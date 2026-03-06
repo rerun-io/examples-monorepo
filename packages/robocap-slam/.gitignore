@@ -1,0 +1,16 @@
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# Python
+__pycache__
+*.egg-info
+build
+dist
+
+# Data (auto-downloaded from HuggingFace)
+/data/
+
+# IDE
+.idea
+.vscode

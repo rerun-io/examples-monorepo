@@ -1,0 +1,29 @@
+[project]
+name = "robocap-slam"
+version = "0.1.0"
+authors = [{name = "Pablo Vela", email = "pablovela5620@gmail.com"}]
+requires-python = ">=3.10"
+dependencies = [
+    # common: numpy, scipy, jaxtyping, rerun-sdk, gradio, gradio-rerun,
+    #         huggingface_hub, hf-transfer, tqdm, pyserde, av, opencv
+    "pyyaml",
+    "pyarrow",
+    "tyro",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 150
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+ignore = [
+    "E501",   # Line too long
+    "F722",   # jaxtyping forward annotation false positive
+    "F821",   # jaxtyping forward annotation false positive
+    "UP037",  # Remove quotes false positive with jaxtyping
+    "UP040",  # Beartype requires TypeAlias, not PEP 695 type
+]
