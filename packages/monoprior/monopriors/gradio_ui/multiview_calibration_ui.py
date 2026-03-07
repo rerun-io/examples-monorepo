@@ -1,6 +1,7 @@
 import uuid
 from collections.abc import Generator
 from pathlib import Path
+from typing import Final
 
 import gradio as gr
 import numpy as np
@@ -18,6 +19,10 @@ from monopriors.apis.multiview_calibration import (
     create_final_view,
     estimate_voxel_size,
 )
+
+EXAMPLE_DATA_DIR: Final[Path] = Path(__file__).resolve().parents[2] / "data" / "examples" / "multiview"
+
+gr.set_static_paths([str(EXAMPLE_DATA_DIR)])
 
 
 # Whenever we need a recording, we construct a new recording stream.
@@ -118,6 +123,15 @@ with gr.Blocks() as mv_calibration_block:
                 "selection": "collapsed",
             },
         )
+
+    car_example_images: list[str] = sorted(
+        str(p) for p in (EXAMPLE_DATA_DIR / "car_landscape_12").glob("*.jpg")
+    )
+    gr.Examples(
+        examples=[[car_example_images]],
+        inputs=[input_imgs],
+        cache_examples=False,
+    )
 
     input_imgs.change(
         fn=lambda: uuid.uuid4(),
