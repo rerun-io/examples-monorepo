@@ -1,13 +1,17 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from timeit import default_timer as timer
 from typing import Literal
 
 import numpy as np
 import torch
 from einops import rearrange
 from jaxtyping import Float, UInt8
+from moge.model.v2 import MoGeModel
+from torch import Tensor
 
 from monopriors.models.metric_depth import MetricDepthPrediction, get_metric_predictor
+from monopriors.models.metric_depth.moge_v2 import MOGE_V2_CHECKPOINTS
 from monopriors.models.surface_normal import (
     SurfaceNormalPrediction,
     get_normal_predictor,
@@ -81,5 +85,65 @@ class DsineAndUnidepth(MonoPriorModel):
     ) -> MonoPriorPrediction:
         metric_pred: MetricDepthPrediction = self.depth_model.__call__(rgb, K_33)
         normal_pred: SurfaceNormalPrediction = self.surface_model(rgb, K_33)
+
+        return MonoPriorPrediction(metric_pred=metric_pred, normal_pred=normal_pred)
+
+
+class MoGeV2MonoPrior(MonoPriorModel):
+    """Composite model using a single MoGe v2 forward pass for both metric depth and normals.
+
+    Unlike ``DsineAndUnidepth`` which loads two separate models, this runs one
+    model that produces both outputs simultaneously.
+    """
+
+    def __init__(
+        self,
+        encoder: Literal["vits", "vitb", "vitl"] = "vitl",
+    ) -> None:
+        super().__init__()
+        checkpoint: str = MOGE_V2_CHECKPOINTS[(encoder, True)]
+        print(f"Loading MoGe v2 mono-prior model ({checkpoint})...")
+        start: float = timer()
+        self.model = MoGeModel.from_pretrained(checkpoint).to(self.device)
+        print(f"MoGe v2 mono-prior model loaded. Time: {timer() - start:.2f}s")
+
+    def __call__(
+        self,
+        rgb: UInt8[np.ndarray, "h w 3"],
+        K_33: Float[np.ndarray, "3 3"] | None = None,
+    ) -> MonoPriorPrediction:
+        h: int
+        w: int
+        h, w, _ = rgb.shape
+        input_image: Float[torch.Tensor, "3 h w"] = torch.tensor(
+            rgb / 255, dtype=torch.float32, device=self.device
+        ).permute(2, 0, 1)
+
+        output: dict[str, Tensor] = self.model.infer(input_image)
+
+        # Build intrinsics from normalized values
+        normalized_k: Float[np.ndarray, "3 3"] = output["intrinsics"].numpy(force=True)
+        fx: float = float(normalized_k[0, 0] * w)
+        fy: float = float(normalized_k[1, 1] * h)
+        cx: float = float(normalized_k[0, 2] * w)
+        cy: float = float(normalized_k[1, 2] * h)
+        intrinsics: Float[np.ndarray, "3 3"] = np.array(
+            [[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32
+        )
+
+        depth_meters: Float[np.ndarray, "h w"] = output["depth"].numpy(force=True)
+        confidence: Float[np.ndarray, "h w"] = output["mask"].numpy(force=True).astype(np.float32)
+        normal_hw3: Float[np.ndarray, "h w 3"] = output["normal"].numpy(force=True)
+        confidence_hw1: Float[np.ndarray, "h w 1"] = confidence[:, :, np.newaxis]
+
+        metric_pred = MetricDepthPrediction(
+            depth_meters=depth_meters,
+            confidence=confidence,
+            K_33=intrinsics,
+        )
+        normal_pred = SurfaceNormalPrediction(
+            normal_hw3=normal_hw3,
+            confidence_hw1=confidence_hw1,
+        )
 
         return MonoPriorPrediction(metric_pred=metric_pred, normal_pred=normal_pred)

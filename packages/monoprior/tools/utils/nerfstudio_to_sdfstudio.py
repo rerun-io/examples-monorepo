@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 from monopriors.data.nerfstudio_data import load_nerfstudio_from_json
 from monopriors.data.sdfstudio_data import SceneBox, SDFStudioData, SDFStudioFrame
-from monopriors.monoprior_models import DsineAndUnidepth, OldMonoPriorPrediction
+from monopriors.models.monoprior import DsineAndUnidepth, OldMonoPriorPrediction
 
 
 def main(

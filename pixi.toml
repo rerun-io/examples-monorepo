@@ -156,11 +156,23 @@ depends-on = ["_download-polycam"]
 cwd = "packages/monoprior"
 description = "Run PromptDA depth completion on Polycam dataset"
 
+[feature.monoprior.tasks.metric-depth]
+cmd = "python tools/demos/metric_depth.py --image-path data/examples/single-image/room.jpg"
+depends-on = ["_download-single-image"]
+cwd = "packages/monoprior"
+description = "Run metric depth estimation on example image"
+
 [feature.monoprior.tasks.surface-normals]
 cmd = "python tools/demos/surface_normals.py --image-path data/examples/single-image/room.jpg"
 depends-on = ["_download-single-image"]
 cwd = "packages/monoprior"
 description = "Run surface normal estimation on example image"
+
+[feature.monoprior.tasks.monoprior]
+cmd = "python tools/demos/monoprior.py --image-path data/examples/single-image/room.jpg"
+depends-on = ["_download-single-image"]
+cwd = "packages/monoprior"
+description = "Run monoprior (metric depth + normals) on example image"
 
 # ── App tasks (Gradio UIs) ──────────────────────────────────────────────
 [feature.monoprior.tasks.depth-compare-app]

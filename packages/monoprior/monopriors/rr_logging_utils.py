@@ -181,8 +181,19 @@ def log_normal_pred(
     parent_log_path: Path,
     normal_pred: SurfaceNormalPrediction,
     rgb_hw3: UInt8[np.ndarray, "h w 3"],
+    K_33: Float32[np.ndarray, "3 3"] | None = None,
     jpeg_quality: int = 90,
 ) -> None:
+    """Log surface normal prediction to Rerun.
+
+    Args:
+        parent_log_path: Root entity path for logging.
+        normal_pred: Surface normal prediction to log.
+        rgb_hw3: Input RGB image.
+        K_33: Camera intrinsics. When provided, logs the real pinhole.
+            When None, falls back to an estimated pinhole using max(h, w) as focal length.
+        jpeg_quality: JPEG compression quality for images.
+    """
     cam_log_path: Path = parent_log_path / "camera"
     pinhole_path: Path = cam_log_path / "pinhole"
 
@@ -190,15 +201,26 @@ def log_normal_pred(
     w: int
     h, w, _ = rgb_hw3.shape
 
-    rr.log(
-        f"{pinhole_path}",
-        rr.Pinhole(
-            focal_length=max(h, w),
-            width=w,
-            height=h,
-            camera_xyz=rr.ViewCoordinates.RDF,
-        ),
-    )
+    if K_33 is not None:
+        rr.log(
+            f"{pinhole_path}",
+            rr.Pinhole(
+                image_from_camera=K_33,
+                width=w,
+                height=h,
+                camera_xyz=rr.ViewCoordinates.RDF,
+            ),
+        )
+    else:
+        rr.log(
+            f"{pinhole_path}",
+            rr.Pinhole(
+                focal_length=max(h, w),
+                width=w,
+                height=h,
+                camera_xyz=rr.ViewCoordinates.RDF,
+            ),
+        )
     rr.log(f"{pinhole_path}/image", rr.Image(rgb_hw3).compress(jpeg_quality=jpeg_quality))
 
     # normals are in [-1, 1] range, convert to [0, 255] for visualization

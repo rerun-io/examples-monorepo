@@ -11,7 +11,7 @@ from simplecv.ops.tsdf_depth_fuser import Open3DFuser
 from simplecv.rerun_log_utils import RerunTyroConfig
 from tqdm import tqdm
 
-from monopriors.monoprior_models import DsineAndUnidepth, MonoPriorPrediction
+from monopriors.models.monoprior import DsineAndUnidepth, MonoPriorPrediction
 
 
 @dataclass
