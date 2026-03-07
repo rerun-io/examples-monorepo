@@ -5,7 +5,7 @@ import torch
 from jaxtyping import Float, UInt8
 from PIL import Image
 
-from monopriors.surface_normal_models.base_normal_model import (
+from monopriors.models.surface_normal.base_normal_model import (
     BaseNormalPredictor,
     SurfaceNormalPrediction,
 )

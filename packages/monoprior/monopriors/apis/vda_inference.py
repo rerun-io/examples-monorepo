@@ -23,8 +23,8 @@ from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from monopriors.dc_utils import read_video_frames
-from monopriors.relative_depth_models.base_relative_depth import RelativeDepthPrediction
-from monopriors.relative_depth_models.video_depth_anything import (
+from monopriors.models.relative_depth.base_relative_depth import RelativeDepthPrediction
+from monopriors.models.relative_depth.video_depth_anything import (
     DepthChunkIntermediate,
     FinalDepthResult,
     VideoDepthAnythingPredictor,
@@ -34,7 +34,7 @@ from monopriors.relative_depth_models.video_depth_anything import (
 @dataclass
 class VDAConfig:
     rr_config: RerunTyroConfig
-    video_path: Path = Path("/mnt/12tbdrive/data/HO-cap/sample/subject_8/20231024_180733/raw_videos/043422252387.mp4")
+    video_path: Path = Path("data/examples/video/davis_rollercoaster.mp4")
     max_len: int = 100
     target_fps: int = -1
     max_res: int = 1280
@@ -53,7 +53,7 @@ def vda_inference(config: VDAConfig) -> None:
     if not config.iterate:
         depths: list[RelativeDepthPrediction] = video_depth_anything(frames, K_33=None)
         for i, depth_pred in enumerate(depths):
-            rr.set_time_sequence(timeline="frame", sequence=i)
+            rr.set_time("frame", sequence=i)
             rr.log("depth", rr.DepthImage(depth_pred.disparity, colormap=rr.components.Colormap.Magma))
     else:
         # Use the iterator-based inference function, larger memory footprint since logging all intermediate results.
@@ -63,19 +63,19 @@ def vda_inference(config: VDAConfig) -> None:
                 case DepthChunkIntermediate(chunk_index=ci, raw_depth_list=raw_depth_list, progress=progress):
                     # Intermediate result: update visualization with raw (unaligned) depth for this chunk.
                     for depth_pred in raw_depth_list:
-                        rr.set_time_sequence(timeline="frame", sequence=frame_idx)
+                        rr.set_time("frame", sequence=frame_idx)
                         rr.log("depth", rr.DepthImage(depth_pred, colormap=rr.components.Colormap.Magma))
                         frame_idx += 1
                 case FinalDepthResult(aligned_depth=aligned_depth):
                     # clear out all previously logged depth images
                     for i in range(frame_idx):
-                        rr.set_time_sequence(timeline="frame", sequence=i)
+                        rr.set_time("frame", sequence=i)
                         rr.log("depth", rr.Clear(recursive=True))
                     # Final result: update visualization with the final aligned depths.
                     print("Final aligned depth result received.")
                     # Example: iterate over the final aligned depth predictions and log them.
                     for i, depth_pred in enumerate(aligned_depth):
-                        rr.set_time_sequence(timeline="frame", sequence=i)
+                        rr.set_time("frame", sequence=i)
                         rr.log("depth", rr.DepthImage(depth_pred.depth, rr.components.Colormap.Turbo))
                 case _:
                     # Fallback in case of an unexpected type.

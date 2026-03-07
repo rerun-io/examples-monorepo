@@ -7,8 +7,9 @@ from einops import rearrange
 from jaxtyping import Bool, Float32, Float64, UInt8
 
 from monopriors.depth_utils import clip_disparity, depth_edges_mask, depth_to_disparity, depth_to_points
-from monopriors.metric_depth_models import METRIC_PREDICTORS, MetricDepthPrediction
-from monopriors.relative_depth_models import RELATIVE_PREDICTORS, RelativeDepthPrediction
+from monopriors.models.metric_depth import METRIC_PREDICTORS, MetricDepthPrediction
+from monopriors.models.relative_depth import RELATIVE_PREDICTORS, RelativeDepthPrediction
+from monopriors.models.surface_normal.base_normal_model import SurfaceNormalPrediction
 
 
 def log_relative_pred(
@@ -174,3 +175,36 @@ def log_metric_pred(
             colors=rgb_hw3.reshape(-1, 3),
         ),
     )
+
+
+def log_normal_pred(
+    parent_log_path: Path,
+    normal_pred: SurfaceNormalPrediction,
+    rgb_hw3: UInt8[np.ndarray, "h w 3"],
+    jpeg_quality: int = 90,
+) -> None:
+    cam_log_path: Path = parent_log_path / "camera"
+    pinhole_path: Path = cam_log_path / "pinhole"
+
+    h: int
+    w: int
+    h, w, _ = rgb_hw3.shape
+
+    rr.log(
+        f"{pinhole_path}",
+        rr.Pinhole(
+            focal_length=max(h, w),
+            width=w,
+            height=h,
+            camera_xyz=rr.ViewCoordinates.RDF,
+        ),
+    )
+    rr.log(f"{pinhole_path}/image", rr.Image(rgb_hw3).compress(jpeg_quality=jpeg_quality))
+
+    # normals are in [-1, 1] range, convert to [0, 255] for visualization
+    normal_hw3: Float32[np.ndarray, "h w 3"] = normal_pred.normal_hw3
+    normal_uint8: UInt8[np.ndarray, "h w 3"] = ((normal_hw3 + 1) / 2 * 255).astype(np.uint8)
+    rr.log(f"{pinhole_path}/normals", rr.Image(normal_uint8).compress(jpeg_quality=jpeg_quality))
+
+    confidence_hw1: Float32[np.ndarray, "h w 1"] = normal_pred.confidence_hw1
+    rr.log(f"{pinhole_path}/confidence", rr.Image((confidence_hw1 * 255).astype(np.uint8)))

@@ -8,7 +8,7 @@ from einops import rearrange
 from jaxtyping import Float, UInt8
 from omnidata_tools.torch.modules.midas.dpt_depth import DPTDepthModel
 
-from monopriors.surface_normal_models.base_normal_model import (
+from monopriors.models.surface_normal.base_normal_model import (
     BaseNormalPredictor,
     SurfaceNormalPrediction,
 )

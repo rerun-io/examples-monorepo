@@ -13,8 +13,7 @@ from beartype.vale import Is
 from einops import rearrange
 from jaxtyping import Bool, Float, Float32, Int, UInt8
 from numpy import ndarray
-from rtmlib import YOLOX
-from sam2.sam2_image_predictor import SAM2ImagePredictor
+from sam3_rerun.api.predictor import SAM3Config, SAM3Predictor, SAM3Results
 from simplecv.camera_orient_utils import auto_orient_and_center_poses
 from simplecv.camera_parameters import Extrinsics, PinholeParameters
 from simplecv.ops.conventions import CameraConventions, convert_pose
@@ -24,12 +23,12 @@ from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
 from simplecv.video_io import MultiVideoReader
 
 from monopriors.depth_utils import depth_edges_mask, multidepth_to_points
-from monopriors.multiview_models.vggt_model import MultiviewPred, VGGTPredictor, robust_filter_confidences
-from monopriors.relative_depth_models import (
+from monopriors.models.multiview.vggt_model import MultiviewPred, VGGTPredictor, robust_filter_confidences
+from monopriors.models.relative_depth import (
     RelativeDepthPrediction,
     get_relative_predictor,
 )
-from monopriors.relative_depth_models.base_relative_depth import BaseRelativePredictor
+from monopriors.models.relative_depth.base_relative_depth import BaseRelativePredictor
 from monopriors.scale_utils import compute_scale_and_shift
 
 np.set_printoptions(suppress=True)
@@ -282,29 +281,43 @@ def mv_pred_to_pointcloud(
 
 
 def segment_people(
-    bgr: UInt8[ndarray, "H W 3"],
+    rgb: UInt8[ndarray, "H W 3"],
     *,
-    det_model: YOLOX,
-    sam_2_predictor: SAM2ImagePredictor,
+    seg_predictor: SAM3Predictor,
+    text: str = "person",
+    mask_threshold: float = 0.5,
     dilation: int = 0,
 ) -> Bool[np.ndarray, "h w"] | None:
-    xyxy_bboxes: Float32[ndarray, "n_dets 4"] = det_model(bgr)
-    if len(xyxy_bboxes) == 0:
-        return None
-    # only take the top first bbox
-    xyxy_bboxes = xyxy_bboxes[:1]
+    """Segment people using SAM3 text-conditioned instance segmentation.
 
-    with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-        sam_2_predictor.set_image(bgr)
-        masks, _, _ = sam_2_predictor.predict(box=xyxy_bboxes, multimask_output=False)
-        masks: Bool[np.ndarray, "h w"] = masks[0] > 0.0
+    Args:
+        rgb: Input image in RGB order with dtype uint8 and shape [H, W, 3].
+        seg_predictor: SAM3Predictor instance for inference.
+        text: Text prompt for SAM3 (default: "person").
+        mask_threshold: Probability threshold to binarize masks.
+        dilation: Kernel size for mask dilation (0 = no dilation).
+
+    Returns:
+        Boolean union mask of all detected people, or None if no detections.
+    """
+    sam3_results: SAM3Results = seg_predictor.predict_single_image(rgb_hw3=rgb, text=text)
+    if len(sam3_results.scores) == 0:
+        return None
+
+    # Union all detected person masks into a single binary mask
+    h: int = rgb.shape[0]
+    w: int = rgb.shape[1]
+    union_mask: Bool[np.ndarray, "h w"] = np.zeros((h, w), dtype=bool)
+    for mask in sam3_results.masks:
+        mask_bool: Bool[np.ndarray, "h w"] = mask >= mask_threshold
+        union_mask = np.logical_or(union_mask, mask_bool)
 
     # Apply dilation to expand the mask boundaries
     if dilation > 0:
         kernel = np.ones((dilation, dilation), np.uint8)
-        masks = cv2.dilate(masks.astype(np.uint8), kernel, iterations=1).astype(bool)
+        union_mask = cv2.dilate(union_mask.astype(np.uint8), kernel, iterations=1).astype(bool)
 
-    return masks
+    return union_mask
 
 
 KeepTopPercent = Annotated[int | float, Is[lambda percent: 1 <= percent <= 100]]
@@ -330,7 +343,7 @@ class MultiViewCalibratorConfig:
     refine_depth_maps: bool = True
     """Run MoGe depth refinement on VGGT predictions before unprojection."""
     segment_people: bool = True
-    """Enable YOLOX + SAM2 foreground removal for dynamic human actors."""
+    """Enable SAM3 text-conditioned foreground removal for dynamic human actors."""
     preprocessing_mode: Literal["crop", "pad"] = "pad"
     """Mode for image preprocessing: 'crop' preserves aspect ratio, 'pad' adds white padding"""
     device: Literal["cuda", "cpu"] = "cuda"
@@ -343,7 +356,7 @@ class MultiViewCalibrator:
     """Orchestrates multi-view calibration by fusing depth, segmentation, and refinement models.
 
     The calibrator runs VGGT to infer geometry per view, filters dynamic actors via
-    YOLOX + SAM2 segmentation, and optionally refines the predicted depths with the
+    SAM3 text-conditioned segmentation, and optionally refines the predicted depths with the
     Moge relative depth model before generating a consolidated Open3D point cloud.
     """
 
@@ -353,15 +366,7 @@ class MultiViewCalibrator:
         self.device = config.device
         self.parent_log_path = parent_log_path
         if self.config.segment_people:
-            self.det_model: YOLOX = YOLOX(
-                "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_m_8xb8-300e_humanart-c2c7a14a.zip",
-                model_input_size=(640, 640),
-                score_thr=0.7,
-                backend="onnxruntime",
-                device=self.device,
-            )
-
-            self.sam2_predictor: SAM2ImagePredictor = SAM2ImagePredictor.from_pretrained("facebook/sam2-hiera-large")
+            self.seg_predictor: SAM3Predictor = SAM3Predictor(SAM3Config(device=self.device))
 
         self.vggt_predictor: VGGTPredictor = VGGTPredictor(
             device=self.device,
@@ -394,9 +399,8 @@ class MultiViewCalibrator:
         if self.config.segment_people:
             segmask_list: list[Bool[np.ndarray, "H W"] | None] = []
             for rgb in rgb_list:
-                bgr: UInt8[ndarray, "H W 3"] = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
                 people_masks: Bool[ndarray, "H W"] | None = segment_people(
-                    bgr, det_model=self.det_model, sam_2_predictor=self.sam2_predictor, dilation=50
+                    rgb, seg_predictor=self.seg_predictor, dilation=50
                 )
                 segmask_list.append(people_masks)
         else:

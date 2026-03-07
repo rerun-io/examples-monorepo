@@ -1,8 +1,9 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from jaxtyping import Float, UInt8, UInt16
 from typing import Literal
+
 import numpy as np
+from jaxtyping import Float, UInt8, UInt16
 
 
 @dataclass

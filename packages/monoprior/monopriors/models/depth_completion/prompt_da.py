@@ -1,17 +1,19 @@
-from typing import Literal
-import torch
-from torch import Tensor
-import numpy as np
-from numpy import ndarray
-from jaxtyping import UInt16, UInt8, Float32
 from timeit import default_timer as timer
-from monopriors.depth_completion_models.base_completion_depth import (
+from typing import Literal
+
+import cv2
+import numpy as np
+import torch
+from einops import rearrange
+from jaxtyping import Float32, UInt8, UInt16
+from numpy import ndarray
+from torch import Tensor
+
+from monopriors.models.depth_completion.base_completion_depth import (
     BaseCompletionPredictor,
     CompletionDepthPrediction,
 )
 from monopriors.third_party.promptda.promptda import PromptDA
-import cv2
-from einops import rearrange
 
 
 def ensure_multiple_of(x: float, multiple_of: int = 14) -> int:

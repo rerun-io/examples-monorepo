@@ -4,8 +4,8 @@ import tempfile
 from pathlib import Path
 from typing import get_args
 
+import cv2
 import gradio as gr
-import mmcv
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
@@ -13,7 +13,7 @@ import torch
 from gradio_rerun import Rerun
 from jaxtyping import UInt8
 
-from monopriors.relative_depth_models import (
+from monopriors.models.relative_depth import (
     RELATIVE_PREDICTORS,
     BaseRelativePredictor,
     RelativeDepthPrediction,
@@ -107,7 +107,9 @@ def relative_depth_from_img(
         current_dim = max(height, width)
         if current_dim > max_dim:
             scale_factor = max_dim / current_dim
-            rgb_hw3 = mmcv.imrescale(img=rgb_hw3, scale=scale_factor)
+            new_h: int = int(rgb_hw3.shape[0] * scale_factor)
+            new_w: int = int(rgb_hw3.shape[1] * scale_factor)
+            rgb_hw3 = cv2.resize(rgb_hw3, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
 
         relative_pred: RelativeDepthPrediction = predict_depth(rgb_hw3)
         rr.log("/", rr.ViewCoordinates.RDF, static=True)

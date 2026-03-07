@@ -8,7 +8,7 @@ from einops import rearrange
 from jaxtyping import Float, UInt8
 from torchvision import transforms
 
-from monopriors.surface_normal_models.base_normal_model import (
+from monopriors.models.surface_normal.base_normal_model import (
     BaseNormalPredictor,
     SurfaceNormalPrediction,
 )
@@ -97,9 +97,15 @@ class DSineNormalPredictor(BaseNormalPredictor):
             normal_b3hw, conf_b1hw = normal_bchw[:, :3, :, :], normal_bchw[:, 3:, :, :]
             conf_b1hw = None if conf_b1hw.size(1) == 0 else conf_b1hw
 
+        confidence_hw1: np.ndarray = (
+            rearrange(conf_b1hw, "1 c h w -> h w c").numpy(force=True)
+            if conf_b1hw is not None
+            else np.ones((h, w, 1), dtype=np.float32)
+        )
+
         normal_pred = SurfaceNormalPrediction(
             normal_hw3=rearrange(normal_b3hw, "1 c h w -> h w c").numpy(force=True),
-            confidence_hw1=rearrange(conf_b1hw, "1 c h w -> h w c").numpy(force=True),
+            confidence_hw1=confidence_hw1,
         )
 
         return normal_pred

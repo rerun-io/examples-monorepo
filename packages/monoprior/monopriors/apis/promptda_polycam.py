@@ -17,10 +17,10 @@ from simplecv.ops.tsdf_depth_fuser import Open3DFuser
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole
 from tqdm import tqdm
 
-from monopriors.depth_completion_models.base_completion_depth import (
+from monopriors.models.depth_completion.base_completion_depth import (
     CompletionDepthPrediction,
 )
-from monopriors.depth_completion_models.prompt_da import PromptDAPredictor
+from monopriors.models.depth_completion.prompt_da import PromptDAPredictor
 
 
 @dataclass
@@ -84,7 +84,7 @@ def pda_polycam_inference(
     config: PDAPolycamConfig,
 ) -> None:
     parent_path: Path = Path("world")
-    rr.log("/", rr.ViewCoordinates.RUB, timeless=True)
+    rr.log("/", rr.ViewCoordinates.RUB, static=True)
     polycam_dataset: PolycamDataset = load_polycam_data(polycam_zip_or_directory_path=config.polycam_zip_path)
 
     max_depth_meter: float = 4.0
@@ -94,7 +94,7 @@ def pda_polycam_inference(
     pbar = tqdm(polycam_dataset, desc="Inferring", total=len(polycam_dataset))
     polycam_data: PolycamData
     for frame_idx, polycam_data in enumerate(pbar):
-        rr.set_time_sequence("frame_idx", frame_idx)
+        rr.set_time("frame_idx", sequence=frame_idx)
         # convert image data to tensor
         depth_pred: CompletionDepthPrediction = model(
             rgb=polycam_data.rgb_hw3, prompt_depth=polycam_data.original_depth_hw

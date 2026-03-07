@@ -1,7 +1,6 @@
 import os
 from dataclasses import dataclass, replace
 from pathlib import Path
-from re import match
 from timeit import default_timer as timer
 from typing import Literal
 
@@ -15,20 +14,20 @@ from einops import rearrange
 from jaxtyping import Bool, Float, Float32, UInt8
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
+from simplecv.camera_orient_utils import auto_orient_and_center_poses
 from simplecv.camera_parameters import Extrinsics
 from simplecv.ops.conventions import CameraConventions, convert_pose
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
 from simplecv.video_io import MultiVideoReader
 from tqdm.auto import trange
 
-from monopriors.camera_numpy_utils import auto_orient_and_center_poses
 from monopriors.depth_utils import depth_edges_mask, multidepth_to_points
-from monopriors.multiview_models.vggt_model import MultiviewPred, VGGTPredictor, robust_filter_confidences
-from monopriors.relative_depth_models import (
+from monopriors.models.multiview.vggt_model import MultiviewPred, VGGTPredictor, robust_filter_confidences
+from monopriors.models.relative_depth import (
     RelativeDepthPrediction,
     get_relative_predictor,
 )
-from monopriors.relative_depth_models.base_relative_depth import BaseRelativePredictor
+from monopriors.models.relative_depth.base_relative_depth import BaseRelativePredictor
 from monopriors.scale_utils import compute_scale_and_shift
 
 np.set_printoptions(suppress=True)

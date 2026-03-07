@@ -1,14 +1,16 @@
-from typing import Literal, TypedDict
-import torch
-import numpy as np
-from jaxtyping import Float, UInt8
 from timeit import default_timer as timer
-from monopriors.depth_utils import estimate_intrinsics, disparity_to_depth
-from transformers import pipeline
-from PIL import Image
+from typing import Literal, TypedDict
+
+import numpy as np
+import torch
 from einops import rearrange
-from jaxtyping import Float32
-from .base_relative_depth import RelativeDepthPrediction, BaseRelativePredictor
+from jaxtyping import Float, Float32, UInt8
+from PIL import Image
+from transformers import pipeline
+
+from monopriors.depth_utils import disparity_to_depth, estimate_intrinsics
+
+from .base_relative_depth import BaseRelativePredictor, RelativeDepthPrediction
 
 
 class DepthDict(TypedDict):

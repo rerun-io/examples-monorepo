@@ -1,16 +1,17 @@
-from typing import Literal
-import torch
-import numpy as np
-from jaxtyping import Float, UInt8, Float32
 from timeit import default_timer as timer
-from monopriors.depth_utils import estimate_intrinsics, depth_to_disparity
-from monopriors.relative_depth_models.base_relative_depth import (
-    RelativeDepthPrediction,
-    BaseRelativePredictor,
-)
-from einops import rearrange
+from typing import Literal, TypedDict
+
 import cv2
-from typing import TypedDict
+import numpy as np
+import torch
+from einops import rearrange
+from jaxtyping import Float, Float32, UInt8
+
+from monopriors.depth_utils import depth_to_disparity, estimate_intrinsics
+from monopriors.models.relative_depth.base_relative_depth import (
+    BaseRelativePredictor,
+    RelativeDepthPrediction,
+)
 
 
 class Metric3DPredDict(TypedDict):

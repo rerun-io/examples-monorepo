@@ -2,25 +2,24 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
-import mmcv
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 from simplecv.rerun_log_utils import RerunTyroConfig
 
-from monopriors.relative_depth_models import (
+from monopriors.models.relative_depth import (
     RELATIVE_PREDICTORS,
     RelativeDepthPrediction,
     get_relative_predictor,
 )
-from monopriors.relative_depth_models.base_relative_depth import BaseRelativePredictor
+from monopriors.models.relative_depth.base_relative_depth import BaseRelativePredictor
 from monopriors.rr_logging_utils import log_relative_pred
 
 
 @dataclass
 class PredictorConfig:
     rr_config: RerunTyroConfig
-    image_path: Path = Path("data/images/frame_00001.png")
+    image_path: Path = Path("data/examples/single-image/room.jpg")
     predictor_name: RELATIVE_PREDICTORS = "MogeV1Predictor"
     depth_edge_threshold: float = 0.1
 
@@ -29,7 +28,9 @@ def resize_image(image: np.ndarray, max_dim: int = 1024) -> np.ndarray:
     current_dim = max(image.shape[0], image.shape[1])
     if current_dim > max_dim:
         scale_factor = max_dim / current_dim
-        image = mmcv.imrescale(img=image, scale=scale_factor)
+        new_h: int = int(image.shape[0] * scale_factor)
+        new_w: int = int(image.shape[1] * scale_factor)
+        image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
     return image
 
 

@@ -2,8 +2,8 @@ import gc
 from pathlib import Path
 from typing import Literal, get_args
 
+import cv2
 import gradio as gr
-import mmcv
 import numpy as np
 import rerun as rr
 import torch
@@ -12,12 +12,12 @@ from jaxtyping import Float32, UInt8
 from tqdm import tqdm
 
 from monopriors.depth_utils import estimate_intrinsics
-from monopriors.metric_depth_models import (
+from monopriors.models.metric_depth import (
     METRIC_PREDICTORS,
     MetricDepthPrediction,
     get_metric_predictor,
 )
-from monopriors.relative_depth_models import (
+from monopriors.models.relative_depth import (
     RELATIVE_PREDICTORS,
     RelativeDepthPrediction,
     get_relative_predictor,
@@ -88,7 +88,9 @@ def on_submit(
     current_dim = max(height, width)
     if current_dim > max_dim:
         scale_factor = max_dim / current_dim
-        rgb = mmcv.imrescale(img=rgb, scale=scale_factor)
+        new_h: int = int(rgb.shape[0] * scale_factor)
+        new_w: int = int(rgb.shape[1] * scale_factor)
+        rgb = cv2.resize(rgb, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
 
     for model_name in tqdm(model_names, desc="Loading Model and Predicting Depth"):
         # get the name of the model

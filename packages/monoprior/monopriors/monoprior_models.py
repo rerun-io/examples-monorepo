@@ -7,8 +7,8 @@ import torch
 from einops import rearrange
 from jaxtyping import Float, UInt8
 
-from monopriors.metric_depth_models import MetricDepthPrediction, get_metric_predictor
-from monopriors.surface_normal_models import (
+from monopriors.models.metric_depth import MetricDepthPrediction, get_metric_predictor
+from monopriors.models.surface_normal import (
     SurfaceNormalPrediction,
     get_normal_predictor,
 )
