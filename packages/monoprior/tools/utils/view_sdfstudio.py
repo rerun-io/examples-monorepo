@@ -1,10 +1,11 @@
+from argparse import ArgumentParser
+from pathlib import Path
+
+import cv2
 import numpy as np
 import rerun as rr
-from pathlib import Path
-from argparse import ArgumentParser
-import cv2
+from jaxtyping import Float32, UInt8
 
-from jaxtyping import UInt8, Float32
 from monopriors.data.sdfstudio_data import load_sdfstudio_from_json
 
 

@@ -1,9 +1,8 @@
+import geffnet
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import geffnet
-import numpy as np
-
 
 INPUT_CHANNELS_DICT = {
     0: [1280, 112, 40, 24, 16],

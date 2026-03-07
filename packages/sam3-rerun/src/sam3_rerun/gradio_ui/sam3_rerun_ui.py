@@ -18,29 +18,15 @@ from gradio_rerun import Rerun
 from jaxtyping import Bool, Float32, UInt8
 from numpy import ndarray
 
-from sam3d_body.api.demo import SAM3Config, SAM3Predictor, SAM3Results
-from sam3d_body.api.visualization import SEG_CLASS_OFFSET, SEG_OVERLAY_ALPHA
+from sam3_rerun.api.predictor import SAM3Config, SAM3Predictor, SAM3Results
+from sam3_rerun.viz_constants import BOX_PALETTE, SEG_CLASS_OFFSET, SEG_OVERLAY_ALPHA
 
 CFG: SAM3Config = SAM3Config()
 MODEL_E2E: SAM3Predictor = SAM3Predictor(config=CFG)
-DONE_STATUS: Final[str] = "✅ Ready"
-RUNNING_STATUS: Final[str] = "⏳ Running prediction..."
+DONE_STATUS: Final[str] = "Ready"
+RUNNING_STATUS: Final[str] = "Running prediction..."
 # Absolute path to bundled example data used by Gradio examples.
 TEST_INPUT_DIR: Final[Path] = Path(__file__).resolve().parents[3] / "data" / "example-data"
-# Palette reused for segmentation overlays; RGBA so we can set alpha when building an overlay.
-BOX_PALETTE: UInt8[np.ndarray, "n_colors 4"] = np.array(
-    [
-        [255, 99, 71, 255],  # tomato
-        [65, 105, 225, 255],  # royal blue
-        [60, 179, 113, 255],  # medium sea green
-        [255, 215, 0, 255],  # gold
-        [138, 43, 226, 255],  # blue violet
-        [255, 140, 0, 255],  # dark orange
-        [220, 20, 60, 255],  # crimson
-        [70, 130, 180, 255],  # steel blue
-    ],
-    dtype=np.uint8,
-)
 
 # Allow Gradio to serve and cache files from the bundled test data directory.
 gr.set_static_paths([str(TEST_INPUT_DIR)])

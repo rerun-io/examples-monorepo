@@ -10,17 +10,6 @@ import numpy as np
 from jaxtyping import UInt8
 from simplecv.video_io import VideoReader
 
-try:
-    import imageio
-    import matplotlib.cm as cm
-except ImportError:
-    imageio = None
-    cm = None
-
-
-def ensure_even(value):
-    return value if value % 2 == 0 else value + 1
-
 
 def read_video_frames(
     video_path: Path, process_length: int, target_fps: int = -1, max_res: int = -1

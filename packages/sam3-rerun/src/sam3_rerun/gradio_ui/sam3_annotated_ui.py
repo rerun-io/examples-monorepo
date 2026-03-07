@@ -3,8 +3,6 @@ import warnings
 import gradio as gr
 import numpy as np
 import requests
-
-# import spaces
 import torch
 from PIL import Image
 from transformers import Sam3Model, Sam3Processor
@@ -19,17 +17,16 @@ model = Sam3Model.from_pretrained(
 processor = Sam3Processor.from_pretrained("facebook/sam3")
 
 
-# @spaces.GPU()
 def segment(image: Image.Image, text: str, threshold: float, mask_threshold: float):
     """
     Perform promptable concept segmentation using SAM3.
     Returns format compatible with gr.AnnotatedImage: (image, [(mask, label), ...])
     """
     if image is None:
-        return None, "❌ Please upload an image."
+        return None, "Please upload an image."
 
     if not text.strip():
-        return (image, []), "❌ Please enter a text prompt."
+        return (image, []), "Please enter a text prompt."
 
     try:
         inputs = processor(images=image, text=text.strip(), return_tensors="pt").to(device)
@@ -50,30 +47,30 @@ def segment(image: Image.Image, text: str, threshold: float, mask_threshold: flo
 
         n_masks = len(results["masks"])
         if n_masks == 0:
-            return (image, []), f"❌ No objects found matching '{text}' (try adjusting thresholds)."
+            return (image, []), f"No objects found matching '{text}' (try adjusting thresholds)."
 
         # Format for AnnotatedImage: list of (mask, label) tuples
         # mask should be numpy array with values 0-1 (float) matching image dimensions
         annotations = []
-        for i, (mask, score) in enumerate(zip(results["masks"], results["scores"])):
+        for i, (mask, score) in enumerate(zip(results["masks"], results["scores"], strict=True)):
             # Convert binary mask to float numpy array (0-1 range)
             mask_np = mask.cpu().numpy().astype(np.float32)
             label = f"{text} #{i + 1} ({score:.2f})"
             annotations.append((mask_np, label))
 
         scores_text = ", ".join([f"{s:.2f}" for s in results["scores"].cpu().numpy()[:5]])
-        info = f"✅ Found **{n_masks}** objects matching **'{text}'**\nConfidence scores: {scores_text}{'...' if n_masks > 5 else ''}"
+        info = f"Found **{n_masks}** objects matching **'{text}'**\nConfidence scores: {scores_text}{'...' if n_masks > 5 else ''}"
 
         # Return tuple: (base_image, list_of_annotations)
         return (image, annotations), info
 
     except Exception as e:
-        return (image, []), f"❌ Error during segmentation: {str(e)}"
+        return (image, []), f"Error during segmentation: {str(e)}"
 
 
 def clear_all():
     """Clear all inputs and outputs"""
-    return None, "", None, 0.5, 0.5, "📝 Enter a prompt and click **Segment** to start."
+    return None, "", None, 0.5, 0.5, "Enter a prompt and click **Segment** to start."
 
 
 def segment_example(image_path: str, prompt: str):
@@ -94,10 +91,10 @@ with gr.Blocks(
     gr.Markdown(
         """
         # SAM3 - Promptable Concept Segmentation (PCS)
-        
+
         **SAM3** performs zero-shot instance segmentation using natural language prompts.
         Upload an image, enter a text prompt (e.g., "person", "car", "dog"), and get segmentation masks.
-        
+
         Built with [anycoder](https://huggingface.co/spaces/akhaliq/anycoder)
         """
     )
@@ -118,7 +115,7 @@ with gr.Blocks(
 
     with gr.Row():
         text_input = gr.Textbox(label="Text Prompt", placeholder="e.g., person, ear, cat, bicycle...", scale=3)
-        clear_btn = gr.Button("🔍 Clear", size="sm", variant="secondary")
+        clear_btn = gr.Button("Clear", size="sm", variant="secondary")
 
     with gr.Row():
         thresh_slider = gr.Slider(
@@ -133,9 +130,9 @@ with gr.Blocks(
             minimum=0.0, maximum=1.0, value=0.5, step=0.01, label="Mask Threshold", info="Higher = sharper masks"
         )
 
-    info_output = gr.Markdown(value="📝 Enter a prompt and click **Segment** to start.", label="Info / Results")
+    info_output = gr.Markdown(value="Enter a prompt and click **Segment** to start.", label="Info / Results")
 
-    segment_btn = gr.Button("🎯 Segment", variant="primary", size="lg")
+    segment_btn = gr.Button("Segment", variant="primary", size="lg")
 
     gr.Examples(
         examples=[

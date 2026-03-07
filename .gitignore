@@ -96,6 +96,7 @@ cython_debug/
 # IDE
 .idea/
 .vscode/
+.zed/
 
 # Package top-level data directories (downloaded assets, not Python package data/)
 packages/monoprior/data/

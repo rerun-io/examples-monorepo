@@ -18,7 +18,6 @@ from dinov2.utils.cluster import (
     get_user_checkpoint_path,
 )
 
-
 logger = logging.getLogger("dinov2")
 
 

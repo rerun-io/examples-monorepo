@@ -99,7 +99,7 @@ def polycam_inference(config: PolycamConfig) -> None:
     pbar = tqdm(polycam_dataset, total=len(polycam_dataset))
     polycam_data: PolycamData
     for idx, polycam_data in enumerate(pbar):
-        rr.set_time_sequence("timestep", idx)
+        rr.set_time("timestep", sequence=idx)
         rgb_hw3: UInt8[np.ndarray, "h w 3"] = polycam_data.rgb_hw3
         pinhole_params: PinholeParameters = polycam_data.pinhole_params
         K_33: Float32[np.ndarray, "3 3"] = pinhole_params.intrinsics.k_matrix.astype(np.float32)

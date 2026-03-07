@@ -4,15 +4,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .submodules import (
-    Encoder,
+    INPUT_CHANNELS_DICT,
     ConvGRU,
+    Encoder,
+    RayReLU,
     UpSampleBN,
     UpSampleGN,
-    RayReLU,
     convex_upsampling,
-    get_unfold,
     get_prediction_head,
-    INPUT_CHANNELS_DICT,
+    get_unfold,
 )
 from .utils.rotation import axis_angle_to_matrix
 

@@ -20,9 +20,10 @@ from gradio_rerun import Rerun
 from jaxtyping import Int, UInt8
 from monopriors.relative_depth_models import RelativeDepthPrediction
 from numpy import ndarray
+from sam3_rerun.api.predictor import SAM3Config
 
-from sam3d_body.api.demo import SAM3Config, SAM3DBodyE2E, SAM3DBodyE2EConfig, create_view, set_annotation_context
-from sam3d_body.api.visualization import export_meshes_to_glb, visualize_sample
+from sam3d_body.api.demo import SAM3DBodyE2E, SAM3DBodyE2EConfig
+from sam3d_body.api.visualization import create_view, export_meshes_to_glb, set_annotation_context, visualize_sample
 from sam3d_body.sam_3d_body_estimator import FinalPosePrediction
 
 CFG: SAM3DBodyE2EConfig = SAM3DBodyE2EConfig(sam3_config=SAM3Config())

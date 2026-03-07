@@ -8,7 +8,7 @@ requires-pixi = ">=0.40"
 
 # ─── pypi-options (workspace-level) ─────────────────────────────────────────
 [pypi-options]
-no-build-isolation = ["detectron2", "moge"]
+no-build-isolation = ["moge"]
 
 [pypi-options.dependency-overrides]
 iopath = ">=0.1.10"
@@ -28,44 +28,16 @@ hf-transfer = "*"
 scipy = "*"
 huggingface_hub = "*"
 tqdm = "*"
+transformers = ">=5.0.0"
 [feature.common.pypi-dependencies]
 gradio = "*"
 gradio-rerun = "*"
 
-# ─── CUDA 12.8 feature (monoprior, wilor) ──────────────────────────────────
-[feature.cuda128.system-requirements]
-cuda = "12.8"
-
-[feature.cuda128.dependencies]
-# CUDA Build Tools
-cuda-compiler = "*"
-cuda-version = "12.8.*"
-cuda-cudart-dev = "*"
-cuda-crt = "*"
-libcusparse-dev = "*"
-cuda-driver-dev = "*"
-cuda-nvcc = "*"
-cuda-nvrtc-dev = "*"
-cuda-nvtx = "*"
-cuda-nvtx-dev = "*"
-cuda-nvml-dev = "*"
-cuda-profiler-api = "*"
-# CUDA Libraries
-cudnn = "*"
-libcublas-dev = "*"
-libcudss-dev = "*"
-libcufile-dev = "*"
-libcufft-dev = "*"
-libcurand-dev = "*"
-libcusolver-dev = "*"
-cusparselt = "*"
-libnvjitlink = "*"
-
-# ─── CUDA 12.9 feature (sam3d) ─────────────────────────────────────────────
-[feature.cuda129.system-requirements]
+# ─── CUDA 12.9 feature (shared across all GPU envs) ─────────────────────────
+[feature.cuda.system-requirements]
 cuda = "12.9"
 
-[feature.cuda129.dependencies]
+[feature.cuda.dependencies]
 # CUDA Build Tools
 cuda-compiler = "*"
 cuda-version = "12.9.*"
@@ -89,6 +61,9 @@ libcurand-dev = "*"
 libcusolver-dev = "*"
 cusparselt = "*"
 libnvjitlink = "*"
+# PyTorch
+pytorch-gpu = ">=2.8.0"
+torchvision = "*"
 
 # ─── dev-tools feature (shared across all envs) ────────────────────────────
 [feature.dev-tools.dependencies]
@@ -124,68 +99,105 @@ natsort = ">=8.4.0,<9"
 [feature.monoprior.pypi-dependencies]
 monopriors = { path = "packages/monoprior", editable = true }
 simplecv = { git = "https://github.com/pablovela5620/simplecv.git", rev = "ab88369f5d0353ffb245de6d5981b0aede0930d7" }
-torch = { version = ">=2.7.0", index = "https://download.pytorch.org/whl/cu128" }
-torchvision = { version = ">=0.20.1", index = "https://download.pytorch.org/whl/cu128" }
 vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c" }
 moge = { git = "https://github.com/microsoft/MoGe.git" }
-rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
-sam-2 = { git = "https://github.com/facebookresearch/segment-anything-2.git", rev = "2b90b9f5ceec907a1c18123530e92e794ad901a4" }
 
-[feature.monoprior.tasks.monoprior-download-example]
-cmd = """
-test -e data/example-room-scan-poly.zip \
-|| ( \
-    hf download pablovela5620/sample-polycam-room \
-    example-room-scan-poly.zip --repo-type dataset \
-    --local-dir data/ \
-)
-"""
+# ── Download tasks (hidden, used as depends-on) ─────────────────────────
+[feature.monoprior.tasks._download-single-image]
+cmd = "test -d data/examples/single-image || hf download pablovela5620/monoprior-example --include 'single-image/*' --repo-type dataset --local-dir data/examples/"
 cwd = "packages/monoprior"
-outputs = ["packages/monoprior/data/example-room-scan-poly.zip"]
-description = "Downloads an example polycam dataset from huggingface"
 
-[feature.monoprior.tasks.monoprior-polycam-inference]
-cmd = """
-python tools/inference_polycam.py \
---polycam-zip-path data/example-room-scan-poly.zip
-"""
+[feature.monoprior.tasks._download-multiview]
+cmd = "test -d data/examples/multiview || hf download pablovela5620/monoprior-example --include 'multiview/*' --repo-type dataset --local-dir data/examples/"
 cwd = "packages/monoprior"
-depends-on = ["monoprior-download-example"]
-description = "Runs inference on polycam dataset on downloaded example"
 
-[feature.monoprior.tasks.monoprior-vo]
-cmd = """
-python tools/inference_polycam.py \
---polycam-zip-path data/example-room-scan-poly.zip
-"""
+[feature.monoprior.tasks._download-video]
+cmd = "test -d data/examples/video || hf download pablovela5620/monoprior-example --include 'video/*' --repo-type dataset --local-dir data/examples/"
 cwd = "packages/monoprior"
-depends-on = ["monoprior-download-example"]
-description = "Runs visual odometry on polycam dataset"
 
-[feature.monoprior.tasks.monoprior-build-wheel]
+[feature.monoprior.tasks._download-polycam]
+cmd = "test -d data/examples/polycam || hf download pablovela5620/monoprior-example --include 'polycam/*' --repo-type dataset --local-dir data/examples/"
+cwd = "packages/monoprior"
+
+# ── Demo tasks ───────────────────────────────────────────────────────────
+[feature.monoprior.tasks.relative-depth]
+cmd = "python tools/demos/relative_depth.py --image-path data/examples/single-image/room.jpg"
+depends-on = ["_download-single-image"]
+cwd = "packages/monoprior"
+description = "Run relative depth estimation on example image"
+
+[feature.monoprior.tasks.multiview-depth]
+cmd = "python tools/demos/multiview_depth.py --image-dir data/examples/multiview/car_landscape_12"
+depends-on = ["_download-multiview"]
+cwd = "packages/monoprior"
+description = "Run VGGT multiview depth on example images"
+
+[feature.monoprior.tasks.multiview-calibration]
+cmd = "python tools/demos/multiview_calibration.py --image-dir data/examples/multiview/car_landscape_12"
+depends-on = ["_download-multiview"]
+cwd = "packages/monoprior"
+description = "Run multiview calibration on example images"
+
+[feature.monoprior.tasks.video-depth]
+cmd = "python tools/demos/video_depth.py --video-path data/examples/video/davis_rollercoaster.mp4"
+depends-on = ["_download-video"]
+cwd = "packages/monoprior"
+description = "Run video depth estimation on example video"
+
+[feature.monoprior.tasks.polycam-inference]
+cmd = "python tools/demos/polycam_inference.py --polycam-zip-path data/examples/polycam/example-room-scan-poly.zip"
+depends-on = ["_download-polycam"]
+cwd = "packages/monoprior"
+description = "Run monoprior inference on Polycam dataset"
+
+[feature.monoprior.tasks.promptda-polycam]
+cmd = "python tools/demos/promptda_polycam.py --polycam-zip-path data/examples/polycam/example-room-scan-poly.zip"
+depends-on = ["_download-polycam"]
+cwd = "packages/monoprior"
+description = "Run PromptDA depth completion on Polycam dataset"
+
+[feature.monoprior.tasks.surface-normals]
+cmd = "python tools/demos/surface_normals.py --image-path data/examples/single-image/room.jpg"
+depends-on = ["_download-single-image"]
+cwd = "packages/monoprior"
+description = "Run surface normal estimation on example image"
+
+# ── App tasks (Gradio UIs) ──────────────────────────────────────────────
+[feature.monoprior.tasks.depth-compare-app]
+cmd = "python tools/apps/depth_compare_app.py"
+cwd = "packages/monoprior"
+description = "Launch Gradio depth comparison UI"
+
+[feature.monoprior.tasks.calibration-app]
+cmd = "python tools/apps/calibration_app.py"
+cwd = "packages/monoprior"
+description = "Launch Gradio multiview calibration UI"
+
+# ── Utility & dev tasks ─────────────────────────────────────────────────
+[feature.monoprior.tasks.build-wheel]
 cmd = "python -m pip install build && python -m build"
 cwd = "packages/monoprior"
 
-[feature.monoprior.tasks.monoprior-upload-pypi]
+[feature.monoprior.tasks.upload-pypi]
 cmd = "python -m pip install twine && twine check dist/*"
 cwd = "packages/monoprior"
 
-[feature.monoprior.tasks.monoprior-upload-hf]
-cmd = "python tools/upload_to_hf.py"
+[feature.monoprior.tasks.upload-hf]
+cmd = "python tools/utils/upload_to_hf.py"
+depends-on = ["build-wheel"]
 cwd = "packages/monoprior"
-depends-on = ["monoprior-build-wheel"]
 
-[feature.monoprior.tasks.monoprior-tests]
+[feature.monoprior.tasks.tests]
 cmd = "pytest -q"
 cwd = "packages/monoprior"
 description = "Run monoprior test suite"
 
-[feature.monoprior.tasks.monoprior-lint]
+[feature.monoprior.tasks.lint]
 cmd = "ruff check ."
 cwd = "packages/monoprior"
 description = "Lint monoprior"
 
-[feature.monoprior.tasks.monoprior-typecheck]
+[feature.monoprior.tasks.typecheck]
 cmd = "pyrefly check"
 cwd = "packages/monoprior"
 description = "Typecheck monoprior"
@@ -202,8 +214,6 @@ dill = ">=0.4.0,<0.5"
 [feature.wilor.pypi-dependencies]
 wilor_nano = { path = "packages/wilor-nano", editable = true }
 simplecv = { git = "https://github.com/pablovela5620/simplecv.git", rev = "31cc852429cc292959f30c0277010ec57caa6caf" }
-torch = { version = ">=2.7.0", index = "https://download.pytorch.org/whl/cu128" }
-torchvision = { version = ">=0.20.1", index = "https://download.pytorch.org/whl/cu128" }
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 
 [feature.wilor.tasks.wilor-image-example]
@@ -244,16 +254,12 @@ pydub = "*"
 open3d = ">=0.19.0,<0.20"
 h5py = ">=3.11"
 torchcodec = "*"
-pytorch-gpu = ">=2.8.0"
-torchvision = "*"
 
 [feature.sam3d.pypi-dependencies]
 sam3d_body = { path = "packages/sam3d-body-rerun", editable = true }
-monopriors = { path = "packages/monoprior", editable = true }
 moge = { git = "https://github.com/microsoft/MoGe.git" }
 simplecv = { git = "https://github.com/pablovela5620/simplecv.git", rev = "804e95c588b4af5be50874288eb8929ef2450f74" }
 timm = ">=0.9"
-transformers = ">=5.0.0rc2"
 natsort = ">=8.4"
 datasets = ">=2.20"
 fsspec = ">=2025.3"
@@ -306,21 +312,6 @@ cwd = "packages/sam3d-body-rerun"
 depends-on = ["sam3d-download-hocap-sample"]
 description = "Multiview 3D body mesh fitting with per-camera estimation"
 
-[feature.sam3d.tasks.sam3d-video-demo]
-cmd = "python tool/demo_video.py"
-cwd = "packages/sam3d-body-rerun"
-description = "Batch video segmentation (loads full video in RAM, best for <4GB videos)"
-
-[feature.sam3d.tasks.sam3d-video-chunk-demo]
-cmd = "python tool/demo_chunk_video.py"
-cwd = "packages/sam3d-body-rerun"
-description = "Chunk-based video segmentation (memory-efficient, ~4GB chunks)"
-
-[feature.sam3d.tasks.sam3d-video-stream-demo]
-cmd = "python tool/demo_stream.py"
-cwd = "packages/sam3d-body-rerun"
-description = "Streaming video segmentation (constant memory, frame-by-frame)"
-
 [feature.sam3d.tasks.sam3d-lint]
 cmd = "ruff check ."
 cwd = "packages/sam3d-body-rerun"
@@ -330,6 +321,53 @@ description = "Lint sam3d-body-rerun"
 cmd = "pyrefly check"
 cwd = "packages/sam3d-body-rerun"
 description = "Typecheck sam3d-body-rerun"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# sam3-rerun
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.sam3-rerun.dependencies]
+python = "3.12.*"
+jaxtyping = "<0.3.0"
+
+[feature.sam3-rerun.pypi-dependencies]
+sam3-rerun = { path = "packages/sam3-rerun", editable = true }
+simplecv = { git = "https://github.com/pablovela5620/simplecv.git", rev = "804e95c588b4af5be50874288eb8929ef2450f74" }
+spaces = ">=0.43.0"
+
+[feature.sam3-rerun.tasks.sam3-video-batch]
+cmd = "python tools/demos/video_batch.py"
+cwd = "packages/sam3-rerun"
+description = "Batch video segmentation with SAM3"
+
+[feature.sam3-rerun.tasks.sam3-video-chunk]
+cmd = "python tools/demos/video_chunk.py"
+cwd = "packages/sam3-rerun"
+description = "Chunk-based video segmentation with SAM3 (memory-efficient)"
+
+[feature.sam3-rerun.tasks.sam3-video-stream]
+cmd = "python tools/demos/video_stream.py"
+cwd = "packages/sam3-rerun"
+description = "Streaming video segmentation with SAM3 (constant memory)"
+
+[feature.sam3-rerun.tasks.sam3-rerun-app]
+cmd = "python tools/apps/sam3_rerun_app.py"
+cwd = "packages/sam3-rerun"
+description = "Launch SAM3 segmentation Gradio app with Rerun viewer"
+
+[feature.sam3-rerun.tasks.sam3-annotated-app]
+cmd = "python tools/apps/sam3_annotated_app.py"
+cwd = "packages/sam3-rerun"
+description = "Launch SAM3 segmentation Gradio app with annotated image"
+
+[feature.sam3-rerun.tasks.sam3-rerun-lint]
+cmd = "ruff check ."
+cwd = "packages/sam3-rerun"
+description = "Lint sam3-rerun"
+
+[feature.sam3-rerun.tasks.sam3-rerun-typecheck]
+cmd = "pyrefly check"
+cwd = "packages/sam3-rerun"
+description = "Typecheck sam3-rerun"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # robocap-slam
@@ -381,7 +419,8 @@ description = "Typecheck robocap-slam"
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
 [environments]
-monoprior = { features = ["common", "cuda128", "monoprior", "dev-tools"], solve-group = "monoprior", no-default-feature = true }
-wilor = { features = ["common", "cuda128", "wilor", "dev-tools"], solve-group = "wilor", no-default-feature = true }
-sam3d = { features = ["common", "cuda129", "sam3d", "dev-tools"], solve-group = "sam3d", no-default-feature = true }
+monoprior = { features = ["common", "cuda", "monoprior", "dev-tools"], solve-group = "monoprior", no-default-feature = true }
+wilor = { features = ["common", "cuda", "wilor", "dev-tools"], solve-group = "wilor", no-default-feature = true }
+sam3d = { features = ["common", "cuda", "sam3d", "dev-tools"], solve-group = "sam3d", no-default-feature = true }
+sam3-rerun = { features = ["common", "cuda", "sam3-rerun", "dev-tools"], solve-group = "sam3-rerun", no-default-feature = true }
 robocap = { features = ["common", "robocap", "dev-tools"], solve-group = "robocap", no-default-feature = true }

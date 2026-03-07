@@ -163,7 +163,7 @@ def main(
         )
 
         frames.append(frame)
-        rr.set_time_sequence("timestep", idx)
+        rr.set_time("timestep", sequence=idx)
         if log:
             cam_log_path = sdf_log_path / "cam"
             pinhole_log_path = cam_log_path / "pinhole"

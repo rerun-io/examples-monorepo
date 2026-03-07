@@ -9,6 +9,7 @@ from jaxtyping import Bool, Float32, Int, UInt8
 from monopriors.depth_utils import depth_edges_mask
 from monopriors.relative_depth_models import RelativeDepthPrediction
 from numpy import ndarray
+from sam3_rerun.viz_constants import BOX_PALETTE, SEG_CLASS_OFFSET, SEG_OVERLAY_ALPHA
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from simplecv.ops.pc_utils import estimate_voxel_size
 from simplecv.rerun_log_utils import log_pinhole
@@ -16,27 +17,8 @@ from simplecv.rerun_log_utils import log_pinhole
 from sam3d_body.metadata.mhr70 import MHR70_ID2NAME, MHR70_IDS, MHR70_LINKS
 from sam3d_body.sam_3d_body_estimator import FinalPosePrediction
 
-BOX_PALETTE: UInt8[np.ndarray, "n_colors 4"] = np.array(
-    [
-        [255, 99, 71, 255],  # tomato
-        [65, 105, 225, 255],  # royal blue
-        [60, 179, 113, 255],  # medium sea green
-        [255, 215, 0, 255],  # gold
-        [138, 43, 226, 255],  # blue violet
-        [255, 140, 0, 255],  # dark orange
-        [220, 20, 60, 255],  # crimson
-        [70, 130, 180, 255],  # steel blue
-    ],
-    dtype=np.uint8,
-)
-
-# Use a separate id range for segmentation classes to avoid clobbering the person class (id=0).
-# Segmentation IDs use 100=background, 101-N for person instances (uint8 compatible, avoids keypoint IDs 0-70).
-SEG_CLASS_OFFSET: int = 100
 MAX_POINT_CLOUD_POINTS = 50_000
 MIN_DEPTH_CONFIDENCE = 0.5
-SEG_OVERLAY_ALPHA: int = 242  # ~0.95 opacity (242/255)
-"""Alpha value for segmentation mask overlay (0-255). Higher = more opaque."""
 
 
 def filter_out_of_bounds(

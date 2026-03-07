@@ -7,10 +7,10 @@
 #   https://github.com/facebookresearch/dino/blob/main/vision_transformer.py
 #   https://github.com/rwightman/pytorch-image-models/tree/master/timm/models/vision_transformer.py
 
-from functools import partial
-import math
 import logging
-from typing import Sequence, Tuple, Union, Callable
+import math
+from functools import partial
+from typing import Callable, Sequence, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -18,13 +18,14 @@ import torch.utils.checkpoint
 from torch.nn.init import trunc_normal_
 
 from .dinov2_layers import (
+    MemEffAttention,
     Mlp,
     PatchEmbed,
     SwiGLUFFNFused,
-    MemEffAttention,
+)
+from .dinov2_layers import (
     NestedTensorBlock as Block,
 )
-
 
 logger = logging.getLogger("dinov2")
 

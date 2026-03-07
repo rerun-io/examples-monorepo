@@ -3,9 +3,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from monopriors.third_party.promptda.model.blocks import (
-    _make_scratch,
     _make_fusion_block,
+    _make_scratch,
 )
 
 

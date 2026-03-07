@@ -23,8 +23,8 @@ def main(upload_examples: bool) -> None:
     print(f"WHL_PATH: {whl_path}")
 
     files_to_upload: list[FileUpload] = [
-        {"local_path": "./tools/app.py", "repo_path": "app.py"},
-        {"local_path": "./tools/gradio_app.py", "repo_path": "gradio_app.py"},
+        {"local_path": "./tools/utils/hf_spaces_launcher.py", "repo_path": "app.py"},
+        {"local_path": "./tools/apps/depth_compare_app.py", "repo_path": "gradio_app.py"},
         {
             "local_path": f"./dist/{whl_path}",
             "repo_path": f"{whl_path}",

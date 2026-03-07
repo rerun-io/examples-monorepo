@@ -123,12 +123,12 @@ This works because each env has its own solve-group — the solver combines the 
 
 ```toml
 [pypi-options]
-no-build-isolation = ["detectron2", "moge"]   # These need access to torch at build time
+no-build-isolation = ["moge"]   # These need access to torch at build time
 
 [pypi-options.dependency-overrides]
 gradio = ">=6.0.0,<7"    # Override monopriors' gradio==5.33.1 pin
 rerun-sdk = ">=0.28.1"   # Override transitive pins
-iopath = ">=0.1.10"      # Override detectron2's iopath<0.1.10 pin
+iopath = ">=0.1.10"      # Override transitive iopath pins
 fsspec = ">=2025.3"       # Override transitive pins
 ```
 

@@ -8,8 +8,8 @@ This module provides memory-efficient video segmentation by processing in chunks
 - Logs results to Rerun for interactive visualization.
 
 This is a middle ground between:
-- demo_video.py (full video in RAM - best quality, highest memory)
-- demo_stream.py (frame-by-frame - lowest memory, reduced temporal context)
+- video_batch.py (full video in RAM - best quality, highest memory)
+- video_stream.py (frame-by-frame - lowest memory, reduced temporal context)
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from simplecv.rerun_log_utils import RerunTyroConfig, log_video
 from tqdm import tqdm
 from transformers import Sam3VideoConfig, Sam3VideoModel, Sam3VideoProcessor
 
-from sam3d_body.api.visualization import BOX_PALETTE, SEG_OVERLAY_ALPHA
+from sam3_rerun.viz_constants import BOX_PALETTE, SEG_OVERLAY_ALPHA
 
 if TYPE_CHECKING:
     from transformers.models.sam3_video.processing_sam3_video import Sam3VideoInferenceSession
@@ -337,7 +337,7 @@ def log_frame_outputs(
         dtype=np.uint8,
     )
 
-    # Create segmentation map (use uint8 if ≤255 objects for 50% storage savings)
+    # Create segmentation map (use uint8 if <=255 objects for 50% storage savings)
     if num_instances <= 255:
         seg_map: UInt8[ndarray, "h w"] | UInt16[ndarray, "h w"] = np.zeros((h, w), dtype=np.uint8)
         for idx in range(num_instances):

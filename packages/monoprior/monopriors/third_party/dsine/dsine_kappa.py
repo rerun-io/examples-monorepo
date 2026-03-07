@@ -10,19 +10,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .submodules import (
+    INPUT_CHANNELS_DICT,
+    ConvGRU,
     Encoder,
+    RayReLU,
     UpSampleBN,
     UpSampleGN,
-    INPUT_CHANNELS_DICT,
-    upsample_via_mask,
-    get_prediction_head,
-)
-from .submodules import (
-    normal_activation,
     get_pixel_coords,
-    ConvGRU,
+    get_prediction_head,
     get_unfold,
-    RayReLU,
+    normal_activation,
+    upsample_via_mask,
 )
 from .utils.rotation import axis_angle_to_matrix
 
