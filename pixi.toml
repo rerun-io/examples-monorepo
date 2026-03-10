@@ -65,16 +65,35 @@ libnvjitlink = "*"
 pytorch-gpu = ">=2.8.0"
 torchvision = "*"
 
-# ─── dev-tools feature (shared across all envs) ────────────────────────────
-[feature.dev-tools.dependencies]
+# ─── ide feature (standalone dev env for Zed/IDE tooling) ────────────────────
+[feature.ide.dependencies]
+python = "3.12.*"
+
+# ─── dev feature (shared across all *-dev envs) ─────────────────────────────
+[feature.dev.dependencies]
 ruff = "*"
 pytest = ">=8.0.0,<9"
 beartype = ">=0.22.9"
 pyrefly = "*"
 hypothesis = "*"
 
-[feature.dev-tools.pypi-dependencies]
+[feature.dev.pypi-dependencies]
 types-tqdm = "*"
+
+[feature.dev.activation.env]
+PIXI_DEV_MODE = "1"
+
+[feature.dev.tasks.lint]
+cmd = "cd $PACKAGE_DIR && ruff check ."
+description = "Lint the package"
+
+[feature.dev.tasks.typecheck]
+cmd = "cd $PACKAGE_DIR && pyrefly check"
+description = "Typecheck the package"
+
+[feature.dev.tasks.tests]
+cmd = "cd $PACKAGE_DIR && pytest -q"
+description = "Run package tests"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # monoprior
@@ -101,6 +120,9 @@ monopriors = { path = "packages/monoprior", editable = true }
 simplecv = { git = "https://github.com/pablovela5620/simplecv.git", rev = "ab88369f5d0353ffb245de6d5981b0aede0930d7" }
 vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c" }
 moge = { git = "https://github.com/microsoft/MoGe.git" }
+
+[feature.monoprior.activation.env]
+PACKAGE_DIR = "packages/monoprior"
 
 # ── Download tasks (hidden, used as depends-on) ─────────────────────────
 [feature.monoprior.tasks._download-single-image]
@@ -185,7 +207,7 @@ cmd = "python tools/apps/calibration_app.py"
 cwd = "packages/monoprior"
 description = "Launch Gradio multiview calibration UI"
 
-# ── Utility & dev tasks ─────────────────────────────────────────────────
+# ── Utility tasks ────────────────────────────────────────────────────────
 [feature.monoprior.tasks.build-wheel]
 cmd = "python -m pip install build && python -m build"
 cwd = "packages/monoprior"
@@ -198,21 +220,6 @@ cwd = "packages/monoprior"
 cmd = "python tools/utils/upload_to_hf.py"
 depends-on = ["build-wheel"]
 cwd = "packages/monoprior"
-
-[feature.monoprior.tasks.tests]
-cmd = "pytest -q"
-cwd = "packages/monoprior"
-description = "Run monoprior test suite"
-
-[feature.monoprior.tasks.lint]
-cmd = "ruff check ."
-cwd = "packages/monoprior"
-description = "Lint monoprior"
-
-[feature.monoprior.tasks.typecheck]
-cmd = "pyrefly check"
-cwd = "packages/monoprior"
-description = "Typecheck monoprior"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # wilor-nano
@@ -228,6 +235,9 @@ wilor_nano = { path = "packages/wilor-nano", editable = true }
 simplecv = { git = "https://github.com/pablovela5620/simplecv.git", rev = "31cc852429cc292959f30c0277010ec57caa6caf" }
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 
+[feature.wilor.activation.env]
+PACKAGE_DIR = "packages/wilor-nano"
+
 [feature.wilor.tasks.wilor-image-example]
 cmd = "python tools/wilor_inference.py --image-path assets/img.png"
 cwd = "packages/wilor-nano"
@@ -237,21 +247,6 @@ description = "Run WiLoR inference on example image"
 cmd = "python tools/wilor_inference.py --video-path assets/video.mp4"
 cwd = "packages/wilor-nano"
 description = "Run WiLoR inference on example video"
-
-[feature.wilor.tasks.wilor-tests]
-cmd = "pytest -q"
-cwd = "packages/wilor-nano"
-description = "Run wilor-nano test suite"
-
-[feature.wilor.tasks.wilor-lint]
-cmd = "ruff check ."
-cwd = "packages/wilor-nano"
-description = "Lint wilor-nano"
-
-[feature.wilor.tasks.wilor-typecheck]
-cmd = "pyrefly check"
-cwd = "packages/wilor-nano"
-description = "Typecheck wilor-nano"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # sam3d-body-rerun
@@ -276,6 +271,9 @@ natsort = ">=8.4"
 datasets = ">=2.20"
 fsspec = ">=2025.3"
 kernels = ">=0.11.3"
+
+[feature.sam3d.activation.env]
+PACKAGE_DIR = "packages/sam3d-body-rerun"
 
 [feature.sam3d.tasks.sam3d-app]
 cmd = "python tool/gradio_sam3d_body.py"
@@ -324,16 +322,6 @@ cwd = "packages/sam3d-body-rerun"
 depends-on = ["sam3d-download-hocap-sample"]
 description = "Multiview 3D body mesh fitting with per-camera estimation"
 
-[feature.sam3d.tasks.sam3d-lint]
-cmd = "ruff check ."
-cwd = "packages/sam3d-body-rerun"
-description = "Lint sam3d-body-rerun"
-
-[feature.sam3d.tasks.sam3d-typecheck]
-cmd = "pyrefly check"
-cwd = "packages/sam3d-body-rerun"
-description = "Typecheck sam3d-body-rerun"
-
 # ═══════════════════════════════════════════════════════════════════════════
 # sam3-rerun
 # ═══════════════════════════════════════════════════════════════════════════
@@ -345,6 +333,9 @@ jaxtyping = "<0.3.0"
 sam3-rerun = { path = "packages/sam3-rerun", editable = true }
 simplecv = { git = "https://github.com/pablovela5620/simplecv.git", rev = "804e95c588b4af5be50874288eb8929ef2450f74" }
 spaces = ">=0.43.0"
+
+[feature.sam3-rerun.activation.env]
+PACKAGE_DIR = "packages/sam3-rerun"
 
 [feature.sam3-rerun.tasks.sam3-video-batch]
 cmd = "python tools/demos/video_batch.py"
@@ -371,16 +362,6 @@ cmd = "python tools/apps/sam3_annotated_app.py"
 cwd = "packages/sam3-rerun"
 description = "Launch SAM3 segmentation Gradio app with annotated image"
 
-[feature.sam3-rerun.tasks.sam3-rerun-lint]
-cmd = "ruff check ."
-cwd = "packages/sam3-rerun"
-description = "Lint sam3-rerun"
-
-[feature.sam3-rerun.tasks.sam3-rerun-typecheck]
-cmd = "pyrefly check"
-cwd = "packages/sam3-rerun"
-description = "Typecheck sam3-rerun"
-
 # ═══════════════════════════════════════════════════════════════════════════
 # robocap-slam
 # ═══════════════════════════════════════════════════════════════════════════
@@ -398,6 +379,9 @@ pip = ">=25.1.1,<26"
 robocap-slam = { path = "packages/robocap-slam", editable = true }
 simplecv = { git = "https://github.com/pablovela5620/simplecv.git", branch = "main" }
 tyro = ">=0.9,<1"
+
+[feature.robocap.activation.env]
+PACKAGE_DIR = "packages/robocap-slam"
 
 [feature.robocap.tasks.robocap-download-example]
 cmd = """test -d data/robocap/f408193e6447b3b0_session_14 || hf download pablovela5620/robocap-example --repo-type dataset --local-dir data/robocap"""
@@ -417,22 +401,18 @@ cwd = "packages/robocap-slam"
 depends-on = ["robocap-download-example"]
 description = "Run multicamera visual SLAM on Robocap data"
 
-[feature.robocap.tasks.robocap-lint]
-cmd = "ruff check ."
-cwd = "packages/robocap-slam"
-description = "Lint robocap-slam"
-
-[feature.robocap.tasks.robocap-typecheck]
-cmd = "pyrefly check"
-cwd = "packages/robocap-slam"
-description = "Typecheck robocap-slam"
-
 # ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
 [environments]
-monoprior = { features = ["common", "cuda", "monoprior", "dev-tools"], solve-group = "monoprior", no-default-feature = true }
-wilor = { features = ["common", "cuda", "wilor", "dev-tools"], solve-group = "wilor", no-default-feature = true }
-sam3d = { features = ["common", "cuda", "sam3d", "dev-tools"], solve-group = "sam3d", no-default-feature = true }
-sam3-rerun = { features = ["common", "cuda", "sam3-rerun", "dev-tools"], solve-group = "sam3-rerun", no-default-feature = true }
-robocap = { features = ["common", "robocap", "dev-tools"], solve-group = "robocap", no-default-feature = true }
+dev            = { features = ["ide", "dev"],                               solve-group = "dev",        no-default-feature = true }
+monoprior      = { features = ["common", "cuda", "monoprior"],              solve-group = "monoprior",  no-default-feature = true }
+monoprior-dev  = { features = ["common", "cuda", "monoprior", "dev"],       solve-group = "monoprior",  no-default-feature = true }
+wilor          = { features = ["common", "cuda", "wilor"],                  solve-group = "wilor",      no-default-feature = true }
+wilor-dev      = { features = ["common", "cuda", "wilor", "dev"],           solve-group = "wilor",      no-default-feature = true }
+sam3d          = { features = ["common", "cuda", "sam3d"],                  solve-group = "sam3d",      no-default-feature = true }
+sam3d-dev      = { features = ["common", "cuda", "sam3d", "dev"],           solve-group = "sam3d",      no-default-feature = true }
+sam3-rerun     = { features = ["common", "cuda", "sam3-rerun"],             solve-group = "sam3-rerun", no-default-feature = true }
+sam3-rerun-dev = { features = ["common", "cuda", "sam3-rerun", "dev"],      solve-group = "sam3-rerun", no-default-feature = true }
+robocap        = { features = ["common", "robocap"],                        solve-group = "robocap",    no-default-feature = true }
+robocap-dev    = { features = ["common", "robocap", "dev"],                 solve-group = "robocap",    no-default-feature = true }
