@@ -1,0 +1,9 @@
+[tool.pyrefly]
+project-includes = [
+    "packages/monoprior/monopriors/**/*",
+    "packages/wilor-nano/src/**/*",
+    "packages/sam3d-body-rerun/src/**/*",
+    "packages/sam3-rerun/src/**/*",
+    "packages/robocap-slam/robocap_slam/**/*",
+]
+project-excludes = ["**/node_modules", "**/__pycache__", "**/*venv/**/*"]

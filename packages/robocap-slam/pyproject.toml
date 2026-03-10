@@ -27,3 +27,7 @@ ignore = [
     "UP037",  # Remove quotes false positive with jaxtyping
     "UP040",  # Beartype requires TypeAlias, not PEP 695 type
 ]
+
+[tool.pyrefly]
+project-includes = ["**/*"]
+project-excludes = ["**/node_modules", "**/__pycache__", "**/*venv/**/*"]

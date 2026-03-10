@@ -1,0 +1,33 @@
+{
+  "languages": {
+    "Python": {
+      "code_actions_on_format": {
+        "source.organizeImports.ruff": true
+      },
+      "formatter": {
+        "language_server": {
+          "name": "ruff"
+        }
+      },
+      "language_servers": ["!basedpyright", "ruff", "!ty", "pyrefly", "!pyright", "!pylsp", "..."]
+    }
+  },
+  "lsp": {
+    "pyrefly": {
+      "binary": {
+        "path": ".pixi/envs/dev/bin/pyrefly",
+        "arguments": ["lsp"]
+      },
+      "settings": {
+        "python": {
+          "pythonPath": ".pixi/envs/dev/bin/python"
+        }
+      }
+    },
+    "ruff": {
+      "binary": {
+        "path": ".pixi/envs/dev/bin/ruff"
+      }
+    }
+  }
+}

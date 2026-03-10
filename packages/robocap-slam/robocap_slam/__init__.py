@@ -2,10 +2,7 @@
 
 import os
 
-if os.environ.get("PIXI_ENVIRONMENT_NAME") == "dev":
-    try:
-        from beartype.claw import beartype_this_package
+if os.environ.get("PIXI_DEV_MODE") == "1":
+    from beartype.claw import beartype_this_package
 
-        beartype_this_package()
-    except ImportError:
-        pass
+    beartype_this_package()

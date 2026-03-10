@@ -4,27 +4,33 @@ A pixi workspace containing multiple computer vision example projects, each with
 
 ## Packages
 
-| Package | Environment | Python | GPU | Description |
-|---|---|---|---|---|
-| [monoprior](packages/monoprior/) | `monoprior` | 3.12 | CUDA 12.8 | Monocular geometric priors (depth, normals) |
-| [wilor-nano](packages/wilor-nano/) | `wilor` | 3.12 | CUDA 12.8 | Hand pose estimation |
-| [sam3d-body-rerun](packages/sam3d-body-rerun/) | `sam3d` | 3.12 | CUDA 12.9 | 3D body segmentation with SAM + Rerun |
-| [robocap-slam](packages/robocap-slam/) | `robocap` | 3.10 | None | Multi-camera visual odometry & SLAM |
+| Package | Prod env | Dev env | Python | GPU | Description |
+|---|---|---|---|---|---|
+| [monoprior](packages/monoprior/) | `monoprior` | `monoprior-dev` | 3.12 | CUDA 12.9 | Monocular geometric priors (depth, normals) |
+| [wilor-nano](packages/wilor-nano/) | `wilor` | `wilor-dev` | 3.12 | CUDA 12.9 | Hand pose estimation |
+| [sam3d-body-rerun](packages/sam3d-body-rerun/) | `sam3d` | `sam3d-dev` | 3.12 | CUDA 12.9 | 3D body segmentation with SAM + Rerun |
+| [sam3-rerun](packages/sam3-rerun/) | `sam3-rerun` | `sam3-rerun-dev` | 3.12 | CUDA 12.9 | SAM3 video segmentation with Rerun |
+| [robocap-slam](packages/robocap-slam/) | `robocap` | `robocap-dev` | 3.10 | None | Multi-camera visual odometry & SLAM |
 
 ## Quick start
 
 ```bash
-pixi install -e robocap        # Install one environment
-pixi run -e robocap robocap-track  # Run a task
+pixi install -e robocap            # Install prod environment
+pixi run -e robocap robocap-track  # Run a demo task
+
+pixi install -e robocap-dev        # Install dev environment (adds ruff, pytest, beartype, pyrefly)
+pixi run -e robocap-dev lint       # Lint
+pixi run -e robocap-dev typecheck  # Typecheck
+pixi run -e robocap-dev tests      # Run tests
 ```
 
 ## Listing tasks
 
-Use `-e` to filter tasks by environment (recommended — without it you see all ~30 tasks):
+Use `-e` to filter tasks by environment (recommended — without it you see all tasks):
 
 ```bash
-pixi task list -e robocap
-pixi task list -e sam3d
+pixi task list -e robocap       # Demo/app tasks only
+pixi task list -e robocap-dev   # Demo/app tasks + lint, typecheck, tests
 ```
 
 ## Running from a package subdirectory
@@ -49,16 +55,16 @@ The root `pixi.toml` is structured around **features** that compose into **envir
 [pypi-options]                  # Workspace-level: no-build-isolation, dependency-overrides
 
 [feature.common]                # Shared base deps (all envs get these)
-[feature.cuda128]               # CUDA 12.8 toolkit
-[feature.cuda129]               # CUDA 12.9 toolkit
-[feature.dev-tools]             # ruff, pytest, beartype, pyrefly, hypothesis
+[feature.cuda]                  # CUDA 12.9 toolkit + PyTorch GPU
+[feature.dev]                   # ruff, pytest, beartype, pyrefly, hypothesis + PIXI_DEV_MODE=1
 
-[feature.monoprior]             # Package-specific: conda deps, pypi deps, tasks
+[feature.monoprior]             # Package-specific: conda deps, pypi deps, tasks, PACKAGE_DIR
 [feature.wilor]                 #   "
 [feature.sam3d]                 #   "
+[feature.sam3-rerun]            #   "
 [feature.robocap]               #   "
 
-[environments]                  # Compose features into named environments
+[environments]                  # Compose features into named environments (prod + dev per package)
 ```
 
 ### Features
@@ -69,28 +75,35 @@ The root `pixi.toml` is structured around **features** that compose into **envir
 |---|---|
 | av, rerun-sdk (>=0.28.1,<0.29), py-opencv, numpy, pyserde, jaxtyping, hf-transfer, scipy, huggingface_hub, tqdm | gradio, gradio-rerun |
 
-**`cuda128`** / **`cuda129`** — Named CUDA features with the full toolkit (compiler, cudnn, cublas, etc.). Attached to environments that need GPU. Adding a future CUDA version is a new root feature, not a per-package change.
+**`cuda`** — CUDA 12.9 toolkit with the full set of libraries (compiler, cudnn, cublas, etc.) and PyTorch GPU. Attached to environments that need GPU.
 
-**`dev-tools`** — ruff, pytest, beartype, pyrefly, hypothesis, types-tqdm. Included in every environment so there's no need for separate dev environments.
+**`dev`** — ruff, pytest, beartype, pyrefly, hypothesis, types-tqdm. Sets `PIXI_DEV_MODE=1` via activation env. Provides unified `lint`, `typecheck`, and `tests` tasks that use `$PACKAGE_DIR` (set by each package feature).
 
-**Per-package features** (`monoprior`, `wilor`, `sam3d`, `robocap`) contain:
+**Per-package features** (`monoprior`, `wilor`, `sam3d`, `sam3-rerun`, `robocap`) contain:
 - Python version pin
 - Deps that **override** common (e.g. `jaxtyping = "<0.3.0"` tightens common's `"*"`)
 - Deps **not** in common (package-specific libraries)
 - Editable install of the package itself
 - Git/PyPI dependencies (simplecv, torch, etc.)
-- All tasks with `cwd = "packages/<dir>"` for correct path resolution
+- Demo/app tasks with `cwd = "packages/<dir>"` for correct path resolution
+- `PACKAGE_DIR` activation env (used by dev tasks)
 
 ### Environments and solve-groups
 
-Each environment has its own **solve-group**, so dependency versions are resolved independently:
+Each package has a **prod** and **dev** environment sharing the same **solve-group**:
 
 ```toml
 [environments]
-monoprior = { features = ["common", "cuda128", "monoprior", "dev-tools"], solve-group = "monoprior", no-default-feature = true }
-wilor     = { features = ["common", "cuda128", "wilor",     "dev-tools"], solve-group = "wilor",     no-default-feature = true }
-sam3d     = { features = ["common", "cuda129", "sam3d",     "dev-tools"], solve-group = "sam3d",     no-default-feature = true }
-robocap   = { features = ["common",            "robocap",   "dev-tools"], solve-group = "robocap",   no-default-feature = true }
+monoprior      = { features = ["common", "cuda", "monoprior"],              solve-group = "monoprior",  no-default-feature = true }
+monoprior-dev  = { features = ["common", "cuda", "monoprior", "dev"],       solve-group = "monoprior",  no-default-feature = true }
+wilor          = { features = ["common", "cuda", "wilor"],                  solve-group = "wilor",      no-default-feature = true }
+wilor-dev      = { features = ["common", "cuda", "wilor", "dev"],           solve-group = "wilor",      no-default-feature = true }
+sam3d          = { features = ["common", "cuda", "sam3d"],                  solve-group = "sam3d",      no-default-feature = true }
+sam3d-dev      = { features = ["common", "cuda", "sam3d", "dev"],           solve-group = "sam3d",      no-default-feature = true }
+sam3-rerun     = { features = ["common", "cuda", "sam3-rerun"],             solve-group = "sam3-rerun", no-default-feature = true }
+sam3-rerun-dev = { features = ["common", "cuda", "sam3-rerun", "dev"],      solve-group = "sam3-rerun", no-default-feature = true }
+robocap        = { features = ["common", "robocap"],                        solve-group = "robocap",    no-default-feature = true }
+robocap-dev    = { features = ["common", "robocap", "dev"],                 solve-group = "robocap",    no-default-feature = true }
 ```
 
 `no-default-feature = true` means the root `[dependencies]` (empty) is not included — each env is fully defined by its features.
@@ -145,32 +158,30 @@ The conda `huggingface_hub` package provides the `hf` binary, not `huggingface-c
 ### Run demos
 
 ```bash
-pixi run -e monoprior monoprior-polycam-inference  # Downloads data first
+pixi run -e monoprior polycam-inference    # Downloads data first
 pixi run -e wilor wilor-image-example
-pixi run -e sam3d sam3d-app                        # Gradio UI
-pixi run -e robocap robocap-track-slam             # Downloads data first
+pixi run -e sam3d sam3d-app                # Gradio UI
+pixi run -e robocap robocap-track-slam     # Downloads data first
 ```
 
-### Lint & typecheck
+### Lint, typecheck & test
 
-Every package has `<pkg>-lint` and `<pkg>-typecheck` tasks:
-
-```bash
-pixi run -e robocap robocap-lint
-pixi run -e robocap robocap-typecheck
-```
-
-### Run tests
+All dev tasks use unified names in `*-dev` environments:
 
 ```bash
-pixi run -e monoprior monoprior-tests
-pixi run -e wilor wilor-tests
+pixi run -e monoprior-dev lint
+pixi run -e monoprior-dev typecheck
+pixi run -e monoprior-dev tests
+
+pixi run -e wilor-dev lint
+pixi run -e robocap-dev typecheck
 ```
 
 ## Project structure
 
 ```
 pixi.toml                         # Workspace manifest (features, envs, tasks, deps)
+pyrefly.toml                      # Root pyrefly config (for IDE/Zed LSP)
 .gitignore                        # Merged patterns from all packages
 packages/
   monoprior/
@@ -187,10 +198,17 @@ packages/
     pyproject.toml
     src/sam3d_body/               # Python package (includes sam3d_body/data/ submodule)
     tool/                         # CLI scripts (note: singular "tool")
+    tests/
+  sam3-rerun/
+    pyproject.toml
+    src/sam3_rerun/
+    tools/
+    tests/
   robocap-slam/
     pyproject.toml
     robocap_slam/                 # Python package (includes robocap_slam/data/ submodule)
     tools/
+    tests/
 ```
 
 ## Adding a new package
@@ -201,7 +219,10 @@ packages/
 4. Add a new feature in root `pixi.toml`:
    - `[feature.<name>.dependencies]` — Python pin + package-specific conda deps
    - `[feature.<name>.pypi-dependencies]` — editable install + git deps
-   - `[feature.<name>.tasks.*]` — tasks with `cwd = "packages/<name>"`
-5. Add an environment in `[environments]` composing common + cuda (if needed) + package + dev-tools
+   - `[feature.<name>.activation.env]` — set `PACKAGE_DIR = "packages/<name>"`
+   - `[feature.<name>.tasks.*]` — demo/app tasks with `cwd = "packages/<name>"`
+5. Add two environments in `[environments]`:
+   - `<name> = { features = ["common", "cuda", "<name>"], solve-group = "<name>", no-default-feature = true }`
+   - `<name>-dev = { features = ["common", "cuda", "<name>", "dev"], solve-group = "<name>", no-default-feature = true }`
 6. Add `packages/<name>/data/` to `.gitignore`
-7. Run `pixi install -e <name>` to verify
+7. Run `pixi install -e <name>-dev` to verify
