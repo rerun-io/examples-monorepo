@@ -19,6 +19,3 @@ line-length = 150
 select = ["E", "F", "UP", "B", "SIM", "I"]
 ignore = ["E501", "F722", "F821", "UP037", "UP040"]
 
-[tool.pyrefly]
-project-includes = ["**/*"]
-project-excludes = ["**/node_modules", "**/__pycache__", "**/*venv/**/*"]

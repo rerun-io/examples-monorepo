@@ -47,6 +47,3 @@ ignore = [
     "UP037", # Remove quotes from type, false positive when using jaxtyping
 ]
 
-[tool.pyrefly]
-project-includes = ["**/*"]
-project-excludes = ["**/node_modules", "**/__pycache__", "**/*venv/**/*"]

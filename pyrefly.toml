@@ -1,4 +1,3 @@
-[tool.pyrefly]
 project-includes = [
     "packages/monoprior/monopriors/**/*",
     "packages/wilor-nano/src/**/*",
@@ -7,3 +6,32 @@ project-includes = [
     "packages/robocap-slam/robocap_slam/**/*",
 ]
 project-excludes = ["**/node_modules", "**/__pycache__", "**/*venv/**/*"]
+
+# Disable heuristics so pyrefly uses only our explicit search-path,
+# not per-file guesses (critical for monorepo with multiple source roots)
+disable-search-path-heuristics = true
+
+# Source roots — where first-party imports are resolved from
+search-path = [
+    "packages/monoprior",
+    "packages/wilor-nano/src",
+    "packages/sam3d-body-rerun/src",
+    "packages/sam3-rerun/src",
+    "packages/robocap-slam",
+    # rerun-sdk uses a .pth file to add rerun_sdk/ as an import root;
+    # pyrefly doesn't follow .pth files in site-packages, so we add it explicitly
+    ".pixi/envs/monoprior-dev/lib/python3.12/site-packages/rerun_sdk",
+]
+
+# Third-party packages — all *-dev env site-packages so pyrefly can resolve
+# any import regardless of which package file is open.
+# Requires all *-dev envs installed (pixi install -a)
+site-package-path = [
+    ".pixi/envs/monoprior-dev/lib/python3.12/site-packages",
+    ".pixi/envs/wilor-dev/lib/python3.12/site-packages",
+    ".pixi/envs/sam3d-dev/lib/python3.12/site-packages",
+    ".pixi/envs/sam3-rerun-dev/lib/python3.12/site-packages",
+    ".pixi/envs/robocap-dev/lib/python3.10/site-packages",
+]
+
+python-interpreter-path = ".pixi/envs/dev/bin/python"
