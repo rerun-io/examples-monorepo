@@ -1,0 +1,25 @@
+[project]
+authors = [{ name = "pablo vela", email = "pablovela5620@gmail.com" }]
+dependencies = [
+    # common: numpy, scipy, jaxtyping, rerun-sdk, gradio, gradio-rerun,
+    #         huggingface_hub, hf-transfer, tqdm, pyserde, av, opencv
+    "monopriors>=0.3.2",
+]
+description = "Prompt Depth Anything Polycam CLI for the examples monorepo"
+name = "rerun-prompt-da"
+requires-python = ">= 3.12"
+version = "0.1.0"
+
+[tool.uv.sources]
+monopriors = { path = "../monoprior", editable = true }
+
+[build-system]
+build-backend = "hatchling.build"
+requires = ["hatchling"]
+
+[tool.ruff]
+line-length = 150
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+ignore = ["E501", "F722", "F821", "UP037"]

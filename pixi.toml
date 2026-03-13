@@ -226,6 +226,50 @@ depends-on = ["build-wheel"]
 cwd = "packages/monoprior"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# prompt-da
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.prompt-da.dependencies]
+python = "3.12.*"
+open3d = ">=0.19.0,<0.20"
+pyserde = ">=0.20,<0.30"
+
+[feature.prompt-da.pypi-dependencies]
+rerun-prompt-da = { path = "packages/prompt-da", editable = true }
+simplecv = { git = "https://github.com/pablovela5620/simplecv.git", tag = "v0.7.2" }
+
+[feature.prompt-da.pypi-options.dependency-overrides]
+rerun-sdk = "==0.28.2"
+
+[feature.prompt-da.activation.env]
+PACKAGE_DIR = "packages/prompt-da"
+
+[feature.prompt-da-demo.tasks._download-polycam-example]
+cmd = """
+test -e data/6G-room-example.zip || hf download pablovela5620/polycam-example-data 6G-room-example.zip --repo-type dataset --local-dir data/
+"""
+cwd = "packages/prompt-da"
+outputs = ["packages/prompt-da/data/6G-room-example.zip"]
+description = "Download the example Polycam zip from HuggingFace"
+
+[feature.prompt-da-demo.tasks.polycam-prompt_da]
+cmd = "python tools/prompt_da_polycam.py --polycam-zip-path data/6G-room-example.zip"
+depends-on = ["_download-polycam-example"]
+cwd = "packages/prompt-da"
+description = "Run PromptDA on the example Polycam dataset"
+
+[feature.prompt-da-demo.tasks.app]
+cmd = "python tools/gradio_app.py"
+depends-on = ["_download-polycam-example"]
+cwd = "packages/prompt-da"
+description = "Run the gradio app"
+
+[feature.prompt-da-demo.tasks.dev-app]
+cmd = "gradio tools/gradio_app.py"
+depends-on = ["_download-polycam-example"]
+cwd = "packages/prompt-da"
+description = "Run the gradio app in dev mode"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # wilor-nano
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.wilor.dependencies]
@@ -407,14 +451,72 @@ description = "Run multicamera visual SLAM on Robocap data"
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
 [environments]
-dev            = { features = ["ide", "dev"],                               solve-group = "dev",        no-default-feature = true }
-monoprior      = { features = ["common", "cuda", "monoprior"],              solve-group = "monoprior",  no-default-feature = true }
-monoprior-dev  = { features = ["common", "cuda", "monoprior", "dev"],       solve-group = "monoprior",  no-default-feature = true }
-wilor          = { features = ["common", "cuda", "wilor"],                  solve-group = "wilor",      no-default-feature = true }
-wilor-dev      = { features = ["common", "cuda", "wilor", "dev"],           solve-group = "wilor",      no-default-feature = true }
-sam3d          = { features = ["common", "cuda", "sam3d"],                  solve-group = "sam3d",      no-default-feature = true }
-sam3d-dev      = { features = ["common", "cuda", "sam3d", "dev"],           solve-group = "sam3d",      no-default-feature = true }
-sam3-rerun     = { features = ["common", "cuda", "sam3-rerun"],             solve-group = "sam3-rerun", no-default-feature = true }
-sam3-rerun-dev = { features = ["common", "cuda", "sam3-rerun", "dev"],      solve-group = "sam3-rerun", no-default-feature = true }
-robocap        = { features = ["common", "robocap"],                        solve-group = "robocap",    no-default-feature = true }
-robocap-dev    = { features = ["common", "robocap", "dev"],                 solve-group = "robocap",    no-default-feature = true }
+dev = { features = [
+    "ide",
+    "dev",
+], solve-group = "dev", no-default-feature = true }
+monoprior = { features = [
+    "common",
+    "cuda",
+    "monoprior",
+], solve-group = "monoprior", no-default-feature = true }
+monoprior-dev = { features = [
+    "common",
+    "cuda",
+    "monoprior",
+    "dev",
+], solve-group = "monoprior", no-default-feature = true }
+prompt-da = { features = [
+    "common",
+    "cuda",
+    "prompt-da",
+    "prompt-da-demo",
+], solve-group = "prompt-da", no-default-feature = true }
+prompt-da-dev = { features = [
+    "common",
+    "cuda",
+    "prompt-da",
+    "dev",
+], solve-group = "prompt-da", no-default-feature = true }
+wilor = { features = [
+    "common",
+    "cuda",
+    "wilor",
+], solve-group = "wilor", no-default-feature = true }
+wilor-dev = { features = [
+    "common",
+    "cuda",
+    "wilor",
+    "dev",
+], solve-group = "wilor", no-default-feature = true }
+sam3d = { features = [
+    "common",
+    "cuda",
+    "sam3d",
+], solve-group = "sam3d", no-default-feature = true }
+sam3d-dev = { features = [
+    "common",
+    "cuda",
+    "sam3d",
+    "dev",
+], solve-group = "sam3d", no-default-feature = true }
+sam3-rerun = { features = [
+    "common",
+    "cuda",
+    "sam3-rerun",
+], solve-group = "sam3-rerun", no-default-feature = true }
+sam3-rerun-dev = { features = [
+    "common",
+    "cuda",
+    "sam3-rerun",
+    "dev",
+], solve-group = "sam3-rerun", no-default-feature = true }
+robocap = { features = [
+    "common",
+    "robocap",
+], solve-group = "robocap", no-default-feature = true }
+robocap-dev = { features = [
+    "common",
+    "robocap",
+    "dev",
+], solve-group = "robocap", no-default-feature = true }
