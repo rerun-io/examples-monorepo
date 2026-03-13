@@ -18,7 +18,7 @@ import rerun.blueprint as rrb
 import spaces
 from gradio_rerun import Rerun
 from jaxtyping import Int, UInt8
-from monopriors.relative_depth_models import RelativeDepthPrediction
+from monopriors.models.metric_depth import MetricDepthPrediction
 from numpy import ndarray
 from sam3_rerun.api.predictor import SAM3Config
 
@@ -41,7 +41,7 @@ gr.set_static_paths([str(TEST_INPUT_DIR)])
 @rr.thread_local_stream("sam3d_body_gradio_ui")
 def sam3d_prediction_fn(
     rgb_hw3,
-    log_relative_depth,
+    log_metric_depth,
     export_glb,
     center_glb,
     pending_cleanup=None,
@@ -61,23 +61,23 @@ def sam3d_prediction_fn(
     if pending_cleanup is not None:
         pending_cleanup.append(temp.name)
 
-    view: rrb.ContainerLike = create_view(log_relative_depth)
+    view: rrb.ContainerLike = create_view(log_metric_depth)
     blueprint = rrb.Blueprint(view, collapse_panels=True)
     rr.save(path=temp.name, default_blueprint=blueprint)
     set_annotation_context()
     parent_log_path = Path("/world")
     rr.log("/", rr.ViewCoordinates.RDF, static=True)
 
-    outputs: tuple[list[FinalPosePrediction], RelativeDepthPrediction] = MODEL_E2E.predict_single_image(rgb_hw3=rgb_hw3)
+    outputs: tuple[list[FinalPosePrediction], MetricDepthPrediction] = MODEL_E2E.predict_single_image(rgb_hw3=rgb_hw3)
     pred_list: list[FinalPosePrediction] = outputs[0]
-    relative_pred: RelativeDepthPrediction = outputs[1]
+    metric_pred: MetricDepthPrediction = outputs[1]
     rr.set_time(timeline="image_sequence", sequence=0)
     visualize_sample(
         pred_list=pred_list,
         rgb_hw3=rgb_hw3,
         parent_log_path=parent_log_path,
         faces=mesh_faces,
-        relative_depth_pred=relative_pred if log_relative_depth else None,
+        metric_depth_pred=metric_pred if log_metric_depth else None,
     )
 
     glb_files: list[str] = []
@@ -127,7 +127,7 @@ def main():
 # SAM3D Body with Rerun
 An unofficial playground for Meta's SAM3D Body (DINOv3) with promptable SAM3 masks and live Rerun visualization. Uses **Rerun** for 3D inspection, **Gradio** for the UI, and **Pixi** for one-command setup.
 
-When "Log relative depth" is enabled, the 3D panel switches to tabbed views for full, background-only, and people-only depth point clouds.
+When "Log metric depth" is enabled, the 3D panel switches to tabbed views for full, background-only, and people-only depth point clouds.
 
 <div style="display:flex; gap:8px; justify-content:center; align-items:center; flex-wrap:wrap; margin:12px 0;">
   <a title="Rerun" href="https://rerun.io" target="_blank" rel="noopener noreferrer">
@@ -158,7 +158,7 @@ When "Log relative depth" is enabled, the 3D panel switches to tabbed views for 
                 with tabs:
                     with gr.TabItem("Inputs", id="inputs"):
                         img = gr.Image(interactive=True, label="Image", type="numpy", image_mode="RGB")
-                        depth_checkbox = gr.Checkbox(label="Log relative depth", value=False)
+                        depth_checkbox = gr.Checkbox(label="Log metric depth", value=False)
                         with gr.Row():
                             export_checkbox = gr.Checkbox(label="Export GLB meshes", value=False)
                             center_checkbox = gr.Checkbox(label="Center GLB at origin", value=True)

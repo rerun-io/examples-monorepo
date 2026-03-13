@@ -29,7 +29,7 @@ search-path = [
 site-package-path = [
     ".pixi/envs/monoprior-dev/lib/python3.12/site-packages",
     ".pixi/envs/wilor-dev/lib/python3.12/site-packages",
-    ".pixi/envs/sam3d-dev/lib/python3.12/site-packages",
+    ".pixi/envs/sam3d-body-dev/lib/python3.12/site-packages",
     ".pixi/envs/sam3-rerun-dev/lib/python3.12/site-packages",
     ".pixi/envs/robocap-dev/lib/python3.10/site-packages",
 ]

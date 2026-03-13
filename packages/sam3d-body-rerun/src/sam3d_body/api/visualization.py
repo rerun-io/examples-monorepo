@@ -7,7 +7,7 @@ import rerun as rr
 import rerun.blueprint as rrb
 from jaxtyping import Bool, Float32, Int, UInt8
 from monopriors.depth_utils import depth_edges_mask
-from monopriors.relative_depth_models import RelativeDepthPrediction
+from monopriors.models.metric_depth import MetricDepthPrediction
 from numpy import ndarray
 from sam3_rerun.viz_constants import BOX_PALETTE, SEG_CLASS_OFFSET, SEG_OVERLAY_ALPHA
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
@@ -195,7 +195,7 @@ def visualize_sample(
     rgb_hw3: UInt8[ndarray, "h w 3"],
     parent_log_path: Path,
     faces: Int[ndarray, "n_faces 3"],
-    relative_depth_pred: RelativeDepthPrediction | None = None,
+    metric_depth_pred: MetricDepthPrediction | None = None,
 ) -> None:
     h: int = rgb_hw3.shape[0]
     w: int = rgb_hw3.shape[1]
@@ -315,9 +315,9 @@ def visualize_sample(
         rr.log(f"{pred_log_path}/segmentation_ids", rr.SegmentationImage(seg_map))
 
     # Optionally log depth-derived point clouds (full / background-only / people-only).
-    if relative_depth_pred is not None:
-        depth_hw: Float32[ndarray, "h w"] = np.asarray(relative_depth_pred.depth, dtype=np.float32)
-        conf_hw: Float32[ndarray, "h w"] = np.asarray(relative_depth_pred.confidence, dtype=np.float32)
+    if metric_depth_pred is not None:
+        depth_hw: Float32[ndarray, "h w"] = np.asarray(metric_depth_pred.depth_meters, dtype=np.float32)
+        conf_hw: Float32[ndarray, "h w"] = np.asarray(metric_depth_pred.confidence, dtype=np.float32)
         if depth_hw.shape != (h, w):
             depth_hw = cv2.resize(depth_hw, (w, h), interpolation=cv2.INTER_NEAREST)
         if conf_hw.shape != (h, w):
@@ -340,10 +340,10 @@ def visualize_sample(
 
         # Skip logging depth images; keep point clouds only to visualize full/background/foreground variants.
 
-        fx: float = float(relative_depth_pred.K_33[0, 0])
-        fy: float = float(relative_depth_pred.K_33[1, 1])
-        cx: float = float(relative_depth_pred.K_33[0, 2])
-        cy: float = float(relative_depth_pred.K_33[1, 2])
+        fx: float = float(metric_depth_pred.K_33[0, 0])
+        fy: float = float(metric_depth_pred.K_33[1, 1])
+        cx: float = float(metric_depth_pred.K_33[0, 2])
+        cy: float = float(metric_depth_pred.K_33[1, 2])
 
         u: Float32[ndarray, "w"] = np.arange(w, dtype=np.float32)
         v: Float32[ndarray, "h"] = np.arange(h, dtype=np.float32)
