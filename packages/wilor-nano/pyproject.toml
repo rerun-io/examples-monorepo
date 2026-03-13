@@ -8,7 +8,6 @@ dependencies = [
     "ultralytics==8.3.162",       # needed to avoid weights_only bug in pytorch 2.7+
     "scikit-image",
     "roma",
-    "onnxruntime-gpu>=1.23.2,<2",
     "daggr>=0.7.0",
 ]
 name = "wilor-nano"
@@ -44,4 +43,3 @@ ignore = [
     "F821",  # Forward annotation false positive from jaxtyping. Should be caught by pyright.
     "UP037",
 ]
-

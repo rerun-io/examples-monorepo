@@ -2,7 +2,7 @@
 authors = ["pablo vela <pablovela5620@gmail.com>"]
 channels = ["https://prefix.dev/ai-demos", "https://prefix.dev/conda-forge"]
 name = "examples-monorepo"
-platforms = ["linux-64"]
+platforms = ["linux-64", "linux-aarch64"]
 version = "0.1.0"
 requires-pixi = ">=0.40"
 
@@ -12,25 +12,32 @@ no-build-isolation = ["moge"]
 
 [pypi-options.dependency-overrides]
 iopath = ">=0.1.10"
-gradio = ">=6.0.0,<7"
+gradio = "==6.8.0"
 fsspec = ">=2025.3"
 
 # ─── common feature (shared loose base deps) ───────────────────────────────
 [feature.common.dependencies]
 av = "*"
-rerun-sdk = ">=0.28.1,<0.29"
+rerun-sdk = "==0.28.2"
 py-opencv = "*"
 numpy = "*"
 pyserde = "*"
-jaxtyping = "*"
+jaxtyping = "<0.3"
+typing_extensions = ">=4.1.0,<4.13.0"
 hf-transfer = "*"
 scipy = "*"
 huggingface_hub = "*"
 tqdm = "*"
 transformers = ">=5.0.0"
+
+[feature.common.target.linux-aarch64.dependencies]
+xorg-libx11 = "*"
+xorg-xorgproto = "*"
+
 [feature.common.pypi-dependencies]
-gradio = "*"
-gradio-rerun = "*"
+gradio = "==6.8.0"
+gradio-rerun = "==0.28.2"
+
 
 # ─── CUDA 12.9 feature (shared across all GPU envs) ─────────────────────────
 [feature.cuda.system-requirements]
@@ -99,8 +106,6 @@ description = "Run package tests"
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.monoprior.dependencies]
 python = "3.12.*"
-jaxtyping = ">=0.2.36,<0.3"
-av = ">=15.1.0,<16"
 icecream = ">=2.1.3,<2.2"
 einops = ">=0.8.0,<0.9"
 matplotlib = ">=3.8.3,<3.9"
@@ -225,14 +230,18 @@ cwd = "packages/monoprior"
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.wilor.dependencies]
 python = "3.12.*"
-jaxtyping = "<0.3.0"
-av = ">=16.0.1,<17"
 dill = ">=0.4.0,<0.5"
 
 [feature.wilor.pypi-dependencies]
 wilor_nano = { path = "packages/wilor-nano", editable = true }
 simplecv = { git = "https://github.com/pablovela5620/simplecv.git", rev = "31cc852429cc292959f30c0277010ec57caa6caf" }
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
+
+[feature.wilor.target.linux-64.pypi-dependencies]
+onnxruntime-gpu = ">=1.23.2,<2"
+
+[feature.wilor.target.linux-aarch64.pypi-dependencies]
+onnxruntime = ">=1.23.2,<2"
 
 [feature.wilor.activation.env]
 PACKAGE_DIR = "packages/wilor-nano"
@@ -252,8 +261,6 @@ description = "Run WiLoR inference on example video"
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.sam3d.dependencies]
 python = "3.12.*"
-jaxtyping = "<0.3.0"
-av = ">=16.0.1,<17"
 tomlkit = "==0.12.0"
 audioop-lts = "*"
 pydub = "*"
@@ -326,7 +333,6 @@ description = "Multiview 3D body mesh fitting with per-camera estimation"
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.sam3-rerun.dependencies]
 python = "3.12.*"
-jaxtyping = "<0.3.0"
 
 [feature.sam3-rerun.pypi-dependencies]
 sam3-rerun = { path = "packages/sam3-rerun", editable = true }
@@ -366,9 +372,7 @@ description = "Launch SAM3 segmentation Gradio app with annotated image"
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.robocap.dependencies]
 python = "3.10.*"
-jaxtyping = ">=0.3.7,<0.4"
 cuvslam = "==0.2.0"
-opencv = ">=4.10,<5"
 pyyaml = "*"
 libstdcxx-ng = ">=14.2"
 pyarrow = ">=20.0.0,<21"
@@ -376,7 +380,6 @@ pip = ">=25.1.1,<26"
 
 [feature.robocap.pypi-dependencies]
 robocap-slam = { path = "packages/robocap-slam", editable = true }
-simplecv = { git = "https://github.com/pablovela5620/simplecv.git", branch = "main" }
 tyro = ">=0.9,<1"
 
 [feature.robocap.activation.env]

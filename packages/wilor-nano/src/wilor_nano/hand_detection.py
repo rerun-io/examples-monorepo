@@ -23,6 +23,8 @@ from torch import Tensor
 from ultralytics import YOLO
 from ultralytics.engine.results import Boxes, Results
 
+from wilor_nano.runtime import get_torch_device
+
 
 @dataclass
 class DetectionResult:
@@ -44,7 +46,7 @@ class HandDetector:
         self.init_models()
 
     def init_models(self) -> None:
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = get_torch_device()
 
         self.cfg.pretrained_dir.mkdir(parents=True, exist_ok=True)
         yolo_model_path: Path = self.cfg.pretrained_dir / "detector.pt"

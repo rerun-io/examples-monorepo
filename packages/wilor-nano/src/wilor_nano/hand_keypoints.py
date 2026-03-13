@@ -38,6 +38,7 @@ from skimage.filters import gaussian
 
 from wilor_nano.models.refinement_net import RefineNetOutput
 from wilor_nano.models.wilor import WiLor
+from wilor_nano.runtime import get_rtmpose_device, get_torch_device, get_torch_dtype
 from wilor_nano.utils import utils
 
 
@@ -150,7 +151,8 @@ class RTMPoseHandKeypointDetector:
         """Initialize the RTMPose model for hand keypoint detection."""
         url: str = "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmpose-m_simcc-hand5_pt-aic-coco_210e-256x256-74fb594_20230320.zip"
         pose_input_size: tuple[int, int] = (256, 256)
-        self.hand_model = RTMPose(onnx_model=url, model_input_size=pose_input_size, device="cuda")
+        rtmpose_device = get_rtmpose_device()
+        self.hand_model = RTMPose(onnx_model=url, model_input_size=pose_input_size, device=rtmpose_device)
 
     def __call__(
         self,
@@ -199,8 +201,8 @@ class WilorHandKeypointDetector:
         self.init_model()
 
     def init_model(self):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.dtype = torch.float16
+        self.device = get_torch_device()
+        self.dtype = get_torch_dtype(self.device)
 
         self.cfg.pretrained_dir.mkdir(parents=True, exist_ok=True)
         mano_mean_path: Path = self.cfg.pretrained_dir / "pretrained_models" / "mano_mean_params.npz"

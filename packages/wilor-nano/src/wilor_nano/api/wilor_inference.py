@@ -4,7 +4,6 @@ from typing import Literal
 
 import cv2
 import rerun as rr
-import torch
 from jaxtyping import Float, Int, UInt8
 from numpy import ndarray
 from simplecv.data.skeleton.mediapipe import MEDIAPIPE_ID2NAME, MEDIAPIPE_IDS, MEDIAPIPE_LINKS
@@ -17,6 +16,7 @@ from wilor_nano.pipelines.wilor_hand_pose3d_estimation_pipeline import (
     WiLorHandPose3dEstimationPipeline,
     WilorPreds,
 )
+from wilor_nano.runtime import get_torch_device, get_torch_dtype
 
 
 @dataclass
@@ -46,8 +46,8 @@ def set_annotation_context() -> None:
 
 
 def main(config: WilorConfig):
-    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-    dtype = torch.float16
+    device = get_torch_device()
+    dtype = get_torch_dtype(device)
 
     pipe = WiLorHandPose3dEstimationPipeline(device=device, dtype=dtype, verbose=False)
     set_annotation_context()
