@@ -50,6 +50,13 @@ Use VGGT model for multi-view consistent depth estimation and camera pose recove
 pixi run -e monoprior multiview-depth
 ```
 
+## Removed Models
+
+### Metric3D
+Metric3D was removed because it depends on mmcv/mmengine (OpenMMLab), which is not conda-installable with CUDA support and therefore incompatible with Pixi. The last mmcv release (April 2024) has no wheels for recent PyTorch/CUDA versions, and the model is loaded via `torch.hub.load` which clones the entire 290 MB repo unpinned from `main`.
+
+To re-add Metric3D in the future, vendor the model code directly into `monopriors/third_party/metric3d/` instead of using `torch.hub`. The actual model architecture (ViT backbone, RAFT heads) is pure PyTorch — mmcv is only used for config parsing and can be replaced. The relevant source files are in the `mono/` directory of [YvanYin/Metric3D](https://github.com/YvanYin/Metric3D).
+
 ## Acknowledgements
 Thanks to the following great works!
 
@@ -70,16 +77,6 @@ Thanks to the following great works!
     author    = {Piccinelli, Luigi and Yang, Yung-Hsu and Sakaridis, Christos and Segu, Mattia and Li, Siyuan and Van Gool, Luc and Yu, Fisher},
     booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
     year      = {2024}
-}
-```
-
-[Metric3D V2](https://github.com/YvanYin/Metric3D)
-```bibtex
-@article{hu2024metric3dv2,
-  title={Metric3D v2: A Versatile Monocular Geometric Foundation Model for Zero-shot Metric Depth and Surface Normal Estimation},
-  author={Hu, Mu and Yin, Wei and Zhang, Chi and Cai, Zhipeng and Long, Xiaoxiao and Chen, Hao and Wang, Kaixuan and Yu, Gang and Shen, Chunhua and Shen, Shaojie},
-  journal={arXiv preprint arXiv:2404.15506},
-  year={2024}
 }
 ```
 

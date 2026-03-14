@@ -10,7 +10,6 @@ Predict depth maps with real-world scale. Defined in `monopriors/models/metric_d
 
 | Predictor class | Model | Source |
 |---|---|---|
-| `Metric3DPredictor` | Metric3D V2 | [YvanYin/Metric3D](https://github.com/YvanYin/Metric3D) |
 | `UniDepthMetricPredictor` | UniDepth | [lpiccinelli-eth/UniDepth](https://github.com/lpiccinelli-eth/UniDepth) |
 
 Base class: `BaseMetricPredictor`
@@ -24,7 +23,6 @@ Predict depth/disparity without absolute scale. Defined in `monopriors/models/re
 |---|---|---|
 | `DepthAnythingV1Predictor` | Depth Anything V1 | [LiheYoung/Depth-Anything](https://github.com/LiheYoung/Depth-Anything) |
 | `DepthAnythingV2Predictor` | Depth Anything V2 | [DepthAnything/Depth-Anything-V2](https://github.com/DepthAnything/Depth-Anything-V2) |
-| `Metric3DRelativePredictor` | Metric3D (relative mode) | [YvanYin/Metric3D](https://github.com/YvanYin/Metric3D) |
 | `MogeV1Predictor` | MoGe V1 | [microsoft/MoGe](https://github.com/microsoft/MoGe) |
 | `UniDepthRelativePredictor` | UniDepth (relative mode) | [lpiccinelli-eth/UniDepth](https://github.com/lpiccinelli-eth/UniDepth) |
 
@@ -74,7 +72,7 @@ Output: `CompletionDepthPrediction(depth_mm, confidence)`
 ```
 MonoPriorModel (abstract)
  └── DsineAndUnidepth
-      ├── metric depth  → Metric3DPredictor
+      ├── metric depth  → UniDepthMetricPredictor
       └── surface normals → DSineNormalPredictor
 ```
 

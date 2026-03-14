@@ -4,7 +4,6 @@ from typing import Literal, get_args
 from .base_relative_depth import BaseRelativePredictor, RelativeDepthPrediction
 from .depth_anything_v1 import DepthAnythingV1Predictor
 from .depth_anything_v2 import DepthAnythingV2Predictor
-from .metric3d_relative import Metric3DRelativePredictor
 from .moge import MogeV1Predictor
 from .unidepth import UniDepthRelativePredictor
 
@@ -13,7 +12,6 @@ RELATIVE_PREDICTORS = Literal[
     "DepthAnythingV1Predictor",
     "DepthAnythingV2Predictor",
     "UniDepthRelativePredictor",
-    "Metric3DRelativePredictor",
     "MogeV1Predictor",
 ]
 
@@ -33,8 +31,6 @@ def get_relative_predictor(
             return DepthAnythingV2Predictor
         case "DepthAnythingV1Predictor":
             return DepthAnythingV1Predictor
-        case "Metric3DRelativePredictor":
-            return Metric3DRelativePredictor
         case "MogeV1Predictor":
             return MogeV1Predictor
         case _:

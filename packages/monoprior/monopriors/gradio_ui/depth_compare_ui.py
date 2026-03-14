@@ -38,7 +38,6 @@ except ImportError:
 
 model_load_status: str = "Models loaded and ready to use!"
 DEVICE: Literal["cuda"] | Literal["cpu"] = "cuda" if torch.cuda.is_available() else "cpu"
-MODELS_TO_SKIP: list[str] = []
 
 
 def predict_depth(
@@ -61,8 +60,6 @@ def predict_depth(
 
 if IN_SPACES:
     predict_depth = spaces.GPU(predict_depth)
-    # remove any model that fails on zerogpu spaces
-    MODELS_TO_SKIP.extend(["Metric3DRelativePredictor", "Metric3DPredictor"])
 
 
 @rr.thread_local_stream("depth")
@@ -183,7 +180,7 @@ with gr.Blocks() as relative_compare_block:
         model_2_dropdown = gr.Dropdown(
             choices=choices,
             label="Model2",
-            value="Metric3DPredictor" if model_type == "Metric" else "UniDepthRelativePredictor",
+            value="MoGeV2MetricPredictor" if model_type == "Metric" else "UniDepthRelativePredictor",
         )
         return model_1_dropdown, model_2_dropdown
 

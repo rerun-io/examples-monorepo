@@ -12,16 +12,15 @@ no-build-isolation = ["moge"]
 
 [pypi-options.dependency-overrides]
 iopath = ">=0.1.10"
-gradio = "==6.8.0"
 fsspec = ">=2025.3"
 
 # ─── common feature (shared loose base deps) ───────────────────────────────
 [feature.common.dependencies]
 av = "*"
-rerun-sdk = "==0.28.2"
+rerun-sdk = "==0.30.2"
 py-opencv = "*"
 numpy = "*"
-pyserde = "*"
+pyserde = ">=0.20,<0.30"
 jaxtyping = "<0.3"
 typing_extensions = ">=4.1.0,<4.13.0"
 hf-transfer = "*"
@@ -36,7 +35,8 @@ xorg-xorgproto = "*"
 
 [feature.common.pypi-dependencies]
 gradio = "==6.8.0"
-gradio-rerun = "==0.28.2"
+gradio-rerun = "==0.30.2"
+simplecv = { git = "https://github.com/pablovela5620/simplecv.git", tag = "v0.7.2" }
 
 
 # ─── CUDA 12.9 feature (shared across all GPU envs) ─────────────────────────
@@ -110,7 +110,7 @@ icecream = ">=2.1.3,<2.2"
 einops = ">=0.8.0,<0.9"
 matplotlib = ">=3.8.3,<3.9"
 wandb = ">=0.19.10,<0.20"
-pandas = ">=2.2.2,<2.3"
+pandas = ">=2.3.3,<2.4"
 jupyterlab = ">=4.2.0,<4.3"
 tyro = ">=0.9.1,<0.10"
 open3d = ">=0.19.0,<0.20"
@@ -121,7 +121,6 @@ natsort = ">=8.4.0,<9"
 
 [feature.monoprior.pypi-dependencies]
 monopriors = { path = "packages/monoprior", editable = true }
-simplecv = { git = "https://github.com/pablovela5620/simplecv.git", rev = "ab88369f5d0353ffb245de6d5981b0aede0930d7" }
 vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c" }
 moge = { git = "https://github.com/microsoft/MoGe.git" }
 
@@ -231,14 +230,9 @@ cwd = "packages/monoprior"
 [feature.prompt-da.dependencies]
 python = "3.12.*"
 open3d = ">=0.19.0,<0.20"
-pyserde = ">=0.20,<0.30"
 
 [feature.prompt-da.pypi-dependencies]
 rerun-prompt-da = { path = "packages/prompt-da", editable = true }
-simplecv = { git = "https://github.com/pablovela5620/simplecv.git", tag = "v0.7.2" }
-
-[feature.prompt-da.pypi-options.dependency-overrides]
-rerun-sdk = "==0.28.2"
 
 [feature.prompt-da.activation.env]
 PACKAGE_DIR = "packages/prompt-da"
@@ -275,10 +269,11 @@ description = "Run the gradio app in dev mode"
 [feature.wilor.dependencies]
 python = "3.12.*"
 dill = ">=0.4.0,<0.5"
+trimesh = "*"
+pyrender = "*"
 
 [feature.wilor.pypi-dependencies]
 wilor_nano = { path = "packages/wilor-nano", editable = true }
-simplecv = { git = "https://github.com/pablovela5620/simplecv.git", rev = "31cc852429cc292959f30c0277010ec57caa6caf" }
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 
 [feature.wilor.target.linux-64.pypi-dependencies]
@@ -315,7 +310,6 @@ torchcodec = "*"
 [feature.sam3d.pypi-dependencies]
 sam3d_body = { path = "packages/sam3d-body-rerun", editable = true }
 moge = { git = "https://github.com/microsoft/MoGe.git" }
-simplecv = { git = "https://github.com/pablovela5620/simplecv.git", rev = "804e95c588b4af5be50874288eb8929ef2450f74" }
 timm = ">=0.9"
 natsort = ">=8.4"
 datasets = ">=2.20"
@@ -380,7 +374,6 @@ python = "3.12.*"
 
 [feature.sam3-rerun.pypi-dependencies]
 sam3-rerun = { path = "packages/sam3-rerun", editable = true }
-simplecv = { git = "https://github.com/pablovela5620/simplecv.git", rev = "804e95c588b4af5be50874288eb8929ef2450f74" }
 spaces = ">=0.43.0"
 
 [feature.sam3-rerun.activation.env]

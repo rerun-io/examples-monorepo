@@ -29,8 +29,6 @@ except ImportError:
     print("Not running on Zero")
     IN_SPACES = False
 
-
-MODELS_TO_SKIP: list[str] = []
 model_load_status: str = "Models loaded and ready to use!"
 if gr.NO_RELOAD:
     DEPTH_PREDICTOR: BaseRelativePredictor = get_relative_predictor("MogeV1Predictor")(device="cuda")
@@ -43,8 +41,6 @@ def predict_depth(rgb_hw3: UInt8[np.ndarray, "h w 3"]) -> RelativeDepthPredictio
 
 if IN_SPACES:
     predict_depth = spaces.GPU(predict_depth)
-    # remove any model that fails on zerogpu spaces
-    MODELS_TO_SKIP.extend(["Metric3DRelativePredictor", "Metric3DPredictor"])
 
 
 def load_model(
@@ -52,10 +48,6 @@ def load_model(
     progress=gr.Progress(),
 ) -> str:
     print(model)
-    # check if the models are in the list of models to skip
-    if any(model == m for m in MODELS_TO_SKIP):
-        raise gr.Error(f"Model not supported on ZeroGPU, please try another model: {MODELS_TO_SKIP}")
-
     global DEPTH_PREDICTOR
     # delete the previous models and clear gpu memory
     if "DEPTH_PREDICTOR" in globals():
