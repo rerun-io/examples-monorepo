@@ -74,46 +74,74 @@ def multiview_calibration_fn(
     yield stream.read()
 
 
-with gr.Blocks() as mv_calibration_block:
-    # We make a new recording id, and store it in a Gradio's session state.
-    recording_id = gr.State(uuid.uuid4())
-    with gr.Row():
-        input_imgs = gr.File(
-            label="Input Images",
-            file_count="multiple",
-            file_types=[".png", ".jpg", ".jpeg"],
+def _switch_to_outputs():
+    return gr.update(selected="outputs")
+
+
+def main() -> gr.Blocks:
+    rr_viewer = Rerun(
+        streaming=True,
+        panel_states={
+            "time": "collapsed",
+            "blueprint": "collapsed",
+            "selection": "collapsed",
+        },
+        height=800,
+    )
+
+    with gr.Blocks() as demo:
+        recording_id = gr.State(uuid.uuid4())
+
+        with gr.Row():
+            with gr.Column(scale=1):
+                tabs = gr.Tabs(selected="inputs")
+                with tabs:
+                    with gr.TabItem("Inputs", id="inputs"):
+                        input_imgs = gr.File(
+                            label="Input Images",
+                            file_count="multiple",
+                            file_types=[".png", ".jpg", ".jpeg"],
+                        )
+                        run_calibration_btn = gr.Button("Run Multi-view Calibration")
+
+                        with gr.Accordion("Config", open=False):
+                            gr.Markdown("Calibrator configuration (not yet configurable)")
+
+                    with gr.TabItem("Outputs", id="outputs"):
+                        gr.Markdown("View calibration results in the Rerun viewer.")
+
+                car_example_images: list[str] = sorted(
+                    str(p) for p in (EXAMPLE_DATA_DIR / "car_landscape_12").glob("*.jpg")
+                )
+                rp_capture_images: list[str] = sorted(
+                    str(p) for p in (EXAMPLE_DATA_DIR / "rp_capture_6").glob("*.jpg")
+                )
+                gr.Examples(
+                    examples=[
+                        [car_example_images],
+                        [rp_capture_images],
+                    ],
+                    inputs=[input_imgs],
+                    cache_examples=False,
+                )
+
+            with gr.Column(scale=5):
+                rr_viewer.render()
+
+        run_calibration_btn.click(
+            fn=_switch_to_outputs,
+            inputs=None,
+            outputs=[tabs],
+            api_visibility="private",
+        ).then(
+            multiview_calibration_fn,
+            inputs=[recording_id, input_imgs],
+            outputs=[rr_viewer],
+        ).then(
+            fn=lambda: uuid.uuid4(),
+            inputs=None,
+            outputs=[recording_id],
+            api_visibility="private",
         )
-        with gr.Column():
-            run_calibration_btn = gr.Button("Run Multi-view Calibration")
 
-    with gr.Row():
-        rr_viewer = Rerun(
-            streaming=True,
-            panel_states={
-                "time": "collapsed",
-                "blueprint": "collapsed",
-                "selection": "collapsed",
-            },
-        )
-
-    car_example_images: list[str] = sorted(str(p) for p in (EXAMPLE_DATA_DIR / "car_landscape_12").glob("*.jpg"))
-    rp_capture_images: list[str] = sorted(str(p) for p in (EXAMPLE_DATA_DIR / "rp_capture_6").glob("*.jpg"))
-    gr.Examples(
-        examples=[
-            [car_example_images],
-            [rp_capture_images],
-        ],
-        inputs=[input_imgs],
-        cache_examples=False,
-    )
-
-    input_imgs.change(
-        fn=lambda: uuid.uuid4(),
-        inputs=[],
-        outputs=[recording_id],
-    )
-    run_calibration_btn.click(
-        multiview_calibration_fn,
-        inputs=[recording_id, input_imgs],
-        outputs=[rr_viewer],
-    )
+    return demo
