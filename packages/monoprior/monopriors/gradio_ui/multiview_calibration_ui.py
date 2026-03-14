@@ -6,23 +6,31 @@ from typing import Final
 import gradio as gr
 import numpy as np
 import rerun as rr
-import rerun.blueprint as rrb
 from gradio_rerun import Rerun
-from jaxtyping import Float32, UInt8
+from jaxtyping import UInt8
 from numpy import ndarray
 from PIL import Image
 
 from monopriors.apis.multiview_calibration import (
+    PARENT_LOG_PATH,
+    TIMELINE,
     MultiViewCalibrator,
     MultiViewCalibratorConfig,
-    MVCalibResults,
-    create_final_view,
-    estimate_voxel_size,
+    run_calibration_pipeline,
 )
 
 EXAMPLE_DATA_DIR: Final[Path] = Path(__file__).resolve().parents[2] / "data" / "examples" / "multiview"
 
 gr.set_static_paths([str(EXAMPLE_DATA_DIR)])
+
+_MV_CONFIG: MultiViewCalibratorConfig = MultiViewCalibratorConfig(
+    device="cuda",
+    verbose=True,
+)
+_MV_CALIBRATOR: MultiViewCalibrator = MultiViewCalibrator(
+    parent_log_path=PARENT_LOG_PATH,
+    config=_MV_CONFIG,
+)
 
 
 # Whenever we need a recording, we construct a new recording stream.
@@ -32,25 +40,14 @@ def get_recording(recording_id: uuid.UUID) -> rr.RecordingStream:
     return rr.RecordingStream(application_id="rerun_example_gradio", recording_id=recording_id)
 
 
-def _prerocess():
-    pass
-
-
-def multiview_calibration_fn(recording_id, imgs):
-    yield from _multiview_calibration_fn(recording_id, imgs)
-
-
-def _multiview_calibration_fn(
+def multiview_calibration_fn(
     recording_id: uuid.UUID, img_files: str | list[str]
 ) -> Generator[bytes | None, None, None]:
-    # Here we get a recording using the provided recording id.
     recording: rr.RecordingStream = get_recording(recording_id)
     stream: rr.BinaryStream = recording.binary_stream()
-    parent_log_path: Path = Path("world")
-    timeline: str = "video_time"
 
     if isinstance(img_files, str):
-        img_paths = [Path(img_files)]
+        img_paths: list[Path] = [Path(img_files)]
     elif isinstance(img_files, list):
         img_paths = [Path(f) for f in img_files]
     else:
@@ -67,38 +64,13 @@ def _multiview_calibration_fn(
             rgb_array: UInt8[ndarray, "height width 3"] = np.asarray(pil_image.convert("RGB"), dtype=np.uint8)
         rgb_list.append(rgb_array)
 
-    final_view: rrb.ContainerLike = create_final_view(
-        parent_log_path=parent_log_path, num_images=len(rgb_list), show_videos=False
-    )
-    blueprint: rrb.Blueprint = rrb.Blueprint(final_view, collapse_panels=True)
-    rr.send_blueprint(blueprint=blueprint, recording=recording)
-    rr.log(f"{parent_log_path}", rr.ViewCoordinates.RFU, static=True, recording=recording)
-    rr.set_time(timeline, duration=0, recording=recording)
-    yield stream.read()
-
-    mv_config: MultiViewCalibratorConfig = MultiViewCalibratorConfig(
-        device="cuda",
-        verbose=True,
-    )
-    mv_calibrator: MultiViewCalibrator = MultiViewCalibrator(
-        parent_log_path=parent_log_path,
-        config=mv_config,
-    )
-    mv_results: MVCalibResults = mv_calibrator(rgb_list=rgb_list, recording=recording)
-    yield stream.read()
-
-    pcd_points: Float32[ndarray, "num_points 3"] = np.asarray(mv_results.pcd.points, dtype=np.float32)
-    voxel_size: float = estimate_voxel_size(pcd_points, target_points=500_000)
-    pcd_ds = mv_results.pcd.voxel_down_sample(voxel_size)
-    filtered_points: Float32[ndarray, "final_points 3"] = np.asarray(pcd_ds.points, dtype=np.float32)
-    filtered_colors: Float32[ndarray, "final_points 3"] = np.asarray(pcd_ds.colors, dtype=np.float32)
-
-    rr.log(
-        f"{parent_log_path}/point_cloud",
-        rr.Points3D(filtered_points, colors=filtered_colors),
-        static=True,
-        recording=recording,
-    )
+    with recording:
+        run_calibration_pipeline(
+            rgb_list=rgb_list,
+            mv_calibrator=_MV_CALIBRATOR,
+            parent_log_path=PARENT_LOG_PATH,
+            timeline=TIMELINE,
+        )
     yield stream.read()
 
 
@@ -124,11 +96,13 @@ with gr.Blocks() as mv_calibration_block:
             },
         )
 
-    car_example_images: list[str] = sorted(
-        str(p) for p in (EXAMPLE_DATA_DIR / "car_landscape_12").glob("*.jpg")
-    )
+    car_example_images: list[str] = sorted(str(p) for p in (EXAMPLE_DATA_DIR / "car_landscape_12").glob("*.jpg"))
+    rp_capture_images: list[str] = sorted(str(p) for p in (EXAMPLE_DATA_DIR / "rp_capture_6").glob("*.jpg"))
     gr.Examples(
-        examples=[[car_example_images]],
+        examples=[
+            [car_example_images],
+            [rp_capture_images],
+        ],
         inputs=[input_imgs],
         cache_examples=False,
     )
@@ -139,7 +113,6 @@ with gr.Blocks() as mv_calibration_block:
         outputs=[recording_id],
     )
     run_calibration_btn.click(
-        # Using the `viewer` as an output allows us to stream data to it by yielding bytes from the callback.
         multiview_calibration_fn,
         inputs=[recording_id, input_imgs],
         outputs=[rr_viewer],

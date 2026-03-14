@@ -34,6 +34,8 @@ from monopriors.scale_utils import compute_scale_and_shift
 np.set_printoptions(suppress=True)
 
 SUPPORTED_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg")
+PARENT_LOG_PATH: Path = Path("world")
+TIMELINE: str = "video_time"
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -336,7 +338,6 @@ class MultiViewCalibratorConfig:
 
     keep_top_percent: KeepTopPercent = 30.0
     """Fraction of high-confidence pixels retained after VGGT filtering.
-
     Value must be in [1, 100] and controls how aggressively low-confidence pixels
     are discarded. The calibrator keeps (100 - keep_top_percent)% of pixels;
     e.g. 75 → keep top 25%, 30 → keep top 70%."""
@@ -380,7 +381,6 @@ class MultiViewCalibrator:
         self,
         *,
         rgb_list: list[UInt8[ndarray, "H W 3"]],
-        recording: rr.RecordingStream | None = None,
     ) -> MVCalibResults:
         """Estimate calibrated pinhole parameters and a fused point cloud from RGB views.
 
@@ -475,39 +475,33 @@ class MultiViewCalibrator:
                     cam_log_path=cam_log_path,
                     image_plane_distance=0.05,
                     static=True,
-                    recording=recording,
                 )
 
                 rr.log(
                     f"{pinhole_log_path}/image",
                     rr.Image(mv_pred.rgb_image, color_model=rr.ColorModel.RGB).compress(),
                     static=True,
-                    recording=recording,
                 )
                 rr.log(
                     f"{pinhole_log_path}/confidence",
                     rr.Image(depth_conf, color_model=rr.ColorModel.L).compress(),
                     static=True,
-                    recording=recording,
                 )
                 rr.log(
                     f"{pinhole_log_path}/filtered_depth",
                     rr.DepthImage(filtered_depth_map, meter=1),
                     static=True,
-                    recording=recording,
                 )
                 rr.log(
                     f"{pinhole_log_path}/depth",
                     rr.DepthImage(depth_map, meter=1),
                     static=True,
-                    recording=recording,
                 )
                 if self.config.refine_depth_maps:
                     rr.log(
                         f"{pinhole_log_path}/refined_depth",
                         rr.DepthImage(metric_depth, meter=1),
                         static=True,
-                        recording=recording,
                     )
 
         if self.config.refine_depth_maps:
@@ -535,7 +529,7 @@ class MultiViewCalibrator:
 
 
 @dataclass
-class VGGTInferenceConfig:
+class MVInferenceConfig:
     """Runtime options for VGGT-based multi-view inference and calibration."""
 
     rr_config: RerunTyroConfig
@@ -550,58 +544,38 @@ class VGGTInferenceConfig:
     """Base calibrator configuration; `refine_depth_maps` overrides its refinement flag."""
 
 
-def main(config: VGGTInferenceConfig) -> None:
-    parent_log_path = Path("world")
-    timeline = "video_time"
+def run_calibration_pipeline(
+    *,
+    rgb_list: list[UInt8[ndarray, "H W 3"]],
+    mv_calibrator: MultiViewCalibrator,
+    parent_log_path: Path,
+    timeline: str,
+    show_videos: bool = False,
+) -> MVCalibResults:
+    """Run the full calibration pipeline: blueprint, calibration, pointcloud, and TSDF mesh.
 
-    if config.image_dir is None and config.videos_dir is None:
-        raise ValueError("Either image or videos directory must be specified")
+    All ``rr.log`` calls use the thread-local recording set by the caller
+    (via ``with recording:`` in the UI, or the global recording in the CLI).
 
-    ####################################################
-    # 0. Parse inputs to setup for MultiViewCalibrator #
-    ####################################################
-    if config.image_dir is not None:
-        image_paths = []
+    Args:
+        rgb_list: Ordered RGB frames across cameras.
+        mv_calibrator: Pre-initialised calibrator (models already loaded).
+        parent_log_path: Root Rerun entity path.
+        timeline: Rerun timeline name.
+        show_videos: Whether to include video views in the blueprint.
 
-        for ext in SUPPORTED_IMAGE_EXTENSIONS:
-            image_paths.extend(config.image_dir.glob(f"*{ext}"))
-        image_paths: list[Path] = sorted(image_paths)
-        assert len(image_paths) > 0, (
-            f"No images found in {config.image_dir} in supported formats {SUPPORTED_IMAGE_EXTENSIONS}"
-        )
-        bgr_list: list[UInt8[ndarray, "H W 3"]] = []
-        for image_path in image_paths:
-            bgr: UInt8[ndarray, "H W 3"] | None = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
-            if bgr is None:
-                raise FileNotFoundError(f"Failed to read image {image_path}")
-            bgr_list.append(bgr)
-
-    elif config.videos_dir is not None:
-        video_path_list: list[Path] = sorted(config.videos_dir.glob("*.mp4"))
-        assert len(video_path_list) > 0, f"No videos found in {config.videos_dir}"
-        exo_timestamps: list[Int[ndarray, "num_frames"]] = []
-        for i, video_path in enumerate(video_path_list):
-            frame_timestamps_ns: Int[ndarray, "num_frames"] = log_video(
-                video_path=video_path,
-                video_log_path=parent_log_path / f"camera_{i}" / "pinhole" / "video",
-                timeline=timeline,
-            )
-            exo_timestamps.append(frame_timestamps_ns)
-
-        mv_reader = MultiVideoReader(video_path_list)
-        bgr_list: list[UInt8[ndarray, "H W 3"]] = mv_reader[config.ts_idx]
-    else:
-        raise ValueError("Either image_dir or videos_dir must be specified")
+    Returns:
+        MVCalibResults with per-camera pinholes and a fused point cloud.
+    """
+    start: float = timer()
 
     #####################################
     # 1. Setup Rerun related components #
     #####################################
-    rgb_list: list[UInt8[ndarray, "H W 3"]] = [cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB) for bgr in bgr_list]
-    start: float = timer()
     final_view: rrb.ContainerLike = create_final_view(
-        parent_log_path=parent_log_path, num_images=len(rgb_list), show_videos=config.videos_dir is not None
+        parent_log_path=parent_log_path, num_images=len(rgb_list), show_videos=show_videos
     )
-    blueprint = rrb.Blueprint(final_view, collapse_panels=True)
+    blueprint: rrb.Blueprint = rrb.Blueprint(final_view, collapse_panels=True)
     rr.send_blueprint(blueprint=blueprint)
     rr.log(f"{parent_log_path}", rr.ViewCoordinates.RFU, static=True)
     rr.set_time(timeline, duration=0)
@@ -609,27 +583,23 @@ def main(config: VGGTInferenceConfig) -> None:
     ##############################
     # 2. Run MultiViewCalibrator #
     ##############################
-    mv_calibrator = MultiViewCalibrator(parent_log_path, config=config.mv_calibrator_config)
-    output: MVCalibResults = mv_calibrator(rgb_list=rgb_list, recording=None)
+    output: MVCalibResults = mv_calibrator(rgb_list=rgb_list)
 
     ###################################################
     # 3. Log Final Output (Not Verbose always logged) #
     ###################################################
-    pcd = output.pcd
+    pcd: o3d.geometry.PointCloud = output.pcd
 
     # Automatically determine optimal voxel size based on point cloud characteristics
     voxel_size: float = estimate_voxel_size(np.asarray(pcd.points, dtype=np.float32), target_points=150_000)
-    pcd_ds = pcd.voxel_down_sample(voxel_size)
+    pcd_ds: o3d.geometry.PointCloud = pcd.voxel_down_sample(voxel_size)
 
     filtered_points: Float32[ndarray, "final_points 3"] = np.asarray(pcd_ds.points, dtype=np.float32)
     filtered_colors: Float32[ndarray, "final_points 3"] = np.asarray(pcd_ds.colors, dtype=np.float32)
 
     rr.log(
         f"{parent_log_path}/point_cloud",
-        rr.Points3D(
-            filtered_points,
-            colors=filtered_colors,
-        ),
+        rr.Points3D(filtered_points, colors=filtered_colors),
         static=True,
     )
     # Log camera intrinsics/extrinsics
@@ -640,14 +610,13 @@ def main(config: VGGTInferenceConfig) -> None:
             cam_log_path=cam_log_path,
             image_plane_distance=0.05,
             static=True,
-            recording=None,
         )
 
     #####################################
     # 4. Fuse Depths into TSDF Mesh     #
     #####################################
     if output.depth_list and output.pinhole_param_list:
-        depth_fuser = Open3DScaleInvariantFuser(grid_resolution=512)
+        depth_fuser: Open3DScaleInvariantFuser = Open3DScaleInvariantFuser(grid_resolution=512)
         reference_points: Float32[ndarray, "num_points 3"] = np.asarray(pcd.points, dtype=np.float32)
         depth_fuser.initialise_from_points(reference_points)
 
@@ -680,3 +649,55 @@ def main(config: VGGTInferenceConfig) -> None:
         )
 
     print(f"Inference completed in {timer() - start:.2f} seconds")
+    return output
+
+
+def main(config: MVInferenceConfig) -> None:
+    if config.image_dir is None and config.videos_dir is None:
+        raise ValueError("Either image or videos directory must be specified")
+
+    ####################################################
+    # 0. Parse inputs to setup for MultiViewCalibrator #
+    ####################################################
+    if config.image_dir is not None:
+        image_paths: list[Path] = []
+        for ext in SUPPORTED_IMAGE_EXTENSIONS:
+            image_paths.extend(config.image_dir.glob(f"*{ext}"))
+        image_paths = sorted(image_paths)
+        assert len(image_paths) > 0, (
+            f"No images found in {config.image_dir} in supported formats {SUPPORTED_IMAGE_EXTENSIONS}"
+        )
+        bgr_list: list[UInt8[ndarray, "H W 3"]] = []
+        for image_path in image_paths:
+            bgr: UInt8[ndarray, "H W 3"] | None = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+            if bgr is None:
+                raise FileNotFoundError(f"Failed to read image {image_path}")
+            bgr_list.append(bgr)
+
+    elif config.videos_dir is not None:
+        video_path_list: list[Path] = sorted(config.videos_dir.glob("*.mp4"))
+        assert len(video_path_list) > 0, f"No videos found in {config.videos_dir}"
+        exo_timestamps: list[Int[ndarray, "num_frames"]] = []
+        for i, video_path in enumerate(video_path_list):
+            frame_timestamps_ns: Int[ndarray, "num_frames"] = log_video(
+                video_source=video_path,
+                video_log_path=PARENT_LOG_PATH / f"camera_{i}" / "pinhole" / "video",
+                timeline=TIMELINE,
+            )
+            exo_timestamps.append(frame_timestamps_ns)
+
+        mv_reader: MultiVideoReader = MultiVideoReader(video_path_list)
+        bgr_list = mv_reader[config.ts_idx]
+    else:
+        raise ValueError("Either image_dir or videos_dir must be specified")
+
+    rgb_list: list[UInt8[ndarray, "H W 3"]] = [cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB) for bgr in bgr_list]
+    mv_calibrator: MultiViewCalibrator = MultiViewCalibrator(PARENT_LOG_PATH, config=config.mv_calibrator_config)
+
+    run_calibration_pipeline(
+        rgb_list=rgb_list,
+        mv_calibrator=mv_calibrator,
+        parent_log_path=PARENT_LOG_PATH,
+        timeline=TIMELINE,
+        show_videos=config.videos_dir is not None,
+    )
