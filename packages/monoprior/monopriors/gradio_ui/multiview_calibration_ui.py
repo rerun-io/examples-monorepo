@@ -1,3 +1,16 @@
+"""Gradio UI for multi-view calibration.
+
+Provides an interactive web interface for running the multi-view calibration
+pipeline with configurable parameters. The left panel holds image inputs,
+a run button, and a config accordion; the right panel streams results into
+an embedded Rerun viewer.
+
+Models (VGGT, SAM3, MoGe) are loaded once at module import and reused
+across calibration runs. Config changes that require new models (toggling
+``segment_people`` or ``refine_depth_maps`` from OFF to ON) trigger a
+lazy re-initialisation of the calibrator.
+"""
+
 import uuid
 from collections.abc import Generator
 from pathlib import Path
@@ -20,6 +33,7 @@ from monopriors.apis.multiview_calibration import (
 )
 
 EXAMPLE_DATA_DIR: Final[Path] = Path(__file__).resolve().parents[2] / "data" / "examples" / "multiview"
+"""Path to bundled example image sets used by ``gr.Examples``."""
 
 gr.set_static_paths([str(EXAMPLE_DATA_DIR)])
 
@@ -27,22 +41,95 @@ _MV_CONFIG: MultiViewCalibratorConfig = MultiViewCalibratorConfig(
     device="cuda",
     verbose=True,
 )
+"""Module-level calibrator config, kept in sync with the UI widgets."""
+
 _MV_CALIBRATOR: MultiViewCalibrator = MultiViewCalibrator(
     parent_log_path=PARENT_LOG_PATH,
     config=_MV_CONFIG,
 )
+"""Module-level calibrator singleton. Re-created only when model-affecting
+config fields are toggled ON (see ``_ensure_calibrator``)."""
 
 
-# Whenever we need a recording, we construct a new recording stream.
-# As long as the app and recording IDs remain the same, the data
-# will be merged by the Viewer.
+def _ensure_calibrator(
+    keep_top_percent: int | float,
+    refine_depth_maps: bool,
+    segment_people: bool,
+    preprocessing_mode: str,
+) -> None:
+    """Update or re-create the module-level calibrator to match the requested config.
+
+    Compares incoming widget values against the current ``_MV_CONFIG``.
+    Runtime-only fields (``keep_top_percent``, ``preprocessing_mode``) are
+    applied in-place. Model-affecting fields (``segment_people``,
+    ``refine_depth_maps``) only trigger a full re-init when toggled from
+    OFF to ON, since the required model was never loaded.
+
+    Args:
+        keep_top_percent: Confidence filtering threshold (1-100).
+            Higher values discard more low-confidence pixels.
+        refine_depth_maps: Whether to run MoGe depth refinement.
+        segment_people: Whether to run SAM3 person segmentation.
+        preprocessing_mode: Image preprocessing strategy ("crop" or "pad").
+    """
+    global _MV_CONFIG, _MV_CALIBRATOR
+
+    needs_reinit: bool = False
+    if segment_people and not _MV_CONFIG.segment_people:
+        needs_reinit = True
+    if refine_depth_maps and not _MV_CONFIG.refine_depth_maps:
+        needs_reinit = True
+
+    new_config: MultiViewCalibratorConfig = MultiViewCalibratorConfig(
+        keep_top_percent=keep_top_percent,
+        refine_depth_maps=refine_depth_maps,
+        segment_people=segment_people,
+        preprocessing_mode=preprocessing_mode,
+        device="cuda",
+        verbose=True,
+    )
+
+    if needs_reinit:
+        _MV_CONFIG = new_config
+        _MV_CALIBRATOR = MultiViewCalibrator(parent_log_path=PARENT_LOG_PATH, config=_MV_CONFIG)
+    else:
+        _MV_CONFIG = new_config
+        _MV_CALIBRATOR.config = new_config
+        _MV_CALIBRATOR.vggt_predictor.preprocessing_mode = preprocessing_mode
+
+
 def get_recording(recording_id: uuid.UUID) -> rr.RecordingStream:
+    """Create a Rerun recording stream for a given session.
+
+    As long as the application and recording IDs remain the same, data
+    will be merged by the Rerun viewer.
+
+    Args:
+        recording_id: Unique session identifier from Gradio state.
+
+    Returns:
+        A new ``RecordingStream`` bound to the session.
+    """
     return rr.RecordingStream(application_id="rerun_example_gradio", recording_id=recording_id)
 
 
 def multiview_calibration_fn(
-    recording_id: uuid.UUID, img_files: str | list[str]
-) -> Generator[bytes | None, None, None]:
+    recording_id: uuid.UUID,
+    img_files: str | list[str],
+) -> Generator[tuple[bytes | None, str], None, None]:
+    """Gradio streaming callback that runs the calibration pipeline.
+
+    Parses Gradio file uploads into RGB arrays, then delegates to
+    ``run_calibration_pipeline`` inside a ``with recording:`` context
+    so all Rerun logging targets the UI's binary stream.
+
+    Args:
+        recording_id: Session-scoped recording identifier.
+        img_files: Single path or list of paths from ``gr.File``.
+
+    Yields:
+        Tuple of (Rerun binary stream bytes, status message string).
+    """
     recording: rr.RecordingStream = get_recording(recording_id)
     stream: rr.BinaryStream = recording.binary_stream()
 
@@ -71,14 +158,29 @@ def multiview_calibration_fn(
             parent_log_path=PARENT_LOG_PATH,
             timeline=TIMELINE,
         )
-    yield stream.read()
+    yield stream.read(), "Calibration complete"
 
 
 def _switch_to_outputs():
+    """Switch the Gradio Tabs component to the Outputs tab."""
     return gr.update(selected="outputs")
 
 
 def main() -> gr.Blocks:
+    """Build and return the multiview calibration Gradio app.
+
+    Layout:
+        - **Left column** (scale=1): Tabs with Inputs (file upload, run
+          button, config accordion) and Outputs (status); example sets below.
+        - **Right column** (scale=5): Embedded Rerun viewer.
+
+    Click chain::
+
+        click → _switch_to_outputs → new recording_id → _ensure_calibrator → multiview_calibration_fn
+
+    Returns:
+        The assembled ``gr.Blocks`` instance ready for ``.queue().launch()``.
+    """
     rr_viewer = Rerun(
         streaming=True,
         panel_states={
@@ -105,10 +207,29 @@ def main() -> gr.Blocks:
                         run_calibration_btn = gr.Button("Run Multi-view Calibration")
 
                         with gr.Accordion("Config", open=False):
-                            gr.Markdown("Calibrator configuration (not yet configurable)")
+                            keep_top_percent_slider = gr.Slider(
+                                label="Keep Top Percent (confidence filtering)",
+                                minimum=1.0,
+                                maximum=100.0,
+                                step=1.0,
+                                value=_MV_CONFIG.keep_top_percent,
+                            )
+                            refine_depth_checkbox = gr.Checkbox(
+                                label="Refine Depth Maps (MoGe)",
+                                value=_MV_CONFIG.refine_depth_maps,
+                            )
+                            segment_people_checkbox = gr.Checkbox(
+                                label="Segment People (SAM3)",
+                                value=_MV_CONFIG.segment_people,
+                            )
+                            preprocessing_radio = gr.Radio(
+                                label="Preprocessing Mode",
+                                choices=["crop", "pad"],
+                                value=_MV_CONFIG.preprocessing_mode,
+                            )
 
                     with gr.TabItem("Outputs", id="outputs"):
-                        gr.Markdown("View calibration results in the Rerun viewer.")
+                        status_text = gr.Textbox(label="Status", interactive=False)
 
                 car_example_images: list[str] = sorted(
                     str(p) for p in (EXAMPLE_DATA_DIR / "car_landscape_12").glob("*.jpg")
@@ -134,14 +255,22 @@ def main() -> gr.Blocks:
             outputs=[tabs],
             api_visibility="private",
         ).then(
-            multiview_calibration_fn,
-            inputs=[recording_id, input_imgs],
-            outputs=[rr_viewer],
-        ).then(
             fn=lambda: uuid.uuid4(),
             inputs=None,
             outputs=[recording_id],
             api_visibility="private",
+        ).then(
+            _ensure_calibrator,
+            inputs=[
+                keep_top_percent_slider,
+                refine_depth_checkbox,
+                segment_people_checkbox,
+                preprocessing_radio,
+            ],
+        ).then(
+            multiview_calibration_fn,
+            inputs=[recording_id, input_imgs],
+            outputs=[rr_viewer, status_text],
         )
 
     return demo
