@@ -210,6 +210,21 @@ cmd = "python tools/apps/calibration_app.py"
 cwd = "packages/monoprior"
 description = "Launch Gradio multiview calibration UI"
 
+[feature.monoprior.tasks.multiview-geometry-app]
+cmd = "python tools/apps/multiview_geometry_app.py"
+cwd = "packages/monoprior"
+description = "Launch Gradio multiview geometry UI"
+
+[feature.monoprior.tasks.metric-depth-app]
+cmd = "python tools/apps/metric_depth_app.py"
+cwd = "packages/monoprior"
+description = "Launch Gradio metric depth UI"
+
+[feature.monoprior.tasks.depth-alignment-app]
+cmd = "python tools/apps/depth_alignment_app.py"
+cwd = "packages/monoprior"
+description = "Launch Gradio depth alignment UI"
+
 # ── Utility tasks ────────────────────────────────────────────────────────
 [feature.monoprior.tasks.build-wheel]
 cmd = "python -m pip install build && python -m build"

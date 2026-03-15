@@ -102,6 +102,7 @@ packages/monoprior/data/
 packages/prompt-da/data/
 packages/wilor-nano/data/
 packages/sam3d-body-rerun/data/
+packages/sam3-rerun/data/
 packages/robocap-slam/data/
 packages/*/outputs/
 packages/*/checkpoints/

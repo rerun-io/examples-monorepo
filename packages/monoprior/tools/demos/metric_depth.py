@@ -1,6 +1,6 @@
 import tyro
 
-from monopriors.apis.metric_depth_inference import MetricDepthConfig, metric_depth_from_img
+from monopriors.apis.metric_depth import MetricDepthCLIConfig, main
 
 if __name__ == "__main__":
-    metric_depth_from_img(tyro.cli(MetricDepthConfig))
+    main(tyro.cli(MetricDepthCLIConfig))

@@ -175,6 +175,11 @@ def _switch_to_outputs():
     return gr.update(selected="outputs")
 
 
+def _switch_to_inputs():
+    """Switch the Gradio Tabs component to the Inputs tab."""
+    return gr.update(selected="inputs")
+
+
 def main() -> gr.Blocks:
     """Build and return the multiview calibration Gradio app.
 
@@ -244,9 +249,7 @@ def main() -> gr.Blocks:
                 car_example_images: list[str] = sorted(
                     str(p) for p in (EXAMPLE_DATA_DIR / "car_landscape_12").glob("*.jpg")
                 )
-                rp_capture_images: list[str] = sorted(
-                    str(p) for p in (EXAMPLE_DATA_DIR / "rp_capture_6").glob("*.jpg")
-                )
+                rp_capture_images: list[str] = sorted(str(p) for p in (EXAMPLE_DATA_DIR / "rp_capture_6").glob("*.jpg"))
                 gr.Examples(
                     examples=[
                         [car_example_images],
@@ -258,6 +261,9 @@ def main() -> gr.Blocks:
 
             with gr.Column(scale=5):
                 rr_viewer.render()
+
+        # Switch to Inputs tab when examples populate the input
+        input_imgs.change(fn=_switch_to_inputs, inputs=None, outputs=[tabs], api_visibility="private")
 
         # Click chain: UI transition → fresh session → sync config → load images → run pipeline
         run_calibration_btn.click(

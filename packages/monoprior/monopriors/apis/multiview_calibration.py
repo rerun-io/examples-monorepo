@@ -22,14 +22,13 @@ from simplecv.ops.tsdf_depth_fuser import Open3DScaleInvariantFuser
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
 from simplecv.video_io import MultiVideoReader
 
-from monopriors.depth_utils import depth_edges_mask, multidepth_to_points
-from monopriors.models.multiview.vggt_model import MultiviewPred, VGGTPredictor, robust_filter_confidences
+from monopriors.depth_utils import multidepth_to_points
+from monopriors.models.multiview.vggt_model import MultiviewPred, VGGTPredictor
 from monopriors.models.relative_depth import (
     RelativeDepthPrediction,
     get_relative_predictor,
 )
 from monopriors.models.relative_depth.base_relative_depth import BaseRelativePredictor
-from monopriors.scale_utils import compute_scale_and_shift
 
 np.set_printoptions(suppress=True)
 
@@ -384,18 +383,42 @@ class MultiViewCalibrator:
     ) -> MVCalibResults:
         """Estimate calibrated pinhole parameters and a fused point cloud from RGB views.
 
+        Delegates to decomposed node APIs:
+        1. ``run_multiview_geometry`` — multi-view prediction + orientation + confidence filtering
+        2. ``segment_people`` — per-view SAM3 segmentation (looped)
+        3. ``run_depth_alignment`` — per-view MoGe depth → aligned to VGGT frame (looped)
+        4. Point cloud + TSDF fusion
+
         Args:
             rgb_list: Ordered list of RGB frames captured at the same timestamp across cameras.
 
         Returns:
             MVCalibResults containing per-camera pinhole parameters and a down-sampled point cloud
-            reconstructed from high-confidence depth measurements (optionally refined by Moge).
+            reconstructed from high-confidence depth measurements (optionally refined by MoGe).
         """
-        mv_pred_list: list[MultiviewPred] = self.vggt_predictor(rgb_list)
-        mv_pred_list: list[MultiviewPred] = orient_mv_pred_list(mv_pred_list)
+        from monopriors.apis.depth_alignment import DepthAlignmentConfig, DepthAlignmentResult, run_depth_alignment
+        from monopriors.apis.multiview_geometry import (
+            MultiviewGeometryConfig,
+            MultiviewGeometryResult,
+            run_multiview_geometry,
+        )
 
-        # Compute person segmentation masks per view. Keep for potential UI/analysis,
-        # but do not alter confidences/depth with it here.
+        # 1. Multiview geometry: predict + orient + confidence filter
+        mv_geo_config: MultiviewGeometryConfig = MultiviewGeometryConfig(
+            preprocessing_mode=self.config.preprocessing_mode,
+            keep_top_percent=self.config.keep_top_percent,
+            device=self.config.device,
+            verbose=self.config.verbose,
+        )
+        mv_geo_result: MultiviewGeometryResult = run_multiview_geometry(
+            rgb_list=rgb_list,
+            vggt_predictor=self.vggt_predictor,
+            config=mv_geo_config,
+        )
+        mv_pred_list: list[MultiviewPred] = mv_geo_result.mv_pred_list
+        depth_confidences: list[UInt8[ndarray, "H W"]] = mv_geo_result.depth_confidences
+
+        # 2. SAM3 segmentation: per-view person masks
         if self.config.segment_people:
             segmask_list: list[Bool[np.ndarray, "H W"] | None] = []
             for rgb in rgb_list:
@@ -406,77 +429,70 @@ class MultiViewCalibrator:
         else:
             segmask_list = [None] * len(mv_pred_list)
 
+        # Update depth confidences to exclude people
+        updated_confidences: list[UInt8[ndarray, "H W"]] = []
+        for depth_conf, segmask in zip(depth_confidences, segmask_list, strict=True):
+            if segmask is not None:
+                updated_confidences.append(depth_conf * ~segmask)
+            else:
+                updated_confidences.append(depth_conf)
+        depth_confidences = updated_confidences
+
+        # Build initial point cloud from VGGT depths
         pointcloud: Float32[ndarray, "num_points 3"] = mv_pred_to_pointcloud(mv_pred_list)
         rgb_stack: UInt8[ndarray, "num_points 3"] = np.concatenate(
             [rearrange(mv_pred.rgb_image, "h w c -> (h w) c") for mv_pred in mv_pred_list]
         )
-
-        # create depth confidence values using robust filtering for top keep percentile
-        depth_confidences: list[UInt8[ndarray, "H W"]] = [
-            robust_filter_confidences(mv_pred.confidence_mask, keep_top_percent=self.config.keep_top_percent)
-            for mv_pred in mv_pred_list
-        ]
-
-        # update depth_confidences to exclude people, create a totally new list so it doesn't modify the original
-        new_depth_confidences = []
-        for depth_conf, segmask in zip(depth_confidences, segmask_list, strict=True):
-            if segmask is not None:
-                new_depth_confidences.append(depth_conf * ~segmask)
-            else:
-                new_depth_confidences.append(depth_conf)
-
-        depth_confidences = new_depth_confidences
         pc_conf_mask: Bool[ndarray, "num_points"] = np.concatenate(
             [rearrange(depth_conf, "h w -> (h w)") for depth_conf in depth_confidences]
         ).astype(bool)
-
-        # Filter by confidence BEFORE downsampling for better quality and efficiency
-        filtered_points_pre_ds: Float32[ndarray, "filtered_points 3"] = pointcloud[pc_conf_mask]
-        filtered_colors_pre_ds: UInt8[ndarray, "filtered_points 3"] = rgb_stack[pc_conf_mask]
-
-        # Create point cloud from high-confidence points only
+        filtered_points: Float32[ndarray, "filtered_points 3"] = pointcloud[pc_conf_mask]
+        filtered_colors: UInt8[ndarray, "filtered_points 3"] = rgb_stack[pc_conf_mask]
         pcd: o3d.geometry.PointCloud = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(filtered_points_pre_ds)
-        pcd.colors = o3d.utility.Vector3dVector(filtered_colors_pre_ds / 255.0)  # Open3D expects [0,1] range
+        pcd.points = o3d.utility.Vector3dVector(filtered_points)
+        pcd.colors = o3d.utility.Vector3dVector(filtered_colors / 255.0)
 
+        # 3. Optional depth refinement: MoGe + depth alignment per view
         if self.config.refine_depth_maps:
             refined_depths_list: list[Float32[ndarray, "H W"]] = []
+            alignment_config: DepthAlignmentConfig = DepthAlignmentConfig(edge_threshold=0.01, scale_only=False)
 
-        for mv_pred in mv_pred_list:
-            depth_map: Float32[ndarray, "H W"] = mv_pred.depth_map
-            depth_conf: UInt8[ndarray, "H W"] = depth_confidences[mv_pred_list.index(mv_pred)]
-            # Filter depth
-            filtered_depth_map: Float32[ndarray, "H W"] = np.where(depth_conf > 0, depth_map, 0)
+            for idx, mv_pred in enumerate(mv_pred_list):
+                depth_conf: UInt8[ndarray, "H W"] = depth_confidences[idx]
+                filtered_depth_map: Float32[ndarray, "H W"] = np.where(depth_conf > 0, mv_pred.depth_map, 0)
 
-            if self.config.refine_depth_maps:
-                relative_pred: RelativeDepthPrediction = self.moge_predictor.__call__(
+                # Run MoGe relative depth on this view
+                relative_pred: RelativeDepthPrediction = self.moge_predictor(
                     rgb=mv_pred.rgb_image, K_33=mv_pred.pinhole_param.intrinsics.k_matrix
                 )
 
-                scale, shift = compute_scale_and_shift(
-                    relative_pred.depth, filtered_depth_map, mask=depth_conf > 0, scale_only=False
+                # Align MoGe depth to VGGT's coordinate frame using decomposed alignment node
+                alignment_result: DepthAlignmentResult = run_depth_alignment(
+                    reference_depth=filtered_depth_map,
+                    target_depth=relative_pred.depth,
+                    confidence_mask=(depth_conf > 0),
+                    exclusion_mask=segmask_list[idx],
+                    config=alignment_config,
                 )
-                metric_depth: Float32[np.ndarray, "h w"] = relative_pred.depth.copy() * scale + shift
-                # filter depth
-                edges_mask: Bool[np.ndarray, "h w"] = depth_edges_mask(metric_depth, threshold=0.01)
-                metric_depth: Float32[np.ndarray, "h w"] = metric_depth * ~edges_mask
-                # metric_depth = np.where(depth_conf > 0, metric_depth, 0)
-                # remove people from metric depth
-                if segmask_list[mv_pred_list.index(mv_pred)] is not None:
-                    metric_depth: Float32[np.ndarray, "h w"] = metric_depth * ~segmask_list[mv_pred_list.index(mv_pred)]
+                refined_depths_list.append(alignment_result.aligned_depth)
 
-                refined_depths_list.append(metric_depth)
+                if self.config.verbose:
+                    cam_log_path: Path = self.parent_log_path / mv_pred.cam_name
+                    pinhole_log_path: Path = cam_log_path / "pinhole"
+                    rr.log(
+                        f"{pinhole_log_path}/refined_depth",
+                        rr.DepthImage(alignment_result.aligned_depth, meter=1),
+                        static=True,
+                    )
 
-            if self.config.verbose:
-                cam_log_path: Path = self.parent_log_path / mv_pred.cam_name
-                pinhole_log_path: Path = cam_log_path / "pinhole"
-                log_pinhole(
-                    mv_pred.pinhole_param,
-                    cam_log_path=cam_log_path,
-                    image_plane_distance=0.05,
-                    static=True,
-                )
-
+        # Verbose logging: per-camera detail
+        if self.config.verbose:
+            for idx, mv_pred in enumerate(mv_pred_list):
+                depth_conf = depth_confidences[idx]
+                filtered_depth_map = np.where(depth_conf > 0, mv_pred.depth_map, 0)
+                cam_log_path = self.parent_log_path / mv_pred.cam_name
+                pinhole_log_path = cam_log_path / "pinhole"
+                log_pinhole(mv_pred.pinhole_param, cam_log_path=cam_log_path, image_plane_distance=0.05, static=True)
                 rr.log(
                     f"{pinhole_log_path}/image",
                     rr.Image(mv_pred.rgb_image, color_model=rr.ColorModel.RGB).compress(),
@@ -487,36 +503,18 @@ class MultiViewCalibrator:
                     rr.Image(depth_conf, color_model=rr.ColorModel.L).compress(),
                     static=True,
                 )
-                rr.log(
-                    f"{pinhole_log_path}/filtered_depth",
-                    rr.DepthImage(filtered_depth_map, meter=1),
-                    static=True,
-                )
-                rr.log(
-                    f"{pinhole_log_path}/depth",
-                    rr.DepthImage(depth_map, meter=1),
-                    static=True,
-                )
-                if self.config.refine_depth_maps:
-                    rr.log(
-                        f"{pinhole_log_path}/refined_depth",
-                        rr.DepthImage(metric_depth, meter=1),
-                        static=True,
-                    )
+                rr.log(f"{pinhole_log_path}/filtered_depth", rr.DepthImage(filtered_depth_map, meter=1), static=True)
+                rr.log(f"{pinhole_log_path}/depth", rr.DepthImage(mv_pred.depth_map, meter=1), static=True)
 
+        # If refinement was done, rebuild point cloud from refined depths
         if self.config.refine_depth_maps:
             moge_points: Float32[ndarray, "num_points 3"] = mv_pred_to_pointcloud(
                 mv_pred_list, depth_list=refined_depths_list
             )
-            new_pc: Float32[ndarray, "num_points 3"] = moge_points.reshape(-1, 3)
-            rgb_stack: UInt8[ndarray, "num_points 3"] = np.concatenate(
-                [rearrange(mv_pred.rgb_image, "h w c -> (h w) c") for mv_pred in mv_pred_list]
-            )
-
-            # Create point cloud from high-confidence points only
-            pcd: o3d.geometry.PointCloud = o3d.geometry.PointCloud()
-            pcd.points = o3d.utility.Vector3dVector(new_pc)
-            pcd.colors = o3d.utility.Vector3dVector(rgb_stack / 255.0)  # Open3D expects [0,1] range
+            rgb_stack = np.concatenate([rearrange(mv_pred.rgb_image, "h w c -> (h w) c") for mv_pred in mv_pred_list])
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(moge_points.reshape(-1, 3))
+            pcd.colors = o3d.utility.Vector3dVector(rgb_stack / 255.0)
 
         mv_calib_results: MVCalibResults = MVCalibResults(
             pinhole_param_list=[mv_pred.pinhole_param for mv_pred in mv_pred_list],
