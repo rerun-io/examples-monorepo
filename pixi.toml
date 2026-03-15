@@ -487,6 +487,9 @@ omegaconf = "*"
 [feature.vistadream.activation.env]
 PACKAGE_DIR = "packages/vistadream"
 TORCH_CUDA_ARCH_LIST = "7.5 8.6 8.9 12.0 12.1"
+CUDA_HOME = "${CONDA_PREFIX}/targets/x86_64-linux"
+CPATH = "${CONDA_PREFIX}/targets/x86_64-linux/include:${CPATH}"
+PATH = "${CONDA_PREFIX}/nvvm/bin:${PATH}"
 
 # ── Download tasks (hidden, used as depends-on) ─────────────────────────
 [feature.vistadream.tasks._download-models]
