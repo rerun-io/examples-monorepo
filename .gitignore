@@ -108,6 +108,8 @@ packages/*/outputs/
 packages/*/checkpoints/
 packages/*/_checkpoints/
 
+packages/vistadream/ckpt/
+
 # Package-specific ignores
 packages/wilor-nano/pretrained_models/
 packages/wilor-nano/onnx_models/
