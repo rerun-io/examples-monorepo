@@ -124,6 +124,9 @@ packages/wilor-nano/results/
 # PEP 582
 __pypackages__/
 
+# Playwright CLI
+.playwright-cli/
+
 # Misc
 *.npy
 *.tar

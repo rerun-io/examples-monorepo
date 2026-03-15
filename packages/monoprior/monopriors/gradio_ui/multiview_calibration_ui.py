@@ -17,18 +17,17 @@ from pathlib import Path
 from typing import Final
 
 import gradio as gr
-import numpy as np
 import rerun as rr
 from gradio_rerun import Rerun
 from jaxtyping import UInt8
 from numpy import ndarray
-from PIL import Image
 
 from monopriors.apis.multiview_calibration import (
     PARENT_LOG_PATH,
     TIMELINE,
     MultiViewCalibrator,
     MultiViewCalibratorConfig,
+    load_rgb_images,
     run_calibration_pipeline,
 )
 
@@ -48,16 +47,16 @@ _MV_CALIBRATOR: MultiViewCalibrator = MultiViewCalibrator(
     config=_MV_CONFIG,
 )
 """Module-level calibrator singleton. Re-created only when model-affecting
-config fields are toggled ON (see ``_ensure_calibrator``)."""
+config fields are toggled ON (see ``_sync_config``)."""
 
 
-def _ensure_calibrator(
+def _sync_config(
     keep_top_percent: int | float,
     refine_depth_maps: bool,
     segment_people: bool,
     preprocessing_mode: str,
 ) -> None:
-    """Update or re-create the module-level calibrator to match the requested config.
+    """Sync UI widget values into the module-level config and model singleton.
 
     Compares incoming widget values against the current ``_MV_CONFIG``.
     Runtime-only fields (``keep_top_percent``, ``preprocessing_mode``) are
@@ -113,26 +112,20 @@ def get_recording(recording_id: uuid.UUID) -> rr.RecordingStream:
     return rr.RecordingStream(application_id="rerun_example_gradio", recording_id=recording_id)
 
 
-def multiview_calibration_fn(
-    recording_id: uuid.UUID,
+def _parse_and_load_images(
     img_files: str | list[str],
-) -> Generator[tuple[bytes | None, str], None, None]:
-    """Gradio streaming callback that runs the calibration pipeline.
+) -> list[UInt8[ndarray, "H W 3"]]:
+    """Parse Gradio file uploads and load them as RGB arrays.
 
-    Parses Gradio file uploads into RGB arrays, then delegates to
-    ``run_calibration_pipeline`` inside a ``with recording:`` context
-    so all Rerun logging targets the UI's binary stream.
+    Converts ``gr.File`` output (single path or list of paths) into
+    sorted RGB numpy arrays using the shared ``load_rgb_images`` loader.
 
     Args:
-        recording_id: Session-scoped recording identifier.
         img_files: Single path or list of paths from ``gr.File``.
 
-    Yields:
-        Tuple of (Rerun binary stream bytes, status message string).
+    Returns:
+        Sorted list of RGB images as uint8 numpy arrays.
     """
-    recording: rr.RecordingStream = get_recording(recording_id)
-    stream: rr.BinaryStream = recording.binary_stream()
-
     if isinstance(img_files, str):
         img_paths: list[Path] = [Path(img_files)]
     elif isinstance(img_files, list):
@@ -144,12 +137,28 @@ def multiview_calibration_fn(
         raise gr.Error("Please select at least one RGB image before running calibration.")
 
     img_paths.sort()
+    rgb_list: list[UInt8[ndarray, "H W 3"]] = load_rgb_images(img_paths)
+    return rgb_list
 
-    rgb_list: list[UInt8[ndarray, "height width 3"]] = []
-    for img_path in img_paths:
-        with Image.open(img_path) as pil_image:
-            rgb_array: UInt8[ndarray, "height width 3"] = np.asarray(pil_image.convert("RGB"), dtype=np.uint8)
-        rgb_list.append(rgb_array)
+
+def multiview_calibration_fn(
+    recording_id: uuid.UUID,
+    rgb_list: list[UInt8[ndarray, "H W 3"]],
+) -> Generator[tuple[bytes | None, str], None, None]:
+    """Gradio streaming callback that runs the calibration pipeline.
+
+    Delegates to ``run_calibration_pipeline`` inside a ``with recording:``
+    context so all Rerun logging targets the UI's binary stream.
+
+    Args:
+        recording_id: Session-scoped recording identifier.
+        rgb_list: Pre-loaded RGB images.
+
+    Yields:
+        Tuple of (Rerun binary stream bytes, status message string).
+    """
+    recording: rr.RecordingStream = get_recording(recording_id)
+    stream: rr.BinaryStream = recording.binary_stream()
 
     with recording:
         run_calibration_pipeline(
@@ -176,7 +185,7 @@ def main() -> gr.Blocks:
 
     Click chain::
 
-        click → _switch_to_outputs → new recording_id → _ensure_calibrator → multiview_calibration_fn
+        click → _switch_to_outputs → new recording_id → _sync_config → _parse_and_load_images → multiview_calibration_fn
 
     Returns:
         The assembled ``gr.Blocks`` instance ready for ``.queue().launch()``.
@@ -193,6 +202,7 @@ def main() -> gr.Blocks:
 
     with gr.Blocks() as demo:
         recording_id = gr.State(uuid.uuid4())
+        rgb_list_state = gr.State([])
 
         with gr.Row():
             with gr.Column(scale=1):
@@ -249,27 +259,32 @@ def main() -> gr.Blocks:
             with gr.Column(scale=5):
                 rr_viewer.render()
 
+        # Click chain: UI transition → fresh session → sync config → load images → run pipeline
         run_calibration_btn.click(
             fn=_switch_to_outputs,
             inputs=None,
             outputs=[tabs],
             api_visibility="private",
-        ).then(
+        ).then(  # Generate a fresh recording ID so each run gets its own Rerun session
             fn=lambda: uuid.uuid4(),
             inputs=None,
             outputs=[recording_id],
             api_visibility="private",
-        ).then(
-            _ensure_calibrator,
+        ).then(  # Sync the calibrator singleton with the current UI config widgets
+            _sync_config,
             inputs=[
                 keep_top_percent_slider,
                 refine_depth_checkbox,
                 segment_people_checkbox,
                 preprocessing_radio,
             ],
-        ).then(
+        ).then(  # Parse Gradio file uploads into RGB arrays
+            _parse_and_load_images,
+            inputs=[input_imgs],
+            outputs=[rgb_list_state],
+        ).then(  # Run calibration and stream results to the Rerun viewer
             multiview_calibration_fn,
-            inputs=[recording_id, input_imgs],
+            inputs=[recording_id, rgb_list_state],
             outputs=[rr_viewer, status_text],
         )
 

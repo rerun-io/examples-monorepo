@@ -652,6 +652,28 @@ def run_calibration_pipeline(
     return output
 
 
+def load_rgb_images(image_paths: list[Path]) -> list[UInt8[ndarray, "H W 3"]]:
+    """Load image files as RGB uint8 numpy arrays.
+
+    Args:
+        image_paths: Paths to image files to load.
+
+    Returns:
+        List of RGB images as uint8 numpy arrays.
+
+    Raises:
+        FileNotFoundError: If any image path cannot be read by OpenCV.
+    """
+    rgb_list: list[UInt8[ndarray, "H W 3"]] = []
+    for image_path in image_paths:
+        bgr: UInt8[ndarray, "H W 3"] | None = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+        if bgr is None:
+            raise FileNotFoundError(f"Failed to read image {image_path}")
+        rgb: UInt8[ndarray, "H W 3"] = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        rgb_list.append(rgb)
+    return rgb_list
+
+
 def main(config: MVInferenceConfig) -> None:
     if config.image_dir is None and config.videos_dir is None:
         raise ValueError("Either image or videos directory must be specified")
@@ -667,12 +689,7 @@ def main(config: MVInferenceConfig) -> None:
         assert len(image_paths) > 0, (
             f"No images found in {config.image_dir} in supported formats {SUPPORTED_IMAGE_EXTENSIONS}"
         )
-        bgr_list: list[UInt8[ndarray, "H W 3"]] = []
-        for image_path in image_paths:
-            bgr: UInt8[ndarray, "H W 3"] | None = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
-            if bgr is None:
-                raise FileNotFoundError(f"Failed to read image {image_path}")
-            bgr_list.append(bgr)
+        rgb_list: list[UInt8[ndarray, "H W 3"]] = load_rgb_images(image_paths)
 
     elif config.videos_dir is not None:
         video_path_list: list[Path] = sorted(config.videos_dir.glob("*.mp4"))
@@ -687,11 +704,11 @@ def main(config: MVInferenceConfig) -> None:
             exo_timestamps.append(frame_timestamps_ns)
 
         mv_reader: MultiVideoReader = MultiVideoReader(video_path_list)
-        bgr_list = mv_reader[config.ts_idx]
+        bgr_list: list[UInt8[ndarray, "H W 3"]] = mv_reader[config.ts_idx]
+        rgb_list: list[UInt8[ndarray, "H W 3"]] = [cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB) for bgr in bgr_list]
     else:
         raise ValueError("Either image_dir or videos_dir must be specified")
 
-    rgb_list: list[UInt8[ndarray, "H W 3"]] = [cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB) for bgr in bgr_list]
     mv_calibrator: MultiViewCalibrator = MultiViewCalibrator(PARENT_LOG_PATH, config=config.mv_calibrator_config)
 
     run_calibration_pipeline(
