@@ -249,11 +249,9 @@ def main() -> gr.Blocks:
                 car_example_images: list[str] = sorted(
                     str(p) for p in (EXAMPLE_DATA_DIR / "car_landscape_12").glob("*.jpg")
                 )
-                rp_capture_images: list[str] = sorted(str(p) for p in (EXAMPLE_DATA_DIR / "rp_capture_6").glob("*.jpg"))
                 gr.Examples(
                     examples=[
                         [car_example_images],
-                        [rp_capture_images],
                     ],
                     inputs=[input_imgs],
                     cache_examples=False,
