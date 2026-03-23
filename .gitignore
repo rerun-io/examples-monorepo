@@ -1,7 +1,6 @@
 # pixi environments
 .pixi/*
 !.pixi/config.toml
-pixi.lock
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -104,6 +103,7 @@ packages/wilor-nano/data/
 packages/sam3d-body-rerun/data/
 packages/sam3-rerun/data/
 packages/robocap-slam/data/
+packages/pysfm/data/
 packages/*/outputs/
 packages/*/checkpoints/
 packages/*/_checkpoints/

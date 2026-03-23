@@ -94,7 +94,7 @@ cmd = "cd $PACKAGE_DIR && ruff check ."
 description = "Lint the package"
 
 [feature.dev.tasks.typecheck]
-cmd = "cd $PACKAGE_DIR && pyrefly check"
+cmd = "cd $PACKAGE_DIR && pyrefly check -c ../../pyrefly.toml ."
 description = "Typecheck the package"
 
 [feature.dev.tasks.tests]
@@ -456,6 +456,65 @@ depends-on = ["robocap-download-example"]
 description = "Run multicamera visual SLAM on Robocap data"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# pysfm
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.pysfm.dependencies]
+python = "3.12.*"
+pycolmap = "==4.0.2"
+tyro = ">=0.9.1,<0.10"
+
+[feature.pysfm.pypi-dependencies]
+pysfm = { path = "packages/pysfm", editable = true }
+
+[feature.pysfm.activation.env]
+PACKAGE_DIR = "packages/pysfm"
+
+# ── Download tasks ───────────────────────────────────────────────────────
+[feature.pysfm.tasks._download-sfm-example]
+cmd = """
+test -d data/examples/sfm_reconstruction/Fountain || \
+(mkdir -p data/examples/sfm_reconstruction && \
+python -c "
+import urllib.request, zipfile
+urllib.request.urlretrieve('https://cvg-data.inf.ethz.ch/local-feature-evaluation-schoenberger2017/Strecha-Fountain.zip', '/tmp/fountain.zip')
+zipfile.ZipFile('/tmp/fountain.zip').extractall('data/examples/sfm_reconstruction')
+")
+"""
+cwd = "packages/pysfm"
+description = "Download Fountain example dataset for SfM"
+
+# ── Demo tasks ───────────────────────────────────────────────────────────
+[feature.pysfm.tasks.sfm-reconstruction-demo]
+cmd = "python tools/demos/sfm_reconstruction.py --image-dir data/examples/sfm_reconstruction/Fountain/images --rr-config.save data/examples/sfm_reconstruction/fountain.rrd"
+depends-on = ["_download-sfm-example"]
+cwd = "packages/pysfm"
+description = "Run COLMAP SfM reconstruction on Fountain dataset with Rerun viewer"
+
+# ── App tasks ────────────────────────────────────────────────────────────
+[feature.pysfm.tasks.sfm-reconstruction-app]
+cmd = "python tools/nodes/sfm_reconstruction_app.py"
+cwd = "packages/pysfm"
+description = "Launch COLMAP SfM Gradio app with Rerun viewer"
+
+[feature.pysfm.tasks.brush-train-kitchen-5k]
+cmd = """
+python tools/brush/train_colmap_brush.py \
+  --images-dir /home/pablo/0Dev/data/colmap-data/multicam/images/6g-night-nov-29-2024/kitchen-nov-29-2024-train/0100 \
+  --model-dir /home/pablo/0Dev/data/colmap-data/multicam/colmap/6g-night-nov-29-2024/kitchen-nov-29-2024-train/0100-aliked-lightglue-globalmapper-overlap10-timed-20260320/rig/sparse/0 \
+  --work-root /home/pablo/0Dev/data/colmap-data/multicam/brush/6g-night-nov-29-2024/kitchen-nov-29-2024-train/0100-global-rig \
+  --steps 5000 \
+  --eval-split-every 10 \
+  --eval-every 1000 \
+  --export-every 5000 \
+  --experiment-name 5k
+"""
+cwd = "packages/pysfm"
+description = "Train a first 5k-step Brush splat from the kitchen train 0100 rig model"
+
+[feature.pysfm.target.linux-64.dependencies]
+brush = "==0.3.0"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
 [environments]
@@ -528,3 +587,14 @@ robocap-dev = { features = [
     "robocap",
     "dev",
 ], solve-group = "robocap", no-default-feature = true }
+pysfm = { features = [
+    "common",
+    "cuda",
+    "pysfm",
+], solve-group = "pysfm", no-default-feature = true }
+pysfm-dev = { features = [
+    "common",
+    "cuda",
+    "pysfm",
+    "dev",
+], solve-group = "pysfm", no-default-feature = true }
