@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeAlias
 
@@ -22,6 +22,7 @@ import cv2
 import numpy as np
 from jaxtyping import Float32, Float64, UInt8
 from numpy import ndarray
+from serde import field, serde, to_dict
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.video_io import MultiVideoReader
 
@@ -193,6 +194,27 @@ def extract_synchronized_frames(
 
 
 # ---------------------------------------------------------------------------
+# Rig config dataclasses (pyserde — matches COLMAP rig_config.json format)
+# ---------------------------------------------------------------------------
+@serde
+class ColmapRigCameraConfig:
+    """Single camera entry in a COLMAP rig_config.json."""
+
+    image_prefix: str
+    """Image path prefix for this camera (e.g. ``rig1/cam1/``)."""
+    ref_sensor: bool = field(default=False, skip_if=lambda v: not v)
+    """Whether this is the reference sensor. Omitted from JSON when False."""
+
+
+@serde
+class ColmapRigConfig:
+    """One rig entry in a COLMAP rig_config.json (the file is a list of these)."""
+
+    cameras: list[ColmapRigCameraConfig]
+    """Cameras belonging to this rig."""
+
+
+# ---------------------------------------------------------------------------
 # Rig config generation
 # ---------------------------------------------------------------------------
 def generate_rig_config_json(
@@ -213,16 +235,14 @@ def generate_rig_config_json(
         ref_camera: Which camera is the reference sensor.
         output_path: Where to write the JSON file.
     """
-    cameras: list[dict[str, str | bool]] = []
-    for name in camera_names:
-        entry: dict[str, str | bool] = {"image_prefix": f"{rig_name}/{name}/"}
-        if name == ref_camera:
-            entry["ref_sensor"] = True
-        cameras.append(entry)
+    cameras: list[ColmapRigCameraConfig] = [
+        ColmapRigCameraConfig(image_prefix=f"{rig_name}/{name}/", ref_sensor=(name == ref_camera))
+        for name in camera_names
+    ]
+    rig: ColmapRigConfig = ColmapRigConfig(cameras=cameras)
 
-    config: list[dict[str, list[dict[str, str | bool]]]] = [{"cameras": cameras}]
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(config, indent=2) + "\n")
+    output_path.write_text(json.dumps([to_dict(rig)], indent=2) + "\n")
     logger.info("Wrote rig config to %s", output_path)
 
 
