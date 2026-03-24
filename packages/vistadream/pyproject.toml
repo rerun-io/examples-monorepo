@@ -1,0 +1,33 @@
+[project]
+name = "vistadream"
+version = "0.1.0"
+authors = [{ name = "pablo vela", email = "pablovela5620@gmail.com" }]
+requires-python = ">= 3.11"
+dependencies = [
+    # common: numpy, scipy, jaxtyping, rerun-sdk, gradio, gradio-rerun,
+    #         huggingface_hub, hf-transfer, tqdm, pyserde, av, opencv, transformers
+    # cuda: pytorch-gpu, torchvision
+    # vistadream feature: diffusers, timm, accelerate, open3d, roma, peft, omegaconf,
+    #                     plyfile, torchsde, imageio, imageio-ffmpeg, gsplat, einops
+    "einops>=0.8.1,<0.9",
+    "monopriors>=0.3.2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv.sources]
+monopriors = { path = "../monoprior", editable = true }
+
+[tool.ruff]
+line-length = 150
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+ignore = [
+    "E501",  # Line too long.
+    "F722",  # Forward annotation false positive from jaxtyping. Should be caught by pyright.
+    "F821",  # Forward annotation false positive from jaxtyping. Should be caught by pyright.
+    "UP037", # Remove quotes from type, false positive when using jaxtyping
+]

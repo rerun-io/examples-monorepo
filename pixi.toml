@@ -8,7 +8,7 @@ requires-pixi = ">=0.40"
 
 # ─── pypi-options (workspace-level) ─────────────────────────────────────────
 [pypi-options]
-no-build-isolation = ["moge"]
+no-build-isolation = ["moge", "gsplat"]
 
 [pypi-options.dependency-overrides]
 iopath = ">=0.1.10"
@@ -68,7 +68,7 @@ libcusolver-dev = "*"
 cusparselt = "*"
 libnvjitlink = "*"
 # PyTorch
-pytorch-gpu = ">=2.8.0"
+pytorch-gpu = ">=2.10.0"
 torchvision = "*"
 
 # ─── ide feature (standalone dev env for Zed/IDE tooling) ────────────────────
@@ -456,6 +456,64 @@ depends-on = ["robocap-download-example"]
 description = "Run multicamera visual SLAM on Robocap data"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# vistadream
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.vistadream.dependencies]
+python = "3.12.*"
+cmake = ">=4.0.3,<5"
+open3d = ">=0.19.0,<0.20"
+scikit-learn = ">=1.7.1,<2"
+nodejs = ">=25.7.0,<26"
+torchmetrics = "*"
+icecream = ">=2.1.3,<2.2"
+einops = ">=0.8.0,<0.9"
+imageio = ">=2.37.0,<3"
+imageio-ffmpeg = ">=0.6.0,<0.7"
+[feature.vistadream.target.linux-64.dependencies]
+splat-transform = "*"
+
+[feature.vistadream.pypi-dependencies]
+vistadream = { path = "packages/vistadream", editable = true }
+vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c" }
+moge = { git = "https://github.com/microsoft/MoGe.git" }
+gsplat = { git = "https://github.com/nerfstudio-project/gsplat.git", rev = "970dd84803ecf8570651f8e121e328bfef567fb9" }
+accelerate = "*"
+plyfile = "*"
+timm = "*"
+diffusers = "*"
+torchsde = "*"
+roma = "*"
+peft = "*"
+omegaconf = "*"
+
+[feature.vistadream.activation.env]
+PACKAGE_DIR = "packages/vistadream"
+TORCH_CUDA_ARCH_LIST = "7.5 8.6 8.9 12.0 12.1"
+CUDA_HOME = "${CONDA_PREFIX}/targets/x86_64-linux"
+CPATH = "${CONDA_PREFIX}/targets/x86_64-linux/include:${CPATH}"
+PATH = "${CONDA_PREFIX}/nvvm/bin:${PATH}"
+
+# [feature.vistadream.tasks._install-splat-transform]
+# cmd = """
+# test -e $CONDA_PREFIX/bin/splat-transform || npm install -g @playcanvas/splat-transform
+# """
+# cwd = "packages/vistadream"
+# description = "Install the splat-transform npm tool"
+
+# ── Demo tasks ───────────────────────────────────────────────────────────
+[feature.vistadream.tasks.example]
+cmd = "python tools/run_single_img.py --image-path data/office/IMG_4029.jpg"
+# depends-on = ["_install-splat-transform"]
+cwd = "packages/vistadream"
+description = "Run VistaDream single image 3D reconstruction"
+
+[feature.vistadream.tasks.gradio-app]
+cmd = "python tools/gradio_app.py"
+depends-on = ["_install-splat-transform"]
+cwd = "packages/vistadream"
+description = "Launch VistaDream Gradio web interface"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
 [environments]
@@ -528,3 +586,14 @@ robocap-dev = { features = [
     "robocap",
     "dev",
 ], solve-group = "robocap", no-default-feature = true }
+vistadream = { features = [
+    "common",
+    "cuda",
+    "vistadream",
+], solve-group = "vistadream", no-default-feature = true }
+vistadream-dev = { features = [
+    "common",
+    "cuda",
+    "vistadream",
+    "dev",
+], solve-group = "vistadream", no-default-feature = true }

@@ -4,6 +4,7 @@ project-includes = [
     "packages/sam3d-body-rerun/src/**/*",
     "packages/sam3-rerun/src/**/*",
     "packages/robocap-slam/robocap_slam/**/*",
+    "packages/vistadream/src/**/*",
 ]
 project-excludes = ["**/node_modules", "**/__pycache__", "**/*venv/**/*"]
 
@@ -18,6 +19,7 @@ search-path = [
     "packages/sam3d-body-rerun/src",
     "packages/sam3-rerun/src",
     "packages/robocap-slam",
+    "packages/vistadream/src",
     # rerun-sdk uses a .pth file to add rerun_sdk/ as an import root;
     # pyrefly doesn't follow .pth files in site-packages, so we add it explicitly
     ".pixi/envs/monoprior-dev/lib/python3.12/site-packages/rerun_sdk",
@@ -32,6 +34,7 @@ site-package-path = [
     ".pixi/envs/sam3d-body-dev/lib/python3.12/site-packages",
     ".pixi/envs/sam3-rerun-dev/lib/python3.12/site-packages",
     ".pixi/envs/robocap-dev/lib/python3.10/site-packages",
+    ".pixi/envs/vistadream-dev/lib/python3.12/site-packages",
 ]
 
 python-interpreter-path = ".pixi/envs/dev/bin/python"
