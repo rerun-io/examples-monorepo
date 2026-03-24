@@ -12,7 +12,6 @@ Also provides a CLI entry point (``main``) for standalone usage with tyro.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,7 +21,8 @@ import cv2
 import numpy as np
 from jaxtyping import Float32, Float64, UInt8
 from numpy import ndarray
-from serde import field, serde, to_dict
+from serde import field, serde
+from serde.json import to_json
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.video_io import MultiVideoReader
 
@@ -242,7 +242,7 @@ def generate_rig_config_json(
     rig: ColmapRigConfig = ColmapRigConfig(cameras=cameras)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps([to_dict(rig)], indent=2) + "\n")
+    output_path.write_text(to_json([rig]))
     logger.info("Wrote rig config to %s", output_path)
 
 
