@@ -12,7 +12,7 @@ description1 = """
     <a title="Paper" href="https://ai.meta.com/research/publications/sam-2-segment-anything-in-images-and-videos/" target="_blank" rel="noopener noreferrer" style="display: inline-block;">
         <img src="https://www.obukhov.ai/img/badges/badge-pdf.svg">
     </a>
-    <a title="Github" href="https://github.com/rerun-io/annotation-example.git" target="_blank" rel="noopener noreferrer" style="display: inline-block;">
+    <a title="GitHub" href="https://github.com/rerun-io/annotation-example.git" target="_blank" rel="noopener noreferrer" style="display: inline-block;">
         <img src="https://img.shields.io/github/stars/rerun-io/annotation-example?label=GitHub%20%E2%98%85&logo=github&color=C8C" alt="badge-github-stars">
     </a>
     <a title="Social" href="https://x.com/pablovelagomez1" target="_blank" rel="noopener noreferrer" style="display: inline-block;">
