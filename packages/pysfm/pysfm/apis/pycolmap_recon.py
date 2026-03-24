@@ -60,7 +60,7 @@ class RigReconConfig:
     ref_camera: str | None = None
     """Reference camera name. Defaults to first camera alphabetically."""
     camera_model: SfMCameraModel = "OPENCV"
-    """COLMAP camera model for intrinsics estimation."""
+    """COLMAP camera model for intrinsics estimation (e.g. OPENCV_FISHEYE for fisheye lenses)."""
     overlap: int = 5
     """Sequential matching overlap (number of neighboring frames to match)."""
     use_gpu: bool = True
@@ -164,6 +164,9 @@ def extract_synchronized_frames(
     reader: MultiVideoReader = MultiVideoReader(video_paths)
 
     total_frames: int = len(reader)
+    if total_frames <= 0:
+        msg: str = "No synchronized frames available — videos may have zero frames"
+        raise RuntimeError(msg)
     actual_num_frames: int = min(num_frames, total_frames)
     frame_indices: list[int] = np.linspace(0, total_frames - 1, actual_num_frames, dtype=int).tolist()
     pad_width: int = len(str(actual_num_frames))
@@ -288,6 +291,9 @@ def run_rig_recon(*, config: RigReconConfig) -> RigReconResult:
     videos: list[tuple[str, Path]] = discover_videos(config.videos_dir)
     camera_names: list[str] = [name for name, _ in videos]
     ref_camera: str = config.ref_camera if config.ref_camera is not None else camera_names[0]
+    if ref_camera not in camera_names:
+        msg: str = f"ref_camera '{ref_camera}' not among discovered cameras: {camera_names}"
+        raise ValueError(msg)
     logger.info("Discovered %d cameras: %s (ref=%s)", len(videos), camera_names, ref_camera)
 
     # -- 2. Extract frames ----------------------------------------------------
@@ -310,16 +316,23 @@ def run_rig_recon(*, config: RigReconConfig) -> RigReconResult:
     # -- 4. Feature extraction (ALIKED_N16ROT, GPU) ---------------------------
     pycolmap.set_random_seed(0)
 
+    if config.verbose:
+        pycolmap.logging.minloglevel = pycolmap.logging.INFO
+
+    reader_options: pycolmap.ImageReaderOptions = pycolmap.ImageReaderOptions()
+    reader_options.camera_model = config.camera_model
+
     extraction_options: pycolmap.FeatureExtractionOptions = pycolmap.FeatureExtractionOptions()
     extraction_options.type = pycolmap.FeatureExtractorType.ALIKED_N16ROT
     extraction_options.use_gpu = config.use_gpu
     extraction_options.gpu_index = "0"
 
-    logger.info("Extracting features (ALIKED_N16ROT, gpu=%s) ...", config.use_gpu)
+    logger.info("Extracting features (ALIKED_N16ROT, camera_model=%s, gpu=%s) ...", config.camera_model, config.use_gpu)
     pycolmap.extract_features(
         database_path=database_path,
         image_path=images_dir,
         camera_mode=pycolmap.CameraMode.PER_FOLDER,
+        reader_options=reader_options,
         extraction_options=extraction_options,
     )
 
@@ -358,8 +371,9 @@ def run_rig_recon(*, config: RigReconConfig) -> RigReconResult:
         raise RuntimeError(msg)
 
     # Use the largest reconstruction.
-    no_rig_rec: pycolmap.Reconstruction = max(no_rig_recs.values(), key=lambda r: r.num_reg_images())
-    logger.info("No-rig bootstrap: %d images registered", no_rig_rec.num_reg_images())
+    no_rig_rec_id: int = max(no_rig_recs, key=lambda k: no_rig_recs[k].num_reg_images())
+    no_rig_rec: pycolmap.Reconstruction = no_rig_recs[no_rig_rec_id]
+    logger.info("No-rig bootstrap: %d images registered (model %d)", no_rig_rec.num_reg_images(), no_rig_rec_id)
 
     # -- 7. Apply rig config (auto-derive cam_from_rig from bootstrap) --------
     rig_configs: list[pycolmap.RigConfig] = pycolmap.read_rig_config(rig_config_path)
@@ -410,16 +424,17 @@ def run_rig_recon(*, config: RigReconConfig) -> RigReconResult:
         msg = "Rig-aware global mapping failed: COLMAP produced no reconstruction"
         raise RuntimeError(msg)
 
-    rig_rec: pycolmap.Reconstruction = max(rig_recs.values(), key=lambda r: r.num_reg_images())
-    logger.info("Final rig reconstruction: %d images registered", rig_rec.num_reg_images())
+    rig_rec_id: int = max(rig_recs, key=lambda k: rig_recs[k].num_reg_images())
+    rig_rec: pycolmap.Reconstruction = rig_recs[rig_rec_id]
+    logger.info("Final rig reconstruction: %d images registered (model %d)", rig_rec.num_reg_images(), rig_rec_id)
 
     # -- Done -----------------------------------------------------------------
     return RigReconResult(
         output_dir=output_dir,
         images_dir=images_dir,
         database_path=database_path,
-        no_rig_model_dir=no_rig_sparse_dir / "0",
-        rig_model_dir=rig_sparse_dir / "0",
+        no_rig_model_dir=no_rig_sparse_dir / str(no_rig_rec_id),
+        rig_model_dir=rig_sparse_dir / str(rig_rec_id),
         num_frames_extracted=num_frames_extracted,
         num_cameras=len(camera_names),
         camera_names=camera_names,
