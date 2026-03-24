@@ -90,6 +90,8 @@ class RigReconResult:
     """Number of cameras in the rig."""
     camera_names: list[str]
     """Names of discovered cameras (sorted alphabetically)."""
+    ref_camera: str
+    """Name of the reference camera."""
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +176,9 @@ def extract_synchronized_frames(
     frame_indices: list[int] = np.linspace(0, min_total - 1, actual_num_frames, dtype=int).tolist()
     pad_width: int = len(str(actual_num_frames))
 
-    logger.info("Extracting %d frames from %d videos (shortest has %d frames)", actual_num_frames, len(videos), min_total)
+    logger.info(
+        "Extracting %d frames from %d videos (shortest has %d frames)", actual_num_frames, len(videos), min_total
+    )
 
     for cam_name, video_path in videos:
         cam_dir: Path = output_images_dir / rig_name / cam_name
@@ -403,6 +407,7 @@ def run_rig_recon(*, config: RigReconConfig) -> RigReconResult:
         num_frames_extracted=num_frames_extracted,
         num_cameras=len(camera_names),
         camera_names=camera_names,
+        ref_camera=ref_camera,
     )
 
 
@@ -473,7 +478,7 @@ def log_rig_reconstruction(result: RigReconResult, parent_log_path: Path) -> Non
             rr.Points3D(
                 positions=points3d_xyz,
                 colors=points3d_rgb,
-                radii=np.full(points3d_xyz.shape[0], 0.005, dtype=np.float32),
+                # radii=np.full(points3d_xyz.shape[0], 0.005, dtype=np.float32),
             ),
             static=True,
         )
@@ -493,6 +498,11 @@ def log_rig_reconstruction(result: RigReconResult, parent_log_path: Path) -> Non
         cam_images[cam_name].sort(key=lambda x: x[1].name)
 
     max_frames: int = max((len(imgs) for imgs in cam_images.values()), default=0)
+
+    # -- Color the reference camera green so it's easy to identify ------------
+    for cam_name in result.camera_names:
+        color: list[int] = [0, 200, 0] if cam_name == result.ref_camera else [200, 200, 200]
+        rr.log(f"{parent_log_path}/{cam_name}/pinhole", [rr.components.Color(color)], static=True)
 
     # -- Log per-camera data over timeline ------------------------------------
     for frame_idx in range(max_frames):
@@ -521,7 +531,10 @@ def log_rig_reconstruction(result: RigReconResult, parent_log_path: Path) -> Non
             # Pinhole camera
             cam: pycolmap.Camera = image.camera
             K: Float64[ndarray, "3 3"] = _extract_intrinsics(cam)
-            rr.log(f"{camera_path}/pinhole", rr.Pinhole(image_from_camera=K, width=cam.width, height=cam.height))
+            rr.log(
+                f"{camera_path}/pinhole",
+                rr.Pinhole(image_from_camera=K, width=cam.width, height=cam.height, image_plane_distance=1.0),
+            )
 
             # Image
             image_path: Path = result.images_dir / image.name
