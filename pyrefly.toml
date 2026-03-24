@@ -26,10 +26,6 @@ search-path = [
     "packages/robocap-slam",
     "packages/pysfm",
     "packages/vistadream/src",
-    # rerun-sdk nests its modules under rerun_sdk/ and uses a .pth file;
-    # pyrefly doesn't follow .pth files, so we add this path explicitly.
-    # Requires: pixi install -e dev
-    ".pixi/envs/dev/lib/python3.12/site-packages/rerun_sdk",
 ]
 
 # Third-party packages — all *-dev env site-packages so pyrefly can resolve
