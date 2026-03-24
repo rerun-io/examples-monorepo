@@ -2,85 +2,64 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-from einops import rearrange
-from jaxtyping import BFloat16, UInt8
+from diffusers import FluxFillPipeline
+from jaxtyping import UInt8
 from PIL import Image
-
-from vistadream.flux.model import Flux
-from vistadream.flux.modules.autoencoder import AutoEncoder
-from vistadream.flux.sampling import denoise, get_noise, get_schedule, prepare_fill_empty_prompt, unpack
-from vistadream.flux.util import load_ae, load_flow_model
 
 
 @dataclass
 class FluxInpaintingConfig:
+    """Configuration for Flux Fill inpainting via HuggingFace diffusers."""
+
     offload: bool = True
+    """Whether to use CPU offloading to reduce VRAM usage."""
     num_steps: int = 25
+    """Number of denoising steps."""
     guidance: int | float = 30.0
+    """Guidance scale for classifier-free guidance."""
     seed: int = 42
+    """Random seed for reproducibility."""
 
 
 class FluxInpainting:
+    """Flux Fill inpainting wrapper around HuggingFace diffusers FluxFillPipeline."""
+
     def __init__(self, config: FluxInpaintingConfig) -> None:
         self.config: FluxInpaintingConfig = config
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.torch_device = torch.device(self.device)
-        self._load_model()
+        self.pipe: FluxFillPipeline = FluxFillPipeline.from_pretrained(
+            "black-forest-labs/FLUX.1-Fill-dev",
+            torch_dtype=torch.bfloat16,
+        )
+        if config.offload:
+            self.pipe.enable_model_cpu_offload()
+        else:
+            self.pipe = self.pipe.to("cuda")
 
-    def _load_model(self):
-        self.model: Flux = load_flow_model("flux-dev-fill", device="cpu" if self.config.offload else self.torch_device)
-        self.ae: AutoEncoder = load_ae("flux-dev-fill", device="cpu" if self.config.offload else self.torch_device)
-
-    @torch.inference_mode
+    @torch.inference_mode()
     def __call__(
         self,
         rgb_hw3: UInt8[np.ndarray, "h w 3"],
         mask: UInt8[np.ndarray, "h w"],
     ) -> Image.Image:
-        height: int = rgb_hw3.shape[0]
-        width: int = rgb_hw3.shape[1]
-        x: BFloat16[torch.Tensor, "batch channels latent_height latent_width"] = get_noise(
-            num_samples=1,
-            height=height,
-            width=width,
-            device=self.torch_device,
-            dtype=torch.bfloat16,
-            seed=self.config.seed,
-        )
+        """Run Flux Fill inpainting.
 
-        if self.config.offload:
-            self.ae = self.ae.to(self.torch_device)
+        Args:
+            rgb_hw3: Input RGB image. Masked regions should contain the border/background.
+            mask: Inpainting mask where 255 = fill (inpaint), 0 = keep.
 
-        inp: dict[str, torch.Tensor] = prepare_fill_empty_prompt(
-            x,
+        Returns:
+            Inpainted PIL Image.
+        """
+        image: Image.Image = Image.fromarray(rgb_hw3)
+        mask_image: Image.Image = Image.fromarray(mask)
+        result = self.pipe(
             prompt="",
-            ae=self.ae,
-            img_cond=rgb_hw3,
-            mask=mask,
+            image=image,
+            mask_image=mask_image,
+            height=rgb_hw3.shape[0],
+            width=rgb_hw3.shape[1],
+            num_inference_steps=self.config.num_steps,
+            guidance_scale=self.config.guidance,
+            generator=torch.Generator("cpu").manual_seed(self.config.seed),
         )
-
-        timesteps: list[float] = get_schedule(self.config.num_steps, inp["img"].shape[1], shift=True)
-
-        if self.config.offload:
-            self.ae = self.ae.cpu()
-            torch.cuda.empty_cache()
-            self.model = self.model.to(self.torch_device)
-
-        x = denoise(self.model, **inp, timesteps=timesteps, guidance=self.config.guidance)
-
-        if self.config.offload:
-            self.model.cpu()
-            torch.cuda.empty_cache()
-            self.ae.decoder.to(x.device)
-
-        x = unpack(x.float(), height, width)
-        with torch.autocast(device_type=self.torch_device.type, dtype=torch.bfloat16):
-            x = self.ae.decode(x)
-
-        torch.cuda.empty_cache()
-        # Process and display result
-        x = x.clamp(-1, 1)
-        # x = embed_watermark(x.float())
-        x = rearrange(x[0], "c h w -> h w c")
-        inpainted_image: Image.Image = Image.fromarray((127.5 * (x + 1.0)).cpu().byte().numpy())
-        return inpainted_image
+        return result.images[0]

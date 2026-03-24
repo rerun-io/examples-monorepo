@@ -31,7 +31,3 @@ ignore = [
     "F821",  # Forward annotation false positive from jaxtyping. Should be caught by pyright.
     "UP037", # Remove quotes from type, false positive when using jaxtyping
 ]
-
-[tool.ruff.lint.per-file-ignores]
-# Vendored Flux code — suppress style/unused warnings
-"src/vistadream/flux/**" = ["SIM102", "SIM108", "F401", "B006", "B026", "B905", "E741", "F841"]
