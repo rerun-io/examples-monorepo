@@ -325,13 +325,13 @@ def run_rig_recon(*, config: RigReconConfig) -> RigReconResult:
 
     # -- 5. Sequential matching (ALIKED_LIGHTGLUE, no rig) --------------------
     matching_options: pycolmap.FeatureMatchingOptions = pycolmap.FeatureMatchingOptions()
-    matching_options.type = pycolmap.FeatureMatcherType.ALIKED_LIGHTGLUE
+    matching_options.type = pycolmap.FeatureMatcherType.ALIKED_LIGHTGLUE  # Neural matcher paired with ALIKED features.
     matching_options.use_gpu = config.use_gpu
     matching_options.gpu_index = "0"
 
     pairing_options: pycolmap.SequentialPairingOptions = pycolmap.SequentialPairingOptions()
-    pairing_options.overlap = config.overlap
-    pairing_options.quadratic_overlap = False
+    pairing_options.overlap = config.overlap  # Match each image against this many neighbors in sequence.
+    pairing_options.quadratic_overlap = False  # Skip quadratically-spaced far-apart matches (not needed here).
 
     logger.info("Sequential matching (ALIKED_LIGHTGLUE, overlap=%d, no rig) ...", config.overlap)
     pycolmap.match_sequential(
@@ -370,14 +370,21 @@ def run_rig_recon(*, config: RigReconConfig) -> RigReconResult:
 
     # -- 8. Rig-aware sequential matching (expand_rig_images) -----------------
     rig_matching_options: pycolmap.FeatureMatchingOptions = pycolmap.FeatureMatchingOptions()
-    rig_matching_options.type = pycolmap.FeatureMatcherType.ALIKED_LIGHTGLUE
+    rig_matching_options.type = pycolmap.FeatureMatcherType.ALIKED_LIGHTGLUE  # Neural matcher paired with ALIKED features.
     rig_matching_options.use_gpu = config.use_gpu
     rig_matching_options.gpu_index = "0"
+    # Allow matching images that share the same rig-frame timestamp (cross-camera
+    # pairs like cam1/image0001 ↔ cam2/image0001).  Without this, same-frame
+    # pairs are skipped and rig cameras would never be directly linked.
     rig_matching_options.skip_image_pairs_in_same_frame = False
 
     rig_pairing_options: pycolmap.SequentialPairingOptions = pycolmap.SequentialPairingOptions()
-    rig_pairing_options.overlap = config.overlap
-    rig_pairing_options.quadratic_overlap = False
+    rig_pairing_options.overlap = config.overlap  # Match each image against this many neighbors in sequence.
+    rig_pairing_options.quadratic_overlap = False  # Skip quadratically-spaced far-apart matches (not needed here).
+    # When matching image N, also match against ALL cameras in neighboring rig
+    # frames — not just the same camera.  e.g. cam1/image0005 gets matched
+    # against cam2/image0004, cam3/image0006, etc.  This produces the cross-camera
+    # pairs that let the global mapper enforce rig constraints.
     rig_pairing_options.expand_rig_images = True
 
     logger.info("Rig-aware sequential matching (expand_rig_images=True) ...")
