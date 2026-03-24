@@ -79,7 +79,7 @@ This means beartype only runs in `*-dev` environments. No try/except needed sinc
 Each package follows roughly:
 ```
 packages/<name>/
-  pyproject.toml          # [project], [build-system], [tool.ruff], [tool.pyrefly]
+  pyproject.toml          # [project], [build-system], [tool.ruff]
   <module>/
     __init__.py           # Beartype activation (conditional on PIXI_DEV_MODE)
     apis/                 # High-level inference interfaces
@@ -89,6 +89,9 @@ packages/<name>/
   tools/                  # CLI scripts (demos/ and apps/ subdirs)
   tests/
 ```
+
+`pyrefly` config is monorepo-wide and lives only in the root `pyrefly.toml`. Do not add
+`[tool.pyrefly]` to per-package `pyproject.toml` files.
 
 ### Key External Dependencies
 

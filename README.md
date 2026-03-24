@@ -24,6 +24,21 @@ pixi run -e robocap-dev typecheck  # Typecheck
 pixi run -e robocap-dev tests      # Run tests
 ```
 
+### CUDA driver troubleshooting
+
+GPU environments require CUDA 12.9. If `pixi install` fails with `Virtual package '__cuda >=12.9' does not match`, your NVIDIA driver is too old.
+
+**Workaround** (no reboot):
+```bash
+export CONDA_OVERRIDE_CUDA=12.9
+pixi install -a
+```
+
+**Proper fix** — upgrade your NVIDIA driver to one that reports CUDA 12.9+ (check with `nvidia-smi`). On Ubuntu:
+```bash
+sudo apt install nvidia-driver-590-open && sudo reboot
+```
+
 ## Listing tasks
 
 Use `-e` to filter tasks by environment (recommended — without it you see all tasks):
@@ -181,11 +196,11 @@ pixi run -e robocap-dev typecheck
 
 ```
 pixi.toml                         # Workspace manifest (features, envs, tasks, deps)
-pyrefly.toml                      # Root pyrefly config (for IDE/Zed LSP)
+pyrefly.toml                      # Root pyrefly config (single source of truth for IDE + tasks)
 .gitignore                        # Merged patterns from all packages
 packages/
   monoprior/
-    pyproject.toml                # [project] + [tool.ruff] + [tool.pyrefly] (no pixi config)
+    pyproject.toml                # [project] + build backend + [tool.ruff] (no per-package pyrefly)
     monopriors/                   # Python package (includes monopriors/data/ submodule)
     tools/                        # CLI scripts
     tests/
@@ -210,6 +225,10 @@ packages/
     tools/
     tests/
 ```
+
+`pyrefly` is configured only at the repo root. Package-local `pyproject.toml` files should not
+define `[tool.pyrefly]`; per-package typecheck tasks point `pyrefly` at the root `pyrefly.toml`
+explicitly.
 
 ## Adding a new package
 
