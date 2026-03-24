@@ -19,7 +19,7 @@ description1 = """
         <img src="https://www.obukhov.ai/img/badges/badge-social.svg" alt="social">
     </a>
 """
-description2 = "Ussing Segment Anything 2 to annotate multiple images with ease"
+description2 = "Using Segment Anything 2 to annotate multiple images with ease"
 
 with gr.Blocks() as demo:
     gr.Markdown(title)
