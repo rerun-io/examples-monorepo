@@ -17,7 +17,6 @@ fsspec = ">=2025.3"
 # ─── common feature (shared loose base deps) ───────────────────────────────
 [feature.common.dependencies]
 av = "*"
-rerun-sdk = "==0.30.2"
 py-opencv = "*"
 numpy = "*"
 pyserde = ">=0.20,<0.30"
@@ -34,6 +33,7 @@ xorg-libx11 = "*"
 xorg-xorgproto = "*"
 
 [feature.common.pypi-dependencies]
+rerun-sdk = "==0.30.2"
 gradio = "==6.8.0"
 gradio-rerun = "==0.30.2"
 simplecv = { git = "https://github.com/pablovela5620/simplecv.git", tag = "v0.7.2" }
@@ -580,6 +580,7 @@ description = "Launch VistaDream Gradio web interface"
 dev = { features = [
     "ide",
     "dev",
+    "common",
 ], solve-group = "dev", no-default-feature = true }
 monoprior = { features = [
     "common",
