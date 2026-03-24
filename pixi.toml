@@ -580,6 +580,7 @@ description = "Launch VistaDream Gradio web interface"
 dev = { features = [
     "ide",
     "dev",
+    "common",
 ], solve-group = "dev", no-default-feature = true }
 monoprior = { features = [
     "common",
