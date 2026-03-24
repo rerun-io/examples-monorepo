@@ -23,6 +23,7 @@ import numpy as np
 from jaxtyping import Float32, Float64, UInt8
 from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
+from simplecv.video_io import MultiVideoReader
 
 if TYPE_CHECKING:
     import pycolmap
@@ -157,47 +158,35 @@ def extract_synchronized_frames(
     Raises:
         RuntimeError: If a video cannot be opened or has zero frames.
     """
-    # Determine frame count from the shortest video.
-    total_frames_per_video: list[int] = []
-    for _cam_name, video_path in videos:
-        cap: cv2.VideoCapture = cv2.VideoCapture(str(video_path))
-        if not cap.isOpened():
-            msg: str = f"Cannot open video: {video_path}"
-            raise RuntimeError(msg)
-        total: int = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if total <= 0:
-            msg = f"Video has zero frames: {video_path}"
-            raise RuntimeError(msg)
-        total_frames_per_video.append(total)
-        cap.release()
+    video_paths: list[Path] = [path for _, path in videos]
+    camera_names: list[str] = [name for name, _ in videos]
+    reader: MultiVideoReader = MultiVideoReader(video_paths)
 
-    min_total: int = min(total_frames_per_video)
-    actual_num_frames: int = min(num_frames, min_total)
-    frame_indices: list[int] = np.linspace(0, min_total - 1, actual_num_frames, dtype=int).tolist()
+    total_frames: int = len(reader)
+    actual_num_frames: int = min(num_frames, total_frames)
+    frame_indices: list[int] = np.linspace(0, total_frames - 1, actual_num_frames, dtype=int).tolist()
     pad_width: int = len(str(actual_num_frames))
 
     logger.info(
-        "Extracting %d frames from %d videos (shortest has %d frames)", actual_num_frames, len(videos), min_total
+        "Extracting %d frames from %d videos (%d synchronized frames available)",
+        actual_num_frames,
+        len(videos),
+        total_frames,
     )
 
-    for cam_name, video_path in videos:
+    # Create output directories for each camera.
+    cam_dirs: list[Path] = []
+    for cam_name in camera_names:
         cam_dir: Path = output_images_dir / rig_name / cam_name
         cam_dir.mkdir(parents=True, exist_ok=True)
+        cam_dirs.append(cam_dir)
 
-        cap = cv2.VideoCapture(str(video_path))
-        for out_idx, frame_idx in enumerate(frame_indices):
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-            ret: bool
-            frame: UInt8[ndarray, "H W 3"]
-            ret, frame = cap.read()
-            if not ret:
-                msg = f"Failed to read frame {frame_idx} from {video_path}"
-                raise RuntimeError(msg)
-
-            # One-based, zero-padded filename: image0001.jpg, image0002.jpg, ...
-            filename: str = f"image{out_idx + 1:0{pad_width}d}.jpg"
-            cv2.imwrite(str(cam_dir / filename), frame)
-        cap.release()
+    # Extract frames using random access (MultiVideoReader.__getitem__).
+    for out_idx, frame_idx in enumerate(frame_indices):
+        bgr_list: list[UInt8[ndarray, "H W 3"]] = reader[frame_idx]
+        filename: str = f"image{out_idx + 1:0{pad_width}d}.jpg"
+        for cam_idx, bgr in enumerate(bgr_list):
+            cv2.imwrite(str(cam_dirs[cam_idx] / filename), bgr)
 
     logger.info("Wrote frames to %s", output_images_dir / rig_name)
     return actual_num_frames
