@@ -68,7 +68,7 @@ libcusolver-dev = "*"
 cusparselt = "*"
 libnvjitlink = "*"
 # PyTorch
-pytorch-gpu = ">=2.10.0"
+pytorch-gpu = ">=2.8.0"
 torchvision = "*"
 
 # ─── ide feature (standalone dev env for Zed/IDE tooling) ────────────────────
@@ -519,6 +519,7 @@ brush = "==0.3.0"
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.vistadream.dependencies]
 python = "3.12.*"
+pytorch-gpu = ">=2.10.0"  # tightens shared cuda floor; needed by Flux/diffusers
 cmake = ">=4.0.3,<5"
 open3d = ">=0.19.0,<0.20"
 scikit-learn = ">=1.7.1,<2"
