@@ -499,11 +499,6 @@ def log_rig_reconstruction(result: RigReconResult, parent_log_path: Path) -> Non
 
     max_frames: int = max((len(imgs) for imgs in cam_images.values()), default=0)
 
-    # -- Color the reference camera green so it's easy to identify ------------
-    for cam_name in result.camera_names:
-        color: list[int] = [0, 200, 0] if cam_name == result.ref_camera else [200, 200, 200]
-        rr.log(f"{parent_log_path}/{cam_name}/pinhole", [rr.components.Color(color)], static=True)
-
     # -- Log per-camera data over timeline ------------------------------------
     for frame_idx in range(max_frames):
         rr.set_time(TIMELINE, sequence=frame_idx)
@@ -528,12 +523,19 @@ def log_rig_reconstruction(result: RigReconResult, parent_log_path: Path) -> Non
 
             rr.log(camera_path, rr.Transform3D(mat3x3=world_T_cam[:3, :3], translation=world_T_cam[:3, 3]))
 
-            # Pinhole camera
+            # Pinhole camera — ref camera is green, others are gray.
             cam: pycolmap.Camera = image.camera
             K: Float64[ndarray, "3 3"] = _extract_intrinsics(cam)
+            frustum_color: list[int] = [0, 200, 0] if cam_name == result.ref_camera else [200, 200, 200]
             rr.log(
                 f"{camera_path}/pinhole",
-                rr.Pinhole(image_from_camera=K, width=cam.width, height=cam.height, image_plane_distance=1.0),
+                rr.Pinhole(
+                    image_from_camera=K,
+                    width=cam.width,
+                    height=cam.height,
+                    image_plane_distance=1.0,
+                    color=frustum_color,
+                ),
             )
 
             # Image
