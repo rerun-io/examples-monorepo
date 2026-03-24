@@ -465,8 +465,10 @@ def create_rig_blueprint(parent_log_path: Path, camera_names: list[str]) -> rrb.
 def log_rig_reconstruction(result: RigReconResult, parent_log_path: Path) -> None:
     """Load the final rig reconstruction and log it to Rerun.
 
-    Logs 3D point cloud (static), then per-camera frustums, images, and
-    keypoints over a timeline.
+    Computes a gravity-alignment transform using ``auto_orient_and_center_poses``
+    and logs it on the parent entity so that all cameras and points appear
+    upright.  Then logs the 3D point cloud (static) and per-camera frustums,
+    images, and keypoints over a timeline.
 
     Args:
         result: Pipeline result with paths to outputs.
@@ -474,10 +476,36 @@ def log_rig_reconstruction(result: RigReconResult, parent_log_path: Path) -> Non
     """
     import pycolmap
     import rerun as rr
+    from simplecv.camera_orient_utils import auto_orient_and_center_poses
+    from simplecv.ops.conventions import CameraConventions as CC
+    from simplecv.ops.conventions import convert_pose
 
     from pysfm.apis.sfm_reconstruction import _extract_intrinsics, _extract_visible_keypoints
 
     rec: pycolmap.Reconstruction = pycolmap.Reconstruction(str(result.rig_model_dir))
+
+    # -- Compute gravity-alignment transform from all camera poses ------------
+    # Collect world_T_cam matrices in CV convention (COLMAP native).
+    world_T_cam_list: list[Float64[ndarray, "4 4"]] = []
+    for image in rec.images.values():
+        world_from_cam: pycolmap.Rigid3d = image.cam_from_world().inverse()
+        world_T_cam: Float64[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
+        world_T_cam[:3, :3] = world_from_cam.rotation.matrix()
+        world_T_cam[:3, 3] = world_from_cam.translation
+        world_T_cam_list.append(world_T_cam)
+
+    world_T_cam_batch: Float64[ndarray, "N 4 4"] = np.stack(world_T_cam_list)
+
+    # auto_orient_and_center_poses requires GL convention.
+    world_T_cam_gl: Float64[ndarray, "N 4 4"] = convert_pose(world_T_cam_batch, CC.CV, CC.GL)
+    orient_result = auto_orient_and_center_poses(world_T_cam_gl, method="up", center_method="poses")
+    orient_transform: Float64[ndarray, "3 4"] = orient_result.transform
+
+    # Log the orientation transform on the parent entity — Rerun applies it to
+    # all children (cameras, point cloud) automatically.
+    orient_R: Float64[ndarray, "3 3"] = orient_transform[:3, :3]
+    orient_t: Float64[ndarray, "3"] = orient_transform[:3, 3]
+    rr.log(f"{parent_log_path}", rr.Transform3D(mat3x3=orient_R, translation=orient_t), static=True)
 
     # -- Static 3D point cloud ------------------------------------------------
     xyz_list: list[Float64[ndarray, "3"]] = []
@@ -609,7 +637,8 @@ def main(cli_config: RigReconCLIConfig) -> None:
         collapse_panels=True,
     )
     rr.send_blueprint(blueprint)
-    rr.log(f"{parent_log_path}", rr.ViewCoordinates.RDF, static=True)
+    # RFU = Right-Forward-Up (Z-up), matching auto_orient_and_center_poses output.
+    rr.log("/", rr.ViewCoordinates.RFU, static=True)
 
     # 3. Log the reconstruction
     log_rig_reconstruction(result, parent_log_path)
