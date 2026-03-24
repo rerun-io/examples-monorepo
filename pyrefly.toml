@@ -32,10 +32,9 @@ search-path = [
 # any import regardless of which package file is open.
 # Requires all *-dev envs installed (pixi install -a)
 site-package-path = [
-    # dev env has common deps (rerun, numpy, etc.) — always install this first:
-    # pixi install -e dev
-    ".pixi/envs/dev/lib/python3.12/site-packages",
-    # Per-package envs for package-specific deps
+    # Per-package envs for package-specific deps.
+    # Common deps (rerun, numpy, etc.) are resolved from the python-interpreter-path
+    # (dev env) automatically — no need to list .pixi/envs/dev here.
     ".pixi/envs/monoprior-dev/lib/python3.12/site-packages",
     ".pixi/envs/prompt-da-dev/lib/python3.12/site-packages",
     ".pixi/envs/wilor-dev/lib/python3.12/site-packages",
