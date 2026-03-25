@@ -513,7 +513,7 @@ def log_rig_reconstruction(result: RigReconResult, parent_log_path: Path) -> Non
         ).transform
         orient_R: Float64[ndarray, "3 3"] = orient_transform[:3, :3]
         orient_t: Float64[ndarray, "3"] = orient_transform[:3, 3]
-        rr.log("/", rr.Transform3D(mat3x3=orient_R, translation=orient_t), static=True)
+        rr.log(f"{parent_log_path}", rr.Transform3D(mat3x3=orient_R, translation=orient_t), static=True)
 
     # -- Static 3D point cloud ------------------------------------------------
     xyz_list: list[Float64[ndarray, "3"]] = []
@@ -645,7 +645,7 @@ def main(cli_config: RigReconCLIConfig) -> None:
         collapse_panels=True,
     )
     rr.send_blueprint(blueprint)
-    rr.log(f"{parent_log_path}", rr.ViewCoordinates.RDF, static=True)
+    rr.log("/", rr.ViewCoordinates.RFU, static=True)
 
     # 3. Log the reconstruction
     log_rig_reconstruction(result, parent_log_path)
