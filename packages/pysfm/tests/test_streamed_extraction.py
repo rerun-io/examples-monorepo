@@ -127,18 +127,14 @@ def _compare_databases(
         images_b: list[pycolmap.Image] = db_b.read_all_images()
 
         # Same number of images
-        assert len(images_a) == len(images_b), (
-            f"Image count mismatch: {len(images_a)} vs {len(images_b)}"
-        )
+        assert len(images_a) == len(images_b), f"Image count mismatch: {len(images_a)} vs {len(images_b)}"
 
         # Sort by name for stable comparison
         images_a.sort(key=lambda img: img.name)
         images_b.sort(key=lambda img: img.name)
 
         for img_a, img_b in zip(images_a, images_b, strict=True):
-            assert img_a.name == img_b.name, (
-                f"Image name mismatch: {img_a.name} vs {img_b.name}"
-            )
+            assert img_a.name == img_b.name, f"Image name mismatch: {img_a.name} vs {img_b.name}"
 
             # Compare keypoints
             kps_a: Float32[ndarray, "N_a C_a"] = db_a.read_keypoints(img_a.image_id)
@@ -150,12 +146,14 @@ def _compare_databases(
 
             if keypoint_atol == 0.0:
                 np.testing.assert_array_equal(
-                    kps_a, kps_b,
+                    kps_a,
+                    kps_b,
                     err_msg=f"Keypoints differ for {img_a.name}",
                 )
             else:
                 np.testing.assert_allclose(
-                    kps_a, kps_b,
+                    kps_a,
+                    kps_b,
                     atol=keypoint_atol,
                     err_msg=f"Keypoints differ for {img_a.name}",
                 )
@@ -165,11 +163,11 @@ def _compare_databases(
             descs_b: pycolmap.FeatureDescriptors = db_b.read_descriptors(img_b.image_id)
 
             assert descs_a.data.shape == descs_b.data.shape, (
-                f"Descriptor shape mismatch for {img_a.name}: "
-                f"{descs_a.data.shape} vs {descs_b.data.shape}"
+                f"Descriptor shape mismatch for {img_a.name}: {descs_a.data.shape} vs {descs_b.data.shape}"
             )
             np.testing.assert_array_equal(
-                descs_a.data, descs_b.data,
+                descs_a.data,
+                descs_b.data,
                 err_msg=f"Descriptors differ for {img_a.name}",
             )
 
