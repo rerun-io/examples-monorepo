@@ -386,7 +386,9 @@ def run_rig_recon(*, config: RigReconConfig) -> RigReconResult:
 
     # -- 8. Rig-aware sequential matching (expand_rig_images) -----------------
     rig_matching_options: pycolmap.FeatureMatchingOptions = pycolmap.FeatureMatchingOptions()
-    rig_matching_options.type = pycolmap.FeatureMatcherType.ALIKED_LIGHTGLUE  # Neural matcher paired with ALIKED features.
+    rig_matching_options.type = (
+        pycolmap.FeatureMatcherType.ALIKED_LIGHTGLUE
+    )  # Neural matcher paired with ALIKED features.
     rig_matching_options.use_gpu = config.use_gpu
     rig_matching_options.gpu_index = "0"
     # Allow matching images that share the same rig-frame timestamp (cross-camera
@@ -527,7 +529,9 @@ def log_rig_reconstruction(result: RigReconResult, parent_log_path: Path) -> Non
 
     if world_T_cam_all:
         world_T_cam_batch: Float64[ndarray, "N 4 4"] = np.stack(world_T_cam_all)
-        world_T_cam_gl: Float64[ndarray, "N 4 4"] = convert_pose(world_T_cam_batch, CameraConventions.CV, CameraConventions.GL)
+        world_T_cam_gl: Float64[ndarray, "N 4 4"] = convert_pose(
+            world_T_cam_batch, CameraConventions.CV, CameraConventions.GL
+        )
         orient_34: Float64[ndarray, "3 4"] = auto_orient_and_center_poses(
             world_T_cam_gl, method="up", center_method="poses"
         ).transform
