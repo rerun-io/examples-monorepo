@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Literal, TypeAlias
 
 import cv2
 import numpy as np
+import rerun.blueprint as rrb
 from jaxtyping import Float32, Float64, UInt8
 from numpy import ndarray
 from serde import field, serde
@@ -32,7 +33,6 @@ from pysfm.streamed_pipeline import compare_databases, extract_features_streamed
 
 if TYPE_CHECKING:
     import pycolmap
-    import rerun.blueprint as rrb
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -487,8 +487,6 @@ def create_rig_blueprint(parent_log_path: Path, camera_names: list[str]) -> rrb.
     Returns:
         Rerun blueprint layout.
     """
-    import rerun.blueprint as rrb
-
     # Origin must be an ancestor of parent_log_path (not parent_log_path
     # itself) so that the gravity-alignment Transform3D logged on
     # parent_log_path is visible in the view.
@@ -681,7 +679,6 @@ class RigReconCLIConfig:
 def main(cli_config: RigReconCLIConfig) -> None:
     """Run the unknown-rig pipeline and visualize results in Rerun."""
     import rerun as rr
-    import rerun.blueprint as rrb
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
