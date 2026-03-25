@@ -23,6 +23,8 @@ from jaxtyping import Float32, Float64, UInt8
 from numpy import ndarray
 from serde import field, serde
 from serde.json import to_json
+from simplecv.camera_orient_utils import auto_orient_and_center_poses
+from simplecv.ops.conventions import CameraConventions, convert_pose
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.video_io import MultiVideoReader
 
@@ -460,9 +462,12 @@ def create_rig_blueprint(parent_log_path: Path, camera_names: list[str]) -> rrb.
     """
     import rerun.blueprint as rrb
 
+    # Origin must be an ancestor of parent_log_path (not parent_log_path
+    # itself) so that the gravity-alignment Transform3D logged on
+    # parent_log_path is visible in the view.
     view_3d: rrb.Spatial3DView = rrb.Spatial3DView(
-        origin=f"{parent_log_path}",
-        contents=["+ $origin/**"],
+        origin="/",
+        contents=[f"+ {parent_log_path}/**"],
     )
 
     # 2D view for the first camera — user can switch via entity panel.
@@ -480,6 +485,19 @@ def create_rig_blueprint(parent_log_path: Path, camera_names: list[str]) -> rrb.
 def log_rig_reconstruction(result: RigReconResult, parent_log_path: Path) -> None:
     """Load the final rig reconstruction and log it to Rerun.
 
+    Computes a gravity-alignment transform from the camera poses using
+    ``auto_orient_and_center_poses`` (method="up") and logs it as a static
+    ``Transform3D`` on ``parent_log_path``.  Rerun's transform hierarchy then
+    applies it to the entire scene (point cloud, camera frustums, images,
+    keypoints).
+
+    .. note::
+
+        The Spatial3DView **must** have its ``origin`` set to an ancestor of
+        ``parent_log_path`` (e.g. ``"/"``) for the gravity-alignment transform
+        to be visible.  If ``origin`` equals ``parent_log_path``, the view
+        renders from that entity's perspective and the transform is invisible.
+
     Logs 3D point cloud (static), then per-camera frustums, images, and
     keypoints over a timeline.
 
@@ -493,6 +511,34 @@ def log_rig_reconstruction(result: RigReconResult, parent_log_path: Path) -> Non
     from pysfm.apis.sfm_reconstruction import _extract_intrinsics, _extract_visible_keypoints
 
     rec: pycolmap.Reconstruction = pycolmap.Reconstruction(str(result.rig_model_dir))
+
+    # -- Compute gravity-alignment transform from camera poses ----------------
+    # Extract all world_T_cam poses, convert CV→GL (required by
+    # auto_orient_and_center_poses), then log the resulting rotation+centering
+    # as a static Transform3D on parent_log_path so that Rerun's hierarchy
+    # applies it to all children (point cloud, cameras, etc.).
+    world_T_cam_all: list[Float64[ndarray, "4 4"]] = []
+    for image in rec.images.values():
+        world_from_cam: pycolmap.Rigid3d = image.cam_from_world().inverse()
+        world_T_cam_cv: Float64[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
+        world_T_cam_cv[:3, :3] = world_from_cam.rotation.matrix()
+        world_T_cam_cv[:3, 3] = world_from_cam.translation
+        world_T_cam_all.append(world_T_cam_cv)
+
+    if world_T_cam_all:
+        world_T_cam_batch: Float64[ndarray, "N 4 4"] = np.stack(world_T_cam_all)
+        world_T_cam_gl: Float64[ndarray, "N 4 4"] = convert_pose(world_T_cam_batch, CameraConventions.CV, CameraConventions.GL)
+        orient_34: Float64[ndarray, "3 4"] = auto_orient_and_center_poses(
+            world_T_cam_gl, method="up", center_method="poses"
+        ).transform
+        orient_R: Float64[ndarray, "3 3"] = orient_34[:, :3]
+        orient_t: Float64[ndarray, "3"] = orient_34[:, 3]
+        rr.log(
+            f"{parent_log_path}",
+            rr.Transform3D(mat3x3=orient_R, translation=orient_t),
+            static=True,
+        )
+        logger.info("Gravity-alignment transform logged on '%s' (det=%.4f)", parent_log_path, np.linalg.det(orient_R))
 
     # -- Static 3D point cloud ------------------------------------------------
     xyz_list: list[Float64[ndarray, "3"]] = []
@@ -509,7 +555,6 @@ def log_rig_reconstruction(result: RigReconResult, parent_log_path: Path) -> Non
             rr.Points3D(
                 positions=points3d_xyz,
                 colors=points3d_rgb,
-                # radii=np.full(points3d_xyz.shape[0], 0.005, dtype=np.float32),
             ),
             static=True,
         )
@@ -543,14 +588,12 @@ def log_rig_reconstruction(result: RigReconResult, parent_log_path: Path) -> Non
             _image_id, image = cam_images[cam_name][frame_idx]
             camera_path: str = f"{parent_log_path}/{cam_name}"
 
-            # Transform (world_T_cam)
+            # Transform (world_T_cam) — raw COLMAP pose; gravity-alignment
+            # is handled by the parent Transform3D on parent_log_path.
             world_from_cam: pycolmap.Rigid3d = image.cam_from_world().inverse()
-            R: Float64[ndarray, "3 3"] = world_from_cam.rotation.matrix()
-            t: Float64[ndarray, "3"] = world_from_cam.translation
-
             world_T_cam: Float64[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
-            world_T_cam[:3, :3] = R
-            world_T_cam[:3, 3] = t
+            world_T_cam[:3, :3] = world_from_cam.rotation.matrix()
+            world_T_cam[:3, 3] = world_from_cam.translation
 
             rr.log(camera_path, rr.Transform3D(mat3x3=world_T_cam[:3, :3], translation=world_T_cam[:3, 3]))
 
@@ -624,7 +667,8 @@ def main(cli_config: RigReconCLIConfig) -> None:
         collapse_panels=True,
     )
     rr.send_blueprint(blueprint)
-    rr.log(f"{parent_log_path}", rr.ViewCoordinates.RDF, static=True)
+    # Gravity-aligned data has Z-up; tell the viewer accordingly.
+    rr.log("/", rr.ViewCoordinates.RFU, static=True)
 
     # 3. Log the reconstruction
     log_rig_reconstruction(result, parent_log_path)
