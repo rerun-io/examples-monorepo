@@ -182,6 +182,8 @@ def main() -> gr.Blocks:
     )
 
     with gr.Blocks() as demo:
+        demo.allowed_paths = [str(EXAMPLE_DATA_DIR)]
+
         # Session state
         recording_id = gr.State(uuid.uuid4())
         video_path_state: gr.State = gr.State(None)

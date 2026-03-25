@@ -501,6 +501,11 @@ cmd = "python tools/nodes/video_to_image_app.py"
 cwd = "packages/pysfm"
 description = "Launch Video-to-Image frame extraction Gradio app with Rerun viewer"
 
+[feature.pysfm.tasks.pysfm-video-node]
+cmd = "gradio tools/nodes/video_to_image_app.py --watch-dirs $PIXI_PROJECT_ROOT/packages/pysfm/pysfm"
+cwd = "packages/pysfm"
+description = "Video-to-Image Gradio app with hot reload"
+
 [feature.pysfm.tasks.video-to-image-demo]
 cmd = "python tools/demos/video_to_image.py --video-path data/examples/unknown-rig/cam1.mp4 --output-dir /tmp/video_to_image_output"
 cwd = "packages/pysfm"
