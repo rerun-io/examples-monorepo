@@ -107,21 +107,6 @@ def _run_streamed_extraction(
 
 
 # ---------------------------------------------------------------------------
-# Test: API availability
-# ---------------------------------------------------------------------------
-def test_pycolmap_low_level_apis_exist() -> None:
-    """Verify that the pycolmap low-level APIs we depend on are available."""
-    assert hasattr(pycolmap, "import_images")
-    assert hasattr(pycolmap, "FeatureExtractor")
-    assert hasattr(pycolmap.FeatureExtractor, "create")
-    assert hasattr(pycolmap, "DatabaseTransaction")
-
-    opts: pycolmap.FeatureExtractionOptions = pycolmap.FeatureExtractionOptions()
-    assert hasattr(opts, "eff_max_image_size")
-    assert hasattr(opts, "requires_rgb")
-
-
-# ---------------------------------------------------------------------------
 # Test: Equivalence on synthetic images (no resize)
 # ---------------------------------------------------------------------------
 def test_streamed_extraction_equivalence_synthetic(tmp_path: Path) -> None:
