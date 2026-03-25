@@ -15,10 +15,11 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypeAlias
+from typing import Literal, TypeAlias
 
 import cv2
 import numpy as np
+import pycolmap
 import rerun.blueprint as rrb
 from jaxtyping import Float32, Float64, UInt8
 from numpy import ndarray
@@ -30,9 +31,6 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.video_io import MultiVideoReader
 
 from pysfm.streamed_pipeline import compare_databases, extract_features_streamed
-
-if TYPE_CHECKING:
-    import pycolmap
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -283,8 +281,6 @@ def run_rig_recon(*, config: RigReconConfig) -> RigReconResult:
     Returns:
         Result containing paths to all outputs.
     """
-    import pycolmap
-
     # -- Resolve output paths -------------------------------------------------
     output_dir: Path = config.output_dir if config.output_dir is not None else config.videos_dir / "output"
     images_dir: Path = output_dir / "images"
@@ -530,7 +526,6 @@ def log_rig_reconstruction(result: RigReconResult, parent_log_path: Path) -> Non
         result: Pipeline result with paths to outputs.
         parent_log_path: Root Rerun log path.
     """
-    import pycolmap
     import rerun as rr
 
     from pysfm.apis.sfm_reconstruction import _extract_intrinsics, _extract_visible_keypoints

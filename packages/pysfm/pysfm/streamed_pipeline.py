@@ -14,14 +14,11 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import numpy as np
+import pycolmap
 from jaxtyping import Float32, UInt8
 from numpy import ndarray
-
-if TYPE_CHECKING:
-    import pycolmap
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -70,8 +67,6 @@ def _maybe_rescale_bitmap(
         (a clone is made first).  Scale factors map from rescaled coordinates
         back to the original resolution (1.0 when no resizing is performed).
     """
-    import pycolmap as _pycolmap  # noqa: F811 — runtime import
-
     if max_image_size <= 0:
         return bitmap, 1.0, 1.0
 
@@ -87,7 +82,7 @@ def _maybe_rescale_bitmap(
     new_w: int = int(orig_w * scale)
     new_h: int = int(orig_h * scale)
 
-    rescaled: _pycolmap.Bitmap = bitmap.clone()
+    rescaled: pycolmap.Bitmap = bitmap.clone()
     rescaled.rescale(new_w, new_h)
 
     scale_x: float = orig_w / new_w
@@ -124,8 +119,6 @@ def extract_features_streamed(
         reader_options: Image reader configuration.
         extraction_options: Feature extraction configuration.
     """
-    import pycolmap
-
     # -- Phase 1: Import images (camera models, EXIF) without extraction -----
     # Create database if it does not exist (extract_features does this
     # automatically, but import_images requires an existing file).
@@ -229,8 +222,6 @@ def compare_databases(
     Raises:
         AssertionError: If the databases differ.
     """
-    import pycolmap
-
     with pycolmap.Database.open(db_path_a) as db_a, pycolmap.Database.open(db_path_b) as db_b:
         images_a: list[pycolmap.Image] = db_a.read_all_images()
         images_b: list[pycolmap.Image] = db_b.read_all_images()
