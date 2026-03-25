@@ -79,8 +79,9 @@ def _maybe_rescale_bitmap(
 
     scale: float = max_image_size / max_dim
     # COLMAP uses static_cast<int> which truncates (floors toward zero).
-    new_w: int = int(orig_w * scale)
-    new_h: int = int(orig_h * scale)
+    # Clamp to at least 1 to avoid zero-size resize and division-by-zero.
+    new_w: int = max(1, int(orig_w * scale))
+    new_h: int = max(1, int(orig_h * scale))
 
     rescaled: pycolmap.Bitmap = bitmap.clone()
     rescaled.rescale(new_w, new_h)
@@ -220,29 +221,34 @@ def compare_databases(
         keypoint_atol: Absolute tolerance for keypoint position comparison.
 
     Raises:
-        AssertionError: If the databases differ.
+        ValueError: If image counts, names, or feature shapes differ.
+        AssertionError: If keypoint values or descriptors differ (via numpy).
     """
     with pycolmap.Database.open(db_path_a) as db_a, pycolmap.Database.open(db_path_b) as db_b:
         images_a: list[pycolmap.Image] = db_a.read_all_images()
         images_b: list[pycolmap.Image] = db_b.read_all_images()
 
         # Same number of images
-        assert len(images_a) == len(images_b), f"Image count mismatch: {len(images_a)} vs {len(images_b)}"
+        if len(images_a) != len(images_b):
+            msg: str = f"Image count mismatch: {len(images_a)} vs {len(images_b)}"
+            raise ValueError(msg)
 
         # Sort by name for stable comparison
         images_a.sort(key=lambda img: img.name)
         images_b.sort(key=lambda img: img.name)
 
         for img_a, img_b in zip(images_a, images_b, strict=True):
-            assert img_a.name == img_b.name, f"Image name mismatch: {img_a.name} vs {img_b.name}"
+            if img_a.name != img_b.name:
+                msg = f"Image name mismatch: {img_a.name} vs {img_b.name}"
+                raise ValueError(msg)
 
             # Compare keypoints
             kps_a: Float32[ndarray, "N_a C_a"] = db_a.read_keypoints(img_a.image_id)
             kps_b: Float32[ndarray, "N_b C_b"] = db_b.read_keypoints(img_b.image_id)
 
-            assert kps_a.shape == kps_b.shape, (
-                f"Keypoint shape mismatch for {img_a.name}: {kps_a.shape} vs {kps_b.shape}"
-            )
+            if kps_a.shape != kps_b.shape:
+                msg = f"Keypoint shape mismatch for {img_a.name}: {kps_a.shape} vs {kps_b.shape}"
+                raise ValueError(msg)
 
             if keypoint_atol == 0.0:
                 np.testing.assert_array_equal(
@@ -262,9 +268,9 @@ def compare_databases(
             descs_a: pycolmap.FeatureDescriptors = db_a.read_descriptors(img_a.image_id)
             descs_b: pycolmap.FeatureDescriptors = db_b.read_descriptors(img_b.image_id)
 
-            assert descs_a.data.shape == descs_b.data.shape, (
-                f"Descriptor shape mismatch for {img_a.name}: {descs_a.data.shape} vs {descs_b.data.shape}"
-            )
+            if descs_a.data.shape != descs_b.data.shape:
+                msg = f"Descriptor shape mismatch for {img_a.name}: {descs_a.data.shape} vs {descs_b.data.shape}"
+                raise ValueError(msg)
             np.testing.assert_array_equal(
                 descs_a.data,
                 descs_b.data,
