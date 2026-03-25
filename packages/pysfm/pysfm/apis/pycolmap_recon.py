@@ -23,6 +23,8 @@ from jaxtyping import Float32, Float64, UInt8
 from numpy import ndarray
 from serde import field, serde
 from serde.json import to_json
+from simplecv.camera_orient_utils import auto_orient_and_center_poses
+from simplecv.ops.conventions import CameraConventions, convert_pose
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.video_io import MultiVideoReader
 
@@ -493,6 +495,25 @@ def log_rig_reconstruction(result: RigReconResult, parent_log_path: Path) -> Non
     from pysfm.apis.sfm_reconstruction import _extract_intrinsics, _extract_visible_keypoints
 
     rec: pycolmap.Reconstruction = pycolmap.Reconstruction(str(result.rig_model_dir))
+
+    # -- Compute gravity-alignment transform from camera poses ----------------
+    world_T_cam_list: list[Float64[ndarray, "4 4"]] = []
+    for image in rec.images.values():
+        world_from_cam: pycolmap.Rigid3d = image.cam_from_world().inverse()
+        world_T_cam_cv: Float64[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
+        world_T_cam_cv[:3, :3] = world_from_cam.rotation.matrix()
+        world_T_cam_cv[:3, 3] = world_from_cam.translation
+        world_T_cam_list.append(world_T_cam_cv)
+
+    if world_T_cam_list:
+        world_T_cam_batch: Float64[ndarray, "N 4 4"] = np.stack(world_T_cam_list)
+        world_T_cam_gl: Float64[ndarray, "N 4 4"] = convert_pose(world_T_cam_batch, CameraConventions.CV, CameraConventions.GL)
+        orient_transform: Float64[ndarray, "3 4"] = auto_orient_and_center_poses(
+            world_T_cam_gl, method="up", center_method="poses"
+        ).transform
+        orient_R: Float64[ndarray, "3 3"] = orient_transform[:3, :3]
+        orient_t: Float64[ndarray, "3"] = orient_transform[:3, 3]
+        rr.log("/", rr.Transform3D(mat3x3=orient_R, translation=orient_t), static=True)
 
     # -- Static 3D point cloud ------------------------------------------------
     xyz_list: list[Float64[ndarray, "3"]] = []
