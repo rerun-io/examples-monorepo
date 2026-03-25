@@ -34,13 +34,15 @@ from pysfm.apis.video_to_image import (
 )
 
 # ---------------------------------------------------------------------------
-# Example data path
+# Example data
 # ---------------------------------------------------------------------------
 EXAMPLE_DATA_DIR: Final[Path] = Path(__file__).resolve().parents[3] / "data" / "examples" / "unknown-rig"
 """Path to bundled example videos.
 
-Note: .parents[3] navigates from pysfm/gradio_ui/nodes/video_to_image_ui.py
-up to the package root.
+Note: ``.parents[3]`` navigates from ``pysfm/gradio_ui/nodes/`` up to the
+package root.  ``set_static_paths`` lets Gradio serve these for thumbnail
+display; the preprocessing cache-security check is a separate concern handled
+at the ``launch(allowed_paths=...)`` level (non-hot-reload) or by uploading.
 """
 
 gr.set_static_paths([str(EXAMPLE_DATA_DIR)])
@@ -182,8 +184,6 @@ def main() -> gr.Blocks:
     )
 
     with gr.Blocks() as demo:
-        demo.allowed_paths = [str(EXAMPLE_DATA_DIR)]
-
         # Session state
         recording_id = gr.State(uuid.uuid4())
         video_path_state: gr.State = gr.State(None)
@@ -209,12 +209,9 @@ def main() -> gr.Blocks:
                     with gr.TabItem("Outputs", id="outputs"):
                         status_text = gr.Textbox(label="Status", interactive=False)
 
-                # Example videos
-                example_videos: list[list[str]] = [
-                    [str(EXAMPLE_DATA_DIR / "cam1.mp4")],
-                ]
+                # Bundled example videos
                 gr.Examples(
-                    examples=example_videos,
+                    examples=[[str(EXAMPLE_DATA_DIR / "cam1.mp4")]],
                     inputs=[input_video],
                     cache_examples=False,
                 )
