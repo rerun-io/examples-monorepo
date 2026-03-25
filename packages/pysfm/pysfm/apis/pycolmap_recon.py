@@ -15,10 +15,12 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypeAlias
+from typing import Literal, TypeAlias
 
 import cv2
 import numpy as np
+import pycolmap
+import rerun.blueprint as rrb
 from jaxtyping import Float32, Float64, UInt8
 from numpy import ndarray
 from serde import field, serde
@@ -28,9 +30,7 @@ from simplecv.ops.conventions import CameraConventions, convert_pose
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.video_io import MultiVideoReader
 
-if TYPE_CHECKING:
-    import pycolmap
-    import rerun.blueprint as rrb
+from pysfm.streamed_pipeline import compare_databases, extract_features_streamed
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -69,6 +69,10 @@ class RigReconConfig:
     """Use GPU for feature extraction and matching."""
     verbose: bool = False
     """Emit detailed COLMAP logging."""
+    validate: bool = False
+    """When True, run streamed implementations of pipeline stages alongside
+    the black-box pycolmap calls and assert equivalence.  Increases runtime
+    proportionally — intended for development and testing."""
 
 
 # ---------------------------------------------------------------------------
@@ -277,8 +281,6 @@ def run_rig_recon(*, config: RigReconConfig) -> RigReconResult:
     Returns:
         Result containing paths to all outputs.
     """
-    import pycolmap
-
     # -- Resolve output paths -------------------------------------------------
     output_dir: Path = config.output_dir if config.output_dir is not None else config.videos_dir / "output"
     images_dir: Path = output_dir / "images"
@@ -338,6 +340,25 @@ def run_rig_recon(*, config: RigReconConfig) -> RigReconResult:
         extraction_options=extraction_options,
     )
 
+    # -- 4b. Streamed extraction validation -----------------------------------
+    if config.validate:
+        validation_db_path: Path = output_dir / "database_validation.db"
+        if validation_db_path.exists():
+            validation_db_path.unlink()
+
+        logger.info("Running streamed feature extraction for validation ...")
+        pycolmap.set_random_seed(0)  # Reset for reproducibility
+        extract_features_streamed(
+            database_path=validation_db_path,
+            image_path=images_dir,
+            camera_mode=pycolmap.CameraMode.PER_FOLDER,
+            reader_options=reader_options,
+            extraction_options=extraction_options,
+        )
+
+        compare_databases(database_path, validation_db_path)
+        logger.info("Extraction validation passed — databases are equivalent.")
+
     # -- 5. Sequential matching (ALIKED_LIGHTGLUE, no rig) --------------------
     matching_options: pycolmap.FeatureMatchingOptions = pycolmap.FeatureMatchingOptions()
     matching_options.type = pycolmap.FeatureMatcherType.ALIKED_LIGHTGLUE  # Neural matcher paired with ALIKED features.
@@ -386,7 +407,9 @@ def run_rig_recon(*, config: RigReconConfig) -> RigReconResult:
 
     # -- 8. Rig-aware sequential matching (expand_rig_images) -----------------
     rig_matching_options: pycolmap.FeatureMatchingOptions = pycolmap.FeatureMatchingOptions()
-    rig_matching_options.type = pycolmap.FeatureMatcherType.ALIKED_LIGHTGLUE  # Neural matcher paired with ALIKED features.
+    rig_matching_options.type = (
+        pycolmap.FeatureMatcherType.ALIKED_LIGHTGLUE
+    )  # Neural matcher paired with ALIKED features.
     rig_matching_options.use_gpu = config.use_gpu
     rig_matching_options.gpu_index = "0"
     # Allow matching images that share the same rig-frame timestamp (cross-camera
@@ -460,8 +483,6 @@ def create_rig_blueprint(parent_log_path: Path, camera_names: list[str]) -> rrb.
     Returns:
         Rerun blueprint layout.
     """
-    import rerun.blueprint as rrb
-
     # Origin must be an ancestor of parent_log_path (not parent_log_path
     # itself) so that the gravity-alignment Transform3D logged on
     # parent_log_path is visible in the view.
@@ -505,7 +526,6 @@ def log_rig_reconstruction(result: RigReconResult, parent_log_path: Path) -> Non
         result: Pipeline result with paths to outputs.
         parent_log_path: Root Rerun log path.
     """
-    import pycolmap
     import rerun as rr
 
     from pysfm.apis.sfm_reconstruction import _extract_intrinsics, _extract_visible_keypoints
@@ -527,7 +547,9 @@ def log_rig_reconstruction(result: RigReconResult, parent_log_path: Path) -> Non
 
     if world_T_cam_all:
         world_T_cam_batch: Float64[ndarray, "N 4 4"] = np.stack(world_T_cam_all)
-        world_T_cam_gl: Float64[ndarray, "N 4 4"] = convert_pose(world_T_cam_batch, CameraConventions.CV, CameraConventions.GL)
+        world_T_cam_gl: Float64[ndarray, "N 4 4"] = convert_pose(
+            world_T_cam_batch, CameraConventions.CV, CameraConventions.GL
+        )
         orient_34: Float64[ndarray, "3 4"] = auto_orient_and_center_poses(
             world_T_cam_gl, method="up", center_method="poses"
         ).transform
@@ -652,7 +674,6 @@ class RigReconCLIConfig:
 def main(cli_config: RigReconCLIConfig) -> None:
     """Run the unknown-rig pipeline and visualize results in Rerun."""
     import rerun as rr
-    import rerun.blueprint as rrb
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
