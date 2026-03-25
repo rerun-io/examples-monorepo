@@ -4,16 +4,24 @@ Extracts evenly-spaced frames from a single video and saves them as JPEG
 images to an output directory. Reuses the same ``np.linspace`` spacing
 strategy as :func:`pysfm.apis.pycolmap_recon.extract_synchronized_frames`
 but simplified for a single video.
+
+Uses a class-based node pattern (like ``MultiViewCalibrator``) so that
+intermediate Rerun logging lives inside the node, gated behind
+``config.verbose``. Callers only need to set the Rerun recording context.
 """
 
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 from jaxtyping import Int, UInt8
 from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
+
+if TYPE_CHECKING:
+    import rerun.blueprint as rrb
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -27,6 +35,8 @@ class VideoToImageConfig:
 
     num_frames: int = 20
     """Number of evenly-spaced frames to extract from the video."""
+    verbose: bool = False
+    """Log each extracted frame to Rerun as it is written (requires active recording context)."""
 
 
 @dataclass
@@ -44,80 +54,119 @@ class VideoToImageResult:
 
 
 # ---------------------------------------------------------------------------
-# Pure pipeline function (no Rerun)
+# Node class
 # ---------------------------------------------------------------------------
-def run_video_to_image(
-    *,
-    video_path: Path,
-    output_dir: Path,
-    config: VideoToImageConfig,
-) -> VideoToImageResult:
-    """Extract evenly-spaced frames from a video and save as JPEG images.
+TIMELINE: str = "video_time"
+"""Timeline name shared between video and extracted images."""
+
+
+class VideoToImageNode:
+    """Extract evenly-spaced frames from a single video.
+
+    Follows the ``MultiViewCalibrator`` pattern: takes ``parent_log_path`` and
+    ``config`` in the constructor, optionally logs intermediate results to Rerun
+    when ``config.verbose`` is ``True``. The caller is responsible for setting
+    the Rerun recording context (``with recording:`` or global init).
 
     Args:
-        video_path: Path to the input video file.
-        output_dir: Directory to write extracted images into.
         config: Extraction configuration.
-
-    Returns:
-        VideoToImageResult with paths and metadata about extracted frames.
-
-    Raises:
-        FileNotFoundError: If the video file does not exist.
-        RuntimeError: If the video has zero frames.
+        parent_log_path: Root Rerun entity path for this node's data.
     """
-    import cv2
-    from simplecv.video_io import VideoReader
 
-    if not video_path.exists():
-        msg: str = f"Video not found: {video_path}"
-        raise FileNotFoundError(msg)
+    def __init__(self, config: VideoToImageConfig, parent_log_path: Path) -> None:
+        self.config: VideoToImageConfig = config
+        self.parent_log_path: Path = parent_log_path
 
-    reader: VideoReader = VideoReader(filename=video_path)
-    total_frames: int = reader.frame_cnt
+    def __call__(
+        self,
+        *,
+        video_path: Path,
+        output_dir: Path,
+        frame_timestamps_ns: Int[ndarray, "num_frames"] | None = None,
+    ) -> VideoToImageResult:
+        """Extract evenly-spaced frames from a video and save as JPEG images.
 
-    if total_frames <= 0:
-        msg = f"Video has zero frames: {video_path}"
-        raise RuntimeError(msg)
+        When ``self.config.verbose`` is True and a Rerun recording context is
+        active, each extracted frame is logged to
+        ``{parent_log_path}/extracted/image`` on the ``video_time`` timeline
+        (synchronized with the video asset if ``frame_timestamps_ns`` is given).
 
-    actual_num_frames: int = min(config.num_frames, total_frames)
-    frame_indices: list[int] = np.linspace(0, total_frames - 1, actual_num_frames, dtype=int).tolist()
-    frame_index_set: set[int] = set(frame_indices)
-    pad_width: int = len(str(actual_num_frames))
+        Args:
+            video_path: Path to the input video file.
+            output_dir: Directory to write extracted images into.
+            frame_timestamps_ns: Optional per-frame video timestamps in nanoseconds
+                (as returned by ``log_video``). When provided and verbose is True,
+                extracted frames are logged at the correct video time.
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+        Returns:
+            VideoToImageResult with paths and metadata about extracted frames.
 
-    logger.info(
-        "Extracting %d evenly-spaced frames from %s (%d total frames)",
-        actual_num_frames,
-        video_path.name,
-        total_frames,
-    )
+        Raises:
+            FileNotFoundError: If the video file does not exist.
+            RuntimeError: If the video has zero frames.
+        """
+        import cv2
+        import rerun as rr
+        from simplecv.video_io import VideoReader
 
-    # Map frame_index -> output index for filename generation
-    frame_idx_to_out_idx: dict[int, int] = {fi: oi for oi, fi in enumerate(frame_indices)}
+        if not video_path.exists():
+            msg: str = f"Video not found: {video_path}"
+            raise FileNotFoundError(msg)
 
-    image_paths: list[Path] = [Path()] * actual_num_frames
+        reader: VideoReader = VideoReader(filename=video_path)
+        total_frames: int = reader.frame_cnt
 
-    for current_idx, bgr in enumerate(reader):
-        if current_idx not in frame_index_set:
-            continue
+        if total_frames <= 0:
+            msg = f"Video has zero frames: {video_path}"
+            raise RuntimeError(msg)
 
-        bgr_frame: UInt8[ndarray, "H W 3"] = bgr
-        out_idx: int = frame_idx_to_out_idx[current_idx]
-        filename: str = f"image{out_idx + 1:0{pad_width}d}.jpg"
-        out_path: Path = output_dir / filename
-        cv2.imwrite(str(out_path), bgr_frame)
-        image_paths[out_idx] = out_path
+        actual_num_frames: int = min(self.config.num_frames, total_frames)
+        frame_indices: list[int] = np.linspace(0, total_frames - 1, actual_num_frames, dtype=int).tolist()
+        frame_index_set: set[int] = set(frame_indices)
+        pad_width: int = len(str(actual_num_frames))
 
-    logger.info("Wrote %d frames to %s", actual_num_frames, output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-    return VideoToImageResult(
-        output_dir=output_dir,
-        num_frames_extracted=actual_num_frames,
-        frame_indices=frame_indices,
-        image_paths=image_paths,
-    )
+        logger.info(
+            "Extracting %d evenly-spaced frames from %s (%d total frames)",
+            actual_num_frames,
+            video_path.name,
+            total_frames,
+        )
+
+        # Map frame_index -> output index for filename generation
+        frame_idx_to_out_idx: dict[int, int] = {fi: oi for oi, fi in enumerate(frame_indices)}
+        image_paths: list[Path] = [Path()] * actual_num_frames
+
+        for current_idx, bgr in enumerate(reader):
+            if current_idx not in frame_index_set:
+                continue
+
+            bgr_frame: UInt8[ndarray, "H W 3"] = bgr
+            out_idx: int = frame_idx_to_out_idx[current_idx]
+            filename: str = f"image{out_idx + 1:0{pad_width}d}.jpg"
+            out_path: Path = output_dir / filename
+            cv2.imwrite(str(out_path), bgr_frame)
+            image_paths[out_idx] = out_path
+
+            # Verbose: log each frame as it's extracted
+            if self.config.verbose:
+                if frame_timestamps_ns is not None:
+                    rr.set_time(TIMELINE, duration=1e-9 * float(frame_timestamps_ns[current_idx]))
+                rgb: UInt8[ndarray, "H W 3"] = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
+                rr.log(
+                    f"{self.parent_log_path}/extracted/image",
+                    rr.Image(rgb, color_model=rr.ColorModel.RGB).compress(),
+                )
+
+        logger.info("Wrote %d frames to %s", actual_num_frames, output_dir)
+
+        return VideoToImageResult(
+            output_dir=output_dir,
+            num_frames_extracted=actual_num_frames,
+            frame_indices=frame_indices,
+            image_paths=image_paths,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -152,10 +201,6 @@ def create_video_to_image_blueprint(parent_log_path: Path) -> "rrb.ContainerLike
 # ---------------------------------------------------------------------------
 # CLI config & main
 # ---------------------------------------------------------------------------
-TIMELINE: str = "video_time"
-"""Timeline name shared between video and extracted images."""
-
-
 @dataclass
 class VideoToImageCLIConfig:
     """CLI configuration for video-to-image frame extraction."""
@@ -166,27 +211,19 @@ class VideoToImageCLIConfig:
     """Path to input video file."""
     output_dir: Path = Path("/tmp/video_to_image_output")
     """Directory to write extracted JPEG images."""
-    config: VideoToImageConfig = field(default_factory=VideoToImageConfig)
+    config: VideoToImageConfig = field(default_factory=lambda: VideoToImageConfig(verbose=True))
     """Frame extraction configuration."""
 
 
 def main(config: VideoToImageCLIConfig) -> None:
     """CLI entry point for video-to-image extraction with Rerun visualization."""
-    import cv2
     import rerun as rr
     import rerun.blueprint as rrb
     from simplecv.rerun_log_utils import log_video
 
     parent_log_path: Path = Path("world")
 
-    # Run extraction
-    result: VideoToImageResult = run_video_to_image(
-        video_path=config.video_path,
-        output_dir=config.output_dir,
-        config=config.config,
-    )
-
-    # Setup Rerun
+    # Setup Rerun blueprint
     blueprint: rrb.Blueprint = rrb.Blueprint(
         create_video_to_image_blueprint(parent_log_path),
         collapse_panels=True,
@@ -200,14 +237,10 @@ def main(config: VideoToImageCLIConfig) -> None:
         timeline=TIMELINE,
     )
 
-    # Log each extracted image on the same timeline as the video
-    for out_idx, frame_idx in enumerate(result.frame_indices):
-        rr.set_time(TIMELINE, duration=1e-9 * float(frame_timestamps_ns[frame_idx]))
-
-        bgr: UInt8[ndarray, "H W 3"] | None = cv2.imread(str(result.image_paths[out_idx]), cv2.IMREAD_COLOR)
-        if bgr is not None:
-            rgb: UInt8[ndarray, "H W 3"] = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-            rr.log(
-                f"{parent_log_path}/extracted/image",
-                rr.Image(rgb, color_model=rr.ColorModel.RGB).compress(),
-            )
+    # Run extraction — node handles intermediate logging when verbose
+    node: VideoToImageNode = VideoToImageNode(config=config.config, parent_log_path=parent_log_path)
+    node(
+        video_path=config.video_path,
+        output_dir=config.output_dir,
+        frame_timestamps_ns=frame_timestamps_ns,
+    )

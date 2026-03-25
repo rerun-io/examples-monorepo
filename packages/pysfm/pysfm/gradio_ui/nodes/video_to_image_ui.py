@@ -17,21 +17,20 @@ from collections.abc import Generator
 from pathlib import Path
 from typing import Final
 
-import cv2
 import gradio as gr
 import rerun as rr
 import rerun.blueprint as rrb
 from gradio_rerun import Rerun
-from jaxtyping import Int, UInt8
+from jaxtyping import Int
 from numpy import ndarray
 from simplecv.rerun_log_utils import log_video
 
 from pysfm.apis.video_to_image import (
     TIMELINE,
     VideoToImageConfig,
+    VideoToImageNode,
     VideoToImageResult,
     create_video_to_image_blueprint,
-    run_video_to_image,
 )
 
 # ---------------------------------------------------------------------------
@@ -52,7 +51,7 @@ PARENT_LOG_PATH: Final[Path] = Path("world")
 # ---------------------------------------------------------------------------
 # Module-level state
 # ---------------------------------------------------------------------------
-_CONFIG: VideoToImageConfig = VideoToImageConfig()
+_CONFIG: VideoToImageConfig = VideoToImageConfig(verbose=True)
 """Module-level config, kept in sync with UI widgets."""
 
 
@@ -66,7 +65,7 @@ def _sync_config(num_frames: int) -> None:
         num_frames: Number of frames to extract.
     """
     global _CONFIG
-    _CONFIG = VideoToImageConfig(num_frames=int(num_frames))
+    _CONFIG = VideoToImageConfig(num_frames=int(num_frames), verbose=True)
 
 
 # ---------------------------------------------------------------------------
@@ -98,9 +97,9 @@ def video_to_image_fn(
 ) -> Generator[tuple[bytes | None, str], None, None]:
     """Gradio streaming callback that extracts frames and visualizes in Rerun.
 
-    Creates a scoped Rerun recording, runs extraction, logs the source
-    video and each extracted frame on a synchronized timeline, and yields
-    binary stream bytes to the Rerun viewer component.
+    Creates a scoped Rerun recording, logs the source video, then runs the
+    ``VideoToImageNode`` which handles both extraction and intermediate frame
+    logging (when verbose). Yields binary stream bytes to the Rerun viewer.
 
     Args:
         recording_id: Session-scoped recording identifier.
@@ -115,18 +114,6 @@ def video_to_image_fn(
     stream: rr.BinaryStream = recording.binary_stream()
 
     with recording:
-        yield stream.read(), "Extracting frames..."
-
-        # Run extraction to a temp directory
-        tmp_dir: Path = Path(tempfile.mkdtemp(prefix="video_to_image_"))
-        result: VideoToImageResult = run_video_to_image(
-            video_path=video_path,
-            output_dir=tmp_dir,
-            config=_CONFIG,
-        )
-
-        yield stream.read(), f"Extracted {result.num_frames_extracted} frames. Logging to Rerun..."
-
         # Send blueprint
         blueprint: rrb.Blueprint = rrb.Blueprint(
             create_video_to_image_blueprint(PARENT_LOG_PATH),
@@ -134,30 +121,27 @@ def video_to_image_fn(
         )
         rr.send_blueprint(blueprint=blueprint)
 
-        # Log the video asset
+        yield stream.read(), "Logging video asset..."
+
+        # Log the video asset — returns timestamps for all frames
         frame_timestamps_ns: Int[ndarray, "num_frames"] = log_video(
             video_source=video_path,
             video_log_path=PARENT_LOG_PATH / "video",
             timeline=TIMELINE,
         )
 
-        yield stream.read(), "Logging extracted frames..."
+        yield stream.read(), "Extracting frames..."
 
-        # Log each extracted image on the same timeline
-        for out_idx, frame_idx in enumerate(result.frame_indices):
-            rr.set_time(TIMELINE, duration=1e-9 * float(frame_timestamps_ns[frame_idx]))
+        # Run extraction — node handles intermediate Rerun logging
+        tmp_dir: Path = Path(tempfile.mkdtemp(prefix="video_to_image_"))
+        node: VideoToImageNode = VideoToImageNode(config=_CONFIG, parent_log_path=PARENT_LOG_PATH)
+        result: VideoToImageResult = node(
+            video_path=video_path,
+            output_dir=tmp_dir,
+            frame_timestamps_ns=frame_timestamps_ns,
+        )
 
-            bgr: UInt8[ndarray, "H W 3"] | None = cv2.imread(str(result.image_paths[out_idx]), cv2.IMREAD_COLOR)
-            if bgr is not None:
-                rgb: UInt8[ndarray, "H W 3"] = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                rr.log(
-                    f"{PARENT_LOG_PATH}/extracted/image",
-                    rr.Image(rgb, color_model=rr.ColorModel.RGB).compress(),
-                )
-
-            yield stream.read(), f"Logged frame {out_idx + 1}/{result.num_frames_extracted}"
-
-    yield stream.read(), f"Done -- extracted {result.num_frames_extracted} frames to {result.output_dir}"
+    yield stream.read(), f"Done — extracted {result.num_frames_extracted} frames to {result.output_dir}"
 
 
 # ---------------------------------------------------------------------------
