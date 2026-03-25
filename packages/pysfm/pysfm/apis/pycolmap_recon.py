@@ -482,6 +482,13 @@ def create_rig_blueprint(parent_log_path: Path, camera_names: list[str]) -> rrb.
 def log_rig_reconstruction(result: RigReconResult, parent_log_path: Path) -> None:
     """Load the final rig reconstruction and log it to Rerun.
 
+    Computes a gravity-alignment transform from the camera poses using
+    ``auto_orient_and_center_poses`` (method="up"), then applies it directly
+    to the 3D point cloud and per-camera poses before logging.  This avoids
+    relying on Rerun's ``Transform3D`` hierarchy which does not compose
+    correctly when a static parent transform is combined with dynamic child
+    camera transforms.
+
     Logs 3D point cloud (static), then per-camera frustums, images, and
     keypoints over a timeline.
 
@@ -497,6 +504,9 @@ def log_rig_reconstruction(result: RigReconResult, parent_log_path: Path) -> Non
     rec: pycolmap.Reconstruction = pycolmap.Reconstruction(str(result.rig_model_dir))
 
     # -- Compute gravity-alignment transform from camera poses ----------------
+    # Extract all world_T_cam poses, convert CV→GL (required by
+    # auto_orient_and_center_poses), compute the orient rotation+centering,
+    # then apply it directly to points and cameras below.
     world_T_cam_all: list[Float64[ndarray, "4 4"]] = []
     for image in rec.images.values():
         world_from_cam: pycolmap.Rigid3d = image.cam_from_world().inverse()
@@ -505,7 +515,6 @@ def log_rig_reconstruction(result: RigReconResult, parent_log_path: Path) -> Non
         world_T_cam_cv[:3, 3] = world_from_cam.translation
         world_T_cam_all.append(world_T_cam_cv)
 
-    # Compute orient transform (3x4) that gravity-aligns the scene.
     orient_44: Float64[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
     if world_T_cam_all:
         world_T_cam_batch: Float64[ndarray, "N 4 4"] = np.stack(world_T_cam_all)
@@ -645,6 +654,7 @@ def main(cli_config: RigReconCLIConfig) -> None:
         collapse_panels=True,
     )
     rr.send_blueprint(blueprint)
+    # Gravity-aligned data has Z-up; tell the viewer accordingly.
     rr.log("/", rr.ViewCoordinates.RFU, static=True)
 
     # 3. Log the reconstruction
