@@ -115,26 +115,23 @@ def video_to_image_fn(
     )
     stream: rr.BinaryStream = recording.binary_stream()
 
+    # NOTE: Do NOT yield inside ``with recording:`` — Gradio resumes
+    # the generator in a different async context, which invalidates
+    # the ContextVar token and raises ValueError on __exit__.
     with recording:
-        # Send blueprint
-        blueprint: rrb.Blueprint = rrb.Blueprint(
-            create_video_to_image_blueprint(PARENT_LOG_PATH),
-            collapse_panels=True,
+        rr.send_blueprint(
+            blueprint=rrb.Blueprint(
+                create_video_to_image_blueprint(PARENT_LOG_PATH),
+                collapse_panels=True,
+            )
         )
-        rr.send_blueprint(blueprint=blueprint)
 
-        yield stream.read(), "Logging video asset..."
-
-        # Log the video asset — returns timestamps for all frames
         frame_timestamps_ns: Int[ndarray, "num_frames"] = log_video(
             video_source=video_path,
             video_log_path=PARENT_LOG_PATH / "video",
             timeline=TIMELINE,
         )
 
-        yield stream.read(), "Extracting frames..."
-
-        # Run extraction — node handles intermediate Rerun logging
         tmp_dir: Path = Path(tempfile.mkdtemp(prefix="video_to_image_"))
         node: VideoToImageNode = VideoToImageNode(config=_CONFIG, parent_log_path=PARENT_LOG_PATH)
         result: VideoToImageResult = node(
