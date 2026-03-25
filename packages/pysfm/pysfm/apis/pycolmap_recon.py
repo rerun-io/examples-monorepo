@@ -497,23 +497,24 @@ def log_rig_reconstruction(result: RigReconResult, parent_log_path: Path) -> Non
     rec: pycolmap.Reconstruction = pycolmap.Reconstruction(str(result.rig_model_dir))
 
     # -- Compute gravity-alignment transform from camera poses ----------------
-    world_T_cam_list: list[Float64[ndarray, "4 4"]] = []
+    world_T_cam_all: list[Float64[ndarray, "4 4"]] = []
     for image in rec.images.values():
         world_from_cam: pycolmap.Rigid3d = image.cam_from_world().inverse()
         world_T_cam_cv: Float64[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
         world_T_cam_cv[:3, :3] = world_from_cam.rotation.matrix()
         world_T_cam_cv[:3, 3] = world_from_cam.translation
-        world_T_cam_list.append(world_T_cam_cv)
+        world_T_cam_all.append(world_T_cam_cv)
 
-    if world_T_cam_list:
-        world_T_cam_batch: Float64[ndarray, "N 4 4"] = np.stack(world_T_cam_list)
+    # Compute orient transform (3x4) that gravity-aligns the scene.
+    orient_44: Float64[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
+    if world_T_cam_all:
+        world_T_cam_batch: Float64[ndarray, "N 4 4"] = np.stack(world_T_cam_all)
         world_T_cam_gl: Float64[ndarray, "N 4 4"] = convert_pose(world_T_cam_batch, CameraConventions.CV, CameraConventions.GL)
-        orient_transform: Float64[ndarray, "3 4"] = auto_orient_and_center_poses(
+        orient_34: Float64[ndarray, "3 4"] = auto_orient_and_center_poses(
             world_T_cam_gl, method="up", center_method="poses"
         ).transform
-        orient_R: Float64[ndarray, "3 3"] = orient_transform[:3, :3]
-        orient_t: Float64[ndarray, "3"] = orient_transform[:3, 3]
-        rr.log(f"{parent_log_path}", rr.Transform3D(mat3x3=orient_R, translation=orient_t), static=True)
+        orient_44[:3, :] = orient_34
+        logger.info("Gravity-alignment transform computed (det=%.4f)", np.linalg.det(orient_44[:3, :3]))
 
     # -- Static 3D point cloud ------------------------------------------------
     xyz_list: list[Float64[ndarray, "3"]] = []
@@ -523,14 +524,15 @@ def log_rig_reconstruction(result: RigReconResult, parent_log_path: Path) -> Non
         rgb_list.append(point.color)
 
     if xyz_list:
-        points3d_xyz: Float32[ndarray, "N 3"] = np.array(xyz_list, dtype=np.float32)
+        points3d_xyz: Float64[ndarray, "N 3"] = np.array(xyz_list, dtype=np.float64)
         points3d_rgb: UInt8[ndarray, "N 3"] = np.array(rgb_list, dtype=np.uint8)
+        # Apply gravity-alignment directly to point positions.
+        points3d_oriented: Float32[ndarray, "N 3"] = (orient_44[:3, :3] @ points3d_xyz.T + orient_44[:3, 3:]).T.astype(np.float32)
         rr.log(
             f"{parent_log_path}/point_cloud",
             rr.Points3D(
-                positions=points3d_xyz,
+                positions=points3d_oriented,
                 colors=points3d_rgb,
-                # radii=np.full(points3d_xyz.shape[0], 0.005, dtype=np.float32),
             ),
             static=True,
         )
@@ -564,16 +566,14 @@ def log_rig_reconstruction(result: RigReconResult, parent_log_path: Path) -> Non
             _image_id, image = cam_images[cam_name][frame_idx]
             camera_path: str = f"{parent_log_path}/{cam_name}"
 
-            # Transform (world_T_cam)
+            # Transform (world_T_cam), gravity-aligned
             world_from_cam: pycolmap.Rigid3d = image.cam_from_world().inverse()
-            R: Float64[ndarray, "3 3"] = world_from_cam.rotation.matrix()
-            t: Float64[ndarray, "3"] = world_from_cam.translation
-
             world_T_cam: Float64[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
-            world_T_cam[:3, :3] = R
-            world_T_cam[:3, 3] = t
+            world_T_cam[:3, :3] = world_from_cam.rotation.matrix()
+            world_T_cam[:3, 3] = world_from_cam.translation
+            oriented_T_cam: Float64[ndarray, "4 4"] = orient_44 @ world_T_cam
 
-            rr.log(camera_path, rr.Transform3D(mat3x3=world_T_cam[:3, :3], translation=world_T_cam[:3, 3]))
+            rr.log(camera_path, rr.Transform3D(mat3x3=oriented_T_cam[:3, :3], translation=oriented_T_cam[:3, 3]))
 
             # Pinhole camera — ref camera is green, others are gray.
             cam: pycolmap.Camera = image.camera
