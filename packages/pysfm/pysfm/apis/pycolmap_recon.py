@@ -28,6 +28,8 @@ from simplecv.ops.conventions import CameraConventions, convert_pose
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.video_io import MultiVideoReader
 
+from pysfm.streamed_pipeline import compare_databases, extract_features_streamed
+
 if TYPE_CHECKING:
     import pycolmap
     import rerun.blueprint as rrb
@@ -69,6 +71,10 @@ class RigReconConfig:
     """Use GPU for feature extraction and matching."""
     verbose: bool = False
     """Emit detailed COLMAP logging."""
+    validate: bool = False
+    """When True, run streamed implementations of pipeline stages alongside
+    the black-box pycolmap calls and assert equivalence.  Increases runtime
+    proportionally — intended for development and testing."""
 
 
 # ---------------------------------------------------------------------------
@@ -337,6 +343,25 @@ def run_rig_recon(*, config: RigReconConfig) -> RigReconResult:
         reader_options=reader_options,
         extraction_options=extraction_options,
     )
+
+    # -- 4b. Streamed extraction validation -----------------------------------
+    if config.validate:
+        validation_db_path: Path = output_dir / "database_validation.db"
+        if validation_db_path.exists():
+            validation_db_path.unlink()
+
+        logger.info("Running streamed feature extraction for validation ...")
+        pycolmap.set_random_seed(0)  # Reset for reproducibility
+        extract_features_streamed(
+            database_path=validation_db_path,
+            image_path=images_dir,
+            camera_mode=pycolmap.CameraMode.PER_FOLDER,
+            reader_options=reader_options,
+            extraction_options=extraction_options,
+        )
+
+        compare_databases(database_path, validation_db_path)
+        logger.info("Extraction validation passed — databases are equivalent.")
 
     # -- 5. Sequential matching (ALIKED_LIGHTGLUE, no rig) --------------------
     matching_options: pycolmap.FeatureMatchingOptions = pycolmap.FeatureMatchingOptions()

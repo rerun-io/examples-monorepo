@@ -8,19 +8,18 @@ real Fountain dataset.
 from __future__ import annotations
 
 import shutil
-from collections.abc import Callable
 from pathlib import Path
 
 import cv2
 import numpy as np
 import pycolmap
 import pytest
-from jaxtyping import Float32, UInt8
+from jaxtyping import UInt8
 from numpy import ndarray
 
-from pysfm.apis.pycolmap_recon_streamed import (
-    PerImageExtractionResult,
+from pysfm.streamed_pipeline import (
     _maybe_rescale_bitmap,
+    compare_databases,
     extract_features_streamed,
 )
 
@@ -89,7 +88,6 @@ def _run_streamed_extraction(
     images_dir: Path,
     db_path: Path,
     extraction_options: pycolmap.FeatureExtractionOptions | None = None,
-    callback: Callable[[PerImageExtractionResult], None] | None = None,
 ) -> None:
     """Run ``extract_features_streamed`` for comparison."""
     if extraction_options is None:
@@ -105,71 +103,7 @@ def _run_streamed_extraction(
         camera_mode=pycolmap.CameraMode.AUTO,
         reader_options=reader_options,
         extraction_options=extraction_options,
-        callback=callback,
     )
-
-
-def _compare_databases(
-    db_path_a: Path,
-    db_path_b: Path,
-    *,
-    keypoint_atol: float = 0.0,
-) -> None:
-    """Compare two COLMAP databases for feature extraction equivalence.
-
-    Args:
-        db_path_a: Path to reference database (black-box extract_features).
-        db_path_b: Path to test database (streamed extraction).
-        keypoint_atol: Absolute tolerance for keypoint position comparison.
-    """
-    with pycolmap.Database.open(db_path_a) as db_a, pycolmap.Database.open(db_path_b) as db_b:
-        images_a: list[pycolmap.Image] = db_a.read_all_images()
-        images_b: list[pycolmap.Image] = db_b.read_all_images()
-
-        # Same number of images
-        assert len(images_a) == len(images_b), f"Image count mismatch: {len(images_a)} vs {len(images_b)}"
-
-        # Sort by name for stable comparison
-        images_a.sort(key=lambda img: img.name)
-        images_b.sort(key=lambda img: img.name)
-
-        for img_a, img_b in zip(images_a, images_b, strict=True):
-            assert img_a.name == img_b.name, f"Image name mismatch: {img_a.name} vs {img_b.name}"
-
-            # Compare keypoints
-            kps_a: Float32[ndarray, "N_a C_a"] = db_a.read_keypoints(img_a.image_id)
-            kps_b: Float32[ndarray, "N_b C_b"] = db_b.read_keypoints(img_b.image_id)
-
-            assert kps_a.shape == kps_b.shape, (
-                f"Keypoint shape mismatch for {img_a.name}: {kps_a.shape} vs {kps_b.shape}"
-            )
-
-            if keypoint_atol == 0.0:
-                np.testing.assert_array_equal(
-                    kps_a,
-                    kps_b,
-                    err_msg=f"Keypoints differ for {img_a.name}",
-                )
-            else:
-                np.testing.assert_allclose(
-                    kps_a,
-                    kps_b,
-                    atol=keypoint_atol,
-                    err_msg=f"Keypoints differ for {img_a.name}",
-                )
-
-            # Compare descriptors
-            descs_a: pycolmap.FeatureDescriptors = db_a.read_descriptors(img_a.image_id)
-            descs_b: pycolmap.FeatureDescriptors = db_b.read_descriptors(img_b.image_id)
-
-            assert descs_a.data.shape == descs_b.data.shape, (
-                f"Descriptor shape mismatch for {img_a.name}: {descs_a.data.shape} vs {descs_b.data.shape}"
-            )
-            np.testing.assert_array_equal(
-                descs_a.data,
-                descs_b.data,
-                err_msg=f"Descriptors differ for {img_a.name}",
-            )
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +134,7 @@ def test_streamed_extraction_equivalence_synthetic(tmp_path: Path) -> None:
     _run_blackbox_extraction(images_dir, db_a)
     _run_streamed_extraction(images_dir, db_b)
 
-    _compare_databases(db_a, db_b, keypoint_atol=0.0)
+    compare_databases(db_a, db_b, keypoint_atol=0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -230,35 +164,7 @@ def test_streamed_extraction_equivalence_fountain(tmp_path: Path) -> None:
     _run_streamed_extraction(subset_dir, db_b)
 
     # Using pycolmap.Bitmap for reading and resizing gives exact COLMAP equivalence.
-    _compare_databases(db_a, db_b, keypoint_atol=0.0)
-
-
-# ---------------------------------------------------------------------------
-# Test: Callback invocation
-# ---------------------------------------------------------------------------
-def test_callback_invoked_per_image(tmp_path: Path) -> None:
-    """Callback is invoked once per image with correct metadata."""
-    images_dir: Path = _create_synthetic_images(tmp_path / "data", num_images=3)
-
-    results: list[PerImageExtractionResult] = []
-
-    def record_callback(result: PerImageExtractionResult) -> None:
-        results.append(result)
-
-    db_path: Path = tmp_path / "test.db"
-    _run_streamed_extraction(images_dir, db_path, callback=record_callback)
-
-    assert len(results) == 3, f"Expected 3 callbacks, got {len(results)}"
-
-    for i, r in enumerate(results):
-        assert r.image_index == i, f"Expected image_index={i}, got {r.image_index}"
-        assert r.total_images == 3, f"Expected total_images=3, got {r.total_images}"
-        assert r.image_rgb.ndim == 3, "Expected 3D RGB array"
-        assert r.image_rgb.shape[2] == 3, "Expected 3 channels (RGB)"
-        assert r.num_keypoints == r.keypoints_xy.shape[0], (
-            f"num_keypoints ({r.num_keypoints}) != keypoints_xy rows ({r.keypoints_xy.shape[0]})"
-        )
-        assert r.num_keypoints > 0, f"Expected keypoints for image {r.image_name}"
+    compare_databases(db_a, db_b, keypoint_atol=0.0)
 
 
 # ---------------------------------------------------------------------------
