@@ -113,6 +113,18 @@ def extract_features_streamed(
         3. Per-image loop: read → resize → extract → rescale keypoints →
            write to DB.
 
+    Note:
+        This implementation does **not** handle gravity-based keypoint rotation
+        or camera/image mask filtering that COLMAP's full
+        ``FeatureExtractionController`` performs.  Those code paths are not
+        exercised by our rig pipeline and ``compare_databases()`` would catch
+        any resulting discrepancy.
+
+        This function assumes a fresh (empty) database.  Unlike
+        ``pycolmap.extract_features()`` it does not skip images that already
+        have features, so calling it on a partially populated database will
+        raise on duplicate writes.
+
     Args:
         database_path: Path to the COLMAP SQLite database.
         image_path: Root directory containing images.
@@ -176,13 +188,17 @@ def extract_features_streamed(
                     [[kp.x, kp.y, kp.a11, kp.a12, kp.a21, kp.a22] for kp in kps],
                     dtype=np.float32,
                 )
-                # Rescale keypoints back to original resolution
+                # Rescale keypoints back to original resolution.
+                # COLMAP rescales affine terms column-wise (see
+                # FeatureKeypoint::Rescale in colmap/feature/types.cc):
+                #   column 0 (a11, a21) *= scale_x
+                #   column 1 (a12, a22) *= scale_y
                 if scale_x != 1.0 or scale_y != 1.0:
                     kps_np[:, 0] *= scale_x  # x
                     kps_np[:, 1] *= scale_y  # y
                     kps_np[:, 2] *= scale_x  # a11
-                    kps_np[:, 3] *= scale_x  # a12
-                    kps_np[:, 4] *= scale_y  # a21
+                    kps_np[:, 3] *= scale_y  # a12
+                    kps_np[:, 4] *= scale_x  # a21
                     kps_np[:, 5] *= scale_y  # a22
             else:
                 kps_np: Float32[ndarray, "N 6"] = np.zeros((0, 6), dtype=np.float32)  # type: ignore[no-redef]
