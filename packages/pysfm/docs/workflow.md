@@ -289,7 +289,7 @@ If you want the faster but less robust variant, replace the `0050` seed
 `mapper` call with `global_mapper`. Keep the `0100` final stage as
 `global_mapper`.
 
-## 5. How `rig_configurator` Works
+## 6. How `rig_configurator` Works
 
 In the unknown-rig workflow, `rig_configurator` estimates fixed camera-to-rig
 poses from the no-rig reconstruction.
@@ -318,7 +318,103 @@ The important consequence is:
 - the no-rig bootstrap does not need to be the final map
 - it only needs to be good enough to estimate a stable rig
 
-## 6. Mono Baseline
+## 7. Cross-Camera Registration in the No-Rig Bootstrap
+
+### The problem
+
+The sequential matcher sorts images by filename. With our folder layout
+(`rig1/cam1/`, `rig1/cam2/`, ...), all images from one camera form a
+contiguous block in the sorted order. Sequential matching with `overlap=N`
+only creates cross-camera pairs at the **boundaries** between blocks — e.g.
+the last frames of cam1 matched against the first frames of cam2. These
+boundary pairs involve different viewpoints at different timestamps and may
+produce no usable feature matches, especially when cameras point in
+different directions.
+
+If no cross-camera matches survive geometric verification, COLMAP's
+incremental mapper builds **separate reconstructions per camera** and
+`rig_configurator` cannot compute `sensor_from_rig`.
+
+### Why `expand_rig_images` is the right tool
+
+COLMAP's `SequentialPairingOptions.expand_rig_images` generates cross-camera
+pairs across neighboring rig frames. With `overlap=5`, each image gets
+matched against **all cameras** within ±5 frames — both temporal (different
+timestamps) and spatial (different cameras). This is exactly what we need.
+
+However, `expand_rig_images` requires `frame_id` and `rig_id` to be set on
+images in the database, which is normally done by `apply_rig_config()` after
+a reconstruction exists. This creates a chicken-and-egg: the bootstrap needs
+cross-camera pairs, but `apply_rig_config()` needs the bootstrap.
+
+### The two-call pattern
+
+`apply_rig_config(rig_configs, db)` can be called **without a
+reconstruction** — the reconstruction parameter is optional. When called
+without one, it still populates `frame_id` and `rig_id` from
+`rig_config.json` image prefixes and matching filenames. It just skips
+deriving `sensor_from_rig` poses. This is enough for `expand_rig_images` to
+work.
+
+The pipeline calls `apply_rig_config` twice, with a clearing step in between:
+
+```text
+features
+  ↓
+apply_rig_config(configs, db)            ← frame grouping only, no poses
+  ↓
+sequential_match(expand_rig_images=True) ← cross-camera pairs in bootstrap
+  ↓
+clear_rigs() + clear_frames()            ← mapper rejects rig info without poses
+  ↓
+incremental_mapping                      ← runs without rig constraints
+  ↓
+apply_rig_config(configs, db, rec)       ← derives sensor_from_rig from poses
+  ↓
+sequential_match(expand_rig_images=True) ← rig-aware pass
+  ↓
+global_mapping(refine_sensor_from_rig)   ← final solve
+```
+
+### The clearing gotcha
+
+The incremental mapper loads rig info from the database at startup. If it
+finds rigs with unknown `sensor_from_rig` poses, it discards the
+reconstruction immediately:
+
+```
+Discarding reconstruction due to unknown sensor_from_rig poses.
+```
+
+After matching completes, call `db.clear_rigs()` + `db.clear_frames()`
+before running the bootstrap mapper. This resets `frame_id` on all images
+(200/200 → 0/200) while preserving all match data — matches are indexed by
+image pairs, not frames or rigs. Step 7 re-applies rig config with the
+reconstruction to derive the actual poses.
+
+Without this clearing step, **both** the legacy and early-rig-config paths
+fail on calibrated-rig data.
+
+### Verified impact
+
+Tested on calibrated-rig data (4 cameras × 50 frames = 200 images):
+
+| | Without early rig config | With early rig config |
+|---|---|---|
+| Cross-camera pairs | 601 (boundary only) | **2601** (4.3×) |
+| Within-camera pairs | 204 | 833 |
+| `frame_id` set | 0/200 | **200/200** |
+| Frames in DB | 0 | 50 |
+| Bootstrap reconstruction | **FAILED** (0 images) | **196/200** images registered |
+
+The early `apply_rig_config` call (with the clearing step before the mapper)
+increased cross-camera pairs by 4.3× and ensures all cameras are linked
+through principled same-timestamp and near-timestamp pairs rather than
+accidental filename-boundary matches. On the calibrated-rig dataset, this is
+the difference between a complete failure and a successful 196-image
+reconstruction.
+
+## 8. Mono Baseline
 
 Mono is just a sanity-check path. Use one camera folder directly as
 `image_path`, for example:
@@ -336,7 +432,7 @@ feature_extractor -> sequential_matcher -> mapper/global_mapper
 This is useful when you want a cheap baseline or to isolate whether a problem
 is rig-specific.
 
-## 7. What Actually Worked
+## 9. What Actually Worked
 
 Validated takeaways:
 
@@ -375,7 +471,7 @@ Practical interpretation:
 - judge the final `rig` model by completeness and visual consistency
 - compare `rig` and `no_rig` in the GUI when both register the same images
 
-## 8. GUI
+## 10. GUI
 
 Pattern:
 
