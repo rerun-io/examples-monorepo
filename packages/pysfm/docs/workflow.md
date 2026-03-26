@@ -1,4 +1,26 @@
-# Multicam Workflow
+# Reconstruction Workflow
+
+## Reconstruction Modes
+
+| Mode | Input | Pipeline | Script |
+|---|---|---|---|
+| **Monocular video** | Single video | extract frames → features → sequential match → incremental/global mapping | `pycolmap_vid_recon.py` |
+| **Unknown rig** | 2+ synchronized videos | extract synced frames → features → bootstrap (no-rig) → rig calibration → rig-aware mapping | `pycolmap_rig_recon.py` |
+| **Calibrated rig** | 2+ videos + known extrinsics | (not yet implemented) | — |
+
+The monocular pipeline is the simplest: no rig config, no cross-camera
+matching, no two-pass approach. Just the standard COLMAP pipeline applied
+to video frames with sequential matching (exploiting temporal ordering).
+The user can choose between incremental mapping (more robust) or global
+mapping (faster).
+
+The unknown-rig pipeline adds rig calibration on top: it first builds a
+no-rig bootstrap reconstruction, estimates camera-to-rig transforms, then
+produces a final rig-aware reconstruction with cross-camera constraints.
+
+---
+
+## Multicam Workflow
 
 This is the compact source of truth for the multicam dataset.
 

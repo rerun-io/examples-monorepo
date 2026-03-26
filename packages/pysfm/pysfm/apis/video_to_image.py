@@ -2,7 +2,7 @@
 
 Extracts evenly-spaced frames from a single video and saves them as JPEG
 images to an output directory. Reuses the same ``np.linspace`` spacing
-strategy as :func:`pysfm.apis.pycolmap_recon.extract_synchronized_frames`
+strategy as :func:`pysfm.apis.pycolmap_rig_recon.extract_synchronized_frames`
 but simplified for a single video.
 
 Uses a class-based node pattern (like ``MultiViewCalibrator``) so that

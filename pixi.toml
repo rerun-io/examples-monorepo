@@ -524,6 +524,12 @@ depends-on = ["_download-unknown-rig"]
 cwd = "packages/pysfm"
 description = "Run video-to-image frame extraction CLI demo (saves .rrd)"
 
+[feature.pysfm.tasks.pysfm-vid-recon-demo]
+cmd = "python tools/demos/pycolmap_vid_recon.py --config.video-path data/examples/unknown-rig/cam1.mp4"
+depends-on = ["_download-unknown-rig"]
+cwd = "packages/pysfm"
+description = "Monocular video reconstruction demo with Rerun viewer"
+
 [feature.pysfm.tasks.brush-train-kitchen-5k]
 cmd = """
 python tools/brush/train_colmap_brush.py \

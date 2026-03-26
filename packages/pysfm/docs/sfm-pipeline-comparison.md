@@ -12,7 +12,8 @@ These three systems operate at **different abstraction layers** on top of the sa
 |---|---|---|---|
 | **COLMAP `incremental_mapping`** | The engine. Estimates poses + 3D points from scratch | Yes (it IS the pose estimator) | Internally, per-image after registration |
 | **hloc** | Reconstruction with swappable features/matchers | Delegates to `pycolmap.incremental_mapping` for full SfM; uses `pycolmap.triangulate_points` separately for the "known poses" case | Yes — `triangulation.py` is for adding 3D points to an existing model |
-| **pysfm (`pycolmap_recon.py`)** | Multi-camera rig reconstruction from video | Delegates to `pycolmap.incremental_mapping` (bootstrap) + `pycolmap.global_mapping` (rig-aware) | No — relies entirely on COLMAP's built-in pipelines |
+| **pysfm (`pycolmap_vid_recon.py`)** | Monocular video reconstruction | `pycolmap.incremental_mapping` or `pycolmap.global_mapping` (user choice) | No — relies entirely on COLMAP's built-in pipelines |
+| **pysfm (`pycolmap_rig_recon.py`)** | Multi-camera rig reconstruction from video | Delegates to `pycolmap.incremental_mapping` (bootstrap) + `pycolmap.global_mapping` (rig-aware) | No — relies entirely on COLMAP's built-in pipelines |
 | **COLMAP custom examples** | Teaching/research: expose every internal step | Same as `incremental_mapping` but you control the loop | Same internal triangulation, but you can call it explicitly |
 
 ---
@@ -163,7 +164,7 @@ When you ALREADY HAVE camera poses (e.g., from a prior SfM run, GPS, or SLAM).
 
 ---
 
-## State Machine 3: pysfm (`pycolmap_recon.py`) — Rig-aware two-pass
+## State Machine 3: pysfm (`pycolmap_rig_recon.py`) — Rig-aware two-pass
 
 This pipeline does something neither hloc nor vanilla COLMAP does: **multi-camera rig reconstruction**.
 
