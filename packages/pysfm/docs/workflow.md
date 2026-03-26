@@ -356,7 +356,7 @@ without one, it still populates `frame_id` and `rig_id` from
 deriving `sensor_from_rig` poses. This is enough for `expand_rig_images` to
 work.
 
-The pipeline calls `apply_rig_config` twice:
+The pipeline calls `apply_rig_config` twice, with a clearing step in between:
 
 ```text
 features
@@ -365,7 +365,9 @@ apply_rig_config(configs, db)            ← frame grouping only, no poses
   ↓
 sequential_match(expand_rig_images=True) ← cross-camera pairs in bootstrap
   ↓
-incremental_mapping                      ← all cameras register together
+clear_rigs() + clear_frames()            ← mapper rejects rig info without poses
+  ↓
+incremental_mapping                      ← runs without rig constraints
   ↓
 apply_rig_config(configs, db, rec)       ← derives sensor_from_rig from poses
   ↓
@@ -373,6 +375,25 @@ sequential_match(expand_rig_images=True) ← rig-aware pass
   ↓
 global_mapping(refine_sensor_from_rig)   ← final solve
 ```
+
+### The clearing gotcha
+
+The incremental mapper loads rig info from the database at startup. If it
+finds rigs with unknown `sensor_from_rig` poses, it discards the
+reconstruction immediately:
+
+```
+Discarding reconstruction due to unknown sensor_from_rig poses.
+```
+
+After matching completes, call `db.clear_rigs()` + `db.clear_frames()`
+before running the bootstrap mapper. This resets `frame_id` on all images
+(200/200 → 0/200) while preserving all match data — matches are indexed by
+image pairs, not frames or rigs. Step 7 re-applies rig config with the
+reconstruction to derive the actual poses.
+
+Without this clearing step, **both** the legacy and early-rig-config paths
+fail on calibrated-rig data.
 
 ### Verified impact
 
@@ -384,10 +405,14 @@ Tested on calibrated-rig data (4 cameras × 50 frames = 200 images):
 | Within-camera pairs | 204 | 833 |
 | `frame_id` set | 0/200 | **200/200** |
 | Frames in DB | 0 | 50 |
+| Bootstrap reconstruction | **FAILED** (0 images) | **196/200** images registered |
 
-The early `apply_rig_config` call increased cross-camera pairs by 4.3× and
-ensures all cameras are linked through principled same-timestamp and
-near-timestamp pairs rather than accidental filename-boundary matches.
+The early `apply_rig_config` call (with the clearing step before the mapper)
+increased cross-camera pairs by 4.3× and ensures all cameras are linked
+through principled same-timestamp and near-timestamp pairs rather than
+accidental filename-boundary matches. On the calibrated-rig dataset, this is
+the difference between a complete failure and a successful 196-image
+reconstruction.
 
 ## 8. Mono Baseline
 
