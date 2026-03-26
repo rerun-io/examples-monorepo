@@ -73,6 +73,11 @@ class RigReconConfig:
     """When True, run streamed implementations of pipeline stages alongside
     the black-box pycolmap calls and assert equivalence.  Increases runtime
     proportionally — intended for development and testing."""
+    early_rig_config: bool = True
+    """Apply rig frame grouping before the no-rig bootstrap matching.
+    Populates frame_id/rig_id in the database so expand_rig_images generates
+    cross-camera pairs in the bootstrap pass. Set to False for legacy behavior
+    (boundary-only cross-camera pairs)."""
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +322,9 @@ def run_rig_recon(*, config: RigReconConfig) -> RigReconResult:
         output_path=rig_config_path,
     )
 
+    # -- 3b. Read rig config (needed for early apply and step 7) --------------
+    rig_configs: list[pycolmap.RigConfig] = pycolmap.read_rig_config(rig_config_path)
+
     # -- 4. Feature extraction (ALIKED_N16ROT, GPU) ---------------------------
     pycolmap.set_random_seed(0)
 
@@ -359,6 +367,12 @@ def run_rig_recon(*, config: RigReconConfig) -> RigReconResult:
         compare_databases(database_path, validation_db_path)
         logger.info("Extraction validation passed — databases are equivalent.")
 
+    # -- 4c. Early rig config (frame grouping for cross-camera matching) ------
+    if config.early_rig_config:
+        logger.info("Early rig config: populating frame_id/rig_id for cross-camera matching ...")
+        with pycolmap.Database.open(database_path) as db:
+            pycolmap.apply_rig_config(rig_configs, db)
+
     # -- 5. Sequential matching (ALIKED_LIGHTGLUE, no rig) --------------------
     matching_options: pycolmap.FeatureMatchingOptions = pycolmap.FeatureMatchingOptions()
     matching_options.type = pycolmap.FeatureMatcherType.ALIKED_LIGHTGLUE  # Neural matcher paired with ALIKED features.
@@ -369,7 +383,17 @@ def run_rig_recon(*, config: RigReconConfig) -> RigReconResult:
     pairing_options.overlap = config.overlap  # Match each image against this many neighbors in sequence.
     pairing_options.quadratic_overlap = False  # Skip quadratically-spaced far-apart matches (not needed here).
 
-    logger.info("Sequential matching (ALIKED_LIGHTGLUE, overlap=%d, no rig) ...", config.overlap)
+    if config.early_rig_config:
+        # Allow same-timestamp cross-camera pairs and expand matching to all
+        # cameras in neighboring rig frames (not just the same camera).
+        matching_options.skip_image_pairs_in_same_frame = False
+        pairing_options.expand_rig_images = True
+
+    logger.info(
+        "Sequential matching (ALIKED_LIGHTGLUE, overlap=%d, expand_rig=%s) ...",
+        config.overlap,
+        pairing_options.expand_rig_images,
+    )
     pycolmap.match_sequential(
         database_path=database_path,
         matching_options=matching_options,
@@ -399,8 +423,6 @@ def run_rig_recon(*, config: RigReconConfig) -> RigReconResult:
     logger.info("No-rig bootstrap: %d images registered (model %d)", no_rig_rec.num_reg_images(), no_rig_rec_id)
 
     # -- 7. Apply rig config (auto-derive cam_from_rig from bootstrap) --------
-    rig_configs: list[pycolmap.RigConfig] = pycolmap.read_rig_config(rig_config_path)
-
     logger.info("Applying rig config and deriving cam_from_rig from bootstrap ...")
     with pycolmap.Database.open(database_path) as db:
         pycolmap.apply_rig_config(rig_configs, db, no_rig_rec)

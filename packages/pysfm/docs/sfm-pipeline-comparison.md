@@ -13,6 +13,7 @@ These three systems operate at **different abstraction layers** on top of the sa
 | **COLMAP `incremental_mapping`** | The engine. Estimates poses + 3D points from scratch | Yes (it IS the pose estimator) | Internally, per-image after registration |
 | **hloc** | Reconstruction with swappable features/matchers | Delegates to `pycolmap.incremental_mapping` for full SfM; uses `pycolmap.triangulate_points` separately for the "known poses" case | Yes — `triangulation.py` is for adding 3D points to an existing model |
 | **pysfm (`pycolmap_recon.py`)** | Multi-camera rig reconstruction from video | Delegates to `pycolmap.incremental_mapping` (bootstrap) + `pycolmap.global_mapping` (rig-aware) | No — relies entirely on COLMAP's built-in pipelines |
+| **COLMAP custom examples** | Teaching/research: expose every internal step | Same as `incremental_mapping` but you control the loop | Same internal triangulation, but you can call it explicitly |
 
 ---
 
@@ -266,7 +267,93 @@ There are **three different uses of the word "triangulation"**:
 - **Inside `incremental_mapping`**: BA runs automatically — local BA after every image, global BA periodically. You don't call it.
 - **Inside `global_mapping`** (pysfm step 9): Also runs BA internally, but with rig constraints (`refine_sensor_from_rig`).
 - **Standalone `pycolmap.bundle_adjustment()`**: Exists but hloc and pysfm don't call it directly — they rely on the mapping pipelines to handle it.
-- **The COLMAP Python example** (custom pipeline on DeepWiki): Shows calling BA explicitly as a teaching example of "build your own pipeline from primitives" — but in practice, `incremental_mapping()` does all of this for you.
+- **COLMAP's `custom_bundle_adjustment.py`**: A Python reimplementation of the same BA that runs inside `incremental_mapping`. Lets you access the raw `pyceres.Problem` to add custom residuals (GPS priors, IMU factors, etc.). See the "Custom Python Examples" section below for details.
+- **COLMAP's `custom_incremental_pipeline.py`**: Reimplements the full `IncrementalPipeline.run()` loop in Python, calling the custom BA functions above. Same logic as `incremental_mapping()`, but you control every step.
+
+---
+
+## COLMAP's Custom Python Examples — The "Exploded View"
+
+These two files from `colmap/colmap/python/examples/` are **not a separate pipeline** — they are a 1:1 Python reimplementation of the same C++ `IncrementalPipeline::Run()` logic, exposing every internal step so you can hook into or replace individual pieces.
+
+### `custom_incremental_pipeline.py` — The full loop, in Python
+
+This reimplements `IncrementalPipeline.run()` in pure Python, calling the same `pycolmap.IncrementalMapper` object that the C++ pipeline uses internally. The key functions map directly to C++ methods:
+
+| Python function | C++ equivalent | What it does |
+|---|---|---|
+| `main_incremental_mapper(controller)` | `IncrementalPipeline::Run()` | Outer loop: try init, relax constraints, retry |
+| `reconstruct(controller, mapper, ...)` | `IncrementalPipeline::Reconstruct()` | Manage sub-models, handle status codes |
+| `reconstruct_sub_model(controller, mapper, ...)` | `IncrementalPipeline::ReconstructSubModel()` | **The main loop** from State Machine 1 above |
+| `initialize_reconstruction(controller, mapper, ...)` | `IncrementalPipeline::InitializeReconstruction()` | Find initial pair, register, triangulate, global BA |
+
+The loop inside `reconstruct_sub_model` is exactly the state machine from State Machine 1:
+
+```
+while True:
+    next_images = mapper.find_next_images(...)        # FIND NEXT IMAGE
+    reg_success = mapper.register_next_image(...)     # REGISTER IMAGE (PnP)
+    mapper.triangulate_image(...)                     # TRIANGULATE IMAGE
+    custom_bundle_adjustment.iterative_local_refinement(...)  # LOCAL BA
+    if check_run_global_refinement(...):
+        iterative_global_refinement(...)              # GLOBAL BA + FILTER
+```
+
+The difference: instead of calling `mapper.iterative_local_refinement()` (which delegates to C++), it calls `custom_bundle_adjustment.iterative_local_refinement()` — the Python reimplementation that you can modify.
+
+### `custom_bundle_adjustment.py` — Replace BA with your own
+
+This reimplements the four BA-related methods of `IncrementalMapper`:
+
+| Python function | C++ equivalent | When it runs |
+|---|---|---|
+| `solve_bundle_adjustment(rec, options, config)` | Core Ceres solve | Called by all others below |
+| `adjust_local_bundle(mapper, ..., image_id, point3D_ids)` | `mapper.adjust_local_bundle()` | After each image registration |
+| `adjust_global_bundle(mapper, ...)` | `mapper.adjust_global_bundle()` | Periodically when model grows |
+| `iterative_local_refinement(mapper, ...)` | `mapper.iterative_local_refinement()` | Wraps local BA + track merging |
+| `iterative_global_refinement(mapper, ...)` | `mapper.iterative_global_refinement()` | Wraps global BA + retriangulation + filtering |
+
+The customization point is `solve_bundle_adjustment` — the commented-out code shows how to access the raw `pyceres.Problem` and add your own residuals:
+
+```python
+# bundle_adjuster = pycolmap.create_default_ceres_bundle_adjuster(...)
+# solver_options = ba_options.ceres.create_solver_options(...)
+# # Add custom residuals to bundle_adjuster.problem here
+# pyceres.solve(solver_options, bundle_adjuster.problem, summary)
+```
+
+### Where these fit in the layer cake
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  YOUR CODE (pysfm, hloc, etc.)                               │
+│  Calls: pycolmap.incremental_mapping()  ◄── black box        │
+├─────────────────────────────────────────────────────────────┤
+│  custom_incremental_pipeline.py                              │
+│  Calls: mapper.find_next_images(), mapper.register_next_..() │
+│         mapper.triangulate_image(), custom BA functions       │
+│  ◄── same logic as the black box, but you control the loop   │
+├─────────────────────────────────────────────────────────────┤
+│  custom_bundle_adjustment.py                                 │
+│  Calls: pycolmap.create_default_bundle_adjuster(),           │
+│         bundle_adjuster.solve()                              │
+│  ◄── same BA as the black box, but you can inject residuals  │
+├─────────────────────────────────────────────────────────────┤
+│  pycolmap primitives                                         │
+│  IncrementalMapper, BundleAdjustmentConfig, pyceres.Problem  │
+├─────────────────────────────────────────────────────────────┤
+│  COLMAP C++                                                  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### When would you use the custom pipeline?
+
+- **Add custom loss terms to BA** — e.g., regularization priors, GPS constraints, IMU factors
+- **Custom image selection** — override `find_next_images` with your own ordering
+- **Logging/callbacks at every step** — the example already adds an `enlighten` progress bar
+- **Research** — ablate individual components (skip local BA, change triangulation thresholds)
+
+You would NOT use these if you just want standard SfM — `pycolmap.incremental_mapping()` does the same thing with less code. pysfm and hloc both use the black-box version.
 
 ---
 
