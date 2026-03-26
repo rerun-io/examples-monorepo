@@ -483,6 +483,16 @@ zipfile.ZipFile('/tmp/fountain.zip').extractall('data/examples/sfm_reconstructio
 cwd = "packages/pysfm"
 description = "Download Fountain example dataset for SfM"
 
+[feature.pysfm.tasks._download-unknown-rig]
+cmd = "test -e data/examples/unknown-rig/cam1.mp4 || hf download pablovela5620/pycolmap-glomap-example --include 'unknown-rig/*.mp4' --repo-type dataset --local-dir data/examples/"
+cwd = "packages/pysfm"
+description = "Download unknown-rig example videos"
+
+[feature.pysfm.tasks._download-calibrated-rig]
+cmd = "test -e data/examples/calibrated-rig/video_dev1_session15_segment1_left-front.mp4 || hf download pablovela5620/pycolmap-glomap-example --include 'calibrated-rig/*.mp4' --repo-type dataset --local-dir data/examples/"
+cwd = "packages/pysfm"
+description = "Download calibrated-rig example videos"
+
 # ── Demo tasks ───────────────────────────────────────────────────────────
 [feature.pysfm.tasks.sfm-reconstruction-demo]
 cmd = "python tools/demos/sfm_reconstruction.py --image-dir data/examples/sfm_reconstruction/Fountain/images --rr-config.save data/examples/sfm_reconstruction/fountain.rrd"
@@ -508,6 +518,7 @@ description = "Video-to-Image Gradio app with hot reload"
 
 [feature.pysfm.tasks.video-to-image-demo]
 cmd = "python tools/demos/video_to_image.py --video-path data/examples/unknown-rig/cam1.mp4 --output-dir /tmp/video_to_image_output"
+depends-on = ["_download-unknown-rig"]
 cwd = "packages/pysfm"
 description = "Run video-to-image frame extraction CLI demo"
 
