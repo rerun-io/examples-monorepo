@@ -94,6 +94,7 @@ def _parse_video_path(video_file: str | None) -> Path:
 # ---------------------------------------------------------------------------
 # Streaming callback
 # ---------------------------------------------------------------------------
+@rr.recording_stream_generator_ctx
 def video_to_image_fn(
     recording_id: uuid.UUID,
     video_path: Path,
@@ -101,8 +102,13 @@ def video_to_image_fn(
     """Gradio streaming callback that extracts frames and visualizes in Rerun.
 
     Creates a scoped Rerun recording, logs the source video, then runs the
-    ``VideoToImageNode`` which handles both extraction and intermediate frame
-    logging (when verbose). Yields binary stream bytes to the Rerun viewer.
+    ``VideoToImageNode`` which handles extraction and intermediate frame
+    logging (when verbose). Yields binary stream bytes so the Rerun viewer
+    updates incrementally.
+
+    The ``@rr.recording_stream_generator_ctx`` decorator suspends and
+    restores the Rerun ContextVar around each ``yield``, making it safe to
+    yield inside ``with recording:``.
 
     Args:
         recording_id: Session-scoped recording identifier.
@@ -115,9 +121,6 @@ def video_to_image_fn(
     recording: rr.RecordingStream = rr.RecordingStream(application_id="video_to_image", recording_id=recording_id)
     stream: rr.BinaryStream = recording.binary_stream()
 
-    # NOTE: Do NOT yield inside ``with recording:`` — Gradio resumes the
-    # generator in a different async context, which invalidates the
-    # ContextVar token and raises ValueError on __exit__.
     tmp_dir: Path = Path(tempfile.mkdtemp(prefix="video_to_image_"))
     try:
         with recording:
@@ -134,6 +137,9 @@ def video_to_image_fn(
                 timeline=TIMELINE,
             )
 
+            # Yield early so the viewer shows the video asset + blueprint
+            yield stream.read(), "Extracting frames…"
+
             node: VideoToImageNode = VideoToImageNode(config=_CONFIG, parent_log_path=PARENT_LOG_PATH)
             result: VideoToImageResult = node(
                 video_path=video_path,
@@ -141,7 +147,7 @@ def video_to_image_fn(
                 frame_timestamps_ns=frame_timestamps_ns,
             )
 
-        yield stream.read(), f"Done — extracted {result.num_frames_extracted} frames to {result.output_dir}"
+            yield stream.read(), f"Done — extracted {result.num_frames_extracted} frames to {result.output_dir}"
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
