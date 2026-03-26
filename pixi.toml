@@ -507,13 +507,13 @@ cwd = "packages/pysfm"
 description = "Launch COLMAP SfM Gradio app with Rerun viewer"
 
 [feature.pysfm.tasks.pysfm-vid-to-img-node]
-cmd = "python tools/nodes/video_to_image_app.py"
+cmd = "python tools/nodes/video_to_image_node.py"
 depends-on = ["_download-unknown-rig"]
 cwd = "packages/pysfm"
 description = "Launch Video-to-Image frame extraction Gradio app with Rerun viewer"
 
 [feature.pysfm.tasks.pysfm-vid-to-img-node-dev]
-cmd = "gradio tools/nodes/video_to_image_app.py --watch-dirs $PIXI_PROJECT_ROOT/packages/pysfm/pysfm"
+cmd = "gradio tools/nodes/video_to_image_node.py --watch-dirs $PIXI_PROJECT_ROOT/packages/pysfm/pysfm"
 depends-on = ["_download-unknown-rig"]
 cwd = "packages/pysfm"
 description = "Video-to-Image Gradio app with hot reload"
