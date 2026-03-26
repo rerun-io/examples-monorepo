@@ -400,6 +400,16 @@ def run_rig_recon(*, config: RigReconConfig) -> RigReconResult:
         pairing_options=pairing_options,
     )
 
+    # -- 5b. Clear early rig info before bootstrap mapper ---------------------
+    # The incremental mapper rejects reconstructions with rig info but no
+    # sensor_from_rig poses.  Clear rigs/frames so the bootstrap runs without
+    # rig constraints; step 7 re-applies rig config with derived poses.
+    if config.early_rig_config:
+        logger.info("Clearing rig/frame info before no-rig bootstrap mapper ...")
+        with pycolmap.Database.open(database_path) as db:
+            db.clear_rigs()
+            db.clear_frames()
+
     # -- 6. Incremental mapping (no-rig bootstrap) ----------------------------
     # NOTE: GPU BA via cuDSS is not working in this build — using CPU for BA.
     incremental_options: pycolmap.IncrementalPipelineOptions = pycolmap.IncrementalPipelineOptions()
