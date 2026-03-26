@@ -134,7 +134,7 @@ Run modes:
 GPU policy:
 
 ```bash
-COLMAP="CONDA_OVERRIDE_CUDA=12.9 pixi run --frozen -e pysfm colmap"
+COLMAP="pixi run --frozen -e pysfm colmap"
 ```
 
 - feature extraction uses GPU
@@ -150,7 +150,7 @@ This is the preferred production workflow:
 - final solve on `0100` with `global_mapper`
 
 ```bash
-COLMAP="CONDA_OVERRIDE_CUDA=12.9 pixi run --frozen -e pysfm colmap"
+COLMAP="pixi run --frozen -e pysfm colmap"
 SEED_IMAGE_SET="/home/pablo/0Dev/data/colmap-data/multicam/images/<batch>/<capture>/0050"
 FINAL_IMAGE_SET="/home/pablo/0Dev/data/colmap-data/multicam/images/<batch>/<capture>/0100"
 RUN_ROOT="/home/pablo/0Dev/data/colmap-data/multicam/colmap/<batch>/<capture>/0050seed-0100final"
@@ -275,13 +275,13 @@ changed. Otherwise Pixi spends a long time re-solving before every launch.
 First kitchen-train run:
 
 ```bash
-CONDA_OVERRIDE_CUDA=12.9 pixi run --frozen -e pysfm brush-train-kitchen-5k
+pixi run --frozen -e pysfm brush-train-kitchen-5k
 ```
 
 Equivalent direct helper command from `packages/pysfm/`:
 
 ```bash
-CONDA_OVERRIDE_CUDA=12.9 pixi run --frozen -e pysfm python tools/brush/train_colmap_brush.py \
+pixi run --frozen -e pysfm python tools/brush/train_colmap_brush.py \
   --images-dir /home/pablo/0Dev/data/colmap-data/multicam/images/6g-night-nov-29-2024/kitchen-nov-29-2024-train/0100 \
   --model-dir /home/pablo/0Dev/data/colmap-data/multicam/colmap/6g-night-nov-29-2024/kitchen-nov-29-2024-train/0100-aliked-lightglue-globalmapper-overlap10-timed-20260320/rig/sparse/0 \
   --work-root /home/pablo/0Dev/data/colmap-data/multicam/brush/6g-night-nov-29-2024/kitchen-nov-29-2024-train/0100-global-rig \
@@ -295,7 +295,7 @@ CONDA_OVERRIDE_CUDA=12.9 pixi run --frozen -e pysfm python tools/brush/train_col
 View the exported splat:
 
 ```bash
-CONDA_OVERRIDE_CUDA=12.9 pixi run -e pysfm brush_app \
+pixi run -e pysfm brush_app \
   /home/pablo/0Dev/data/colmap-data/multicam/brush/6g-night-nov-29-2024/kitchen-nov-29-2024-train/0100-global-rig/runs/5k/export_5000.ply \
   --with-viewer
 ```
@@ -304,7 +304,6 @@ Notes:
 
 - the packaged `brush` dependency is currently scoped to `linux-64` only
 - the packaged executable name is `brush_app` even though upstream docs call it `brush`
-- the shared `pysfm` env still needs `CONDA_OVERRIDE_CUDA=12.9` on this host
 - `--eval-split-every 10` is image-level, not synchronized rig-frame-level
 
 If you want the faster but less robust variant, replace the `0050` seed

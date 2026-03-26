@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Generator
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, TypeAlias
@@ -20,6 +22,7 @@ from typing import Literal, TypeAlias
 import cv2
 import numpy as np
 import pycolmap
+import rerun as rr
 import rerun.blueprint as rrb
 from jaxtyping import Float32, Float64, UInt8
 from numpy import ndarray
@@ -37,6 +40,52 @@ TIMELINE: str = "frame"
 
 SfMCameraModel: TypeAlias = Literal["SIMPLE_PINHOLE", "PINHOLE", "SIMPLE_RADIAL", "RADIAL", "OPENCV", "OPENCV_FISHEYE", "FULL_OPENCV"]
 """Supported COLMAP camera model names."""
+
+
+# ---------------------------------------------------------------------------
+# TimingLogger
+# ---------------------------------------------------------------------------
+class TimingLogger:
+    """Builds a markdown timing table and logs it to Rerun as a TextDocument.
+
+    Each pipeline step is wrapped in ``with timer.log_time("section"):``.
+    The markdown table grows incrementally — each exit appends a row and
+    updates the Rerun log so the viewer shows progress live.
+    """
+
+    def __init__(self, header: str, log_path: str = "logs") -> None:
+        self.start_time: float = time.perf_counter()
+        self.log_path: str = log_path
+        self.markdown_table: str = f"# {header}\n" "| Section | Time |\n" "|---------|------|\n"
+        rr.log(self.log_path, rr.TextDocument(self.markdown_table, media_type="text/markdown"), static=True)
+
+    @contextmanager
+    def log_time(self, section_name: str) -> Generator[None, None, None]:
+        """Time a pipeline section and append it to the markdown table."""
+        t_start: float = time.perf_counter()
+        logger.info(f"{section_name} ...")
+        try:
+            yield
+        finally:
+            elapsed: float = time.perf_counter() - t_start
+            minutes: int
+            seconds: float
+            minutes, seconds = divmod(elapsed, 60)
+            time_str: str = f"{int(minutes)}m {seconds:.1f}s"
+            self.markdown_table += f"| {section_name} | {time_str} |\n"
+            rr.log(self.log_path, rr.TextDocument(self.markdown_table, media_type="text/markdown"), static=True)
+            logger.info(f"{section_name}: {time_str}")
+
+    def log_total(self) -> None:
+        """Append a total row to the timing table."""
+        total: float = time.perf_counter() - self.start_time
+        minutes: int
+        seconds: float
+        minutes, seconds = divmod(total, 60)
+        time_str: str = f"{int(minutes)}m {seconds:.1f}s"
+        self.markdown_table += f"| **Total** | **{time_str}** |\n"
+        rr.log(self.log_path, rr.TextDocument(self.markdown_table, media_type="text/markdown"), static=True)
+        logger.info(f"Total pipeline time: {time_str}")
 
 
 # ---------------------------------------------------------------------------
@@ -88,11 +137,8 @@ class VidReconResult:
 # ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
-def run_vid_recon(*, config: VidReconConfig) -> VidReconResult:
+def run_vid_recon(*, config: VidReconConfig, timer: TimingLogger | None = None) -> VidReconResult:
     """Run the monocular video reconstruction pipeline.
-
-    This function is the main orchestrator.  It does NOT call ``rr.log()`` —
-    visualization is handled by the CLI / Gradio layer.
 
     Pipeline:
         1. Extract frames from video
@@ -102,6 +148,8 @@ def run_vid_recon(*, config: VidReconConfig) -> VidReconResult:
 
     Args:
         config: Pipeline configuration.
+        timer: Optional timing logger. When provided, each step is timed
+            and the results are logged to Rerun as a markdown table.
 
     Returns:
         Result containing paths to all outputs.
@@ -116,18 +164,16 @@ def run_vid_recon(*, config: VidReconConfig) -> VidReconResult:
         d.mkdir(parents=True, exist_ok=True)
 
     # -- 1. Extract frames ----------------------------------------------------
-    t0: float = time.perf_counter()
-    node: VideoToImageNode = VideoToImageNode(
-        config=VideoToImageConfig(num_frames=config.num_frames),
-        parent_log_path=Path("world"),
-    )
-    extraction_result = node(
-        video_path=config.video_path,
-        output_dir=images_dir,
-    )
+    with timer.log_time("Frame extraction") if timer else nullcontext():
+        node: VideoToImageNode = VideoToImageNode(
+            config=VideoToImageConfig(num_frames=config.num_frames),
+            parent_log_path=Path("world"),
+        )
+        extraction_result = node(
+            video_path=config.video_path,
+            output_dir=images_dir,
+        )
     num_frames_extracted: int = extraction_result.num_frames_extracted
-    t1: float = time.perf_counter()
-    logger.info("Frame extraction: %.1fs (%d frames)", t1 - t0, num_frames_extracted)
 
     # -- 2. Feature extraction (ALIKED_N16ROT, GPU) ---------------------------
     pycolmap.set_random_seed(0)
@@ -143,17 +189,14 @@ def run_vid_recon(*, config: VidReconConfig) -> VidReconResult:
     extraction_options.use_gpu = config.use_gpu
     extraction_options.gpu_index = "0"
 
-    t2: float = time.perf_counter()
-    logger.info("Extracting features (ALIKED_N16ROT, camera_model=%s, gpu=%s) ...", config.camera_model, config.use_gpu)
-    pycolmap.extract_features(
-        database_path=database_path,
-        image_path=images_dir,
-        camera_mode=pycolmap.CameraMode.PER_IMAGE,
-        reader_options=reader_options,
-        extraction_options=extraction_options,
-    )
-    t3: float = time.perf_counter()
-    logger.info("Feature extraction: %.1fs", t3 - t2)
+    with timer.log_time(f"Feature extraction (ALIKED_N16ROT, {config.camera_model})") if timer else nullcontext():
+        pycolmap.extract_features(
+            database_path=database_path,
+            image_path=images_dir,
+            camera_mode=pycolmap.CameraMode.PER_IMAGE,
+            reader_options=reader_options,
+            extraction_options=extraction_options,
+        )
 
     # -- 3. Sequential matching (ALIKED_LIGHTGLUE) ----------------------------
     matching_options: pycolmap.FeatureMatchingOptions = pycolmap.FeatureMatchingOptions()
@@ -165,39 +208,32 @@ def run_vid_recon(*, config: VidReconConfig) -> VidReconResult:
     pairing_options.overlap = config.overlap
     pairing_options.quadratic_overlap = False
 
-    t4: float = time.perf_counter()
-    logger.info("Sequential matching (ALIKED_LIGHTGLUE, overlap=%d) ...", config.overlap)
-    pycolmap.match_sequential(
-        database_path=database_path,
-        matching_options=matching_options,
-        pairing_options=pairing_options,
-    )
-    t5: float = time.perf_counter()
-    logger.info("Sequential matching: %.1fs", t5 - t4)
+    with timer.log_time(f"Sequential matching (overlap={config.overlap})") if timer else nullcontext():
+        pycolmap.match_sequential(
+            database_path=database_path,
+            matching_options=matching_options,
+            pairing_options=pairing_options,
+        )
 
     # -- 4. Mapping -----------------------------------------------------------
-    t6: float = time.perf_counter()
-    if config.mapping == "incremental":
-        logger.info("Incremental mapping ...")
-        incremental_options: pycolmap.IncrementalPipelineOptions = pycolmap.IncrementalPipelineOptions()
-        incremental_options.multiple_models = False
-        recs: dict[int, pycolmap.Reconstruction] = pycolmap.incremental_mapping(
-            database_path=database_path,
-            image_path=images_dir,
-            output_path=sparse_dir,
-            options=incremental_options,
-        )
-    else:
-        logger.info("Global mapping ...")
-        global_options: pycolmap.GlobalPipelineOptions = pycolmap.GlobalPipelineOptions()
-        recs = pycolmap.global_mapping(
-            database_path=database_path,
-            image_path=images_dir,
-            output_path=sparse_dir,
-            options=global_options,
-        )
-    t7: float = time.perf_counter()
-    logger.info("%s mapping: %.1fs", config.mapping.capitalize(), t7 - t6)
+    with timer.log_time(f"{config.mapping.capitalize()} mapping") if timer else nullcontext():
+        if config.mapping == "incremental":
+            incremental_options: pycolmap.IncrementalPipelineOptions = pycolmap.IncrementalPipelineOptions()
+            incremental_options.multiple_models = False
+            recs: dict[int, pycolmap.Reconstruction] = pycolmap.incremental_mapping(
+                database_path=database_path,
+                image_path=images_dir,
+                output_path=sparse_dir,
+                options=incremental_options,
+            )
+        else:
+            global_options: pycolmap.GlobalPipelineOptions = pycolmap.GlobalPipelineOptions()
+            recs = pycolmap.global_mapping(
+                database_path=database_path,
+                image_path=images_dir,
+                output_path=sparse_dir,
+                options=global_options,
+            )
 
     if not recs:
         msg: str = f"{config.mapping.capitalize()} mapping failed: COLMAP produced no reconstruction"
@@ -206,8 +242,10 @@ def run_vid_recon(*, config: VidReconConfig) -> VidReconResult:
     # Use the largest reconstruction.
     rec_id: int = max(recs, key=lambda k: recs[k].num_reg_images())
     rec: pycolmap.Reconstruction = recs[rec_id]
-    logger.info("Reconstruction: %d images registered (model %d)", rec.num_reg_images(), rec_id)
-    logger.info("Total pipeline time: %.1fs", t7 - t0)
+    logger.info(f"Reconstruction: {rec.num_reg_images()} images registered (model {rec_id})")
+
+    if timer:
+        timer.log_total()
 
     return VidReconResult(
         output_dir=output_dir,
@@ -225,8 +263,7 @@ def run_vid_recon(*, config: VidReconConfig) -> VidReconResult:
 def create_vid_blueprint(parent_log_path: Path) -> rrb.ContainerLike:
     """Create a Rerun blueprint for monocular video reconstruction visualization.
 
-    Shows a 3D spatial view with the point cloud and camera frustums,
-    plus a 2D view for scrubbing through frames.
+    Layout: 3D view (left) | 2D camera view + timing table (right, stacked).
 
     Args:
         parent_log_path: Root log path (typically ``Path("world")``).
@@ -243,7 +280,15 @@ def create_vid_blueprint(parent_log_path: Path) -> rrb.ContainerLike:
         origin=f"{parent_log_path}/camera/pinhole",
     )
 
-    return rrb.Horizontal(contents=[view_3d, view_2d], column_shares=[3, 2])
+    view_timing: rrb.TextDocumentView = rrb.TextDocumentView(
+        origin="logs",
+        name="Timing",
+    )
+
+    return rrb.Horizontal(
+        contents=[view_3d, rrb.Vertical(contents=[view_2d, view_timing], row_shares=[3, 1])],
+        column_shares=[3, 2],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -263,8 +308,6 @@ def log_vid_reconstruction(result: VidReconResult, parent_log_path: Path) -> Non
         result: Pipeline result with paths to outputs.
         parent_log_path: Root Rerun log path.
     """
-    import rerun as rr
-
     rec: pycolmap.Reconstruction = pycolmap.Reconstruction(str(result.model_dir))
 
     # -- Compute gravity-alignment transform from camera poses ----------------
@@ -291,7 +334,7 @@ def log_vid_reconstruction(result: VidReconResult, parent_log_path: Path) -> Non
             rr.Transform3D(mat3x3=orient_R, translation=orient_t),
             static=True,
         )
-        logger.info("Gravity-alignment transform logged on '%s' (det=%.4f)", parent_log_path, np.linalg.det(orient_R))
+        logger.info(f"Gravity-alignment transform logged on '{parent_log_path}' (det={np.linalg.det(orient_R):.4f})")
 
     # -- Static 3D point cloud ------------------------------------------------
     xyz_list: list[Float64[ndarray, "3"]] = []
@@ -380,14 +423,13 @@ class VidReconCLIConfig:
 # ---------------------------------------------------------------------------
 def main(cli_config: VidReconCLIConfig) -> None:
     """Run the monocular video pipeline and visualize results in Rerun."""
-    import rerun as rr
-
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
     parent_log_path: Path = Path("world")
 
-    # 1. Run the full pipeline
-    result: VidReconResult = run_vid_recon(config=cli_config.config)
+    # 1. Run the full pipeline with timing
+    timer: TimingLogger = TimingLogger(header="Monocular Video Reconstruction")
+    result: VidReconResult = run_vid_recon(config=cli_config.config, timer=timer)
 
     # 2. Setup Rerun blueprint
     blueprint: rrb.Blueprint = rrb.Blueprint(
