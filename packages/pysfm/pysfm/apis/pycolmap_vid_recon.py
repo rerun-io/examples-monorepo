@@ -38,7 +38,9 @@ logger: logging.Logger = logging.getLogger(__name__)
 TIMELINE: str = "frame"
 """Timeline name used for sequential camera logging."""
 
-SfMCameraModel: TypeAlias = Literal["SIMPLE_PINHOLE", "PINHOLE", "SIMPLE_RADIAL", "RADIAL", "OPENCV", "OPENCV_FISHEYE", "FULL_OPENCV"]
+SfMCameraModel: TypeAlias = Literal[
+    "SIMPLE_PINHOLE", "PINHOLE", "SIMPLE_RADIAL", "RADIAL", "OPENCV", "OPENCV_FISHEYE", "FULL_OPENCV"
+]
 """Supported COLMAP camera model names."""
 
 
@@ -56,7 +58,7 @@ class TimingLogger:
     def __init__(self, header: str, log_path: str = "logs") -> None:
         self.start_time: float = time.perf_counter()
         self.log_path: str = log_path
-        self.markdown_table: str = f"# {header}\n" "| Section | Time |\n" "|---------|------|\n"
+        self.markdown_table: str = f"# {header}\n| Section | Time |\n|---------|------|\n"
         rr.log(self.log_path, rr.TextDocument(self.markdown_table, media_type="text/markdown"), static=True)
 
     @contextmanager
@@ -286,7 +288,7 @@ def create_vid_blueprint(parent_log_path: Path) -> rrb.ContainerLike:
     )
 
     return rrb.Horizontal(
-        contents=[view_3d, rrb.Vertical(contents=[view_2d, view_timing], row_shares=[3, 1])],
+        contents=[view_3d, rrb.Vertical(contents=[view_2d, view_timing], row_shares=[5, 2])],
         column_shares=[3, 2],
     )
 
@@ -399,8 +401,7 @@ def log_vid_reconstruction(result: VidReconResult, parent_log_path: Path) -> Non
                 f"{camera_path}/pinhole/image/keypoints",
                 rr.Points2D(
                     positions=keypoints_xy,
-                    radii=np.full(keypoints_xy.shape[0], 2.0, dtype=np.float32),
-                    colors=np.full((keypoints_xy.shape[0], 3), [34, 138, 167], dtype=np.uint8),
+                    colors=[0, 255, 0],  # Green for visible keypoints
                 ),
             )
 
