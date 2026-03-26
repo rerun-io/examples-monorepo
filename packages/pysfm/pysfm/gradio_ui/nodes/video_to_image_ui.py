@@ -113,38 +113,30 @@ def video_to_image_fn(
     recording: rr.RecordingStream = rr.RecordingStream(application_id="video_to_image", recording_id=recording_id)
     stream: rr.BinaryStream = recording.binary_stream()
 
-    # Use set_global instead of ``with recording:`` — the context manager
-    # stores a ContextVar token that becomes invalid when Gradio resumes
-    # the generator in a different async context.  set_global is safe here
-    # because Gradio queues requests sequentially for a single session.
-    recording.set_global()
-
-    rr.send_blueprint(
-        blueprint=rrb.Blueprint(
-            create_video_to_image_blueprint(PARENT_LOG_PATH),
-            collapse_panels=True,
+    # NOTE: Do NOT yield inside ``with recording:`` — Gradio resumes the
+    # generator in a different async context, which invalidates the
+    # ContextVar token and raises ValueError on __exit__.
+    with recording:
+        rr.send_blueprint(
+            blueprint=rrb.Blueprint(
+                create_video_to_image_blueprint(PARENT_LOG_PATH),
+                collapse_panels=True,
+            )
         )
-    )
 
-    yield stream.read(), "Logging video asset..."
+        frame_timestamps_ns: Int[ndarray, "num_frames"] = log_video(
+            video_source=video_path,
+            video_log_path=PARENT_LOG_PATH / "video",
+            timeline=TIMELINE,
+        )
 
-    # Log the video asset — returns timestamps for all frames
-    frame_timestamps_ns: Int[ndarray, "num_frames"] = log_video(
-        video_source=video_path,
-        video_log_path=PARENT_LOG_PATH / "video",
-        timeline=TIMELINE,
-    )
-
-    yield stream.read(), "Extracting frames..."
-
-    # Run extraction — node handles intermediate Rerun logging
-    tmp_dir: Path = Path(tempfile.mkdtemp(prefix="video_to_image_"))
-    node: VideoToImageNode = VideoToImageNode(config=_CONFIG, parent_log_path=PARENT_LOG_PATH)
-    result: VideoToImageResult = node(
-        video_path=video_path,
-        output_dir=tmp_dir,
-        frame_timestamps_ns=frame_timestamps_ns,
-    )
+        tmp_dir: Path = Path(tempfile.mkdtemp(prefix="video_to_image_"))
+        node: VideoToImageNode = VideoToImageNode(config=_CONFIG, parent_log_path=PARENT_LOG_PATH)
+        result: VideoToImageResult = node(
+            video_path=video_path,
+            output_dir=tmp_dir,
+            frame_timestamps_ns=frame_timestamps_ns,
+        )
 
     yield stream.read(), f"Done — extracted {result.num_frames_extracted} frames to {result.output_dir}"
 
