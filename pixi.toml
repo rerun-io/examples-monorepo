@@ -519,10 +519,10 @@ cwd = "packages/pysfm"
 description = "Video-to-Image Gradio app with hot reload"
 
 [feature.pysfm.tasks.video-to-image-demo]
-cmd = "python tools/demos/video_to_image.py --video-path data/examples/unknown-rig/cam1.mp4 --output-dir /tmp/video_to_image_output"
+cmd = "python tools/demos/video_to_image.py --video-path data/examples/unknown-rig/cam1.mp4 --output-dir /tmp/video_to_image_output --rr-config.save /tmp/video_to_image_output/video_to_image.rrd"
 depends-on = ["_download-unknown-rig"]
 cwd = "packages/pysfm"
-description = "Run video-to-image frame extraction CLI demo"
+description = "Run video-to-image frame extraction CLI demo (saves .rrd)"
 
 [feature.pysfm.tasks.brush-train-kitchen-5k]
 cmd = """

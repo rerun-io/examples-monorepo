@@ -7,10 +7,11 @@ into an embedded Rerun viewer.
 
 Click chain::
 
-    click -> _switch_to_outputs -> recording_id -> _sync_config
+    click -> _switch_to_outputs -> recording_id
           -> _parse_video_path -> video_to_image_fn
 """
 
+import shutil
 import tempfile
 import uuid
 from collections.abc import Generator
@@ -49,25 +50,8 @@ gr.set_static_paths([str(EXAMPLE_DATA_DIR)])
 
 PARENT_LOG_PATH: Final[Path] = Path("world")
 
-
-# ---------------------------------------------------------------------------
-# Module-level state
-# ---------------------------------------------------------------------------
-_CONFIG: VideoToImageConfig = VideoToImageConfig(verbose=True)
-"""Module-level config, kept in sync with UI widgets."""
-
-
-# ---------------------------------------------------------------------------
-# _sync_config: widgets -> config singleton
-# ---------------------------------------------------------------------------
-def _sync_config(num_frames: int) -> None:
-    """Sync UI widget values into the module-level config.
-
-    Args:
-        num_frames: Number of frames to extract.
-    """
-    global _CONFIG
-    _CONFIG = VideoToImageConfig(num_frames=int(num_frames), verbose=True)
+DEFAULT_NUM_FRAMES: Final[int] = 20
+"""Default number of frames shown in the slider."""
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +80,7 @@ def _parse_video_path(video_file: str | None) -> Path:
 def video_to_image_fn(
     recording_id: uuid.UUID,
     video_path: Path,
+    num_frames: int,
 ) -> Generator[tuple[bytes | None, str], None, None]:
     """Gradio streaming callback that extracts frames and visualizes in Rerun.
 
@@ -106,39 +91,45 @@ def video_to_image_fn(
     Args:
         recording_id: Session-scoped recording identifier.
         video_path: Path to the input video file.
+        num_frames: Number of frames to extract (from the slider).
 
     Yields:
         Tuple of (Rerun binary stream bytes, status message string).
     """
+    config: VideoToImageConfig = VideoToImageConfig(num_frames=int(num_frames), verbose=True)
+
     recording: rr.RecordingStream = rr.RecordingStream(application_id="video_to_image", recording_id=recording_id)
     stream: rr.BinaryStream = recording.binary_stream()
 
     # NOTE: Do NOT yield inside ``with recording:`` — Gradio resumes the
     # generator in a different async context, which invalidates the
     # ContextVar token and raises ValueError on __exit__.
-    with recording:
-        rr.send_blueprint(
-            blueprint=rrb.Blueprint(
-                create_video_to_image_blueprint(PARENT_LOG_PATH),
-                collapse_panels=True,
+    tmp_dir: Path = Path(tempfile.mkdtemp(prefix="video_to_image_"))
+    try:
+        with recording:
+            rr.send_blueprint(
+                blueprint=rrb.Blueprint(
+                    create_video_to_image_blueprint(PARENT_LOG_PATH),
+                    collapse_panels=True,
+                )
             )
-        )
 
-        frame_timestamps_ns: Int[ndarray, "num_frames"] = log_video(
-            video_source=video_path,
-            video_log_path=PARENT_LOG_PATH / "video",
-            timeline=TIMELINE,
-        )
+            frame_timestamps_ns: Int[ndarray, "num_frames"] = log_video(
+                video_source=video_path,
+                video_log_path=PARENT_LOG_PATH / "video",
+                timeline=TIMELINE,
+            )
 
-        tmp_dir: Path = Path(tempfile.mkdtemp(prefix="video_to_image_"))
-        node: VideoToImageNode = VideoToImageNode(config=_CONFIG, parent_log_path=PARENT_LOG_PATH)
-        result: VideoToImageResult = node(
-            video_path=video_path,
-            output_dir=tmp_dir,
-            frame_timestamps_ns=frame_timestamps_ns,
-        )
+            node: VideoToImageNode = VideoToImageNode(config=config, parent_log_path=PARENT_LOG_PATH)
+            result: VideoToImageResult = node(
+                video_path=video_path,
+                output_dir=tmp_dir,
+                frame_timestamps_ns=frame_timestamps_ns,
+            )
 
-    yield stream.read(), f"Done — extracted {result.num_frames_extracted} frames to {result.output_dir}"
+        yield stream.read(), f"Done — extracted {result.num_frames_extracted} frames to {result.output_dir}"
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +189,7 @@ def main() -> gr.Blocks:
                                 minimum=2,
                                 maximum=200,
                                 step=1,
-                                value=_CONFIG.num_frames,
+                                value=DEFAULT_NUM_FRAMES,
                             )
 
                     with gr.TabItem("Outputs", id="outputs"):
@@ -235,15 +226,12 @@ def main() -> gr.Blocks:
             outputs=[recording_id],
             api_visibility="private",
         ).then(
-            _sync_config,
-            inputs=[num_frames_slider],
-        ).then(
             _parse_video_path,
             inputs=[input_video],
             outputs=[video_path_state],
         ).then(
             video_to_image_fn,
-            inputs=[recording_id, video_path_state],
+            inputs=[recording_id, video_path_state, num_frames_slider],
             outputs=[rr_viewer, status_text],
         )
 
