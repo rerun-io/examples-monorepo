@@ -369,7 +369,7 @@ def run_rig_recon(*, config: RigReconConfig) -> RigReconResult:
     with pycolmap.Database.open(database_path) as db:
         pycolmap.apply_rig_config(rig_configs, db)
 
-    # -- 5. Sequential matching (ALIKED_LIGHTGLUE, no rig) --------------------
+    # -- 5. Sequential matching (ALIKED_LIGHTGLUE, rig-aware) -----------------
     matching_options: pycolmap.FeatureMatchingOptions = pycolmap.FeatureMatchingOptions()
     matching_options.type = pycolmap.FeatureMatcherType.ALIKED_LIGHTGLUE  # Neural matcher paired with ALIKED features.
     matching_options.use_gpu = config.use_gpu

@@ -118,7 +118,6 @@ class VideoToImageNode:
 
         actual_num_frames: int = min(self.config.num_frames, total_frames)
         frame_indices: list[int] = np.linspace(0, total_frames - 1, actual_num_frames, dtype=int).tolist()
-        frame_index_set: set[int] = set(frame_indices)
         pad_width: int = len(str(actual_num_frames))
 
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -130,16 +129,12 @@ class VideoToImageNode:
             total_frames,
         )
 
-        # Map frame_index -> output index for filename generation
-        frame_idx_to_out_idx: dict[int, int] = {fi: oi for oi, fi in enumerate(frame_indices)}
         image_paths: list[Path] = [Path()] * actual_num_frames
 
-        for current_idx, bgr in enumerate(reader):
-            if current_idx not in frame_index_set:
-                continue
-
-            bgr_frame: UInt8[ndarray, "H W 3"] = bgr
-            out_idx: int = frame_idx_to_out_idx[current_idx]
+        # Use random access (get_frame) to read only the needed frames,
+        # avoiding a full sequential scan of the entire video.
+        for out_idx, frame_idx in enumerate(frame_indices):
+            bgr_frame: UInt8[ndarray, "H W 3"] = reader.get_frame(frame_idx)
             filename: str = f"image{out_idx + 1:0{pad_width}d}.jpg"
             out_path: Path = output_dir / filename
             cv2.imwrite(str(out_path), bgr_frame)
@@ -148,7 +143,7 @@ class VideoToImageNode:
             # Verbose: log each frame as it's extracted
             if self.config.verbose:
                 if frame_timestamps_ns is not None:
-                    rr.set_time(TIMELINE, duration=1e-9 * float(frame_timestamps_ns[current_idx]))
+                    rr.set_time(TIMELINE, duration=1e-9 * float(frame_timestamps_ns[frame_idx]))
                 rgb: UInt8[ndarray, "H W 3"] = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
                 rr.log(
                     f"{self.parent_log_path}/extracted/image",

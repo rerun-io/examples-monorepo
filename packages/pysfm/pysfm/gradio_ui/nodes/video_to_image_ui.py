@@ -152,7 +152,7 @@ def video_to_image_fn(
                 frame_timestamps_ns=frame_timestamps_ns,
             )
 
-            yield stream.read(), f"Done — extracted {result.num_frames_extracted} frames to {result.output_dir}"
+            yield stream.read(), f"Done — extracted {result.num_frames_extracted} frames."
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
