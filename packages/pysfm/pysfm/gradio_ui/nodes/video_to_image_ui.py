@@ -57,18 +57,24 @@ PARENT_LOG_PATH: Final[Path] = Path("world")
 _CONFIG: VideoToImageConfig = VideoToImageConfig(verbose=True)
 """Module-level config, kept in sync with UI widgets."""
 
+_NODE: VideoToImageNode = VideoToImageNode(config=_CONFIG, parent_log_path=PARENT_LOG_PATH)
+"""Module-level node singleton. Re-created when config changes."""
+
 
 # ---------------------------------------------------------------------------
-# _sync_config: widgets -> config singleton
+# _sync_config: widgets -> config + node singletons
 # ---------------------------------------------------------------------------
 def _sync_config(num_frames: int) -> None:
-    """Sync UI widget values into the module-level config.
+    """Sync UI widget values into the module-level config and node singleton.
+
+    VideoToImageNode is lightweight (no model), so we always re-create.
 
     Args:
         num_frames: Number of frames to extract.
     """
-    global _CONFIG
+    global _CONFIG, _NODE
     _CONFIG = VideoToImageConfig(num_frames=int(num_frames), verbose=True)
+    _NODE = VideoToImageNode(config=_CONFIG, parent_log_path=PARENT_LOG_PATH)
 
 
 # ---------------------------------------------------------------------------
@@ -140,8 +146,7 @@ def video_to_image_fn(
             # Yield early so the viewer shows the video asset + blueprint
             yield stream.read(), "Extracting frames…"
 
-            node: VideoToImageNode = VideoToImageNode(config=_CONFIG, parent_log_path=PARENT_LOG_PATH)
-            result: VideoToImageResult = node(
+            result: VideoToImageResult = _NODE(
                 video_path=video_path,
                 output_dir=tmp_dir,
                 frame_timestamps_ns=frame_timestamps_ns,
