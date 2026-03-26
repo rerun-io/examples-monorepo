@@ -13,15 +13,15 @@ intermediate Rerun logging lives inside the node, gated behind
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
 
+import cv2
 import numpy as np
+import rerun as rr
+import rerun.blueprint as rrb
 from jaxtyping import Int, UInt8
 from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
-
-if TYPE_CHECKING:
-    import rerun.blueprint as rrb
+from simplecv.video_io import VideoReader
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -105,10 +105,6 @@ class VideoToImageNode:
             FileNotFoundError: If the video file does not exist.
             RuntimeError: If the video has zero frames.
         """
-        import cv2
-        import rerun as rr
-        from simplecv.video_io import VideoReader
-
         if not video_path.exists():
             msg: str = f"Video not found: {video_path}"
             raise FileNotFoundError(msg)
@@ -172,7 +168,7 @@ class VideoToImageNode:
 # ---------------------------------------------------------------------------
 # Blueprint
 # ---------------------------------------------------------------------------
-def create_video_to_image_blueprint(parent_log_path: Path) -> "rrb.ContainerLike":
+def create_video_to_image_blueprint(parent_log_path: Path) -> rrb.ContainerLike:
     """Create a Rerun blueprint for video-to-image visualization.
 
     Args:
@@ -181,8 +177,6 @@ def create_video_to_image_blueprint(parent_log_path: Path) -> "rrb.ContainerLike
     Returns:
         Rerun container layout.
     """
-    import rerun.blueprint as rrb
-
     return rrb.Horizontal(
         contents=[
             rrb.Spatial2DView(
@@ -217,8 +211,6 @@ class VideoToImageCLIConfig:
 
 def main(config: VideoToImageCLIConfig) -> None:
     """CLI entry point for video-to-image extraction with Rerun visualization."""
-    import rerun as rr
-    import rerun.blueprint as rrb
     from simplecv.rerun_log_utils import log_video
 
     parent_log_path: Path = Path("world")
