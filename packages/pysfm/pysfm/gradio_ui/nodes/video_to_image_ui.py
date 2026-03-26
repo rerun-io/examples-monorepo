@@ -110,9 +110,7 @@ def video_to_image_fn(
     Yields:
         Tuple of (Rerun binary stream bytes, status message string).
     """
-    recording: rr.RecordingStream = rr.RecordingStream(
-        application_id="video_to_image", recording_id=recording_id
-    )
+    recording: rr.RecordingStream = rr.RecordingStream(application_id="video_to_image", recording_id=recording_id)
     stream: rr.BinaryStream = recording.binary_stream()
 
     # Use set_global instead of ``with recording:`` — the context manager
