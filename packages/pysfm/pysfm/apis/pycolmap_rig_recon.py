@@ -13,10 +13,10 @@ Also provides a CLI entry point (``main``) for standalone usage with tyro.
 from __future__ import annotations
 
 import logging
+import shutil
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypeAlias
 
 import cv2
 import numpy as np
@@ -32,7 +32,7 @@ from simplecv.ops.conventions import CameraConventions, convert_pose
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.video_io import MultiVideoReader
 
-from pysfm.apis.pycolmap_vid_recon import MATCH_TIMELINE, TimingLogger
+from pysfm.apis.pycolmap_vid_recon import MATCH_TIMELINE, SfMCameraModel, TimingLogger
 from pysfm.streamed_pipeline import compare_databases, extract_features_streamed
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -42,9 +42,6 @@ VIDEO_EXTENSIONS: frozenset[str] = frozenset({".mp4", ".avi", ".mov", ".mkv"})
 
 TIMELINE: str = "frame"
 """Timeline name used for sequential camera logging."""
-
-SfMCameraModel: TypeAlias = Literal["SIMPLE_PINHOLE", "PINHOLE", "OPENCV", "OPENCV_FISHEYE", "FULL_OPENCV"]
-"""Supported COLMAP camera model names."""
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +61,7 @@ class RigReconConfig:
     """Name for the camera rig (used in image path structure)."""
     ref_camera: str | None = None
     """Reference camera name. Defaults to first camera alphabetically."""
-    camera_model: SfMCameraModel = "OPENCV"
+    camera_model: SfMCameraModel = "SIMPLE_RADIAL"
     """COLMAP camera model for intrinsics estimation (e.g. OPENCV_FISHEYE for fisheye lenses)."""
     overlap: int = 5
     """Sequential matching overlap (number of neighboring frames to match)."""
@@ -188,10 +185,7 @@ def extract_synchronized_frames(
     pad_width: int = len(str(actual_num_frames))
 
     logger.info(
-        "Extracting %d frames from %d videos (%d synchronized frames available)",
-        actual_num_frames,
-        len(videos),
-        total_frames,
+        f"Extracting {actual_num_frames} frames from {len(videos)} videos ({total_frames} synchronized frames available)"
     )
 
     # Create output directories for each camera.
@@ -201,14 +195,31 @@ def extract_synchronized_frames(
         cam_dir.mkdir(parents=True, exist_ok=True)
         cam_dirs.append(cam_dir)
 
-    # Extract frames using random access (MultiVideoReader.__getitem__).
-    for out_idx, frame_idx in enumerate(frame_indices):
-        bgr_list: list[UInt8[ndarray, "H W 3"]] = reader[frame_idx]
-        filename: str = f"image{out_idx + 1:0{pad_width}d}.jpg"
-        for cam_idx, bgr in enumerate(bgr_list):
-            cv2.imwrite(str(cam_dirs[cam_idx] / filename), bgr)
+    # Read sequentially through the synchronized videos, saving only frames
+    # at target indices.  Sequential decoding avoids the costly random seeks
+    # that __getitem__/get_frame performs on compressed video.
+    target_set: set[int] = set(frame_indices)
+    index_to_out: dict[int, int] = {idx: out_idx for out_idx, idx in enumerate(frame_indices)}
+    frames_saved: int = 0
+    last_target: int = frame_indices[-1]
 
-    logger.info("Wrote frames to %s", output_images_dir / rig_name)
+    for video_idx, bgr_list in enumerate(reader):
+        if bgr_list is None:
+            break
+        if video_idx in target_set:
+            out_idx: int = index_to_out[video_idx]
+            filename: str = f"image{out_idx + 1:0{pad_width}d}.jpg"
+            for cam_idx, bgr in enumerate(bgr_list):
+                cv2.imwrite(str(cam_dirs[cam_idx] / filename), bgr)
+            frames_saved += 1
+
+            if frames_saved == actual_num_frames:
+                break
+
+        if video_idx >= last_target:
+            break
+
+    logger.info(f"Wrote frames to {output_images_dir / rig_name}")
     return actual_num_frames
 
 
@@ -262,7 +273,7 @@ def generate_rig_config_json(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(to_json([rig]))
-    logger.info("Wrote rig config to %s", output_path)
+    logger.info(f"Wrote rig config to {output_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +311,14 @@ def run_rig_recon(*, config: RigReconConfig, timer: TimingLogger | None = None) 
     no_rig_sparse_dir: Path = output_dir / "sparse" / "no_rig"
     rig_sparse_dir: Path = output_dir / "sparse"
 
+    # Clean stale data from previous runs to prevent mixed-naming collisions.
+    if images_dir.exists():
+        shutil.rmtree(images_dir)
+    if database_path.exists():
+        database_path.unlink()
+    if rig_sparse_dir.exists():
+        shutil.rmtree(rig_sparse_dir)
+
     for d in (images_dir, no_rig_sparse_dir, rig_sparse_dir):
         d.mkdir(parents=True, exist_ok=True)
 
@@ -310,14 +329,14 @@ def run_rig_recon(*, config: RigReconConfig, timer: TimingLogger | None = None) 
     if ref_camera not in camera_names:
         msg: str = f"ref_camera '{ref_camera}' not among discovered cameras: {camera_names}"
         raise ValueError(msg)
-    logger.info("Discovered %d cameras: %s (ref=%s)", len(videos), camera_names, ref_camera)
+    logger.info(f"Discovered {len(videos)} cameras: {camera_names} (ref={ref_camera})")
 
     # -- 2. Extract frames ----------------------------------------------------
     with timer.log_time("Frame extraction") if timer else nullcontext():
         num_frames_extracted: int = extract_synchronized_frames(
-        videos=videos,
-        output_images_dir=images_dir,
-        rig_name=config.rig_name,
+            videos=videos,
+            output_images_dir=images_dir,
+            rig_name=config.rig_name,
             num_frames=config.num_frames,
         )
 
@@ -348,7 +367,9 @@ def run_rig_recon(*, config: RigReconConfig, timer: TimingLogger | None = None) 
     extraction_options.gpu_index = "0"
 
     with timer.log_time(f"Feature extraction (ALIKED_N16ROT, {config.camera_model})") if timer else nullcontext():
-        logger.info(f"Extracting features (ALIKED_N16ROT, camera_model={config.camera_model}, gpu={config.use_gpu}) ...")
+        logger.info(
+            f"Extracting features (ALIKED_N16ROT, camera_model={config.camera_model}, gpu={config.use_gpu}) ..."
+        )
         pycolmap.extract_features(
             database_path=database_path,
             image_path=images_dir,
@@ -399,7 +420,9 @@ def run_rig_recon(*, config: RigReconConfig, timer: TimingLogger | None = None) 
     pairing_options.expand_rig_images = True
 
     with timer.log_time(f"Sequential matching (overlap={config.overlap})") if timer else nullcontext():
-        logger.info(f"Sequential matching (ALIKED_LIGHTGLUE, overlap={config.overlap}, expand_rig={pairing_options.expand_rig_images}) ...")
+        logger.info(
+            f"Sequential matching (ALIKED_LIGHTGLUE, overlap={config.overlap}, expand_rig={pairing_options.expand_rig_images}) ..."
+        )
         pycolmap.match_sequential(
             database_path=database_path,
             matching_options=matching_options,
@@ -436,7 +459,7 @@ def run_rig_recon(*, config: RigReconConfig, timer: TimingLogger | None = None) 
     # Use the largest reconstruction.
     no_rig_rec_id: int = max(no_rig_recs, key=lambda k: no_rig_recs[k].num_reg_images())
     no_rig_rec: pycolmap.Reconstruction = no_rig_recs[no_rig_rec_id]
-    logger.info("No-rig bootstrap: %d images registered (model %d)", no_rig_rec.num_reg_images(), no_rig_rec_id)
+    logger.info(f"No-rig bootstrap: {no_rig_rec.num_reg_images()} images registered (model {no_rig_rec_id})")
 
     # -- 7. Apply rig config (auto-derive cam_from_rig from bootstrap) --------
     logger.info("Applying rig config and deriving cam_from_rig from bootstrap ...")
@@ -830,18 +853,14 @@ def log_rig_matches(
             img_a: pycolmap.Image = sorted_images[i]
             kps_a: Float32[ndarray, "Na 6"] = db.read_keypoints(img_a.image_id)
 
-            bgr_a: UInt8[ndarray, "H W 3"] | None = cv2.imread(
-                str(result.images_dir / img_a.name), cv2.IMREAD_COLOR
-            )
+            bgr_a: UInt8[ndarray, "H W 3"] | None = cv2.imread(str(result.images_dir / img_a.name), cv2.IMREAD_COLOR)
             if bgr_a is None:
                 continue
 
             for j in range(i + 1, min(i + result.overlap + 1, num_images)):
                 img_b: pycolmap.Image = sorted_images[j]
 
-                tvg: pycolmap.TwoViewGeometry = db.read_two_view_geometry(
-                    img_a.image_id, img_b.image_id
-                )
+                tvg: pycolmap.TwoViewGeometry = db.read_two_view_geometry(img_a.image_id, img_b.image_id)
                 inlier_matches: np.ndarray = tvg.inlier_matches
                 if inlier_matches.shape[0] == 0:
                     continue
@@ -901,8 +920,7 @@ def log_rig_matches(
 
                 num_matches: int = pts_a.shape[0]
                 strips: list[Float32[ndarray, "2 2"]] = [
-                    np.stack([pts_a[k], pts_b_offset[k]]).astype(np.float32)
-                    for k in range(num_matches)
+                    np.stack([pts_a[k], pts_b_offset[k]]).astype(np.float32) for k in range(num_matches)
                 ]
                 strip_list.append(strips)
 
@@ -1003,7 +1021,9 @@ def main(cli_config: RigReconCLIConfig) -> None:
     log_rig_features(result, parent_log_path)
 
     # 4. Log matches → switch to Matches tab + match_pair timeline
-    rr.send_blueprint(create_rig_blueprint_tabs(parent_log_path, result.camera_names, active_tab=1, timeline=MATCH_TIMELINE))
+    rr.send_blueprint(
+        create_rig_blueprint_tabs(parent_log_path, result.camera_names, active_tab=1, timeline=MATCH_TIMELINE)
+    )
     log_rig_matches(result, parent_log_path)
 
     # 5. Log reconstruction → switch to Reconstruction tab + frame timeline
