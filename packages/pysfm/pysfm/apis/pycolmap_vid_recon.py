@@ -685,7 +685,7 @@ def log_matches(
 
     line_cols: rr.ComponentColumnList = rr.LineStrips2D.columns(
         strips=all_strips,
-        colors=np.full((len(all_strips), 3), [0, 255, 0], dtype=np.uint8),
+        colors=np.full((len(all_strips), 4), [0, 255, 0, 64], dtype=np.uint8),
     ).partition(lengths=strip_counts)
     rr.send_columns(
         f"{parent_log_path}/matches/image/lines",
