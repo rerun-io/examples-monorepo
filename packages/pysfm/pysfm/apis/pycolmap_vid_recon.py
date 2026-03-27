@@ -272,6 +272,7 @@ def create_vid_blueprint_tabs(
     parent_log_path: Path,
     *,
     active_tab: int = 0,
+    timeline: str = TIMELINE,
 ) -> rrb.Blueprint:
     """Create a tabbed Rerun blueprint for video reconstruction visualization.
 
@@ -283,6 +284,7 @@ def create_vid_blueprint_tabs(
     Args:
         parent_log_path: Root log path (typically ``Path("world")``).
         active_tab: Index of the tab to display initially.
+        timeline: Which timeline the time panel should display.
 
     Returns:
         Blueprint with tabbed layout.
@@ -339,6 +341,7 @@ def create_vid_blueprint_tabs(
             recon_tab,
             active_tab=active_tab,
         ),
+        rrb.TimePanel(timeline=timeline),
         collapse_panels=True,
     )
 
@@ -730,12 +733,12 @@ def main(cli_config: VidReconCLIConfig) -> None:
     # 3. Log features → stay on Features tab
     log_features(result, parent_log_path)
 
-    # 4. Log matches → switch to Matches tab
-    rr.send_blueprint(create_vid_blueprint_tabs(parent_log_path, active_tab=1))
+    # 4. Log matches → switch to Matches tab + match_pair timeline
+    rr.send_blueprint(create_vid_blueprint_tabs(parent_log_path, active_tab=1, timeline=MATCH_TIMELINE))
     log_matches(result, parent_log_path)
 
-    # 5. Log reconstruction → switch to Reconstruction tab
-    rr.send_blueprint(create_vid_blueprint_tabs(parent_log_path, active_tab=2))
+    # 5. Log reconstruction → switch to Reconstruction tab + frame timeline
+    rr.send_blueprint(create_vid_blueprint_tabs(parent_log_path, active_tab=2, timeline=TIMELINE))
     log_vid_reconstruction(result, parent_log_path)
 
     print(f"Output: {result.output_dir}")
