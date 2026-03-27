@@ -131,23 +131,38 @@ class VideoToImageNode:
 
         image_paths: list[Path] = [Path()] * actual_num_frames
 
-        # Use random access (get_frame) to read only the needed frames.
-        for out_idx, frame_idx in enumerate(frame_indices):
-            bgr_frame: UInt8[ndarray, "H W 3"] = reader.get_frame(frame_idx)
-            filename: str = f"image{out_idx + 1:0{pad_width}d}.jpg"
-            out_path: Path = output_dir / filename
-            cv2.imwrite(str(out_path), bgr_frame)
-            image_paths[out_idx] = out_path
+        # Read sequentially through the video using the reader's own iterator,
+        # saving only the frames at target indices.  Sequential decoding avoids
+        # the costly random seeks that get_frame() performs on compressed video.
+        target_set: set[int] = set(frame_indices)
+        index_to_out: dict[int, int] = {idx: out_idx for out_idx, idx in enumerate(frame_indices)}
+        frames_saved: int = 0
+        last_target: int = frame_indices[-1]
 
-            # Verbose: log each frame as it's extracted
-            if self.config.verbose:
-                if frame_timestamps_ns is not None:
-                    rr.set_time(TIMELINE, duration=1e-9 * float(frame_timestamps_ns[frame_idx]))
-                rgb: UInt8[ndarray, "H W 3"] = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
-                rr.log(
-                    f"{self.parent_log_path}/extracted/image",
-                    rr.Image(rgb, color_model=rr.ColorModel.RGB).compress(),
-                )
+        for video_idx, bgr_frame in enumerate(reader):
+            if video_idx in target_set:
+                out_idx: int = index_to_out[video_idx]
+                filename: str = f"image{out_idx + 1:0{pad_width}d}.jpg"
+                out_path: Path = output_dir / filename
+                cv2.imwrite(str(out_path), bgr_frame)
+                image_paths[out_idx] = out_path
+                frames_saved += 1
+
+                # Verbose: log each frame as it's extracted
+                if self.config.verbose:
+                    if frame_timestamps_ns is not None:
+                        rr.set_time(TIMELINE, duration=1e-9 * float(frame_timestamps_ns[video_idx]))
+                    rgb: UInt8[ndarray, "H W 3"] = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
+                    rr.log(
+                        f"{self.parent_log_path}/extracted/image",
+                        rr.Image(rgb, color_model=rr.ColorModel.RGB).compress(),
+                    )
+
+                if frames_saved == actual_num_frames:
+                    break
+
+            if video_idx >= last_target:
+                break
 
         logger.info("Wrote %d frames to %s", actual_num_frames, output_dir)
 
