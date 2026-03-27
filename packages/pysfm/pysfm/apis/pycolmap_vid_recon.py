@@ -12,6 +12,7 @@ Also provides a CLI entry point (``main``) for standalone usage with tyro.
 from __future__ import annotations
 
 import logging
+import shutil
 import time
 from collections.abc import Generator
 from contextlib import contextmanager, nullcontext
@@ -166,6 +167,15 @@ def run_vid_recon(*, config: VidReconConfig, timer: TimingLogger | None = None) 
     images_dir: Path = output_dir / "images"
     database_path: Path = output_dir / "database.db"
     sparse_dir: Path = output_dir / "sparse"
+
+    # Clean stale data from previous runs to prevent mixed-naming collisions
+    # (e.g. image01.jpg from a 20-frame run + image001.jpg from a 100-frame run).
+    if images_dir.exists():
+        shutil.rmtree(images_dir)
+    if database_path.exists():
+        database_path.unlink()
+    if sparse_dir.exists():
+        shutil.rmtree(sparse_dir)
 
     for d in (images_dir, sparse_dir):
         d.mkdir(parents=True, exist_ok=True)

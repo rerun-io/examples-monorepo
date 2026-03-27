@@ -131,24 +131,45 @@ class VideoToImageNode:
 
         image_paths: list[Path] = [Path()] * actual_num_frames
 
-        # Use random access (get_frame) to read only the needed frames,
-        # avoiding a full sequential scan of the entire video.
-        for out_idx, frame_idx in enumerate(frame_indices):
-            bgr_frame: UInt8[ndarray, "H W 3"] = reader.get_frame(frame_idx)
-            filename: str = f"image{out_idx + 1:0{pad_width}d}.jpg"
-            out_path: Path = output_dir / filename
-            cv2.imwrite(str(out_path), bgr_frame)
-            image_paths[out_idx] = out_path
+        # Read sequentially through the video, grabbing only frames at target
+        # indices.  This is much faster than random-access seeking (get_frame)
+        # because compressed video requires decoding from the nearest keyframe.
+        # We bypass VideoReader.read() and use vcap directly to avoid its
+        # internal position tracking interfering with our grab()-based skipping.
+        vcap: cv2.VideoCapture = reader.vcap
+        target_set: set[int] = set(frame_indices)
+        index_to_out: dict[int, int] = {idx: out_idx for out_idx, idx in enumerate(frame_indices)}
+        frames_saved: int = 0
 
-            # Verbose: log each frame as it's extracted
-            if self.config.verbose:
-                if frame_timestamps_ns is not None:
-                    rr.set_time(TIMELINE, duration=1e-9 * float(frame_timestamps_ns[frame_idx]))
-                rgb: UInt8[ndarray, "H W 3"] = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
-                rr.log(
-                    f"{self.parent_log_path}/extracted/image",
-                    rr.Image(rgb, color_model=rr.ColorModel.RGB).compress(),
-                )
+        for video_idx in range(total_frames):
+            if video_idx in target_set:
+                ret: bool
+                bgr_frame: UInt8[ndarray, "H W 3"]
+                ret, bgr_frame = vcap.read()
+                if not ret:
+                    break
+                out_idx: int = index_to_out[video_idx]
+                filename: str = f"image{out_idx + 1:0{pad_width}d}.jpg"
+                out_path: Path = output_dir / filename
+                cv2.imwrite(str(out_path), bgr_frame)
+                image_paths[out_idx] = out_path
+                frames_saved += 1
+
+                # Verbose: log each frame as it's extracted
+                if self.config.verbose:
+                    if frame_timestamps_ns is not None:
+                        rr.set_time(TIMELINE, duration=1e-9 * float(frame_timestamps_ns[video_idx]))
+                    rgb: UInt8[ndarray, "H W 3"] = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
+                    rr.log(
+                        f"{self.parent_log_path}/extracted/image",
+                        rr.Image(rgb, color_model=rr.ColorModel.RGB).compress(),
+                    )
+
+                # All targets found — stop early
+                if frames_saved == actual_num_frames:
+                    break
+            else:
+                vcap.grab()
 
         logger.info("Wrote %d frames to %s", actual_num_frames, output_dir)
 
