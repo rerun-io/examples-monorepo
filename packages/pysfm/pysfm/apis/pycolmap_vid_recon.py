@@ -38,6 +38,9 @@ logger: logging.Logger = logging.getLogger(__name__)
 TIMELINE: str = "frame"
 """Timeline name used for sequential camera logging."""
 
+MATCH_TIMELINE: str = "match_pair"
+"""Timeline name used for match-pair visualization."""
+
 SfMCameraModel: TypeAlias = Literal[
     "SIMPLE_PINHOLE", "PINHOLE", "SIMPLE_RADIAL", "RADIAL", "OPENCV", "OPENCV_FISHEYE", "FULL_OPENCV"
 ]
@@ -134,6 +137,8 @@ class VidReconResult:
     """Number of frames extracted from the video."""
     mapping_method: str
     """Which mapping method was used ('incremental' or 'global')."""
+    overlap: int
+    """Sequential matching overlap used for pairing."""
 
 
 # ---------------------------------------------------------------------------
@@ -256,40 +261,85 @@ def run_vid_recon(*, config: VidReconConfig, timer: TimingLogger | None = None) 
         model_dir=sparse_dir / str(rec_id),
         num_frames_extracted=num_frames_extracted,
         mapping_method=config.mapping,
+        overlap=config.overlap,
     )
 
 
 # ---------------------------------------------------------------------------
 # Blueprint builder
 # ---------------------------------------------------------------------------
-def create_vid_blueprint(parent_log_path: Path) -> rrb.ContainerLike:
-    """Create a Rerun blueprint for monocular video reconstruction visualization.
+def create_vid_blueprint_tabs(
+    parent_log_path: Path,
+    *,
+    active_tab: int = 0,
+) -> rrb.Blueprint:
+    """Create a tabbed Rerun blueprint for video reconstruction visualization.
 
-    Layout: 3D view (left) | 2D camera view + timing table (right, stacked).
+    Three tabs:
+        0 — **Features**: per-frame 2D keypoints + timing
+        1 — **Matches**: side-by-side match pairs + timing
+        2 — **Reconstruction**: 3D + 2D views of the final model + timing
 
     Args:
         parent_log_path: Root log path (typically ``Path("world")``).
+        active_tab: Index of the tab to display initially.
 
     Returns:
-        Rerun blueprint layout.
+        Blueprint with tabbed layout.
     """
-    view_3d: rrb.Spatial3DView = rrb.Spatial3DView(
-        origin="/",
-        contents=[f"+ {parent_log_path}/**"],
+    # -- Tab 0: Features -------------------------------------------------------
+    features_tab: rrb.Horizontal = rrb.Horizontal(
+        contents=[
+            rrb.Spatial2DView(
+                origin=f"{parent_log_path}/features",
+                name="Features",
+            ),
+            rrb.TextDocumentView(origin="logs", name="Timing"),
+        ],
+        column_shares=[3, 1],
+        name="Features",
     )
 
-    view_2d: rrb.Spatial2DView = rrb.Spatial2DView(
-        origin=f"{parent_log_path}/camera/pinhole",
+    # -- Tab 1: Matches --------------------------------------------------------
+    matches_tab: rrb.Horizontal = rrb.Horizontal(
+        contents=[
+            rrb.Spatial2DView(
+                origin=f"{parent_log_path}/matches",
+                name="Match Pairs",
+            ),
+            rrb.TextDocumentView(origin="logs", name="Timing"),
+        ],
+        column_shares=[3, 1],
+        name="Matches",
     )
 
-    view_timing: rrb.TextDocumentView = rrb.TextDocumentView(
-        origin="logs",
-        name="Timing",
-    )
-
-    return rrb.Horizontal(
-        contents=[view_3d, rrb.Vertical(contents=[view_2d, view_timing], row_shares=[5, 2])],
+    # -- Tab 2: Reconstruction -------------------------------------------------
+    recon_tab: rrb.Horizontal = rrb.Horizontal(
+        contents=[
+            rrb.Spatial3DView(
+                origin="/",
+                contents=[f"+ {parent_log_path}/**"],
+            ),
+            rrb.Vertical(
+                contents=[
+                    rrb.Spatial2DView(origin=f"{parent_log_path}/camera/pinhole"),
+                    rrb.TextDocumentView(origin="logs", name="Timing"),
+                ],
+                row_shares=[5, 2],
+            ),
+        ],
         column_shares=[3, 2],
+        name="Reconstruction",
+    )
+
+    return rrb.Blueprint(
+        rrb.Tabs(
+            features_tab,
+            matches_tab,
+            recon_tab,
+            active_tab=active_tab,
+        ),
+        collapse_panels=True,
     )
 
 
@@ -407,6 +457,243 @@ def log_vid_reconstruction(result: VidReconResult, parent_log_path: Path) -> Non
 
 
 # ---------------------------------------------------------------------------
+# Feature visualization
+# ---------------------------------------------------------------------------
+def log_features(result: VidReconResult, parent_log_path: Path) -> None:
+    """Log per-frame images with **all** detected keypoints from the database.
+
+    Unlike ``log_vid_reconstruction`` which shows only triangulated keypoints,
+    this shows every keypoint found by ALIKED — giving a complete picture
+    of feature coverage before matching and reconstruction.
+
+    Args:
+        result: Pipeline result with paths to outputs.
+        parent_log_path: Root Rerun log path.
+    """
+    with pycolmap.Database.open(result.database_path) as db:
+        all_images: list[pycolmap.Image] = db.read_all_images()
+        sorted_images: list[pycolmap.Image] = sorted(all_images, key=lambda img: img.name)
+
+        for frame_idx, db_image in enumerate(sorted_images):
+            rr.set_time(TIMELINE, sequence=frame_idx)
+
+            image_path: Path = result.images_dir / db_image.name
+            if not image_path.exists():
+                continue
+            bgr: UInt8[ndarray, "H W 3"] | None = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+            if bgr is None:
+                continue
+            rgb: UInt8[ndarray, "H W 3"] = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            rr.log(
+                f"{parent_log_path}/features/image",
+                rr.Image(rgb, color_model=rr.ColorModel.RGB).compress(),
+            )
+
+            # All keypoints from DB (Nx6: x, y, a11, a12, a21, a22)
+            kps: Float32[ndarray, "N 6"] = db.read_keypoints(db_image.image_id)
+            if kps.shape[0] > 0:
+                kps_xy: Float32[ndarray, "N 2"] = kps[:, :2]
+                rr.log(
+                    f"{parent_log_path}/features/image/keypoints",
+                    rr.Points2D(positions=kps_xy, colors=[255, 165, 0]),
+                )
+
+    logger.info(f"Logged features for {len(sorted_images)} frames")
+
+
+# ---------------------------------------------------------------------------
+# Match visualization
+# ---------------------------------------------------------------------------
+def log_matches(
+    result: VidReconResult,
+    parent_log_path: Path,
+    *,
+    max_dim: int = 640,
+) -> None:
+    """Log feature matches as side-by-side image pairs with connecting lines.
+
+    Creates horizontally stacked image pairs, draws line strips between
+    matched keypoint positions, and sends everything via ``rr.send_columns``
+    on a separate ``"match_pair"`` timeline.
+
+    Uses geometrically verified inlier matches from two-view geometry
+    (post-RANSAC) for cleaner visualization.
+
+    Args:
+        result: Pipeline result with paths to outputs.
+        parent_log_path: Root Rerun log path.
+        max_dim: Maximum dimension for resized stacked images.
+    """
+    with pycolmap.Database.open(result.database_path) as db:
+        all_images: list[pycolmap.Image] = db.read_all_images()
+        sorted_images: list[pycolmap.Image] = sorted(all_images, key=lambda img: img.name)
+        num_images: int = len(sorted_images)
+
+        # -- Collect all match data in a single pass ----------------------------
+        pair_indices: list[int] = []
+        jpeg_blobs: list[bytes] = []
+        kp_left_list: list[Float32[ndarray, "M 2"]] = []
+        kp_right_list: list[Float32[ndarray, "M 2"]] = []
+        strip_list: list[list[Float32[ndarray, "2 2"]]] = []
+        pair_idx: int = 0
+
+        for i in range(num_images):
+            img_a: pycolmap.Image = sorted_images[i]
+            kps_a: Float32[ndarray, "Na 6"] = db.read_keypoints(img_a.image_id)
+
+            bgr_a: UInt8[ndarray, "H W 3"] | None = cv2.imread(
+                str(result.images_dir / img_a.name), cv2.IMREAD_COLOR
+            )
+            if bgr_a is None:
+                continue
+
+            for j in range(i + 1, min(i + result.overlap + 1, num_images)):
+                img_b: pycolmap.Image = sorted_images[j]
+
+                # Read geometrically verified matches
+                tvg: pycolmap.TwoViewGeometry = db.read_two_view_geometry(
+                    img_a.image_id, img_b.image_id
+                )
+                inlier_matches: np.ndarray = tvg.inlier_matches
+                if inlier_matches.shape[0] == 0:
+                    continue
+
+                kps_b: Float32[ndarray, "Nb 6"] = db.read_keypoints(img_b.image_id)
+                bgr_b: UInt8[ndarray, "H W 3"] | None = cv2.imread(
+                    str(result.images_dir / img_b.name), cv2.IMREAD_COLOR
+                )
+                if bgr_b is None:
+                    continue
+
+                # Stack images side-by-side
+                h_a: int = bgr_a.shape[0]
+                w_a: int = bgr_a.shape[1]
+                h_b: int = bgr_b.shape[0]
+                w_b: int = bgr_b.shape[1]
+
+                # Resize both to same height for hconcat
+                max_h: int = max(h_a, h_b)
+                if h_a != max_h:
+                    scale_a: float = max_h / h_a
+                    bgr_a_resized: UInt8[ndarray, "Hm Wa 3"] = cv2.resize(bgr_a, (int(w_a * scale_a), max_h))
+                else:
+                    bgr_a_resized = bgr_a
+                    scale_a = 1.0
+                if h_b != max_h:
+                    scale_b: float = max_h / h_b
+                    bgr_b_resized: UInt8[ndarray, "Hm Wb 3"] = cv2.resize(bgr_b, (int(w_b * scale_b), max_h))
+                else:
+                    bgr_b_resized = bgr_b
+                    scale_b = 1.0
+
+                stacked: UInt8[ndarray, "Hm Ws 3"] = cv2.hconcat([bgr_a_resized, bgr_b_resized])
+                w_left: int = bgr_a_resized.shape[1]
+
+                # Resize stacked image to max_dim
+                sh: int = stacked.shape[0]
+                sw: int = stacked.shape[1]
+                resize_scale: float = max_dim / max(sh, sw) if max(sh, sw) > max_dim else 1.0
+                if resize_scale < 1.0:
+                    stacked = cv2.resize(stacked, (int(sw * resize_scale), int(sh * resize_scale)))
+
+                # JPEG compress
+                ok: bool
+                buf: np.ndarray
+                ok, buf = cv2.imencode(".jpg", stacked)
+                if not ok:
+                    continue
+                jpeg_blobs.append(buf.tobytes())
+
+                # Map match indices to keypoint coordinates
+                idx_a: np.ndarray = inlier_matches[:, 0]
+                idx_b: np.ndarray = inlier_matches[:, 1]
+
+                pts_a: Float32[ndarray, "M 2"] = kps_a[idx_a, :2] * scale_a * resize_scale
+                pts_b: Float32[ndarray, "M 2"] = kps_b[idx_b, :2] * scale_b * resize_scale
+                pts_b_offset: Float32[ndarray, "M 2"] = pts_b.copy()
+                pts_b_offset[:, 0] += w_left * resize_scale
+
+                kp_left_list.append(pts_a.astype(np.float32))
+                kp_right_list.append(pts_b_offset.astype(np.float32))
+
+                # Line strips: each match is a 2-point strip
+                num_matches: int = pts_a.shape[0]
+                strips: list[Float32[ndarray, "2 2"]] = [
+                    np.stack([pts_a[k], pts_b_offset[k]]).astype(np.float32)
+                    for k in range(num_matches)
+                ]
+                strip_list.append(strips)
+
+                pair_indices.append(pair_idx)
+                pair_idx += 1
+
+    if not pair_indices:
+        logger.warning("No match pairs found to visualize")
+        return
+
+    num_pairs: int = len(pair_indices)
+    logger.info(f"Sending {num_pairs} match pairs via send_columns ...")
+
+    # -- Batch send images via send_columns ------------------------------------
+    pair_indices_arr: np.ndarray = np.array(pair_indices, dtype=np.int64)
+
+    image_cols: rr.ComponentColumnList = rr.EncodedImage.columns(
+        blob=jpeg_blobs,
+        media_type=["image/jpeg"] * num_pairs,
+    )
+    rr.send_columns(
+        f"{parent_log_path}/matches/image",
+        indexes=[rr.TimeColumn(MATCH_TIMELINE, sequence=pair_indices_arr)],
+        columns=image_cols,
+    )
+
+    # -- Batch send left keypoints ---------------------------------------------
+    all_kp_left: Float32[ndarray, "T 2"] = np.concatenate(kp_left_list, axis=0)
+    kp_left_lengths: list[int] = [kp.shape[0] for kp in kp_left_list]
+    kp_left_cols: rr.ComponentColumnList = rr.Points2D.columns(
+        positions=all_kp_left,
+        colors=np.full((all_kp_left.shape[0], 3), [0, 255, 0], dtype=np.uint8),
+    ).partition(lengths=kp_left_lengths)
+    rr.send_columns(
+        f"{parent_log_path}/matches/image/kp_left",
+        indexes=[rr.TimeColumn(MATCH_TIMELINE, sequence=pair_indices_arr)],
+        columns=kp_left_cols,
+    )
+
+    # -- Batch send right keypoints --------------------------------------------
+    all_kp_right: Float32[ndarray, "T 2"] = np.concatenate(kp_right_list, axis=0)
+    kp_right_lengths: list[int] = [kp.shape[0] for kp in kp_right_list]
+    kp_right_cols: rr.ComponentColumnList = rr.Points2D.columns(
+        positions=all_kp_right,
+        colors=np.full((all_kp_right.shape[0], 3), [0, 255, 0], dtype=np.uint8),
+    ).partition(lengths=kp_right_lengths)
+    rr.send_columns(
+        f"{parent_log_path}/matches/image/kp_right",
+        indexes=[rr.TimeColumn(MATCH_TIMELINE, sequence=pair_indices_arr)],
+        columns=kp_right_cols,
+    )
+
+    # -- Batch send line strips ------------------------------------------------
+    all_strips: list[Float32[ndarray, "2 2"]] = []
+    strip_counts: list[int] = []
+    for strips in strip_list:
+        all_strips.extend(strips)
+        strip_counts.append(len(strips))
+
+    line_cols: rr.ComponentColumnList = rr.LineStrips2D.columns(
+        strips=all_strips,
+        colors=np.full((len(all_strips), 3), [0, 255, 0], dtype=np.uint8),
+    ).partition(lengths=strip_counts)
+    rr.send_columns(
+        f"{parent_log_path}/matches/image/lines",
+        indexes=[rr.TimeColumn(MATCH_TIMELINE, sequence=pair_indices_arr)],
+        columns=line_cols,
+    )
+
+    logger.info(f"Logged {num_pairs} match pairs")
+
+
+# ---------------------------------------------------------------------------
 # CLI config
 # ---------------------------------------------------------------------------
 @dataclass
@@ -423,25 +710,32 @@ class VidReconCLIConfig:
 # CLI entry point
 # ---------------------------------------------------------------------------
 def main(cli_config: VidReconCLIConfig) -> None:
-    """Run the monocular video pipeline and visualize results in Rerun."""
+    """Run the monocular video pipeline and visualize results in Rerun.
+
+    Sends the blueprint multiple times to switch the active tab as
+    features → matches → reconstruction are progressively logged.
+    """
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
     parent_log_path: Path = Path("world")
 
-    # 1. Run the full pipeline with timing
+    # 1. Initial blueprint — Features tab shows timing updates live
+    rr.send_blueprint(create_vid_blueprint_tabs(parent_log_path, active_tab=0))
+    rr.log("/", rr.ViewCoordinates.RFU, static=True)
+
+    # 2. Run the full pipeline (computation only, timed)
     timer: TimingLogger = TimingLogger(header="Monocular Video Reconstruction")
     result: VidReconResult = run_vid_recon(config=cli_config.config, timer=timer)
 
-    # 2. Setup Rerun blueprint
-    blueprint: rrb.Blueprint = rrb.Blueprint(
-        create_vid_blueprint(parent_log_path=parent_log_path),
-        collapse_panels=True,
-    )
-    rr.send_blueprint(blueprint)
-    # Gravity-aligned data has Z-up; tell the viewer accordingly.
-    rr.log("/", rr.ViewCoordinates.RFU, static=True)
+    # 3. Log features → stay on Features tab
+    log_features(result, parent_log_path)
 
-    # 3. Log the reconstruction
+    # 4. Log matches → switch to Matches tab
+    rr.send_blueprint(create_vid_blueprint_tabs(parent_log_path, active_tab=1))
+    log_matches(result, parent_log_path)
+
+    # 5. Log reconstruction → switch to Reconstruction tab
+    rr.send_blueprint(create_vid_blueprint_tabs(parent_log_path, active_tab=2))
     log_vid_reconstruction(result, parent_log_path)
 
     print(f"Output: {result.output_dir}")
