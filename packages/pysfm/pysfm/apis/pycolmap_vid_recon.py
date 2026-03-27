@@ -356,8 +356,10 @@ def log_vid_reconstruction(result: VidReconResult, parent_log_path: Path) -> Non
     ``auto_orient_and_center_poses`` (method="up") and logs it as a static
     ``Transform3D`` on ``parent_log_path``.
 
-    Logs 3D point cloud (static), then camera frustums, images, and
-    keypoints over a timeline.
+    The 3D point cloud is logged **incrementally**: each frame adds the
+    points visible from that camera so the cloud grows as you scrub through
+    the timeline.  Camera frustums, images, and 2D keypoints are logged
+    per-frame as before.
 
     Args:
         result: Pipeline result with paths to outputs.
@@ -391,27 +393,12 @@ def log_vid_reconstruction(result: VidReconResult, parent_log_path: Path) -> Non
         )
         logger.info(f"Gravity-alignment transform logged on '{parent_log_path}' (det={np.linalg.det(orient_R):.4f})")
 
-    # -- Static 3D point cloud ------------------------------------------------
-    xyz_list: list[Float64[ndarray, "3"]] = []
-    rgb_list: list[UInt8[ndarray, "3"]] = []
-    for point in rec.points3D.values():
-        xyz_list.append(point.xyz)
-        rgb_list.append(point.color)
-
-    if xyz_list:
-        points3d_xyz: Float32[ndarray, "N 3"] = np.array(xyz_list, dtype=np.float32)
-        points3d_rgb: UInt8[ndarray, "N 3"] = np.array(rgb_list, dtype=np.uint8)
-        rr.log(
-            f"{parent_log_path}/point_cloud",
-            rr.Points3D(
-                positions=points3d_xyz,
-                colors=points3d_rgb,
-            ),
-            static=True,
-        )
-
-    # -- Log cameras over timeline --------------------------------------------
+    # -- Log cameras + incremental point cloud over timeline -------------------
     sorted_images: list[tuple[int, pycolmap.Image]] = sorted(rec.images.items(), key=lambda x: x[1].name)
+
+    seen_point_ids: set[int] = set()
+    accumulated_xyz: list[Float64[ndarray, "3"]] = []
+    accumulated_rgb: list[UInt8[ndarray, "3"]] = []
 
     for frame_idx, (_image_id, image) in enumerate(sorted_images):
         rr.set_time(TIMELINE, sequence=frame_idx)
@@ -454,7 +441,25 @@ def log_vid_reconstruction(result: VidReconResult, parent_log_path: Path) -> Non
                 f"{camera_path}/pinhole/image/keypoints",
                 rr.Points2D(
                     positions=keypoints_xy,
-                    colors=[0, 255, 0],  # Green for visible keypoints
+                    colors=[0, 255, 0],
+                ),
+            )
+
+        # Accumulate 3D points visible from this camera
+        for p2d in image.points2D:
+            if p2d.has_point3D() and p2d.point3D_id in rec.points3D and p2d.point3D_id not in seen_point_ids:
+                seen_point_ids.add(p2d.point3D_id)
+                point: pycolmap.Point3D = rec.points3D[p2d.point3D_id]
+                accumulated_xyz.append(point.xyz)
+                accumulated_rgb.append(point.color)
+
+        # Log the growing point cloud
+        if accumulated_xyz:
+            rr.log(
+                f"{parent_log_path}/point_cloud",
+                rr.Points3D(
+                    positions=np.array(accumulated_xyz, dtype=np.float32),
+                    colors=np.array(accumulated_rgb, dtype=np.uint8),
                 ),
             )
 
