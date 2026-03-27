@@ -512,6 +512,7 @@ def log_matches(
     parent_log_path: Path,
     *,
     max_dim: int = 640,
+    max_lines_per_pair: int = 50,
 ) -> None:
     """Log feature matches as side-by-side image pairs with connecting lines.
 
@@ -526,6 +527,8 @@ def log_matches(
         result: Pipeline result with paths to outputs.
         parent_log_path: Root Rerun log path.
         max_dim: Maximum dimension for resized stacked images.
+        max_lines_per_pair: Maximum number of match lines drawn per pair.
+            Subsampled uniformly when there are more inlier matches.
     """
     with pycolmap.Database.open(result.database_path) as db:
         all_images: list[pycolmap.Image] = db.read_all_images()
@@ -607,6 +610,12 @@ def log_matches(
                     continue
                 jpeg_blobs.append(buf.tobytes())
 
+                # Subsample matches to keep line density manageable
+                n_inliers: int = inlier_matches.shape[0]
+                if n_inliers > max_lines_per_pair:
+                    step: int = n_inliers // max_lines_per_pair
+                    inlier_matches = inlier_matches[::step][:max_lines_per_pair]
+
                 # Map match indices to keypoint coordinates
                 idx_a: np.ndarray = inlier_matches[:, 0]
                 idx_b: np.ndarray = inlier_matches[:, 1]
@@ -685,7 +694,7 @@ def log_matches(
 
     line_cols: rr.ComponentColumnList = rr.LineStrips2D.columns(
         strips=all_strips,
-        colors=np.full((len(all_strips), 4), [0, 255, 0, 64], dtype=np.uint8),
+        colors=np.full((len(all_strips), 4), [0, 255, 0, 30], dtype=np.uint8),
     ).partition(lengths=strip_counts)
     rr.send_columns(
         f"{parent_log_path}/matches/image/lines",
