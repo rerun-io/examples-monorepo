@@ -70,6 +70,9 @@ class RigReconConfig:
     """Sequential matching overlap (number of neighboring frames to match)."""
     use_gpu: bool = True
     """Use GPU for feature extraction and matching."""
+    image_plane_distance: float | None = None
+    """Rerun frustum size. Controls how large camera frustums appear in the 3D view.
+    When None, Rerun picks a default. Try 0.2 for a compact view."""
     verbose: bool = False
     """Emit detailed COLMAP logging."""
     validate: bool = False
@@ -105,6 +108,8 @@ class RigReconResult:
     """Name of the reference camera."""
     overlap: int
     """Sequential matching overlap used for pairing."""
+    image_plane_distance: float | None
+    """Rerun frustum size for camera visualization."""
 
 
 # ---------------------------------------------------------------------------
@@ -503,6 +508,7 @@ def run_rig_recon(*, config: RigReconConfig, timer: TimingLogger | None = None) 
         camera_names=camera_names,
         ref_camera=ref_camera,
         overlap=config.overlap,
+        image_plane_distance=config.image_plane_distance,
     )
 
 
@@ -688,7 +694,7 @@ def log_rig_reconstruction(result: RigReconResult, parent_log_path: Path) -> Non
                     image_from_camera=K,
                     width=cam.width,
                     height=cam.height,
-                    image_plane_distance=1.0,
+                    image_plane_distance=result.image_plane_distance,
                     color=frustum_color,
                 ),
             )
