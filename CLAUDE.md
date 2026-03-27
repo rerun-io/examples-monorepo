@@ -49,6 +49,8 @@ pixi run -e robocap robocap-track
 
 Dev tasks (`lint`, `typecheck`, `tests`) are unified — same name in every `*-dev` environment. Demo/app tasks live in the package's own feature and work in both prod and dev envs.
 
+When running tasks (especially demos and apps), prefer `pixi run --frozen` to skip re-solving dependencies. This avoids multi-minute solve times in a large monorepo when `pixi.toml` hasn't changed. Only omit `--frozen` when you've actually modified dependencies.
+
 ## Architecture
 
 ### pixi.toml Feature Composition
