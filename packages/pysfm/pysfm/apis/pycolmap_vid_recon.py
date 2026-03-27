@@ -170,6 +170,8 @@ def run_vid_recon(*, config: VidReconConfig, timer: TimingLogger | None = None) 
 
     # Clean stale data from previous runs to prevent mixed-naming collisions
     # (e.g. image01.jpg from a 20-frame run + image001.jpg from a 100-frame run).
+    if images_dir.exists() or database_path.exists() or sparse_dir.exists():
+        logger.info(f"Removing stale output from previous run: {output_dir}")
     if images_dir.exists():
         shutil.rmtree(images_dir)
     if database_path.exists():

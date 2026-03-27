@@ -312,6 +312,8 @@ def run_rig_recon(*, config: RigReconConfig, timer: TimingLogger | None = None) 
     rig_sparse_dir: Path = output_dir / "sparse"
 
     # Clean stale data from previous runs to prevent mixed-naming collisions.
+    if images_dir.exists() or database_path.exists() or rig_sparse_dir.exists():
+        logger.info(f"Removing stale output from previous run: {output_dir}")
     if images_dir.exists():
         shutil.rmtree(images_dir)
     if database_path.exists():
