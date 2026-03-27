@@ -3,7 +3,7 @@ COLMAP Structure-from-Motion reconstruction through [pycolmap](https://github.co
 
 <p align="center">
   <a title="Rerun" href="https://rerun.io" target="_blank" rel="noopener noreferrer">
-    <img src="https://img.shields.io/badge/Rerun-0.22%2B-0b82f9" alt="Rerun badge">
+    <img src="https://img.shields.io/badge/Rerun-0.30%2B-0b82f9" alt="Rerun badge">
   </a>
   <a title="Pixi" href="https://pixi.sh/latest/" target="_blank" rel="noopener noreferrer">
     <img src="https://img.shields.io/badge/Install%20with-Pixi-16A34A" alt="Pixi badge">
@@ -14,7 +14,7 @@ COLMAP Structure-from-Motion reconstruction through [pycolmap](https://github.co
 </p>
 
 <p align="center">
-  <img src="media/github.gif" alt="pysfm demo" width="720" />
+  <img src="media/pycolmap-github.gif" alt="pysfm demo" width="720" />
 </p>
 
 ## Installation
