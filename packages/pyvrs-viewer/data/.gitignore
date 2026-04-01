@@ -1,0 +1,3 @@
+# VRS and RRD files are large binaries — download via pixi tasks
+*.vrs
+*.rrd
