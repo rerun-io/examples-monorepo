@@ -9,6 +9,7 @@ When encode_video=True, uses a two-phase parallel pipeline:
 """
 
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -226,19 +227,66 @@ def _process_with_parallel_encode(
     if not pending_jpeg:
         return
 
-    # Phase 2+3: Parallel JPEG decode overlapped with encode+log.
-    # pool.map returns an iterator that yields decoded results in submission order
-    # as they complete. By NOT materializing with list(), the encoder starts working
-    # as soon as the first decode finishes — decode and encode overlap in time.
+    # Phase 2: Parallel JPEG decode (overlapped with Phase 1 via pool.map iterator)
     jpeg_bytes_list: list[bytes] = [item[2] for item in pending_jpeg]
-    logger.info("Decoding + encoding %d frames (%d threads)...", len(jpeg_bytes_list), decode_threads)
+    n_streams: int = len(frame_players)
+    logger.info("Decoding %d frames (%d threads) + encoding (%d parallel NVENC)...", len(jpeg_bytes_list), decode_threads, n_streams)
 
     with ThreadPoolExecutor(max_workers=decode_threads) as pool:
         yuv_iter = pool.map(_decode_jpeg_to_yuv, jpeg_bytes_list)
+        # Collect decoded frames grouped by stream (for parallel NVENC encoding)
+        frames_by_stream: dict[str, list[tuple[float, list[UInt8[np.ndarray, "..."]], dict[str, object]]]] = {sid: [] for sid in frame_players}
         for (stream_id_str, timestamp_sec, _jpeg, metadata), yuv_planes in tqdm(
-            zip(pending_jpeg, yuv_iter, strict=True), total=len(pending_jpeg), desc="Decode+Encode", unit="frame"
+            zip(pending_jpeg, yuv_iter, strict=True), total=len(pending_jpeg), desc="Decoding", unit="frame"
         ):
-            frame_players[stream_id_str].encode_and_log_yuv(timestamp_sec, yuv_planes, metadata)
+            frames_by_stream[stream_id_str].append((timestamp_sec, yuv_planes, metadata))
+
+    # Phase 3: Parallel NVENC encoding — each stream gets its own thread + NVENC session.
+    # Encode in threads, collect (timestamp, packets, metadata) for main-thread Rerun logging.
+    encoded_by_stream: dict[str, list[tuple[float, list[bytes], dict[str, object]]]] = {}
+
+    def _encode_stream(sid: str) -> None:
+        player: FramePlayer = frame_players[sid]
+        player._ensure_encoder()
+        assert player._encoder is not None
+        results: list[tuple[float, list[bytes], dict[str, object]]] = []
+        for timestamp_sec, yuv_planes, metadata in frames_by_stream[sid]:
+            if len(yuv_planes) == 1:
+                packets: list[bytes] = player._encoder.encode_yuv_planes(yuv_planes[0])
+            elif len(yuv_planes) >= 3:
+                packets = player._encoder.encode_yuv_planes(yuv_planes[0], yuv_planes[1], yuv_planes[2])
+            else:
+                continue
+            results.append((timestamp_sec, packets, metadata))
+        # Flush
+        for pkt in player._encoder.flush():
+            results.append((0.0, [pkt], {}))
+        encoded_by_stream[sid] = results
+
+    encode_threads: list[threading.Thread] = [threading.Thread(target=_encode_stream, args=(sid,)) for sid in frame_players]
+    for t in encode_threads:
+        t.start()
+    for t in encode_threads:
+        t.join()
+
+    # Phase 4: Log to Rerun from main thread (set_time is not thread-safe).
+    # Merge streams back in timestamp order for correct Rerun playback.
+    all_log_items: list[tuple[float, str, list[bytes], dict[str, object]]] = []
+    for sid, items in encoded_by_stream.items():
+        for timestamp_sec, packets, metadata in items:
+            all_log_items.append((timestamp_sec, sid, packets, metadata))
+    all_log_items.sort(key=lambda x: x[0])
+
+    frame_counters: dict[str, int] = {sid: 0 for sid in frame_players}
+    for timestamp_sec, sid, packets, metadata in tqdm(all_log_items, desc="Logging", unit="frame"):
+        rr.set_time("timestamp", duration=timestamp_sec)
+        rr.set_time("frame_number", sequence=frame_counters[sid])
+        frame_counters[sid] += 1
+        if metadata:
+            meta_str: str = "\n".join(f"{k}: {v}" for k, v in metadata.items())
+            rr.log(f"{frame_players[sid].entity_path}/data", rr.TextDocument(meta_str))
+        for pkt in packets:
+            rr.log(frame_players[sid].entity_path, rr.VideoStream.from_fields(sample=pkt))
 
 
 def _process_sequential(
