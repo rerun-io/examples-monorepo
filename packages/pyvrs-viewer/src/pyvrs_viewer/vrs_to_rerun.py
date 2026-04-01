@@ -8,9 +8,11 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import rerun as rr
 from pyvrs import SyncVRSReader
 from simplecv.rerun_log_utils import RerunTyroConfig
 
+from pyvrs_viewer.blueprint import create_vrs_blueprint
 from pyvrs_viewer.frame_player import FramePlayer
 from pyvrs_viewer.imu_player import IMUPlayer, might_contain_imu_data
 
@@ -25,6 +27,8 @@ class VrsToRerunConfig:
     """Path to the input .vrs file."""
     rr_config: RerunTyroConfig = field(default_factory=RerunTyroConfig)
     """Rerun save/connect configuration."""
+    encode_video: bool = True
+    """Re-encode camera streams to H265 VideoStream for smaller RRD files (default: on)."""
 
 
 def _parse_recordable_type_id(stream_id: str) -> int:
@@ -77,6 +81,7 @@ def vrs_to_rerun(config: VrsToRerunConfig) -> None:
         raise FileNotFoundError(msg)
 
     logger.info("Opening VRS file: %s", vrs_path)
+    logger.info("Video encoding: %s", "ON (H265)" if config.encode_video else "OFF (raw images)")
     reader: SyncVRSReader = SyncVRSReader(str(vrs_path))
 
     # Discover streams and create players
@@ -99,12 +104,18 @@ def vrs_to_rerun(config: VrsToRerunConfig) -> None:
 
         if reader.might_contain_images(stream_id):
             logger.info("Stream %s (%s): handled by FramePlayer", stream_id, entity_name)
-            frame_players[stream_id] = FramePlayer(stream_id, entity_name)
+            frame_players[stream_id] = FramePlayer(stream_id, entity_name, encode_video=config.encode_video)
         elif might_contain_imu_data(recordable_type_id):
             logger.info("Stream %s (%s): handled by IMUPlayer", stream_id, entity_name)
             imu_players[stream_id] = IMUPlayer(stream_id, entity_name)
         else:
             logger.info("Stream %s (%s): no player available, skipping", stream_id, entity_name)
+
+    # Send dynamic blueprint
+    camera_entities: list[str] = [p.entity_path for p in frame_players.values()]
+    imu_entity_paths: list[str] = [p.entity_path for p in imu_players.values()]
+    blueprint = create_vrs_blueprint(camera_entities, imu_entity_paths)
+    rr.send_blueprint(blueprint, make_active=True, make_default=True)
 
     # Iterate all records in timestamp order
     record_count: int = 0
@@ -136,6 +147,10 @@ def vrs_to_rerun(config: VrsToRerunConfig) -> None:
         record_count += 1
         if record_count % 1000 == 0:
             logger.info("Processed %d records...", record_count)
+
+    # Flush video encoders
+    for fp in frame_players.values():
+        fp.flush()
 
     logger.info("Done. Processed %d records total.", record_count)
     if config.rr_config.save is not None:

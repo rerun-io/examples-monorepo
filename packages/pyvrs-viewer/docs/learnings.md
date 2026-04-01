@@ -40,23 +40,55 @@
 - `rr.set_time("timestamp", duration=seconds)` — wall-clock time from VRS
 - `rr.set_time("frame_number", sequence=n)` — per-stream frame counter
 
+## H265 Video Encoding
+
+### Encoder selection
+- Tries `hevc_nvenc` (NVIDIA hardware) first, falls back to `libx265` (CPU)
+- Both are available from conda-forge's `av` package on Linux
+- RTX 5090 NVENC confirmed working — encoding is near-instant
+
+### PyAV encoding setup
+- Use `av.CodecContext.create(codec_name, 'w')` for containerless encoding
+- Use `from fractions import Fraction` (NOT `av.Fraction` — doesn't exist)
+- `ctx.max_b_frames = 0` required by Rerun VideoStream
+- `ctx.pix_fmt = 'yuv420p'` — all H265 encoders require this
+- Convert gray → yuv420p: `av.VideoFrame.from_ndarray(img, format='gray').reformat(format='yuv420p')`
+- `bytes(packet)` from `ctx.encode(frame)` gives raw H265 Annex B data
+- Must call `ctx.encode(None)` at end to flush buffered frames
+
+### Rerun VideoStream integration
+- Log codec once as static: `rr.log(entity, rr.VideoStream(codec=rr.VideoCodec.H265), static=True)`
+- Log each packet: `rr.log(entity, rr.VideoStream.from_fields(sample=packet_bytes))`
+- Encoder may buffer frames — first few `encode()` calls return empty lists
+- Flush packets must also be logged at the end
+
+### Dynamic Blueprint
+- `rerun.blueprint` module provides layout containers: `Grid`, `Horizontal`, `Vertical`, `Tabs`
+- `rrb.Spatial2DView(origin=entity)` for cameras
+- `rrb.TimeSeriesView(origin=entity)` for IMU data
+- Send early: `rr.send_blueprint(blueprint, make_active=True, make_default=True)`
+
 ## Test Results
 
-### Hot3D Quest VRS (2.7GB)
-- 2 streams: `1201-1` (camera-slam-left), `1201-2` (camera-slam-right)
-- 7,966 records total (1 config + 1 state + 3,981 data per stream)
-- All images JPEG encoded (~360KB per frame, 1280x1024 mono)
-- Output RRD: 2.7GB
-- Entity paths use `flavor` (unique): `camera-slam-left`, `camera-slam-right`
+### Hot3D Quest VRS (2.7GB input)
 
-### Hot3D Aria VRS (1.7GB)
-- 8 streams: 3 cameras (1201-1, 1201-2, 214-1), 2 IMUs (1202-1, 1202-2), 3 skipped (285-1, 285-2, 286-1)
+| Mode | RRD Size | Reduction |
+|------|----------|-----------|
+| JPEG (no encode) | 2.7 GB | — |
+| H265 (NVENC) | 70 MB | **38x** |
+
+- 2 streams: `camera-slam-left`, `camera-slam-right`
+- 7,966 records, 1280x1024 mono @ 30fps
+
+### Hot3D Aria VRS (1.7GB input)
+
+| Mode | RRD Size | Reduction |
+|------|----------|-----------|
+| JPEG (no encode) | 1.7 GB | — |
+| H265 (NVENC) | 129 MB | **13x** |
+
+- 3 cameras (1408x1408 RGB + 2x 640x480 mono) + 2 IMUs
 - 237,185 records total
-- Camera images: JPEG encoded
-- IMU: accelerometer + gyroscope (no magnetometer in this recording)
-- Skipped: Time Domain Mapping (285) and Attention Data (286) — no player implemented
-- Entity paths use stream_id directly because `flavor` ("device/ariane") is shared across all streams
-- Output RRD: 1.7GB
 
 ## Stream Entity Naming
 - Quest VRS has unique `flavor` values per stream → used as Rerun entity path

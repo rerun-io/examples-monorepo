@@ -43,6 +43,10 @@ class IMUPlayer:
     def enabled(self) -> bool:
         return self._enabled
 
+    @property
+    def entity_path(self) -> str:
+        return self._entity_path
+
     def on_configuration_record(self, metadata: dict[str, object]) -> None:
         """Log static configuration metadata and detect available sensors."""
         if not self._enabled:

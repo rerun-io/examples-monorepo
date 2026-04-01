@@ -1,17 +1,21 @@
 """Image stream handler: logs camera frames to Rerun.
 
-Supports three image formats with priority for memory efficiency:
-  1. video (H264/H265) → rr.VideoStream (raw codec bytes, no decode)
-  2. jpg → rr.EncodedImage (raw JPEG bytes, no decode)
-  3. raw → rr.Image (decoded pixel array, fallback)
+When encode_video=True (default), JPEG/RAW images are re-encoded to H265
+via VideoStream for dramatically smaller RRD files. When encode_video=False,
+images are logged as-is (EncodedImage for JPEG, Image for RAW).
+
+Video codec streams (H264/H265 already in VRS) always pass through directly.
 """
 
 import logging
 
+import cv2
 import numpy as np
 import rerun as rr
 from jaxtyping import UInt8
 from numpy import ndarray
+
+from pyvrs_viewer.video_encoder import VideoEncoder
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -19,19 +23,26 @@ logger: logging.Logger = logging.getLogger(__name__)
 class FramePlayer:
     """Handles image streams from a VRS file and logs them to Rerun.
 
-    Mirrors the C++ FramePlayer from rerun-io/cpp-example-vrs.
+    Mirrors the C++ FramePlayer from rerun-io/cpp-example-vrs, with optional
+    H265 video encoding for smaller RRD output.
     """
 
-    def __init__(self, stream_id: str, stream_name: str) -> None:
+    def __init__(self, stream_id: str, stream_name: str, *, encode_video: bool = True) -> None:
         self._stream_id: str = stream_id
         self._entity_path: str = stream_name
         self._enabled: bool = True
         self._frame_number: int = 0
         self._codec_logged: bool = False
+        self._encode_video: bool = encode_video
+        self._encoder: VideoEncoder | None = None
 
     @property
     def enabled(self) -> bool:
         return self._enabled
+
+    @property
+    def entity_path(self) -> str:
+        return self._entity_path
 
     def on_configuration_record(self, metadata: dict[str, object]) -> None:
         """Log static configuration metadata as a TextDocument."""
@@ -70,7 +81,11 @@ class FramePlayer:
         image_format: str = str(image_spec.get("image_format", "raw"))
 
         if image_format == "video":
-            self._log_video_frame(image_spec, image_block)
+            # Already encoded — pass through directly regardless of encode_video flag
+            self._log_video_passthrough(image_spec, image_block)
+        elif self._encode_video:
+            # Re-encode to H265 for smaller RRD
+            self._log_encoded_frame(image_format, image_spec, image_block)
         elif image_format == "jpg":
             self._log_jpeg_frame(image_block)
         elif image_format == "png":
@@ -78,59 +93,102 @@ class FramePlayer:
         else:
             self._log_raw_frame(image_spec, image_block)
 
-    def _log_video_frame(self, image_spec: dict[str, object], raw_bytes: UInt8[ndarray, "n"]) -> None:
-        """Log H264/H265 video codec frame via rr.VideoStream."""
-        codec_name: str = str(image_spec.get("codec_name", "h264")).lower()
+    def flush(self) -> None:
+        """Flush any remaining frames from the video encoder."""
+        if self._encoder is None:
+            return
+        flush_packets: list[bytes] = self._encoder.flush()
+        for packet_bytes in flush_packets:
+            rr.log(self._entity_path, rr.VideoStream.from_fields(sample=packet_bytes))
 
-        if not self._codec_logged:
-            # Log codec as static on first frame
-            codec = rr.VideoCodec.H265 if ("h265" in codec_name or "hevc" in codec_name) else rr.VideoCodec.H264
-            rr.log(self._entity_path, rr.VideoStream(codec=codec), static=True)
+    # ── Video encoding path (encode_video=True) ─────────────────────────
+
+    def _log_encoded_frame(
+        self,
+        image_format: str,
+        image_spec: dict[str, object],
+        image_block: UInt8[ndarray, "n"],
+    ) -> None:
+        """Decode image, re-encode to H265, log as VideoStream."""
+        # Decode to numpy
+        if image_format in ("jpg", "png"):
+            decoded: UInt8[np.ndarray, "h w"] | UInt8[np.ndarray, "h w 3"] | None = cv2.imdecode(image_block, cv2.IMREAD_UNCHANGED)
+            if decoded is None:
+                logger.warning("Stream %s: failed to decode %s image, skipping frame", self._stream_id, image_format)
+                return
+            # cv2 returns BGR for color images — convert to RGB
+            if decoded.ndim == 3 and decoded.shape[2] == 3:
+                decoded = cv2.cvtColor(decoded, cv2.COLOR_BGR2RGB)
+        else:
+            # RAW format — reshape using spec dimensions
+            decoded = self._decode_raw_image(image_spec, image_block)
+            if decoded is None:
+                return
+
+        # Lazily create encoder on first frame
+        if self._encoder is None:
+            self._encoder = VideoEncoder()
+            # Log H265 codec as static
+            rr.log(self._entity_path, rr.VideoStream(codec=rr.VideoCodec.H265), static=True)
             self._codec_logged = True
-            logger.info("Stream %s: using VideoStream with codec %s", self._stream_id, codec_name)
 
-        frame_bytes: bytes = raw_bytes.tobytes()
-        rr.log(self._entity_path, rr.VideoStream(sample=frame_bytes))
+        # Encode and log packets
+        packets: list[bytes] = self._encoder.encode_frame(decoded)
+        for packet_bytes in packets:
+            rr.log(self._entity_path, rr.VideoStream.from_fields(sample=packet_bytes))
 
-    def _log_jpeg_frame(self, raw_bytes: UInt8[ndarray, "n"]) -> None:
-        """Log raw JPEG bytes via rr.EncodedImage (no decode needed)."""
-        jpeg_bytes: bytes = raw_bytes.tobytes()
-        rr.log(self._entity_path, rr.EncodedImage(contents=jpeg_bytes, media_type="image/jpeg"))
-
-    def _log_png_frame(self, raw_bytes: UInt8[ndarray, "n"]) -> None:
-        """Log raw PNG bytes via rr.EncodedImage (no decode needed)."""
-        png_bytes: bytes = raw_bytes.tobytes()
-        rr.log(self._entity_path, rr.EncodedImage(contents=png_bytes, media_type="image/png"))
-
-    def _log_raw_frame(self, image_spec: dict[str, object], pixel_array: UInt8[ndarray, "n"]) -> None:
-        """Log decoded raw pixel array via rr.Image."""
+    def _decode_raw_image(
+        self, image_spec: dict[str, object], pixel_array: UInt8[ndarray, "n"]
+    ) -> UInt8[np.ndarray, "h w"] | UInt8[np.ndarray, "h w 3"] | None:
+        """Reshape a raw pixel array into an image using spec dimensions."""
         width: int = int(image_spec.get("width", 0))
         height: int = int(image_spec.get("height", 0))
         pixel_format: str = str(image_spec.get("pixel_format", ""))
 
         if width == 0 or height == 0:
             logger.warning("Stream %s: raw image with unknown dimensions, skipping", self._stream_id)
-            return
+            return None
 
-        # Determine channels from pixel format
         channels: int = _channels_from_pixel_format(pixel_format)
-
         try:
             if channels == 1:
-                image: UInt8[np.ndarray, "h w"] = pixel_array.reshape(height, width)
-            else:
-                image = pixel_array.reshape(height, width, channels)
-            rr.log(self._entity_path, rr.Image(image))
+                return pixel_array.reshape(height, width)
+            return pixel_array.reshape(height, width, channels)
         except ValueError:
-            logger.warning(
-                "Stream %s: failed to reshape raw image (%d bytes) to %dx%dx%d, skipping",
-                self._stream_id,
-                pixel_array.size,
-                height,
-                width,
-                channels,
-            )
+            logger.warning("Stream %s: failed to reshape raw image, disabling", self._stream_id)
             self._enabled = False
+            return None
+
+    # ── Video passthrough (already H264/H265 in VRS) ────────────────────
+
+    def _log_video_passthrough(self, image_spec: dict[str, object], raw_bytes: UInt8[ndarray, "n"]) -> None:
+        """Log H264/H265 video codec frame via rr.VideoStream (passthrough)."""
+        codec_name: str = str(image_spec.get("codec_name", "h264")).lower()
+
+        if not self._codec_logged:
+            codec = rr.VideoCodec.H265 if ("h265" in codec_name or "hevc" in codec_name) else rr.VideoCodec.H264
+            rr.log(self._entity_path, rr.VideoStream(codec=codec), static=True)
+            self._codec_logged = True
+            logger.info("Stream %s: passthrough VideoStream with codec %s", self._stream_id, codec_name)
+
+        frame_bytes: bytes = raw_bytes.tobytes()
+        rr.log(self._entity_path, rr.VideoStream.from_fields(sample=frame_bytes))
+
+    # ── Image-only paths (encode_video=False) ───────────────────────────
+
+    def _log_jpeg_frame(self, raw_bytes: UInt8[ndarray, "n"]) -> None:
+        """Log raw JPEG bytes via rr.EncodedImage (no decode needed)."""
+        rr.log(self._entity_path, rr.EncodedImage(contents=raw_bytes.tobytes(), media_type="image/jpeg"))
+
+    def _log_png_frame(self, raw_bytes: UInt8[ndarray, "n"]) -> None:
+        """Log raw PNG bytes via rr.EncodedImage (no decode needed)."""
+        rr.log(self._entity_path, rr.EncodedImage(contents=raw_bytes.tobytes(), media_type="image/png"))
+
+    def _log_raw_frame(self, image_spec: dict[str, object], pixel_array: UInt8[ndarray, "n"]) -> None:
+        """Log decoded raw pixel array via rr.Image."""
+        decoded: UInt8[np.ndarray, "h w"] | UInt8[np.ndarray, "h w 3"] | None = self._decode_raw_image(image_spec, pixel_array)
+        if decoded is not None:
+            rr.log(self._entity_path, rr.Image(decoded))
 
 
 def _channels_from_pixel_format(pixel_format: str) -> int:
@@ -142,5 +200,4 @@ def _channels_from_pixel_format(pixel_format: str) -> int:
         return 4
     if "rgb" in fmt or "bgr" in fmt:
         return 3
-    # Default to 1 channel for unknown formats
     return 1
