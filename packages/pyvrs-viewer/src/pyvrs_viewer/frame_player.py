@@ -1,30 +1,33 @@
 """Image stream handler: logs camera frames to Rerun.
 
-When encode_video=True (default), JPEG/RAW images are re-encoded to H265 or AV1
-via VideoStream for dramatically smaller RRD files. When encode_video=False,
-images are logged as-is (EncodedImage for JPEG, Image for RAW).
+When encode_video=True (default), JPEG images are decoded directly to YUV planes
+via turbojpeg (no RGB intermediate) and encoded to H265/AV1 via VideoStream.
+When encode_video=False, raw JPEG bytes are passed to EncodedImage (no decode).
 
 Video codec streams (H264/H265 already in VRS) always pass through directly.
 """
 
 import logging
 
-import cv2
 import numpy as np
 import rerun as rr
 from jaxtyping import UInt8
 from numpy import ndarray
+from turbojpeg import TurboJPEG
 
 from pyvrs_viewer.video_encoder import VideoCodecChoice, VideoEncoder
 
 logger: logging.Logger = logging.getLogger(__name__)
+
+# Thread-local TurboJPEG instance (safe for concurrent use from thread pools)
+_tj: TurboJPEG = TurboJPEG()
 
 
 class FramePlayer:
     """Handles image streams from a VRS file and logs them to Rerun.
 
     Mirrors the C++ FramePlayer from rerun-io/cpp-example-vrs, with optional
-    H265 video encoding for smaller RRD output.
+    video encoding for smaller RRD output.
     """
 
     def __init__(self, stream_id: str, stream_name: str, *, encode_video: bool = True, video_codec: VideoCodecChoice = VideoCodecChoice.H265) -> None:
@@ -64,14 +67,7 @@ class FramePlayer:
         image_block: UInt8[ndarray, "n"],
         metadata: dict[str, object],
     ) -> None:
-        """Log a single image frame to Rerun.
-
-        Args:
-            timestamp_sec: Record timestamp in seconds.
-            image_spec: Image spec dict with keys like image_format, codec_name, width, height.
-            image_block: Raw image data as 1D uint8 numpy array (encoded for jpg/video, decoded for raw).
-            metadata: Per-frame metadata dict.
-        """
+        """Log a single image frame to Rerun."""
         if not self._enabled:
             return
 
@@ -79,7 +75,6 @@ class FramePlayer:
         rr.set_time("frame_number", sequence=self._frame_number)
         self._frame_number += 1
 
-        # Log per-frame metadata
         if metadata:
             meta_str: str = "\n".join(f"{k}: {v}" for k, v in metadata.items())
             rr.log(f"{self._entity_path}/data", rr.TextDocument(meta_str))
@@ -87,15 +82,12 @@ class FramePlayer:
         image_format: str = str(image_spec.get("image_format", "raw"))
 
         if image_format == "video":
-            # Already encoded — pass through directly regardless of encode_video flag
             self._log_video_passthrough(image_spec, image_block)
         elif self._encode_video:
-            # Re-encode to H265 for smaller RRD
             self._log_encoded_frame(image_format, image_spec, image_block)
-        elif image_format == "jpg":
-            self._log_jpeg_frame(image_block)
-        elif image_format == "png":
-            self._log_png_frame(image_block)
+        elif image_format in ("jpg", "png"):
+            media_type: str = "image/jpeg" if image_format == "jpg" else "image/png"
+            rr.log(self._entity_path, rr.EncodedImage(contents=image_block.tobytes(), media_type=media_type))
         else:
             self._log_raw_frame(image_spec, image_block)
 
@@ -103,11 +95,18 @@ class FramePlayer:
         """Flush any remaining frames from the video encoder."""
         if self._encoder is None:
             return
-        flush_packets: list[bytes] = self._encoder.flush()
-        for packet_bytes in flush_packets:
+        for packet_bytes in self._encoder.flush():
             rr.log(self._entity_path, rr.VideoStream.from_fields(sample=packet_bytes))
 
     # ── Video encoding path (encode_video=True) ─────────────────────────
+
+    def _ensure_encoder(self) -> None:
+        """Lazily create encoder and log codec as static on first frame."""
+        if self._encoder is None:
+            self._encoder = VideoEncoder(codec=self._video_codec)
+            rr_codec = rr.VideoCodec.AV1 if self._video_codec == VideoCodecChoice.AV1 else rr.VideoCodec.H265
+            rr.log(self._entity_path, rr.VideoStream(codec=rr_codec), static=True)
+            self._codec_logged = True
 
     def _log_encoded_frame(
         self,
@@ -115,32 +114,32 @@ class FramePlayer:
         image_spec: dict[str, object],
         image_block: UInt8[ndarray, "n"],
     ) -> None:
-        """Decode image, re-encode to video codec, log as VideoStream."""
-        # Decode to numpy
+        """Decode image to YUV via turbojpeg, encode to video codec, log as VideoStream."""
+        self._ensure_encoder()
+        assert self._encoder is not None
+
         if image_format in ("jpg", "png"):
-            decoded: UInt8[np.ndarray, "h w"] | UInt8[np.ndarray, "h w 3"] | None = cv2.imdecode(image_block, cv2.IMREAD_UNCHANGED)
-            if decoded is None:
-                logger.warning("Stream %s: failed to decode %s image, skipping frame", self._stream_id, image_format)
+            jpeg_bytes: bytes = image_block.tobytes()
+            # turbojpeg decode_to_yuv_planes: extracts YUV planes directly from JPEG
+            # (no RGB intermediate — JPEG internally stores YCbCr)
+            yuv_planes: list[UInt8[np.ndarray, "..."]] = _tj.decode_to_yuv_planes(jpeg_bytes)
+
+            if len(yuv_planes) == 1:
+                # Grayscale JPEG — Y plane only
+                packets: list[bytes] = self._encoder.encode_yuv_planes(yuv_planes[0])
+            elif len(yuv_planes) >= 3:
+                # Color JPEG — Y, U, V planes
+                packets = self._encoder.encode_yuv_planes(yuv_planes[0], yuv_planes[1], yuv_planes[2])
+            else:
+                logger.warning("Stream %s: unexpected %d YUV planes, skipping", self._stream_id, len(yuv_planes))
                 return
-            # cv2 returns BGR for color images — convert to RGB
-            if decoded.ndim == 3 and decoded.shape[2] == 3:
-                decoded = cv2.cvtColor(decoded, cv2.COLOR_BGR2RGB)
         else:
-            # RAW format — reshape using spec dimensions
-            decoded = self._decode_raw_image(image_spec, image_block)
+            # RAW format — decode and use legacy encode path
+            decoded: UInt8[np.ndarray, "h w"] | UInt8[np.ndarray, "h w 3"] | None = self._decode_raw_image(image_spec, image_block)
             if decoded is None:
                 return
+            packets = self._encoder.encode_frame(decoded)
 
-        # Lazily create encoder on first frame
-        if self._encoder is None:
-            self._encoder = VideoEncoder(codec=self._video_codec)
-            # Log codec as static — map our codec choice to Rerun's VideoCodec enum
-            rr_codec = rr.VideoCodec.AV1 if self._video_codec == VideoCodecChoice.AV1 else rr.VideoCodec.H265
-            rr.log(self._entity_path, rr.VideoStream(codec=rr_codec), static=True)
-            self._codec_logged = True
-
-        # Encode and log packets
-        packets: list[bytes] = self._encoder.encode_frame(decoded)
         for packet_bytes in packets:
             rr.log(self._entity_path, rr.VideoStream.from_fields(sample=packet_bytes))
 
@@ -178,18 +177,9 @@ class FramePlayer:
             self._codec_logged = True
             logger.info("Stream %s: passthrough VideoStream with codec %s", self._stream_id, codec_name)
 
-        frame_bytes: bytes = raw_bytes.tobytes()
-        rr.log(self._entity_path, rr.VideoStream.from_fields(sample=frame_bytes))
+        rr.log(self._entity_path, rr.VideoStream.from_fields(sample=raw_bytes.tobytes()))
 
-    # ── Image-only paths (encode_video=False) ───────────────────────────
-
-    def _log_jpeg_frame(self, raw_bytes: UInt8[ndarray, "n"]) -> None:
-        """Log raw JPEG bytes via rr.EncodedImage (no decode needed)."""
-        rr.log(self._entity_path, rr.EncodedImage(contents=raw_bytes.tobytes(), media_type="image/jpeg"))
-
-    def _log_png_frame(self, raw_bytes: UInt8[ndarray, "n"]) -> None:
-        """Log raw PNG bytes via rr.EncodedImage (no decode needed)."""
-        rr.log(self._entity_path, rr.EncodedImage(contents=raw_bytes.tobytes(), media_type="image/png"))
+    # ── Image-only path (encode_video=False, RAW format) ────────────────
 
     def _log_raw_frame(self, image_spec: dict[str, object], pixel_array: UInt8[ndarray, "n"]) -> None:
         """Log decoded raw pixel array via rr.Image."""

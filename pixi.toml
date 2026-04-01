@@ -617,6 +617,7 @@ tyro = ">=0.9.1,<0.10"
 [feature.pyvrs-viewer.pypi-dependencies]
 pyvrs-viewer = { path = "packages/pyvrs-viewer", editable = true }
 vrs = "*"
+PyTurboJPEG = "*"
 
 [feature.pyvrs-viewer.activation.env]
 PACKAGE_DIR = "packages/pyvrs-viewer"

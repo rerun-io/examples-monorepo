@@ -11,6 +11,7 @@ from enum import Enum
 from fractions import Fraction
 
 import av
+import numpy as np
 from jaxtyping import UInt8
 from numpy import ndarray
 
@@ -122,8 +123,56 @@ class VideoEncoder:
         msg: str = f"No {self._codec.value} encoder available. Tried: " + ", ".join(candidates)
         raise RuntimeError(msg)
 
+    def encode_yuv_planes(self, y_plane: UInt8[ndarray, "h w"], u_plane: UInt8[ndarray, "h2 w2"] | None = None, v_plane: UInt8[ndarray, "h2 w2"] | None = None) -> list[bytes]:
+        """Encode pre-decoded YUV planes directly (fastest path, no color conversion).
+
+        For grayscale images, pass only y_plane — U/V will be filled with 128 (neutral).
+        For color images, pass all three YUV420 planes from turbojpeg.decode_to_yuv_planes().
+
+        Args:
+            y_plane: Luma plane (h, w) uint8.
+            u_plane: Chroma-U plane (h/2, w/2) uint8, or None for grayscale.
+            v_plane: Chroma-V plane (h/2, w/2) uint8, or None for grayscale.
+
+        Returns:
+            List of encoded packet byte strings.
+        """
+        height: int = y_plane.shape[0]
+        width: int = y_plane.shape[1]
+
+        if self._ctx is None:
+            self._init_encoder(width, height)
+
+        # Construct YUV420P frame directly from planes
+        frame: av.VideoFrame = av.VideoFrame(width=width, height=height, format="yuv420p")
+        frame.planes[0].update(y_plane)
+        if u_plane is not None and v_plane is not None:
+            frame.planes[1].update(u_plane)
+            frame.planes[2].update(v_plane)
+        else:
+            # Grayscale: fill U/V with 128 (neutral chroma)
+            uv_h: int = height // 2
+            uv_w: int = width // 2
+            neutral: UInt8[np.ndarray, "h2 w2"] = np.full((uv_h, uv_w), 128, dtype=np.uint8)
+            frame.planes[1].update(neutral)
+            frame.planes[2].update(neutral)
+
+        frame.pts = self._frame_number
+        self._frame_number += 1
+
+        assert self._ctx is not None
+        t0: float = time.perf_counter()
+        packets: list[bytes] = [bytes(pkt) for pkt in self._ctx.encode(frame)]
+        self._total_encode_sec += time.perf_counter() - t0
+
+        for p in packets:
+            self._total_bytes += len(p)
+        return packets
+
     def encode_frame(self, image: UInt8[ndarray, "h w"] | UInt8[ndarray, "h w 3"]) -> list[bytes]:
-        """Encode a numpy image frame to codec packets.
+        """Encode a numpy image frame to codec packets (legacy path with color conversion).
+
+        Prefer encode_yuv_planes() when YUV data is available from turbojpeg.
 
         Args:
             image: Grayscale (h, w) or RGB (h, w, 3) uint8 numpy array.
