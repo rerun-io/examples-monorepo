@@ -608,6 +608,52 @@ cwd = "packages/vistadream"
 description = "Launch VistaDream Gradio web interface"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# pyvrs-viewer
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.pyvrs-viewer.dependencies]
+python = "3.12.*"
+tyro = ">=0.9.1,<0.10"
+
+[feature.pyvrs-viewer.pypi-dependencies]
+pyvrs-viewer = { path = "packages/pyvrs-viewer", editable = true }
+vrs = "*"
+
+[feature.pyvrs-viewer.activation.env]
+PACKAGE_DIR = "packages/pyvrs-viewer"
+
+# ── Download tasks ───────────────────────────────────────────────────────
+[feature.pyvrs-viewer-demo.tasks._download-hot3d-quest-vrs]
+cmd = """
+test -f data/hot3d_quest.vrs || \
+curl -L -o data/hot3d_quest.vrs \
+  'https://scontent.xx.fbcdn.net/m1/v/t6/An9GExjCnYwO02IsP_xnrencBwdUTHg2gxLtxbWcVVn05qEZ7MZ-TEyybVMIVS9tVckTd0anQCP058RBnetrmidiFc4kkKRCMwbZ9DPufV8VZ_CsSlmn9k-tJjAJCLjks31tl4mkR5k5EM_DIO69BeOPbcNzbaSxCr0.vrs/Hot3DQuest_v4.0.0_P0002_1464cbdc_main_recording.vrs?_nc_gid&ccb=10-5&oh=00_AfxEnSw-bXsG5fzYoCMC8z4yPRBu-dNnse9nztDGrOopEA&oe=69F370EC&_nc_sid=71efe3'
+"""
+cwd = "packages/pyvrs-viewer"
+description = "Download Hot3D Quest VRS example (2 mono cameras)"
+
+[feature.pyvrs-viewer-demo.tasks._download-hot3d-aria-vrs]
+cmd = """
+test -f data/hot3d_aria.vrs || \
+curl -L -o data/hot3d_aria.vrs \
+  'https://scontent.xx.fbcdn.net/m1/v/t6/An9jFWjgcg_1tMlA5V2DkwPV8hSjqqfw3fpaoe-Mz5PxqMZCzq5HZg_QJaX6Oq2jm0j8tAJ2I-H-c4FAOnDvqezuEho1RUFDWqe6d0AqrcOMK0LCjmnhXiNuihAr_-SDjNEPK1896cP9oVpHhp7bUEi0O795nufof00.vrs/Hot3DAria_v4.0.0_P0001_10a27bf7_main_recording.vrs?_nc_gid&ccb=10-6&oh=00_Afy-YiaePXBCaucxejkXfKbjTJG6dF2PvdJg0eLCPlxKyQ&oe=69F03AE5&_nc_sid=71efe3'
+"""
+cwd = "packages/pyvrs-viewer"
+description = "Download Hot3D Aria VRS example (4 cameras + IMU + sensors)"
+
+# ── Demo tasks ───────────────────────────────────────────────────────────
+[feature.pyvrs-viewer-demo.tasks.vrs-to-rrd-quest]
+cmd = "python tools/demos/vrs_to_rrd.py --vrs-path data/hot3d_quest.vrs --rr-config.save data/hot3d_quest.rrd"
+depends-on = ["_download-hot3d-quest-vrs"]
+cwd = "packages/pyvrs-viewer"
+description = "Convert Hot3D Quest VRS to .rrd (2 mono cameras)"
+
+[feature.pyvrs-viewer-demo.tasks.vrs-to-rrd-aria]
+cmd = "python tools/demos/vrs_to_rrd.py --vrs-path data/hot3d_aria.vrs --rr-config.save data/hot3d_aria.rrd"
+depends-on = ["_download-hot3d-aria-vrs"]
+cwd = "packages/pyvrs-viewer"
+description = "Convert Hot3D Aria VRS to .rrd (cameras + IMU + sensors)"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
 [environments]
@@ -703,3 +749,13 @@ vistadream-dev = { features = [
     "vistadream",
     "dev",
 ], solve-group = "vistadream", no-default-feature = true }
+pyvrs-viewer = { features = [
+    "common",
+    "pyvrs-viewer",
+    "pyvrs-viewer-demo",
+], solve-group = "pyvrs-viewer", no-default-feature = true }
+pyvrs-viewer-dev = { features = [
+    "common",
+    "pyvrs-viewer",
+    "dev",
+], solve-group = "pyvrs-viewer", no-default-feature = true }
