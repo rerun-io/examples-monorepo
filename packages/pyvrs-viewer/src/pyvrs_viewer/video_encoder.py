@@ -76,6 +76,7 @@ class VideoEncoder:
         self._frame_number: int = 0
         self._total_encode_sec: float = 0.0
         self._total_bytes: int = 0
+        self._neutral_uv: UInt8[np.ndarray, "h2 w2"] | None = None
 
     @property
     def encoder_name(self) -> str:
@@ -150,12 +151,11 @@ class VideoEncoder:
             frame.planes[1].update(u_plane)
             frame.planes[2].update(v_plane)
         else:
-            # Grayscale: fill U/V with 128 (neutral chroma)
-            uv_h: int = height // 2
-            uv_w: int = width // 2
-            neutral: UInt8[np.ndarray, "h2 w2"] = np.full((uv_h, uv_w), 128, dtype=np.uint8)
-            frame.planes[1].update(neutral)
-            frame.planes[2].update(neutral)
+            # Grayscale: fill U/V with 128 (neutral chroma), cached to avoid repeated allocation
+            if self._neutral_uv is None or self._neutral_uv.shape != (height // 2, width // 2):
+                self._neutral_uv = np.full((height // 2, width // 2), 128, dtype=np.uint8)
+            frame.planes[1].update(self._neutral_uv)
+            frame.planes[2].update(self._neutral_uv)
 
         frame.pts = self._frame_number
         self._frame_number += 1

@@ -226,20 +226,19 @@ def _process_with_parallel_encode(
     if not pending_jpeg:
         return
 
-    # Phase 2: Parallel JPEG decode to YUV planes
+    # Phase 2+3: Parallel JPEG decode overlapped with encode+log.
+    # pool.map returns an iterator that yields decoded results in submission order
+    # as they complete. By NOT materializing with list(), the encoder starts working
+    # as soon as the first decode finishes — decode and encode overlap in time.
     jpeg_bytes_list: list[bytes] = [item[2] for item in pending_jpeg]
-    logger.info("Decoding %d JPEG frames with %d threads...", len(jpeg_bytes_list), decode_threads)
+    logger.info("Decoding + encoding %d frames (%d threads)...", len(jpeg_bytes_list), decode_threads)
 
     with ThreadPoolExecutor(max_workers=decode_threads) as pool:
-        yuv_results: list[list[UInt8[np.ndarray, "..."]]] = list(
-            tqdm(pool.map(_decode_jpeg_to_yuv, jpeg_bytes_list), total=len(jpeg_bytes_list), desc="Decoding JPEG", unit="img")
-        )
-
-    # Phase 3: Encode + log per frame in VRS order (preserves timestamp ordering)
-    for (stream_id_str, timestamp_sec, _jpeg, metadata), yuv_planes in tqdm(
-        zip(pending_jpeg, yuv_results, strict=True), total=len(pending_jpeg), desc="Encoding video", unit="frame"
-    ):
-        frame_players[stream_id_str].encode_and_log_yuv(timestamp_sec, yuv_planes, metadata)
+        yuv_iter = pool.map(_decode_jpeg_to_yuv, jpeg_bytes_list)
+        for (stream_id_str, timestamp_sec, _jpeg, metadata), yuv_planes in tqdm(
+            zip(pending_jpeg, yuv_iter, strict=True), total=len(pending_jpeg), desc="Decode+Encode", unit="frame"
+        ):
+            frame_players[stream_id_str].encode_and_log_yuv(timestamp_sec, yuv_planes, metadata)
 
 
 def _process_sequential(
