@@ -26,10 +26,10 @@ logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(mes
 logger: logging.Logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-REPO_ROOT: Path = Path(__file__).resolve().parents[4]
-PKG_ROOT: Path = Path(__file__).resolve().parents[2]
-QUEST_JSON: Path = REPO_ROOT / ".vibe-attachments" / "e0f8ef29-0798-4e19-8ac2-d58289db420f_hot3dquest_download_urls.json"
-ARIA_JSON: Path = REPO_ROOT / ".vibe-attachments" / "c641c45d-c468-4e35-912d-2cb92fdc893d_hot3daria_download_urls.json"
+BENCH_DIR: Path = Path(__file__).resolve().parent
+PKG_ROOT: Path = BENCH_DIR.parents[1]
+QUEST_JSON: Path = BENCH_DIR / "hot3dquest_download_urls.json"
+ARIA_JSON: Path = BENCH_DIR / "hot3daria_download_urls.json"
 DATA_DIR: Path = PKG_ROOT / "data" / "benchmark"
 MAX_FILES: int = 5
 
@@ -102,9 +102,11 @@ def _copy_existing_files() -> None:
     dest_aria: Path = DATA_DIR / "aria" / "P0001_10a27bf7.vrs"
 
     if existing_quest.exists() and not dest_quest.exists():
+        dest_quest.parent.mkdir(parents=True, exist_ok=True)
         logger.info("Linking existing Quest VRS → %s", dest_quest.name)
         os.link(str(existing_quest), str(dest_quest))
     if existing_aria.exists() and not dest_aria.exists():
+        dest_aria.parent.mkdir(parents=True, exist_ok=True)
         logger.info("Linking existing Aria VRS → %s", dest_aria.name)
         os.link(str(existing_aria), str(dest_aria))
 

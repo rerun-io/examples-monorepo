@@ -39,6 +39,8 @@ class FramePlayer:
         self._encode_video: bool = encode_video
         self._video_codec: VideoCodecChoice = video_codec
         self._encoder: VideoEncoder | None = None
+        # Map encoder PTS → (source_timestamp, frame_number) for correct timestamp on delayed packets
+        self._pts_to_time: dict[int, tuple[float, int]] = {}
 
     @property
     def enabled(self) -> bool:
@@ -84,7 +86,7 @@ class FramePlayer:
         if image_format == "video":
             self._log_video_passthrough(image_spec, image_block)
         elif self._encode_video:
-            self._log_encoded_frame(image_format, image_spec, image_block)
+            self._log_encoded_frame(timestamp_sec, image_format, image_spec, image_block)
         elif image_format in ("jpg", "png"):
             media_type: str = "image/jpeg" if image_format == "jpg" else "image/png"
             rr.log(self._entity_path, rr.EncodedImage(contents=image_block.tobytes(), media_type=media_type))
@@ -95,8 +97,8 @@ class FramePlayer:
         """Flush any remaining frames from the video encoder."""
         if self._encoder is None:
             return
-        for packet_bytes in self._encoder.flush():
-            rr.log(self._entity_path, rr.VideoStream.from_fields(sample=packet_bytes))
+        for pts, packet_bytes in self._encoder.flush():
+            self._log_packet_with_correct_time(pts, packet_bytes)
 
     # ── Video encoding path (encode_video=True) ─────────────────────────
 
@@ -108,6 +110,18 @@ class FramePlayer:
             rr.log(self._entity_path, rr.VideoStream(codec=rr_codec), static=True)
             self._codec_logged = True
 
+    def _log_packet_with_correct_time(self, pts: int, packet_bytes: bytes) -> None:
+        """Log an encoded packet using the source frame's timestamp (not the current frame's).
+
+        Encoders buffer frames — the packet emitted when submitting frame N may
+        actually be for frame N-2. Use the PTS to look up the correct source timestamp.
+        """
+        ts_info: tuple[float, int] | None = self._pts_to_time.get(pts)
+        if ts_info is not None:
+            rr.set_time("timestamp", duration=ts_info[0])
+            rr.set_time("frame_number", sequence=ts_info[1])
+        rr.log(self._entity_path, rr.VideoStream.from_fields(sample=packet_bytes))
+
     def encode_and_log_yuv(
         self,
         timestamp_sec: float,
@@ -118,47 +132,69 @@ class FramePlayer:
         if not self._enabled:
             return
 
+        # Log metadata with the source frame's timestamp
         rr.set_time("timestamp", duration=timestamp_sec)
         rr.set_time("frame_number", sequence=self._frame_number)
-        self._frame_number += 1
 
         if metadata:
             meta_str: str = "\n".join(f"{k}: {v}" for k, v in metadata.items())
             rr.log(f"{self._entity_path}/data", rr.TextDocument(meta_str))
 
+        # Record PTS→timestamp mapping BEFORE encoding (encoder assigns PTS = _frame_number)
         self._ensure_encoder()
         assert self._encoder is not None
+        encoder_pts: int = self._encoder._frame_number  # Next PTS the encoder will assign
+        self._pts_to_time[encoder_pts] = (timestamp_sec, self._frame_number)
+        self._frame_number += 1
 
         if len(yuv_planes) == 1:
-            packets: list[bytes] = self._encoder.encode_yuv_planes(yuv_planes[0])
+            packets: list[tuple[int, bytes]] = self._encoder.encode_yuv_planes(yuv_planes[0])
         elif len(yuv_planes) >= 3:
             packets = self._encoder.encode_yuv_planes(yuv_planes[0], yuv_planes[1], yuv_planes[2])
         else:
             return
 
-        for packet_bytes in packets:
-            rr.log(self._entity_path, rr.VideoStream.from_fields(sample=packet_bytes))
+        # Log packets with their actual source timestamps (may differ due to encoder buffering)
+        for pts, packet_bytes in packets:
+            self._log_packet_with_correct_time(pts, packet_bytes)
 
     def _log_encoded_frame(
         self,
+        timestamp_sec: float,
         image_format: str,
         image_spec: dict[str, object],
         image_block: UInt8[ndarray, "n"],
     ) -> None:
-        """Decode image to YUV via turbojpeg, encode to video codec, log as VideoStream."""
+        """Decode image to YUV via turbojpeg, encode to video codec, log as VideoStream.
+
+        Called from on_data_record (sequential path). Timestamp/frame_number are
+        already set by the caller for metadata logging, but packet logging uses
+        PTS-based timestamp lookup due to encoder buffering.
+        """
+        self._ensure_encoder()
+        assert self._encoder is not None
+
+        # Register PTS→timestamp mapping before encoding
+        encoder_pts: int = self._encoder._frame_number
+        self._pts_to_time[encoder_pts] = (timestamp_sec, self._frame_number - 1)
+
         if image_format in ("jpg", "png"):
             jpeg_bytes: bytes = image_block.tobytes()
             yuv_planes: list[UInt8[np.ndarray, "..."]] = _tj.decode_to_yuv_planes(jpeg_bytes)
-            self.encode_and_log_yuv(0.0, yuv_planes, {})  # timestamp already set by caller
+            if len(yuv_planes) == 1:
+                packets: list[tuple[int, bytes]] = self._encoder.encode_yuv_planes(yuv_planes[0])
+            elif len(yuv_planes) >= 3:
+                packets = self._encoder.encode_yuv_planes(yuv_planes[0], yuv_planes[1], yuv_planes[2])
+            else:
+                return
         else:
-            # RAW format — decode and use legacy encode path
-            self._ensure_encoder()
-            assert self._encoder is not None
             decoded: UInt8[np.ndarray, "h w"] | UInt8[np.ndarray, "h w 3"] | None = self._decode_raw_image(image_spec, image_block)
             if decoded is None:
                 return
-            for packet_bytes in self._encoder.encode_frame(decoded):
-                rr.log(self._entity_path, rr.VideoStream.from_fields(sample=packet_bytes))
+            packets = self._encoder.encode_frame(decoded)
+
+        for pts, packet_bytes in packets:
+            self._log_packet_with_correct_time(pts, packet_bytes)
 
     def _decode_raw_image(
         self, image_spec: dict[str, object], pixel_array: UInt8[ndarray, "n"]

@@ -124,7 +124,7 @@ class VideoEncoder:
         msg: str = f"No {self._codec.value} encoder available. Tried: " + ", ".join(candidates)
         raise RuntimeError(msg)
 
-    def encode_yuv_planes(self, y_plane: UInt8[ndarray, "h w"], u_plane: UInt8[ndarray, "h2 w2"] | None = None, v_plane: UInt8[ndarray, "h2 w2"] | None = None) -> list[bytes]:
+    def encode_yuv_planes(self, y_plane: UInt8[ndarray, "h w"], u_plane: UInt8[ndarray, "h2 w2"] | None = None, v_plane: UInt8[ndarray, "h2 w2"] | None = None) -> list[tuple[int, bytes]]:
         """Encode pre-decoded YUV planes directly (fastest path, no color conversion).
 
         For grayscale images, pass only y_plane — U/V will be filled with 128 (neutral).
@@ -136,7 +136,8 @@ class VideoEncoder:
             v_plane: Chroma-V plane (h/2, w/2) uint8, or None for grayscale.
 
         Returns:
-            List of encoded packet byte strings.
+            List of (pts, encoded_bytes) tuples. PTS maps to the frame submission order
+            and may differ from the current frame due to encoder buffering.
         """
         height: int = y_plane.shape[0]
         width: int = y_plane.shape[1]
@@ -162,14 +163,14 @@ class VideoEncoder:
 
         assert self._ctx is not None
         t0: float = time.perf_counter()
-        packets: list[bytes] = [bytes(pkt) for pkt in self._ctx.encode(frame)]
+        packets: list[tuple[int, bytes]] = [(pkt.pts, bytes(pkt)) for pkt in self._ctx.encode(frame)]
         self._total_encode_sec += time.perf_counter() - t0
 
-        for p in packets:
+        for _pts, p in packets:
             self._total_bytes += len(p)
         return packets
 
-    def encode_frame(self, image: UInt8[ndarray, "h w"] | UInt8[ndarray, "h w 3"]) -> list[bytes]:
+    def encode_frame(self, image: UInt8[ndarray, "h w"] | UInt8[ndarray, "h w 3"]) -> list[tuple[int, bytes]]:
         """Encode a numpy image frame to codec packets (legacy path with color conversion).
 
         Prefer encode_yuv_planes() when YUV data is available from turbojpeg.
@@ -178,7 +179,7 @@ class VideoEncoder:
             image: Grayscale (h, w) or RGB (h, w, 3) uint8 numpy array.
 
         Returns:
-            List of encoded packet byte strings.
+            List of (pts, encoded_bytes) tuples.
         """
         if self._ctx is None:
             height: int = image.shape[0]
@@ -204,25 +205,25 @@ class VideoEncoder:
 
         assert self._ctx is not None
         t0: float = time.perf_counter()
-        packets: list[bytes] = [bytes(pkt) for pkt in self._ctx.encode(frame)]
+        packets: list[tuple[int, bytes]] = [(pkt.pts, bytes(pkt)) for pkt in self._ctx.encode(frame)]
         self._total_encode_sec += time.perf_counter() - t0
 
-        for p in packets:
+        for _pts, p in packets:
             self._total_bytes += len(p)
         return packets
 
-    def flush(self) -> list[bytes]:
+    def flush(self) -> list[tuple[int, bytes]]:
         """Flush any remaining buffered frames from the encoder.
 
         Returns:
-            List of encoded packet byte strings.
+            List of (pts, encoded_bytes) tuples for buffered frames.
         """
         if self._ctx is None:
             return []
         t0: float = time.perf_counter()
-        packets: list[bytes] = [bytes(pkt) for pkt in self._ctx.encode(None)]
+        packets: list[tuple[int, bytes]] = [(pkt.pts, bytes(pkt)) for pkt in self._ctx.encode(None)]
         self._total_encode_sec += time.perf_counter() - t0
 
-        for p in packets:
+        for _pts, p in packets:
             self._total_bytes += len(p)
         return packets
