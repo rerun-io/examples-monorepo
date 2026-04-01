@@ -665,6 +665,69 @@ cwd = "packages/pyvrs-viewer"
 description = "Benchmark 5 Quest + 5 Aria VRS files (requires download URL JSONs)"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# gsplat-rust-renderer
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.gsplat-rust-renderer.dependencies]
+python = "3.12.*"
+rust = "1.93.*"
+clang = "*"
+cmake = "*"
+pkg-config = "*"
+numpy = "*"
+jaxtyping = "<0.3"
+
+[feature.gsplat-rust-renderer.target.linux-64.dependencies]
+libxkbcommon = "*"
+wayland = "*"
+xorg-libx11 = "*"
+xorg-libxcursor = "*"
+xorg-libxi = "*"
+xorg-libxinerama = "*"
+xorg-libxrandr = "*"
+
+[feature.gsplat-rust-renderer.pypi-dependencies]
+gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
+plyfile = ">=1.1,<2"
+rerun-sdk = "==0.30.2"
+
+[feature.gsplat-rust-renderer.activation.env]
+PACKAGE_DIR = "packages/gsplat-rust-renderer"
+
+# ── Download tasks ───────────────────────────────────────────────────────
+[feature.gsplat-rust-renderer.tasks._download-chair-ply]
+cmd = "test -e examples/chair.ply || hf download pablovela5620/splat-dataset chair.ply --repo-type dataset --local-dir examples/"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download example chair PLY from HuggingFace"
+
+# ── Rust tasks ───────────────────────────────────────────────────────────
+[feature.gsplat-rust-renderer.tasks.viewer]
+cmd = "cargo run --release"
+cwd = "packages/gsplat-rust-renderer"
+description = "Launch the Rerun viewer with Gaussian splat visualization"
+
+[feature.gsplat-rust-renderer.tasks.fmt]
+cmd = "cargo fmt --all"
+cwd = "packages/gsplat-rust-renderer"
+description = "Format Rust code"
+
+[feature.gsplat-rust-renderer.tasks.clippy]
+cmd = "cargo clippy --all-targets -- -D warnings"
+cwd = "packages/gsplat-rust-renderer"
+description = "Run clippy on Rust code"
+
+[feature.gsplat-rust-renderer.tasks.rust-test]
+cmd = "cargo test"
+cwd = "packages/gsplat-rust-renderer"
+description = "Run Rust test suite"
+
+# ── Python demo tasks ────────────────────────────────────────────────────
+[feature.gsplat-rust-renderer.tasks.log-ply]
+cmd = "python tools/log_gaussian_ply.py"
+depends-on = ["_download-chair-ply"]
+cwd = "packages/gsplat-rust-renderer"
+description = "Load example PLY and log it to the running viewer"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
 [environments]
@@ -770,3 +833,10 @@ pyvrs-viewer-dev = { features = [
     "pyvrs-viewer",
     "dev",
 ], solve-group = "pyvrs-viewer", no-default-feature = true }
+gsplat-rust-renderer = { features = [
+    "gsplat-rust-renderer",
+], solve-group = "gsplat-rust-renderer", no-default-feature = true }
+gsplat-rust-renderer-dev = { features = [
+    "gsplat-rust-renderer",
+    "dev",
+], solve-group = "gsplat-rust-renderer", no-default-feature = true }
