@@ -1,7 +1,8 @@
-"""Video encoder using PyAV with hardware acceleration fallback to CPU.
+"""Video encoder using PyAV. Prefers hardware NVENC (faster, offloads CPU)
+with software encoders as fallback.
 
-Supports H265 and AV1 codecs. Encodes numpy image frames to raw codec
-packets suitable for rr.VideoStream.
+Supports H265 and AV1 codecs. Parameters tuned per HuggingFace/LeRobot
+video encoding benchmarks: CRF=30, GOP=30, preset=8 (SVT-AV1).
 """
 
 import logging
@@ -25,15 +26,37 @@ class VideoCodecChoice(Enum):
     """AV1 — best compression, newer hardware required for decode."""
 
 
-# Encoder preference order per codec: hardware (NVENC) → software (CPU)
+# Encoder preference: hardware (NVENC) first, software (CPU) fallback.
+# NVENC is faster and offloads CPU for VRS reading + JPEG decoding.
+# At matched quality settings (constqp qp=30 vs CRF=30), file sizes are comparable.
 _ENCODER_CANDIDATES: dict[VideoCodecChoice, list[str]] = {
     VideoCodecChoice.H265: ["hevc_nvenc", "libx265"],
     VideoCodecChoice.AV1: ["av1_nvenc", "libsvtav1"],
 }
 
+# GOP size: keyframe interval in frames. GOP=30 at 30fps = 1-second max seek
+# latency in Rerun viewer. GOP=2 (HF/LeRobot default for RL random access)
+# produces 10x larger files — not needed for sequential viewer playback.
+_GOP_SIZE: int = 30
+
+# Quality: CRF 30 validated by HF on robotics data — imperceptibly different
+# from lossless with ~86% avg size reduction. For NVENC, use constant QP mode.
+_CRF: int = 30
+
+
+def _encoder_options(name: str) -> dict[str, str]:
+    """Return tuned options for each encoder."""
+    if name == "libsvtav1":
+        return {"preset": "8", "crf": str(_CRF)}
+    if name == "libx265":
+        return {"preset": "fast", "x265-params": f"crf={_CRF}"}
+    if name in ("av1_nvenc", "hevc_nvenc"):
+        return {"rc": "constqp", "qp": str(_CRF)}
+    return {}
+
 
 class VideoEncoder:
-    """Per-stream video encoder. Tries hardware (NVENC) first, falls back to CPU.
+    """Per-stream video encoder. Prefers NVENC (hardware), software fallback.
 
     Lazily initialized on the first call to encode_frame() when dimensions are known.
     Outputs raw codec packets suitable for rr.VideoStream.
@@ -80,14 +103,12 @@ class VideoEncoder:
                 ctx.pix_fmt = "yuv420p"
                 ctx.time_base = Fraction(1, int(self._fps))
                 ctx.max_b_frames = 0  # Required by Rerun VideoStream
-                if name == "libx265":
-                    ctx.options = {"preset": "fast"}
-                elif name == "libsvtav1":
-                    ctx.options = {"preset": "8"}  # Fast preset for SVT-AV1 (0=slow, 13=fastest)
+                ctx.gop_size = _GOP_SIZE
+                ctx.options = _encoder_options(name)
                 ctx.open()
                 self._ctx = ctx
                 self._encoder_name = name
-                logger.info("VideoEncoder: using %s (%dx%d @ %gfps)", name, width, height, self._fps)
+                logger.info("VideoEncoder: using %s (%dx%d @ %gfps, gop=%d)", name, width, height, self._fps, _GOP_SIZE)
                 return
             except Exception:
                 logger.debug("VideoEncoder: %s not available, trying next", name)

@@ -31,8 +31,8 @@ class VrsToRerunConfig:
     """Rerun save/connect configuration."""
     encode_video: bool = True
     """Re-encode camera streams to video codec for smaller RRD files (default: on)."""
-    video_codec: VideoCodecChoice = VideoCodecChoice.H265
-    """Video codec to use when encode_video is on."""
+    video_codec: VideoCodecChoice = VideoCodecChoice.AV1
+    """Video codec to use when encode_video is on (default: AV1 for best compression)."""
 
 
 def _parse_recordable_type_id(stream_id: str) -> int:
