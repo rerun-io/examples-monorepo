@@ -675,6 +675,13 @@ cmake = "*"
 pkg-config = "*"
 numpy = "*"
 jaxtyping = "<0.3"
+typing_extensions = ">=4.1.0,<4.13.0"
+av = "*"
+py-opencv = "*"
+huggingface_hub = "*"
+hf-transfer = "*"
+tyro = ">=0.9.1,<0.10"
+pyserde = ">=0.20,<0.30"
 
 [feature.gsplat-rust-renderer.target.linux-64.dependencies]
 libxkbcommon = "*"
@@ -689,6 +696,7 @@ xorg-libxrandr = "*"
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
 plyfile = ">=1.1,<2"
 rerun-sdk = "==0.30.2"
+simplecv = { git = "https://github.com/pablovela5620/simplecv.git", tag = "v0.7.2" }
 
 [feature.gsplat-rust-renderer.activation.env]
 PACKAGE_DIR = "packages/gsplat-rust-renderer"
@@ -722,7 +730,7 @@ description = "Run Rust test suite"
 
 # ── Python demo tasks ────────────────────────────────────────────────────
 [feature.gsplat-rust-renderer.tasks.log-ply]
-cmd = "python tools/log_gaussian_ply.py"
+cmd = "python tools/log_gaussian_ply.py --rr-config.connect --rr-config.application-id gsplat-rust-renderer"
 depends-on = ["_download-chair-ply"]
 cwd = "packages/gsplat-rust-renderer"
 description = "Load example PLY and log it to the running viewer"

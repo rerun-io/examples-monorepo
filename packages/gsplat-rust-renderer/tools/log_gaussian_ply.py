@@ -2,36 +2,31 @@
 
 from __future__ import annotations
 
-import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
+import tyro
+from simplecv.rerun_log_utils import RerunTyroConfig
 
 from gsplat_rust_renderer.gaussians3d import Gaussians3D
 
-APP_ID: str = "gsplat-rust-renderer"
-VIEWER_URL: str = "rerun+http://127.0.0.1:9876/proxy"
 VIEW_ROOT: str = "/"
-DEFAULT_ENTITY_PATH: str = "world/splats"
 DEFAULT_PLY: Path = Path(__file__).resolve().parents[1] / "examples" / "chair.ply"
 
 
-def args_from_argv() -> tuple[Path, str]:
-    """Parse command-line arguments for PLY path and entity path.
+@dataclass
+class LogPlyConfig:
+    """Log a Gaussian splat PLY file to the custom Rust viewer."""
 
-    Returns:
-        A tuple of ``(ply_path, entity_path)``.
-    """
-    args: list[str] = sys.argv[1:]
-    if len(args) > 2:
-        raise SystemExit(
-            "usage: python tools/log_gaussian_ply.py [scene.ply] [entity/path]"
-        )
-    ply_path: Path = Path(args[0]) if args else DEFAULT_PLY
-    entity_path: str = args[1] if len(args) == 2 else DEFAULT_ENTITY_PATH
-    return ply_path, entity_path
+    rr_config: RerunTyroConfig
+    """Rerun connection/output configuration. Use --rr-config.connect to send to the Rust viewer."""
+    ply_path: Path = DEFAULT_PLY
+    """Path to the Gaussian splat .ply file."""
+    entity_path: str = "world/splats"
+    """Rerun entity path to log the splats under."""
 
 
 def splat_blueprint(entity_path: str, gaussians: Gaussians3D) -> rrb.Blueprint:
@@ -64,22 +59,20 @@ def splat_blueprint(entity_path: str, gaussians: Gaussians3D) -> rrb.Blueprint:
     )
 
 
-def main() -> None:
-    """Entry point: load PLY and log to the running Rust viewer."""
-    ply_path: Path
-    entity_path: str
-    ply_path, entity_path = args_from_argv()
-    gaussians: Gaussians3D = Gaussians3D.from_ply(ply_path)
+def main(config: LogPlyConfig) -> None:
+    """Load a PLY file and log it to the Rerun viewer.
 
-    rr.init(APP_ID, spawn=False)
-    rr.connect_grpc(VIEWER_URL)
-    rr.send_blueprint(splat_blueprint(entity_path, gaussians))
-    rr.log(entity_path, rr.Clear(recursive=True), static=True)
-    rr.log(entity_path, gaussians, static=True)
-    rr.disconnect()
+    Args:
+        config: CLI configuration parsed by tyro.
+    """
+    gaussians: Gaussians3D = Gaussians3D.from_ply(config.ply_path)
 
-    print(f"Logged {ply_path} to {VIEWER_URL} as {entity_path}")
+    rr.send_blueprint(splat_blueprint(config.entity_path, gaussians))
+    rr.log(config.entity_path, rr.Clear(recursive=True), static=True)
+    rr.log(config.entity_path, gaussians, static=True)
+
+    print(f"Logged {config.ply_path} as {config.entity_path}")
 
 
 if __name__ == "__main__":
-    main()
+    main(tyro.cli(LogPlyConfig))
