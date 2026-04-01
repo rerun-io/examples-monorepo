@@ -720,6 +720,26 @@ cwd = "packages/gsplat-rust-renderer"
 outputs = ["packages/gsplat-rust-renderer/data/tandt/"]
 description = "Download Tanks & Temples + Deep Blending datasets from INRIA"
 
+[feature.gsplat-rust-renderer.tasks._download-nerf-lego]
+cmd = "test -d data/nerf-synthetic/lego || hf download pablovela5620/nerf-synthetic-mirror --include 'lego/*' --repo-type dataset --local-dir data/nerf-synthetic/"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download NeRF Synthetic lego scene from HuggingFace"
+
+[feature.gsplat-rust-renderer.tasks._download-nerf-hotdog]
+cmd = "test -d data/nerf-synthetic/hotdog || hf download pablovela5620/nerf-synthetic-mirror --include 'hotdog/*' --repo-type dataset --local-dir data/nerf-synthetic/"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download NeRF Synthetic hotdog scene from HuggingFace"
+
+[feature.gsplat-rust-renderer.tasks._download-nerf-drums]
+cmd = "test -d data/nerf-synthetic/drums || hf download pablovela5620/nerf-synthetic-mirror --include 'drums/*' --repo-type dataset --local-dir data/nerf-synthetic/"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download NeRF Synthetic drums scene from HuggingFace"
+
+[feature.gsplat-rust-renderer.tasks._download-nerf-ship]
+cmd = "test -d data/nerf-synthetic/ship || hf download pablovela5620/nerf-synthetic-mirror --include 'ship/*' --repo-type dataset --local-dir data/nerf-synthetic/"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download NeRF Synthetic ship scene from HuggingFace"
+
 # ── Brush training tasks ─────────────────────────────────────────────────
 [feature.gsplat-rust-renderer.tasks.brush-train-truck]
 cmd = """
@@ -744,6 +764,30 @@ brush_app data/tandt/train \
 depends-on = ["_download-tandt"]
 cwd = "packages/gsplat-rust-renderer"
 description = "Train Gaussian splats on train scene (30K steps)"
+
+[feature.gsplat-rust-renderer.tasks.brush-train-lego]
+cmd = """
+brush_app data/nerf-synthetic/lego \
+  --total-steps 30000 \
+  --export-every 30000 \
+  --export-path data/trained \
+  --export-name lego.ply
+"""
+depends-on = ["_download-nerf-lego"]
+cwd = "packages/gsplat-rust-renderer"
+description = "Train Gaussian splats on NeRF Synthetic lego scene (30K steps)"
+
+[feature.gsplat-rust-renderer.tasks.brush-train-hotdog]
+cmd = """
+brush_app data/nerf-synthetic/hotdog \
+  --total-steps 30000 \
+  --export-every 30000 \
+  --export-path data/trained \
+  --export-name hotdog.ply
+"""
+depends-on = ["_download-nerf-hotdog"]
+cwd = "packages/gsplat-rust-renderer"
+description = "Train Gaussian splats on NeRF Synthetic hotdog scene (30K steps)"
 
 # ── Rust tasks ───────────────────────────────────────────────────────────
 [feature.gsplat-rust-renderer.tasks.viewer]
