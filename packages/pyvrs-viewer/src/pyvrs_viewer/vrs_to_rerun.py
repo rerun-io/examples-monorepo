@@ -12,6 +12,7 @@ from pathlib import Path
 import rerun as rr
 from pyvrs import SyncVRSReader
 from simplecv.rerun_log_utils import RerunTyroConfig
+from tqdm import tqdm
 
 from pyvrs_viewer.blueprint import create_vrs_blueprint
 from pyvrs_viewer.frame_player import FramePlayer
@@ -123,8 +124,8 @@ def vrs_to_rerun(config: VrsToRerunConfig) -> None:
 
     # Iterate all records in timestamp order
     t_start: float = time.perf_counter()
-    record_count: int = 0
-    for record in reader:
+    total_records: int = reader.n_records
+    for record in tqdm(reader, total=total_records, desc="Processing VRS", unit="rec"):
         stream_id_str: str = str(record.stream_id)
         record_type: str = str(record.record_type)
         timestamp_sec: float = float(record.timestamp)
@@ -149,16 +150,12 @@ def vrs_to_rerun(config: VrsToRerunConfig) -> None:
             elif record_type == "data":
                 imu.on_data_record(timestamp_sec, metadata)
 
-        record_count += 1
-        if record_count % 1000 == 0:
-            logger.info("Processed %d records...", record_count)
-
     # Flush video encoders
     for fp in frame_players.values():
         fp.flush()
 
     total_sec: float = time.perf_counter() - t_start
-    logger.info("Done. Processed %d records in %.1fs (%.0f records/sec).", record_count, total_sec, record_count / total_sec if total_sec > 0 else 0)
+    logger.info("Done. Processed %d records in %.1fs (%.0f records/sec).", total_records, total_sec, total_records / total_sec if total_sec > 0 else 0)
 
     # Print per-stream encoding stats
     for sid, fp in frame_players.items():
