@@ -3,6 +3,10 @@
 Downloads 5 Quest + 5 Aria VRS files and runs both AV1 encode and
 EncodedImage (JPEG passthrough) modes, collecting timing and size metrics.
 
+Requires Hot3D download URL JSON files (not included in repo — see README):
+  tools/bench/hot3dquest_download_urls.json
+  tools/bench/hot3daria_download_urls.json
+
 Usage:
     pixi run -e pyvrs-viewer -- python tools/bench/run_benchmark.py
 """
@@ -113,6 +117,18 @@ def _copy_existing_files() -> None:
 
 def main() -> None:
     logger.info("=== pyvrs-viewer Benchmark ===")
+
+    # Check for required download JSON files
+    for json_path, name in [(QUEST_JSON, "Quest"), (ARIA_JSON, "Aria")]:
+        if not json_path.exists():
+            logger.error(
+                "Missing %s download URLs: %s\n"
+                "Download from https://www.projectaria.com/datasets/hot3d/ and place in tools/bench/.\n"
+                "See README.md for instructions.",
+                name,
+                json_path,
+            )
+            return
 
     # Organize existing files
     _copy_existing_files()
