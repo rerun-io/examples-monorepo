@@ -77,11 +77,13 @@
 | No encoding (JPEG) | — | 37s | 2.7 GB | — |
 | **H265 NVENC** (RTX 5090) | **4800 fps** | 37s | **70 MB** | **38x** |
 | **AV1 NVENC** (RTX 5090) | **5200 fps** | 37s | **70 MB** | **38x** |
-| H265 CPU (libx265) | 530 fps | 61s | **66 MB** | **41x** |
+| AV1 CPU (libsvtav1, preset 8) | 4100 fps | 44s | **75 MB** | **36x** |
+| H265 CPU (libx265, preset fast) | 530 fps | 61s | **66 MB** | **41x** |
 
 - Pipeline time dominated by VRS reading + JPEG decoding (~36s), encoding is negligible with NVENC
-- NVENC 10x faster than CPU (4800 vs 530 fps) with 0.8s vs 6-9s encode time
-- AV1 and H265 similar compression on mono SLAM data (high temporal redundancy)
+- NVENC ~10x faster than libx265 CPU, but SVT-AV1 CPU nearly matches NVENC speed at preset 8
+- libx265 compresses best (66 MB) but is by far the slowest encoder
+- SVT-AV1 at preset 8 is a great CPU fallback: nearly as fast as NVENC with reasonable compression
 
 ### Hot3D Aria VRS (1.7GB input)
 
