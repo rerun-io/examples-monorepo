@@ -15,32 +15,40 @@ Python port of [rerun-io/cpp-example-vrs](https://github.com/rerun-io/cpp-exampl
 ## Quick Start
 
 ```bash
-# Install the environment
-pixi install -e pyvrs-viewer
-
-# Convert a VRS file to .rrd (AV1 encoded, saves to file)
-pixi run -e pyvrs-viewer -- bash -c "cd packages/pyvrs-viewer && python tools/demos/vrs_to_rrd.py --vrs-path /path/to/file.vrs --rr-config.save output.rrd"
-
-# View live in Rerun viewer (opens viewer automatically)
-pixi run -e pyvrs-viewer -- bash -c "cd packages/pyvrs-viewer && python tools/demos/vrs_to_rrd.py --vrs-path /path/to/file.vrs"
-
-# Disable video encoding (JPEG passthrough, larger files but faster)
-pixi run -e pyvrs-viewer -- bash -c "cd packages/pyvrs-viewer && python tools/demos/vrs_to_rrd.py --vrs-path /path/to/file.vrs --no-encode-video --rr-config.save output.rrd"
-
-# Use H265 instead of AV1
-pixi run -e pyvrs-viewer -- bash -c "cd packages/pyvrs-viewer && python tools/demos/vrs_to_rrd.py --vrs-path /path/to/file.vrs --video-codec H265 --rr-config.save output.rrd"
+pixi run -e pyvrs-viewer vrs-to-rrd-quest
 ```
 
-### Hot3D Example Data
+On the first run, example VRS files are automatically downloaded from the [Hot3D dataset](https://www.projectaria.com/datasets/hot3d/). Subsequent runs skip the download.
 
-The demo tasks download example VRS files from the [Hot3D dataset](https://www.projectaria.com/datasets/hot3d/):
+## Usage
+
+### Demo tasks (Hot3D example data)
 
 ```bash
-# Quest (2 mono SLAM cameras, ~2.7 GB download)
-pixi run -e pyvrs-viewer vrs-to-rrd-quest
+pixi run -e pyvrs-viewer vrs-to-rrd-quest    # Quest: 2 mono SLAM cameras (~2.7 GB download)
+pixi run -e pyvrs-viewer vrs-to-rrd-aria     # Aria: 3 cameras + 2 IMUs (~1.7 GB download)
+```
 
-# Aria (3 cameras + 2 IMUs, ~1.7 GB download)
-pixi run -e pyvrs-viewer vrs-to-rrd-aria
+### Custom VRS files
+
+```bash
+# Save to .rrd (AV1 encoded)
+pixi run -e pyvrs-viewer vrs-to-rrd -- --vrs-path /path/to/file.vrs --rr-config.save output.rrd
+
+# View live in Rerun viewer
+pixi run -e pyvrs-viewer vrs-to-rrd -- --vrs-path /path/to/file.vrs
+
+# JPEG passthrough (no encoding, larger files)
+pixi run -e pyvrs-viewer vrs-to-rrd -- --vrs-path /path/to/file.vrs --no-encode-video
+
+# H265 instead of AV1
+pixi run -e pyvrs-viewer vrs-to-rrd -- --vrs-path /path/to/file.vrs --video-codec H265
+```
+
+### All available tasks
+
+```bash
+pixi task list -e pyvrs-viewer
 ```
 
 ## CLI Options
@@ -49,7 +57,7 @@ pixi run -e pyvrs-viewer vrs-to-rrd-aria
 --vrs-path PATH           Path to the input .vrs file (required)
 --rr-config.save PATH     Save .rrd to file (default: opens viewer)
 --rr-config.connect       Connect to existing Rerun viewer
---rr-config.headless       Run without viewer
+--rr-config.headless      Run without viewer
 --encode-video / --no-encode-video
                           AV1 video encoding (default: on)
 --video-codec {H265,AV1}  Video codec (default: AV1)
@@ -84,7 +92,7 @@ packages/pyvrs-viewer/tools/bench/
 ### 2. Run the benchmark
 
 ```bash
-pixi run -e pyvrs-viewer -- bash -c "cd packages/pyvrs-viewer && python tools/bench/run_benchmark.py"
+pixi run -e pyvrs-viewer benchmark
 ```
 
 This will:

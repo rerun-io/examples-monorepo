@@ -642,6 +642,11 @@ cwd = "packages/pyvrs-viewer"
 description = "Download Hot3D Aria VRS example (4 cameras + IMU + sensors)"
 
 # ── Demo tasks ───────────────────────────────────────────────────────────
+[feature.pyvrs-viewer-demo.tasks.vrs-to-rrd]
+cmd = "python tools/demos/vrs_to_rrd.py"
+cwd = "packages/pyvrs-viewer"
+description = "Convert any VRS file (pass --vrs-path and other args after --)"
+
 [feature.pyvrs-viewer-demo.tasks.vrs-to-rrd-quest]
 cmd = "python tools/demos/vrs_to_rrd.py --vrs-path data/hot3d_quest.vrs --rr-config.save data/hot3d_quest.rrd"
 depends-on = ["_download-hot3d-quest-vrs"]
@@ -653,6 +658,11 @@ cmd = "python tools/demos/vrs_to_rrd.py --vrs-path data/hot3d_aria.vrs --rr-conf
 depends-on = ["_download-hot3d-aria-vrs"]
 cwd = "packages/pyvrs-viewer"
 description = "Convert Hot3D Aria VRS to .rrd (cameras + IMU + sensors)"
+
+[feature.pyvrs-viewer-demo.tasks.benchmark]
+cmd = "python tools/bench/run_benchmark.py"
+cwd = "packages/pyvrs-viewer"
+description = "Benchmark 5 Quest + 5 Aria VRS files (requires download URL JSONs)"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Environments
