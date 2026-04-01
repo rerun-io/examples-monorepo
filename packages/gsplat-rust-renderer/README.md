@@ -1,206 +1,143 @@
 # gsplat-rust-renderer
 
-GPU-accelerated Gaussian Splatting viewer built as a custom Rerun visualizer. A Rust binary extends the stock Rerun viewer with a tile-based compute renderer (wgpu/WGSL), while a Python module handles data loading and logging via gRPC.
+GPU-accelerated [Gaussian Splatting](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/) viewer built as a custom [Rerun](https://rerun.io) visualizer. A Rust binary extends the stock Rerun viewer with a tile-based compute renderer (wgpu/WGSL), while a Python module handles data loading and logging via gRPC. Uses **tyro** for the CLI and **Pixi** for one-command setup.
 
-## Architecture
+<p align="center">
+  <a title="Rerun" href="https://rerun.io" target="_blank" rel="noopener noreferrer">
+    <img src="https://img.shields.io/badge/Rerun-0.30%2B-0b82f9" alt="Rerun badge">
+  </a>
+  <a title="Pixi" href="https://pixi.sh/latest/" target="_blank" rel="noopener noreferrer">
+    <img src="https://img.shields.io/badge/Install%20with-Pixi-16A34A" alt="Pixi badge">
+  </a>
+  <a title="Rust" href="https://www.rust-lang.org/" target="_blank" rel="noopener noreferrer">
+    <img src="https://img.shields.io/badge/Rust-1.93-dea584" alt="Rust badge">
+  </a>
+</p>
 
-The system is a two-process design: a **Rust viewer** with a custom GPU pipeline and a **Python client** that parses PLY files and logs component batches over gRPC.
+## Installation
 
+Make sure you have the [Pixi](https://pixi.sh/latest/#installation) package manager installed.
+
+TL;DR install Pixi:
+```bash
+curl -fsSL https://pixi.sh/install.sh | sh
 ```
-                        ┌─────────────────────────────────────────────────────────────┐
-                        │                    Rust Viewer Process                       │
-                        │                                                             │
-  ┌──────────┐  gRPC   │  ┌─────────────┐    ┌──────────────────┐    ┌────────────┐  │
-  │  Python   │────────►│  │ Rerun Data  │───►│  Gaussian Splat  │───►│  Gaussian  │  │
-  │  Client   │  :9876  │  │   Store     │    │   Visualizer     │    │  Renderer  │  │
-  │           │         │  │             │    │ (VisualizerSystem)│    │   (wgpu)   │  │
-  └──────────┘         │  └─────────────┘    └──────────────────┘    └─────┬──────┘  │
-       │                │                                                   │         │
-       │                │                                              ┌────▼─────┐   │
-  ┌────▼─────┐         │                                              │ Framebuf  │   │
-  │ .ply file │         │                                              │ (display) │   │
-  └──────────┘         │                                              └──────────┘   │
-                        └─────────────────────────────────────────────────────────────┘
-```
+Restart your shell so the new `pixi` binary is on `PATH`.
 
-### Component Contract
+This is Linux only (Vulkan GPU required, no CUDA needed).
 
-Python and Rust agree on a custom `GaussianSplats3D` archetype with these components:
+## Quick Start
 
-| Component | Type | Shape | Description |
-|---|---|---|---|
-| `centers` | `Translation3D` | `[N, 3]` | World-space Gaussian positions |
-| `quaternions` | `RotationQuat` | `[N, 4]` | Rotation quaternions (xyzw) |
-| `scales` | `Scale3D` | `[N, 3]` | Per-axis scale factors |
-| `opacities` | `Opacity` | `[N]` | Per-splat opacity [0, 1] |
-| `colors` | `Color` | `[N]` | Base RGB from SH DC coefficient |
-| `sh_coefficients` | `TensorData` | `[N, C, 3]` | Optional higher-order SH (degree 0-4) |
+Two terminals — one for the viewer, one for logging data:
 
-### State Machine: Per-Frame Render Pipeline
+```bash
+# Terminal 1: Build and launch the viewer
+pixi run --frozen -e gsplat-rust-renderer viewer
 
-Each frame, the visualizer queries the data store and drives the GPU renderer through these states:
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                     Per-Frame Execution                             │
-│                                                                     │
-│  ┌───────────┐     ┌──────────────┐     ┌──────────────────────┐   │
-│  │  Query     │────►│  Cache Check │────►│  Build/Reuse Cloud   │   │
-│  │  Archetype │     │  (signature) │     │  (RenderGaussianCloud│   │
-│  └───────────┘     └──────────────┘     └──────────┬───────────┘   │
-│                                                     │               │
-│                                          ┌──────────▼───────────┐   │
-│                                          │  Extract Camera      │   │
-│                                          │  (view state or      │   │
-│                                          │   fallback bounds)   │   │
-│                                          └──────────┬───────────┘   │
-│                                                     │               │
-│                                          ┌──────────▼───────────┐   │
-│                                          │  Visibility Culling  │   │
-│                                          │  (frustum + depth    │   │
-│                                          │   + opacity filter)  │   │
-│                                          └──────────┬───────────┘   │
-│                                                     │               │
-│                                          ┌──────────▼───────────┐   │
-│                                          │  Depth Sort          │   │
-│                                          │  (back-to-front,     │   │
-│                                          │   cap at 200K)       │   │
-│                                          └──────────┬───────────┘   │
-│                                                     │               │
-│                                          ┌──────────▼───────────┐   │
-│                                          │  Submit to Renderer  │   │
-│                                          │  (GaussianDrawData)  │   │
-│                                          └──────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────┘
+# Terminal 2: Download example chair PLY and log it to the viewer
+pixi run --frozen -e gsplat-rust-renderer log-ply
 ```
 
-### GPU Renderer Pipeline (Compute / Tile Path)
+The first build compiles Rerun from source and takes a few minutes. Subsequent runs are instant.
 
-The renderer has two paths. The **compute tile path** (preferred) runs entirely on the GPU via WGSL compute shaders:
-
-```
-Sorted splat indices + cloud data
-          │
-          ▼
-┌──────────────────┐   gaussian_project.wgsl
-│  1. Project      │   Exact 3D→2D Gaussian projection
-│     Splats       │   Covariance linearization, SH evaluation
-└────────┬─────────┘
-         │
-         ▼
-┌──────────────────┐   (prefix sum - scan blocks + block sums)
-│  2. Compact      │   Parallel prefix scan on per-splat tile counts
-│     Tile Counts  │   Produces tile-hit offsets for scatter
-└────────┬─────────┘
-         │
-         ▼
-┌──────────────────┐   gaussian_map_intersections.wgsl
-│  3. Map          │   Scatter (splat, tile) pairs into flat buffer
-│     Intersections│   Each visible splat × overlapped tiles
-└────────┬─────────┘
-         │
-         ▼
-┌──────────────────┐   gaussian_dynamic_sort.wgsl
-│  4. Radix Sort   │   16-bin radix sort by depth within each tile
-│     by Depth     │   Multi-pass: count → reduce → scan → scatter
-└────────┬─────────┘
-         │
-         ▼
-┌──────────────────┐   gaussian_tile_offsets.wgsl
-│  5. Tile Offsets │   Binary search for per-tile start/end in
-│                  │   the sorted intersection array
-└────────┬─────────┘
-         │
-         ▼
-┌──────────────────┐   gaussian_splat.wgsl
-│  6. Tile Raster  │   Per-pixel alpha blending within each tile
-│                  │   Front-to-back accumulation, early termination
-└────────┬─────────┘
-         │
-         ▼
-┌──────────────────┐   gaussian_composite.wgsl
-│  7. Composite    │   Blit raster texture onto the Rerun viewport
-│                  │   with depth and alpha compositing
-└────────┘─────────┘
-```
-
-When compute shaders are unavailable, a **CPU fallback** projects splats into instanced quads rendered via the standard rasterization pipeline.
-
-### Python Client Flow
-
-```
-┌──────────┐     ┌────────────────┐     ┌─────────────┐     ┌──────────┐
-│  Load    │────►│  Parse PLY     │────►│  Normalize   │────►│  Log via │
-│  .ply    │     │  (plyfile)     │     │  & Validate  │     │  gRPC    │
-│  file    │     │                │     │              │     │          │
-└──────────┘     │  Extract:      │     │  - unit quat │     │  rr.log( │
-                 │  - positions   │     │  - clamp     │     │    entity│
-                 │  - rotations   │     │    scales    │     │    splats│
-                 │  - scales      │     │  - sigmoid   │     │  )       │
-                 │  - opacity     │     │    opacity   │     │          │
-                 │  - SH coeffs   │     │  - SH→RGB    │     │  + Send  │
-                 │  - f_rest_*    │     │  - shape     │     │  blueprint
-                 └────────────────┘     │    checks    │     └──────────┘
-                                        └──────────────┘
-```
-
-## File Structure
-
-```
-gsplat-rust-renderer/
-├── Cargo.toml                         # Rust crate: rerun 0.30.2 + re_* crates
-├── Cargo.lock                         # Pinned Rust deps (committed for binary)
-├── pyproject.toml                     # Python package metadata (hatchling)
-├── src/
-│   ├── main.rs                        # Viewer binary: gRPC listener + visualizer registration
-│   ├── gaussian_visualizer.rs         # VisualizerSystem: query → cloud → cull → sort → submit
-│   └── gaussian_renderer.rs           # GPU renderer: compute pipelines + CPU fallback
-├── shader/
-│   ├── gaussian_project.wgsl          # 3D→2D projection + SH evaluation
-│   ├── gaussian_map_intersections.wgsl # Scatter (splat, tile) pairs
-│   ├── gaussian_dynamic_sort.wgsl     # 16-bin radix sort by depth per tile
-│   ├── gaussian_tile_offsets.wgsl     # Binary search for tile ranges
-│   ├── gaussian_splat.wgsl            # Per-pixel tile rasterization
-│   ├── gaussian_composite.wgsl        # Final composite blit
-│   └── gaussian_raster_tiles.wgsl     # Tile grid utilities
-├── gsplat_rust_renderer/
-│   ├── __init__.py                    # Beartype activation
-│   └── gaussians3d.py                 # Gaussians3D dataclass + PLY parser
-├── tools/
-│   └── log_gaussian_ply.py            # CLI: load PLY → log to viewer via gRPC
-├── tests/
-│   ├── test_import.py                 # Smoke test
-│   └── test_gaussians3d.py            # Unit tests for PLY parsing + validation
-└── examples/
-    └── .gitkeep                       # PLY downloaded at runtime from HuggingFace
-```
+On the first `log-ply` run, an example PLY (~36 MB) is automatically downloaded from [HuggingFace](https://huggingface.co/datasets/pablovela5620/splat-dataset).
 
 ## Usage
 
+### Log your own PLY file
+
 ```bash
-# Build and launch the viewer (first build ~5-10 min, compiles Rerun from source)
-pixi run -e gsplat-rust-renderer viewer
-
-# In a second terminal, download example PLY and log it to the viewer
-pixi run -e gsplat-rust-renderer log-ply
-
-# Or log your own PLY file
-pixi run -e gsplat-rust-renderer -- python tools/log_gaussian_ply.py /path/to/scene.ply
-
-# Dev tasks
-pixi run -e gsplat-rust-renderer-dev lint        # ruff
-pixi run -e gsplat-rust-renderer-dev typecheck   # pyrefly
-pixi run -e gsplat-rust-renderer-dev tests       # pytest
-pixi run -e gsplat-rust-renderer fmt             # cargo fmt
-pixi run -e gsplat-rust-renderer clippy          # cargo clippy
-pixi run -e gsplat-rust-renderer rust-test       # cargo test
+pixi run --frozen -e gsplat-rust-renderer -- python tools/log_gaussian_ply.py \
+    --rr-config.connect \
+    --rr-config.application-id gsplat-rust-renderer \
+    --ply-path /path/to/your/scene.ply
 ```
 
-## Key Design Decisions
+The `--rr-config` flags come from [simplecv's `RerunTyroConfig`](https://github.com/pablovela5620/simplecv) and support all standard Rerun output modes:
 
-- **Two-process model**: The Rust viewer runs as a standalone native window. Python sends data over gRPC, keeping the Python side lightweight and the render loop free from GIL contention.
-- **Custom Rerun visualizer**: Registered on the built-in `Spatial3DView` via `extend_view_class`. No fork of Rerun required.
-- **Tile-based compute rendering**: Inspired by [Brush](https://github.com/ArthurBrussee/brush), the GPU path uses a multi-stage compute pipeline (project → compact → sort → raster → composite) instead of instanced quads, enabling higher splat counts at interactive framerates.
-- **Cloud caching**: The visualizer caches `RenderGaussianCloud` per entity path, keyed by a signature of splat count + SH shape + transform. Clouds are only rebuilt when the data or transform changes.
-- **SH evaluation on GPU**: Spherical harmonics up to degree 4 (25 coefficients/channel) are evaluated per-splat in the projection shader, enabling view-dependent color without CPU recomputation.
-- **No CUDA dependency**: All GPU work uses wgpu (Vulkan/Metal backend), so the package does not require CUDA or the monorepo's `cuda` feature.
+| Flag | Description |
+|------|-------------|
+| `--rr-config.connect` | Send to the running Rust viewer on `:9876` (default for `log-ply`) |
+| `--rr-config.save output.rrd` | Save to an RRD file instead of viewing |
+| `--rr-config.serve` | Launch a web viewer + gRPC server |
+| (no flag) | Spawn the stock Rerun viewer (no custom Gaussian rendering) |
+
+### Log from your own Python code
+
+```python
+import rerun as rr
+from gsplat_rust_renderer.gaussians3d import Gaussians3D
+
+# Load a PLY file into the Gaussians3D dataclass
+gaussians = Gaussians3D.from_ply("scene.ply")
+
+# Connect to the running Rust viewer
+rr.init("my-app", spawn=False)
+rr.connect_grpc("rerun+http://127.0.0.1:9876/proxy")
+
+# Log the splats — Gaussians3D implements rr.AsComponents
+rr.log("world/splats", gaussians, static=True)
+```
+
+### Available tasks
+
+All commands can be listed with `pixi task list -e gsplat-rust-renderer`.
+
+| Task | Description |
+|------|-------------|
+| `viewer` | Launch the Rerun viewer with Gaussian splat visualization |
+| `log-ply` | Download example PLY and log it to the running viewer |
+| `fmt` | Format Rust code (`cargo fmt`) |
+| `clippy` | Lint Rust code (`cargo clippy`) |
+| `rust-test` | Run Rust test suite (`cargo test`) |
+
+Dev tasks (use `-e gsplat-rust-renderer-dev`):
+
+| Task | Description |
+|------|-------------|
+| `lint` | Lint Python code (`ruff check`) |
+| `typecheck` | Typecheck Python code (`pyrefly`) |
+| `tests` | Run Python tests (`pytest`) |
+
+## Project Structure
+
+```
+gsplat-rust-renderer/
+├── Cargo.toml                          # Rust crate: rerun 0.30.2 + re_* crates
+├── Cargo.lock                          # Pinned Rust deps (committed for binary)
+├── pyproject.toml                      # Python package metadata (hatchling)
+├── src/
+│   ├── main.rs                         # Viewer binary: gRPC listener + visualizer registration
+│   ├── gaussian_visualizer.rs          # VisualizerSystem: query → cloud → cull → sort → submit
+│   └── gaussian_renderer.rs            # GPU renderer: compute pipelines + CPU fallback
+├── shader/                             # WGSL compute shaders (7-stage pipeline)
+│   ├── gaussian_project.wgsl           # Stage 1: 3D→2D projection + SH evaluation
+│   ├── gaussian_map_intersections.wgsl # Stage 3: scatter (splat, tile) pairs
+│   ├── gaussian_dynamic_sort.wgsl      # Stage 4: radix sort by tile ID
+│   ├── gaussian_tile_offsets.wgsl      # Stage 5: find per-tile [start, end) ranges
+│   ├── gaussian_raster_tiles.wgsl      # Stage 6: per-pixel alpha blending per tile
+│   ├── gaussian_composite.wgsl         # Stage 7: blit raster texture to viewport
+│   └── gaussian_splat.wgsl             # CPU fallback: instanced-quad rendering
+├── gsplat_rust_renderer/               # Python package
+│   ├── __init__.py                     # Beartype activation (dev env only)
+│   └── gaussians3d.py                  # Gaussians3D dataclass + PLY parser
+├── tools/
+│   └── log_gaussian_ply.py             # CLI: load PLY → log to viewer (tyro + RerunTyroConfig)
+├── tests/
+│   ├── test_import.py                  # Smoke test
+│   └── test_gaussians3d.py             # Unit tests for PLY parsing + validation
+└── examples/
+    └── .gitkeep                        # PLY downloaded at runtime from HuggingFace
+```
+
+## Architecture
+
+Two-process design: a **Rust viewer** with a custom GPU pipeline and a **Python client** that parses PLY files and logs Rerun component batches over gRPC. The GPU renderer uses a 7-stage compute pipeline inspired by [Brush](https://github.com/ArthurBrussee/brush) — project, compact, map intersections, radix sort, tile offsets, tile raster, composite. No CUDA required (uses wgpu/Vulkan).
+
+For detailed internals (per-frame pipeline, GPU stages, component contract, buffer management, constants), see **[docs/architecture.md](docs/architecture.md)**.
+
+## Acknowledgements
+
+- [3D Gaussian Splatting](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/) — Kerbl et al., SIGGRAPH 2023
+- [Brush](https://github.com/ArthurBrussee/brush) — tile-based compute renderer that inspired the GPU pipeline
+- [Rerun](https://rerun.io) — visualization framework and custom visualizer API
