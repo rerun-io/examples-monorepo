@@ -1,6 +1,6 @@
 """Image stream handler: logs camera frames to Rerun.
 
-When encode_video=True (default), JPEG/RAW images are re-encoded to H265
+When encode_video=True (default), JPEG/RAW images are re-encoded to H265 or AV1
 via VideoStream for dramatically smaller RRD files. When encode_video=False,
 images are logged as-is (EncodedImage for JPEG, Image for RAW).
 
@@ -15,7 +15,7 @@ import rerun as rr
 from jaxtyping import UInt8
 from numpy import ndarray
 
-from pyvrs_viewer.video_encoder import VideoEncoder
+from pyvrs_viewer.video_encoder import VideoCodecChoice, VideoEncoder
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -27,13 +27,14 @@ class FramePlayer:
     H265 video encoding for smaller RRD output.
     """
 
-    def __init__(self, stream_id: str, stream_name: str, *, encode_video: bool = True) -> None:
+    def __init__(self, stream_id: str, stream_name: str, *, encode_video: bool = True, video_codec: VideoCodecChoice = VideoCodecChoice.H265) -> None:
         self._stream_id: str = stream_id
         self._entity_path: str = stream_name
         self._enabled: bool = True
         self._frame_number: int = 0
         self._codec_logged: bool = False
         self._encode_video: bool = encode_video
+        self._video_codec: VideoCodecChoice = video_codec
         self._encoder: VideoEncoder | None = None
 
     @property
@@ -43,6 +44,11 @@ class FramePlayer:
     @property
     def entity_path(self) -> str:
         return self._entity_path
+
+    @property
+    def encoder_stats(self) -> dict[str, object] | None:
+        """Return encoding statistics, or None if no encoder was used."""
+        return self._encoder.stats if self._encoder is not None else None
 
     def on_configuration_record(self, metadata: dict[str, object]) -> None:
         """Log static configuration metadata as a TextDocument."""
@@ -109,7 +115,7 @@ class FramePlayer:
         image_spec: dict[str, object],
         image_block: UInt8[ndarray, "n"],
     ) -> None:
-        """Decode image, re-encode to H265, log as VideoStream."""
+        """Decode image, re-encode to video codec, log as VideoStream."""
         # Decode to numpy
         if image_format in ("jpg", "png"):
             decoded: UInt8[np.ndarray, "h w"] | UInt8[np.ndarray, "h w 3"] | None = cv2.imdecode(image_block, cv2.IMREAD_UNCHANGED)
@@ -127,9 +133,10 @@ class FramePlayer:
 
         # Lazily create encoder on first frame
         if self._encoder is None:
-            self._encoder = VideoEncoder()
-            # Log H265 codec as static
-            rr.log(self._entity_path, rr.VideoStream(codec=rr.VideoCodec.H265), static=True)
+            self._encoder = VideoEncoder(codec=self._video_codec)
+            # Log codec as static — map our codec choice to Rerun's VideoCodec enum
+            rr_codec = rr.VideoCodec.AV1 if self._video_codec == VideoCodecChoice.AV1 else rr.VideoCodec.H265
+            rr.log(self._entity_path, rr.VideoStream(codec=rr_codec), static=True)
             self._codec_logged = True
 
         # Encode and log packets

@@ -70,22 +70,25 @@
 
 ## Test Results
 
-### Hot3D Quest VRS (2.7GB input)
+### Hot3D Quest VRS (2.7GB input, 2x 1280x1024 mono @ 30fps, 3981 frames/stream)
 
-| Mode | RRD Size | Reduction |
-|------|----------|-----------|
-| JPEG (no encode) | 2.7 GB | — |
-| H265 (NVENC) | 70 MB | **38x** |
+| Encoder | Encode FPS | Total Time | RRD Size | Reduction |
+|---------|-----------|------------|----------|-----------|
+| No encoding (JPEG) | — | 37s | 2.7 GB | — |
+| **H265 NVENC** (RTX 5090) | **4800 fps** | 37s | **70 MB** | **38x** |
+| **AV1 NVENC** (RTX 5090) | **5200 fps** | 37s | **70 MB** | **38x** |
+| H265 CPU (libx265) | 530 fps | 61s | **66 MB** | **41x** |
 
-- 2 streams: `camera-slam-left`, `camera-slam-right`
-- 7,966 records, 1280x1024 mono @ 30fps
+- Pipeline time dominated by VRS reading + JPEG decoding (~36s), encoding is negligible with NVENC
+- NVENC 10x faster than CPU (4800 vs 530 fps) with 0.8s vs 6-9s encode time
+- AV1 and H265 similar compression on mono SLAM data (high temporal redundancy)
 
 ### Hot3D Aria VRS (1.7GB input)
 
-| Mode | RRD Size | Reduction |
-|------|----------|-----------|
-| JPEG (no encode) | 1.7 GB | — |
-| H265 (NVENC) | 129 MB | **13x** |
+| Encoder | RRD Size | Reduction |
+|---------|----------|-----------|
+| No encoding (JPEG) | 1.7 GB | — |
+| **H265 NVENC** | **129 MB** | **13x** |
 
 - 3 cameras (1408x1408 RGB + 2x 640x480 mono) + 2 IMUs
 - 237,185 records total

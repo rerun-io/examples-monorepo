@@ -5,6 +5,7 @@ and dispatches to FramePlayer / IMUPlayer based on stream type.
 """
 
 import logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 from pyvrs_viewer.blueprint import create_vrs_blueprint
 from pyvrs_viewer.frame_player import FramePlayer
 from pyvrs_viewer.imu_player import IMUPlayer, might_contain_imu_data
+from pyvrs_viewer.video_encoder import VideoCodecChoice
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -28,7 +30,9 @@ class VrsToRerunConfig:
     rr_config: RerunTyroConfig = field(default_factory=RerunTyroConfig)
     """Rerun save/connect configuration."""
     encode_video: bool = True
-    """Re-encode camera streams to H265 VideoStream for smaller RRD files (default: on)."""
+    """Re-encode camera streams to video codec for smaller RRD files (default: on)."""
+    video_codec: VideoCodecChoice = VideoCodecChoice.H265
+    """Video codec to use when encode_video is on."""
 
 
 def _parse_recordable_type_id(stream_id: str) -> int:
@@ -81,7 +85,7 @@ def vrs_to_rerun(config: VrsToRerunConfig) -> None:
         raise FileNotFoundError(msg)
 
     logger.info("Opening VRS file: %s", vrs_path)
-    logger.info("Video encoding: %s", "ON (H265)" if config.encode_video else "OFF (raw images)")
+    logger.info("Video encoding: %s", f"ON ({config.video_codec.value})" if config.encode_video else "OFF (raw images)")
     reader: SyncVRSReader = SyncVRSReader(str(vrs_path))
 
     # Discover streams and create players
@@ -104,7 +108,7 @@ def vrs_to_rerun(config: VrsToRerunConfig) -> None:
 
         if reader.might_contain_images(stream_id):
             logger.info("Stream %s (%s): handled by FramePlayer", stream_id, entity_name)
-            frame_players[stream_id] = FramePlayer(stream_id, entity_name, encode_video=config.encode_video)
+            frame_players[stream_id] = FramePlayer(stream_id, entity_name, encode_video=config.encode_video, video_codec=config.video_codec)
         elif might_contain_imu_data(recordable_type_id):
             logger.info("Stream %s (%s): handled by IMUPlayer", stream_id, entity_name)
             imu_players[stream_id] = IMUPlayer(stream_id, entity_name)
@@ -118,6 +122,7 @@ def vrs_to_rerun(config: VrsToRerunConfig) -> None:
     rr.send_blueprint(blueprint, make_active=True, make_default=True)
 
     # Iterate all records in timestamp order
+    t_start: float = time.perf_counter()
     record_count: int = 0
     for record in reader:
         stream_id_str: str = str(record.stream_id)
@@ -152,6 +157,23 @@ def vrs_to_rerun(config: VrsToRerunConfig) -> None:
     for fp in frame_players.values():
         fp.flush()
 
-    logger.info("Done. Processed %d records total.", record_count)
+    total_sec: float = time.perf_counter() - t_start
+    logger.info("Done. Processed %d records in %.1fs (%.0f records/sec).", record_count, total_sec, record_count / total_sec if total_sec > 0 else 0)
+
+    # Print per-stream encoding stats
+    for sid, fp in frame_players.items():
+        stats: dict[str, object] | None = fp.encoder_stats
+        if stats is not None:
+            logger.info(
+                "Encoder stats [%s]: %s %s, %d frames, %.1fs encode time, %.1f encode fps, %.1f MB output",
+                sid,
+                stats["encoder"],
+                stats["codec"],
+                stats["frames"],  # type: ignore[arg-type]
+                stats["total_encode_sec"],  # type: ignore[arg-type]
+                stats["fps"],  # type: ignore[arg-type]
+                stats["total_bytes"] / 1024 / 1024,  # type: ignore[operator]
+            )
+
     if config.rr_config.save is not None:
         logger.info("RRD saved to: %s", config.rr_config.save)
