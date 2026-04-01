@@ -691,6 +691,7 @@ xorg-libxcursor = "*"
 xorg-libxi = "*"
 xorg-libxinerama = "*"
 xorg-libxrandr = "*"
+brush = "==0.3.0"
 
 [feature.gsplat-rust-renderer.pypi-dependencies]
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
@@ -706,6 +707,43 @@ PACKAGE_DIR = "packages/gsplat-rust-renderer"
 cmd = "test -e examples/chair.ply || hf download pablovela5620/splat-dataset chair.ply --repo-type dataset --local-dir examples/"
 cwd = "packages/gsplat-rust-renderer"
 description = "Download example chair PLY from HuggingFace"
+
+[feature.gsplat-rust-renderer.tasks._download-tandt]
+cmd = """
+test -d data/tandt || \
+(mkdir -p data && \
+wget -q --show-progress -O data/tandt_db.zip https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/datasets/input/tandt_db.zip && \
+unzip -q data/tandt_db.zip -d data && \
+rm data/tandt_db.zip)
+"""
+cwd = "packages/gsplat-rust-renderer"
+outputs = ["packages/gsplat-rust-renderer/data/tandt/"]
+description = "Download Tanks & Temples + Deep Blending datasets from INRIA"
+
+# ── Brush training tasks ─────────────────────────────────────────────────
+[feature.gsplat-rust-renderer.tasks.brush-train-truck]
+cmd = """
+brush_app data/tandt/truck \
+  --total-steps 30000 \
+  --export-every 30000 \
+  --export-path data/trained \
+  --export-name truck.ply
+"""
+depends-on = ["_download-tandt"]
+cwd = "packages/gsplat-rust-renderer"
+description = "Train Gaussian splats on truck scene (30K steps)"
+
+[feature.gsplat-rust-renderer.tasks.brush-train-train]
+cmd = """
+brush_app data/tandt/train \
+  --total-steps 30000 \
+  --export-every 30000 \
+  --export-path data/trained \
+  --export-name train.ply
+"""
+depends-on = ["_download-tandt"]
+cwd = "packages/gsplat-rust-renderer"
+description = "Train Gaussian splats on train scene (30K steps)"
 
 # ── Rust tasks ───────────────────────────────────────────────────────────
 [feature.gsplat-rust-renderer.tasks.viewer]
