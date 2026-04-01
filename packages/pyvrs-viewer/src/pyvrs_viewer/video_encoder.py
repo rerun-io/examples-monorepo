@@ -115,10 +115,10 @@ class VideoEncoder:
                 ctx.open()
                 self._ctx = ctx
                 self._encoder_name = name
-                logger.info("VideoEncoder: using %s (%dx%d @ %gfps, gop=%d)", name, width, height, self._fps, _GOP_SIZE)
+                logger.info(f"VideoEncoder: using {name} ({width}x{height} @ {self._fps}fps, gop={_GOP_SIZE})")
                 return
             except Exception:
-                logger.debug("VideoEncoder: %s not available, trying next", name)
+                logger.debug(f"VideoEncoder: {name} not available, trying next")
                 continue
 
         msg: str = f"No {self._codec.value} encoder available. Tried: " + ", ".join(candidates)

@@ -61,13 +61,7 @@ class IMUPlayer:
         self._has_gyroscope = bool(metadata.get("has_gyroscope", False))
         self._has_magnetometer = bool(metadata.get("has_magnetometer", False))
 
-        logger.info(
-            "Stream %s: accel=%s gyro=%s mag=%s",
-            self._stream_id,
-            self._has_accelerometer,
-            self._has_gyroscope,
-            self._has_magnetometer,
-        )
+        logger.info(f"Stream {self._stream_id}: accel={self._has_accelerometer} gyro={self._has_gyroscope} mag={self._has_magnetometer}")
 
         config_str: str = "\n".join(f"{k}: {v}" for k, v in metadata.items())
         rr.log(f"{self._entity_path}/configuration", rr.TextDocument(config_str), static=True)
@@ -157,7 +151,7 @@ class IMUPlayer:
             )
 
         n_samples: int = len(self._timestamps)
-        logger.info("Stream %s: batch-logged %d IMU samples via send_columns", self._stream_id, n_samples)
+        logger.info(f"Stream {self._stream_id}: batch-logged {n_samples} IMU samples via send_columns")
 
         # Clear accumulators
         self._timestamps.clear()

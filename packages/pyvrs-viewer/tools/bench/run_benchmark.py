@@ -56,9 +56,9 @@ class BenchmarkResult:
 def _download_vrs(url: str, dest: Path) -> None:
     """Download a VRS file with curl if not already on disk."""
     if dest.exists():
-        logger.info("  Already exists: %s", dest.name)
+        logger.info(f"  Already exists: {dest.name}")
         return
-    logger.info("  Downloading %s (%.0f MB)...", dest.name, 0)
+    logger.info(f"  Downloading {dest.name}...")
     dest.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(["curl", "-L", "-o", str(dest), url], check=True)
 
@@ -107,11 +107,11 @@ def _copy_existing_files() -> None:
 
     if existing_quest.exists() and not dest_quest.exists():
         dest_quest.parent.mkdir(parents=True, exist_ok=True)
-        logger.info("Linking existing Quest VRS → %s", dest_quest.name)
+        logger.info(f"Linking existing Quest VRS → {dest_quest.name}")
         os.link(str(existing_quest), str(dest_quest))
     if existing_aria.exists() and not dest_aria.exists():
         dest_aria.parent.mkdir(parents=True, exist_ok=True)
-        logger.info("Linking existing Aria VRS → %s", dest_aria.name)
+        logger.info(f"Linking existing Aria VRS → {dest_aria.name}")
         os.link(str(existing_aria), str(dest_aria))
 
 
@@ -122,11 +122,9 @@ def main() -> None:
     for json_path, name in [(QUEST_JSON, "Quest"), (ARIA_JSON, "Aria")]:
         if not json_path.exists():
             logger.error(
-                "Missing %s download URLs: %s\n"
+                f"Missing {name} download URLs: {json_path}\n"
                 "Download from https://www.projectaria.com/datasets/hot3d/ and place in tools/bench/.\n"
-                "See README.md for instructions.",
-                name,
-                json_path,
+                "See README.md for instructions."
             )
             return
 
@@ -139,7 +137,7 @@ def main() -> None:
     all_files: list[tuple[str, str, Path, str]] = [(s, u, p, "quest") for s, u, p in quest_files] + [(s, u, p, "aria") for s, u, p in aria_files]
 
     # Download missing files
-    logger.info("Downloading %d VRS files...", len(all_files))
+    logger.info(f"Downloading {len(all_files)} VRS files...")
     for _seq_id, url, local_path, _device in all_files:
         _download_vrs(url, local_path)
 
@@ -151,7 +149,7 @@ def main() -> None:
         n_records: int = reader.n_records
 
         logger.info("")
-        logger.info("─── %s (%s, %.0f MB, %d records) ───", seq_id, device, vrs_size_mb, n_records)
+        logger.info(f"─── {seq_id} ({device}, {vrs_size_mb:.0f} MB, {n_records} records) ───")
 
         result: BenchmarkResult = BenchmarkResult(
             sequence_id=seq_id, device=device, vrs_size_mb=vrs_size_mb, n_records=n_records
@@ -161,19 +159,20 @@ def main() -> None:
             # AV1 encode mode
             logger.info("  AV1 encode...")
             result.av1_time_sec, result.av1_rrd_size_mb = _run_one(local_path, encode_video=True)
-            logger.info("  → %.1fs, %.0f MB RRD (%.1fx compression)", result.av1_time_sec, result.av1_rrd_size_mb, vrs_size_mb / result.av1_rrd_size_mb if result.av1_rrd_size_mb > 0 else 0)
+            compression: float = vrs_size_mb / result.av1_rrd_size_mb if result.av1_rrd_size_mb > 0 else 0
+            logger.info(f"  → {result.av1_time_sec:.1f}s, {result.av1_rrd_size_mb:.0f} MB RRD ({compression:.1f}x compression)")
         except Exception as e:
             result.error += f"AV1: {e}; "
-            logger.exception("  AV1 FAILED: %s", e)
+            logger.exception(f"  AV1 FAILED: {e}")
 
         try:
             # EncodedImage (JPEG passthrough) mode
             logger.info("  JPEG passthrough...")
             result.jpeg_time_sec, result.jpeg_rrd_size_mb = _run_one(local_path, encode_video=False)
-            logger.info("  → %.1fs, %.0f MB RRD", result.jpeg_time_sec, result.jpeg_rrd_size_mb)
+            logger.info(f"  → {result.jpeg_time_sec:.1f}s, {result.jpeg_rrd_size_mb:.0f} MB RRD")
         except Exception as e:
             result.error += f"JPEG: {e}; "
-            logger.exception("  JPEG FAILED: %s", e)
+            logger.exception(f"  JPEG FAILED: {e}")
 
         results.append(result)
 
@@ -222,7 +221,7 @@ def main() -> None:
         f.write("\n## Summary\n\n")
         f.write("**AV1 Speedup** = JPEG time / AV1 time (how much slower AV1 is vs JPEG passthrough)\n")
         f.write("**AV1 Size Reduction** = JPEG RRD / AV1 RRD (how much smaller AV1 output is)\n")
-    logger.info("Results saved to %s", results_md)
+    logger.info(f"Results saved to {results_md}")
 
 
 if __name__ == "__main__":

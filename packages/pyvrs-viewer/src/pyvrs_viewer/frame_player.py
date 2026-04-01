@@ -205,7 +205,7 @@ class FramePlayer:
         pixel_format: str = str(image_spec.get("pixel_format", ""))
 
         if width == 0 or height == 0:
-            logger.warning("Stream %s: raw image with unknown dimensions, skipping", self._stream_id)
+            logger.warning(f"Stream {self._stream_id}: raw image with unknown dimensions, skipping")
             return None
 
         channels: int = _channels_from_pixel_format(pixel_format)
@@ -214,7 +214,7 @@ class FramePlayer:
                 return pixel_array.reshape(height, width)
             return pixel_array.reshape(height, width, channels)
         except ValueError:
-            logger.warning("Stream %s: failed to reshape raw image, disabling", self._stream_id)
+            logger.warning(f"Stream {self._stream_id}: failed to reshape raw image, disabling")
             self._enabled = False
             return None
 
@@ -228,7 +228,7 @@ class FramePlayer:
             codec = rr.VideoCodec.H265 if ("h265" in codec_name or "hevc" in codec_name) else rr.VideoCodec.H264
             rr.log(self._entity_path, rr.VideoStream(codec=codec), static=True)
             self._codec_logged = True
-            logger.info("Stream %s: passthrough VideoStream with codec %s", self._stream_id, codec_name)
+            logger.info(f"Stream {self._stream_id}: passthrough VideoStream with codec {codec_name}")
 
         rr.log(self._entity_path, rr.VideoStream.from_fields(sample=raw_bytes.tobytes()))
 

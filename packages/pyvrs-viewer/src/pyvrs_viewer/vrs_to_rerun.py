@@ -111,8 +111,9 @@ def vrs_to_rerun(config: VrsToRerunConfig) -> None:
         msg: str = f"VRS file not found: {vrs_path}"
         raise FileNotFoundError(msg)
 
-    logger.info("Opening VRS file: %s", vrs_path)
-    logger.info("Video encoding: %s", f"ON ({config.video_codec.value})" if config.encode_video else "OFF (raw images)")
+    logger.info(f"Opening VRS file: {vrs_path}")
+    encoding_str: str = f"ON ({config.video_codec.value})" if config.encode_video else "OFF (raw images)"
+    logger.info(f"Video encoding: {encoding_str}")
     reader: SyncVRSReader = SyncVRSReader(str(vrs_path))
 
     # Discover streams and create players
@@ -132,13 +133,13 @@ def vrs_to_rerun(config: VrsToRerunConfig) -> None:
         recordable_type_id: int = _parse_recordable_type_id(stream_id)
 
         if reader.might_contain_images(stream_id):
-            logger.info("Stream %s (%s): handled by FramePlayer", stream_id, entity_name)
+            logger.info(f"Stream {stream_id} ({entity_name}): handled by FramePlayer")
             frame_players[stream_id] = FramePlayer(stream_id, entity_name, encode_video=config.encode_video, video_codec=config.video_codec)
         elif might_contain_imu_data(recordable_type_id):
-            logger.info("Stream %s (%s): handled by IMUPlayer", stream_id, entity_name)
+            logger.info(f"Stream {stream_id} ({entity_name}): handled by IMUPlayer")
             imu_players[stream_id] = IMUPlayer(stream_id, entity_name)
         else:
-            logger.info("Stream %s (%s): no player available, skipping", stream_id, entity_name)
+            logger.info(f"Stream {stream_id} ({entity_name}): no player available, skipping")
 
     # Send dynamic blueprint
     camera_entities: list[str] = [p.entity_path for p in frame_players.values()]
@@ -159,24 +160,21 @@ def vrs_to_rerun(config: VrsToRerunConfig) -> None:
         fp.flush()
 
     total_sec: float = time.perf_counter() - t_start
-    logger.info("Done. Processed %d records in %.1fs (%.0f records/sec).", total_records, total_sec, total_records / total_sec if total_sec > 0 else 0)
+    recs_per_sec: float = total_records / total_sec if total_sec > 0 else 0
+    logger.info(f"Done. Processed {total_records} records in {total_sec:.1f}s ({recs_per_sec:.0f} records/sec).")
 
     for sid, fp in frame_players.items():
         stats: dict[str, object] | None = fp.encoder_stats
         if stats is not None:
+            output_mb: float = stats["total_bytes"] / 1024 / 1024  # type: ignore[operator]
             logger.info(
-                "Encoder stats [%s]: %s %s, %d frames, %.1fs encode time, %.1f encode fps, %.1f MB output",
-                sid,
-                stats["encoder"],
-                stats["codec"],
-                stats["frames"],  # type: ignore[arg-type]
-                stats["total_encode_sec"],  # type: ignore[arg-type]
-                stats["fps"],  # type: ignore[arg-type]
-                stats["total_bytes"] / 1024 / 1024,  # type: ignore[operator]
+                f"Encoder stats [{sid}]: {stats['encoder']} {stats['codec']}, "
+                f"{stats['frames']} frames, {stats['total_encode_sec']}s encode time, "
+                f"{stats['fps']} encode fps, {output_mb:.1f} MB output"
             )
 
     if config.rr_config.save is not None:
-        logger.info("RRD saved to: %s", config.rr_config.save)
+        logger.info(f"RRD saved to: {config.rr_config.save}")
 
 
 def _process_with_parallel_encode(
@@ -235,7 +233,7 @@ def _process_with_parallel_encode(
     # as they complete. By NOT materializing with list(), the encoder starts working
     # as soon as the first decode finishes — decode and encode overlap in time.
     jpeg_bytes_list: list[bytes] = [item[2] for item in pending_jpeg]
-    logger.info("Decoding + encoding %d frames (%d threads)...", len(jpeg_bytes_list), decode_threads)
+    logger.info(f"Decoding + encoding {len(jpeg_bytes_list)} frames ({decode_threads} threads)...")
 
     with ThreadPoolExecutor(max_workers=decode_threads) as pool:
         yuv_iter = pool.map(_decode_jpeg_to_yuv, jpeg_bytes_list)
