@@ -1,4 +1,23 @@
-// Fullscreen composite pass for the tile-raster path.
+// ═══════════════════════════════════════════════════════════════════════════
+// gaussian_composite.wgsl — Stage 7: Final Composite
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Pipeline position: LAST stage — runs after tile rasterization.
+//
+// Purpose: Blit the off-screen raster texture (produced by gaussian_splat.wgsl)
+// onto the Rerun viewport as a fullscreen triangle.  This is how the tile-based
+// compute path's output gets displayed — the tile raster writes to an offscreen
+// texture, and this shader samples it and writes to the framebuffer.
+//
+// Technique: A single fullscreen triangle (3 vertices, no vertex buffer) that
+// covers the entire screen.  The fragment shader reads the raster texture at
+// the pixel coordinate and outputs it directly.
+//
+// WGSL note for Python developers:
+// - `@vertex` / `@fragment` mark the two shader stages (like two separate functions)
+// - `@group(1) @binding(0)` references a GPU resource (texture/buffer) by index
+// - `vec4f` = 4-component float vector (like numpy float32 array of size 4)
+// - `textureLoad` reads a specific pixel from a texture (no filtering)
 
 struct VsOut {
     @builtin(position) position: vec4f,

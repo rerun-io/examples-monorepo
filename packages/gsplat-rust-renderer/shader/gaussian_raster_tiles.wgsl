@@ -1,7 +1,28 @@
-// Tile-local Gaussian raster pass.
+// ═══════════════════════════════════════════════════════════════════════════
+// gaussian_raster_tiles.wgsl — Stage 6: Tile Rasterization
+// ═══════════════════════════════════════════════════════════════════════════
 //
-// Each workgroup shades one tile. The inputs have already been sorted by tile and compacted, so
-// the shader can iterate a contiguous intersection range and accumulate front-to-back color.
+// Pipeline position: Runs after tile offsets (stage 5), before composite (stage 7).
+//
+// Purpose: This is where the actual pixel colors are computed.  Each workgroup
+// (256 threads = one 16×16 tile) processes all the splats that overlap its tile,
+// accumulating color using front-to-back alpha blending.
+//
+// Algorithm:
+//   1. Load the tile's [start, end) range from tile_offsets
+//   2. In batches of 256 (one splat per thread), load projected splat data into
+//      shared memory (workgroup-local memory, fast access for all threads)
+//   3. Each pixel evaluates the Gaussian function for each splat in the batch:
+//      - sigma = 0.5 * Δᵀ * conic * Δ  (Mahalanobis distance squared)
+//      - alpha = opacity * exp(-sigma)
+//      - color += splat_color * alpha * transmittance
+//      - transmittance *= (1 - alpha)
+//   4. Early termination: if transmittance drops below 1e-4 (pixel is fully
+//      opaque), stop processing more splats for this pixel
+//   5. Write final color + alpha to the output texture
+//
+// Each workgroup shades one tile.  The inputs have already been sorted by tile
+// and compacted, so the shader iterates a contiguous intersection range.
 
 struct ProjectedTileSplat {
     xy_px: vec2f,

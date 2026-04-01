@@ -1,4 +1,24 @@
-// Classic instanced-quad splat shader used by the CPU fallback path.
+// ═══════════════════════════════════════════════════════════════════════════
+// gaussian_splat.wgsl — CPU Fallback: Instanced-Quad Rendering
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// This shader is used by the CPU fallback path (when the compute tile pipeline
+// is not available).  Each Gaussian splat is rendered as a screen-aligned quad
+// (two triangles = 6 vertices) using GPU instancing — one instance per splat.
+//
+// The vertex shader expands each instance into a quad sized by `radius_ndc`,
+// centered at `center_ndc`.  The fragment shader evaluates the Gaussian
+// function at each pixel: it computes the Mahalanobis distance using the
+// inverse 2D covariance matrix, applies an exponential falloff, and discards
+// pixels beyond 3σ (where the contribution is negligible).
+//
+// The output uses premultiplied alpha (`color * alpha, alpha`) for correct
+// alpha blending with the back-to-front sorted draw order.
+//
+// Key math:
+//   mahalanobis = Δᵀ * Σ⁻¹ * Δ    (where Δ = pixel offset from center)
+//   alpha = exp(-0.5 * mahalanobis) * opacity
+//   output = (rgb * alpha, alpha)    (premultiplied alpha)
 
 #import <types.wgsl>
 #import <global_bindings.wgsl>

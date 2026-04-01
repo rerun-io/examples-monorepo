@@ -1,4 +1,36 @@
-// Exact projection / visibility pass for the compute renderer.
+// ═══════════════════════════════════════════════════════════════════════════
+// gaussian_project.wgsl — Stage 1: Projection + Compaction
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Pipeline position: FIRST compute stage — runs on the GPU after the CPU
+// provides a roughly-sorted candidate list.
+//
+// Purpose: For each candidate splat, perform the exact 3D → 2D Gaussian
+// projection on the GPU (the CPU only did an approximate frustum test).
+// This includes:
+//
+//   1. Transform the 3D Gaussian center to view/clip space
+//   2. Build the 3D covariance matrix from rotation + scale
+//   3. Project it to a 2D covariance in pixel space using the camera Jacobian
+//      (Brush-style local linearization: J * Σ_view * Jᵀ)
+//   4. Evaluate spherical harmonics for view-dependent color (if SH data exists)
+//   5. Compute the screen-space tile bounding box (which 16×16 tiles overlap)
+//   6. Set a visibility flag and tile hit count for the compaction stages
+//
+// This shader also contains the **compaction sub-passes** (scan_blocks_main,
+// scan_block_sums_main, scatter_main) which use a parallel prefix sum to
+// remove invisible splats and pack the visible ones into a dense array.
+//
+// Entry points:
+//   - project_main:          Per-splat projection (128 threads/workgroup)
+//   - scan_blocks_main:      Blelloch prefix scan within blocks (compaction step 1)
+//   - scan_block_sums_main:  Scan across block sums (compaction step 2)
+//   - scatter_main:          Write visible splats to compacted output (compaction step 3)
+//
+// Key math concepts:
+//   - Covariance: Σ = R * diag(s²) * Rᵀ  (rotation * squared-scale * rotation-transpose)
+//   - Projection: Σ_2D = J * V * Σ_3D * Vᵀ * Jᵀ  (Jacobian * view-transform * covariance)
+//   - SH evaluation: color = Σ(basis_i(dir) * coeff_i) for each RGB channel
 //
 // Input: CPU-provided visible candidate ordering plus the canonical Gaussian buffers.
 // Output:

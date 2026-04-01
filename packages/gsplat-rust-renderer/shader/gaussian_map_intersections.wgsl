@@ -1,4 +1,23 @@
-// Maps each projected splat to the tiles it overlaps.
+// ═══════════════════════════════════════════════════════════════════════════
+// gaussian_map_intersections.wgsl — Stage 3: Tile Intersection Mapping
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Pipeline position: Runs after projection + compaction (stages 1-2).
+//
+// Purpose: Each visible splat overlaps one or more screen tiles (16×16 pixel
+// regions).  This shader "scatters" each splat into all the tiles it touches,
+// creating a flat list of (tile_id, splat_id) pairs.
+//
+// Example: if splat #42 overlaps tiles 5, 6, 9, and 10, this shader writes:
+//   (5, 42), (6, 42), (9, 42), (10, 42)
+//
+// The tile bounding box was already computed in the projection stage.  Here we
+// iterate within that bounding box and do a tighter contribution test to avoid
+// mapping tiles where the Gaussian has negligible contribution.
+//
+// Also includes `clamp_count_main` — a tiny 1-thread dispatch that clamps the
+// total intersection count to the buffer capacity (prevents out-of-bounds writes
+// on very dense scenes).
 //
 // Input: projected splats with a per-splat tile bounding box.
 // Output: one `(tile_id, compacted_splat_id)` pair per overlapping tile.

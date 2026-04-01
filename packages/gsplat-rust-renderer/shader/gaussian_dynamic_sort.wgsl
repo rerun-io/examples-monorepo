@@ -1,8 +1,30 @@
-// GPU radix-sort over tile intersection ids.
+// ═══════════════════════════════════════════════════════════════════════════
+// gaussian_dynamic_sort.wgsl — Stage 4: Radix Sort by Tile ID
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Pipeline position: Runs after intersection mapping (stage 3).
+//
+// Purpose: Sort all (tile_id, splat_id) pairs by tile_id so that all splats
+// for the same tile are contiguous in memory.  This enables the raster stage
+// to process one tile at a time without random-access lookups.
+//
+// Algorithm: Multi-pass 4-bit radix sort (16 bins per pass).  For a 32-bit
+// tile ID, this takes up to 8 passes.  Each pass consists of:
+//
+//   1. sort_count_main:         Per-workgroup histogram of 4-bit digit values
+//   2. sort_reduce_main:        Reduce histograms across workgroups
+//   3. sort_scan_main:          Exclusive prefix scan of the reduced counts
+//   4. sort_scan_compose_main:  Compose block-local and global scan offsets
+//   5. sort_scan_add_main:      Add reduced offsets back to per-workgroup counts
+//   6. sort_scatter_main:       Scatter keys+values to their sorted positions
+//
+// This is the most compute-intensive stage but runs entirely on the GPU with
+// no CPU readback.  The total number of keys to sort is read from a GPU buffer
+// (set by the clamp_count_main dispatch in the previous stage).
 //
 // Input: unsorted per-intersection tile ids emitted by the map stage.
-// Output: tile ids grouped contiguously so the later tile-offset and raster passes can process
-// one tile at a time.
+// Output: tile ids grouped contiguously so the later tile-offset and raster
+// passes can process one tile at a time.
 
 struct SortUniformBuffer {
     shift: u32,

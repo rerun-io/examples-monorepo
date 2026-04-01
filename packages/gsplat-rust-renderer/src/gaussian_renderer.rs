@@ -1,14 +1,50 @@
-//! Thin public facade for the Gaussian renderer.
+//! GPU renderer for Gaussian splats — the lowest layer of the pipeline.
 //!
-//! The visualizer hands prefiltered batches to [`GaussianDrawData`]. The renderer then chooses
-//! between the CPU reference path and the Brush-inspired compute/tile path, while keeping buffer
-//! reuse and shader setup internal to this module tree.
+//! # Overview
 //!
-//! Per-frame flow:
-//! 1. reuse or grow persistent GPU buffers for the entity
-//! 2. CPU fallback: project visible splats into instanced quads
-//! 3. Compute path: exact projection -> compaction -> tile sorting -> tile raster -> composite
-//! 4. emit one draw payload back to Rerun's normal transparent draw phase
+//! This module owns all GPU resources (buffers, pipelines, bind groups, shaders)
+//! and implements the actual rendering.  The visualizer
+//! ([`crate::gaussian_visualizer`]) hands it a pre-sorted batch of visible
+//! splats each frame; the renderer uploads them and issues draw/dispatch calls.
+//!
+//! # Two Render Paths
+//!
+//! The renderer automatically chooses between two paths:
+//!
+//! ## CPU Fallback Path (Instanced Quads)
+//! Each visible splat is projected on the CPU and uploaded as a per-instance
+//! buffer.  The GPU draws one screen-aligned quad per splat using the
+//! `gaussian_splat.wgsl` shader.  Simple but bandwidth-limited.
+//!
+//! ## Compute Tile Path (Preferred)
+//! Inspired by the [Brush](https://github.com/ArthurBrussee/brush) renderer,
+//! this path runs the entire projection and rasterization on the GPU through
+//! a multi-stage compute pipeline:
+//!
+//! | Stage | Shader | Description |
+//! |-------|--------|-------------|
+//! | 1. Project | `gaussian_project.wgsl` | Exact 3D→2D Gaussian projection + SH evaluation |
+//! | 2. Compact | `gaussian_project.wgsl` (scan entries) | Parallel prefix sum to remove invisible splats |
+//! | 3. Map | `gaussian_map_intersections.wgsl` | Scatter (splat, tile) pairs for each overlapped tile |
+//! | 4. Sort | `gaussian_dynamic_sort.wgsl` | 16-bin radix sort by tile ID |
+//! | 5. Offsets | `gaussian_tile_offsets.wgsl` | Find per-tile start/end range |
+//! | 6. Raster | `gaussian_raster_tiles.wgsl` | Per-pixel alpha blending within each tile |
+//! | 7. Composite | `gaussian_composite.wgsl` | Blit raster texture onto the viewport |
+//!
+//! # Buffer Management
+//!
+//! GPU buffers are cached per-entity and grow as needed (never shrink).  This
+//! avoids re-creating buffers every frame for static scenes.  The intersection
+//! count is read back from the GPU (with a 2-frame delay) to right-size the
+//! tile intersection buffers for the next frame.
+//!
+//! # Per-frame flow
+//!
+//! 1. Reuse or grow persistent GPU buffers for the entity
+//! 2. Upload splat data (means, quats, scales, opacities, colors, SH) to GPU
+//! 3. CPU fallback: project visible splats into instanced quads
+//! 4. Compute path: project → compact → map → sort → tile offsets → raster → composite
+//! 5. Emit one draw payload back to Rerun's normal transparent draw phase
 
 use std::borrow::Cow;
 use std::collections::HashMap;
