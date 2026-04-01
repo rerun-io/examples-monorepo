@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from beartype.roar import BeartypeCallHintParamViolation
 from jaxtyping import Float32
 
 from gsplat_rust_renderer.gaussians3d import Gaussians3D
@@ -74,7 +75,7 @@ def test_bad_shape_raises() -> None:
     boundary before ``__post_init__`` runs, raising
     ``BeartypeCallHintParamViolation`` instead of ``ValueError``.
     """
-    with pytest.raises((ValueError, Exception)):
+    with pytest.raises((ValueError, BeartypeCallHintParamViolation)):
         Gaussians3D(
             centers=np.zeros((10, 2), dtype=np.float32),  # wrong: 2 not 3
             quaternions_xyzw=np.zeros((10, 4), dtype=np.float32),

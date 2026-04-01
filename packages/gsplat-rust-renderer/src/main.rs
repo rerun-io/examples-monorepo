@@ -252,7 +252,7 @@ fn native_options() -> eframe::NativeOptions {
                 })),
                 device_descriptor: Arc::new(|adapter| {
                     re_renderer::external::wgpu::DeviceDescriptor {
-                        label: Some("rerun-simple-gs device"),
+                        label: Some("gsplat-rust-renderer device"),
                         // Request all features the adapter supports, except
                         // MAPPABLE_PRIMARY_BUFFERS which isn't needed and can
                         // cause issues on some drivers.

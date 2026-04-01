@@ -34,7 +34,7 @@
 //! - [`VisualizerSystem`] — the `execute()` method is called once per frame by
 //!   the Rerun viewer with the current view context and query.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::gaussian_renderer::GaussianDrawData;
@@ -357,7 +357,7 @@ impl VisualizerSystem for GaussianSplatVisualizer {
         let transforms = context_systems.get::<TransformTreeContext>(&output)?;
         let mut draw_data = GaussianDrawData::new(ctx.render_ctx());
         let mut extra_draw_data = Vec::new();
-        let mut active_labels = Vec::new();
+        let mut active_labels = HashSet::new();
 
         // Iterate over every entity in the current view that has been assigned
         // to this visualizer (via blueprint override or automatic matching).
@@ -422,7 +422,7 @@ impl VisualizerSystem for GaussianSplatVisualizer {
                 sh_coeffs_per_channel: sh_coefficients.as_ref().map(|sh| sh.coeffs_per_channel),
                 transform_bits: transform.to_cols_array().map(f32::to_bits),
             };
-            active_labels.push(label.clone());
+            active_labels.insert(label.clone());
 
             // `or_insert_with` only builds the cloud if this is the first time
             // we've seen this entity path.
@@ -546,8 +546,13 @@ where
             .min(colors.len());
 
         for row_index in 0..count {
-            // Apply the entity transform to positions so the GPU shaders
-            // only need a single view matrix.
+            // Only positions are transformed here — quaternions and scales stay
+            // in entity-local space.  This is intentional and matches Brush:
+            // the GPU projection shader builds the 3D covariance from the
+            // untransformed quat + scale, then applies the view matrix during
+            // the Jacobian-based 2D projection.  Applying the entity transform
+            // to the covariance would require decomposing rotation and non-uniform
+            // scale from the affine, which is fragile for arbitrary transforms.
             means_world.push(transform.transform_point3(Vec3::from_array(centers[row_index])));
             quats_world.push(normalize_quat_or_identity(Quat::from_xyzw(
                 quats[row_index][0],
@@ -556,8 +561,9 @@ where
                 quats[row_index][3],
             )));
             // Clamp scales to a small positive minimum to avoid degenerate
-            // (zero-volume) Gaussians.
-            scales_world.push(Vec3::from_array(scales[row_index]).max(Vec3::splat(1e-4)));
+            // (zero-volume) Gaussians.  1e-6 matches the Python side, the GPU
+            // shader, and Brush.
+            scales_world.push(Vec3::from_array(scales[row_index]).max(Vec3::splat(1e-6)));
             opacities_world.push(opacities[row_index].clamp(0.0, 1.0));
             colors_world.push(rerun_color_to_rgb(colors[row_index]));
         }

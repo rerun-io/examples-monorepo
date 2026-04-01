@@ -305,7 +305,15 @@ class Gaussians3D(rr.AsComponents):
         sh_coefficients: Float32[np.ndarray, "n coeffs 3"] | None = None
         if dc_coefficients is not None or rest_fields:
             extra_coefficients: int = len(rest_fields) // 3
-            coeffs_per_channel: int = extra_coefficients + 1
+            raw_coeffs_per_channel: int = extra_coefficients + 1
+            # The Rust viewer only supports SH sizes in {1, 4, 9, 16, 25}
+            # (degrees 0-4).  Round up to the next supported size and zero-pad,
+            # matching Brush's behavior for partial PLY payloads.
+            supported_sh_sizes: tuple[int, ...] = (1, 4, 9, 16, 25)
+            coeffs_per_channel: int = next(
+                (s for s in supported_sh_sizes if s >= raw_coeffs_per_channel),
+                raw_coeffs_per_channel,  # fall through if larger than degree 4
+            )
             sh_coefficients = np.zeros((len(vertex), coeffs_per_channel, 3), dtype=np.float32)
             if dc_coefficients is not None:
                 sh_coefficients[:, 0, :] = dc_coefficients

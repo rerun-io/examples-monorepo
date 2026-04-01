@@ -1,6 +1,6 @@
 [package]
-name = "gsplat-rerun-minimal"
-version = "0.30.2"
+name = "gsplat-rust-renderer"
+version = "0.1.0"
 edition = "2024"
 
 [dependencies]

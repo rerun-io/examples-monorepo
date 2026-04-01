@@ -4,7 +4,7 @@
 //
 // Pipeline position: LAST stage — runs after tile rasterization.
 //
-// Purpose: Blit the off-screen raster texture (produced by gaussian_splat.wgsl)
+// Purpose: Blit the off-screen raster texture (produced by gaussian_raster_tiles.wgsl)
 // onto the Rerun viewport as a fullscreen triangle.  This is how the tile-based
 // compute path's output gets displayed — the tile raster writes to an offscreen
 // texture, and this shader samples it and writes to the framebuffer.
