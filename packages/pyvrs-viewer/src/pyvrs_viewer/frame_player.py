@@ -108,6 +108,37 @@ class FramePlayer:
             rr.log(self._entity_path, rr.VideoStream(codec=rr_codec), static=True)
             self._codec_logged = True
 
+    def encode_and_log_yuv(
+        self,
+        timestamp_sec: float,
+        yuv_planes: list[UInt8[np.ndarray, "..."]],
+        metadata: dict[str, object],
+    ) -> None:
+        """Encode pre-decoded YUV planes and log to Rerun (used by parallel pipeline)."""
+        if not self._enabled:
+            return
+
+        rr.set_time("timestamp", duration=timestamp_sec)
+        rr.set_time("frame_number", sequence=self._frame_number)
+        self._frame_number += 1
+
+        if metadata:
+            meta_str: str = "\n".join(f"{k}: {v}" for k, v in metadata.items())
+            rr.log(f"{self._entity_path}/data", rr.TextDocument(meta_str))
+
+        self._ensure_encoder()
+        assert self._encoder is not None
+
+        if len(yuv_planes) == 1:
+            packets: list[bytes] = self._encoder.encode_yuv_planes(yuv_planes[0])
+        elif len(yuv_planes) >= 3:
+            packets = self._encoder.encode_yuv_planes(yuv_planes[0], yuv_planes[1], yuv_planes[2])
+        else:
+            return
+
+        for packet_bytes in packets:
+            rr.log(self._entity_path, rr.VideoStream.from_fields(sample=packet_bytes))
+
     def _log_encoded_frame(
         self,
         image_format: str,
@@ -115,33 +146,19 @@ class FramePlayer:
         image_block: UInt8[ndarray, "n"],
     ) -> None:
         """Decode image to YUV via turbojpeg, encode to video codec, log as VideoStream."""
-        self._ensure_encoder()
-        assert self._encoder is not None
-
         if image_format in ("jpg", "png"):
             jpeg_bytes: bytes = image_block.tobytes()
-            # turbojpeg decode_to_yuv_planes: extracts YUV planes directly from JPEG
-            # (no RGB intermediate — JPEG internally stores YCbCr)
             yuv_planes: list[UInt8[np.ndarray, "..."]] = _tj.decode_to_yuv_planes(jpeg_bytes)
-
-            if len(yuv_planes) == 1:
-                # Grayscale JPEG — Y plane only
-                packets: list[bytes] = self._encoder.encode_yuv_planes(yuv_planes[0])
-            elif len(yuv_planes) >= 3:
-                # Color JPEG — Y, U, V planes
-                packets = self._encoder.encode_yuv_planes(yuv_planes[0], yuv_planes[1], yuv_planes[2])
-            else:
-                logger.warning("Stream %s: unexpected %d YUV planes, skipping", self._stream_id, len(yuv_planes))
-                return
+            self.encode_and_log_yuv(0.0, yuv_planes, {})  # timestamp already set by caller
         else:
             # RAW format — decode and use legacy encode path
+            self._ensure_encoder()
+            assert self._encoder is not None
             decoded: UInt8[np.ndarray, "h w"] | UInt8[np.ndarray, "h w 3"] | None = self._decode_raw_image(image_spec, image_block)
             if decoded is None:
                 return
-            packets = self._encoder.encode_frame(decoded)
-
-        for packet_bytes in packets:
-            rr.log(self._entity_path, rr.VideoStream.from_fields(sample=packet_bytes))
+            for packet_bytes in self._encoder.encode_frame(decoded):
+                rr.log(self._entity_path, rr.VideoStream.from_fields(sample=packet_bytes))
 
     def _decode_raw_image(
         self, image_spec: dict[str, object], pixel_array: UInt8[ndarray, "n"]
