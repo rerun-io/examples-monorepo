@@ -19,7 +19,7 @@ from pyvrs_viewer.video_encoder import VideoCodecChoice, VideoEncoder
 
 logger: logging.Logger = logging.getLogger(__name__)
 
-# Thread-local TurboJPEG instance (safe for concurrent use from thread pools)
+# Module-global TurboJPEG instance (TurboJPEG is thread-safe, used from thread pools)
 _tj: TurboJPEG = TurboJPEG()
 
 
@@ -116,7 +116,7 @@ class FramePlayer:
         Encoders buffer frames — the packet emitted when submitting frame N may
         actually be for frame N-2. Use the PTS to look up the correct source timestamp.
         """
-        ts_info: tuple[float, int] | None = self._pts_to_time.get(pts)
+        ts_info: tuple[float, int] | None = self._pts_to_time.pop(pts, None)
         if ts_info is not None:
             rr.set_time("timestamp", duration=ts_info[0])
             rr.set_time("frame_number", sequence=ts_info[1])
@@ -143,7 +143,7 @@ class FramePlayer:
         # Record PTS→timestamp mapping BEFORE encoding (encoder assigns PTS = _frame_number)
         self._ensure_encoder()
         assert self._encoder is not None
-        encoder_pts: int = self._encoder._frame_number  # Next PTS the encoder will assign
+        encoder_pts: int = self._encoder.next_pts
         self._pts_to_time[encoder_pts] = (timestamp_sec, self._frame_number)
         self._frame_number += 1
 
@@ -178,8 +178,9 @@ class FramePlayer:
         encoder_pts: int = self._encoder._frame_number
         self._pts_to_time[encoder_pts] = (timestamp_sec, self._frame_number - 1)
 
-        if image_format in ("jpg", "png"):
+        if image_format == "jpg":
             jpeg_bytes: bytes = image_block.tobytes()
+            # turbojpeg only supports JPEG — PNG falls through to the raw/legacy path below
             yuv_planes: list[UInt8[np.ndarray, "..."]] = _tj.decode_to_yuv_planes(jpeg_bytes)
             if len(yuv_planes) == 1:
                 packets: list[tuple[int, bytes]] = self._encoder.encode_yuv_planes(yuv_planes[0])

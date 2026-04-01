@@ -13,7 +13,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import NamedTuple
 
 import numpy as np
 import rerun as rr
@@ -30,17 +29,8 @@ from pyvrs_viewer.video_encoder import VideoCodecChoice
 
 logger: logging.Logger = logging.getLogger(__name__)
 
-# Thread-local TurboJPEG instances for parallel decode
+# Shared TurboJPEG instance used for parallel decode (TurboJPEG is thread-safe)
 _tj: TurboJPEG = TurboJPEG()
-
-
-class _DecodedFrame(NamedTuple):
-    """Pre-decoded image frame ready for encoding."""
-
-    stream_id: str
-    timestamp_sec: float
-    yuv_planes: list[UInt8[np.ndarray, "..."]]
-    metadata: dict[str, object]
 
 
 @dataclass
@@ -121,6 +111,10 @@ def vrs_to_rerun(config: VrsToRerunConfig) -> None:
     imu_players: dict[str, IMUPlayer] = {}
 
     all_stream_ids: list[str] = sorted(reader.stream_ids)
+    # "flavor" is a VRS stream tag that provides a human-readable name for the stream
+    # (e.g., "camera-slam-left" for Quest, "device/ariane" for Aria). When unique per
+    # stream, it makes a good Rerun entity path. When shared (Aria uses the same flavor
+    # for all streams), we fall back to the stream_id string (e.g., "1201-1").
     flavor_counts: dict[str, int] = {}
     for sid in all_stream_ids:
         flavor_val: str = str(reader.get_stream_info(sid).get("flavor", ""))
@@ -206,7 +200,8 @@ def _process_with_parallel_encode(
             elif record_type == "data" and record.n_image_blocks > 0:
                 image_spec: dict[str, object] = _build_image_spec_dict(record.image_specs[0])
                 image_format: str = str(image_spec.get("image_format", "raw"))
-                if image_format in ("jpg", "png"):
+                if image_format == "jpg":
+                    # Only JPEG goes through turbojpeg parallel decode path
                     jpeg_bytes: bytes = record.image_blocks[0].tobytes()
                     pending_jpeg.append((stream_id_str, timestamp_sec, jpeg_bytes, metadata))
                 elif image_format == "video":
@@ -229,9 +224,9 @@ def _process_with_parallel_encode(
         return
 
     # Phase 2+3: Parallel JPEG decode overlapped with encode+log.
-    # pool.map returns an iterator that yields decoded results in submission order
-    # as they complete. By NOT materializing with list(), the encoder starts working
-    # as soon as the first decode finishes — decode and encode overlap in time.
+    # pool.map returns a lazy iterator that yields decoded results in submission
+    # (input) order. By NOT materializing with list(), decoding runs in parallel
+    # and overlaps with encoding, though a slow early frame can delay later ones.
     jpeg_bytes_list: list[bytes] = [item[2] for item in pending_jpeg]
     logger.info(f"Decoding + encoding {len(jpeg_bytes_list)} frames ({decode_threads} threads)...")
 

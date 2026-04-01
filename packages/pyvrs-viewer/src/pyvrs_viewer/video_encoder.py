@@ -83,6 +83,11 @@ class VideoEncoder:
         return self._encoder_name
 
     @property
+    def next_pts(self) -> int:
+        """The PTS that will be assigned to the next submitted frame."""
+        return self._frame_number
+
+    @property
     def stats(self) -> dict[str, object]:
         """Return encoding statistics."""
         return {
@@ -196,7 +201,8 @@ class VideoEncoder:
             case 4:
                 frame = av.VideoFrame.from_ndarray(image[:, :, :3], format="rgb24")
             case _:
-                frame = av.VideoFrame.from_ndarray(image[:, :, 0], format="gray")
+                msg: str = f"Unsupported channel count: {channels} (expected 1, 3, or 4)"
+                raise ValueError(msg)
 
         # Convert to yuv420p (required by video encoders)
         frame = frame.reformat(format="yuv420p")

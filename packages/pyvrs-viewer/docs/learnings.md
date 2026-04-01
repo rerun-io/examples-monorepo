@@ -2,6 +2,11 @@
 
 ## pyvrs API (PyPI package: `vrs`)
 
+### Stream ID format
+VRS stream IDs are strings like `"1201-1"` where:
+- The first number is the **RecordableTypeId** — a numeric enum from [vrs/StreamId.h](https://github.com/facebookresearch/vrs/blob/main/vrs/StreamId.h) that identifies the sensor type (e.g., 1201 = SLAM camera, 1202 = IMU, 214 = RGB camera)
+- The second number is the **instance ID** — differentiates multiple sensors of the same type (e.g., `1201-1` = left SLAM camera, `1201-2` = right SLAM camera)
+
 ### SyncVRSReader key attributes/methods
 - `reader.stream_ids` — `set[str]`, each string like `"1201-1"` (type_id-instance_id)
 - `reader.get_stream_info(stream_id)` — dict with `device_name`, `flavor`, `configuration_records_count`, `data_records_count`, etc.

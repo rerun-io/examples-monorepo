@@ -10,12 +10,15 @@ import logging
 
 import numpy as np
 import rerun as rr
-from jaxtyping import Float32
+from jaxtyping import Float32, Float64
 from numpy import ndarray
 
 logger: logging.Logger = logging.getLogger(__name__)
 
-# RecordableTypeIds for IMU-related streams
+# RecordableTypeIds for IMU-related streams.
+# These numeric IDs come from the VRS StreamId spec (vrs/StreamId.h).
+# Each VRS stream has a type_id-instance_id string (e.g., "1202-1").
+# See: https://github.com/facebookresearch/vrs/blob/main/vrs/StreamId.h
 IMU_RECORDABLE_TYPE_IDS: set[int] = {
     1202,  # SlamImuData (accelerometer + gyroscope)
     1203,  # SlamMagnetometerData
@@ -76,21 +79,19 @@ class IMUPlayer:
         rr.set_time("timestamp", duration=timestamp_sec)
 
         if self._has_accelerometer and "accelerometer" in metadata:
-            accel_raw: object = metadata["accelerometer"]
-            accel: Float32[ndarray, "3"] = np.asarray(accel_raw, dtype=np.float32).flatten()[:3]
+            # pyvrs metadata values are list[float] but typed as object in the generic dict
+            accel: Float32[ndarray, "3"] = np.asarray(metadata["accelerometer"], dtype=np.float32).flatten()[:3]
             if accel.shape[0] == 3:
                 rr.log(f"{self._entity_path}/accelerometer", rr.Arrows3D(vectors=[accel.tolist()]))
                 rr.log(f"{self._entity_path}/accelerometer", rr.Scalars(accel.tolist()))
 
         if self._has_gyroscope and "gyroscope" in metadata:
-            gyro_raw: object = metadata["gyroscope"]
-            gyro: Float32[ndarray, "3"] = np.asarray(gyro_raw, dtype=np.float32).flatten()[:3]
+            gyro: Float32[ndarray, "3"] = np.asarray(metadata["gyroscope"], dtype=np.float32).flatten()[:3]
             if gyro.shape[0] == 3:
                 rr.log(f"{self._entity_path}/gyroscope", rr.Scalars(gyro.tolist()))
 
         if self._has_magnetometer and "magnetometer" in metadata:
-            mag_raw: object = metadata["magnetometer"]
-            mag: Float32[ndarray, "3"] = np.asarray(mag_raw, dtype=np.float32).flatten()[:3]
+            mag: Float32[ndarray, "3"] = np.asarray(metadata["magnetometer"], dtype=np.float32).flatten()[:3]
             if mag.shape[0] == 3:
                 rr.log(f"{self._entity_path}/magnetometer", rr.Scalars(mag.tolist()))
 
@@ -104,18 +105,15 @@ class IMUPlayer:
         self._timestamps.append(timestamp_sec)
 
         if self._has_accelerometer and "accelerometer" in metadata:
-            accel_raw: object = metadata["accelerometer"]
-            accel: Float32[ndarray, "3"] = np.asarray(accel_raw, dtype=np.float32).flatten()[:3]
+            accel: Float32[ndarray, "3"] = np.asarray(metadata["accelerometer"], dtype=np.float32).flatten()[:3]
             self._accel_data.append(accel.tolist())
 
         if self._has_gyroscope and "gyroscope" in metadata:
-            gyro_raw: object = metadata["gyroscope"]
-            gyro: Float32[ndarray, "3"] = np.asarray(gyro_raw, dtype=np.float32).flatten()[:3]
+            gyro: Float32[ndarray, "3"] = np.asarray(metadata["gyroscope"], dtype=np.float32).flatten()[:3]
             self._gyro_data.append(gyro.tolist())
 
         if self._has_magnetometer and "magnetometer" in metadata:
-            mag_raw: object = metadata["magnetometer"]
-            mag: Float32[ndarray, "3"] = np.asarray(mag_raw, dtype=np.float32).flatten()[:3]
+            mag: Float32[ndarray, "3"] = np.asarray(metadata["magnetometer"], dtype=np.float32).flatten()[:3]
             self._mag_data.append(mag.tolist())
 
     def flush_columns(self) -> None:
@@ -123,7 +121,7 @@ class IMUPlayer:
         if not self._timestamps:
             return
 
-        timestamps: Float32[np.ndarray, "n"] = np.array(self._timestamps, dtype=np.float64)
+        timestamps: Float64[np.ndarray, "n"] = np.array(self._timestamps, dtype=np.float64)
         time_column: rr.TimeColumn = rr.TimeColumn("timestamp", duration=timestamps)
 
         if self._accel_data:
