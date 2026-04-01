@@ -137,14 +137,16 @@ class VideoEncoder:
             self._init_encoder(width, height)
 
         # Convert numpy array to av.VideoFrame
-        if image.ndim == 2:
-            frame: av.VideoFrame = av.VideoFrame.from_ndarray(image, format="gray")
-        elif image.shape[2] == 3:
-            frame = av.VideoFrame.from_ndarray(image, format="rgb24")
-        elif image.shape[2] == 4:
-            frame = av.VideoFrame.from_ndarray(image[:, :, :3], format="rgb24")
-        else:
-            frame = av.VideoFrame.from_ndarray(image[:, :, 0], format="gray")
+        channels: int = 1 if image.ndim == 2 else image.shape[2]
+        match channels:
+            case 1:
+                frame: av.VideoFrame = av.VideoFrame.from_ndarray(image if image.ndim == 2 else image[:, :, 0], format="gray")
+            case 3:
+                frame = av.VideoFrame.from_ndarray(image, format="rgb24")
+            case 4:
+                frame = av.VideoFrame.from_ndarray(image[:, :, :3], format="rgb24")
+            case _:
+                frame = av.VideoFrame.from_ndarray(image[:, :, 0], format="gray")
 
         # Convert to yuv420p (required by video encoders)
         frame = frame.reformat(format="yuv420p")
