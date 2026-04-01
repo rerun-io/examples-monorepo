@@ -196,12 +196,14 @@ class VideoEncoder:
         match channels:
             case 1:
                 frame: av.VideoFrame = av.VideoFrame.from_ndarray(image if image.ndim == 2 else image[:, :, 0], format="gray")
+            case 2:
+                frame = av.VideoFrame.from_ndarray(image[:, :, 0], format="gray")
             case 3:
                 frame = av.VideoFrame.from_ndarray(image, format="rgb24")
             case 4:
                 frame = av.VideoFrame.from_ndarray(image[:, :, :3], format="rgb24")
             case _:
-                msg: str = f"Unsupported channel count: {channels} (expected 1, 3, or 4)"
+                msg: str = f"Unsupported channel count: {channels} (expected 1-4)"
                 raise ValueError(msg)
 
         # Convert to yuv420p (required by video encoders)
