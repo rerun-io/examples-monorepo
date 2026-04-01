@@ -13,7 +13,7 @@ import os
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from pyvrs import SyncVRSReader
@@ -122,7 +122,7 @@ def main() -> None:
 
     # Download missing files
     logger.info("Downloading %d VRS files...", len(all_files))
-    for seq_id, url, local_path, device in all_files:
+    for _seq_id, url, local_path, _device in all_files:
         _download_vrs(url, local_path)
 
     # Run benchmarks
@@ -160,38 +160,50 @@ def main() -> None:
         results.append(result)
 
     # Print summary table
-    print("\n" + "=" * 120)
+    print("\n" + "=" * 140)
     print("BENCHMARK RESULTS")
-    print("=" * 120)
-    header: str = f"{'Sequence':<20} {'Device':<6} {'VRS(MB)':>8} {'Records':>8} │ {'AV1 Time':>9} {'AV1 RRD':>9} {'Ratio':>6} │ {'JPEG Time':>10} {'JPEG RRD':>10} {'Ratio':>6} │ {'Errors'}"
+    print("=" * 140)
+    header: str = (
+        f"{'Sequence':<20} {'Device':<6} {'VRS(MB)':>8} {'Recs':>8} │ "
+        f"{'AV1 Time':>9} {'AV1 RRD':>9} {'Compress':>9} │ "
+        f"{'JPEG Time':>10} {'JPEG RRD':>10} │ "
+        f"{'Speedup':>8} {'SizeRed':>8} │ {'Status'}"
+    )
     print(header)
-    print("─" * 120)
+    print("─" * 140)
     for r in results:
-        av1_ratio: str = f"{r.vrs_size_mb / r.av1_rrd_size_mb:.0f}x" if r.av1_rrd_size_mb > 0 else "N/A"
-        jpeg_ratio: str = f"{r.vrs_size_mb / r.jpeg_rrd_size_mb:.1f}x" if r.jpeg_rrd_size_mb > 0 else "N/A"
+        compress: str = f"{r.vrs_size_mb / r.av1_rrd_size_mb:.0f}x" if r.av1_rrd_size_mb > 0 else "N/A"
+        speedup: str = f"{r.jpeg_time_sec / r.av1_time_sec:.1f}x" if r.av1_time_sec > 0 and r.jpeg_time_sec > 0 else "N/A"
+        size_red: str = f"{r.jpeg_rrd_size_mb / r.av1_rrd_size_mb:.0f}x" if r.av1_rrd_size_mb > 0 and r.jpeg_rrd_size_mb > 0 else "N/A"
         print(
             f"{r.sequence_id:<20} {r.device:<6} {r.vrs_size_mb:>8.0f} {r.n_records:>8} │ "
-            f"{r.av1_time_sec:>8.1f}s {r.av1_rrd_size_mb:>8.0f}M {av1_ratio:>6} │ "
-            f"{r.jpeg_time_sec:>9.1f}s {r.jpeg_rrd_size_mb:>9.0f}M {jpeg_ratio:>6} │ "
-            f"{r.error or 'OK'}"
+            f"{r.av1_time_sec:>8.1f}s {r.av1_rrd_size_mb:>8.0f}M {compress:>9} │ "
+            f"{r.jpeg_time_sec:>9.1f}s {r.jpeg_rrd_size_mb:>9.0f}M │ "
+            f"{speedup:>8} {size_red:>8} │ {r.error or 'OK'}"
         )
-    print("─" * 120)
+    print("─" * 140)
+    print("  Speedup = JPEG time / AV1 time (<1 means AV1 slower)")
+    print("  SizeRed = JPEG RRD / AV1 RRD (how many times smaller AV1 output is)")
 
     # Save markdown results
     results_md: Path = DATA_DIR / "results.md"
     with open(results_md, "w") as f:
         f.write("# pyvrs-viewer Benchmark Results\n\n")
-        f.write("| Sequence | Device | VRS (MB) | Records | AV1 Time (s) | AV1 RRD (MB) | AV1 Ratio | JPEG Time (s) | JPEG RRD (MB) | JPEG Ratio | Status |\n")
-        f.write("|----------|--------|----------|---------|--------------|--------------|-----------|---------------|---------------|------------|--------|\n")
+        f.write("| Sequence | Device | VRS (MB) | Records | AV1 Time (s) | AV1 RRD (MB) | Compression | JPEG Time (s) | JPEG RRD (MB) | AV1 Speedup | AV1 Size Reduction | Status |\n")
+        f.write("|----------|--------|----------|---------|--------------|--------------|-------------|---------------|---------------|-------------|-------------------|--------|\n")
         for r in results:
-            av1_ratio_str: str = f"{r.vrs_size_mb / r.av1_rrd_size_mb:.0f}x" if r.av1_rrd_size_mb > 0 else "N/A"
-            jpeg_ratio_str: str = f"{r.vrs_size_mb / r.jpeg_rrd_size_mb:.1f}x" if r.jpeg_rrd_size_mb > 0 else "N/A"
+            compress_str: str = f"{r.vrs_size_mb / r.av1_rrd_size_mb:.0f}x" if r.av1_rrd_size_mb > 0 else "N/A"
+            speedup_str: str = f"{r.jpeg_time_sec / r.av1_time_sec:.1f}x" if r.av1_time_sec > 0 and r.jpeg_time_sec > 0 else "N/A"
+            size_red_str: str = f"{r.jpeg_rrd_size_mb / r.av1_rrd_size_mb:.0f}x smaller" if r.av1_rrd_size_mb > 0 and r.jpeg_rrd_size_mb > 0 else "N/A"
             f.write(
                 f"| {r.sequence_id} | {r.device} | {r.vrs_size_mb:.0f} | {r.n_records} | "
-                f"{r.av1_time_sec:.1f} | {r.av1_rrd_size_mb:.0f} | {av1_ratio_str} | "
-                f"{r.jpeg_time_sec:.1f} | {r.jpeg_rrd_size_mb:.0f} | {jpeg_ratio_str} | "
+                f"{r.av1_time_sec:.1f} | {r.av1_rrd_size_mb:.0f} | {compress_str} | "
+                f"{r.jpeg_time_sec:.1f} | {r.jpeg_rrd_size_mb:.0f} | {speedup_str} | {size_red_str} | "
                 f"{r.error or 'OK'} |\n"
             )
+        f.write("\n## Summary\n\n")
+        f.write("**AV1 Speedup** = JPEG time / AV1 time (how much slower AV1 is vs JPEG passthrough)\n")
+        f.write("**AV1 Size Reduction** = JPEG RRD / AV1 RRD (how much smaller AV1 output is)\n")
     logger.info("Results saved to %s", results_md)
 
 
