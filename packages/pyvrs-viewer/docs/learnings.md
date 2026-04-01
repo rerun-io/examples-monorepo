@@ -8,6 +8,7 @@
 - `reader.might_contain_images(stream_id)` — bool, checks if stream has image blocks
 - `reader.might_contain_audio(stream_id)` — bool
 - `reader.stream_tags` — dict of stream_id → tags dict
+- `reader.n_records` — total record count (for tqdm progress bars)
 - Iteration: `for record in reader:` yields records in timestamp order
 
 ### Record structure
@@ -31,69 +32,83 @@
 - When `save` is set, calls `rr.save(path)` automatically
 - Exposes `--rr-config.save`, `--rr-config.connect`, `--rr-config.headless` via tyro CLI
 
-### Image archetype priority (memory efficiency)
-1. `rr.EncodedImage(contents=jpeg_bytes)` — for JPEG streams, no decode needed
-2. `rr.VideoStream(codec=..., sample=...)` — for H264/H265 streams, raw codec frames
-3. `rr.Image(pixel_array)` — for RAW streams only (fallback)
+### Image archetype strategy
+1. **`rr.VideoStream`** (default, encode_video=True) — AV1/H265 encoded, 13-42x smaller RRDs
+2. **`rr.EncodedImage`** (encode_video=False) — raw JPEG passthrough, fastest but large RRDs
+3. **`rr.Image`** — decoded pixels, only for RAW format fallback
 
-### Timeline setup
-- `rr.set_time("timestamp", duration=seconds)` — wall-clock time from VRS
-- `rr.set_time("frame_number", sequence=n)` — per-stream frame counter
-
-## H265 Video Encoding
-
-### Encoder selection
-- Tries `hevc_nvenc` (NVIDIA hardware) first, falls back to `libx265` (CPU)
-- Both are available from conda-forge's `av` package on Linux
-- RTX 5090 NVENC confirmed working — encoding is near-instant
-
-### PyAV encoding setup
-- Use `av.CodecContext.create(codec_name, 'w')` for containerless encoding
-- Use `from fractions import Fraction` (NOT `av.Fraction` — doesn't exist)
-- `ctx.max_b_frames = 0` required by Rerun VideoStream
-- `ctx.pix_fmt = 'yuv420p'` — all H265 encoders require this
-- Convert gray → yuv420p: `av.VideoFrame.from_ndarray(img, format='gray').reformat(format='yuv420p')`
-- `bytes(packet)` from `ctx.encode(frame)` gives raw H265 Annex B data
-- Must call `ctx.encode(None)` at end to flush buffered frames
-
-### Rerun VideoStream integration
-- Log codec once as static: `rr.log(entity, rr.VideoStream(codec=rr.VideoCodec.H265), static=True)`
-- Log each packet: `rr.log(entity, rr.VideoStream.from_fields(sample=packet_bytes))`
-- Encoder may buffer frames — first few `encode()` calls return empty lists
-- Flush packets must also be logged at the end
+### IMU batch logging
+- `rr.send_columns()` is **282x faster** than row-by-row `rr.log()` for IMU data
+- Aria VRS has 224k IMU records — batch logging saves ~4s
+- Accumulate timestamps + sensor arrays during VRS read, flush once at the end
 
 ### Dynamic Blueprint
-- `rerun.blueprint` module provides layout containers: `Grid`, `Horizontal`, `Vertical`, `Tabs`
+- `rerun.blueprint` module: `Grid`, `Horizontal`, `Vertical`, `Tabs` containers
 - `rrb.Spatial2DView(origin=entity)` for cameras
 - `rrb.TimeSeriesView(origin=entity)` for IMU data
+- `rrb.TextDocumentView(origin=entity)` for config/metadata
 - Send early: `rr.send_blueprint(blueprint, make_active=True, make_default=True)`
 
-## Test Results
+## Video Encoding
 
-### Hot3D Quest VRS (2.7GB input, 2x 1280x1024 mono @ 30fps, 3981 frames/stream)
+### Codec defaults
+- **AV1** is the default codec (best compression, wide NVENC support)
+- Encoder preference: NVENC hardware first → CPU fallback (libsvtav1 or libx265)
+- NVENC default rate control gives best size/quality tradeoff (don't set constqp — it's a different scale than CRF)
+- Software encoders use CRF=30 (validated by HuggingFace/LeRobot benchmarks)
+- GOP=30 (1-second keyframe interval for Rerun viewer scrubbing; GOP=2 produces 10x larger files)
 
-| Encoder | Encode FPS | Total Time | RRD Size | Reduction |
-|---------|-----------|------------|----------|-----------|
-| No encoding (JPEG) | — | 37s | 2.7 GB | — |
-| **H265 NVENC** (RTX 5090) | **4800 fps** | 37s | **70 MB** | **38x** |
-| **AV1 NVENC** (RTX 5090) | **5200 fps** | 37s | **70 MB** | **38x** |
-| AV1 CPU (libsvtav1, preset 8) | 4100 fps | 44s | **75 MB** | **36x** |
-| H265 CPU (libx265, preset fast) | 530 fps | 61s | **66 MB** | **41x** |
+### PyAV encoding setup
+- `av.CodecContext.create(codec_name, 'w')` for containerless encoding
+- `from fractions import Fraction` (NOT `av.Fraction` — doesn't exist)
+- `ctx.max_b_frames = 0` required by Rerun VideoStream
+- `ctx.pix_fmt = 'yuv420p'` required by all video encoders
 
-- Pipeline time dominated by VRS reading + JPEG decoding (~36s), encoding is negligible with NVENC
-- NVENC ~10x faster than libx265 CPU, but SVT-AV1 CPU nearly matches NVENC speed at preset 8
-- libx265 compresses best (66 MB) but is by far the slowest encoder
-- SVT-AV1 at preset 8 is a great CPU fallback: nearly as fast as NVENC with reasonable compression
+### Encoder packet buffering (critical)
+- **NVENC buffers 2 frames**: submit frame 2 → get packet for frame 0
+- **SVT-AV1 buffers ALL frames**: every packet comes from `flush()` only
+- Packets have PTS that maps back to the original frame submission order
+- Must track `PTS → (source_timestamp, frame_number)` to log packets at correct times
+- Without this fix, video timestamps shift by 1-2 frames (NVENC) or collapse entirely (SVT-AV1)
 
-### Hot3D Aria VRS (1.7GB input)
+### turbojpeg YUV decode (performance critical)
+- JPEG internally stores YCbCr — `turbojpeg.decode_to_yuv_planes()` extracts it without RGB conversion
+- Grayscale JPEG → 1 plane (Y only), color JPEG → 3 planes (Y, U, V)
+- For grayscale: fill U/V with 128 (neutral chroma), cache the allocation
+- 1.8x faster than `cv2.imdecode` + `av.VideoFrame.reformat()`
 
-| Encoder | RRD Size | Reduction |
-|---------|----------|-----------|
-| No encoding (JPEG) | 1.7 GB | — |
-| **H265 NVENC** | **129 MB** | **13x** |
+## Pipeline Architecture (encode_video=True)
 
-- 3 cameras (1408x1408 RGB + 2x 640x480 mono) + 2 IMUs
-- 237,185 records total
+### Streaming parallel pipeline
+```
+Phase 1: Read VRS + collect JPEG bytes (IMU accumulated, config logged inline)
+Phase 2+3: pool.map iterator — parallel decode overlapped with serial encode
+Phase 4: Batch IMU logging via rr.send_columns()
+```
+
+Key insight: `pool.map()` returns an **iterator** (not a list). By iterating directly, decode and encode overlap — the encoder starts as soon as the first decode finishes.
+
+### Performance breakdown (Quest VRS, 7962 frames @ 1280x1024)
+
+| Stage | Time |
+|-------|------|
+| VRS read + collect | 0.8s |
+| JPEG decode (8 threads, turbojpeg YUV) | 2.6s |
+| AV1 NVENC encode | ~3.8s (GPU throughput limit) |
+| Rerun logging | 0.2s |
+| **Total (overlapped)** | **~5s** |
+
+Theoretical minimum: 3.8s (NVENC throughput). Current ~5s is close to optimal.
+
+## Benchmark Results (5 Quest + 5 Aria, RTX 5090)
+
+| Device | VRS Size | AV1 Time | AV1 RRD | Compression | JPEG Time | JPEG RRD |
+|--------|----------|----------|---------|-------------|-----------|----------|
+| Quest | 0.8-2.7 GB | 2-5s | 31-66 MB | 21-41x | 0.3-0.9s | 0.8-2.7 GB |
+| Aria | 0.8-1.8 GB | 4-9s | 50-110 MB | 15-16x | 5-11s | 0.8-1.8 GB |
+
+- AV1 is **faster than JPEG passthrough** on Aria (send_columns eliminates IMU overhead)
+- C++ reference (rerun-io/cpp-example-vrs) takes ~19s for Quest (decodes every JPEG frame)
 
 ## Stream Entity Naming
 - Quest VRS has unique `flavor` values per stream → used as Rerun entity path
@@ -103,6 +118,8 @@
 ## Gotchas
 - `SyncVRSReader` does NOT have a `.streams` attribute — use `.stream_ids` (set of strings)
 - `ImageSpec` objects stringify to the format name (e.g., `"jpg"`) — access attributes via `.image_format`, `.width` etc.
-- Configuration record timestamps are near-zero (5e-324) — these are sentinel values, not real timestamps
+- Configuration record timestamps are near-zero (5e-324) — sentinel values, not real timestamps
 - `VRSBlocks` is not iterable directly — use `blocks[j]` with range(n_blocks)
 - pyvrs is on PyPI as `vrs`, NOT on conda-forge
+- NVENC `constqp qp=30` is NOT equivalent to CRF=30 — produces 10-30x larger files. Use NVENC defaults.
+- Parallel NVENC sessions (one per stream) causes GPU contention — serial streaming overlap is faster
