@@ -45,13 +45,18 @@ _CRF: int = 30
 
 
 def _encoder_options(name: str) -> dict[str, str]:
-    """Return tuned options for each encoder."""
+    """Return tuned options for each encoder.
+
+    NVENC uses default rate control (produces excellent compression without
+    explicit quality settings). Software encoders use CRF for quality targeting.
+    Note: NVENC's QP scale differs from CRF — constqp qp=30 is much higher
+    quality than CRF=30, producing files 10-30x larger.
+    """
     if name == "libsvtav1":
         return {"preset": "8", "crf": str(_CRF)}
     if name == "libx265":
         return {"preset": "fast", "x265-params": f"crf={_CRF}"}
-    if name in ("av1_nvenc", "hevc_nvenc"):
-        return {"rc": "constqp", "qp": str(_CRF)}
+    # NVENC: no explicit quality settings — defaults give best size/quality tradeoff
     return {}
 
 
