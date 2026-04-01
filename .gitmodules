@@ -1,0 +1,3 @@
+[submodule "packages/pyvrs-viewer/thirdparty/cpp-example-vrs"]
+	path = packages/pyvrs-viewer/thirdparty/cpp-example-vrs
+	url = https://github.com/rerun-io/cpp-example-vrs.git
