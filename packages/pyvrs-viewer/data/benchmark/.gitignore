@@ -1,4 +1,5 @@
-# Benchmark VRS files and temp RRDs
+# Benchmark VRS files, RRDs, and generated results
 quest/
 aria/
 rrd/
+results.md
