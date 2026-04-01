@@ -29,7 +29,7 @@ pixi run -e pyvrs-viewer vrs-to-rrd-quest    # Quest: 2 mono SLAM cameras (~2.7 
 pixi run -e pyvrs-viewer vrs-to-rrd-aria     # Aria: 3 cameras + 2 IMUs (~1.7 GB download)
 ```
 
-### Custom VRS files
+### Custom VRS files (via task)
 
 ```bash
 # Save to .rrd (AV1 encoded)
@@ -43,6 +43,16 @@ pixi run -e pyvrs-viewer vrs-to-rrd -- --vrs-path /path/to/file.vrs --no-encode-
 
 # H265 instead of AV1
 pixi run -e pyvrs-viewer vrs-to-rrd -- --vrs-path /path/to/file.vrs --video-codec H265
+```
+
+### Custom VRS files (via python directly)
+
+You can also run the CLI script directly in the pixi environment without a task:
+
+```bash
+pixi run -e pyvrs-viewer python packages/pyvrs-viewer/tools/demos/vrs_to_rrd.py \
+  --vrs-path /path/to/file.vrs \
+  --rr-config.save output.rrd
 ```
 
 ### All available tasks
