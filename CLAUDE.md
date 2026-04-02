@@ -156,3 +156,4 @@ Workspace-level `[pypi-options.dependency-overrides]` in root `pixi.toml` overri
 - **`moge` needs no-build-isolation** — it requires torch at build time (configured in `[pypi-options]`)
 - **sam3d-body-rerun uses `tool/` (singular)** not `tools/` for its CLI scripts
 - **Dev tasks use `$PACKAGE_DIR`** — each package feature sets `PACKAGE_DIR` via activation env, dev tasks `cd $PACKAGE_DIR` before running
+- **Direnv fails after changing `pixi.toml`** — `.envrc` uses `--frozen`, so run `pixi install -e <name>-dev` (or `pixi install -a`) to re-solve, then direnv picks up the updated lockfile automatically
