@@ -13,10 +13,13 @@ Each package has a **prod** environment (for running demos/apps) and a **dev** e
 | Package | Prod env | Dev env | Module path | GPU |
 |---|---|---|---|---|
 | monoprior | `monoprior` | `monoprior-dev` | `packages/monoprior/monopriors/` | CUDA 12.9 |
+| prompt-da | `prompt-da` | `prompt-da-dev` | `packages/prompt-da/src/rerun_prompt_da/` | CUDA 12.9 |
 | wilor-nano | `wilor` | `wilor-dev` | `packages/wilor-nano/src/wilor_nano/` | CUDA 12.9 |
 | sam3d-body-rerun | `sam3d` | `sam3d-dev` | `packages/sam3d-body-rerun/src/sam3d_body/` | CUDA 12.9 |
 | sam3-rerun | `sam3-rerun` | `sam3-rerun-dev` | `packages/sam3-rerun/src/sam3_rerun/` | CUDA 12.9 |
 | robocap-slam | `robocap` | `robocap-dev` | `packages/robocap-slam/robocap_slam/` | None (CPU) |
+| pysfm | `pysfm` | `pysfm-dev` | `packages/pysfm/pysfm/` | CUDA 12.9 |
+| vistadream | `vistadream` | `vistadream-dev` | `packages/vistadream/src/vistadream/` | CUDA 12.9 |
 
 ## Direnv Integration
 
