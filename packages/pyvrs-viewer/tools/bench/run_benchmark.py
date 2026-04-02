@@ -1,0 +1,228 @@
+"""Benchmark pyvrs-viewer across multiple Hot3D VRS files.
+
+Downloads 5 Quest + 5 Aria VRS files and runs both AV1 encode and
+EncodedImage (JPEG passthrough) modes, collecting timing and size metrics.
+
+Requires Hot3D download URL JSON files (not included in repo — see README):
+  tools/bench/hot3dquest_download_urls.json
+  tools/bench/hot3daria_download_urls.json
+
+Usage:
+    pixi run -e pyvrs-viewer -- python tools/bench/run_benchmark.py
+"""
+
+import json
+import logging
+import os
+import subprocess
+import tempfile
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+from pyvrs import SyncVRSReader
+from simplecv.rerun_log_utils import RerunTyroConfig
+
+from pyvrs_viewer.video_encoder import VideoCodecChoice
+from pyvrs_viewer.vrs_to_rerun import VrsToRerunConfig, vrs_to_rerun
+
+logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+logger: logging.Logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+BENCH_DIR: Path = Path(__file__).resolve().parent
+PKG_ROOT: Path = BENCH_DIR.parents[1]
+QUEST_JSON: Path = BENCH_DIR / "hot3dquest_download_urls.json"
+ARIA_JSON: Path = BENCH_DIR / "hot3daria_download_urls.json"
+DATA_DIR: Path = PKG_ROOT / "data" / "benchmark"
+MAX_FILES: int = 5
+
+
+@dataclass
+class BenchmarkResult:
+    """Results for one VRS file."""
+
+    sequence_id: str
+    device: str
+    vrs_size_mb: float
+    n_records: int
+    av1_time_sec: float = 0.0
+    av1_rrd_size_mb: float = 0.0
+    jpeg_time_sec: float = 0.0
+    jpeg_rrd_size_mb: float = 0.0
+    error: str = ""
+
+
+def _download_vrs(url: str, dest: Path) -> None:
+    """Download a VRS file with curl if not already on disk."""
+    if dest.exists():
+        logger.info(f"  Already exists: {dest.name}")
+        return
+    logger.info(f"  Downloading {dest.name}...")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["curl", "-L", "-o", str(dest), url], check=True)
+
+
+def _run_one(vrs_path: Path, encode_video: bool) -> tuple[float, float]:
+    """Run vrs_to_rerun and return (time_sec, rrd_size_mb)."""
+    with tempfile.NamedTemporaryFile(suffix=".rrd", delete=False) as f:
+        rrd_path: Path = Path(f.name)
+
+    try:
+        config: VrsToRerunConfig = VrsToRerunConfig(
+            vrs_path=vrs_path,
+            rr_config=RerunTyroConfig(save=rrd_path, headless=True),
+            encode_video=encode_video,
+            video_codec=VideoCodecChoice.AV1,
+        )
+        t0: float = time.perf_counter()
+        vrs_to_rerun(config)
+        elapsed: float = time.perf_counter() - t0
+        rrd_size_mb: float = rrd_path.stat().st_size / 1024 / 1024
+        return elapsed, rrd_size_mb
+    finally:
+        rrd_path.unlink(missing_ok=True)
+
+
+def _collect_vrs_files(json_path: Path, device: str) -> list[tuple[str, str, Path]]:
+    """Return list of (sequence_id, download_url, local_path) for first MAX_FILES sequences."""
+    with open(json_path) as f:
+        data: dict = json.load(f)
+
+    results: list[tuple[str, str, Path]] = []
+    for seq_id in list(data["sequences"].keys())[:MAX_FILES]:
+        vrs_info: dict = data["sequences"][seq_id].get("main_vrs", {})
+        url: str = vrs_info.get("download_url", "")
+        local_path: Path = DATA_DIR / device / f"{seq_id}.vrs"
+        results.append((seq_id, url, local_path))
+    return results
+
+
+def _copy_existing_files() -> None:
+    """Copy existing VRS files from data/ to benchmark directories."""
+    existing_quest: Path = PKG_ROOT / "data" / "hot3d_quest.vrs"
+    existing_aria: Path = PKG_ROOT / "data" / "hot3d_aria.vrs"
+    dest_quest: Path = DATA_DIR / "quest" / "P0002_1464cbdc.vrs"
+    dest_aria: Path = DATA_DIR / "aria" / "P0001_10a27bf7.vrs"
+
+    if existing_quest.exists() and not dest_quest.exists():
+        dest_quest.parent.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Linking existing Quest VRS → {dest_quest.name}")
+        os.link(str(existing_quest), str(dest_quest))
+    if existing_aria.exists() and not dest_aria.exists():
+        dest_aria.parent.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Linking existing Aria VRS → {dest_aria.name}")
+        os.link(str(existing_aria), str(dest_aria))
+
+
+def main() -> None:
+    logger.info("=== pyvrs-viewer Benchmark ===")
+
+    # Check for required download JSON files
+    for json_path, name in [(QUEST_JSON, "Quest"), (ARIA_JSON, "Aria")]:
+        if not json_path.exists():
+            logger.error(
+                f"Missing {name} download URLs: {json_path}\n"
+                "Download from https://www.projectaria.com/datasets/hot3d/ and place in tools/bench/.\n"
+                "See README.md for instructions."
+            )
+            return
+
+    # Organize existing files
+    _copy_existing_files()
+
+    # Collect file lists
+    quest_files: list[tuple[str, str, Path]] = _collect_vrs_files(QUEST_JSON, "quest")
+    aria_files: list[tuple[str, str, Path]] = _collect_vrs_files(ARIA_JSON, "aria")
+    all_files: list[tuple[str, str, Path, str]] = [(s, u, p, "quest") for s, u, p in quest_files] + [(s, u, p, "aria") for s, u, p in aria_files]
+
+    # Download missing files
+    logger.info(f"Downloading {len(all_files)} VRS files...")
+    for _seq_id, url, local_path, _device in all_files:
+        _download_vrs(url, local_path)
+
+    # Run benchmarks
+    results: list[BenchmarkResult] = []
+    for seq_id, _url, local_path, device in all_files:
+        vrs_size_mb: float = local_path.stat().st_size / 1024 / 1024
+        reader: SyncVRSReader = SyncVRSReader(str(local_path))
+        n_records: int = reader.n_records
+
+        logger.info("")
+        logger.info(f"─── {seq_id} ({device}, {vrs_size_mb:.0f} MB, {n_records} records) ───")
+
+        result: BenchmarkResult = BenchmarkResult(
+            sequence_id=seq_id, device=device, vrs_size_mb=vrs_size_mb, n_records=n_records
+        )
+
+        try:
+            # AV1 encode mode
+            logger.info("  AV1 encode...")
+            result.av1_time_sec, result.av1_rrd_size_mb = _run_one(local_path, encode_video=True)
+            compression: float = vrs_size_mb / result.av1_rrd_size_mb if result.av1_rrd_size_mb > 0 else 0
+            logger.info(f"  → {result.av1_time_sec:.1f}s, {result.av1_rrd_size_mb:.0f} MB RRD ({compression:.1f}x compression)")
+        except Exception as e:
+            result.error += f"AV1: {e}; "
+            logger.exception(f"  AV1 FAILED: {e}")
+
+        try:
+            # EncodedImage (JPEG passthrough) mode
+            logger.info("  JPEG passthrough...")
+            result.jpeg_time_sec, result.jpeg_rrd_size_mb = _run_one(local_path, encode_video=False)
+            logger.info(f"  → {result.jpeg_time_sec:.1f}s, {result.jpeg_rrd_size_mb:.0f} MB RRD")
+        except Exception as e:
+            result.error += f"JPEG: {e}; "
+            logger.exception(f"  JPEG FAILED: {e}")
+
+        results.append(result)
+
+    # Print summary table
+    print("\n" + "=" * 140)
+    print("BENCHMARK RESULTS")
+    print("=" * 140)
+    header: str = (
+        f"{'Sequence':<20} {'Device':<6} {'VRS(MB)':>8} {'Recs':>8} │ "
+        f"{'AV1 Time':>9} {'AV1 RRD':>9} {'Compress':>9} │ "
+        f"{'JPEG Time':>10} {'JPEG RRD':>10} │ "
+        f"{'Speedup':>8} {'SizeRed':>8} │ {'Status'}"
+    )
+    print(header)
+    print("─" * 140)
+    for r in results:
+        compress: str = f"{r.vrs_size_mb / r.av1_rrd_size_mb:.0f}x" if r.av1_rrd_size_mb > 0 else "N/A"
+        speedup: str = f"{r.jpeg_time_sec / r.av1_time_sec:.1f}x" if r.av1_time_sec > 0 and r.jpeg_time_sec > 0 else "N/A"
+        size_red: str = f"{r.jpeg_rrd_size_mb / r.av1_rrd_size_mb:.0f}x" if r.av1_rrd_size_mb > 0 and r.jpeg_rrd_size_mb > 0 else "N/A"
+        print(
+            f"{r.sequence_id:<20} {r.device:<6} {r.vrs_size_mb:>8.0f} {r.n_records:>8} │ "
+            f"{r.av1_time_sec:>8.1f}s {r.av1_rrd_size_mb:>8.0f}M {compress:>9} │ "
+            f"{r.jpeg_time_sec:>9.1f}s {r.jpeg_rrd_size_mb:>9.0f}M │ "
+            f"{speedup:>8} {size_red:>8} │ {r.error or 'OK'}"
+        )
+    print("─" * 140)
+    print("  Speedup = JPEG time / AV1 time (<1 means AV1 slower)")
+    print("  SizeRed = JPEG RRD / AV1 RRD (how many times smaller AV1 output is)")
+
+    # Save markdown results
+    results_md: Path = DATA_DIR / "results.md"
+    with open(results_md, "w") as f:
+        f.write("# pyvrs-viewer Benchmark Results\n\n")
+        f.write("| Sequence | Device | VRS (MB) | Records | AV1 Time (s) | AV1 RRD (MB) | Compression | JPEG Time (s) | JPEG RRD (MB) | AV1 Speedup | AV1 Size Reduction | Status |\n")
+        f.write("|----------|--------|----------|---------|--------------|--------------|-------------|---------------|---------------|-------------|-------------------|--------|\n")
+        for r in results:
+            compress_str: str = f"{r.vrs_size_mb / r.av1_rrd_size_mb:.0f}x" if r.av1_rrd_size_mb > 0 else "N/A"
+            speedup_str: str = f"{r.jpeg_time_sec / r.av1_time_sec:.1f}x" if r.av1_time_sec > 0 and r.jpeg_time_sec > 0 else "N/A"
+            size_red_str: str = f"{r.jpeg_rrd_size_mb / r.av1_rrd_size_mb:.0f}x smaller" if r.av1_rrd_size_mb > 0 and r.jpeg_rrd_size_mb > 0 else "N/A"
+            f.write(
+                f"| {r.sequence_id} | {r.device} | {r.vrs_size_mb:.0f} | {r.n_records} | "
+                f"{r.av1_time_sec:.1f} | {r.av1_rrd_size_mb:.0f} | {compress_str} | "
+                f"{r.jpeg_time_sec:.1f} | {r.jpeg_rrd_size_mb:.0f} | {speedup_str} | {size_red_str} | "
+                f"{r.error or 'OK'} |\n"
+            )
+        f.write("\n## Summary\n\n")
+        f.write("**AV1 Speedup** = JPEG time / AV1 time (how much slower AV1 is vs JPEG passthrough)\n")
+        f.write("**AV1 Size Reduction** = JPEG RRD / AV1 RRD (how much smaller AV1 output is)\n")
+    logger.info(f"Results saved to {results_md}")
+
+
+if __name__ == "__main__":
+    main()

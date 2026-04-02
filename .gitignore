@@ -104,11 +104,16 @@ packages/sam3d-body-rerun/data/
 packages/sam3-rerun/data/
 packages/robocap-slam/data/
 packages/pysfm/data/
+packages/gsplat-rust-renderer/data/
 packages/*/outputs/
 packages/*/checkpoints/
 packages/*/_checkpoints/
 
 packages/vistadream/ckpt/
+
+# gsplat-rust-renderer
+packages/gsplat-rust-renderer/target/
+packages/gsplat-rust-renderer/examples/*.ply
 
 # Package-specific ignores
 packages/wilor-nano/pretrained_models/

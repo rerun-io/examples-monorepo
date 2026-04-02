@@ -608,6 +608,216 @@ cwd = "packages/vistadream"
 description = "Launch VistaDream Gradio web interface"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# pyvrs-viewer
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.pyvrs-viewer.dependencies]
+python = "3.12.*"
+tyro = ">=0.9.1,<0.10"
+
+[feature.pyvrs-viewer.pypi-dependencies]
+pyvrs-viewer = { path = "packages/pyvrs-viewer", editable = true }
+vrs = "*"
+PyTurboJPEG = "*"
+
+[feature.pyvrs-viewer.activation.env]
+PACKAGE_DIR = "packages/pyvrs-viewer"
+
+# ── Download tasks ───────────────────────────────────────────────────────
+[feature.pyvrs-viewer-demo.tasks._download-hot3d-quest-vrs]
+cmd = """
+test -f data/hot3d_quest.vrs || \
+curl -L -o data/hot3d_quest.vrs \
+  'https://scontent.xx.fbcdn.net/m1/v/t6/An9GExjCnYwO02IsP_xnrencBwdUTHg2gxLtxbWcVVn05qEZ7MZ-TEyybVMIVS9tVckTd0anQCP058RBnetrmidiFc4kkKRCMwbZ9DPufV8VZ_CsSlmn9k-tJjAJCLjks31tl4mkR5k5EM_DIO69BeOPbcNzbaSxCr0.vrs/Hot3DQuest_v4.0.0_P0002_1464cbdc_main_recording.vrs?_nc_gid&ccb=10-5&oh=00_AfxEnSw-bXsG5fzYoCMC8z4yPRBu-dNnse9nztDGrOopEA&oe=69F370EC&_nc_sid=71efe3'
+"""
+cwd = "packages/pyvrs-viewer"
+description = "Download Hot3D Quest VRS example (2 mono cameras)"
+
+[feature.pyvrs-viewer-demo.tasks._download-hot3d-aria-vrs]
+cmd = """
+test -f data/hot3d_aria.vrs || \
+curl -L -o data/hot3d_aria.vrs \
+  'https://scontent.xx.fbcdn.net/m1/v/t6/An9jFWjgcg_1tMlA5V2DkwPV8hSjqqfw3fpaoe-Mz5PxqMZCzq5HZg_QJaX6Oq2jm0j8tAJ2I-H-c4FAOnDvqezuEho1RUFDWqe6d0AqrcOMK0LCjmnhXiNuihAr_-SDjNEPK1896cP9oVpHhp7bUEi0O795nufof00.vrs/Hot3DAria_v4.0.0_P0001_10a27bf7_main_recording.vrs?_nc_gid&ccb=10-6&oh=00_Afy-YiaePXBCaucxejkXfKbjTJG6dF2PvdJg0eLCPlxKyQ&oe=69F03AE5&_nc_sid=71efe3'
+"""
+cwd = "packages/pyvrs-viewer"
+description = "Download Hot3D Aria VRS example (4 cameras + IMU + sensors)"
+
+# ── Demo tasks ───────────────────────────────────────────────────────────
+[feature.pyvrs-viewer-demo.tasks.vrs-to-rrd]
+cmd = "python tools/demos/vrs_to_rrd.py"
+cwd = "packages/pyvrs-viewer"
+description = "Convert any VRS file (pass --vrs-path and other args after --)"
+
+[feature.pyvrs-viewer-demo.tasks.vrs-to-rrd-quest]
+cmd = "python tools/demos/vrs_to_rrd.py --vrs-path data/hot3d_quest.vrs --rr-config.save data/hot3d_quest.rrd"
+depends-on = ["_download-hot3d-quest-vrs"]
+cwd = "packages/pyvrs-viewer"
+description = "Convert Hot3D Quest VRS to .rrd (2 mono cameras)"
+
+[feature.pyvrs-viewer-demo.tasks.vrs-to-rrd-aria]
+cmd = "python tools/demos/vrs_to_rrd.py --vrs-path data/hot3d_aria.vrs --rr-config.save data/hot3d_aria.rrd"
+depends-on = ["_download-hot3d-aria-vrs"]
+cwd = "packages/pyvrs-viewer"
+description = "Convert Hot3D Aria VRS to .rrd (cameras + IMU + sensors)"
+
+[feature.pyvrs-viewer-demo.tasks.benchmark]
+cmd = "python tools/bench/run_benchmark.py"
+cwd = "packages/pyvrs-viewer"
+description = "Benchmark 5 Quest + 5 Aria VRS files (requires download URL JSONs)"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# gsplat-rust-renderer
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.gsplat-rust-renderer.dependencies]
+python = "3.12.*"
+rust = "1.93.*"
+clang = "*"
+cmake = "*"
+pkg-config = "*"
+numpy = "*"
+jaxtyping = "<0.3"
+typing_extensions = ">=4.1.0,<4.13.0"
+av = "*"
+py-opencv = "*"
+huggingface_hub = "*"
+hf-transfer = "*"
+tyro = ">=0.9.1,<0.10"
+pyserde = ">=0.20,<0.30"
+
+[feature.gsplat-rust-renderer.target.linux-64.dependencies]
+libxkbcommon = "*"
+wayland = "*"
+xorg-libx11 = "*"
+xorg-libxcursor = "*"
+xorg-libxi = "*"
+xorg-libxinerama = "*"
+xorg-libxrandr = "*"
+brush = "==0.3.0"
+
+[feature.gsplat-rust-renderer.pypi-dependencies]
+gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
+plyfile = ">=1.1,<2"
+rerun-sdk = "==0.30.2"
+simplecv = { git = "https://github.com/pablovela5620/simplecv.git", tag = "v0.7.2" }
+
+[feature.gsplat-rust-renderer.activation.env]
+PACKAGE_DIR = "packages/gsplat-rust-renderer"
+
+# ── Download tasks ───────────────────────────────────────────────────────
+[feature.gsplat-rust-renderer.tasks._download-chair-ply]
+cmd = "test -e examples/chair.ply || hf download pablovela5620/splat-dataset chair.ply --repo-type dataset --local-dir examples/"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download example chair PLY from HuggingFace"
+
+[feature.gsplat-rust-renderer.tasks._download-tandt]
+cmd = """
+test -d data/tandt || \
+(mkdir -p data && \
+wget -q --show-progress -O data/tandt_db.zip https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/datasets/input/tandt_db.zip && \
+unzip -q data/tandt_db.zip -d data && \
+rm data/tandt_db.zip)
+"""
+cwd = "packages/gsplat-rust-renderer"
+outputs = ["packages/gsplat-rust-renderer/data/tandt/"]
+description = "Download Tanks & Temples + Deep Blending datasets from INRIA"
+
+[feature.gsplat-rust-renderer.tasks._download-nerf-lego]
+cmd = "test -d data/nerf-synthetic/lego || hf download pablovela5620/nerf-synthetic-mirror --include 'lego/*' --repo-type dataset --local-dir data/nerf-synthetic/"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download NeRF Synthetic lego scene from HuggingFace"
+
+[feature.gsplat-rust-renderer.tasks._download-nerf-hotdog]
+cmd = "test -d data/nerf-synthetic/hotdog || hf download pablovela5620/nerf-synthetic-mirror --include 'hotdog/*' --repo-type dataset --local-dir data/nerf-synthetic/"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download NeRF Synthetic hotdog scene from HuggingFace"
+
+[feature.gsplat-rust-renderer.tasks._download-nerf-drums]
+cmd = "test -d data/nerf-synthetic/drums || hf download pablovela5620/nerf-synthetic-mirror --include 'drums/*' --repo-type dataset --local-dir data/nerf-synthetic/"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download NeRF Synthetic drums scene from HuggingFace"
+
+[feature.gsplat-rust-renderer.tasks._download-nerf-ship]
+cmd = "test -d data/nerf-synthetic/ship || hf download pablovela5620/nerf-synthetic-mirror --include 'ship/*' --repo-type dataset --local-dir data/nerf-synthetic/"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download NeRF Synthetic ship scene from HuggingFace"
+
+# ── Brush training tasks ─────────────────────────────────────────────────
+[feature.gsplat-rust-renderer.tasks.brush-train-truck]
+cmd = """
+brush_app data/tandt/truck \
+  --total-steps 30000 \
+  --export-every 30000 \
+  --export-path data/trained \
+  --export-name truck.ply
+"""
+depends-on = ["_download-tandt"]
+cwd = "packages/gsplat-rust-renderer"
+description = "Train Gaussian splats on truck scene (30K steps)"
+
+[feature.gsplat-rust-renderer.tasks.brush-train-train]
+cmd = """
+brush_app data/tandt/train \
+  --total-steps 30000 \
+  --export-every 30000 \
+  --export-path data/trained \
+  --export-name train.ply
+"""
+depends-on = ["_download-tandt"]
+cwd = "packages/gsplat-rust-renderer"
+description = "Train Gaussian splats on train scene (30K steps)"
+
+[feature.gsplat-rust-renderer.tasks.brush-train-lego]
+cmd = """
+brush_app data/nerf-synthetic/lego \
+  --total-steps 30000 \
+  --export-every 30000 \
+  --export-path data/trained \
+  --export-name lego.ply
+"""
+depends-on = ["_download-nerf-lego"]
+cwd = "packages/gsplat-rust-renderer"
+description = "Train Gaussian splats on NeRF Synthetic lego scene (30K steps)"
+
+[feature.gsplat-rust-renderer.tasks.brush-train-hotdog]
+cmd = """
+brush_app data/nerf-synthetic/hotdog \
+  --total-steps 30000 \
+  --export-every 30000 \
+  --export-path data/trained \
+  --export-name hotdog.ply
+"""
+depends-on = ["_download-nerf-hotdog"]
+cwd = "packages/gsplat-rust-renderer"
+description = "Train Gaussian splats on NeRF Synthetic hotdog scene (30K steps)"
+
+# ── Rust tasks ───────────────────────────────────────────────────────────
+[feature.gsplat-rust-renderer.tasks.viewer]
+cmd = "cargo run --release"
+cwd = "packages/gsplat-rust-renderer"
+description = "Launch the Rerun viewer with Gaussian splat visualization"
+
+[feature.gsplat-rust-renderer.tasks.fmt]
+cmd = "cargo fmt --all"
+cwd = "packages/gsplat-rust-renderer"
+description = "Format Rust code"
+
+[feature.gsplat-rust-renderer.tasks.clippy]
+cmd = "cargo clippy --all-targets -- -D warnings"
+cwd = "packages/gsplat-rust-renderer"
+description = "Run clippy on Rust code"
+
+[feature.gsplat-rust-renderer.tasks.rust-test]
+cmd = "cargo test"
+cwd = "packages/gsplat-rust-renderer"
+description = "Run Rust test suite"
+
+# ── Python demo tasks ────────────────────────────────────────────────────
+[feature.gsplat-rust-renderer.tasks.log-ply]
+cmd = "python tools/log_gaussian_ply.py --rr-config.connect --rr-config.application-id gsplat-rust-renderer"
+depends-on = ["_download-chair-ply"]
+cwd = "packages/gsplat-rust-renderer"
+description = "Load example PLY and log it to the running viewer"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
 [environments]
@@ -703,3 +913,20 @@ vistadream-dev = { features = [
     "vistadream",
     "dev",
 ], solve-group = "vistadream", no-default-feature = true }
+pyvrs-viewer = { features = [
+    "common",
+    "pyvrs-viewer",
+    "pyvrs-viewer-demo",
+], solve-group = "pyvrs-viewer", no-default-feature = true }
+pyvrs-viewer-dev = { features = [
+    "common",
+    "pyvrs-viewer",
+    "dev",
+], solve-group = "pyvrs-viewer", no-default-feature = true }
+gsplat-rust-renderer = { features = [
+    "gsplat-rust-renderer",
+], solve-group = "gsplat-rust-renderer", no-default-feature = true }
+gsplat-rust-renderer-dev = { features = [
+    "gsplat-rust-renderer",
+    "dev",
+], solve-group = "gsplat-rust-renderer", no-default-feature = true }

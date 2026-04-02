@@ -1,0 +1,27 @@
+[project]
+name = "pyvrs-viewer"
+version = "0.1.0"
+description = "VRS file viewer for Rerun, ported from the C++ rerun-io/cpp-example-vrs using pyvrs"
+requires-python = ">=3.12"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pyvrs_viewer"]
+
+[tool.ruff]
+line-length = 150
+exclude = ["thirdparty"]
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+ignore = [
+    "E501",   # Line too long
+    "F722",   # jaxtyping forward annotation false positive
+    "F821",   # jaxtyping forward annotation false positive
+    "UP037",  # Remove quotes false positive with jaxtyping
+    "UP040",  # Beartype requires TypeAlias, not PEP 695 type
+]
