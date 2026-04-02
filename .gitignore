@@ -60,7 +60,7 @@ cover/
 
 # Environments
 .env
-.envrc
+.envrc.local
 .venv
 env/
 venv/

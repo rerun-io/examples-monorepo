@@ -13,38 +13,74 @@ Each package has a **prod** environment (for running demos/apps) and a **dev** e
 | Package | Prod env | Dev env | Module path | GPU |
 |---|---|---|---|---|
 | monoprior | `monoprior` | `monoprior-dev` | `packages/monoprior/monopriors/` | CUDA 12.9 |
+| prompt-da | `prompt-da` | `prompt-da-dev` | `packages/prompt-da/src/rerun_prompt_da/` | CUDA 12.9 |
 | wilor-nano | `wilor` | `wilor-dev` | `packages/wilor-nano/src/wilor_nano/` | CUDA 12.9 |
 | sam3d-body-rerun | `sam3d` | `sam3d-dev` | `packages/sam3d-body-rerun/src/sam3d_body/` | CUDA 12.9 |
 | sam3-rerun | `sam3-rerun` | `sam3-rerun-dev` | `packages/sam3-rerun/src/sam3_rerun/` | CUDA 12.9 |
 | robocap-slam | `robocap` | `robocap-dev` | `packages/robocap-slam/robocap_slam/` | None (CPU) |
+| pysfm | `pysfm` | `pysfm-dev` | `packages/pysfm/pysfm/` | CUDA 12.9 |
+| vistadream | `vistadream` | `vistadream-dev` | `packages/vistadream/src/vistadream/` | CUDA 12.9 |
+| gsplat-rust-renderer | `gsplat-rust-renderer` | `gsplat-rust-renderer-dev` | `packages/gsplat-rust-renderer/src/` | CUDA 12.9 |
+| pyvrs-viewer | `pyvrs-viewer` | `pyvrs-viewer-dev` | `packages/pyvrs-viewer/src/pyvrs_viewer/` | None (CPU) |
+
+## Direnv Integration
+
+Each package directory has an `.envrc` that auto-activates the correct `*-dev` pixi environment via [direnv](https://direnv.net/). This eliminates the need for `-e` and `--frozen` flags on every command.
+
+### Setup (one-time)
+
+```bash
+pixi global install direnv                    # install direnv
+echo 'eval "$(direnv hook bash)"' >> ~/.bashrc  # or: echo 'eval "$(direnv hook zsh)"' >> ~/.zshrc
+source ~/.bashrc                               # restart shell or source your rc file
+direnv allow                                   # approve root .envrc
+for d in packages/*/; do (cd "$d" && direnv allow); done  # approve all packages
+```
+
+### Usage
+
+```bash
+cd packages/robocap-slam/   # direnv auto-activates robocap-dev
+python --version             # → 3.10.x (robocap's pinned Python)
+ruff check .                 # just works, no pixi run -e needed
+pytest -q                    # just works
+
+cd ../../packages/pysfm/     # direnv switches to pysfm-dev
+python --version             # → 3.12.x
+```
+
+Each `.envrc` defaults to the `*-dev` environment. To override (e.g., use prod env), create a `.envrc.local` (gitignored):
+```bash
+# packages/robocap-slam/.envrc.local
+PIXI_ENV=robocap
+```
+
+### How it works
+
+- Root `.envrc` activates the lightweight `dev` environment (ruff, pytest, pyrefly only)
+- Each `packages/<name>/.envrc` activates that package's `*-dev` environment with `--frozen` and `--manifest-path ../..`
+- `PIXI_DEV_MODE`, `PACKAGE_DIR`, `CONDA_PREFIX` etc. are all set automatically
+- Environment deactivates when you `cd` out
 
 ## Common Commands
 
-Always specify the environment with `-e`:
+With direnv active, run dev tools directly from a package directory:
 
 ```bash
-# Install an environment
-pixi install -e monoprior        # prod only
-pixi install -e monoprior-dev    # dev (includes ruff, pytest, beartype, pyrefly)
+cd packages/monoprior/
+ruff check .          # lint
+pytest -q             # test
+pyrefly check .       # typecheck
+python tools/demos/relative_depth.py --image-path data/examples/single-image/room.jpg
+```
 
-# List tasks for an environment
-pixi task list -e monoprior-dev
+The `pixi run -e` workflow still works from the repo root and is needed for tasks with `depends-on` chains (like download tasks):
 
-# Lint, typecheck, test (unified task names across all *-dev envs)
-pixi run -e monoprior-dev lint
-pixi run -e monoprior-dev typecheck
-pixi run -e monoprior-dev tests
-
-pixi run -e robocap-dev lint
-pixi run -e robocap-dev typecheck
-pixi run -e robocap-dev tests
-
-# Run a single test file
-pixi run -e monoprior-dev -- pytest tests/test_specific.py -q
-
-# Run demos (prod env is sufficient)
-pixi run -e monoprior relative-depth
-pixi run -e robocap robocap-track
+```bash
+# From repo root — pixi run tasks still work
+pixi run -e monoprior --frozen relative-depth     # runs download + demo
+pixi run -e robocap-dev --frozen lint
+pixi run -e robocap-dev --frozen tests
 ```
 
 Dev tasks (`lint`, `typecheck`, `tests`) are unified — same name in every `*-dev` environment. Demo/app tasks live in the package's own feature and work in both prod and dev envs.
@@ -122,3 +158,4 @@ Workspace-level `[pypi-options.dependency-overrides]` in root `pixi.toml` overri
 - **`moge` needs no-build-isolation** — it requires torch at build time (configured in `[pypi-options]`)
 - **sam3d-body-rerun uses `tool/` (singular)** not `tools/` for its CLI scripts
 - **Dev tasks use `$PACKAGE_DIR`** — each package feature sets `PACKAGE_DIR` via activation env, dev tasks `cd $PACKAGE_DIR` before running
+- **Direnv fails after changing `pixi.toml`** — `.envrc` uses `--frozen`, so run `pixi install -e <name>-dev` (or `pixi install -a`) to re-solve, then direnv picks up the updated lockfile automatically
