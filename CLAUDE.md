@@ -18,33 +18,64 @@ Each package has a **prod** environment (for running demos/apps) and a **dev** e
 | sam3-rerun | `sam3-rerun` | `sam3-rerun-dev` | `packages/sam3-rerun/src/sam3_rerun/` | CUDA 12.9 |
 | robocap-slam | `robocap` | `robocap-dev` | `packages/robocap-slam/robocap_slam/` | None (CPU) |
 
-## Common Commands
+## Direnv Integration
 
-Always specify the environment with `-e`:
+Each package directory has an `.envrc` that auto-activates the correct `*-dev` pixi environment via [direnv](https://direnv.net/). This eliminates the need for `-e` and `--frozen` flags on every command.
+
+### Setup (one-time)
 
 ```bash
-# Install an environment
-pixi install -e monoprior        # prod only
-pixi install -e monoprior-dev    # dev (includes ruff, pytest, beartype, pyrefly)
+pixi global install direnv                    # install direnv
+echo 'eval "$(direnv hook bash)"' >> ~/.bashrc  # or ~/.zshrc for zsh
+source ~/.bashrc                               # reload shell
+direnv allow                                   # approve root .envrc
+for d in packages/*/; do (cd "$d" && direnv allow); done  # approve all packages
+```
 
-# List tasks for an environment
-pixi task list -e monoprior-dev
+### Usage
 
-# Lint, typecheck, test (unified task names across all *-dev envs)
-pixi run -e monoprior-dev lint
-pixi run -e monoprior-dev typecheck
-pixi run -e monoprior-dev tests
+```bash
+cd packages/robocap-slam/   # direnv auto-activates robocap-dev
+python --version             # → 3.10.x (robocap's pinned Python)
+ruff check .                 # just works, no pixi run -e needed
+pytest -q                    # just works
 
-pixi run -e robocap-dev lint
-pixi run -e robocap-dev typecheck
-pixi run -e robocap-dev tests
+cd ../../packages/pysfm/     # direnv switches to pysfm-dev
+python --version             # → 3.12.x
+```
 
-# Run a single test file
-pixi run -e monoprior-dev -- pytest tests/test_specific.py -q
+Each `.envrc` defaults to the `*-dev` environment. To override (e.g., use prod env), create a `.envrc.local` (gitignored):
+```bash
+# packages/robocap-slam/.envrc.local
+PIXI_ENV=robocap
+```
 
-# Run demos (prod env is sufficient)
-pixi run -e monoprior relative-depth
-pixi run -e robocap robocap-track
+### How it works
+
+- Root `.envrc` activates the lightweight `dev` environment (ruff, pytest, pyrefly only)
+- Each `packages/<name>/.envrc` activates that package's `*-dev` environment with `--frozen` and `--manifest-path ../..`
+- `PIXI_DEV_MODE`, `PACKAGE_DIR`, `CONDA_PREFIX` etc. are all set automatically
+- Environment deactivates when you `cd` out
+
+## Common Commands
+
+With direnv active, run dev tools directly from a package directory:
+
+```bash
+cd packages/monoprior/
+ruff check .          # lint
+pytest -q             # test
+pyrefly check .       # typecheck
+python tools/demos/relative_depth.py --image-path data/examples/single-image/room.jpg
+```
+
+The `pixi run -e` workflow still works from the repo root and is needed for tasks with `depends-on` chains (like download tasks):
+
+```bash
+# From repo root — pixi run tasks still work
+pixi run -e monoprior --frozen relative-depth     # runs download + demo
+pixi run -e robocap-dev --frozen lint
+pixi run -e robocap-dev --frozen tests
 ```
 
 Dev tasks (`lint`, `typecheck`, `tests`) are unified — same name in every `*-dev` environment. Demo/app tasks live in the package's own feature and work in both prod and dev envs.
