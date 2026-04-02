@@ -665,6 +665,159 @@ cwd = "packages/pyvrs-viewer"
 description = "Benchmark 5 Quest + 5 Aria VRS files (requires download URL JSONs)"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# gsplat-rust-renderer
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.gsplat-rust-renderer.dependencies]
+python = "3.12.*"
+rust = "1.93.*"
+clang = "*"
+cmake = "*"
+pkg-config = "*"
+numpy = "*"
+jaxtyping = "<0.3"
+typing_extensions = ">=4.1.0,<4.13.0"
+av = "*"
+py-opencv = "*"
+huggingface_hub = "*"
+hf-transfer = "*"
+tyro = ">=0.9.1,<0.10"
+pyserde = ">=0.20,<0.30"
+
+[feature.gsplat-rust-renderer.target.linux-64.dependencies]
+libxkbcommon = "*"
+wayland = "*"
+xorg-libx11 = "*"
+xorg-libxcursor = "*"
+xorg-libxi = "*"
+xorg-libxinerama = "*"
+xorg-libxrandr = "*"
+brush = "==0.3.0"
+
+[feature.gsplat-rust-renderer.pypi-dependencies]
+gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
+plyfile = ">=1.1,<2"
+rerun-sdk = "==0.30.2"
+simplecv = { git = "https://github.com/pablovela5620/simplecv.git", tag = "v0.7.2" }
+
+[feature.gsplat-rust-renderer.activation.env]
+PACKAGE_DIR = "packages/gsplat-rust-renderer"
+
+# ── Download tasks ───────────────────────────────────────────────────────
+[feature.gsplat-rust-renderer.tasks._download-chair-ply]
+cmd = "test -e examples/chair.ply || hf download pablovela5620/splat-dataset chair.ply --repo-type dataset --local-dir examples/"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download example chair PLY from HuggingFace"
+
+[feature.gsplat-rust-renderer.tasks._download-tandt]
+cmd = """
+test -d data/tandt || \
+(mkdir -p data && \
+wget -q --show-progress -O data/tandt_db.zip https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/datasets/input/tandt_db.zip && \
+unzip -q data/tandt_db.zip -d data && \
+rm data/tandt_db.zip)
+"""
+cwd = "packages/gsplat-rust-renderer"
+outputs = ["packages/gsplat-rust-renderer/data/tandt/"]
+description = "Download Tanks & Temples + Deep Blending datasets from INRIA"
+
+[feature.gsplat-rust-renderer.tasks._download-nerf-lego]
+cmd = "test -d data/nerf-synthetic/lego || hf download pablovela5620/nerf-synthetic-mirror --include 'lego/*' --repo-type dataset --local-dir data/nerf-synthetic/"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download NeRF Synthetic lego scene from HuggingFace"
+
+[feature.gsplat-rust-renderer.tasks._download-nerf-hotdog]
+cmd = "test -d data/nerf-synthetic/hotdog || hf download pablovela5620/nerf-synthetic-mirror --include 'hotdog/*' --repo-type dataset --local-dir data/nerf-synthetic/"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download NeRF Synthetic hotdog scene from HuggingFace"
+
+[feature.gsplat-rust-renderer.tasks._download-nerf-drums]
+cmd = "test -d data/nerf-synthetic/drums || hf download pablovela5620/nerf-synthetic-mirror --include 'drums/*' --repo-type dataset --local-dir data/nerf-synthetic/"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download NeRF Synthetic drums scene from HuggingFace"
+
+[feature.gsplat-rust-renderer.tasks._download-nerf-ship]
+cmd = "test -d data/nerf-synthetic/ship || hf download pablovela5620/nerf-synthetic-mirror --include 'ship/*' --repo-type dataset --local-dir data/nerf-synthetic/"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download NeRF Synthetic ship scene from HuggingFace"
+
+# ── Brush training tasks ─────────────────────────────────────────────────
+[feature.gsplat-rust-renderer.tasks.brush-train-truck]
+cmd = """
+brush_app data/tandt/truck \
+  --total-steps 30000 \
+  --export-every 30000 \
+  --export-path data/trained \
+  --export-name truck.ply
+"""
+depends-on = ["_download-tandt"]
+cwd = "packages/gsplat-rust-renderer"
+description = "Train Gaussian splats on truck scene (30K steps)"
+
+[feature.gsplat-rust-renderer.tasks.brush-train-train]
+cmd = """
+brush_app data/tandt/train \
+  --total-steps 30000 \
+  --export-every 30000 \
+  --export-path data/trained \
+  --export-name train.ply
+"""
+depends-on = ["_download-tandt"]
+cwd = "packages/gsplat-rust-renderer"
+description = "Train Gaussian splats on train scene (30K steps)"
+
+[feature.gsplat-rust-renderer.tasks.brush-train-lego]
+cmd = """
+brush_app data/nerf-synthetic/lego \
+  --total-steps 30000 \
+  --export-every 30000 \
+  --export-path data/trained \
+  --export-name lego.ply
+"""
+depends-on = ["_download-nerf-lego"]
+cwd = "packages/gsplat-rust-renderer"
+description = "Train Gaussian splats on NeRF Synthetic lego scene (30K steps)"
+
+[feature.gsplat-rust-renderer.tasks.brush-train-hotdog]
+cmd = """
+brush_app data/nerf-synthetic/hotdog \
+  --total-steps 30000 \
+  --export-every 30000 \
+  --export-path data/trained \
+  --export-name hotdog.ply
+"""
+depends-on = ["_download-nerf-hotdog"]
+cwd = "packages/gsplat-rust-renderer"
+description = "Train Gaussian splats on NeRF Synthetic hotdog scene (30K steps)"
+
+# ── Rust tasks ───────────────────────────────────────────────────────────
+[feature.gsplat-rust-renderer.tasks.viewer]
+cmd = "cargo run --release"
+cwd = "packages/gsplat-rust-renderer"
+description = "Launch the Rerun viewer with Gaussian splat visualization"
+
+[feature.gsplat-rust-renderer.tasks.fmt]
+cmd = "cargo fmt --all"
+cwd = "packages/gsplat-rust-renderer"
+description = "Format Rust code"
+
+[feature.gsplat-rust-renderer.tasks.clippy]
+cmd = "cargo clippy --all-targets -- -D warnings"
+cwd = "packages/gsplat-rust-renderer"
+description = "Run clippy on Rust code"
+
+[feature.gsplat-rust-renderer.tasks.rust-test]
+cmd = "cargo test"
+cwd = "packages/gsplat-rust-renderer"
+description = "Run Rust test suite"
+
+# ── Python demo tasks ────────────────────────────────────────────────────
+[feature.gsplat-rust-renderer.tasks.log-ply]
+cmd = "python tools/log_gaussian_ply.py --rr-config.connect --rr-config.application-id gsplat-rust-renderer"
+depends-on = ["_download-chair-ply"]
+cwd = "packages/gsplat-rust-renderer"
+description = "Load example PLY and log it to the running viewer"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
 [environments]
@@ -770,3 +923,10 @@ pyvrs-viewer-dev = { features = [
     "pyvrs-viewer",
     "dev",
 ], solve-group = "pyvrs-viewer", no-default-feature = true }
+gsplat-rust-renderer = { features = [
+    "gsplat-rust-renderer",
+], solve-group = "gsplat-rust-renderer", no-default-feature = true }
+gsplat-rust-renderer-dev = { features = [
+    "gsplat-rust-renderer",
+    "dev",
+], solve-group = "gsplat-rust-renderer", no-default-feature = true }

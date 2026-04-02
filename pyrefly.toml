@@ -10,6 +10,7 @@ project-includes = [
     "packages/pysfm/pysfm/**/*",
     "packages/vistadream/src/**/*",
     "packages/pyvrs-viewer/src/**/*",
+    "packages/gsplat-rust-renderer/gsplat_rust_renderer/**/*",
 ]
 project-excludes = ["**/node_modules", "**/__pycache__", "**/*venv/**/*"]
 
@@ -28,6 +29,7 @@ search-path = [
     "packages/pysfm",
     "packages/vistadream/src",
     "packages/pyvrs-viewer/src",
+    "packages/gsplat-rust-renderer",
 ]
 
 # Third-party packages — all *-dev env site-packages so pyrefly can resolve
@@ -46,6 +48,7 @@ site-package-path = [
     ".pixi/envs/pysfm-dev/lib/python3.12/site-packages",
     ".pixi/envs/vistadream-dev/lib/python3.12/site-packages",
     ".pixi/envs/pyvrs-viewer-dev/lib/python3.12/site-packages",
+    ".pixi/envs/gsplat-rust-renderer-dev/lib/python3.12/site-packages",
 ]
 
 python-interpreter-path = ".pixi/envs/dev/bin/python"
