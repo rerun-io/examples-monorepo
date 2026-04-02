@@ -20,6 +20,8 @@ Each package has a **prod** environment (for running demos/apps) and a **dev** e
 | robocap-slam | `robocap` | `robocap-dev` | `packages/robocap-slam/robocap_slam/` | None (CPU) |
 | pysfm | `pysfm` | `pysfm-dev` | `packages/pysfm/pysfm/` | CUDA 12.9 |
 | vistadream | `vistadream` | `vistadream-dev` | `packages/vistadream/src/vistadream/` | CUDA 12.9 |
+| gsplat-rust-renderer | `gsplat-rust-renderer` | `gsplat-rust-renderer-dev` | `packages/gsplat-rust-renderer/src/` | CUDA 12.9 |
+| pyvrs-viewer | `pyvrs-viewer` | `pyvrs-viewer-dev` | `packages/pyvrs-viewer/src/pyvrs_viewer/` | None (CPU) |
 
 ## Direnv Integration
 
@@ -29,8 +31,8 @@ Each package directory has an `.envrc` that auto-activates the correct `*-dev` p
 
 ```bash
 pixi global install direnv                    # install direnv
-echo 'eval "$(direnv hook bash)"' >> ~/.bashrc  # or ~/.zshrc for zsh
-source ~/.bashrc                               # reload shell
+echo 'eval "$(direnv hook bash)"' >> ~/.bashrc  # or: echo 'eval "$(direnv hook zsh)"' >> ~/.zshrc
+source ~/.bashrc                               # restart shell or source your rc file
 direnv allow                                   # approve root .envrc
 for d in packages/*/; do (cd "$d" && direnv allow); done  # approve all packages
 ```

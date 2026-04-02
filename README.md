@@ -14,6 +14,8 @@ A pixi workspace containing multiple computer vision example projects, each with
 | [robocap-slam](packages/robocap-slam/) | `robocap` | `robocap-dev` | 3.10 | None | Multi-camera visual odometry & SLAM |
 | [pysfm](packages/pysfm/) | `pysfm` | `pysfm-dev` | 3.12 | CUDA 12.9 | COLMAP SfM reconstruction with Rerun + Gradio |
 | [vistadream](packages/vistadream/) | `vistadream` | `vistadream-dev` | 3.12 | CUDA 12.9 | Single-image 3D reconstruction via 3D Gaussians |
+| [gsplat-rust-renderer](packages/gsplat-rust-renderer/) | `gsplat-rust-renderer` | `gsplat-rust-renderer-dev` | 3.12 | CUDA 12.9 | Rust-based Gaussian splatting renderer |
+| [pyvrs-viewer](packages/pyvrs-viewer/) | `pyvrs-viewer` | `pyvrs-viewer-dev` | 3.12 | None | VRS file viewer with Rerun |
 
 ## Quick start
 
@@ -23,8 +25,8 @@ A pixi workspace containing multiple computer vision example projects, each with
 
 ```bash
 pixi global install direnv                      # install direnv
-echo 'eval "$(direnv hook bash)"' >> ~/.bashrc  # or ~/.zshrc for zsh
-source ~/.bashrc                                # reload shell
+echo 'eval "$(direnv hook bash)"' >> ~/.bashrc  # or: echo 'eval "$(direnv hook zsh)"' >> ~/.zshrc
+source ~/.bashrc                                # restart shell or source your rc file
 direnv allow                                    # approve root .envrc
 for d in packages/*/; do (cd "$d" && direnv allow); done  # approve all packages
 ```
@@ -112,6 +114,8 @@ The root `pixi.toml` is structured around **features** that compose into **envir
 [feature.robocap]               #   "
 [feature.pysfm]                 #   "
 [feature.vistadream]            #   "
+[feature.gsplat-rust-renderer]  #   "
+[feature.pyvrs-viewer]          #   "
 
 [environments]                  # Compose features into named environments (prod + dev per package)
 ```
@@ -166,7 +170,7 @@ Note: `sam3d-body-rerun` uses `tool/` (singular) not `tools/`.
    watch_file ../../pixi.lock
    PIXI_ENV="${PIXI_ENV:-<name>-dev}"
    source_env_if_exists .envrc.local
-   eval "$(pixi shell-hook -e $PIXI_ENV --manifest-path ../.. --frozen)"
+   eval "$(pixi shell-hook -e "$PIXI_ENV" --manifest-path ../.. --frozen)"
    ```
 5. Add `packages/<name>/data/` to `.gitignore`
 6. Run `pixi install -e <name>-dev` to verify
