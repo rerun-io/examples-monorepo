@@ -819,7 +819,7 @@ description = "Render a PLY at a NeRF camera position to PNG (no Rerun needed)"
 
 # ── Rust tasks ───────────────────────────────────────────────────────────
 [feature.gsplat-rust-renderer.tasks.viewer]
-cmd = "cargo run --release"
+cmd = "cargo run --release --bin gsplat-rust-renderer"
 cwd = "packages/gsplat-rust-renderer"
 description = "Launch the Rerun viewer with Gaussian splat visualization"
 
