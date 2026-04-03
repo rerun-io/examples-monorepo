@@ -695,6 +695,7 @@ brush = "==0.3.0"
 
 [feature.gsplat-rust-renderer.pypi-dependencies]
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
+lpips = ">=0.1.4,<1"
 plyfile = ">=1.1,<2"
 rerun-sdk = "==0.30.2"
 simplecv = { git = "https://github.com/pablovela5620/simplecv.git", tag = "v0.7.2" }
@@ -953,8 +954,10 @@ pyvrs-viewer-dev = { features = [
 ], solve-group = "pyvrs-viewer", no-default-feature = true }
 gsplat-rust-renderer = { features = [
     "gsplat-rust-renderer",
+    "cuda",
 ], solve-group = "gsplat-rust-renderer", no-default-feature = true }
 gsplat-rust-renderer-dev = { features = [
     "gsplat-rust-renderer",
+    "cuda",
     "dev",
 ], solve-group = "gsplat-rust-renderer", no-default-feature = true }
