@@ -1,35 +1,27 @@
-//! GPU renderer for Gaussian splats — the lowest layer of the pipeline.
+//! GPU renderer for Gaussian splats — the Rerun viewer layer.
 //!
 //! # Overview
 //!
-//! This module owns all GPU resources (buffers, pipelines, bind groups, shaders)
-//! and implements the actual rendering.  The visualizer
-//! ([`crate::gaussian_visualizer`]) hands it a pre-sorted batch of visible
-//! splats each frame; the renderer uploads them and issues draw/dispatch calls.
+//! This module integrates the GPU compute pipeline with Rerun's rendering
+//! system.  The visualizer ([`crate::gaussian_visualizer`]) hands it a
+//! pre-sorted batch of visible splats each frame; the renderer uploads them
+//! and dispatches the 7-stage compute pipeline.
 //!
-//! # Two Render Paths
+//! GPU types, bind group layouts, compute pipelines, and helper functions
+//! are imported from [`crate::gsplat_core::gpu_types`] — the single source
+//! of truth shared with the standalone renderer.
 //!
-//! The renderer automatically chooses between two paths:
-//!
-//! ## CPU Fallback Path (Instanced Quads)
-//! Each visible splat is projected on the CPU and uploaded as a per-instance
-//! buffer.  The GPU draws one screen-aligned quad per splat using the
-//! `gaussian_splat.wgsl` shader.  Simple but bandwidth-limited.
-//!
-//! ## Compute Tile Path (Preferred)
-//! Inspired by the [Brush](https://github.com/ArthurBrussee/brush) renderer,
-//! this path runs the entire projection and rasterization on the GPU through
-//! a multi-stage compute pipeline:
+//! # Compute Pipeline (GPU-only, Brush-aligned)
 //!
 //! | Stage | Shader | Description |
 //! |-------|--------|-------------|
-//! | 1. Project | `gaussian_project.wgsl` | Exact 3D→2D Gaussian projection + SH evaluation |
-//! | 2. Compact | `gaussian_project.wgsl` (scan entries) | Parallel prefix sum to remove invisible splats |
-//! | 3. Map | `gaussian_map_intersections.wgsl` | Scatter (splat, tile) pairs for each overlapped tile |
-//! | 4. Sort | `gaussian_dynamic_sort.wgsl` | 16-bin radix sort by tile ID |
-//! | 5. Offsets | `gaussian_tile_offsets.wgsl` | Find per-tile start/end range |
-//! | 6. Raster | `gaussian_raster_tiles.wgsl` | Per-pixel alpha blending within each tile |
-//! | 7. Composite | `gaussian_composite.wgsl` | Blit raster texture onto the viewport |
+//! | 1. Project | `gaussian_project.wgsl` | 3D→2D Gaussian projection + SH evaluation |
+//! | 2. Compact | `gaussian_project.wgsl` (scan) | Prefix sum to remove invisible splats |
+//! | 3. Map | `gaussian_map_intersections.wgsl` | Scatter (splat, tile) pairs |
+//! | 4. Sort | `gaussian_dynamic_sort.wgsl` | Radix sort by tile ID |
+//! | 5. Offsets | `gaussian_tile_offsets.wgsl` | Per-tile start/end range |
+//! | 6. Raster | `gaussian_raster_tiles.wgsl` | Per-pixel alpha blending |
+//! | 7. Composite | `gaussian_composite.wgsl` | Blit to Rerun viewport |
 //!
 //! # Buffer Management
 //!
@@ -42,9 +34,8 @@
 //!
 //! 1. Reuse or grow persistent GPU buffers for the entity
 //! 2. Upload splat data (means, quats, scales, opacities, colors, SH) to GPU
-//! 3. CPU fallback: project visible splats into instanced quads
-//! 4. Compute path: project → compact → map → sort → tile offsets → raster → composite
-//! 5. Emit one draw payload back to Rerun's normal transparent draw phase
+//! 3. Dispatch 7-stage compute pipeline
+//! 4. Composite raster texture into Rerun's viewport via fullscreen blit
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -138,9 +129,10 @@ mod tests {
     }
 }
 
+// Some fields are retained as lifetime anchors for GPU resources even when not
+// directly referenced in every code path.
+#[allow(dead_code)]
 pub struct GaussianRenderer {
-    // The renderer is intentionally stateful: pipelines and reusable buffers live here so the
-    // visualizer can stay small and submit one logical batch per frame.
     render_bind_group_layout: re_renderer::GpuBindGroupLayoutHandle,
     composite_bind_group_layout: re_renderer::GpuBindGroupLayoutHandle,
     render_pipeline_color: re_renderer::GpuRenderPipelineHandle,
@@ -205,30 +197,21 @@ struct PreparedBatch {
 #[derive(Clone)]
 struct GaussianBatch {
     payload: GaussianBatchPayload,
-    farthest_depth: f32,
 }
 
 #[derive(Clone)]
-enum GaussianBatchPayload {
-    // The classic path renders instanced quads directly.
-    Instances {
-        render_bind_group: Arc<wgpu::BindGroup>,
-        instance_buffer: Arc<wgpu::Buffer>,
-        instance_count: u32,
-        indirect_draw_buffer: Option<Arc<wgpu::Buffer>>,
-    },
-    // The compute tile path rasterizes into an intermediate target, then blits it back.
-    RasterBlit {
-        composite_bind_group: Arc<wgpu::BindGroup>,
-    },
+struct GaussianBatchPayload {
+    /// The compute tile path rasterizes into an intermediate target, then blits it back.
+    composite_bind_group: Arc<wgpu::BindGroup>,
 }
 
+// Some fields are retained as lifetime anchors for GPU resources.
+#[allow(dead_code)]
 struct CachedBatchResources {
     render_uniform_buffer: Arc<wgpu::Buffer>,
     render_bind_group: Arc<wgpu::BindGroup>,
     instance_buffer: Arc<wgpu::Buffer>,
     instance_capacity: usize,
-    cpu_instances: Vec<gpu_data::InstanceData>,
     compute: Option<CachedComputeResources>,
 }
 
@@ -316,30 +299,14 @@ impl DrawData for GaussianDrawData {
         _view_info: &re_renderer::renderer::DrawableCollectionViewInfo,
         collector: &mut re_renderer::DrawableCollector<'_>,
     ) {
-        for (index, batch) in self.batches.iter().enumerate() {
-            match &batch.payload {
-                GaussianBatchPayload::Instances { instance_count, .. } => {
-                    if *instance_count == 0 {
-                        continue;
-                    }
-                    collector.add_drawable(
-                        re_renderer::DrawPhase::Transparent,
-                        DrawDataDrawable {
-                            distance_sort_key: batch.farthest_depth,
-                            draw_data_payload: index as u32,
-                        },
-                    );
-                }
-                GaussianBatchPayload::RasterBlit { .. } => {
-                    collector.add_drawable(
-                        re_renderer::DrawPhase::Transparent,
-                        DrawDataDrawable {
-                            distance_sort_key: 0.0,
-                            draw_data_payload: index as u32,
-                        },
-                    );
-                }
-            }
+        for (index, _batch) in self.batches.iter().enumerate() {
+            collector.add_drawable(
+                re_renderer::DrawPhase::Transparent,
+                DrawDataDrawable {
+                    distance_sort_key: 0.0,
+                    draw_data_payload: index as u32,
+                },
+            );
         }
     }
 }
@@ -401,20 +368,7 @@ impl GaussianRenderer {
         visible_indices: &[SortedSplatIndex],
         farthest_depth: f32,
     ) -> PreparedBatch {
-        // The facade only decides which path is available. The rest of the per-frame logic stays
-        // inside the path-specific modules below.
-        if self.compute_pipelines.is_some() {
-            return self.prepare_compute_batch(
-                ctx,
-                label,
-                cloud,
-                camera,
-                visible_indices,
-                farthest_depth,
-            );
-        }
-
-        self.prepare_cpu_batch(ctx, label, cloud, camera, visible_indices, farthest_depth)
+        self.prepare_compute_batch(ctx, label, cloud, camera, visible_indices, farthest_depth)
     }
 
     fn create_batch_resources(
@@ -472,7 +426,6 @@ impl GaussianRenderer {
             render_bind_group,
             instance_buffer,
             instance_capacity,
-            cpu_instances: Vec::with_capacity(instance_capacity),
             compute,
         }
     }
@@ -1653,11 +1606,6 @@ impl GaussianRenderer {
             resources.instance_capacity * std::mem::size_of::<gpu_data::InstanceData>(),
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         ));
-        resources.cpu_instances.reserve(
-            resources
-                .instance_capacity
-                .saturating_sub(resources.cpu_instances.capacity()),
-        );
         if let Some(compute) = resources.compute.as_mut() {
             compute.visibility_flags_buffer = Arc::new(create_sized_buffer(
                 &ctx.device,
@@ -2240,7 +2188,6 @@ impl Renderer for GaussianRenderer {
     ) -> Result<(), DrawError> {
         let draw_start = Instant::now();
 
-        let color_pipeline = render_pipelines.get(self.render_pipeline_color)?;
         let tile_pipeline = render_pipelines.get(self.render_pipeline_tile)?;
         for instruction in draw_instructions {
             for drawable in instruction.drawables {
@@ -2249,37 +2196,14 @@ impl Renderer for GaussianRenderer {
                     continue;
                 };
 
-                match &batch.payload {
-                    GaussianBatchPayload::Instances {
-                        render_bind_group,
-                        instance_buffer,
-                        instance_count,
-                        indirect_draw_buffer,
-                    } => {
-                        // Classic path: draw precomputed instanced quads directly into the main
-                        // transparent color target.
-                        pass.set_pipeline(color_pipeline);
-                        pass.set_bind_group(1, render_bind_group.as_ref(), &[]);
-                        pass.set_vertex_buffer(0, instance_buffer.slice(..));
-                        if let Some(indirect_draw_buffer) = indirect_draw_buffer {
-                            pass.draw_indirect(indirect_draw_buffer, 0);
-                        } else {
-                            pass.draw(0..6, 0..*instance_count);
-                        }
-                    }
-                    GaussianBatchPayload::RasterBlit {
-                        composite_bind_group,
-                    } => {
-                        // Compute path: the heavy work already happened in compute passes, so the
-                        // draw step is just a fullscreen composite of the intermediate raster.
-                        if phase != re_renderer::DrawPhase::Transparent {
-                            continue;
-                        }
-                        pass.set_pipeline(tile_pipeline);
-                        pass.set_bind_group(1, composite_bind_group.as_ref(), &[]);
-                        pass.draw(0..3, 0..1);
-                    }
+                // The compute pipeline has already rasterized into an intermediate texture.
+                // The draw step is just a fullscreen composite of that texture into the viewport.
+                if phase != re_renderer::DrawPhase::Transparent {
+                    continue;
                 }
+                pass.set_pipeline(tile_pipeline);
+                pass.set_bind_group(1, batch.payload.composite_bind_group.as_ref(), &[]);
+                pass.draw(0..3, 0..1);
             }
         }
 
@@ -2346,142 +2270,11 @@ fn register_embedded_shaders() {
     });
 }
 
-mod cpu {
-    //! CPU reference preparation path.
-    //!
-    //! This path stays available for downlevel backends and as a correctness reference when the
-    //! compute/tile pipeline is unavailable.
-
-    use std::sync::Arc;
-    use std::time::Instant;
-
-    use glam::Vec3;
-
-    use super::*;
-    use crate::gsplat_core::{
-        RenderShCoefficients, build_prepared_splat, evaluate_sh_rgb, project_gaussian_to_ndc,
-    };
-
-    impl GaussianRenderer {
-        #[allow(clippy::too_many_arguments)]
-        pub(super) fn prepare_cpu_batch(
-            &self,
-            ctx: &re_renderer::RenderContext,
-            label: &str,
-            cloud: &Arc<RenderGaussianCloud>,
-            camera: &CameraApproximation,
-            visible_indices: &[SortedSplatIndex],
-            farthest_depth: f32,
-        ) -> PreparedBatch {
-            let upload_start = Instant::now();
-            let mut cache = self.batch_cache.lock().unwrap();
-            let resources = cache.entry(label.to_owned()).or_insert_with(|| {
-                self.create_batch_resources(ctx, label, cloud, visible_indices.len().max(1))
-            });
-
-            if resources.instance_capacity < visible_indices.len() {
-                self.grow_instance_buffer(ctx, label, resources, visible_indices.len());
-            }
-
-            let render_uniform = gpu_data::UniformBuffer {
-                radius_scale: RADIUS_SCALE,
-                opacity_scale: OPACITY_SCALE,
-                alpha_discard_threshold: ALPHA_DISCARD_THRESHOLD,
-                _pad0: 0.0,
-                end_padding: [re_renderer::wgpu_buffer_types::PaddingRow::default(); 15],
-            };
-            ctx.queue.write_buffer(
-                &resources.render_uniform_buffer,
-                0,
-                bytemuck::bytes_of(&render_uniform),
-            );
-
-            resources.cpu_instances.clear();
-            resources.cpu_instances.reserve(visible_indices.len());
-
-            // Build the exact projected splats on CPU. This path doubles as a fallback and as a
-            // correctness reference when debugging the compute renderer.
-            for visible in visible_indices {
-                let index = visible.splat_index as usize;
-                let base_opacity = cloud.opacities[index].clamp(0.0, 1.0);
-                let effective_opacity = base_opacity * OPACITY_SCALE;
-                if effective_opacity <= 0.0 {
-                    continue;
-                }
-
-                let Some(projected) = project_gaussian_to_ndc(
-                    camera,
-                    cloud.means_world[index],
-                    cloud.quats[index],
-                    cloud.scales[index],
-                    effective_opacity,
-                ) else {
-                    continue;
-                };
-
-                let color_rgb = cloud
-                    .sh_coeffs
-                    .as_ref()
-                    .and_then(|sh| {
-                        sh_color_for_splat(
-                            sh,
-                            index,
-                            cloud.means_world[index] - camera.world_position,
-                        )
-                    })
-                    .unwrap_or(cloud.colors_dc[index]);
-
-                let prepared = build_prepared_splat(projected, color_rgb, base_opacity);
-                resources
-                    .cpu_instances
-                    .push(gpu_data::InstanceData::from_prepared(prepared));
-            }
-
-            ctx.queue.write_buffer(
-                &resources.instance_buffer,
-                0,
-                bytemuck::cast_slice(resources.cpu_instances.as_slice()),
-            );
-
-            PreparedBatch {
-                batch: Some(GaussianBatch {
-                    payload: GaussianBatchPayload::Instances {
-                        render_bind_group: resources.render_bind_group.clone(),
-                        instance_buffer: resources.instance_buffer.clone(),
-                        instance_count: resources.cpu_instances.len() as u32,
-                        indirect_draw_buffer: None,
-                    },
-                    farthest_depth,
-                }),
-                upload_ms: upload_start.elapsed().as_secs_f32() * 1000.0,
-                extra_draw_data: None,
-                tile_intersections: 0,
-                intersection_capacity: 0,
-                intersection_capacity_saturated: false,
-            }
-        }
-    }
-
-    pub(super) fn sh_color_for_splat(
-        sh: &RenderShCoefficients,
-        splat_index: usize,
-        view_direction: Vec3,
-    ) -> Option<[f32; 3]> {
-        // If higher-order SH is missing, the DC term is already the correct color.
-        let coeffs_per_channel = sh.coeffs_per_channel;
-        let coeffs = sh.coefficients.as_ref();
-        let coeff_stride = coeffs_per_channel.checked_mul(3)?;
-        let start = splat_index.checked_mul(coeff_stride)?;
-        let end = start.checked_add(coeff_stride)?;
-        evaluate_sh_rgb(coeffs.get(start..end)?, coeffs_per_channel, view_direction)
-    }
-}
-
 mod compute {
     //! Brush-inspired compute/tile preparation path.
     //!
     //! The public facade decides when compute is available. This module owns the per-frame GPU work
-    //! that starts from the CPU-provided candidate list and ends at the tile raster/composite pass.
+    //! that dispatches the 7-stage GPU compute pipeline ending at tile raster/composite.
 
     use std::sync::Arc;
     use std::time::Instant;
@@ -2498,7 +2291,7 @@ mod compute {
             cloud: &Arc<RenderGaussianCloud>,
             camera: &CameraApproximation,
             visible_indices: &[SortedSplatIndex],
-            farthest_depth: f32,
+            _farthest_depth: f32,
         ) -> PreparedBatch {
             let upload_start = Instant::now();
             let mut cache = self.batch_cache.lock().unwrap();
@@ -2602,8 +2395,8 @@ mod compute {
                 bytemuck::bytes_of(&map_uniform),
             );
 
-            // Step 2: upload the CPU-provided candidate ordering. The compute path starts from the
-            // same visible list as the stable CPU path, then moves the heavy projection/raster work
+            // Step 2: upload the pre-sorted candidate ordering from the CPU visibility pass.
+            // The GPU projection/raster work
             // onto the GPU.
             compute.cpu_indices.clear();
             compute.cpu_indices.reserve(visible_indices.len());
@@ -2909,10 +2702,9 @@ mod compute {
 
             PreparedBatch {
                 batch: Some(GaussianBatch {
-                    payload: GaussianBatchPayload::RasterBlit {
+                    payload: GaussianBatchPayload {
                         composite_bind_group: compute.composite_bind_group.clone(),
                     },
-                    farthest_depth,
                 }),
                 upload_ms: upload_start.elapsed().as_secs_f32() * 1000.0,
                 extra_draw_data: None,
@@ -2935,8 +2727,6 @@ mod gpu_types {
     use re_renderer::external::smallvec::smallvec;
     use re_renderer::external::wgpu;
 
-    use crate::gsplat_core::PreparedSplat;
-
     // Re-export shared GPU types from gsplat_core so existing `gpu_data::*`
     // references throughout this file continue to work unchanged.
     pub use crate::gsplat_core::gpu_types::{
@@ -2944,7 +2734,7 @@ mod gpu_types {
         ScanUniformBuffer, SortUniformBuffer, TileProjectedSplat,
     };
 
-    /// Uniform buffer for the instanced-quad render pass (CPU fallback + composite).
+    /// Uniform buffer for the composite render pass.
     /// Contains Rerun-specific `PaddingRow` for re_renderer alignment.
     #[repr(C)]
     #[derive(Clone, Copy, Pod, Zeroable)]
@@ -2956,7 +2746,7 @@ mod gpu_types {
         pub end_padding: [re_renderer::wgpu_buffer_types::PaddingRow; 15],
     }
 
-    /// Per-instance data for the CPU fallback instanced-quad path.
+    /// Per-instance data for the instanced-quad path (legacy, retained for InstanceData layout tests).
     /// Contains Rerun-specific `VertexBufferLayout`.
     #[repr(C)]
     #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -2969,26 +2759,6 @@ mod gpu_types {
     }
 
     impl InstanceData {
-        pub fn from_prepared(prepared: PreparedSplat) -> Self {
-            Self {
-                center_ndc: prepared.center_ndc.to_array(),
-                ndc_depth: prepared.ndc_depth,
-                radius_ndc: prepared.radius_ndc,
-                inv_cov_ndc_xx_xy_yy_pad: [
-                    prepared.inv_cov_ndc_xx_xy_yy[0],
-                    prepared.inv_cov_ndc_xx_xy_yy[1],
-                    prepared.inv_cov_ndc_xx_xy_yy[2],
-                    0.0,
-                ],
-                color_opacity: [
-                    prepared.color_rgb[0],
-                    prepared.color_rgb[1],
-                    prepared.color_rgb[2],
-                    prepared.opacity,
-                ],
-            }
-        }
-
         pub fn vertex_buffer_layout() -> re_renderer::VertexBufferLayout {
             re_renderer::VertexBufferLayout {
                 array_stride: std::mem::size_of::<Self>() as u64,
