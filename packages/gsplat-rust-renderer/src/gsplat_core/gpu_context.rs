@@ -37,12 +37,23 @@ impl GpuContext {
         let adapter_info = adapter.get_info();
         let adapter_limits = adapter.limits();
 
+        // The compute pipeline needs at least 11 storage buffers per shader stage.
+        const MIN_STORAGE_BUFFERS: u32 = 11;
+        if adapter_limits.max_storage_buffers_per_shader_stage < MIN_STORAGE_BUFFERS {
+            anyhow::bail!(
+                "GPU adapter '{}' supports only {} storage buffers per shader stage, \
+                 but the Gaussian splat pipeline requires at least {}",
+                adapter_info.name,
+                adapter_limits.max_storage_buffers_per_shader_stage,
+                MIN_STORAGE_BUFFERS,
+            );
+        }
+
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("gsplat-render"),
             required_features: wgpu::Features::empty(),
             required_limits: wgpu::Limits {
-                max_storage_buffers_per_shader_stage:
-                    adapter_limits.max_storage_buffers_per_shader_stage.min(11),
+                max_storage_buffers_per_shader_stage: MIN_STORAGE_BUFFERS,
                 max_compute_workgroups_per_dimension:
                     adapter_limits.max_compute_workgroups_per_dimension,
                 max_buffer_size: adapter_limits.max_buffer_size,

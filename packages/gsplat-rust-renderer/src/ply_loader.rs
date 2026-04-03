@@ -87,6 +87,12 @@ pub fn load_ply(path: &Path) -> anyhow::Result<RenderGaussianCloud> {
     let rest_count: usize = (0..)
         .take_while(|i| property_names.contains(&format!("f_rest_{i}")))
         .count();
+    if rest_count != 0 && !rest_count.is_multiple_of(3) {
+        anyhow::bail!(
+            "Invalid PLY SH layout: found {rest_count} contiguous f_rest_* properties, \
+             but the count must be divisible by 3 for RGB channel-major coefficients"
+        );
+    }
     let extra_coeffs_per_channel = rest_count / 3;
 
     for vertex in &vertices {

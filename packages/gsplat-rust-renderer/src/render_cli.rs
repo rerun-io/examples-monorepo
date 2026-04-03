@@ -47,8 +47,8 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     frame: usize,
 
-    /// Output PNG path.
-    #[arg(long)]
+    /// Output PNG path (required unless --benchmark).
+    #[arg(long, required_unless_present = "benchmark")]
     output: Option<PathBuf>,
 
     /// Image width in pixels.
