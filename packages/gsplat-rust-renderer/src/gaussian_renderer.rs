@@ -51,31 +51,24 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
-use bytemuck::Pod;
-use glam::Vec3;
 use re_renderer::external::smallvec::smallvec;
 use re_renderer::external::wgpu;
 use re_renderer::renderer::{DrawData, DrawDataDrawable, DrawError, DrawInstruction, Renderer};
 
 use self::gpu_types as gpu_data;
+use crate::gsplat_core::gpu_types::{
+    PROJECT_WORKGROUP_SIZE, RASTER_TEXTURE_FORMAT, SORT_BIN_COUNT, SORT_BLOCK_SIZE,
+    SORT_WORKGROUP_SIZE, TILE_OFFSET_CHECKS_PER_ITER, TILE_OFFSET_WORKGROUP_SIZE,
+    calc_raster_extent, calc_tile_bounds, compaction_block_count, create_compute_pipeline,
+    create_filled_buffer, create_sized_buffer, dispatch_grid_1d, dispatch_grid_for_workgroups,
+    intersection_capacity_for_instances, next_block_capacity, next_capacity, pack_quats, pack_rgb,
+    pack_scales_opacity, pack_sh_coefficients, pack_vec3s, storage_buffer_entry,
+    storage_layout_entry, tile_count, uniform_layout_entry,
+};
 use crate::gsplat_core::{CameraApproximation, RenderGaussianCloud, SortedSplatIndex};
 
-const PROJECT_WORKGROUP_SIZE: u32 = 128;
-const COMPACTION_WORKGROUP_SIZE: u32 = 256;
-const COMPACTION_BLOCK_SIZE: u32 = COMPACTION_WORKGROUP_SIZE * 2;
 const COMPUTE_PROJECT_STORAGE_BINDINGS: u32 = 10;
-// Dense indoor scenes hit many more tiles per splat than the chair reference. A larger multiplier
-// keeps the live tile path from saturating its staging buffers too early.
-const INTERSECTION_CAPACITY_MULTIPLIER: usize = 32;
-const SORT_WORKGROUP_SIZE: u32 = 256;
-const SORT_ELEMENTS_PER_THREAD: u32 = 1;
-const SORT_BLOCK_SIZE: u32 = SORT_WORKGROUP_SIZE * SORT_ELEMENTS_PER_THREAD;
-const SORT_BIN_COUNT: u32 = 16;
-const TILE_WIDTH: u32 = 16;
-const TILE_OFFSET_WORKGROUP_SIZE: u32 = 256;
-const TILE_OFFSET_CHECKS_PER_ITER: u32 = 8;
 const INTERSECTION_READBACK_SLOT_COUNT: usize = 2;
-const RASTER_TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const MAX_SPLATS_RENDERED: usize = 200_000;
 const RADIUS_SCALE: f32 = 1.0;
 const OPACITY_SCALE: f32 = 1.0;
@@ -118,13 +111,14 @@ mod tests {
 
     #[test]
     fn compaction_block_count_rounds_up() {
+        use crate::gsplat_core::gpu_types::COMPACTION_BLOCK_SIZE;
         assert_eq!(super::compaction_block_count(1), 1);
         assert_eq!(
-            super::compaction_block_count(super::COMPACTION_BLOCK_SIZE as usize),
+            super::compaction_block_count(COMPACTION_BLOCK_SIZE as usize),
             1
         );
         assert_eq!(
-            super::compaction_block_count(super::COMPACTION_BLOCK_SIZE as usize + 1),
+            super::compaction_block_count(COMPACTION_BLOCK_SIZE as usize + 1),
             2
         );
     }
@@ -2296,41 +2290,6 @@ impl Renderer for GaussianRenderer {
     }
 }
 
-fn create_filled_buffer<T: Pod>(
-    device: &wgpu::Device,
-    label: &str,
-    extra_usage: wgpu::BufferUsages,
-    data: &[T],
-) -> wgpu::Buffer {
-    let bytes = bytemuck::cast_slice(data);
-    let size = bytes.len().max(std::mem::size_of::<T>().max(16)) as u64;
-    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some(label),
-        size,
-        usage: extra_usage | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: true,
-    });
-    let mut mapped = buffer.slice(..).get_mapped_range_mut();
-    mapped[..bytes.len()].copy_from_slice(bytes);
-    drop(mapped);
-    buffer.unmap();
-    buffer
-}
-
-fn create_sized_buffer(
-    device: &wgpu::Device,
-    label: &str,
-    size_bytes: usize,
-    usage: wgpu::BufferUsages,
-) -> wgpu::Buffer {
-    device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some(label),
-        size: size_bytes.max(16) as u64,
-        usage,
-        mapped_at_creation: false,
-    })
-}
-
 fn create_raster_texture(
     device: &wgpu::Device,
     label: &str,
@@ -2375,152 +2334,9 @@ fn create_intersection_count_readback_slots(
         .collect()
 }
 
-fn storage_layout_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Storage { read_only },
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    }
-}
-
-fn uniform_layout_entry(binding: u32, size_bytes: usize) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Uniform,
-            has_dynamic_offset: false,
-            min_binding_size: std::num::NonZeroU64::new(size_bytes as u64),
-        },
-        count: None,
-    }
-}
-
-fn storage_buffer_entry(binding: u32, buffer: &Arc<wgpu::Buffer>) -> wgpu::BindGroupEntry<'_> {
-    wgpu::BindGroupEntry {
-        binding,
-        resource: buffer.as_entire_binding(),
-    }
-}
-
-fn create_compute_pipeline(
-    device: &wgpu::Device,
-    label: &str,
-    module: &wgpu::ShaderModule,
-    entry_point: &str,
-    bind_group_layouts: &[&wgpu::BindGroupLayout],
-) -> wgpu::ComputePipeline {
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some(&format!("{label}::layout")),
-        bind_group_layouts,
-        push_constant_ranges: &[],
-    });
-    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some(label),
-        layout: Some(&pipeline_layout),
-        module,
-        entry_point: Some(entry_point),
-        cache: None,
-        compilation_options: Default::default(),
-    })
-}
-
-fn pack_vec3s(values: impl Iterator<Item = Vec3>) -> Vec<[f32; 4]> {
-    values
-        .map(|value| [value.x, value.y, value.z, 0.0])
-        .collect()
-}
-
-fn pack_quats(values: impl Iterator<Item = glam::Quat>) -> Vec<[f32; 4]> {
-    values
-        .map(|quat| [quat.x, quat.y, quat.z, quat.w])
-        .collect()
-}
-
-fn pack_scales_opacity(cloud: &RenderGaussianCloud) -> Vec<[f32; 4]> {
-    cloud
-        .scales
-        .iter()
-        .zip(cloud.opacities.iter())
-        .map(|(scale, opacity)| [scale.x, scale.y, scale.z, *opacity])
-        .collect()
-}
-
-fn pack_rgb(values: impl Iterator<Item = [f32; 3]>) -> Vec<[f32; 4]> {
-    values.map(|rgb| [rgb[0], rgb[1], rgb[2], 0.0]).collect()
-}
-
-fn pack_sh_coefficients(cloud: &RenderGaussianCloud) -> Vec<[f32; 4]> {
-    cloud
-        .sh_coeffs
-        .as_ref()
-        .map(|sh| {
-            sh.coefficients
-                .chunks_exact(3)
-                .map(|coeff| [coeff[0], coeff[1], coeff[2], 0.0])
-                .collect()
-        })
-        .unwrap_or_else(|| vec![[0.0, 0.0, 0.0, 0.0]])
-}
-
-fn next_capacity(required: usize) -> usize {
-    required.max(1).next_power_of_two().max(1024)
-}
-
-fn intersection_capacity_for_instances(instance_capacity: usize) -> usize {
-    (instance_capacity.max(1) * INTERSECTION_CAPACITY_MULTIPLIER)
-        .next_power_of_two()
-        .max(16)
-}
-
-fn compaction_block_count(required: usize) -> usize {
-    required.max(1).div_ceil(COMPACTION_BLOCK_SIZE as usize)
-}
-
-fn next_block_capacity(required: usize) -> usize {
-    compaction_block_count(required).next_power_of_two().max(1)
-}
-
 #[cfg(test)]
 fn encode_descending_depth_key(camera_depth: f32) -> u32 {
     u32::MAX - camera_depth.to_bits()
-}
-
-fn dispatch_grid_1d(num_elements: u32, workgroup_size: u32) -> (u32, u32) {
-    let total_workgroups = num_elements.div_ceil(workgroup_size).max(1);
-    dispatch_grid_for_workgroups(total_workgroups)
-}
-
-fn dispatch_grid_for_workgroups(total_workgroups: u32) -> (u32, u32) {
-    if total_workgroups <= 65_535 {
-        (total_workgroups, 1)
-    } else {
-        let wg_y = (total_workgroups as f64).sqrt().ceil() as u32;
-        let wg_x = total_workgroups.div_ceil(wg_y);
-        (wg_x, wg_y)
-    }
-}
-
-fn calc_tile_bounds(viewport_size_px: glam::Vec2) -> glam::UVec2 {
-    glam::uvec2(
-        viewport_size_px.x.max(1.0).ceil() as u32,
-        viewport_size_px.y.max(1.0).ceil() as u32,
-    )
-    .map(|dimension| dimension.div_ceil(TILE_WIDTH))
-}
-
-fn tile_count(tile_bounds: glam::UVec2) -> usize {
-    tile_bounds.x as usize * tile_bounds.y as usize
-}
-
-fn calc_raster_extent(viewport_size_px: glam::Vec2) -> glam::UVec2 {
-    let tile_bounds = calc_tile_bounds(viewport_size_px);
-    glam::uvec2(tile_bounds.x * TILE_WIDTH, tile_bounds.y * TILE_WIDTH)
 }
 
 fn register_embedded_shaders() {
@@ -3122,10 +2938,11 @@ mod compute {
 }
 
 mod gpu_types {
-    //! GPU buffer layouts shared by the splat draw and compute passes.
+    //! GPU buffer layouts for the Rerun viewer splat draw path.
     //!
-    //! These structs mirror the WGSL storage/uniform layouts. Keep them tightly packed and covered by
-    //! the regression tests below.
+    //! Shared types (ProjectUniformBuffer, ScanUniformBuffer, etc.) are imported
+    //! from `gsplat_core::gpu_types` — the single source of truth.  Only
+    //! Rerun-specific types live here.
 
     use bytemuck::{Pod, Zeroable};
     use re_renderer::external::smallvec::smallvec;
@@ -3133,78 +2950,27 @@ mod gpu_types {
 
     use crate::gsplat_core::PreparedSplat;
 
+    // Re-export shared GPU types from gsplat_core so existing `gpu_data::*`
+    // references throughout this file continue to work unchanged.
+    pub use crate::gsplat_core::gpu_types::{
+        DrawIndirectArgs, MapUniformBuffer, ProjectUniformBuffer, RasterUniformBuffer,
+        ScanUniformBuffer, SortUniformBuffer, TileProjectedSplat,
+    };
+
+    /// Uniform buffer for the instanced-quad render pass (CPU fallback + composite).
+    /// Contains Rerun-specific `PaddingRow` for re_renderer alignment.
     #[repr(C)]
     #[derive(Clone, Copy, Pod, Zeroable)]
     pub struct UniformBuffer {
-        /// User-facing radius multiplier.
         pub radius_scale: f32,
-        /// User-facing opacity multiplier.
         pub opacity_scale: f32,
-        /// Fragment alpha discard threshold.
         pub alpha_discard_threshold: f32,
         pub _pad0: f32,
         pub end_padding: [re_renderer::wgpu_buffer_types::PaddingRow; 15],
     }
 
-    #[repr(C)]
-    #[derive(Clone, Copy, Pod, Zeroable)]
-    pub struct ProjectUniformBuffer {
-        /// Camera view matrix.
-        pub view_from_world: [[f32; 4]; 4],
-        /// Camera projection matrix.
-        pub projection_from_view: [[f32; 4]; 4],
-        /// Camera position in world space.
-        pub camera_world_position: [f32; 4],
-        /// Viewport size plus near-plane / min-radius payload.
-        pub viewport_and_near: [f32; 4],
-        /// Sigma coverage, selected count, and SH metadata packed for WGSL.
-        pub sigma_and_counts: [u32; 4],
-        pub _pad: [[u32; 4]; 1],
-    }
-
-    #[repr(C)]
-    #[derive(Clone, Copy, Debug, Pod, Zeroable)]
-    pub struct ScanUniformBuffer {
-        pub total_selected: u32,
-        pub block_count: u32,
-        pub _pad: [u32; 2],
-    }
-
-    #[repr(C)]
-    #[derive(Clone, Copy, Debug, Pod, Zeroable)]
-    pub struct SortUniformBuffer {
-        pub shift: u32,
-        pub total_keys_unused: u32,
-        pub _pad: [u32; 2],
-    }
-
-    #[repr(C)]
-    #[derive(Clone, Copy, Debug, Pod, Zeroable)]
-    pub struct MapUniformBuffer {
-        pub total_selected: u32,
-        pub intersection_capacity: u32,
-        pub tile_bounds_x: u32,
-        pub tile_bounds_y: u32,
-    }
-
-    #[repr(C)]
-    #[derive(Clone, Copy, Debug, Pod, Zeroable)]
-    pub struct RasterUniformBuffer {
-        pub tile_bounds: [u32; 2],
-        pub img_size: [u32; 2],
-    }
-
-    #[repr(C)]
-    #[derive(Clone, Copy, Debug, Pod, Zeroable)]
-    pub struct DrawIndirectArgs {
-        /// Number of vertices emitted by the draw.
-        pub vertex_count: u32,
-        /// Number of instances emitted by the draw.
-        pub instance_count: u32,
-        pub first_vertex: u32,
-        pub first_instance: u32,
-    }
-
+    /// Per-instance data for the CPU fallback instanced-quad path.
+    /// Contains Rerun-specific `VertexBufferLayout`.
     #[repr(C)]
     #[derive(Clone, Copy, Debug, Pod, Zeroable)]
     pub struct InstanceData {
@@ -3213,16 +2979,6 @@ mod gpu_types {
         pub radius_ndc: f32,
         pub inv_cov_ndc_xx_xy_yy_pad: [f32; 4],
         pub color_opacity: [f32; 4],
-    }
-
-    #[repr(C)]
-    #[derive(Clone, Copy, Debug, Pod, Zeroable)]
-    pub struct TileProjectedSplat {
-        pub xy_px: [f32; 2],
-        pub _pad0: [f32; 2],
-        pub conic_xyy_opacity: [f32; 4],
-        pub color_rgba: [f32; 4],
-        pub tile_bbox_min_max: [u32; 4],
     }
 
     impl InstanceData {
