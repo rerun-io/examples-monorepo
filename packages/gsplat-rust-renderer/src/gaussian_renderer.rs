@@ -56,6 +56,9 @@ use re_renderer::external::wgpu;
 use re_renderer::renderer::{DrawData, DrawDataDrawable, DrawError, DrawInstruction, Renderer};
 
 use self::gpu_types as gpu_data;
+use crate::gsplat_core::constants::{
+    MAX_SPLATS_RENDERED, MIN_RADIUS_PX, OPACITY_SCALE, SIGMA_COVERAGE,
+};
 use crate::gsplat_core::gpu_types::{
     PROJECT_WORKGROUP_SIZE, RASTER_TEXTURE_FORMAT, SORT_BIN_COUNT, SORT_BLOCK_SIZE,
     SORT_WORKGROUP_SIZE, TILE_OFFSET_CHECKS_PER_ITER, TILE_OFFSET_WORKGROUP_SIZE,
@@ -69,12 +72,8 @@ use crate::gsplat_core::{CameraApproximation, RenderGaussianCloud, SortedSplatIn
 
 const COMPUTE_PROJECT_STORAGE_BINDINGS: u32 = 10;
 const INTERSECTION_READBACK_SLOT_COUNT: usize = 2;
-const MAX_SPLATS_RENDERED: usize = 200_000;
 const RADIUS_SCALE: f32 = 1.0;
-const OPACITY_SCALE: f32 = 1.0;
 const ALPHA_DISCARD_THRESHOLD: f32 = 0.01;
-const SIGMA_COVERAGE: f32 = 3.0;
-const MIN_RADIUS_PX: f32 = 0.35;
 
 #[cfg(test)]
 mod tests {
@@ -684,7 +683,7 @@ impl GaussianRenderer {
             mapped_at_creation: false,
         }));
         let raster_extent = glam::uvec2(1, 1);
-        let (raster_texture, raster_texture_view) = create_raster_texture(
+        let (raster_texture, raster_texture_view) = create_viewer_raster_texture(
             &ctx.device,
             &format!("{label}::raster_color"),
             raster_extent,
@@ -1615,7 +1614,7 @@ impl GaussianRenderer {
 
         if compute.raster_extent != raster_extent {
             compute.raster_extent = raster_extent;
-            let (raster_texture, raster_texture_view) = create_raster_texture(
+            let (raster_texture, raster_texture_view) = create_viewer_raster_texture(
                 &ctx.device,
                 &format!("{label}::raster_color"),
                 raster_extent,
@@ -2290,30 +2289,18 @@ impl Renderer for GaussianRenderer {
     }
 }
 
-fn create_raster_texture(
+fn create_viewer_raster_texture(
     device: &wgpu::Device,
     label: &str,
     extent: glam::UVec2,
 ) -> (Arc<wgpu::Texture>, Arc<wgpu::TextureView>) {
-    let texture = Arc::new(device.create_texture(&wgpu::TextureDescriptor {
-        label: Some(label),
-        size: wgpu::Extent3d {
-            width: extent.x.max(1),
-            height: extent.y.max(1),
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        // Keep the tile-raster intermediate in float space until the fullscreen composite.
-        // The older rgba8 storage target quantized color and alpha before the final blend,
-        // which made the live compute path look flatter than Brush even when SH matched.
-        format: RASTER_TEXTURE_FORMAT,
-        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
-    }));
-    let view = Arc::new(texture.create_view(&wgpu::TextureViewDescriptor::default()));
-    (texture, view)
+    let (texture, view) = crate::gsplat_core::gpu_types::create_raster_texture(
+        device,
+        label,
+        extent,
+        wgpu::TextureUsages::empty(),
+    );
+    (Arc::new(texture), Arc::new(view))
 }
 
 fn create_intersection_count_readback_slots(

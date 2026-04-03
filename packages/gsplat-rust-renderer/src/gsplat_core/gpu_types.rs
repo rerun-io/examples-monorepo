@@ -300,3 +300,415 @@ pub fn create_shader_module(
         source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(source)),
     })
 }
+
+/// Create a raster texture for tile-based rendering output.
+///
+/// Returns `(texture, view)`.  The caller may pass extra usage flags
+/// (e.g. `COPY_SRC` for readback in the standalone renderer).
+pub fn create_raster_texture(
+    device: &wgpu::Device,
+    label: &str,
+    extent: glam::UVec2,
+    extra_usage: wgpu::TextureUsages,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: extent.x.max(1),
+            height: extent.y.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: RASTER_TEXTURE_FORMAT,
+        usage: wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | extra_usage,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Shared bind group layouts + compute pipelines
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// All bind group layouts for the 7-stage Gaussian splat compute pipeline.
+///
+/// These layouts are shared between the Rerun viewer path and the
+/// standalone GPU renderer — both bind buffers with the same WGSL
+/// shader bindings.
+pub struct GpuBindGroupLayouts {
+    pub project: wgpu::BindGroupLayout,
+    pub scan: wgpu::BindGroupLayout,
+    pub scan_block_sums: wgpu::BindGroupLayout,
+    pub map: wgpu::BindGroupLayout,
+    pub sort_count: wgpu::BindGroupLayout,
+    pub sort_reduce: wgpu::BindGroupLayout,
+    pub sort_scan: wgpu::BindGroupLayout,
+    pub sort_scan_compose: wgpu::BindGroupLayout,
+    pub sort_scan_add: wgpu::BindGroupLayout,
+    pub sort_scatter: wgpu::BindGroupLayout,
+    pub tile_offsets: wgpu::BindGroupLayout,
+    pub rasterize: wgpu::BindGroupLayout,
+}
+
+/// Create all 12 bind group layouts for the compute pipeline.
+pub fn create_compute_bind_group_layouts(device: &wgpu::Device) -> GpuBindGroupLayouts {
+    let project = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("project_bgl"),
+        entries: &[
+            storage_layout_entry(0, true),  // means_world
+            storage_layout_entry(1, true),  // quats_xyzw
+            storage_layout_entry(2, true),  // scales_opacity
+            storage_layout_entry(3, true),  // colors_dc
+            storage_layout_entry(4, true),  // sh_coefficients
+            storage_layout_entry(5, true),  // sorted_indices
+            storage_layout_entry(6, false), // project_output_instances
+            storage_layout_entry(7, false), // visibility_flags
+            uniform_layout_entry(8, std::mem::size_of::<ProjectUniformBuffer>()),
+            storage_layout_entry(9, false),  // projected_tile_splats
+            storage_layout_entry(10, false), // projected_tile_hit_counts
+        ],
+    });
+    let scan = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("scan_bgl"),
+        entries: &[
+            storage_layout_entry(16, true),  // scan input
+            storage_layout_entry(17, false), // local_offsets
+            storage_layout_entry(18, false), // block_offsets
+            uniform_layout_entry(19, std::mem::size_of::<ScanUniformBuffer>()),
+        ],
+    });
+    let scan_block_sums = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("scan_block_sums_bgl"),
+        entries: &[
+            storage_layout_entry(24, false), // block_offsets
+            storage_layout_entry(25, false), // indirect_draw / totals
+            uniform_layout_entry(26, std::mem::size_of::<ScanUniformBuffer>()),
+        ],
+    });
+    let map = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("map_bgl"),
+        entries: &[
+            storage_layout_entry(0, true),  // projected_tile_splats
+            storage_layout_entry(1, true),  // tile_hit_offsets
+            storage_layout_entry(2, true),  // tile_hit_counts
+            storage_layout_entry(3, true),  // tile_hit_block_offsets
+            storage_layout_entry(4, false), // tile_id_from_isect
+            storage_layout_entry(5, false), // compact_gid_from_isect
+            uniform_layout_entry(6, std::mem::size_of::<MapUniformBuffer>()),
+            storage_layout_entry(7, true),  // tile_intersection_count
+            storage_layout_entry(8, false), // num_intersections
+        ],
+    });
+    let sort_count = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("sort_count_bgl"),
+        entries: &[
+            uniform_layout_entry(0, std::mem::size_of::<SortUniformBuffer>()),
+            storage_layout_entry(1, true),  // src_keys
+            storage_layout_entry(2, false), // counts
+            storage_layout_entry(6, true),  // num_intersections
+        ],
+    });
+    let sort_reduce = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("sort_reduce_bgl"),
+        entries: &[
+            uniform_layout_entry(0, std::mem::size_of::<SortUniformBuffer>()),
+            storage_layout_entry(1, true),  // counts
+            storage_layout_entry(2, false), // reduced
+            storage_layout_entry(6, true),  // num_intersections
+        ],
+    });
+    let sort_scan = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("sort_scan_bgl"),
+        entries: &[
+            uniform_layout_entry(0, std::mem::size_of::<SortUniformBuffer>()),
+            storage_layout_entry(1, false), // reduced
+            storage_layout_entry(6, true),  // num_intersections
+        ],
+    });
+    let sort_scan_compose = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("sort_scan_compose_bgl"),
+        entries: &[
+            storage_layout_entry(8, true),   // offsets
+            storage_layout_entry(9, true),   // block_offsets
+            storage_layout_entry(10, false), // out
+            uniform_layout_entry(11, std::mem::size_of::<ScanUniformBuffer>()),
+        ],
+    });
+    let sort_scan_add = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("sort_scan_add_bgl"),
+        entries: &[
+            uniform_layout_entry(0, std::mem::size_of::<SortUniformBuffer>()),
+            storage_layout_entry(1, true),  // reduced
+            storage_layout_entry(2, false), // counts
+            storage_layout_entry(6, true),  // num_intersections
+        ],
+    });
+    let sort_scatter = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("sort_scatter_bgl"),
+        entries: &[
+            uniform_layout_entry(0, std::mem::size_of::<SortUniformBuffer>()),
+            storage_layout_entry(1, true),  // src_keys
+            storage_layout_entry(2, true),  // src_values
+            storage_layout_entry(3, true),  // counts
+            storage_layout_entry(4, false), // dst_keys
+            storage_layout_entry(5, false), // dst_values
+            storage_layout_entry(6, true),  // num_intersections
+        ],
+    });
+    let tile_offsets = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("tile_offsets_bgl"),
+        entries: &[
+            storage_layout_entry(0, true),  // sorted_tile_ids
+            storage_layout_entry(1, false), // tile_offsets
+            storage_layout_entry(2, true),  // num_intersections
+        ],
+    });
+    let rasterize = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("rasterize_bgl"),
+        entries: &[
+            storage_layout_entry(0, true), // compact_gid_from_isect
+            storage_layout_entry(1, true), // tile_offsets
+            storage_layout_entry(2, true), // projected
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: RASTER_TEXTURE_FORMAT,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                },
+                count: None,
+            },
+            uniform_layout_entry(4, std::mem::size_of::<RasterUniformBuffer>()),
+        ],
+    });
+
+    GpuBindGroupLayouts {
+        project,
+        scan,
+        scan_block_sums,
+        map,
+        sort_count,
+        sort_reduce,
+        sort_scan,
+        sort_scan_compose,
+        sort_scan_add,
+        sort_scatter,
+        tile_offsets,
+        rasterize,
+    }
+}
+
+/// All compute pipelines for the 7-stage Gaussian splat pipeline.
+// Some pipelines are retained as lifetime anchors even when not directly
+// referenced in every dispatch path.
+#[allow(dead_code)]
+pub struct GpuComputePipelines {
+    pub project: wgpu::ComputePipeline,
+    pub scan_blocks: wgpu::ComputePipeline,
+    pub scan_block_sums: wgpu::ComputePipeline,
+    pub map_intersections: wgpu::ComputePipeline,
+    pub clamp_intersection_count: wgpu::ComputePipeline,
+    pub sort_count: wgpu::ComputePipeline,
+    pub sort_reduce: wgpu::ComputePipeline,
+    pub sort_scan: wgpu::ComputePipeline,
+    pub sort_scan_compose: wgpu::ComputePipeline,
+    pub sort_scan_add: wgpu::ComputePipeline,
+    pub sort_scatter: wgpu::ComputePipeline,
+    pub tile_offsets: wgpu::ComputePipeline,
+    pub rasterize: wgpu::ComputePipeline,
+}
+
+/// Create all 13 compute pipelines from the 5 embedded WGSL shaders.
+pub fn create_compute_pipelines(
+    device: &wgpu::Device,
+    layouts: &GpuBindGroupLayouts,
+) -> GpuComputePipelines {
+    let project_shader = create_shader_module(
+        device,
+        "project",
+        include_str!("../../shader/gaussian_project.wgsl"),
+    );
+    let map_shader = create_shader_module(
+        device,
+        "map_intersections",
+        include_str!("../../shader/gaussian_map_intersections.wgsl"),
+    );
+    let sort_shader = create_shader_module(
+        device,
+        "dynamic_sort",
+        include_str!("../../shader/gaussian_dynamic_sort.wgsl"),
+    );
+    let tile_offsets_shader = create_shader_module(
+        device,
+        "tile_offsets",
+        include_str!("../../shader/gaussian_tile_offsets.wgsl"),
+    );
+    let rasterize_shader = create_shader_module(
+        device,
+        "rasterize",
+        include_str!("../../shader/gaussian_raster_tiles.wgsl"),
+    );
+
+    GpuComputePipelines {
+        project: create_compute_pipeline(
+            device,
+            "project",
+            &project_shader,
+            "project_main",
+            &[&layouts.project],
+        ),
+        scan_blocks: create_compute_pipeline(
+            device,
+            "scan_blocks",
+            &project_shader,
+            "scan_blocks_main",
+            &[&layouts.scan],
+        ),
+        scan_block_sums: create_compute_pipeline(
+            device,
+            "scan_block_sums",
+            &project_shader,
+            "scan_block_sums_main",
+            &[&layouts.scan_block_sums],
+        ),
+        map_intersections: create_compute_pipeline(
+            device,
+            "map_intersections",
+            &map_shader,
+            "map_main",
+            &[&layouts.map],
+        ),
+        clamp_intersection_count: create_compute_pipeline(
+            device,
+            "clamp_intersection_count",
+            &map_shader,
+            "clamp_count_main",
+            &[&layouts.map],
+        ),
+        sort_count: create_compute_pipeline(
+            device,
+            "sort_count",
+            &sort_shader,
+            "sort_count_main",
+            &[&layouts.sort_count],
+        ),
+        sort_reduce: create_compute_pipeline(
+            device,
+            "sort_reduce",
+            &sort_shader,
+            "sort_reduce_main",
+            &[&layouts.sort_reduce],
+        ),
+        sort_scan: create_compute_pipeline(
+            device,
+            "sort_scan",
+            &sort_shader,
+            "sort_scan_main",
+            &[&layouts.sort_scan],
+        ),
+        sort_scan_compose: create_compute_pipeline(
+            device,
+            "sort_scan_compose",
+            &sort_shader,
+            "sort_scan_compose_main",
+            &[&layouts.sort_scan_compose],
+        ),
+        sort_scan_add: create_compute_pipeline(
+            device,
+            "sort_scan_add",
+            &sort_shader,
+            "sort_scan_add_main",
+            &[&layouts.sort_scan_add],
+        ),
+        sort_scatter: create_compute_pipeline(
+            device,
+            "sort_scatter",
+            &sort_shader,
+            "sort_scatter_main",
+            &[&layouts.sort_scatter],
+        ),
+        tile_offsets: create_compute_pipeline(
+            device,
+            "tile_offsets",
+            &tile_offsets_shader,
+            "main",
+            &[&layouts.tile_offsets],
+        ),
+        rasterize: create_compute_pipeline(
+            device,
+            "rasterize",
+            &rasterize_shader,
+            "main",
+            &[&layouts.rasterize],
+        ),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Uniform buffer fill helpers
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Fill the project uniform buffer from camera and cloud parameters.
+pub fn fill_project_uniform(
+    camera: &super::types::CameraApproximation,
+    selected_limit: usize,
+    cloud: &super::types::RenderGaussianCloud,
+) -> ProjectUniformBuffer {
+    let coeffs_per_channel: u32 = cloud
+        .sh_coeffs
+        .as_ref()
+        .map_or(0, |sh| sh.coeffs_per_channel as u32);
+    let sh_degree: u32 = super::sh::sh_degree_from_coeffs(coeffs_per_channel as usize).unwrap_or(0);
+    ProjectUniformBuffer {
+        view_from_world: glam::Mat4::from(camera.view_from_world).to_cols_array_2d(),
+        projection_from_view: camera.projection_from_view.to_cols_array_2d(),
+        camera_world_position: camera.world_position.extend(0.0).to_array(),
+        viewport_and_near: [
+            camera.viewport_size_px.x,
+            camera.viewport_size_px.y,
+            camera.near_plane,
+            super::constants::MIN_RADIUS_PX,
+        ],
+        sigma_and_counts: [
+            super::constants::SIGMA_COVERAGE.to_bits(),
+            selected_limit as u32,
+            coeffs_per_channel,
+            sh_degree,
+        ],
+        _pad: [[
+            u32::from(cloud.sh_coeffs.is_some()),
+            super::constants::OPACITY_SCALE.to_bits(),
+            super::constants::MAX_SPLATS_RENDERED.min(u32::MAX as usize) as u32,
+            0,
+        ]],
+    }
+}
+
+/// Fill the scan uniform buffer.
+pub fn fill_scan_uniform(selected_limit: usize) -> ScanUniformBuffer {
+    ScanUniformBuffer {
+        total_selected: selected_limit as u32,
+        block_count: compaction_block_count(selected_limit) as u32,
+        _pad: [0; 2],
+    }
+}
+
+/// Fill the map uniform buffer.
+pub fn fill_map_uniform(
+    selected_limit: usize,
+    intersection_capacity: usize,
+    tile_bounds: glam::UVec2,
+) -> MapUniformBuffer {
+    MapUniformBuffer {
+        total_selected: selected_limit as u32,
+        intersection_capacity: intersection_capacity.min(u32::MAX as usize) as u32,
+        tile_bounds_x: tile_bounds.x,
+        tile_bounds_y: tile_bounds.y,
+    }
+}
