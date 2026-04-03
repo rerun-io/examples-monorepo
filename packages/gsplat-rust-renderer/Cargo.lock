@@ -3753,6 +3753,7 @@ dependencies = [
  "glam",
  "image",
  "ply-rs",
+ "pollster",
  "rayon",
  "re_crash_handler",
  "re_grpc_server",
@@ -3771,6 +3772,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "wgpu",
 ]
 
 [[package]]

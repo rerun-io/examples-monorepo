@@ -134,6 +134,36 @@ pub struct PreparedSplat {
     pub opacity: f32,
 }
 
+/// Output of the GPU rasterizer.
+pub struct RenderOutput {
+    /// RGBA pixels in row-major order (top-left origin), float32 per channel.
+    /// Each pixel is `[R, G, B, A]` with values in `[0, 1]`.
+    pub pixels: Vec<[f32; 4]>,
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+}
+
+impl RenderOutput {
+    /// Composite over a background color and convert to 8-bit RGB for PNG saving.
+    ///
+    /// Returns a flat byte array of length `width * height * 3` in row-major RGB order.
+    pub fn to_rgb8(&self, background: [f32; 3]) -> Vec<u8> {
+        let mut bytes: Vec<u8> = Vec::with_capacity(self.width as usize * self.height as usize * 3);
+        for pixel in &self.pixels {
+            let alpha: f32 = pixel[3];
+            let r: f32 = pixel[0] + background[0] * (1.0 - alpha);
+            let g: f32 = pixel[1] + background[1] * (1.0 - alpha);
+            let b: f32 = pixel[2] + background[2] * (1.0 - alpha);
+            bytes.push((r.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+            bytes.push((g.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+            bytes.push((b.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+        }
+        bytes
+    }
+}
+
 /// Compute the axis-aligned bounding box of a set of 3D points.
 /// Returns `None` if the point set is empty or contains non-finite values.
 pub fn approximate_bounds_from_points(points: &[Vec3]) -> Option<(Vec3, Vec3)> {
