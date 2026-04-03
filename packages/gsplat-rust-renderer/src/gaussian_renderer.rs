@@ -58,7 +58,7 @@ use re_renderer::external::wgpu;
 use re_renderer::renderer::{DrawData, DrawDataDrawable, DrawError, DrawInstruction, Renderer};
 
 use self::gpu_types as gpu_data;
-use crate::gaussian_visualizer::{CameraApproximation, RenderGaussianCloud, SortedSplatIndex};
+use crate::gsplat_core::{CameraApproximation, RenderGaussianCloud, SortedSplatIndex};
 
 const PROJECT_WORKGROUP_SIZE: u32 = 128;
 const COMPACTION_WORKGROUP_SIZE: u32 = 256;
@@ -2555,7 +2555,7 @@ mod cpu {
     use glam::Vec3;
 
     use super::*;
-    use crate::gaussian_visualizer::{
+    use crate::gsplat_core::{
         RenderShCoefficients, build_prepared_splat, evaluate_sh_rgb, project_gaussian_to_ndc,
     };
 
@@ -2684,7 +2684,7 @@ mod compute {
     use std::time::Instant;
 
     use super::*;
-    use crate::gaussian_visualizer::sh_degree_from_coeffs;
+    use crate::gsplat_core::sh_degree_from_coeffs;
 
     impl GaussianRenderer {
         #[allow(clippy::too_many_arguments)]
@@ -3131,7 +3131,7 @@ mod gpu_types {
     use re_renderer::external::smallvec::smallvec;
     use re_renderer::external::wgpu;
 
-    use crate::gaussian_visualizer::PreparedSplat;
+    use crate::gsplat_core::PreparedSplat;
 
     #[repr(C)]
     #[derive(Clone, Copy, Pod, Zeroable)]
