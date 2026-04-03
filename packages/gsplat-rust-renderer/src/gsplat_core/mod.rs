@@ -14,14 +14,14 @@
 //! |--------|---------|
 //! | [`types`] | Data structures: `RenderGaussianCloud`, `CameraApproximation`, `RenderOutput`, etc. |
 //! | [`constants`] | Shared constants: `SH_C0`, `MAX_SPLATS_RENDERED`, `SIGMA_COVERAGE`, etc. |
-//! | [`projection`] | 3D→2D Gaussian projection via camera Jacobian |
+//! | [`projection`] | Quaternion helpers |
 //! | [`sh`] | Spherical harmonics evaluation (degrees 0–4) |
 //! | [`covariance`] | 2D covariance from 3D Gaussian + camera Jacobian |
 //! | [`culling`] | CPU frustum culling + depth sorting (pre-GPU pass) |
 //! | [`camera`] | Camera constructors (look-at, NeRF transform, fallback) |
 //! | [`gpu_types`] | GPU buffer layout structs and helpers |
 //! | [`gpu_context`] | Headless wgpu device/queue initialization |
-//! | [`gpu_renderer`] | 7-stage GPU compute pipeline (Brush-aligned, no CPU fallback) |
+//! | [`gpu_renderer`] | 7-stage GPU compute pipeline (Brush-aligned) |
 
 pub mod camera;
 pub mod constants;
@@ -46,9 +46,9 @@ pub use covariance::{
 pub use culling::{build_compute_candidate, rebuild_visible_indices};
 pub use gpu_context::GpuContext;
 pub use gpu_renderer::{GpuRenderer, gpu_render};
-pub use projection::{build_prepared_splat, normalize_quat_or_identity, project_gaussian_to_ndc};
+pub use projection::normalize_quat_or_identity;
 pub use sh::{evaluate_sh_rgb, sh_degree_from_coeffs};
 pub use types::{
-    CameraApproximation, PreparedSplat, ProjectedGaussian, RenderGaussianCloud, RenderOutput,
-    RenderShCoefficients, SortedSplatIndex, approximate_bounds_from_points,
+    CameraApproximation, RenderGaussianCloud, RenderOutput, RenderShCoefficients, SortedSplatIndex,
+    approximate_bounds_from_points,
 };

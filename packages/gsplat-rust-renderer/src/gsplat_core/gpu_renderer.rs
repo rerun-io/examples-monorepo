@@ -6,7 +6,7 @@
 //!
 //! The output is read back from the GPU as an RGBA8 image buffer.
 //! This module follows the [Brush](https://github.com/ArthurBrussee/brush)
-//! approach: pure GPU rendering with no CPU rasterization fallback.
+//! approach: pure GPU rendering.
 
 use std::sync::Arc;
 
@@ -47,7 +47,7 @@ impl GpuRenderer {
 /// Render a Gaussian cloud from a camera viewpoint using the GPU compute pipeline.
 ///
 /// This is the standalone equivalent of the Rerun viewer's compute tile path,
-/// following Brush's approach of pure GPU rendering with no CPU fallback.
+/// following Brush's approach of pure GPU rendering.
 ///
 /// # Pipeline stages
 ///
@@ -317,8 +317,8 @@ pub fn gpu_render(
         };
     }
 
-    // Binding 6 is the instance output buffer (used by CPU fallback path).
-    // The standalone GPU renderer doesn't need it, but the shader writes to it.
+    // Binding 6 is the instance output buffer (legacy, written by the shader but not consumed).
+    // Kept as a dummy to satisfy the bind group layout.
     let dummy_instance_buf: Arc<wgpu::Buffer> = Arc::new(create_sized_buffer(
         device,
         "dummy_instances",

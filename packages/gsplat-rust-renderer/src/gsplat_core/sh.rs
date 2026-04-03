@@ -1,4 +1,4 @@
-//! Spherical harmonics evaluation (CPU path).
+//! Spherical harmonics evaluation.
 //!
 //! Evaluates real spherical harmonic basis functions up to degree 4 (25
 //! coefficients per channel).  The math matches `gaussian_project.wgsl` and
@@ -32,7 +32,7 @@ pub fn sh_degree_from_coeffs(coeffs_per_channel: usize) -> Option<u32> {
 /// Evaluate spherical harmonics for a given view direction and return the
 /// final activated RGB color.
 ///
-/// This is the CPU-side equivalent of `evaluate_sh_rgb` in `gaussian_project.wgsl`.
+/// This is the Rust reference equivalent of `evaluate_sh_rgb` in `gaussian_project.wgsl`.
 /// The GPU shader evaluates the same math per-splat in parallel.
 pub fn evaluate_sh_rgb(
     coefficients: &[f32],

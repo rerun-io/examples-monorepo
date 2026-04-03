@@ -2,8 +2,8 @@
 //!
 //! Projects a 3D Gaussian covariance matrix into 2D pixel space using the
 //! Brush-style local linearization (camera Jacobian).  These functions are
-//! shared between the CPU software rasterizer and the GPU compute shaders
-//! (which implement the same math in WGSL).
+//! The GPU compute shaders implement the same math in WGSL; these Rust
+//! functions are the reference implementation.
 
 use glam::{Affine3A, Mat2, Mat3, Vec2, Vec3};
 

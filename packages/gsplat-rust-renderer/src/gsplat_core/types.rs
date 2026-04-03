@@ -37,7 +37,7 @@ pub struct RenderGaussianCloud {
     /// Optional higher-order SH coefficients for view-dependent color.
     pub sh_coeffs: Option<RenderShCoefficients>,
     /// Axis-aligned bounding box of all splat centers in world space.
-    /// Used by the fallback camera when the user hasn't interacted yet.
+    /// Used by the initial camera when the user hasn't interacted yet.
     pub bounds_world: Option<(Vec3, Vec3)>,
 }
 
@@ -79,7 +79,7 @@ impl RenderGaussianCloud {
 
 /// Simplified camera parameters for rendering.
 ///
-/// Used for frustum culling on the CPU and as uniforms for the GPU shaders.
+/// Used for CPU frustum culling (pre-GPU pass) and as uniforms for the GPU shaders.
 /// Can be constructed from a Rerun 3D view state, a NeRF transforms JSON,
 /// or manually via [`CameraApproximation::from_look_at`].
 #[derive(Clone, Debug)]
@@ -97,7 +97,7 @@ pub struct CameraApproximation {
     pub near_plane: f32,
 }
 
-/// A splat that passed the CPU visibility test, carrying its index back into
+/// A splat that passed the CPU visibility pre-pass, carrying its index back into
 /// the cloud arrays and its depth from the camera (for sorting).
 #[derive(Clone, Copy, Debug)]
 pub struct SortedSplatIndex {
@@ -105,33 +105,6 @@ pub struct SortedSplatIndex {
     pub splat_index: u32,
     /// Positive distance from camera.  Larger = farther away.
     pub camera_depth: f32,
-}
-
-/// Result of projecting one Gaussian onto the screen (CPU fallback path).
-/// Contains everything the instanced-quad shader needs to render a splat.
-#[derive(Clone, Copy, Debug)]
-pub struct ProjectedGaussian {
-    /// Screen-space center in normalized device coordinates (NDC), range `[-1, 1]`.
-    pub center_ndc: Vec2,
-    /// Depth in NDC for depth testing.
-    pub ndc_depth: f32,
-    /// Inverse of the 2D covariance matrix in NDC (upper triangle: xx, xy, yy).
-    /// Used by the fragment shader to evaluate the Gaussian falloff.
-    pub inv_cov_ndc_xx_xy_yy: [f32; 3],
-    /// Conservative bounding radius in NDC for the instanced quad.
-    pub radius_ndc: f32,
-}
-
-/// A fully prepared splat ready for GPU upload (CPU fallback path).
-/// Combines the projected geometry with the final color and opacity.
-#[derive(Clone, Copy, Debug)]
-pub struct PreparedSplat {
-    pub center_ndc: Vec2,
-    pub ndc_depth: f32,
-    pub inv_cov_ndc_xx_xy_yy: [f32; 3],
-    pub radius_ndc: f32,
-    pub color_rgb: [f32; 3],
-    pub opacity: f32,
 }
 
 /// Output of the GPU rasterizer.

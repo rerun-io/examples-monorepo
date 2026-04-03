@@ -1,7 +1,7 @@
 //! Shared constants for the Gaussian splatting pipeline.
 //!
-//! These values are used by both the CPU software rasterizer and the GPU
-//! compute pipeline.  They match the constants used by the
+//! These values are used by the GPU compute pipeline and the CPU pre-pass
+//! (frustum culling + depth sorting).  They match the constants used by the
 //! [Brush](https://github.com/ArthurBrussee/brush) renderer so that our
 //! output is numerically comparable.
 

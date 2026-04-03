@@ -5,8 +5,7 @@
 //! `--no-default-features` to exclude all `re_*` crates.
 //!
 //! Uses the same 7-stage GPU compute pipeline as the Rerun viewer but runs
-//! headless via raw `wgpu`.  Follows the Brush approach: pure GPU rendering
-//! with no CPU rasterization fallback.
+//! headless via raw `wgpu`.
 //!
 //! # Usage
 //!

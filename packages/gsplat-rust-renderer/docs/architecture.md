@@ -266,8 +266,7 @@ packages/gsplat-rust-renderer/
 │   ├── gaussian_dynamic_sort.wgsl      # Stage 4: radix sort
 │   ├── gaussian_tile_offsets.wgsl      # Stage 5: tile ranges
 │   ├── gaussian_raster_tiles.wgsl      # Stage 6: per-pixel rasterize
-│   ├── gaussian_composite.wgsl         # Stage 7: viewport blit (viewer only)
-│   └── gaussian_splat.wgsl             # Legacy CPU fallback quads (viewer only)
+│   └── gaussian_composite.wgsl         # Stage 7: viewport blit (viewer only)
 ├── gsplat_rust_renderer/          # Python module
 │   ├── __init__.py                # Beartype activation
 │   ├── gaussians3d.py             # PLY loader + rr.AsComponents
