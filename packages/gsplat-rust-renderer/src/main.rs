@@ -23,14 +23,13 @@
 //!
 //! ```bash
 //! # Terminal 1 – launch the viewer:
-//! cargo run --release
+//! cargo run --release --bin gsplat-rust-renderer
 //!
 //! # Terminal 2 – send Gaussian splat data from Python:
 //! python tools/log_gaussian_ply.py --rr-config.connect
 //! ```
 
-mod gaussian_renderer;
-mod gaussian_visualizer;
+use gsplat_lib::gaussian_visualizer;
 
 use re_sdk_types::View as _;
 use re_viewer::external::eframe;

@@ -34,7 +34,6 @@
 //
 // Input: CPU-provided visible candidate ordering plus the canonical Gaussian buffers.
 // Output:
-// - projected splat instances for the classic draw path
 // - projected tile splats for the tile raster path
 // - visibility flags and tile hit counts used by later compute stages
 

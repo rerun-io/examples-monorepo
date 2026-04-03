@@ -682,6 +682,9 @@ huggingface_hub = "*"
 hf-transfer = "*"
 tyro = ">=0.9.1,<0.10"
 pyserde = ">=0.20,<0.30"
+# CPU-only PyTorch for lpips metrics (no CUDA requirement).
+pytorch-cpu = ">=2.8.0"
+torchvision = "*"
 
 [feature.gsplat-rust-renderer.target.linux-64.dependencies]
 libxkbcommon = "*"
@@ -695,6 +698,7 @@ brush = "==0.3.0"
 
 [feature.gsplat-rust-renderer.pypi-dependencies]
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
+lpips = ">=0.1.4,<1"
 plyfile = ">=1.1,<2"
 rerun-sdk = "==0.30.2"
 simplecv = { git = "https://github.com/pablovela5620/simplecv.git", tag = "v0.7.2" }
@@ -789,9 +793,37 @@ depends-on = ["_download-nerf-hotdog"]
 cwd = "packages/gsplat-rust-renderer"
 description = "Train Gaussian splats on NeRF Synthetic hotdog scene (30K steps)"
 
+[feature.gsplat-rust-renderer.tasks._download-nerf-chair]
+cmd = "test -d data/nerf-synthetic/chair || hf download pablovela5620/nerf-synthetic-mirror --include 'chair/*' --repo-type dataset --local-dir data/nerf-synthetic/"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download NeRF Synthetic chair scene from HuggingFace"
+
+[feature.gsplat-rust-renderer.tasks._download-trained-plys]
+cmd = "mkdir -p data/trained && (test -f data/trained/chair.ply || hf download pablovela5620/nerf-synthetic-mirror --include 'trained/chair.ply' --repo-type dataset --local-dir data/) && (test -f data/trained/hotdog.ply || hf download pablovela5620/nerf-synthetic-mirror --include 'trained/hotdog.ply' --repo-type dataset --local-dir data/)"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download pre-trained Gaussian splat PLYs for chair and hotdog"
+
+[feature.gsplat-rust-renderer.tasks.brush-train-chair]
+cmd = """
+brush_app data/nerf-synthetic/chair \
+  --total-steps 30000 \
+  --export-every 30000 \
+  --export-path data/trained \
+  --export-name chair.ply
+"""
+depends-on = ["_download-nerf-chair"]
+cwd = "packages/gsplat-rust-renderer"
+description = "Train Gaussian splats on NeRF Synthetic chair scene (30K steps)"
+
+# ── Standalone render CLI ────────────────────────────────────────────────
+[feature.gsplat-rust-renderer.tasks.render]
+cmd = "cargo run --release --no-default-features --bin gsplat-render --"
+cwd = "packages/gsplat-rust-renderer"
+description = "Render a PLY at a NeRF camera position to PNG (no Rerun needed)"
+
 # ── Rust tasks ───────────────────────────────────────────────────────────
 [feature.gsplat-rust-renderer.tasks.viewer]
-cmd = "cargo run --release"
+cmd = "cargo run --release --bin gsplat-rust-renderer"
 cwd = "packages/gsplat-rust-renderer"
 description = "Launch the Rerun viewer with Gaussian splat visualization"
 

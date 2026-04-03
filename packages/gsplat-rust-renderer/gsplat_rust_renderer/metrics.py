@@ -1,7 +1,10 @@
 """Image quality metrics for evaluating Gaussian splat rendering.
 
-Provides PSNR and SSIM implementations matching the standard definitions
-used by 3DGS, NeRF, and Brush for benchmarking novel view synthesis.
+Provides PSNR, SSIM, and LPIPS implementations matching the standard
+definitions used by 3DGS, NeRF, and Brush for benchmarking novel view
+synthesis.
+
+LPIPS uses the standard VGG-based ``lpips`` package (requires PyTorch).
 """
 
 from __future__ import annotations
@@ -174,18 +177,67 @@ def ssim(
     return float(np.mean(ssim_map))
 
 
+_lpips_model: object | None = None
+
+
+def _get_lpips_model() -> object:
+    """Return a cached LPIPS VGG model instance.
+
+    The model is loaded on first call and reused for subsequent calls.
+    Weights are downloaded automatically by the ``lpips`` package on
+    first use (~22 MB).
+    """
+    global _lpips_model
+    if _lpips_model is None:
+        import lpips as lpips_pkg
+
+        _lpips_model = lpips_pkg.LPIPS(net="vgg", verbose=False)
+    return _lpips_model
+
+
+def lpips(
+    rendered: Float32[np.ndarray, "h w 3"],
+    ground_truth: Float32[np.ndarray, "h w 3"],
+) -> float:
+    """Compute Learned Perceptual Image Patch Similarity (LPIPS).
+
+    Uses the standard VGG-based LPIPS model from the ``lpips`` package.
+    Lower is better.  Typical values for good 3DGS reconstructions:
+    0.05-0.20.
+
+    Args:
+        rendered: The rendered image, float32 in [0, 1].
+        ground_truth: The reference ground truth image, float32 in [0, 1].
+
+    Returns:
+        LPIPS distance (lower = more perceptually similar).
+    """
+    import torch
+
+    model: object = _get_lpips_model()
+
+    # lpips expects NCHW tensors in [-1, 1].
+    rendered_t: torch.Tensor = torch.from_numpy(rendered).permute(2, 0, 1).unsqueeze(0) * 2.0 - 1.0
+    gt_t: torch.Tensor = torch.from_numpy(ground_truth).permute(2, 0, 1).unsqueeze(0) * 2.0 - 1.0
+
+    with torch.no_grad():
+        score: torch.Tensor = model(rendered_t, gt_t)
+
+    return float(score.item())
+
+
 def compute_metrics(
     rendered_path: Path,
     ground_truth_path: Path,
 ) -> dict[str, float]:
-    """Compute PSNR and SSIM between a rendered image and ground truth.
+    """Compute PSNR, SSIM, and LPIPS between a rendered image and ground truth.
 
     Args:
         rendered_path: Path to the rendered image.
         ground_truth_path: Path to the ground truth image.
 
     Returns:
-        Dictionary with ``"psnr"`` and ``"ssim"`` keys.
+        Dictionary with ``"psnr"``, ``"ssim"``, and ``"lpips"`` keys.
     """
     rendered: Float32[np.ndarray, "h w 3"] = load_image_rgb(rendered_path)
     gt: Float32[np.ndarray, "h w 3"] = load_image_rgb(ground_truth_path)
@@ -202,4 +254,5 @@ def compute_metrics(
     return {
         "psnr": psnr(rendered, gt),
         "ssim": ssim(rendered, gt),
+        "lpips": lpips(rendered, gt),
     }

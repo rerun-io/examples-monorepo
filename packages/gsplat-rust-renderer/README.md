@@ -109,15 +109,14 @@ gsplat-rust-renderer/
 ├── src/
 │   ├── main.rs                         # Viewer binary: gRPC listener + visualizer registration
 │   ├── gaussian_visualizer.rs          # VisualizerSystem: query → cloud → cull → sort → submit
-│   └── gaussian_renderer.rs            # GPU renderer: compute pipelines + CPU fallback
+│   └── gaussian_renderer.rs            # GPU renderer: compute pipelines + viewport composite
 ├── shader/                             # WGSL compute shaders (7-stage pipeline)
 │   ├── gaussian_project.wgsl           # Stage 1: 3D→2D projection + SH evaluation
 │   ├── gaussian_map_intersections.wgsl # Stage 3: scatter (splat, tile) pairs
 │   ├── gaussian_dynamic_sort.wgsl      # Stage 4: radix sort by tile ID
 │   ├── gaussian_tile_offsets.wgsl      # Stage 5: find per-tile [start, end) ranges
 │   ├── gaussian_raster_tiles.wgsl      # Stage 6: per-pixel alpha blending per tile
-│   ├── gaussian_composite.wgsl         # Stage 7: blit raster texture to viewport
-│   └── gaussian_splat.wgsl             # CPU fallback: instanced-quad rendering
+│   └── gaussian_composite.wgsl         # Stage 7: blit raster texture to viewport
 ├── gsplat_rust_renderer/               # Python package
 │   ├── __init__.py                     # Beartype activation (dev env only)
 │   └── gaussians3d.py                  # Gaussians3D dataclass + PLY parser

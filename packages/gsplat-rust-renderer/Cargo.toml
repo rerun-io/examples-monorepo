@@ -3,23 +3,66 @@ name = "gsplat-rust-renderer"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "gsplat_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gsplat-rust-renderer"
+path = "src/main.rs"
+required-features = ["viewer"]
+
+[[bin]]
+name = "gsplat-render"
+path = "src/render_cli.rs"
+
+[features]
+default = ["viewer"]
+viewer = [
+    "dep:re_crash_handler",
+    "dep:re_grpc_server",
+    "dep:re_log_channel",
+    "dep:re_log",
+    "dep:re_log_types",
+    "dep:re_query",
+    "dep:re_renderer",
+    "dep:re_sdk",
+    "dep:re_sdk_types",
+    "dep:re_view",
+    "dep:re_view_spatial",
+    "dep:re_viewer",
+    "dep:re_viewer_context",
+    "dep:rerun",
+    "dep:tokio",
+]
+
 [dependencies]
+# ── Always-on deps (core algorithm + CLI) ─────────────────────────────
 anyhow = "1.0"
 bytemuck = { version = "1.23", features = ["derive"] }
+clap = { version = "4", features = ["derive"] }
 glam = "0.30"
+image = "0.25"
+ply-rs = "0.1"
+pollster = "0.4"
 rayon = "1.11"
-re_crash_handler = "=0.30.2"
-re_grpc_server = "=0.30.2"
-re_log_channel = "=0.30.2"
-re_log = "=0.30.2"
-re_log_types = "=0.30.2"
-re_query = "=0.30.2"
-re_renderer = "=0.30.2"
-re_sdk = "=0.30.2"
-re_sdk_types = "=0.30.2"
-re_view = "=0.30.2"
-re_view_spatial = "=0.30.2"
-re_viewer = "=0.30.2"
-re_viewer_context = "=0.30.2"
-rerun = { version = "=0.30.2", features = ["native_viewer"] }
-tokio = { version = "1.50", features = ["macros", "rt-multi-thread"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wgpu = "=27.0.1"
+
+# ── Viewer-only deps (behind "viewer" feature flag) ───────────────────
+re_crash_handler = { version = "=0.30.2", optional = true }
+re_grpc_server = { version = "=0.30.2", optional = true }
+re_log_channel = { version = "=0.30.2", optional = true }
+re_log = { version = "=0.30.2", optional = true }
+re_log_types = { version = "=0.30.2", optional = true }
+re_query = { version = "=0.30.2", optional = true }
+re_renderer = { version = "=0.30.2", optional = true }
+re_sdk = { version = "=0.30.2", optional = true }
+re_sdk_types = { version = "=0.30.2", optional = true }
+re_view = { version = "=0.30.2", optional = true }
+re_view_spatial = { version = "=0.30.2", optional = true }
+re_viewer = { version = "=0.30.2", optional = true }
+re_viewer_context = { version = "=0.30.2", optional = true }
+rerun = { version = "=0.30.2", features = ["native_viewer"], optional = true }
+tokio = { version = "1.50", features = ["macros", "rt-multi-thread"], optional = true }
