@@ -682,6 +682,9 @@ huggingface_hub = "*"
 hf-transfer = "*"
 tyro = ">=0.9.1,<0.10"
 pyserde = ">=0.20,<0.30"
+# CPU-only PyTorch for lpips metrics (no CUDA requirement).
+pytorch-cpu = ">=2.8.0"
+torchvision = "*"
 
 [feature.gsplat-rust-renderer.target.linux-64.dependencies]
 libxkbcommon = "*"
@@ -954,10 +957,8 @@ pyvrs-viewer-dev = { features = [
 ], solve-group = "pyvrs-viewer", no-default-feature = true }
 gsplat-rust-renderer = { features = [
     "gsplat-rust-renderer",
-    "cuda",
 ], solve-group = "gsplat-rust-renderer", no-default-feature = true }
 gsplat-rust-renderer-dev = { features = [
     "gsplat-rust-renderer",
-    "cuda",
     "dev",
 ], solve-group = "gsplat-rust-renderer", no-default-feature = true }
