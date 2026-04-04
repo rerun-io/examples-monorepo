@@ -1,33 +1,31 @@
-from dataclasses import dataclass
 import sys
 import time
-import lietorch
-import torch
-from mast3r_slam.global_opt import FactorGraph
+from dataclasses import dataclass
+from multiprocessing.managers import SyncManager
+from pathlib import Path
+from timeit import default_timer as timer
+from typing import Literal
 
-from mast3r_slam.config import load_config, config
-from mast3r_slam.dataloader import load_dataset
+import lietorch
+import rerun as rr
+import rerun.blueprint as rrb
+import torch
+import torch.multiprocessing as mp
+from simplecv.rerun_log_utils import RerunTyroConfig
+
 import mast3r_slam.evaluate as eval
+from mast3r_slam.config import config, load_config
+from mast3r_slam.dataloader import load_dataset
 from mast3r_slam.frame import Frame, Mode, SharedKeyframes, SharedStates, create_frame
+from mast3r_slam.global_opt import FactorGraph
 from mast3r_slam.mast3r_utils import (
     load_mast3r,
     load_retriever,
     mast3r_inference_mono,
 )
-from mast3r_slam.tracker import FrameTracker
-import torch.multiprocessing as mp
-from multiprocessing.managers import SyncManager
-from timeit import default_timer as timer
-import rerun as rr
-
-
-from simplecv.rerun_log_utils import RerunTyroConfig
-from pathlib import Path
-from typing import Literal
-import rerun.blueprint as rrb
-
-from mast3r_slam.rerun_log_utils import create_blueprints, RerunLogger
 from mast3r_slam.nerfstudio_utils import save_kf_to_nerfstudio
+from mast3r_slam.rerun_log_utils import RerunLogger, create_blueprints
+from mast3r_slam.tracker import FrameTracker
 
 
 def format_time(seconds):
@@ -84,9 +82,7 @@ def mast3r_slam_inference(inf_config: InferenceConfig):
         sys.exit(0)
     K = None
     if use_calib:
-        K = torch.from_numpy(dataset.camera_intrinsics.K_frame).to(
-            device, dtype=torch.float32
-        )
+        K = torch.from_numpy(dataset.camera_intrinsics.K_frame).to(device, dtype=torch.float32)
         keyframes.set_intrinsics(K)
 
     # remove the trajectory from the previous run
@@ -102,9 +98,7 @@ def mast3r_slam_inference(inf_config: InferenceConfig):
 
     tracker = FrameTracker(model, keyframes, device)
 
-    backend = mp.Process(
-        target=run_backend, args=(inf_config.config, model, states, keyframes, K)
-    )
+    backend = mp.Process(target=run_backend, args=(inf_config.config, model, states, keyframes, K))
     backend.start()
 
     i = 0
@@ -122,14 +116,8 @@ def mast3r_slam_inference(inf_config: InferenceConfig):
         timestamp, img = dataset[i]
 
         # get frames last camera pose
-        T_WC: lietorch.Sim3 = (
-            lietorch.Sim3.Identity(1, device=device)
-            if i == 0
-            else states.get_frame().T_WC
-        )
-        frame: Frame = create_frame(
-            i, img, T_WC, img_size=dataset.img_size, device=device
-        )
+        T_WC: lietorch.Sim3 = lietorch.Sim3.Identity(1, device=device) if i == 0 else states.get_frame().T_WC
+        frame: Frame = create_frame(i, img, T_WC, img_size=dataset.img_size, device=device)
 
         if mode == Mode.INIT:
             # Initialize via mono inference, and encoded features needed for database
@@ -185,12 +173,8 @@ def mast3r_slam_inference(inf_config: InferenceConfig):
     if dataset.save_results:
         save_dir, seq_name = eval.prepare_savedir(inf_config, dataset)
         eval.save_ATE(save_dir, f"{seq_name}.txt", dataset.timestamps, keyframes)
-        eval.save_reconstruction(
-            save_dir, f"{seq_name}.pt", dataset.timestamps, keyframes
-        )
-        eval.save_keyframes(
-            save_dir / "keyframes" / seq_name, dataset.timestamps, keyframes
-        )
+        eval.save_reconstruction(save_dir, f"{seq_name}.pt", dataset.timestamps, keyframes)
+        eval.save_keyframes(save_dir / "keyframes" / seq_name, dataset.timestamps, keyframes)
 
     if inf_config.ns_save_path is not None:
         pcd = save_kf_to_nerfstudio(
@@ -271,9 +255,7 @@ def run_backend(config_path, model, states, keyframes, K):
             continue
         if mode == Mode.RELOC:
             frame = states.get_frame()
-            success: bool = relocalization(
-                frame, keyframes, factor_graph, retrieval_database
-            )
+            success: bool = relocalization(frame, keyframes, factor_graph, retrieval_database)
             if success:
                 states.set_mode(Mode.TRACKING)
             states.dequeue_reloc()
@@ -311,9 +293,7 @@ def run_backend(config_path, model, states, keyframes, K):
         kf_idx = list(kf_idx)  # convert to list
         frame_idx = [idx] * len(kf_idx)
         if kf_idx:
-            factor_graph.add_factors(
-                kf_idx, frame_idx, config["local_opt"]["min_match_frac"]
-            )
+            factor_graph.add_factors(kf_idx, frame_idx, config["local_opt"]["min_match_frac"])
 
         with states.lock:
             states.edges_ii[:] = factor_graph.ii.cpu().tolist()
