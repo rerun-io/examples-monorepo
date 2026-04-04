@@ -22,6 +22,7 @@ Each package has a **prod** environment (for running demos/apps) and a **dev** e
 | vistadream | `vistadream` | `vistadream-dev` | `packages/vistadream/src/vistadream/` | CUDA 12.9 |
 | gsplat-rust-renderer | `gsplat-rust-renderer` | `gsplat-rust-renderer-dev` | `packages/gsplat-rust-renderer/src/` | CUDA 12.9 |
 | pyvrs-viewer | `pyvrs-viewer` | `pyvrs-viewer-dev` | `packages/pyvrs-viewer/src/pyvrs_viewer/` | None (CPU) |
+| mast3r-slam | `mast3r-slam` | `mast3r-slam-dev` | `packages/mast3r-slam/mast3r_slam/` | CUDA 12.9 |
 
 ## Direnv Integration
 

@@ -1,0 +1,6 @@
+data/
+checkpoints/
+logs/
+*.so
+*.egg-info/
+build/

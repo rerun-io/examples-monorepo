@@ -665,6 +665,100 @@ cwd = "packages/pyvrs-viewer"
 description = "Benchmark 5 Quest + 5 Aria VRS files (requires download URL JSONs)"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# mast3r-slam
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.mast3r-slam.dependencies]
+python = "3.11.*"
+eigen = ">=3.4.0,<4"
+pip = ">=25.0.1,<26"
+ffmpeg = ">=7.1.0,<8"
+open3d = ">=0.19.0,<0.20"
+faiss = "*"
+scikit-learn = "*"
+matplotlib = "*"
+trimesh = "*"
+
+[feature.mast3r-slam.pypi-dependencies]
+einops = ">=0.8.0"
+evo = "*"
+natsort = ">=8.4"
+pykdtree = "*"
+roma = "*"
+pyaml = "*"
+
+[feature.mast3r-slam.activation.env]
+PACKAGE_DIR = "packages/mast3r-slam"
+TORCH_CUDA_ARCH_LIST = "7.5 8.0 8.6 8.9 9.0 12.0"
+
+# ── Install tasks (CUDA extensions need pip install inside activated env) ─
+[feature.mast3r-slam.tasks._install-lietorch]
+cmd = """
+python -c "import lietorch" 2>/dev/null || python -m pip install --no-build-isolation git+https://github.com/princeton-vl/lietorch.git
+"""
+cwd = "packages/mast3r-slam"
+description = "Install lietorch (Lie group operations, requires CUDA)"
+
+[feature.mast3r-slam.tasks._install-mast3r]
+cmd = """
+test -d thirdparty/mast3r/MAST3R.egg-info || (
+  python -m pip install --no-deps --no-build-isolation -e thirdparty/mast3r &&
+  python -m pip install --no-deps --no-build-isolation thirdparty/mast3r/asmk
+)
+"""
+cwd = "packages/mast3r-slam"
+description = "Install mast3r thirdparty (with dust3r and asmk; curope optional, falls back to PyTorch)"
+
+[feature.mast3r-slam.tasks._install-mast3r-slam]
+cmd = """
+python -c "import mast3r_slam_backends" 2>/dev/null || python -m pip install --no-build-isolation -e .
+"""
+depends-on = ["_install-lietorch", "_install-mast3r"]
+cwd = "packages/mast3r-slam"
+description = "Build CUDA kernels and install mast3r-slam"
+
+# ── Download tasks (hidden, used as depends-on) ─────────────────────────
+[feature.mast3r-slam.tasks._download-checkpoints]
+cmd = """
+test -e checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth \
+|| hf download pablovela5620/mast3r-slam \
+    MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth \
+    MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_codebook.pkl \
+    MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth \
+    --repo-type model --local-dir checkpoints/
+"""
+cwd = "packages/mast3r-slam"
+description = "Download MASt3R-SLAM model checkpoints"
+
+[feature.mast3r-slam.tasks._download-example-data]
+cmd = """
+test -e data/normal-apt-tour.MOV \
+|| hf download pablovela5620/mast3r-slam-example-data \
+    normal-apt-tour.MOV --repo-type dataset --local-dir data/
+"""
+cwd = "packages/mast3r-slam"
+outputs = ["packages/mast3r-slam/data/normal-apt-tour.MOV"]
+description = "Download example video data"
+
+# ── Demo tasks ───────────────────────────────────────────────────────────
+[feature.mast3r-slam.tasks.example-fast]
+cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.MOV --img-size 224 --config config/fast.yaml"
+depends-on = ["_install-mast3r-slam", "_download-checkpoints", "_download-example-data"]
+cwd = "packages/mast3r-slam"
+description = "Run MASt3R-SLAM inference (fast config, 224px)"
+
+[feature.mast3r-slam.tasks.example-base]
+cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.MOV --img-size 512 --config config/base.yaml"
+depends-on = ["_install-mast3r-slam", "_download-checkpoints", "_download-example-data"]
+cwd = "packages/mast3r-slam"
+description = "Run MASt3R-SLAM inference (base config, 512px)"
+
+[feature.mast3r-slam.tasks.mast3r-slam-app]
+cmd = "python tools/gradio-app.py"
+depends-on = ["_install-mast3r-slam", "_download-checkpoints"]
+cwd = "packages/mast3r-slam"
+description = "Launch MASt3R-SLAM Gradio web UI"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # gsplat-rust-renderer
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.gsplat-rust-renderer.dependencies]
@@ -955,6 +1049,17 @@ pyvrs-viewer-dev = { features = [
     "pyvrs-viewer",
     "dev",
 ], solve-group = "pyvrs-viewer", no-default-feature = true }
+mast3r-slam = { features = [
+    "common",
+    "cuda",
+    "mast3r-slam",
+], solve-group = "mast3r-slam", no-default-feature = true }
+mast3r-slam-dev = { features = [
+    "common",
+    "cuda",
+    "mast3r-slam",
+    "dev",
+], solve-group = "mast3r-slam", no-default-feature = true }
 gsplat-rust-renderer = { features = [
     "gsplat-rust-renderer",
 ], solve-group = "gsplat-rust-renderer", no-default-feature = true }

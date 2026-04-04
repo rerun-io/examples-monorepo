@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools==70.0.0", "torch"]
+build-backend = "setuptools.build_meta"
+
+[project]
+authors = [{ name = "pablo vela", email = "pablovela5620@gmail.com" }]
+name = "mast3r-slam"
+version = "0.0.1"
+requires-python = ">= 3.11"
+dependencies = [
+    # Common deps (numpy, opencv, jaxtyping, rerun-sdk, gradio, etc.)
+    # come from [feature.common] in root pixi.toml.
+    # Package-specific deps only:
+    "einops",
+    "natsort",
+    "pykdtree",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mast3r_slam", "mast3r_slam.*"]
+namespaces = false
+
+[tool.ruff]
+line-length = 150
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+ignore = ["E501", "F722", "F821", "UP037", "UP040"]
