@@ -1,3 +1,15 @@
+# Patch: Create setup.py with multi-source package discovery (upstream has none)
+#
+# This is the companion to add-pyproject-toml.patch. We need a setup.py
+# because the package layout is unusual — three repos nested together:
+#
+#   ./mast3r/          ← naver/mast3r Python package
+#   ./dust3r/dust3r/   ← naver/dust3r Python package (repo root has non-package files)
+#   ./dust3r/croco/models/ ← naver/croco CroCo model code (used by dust3r encoder)
+#
+# find_packages() is called three times with different `where` roots to
+# discover packages in each location. package_dir maps the top-level
+# package names to their actual filesystem paths so setuptools can find them.
 --- /dev/null
 +++ b/setup.py
 @@ -0,0 +1,14 @@

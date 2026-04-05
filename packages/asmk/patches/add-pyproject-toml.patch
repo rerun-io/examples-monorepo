@@ -1,3 +1,10 @@
+# Patch: Create pyproject.toml (upstream has none)
+#
+# The upstream jenicek/asmk repo uses only setup.py with no pyproject.toml.
+# We add one with modern setuptools backend and empty dependencies, since
+# faiss comes from conda and numpy/pyaml from the pixi environment.
+#
+# The "--- /dev/null" header tells the patch tool this is a new file.
 --- /dev/null
 +++ b/pyproject.toml
 @@ -0,0 +1,15 @@

@@ -1,3 +1,11 @@
+# Patch: Create pyproject.toml (upstream has none)
+#
+# The upstream naver/mast3r repo is not a pip-installable package — it has
+# no setup.py or pyproject.toml. Users are expected to clone it and add
+# the directory to PYTHONPATH. We create a minimal pyproject.toml so
+# rattler-build can install it as a proper conda package.
+#
+# The "--- /dev/null" header tells the patch tool this is a new file.
 --- /dev/null
 +++ b/pyproject.toml
 @@ -0,0 +1,8 @@

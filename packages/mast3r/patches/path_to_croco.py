@@ -4,6 +4,12 @@
 # --------------------------------------------------------
 # CroCo submodule import (or package import)
 # --------------------------------------------------------
+#
+# Replacement file: copied over upstream's path_to_croco.py during build.
+# Same pattern as fix-path-to-dust3r.patch — try importing the installed
+# package first. If CroCo's `models` package is installed (our case via
+# pixi-build), no sys.path hack is needed. Falls back to the submodule
+# layout for standalone upstream usage.
 
 import sys
 import os.path as path

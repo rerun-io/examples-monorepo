@@ -1,3 +1,12 @@
+# Patch: Add weights_only=False to dust3r's torch.load()
+#
+# Same issue as torch-load-weights-only.patch but for the dust3r submodule.
+# dust3r/model.py loads checkpoints containing argparse.Namespace objects
+# which require weights_only=False in PyTorch 2.6+.
+#
+# This patch is applied via `cd dust3r && patch -p1` in the build script
+# (not via the rattler-build patches: field) because dust3r is cloned
+# separately as a git submodule during the build.
 --- a/dust3r/model.py
 +++ b/dust3r/model.py
 @@ -27,7 +27,7 @@

@@ -1,3 +1,5 @@
+# rattler-build recipe for asmk
+# Builds the ASMK image retrieval library with its Cython C extension
 package:
   name: asmk
   version: "0.1.0"
@@ -5,6 +7,8 @@ package:
 source:
   git: https://github.com/jenicek/asmk.git
   rev: 2a96d9c03a841dffdfddabc699a20512dcd09363
+  # Patches are applied to the cloned source before the build script runs.
+  # See each .patch file for detailed comments on what it changes and why.
   patches:
     - patches/add-pyproject-toml.patch
     - patches/simplify-setup-py.patch
@@ -12,12 +16,15 @@ source:
 build:
   number: 0
   script:
-    # Regenerate hamming.c from .pyx to fix CPython 3.11+ header compatibility
+    # The upstream cython/hamming.c was generated with an old Cython that
+    # uses #include "longintrepr.h" — this header moved to cpython/ in
+    # CPython 3.11+. Regenerating from .pyx with modern Cython fixes it.
     - cython cython/hamming.pyx -o cython/hamming.c
     - python -m pip install . --no-deps --no-build-isolation -vv
 
 requirements:
   build:
+    # C compiler for the Cython extension (hamming distance computation)
     - ${{ compiler('c') }}
   host:
     - python 3.11.*

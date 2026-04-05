@@ -1,3 +1,13 @@
+# Patch: Make path_to_dust3r.py work when dust3r is installed as a package
+#
+# Upstream mast3r expects dust3r to be a git submodule at ../../dust3r/
+# relative to this file. It adds that path to sys.path so `import dust3r`
+# works. When dust3r is installed as a proper conda package (our case),
+# the submodule path doesn't exist and the original code raises ImportError.
+#
+# Fix: try `import dust3r` first. If it succeeds (package is installed),
+# do nothing. If it fails, raise a clear error. This file is imported by
+# nearly every module in mast3r via `import mast3r.utils.path_to_dust3r`.
 --- a/mast3r/utils/path_to_dust3r.py
 +++ b/mast3r/utils/path_to_dust3r.py
 @@ -1,19 +1,14 @@

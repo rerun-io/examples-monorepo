@@ -1,3 +1,13 @@
+# Patch: Add weights_only=False to torch.load() calls
+#
+# PyTorch 2.6+ changed torch.load() to default to weights_only=True, which
+# rejects pickled objects that aren't plain tensors. MASt3R checkpoints
+# contain custom Python objects (argparse.Namespace, etc.) that require
+# weights_only=False to load. Without this, you get:
+#   _pickle.UnpicklingError: Weights only load failed.
+#
+# This patches two files in mast3r/retrieval/ that upstream hasn't updated.
+# (mast3r/model.py already has this fix upstream.)
 --- a/mast3r/retrieval/model.py
 +++ b/mast3r/retrieval/model.py
 @@ -136,7 +136,7 @@

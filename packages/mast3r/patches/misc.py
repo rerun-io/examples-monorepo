@@ -4,6 +4,17 @@
 # --------------------------------------------------------
 # utilitary functions for DUSt3R
 # --------------------------------------------------------
+#
+# Replacement file: copied over upstream's misc.py during build.
+#
+# Key change: transpose_to_landscape() now returns class instances
+# (_TransposeToLandscapeYes/_No) instead of local closures (wrapper_yes/
+# wrapper_no). The original closures can't be pickled, which breaks
+# torch.multiprocessing with spawn mode — the model is sent to a
+# subprocess via pickle and the local functions cause:
+#   AttributeError: Can't pickle local object 'transpose_to_landscape.<locals>.wrapper_no'
+#
+# The class-based callables are functionally identical but picklable.
 import torch
 
 

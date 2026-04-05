@@ -1,3 +1,11 @@
+# Patch: Strip torch/numpy from build and runtime dependencies
+#
+# Upstream declares torch and numpy as both build-requires and runtime deps.
+# In our pixi environment, these are provided by conda (pytorch-gpu, numpy),
+# so we remove them to avoid pixi's pypi resolver trying to pull them from
+# PyPI (which would conflict with the conda versions).
+#
+# Also switches from the legacy build backend to the modern one.
 --- a/pyproject.toml
 +++ b/pyproject.toml
 @@ -1,18 +1,15 @@
@@ -6,10 +14,10 @@
 -build-backend = "setuptools.build_meta:__legacy__"
 +requires = ["setuptools"]
 +build-backend = "setuptools.build_meta"
- 
+
  [project]
  name = "lietorch"
--version = "0.3" 
+-version = "0.3"
 +version = "0.3"
  description = "Lie Groups for PyTorch"
  authors = [

@@ -1,3 +1,18 @@
+# Patch: Remove InstallWrapper and install_requires from setup.py
+#
+# Upstream setup.py has two things we don't want:
+#
+# 1. InstallWrapper: a custom install command that checks `import faiss`
+#    at install time and aborts if not found. We don't need this because
+#    faiss is provided by conda (guaranteed to be present).
+#
+# 2. install_requires: declares numpy and pyaml as pip dependencies.
+#    These are provided by the pixi environment, so declaring them here
+#    would cause pixi's resolver to pull redundant PyPI versions.
+#
+# We keep only the ext_modules line, which builds the Cython C extension
+# (asmk.hamming) for fast Hamming distance computation. All package
+# metadata (name, version, etc.) now comes from pyproject.toml.
 --- a/setup.py
 +++ b/setup.py
 @@ -1,32 +1,7 @@
