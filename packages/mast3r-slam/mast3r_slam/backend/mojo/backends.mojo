@@ -10,9 +10,11 @@ Build: mojo build --emit shared-lib -o mast3r_slam_mojo_backends.so \
 from std.os import abort
 from std.math import ceildiv, sqrt, min, max, floor
 from std.sys import has_accelerator
-from std.gpu import global_idx, block_idx, block_dim, thread_idx
+from std.gpu import global_idx, block_idx, block_dim, thread_idx, barrier
 from std.gpu.host import DeviceContext, DeviceBuffer
+from std.gpu.memory import AddressSpace
 from std.memory import alloc
+from std.memory import stack_allocation
 from std.python import Python, PythonObject
 from std.python.bindings import PythonModuleBuilder
 
@@ -358,6 +360,95 @@ def refine_matches_kernel_f16(
     p1_new[p_base + 1] = Int64(v_new)
 
 
+def refine_matches_kernel_f16_cached[
+    FDIM: Int,
+    BLOCK_SIZE: Int,
+](
+    D11: UnsafePointer[Float16, MutAnyOrigin],
+    D21: UnsafePointer[Float16, MutAnyOrigin],
+    p1: UnsafePointer[Int64, MutAnyOrigin],
+    p1_new: UnsafePointer[Int64, MutAnyOrigin],
+    h: Int,
+    w: Int,
+    num_pts: Int,
+):
+    """Specialized f16 refinement kernel for the common radius=2, dilation=2 case.
+
+    Each thread copies its query descriptor into shared memory once, then reuses
+    it across all candidate scores. This reduces repeated global reads of D21.
+    """
+    var n: UInt = block_idx.x * block_dim.x + thread_idx.x
+    var b: UInt = block_idx.y
+
+    if n >= UInt(num_pts):
+        return
+
+    comptime CHUNKS = FDIM // 8
+
+    var q_shared = stack_allocation[
+        BLOCK_SIZE * CHUNKS,
+        SIMD[DType.float16, 8],
+        address_space=AddressSpace.SHARED,
+    ]()
+
+    var d11_stride_b: Int = h * w * FDIM
+    var d11_stride_v: Int = w * FDIM
+    var d21_stride_b: Int = num_pts * FDIM
+    var p_stride_b: Int = num_pts * 2
+
+    var p_base: Int = Int(b) * p_stride_b + Int(n) * 2
+    var u0: Int = Int(p1[p_base + 0])
+    var v0: Int = Int(p1[p_base + 1])
+    var d21_base: Int = Int(b) * d21_stride_b + Int(n) * FDIM
+    var q_shared_base: Int = Int(thread_idx.x) * CHUNKS
+
+    comptime for chunk in range(CHUNKS):
+        q_shared[q_shared_base + chunk] = D21.load[width=8, alignment=16](
+            d21_base + chunk * 8
+        )
+    barrier()
+
+    var max_score: Float32 = -3.4028235e+38
+    var u_new: Int = u0
+    var v_new: Int = v0
+
+    for d in range(2, 0, -1):
+        var rd: Int = 2 * d
+        var diam: Int = 2 * rd + 1
+        var i: Int = 0
+        while i < diam:
+            var j: Int = 0
+            while j < diam:
+                var u_cand: Int = u0 - rd + i
+                var v_cand: Int = v0 - rd + j
+
+                if v_cand >= 0 and v_cand < h and u_cand >= 0 and u_cand < w:
+                    var score: Float32 = 0.0
+                    var d11_base: Int = Int(b) * d11_stride_b + v_cand * d11_stride_v + u_cand * FDIM
+                    comptime for chunk in range(CHUNKS):
+                        var q = q_shared[q_shared_base + chunk]
+                        var v11 = D11.load[width=8, alignment=16](
+                            d11_base + chunk * 8
+                        )
+                        score += (
+                            q.cast[DType.float32]() * v11.cast[DType.float32]()
+                        ).reduce_add()
+
+                    if score > max_score:
+                        max_score = score
+                        u_new = u_cand
+                        v_new = v_cand
+
+                j += d
+            i += d
+
+        u0 = u_new
+        v0 = v_new
+
+    p1_new[p_base + 0] = Int64(u_new)
+    p1_new[p_base + 1] = Int64(v_new)
+
+
 # ─── Python-facing wrapper functions ──────────────────────────────────────────
 
 def iter_proj_py(
@@ -486,15 +577,40 @@ def refine_matches_py(
         var d11_uptr = UnsafePointer[Float16, MutAnyOrigin](unsafe_from_address=d11_ptr)
         var d21_uptr = UnsafePointer[Float16, MutAnyOrigin](unsafe_from_address=d21_ptr)
 
-        ctx_ptr[].enqueue_function[refine_matches_kernel_f16, refine_matches_kernel_f16](
-            d11_uptr,
-            d21_uptr,
-            p1_uptr,
-            p1_new_uptr,
-            h, w, num_pts, fdim, radius, dilation_max,
-            grid_dim=(num_blocks_x, batch),
-            block_dim=block_size,
-        )
+        # Specialize the hot MASt3R-SLAM path so the compiler can unroll the
+        # inner dot product and we only read each query descriptor once.
+        if radius == 2 and dilation_max == 2 and block_size == 8 and fdim == 16:
+            comptime kernel = refine_matches_kernel_f16_cached[16, 8]
+            ctx_ptr[].enqueue_function[kernel, kernel](
+                d11_uptr,
+                d21_uptr,
+                p1_uptr,
+                p1_new_uptr,
+                h, w, num_pts,
+                grid_dim=(num_blocks_x, batch),
+                block_dim=block_size,
+            )
+        elif radius == 2 and dilation_max == 2 and block_size == 16 and fdim == 128:
+            comptime kernel = refine_matches_kernel_f16_cached[128, 16]
+            ctx_ptr[].enqueue_function[kernel, kernel](
+                d11_uptr,
+                d21_uptr,
+                p1_uptr,
+                p1_new_uptr,
+                h, w, num_pts,
+                grid_dim=(num_blocks_x, batch),
+                block_dim=block_size,
+            )
+        else:
+            ctx_ptr[].enqueue_function[refine_matches_kernel_f16, refine_matches_kernel_f16](
+                d11_uptr,
+                d21_uptr,
+                p1_uptr,
+                p1_new_uptr,
+                h, w, num_pts, fdim, radius, dilation_max,
+                grid_dim=(num_blocks_x, batch),
+                block_dim=block_size,
+            )
     else:
         var D11: PythonObject = D11_obj.contiguous().float()
         var D21: PythonObject = D21_obj.contiguous().float()
