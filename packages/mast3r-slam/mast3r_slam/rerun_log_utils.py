@@ -47,8 +47,6 @@ class RerunLogger:
 
     def __init__(self, parent_log_path: Path) -> None:
         self.parent_log_path: Path = parent_log_path
-        # Set up-axis convention on the root so the 3D view (origin="/") is correctly oriented.
-        # RFU = Right-Forward-Up (Y-up convention matching Rerun's default grid).
         rr.log("/", rr.ViewCoordinates.RFU, static=True)
 
         self.path_list: list[list[float]] = []
@@ -56,18 +54,16 @@ class RerunLogger:
         self.num_keyframes_logged: int = 0
         self.conf_thresh: int = 7
         self.image_plane_distance: float = 0.2
-        self._orient_logged: bool = False
-        """Whether the gravity-alignment transform has been logged."""
-        self._orient_min_keyframes: int = 3
-        """Minimum keyframes needed before computing orientation."""
+        self._last_orient_n_kf: int = 0
+        """Number of keyframes used in the last orientation update."""
 
     def _log_orient_transform(self, keyframes: SharedKeyframes, n_kf: int) -> None:
-        """Compute gravity-alignment from keyframe poses and log as static transform.
+        """Recompute gravity-alignment from all keyframe poses and update the transform.
 
-        Collects the first ``n_kf`` keyframe world-from-camera poses, converts
-        them to GL convention, runs ``auto_orient_and_center_poses`` with
-        method="up" to align the reconstruction's up-vector with the Y axis,
-        and logs the resulting rotation+translation on ``parent_log_path``.
+        Collects all ``n_kf`` keyframe world-from-camera poses, converts to GL
+        convention, runs ``auto_orient_and_center_poses(method="up")`` to align
+        the reconstruction's up-vector with the Y axis, and logs the resulting
+        rotation+translation on ``parent_log_path``.
         """
         world_T_cam_gl_list: list[np.ndarray] = []
         for i in range(n_kf):
@@ -88,8 +84,8 @@ class RerunLogger:
         rr.log(
             f"{self.parent_log_path}",
             rr.Transform3D(mat3x3=orient_R, translation=orient_t),
-            static=True,
         )
+        self._last_orient_n_kf = n_kf
 
     def log_frame(
         self,
@@ -104,13 +100,11 @@ class RerunLogger:
             keyframes: Shared keyframe buffer.
             states: Shared system state (for edge lists).
         """
-        # Compute and log gravity-alignment transform once we have enough keyframes
-        if not self._orient_logged:
-            with keyframes.lock:
-                n_kf: int = len(keyframes)
-            if n_kf >= self._orient_min_keyframes:
-                self._log_orient_transform(keyframes, n_kf)
-                self._orient_logged = True
+        # Recompute gravity-alignment whenever new keyframes appear (min 3)
+        with keyframes.lock:
+            n_kf: int = len(keyframes)
+        if n_kf >= 3 and n_kf != self._last_orient_n_kf:
+            self._log_orient_transform(keyframes, n_kf)
         H: int = current_frame.img_shape.squeeze()[0].item()
         W: int = current_frame.img_shape.squeeze()[1].item()
 
