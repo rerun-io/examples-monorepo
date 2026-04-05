@@ -43,6 +43,8 @@ class InferenceConfig:
     save_as: str = "default"
     no_viz: bool = False
     img_size: Literal[224, 512] = 512
+    max_frames: int | None = None
+    """Stop after processing this many frames (None = process all)."""
     ns_save_path: None | Path = None
 
 
@@ -109,7 +111,8 @@ def mast3r_slam_inference(inf_config: InferenceConfig):
         rr.set_time("frame", sequence=i)
         mode: Mode = states.get_mode()
 
-        if i == len(dataset):
+        n_frames: int = len(dataset) if inf_config.max_frames is None else min(inf_config.max_frames, len(dataset))
+        if i == n_frames:
             states.set_mode(Mode.TERMINATED)
             break
 

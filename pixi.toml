@@ -699,7 +699,11 @@ TORCH_CUDA_ARCH_LIST = "7.5 8.0 8.6 8.9 9.0 12.0"
 
 # ── Build tasks (CUDA extensions compiled via setuptools, no pip) ────────
 [feature.mast3r-slam.tasks._build-cuda-kernels]
-cmd = "cd thirdparty/lietorch && python setup.py build_ext --inplace && cd ../.. && python setup.py build_ext --inplace"
+cmd = """
+cd thirdparty/lietorch && python setup.py build_ext --inplace \
+&& cp lietorch_backends*.so lietorch_extras*.so $(python -c "import sysconfig; print(sysconfig.get_path('purelib'))") \
+&& cd ../.. && python setup.py build_ext --inplace
+"""
 cwd = "packages/mast3r-slam"
 description = "Build mast3r-slam CUDA backend kernels"
 inputs = [
@@ -742,11 +746,17 @@ outputs = ["packages/mast3r-slam/data/normal-apt-tour.MOV"]
 description = "Download example video data"
 
 # ── Demo tasks ───────────────────────────────────────────────────────────
+[feature.mast3r-slam.tasks.example-quick]
+cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.MOV --img-size 224 --config config/fast.yaml --max-frames 100"
+depends-on = ["_build-cuda-kernels", "_download-checkpoints", "_download-example-data"]
+cwd = "packages/mast3r-slam"
+description = "Run MASt3R-SLAM on first 100 frames (fast config, ~2 min)"
+
 [feature.mast3r-slam.tasks.example-fast]
 cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.MOV --img-size 224 --config config/fast.yaml"
 depends-on = ["_build-cuda-kernels", "_download-checkpoints", "_download-example-data"]
 cwd = "packages/mast3r-slam"
-description = "Run MASt3R-SLAM inference (fast config, 224px)"
+description = "Run MASt3R-SLAM inference (fast config, 224px, full video)"
 
 [feature.mast3r-slam.tasks.example-base]
 cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.MOV --img-size 512 --config config/base.yaml"
