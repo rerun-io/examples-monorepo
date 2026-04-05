@@ -160,3 +160,21 @@ Workspace-level `[pypi-options.dependency-overrides]` in root `pixi.toml` overri
 - **sam3d-body-rerun uses `tool/` (singular)** not `tools/` for its CLI scripts
 - **Dev tasks use `$PACKAGE_DIR`** — each package feature sets `PACKAGE_DIR` via activation env, dev tasks `cd $PACKAGE_DIR` before running
 - **Direnv fails after changing `pixi.toml`** — `.envrc` uses `--frozen`, so run `pixi install -e <name>-dev` (or `pixi install -a`) to re-solve, then direnv picks up the updated lockfile automatically
+- **Never use bare `except Exception` with beartype** — beartype raises `BeartypeDoorHintViolation` which inherits from `Exception`. A catch-all `except Exception` will silently swallow type annotation errors, making bugs invisible in dev mode. Either catch a specific exception type (e.g. `except torch.linalg.LinAlgError`) or re-raise beartype violations:
+  ```python
+  # BAD — silently swallows beartype violations
+  try:
+      result = some_typed_function()
+  except Exception:
+      print("failed")
+
+  # GOOD — let beartype violations propagate
+  from beartype.roar import BeartypeException
+  try:
+      result = some_typed_function()
+  except BeartypeException:
+      raise  # always re-raise beartype errors
+  except Exception:
+      print("failed")
+  ```
+- **Use `0.0` not `0` for float annotations** — beartype strictly distinguishes `int` from `float`. `last_error: float = 0` will fail; use `last_error: float = 0.0`
