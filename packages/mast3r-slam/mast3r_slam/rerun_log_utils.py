@@ -23,7 +23,10 @@ def create_blueprints(parent_log_path: Path) -> rrb.Blueprint:
     """
     blueprint: rrb.Blueprint = rrb.Blueprint(
         rrb.Horizontal(
-            rrb.Spatial3DView(origin=parent_log_path),
+            rrb.Spatial3DView(
+                origin="/",
+                contents=[f"+ {parent_log_path}/**"],
+            ),
             rrb.Vertical(
                 rrb.Spatial2DView(
                     origin=parent_log_path / "current_camera" / "pinhole"
@@ -43,16 +46,9 @@ class RerunLogger:
 
     def __init__(self, parent_log_path: Path) -> None:
         self.parent_log_path: Path = parent_log_path
-        # Create a 3x3 rotation matrix for 90-degree rotation around X-axis
-        rr.log(f"{self.parent_log_path}", rr.ViewCoordinates.RDF, static=True)
-        # this does not work and I don't know why
-        rr.log(
-            f"{parent_log_path}",
-            rr.Transform3D(
-                rotation=rr.RotationAxisAngle(axis=(0, 0, 1), radians=-np.pi / 4)
-            ),
-            static=True,
-        )
+        # Set up-axis convention on the root so the 3D view (origin="/") is correctly oriented.
+        # RFU = Right-Forward-Up (Y-up convention matching Rerun's default grid).
+        rr.log("/", rr.ViewCoordinates.RFU, static=True)
 
         self.path_list: list[list[float]] = []
         self.keyframe_logged_list: list[int] = []
