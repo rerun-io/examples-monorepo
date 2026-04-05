@@ -1,0 +1,6 @@
+[package]
+name = "mast3r"
+version = "0.0.1"
+
+[package.build]
+backend = { name = "pixi-build-rattler-build", version = "*" }

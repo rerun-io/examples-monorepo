@@ -1,0 +1,54 @@
+# Patch: Remove InstallWrapper and install_requires from setup.py
+#
+# Upstream setup.py has two things we don't want:
+#
+# 1. InstallWrapper: a custom install command that checks `import faiss`
+#    at install time and aborts if not found. We don't need this because
+#    faiss is provided by conda (guaranteed to be present).
+#
+# 2. install_requires: declares numpy and pyaml as pip dependencies.
+#    These are provided by the pixi environment, so declaring them here
+#    would cause pixi's resolver to pull redundant PyPI versions.
+#
+# We keep only the ext_modules line, which builds the Cython C extension
+# (asmk.hamming) for fast Hamming distance computation. All package
+# metadata (name, version, etc.) now comes from pyproject.toml.
+--- a/setup.py
++++ b/setup.py
+@@ -1,32 +1,7 @@
+ import sys
+ from setuptools import setup, Extension
+-from setuptools.command.install import install
+
+-class InstallWrapper(install):
+-
+-    def run(self):
+-        try:
+-            import faiss
+-        except ImportError:
+-            sys.stderr.write("\nERROR: faiss package not installed (install either faiss-cpu or " \
+-                             "faiss-gpu before installing this package.).\n\n")
+-            sys.exit(1)
+-
+-        install.run(self)
+-
+-
+ setup(
+-    name="asmk",
+-    version="0.1",
+-    description="ASMK Python implementation for ECCV'20 paper \"Learning and aggregating deep " \
+-                "local descriptors for instance-level recognition\"",
+-    author="Tomas Jenicek, Giorgos Tolias",
+-    packages=[
+-        "asmk",
+-    ],
+     ext_modules=[Extension("asmk.hamming", ["cython/hamming.c"])],
+-    install_requires=[
+-        "numpy",
+-        "pyaml",
+-    ],
+-    cmdclass={
+-        "install": InstallWrapper,
+-    },
+-    zip_safe=True)
++)

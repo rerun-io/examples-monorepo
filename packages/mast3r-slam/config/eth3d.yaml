@@ -1,0 +1,8 @@
+inherit: "config/eval_calib.yaml"
+
+dataset:
+  subsample: 1
+  center_principle_point: False
+  
+reloc:
+  strict: False

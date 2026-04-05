@@ -1,0 +1,7 @@
+data/
+checkpoints/
+logs/
+*.so
+*.egg-info/
+build/
+tests/fixtures/*.rrd

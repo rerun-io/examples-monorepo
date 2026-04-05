@@ -1,0 +1,76 @@
+# rattler-build recipe for mast3r
+# Builds MASt3R + DUSt3R + CroCo as a single pure-Python conda package.
+#
+# This is more complex than a typical recipe because upstream mast3r has no
+# setup.py or pyproject.toml, and it nests two git submodules (dust3r, croco)
+# that also lack proper packaging. The build script clones the submodules
+# and applies patches to make everything installable as one package.
+package:
+  name: mast3r
+  version: "0.0.1"
+
+# NOTE: curope (CUDA RoPE2D from dust3r/croco/models/curope/) is NOT built.
+# The codebase falls back to a slower pure-PyTorch RoPE2D implementation.
+# TODO: Add curope as a separate pixi-build workspace package to enable
+# the faster CUDA version (requires ${{ compiler('cuda') }} and torch).
+
+source:
+  git: https://github.com/naver/mast3r.git
+  rev: f5209afc300cec36239a7ac992263f36847bbba0
+  # Patches applied to the mast3r source BEFORE the build script runs.
+  # See each .patch file for detailed comments on what it changes and why.
+  patches:
+    - patches/add-pyproject-toml.patch
+    - patches/add-setup-py.patch
+    - patches/fix-path-to-dust3r.patch
+    - patches/torch-load-weights-only.patch
+
+build:
+  number: 0
+  # Pure Python — no compiled extensions, works on any platform
+  noarch: python
+  script:
+    # --- Step 1: Clone submodules ---
+    # mast3r's repo has dust3r/ as a git submodule pointer (empty dir).
+    # We can't use rattler-build's multi-source feature here because the
+    # dust3r/ directory already exists, causing a conflict. Instead we
+    # clone manually in the build script.
+    - rm -rf dust3r
+    - git clone https://github.com/naver/dust3r.git dust3r
+    - cd dust3r && git checkout 3cc8c88c413bb9e34c41db0e0eef99c2ee010b12 && cd ..
+    # croco is a submodule of dust3r (provides the vision transformer encoder)
+    - git clone https://github.com/naver/croco.git dust3r/croco
+    - cd dust3r/croco && git checkout d7de0705845239092414480bd829228723bf20de && cd ../..
+
+    # --- Step 2: Patch dust3r ---
+    # torch.load needs weights_only=False for PyTorch 2.6+
+    - cd dust3r && patch -p1 < $RECIPE_DIR/patches/dust3r-torch-load.patch && cd ..
+    # These two files are REPLACED rather than patched (the upstream files
+    # don't end with a newline, which breaks the `patch` tool). See the
+    # comments at the top of each file for what changed and why.
+    # - path_to_croco.py: package-import instead of sys.path submodule hack
+    # - misc.py: picklable classes instead of closures (for torch.multiprocessing)
+    - cp $RECIPE_DIR/patches/path_to_croco.py dust3r/dust3r/utils/path_to_croco.py
+    - cp $RECIPE_DIR/patches/misc.py dust3r/dust3r/utils/misc.py
+
+    # --- Step 3: Fix missing __init__.py files ---
+    # Upstream treats these as namespace packages (no __init__.py), but
+    # setuptools' find_packages() only discovers regular packages.
+    - touch dust3r/croco/models/__init__.py
+    - touch mast3r/retrieval/__init__.py
+
+    # --- Step 4: Install ---
+    - python -m pip install . --no-deps --no-build-isolation -vv
+
+requirements:
+  build:
+    # git: needed to clone dust3r and croco submodules in the build script
+    # patch: needed to apply dust3r-torch-load.patch
+    - git
+    - patch
+  host:
+    - python 3.11.*
+    - pip
+    - setuptools
+  run:
+    - python >=3.11
