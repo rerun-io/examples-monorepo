@@ -4,7 +4,7 @@
 
 Replace CUDA/C++ matching kernels (`iter_proj`, `refine_matches`) with Mojo equivalents that match or beat CUDA performance.
 
-**Status**: Mojo `refine_matches` **beats CUDA** at the production workload (64x64 fdim=128: 0.87x). Mojo `iter_proj` is 1.3-1.8x slower due to cross-stream synchronization overhead that CUDA avoids. End-to-end pipeline time is **identical** (33.0s CUDA vs 33.4s Mojo for 100 frames, 1.01x).
+**Status (verified 2026-04-05)**: the current Mojo backend is numerically aligned with the CUDA oracle on the checked test suite, but it does **not** consistently beat CUDA on the latest benchmark run. `iter_proj` remains 1.4-1.8x slower, and `refine_matches` is currently near parity on small cases and somewhat slower on the larger hot case.
 
 ## Architecture
 
@@ -30,7 +30,7 @@ pixi run -e mast3r-slam-dev mojo build --emit shared-lib \
   mast3r_slam/backend/mojo/backends.mojo
 ```
 
-**Test command (24 tests: 10 parametric + 4 Hypothesis fuzz + 6 edge cases + 4 benchmarks):**
+**Test command (24 collected pytest cases from 15 test functions):**
 ```bash
 pixi run -e mast3r-slam-dev python -m pytest tests/test_mojo_vs_cuda.py -v -s
 ```
@@ -40,7 +40,7 @@ pixi run -e mast3r-slam-dev python -m pytest tests/test_mojo_vs_cuda.py -v -s
 PYTHONPATH=. pixi run -e mast3r-slam-dev python tools/bench_matching_kernels.py
 ```
 
-## Current Performance (RTX 5090, median of 500 runs)
+## Current Performance (RTX 5090, median of 500 runs, verified 2026-04-05)
 
 ```
 ========================================================================
@@ -49,12 +49,12 @@ GPU: NVIDIA GeForce RTX 5090
 ========================================================================
 Kernel               Size                 CUDA (ms)      Mojo (ms)      Ratio
 ------------------------------------------------------------------------
-iter_proj            64x64 (4K pts)          0.013         0.020       1.50x (CUDA)
-iter_proj            224x224 (50K pts)       0.027         0.036       1.32x (CUDA)
-iter_proj            512x512 (262K pts)      0.130         0.229       1.76x (CUDA)
-refine_matches       32x32, d=16             0.035         0.036       1.03x (CUDA)
-refine_matches       64x64, d=128            0.225         0.196       0.87x (Mojo)
-refine_matches       128x128, d=16           0.039         0.050       1.28x (CUDA)
+iter_proj            64x64 (4K pts)          0.013         0.021       1.56x (CUDA)
+iter_proj            224x224 (50K pts)       0.027         0.039       1.42x (CUDA)
+iter_proj            512x512 (262K pts)      0.131         0.229       1.75x (CUDA)
+refine_matches       32x32, d=16             0.036         0.037       1.03x (CUDA)
+refine_matches       64x64, d=128            0.226         0.246       1.09x (CUDA)
+refine_matches       128x128, d=16           0.039         0.050       1.29x (CUDA)
 ------------------------------------------------------------------------
 ```
 
@@ -64,7 +64,7 @@ refine_matches       128x128, d=16           0.039         0.050       1.28x (CU
 | fast (224px) | 33.0s | 33.4s | 1.01x |
 | base (512px) | 30.5s | 30.8s | 1.01x |
 
-The matching kernels are a small fraction of pipeline time (dominated by MASt3R ViT forward pass). The kernel-level differences are invisible at the application level.
+The matching kernels are a small fraction of pipeline time (dominated by the MASt3R ViT forward pass), so these differences are much more visible in microbenchmarks than in the full application.
 
 ## Why CUDA Is Still Faster on `iter_proj`
 
@@ -91,7 +91,7 @@ The `torch.cuda.synchronize()` is the critical difference. Mojo's `DeviceContext
 | `.contiguous()` + `.data_ptr()` | ~0.2 | Negligible |
 | **Total active overhead** | **~8** | vs **~0** for CUDA C++ |
 
-For a 13 µs kernel (iter_proj 64x64), 8 µs overhead = 1.6x. For a 225 µs kernel (refine_matches 64x64), 8 µs overhead = 1.04x. This is why `refine_matches` beats CUDA (compute dominates) while `iter_proj` is slower (overhead dominates).
+For a 13 µs kernel (iter_proj 64x64), 8 µs overhead = 1.6x. For a 225 µs kernel (refine_matches 64x64), 8 µs overhead = 1.04x. This explains most of the `iter_proj` gap. `refine_matches` can get closer because compute dominates more often, but on the latest verified run it still does not beat CUDA consistently.
 
 ## All Optimizations Applied (chronological)
 
@@ -223,17 +223,17 @@ info = torch.tensor([batch, h, w, num_pts, max_iter, ...], dtype=torch.int64)
 mojo_be.iter_proj_packed(info, rays_img, pts_3d_norm, p_init, p_new, converged)
 ```
 
-## Correctness: What Hypothesis Testing Proved
+## Correctness: What The Tests Currently Establish
 
-The Hypothesis property-based fuzz tests (50 random examples per test, randomizing shapes 8-128, batch 1-3, seeds, LM parameters, feature dims including non-SIMD-aligned values) proved:
+The Hypothesis property-based fuzz tests (50 random examples per test, randomizing shapes 8-128, batch 1-3, seeds, LM parameters, feature dims including non-SIMD-aligned values) currently support the following:
 
 1. **Single-iteration iter_proj**: p99 diff < 0.1 pixels across all tested configurations. The kernel is numerically equivalent to CUDA for one LM step.
 
 2. **Multi-iteration iter_proj**: With near-zero damping (lambda=1e-8), a 0.007 pixel FP diff at iteration 1 cascades to 221 pixel difference by iteration 10. This is NOT a bug — it's the chaotic nature of the LM accept/reject branch. The test uses statistical comparison (convergence rate gap < 10%, median position gap < 2 pixels).
 
-3. **refine_matches**: < 2% of positions differ across all shapes, feature dims (including non-aligned: 3, 5, 7, 9, 11, 13, 15, 17, 19), radii (1-4), and dilation levels (1-5). Differences are from FP accumulation order in the dot product (SIMD vs scalar).
+3. **refine_matches**: differences stay small across the tested shapes, feature dims, radii, and dilation levels, but the strongest honest statement is not `< 2%` for every case. The current fuzz test uses `< 3%` because tiny half-precision searches with many near-ties can flip a few winners even in the CUDA oracle when the same values are reallocated at different addresses.
 
-4. **Cross-stream correctness**: Without `torch.cuda.synchronize()`, rapid-fire calls produce `max_diff=8-20 pixels` from stale `torch.empty()` buffers. With sync, all tests pass.
+4. **Cross-stream correctness**: Without `torch.cuda.synchronize()`, rapid-fire calls produce `max_diff=8-20 pixels` from stale `torch.empty()` buffers. With sync restored, the current verification run passes the full comparison suite (`24 passed`).
 
 ## File Inventory
 
@@ -241,7 +241,7 @@ The Hypothesis property-based fuzz tests (50 random examples per test, randomizi
 |------|---------|
 | `mast3r_slam/backend/mojo/backends.mojo` | All Mojo code — kernels + Python extension |
 | `mast3r_slam/backend/mojo/OPTIMIZATION_GUIDE.md` | This document |
-| `tests/test_mojo_vs_cuda.py` | 24 tests: 10 parametric + 4 Hypothesis fuzz + 6 edge cases + 4 benchmarks |
+| `tests/test_mojo_vs_cuda.py` | 15 test functions expanded to 24 collected pytest cases |
 | `tools/bench_matching_kernels.py` | Side-by-side CUDA vs Mojo benchmark (500 runs, median) |
 | `mast3r_slam/matching.py` | Production code — tries Mojo first, falls back to CUDA |
 | `mast3r_slam/backend/src/matching_kernels.cu` | CUDA oracle (DO NOT MODIFY) |
