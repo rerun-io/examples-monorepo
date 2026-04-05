@@ -75,12 +75,12 @@ class RerunLogger:
             )
             world_T_cam_gl_list.append(mat4x4_gl)
 
-        world_T_cam_gl: Float32[np.ndarray, "n 4 4"] = np.stack(world_T_cam_gl_list)
-        orient_34: Float32[np.ndarray, "3 4"] = auto_orient_and_center_poses(
+        world_T_cam_gl: np.ndarray = np.stack(world_T_cam_gl_list)
+        orient_34: np.ndarray = auto_orient_and_center_poses(
             world_T_cam_gl, method="up", center_method="poses"
         ).transform
-        orient_R: Float32[np.ndarray, "3 3"] = orient_34[:, :3]
-        orient_t: Float32[np.ndarray, "3"] = orient_34[:, 3]
+        orient_R: np.ndarray = orient_34[:, :3]
+        orient_t: np.ndarray = orient_34[:, 3]
         rr.log(
             f"{self.parent_log_path}",
             rr.Transform3D(mat3x3=orient_R, translation=orient_t),
