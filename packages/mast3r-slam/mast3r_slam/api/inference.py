@@ -77,7 +77,10 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
     Args:
         inf_config: Inference configuration dataclass.
     """
-    mp.set_start_method("spawn")
+    try:
+        mp.set_start_method("spawn")
+    except RuntimeError:
+        pass
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.set_grad_enabled(False)
     device: str = "cuda:0"
@@ -192,7 +195,7 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
                 time.sleep(0.01)
 
         else:
-            raise Exception("Invalid mode")
+            raise RuntimeError(f"Invalid mode: {mode!r}")
 
         if add_new_kf:
             keyframes.append(frame)

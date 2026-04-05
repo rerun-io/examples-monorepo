@@ -55,3 +55,31 @@ def test_check_convergence_not_converged() -> None:
         delta=delta,
     )
     assert result is False
+
+
+def test_check_convergence_handles_nonfinite_old_cost() -> None:
+    """Non-finite previous cost should fall back to the delta-norm criterion."""
+    delta: Float[torch.Tensor, "3"] = torch.tensor([1.0, 1.0, 1.0])
+    result: bool = check_convergence(
+        iter=0,
+        rel_error_threshold=1e-6,
+        delta_norm_threshold=1e-6,
+        old_cost=float("inf"),
+        new_cost=5.0,
+        delta=delta,
+    )
+    assert result is False
+
+
+def test_check_convergence_handles_zero_old_cost() -> None:
+    """Zero previous cost should not divide by zero in the relative criterion."""
+    delta: Float[torch.Tensor, "3"] = torch.tensor([1.0, 1.0, 1.0])
+    result: bool = check_convergence(
+        iter=0,
+        rel_error_threshold=1e-6,
+        delta_norm_threshold=1e-6,
+        old_cost=0.0,
+        new_cost=0.0,
+        delta=delta,
+    )
+    assert result is False

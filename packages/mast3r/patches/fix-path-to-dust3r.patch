@@ -32,7 +32,7 @@
 -    raise ImportError(f"dust3r is not initialized, could not find: {DUSt3R_LIB_PATH}.\n "
 -                      "Did you forget to run 'git submodule update --init --recursive' ?")
 +# If dust3r is already installed as a package, this is a no-op.
-+# Otherwise fall back to the submodule path layout.
++# Otherwise raise a clear error instead of relying on a sibling submodule checkout.
 +try:
 +    import dust3r  # noqa: F401
 +except ImportError:

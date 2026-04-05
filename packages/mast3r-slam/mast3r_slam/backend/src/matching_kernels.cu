@@ -36,6 +36,10 @@ __global__ void refine_matches_kernel(
   const uint64_t n = blockIdx.x * blockDim.x + threadIdx.x;
   const uint64_t b = blockIdx.y;
 
+  if (n >= p1.size(1)) {
+    return;
+  }
+
   const int h = D11.size(1);
   const int w = D11.size(2);
   const int fdim = D11.size(3);
@@ -130,6 +134,10 @@ __global__ void iter_proj_kernel(
   // batch index
   const uint64_t n = blockIdx.x * blockDim.x + threadIdx.x;
   const uint64_t b = blockIdx.y;
+
+  if (n >= p_init.size(1)) {
+    return;
+  }
 
   const int h = rays_img.size(1);
   const int w = rays_img.size(2);

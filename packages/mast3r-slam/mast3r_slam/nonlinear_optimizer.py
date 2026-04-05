@@ -15,7 +15,9 @@ def check_convergence(
 ) -> bool:
     """Check if the optimizer has converged based on relative error and delta norm."""
     cost_diff: float = old_cost - new_cost
-    rel_dec: float = math.fabs(cost_diff / old_cost)
+    rel_dec: float = math.inf
+    if math.isfinite(old_cost) and old_cost > 0.0:
+        rel_dec = math.fabs(cost_diff / old_cost)
     delta_norm: Float[torch.Tensor, ""] = torch.linalg.norm(delta)
 
     converged: bool = rel_dec < rel_error_threshold or bool(delta_norm < delta_norm_threshold)

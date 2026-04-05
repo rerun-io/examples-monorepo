@@ -2,6 +2,11 @@ import lietorch
 import torch
 from jaxtyping import Float, Bool
 
+try:
+    from beartype.roar import BeartypeException
+except ImportError:
+    BeartypeException = ()
+
 from mast3r_slam.frame import Frame, SharedKeyframes
 from mast3r_slam.geometry import (
     act_Sim3,
@@ -123,7 +128,9 @@ class FrameTracker:
                     K,
                     img_size,
                 )
-        except Exception as e:
+        except BeartypeException:
+            raise
+        except torch.linalg.LinAlgError:
             print(f"Cholesky failed {frame.frame_id}")
             return False, [], True
 
@@ -274,7 +281,7 @@ class FrameTracker:
             A tuple of (T_WCf, T_CkCf) with the updated world-from-frame
             pose and the optimised relative pose.
         """
-        last_error: float = 0.0
+        last_error: float = float("inf")
         sqrt_info_ray: Float[torch.Tensor, "hw 1"] = 1 / self.cfg["sigma_ray"] * valid * torch.sqrt(Qk)
         sqrt_info_dist: Float[torch.Tensor, "hw 1"] = 1 / self.cfg["sigma_dist"] * valid * torch.sqrt(Qk)
         sqrt_info: Float[torch.Tensor, "hw 4"] = torch.cat((sqrt_info_ray.repeat(1, 3), sqrt_info_dist), dim=1)
@@ -301,6 +308,7 @@ class FrameTracker:
             tau_ij_sim3: Float[torch.Tensor, "1 7"]
             new_cost: float
             tau_ij_sim3, new_cost = self.solve(sqrt_info, r, J)
+            last_error = new_cost
             T_CkCf = T_CkCf.retr(tau_ij_sim3)
 
             if check_convergence(
@@ -353,7 +361,7 @@ class FrameTracker:
             A tuple of (T_WCf, T_CkCf) with the updated world-from-frame
             pose and the optimised relative pose.
         """
-        last_error: float = 0.0
+        last_error: float = float("inf")
         sqrt_info_pixel: Float[torch.Tensor, "hw 1"] = 1 / self.cfg["sigma_pixel"] * valid * torch.sqrt(Qk)
         sqrt_info_depth: Float[torch.Tensor, "hw 1"] = 1 / self.cfg["sigma_depth"] * valid * torch.sqrt(Qk)
         sqrt_info: Float[torch.Tensor, "hw 3"] = torch.cat((sqrt_info_pixel.repeat(1, 2), sqrt_info_depth), dim=1)
@@ -388,6 +396,7 @@ class FrameTracker:
             tau_ij_sim3: Float[torch.Tensor, "1 7"]
             new_cost: float
             tau_ij_sim3, new_cost = self.solve(sqrt_info2, r, J)
+            last_error = new_cost
             T_CkCf = T_CkCf.retr(tau_ij_sim3)
 
             if check_convergence(

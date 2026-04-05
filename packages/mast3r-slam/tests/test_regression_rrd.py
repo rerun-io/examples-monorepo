@@ -70,6 +70,6 @@ def test_edges_logged(baseline_rrd_path: Path) -> None:
 
 
 def test_keyframe_count_reasonable(baseline_rrd_path: Path) -> None:
-    """Verify the number of keyframes is in a reasonable range for 100 frames."""
+    """Verify the number of keyframes is in a reasonable range for the 30-frame baseline."""
     n_keyframes: int = _count_keyframes(baseline_rrd_path)
     assert 3 <= n_keyframes <= 50, f"Unexpected keyframe count: {n_keyframes}"
