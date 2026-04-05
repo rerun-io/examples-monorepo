@@ -1,0 +1,26 @@
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -1,18 +1,15 @@
+ [build-system]
+-requires = ["setuptools", "torch", "wheel"]
+-build-backend = "setuptools.build_meta:__legacy__"
++requires = ["setuptools"]
++build-backend = "setuptools.build_meta"
+ 
+ [project]
+ name = "lietorch"
+-version = "0.3" 
++version = "0.3"
+ description = "Lie Groups for PyTorch"
+ authors = [
+     { name="Zachary Teed", email="zachteed@gmail.com" }
+ ]
+ license = { text = "BSD-3-Clause" }
+-readme = "README.md"
+ requires-python = ">=3.9"
+-dependencies = [
+-    "torch",
+-    "numpy",
+-]
++# torch and numpy provided by pixi environment
++dependencies = []

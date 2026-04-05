@@ -5,6 +5,7 @@ name = "examples-monorepo"
 platforms = ["linux-64", "linux-aarch64"]
 version = "0.1.0"
 requires-pixi = ">=0.40"
+preview = ["pixi-build"]
 
 # ─── pypi-options (workspace-level) ─────────────────────────────────────────
 [pypi-options]
@@ -677,13 +678,15 @@ scikit-learn = "*"
 matplotlib = "*"
 trimesh = "*"
 
+[feature.mast3r-slam.target.linux-64.dependencies]
+lietorch = { path = "packages/lietorch" }
+
 [feature.mast3r-slam.pypi-dependencies]
 # All packages resolved by pixi's pypi resolver.
 # CUDA extension setup.py files use lazy torch imports so metadata
 # extraction works without torch; actual compilation happens via
 # _build-cuda-kernels task (python setup.py build_ext --inplace).
 mast3r-slam = { path = "packages/mast3r-slam", editable = true }
-lietorch = { path = "packages/mast3r-slam/thirdparty/lietorch", editable = true }
 mast3r = { path = "packages/mast3r-slam/thirdparty/mast3r", editable = true }
 asmk = { path = "packages/mast3r-slam/thirdparty/mast3r/asmk" }
 einops = ">=0.8.0"
@@ -695,14 +698,13 @@ pyaml = "*"
 
 [feature.mast3r-slam.activation.env]
 PACKAGE_DIR = "packages/mast3r-slam"
-TORCH_CUDA_ARCH_LIST = "7.5 8.0 8.6 8.9 9.0 12.0"
 
 # ── Build tasks (CUDA extensions compiled via setuptools, no pip) ────────
 [feature.mast3r-slam.tasks._build-cuda-kernels]
 cmd = """
-cd thirdparty/lietorch && python setup.py build_ext --inplace \
-&& cp lietorch_backends*.so lietorch_extras*.so $(python -c "import sysconfig; print(sysconfig.get_path('purelib'))") \
-&& cd ../.. && python setup.py build_ext --inplace
+export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n 1 | tr -d ' ')}"
+echo "Building for CUDA arch: $TORCH_CUDA_ARCH_LIST"
+python setup.py build_ext --inplace
 """
 cwd = "packages/mast3r-slam"
 description = "Build mast3r-slam CUDA backend kernels"
@@ -711,17 +713,9 @@ inputs = [
     "packages/mast3r-slam/mast3r_slam/backend/src/*.cpp",
     "packages/mast3r-slam/mast3r_slam/backend/src/*.cu",
     "packages/mast3r-slam/mast3r_slam/backend/include/*.h",
-    "packages/mast3r-slam/thirdparty/lietorch/setup.py",
-    "packages/mast3r-slam/thirdparty/lietorch/lietorch/src/*.cpp",
-    "packages/mast3r-slam/thirdparty/lietorch/lietorch/src/*.cu",
-    "packages/mast3r-slam/thirdparty/lietorch/lietorch/extras/*.cu",
-    "packages/mast3r-slam/thirdparty/lietorch/lietorch/extras/*.cpp",
-    "packages/mast3r-slam/thirdparty/lietorch/lietorch/include/*.h",
 ]
 outputs = [
     "packages/mast3r-slam/mast3r_slam_backends*.so",
-    "packages/mast3r-slam/thirdparty/lietorch/lietorch_backends*.so",
-    "packages/mast3r-slam/thirdparty/lietorch/lietorch_extras*.so",
 ]
 
 # ── Download tasks (hidden, used as depends-on) ─────────────────────────

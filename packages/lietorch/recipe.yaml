@@ -1,0 +1,35 @@
+package:
+  name: lietorch
+  version: "0.3.0"
+
+source:
+  git: https://github.com/princeton-vl/lietorch.git
+  rev: e7df86554156b36846008d8ddbcc4d8521a16554
+  patches:
+    - patches/setup.py.patch
+    - patches/pyproject.toml.patch
+
+build:
+  number: 0
+  skip:
+    - not linux-64
+  script:
+    - export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d ' ')}"
+    - export CONDA_PREFIX=$PREFIX
+    - python setup.py build_ext install --prefix=$PREFIX
+
+requirements:
+  build:
+    - ${{ compiler('cxx') }}
+    - ${{ compiler('c') }}
+  host:
+    - python 3.11.*
+    - setuptools
+    - pytorch-gpu >=2.8.0
+    - eigen >=3.4.0,<4
+    - cuda-cudart-dev
+    - cuda-crt
+    - cuda-nvcc
+  run:
+    - python 3.11.*
+    - pytorch-gpu >=2.8.0
