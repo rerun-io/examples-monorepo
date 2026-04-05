@@ -132,7 +132,7 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
 
     tracker: FrameTracker = FrameTracker(model, keyframes, device)
 
-    backend: mp.Process = mp.Process(target=run_backend, args=(inf_config.config, model, states, keyframes, K))
+    backend: mp.Process = mp.Process(target=_safe_run_backend, args=(inf_config.config, model, states, keyframes, K))
     backend.start()
 
     i: int = 0
@@ -299,6 +299,15 @@ def relocalization(
             else:
                 factor_graph.solve_GN_rays()
         return successful_loop_closure
+
+
+def _safe_run_backend(*args):
+    """Wrapper that catches and prints exceptions from the backend subprocess."""
+    import traceback
+    try:
+        run_backend(*args)
+    except Exception:
+        traceback.print_exc()
 
 
 def run_backend(config_path, model, states, keyframes, K) -> None:

@@ -274,7 +274,7 @@ class FrameTracker:
             A tuple of (T_WCf, T_CkCf) with the updated world-from-frame
             pose and the optimised relative pose.
         """
-        last_error: float = 0
+        last_error: float = 0.0
         sqrt_info_ray: Float[torch.Tensor, "hw 1"] = 1 / self.cfg["sigma_ray"] * valid * torch.sqrt(Qk)
         sqrt_info_dist: Float[torch.Tensor, "hw 1"] = 1 / self.cfg["sigma_dist"] * valid * torch.sqrt(Qk)
         sqrt_info: Float[torch.Tensor, "hw 4"] = torch.cat((sqrt_info_ray.repeat(1, 3), sqrt_info_dist), dim=1)
@@ -353,7 +353,7 @@ class FrameTracker:
             A tuple of (T_WCf, T_CkCf) with the updated world-from-frame
             pose and the optimised relative pose.
         """
-        last_error: float = 0
+        last_error: float = 0.0
         sqrt_info_pixel: Float[torch.Tensor, "hw 1"] = 1 / self.cfg["sigma_pixel"] * valid * torch.sqrt(Qk)
         sqrt_info_depth: Float[torch.Tensor, "hw 1"] = 1 / self.cfg["sigma_depth"] * valid * torch.sqrt(Qk)
         sqrt_info: Float[torch.Tensor, "hw 3"] = torch.cat((sqrt_info_pixel.repeat(1, 2), sqrt_info_depth), dim=1)
