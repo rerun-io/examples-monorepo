@@ -752,15 +752,15 @@ outputs = [
 ]
 
 [feature.mast3r-slam.tasks._download-example-data]
-cmd = "hf download pablovela5620/mast3r-slam-example-data normal-apt-tour.MOV --repo-type dataset --local-dir data/"
+cmd = "hf download pablovela5620/mast3r-slam-example-data normal-apt-tour.mp4 --repo-type dataset --local-dir data/"
 cwd = "packages/mast3r-slam"
-outputs = ["packages/mast3r-slam/data/normal-apt-tour.MOV"]
+outputs = ["packages/mast3r-slam/data/normal-apt-tour.mp4"]
 description = "Download example video data"
 
 # ── Test baseline task ──────────────────────────────────────────────────
 [feature.mast3r-slam.tasks._generate-test-baseline]
 cmd = """python tools/mast3r_slam_inference.py \
-  --dataset data/normal-apt-tour.MOV --img-size 224 \
+  --dataset data/normal-apt-tour.mp4 --img-size 224 \
   --config config/test.yaml --max-frames 30 --no-viz \
   --rr-config.save tests/fixtures/baseline_30frames.rrd"""
 depends-on = ["_build-cuda-kernels", "_download-checkpoints", "_download-example-data"]
@@ -770,19 +770,19 @@ outputs = ["packages/mast3r-slam/tests/fixtures/baseline_30frames.rrd"]
 
 # ── Demo tasks ───────────────────────────────────────────────────────────
 [feature.mast3r-slam.tasks.example-quick]
-cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.MOV --img-size 224 --config config/fast.yaml --max-frames 100"
+cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.mp4 --img-size 224 --config config/fast.yaml --max-frames 100"
 depends-on = ["_build-cuda-kernels", "_download-checkpoints", "_download-example-data"]
 cwd = "packages/mast3r-slam"
 description = "Run MASt3R-SLAM on first 100 frames (fast config, ~2 min)"
 
 [feature.mast3r-slam.tasks.example-fast]
-cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.MOV --img-size 224 --config config/fast.yaml"
+cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.mp4 --img-size 224 --config config/fast.yaml"
 depends-on = ["_build-cuda-kernels", "_download-checkpoints", "_download-example-data"]
 cwd = "packages/mast3r-slam"
 description = "Run MASt3R-SLAM inference (fast config, 224px, full video)"
 
 [feature.mast3r-slam.tasks.example-base]
-cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.MOV --img-size 512 --config config/base.yaml"
+cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.mp4 --img-size 512 --config config/base.yaml"
 depends-on = ["_build-cuda-kernels", "_download-checkpoints", "_download-example-data"]
 cwd = "packages/mast3r-slam"
 description = "Run MASt3R-SLAM inference (base config, 512px)"
