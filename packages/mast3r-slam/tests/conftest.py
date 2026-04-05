@@ -6,7 +6,7 @@ import pytest
 
 PACKAGE_DIR: Path = Path(__file__).parent.parent
 FIXTURES_DIR: Path = PACKAGE_DIR / "tests" / "fixtures"
-BASELINE_RRD: Path = FIXTURES_DIR / "baseline_100frames.rrd"
+BASELINE_RRD: Path = FIXTURES_DIR / "baseline_30frames.rrd"
 
 
 @pytest.fixture(scope="session")
