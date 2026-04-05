@@ -4,7 +4,8 @@ from jaxtyping import Float, Int, Bool
 
 import mast3r_slam.image as img_utils
 from mast3r_slam.config import config
-import mast3r_slam_backends
+# import mast3r_slam_backends  # CUDA C++ kernels (commented out for Mojo comparison)
+import mast3r_slam_mojo_backends as mast3r_slam_backends  # Mojo GPU kernels
 
 
 def match(
