@@ -46,6 +46,72 @@ def get_cached_context_ptr() raises -> UnsafePointer[DeviceContext, MutAnyOrigin
     )
 
 
+# ─── GPU Kernel Helpers ───────────────────────────────────────────────────────
+
+
+@always_inline
+def bilinear_sample(
+    data: UnsafePointer[Float32, MutAnyOrigin],
+    off11: Int, off12: Int, off21: Int, off22: Int,
+    w11: Float32, w12: Float32, w21: Float32, w22: Float32,
+    ch: Int,
+) -> Float32:
+    """Sample a single channel from four bilinear corners.
+
+    The corners are named by their bilinear weight, NOT their spatial position
+    (pixels are opposite the area weights — same convention as the CUDA kernel).
+    """
+    return (
+        w11 * data[off11 + ch]
+        + w12 * data[off12 + ch]
+        + w21 * data[off21 + ch]
+        + w22 * data[off22 + ch]
+    )
+
+
+@always_inline
+def bilinear_corners(
+    base_b: Int, rays_stride_v: Int,
+    v11: Int, u11: Int,
+) -> InlineArray[Int, 4]:
+    """Compute the four corner offsets for bilinear interpolation.
+
+    Returns [bottom-right, bottom-left, top-right, top-left] offsets.
+    NOTE: pixels opposite the area weights (same as CUDA kernel).
+    """
+    var offsets = InlineArray[Int, 4](fill=0)
+    offsets[0] = base_b + (v11 + 1) * rays_stride_v + (u11 + 1) * 9  # bottom-right
+    offsets[1] = base_b + (v11 + 1) * rays_stride_v + u11 * 9        # bottom-left
+    offsets[2] = base_b + v11 * rays_stride_v + (u11 + 1) * 9        # top-right
+    offsets[3] = base_b + v11 * rays_stride_v + u11 * 9              # top-left
+    return offsets^
+
+
+@always_inline
+def bilinear_weights(du: Float32, dv: Float32) -> InlineArray[Float32, 4]:
+    """Compute bilinear interpolation weights from fractional pixel offsets."""
+    var w = InlineArray[Float32, 4](fill=Float32(0.0))
+    w[0] = du * dv
+    w[1] = (1.0 - du) * dv
+    w[2] = du * (1.0 - dv)
+    w[3] = (1.0 - du) * (1.0 - dv)
+    return w^
+
+
+@always_inline
+def normalize_ray(
+    r0: Float32, r1: Float32, r2: Float32,
+) -> InlineArray[Float32, 3]:
+    """Normalize a 3D ray direction to unit length."""
+    var r_norm: Float32 = sqrt(r0 * r0 + r1 * r1 + r2 * r2)
+    var r_inv: Float32 = 1.0 / r_norm
+    var out = InlineArray[Float32, 3](fill=Float32(0.0))
+    out[0] = r0 * r_inv
+    out[1] = r1 * r_inv
+    out[2] = r2 * r_inv
+    return out^
+
+
 # ─── GPU Kernels ──────────────────────────────────────────────────────────────
 
 def iter_proj_kernel(
@@ -66,33 +132,34 @@ def iter_proj_kernel(
     Each thread processes one point: bilinear-interpolates rays at the current
     pixel, normalises, computes error against the target 3D direction, builds a
     2x2 LM system, solves for a pixel update, and accepts/rejects based on cost.
+
+    Mirrors the CUDA kernel in matching_kernels.cu:iter_proj_kernel (lines 119-275).
     """
+    # ── Thread indexing ──
     var n: UInt = block_idx.x * block_dim.x + thread_idx.x
     var b: UInt = block_idx.y
 
     if n >= UInt(num_pts):
         return
 
-    # Strides for row-major [batch, h, w, 9] and [batch, num_pts, {3,2}]
+    # ── Strides for row-major tensors ──
     var rays_stride_b: Int = h * w * 9
     var rays_stride_v: Int = w * 9
     var pts_stride_b: Int = num_pts * 3
     var p_stride_b: Int = num_pts * 2
     var conv_stride_b: Int = num_pts
 
-    # Batch-invariant base offsets (hoisted out of loop)
+    # ── Batch-invariant base offsets (hoisted out of loop) ──
     var base_b: Int = Int(b) * rays_stride_b
     var conv_idx: Int = Int(b) * conv_stride_b + Int(n)
 
-    # Load initial pixel
+    # ── Load initial pixel and clamp to valid bilinear range ──
     var u: Float32 = p_init[Int(b) * p_stride_b + Int(n) * 2 + 0]
     var v: Float32 = p_init[Int(b) * p_stride_b + Int(n) * 2 + 1]
-
-    # Clamp to valid bilinear range
     u = min(max(u, Float32(1.0)), Float32(w - 2))
     v = min(max(v, Float32(1.0)), Float32(h - 2))
 
-    # Load target point once (loop-invariant)
+    # ── Load target point once (loop-invariant) ──
     var pts_base: Int = Int(b) * pts_stride_b + Int(n) * 3
     var t0: Float32 = pts_3d_norm[pts_base + 0]
     var t1: Float32 = pts_3d_norm[pts_base + 1]
@@ -101,60 +168,45 @@ def iter_proj_kernel(
     var lam: Float32 = lambda_init
 
     for _i in range(max_iter):
-        # Bilinear interpolation
+        # ── Bilinear interpolation at current pixel ──
         var u11: Int = Int(floor(u))
         var v11: Int = Int(floor(v))
-        var du: Float32 = u - Float32(u11)
-        var dv: Float32 = v - Float32(v11)
+        var wt = bilinear_weights(u - Float32(u11), v - Float32(v11))
+        var off = bilinear_corners(base_b, rays_stride_v, v11, u11)
 
-        var w11: Float32 = du * dv
-        var w12: Float32 = (1.0 - du) * dv
-        var w21: Float32 = du * (1.0 - dv)
-        var w22: Float32 = (1.0 - du) * (1.0 - dv)
+        # Interpolate ray (ch 0-2), gx (ch 3-5), gy (ch 6-8)
+        var r0: Float32 = bilinear_sample(rays_img, off[0], off[1], off[2], off[3], wt[0], wt[1], wt[2], wt[3], 0)
+        var r1: Float32 = bilinear_sample(rays_img, off[0], off[1], off[2], off[3], wt[0], wt[1], wt[2], wt[3], 1)
+        var r2: Float32 = bilinear_sample(rays_img, off[0], off[1], off[2], off[3], wt[0], wt[1], wt[2], wt[3], 2)
 
-        # Base offsets into rays_img for the 4 bilinear corners
-        # NOTE: pixels opposite the area weights (same as CUDA kernel)
-        var off11: Int = base_b + (v11 + 1) * rays_stride_v + (u11 + 1) * 9  # bottom-right
-        var off12: Int = base_b + (v11 + 1) * rays_stride_v + u11 * 9        # bottom-left
-        var off21: Int = base_b + v11 * rays_stride_v + (u11 + 1) * 9        # top-right
-        var off22: Int = base_b + v11 * rays_stride_v + u11 * 9              # top-left
+        var gx0: Float32 = bilinear_sample(rays_img, off[0], off[1], off[2], off[3], wt[0], wt[1], wt[2], wt[3], 3)
+        var gx1: Float32 = bilinear_sample(rays_img, off[0], off[1], off[2], off[3], wt[0], wt[1], wt[2], wt[3], 4)
+        var gx2: Float32 = bilinear_sample(rays_img, off[0], off[1], off[2], off[3], wt[0], wt[1], wt[2], wt[3], 5)
 
-        # Interpolate ray (channels 0-2), gx (3-5), gy (6-8)
-        var r0: Float32 = w11 * rays_img[off11 + 0] + w12 * rays_img[off12 + 0] + w21 * rays_img[off21 + 0] + w22 * rays_img[off22 + 0]
-        var r1: Float32 = w11 * rays_img[off11 + 1] + w12 * rays_img[off12 + 1] + w21 * rays_img[off21 + 1] + w22 * rays_img[off22 + 1]
-        var r2: Float32 = w11 * rays_img[off11 + 2] + w12 * rays_img[off12 + 2] + w21 * rays_img[off21 + 2] + w22 * rays_img[off22 + 2]
+        var gy0: Float32 = bilinear_sample(rays_img, off[0], off[1], off[2], off[3], wt[0], wt[1], wt[2], wt[3], 6)
+        var gy1: Float32 = bilinear_sample(rays_img, off[0], off[1], off[2], off[3], wt[0], wt[1], wt[2], wt[3], 7)
+        var gy2: Float32 = bilinear_sample(rays_img, off[0], off[1], off[2], off[3], wt[0], wt[1], wt[2], wt[3], 8)
 
-        var gx0: Float32 = w11 * rays_img[off11 + 3] + w12 * rays_img[off12 + 3] + w21 * rays_img[off21 + 3] + w22 * rays_img[off22 + 3]
-        var gx1: Float32 = w11 * rays_img[off11 + 4] + w12 * rays_img[off12 + 4] + w21 * rays_img[off21 + 4] + w22 * rays_img[off22 + 4]
-        var gx2: Float32 = w11 * rays_img[off11 + 5] + w12 * rays_img[off12 + 5] + w21 * rays_img[off21 + 5] + w22 * rays_img[off22 + 5]
+        # ── Normalize ray ──
+        var r = normalize_ray(r0, r1, r2)
+        r0 = r[0]
+        r1 = r[1]
+        r2 = r[2]
 
-        var gy0: Float32 = w11 * rays_img[off11 + 6] + w12 * rays_img[off12 + 6] + w21 * rays_img[off21 + 6] + w22 * rays_img[off22 + 6]
-        var gy1: Float32 = w11 * rays_img[off11 + 7] + w12 * rays_img[off12 + 7] + w21 * rays_img[off21 + 7] + w22 * rays_img[off22 + 7]
-        var gy2: Float32 = w11 * rays_img[off11 + 8] + w12 * rays_img[off12 + 8] + w21 * rays_img[off21 + 8] + w22 * rays_img[off22 + 8]
-
-        # Normalize ray
-        var r_norm: Float32 = sqrt(r0 * r0 + r1 * r1 + r2 * r2)
-        var r_inv: Float32 = 1.0 / r_norm
-        r0 *= r_inv
-        r1 *= r_inv
-        r2 *= r_inv
-
-        # Error and cost
+        # ── Error and cost ──
         var e0: Float32 = r0 - t0
         var e1: Float32 = r1 - t1
         var e2: Float32 = r2 - t2
         var cost: Float32 = e0 * e0 + e1 * e1 + e2 * e2
 
-        # J^T J (2x2 symmetric)
+        # ── Build normal equations: J^T J + lambda * I, -J^T r ──
         var A00: Float32 = gx0 * gx0 + gx1 * gx1 + gx2 * gx2 + lam
         var A01: Float32 = gx0 * gy0 + gx1 * gy1 + gx2 * gy2
         var A11: Float32 = gy0 * gy0 + gy1 * gy1 + gy2 * gy2 + lam
-
-        # -J^T r
         var b0: Float32 = -(e0 * gx0 + e1 * gx1 + e2 * gx2)
         var b1: Float32 = -(e0 * gy0 + e1 * gy1 + e2 * gy2)
 
-        # Solve 2x2 system
+        # ── Solve 2x2 system via Cramer's rule ──
         var det_inv: Float32 = 1.0 / (A00 * A11 - A01 * A01)
         var delta_u: Float32 = det_inv * (A11 * b0 - A01 * b1)
         var delta_v: Float32 = det_inv * (-A01 * b0 + A00 * b1)
@@ -162,36 +214,23 @@ def iter_proj_kernel(
         var u_new: Float32 = min(max(u + delta_u, Float32(1.0)), Float32(w - 2))
         var v_new: Float32 = min(max(v + delta_v, Float32(1.0)), Float32(h - 2))
 
-        # Evaluate new cost at candidate position
+        # ── Evaluate new cost at candidate position ──
         var u11n: Int = Int(floor(u_new))
         var v11n: Int = Int(floor(v_new))
-        var dun: Float32 = u_new - Float32(u11n)
-        var dvn: Float32 = v_new - Float32(v11n)
-        var wn11: Float32 = dun * dvn
-        var wn12: Float32 = (1.0 - dun) * dvn
-        var wn21: Float32 = dun * (1.0 - dvn)
-        var wn22: Float32 = (1.0 - dun) * (1.0 - dvn)
+        var wtn = bilinear_weights(u_new - Float32(u11n), v_new - Float32(v11n))
+        var offn = bilinear_corners(base_b, rays_stride_v, v11n, u11n)
 
-        var on11: Int = base_b + (v11n + 1) * rays_stride_v + (u11n + 1) * 9
-        var on12: Int = base_b + (v11n + 1) * rays_stride_v + u11n * 9
-        var on21: Int = base_b + v11n * rays_stride_v + (u11n + 1) * 9
-        var on22: Int = base_b + v11n * rays_stride_v + u11n * 9
+        var nr0: Float32 = bilinear_sample(rays_img, offn[0], offn[1], offn[2], offn[3], wtn[0], wtn[1], wtn[2], wtn[3], 0)
+        var nr1: Float32 = bilinear_sample(rays_img, offn[0], offn[1], offn[2], offn[3], wtn[0], wtn[1], wtn[2], wtn[3], 1)
+        var nr2: Float32 = bilinear_sample(rays_img, offn[0], offn[1], offn[2], offn[3], wtn[0], wtn[1], wtn[2], wtn[3], 2)
+        var nr = normalize_ray(nr0, nr1, nr2)
 
-        var nr0: Float32 = wn11 * rays_img[on11 + 0] + wn12 * rays_img[on12 + 0] + wn21 * rays_img[on21 + 0] + wn22 * rays_img[on22 + 0]
-        var nr1: Float32 = wn11 * rays_img[on11 + 1] + wn12 * rays_img[on12 + 1] + wn21 * rays_img[on21 + 1] + wn22 * rays_img[on22 + 1]
-        var nr2: Float32 = wn11 * rays_img[on11 + 2] + wn12 * rays_img[on12 + 2] + wn21 * rays_img[on21 + 2] + wn22 * rays_img[on22 + 2]
-        var nr_norm: Float32 = sqrt(nr0 * nr0 + nr1 * nr1 + nr2 * nr2)
-        var nr_inv: Float32 = 1.0 / nr_norm
-        nr0 *= nr_inv
-        nr1 *= nr_inv
-        nr2 *= nr_inv
-
-        var ne0: Float32 = nr0 - t0
-        var ne1: Float32 = nr1 - t1
-        var ne2: Float32 = nr2 - t2
+        var ne0: Float32 = nr[0] - t0
+        var ne1: Float32 = nr[1] - t1
+        var ne2: Float32 = nr[2] - t2
         var new_cost: Float32 = ne0 * ne0 + ne1 * ne1 + ne2 * ne2
 
-        # Accept/reject step
+        # ── Accept/reject step (Levenberg-Marquardt) ──
         if new_cost < cost:
             u = u_new
             v = v_new
@@ -201,7 +240,7 @@ def iter_proj_kernel(
             lam *= 10.0
             converged[conv_idx] = UInt8(1) if cost < cost_thresh else UInt8(0)
 
-    # Write final pixel
+    # ── Write final pixel ──
     var out_idx: Int = Int(b) * p_stride_b + Int(n) * 2
     p_new[out_idx + 0] = u
     p_new[out_idx + 1] = v
