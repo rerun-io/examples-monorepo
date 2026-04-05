@@ -136,7 +136,7 @@ class FrameTracker:
         self.keyframes[len(self.keyframes) - 1] = keyframe
 
         # Keyframe selection
-        n_valid: int = valid_kf.sum()
+        n_valid: torch.Tensor = valid_kf.sum()
         match_frac_k: Float[torch.Tensor, ""] = n_valid / valid_kf.numel()
         unique_frac_f: float = (
             torch.unique(idx_f2k[valid_match_k[:, 0]]).shape[0] / valid_kf.numel()
