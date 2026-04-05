@@ -229,8 +229,17 @@ def refine_matches_kernel(
                 if v_cand >= 0 and v_cand < h and u_cand >= 0 and u_cand < w:
                     var score: Float32 = 0.0
                     var d11_base: Int = Int(b) * d11_stride_b + v_cand * d11_stride_v + u_cand * fdim
-                    for k in range(fdim):
+                    # SIMD-4 vectorized dot product
+                    var k: Int = 0
+                    while k + 4 <= fdim:
+                        var v21 = D21.load[width=4](d21_base + k)
+                        var v11 = D11.load[width=4](d11_base + k)
+                        score += (v21 * v11).reduce_add()
+                        k += 4
+                    # Scalar remainder
+                    while k < fdim:
                         score += D21[d21_base + k] * D11[d11_base + k]
+                        k += 1
 
                     if score > max_score:
                         max_score = score
@@ -295,11 +304,20 @@ def refine_matches_kernel_f16(
                 var v_cand: Int = v0 - rd + j
 
                 if v_cand >= 0 and v_cand < h and u_cand >= 0 and u_cand < w:
-                    # Accumulate dot product in float32 for precision
+                    # SIMD-8 vectorized dot product (8 × f16 = 128 bits),
+                    # accumulated in float32 for precision.
                     var score: Float32 = 0.0
                     var d11_base: Int = Int(b) * d11_stride_b + v_cand * d11_stride_v + u_cand * fdim
-                    for k in range(fdim):
+                    var k: Int = 0
+                    while k + 8 <= fdim:
+                        var v21 = D21.load[width=8](d21_base + k)
+                        var v11 = D11.load[width=8](d11_base + k)
+                        score += (v21.cast[DType.float32]() * v11.cast[DType.float32]()).reduce_add()
+                        k += 8
+                    # Scalar remainder
+                    while k < fdim:
                         score += Float32(D21[d21_base + k]) * Float32(D11[d11_base + k])
+                        k += 1
 
                     if score > max_score:
                         max_score = score
@@ -351,10 +369,12 @@ def iter_proj_py(
         device=rays_img.device,
         dtype=torch.float32,
     )
+    # Allocate directly as bool — PyTorch stores bool as uint8 internally,
+    # so the kernel can write UInt8 (0/1) to it without a .to(bool) cast.
     var converged: PythonObject = torch.empty(
         Python.list(batch, num_pts),
         device=rays_img.device,
-        dtype=torch.uint8,
+        dtype=torch.bool,
     )
 
     # Get raw CUDA pointers
@@ -387,10 +407,8 @@ def iter_proj_py(
         grid_dim=(num_blocks_x, batch),
         block_dim=BLOCK_ITER_PROJ,
     )
-    ctx.synchronize()
-
-    # Cast converged from uint8 to bool to match CUDA output
-    converged = converged.to(torch.bool)
+    # No ctx.synchronize() — let the kernel run async like CUDA.
+    # PyTorch ops on the same default stream will wait automatically.
 
     return Python.tuple(p_new, converged)
 
@@ -469,7 +487,7 @@ def refine_matches_py(
             block_dim=BLOCK_REFINE,
         )
 
-    ctx.synchronize()
+    # No ctx.synchronize() — let the kernel run async like CUDA.
     return Python.tuple(p1_new)
 
 
