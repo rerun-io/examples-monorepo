@@ -680,15 +680,13 @@ trimesh = "*"
 
 [feature.mast3r-slam.target.linux-64.dependencies]
 lietorch = { path = "packages/lietorch" }
+mast3r = { path = "packages/mast3r" }
+asmk = { path = "packages/asmk" }
 
 [feature.mast3r-slam.pypi-dependencies]
-# All packages resolved by pixi's pypi resolver.
-# CUDA extension setup.py files use lazy torch imports so metadata
-# extraction works without torch; actual compilation happens via
-# _build-cuda-kernels task (python setup.py build_ext --inplace).
+# mast3r-slam is the only pypi editable install remaining.
+# lietorch, mast3r, and asmk are pixi-build workspace packages.
 mast3r-slam = { path = "packages/mast3r-slam", editable = true }
-mast3r = { path = "packages/mast3r-slam/thirdparty/mast3r", editable = true }
-asmk = { path = "packages/mast3r-slam/thirdparty/mast3r/asmk" }
 einops = ">=0.8.0"
 evo = "*"
 natsort = ">=8.4"

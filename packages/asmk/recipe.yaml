@@ -1,0 +1,28 @@
+package:
+  name: asmk
+  version: "0.1.0"
+
+source:
+  git: https://github.com/jenicek/asmk.git
+  rev: 2a96d9c03a841dffdfddabc699a20512dcd09363
+  patches:
+    - patches/add-pyproject-toml.patch
+    - patches/simplify-setup-py.patch
+
+build:
+  number: 0
+  script:
+    # Regenerate hamming.c from .pyx to fix CPython 3.11+ header compatibility
+    - cython cython/hamming.pyx -o cython/hamming.c
+    - python -m pip install . --no-deps --no-build-isolation -vv
+
+requirements:
+  build:
+    - ${{ compiler('c') }}
+  host:
+    - python 3.11.*
+    - pip
+    - setuptools
+    - cython
+  run:
+    - python 3.11.*

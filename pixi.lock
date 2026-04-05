@@ -2515,7 +2515,9 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/zlib-1.3.2-h25fd6f3_2.conda
       - conda: https://prefix.dev/conda-forge/linux-64/zlib-ng-2.3.3-hceb46e0_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/zstd-1.5.7-hb78ec9c_6.conda
+      - conda: packages/asmk
       - conda: packages/lietorch
+      - conda: packages/mast3r
       - pypi: https://files.pythonhosted.org/packages/16/54/a295bd8d7ac900c339b2c7024ed0ff9538afb60e92eb0979b8bb49deb20e/aiobotocore-3.3.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/a5/45/30bb92d442636f570cb5651bc661f52b610e2eec3f891a5dc3a4c3667db0/aiofiles-24.1.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/10/a1/510b0a7fadc6f43a6ce50152e69dbd86415240835868bb0bd9b5b88b1e06/aioitertools-0.13.0-py3-none-any.whl
@@ -2592,8 +2594,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b0/be/d7c88cd9293c859fc74b232abdc65a229bb953997995d6912fc85af18323/wrapt-2.1.2-cp311-cp311-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/bb/1f/e9cfd801a3f9190bf3e759c422bbfd2247db9d7f3d54a56ecde70137791a/zstandard-0.25.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
       - pypi: ./packages/mast3r-slam
-      - pypi: ./packages/mast3r-slam/thirdparty/mast3r
-      - pypi: ./packages/mast3r-slam/thirdparty/mast3r/asmk
       linux-aarch64:
       - conda: https://prefix.dev/conda-forge/linux-aarch64/_openmp_mutex-4.5-7_kmp_llvm.conda
       - conda: https://prefix.dev/conda-forge/noarch/_python_abi3_support-1.0-hd8ed1ab_2.conda
@@ -3095,8 +3095,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/ea/25/36c04602831a4d685d45a93b3abea61eca7fe35dab6c842d6f5d570ef94a/wrapt-2.1.2-cp311-cp311-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl
       - pypi: https://files.pythonhosted.org/packages/3b/13/2b7ed68bd85e69a2069bcc72141d378f22cae5a0f3b353a2c8f50ef30c1b/zstandard-0.25.0-cp311-cp311-manylinux2014_aarch64.manylinux_2_17_aarch64.whl
       - pypi: ./packages/mast3r-slam
-      - pypi: ./packages/mast3r-slam/thirdparty/mast3r
-      - pypi: ./packages/mast3r-slam/thirdparty/mast3r/asmk
   mast3r-slam-dev:
     channels:
     - url: https://prefix.dev/ai-demos/
@@ -3539,7 +3537,9 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/zlib-1.3.2-h25fd6f3_2.conda
       - conda: https://prefix.dev/conda-forge/linux-64/zlib-ng-2.3.3-hceb46e0_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/zstd-1.5.7-hb78ec9c_6.conda
+      - conda: packages/asmk
       - conda: packages/lietorch
+      - conda: packages/mast3r
       - pypi: https://files.pythonhosted.org/packages/16/54/a295bd8d7ac900c339b2c7024ed0ff9538afb60e92eb0979b8bb49deb20e/aiobotocore-3.3.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/a5/45/30bb92d442636f570cb5651bc661f52b610e2eec3f891a5dc3a4c3667db0/aiofiles-24.1.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/10/a1/510b0a7fadc6f43a6ce50152e69dbd86415240835868bb0bd9b5b88b1e06/aioitertools-0.13.0-py3-none-any.whl
@@ -3618,8 +3618,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b0/be/d7c88cd9293c859fc74b232abdc65a229bb953997995d6912fc85af18323/wrapt-2.1.2-cp311-cp311-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/bb/1f/e9cfd801a3f9190bf3e759c422bbfd2247db9d7f3d54a56ecde70137791a/zstandard-0.25.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
       - pypi: ./packages/mast3r-slam
-      - pypi: ./packages/mast3r-slam/thirdparty/mast3r
-      - pypi: ./packages/mast3r-slam/thirdparty/mast3r/asmk
       linux-aarch64:
       - conda: https://prefix.dev/conda-forge/linux-aarch64/_openmp_mutex-4.5-7_kmp_llvm.conda
       - conda: https://prefix.dev/conda-forge/noarch/_python_abi3_support-1.0-hd8ed1ab_2.conda
@@ -4131,8 +4129,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/ea/25/36c04602831a4d685d45a93b3abea61eca7fe35dab6c842d6f5d570ef94a/wrapt-2.1.2-cp311-cp311-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl
       - pypi: https://files.pythonhosted.org/packages/3b/13/2b7ed68bd85e69a2069bcc72141d378f22cae5a0f3b353a2c8f50ef30c1b/zstandard-0.25.0-cp311-cp311-manylinux2014_aarch64.manylinux_2_17_aarch64.whl
       - pypi: ./packages/mast3r-slam
-      - pypi: ./packages/mast3r-slam/thirdparty/mast3r
-      - pypi: ./packages/mast3r-slam/thirdparty/mast3r/asmk
   monoprior:
     channels:
     - url: https://prefix.dev/ai-demos/
@@ -22052,10 +22048,17 @@ packages:
   - wcwidth
   - pywin32 ; sys_platform == 'win32'
   requires_python: '>=3.8'
-- pypi: ./packages/mast3r-slam/thirdparty/mast3r/asmk
+- conda: packages/asmk
   name: asmk
-  version: '0.1'
-  sha256: 159f30dd7ae1ebaa77a7d93918e784400b6c9a493002d4b27f7f499bc6287956
+  version: 0.1.0
+  build: hb0f4dca_0
+  subdir: linux-64
+  variants:
+    target_platform: linux-64
+  depends:
+  - python 3.11.*
+  - libgcc >=15
+  - python_abi 3.11.* *_cp311
 - conda: https://prefix.dev/conda-forge/linux-64/assimp-6.0.3-hecf2907_0.conda
   sha256: c78cdc93b83aafe4c811e294a08bd9f81a87949dfe9459b514d3080b0a87d582
   md5: 534a1605b76f8df12ab7c3f4e5cb29bf
@@ -38815,10 +38818,16 @@ packages:
   - pkg:pypi/markupsafe?source=compressed-mapping
   size: 26305
   timestamp: 1772446326927
-- pypi: ./packages/mast3r-slam/thirdparty/mast3r
+- conda: packages/mast3r
   name: mast3r
   version: 0.0.1
-  sha256: 62e7ab0dcb589f99677ec3ed06ebe10236e27090791a0a22c5fdf80f87860e52
+  build: pyh4616a5c_0
+  subdir: noarch
+  variants:
+    target_platform: noarch
+  depends:
+  - python >=3.11
+  - python *
 - pypi: ./packages/mast3r-slam
   name: mast3r-slam
   version: 0.0.1

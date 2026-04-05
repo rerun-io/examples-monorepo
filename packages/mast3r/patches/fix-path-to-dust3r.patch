@@ -1,0 +1,30 @@
+--- a/mast3r/utils/path_to_dust3r.py
++++ b/mast3r/utils/path_to_dust3r.py
+@@ -1,19 +1,14 @@
+ # Copyright (C) 2024-present Naver Corporation. All rights reserved.
+ # Licensed under CC BY-NC-SA 4.0 (non-commercial use only).
+ #
+ # --------------------------------------------------------
+-# dust3r submodule import
++# dust3r submodule import (or package import)
+ # --------------------------------------------------------
+
+-import sys
+-import os.path as path
+-HERE_PATH = path.normpath(path.dirname(__file__))
+-DUSt3R_REPO_PATH = path.normpath(path.join(HERE_PATH, '../../dust3r'))
+-DUSt3R_LIB_PATH = path.join(DUSt3R_REPO_PATH, 'dust3r')
+-# check the presence of models directory in repo to be sure its cloned
+-if path.isdir(DUSt3R_LIB_PATH):
+-    # workaround for sibling import
+-    sys.path.insert(0, DUSt3R_REPO_PATH)
+-else:
+-    raise ImportError(f"dust3r is not initialized, could not find: {DUSt3R_LIB_PATH}.\n "
+-                      "Did you forget to run 'git submodule update --init --recursive' ?")
++# If dust3r is already installed as a package, this is a no-op.
++# Otherwise fall back to the submodule path layout.
++try:
++    import dust3r  # noqa: F401
++except ImportError:
++    raise ImportError("dust3r is not installed and not found as a submodule. "
++                      "Install dust3r as a package or use git submodule update --init --recursive.")

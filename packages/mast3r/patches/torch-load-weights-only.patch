@@ -1,0 +1,22 @@
+--- a/mast3r/retrieval/model.py
++++ b/mast3r/retrieval/model.py
+@@ -136,7 +136,7 @@
+         self.nfeat = nfeat
+         self.pretrained_retrieval = pretrained_retrieval
+         if self.pretrained_retrieval is not None:
+-            ckpt = torch.load(pretrained_retrieval, 'cpu')
++            ckpt = torch.load(pretrained_retrieval, 'cpu', weights_only=False)
+             msg = self.load_state_dict(ckpt['model'], strict=False)
+             assert len(msg.unexpected_keys) == 0 and all(k.startswith('backbone')
+                                                          or k.startswith('postwhiten') for k in msg.missing_keys)
+--- a/mast3r/retrieval/processor.py
++++ b/mast3r/retrieval/processor.py
+@@ -67,7 +67,7 @@
+         # load the model
+         assert os.path.isfile(modelname), modelname
+         print(f'Loading retrieval model from {modelname}')
+-        ckpt = torch.load(modelname, 'cpu')  # TODO from pretrained to download it automatically
++        ckpt = torch.load(modelname, 'cpu', weights_only=False)  # TODO from pretrained to download it automatically
+         ckpt_args = ckpt['args']
+         if backbone is None:
+             backbone = AsymmetricMASt3R.from_pretrained(ckpt_args.pretrained)

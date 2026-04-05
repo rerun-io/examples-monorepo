@@ -1,0 +1,48 @@
+package:
+  name: mast3r
+  version: "0.0.1"
+
+# NOTE: curope (CUDA RoPE2D from dust3r/croco/models/curope/) is NOT built.
+# The codebase falls back to a slower pure-PyTorch RoPE2D implementation.
+# TODO: Add curope as a separate pixi-build workspace package to enable
+# the faster CUDA version (requires ${{ compiler('cuda') }} and torch).
+
+source:
+  git: https://github.com/naver/mast3r.git
+  rev: f5209afc300cec36239a7ac992263f36847bbba0
+  patches:
+    - patches/add-pyproject-toml.patch
+    - patches/add-setup-py.patch
+    - patches/fix-path-to-dust3r.patch
+    - patches/torch-load-weights-only.patch
+
+build:
+  number: 0
+  noarch: python
+  script:
+    # Clone dust3r + croco submodules into the empty directories
+    - rm -rf dust3r
+    - git clone https://github.com/naver/dust3r.git dust3r
+    - cd dust3r && git checkout 3cc8c88c413bb9e34c41db0e0eef99c2ee010b12 && cd ..
+    - git clone https://github.com/naver/croco.git dust3r/croco
+    - cd dust3r/croco && git checkout d7de0705845239092414480bd829228723bf20de && cd ../..
+    # Apply patches to dust3r
+    - cd dust3r && patch -p1 < $RECIPE_DIR/patches/dust3r-torch-load.patch && cd ..
+    # Replace files with picklable/package-import versions (avoid patch newline issues)
+    - cp $RECIPE_DIR/patches/path_to_croco.py dust3r/dust3r/utils/path_to_croco.py
+    - cp $RECIPE_DIR/patches/misc.py dust3r/dust3r/utils/misc.py
+    # Add missing __init__.py files so find_packages discovers these dirs
+    - touch dust3r/croco/models/__init__.py
+    - touch mast3r/retrieval/__init__.py
+    - python -m pip install . --no-deps --no-build-isolation -vv
+
+requirements:
+  build:
+    - git
+    - patch
+  host:
+    - python 3.11.*
+    - pip
+    - setuptools
+  run:
+    - python >=3.11

@@ -59,7 +59,9 @@ Subsequent runs skip all install steps (idempotent checks).
 
 - **Linux only** with an NVIDIA GPU (CUDA required)
 - Python 3.11 (pinned for lietorch compatibility)
-- curope (CUDA RoPE2D) is skipped; falls back to a slower PyTorch implementation
+- curope (CUDA RoPE2D) is skipped; falls back to a slower PyTorch implementation.
+  **TODO:** Add curope as a pixi-build workspace package (`packages/curope/`) to enable
+  the faster CUDA kernel from `naver/croco/models/curope/`.
 - `pyrealsense2` is optional (only needed for live RealSense camera input)
 
 ## Acknowledgements

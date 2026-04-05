@@ -1,0 +1,17 @@
+--- /dev/null
++++ b/setup.py
+@@ -0,0 +1,14 @@
++from setuptools import setup, find_packages
++
++setup(
++    packages=(
++        find_packages(where=".", include=["mast3r", "mast3r.*"])
++        + find_packages(where="dust3r", include=["dust3r", "dust3r.*"])
++        + find_packages(where="dust3r/croco", include=["models", "models.*"])
++    ),
++    package_dir={
++        "mast3r": "mast3r",
++        "dust3r": "dust3r/dust3r",
++        "models": "dust3r/croco/models",
++    },
++)
