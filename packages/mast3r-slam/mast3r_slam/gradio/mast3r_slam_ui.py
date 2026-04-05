@@ -1,4 +1,3 @@
-from dataclasses import dataclass, fields
 import gradio as gr
 
 import time
@@ -80,7 +79,11 @@ def stop_streaming():
 
 
 @rr.thread_local_stream("rerun_example_streaming_blur")
-def streaming_mast3r_slam_fn(*input_params, progress=gr.Progress()):
+def streaming_mast3r_slam_fn(
+    video_file: str,
+    subsample: int,
+    progress=gr.Progress(),
+):
     global active_backend_process, active_states
     stream = rr.binary_stream()
 
@@ -88,9 +91,8 @@ def streaming_mast3r_slam_fn(*input_params, progress=gr.Progress()):
     stop_streaming()
 
     try:
-        parameters = InputValues(*input_params)
-        video_path = Path(parameters.video_file)
-    except beartype.roar.BeartypeCallHintParamViolation as e:
+        video_path = Path(video_file)
+    except beartype.roar.BeartypeCallHintParamViolation:
         raise gr.Error(  # noqa: B904
             "Did you make sure the zipfile finished uploading?. Try to hit run again.",
             duration=20,
@@ -113,6 +115,7 @@ def streaming_mast3r_slam_fn(*input_params, progress=gr.Progress()):
     progress(0.05, desc="Loading config")
     inference_config = "config/base.yaml"
     load_config(path=inference_config)
+    config["dataset"]["subsample"] = subsample
 
     manager: SyncManager = mp.Manager()
 
@@ -224,7 +227,7 @@ def streaming_mast3r_slam_fn(*input_params, progress=gr.Progress()):
             print(f"FPS: {FPS}")
         i += 1
 
-        yield stream.read(), None
+        yield stream.read(), None, f"Processing frame {i}/{len(dataset)}"
 
     pcd = save_kf_to_nerfstudio(
         ns_save_path=video_path.parent / "nerfstudio-output",
@@ -256,7 +259,7 @@ def streaming_mast3r_slam_fn(*input_params, progress=gr.Progress()):
     assert zip_output_path.exists(), f"Zip file {zip_output_path} does not exist"
 
     print("Finished processing")
-    yield stream.read(), str(zip_output_path)
+    yield stream.read(), str(zip_output_path), "MASt3R-SLAM complete"
     backend.join()
     # Clean up resources before completing
     stop_streaming()
@@ -287,14 +290,13 @@ def mov_to_mp4(video_path: Path) -> Path:
 
 @rr.thread_local_stream("rr_show_video")
 def show_video_file(
-    *input_params,
+    video_file: str,
 ):
     stream = rr.binary_stream()
 
     try:
-        parameters = InputValues(*input_params)
-        video_path: Path = Path(parameters.video_file)
-    except beartype.roar.BeartypeCallHintParamViolation as e:
+        video_path = Path(video_file)
+    except beartype.roar.BeartypeCallHintParamViolation:
         raise gr.Error(  # noqa: B904
             "Did you make sure the zipfile finished uploading?. Try to hit run again.",
             duration=20,
@@ -320,64 +322,131 @@ def show_video_file(
         indexes=[rr.TimeNanosColumn("video_time", frame_timestamps_ns)],
         columns=rr.VideoFrameReference.columns_nanoseconds(frame_timestamps_ns),
     )
-    yield stream.read()
+    yield stream.read(), f"Loaded preview for {video_path.name}"
 
 
-@dataclass
-class InputComponents:
-    video_file: gr.File
-
-    def to_list(self) -> list:
-        return [getattr(self, f.name) for f in fields(self)]
+def _switch_to_outputs():
+    return gr.update(selected="outputs")
 
 
-@dataclass
-class InputValues:
-    video_file: str
+def _switch_to_inputs():
+    return gr.update(selected="inputs")
+
+
+def _reset_run_outputs():
+    return None, "Starting MASt3R-SLAM..."
 
 
 with gr.Blocks() as mast3r_slam_block:
     with gr.Row():
-        with gr.Column():
-            video_file = gr.File(label="Upload Video", file_types=[".mp4", ".mov", ".MOV"])
+        with gr.Column(scale=1):
+            tabs = gr.Tabs(selected="inputs")
+            with tabs:
+                with gr.TabItem("Inputs", id="inputs"):
+                    gr.Markdown(
+                        "Upload a video, preview it in the Rerun viewer, then run the full "
+                        "MASt3R-SLAM pipeline."
+                    )
+                    video_file = gr.File(
+                        label="Input Video",
+                        file_types=[".mp4", ".mov", ".MOV"],
+                    )
+                    with gr.Row():
+                        run_slam_btn = gr.Button("Run MASt3R-SLAM", variant="primary")
+                        stop_slam_btn = gr.Button("Stop")
 
-        with gr.Column():
-            with gr.Row():
-                blur_btn = gr.Button("Run Mast3r Slam")
-                stop_blur_btn = gr.Button("Stop Mast3r Slam")
-            output_zip_file = gr.File(
-                label="Download NerfStudio Output", file_count="single"
+                    with gr.Accordion("Config", open=False):
+                        subsample_slider = gr.Slider(
+                            label="Frame Subsample",
+                            minimum=1,
+                            maximum=8,
+                            step=1,
+                            value=1,
+                        )
+                        gr.Markdown(
+                            "Base config file: `config/base.yaml`\n\n"
+                            "Advanced calibration and backend settings remain in the YAML "
+                            "for now so the UI does not expose partially applied controls."
+                        )
+
+                with gr.TabItem("Outputs", id="outputs"):
+                    status_text = gr.Textbox(
+                        label="Status",
+                        value="Upload a video to begin.",
+                        interactive=False,
+                    )
+                    output_zip_file = gr.File(
+                        label="Download Nerfstudio Output",
+                        file_count="single",
+                    )
+
+            examples = gr.Examples(
+                examples=[
+                    ["data/normal-apt-tour.MOV"],
+                ],
+                inputs=[video_file],
+                cache_examples=False,
             )
 
-    with gr.Row():
-        viewer = Rerun(
-            streaming=True,
-            panel_states={
-                "time": "collapsed",
-                "blueprint": "hidden",
-                "selection": "hidden",
-            },
-        )
-
-    # this is to allow for kwargs as well as type hint validation of inputs with beartype
-    input_params = InputComponents(
-        video_file=video_file,
-    )
+        with gr.Column(scale=5):
+            viewer = Rerun(
+                streaming=True,
+                panel_states={
+                    "time": "collapsed",
+                    "blueprint": "hidden",
+                    "selection": "hidden",
+                },
+                height=800,
+            )
+            viewer.render()
 
     video_file.upload(
-        fn=show_video_file, inputs=input_params.to_list(), outputs=[viewer]
+        fn=_switch_to_inputs,
+        inputs=None,
+        outputs=[tabs],
+        api_visibility="private",
+    ).then(
+        fn=show_video_file,
+        inputs=[video_file],
+        outputs=[viewer, status_text],
     )
 
-    examples = gr.Examples(
-        examples=[
-            ["data/normal-apt-tour.MOV"],
+    load_input_event = getattr(examples, "load_input_event", None)
+    if load_input_event is not None:
+        load_input_event.then(
+            fn=_switch_to_inputs,
+            inputs=None,
+            outputs=[tabs],
+            api_visibility="private",
+        )
+
+    run_event = run_slam_btn.click(
+        fn=_switch_to_outputs,
+        inputs=None,
+        outputs=[tabs],
+        api_visibility="private",
+    ).then(
+        fn=_reset_run_outputs,
+        inputs=None,
+        outputs=[output_zip_file, status_text],
+        api_visibility="private",
+    ).then(
+        fn=streaming_mast3r_slam_fn,
+        inputs=[
+            video_file,
+            subsample_slider,
         ],
-        inputs=input_params.to_list(),
-        outputs=[viewer, output_zip_file],
+        outputs=[viewer, output_zip_file, status_text],
     )
-    blur_event = blur_btn.click(
-        streaming_mast3r_slam_fn,
-        inputs=input_params.to_list(),
-        outputs=[viewer, output_zip_file],
+
+    stop_slam_btn.click(
+        fn=stop_streaming,
+        inputs=[],
+        outputs=[],
+        cancels=[run_event],
+    ).then(
+        fn=lambda: "MASt3R-SLAM stopped",
+        inputs=None,
+        outputs=[status_text],
+        api_visibility="private",
     )
-    stop_blur_btn.click(fn=stop_streaming, inputs=[], outputs=[], cancels=[blur_event])
