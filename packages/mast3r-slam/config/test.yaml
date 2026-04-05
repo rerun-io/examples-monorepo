@@ -1,0 +1,60 @@
+# Deterministic test config — same as fast.yaml but single-threaded
+# for reproducible regression testing.
+use_calib: False
+single_thread: True
+dataset:
+  subsample: 5
+  img_downsample: 1
+  center_principle_point: True
+
+matching:
+  max_iter: 10
+  lambda_init: 1e-8
+  convergence_thresh: 1e-6
+  dist_thresh: 1e-1
+  radius: 3
+  dilation_max: 5
+
+tracking:
+  min_match_frac: 0.05
+  max_iters: 50
+  C_conf: 0.0
+  Q_conf: 1.5
+  rel_error: 1e-3
+  delta_norm: 1e-3
+  huber: 1.345
+  match_frac_thresh: 0.333
+  sigma_ray: 0.003
+  sigma_dist: 1e+1
+  sigma_pixel: 1.0
+  sigma_depth: 1e+1
+  sigma_point: 0.05
+  pixel_border: -10
+  depth_eps: 1e-6
+  filtering_mode: weighted_pointmap
+  filtering_score: median
+
+local_opt:
+  pin: 1
+  window_size: 1e+6
+  C_conf: 0.0
+  Q_conf: 1.5
+  min_match_frac: 0.1
+  pixel_border: -10
+  depth_eps: 1e-6
+  max_iters: 10
+  sigma_ray: 0.003
+  sigma_dist: 1e+1
+  sigma_pixel: 1.0
+  sigma_depth: 1e+1
+  sigma_point: 0.05
+  delta_norm: 1e-8
+  use_cuda: True
+
+retrieval:
+  k: 3
+  min_thresh: 5e-3
+
+reloc:
+  min_match_frac: 0.3
+  strict: True

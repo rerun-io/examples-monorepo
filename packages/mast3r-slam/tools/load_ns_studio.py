@@ -1,4 +1,4 @@
-from mast3r_slam.api.inference import NerfstudioData
+from mast3r_slam.nerfstudio_utils import NerfstudioData
 from serde.json import from_json
 from pathlib import Path
 from dataclasses import dataclass

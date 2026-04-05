@@ -745,6 +745,17 @@ cwd = "packages/mast3r-slam"
 outputs = ["packages/mast3r-slam/data/normal-apt-tour.MOV"]
 description = "Download example video data"
 
+# ── Test baseline task ──────────────────────────────────────────────────
+[feature.mast3r-slam.tasks._generate-test-baseline]
+cmd = """python tools/mast3r_slam_inference.py \
+  --dataset data/normal-apt-tour.MOV --img-size 224 \
+  --config config/test.yaml --max-frames 100 --no-viz \
+  --rr-config.save tests/fixtures/baseline_100frames.rrd"""
+depends-on = ["_build-cuda-kernels", "_download-checkpoints", "_download-example-data"]
+cwd = "packages/mast3r-slam"
+description = "Generate baseline .rrd for regression tests (100 frames, deterministic)"
+outputs = ["packages/mast3r-slam/tests/fixtures/baseline_100frames.rrd"]
+
 # ── Demo tasks ───────────────────────────────────────────────────────────
 [feature.mast3r-slam.tasks.example-quick]
 cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.MOV --img-size 224 --config config/fast.yaml --max-frames 100"

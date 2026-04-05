@@ -229,7 +229,6 @@ def streaming_mast3r_slam_fn(*input_params, progress=gr.Progress()):
     pcd = save_kf_to_nerfstudio(
         ns_save_path=video_path.parent / "nerfstudio-output",
         keyframes=keyframes,
-        parent_log_path=parent_log_path,
     )
 
     rr.log(
