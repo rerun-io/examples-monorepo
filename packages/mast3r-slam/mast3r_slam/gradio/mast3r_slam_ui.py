@@ -398,7 +398,6 @@ with gr.Blocks() as mast3r_slam_block:
                 },
                 height=800,
             )
-            viewer.render()
 
     video_file.upload(
         fn=_switch_to_inputs,
