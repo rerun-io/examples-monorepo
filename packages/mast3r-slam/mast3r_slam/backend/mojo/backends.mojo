@@ -258,8 +258,8 @@ def refine_matches_kernel(
                     # SIMD-4 vectorized dot product
                     var k: Int = 0
                     while k + 4 <= fdim:
-                        var v21 = D21.load[width=4, alignment=16](d21_base + k)
-                        var v11 = D11.load[width=4, alignment=16](d11_base + k)
+                        var v21 = D21.load[width=4](d21_base + k)
+                        var v11 = D11.load[width=4](d11_base + k)
                         score += (v21 * v11).reduce_add()
                         k += 4
                     # Scalar remainder
@@ -336,8 +336,8 @@ def refine_matches_kernel_f16(
                     var d11_base: Int = Int(b) * d11_stride_b + v_cand * d11_stride_v + u_cand * fdim
                     var k: Int = 0
                     while k + 8 <= fdim:
-                        var v21 = D21.load[width=8, alignment=16](d21_base + k)
-                        var v11 = D11.load[width=8, alignment=16](d11_base + k)
+                        var v21 = D21.load[width=8](d21_base + k)
+                        var v11 = D11.load[width=8](d11_base + k)
                         score += (v21.cast[DType.float32]() * v11.cast[DType.float32]()).reduce_add()
                         k += 8
                     # Scalar remainder
@@ -403,7 +403,7 @@ def refine_matches_kernel_f16_cached[
     var q_shared_base: Int = Int(thread_idx.x) * CHUNKS
 
     comptime for chunk in range(CHUNKS):
-        q_shared[q_shared_base + chunk] = D21.load[width=8, alignment=16](
+        q_shared[q_shared_base + chunk] = D21.load[width=8](
             d21_base + chunk * 8
         )
     barrier()
@@ -427,7 +427,7 @@ def refine_matches_kernel_f16_cached[
                     var d11_base: Int = Int(b) * d11_stride_b + v_cand * d11_stride_v + u_cand * FDIM
                     comptime for chunk in range(CHUNKS):
                         var q = q_shared[q_shared_base + chunk]
-                        var v11 = D11.load[width=8, alignment=16](
+                        var v11 = D11.load[width=8](
                             d11_base + chunk * 8
                         )
                         score += (
@@ -523,7 +523,7 @@ def iter_proj_py(
         grid_dim=(num_blocks_x, batch),
         block_dim=block_size,
     )
-    # No ctx.synchronize() — let the kernel run async like CUDA.
+    ctx_ptr[].synchronize()
     # PyTorch ops on the same default stream will wait automatically.
 
     return Python.tuple(p_new, converged)
@@ -629,7 +629,7 @@ def refine_matches_py(
             block_dim=block_size,
         )
 
-    # No ctx.synchronize() — let the kernel run async like CUDA.
+    ctx_ptr[].synchronize()
     return Python.tuple(p1_new)
 
 
