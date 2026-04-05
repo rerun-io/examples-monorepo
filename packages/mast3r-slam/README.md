@@ -7,6 +7,10 @@ Uses [Rerun](https://rerun.io/) to visualize, [Gradio](https://www.gradio.app) f
 Based on [rerun-io/mast3r-slam](https://github.com/rerun-io/mast3r-slam).
 
 <p align="center">
+  <img src="media/mast3r-slam.gif" alt="MASt3R-SLAM demo" width="768">
+</p>
+
+<p align="center">
   <a title="Website" href="https://edexheim.github.io/mast3r-slam/" target="_blank" rel="noopener noreferrer" style="display: inline-block;">
       <img src="https://www.obukhov.ai/img/badges/badge-website.svg">
   <a title="arXiv" href="https://arxiv.org/abs/2412.12392" target="_blank" rel="noopener noreferrer" style="display: inline-block;">
