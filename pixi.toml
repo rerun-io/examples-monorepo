@@ -699,18 +699,31 @@ TORCH_CUDA_ARCH_LIST = "7.5 8.0 8.6 8.9 9.0 12.0"
 
 # ── Build tasks (CUDA extensions compiled via setuptools, no pip) ────────
 [feature.mast3r-slam.tasks._build-cuda-kernels]
-cmd = """
-python -c "import lietorch_backends; import mast3r_slam_backends" 2>/dev/null \
-|| (cd thirdparty/lietorch && python setup.py build_ext --inplace && cd ../.. && python setup.py build_ext --inplace)
-"""
+cmd = "cd thirdparty/lietorch && python setup.py build_ext --inplace && cd ../.. && python setup.py build_ext --inplace"
 cwd = "packages/mast3r-slam"
 description = "Build mast3r-slam CUDA backend kernels"
+inputs = [
+    "packages/mast3r-slam/setup.py",
+    "packages/mast3r-slam/mast3r_slam/backend/src/*.cpp",
+    "packages/mast3r-slam/mast3r_slam/backend/src/*.cu",
+    "packages/mast3r-slam/mast3r_slam/backend/include/*.h",
+    "packages/mast3r-slam/thirdparty/lietorch/setup.py",
+    "packages/mast3r-slam/thirdparty/lietorch/lietorch/src/*.cpp",
+    "packages/mast3r-slam/thirdparty/lietorch/lietorch/src/*.cu",
+    "packages/mast3r-slam/thirdparty/lietorch/lietorch/extras/*.cu",
+    "packages/mast3r-slam/thirdparty/lietorch/lietorch/extras/*.cpp",
+    "packages/mast3r-slam/thirdparty/lietorch/lietorch/include/*.h",
+]
+outputs = [
+    "packages/mast3r-slam/mast3r_slam_backends*.so",
+    "packages/mast3r-slam/thirdparty/lietorch/lietorch_backends*.so",
+    "packages/mast3r-slam/thirdparty/lietorch/lietorch_extras*.so",
+]
 
 # ── Download tasks (hidden, used as depends-on) ─────────────────────────
 [feature.mast3r-slam.tasks._download-checkpoints]
 cmd = """
-test -e checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth \
-|| hf download pablovela5620/mast3r-slam \
+hf download pablovela5620/mast3r-slam \
     MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth \
     MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_codebook.pkl \
     MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric_retrieval_trainingfree.pth \
@@ -718,13 +731,12 @@ test -e checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth \
 """
 cwd = "packages/mast3r-slam"
 description = "Download MASt3R-SLAM model checkpoints"
+outputs = [
+    "packages/mast3r-slam/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth",
+]
 
 [feature.mast3r-slam.tasks._download-example-data]
-cmd = """
-test -e data/normal-apt-tour.MOV \
-|| hf download pablovela5620/mast3r-slam-example-data \
-    normal-apt-tour.MOV --repo-type dataset --local-dir data/
-"""
+cmd = "hf download pablovela5620/mast3r-slam-example-data normal-apt-tour.MOV --repo-type dataset --local-dir data/"
 cwd = "packages/mast3r-slam"
 outputs = ["packages/mast3r-slam/data/normal-apt-tour.MOV"]
 description = "Download example video data"
