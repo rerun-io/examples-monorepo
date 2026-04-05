@@ -523,7 +523,9 @@ def iter_proj_py(
         grid_dim=(num_blocks_x, batch),
         block_dim=block_size,
     )
-    ctx_ptr[].synchronize()
+    # Device-wide sync to ensure Mojo's kernel completes before PyTorch's
+    # caching allocator can recycle the output buffer on a subsequent call.
+    Python.import_module("torch").cuda.synchronize()
     # PyTorch ops on the same default stream will wait automatically.
 
     return Python.tuple(p_new, converged)
@@ -629,7 +631,9 @@ def refine_matches_py(
             block_dim=block_size,
         )
 
-    ctx_ptr[].synchronize()
+    # Device-wide sync to ensure Mojo's kernel completes before PyTorch's
+    # caching allocator can recycle the output buffer on a subsequent call.
+    Python.import_module("torch").cuda.synchronize()
     return Python.tuple(p1_new)
 
 
