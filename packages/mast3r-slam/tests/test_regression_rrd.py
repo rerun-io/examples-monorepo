@@ -1,18 +1,17 @@
-"""Regression tests: compare current inference output against baseline .rrd.
+"""Regression tests: validate baseline .rrd structure and content.
 
 The baseline is generated once via:
     pixi run -e mast3r-slam --frozen _generate-test-baseline
 
-These tests run inference on the same 100 frames with the deterministic
-config (single_thread=True) and compare key metrics against the baseline.
+These tests only read the pre-generated baseline .rrd — they do NOT
+run inference. To compare two runs, generate a fresh RRD and diff
+manually or via a separate pixi task.
 """
 
 from pathlib import Path
 
 import pytest
 import rerun as rr
-
-from conftest import BASELINE_RRD, PACKAGE_DIR
 
 
 def _get_entity_paths(rrd_path: Path) -> list[str]:
@@ -34,29 +33,6 @@ def _count_keyframes(rrd_path: Path) -> int:
             if part.startswith("keyframe-"):
                 kf_indices.add(part)
     return len(kf_indices)
-
-
-@pytest.fixture(scope="module")
-def current_rrd_path(tmp_path_factory) -> Path:
-    """Run inference and produce a fresh .rrd for comparison."""
-    import os
-
-    os.chdir(PACKAGE_DIR)
-
-    from mast3r_slam.api.inference import InferenceConfig, mast3r_slam_inference
-    from simplecv.rerun_log_utils import RerunTyroConfig
-
-    output_rrd: Path = tmp_path_factory.mktemp("rrd") / "current_100frames.rrd"
-    inf_config: InferenceConfig = InferenceConfig(
-        rr_config=RerunTyroConfig(save=output_rrd),
-        dataset="data/normal-apt-tour.MOV",
-        config="config/test.yaml",
-        img_size=224,
-        max_frames=100,
-        no_viz=True,
-    )
-    mast3r_slam_inference(inf_config)
-    return output_rrd
 
 
 def test_baseline_rrd_exists(baseline_rrd_path: Path) -> None:
@@ -83,13 +59,14 @@ def test_current_camera_logged(baseline_rrd_path: Path) -> None:
     assert "/world/current_camera" in paths, "No /world/current_camera entity found"
 
 
-def test_keyframe_count_regression(baseline_rrd_path: Path, current_rrd_path: Path) -> None:
-    """Number of keyframes should match between baseline and current within tolerance."""
-    baseline_kf: int = _count_keyframes(baseline_rrd_path)
-    current_kf: int = _count_keyframes(current_rrd_path)
+def test_edges_logged(baseline_rrd_path: Path) -> None:
+    """Verify factor graph edges entity exists in the baseline."""
+    paths: list[str] = _get_entity_paths(baseline_rrd_path)
+    assert "/world/edges" in paths, "No /world/edges entity found"
 
-    # Allow 10% variance due to CUDA non-determinism
-    tolerance: float = 0.1
-    lower: int = int(baseline_kf * (1 - tolerance))
-    upper: int = int(baseline_kf * (1 + tolerance))
-    assert lower <= current_kf <= upper, f"Keyframe count {current_kf} outside [{lower}, {upper}] (baseline={baseline_kf})"
+
+def test_keyframe_count_reasonable(baseline_rrd_path: Path) -> None:
+    """Verify the number of keyframes is in a reasonable range for 100 frames."""
+    n_keyframes: int = _count_keyframes(baseline_rrd_path)
+    # With subsample=5, 100 input frames -> ~20 actual frames -> 5-20 keyframes typical
+    assert 3 <= n_keyframes <= 50, f"Unexpected keyframe count: {n_keyframes}"

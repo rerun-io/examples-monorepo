@@ -1,5 +1,8 @@
+import lietorch
 import torch
-from mast3r_slam.frame import Frame
+from jaxtyping import Float, Bool
+
+from mast3r_slam.frame import Frame, SharedKeyframes
 from mast3r_slam.geometry import (
     act_Sim3,
     point_to_ray_dist,
@@ -13,20 +16,43 @@ from mast3r_slam.mast3r_utils import mast3r_match_asymmetric
 
 
 class FrameTracker:
-    def __init__(self, model, frames, device):
-        self.cfg = config["tracking"]
-        self.model = model
-        self.keyframes = frames
-        self.device = device
+    """Tracks the pose of incoming frames against the most recent keyframe.
+
+    Uses iterative Gauss-Newton optimisation on either ray-distance or
+    calibrated reprojection residuals.
+    """
+
+    def __init__(
+        self,
+        model: object,
+        frames: SharedKeyframes,
+        device: str,
+    ) -> None:
+        self.cfg: dict = config["tracking"]
+        self.model: object = model
+        self.keyframes: SharedKeyframes = frames
+        self.device: str = device
 
         self.reset_idx_f2k()
 
     # Initialize with identity indexing of size (1,n)
-    def reset_idx_f2k(self):
-        self.idx_f2k = None
+    def reset_idx_f2k(self) -> None:
+        """Reset the frame-to-keyframe correspondence cache to identity."""
+        self.idx_f2k: torch.Tensor | None = None
 
-    def track(self, frame: Frame):
-        keyframe = self.keyframes.last_keyframe()
+    def track(self, frame: Frame) -> tuple[bool, list, bool]:
+        """Track the frame pose against the last keyframe.
+
+        Args:
+            frame: The current Frame to track; its ``T_WC`` is updated in place.
+
+        Returns:
+            A tuple of (new_kf, match_info, try_reloc) where new_kf is True
+            when a new keyframe should be created, match_info contains
+            diagnostic tensors, and try_reloc is True when relocalization
+            should be attempted.
+        """
+        keyframe: Frame = self.keyframes.last_keyframe()
 
         idx_f2k, valid_match_k, Xff, Cff, Qff, Xkf, Ckf, Qkf = mast3r_match_asymmetric(
             self.model, frame, keyframe, idx_i2j_init=self.idx_f2k
@@ -38,33 +64,42 @@ class FrameTracker:
         idx_f2k = idx_f2k[0]
         valid_match_k = valid_match_k[0]
 
-        Qk = torch.sqrt(Qff[idx_f2k] * Qkf)
+        Qk: Float[torch.Tensor, "hw 1"] = torch.sqrt(Qff[idx_f2k] * Qkf)
 
         # Update keyframe pointmap after registration (need pose)
         frame.update_pointmap(Xff, Cff)
 
-        use_calib = config["use_calib"]
-        img_size = frame.img.shape[-2:]
+        use_calib: bool = config["use_calib"]
+        img_size: tuple[int, int] = frame.img.shape[-2:]
+        K: Float[torch.Tensor, "3 3"] | None
         if use_calib:
             K = keyframe.K
         else:
             K = None
 
         # Get poses and point correspondneces and confidences
+        Xf: Float[torch.Tensor, "hw 3"]
+        Xk: Float[torch.Tensor, "hw 3"]
+        T_WCf: lietorch.Sim3
+        T_WCk: lietorch.Sim3
+        Cf: Float[torch.Tensor, "hw 1"]
+        Ck: Float[torch.Tensor, "hw 1"]
+        meas_k: Float[torch.Tensor, "hw 3"] | None
+        valid_meas_k: Bool[torch.Tensor, "hw 1"] | None
         Xf, Xk, T_WCf, T_WCk, Cf, Ck, meas_k, valid_meas_k = self.get_points_poses(
             frame, keyframe, idx_f2k, img_size, use_calib, K
         )
 
         # Get valid
         # Use canonical confidence average
-        valid_Cf = Cf > self.cfg["C_conf"]
-        valid_Ck = Ck > self.cfg["C_conf"]
-        valid_Q = Qk > self.cfg["Q_conf"]
+        valid_Cf: Bool[torch.Tensor, "hw 1"] = Cf > self.cfg["C_conf"]
+        valid_Ck: Bool[torch.Tensor, "hw 1"] = Ck > self.cfg["C_conf"]
+        valid_Q: Bool[torch.Tensor, "hw 1"] = Qk > self.cfg["Q_conf"]
 
-        valid_opt = valid_match_k & valid_Cf & valid_Ck & valid_Q
-        valid_kf = valid_match_k & valid_Q
+        valid_opt: Bool[torch.Tensor, "hw 1"] = valid_match_k & valid_Cf & valid_Ck & valid_Q
+        valid_kf: Bool[torch.Tensor, "hw 1"] = valid_match_k & valid_Q
 
-        match_frac = valid_opt.sum() / valid_opt.numel()
+        match_frac: Float[torch.Tensor, ""] = valid_opt.sum() / valid_opt.numel()
         if match_frac < self.cfg["min_match_frac"]:
             print(f"Skipped frame {frame.frame_id}")
             return False, [], True
@@ -95,19 +130,19 @@ class FrameTracker:
         frame.T_WC = T_WCf
 
         # Use pose to transform points to update keyframe
-        Xkk = T_CkCf.act(Xkf)
+        Xkk: Float[torch.Tensor, "hw 3"] = T_CkCf.act(Xkf)
         keyframe.update_pointmap(Xkk, Ckf)
         # write back the fitered pointmap
         self.keyframes[len(self.keyframes) - 1] = keyframe
 
         # Keyframe selection
-        n_valid = valid_kf.sum()
-        match_frac_k = n_valid / valid_kf.numel()
-        unique_frac_f = (
+        n_valid: int = valid_kf.sum()
+        match_frac_k: Float[torch.Tensor, ""] = n_valid / valid_kf.numel()
+        unique_frac_f: float = (
             torch.unique(idx_f2k[valid_match_k[:, 0]]).shape[0] / valid_kf.numel()
         )
 
-        new_kf = min(match_frac_k, unique_frac_f) < self.cfg["match_frac_thresh"]
+        new_kf: bool = bool(min(match_frac_k, unique_frac_f) < self.cfg["match_frac_thresh"])
 
         # Rest idx if new keyframe
         if new_kf:
@@ -126,25 +161,55 @@ class FrameTracker:
             False,
         )
 
-    def get_points_poses(self, frame, keyframe, idx_f2k, img_size, use_calib, K=None):
-        Xf = frame.X_canon
-        Xk = keyframe.X_canon
-        T_WCf = frame.T_WC
-        T_WCk = keyframe.T_WC
+    def get_points_poses(
+        self,
+        frame: Frame,
+        keyframe: Frame,
+        idx_f2k: torch.Tensor,
+        img_size: tuple[int, int],
+        use_calib: bool,
+        K: Float[torch.Tensor, "3 3"] | None = None,
+    ) -> tuple[
+        Float[torch.Tensor, "hw 3"],
+        Float[torch.Tensor, "hw 3"],
+        lietorch.Sim3,
+        lietorch.Sim3,
+        Float[torch.Tensor, "hw 1"],
+        Float[torch.Tensor, "hw 1"],
+        Float[torch.Tensor, "hw 3"] | None,
+        Bool[torch.Tensor, "hw 1"] | None,
+    ]:
+        """Extract matched points, poses, confidences, and optional pixel measurements.
+
+        Args:
+            frame: The current tracked frame.
+            keyframe: The reference keyframe.
+            idx_f2k: Linear correspondence indices from frame pixels to keyframe pixels.
+            img_size: (height, width) of the image.
+            use_calib: Whether calibrated mode is active.
+            K: 3x3 intrinsic matrix (only used when ``use_calib`` is True).
+
+        Returns:
+            A tuple of (Xf, Xk, T_WCf, T_WCk, Cf, Ck, meas_k, valid_meas_k).
+        """
+        Xf: Float[torch.Tensor, "hw 3"] = frame.X_canon
+        Xk: Float[torch.Tensor, "hw 3"] = keyframe.X_canon
+        T_WCf: lietorch.Sim3 = frame.T_WC
+        T_WCk: lietorch.Sim3 = keyframe.T_WC
 
         # Average confidence
-        Cf = frame.get_average_conf()
-        Ck = keyframe.get_average_conf()
+        Cf: Float[torch.Tensor, "hw 1"] = frame.get_average_conf()
+        Ck: Float[torch.Tensor, "hw 1"] = keyframe.get_average_conf()
 
-        meas_k = None
-        valid_meas_k = None
+        meas_k: Float[torch.Tensor, "hw 3"] | None = None
+        valid_meas_k: Bool[torch.Tensor, "hw 1"] | None = None
 
         if use_calib:
             Xf = constrain_points_to_ray(img_size, Xf[None], K).squeeze(0)
             Xk = constrain_points_to_ray(img_size, Xk[None], K).squeeze(0)
 
             # Setup pixel coordinates
-            uv_k = get_pixel_coords(1, img_size, device=Xf.device, dtype=Xf.dtype)
+            uv_k: Float[torch.Tensor, "hw 2"] = get_pixel_coords(1, img_size, device=Xf.device, dtype=Xf.dtype)
             uv_k = uv_k.view(-1, 2)
             meas_k = torch.cat((uv_k, torch.log(Xk[..., 2:3])), dim=-1)
             # Avoid any bad calcs in log
@@ -153,44 +218,88 @@ class FrameTracker:
 
         return Xf[idx_f2k], Xk, T_WCf, T_WCk, Cf[idx_f2k], Ck, meas_k, valid_meas_k
 
-    def solve(self, sqrt_info, r, J):
-        whitened_r = sqrt_info * r
-        robust_sqrt_info = sqrt_info * torch.sqrt(
+    def solve(
+        self,
+        sqrt_info: Float[torch.Tensor, "n r"],
+        r: Float[torch.Tensor, "n r"],
+        J: Float[torch.Tensor, "n r m"],
+    ) -> tuple[Float[torch.Tensor, "1 m"], float]:
+        """Solve one Gauss-Newton step with Huber-weighted residuals.
+
+        Args:
+            sqrt_info: Square-root information (weighting) matrix diagonal.
+            r: Residual vector.
+            J: Jacobian of residuals w.r.t. the state.
+
+        Returns:
+            A tuple of (tau_j, cost) where tau_j is the update step and
+            cost is the weighted squared cost.
+        """
+        whitened_r: Float[torch.Tensor, "n r"] = sqrt_info * r
+        robust_sqrt_info: Float[torch.Tensor, "n r"] = sqrt_info * torch.sqrt(
             huber(whitened_r, k=self.cfg["huber"])
         )
-        mdim = J.shape[-1]
-        A = (robust_sqrt_info[..., None] * J).view(-1, mdim)  # dr_dX
-        b = (robust_sqrt_info * r).view(-1, 1)  # z-h
-        H = A.T @ A
-        g = -A.T @ b
-        cost = 0.5 * (b.T @ b).item()
+        mdim: int = J.shape[-1]
+        A: Float[torch.Tensor, "N m"] = (robust_sqrt_info[..., None] * J).view(-1, mdim)  # dr_dX
+        b: Float[torch.Tensor, "N 1"] = (robust_sqrt_info * r).view(-1, 1)  # z-h
+        H: Float[torch.Tensor, "m m"] = A.T @ A
+        g: Float[torch.Tensor, "m 1"] = -A.T @ b
+        cost: float = 0.5 * (b.T @ b).item()
 
-        L = torch.linalg.cholesky(H, upper=False)
-        tau_j = torch.cholesky_solve(g, L, upper=False).view(1, -1)
+        L: Float[torch.Tensor, "m m"] = torch.linalg.cholesky(H, upper=False)
+        tau_j: Float[torch.Tensor, "1 m"] = torch.cholesky_solve(g, L, upper=False).view(1, -1)
 
         return tau_j, cost
 
-    def opt_pose_ray_dist_sim3(self, Xf, Xk, T_WCf, T_WCk, Qk, valid):
-        last_error = 0
-        sqrt_info_ray = 1 / self.cfg["sigma_ray"] * valid * torch.sqrt(Qk)
-        sqrt_info_dist = 1 / self.cfg["sigma_dist"] * valid * torch.sqrt(Qk)
-        sqrt_info = torch.cat((sqrt_info_ray.repeat(1, 3), sqrt_info_dist), dim=1)
+    def opt_pose_ray_dist_sim3(
+        self,
+        Xf: Float[torch.Tensor, "hw 3"],
+        Xk: Float[torch.Tensor, "hw 3"],
+        T_WCf: lietorch.Sim3,
+        T_WCk: lietorch.Sim3,
+        Qk: Float[torch.Tensor, "hw 1"],
+        valid: Bool[torch.Tensor, "hw 1"],
+    ) -> tuple[lietorch.Sim3, lietorch.Sim3]:
+        """Optimise the relative Sim3 pose using ray-distance residuals.
+
+        Args:
+            Xf: Frame points in the frame's canonical coordinate system.
+            Xk: Keyframe points in the keyframe's canonical coordinate system.
+            T_WCf: Current world-from-frame Sim3 pose.
+            T_WCk: World-from-keyframe Sim3 pose.
+            Qk: Matching quality weights.
+            valid: Boolean validity mask.
+
+        Returns:
+            A tuple of (T_WCf, T_CkCf) with the updated world-from-frame
+            pose and the optimised relative pose.
+        """
+        last_error: float = 0
+        sqrt_info_ray: Float[torch.Tensor, "hw 1"] = 1 / self.cfg["sigma_ray"] * valid * torch.sqrt(Qk)
+        sqrt_info_dist: Float[torch.Tensor, "hw 1"] = 1 / self.cfg["sigma_dist"] * valid * torch.sqrt(Qk)
+        sqrt_info: Float[torch.Tensor, "hw 4"] = torch.cat((sqrt_info_ray.repeat(1, 3), sqrt_info_dist), dim=1)
 
         # Solving for relative pose without scale!
-        T_CkCf = T_WCk.inv() * T_WCf
+        T_CkCf: lietorch.Sim3 = T_WCk.inv() * T_WCf
 
         # Precalculate distance and ray for obs k
-        rd_k = point_to_ray_dist(Xk, jacobian=False)
+        rd_k: Float[torch.Tensor, "hw 4"] = point_to_ray_dist(Xk, jacobian=False)
 
-        old_cost = float("inf")
+        old_cost: float = float("inf")
         for step in range(self.cfg["max_iters"]):
+            Xf_Ck: Float[torch.Tensor, "hw 3"]
+            dXf_Ck_dT_CkCf: Float[torch.Tensor, "hw 3 7"]
             Xf_Ck, dXf_Ck_dT_CkCf = act_Sim3(T_CkCf, Xf, jacobian=True)
+            rd_f_Ck: Float[torch.Tensor, "hw 4"]
+            drd_f_Ck_dXf_Ck: Float[torch.Tensor, "hw 4 3"]
             rd_f_Ck, drd_f_Ck_dXf_Ck = point_to_ray_dist(Xf_Ck, jacobian=True)
             # r = z-h(x)
-            r = rd_k - rd_f_Ck
+            r: Float[torch.Tensor, "hw 4"] = rd_k - rd_f_Ck
             # Jacobian
-            J = -drd_f_Ck_dXf_Ck @ dXf_Ck_dT_CkCf
+            J: Float[torch.Tensor, "hw 4 7"] = -drd_f_Ck_dXf_Ck @ dXf_Ck_dT_CkCf
 
+            tau_ij_sim3: Float[torch.Tensor, "1 7"]
+            new_cost: float
             tau_ij_sim3, new_cost = self.solve(sqrt_info, r, J)
             T_CkCf = T_CkCf.retr(tau_ij_sim3)
 
@@ -214,19 +323,52 @@ class FrameTracker:
         return T_WCf, T_CkCf
 
     def opt_pose_calib_sim3(
-        self, Xf, Xk, T_WCf, T_WCk, Qk, valid, meas_k, valid_meas_k, K, img_size
-    ):
-        last_error = 0
-        sqrt_info_pixel = 1 / self.cfg["sigma_pixel"] * valid * torch.sqrt(Qk)
-        sqrt_info_depth = 1 / self.cfg["sigma_depth"] * valid * torch.sqrt(Qk)
-        sqrt_info = torch.cat((sqrt_info_pixel.repeat(1, 2), sqrt_info_depth), dim=1)
+        self,
+        Xf: Float[torch.Tensor, "hw 3"],
+        Xk: Float[torch.Tensor, "hw 3"],
+        T_WCf: lietorch.Sim3,
+        T_WCk: lietorch.Sim3,
+        Qk: Float[torch.Tensor, "hw 1"],
+        valid: Bool[torch.Tensor, "hw 1"],
+        meas_k: Float[torch.Tensor, "hw 3"],
+        valid_meas_k: Bool[torch.Tensor, "hw 1"],
+        K: Float[torch.Tensor, "3 3"],
+        img_size: tuple[int, int],
+    ) -> tuple[lietorch.Sim3, lietorch.Sim3]:
+        """Optimise the relative Sim3 pose using calibrated reprojection residuals.
+
+        Args:
+            Xf: Frame points in frame canonical coordinates.
+            Xk: Keyframe points in keyframe canonical coordinates.
+            T_WCf: Current world-from-frame Sim3 pose.
+            T_WCk: World-from-keyframe Sim3 pose.
+            Qk: Matching quality weights.
+            valid: Boolean validity mask.
+            meas_k: Keyframe measurements (u, v, log_z).
+            valid_meas_k: Validity mask for the keyframe measurements.
+            K: 3x3 camera intrinsic matrix.
+            img_size: (height, width) of the image.
+
+        Returns:
+            A tuple of (T_WCf, T_CkCf) with the updated world-from-frame
+            pose and the optimised relative pose.
+        """
+        last_error: float = 0
+        sqrt_info_pixel: Float[torch.Tensor, "hw 1"] = 1 / self.cfg["sigma_pixel"] * valid * torch.sqrt(Qk)
+        sqrt_info_depth: Float[torch.Tensor, "hw 1"] = 1 / self.cfg["sigma_depth"] * valid * torch.sqrt(Qk)
+        sqrt_info: Float[torch.Tensor, "hw 3"] = torch.cat((sqrt_info_pixel.repeat(1, 2), sqrt_info_depth), dim=1)
 
         # Solving for relative pose without scale!
-        T_CkCf = T_WCk.inv() * T_WCf
+        T_CkCf: lietorch.Sim3 = T_WCk.inv() * T_WCf
 
-        old_cost = float("inf")
+        old_cost: float = float("inf")
         for step in range(self.cfg["max_iters"]):
+            Xf_Ck: Float[torch.Tensor, "hw 3"]
+            dXf_Ck_dT_CkCf: Float[torch.Tensor, "hw 3 7"]
             Xf_Ck, dXf_Ck_dT_CkCf = act_Sim3(T_CkCf, Xf, jacobian=True)
+            pzf_Ck: Float[torch.Tensor, "hw 3"]
+            dpzf_Ck_dXf_Ck: Float[torch.Tensor, "hw 3 3"]
+            valid_proj: Bool[torch.Tensor, "hw 1"]
             pzf_Ck, dpzf_Ck_dXf_Ck, valid_proj = project_calib(
                 Xf_Ck,
                 K,
@@ -235,14 +377,16 @@ class FrameTracker:
                 border=self.cfg["pixel_border"],
                 z_eps=self.cfg["depth_eps"],
             )
-            valid2 = valid_proj & valid_meas_k
-            sqrt_info2 = valid2 * sqrt_info
+            valid2: Bool[torch.Tensor, "hw 1"] = valid_proj & valid_meas_k
+            sqrt_info2: Float[torch.Tensor, "hw 3"] = valid2 * sqrt_info
 
             # r = z-h(x)
-            r = meas_k - pzf_Ck
+            r: Float[torch.Tensor, "hw 3"] = meas_k - pzf_Ck
             # Jacobian
-            J = -dpzf_Ck_dXf_Ck @ dXf_Ck_dT_CkCf
+            J: Float[torch.Tensor, "hw 3 7"] = -dpzf_Ck_dXf_Ck @ dXf_Ck_dT_CkCf
 
+            tau_ij_sim3: Float[torch.Tensor, "1 7"]
+            new_cost: float
             tau_ij_sim3, new_cost = self.solve(sqrt_info2, r, J)
             T_CkCf = T_CkCf.retr(tau_ij_sim3)
 
