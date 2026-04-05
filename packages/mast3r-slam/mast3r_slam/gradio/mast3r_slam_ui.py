@@ -47,6 +47,25 @@ except RuntimeError:
     pass
 
 
+def _cleanup_active_backend() -> None:
+    global active_backend_process, active_states
+
+    if active_backend_process is not None:
+        active_backend_process.join(timeout=1)
+        if active_backend_process.is_alive():
+            active_backend_process.terminate()
+            active_backend_process.join()
+
+        print("Backend process stopped")
+
+    torch.cuda.empty_cache()
+    gc.collect()
+    print("CUDA memory cleared")
+
+    active_backend_process = None
+    active_states = None
+
+
 def stop_streaming():
     global active_backend_process, active_states
 
@@ -55,25 +74,7 @@ def stop_streaming():
         # Set termination mode
         active_states.set_mode(Mode.TERMINATED)
 
-        # Join the process with timeout to prevent hanging
-        active_backend_process.join(timeout=1)
-
-        # If process is still alive after timeout, terminate it
-        if active_backend_process.is_alive():
-            active_backend_process.terminate()
-            active_backend_process.join()
-
-        print("Backend process stopped")
-
-        # Force CUDA memory cleanup
-        torch.cuda.empty_cache()
-        gc.collect()
-
-        print("CUDA memory cleared")
-
-        # Reset globals
-        active_backend_process = None
-        active_states = None
+        _cleanup_active_backend()
 
     return None
 
@@ -155,10 +156,15 @@ def streaming_mast3r_slam_fn(
 
     i = 0
     fps_timer: float = time.time()
+    stopped_early = False
 
     while True:
         rr.set_time("frame", sequence=i)
         mode: Mode = states.get_mode()
+
+        if mode == Mode.TERMINATED:
+            stopped_early = i < len(dataset)
+            break
 
         if i == len(dataset):
             states.set_mode(Mode.TERMINATED)
@@ -207,7 +213,7 @@ def streaming_mast3r_slam_fn(
                 time.sleep(0.01)
 
         else:
-            raise Exception("Invalid mode")
+            raise RuntimeError(f"Unexpected MASt3R-SLAM mode: {mode}")
 
         if add_new_kf:
             keyframes.append(frame)
@@ -228,6 +234,11 @@ def streaming_mast3r_slam_fn(
         i += 1
 
         yield stream.read(), None, f"Processing frame {i}/{len(dataset)}"
+
+    if stopped_early:
+        _cleanup_active_backend()
+        yield stream.read(), None, "MASt3R-SLAM stopped"
+        return
 
     pcd = save_kf_to_nerfstudio(
         ns_save_path=video_path.parent / "nerfstudio-output",
@@ -260,9 +271,7 @@ def streaming_mast3r_slam_fn(
 
     print("Finished processing")
     yield stream.read(), str(zip_output_path), "MASt3R-SLAM complete"
-    backend.join()
-    # Clean up resources before completing
-    stop_streaming()
+    _cleanup_active_backend()
 
 
 def mov_to_mp4(video_path: Path) -> Path:
@@ -351,9 +360,7 @@ with gr.Blocks() as mast3r_slam_block:
                         label="Input Video",
                         file_types=[".mp4", ".mov", ".MOV"],
                     )
-                    with gr.Row():
-                        run_slam_btn = gr.Button("Run MASt3R-SLAM", variant="primary")
-                        stop_slam_btn = gr.Button("Stop")
+                    run_slam_btn = gr.Button("Run MASt3R-SLAM", variant="primary")
 
                     with gr.Accordion("Config", open=False):
                         subsample_slider = gr.Slider(
@@ -375,6 +382,7 @@ with gr.Blocks() as mast3r_slam_block:
                         value="Upload a video to begin.",
                         interactive=False,
                     )
+                    stop_slam_btn = gr.Button("Stop MASt3R-SLAM")
                     output_zip_file = gr.File(
                         label="Download Nerfstudio Output",
                         file_count="single",
