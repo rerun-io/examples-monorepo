@@ -166,14 +166,12 @@ def get_pixel_coords(
     img_size: tuple[int, int],
     device: torch.device,
     dtype: torch.dtype,
-) -> Float[torch.Tensor, "b h w 2"]:
+) -> torch.Tensor:
     """Generate a (b, h, w, 2) grid of pixel coordinates."""
-    h: int
-    w: int
-    h, w = img_size
-    u: torch.Tensor
-    v: torch.Tensor
-    u, v = torch.meshgrid(torch.arange(w), torch.arange(h), indexing="xy")
-    uv: Float[torch.Tensor, "b h w 2"] = torch.stack((u, v), dim=-1).unsqueeze(0).repeat(b, 1, 1, 1)
+    grid_h: int
+    grid_w: int
+    grid_h, grid_w = img_size
+    u, v = torch.meshgrid(torch.arange(grid_w), torch.arange(grid_h), indexing="xy")
+    uv: torch.Tensor = torch.stack((u, v), dim=-1).unsqueeze(0).repeat(b, 1, 1, 1)
     uv = uv.to(device=device, dtype=dtype)
     return uv

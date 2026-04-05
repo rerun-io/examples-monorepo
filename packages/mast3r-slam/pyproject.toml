@@ -21,6 +21,10 @@ where = ["."]
 include = ["mast3r_slam", "mast3r_slam.*"]
 namespaces = false
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["thirdparty"]
+
 [tool.ruff]
 line-length = 150
 

@@ -18,7 +18,7 @@ def check_convergence(
     rel_dec: float = math.fabs(cost_diff / old_cost)
     delta_norm: Float[torch.Tensor, ""] = torch.linalg.norm(delta)
 
-    converged: bool = rel_dec < rel_error_threshold or delta_norm < delta_norm_threshold
+    converged: bool = rel_dec < rel_error_threshold or bool(delta_norm < delta_norm_threshold)
     if verbose:
         print(f"{iter=} | {new_cost=} {cost_diff=} {rel_dec=} {delta_norm=} | {converged=}")
 
