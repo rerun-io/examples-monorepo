@@ -670,7 +670,6 @@ description = "Benchmark 5 Quest + 5 Aria VRS files (requires download URL JSONs
 [feature.mast3r-slam.dependencies]
 python = "3.11.*"
 eigen = ">=3.4.0,<4"
-pip = ">=25.0.1,<26"
 ffmpeg = ">=7.1.0,<8"
 open3d = ">=0.19.0,<0.20"
 faiss = "*"
@@ -679,6 +678,14 @@ matplotlib = "*"
 trimesh = "*"
 
 [feature.mast3r-slam.pypi-dependencies]
+# All packages resolved by pixi's pypi resolver.
+# CUDA extension setup.py files use lazy torch imports so metadata
+# extraction works without torch; actual compilation happens via
+# _build-cuda-kernels task (python setup.py build_ext --inplace).
+mast3r-slam = { path = "packages/mast3r-slam", editable = true }
+lietorch = { path = "packages/mast3r-slam/thirdparty/lietorch", editable = true }
+mast3r = { path = "packages/mast3r-slam/thirdparty/mast3r", editable = true }
+asmk = { path = "packages/mast3r-slam/thirdparty/mast3r/asmk" }
 einops = ">=0.8.0"
 evo = "*"
 natsort = ">=8.4"
@@ -690,31 +697,14 @@ pyaml = "*"
 PACKAGE_DIR = "packages/mast3r-slam"
 TORCH_CUDA_ARCH_LIST = "7.5 8.0 8.6 8.9 9.0 12.0"
 
-# ── Install tasks (CUDA extensions need pip install inside activated env) ─
-[feature.mast3r-slam.tasks._install-lietorch]
+# ── Build tasks (CUDA extensions compiled via setuptools, no pip) ────────
+[feature.mast3r-slam.tasks._build-cuda-kernels]
 cmd = """
-python -c "import lietorch" 2>/dev/null || python -m pip install --no-build-isolation git+https://github.com/princeton-vl/lietorch.git
+python -c "import lietorch_backends; import mast3r_slam_backends" 2>/dev/null \
+|| (cd thirdparty/lietorch && python setup.py build_ext --inplace && cd ../.. && python setup.py build_ext --inplace)
 """
 cwd = "packages/mast3r-slam"
-description = "Install lietorch (Lie group operations, requires CUDA)"
-
-[feature.mast3r-slam.tasks._install-mast3r]
-cmd = """
-test -d thirdparty/mast3r/MAST3R.egg-info || (
-  python -m pip install --no-deps --no-build-isolation -e thirdparty/mast3r &&
-  python -m pip install --no-deps --no-build-isolation thirdparty/mast3r/asmk
-)
-"""
-cwd = "packages/mast3r-slam"
-description = "Install mast3r thirdparty (with dust3r and asmk; curope optional, falls back to PyTorch)"
-
-[feature.mast3r-slam.tasks._install-mast3r-slam]
-cmd = """
-python -c "import mast3r_slam_backends" 2>/dev/null || python -m pip install --no-build-isolation -e .
-"""
-depends-on = ["_install-lietorch", "_install-mast3r"]
-cwd = "packages/mast3r-slam"
-description = "Build CUDA kernels and install mast3r-slam"
+description = "Build mast3r-slam CUDA backend kernels"
 
 # ── Download tasks (hidden, used as depends-on) ─────────────────────────
 [feature.mast3r-slam.tasks._download-checkpoints]
@@ -742,19 +732,19 @@ description = "Download example video data"
 # ── Demo tasks ───────────────────────────────────────────────────────────
 [feature.mast3r-slam.tasks.example-fast]
 cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.MOV --img-size 224 --config config/fast.yaml"
-depends-on = ["_install-mast3r-slam", "_download-checkpoints", "_download-example-data"]
+depends-on = ["_build-cuda-kernels", "_download-checkpoints", "_download-example-data"]
 cwd = "packages/mast3r-slam"
 description = "Run MASt3R-SLAM inference (fast config, 224px)"
 
 [feature.mast3r-slam.tasks.example-base]
 cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.MOV --img-size 512 --config config/base.yaml"
-depends-on = ["_install-mast3r-slam", "_download-checkpoints", "_download-example-data"]
+depends-on = ["_build-cuda-kernels", "_download-checkpoints", "_download-example-data"]
 cwd = "packages/mast3r-slam"
 description = "Run MASt3R-SLAM inference (base config, 512px)"
 
 [feature.mast3r-slam.tasks.mast3r-slam-app]
 cmd = "python tools/gradio-app.py"
-depends-on = ["_install-mast3r-slam", "_download-checkpoints"]
+depends-on = ["_build-cuda-kernels", "_download-checkpoints"]
 cwd = "packages/mast3r-slam"
 description = "Launch MASt3R-SLAM Gradio web UI"
 
