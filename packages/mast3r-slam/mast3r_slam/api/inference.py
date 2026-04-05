@@ -50,7 +50,7 @@ class InferenceConfig:
 
     rr_config: RerunTyroConfig
     """Rerun recording configuration (save path, application id, etc.)."""
-    dataset: str = "data/normal-apt-tour.MOV"
+    dataset: str = "data/normal-apt-tour.mp4"
     """Path to the input dataset or video file."""
     config: str = "config/base.yaml"
     """Path to the SLAM config YAML file."""

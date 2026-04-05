@@ -380,9 +380,9 @@ with gr.Blocks() as mast3r_slam_block:
                         file_count="single",
                     )
 
-            examples = gr.Examples(
-                examples=[
-                    ["data/normal-apt-tour.MOV"],
+                examples = gr.Examples(
+                    examples=[
+                    ["data/normal-apt-tour.mp4"],
                 ],
                 inputs=[video_file],
                 cache_examples=False,

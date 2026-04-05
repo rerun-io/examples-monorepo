@@ -41,7 +41,7 @@ pixi run -e mast3r-slam --frozen mast3r-slam-app
 ```bash
 cd packages/mast3r-slam
 pixi run -e mast3r-slam --frozen python tools/mast3r_slam_inference.py \
-    --dataset data/normal-apt-tour.MOV --img-size 512 --config config/base.yaml
+    --dataset data/normal-apt-tour.mp4 --img-size 512 --config config/base.yaml
 ```
 
 ## First Run
