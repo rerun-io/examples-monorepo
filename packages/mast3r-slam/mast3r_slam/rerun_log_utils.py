@@ -8,6 +8,7 @@ from mast3r_slam.frame import Frame, SharedKeyframes, SharedStates
 from mast3r_slam.mast3r_utils import estimate_focal_knowing_depth
 import lietorch
 from mast3r_slam.lietorch_utils import as_SE3
+from simplecv.camera_orient_utils import auto_orient_and_center_poses
 from simplecv.ops import conventions
 import rerun.blueprint as rrb
 
@@ -55,6 +56,40 @@ class RerunLogger:
         self.num_keyframes_logged: int = 0
         self.conf_thresh: int = 7
         self.image_plane_distance: float = 0.2
+        self._orient_logged: bool = False
+        """Whether the gravity-alignment transform has been logged."""
+        self._orient_min_keyframes: int = 3
+        """Minimum keyframes needed before computing orientation."""
+
+    def _log_orient_transform(self, keyframes: SharedKeyframes, n_kf: int) -> None:
+        """Compute gravity-alignment from keyframe poses and log as static transform.
+
+        Collects the first ``n_kf`` keyframe world-from-camera poses, converts
+        them to GL convention, runs ``auto_orient_and_center_poses`` with
+        method="up" to align the reconstruction's up-vector with the Y axis,
+        and logs the resulting rotation+translation on ``parent_log_path``.
+        """
+        world_T_cam_gl_list: list[np.ndarray] = []
+        for i in range(n_kf):
+            kf: Frame = keyframes[i]
+            se3: lietorch.SE3 = as_SE3(kf.T_WC.cpu())
+            mat4x4_cv: Float32[np.ndarray, "4 4"] = se3.matrix().numpy().astype(np.float32)[0]
+            mat4x4_gl: Float32[np.ndarray, "4 4"] = conventions.convert_pose(
+                mat4x4_cv, src_convention=conventions.CC.CV, dst_convention=conventions.CC.GL
+            )
+            world_T_cam_gl_list.append(mat4x4_gl)
+
+        world_T_cam_gl: Float32[np.ndarray, "n 4 4"] = np.stack(world_T_cam_gl_list)
+        orient_34: Float32[np.ndarray, "3 4"] = auto_orient_and_center_poses(
+            world_T_cam_gl, method="up", center_method="poses"
+        ).transform
+        orient_R: Float32[np.ndarray, "3 3"] = orient_34[:, :3]
+        orient_t: Float32[np.ndarray, "3"] = orient_34[:, 3]
+        rr.log(
+            f"{self.parent_log_path}",
+            rr.Transform3D(mat3x3=orient_R, translation=orient_t),
+            static=True,
+        )
 
     def log_frame(
         self,
@@ -69,7 +104,13 @@ class RerunLogger:
             keyframes: Shared keyframe buffer.
             states: Shared system state (for edge lists).
         """
-        # Add your rerun logging logic here
+        # Compute and log gravity-alignment transform once we have enough keyframes
+        if not self._orient_logged:
+            with keyframes.lock:
+                n_kf: int = len(keyframes)
+            if n_kf >= self._orient_min_keyframes:
+                self._log_orient_transform(keyframes, n_kf)
+                self._orient_logged = True
         H: int = current_frame.img_shape.squeeze()[0].item()
         W: int = current_frame.img_shape.squeeze()[1].item()
 
