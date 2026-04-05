@@ -12,12 +12,36 @@ from std.math import ceildiv, sqrt, min, max, floor
 from std.sys import has_accelerator
 from std.gpu import global_idx, block_idx, block_dim, thread_idx
 from std.gpu.host import DeviceContext, DeviceBuffer
+from std.memory import alloc
 from std.python import Python, PythonObject
 from std.python.bindings import PythonModuleBuilder
 
-# ─── Constants ────────────────────────────────────────────────────────────────
-comptime BLOCK_ITER_PROJ = 128  # 4 warps — iter_proj is compute-bound, benefits from occupancy
-comptime BLOCK_REFINE = 16     # Half-warp — refine_matches has branch-heavy dilation loops
+# ─── Launch heuristics ────────────────────────────────────────────────────────
+# The CUDA reference uses 16 threads. Mojo benefits from larger blocks on large
+# workloads, but that hurts the smaller 64x64 iter_proj benchmark where wrapper
+# overhead dominates. Pick block sizes per workload instead of forcing a single
+# compile-time choice for every case.
+def choose_iter_proj_block(num_pts: Int) -> Int:
+    if num_pts <= 4096:
+        return 16
+    if num_pts <= 16384:
+        return 64
+    return 128
+
+
+def choose_refine_block(num_pts: Int, fdim: Int) -> Int:
+    if num_pts <= 1024:
+        return 8
+    return 16
+
+
+def get_cached_context_ptr() raises -> UnsafePointer[DeviceContext, MutAnyOrigin]:
+    """Return the process-lifetime DeviceContext storage for this extension."""
+    var module = Python.import_module("mast3r_slam_mojo_backends")
+    var ctx_addr = Int(py=module._ctx_addr)
+    return UnsafePointer[DeviceContext, MutAnyOrigin](
+        unsafe_from_address=ctx_addr
+    )
 
 
 # ─── GPU Kernels ──────────────────────────────────────────────────────────────
@@ -232,8 +256,8 @@ def refine_matches_kernel(
                     # SIMD-4 vectorized dot product
                     var k: Int = 0
                     while k + 4 <= fdim:
-                        var v21 = D21.load[width=4](d21_base + k)
-                        var v11 = D11.load[width=4](d11_base + k)
+                        var v21 = D21.load[width=4, alignment=16](d21_base + k)
+                        var v11 = D11.load[width=4, alignment=16](d11_base + k)
                         score += (v21 * v11).reduce_add()
                         k += 4
                     # Scalar remainder
@@ -310,8 +334,8 @@ def refine_matches_kernel_f16(
                     var d11_base: Int = Int(b) * d11_stride_b + v_cand * d11_stride_v + u_cand * fdim
                     var k: Int = 0
                     while k + 8 <= fdim:
-                        var v21 = D21.load[width=8](d21_base + k)
-                        var v11 = D11.load[width=8](d11_base + k)
+                        var v21 = D21.load[width=8, alignment=16](d21_base + k)
+                        var v11 = D11.load[width=8, alignment=16](d11_base + k)
                         score += (v21.cast[DType.float32]() * v11.cast[DType.float32]()).reduce_add()
                         k += 8
                     # Scalar remainder
@@ -390,9 +414,10 @@ def iter_proj_py(
     var pnew_uptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=pnew_ptr)
     var conv_uptr = UnsafePointer[UInt8, MutAnyOrigin](unsafe_from_address=conv_ptr)
 
-    var ctx = DeviceContext()
-    var num_blocks_x: Int = ceildiv(num_pts, BLOCK_ITER_PROJ)
-    ctx.enqueue_function[iter_proj_kernel, iter_proj_kernel](
+    var ctx_ptr = get_cached_context_ptr()
+    var block_size: Int = choose_iter_proj_block(num_pts)
+    var num_blocks_x: Int = ceildiv(num_pts, block_size)
+    ctx_ptr[].enqueue_function[iter_proj_kernel, iter_proj_kernel](
         rays_uptr,
         pts_uptr,
         pinit_uptr,
@@ -405,7 +430,7 @@ def iter_proj_py(
         Float32(lambda_init),
         Float32(cost_thresh),
         grid_dim=(num_blocks_x, batch),
-        block_dim=BLOCK_ITER_PROJ,
+        block_dim=block_size,
     )
     # No ctx.synchronize() — let the kernel run async like CUDA.
     # PyTorch ops on the same default stream will wait automatically.
@@ -446,8 +471,9 @@ def refine_matches_py(
     var p1_uptr = UnsafePointer[Int64, MutAnyOrigin](unsafe_from_address=p1_ptr)
     var p1_new_uptr = UnsafePointer[Int64, MutAnyOrigin](unsafe_from_address=p1_new_ptr)
 
-    var ctx = DeviceContext()
-    var num_blocks_x: Int = ceildiv(num_pts, BLOCK_REFINE)
+    var ctx_ptr = get_cached_context_ptr()
+    var block_size: Int = choose_refine_block(num_pts, fdim)
+    var num_blocks_x: Int = ceildiv(num_pts, block_size)
 
     # Dispatch float16 vs float32 to avoid half→float copy overhead (~7 µs)
     var is_half: Bool = Bool(D11_obj.dtype == torch.float16)
@@ -460,14 +486,14 @@ def refine_matches_py(
         var d11_uptr = UnsafePointer[Float16, MutAnyOrigin](unsafe_from_address=d11_ptr)
         var d21_uptr = UnsafePointer[Float16, MutAnyOrigin](unsafe_from_address=d21_ptr)
 
-        ctx.enqueue_function[refine_matches_kernel_f16, refine_matches_kernel_f16](
+        ctx_ptr[].enqueue_function[refine_matches_kernel_f16, refine_matches_kernel_f16](
             d11_uptr,
             d21_uptr,
             p1_uptr,
             p1_new_uptr,
             h, w, num_pts, fdim, radius, dilation_max,
             grid_dim=(num_blocks_x, batch),
-            block_dim=BLOCK_REFINE,
+            block_dim=block_size,
         )
     else:
         var D11: PythonObject = D11_obj.contiguous().float()
@@ -477,14 +503,14 @@ def refine_matches_py(
         var d11_uptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=d11_ptr)
         var d21_uptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=d21_ptr)
 
-        ctx.enqueue_function[refine_matches_kernel, refine_matches_kernel](
+        ctx_ptr[].enqueue_function[refine_matches_kernel, refine_matches_kernel](
             d11_uptr,
             d21_uptr,
             p1_uptr,
             p1_new_uptr,
             h, w, num_pts, fdim, radius, dilation_max,
             grid_dim=(num_blocks_x, batch),
-            block_dim=BLOCK_REFINE,
+            block_dim=block_size,
         )
 
     # No ctx.synchronize() — let the kernel run async like CUDA.
@@ -499,6 +525,14 @@ def PyInit_mast3r_slam_mojo_backends() -> PythonObject:
         var m = PythonModuleBuilder("mast3r_slam_mojo_backends")
         m.def_function[iter_proj_py]("iter_proj")
         m.def_function[refine_matches_py]("refine_matches")
-        return m.finalize()
+        var module = m.finalize()
+
+        # Keep one owning DeviceContext alive for the life of the extension so
+        # wrappers can reuse it instead of constructing a fresh context per call.
+        var ctx_storage = alloc[DeviceContext](1)
+        var cached_ctx = DeviceContext()
+        ctx_storage.init_pointee_move(cached_ctx^)
+        Python.add_object(module, "_ctx_addr", PythonObject(Int(ctx_storage)))
+        return module
     except e:
         abort(String("Failed to create mast3r_slam_mojo_backends module: ", e))
