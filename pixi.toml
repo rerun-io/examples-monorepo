@@ -725,7 +725,7 @@ outputs = [
 cmd = """
 mojo build --emit shared-lib \
   -o mast3r_slam_mojo_backends.so \
-  mast3r_slam/backend/mojo/backends.mojo
+  mast3r_slam/backend/mojo/matching_kernels.mojo
 """
 cwd = "packages/mast3r-slam"
 description = "Build mast3r-slam Mojo backend kernels"

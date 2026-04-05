@@ -4,7 +4,7 @@ Provides `iter_proj` and `refine_matches` as drop-in replacements
 for the CUDA implementations in mast3r_slam_backends.
 
 Build: mojo build --emit shared-lib -o mast3r_slam_mojo_backends.so \
-           mast3r_slam/backend/mojo/backends.mojo
+           mast3r_slam/backend/mojo/matching_kernels.mojo
 """
 
 from std.os import abort

@@ -27,7 +27,7 @@ Gauss-Newton solvers which have not been ported to Mojo.
 cd packages/mast3r-slam
 pixi run -e mast3r-slam-dev mojo build --emit shared-lib \
   -o mast3r_slam_mojo_backends.so \
-  mast3r_slam/backend/mojo/backends.mojo
+  mast3r_slam/backend/mojo/matching_kernels.mojo
 ```
 
 **Test command (24 collected pytest cases from 15 test functions):**
@@ -239,7 +239,7 @@ The Hypothesis property-based fuzz tests (50 random examples per test, randomizi
 
 | File | Purpose |
 |------|---------|
-| `mast3r_slam/backend/mojo/backends.mojo` | All Mojo code — kernels + Python extension |
+| `mast3r_slam/backend/mojo/matching_kernels.mojo` | All Mojo code — kernels + Python extension |
 | `mast3r_slam/backend/mojo/OPTIMIZATION_GUIDE.md` | This document |
 | `tests/test_mojo_vs_cuda.py` | 15 test functions expanded to 24 collected pytest cases |
 | `tools/bench_matching_kernels.py` | Side-by-side CUDA vs Mojo benchmark (500 runs, median) |
