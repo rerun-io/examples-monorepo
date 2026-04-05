@@ -22,7 +22,13 @@ Note: global_opt.py still imports mast3r_slam_backends directly for the
 Gauss-Newton solvers which have not been ported to Mojo.
 ```
 
-**Build command:**
+**Build command (current repo workflow):**
+```bash
+cd packages/mast3r-slam
+pixi run -e mast3r-slam-dev _build-mojo-kernels
+```
+
+**Equivalent direct Mojo invocation:**
 ```bash
 cd packages/mast3r-slam
 pixi run -e mast3r-slam-dev mojo build --emit shared-lib \
@@ -39,6 +45,8 @@ pixi run -e mast3r-slam-dev python -m pytest tests/test_mojo_vs_cuda.py -v -s
 ```bash
 PYTHONPATH=. pixi run -e mast3r-slam-dev python tools/bench_matching_kernels.py
 ```
+
+**Task wiring note:** the `mast3r-slam` Pixi baseline/example/app tasks now depend on both `_build-cuda-kernels` and `_build-mojo-kernels`, so the Mojo shared library is built automatically before those entrypoints run. The CUDA build is still required because `global_opt.py` still uses `mast3r_slam_backends`.
 
 ## Current Performance (RTX 5090, median of 500 runs, verified 2026-04-05)
 
@@ -246,7 +254,7 @@ The Hypothesis property-based fuzz tests (50 random examples per test, randomizi
 | `mast3r_slam/matching.py` | Production code — tries Mojo first, falls back to CUDA |
 | `mast3r_slam/backend/src/matching_kernels.cu` | CUDA oracle (DO NOT MODIFY) |
 | `mast3r_slam/backend/src/gn_kernels.cu` | GN CUDA kernels (not yet ported to Mojo) |
-| `pixi.toml` (root) | `mojo` dep + Modular channel in `mast3r-slam` feature |
+| `pixi.toml` (root) | `mojo` dep + Modular channel + cached `_build-mojo-kernels` task and task dependencies |
 
 ## Mojo API Gotchas
 
