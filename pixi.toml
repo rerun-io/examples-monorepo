@@ -668,6 +668,9 @@ description = "Benchmark 5 Quest + 5 Aria VRS files (requires download URL JSONs
 # ═══════════════════════════════════════════════════════════════════════════
 # mast3r-slam
 # ═══════════════════════════════════════════════════════════════════════════
+[feature.mast3r-slam]
+channels = ["https://conda.modular.com/max/", "conda-forge"]
+
 [feature.mast3r-slam.dependencies]
 python = "3.11.*"
 eigen = ">=3.4.0,<4"
@@ -677,6 +680,7 @@ faiss = "*"
 scikit-learn = "*"
 matplotlib = "*"
 trimesh = "*"
+mojo = "*"
 
 [feature.mast3r-slam.target.linux-64.dependencies]
 lietorch = { path = "packages/lietorch" }
@@ -714,6 +718,22 @@ inputs = [
 ]
 outputs = [
     "packages/mast3r-slam/mast3r_slam_backends*.so",
+]
+
+# ── Mojo kernel build ──────────────────────────────────────────────────
+[feature.mast3r-slam.tasks._build-mojo-kernels]
+cmd = """
+mojo build --emit shared-lib \
+  -o mast3r_slam_mojo_backends.so \
+  mast3r_slam/backend/mojo/backends.mojo
+"""
+cwd = "packages/mast3r-slam"
+description = "Build mast3r-slam Mojo backend kernels"
+inputs = [
+    "packages/mast3r-slam/mast3r_slam/backend/mojo/*.mojo",
+]
+outputs = [
+    "packages/mast3r-slam/mast3r_slam_mojo_backends*.so",
 ]
 
 # ── Download tasks (hidden, used as depends-on) ─────────────────────────
