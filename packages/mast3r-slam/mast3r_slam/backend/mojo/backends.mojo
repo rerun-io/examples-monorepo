@@ -16,7 +16,8 @@ from std.python import Python, PythonObject
 from std.python.bindings import PythonModuleBuilder
 
 # ─── Constants ────────────────────────────────────────────────────────────────
-comptime BLOCK = 16
+comptime BLOCK_ITER_PROJ = 128  # 4 warps — iter_proj is compute-bound, benefits from occupancy
+comptime BLOCK_REFINE = 16     # Half-warp — refine_matches has branch-heavy dilation loops
 
 
 # ─── GPU Kernels ──────────────────────────────────────────────────────────────
@@ -46,14 +47,16 @@ def iter_proj_kernel(
     if n >= UInt(num_pts):
         return
 
-    var bn: Int = Int(b) * num_pts + Int(n)
-
     # Strides for row-major [batch, h, w, 9] and [batch, num_pts, {3,2}]
     var rays_stride_b: Int = h * w * 9
     var rays_stride_v: Int = w * 9
     var pts_stride_b: Int = num_pts * 3
     var p_stride_b: Int = num_pts * 2
     var conv_stride_b: Int = num_pts
+
+    # Batch-invariant base offsets (hoisted out of loop)
+    var base_b: Int = Int(b) * rays_stride_b
+    var conv_idx: Int = Int(b) * conv_stride_b + Int(n)
 
     # Load initial pixel
     var u: Float32 = p_init[Int(b) * p_stride_b + Int(n) * 2 + 0]
@@ -62,6 +65,12 @@ def iter_proj_kernel(
     # Clamp to valid bilinear range
     u = min(max(u, Float32(1.0)), Float32(w - 2))
     v = min(max(v, Float32(1.0)), Float32(h - 2))
+
+    # Load target point once (loop-invariant)
+    var pts_base: Int = Int(b) * pts_stride_b + Int(n) * 3
+    var t0: Float32 = pts_3d_norm[pts_base + 0]
+    var t1: Float32 = pts_3d_norm[pts_base + 1]
+    var t2: Float32 = pts_3d_norm[pts_base + 2]
 
     var lam: Float32 = lambda_init
 
@@ -79,7 +88,6 @@ def iter_proj_kernel(
 
         # Base offsets into rays_img for the 4 bilinear corners
         # NOTE: pixels opposite the area weights (same as CUDA kernel)
-        var base_b: Int = Int(b) * rays_stride_b
         var off11: Int = base_b + (v11 + 1) * rays_stride_v + (u11 + 1) * 9  # bottom-right
         var off12: Int = base_b + (v11 + 1) * rays_stride_v + u11 * 9        # bottom-left
         var off21: Int = base_b + v11 * rays_stride_v + (u11 + 1) * 9        # top-right
@@ -104,12 +112,6 @@ def iter_proj_kernel(
         r0 *= r_inv
         r1 *= r_inv
         r2 *= r_inv
-
-        # Target point
-        var pts_base: Int = Int(b) * pts_stride_b + Int(n) * 3
-        var t0: Float32 = pts_3d_norm[pts_base + 0]
-        var t1: Float32 = pts_3d_norm[pts_base + 1]
-        var t2: Float32 = pts_3d_norm[pts_base + 2]
 
         # Error and cost
         var e0: Float32 = r0 - t0
@@ -164,7 +166,6 @@ def iter_proj_kernel(
         var new_cost: Float32 = ne0 * ne0 + ne1 * ne1 + ne2 * ne2
 
         # Accept/reject step
-        var conv_idx: Int = Int(b) * conv_stride_b + Int(n)
         if new_cost < cost:
             u = u_new
             v = v_new
@@ -192,34 +193,29 @@ def refine_matches_kernel(
     radius: Int,
     dilation_max: Int,
 ):
-    """Descriptor-based match refinement kernel.
-
-    Each thread refines one match position by searching a dilated neighbourhood
-    for the best descriptor dot-product score, iterating from coarse to fine
-    dilation levels.
-    """
+    """Descriptor-based match refinement kernel (float32 path)."""
     var n: UInt = block_idx.x * block_dim.x + thread_idx.x
     var b: UInt = block_idx.y
 
     if n >= UInt(num_pts):
         return
 
-    # Strides for row-major tensors
-    var d11_stride_b: Int = h * w * fdim     # D11: [batch, h, w, fdim]
+    var d11_stride_b: Int = h * w * fdim
     var d11_stride_v: Int = w * fdim
-    var d21_stride_b: Int = num_pts * fdim   # D21: [batch, num_pts, fdim]
-    var p_stride_b: Int = num_pts * 2        # p1/p1_new: [batch, num_pts, 2]
+    var d21_stride_b: Int = num_pts * fdim
+    var p_stride_b: Int = num_pts * 2
 
-    # Load initial match position
     var p_base: Int = Int(b) * p_stride_b + Int(n) * 2
     var u0: Int = Int(p1[p_base + 0])
     var v0: Int = Int(p1[p_base + 1])
 
-    var max_score: Float32 = -3.4028235e+38  # -FLT_MAX
+    # Pre-compute query descriptor base (loop-invariant)
+    var d21_base: Int = Int(b) * d21_stride_b + Int(n) * fdim
+
+    var max_score: Float32 = -3.4028235e+38
     var u_new: Int = u0
     var v_new: Int = v0
 
-    # Dilation loop: coarse to fine
     for d in range(dilation_max, 0, -1):
         var rd: Int = radius * d
         var diam: Int = 2 * rd + 1
@@ -230,11 +226,8 @@ def refine_matches_kernel(
                 var u_cand: Int = u0 - rd + i
                 var v_cand: Int = v0 - rd + j
 
-                # Bounds check
                 if v_cand >= 0 and v_cand < h and u_cand >= 0 and u_cand < w:
-                    # Dot product D21[b,n,:] . D11[b,v,u,:]
                     var score: Float32 = 0.0
-                    var d21_base: Int = Int(b) * d21_stride_b + Int(n) * fdim
                     var d11_base: Int = Int(b) * d11_stride_b + v_cand * d11_stride_v + u_cand * fdim
                     for k in range(fdim):
                         score += D21[d21_base + k] * D11[d11_base + k]
@@ -247,11 +240,78 @@ def refine_matches_kernel(
                 j += d
             i += d
 
-        # Centre next dilation level on best so far
         u0 = u_new
         v0 = v_new
 
-    # Write output
+    p1_new[p_base + 0] = Int64(u_new)
+    p1_new[p_base + 1] = Int64(v_new)
+
+
+def refine_matches_kernel_f16(
+    D11: UnsafePointer[Float16, MutAnyOrigin],
+    D21: UnsafePointer[Float16, MutAnyOrigin],
+    p1: UnsafePointer[Int64, MutAnyOrigin],
+    p1_new: UnsafePointer[Int64, MutAnyOrigin],
+    h: Int,
+    w: Int,
+    num_pts: Int,
+    fdim: Int,
+    radius: Int,
+    dilation_max: Int,
+):
+    """Descriptor-based match refinement kernel (float16 path).
+
+    Reads float16 descriptors directly, accumulates dot products in float32.
+    """
+    var n: UInt = block_idx.x * block_dim.x + thread_idx.x
+    var b: UInt = block_idx.y
+
+    if n >= UInt(num_pts):
+        return
+
+    var d11_stride_b: Int = h * w * fdim
+    var d11_stride_v: Int = w * fdim
+    var d21_stride_b: Int = num_pts * fdim
+    var p_stride_b: Int = num_pts * 2
+
+    var p_base: Int = Int(b) * p_stride_b + Int(n) * 2
+    var u0: Int = Int(p1[p_base + 0])
+    var v0: Int = Int(p1[p_base + 1])
+
+    var d21_base: Int = Int(b) * d21_stride_b + Int(n) * fdim
+
+    var max_score: Float32 = -3.4028235e+38
+    var u_new: Int = u0
+    var v_new: Int = v0
+
+    for d in range(dilation_max, 0, -1):
+        var rd: Int = radius * d
+        var diam: Int = 2 * rd + 1
+        var i: Int = 0
+        while i < diam:
+            var j: Int = 0
+            while j < diam:
+                var u_cand: Int = u0 - rd + i
+                var v_cand: Int = v0 - rd + j
+
+                if v_cand >= 0 and v_cand < h and u_cand >= 0 and u_cand < w:
+                    # Accumulate dot product in float32 for precision
+                    var score: Float32 = 0.0
+                    var d11_base: Int = Int(b) * d11_stride_b + v_cand * d11_stride_v + u_cand * fdim
+                    for k in range(fdim):
+                        score += Float32(D21[d21_base + k]) * Float32(D11[d11_base + k])
+
+                    if score > max_score:
+                        max_score = score
+                        u_new = u_cand
+                        v_new = v_cand
+
+                j += d
+            i += d
+
+        u0 = u_new
+        v0 = v_new
+
     p1_new[p_base + 0] = Int64(u_new)
     p1_new[p_base + 1] = Int64(v_new)
 
@@ -274,7 +334,7 @@ def iter_proj_py(
     var pts_3d_norm: PythonObject = pts_3d_norm_obj.contiguous()
     var p_init: PythonObject = p_init_obj.contiguous()
 
-    # Extract shapes: rays_img [b, h, w, 9], pts_3d_norm [b, n, 3], p_init [b, n, 2]
+    # Extract shapes
     var batch: Int = Int(py=rays_img.shape[0])
     var h: Int = Int(py=rays_img.shape[1])
     var w: Int = Int(py=rays_img.shape[2])
@@ -283,16 +343,15 @@ def iter_proj_py(
     var lambda_init: Float64 = Float64(py=lambda_init_obj)
     var cost_thresh: Float64 = Float64(py=cost_thresh_obj)
 
-    # Sync PyTorch CUDA before reading its memory
-    torch.cuda.synchronize()
+    # No torch.cuda.synchronize() — CUDA stream ordering handles dependencies.
 
-    # Allocate output tensors via PyTorch (on same device)
-    var p_new: PythonObject = torch.zeros(
+    # Allocate output tensors via torch.empty (kernel writes all positions)
+    var p_new: PythonObject = torch.empty(
         Python.list(batch, num_pts, 2),
         device=rays_img.device,
         dtype=torch.float32,
     )
-    var converged: PythonObject = torch.zeros(
+    var converged: PythonObject = torch.empty(
         Python.list(batch, num_pts),
         device=rays_img.device,
         dtype=torch.uint8,
@@ -305,16 +364,14 @@ def iter_proj_py(
     var pnew_ptr: Int = Int(py=p_new.data_ptr())
     var conv_ptr: Int = Int(py=converged.data_ptr())
 
-    # Create device context and launch kernel
-    var ctx = DeviceContext()
-    var num_blocks_x: Int = ceildiv(num_pts, BLOCK)
-
     var rays_uptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=rays_ptr)
     var pts_uptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=pts_ptr)
     var pinit_uptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=pinit_ptr)
     var pnew_uptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=pnew_ptr)
     var conv_uptr = UnsafePointer[UInt8, MutAnyOrigin](unsafe_from_address=conv_ptr)
 
+    var ctx = DeviceContext()
+    var num_blocks_x: Int = ceildiv(num_pts, BLOCK_ITER_PROJ)
     ctx.enqueue_function[iter_proj_kernel, iter_proj_kernel](
         rays_uptr,
         pts_uptr,
@@ -328,7 +385,7 @@ def iter_proj_py(
         Float32(lambda_init),
         Float32(cost_thresh),
         grid_dim=(num_blocks_x, batch),
-        block_dim=BLOCK,
+        block_dim=BLOCK_ITER_PROJ,
     )
     ctx.synchronize()
 
@@ -348,60 +405,71 @@ def refine_matches_py(
     """Drop-in replacement for mast3r_slam_backends.refine_matches."""
     var torch = Python.import_module("torch")
 
-    # The CUDA kernel dispatches on float types; cast half→float for Mojo
-    var D11: PythonObject = D11_obj.contiguous().float()
-    var D21: PythonObject = D21_obj.contiguous().float()
     var p1: PythonObject = p1_obj.contiguous()
 
-    # Shapes: D11 [b, h, w, fdim], D21 [b, n, fdim], p1 [b, n, 2]
-    var batch: Int = Int(py=D11.shape[0])
-    var h: Int = Int(py=D11.shape[1])
-    var w: Int = Int(py=D11.shape[2])
-    var fdim: Int = Int(py=D11.shape[3])
+    # Shapes from original (possibly half) inputs
+    var batch: Int = Int(py=D11_obj.shape[0])
+    var h: Int = Int(py=D11_obj.shape[1])
+    var w: Int = Int(py=D11_obj.shape[2])
+    var fdim: Int = Int(py=D11_obj.shape[3])
     var num_pts: Int = Int(py=p1.shape[1])
     var radius: Int = Int(py=radius_obj)
     var dilation_max: Int = Int(py=dilation_max_obj)
 
-    torch.cuda.synchronize()
-
-    # Allocate output (same dtype/device as p1 — long)
-    var p1_new: PythonObject = torch.zeros(
+    # Allocate output
+    var p1_new: PythonObject = torch.empty(
         Python.list(batch, num_pts, 2),
         device=p1.device,
         dtype=p1.dtype,
     )
 
-    # Get raw CUDA pointers
-    var d11_ptr: Int = Int(py=D11.data_ptr())
-    var d21_ptr: Int = Int(py=D21.data_ptr())
     var p1_ptr: Int = Int(py=p1.data_ptr())
     var p1_new_ptr: Int = Int(py=p1_new.data_ptr())
-
-    var ctx = DeviceContext()
-    var num_blocks_x: Int = ceildiv(num_pts, BLOCK)
-
-    var d11_uptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=d11_ptr)
-    var d21_uptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=d21_ptr)
     var p1_uptr = UnsafePointer[Int64, MutAnyOrigin](unsafe_from_address=p1_ptr)
     var p1_new_uptr = UnsafePointer[Int64, MutAnyOrigin](unsafe_from_address=p1_new_ptr)
 
-    ctx.enqueue_function[refine_matches_kernel, refine_matches_kernel](
-        d11_uptr,
-        d21_uptr,
-        p1_uptr,
-        p1_new_uptr,
-        h,
-        w,
-        num_pts,
-        fdim,
-        radius,
-        dilation_max,
-        grid_dim=(num_blocks_x, batch),
-        block_dim=BLOCK,
-    )
-    ctx.synchronize()
+    var ctx = DeviceContext()
+    var num_blocks_x: Int = ceildiv(num_pts, BLOCK_REFINE)
 
-    # Return as tuple to match CUDA API: returns {p1_new}
+    # Dispatch float16 vs float32 to avoid half→float copy overhead (~7 µs)
+    var is_half: Bool = Bool(D11_obj.dtype == torch.float16)
+
+    if is_half:
+        var D11: PythonObject = D11_obj.contiguous()
+        var D21: PythonObject = D21_obj.contiguous()
+        var d11_ptr: Int = Int(py=D11.data_ptr())
+        var d21_ptr: Int = Int(py=D21.data_ptr())
+        var d11_uptr = UnsafePointer[Float16, MutAnyOrigin](unsafe_from_address=d11_ptr)
+        var d21_uptr = UnsafePointer[Float16, MutAnyOrigin](unsafe_from_address=d21_ptr)
+
+        ctx.enqueue_function[refine_matches_kernel_f16, refine_matches_kernel_f16](
+            d11_uptr,
+            d21_uptr,
+            p1_uptr,
+            p1_new_uptr,
+            h, w, num_pts, fdim, radius, dilation_max,
+            grid_dim=(num_blocks_x, batch),
+            block_dim=BLOCK_REFINE,
+        )
+    else:
+        var D11: PythonObject = D11_obj.contiguous().float()
+        var D21: PythonObject = D21_obj.contiguous().float()
+        var d11_ptr: Int = Int(py=D11.data_ptr())
+        var d21_ptr: Int = Int(py=D21.data_ptr())
+        var d11_uptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=d11_ptr)
+        var d21_uptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=d21_ptr)
+
+        ctx.enqueue_function[refine_matches_kernel, refine_matches_kernel](
+            d11_uptr,
+            d21_uptr,
+            p1_uptr,
+            p1_new_uptr,
+            h, w, num_pts, fdim, radius, dilation_max,
+            grid_dim=(num_blocks_x, batch),
+            block_dim=BLOCK_REFINE,
+        )
+
+    ctx.synchronize()
     return Python.tuple(p1_new)
 
 
