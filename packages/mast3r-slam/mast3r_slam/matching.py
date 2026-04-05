@@ -4,8 +4,16 @@ from jaxtyping import Float, Int, Bool
 
 import mast3r_slam.image as img_utils
 from mast3r_slam.config import config
-# import mast3r_slam_backends  # CUDA C++ kernels (commented out for Mojo comparison)
-import mast3r_slam_mojo_backends as mast3r_slam_backends  # Mojo GPU kernels
+
+# Matching kernel backend selection: prefer Mojo (faster, no C++ build step),
+# fall back to CUDA C++ if Mojo .so is not built. Both provide identical
+# iter_proj() and refine_matches() APIs.
+# Note: global_opt.py still imports mast3r_slam_backends directly for the
+# Gauss-Newton solvers which have not been ported to Mojo.
+try:
+    import mast3r_slam_mojo_backends as mast3r_slam_backends
+except ImportError:
+    import mast3r_slam_backends
 
 
 def match(
