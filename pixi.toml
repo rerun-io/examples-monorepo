@@ -789,7 +789,7 @@ description = "Run MASt3R-SLAM inference (base config, 512px)"
 
 [feature.mast3r-slam.tasks.mast3r-slam-app]
 cmd = "python tools/gradio-app.py"
-depends-on = ["_build-cuda-kernels", "_build-mojo-kernels", "_download-checkpoints"]
+depends-on = ["_build-cuda-kernels", "_build-mojo-kernels", "_download-checkpoints", "_download-example-data"]
 cwd = "packages/mast3r-slam"
 description = "Launch MASt3R-SLAM Gradio web UI"
 
@@ -1088,13 +1088,13 @@ mast3r-slam = { features = [
     "common",
     "cuda",
     "mast3r-slam",
-], solve-group = "mast3r-slam", no-default-feature = true }
+], solve-group = "mast3r-slam", no-default-feature = true, platforms = ["linux-64"] }
 mast3r-slam-dev = { features = [
     "common",
     "cuda",
     "mast3r-slam",
     "dev",
-], solve-group = "mast3r-slam", no-default-feature = true }
+], solve-group = "mast3r-slam", no-default-feature = true, platforms = ["linux-64"] }
 gsplat-rust-renderer = { features = [
     "gsplat-rust-renderer",
 ], solve-group = "gsplat-rust-renderer", no-default-feature = true }

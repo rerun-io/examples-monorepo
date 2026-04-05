@@ -157,8 +157,8 @@ class TUMDataset(MonocularDataset):
 
 
 class EurocDataset(MonocularDataset):
-    def __init__(self, dataset_path: str) -> None:
-        super().__init__()
+    def __init__(self, dataset_path: str, img_size: Literal[224, 512] = 512) -> None:
+        super().__init__(img_size=img_size)
         # For Euroc dataset, the distortion is too much to handle for MASt3R.
         # So we always undistort the images, but the calibration will not be used for any later optimization unless specified.
         self.use_calibration: bool = True
@@ -186,8 +186,8 @@ class EurocDataset(MonocularDataset):
 
 
 class ETH3DDataset(MonocularDataset):
-    def __init__(self, dataset_path: str) -> None:
-        super().__init__()
+    def __init__(self, dataset_path: str, img_size: Literal[224, 512] = 512) -> None:
+        super().__init__(img_size=img_size)
         self.dataset_path: pathlib.Path = pathlib.Path(dataset_path)
         rgb_list: pathlib.Path = self.dataset_path / "rgb.txt"
         tstamp_rgb = np.loadtxt(rgb_list, delimiter=" ", dtype=np.unicode_, skiprows=0)
@@ -204,8 +204,8 @@ class ETH3DDataset(MonocularDataset):
 
 
 class SevenScenesDataset(MonocularDataset):
-    def __init__(self, dataset_path: str) -> None:
-        super().__init__()
+    def __init__(self, dataset_path: str, img_size: Literal[224, 512] = 512) -> None:
+        super().__init__(img_size=img_size)
         self.dataset_path: pathlib.Path = pathlib.Path(dataset_path)
         self.rgb_files = natsorted(
             list((self.dataset_path / "seq-01").glob("*.color.png"))
@@ -221,8 +221,8 @@ class SevenScenesDataset(MonocularDataset):
 
 
 class RealsenseDataset(MonocularDataset):
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, img_size: Literal[224, 512] = 512) -> None:
+        super().__init__(img_size=img_size)
         self.dataset_path = None
         self.pipeline = rs.pipeline()
         # self.h, self.w = 720, 1280
@@ -277,8 +277,8 @@ class RealsenseDataset(MonocularDataset):
 
 
 class Webcam(MonocularDataset):
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, img_size: Literal[224, 512] = 512) -> None:
+        super().__init__(img_size=img_size)
         self.use_calibration: bool = False
         self.dataset_path = None
         # load webcam using opencv
@@ -475,15 +475,15 @@ def load_dataset(
     if "tum" in split_dataset_type:
         return TUMDataset(dataset_path, img_size)
     if "euroc" in split_dataset_type:
-        return EurocDataset(dataset_path)
+        return EurocDataset(dataset_path, img_size)
     if "eth3d" in split_dataset_type:
-        return ETH3DDataset(dataset_path)
+        return ETH3DDataset(dataset_path, img_size)
     if "7-scenes" in split_dataset_type:
-        return SevenScenesDataset(dataset_path)
+        return SevenScenesDataset(dataset_path, img_size)
     if "realsense" in split_dataset_type:
-        return RealsenseDataset()
+        return RealsenseDataset(img_size)
     if "webcam" in split_dataset_type:
-        return Webcam()
+        return Webcam(img_size)
 
     ext: str = split_dataset_type[-1].split(".")[-1]
     if ext in ["mp4", "avi", "MOV", "mov"]:

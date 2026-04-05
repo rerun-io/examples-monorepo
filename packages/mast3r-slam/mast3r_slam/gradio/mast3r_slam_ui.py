@@ -36,15 +36,16 @@ from mast3r_slam.rerun_log_utils import create_blueprints, RerunLogger
 active_backend_process = None
 active_states = None
 
-# Initialize multiprocessing start method only once
+# Initialize multiprocessing start method (spawn required for CUDA).
+# If already set (e.g. by a parent process), reuse the existing setting.
 try:
     mp.set_start_method("spawn")
-    DEVICE = "cuda:0"
-    model = load_mast3r(device=DEVICE)
-    model.share_memory()
 except RuntimeError:
-    # Method already set, ignore
-    pass
+    pass  # Method already set, safe to continue
+
+DEVICE: str = "cuda:0"
+model = load_mast3r(device=DEVICE)
+model.share_memory()
 
 
 def _cleanup_active_backend() -> None:
