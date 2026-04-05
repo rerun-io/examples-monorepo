@@ -380,7 +380,7 @@ class SharedKeyframes:
         self.K: Float[torch.Tensor, "3 3"] = torch.zeros(3, 3, device=device, dtype=dtype).share_memory_()
         # fmt: on
 
-    def __getitem__(self, idx: int) -> Frame:
+    def __getitem__(self, idx) -> Frame:
         """Retrieve a keyframe by buffer index.
 
         Args:

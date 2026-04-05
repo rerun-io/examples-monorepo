@@ -143,24 +143,18 @@ class FactorGraph:
 
     def prep_two_way_edges(
         self,
-    ) -> tuple[
-        Int[torch.Tensor, "2n_edges"],
-        Int[torch.Tensor, "2n_edges"],
-        Int[torch.Tensor, "2n_edges hw"],
-        Bool[torch.Tensor, "2n_edges hw 1"],
-        Float[torch.Tensor, "2n_edges hw 1"],
-    ]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Concatenate forward and backward edges into symmetric form.
 
         Returns:
             A tuple of (ii, jj, idx_ii2jj, valid_match, Q_ii2jj) with
             doubled edges (original + reversed).
         """
-        ii: Int[torch.Tensor, "2n_edges"] = torch.cat((self.ii, self.jj), dim=0)
-        jj: Int[torch.Tensor, "2n_edges"] = torch.cat((self.jj, self.ii), dim=0)
-        idx_ii2jj: Int[torch.Tensor, "2n_edges hw"] = torch.cat((self.idx_ii2jj, self.idx_jj2ii), dim=0)
-        valid_match: Bool[torch.Tensor, "2n_edges hw 1"] = torch.cat((self.valid_match_j, self.valid_match_i), dim=0)
-        Q_ii2jj: Float[torch.Tensor, "2n_edges hw 1"] = torch.cat((self.Q_ii2jj, self.Q_jj2ii), dim=0)
+        ii: torch.Tensor = torch.cat((self.ii, self.jj), dim=0)
+        jj: torch.Tensor = torch.cat((self.jj, self.ii), dim=0)
+        idx_ii2jj: torch.Tensor = torch.cat((self.idx_ii2jj, self.idx_jj2ii), dim=0)
+        valid_match: torch.Tensor = torch.cat((self.valid_match_j, self.valid_match_i), dim=0)
+        Q_ii2jj: torch.Tensor = torch.cat((self.Q_ii2jj, self.Q_jj2ii), dim=0)
         return ii, jj, idx_ii2jj, valid_match, Q_ii2jj
 
     def get_poses_points(

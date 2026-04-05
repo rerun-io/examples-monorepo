@@ -94,7 +94,7 @@ class RetrievalDatabase(Retriever):
         feat_np: np.ndarray = feat[0].cpu().numpy()  # Assumes one frame at a time!
         id_np: np.ndarray = id * np.ones(feat_np.shape[0], dtype=np.int64)
 
-        database_size: int = self.ivf_builder.ivf.n_images
+        database_size: int = int(self.ivf_builder.ivf.n_images)
         # print("Database size: ", database_size, self.kf_counter)
 
         # Only query if already an image
@@ -107,7 +107,7 @@ class RetrievalDatabase(Retriever):
 
             scores: np.ndarray = np.empty_like(ranked_scores)
             scores[np.arange(ranked_scores.shape[0])[:, None], ranks] = ranked_scores
-            scores_tensor: Float[torch.Tensor, "1 n_images"] = torch.from_numpy(scores)[0]
+            scores_tensor: torch.Tensor = torch.from_numpy(scores)[0]
 
             topk_images = torch.topk(scores_tensor, min(k, database_size))
 
