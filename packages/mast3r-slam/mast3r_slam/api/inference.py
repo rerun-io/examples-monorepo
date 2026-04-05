@@ -301,13 +301,7 @@ def relocalization(
         return successful_loop_closure
 
 
-def run_backend(
-    config_path: str,
-    model: object,
-    states: SharedStates,
-    keyframes: SharedKeyframes,
-    K: Float[torch.Tensor, "3 3"] | None,
-) -> None:
+def run_backend(config_path, model, states, keyframes, K) -> None:
     """Backend process: graph construction, retrieval, and global optimisation.
 
     Runs in a separate process. Continuously polls for new keyframes,
@@ -367,9 +361,9 @@ def run_backend(
         if len(lc_inds) > 0:
             print("Database retrieval", idx, ": ", lc_inds)
 
-        kf_idx_set: set[int] = set(kf_idx)  # Remove duplicates by using set
-        kf_idx_set.discard(idx)  # Remove current kf idx if included
-        kf_idx = list(kf_idx_set)  # convert to list
+        kf_idx_set: set[int] = set(kf_idx)
+        kf_idx_set.discard(idx)
+        kf_idx = list(kf_idx_set)
         frame_idx: list[int] = [idx] * len(kf_idx)
         if kf_idx:
             factor_graph.add_factors(kf_idx, frame_idx, config["local_opt"]["min_match_frac"])
