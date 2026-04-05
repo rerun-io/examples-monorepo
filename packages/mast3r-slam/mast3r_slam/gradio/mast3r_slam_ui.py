@@ -340,7 +340,7 @@ class InputValues:
 with gr.Blocks() as mast3r_slam_block:
     with gr.Row():
         with gr.Column():
-            video_file = gr.File(label="Upload Image", file_types=["mp4", "mov", "MOV"])
+            video_file = gr.File(label="Upload Video", file_types=[".mp4", ".mov", ".MOV"])
 
         with gr.Column():
             with gr.Row():
