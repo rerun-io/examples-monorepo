@@ -140,3 +140,4 @@ __pypackages__/
 *.tar
 *.rdb
 *.aof
+repomix-output.xml
