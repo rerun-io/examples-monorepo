@@ -11,6 +11,7 @@ import rerun as rr
 import torch
 import torch.multiprocessing as mp
 from gradio_rerun import Rerun
+from simplecv.rerun_log_utils import log_video
 
 from mast3r_slam.backend_lifecycle import SlamBackend
 from mast3r_slam.config import config, load_config
@@ -278,18 +279,9 @@ def show_video_file(
     if video_path.suffix.lower() == ".mov":
         video_path = mov_to_mp4(video_path)
 
-    # Log video asset which is referred to by frame references.
-    video_asset = rr.AssetVideo(path=video_path)
-    rr.log("video", video_asset, static=True)
-
-    # Send automatically determined video frame timestamps.
-    frame_timestamps_ns = video_asset.read_frame_timestamps_ns()
-    rr.send_columns(
-        "video",
-        # Note timeline values don't have to be the same as the video timestamps.
-        indexes=[rr.TimeNanosColumn("video_time", frame_timestamps_ns)],
-        columns=rr.VideoFrameReference.columns_nanoseconds(frame_timestamps_ns),
-    )
+    # Log video asset and frame timestamps using simplecv's helper
+    # (handles AssetVideo, frame timestamp extraction, and column logging).
+    log_video(video_path, Path("video"))
     yield stream.read(), f"Loaded preview for {video_path.name}"
 
 
