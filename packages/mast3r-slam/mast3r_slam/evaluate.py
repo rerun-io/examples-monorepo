@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 import torch
 from jaxtyping import UInt8
+from numpy import ndarray
 
 from mast3r_slam.config import config
 from mast3r_slam.dataloader import Intrinsics
@@ -139,7 +140,7 @@ def save_keyframes(
         keyframe = keyframes[i]
         t = timestamps[keyframe.frame_id]
         filename: pathlib.Path = savedir / f"{t}.png"
-        bgr_img: UInt8[np.ndarray, "h w 3"] = cv2.cvtColor(
+        bgr_img: UInt8[ndarray, "h w 3"] = cv2.cvtColor(
             (keyframe.uimg.cpu().numpy() * 255).astype(np.uint8), cv2.COLOR_RGB2BGR
         )
         cv2.imwrite(str(filename), bgr_img)

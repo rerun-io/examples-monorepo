@@ -7,6 +7,7 @@ from jaxtyping import Float, Float32, Int, Int64
 from mast3r.retrieval.model import how_select_local
 from mast3r.retrieval.processor import Retriever
 from numpy import ndarray
+from torch import Tensor
 
 if TYPE_CHECKING:
     from mast3r_slam.frame import Frame
@@ -35,15 +36,15 @@ class RetrievalDatabase(Retriever):
         self.query_dtype: torch.dtype = torch.float32
         self.query_device: str = device
         assert self.asmk.codebook is not None
-        self.centroids: Float[torch.Tensor, "n_centroids d"] = torch.from_numpy(self.asmk.codebook.centroids).to(
+        self.centroids: Float[Tensor, "n_centroids d"] = torch.from_numpy(self.asmk.codebook.centroids).to(
             device=self.query_device, dtype=self.query_dtype
         )
 
     # Mirrors forward_local in extract_local_features from retrieval/model.py
     def prep_features(
         self,
-        backbone_feat: Float[torch.Tensor, "1 n_patches feat_dim"],
-    ) -> Float[torch.Tensor, "1 n_local d"]:
+        backbone_feat: Float[Tensor, "1 n_patches feat_dim"],
+    ) -> Float[Tensor, "1 n_local d"]:
         """Extract whitened local features from backbone tokens for retrieval.
 
         Args:
@@ -63,7 +64,7 @@ class RetrievalDatabase(Retriever):
         proj_feat_whitened = retrieval_model.postwhiten(proj_feat)
 
         # how_select_local in
-        topk_features: Float[torch.Tensor, "1 n_local d"]
+        topk_features: Float[Tensor, "1 n_local d"]
         topk_features, _, _ = how_select_local(
             proj_feat_whitened, attention, retrieval_model.nfeat
         )
@@ -89,7 +90,7 @@ class RetrievalDatabase(Retriever):
             List of keyframe indices (in the database's ID space) that match.
         """
         assert frame.feat is not None
-        feat: Float[torch.Tensor, "1 n_local d"] = self.prep_features(frame.feat)
+        feat: Float[Tensor, "1 n_local d"] = self.prep_features(frame.feat)
         id: int = self.kf_counter  # Using own counter since otherwise messes up IVF
 
         feat_np: Float32[ndarray, "n_local d"] = feat[0].cpu().numpy()  # Assumes one frame at a time!
@@ -108,12 +109,12 @@ class RetrievalDatabase(Retriever):
 
             scores: Float[ndarray, "1 n_images"] = np.empty_like(ranked_scores)
             scores[np.arange(ranked_scores.shape[0])[:, None], ranks] = ranked_scores
-            scores_tensor: Float[torch.Tensor, "n_images"] = torch.from_numpy(scores)[0]
+            scores_tensor: Float[Tensor, "n_images"] = torch.from_numpy(scores)[0]
 
             topk_images = torch.topk(scores_tensor, min(k, database_size))
 
-            valid: Float[torch.Tensor, "k"] = topk_images.values > min_thresh
-            topk_image_inds_tensor: Int[torch.Tensor, "n_valid"] = topk_images.indices[valid]
+            valid: Float[Tensor, "k"] = topk_images.values > min_thresh
+            topk_image_inds_tensor: Int[Tensor, "n_valid"] = topk_images.indices[valid]
             topk_image_inds = topk_image_inds_tensor.tolist()
 
         if add_after_query:
@@ -174,9 +175,9 @@ class RetrievalDatabase(Retriever):
 
     def quantize_custom(
         self,
-        qvecs: Float[torch.Tensor, "n_local d"],
+        qvecs: Float[Tensor, "n_local d"],
         params: dict,
-    ) -> Int[torch.Tensor, "n_local k"]:
+    ) -> Int[Tensor, "n_local k"]:
         """Quantise descriptors to the nearest centroids using L2 distance.
 
         Args:
@@ -187,7 +188,7 @@ class RetrievalDatabase(Retriever):
             Top-k centroid indices per descriptor.
         """
         # Using trick for efficient distance matrix
-        l2_dists: Float[torch.Tensor, "n_local n_centroids"] = (
+        l2_dists: Float[Tensor, "n_local n_centroids"] = (
             torch.sum(qvecs**2, dim=1)[:, None]
             + torch.sum(self.centroids**2, dim=1)[None, :]
             - 2 * (qvecs @ self.centroids.mT)
@@ -225,10 +226,10 @@ class RetrievalDatabase(Retriever):
         slices: list = list(io_helpers.slice_unique(qimids))
         for imid, seq in slices:
             # Calculate qvecs to centroids distance matrix (without forming diff!)
-            qvecs_torch: Float[torch.Tensor, "n_local d"] = torch.from_numpy(qvecs[seq]).to(
+            qvecs_torch: Float[Tensor, "n_local d"] = torch.from_numpy(qvecs[seq]).to(
                 device=self.query_device, dtype=self.query_dtype
             )
-            topk_inds: Int[torch.Tensor, "n_local k"] = self.quantize_custom(qvecs_torch, params)
+            topk_inds: Int[Tensor, "n_local k"] = self.quantize_custom(qvecs_torch, params)
             topk_inds_np: Int64[ndarray, "n_local k"] = topk_inds.cpu().numpy()
             quantized: tuple = (qvecs, topk_inds_np)
 
@@ -271,10 +272,10 @@ class RetrievalDatabase(Retriever):
         step_params: dict = self.asmk.params.get("build_ivf")
 
         if topk_codes is None:
-            qvecs_torch: Float[torch.Tensor, "n_local d"] = torch.from_numpy(vecs).to(
+            qvecs_torch: Float[Tensor, "n_local d"] = torch.from_numpy(vecs).to(
                 device=self.query_device, dtype=self.query_dtype
             )
-            topk_inds: Int[torch.Tensor, "n_local k"] = self.quantize_custom(qvecs_torch, step_params)
+            topk_inds: Int[Tensor, "n_local k"] = self.quantize_custom(qvecs_torch, step_params)
             topk_inds_np: Int64[ndarray, "n_local k"] = topk_inds.cpu().numpy()
         else:
             # Reuse previously calculated! Only take top 1

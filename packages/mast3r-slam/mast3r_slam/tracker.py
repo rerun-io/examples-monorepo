@@ -72,42 +72,42 @@ class FrameTracker:
         idx_f2k = idx_f2k[0]
         valid_match_k = valid_match_k[0]
 
-        Qk: Float[torch.Tensor, "hw 1"] = torch.sqrt(Qff[idx_f2k] * Qkf)
+        Qk: Float[Tensor, "hw 1"] = torch.sqrt(Qff[idx_f2k] * Qkf)
 
         # Update keyframe pointmap after registration (need pose)
         frame.update_pointmap(Xff, Cff)
 
         use_calib: bool = config["use_calib"]
         img_size: tuple[int, int] = (int(frame.img.shape[-2]), int(frame.img.shape[-1]))
-        K: Float[torch.Tensor, "3 3"] | None
+        K: Float[Tensor, "3 3"] | None
         if use_calib:
             K = keyframe.K
         else:
             K = None
 
         # Get poses and point correspondneces and confidences
-        Xf: Float[torch.Tensor, "hw 3"]
-        Xk: Float[torch.Tensor, "hw 3"]
+        Xf: Float[Tensor, "hw 3"]
+        Xk: Float[Tensor, "hw 3"]
         world_T_camf: lietorch.Sim3
         world_T_camk: lietorch.Sim3
-        Cf: Float[torch.Tensor, "hw 1"]
-        Ck: Float[torch.Tensor, "hw 1"]
-        meas_k: Float[torch.Tensor, "hw 3"] | None
-        valid_meas_k: Bool[torch.Tensor, "hw 1"] | None
+        Cf: Float[Tensor, "hw 1"]
+        Ck: Float[Tensor, "hw 1"]
+        meas_k: Float[Tensor, "hw 3"] | None
+        valid_meas_k: Bool[Tensor, "hw 1"] | None
         Xf, Xk, world_T_camf, world_T_camk, Cf, Ck, meas_k, valid_meas_k = self.get_points_poses(
             frame, keyframe, idx_f2k, img_size, use_calib, K
         )
 
         # Get valid
         # Use canonical confidence average
-        valid_Cf: Bool[torch.Tensor, "hw 1"] = Cf > self.cfg["C_conf"]
-        valid_Ck: Bool[torch.Tensor, "hw 1"] = Ck > self.cfg["C_conf"]
-        valid_Q: Bool[torch.Tensor, "hw 1"] = Qk > self.cfg["Q_conf"]
+        valid_Cf: Bool[Tensor, "hw 1"] = Cf > self.cfg["C_conf"]
+        valid_Ck: Bool[Tensor, "hw 1"] = Ck > self.cfg["C_conf"]
+        valid_Q: Bool[Tensor, "hw 1"] = Qk > self.cfg["Q_conf"]
 
-        valid_opt: Bool[torch.Tensor, "hw 1"] = valid_match_k & valid_Cf & valid_Ck & valid_Q
-        valid_kf: Bool[torch.Tensor, "hw 1"] = valid_match_k & valid_Q
+        valid_opt: Bool[Tensor, "hw 1"] = valid_match_k & valid_Cf & valid_Ck & valid_Q
+        valid_kf: Bool[Tensor, "hw 1"] = valid_match_k & valid_Q
 
-        match_frac: Float[torch.Tensor, ""] = valid_opt.sum() / valid_opt.numel()
+        match_frac: Float[Tensor, ""] = valid_opt.sum() / valid_opt.numel()
         if match_frac < self.cfg["min_match_frac"]:
             print(f"Skipped frame {frame.frame_id}")
             return False, [], True
@@ -145,14 +145,14 @@ class FrameTracker:
         # Use pose to transform points to update keyframe
         Xkk_raw = camk_T_camf.act(Xkf)
         assert isinstance(Xkk_raw, torch.Tensor)
-        Xkk: Float[torch.Tensor, "hw 3"] = Xkk_raw
+        Xkk: Float[Tensor, "hw 3"] = Xkk_raw
         keyframe.update_pointmap(Xkk, Ckf)
         # write back the fitered pointmap
         self.keyframes[len(self.keyframes) - 1] = keyframe
 
         # Keyframe selection
         n_valid: Int[Tensor, ""] = valid_kf.sum()
-        match_frac_k: Float[torch.Tensor, ""] = n_valid / valid_kf.numel()
+        match_frac_k: Float[Tensor, ""] = n_valid / valid_kf.numel()
         unique_frac_f: float = (
             torch.unique(idx_f2k[valid_match_k[:, 0]]).shape[0] / valid_kf.numel()
         )
@@ -185,14 +185,14 @@ class FrameTracker:
         use_calib: bool,
         K: Float[Tensor, "3 3"] | None = None,
     ) -> tuple[
-        Float[torch.Tensor, "hw 3"],
-        Float[torch.Tensor, "hw 3"],
+        Float[Tensor, "hw 3"],
+        Float[Tensor, "hw 3"],
         lietorch.Sim3,
         lietorch.Sim3,
-        Float[torch.Tensor, "hw 1"],
-        Float[torch.Tensor, "hw 1"],
-        Float[torch.Tensor, "hw 3"] | None,
-        Bool[torch.Tensor, "hw 1"] | None,
+        Float[Tensor, "hw 1"],
+        Float[Tensor, "hw 1"],
+        Float[Tensor, "hw 3"] | None,
+        Bool[Tensor, "hw 1"] | None,
     ]:
         """Extract matched points, poses, confidences, and optional pixel measurements.
 
@@ -209,21 +209,21 @@ class FrameTracker:
         """
         assert frame.X_canon is not None
         assert keyframe.X_canon is not None
-        Xf: Float[torch.Tensor, "hw 3"] = frame.X_canon
-        Xk: Float[torch.Tensor, "hw 3"] = keyframe.X_canon
+        Xf: Float[Tensor, "hw 3"] = frame.X_canon
+        Xk: Float[Tensor, "hw 3"] = keyframe.X_canon
         world_T_camf: lietorch.Sim3 = frame.world_T_cam
         world_T_camk: lietorch.Sim3 = keyframe.world_T_cam
 
         # Average confidence
-        Cf_opt: Float[torch.Tensor, "hw 1"] | None = frame.get_average_conf()
-        Ck_opt: Float[torch.Tensor, "hw 1"] | None = keyframe.get_average_conf()
+        Cf_opt: Float[Tensor, "hw 1"] | None = frame.get_average_conf()
+        Ck_opt: Float[Tensor, "hw 1"] | None = keyframe.get_average_conf()
         assert Cf_opt is not None
         assert Ck_opt is not None
-        Cf: Float[torch.Tensor, "hw 1"] = Cf_opt
-        Ck: Float[torch.Tensor, "hw 1"] = Ck_opt
+        Cf: Float[Tensor, "hw 1"] = Cf_opt
+        Ck: Float[Tensor, "hw 1"] = Ck_opt
 
-        meas_k: Float[torch.Tensor, "hw 3"] | None = None
-        valid_meas_k: Bool[torch.Tensor, "hw 1"] | None = None
+        meas_k: Float[Tensor, "hw 3"] | None = None
+        valid_meas_k: Bool[Tensor, "hw 1"] | None = None
 
         if use_calib:
             assert K is not None
@@ -231,7 +231,7 @@ class FrameTracker:
             Xk = constrain_points_to_ray(img_size, Xk[None], K).squeeze(0)
 
             # Setup pixel coordinates
-            uv_k: Float[torch.Tensor, "hw 2"] = get_pixel_coords(1, img_size, device=Xf.device, dtype=Xf.dtype)
+            uv_k: Float[Tensor, "hw 2"] = get_pixel_coords(1, img_size, device=Xf.device, dtype=Xf.dtype)
             uv_k = uv_k.view(-1, 2)
             meas_k = torch.cat((uv_k, torch.log(Xk[..., 2:3])), dim=-1)
             # Avoid any bad calcs in log
@@ -242,10 +242,10 @@ class FrameTracker:
 
     def solve(
         self,
-        sqrt_info: Float[torch.Tensor, "n r"],
-        r: Float[torch.Tensor, "n r"],
-        J: Float[torch.Tensor, "n r m"],
-    ) -> tuple[Float[torch.Tensor, "1 m"], float]:
+        sqrt_info: Float[Tensor, "n r"],
+        r: Float[Tensor, "n r"],
+        J: Float[Tensor, "n r m"],
+    ) -> tuple[Float[Tensor, "1 m"], float]:
         """Solve one Gauss-Newton step with Huber-weighted residuals.
 
         Args:
@@ -257,30 +257,30 @@ class FrameTracker:
             A tuple of (tau_j, cost) where tau_j is the update step and
             cost is the weighted squared cost.
         """
-        whitened_r: Float[torch.Tensor, "n r"] = sqrt_info * r
-        robust_sqrt_info: Float[torch.Tensor, "n r"] = sqrt_info * torch.sqrt(
+        whitened_r: Float[Tensor, "n r"] = sqrt_info * r
+        robust_sqrt_info: Float[Tensor, "n r"] = sqrt_info * torch.sqrt(
             huber(whitened_r, k=self.cfg["huber"])
         )
         mdim: int = J.shape[-1]
-        A: Float[torch.Tensor, "N m"] = (robust_sqrt_info[..., None] * J).view(-1, mdim)  # dr_dX
-        b: Float[torch.Tensor, "N 1"] = (robust_sqrt_info * r).view(-1, 1)  # z-h
-        H: Float[torch.Tensor, "m m"] = A.T @ A
-        g: Float[torch.Tensor, "m 1"] = -A.T @ b
+        A: Float[Tensor, "N m"] = (robust_sqrt_info[..., None] * J).view(-1, mdim)  # dr_dX
+        b: Float[Tensor, "N 1"] = (robust_sqrt_info * r).view(-1, 1)  # z-h
+        H: Float[Tensor, "m m"] = A.T @ A
+        g: Float[Tensor, "m 1"] = -A.T @ b
         cost: float = 0.5 * (b.T @ b).item()
 
-        L: Float[torch.Tensor, "m m"] = torch.linalg.cholesky(H, upper=False)
-        tau_j: Float[torch.Tensor, "1 m"] = torch.cholesky_solve(g, L, upper=False).view(1, -1)
+        L: Float[Tensor, "m m"] = torch.linalg.cholesky(H, upper=False)
+        tau_j: Float[Tensor, "1 m"] = torch.cholesky_solve(g, L, upper=False).view(1, -1)
 
         return tau_j, cost
 
     def opt_pose_ray_dist_sim3(
         self,
-        Xf: Float[torch.Tensor, "hw 3"],
-        Xk: Float[torch.Tensor, "hw 3"],
+        Xf: Float[Tensor, "hw 3"],
+        Xk: Float[Tensor, "hw 3"],
         world_T_camf: lietorch.Sim3,
         world_T_camk: lietorch.Sim3,
-        Qk: Float[torch.Tensor, "hw 1"],
-        valid: Bool[torch.Tensor, "hw 1"],
+        Qk: Float[Tensor, "hw 1"],
+        valid: Bool[Tensor, "hw 1"],
     ) -> tuple[lietorch.Sim3, lietorch.Sim3]:
         """Optimise the relative Sim3 pose using ray-distance residuals.
 
@@ -297,9 +297,9 @@ class FrameTracker:
             pose and the optimised relative pose.
         """
         last_error: float = float("inf")
-        sqrt_info_ray: Float[torch.Tensor, "hw 1"] = 1 / self.cfg["sigma_ray"] * valid * torch.sqrt(Qk)
-        sqrt_info_dist: Float[torch.Tensor, "hw 1"] = 1 / self.cfg["sigma_dist"] * valid * torch.sqrt(Qk)
-        sqrt_info: Float[torch.Tensor, "hw 4"] = torch.cat((sqrt_info_ray.repeat(1, 3), sqrt_info_dist), dim=1)
+        sqrt_info_ray: Float[Tensor, "hw 1"] = 1 / self.cfg["sigma_ray"] * valid * torch.sqrt(Qk)
+        sqrt_info_dist: Float[Tensor, "hw 1"] = 1 / self.cfg["sigma_dist"] * valid * torch.sqrt(Qk)
+        sqrt_info: Float[Tensor, "hw 4"] = torch.cat((sqrt_info_ray.repeat(1, 3), sqrt_info_dist), dim=1)
 
         # Solving for relative pose without scale!
         camk_T_camf_raw = world_T_camk.inv() * world_T_camf
@@ -309,24 +309,24 @@ class FrameTracker:
         # Precalculate distance and ray for obs k
         rd_k_result = point_to_ray_dist(Xk, jacobian=False)
         assert isinstance(rd_k_result, torch.Tensor)
-        rd_k: Float[torch.Tensor, "hw 4"] = rd_k_result
+        rd_k: Float[Tensor, "hw 4"] = rd_k_result
 
         old_cost: float = float("inf")
         for step in range(self.cfg["max_iters"]):
             act_result = act_Sim3(camk_T_camf, Xf, jacobian=True)
             assert isinstance(act_result, tuple)
-            Xf_Ck: Float[torch.Tensor, "hw 3"] = act_result[0]
-            dXf_Ck_dcamk_T_camf: Float[torch.Tensor, "hw 3 7"] = act_result[1]
+            Xf_Ck: Float[Tensor, "hw 3"] = act_result[0]
+            dXf_Ck_dcamk_T_camf: Float[Tensor, "hw 3 7"] = act_result[1]
             rd_result = point_to_ray_dist(Xf_Ck, jacobian=True)
             assert isinstance(rd_result, tuple)
-            rd_f_Ck: Float[torch.Tensor, "hw 4"] = rd_result[0]
-            drd_f_Ck_dXf_Ck: Float[torch.Tensor, "hw 4 3"] = rd_result[1]
+            rd_f_Ck: Float[Tensor, "hw 4"] = rd_result[0]
+            drd_f_Ck_dXf_Ck: Float[Tensor, "hw 4 3"] = rd_result[1]
             # r = z-h(x)
-            r: Float[torch.Tensor, "hw 4"] = rd_k - rd_f_Ck
+            r: Float[Tensor, "hw 4"] = rd_k - rd_f_Ck
             # Jacobian
-            J: Float[torch.Tensor, "hw 4 7"] = -drd_f_Ck_dXf_Ck @ dXf_Ck_dcamk_T_camf
+            J: Float[Tensor, "hw 4 7"] = -drd_f_Ck_dXf_Ck @ dXf_Ck_dcamk_T_camf
 
-            tau_ij_sim3: Float[torch.Tensor, "1 7"]
+            tau_ij_sim3: Float[Tensor, "1 7"]
             new_cost: float
             tau_ij_sim3, new_cost = self.solve(sqrt_info, r, J)
             last_error = new_cost
@@ -356,15 +356,15 @@ class FrameTracker:
 
     def opt_pose_calib_sim3(
         self,
-        Xf: Float[torch.Tensor, "hw 3"],
-        Xk: Float[torch.Tensor, "hw 3"],
+        Xf: Float[Tensor, "hw 3"],
+        Xk: Float[Tensor, "hw 3"],
         world_T_camf: lietorch.Sim3,
         world_T_camk: lietorch.Sim3,
-        Qk: Float[torch.Tensor, "hw 1"],
-        valid: Bool[torch.Tensor, "hw 1"],
-        meas_k: Float[torch.Tensor, "hw 3"],
-        valid_meas_k: Bool[torch.Tensor, "hw 1"],
-        K: Float[torch.Tensor, "3 3"],
+        Qk: Float[Tensor, "hw 1"],
+        valid: Bool[Tensor, "hw 1"],
+        meas_k: Float[Tensor, "hw 3"],
+        valid_meas_k: Bool[Tensor, "hw 1"],
+        K: Float[Tensor, "3 3"],
         img_size: tuple[int, int],
     ) -> tuple[lietorch.Sim3, lietorch.Sim3]:
         """Optimise the relative Sim3 pose using calibrated reprojection residuals.
@@ -386,9 +386,9 @@ class FrameTracker:
             pose and the optimised relative pose.
         """
         last_error: float = float("inf")
-        sqrt_info_pixel: Float[torch.Tensor, "hw 1"] = 1 / self.cfg["sigma_pixel"] * valid * torch.sqrt(Qk)
-        sqrt_info_depth: Float[torch.Tensor, "hw 1"] = 1 / self.cfg["sigma_depth"] * valid * torch.sqrt(Qk)
-        sqrt_info: Float[torch.Tensor, "hw 3"] = torch.cat((sqrt_info_pixel.repeat(1, 2), sqrt_info_depth), dim=1)
+        sqrt_info_pixel: Float[Tensor, "hw 1"] = 1 / self.cfg["sigma_pixel"] * valid * torch.sqrt(Qk)
+        sqrt_info_depth: Float[Tensor, "hw 1"] = 1 / self.cfg["sigma_depth"] * valid * torch.sqrt(Qk)
+        sqrt_info: Float[Tensor, "hw 3"] = torch.cat((sqrt_info_pixel.repeat(1, 2), sqrt_info_depth), dim=1)
 
         # Solving for relative pose without scale!
         camk_T_camf_raw = world_T_camk.inv() * world_T_camf
@@ -399,8 +399,8 @@ class FrameTracker:
         for step in range(self.cfg["max_iters"]):
             act_result = act_Sim3(camk_T_camf, Xf, jacobian=True)
             assert isinstance(act_result, tuple)
-            Xf_Ck: Float[torch.Tensor, "hw 3"] = act_result[0]
-            dXf_Ck_dcamk_T_camf: Float[torch.Tensor, "hw 3 7"] = act_result[1]
+            Xf_Ck: Float[Tensor, "hw 3"] = act_result[0]
+            dXf_Ck_dcamk_T_camf: Float[Tensor, "hw 3 7"] = act_result[1]
             proj_result = project_calib(
                 Xf_Ck,
                 K,
@@ -410,18 +410,18 @@ class FrameTracker:
                 z_eps=self.cfg["depth_eps"],
             )
             assert len(proj_result) == 3
-            pzf_Ck: Float[torch.Tensor, "hw 3"] = proj_result[0]
-            dpzf_Ck_dXf_Ck: Float[torch.Tensor, "hw 3 3"] = proj_result[1]
-            valid_proj: Bool[torch.Tensor, "hw 1"] = proj_result[2]
-            valid2: Bool[torch.Tensor, "hw 1"] = valid_proj & valid_meas_k
-            sqrt_info2: Float[torch.Tensor, "hw 3"] = valid2 * sqrt_info
+            pzf_Ck: Float[Tensor, "hw 3"] = proj_result[0]
+            dpzf_Ck_dXf_Ck: Float[Tensor, "hw 3 3"] = proj_result[1]
+            valid_proj: Bool[Tensor, "hw 1"] = proj_result[2]
+            valid2: Bool[Tensor, "hw 1"] = valid_proj & valid_meas_k
+            sqrt_info2: Float[Tensor, "hw 3"] = valid2 * sqrt_info
 
             # r = z-h(x)
-            r: Float[torch.Tensor, "hw 3"] = meas_k - pzf_Ck
+            r: Float[Tensor, "hw 3"] = meas_k - pzf_Ck
             # Jacobian
-            J: Float[torch.Tensor, "hw 3 7"] = -dpzf_Ck_dXf_Ck @ dXf_Ck_dcamk_T_camf
+            J: Float[Tensor, "hw 3 7"] = -dpzf_Ck_dXf_Ck @ dXf_Ck_dcamk_T_camf
 
-            tau_ij_sim3: Float[torch.Tensor, "1 7"]
+            tau_ij_sim3: Float[Tensor, "1 7"]
             new_cost: float
             tau_ij_sim3, new_cost = self.solve(sqrt_info2, r, J)
             last_error = new_cost

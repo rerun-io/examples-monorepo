@@ -9,6 +9,7 @@ from jaxtyping import Bool, Float32, Int, UInt8
 from numpy import ndarray
 from simplecv.camera_orient_utils import auto_orient_and_center_poses
 from simplecv.ops import conventions
+from torch import Tensor
 
 from mast3r_slam.frame import Frame, SharedKeyframes, SharedStates
 from mast3r_slam.lietorch_utils import as_SE3
@@ -109,23 +110,23 @@ class RerunLogger:
         H: int = int(current_frame.img_shape.squeeze()[0].item())
         W: int = int(current_frame.img_shape.squeeze()[1].item())
 
-        pp: Float32[torch.Tensor, "2"] = torch.tensor((W / 2, H / 2))
+        pp: Float32[Tensor, "2"] = torch.tensor((W / 2, H / 2))
         assert current_frame.X_canon is not None
-        pts3d: Float32[torch.Tensor, "H W 3"] = current_frame.X_canon.clone().cpu().reshape(H, W, 3)
+        pts3d: Float32[Tensor, "H W 3"] = current_frame.X_canon.clone().cpu().reshape(H, W, 3)
         focal: float = float(estimate_focal_knowing_depth(pts3d[None], pp, focal_mode="weiszfeld"))
 
-        rgb_img_float: Float32[torch.Tensor, "H W 3"] = current_frame.uimg
-        rgb_img: UInt8[np.ndarray, "H W 3"] = (rgb_img_float * 255).numpy().astype(np.uint8)
+        rgb_img_float: Float32[Tensor, "H W 3"] = current_frame.uimg
+        rgb_img: UInt8[ndarray, "H W 3"] = (rgb_img_float * 255).numpy().astype(np.uint8)
 
         se3_pose: lietorch.SE3 = as_SE3(current_frame.world_T_cam.cpu())
-        matb4x4: Float32[np.ndarray, "1 4 4"] = se3_pose.matrix().numpy().astype(dtype=np.float32)
-        mat4x4: Float32[np.ndarray, "4 4"] = matb4x4[0]  # Extract the first batch element
+        matb4x4: Float32[ndarray, "1 4 4"] = se3_pose.matrix().numpy().astype(dtype=np.float32)
+        mat4x4: Float32[ndarray, "4 4"] = matb4x4[0]  # Extract the first batch element
 
         mat4x4 = conventions.convert_pose(mat4x4, src_convention=conventions.CC.CV, dst_convention=conventions.CC.GL)
 
         # Extract rotation (3x3) and translation (1x3) from the 4x4 transformation matrix
-        rotation_matrix: Float32[np.ndarray, "3 3"] = mat4x4[:3, :3]  # Top-left 3x3 block
-        translation_vector: Float32[np.ndarray, "3"] = mat4x4[:3, 3]  # Right column, first 3 elements
+        rotation_matrix: Float32[ndarray, "3 3"] = mat4x4[:3, :3]  # Top-left 3x3 block
+        translation_vector: Float32[ndarray, "3"] = mat4x4[:3, 3]  # Right column, first 3 elements
 
         cam_log_path: Path = self.parent_log_path / "current_camera"
         rr.log(
@@ -172,30 +173,30 @@ class RerunLogger:
             translation_vector = mat4x4[:3, 3]  # Right column, first 3 elements
             cam_log_path = self.parent_log_path / "keyframes" / f"keyframe-{kf_idx}"
             if kf_idx not in self.keyframe_logged_list:
-                kf_img_float: Float32[torch.Tensor, "H W 3"] = keyframe.uimg
-                kf_img: UInt8[np.ndarray, "H W 3"] = (kf_img_float * 255).numpy().astype(np.uint8)
+                kf_img_float: Float32[Tensor, "H W 3"] = keyframe.uimg
+                kf_img: UInt8[ndarray, "H W 3"] = (kf_img_float * 255).numpy().astype(np.uint8)
                 rr.log(
                     f"{cam_log_path}/pinhole/image",
                     rr.Image(image=kf_img, color_model=rr.ColorModel.RGB).compress(),
                 )
                 # create a mask based on the confidence values
                 assert keyframe.C is not None
-                mask_raw: Bool[np.ndarray, "hw 1"] = keyframe.C.cpu().numpy() > self.conf_thresh
+                mask_raw: Bool[ndarray, "hw 1"] = keyframe.C.cpu().numpy() > self.conf_thresh
 
                 # Convert the mask from shape (h*w, 1) to shape (h*w,)
-                mask: Bool[np.ndarray, "hw"] = (
+                mask: Bool[ndarray, "hw"] = (
                     mask_raw.squeeze()
                 )  # Remove the trailing dimension to get a 1D boolean array
 
                 # Now apply the mask to both positions and colors
                 assert keyframe.X_canon is not None
-                positions: Float32[np.ndarray, "num_points 3"] = keyframe.X_canon.cpu().numpy()
-                colors: UInt8[np.ndarray, "num_points 3"] = kf_img.reshape(-1, 3)
+                positions: Float32[ndarray, "num_points 3"] = keyframe.X_canon.cpu().numpy()
+                colors: UInt8[ndarray, "num_points 3"] = kf_img.reshape(-1, 3)
 
-                masked_positions: Float32[np.ndarray, "n_valid 3"] = positions[
+                masked_positions: Float32[ndarray, "n_valid 3"] = positions[
                     mask
                 ]  # Now selects entire rows where mask is True
-                masked_colors: UInt8[np.ndarray, "n_valid 3"] = colors[mask]
+                masked_colors: UInt8[ndarray, "n_valid 3"] = colors[mask]
                 rr.log(
                     f"{cam_log_path}/pointcloud",
                     rr.Points3D(
@@ -223,8 +224,8 @@ class RerunLogger:
         # log the last keyframe image
         if N_keyframes > 0:
             last_kf: Frame = keyframes[N_keyframes - 1]
-            last_kf_img_float: Float32[torch.Tensor, "H W 3"] = last_kf.uimg
-            last_kf_img: UInt8[np.ndarray, "H W 3"] = (last_kf_img_float * 255).numpy().astype(np.uint8)
+            last_kf_img_float: Float32[Tensor, "H W 3"] = last_kf.uimg
+            last_kf_img: UInt8[ndarray, "H W 3"] = (last_kf_img_float * 255).numpy().astype(np.uint8)
             rr.log(
                 f"{self.parent_log_path}/last_keyframe",
                 rr.Image(image=last_kf_img, color_model=rr.ColorModel.RGB).compress(),
@@ -234,16 +235,16 @@ class RerunLogger:
         world_T_cami: lietorch.Sim3 | None = None
         world_T_camj: lietorch.Sim3 | None = None
         with states.lock:
-            ii: Int[torch.Tensor, "num_edges"] = torch.tensor(states.edges_ii, dtype=torch.long)
-            jj: Int[torch.Tensor, "num_edges"] = torch.tensor(states.edges_jj, dtype=torch.long)
+            ii: Int[Tensor, "num_edges"] = torch.tensor(states.edges_ii, dtype=torch.long)
+            jj: Int[Tensor, "num_edges"] = torch.tensor(states.edges_jj, dtype=torch.long)
             if ii.numel() > 0 and jj.numel() > 0:
                 world_T_cami = lietorch.Sim3(keyframes.world_T_cam[ii, 0])
                 world_T_camj = lietorch.Sim3(keyframes.world_T_cam[jj, 0])
         if ii.numel() > 0 and jj.numel() > 0:
             assert world_T_cami is not None
             assert world_T_camj is not None
-            t_world_cami: Float32[np.ndarray, "num_edges 3"] = world_T_cami.matrix()[:, :3, 3].cpu().numpy()
-            t_world_camj: Float32[np.ndarray, "num_edges 3"] = world_T_camj.matrix()[:, :3, 3].cpu().numpy()
+            t_world_cami: Float32[ndarray, "num_edges 3"] = world_T_cami.matrix()[:, :3, 3].cpu().numpy()
+            t_world_camj: Float32[ndarray, "num_edges 3"] = world_T_camj.matrix()[:, :3, 3].cpu().numpy()
             line_strips: list[list[float]] = []
             for t_i, t_j in zip(t_world_cami, t_world_camj):
                 line_strips.append(t_i.tolist())

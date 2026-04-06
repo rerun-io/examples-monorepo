@@ -8,6 +8,7 @@ import torch
 from dust3r.utils.image import ImgNorm
 from jaxtyping import Float32
 from mast3r.model import AsymmetricMASt3R
+from torch import Tensor
 
 import mast3r_slam.matching as matching
 from mast3r_slam.config import config
@@ -319,7 +320,7 @@ def xy_grid(
 
 
 def estimate_focal_knowing_depth(
-    pts3d: Float32[torch.Tensor, "B H W 3"],
+    pts3d: Float32[Tensor, "B H W 3"],
     pp,
     focal_mode="median",
     min_focal=0.0,
@@ -385,9 +386,9 @@ def frame_to_intir(frame: "Frame") -> tuple[tuple[float, float], tuple[float, fl
     H: int = int(frame.img_shape.squeeze()[0].item())
     W: int = int(frame.img_shape.squeeze()[1].item())
 
-    pp: Float32[torch.Tensor, "2"] = torch.tensor((W / 2, H / 2))
+    pp: Float32[Tensor, "2"] = torch.tensor((W / 2, H / 2))
     assert frame.X_canon is not None
-    pts3d: Float32[torch.Tensor, "H W 3"] = frame.X_canon.clone().cpu().reshape(H, W, 3)
+    pts3d: Float32[Tensor, "H W 3"] = frame.X_canon.clone().cpu().reshape(H, W, 3)
     focal: float = float(
         estimate_focal_knowing_depth(pts3d[None], pp, focal_mode="weiszfeld")
     )

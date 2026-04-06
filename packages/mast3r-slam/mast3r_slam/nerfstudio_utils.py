@@ -5,12 +5,13 @@ import cv2
 import lietorch
 import numpy as np
 import open3d as o3d
-import torch
 import tqdm
 from jaxtyping import Bool, Float32, UInt8
+from numpy import ndarray
 from serde import serde
 from serde.json import to_json
 from simplecv.ops import conventions
+from torch import Tensor
 
 from mast3r_slam.frame import Frame, SharedKeyframes
 from mast3r_slam.lietorch_utils import as_SE3
@@ -59,7 +60,7 @@ class NerfstudioData:
     """Camera model identifier (always OPENCV for this exporter)."""
     frames: list[NSFrame]
     """List of per-frame pose entries."""
-    applied_transform: Float32[np.ndarray, "3 4"]
+    applied_transform: Float32[ndarray, "3 4"]
     """3x4 affine transform applied to all poses (typically identity)."""
     ply_file_path: Literal["sparse_pc.ply"]
     """Relative path to the sparse point cloud PLY file."""
@@ -91,15 +92,15 @@ def save_kf_to_nerfstudio(
     images_dir.mkdir(exist_ok=True)
 
     ns_frames_list: list[NSFrame] = []
-    pcd_positions: list[Float32[np.ndarray, "n_valid 3"]] = []
-    pcd_colors: list[UInt8[np.ndarray, "n_valid 3"]] = []
+    pcd_positions: list[Float32[ndarray, "n_valid 3"]] = []
+    pcd_colors: list[UInt8[ndarray, "n_valid 3"]] = []
     h: int = 0
     w: int = 0
     for i in tqdm.tqdm(range(len(keyframes)), desc="Processing keyframes"):
         keyframe: Frame = keyframes[i]
-        rgb_img_float: Float32[torch.Tensor, "H W 3"] = keyframe.uimg
-        rgb_img: UInt8[np.ndarray, "H W 3"] = (rgb_img_float * 255).numpy().astype(np.uint8)
-        bgr_img: UInt8[np.ndarray, "H W 3"] = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2BGR)
+        rgb_img_float: Float32[Tensor, "H W 3"] = keyframe.uimg
+        rgb_img: UInt8[ndarray, "H W 3"] = (rgb_img_float * 255).numpy().astype(np.uint8)
+        bgr_img: UInt8[ndarray, "H W 3"] = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2BGR)
         h, w, _ = bgr_img.shape
 
         # Save the image with zero-padded numbering
@@ -109,41 +110,41 @@ def save_kf_to_nerfstudio(
         relative_image_path: str = f"images/{image_filename}"
 
         se3_pose: lietorch.SE3 = as_SE3(keyframe.world_T_cam.cpu())
-        matb4x4: Float32[np.ndarray, "1 4 4"] = (
+        matb4x4: Float32[ndarray, "1 4 4"] = (
             se3_pose.matrix().numpy().astype(dtype=np.float32)
         )
         # in RDF (OpenCV) Format
-        mat4x4_cv: Float32[np.ndarray, "4 4"] = matb4x4[0]
+        mat4x4_cv: Float32[ndarray, "4 4"] = matb4x4[0]
 
         # in RUB (OpenGL) Format
-        mat4x4_gl: Float32[np.ndarray, "4 4"] = conventions.convert_pose(
+        mat4x4_gl: Float32[ndarray, "4 4"] = conventions.convert_pose(
             mat4x4_cv,
             src_convention=conventions.CC.CV,
             dst_convention=conventions.CC.GL,
         )
 
         assert keyframe.C is not None
-        mask_raw: Bool[np.ndarray, "hw 1"] = keyframe.C.cpu().numpy() > confidence_thresh
+        mask_raw: Bool[ndarray, "hw 1"] = keyframe.C.cpu().numpy() > confidence_thresh
 
         # Convert the mask from shape (h*w, 1) to shape (h*w,)
-        mask: Bool[np.ndarray, "hw"] = mask_raw.squeeze()  # Remove the trailing dimension to get a 1D boolean array
+        mask: Bool[ndarray, "hw"] = mask_raw.squeeze()  # Remove the trailing dimension to get a 1D boolean array
 
         # Now apply the mask to both positions and colors
         assert keyframe.X_canon is not None
-        positions: Float32[np.ndarray, "num_points 3"] = keyframe.X_canon.cpu().numpy()
-        colors: UInt8[np.ndarray, "num_points 3"] = rgb_img.reshape(-1, 3)
+        positions: Float32[ndarray, "num_points 3"] = keyframe.X_canon.cpu().numpy()
+        colors: UInt8[ndarray, "num_points 3"] = rgb_img.reshape(-1, 3)
 
-        masked_positions: Float32[np.ndarray, "n_valid 3"] = positions[mask]  # Now selects entire rows where mask is True
-        masked_colors: UInt8[np.ndarray, "n_valid 3"] = colors[mask]
+        masked_positions: Float32[ndarray, "n_valid 3"] = positions[mask]  # Now selects entire rows where mask is True
+        masked_colors: UInt8[ndarray, "n_valid 3"] = colors[mask]
 
         # Convert to homogeneous coordinates (add 1 as 4th coordinate)
-        homogeneous_positions: Float32[np.ndarray, "n_valid 4"] = np.ones(
+        homogeneous_positions: Float32[ndarray, "n_valid 4"] = np.ones(
             (masked_positions.shape[0], 4), dtype=np.float32
         )
         homogeneous_positions[:, :3] = masked_positions
 
         # Apply transformation (points are column vectors: p_world = T_world_cam * p_cam)
-        world_positions: Float32[np.ndarray, "n_valid 3"] = (mat4x4_cv @ homogeneous_positions.T).T[:, :3]
+        world_positions: Float32[ndarray, "n_valid 3"] = (mat4x4_cv @ homogeneous_positions.T).T[:, :3]
 
         pcd_positions.append(world_positions)
         pcd_colors.append(masked_colors)
@@ -157,10 +158,10 @@ def save_kf_to_nerfstudio(
         )
 
     # stack all the point clouds
-    pcd_positions_all: Float32[np.ndarray, "num_points 3"] = np.vstack(pcd_positions)
-    pcd_colors_all: UInt8[np.ndarray, "num_points 3"] = np.vstack(pcd_colors)
+    pcd_positions_all: Float32[ndarray, "num_points 3"] = np.vstack(pcd_positions)
+    pcd_colors_all: UInt8[ndarray, "num_points 3"] = np.vstack(pcd_colors)
     # normalize point colors to be between 0 and 1 and a float32
-    pcd_colors_float: Float32[np.ndarray, "num_points 3"] = (
+    pcd_colors_float: Float32[ndarray, "num_points 3"] = (
         pcd_colors_all.astype(np.float32) / 255.0
     )
     # Create an empty point cloud

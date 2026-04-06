@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 from jaxtyping import Bool, Float, Int
+from torch import Tensor
 
 import mast3r_slam.image as img_utils
 from mast3r_slam.config import config
@@ -17,12 +18,12 @@ except ImportError:
 
 
 def match(
-    X11: Float[torch.Tensor, "b h w 3"],
-    X21: Float[torch.Tensor, "b h w 3"],
-    D11: Float[torch.Tensor, "b h w d"],
-    D21: Float[torch.Tensor, "b h w d"],
-    idx_1_to_2_init: Int[torch.Tensor, "b hw"] | None = None,
-) -> tuple[Int[torch.Tensor, "b hw"], Bool[torch.Tensor, "b hw 1"]]:
+    X11: Float[Tensor, "b h w 3"],
+    X21: Float[Tensor, "b h w 3"],
+    D11: Float[Tensor, "b h w d"],
+    D21: Float[Tensor, "b h w d"],
+    idx_1_to_2_init: Int[Tensor, "b hw"] | None = None,
+) -> tuple[Int[Tensor, "b hw"], Bool[Tensor, "b hw 1"]]:
     """Compute dense correspondences from frame 2 to frame 1 via iterative projection.
 
     Args:
@@ -36,16 +37,16 @@ def match(
         A tuple of (idx_1_to_2, valid_match2) where idx_1_to_2 are linear
         pixel indices and valid_match2 is a per-pixel validity mask.
     """
-    idx_1_to_2: Int[torch.Tensor, "b hw"]
-    valid_match2: Bool[torch.Tensor, "b hw 1"]
+    idx_1_to_2: Int[Tensor, "b hw"]
+    valid_match2: Bool[Tensor, "b hw 1"]
     idx_1_to_2, valid_match2 = match_iterative_proj(X11, X21, D11, D21, idx_1_to_2_init)
     return idx_1_to_2, valid_match2
 
 
 def pixel_to_lin(
-    p1: Int[torch.Tensor, "... 2"],
+    p1: Int[Tensor, "... 2"],
     w: int,
-) -> Int[torch.Tensor, "..."]:
+) -> Int[Tensor, "..."]:
     """Convert (u, v) pixel coordinates to linear indices (u + w * v).
 
     Args:
@@ -55,14 +56,14 @@ def pixel_to_lin(
     Returns:
         Linear indices into a flattened (h*w) array.
     """
-    idx_1_to_2: Int[torch.Tensor, "..."] = p1[..., 0] + (w * p1[..., 1])
+    idx_1_to_2: Int[Tensor, "..."] = p1[..., 0] + (w * p1[..., 1])
     return idx_1_to_2
 
 
 def lin_to_pixel(
-    idx_1_to_2: Int[torch.Tensor, "..."],
+    idx_1_to_2: Int[Tensor, "..."],
     w: int,
-) -> Int[torch.Tensor, "... 2"]:
+) -> Int[Tensor, "... 2"]:
     """Convert linear indices back to (u, v) pixel coordinates.
 
     Args:
@@ -72,20 +73,20 @@ def lin_to_pixel(
     Returns:
         Pixel coordinates with last dim (u, v).
     """
-    u: Int[torch.Tensor, "..."] = idx_1_to_2 % w
-    v: Int[torch.Tensor, "..."] = idx_1_to_2 // w
-    p: Int[torch.Tensor, "... 2"] = torch.stack((u, v), dim=-1)
+    u: Int[Tensor, "..."] = idx_1_to_2 % w
+    v: Int[Tensor, "..."] = idx_1_to_2 // w
+    p: Int[Tensor, "... 2"] = torch.stack((u, v), dim=-1)
     return p
 
 
 def prep_for_iter_proj(
-    X11: Float[torch.Tensor, "b h w 3"],
-    X21: Float[torch.Tensor, "b h w 3"],
-    idx_1_to_2_init: Int[torch.Tensor, "b hw"] | None,
+    X11: Float[Tensor, "b h w 3"],
+    X21: Float[Tensor, "b h w 3"],
+    idx_1_to_2_init: Int[Tensor, "b hw"] | None,
 ) -> tuple[
-    Float[torch.Tensor, "b h w 9"],
-    Float[torch.Tensor, "b hw 3"],
-    Float[torch.Tensor, "b hw 2"],
+    Float[Tensor, "b h w 9"],
+    Float[Tensor, "b hw 3"],
+    Float[Tensor, "b hw 2"],
 ]:
     """Prepare inputs for the iterative projection matching kernel.
 
@@ -107,37 +108,37 @@ def prep_for_iter_proj(
     device: torch.device = X11.device
 
     # Ray image
-    rays_img: Float[torch.Tensor, "b h w 3"] = F.normalize(X11, dim=-1)
+    rays_img: Float[Tensor, "b h w 3"] = F.normalize(X11, dim=-1)
     rays_img = rays_img.permute(0, 3, 1, 2)  # (b,3,h,w)
-    gx_img: Float[torch.Tensor, "b 3 h w"]
-    gy_img: Float[torch.Tensor, "b 3 h w"]
+    gx_img: Float[Tensor, "b 3 h w"]
+    gy_img: Float[Tensor, "b 3 h w"]
     gx_img, gy_img = img_utils.img_gradient(rays_img)
-    rays_with_grad_img: Float[torch.Tensor, "b 9 h w"] = torch.cat((rays_img, gx_img, gy_img), dim=1)
+    rays_with_grad_img: Float[Tensor, "b 9 h w"] = torch.cat((rays_img, gx_img, gy_img), dim=1)
     rays_with_grad_img = rays_with_grad_img.permute(
         0, 2, 3, 1
     ).contiguous()  # (b,h,w,c)
 
     # 3D points to project
-    X21_vec: Float[torch.Tensor, "b hw 3"] = X21.view(b, -1, 3)
-    pts3d_norm: Float[torch.Tensor, "b hw 3"] = F.normalize(X21_vec, dim=-1)
+    X21_vec: Float[Tensor, "b hw 3"] = X21.view(b, -1, 3)
+    pts3d_norm: Float[Tensor, "b hw 3"] = F.normalize(X21_vec, dim=-1)
 
     # Initial guesses of projections
     if idx_1_to_2_init is None:
         # Reset to identity mapping
         idx_1_to_2_init = torch.arange(h * w, device=device)[None, :].repeat(b, 1)
-    p_init: Float[torch.Tensor, "b hw 2"] = lin_to_pixel(idx_1_to_2_init, w)
+    p_init: Float[Tensor, "b hw 2"] = lin_to_pixel(idx_1_to_2_init, w)
     p_init = p_init.float()
 
     return rays_with_grad_img, pts3d_norm, p_init
 
 
 def match_iterative_proj(
-    X11: Float[torch.Tensor, "b h w 3"],
-    X21: Float[torch.Tensor, "b h w 3"],
-    D11: Float[torch.Tensor, "b h w d"],
-    D21: Float[torch.Tensor, "b h w d"],
-    idx_1_to_2_init: Int[torch.Tensor, "b hw"] | None = None,
-) -> tuple[Int[torch.Tensor, "b hw"], Bool[torch.Tensor, "b hw 1"]]:
+    X11: Float[Tensor, "b h w 3"],
+    X21: Float[Tensor, "b h w 3"],
+    D11: Float[Tensor, "b h w d"],
+    D21: Float[Tensor, "b h w d"],
+    idx_1_to_2_init: Int[Tensor, "b hw"] | None = None,
+) -> tuple[Int[Tensor, "b hw"], Bool[Tensor, "b hw 1"]]:
     """Run iterative-projection matching followed by optional descriptor refinement.
 
     Args:
@@ -158,14 +159,14 @@ def match_iterative_proj(
     b, h, w = X21.shape[:3]
     device: torch.device = X11.device
 
-    rays_with_grad_img: Float[torch.Tensor, "b h w 9"]
-    pts3d_norm: Float[torch.Tensor, "b hw 3"]
-    p_init: Float[torch.Tensor, "b hw 2"]
+    rays_with_grad_img: Float[Tensor, "b h w 9"]
+    pts3d_norm: Float[Tensor, "b hw 3"]
+    p_init: Float[Tensor, "b hw 2"]
     rays_with_grad_img, pts3d_norm, p_init = prep_for_iter_proj(
         X11, X21, idx_1_to_2_init
     )
-    p1: Float[torch.Tensor, "b hw 2"]
-    valid_proj2: Bool[torch.Tensor, "b hw"]
+    p1: Float[Tensor, "b hw 2"]
+    valid_proj2: Bool[Tensor, "b hw"]
     p1, valid_proj2 = _matching_backends.iter_proj(
         rays_with_grad_img,
         pts3d_norm,
@@ -177,11 +178,11 @@ def match_iterative_proj(
     p1 = p1.long()
 
     # Check for occlusion based on distances
-    batch_inds: Int[torch.Tensor, "b hw"] = torch.arange(b, device=device)[:, None].repeat(1, h * w)
-    dists2: Float[torch.Tensor, "b h w"] = torch.linalg.norm(
+    batch_inds: Int[Tensor, "b hw"] = torch.arange(b, device=device)[:, None].repeat(1, h * w)
+    dists2: Float[Tensor, "b h w"] = torch.linalg.norm(
         X11[batch_inds, p1[..., 1], p1[..., 0], :].reshape(b, h, w, 3) - X21, dim=-1
     )
-    valid_dists2: Bool[torch.Tensor, "b hw"] = (dists2 < cfg["dist_thresh"]).view(b, -1)
+    valid_dists2: Bool[Tensor, "b hw"] = (dists2 < cfg["dist_thresh"]).view(b, -1)
     valid_proj2 = valid_proj2 & valid_dists2
 
     if cfg["radius"] > 0:
@@ -194,6 +195,6 @@ def match_iterative_proj(
         )
 
     # Convert to linear index
-    idx_1_to_2: Int[torch.Tensor, "b hw"] = pixel_to_lin(p1, w)
+    idx_1_to_2: Int[Tensor, "b hw"] = pixel_to_lin(p1, w)
 
     return idx_1_to_2, valid_proj2.unsqueeze(-1)

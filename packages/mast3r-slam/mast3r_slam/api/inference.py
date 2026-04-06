@@ -14,6 +14,7 @@ import torch
 import torch.multiprocessing as mp
 from jaxtyping import Float
 from simplecv.rerun_log_utils import RerunTyroConfig
+from torch import Tensor
 
 import mast3r_slam.evaluate as eval
 from mast3r_slam.config import config, load_config
@@ -114,7 +115,7 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
     if use_calib and not has_calib:
         print("[Warning] No calibration provided for this dataset!")
         sys.exit(0)
-    K: Float[torch.Tensor, "3 3"] | None = None
+    K: Float[Tensor, "3 3"] | None = None
     if use_calib:
         assert dataset.camera_intrinsics is not None
         K = torch.from_numpy(dataset.camera_intrinsics.K_frame).to(device, dtype=torch.float32)
@@ -160,8 +161,8 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
         add_new_kf: bool = False
         if mode == Mode.INIT:
             # Initialize via mono inference, and encoded features needed for database
-            X_init: Float[torch.Tensor, "hw 3"]
-            C_init: Float[torch.Tensor, "hw 1"]
+            X_init: Float[Tensor, "hw 3"]
+            C_init: Float[Tensor, "hw 1"]
             X_init, C_init = mast3r_inference_mono(model, frame)
             frame.update_pointmap(X_init, C_init)
             keyframes.append(frame)
@@ -181,8 +182,8 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
             states.set_frame(frame)
 
         elif mode == Mode.RELOC:
-            X: Float[torch.Tensor, "hw 3"]
-            C: Float[torch.Tensor, "hw 1"]
+            X: Float[Tensor, "hw 3"]
+            C: Float[Tensor, "hw 1"]
             X, C = mast3r_inference_mono(model, frame)
             frame.update_pointmap(X, C)
             states.set_frame(frame)

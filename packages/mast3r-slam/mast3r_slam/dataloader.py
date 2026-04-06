@@ -6,6 +6,7 @@ import numpy as np
 import torch
 from jaxtyping import Float32, UInt8
 from natsort import natsorted
+from numpy import ndarray
 
 try:
     import pyrealsense2 as rs
@@ -59,7 +60,7 @@ class MonocularDataset(torch.utils.data.Dataset):
             A tuple of (timestamp, normalised float image).
         """
         # Call get_image before timestamp for realsense camera
-        img: Float32[np.ndarray, "h w 3"] = self.get_image(index)
+        img: Float32[ndarray, "h w 3"] = self.get_image(index)
         timestamp = self.get_timestamp(index)
         return timestamp, img
 
@@ -74,7 +75,7 @@ class MonocularDataset(torch.utils.data.Dataset):
         """
         return self.timestamps[idx]
 
-    def read_img(self, idx: int) -> UInt8[np.ndarray, "h w 3"]:
+    def read_img(self, idx: int) -> UInt8[ndarray, "h w 3"]:
         """Read the raw RGB image at the given index.
 
         Args:
@@ -85,10 +86,10 @@ class MonocularDataset(torch.utils.data.Dataset):
         """
         img_raw = cv2.imread(self.rgb_files[idx])
         assert img_raw is not None, f"Failed to read image: {self.rgb_files[idx]}"
-        img: UInt8[np.ndarray, "h w 3"] = img_raw
+        img: UInt8[ndarray, "h w 3"] = img_raw
         return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-    def get_image(self, idx: int) -> Float32[np.ndarray, "h w 3"]:
+    def get_image(self, idx: int) -> Float32[ndarray, "h w 3"]:
         """Return the preprocessed float image (optionally undistorted) at the given index.
 
         Args:
@@ -97,7 +98,7 @@ class MonocularDataset(torch.utils.data.Dataset):
         Returns:
             Float32 image in [0, 1] range.
         """
-        raw_img: UInt8[np.ndarray, "h w 3"] = self.read_img(idx)
+        raw_img: UInt8[ndarray, "h w 3"] = self.read_img(idx)
         if self.use_calibration:
             assert self.camera_intrinsics is not None
             raw_img = self.camera_intrinsics.remap(raw_img)
@@ -109,7 +110,7 @@ class MonocularDataset(torch.utils.data.Dataset):
         Returns:
             A tuple of ((processed_h, processed_w), (raw_h, raw_w)).
         """
-        raw_img: UInt8[np.ndarray, "h w 3"] = self.read_img(0)
+        raw_img: UInt8[ndarray, "h w 3"] = self.read_img(0)
         raw_img_shape: tuple[int, int] = raw_img.shape[:2]
         resized = resize_img(raw_img, self.img_size)
         assert isinstance(resized, dict)
@@ -188,7 +189,7 @@ class EurocDataset(MonocularDataset):
             self.img_size, W, H, [*intrinsics, *distortion], always_undistort=True
         )
 
-    def read_img(self, idx: int) -> UInt8[np.ndarray, "h w 3"]:
+    def read_img(self, idx: int) -> UInt8[ndarray, "h w 3"]:
         img_raw = cv2.imread(self.rgb_files[idx], cv2.IMREAD_GRAYSCALE)
         assert img_raw is not None, f"Failed to read image: {self.rgb_files[idx]}"
         img = img_raw
@@ -274,14 +275,14 @@ class RealsenseDataset(MonocularDataset):
     def get_timestamp(self, idx: int) -> float:
         return self.timestamps[idx]
 
-    def read_img(self, idx: int) -> UInt8[np.ndarray, "h w 3"]:
+    def read_img(self, idx: int) -> UInt8[ndarray, "h w 3"]:
         frameset = self.pipeline.wait_for_frames()
         timestamp: float = frameset.get_timestamp()
         timestamp /= 1000
         self.timestamps.append(timestamp)
 
         rgb_frame = frameset.get_color_frame()
-        img: UInt8[np.ndarray, "h w 3"] = np.asanyarray(rgb_frame.get_data())
+        img: UInt8[ndarray, "h w 3"] = np.asanyarray(rgb_frame.get_data())
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = img.astype(self.dtype)
         return img
@@ -302,9 +303,9 @@ class Webcam(MonocularDataset):
     def get_timestamp(self, idx: int) -> float:
         return self.timestamps[idx]
 
-    def read_img(self, idx: int) -> UInt8[np.ndarray, "h w 3"]:
+    def read_img(self, idx: int) -> UInt8[ndarray, "h w 3"]:
         ret: bool
-        img: UInt8[np.ndarray, "h w 3"]
+        img: UInt8[ndarray, "h w 3"]
         ret, img = self.cap.read()
         if not ret:
             raise ValueError("Failed to read image")
@@ -334,7 +335,7 @@ class MP4Dataset(MonocularDataset):
     def __len__(self) -> int:
         return self.total_frames // self.stride
 
-    def read_img(self, idx: int) -> UInt8[np.ndarray, "h w 3"]:
+    def read_img(self, idx: int) -> UInt8[ndarray, "h w 3"]:
         if HAS_TORCHCODEC:
             img = self.decoder[idx * self.stride]  # c,h,w
             img = img.permute(1, 2, 0)
@@ -378,11 +379,11 @@ class Intrinsics:
         img_size: Literal[224, 512],
         W: int,
         H: int,
-        K_orig: Float32[np.ndarray, "3 3"],
-        K: Float32[np.ndarray, "3 3"],
-        distortion: Float32[np.ndarray, "n_distortion"],
-        mapx: Float32[np.ndarray, "H W"] | None,
-        mapy: Float32[np.ndarray, "H W"] | None,
+        K_orig: Float32[ndarray, "3 3"],
+        K: Float32[ndarray, "3 3"],
+        distortion: Float32[ndarray, "n_distortion"],
+        mapx: Float32[ndarray, "H W"] | None,
+        mapy: Float32[ndarray, "H W"] | None,
     ) -> None:
         self.img_size: Literal[224, 512] = img_size
         """Target image size for MASt3R (224 or 512)."""
@@ -390,29 +391,29 @@ class Intrinsics:
         """Original image width in pixels."""
         self.H: int = H
         """Original image height in pixels."""
-        self.K_orig: Float32[np.ndarray, "3 3"] = K_orig
+        self.K_orig: Float32[ndarray, "3 3"] = K_orig
         """Original 3x3 camera intrinsic matrix."""
-        self.K: Float32[np.ndarray, "3 3"] = K
+        self.K: Float32[ndarray, "3 3"] = K
         """Optimal 3x3 camera intrinsic matrix after undistortion."""
-        self.distortion: Float32[np.ndarray, "n_distortion"] = distortion
+        self.distortion: Float32[ndarray, "n_distortion"] = distortion
         """Distortion coefficients."""
-        self.mapx: Float32[np.ndarray, "H W"] | None = mapx
+        self.mapx: Float32[ndarray, "H W"] | None = mapx
         """Horizontal undistortion remap table."""
-        self.mapy: Float32[np.ndarray, "H W"] | None = mapy
+        self.mapy: Float32[ndarray, "H W"] | None = mapy
         """Vertical undistortion remap table."""
         resize_result = resize_img(
             np.zeros((H, W, 3)), self.img_size, return_transformation=True
         )
         assert isinstance(resize_result, tuple)
         _, (scale_w, scale_h, half_crop_w, half_crop_h) = resize_result
-        self.K_frame: Float32[np.ndarray, "3 3"] = self.K.copy()
+        self.K_frame: Float32[ndarray, "3 3"] = self.K.copy()
         """Intrinsic matrix transformed to the MASt3R frame coordinate system."""
         self.K_frame[0, 0] = self.K[0, 0] / scale_w
         self.K_frame[1, 1] = self.K[1, 1] / scale_h
         self.K_frame[0, 2] = self.K[0, 2] / scale_w - half_crop_w
         self.K_frame[1, 2] = self.K[1, 2] / scale_h - half_crop_h
 
-    def remap(self, img: UInt8[np.ndarray, "H W 3"]) -> UInt8[np.ndarray, "H W 3"]:
+    def remap(self, img: UInt8[ndarray, "H W 3"]) -> UInt8[ndarray, "H W 3"]:
         """Apply undistortion remap to an image.
 
         Args:
@@ -452,13 +453,13 @@ class Intrinsics:
         fy: float = calib[1]
         cx: float = calib[2]
         cy: float = calib[3]
-        distortion: Float32[np.ndarray, "n_distortion"] = np.zeros(4)
+        distortion: Float32[ndarray, "n_distortion"] = np.zeros(4)
         if len(calib) > 4:
             distortion = np.array(calib[4:])
-        K: Float32[np.ndarray, "3 3"] = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]])
-        K_opt: Float32[np.ndarray, "3 3"] = K.copy()
-        mapx: Float32[np.ndarray, "H W"] | None = None
-        mapy: Float32[np.ndarray, "H W"] | None = None
+        K: Float32[ndarray, "3 3"] = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]])
+        K_opt: Float32[ndarray, "3 3"] = K.copy()
+        mapx: Float32[ndarray, "H W"] | None = None
+        mapy: Float32[ndarray, "H W"] | None = None
         center: bool = config["dataset"]["center_principle_point"]
         K_opt, _ = cv2.getOptimalNewCameraMatrix(
             K, distortion, (W, H), 0, (W, H), centerPrincipalPoint=center

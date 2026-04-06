@@ -24,7 +24,7 @@ class FactorGraph:
         self,
         model: object,
         frames: SharedKeyframes,
-        K: Float[torch.Tensor, "3 3"] | None = None,
+        K: Float[Tensor, "3 3"] | None = None,
         device: str = "cuda",
     ) -> None:
         self.model: object = model
@@ -41,7 +41,7 @@ class FactorGraph:
         self.Q_jj2ii: Float32[Tensor, "n_edges hw 1"] = torch.as_tensor([], dtype=torch.float32, device=self.device)
         self.window_size: float = self.cfg["window_size"]
 
-        self.K: Float[torch.Tensor, "3 3"] | None = K
+        self.K: Float[Tensor, "3 3"] | None = K
 
     def add_factors(
         self,
@@ -80,12 +80,12 @@ class FactorGraph:
             assert kf_j.pos is not None
             feat_j_list.append(kf_j.feat)
             pos_j_list.append(kf_j.pos)
-        feat_i: Float[torch.Tensor, "b n_patches feat_dim"] = torch.cat(feat_i_list)
-        feat_j: Float[torch.Tensor, "b n_patches feat_dim"] = torch.cat(feat_j_list)
-        pos_i: Int[torch.Tensor, "b n_patches 2"] = torch.cat(pos_i_list)
-        pos_j: Int[torch.Tensor, "b n_patches 2"] = torch.cat(pos_j_list)
-        shape_i: list[Int[torch.Tensor, "1 2"]] = [kf_i.img_true_shape for kf_i in kf_ii]
-        shape_j: list[Int[torch.Tensor, "1 2"]] = [kf_j.img_true_shape for kf_j in kf_jj]
+        feat_i: Float[Tensor, "b n_patches feat_dim"] = torch.cat(feat_i_list)
+        feat_j: Float[Tensor, "b n_patches feat_dim"] = torch.cat(feat_j_list)
+        pos_i: Int[Tensor, "b n_patches 2"] = torch.cat(pos_i_list)
+        pos_j: Int[Tensor, "b n_patches 2"] = torch.cat(pos_j_list)
+        shape_i: list[Int[Tensor, "1 2"]] = [kf_i.img_true_shape for kf_i in kf_ii]
+        shape_j: list[Int[Tensor, "1 2"]] = [kf_j.img_true_shape for kf_j in kf_jj]
 
         (
             idx_i2j,
@@ -100,33 +100,33 @@ class FactorGraph:
             self.model, feat_i, pos_i, feat_j, pos_j, shape_i, shape_j
         )
 
-        batch_inds: Int[torch.Tensor, "b hw"] = torch.arange(idx_i2j.shape[0], device=idx_i2j.device)[
+        batch_inds: Int[Tensor, "b hw"] = torch.arange(idx_i2j.shape[0], device=idx_i2j.device)[
             :, None
         ].repeat(1, idx_i2j.shape[1])
-        Qj: Float[torch.Tensor, "b hw 1"] = torch.sqrt(Qii[batch_inds, idx_i2j] * Qji)
-        Qi: Float[torch.Tensor, "b hw 1"] = torch.sqrt(Qjj[batch_inds, idx_j2i] * Qij)
+        Qj: Float[Tensor, "b hw 1"] = torch.sqrt(Qii[batch_inds, idx_i2j] * Qji)
+        Qi: Float[Tensor, "b hw 1"] = torch.sqrt(Qjj[batch_inds, idx_j2i] * Qij)
 
-        valid_Qj: Bool[torch.Tensor, "b hw 1"] = Qj > self.cfg["Q_conf"]
-        valid_Qi: Bool[torch.Tensor, "b hw 1"] = Qi > self.cfg["Q_conf"]
-        valid_j: Bool[torch.Tensor, "b hw 1"] = valid_match_j & valid_Qj
-        valid_i: Bool[torch.Tensor, "b hw 1"] = valid_match_i & valid_Qi
+        valid_Qj: Bool[Tensor, "b hw 1"] = Qj > self.cfg["Q_conf"]
+        valid_Qi: Bool[Tensor, "b hw 1"] = Qi > self.cfg["Q_conf"]
+        valid_j: Bool[Tensor, "b hw 1"] = valid_match_j & valid_Qj
+        valid_i: Bool[Tensor, "b hw 1"] = valid_match_i & valid_Qi
         nj: int = valid_j.shape[1] * valid_j.shape[2]
         ni: int = valid_i.shape[1] * valid_i.shape[2]
-        match_frac_j: Float[torch.Tensor, "b"] = valid_j.sum(dim=(1, 2)) / nj
-        match_frac_i: Float[torch.Tensor, "b"] = valid_i.sum(dim=(1, 2)) / ni
+        match_frac_j: Float[Tensor, "b"] = valid_j.sum(dim=(1, 2)) / nj
+        match_frac_i: Float[Tensor, "b"] = valid_i.sum(dim=(1, 2)) / ni
 
-        ii_tensor: Int[torch.Tensor, "b"] = torch.as_tensor(ii, device=self.device)
-        jj_tensor: Int[torch.Tensor, "b"] = torch.as_tensor(jj, device=self.device)
+        ii_tensor: Int[Tensor, "b"] = torch.as_tensor(ii, device=self.device)
+        jj_tensor: Int[Tensor, "b"] = torch.as_tensor(jj, device=self.device)
 
         # NOTE: Saying we need both edge directions to be above thrhreshold to accept either
-        invalid_edges: Bool[torch.Tensor, "b"] = torch.minimum(match_frac_j, match_frac_i) < min_match_frac
-        consecutive_edges: Bool[torch.Tensor, "b"] = ii_tensor == (jj_tensor - 1)
+        invalid_edges: Bool[Tensor, "b"] = torch.minimum(match_frac_j, match_frac_i) < min_match_frac
+        consecutive_edges: Bool[Tensor, "b"] = ii_tensor == (jj_tensor - 1)
         invalid_edges = (~consecutive_edges) & invalid_edges
 
         if invalid_edges.any() and is_reloc:
             return False
 
-        valid_edges: Bool[torch.Tensor, "b"] = ~invalid_edges
+        valid_edges: Bool[Tensor, "b"] = ~invalid_edges
         ii_tensor = ii_tensor[valid_edges]
         jj_tensor = jj_tensor[valid_edges]
         idx_i2j = idx_i2j[valid_edges]
@@ -148,7 +148,7 @@ class FactorGraph:
         added_new_edges: bool = bool(valid_edges.sum() > 0)
         return added_new_edges
 
-    def get_unique_kf_idx(self) -> Int[torch.Tensor, "n_unique"]:
+    def get_unique_kf_idx(self) -> Int[Tensor, "n_unique"]:
         """Return sorted unique keyframe indices from all edges.
 
         Returns:
@@ -180,11 +180,11 @@ class FactorGraph:
 
     def get_poses_points(
         self,
-        unique_kf_idx: Int[torch.Tensor, "n_unique"],
+        unique_kf_idx: Int[Tensor, "n_unique"],
     ) -> tuple[
-        Float[torch.Tensor, "n_unique hw 3"],
+        Float[Tensor, "n_unique hw 3"],
         lietorch.Sim3,
-        Float[torch.Tensor, "n_unique hw 1"],
+        Float[Tensor, "n_unique hw 1"],
     ]:
         """Read poses, point maps, and confidences for a set of keyframe indices.
 
@@ -204,10 +204,10 @@ class FactorGraph:
             avg_conf: Float[Tensor, "hw 1"] | None = kf.get_average_conf()
             assert avg_conf is not None
             C_list.append(avg_conf)
-        Xs: Float[torch.Tensor, "n_unique hw 3"] = torch.stack(X_list)
+        Xs: Float[Tensor, "n_unique hw 3"] = torch.stack(X_list)
         world_T_cams: lietorch.Sim3 = lietorch.Sim3(torch.stack([kf.world_T_cam.data for kf in kfs]))
 
-        Cs: Float[torch.Tensor, "n_unique hw 1"] = torch.stack(C_list)
+        Cs: Float[Tensor, "n_unique hw 1"] = torch.stack(C_list)
 
         return Xs, world_T_cams, Cs
 
@@ -218,21 +218,21 @@ class FactorGraph:
         the updated poses back into the shared keyframe buffer.
         """
         pin: int = self.cfg["pin"]
-        unique_kf_idx: Int[torch.Tensor, "n_unique"] = self.get_unique_kf_idx()
+        unique_kf_idx: Int[Tensor, "n_unique"] = self.get_unique_kf_idx()
         n_unique_kf: int = unique_kf_idx.numel()
         if n_unique_kf <= pin:
             return
 
-        Xs: Float[torch.Tensor, "n_unique hw 3"]
+        Xs: Float[Tensor, "n_unique hw 3"]
         world_T_cams: lietorch.Sim3
-        Cs: Float[torch.Tensor, "n_unique hw 1"]
+        Cs: Float[Tensor, "n_unique hw 1"]
         Xs, world_T_cams, Cs = self.get_poses_points(unique_kf_idx)
 
-        ii: Int[torch.Tensor, "2n_edges"]
-        jj: Int[torch.Tensor, "2n_edges"]
-        idx_ii2jj: Int[torch.Tensor, "2n_edges hw"]
-        valid_match: Bool[torch.Tensor, "2n_edges hw 1"]
-        Q_ii2jj: Float[torch.Tensor, "2n_edges hw 1"]
+        ii: Int[Tensor, "2n_edges"]
+        jj: Int[Tensor, "2n_edges"]
+        idx_ii2jj: Int[Tensor, "2n_edges hw"]
+        valid_match: Bool[Tensor, "2n_edges hw 1"]
+        Q_ii2jj: Float[Tensor, "2n_edges hw 1"]
         ii, jj, idx_ii2jj, valid_match, Q_ii2jj = self.prep_two_way_edges()
 
         C_thresh: float = self.cfg["C_conf"]
@@ -242,7 +242,7 @@ class FactorGraph:
         sigma_dist: float = self.cfg["sigma_dist"]
         delta_thresh: float = self.cfg["delta_norm"]
 
-        pose_data: Float[torch.Tensor, "n_unique sim3_dim"] = world_T_cams.data[:, 0, :]
+        pose_data: Float[Tensor, "n_unique sim3_dim"] = world_T_cams.data[:, 0, :]
         _backends.gauss_newton_rays(
             pose_data,
             Xs,
@@ -271,27 +271,27 @@ class FactorGraph:
         into the shared keyframe buffer.
         """
         assert self.K is not None
-        K: Float[torch.Tensor, "3 3"] = self.K
+        K: Float[Tensor, "3 3"] = self.K
         pin: int = self.cfg["pin"]
-        unique_kf_idx: Int[torch.Tensor, "n_unique"] = self.get_unique_kf_idx()
+        unique_kf_idx: Int[Tensor, "n_unique"] = self.get_unique_kf_idx()
         n_unique_kf: int = unique_kf_idx.numel()
         if n_unique_kf <= pin:
             return
 
-        Xs: Float[torch.Tensor, "n_unique hw 3"]
+        Xs: Float[Tensor, "n_unique hw 3"]
         world_T_cams: lietorch.Sim3
-        Cs: Float[torch.Tensor, "n_unique hw 1"]
+        Cs: Float[Tensor, "n_unique hw 1"]
         Xs, world_T_cams, Cs = self.get_poses_points(unique_kf_idx)
 
         # Constrain points to ray
         img_size: tuple[int, int] = (int(self.frames[0].img.shape[-2]), int(self.frames[0].img.shape[-1]))
         Xs = constrain_points_to_ray(img_size, Xs, K)
 
-        ii: Int[torch.Tensor, "2n_edges"]
-        jj: Int[torch.Tensor, "2n_edges"]
-        idx_ii2jj: Int[torch.Tensor, "2n_edges hw"]
-        valid_match: Bool[torch.Tensor, "2n_edges hw 1"]
-        Q_ii2jj: Float[torch.Tensor, "2n_edges hw 1"]
+        ii: Int[Tensor, "2n_edges"]
+        jj: Int[Tensor, "2n_edges"]
+        idx_ii2jj: Int[Tensor, "2n_edges hw"]
+        valid_match: Bool[Tensor, "2n_edges hw 1"]
+        Q_ii2jj: Float[Tensor, "2n_edges hw 1"]
         ii, jj, idx_ii2jj, valid_match, Q_ii2jj = self.prep_two_way_edges()
 
         C_thresh: float = self.cfg["C_conf"]
@@ -303,7 +303,7 @@ class FactorGraph:
         sigma_depth: float = self.cfg["sigma_depth"]
         delta_thresh: float = self.cfg["delta_norm"]
 
-        pose_data: Float[torch.Tensor, "n_unique sim3_dim"] = world_T_cams.data[:, 0, :]
+        pose_data: Float[Tensor, "n_unique sim3_dim"] = world_T_cams.data[:, 0, :]
 
         img_size = (int(self.frames[0].img.shape[-2]), int(self.frames[0].img.shape[-1]))
         height: int

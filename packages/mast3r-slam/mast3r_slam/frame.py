@@ -57,7 +57,7 @@ class Frame:
     score: Float[Tensor, ""] | None = None
     """Scalar filtering score (set by ``best_score`` filtering mode)."""
 
-    def get_score(self, C: Float[torch.Tensor, "hw 1"]) -> Float[torch.Tensor, ""]:
+    def get_score(self, C: Float[Tensor, "hw 1"]) -> Float[Tensor, ""]:
         """Compute a scalar filtering score from confidence values.
 
         Args:
@@ -67,7 +67,7 @@ class Frame:
             Scalar score tensor (median or mean of C, depending on config).
         """
         filtering_score: str = config["tracking"]["filtering_score"]
-        score: Float[torch.Tensor, ""]
+        score: Float[Tensor, ""]
         if filtering_score == "median":
             score = torch.median(C)  # Is this slower than mean? Is it worth it?
         elif filtering_score == "mean":
@@ -78,8 +78,8 @@ class Frame:
 
     def update_pointmap(
         self,
-        X: Float[torch.Tensor, "hw 3"],
-        C: Float[torch.Tensor, "hw 1"],
+        X: Float[Tensor, "hw 3"],
+        C: Float[Tensor, "hw 1"],
     ) -> None:
         """Update the canonical point map using the configured filtering strategy.
 
@@ -108,7 +108,7 @@ class Frame:
             self.C = C.clone()
             self.N = 1
         elif filtering_mode == "best_score":
-            new_score: Float[torch.Tensor, ""] = self.get_score(C)
+            new_score: Float[Tensor, ""] = self.get_score(C)
             assert self.score is not None
             if new_score > self.score:
                 self.X_canon = X.clone()
@@ -118,7 +118,7 @@ class Frame:
         elif filtering_mode == "indep_conf":
             assert self.C is not None
             assert self.X_canon is not None
-            new_mask: Bool[torch.Tensor, "hw 1"] = C > self.C
+            new_mask: Bool[Tensor, "hw 1"] = C > self.C
             self.X_canon[new_mask.repeat(1, 3)] = X[new_mask.repeat(1, 3)]
             self.C[new_mask] = C[new_mask]
             self.N = 1
@@ -133,34 +133,34 @@ class Frame:
             assert self.X_canon is not None
 
             def cartesian_to_spherical(
-                P: Float[torch.Tensor, "hw 3"],
-            ) -> Float[torch.Tensor, "hw 3"]:
-                r: Float[torch.Tensor, "hw 1"] = torch.linalg.norm(P, dim=-1, keepdim=True)
-                x: Float[torch.Tensor, "hw 1"]
-                y: Float[torch.Tensor, "hw 1"]
-                z: Float[torch.Tensor, "hw 1"]
+                P: Float[Tensor, "hw 3"],
+            ) -> Float[Tensor, "hw 3"]:
+                r: Float[Tensor, "hw 1"] = torch.linalg.norm(P, dim=-1, keepdim=True)
+                x: Float[Tensor, "hw 1"]
+                y: Float[Tensor, "hw 1"]
+                z: Float[Tensor, "hw 1"]
                 x, y, z = torch.tensor_split(P, 3, dim=-1)
-                phi: Float[torch.Tensor, "hw 1"] = torch.atan2(y, x)
-                theta: Float[torch.Tensor, "hw 1"] = torch.acos(z / r)
-                spherical: Float[torch.Tensor, "hw 3"] = torch.cat((r, phi, theta), dim=-1)
+                phi: Float[Tensor, "hw 1"] = torch.atan2(y, x)
+                theta: Float[Tensor, "hw 1"] = torch.acos(z / r)
+                spherical: Float[Tensor, "hw 3"] = torch.cat((r, phi, theta), dim=-1)
                 return spherical
 
             def spherical_to_cartesian(
-                spherical: Float[torch.Tensor, "hw 3"],
-            ) -> Float[torch.Tensor, "hw 3"]:
-                r: Float[torch.Tensor, "hw 1"]
-                phi: Float[torch.Tensor, "hw 1"]
-                theta: Float[torch.Tensor, "hw 1"]
+                spherical: Float[Tensor, "hw 3"],
+            ) -> Float[Tensor, "hw 3"]:
+                r: Float[Tensor, "hw 1"]
+                phi: Float[Tensor, "hw 1"]
+                theta: Float[Tensor, "hw 1"]
                 r, phi, theta = torch.tensor_split(spherical, 3, dim=-1)
-                x: Float[torch.Tensor, "hw 1"] = r * torch.sin(theta) * torch.cos(phi)
-                y: Float[torch.Tensor, "hw 1"] = r * torch.sin(theta) * torch.sin(phi)
-                z: Float[torch.Tensor, "hw 1"] = r * torch.cos(theta)
-                P: Float[torch.Tensor, "hw 3"] = torch.cat((x, y, z), dim=-1)
+                x: Float[Tensor, "hw 1"] = r * torch.sin(theta) * torch.cos(phi)
+                y: Float[Tensor, "hw 1"] = r * torch.sin(theta) * torch.sin(phi)
+                z: Float[Tensor, "hw 1"] = r * torch.cos(theta)
+                P: Float[Tensor, "hw 3"] = torch.cat((x, y, z), dim=-1)
                 return P
 
-            spherical1: Float[torch.Tensor, "hw 3"] = cartesian_to_spherical(self.X_canon)
-            spherical2: Float[torch.Tensor, "hw 3"] = cartesian_to_spherical(X)
-            spherical: Float[torch.Tensor, "hw 3"] = ((self.C * spherical1) + (C * spherical2)) / (self.C + C)
+            spherical1: Float[Tensor, "hw 3"] = cartesian_to_spherical(self.X_canon)
+            spherical2: Float[Tensor, "hw 3"] = cartesian_to_spherical(X)
+            spherical: Float[Tensor, "hw 3"] = ((self.C * spherical1) + (C * spherical2)) / (self.C + C)
 
             self.X_canon = spherical_to_cartesian(spherical)
             self.C = self.C + C
@@ -169,7 +169,7 @@ class Frame:
         self.N_updates += 1
         return
 
-    def get_average_conf(self) -> Float[torch.Tensor, "hw 1"] | None:
+    def get_average_conf(self) -> Float[Tensor, "hw 1"] | None:
         """Return confidence divided by observation count, or None if no confidence."""
         return self.C / self.N if self.C is not None else None
 
@@ -197,10 +197,10 @@ def create_frame(
     assert isinstance(resized, dict)
     img_tensor = resized["img"]
     assert isinstance(img_tensor, torch.Tensor)
-    rgb: Float[torch.Tensor, "1 3 h w"] = img_tensor.to(device=device)
-    img_shape: Int[torch.Tensor, "1 2"] = torch.tensor(resized["true_shape"], device=device)
-    img_true_shape: Int[torch.Tensor, "1 2"] = img_shape.clone()
-    uimg: Float[torch.Tensor, "h w 3"] = torch.from_numpy(resized["unnormalized_img"]) / 255.0
+    rgb: Float[Tensor, "1 3 h w"] = img_tensor.to(device=device)
+    img_shape: Int[Tensor, "1 2"] = torch.tensor(resized["true_shape"], device=device)
+    img_true_shape: Int[Tensor, "1 2"] = img_shape.clone()
+    uimg: Float[Tensor, "h w 3"] = torch.from_numpy(resized["unnormalized_img"]) / 255.0
     downsample: int = config["dataset"]["img_downsample"]
     if downsample > 1:
         uimg = uimg[::downsample, ::downsample]
@@ -243,16 +243,16 @@ class SharedStates:
 
         # fmt:off
         # shared state for the current frame (used for reloc/visualization)
-        self.dataset_idx: Int[torch.Tensor, "1"] = torch.zeros(1, device=device, dtype=torch.int).share_memory_()
-        self.img: Float[torch.Tensor, "3 h w"] = torch.zeros(3, h, w, device=device, dtype=dtype).share_memory_()
-        self.uimg: Float[torch.Tensor, "h w 3"] = torch.zeros(h, w, 3, device="cpu", dtype=dtype).share_memory_()
-        self.img_shape: Int[torch.Tensor, "1 2"] = torch.zeros(1, 2, device=device, dtype=torch.int).share_memory_()
-        self.img_true_shape: Int[torch.Tensor, "1 2"] = torch.zeros(1, 2, device=device, dtype=torch.int).share_memory_()
-        self.world_T_cam: Float[torch.Tensor, "1 8"] = lietorch.Sim3.Identity(1, device=device, dtype=dtype).data.share_memory_()
-        self.X: Float[torch.Tensor, "hw 3"] = torch.zeros(h * w, 3, device=device, dtype=dtype).share_memory_()
-        self.C: Float[torch.Tensor, "hw 1"] = torch.zeros(h * w, 1, device=device, dtype=dtype).share_memory_()
-        self.feat: Float[torch.Tensor, "1 n_patches feat_dim"] = torch.zeros(1, self.num_patches, self.feat_dim, device=device, dtype=dtype).share_memory_()
-        self.pos: Int[torch.Tensor, "1 n_patches 2"] = torch.zeros(1, self.num_patches, 2, device=device, dtype=torch.long).share_memory_()
+        self.dataset_idx: Int[Tensor, "1"] = torch.zeros(1, device=device, dtype=torch.int).share_memory_()
+        self.img: Float[Tensor, "3 h w"] = torch.zeros(3, h, w, device=device, dtype=dtype).share_memory_()
+        self.uimg: Float[Tensor, "h w 3"] = torch.zeros(h, w, 3, device="cpu", dtype=dtype).share_memory_()
+        self.img_shape: Int[Tensor, "1 2"] = torch.zeros(1, 2, device=device, dtype=torch.int).share_memory_()
+        self.img_true_shape: Int[Tensor, "1 2"] = torch.zeros(1, 2, device=device, dtype=torch.int).share_memory_()
+        self.world_T_cam: Float[Tensor, "1 8"] = lietorch.Sim3.Identity(1, device=device, dtype=dtype).data.share_memory_()
+        self.X: Float[Tensor, "hw 3"] = torch.zeros(h * w, 3, device=device, dtype=dtype).share_memory_()
+        self.C: Float[Tensor, "hw 1"] = torch.zeros(h * w, 1, device=device, dtype=dtype).share_memory_()
+        self.feat: Float[Tensor, "1 n_patches feat_dim"] = torch.zeros(1, self.num_patches, self.feat_dim, device=device, dtype=dtype).share_memory_()
+        self.pos: Int[Tensor, "1 n_patches 2"] = torch.zeros(1, self.num_patches, 2, device=device, dtype=torch.long).share_memory_()
         # fmt: on
 
     def set_frame(self, frame: Frame) -> None:
@@ -383,20 +383,20 @@ class SharedKeyframes:
         self.num_patches: int = h * w // (16 * 16)
 
         # fmt:off
-        self.dataset_idx: Int[torch.Tensor, "buf"] = torch.zeros(buffer, device=device, dtype=torch.int).share_memory_()
-        self.img: Float[torch.Tensor, "buf 3 h w"] = torch.zeros(buffer, 3, h, w, device=device, dtype=dtype).share_memory_()
-        self.uimg: Float[torch.Tensor, "buf h w 3"] = torch.zeros(buffer, h, w, 3, device="cpu", dtype=dtype).share_memory_()
-        self.img_shape: Int[torch.Tensor, "buf 1 2"] = torch.zeros(buffer, 1, 2, device=device, dtype=torch.int).share_memory_()
-        self.img_true_shape: Int[torch.Tensor, "buf 1 2"] = torch.zeros(buffer, 1, 2, device=device, dtype=torch.int).share_memory_()
-        self.world_T_cam: Float[torch.Tensor, "buf 1 sim3_dim"] = torch.zeros(buffer, 1, lietorch.Sim3.embedded_dim, device=device, dtype=dtype).share_memory_()
-        self.X: Float[torch.Tensor, "buf hw 3"] = torch.zeros(buffer, h * w, 3, device=device, dtype=dtype).share_memory_()
-        self.C: Float[torch.Tensor, "buf hw 1"] = torch.zeros(buffer, h * w, 1, device=device, dtype=dtype).share_memory_()
-        self.N: Int[torch.Tensor, "buf"] = torch.zeros(buffer, device=device, dtype=torch.int).share_memory_()
-        self.N_updates: Int[torch.Tensor, "buf"] = torch.zeros(buffer, device=device, dtype=torch.int).share_memory_()
-        self.feat: Float[torch.Tensor, "buf 1 n_patches feat_dim"] = torch.zeros(buffer, 1, self.num_patches, self.feat_dim, device=device, dtype=dtype).share_memory_()
-        self.pos: Int[torch.Tensor, "buf 1 n_patches 2"] = torch.zeros(buffer, 1, self.num_patches, 2, device=device, dtype=torch.long).share_memory_()
-        self.is_dirty: Bool[torch.Tensor, "buf 1"] = torch.zeros(buffer, 1, device=device, dtype=torch.bool).share_memory_()
-        self.K: Float[torch.Tensor, "3 3"] = torch.zeros(3, 3, device=device, dtype=dtype).share_memory_()
+        self.dataset_idx: Int[Tensor, "buf"] = torch.zeros(buffer, device=device, dtype=torch.int).share_memory_()
+        self.img: Float[Tensor, "buf 3 h w"] = torch.zeros(buffer, 3, h, w, device=device, dtype=dtype).share_memory_()
+        self.uimg: Float[Tensor, "buf h w 3"] = torch.zeros(buffer, h, w, 3, device="cpu", dtype=dtype).share_memory_()
+        self.img_shape: Int[Tensor, "buf 1 2"] = torch.zeros(buffer, 1, 2, device=device, dtype=torch.int).share_memory_()
+        self.img_true_shape: Int[Tensor, "buf 1 2"] = torch.zeros(buffer, 1, 2, device=device, dtype=torch.int).share_memory_()
+        self.world_T_cam: Float[Tensor, "buf 1 sim3_dim"] = torch.zeros(buffer, 1, lietorch.Sim3.embedded_dim, device=device, dtype=dtype).share_memory_()
+        self.X: Float[Tensor, "buf hw 3"] = torch.zeros(buffer, h * w, 3, device=device, dtype=dtype).share_memory_()
+        self.C: Float[Tensor, "buf hw 1"] = torch.zeros(buffer, h * w, 1, device=device, dtype=dtype).share_memory_()
+        self.N: Int[Tensor, "buf"] = torch.zeros(buffer, device=device, dtype=torch.int).share_memory_()
+        self.N_updates: Int[Tensor, "buf"] = torch.zeros(buffer, device=device, dtype=torch.int).share_memory_()
+        self.feat: Float[Tensor, "buf 1 n_patches feat_dim"] = torch.zeros(buffer, 1, self.num_patches, self.feat_dim, device=device, dtype=dtype).share_memory_()
+        self.pos: Int[Tensor, "buf 1 n_patches 2"] = torch.zeros(buffer, 1, self.num_patches, 2, device=device, dtype=torch.long).share_memory_()
+        self.is_dirty: Bool[Tensor, "buf 1"] = torch.zeros(buffer, 1, device=device, dtype=torch.bool).share_memory_()
+        self.K: Float[Tensor, "3 3"] = torch.zeros(3, 3, device=device, dtype=dtype).share_memory_()
         # fmt: on
 
     def __getitem__(self, idx) -> Frame:
@@ -501,18 +501,18 @@ class SharedKeyframes:
         with self.lock:
             self.world_T_cam[idx] = world_T_cams.data
 
-    def get_dirty_idx(self) -> Int[torch.Tensor, "n_dirty"]:
+    def get_dirty_idx(self) -> Int[Tensor, "n_dirty"]:
         """Return indices of keyframes modified since the last call, then clear the dirty flags.
 
         Returns:
             1-D tensor of dirty keyframe buffer indices.
         """
         with self.lock:
-            idx: Int[torch.Tensor, "n_dirty"] = torch.where(self.is_dirty)[0]
+            idx: Int[Tensor, "n_dirty"] = torch.where(self.is_dirty)[0]
             self.is_dirty[:] = False
             return idx
 
-    def set_intrinsics(self, K: Float[torch.Tensor, "3 3"]) -> None:
+    def set_intrinsics(self, K: Float[Tensor, "3 3"]) -> None:
         """Set the shared camera intrinsic matrix (requires ``use_calib`` config).
 
         Args:
@@ -522,7 +522,7 @@ class SharedKeyframes:
         with self.lock:
             self.K[:] = K
 
-    def get_intrinsics(self) -> Float[torch.Tensor, "3 3"]:
+    def get_intrinsics(self) -> Float[Tensor, "3 3"]:
         """Return the shared camera intrinsic matrix (requires ``use_calib`` config).
 
         Returns:
