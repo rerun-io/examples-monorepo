@@ -171,13 +171,13 @@ def streaming_mast3r_slam_fn(
         timestamp, img = dataset[i]
 
         # get frames last camera pose
-        T_WC: lietorch.Sim3 = (
+        world_T_cam: lietorch.Sim3 = (
             lietorch.Sim3.Identity(1, device=DEVICE)
             if i == 0
-            else states.get_frame().T_WC
+            else states.get_frame().world_T_cam
         )
         frame: Frame = create_frame(
-            i, img, T_WC, img_size=dataset.img_size, device=DEVICE
+            i, img, world_T_cam, img_size=dataset.img_size, device=DEVICE
         )
 
         if mode == Mode.INIT:

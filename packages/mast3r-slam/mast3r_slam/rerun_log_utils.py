@@ -67,7 +67,7 @@ class RerunLogger:
         world_T_cam_gl_list: list[np.ndarray] = []
         for i in range(n_kf):
             kf: Frame = keyframes[i]
-            se3: lietorch.SE3 = as_SE3(kf.T_WC.cpu())
+            se3: lietorch.SE3 = as_SE3(kf.world_T_cam.cpu())
             mat4x4_cv: Float32[np.ndarray, "4 4"] = se3.matrix().numpy().astype(np.float32)[0]
             mat4x4_gl: Float32[np.ndarray, "4 4"] = conventions.convert_pose(
                 mat4x4_cv, src_convention=conventions.CC.CV, dst_convention=conventions.CC.GL
@@ -116,7 +116,7 @@ class RerunLogger:
         rgb_img_float: Float32[torch.Tensor, "H W 3"] = current_frame.uimg
         rgb_img: UInt8[np.ndarray, "H W 3"] = (rgb_img_float * 255).numpy().astype(np.uint8)
 
-        se3_pose: lietorch.SE3 = as_SE3(current_frame.T_WC.cpu())
+        se3_pose: lietorch.SE3 = as_SE3(current_frame.world_T_cam.cpu())
         matb4x4: Float32[np.ndarray, "1 4 4"] = se3_pose.matrix().numpy().astype(dtype=np.float32)
         mat4x4: Float32[np.ndarray, "4 4"] = matb4x4[0]  # Extract the first batch element
 
@@ -162,7 +162,7 @@ class RerunLogger:
 
         for kf_idx in range(N_keyframes):
             keyframe: Frame = keyframes[kf_idx]
-            se3_pose = as_SE3(keyframe.T_WC.cpu())
+            se3_pose = as_SE3(keyframe.world_T_cam.cpu())
             matb4x4 = se3_pose.matrix().numpy().astype(dtype=np.float32)
             mat4x4 = matb4x4[0]  # Extract the first batch element
 
@@ -230,21 +230,21 @@ class RerunLogger:
             )
 
         # Log the edges
-        T_WCi: lietorch.Sim3 | None = None
-        T_WCj: lietorch.Sim3 | None = None
+        world_T_cami: lietorch.Sim3 | None = None
+        world_T_camj: lietorch.Sim3 | None = None
         with states.lock:
             ii: Int[torch.Tensor, "num_edges"] = torch.tensor(states.edges_ii, dtype=torch.long)
             jj: Int[torch.Tensor, "num_edges"] = torch.tensor(states.edges_jj, dtype=torch.long)
             if ii.numel() > 0 and jj.numel() > 0:
-                T_WCi = lietorch.Sim3(keyframes.T_WC[ii, 0])
-                T_WCj = lietorch.Sim3(keyframes.T_WC[jj, 0])
+                world_T_cami = lietorch.Sim3(keyframes.world_T_cam[ii, 0])
+                world_T_camj = lietorch.Sim3(keyframes.world_T_cam[jj, 0])
         if ii.numel() > 0 and jj.numel() > 0:
-            assert T_WCi is not None
-            assert T_WCj is not None
-            t_WCi: Float32[np.ndarray, "num_edges 3"] = T_WCi.matrix()[:, :3, 3].cpu().numpy()
-            t_WCj: Float32[np.ndarray, "num_edges 3"] = T_WCj.matrix()[:, :3, 3].cpu().numpy()
+            assert world_T_cami is not None
+            assert world_T_camj is not None
+            t_world_cami: Float32[np.ndarray, "num_edges 3"] = world_T_cami.matrix()[:, :3, 3].cpu().numpy()
+            t_world_camj: Float32[np.ndarray, "num_edges 3"] = world_T_camj.matrix()[:, :3, 3].cpu().numpy()
             line_strips: list[list[float]] = []
-            for t_i, t_j in zip(t_WCi, t_WCj):
+            for t_i, t_j in zip(t_world_cami, t_world_camj):
                 line_strips.append(t_i.tolist())
                 line_strips.append(t_j.tolist())
             rr.log(

@@ -154,8 +154,8 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
         timestamp, img = dataset[i]
 
         # get frames last camera pose
-        T_WC: lietorch.Sim3 = lietorch.Sim3.Identity(1, device=device) if i == 0 else states.get_frame().T_WC
-        frame: Frame = create_frame(i, img, T_WC, img_size=dataset.img_size, device=device)
+        world_T_cam: lietorch.Sim3 = lietorch.Sim3.Identity(1, device=device) if i == 0 else states.get_frame().world_T_cam
+        frame: Frame = create_frame(i, img, world_T_cam, img_size=dataset.img_size, device=device)
 
         add_new_kf: bool = False
         if mode == Mode.INIT:
@@ -291,7 +291,7 @@ def relocalization(
                 )
                 print("Success! Relocalized")
                 successful_loop_closure = True
-                keyframes.T_WC[n_kf - 1] = keyframes.T_WC[kf_idx[0]].clone()
+                keyframes.world_T_cam[n_kf - 1] = keyframes.world_T_cam[kf_idx[0]].clone()
             else:
                 keyframes.pop_last()
                 print("Failed to relocalize")
