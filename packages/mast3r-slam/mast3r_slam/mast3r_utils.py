@@ -5,6 +5,7 @@ import PIL
 import torch
 from dust3r.utils.image import ImgNorm
 from jaxtyping import Float32
+from numpy import ndarray
 from mast3r.model import AsymmetricMASt3R
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from simplecv.ops import conventions
@@ -412,8 +413,8 @@ def frame_to_extrinsics(frame: object) -> Extrinsics:
         An ``Extrinsics`` in GL (RUB) convention.
     """
     se3 = as_SE3(frame.world_T_cam.cpu())
-    mat4x4_cv: Float32[np.ndarray, "4 4"] = se3.matrix().numpy().astype(np.float32)[0]
-    mat4x4_gl: Float32[np.ndarray, "4 4"] = conventions.convert_pose(
+    mat4x4_cv: Float32[ndarray, "4 4"] = se3.matrix().numpy().astype(np.float32)[0]
+    mat4x4_gl: Float32[ndarray, "4 4"] = conventions.convert_pose(
         mat4x4_cv, src_convention=conventions.CC.CV, dst_convention=conventions.CC.GL
     )
     return Extrinsics(
