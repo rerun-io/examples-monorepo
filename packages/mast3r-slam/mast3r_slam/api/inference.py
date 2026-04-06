@@ -2,7 +2,6 @@ import contextlib
 import sys
 import time
 from dataclasses import dataclass
-from multiprocessing.managers import SyncManager
 from pathlib import Path
 from timeit import default_timer as timer
 from typing import Literal
@@ -17,6 +16,7 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
 
 import mast3r_slam.evaluate as eval
+from mast3r_slam.backend_lifecycle import SlamBackend
 from mast3r_slam.config import config, load_config
 from mast3r_slam.dataloader import MonocularDataset, load_dataset
 from mast3r_slam.frame import Frame, Mode, SharedKeyframes, SharedStates, create_frame
@@ -96,16 +96,12 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
     print(inf_config.dataset)
     print(config)
 
-    manager: SyncManager = mp.Manager()
-
     dataset: MonocularDataset = load_dataset(inf_config.dataset, img_size=inf_config.img_size)
     dataset.subsample(config["dataset"]["subsample"])
 
     h: int
     w: int
     h, w = dataset.get_img_shape()[0]
-    keyframes: SharedKeyframes = SharedKeyframes(manager, h, w)
-    states: SharedStates = SharedStates(manager, h, w)
 
     model = load_mast3r(device=device)
     model.share_memory()
@@ -119,7 +115,6 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
     if use_calib:
         assert dataset.camera_intrinsics is not None
         K = torch.from_numpy(dataset.camera_intrinsics.K_frame).to(device, dtype=torch.float32)
-        keyframes.set_intrinsics(K)
 
     # remove the trajectory from the previous run
     if dataset.save_results:
@@ -134,108 +129,111 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
         if recon_file.exists():
             recon_file.unlink()
 
-    tracker: FrameTracker = FrameTracker(model, keyframes, device)
+    with SlamBackend(inf_config.config, model, h, w, K, device=device) as ctx:
+        keyframes: SharedKeyframes = ctx.keyframes
+        states: SharedStates = ctx.states
+        tracker: FrameTracker = FrameTracker(model, keyframes, device)
 
-    backend: mp.Process = mp.Process(target=_safe_run_backend, args=(inf_config.config, model, states, keyframes, K))
-    backend.start()
+        i: int = 0
+        fps_timer: float = time.time()
+        start_time: float = timer()
 
-    i: int = 0
-    fps_timer: float = time.time()
-    start_time: float = timer()
+        while True:
+            ctx.check_backend()
+            rr.set_time("frame", sequence=i)
+            mode: Mode = states.get_mode()
 
-    while True:
-        rr.set_time("frame", sequence=i)
-        mode: Mode = states.get_mode()
+            n_frames: int = len(dataset) if inf_config.max_frames is None else min(inf_config.max_frames, len(dataset))
+            if i == n_frames:
+                states.set_mode(Mode.TERMINATED)
+                break
 
-        n_frames: int = len(dataset) if inf_config.max_frames is None else min(inf_config.max_frames, len(dataset))
-        if i == n_frames:
-            states.set_mode(Mode.TERMINATED)
-            break
+            timestamp, img = dataset[i]
 
-        timestamp, img = dataset[i]
+            # get frames last camera pose
+            world_T_cam: lietorch.Sim3 = lietorch.Sim3.Identity(1, device=device) if i == 0 else states.get_frame().world_T_cam
+            frame: Frame = create_frame(i, img, world_T_cam, img_size=dataset.img_size, device=device)
 
-        # get frames last camera pose
-        world_T_cam: lietorch.Sim3 = lietorch.Sim3.Identity(1, device=device) if i == 0 else states.get_frame().world_T_cam
-        frame: Frame = create_frame(i, img, world_T_cam, img_size=dataset.img_size, device=device)
+            add_new_kf: bool = False
+            if mode == Mode.INIT:
+                # Initialize via mono inference, and encoded features needed for database
+                X_init: Float[Tensor, "hw 3"]
+                C_init: Float[Tensor, "hw 1"]
+                X_init, C_init = mast3r_inference_mono(model, frame)
+                frame.update_pointmap(X_init, C_init)
+                keyframes.append(frame)
+                states.queue_global_optimization(len(keyframes) - 1)
+                states.set_mode(Mode.TRACKING)
+                states.set_frame(frame)
+                rr_logger.log_frame(frame, keyframes, states)
+                i += 1
+                continue
 
-        add_new_kf: bool = False
-        if mode == Mode.INIT:
-            # Initialize via mono inference, and encoded features needed for database
-            X_init: Float[Tensor, "hw 3"]
-            C_init: Float[Tensor, "hw 1"]
-            X_init, C_init = mast3r_inference_mono(model, frame)
-            frame.update_pointmap(X_init, C_init)
-            keyframes.append(frame)
-            states.queue_global_optimization(len(keyframes) - 1)
-            states.set_mode(Mode.TRACKING)
-            states.set_frame(frame)
+            if mode == Mode.TRACKING:
+                match_info: list
+                try_reloc: bool
+                add_new_kf, match_info, try_reloc = tracker.track(frame)
+                if try_reloc:
+                    states.set_mode(Mode.RELOC)
+                states.set_frame(frame)
+
+            elif mode == Mode.RELOC:
+                X: Float[Tensor, "hw 3"]
+                C: Float[Tensor, "hw 1"]
+                X, C = mast3r_inference_mono(model, frame)
+                frame.update_pointmap(X, C)
+                states.set_frame(frame)
+                states.queue_reloc()
+                # In single threaded mode, make sure relocalization happen for every frame
+                while config["single_thread"]:
+                    with states.lock:
+                        if states.reloc_sem.value == 0:
+                            break
+                    time.sleep(0.01)
+
+            else:
+                raise RuntimeError(f"Invalid mode: {mode!r}")
+
+            if add_new_kf:
+                keyframes.append(frame)
+                states.queue_global_optimization(len(keyframes) - 1)
+                # In single threaded mode, wait for the backend to finish
+                while config["single_thread"]:
+                    with states.lock:
+                        if len(states.global_optimizer_tasks) == 0:
+                            break
+                    time.sleep(0.01)
+
+            ## rerun log stuff
             rr_logger.log_frame(frame, keyframes, states)
+            # log time
+            if i % 30 == 0:
+                FPS: float = i / (time.time() - fps_timer)
+                print(f"FPS: {FPS}")
             i += 1
-            continue
 
-        if mode == Mode.TRACKING:
-            match_info: list
-            try_reloc: bool
-            add_new_kf, match_info, try_reloc = tracker.track(frame)
-            if try_reloc:
-                states.set_mode(Mode.RELOC)
-            states.set_frame(frame)
+        if dataset.save_results:
+            save_dir, seq_name = eval.prepare_savedir(inf_config, dataset)
+            eval.save_ATE(save_dir, f"{seq_name}.txt", dataset.timestamps, keyframes)
+            eval.save_reconstruction(save_dir, f"{seq_name}.pt", dataset.timestamps, keyframes)
+            eval.save_keyframes(save_dir / "keyframes" / seq_name, dataset.timestamps, keyframes)
 
-        elif mode == Mode.RELOC:
-            X: Float[Tensor, "hw 3"]
-            C: Float[Tensor, "hw 1"]
-            X, C = mast3r_inference_mono(model, frame)
-            frame.update_pointmap(X, C)
-            states.set_frame(frame)
-            states.queue_reloc()
-            # In single threaded mode, make sure relocalization happen for every frame
-            while config["single_thread"]:
-                with states.lock:
-                    if states.reloc_sem.value == 0:
-                        break
-                time.sleep(0.01)
+        if inf_config.ns_save_path is not None:
+            pcd = save_kf_to_nerfstudio(
+                ns_save_path=inf_config.ns_save_path,
+                keyframes=keyframes,
+            )
+            rr.log(
+                f"{parent_log_path}/final_pointcloud",
+                rr.Points3D(positions=pcd.points, colors=pcd.colors),
+            )
 
-        else:
-            raise RuntimeError(f"Invalid mode: {mode!r}")
+        print("done")
+        print(f"Inference time: {format_time(timer() - start_time)}")
+        print(f"Processed {len(keyframes)}")
+        ctx.join()
 
-        if add_new_kf:
-            keyframes.append(frame)
-            states.queue_global_optimization(len(keyframes) - 1)
-            # In single threaded mode, wait for the backend to finish
-            while config["single_thread"]:
-                with states.lock:
-                    if len(states.global_optimizer_tasks) == 0:
-                        break
-                time.sleep(0.01)
-
-        ## rerun log stuff
-        rr_logger.log_frame(frame, keyframes, states)
-        # log time
-        if i % 30 == 0:
-            FPS: float = i / (time.time() - fps_timer)
-            print(f"FPS: {FPS}")
-        i += 1
-
-    if dataset.save_results:
-        save_dir, seq_name = eval.prepare_savedir(inf_config, dataset)
-        eval.save_ATE(save_dir, f"{seq_name}.txt", dataset.timestamps, keyframes)
-        eval.save_reconstruction(save_dir, f"{seq_name}.pt", dataset.timestamps, keyframes)
-        eval.save_keyframes(save_dir / "keyframes" / seq_name, dataset.timestamps, keyframes)
-
-    if inf_config.ns_save_path is not None:
-        pcd = save_kf_to_nerfstudio(
-            ns_save_path=inf_config.ns_save_path,
-            keyframes=keyframes,
-        )
-        rr.log(
-            f"{parent_log_path}/final_pointcloud",
-            rr.Points3D(positions=pcd.points, colors=pcd.colors),
-        )
-
-    print("done")
-    print(f"Inference time: {format_time(timer() - start_time)}")
-    print(f"Processed {len(keyframes)}")
-    backend.join()
+    # SlamBackend.__exit__ handles: backend shutdown, manager shutdown, GPU cleanup
     if not inf_config.no_viz:
         print("All visualization processes terminated")
 
@@ -304,15 +302,6 @@ def relocalization(
                 factor_graph.solve_GN_rays()
         return successful_loop_closure
 
-
-def _safe_run_backend(*args):
-    """Wrapper that catches and prints exceptions from the backend subprocess."""
-    import traceback
-
-    try:
-        run_backend(*args)
-    except Exception:
-        traceback.print_exc()
 
 
 def run_backend(config_path, model, states, keyframes, K) -> None:
