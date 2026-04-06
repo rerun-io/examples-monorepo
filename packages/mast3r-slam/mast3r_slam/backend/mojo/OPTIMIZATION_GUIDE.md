@@ -10,8 +10,8 @@ Replace CUDA/C++ matching kernels (`iter_proj`, `refine_matches`) with Mojo equi
 
 ```
 Python caller (mast3r_slam/matching.py)
-  → try: from mast3r_slam import _mojo_backends  (preferred, no C++ build)
-    except: from mast3r_slam import _backends    (CUDA fallback)
+  → try: import mast3r_slam_mojo_backends  (preferred, no C++ build)
+    except: from mast3r_slam import _backends  (CUDA fallback)
   → iter_proj_py() / refine_matches_py()   (Mojo, receives PythonObject)
     → Extract shapes, pointers from PyTorch tensors
     → get_cached_context_ptr() → enqueue_function[kernel]()

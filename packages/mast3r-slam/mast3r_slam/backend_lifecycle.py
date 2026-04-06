@@ -17,9 +17,10 @@ Usage::
 """
 
 import gc
-import multiprocessing as _mp
+import multiprocessing
 import traceback
 from multiprocessing.managers import SyncManager
+from queue import Empty
 from types import TracebackType
 
 import torch
@@ -61,14 +62,14 @@ class SlamBackend:
 
         self._manager: SyncManager | None = None
         self._backend: mp.Process | None = None
-        self._error_queue: object | None = None
+        self._error_queue: multiprocessing.Queue | None = None
 
         self.states: SharedStates | None = None
         self.keyframes: SharedKeyframes | None = None
 
     def __enter__(self) -> "SlamBackend":
         self._manager = mp.Manager()
-        self._error_queue = object()
+        self._error_queue = multiprocessing.Queue()
 
         self.keyframes = SharedKeyframes(self._manager, self._h, self._w, device=self._device)
         self.states = SharedStates(self._manager, self._h, self._w, device=self._device)
@@ -137,7 +138,8 @@ class SlamBackend:
 
     def _cleanup_gpu(self) -> None:
         """Release cached GPU memory."""
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         gc.collect()
 
     def check_backend(self) -> None:
@@ -151,13 +153,16 @@ class SlamBackend:
         if self._backend.is_alive():
             return
 
-        # Backend died — check error queue for details
+        # Backend died — try to read error details from queue (non-blocking).
         error_msg: str = "Backend process died unexpectedly"
-        if self._error_queue is not None and not self._error_queue.empty():
-            exc_type_name: str
-            tb_str: str
-            exc_type_name, tb_str = self._error_queue.get()
-            error_msg = f"Backend process crashed with {exc_type_name}:\n{tb_str}"
+        if self._error_queue is not None:
+            try:
+                exc_type_name: str
+                tb_str: str
+                exc_type_name, tb_str = self._error_queue.get_nowait()
+                error_msg = f"Backend process crashed with {exc_type_name}:\n{tb_str}"
+            except Empty:
+                pass  # Backend died without writing to the queue
 
         raise BackendError(error_msg)
 
@@ -178,7 +183,7 @@ def _backend_entry(
     states: SharedStates,
     keyframes: SharedKeyframes,
     K: Float[Tensor, "3 3"] | None,
-    error_queue: "object",
+    error_queue: multiprocessing.Queue,
 ) -> None:
     """Entry point for the backend subprocess.
 

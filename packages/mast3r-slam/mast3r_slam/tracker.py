@@ -85,7 +85,7 @@ class FrameTracker:
         else:
             K = None
 
-        # Get poses and point correspondneces and confidences
+        # Get poses and point correspondences and confidences
         Xf: Float[Tensor, "hw 3"]
         Xk: Float[Tensor, "hw 3"]
         world_T_camf: lietorch.Sim3

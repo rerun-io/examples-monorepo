@@ -8,7 +8,7 @@ Usage:
     pixi run -e mast3r-slam-dev python tools/bench_matching_kernels.py
 
 Requires both mast3r_slam._backends (.so from CUDA build) and
-mast3r_slam._mojo_backends (.so from Mojo build) to be importable.
+mast3r_slam_mojo_backends (.so from Mojo build) to be importable.
 """
 
 from __future__ import annotations

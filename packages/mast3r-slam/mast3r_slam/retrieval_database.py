@@ -99,7 +99,7 @@ class RetrievalDatabase(Retriever):
 
         # Only query if already an image
         topk_image_inds: list[int] = []
-        topk_codes: Int64[ndarray, "n_local k"] | None = None  # Change this if actualy querying
+        topk_codes: Int64[ndarray, "n_local k"] | None = None  # Set when querying; remains None otherwise.
         if self.kf_counter > 0:
             ranks: Float[ndarray, "1 n_images"]
             ranked_scores: Float[ndarray, "1 n_images"]
@@ -120,7 +120,7 @@ class RetrievalDatabase(Retriever):
 
         return topk_image_inds
 
-    # The reason we need this function is becasue kernel and inverted file not defined when manually updating ivf_builder
+    # The reason we need this function is because kernel and inverted file not defined when manually updating ivf_builder
     def query(
         self,
         feat: Float32[ndarray, "n_local d"],

@@ -1,7 +1,7 @@
 """Compare Mojo GPU kernels against CUDA originals for numerical correctness and performance.
 
 Uses the CUDA mast3r_slam._backends as oracle and validates that the Mojo
-mast3r_slam._mojo_backends produces matching outputs within tolerance.
+mast3r_slam_mojo_backends produces matching outputs within tolerance.
 
 Includes both parametrized deterministic tests and Hypothesis property-based
 fuzz tests that randomise shapes, seeds, and kernel parameters.
