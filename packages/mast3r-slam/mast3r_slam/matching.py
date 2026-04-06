@@ -1,9 +1,21 @@
+import sys
+from pathlib import Path
+
 import torch
 import torch.nn.functional as F
 from jaxtyping import Float, Int, Bool
 
 import mast3r_slam.image as img_utils
 from mast3r_slam.config import config
+
+# The compiled backend .so files (mast3r_slam_backends, mast3r_slam_mojo_backends)
+# live in the package root (packages/mast3r-slam/).  When scripts are invoked
+# from tools/, sys.path[0] points to tools/ rather than the package root,
+# making the .so files invisible to the importer.  Ensure the package root is
+# on sys.path before attempting the import.
+_pkg_root: str = str(Path(__file__).resolve().parent.parent)
+if _pkg_root not in sys.path:
+    sys.path.insert(0, _pkg_root)
 
 # Matching kernel backend selection: prefer Mojo (faster, no C++ build step),
 # fall back to CUDA C++ if Mojo .so is not built. Both provide identical
