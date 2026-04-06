@@ -1,6 +1,7 @@
 import lietorch
 import torch
-from jaxtyping import Bool, Float
+from jaxtyping import Bool, Float, Int
+from torch import Tensor
 
 
 def skew_sym(x: Float[torch.Tensor, "... 3"]) -> Float[torch.Tensor, "... 3 3"]:
@@ -168,12 +169,12 @@ def get_pixel_coords(
     img_size: tuple[int, int],
     device: torch.device,
     dtype: torch.dtype,
-) -> torch.Tensor:
+) -> Float[Tensor, "b h w 2"]:
     """Generate a (b, h, w, 2) grid of pixel coordinates."""
     grid_h: int
     grid_w: int
     grid_h, grid_w = img_size
     u, v = torch.meshgrid(torch.arange(grid_w), torch.arange(grid_h), indexing="xy")
-    uv: torch.Tensor = torch.stack((u, v), dim=-1).unsqueeze(0).repeat(b, 1, 1, 1)
-    uv = uv.to(device=device, dtype=dtype)
+    uv_int: Int[Tensor, "b h w 2"] = torch.stack((u, v), dim=-1).unsqueeze(0).repeat(b, 1, 1, 1)
+    uv: Float[Tensor, "b h w 2"] = uv_int.to(device=device, dtype=dtype)
     return uv

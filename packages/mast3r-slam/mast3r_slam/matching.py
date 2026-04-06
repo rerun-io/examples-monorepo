@@ -107,7 +107,7 @@ def prep_for_iter_proj(
     device: torch.device = X11.device
 
     # Ray image
-    rays_img: torch.Tensor = F.normalize(X11, dim=-1)
+    rays_img: Float[torch.Tensor, "b h w 3"] = F.normalize(X11, dim=-1)
     rays_img = rays_img.permute(0, 3, 1, 2)  # (b,3,h,w)
     gx_img: Float[torch.Tensor, "b 3 h w"]
     gy_img: Float[torch.Tensor, "b 3 h w"]
@@ -125,7 +125,7 @@ def prep_for_iter_proj(
     if idx_1_to_2_init is None:
         # Reset to identity mapping
         idx_1_to_2_init = torch.arange(h * w, device=device)[None, :].repeat(b, 1)
-    p_init: torch.Tensor = lin_to_pixel(idx_1_to_2_init, w)
+    p_init: Float[torch.Tensor, "b hw 2"] = lin_to_pixel(idx_1_to_2_init, w)
     p_init = p_init.float()
 
     return rays_with_grad_img, pts3d_norm, p_init

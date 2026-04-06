@@ -1,7 +1,7 @@
 """Unit tests for mast3r_slam.geometry pure functions."""
 
 import torch
-from jaxtyping import Float
+from jaxtyping import Bool, Float
 
 from mast3r_slam.geometry import backproject, get_pixel_coords, point_to_dist, point_to_ray_dist, project_calib, skew_sym
 
@@ -76,7 +76,7 @@ def test_project_backproject_roundtrip() -> None:
     P_recon: Float[torch.Tensor, "5 3"] = backproject(uv, z, K)
 
     # Only check valid projections
-    valid_mask: torch.Tensor = valid.squeeze(-1)
+    valid_mask: Bool[torch.Tensor, "5"] = valid.squeeze(-1)
     if valid_mask.any():
         torch.testing.assert_close(P_recon[valid_mask], P[valid_mask], atol=1e-4, rtol=1e-4)
 

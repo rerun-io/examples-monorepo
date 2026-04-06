@@ -1,6 +1,7 @@
 import lietorch
 import torch
-from jaxtyping import Bool, Float
+from jaxtyping import Bool, Float, Int
+from torch import Tensor
 
 try:
     from beartype.roar import BeartypeException
@@ -43,7 +44,7 @@ class FrameTracker:
     # Initialize with identity indexing of size (1,n)
     def reset_idx_f2k(self) -> None:
         """Reset the frame-to-keyframe correspondence cache to identity."""
-        self.idx_f2k: torch.Tensor | None = None
+        self.idx_f2k: Int[Tensor, "1 hw"] | None = None
 
     def track(self, frame: Frame) -> tuple[bool, list, bool]:
         """Track the frame pose against the last keyframe.
@@ -150,7 +151,7 @@ class FrameTracker:
         self.keyframes[len(self.keyframes) - 1] = keyframe
 
         # Keyframe selection
-        n_valid: torch.Tensor = valid_kf.sum()
+        n_valid: Int[Tensor, ""] = valid_kf.sum()
         match_frac_k: Float[torch.Tensor, ""] = n_valid / valid_kf.numel()
         unique_frac_f: float = (
             torch.unique(idx_f2k[valid_match_k[:, 0]]).shape[0] / valid_kf.numel()
@@ -179,10 +180,10 @@ class FrameTracker:
         self,
         frame: Frame,
         keyframe: Frame,
-        idx_f2k: torch.Tensor,
+        idx_f2k: Int[Tensor, "hw"],
         img_size: tuple[int, int],
         use_calib: bool,
-        K: Float[torch.Tensor, "3 3"] | None = None,
+        K: Float[Tensor, "3 3"] | None = None,
     ) -> tuple[
         Float[torch.Tensor, "hw 3"],
         Float[torch.Tensor, "hw 3"],

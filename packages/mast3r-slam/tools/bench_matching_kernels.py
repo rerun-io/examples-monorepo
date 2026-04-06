@@ -77,7 +77,7 @@ def bench(fn: Callable[..., object], warmup: int = 50, runs: int = 500) -> Bench
         torch.cuda.synchronize()
         timings.append(start.elapsed_time(end))
 
-    t: torch.Tensor = torch.tensor(timings)
+    t: Float[torch.Tensor, "n_runs"] = torch.tensor(timings)
     return BenchResult(
         median_ms=float(t.median()),
         mean_ms=float(t.mean()),
@@ -92,30 +92,30 @@ def bench(fn: Callable[..., object], warmup: int = 50, runs: int = 500) -> Bench
 
 def make_iter_proj_data(
     batch: int, h: int, w: int, seed: int = 42,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[Float[torch.Tensor, "b h w 9"], Float[torch.Tensor, "b hw 3"], Float[torch.Tensor, "b hw 2"]]:
     """Generate synthetic inputs for iter_proj."""
     gen: torch.Generator = torch.Generator(device=DEVICE).manual_seed(seed)
     hw: int = h * w
     rays: Float[torch.Tensor, "b h w 3"] = torch.randn(batch, h, w, 3, device=DEVICE, generator=gen)
     rays = rays / rays.norm(dim=-1, keepdim=True).clamp(min=1e-6)
-    gx: torch.Tensor = torch.randn(batch, h, w, 3, device=DEVICE, generator=gen) * 0.01
-    gy: torch.Tensor = torch.randn(batch, h, w, 3, device=DEVICE, generator=gen) * 0.01
-    rays_img: torch.Tensor = torch.cat([rays, gx, gy], dim=-1).contiguous()
-    pts: torch.Tensor = torch.randn(batch, hw, 3, device=DEVICE, generator=gen)
-    pts_norm: torch.Tensor = (pts / pts.norm(dim=-1, keepdim=True).clamp(min=1e-6)).contiguous()
-    p_init: torch.Tensor = (torch.rand(batch, hw, 2, device=DEVICE, generator=gen) * (w - 4) + 2.0).contiguous()
+    gx: Float[torch.Tensor, "b h w 3"] = torch.randn(batch, h, w, 3, device=DEVICE, generator=gen) * 0.01
+    gy: Float[torch.Tensor, "b h w 3"] = torch.randn(batch, h, w, 3, device=DEVICE, generator=gen) * 0.01
+    rays_img: Float[torch.Tensor, "b h w 9"] = torch.cat([rays, gx, gy], dim=-1).contiguous()
+    pts: Float[torch.Tensor, "b hw 3"] = torch.randn(batch, hw, 3, device=DEVICE, generator=gen)
+    pts_norm: Float[torch.Tensor, "b hw 3"] = (pts / pts.norm(dim=-1, keepdim=True).clamp(min=1e-6)).contiguous()
+    p_init: Float[torch.Tensor, "b hw 2"] = (torch.rand(batch, hw, 2, device=DEVICE, generator=gen) * (w - 4) + 2.0).contiguous()
     return rays_img, pts_norm, p_init
 
 
 def make_refine_data(
     batch: int, h: int, w: int, fdim: int, seed: int = 42,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[Float[torch.Tensor, "b h w d"], Float[torch.Tensor, "b hw d"], Int[torch.Tensor, "b hw 2"]]:
     """Generate synthetic inputs for refine_matches."""
     gen: torch.Generator = torch.Generator(device=DEVICE).manual_seed(seed)
     hw: int = h * w
-    D11: torch.Tensor = torch.randn(batch, h, w, fdim, device=DEVICE, generator=gen)
+    D11: Float[torch.Tensor, "b h w d"] = torch.randn(batch, h, w, fdim, device=DEVICE, generator=gen)
     D11 = (D11 / D11.norm(dim=-1, keepdim=True).clamp(min=1e-6)).contiguous()
-    D21: torch.Tensor = torch.randn(batch, hw, fdim, device=DEVICE, generator=gen)
+    D21: Float[torch.Tensor, "b hw d"] = torch.randn(batch, hw, fdim, device=DEVICE, generator=gen)
     D21 = (D21 / D21.norm(dim=-1, keepdim=True).clamp(min=1e-6)).contiguous()
     p1: Int[torch.Tensor, "b hw 2"] = torch.randint(4, min(h, w) - 4, (batch, hw, 2), device=DEVICE)
     return D11, D21, p1

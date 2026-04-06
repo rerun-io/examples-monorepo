@@ -1,7 +1,7 @@
 import math
 
 import torch
-from jaxtyping import Float
+from jaxtyping import Bool, Float
 
 
 def check_convergence(
@@ -31,6 +31,6 @@ def huber(r: Float[torch.Tensor, "..."], k: float = 1.345) -> Float[torch.Tensor
     """Compute Huber weighting function: 1 where |r| < k, else k/|r|."""
     unit: Float[torch.Tensor, "1"] = torch.ones((1), dtype=r.dtype, device=r.device)
     r_abs: Float[torch.Tensor, "..."] = torch.abs(r)
-    mask: torch.Tensor = r_abs < k
+    mask: Bool[torch.Tensor, "..."] = r_abs < k
     w: Float[torch.Tensor, "..."] = torch.where(mask, unit, k / r_abs)
     return w

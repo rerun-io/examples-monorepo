@@ -1,6 +1,7 @@
 import lietorch
 import torch
-from jaxtyping import Bool, Float, Int
+from jaxtyping import Bool, Float, Float32, Int
+from torch import Tensor
 
 from mast3r_slam import _backends
 from mast3r_slam.config import config
@@ -30,14 +31,14 @@ class FactorGraph:
         self.frames: SharedKeyframes = frames
         self.device: str = device
         self.cfg: dict = config["local_opt"]
-        self.ii: torch.Tensor = torch.as_tensor([], dtype=torch.long, device=self.device)
-        self.jj: torch.Tensor = torch.as_tensor([], dtype=torch.long, device=self.device)
-        self.idx_ii2jj: torch.Tensor = torch.as_tensor([], dtype=torch.long, device=self.device)
-        self.idx_jj2ii: torch.Tensor = torch.as_tensor([], dtype=torch.long, device=self.device)
-        self.valid_match_j: torch.Tensor = torch.as_tensor([], dtype=torch.bool, device=self.device)
-        self.valid_match_i: torch.Tensor = torch.as_tensor([], dtype=torch.bool, device=self.device)
-        self.Q_ii2jj: torch.Tensor = torch.as_tensor([], dtype=torch.float32, device=self.device)
-        self.Q_jj2ii: torch.Tensor = torch.as_tensor([], dtype=torch.float32, device=self.device)
+        self.ii: Int[Tensor, "n_edges"] = torch.as_tensor([], dtype=torch.long, device=self.device)
+        self.jj: Int[Tensor, "n_edges"] = torch.as_tensor([], dtype=torch.long, device=self.device)
+        self.idx_ii2jj: Int[Tensor, "n_edges hw"] = torch.as_tensor([], dtype=torch.long, device=self.device)
+        self.idx_jj2ii: Int[Tensor, "n_edges hw"] = torch.as_tensor([], dtype=torch.long, device=self.device)
+        self.valid_match_j: Bool[Tensor, "n_edges hw 1"] = torch.as_tensor([], dtype=torch.bool, device=self.device)
+        self.valid_match_i: Bool[Tensor, "n_edges hw 1"] = torch.as_tensor([], dtype=torch.bool, device=self.device)
+        self.Q_ii2jj: Float32[Tensor, "n_edges hw 1"] = torch.as_tensor([], dtype=torch.float32, device=self.device)
+        self.Q_jj2ii: Float32[Tensor, "n_edges hw 1"] = torch.as_tensor([], dtype=torch.float32, device=self.device)
         self.window_size: float = self.cfg["window_size"]
 
         self.K: Float[torch.Tensor, "3 3"] | None = K
@@ -65,10 +66,10 @@ class FactorGraph:
         """
         kf_ii: list[Frame] = [self.frames[idx] for idx in ii]
         kf_jj: list[Frame] = [self.frames[idx] for idx in jj]
-        feat_i_list: list[torch.Tensor] = []
-        feat_j_list: list[torch.Tensor] = []
-        pos_i_list: list[torch.Tensor] = []
-        pos_j_list: list[torch.Tensor] = []
+        feat_i_list: list[Float[Tensor, "1 n_patches feat_dim"]] = []
+        feat_j_list: list[Float[Tensor, "1 n_patches feat_dim"]] = []
+        pos_i_list: list[Int[Tensor, "1 n_patches 2"]] = []
+        pos_j_list: list[Int[Tensor, "1 n_patches 2"]] = []
         for kf_i in kf_ii:
             assert kf_i.feat is not None
             assert kf_i.pos is not None
@@ -157,18 +158,24 @@ class FactorGraph:
 
     def prep_two_way_edges(
         self,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[
+        Int[Tensor, "2n_edges"],
+        Int[Tensor, "2n_edges"],
+        Int[Tensor, "2n_edges hw"],
+        Bool[Tensor, "2n_edges hw 1"],
+        Float[Tensor, "2n_edges hw 1"],
+    ]:
         """Concatenate forward and backward edges into symmetric form.
 
         Returns:
             A tuple of (ii, jj, idx_ii2jj, valid_match, Q_ii2jj) with
             doubled edges (original + reversed).
         """
-        ii: torch.Tensor = torch.cat((self.ii, self.jj), dim=0)
-        jj: torch.Tensor = torch.cat((self.jj, self.ii), dim=0)
-        idx_ii2jj: torch.Tensor = torch.cat((self.idx_ii2jj, self.idx_jj2ii), dim=0)
-        valid_match: torch.Tensor = torch.cat((self.valid_match_j, self.valid_match_i), dim=0)
-        Q_ii2jj: torch.Tensor = torch.cat((self.Q_ii2jj, self.Q_jj2ii), dim=0)
+        ii: Int[Tensor, "2n_edges"] = torch.cat((self.ii, self.jj), dim=0)
+        jj: Int[Tensor, "2n_edges"] = torch.cat((self.jj, self.ii), dim=0)
+        idx_ii2jj: Int[Tensor, "2n_edges hw"] = torch.cat((self.idx_ii2jj, self.idx_jj2ii), dim=0)
+        valid_match: Bool[Tensor, "2n_edges hw 1"] = torch.cat((self.valid_match_j, self.valid_match_i), dim=0)
+        Q_ii2jj: Float[Tensor, "2n_edges hw 1"] = torch.cat((self.Q_ii2jj, self.Q_jj2ii), dim=0)
         return ii, jj, idx_ii2jj, valid_match, Q_ii2jj
 
     def get_poses_points(
@@ -189,12 +196,12 @@ class FactorGraph:
             and average confidence values.
         """
         kfs: list[Frame] = [self.frames[idx] for idx in unique_kf_idx]
-        X_list: list[torch.Tensor] = []
-        C_list: list[torch.Tensor] = []
+        X_list: list[Float[Tensor, "hw 3"]] = []
+        C_list: list[Float[Tensor, "hw 1"]] = []
         for kf in kfs:
             assert kf.X_canon is not None
             X_list.append(kf.X_canon)
-            avg_conf: torch.Tensor | None = kf.get_average_conf()
+            avg_conf: Float[Tensor, "hw 1"] | None = kf.get_average_conf()
             assert avg_conf is not None
             C_list.append(avg_conf)
         Xs: Float[torch.Tensor, "n_unique hw 3"] = torch.stack(X_list)

@@ -3,9 +3,10 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import torch
 from asmk import io_helpers
-from jaxtyping import Float, Int
+from jaxtyping import Float, Float32, Int, Int64
 from mast3r.retrieval.model import how_select_local
 from mast3r.retrieval.processor import Retriever
+from numpy import ndarray
 
 if TYPE_CHECKING:
     from mast3r_slam.frame import Frame
@@ -91,27 +92,27 @@ class RetrievalDatabase(Retriever):
         feat: Float[torch.Tensor, "1 n_local d"] = self.prep_features(frame.feat)
         id: int = self.kf_counter  # Using own counter since otherwise messes up IVF
 
-        feat_np: np.ndarray = feat[0].cpu().numpy()  # Assumes one frame at a time!
-        id_np: np.ndarray = id * np.ones(feat_np.shape[0], dtype=np.int64)
+        feat_np: Float32[ndarray, "n_local d"] = feat[0].cpu().numpy()  # Assumes one frame at a time!
+        id_np: Int64[ndarray, "n_local"] = id * np.ones(feat_np.shape[0], dtype=np.int64)
 
         database_size: int = int(self.ivf_builder.ivf.n_images)
         # print("Database size: ", database_size, self.kf_counter)
 
         # Only query if already an image
         topk_image_inds: list[int] = []
-        topk_codes: np.ndarray | None = None  # Change this if actualy querying
+        topk_codes: Int64[ndarray, "n_local k"] | None = None  # Change this if actualy querying
         if self.kf_counter > 0:
-            ranks: np.ndarray
-            ranked_scores: np.ndarray
+            ranks: Float[ndarray, "1 n_images"]
+            ranked_scores: Float[ndarray, "1 n_images"]
             ranks, ranked_scores, topk_codes = self.query(feat_np, id_np)
 
-            scores: np.ndarray = np.empty_like(ranked_scores)
+            scores: Float[ndarray, "1 n_images"] = np.empty_like(ranked_scores)
             scores[np.arange(ranked_scores.shape[0])[:, None], ranks] = ranked_scores
-            scores_tensor: torch.Tensor = torch.from_numpy(scores)[0]
+            scores_tensor: Float[torch.Tensor, "n_images"] = torch.from_numpy(scores)[0]
 
             topk_images = torch.topk(scores_tensor, min(k, database_size))
 
-            valid: torch.Tensor = topk_images.values > min_thresh
+            valid: Float[torch.Tensor, "k"] = topk_images.values > min_thresh
             topk_image_inds_tensor: Int[torch.Tensor, "n_valid"] = topk_images.indices[valid]
             topk_image_inds = topk_image_inds_tensor.tolist()
 
@@ -123,9 +124,9 @@ class RetrievalDatabase(Retriever):
     # The reason we need this function is becasue kernel and inverted file not defined when manually updating ivf_builder
     def query(
         self,
-        feat: np.ndarray,
-        id: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        feat: Float32[ndarray, "n_local d"],
+        id: Int64[ndarray, "n_local"],
+    ) -> tuple[Float[ndarray, "..."], Float[ndarray, "..."], Int64[ndarray, "..."]]:
         """Query the ASMK inverted file for matching images.
 
         Args:
@@ -137,10 +138,10 @@ class RetrievalDatabase(Retriever):
         """
         step_params: dict = self.asmk.params.get("query_ivf")
 
-        images2: np.ndarray
-        ranks: np.ndarray
-        scores: np.ndarray
-        topk: np.ndarray
+        images2: Float[ndarray, "..."]
+        ranks: Float[ndarray, "..."]
+        scores: Float[ndarray, "..."]
+        topk: Int64[ndarray, "..."]
         images2, ranks, scores, topk = self.accumulate_scores(
             self.asmk.codebook,
             self.ivf_builder.kernel,
@@ -154,9 +155,9 @@ class RetrievalDatabase(Retriever):
 
     def add_to_database(
         self,
-        feat_np: np.ndarray,
-        id_np: np.ndarray,
-        topk_codes: np.ndarray | None,
+        feat_np: Float32[ndarray, "n_local d"],
+        id_np: Int64[ndarray, "n_local"],
+        topk_codes: Int64[ndarray, "n_local k"] | None,
     ) -> None:
         """Add descriptors to the inverted file and update bookkeeping.
 
@@ -200,10 +201,10 @@ class RetrievalDatabase(Retriever):
         cdb: Any,
         kern: Any,
         ivf: Any,
-        qvecs: np.ndarray,
-        qimids: np.ndarray,
+        qvecs: Float32[ndarray, "n_local d"],
+        qimids: Int64[ndarray, "n_local"],
         params: dict,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[Float[ndarray, "..."], Float[ndarray, "..."], Float[ndarray, "..."], Int64[ndarray, "..."]]:
         """Accumulate scores for every query image given codebook, kernel,
         inverted_file and parameters.
 
@@ -228,12 +229,12 @@ class RetrievalDatabase(Retriever):
                 device=self.query_device, dtype=self.query_dtype
             )
             topk_inds: Int[torch.Tensor, "n_local k"] = self.quantize_custom(qvecs_torch, params)
-            topk_inds_np: np.ndarray = topk_inds.cpu().numpy()
+            topk_inds_np: Int64[ndarray, "n_local k"] = topk_inds.cpu().numpy()
             quantized: tuple = (qvecs, topk_inds_np)
 
             aggregated = kern.aggregate_image(*quantized, **params["aggregate"])
-            ranks: np.ndarray
-            scores: np.ndarray
+            ranks: Float[ndarray, "..."]
+            scores: Float[ndarray, "..."]
             ranks, scores = ivf.search(
                 *aggregated, **params["search"], similarity_func=similarity_func
             )
@@ -254,9 +255,9 @@ class RetrievalDatabase(Retriever):
 
     def add_to_ivf_custom(
         self,
-        vecs: np.ndarray,
-        imids: np.ndarray,
-        topk_codes: np.ndarray | None = None,
+        vecs: Float32[ndarray, "n_local d"],
+        imids: Int64[ndarray, "n_local"],
+        topk_codes: Int64[ndarray, "n_local k"] | None = None,
     ) -> None:
         """Add descriptors and corresponding image ids to the IVF.
 
@@ -274,7 +275,7 @@ class RetrievalDatabase(Retriever):
                 device=self.query_device, dtype=self.query_dtype
             )
             topk_inds: Int[torch.Tensor, "n_local k"] = self.quantize_custom(qvecs_torch, step_params)
-            topk_inds_np: np.ndarray = topk_inds.cpu().numpy()
+            topk_inds_np: Int64[ndarray, "n_local k"] = topk_inds.cpu().numpy()
         else:
             # Reuse previously calculated! Only take top 1
             # NOTE: Assuming build params multiple assignment is less than query

@@ -82,7 +82,7 @@ def benchmark_fn(fn: Callable[..., object], warmup: int = 10, runs: int = 100) -
         torch.cuda.synchronize()
         timings.append(start.elapsed_time(end))
 
-    t: torch.Tensor = torch.tensor(timings)
+    t: Float[torch.Tensor, "n_runs"] = torch.tensor(timings)
     return BenchResult(
         name="",
         mean_ms=float(t.mean()),

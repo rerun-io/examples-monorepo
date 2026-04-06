@@ -59,7 +59,7 @@ class MonocularDataset(torch.utils.data.Dataset):
             A tuple of (timestamp, normalised float image).
         """
         # Call get_image before timestamp for realsense camera
-        img: np.ndarray = self.get_image(index)
+        img: Float32[np.ndarray, "h w 3"] = self.get_image(index)
         timestamp = self.get_timestamp(index)
         return timestamp, img
 
@@ -97,7 +97,7 @@ class MonocularDataset(torch.utils.data.Dataset):
         Returns:
             Float32 image in [0, 1] range.
         """
-        raw_img: np.ndarray = self.read_img(idx)
+        raw_img: UInt8[np.ndarray, "h w 3"] = self.read_img(idx)
         if self.use_calibration:
             assert self.camera_intrinsics is not None
             raw_img = self.camera_intrinsics.remap(raw_img)
@@ -109,7 +109,7 @@ class MonocularDataset(torch.utils.data.Dataset):
         Returns:
             A tuple of ((processed_h, processed_w), (raw_h, raw_w)).
         """
-        raw_img: np.ndarray = self.read_img(0)
+        raw_img: UInt8[np.ndarray, "h w 3"] = self.read_img(0)
         raw_img_shape: tuple[int, int] = raw_img.shape[:2]
         resized = resize_img(raw_img, self.img_size)
         assert isinstance(resized, dict)
@@ -334,7 +334,7 @@ class MP4Dataset(MonocularDataset):
     def __len__(self) -> int:
         return self.total_frames // self.stride
 
-    def read_img(self, idx: int) -> np.ndarray:
+    def read_img(self, idx: int) -> UInt8[np.ndarray, "h w 3"]:
         if HAS_TORCHCODEC:
             img = self.decoder[idx * self.stride]  # c,h,w
             img = img.permute(1, 2, 0)

@@ -1,3 +1,4 @@
+import contextlib
 import sys
 import time
 from dataclasses import dataclass
@@ -28,7 +29,6 @@ from mast3r_slam.nerfstudio_utils import save_kf_to_nerfstudio
 from mast3r_slam.rerun_log_utils import RerunLogger, create_blueprints
 from mast3r_slam.retrieval_database import RetrievalDatabase
 from mast3r_slam.tracker import FrameTracker
-import contextlib
 
 
 def format_time(seconds: float) -> str:

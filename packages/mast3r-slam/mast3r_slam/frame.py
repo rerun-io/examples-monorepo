@@ -2,9 +2,10 @@ import dataclasses
 from enum import Enum
 
 import lietorch
-import numpy as np
 import torch
-from jaxtyping import Bool, Float, Int
+from jaxtyping import Bool, Float, Float32, Int
+from numpy import ndarray
+from torch import Tensor
 
 from mast3r_slam.config import config
 from mast3r_slam.mast3r_utils import resize_img
@@ -29,31 +30,31 @@ class Frame:
 
     frame_id: int
     """Index of this frame in the dataset sequence."""
-    img: torch.Tensor
+    img: Float[Tensor, "1 3 h w"]
     """Normalized RGB image tensor in CHW layout (may have leading batch dim)."""
-    img_shape: torch.Tensor
+    img_shape: Int[Tensor, "1 2"]
     """(height, width) of the processed image after optional downsampling."""
-    img_true_shape: torch.Tensor
+    img_true_shape: Int[Tensor, "1 2"]
     """(height, width) of the image before any downsampling."""
-    uimg: torch.Tensor
+    uimg: Float[Tensor, "h w 3"]
     """Unnormalized RGB image in [0, 1] range, HWC layout on CPU."""
     world_T_cam: lietorch.Sim3 = lietorch.Sim3.Identity(1)
     """World-from-camera Sim3 pose."""
-    X_canon: torch.Tensor | None = None
+    X_canon: Float[Tensor, "hw 3"] | None = None
     """Canonical 3D point map, shape (h*w, 3)."""
-    C: torch.Tensor | None = None
+    C: Float[Tensor, "hw 1"] | None = None
     """Per-point confidence values, shape (h*w, 1)."""
-    feat: torch.Tensor | None = None
+    feat: Float[Tensor, "1 n_patches feat_dim"] | None = None
     """Encoded MASt3R feature tokens."""
-    pos: torch.Tensor | None = None
+    pos: Int[Tensor, "1 n_patches 2"] | None = None
     """Positional encodings for feature patches."""
     N: int = 0
     """Number of accumulated point map observations."""
     N_updates: int = 0
     """Total number of point map update calls."""
-    K: torch.Tensor | None = None
+    K: Float[Tensor, "3 3"] | None = None
     """Camera intrinsic matrix (only set when using calibration)."""
-    score: torch.Tensor | None = None
+    score: Float[Tensor, ""] | None = None
     """Scalar filtering score (set by ``best_score`` filtering mode)."""
 
     def get_score(self, C: Float[torch.Tensor, "hw 1"]) -> Float[torch.Tensor, ""]:
@@ -175,7 +176,7 @@ class Frame:
 
 def create_frame(
     i: int,
-    img: np.ndarray,
+    img: Float32[ndarray, "h w 3"],
     world_T_cam: lietorch.Sim3,
     img_size: int = 512,
     device: str = "cuda:0",
@@ -490,7 +491,7 @@ class SharedKeyframes:
                 return None
             return self[self.n_size.value - 1]
 
-    def update_world_T_cams(self, world_T_cams: lietorch.Sim3, idx: torch.Tensor) -> None:
+    def update_world_T_cams(self, world_T_cams: lietorch.Sim3, idx: Int[Tensor, "n"]) -> None:
         """Overwrite the poses for a set of keyframes.
 
         Args:
