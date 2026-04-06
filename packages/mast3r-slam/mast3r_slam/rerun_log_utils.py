@@ -17,7 +17,6 @@ import torch
 from jaxtyping import Bool, Float, Float32, Int, UInt8
 from numpy import ndarray
 from simplecv.camera_orient_utils import auto_orient_and_center_poses
-from simplecv.rerun_log_utils import log_pinhole
 from torch import Tensor
 
 from mast3r_slam.frame import Frame, SharedKeyframes, SharedStates
@@ -113,7 +112,26 @@ class RerunLogger:
         # ── Current camera ─────────────────────────────────────────────────
         current_pinhole = frame_to_pinhole(current_frame)
         cam_log_path: Path = self.parent_log_path / "current_camera"
-        log_pinhole(current_pinhole, cam_log_path, image_plane_distance=self.image_plane_distance * 2)
+
+        # Log transform using world-from-camera (no from_parent) so camera
+        # frustums are placed at their world position.
+        rr.log(
+            f"{cam_log_path}",
+            rr.Transform3D(
+                translation=current_pinhole.extrinsics.world_t_cam,
+                mat3x3=current_pinhole.extrinsics.world_R_cam,
+            ),
+        )
+        rr.log(
+            f"{cam_log_path}/pinhole",
+            rr.Pinhole(
+                image_from_camera=current_pinhole.intrinsics.k_matrix,
+                height=current_pinhole.intrinsics.height,
+                width=current_pinhole.intrinsics.width,
+                camera_xyz=rr.ViewCoordinates.RUB,
+                image_plane_distance=self.image_plane_distance * 2,
+            ),
+        )
 
         # Log the current camera image
         rgb_img_float: Float32[Tensor, "H W 3"] = current_frame.uimg
@@ -168,7 +186,23 @@ class RerunLogger:
             # Always update the keyframe's pose (it may have been refined by
             # the backend's global optimisation since the last log call).
             kf_pinhole = frame_to_pinhole(keyframe)
-            log_pinhole(kf_pinhole, kf_cam_log_path, image_plane_distance=self.image_plane_distance)
+            rr.log(
+                f"{kf_cam_log_path}",
+                rr.Transform3D(
+                    translation=kf_pinhole.extrinsics.world_t_cam,
+                    mat3x3=kf_pinhole.extrinsics.world_R_cam,
+                ),
+            )
+            rr.log(
+                f"{kf_cam_log_path}/pinhole",
+                rr.Pinhole(
+                    image_from_camera=kf_pinhole.intrinsics.k_matrix,
+                    height=kf_pinhole.intrinsics.height,
+                    width=kf_pinhole.intrinsics.width,
+                    camera_xyz=rr.ViewCoordinates.RDF,
+                    image_plane_distance=self.image_plane_distance,
+                ),
+            )
 
         # ── Last keyframe image ────────────────────────────────────────────
         if N_keyframes > 0:
