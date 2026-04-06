@@ -71,6 +71,7 @@ libnvjitlink = "*"
 # PyTorch
 pytorch-gpu = ">=2.8.0"
 torchvision = "*"
+torchcodec = "*"
 
 # ─── ide feature (standalone dev env for Zed/IDE tooling) ────────────────────
 [feature.ide.dependencies]
@@ -321,7 +322,6 @@ audioop-lts = "*"
 pydub = "*"
 open3d = ">=0.19.0,<0.20"
 h5py = ">=3.11"
-torchcodec = "*"
 
 [feature.sam3d.pypi-dependencies]
 sam3d_body = { path = "packages/sam3d-body-rerun", editable = true }
