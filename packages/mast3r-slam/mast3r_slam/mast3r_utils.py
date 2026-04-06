@@ -1,16 +1,17 @@
-import PIL
-import numpy as np
-import torch
-import einops
-from typing import TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING
 
+import einops
 import mast3r.utils.path_to_dust3r  # noqa
+import numpy as np
+import PIL
+import torch
 from dust3r.utils.image import ImgNorm
-from mast3r.model import AsymmetricMASt3R
-from mast3r_slam.retrieval_database import RetrievalDatabase
-from mast3r_slam.config import config
-import mast3r_slam.matching as matching
 from jaxtyping import Float32
+from mast3r.model import AsymmetricMASt3R
+
+import mast3r_slam.matching as matching
+from mast3r_slam.config import config
+from mast3r_slam.retrieval_database import RetrievalDatabase
 
 if TYPE_CHECKING:
     from mast3r_slam.frame import Frame
@@ -238,9 +239,9 @@ def mast3r_match_asymmetric(model, frame_i, frame_j, idx_i2j_init=None):
 
 def _resize_pil_image(img, long_edge_size):
     S = max(img.size)
-    if S > long_edge_size:
+    if long_edge_size < S:
         interp = PIL.Image.LANCZOS
-    elif S <= long_edge_size:
+    elif long_edge_size >= S:
         interp = PIL.Image.BICUBIC
     new_size = tuple(int(round(x * long_edge_size / S)) for x in img.size)
     return img.resize(new_size, interp)

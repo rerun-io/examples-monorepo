@@ -2,26 +2,26 @@ import pathlib
 import re
 
 import cv2
-from natsort import natsorted
 import numpy as np
 import torch
 from jaxtyping import Float32, UInt8
+from natsort import natsorted
 
 try:
     import pyrealsense2 as rs
 except ImportError:
     rs = None
+from typing import Literal
+
 import yaml
 
-from mast3r_slam.mast3r_utils import resize_img
 from mast3r_slam.config import config
-
-from typing import Literal
+from mast3r_slam.mast3r_utils import resize_img
 
 HAS_TORCHCODEC: bool = True
 try:
     from torchcodec.decoders import VideoDecoder
-except Exception as e:
+except Exception:
     HAS_TORCHCODEC = False
 
 

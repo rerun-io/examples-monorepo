@@ -5,11 +5,11 @@ import numpy as np
 import torch
 from jaxtyping import UInt8
 
+from mast3r_slam.config import config
 from mast3r_slam.dataloader import Intrinsics
 from mast3r_slam.frame import SharedKeyframes
-from mast3r_slam.lietorch_utils import as_SE3
-from mast3r_slam.config import config
 from mast3r_slam.geometry import constrain_points_to_ray
+from mast3r_slam.lietorch_utils import as_SE3
 
 
 def prepare_savedir(args: object, dataset: object) -> tuple[pathlib.Path, str]:

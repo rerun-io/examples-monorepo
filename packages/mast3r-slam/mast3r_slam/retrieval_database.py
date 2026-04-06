@@ -1,16 +1,14 @@
-import torch
-import numpy as np
-from jaxtyping import Float, Int
-
-from mast3r.retrieval.processor import Retriever
-from mast3r.retrieval.model import how_select_local
-
-from asmk import io_helpers
-
 from typing import TYPE_CHECKING
 
+import numpy as np
+import torch
+from asmk import io_helpers
+from jaxtyping import Float, Int
+from mast3r.retrieval.model import how_select_local
+from mast3r.retrieval.processor import Retriever
+
 if TYPE_CHECKING:
-    from mast3r_slam.frame import Frame
+    pass
 
 
 class RetrievalDatabase(Retriever):

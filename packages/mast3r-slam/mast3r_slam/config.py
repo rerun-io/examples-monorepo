@@ -1,4 +1,5 @@
 import re
+
 import yaml
 
 config = {}
@@ -22,7 +23,7 @@ def load_config(path="config/base.yaml", is_parent=False):
         list("-+0123456789."),
     )
 
-    with open(path, "r") as f:
+    with open(path) as f:
         print(path)
         cfg = yaml.load(f, Loader=loader)
     inherit = cfg.get("inherit")

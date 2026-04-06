@@ -1,14 +1,14 @@
 import lietorch
 import torch
-from jaxtyping import Float, Int, Bool
+from jaxtyping import Bool, Float, Int
 
+from mast3r_slam import _backends
 from mast3r_slam.config import config
 from mast3r_slam.frame import Frame, SharedKeyframes
 from mast3r_slam.geometry import (
     constrain_points_to_ray,
 )
 from mast3r_slam.mast3r_utils import mast3r_match_symmetric
-from mast3r_slam import _backends
 
 
 class FactorGraph:

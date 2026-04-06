@@ -1,23 +1,23 @@
 import lietorch
 import torch
-from jaxtyping import Float, Bool
+from jaxtyping import Bool, Float
 
 try:
     from beartype.roar import BeartypeException
 except ImportError:
     BeartypeException = ()
 
+from mast3r_slam.config import config
 from mast3r_slam.frame import Frame, SharedKeyframes
 from mast3r_slam.geometry import (
     act_Sim3,
-    point_to_ray_dist,
-    get_pixel_coords,
     constrain_points_to_ray,
+    get_pixel_coords,
+    point_to_ray_dist,
     project_calib,
 )
-from mast3r_slam.nonlinear_optimizer import check_convergence, huber
-from mast3r_slam.config import config
 from mast3r_slam.mast3r_utils import mast3r_match_asymmetric
+from mast3r_slam.nonlinear_optimizer import check_convergence, huber
 
 
 class FrameTracker:

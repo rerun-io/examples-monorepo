@@ -4,10 +4,10 @@ from enum import Enum
 import lietorch
 import numpy as np
 import torch
-from jaxtyping import Float, Int, Bool
+from jaxtyping import Bool, Float, Int
 
-from mast3r_slam.mast3r_utils import resize_img
 from mast3r_slam.config import config
+from mast3r_slam.mast3r_utils import resize_img
 
 
 class Mode(Enum):

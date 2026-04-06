@@ -1,36 +1,32 @@
-import gradio as gr
-
+import gc
+import shutil
+import subprocess
+import sys
 import time
-
-from gradio_rerun import Rerun
-
-import rerun as rr
+from multiprocessing.managers import SyncManager
+from pathlib import Path
 
 import beartype
-from pathlib import Path
-import subprocess
-
-from mast3r_slam.config import load_config, config
-from mast3r_slam.dataloader import load_dataset
-
-import sys
+import gradio as gr
 import lietorch
+import rerun as rr
 import torch
+import torch.multiprocessing as mp
+from gradio_rerun import Rerun
+
+from mast3r_slam.api.inference import (
+    run_backend,
+)
+from mast3r_slam.config import config, load_config
+from mast3r_slam.dataloader import load_dataset
 from mast3r_slam.frame import Frame, Mode, SharedKeyframes, SharedStates, create_frame
 from mast3r_slam.mast3r_utils import (
     load_mast3r,
     mast3r_inference_mono,
 )
-from mast3r_slam.tracker import FrameTracker
-import torch.multiprocessing as mp
-from mast3r_slam.api.inference import (
-    run_backend,
-)
-from multiprocessing.managers import SyncManager
-import gc
-import shutil
 from mast3r_slam.nerfstudio_utils import save_kf_to_nerfstudio
-from mast3r_slam.rerun_log_utils import create_blueprints, RerunLogger
+from mast3r_slam.rerun_log_utils import RerunLogger, create_blueprints
+from mast3r_slam.tracker import FrameTracker
 
 # Global variables to track the backend process, states, and model
 active_backend_process = None

@@ -13,15 +13,13 @@ Run:
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 
 import pytest
 import torch
-from hypothesis import given, settings, HealthCheck
+from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from jaxtyping import Bool, Float, Int
-
 
 # ── Skip if either backend is unavailable ─────────────────────────────────────
 

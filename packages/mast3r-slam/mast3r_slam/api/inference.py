@@ -16,7 +16,7 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 
 import mast3r_slam.evaluate as eval
 from mast3r_slam.config import config, load_config
-from mast3r_slam.dataloader import load_dataset, MonocularDataset
+from mast3r_slam.dataloader import MonocularDataset, load_dataset
 from mast3r_slam.frame import Frame, Mode, SharedKeyframes, SharedStates, create_frame
 from mast3r_slam.global_opt import FactorGraph
 from mast3r_slam.mast3r_utils import (

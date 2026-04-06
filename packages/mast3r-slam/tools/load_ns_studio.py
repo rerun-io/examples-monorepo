@@ -1,14 +1,16 @@
-from mast3r_slam.nerfstudio_utils import NerfstudioData
-from serde.json import from_json
-from pathlib import Path
 from dataclasses import dataclass
-import tyro
-from simplecv.rerun_log_utils import RerunTyroConfig
+from pathlib import Path
+
 import cv2
-import rerun as rr
-import open3d as o3d
 import numpy as np
+import open3d as o3d
+import rerun as rr
+import tyro
+from serde.json import from_json
 from simplecv.ops import conventions
+from simplecv.rerun_log_utils import RerunTyroConfig
+
+from mast3r_slam.nerfstudio_utils import NerfstudioData
 
 
 @dataclass
@@ -20,7 +22,7 @@ class ViewNsDataConfig:
 
 
 def view_ns_data(config: ViewNsDataConfig) -> None:
-    with open(config.transform_json_path, "r") as f:
+    with open(config.transform_json_path) as f:
         ns_data: NerfstudioData = from_json(NerfstudioData, f.read())
 
     ply_path: Path = config.transform_json_path.parent / ns_data.ply_file_path

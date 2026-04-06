@@ -128,7 +128,7 @@ def main() -> None:
     print("=" * 72)
     print("CUDA vs Mojo Matching Kernel Benchmarks")
     print(f"GPU: {torch.cuda.get_device_name(0)}")
-    print(f"Warmup: 50 | Runs: 500 | Metric: median (ms)")
+    print("Warmup: 50 | Runs: 500 | Metric: median (ms)")
     print("=" * 72)
 
     configs: list[dict] = [

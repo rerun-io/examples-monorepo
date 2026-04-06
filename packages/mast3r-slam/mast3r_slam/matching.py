@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from jaxtyping import Float, Int, Bool
+from jaxtyping import Bool, Float, Int
 
 import mast3r_slam.image as img_utils
 from mast3r_slam.config import config
