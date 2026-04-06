@@ -20,6 +20,7 @@ from simplecv.camera_orient_utils import auto_orient_and_center_poses
 from torch import Tensor
 
 from mast3r_slam.frame import Frame, SharedKeyframes, SharedStates
+from mast3r_slam.lietorch_utils import as_SE3
 from mast3r_slam.mast3r_utils import frame_to_extrinsics, frame_to_pinhole
 
 
@@ -185,21 +186,21 @@ class RerunLogger:
 
             # Always update the keyframe's pose (it may have been refined by
             # the backend's global optimisation since the last log call).
-            # Use frame_to_extrinsics (fast, no focal re-estimation) and
-            # share the current frame's intrinsics across all keyframes —
-            # matching the original behaviour.
-            kf_ext = frame_to_extrinsics(keyframe)
+            # Keyframes use CV convention (RDF) — no GL conversion needed.
+            kf_se3: lietorch.SE3 = as_SE3(keyframe.world_T_cam.cpu())
+            kf_mat4x4: Float32[ndarray, "4 4"] = kf_se3.matrix().numpy().astype(np.float32)[0]
             rr.log(
                 f"{kf_cam_log_path}",
                 rr.Transform3D(
-                    translation=kf_ext.world_t_cam,
-                    mat3x3=kf_ext.world_R_cam,
+                    translation=kf_mat4x4[:3, 3],
+                    mat3x3=kf_mat4x4[:3, :3],
                 ),
             )
             rr.log(
                 f"{kf_cam_log_path}/pinhole",
                 rr.Pinhole(
-                    image_from_camera=current_pinhole.intrinsics.k_matrix,
+                    focal_length=current_pinhole.intrinsics.fl_x,
+                    principal_point=[current_pinhole.intrinsics.cx, current_pinhole.intrinsics.cy],
                     height=current_pinhole.intrinsics.height,
                     width=current_pinhole.intrinsics.width,
                     camera_xyz=rr.ViewCoordinates.RDF,
