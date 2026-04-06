@@ -2,13 +2,11 @@ import os
 import sys
 from pathlib import Path
 
-# The compiled backend extensions (mast3r_slam_backends.so,
-# mast3r_slam_mojo_backends.so) are built in-place in the package root
-# via `python setup.py build_ext --inplace`.  The editable install only
-# registers the mast3r_slam *package*, so those top-level .so files are
-# invisible unless the package root is on sys.path.  Adding it here
-# means any module in this package can `import mast3r_slam_backends`
-# without per-file sys.path hacks.
+# The Mojo backend (mast3r_slam_mojo_backends.so) is built as a bare .so in
+# the package root — its PyInit symbol is baked in at compile time and can't
+# be renamed.  Adding the package root to sys.path lets a plain `import
+# mast3r_slam_mojo_backends` find it.  (The CUDA backend is properly
+# namespaced as mast3r_slam._backends and needs no path hack.)
 _pkg_root: str = str(Path(__file__).resolve().parent.parent)
 if _pkg_root not in sys.path:
     sys.path.insert(0, _pkg_root)

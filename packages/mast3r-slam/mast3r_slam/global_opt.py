@@ -8,7 +8,7 @@ from mast3r_slam.geometry import (
     constrain_points_to_ray,
 )
 from mast3r_slam.mast3r_utils import mast3r_match_symmetric
-import mast3r_slam_backends
+from mast3r_slam import _backends
 
 
 class FactorGraph:
@@ -214,7 +214,7 @@ class FactorGraph:
         delta_thresh: float = self.cfg["delta_norm"]
 
         pose_data: Float[torch.Tensor, "n_unique sim3_dim"] = T_WCs.data[:, 0, :]
-        mast3r_slam_backends.gauss_newton_rays(
+        _backends.gauss_newton_rays(
             pose_data,
             Xs,
             Cs,
@@ -280,7 +280,7 @@ class FactorGraph:
         width: int
         height, width = img_size
 
-        mast3r_slam_backends.gauss_newton_calib(
+        _backends.gauss_newton_calib(
             pose_data,
             Xs,
             Cs,

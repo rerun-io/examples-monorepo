@@ -7,8 +7,8 @@ timing (median of 500 runs after 50 warmup iterations).
 Usage:
     pixi run -e mast3r-slam-dev python tools/bench_matching_kernels.py
 
-Requires both mast3r_slam_backends (.so from CUDA build) and
-mast3r_slam_mojo_backends (.so from Mojo build) to be importable.
+Requires both mast3r_slam._backends (.so from CUDA build) and
+mast3r_slam._mojo_backends (.so from Mojo build) to be importable.
 """
 
 from __future__ import annotations
@@ -22,9 +22,9 @@ from jaxtyping import Float, Int
 # ── Backend imports ───────────────────────────────────────────────────────────
 
 try:
-    import mast3r_slam_backends as cuda_be
+    from mast3r_slam import _backends as cuda_be
 except ImportError:
-    print("ERROR: mast3r_slam_backends not found. Run: pixi run -e mast3r-slam-dev _build-cuda-kernels")
+    print("ERROR: mast3r_slam._backends not found. Run: pixi run -e mast3r-slam-dev _build-cuda-kernels")
     sys.exit(1)
 
 try:

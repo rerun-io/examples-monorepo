@@ -1,7 +1,7 @@
 """Compare Mojo GPU kernels against CUDA originals for numerical correctness and performance.
 
-Uses the CUDA mast3r_slam_backends as oracle and validates that the Mojo
-mast3r_slam_mojo_backends produces matching outputs within tolerance.
+Uses the CUDA mast3r_slam._backends as oracle and validates that the Mojo
+mast3r_slam._mojo_backends produces matching outputs within tolerance.
 
 Includes both parametrized deterministic tests and Hypothesis property-based
 fuzz tests that randomise shapes, seeds, and kernel parameters.
@@ -25,7 +25,7 @@ from jaxtyping import Bool, Float, Int
 
 # ── Skip if either backend is unavailable ─────────────────────────────────────
 
-cuda_backends = pytest.importorskip("mast3r_slam_backends", reason="CUDA backends not built")
+cuda_backends = pytest.importorskip("mast3r_slam._backends", reason="CUDA backends not built")
 mojo_backends = pytest.importorskip("mast3r_slam_mojo_backends", reason="Mojo backends not built")
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")

@@ -8,12 +8,12 @@ from mast3r_slam.config import config
 # Matching kernel backend selection: prefer Mojo (faster, no C++ build step),
 # fall back to CUDA C++ if Mojo .so is not built. Both provide identical
 # iter_proj() and refine_matches() APIs.
-# Note: global_opt.py still imports mast3r_slam_backends directly for the
+# Note: global_opt.py imports mast3r_slam._backends directly for the
 # Gauss-Newton solvers which have not been ported to Mojo.
 try:
-    import mast3r_slam_mojo_backends as mast3r_slam_backends
+    import mast3r_slam_mojo_backends as _matching_backends
 except ImportError:
-    import mast3r_slam_backends
+    from mast3r_slam import _backends as _matching_backends
 
 
 def match(
@@ -166,7 +166,7 @@ def match_iterative_proj(
     )
     p1: Float[torch.Tensor, "b hw 2"]
     valid_proj2: Bool[torch.Tensor, "b hw"]
-    p1, valid_proj2 = mast3r_slam_backends.iter_proj(
+    p1, valid_proj2 = _matching_backends.iter_proj(
         rays_with_grad_img,
         pts3d_norm,
         p_init,
@@ -185,7 +185,7 @@ def match_iterative_proj(
     valid_proj2 = valid_proj2 & valid_dists2
 
     if cfg["radius"] > 0:
-        (p1,) = mast3r_slam_backends.refine_matches(
+        (p1,) = _matching_backends.refine_matches(
             D11.half(),
             D21.view(b, h * w, -1).half(),
             p1,

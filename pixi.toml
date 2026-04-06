@@ -718,7 +718,7 @@ inputs = [
     "packages/mast3r-slam/mast3r_slam/backend/include/*.h",
 ]
 outputs = [
-    "packages/mast3r-slam/mast3r_slam_backends*.so",
+    "packages/mast3r-slam/mast3r_slam/_backends*.so",
 ]
 
 # ── Mojo kernel build ──────────────────────────────────────────────────
