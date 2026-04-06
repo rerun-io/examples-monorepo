@@ -1,6 +1,3 @@
-import sys
-from pathlib import Path
-
 import lietorch
 import torch
 from jaxtyping import Float, Int, Bool
@@ -11,11 +8,6 @@ from mast3r_slam.geometry import (
     constrain_points_to_ray,
 )
 from mast3r_slam.mast3r_utils import mast3r_match_symmetric
-
-# Ensure the package root (where the .so lives) is on sys.path.
-_pkg_root: str = str(Path(__file__).resolve().parent.parent)
-if _pkg_root not in sys.path:
-    sys.path.insert(0, _pkg_root)
 import mast3r_slam_backends
 
 
