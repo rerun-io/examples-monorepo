@@ -17,12 +17,10 @@ import torch
 from jaxtyping import Bool, Float, Float32, Int, UInt8
 from numpy import ndarray
 from simplecv.camera_orient_utils import auto_orient_and_center_poses
-from simplecv.ops import conventions
 from simplecv.rerun_log_utils import log_pinhole
 from torch import Tensor
 
 from mast3r_slam.frame import Frame, SharedKeyframes, SharedStates
-from mast3r_slam.lietorch_utils import as_SE3
 from mast3r_slam.mast3r_utils import frame_to_pinhole
 
 
@@ -58,6 +56,9 @@ class RerunLogger:
 
     def __init__(self, parent_log_path: Path) -> None:
         self.parent_log_path: Path = parent_log_path
+        # Set the scene coordinate system: Right-Forward-Up so the
+        # gravity-aligned orient transform produces an upright view.
+        rr.log("/", rr.ViewCoordinates.RFU, static=True)
 
         self.path_list: list[list[float]] = []
         self.keyframe_logged_list: list[int] = []
@@ -70,20 +71,16 @@ class RerunLogger:
     def _log_orient_transform(self, keyframes: SharedKeyframes, n_kf: int) -> None:
         """Recompute gravity-alignment from all keyframe poses and update the transform.
 
-        Collects all ``n_kf`` keyframe world-from-camera poses, converts to GL
-        convention, runs ``auto_orient_and_center_poses(method="up")`` to align
-        the reconstruction's up-vector with the Y axis, and logs the resulting
-        rotation+translation on ``parent_log_path``.
+        Collects all ``n_kf`` keyframe world-from-camera poses (in GL convention
+        via ``frame_to_pinhole``), runs ``auto_orient_and_center_poses(method="up")``
+        to align the reconstruction's up-vector with the Y axis, and logs the
+        resulting rotation+translation on ``parent_log_path``.
         """
         world_T_cam_gl_list: list[Float32[ndarray, "4 4"]] = []
         for i in range(n_kf):
             kf: Frame = keyframes[i]
-            se3: lietorch.SE3 = as_SE3(kf.world_T_cam.cpu())
-            mat4x4_cv: Float32[ndarray, "4 4"] = se3.matrix().numpy().astype(np.float32)[0]
-            mat4x4_gl: Float32[ndarray, "4 4"] = conventions.convert_pose(
-                mat4x4_cv, src_convention=conventions.CC.CV, dst_convention=conventions.CC.GL
-            )
-            world_T_cam_gl_list.append(mat4x4_gl)
+            pinhole = frame_to_pinhole(kf)
+            world_T_cam_gl_list.append(pinhole.extrinsics.world_T_cam.astype(np.float32))
 
         world_T_cam_gl: Float32[ndarray, "n_kf 4 4"] = np.stack(world_T_cam_gl_list)
         orient_34: Float[ndarray, "3 4"] = auto_orient_and_center_poses(
