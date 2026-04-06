@@ -20,7 +20,7 @@ from simplecv.camera_orient_utils import auto_orient_and_center_poses
 from torch import Tensor
 
 from mast3r_slam.frame import Frame, SharedKeyframes, SharedStates
-from mast3r_slam.mast3r_utils import frame_to_pinhole
+from mast3r_slam.mast3r_utils import frame_to_extrinsics, frame_to_pinhole
 
 
 def create_blueprints(parent_log_path: Path) -> rrb.Blueprint:
@@ -75,8 +75,8 @@ class RerunLogger:
         world_T_cam_gl_list: list[Float32[ndarray, "4 4"]] = []
         for i in range(n_kf):
             kf: Frame = keyframes[i]
-            pinhole = frame_to_pinhole(kf)
-            world_T_cam_gl_list.append(pinhole.extrinsics.world_T_cam.astype(np.float32))
+            kf_ext = frame_to_extrinsics(kf)
+            world_T_cam_gl_list.append(kf_ext.world_T_cam.astype(np.float32))
 
         world_T_cam_gl: Float32[ndarray, "n_kf 4 4"] = np.stack(world_T_cam_gl_list)
         orient_34: Float[ndarray, "3 4"] = auto_orient_and_center_poses(
@@ -185,20 +185,23 @@ class RerunLogger:
 
             # Always update the keyframe's pose (it may have been refined by
             # the backend's global optimisation since the last log call).
-            kf_pinhole = frame_to_pinhole(keyframe)
+            # Use frame_to_extrinsics (fast, no focal re-estimation) and
+            # share the current frame's intrinsics across all keyframes —
+            # matching the original behaviour.
+            kf_ext = frame_to_extrinsics(keyframe)
             rr.log(
                 f"{kf_cam_log_path}",
                 rr.Transform3D(
-                    translation=kf_pinhole.extrinsics.world_t_cam,
-                    mat3x3=kf_pinhole.extrinsics.world_R_cam,
+                    translation=kf_ext.world_t_cam,
+                    mat3x3=kf_ext.world_R_cam,
                 ),
             )
             rr.log(
                 f"{kf_cam_log_path}/pinhole",
                 rr.Pinhole(
-                    image_from_camera=kf_pinhole.intrinsics.k_matrix,
-                    height=kf_pinhole.intrinsics.height,
-                    width=kf_pinhole.intrinsics.width,
+                    image_from_camera=current_pinhole.intrinsics.k_matrix,
+                    height=current_pinhole.intrinsics.height,
+                    width=current_pinhole.intrinsics.width,
                     camera_xyz=rr.ViewCoordinates.RDF,
                     image_plane_distance=self.image_plane_distance,
                 ),

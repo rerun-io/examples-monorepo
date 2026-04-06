@@ -402,6 +402,26 @@ def frame_to_intir(frame: object) -> tuple[tuple[float, float], tuple[float, flo
     return (focal, focal), (float(pp[0].item()), float(pp[1].item()))
 
 
+def frame_to_extrinsics(frame: object) -> Extrinsics:
+    """Convert a Frame's lietorch Sim3 pose to simplecv Extrinsics in GL convention.
+
+    Args:
+        frame: A Frame with a valid ``world_T_cam`` pose.
+
+    Returns:
+        An ``Extrinsics`` in GL (RUB) convention.
+    """
+    se3 = as_SE3(frame.world_T_cam.cpu())
+    mat4x4_cv: Float32[np.ndarray, "4 4"] = se3.matrix().numpy().astype(np.float32)[0]
+    mat4x4_gl: Float32[np.ndarray, "4 4"] = conventions.convert_pose(
+        mat4x4_cv, src_convention=conventions.CC.CV, dst_convention=conventions.CC.GL
+    )
+    return Extrinsics(
+        world_R_cam=mat4x4_gl[:3, :3],
+        world_t_cam=mat4x4_gl[:3, 3],
+    )
+
+
 def frame_to_pinhole(frame: object) -> PinholeParameters:
     """Convert a Frame into a simplecv PinholeParameters.
 
@@ -421,17 +441,7 @@ def frame_to_pinhole(frame: object) -> PinholeParameters:
     H: int = int(frame.img_shape.squeeze()[0].item())
     W: int = int(frame.img_shape.squeeze()[1].item())
 
-    # Convert lietorch Sim3 → SE3 → 4x4 matrix → GL convention
-    se3 = as_SE3(frame.world_T_cam.cpu())
-    mat4x4_cv: Float32[np.ndarray, "4 4"] = se3.matrix().numpy().astype(np.float32)[0]
-    mat4x4_gl: Float32[np.ndarray, "4 4"] = conventions.convert_pose(
-        mat4x4_cv, src_convention=conventions.CC.CV, dst_convention=conventions.CC.GL
-    )
-
-    extrinsics: Extrinsics = Extrinsics(
-        world_R_cam=mat4x4_gl[:3, :3],
-        world_t_cam=mat4x4_gl[:3, 3],
-    )
+    extrinsics: Extrinsics = frame_to_extrinsics(frame)
     intrinsics: Intrinsics = Intrinsics.from_focal_principal_point(
         camera_conventions="RUB",
         fl_x=fl_x,
