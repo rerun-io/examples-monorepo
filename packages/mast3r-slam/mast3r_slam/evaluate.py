@@ -1,4 +1,8 @@
 import pathlib
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from mast3r_slam.dataloader import MonocularDataset
 
 import cv2
 import numpy as np
@@ -12,7 +16,19 @@ from mast3r_slam.geometry import constrain_points_to_ray
 from mast3r_slam.lietorch_utils import as_SE3
 
 
-def prepare_savedir(args: object, dataset: object) -> tuple[pathlib.Path, str]:
+class _HasSaveAs(Protocol):
+    """Protocol for objects with a ``save_as`` attribute."""
+
+    save_as: str
+
+
+class _HasDatasetPath(Protocol):
+    """Protocol for objects with a ``dataset_path`` attribute."""
+
+    dataset_path: pathlib.Path
+
+
+def prepare_savedir(args: _HasSaveAs, dataset: "MonocularDataset") -> tuple[pathlib.Path, str]:
     """Create the log directory and derive a sequence name from the dataset path.
 
     Args:
@@ -57,10 +73,8 @@ def save_ATE(
         for i in range(len(frames)):
             keyframe = frames[i]
             t = timestamps[keyframe.frame_id]
-            if intrinsics is None:
-                T_WC = as_SE3(keyframe.T_WC)
-            else:
-                T_WC = intrinsics.refine_pose_with_calibration(keyframe)
+            # TODO: calibrated pose refinement not yet implemented
+            T_WC = as_SE3(keyframe.T_WC)
             x, y, z, qx, qy, qz, qw = T_WC.data.numpy().reshape(-1)
             f.write(f"{t} {x} {y} {z} {qx} {qy} {qz} {qw}\n")
 

@@ -37,7 +37,7 @@ def load_retriever(mast3r_model, retriever_path=None, device="cuda"):
     return retriever
 
 
-@torch.inference_mode
+@torch.inference_mode()
 def decoder(model, feat1, feat2, pos1, pos2, shape1, shape2):
     dec1, dec2 = model._decoder(feat1, pos1, feat2, pos2)
     with torch.amp.autocast(enabled=False, device_type="cuda"):
@@ -58,7 +58,7 @@ def downsample(X, C, D, Q):
     return X, C, D, Q
 
 
-@torch.inference_mode
+@torch.inference_mode()
 def mast3r_symmetric_inference(model, frame_i, frame_j):
     if frame_i.feat is None:
         frame_i.feat, frame_i.pos, _ = model._encode_image(
@@ -86,7 +86,7 @@ def mast3r_symmetric_inference(model, frame_i, frame_j):
 
 
 # NOTE: Assumes img shape the same
-@torch.inference_mode
+@torch.inference_mode()
 def mast3r_decode_symmetric_batch(
     model, feat_i, pos_i, feat_j, pos_j, shape_i, shape_j
 ):
@@ -121,7 +121,7 @@ def mast3r_decode_symmetric_batch(
     return X, C, D, Q
 
 
-@torch.inference_mode
+@torch.inference_mode()
 def mast3r_inference_mono(model, frame):
     if frame.feat is None:
         frame.feat, frame.pos, _ = model._encode_image(frame.img, frame.img_true_shape)
@@ -186,7 +186,7 @@ def mast3r_match_symmetric(model, feat_i, pos_i, feat_j, pos_j, shape_i, shape_j
     )
 
 
-@torch.inference_mode
+@torch.inference_mode()
 def mast3r_asymmetric_inference(model, frame_i, frame_j):
     if frame_i.feat is None:
         frame_i.feat, frame_i.pos, _ = model._encode_image(
@@ -240,9 +240,9 @@ def mast3r_match_asymmetric(model, frame_i, frame_j, idx_i2j_init=None):
 def _resize_pil_image(img, long_edge_size):
     S = max(img.size)
     if long_edge_size < S:
-        interp = PIL.Image.LANCZOS
+        interp = PIL.Image.Resampling.LANCZOS
     else:
-        interp = PIL.Image.BICUBIC
+        interp = PIL.Image.Resampling.BICUBIC
     new_size = tuple(int(round(x * long_edge_size / S)) for x in img.size)
     return img.resize(new_size, interp)
 
@@ -271,7 +271,7 @@ def resize_img(img, size, square_ok=False, return_transformation=False):
 
     res = dict(
         img=ImgNorm(img)[None],
-        true_shape=np.int32([img.size[::-1]]),
+        true_shape=np.array([img.size[::-1]], dtype=np.int32),
         unnormalized_img=np.asarray(img),
     )
     if return_transformation:

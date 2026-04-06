@@ -28,6 +28,7 @@ from mast3r_slam.nerfstudio_utils import save_kf_to_nerfstudio
 from mast3r_slam.rerun_log_utils import RerunLogger, create_blueprints
 from mast3r_slam.retrieval_database import RetrievalDatabase
 from mast3r_slam.tracker import FrameTracker
+import contextlib
 
 
 def format_time(seconds: float) -> str:
@@ -77,10 +78,8 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
     Args:
         inf_config: Inference configuration dataclass.
     """
-    try:
+    with contextlib.suppress(RuntimeError):
         mp.set_start_method("spawn")
-    except RuntimeError:
-        pass
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.set_grad_enabled(False)
     device: str = "cuda:0"
@@ -308,6 +307,7 @@ def relocalization(
 def _safe_run_backend(*args):
     """Wrapper that catches and prints exceptions from the backend subprocess."""
     import traceback
+
     try:
         run_backend(*args)
     except Exception:

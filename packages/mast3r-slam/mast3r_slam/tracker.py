@@ -142,7 +142,9 @@ class FrameTracker:
         frame.T_WC = T_WCf
 
         # Use pose to transform points to update keyframe
-        Xkk: Float[torch.Tensor, "hw 3"] = T_CkCf.act(Xkf)
+        Xkk_raw = T_CkCf.act(Xkf)
+        assert isinstance(Xkk_raw, torch.Tensor)
+        Xkk: Float[torch.Tensor, "hw 3"] = Xkk_raw
         keyframe.update_pointmap(Xkk, Ckf)
         # write back the fitered pointmap
         self.keyframes[len(self.keyframes) - 1] = keyframe
@@ -299,7 +301,9 @@ class FrameTracker:
         sqrt_info: Float[torch.Tensor, "hw 4"] = torch.cat((sqrt_info_ray.repeat(1, 3), sqrt_info_dist), dim=1)
 
         # Solving for relative pose without scale!
-        T_CkCf = T_WCk.inv() * T_WCf
+        T_CkCf_raw = T_WCk.inv() * T_WCf
+        assert isinstance(T_CkCf_raw, lietorch.Sim3)
+        T_CkCf: lietorch.Sim3 = T_CkCf_raw
 
         # Precalculate distance and ray for obs k
         rd_k_result = point_to_ray_dist(Xk, jacobian=False)
@@ -325,7 +329,9 @@ class FrameTracker:
             new_cost: float
             tau_ij_sim3, new_cost = self.solve(sqrt_info, r, J)
             last_error = new_cost
-            T_CkCf = T_CkCf.retr(tau_ij_sim3)
+            T_CkCf_new = T_CkCf.retr(tau_ij_sim3)
+            assert isinstance(T_CkCf_new, lietorch.Sim3)
+            T_CkCf = T_CkCf_new
 
             if check_convergence(
                 step,
@@ -342,9 +348,10 @@ class FrameTracker:
                 print(f"max iters reached {last_error}")
 
         # Assign new pose based on relative pose
-        T_WCf_updated = T_WCk * T_CkCf
+        T_WCf_new = T_WCk * T_CkCf
+        assert isinstance(T_WCf_new, lietorch.Sim3)
 
-        return T_WCf_updated, T_CkCf
+        return T_WCf_new, T_CkCf
 
     def opt_pose_calib_sim3(
         self,
@@ -383,7 +390,9 @@ class FrameTracker:
         sqrt_info: Float[torch.Tensor, "hw 3"] = torch.cat((sqrt_info_pixel.repeat(1, 2), sqrt_info_depth), dim=1)
 
         # Solving for relative pose without scale!
-        T_CkCf = T_WCk.inv() * T_WCf
+        T_CkCf_raw = T_WCk.inv() * T_WCf
+        assert isinstance(T_CkCf_raw, lietorch.Sim3)
+        T_CkCf: lietorch.Sim3 = T_CkCf_raw
 
         old_cost: float = float("inf")
         for step in range(self.cfg["max_iters"]):
@@ -415,7 +424,9 @@ class FrameTracker:
             new_cost: float
             tau_ij_sim3, new_cost = self.solve(sqrt_info2, r, J)
             last_error = new_cost
-            T_CkCf = T_CkCf.retr(tau_ij_sim3)
+            T_CkCf_new = T_CkCf.retr(tau_ij_sim3)
+            assert isinstance(T_CkCf_new, lietorch.Sim3)
+            T_CkCf = T_CkCf_new
 
             if check_convergence(
                 step,
@@ -432,6 +443,7 @@ class FrameTracker:
                 print(f"max iters reached {last_error}")
 
         # Assign new pose based on relative pose
-        T_WCf_updated = T_WCk * T_CkCf
+        T_WCf_new = T_WCk * T_CkCf
+        assert isinstance(T_WCf_new, lietorch.Sim3)
 
-        return T_WCf_updated, T_CkCf
+        return T_WCf_new, T_CkCf

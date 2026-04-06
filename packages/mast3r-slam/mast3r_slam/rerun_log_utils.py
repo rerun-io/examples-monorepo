@@ -30,9 +30,9 @@ def create_blueprints(parent_log_path: Path) -> rrb.Blueprint:
                 contents=[f"+ {parent_log_path}/**"],
             ),
             rrb.Vertical(
-                rrb.Spatial2DView(origin=parent_log_path / "current_camera" / "pinhole"),
-                rrb.Spatial2DView(origin=parent_log_path / "last_keyframe"),
-                rrb.TextDocumentView(origin=parent_log_path),
+                rrb.Spatial2DView(origin=str(parent_log_path / "current_camera" / "pinhole")),
+                rrb.Spatial2DView(origin=str(parent_log_path / "last_keyframe")),
+                rrb.TextDocumentView(origin=str(parent_log_path)),
             ),
             column_shares=(3, 1),
         ),

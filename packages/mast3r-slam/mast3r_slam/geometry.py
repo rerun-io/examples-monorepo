@@ -66,7 +66,9 @@ def act_Sim3(
 
     If jacobian=True, also returns the 3x7 Jacobian d(pW)/d(xi) w.r.t. the Sim3 tangent.
     """
-    pW: Float[torch.Tensor, "... 3"] = X.act(pC)
+    pW_raw = X.act(pC)
+    assert isinstance(pW_raw, torch.Tensor)
+    pW: Float[torch.Tensor, "... 3"] = pW_raw
     if not jacobian:
         return pW
     dpC_dt: Float[torch.Tensor, "... 3 3"] = torch.eye(3, device=pW.device).repeat(*pW.shape[:-1], 1, 1)

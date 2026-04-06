@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -8,7 +8,7 @@ from mast3r.retrieval.model import how_select_local
 from mast3r.retrieval.processor import Retriever
 
 if TYPE_CHECKING:
-    pass
+    from mast3r_slam.frame import Frame
 
 
 class RetrievalDatabase(Retriever):
@@ -71,7 +71,7 @@ class RetrievalDatabase(Retriever):
 
     def update(
         self,
-        frame: "mast3r_slam.frame.Frame",
+        frame: "Frame",
         add_after_query: bool,
         k: int,
         min_thresh: float = 0.0,
@@ -87,6 +87,7 @@ class RetrievalDatabase(Retriever):
         Returns:
             List of keyframe indices (in the database's ID space) that match.
         """
+        assert frame.feat is not None
         feat: Float[torch.Tensor, "1 n_local d"] = self.prep_features(frame.feat)
         id: int = self.kf_counter  # Using own counter since otherwise messes up IVF
 
@@ -196,9 +197,9 @@ class RetrievalDatabase(Retriever):
 
     def accumulate_scores(
         self,
-        cdb: object,
-        kern: object,
-        ivf: object,
+        cdb: Any,
+        kern: Any,
+        ivf: Any,
         qvecs: np.ndarray,
         qimids: np.ndarray,
         params: dict,

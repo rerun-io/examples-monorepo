@@ -140,7 +140,7 @@ class TUMDataset(MonocularDataset):
         super().__init__(img_size=img_size)
         self.dataset_path: pathlib.Path = pathlib.Path(dataset_path)
         rgb_list: pathlib.Path = self.dataset_path / "rgb.txt"
-        tstamp_rgb = np.loadtxt(rgb_list, delimiter=" ", dtype=np.unicode_, skiprows=0)
+        tstamp_rgb = np.loadtxt(rgb_list, delimiter=" ", dtype=np.str_, skiprows=0)
         self.rgb_files = [self.dataset_path / f for f in tstamp_rgb[:, 1]]
         self.timestamps = list(tstamp_rgb[:, 0])
 
@@ -172,7 +172,7 @@ class EurocDataset(MonocularDataset):
         self.use_calibration: bool = True
         self.dataset_path: pathlib.Path = pathlib.Path(dataset_path)
         rgb_list: pathlib.Path = self.dataset_path / "mav0/cam0/data.csv"
-        tstamp_rgb = np.loadtxt(rgb_list, delimiter=",", dtype=np.unicode_, skiprows=0)
+        tstamp_rgb = np.loadtxt(rgb_list, delimiter=",", dtype=np.str_, skiprows=0)
         self.rgb_files = [
             self.dataset_path / "mav0/cam0/data" / f for f in tstamp_rgb[:, 1]
         ]
@@ -200,7 +200,7 @@ class ETH3DDataset(MonocularDataset):
         super().__init__(img_size=img_size)
         self.dataset_path: pathlib.Path = pathlib.Path(dataset_path)
         rgb_list: pathlib.Path = self.dataset_path / "rgb.txt"
-        tstamp_rgb = np.loadtxt(rgb_list, delimiter=" ", dtype=np.unicode_, skiprows=0)
+        tstamp_rgb = np.loadtxt(rgb_list, delimiter=" ", dtype=np.str_, skiprows=0)
         self.rgb_files = [self.dataset_path / f for f in tstamp_rgb[:, 1]]
         self.timestamps = list(tstamp_rgb[:, 0])
         calibration = np.loadtxt(
@@ -233,6 +233,7 @@ class SevenScenesDataset(MonocularDataset):
 class RealsenseDataset(MonocularDataset):
     def __init__(self, img_size: Literal[224, 512] = 512) -> None:
         super().__init__(img_size=img_size)
+        assert rs is not None, "pyrealsense2 is required for RealsenseDataset"
         self.dataset_path = None
         self.pipeline = rs.pipeline()
         # self.h, self.w = 720, 1280
@@ -463,7 +464,7 @@ class Intrinsics:
             K, distortion, (W, H), 0, (W, H), centerPrincipalPoint=center
         )
         mapx, mapy = cv2.initUndistortRectifyMap(
-            K, distortion, None, K_opt, (W, H), cv2.CV_32FC1
+            K, distortion, np.eye(3, dtype=np.float64), K_opt, (W, H), cv2.CV_32FC1
         )
 
         return Intrinsics(img_size, W, H, K, K_opt, distortion, mapx, mapy)

@@ -51,7 +51,7 @@ def view_ns_data(config: ViewNsDataConfig) -> None:
     #     static=True,
     # )
     for idx, frame in enumerate(ns_data.frames):
-        rr.set_time_sequence("sequence", idx)
+        rr.set_time("sequence", sequence=idx)
         image_path: Path = config.transform_json_path.parent / frame.file_path
         assert image_path.exists(), f"Image path {image_path} does not exist"
         rgb = cv2.imread(str(image_path))
