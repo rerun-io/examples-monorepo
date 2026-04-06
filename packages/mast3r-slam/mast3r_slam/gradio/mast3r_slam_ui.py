@@ -135,6 +135,7 @@ def streaming_mast3r_slam_fn(
         sys.exit(0)
     K = None
     if use_calib:
+        assert dataset.camera_intrinsics is not None
         K = torch.from_numpy(dataset.camera_intrinsics.K_frame).to(
             DEVICE, dtype=torch.float32
         )

@@ -65,10 +65,24 @@ class FactorGraph:
         """
         kf_ii: list[Frame] = [self.frames[idx] for idx in ii]
         kf_jj: list[Frame] = [self.frames[idx] for idx in jj]
-        feat_i: Float[torch.Tensor, "b n_patches feat_dim"] = torch.cat([kf_i.feat for kf_i in kf_ii])
-        feat_j: Float[torch.Tensor, "b n_patches feat_dim"] = torch.cat([kf_j.feat for kf_j in kf_jj])
-        pos_i: Int[torch.Tensor, "b n_patches 2"] = torch.cat([kf_i.pos for kf_i in kf_ii])
-        pos_j: Int[torch.Tensor, "b n_patches 2"] = torch.cat([kf_j.pos for kf_j in kf_jj])
+        feat_i_list: list[torch.Tensor] = []
+        feat_j_list: list[torch.Tensor] = []
+        pos_i_list: list[torch.Tensor] = []
+        pos_j_list: list[torch.Tensor] = []
+        for kf_i in kf_ii:
+            assert kf_i.feat is not None
+            assert kf_i.pos is not None
+            feat_i_list.append(kf_i.feat)
+            pos_i_list.append(kf_i.pos)
+        for kf_j in kf_jj:
+            assert kf_j.feat is not None
+            assert kf_j.pos is not None
+            feat_j_list.append(kf_j.feat)
+            pos_j_list.append(kf_j.pos)
+        feat_i: Float[torch.Tensor, "b n_patches feat_dim"] = torch.cat(feat_i_list)
+        feat_j: Float[torch.Tensor, "b n_patches feat_dim"] = torch.cat(feat_j_list)
+        pos_i: Int[torch.Tensor, "b n_patches 2"] = torch.cat(pos_i_list)
+        pos_j: Int[torch.Tensor, "b n_patches 2"] = torch.cat(pos_j_list)
         shape_i: list[Int[torch.Tensor, "1 2"]] = [kf_i.img_true_shape for kf_i in kf_ii]
         shape_j: list[Int[torch.Tensor, "1 2"]] = [kf_j.img_true_shape for kf_j in kf_jj]
 
@@ -175,10 +189,18 @@ class FactorGraph:
             and average confidence values.
         """
         kfs: list[Frame] = [self.frames[idx] for idx in unique_kf_idx]
-        Xs: Float[torch.Tensor, "n_unique hw 3"] = torch.stack([kf.X_canon for kf in kfs])
+        X_list: list[torch.Tensor] = []
+        C_list: list[torch.Tensor] = []
+        for kf in kfs:
+            assert kf.X_canon is not None
+            X_list.append(kf.X_canon)
+            avg_conf: torch.Tensor | None = kf.get_average_conf()
+            assert avg_conf is not None
+            C_list.append(avg_conf)
+        Xs: Float[torch.Tensor, "n_unique hw 3"] = torch.stack(X_list)
         T_WCs: lietorch.Sim3 = lietorch.Sim3(torch.stack([kf.T_WC.data for kf in kfs]))
 
-        Cs: Float[torch.Tensor, "n_unique hw 1"] = torch.stack([kf.get_average_conf() for kf in kfs])
+        Cs: Float[torch.Tensor, "n_unique hw 1"] = torch.stack(C_list)
 
         return Xs, T_WCs, Cs
 
@@ -241,6 +263,7 @@ class FactorGraph:
         keyframes and optimises the rest.  Writes the updated poses back
         into the shared keyframe buffer.
         """
+        assert self.K is not None
         K: Float[torch.Tensor, "3 3"] = self.K
         pin: int = self.cfg["pin"]
         unique_kf_idx: Int[torch.Tensor, "n_unique"] = self.get_unique_kf_idx()
@@ -254,7 +277,7 @@ class FactorGraph:
         Xs, T_WCs, Cs = self.get_poses_points(unique_kf_idx)
 
         # Constrain points to ray
-        img_size: tuple[int, int] = self.frames[0].img.shape[-2:]
+        img_size: tuple[int, int] = (int(self.frames[0].img.shape[-2]), int(self.frames[0].img.shape[-1]))
         Xs = constrain_points_to_ray(img_size, Xs, K)
 
         ii: Int[torch.Tensor, "2n_edges"]
@@ -275,7 +298,7 @@ class FactorGraph:
 
         pose_data: Float[torch.Tensor, "n_unique sim3_dim"] = T_WCs.data[:, 0, :]
 
-        img_size = self.frames[0].img.shape[-2:]
+        img_size = (int(self.frames[0].img.shape[-2]), int(self.frames[0].img.shape[-1]))
         height: int
         width: int
         height, width = img_size

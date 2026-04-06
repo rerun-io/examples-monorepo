@@ -57,7 +57,9 @@ class FrameTracker:
             diagnostic tensors, and try_reloc is True when relocalization
             should be attempted.
         """
-        keyframe: Frame = self.keyframes.last_keyframe()
+        last_kf: Frame | None = self.keyframes.last_keyframe()
+        assert last_kf is not None, "Cannot track without a keyframe"
+        keyframe: Frame = last_kf
 
         idx_f2k, valid_match_k, Xff, Cff, Qff, Xkf, Ckf, Qkf = mast3r_match_asymmetric(
             self.model, frame, keyframe, idx_i2j_init=self.idx_f2k
@@ -75,7 +77,7 @@ class FrameTracker:
         frame.update_pointmap(Xff, Cff)
 
         use_calib: bool = config["use_calib"]
-        img_size: tuple[int, int] = frame.img.shape[-2:]
+        img_size: tuple[int, int] = (int(frame.img.shape[-2]), int(frame.img.shape[-1]))
         K: Float[torch.Tensor, "3 3"] | None
         if use_calib:
             K = keyframe.K
@@ -116,6 +118,9 @@ class FrameTracker:
                     Xf, Xk, T_WCf, T_WCk, Qk, valid_opt
                 )
             else:
+                assert meas_k is not None
+                assert valid_meas_k is not None
+                assert K is not None
                 T_WCf, T_CkCf = self.opt_pose_calib_sim3(
                     Xf,
                     Xk,
@@ -199,19 +204,26 @@ class FrameTracker:
         Returns:
             A tuple of (Xf, Xk, T_WCf, T_WCk, Cf, Ck, meas_k, valid_meas_k).
         """
+        assert frame.X_canon is not None
+        assert keyframe.X_canon is not None
         Xf: Float[torch.Tensor, "hw 3"] = frame.X_canon
         Xk: Float[torch.Tensor, "hw 3"] = keyframe.X_canon
         T_WCf: lietorch.Sim3 = frame.T_WC
         T_WCk: lietorch.Sim3 = keyframe.T_WC
 
         # Average confidence
-        Cf: Float[torch.Tensor, "hw 1"] = frame.get_average_conf()
-        Ck: Float[torch.Tensor, "hw 1"] = keyframe.get_average_conf()
+        Cf_opt: Float[torch.Tensor, "hw 1"] | None = frame.get_average_conf()
+        Ck_opt: Float[torch.Tensor, "hw 1"] | None = keyframe.get_average_conf()
+        assert Cf_opt is not None
+        assert Ck_opt is not None
+        Cf: Float[torch.Tensor, "hw 1"] = Cf_opt
+        Ck: Float[torch.Tensor, "hw 1"] = Ck_opt
 
         meas_k: Float[torch.Tensor, "hw 3"] | None = None
         valid_meas_k: Bool[torch.Tensor, "hw 1"] | None = None
 
         if use_calib:
+            assert K is not None
             Xf = constrain_points_to_ray(img_size, Xf[None], K).squeeze(0)
             Xk = constrain_points_to_ray(img_size, Xk[None], K).squeeze(0)
 
@@ -287,19 +299,23 @@ class FrameTracker:
         sqrt_info: Float[torch.Tensor, "hw 4"] = torch.cat((sqrt_info_ray.repeat(1, 3), sqrt_info_dist), dim=1)
 
         # Solving for relative pose without scale!
-        T_CkCf: lietorch.Sim3 = T_WCk.inv() * T_WCf
+        T_CkCf = T_WCk.inv() * T_WCf
 
         # Precalculate distance and ray for obs k
-        rd_k: Float[torch.Tensor, "hw 4"] = point_to_ray_dist(Xk, jacobian=False)
+        rd_k_result = point_to_ray_dist(Xk, jacobian=False)
+        assert isinstance(rd_k_result, torch.Tensor)
+        rd_k: Float[torch.Tensor, "hw 4"] = rd_k_result
 
         old_cost: float = float("inf")
         for step in range(self.cfg["max_iters"]):
-            Xf_Ck: Float[torch.Tensor, "hw 3"]
-            dXf_Ck_dT_CkCf: Float[torch.Tensor, "hw 3 7"]
-            Xf_Ck, dXf_Ck_dT_CkCf = act_Sim3(T_CkCf, Xf, jacobian=True)
-            rd_f_Ck: Float[torch.Tensor, "hw 4"]
-            drd_f_Ck_dXf_Ck: Float[torch.Tensor, "hw 4 3"]
-            rd_f_Ck, drd_f_Ck_dXf_Ck = point_to_ray_dist(Xf_Ck, jacobian=True)
+            act_result = act_Sim3(T_CkCf, Xf, jacobian=True)
+            assert isinstance(act_result, tuple)
+            Xf_Ck: Float[torch.Tensor, "hw 3"] = act_result[0]
+            dXf_Ck_dT_CkCf: Float[torch.Tensor, "hw 3 7"] = act_result[1]
+            rd_result = point_to_ray_dist(Xf_Ck, jacobian=True)
+            assert isinstance(rd_result, tuple)
+            rd_f_Ck: Float[torch.Tensor, "hw 4"] = rd_result[0]
+            drd_f_Ck_dXf_Ck: Float[torch.Tensor, "hw 4 3"] = rd_result[1]
             # r = z-h(x)
             r: Float[torch.Tensor, "hw 4"] = rd_k - rd_f_Ck
             # Jacobian
@@ -326,9 +342,9 @@ class FrameTracker:
                 print(f"max iters reached {last_error}")
 
         # Assign new pose based on relative pose
-        T_WCf = T_WCk * T_CkCf
+        T_WCf_updated = T_WCk * T_CkCf
 
-        return T_WCf, T_CkCf
+        return T_WCf_updated, T_CkCf
 
     def opt_pose_calib_sim3(
         self,
@@ -367,17 +383,15 @@ class FrameTracker:
         sqrt_info: Float[torch.Tensor, "hw 3"] = torch.cat((sqrt_info_pixel.repeat(1, 2), sqrt_info_depth), dim=1)
 
         # Solving for relative pose without scale!
-        T_CkCf: lietorch.Sim3 = T_WCk.inv() * T_WCf
+        T_CkCf = T_WCk.inv() * T_WCf
 
         old_cost: float = float("inf")
         for step in range(self.cfg["max_iters"]):
-            Xf_Ck: Float[torch.Tensor, "hw 3"]
-            dXf_Ck_dT_CkCf: Float[torch.Tensor, "hw 3 7"]
-            Xf_Ck, dXf_Ck_dT_CkCf = act_Sim3(T_CkCf, Xf, jacobian=True)
-            pzf_Ck: Float[torch.Tensor, "hw 3"]
-            dpzf_Ck_dXf_Ck: Float[torch.Tensor, "hw 3 3"]
-            valid_proj: Bool[torch.Tensor, "hw 1"]
-            pzf_Ck, dpzf_Ck_dXf_Ck, valid_proj = project_calib(
+            act_result = act_Sim3(T_CkCf, Xf, jacobian=True)
+            assert isinstance(act_result, tuple)
+            Xf_Ck: Float[torch.Tensor, "hw 3"] = act_result[0]
+            dXf_Ck_dT_CkCf: Float[torch.Tensor, "hw 3 7"] = act_result[1]
+            proj_result = project_calib(
                 Xf_Ck,
                 K,
                 img_size,
@@ -385,6 +399,10 @@ class FrameTracker:
                 border=self.cfg["pixel_border"],
                 z_eps=self.cfg["depth_eps"],
             )
+            assert len(proj_result) == 3
+            pzf_Ck: Float[torch.Tensor, "hw 3"] = proj_result[0]
+            dpzf_Ck_dXf_Ck: Float[torch.Tensor, "hw 3 3"] = proj_result[1]
+            valid_proj: Bool[torch.Tensor, "hw 1"] = proj_result[2]
             valid2: Bool[torch.Tensor, "hw 1"] = valid_proj & valid_meas_k
             sqrt_info2: Float[torch.Tensor, "hw 3"] = valid2 * sqrt_info
 
@@ -414,6 +432,6 @@ class FrameTracker:
                 print(f"max iters reached {last_error}")
 
         # Assign new pose based on relative pose
-        T_WCf = T_WCk * T_CkCf
+        T_WCf_updated = T_WCk * T_CkCf
 
-        return T_WCf, T_CkCf
+        return T_WCf_updated, T_CkCf

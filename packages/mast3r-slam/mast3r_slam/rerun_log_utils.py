@@ -105,10 +105,11 @@ class RerunLogger:
             n_kf: int = len(keyframes)
         if n_kf > 0 and n_kf != self._last_orient_n_kf:
             self._log_orient_transform(keyframes, n_kf)
-        H: int = current_frame.img_shape.squeeze()[0].item()
-        W: int = current_frame.img_shape.squeeze()[1].item()
+        H: int = int(current_frame.img_shape.squeeze()[0].item())
+        W: int = int(current_frame.img_shape.squeeze()[1].item())
 
         pp: Float32[torch.Tensor, "2"] = torch.tensor((W / 2, H / 2))
+        assert current_frame.X_canon is not None
         pts3d: Float32[torch.Tensor, "H W 3"] = current_frame.X_canon.clone().cpu().reshape(H, W, 3)
         focal: float = float(estimate_focal_knowing_depth(pts3d[None], pp, focal_mode="weiszfeld"))
 
@@ -177,6 +178,7 @@ class RerunLogger:
                     rr.Image(image=kf_img, color_model=rr.ColorModel.RGB).compress(),
                 )
                 # create a mask based on the confidence values
+                assert keyframe.C is not None
                 mask_raw: Bool[np.ndarray, "hw 1"] = keyframe.C.cpu().numpy() > self.conf_thresh
 
                 # Convert the mask from shape (h*w, 1) to shape (h*w,)
@@ -185,6 +187,7 @@ class RerunLogger:
                 )  # Remove the trailing dimension to get a 1D boolean array
 
                 # Now apply the mask to both positions and colors
+                assert keyframe.X_canon is not None
                 positions: Float32[np.ndarray, "num_points 3"] = keyframe.X_canon.cpu().numpy()
                 colors: UInt8[np.ndarray, "num_points 3"] = kf_img.reshape(-1, 3)
 
@@ -227,13 +230,17 @@ class RerunLogger:
             )
 
         # Log the edges
+        T_WCi: lietorch.Sim3 | None = None
+        T_WCj: lietorch.Sim3 | None = None
         with states.lock:
             ii: Int[torch.Tensor, "num_edges"] = torch.tensor(states.edges_ii, dtype=torch.long)
             jj: Int[torch.Tensor, "num_edges"] = torch.tensor(states.edges_jj, dtype=torch.long)
             if ii.numel() > 0 and jj.numel() > 0:
-                T_WCi: lietorch.Sim3 = lietorch.Sim3(keyframes.T_WC[ii, 0])
-                T_WCj: lietorch.Sim3 = lietorch.Sim3(keyframes.T_WC[jj, 0])
+                T_WCi = lietorch.Sim3(keyframes.T_WC[ii, 0])
+                T_WCj = lietorch.Sim3(keyframes.T_WC[jj, 0])
         if ii.numel() > 0 and jj.numel() > 0:
+            assert T_WCi is not None
+            assert T_WCj is not None
             t_WCi: Float32[np.ndarray, "num_edges 3"] = T_WCi.matrix()[:, :3, 3].cpu().numpy()
             t_WCj: Float32[np.ndarray, "num_edges 3"] = T_WCj.matrix()[:, :3, 3].cpu().numpy()
             line_strips: list[list[float]] = []

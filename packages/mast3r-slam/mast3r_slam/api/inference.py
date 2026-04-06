@@ -117,6 +117,7 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
         sys.exit(0)
     K: Float[torch.Tensor, "3 3"] | None = None
     if use_calib:
+        assert dataset.camera_intrinsics is not None
         K = torch.from_numpy(dataset.camera_intrinsics.K_frame).to(device, dtype=torch.float32)
         keyframes.set_intrinsics(K)
 

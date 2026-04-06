@@ -85,11 +85,16 @@ def save_reconstruction(
     for i in range(len(keyframes)):
         keyframe = keyframes[i]
         if config["use_calib"]:
+            assert keyframe.X_canon is not None
+            assert keyframe.K is not None
+            kf_img_shape: tuple[int, int] = (int(keyframe.img_shape.flatten()[0]), int(keyframe.img_shape.flatten()[1]))
             X_canon = constrain_points_to_ray(
-                keyframe.img_shape.flatten()[:2], keyframe.X_canon[None], keyframe.K
+                kf_img_shape, keyframe.X_canon[None], keyframe.K
             )
             keyframe.X_canon = X_canon.squeeze(0)
 
+        assert keyframe.X_canon is not None
+        assert keyframe.C is not None
         t = timestamps[keyframe.frame_id]
         reconstruction[i] = {
             "frame_id": i,

@@ -41,7 +41,9 @@ def test_point_to_dist_unit_vector() -> None:
 def test_point_to_ray_dist_roundtrip() -> None:
     """ray * distance should reconstruct the original point."""
     X: Float[torch.Tensor, "5 3"] = torch.randn(5, 3)
-    rd: Float[torch.Tensor, "5 4"] = point_to_ray_dist(X, jacobian=False)
+    rd_result = point_to_ray_dist(X, jacobian=False)
+    assert isinstance(rd_result, torch.Tensor)
+    rd: Float[torch.Tensor, "5 4"] = rd_result
     ray: Float[torch.Tensor, "5 3"] = rd[..., :3]
     dist: Float[torch.Tensor, "5 1"] = rd[..., 3:]
     reconstructed: Float[torch.Tensor, "5 3"] = ray * dist
@@ -51,7 +53,9 @@ def test_point_to_ray_dist_roundtrip() -> None:
 def test_point_to_ray_dist_jacobian_shape() -> None:
     """Jacobian should have shape (..., 4, 3)."""
     X: Float[torch.Tensor, "2 3 3"] = torch.randn(2, 3, 3)
-    rd, drd_dX = point_to_ray_dist(X, jacobian=True)
+    rd_jac_result = point_to_ray_dist(X, jacobian=True)
+    assert isinstance(rd_jac_result, tuple)
+    rd, drd_dX = rd_jac_result
     assert rd.shape == (2, 3, 4)
     assert drd_dX.shape == (2, 3, 4, 3)
 
@@ -63,7 +67,9 @@ def test_project_backproject_roundtrip() -> None:
     P[..., 2] = P[..., 2].abs() + 0.5  # positive depth
 
     img_size: tuple[int, int] = (480, 640)
-    pz, valid = project_calib(P, K, img_size)
+    proj_result = project_calib(P, K, img_size)
+    assert len(proj_result) == 2
+    pz, valid = proj_result[0], proj_result[1]
 
     uv: Float[torch.Tensor, "5 2"] = pz[..., :2]
     z: Float[torch.Tensor, "5 1"] = torch.exp(pz[..., 2:3])  # log(z) -> z

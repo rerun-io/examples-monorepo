@@ -33,6 +33,7 @@ class RetrievalDatabase(Retriever):
 
         self.query_dtype: torch.dtype = torch.float32
         self.query_device: str = device
+        assert self.asmk.codebook is not None
         self.centroids: Float[torch.Tensor, "n_centroids d"] = torch.from_numpy(self.asmk.codebook.centroids).to(
             device=self.query_device, dtype=self.query_dtype
         )

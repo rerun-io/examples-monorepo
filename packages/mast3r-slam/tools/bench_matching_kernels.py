@@ -14,6 +14,7 @@ mast3r_slam._mojo_backends (.so from Mojo build) to be importable.
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
@@ -51,7 +52,7 @@ class BenchResult:
     max_ms: float
 
 
-def bench(fn: callable, warmup: int = 50, runs: int = 500) -> BenchResult:
+def bench(fn: Callable[..., object], warmup: int = 50, runs: int = 500) -> BenchResult:
     """Benchmark a GPU kernel using torch.cuda.Event timing.
 
     Args:

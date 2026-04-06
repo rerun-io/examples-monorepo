@@ -241,7 +241,7 @@ def _resize_pil_image(img, long_edge_size):
     S = max(img.size)
     if long_edge_size < S:
         interp = PIL.Image.LANCZOS
-    elif long_edge_size >= S:
+    else:
         interp = PIL.Image.BICUBIC
     new_size = tuple(int(round(x * long_edge_size / S)) for x in img.size)
     return img.resize(new_size, interp)
@@ -382,10 +382,11 @@ def estimate_focal_knowing_depth(
 
 
 def frame_to_intir(frame: "Frame") -> tuple[tuple[float, float], tuple[float, float]]:
-    H = frame.img_shape.squeeze()[0].item()
-    W = frame.img_shape.squeeze()[1].item()
+    H: int = int(frame.img_shape.squeeze()[0].item())
+    W: int = int(frame.img_shape.squeeze()[1].item())
 
     pp: Float32[torch.Tensor, "2"] = torch.tensor((W / 2, H / 2))
+    assert frame.X_canon is not None
     pts3d: Float32[torch.Tensor, "H W 3"] = frame.X_canon.clone().cpu().reshape(H, W, 3)
     focal: float = float(
         estimate_focal_knowing_depth(pts3d[None], pp, focal_mode="weiszfeld")

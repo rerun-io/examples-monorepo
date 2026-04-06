@@ -122,12 +122,14 @@ def save_kf_to_nerfstudio(
             dst_convention=conventions.CC.GL,
         )
 
+        assert keyframe.C is not None
         mask_raw: Bool[np.ndarray, "hw 1"] = keyframe.C.cpu().numpy() > confidence_thresh
 
         # Convert the mask from shape (h*w, 1) to shape (h*w,)
         mask: Bool[np.ndarray, "hw"] = mask_raw.squeeze()  # Remove the trailing dimension to get a 1D boolean array
 
         # Now apply the mask to both positions and colors
+        assert keyframe.X_canon is not None
         positions: Float32[np.ndarray, "num_points 3"] = keyframe.X_canon.cpu().numpy()
         colors: UInt8[np.ndarray, "num_points 3"] = rgb_img.reshape(-1, 3)
 

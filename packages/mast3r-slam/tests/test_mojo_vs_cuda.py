@@ -13,6 +13,7 @@ Run:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import pytest
@@ -56,7 +57,7 @@ class BenchResult:
     max_ms: float
 
 
-def benchmark_fn(fn: callable, warmup: int = 10, runs: int = 100) -> BenchResult:
+def benchmark_fn(fn: Callable[..., object], warmup: int = 10, runs: int = 100) -> BenchResult:
     """Benchmark a CUDA kernel using torch.cuda.Event timing.
 
     Args:

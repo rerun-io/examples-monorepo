@@ -53,6 +53,8 @@ class Frame:
     """Total number of point map update calls."""
     K: torch.Tensor | None = None
     """Camera intrinsic matrix (only set when using calibration)."""
+    score: torch.Tensor | None = None
+    """Scalar filtering score (set by ``best_score`` filtering mode)."""
 
     def get_score(self, C: Float[torch.Tensor, "hw 1"]) -> Float[torch.Tensor, ""]:
         """Compute a scalar filtering score from confidence values.
@@ -69,6 +71,8 @@ class Frame:
             score = torch.median(C)  # Is this slower than mean? Is it worth it?
         elif filtering_score == "mean":
             score = torch.mean(C)
+        else:
+            raise ValueError(f"Unknown filtering_score: {filtering_score}")
         return score
 
     def update_pointmap(
@@ -104,21 +108,28 @@ class Frame:
             self.N = 1
         elif filtering_mode == "best_score":
             new_score: Float[torch.Tensor, ""] = self.get_score(C)
+            assert self.score is not None
             if new_score > self.score:
                 self.X_canon = X.clone()
                 self.C = C.clone()
                 self.N = 1
                 self.score = new_score
         elif filtering_mode == "indep_conf":
+            assert self.C is not None
+            assert self.X_canon is not None
             new_mask: Bool[torch.Tensor, "hw 1"] = C > self.C
             self.X_canon[new_mask.repeat(1, 3)] = X[new_mask.repeat(1, 3)]
             self.C[new_mask] = C[new_mask]
             self.N = 1
         elif filtering_mode == "weighted_pointmap":
+            assert self.C is not None
+            assert self.X_canon is not None
             self.X_canon = ((self.C * self.X_canon) + (C * X)) / (self.C + C)
             self.C = self.C + C
             self.N += 1
         elif filtering_mode == "weighted_spherical":
+            assert self.C is not None
+            assert self.X_canon is not None
 
             def cartesian_to_spherical(
                 P: Float[torch.Tensor, "hw 3"],
@@ -181,11 +192,12 @@ def create_frame(
     Returns:
         A fully constructed Frame ready for tracking.
     """
-    img = resize_img(img, img_size)
-    rgb: Float[torch.Tensor, "1 3 h w"] = img["img"].to(device=device)
-    img_shape: Int[torch.Tensor, "1 2"] = torch.tensor(img["true_shape"], device=device)
+    resized = resize_img(img, img_size)
+    assert isinstance(resized, dict)
+    rgb: Float[torch.Tensor, "1 3 h w"] = resized["img"].to(device=device)
+    img_shape: Int[torch.Tensor, "1 2"] = torch.tensor(resized["true_shape"], device=device)
     img_true_shape: Int[torch.Tensor, "1 2"] = img_shape.clone()
-    uimg: Float[torch.Tensor, "h w 3"] = torch.from_numpy(img["unnormalized_img"]) / 255.0
+    uimg: Float[torch.Tensor, "h w 3"] = torch.from_numpy(resized["unnormalized_img"]) / 255.0
     downsample: int = config["dataset"]["img_downsample"]
     if downsample > 1:
         uimg = uimg[::downsample, ::downsample]
@@ -246,6 +258,10 @@ class SharedStates:
         Args:
             frame: The Frame whose data should be written.
         """
+        assert frame.X_canon is not None
+        assert frame.C is not None
+        assert frame.feat is not None
+        assert frame.pos is not None
         with self.lock:
             self.dataset_idx[:] = frame.frame_id
             self.img[:] = frame.img
@@ -419,6 +435,10 @@ class SharedKeyframes:
         Returns:
             The index that was written.
         """
+        assert value.X_canon is not None
+        assert value.C is not None
+        assert value.feat is not None
+        assert value.pos is not None
         with self.lock:
             self.n_size.value = max(idx + 1, self.n_size.value)
 
