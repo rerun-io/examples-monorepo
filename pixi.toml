@@ -41,6 +41,10 @@ simplecv = { git = "https://github.com/pablovela5620/simplecv.git", tag = "v0.7.
 
 
 # ─── CUDA 12.9 feature (shared across all GPU envs) ─────────────────────────
+# Only solve for linux-64 — CUDA/pytorch-gpu packages are not available on aarch64.
+[feature.cuda]
+platforms = ["linux-64"]
+
 [feature.cuda.system-requirements]
 cuda = "12.9"
 
@@ -71,7 +75,6 @@ libnvjitlink = "*"
 # PyTorch
 pytorch-gpu = ">=2.8.0"
 torchvision = "*"
-torchcodec = "*"
 
 # ─── ide feature (standalone dev env for Zed/IDE tooling) ────────────────────
 [feature.ide.dependencies]
@@ -322,6 +325,7 @@ audioop-lts = "*"
 pydub = "*"
 open3d = ">=0.19.0,<0.20"
 h5py = ">=3.11"
+torchcodec = "*"
 
 [feature.sam3d.pypi-dependencies]
 sam3d_body = { path = "packages/sam3d-body-rerun", editable = true }
@@ -674,8 +678,9 @@ platforms = ["linux-64"]
 
 [feature.mast3r-slam.dependencies]
 python = "3.11.*"
+torchcodec = "*"
 eigen = ">=3.4.0,<4"
-ffmpeg = ">=7.1.0,<8"
+ffmpeg = ">=7.1.0"
 open3d = ">=0.19.0,<0.20"
 faiss = "*"
 scikit-learn = "*"
