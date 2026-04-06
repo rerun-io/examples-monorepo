@@ -56,9 +56,6 @@ class RerunLogger:
 
     def __init__(self, parent_log_path: Path) -> None:
         self.parent_log_path: Path = parent_log_path
-        # Set the scene coordinate system: Right-Forward-Up so the
-        # gravity-aligned orient transform produces an upright view.
-        rr.log("/", rr.ViewCoordinates.RFU, static=True)
 
         self.path_list: list[list[float]] = []
         self.keyframe_logged_list: list[int] = []
