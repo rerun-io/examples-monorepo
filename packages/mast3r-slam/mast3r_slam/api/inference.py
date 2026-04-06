@@ -210,6 +210,8 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
 
             add_new_kf: bool = False
 
+            # INIT is handled separately because it uses `continue` to skip
+            # the keyframe-selection and logging below.
             if mode == Mode.INIT:
                 # Bootstrap: run MASt3R mono inference to get initial 3D points
                 # and features.  The first frame is always a keyframe.
@@ -225,36 +227,37 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
                 i += 1
                 continue
 
-            if mode == Mode.TRACKING:
-                # Normal tracking: match this frame against the last keyframe,
-                # estimate its relative pose via Gauss-Newton, and decide
-                # whether the overlap is low enough to warrant a new keyframe.
-                match_info: list
-                try_reloc: bool
-                add_new_kf, match_info, try_reloc = tracker.track(frame)
-                if try_reloc:
-                    # Too few matches — tracking is lost, switch to reloc mode.
-                    states.set_mode(Mode.RELOC)
-                states.set_frame(frame)
+            match mode:
+                case Mode.TRACKING:
+                    # Normal tracking: match this frame against the last keyframe,
+                    # estimate its relative pose via Gauss-Newton, and decide
+                    # whether the overlap is low enough to warrant a new keyframe.
+                    match_info: list
+                    try_reloc: bool
+                    add_new_kf, match_info, try_reloc = tracker.track(frame)
+                    if try_reloc:
+                        # Too few matches — tracking is lost, switch to reloc mode.
+                        states.set_mode(Mode.RELOC)
+                    states.set_frame(frame)
 
-            elif mode == Mode.RELOC:
-                # Relocalization: run mono inference to get features, then the
-                # backend process will try to match against the retrieval DB.
-                X: Float[Tensor, "hw 3"]
-                C: Float[Tensor, "hw 1"]
-                X, C = mast3r_inference_mono(model, frame)
-                frame.update_pointmap(X, C)
-                states.set_frame(frame)
-                states.queue_reloc()
-                # In single-threaded mode, block until reloc completes.
-                while config["single_thread"]:
-                    with states.lock:
-                        if states.reloc_sem.value == 0:
-                            break
-                    time.sleep(0.01)
+                case Mode.RELOC:
+                    # Relocalization: run mono inference to get features, then the
+                    # backend process will try to match against the retrieval DB.
+                    X: Float[Tensor, "hw 3"]
+                    C: Float[Tensor, "hw 1"]
+                    X, C = mast3r_inference_mono(model, frame)
+                    frame.update_pointmap(X, C)
+                    states.set_frame(frame)
+                    states.queue_reloc()
+                    # In single-threaded mode, block until reloc completes.
+                    while config["single_thread"]:
+                        with states.lock:
+                            if states.reloc_sem.value == 0:
+                                break
+                        time.sleep(0.01)
 
-            else:
-                raise RuntimeError(f"Invalid mode: {mode!r}")
+                case _:
+                    raise RuntimeError(f"Invalid mode: {mode!r}")
 
             # If the tracker decided this frame should be a new keyframe,
             # add it to the shared buffer and queue it for the backend to
