@@ -41,7 +41,8 @@ simplecv = { git = "https://github.com/pablovela5620/simplecv.git", tag = "v0.7.
 
 
 # ─── CUDA 12.9 feature (shared across all GPU envs) ─────────────────────────
-# Only solve for linux-64 — CUDA/pytorch-gpu packages are not available on aarch64.
+# Restrict to linux-64: the CUDA toolchain, pytorch-gpu, and GPU-only deps
+# like torchcodec don't have conda-forge builds for linux-aarch64.
 [feature.cuda]
 platforms = ["linux-64"]
 
