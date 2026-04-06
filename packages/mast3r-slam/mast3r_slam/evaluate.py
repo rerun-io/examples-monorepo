@@ -1,8 +1,5 @@
 import pathlib
-from typing import TYPE_CHECKING, Protocol
-
-if TYPE_CHECKING:
-    from mast3r_slam.dataloader import MonocularDataset
+from typing import Protocol, runtime_checkable
 
 import cv2
 import numpy as np
@@ -11,25 +8,27 @@ from jaxtyping import UInt8
 from numpy import ndarray
 
 from mast3r_slam.config import config
-from mast3r_slam.dataloader import Intrinsics
+from mast3r_slam.dataloader import Intrinsics, MonocularDataset
 from mast3r_slam.frame import SharedKeyframes
 from mast3r_slam.geometry import constrain_points_to_ray
 from mast3r_slam.lietorch_utils import as_SE3
 
 
+@runtime_checkable
 class _HasSaveAs(Protocol):
     """Protocol for objects with a ``save_as`` attribute."""
 
     save_as: str
 
 
+@runtime_checkable
 class _HasDatasetPath(Protocol):
     """Protocol for objects with a ``dataset_path`` attribute."""
 
     dataset_path: pathlib.Path
 
 
-def prepare_savedir(args: _HasSaveAs, dataset: "MonocularDataset") -> tuple[pathlib.Path, str]:
+def prepare_savedir(args: _HasSaveAs, dataset: MonocularDataset) -> tuple[pathlib.Path, str]:
     """Create the log directory and derive a sequence name from the dataset path.
 
     Args:

@@ -1,16 +1,14 @@
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
 import torch
 from asmk import io_helpers
-from jaxtyping import Float, Float32, Int, Int64
+from jaxtyping import Bool, Float, Float32, Int, Int64
 from mast3r.retrieval.model import how_select_local
 from mast3r.retrieval.processor import Retriever
 from numpy import ndarray
 from torch import Tensor
 
-if TYPE_CHECKING:
-    from mast3r_slam.frame import Frame
 
 
 class RetrievalDatabase(Retriever):
@@ -73,7 +71,7 @@ class RetrievalDatabase(Retriever):
 
     def update(
         self,
-        frame: "Frame",
+        frame: Any,
         add_after_query: bool,
         k: int,
         min_thresh: float = 0.0,
@@ -113,7 +111,7 @@ class RetrievalDatabase(Retriever):
 
             topk_images = torch.topk(scores_tensor, min(k, database_size))
 
-            valid: Float[Tensor, "k"] = topk_images.values > min_thresh
+            valid: Bool[Tensor, "k"] = topk_images.values > min_thresh
             topk_image_inds_tensor: Int[Tensor, "n_valid"] = topk_images.indices[valid]
             topk_image_inds = topk_image_inds_tensor.tolist()
 
@@ -127,7 +125,7 @@ class RetrievalDatabase(Retriever):
         self,
         feat: Float32[ndarray, "n_local d"],
         id: Int64[ndarray, "n_local"],
-    ) -> tuple[Float[ndarray, "..."], Float[ndarray, "..."], Int64[ndarray, "..."]]:
+    ) -> tuple[Int64[ndarray, "..."], Float[ndarray, "..."], Int64[ndarray, "..."]]:
         """Query the ASMK inverted file for matching images.
 
         Args:
@@ -205,7 +203,7 @@ class RetrievalDatabase(Retriever):
         qvecs: Float32[ndarray, "n_local d"],
         qimids: Int64[ndarray, "n_local"],
         params: dict,
-    ) -> tuple[Float[ndarray, "..."], Float[ndarray, "..."], Float[ndarray, "..."], Int64[ndarray, "..."]]:
+    ) -> tuple[Int64[ndarray, "..."], Int64[ndarray, "..."], Float[ndarray, "..."], Int64[ndarray, "..."]]:
         """Accumulate scores for every query image given codebook, kernel,
         inverted_file and parameters.
 

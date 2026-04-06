@@ -126,8 +126,8 @@ def prep_for_iter_proj(
     if idx_1_to_2_init is None:
         # Reset to identity mapping
         idx_1_to_2_init = torch.arange(h * w, device=device)[None, :].repeat(b, 1)
-    p_init: Float[Tensor, "b hw 2"] = lin_to_pixel(idx_1_to_2_init, w)
-    p_init = p_init.float()
+    p_init_int: Int[Tensor, "b hw 2"] = lin_to_pixel(idx_1_to_2_init, w)
+    p_init: Float[Tensor, "b hw 2"] = p_init_int.float()
 
     return rays_with_grad_img, pts3d_norm, p_init
 

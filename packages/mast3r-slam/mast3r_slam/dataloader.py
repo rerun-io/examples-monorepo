@@ -337,17 +337,15 @@ class MP4Dataset(MonocularDataset):
 
     def read_img(self, idx: int) -> UInt8[ndarray, "h w 3"]:
         if HAS_TORCHCODEC:
-            img = self.decoder[idx * self.stride]  # c,h,w
-            img = img.permute(1, 2, 0)
-            img = img.numpy()
+            img_tensor = self.decoder[idx * self.stride]  # c,h,w uint8
+            img: UInt8[ndarray, "h w 3"] = img_tensor.permute(1, 2, 0).numpy()
         else:
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, idx * self.stride)
             ret: bool
-            ret, img = self.cap.read()
+            ret, frame = self.cap.read()
             if not ret:
                 raise ValueError("Failed to read image")
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img = img.astype(self.dtype)
+            img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         timestamp: float = idx / self.fps
         self.timestamps.append(timestamp)
         return img

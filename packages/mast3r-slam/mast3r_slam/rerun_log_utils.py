@@ -5,7 +5,7 @@ import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 import torch
-from jaxtyping import Bool, Float32, Int, UInt8
+from jaxtyping import Bool, Float, Float32, Int, UInt8
 from numpy import ndarray
 from simplecv.camera_orient_utils import auto_orient_and_center_poses
 from simplecv.ops import conventions
@@ -77,11 +77,11 @@ class RerunLogger:
             world_T_cam_gl_list.append(mat4x4_gl)
 
         world_T_cam_gl: Float32[ndarray, "n_kf 4 4"] = np.stack(world_T_cam_gl_list)
-        orient_34: Float32[ndarray, "3 4"] = auto_orient_and_center_poses(
+        orient_34: Float[ndarray, "3 4"] = auto_orient_and_center_poses(
             world_T_cam_gl, method="up", center_method="poses"
         ).transform
-        orient_R: Float32[ndarray, "3 3"] = orient_34[:, :3]
-        orient_t: Float32[ndarray, "3"] = orient_34[:, 3]
+        orient_R: Float[ndarray, "3 3"] = orient_34[:, :3]
+        orient_t: Float[ndarray, "3"] = orient_34[:, 3]
         rr.log(
             f"{self.parent_log_path}",
             rr.Transform3D(mat3x3=orient_R, translation=orient_t),

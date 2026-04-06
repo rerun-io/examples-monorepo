@@ -30,13 +30,13 @@ class Frame:
 
     frame_id: int
     """Index of this frame in the dataset sequence."""
-    img: Float[Tensor, "1 3 h w"]
-    """Normalized RGB image tensor in CHW layout (may have leading batch dim)."""
-    img_shape: Int[Tensor, "1 2"]
+    img: Float[Tensor, "*batch 3 h w"]
+    """Normalized RGB image tensor, (1, 3, h, w) or (3, h, w) when read from shared buffer."""
+    img_shape: Int[Tensor, "*batch 2"]
     """(height, width) of the processed image after optional downsampling."""
-    img_true_shape: Int[Tensor, "1 2"]
+    img_true_shape: Int[Tensor, "*batch 2"]
     """(height, width) of the image before any downsampling."""
-    uimg: Float[Tensor, "h w 3"]
+    uimg: Float[Tensor, "*batch h w 3"]
     """Unnormalized RGB image in [0, 1] range, HWC layout on CPU."""
     world_T_cam: lietorch.Sim3 = lietorch.Sim3.Identity(1)
     """World-from-camera Sim3 pose."""
