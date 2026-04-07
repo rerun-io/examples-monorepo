@@ -285,7 +285,7 @@ class FactorGraph:
         Xs, world_sim3_cams, Cs = self.get_poses_points(unique_kf_idx)
 
         # Constrain points to ray
-        img_size: tuple[int, int] = (int(self.frames[0].img.shape[-2]), int(self.frames[0].img.shape[-1]))
+        img_size: tuple[int, int] = (int(self.frames[0].rgb_tensor.shape[-2]), int(self.frames[0].rgb_tensor.shape[-1]))
         Xs = constrain_points_to_ray(img_size, Xs, K)
 
         ii: Int[Tensor, "n_edges"]
@@ -306,7 +306,7 @@ class FactorGraph:
 
         pose_data: Float[Tensor, "n_unique sim3_dim"] = world_sim3_cams.data[:, 0, :]
 
-        img_size = (int(self.frames[0].img.shape[-2]), int(self.frames[0].img.shape[-1]))
+        img_size = (int(self.frames[0].rgb_tensor.shape[-2]), int(self.frames[0].rgb_tensor.shape[-1]))
         height: int
         width: int
         height, width = img_size

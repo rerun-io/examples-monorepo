@@ -135,7 +135,7 @@ def streaming_mast3r_slam_fn(
                 states.set_mode(Mode.TERMINATED)
                 break
 
-            timestamp, img = dataset[i]
+            timestamp, rgb = dataset[i]
 
             # get frames last camera pose
             world_sim3_cam: lietorch.Sim3 = (
@@ -144,7 +144,7 @@ def streaming_mast3r_slam_fn(
                 else states.get_frame().world_sim3_cam
             )
             frame: Frame = create_frame(
-                i, img, world_sim3_cam, img_size=dataset.img_size, device=DEVICE
+                i, rgb, world_sim3_cam, img_size=dataset.img_size, device=DEVICE
             )
 
             if mode == Mode.INIT:

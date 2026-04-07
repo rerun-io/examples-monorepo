@@ -130,8 +130,8 @@ class RerunLogger:
         )
 
         # Log the current camera image
-        rgb_img_float: Float32[Tensor, "H W 3"] = current_frame.uimg
-        rgb_img: UInt8[ndarray, "H W 3"] = (rgb_img_float * 255).numpy().astype(np.uint8)
+        rgb_float: Float32[Tensor, "H W 3"] = current_frame.rgb
+        rgb_img: UInt8[ndarray, "H W 3"] = (rgb_float * 255).numpy().astype(np.uint8)
         rr.log(
             f"{cam_log_path}/pinhole/image",
             rr.Image(image=rgb_img, color_model=rr.ColorModel.RGB).compress(jpeg_quality=75),
@@ -160,8 +160,8 @@ class RerunLogger:
 
             # Log image + pointcloud only the first time a keyframe appears.
             if kf_idx not in self.keyframe_logged_list:
-                kf_img_float: Float32[Tensor, "H W 3"] = keyframe.uimg
-                kf_img: UInt8[ndarray, "H W 3"] = (kf_img_float * 255).numpy().astype(np.uint8)
+                kf_rgb_float: Float32[Tensor, "H W 3"] = keyframe.rgb
+                kf_img: UInt8[ndarray, "H W 3"] = (kf_rgb_float * 255).numpy().astype(np.uint8)
                 rr.log(
                     f"{kf_cam_log_path}/pinhole/image",
                     rr.Image(image=kf_img, color_model=rr.ColorModel.RGB).compress(),
@@ -191,8 +191,8 @@ class RerunLogger:
         # ── Last keyframe image ────────────────────────────────────────────
         if N_keyframes > 0:
             last_kf: Frame = keyframes[N_keyframes - 1]
-            last_kf_img_float: Float32[Tensor, "H W 3"] = last_kf.uimg
-            last_kf_img: UInt8[ndarray, "H W 3"] = (last_kf_img_float * 255).numpy().astype(np.uint8)
+            last_kf_rgb_float: Float32[Tensor, "H W 3"] = last_kf.rgb
+            last_kf_img: UInt8[ndarray, "H W 3"] = (last_kf_rgb_float * 255).numpy().astype(np.uint8)
             rr.log(
                 f"{self.parent_log_path}/last_keyframe",
                 rr.Image(image=last_kf_img, color_model=rr.ColorModel.RGB).compress(),

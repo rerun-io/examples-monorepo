@@ -96,15 +96,15 @@ def save_kf_to_nerfstudio(
     w: int = 0
     for i in tqdm.tqdm(range(len(keyframes)), desc="Processing keyframes"):
         keyframe: Frame = keyframes[i]
-        rgb_img_float: Float32[Tensor, "H W 3"] = keyframe.uimg
-        rgb_img: UInt8[ndarray, "H W 3"] = (rgb_img_float * 255).numpy().astype(np.uint8)
-        bgr_img: UInt8[ndarray, "H W 3"] = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2BGR)
-        h, w, _ = bgr_img.shape
+        rgb_float: Float32[Tensor, "H W 3"] = keyframe.rgb
+        rgb_uint8: UInt8[ndarray, "H W 3"] = (rgb_float * 255).numpy().astype(np.uint8)
+        bgr: UInt8[ndarray, "H W 3"] = cv2.cvtColor(rgb_uint8, cv2.COLOR_RGB2BGR)
+        h, w, _ = bgr.shape
 
         # Save the image with zero-padded numbering
         image_filename: str = f"frame_{i + 1:05d}.png"  # Format: frame_00001.png
         image_path: Path = images_dir / image_filename
-        cv2.imwrite(str(image_path), bgr_img)
+        cv2.imwrite(str(image_path), bgr)
         relative_image_path: str = f"images/{image_filename}"
 
         se3_pose: lietorch.SE3 = as_SE3(keyframe.world_sim3_cam.cpu())
@@ -128,7 +128,7 @@ def save_kf_to_nerfstudio(
         # Now apply the mask to both positions and colors
         assert keyframe.X_canon is not None
         positions: Float32[ndarray, "num_points 3"] = keyframe.X_canon.cpu().numpy()
-        colors: UInt8[ndarray, "num_points 3"] = rgb_img.reshape(-1, 3)
+        colors: UInt8[ndarray, "num_points 3"] = rgb_uint8.reshape(-1, 3)
 
         masked_positions: Float32[ndarray, "n_valid 3"] = positions[mask]  # Now selects entire rows where mask is True
         masked_colors: UInt8[ndarray, "n_valid 3"] = colors[mask]

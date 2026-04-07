@@ -14,16 +14,18 @@ from jaxtyping import Float, Int32
 from numpy import ndarray
 from torch import Tensor
 
+from mast3r_slam.image_types import RgbNormalized
+
 
 class ResizedImage(NamedTuple):
     """Result of resizing and normalizing an image for MASt3R input."""
 
-    img: Float[Tensor, "1 3 h w"]
-    """ImageNet-normalized float tensor, ready for the MASt3R encoder."""
+    rgb_tensor: Float[Tensor, "1 3 h w"]
+    """ImageNet-normalized RGB tensor, ready for the MASt3R encoder."""
     true_shape: Int32[ndarray, "1 2"]
     """(height, width) of the cropped image as a (1, 2) int32 array."""
-    unnormalized_img: np.ndarray
-    """Cropped uint8 HWC image before normalization (for visualization)."""
+    rgb_uint8: np.ndarray
+    """Cropped RGB uint8 image before ImageNet normalization."""
 
 
 class CropTransform(NamedTuple):
@@ -107,7 +109,7 @@ def _center_crop_512(img: PIL.Image.Image, square_ok: bool) -> PIL.Image.Image:
 
 
 def resize_img(
-    img: Float[ndarray, "h w 3"],
+    rgb: RgbNormalized,
     size: Literal[224, 512],
     square_ok: bool = False,
 ) -> ResizedImage:
@@ -118,7 +120,7 @@ def resize_img(
     crop), applies ``ImgNorm``, and returns the processed tensors.
 
     Args:
-        img: Input RGB image in ``[0, 1]`` float range, shape ``(H, W, 3)``.
+        rgb: Input RGB image in ``[0, 1]`` float range, shape ``(H, W, 3)``.
         size: Target resolution -- ``224`` (center-crop to square) or ``512``
             (resize long edge, crop to 16-pixel-aligned dimensions).
         square_ok: When ``True`` and ``size=512``, allow square output even if
@@ -129,7 +131,7 @@ def resize_img(
         unnormalized uint8 image.
     """
     assert size in (224, 512)
-    pil_img: PIL.Image.Image = PIL.Image.fromarray(np.uint8(img * 255))
+    pil_img: PIL.Image.Image = PIL.Image.fromarray(np.uint8(rgb * 255))
     if size == 224:
         # Resize short side to 224, then center-crop to square.
         orig_w: int
@@ -145,11 +147,11 @@ def resize_img(
     normalized: Float[Tensor, "1 3 h w"] = ImgNorm(pil_img)[None]
     true_shape: Int32[ndarray, "1 2"] = np.array([pil_img.size[::-1]], dtype=np.int32)
     unnormalized: np.ndarray = np.asarray(pil_img)
-    return ResizedImage(img=normalized, true_shape=true_shape, unnormalized_img=unnormalized)
+    return ResizedImage(rgb_tensor=normalized, true_shape=true_shape, rgb_uint8=unnormalized)
 
 
 def resize_img_with_transform(
-    img: Float[ndarray, "h w 3"],
+    rgb: RgbNormalized,
     size: Literal[224, 512],
     square_ok: bool = False,
 ) -> tuple[ResizedImage, CropTransform]:
@@ -160,7 +162,7 @@ def resize_img_with_transform(
     (used for adjusting camera intrinsics after resizing).
 
     Args:
-        img: Input RGB image in ``[0, 1]`` float range, shape ``(H, W, 3)``.
+        rgb: Input RGB image in ``[0, 1]`` float range, shape ``(H, W, 3)``.
         size: Target resolution (224 or 512).
         square_ok: Allow square output when the image is square.
 
@@ -168,7 +170,7 @@ def resize_img_with_transform(
         A tuple of (``ResizedImage``, ``CropTransform``).
     """
     assert size in (224, 512)
-    pil_img: PIL.Image.Image = PIL.Image.fromarray(np.uint8(img * 255))
+    pil_img: PIL.Image.Image = PIL.Image.fromarray(np.uint8(rgb * 255))
     orig_w: int
     orig_h: int
     orig_w, orig_h = pil_img.size
@@ -196,6 +198,6 @@ def resize_img_with_transform(
     half_crop_h: float = (resized_h - pil_img.size[1]) / 2
 
     return (
-        ResizedImage(img=normalized, true_shape=true_shape, unnormalized_img=unnormalized),
+        ResizedImage(rgb_tensor=normalized, true_shape=true_shape, rgb_uint8=unnormalized),
         CropTransform(scale_w=scale_w, scale_h=scale_h, half_crop_w=half_crop_w, half_crop_h=half_crop_h),
     )

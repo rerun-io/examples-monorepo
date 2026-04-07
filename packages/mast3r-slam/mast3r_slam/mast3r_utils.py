@@ -159,9 +159,9 @@ def mast3r_symmetric_inference(
         A tuple ``(X, C, D, Q)`` each of shape ``(4, h, w, ...)``.
     """
     if frame_i.feat is None:
-        frame_i.feat, frame_i.pos, _ = model._encode_image(frame_i.img, frame_i.img_true_shape)
+        frame_i.feat, frame_i.pos, _ = model._encode_image(frame_i.rgb_tensor, frame_i.img_true_shape)
     if frame_j.feat is None:
-        frame_j.feat, frame_j.pos, _ = model._encode_image(frame_j.img, frame_j.img_true_shape)
+        frame_j.feat, frame_j.pos, _ = model._encode_image(frame_j.rgb_tensor, frame_j.img_true_shape)
 
     assert frame_i.pos is not None
     assert frame_j.pos is not None
@@ -262,7 +262,7 @@ def mast3r_inference_mono(model: AsymmetricMASt3R, frame: Frame) -> tuple[Float[
         of shape ``(1, h*w, 1)``.
     """
     if frame.feat is None:
-        frame.feat, frame.pos, _ = model._encode_image(frame.img, frame.img_true_shape)
+        frame.feat, frame.pos, _ = model._encode_image(frame.rgb_tensor, frame.img_true_shape)
 
     assert frame.pos is not None
     feat = frame.feat
@@ -387,9 +387,9 @@ def mast3r_asymmetric_inference(
         dim 0 corresponds to ``[res_ii, res_ji]``.
     """
     if frame_i.feat is None:
-        frame_i.feat, frame_i.pos, _ = model._encode_image(frame_i.img, frame_i.img_true_shape)
+        frame_i.feat, frame_i.pos, _ = model._encode_image(frame_i.rgb_tensor, frame_i.img_true_shape)
     if frame_j.feat is None:
-        frame_j.feat, frame_j.pos, _ = model._encode_image(frame_j.img, frame_j.img_true_shape)
+        frame_j.feat, frame_j.pos, _ = model._encode_image(frame_j.rgb_tensor, frame_j.img_true_shape)
 
     assert frame_i.pos is not None
     assert frame_j.pos is not None

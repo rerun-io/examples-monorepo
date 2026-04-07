@@ -54,7 +54,7 @@ def view_ns_data(config: ViewNsDataConfig) -> None:
         rr.set_time("sequence", sequence=idx)
         image_path: Path = config.transform_json_path.parent / frame.file_path
         assert image_path.exists(), f"Image path {image_path} does not exist"
-        rgb = cv2.imread(str(image_path))
+        bgr = cv2.imread(str(image_path))
         mat4x4_gl = frame.transform_matrix
 
         world_T_cam_44_cv = conventions.convert_pose(
@@ -89,7 +89,7 @@ def view_ns_data(config: ViewNsDataConfig) -> None:
         )
         rr.log(
             f"{cam_log_path}/pinhole/image",
-            rr.Image(image=rgb, color_model=rr.ColorModel.BGR).compress(
+            rr.Image(image=bgr, color_model=rr.ColorModel.BGR).compress(
                 jpeg_quality=10
             ),
         )

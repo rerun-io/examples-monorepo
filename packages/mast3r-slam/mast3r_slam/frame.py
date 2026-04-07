@@ -4,11 +4,11 @@ from typing import Literal
 
 import lietorch
 import torch
-from jaxtyping import Bool, Float, Float32, Int
-from numpy import ndarray
+from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
 from mast3r_slam.config import config
+from mast3r_slam.image_types import RgbNormalized
 from mast3r_slam.image_utils import ResizedImage, resize_img
 
 
@@ -101,14 +101,14 @@ class Frame:
 
     frame_id: int
     """Index of this frame in the dataset sequence."""
-    img: Float[Tensor, "*batch 3 h w"]
-    """Normalized RGB image tensor, (1, 3, h, w) or (3, h, w) when read from shared buffer."""
+    rgb_tensor: Float[Tensor, "*batch 3 h w"]
+    """ImageNet-normalized RGB tensor, (1, 3, h, w) or (3, h, w) when read from shared buffer."""
     img_shape: Int[Tensor, "*batch 2"]
     """(height, width) of the processed image after optional downsampling."""
     img_true_shape: Int[Tensor, "*batch 2"]
     """(height, width) of the image before any downsampling."""
-    uimg: Float[Tensor, "*batch h w 3"]
-    """Unnormalized RGB image in [0, 1] range, HWC layout on CPU."""
+    rgb: Float[Tensor, "*batch h w 3"]
+    """Normalized RGB image in [0, 1] range, HWC layout on CPU."""
     world_sim3_cam: lietorch.Sim3 = lietorch.Sim3.Identity(1)
     """World-from-camera Sim3 pose."""
     X_canon: Float[Tensor, "hw 3"] | None = None
@@ -232,7 +232,7 @@ class Frame:
 
 def create_frame(
     i: int,
-    img: Float32[ndarray, "h w 3"],
+    rgb: RgbNormalized,
     world_sim3_cam: lietorch.Sim3,
     img_size: Literal[224, 512] = 512,
     device: str = "cuda:0",
@@ -241,7 +241,7 @@ def create_frame(
 
     Args:
         i: Frame index in the dataset.
-        img: Raw image (numpy array or similar, passed to ``resize_img``).
+        rgb: Normalized RGB image passed to ``resize_img``.
         world_sim3_cam: World-from-camera Sim3 pose.
         img_size: Target image size for MASt3R encoder (224 or 512).
         device: Torch device string.
@@ -249,16 +249,16 @@ def create_frame(
     Returns:
         A fully constructed Frame ready for tracking.
     """
-    resized: ResizedImage = resize_img(img, img_size)
-    rgb: Float[Tensor, "1 3 h w"] = resized.img.to(device=device)
+    resized: ResizedImage = resize_img(rgb, img_size)
+    rgb_tensor: Float[Tensor, "1 3 h w"] = resized.rgb_tensor.to(device=device)
     img_shape: Int[Tensor, "1 2"] = torch.tensor(resized.true_shape, device=device)
     img_true_shape: Int[Tensor, "1 2"] = img_shape.clone()
-    uimg: Float[Tensor, "h w 3"] = torch.from_numpy(resized.unnormalized_img) / 255.0
+    rgb_cropped: Float[Tensor, "h w 3"] = torch.from_numpy(resized.rgb_uint8) / 255.0
     downsample: int = config["dataset"]["img_downsample"]
     if downsample > 1:
-        uimg = uimg[::downsample, ::downsample]
+        rgb_cropped = rgb_cropped[::downsample, ::downsample]
         img_shape = img_shape // downsample
-    frame: Frame = Frame(i, rgb, img_shape, img_true_shape, uimg, world_sim3_cam)
+    frame: Frame = Frame(i, rgb_tensor, img_shape, img_true_shape, rgb_cropped, world_sim3_cam)
     return frame
 
 
@@ -297,8 +297,8 @@ class SharedStates:
         # fmt:off
         # shared state for the current frame (used for reloc/visualization)
         self.dataset_idx: Int[Tensor, "1"] = torch.zeros(1, device=device, dtype=torch.int).share_memory_()
-        self.img: Float[Tensor, "3 h w"] = torch.zeros(3, h, w, device=device, dtype=dtype).share_memory_()
-        self.uimg: Float[Tensor, "h w 3"] = torch.zeros(h, w, 3, device="cpu", dtype=dtype).share_memory_()
+        self.rgb_tensor: Float[Tensor, "3 h w"] = torch.zeros(3, h, w, device=device, dtype=dtype).share_memory_()
+        self.rgb: Float[Tensor, "h w 3"] = torch.zeros(h, w, 3, device="cpu", dtype=dtype).share_memory_()
         self.img_shape: Int[Tensor, "1 2"] = torch.zeros(1, 2, device=device, dtype=torch.int).share_memory_()
         self.img_true_shape: Int[Tensor, "1 2"] = torch.zeros(1, 2, device=device, dtype=torch.int).share_memory_()
         self.world_sim3_cam: Float[Tensor, "1 8"] = lietorch.Sim3.Identity(1, device=device, dtype=dtype).data.share_memory_()
@@ -320,8 +320,8 @@ class SharedStates:
         assert frame.pos is not None
         with self.lock:
             self.dataset_idx[:] = frame.frame_id
-            self.img[:] = frame.img
-            self.uimg[:] = frame.uimg
+            self.rgb_tensor[:] = frame.rgb_tensor
+            self.rgb[:] = frame.rgb
             self.img_shape[:] = frame.img_shape
             self.img_true_shape[:] = frame.img_true_shape
             self.world_sim3_cam[:] = frame.world_sim3_cam.data
@@ -339,10 +339,10 @@ class SharedStates:
         with self.lock:
             frame: Frame = Frame(
                 int(self.dataset_idx[0]),
-                self.img,
+                self.rgb_tensor,
                 self.img_shape,
                 self.img_true_shape,
-                self.uimg,
+                self.rgb,
                 lietorch.Sim3(self.world_sim3_cam),
             )
             frame.X_canon = self.X
@@ -437,8 +437,8 @@ class SharedKeyframes:
 
         # fmt:off
         self.dataset_idx: Int[Tensor, "buf"] = torch.zeros(buffer, device=device, dtype=torch.int).share_memory_()
-        self.img: Float[Tensor, "buf 3 h w"] = torch.zeros(buffer, 3, h, w, device=device, dtype=dtype).share_memory_()
-        self.uimg: Float[Tensor, "buf h w 3"] = torch.zeros(buffer, h, w, 3, device="cpu", dtype=dtype).share_memory_()
+        self.rgb_tensor: Float[Tensor, "buf 3 h w"] = torch.zeros(buffer, 3, h, w, device=device, dtype=dtype).share_memory_()
+        self.rgb: Float[Tensor, "buf h w 3"] = torch.zeros(buffer, h, w, 3, device="cpu", dtype=dtype).share_memory_()
         self.img_shape: Int[Tensor, "buf 1 2"] = torch.zeros(buffer, 1, 2, device=device, dtype=torch.int).share_memory_()
         self.img_true_shape: Int[Tensor, "buf 1 2"] = torch.zeros(buffer, 1, 2, device=device, dtype=torch.int).share_memory_()
         self.world_sim3_cam: Float[Tensor, "buf 1 sim3_dim"] = torch.zeros(buffer, 1, lietorch.Sim3.embedded_dim, device=device, dtype=dtype).share_memory_()
@@ -465,10 +465,10 @@ class SharedKeyframes:
             # put all of the data into a frame
             kf: Frame = Frame(
                 int(self.dataset_idx[idx]),
-                self.img[idx],
+                self.rgb_tensor[idx],
                 self.img_shape[idx],
                 self.img_true_shape[idx],
-                self.uimg[idx],
+                self.rgb[idx],
                 lietorch.Sim3(self.world_sim3_cam[idx]),
             )
             kf.X_canon = self.X[idx]
@@ -500,8 +500,8 @@ class SharedKeyframes:
 
             # set the attributes
             self.dataset_idx[idx] = value.frame_id
-            self.img[idx] = value.img
-            self.uimg[idx] = value.uimg
+            self.rgb_tensor[idx] = value.rgb_tensor
+            self.rgb[idx] = value.rgb
             self.img_shape[idx] = value.img_shape
             self.img_true_shape[idx] = value.img_true_shape
             self.world_sim3_cam[idx] = value.world_sim3_cam.data

@@ -6,11 +6,12 @@ import cv2
 import numpy as np
 import torch
 import yaml
-from jaxtyping import Float32, UInt8
+from jaxtyping import UInt8
 from natsort import natsorted
 from numpy import ndarray
 
 from mast3r_slam.config import config
+from mast3r_slam.image_types import RgbNormalized
 from mast3r_slam.image_utils import ResizedImage, resize_img, resize_img_with_transform
 
 HAS_TORCHCODEC: bool = True
@@ -46,19 +47,19 @@ class MonocularDataset(torch.utils.data.Dataset):
         """Return the number of frames in the dataset."""
         return len(self.rgb_files)
 
-    def __getitem__(self, index: int) -> tuple[float | str, np.ndarray]:
+    def __getitem__(self, index: int) -> tuple[float | str, RgbNormalized]:
         """Return (timestamp, image) for the given index.
 
         Args:
             index: Frame index.
 
         Returns:
-            A tuple of (timestamp, normalised float image).
+            A tuple of (timestamp, normalized RGB float image).
         """
-        # Call get_image before timestamp for realsense camera
-        img: Float32[ndarray, "h w 3"] = self.get_image(index)
+        # Call get_rgb_normalized before timestamp for realsense camera.
+        rgb_normalized: RgbNormalized = self.get_rgb_normalized(index)
         timestamp = self.get_timestamp(index)
-        return timestamp, img
+        return timestamp, rgb_normalized
 
     def get_timestamp(self, idx: int) -> float | str:
         """Return the timestamp for a given frame index.
@@ -71,7 +72,7 @@ class MonocularDataset(torch.utils.data.Dataset):
         """
         return self.timestamps[idx]
 
-    def read_img(self, idx: int) -> UInt8[ndarray, "h w 3"]:
+    def read_rgb(self, idx: int) -> UInt8[ndarray, "h w 3"]:
         """Read the raw RGB image at the given index.
 
         Args:
@@ -80,25 +81,26 @@ class MonocularDataset(torch.utils.data.Dataset):
         Returns:
             RGB uint8 image of shape (h, w, 3).
         """
-        img_raw = cv2.imread(self.rgb_files[idx])
-        assert img_raw is not None, f"Failed to read image: {self.rgb_files[idx]}"
-        img: UInt8[ndarray, "h w 3"] = img_raw
-        return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        bgr = cv2.imread(self.rgb_files[idx])
+        assert bgr is not None, f"Failed to read image: {self.rgb_files[idx]}"
+        rgb: UInt8[ndarray, "h w 3"] = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        return rgb
 
-    def get_image(self, idx: int) -> Float32[ndarray, "h w 3"]:
-        """Return the preprocessed float image (optionally undistorted) at the given index.
+    def get_rgb_normalized(self, idx: int) -> RgbNormalized:
+        """Return the preprocessed normalized RGB image at the given index.
 
         Args:
             idx: Frame index.
 
         Returns:
-            Float32 image in [0, 1] range.
+            Floating RGB image in [0, 1] range.
         """
-        raw_img: UInt8[ndarray, "h w 3"] = self.read_img(idx)
+        rgb: UInt8[ndarray, "h w 3"] = self.read_rgb(idx)
         if self.use_calibration:
             assert self.camera_intrinsics is not None
-            raw_img = self.camera_intrinsics.remap(raw_img)
-        return raw_img.astype(self.dtype) / 255.0
+            rgb = self.camera_intrinsics.remap(rgb)
+        rgb_normalized: RgbNormalized = rgb.astype(self.dtype) / 255.0
+        return rgb_normalized
 
     def get_img_shape(self) -> tuple[tuple[int, int], tuple[int, int]]:
         """Return the processed and raw image shapes.
@@ -106,12 +108,12 @@ class MonocularDataset(torch.utils.data.Dataset):
         Returns:
             A tuple of ((processed_h, processed_w), (raw_h, raw_w)).
         """
-        raw_img: UInt8[ndarray, "h w 3"] = self.read_img(0)
-        raw_img_shape: tuple[int, int] = raw_img.shape[:2]
-        normalized_img: Float32[ndarray, "h w 3"] = raw_img.astype(np.float32) / 255.0
-        resized: ResizedImage = resize_img(normalized_img, self.img_size)
-        processed_shape: torch.Size = resized.img[0].shape[1:]  # (3, h, w) -> (h, w)
-        return (int(processed_shape[0]), int(processed_shape[1])), raw_img_shape
+        rgb: UInt8[ndarray, "h w 3"] = self.read_rgb(0)
+        raw_rgb_shape: tuple[int, int] = rgb.shape[:2]
+        rgb_normalized: RgbNormalized = rgb.astype(np.float32) / 255.0
+        resized: ResizedImage = resize_img(rgb_normalized, self.img_size)
+        processed_shape: torch.Size = resized.rgb_tensor[0].shape[1:]  # (3, h, w) -> (h, w)
+        return (int(processed_shape[0]), int(processed_shape[1])), raw_rgb_shape
 
     def subsample(self, subsample: int) -> None:
         """Subsample the dataset by keeping every ``subsample``-th frame.
@@ -178,11 +180,11 @@ class EurocDataset(MonocularDataset):
             self.img_size, W, H, [*intrinsics, *distortion], always_undistort=True
         )
 
-    def read_img(self, idx: int) -> UInt8[ndarray, "h w 3"]:
-        img_raw = cv2.imread(self.rgb_files[idx], cv2.IMREAD_GRAYSCALE)
-        assert img_raw is not None, f"Failed to read image: {self.rgb_files[idx]}"
-        img = img_raw
-        return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    def read_rgb(self, idx: int) -> UInt8[ndarray, "h w 3"]:
+        gray = cv2.imread(self.rgb_files[idx], cv2.IMREAD_GRAYSCALE)
+        assert gray is not None, f"Failed to read image: {self.rgb_files[idx]}"
+        rgb: UInt8[ndarray, "h w 3"] = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        return rgb
 
 
 class ETH3DDataset(MonocularDataset):
@@ -233,16 +235,16 @@ class Webcam(MonocularDataset):
         assert isinstance(ts, float)
         return ts
 
-    def read_img(self, idx: int) -> UInt8[ndarray, "h w 3"]:
+    def read_rgb(self, idx: int) -> UInt8[ndarray, "h w 3"]:
         ret: bool
-        img: UInt8[ndarray, "h w 3"]
-        ret, img = self.cap.read()
+        bgr: UInt8[ndarray, "h w 3"]
+        ret, bgr = self.cap.read()
         if not ret:
             raise ValueError("Failed to read image")
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        rgb: UInt8[ndarray, "h w 3"] = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         self.timestamps.append(idx / 30)
 
-        return img
+        return rgb
 
 
 class MP4Dataset(MonocularDataset):
@@ -267,20 +269,20 @@ class MP4Dataset(MonocularDataset):
     def __len__(self) -> int:
         return self.total_frames // self.stride
 
-    def read_img(self, idx: int) -> UInt8[ndarray, "h w 3"]:
+    def read_rgb(self, idx: int) -> UInt8[ndarray, "h w 3"]:
         if HAS_TORCHCODEC:
-            img_tensor = self.decoder[idx * self.stride]  # c,h,w uint8  # pyrefly: ignore
-            img: UInt8[ndarray, "h w 3"] = img_tensor.permute(1, 2, 0).numpy()
+            rgb_tensor = self.decoder[idx * self.stride]  # c,h,w uint8  # pyrefly: ignore
+            rgb: UInt8[ndarray, "h w 3"] = rgb_tensor.permute(1, 2, 0).numpy()
         else:
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, idx * self.stride)
             ret: bool
-            ret, frame = self.cap.read()
+            ret, bgr = self.cap.read()
             if not ret:
                 raise ValueError("Failed to read image")
-            img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         timestamp: float = idx / self.fps
         self.timestamps.append(timestamp)
-        return img
+        return rgb
 
 
 class RGBFiles(MonocularDataset):

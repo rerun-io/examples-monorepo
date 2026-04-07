@@ -194,14 +194,14 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
                 states.set_mode(Mode.TERMINATED)
                 break
 
-            timestamp, img = dataset[i]
+            timestamp, rgb = dataset[i]
 
             # Initialise pose: identity for the first frame, otherwise use the
             # last tracked pose from shared state.
             world_sim3_cam: lietorch.Sim3 = (
                 lietorch.Sim3.Identity(1, device=device) if i == 0 else states.get_frame().world_sim3_cam
             )
-            frame: Frame = create_frame(i, img, world_sim3_cam, img_size=dataset.img_size, device=device)
+            frame: Frame = create_frame(i, rgb, world_sim3_cam, img_size=dataset.img_size, device=device)
 
             add_new_kf: bool = False
 
