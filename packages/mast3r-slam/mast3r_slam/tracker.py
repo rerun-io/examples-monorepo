@@ -81,11 +81,7 @@ class FrameTracker:
 
         use_calib: bool = config["use_calib"]
         img_size: tuple[int, int] = (int(frame.img.shape[-2]), int(frame.img.shape[-1]))
-        K: Float[Tensor, "3 3"] | None
-        if use_calib:
-            K = keyframe.K
-        else:
-            K = None
+        K: Float[Tensor, "3 3"] | None = keyframe.K if use_calib else None
 
         # Get poses and point correspondences and confidences
         Xf: Float[Tensor, "hw 3"]

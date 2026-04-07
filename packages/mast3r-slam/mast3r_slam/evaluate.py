@@ -43,6 +43,7 @@ def prepare_savedir(args: _HasSaveAs, dataset: MonocularDataset) -> tuple[pathli
     if args.save_as != "default":
         save_dir = save_dir / args.save_as
     save_dir.mkdir(exist_ok=True, parents=True)
+    assert dataset.dataset_path is not None, "Cannot save results without a dataset path"
     seq_name: str = dataset.dataset_path.stem
     return save_dir, seq_name
 

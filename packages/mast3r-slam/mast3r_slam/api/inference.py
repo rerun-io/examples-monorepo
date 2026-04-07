@@ -185,6 +185,8 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
     # Only works when the main process uses spawn/serve/connect (not save-to-file).
     rr_app_id: str | None = None if inf_config.rr_config.save is not None else inf_config.rr_config.application_id
     with SlamBackend(inf_config.config, model, h, w, K, device=device, rr_application_id=rr_app_id) as ctx:
+        assert ctx.keyframes is not None
+        assert ctx.states is not None
         keyframes: SharedKeyframes = ctx.keyframes
         states: SharedStates = ctx.states
         tracker: FrameTracker = FrameTracker(model, keyframes, device)

@@ -171,6 +171,8 @@ def mast3r_symmetric_inference(
             frame_j.img, frame_j.img_true_shape
         )
 
+    assert frame_i.pos is not None
+    assert frame_j.pos is not None
     feat1, feat2 = frame_i.feat, frame_j.feat
     pos1, pos2 = frame_i.pos, frame_j.pos
     shape1, shape2 = frame_i.img_true_shape, frame_j.img_true_shape
@@ -179,7 +181,8 @@ def mast3r_symmetric_inference(
     res22, res12 = decoder(model, feat2, feat1, pos2, pos1, shape2, shape1)
     res = [res11, res21, res22, res12]
     X, C, D, Q = zip(
-        *[(r["pts3d"][0], r["conf"][0], r["desc"][0], r["desc_conf"][0]) for r in res]
+        *[(r["pts3d"][0], r["conf"][0], r["desc"][0], r["desc_conf"][0]) for r in res],
+        strict=False,
     )
     # 4xhxwxc
     X, C, D, Q = torch.stack(X), torch.stack(C), torch.stack(D), torch.stack(Q)
@@ -235,7 +238,8 @@ def mast3r_decode_symmetric_batch(
             *[
                 (r["pts3d"][0], r["conf"][0], r["desc"][0], r["desc_conf"][0])
                 for r in res
-            ]
+            ],
+            strict=False,
         )
         X.append(torch.stack(Xb, dim=0))
         C.append(torch.stack(Cb, dim=0))
@@ -273,6 +277,7 @@ def mast3r_inference_mono(
     if frame.feat is None:
         frame.feat, frame.pos, _ = model._encode_image(frame.img, frame.img_true_shape)
 
+    assert frame.pos is not None
     feat = frame.feat
     pos = frame.pos
     shape = frame.img_true_shape
@@ -280,7 +285,8 @@ def mast3r_inference_mono(
     res11, res21 = decoder(model, feat, feat, pos, pos, shape, shape)
     res = [res11, res21]
     X, C, D, Q = zip(
-        *[(r["pts3d"][0], r["conf"][0], r["desc"][0], r["desc_conf"][0]) for r in res]
+        *[(r["pts3d"][0], r["conf"][0], r["desc"][0], r["desc_conf"][0]) for r in res],
+        strict=False,
     )
     # 4xhxwxc
     X, C, D, Q = torch.stack(X), torch.stack(C), torch.stack(D), torch.stack(Q)
@@ -404,6 +410,8 @@ def mast3r_asymmetric_inference(
             frame_j.img, frame_j.img_true_shape
         )
 
+    assert frame_i.pos is not None
+    assert frame_j.pos is not None
     feat1, feat2 = frame_i.feat, frame_j.feat
     pos1, pos2 = frame_i.pos, frame_j.pos
     shape1, shape2 = frame_i.img_true_shape, frame_j.img_true_shape
@@ -411,7 +419,8 @@ def mast3r_asymmetric_inference(
     res11, res21 = decoder(model, feat1, feat2, pos1, pos2, shape1, shape2)
     res = [res11, res21]
     X, C, D, Q = zip(
-        *[(r["pts3d"][0], r["conf"][0], r["desc"][0], r["desc_conf"][0]) for r in res]
+        *[(r["pts3d"][0], r["conf"][0], r["desc"][0], r["desc_conf"][0]) for r in res],
+        strict=False,
     )
     # 4xhxwxc
     X, C, D, Q = torch.stack(X), torch.stack(C), torch.stack(D), torch.stack(Q)
@@ -516,21 +525,25 @@ def xy_grid(
     """
     if device is None:
         # numpy
-        arange, meshgrid, stack, ones = np.arange, np.meshgrid, np.stack, np.ones
+        arange, meshgrid, stack, ones = np.arange, np.meshgrid, np.stack, np.ones  # pyrefly: ignore
     else:
         # torch
-        arange = lambda *a, **kw: torch.arange(*a, device=device, **kw)
-        meshgrid, stack = torch.meshgrid, torch.stack
-        ones = lambda *a: torch.ones(*a, device=device)
+        def arange(*a, **kw):  # pyrefly: ignore
+            return torch.arange(*a, device=device, **kw)
 
-    tw, th = [arange(o, o + s, **arange_kw) for s, o in zip((W, H), origin)]
-    grid = meshgrid(tw, th, indexing="xy")
+        meshgrid, stack = torch.meshgrid, torch.stack  # pyrefly: ignore
+
+        def ones(*a):  # pyrefly: ignore
+            return torch.ones(*a, device=device)
+
+    tw, th = [arange(o, o + s, **arange_kw) for s, o in zip((W, H), origin, strict=False)]
+    grid = meshgrid(tw, th, indexing="xy")  # pyrefly: ignore
     if homogeneous:
         grid = grid + (ones((H, W)),)
     if unsqueeze is not None:
-        grid = (grid[0].unsqueeze(unsqueeze), grid[1].unsqueeze(unsqueeze))
+        grid = (grid[0].unsqueeze(unsqueeze), grid[1].unsqueeze(unsqueeze))  # pyrefly: ignore
     if cat_dim is not None:
-        grid = stack(grid, cat_dim)
+        grid = stack(grid, cat_dim)  # pyrefly: ignore
     return grid
 
 
@@ -565,7 +578,7 @@ def estimate_focal_knowing_depth(
     assert THREE == 3
 
     # centered pixel grid
-    pixels = xy_grid(W, H, device=pts3d.device).view(1, -1, 2) - pp.view(
+    pixels = xy_grid(W, H, device=pts3d.device).view(1, -1, 2) - pp.view(  # pyrefly: ignore
         -1, 1, 2
     )  # B,HW,2
     pts3d = pts3d.flatten(1, 2)  # (B, HW, 3)
@@ -595,7 +608,7 @@ def estimate_focal_knowing_depth(
         focal = dot_xy_px.mean(dim=1) / dot_xy_xy.mean(dim=1)
 
         # iterative re-weighted least-squares
-        for iter in range(10):
+        for _iter in range(10):
             # re-weighting by inverse of distance
             dis = (pixels - focal.view(-1, 1, 1) * xy_over_z).norm(dim=-1)
             # print(dis.nanmean(-1))

@@ -1,3 +1,4 @@
+import contextlib
 import shutil
 import subprocess
 import sys
@@ -16,7 +17,7 @@ from simplecv.rerun_log_utils import log_video
 from mast3r_slam.backend_lifecycle import SlamBackend
 from mast3r_slam.config import config, load_config
 from mast3r_slam.dataloader import load_dataset
-from mast3r_slam.frame import Frame, Mode, create_frame
+from mast3r_slam.frame import Frame, Mode, SharedStates, create_frame
 from mast3r_slam.mast3r_utils import (
     load_mast3r,
     mast3r_inference_mono,
@@ -27,14 +28,12 @@ from mast3r_slam.tracker import FrameTracker
 
 # Global reference to the active states so the stop button can signal termination.
 # The SlamBackend context manager handles all cleanup.
-active_states: "SharedStates | None" = None
+active_states: SharedStates | None = None
 
 # Initialize multiprocessing start method (spawn required for CUDA).
 # If already set (e.g. by a parent process), reuse the existing setting.
-try:
+with contextlib.suppress(RuntimeError):
     mp.set_start_method("spawn")
-except RuntimeError:
-    pass  # Method already set, safe to continue
 
 DEVICE: str = "cuda:0"
 model = load_mast3r(device=DEVICE)
@@ -59,7 +58,7 @@ def stop_streaming():
 def streaming_mast3r_slam_fn(
     video_file: str,
     subsample: int,
-    progress=gr.Progress(),
+    progress=gr.Progress(),  # noqa: B008
 ):
     global active_states
 
@@ -112,6 +111,8 @@ def streaming_mast3r_slam_fn(
     progress(0.15, desc="Starting Backend")
 
     with SlamBackend(inference_config, model, h, w, K, device=DEVICE) as ctx:
+        assert ctx.keyframes is not None
+        assert ctx.states is not None
         keyframes = ctx.keyframes
         states = ctx.states
         active_states = states  # expose to stop button
@@ -225,7 +226,7 @@ def streaming_mast3r_slam_fn(
                     base_dir="nerfstudio-output",
                 )
         except Exception as e:
-            raise gr.Error(f"Failed to zip nerfstudio output: {e}")
+            raise gr.Error(f"Failed to zip nerfstudio output: {e}") from e
 
         assert zip_output_path.exists(), f"Zip file {zip_output_path} does not exist"
 
@@ -255,7 +256,7 @@ def mov_to_mp4(video_path: Path) -> Path:
         )
         video_path = mp4_path
     except subprocess.CalledProcessError as e:
-        raise gr.Error(f"Failed to convert MOV to MP4: {e.stderr.decode()}")
+        raise gr.Error(f"Failed to convert MOV to MP4: {e.stderr.decode()}") from e
     return video_path
 
 

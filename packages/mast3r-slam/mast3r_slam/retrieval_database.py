@@ -218,7 +218,8 @@ class RetrievalDatabase(Retriever):
         Returns:
             A tuple of (imids_all, ranks_all, scores_all, topk_all).
         """
-        similarity_func = lambda *x: kern.similarity(*x, **params["similarity"])
+        def similarity_func(*x):
+            return kern.similarity(*x, **params["similarity"])
 
         acc: list[tuple] = []
         slices: list = list(io_helpers.slice_unique(qimids))
@@ -243,7 +244,7 @@ class RetrievalDatabase(Retriever):
         ranks_all: tuple
         scores_all: tuple
         topk_all: tuple
-        imids_all, ranks_all, scores_all, topk_all = zip(*acc)
+        imids_all, ranks_all, scores_all, topk_all = zip(*acc, strict=False)
 
         return (
             np.array(imids_all),

@@ -173,7 +173,7 @@ def resize_img_with_transform(
     orig_h: int
     orig_w, orig_h = pil_img.size
 
-    if size == 224:
+    if size == 224:  # noqa: SIM108
         pil_img = _resize_pil_image(pil_img, round(size * max(orig_w / orig_h, orig_h / orig_w)))
     else:
         pil_img = _resize_pil_image(pil_img, size)
@@ -181,7 +181,7 @@ def resize_img_with_transform(
     resized_h: int
     resized_w, resized_h = pil_img.size
 
-    if size == 224:
+    if size == 224:  # noqa: SIM108
         pil_img = _center_crop_224(pil_img)
     else:
         pil_img = _center_crop_512(pil_img, square_ok)

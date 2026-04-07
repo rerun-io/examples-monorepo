@@ -4,7 +4,7 @@ from jaxtyping import Bool, Float, Float32, Int
 from mast3r.model import AsymmetricMASt3R
 from torch import Tensor
 
-from mast3r_slam import _backends
+from mast3r_slam import _backends  # pyrefly: ignore
 from mast3r_slam.config import config
 from mast3r_slam.frame import Frame, SharedKeyframes
 from mast3r_slam.geometry import (

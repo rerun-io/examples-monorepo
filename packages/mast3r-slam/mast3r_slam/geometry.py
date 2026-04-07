@@ -40,8 +40,8 @@ def point_to_ray_dist(
         return rd
 
     d_inv_2: Float[Tensor, "... 1"] = d_inv**2
-    I: Float[Tensor, "... 3 3"] = torch.eye(3, device=X.device, dtype=X.dtype).repeat(*b, 1, 1)
-    dr_dX: Float[Tensor, "... 3 3"] = d_inv.unsqueeze(-1) * (I - d_inv_2.unsqueeze(-1) * (X.unsqueeze(-1) @ X.unsqueeze(-2)))
+    eye: Float[Tensor, "... 3 3"] = torch.eye(3, device=X.device, dtype=X.dtype).repeat(*b, 1, 1)
+    dr_dX: Float[Tensor, "... 3 3"] = d_inv.unsqueeze(-1) * (eye - d_inv_2.unsqueeze(-1) * (X.unsqueeze(-1) @ X.unsqueeze(-2)))
     dd_dX: Float[Tensor, "... 1 3"] = r.unsqueeze(-2)
     drd_dX: Float[Tensor, "... 4 3"] = torch.cat((dr_dX, dd_dX), dim=-2)
     return rd, drd_dX

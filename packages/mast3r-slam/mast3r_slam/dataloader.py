@@ -9,7 +9,7 @@ from natsort import natsorted
 from numpy import ndarray
 
 try:
-    import pyrealsense2 as rs
+    import pyrealsense2 as rs  # pyrefly: ignore
 except ImportError:
     rs = None
 from typing import Literal
@@ -42,6 +42,8 @@ class MonocularDataset(torch.utils.data.Dataset):
         self.rgb_files: list[str | pathlib.Path] = []
         self.timestamps: list[float | str] = []
         self.img_size: Literal[224, 512] = img_size
+        self.dataset_path: pathlib.Path | None = None
+        """Filesystem path to the dataset root, or None for live sources (webcam, realsense)."""
         self.camera_intrinsics = None  # Intrinsics | None — forward ref, typed by subclasses
         self.use_calibration: bool = config["use_calib"]
         self.save_results: bool = True
@@ -138,7 +140,7 @@ class MonocularDataset(torch.utils.data.Dataset):
 class TUMDataset(MonocularDataset):
     def __init__(self, dataset_path: str, img_size: Literal[224, 512]) -> None:
         super().__init__(img_size=img_size)
-        self.dataset_path: pathlib.Path = pathlib.Path(dataset_path)
+        self.dataset_path = pathlib.Path(dataset_path)
         rgb_list: pathlib.Path = self.dataset_path / "rgb.txt"
         tstamp_rgb = np.loadtxt(rgb_list, delimiter=" ", dtype=np.str_, skiprows=0)
         self.rgb_files = [self.dataset_path / f for f in tstamp_rgb[:, 1]]
@@ -148,13 +150,9 @@ class TUMDataset(MonocularDataset):
         assert match is not None, f"Could not find freiburg index in path: {dataset_path}"
         idx: int = int(match.group(1))
         if idx == 1:
-            calib = np.array(
-                [517.3, 516.5, 318.6, 255.3, 0.2624, -0.9531, -0.0054, 0.0026, 1.1633]
-            )
+            calib = np.array([517.3, 516.5, 318.6, 255.3, 0.2624, -0.9531, -0.0054, 0.0026, 1.1633])
         elif idx == 2:
-            calib = np.array(
-                [520.9, 521.0, 325.1, 249.7, 0.2312, -0.7849, -0.0033, -0.0001, 0.9172]
-            )
+            calib = np.array([520.9, 521.0, 325.1, 249.7, 0.2312, -0.7849, -0.0033, -0.0001, 0.9172])
         elif idx == 3:
             calib = np.array([535.4, 539.2, 320.1, 247.6])
         else:
@@ -170,12 +168,10 @@ class EurocDataset(MonocularDataset):
         # For Euroc dataset, the distortion is too much to handle for MASt3R.
         # So we always undistort the images, but the calibration will not be used for any later optimization unless specified.
         self.use_calibration: bool = True
-        self.dataset_path: pathlib.Path = pathlib.Path(dataset_path)
+        self.dataset_path = pathlib.Path(dataset_path)
         rgb_list: pathlib.Path = self.dataset_path / "mav0/cam0/data.csv"
         tstamp_rgb = np.loadtxt(rgb_list, delimiter=",", dtype=np.str_, skiprows=0)
-        self.rgb_files = [
-            self.dataset_path / "mav0/cam0/data" / f for f in tstamp_rgb[:, 1]
-        ]
+        self.rgb_files = [self.dataset_path / "mav0/cam0/data" / f for f in tstamp_rgb[:, 1]]
         self.timestamps = list(tstamp_rgb[:, 0])
         with open(self.dataset_path / "mav0/cam0/sensor.yaml") as f:
             self.cam0 = yaml.load(f, Loader=yaml.FullLoader)
@@ -198,7 +194,7 @@ class EurocDataset(MonocularDataset):
 class ETH3DDataset(MonocularDataset):
     def __init__(self, dataset_path: str, img_size: Literal[224, 512] = 512) -> None:
         super().__init__(img_size=img_size)
-        self.dataset_path: pathlib.Path = pathlib.Path(dataset_path)
+        self.dataset_path = pathlib.Path(dataset_path)
         rgb_list: pathlib.Path = self.dataset_path / "rgb.txt"
         tstamp_rgb = np.loadtxt(rgb_list, delimiter=" ", dtype=np.str_, skiprows=0)
         self.rgb_files = [self.dataset_path / f for f in tstamp_rgb[:, 1]]
@@ -216,18 +212,14 @@ class ETH3DDataset(MonocularDataset):
 class SevenScenesDataset(MonocularDataset):
     def __init__(self, dataset_path: str, img_size: Literal[224, 512] = 512) -> None:
         super().__init__(img_size=img_size)
-        self.dataset_path: pathlib.Path = pathlib.Path(dataset_path)
-        self.rgb_files = natsorted(
-            list((self.dataset_path / "seq-01").glob("*.color.png"))
-        )
+        self.dataset_path = pathlib.Path(dataset_path)
+        self.rgb_files = natsorted(list((self.dataset_path / "seq-01").glob("*.color.png")))
         self.timestamps = list(np.arange(0, len(self.rgb_files)).astype(self.dtype))
         fx: float = 585.0
         fy: float = 585.0
         cx: float = 320.0
         cy: float = 240.0
-        self.camera_intrinsics = Intrinsics.from_calib(
-            self.img_size, 640, 480, [fx, fy, cx, cy]
-        )
+        self.camera_intrinsics = Intrinsics.from_calib(self.img_size, 640, 480, [fx, fy, cx, cy])
 
 
 class RealsenseDataset(MonocularDataset):
@@ -240,18 +232,14 @@ class RealsenseDataset(MonocularDataset):
         self.h: int = 480
         self.w: int = 640
         self.rs_config = rs.config()
-        self.rs_config.enable_stream(
-            rs.stream.color, self.w, self.h, rs.format.bgr8, 30
-        )
+        self.rs_config.enable_stream(rs.stream.color, self.w, self.h, rs.format.bgr8, 30)
         self.profile = self.pipeline.start(self.rs_config)
 
         self.rgb_sensor = self.profile.get_device().query_sensors()[1]
         # self.rgb_sensor.set_option(rs.option.enable_auto_exposure, False)
         # self.rgb_sensor.set_option(rs.option.enable_auto_white_balance, False)
         # self.rgb_sensor.set_option(rs.option.exposure, 200)
-        self.rgb_profile = rs.video_stream_profile(
-            self.profile.get_stream(rs.stream.color)
-        )
+        self.rgb_profile = rs.video_stream_profile(self.profile.get_stream(rs.stream.color))
         self.save_results: bool = False
 
         if self.use_calibration:
@@ -272,7 +260,9 @@ class RealsenseDataset(MonocularDataset):
         return 999999
 
     def get_timestamp(self, idx: int) -> float:
-        return self.timestamps[idx]
+        ts: float | str = self.timestamps[idx]
+        assert isinstance(ts, float)
+        return ts
 
     def read_img(self, idx: int) -> UInt8[ndarray, "h w 3"]:
         frameset = self.pipeline.wait_for_frames()
@@ -300,7 +290,9 @@ class Webcam(MonocularDataset):
         return 999999
 
     def get_timestamp(self, idx: int) -> float:
-        return self.timestamps[idx]
+        ts: float | str = self.timestamps[idx]
+        assert isinstance(ts, float)
+        return ts
 
     def read_img(self, idx: int) -> UInt8[ndarray, "h w 3"]:
         ret: bool
@@ -318,15 +310,17 @@ class MP4Dataset(MonocularDataset):
     def __init__(self, dataset_path: str, img_size: Literal[224, 512]) -> None:
         super().__init__(img_size=img_size)
         self.use_calibration: bool = False
-        self.dataset_path: pathlib.Path = pathlib.Path(dataset_path)
+        self.dataset_path = pathlib.Path(dataset_path)
         if HAS_TORCHCODEC:
             self.decoder = VideoDecoder(str(self.dataset_path))
+            assert self.decoder.metadata.average_fps is not None, "Video has no FPS metadata"
+            assert self.decoder.metadata.num_frames is not None, "Video has no frame count metadata"
             self.fps: float = self.decoder.metadata.average_fps
             self.total_frames: int = self.decoder.metadata.num_frames
         else:
             print("Warning: torchcodec is not installed. This may slow down the dataloader")
             self.cap = cv2.VideoCapture(str(self.dataset_path))
-            self.fps = self.cap.get(cv2.CAP_PROP_FPS)
+            self.fps = float(self.cap.get(cv2.CAP_PROP_FPS))
             self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
         self.stride: int = config["dataset"]["subsample"]
@@ -336,7 +330,7 @@ class MP4Dataset(MonocularDataset):
 
     def read_img(self, idx: int) -> UInt8[ndarray, "h w 3"]:
         if HAS_TORCHCODEC:
-            img_tensor = self.decoder[idx * self.stride]  # c,h,w uint8
+            img_tensor = self.decoder[idx * self.stride]  # c,h,w uint8  # pyrefly: ignore
             img: UInt8[ndarray, "h w 3"] = img_tensor.permute(1, 2, 0).numpy()
         else:
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, idx * self.stride)
@@ -354,7 +348,7 @@ class RGBFiles(MonocularDataset):
     def __init__(self, dataset_path: str, img_size: Literal[224, 512]) -> None:
         super().__init__(img_size=img_size)
         self.use_calibration: bool = False
-        self.dataset_path: pathlib.Path = pathlib.Path(dataset_path)
+        self.dataset_path = pathlib.Path(dataset_path)
         # Support both PNG and JPG/JPEG files
         png_files: list[pathlib.Path] = list((self.dataset_path).glob("*.png"))
         jpg_files: list[pathlib.Path] = list((self.dataset_path).glob("*.jpg"))
@@ -454,9 +448,7 @@ class Intrinsics:
         mapx: Float32[ndarray, "H W"] | None = None
         mapy: Float32[ndarray, "H W"] | None = None
         center: bool = config["dataset"]["center_principle_point"]
-        K_opt, _ = cv2.getOptimalNewCameraMatrix(
-            K, distortion, (W, H), 0, (W, H), centerPrincipalPoint=center
-        )
+        K_opt, _ = cv2.getOptimalNewCameraMatrix(K, distortion, (W, H), 0, (W, H), centerPrincipalPoint=center)
         mapx, mapy = cv2.initUndistortRectifyMap(
             K, distortion, np.eye(3, dtype=np.float64), K_opt, (W, H), cv2.CV_32FC1
         )

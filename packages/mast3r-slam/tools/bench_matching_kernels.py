@@ -152,16 +152,16 @@ def main() -> None:
             h: int = cfg["h"]
             w: int = cfg["w"]
             rays_img, pts_norm, p_init = make_iter_proj_data(1, h, w)
-            cuda_r: BenchResult = bench(lambda: cuda_be.iter_proj(rays_img, pts_norm, p_init, 5, 1.0, 1e-4))
-            mojo_r: BenchResult = bench(lambda: mojo_be.iter_proj(rays_img, pts_norm, p_init, 5, 1.0, 1e-4))
+            cuda_r: BenchResult = bench(lambda _r=rays_img, _p=pts_norm, _i=p_init: cuda_be.iter_proj(_r, _p, _i, 5, 1.0, 1e-4))
+            mojo_r: BenchResult = bench(lambda _r=rays_img, _p=pts_norm, _i=p_init: mojo_be.iter_proj(_r, _p, _i, 5, 1.0, 1e-4))
             name: str = "iter_proj"
         else:
             h = cfg["h"]
             w = cfg["w"]
             fdim: int = cfg["fdim"]
             D11, D21, p1 = make_refine_data(1, h, w, fdim)
-            cuda_r = bench(lambda: cuda_be.refine_matches(D11.half(), D21.half(), p1, 2, 2))
-            mojo_r = bench(lambda: mojo_be.refine_matches(D11.half(), D21.half(), p1, 2, 2))
+            cuda_r = bench(lambda _d1=D11, _d2=D21, _p=p1: cuda_be.refine_matches(_d1.half(), _d2.half(), _p, 2, 2))
+            mojo_r = bench(lambda _d1=D11, _d2=D21, _p=p1: mojo_be.refine_matches(_d1.half(), _d2.half(), _p, 2, 2))
             name = "refine_matches"
 
         ratio: float = mojo_r.median_ms / max(cuda_r.median_ms, 1e-9)

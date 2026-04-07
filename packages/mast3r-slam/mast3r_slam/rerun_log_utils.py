@@ -148,6 +148,7 @@ class RerunLogger:
         )
 
         # Log camera path
+        assert current_pinhole.extrinsics.world_t_cam is not None
         translation: Float32[ndarray, "3"] = current_pinhole.extrinsics.world_t_cam
         self.path_list.append(translation.tolist())
         rr.log(
@@ -205,7 +206,7 @@ class RerunLogger:
                 f"{kf_cam_log_path}/pinhole",
                 rr.Pinhole(
                     focal_length=current_pinhole.intrinsics.fl_x,
-                    principal_point=[current_pinhole.intrinsics.cx, current_pinhole.intrinsics.cy],
+                    principal_point=[float(current_pinhole.intrinsics.cx), float(current_pinhole.intrinsics.cy)],  # pyrefly: ignore
                     height=current_pinhole.intrinsics.height,
                     width=current_pinhole.intrinsics.width,
                     camera_xyz=rr.ViewCoordinates.RDF,
@@ -238,7 +239,7 @@ class RerunLogger:
             t_world_cami: Float32[ndarray, "num_edges 3"] = world_sim3_cami.matrix()[:, :3, 3].cpu().numpy()
             t_world_camj: Float32[ndarray, "num_edges 3"] = world_sim3_camj.matrix()[:, :3, 3].cpu().numpy()
             line_strips: list[list[float]] = []
-            for t_i, t_j in zip(t_world_cami, t_world_camj):
+            for t_i, t_j in zip(t_world_cami, t_world_camj, strict=False):
                 line_strips.append(t_i.tolist())
                 line_strips.append(t_j.tolist())
             rr.log(
