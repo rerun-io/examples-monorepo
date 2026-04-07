@@ -1,4 +1,3 @@
-import logging
 import shutil
 import subprocess
 import sys
@@ -25,8 +24,6 @@ from mast3r_slam.mast3r_utils import (
 from mast3r_slam.nerfstudio_utils import save_kf_to_nerfstudio
 from mast3r_slam.rerun_log_utils import RerunLogger, create_blueprints
 from mast3r_slam.tracker import FrameTracker
-
-logger: logging.Logger = logging.getLogger(__name__)
 
 # Global reference to the active states so the stop button can signal termination.
 # The SlamBackend context manager handles all cleanup.
@@ -103,7 +100,7 @@ def streaming_mast3r_slam_fn(
     has_calib: bool = dataset.has_calib()
     use_calib: bool = config["use_calib"]
     if use_calib and not has_calib:
-        logger.warning("No calibration provided for this dataset!")
+        rr.log(f"{parent_log_path}/logs", rr.TextLog("No calibration provided for this dataset!", level="WARN"))
         sys.exit(0)
     K = None
     if use_calib:
@@ -193,7 +190,7 @@ def streaming_mast3r_slam_fn(
             rr_logger.log_frame(frame, keyframes, states)
             if i % 30 == 0:
                 FPS = i / (time.time() - fps_timer)
-                logger.info("FPS: %s", FPS)
+                rr.log(f"{parent_log_path}/logs", rr.TextLog(f"FPS: {FPS:.1f}", level="INFO"))
             i += 1
 
             yield stream.read(), None, f"Processing frame {i}/{len(dataset)}"
@@ -220,7 +217,7 @@ def streaming_mast3r_slam_fn(
 
         try:
             if ns_output_dir.exists():
-                logger.info("Zipping nerfstudio output to %s", zip_output_path)
+                rr.log(f"{parent_log_path}/logs", rr.TextLog(f"Zipping nerfstudio output to {zip_output_path}", level="INFO"))
                 shutil.make_archive(
                     base_name=str(zip_output_path.with_suffix("")),
                     format="zip",
@@ -232,7 +229,7 @@ def streaming_mast3r_slam_fn(
 
         assert zip_output_path.exists(), f"Zip file {zip_output_path} does not exist"
 
-        logger.info("Finished processing")
+        rr.log(f"{parent_log_path}/logs", rr.TextLog("Finished processing", level="INFO"))
         yield stream.read(), str(zip_output_path), "MASt3R-SLAM complete"
 
     # SlamBackend.__exit__ handles: backend shutdown, manager shutdown, GPU cleanup

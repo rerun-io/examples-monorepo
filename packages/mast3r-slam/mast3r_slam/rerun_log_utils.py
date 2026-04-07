@@ -33,17 +33,22 @@ def create_blueprints(parent_log_path: Path) -> rrb.Blueprint:
     Returns:
         A configured Rerun Blueprint.
     """
+    views: rrb.Vertical = rrb.Vertical(
+        rrb.Spatial2DView(origin=str(parent_log_path / "current_camera" / "pinhole")),
+        rrb.Spatial2DView(origin=str(parent_log_path / "last_keyframe")),
+        name="Views",
+    )
+    logs: rrb.TextLogView = rrb.TextLogView(
+        origin=str(parent_log_path / "logs"),
+        name="Logs",
+    )
     blueprint: rrb.Blueprint = rrb.Blueprint(
         rrb.Horizontal(
             rrb.Spatial3DView(
                 origin="/",
                 contents=[f"+ {parent_log_path}/**"],
             ),
-            rrb.Vertical(
-                rrb.Spatial2DView(origin=str(parent_log_path / "current_camera" / "pinhole")),
-                rrb.Spatial2DView(origin=str(parent_log_path / "last_keyframe")),
-                rrb.TextDocumentView(origin=str(parent_log_path)),
-            ),
+            rrb.Tabs(views, logs, active_tab=0),
             column_shares=(3, 1),
         ),
         collapse_panels=True,

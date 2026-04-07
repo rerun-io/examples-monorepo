@@ -17,7 +17,6 @@ Usage::
 """
 
 import gc
-import logging
 import multiprocessing
 import traceback
 from multiprocessing.managers import SyncManager
@@ -39,9 +38,6 @@ try:
 except ImportError:
     BeartypeException = ()
 
-logger: logging.Logger = logging.getLogger(__name__)
-
-
 class BackendError(RuntimeError):
     """Raised when the backend process dies with an exception."""
 
@@ -62,6 +58,7 @@ class SlamBackend:
         w: int,
         K: Float[Tensor, "3 3"] | None,
         device: str = "cuda",
+        rr_application_id: str | None = None,
     ) -> None:
         self._config_path: str = config_path
         self._model: AsymmetricMASt3R = model
@@ -69,6 +66,9 @@ class SlamBackend:
         self._w: int = w
         self._K: Float[Tensor, "3 3"] | None = K
         self._device: str = device
+        self._rr_application_id: str | None = rr_application_id
+        """When set, the backend subprocess will call ``rr.init`` + ``rr.connect_grpc``
+        so that ``rr.TextLog`` entries reach the same viewer as the main process."""
 
         self._manager: SyncManager | None = None
         self._backend: mp.Process | None = None
@@ -96,6 +96,7 @@ class SlamBackend:
                 self.keyframes,
                 self._K,
                 self._error_queue,
+                self._rr_application_id,
             ),
             daemon=False,
         )
@@ -198,6 +199,7 @@ def _backend_entry(
     keyframes: SharedKeyframes,
     K: Float[Tensor, "3 3"] | None,
     error_queue: MPQueue,
+    rr_application_id: str | None = None,
 ) -> None:
     """Entry point for the backend subprocess.
 
@@ -207,7 +209,7 @@ def _backend_entry(
     try:
         from mast3r_slam.api.inference import run_backend
 
-        run_backend(config_path, model, states, keyframes, K)
+        run_backend(config_path, model, states, keyframes, K, rr_application_id=rr_application_id)
     except KeyboardInterrupt:
         pass  # Normal Ctrl+C propagation, not an error
     except BeartypeException:
@@ -220,4 +222,4 @@ def _backend_entry(
             raise
         except (OSError, BrokenPipeError, EOFError):
             pass
-        logger.critical("[Backend FATAL] %s", tb_str)
+        print(f"[Backend FATAL] {tb_str}", flush=True)

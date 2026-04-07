@@ -5,15 +5,12 @@ parent.  The global ``config`` dict is populated once at the leaf node and
 shared across the entire SLAM pipeline.
 """
 
-import logging
 import re
 from typing import Any
 
 import yaml
 
 config: dict[str, Any] = {}
-
-logger: logging.Logger = logging.getLogger(__name__)
 
 
 def load_config(path: str = "config/base.yaml", is_parent: bool = False) -> dict[str, Any]:
@@ -45,7 +42,6 @@ def load_config(path: str = "config/base.yaml", is_parent: bool = False) -> dict
     )
 
     with open(path) as f:
-        logger.debug("Loading config: %s", path)
         cfg: dict[str, Any] = yaml.load(f, Loader=loader)
     inherit: str | None = cfg.get("inherit")
     if inherit is not None:

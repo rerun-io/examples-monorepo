@@ -48,6 +48,8 @@ from jaxtyping import Float
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
 
+from mast3r.model import AsymmetricMASt3R
+
 import mast3r_slam.evaluate as eval
 from mast3r_slam.backend_lifecycle import SlamBackend
 from mast3r_slam.config import config, load_config
@@ -134,9 +136,10 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
     rr.send_blueprint(blueprint)
 
     # ── Load SLAM config and dataset ───────────────────────────────────────
+    log_path: str = f"{parent_log_path}/logs"
     load_config(inf_config.config)
-    print(inf_config.dataset)
-    print(config)
+    rr.log(log_path, rr.TextLog(f"Dataset: {inf_config.dataset}", level="INFO"))
+    rr.log(log_path, rr.TextLog(f"Config: {config}", level="DEBUG"))
 
     dataset: MonocularDataset = load_dataset(inf_config.dataset, img_size=inf_config.img_size)
     dataset.subsample(config["dataset"]["subsample"])
@@ -155,7 +158,7 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
     has_calib: bool = dataset.has_calib()
     use_calib: bool = config["use_calib"]
     if use_calib and not has_calib:
-        print("[Warning] No calibration provided for this dataset!")
+        rr.log(log_path, rr.TextLog("No calibration provided for this dataset!", level="WARN"))
         sys.exit(0)
     K: Float[Tensor, "3 3"] | None = None
     if use_calib:
@@ -167,7 +170,7 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
         save_dir: Path
         seq_name: str
         save_dir, seq_name = eval.prepare_savedir(inf_config, dataset)
-        print(f"Saving results to {save_dir}")
+        rr.log(log_path, rr.TextLog(f"Saving results to {save_dir}", level="INFO"))
         traj_file: Path = save_dir / f"{seq_name}.txt"
         recon_file: Path = save_dir / f"{seq_name}.pt"
         if traj_file.exists():
@@ -179,7 +182,10 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
     # SlamBackend.__enter__ creates the mp.Manager, shared keyframe/state
     # buffers, and spawns the backend process.  __exit__ guarantees cleanup
     # (backend shutdown, manager shutdown, GPU memory release).
-    with SlamBackend(inf_config.config, model, h, w, K, device=device) as ctx:
+    # Pass application_id to backend so it can connect to the same Rerun viewer via gRPC.
+    # Only works when the main process uses spawn/serve/connect (not save-to-file).
+    rr_app_id: str | None = None if inf_config.rr_config.save is not None else inf_config.rr_config.application_id
+    with SlamBackend(inf_config.config, model, h, w, K, device=device, rr_application_id=rr_app_id) as ctx:
         keyframes: SharedKeyframes = ctx.keyframes
         states: SharedStates = ctx.states
         tracker: FrameTracker = FrameTracker(model, keyframes, device)
@@ -277,7 +283,7 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
             rr_logger.log_frame(frame, keyframes, states)
             if i % 30 == 0:
                 FPS: float = i / (time.time() - fps_timer)
-                print(f"FPS: {FPS}")
+                rr.log(log_path, rr.TextLog(f"FPS: {FPS:.1f}", level="INFO"))
             i += 1
 
         # ── Save results ───────────────────────────────────────────────────
@@ -297,9 +303,9 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
                 rr.Points3D(positions=pcd.points, colors=pcd.colors),
             )
 
-        print("done")
-        print(f"Inference time: {format_time(timer() - start_time)}")
-        print(f"Processed {len(keyframes)}")
+        rr.log(log_path, rr.TextLog("Done", level="INFO"))
+        rr.log(log_path, rr.TextLog(f"Inference time: {format_time(timer() - start_time)}", level="INFO"))
+        rr.log(log_path, rr.TextLog(f"Processed {len(keyframes)} keyframes", level="INFO"))
 
         # Wait for the backend to finish its last optimisation task before
         # the context manager shuts it down.
@@ -308,7 +314,7 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
     # SlamBackend.__exit__ has now run: backend terminated, manager shut down,
     # GPU memory released via torch.cuda.empty_cache() + gc.collect().
     if not inf_config.no_viz:
-        print("All visualization processes terminated")
+        rr.log(log_path, rr.TextLog("All visualization processes terminated", level="INFO"))
 
 
 def relocalization(
@@ -349,7 +355,7 @@ def relocalization(
             n_kf: int = len(keyframes)
             kf_idx = list(kf_idx)
             frame_idx: list[int] = [n_kf - 1] * len(kf_idx)
-            print("RELOCALIZING against kf ", n_kf - 1, " and ", kf_idx)
+            rr.log("/world/logs", rr.TextLog(f"Relocalizing against kf {n_kf - 1} and {kf_idx}", level="INFO"))
             if factor_graph.add_factors(
                 frame_idx,
                 kf_idx,
@@ -362,13 +368,13 @@ def relocalization(
                     k=config["retrieval"]["k"],
                     min_thresh=config["retrieval"]["min_thresh"],
                 )
-                print("Success! Relocalized")
+                rr.log("/world/logs", rr.TextLog("Relocalized successfully", level="INFO"))
                 successful_loop_closure = True
                 # Copy the pose from the matched keyframe as initial estimate.
                 keyframes.world_sim3_cam[n_kf - 1] = keyframes.world_sim3_cam[kf_idx[0]].clone()
             else:
                 keyframes.pop_last()
-                print("Failed to relocalize")
+                rr.log("/world/logs", rr.TextLog("Failed to relocalize", level="WARN"))
 
         if successful_loop_closure:
             if config["use_calib"]:
@@ -378,7 +384,14 @@ def relocalization(
         return successful_loop_closure
 
 
-def run_backend(config_path: str, model: object, states: SharedStates, keyframes: SharedKeyframes, K: Float[Tensor, "3 3"] | None) -> None:
+def run_backend(
+    config_path: str,
+    model: AsymmetricMASt3R,
+    states: SharedStates,
+    keyframes: SharedKeyframes,
+    K: Float[Tensor, "3 3"] | None,
+    rr_application_id: str | None = None,
+) -> None:
     """Backend process main loop: graph construction, retrieval, and global optimisation.
 
     This function runs in a **separate process** spawned by ``SlamBackend``.
@@ -394,8 +407,15 @@ def run_backend(config_path: str, model: object, states: SharedStates, keyframes
         states: Shared mutable state for mode, task queue, and current frame.
         keyframes: Shared keyframe buffer (poses, pointmaps, features).
         K: Camera intrinsic matrix, or None for uncalibrated mode.
+        rr_application_id: When set, initialize Rerun in this subprocess and
+            connect via gRPC so ``rr.TextLog`` entries reach the main viewer.
     """
     load_config(config_path)
+
+    # Connect to the main process's Rerun viewer for TextLog output.
+    if rr_application_id is not None:
+        rr.init(rr_application_id, spawn=False)
+        rr.connect_grpc()
 
     device: str = keyframes.device
     factor_graph: FactorGraph = FactorGraph(model, keyframes, K, device)
@@ -449,7 +469,7 @@ def run_backend(config_path: str, model: object, states: SharedStates, keyframes
         lc_inds: set[int] = set(retrieval_inds)
         lc_inds.discard(idx - 1)
         if len(lc_inds) > 0:
-            print("Database retrieval", idx, ": ", lc_inds)
+            rr.log("/world/logs", rr.TextLog(f"Database retrieval {idx}: {lc_inds}", level="INFO"))
 
         # Deduplicate and remove self-references.
         kf_idx_set: set[int] = set(kf_idx)
