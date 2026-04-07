@@ -20,6 +20,76 @@ class Mode(Enum):
     TERMINATED = 3
 
 
+class FilteringMode(Enum):
+    """Strategy for updating a frame's canonical 3D point map.
+
+    When a new observation arrives (from matching or mono inference), this
+    controls how the existing point map is combined with the new one.
+    """
+
+    FIRST = "first"
+    """Keep only the second observation (first update after init), ignore all later ones."""
+    RECENT = "recent"
+    """Always replace the point map with the most recent observation."""
+    BEST_SCORE = "best_score"
+    """Keep the observation whose scalar confidence score (median or mean) is highest."""
+    INDEP_CONF = "indep_conf"
+    """Per-point update: for each pixel, keep whichever observation has higher confidence."""
+    WEIGHTED_POINTMAP = "weighted_pointmap"
+    """Confidence-weighted running average of 3D points in Cartesian space."""
+    WEIGHTED_SPHERICAL = "weighted_spherical"
+    """Confidence-weighted running average in spherical coordinates (r, phi, theta)."""
+
+
+class FilteringScore(Enum):
+    """Scalar score function used by ``FilteringMode.BEST_SCORE``."""
+
+    MEDIAN = "median"
+    """Median of per-point confidence values."""
+    MEAN = "mean"
+    """Mean of per-point confidence values."""
+
+
+def _cartesian_to_spherical(P: Float[Tensor, "hw 3"]) -> Float[Tensor, "hw 3"]:
+    """Convert Cartesian (x, y, z) to spherical (r, phi, theta) coordinates.
+
+    Args:
+        P: Points in Cartesian coordinates, shape (hw, 3).
+
+    Returns:
+        Points in spherical coordinates (r, phi, theta), shape (hw, 3).
+    """
+    r: Float[Tensor, "hw 1"] = torch.linalg.norm(P, dim=-1, keepdim=True)
+    x: Float[Tensor, "hw 1"]
+    y: Float[Tensor, "hw 1"]
+    z: Float[Tensor, "hw 1"]
+    x, y, z = torch.tensor_split(P, 3, dim=-1)
+    phi: Float[Tensor, "hw 1"] = torch.atan2(y, x)
+    theta: Float[Tensor, "hw 1"] = torch.acos(z / r)
+    spherical: Float[Tensor, "hw 3"] = torch.cat((r, phi, theta), dim=-1)
+    return spherical
+
+
+def _spherical_to_cartesian(spherical: Float[Tensor, "hw 3"]) -> Float[Tensor, "hw 3"]:
+    """Convert spherical (r, phi, theta) to Cartesian (x, y, z) coordinates.
+
+    Args:
+        spherical: Points in spherical coordinates (r, phi, theta), shape (hw, 3).
+
+    Returns:
+        Points in Cartesian coordinates, shape (hw, 3).
+    """
+    r: Float[Tensor, "hw 1"]
+    phi: Float[Tensor, "hw 1"]
+    theta: Float[Tensor, "hw 1"]
+    r, phi, theta = torch.tensor_split(spherical, 3, dim=-1)
+    x: Float[Tensor, "hw 1"] = r * torch.sin(theta) * torch.cos(phi)
+    y: Float[Tensor, "hw 1"] = r * torch.sin(theta) * torch.sin(phi)
+    z: Float[Tensor, "hw 1"] = r * torch.cos(theta)
+    P: Float[Tensor, "hw 3"] = torch.cat((x, y, z), dim=-1)
+    return P
+
+
 @dataclasses.dataclass
 class Frame:
     """A single image frame with associated 3D data and pose.
@@ -66,15 +136,11 @@ class Frame:
         Returns:
             Scalar score tensor (median or mean of C, depending on config).
         """
-        filtering_score: str = config["tracking"]["filtering_score"]
-        score: Float[Tensor, ""]
-        if filtering_score == "median":
-            score = torch.median(C)  # Is this slower than mean? Is it worth it?
-        elif filtering_score == "mean":
-            score = torch.mean(C)
-        else:
-            raise ValueError(f"Unknown filtering_score: {filtering_score}")
-        return score
+        match FilteringScore(config["tracking"]["filtering_score"]):
+            case FilteringScore.MEDIAN:
+                return torch.median(C)
+            case FilteringScore.MEAN:
+                return torch.mean(C)
 
     def update_pointmap(
         self,
@@ -83,91 +149,71 @@ class Frame:
     ) -> None:
         """Update the canonical point map using the configured filtering strategy.
 
+        See ``FilteringMode`` for a description of each strategy.
+
         Args:
             X: New 3D point map of shape (h*w, 3).
             C: New confidence values of shape (h*w, 1).
         """
-        filtering_mode: str = config["tracking"]["filtering_mode"]
+        mode: FilteringMode = FilteringMode(config["tracking"]["filtering_mode"])
 
+        # First observation — always accept regardless of mode.
         if self.N == 0:
             self.X_canon = X.clone()
             self.C = C.clone()
             self.N = 1
             self.N_updates = 1
-            if filtering_mode == "best_score":
+            if mode is FilteringMode.BEST_SCORE:
                 self.score = self.get_score(C)
             return
 
-        if filtering_mode == "first":
-            if self.N_updates == 1:
+        match mode:
+            case FilteringMode.FIRST:
+                if self.N_updates == 1:
+                    self.X_canon = X.clone()
+                    self.C = C.clone()
+                    self.N = 1
+
+            case FilteringMode.RECENT:
                 self.X_canon = X.clone()
                 self.C = C.clone()
                 self.N = 1
-        elif filtering_mode == "recent":
-            self.X_canon = X.clone()
-            self.C = C.clone()
-            self.N = 1
-        elif filtering_mode == "best_score":
-            new_score: Float[Tensor, ""] = self.get_score(C)
-            assert self.score is not None
-            if new_score > self.score:
-                self.X_canon = X.clone()
-                self.C = C.clone()
+
+            case FilteringMode.BEST_SCORE:
+                new_score: Float[Tensor, ""] = self.get_score(C)
+                assert self.score is not None
+                if new_score > self.score:
+                    self.X_canon = X.clone()
+                    self.C = C.clone()
+                    self.N = 1
+                    self.score = new_score
+
+            case FilteringMode.INDEP_CONF:
+                assert self.C is not None
+                assert self.X_canon is not None
+                new_mask: Bool[Tensor, "hw 1"] = C > self.C
+                self.X_canon[new_mask.repeat(1, 3)] = X[new_mask.repeat(1, 3)]
+                self.C[new_mask] = C[new_mask]
                 self.N = 1
-                self.score = new_score
-        elif filtering_mode == "indep_conf":
-            assert self.C is not None
-            assert self.X_canon is not None
-            new_mask: Bool[Tensor, "hw 1"] = C > self.C
-            self.X_canon[new_mask.repeat(1, 3)] = X[new_mask.repeat(1, 3)]
-            self.C[new_mask] = C[new_mask]
-            self.N = 1
-        elif filtering_mode == "weighted_pointmap":
-            assert self.C is not None
-            assert self.X_canon is not None
-            self.X_canon = ((self.C * self.X_canon) + (C * X)) / (self.C + C)
-            self.C = self.C + C
-            self.N += 1
-        elif filtering_mode == "weighted_spherical":
-            assert self.C is not None
-            assert self.X_canon is not None
 
-            def cartesian_to_spherical(
-                P: Float[Tensor, "hw 3"],
-            ) -> Float[Tensor, "hw 3"]:
-                r: Float[Tensor, "hw 1"] = torch.linalg.norm(P, dim=-1, keepdim=True)
-                x: Float[Tensor, "hw 1"]
-                y: Float[Tensor, "hw 1"]
-                z: Float[Tensor, "hw 1"]
-                x, y, z = torch.tensor_split(P, 3, dim=-1)
-                phi: Float[Tensor, "hw 1"] = torch.atan2(y, x)
-                theta: Float[Tensor, "hw 1"] = torch.acos(z / r)
-                spherical: Float[Tensor, "hw 3"] = torch.cat((r, phi, theta), dim=-1)
-                return spherical
+            case FilteringMode.WEIGHTED_POINTMAP:
+                assert self.C is not None
+                assert self.X_canon is not None
+                self.X_canon = ((self.C * self.X_canon) + (C * X)) / (self.C + C)
+                self.C = self.C + C
+                self.N += 1
 
-            def spherical_to_cartesian(
-                spherical: Float[Tensor, "hw 3"],
-            ) -> Float[Tensor, "hw 3"]:
-                r: Float[Tensor, "hw 1"]
-                phi: Float[Tensor, "hw 1"]
-                theta: Float[Tensor, "hw 1"]
-                r, phi, theta = torch.tensor_split(spherical, 3, dim=-1)
-                x: Float[Tensor, "hw 1"] = r * torch.sin(theta) * torch.cos(phi)
-                y: Float[Tensor, "hw 1"] = r * torch.sin(theta) * torch.sin(phi)
-                z: Float[Tensor, "hw 1"] = r * torch.cos(theta)
-                P: Float[Tensor, "hw 3"] = torch.cat((x, y, z), dim=-1)
-                return P
-
-            spherical1: Float[Tensor, "hw 3"] = cartesian_to_spherical(self.X_canon)
-            spherical2: Float[Tensor, "hw 3"] = cartesian_to_spherical(X)
-            spherical: Float[Tensor, "hw 3"] = ((self.C * spherical1) + (C * spherical2)) / (self.C + C)
-
-            self.X_canon = spherical_to_cartesian(spherical)
-            self.C = self.C + C
-            self.N += 1
+            case FilteringMode.WEIGHTED_SPHERICAL:
+                assert self.C is not None
+                assert self.X_canon is not None
+                spherical1: Float[Tensor, "hw 3"] = _cartesian_to_spherical(self.X_canon)
+                spherical2: Float[Tensor, "hw 3"] = _cartesian_to_spherical(X)
+                spherical: Float[Tensor, "hw 3"] = ((self.C * spherical1) + (C * spherical2)) / (self.C + C)
+                self.X_canon = _spherical_to_cartesian(spherical)
+                self.C = self.C + C
+                self.N += 1
 
         self.N_updates += 1
-        return
 
     def get_average_conf(self) -> Float[Tensor, "hw 1"] | None:
         """Return confidence divided by observation count, or None if no confidence."""
