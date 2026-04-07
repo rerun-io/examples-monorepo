@@ -29,11 +29,14 @@ if "build_ext" in sys.argv:
     ROOT = os.path.dirname(os.path.abspath(__file__))
     conda_prefix = os.environ.get("CONDA_PREFIX", "")
 
-    # Let TORCH_CUDA_ARCH_LIST (set by the pixi task from nvidia-smi) control
-    # which GPU architectures are compiled.  CUDAExtension reads this env var
-    # automatically and generates the correct -gencode flags.  Hardcoding
-    # -gencode flags breaks when the installed nvcc doesn't support the listed
-    # architectures (e.g. compute_120 requires CUDA 12.8+).
+    # Auto-detect GPU architecture if TORCH_CUDA_ARCH_LIST isn't set.
+    # CUDAExtension reads this env var to generate the correct -gencode flags.
+    if not os.environ.get("TORCH_CUDA_ARCH_LIST"):
+        cap = torch.cuda.get_device_capability()
+        arch = f"{cap[0]}.{cap[1]}"
+        os.environ["TORCH_CUDA_ARCH_LIST"] = arch
+        print(f"Auto-detected CUDA arch: {arch}")
+
     setup(
         ext_modules=[
             CUDAExtension(
