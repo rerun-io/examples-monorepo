@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 import torch
 import yaml
-from jaxtyping import UInt8
+from jaxtyping import Float32, UInt8
 from natsort import natsorted
 from numpy import ndarray
 

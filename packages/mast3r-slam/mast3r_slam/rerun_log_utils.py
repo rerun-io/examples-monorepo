@@ -131,10 +131,10 @@ class RerunLogger:
 
         # Log the current camera image
         rgb_float: Float32[Tensor, "H W 3"] = current_frame.rgb
-        rgb_img: UInt8[ndarray, "H W 3"] = (rgb_float * 255).numpy().astype(np.uint8)
+        rgb_uint8: UInt8[ndarray, "H W 3"] = (rgb_float * 255).numpy().astype(np.uint8)
         rr.log(
             f"{cam_log_path}/pinhole/image",
-            rr.Image(image=rgb_img, color_model=rr.ColorModel.RGB).compress(jpeg_quality=75),
+            rr.Image(image=rgb_uint8, color_model=rr.ColorModel.RGB).compress(jpeg_quality=75),
         )
 
         # Log camera path
@@ -161,10 +161,10 @@ class RerunLogger:
             # Log image + pointcloud only the first time a keyframe appears.
             if kf_idx not in self.keyframe_logged_list:
                 kf_rgb_float: Float32[Tensor, "H W 3"] = keyframe.rgb
-                kf_img: UInt8[ndarray, "H W 3"] = (kf_rgb_float * 255).numpy().astype(np.uint8)
+                kf_rgb_uint8: UInt8[ndarray, "H W 3"] = (kf_rgb_float * 255).numpy().astype(np.uint8)
                 rr.log(
                     f"{kf_cam_log_path}/pinhole/image",
-                    rr.Image(image=kf_img, color_model=rr.ColorModel.RGB).compress(),
+                    rr.Image(image=kf_rgb_uint8, color_model=rr.ColorModel.RGB).compress(),
                 )
                 # Confidence-filtered point cloud
                 assert keyframe.C is not None
@@ -172,7 +172,7 @@ class RerunLogger:
 
                 assert keyframe.X_canon is not None
                 positions: Float32[ndarray, "num_points 3"] = keyframe.X_canon.cpu().numpy()
-                colors: UInt8[ndarray, "num_points 3"] = kf_img.reshape(-1, 3)
+                colors: UInt8[ndarray, "num_points 3"] = kf_rgb_uint8.reshape(-1, 3)
 
                 rr.log(
                     f"{kf_cam_log_path}/pointcloud",
@@ -192,10 +192,10 @@ class RerunLogger:
         if N_keyframes > 0:
             last_kf: Frame = keyframes[N_keyframes - 1]
             last_kf_rgb_float: Float32[Tensor, "H W 3"] = last_kf.rgb
-            last_kf_img: UInt8[ndarray, "H W 3"] = (last_kf_rgb_float * 255).numpy().astype(np.uint8)
+            last_kf_rgb_uint8: UInt8[ndarray, "H W 3"] = (last_kf_rgb_float * 255).numpy().astype(np.uint8)
             rr.log(
                 f"{self.parent_log_path}/last_keyframe",
-                rr.Image(image=last_kf_img, color_model=rr.ColorModel.RGB).compress(),
+                rr.Image(image=last_kf_rgb_uint8, color_model=rr.ColorModel.RGB).compress(),
             )
 
         # ── Factor graph edges ─────────────────────────────────────────────
