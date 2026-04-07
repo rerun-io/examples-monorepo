@@ -1,6 +1,7 @@
 import lietorch
 import torch
 from jaxtyping import Bool, Float, Float32, Int
+from mast3r.model import AsymmetricMASt3R
 from torch import Tensor
 
 from mast3r_slam import _backends
@@ -22,12 +23,12 @@ class FactorGraph:
 
     def __init__(
         self,
-        model: object,
+        model: AsymmetricMASt3R,
         frames: SharedKeyframes,
         K: Float[Tensor, "3 3"] | None = None,
         device: str = "cuda",
     ) -> None:
-        self.model: object = model
+        self.model: AsymmetricMASt3R = model
         self.frames: SharedKeyframes = frames
         self.device: str = device
         self.cfg: dict = config["local_opt"]

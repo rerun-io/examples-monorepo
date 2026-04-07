@@ -4,11 +4,11 @@ import numpy as np
 import torch
 from asmk import io_helpers
 from jaxtyping import Bool, Float, Float32, Int, Int64
+from mast3r.model import AsymmetricMASt3R
 from mast3r.retrieval.model import how_select_local
 from mast3r.retrieval.processor import Retriever
 from numpy import ndarray
 from torch import Tensor
-
 
 
 class RetrievalDatabase(Retriever):
@@ -21,7 +21,7 @@ class RetrievalDatabase(Retriever):
     def __init__(
         self,
         modelname: str,
-        backbone: object | None = None,
+        backbone: AsymmetricMASt3R | None = None,
         device: str = "cuda",
     ) -> None:
         super().__init__(modelname, backbone, device)

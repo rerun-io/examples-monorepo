@@ -17,6 +17,7 @@ Usage::
 """
 
 import gc
+import logging
 import multiprocessing
 import traceback
 from multiprocessing.managers import SyncManager
@@ -27,10 +28,18 @@ from types import TracebackType
 import torch
 import torch.multiprocessing as mp
 from jaxtyping import Float
+from mast3r.model import AsymmetricMASt3R
 from torch import Tensor
 
 from mast3r_slam.config import config
 from mast3r_slam.frame import Mode, SharedKeyframes, SharedStates
+
+try:
+    from beartype.roar import BeartypeException
+except ImportError:
+    BeartypeException = ()
+
+logger: logging.Logger = logging.getLogger(__name__)
 
 
 class BackendError(RuntimeError):
@@ -48,14 +57,14 @@ class SlamBackend:
     def __init__(
         self,
         config_path: str,
-        model: object,
+        model: AsymmetricMASt3R,
         h: int,
         w: int,
         K: Float[Tensor, "3 3"] | None,
         device: str = "cuda",
     ) -> None:
         self._config_path: str = config_path
-        self._model: object = model
+        self._model: AsymmetricMASt3R = model
         self._h: int = h
         self._w: int = w
         self._K: Float[Tensor, "3 3"] | None = K
@@ -112,7 +121,9 @@ class SlamBackend:
         if self.states is not None:
             try:
                 self.states.set_mode(Mode.TERMINATED)
-            except Exception:
+            except BeartypeException:
+                raise
+            except (OSError, BrokenPipeError, EOFError):
                 pass  # Manager might already be dead
 
         # Step 2: Wait for graceful exit
@@ -133,7 +144,9 @@ class SlamBackend:
         if self._manager is not None:
             try:
                 self._manager.shutdown()
-            except Exception:
+            except BeartypeException:
+                raise
+            except (OSError, BrokenPipeError, EOFError):
                 pass
             self._manager = None
 
@@ -180,7 +193,7 @@ class SlamBackend:
 
 def _backend_entry(
     config_path: str,
-    model: object,
+    model: AsymmetricMASt3R,
     states: SharedStates,
     keyframes: SharedKeyframes,
     K: Float[Tensor, "3 3"] | None,
@@ -197,10 +210,14 @@ def _backend_entry(
         run_backend(config_path, model, states, keyframes, K)
     except KeyboardInterrupt:
         pass  # Normal Ctrl+C propagation, not an error
+    except BeartypeException:
+        raise
     except Exception as exc:
         tb_str: str = traceback.format_exc()
         try:
             error_queue.put((type(exc).__name__, tb_str))
-        except Exception:
+        except BeartypeException:
+            raise
+        except (OSError, BrokenPipeError, EOFError):
             pass
-        print(f"[Backend FATAL] {tb_str}", flush=True)
+        logger.critical("[Backend FATAL] %s", tb_str)

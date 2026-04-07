@@ -1,3 +1,4 @@
+import logging
 import pathlib
 import re
 
@@ -19,10 +20,12 @@ import yaml
 from mast3r_slam.config import config
 from mast3r_slam.mast3r_utils import resize_img
 
+logger: logging.Logger = logging.getLogger(__name__)
+
 HAS_TORCHCODEC: bool = True
 try:
     from torchcodec.decoders import VideoDecoder
-except Exception:
+except (ImportError, ModuleNotFoundError):
     HAS_TORCHCODEC = False
 
 
@@ -39,10 +42,10 @@ class MonocularDataset(torch.utils.data.Dataset):
         img_size: Literal[224, 512] = 512,
     ) -> None:
         self.dtype: type = dtype
-        self.rgb_files: list = []
-        self.timestamps: list = []
+        self.rgb_files: list[str | pathlib.Path] = []
+        self.timestamps: list[float | str] = []
         self.img_size: Literal[224, 512] = img_size
-        self.camera_intrinsics = None
+        self.camera_intrinsics = None  # Intrinsics | None — forward ref, typed by subclasses
         self.use_calibration: bool = config["use_calib"]
         self.save_results: bool = True
 
@@ -327,7 +330,7 @@ class MP4Dataset(MonocularDataset):
             self.fps: float = self.decoder.metadata.average_fps
             self.total_frames: int = self.decoder.metadata.num_frames
         else:
-            print("torchcodec is not installed. This may slow down the dataloader")
+            logger.warning("torchcodec is not installed. This may slow down the dataloader")
             self.cap = cv2.VideoCapture(str(self.dataset_path))
             self.fps = self.cap.get(cv2.CAP_PROP_FPS)
             self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))

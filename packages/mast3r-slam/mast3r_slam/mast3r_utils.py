@@ -19,6 +19,9 @@ from mast3r_slam.config import config
 from mast3r_slam.lietorch_utils import as_SE3
 from mast3r_slam.retrieval_database import RetrievalDatabase
 
+# NOTE: Frame cannot be imported here due to circular import (frame -> mast3r_utils -> frame).
+# Functions that accept Frame use `object` as the runtime type hint.
+
 
 def load_mast3r(path: str | None = None, device: str = "cuda") -> AsymmetricMASt3R:
     """Load a pretrained MASt3R model from a checkpoint file.

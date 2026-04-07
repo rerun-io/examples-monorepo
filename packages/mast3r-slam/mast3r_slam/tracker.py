@@ -1,6 +1,9 @@
+import logging
+
 import lietorch
 import torch
 from jaxtyping import Bool, Float, Int
+from mast3r.model import AsymmetricMASt3R
 from torch import Tensor
 
 try:
@@ -20,6 +23,8 @@ from mast3r_slam.geometry import (
 from mast3r_slam.mast3r_utils import mast3r_match_asymmetric
 from mast3r_slam.nonlinear_optimizer import check_convergence, huber
 
+logger: logging.Logger = logging.getLogger(__name__)
+
 
 class FrameTracker:
     """Tracks the pose of incoming frames against the most recent keyframe.
@@ -30,12 +35,12 @@ class FrameTracker:
 
     def __init__(
         self,
-        model: object,
+        model: AsymmetricMASt3R,
         frames: SharedKeyframes,
         device: str,
     ) -> None:
         self.cfg: dict = config["tracking"]
-        self.model: object = model
+        self.model: AsymmetricMASt3R = model
         self.keyframes: SharedKeyframes = frames
         self.device: str = device
 
@@ -109,7 +114,7 @@ class FrameTracker:
 
         match_frac: Float[Tensor, ""] = valid_opt.sum() / valid_opt.numel()
         if match_frac < self.cfg["min_match_frac"]:
-            print(f"Skipped frame {frame.frame_id}")
+            logger.debug("Skipped frame %s", frame.frame_id)
             return False, [], True
 
         try:
@@ -137,7 +142,7 @@ class FrameTracker:
         except BeartypeException:
             raise
         except torch.linalg.LinAlgError:
-            print(f"Cholesky failed {frame.frame_id}")
+            logger.debug("Cholesky failed %s", frame.frame_id)
             return False, [], True
 
         frame.world_sim3_cam = world_sim3_camf
@@ -346,7 +351,7 @@ class FrameTracker:
             old_cost = new_cost
 
             if step == self.cfg["max_iters"] - 1:
-                print(f"max iters reached {last_error}")
+                logger.debug("max iters reached %s", last_error)
 
         # Assign new pose based on relative pose
         world_sim3_camf_new = world_sim3_camk * camk_sim3_camf
@@ -441,7 +446,7 @@ class FrameTracker:
             old_cost = new_cost
 
             if step == self.cfg["max_iters"] - 1:
-                print(f"max iters reached {last_error}")
+                logger.debug("max iters reached %s", last_error)
 
         # Assign new pose based on relative pose
         world_sim3_camf_new = world_sim3_camk * camk_sim3_camf
