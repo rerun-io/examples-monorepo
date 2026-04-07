@@ -1,3 +1,4 @@
+import contextlib
 import shutil
 import subprocess
 import sys
@@ -16,7 +17,7 @@ from simplecv.rerun_log_utils import log_video
 from mast3r_slam.backend_lifecycle import SlamBackend
 from mast3r_slam.config import config, load_config
 from mast3r_slam.dataloader import load_dataset
-from mast3r_slam.frame import Frame, Mode, create_frame
+from mast3r_slam.frame import Frame, Mode, SharedStates, create_frame
 from mast3r_slam.mast3r_utils import (
     load_mast3r,
     mast3r_inference_mono,
@@ -27,14 +28,12 @@ from mast3r_slam.tracker import FrameTracker
 
 # Global reference to the active states so the stop button can signal termination.
 # The SlamBackend context manager handles all cleanup.
-active_states: "SharedStates | None" = None
+active_states: SharedStates | None = None
 
 # Initialize multiprocessing start method (spawn required for CUDA).
 # If already set (e.g. by a parent process), reuse the existing setting.
-try:
+with contextlib.suppress(RuntimeError):
     mp.set_start_method("spawn")
-except RuntimeError:
-    pass  # Method already set, safe to continue
 
 DEVICE: str = "cuda:0"
 model = load_mast3r(device=DEVICE)
@@ -48,7 +47,9 @@ def stop_streaming():
     if active_states is not None:
         try:
             active_states.set_mode(Mode.TERMINATED)
-        except Exception:
+        except beartype.roar.BeartypeException:
+            raise
+        except (OSError, BrokenPipeError, EOFError):
             pass
     return None
 
@@ -57,7 +58,7 @@ def stop_streaming():
 def streaming_mast3r_slam_fn(
     video_file: str,
     subsample: int,
-    progress=gr.Progress(),
+    progress=gr.Progress(),  # noqa: B008
 ):
     global active_states
 
@@ -98,7 +99,7 @@ def streaming_mast3r_slam_fn(
     has_calib: bool = dataset.has_calib()
     use_calib: bool = config["use_calib"]
     if use_calib and not has_calib:
-        print("[Warning] No calibration provided for this dataset!")
+        rr.log(f"{parent_log_path}/logs", rr.TextLog("No calibration provided for this dataset!", level="WARN"))
         sys.exit(0)
     K = None
     if use_calib:
@@ -110,6 +111,8 @@ def streaming_mast3r_slam_fn(
     progress(0.15, desc="Starting Backend")
 
     with SlamBackend(inference_config, model, h, w, K, device=DEVICE) as ctx:
+        assert ctx.keyframes is not None
+        assert ctx.states is not None
         keyframes = ctx.keyframes
         states = ctx.states
         active_states = states  # expose to stop button
@@ -132,7 +135,7 @@ def streaming_mast3r_slam_fn(
                 states.set_mode(Mode.TERMINATED)
                 break
 
-            timestamp, img = dataset[i]
+            timestamp, rgb = dataset[i]
 
             # get frames last camera pose
             world_sim3_cam: lietorch.Sim3 = (
@@ -141,7 +144,7 @@ def streaming_mast3r_slam_fn(
                 else states.get_frame().world_sim3_cam
             )
             frame: Frame = create_frame(
-                i, img, world_sim3_cam, img_size=dataset.img_size, device=DEVICE
+                i, rgb, world_sim3_cam, img_size=dataset.img_size, device=DEVICE
             )
 
             if mode == Mode.INIT:
@@ -188,7 +191,7 @@ def streaming_mast3r_slam_fn(
             rr_logger.log_frame(frame, keyframes, states)
             if i % 30 == 0:
                 FPS = i / (time.time() - fps_timer)
-                print(f"FPS: {FPS}")
+                rr.log(f"{parent_log_path}/logs", rr.TextLog(f"FPS: {FPS:.1f}", level="INFO"))
             i += 1
 
             yield stream.read(), None, f"Processing frame {i}/{len(dataset)}"
@@ -215,7 +218,7 @@ def streaming_mast3r_slam_fn(
 
         try:
             if ns_output_dir.exists():
-                print(f"Zipping nerfstudio output to {zip_output_path}")
+                rr.log(f"{parent_log_path}/logs", rr.TextLog(f"Zipping nerfstudio output to {zip_output_path}", level="INFO"))
                 shutil.make_archive(
                     base_name=str(zip_output_path.with_suffix("")),
                     format="zip",
@@ -223,11 +226,11 @@ def streaming_mast3r_slam_fn(
                     base_dir="nerfstudio-output",
                 )
         except Exception as e:
-            raise gr.Error(f"Failed to zip nerfstudio output: {e}")
+            raise gr.Error(f"Failed to zip nerfstudio output: {e}") from e
 
         assert zip_output_path.exists(), f"Zip file {zip_output_path} does not exist"
 
-        print("Finished processing")
+        rr.log(f"{parent_log_path}/logs", rr.TextLog("Finished processing", level="INFO"))
         yield stream.read(), str(zip_output_path), "MASt3R-SLAM complete"
 
     # SlamBackend.__exit__ handles: backend shutdown, manager shutdown, GPU cleanup
@@ -253,7 +256,7 @@ def mov_to_mp4(video_path: Path) -> Path:
         )
         video_path = mp4_path
     except subprocess.CalledProcessError as e:
-        raise gr.Error(f"Failed to convert MOV to MP4: {e.stderr.decode()}")
+        raise gr.Error(f"Failed to convert MOV to MP4: {e.stderr.decode()}") from e
     return video_path
 
 
@@ -369,9 +372,8 @@ with gr.Blocks() as mast3r_slam_block:
         outputs=[viewer, status_text],
     )
 
-    load_input_event = getattr(examples, "load_input_event", None)
-    if load_input_event is not None:
-        load_input_event.then(
+    if hasattr(examples, "load_input_event"):
+        examples.load_input_event.then(
             fn=_switch_to_inputs,
             inputs=None,
             outputs=[tabs],

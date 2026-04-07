@@ -17,10 +17,10 @@ import torch
 from jaxtyping import Bool, Float, Float32, Int, UInt8
 from numpy import ndarray
 from simplecv.camera_orient_utils import auto_orient_and_center_poses
+from simplecv.rerun_log_utils import log_pinhole
 from torch import Tensor
 
 from mast3r_slam.frame import Frame, SharedKeyframes, SharedStates
-from mast3r_slam.lietorch_utils import as_SE3
 from mast3r_slam.mast3r_utils import frame_to_extrinsics, frame_to_pinhole
 
 
@@ -33,17 +33,22 @@ def create_blueprints(parent_log_path: Path) -> rrb.Blueprint:
     Returns:
         A configured Rerun Blueprint.
     """
+    views: rrb.Vertical = rrb.Vertical(
+        rrb.Spatial2DView(origin=str(parent_log_path / "current_camera" / "pinhole")),
+        rrb.Spatial2DView(origin=str(parent_log_path / "last_keyframe")),
+        name="Views",
+    )
+    logs: rrb.TextLogView = rrb.TextLogView(
+        origin=str(parent_log_path / "logs"),
+        name="Logs",
+    )
     blueprint: rrb.Blueprint = rrb.Blueprint(
         rrb.Horizontal(
             rrb.Spatial3DView(
                 origin="/",
                 contents=[f"+ {parent_log_path}/**"],
             ),
-            rrb.Vertical(
-                rrb.Spatial2DView(origin=str(parent_log_path / "current_camera" / "pinhole")),
-                rrb.Spatial2DView(origin=str(parent_log_path / "last_keyframe")),
-                rrb.TextDocumentView(origin=str(parent_log_path)),
-            ),
+            rrb.Tabs(views, logs, active_tab=0),
             column_shares=(3, 1),
         ),
         collapse_panels=True,
@@ -68,20 +73,24 @@ class RerunLogger:
     def _log_orient_transform(self, keyframes: SharedKeyframes, n_kf: int) -> None:
         """Recompute gravity-alignment from all keyframe poses and update the transform.
 
-        Collects all ``n_kf`` keyframe world-from-camera poses (in GL convention
-        via ``frame_to_pinhole``), runs ``auto_orient_and_center_poses(method="up")``
+        Collects all ``n_kf`` keyframe world-from-camera poses in RUB convention,
+        runs ``auto_orient_and_center_poses(method="up")``
         to align the reconstruction's up-vector with the Y axis, and logs the
         resulting rotation+translation on ``parent_log_path``.
         """
-        world_T_cam_gl_list: list[Float32[ndarray, "4 4"]] = []
+        world_T_cam_list: list[Float32[ndarray, "4 4"]] = []
         for i in range(n_kf):
             kf: Frame = keyframes[i]
-            kf_ext = frame_to_extrinsics(kf)
-            world_T_cam_gl_list.append(kf_ext.world_T_cam.astype(np.float32))
+            # auto_orient_and_center_poses(method="up") assumes camera column 1 is
+            # the camera up axis. That is true for RUB, but RDF's column 1 is down.
+            # We therefore orient the global scene from RUB poses even though the
+            # logged pinhole cameras themselves stay in RDF.
+            kf_ext = frame_to_extrinsics(kf, camera_conventions="RUB")
+            world_T_cam_list.append(kf_ext.world_T_cam.astype(np.float32))
 
-        world_T_cam_gl: Float32[ndarray, "n_kf 4 4"] = np.stack(world_T_cam_gl_list)
+        world_T_cam: Float32[ndarray, "n_kf 4 4"] = np.stack(world_T_cam_list)
         orient_34: Float[ndarray, "3 4"] = auto_orient_and_center_poses(
-            world_T_cam_gl, method="up", center_method="poses"
+            world_T_cam, method="up", center_method="poses"
         ).transform
         orient_R: Float[ndarray, "3 3"] = orient_34[:, :3]
         orient_t: Float[ndarray, "3"] = orient_34[:, 3]
@@ -114,35 +123,22 @@ class RerunLogger:
         current_pinhole = frame_to_pinhole(current_frame)
         cam_log_path: Path = self.parent_log_path / "current_camera"
 
-        # Log transform using world-from-camera (no from_parent) so camera
-        # frustums are placed at their world position.
-        rr.log(
-            f"{cam_log_path}",
-            rr.Transform3D(
-                translation=current_pinhole.extrinsics.world_t_cam,
-                mat3x3=current_pinhole.extrinsics.world_R_cam,
-            ),
-        )
-        rr.log(
-            f"{cam_log_path}/pinhole",
-            rr.Pinhole(
-                image_from_camera=current_pinhole.intrinsics.k_matrix,
-                height=current_pinhole.intrinsics.height,
-                width=current_pinhole.intrinsics.width,
-                camera_xyz=rr.ViewCoordinates.RUB,
-                image_plane_distance=self.image_plane_distance * 2,
-            ),
+        log_pinhole(
+            camera=current_pinhole,
+            cam_log_path=cam_log_path,
+            image_plane_distance=self.image_plane_distance * 2,
         )
 
         # Log the current camera image
-        rgb_img_float: Float32[Tensor, "H W 3"] = current_frame.uimg
-        rgb_img: UInt8[ndarray, "H W 3"] = (rgb_img_float * 255).numpy().astype(np.uint8)
+        rgb_float: Float32[Tensor, "H W 3"] = current_frame.rgb
+        rgb_uint8: UInt8[ndarray, "H W 3"] = (rgb_float * 255).numpy().astype(np.uint8)
         rr.log(
             f"{cam_log_path}/pinhole/image",
-            rr.Image(image=rgb_img, color_model=rr.ColorModel.RGB).compress(jpeg_quality=75),
+            rr.Image(image=rgb_uint8, color_model=rr.ColorModel.RGB).compress(jpeg_quality=75),
         )
 
         # Log camera path
+        assert current_pinhole.extrinsics.world_t_cam is not None
         translation: Float32[ndarray, "3"] = current_pinhole.extrinsics.world_t_cam
         self.path_list.append(translation.tolist())
         rr.log(
@@ -164,11 +160,11 @@ class RerunLogger:
 
             # Log image + pointcloud only the first time a keyframe appears.
             if kf_idx not in self.keyframe_logged_list:
-                kf_img_float: Float32[Tensor, "H W 3"] = keyframe.uimg
-                kf_img: UInt8[ndarray, "H W 3"] = (kf_img_float * 255).numpy().astype(np.uint8)
+                kf_rgb_float: Float32[Tensor, "H W 3"] = keyframe.rgb
+                kf_rgb_uint8: UInt8[ndarray, "H W 3"] = (kf_rgb_float * 255).numpy().astype(np.uint8)
                 rr.log(
                     f"{kf_cam_log_path}/pinhole/image",
-                    rr.Image(image=kf_img, color_model=rr.ColorModel.RGB).compress(),
+                    rr.Image(image=kf_rgb_uint8, color_model=rr.ColorModel.RGB).compress(),
                 )
                 # Confidence-filtered point cloud
                 assert keyframe.C is not None
@@ -176,7 +172,7 @@ class RerunLogger:
 
                 assert keyframe.X_canon is not None
                 positions: Float32[ndarray, "num_points 3"] = keyframe.X_canon.cpu().numpy()
-                colors: UInt8[ndarray, "num_points 3"] = kf_img.reshape(-1, 3)
+                colors: UInt8[ndarray, "num_points 3"] = kf_rgb_uint8.reshape(-1, 3)
 
                 rr.log(
                     f"{kf_cam_log_path}/pointcloud",
@@ -184,38 +180,22 @@ class RerunLogger:
                 )
                 self.keyframe_logged_list.append(kf_idx)
 
-            # Always update the keyframe's pose (it may have been refined by
-            # the backend's global optimisation since the last log call).
-            # Keyframes use CV convention (RDF) — no GL conversion needed.
-            kf_se3: lietorch.SE3 = as_SE3(keyframe.world_sim3_cam.cpu())
-            kf_mat4x4: Float32[ndarray, "4 4"] = kf_se3.matrix().numpy().astype(np.float32)[0]
-            rr.log(
-                f"{kf_cam_log_path}",
-                rr.Transform3D(
-                    translation=kf_mat4x4[:3, 3],
-                    mat3x3=kf_mat4x4[:3, :3],
-                ),
-            )
-            rr.log(
-                f"{kf_cam_log_path}/pinhole",
-                rr.Pinhole(
-                    focal_length=current_pinhole.intrinsics.fl_x,
-                    principal_point=[current_pinhole.intrinsics.cx, current_pinhole.intrinsics.cy],
-                    height=current_pinhole.intrinsics.height,
-                    width=current_pinhole.intrinsics.width,
-                    camera_xyz=rr.ViewCoordinates.RDF,
-                    image_plane_distance=self.image_plane_distance,
-                ),
+            # Always update the keyframe's camera; its pose may be refined by
+            # the backend's global optimisation since the last log call.
+            log_pinhole(
+                camera=frame_to_pinhole(keyframe),
+                cam_log_path=kf_cam_log_path,
+                image_plane_distance=self.image_plane_distance,
             )
 
         # ── Last keyframe image ────────────────────────────────────────────
         if N_keyframes > 0:
             last_kf: Frame = keyframes[N_keyframes - 1]
-            last_kf_img_float: Float32[Tensor, "H W 3"] = last_kf.uimg
-            last_kf_img: UInt8[ndarray, "H W 3"] = (last_kf_img_float * 255).numpy().astype(np.uint8)
+            last_kf_rgb_float: Float32[Tensor, "H W 3"] = last_kf.rgb
+            last_kf_rgb_uint8: UInt8[ndarray, "H W 3"] = (last_kf_rgb_float * 255).numpy().astype(np.uint8)
             rr.log(
                 f"{self.parent_log_path}/last_keyframe",
-                rr.Image(image=last_kf_img, color_model=rr.ColorModel.RGB).compress(),
+                rr.Image(image=last_kf_rgb_uint8, color_model=rr.ColorModel.RGB).compress(),
             )
 
         # ── Factor graph edges ─────────────────────────────────────────────
@@ -233,7 +213,7 @@ class RerunLogger:
             t_world_cami: Float32[ndarray, "num_edges 3"] = world_sim3_cami.matrix()[:, :3, 3].cpu().numpy()
             t_world_camj: Float32[ndarray, "num_edges 3"] = world_sim3_camj.matrix()[:, :3, 3].cpu().numpy()
             line_strips: list[list[float]] = []
-            for t_i, t_j in zip(t_world_cami, t_world_camj):
+            for t_i, t_j in zip(t_world_cami, t_world_camj, strict=False):
                 line_strips.append(t_i.tolist())
                 line_strips.append(t_j.tolist())
             rr.log(

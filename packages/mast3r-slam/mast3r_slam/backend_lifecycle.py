@@ -27,11 +27,16 @@ from types import TracebackType
 import torch
 import torch.multiprocessing as mp
 from jaxtyping import Float
+from mast3r.model import AsymmetricMASt3R
 from torch import Tensor
 
 from mast3r_slam.config import config
 from mast3r_slam.frame import Mode, SharedKeyframes, SharedStates
 
+try:
+    from beartype.roar import BeartypeException
+except ImportError:
+    BeartypeException = ()
 
 class BackendError(RuntimeError):
     """Raised when the backend process dies with an exception."""
@@ -48,18 +53,22 @@ class SlamBackend:
     def __init__(
         self,
         config_path: str,
-        model: object,
+        model: AsymmetricMASt3R,
         h: int,
         w: int,
         K: Float[Tensor, "3 3"] | None,
         device: str = "cuda",
+        rr_application_id: str | None = None,
     ) -> None:
         self._config_path: str = config_path
-        self._model: object = model
+        self._model: AsymmetricMASt3R = model
         self._h: int = h
         self._w: int = w
         self._K: Float[Tensor, "3 3"] | None = K
         self._device: str = device
+        self._rr_application_id: str | None = rr_application_id
+        """When set, the backend subprocess will call ``rr.init`` + ``rr.connect_grpc``
+        so that ``rr.TextLog`` entries reach the same viewer as the main process."""
 
         self._manager: SyncManager | None = None
         self._backend: mp.Process | None = None
@@ -87,6 +96,7 @@ class SlamBackend:
                 self.keyframes,
                 self._K,
                 self._error_queue,
+                self._rr_application_id,
             ),
             daemon=False,
         )
@@ -112,7 +122,9 @@ class SlamBackend:
         if self.states is not None:
             try:
                 self.states.set_mode(Mode.TERMINATED)
-            except Exception:
+            except BeartypeException:
+                raise
+            except (OSError, BrokenPipeError, EOFError):
                 pass  # Manager might already be dead
 
         # Step 2: Wait for graceful exit
@@ -133,7 +145,9 @@ class SlamBackend:
         if self._manager is not None:
             try:
                 self._manager.shutdown()
-            except Exception:
+            except BeartypeException:
+                raise
+            except (OSError, BrokenPipeError, EOFError):
                 pass
             self._manager = None
 
@@ -180,11 +194,12 @@ class SlamBackend:
 
 def _backend_entry(
     config_path: str,
-    model: object,
+    model: AsymmetricMASt3R,
     states: SharedStates,
     keyframes: SharedKeyframes,
     K: Float[Tensor, "3 3"] | None,
     error_queue: MPQueue,
+    rr_application_id: str | None = None,
 ) -> None:
     """Entry point for the backend subprocess.
 
@@ -194,13 +209,17 @@ def _backend_entry(
     try:
         from mast3r_slam.api.inference import run_backend
 
-        run_backend(config_path, model, states, keyframes, K)
+        run_backend(config_path, model, states, keyframes, K, rr_application_id=rr_application_id)
     except KeyboardInterrupt:
         pass  # Normal Ctrl+C propagation, not an error
+    except BeartypeException:
+        raise
     except Exception as exc:
         tb_str: str = traceback.format_exc()
         try:
             error_queue.put((type(exc).__name__, tb_str))
-        except Exception:
+        except BeartypeException:
+            raise
+        except (OSError, BrokenPipeError, EOFError):
             pass
         print(f"[Backend FATAL] {tb_str}", flush=True)

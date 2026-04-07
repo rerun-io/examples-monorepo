@@ -12,9 +12,9 @@ from mast3r_slam.config import config
 # Note: global_opt.py imports mast3r_slam._backends directly for the
 # Gauss-Newton solvers which have not been ported to Mojo.
 try:
-    import mast3r_slam_mojo_backends as _matching_backends
+    import mast3r_slam_mojo_backends as _matching_backends  # pyrefly: ignore
 except ImportError:
-    from mast3r_slam import _backends as _matching_backends
+    from mast3r_slam import _backends as _matching_backends  # pyrefly: ignore
 
 
 def match(

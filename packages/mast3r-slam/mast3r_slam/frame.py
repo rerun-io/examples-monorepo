@@ -1,14 +1,15 @@
 import dataclasses
 from enum import Enum
+from typing import Literal
 
 import lietorch
 import torch
-from jaxtyping import Bool, Float, Float32, Int
-from numpy import ndarray
+from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
 from mast3r_slam.config import config
-from mast3r_slam.mast3r_utils import resize_img
+from mast3r_slam.image_types import RgbNormalized
+from mast3r_slam.image_utils import ResizedImage, resize_img
 
 
 class Mode(Enum):
@@ -18,6 +19,76 @@ class Mode(Enum):
     TRACKING = 1
     RELOC = 2
     TERMINATED = 3
+
+
+class FilteringMode(Enum):
+    """Strategy for updating a frame's canonical 3D point map.
+
+    When a new observation arrives (from matching or mono inference), this
+    controls how the existing point map is combined with the new one.
+    """
+
+    FIRST = "first"
+    """Keep only the second observation (first update after init), ignore all later ones."""
+    RECENT = "recent"
+    """Always replace the point map with the most recent observation."""
+    BEST_SCORE = "best_score"
+    """Keep the observation whose scalar confidence score (median or mean) is highest."""
+    INDEP_CONF = "indep_conf"
+    """Per-point update: for each pixel, keep whichever observation has higher confidence."""
+    WEIGHTED_POINTMAP = "weighted_pointmap"
+    """Confidence-weighted running average of 3D points in Cartesian space."""
+    WEIGHTED_SPHERICAL = "weighted_spherical"
+    """Confidence-weighted running average in spherical coordinates (r, phi, theta)."""
+
+
+class FilteringScore(Enum):
+    """Scalar score function used by ``FilteringMode.BEST_SCORE``."""
+
+    MEDIAN = "median"
+    """Median of per-point confidence values."""
+    MEAN = "mean"
+    """Mean of per-point confidence values."""
+
+
+def _cartesian_to_spherical(P: Float[Tensor, "hw 3"]) -> Float[Tensor, "hw 3"]:
+    """Convert Cartesian (x, y, z) to spherical (r, phi, theta) coordinates.
+
+    Args:
+        P: Points in Cartesian coordinates, shape (hw, 3).
+
+    Returns:
+        Points in spherical coordinates (r, phi, theta), shape (hw, 3).
+    """
+    r: Float[Tensor, "hw 1"] = torch.linalg.norm(P, dim=-1, keepdim=True)
+    x: Float[Tensor, "hw 1"]
+    y: Float[Tensor, "hw 1"]
+    z: Float[Tensor, "hw 1"]
+    x, y, z = torch.tensor_split(P, 3, dim=-1)
+    phi: Float[Tensor, "hw 1"] = torch.atan2(y, x)
+    theta: Float[Tensor, "hw 1"] = torch.acos(z / r)
+    spherical: Float[Tensor, "hw 3"] = torch.cat((r, phi, theta), dim=-1)
+    return spherical
+
+
+def _spherical_to_cartesian(spherical: Float[Tensor, "hw 3"]) -> Float[Tensor, "hw 3"]:
+    """Convert spherical (r, phi, theta) to Cartesian (x, y, z) coordinates.
+
+    Args:
+        spherical: Points in spherical coordinates (r, phi, theta), shape (hw, 3).
+
+    Returns:
+        Points in Cartesian coordinates, shape (hw, 3).
+    """
+    r: Float[Tensor, "hw 1"]
+    phi: Float[Tensor, "hw 1"]
+    theta: Float[Tensor, "hw 1"]
+    r, phi, theta = torch.tensor_split(spherical, 3, dim=-1)
+    x: Float[Tensor, "hw 1"] = r * torch.sin(theta) * torch.cos(phi)
+    y: Float[Tensor, "hw 1"] = r * torch.sin(theta) * torch.sin(phi)
+    z: Float[Tensor, "hw 1"] = r * torch.cos(theta)
+    P: Float[Tensor, "hw 3"] = torch.cat((x, y, z), dim=-1)
+    return P
 
 
 @dataclasses.dataclass
@@ -30,14 +101,14 @@ class Frame:
 
     frame_id: int
     """Index of this frame in the dataset sequence."""
-    img: Float[Tensor, "*batch 3 h w"]
-    """Normalized RGB image tensor, (1, 3, h, w) or (3, h, w) when read from shared buffer."""
+    rgb_tensor: Float[Tensor, "*batch 3 h w"]
+    """ImageNet-normalized RGB tensor, (1, 3, h, w) or (3, h, w) when read from shared buffer."""
     img_shape: Int[Tensor, "*batch 2"]
     """(height, width) of the processed image after optional downsampling."""
     img_true_shape: Int[Tensor, "*batch 2"]
     """(height, width) of the image before any downsampling."""
-    uimg: Float[Tensor, "*batch h w 3"]
-    """Unnormalized RGB image in [0, 1] range, HWC layout on CPU."""
+    rgb: Float[Tensor, "*batch h w 3"]
+    """Normalized RGB image in [0, 1] range, HWC layout on CPU."""
     world_sim3_cam: lietorch.Sim3 = lietorch.Sim3.Identity(1)
     """World-from-camera Sim3 pose."""
     X_canon: Float[Tensor, "hw 3"] | None = None
@@ -66,15 +137,14 @@ class Frame:
         Returns:
             Scalar score tensor (median or mean of C, depending on config).
         """
-        filtering_score: str = config["tracking"]["filtering_score"]
-        score: Float[Tensor, ""]
-        if filtering_score == "median":
-            score = torch.median(C)  # Is this slower than mean? Is it worth it?
-        elif filtering_score == "mean":
-            score = torch.mean(C)
-        else:
-            raise ValueError(f"Unknown filtering_score: {filtering_score}")
-        return score
+        score_fn: FilteringScore = FilteringScore(config["tracking"]["filtering_score"])
+        match score_fn:
+            case FilteringScore.MEDIAN:
+                return torch.median(C)
+            case FilteringScore.MEAN:
+                return torch.mean(C)
+            case _:
+                raise ValueError(f"Unknown filtering score: {score_fn}")
 
     def update_pointmap(
         self,
@@ -83,91 +153,77 @@ class Frame:
     ) -> None:
         """Update the canonical point map using the configured filtering strategy.
 
+        See ``FilteringMode`` for a description of each strategy.
+
         Args:
             X: New 3D point map of shape (h*w, 3).
             C: New confidence values of shape (h*w, 1).
         """
-        filtering_mode: str = config["tracking"]["filtering_mode"]
+        mode: FilteringMode = FilteringMode(config["tracking"]["filtering_mode"])
 
+        # First observation — always accept regardless of mode.
         if self.N == 0:
             self.X_canon = X.clone()
             self.C = C.clone()
             self.N = 1
             self.N_updates = 1
-            if filtering_mode == "best_score":
+            if mode is FilteringMode.BEST_SCORE:
                 self.score = self.get_score(C)
             return
 
-        if filtering_mode == "first":
-            if self.N_updates == 1:
+        match mode:
+            case FilteringMode.FIRST:
+                # Accept only the second observation (first update after init).
+                if self.N_updates == 1:
+                    self.X_canon = X.clone()
+                    self.C = C.clone()
+                    self.N = 1
+
+            case FilteringMode.RECENT:
+                # Always overwrite with the latest observation.
                 self.X_canon = X.clone()
                 self.C = C.clone()
                 self.N = 1
-        elif filtering_mode == "recent":
-            self.X_canon = X.clone()
-            self.C = C.clone()
-            self.N = 1
-        elif filtering_mode == "best_score":
-            new_score: Float[Tensor, ""] = self.get_score(C)
-            assert self.score is not None
-            if new_score > self.score:
-                self.X_canon = X.clone()
-                self.C = C.clone()
+
+            case FilteringMode.BEST_SCORE:
+                # Keep whichever full observation has the highest aggregate score.
+                new_score: Float[Tensor, ""] = self.get_score(C)
+                assert self.score is not None
+                if new_score > self.score:
+                    self.X_canon = X.clone()
+                    self.C = C.clone()
+                    self.N = 1
+                    self.score = new_score
+
+            case FilteringMode.INDEP_CONF:
+                # Per-point cherry-pick: keep the higher-confidence point at each pixel.
+                assert self.C is not None
+                assert self.X_canon is not None
+                new_mask: Bool[Tensor, "hw 1"] = C > self.C
+                self.X_canon[new_mask.repeat(1, 3)] = X[new_mask.repeat(1, 3)]
+                self.C[new_mask] = C[new_mask]
                 self.N = 1
-                self.score = new_score
-        elif filtering_mode == "indep_conf":
-            assert self.C is not None
-            assert self.X_canon is not None
-            new_mask: Bool[Tensor, "hw 1"] = C > self.C
-            self.X_canon[new_mask.repeat(1, 3)] = X[new_mask.repeat(1, 3)]
-            self.C[new_mask] = C[new_mask]
-            self.N = 1
-        elif filtering_mode == "weighted_pointmap":
-            assert self.C is not None
-            assert self.X_canon is not None
-            self.X_canon = ((self.C * self.X_canon) + (C * X)) / (self.C + C)
-            self.C = self.C + C
-            self.N += 1
-        elif filtering_mode == "weighted_spherical":
-            assert self.C is not None
-            assert self.X_canon is not None
 
-            def cartesian_to_spherical(
-                P: Float[Tensor, "hw 3"],
-            ) -> Float[Tensor, "hw 3"]:
-                r: Float[Tensor, "hw 1"] = torch.linalg.norm(P, dim=-1, keepdim=True)
-                x: Float[Tensor, "hw 1"]
-                y: Float[Tensor, "hw 1"]
-                z: Float[Tensor, "hw 1"]
-                x, y, z = torch.tensor_split(P, 3, dim=-1)
-                phi: Float[Tensor, "hw 1"] = torch.atan2(y, x)
-                theta: Float[Tensor, "hw 1"] = torch.acos(z / r)
-                spherical: Float[Tensor, "hw 3"] = torch.cat((r, phi, theta), dim=-1)
-                return spherical
+            case FilteringMode.WEIGHTED_POINTMAP:
+                # Confidence-weighted running average in Cartesian space.
+                assert self.C is not None
+                assert self.X_canon is not None
+                self.X_canon = ((self.C * self.X_canon) + (C * X)) / (self.C + C)
+                self.C = self.C + C
+                self.N += 1
 
-            def spherical_to_cartesian(
-                spherical: Float[Tensor, "hw 3"],
-            ) -> Float[Tensor, "hw 3"]:
-                r: Float[Tensor, "hw 1"]
-                phi: Float[Tensor, "hw 1"]
-                theta: Float[Tensor, "hw 1"]
-                r, phi, theta = torch.tensor_split(spherical, 3, dim=-1)
-                x: Float[Tensor, "hw 1"] = r * torch.sin(theta) * torch.cos(phi)
-                y: Float[Tensor, "hw 1"] = r * torch.sin(theta) * torch.sin(phi)
-                z: Float[Tensor, "hw 1"] = r * torch.cos(theta)
-                P: Float[Tensor, "hw 3"] = torch.cat((x, y, z), dim=-1)
-                return P
-
-            spherical1: Float[Tensor, "hw 3"] = cartesian_to_spherical(self.X_canon)
-            spherical2: Float[Tensor, "hw 3"] = cartesian_to_spherical(X)
-            spherical: Float[Tensor, "hw 3"] = ((self.C * spherical1) + (C * spherical2)) / (self.C + C)
-
-            self.X_canon = spherical_to_cartesian(spherical)
-            self.C = self.C + C
-            self.N += 1
+            case FilteringMode.WEIGHTED_SPHERICAL:
+                # Confidence-weighted running average in spherical (r, phi, theta) space.
+                assert self.C is not None
+                assert self.X_canon is not None
+                spherical1: Float[Tensor, "hw 3"] = _cartesian_to_spherical(self.X_canon)
+                spherical2: Float[Tensor, "hw 3"] = _cartesian_to_spherical(X)
+                spherical: Float[Tensor, "hw 3"] = ((self.C * spherical1) + (C * spherical2)) / (self.C + C)
+                self.X_canon = _spherical_to_cartesian(spherical)
+                self.C = self.C + C
+                self.N += 1
 
         self.N_updates += 1
-        return
 
     def get_average_conf(self) -> Float[Tensor, "hw 1"] | None:
         """Return confidence divided by observation count, or None if no confidence."""
@@ -176,16 +232,16 @@ class Frame:
 
 def create_frame(
     i: int,
-    img: Float32[ndarray, "h w 3"],
+    rgb: RgbNormalized,
     world_sim3_cam: lietorch.Sim3,
-    img_size: int = 512,
+    img_size: Literal[224, 512] = 512,
     device: str = "cuda:0",
 ) -> Frame:
     """Create a Frame from a raw image dict and a Sim3 pose.
 
     Args:
         i: Frame index in the dataset.
-        img: Raw image (numpy array or similar, passed to ``resize_img``).
+        rgb: Normalized RGB image passed to ``resize_img``.
         world_sim3_cam: World-from-camera Sim3 pose.
         img_size: Target image size for MASt3R encoder (224 or 512).
         device: Torch device string.
@@ -193,19 +249,16 @@ def create_frame(
     Returns:
         A fully constructed Frame ready for tracking.
     """
-    resized = resize_img(img, img_size)
-    assert isinstance(resized, dict)
-    img_tensor = resized["img"]
-    assert isinstance(img_tensor, torch.Tensor)
-    rgb: Float[Tensor, "1 3 h w"] = img_tensor.to(device=device)
-    img_shape: Int[Tensor, "1 2"] = torch.tensor(resized["true_shape"], device=device)
+    resized: ResizedImage = resize_img(rgb, img_size)
+    rgb_tensor: Float[Tensor, "1 3 h w"] = resized.rgb_tensor.to(device=device)
+    img_shape: Int[Tensor, "1 2"] = torch.tensor(resized.true_shape, device=device)
     img_true_shape: Int[Tensor, "1 2"] = img_shape.clone()
-    uimg: Float[Tensor, "h w 3"] = torch.from_numpy(resized["unnormalized_img"]) / 255.0
+    rgb_cropped: Float[Tensor, "h w 3"] = torch.from_numpy(resized.rgb_uint8) / 255.0
     downsample: int = config["dataset"]["img_downsample"]
     if downsample > 1:
-        uimg = uimg[::downsample, ::downsample]
+        rgb_cropped = rgb_cropped[::downsample, ::downsample]
         img_shape = img_shape // downsample
-    frame: Frame = Frame(i, rgb, img_shape, img_true_shape, uimg, world_sim3_cam)
+    frame: Frame = Frame(i, rgb_tensor, img_shape, img_true_shape, rgb_cropped, world_sim3_cam)
     return frame
 
 
@@ -244,8 +297,8 @@ class SharedStates:
         # fmt:off
         # shared state for the current frame (used for reloc/visualization)
         self.dataset_idx: Int[Tensor, "1"] = torch.zeros(1, device=device, dtype=torch.int).share_memory_()
-        self.img: Float[Tensor, "3 h w"] = torch.zeros(3, h, w, device=device, dtype=dtype).share_memory_()
-        self.uimg: Float[Tensor, "h w 3"] = torch.zeros(h, w, 3, device="cpu", dtype=dtype).share_memory_()
+        self.rgb_tensor: Float[Tensor, "3 h w"] = torch.zeros(3, h, w, device=device, dtype=dtype).share_memory_()
+        self.rgb: Float[Tensor, "h w 3"] = torch.zeros(h, w, 3, device="cpu", dtype=dtype).share_memory_()
         self.img_shape: Int[Tensor, "1 2"] = torch.zeros(1, 2, device=device, dtype=torch.int).share_memory_()
         self.img_true_shape: Int[Tensor, "1 2"] = torch.zeros(1, 2, device=device, dtype=torch.int).share_memory_()
         self.world_sim3_cam: Float[Tensor, "1 8"] = lietorch.Sim3.Identity(1, device=device, dtype=dtype).data.share_memory_()
@@ -267,8 +320,8 @@ class SharedStates:
         assert frame.pos is not None
         with self.lock:
             self.dataset_idx[:] = frame.frame_id
-            self.img[:] = frame.img
-            self.uimg[:] = frame.uimg
+            self.rgb_tensor[:] = frame.rgb_tensor
+            self.rgb[:] = frame.rgb
             self.img_shape[:] = frame.img_shape
             self.img_true_shape[:] = frame.img_true_shape
             self.world_sim3_cam[:] = frame.world_sim3_cam.data
@@ -286,10 +339,10 @@ class SharedStates:
         with self.lock:
             frame: Frame = Frame(
                 int(self.dataset_idx[0]),
-                self.img,
+                self.rgb_tensor,
                 self.img_shape,
                 self.img_true_shape,
-                self.uimg,
+                self.rgb,
                 lietorch.Sim3(self.world_sim3_cam),
             )
             frame.X_canon = self.X
@@ -384,8 +437,8 @@ class SharedKeyframes:
 
         # fmt:off
         self.dataset_idx: Int[Tensor, "buf"] = torch.zeros(buffer, device=device, dtype=torch.int).share_memory_()
-        self.img: Float[Tensor, "buf 3 h w"] = torch.zeros(buffer, 3, h, w, device=device, dtype=dtype).share_memory_()
-        self.uimg: Float[Tensor, "buf h w 3"] = torch.zeros(buffer, h, w, 3, device="cpu", dtype=dtype).share_memory_()
+        self.rgb_tensor: Float[Tensor, "buf 3 h w"] = torch.zeros(buffer, 3, h, w, device=device, dtype=dtype).share_memory_()
+        self.rgb: Float[Tensor, "buf h w 3"] = torch.zeros(buffer, h, w, 3, device="cpu", dtype=dtype).share_memory_()
         self.img_shape: Int[Tensor, "buf 1 2"] = torch.zeros(buffer, 1, 2, device=device, dtype=torch.int).share_memory_()
         self.img_true_shape: Int[Tensor, "buf 1 2"] = torch.zeros(buffer, 1, 2, device=device, dtype=torch.int).share_memory_()
         self.world_sim3_cam: Float[Tensor, "buf 1 sim3_dim"] = torch.zeros(buffer, 1, lietorch.Sim3.embedded_dim, device=device, dtype=dtype).share_memory_()
@@ -412,10 +465,10 @@ class SharedKeyframes:
             # put all of the data into a frame
             kf: Frame = Frame(
                 int(self.dataset_idx[idx]),
-                self.img[idx],
+                self.rgb_tensor[idx],
                 self.img_shape[idx],
                 self.img_true_shape[idx],
-                self.uimg[idx],
+                self.rgb[idx],
                 lietorch.Sim3(self.world_sim3_cam[idx]),
             )
             kf.X_canon = self.X[idx]
@@ -447,8 +500,8 @@ class SharedKeyframes:
 
             # set the attributes
             self.dataset_idx[idx] = value.frame_id
-            self.img[idx] = value.img
-            self.uimg[idx] = value.uimg
+            self.rgb_tensor[idx] = value.rgb_tensor
+            self.rgb[idx] = value.rgb
             self.img_shape[idx] = value.img_shape
             self.img_true_shape[idx] = value.img_true_shape
             self.world_sim3_cam[idx] = value.world_sim3_cam.data

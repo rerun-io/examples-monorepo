@@ -1,9 +1,10 @@
 import lietorch
 import torch
 from jaxtyping import Bool, Float, Float32, Int
+from mast3r.model import AsymmetricMASt3R
 from torch import Tensor
 
-from mast3r_slam import _backends
+from mast3r_slam import _backends  # pyrefly: ignore
 from mast3r_slam.config import config
 from mast3r_slam.frame import Frame, SharedKeyframes
 from mast3r_slam.geometry import (
@@ -22,12 +23,12 @@ class FactorGraph:
 
     def __init__(
         self,
-        model: object,
+        model: AsymmetricMASt3R,
         frames: SharedKeyframes,
         K: Float[Tensor, "3 3"] | None = None,
         device: str = "cuda",
     ) -> None:
-        self.model: object = model
+        self.model: AsymmetricMASt3R = model
         self.frames: SharedKeyframes = frames
         self.device: str = device
         self.cfg: dict = config["local_opt"]
@@ -284,7 +285,7 @@ class FactorGraph:
         Xs, world_sim3_cams, Cs = self.get_poses_points(unique_kf_idx)
 
         # Constrain points to ray
-        img_size: tuple[int, int] = (int(self.frames[0].img.shape[-2]), int(self.frames[0].img.shape[-1]))
+        img_size: tuple[int, int] = (int(self.frames[0].rgb_tensor.shape[-2]), int(self.frames[0].rgb_tensor.shape[-1]))
         Xs = constrain_points_to_ray(img_size, Xs, K)
 
         ii: Int[Tensor, "n_edges"]
@@ -305,7 +306,7 @@ class FactorGraph:
 
         pose_data: Float[Tensor, "n_unique sim3_dim"] = world_sim3_cams.data[:, 0, :]
 
-        img_size = (int(self.frames[0].img.shape[-2]), int(self.frames[0].img.shape[-1]))
+        img_size = (int(self.frames[0].rgb_tensor.shape[-2]), int(self.frames[0].rgb_tensor.shape[-1]))
         height: int
         width: int
         height, width = img_size

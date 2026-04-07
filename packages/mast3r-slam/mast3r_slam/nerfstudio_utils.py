@@ -15,7 +15,7 @@ from torch import Tensor
 
 from mast3r_slam.frame import Frame, SharedKeyframes
 from mast3r_slam.lietorch_utils import as_SE3
-from mast3r_slam.mast3r_utils import frame_to_intir
+from mast3r_slam.mast3r_utils import frame_to_intri
 
 
 @serde
@@ -24,9 +24,7 @@ class NSFrame:
 
     file_path: str
     """Relative path to the frame's image file."""
-    transform_matrix: Float32[
-        np.ndarray, "4 4"
-    ]
+    transform_matrix: Float32[np.ndarray, "4 4"]
     """4x4 camera transformation matrix in OpenGL (RUB) convention."""
     colmap_im_id: int
     """COLMAP-style image ID (sequential index)."""
@@ -98,21 +96,19 @@ def save_kf_to_nerfstudio(
     w: int = 0
     for i in tqdm.tqdm(range(len(keyframes)), desc="Processing keyframes"):
         keyframe: Frame = keyframes[i]
-        rgb_img_float: Float32[Tensor, "H W 3"] = keyframe.uimg
-        rgb_img: UInt8[ndarray, "H W 3"] = (rgb_img_float * 255).numpy().astype(np.uint8)
-        bgr_img: UInt8[ndarray, "H W 3"] = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2BGR)
-        h, w, _ = bgr_img.shape
+        rgb_float: Float32[Tensor, "H W 3"] = keyframe.rgb
+        rgb_uint8: UInt8[ndarray, "H W 3"] = (rgb_float * 255).numpy().astype(np.uint8)
+        bgr: UInt8[ndarray, "H W 3"] = cv2.cvtColor(rgb_uint8, cv2.COLOR_RGB2BGR)
+        h, w, _ = bgr.shape
 
         # Save the image with zero-padded numbering
         image_filename: str = f"frame_{i + 1:05d}.png"  # Format: frame_00001.png
         image_path: Path = images_dir / image_filename
-        cv2.imwrite(str(image_path), bgr_img)
+        cv2.imwrite(str(image_path), bgr)
         relative_image_path: str = f"images/{image_filename}"
 
         se3_pose: lietorch.SE3 = as_SE3(keyframe.world_sim3_cam.cpu())
-        matb4x4: Float32[ndarray, "1 4 4"] = (
-            se3_pose.matrix().numpy().astype(dtype=np.float32)
-        )
+        matb4x4: Float32[ndarray, "1 4 4"] = se3_pose.matrix().numpy().astype(dtype=np.float32)
         # in RDF (OpenCV) Format
         mat4x4_cv: Float32[ndarray, "4 4"] = matb4x4[0]
 
@@ -132,15 +128,13 @@ def save_kf_to_nerfstudio(
         # Now apply the mask to both positions and colors
         assert keyframe.X_canon is not None
         positions: Float32[ndarray, "num_points 3"] = keyframe.X_canon.cpu().numpy()
-        colors: UInt8[ndarray, "num_points 3"] = rgb_img.reshape(-1, 3)
+        colors: UInt8[ndarray, "num_points 3"] = rgb_uint8.reshape(-1, 3)
 
         masked_positions: Float32[ndarray, "n_valid 3"] = positions[mask]  # Now selects entire rows where mask is True
         masked_colors: UInt8[ndarray, "n_valid 3"] = colors[mask]
 
         # Convert to homogeneous coordinates (add 1 as 4th coordinate)
-        homogeneous_positions: Float32[ndarray, "n_valid 4"] = np.ones(
-            (masked_positions.shape[0], 4), dtype=np.float32
-        )
+        homogeneous_positions: Float32[ndarray, "n_valid 4"] = np.ones((masked_positions.shape[0], 4), dtype=np.float32)
         homogeneous_positions[:, :3] = masked_positions
 
         # Apply transformation (points are column vectors: p_world = T_world_cam * p_cam)
@@ -161,9 +155,7 @@ def save_kf_to_nerfstudio(
     pcd_positions_all: Float32[ndarray, "num_points 3"] = np.vstack(pcd_positions)
     pcd_colors_all: UInt8[ndarray, "num_points 3"] = np.vstack(pcd_colors)
     # normalize point colors to be between 0 and 1 and a float32
-    pcd_colors_float: Float32[ndarray, "num_points 3"] = (
-        pcd_colors_all.astype(np.float32) / 255.0
-    )
+    pcd_colors_float: Float32[ndarray, "num_points 3"] = pcd_colors_all.astype(np.float32) / 255.0
     # Create an empty point cloud
     pcd: o3d.geometry.PointCloud = o3d.geometry.PointCloud()
 
@@ -177,18 +169,16 @@ def save_kf_to_nerfstudio(
     # save point cloud to file
     o3d.io.write_point_cloud(str(ns_save_path / "sparse_pc.ply"), pcd)
 
-    # use the last keyframe to get the focal and principal point
-    focal: tuple[float, float]
-    principal_point: tuple[float, float]
-    focal, principal_point = frame_to_intir(keyframe)
+    # use the last keyframe to estimate camera intrinsics
+    intrinsics = frame_to_intri(keyframe, camera_conventions="RDF")
     # save to nerfstudio format, assumes no distortion
     ns_data: NerfstudioData = NerfstudioData(
         w=w,
         h=h,
-        fl_x=focal[0],
-        fl_y=focal[1],
-        cx=principal_point[0],
-        cy=principal_point[1],
+        fl_x=float(intrinsics.fl_x),
+        fl_y=float(intrinsics.fl_y),
+        cx=float(intrinsics.cx),
+        cy=float(intrinsics.cy),
         k1=0.0,
         k2=0.0,
         p1=0.0,

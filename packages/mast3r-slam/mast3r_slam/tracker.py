@@ -1,6 +1,8 @@
 import lietorch
+import rerun as rr
 import torch
 from jaxtyping import Bool, Float, Int
+from mast3r.model import AsymmetricMASt3R
 from torch import Tensor
 
 try:
@@ -30,12 +32,12 @@ class FrameTracker:
 
     def __init__(
         self,
-        model: object,
+        model: AsymmetricMASt3R,
         frames: SharedKeyframes,
         device: str,
     ) -> None:
         self.cfg: dict = config["tracking"]
-        self.model: object = model
+        self.model: AsymmetricMASt3R = model
         self.keyframes: SharedKeyframes = frames
         self.device: str = device
 
@@ -78,12 +80,8 @@ class FrameTracker:
         frame.update_pointmap(Xff, Cff)
 
         use_calib: bool = config["use_calib"]
-        img_size: tuple[int, int] = (int(frame.img.shape[-2]), int(frame.img.shape[-1]))
-        K: Float[Tensor, "3 3"] | None
-        if use_calib:
-            K = keyframe.K
-        else:
-            K = None
+        img_size: tuple[int, int] = (int(frame.rgb_tensor.shape[-2]), int(frame.rgb_tensor.shape[-1]))
+        K: Float[Tensor, "3 3"] | None = keyframe.K if use_calib else None
 
         # Get poses and point correspondences and confidences
         Xf: Float[Tensor, "hw 3"]
@@ -109,7 +107,7 @@ class FrameTracker:
 
         match_frac: Float[Tensor, ""] = valid_opt.sum() / valid_opt.numel()
         if match_frac < self.cfg["min_match_frac"]:
-            print(f"Skipped frame {frame.frame_id}")
+            rr.log("/world/logs", rr.TextLog(f"Skipped frame {frame.frame_id}", level="DEBUG"))
             return False, [], True
 
         try:
@@ -137,7 +135,7 @@ class FrameTracker:
         except BeartypeException:
             raise
         except torch.linalg.LinAlgError:
-            print(f"Cholesky failed {frame.frame_id}")
+            rr.log("/world/logs", rr.TextLog(f"Cholesky failed {frame.frame_id}", level="WARN"))
             return False, [], True
 
         frame.world_sim3_cam = world_sim3_camf
@@ -346,7 +344,7 @@ class FrameTracker:
             old_cost = new_cost
 
             if step == self.cfg["max_iters"] - 1:
-                print(f"max iters reached {last_error}")
+                rr.log("/world/logs", rr.TextLog(f"Max iters reached {last_error}", level="DEBUG"))
 
         # Assign new pose based on relative pose
         world_sim3_camf_new = world_sim3_camk * camk_sim3_camf
@@ -441,7 +439,7 @@ class FrameTracker:
             old_cost = new_cost
 
             if step == self.cfg["max_iters"] - 1:
-                print(f"max iters reached {last_error}")
+                rr.log("/world/logs", rr.TextLog(f"Max iters reached {last_error}", level="DEBUG"))
 
         # Assign new pose based on relative pose
         world_sim3_camf_new = world_sim3_camk * camk_sim3_camf

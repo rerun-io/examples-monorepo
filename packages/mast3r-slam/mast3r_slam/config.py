@@ -1,13 +1,31 @@
+"""YAML configuration loading with inheritance support.
+
+Loads hierarchical YAML configs where child configs can ``inherit`` from a
+parent.  The global ``config`` dict is populated once at the leaf node and
+shared across the entire SLAM pipeline.
+"""
+
 import re
+from typing import Any
 
 import yaml
 
-config = {}
+config: dict[str, Any] = {}
 
 
-def load_config(path="config/base.yaml", is_parent=False):
+def load_config(path: str = "config/base.yaml", is_parent: bool = False) -> dict[str, Any]:
+    """Load a YAML config file, recursively merging any inherited parent.
+
+    Args:
+        path: Filesystem path to the YAML config file.
+        is_parent: Internal flag — when ``True`` the result is returned
+            without updating the global ``config`` dict.
+
+    Returns:
+        The merged configuration dictionary.
+    """
     # from https://stackoverflow.com/questions/30458977/yaml-loads-5e-6-as-string-and-not-a-number
-    loader = yaml.SafeLoader
+    loader: type[yaml.SafeLoader] = yaml.SafeLoader
     loader.add_implicit_resolver(
         "tag:yaml.org,2002:float",
         re.compile(
@@ -24,11 +42,10 @@ def load_config(path="config/base.yaml", is_parent=False):
     )
 
     with open(path) as f:
-        print(path)
-        cfg = yaml.load(f, Loader=loader)
-    inherit = cfg.get("inherit")
+        cfg: dict[str, Any] = yaml.load(f, Loader=loader)
+    inherit: str | None = cfg.get("inherit")
     if inherit is not None:
-        cfg_parent = load_config(inherit, is_parent=True)
+        cfg_parent: dict[str, Any] = load_config(inherit, is_parent=True)
     else:
         cfg_parent = dict()
     cfg = merge_config(cfg_parent, cfg)
@@ -42,7 +59,16 @@ def load_config(path="config/base.yaml", is_parent=False):
     return config
 
 
-def merge_config(dict1, dict2):
+def merge_config(dict1: dict[str, Any], dict2: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge ``dict2`` into ``dict1``, mutating ``dict1`` in place.
+
+    Args:
+        dict1: Base dictionary (modified in place).
+        dict2: Override dictionary whose values take precedence.
+
+    Returns:
+        The merged ``dict1``.
+    """
     for k, v in dict2.items():
         if k not in dict1:
             dict1[k] = dict()
