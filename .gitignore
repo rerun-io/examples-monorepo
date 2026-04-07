@@ -103,6 +103,7 @@ packages/wilor-nano/data/
 packages/sam3d-body-rerun/data/
 packages/sam3-rerun/data/
 packages/robocap-slam/data/
+packages/mv-api/data/
 packages/pysfm/data/
 packages/gsplat-rust-renderer/data/
 packages/*/outputs/

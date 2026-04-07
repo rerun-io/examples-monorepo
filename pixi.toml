@@ -462,6 +462,66 @@ depends-on = ["robocap-download-example"]
 description = "Run multicamera visual SLAM on Robocap data"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# mv-api
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.mv-api.dependencies]
+python = "3.12.*"
+open3d = ">=0.19.0,<0.20"
+tyro = ">=0.9.1,<0.10"
+natsort = ">=8.4.0,<9"
+h5py = ">=3.13.0,<4"
+scikit-image = ">=0.24.0,<0.25"
+dill = ">=0.4.0,<0.5"
+trimesh = "*"
+pyrender = "*"
+datasets = ">=4.0.0"
+
+[feature.mv-api.pypi-dependencies]
+mv-api = { path = "packages/mv-api", editable = true }
+rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
+vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c" }
+moge = { git = "https://github.com/microsoft/MoGe.git" }
+
+[feature.mv-api.target.linux-64.pypi-dependencies]
+onnxruntime-gpu = ">=1.23.2,<2"
+
+[feature.mv-api.target.linux-aarch64.pypi-dependencies]
+onnxruntime = ">=1.23.2,<2"
+
+[feature.mv-api.activation.env]
+PACKAGE_DIR = "packages/mv-api"
+
+[feature.mv-api.tasks.mv-api-exo-only-calib]
+cmd = "python tools/run_exo_only_calib.py"
+cwd = "packages/mv-api"
+description = "Run exo-only calibration on an exo/ego dataset"
+
+[feature.mv-api.tasks.mv-api-batch-calib]
+cmd = "python tools/batch_exo_calib_client.py"
+cwd = "packages/mv-api"
+description = "Batch-calibrate episode trees of exo/ego .rrd captures"
+
+[feature.mv-api.tasks.mv-api-validate-imports]
+cmd = "python -c \"import mv_api, mv_api.api.batch_calibration, mv_api.api.exo_only_calibration, mv_api.api.full_exoego_pipeline, mv_api.gradio_ui.full_pipeline_rrd_ui\""
+cwd = "packages/mv-api"
+description = "Smoke-test retained mv-api imports"
+
+[feature.mv-api.tasks.mv-api-validate]
+cmd = "python tools/validate_mv_api.py"
+cwd = "packages/mv-api"
+description = "Validate retained mv-api tools and app construction"
+
+[feature.mv-api-demo.tasks.mv-api-full-pipeline-app]
+cmd = "python tools/app_full_pipeline_rrd.py"
+cwd = "packages/mv-api"
+description = "Launch the RRD-based full exo/ego Gradio app"
+
+[feature.mv-api-demo.tasks.mv-api-rrd-client]
+cmd = "python tools/run_rrd_client_example.py"
+cwd = "packages/mv-api"
+description = "Submit a smoke-test job to a running mv-api Gradio app"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # pysfm
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.pysfm.dependencies]
@@ -1052,6 +1112,18 @@ robocap-dev = { features = [
     "robocap",
     "dev",
 ], solve-group = "robocap", no-default-feature = true }
+mv-api = { features = [
+    "common",
+    "cuda",
+    "mv-api",
+    "mv-api-demo",
+], solve-group = "mv-api", no-default-feature = true }
+mv-api-dev = { features = [
+    "common",
+    "cuda",
+    "mv-api",
+    "dev",
+], solve-group = "mv-api", no-default-feature = true }
 pysfm = { features = [
     "common",
     "cuda",
