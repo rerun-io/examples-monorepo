@@ -1,20 +1,14 @@
 import pathlib
 import re
+from typing import Literal
 
 import cv2
 import numpy as np
 import torch
+import yaml
 from jaxtyping import Float32, UInt8
 from natsort import natsorted
 from numpy import ndarray
-
-try:
-    import pyrealsense2 as rs  # pyrefly: ignore
-except ImportError:
-    rs = None
-from typing import Literal
-
-import yaml
 
 from mast3r_slam.config import config
 from mast3r_slam.image_utils import ResizedImage, resize_img, resize_img_with_transform
@@ -220,61 +214,6 @@ class SevenScenesDataset(MonocularDataset):
         cx: float = 320.0
         cy: float = 240.0
         self.camera_intrinsics = Intrinsics.from_calib(self.img_size, 640, 480, [fx, fy, cx, cy])
-
-
-class RealsenseDataset(MonocularDataset):
-    def __init__(self, img_size: Literal[224, 512] = 512) -> None:
-        super().__init__(img_size=img_size)
-        assert rs is not None, "pyrealsense2 is required for RealsenseDataset"
-        self.dataset_path = None
-        self.pipeline = rs.pipeline()
-        # self.h, self.w = 720, 1280
-        self.h: int = 480
-        self.w: int = 640
-        self.rs_config = rs.config()
-        self.rs_config.enable_stream(rs.stream.color, self.w, self.h, rs.format.bgr8, 30)
-        self.profile = self.pipeline.start(self.rs_config)
-
-        self.rgb_sensor = self.profile.get_device().query_sensors()[1]
-        # self.rgb_sensor.set_option(rs.option.enable_auto_exposure, False)
-        # self.rgb_sensor.set_option(rs.option.enable_auto_white_balance, False)
-        # self.rgb_sensor.set_option(rs.option.exposure, 200)
-        self.rgb_profile = rs.video_stream_profile(self.profile.get_stream(rs.stream.color))
-        self.save_results: bool = False
-
-        if self.use_calibration:
-            rgb_intrinsics = self.rgb_profile.get_intrinsics()
-            self.camera_intrinsics = Intrinsics.from_calib(
-                self.img_size,
-                self.w,
-                self.h,
-                [
-                    rgb_intrinsics.fx,
-                    rgb_intrinsics.fy,
-                    rgb_intrinsics.ppx,
-                    rgb_intrinsics.ppy,
-                ],
-            )
-
-    def __len__(self) -> int:
-        return 999999
-
-    def get_timestamp(self, idx: int) -> float:
-        ts: float | str = self.timestamps[idx]
-        assert isinstance(ts, float)
-        return ts
-
-    def read_img(self, idx: int) -> UInt8[ndarray, "h w 3"]:
-        frameset = self.pipeline.wait_for_frames()
-        timestamp: float = frameset.get_timestamp()
-        timestamp /= 1000
-        self.timestamps.append(timestamp)
-
-        rgb_frame = frameset.get_color_frame()
-        img: UInt8[ndarray, "h w 3"] = np.asanyarray(rgb_frame.get_data())
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img = img.astype(self.dtype)
-        return img
 
 
 class Webcam(MonocularDataset):

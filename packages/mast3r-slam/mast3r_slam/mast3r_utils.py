@@ -601,7 +601,7 @@ def estimate_focal_knowing_depth(
     return focal
 
 
-def frame_to_intri(frame: Frame, camera_conventions: Literal["RDF", "RUB"] = "RUB") -> Intrinsics:
+def frame_to_intri(frame: Frame, camera_conventions: Literal["RDF", "RUB"] = "RDF") -> Intrinsics:
     """Estimate camera intrinsics from a Frame's 3D point map.
 
     Args:
@@ -630,7 +630,7 @@ def frame_to_intri(frame: Frame, camera_conventions: Literal["RDF", "RUB"] = "RU
     )
 
 
-def frame_to_extrinsics(frame: Frame, camera_conventions: Literal["RDF", "RUB"] = "RUB") -> Extrinsics:
+def frame_to_extrinsics(frame: Frame, camera_conventions: Literal["RDF", "RUB"] = "RDF") -> Extrinsics:
     """Convert a Frame's lietorch Sim3 pose to simplecv Extrinsics in the requested convention.
 
     Args:
@@ -654,7 +654,7 @@ def frame_to_extrinsics(frame: Frame, camera_conventions: Literal["RDF", "RUB"] 
     )
 
 
-def frame_to_pinhole(frame: Frame, camera_conventions: Literal["RDF", "RUB"] = "RUB") -> PinholeParameters:
+def frame_to_pinhole(frame: Frame, camera_conventions: Literal["RDF", "RUB"] = "RDF") -> PinholeParameters:
     """Convert a Frame into a simplecv PinholeParameters.
 
     Estimates focal length from the frame's 3D point map, converts the

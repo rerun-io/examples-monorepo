@@ -49,7 +49,6 @@ from mast3r.model import AsymmetricMASt3R
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
 
-import mast3r_slam.evaluate as eval
 from mast3r_slam.backend_lifecycle import SlamBackend
 from mast3r_slam.config import config, load_config
 from mast3r_slam.dataloader import MonocularDataset, load_dataset
@@ -164,19 +163,6 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
         assert dataset.camera_intrinsics is not None
         K = torch.from_numpy(dataset.camera_intrinsics.K_frame).to(device, dtype=torch.float32)
 
-    # ── Clean up previous run artifacts ────────────────────────────────────
-    if dataset.save_results:
-        save_dir: Path
-        seq_name: str
-        save_dir, seq_name = eval.prepare_savedir(inf_config, dataset)
-        rr.log(log_path, rr.TextLog(f"Saving results to {save_dir}", level="INFO"))
-        traj_file: Path = save_dir / f"{seq_name}.txt"
-        recon_file: Path = save_dir / f"{seq_name}.pt"
-        if traj_file.exists():
-            traj_file.unlink()
-        if recon_file.exists():
-            recon_file.unlink()
-
     # ── Main tracking loop ─────────────────────────────────────────────────
     # SlamBackend.__enter__ creates the mp.Manager, shared keyframe/state
     # buffers, and spawns the backend process.  __exit__ guarantees cleanup
@@ -212,7 +198,9 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
 
             # Initialise pose: identity for the first frame, otherwise use the
             # last tracked pose from shared state.
-            world_sim3_cam: lietorch.Sim3 = lietorch.Sim3.Identity(1, device=device) if i == 0 else states.get_frame().world_sim3_cam
+            world_sim3_cam: lietorch.Sim3 = (
+                lietorch.Sim3.Identity(1, device=device) if i == 0 else states.get_frame().world_sim3_cam
+            )
             frame: Frame = create_frame(i, img, world_sim3_cam, img_size=dataset.img_size, device=device)
 
             add_new_kf: bool = False
@@ -286,13 +274,6 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
                 FPS: float = i / (time.time() - fps_timer)
                 rr.log(log_path, rr.TextLog(f"FPS: {FPS:.1f}", level="INFO"))
             i += 1
-
-        # ── Save results ───────────────────────────────────────────────────
-        if dataset.save_results:
-            save_dir, seq_name = eval.prepare_savedir(inf_config, dataset)
-            eval.save_ATE(save_dir, f"{seq_name}.txt", dataset.timestamps, keyframes)
-            eval.save_reconstruction(save_dir, f"{seq_name}.pt", dataset.timestamps, keyframes)
-            eval.save_keyframes(save_dir / "keyframes" / seq_name, dataset.timestamps, keyframes)
 
         if inf_config.ns_save_path is not None:
             pcd = save_kf_to_nerfstudio(

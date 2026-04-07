@@ -170,7 +170,7 @@ def save_kf_to_nerfstudio(
     o3d.io.write_point_cloud(str(ns_save_path / "sparse_pc.ply"), pcd)
 
     # use the last keyframe to estimate camera intrinsics
-    intrinsics = frame_to_intri(keyframe)
+    intrinsics = frame_to_intri(keyframe, camera_conventions="RDF")
     # save to nerfstudio format, assumes no distortion
     ns_data: NerfstudioData = NerfstudioData(
         w=w,
