@@ -73,15 +73,19 @@ class RerunLogger:
     def _log_orient_transform(self, keyframes: SharedKeyframes, n_kf: int) -> None:
         """Recompute gravity-alignment from all keyframe poses and update the transform.
 
-        Collects all ``n_kf`` keyframe world-from-camera poses in MASt3R's native
-        CV/RDF convention, runs ``auto_orient_and_center_poses(method="up")``
+        Collects all ``n_kf`` keyframe world-from-camera poses in RUB convention,
+        runs ``auto_orient_and_center_poses(method="up")``
         to align the reconstruction's up-vector with the Y axis, and logs the
         resulting rotation+translation on ``parent_log_path``.
         """
         world_T_cam_list: list[Float32[ndarray, "4 4"]] = []
         for i in range(n_kf):
             kf: Frame = keyframes[i]
-            kf_ext = frame_to_extrinsics(kf)
+            # auto_orient_and_center_poses(method="up") assumes camera column 1 is
+            # the camera up axis. That is true for RUB, but RDF's column 1 is down.
+            # We therefore orient the global scene from RUB poses even though the
+            # logged pinhole cameras themselves stay in RDF.
+            kf_ext = frame_to_extrinsics(kf, camera_conventions="RUB")
             world_T_cam_list.append(kf_ext.world_T_cam.astype(np.float32))
 
         world_T_cam: Float32[ndarray, "n_kf 4 4"] = np.stack(world_T_cam_list)
