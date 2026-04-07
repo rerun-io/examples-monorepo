@@ -1,5 +1,6 @@
 import dataclasses
 from enum import Enum
+from typing import Literal
 
 import lietorch
 import torch
@@ -136,11 +137,14 @@ class Frame:
         Returns:
             Scalar score tensor (median or mean of C, depending on config).
         """
-        match FilteringScore(config["tracking"]["filtering_score"]):
+        score_fn: FilteringScore = FilteringScore(config["tracking"]["filtering_score"])
+        match score_fn:
             case FilteringScore.MEDIAN:
                 return torch.median(C)
             case FilteringScore.MEAN:
                 return torch.mean(C)
+            case _:
+                raise ValueError(f"Unknown filtering score: {score_fn}")
 
     def update_pointmap(
         self,
@@ -230,7 +234,7 @@ def create_frame(
     i: int,
     img: Float32[ndarray, "h w 3"],
     world_sim3_cam: lietorch.Sim3,
-    img_size: int = 512,
+    img_size: Literal[224, 512] = 512,
     device: str = "cuda:0",
 ) -> Frame:
     """Create a Frame from a raw image dict and a Sim3 pose.

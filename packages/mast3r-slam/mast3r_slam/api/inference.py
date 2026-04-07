@@ -45,10 +45,9 @@ import rerun.blueprint as rrb
 import torch
 import torch.multiprocessing as mp
 from jaxtyping import Float
+from mast3r.model import AsymmetricMASt3R
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
-
-from mast3r.model import AsymmetricMASt3R
 
 import mast3r_slam.evaluate as eval
 from mast3r_slam.backend_lifecycle import SlamBackend
