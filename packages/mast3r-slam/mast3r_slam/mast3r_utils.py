@@ -29,11 +29,7 @@ def load_mast3r(path: str | None = None, device: str = "cuda") -> AsymmetricMASt
     Returns:
         The loaded ``AsymmetricMASt3R`` model in eval mode on ``device``.
     """
-    weights_path = (
-        "checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth"
-        if path is None
-        else path
-    )
+    weights_path = "checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth" if path is None else path
     model = AsymmetricMASt3R.from_pretrained(weights_path).to(device)
     return model
 
@@ -163,13 +159,9 @@ def mast3r_symmetric_inference(
         A tuple ``(X, C, D, Q)`` each of shape ``(4, h, w, ...)``.
     """
     if frame_i.feat is None:
-        frame_i.feat, frame_i.pos, _ = model._encode_image(
-            frame_i.img, frame_i.img_true_shape
-        )
+        frame_i.feat, frame_i.pos, _ = model._encode_image(frame_i.img, frame_i.img_true_shape)
     if frame_j.feat is None:
-        frame_j.feat, frame_j.pos, _ = model._encode_image(
-            frame_j.img, frame_j.img_true_shape
-        )
+        frame_j.feat, frame_j.pos, _ = model._encode_image(frame_j.img, frame_j.img_true_shape)
 
     assert frame_i.pos is not None
     assert frame_j.pos is not None
@@ -235,10 +227,7 @@ def mast3r_decode_symmetric_batch(
         res22, res12 = decoder(model, feat2, feat1, pos2, pos1, shape_j[b], shape_i[b])
         res = [res11, res21, res22, res12]
         Xb, Cb, Db, Qb = zip(
-            *[
-                (r["pts3d"][0], r["conf"][0], r["desc"][0], r["desc_conf"][0])
-                for r in res
-            ],
+            *[(r["pts3d"][0], r["conf"][0], r["desc"][0], r["desc_conf"][0]) for r in res],
             strict=False,
         )
         X.append(torch.stack(Xb, dim=0))
@@ -257,9 +246,7 @@ def mast3r_decode_symmetric_batch(
 
 
 @torch.inference_mode()
-def mast3r_inference_mono(
-    model: AsymmetricMASt3R, frame: Frame
-) -> tuple[Float[Tensor, "hw 3"], Float[Tensor, "hw 1"]]:
+def mast3r_inference_mono(model: AsymmetricMASt3R, frame: Frame) -> tuple[Float[Tensor, "hw 3"], Float[Tensor, "hw 1"]]:
     """Run monocular self-inference on a single frame.
 
     Decodes the frame against itself (symmetric self-pair) to obtain a
@@ -337,9 +324,7 @@ def mast3r_match_symmetric(
         correspondences, ``valid_match_*`` are boolean validity masks, and
         ``Q*`` are per-pixel descriptor confidences.
     """
-    X, C, D, Q = mast3r_decode_symmetric_batch(
-        model, feat_i, pos_i, feat_j, pos_j, shape_i, shape_j
-    )
+    X, C, D, Q = mast3r_decode_symmetric_batch(model, feat_i, pos_i, feat_j, pos_j, shape_i, shape_j)
 
     # Ordering 4xbxhxwxc
     b = X.shape[1]
@@ -402,13 +387,9 @@ def mast3r_asymmetric_inference(
         dim 0 corresponds to ``[res_ii, res_ji]``.
     """
     if frame_i.feat is None:
-        frame_i.feat, frame_i.pos, _ = model._encode_image(
-            frame_i.img, frame_i.img_true_shape
-        )
+        frame_i.feat, frame_i.pos, _ = model._encode_image(frame_i.img, frame_i.img_true_shape)
     if frame_j.feat is None:
-        frame_j.feat, frame_j.pos, _ = model._encode_image(
-            frame_j.img, frame_j.img_true_shape
-        )
+        frame_j.feat, frame_j.pos, _ = model._encode_image(frame_j.img, frame_j.img_true_shape)
 
     assert frame_i.pos is not None
     assert frame_j.pos is not None
@@ -473,9 +454,7 @@ def mast3r_match_asymmetric(
     Dii, Dji = D[:b], D[b:]
     Qii, Qji = Q[:b], Q[b:]
 
-    idx_i2j, valid_match_j = matching.match(
-        Xii, Xji, Dii, Dji, idx_1_to_2_init=idx_i2j_init
-    )
+    idx_i2j, valid_match_j = matching.match(Xii, Xji, Dii, Dji, idx_1_to_2_init=idx_i2j_init)
 
     # How rest of system expects it
     Xii, Xji = einops.rearrange(X, "b h w c -> b (h w) c")
@@ -598,9 +577,7 @@ def estimate_focal_knowing_depth(
     elif focal_mode == "weiszfeld":
         # init focal with l2 closed form
         # we try to find focal = argmin Sum | pixel - focal * (x,y)/z|
-        xy_over_z = (pts3d[..., :2] / pts3d[..., 2:3]).nan_to_num(
-            posinf=0, neginf=0
-        )  # homogeneous (x,y,1)
+        xy_over_z = (pts3d[..., :2] / pts3d[..., 2:3]).nan_to_num(posinf=0, neginf=0)  # homogeneous (x,y,1)
 
         dot_xy_px = (xy_over_z * pixels).sum(dim=-1)
         dot_xy_xy = xy_over_z.square().sum(dim=-1)
@@ -618,22 +595,20 @@ def estimate_focal_knowing_depth(
     else:
         raise ValueError(f"bad {focal_mode=}")
 
-    focal_base = max(H, W) / (
-        2 * np.tan(np.deg2rad(60) / 2)
-    )  # size / 1.1547005383792515
+    focal_base = max(H, W) / (2 * np.tan(np.deg2rad(60) / 2))  # size / 1.1547005383792515
     focal = focal.clip(min=min_focal * focal_base, max=max_focal * focal_base)
     # print(focal)
     return focal
 
 
-def frame_to_intir(frame: Frame) -> tuple[tuple[float, float], tuple[float, float]]:
-    """Estimate focal length and principal point from a Frame's 3D point map.
+def frame_to_intri(frame: Frame) -> Intrinsics:
+    """Estimate camera intrinsics from a Frame's 3D point map.
 
     Args:
         frame: A Frame with valid ``X_canon`` and ``img_shape``.
 
     Returns:
-        A tuple of ((fl_x, fl_y), (cx, cy)).
+        An ``Intrinsics`` object in RUB convention.
     """
     H: int = int(frame.img_shape.squeeze()[0].item())
     W: int = int(frame.img_shape.squeeze()[1].item())
@@ -641,11 +616,17 @@ def frame_to_intir(frame: Frame) -> tuple[tuple[float, float], tuple[float, floa
     pp: Float32[Tensor, "2"] = torch.tensor((W / 2, H / 2))
     assert frame.X_canon is not None
     pts3d: Float32[Tensor, "H W 3"] = frame.X_canon.clone().cpu().reshape(H, W, 3)
-    focal: float = float(
-        estimate_focal_knowing_depth(pts3d[None], pp, focal_mode="weiszfeld")
-    )
+    focal: float = float(estimate_focal_knowing_depth(pts3d[None], pp, focal_mode="weiszfeld"))
 
-    return (focal, focal), (float(pp[0].item()), float(pp[1].item()))
+    return Intrinsics.from_focal_principal_point(
+        camera_conventions="RUB",
+        fl_x=focal,
+        fl_y=focal,
+        cx=float(pp[0].item()),
+        cy=float(pp[1].item()),
+        height=H,
+        width=W,
+    )
 
 
 def frame_to_extrinsics(frame: Frame) -> Extrinsics:
@@ -682,21 +663,8 @@ def frame_to_pinhole(frame: Frame) -> PinholeParameters:
     Returns:
         A ``PinholeParameters`` in GL (RUB) convention.
     """
-    # Estimate intrinsics from the 3D point map
-    (fl_x, fl_y), (cx, cy) = frame_to_intir(frame)
-    H: int = int(frame.img_shape.squeeze()[0].item())
-    W: int = int(frame.img_shape.squeeze()[1].item())
-
     extrinsics: Extrinsics = frame_to_extrinsics(frame)
-    intrinsics: Intrinsics = Intrinsics.from_focal_principal_point(
-        camera_conventions="RUB",
-        fl_x=fl_x,
-        fl_y=fl_y,
-        cx=cx,
-        cy=cy,
-        height=H,
-        width=W,
-    )
+    intrinsics: Intrinsics = frame_to_intri(frame)
     return PinholeParameters(
         name=f"frame-{frame.frame_id}",
         extrinsics=extrinsics,
