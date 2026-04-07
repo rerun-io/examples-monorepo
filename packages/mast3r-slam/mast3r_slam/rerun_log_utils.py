@@ -59,20 +59,21 @@ def create_blueprints(parent_log_path: Path, timeline: str = FRAME_TIMELINE) -> 
         origin=str(parent_log_path / "logs"),
         name="Logs",
     )
+    parent_log_root = f"/{parent_log_path}"
     blueprint: rrb.Blueprint = rrb.Blueprint(
         rrb.Horizontal(
             rrb.Spatial3DView(
                 origin="/",
                 contents=[
-                    f"+ {parent_log_path}/**",
-                    f"- {parent_log_path}/current_camera/pinhole/video",
-                    f"- {parent_log_path}/current_camera/pinhole/video/**",
-                    f"- {parent_log_path}/**/pointmap_depth",
-                    f"- {parent_log_path}/**/pointmap_depth/**",
-                    f"- {parent_log_path}/keyframes/**/pinhole/pointmap_depth",
-                    f"- {parent_log_path}/keyframes/**/pinhole/pointmap_depth/**",
-                    f"- {parent_log_path}/last_keyframe/pointmap_depth",
-                    f"- {parent_log_path}/last_keyframe/pointmap_depth/**",
+                    f"+ {parent_log_root}/**",
+                    f"- {parent_log_root}/current_camera/pinhole/video",
+                    f"- {parent_log_root}/current_camera/pinhole/video/**",
+                    f"- {parent_log_root}/**/pointmap_depth",
+                    f"- {parent_log_root}/**/pointmap_depth/**",
+                    f"- {parent_log_root}/keyframes/**/pinhole/pointmap_depth",
+                    f"- {parent_log_root}/keyframes/**/pinhole/pointmap_depth/**",
+                    f"- {parent_log_root}/last_keyframe/pointmap_depth",
+                    f"- {parent_log_root}/last_keyframe/pointmap_depth/**",
                 ],
             ),
             rrb.Tabs(views, logs, active_tab=0),
