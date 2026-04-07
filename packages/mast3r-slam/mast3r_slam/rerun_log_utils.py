@@ -43,16 +43,26 @@ def create_blueprints(
     Returns:
         A configured Rerun Blueprint.
     """
+    current_image_and_pointmap: rrb.Horizontal = rrb.Horizontal(
+        contents=[
+            rrb.Spatial2DView(origin=str(parent_log_path / "current_camera" / "pinhole" / "image"), name="Image"),
+            rrb.Spatial2DView(origin=str(parent_log_path / "current_camera" / "pinhole" / "pointmap"), name="Pointmap"),
+        ],
+        column_shares=[1, 1],
+        name="Image + Pointmap",
+    )
     current_views: rrb.Tabs = rrb.Tabs(
         rrb.Spatial2DView(origin=str(parent_log_path / "current_camera" / "pinhole" / "video"), name="Video"),
-        rrb.Spatial2DView(origin=str(parent_log_path / "current_camera" / "pinhole" / "image"), name="Image"),
+        current_image_and_pointmap,
         active_tab=1,
         name="Current",
     )
-    last_keyframe_views: rrb.Tabs = rrb.Tabs(
-        rrb.Spatial2DView(origin=str(parent_log_path / "last_keyframe"), name="Image"),
-        rrb.Spatial2DView(origin=str(parent_log_path / "last_keyframe" / "pointmap"), name="Pointmap"),
-        active_tab=0,
+    last_keyframe_views: rrb.Horizontal = rrb.Horizontal(
+        contents=[
+            rrb.Spatial2DView(origin=str(parent_log_path / "last_keyframe"), name="Image"),
+            rrb.Spatial2DView(origin=str(parent_log_path / "last_keyframe" / "pointmap"), name="Pointmap"),
+        ],
+        column_shares=[1, 1],
         name="Last Keyframe",
     )
     views: rrb.Vertical = rrb.Vertical(
