@@ -29,6 +29,14 @@ if "build_ext" in sys.argv:
     ROOT = os.path.dirname(os.path.abspath(__file__))
     conda_prefix = os.environ.get("CONDA_PREFIX", "")
 
+    # Auto-detect GPU architecture if TORCH_CUDA_ARCH_LIST isn't set.
+    # CUDAExtension reads this env var to generate the correct -gencode flags.
+    if not os.environ.get("TORCH_CUDA_ARCH_LIST"):
+        cap = torch.cuda.get_device_capability()
+        arch = f"{cap[0]}.{cap[1]}+PTX"
+        os.environ["TORCH_CUDA_ARCH_LIST"] = arch
+        print(f"Auto-detected CUDA arch: {arch}")
+
     setup(
         ext_modules=[
             CUDAExtension(
@@ -44,15 +52,7 @@ if "build_ext" in sys.argv:
                 ],
                 extra_compile_args={
                     "cxx": ["-O3"],
-                    "nvcc": [
-                        "-O3",
-                        "-gencode=arch=compute_75,code=sm_75",
-                        "-gencode=arch=compute_80,code=sm_80",
-                        "-gencode=arch=compute_86,code=sm_86",
-                        "-gencode=arch=compute_89,code=sm_89",
-                        "-gencode=arch=compute_90,code=sm_90",
-                        "-gencode=arch=compute_120,code=sm_120",
-                    ],
+                    "nvcc": ["-O3"],
                 },
             )
         ],

@@ -710,11 +710,7 @@ PACKAGE_DIR = "packages/mast3r-slam"
 
 # ── Build tasks (CUDA extensions compiled via setuptools, no pip) ────────
 [feature.mast3r-slam.tasks._build-cuda-kernels]
-cmd = """
-export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n 1 | tr -d ' ')}"
-echo "Building for CUDA arch: $TORCH_CUDA_ARCH_LIST"
-python setup.py build_ext --inplace
-"""
+cmd = "python setup.py build_ext --inplace"
 cwd = "packages/mast3r-slam"
 description = "Build mast3r-slam CUDA backend kernels"
 inputs = [
@@ -729,11 +725,7 @@ outputs = [
 
 # ── Mojo kernel build ──────────────────────────────────────────────────
 [feature.mast3r-slam.tasks._build-mojo-kernels]
-cmd = """
-mojo build --emit shared-lib \
-  -o mast3r_slam_mojo_backends.so \
-  mast3r_slam/backend/mojo/matching_kernels.mojo
-"""
+cmd = "mojo build --emit shared-lib -o mast3r_slam_mojo_backends.so mast3r_slam/backend/mojo/matching_kernels.mojo"
 cwd = "packages/mast3r-slam"
 description = "Build mast3r-slam Mojo backend kernels"
 inputs = [
