@@ -17,10 +17,10 @@ import torch
 from jaxtyping import Bool, Float, Float32, Int, UInt8
 from numpy import ndarray
 from simplecv.camera_orient_utils import auto_orient_and_center_poses
+from simplecv.rerun_log_utils import log_pinhole
 from torch import Tensor
 
 from mast3r_slam.frame import Frame, SharedKeyframes, SharedStates
-from mast3r_slam.lietorch_utils import as_SE3
 from mast3r_slam.mast3r_utils import frame_to_extrinsics, frame_to_pinhole
 
 
@@ -119,24 +119,10 @@ class RerunLogger:
         current_pinhole = frame_to_pinhole(current_frame)
         cam_log_path: Path = self.parent_log_path / "current_camera"
 
-        # Log transform using world-from-camera (no from_parent) so camera
-        # frustums are placed at their world position.
-        rr.log(
-            f"{cam_log_path}",
-            rr.Transform3D(
-                translation=current_pinhole.extrinsics.world_t_cam,
-                mat3x3=current_pinhole.extrinsics.world_R_cam,
-            ),
-        )
-        rr.log(
-            f"{cam_log_path}/pinhole",
-            rr.Pinhole(
-                image_from_camera=current_pinhole.intrinsics.k_matrix,
-                height=current_pinhole.intrinsics.height,
-                width=current_pinhole.intrinsics.width,
-                camera_xyz=rr.ViewCoordinates.RUB,
-                image_plane_distance=self.image_plane_distance * 2,
-            ),
+        log_pinhole(
+            camera=current_pinhole,
+            cam_log_path=cam_log_path,
+            image_plane_distance=self.image_plane_distance * 2,
         )
 
         # Log the current camera image
@@ -190,28 +176,12 @@ class RerunLogger:
                 )
                 self.keyframe_logged_list.append(kf_idx)
 
-            # Always update the keyframe's pose (it may have been refined by
-            # the backend's global optimisation since the last log call).
-            # Keyframes use CV convention (RDF) — no GL conversion needed.
-            kf_se3: lietorch.SE3 = as_SE3(keyframe.world_sim3_cam.cpu())
-            kf_mat4x4: Float32[ndarray, "4 4"] = kf_se3.matrix().numpy().astype(np.float32)[0]
-            rr.log(
-                f"{kf_cam_log_path}",
-                rr.Transform3D(
-                    translation=kf_mat4x4[:3, 3],
-                    mat3x3=kf_mat4x4[:3, :3],
-                ),
-            )
-            rr.log(
-                f"{kf_cam_log_path}/pinhole",
-                rr.Pinhole(
-                    focal_length=current_pinhole.intrinsics.fl_x,
-                    principal_point=[float(current_pinhole.intrinsics.cx), float(current_pinhole.intrinsics.cy)],  # pyrefly: ignore
-                    height=current_pinhole.intrinsics.height,
-                    width=current_pinhole.intrinsics.width,
-                    camera_xyz=rr.ViewCoordinates.RDF,
-                    image_plane_distance=self.image_plane_distance,
-                ),
+            # Always update the keyframe's camera; its pose may be refined by
+            # the backend's global optimisation since the last log call.
+            log_pinhole(
+                camera=frame_to_pinhole(keyframe),
+                cam_log_path=kf_cam_log_path,
+                image_plane_distance=self.image_plane_distance,
             )
 
         # ── Last keyframe image ────────────────────────────────────────────
