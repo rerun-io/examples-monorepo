@@ -674,7 +674,7 @@ description = "Benchmark 5 Quest + 5 Aria VRS files (requires download URL JSONs
 # mast3r-slam
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.mast3r-slam]
-channels = ["https://conda.modular.com/max/", "conda-forge"]
+channels = ["https://prefix.dev/ai-demos", "https://conda.modular.com/max/", "conda-forge"]
 platforms = ["linux-64"]
 
 [feature.mast3r-slam.dependencies]
@@ -690,13 +690,14 @@ trimesh = "*"
 mojo = "*"
 
 [feature.mast3r-slam.target.linux-64.dependencies]
-lietorch = { path = "packages/lietorch" }
+lietorch = ">=0.3.0"
 mast3r = { path = "packages/mast3r" }
 asmk = { path = "packages/asmk" }
 
 [feature.mast3r-slam.pypi-dependencies]
 # mast3r-slam is the only pypi editable install remaining.
-# lietorch, mast3r, and asmk are pixi-build workspace packages.
+# lietorch is a prebuilt package from ai-demos channel.
+# mast3r and asmk are pixi-build workspace packages.
 mast3r-slam = { path = "packages/mast3r-slam", editable = true }
 einops = ">=0.8.0"
 evo = "*"
