@@ -192,7 +192,7 @@ class FactorGraph:
             unique_kf_idx: Tensor of keyframe buffer indices.
 
         Returns:
-            A tuple of (Xs, world_T_cams, Cs) with stacked point maps, Sim3 poses,
+            A tuple of (Xs, world_sim3_cams, Cs) with stacked point maps, Sim3 poses,
             and average confidence values.
         """
         kfs: list[Frame] = [self.frames[idx] for idx in unique_kf_idx]
@@ -205,11 +205,11 @@ class FactorGraph:
             assert avg_conf is not None
             C_list.append(avg_conf)
         Xs: Float[Tensor, "n_unique hw 3"] = torch.stack(X_list)
-        world_T_cams: lietorch.Sim3 = lietorch.Sim3(torch.stack([kf.world_T_cam.data for kf in kfs]))
+        world_sim3_cams: lietorch.Sim3 = lietorch.Sim3(torch.stack([kf.world_sim3_cam.data for kf in kfs]))
 
         Cs: Float[Tensor, "n_unique hw 1"] = torch.stack(C_list)
 
-        return Xs, world_T_cams, Cs
+        return Xs, world_sim3_cams, Cs
 
     def solve_GN_rays(self) -> None:
         """Run Gauss-Newton optimisation using ray-distance residuals.
@@ -224,9 +224,9 @@ class FactorGraph:
             return
 
         Xs: Float[Tensor, "n_unique hw 3"]
-        world_T_cams: lietorch.Sim3
+        world_sim3_cams: lietorch.Sim3
         Cs: Float[Tensor, "n_unique hw 1"]
-        Xs, world_T_cams, Cs = self.get_poses_points(unique_kf_idx)
+        Xs, world_sim3_cams, Cs = self.get_poses_points(unique_kf_idx)
 
         ii: Int[Tensor, "n_edges"]
         jj: Int[Tensor, "n_edges"]
@@ -242,7 +242,7 @@ class FactorGraph:
         sigma_dist: float = self.cfg["sigma_dist"]
         delta_thresh: float = self.cfg["delta_norm"]
 
-        pose_data: Float[Tensor, "n_unique sim3_dim"] = world_T_cams.data[:, 0, :]
+        pose_data: Float[Tensor, "n_unique sim3_dim"] = world_sim3_cams.data[:, 0, :]
         _backends.gauss_newton_rays(
             pose_data,
             Xs,
@@ -260,8 +260,8 @@ class FactorGraph:
             delta_thresh,
         )
 
-        # Update the keyframe world_T_cam
-        self.frames.update_world_T_cams(world_T_cams[pin:], unique_kf_idx[pin:])
+        # Update the keyframe world_sim3_cam
+        self.frames.update_world_sim3_cams(world_sim3_cams[pin:], unique_kf_idx[pin:])
 
     def solve_GN_calib(self) -> None:
         """Run Gauss-Newton optimisation using calibrated reprojection residuals.
@@ -279,9 +279,9 @@ class FactorGraph:
             return
 
         Xs: Float[Tensor, "n_unique hw 3"]
-        world_T_cams: lietorch.Sim3
+        world_sim3_cams: lietorch.Sim3
         Cs: Float[Tensor, "n_unique hw 1"]
-        Xs, world_T_cams, Cs = self.get_poses_points(unique_kf_idx)
+        Xs, world_sim3_cams, Cs = self.get_poses_points(unique_kf_idx)
 
         # Constrain points to ray
         img_size: tuple[int, int] = (int(self.frames[0].img.shape[-2]), int(self.frames[0].img.shape[-1]))
@@ -303,7 +303,7 @@ class FactorGraph:
         sigma_depth: float = self.cfg["sigma_depth"]
         delta_thresh: float = self.cfg["delta_norm"]
 
-        pose_data: Float[Tensor, "n_unique sim3_dim"] = world_T_cams.data[:, 0, :]
+        pose_data: Float[Tensor, "n_unique sim3_dim"] = world_sim3_cams.data[:, 0, :]
 
         img_size = (int(self.frames[0].img.shape[-2]), int(self.frames[0].img.shape[-1]))
         height: int
@@ -332,5 +332,5 @@ class FactorGraph:
             delta_thresh,
         )
 
-        # Update the keyframe world_T_cam
-        self.frames.update_world_T_cams(world_T_cams[pin:], unique_kf_idx[pin:])
+        # Update the keyframe world_sim3_cam
+        self.frames.update_world_sim3_cams(world_sim3_cams[pin:], unique_kf_idx[pin:])

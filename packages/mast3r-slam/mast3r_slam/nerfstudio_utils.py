@@ -109,7 +109,7 @@ def save_kf_to_nerfstudio(
         cv2.imwrite(str(image_path), bgr_img)
         relative_image_path: str = f"images/{image_filename}"
 
-        se3_pose: lietorch.SE3 = as_SE3(keyframe.world_T_cam.cpu())
+        se3_pose: lietorch.SE3 = as_SE3(keyframe.world_sim3_cam.cpu())
         matb4x4: Float32[ndarray, "1 4 4"] = (
             se3_pose.matrix().numpy().astype(dtype=np.float32)
         )

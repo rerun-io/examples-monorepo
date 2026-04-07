@@ -725,12 +725,12 @@ def frame_to_extrinsics(frame: object) -> Extrinsics:
     """Convert a Frame's lietorch Sim3 pose to simplecv Extrinsics in GL convention.
 
     Args:
-        frame: A Frame with a valid ``world_T_cam`` pose.
+        frame: A Frame with a valid ``world_sim3_cam`` pose.
 
     Returns:
         An ``Extrinsics`` in GL (RUB) convention.
     """
-    se3 = as_SE3(frame.world_T_cam.cpu())
+    se3 = as_SE3(frame.world_sim3_cam.cpu())
     mat4x4_cv: Float32[ndarray, "4 4"] = se3.matrix().numpy().astype(np.float32)[0]
     mat4x4_gl: Float32[ndarray, "4 4"] = conventions.convert_pose(
         mat4x4_cv, src_convention=conventions.CC.CV, dst_convention=conventions.CC.GL
@@ -750,7 +750,7 @@ def frame_to_pinhole(frame: object) -> PinholeParameters:
     ``simplecv.rerun_log_utils.log_pinhole``.
 
     Args:
-        frame: A Frame with a valid ``X_canon`` point map and ``world_T_cam`` pose.
+        frame: A Frame with a valid ``X_canon`` point map and ``world_sim3_cam`` pose.
 
     Returns:
         A ``PinholeParameters`` in GL (RUB) convention.

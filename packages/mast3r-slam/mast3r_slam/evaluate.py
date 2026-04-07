@@ -74,8 +74,8 @@ def save_ATE(
             keyframe = frames[i]
             t = timestamps[keyframe.frame_id]
             # TODO: calibrated pose refinement not yet implemented
-            world_T_cam = as_SE3(keyframe.world_T_cam)
-            x, y, z, qx, qy, qz, qw = world_T_cam.data.numpy().reshape(-1)
+            world_se3_cam = as_SE3(keyframe.world_sim3_cam)
+            x, y, z, qx, qy, qz, qw = world_se3_cam.data.numpy().reshape(-1)
             f.write(f"{t} {x} {y} {z} {qx} {qy} {qz} {qw}\n")
 
 
@@ -113,7 +113,7 @@ def save_reconstruction(
         reconstruction[i] = {
             "frame_id": i,
             "timestamp": t,
-            "world_T_cam": keyframe.world_T_cam.cpu(),
+            "world_sim3_cam": keyframe.world_sim3_cam.cpu(),
             "X": keyframe.X_canon.cpu(),
             "X_canon": keyframe.X_canon.cpu(),
             "C": keyframe.C.cpu(),

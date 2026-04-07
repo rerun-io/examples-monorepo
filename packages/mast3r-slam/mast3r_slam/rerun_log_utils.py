@@ -187,7 +187,7 @@ class RerunLogger:
             # Always update the keyframe's pose (it may have been refined by
             # the backend's global optimisation since the last log call).
             # Keyframes use CV convention (RDF) — no GL conversion needed.
-            kf_se3: lietorch.SE3 = as_SE3(keyframe.world_T_cam.cpu())
+            kf_se3: lietorch.SE3 = as_SE3(keyframe.world_sim3_cam.cpu())
             kf_mat4x4: Float32[ndarray, "4 4"] = kf_se3.matrix().numpy().astype(np.float32)[0]
             rr.log(
                 f"{kf_cam_log_path}",
@@ -219,19 +219,19 @@ class RerunLogger:
             )
 
         # ── Factor graph edges ─────────────────────────────────────────────
-        world_T_cami: lietorch.Sim3 | None = None
-        world_T_camj: lietorch.Sim3 | None = None
+        world_sim3_cami: lietorch.Sim3 | None = None
+        world_sim3_camj: lietorch.Sim3 | None = None
         with states.lock:
             ii: Int[Tensor, "num_edges"] = torch.tensor(states.edges_ii, dtype=torch.long)
             jj: Int[Tensor, "num_edges"] = torch.tensor(states.edges_jj, dtype=torch.long)
             if ii.numel() > 0 and jj.numel() > 0:
-                world_T_cami = lietorch.Sim3(keyframes.world_T_cam[ii, 0])
-                world_T_camj = lietorch.Sim3(keyframes.world_T_cam[jj, 0])
+                world_sim3_cami = lietorch.Sim3(keyframes.world_sim3_cam[ii, 0])
+                world_sim3_camj = lietorch.Sim3(keyframes.world_sim3_cam[jj, 0])
         if ii.numel() > 0 and jj.numel() > 0:
-            assert world_T_cami is not None
-            assert world_T_camj is not None
-            t_world_cami: Float32[ndarray, "num_edges 3"] = world_T_cami.matrix()[:, :3, 3].cpu().numpy()
-            t_world_camj: Float32[ndarray, "num_edges 3"] = world_T_camj.matrix()[:, :3, 3].cpu().numpy()
+            assert world_sim3_cami is not None
+            assert world_sim3_camj is not None
+            t_world_cami: Float32[ndarray, "num_edges 3"] = world_sim3_cami.matrix()[:, :3, 3].cpu().numpy()
+            t_world_camj: Float32[ndarray, "num_edges 3"] = world_sim3_camj.matrix()[:, :3, 3].cpu().numpy()
             line_strips: list[list[float]] = []
             for t_i, t_j in zip(t_world_cami, t_world_camj):
                 line_strips.append(t_i.tolist())

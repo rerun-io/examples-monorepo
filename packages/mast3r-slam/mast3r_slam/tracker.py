@@ -50,7 +50,7 @@ class FrameTracker:
         """Track the frame pose against the last keyframe.
 
         Args:
-            frame: The current Frame to track; its ``world_T_cam`` is updated in place.
+            frame: The current Frame to track; its ``world_sim3_cam`` is updated in place.
 
         Returns:
             A tuple of (new_kf, match_info, try_reloc) where new_kf is True
@@ -88,13 +88,13 @@ class FrameTracker:
         # Get poses and point correspondences and confidences
         Xf: Float[Tensor, "hw 3"]
         Xk: Float[Tensor, "hw 3"]
-        world_T_camf: lietorch.Sim3
-        world_T_camk: lietorch.Sim3
+        world_sim3_camf: lietorch.Sim3
+        world_sim3_camk: lietorch.Sim3
         Cf: Float[Tensor, "hw 1"]
         Ck: Float[Tensor, "hw 1"]
         meas_k: Float[Tensor, "hw 3"] | None
         valid_meas_k: Bool[Tensor, "hw 1"] | None
-        Xf, Xk, world_T_camf, world_T_camk, Cf, Ck, meas_k, valid_meas_k = self.get_points_poses(
+        Xf, Xk, world_sim3_camf, world_sim3_camk, Cf, Ck, meas_k, valid_meas_k = self.get_points_poses(
             frame, keyframe, idx_f2k, img_size, use_calib, K
         )
 
@@ -115,18 +115,18 @@ class FrameTracker:
         try:
             # Track
             if not use_calib:
-                world_T_camf, camk_T_camf = self.opt_pose_ray_dist_sim3(
-                    Xf, Xk, world_T_camf, world_T_camk, Qk, valid_opt
+                world_sim3_camf, camk_sim3_camf = self.opt_pose_ray_dist_sim3(
+                    Xf, Xk, world_sim3_camf, world_sim3_camk, Qk, valid_opt
                 )
             else:
                 assert meas_k is not None
                 assert valid_meas_k is not None
                 assert K is not None
-                world_T_camf, camk_T_camf = self.opt_pose_calib_sim3(
+                world_sim3_camf, camk_sim3_camf = self.opt_pose_calib_sim3(
                     Xf,
                     Xk,
-                    world_T_camf,
-                    world_T_camk,
+                    world_sim3_camf,
+                    world_sim3_camk,
                     Qk,
                     valid_opt,
                     meas_k,
@@ -140,10 +140,10 @@ class FrameTracker:
             print(f"Cholesky failed {frame.frame_id}")
             return False, [], True
 
-        frame.world_T_cam = world_T_camf
+        frame.world_sim3_cam = world_sim3_camf
 
         # Use pose to transform points to update keyframe
-        Xkk_raw = camk_T_camf.act(Xkf)
+        Xkk_raw = camk_sim3_camf.act(Xkf)
         assert isinstance(Xkk_raw, torch.Tensor)
         Xkk: Float[Tensor, "hw 3"] = Xkk_raw
         keyframe.update_pointmap(Xkk, Ckf)
@@ -205,14 +205,14 @@ class FrameTracker:
             K: 3x3 intrinsic matrix (only used when ``use_calib`` is True).
 
         Returns:
-            A tuple of (Xf, Xk, world_T_camf, world_T_camk, Cf, Ck, meas_k, valid_meas_k).
+            A tuple of (Xf, Xk, world_sim3_camf, world_sim3_camk, Cf, Ck, meas_k, valid_meas_k).
         """
         assert frame.X_canon is not None
         assert keyframe.X_canon is not None
         Xf: Float[Tensor, "hw 3"] = frame.X_canon
         Xk: Float[Tensor, "hw 3"] = keyframe.X_canon
-        world_T_camf: lietorch.Sim3 = frame.world_T_cam
-        world_T_camk: lietorch.Sim3 = keyframe.world_T_cam
+        world_sim3_camf: lietorch.Sim3 = frame.world_sim3_cam
+        world_sim3_camk: lietorch.Sim3 = keyframe.world_sim3_cam
 
         # Average confidence
         Cf_opt: Float[Tensor, "hw 1"] | None = frame.get_average_conf()
@@ -238,7 +238,7 @@ class FrameTracker:
             valid_meas_k = Xk[..., 2:3] > self.cfg["depth_eps"]
             meas_k[~valid_meas_k.repeat(1, 3)] = 0.0
 
-        return Xf[idx_f2k], Xk, world_T_camf, world_T_camk, Cf[idx_f2k], Ck, meas_k, valid_meas_k
+        return Xf[idx_f2k], Xk, world_sim3_camf, world_sim3_camk, Cf[idx_f2k], Ck, meas_k, valid_meas_k
 
     def solve(
         self,
@@ -277,8 +277,8 @@ class FrameTracker:
         self,
         Xf: Float[Tensor, "hw 3"],
         Xk: Float[Tensor, "hw 3"],
-        world_T_camf: lietorch.Sim3,
-        world_T_camk: lietorch.Sim3,
+        world_sim3_camf: lietorch.Sim3,
+        world_sim3_camk: lietorch.Sim3,
         Qk: Float[Tensor, "hw 1"],
         valid: Bool[Tensor, "hw 1"],
     ) -> tuple[lietorch.Sim3, lietorch.Sim3]:
@@ -287,13 +287,13 @@ class FrameTracker:
         Args:
             Xf: Frame points in the frame's canonical coordinate system.
             Xk: Keyframe points in the keyframe's canonical coordinate system.
-            world_T_camf: Current world-from-frame Sim3 pose.
-            world_T_camk: World-from-keyframe Sim3 pose.
+            world_sim3_camf: Current world-from-frame Sim3 pose.
+            world_sim3_camk: World-from-keyframe Sim3 pose.
             Qk: Matching quality weights.
             valid: Boolean validity mask.
 
         Returns:
-            A tuple of (world_T_camf, camk_T_camf) with the updated world-from-frame
+            A tuple of (world_sim3_camf, camk_sim3_camf) with the updated world-from-frame
             pose and the optimised relative pose.
         """
         last_error: float = float("inf")
@@ -302,9 +302,9 @@ class FrameTracker:
         sqrt_info: Float[Tensor, "hw 4"] = torch.cat((sqrt_info_ray.repeat(1, 3), sqrt_info_dist), dim=1)
 
         # Solving for relative pose without scale!
-        camk_T_camf_raw = world_T_camk.inv() * world_T_camf
-        assert isinstance(camk_T_camf_raw, lietorch.Sim3)
-        camk_T_camf: lietorch.Sim3 = camk_T_camf_raw
+        camk_sim3_camf_raw = world_sim3_camk.inv() * world_sim3_camf
+        assert isinstance(camk_sim3_camf_raw, lietorch.Sim3)
+        camk_sim3_camf: lietorch.Sim3 = camk_sim3_camf_raw
 
         # Precalculate distance and ray for obs k
         rd_k_result = point_to_ray_dist(Xk, jacobian=False)
@@ -313,10 +313,10 @@ class FrameTracker:
 
         old_cost: float = float("inf")
         for step in range(self.cfg["max_iters"]):
-            act_result = act_Sim3(camk_T_camf, Xf, jacobian=True)
+            act_result = act_Sim3(camk_sim3_camf, Xf, jacobian=True)
             assert isinstance(act_result, tuple)
             Xf_Ck: Float[Tensor, "hw 3"] = act_result[0]
-            dXf_Ck_dcamk_T_camf: Float[Tensor, "hw 3 7"] = act_result[1]
+            dXf_Ck_dcamk_sim3_camf: Float[Tensor, "hw 3 7"] = act_result[1]
             rd_result = point_to_ray_dist(Xf_Ck, jacobian=True)
             assert isinstance(rd_result, tuple)
             rd_f_Ck: Float[Tensor, "hw 4"] = rd_result[0]
@@ -324,15 +324,15 @@ class FrameTracker:
             # r = z-h(x)
             r: Float[Tensor, "hw 4"] = rd_k - rd_f_Ck
             # Jacobian
-            J: Float[Tensor, "hw 4 7"] = -drd_f_Ck_dXf_Ck @ dXf_Ck_dcamk_T_camf
+            J: Float[Tensor, "hw 4 7"] = -drd_f_Ck_dXf_Ck @ dXf_Ck_dcamk_sim3_camf
 
             tau_ij_sim3: Float[Tensor, "1 7"]
             new_cost: float
             tau_ij_sim3, new_cost = self.solve(sqrt_info, r, J)
             last_error = new_cost
-            camk_T_camf_new = camk_T_camf.retr(tau_ij_sim3)
-            assert isinstance(camk_T_camf_new, lietorch.Sim3)
-            camk_T_camf = camk_T_camf_new
+            camk_sim3_camf_new = camk_sim3_camf.retr(tau_ij_sim3)
+            assert isinstance(camk_sim3_camf_new, lietorch.Sim3)
+            camk_sim3_camf = camk_sim3_camf_new
 
             if check_convergence(
                 step,
@@ -349,17 +349,17 @@ class FrameTracker:
                 print(f"max iters reached {last_error}")
 
         # Assign new pose based on relative pose
-        world_T_camf_new = world_T_camk * camk_T_camf
-        assert isinstance(world_T_camf_new, lietorch.Sim3)
+        world_sim3_camf_new = world_sim3_camk * camk_sim3_camf
+        assert isinstance(world_sim3_camf_new, lietorch.Sim3)
 
-        return world_T_camf_new, camk_T_camf
+        return world_sim3_camf_new, camk_sim3_camf
 
     def opt_pose_calib_sim3(
         self,
         Xf: Float[Tensor, "hw 3"],
         Xk: Float[Tensor, "hw 3"],
-        world_T_camf: lietorch.Sim3,
-        world_T_camk: lietorch.Sim3,
+        world_sim3_camf: lietorch.Sim3,
+        world_sim3_camk: lietorch.Sim3,
         Qk: Float[Tensor, "hw 1"],
         valid: Bool[Tensor, "hw 1"],
         meas_k: Float[Tensor, "hw 3"],
@@ -372,8 +372,8 @@ class FrameTracker:
         Args:
             Xf: Frame points in frame canonical coordinates.
             Xk: Keyframe points in keyframe canonical coordinates.
-            world_T_camf: Current world-from-frame Sim3 pose.
-            world_T_camk: World-from-keyframe Sim3 pose.
+            world_sim3_camf: Current world-from-frame Sim3 pose.
+            world_sim3_camk: World-from-keyframe Sim3 pose.
             Qk: Matching quality weights.
             valid: Boolean validity mask.
             meas_k: Keyframe measurements (u, v, log_z).
@@ -382,7 +382,7 @@ class FrameTracker:
             img_size: (height, width) of the image.
 
         Returns:
-            A tuple of (world_T_camf, camk_T_camf) with the updated world-from-frame
+            A tuple of (world_sim3_camf, camk_sim3_camf) with the updated world-from-frame
             pose and the optimised relative pose.
         """
         last_error: float = float("inf")
@@ -391,16 +391,16 @@ class FrameTracker:
         sqrt_info: Float[Tensor, "hw 3"] = torch.cat((sqrt_info_pixel.repeat(1, 2), sqrt_info_depth), dim=1)
 
         # Solving for relative pose without scale!
-        camk_T_camf_raw = world_T_camk.inv() * world_T_camf
-        assert isinstance(camk_T_camf_raw, lietorch.Sim3)
-        camk_T_camf: lietorch.Sim3 = camk_T_camf_raw
+        camk_sim3_camf_raw = world_sim3_camk.inv() * world_sim3_camf
+        assert isinstance(camk_sim3_camf_raw, lietorch.Sim3)
+        camk_sim3_camf: lietorch.Sim3 = camk_sim3_camf_raw
 
         old_cost: float = float("inf")
         for step in range(self.cfg["max_iters"]):
-            act_result = act_Sim3(camk_T_camf, Xf, jacobian=True)
+            act_result = act_Sim3(camk_sim3_camf, Xf, jacobian=True)
             assert isinstance(act_result, tuple)
             Xf_Ck: Float[Tensor, "hw 3"] = act_result[0]
-            dXf_Ck_dcamk_T_camf: Float[Tensor, "hw 3 7"] = act_result[1]
+            dXf_Ck_dcamk_sim3_camf: Float[Tensor, "hw 3 7"] = act_result[1]
             proj_result = project_calib(
                 Xf_Ck,
                 K,
@@ -419,15 +419,15 @@ class FrameTracker:
             # r = z-h(x)
             r: Float[Tensor, "hw 3"] = meas_k - pzf_Ck
             # Jacobian
-            J: Float[Tensor, "hw 3 7"] = -dpzf_Ck_dXf_Ck @ dXf_Ck_dcamk_T_camf
+            J: Float[Tensor, "hw 3 7"] = -dpzf_Ck_dXf_Ck @ dXf_Ck_dcamk_sim3_camf
 
             tau_ij_sim3: Float[Tensor, "1 7"]
             new_cost: float
             tau_ij_sim3, new_cost = self.solve(sqrt_info2, r, J)
             last_error = new_cost
-            camk_T_camf_new = camk_T_camf.retr(tau_ij_sim3)
-            assert isinstance(camk_T_camf_new, lietorch.Sim3)
-            camk_T_camf = camk_T_camf_new
+            camk_sim3_camf_new = camk_sim3_camf.retr(tau_ij_sim3)
+            assert isinstance(camk_sim3_camf_new, lietorch.Sim3)
+            camk_sim3_camf = camk_sim3_camf_new
 
             if check_convergence(
                 step,
@@ -444,7 +444,7 @@ class FrameTracker:
                 print(f"max iters reached {last_error}")
 
         # Assign new pose based on relative pose
-        world_T_camf_new = world_T_camk * camk_T_camf
-        assert isinstance(world_T_camf_new, lietorch.Sim3)
+        world_sim3_camf_new = world_sim3_camk * camk_sim3_camf
+        assert isinstance(world_sim3_camf_new, lietorch.Sim3)
 
-        return world_T_camf_new, camk_T_camf
+        return world_sim3_camf_new, camk_sim3_camf

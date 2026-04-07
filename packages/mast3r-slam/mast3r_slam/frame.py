@@ -38,7 +38,7 @@ class Frame:
     """(height, width) of the image before any downsampling."""
     uimg: Float[Tensor, "*batch h w 3"]
     """Unnormalized RGB image in [0, 1] range, HWC layout on CPU."""
-    world_T_cam: lietorch.Sim3 = lietorch.Sim3.Identity(1)
+    world_sim3_cam: lietorch.Sim3 = lietorch.Sim3.Identity(1)
     """World-from-camera Sim3 pose."""
     X_canon: Float[Tensor, "hw 3"] | None = None
     """Canonical 3D point map, shape (h*w, 3)."""
@@ -177,7 +177,7 @@ class Frame:
 def create_frame(
     i: int,
     img: Float32[ndarray, "h w 3"],
-    world_T_cam: lietorch.Sim3,
+    world_sim3_cam: lietorch.Sim3,
     img_size: int = 512,
     device: str = "cuda:0",
 ) -> Frame:
@@ -186,7 +186,7 @@ def create_frame(
     Args:
         i: Frame index in the dataset.
         img: Raw image (numpy array or similar, passed to ``resize_img``).
-        world_T_cam: World-from-camera Sim3 pose.
+        world_sim3_cam: World-from-camera Sim3 pose.
         img_size: Target image size for MASt3R encoder (224 or 512).
         device: Torch device string.
 
@@ -205,7 +205,7 @@ def create_frame(
     if downsample > 1:
         uimg = uimg[::downsample, ::downsample]
         img_shape = img_shape // downsample
-    frame: Frame = Frame(i, rgb, img_shape, img_true_shape, uimg, world_T_cam)
+    frame: Frame = Frame(i, rgb, img_shape, img_true_shape, uimg, world_sim3_cam)
     return frame
 
 
@@ -248,7 +248,7 @@ class SharedStates:
         self.uimg: Float[Tensor, "h w 3"] = torch.zeros(h, w, 3, device="cpu", dtype=dtype).share_memory_()
         self.img_shape: Int[Tensor, "1 2"] = torch.zeros(1, 2, device=device, dtype=torch.int).share_memory_()
         self.img_true_shape: Int[Tensor, "1 2"] = torch.zeros(1, 2, device=device, dtype=torch.int).share_memory_()
-        self.world_T_cam: Float[Tensor, "1 8"] = lietorch.Sim3.Identity(1, device=device, dtype=dtype).data.share_memory_()
+        self.world_sim3_cam: Float[Tensor, "1 8"] = lietorch.Sim3.Identity(1, device=device, dtype=dtype).data.share_memory_()
         self.X: Float[Tensor, "hw 3"] = torch.zeros(h * w, 3, device=device, dtype=dtype).share_memory_()
         self.C: Float[Tensor, "hw 1"] = torch.zeros(h * w, 1, device=device, dtype=dtype).share_memory_()
         self.feat: Float[Tensor, "1 n_patches feat_dim"] = torch.zeros(1, self.num_patches, self.feat_dim, device=device, dtype=dtype).share_memory_()
@@ -271,7 +271,7 @@ class SharedStates:
             self.uimg[:] = frame.uimg
             self.img_shape[:] = frame.img_shape
             self.img_true_shape[:] = frame.img_true_shape
-            self.world_T_cam[:] = frame.world_T_cam.data
+            self.world_sim3_cam[:] = frame.world_sim3_cam.data
             self.X[:] = frame.X_canon
             self.C[:] = frame.C
             self.feat[:] = frame.feat
@@ -290,7 +290,7 @@ class SharedStates:
                 self.img_shape,
                 self.img_true_shape,
                 self.uimg,
-                lietorch.Sim3(self.world_T_cam),
+                lietorch.Sim3(self.world_sim3_cam),
             )
             frame.X_canon = self.X
             frame.C = self.C
@@ -388,7 +388,7 @@ class SharedKeyframes:
         self.uimg: Float[Tensor, "buf h w 3"] = torch.zeros(buffer, h, w, 3, device="cpu", dtype=dtype).share_memory_()
         self.img_shape: Int[Tensor, "buf 1 2"] = torch.zeros(buffer, 1, 2, device=device, dtype=torch.int).share_memory_()
         self.img_true_shape: Int[Tensor, "buf 1 2"] = torch.zeros(buffer, 1, 2, device=device, dtype=torch.int).share_memory_()
-        self.world_T_cam: Float[Tensor, "buf 1 sim3_dim"] = torch.zeros(buffer, 1, lietorch.Sim3.embedded_dim, device=device, dtype=dtype).share_memory_()
+        self.world_sim3_cam: Float[Tensor, "buf 1 sim3_dim"] = torch.zeros(buffer, 1, lietorch.Sim3.embedded_dim, device=device, dtype=dtype).share_memory_()
         self.X: Float[Tensor, "buf hw 3"] = torch.zeros(buffer, h * w, 3, device=device, dtype=dtype).share_memory_()
         self.C: Float[Tensor, "buf hw 1"] = torch.zeros(buffer, h * w, 1, device=device, dtype=dtype).share_memory_()
         self.N: Int[Tensor, "buf"] = torch.zeros(buffer, device=device, dtype=torch.int).share_memory_()
@@ -416,7 +416,7 @@ class SharedKeyframes:
                 self.img_shape[idx],
                 self.img_true_shape[idx],
                 self.uimg[idx],
-                lietorch.Sim3(self.world_T_cam[idx]),
+                lietorch.Sim3(self.world_sim3_cam[idx]),
             )
             kf.X_canon = self.X[idx]
             kf.C = self.C[idx]
@@ -451,7 +451,7 @@ class SharedKeyframes:
             self.uimg[idx] = value.uimg
             self.img_shape[idx] = value.img_shape
             self.img_true_shape[idx] = value.img_true_shape
-            self.world_T_cam[idx] = value.world_T_cam.data
+            self.world_sim3_cam[idx] = value.world_sim3_cam.data
             self.X[idx] = value.X_canon
             self.C[idx] = value.C
             self.feat[idx] = value.feat
@@ -491,15 +491,15 @@ class SharedKeyframes:
                 return None
             return self[self.n_size.value - 1]
 
-    def update_world_T_cams(self, world_T_cams: lietorch.Sim3, idx: Int[Tensor, "n"]) -> None:
+    def update_world_sim3_cams(self, world_sim3_cams: lietorch.Sim3, idx: Int[Tensor, "n"]) -> None:
         """Overwrite the poses for a set of keyframes.
 
         Args:
-            world_T_cams: New Sim3 poses to write.
+            world_sim3_cams: New Sim3 poses to write.
             idx: Tensor of buffer indices corresponding to each pose.
         """
         with self.lock:
-            self.world_T_cam[idx] = world_T_cams.data
+            self.world_sim3_cam[idx] = world_sim3_cams.data
 
     def get_dirty_idx(self) -> Int[Tensor, "n_dirty"]:
         """Return indices of keyframes modified since the last call, then clear the dirty flags.
