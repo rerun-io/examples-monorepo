@@ -33,7 +33,7 @@ if "build_ext" in sys.argv:
     # CUDAExtension reads this env var to generate the correct -gencode flags.
     if not os.environ.get("TORCH_CUDA_ARCH_LIST"):
         cap = torch.cuda.get_device_capability()
-        arch = f"{cap[0]}.{cap[1]}"
+        arch = f"{cap[0]}.{cap[1]}+PTX"
         os.environ["TORCH_CUDA_ARCH_LIST"] = arch
         print(f"Auto-detected CUDA arch: {arch}")
 
