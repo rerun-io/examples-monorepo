@@ -169,17 +169,20 @@ class Frame:
 
         match mode:
             case FilteringMode.FIRST:
+                # Accept only the second observation (first update after init).
                 if self.N_updates == 1:
                     self.X_canon = X.clone()
                     self.C = C.clone()
                     self.N = 1
 
             case FilteringMode.RECENT:
+                # Always overwrite with the latest observation.
                 self.X_canon = X.clone()
                 self.C = C.clone()
                 self.N = 1
 
             case FilteringMode.BEST_SCORE:
+                # Keep whichever full observation has the highest aggregate score.
                 new_score: Float[Tensor, ""] = self.get_score(C)
                 assert self.score is not None
                 if new_score > self.score:
@@ -189,6 +192,7 @@ class Frame:
                     self.score = new_score
 
             case FilteringMode.INDEP_CONF:
+                # Per-point cherry-pick: keep the higher-confidence point at each pixel.
                 assert self.C is not None
                 assert self.X_canon is not None
                 new_mask: Bool[Tensor, "hw 1"] = C > self.C
@@ -197,6 +201,7 @@ class Frame:
                 self.N = 1
 
             case FilteringMode.WEIGHTED_POINTMAP:
+                # Confidence-weighted running average in Cartesian space.
                 assert self.C is not None
                 assert self.X_canon is not None
                 self.X_canon = ((self.C * self.X_canon) + (C * X)) / (self.C + C)
@@ -204,6 +209,7 @@ class Frame:
                 self.N += 1
 
             case FilteringMode.WEIGHTED_SPHERICAL:
+                # Confidence-weighted running average in spherical (r, phi, theta) space.
                 assert self.C is not None
                 assert self.X_canon is not None
                 spherical1: Float[Tensor, "hw 3"] = _cartesian_to_spherical(self.X_canon)
