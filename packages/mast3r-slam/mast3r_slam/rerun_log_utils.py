@@ -181,6 +181,10 @@ class RerunLogger:
         )
         pointmap_hw3 = np.nan_to_num(pointmap_hw3, nan=0.0, posinf=0.0, neginf=0.0)
         depth_hw: Float32[ndarray, "H W"] = np.maximum(pointmap_hw3[..., 2], 0.0)
+        confidence_mask: Bool[ndarray, "H W"] = (
+            frame.C.detach().cpu().numpy().reshape(height, width) > self.conf_thresh
+        )
+        filtered_depth_hw: Float32[ndarray, "H W"] = np.where(confidence_mask, depth_hw, 0.0)
 
         conf = frame.get_average_conf()
         if conf is None:
@@ -189,7 +193,7 @@ class RerunLogger:
         confidence_hw = np.nan_to_num(confidence_hw, nan=0.0, posinf=0.0, neginf=0.0)
         confidence_uint8: UInt8[ndarray, "H W"] = self._normalize_to_uint8(confidence_hw)
         pointmap_uint8: UInt8[ndarray, "H W 3"] = self._normalize_to_uint8(pointmap_hw3)
-        depth_uint16_mm: UInt16[ndarray, "H W"] = self._depth_meters_to_uint16_mm(depth_hw)
+        depth_uint16_mm: UInt16[ndarray, "H W"] = self._depth_meters_to_uint16_mm(filtered_depth_hw)
 
         rr.log(str(log_path / "pointmap"), rr.Image(pointmap_uint8, color_model=rr.ColorModel.RGB).compress())
         rr.log(str(log_path / "pointmap_depth"), rr.DepthImage(depth_uint16_mm, meter=1000.0))
