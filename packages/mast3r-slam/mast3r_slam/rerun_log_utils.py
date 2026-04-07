@@ -43,17 +43,9 @@ def create_blueprints(
     Returns:
         A configured Rerun Blueprint.
     """
-    current_image_and_pointmap: rrb.Horizontal = rrb.Horizontal(
-        contents=[
-            rrb.Spatial2DView(origin=str(parent_log_path / "current_camera" / "pinhole" / "image"), name="Image"),
-            rrb.Spatial2DView(origin=str(parent_log_path / "current_camera" / "pinhole" / "pointmap"), name="Pointmap"),
-        ],
-        column_shares=[1, 1],
-        name="Image + Pointmap",
-    )
     current_views: rrb.Tabs = rrb.Tabs(
         rrb.Spatial2DView(origin=str(parent_log_path / "current_camera" / "pinhole" / "video"), name="Video"),
-        current_image_and_pointmap,
+        rrb.Spatial2DView(origin=str(parent_log_path / "current_camera" / "pinhole" / "image"), name="Image"),
         active_tab=1,
         name="Current",
     )
@@ -97,7 +89,7 @@ def create_blueprints(
             rrb.Tabs(views, logs, active_tab=0),
             column_shares=(3, 1),
         ),
-        rrb.TimePanel(timeline=timeline),
+        rrb.TimePanel(timeline=timeline, state="collapsed"),
         collapse_panels=True,
     )
     return blueprint
