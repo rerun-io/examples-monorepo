@@ -17,25 +17,50 @@ import torch
 from jaxtyping import Bool, Float, Float32, Int, UInt8
 from numpy import ndarray
 from simplecv.camera_orient_utils import auto_orient_and_center_poses
-from simplecv.rerun_log_utils import log_pinhole
+from simplecv.rerun_log_utils import log_pinhole, log_video
 from torch import Tensor
 
+from mast3r_slam.dataloader import MP4Dataset, MonocularDataset
 from mast3r_slam.frame import Frame, SharedKeyframes, SharedStates
 from mast3r_slam.mast3r_utils import frame_to_extrinsics, frame_to_pinhole
 
+FRAME_TIMELINE: str = "frame"
+VIDEO_TIMELINE: str = "video_time"
 
-def create_blueprints(parent_log_path: Path) -> rrb.Blueprint:
+
+def create_blueprints(parent_log_path: Path, timeline: str = FRAME_TIMELINE) -> rrb.Blueprint:
     """Create the default Rerun blueprint layout for the SLAM visualiser.
 
     Args:
         parent_log_path: Root log path for all Rerun entities.
+        timeline: Timeline shown in the Rerun time panel.
 
     Returns:
         A configured Rerun Blueprint.
     """
+    current_views: rrb.Tabs = rrb.Tabs(
+        rrb.Spatial2DView(origin=str(parent_log_path / "current_camera" / "pinhole" / "video"), name="Video"),
+        rrb.Spatial2DView(origin=str(parent_log_path / "current_camera" / "pinhole"), name="Image"),
+        rrb.Spatial2DView(origin=str(parent_log_path / "current_camera" / "pinhole" / "pointmap"), name="Pointmap"),
+        rrb.Spatial2DView(
+            origin=str(parent_log_path / "current_camera" / "pinhole" / "pointmap_depth"),
+            name="Depth",
+        ),
+        rrb.Spatial2DView(origin=str(parent_log_path / "current_camera" / "pinhole" / "confidence"), name="Confidence"),
+        active_tab=1,
+        name="Current",
+    )
+    last_keyframe_views: rrb.Tabs = rrb.Tabs(
+        rrb.Spatial2DView(origin=str(parent_log_path / "last_keyframe"), name="Image"),
+        rrb.Spatial2DView(origin=str(parent_log_path / "last_keyframe" / "pointmap"), name="Pointmap"),
+        rrb.Spatial2DView(origin=str(parent_log_path / "last_keyframe" / "pointmap_depth"), name="Depth"),
+        rrb.Spatial2DView(origin=str(parent_log_path / "last_keyframe" / "confidence"), name="Confidence"),
+        active_tab=0,
+        name="Last Keyframe",
+    )
     views: rrb.Vertical = rrb.Vertical(
-        rrb.Spatial2DView(origin=str(parent_log_path / "current_camera" / "pinhole")),
-        rrb.Spatial2DView(origin=str(parent_log_path / "last_keyframe")),
+        contents=[current_views, last_keyframe_views],
+        row_shares=[1, 1],
         name="Views",
     )
     logs: rrb.TextLogView = rrb.TextLogView(
@@ -51,9 +76,27 @@ def create_blueprints(parent_log_path: Path) -> rrb.Blueprint:
             rrb.Tabs(views, logs, active_tab=0),
             column_shares=(3, 1),
         ),
+        rrb.TimePanel(timeline=timeline),
         collapse_panels=True,
     )
     return blueprint
+
+
+def log_video_for_dataset(
+    dataset: MonocularDataset,
+    video_log_path: Path,
+    timeline: str = VIDEO_TIMELINE,
+) -> Int[ndarray, "num_frames"] | None:
+    """Log a source video asset and return timestamps aligned to the dataset frames."""
+    if not isinstance(dataset, MP4Dataset) or dataset.dataset_path is None:
+        return None
+
+    frame_timestamps_ns: Int[ndarray, "all_video_frames"] = log_video(
+        video_source=dataset.dataset_path,
+        video_log_path=video_log_path,
+        timeline=timeline,
+    )
+    return np.asarray(frame_timestamps_ns[:: dataset.stride][: len(dataset)], dtype=np.int64)
 
 
 class RerunLogger:
@@ -100,6 +143,40 @@ class RerunLogger:
         )
         self._last_orient_n_kf = n_kf
 
+    def _log_rgb_image(self, image_path: Path, rgb: Float32[Tensor, "H W 3"]) -> UInt8[ndarray, "H W 3"]:
+        rgb_uint8: UInt8[ndarray, "H W 3"] = (rgb * 255).numpy().astype(np.uint8)
+        rr.log(
+            str(image_path),
+            rr.Image(image=rgb_uint8, color_model=rr.ColorModel.RGB).compress(jpeg_quality=75),
+        )
+        return rgb_uint8
+
+    def _log_pointmap_and_confidence(
+        self,
+        frame: Frame,
+        log_path: Path,
+        image_shape: tuple[int, int],
+    ) -> None:
+        if frame.X_canon is None or frame.C is None:
+            return
+
+        height, width = image_shape
+        pointmap_hw3: Float32[ndarray, "H W 3"] = frame.X_canon.detach().cpu().numpy().reshape(height, width, 3).astype(
+            np.float32
+        )
+        pointmap_hw3 = np.nan_to_num(pointmap_hw3, nan=0.0, posinf=0.0, neginf=0.0)
+        depth_hw: Float32[ndarray, "H W"] = np.maximum(pointmap_hw3[..., 2], 0.0)
+
+        conf = frame.get_average_conf()
+        if conf is None:
+            conf = frame.C
+        confidence_hw: Float32[ndarray, "H W"] = conf.detach().cpu().numpy().reshape(height, width).astype(np.float32)
+        confidence_hw = np.nan_to_num(confidence_hw, nan=0.0, posinf=0.0, neginf=0.0)
+
+        rr.log(str(log_path / "pointmap"), rr.Image(pointmap_hw3))
+        rr.log(str(log_path / "pointmap_depth"), rr.DepthImage(depth_hw, meter=1.0))
+        rr.log(str(log_path / "confidence"), rr.Image(confidence_hw, color_model=rr.ColorModel.L))
+
     def log_frame(
         self,
         current_frame: Frame,
@@ -129,13 +206,8 @@ class RerunLogger:
             image_plane_distance=self.image_plane_distance * 2,
         )
 
-        # Log the current camera image
-        rgb_float: Float32[Tensor, "H W 3"] = current_frame.rgb
-        rgb_uint8: UInt8[ndarray, "H W 3"] = (rgb_float * 255).numpy().astype(np.uint8)
-        rr.log(
-            f"{cam_log_path}/pinhole/image",
-            rr.Image(image=rgb_uint8, color_model=rr.ColorModel.RGB).compress(jpeg_quality=75),
-        )
+        rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(cam_log_path / "pinhole" / "image", current_frame.rgb)
+        self._log_pointmap_and_confidence(current_frame, cam_log_path / "pinhole", rgb_uint8.shape[:2])
 
         # Log camera path
         assert current_pinhole.extrinsics.world_t_cam is not None
@@ -160,12 +232,11 @@ class RerunLogger:
 
             # Log image + pointcloud only the first time a keyframe appears.
             if kf_idx not in self.keyframe_logged_list:
-                kf_rgb_float: Float32[Tensor, "H W 3"] = keyframe.rgb
-                kf_rgb_uint8: UInt8[ndarray, "H W 3"] = (kf_rgb_float * 255).numpy().astype(np.uint8)
-                rr.log(
-                    f"{kf_cam_log_path}/pinhole/image",
-                    rr.Image(image=kf_rgb_uint8, color_model=rr.ColorModel.RGB).compress(),
+                kf_rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(
+                    kf_cam_log_path / "pinhole" / "image",
+                    keyframe.rgb,
                 )
+                self._log_pointmap_and_confidence(keyframe, kf_cam_log_path / "pinhole", kf_rgb_uint8.shape[:2])
                 # Confidence-filtered point cloud
                 assert keyframe.C is not None
                 mask: Bool[ndarray, "hw"] = (keyframe.C.cpu().numpy() > self.conf_thresh).squeeze()
@@ -191,12 +262,8 @@ class RerunLogger:
         # ── Last keyframe image ────────────────────────────────────────────
         if N_keyframes > 0:
             last_kf: Frame = keyframes[N_keyframes - 1]
-            last_kf_rgb_float: Float32[Tensor, "H W 3"] = last_kf.rgb
-            last_kf_rgb_uint8: UInt8[ndarray, "H W 3"] = (last_kf_rgb_float * 255).numpy().astype(np.uint8)
-            rr.log(
-                f"{self.parent_log_path}/last_keyframe",
-                rr.Image(image=last_kf_rgb_uint8, color_model=rr.ColorModel.RGB).compress(),
-            )
+            last_kf_rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(self.parent_log_path / "last_keyframe", last_kf.rgb)
+            self._log_pointmap_and_confidence(last_kf, self.parent_log_path / "last_keyframe", last_kf_rgb_uint8.shape[:2])
 
         # ── Factor graph edges ─────────────────────────────────────────────
         world_sim3_cami: lietorch.Sim3 | None = None

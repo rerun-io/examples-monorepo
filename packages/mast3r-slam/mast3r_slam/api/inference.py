@@ -44,8 +44,9 @@ import rerun as rr
 import rerun.blueprint as rrb
 import torch
 import torch.multiprocessing as mp
-from jaxtyping import Float
+from jaxtyping import Float, Int
 from mast3r.model import AsymmetricMASt3R
+from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
 
@@ -60,7 +61,13 @@ from mast3r_slam.mast3r_utils import (
     mast3r_inference_mono,
 )
 from mast3r_slam.nerfstudio_utils import save_kf_to_nerfstudio
-from mast3r_slam.rerun_log_utils import RerunLogger, create_blueprints
+from mast3r_slam.rerun_log_utils import (
+    FRAME_TIMELINE,
+    VIDEO_TIMELINE,
+    RerunLogger,
+    create_blueprints,
+    log_video_for_dataset,
+)
 from mast3r_slam.retrieval_database import RetrievalDatabase
 from mast3r_slam.tracker import FrameTracker
 
@@ -127,13 +134,8 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
     torch.set_grad_enabled(False)
     device: str = "cuda:0"
 
-    # ── Rerun visualisation setup ──────────────────────────────────────────
-    parent_log_path: Path = Path("/world")
-    rr_logger: RerunLogger = RerunLogger(parent_log_path)
-    blueprint: rrb.Blueprint = create_blueprints(parent_log_path)
-    rr.send_blueprint(blueprint)
-
     # ── Load SLAM config and dataset ───────────────────────────────────────
+    parent_log_path: Path = Path("/world")
     log_path: str = f"{parent_log_path}/logs"
     load_config(inf_config.config)
     rr.log(log_path, rr.TextLog(f"Dataset: {inf_config.dataset}", level="INFO"))
@@ -141,6 +143,17 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
 
     dataset: MonocularDataset = load_dataset(inf_config.dataset, img_size=inf_config.img_size)
     dataset.subsample(config["dataset"]["subsample"])
+    frame_timestamps_ns: Int[ndarray, "num_frames"] | None = log_video_for_dataset(
+        dataset,
+        parent_log_path / "current_camera" / "pinhole" / "video",
+        timeline=VIDEO_TIMELINE,
+    )
+
+    # ── Rerun visualisation setup ──────────────────────────────────────────
+    rr_logger: RerunLogger = RerunLogger(parent_log_path)
+    active_timeline: str = VIDEO_TIMELINE if frame_timestamps_ns is not None else FRAME_TIMELINE
+    blueprint: rrb.Blueprint = create_blueprints(parent_log_path, timeline=active_timeline)
+    rr.send_blueprint(blueprint)
 
     h: int
     w: int
@@ -185,7 +198,9 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
             # Check if the backend process crashed (raises BackendError if so).
             ctx.check_backend()
 
-            rr.set_time("frame", sequence=i)
+            rr.set_time(FRAME_TIMELINE, sequence=i)
+            if frame_timestamps_ns is not None and i < len(frame_timestamps_ns):
+                rr.set_time(VIDEO_TIMELINE, duration=1e-9 * float(frame_timestamps_ns[i]))
             mode: Mode = states.get_mode()
 
             # Stop condition: processed all requested frames.
@@ -194,7 +209,7 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
                 states.set_mode(Mode.TERMINATED)
                 break
 
-            timestamp, rgb = dataset[i]
+            _, rgb = dataset[i]
 
             # Initialise pose: identity for the first frame, otherwise use the
             # last tracked pose from shared state.
