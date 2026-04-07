@@ -1,14 +1,16 @@
-from mast3r_slam.nerfstudio_utils import NerfstudioData
-from serde.json import from_json
-from pathlib import Path
 from dataclasses import dataclass
-import tyro
-from simplecv.rerun_log_utils import RerunTyroConfig
+from pathlib import Path
+
 import cv2
-import rerun as rr
-import open3d as o3d
 import numpy as np
+import open3d as o3d
+import rerun as rr
+import tyro
+from serde.json import from_json
 from simplecv.ops import conventions
+from simplecv.rerun_log_utils import RerunTyroConfig
+
+from mast3r_slam.nerfstudio_utils import NerfstudioData
 
 
 @dataclass
@@ -20,7 +22,7 @@ class ViewNsDataConfig:
 
 
 def view_ns_data(config: ViewNsDataConfig) -> None:
-    with open(config.transform_json_path, "r") as f:
+    with open(config.transform_json_path) as f:
         ns_data: NerfstudioData = from_json(NerfstudioData, f.read())
 
     ply_path: Path = config.transform_json_path.parent / ns_data.ply_file_path
@@ -49,7 +51,7 @@ def view_ns_data(config: ViewNsDataConfig) -> None:
     #     static=True,
     # )
     for idx, frame in enumerate(ns_data.frames):
-        rr.set_time_sequence("sequence", idx)
+        rr.set_time("sequence", sequence=idx)
         image_path: Path = config.transform_json_path.parent / frame.file_path
         assert image_path.exists(), f"Image path {image_path} does not exist"
         rgb = cv2.imread(str(image_path))

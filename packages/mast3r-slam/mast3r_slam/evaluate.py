@@ -1,18 +1,34 @@
 import pathlib
+from typing import Protocol, runtime_checkable
 
 import cv2
 import numpy as np
 import torch
 from jaxtyping import UInt8
+from numpy import ndarray
 
-from mast3r_slam.dataloader import Intrinsics
-from mast3r_slam.frame import SharedKeyframes
-from mast3r_slam.lietorch_utils import as_SE3
 from mast3r_slam.config import config
+from mast3r_slam.dataloader import Intrinsics, MonocularDataset
+from mast3r_slam.frame import SharedKeyframes
 from mast3r_slam.geometry import constrain_points_to_ray
+from mast3r_slam.lietorch_utils import as_SE3
 
 
-def prepare_savedir(args: object, dataset: object) -> tuple[pathlib.Path, str]:
+@runtime_checkable
+class _HasSaveAs(Protocol):
+    """Protocol for objects with a ``save_as`` attribute."""
+
+    save_as: str
+
+
+@runtime_checkable
+class _HasDatasetPath(Protocol):
+    """Protocol for objects with a ``dataset_path`` attribute."""
+
+    dataset_path: pathlib.Path
+
+
+def prepare_savedir(args: _HasSaveAs, dataset: MonocularDataset) -> tuple[pathlib.Path, str]:
     """Create the log directory and derive a sequence name from the dataset path.
 
     Args:
@@ -57,11 +73,9 @@ def save_ATE(
         for i in range(len(frames)):
             keyframe = frames[i]
             t = timestamps[keyframe.frame_id]
-            if intrinsics is None:
-                T_WC = as_SE3(keyframe.T_WC)
-            else:
-                T_WC = intrinsics.refine_pose_with_calibration(keyframe)
-            x, y, z, qx, qy, qz, qw = T_WC.data.numpy().reshape(-1)
+            # TODO: calibrated pose refinement not yet implemented
+            world_se3_cam = as_SE3(keyframe.world_sim3_cam)
+            x, y, z, qx, qy, qz, qw = world_se3_cam.data.numpy().reshape(-1)
             f.write(f"{t} {x} {y} {z} {qx} {qy} {qz} {qw}\n")
 
 
@@ -85,16 +99,21 @@ def save_reconstruction(
     for i in range(len(keyframes)):
         keyframe = keyframes[i]
         if config["use_calib"]:
+            assert keyframe.X_canon is not None
+            assert keyframe.K is not None
+            kf_img_shape: tuple[int, int] = (int(keyframe.img_shape.flatten()[0]), int(keyframe.img_shape.flatten()[1]))
             X_canon = constrain_points_to_ray(
-                keyframe.img_shape.flatten()[:2], keyframe.X_canon[None], keyframe.K
+                kf_img_shape, keyframe.X_canon[None], keyframe.K
             )
             keyframe.X_canon = X_canon.squeeze(0)
 
+        assert keyframe.X_canon is not None
+        assert keyframe.C is not None
         t = timestamps[keyframe.frame_id]
         reconstruction[i] = {
             "frame_id": i,
             "timestamp": t,
-            "T_WC": keyframe.T_WC.cpu(),
+            "world_sim3_cam": keyframe.world_sim3_cam.cpu(),
             "X": keyframe.X_canon.cpu(),
             "X_canon": keyframe.X_canon.cpu(),
             "C": keyframe.C.cpu(),
@@ -120,7 +139,7 @@ def save_keyframes(
         keyframe = keyframes[i]
         t = timestamps[keyframe.frame_id]
         filename: pathlib.Path = savedir / f"{t}.png"
-        bgr_img: UInt8[np.ndarray, "h w 3"] = cv2.cvtColor(
+        bgr_img: UInt8[ndarray, "h w 3"] = cv2.cvtColor(
             (keyframe.uimg.cpu().numpy() * 255).astype(np.uint8), cv2.COLOR_RGB2BGR
         )
         cv2.imwrite(str(filename), bgr_img)

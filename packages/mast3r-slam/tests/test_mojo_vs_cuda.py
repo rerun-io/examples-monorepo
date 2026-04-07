@@ -1,6 +1,6 @@
 """Compare Mojo GPU kernels against CUDA originals for numerical correctness and performance.
 
-Uses the CUDA mast3r_slam_backends as oracle and validates that the Mojo
+Uses the CUDA mast3r_slam._backends as oracle and validates that the Mojo
 mast3r_slam_mojo_backends produces matching outputs within tolerance.
 
 Includes both parametrized deterministic tests and Hypothesis property-based
@@ -13,19 +13,19 @@ Run:
 
 from __future__ import annotations
 
-import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import pytest
 import torch
-from hypothesis import given, settings, HealthCheck
+from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from jaxtyping import Bool, Float, Int
-
+from torch import Tensor
 
 # ── Skip if either backend is unavailable ─────────────────────────────────────
 
-cuda_backends = pytest.importorskip("mast3r_slam_backends", reason="CUDA backends not built")
+cuda_backends = pytest.importorskip("mast3r_slam._backends", reason="CUDA backends not built")
 mojo_backends = pytest.importorskip("mast3r_slam_mojo_backends", reason="Mojo backends not built")
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -58,7 +58,7 @@ class BenchResult:
     max_ms: float
 
 
-def benchmark_fn(fn: callable, warmup: int = 10, runs: int = 100) -> BenchResult:
+def benchmark_fn(fn: Callable[..., object], warmup: int = 10, runs: int = 100) -> BenchResult:
     """Benchmark a CUDA kernel using torch.cuda.Event timing.
 
     Args:
@@ -83,7 +83,7 @@ def benchmark_fn(fn: callable, warmup: int = 10, runs: int = 100) -> BenchResult
         torch.cuda.synchronize()
         timings.append(start.elapsed_time(end))
 
-    t: torch.Tensor = torch.tensor(timings)
+    t: Float[Tensor, "n_runs"] = torch.tensor(timings)
     return BenchResult(
         name="",
         mean_ms=float(t.mean()),
@@ -99,9 +99,9 @@ def benchmark_fn(fn: callable, warmup: int = 10, runs: int = 100) -> BenchResult
 def make_iter_proj_inputs(
     batch: int, h: int, w: int, seed: int = 42
 ) -> tuple[
-    Float[torch.Tensor, "b h w 9"],
-    Float[torch.Tensor, "b hw 3"],
-    Float[torch.Tensor, "b hw 2"],
+    Float[Tensor, "b h w 9"],
+    Float[Tensor, "b hw 3"],
+    Float[Tensor, "b hw 2"],
 ]:
     """Generate synthetic inputs for iter_proj kernel.
 
@@ -122,20 +122,20 @@ def make_iter_proj_inputs(
 
     # Ray image: [b, h, w, 9] — ray (3) + gx (3) + gy (3)
     # Use normalised random vectors for rays, small gradients
-    rays: Float[torch.Tensor, "b h w 3"] = torch.randn(batch, h, w, 3, device=DEVICE, generator=gen)
+    rays: Float[Tensor, "b h w 3"] = torch.randn(batch, h, w, 3, device=DEVICE, generator=gen)
     rays = rays / rays.norm(dim=-1, keepdim=True).clamp(min=1e-6)
-    gx: Float[torch.Tensor, "b h w 3"] = torch.randn(batch, h, w, 3, device=DEVICE, generator=gen) * 0.01
-    gy: Float[torch.Tensor, "b h w 3"] = torch.randn(batch, h, w, 3, device=DEVICE, generator=gen) * 0.01
-    rays_img: Float[torch.Tensor, "b h w 9"] = torch.cat([rays, gx, gy], dim=-1).contiguous()
+    gx: Float[Tensor, "b h w 3"] = torch.randn(batch, h, w, 3, device=DEVICE, generator=gen) * 0.01
+    gy: Float[Tensor, "b h w 3"] = torch.randn(batch, h, w, 3, device=DEVICE, generator=gen) * 0.01
+    rays_img: Float[Tensor, "b h w 9"] = torch.cat([rays, gx, gy], dim=-1).contiguous()
 
     # Target normalised 3D points
-    pts: Float[torch.Tensor, "b hw 3"] = torch.randn(batch, hw, 3, device=DEVICE, generator=gen)
-    pts_3d_norm: Float[torch.Tensor, "b hw 3"] = (pts / pts.norm(dim=-1, keepdim=True).clamp(min=1e-6)).contiguous()
+    pts: Float[Tensor, "b hw 3"] = torch.randn(batch, hw, 3, device=DEVICE, generator=gen)
+    pts_3d_norm: Float[Tensor, "b hw 3"] = (pts / pts.norm(dim=-1, keepdim=True).clamp(min=1e-6)).contiguous()
 
     # Initial pixel guesses — spread across the image, add small random offset
-    v_coords: Float[torch.Tensor, "hw"] = torch.arange(hw, device=DEVICE).float() // w
-    u_coords: Float[torch.Tensor, "hw"] = torch.arange(hw, device=DEVICE).float() % w
-    p_init: Float[torch.Tensor, "b hw 2"] = torch.stack([u_coords, v_coords], dim=-1).unsqueeze(0).expand(batch, -1, -1).contiguous().clone()
+    v_coords: Float[Tensor, "hw"] = torch.arange(hw, device=DEVICE).float() // w
+    u_coords: Float[Tensor, "hw"] = torch.arange(hw, device=DEVICE).float() % w
+    p_init: Float[Tensor, "b hw 2"] = torch.stack([u_coords, v_coords], dim=-1).unsqueeze(0).expand(batch, -1, -1).contiguous().clone()
     # Add small perturbation — use the seeded generator for reproducibility
     p_init += torch.randn(p_init.shape, device=DEVICE, generator=gen) * 2.0
     p_init[..., 0].clamp_(1.0, w - 2.0)
@@ -151,9 +151,9 @@ def make_iter_proj_inputs(
 def make_refine_matches_inputs(
     batch: int, h: int, w: int, fdim: int, seed: int = 42
 ) -> tuple[
-    Float[torch.Tensor, "b h w d"],
-    Float[torch.Tensor, "b hw d"],
-    Int[torch.Tensor, "b hw 2"],
+    Float[Tensor, "b h w d"],
+    Float[Tensor, "b hw d"],
+    Int[Tensor, "b hw 2"],
 ]:
     """Generate synthetic inputs for refine_matches kernel.
 
@@ -173,17 +173,17 @@ def make_refine_matches_inputs(
     hw: int = h * w
 
     # Descriptor maps — normalised random vectors
-    D11: Float[torch.Tensor, "b h w d"] = torch.randn(batch, h, w, fdim, device=DEVICE, generator=gen)
+    D11: Float[Tensor, "b h w d"] = torch.randn(batch, h, w, fdim, device=DEVICE, generator=gen)
     D11 = (D11 / D11.norm(dim=-1, keepdim=True).clamp(min=1e-6)).contiguous()
 
-    D21: Float[torch.Tensor, "b hw d"] = torch.randn(batch, hw, fdim, device=DEVICE, generator=gen)
+    D21: Float[Tensor, "b hw d"] = torch.randn(batch, hw, fdim, device=DEVICE, generator=gen)
     D21 = (D21 / D21.norm(dim=-1, keepdim=True).clamp(min=1e-6)).contiguous()
 
     # Initial match positions — within image bounds (need margin for search radius)
     margin: int = 4
-    u: Int[torch.Tensor, "b hw"] = torch.randint(margin, w - margin, (batch, hw), device=DEVICE, generator=gen)
-    v: Int[torch.Tensor, "b hw"] = torch.randint(margin, h - margin, (batch, hw), device=DEVICE, generator=gen)
-    p1: Int[torch.Tensor, "b hw 2"] = torch.stack([u, v], dim=-1).contiguous()
+    u: Int[Tensor, "b hw"] = torch.randint(margin, w - margin, (batch, hw), device=DEVICE, generator=gen)
+    v: Int[Tensor, "b hw"] = torch.randint(margin, h - margin, (batch, hw), device=DEVICE, generator=gen)
+    p1: Int[Tensor, "b hw 2"] = torch.stack([u, v], dim=-1).contiguous()
 
     return D11, D21, p1
 
@@ -211,22 +211,22 @@ class TestIterProj:
     )
     def test_numerical_match(self, batch: int, h: int, w: int) -> None:
         """Mojo iter_proj output matches CUDA within tolerance."""
-        rays_img: Float[torch.Tensor, "b h w 9"]
-        pts_3d_norm: Float[torch.Tensor, "b hw 3"]
-        p_init: Float[torch.Tensor, "b hw 2"]
+        rays_img: Float[Tensor, "b h w 9"]
+        pts_3d_norm: Float[Tensor, "b hw 3"]
+        p_init: Float[Tensor, "b hw 2"]
         rays_img, pts_3d_norm, p_init = make_iter_proj_inputs(batch, h, w)
 
         # CUDA oracle
-        p_cuda: Float[torch.Tensor, "b hw 2"]
-        conv_cuda: Bool[torch.Tensor, "b hw"]
+        p_cuda: Float[Tensor, "b hw 2"]
+        conv_cuda: Bool[Tensor, "b hw"]
         p_cuda, conv_cuda = cuda_backends.iter_proj(
             rays_img, pts_3d_norm, p_init,
             self.MAX_ITER, self.LAMBDA_INIT, self.COST_THRESH,
         )
 
         # Mojo under test
-        p_mojo: Float[torch.Tensor, "b hw 2"]
-        conv_mojo: Bool[torch.Tensor, "b hw"]
+        p_mojo: Float[Tensor, "b hw 2"]
+        conv_mojo: Bool[Tensor, "b hw"]
         p_mojo, conv_mojo = mojo_backends.iter_proj(
             rays_img, pts_3d_norm, p_init,
             self.MAX_ITER, self.LAMBDA_INIT, self.COST_THRESH,
@@ -252,16 +252,16 @@ class TestIterProj:
         batch: int = 1
         h: int = 32
         w: int = 32
-        rays_img: Float[torch.Tensor, "b h w 9"]
-        pts_3d_norm: Float[torch.Tensor, "b hw 3"]
-        _: Float[torch.Tensor, "b hw 2"]
+        rays_img: Float[Tensor, "b h w 9"]
+        pts_3d_norm: Float[Tensor, "b hw 3"]
+        _: Float[Tensor, "b hw 2"]
         rays_img, pts_3d_norm, _ = make_iter_proj_inputs(batch, h, w)
 
         # Identity init: each pixel maps to itself
         hw: int = h * w
-        v_coords: Float[torch.Tensor, "hw"] = torch.arange(hw, device=DEVICE).float() // w
-        u_coords: Float[torch.Tensor, "hw"] = torch.arange(hw, device=DEVICE).float() % w
-        p_init: Float[torch.Tensor, "1 hw 2"] = torch.stack([u_coords, v_coords], dim=-1).unsqueeze(0).contiguous()
+        v_coords: Float[Tensor, "hw"] = torch.arange(hw, device=DEVICE).float() // w
+        u_coords: Float[Tensor, "hw"] = torch.arange(hw, device=DEVICE).float() % w
+        p_init: Float[Tensor, "1 hw 2"] = torch.stack([u_coords, v_coords], dim=-1).unsqueeze(0).contiguous()
 
         p_cuda, conv_cuda = cuda_backends.iter_proj(
             rays_img, pts_3d_norm, p_init,
@@ -301,17 +301,17 @@ class TestRefineMatches:
         self, batch: int, h: int, w: int, fdim: int, radius: int, dilation_max: int
     ) -> None:
         """Mojo refine_matches output matches CUDA exactly (integer positions)."""
-        D11: Float[torch.Tensor, "b h w d"]
-        D21: Float[torch.Tensor, "b hw d"]
-        p1: Int[torch.Tensor, "b hw 2"]
+        D11: Float[Tensor, "b h w d"]
+        D21: Float[Tensor, "b hw d"]
+        p1: Int[Tensor, "b hw 2"]
         D11, D21, p1 = make_refine_matches_inputs(batch, h, w, fdim)
 
         # Keep half tensors alive across the async backend calls. Passing
         # ephemeral `.half()` temporaries directly can make this comparison
         # flaky because the kernel launch completes after Python drops the
         # temporary references.
-        D11_half: Float[torch.Tensor, "b h w d"] = D11.half().contiguous()
-        D21_half: Float[torch.Tensor, "b hw d"] = D21.half().contiguous()
+        D11_half: Float[Tensor, "b h w d"] = D11.half().contiguous()
+        D21_half: Float[Tensor, "b hw d"] = D21.half().contiguous()
 
         # CUDA oracle — uses half precision internally
         (p1_cuda,) = cuda_backends.refine_matches(D11_half, D21_half, p1, radius, dilation_max)
@@ -397,7 +397,7 @@ class TestIterProjHypothesis:
         # Use mean absolute error (robust to the rare async stale-buffer
         # outlier that Hypothesis can trigger with rapid-fire CUDA calls).
         # The 99th percentile of diffs must be < 0.1 pixel.
-        diffs: Float[torch.Tensor, "b hw 2"] = (p_mojo - p_cuda).abs()
+        diffs: Float[Tensor, "b hw 2"] = (p_mojo - p_cuda).abs()
         pct99: float = diffs.quantile(0.99).item()
         assert pct99 < 0.1, (
             f"iter_proj single-iter fuzz: batch={batch} h={h} w={w} seed={seed} "
@@ -490,16 +490,16 @@ class TestRefineMatchesHypothesis:
         if margin >= h // 2 or margin >= w // 2:
             return  # Skip if image too small for search radius
 
-        D11: Float[torch.Tensor, "b h w d"]
-        D21: Float[torch.Tensor, "b hw d"]
-        p1: Int[torch.Tensor, "b hw 2"]
+        D11: Float[Tensor, "b h w d"]
+        D21: Float[Tensor, "b hw d"]
+        p1: Int[Tensor, "b hw 2"]
         D11, D21, p1 = make_refine_matches_inputs(batch, h, w, fdim, seed=seed)
         # Clamp positions to have sufficient margin for the search window
         p1[..., 0].clamp_(margin, w - margin - 1)
         p1[..., 1].clamp_(margin, h - margin - 1)
 
-        D11_half: Float[torch.Tensor, "b h w d"] = D11.half().contiguous()
-        D21_half: Float[torch.Tensor, "b hw d"] = D21.half().contiguous()
+        D11_half: Float[Tensor, "b h w d"] = D11.half().contiguous()
+        D21_half: Float[Tensor, "b hw d"] = D21.half().contiguous()
 
         (p1_cuda,) = cuda_backends.refine_matches(D11_half, D21_half, p1, radius, dilation_max)
         (p1_mojo,) = mojo_backends.refine_matches(D11_half, D21_half, p1, radius, dilation_max)
@@ -542,8 +542,8 @@ class TestRefineMatchesHypothesis:
         p1[..., 0].clamp_(margin, w - margin - 1)
         p1[..., 1].clamp_(margin, h - margin - 1)
 
-        D11_half: Float[torch.Tensor, "b h w d"] = D11.half().contiguous()
-        D21_half: Float[torch.Tensor, "b hw d"] = D21.half().contiguous()
+        D11_half: Float[Tensor, "b h w d"] = D11.half().contiguous()
+        D21_half: Float[Tensor, "b hw d"] = D21.half().contiguous()
 
         (p1_cuda,) = cuda_backends.refine_matches(D11_half, D21_half, p1, 3, 5)
         (p1_mojo,) = mojo_backends.refine_matches(D11_half, D21_half, p1, 3, 5)
@@ -564,8 +564,8 @@ class TestEdgeCases:
         """Single-point input (smallest possible workload)."""
         rays_img, pts_3d_norm, p_init = make_iter_proj_inputs(1, 4, 4, seed=99)
         # Only 1 point — slice to [1, 1, 3] and [1, 1, 2]
-        pts_1: Float[torch.Tensor, "1 1 3"] = pts_3d_norm[:, :1, :].contiguous()
-        pi_1: Float[torch.Tensor, "1 1 2"] = p_init[:, :1, :].contiguous()
+        pts_1: Float[Tensor, "1 1 3"] = pts_3d_norm[:, :1, :].contiguous()
+        pi_1: Float[Tensor, "1 1 2"] = p_init[:, :1, :].contiguous()
 
         p_cuda, conv_cuda = cuda_backends.iter_proj(rays_img, pts_1, pi_1, 5, 1.0, 1e-4)
         p_mojo, conv_mojo = mojo_backends.iter_proj(rays_img, pts_1, pi_1, 5, 1.0, 1e-4)
@@ -587,14 +587,14 @@ class TestEdgeCases:
     def test_refine_matches_single_point(self) -> None:
         """Single match point."""
         D11, D21, p1 = make_refine_matches_inputs(1, 16, 16, 16, seed=77)
-        D21_1: Float[torch.Tensor, "1 1 16"] = D21[:, :1, :].contiguous()
-        p1_1: Int[torch.Tensor, "1 1 2"] = p1[:, :1, :].contiguous()
+        D21_1: Float[Tensor, "1 1 16"] = D21[:, :1, :].contiguous()
+        p1_1: Int[Tensor, "1 1 2"] = p1[:, :1, :].contiguous()
         # Ensure position is well within bounds
         p1_1[..., 0] = 8
         p1_1[..., 1] = 8
 
-        D11_half: Float[torch.Tensor, "1 16 16 16"] = D11.half().contiguous()
-        D21_half: Float[torch.Tensor, "1 1 16"] = D21_1.half().contiguous()
+        D11_half: Float[Tensor, "1 16 16 16"] = D11.half().contiguous()
+        D21_half: Float[Tensor, "1 1 16"] = D21_1.half().contiguous()
         (p_cuda,) = cuda_backends.refine_matches(D11_half, D21_half, p1_1, 2, 2)
         (p_mojo,) = mojo_backends.refine_matches(D11_half, D21_half, p1_1, 2, 2)
         sync()
@@ -614,11 +614,11 @@ class TestEdgeCases:
         # Place matches at corners and edges
         corners: list[tuple[int, int]] = [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1), (w // 2, 0), (0, h // 2)]
         n: int = len(corners)
-        p1: Int[torch.Tensor, "1 n 2"] = torch.tensor([[list(c) for c in corners]], device=DEVICE, dtype=torch.long)
-        D21_sub: Float[torch.Tensor, "1 n 16"] = D21[:, :n, :].contiguous()
+        p1: Int[Tensor, "1 n 2"] = torch.tensor([[list(c) for c in corners]], device=DEVICE, dtype=torch.long)
+        D21_sub: Float[Tensor, "1 n 16"] = D21[:, :n, :].contiguous()
 
-        D11_half: Float[torch.Tensor, "1 32 32 16"] = D11.half().contiguous()
-        D21_half: Float[torch.Tensor, "1 n 16"] = D21_sub.half().contiguous()
+        D11_half: Float[Tensor, "1 32 32 16"] = D11.half().contiguous()
+        D21_half: Float[Tensor, "1 n 16"] = D21_sub.half().contiguous()
         (p_cuda,) = cuda_backends.refine_matches(D11_half, D21_half, p1, 1, 1)
         (p_mojo,) = mojo_backends.refine_matches(D11_half, D21_half, p1, 1, 1)
         sync()
@@ -632,8 +632,8 @@ class TestEdgeCases:
         """Radius 0 should not crash (though not typically used)."""
         D11, D21, p1 = make_refine_matches_inputs(1, 16, 16, 16, seed=33)
         # radius=0 means no search — dilation loop does nothing
-        D11_half: Float[torch.Tensor, "1 16 16 16"] = D11.half().contiguous()
-        D21_half: Float[torch.Tensor, "1 256 16"] = D21.half().contiguous()
+        D11_half: Float[Tensor, "1 16 16 16"] = D11.half().contiguous()
+        D21_half: Float[Tensor, "1 256 16"] = D21.half().contiguous()
         (p_cuda,) = cuda_backends.refine_matches(D11_half, D21_half, p1, 0, 1)
         (p_mojo,) = mojo_backends.refine_matches(D11_half, D21_half, p1, 0, 1)
         sync()
@@ -648,8 +648,8 @@ class TestEdgeCases:
             p1[..., 0].clamp_(3, 12)
             p1[..., 1].clamp_(3, 12)
 
-            D11_half: Float[torch.Tensor, "1 16 16 d"] = D11.half().contiguous()
-            D21_half: Float[torch.Tensor, "1 256 d"] = D21.half().contiguous()
+            D11_half: Float[Tensor, "1 16 16 d"] = D11.half().contiguous()
+            D21_half: Float[Tensor, "1 256 d"] = D21.half().contiguous()
             (p_cuda,) = cuda_backends.refine_matches(D11_half, D21_half, p1, 1, 1)
             (p_mojo,) = mojo_backends.refine_matches(D11_half, D21_half, p1, 1, 1)
             sync()

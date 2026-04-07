@@ -10,10 +10,7 @@ eliminating any zombie process risk on test failure.
 
 from pathlib import Path
 
-import pytest
 import rerun as rr
-
-from conftest import BASELINE_RRD, PACKAGE_DIR
 
 
 def _get_entity_paths(rrd_path: Path) -> list[str]:

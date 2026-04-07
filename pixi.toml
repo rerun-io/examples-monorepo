@@ -41,6 +41,11 @@ simplecv = { git = "https://github.com/pablovela5620/simplecv.git", tag = "v0.7.
 
 
 # ─── CUDA 12.9 feature (shared across all GPU envs) ─────────────────────────
+# Restrict to linux-64: the CUDA toolchain, pytorch-gpu, and GPU-only deps
+# like torchcodec don't have conda-forge builds for linux-aarch64.
+[feature.cuda]
+platforms = ["linux-64"]
+
 [feature.cuda.system-requirements]
 cuda = "12.9"
 
@@ -674,8 +679,9 @@ platforms = ["linux-64"]
 
 [feature.mast3r-slam.dependencies]
 python = "3.11.*"
+torchcodec = "*"
 eigen = ">=3.4.0,<4"
-ffmpeg = ">=7.1.0,<8"
+ffmpeg = ">=7.1.0"
 open3d = ">=0.19.0,<0.20"
 faiss = "*"
 scikit-learn = "*"
@@ -718,7 +724,7 @@ inputs = [
     "packages/mast3r-slam/mast3r_slam/backend/include/*.h",
 ]
 outputs = [
-    "packages/mast3r-slam/mast3r_slam_backends*.so",
+    "packages/mast3r-slam/mast3r_slam/_backends*.so",
 ]
 
 # ── Mojo kernel build ──────────────────────────────────────────────────

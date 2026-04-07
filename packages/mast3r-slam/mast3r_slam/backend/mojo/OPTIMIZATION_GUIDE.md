@@ -11,14 +11,14 @@ Replace CUDA/C++ matching kernels (`iter_proj`, `refine_matches`) with Mojo equi
 ```
 Python caller (mast3r_slam/matching.py)
   → try: import mast3r_slam_mojo_backends  (preferred, no C++ build)
-    except: import mast3r_slam_backends    (CUDA fallback)
+    except: from mast3r_slam import _backends  (CUDA fallback)
   → iter_proj_py() / refine_matches_py()   (Mojo, receives PythonObject)
     → Extract shapes, pointers from PyTorch tensors
     → get_cached_context_ptr() → enqueue_function[kernel]()
     → torch.cuda.synchronize()  (required: cross-stream correctness)
   → Return PyTorch tensors
 
-Note: global_opt.py still imports mast3r_slam_backends directly for the
+Note: global_opt.py still imports mast3r_slam._backends directly for the
 Gauss-Newton solvers which have not been ported to Mojo.
 ```
 
@@ -32,7 +32,7 @@ pixi run -e mast3r-slam-dev _build-mojo-kernels
 ```bash
 cd packages/mast3r-slam
 pixi run -e mast3r-slam-dev mojo build --emit shared-lib \
-  -o mast3r_slam_mojo_backends.so \
+  -o mast3r_slam/_mojo_backends.so \
   mast3r_slam/backend/mojo/matching_kernels.mojo
 ```
 
@@ -46,7 +46,7 @@ pixi run -e mast3r-slam-dev python -m pytest tests/test_mojo_vs_cuda.py -v -s
 PYTHONPATH=. pixi run -e mast3r-slam-dev python tools/bench_matching_kernels.py
 ```
 
-**Task wiring note:** the `mast3r-slam` Pixi baseline/example/app tasks now depend on both `_build-cuda-kernels` and `_build-mojo-kernels`, so the Mojo shared library is built automatically before those entrypoints run. The CUDA build is still required because `global_opt.py` still uses `mast3r_slam_backends`.
+**Task wiring note:** the `mast3r-slam` Pixi baseline/example/app tasks now depend on both `_build-cuda-kernels` and `_build-mojo-kernels`, so the Mojo shared library is built automatically before those entrypoints run. The CUDA build is still required because `global_opt.py` still uses `mast3r_slam._backends`.
 
 ## Current Performance (RTX 5090, median of 500 runs, verified 2026-04-05)
 
@@ -147,7 +147,7 @@ Python.add_object(module, "_ctx_addr", PythonObject(Int(ctx_storage)))
 
 # In each wrapper: retrieve via module lookup
 def get_cached_context_ptr() raises -> UnsafePointer[DeviceContext, MutAnyOrigin]:
-    var module = Python.import_module("mast3r_slam_mojo_backends")
+    var module = Python.import_module("mast3r_slam._mojo_backends")
     var ctx_addr = Int(py=module._ctx_addr)
     return UnsafePointer[DeviceContext, MutAnyOrigin](unsafe_from_address=ctx_addr)
 ```

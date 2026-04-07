@@ -1,4 +1,4 @@
-"""Build script for mast3r_slam_backends CUDA extension.
+"""Build script for mast3r_slam._backends CUDA extension.
 
 When installed as a pypi-dependency (via pixi), this is a pure-Python package.
 The CUDA extension is compiled separately via a pixi task:
@@ -6,6 +6,11 @@ The CUDA extension is compiled separately via a pixi task:
     python setup.py build_ext --inplace
 
 inside the activated pixi environment (which provides torch + nvcc).
+
+The extension is namespaced inside the package (``mast3r_slam._backends``)
+so that ``--inplace`` places the ``.so`` inside ``mast3r_slam/``, where the
+editable install's finder already looks.  This follows the same pattern used
+by PyTorch3D (``pytorch3d._C``) and Detectron2 (``detectron2._C``).
 """
 
 import os
@@ -19,7 +24,7 @@ if "build_ext" in sys.argv:
     from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
     if not torch.cuda.is_available():
-        raise RuntimeError("CUDA not found, cannot compile mast3r_slam_backends!")
+        raise RuntimeError("CUDA not found, cannot compile mast3r_slam._backends!")
 
     ROOT = os.path.dirname(os.path.abspath(__file__))
     conda_prefix = os.environ.get("CONDA_PREFIX", "")
@@ -27,7 +32,7 @@ if "build_ext" in sys.argv:
     setup(
         ext_modules=[
             CUDAExtension(
-                "mast3r_slam_backends",
+                "mast3r_slam._backends",
                 include_dirs=[
                     os.path.join(ROOT, "mast3r_slam/backend/include"),
                     os.path.join(conda_prefix, "include", "eigen3"),

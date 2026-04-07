@@ -2,26 +2,27 @@ import pathlib
 import re
 
 import cv2
-from natsort import natsorted
 import numpy as np
 import torch
 from jaxtyping import Float32, UInt8
+from natsort import natsorted
+from numpy import ndarray
 
 try:
     import pyrealsense2 as rs
 except ImportError:
     rs = None
+from typing import Literal
+
 import yaml
 
-from mast3r_slam.mast3r_utils import resize_img
 from mast3r_slam.config import config
-
-from typing import Literal
+from mast3r_slam.mast3r_utils import resize_img
 
 HAS_TORCHCODEC: bool = True
 try:
     from torchcodec.decoders import VideoDecoder
-except Exception as e:
+except Exception:
     HAS_TORCHCODEC = False
 
 
@@ -49,18 +50,18 @@ class MonocularDataset(torch.utils.data.Dataset):
         """Return the number of frames in the dataset."""
         return len(self.rgb_files)
 
-    def __getitem__(self, idx: int) -> tuple[float | str, np.ndarray]:
+    def __getitem__(self, index: int) -> tuple[float | str, np.ndarray]:
         """Return (timestamp, image) for the given index.
 
         Args:
-            idx: Frame index.
+            index: Frame index.
 
         Returns:
             A tuple of (timestamp, normalised float image).
         """
         # Call get_image before timestamp for realsense camera
-        img: np.ndarray = self.get_image(idx)
-        timestamp = self.get_timestamp(idx)
+        img: Float32[ndarray, "h w 3"] = self.get_image(index)
+        timestamp = self.get_timestamp(index)
         return timestamp, img
 
     def get_timestamp(self, idx: int) -> float | str:
@@ -74,7 +75,7 @@ class MonocularDataset(torch.utils.data.Dataset):
         """
         return self.timestamps[idx]
 
-    def read_img(self, idx: int) -> UInt8[np.ndarray, "h w 3"]:
+    def read_img(self, idx: int) -> UInt8[ndarray, "h w 3"]:
         """Read the raw RGB image at the given index.
 
         Args:
@@ -83,10 +84,12 @@ class MonocularDataset(torch.utils.data.Dataset):
         Returns:
             RGB uint8 image of shape (h, w, 3).
         """
-        img: UInt8[np.ndarray, "h w 3"] = cv2.imread(self.rgb_files[idx])
+        img_raw = cv2.imread(self.rgb_files[idx])
+        assert img_raw is not None, f"Failed to read image: {self.rgb_files[idx]}"
+        img: UInt8[ndarray, "h w 3"] = img_raw
         return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-    def get_image(self, idx: int) -> Float32[np.ndarray, "h w 3"]:
+    def get_image(self, idx: int) -> Float32[ndarray, "h w 3"]:
         """Return the preprocessed float image (optionally undistorted) at the given index.
 
         Args:
@@ -95,10 +98,11 @@ class MonocularDataset(torch.utils.data.Dataset):
         Returns:
             Float32 image in [0, 1] range.
         """
-        img: np.ndarray = self.read_img(idx)
+        raw_img: UInt8[ndarray, "h w 3"] = self.read_img(idx)
         if self.use_calibration:
-            img = self.camera_intrinsics.remap(img)
-        return img.astype(self.dtype) / 255.0
+            assert self.camera_intrinsics is not None
+            raw_img = self.camera_intrinsics.remap(raw_img)
+        return raw_img.astype(self.dtype) / 255.0
 
     def get_img_shape(self) -> tuple[tuple[int, int], tuple[int, int]]:
         """Return the processed and raw image shapes.
@@ -106,11 +110,15 @@ class MonocularDataset(torch.utils.data.Dataset):
         Returns:
             A tuple of ((processed_h, processed_w), (raw_h, raw_w)).
         """
-        img: np.ndarray = self.read_img(0)
-        raw_img_shape: tuple[int, int] = img.shape[:2]
-        img = resize_img(img, self.img_size)
+        raw_img: UInt8[ndarray, "h w 3"] = self.read_img(0)
+        raw_img_shape: tuple[int, int] = raw_img.shape[:2]
+        # resize_img expects [0, 1] float input
+        normalized_img: Float32[ndarray, "h w 3"] = raw_img.astype(np.float32) / 255.0
+        resized = resize_img(normalized_img, self.img_size)
+        assert isinstance(resized, dict)
         # 3XHxW, HxWx3 -> HxW, HxW
-        return img["img"][0].shape[1:], raw_img_shape
+        processed_shape: torch.Size = resized["img"][0].shape[1:]
+        return (int(processed_shape[0]), int(processed_shape[1])), raw_img_shape
 
     def subsample(self, subsample: int) -> None:
         """Subsample the dataset by keeping every ``subsample``-th frame.
@@ -135,22 +143,25 @@ class TUMDataset(MonocularDataset):
         super().__init__(img_size=img_size)
         self.dataset_path: pathlib.Path = pathlib.Path(dataset_path)
         rgb_list: pathlib.Path = self.dataset_path / "rgb.txt"
-        tstamp_rgb = np.loadtxt(rgb_list, delimiter=" ", dtype=np.unicode_, skiprows=0)
+        tstamp_rgb = np.loadtxt(rgb_list, delimiter=" ", dtype=np.str_, skiprows=0)
         self.rgb_files = [self.dataset_path / f for f in tstamp_rgb[:, 1]]
-        self.timestamps = tstamp_rgb[:, 0]
+        self.timestamps = list(tstamp_rgb[:, 0])
 
         match = re.search(r"freiburg(\d+)", dataset_path)
+        assert match is not None, f"Could not find freiburg index in path: {dataset_path}"
         idx: int = int(match.group(1))
         if idx == 1:
             calib = np.array(
                 [517.3, 516.5, 318.6, 255.3, 0.2624, -0.9531, -0.0054, 0.0026, 1.1633]
             )
-        if idx == 2:
+        elif idx == 2:
             calib = np.array(
                 [520.9, 521.0, 325.1, 249.7, 0.2312, -0.7849, -0.0033, -0.0001, 0.9172]
             )
-        if idx == 3:
+        elif idx == 3:
             calib = np.array([535.4, 539.2, 320.1, 247.6])
+        else:
+            raise ValueError(f"Unknown TUM freiburg index: {idx}")
         W: int = 640
         H: int = 480
         self.camera_intrinsics = Intrinsics.from_calib(self.img_size, W, H, calib)
@@ -164,11 +175,11 @@ class EurocDataset(MonocularDataset):
         self.use_calibration: bool = True
         self.dataset_path: pathlib.Path = pathlib.Path(dataset_path)
         rgb_list: pathlib.Path = self.dataset_path / "mav0/cam0/data.csv"
-        tstamp_rgb = np.loadtxt(rgb_list, delimiter=",", dtype=np.unicode_, skiprows=0)
+        tstamp_rgb = np.loadtxt(rgb_list, delimiter=",", dtype=np.str_, skiprows=0)
         self.rgb_files = [
             self.dataset_path / "mav0/cam0/data" / f for f in tstamp_rgb[:, 1]
         ]
-        self.timestamps = tstamp_rgb[:, 0]
+        self.timestamps = list(tstamp_rgb[:, 0])
         with open(self.dataset_path / "mav0/cam0/sensor.yaml") as f:
             self.cam0 = yaml.load(f, Loader=yaml.FullLoader)
         W: int
@@ -180,8 +191,10 @@ class EurocDataset(MonocularDataset):
             self.img_size, W, H, [*intrinsics, *distortion], always_undistort=True
         )
 
-    def read_img(self, idx: int) -> UInt8[np.ndarray, "h w 3"]:
-        img = cv2.imread(self.rgb_files[idx], cv2.IMREAD_GRAYSCALE)
+    def read_img(self, idx: int) -> UInt8[ndarray, "h w 3"]:
+        img_raw = cv2.imread(self.rgb_files[idx], cv2.IMREAD_GRAYSCALE)
+        assert img_raw is not None, f"Failed to read image: {self.rgb_files[idx]}"
+        img = img_raw
         return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
 
@@ -190,9 +203,9 @@ class ETH3DDataset(MonocularDataset):
         super().__init__(img_size=img_size)
         self.dataset_path: pathlib.Path = pathlib.Path(dataset_path)
         rgb_list: pathlib.Path = self.dataset_path / "rgb.txt"
-        tstamp_rgb = np.loadtxt(rgb_list, delimiter=" ", dtype=np.unicode_, skiprows=0)
+        tstamp_rgb = np.loadtxt(rgb_list, delimiter=" ", dtype=np.str_, skiprows=0)
         self.rgb_files = [self.dataset_path / f for f in tstamp_rgb[:, 1]]
-        self.timestamps = tstamp_rgb[:, 0]
+        self.timestamps = list(tstamp_rgb[:, 0])
         calibration = np.loadtxt(
             self.dataset_path / "calibration.txt",
             delimiter=" ",
@@ -210,7 +223,7 @@ class SevenScenesDataset(MonocularDataset):
         self.rgb_files = natsorted(
             list((self.dataset_path / "seq-01").glob("*.color.png"))
         )
-        self.timestamps = np.arange(0, len(self.rgb_files)).astype(self.dtype)
+        self.timestamps = list(np.arange(0, len(self.rgb_files)).astype(self.dtype))
         fx: float = 585.0
         fy: float = 585.0
         cx: float = 320.0
@@ -223,6 +236,7 @@ class SevenScenesDataset(MonocularDataset):
 class RealsenseDataset(MonocularDataset):
     def __init__(self, img_size: Literal[224, 512] = 512) -> None:
         super().__init__(img_size=img_size)
+        assert rs is not None, "pyrealsense2 is required for RealsenseDataset"
         self.dataset_path = None
         self.pipeline = rs.pipeline()
         # self.h, self.w = 720, 1280
@@ -263,14 +277,14 @@ class RealsenseDataset(MonocularDataset):
     def get_timestamp(self, idx: int) -> float:
         return self.timestamps[idx]
 
-    def read_img(self, idx: int) -> UInt8[np.ndarray, "h w 3"]:
+    def read_img(self, idx: int) -> UInt8[ndarray, "h w 3"]:
         frameset = self.pipeline.wait_for_frames()
         timestamp: float = frameset.get_timestamp()
         timestamp /= 1000
         self.timestamps.append(timestamp)
 
         rgb_frame = frameset.get_color_frame()
-        img: UInt8[np.ndarray, "h w 3"] = np.asanyarray(rgb_frame.get_data())
+        img: UInt8[ndarray, "h w 3"] = np.asanyarray(rgb_frame.get_data())
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img = img.astype(self.dtype)
         return img
@@ -291,9 +305,9 @@ class Webcam(MonocularDataset):
     def get_timestamp(self, idx: int) -> float:
         return self.timestamps[idx]
 
-    def read_img(self, idx: int) -> UInt8[np.ndarray, "h w 3"]:
+    def read_img(self, idx: int) -> UInt8[ndarray, "h w 3"]:
         ret: bool
-        img: UInt8[np.ndarray, "h w 3"]
+        img: UInt8[ndarray, "h w 3"]
         ret, img = self.cap.read()
         if not ret:
             raise ValueError("Failed to read image")
@@ -323,19 +337,17 @@ class MP4Dataset(MonocularDataset):
     def __len__(self) -> int:
         return self.total_frames // self.stride
 
-    def read_img(self, idx: int) -> np.ndarray:
+    def read_img(self, idx: int) -> UInt8[ndarray, "h w 3"]:
         if HAS_TORCHCODEC:
-            img = self.decoder[idx * self.stride]  # c,h,w
-            img = img.permute(1, 2, 0)
-            img = img.numpy()
+            img_tensor = self.decoder[idx * self.stride]  # c,h,w uint8
+            img: UInt8[ndarray, "h w 3"] = img_tensor.permute(1, 2, 0).numpy()
         else:
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, idx * self.stride)
             ret: bool
-            ret, img = self.cap.read()
+            ret, frame = self.cap.read()
             if not ret:
                 raise ValueError("Failed to read image")
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img = img.astype(self.dtype)
+            img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         timestamp: float = idx / self.fps
         self.timestamps.append(timestamp)
         return img
@@ -351,7 +363,7 @@ class RGBFiles(MonocularDataset):
         jpg_files: list[pathlib.Path] = list((self.dataset_path).glob("*.jpg"))
         jpeg_files: list[pathlib.Path] = list((self.dataset_path).glob("*.jpeg"))
         self.rgb_files = natsorted(png_files + jpg_files + jpeg_files)
-        self.timestamps = np.arange(0, len(self.rgb_files)).astype(self.dtype) / 30.0
+        self.timestamps = list(np.arange(0, len(self.rgb_files)).astype(self.dtype) / 30.0)
 
 
 class Intrinsics:
@@ -367,11 +379,11 @@ class Intrinsics:
         img_size: Literal[224, 512],
         W: int,
         H: int,
-        K_orig: Float32[np.ndarray, "3 3"],
-        K: Float32[np.ndarray, "3 3"],
-        distortion: Float32[np.ndarray, "n_distortion"],
-        mapx: Float32[np.ndarray, "H W"] | None,
-        mapy: Float32[np.ndarray, "H W"] | None,
+        K_orig: Float32[ndarray, "3 3"],
+        K: Float32[ndarray, "3 3"],
+        distortion: Float32[ndarray, "n_distortion"],
+        mapx: Float32[ndarray, "H W"] | None,
+        mapy: Float32[ndarray, "H W"] | None,
     ) -> None:
         self.img_size: Literal[224, 512] = img_size
         """Target image size for MASt3R (224 or 512)."""
@@ -379,27 +391,29 @@ class Intrinsics:
         """Original image width in pixels."""
         self.H: int = H
         """Original image height in pixels."""
-        self.K_orig: Float32[np.ndarray, "3 3"] = K_orig
+        self.K_orig: Float32[ndarray, "3 3"] = K_orig
         """Original 3x3 camera intrinsic matrix."""
-        self.K: Float32[np.ndarray, "3 3"] = K
+        self.K: Float32[ndarray, "3 3"] = K
         """Optimal 3x3 camera intrinsic matrix after undistortion."""
-        self.distortion: Float32[np.ndarray, "n_distortion"] = distortion
+        self.distortion: Float32[ndarray, "n_distortion"] = distortion
         """Distortion coefficients."""
-        self.mapx: Float32[np.ndarray, "H W"] | None = mapx
+        self.mapx: Float32[ndarray, "H W"] | None = mapx
         """Horizontal undistortion remap table."""
-        self.mapy: Float32[np.ndarray, "H W"] | None = mapy
+        self.mapy: Float32[ndarray, "H W"] | None = mapy
         """Vertical undistortion remap table."""
-        _, (scale_w, scale_h, half_crop_w, half_crop_h) = resize_img(
+        resize_result = resize_img(
             np.zeros((H, W, 3)), self.img_size, return_transformation=True
         )
-        self.K_frame: Float32[np.ndarray, "3 3"] = self.K.copy()
+        assert isinstance(resize_result, tuple)
+        _, (scale_w, scale_h, half_crop_w, half_crop_h) = resize_result
+        self.K_frame: Float32[ndarray, "3 3"] = self.K.copy()
         """Intrinsic matrix transformed to the MASt3R frame coordinate system."""
         self.K_frame[0, 0] = self.K[0, 0] / scale_w
         self.K_frame[1, 1] = self.K[1, 1] / scale_h
         self.K_frame[0, 2] = self.K[0, 2] / scale_w - half_crop_w
         self.K_frame[1, 2] = self.K[1, 2] / scale_h - half_crop_h
 
-    def remap(self, img: UInt8[np.ndarray, "H W 3"]) -> UInt8[np.ndarray, "H W 3"]:
+    def remap(self, img: UInt8[ndarray, "H W 3"]) -> UInt8[ndarray, "H W 3"]:
         """Apply undistortion remap to an image.
 
         Args:
@@ -408,6 +422,8 @@ class Intrinsics:
         Returns:
             Undistorted image.
         """
+        assert self.mapx is not None
+        assert self.mapy is not None
         return cv2.remap(img, self.mapx, self.mapy, cv2.INTER_LINEAR)
 
     @staticmethod
@@ -437,19 +453,19 @@ class Intrinsics:
         fy: float = calib[1]
         cx: float = calib[2]
         cy: float = calib[3]
-        distortion: Float32[np.ndarray, "n_distortion"] = np.zeros(4)
+        distortion: Float32[ndarray, "n_distortion"] = np.zeros(4)
         if len(calib) > 4:
             distortion = np.array(calib[4:])
-        K: Float32[np.ndarray, "3 3"] = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]])
-        K_opt: Float32[np.ndarray, "3 3"] = K.copy()
-        mapx: Float32[np.ndarray, "H W"] | None = None
-        mapy: Float32[np.ndarray, "H W"] | None = None
+        K: Float32[ndarray, "3 3"] = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]])
+        K_opt: Float32[ndarray, "3 3"] = K.copy()
+        mapx: Float32[ndarray, "H W"] | None = None
+        mapy: Float32[ndarray, "H W"] | None = None
         center: bool = config["dataset"]["center_principle_point"]
         K_opt, _ = cv2.getOptimalNewCameraMatrix(
             K, distortion, (W, H), 0, (W, H), centerPrincipalPoint=center
         )
         mapx, mapy = cv2.initUndistortRectifyMap(
-            K, distortion, None, K_opt, (W, H), cv2.CV_32FC1
+            K, distortion, np.eye(3, dtype=np.float64), K_opt, (W, H), cv2.CV_32FC1
         )
 
         return Intrinsics(img_size, W, H, K, K_opt, distortion, mapx, mapy)
