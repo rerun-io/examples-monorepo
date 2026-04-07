@@ -18,7 +18,7 @@ from typing import Literal
 import yaml
 
 from mast3r_slam.config import config
-from mast3r_slam.mast3r_utils import resize_img
+from mast3r_slam.image_utils import resize_img
 
 logger: logging.Logger = logging.getLogger(__name__)
 

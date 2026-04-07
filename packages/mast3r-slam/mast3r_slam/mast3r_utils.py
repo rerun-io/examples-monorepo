@@ -3,10 +3,7 @@ from typing import Any, Literal
 import einops
 import mast3r.utils.path_to_dust3r  # noqa
 import numpy as np
-import PIL
-import PIL.Image
 import torch
-from dust3r.utils.image import ImgNorm
 from jaxtyping import Bool, Float, Float32, Int
 from mast3r.model import AsymmetricMASt3R
 from numpy import ndarray
@@ -16,11 +13,10 @@ from torch import Tensor
 
 import mast3r_slam.matching as matching
 from mast3r_slam.config import config
+from mast3r_slam.frame import Frame
+from mast3r_slam.image_utils import resize_img
 from mast3r_slam.lietorch_utils import as_SE3
 from mast3r_slam.retrieval_database import RetrievalDatabase
-
-# NOTE: Frame cannot be imported here due to circular import (frame -> mast3r_utils -> frame).
-# Functions that accept Frame use `object` as the runtime type hint.
 
 
 def load_mast3r(path: str | None = None, device: str = "cuda") -> AsymmetricMASt3R:
@@ -144,7 +140,7 @@ def downsample(
 
 @torch.inference_mode()
 def mast3r_symmetric_inference(
-    model: AsymmetricMASt3R, frame_i: object, frame_j: object
+    model: AsymmetricMASt3R, frame_i: Frame, frame_j: Frame
 ) -> tuple[
     Float[Tensor, "4 h w 3"],
     Float[Tensor, "4 h w"],
@@ -259,7 +255,7 @@ def mast3r_decode_symmetric_batch(
 
 @torch.inference_mode()
 def mast3r_inference_mono(
-    model: AsymmetricMASt3R, frame: object
+    model: AsymmetricMASt3R, frame: Frame
 ) -> tuple[Float[Tensor, "hw 3"], Float[Tensor, "hw 1"]]:
     """Run monocular self-inference on a single frame.
 
@@ -378,7 +374,7 @@ def mast3r_match_symmetric(
 
 @torch.inference_mode()
 def mast3r_asymmetric_inference(
-    model: AsymmetricMASt3R, frame_i: object, frame_j: object
+    model: AsymmetricMASt3R, frame_i: Frame, frame_j: Frame
 ) -> tuple[
     Float[Tensor, "2 h w 3"],
     Float[Tensor, "2 h w"],
@@ -426,8 +422,8 @@ def mast3r_asymmetric_inference(
 
 def mast3r_match_asymmetric(
     model: AsymmetricMASt3R,
-    frame_i: object,
-    frame_j: object,
+    frame_i: Frame,
+    frame_j: Frame,
     idx_i2j_init: Int[Tensor, "b hw"] | None = None,
 ) -> tuple[
     Int[Tensor, "b hw"],
@@ -480,90 +476,6 @@ def mast3r_match_asymmetric(
     Qii, Qji = einops.rearrange(Q, "b h w -> b (h w) 1")
 
     return idx_i2j, valid_match_j, Xii, Cii, Qii, Xji, Cji, Qji
-
-
-def _resize_pil_image(img: PIL.Image.Image, long_edge_size: int) -> PIL.Image.Image:
-    """Resize a PIL image so its longest edge matches the given size.
-
-    Uses Lanczos interpolation when downscaling and bicubic when upscaling.
-
-    Args:
-        img: The input PIL image.
-        long_edge_size: Desired length of the longest edge in pixels.
-
-    Returns:
-        The resized PIL image.
-    """
-    S = max(img.size)
-    if long_edge_size < S:
-        interp = PIL.Image.Resampling.LANCZOS
-    else:
-        interp = PIL.Image.Resampling.BICUBIC
-    new_size = tuple(int(round(x * long_edge_size / S)) for x in img.size)
-    return img.resize(new_size, interp)
-
-
-def resize_img(
-    img: Float[ndarray, "h w 3"],
-    size: Literal[224, 512],
-    square_ok: bool = False,
-    return_transformation: bool = False,
-) -> dict[str, Any] | tuple[dict[str, Any], tuple[float, float, float, float]]:
-    """Resize and normalize an image for MASt3R input.
-
-    Converts a float ``[0, 1]`` HWC numpy image to a PIL image, resizes it to
-    the target resolution (224 with center-crop or 512 with padding-friendly
-    crop), applies ``ImgNorm``, and returns the processed tensors.
-
-    Args:
-        img: Input RGB image in ``[0, 1]`` float range, shape ``(H, W, 3)``.
-        size: Target resolution -- ``224`` (center-crop to square) or ``512``
-            (resize long edge, crop to 16-pixel-aligned dimensions).
-        square_ok: When ``True`` and ``size=512``, allow square output even if
-            the resized image is square.
-        return_transformation: When ``True``, also return the crop/scale
-            parameters needed to map back to the original image coordinates.
-
-    Returns:
-        A dict with keys ``"img"`` (normalized ``(1, 3, h, w)`` tensor),
-        ``"true_shape"`` (``(1, 2)`` int32 array), and ``"unnormalized_img"``
-        (uint8 HWC array). When ``return_transformation`` is ``True``, returns
-        a tuple of ``(dict, (scale_w, scale_h, half_crop_w, half_crop_h))``.
-    """
-    assert size == 224 or size == 512
-    # numpy to PIL format
-    img = PIL.Image.fromarray(np.uint8(img * 255))
-    W1, H1 = img.size
-    if size == 224:
-        # resize short side to 224 (then crop)
-        img = _resize_pil_image(img, round(size * max(W1 / H1, H1 / W1)))
-    else:
-        # resize long side to 512
-        img = _resize_pil_image(img, size)
-    W, H = img.size
-    cx, cy = W // 2, H // 2
-    if size == 224:
-        half = min(cx, cy)
-        img = img.crop((cx - half, cy - half, cx + half, cy + half))
-    else:
-        halfw, halfh = ((2 * cx) // 16) * 8, ((2 * cy) // 16) * 8
-        if not (square_ok) and W == H:
-            halfh = 3 * halfw / 4
-        img = img.crop((cx - halfw, cy - halfh, cx + halfw, cy + halfh))
-
-    res = dict(
-        img=ImgNorm(img)[None],
-        true_shape=np.array([img.size[::-1]], dtype=np.int32),
-        unnormalized_img=np.asarray(img),
-    )
-    if return_transformation:
-        scale_w = W1 / W
-        scale_h = H1 / H
-        half_crop_w = (W - img.size[0]) / 2
-        half_crop_h = (H - img.size[1]) / 2
-        return res, (scale_w, scale_h, half_crop_w, half_crop_h)
-
-    return res
 
 
 def xy_grid(
@@ -702,7 +614,7 @@ def estimate_focal_knowing_depth(
     return focal
 
 
-def frame_to_intir(frame: object) -> tuple[tuple[float, float], tuple[float, float]]:
+def frame_to_intir(frame: Frame) -> tuple[tuple[float, float], tuple[float, float]]:
     """Estimate focal length and principal point from a Frame's 3D point map.
 
     Args:
@@ -724,7 +636,7 @@ def frame_to_intir(frame: object) -> tuple[tuple[float, float], tuple[float, flo
     return (focal, focal), (float(pp[0].item()), float(pp[1].item()))
 
 
-def frame_to_extrinsics(frame: object) -> Extrinsics:
+def frame_to_extrinsics(frame: Frame) -> Extrinsics:
     """Convert a Frame's lietorch Sim3 pose to simplecv Extrinsics in GL convention.
 
     Args:
@@ -744,7 +656,7 @@ def frame_to_extrinsics(frame: object) -> Extrinsics:
     )
 
 
-def frame_to_pinhole(frame: object) -> PinholeParameters:
+def frame_to_pinhole(frame: Frame) -> PinholeParameters:
     """Convert a Frame into a simplecv PinholeParameters.
 
     Estimates focal length from the frame's 3D point map, converts the
