@@ -71,7 +71,11 @@ def create_blueprints(parent_log_path: Path, timeline: str = FRAME_TIMELINE) -> 
         rrb.Horizontal(
             rrb.Spatial3DView(
                 origin="/",
-                contents=[f"+ {parent_log_path}/**"],
+                contents=[
+                    f"+ {parent_log_path}/**",
+                    f"- {parent_log_path}/current_camera/pinhole/video",
+                    f"- {parent_log_path}/current_camera/pinhole/video/**",
+                ],
             ),
             rrb.Tabs(views, logs, active_tab=0),
             column_shares=(3, 1),
