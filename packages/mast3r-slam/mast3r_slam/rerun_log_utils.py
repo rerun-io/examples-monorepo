@@ -67,6 +67,8 @@ def create_blueprints(parent_log_path: Path, timeline: str = FRAME_TIMELINE) -> 
                     f"+ {parent_log_path}/**",
                     f"- {parent_log_path}/current_camera/pinhole/video",
                     f"- {parent_log_path}/current_camera/pinhole/video/**",
+                    f"- {parent_log_path}/**/pointmap_depth",
+                    f"- {parent_log_path}/**/pointmap_depth/**",
                     f"- {parent_log_path}/keyframes/**/pinhole/pointmap_depth",
                     f"- {parent_log_path}/keyframes/**/pinhole/pointmap_depth/**",
                     f"- {parent_log_path}/last_keyframe/pointmap_depth",
