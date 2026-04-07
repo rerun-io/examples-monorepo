@@ -73,20 +73,20 @@ class RerunLogger:
     def _log_orient_transform(self, keyframes: SharedKeyframes, n_kf: int) -> None:
         """Recompute gravity-alignment from all keyframe poses and update the transform.
 
-        Collects all ``n_kf`` keyframe world-from-camera poses (in GL convention
-        via ``frame_to_pinhole``), runs ``auto_orient_and_center_poses(method="up")``
+        Collects all ``n_kf`` keyframe world-from-camera poses in MASt3R's native
+        CV/RDF convention, runs ``auto_orient_and_center_poses(method="up")``
         to align the reconstruction's up-vector with the Y axis, and logs the
         resulting rotation+translation on ``parent_log_path``.
         """
-        world_T_cam_gl_list: list[Float32[ndarray, "4 4"]] = []
+        world_T_cam_list: list[Float32[ndarray, "4 4"]] = []
         for i in range(n_kf):
             kf: Frame = keyframes[i]
-            kf_ext = frame_to_extrinsics(kf)
-            world_T_cam_gl_list.append(kf_ext.world_T_cam.astype(np.float32))
+            kf_ext = frame_to_extrinsics(kf, camera_conventions="RDF")
+            world_T_cam_list.append(kf_ext.world_T_cam.astype(np.float32))
 
-        world_T_cam_gl: Float32[ndarray, "n_kf 4 4"] = np.stack(world_T_cam_gl_list)
+        world_T_cam: Float32[ndarray, "n_kf 4 4"] = np.stack(world_T_cam_list)
         orient_34: Float[ndarray, "3 4"] = auto_orient_and_center_poses(
-            world_T_cam_gl, method="up", center_method="poses"
+            world_T_cam, method="up", center_method="poses"
         ).transform
         orient_R: Float[ndarray, "3 3"] = orient_34[:, :3]
         orient_t: Float[ndarray, "3"] = orient_34[:, 3]
@@ -116,7 +116,7 @@ class RerunLogger:
             self._log_orient_transform(keyframes, n_kf)
 
         # ── Current camera ─────────────────────────────────────────────────
-        current_pinhole = frame_to_pinhole(current_frame)
+        current_pinhole = frame_to_pinhole(current_frame, camera_conventions="RDF")
         cam_log_path: Path = self.parent_log_path / "current_camera"
 
         log_pinhole(
@@ -179,7 +179,7 @@ class RerunLogger:
             # Always update the keyframe's camera; its pose may be refined by
             # the backend's global optimisation since the last log call.
             log_pinhole(
-                camera=frame_to_pinhole(keyframe),
+                camera=frame_to_pinhole(keyframe, camera_conventions="RDF"),
                 cam_log_path=kf_cam_log_path,
                 image_plane_distance=self.image_plane_distance,
             )

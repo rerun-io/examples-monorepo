@@ -601,14 +601,15 @@ def estimate_focal_knowing_depth(
     return focal
 
 
-def frame_to_intri(frame: Frame) -> Intrinsics:
+def frame_to_intri(frame: Frame, camera_conventions: Literal["RDF", "RUB"] = "RUB") -> Intrinsics:
     """Estimate camera intrinsics from a Frame's 3D point map.
 
     Args:
         frame: A Frame with valid ``X_canon`` and ``img_shape``.
+        camera_conventions: Output camera axis convention for the returned intrinsics.
 
     Returns:
-        An ``Intrinsics`` object in RUB convention.
+        An ``Intrinsics`` object in the requested convention.
     """
     H: int = int(frame.img_shape.squeeze()[0].item())
     W: int = int(frame.img_shape.squeeze()[1].item())
@@ -619,7 +620,7 @@ def frame_to_intri(frame: Frame) -> Intrinsics:
     focal: float = float(estimate_focal_knowing_depth(pts3d[None], pp, focal_mode="weiszfeld"))
 
     return Intrinsics.from_focal_principal_point(
-        camera_conventions="RUB",
+        camera_conventions=camera_conventions,
         fl_x=focal,
         fl_y=focal,
         cx=float(pp[0].item()),
@@ -629,42 +630,47 @@ def frame_to_intri(frame: Frame) -> Intrinsics:
     )
 
 
-def frame_to_extrinsics(frame: Frame) -> Extrinsics:
-    """Convert a Frame's lietorch Sim3 pose to simplecv Extrinsics in GL convention.
+def frame_to_extrinsics(frame: Frame, camera_conventions: Literal["RDF", "RUB"] = "RUB") -> Extrinsics:
+    """Convert a Frame's lietorch Sim3 pose to simplecv Extrinsics in the requested convention.
 
     Args:
         frame: A Frame with a valid ``world_sim3_cam`` pose.
+        camera_conventions: Output camera axis convention for the returned extrinsics.
 
     Returns:
-        An ``Extrinsics`` in GL (RUB) convention.
+        An ``Extrinsics`` in the requested convention.
     """
     se3 = as_SE3(frame.world_sim3_cam.cpu())
     mat4x4_cv: Float32[ndarray, "4 4"] = se3.matrix().numpy().astype(np.float32)[0]
-    mat4x4_gl: Float32[ndarray, "4 4"] = conventions.convert_pose(
-        mat4x4_cv, src_convention=conventions.CC.CV, dst_convention=conventions.CC.GL
-    )
+    if camera_conventions == "RDF":
+        mat4x4_out: Float32[ndarray, "4 4"] = mat4x4_cv
+    else:
+        mat4x4_out = conventions.convert_pose(
+            mat4x4_cv, src_convention=conventions.CC.CV, dst_convention=conventions.CC.GL
+        )
     return Extrinsics(
-        world_R_cam=mat4x4_gl[:3, :3],
-        world_t_cam=mat4x4_gl[:3, 3],
+        world_R_cam=mat4x4_out[:3, :3],
+        world_t_cam=mat4x4_out[:3, 3],
     )
 
 
-def frame_to_pinhole(frame: Frame) -> PinholeParameters:
+def frame_to_pinhole(frame: Frame, camera_conventions: Literal["RDF", "RUB"] = "RUB") -> PinholeParameters:
     """Convert a Frame into a simplecv PinholeParameters.
 
     Estimates focal length from the frame's 3D point map, converts the
-    lietorch Sim3 pose to a 4x4 matrix in GL (RUB) convention, and
+    lietorch Sim3 pose to the requested camera convention, and
     packages everything into a ``PinholeParameters`` for use with
     ``simplecv.rerun_log_utils.log_pinhole``.
 
     Args:
         frame: A Frame with a valid ``X_canon`` point map and ``world_sim3_cam`` pose.
+        camera_conventions: Output camera axis convention for the returned pinhole.
 
     Returns:
-        A ``PinholeParameters`` in GL (RUB) convention.
+        A ``PinholeParameters`` in the requested convention.
     """
-    extrinsics: Extrinsics = frame_to_extrinsics(frame)
-    intrinsics: Intrinsics = frame_to_intri(frame)
+    extrinsics: Extrinsics = frame_to_extrinsics(frame, camera_conventions=camera_conventions)
+    intrinsics: Intrinsics = frame_to_intri(frame, camera_conventions=camera_conventions)
     return PinholeParameters(
         name=f"frame-{frame.frame_id}",
         extrinsics=extrinsics,
