@@ -99,14 +99,14 @@ def streaming_mast3r_slam_fn(
 
     ## rerun setup
     parent_log_path = Path("world")
-    rr_logger = RerunLogger(parent_log_path)
     frame_timestamps_ns = log_video_for_dataset(
         dataset,
         parent_log_path / "current_camera" / "pinhole" / "video",
         timeline=VIDEO_TIMELINE,
     )
     active_timeline: str = VIDEO_TIMELINE if frame_timestamps_ns is not None else FRAME_TIMELINE
-    blueprint = create_blueprints(parent_log_path=parent_log_path, timeline=active_timeline)
+    rr_logger = RerunLogger(parent_log_path, timeline=active_timeline)
+    blueprint = create_blueprints(parent_log_path=parent_log_path, timeline=active_timeline, n_keyframes=0)
     rr.send_blueprint(blueprint)
 
     h, w = dataset.get_img_shape()[0]

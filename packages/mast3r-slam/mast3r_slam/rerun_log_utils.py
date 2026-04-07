@@ -26,15 +26,19 @@ from mast3r_slam.mast3r_utils import frame_to_extrinsics, frame_to_pinhole
 
 FRAME_TIMELINE: str = "frame"
 VIDEO_TIMELINE: str = "video_time"
-DEPTH_LOG_ROOT: Path = Path("depths")
 
 
-def create_blueprints(parent_log_path: Path, timeline: str = FRAME_TIMELINE) -> rrb.Blueprint:
+def create_blueprints(
+    parent_log_path: Path,
+    timeline: str = FRAME_TIMELINE,
+    n_keyframes: int = 0,
+) -> rrb.Blueprint:
     """Create the default Rerun blueprint layout for the SLAM visualiser.
 
     Args:
         parent_log_path: Root log path for all Rerun entities.
         timeline: Timeline shown in the Rerun time panel.
+        n_keyframes: Number of keyframe depth entities to exclude from the 3D view.
 
     Returns:
         A configured Rerun Blueprint.
@@ -61,15 +65,24 @@ def create_blueprints(parent_log_path: Path, timeline: str = FRAME_TIMELINE) -> 
         name="Logs",
     )
     parent_log_root = f"/{parent_log_path}"
+    spatial3d_contents: list[str] = [
+        f"+ {parent_log_root}/**",
+        f"- {parent_log_root}/current_camera/pinhole/video",
+        f"- {parent_log_root}/current_camera/pinhole/video/**",
+        f"- {parent_log_root}/current_camera/pinhole/pointmap_depth",
+        f"- {parent_log_root}/last_keyframe/pointmap_depth",
+    ]
+    spatial3d_contents.extend(
+        [
+            f"- {parent_log_root}/keyframes/keyframe-{kf_idx}/pinhole/pointmap_depth"
+            for kf_idx in range(n_keyframes)
+        ]
+    )
     blueprint: rrb.Blueprint = rrb.Blueprint(
         rrb.Horizontal(
             rrb.Spatial3DView(
                 origin="/",
-                contents=[
-                    f"+ {parent_log_root}/**",
-                    f"- {parent_log_root}/current_camera/pinhole/video",
-                    f"- {parent_log_root}/current_camera/pinhole/video/**",
-                ],
+                contents=spatial3d_contents,
             ),
             rrb.Tabs(views, logs, active_tab=0),
             column_shares=(3, 1),
@@ -100,8 +113,9 @@ def log_video_for_dataset(
 class RerunLogger:
     """Logs frames, keyframes, camera paths, and factor-graph edges to Rerun."""
 
-    def __init__(self, parent_log_path: Path) -> None:
+    def __init__(self, parent_log_path: Path, timeline: str = FRAME_TIMELINE) -> None:
         self.parent_log_path: Path = parent_log_path
+        self.timeline: str = timeline
 
         self.path_list: list[list[float]] = []
         self.keyframe_logged_list: list[int] = []
@@ -109,7 +123,12 @@ class RerunLogger:
         self.conf_thresh: int = 7
         self.image_plane_distance: float = 0.2
         self._last_orient_n_kf: int = 0
+        self._last_blueprint_n_kf: int = -1
         """Number of keyframes used in the last orientation update."""
+
+    def _refresh_blueprint(self, n_kf: int) -> None:
+        rr.send_blueprint(create_blueprints(self.parent_log_path, timeline=self.timeline, n_keyframes=n_kf))
+        self._last_blueprint_n_kf = n_kf
 
     def _log_orient_transform(self, keyframes: SharedKeyframes, n_kf: int) -> None:
         """Recompute gravity-alignment from all keyframe poses and update the transform.
@@ -172,7 +191,6 @@ class RerunLogger:
         self,
         frame: Frame,
         log_path: Path,
-        depth_log_path: Path,
         image_shape: tuple[int, int],
     ) -> None:
         if frame.X_canon is None or frame.C is None:
@@ -199,7 +217,7 @@ class RerunLogger:
         depth_uint16_mm: UInt16[ndarray, "H W"] = self._depth_meters_to_uint16_mm(filtered_depth_hw)
 
         rr.log(str(log_path / "pointmap"), rr.Image(pointmap_uint8, color_model=rr.ColorModel.RGB).compress())
-        rr.log(str(depth_log_path), rr.DepthImage(depth_uint16_mm, meter=1000.0))
+        rr.log(str(log_path / "pointmap_depth"), rr.DepthImage(depth_uint16_mm, meter=1000.0))
         rr.log(str(log_path / "confidence"), rr.Image(confidence_uint8, color_model=rr.ColorModel.L).compress())
 
     def log_frame(
@@ -218,6 +236,8 @@ class RerunLogger:
         # Recompute gravity-alignment whenever new keyframes appear.
         with keyframes.lock:
             n_kf: int = len(keyframes)
+        if n_kf != self._last_blueprint_n_kf:
+            self._refresh_blueprint(n_kf)
         if n_kf > 0 and n_kf != self._last_orient_n_kf:
             self._log_orient_transform(keyframes, n_kf)
 
@@ -232,12 +252,7 @@ class RerunLogger:
         )
 
         rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(cam_log_path / "pinhole" / "image", current_frame.rgb)
-        self._log_pointmap_and_confidence(
-            current_frame,
-            cam_log_path / "pinhole",
-            DEPTH_LOG_ROOT / "current_camera" / "pointmap_depth",
-            rgb_uint8.shape[:2],
-        )
+        self._log_pointmap_and_confidence(current_frame, cam_log_path / "pinhole", rgb_uint8.shape[:2])
 
         # Log camera path
         assert current_pinhole.extrinsics.world_t_cam is not None
@@ -269,7 +284,6 @@ class RerunLogger:
                 self._log_pointmap_and_confidence(
                     keyframe,
                     kf_cam_log_path / "pinhole",
-                    DEPTH_LOG_ROOT / "keyframes" / f"keyframe-{kf_idx}" / "pointmap_depth",
                     kf_rgb_uint8.shape[:2],
                 )
                 # Confidence-filtered point cloud
@@ -303,7 +317,6 @@ class RerunLogger:
             self._log_pointmap_and_confidence(
                 last_kf,
                 self.parent_log_path / "last_keyframe",
-                DEPTH_LOG_ROOT / "last_keyframe" / "pointmap_depth",
                 last_kf_rgb_uint8.shape[:2],
             )
 

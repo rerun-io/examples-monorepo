@@ -150,9 +150,9 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
     )
 
     # ── Rerun visualisation setup ──────────────────────────────────────────
-    rr_logger: RerunLogger = RerunLogger(parent_log_path)
     active_timeline: str = VIDEO_TIMELINE if frame_timestamps_ns is not None else FRAME_TIMELINE
-    blueprint: rrb.Blueprint = create_blueprints(parent_log_path, timeline=active_timeline)
+    rr_logger: RerunLogger = RerunLogger(parent_log_path, timeline=active_timeline)
+    blueprint: rrb.Blueprint = create_blueprints(parent_log_path, timeline=active_timeline, n_keyframes=0)
     rr.send_blueprint(blueprint)
 
     h: int
