@@ -14,7 +14,6 @@ from torch import Tensor
 import mast3r_slam.matching as matching
 from mast3r_slam.config import config
 from mast3r_slam.frame import Frame
-from mast3r_slam.image_utils import resize_img
 from mast3r_slam.lietorch_utils import as_SE3
 from mast3r_slam.retrieval_database import RetrievalDatabase
 

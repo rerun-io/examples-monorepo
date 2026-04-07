@@ -17,7 +17,7 @@ from typing import Literal
 import yaml
 
 from mast3r_slam.config import config
-from mast3r_slam.image_utils import resize_img
+from mast3r_slam.image_utils import ResizedImage, resize_img, resize_img_with_transform
 
 HAS_TORCHCODEC: bool = True
 try:
@@ -112,12 +112,9 @@ class MonocularDataset(torch.utils.data.Dataset):
         """
         raw_img: UInt8[ndarray, "h w 3"] = self.read_img(0)
         raw_img_shape: tuple[int, int] = raw_img.shape[:2]
-        # resize_img expects [0, 1] float input
         normalized_img: Float32[ndarray, "h w 3"] = raw_img.astype(np.float32) / 255.0
-        resized = resize_img(normalized_img, self.img_size)
-        assert isinstance(resized, dict)
-        # 3XHxW, HxWx3 -> HxW, HxW
-        processed_shape: torch.Size = resized["img"][0].shape[1:]
+        resized: ResizedImage = resize_img(normalized_img, self.img_size)
+        processed_shape: torch.Size = resized.img[0].shape[1:]  # (3, h, w) -> (h, w)
         return (int(processed_shape[0]), int(processed_shape[1])), raw_img_shape
 
     def subsample(self, subsample: int) -> None:
@@ -401,17 +398,13 @@ class Intrinsics:
         """Horizontal undistortion remap table."""
         self.mapy: Float32[ndarray, "H W"] | None = mapy
         """Vertical undistortion remap table."""
-        resize_result = resize_img(
-            np.zeros((H, W, 3)), self.img_size, return_transformation=True
-        )
-        assert isinstance(resize_result, tuple)
-        _, (scale_w, scale_h, half_crop_w, half_crop_h) = resize_result
+        _, crop = resize_img_with_transform(np.zeros((H, W, 3)), self.img_size)
         self.K_frame: Float32[ndarray, "3 3"] = self.K.copy()
         """Intrinsic matrix transformed to the MASt3R frame coordinate system."""
-        self.K_frame[0, 0] = self.K[0, 0] / scale_w
-        self.K_frame[1, 1] = self.K[1, 1] / scale_h
-        self.K_frame[0, 2] = self.K[0, 2] / scale_w - half_crop_w
-        self.K_frame[1, 2] = self.K[1, 2] / scale_h - half_crop_h
+        self.K_frame[0, 0] = self.K[0, 0] / crop.scale_w
+        self.K_frame[1, 1] = self.K[1, 1] / crop.scale_h
+        self.K_frame[0, 2] = self.K[0, 2] / crop.scale_w - crop.half_crop_w
+        self.K_frame[1, 2] = self.K[1, 2] / crop.scale_h - crop.half_crop_h
 
     def remap(self, img: UInt8[ndarray, "H W 3"]) -> UInt8[ndarray, "H W 3"]:
         """Apply undistortion remap to an image.

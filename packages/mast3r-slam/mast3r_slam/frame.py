@@ -8,7 +8,7 @@ from numpy import ndarray
 from torch import Tensor
 
 from mast3r_slam.config import config
-from mast3r_slam.image_utils import resize_img
+from mast3r_slam.image_utils import ResizedImage, resize_img
 
 
 class Mode(Enum):
@@ -245,14 +245,11 @@ def create_frame(
     Returns:
         A fully constructed Frame ready for tracking.
     """
-    resized = resize_img(img, img_size)
-    assert isinstance(resized, dict)
-    img_tensor = resized["img"]
-    assert isinstance(img_tensor, torch.Tensor)
-    rgb: Float[Tensor, "1 3 h w"] = img_tensor.to(device=device)
-    img_shape: Int[Tensor, "1 2"] = torch.tensor(resized["true_shape"], device=device)
+    resized: ResizedImage = resize_img(img, img_size)
+    rgb: Float[Tensor, "1 3 h w"] = resized.img.to(device=device)
+    img_shape: Int[Tensor, "1 2"] = torch.tensor(resized.true_shape, device=device)
     img_true_shape: Int[Tensor, "1 2"] = img_shape.clone()
-    uimg: Float[Tensor, "h w 3"] = torch.from_numpy(resized["unnormalized_img"]) / 255.0
+    uimg: Float[Tensor, "h w 3"] = torch.from_numpy(resized.unnormalized_img) / 255.0
     downsample: int = config["dataset"]["img_downsample"]
     if downsample > 1:
         uimg = uimg[::downsample, ::downsample]
