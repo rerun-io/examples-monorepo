@@ -26,6 +26,7 @@ from mast3r_slam.mast3r_utils import frame_to_extrinsics, frame_to_pinhole
 
 FRAME_TIMELINE: str = "frame"
 VIDEO_TIMELINE: str = "video_time"
+DEPTH_LOG_ROOT: Path = Path("depths")
 
 
 def create_blueprints(parent_log_path: Path, timeline: str = FRAME_TIMELINE) -> rrb.Blueprint:
@@ -68,12 +69,6 @@ def create_blueprints(parent_log_path: Path, timeline: str = FRAME_TIMELINE) -> 
                     f"+ {parent_log_root}/**",
                     f"- {parent_log_root}/current_camera/pinhole/video",
                     f"- {parent_log_root}/current_camera/pinhole/video/**",
-                    f"- {parent_log_root}/**/pointmap_depth",
-                    f"- {parent_log_root}/**/pointmap_depth/**",
-                    f"- {parent_log_root}/keyframes/**/pinhole/pointmap_depth",
-                    f"- {parent_log_root}/keyframes/**/pinhole/pointmap_depth/**",
-                    f"- {parent_log_root}/last_keyframe/pointmap_depth",
-                    f"- {parent_log_root}/last_keyframe/pointmap_depth/**",
                 ],
             ),
             rrb.Tabs(views, logs, active_tab=0),
@@ -177,6 +172,7 @@ class RerunLogger:
         self,
         frame: Frame,
         log_path: Path,
+        depth_log_path: Path,
         image_shape: tuple[int, int],
     ) -> None:
         if frame.X_canon is None or frame.C is None:
@@ -203,7 +199,7 @@ class RerunLogger:
         depth_uint16_mm: UInt16[ndarray, "H W"] = self._depth_meters_to_uint16_mm(filtered_depth_hw)
 
         rr.log(str(log_path / "pointmap"), rr.Image(pointmap_uint8, color_model=rr.ColorModel.RGB).compress())
-        rr.log(str(log_path / "pointmap_depth"), rr.DepthImage(depth_uint16_mm, meter=1000.0))
+        rr.log(str(depth_log_path), rr.DepthImage(depth_uint16_mm, meter=1000.0))
         rr.log(str(log_path / "confidence"), rr.Image(confidence_uint8, color_model=rr.ColorModel.L).compress())
 
     def log_frame(
@@ -236,7 +232,12 @@ class RerunLogger:
         )
 
         rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(cam_log_path / "pinhole" / "image", current_frame.rgb)
-        self._log_pointmap_and_confidence(current_frame, cam_log_path / "pinhole", rgb_uint8.shape[:2])
+        self._log_pointmap_and_confidence(
+            current_frame,
+            cam_log_path / "pinhole",
+            DEPTH_LOG_ROOT / "current_camera" / "pointmap_depth",
+            rgb_uint8.shape[:2],
+        )
 
         # Log camera path
         assert current_pinhole.extrinsics.world_t_cam is not None
@@ -265,7 +266,12 @@ class RerunLogger:
                     kf_cam_log_path / "pinhole" / "image",
                     keyframe.rgb,
                 )
-                self._log_pointmap_and_confidence(keyframe, kf_cam_log_path / "pinhole", kf_rgb_uint8.shape[:2])
+                self._log_pointmap_and_confidence(
+                    keyframe,
+                    kf_cam_log_path / "pinhole",
+                    DEPTH_LOG_ROOT / "keyframes" / f"keyframe-{kf_idx}" / "pointmap_depth",
+                    kf_rgb_uint8.shape[:2],
+                )
                 # Confidence-filtered point cloud
                 assert keyframe.C is not None
                 mask: Bool[ndarray, "hw"] = (keyframe.C.cpu().numpy() > self.conf_thresh).squeeze()
@@ -295,7 +301,10 @@ class RerunLogger:
                 self.parent_log_path / "last_keyframe", last_kf.rgb
             )
             self._log_pointmap_and_confidence(
-                last_kf, self.parent_log_path / "last_keyframe", last_kf_rgb_uint8.shape[:2]
+                last_kf,
+                self.parent_log_path / "last_keyframe",
+                DEPTH_LOG_ROOT / "last_keyframe" / "pointmap_depth",
+                last_kf_rgb_uint8.shape[:2],
             )
 
         # ── Factor graph edges ─────────────────────────────────────────────
