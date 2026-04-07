@@ -14,13 +14,13 @@ import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 import torch
-from jaxtyping import Bool, Float, Float32, Int, UInt8
+from jaxtyping import Bool, Float, Float32, Int, UInt8, UInt16
 from numpy import ndarray
 from simplecv.camera_orient_utils import auto_orient_and_center_poses
 from simplecv.rerun_log_utils import log_pinhole, log_video
 from torch import Tensor
 
-from mast3r_slam.dataloader import MP4Dataset, MonocularDataset
+from mast3r_slam.dataloader import MonocularDataset, MP4Dataset
 from mast3r_slam.frame import Frame, SharedKeyframes, SharedStates
 from mast3r_slam.mast3r_utils import frame_to_extrinsics, frame_to_pinhole
 
@@ -40,21 +40,13 @@ def create_blueprints(parent_log_path: Path, timeline: str = FRAME_TIMELINE) -> 
     """
     current_views: rrb.Tabs = rrb.Tabs(
         rrb.Spatial2DView(origin=str(parent_log_path / "current_camera" / "pinhole" / "video"), name="Video"),
-        rrb.Spatial2DView(origin=str(parent_log_path / "current_camera" / "pinhole"), name="Image"),
-        rrb.Spatial2DView(origin=str(parent_log_path / "current_camera" / "pinhole" / "pointmap"), name="Pointmap"),
-        rrb.Spatial2DView(
-            origin=str(parent_log_path / "current_camera" / "pinhole" / "pointmap_depth"),
-            name="Depth",
-        ),
-        rrb.Spatial2DView(origin=str(parent_log_path / "current_camera" / "pinhole" / "confidence"), name="Confidence"),
+        rrb.Spatial2DView(origin=str(parent_log_path / "current_camera" / "pinhole" / "image"), name="Image"),
         active_tab=1,
         name="Current",
     )
     last_keyframe_views: rrb.Tabs = rrb.Tabs(
         rrb.Spatial2DView(origin=str(parent_log_path / "last_keyframe"), name="Image"),
         rrb.Spatial2DView(origin=str(parent_log_path / "last_keyframe" / "pointmap"), name="Pointmap"),
-        rrb.Spatial2DView(origin=str(parent_log_path / "last_keyframe" / "pointmap_depth"), name="Depth"),
-        rrb.Spatial2DView(origin=str(parent_log_path / "last_keyframe" / "confidence"), name="Confidence"),
         active_tab=0,
         name="Last Keyframe",
     )
@@ -155,6 +147,25 @@ class RerunLogger:
         )
         return rgb_uint8
 
+    def _normalize_to_uint8(self, values: ndarray) -> UInt8[ndarray, "..."]:
+        values = np.nan_to_num(values, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32, copy=False)
+        finite_mask = np.isfinite(values)
+        if not np.any(finite_mask):
+            return np.zeros(values.shape, dtype=np.uint8)
+
+        finite_values = values[finite_mask]
+        min_value = float(finite_values.min())
+        max_value = float(finite_values.max())
+        if max_value <= min_value:
+            return np.zeros(values.shape, dtype=np.uint8)
+
+        normalized = (values - min_value) / (max_value - min_value)
+        return np.clip(normalized * 255.0, 0, 255).astype(np.uint8)
+
+    def _depth_meters_to_uint16_mm(self, depth_meters: Float32[ndarray, "H W"]) -> UInt16[ndarray, "H W"]:
+        depth_mm = np.clip(depth_meters * 1000.0, 0.0, float(np.iinfo(np.uint16).max))
+        return depth_mm.astype(np.uint16)
+
     def _log_pointmap_and_confidence(
         self,
         frame: Frame,
@@ -165,8 +176,8 @@ class RerunLogger:
             return
 
         height, width = image_shape
-        pointmap_hw3: Float32[ndarray, "H W 3"] = frame.X_canon.detach().cpu().numpy().reshape(height, width, 3).astype(
-            np.float32
+        pointmap_hw3: Float32[ndarray, "H W 3"] = (
+            frame.X_canon.detach().cpu().numpy().reshape(height, width, 3).astype(np.float32)
         )
         pointmap_hw3 = np.nan_to_num(pointmap_hw3, nan=0.0, posinf=0.0, neginf=0.0)
         depth_hw: Float32[ndarray, "H W"] = np.maximum(pointmap_hw3[..., 2], 0.0)
@@ -176,10 +187,13 @@ class RerunLogger:
             conf = frame.C
         confidence_hw: Float32[ndarray, "H W"] = conf.detach().cpu().numpy().reshape(height, width).astype(np.float32)
         confidence_hw = np.nan_to_num(confidence_hw, nan=0.0, posinf=0.0, neginf=0.0)
+        confidence_uint8: UInt8[ndarray, "H W"] = self._normalize_to_uint8(confidence_hw)
+        pointmap_uint8: UInt8[ndarray, "H W 3"] = self._normalize_to_uint8(pointmap_hw3)
+        depth_uint16_mm: UInt16[ndarray, "H W"] = self._depth_meters_to_uint16_mm(depth_hw)
 
-        rr.log(str(log_path / "pointmap"), rr.Image(pointmap_hw3))
-        rr.log(str(log_path / "pointmap_depth"), rr.DepthImage(depth_hw, meter=1.0))
-        rr.log(str(log_path / "confidence"), rr.Image(confidence_hw, color_model=rr.ColorModel.L))
+        rr.log(str(log_path / "pointmap"), rr.Image(pointmap_uint8, color_model=rr.ColorModel.RGB).compress())
+        rr.log(str(log_path / "pointmap_depth"), rr.DepthImage(depth_uint16_mm, meter=1000.0))
+        rr.log(str(log_path / "confidence"), rr.Image(confidence_uint8, color_model=rr.ColorModel.L).compress())
 
     def log_frame(
         self,
@@ -266,8 +280,12 @@ class RerunLogger:
         # ── Last keyframe image ────────────────────────────────────────────
         if N_keyframes > 0:
             last_kf: Frame = keyframes[N_keyframes - 1]
-            last_kf_rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(self.parent_log_path / "last_keyframe", last_kf.rgb)
-            self._log_pointmap_and_confidence(last_kf, self.parent_log_path / "last_keyframe", last_kf_rgb_uint8.shape[:2])
+            last_kf_rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(
+                self.parent_log_path / "last_keyframe", last_kf.rgb
+            )
+            self._log_pointmap_and_confidence(
+                last_kf, self.parent_log_path / "last_keyframe", last_kf_rgb_uint8.shape[:2]
+            )
 
         # ── Factor graph edges ─────────────────────────────────────────────
         world_sim3_cami: lietorch.Sim3 | None = None
