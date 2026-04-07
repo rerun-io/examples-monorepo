@@ -197,8 +197,8 @@ def mast3r_decode_symmetric_batch(
     pos_i: Int[Tensor, "b n_patches 2"],
     feat_j: Float[Tensor, "b n_patches feat_dim"],
     pos_j: Int[Tensor, "b n_patches 2"],
-    shape_i: Int[Tensor, "b 2"],
-    shape_j: Int[Tensor, "b 2"],
+    shape_i: list[Int[Tensor, "1 2"]],
+    shape_j: list[Int[Tensor, "1 2"]],
 ) -> tuple[
     Float[Tensor, "4 b h w 3"],
     Float[Tensor, "4 b h w"],
@@ -257,7 +257,7 @@ def mast3r_decode_symmetric_batch(
 @torch.inference_mode()
 def mast3r_inference_mono(
     model: AsymmetricMASt3R, frame: object
-) -> tuple[Float[Tensor, "1 hw 3"], Float[Tensor, "1 hw 1"]]:
+) -> tuple[Float[Tensor, "hw 3"], Float[Tensor, "hw 1"]]:
     """Run monocular self-inference on a single frame.
 
     Decodes the frame against itself (symmetric self-pair) to obtain a
@@ -300,8 +300,8 @@ def mast3r_match_symmetric(
     pos_i: Int[Tensor, "b n_patches 2"],
     feat_j: Float[Tensor, "b n_patches feat_dim"],
     pos_j: Int[Tensor, "b n_patches 2"],
-    shape_i: Int[Tensor, "b 2"],
-    shape_j: Int[Tensor, "b 2"],
+    shape_i: list[Int[Tensor, "1 2"]],
+    shape_j: list[Int[Tensor, "1 2"]],
 ) -> tuple[
     Int[Tensor, "b hw"],
     Int[Tensor, "b hw"],
@@ -429,12 +429,12 @@ def mast3r_match_asymmetric(
 ) -> tuple[
     Int[Tensor, "b hw"],
     Bool[Tensor, "b hw 1"],
-    Float[Tensor, "b hw 3"],
-    Float[Tensor, "b hw 1"],
-    Float[Tensor, "b hw 1"],
-    Float[Tensor, "b hw 3"],
-    Float[Tensor, "b hw 1"],
-    Float[Tensor, "b hw 1"],
+    Float[Tensor, "hw 3"],
+    Float[Tensor, "hw 1"],
+    Float[Tensor, "hw 1"],
+    Float[Tensor, "hw 3"],
+    Float[Tensor, "hw 1"],
+    Float[Tensor, "hw 1"],
 ]:
     """Asymmetric matching from frame i to frame j.
 

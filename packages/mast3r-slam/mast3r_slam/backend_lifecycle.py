@@ -20,6 +20,7 @@ import gc
 import multiprocessing
 import traceback
 from multiprocessing.managers import SyncManager
+from multiprocessing.queues import Queue as MPQueue
 from queue import Empty
 from types import TracebackType
 
@@ -62,14 +63,14 @@ class SlamBackend:
 
         self._manager: SyncManager | None = None
         self._backend: mp.Process | None = None
-        self._error_queue: multiprocessing.Queue | None = None
+        self._error_queue: MPQueue | None = None
 
         self.states: SharedStates | None = None
         self.keyframes: SharedKeyframes | None = None
 
     def __enter__(self) -> "SlamBackend":
         self._manager = mp.Manager()
-        self._error_queue = multiprocessing.Queue()
+        self._error_queue = MPQueue(ctx=multiprocessing.get_context())
 
         self.keyframes = SharedKeyframes(self._manager, self._h, self._w, device=self._device)
         self.states = SharedStates(self._manager, self._h, self._w, device=self._device)
@@ -183,7 +184,7 @@ def _backend_entry(
     states: SharedStates,
     keyframes: SharedKeyframes,
     K: Float[Tensor, "3 3"] | None,
-    error_queue: multiprocessing.Queue,
+    error_queue: MPQueue,
 ) -> None:
     """Entry point for the backend subprocess.
 

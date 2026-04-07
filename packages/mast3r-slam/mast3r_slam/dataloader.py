@@ -112,7 +112,9 @@ class MonocularDataset(torch.utils.data.Dataset):
         """
         raw_img: UInt8[ndarray, "h w 3"] = self.read_img(0)
         raw_img_shape: tuple[int, int] = raw_img.shape[:2]
-        resized = resize_img(raw_img, self.img_size)
+        # resize_img expects [0, 1] float input
+        normalized_img: Float32[ndarray, "h w 3"] = raw_img.astype(np.float32) / 255.0
+        resized = resize_img(normalized_img, self.img_size)
         assert isinstance(resized, dict)
         # 3XHxW, HxWx3 -> HxW, HxW
         processed_shape: torch.Size = resized["img"][0].shape[1:]
