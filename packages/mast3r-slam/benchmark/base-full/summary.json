@@ -1,0 +1,27 @@
+{
+  "frontend_frames": 2523,
+  "backend_tasks": 97,
+  "frontend": {
+    "avg_frame_ms": 181.50891295565322,
+    "avg_fps": 5.509371323513589,
+    "max_frame_ms": 4195.828048992553,
+    "avg_logging_ms": 54.7152899986897,
+    "avg_tracking_ms": 97.39110887290934,
+    "frame_ms_slope_per_frame": 0.044193731199109604,
+    "logging_ms_slope_per_frame": 0.01662445464211714,
+    "logging_ms_slope_per_keyframe": 0.43474185442158614,
+    "tracking_ms_slope_per_frame": 0.02574324650953103
+  },
+  "backend": {
+    "avg_task_ms": 379.5082354535572,
+    "max_task_ms": 740.9958469943376,
+    "avg_add_factors_ms": 183.2445123504137,
+    "avg_global_opt_ms": 176.8523030318788,
+    "task_ms_slope_per_keyframe": 4.48339718539695
+  },
+  "diagnosis": [
+    "Frontend logging cost increases with keyframe count; visualization overhead is a likely source of FPS decay.",
+    "Backend pair construction dominates backend time; decoder plus dense matching remains the main backend bottleneck.",
+    "Backend work grows noticeably with map size; retrieval and global optimization are not staying constant-time."
+  ]
+}
