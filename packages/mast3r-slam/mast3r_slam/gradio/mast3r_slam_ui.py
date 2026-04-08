@@ -13,6 +13,8 @@ import torch
 import torch.multiprocessing as mp
 from gradio_rerun import Rerun
 from simplecv.rerun_log_utils import log_video
+from jaxtyping import Int
+from numpy import ndarray
 
 from mast3r_slam.backend_lifecycle import SlamBackend
 from mast3r_slam.config import config, load_config
@@ -23,7 +25,13 @@ from mast3r_slam.mast3r_utils import (
     mast3r_inference_mono,
 )
 from mast3r_slam.nerfstudio_utils import save_kf_to_nerfstudio
-from mast3r_slam.rerun_log_utils import RerunLogger, create_blueprints
+from mast3r_slam.rerun_log_utils import (
+    FRAME_TIMELINE,
+    VIDEO_TIMELINE,
+    RerunLogger,
+    create_blueprints,
+    log_video_for_dataset,
+)
 from mast3r_slam.tracker import FrameTracker
 
 # Global reference to the active states so the stop button can signal termination.
@@ -79,12 +87,6 @@ def streaming_mast3r_slam_fn(
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.set_grad_enabled(False)
 
-    ## rerun setup
-    parent_log_path = Path("world")
-    rr_logger = RerunLogger(parent_log_path)
-    blueprint = create_blueprints(parent_log_path=parent_log_path)
-    rr.send_blueprint(blueprint)
-
     progress(0.05, desc="Loading config")
     inference_config = "config/base.yaml"
     load_config(path=inference_config)
@@ -93,6 +95,19 @@ def streaming_mast3r_slam_fn(
     progress(0.1, desc="Loading dataset")
     dataset = load_dataset(dataset_path=str(video_path))
     dataset.subsample(config["dataset"]["subsample"])
+    frame_timestamps_ns: Int[ndarray, "num_frames"] | None = None
+
+    ## rerun setup
+    parent_log_path = Path("world")
+    frame_timestamps_ns = log_video_for_dataset(
+        dataset,
+        parent_log_path / "current_camera" / "pinhole" / "video",
+        timeline=VIDEO_TIMELINE,
+    )
+    active_timeline: str = VIDEO_TIMELINE if frame_timestamps_ns is not None else FRAME_TIMELINE
+    rr_logger = RerunLogger(parent_log_path, timeline=active_timeline)
+    blueprint = create_blueprints(parent_log_path=parent_log_path, timeline=active_timeline, n_keyframes=0)
+    rr.send_blueprint(blueprint)
 
     h, w = dataset.get_img_shape()[0]
 
@@ -124,7 +139,9 @@ def streaming_mast3r_slam_fn(
 
         while True:
             ctx.check_backend()
-            rr.set_time("frame", sequence=i)
+            rr.set_time(FRAME_TIMELINE, sequence=i)
+            if frame_timestamps_ns is not None and i < len(frame_timestamps_ns):
+                rr.set_time(VIDEO_TIMELINE, duration=1e-9 * float(frame_timestamps_ns[i]))
             mode: Mode = states.get_mode()
 
             if mode == Mode.TERMINATED:
@@ -135,7 +152,7 @@ def streaming_mast3r_slam_fn(
                 states.set_mode(Mode.TERMINATED)
                 break
 
-            timestamp, rgb = dataset[i]
+            _, rgb = dataset[i]
 
             # get frames last camera pose
             world_sim3_cam: lietorch.Sim3 = (
@@ -284,7 +301,7 @@ def show_video_file(
 
     # Log video asset and frame timestamps using simplecv's helper
     # (handles AssetVideo, frame timestamp extraction, and column logging).
-    log_video(video_path, Path("video"))
+    log_video(video_path, Path("video"), timeline=VIDEO_TIMELINE)
     yield stream.read(), f"Loaded preview for {video_path.name}"
 
 

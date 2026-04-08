@@ -66,6 +66,24 @@ def test_edges_logged(baseline_rrd_path: Path) -> None:
     assert "/world/edges" in paths, "No /world/edges entity found"
 
 
+def test_dense_logging_entities_present(baseline_rrd_path: Path) -> None:
+    """Verify the baseline .rrd contains the new video, pointmap, depth, and confidence logs."""
+    paths: set[str] = set(_get_entity_paths(baseline_rrd_path))
+
+    expected_paths = {
+        "/world/current_camera/pinhole/video",
+        "/world/current_camera/pinhole/pointmap",
+        "/world/current_camera/pinhole/pointmap_depth",
+        "/world/current_camera/pinhole/confidence",
+        "/world/last_keyframe/pointmap",
+        "/world/last_keyframe/pointmap_depth",
+        "/world/last_keyframe/confidence",
+    }
+
+    missing_paths = sorted(expected_paths - paths)
+    assert not missing_paths, f"Missing dense logging entities: {missing_paths}"
+
+
 def test_keyframe_count_reasonable(baseline_rrd_path: Path) -> None:
     """Verify the number of keyframes is in a reasonable range for the 30-frame baseline."""
     n_keyframes: int = _count_keyframes(baseline_rrd_path)
