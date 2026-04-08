@@ -32,6 +32,7 @@ State machine modes (``Mode`` enum):
 """
 
 import contextlib
+import json
 import sys
 import time
 from dataclasses import dataclass
@@ -70,6 +71,7 @@ from mast3r_slam.rerun_log_utils import (
 )
 from mast3r_slam.retrieval_database import RetrievalDatabase
 from mast3r_slam.tracker import FrameTracker
+from mast3r_slam.perf import BenchmarkRecorder, load_jsonl_rows, summarize_benchmark, timed_section, write_summary_markdown
 
 
 def format_time(seconds: float) -> str:
@@ -106,6 +108,8 @@ class InferenceConfig:
     """Stop after processing this many frames (None = process all)."""
     ns_save_path: None | Path = None
     """Optional path to export keyframes in NerfStudio format."""
+    benchmark_dir: Path | None = None
+    """Optional output directory for per-stage benchmark traces and summaries."""
 
 
 def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
@@ -138,6 +142,16 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
     parent_log_path: Path = Path("/world")
     log_path: str = f"{parent_log_path}/logs"
     load_config(inf_config.config)
+    if inf_config.benchmark_dir is not None:
+        config["benchmark_dir"] = str(inf_config.benchmark_dir)
+    else:
+        config.pop("benchmark_dir", None)
+    frontend_benchmark: BenchmarkRecorder | None = None
+    backend_benchmark_path: Path | None = None
+    if inf_config.benchmark_dir is not None:
+        inf_config.benchmark_dir.mkdir(parents=True, exist_ok=True)
+        frontend_benchmark = BenchmarkRecorder(inf_config.benchmark_dir / "frontend.jsonl")
+        backend_benchmark_path = inf_config.benchmark_dir / "backend.jsonl"
     rr.log(log_path, rr.TextLog(f"Dataset: {inf_config.dataset}", level="INFO"))
     rr.log(log_path, rr.TextLog(f"Config: {config}", level="DEBUG"))
 
@@ -183,7 +197,16 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
     # Pass application_id to backend so it can connect to the same Rerun viewer via gRPC.
     # Only works when the main process uses spawn/serve/connect (not save-to-file).
     rr_app_id: str | None = None if inf_config.rr_config.save is not None else inf_config.rr_config.application_id
-    with SlamBackend(inf_config.config, model, h, w, K, device=device, rr_application_id=rr_app_id) as ctx:
+    with SlamBackend(
+        inf_config.config,
+        model,
+        h,
+        w,
+        K,
+        device=device,
+        rr_application_id=rr_app_id,
+        benchmark_dir=str(inf_config.benchmark_dir) if inf_config.benchmark_dir is not None else None,
+    ) as ctx:
         assert ctx.keyframes is not None
         assert ctx.states is not None
         keyframes: SharedKeyframes = ctx.keyframes
@@ -195,6 +218,7 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
         start_time: float = timer()
 
         while True:
+            frame_profile: dict[str, float | int | str] = {}
             # Check if the backend process crashed (raises BackendError if so).
             ctx.check_backend()
 
@@ -209,14 +233,16 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
                 states.set_mode(Mode.TERMINATED)
                 break
 
-            _, rgb = dataset[i]
+            with timed_section(frame_profile, "dataset_read_ms", sync_cuda=False):
+                _, rgb = dataset[i]
 
             # Initialise pose: identity for the first frame, otherwise use the
             # last tracked pose from shared state.
             world_sim3_cam: lietorch.Sim3 = (
                 lietorch.Sim3.Identity(1, device=device) if i == 0 else states.get_frame().world_sim3_cam
             )
-            frame: Frame = create_frame(i, rgb, world_sim3_cam, img_size=dataset.img_size, device=device)
+            with timed_section(frame_profile, "create_frame_ms", sync_cuda=True):
+                frame: Frame = create_frame(i, rgb, world_sim3_cam, img_size=dataset.img_size, device=device)
 
             add_new_kf: bool = False
 
@@ -227,13 +253,29 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
                 # and features.  The first frame is always a keyframe.
                 X_init: Float[Tensor, "hw 3"]
                 C_init: Float[Tensor, "hw 1"]
-                X_init, C_init = mast3r_inference_mono(model, frame)
-                frame.update_pointmap(X_init, C_init)
-                keyframes.append(frame)
-                states.queue_global_optimization(len(keyframes) - 1)
-                states.set_mode(Mode.TRACKING)
-                states.set_frame(frame)
+                init_profile: dict[str, float | int | str] = {}
+                with timed_section(frame_profile, "init_total_ms", sync_cuda=True):
+                    X_init, C_init = mast3r_inference_mono(model, frame, profile=init_profile)
+                    frame.update_pointmap(X_init, C_init)
+                    keyframes.append(frame)
+                    states.queue_global_optimization(len(keyframes) - 1)
+                    states.set_mode(Mode.TRACKING)
+                    states.set_frame(frame)
+                frame_profile.update({f"init_{k}": v for k, v in init_profile.items()})
                 rr_logger.log_frame(frame, keyframes, states)
+                frame_profile.update(rr_logger.last_profile)
+                frame_profile["frame_idx"] = i
+                frame_profile["mode"] = "INIT"
+                frame_profile["n_keyframes"] = len(keyframes)
+                frame_profile["go_queue_len"] = len(states.global_optimizer_tasks)
+                frame_profile["frame_total_ms"] = (
+                    float(frame_profile.get("dataset_read_ms", 0.0))
+                    + float(frame_profile.get("create_frame_ms", 0.0))
+                    + float(frame_profile.get("init_total_ms", 0.0))
+                    + float(frame_profile.get("logging_total_ms", 0.0))
+                )
+                if frontend_benchmark is not None:
+                    frontend_benchmark.append(frame_profile)
                 i += 1
                 continue
 
@@ -244,27 +286,32 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
                     # whether the overlap is low enough to warrant a new keyframe.
                     match_info: list
                     try_reloc: bool
-                    add_new_kf, match_info, try_reloc = tracker.track(frame)
+                    with timed_section(frame_profile, "tracking_total_ms", sync_cuda=True):
+                        add_new_kf, match_info, try_reloc = tracker.track(frame)
                     if try_reloc:
                         # Too few matches — tracking is lost, switch to reloc mode.
                         states.set_mode(Mode.RELOC)
                     states.set_frame(frame)
+                    frame_profile.update(tracker.last_profile)
 
                 case Mode.RELOC:
                     # Relocalization: run mono inference to get features, then the
                     # backend process will try to match against the retrieval DB.
                     X: Float[Tensor, "hw 3"]
                     C: Float[Tensor, "hw 1"]
-                    X, C = mast3r_inference_mono(model, frame)
-                    frame.update_pointmap(X, C)
-                    states.set_frame(frame)
-                    states.queue_reloc()
+                    reloc_profile: dict[str, float | int | str] = {}
+                    with timed_section(frame_profile, "reloc_total_ms", sync_cuda=True):
+                        X, C = mast3r_inference_mono(model, frame, profile=reloc_profile)
+                        frame.update_pointmap(X, C)
+                        states.set_frame(frame)
+                        states.queue_reloc()
                     # In single-threaded mode, block until reloc completes.
                     while config["single_thread"]:
                         with states.lock:
                             if states.reloc_sem.value == 0:
                                 break
                         time.sleep(0.01)
+                    frame_profile.update({f"reloc_{k}": v for k, v in reloc_profile.items()})
 
                 case _:
                     raise RuntimeError(f"Invalid mode: {mode!r}")
@@ -273,8 +320,9 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
             # add it to the shared buffer and queue it for the backend to
             # build factor graph edges and run global optimisation.
             if add_new_kf:
-                keyframes.append(frame)
-                states.queue_global_optimization(len(keyframes) - 1)
+                with timed_section(frame_profile, "queue_keyframe_ms", sync_cuda=False):
+                    keyframes.append(frame)
+                    states.queue_global_optimization(len(keyframes) - 1)
                 # In single-threaded mode, block until the backend finishes.
                 while config["single_thread"]:
                     with states.lock:
@@ -285,9 +333,24 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
             # Log current frame, all keyframes, camera path, and factor graph
             # edges to the Rerun viewer.
             rr_logger.log_frame(frame, keyframes, states)
+            frame_profile.update(rr_logger.last_profile)
             if i % 30 == 0:
                 FPS: float = i / (time.time() - fps_timer)
                 rr.log(log_path, rr.TextLog(f"FPS: {FPS:.1f}", level="INFO"))
+            frame_profile["frame_idx"] = i
+            frame_profile["mode"] = mode.name
+            frame_profile["n_keyframes"] = len(keyframes)
+            frame_profile["go_queue_len"] = len(states.global_optimizer_tasks)
+            frame_profile["frame_total_ms"] = (
+                float(frame_profile.get("dataset_read_ms", 0.0))
+                + float(frame_profile.get("create_frame_ms", 0.0))
+                + float(frame_profile.get("tracking_total_ms", 0.0))
+                + float(frame_profile.get("reloc_total_ms", 0.0))
+                + float(frame_profile.get("queue_keyframe_ms", 0.0))
+                + float(frame_profile.get("logging_total_ms", 0.0))
+            )
+            if frontend_benchmark is not None:
+                frontend_benchmark.append(frame_profile)
             i += 1
 
         if inf_config.ns_save_path is not None:
@@ -307,6 +370,13 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
         # Wait for the backend to finish its last optimisation task before
         # the context manager shuts it down.
         ctx.join()
+
+    if frontend_benchmark is not None and inf_config.benchmark_dir is not None:
+        frontend_benchmark.flush()
+        backend_rows = load_jsonl_rows(backend_benchmark_path) if backend_benchmark_path is not None else []
+        summary = summarize_benchmark(frontend_benchmark._rows, backend_rows)
+        write_summary_markdown(summary, inf_config.benchmark_dir / "summary.md")
+        (inf_config.benchmark_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
     # SlamBackend.__exit__ has now run: backend terminated, manager shut down,
     # GPU memory released via torch.cuda.empty_cache() + gc.collect().
@@ -388,6 +458,7 @@ def run_backend(
     keyframes: SharedKeyframes,
     K: Float[Tensor, "3 3"] | None,
     rr_application_id: str | None = None,
+    benchmark_dir: str | None = None,
 ) -> None:
     """Backend process main loop: graph construction, retrieval, and global optimisation.
 
@@ -408,6 +479,9 @@ def run_backend(
             connect via gRPC so ``rr.TextLog`` entries reach the main viewer.
     """
     load_config(config_path)
+    benchmark_recorder: BenchmarkRecorder | None = None
+    if benchmark_dir:
+        benchmark_recorder = BenchmarkRecorder(Path(benchmark_dir) / "backend.jsonl")
 
     # Connect to the main process's Rerun viewer for TextLog output.
     if rr_application_id is not None:
@@ -444,6 +518,7 @@ def run_backend(
         if idx == -1:
             time.sleep(0.01)
             continue
+        backend_profile: dict[str, float | int | str] = {"task_keyframe_idx": idx}
 
         # ── Graph construction for the new keyframe ────────────────────────
         # Connect to the previous consecutive keyframe(s) and to any
@@ -454,12 +529,13 @@ def run_backend(
             kf_idx.append(idx - 1 - j)
 
         frame = keyframes[idx]
-        retrieval_inds: list[int] = retrieval_database.update(
-            frame,
-            add_after_query=True,
-            k=config["retrieval"]["k"],
-            min_thresh=config["retrieval"]["min_thresh"],
-        )
+        with timed_section(backend_profile, "retrieval_total_ms", sync_cuda=True):
+            retrieval_inds: list[int] = retrieval_database.update(
+                frame,
+                add_after_query=True,
+                k=config["retrieval"]["k"],
+                min_thresh=config["retrieval"]["min_thresh"],
+            )
         kf_idx += retrieval_inds
 
         # Log loop closure candidates (excluding the consecutive neighbour).
@@ -476,7 +552,9 @@ def run_backend(
 
         # Run symmetric MASt3R matching to build factor graph edges.
         if kf_idx:
-            factor_graph.add_factors(kf_idx, frame_idx, config["local_opt"]["min_match_frac"])
+            with timed_section(backend_profile, "add_factors_total_ms", sync_cuda=True):
+                factor_graph.add_factors(kf_idx, frame_idx, config["local_opt"]["min_match_frac"])
+            backend_profile.update(factor_graph.last_profile)
 
         # Publish edge list to shared state (for Rerun visualisation).
         with states.lock:
@@ -488,8 +566,20 @@ def run_backend(
             factor_graph.solve_GN_calib()
         else:
             factor_graph.solve_GN_rays()
+        backend_profile.update(factor_graph.last_profile)
+        backend_profile["retrieval_candidates"] = len(retrieval_inds)
+        backend_profile["num_connected_keyframes"] = len(kf_idx)
+        backend_profile["task_total_ms"] = (
+            float(backend_profile.get("retrieval_total_ms", 0.0))
+            + float(backend_profile.get("add_factors_total_ms", 0.0))
+            + float(backend_profile.get("global_opt_total_ms", 0.0))
+        )
+        if benchmark_recorder is not None:
+            benchmark_recorder.append(backend_profile)
 
         # Mark this keyframe as processed.
         with states.lock:
             if len(states.global_optimizer_tasks) > 0:
                 idx = states.global_optimizer_tasks.pop(0)
+    if benchmark_recorder is not None:
+        benchmark_recorder.flush()

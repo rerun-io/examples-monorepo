@@ -21,6 +21,7 @@ from mast3r_slam.geometry import (
 )
 from mast3r_slam.mast3r_utils import mast3r_match_asymmetric
 from mast3r_slam.nonlinear_optimizer import check_convergence, huber
+from mast3r_slam.perf import timed_section
 
 
 class FrameTracker:
@@ -41,6 +42,8 @@ class FrameTracker:
         self.keyframes: SharedKeyframes = frames
         self.device: str = device
 
+        self.last_profile: dict[str, float | int | str] = {}
+        self.last_opt_steps: int = 0
         self.reset_idx_f2k()
 
     # Initialize with identity indexing of size (1,n)
@@ -60,13 +63,15 @@ class FrameTracker:
             diagnostic tensors, and try_reloc is True when relocalization
             should be attempted.
         """
+        profile: dict[str, float | int | str] = {}
         last_kf: Frame | None = self.keyframes.last_keyframe()
         assert last_kf is not None, "Cannot track without a keyframe"
         keyframe: Frame = last_kf
 
-        idx_f2k, valid_match_k, Xff, Cff, Qff, Xkf, Ckf, Qkf = mast3r_match_asymmetric(
-            self.model, frame, keyframe, idx_i2j_init=self.idx_f2k
-        )
+        with timed_section(profile, "mast3r_match_total_ms", sync_cuda=True):
+            idx_f2k, valid_match_k, Xff, Cff, Qff, Xkf, Ckf, Qkf = mast3r_match_asymmetric(
+                self.model, frame, keyframe, idx_i2j_init=self.idx_f2k, profile=profile
+            )
         # Save idx for next
         self.idx_f2k = idx_f2k.clone()
 
@@ -92,9 +97,10 @@ class FrameTracker:
         Ck: Float[Tensor, "hw 1"]
         meas_k: Float[Tensor, "hw 3"] | None
         valid_meas_k: Bool[Tensor, "hw 1"] | None
-        Xf, Xk, world_sim3_camf, world_sim3_camk, Cf, Ck, meas_k, valid_meas_k = self.get_points_poses(
-            frame, keyframe, idx_f2k, img_size, use_calib, K
-        )
+        with timed_section(profile, "points_pose_prep_ms", sync_cuda=False):
+            Xf, Xk, world_sim3_camf, world_sim3_camk, Cf, Ck, meas_k, valid_meas_k = self.get_points_poses(
+                frame, keyframe, idx_f2k, img_size, use_calib, K
+            )
 
         # Get valid
         # Use canonical confidence average
@@ -106,47 +112,53 @@ class FrameTracker:
         valid_kf: Bool[Tensor, "hw 1"] = valid_match_k & valid_Q
 
         match_frac: Float[Tensor, ""] = valid_opt.sum() / valid_opt.numel()
+        profile["match_fraction"] = float(match_frac.item())
         if match_frac < self.cfg["min_match_frac"]:
+            self.last_profile = profile
             rr.log("/world/logs", rr.TextLog(f"Skipped frame {frame.frame_id}", level="DEBUG"))
             return False, [], True
 
         try:
             # Track
             if not use_calib:
-                world_sim3_camf, camk_sim3_camf = self.opt_pose_ray_dist_sim3(
-                    Xf, Xk, world_sim3_camf, world_sim3_camk, Qk, valid_opt
-                )
+                with timed_section(profile, "optimize_ms", sync_cuda=True):
+                    world_sim3_camf, camk_sim3_camf = self.opt_pose_ray_dist_sim3(
+                        Xf, Xk, world_sim3_camf, world_sim3_camk, Qk, valid_opt
+                    )
             else:
                 assert meas_k is not None
                 assert valid_meas_k is not None
                 assert K is not None
-                world_sim3_camf, camk_sim3_camf = self.opt_pose_calib_sim3(
-                    Xf,
-                    Xk,
-                    world_sim3_camf,
-                    world_sim3_camk,
-                    Qk,
-                    valid_opt,
-                    meas_k,
-                    valid_meas_k,
-                    K,
-                    img_size,
-                )
+                with timed_section(profile, "optimize_ms", sync_cuda=True):
+                    world_sim3_camf, camk_sim3_camf = self.opt_pose_calib_sim3(
+                        Xf,
+                        Xk,
+                        world_sim3_camf,
+                        world_sim3_camk,
+                        Qk,
+                        valid_opt,
+                        meas_k,
+                        valid_meas_k,
+                        K,
+                        img_size,
+                    )
         except BeartypeException:
             raise
         except torch.linalg.LinAlgError:
+            self.last_profile = profile
             rr.log("/world/logs", rr.TextLog(f"Cholesky failed {frame.frame_id}", level="WARN"))
             return False, [], True
 
         frame.world_sim3_cam = world_sim3_camf
 
         # Use pose to transform points to update keyframe
-        Xkk_raw = camk_sim3_camf.act(Xkf)
-        assert isinstance(Xkk_raw, torch.Tensor)
-        Xkk: Float[Tensor, "hw 3"] = Xkk_raw
-        keyframe.update_pointmap(Xkk, Ckf)
-        # write back the fitered pointmap
-        self.keyframes[len(self.keyframes) - 1] = keyframe
+        with timed_section(profile, "keyframe_update_ms", sync_cuda=True):
+            Xkk_raw = camk_sim3_camf.act(Xkf)
+            assert isinstance(Xkk_raw, torch.Tensor)
+            Xkk: Float[Tensor, "hw 3"] = Xkk_raw
+            keyframe.update_pointmap(Xkk, Ckf)
+            # write back the fitered pointmap
+            self.keyframes[len(self.keyframes) - 1] = keyframe
 
         # Keyframe selection
         n_valid: Int[Tensor, ""] = valid_kf.sum()
@@ -156,11 +168,16 @@ class FrameTracker:
         )
 
         new_kf: bool = bool(min(match_frac_k, unique_frac_f) < self.cfg["match_frac_thresh"])
+        profile["match_frac_k"] = float(match_frac_k.item())
+        profile["unique_frac_f"] = float(unique_frac_f)
+        profile["opt_steps"] = self.last_opt_steps
+        profile["new_keyframe"] = int(new_kf)
 
         # Rest idx if new keyframe
         if new_kf:
             self.reset_idx_f2k()
 
+        self.last_profile = profile
         return (
             new_kf,
             [
@@ -346,6 +363,7 @@ class FrameTracker:
             if step == self.cfg["max_iters"] - 1:
                 rr.log("/world/logs", rr.TextLog(f"Max iters reached {last_error}", level="DEBUG"))
 
+        self.last_opt_steps = step + 1
         # Assign new pose based on relative pose
         world_sim3_camf_new = world_sim3_camk * camk_sim3_camf
         assert isinstance(world_sim3_camf_new, lietorch.Sim3)
@@ -441,6 +459,7 @@ class FrameTracker:
             if step == self.cfg["max_iters"] - 1:
                 rr.log("/world/logs", rr.TextLog(f"Max iters reached {last_error}", level="DEBUG"))
 
+        self.last_opt_steps = step + 1
         # Assign new pose based on relative pose
         world_sim3_camf_new = world_sim3_camk * camk_sim3_camf
         assert isinstance(world_sim3_camf_new, lietorch.Sim3)

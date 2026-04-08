@@ -553,6 +553,7 @@ class SharedKeyframes:
         """
         with self.lock:
             self.world_sim3_cam[idx] = world_sim3_cams.data
+            self.is_dirty[idx] = True
 
     def get_dirty_idx(self) -> Int[Tensor, "n_dirty"]:
         """Return indices of keyframes modified since the last call, then clear the dirty flags.

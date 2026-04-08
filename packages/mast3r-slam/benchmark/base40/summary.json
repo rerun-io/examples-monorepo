@@ -1,0 +1,25 @@
+{
+  "frontend_frames": 40,
+  "backend_tasks": 1,
+  "frontend": {
+    "avg_frame_ms": 119.76789549626119,
+    "avg_fps": 8.349482938282215,
+    "max_frame_ms": 312.2132000135025,
+    "avg_logging_ms": 30.243352947945823,
+    "avg_tracking_ms": 59.27724815046531,
+    "frame_ms_slope_per_frame": -0.8726519541306562,
+    "logging_ms_slope_per_frame": -0.10156334218191024,
+    "logging_ms_slope_per_keyframe": 0.0,
+    "tracking_ms_slope_per_frame": 0.11111949247495476
+  },
+  "backend": {
+    "avg_task_ms": 149.32232099818066,
+    "max_task_ms": 149.32232099818066,
+    "avg_add_factors_ms": 0.0,
+    "avg_global_opt_ms": 0.0,
+    "task_ms_slope_per_keyframe": 0.0
+  },
+  "diagnosis": [
+    "Tracking cost itself grows over time; inspect matcher warm starts, optimizer iteration counts, or cached state growth."
+  ]
+}
