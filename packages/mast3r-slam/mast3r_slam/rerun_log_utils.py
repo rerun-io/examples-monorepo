@@ -23,7 +23,6 @@ from torch import Tensor
 from mast3r_slam.dataloader import MonocularDataset, MP4Dataset
 from mast3r_slam.frame import Frame, SharedKeyframes, SharedStates
 from mast3r_slam.mast3r_utils import frame_to_extrinsics, frame_to_pinhole
-from mast3r_slam.perf import timed_section
 
 FRAME_TIMELINE: str = "frame"
 VIDEO_TIMELINE: str = "video_time"
@@ -126,7 +125,6 @@ class RerunLogger:
         self._last_orient_n_kf: int = 0
         # Number of keyframes covered by the latest blueprint refresh.
         self._last_blueprint_n_kf: int = -1
-        self.last_profile: dict[str, float | int | str] = {}
 
     def _refresh_blueprint(self, n_kf: int) -> None:
         rr.send_blueprint(create_blueprints(self.parent_log_path, timeline=self.timeline, n_keyframes=n_kf))
@@ -233,134 +231,112 @@ class RerunLogger:
             keyframes: Shared keyframe buffer.
             states: Shared system state (for edge lists).
         """
-        profile: dict[str, float | int | str] = {}
         # Recompute gravity-alignment whenever new keyframes appear.
         with keyframes.lock:
             n_kf: int = len(keyframes)
         if n_kf != self._last_blueprint_n_kf:
-            with timed_section(profile, "blueprint_refresh_ms", sync_cuda=False):
-                self._refresh_blueprint(n_kf)
+            self._refresh_blueprint(n_kf)
         if n_kf > 0 and n_kf != self._last_orient_n_kf:
-            with timed_section(profile, "orientation_update_ms", sync_cuda=False):
-                self._log_orient_transform(keyframes, n_kf)
+            self._log_orient_transform(keyframes, n_kf)
 
         # ── Current camera ─────────────────────────────────────────────────
-        with timed_section(profile, "current_frame_logging_ms", sync_cuda=False):
-            current_pinhole = frame_to_pinhole(current_frame)
-            cam_log_path: Path = self.parent_log_path / "current_camera"
+        current_pinhole = frame_to_pinhole(current_frame)
+        cam_log_path: Path = self.parent_log_path / "current_camera"
 
-            log_pinhole(
-                camera=current_pinhole,
-                cam_log_path=cam_log_path,
-                image_plane_distance=self.image_plane_distance * 2,
-            )
+        log_pinhole(
+            camera=current_pinhole,
+            cam_log_path=cam_log_path,
+            image_plane_distance=self.image_plane_distance * 2,
+        )
 
-            rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(cam_log_path / "pinhole" / "image", current_frame.rgb)
-            self._log_pointmap_and_confidence(current_frame, cam_log_path / "pinhole", rgb_uint8.shape[:2])
+        rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(cam_log_path / "pinhole" / "image", current_frame.rgb)
+        self._log_pointmap_and_confidence(current_frame, cam_log_path / "pinhole", rgb_uint8.shape[:2])
 
-            # Log camera path
-            assert current_pinhole.extrinsics.world_t_cam is not None
-            translation: Float32[ndarray, "3"] = current_pinhole.extrinsics.world_t_cam
-            self.path_list.append(translation.tolist())
-            rr.log(
-                f"{self.parent_log_path}/path",
-                rr.LineStrips3D(
-                    strips=self.path_list,
-                    colors=(255, 0, 0),
-                    labels=("Camera Path"),
-                ),
-            )
+        # Log camera path
+        assert current_pinhole.extrinsics.world_t_cam is not None
+        translation: Float32[ndarray, "3"] = current_pinhole.extrinsics.world_t_cam
+        self.path_list.append(translation.tolist())
+        rr.log(
+            f"{self.parent_log_path}/path",
+            rr.LineStrips3D(
+                strips=self.path_list,
+                colors=(255, 0, 0),
+                labels=("Camera Path"),
+            ),
+        )
 
         # ── Keyframes ──────────────────────────────────────────────────────
         with keyframes.lock:
             N_keyframes: int = len(keyframes)
-        dirty_idx: set[int] = set(keyframes.get_dirty_idx().tolist())
-        keyframe_pose_updates: int = 0
 
-        with timed_section(profile, "keyframes_logging_ms", sync_cuda=False):
-            for kf_idx in range(N_keyframes):
-                keyframe: Frame = keyframes[kf_idx]
-                kf_cam_log_path: Path = self.parent_log_path / "keyframes" / f"keyframe-{kf_idx}"
-                is_new_keyframe: bool = kf_idx not in self.keyframe_logged_list
+        for kf_idx in range(N_keyframes):
+            keyframe: Frame = keyframes[kf_idx]
+            kf_cam_log_path: Path = self.parent_log_path / "keyframes" / f"keyframe-{kf_idx}"
 
-                # Log image + pointcloud only the first time a keyframe appears.
-                if is_new_keyframe:
-                    kf_rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(
-                        kf_cam_log_path / "pinhole" / "image",
-                        keyframe.rgb,
-                    )
-                    self._log_pointmap_and_confidence(
-                        keyframe,
-                        kf_cam_log_path / "pinhole",
-                        kf_rgb_uint8.shape[:2],
-                    )
-                    # Confidence-filtered point cloud
-                    assert keyframe.C is not None
-                    mask: Bool[ndarray, "hw"] = (keyframe.C.cpu().numpy() > self.conf_thresh).squeeze()
+            # Log image + pointcloud only the first time a keyframe appears.
+            if kf_idx not in self.keyframe_logged_list:
+                kf_rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(
+                    kf_cam_log_path / "pinhole" / "image",
+                    keyframe.rgb,
+                )
+                self._log_pointmap_and_confidence(
+                    keyframe,
+                    kf_cam_log_path / "pinhole",
+                    kf_rgb_uint8.shape[:2],
+                )
+                # Confidence-filtered point cloud
+                assert keyframe.C is not None
+                mask: Bool[ndarray, "hw"] = (keyframe.C.cpu().numpy() > self.conf_thresh).squeeze()
 
-                    assert keyframe.X_canon is not None
-                    positions: Float32[ndarray, "num_points 3"] = keyframe.X_canon.cpu().numpy()
-                    colors: UInt8[ndarray, "num_points 3"] = kf_rgb_uint8.reshape(-1, 3)
+                assert keyframe.X_canon is not None
+                positions: Float32[ndarray, "num_points 3"] = keyframe.X_canon.cpu().numpy()
+                colors: UInt8[ndarray, "num_points 3"] = kf_rgb_uint8.reshape(-1, 3)
 
-                    rr.log(
-                        f"{kf_cam_log_path}/pointcloud",
-                        rr.Points3D(positions=positions[mask], colors=colors[mask]),
-                    )
-                    self.keyframe_logged_list.append(kf_idx)
+                rr.log(
+                    f"{kf_cam_log_path}/pointcloud",
+                    rr.Points3D(positions=positions[mask], colors=colors[mask]),
+                )
+                self.keyframe_logged_list.append(kf_idx)
 
-                if is_new_keyframe or kf_idx in dirty_idx:
-                    keyframe_pose_updates += 1
-                    log_pinhole(
-                        camera=frame_to_pinhole(keyframe),
-                        cam_log_path=kf_cam_log_path,
-                        image_plane_distance=self.image_plane_distance,
-                    )
+            # Always update the keyframe's camera; its pose may be refined by
+            # the backend's global optimisation since the last log call.
+            log_pinhole(
+                camera=frame_to_pinhole(keyframe),
+                cam_log_path=kf_cam_log_path,
+                image_plane_distance=self.image_plane_distance,
+            )
 
         # ── Last keyframe image ────────────────────────────────────────────
         if N_keyframes > 0:
-            with timed_section(profile, "last_keyframe_logging_ms", sync_cuda=False):
-                last_kf: Frame = keyframes[N_keyframes - 1]
-                last_kf_rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(
-                    self.parent_log_path / "last_keyframe", last_kf.rgb
-                )
-                self._log_pointmap_and_confidence(
-                    last_kf,
-                    self.parent_log_path / "last_keyframe",
-                    last_kf_rgb_uint8.shape[:2],
-                )
+            last_kf: Frame = keyframes[N_keyframes - 1]
+            last_kf_rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(
+                self.parent_log_path / "last_keyframe", last_kf.rgb
+            )
+            self._log_pointmap_and_confidence(
+                last_kf,
+                self.parent_log_path / "last_keyframe",
+                last_kf_rgb_uint8.shape[:2],
+            )
 
         # ── Factor graph edges ─────────────────────────────────────────────
         world_sim3_cami: lietorch.Sim3 | None = None
         world_sim3_camj: lietorch.Sim3 | None = None
-        with timed_section(profile, "edges_logging_ms", sync_cuda=False):
-            with states.lock:
-                ii: Int[Tensor, "num_edges"] = torch.tensor(states.edges_ii, dtype=torch.long)
-                jj: Int[Tensor, "num_edges"] = torch.tensor(states.edges_jj, dtype=torch.long)
-                if ii.numel() > 0 and jj.numel() > 0:
-                    world_sim3_cami = lietorch.Sim3(keyframes.world_sim3_cam[ii, 0])
-                    world_sim3_camj = lietorch.Sim3(keyframes.world_sim3_cam[jj, 0])
+        with states.lock:
+            ii: Int[Tensor, "num_edges"] = torch.tensor(states.edges_ii, dtype=torch.long)
+            jj: Int[Tensor, "num_edges"] = torch.tensor(states.edges_jj, dtype=torch.long)
             if ii.numel() > 0 and jj.numel() > 0:
-                assert world_sim3_cami is not None
-                assert world_sim3_camj is not None
-                t_world_cami: Float32[ndarray, "num_edges 3"] = world_sim3_cami.matrix()[:, :3, 3].cpu().numpy()
-                t_world_camj: Float32[ndarray, "num_edges 3"] = world_sim3_camj.matrix()[:, :3, 3].cpu().numpy()
-                line_strips: list[list[float]] = []
-                for t_i, t_j in zip(t_world_cami, t_world_camj, strict=False):
-                    line_strips.append(t_i.tolist())
-                    line_strips.append(t_j.tolist())
-                rr.log(
-                    f"{self.parent_log_path}/edges",
-                    rr.LineStrips3D(strips=line_strips, colors=(0, 255, 0), labels=("Factor Graph")),
-                )
-        profile["keyframe_pose_updates"] = keyframe_pose_updates
-        profile["n_keyframes"] = N_keyframes
-        profile["n_edges"] = int(ii.numel())
-        profile["logging_total_ms"] = (
-            float(profile.get("blueprint_refresh_ms", 0.0))
-            + float(profile.get("orientation_update_ms", 0.0))
-            + float(profile.get("current_frame_logging_ms", 0.0))
-            + float(profile.get("keyframes_logging_ms", 0.0))
-            + float(profile.get("last_keyframe_logging_ms", 0.0))
-            + float(profile.get("edges_logging_ms", 0.0))
-        )
-        self.last_profile = profile
+                world_sim3_cami = lietorch.Sim3(keyframes.world_sim3_cam[ii, 0])
+                world_sim3_camj = lietorch.Sim3(keyframes.world_sim3_cam[jj, 0])
+        if ii.numel() > 0 and jj.numel() > 0:
+            assert world_sim3_cami is not None
+            assert world_sim3_camj is not None
+            t_world_cami: Float32[ndarray, "num_edges 3"] = world_sim3_cami.matrix()[:, :3, 3].cpu().numpy()
+            t_world_camj: Float32[ndarray, "num_edges 3"] = world_sim3_camj.matrix()[:, :3, 3].cpu().numpy()
+            line_strips: list[list[float]] = []
+            for t_i, t_j in zip(t_world_cami, t_world_camj, strict=False):
+                line_strips.append(t_i.tolist())
+                line_strips.append(t_j.tolist())
+            rr.log(
+                f"{self.parent_log_path}/edges",
+                rr.LineStrips3D(strips=line_strips, colors=(0, 255, 0), labels=("Factor Graph")),
+            )

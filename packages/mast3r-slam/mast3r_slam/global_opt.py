@@ -11,7 +11,6 @@ from mast3r_slam.geometry import (
     constrain_points_to_ray,
 )
 from mast3r_slam.mast3r_utils import mast3r_match_symmetric
-from mast3r_slam.perf import timed_section
 
 
 class FactorGraph:
@@ -42,7 +41,6 @@ class FactorGraph:
         self.Q_ii2jj: Float32[Tensor, "..."] = torch.as_tensor([], dtype=torch.float32, device=self.device)
         self.Q_jj2ii: Float32[Tensor, "..."] = torch.as_tensor([], dtype=torch.float32, device=self.device)
         self.window_size: float = self.cfg["window_size"]
-        self.last_profile: dict[str, float | int | str] = {}
 
         self.K: Float[Tensor, "3 3"] | None = K
 
@@ -67,10 +65,6 @@ class FactorGraph:
         Returns:
             True if at least one valid edge was added, False otherwise.
         """
-        profile: dict[str, float | int | str] = {
-            "num_pairs_requested": len(ii),
-            "is_reloc": int(is_reloc),
-        }
         kf_ii: list[Frame] = [self.frames[idx] for idx in ii]
         kf_jj: list[Frame] = [self.frames[idx] for idx in jj]
         feat_i_list: list[Float[Tensor, "1 n_patches feat_dim"]] = []
@@ -94,19 +88,18 @@ class FactorGraph:
         shape_i: list[Int[Tensor, "1 2"]] = [kf_i.img_true_shape for kf_i in kf_ii]
         shape_j: list[Int[Tensor, "1 2"]] = [kf_j.img_true_shape for kf_j in kf_jj]
 
-        with timed_section(profile, "match_symmetric_total_ms", sync_cuda=True):
-            (
-                idx_i2j,
-                idx_j2i,
-                valid_match_j,
-                valid_match_i,
-                Qii,
-                Qjj,
-                Qji,
-                Qij,
-            ) = mast3r_match_symmetric(
-                self.model, feat_i, pos_i, feat_j, pos_j, shape_i, shape_j, profile=profile
-            )
+        (
+            idx_i2j,
+            idx_j2i,
+            valid_match_j,
+            valid_match_i,
+            Qii,
+            Qjj,
+            Qji,
+            Qij,
+        ) = mast3r_match_symmetric(
+            self.model, feat_i, pos_i, feat_j, pos_j, shape_i, shape_j
+        )
 
         batch_inds: Int[Tensor, "b hw"] = torch.arange(idx_i2j.shape[0], device=idx_i2j.device)[
             :, None
@@ -154,9 +147,6 @@ class FactorGraph:
         self.Q_jj2ii = torch.cat([self.Q_jj2ii, Qi])
 
         added_new_edges: bool = bool(valid_edges.sum() > 0)
-        profile["num_pairs_valid"] = int(valid_edges.sum().item())
-        profile["num_edges_total"] = int(self.ii.numel())
-        self.last_profile = profile
         return added_new_edges
 
     def get_unique_kf_idx(self) -> Int[Tensor, "n_unique"]:
@@ -231,10 +221,6 @@ class FactorGraph:
         pin: int = self.cfg["pin"]
         unique_kf_idx: Int[Tensor, "n_unique"] = self.get_unique_kf_idx()
         n_unique_kf: int = unique_kf_idx.numel()
-        self.last_profile = {
-            "solve_mode": "rays",
-            "n_unique_keyframes": int(n_unique_kf),
-        }
         if n_unique_kf <= pin:
             return
 
@@ -258,23 +244,22 @@ class FactorGraph:
         delta_thresh: float = self.cfg["delta_norm"]
 
         pose_data: Float[Tensor, "n_unique sim3_dim"] = world_sim3_cams.data[:, 0, :]
-        with timed_section(self.last_profile, "global_opt_total_ms", sync_cuda=True):
-            _backends.gauss_newton_rays(
-                pose_data,
-                Xs,
-                Cs,
-                ii,
-                jj,
-                idx_ii2jj,
-                valid_match,
-                Q_ii2jj,
-                sigma_ray,
-                sigma_dist,
-                C_thresh,
-                Q_thresh,
-                max_iter,
-                delta_thresh,
-            )
+        _backends.gauss_newton_rays(
+            pose_data,
+            Xs,
+            Cs,
+            ii,
+            jj,
+            idx_ii2jj,
+            valid_match,
+            Q_ii2jj,
+            sigma_ray,
+            sigma_dist,
+            C_thresh,
+            Q_thresh,
+            max_iter,
+            delta_thresh,
+        )
 
         # Update the keyframe world_sim3_cam
         self.frames.update_world_sim3_cams(world_sim3_cams[pin:], unique_kf_idx[pin:])
@@ -291,10 +276,6 @@ class FactorGraph:
         pin: int = self.cfg["pin"]
         unique_kf_idx: Int[Tensor, "n_unique"] = self.get_unique_kf_idx()
         n_unique_kf: int = unique_kf_idx.numel()
-        self.last_profile = {
-            "solve_mode": "calib",
-            "n_unique_keyframes": int(n_unique_kf),
-        }
         if n_unique_kf <= pin:
             return
 
@@ -330,28 +311,27 @@ class FactorGraph:
         width: int
         height, width = img_size
 
-        with timed_section(self.last_profile, "global_opt_total_ms", sync_cuda=True):
-            _backends.gauss_newton_calib(
-                pose_data,
-                Xs,
-                Cs,
-                K,
-                ii,
-                jj,
-                idx_ii2jj,
-                valid_match,
-                Q_ii2jj,
-                height,
-                width,
-                pixel_border,
-                z_eps,
-                sigma_pixel,
-                sigma_depth,
-                C_thresh,
-                Q_thresh,
-                max_iter,
-                delta_thresh,
-            )
+        _backends.gauss_newton_calib(
+            pose_data,
+            Xs,
+            Cs,
+            K,
+            ii,
+            jj,
+            idx_ii2jj,
+            valid_match,
+            Q_ii2jj,
+            height,
+            width,
+            pixel_border,
+            z_eps,
+            sigma_pixel,
+            sigma_depth,
+            C_thresh,
+            Q_thresh,
+            max_iter,
+            delta_thresh,
+        )
 
         # Update the keyframe world_sim3_cam
         self.frames.update_world_sim3_cams(world_sim3_cams[pin:], unique_kf_idx[pin:])
