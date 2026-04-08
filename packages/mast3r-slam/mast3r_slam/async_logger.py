@@ -294,7 +294,20 @@ class AsyncRerunLogger:
 
     def __exit__(self, exc_type: type | None, exc_val: BaseException | None, exc_tb: object) -> None:
         """Send LogTerminate, join the thread, and warn if it outlives the timeout."""
-        self._queue.put(LogTerminate())
+        # Use a bounded put so we don't deadlock if the logger thread
+        # crashed and the queue is full.
+        try:
+            self._queue.put(LogTerminate(), timeout=5.0)
+        except queue.Full:
+            # Queue is stuck — the logger thread is likely dead.
+            if self._error is not None:
+                warnings.warn(
+                    f"Async logger thread crashed: {self._error}. "
+                    f"{self._queue.qsize()} events were not processed.",
+                    stacklevel=2,
+                )
+            return
+
         self.join(timeout=30.0)
         if self.is_alive():
             warnings.warn(
