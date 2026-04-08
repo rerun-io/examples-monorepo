@@ -1,282 +1,146 @@
 # MASt3R-SLAM Bottleneck Analysis
 
+This note is the current optimization brief for MASt3R-SLAM. It is written for someone new to the repo and focuses on what we have measured, what is already known to be slow, and what to do next.
+
 ## Pipeline Overview
 
-MASt3R-SLAM runs two concurrent processes managed by the `SlamBackend`
-context manager (see `backend_lifecycle.py`):
+MASt3R-SLAM runs as two cooperating processes:
 
 ```
-Main Process (Tracker)                  Backend Process (Global Optimizer)
-┌───────────────────────┐               ┌────────────────────────────┐
-│ for each frame:       │               │ for each new keyframe:     │
-│  1. Load & resize img │               │  1. Retrieval DB query     │
-│  2. Create frame      │  ──queue──▶   │  2. Symmetric matching     │
-│  3. Encode (ViT)      │               │     (4 decoder passes +    │
-│  4. Decode (1 pass)   │               │      dense matching)       │
-│  5. Dense matching    │               │  3. Factor graph update    │
-│  6. GN tracking (50i) │               │  4. Global GN solve (10i)  │
-│  7. Rerun logging     │               │  5. Update shared poses    │
-└───────────────────────┘               └────────────────────────────┘
+Frontend / tracker                    Backend / optimizer
+┌──────────────────────────────┐      ┌──────────────────────────────┐
+│ every frame:                 │      │ every new keyframe:          │
+│ 1. read + resize image       │      │ 1. retrieval query           │
+│ 2. create frame state        │      │ 2. symmetric MASt3R matching │
+│ 3. run tracking inference    │ ───▶ │ 3. add factor-graph edges    │
+│ 4. estimate current pose     │      │ 4. run global optimization    │
+│ 5. log to Rerun              │      │ 5. publish updated poses      │
+└──────────────────────────────┘      └──────────────────────────────┘
 ```
 
-The `SlamBackend` context manager guarantees cleanup on all exit paths
-(normal completion, exceptions, Ctrl+C, Gradio stop) via a 3-step shutdown
-escalation (signal → terminate → kill), manager shutdown, and GPU memory
-release.
+The frontend is responsible for keeping up with incoming frames. The backend is responsible for heavier map-building work that happens when a frame becomes a keyframe.
 
----
+## What We Measured
 
-## Bottleneck #1: MASt3R Decoder Forward Passes (DOMINANT)
+The benchmark artifacts live under [packages/mast3r-slam/benchmark](/var/tmp/vibe-kanban/worktrees/f711-mast3r-slam-infe/examples-monorepo/packages/mast3r-slam/benchmark). The most useful runs are:
 
-**Where:** `mast3r_utils.py` — `decoder()`, called from tracking + backend
+| Run | FPS | Avg frame time | Avg logging time |
+|---|---:|---:|---:|
+| `fast-full` | 5.51 | 181.45 ms | 56.54 ms |
+| `fast-no-logging-full` | 7.88 | 126.98 ms | 0.00 ms |
+| `base-full` | 5.51 | 181.51 ms | 54.72 ms |
+| `base-no-logging-full` | 8.51 | 117.53 ms | 0.00 ms |
 
-**What happens:** The ViT-Large decoder is a heavy neural network forward pass.
-Every tracked frame requires **1 encoder + 1 decoder** call (asymmetric).
-Every new keyframe triggers **4 decoder passes** in the backend (symmetric matching: `ii→jj` + `jj→ii`, both directions).
+The headline result is simple:
 
-**Cost breakdown per frame:**
+- Logging is a major source of slowdown in the default logged path.
+- Disabling logging recovers about `+2.36 FPS` on `fast` and `+3.00 FPS` on `base`.
+- Once logging is removed, the frontend becomes much more stable.
+- After that, the main remaining bottleneck on `base` is backend scaling, especially MASt3R pair construction and global optimization.
 
-| Operation | Decoder Passes | Context |
-|---|---|---|
-| Tracking (asymmetric) | 1 encode + 1 decode | `mast3r_asymmetric_inference` |
-| INIT / RELOC (mono) | 1 encode + 1 decode | `mast3r_inference_mono` |
-| Backend symmetric match | 4 decodes per pair | `mast3r_decode_symmetric_batch` |
+## Current Bottlenecks
 
-At 512px resolution, each decoder pass processes `(1, N_patches, 1024)` tokens through cross-attention layers. This is the single most expensive operation in the entire pipeline.
+### 1. Rerun logging overhead in the default configuration
 
-**Evidence:** The `fast.yaml` config achieves speedup primarily by reducing resolution from 512→224 (4x fewer pixels = fewer patches = much faster decoder).
+This is the main avoidable bottleneck in the current user-facing pipeline.
 
-**Why it's the bottleneck:**
-- ViT-Large has ~300M parameters
-- Each forward pass involves full attention over all patch tokens
-- The backend does 4 decoder passes **per keyframe pair** (sequential loop in `mast3r_decode_symmetric_batch`)
-- With k=3 retrieval + 1 consecutive = ~4 pairs per keyframe = **16 decoder calls per new keyframe** in the backend
+Why we know this:
 
-### Potential Solutions
+- `fast` improved from `5.51 FPS` to `7.88 FPS` when logging was disabled.
+- `base` improved from `5.51 FPS` to `8.51 FPS` when logging was disabled.
+- The logged runs spend roughly `55 ms/frame` in logging alone.
 
-1. **Half-precision inference (FP16/BF16):** The decoder uses `torch.amp.autocast(enabled=False)` for the downstream head — this explicitly *disables* AMP. Enabling AMP for the full decoder+head could yield ~1.5-2x speedup. The `autocast(enabled=False)` was likely added for numerical stability; test whether BF16 maintains acceptable accuracy.
+What is still expensive in the current logging path:
 
-2. **torch.compile the decoder:** Wrapping `model._decoder` and `model._downstream_head` with `torch.compile(mode="reduce-overhead")` can fuse kernels and reduce Python overhead. The model is already in `@torch.inference_mode()`, making it a good candidate.
+- current-camera RGB, pointmap, depth, and confidence are produced every frame
+- camera path is rebuilt from full history every frame
+- factor-graph edge geometry is rebuilt from the full edge set
+- `last_keyframe` image and maps are relogged every frame
+- array conversion and image compression happen synchronously on the tracking thread
 
-3. **Batch decoder calls in the backend:** `mast3r_decode_symmetric_batch` runs decoder pairs **sequentially in a Python loop**. For batch>1 (which happens with retrieval candidates), this loop could be parallelized or batched at the decoder level if memory allows.
+One important update: keyframe pose logging is already better than it used to be. The code now uses dirty keyframe pose updates instead of relogging every keyframe transform every frame. That helped, but it was not enough to remove the main logging cost.
 
-4. **Feature caching across frames:** When a frame becomes a keyframe, its encoder features (`frame.feat`, `frame.pos`) are already cached. But the decoder is still called per-pair. Consider caching intermediate decoder states for the keyframe side.
+### 2. Backend MASt3R pair construction
 
-5. **Reduce retrieval k:** `retrieval.k=3` means 3 extra pairs per keyframe. Reducing to k=1 or k=2 cuts backend decoder calls proportionally (from 16 to 8 or 12 per keyframe).
+The backend still spends most of its time building new factors for incoming keyframes. In practice, this is dominated by decoder work plus dense matching.
 
----
+Evidence:
 
-## Bottleneck #2: Dense Matching Kernels (iter_proj + refine_matches)
+- `fast-no-logging-full`: backend `add_factors` averages `139.13 ms`
+- `base-no-logging-full`: backend `add_factors` averages `181.44 ms`
 
-**Where:** `matching.py` → CUDA/Mojo kernels (`_matching_backends.iter_proj`, `_matching_backends.refine_matches`)
+This is the main backend bottleneck once logging is out of the way.
 
-**What happens:** After decoding, every frame-to-keyframe pair needs dense correspondence matching:
-1. **iter_proj:** 10 iterations of gradient-descent projection of 3D points onto a ray image (`matching.max_iter=10`)
-2. **refine_matches:** Descriptor-based refinement in a local neighborhood (radius=3, dilation_max=5)
+### 3. Backend global optimization growth
 
-At 512px, this operates on ~262K points per frame.
+On longer runs, backend optimization time grows with the map.
 
-**Evidence:** The existing `tools/bench_matching_kernels.py` already benchmarks these kernels in isolation. Both iter_proj and refine_matches have dedicated CUDA and Mojo implementations, indicating they were already identified as performance-sensitive.
+Evidence:
 
-### Potential Solutions
+- `base-no-logging-full`: backend `global_opt` averages `167.24 ms`
+- `base-full`: backend task time grows by about `4.48 ms` per keyframe
 
-1. **Reduce matching iterations:** `max_iter=10` could potentially be reduced to 5-7 if convergence is fast (the kernel has a `convergence_thresh=1e-6` early exit). Profile average actual iterations to convergence.
+At `base` resolution, global optimization is nearly as expensive as pair construction. That means backend scaling, not just frontend logging, becomes a real problem on long sequences.
 
-2. **Warm-start from previous frame:** Already partially implemented — `idx_i2j_init` is passed from the previous tracking result in `tracker.py`. This helps consecutive frames but not the backend's symmetric matching.
+### 4. Tracking cost
 
-3. **Descriptor refinement radius:** `radius=3` with `dilation_max=5` creates a search window up to 15x15. Reducing to radius=2 or dilation_max=3 would shrink the search space significantly.
+Tracking is not the main source of the large logged-vs-no-logging gap, but it is still a meaningful steady-state cost.
 
-4. **Use Mojo kernels over CUDA:** The codebase already has Mojo alternatives (`mast3r_slam_mojo_backends`). The matching module prefers Mojo when available. Benchmark results from `bench_matching_kernels.py` should guide which to use per resolution.
+Evidence:
 
----
+- `fast-no-logging-full`: avg tracking time `82.58 ms`
+- `base-no-logging-full`: avg tracking time `90.06 ms`
 
-## Bottleneck #3: Rerun Visualization Logging
+This matters, but it is not the first thing to optimize while the logged path is still paying large synchronous visualization costs.
 
-**Where:** `rerun_log_utils.py` → `RerunLogger.log_frame()`, called every frame
+## What Has Already Changed
 
-**What happens:** On **every single frame**, the logger:
-1. Estimates focal length via `frame_to_pinhole()` which runs Weiszfeld iteration (10 iterations, CPU)
-2. Converts keyframe poses to SE3 → 4x4 matrix
-3. Re-logs **all keyframes' transforms** (not just new/dirty ones)
-4. Recomputes gravity alignment when keyframe count changes via `_log_orient_transform()`
-5. Logs edge graph by iterating all edges
+Several useful changes are already in the repo:
 
-The keyframe loop is O(N_keyframes) **per frame**, so as the map grows, visualization cost grows linearly.
+- Deep frontend/backend benchmark instrumentation was added.
+- Full benchmark outputs were committed for `fast`, `base`, and no-logging variants.
+- A `--disable-logging` benchmark mode was added so logging cost can be isolated directly.
+- Keyframe pose logging was improved to use dirty updates rather than relogging every keyframe pose each frame.
 
-**Evidence:** The `get_dirty_idx` method exists in `frame.py` but is not used in the logging loop — all keyframes are re-logged every frame.
+These changes were enough to prove that logging overhead was real and to quantify its impact.
 
-### Potential Solutions
+## Logging Optimization Plan
 
-1. **Enable dirty-flag optimization:** `SharedKeyframes.get_dirty_idx()` already exists. Only re-log keyframes whose poses have changed since the last log call.
+The next logging change should preserve the same viewer experience while removing logging from the tracking critical path.
 
-2. **Cache focal estimation:** The Weiszfeld focal estimation in `frame_to_pinhole()` runs for every frame. Since focal length doesn't change rapidly, cache it and recompute only every N frames or on new keyframes.
+The current direction is:
 
-3. **Subsample visualization:** Log every Nth frame to Rerun instead of every frame. The `no_viz` flag exists but is all-or-nothing.
+1. Move logging to a dedicated worker process.
+2. Have that worker initialize Rerun through the existing `RerunTyroConfig`.
+3. Keep the frontend focused on producing tracking results, not compressing and sending visualization data.
+4. Use Rerun's latest-at and partial-update model correctly.
+   MASt3R-SLAM does not assume a fixed pinhole model. The paper explicitly allows generic, time-varying central camera models, so optimizations must not assume intrinsics stay constant across the sequence.
+   - log only components that are actually unchanged
+   - if the current frame's camera model changes, update those camera components for that frame
+   - send only changed transforms or changed components for dynamic entities
+   - stop rebuilding full-history entities every frame
+5. Keep blueprint handling static instead of refreshing it as the map grows.
 
-4. **Async visualization:** Move logging to a separate thread so it doesn't block the tracking loop. Currently `rr_logger.log_frame()` is synchronous in the main loop.
+This should address the main current issue: logging is still synchronous and still does too much repeated work on the frontend thread. The important constraint is that we should remove unnecessary relogs without weakening support for zooming or any other time-varying camera model.
 
----
+## Recommended Next Steps
 
-## Bottleneck #4: Tracking Gauss-Newton Optimizer (Per-Frame CPU)
+1. Optimize the logging path first.
+   Use a worker process, reuse `RerunTyroConfig`, and remove unnecessary full-history relogs.
 
-**Where:** `tracker.py` → `opt_pose_ray_dist_sim3` / `opt_pose_calib_sim3`
+2. Rerun the full logged benchmarks.
+   The goal is to confirm that the logged path gets close to the no-logging baseline.
 
-**What happens:** For every tracked frame, a Gauss-Newton solver runs up to **50 iterations** (`tracking.max_iters=50`):
-- Each iteration: construct Jacobian (hw×4×7 tensor), form H=J'J and g=-J'b, Cholesky factorize, solve
-- Matrix sizes: for 512px, hw ≈ 262K, so A is ~262K×7, H is 7×7
-- The Cholesky solve is 7×7 so it's cheap, but the Jacobian construction is not
+3. After logging is fixed, focus on backend pair construction.
+   The first candidates are decoder-side improvements such as AMP/BF16, `torch.compile`, and reducing backend pair volume.
 
-The solver operates on torch tensors on CUDA but the logic is pure Python with torch operations — no custom kernel.
+4. Then reduce backend optimization scaling.
+   The main candidates are sliding-window or local-subgraph optimization and solving less often.
 
-**Evidence:** The convergence check (`check_convergence`) provides early exit, but worst case is 50 iterations of dense tensor operations.
+## Bottom Line
 
-### Potential Solutions
+If you are looking at MASt3R-SLAM performance for the first time, the current picture is:
 
-1. **Reduce max_iters with good initialization:** The pose is initialized from the previous frame, so convergence should be fast. Profile how many iterations are actually used on average. Reducing from 50→20 may have no accuracy impact.
-
-2. **Move to CUDA kernel:** The backend's global optimizer already uses `_backends.gauss_newton_rays()` (a compiled CUDA kernel). A similar kernel for the per-frame tracker would eliminate Python loop overhead.
-
-3. **Subsample residuals:** Instead of using all ~262K point correspondences, randomly sample or use a confidence-weighted subset (e.g. top-K by quality score). The 7-DOF Sim3 only needs ~7 good correspondences, so using 10K high-quality ones may suffice.
-
-4. **Levenberg-Marquardt damping:** The current solver is undamped Gauss-Newton. Adding LM damping could improve convergence speed and reduce iterations needed.
-
----
-
-## Bottleneck #5: Backend Global Gauss-Newton Solve
-
-**Where:** `global_opt.py` → `solve_GN_rays()` / `solve_GN_calib()`
-
-**What happens:** After adding factors, the backend solves a global pose graph over ALL unique keyframes:
-- `_backends.gauss_newton_rays()` — compiled CUDA kernel
-- Runs up to 10 iterations (`local_opt.max_iters=10`)
-- Data sizes scale with `n_unique_kf × hw` for point maps and `n_edges × hw` for correspondences
-
-As the map grows, this becomes increasingly expensive because it optimizes over all keyframes, not a sliding window.
-
-**Evidence:** `window_size` is set to `1e+6` (effectively infinite) in `base.yaml`, meaning no windowing is applied.
-
-### Potential Solutions
-
-1. **Sliding window optimization:** Set `window_size` to a reasonable value (e.g., 20-50 keyframes) to limit the optimization to recent keyframes. Only optimize the local subgraph.
-
-2. **Reduce global solve frequency:** Currently solves after every new keyframe. Could solve every N keyframes or only when loop closures are detected.
-
-3. **Covisibility-based subgraph:** Only optimize keyframes connected to the new keyframe within K hops in the factor graph, rather than all unique keyframes.
-
----
-
-## Bottleneck #6: Image I/O and Preprocessing (CPU-bound)
-
-**Where:** `dataloader.py` (get_image/read_img) + `mast3r_utils.py` (resize_img) + `frame.py` (create_frame)
-
-**What happens per frame:**
-1. `cv2.imread()` or `torchcodec.VideoDecoder` — disk read + decode
-2. `cv2.cvtColor()` — BGR→RGB conversion (CPU)
-3. Optional `cv2.remap()` for undistortion (CPU)
-4. `float32` conversion + normalization (CPU)
-5. `PIL.Image.fromarray()` + resize via LANCZOS/BICUBIC (CPU, Python GIL)
-6. `ImgNorm()` — ImageNet normalization (CPU)
-7. Transfer to GPU
-
-For MP4 inputs, `torchcodec.VideoDecoder` provides GPU-accelerated video decoding (added as a dependency in this PR), which is significantly faster than OpenCV's `cap.read()`. But the PIL resize step still happens on CPU.
-
-### Potential Solutions
-
-1. **GPU-accelerated resize:** Replace PIL resize with `torchvision.transforms.functional.resize()` on GPU tensors, or use NVIDIA DALI for the full preprocessing pipeline.
-
-2. **Prefetch with DataLoader:** Use `torch.utils.data.DataLoader` with `num_workers>0` and `prefetch_factor` to overlap I/O with GPU computation. Currently frames are loaded synchronously in the main loop.
-
-3. **Eliminate PIL intermediary:** The `resize_img` function converts numpy→PIL→numpy→torch. This could be done entirely in torch/torchvision on GPU.
-
----
-
-## Bottleneck #7: Retrieval Database Scaling
-
-**Where:** `retrieval_database.py` → `update()` method
-
-**What happens:** For each new keyframe, the retrieval database:
-1. Extracts whitened local features via MLP layers (GPU, fast)
-2. Transfers to CPU numpy
-3. Quantizes against codebook centroids via L2 distance (GPU)
-4. Transfers back to CPU numpy
-5. Runs ASMK inverted file search (CPU)
-6. Adds to inverted file (CPU)
-
-**Scaling concern:** The ASMK inverted file search is O(n_images × n_local_features). As the database grows to hundreds of keyframes, query time increases linearly.
-
-### Potential Solutions
-
-1. **Keep quantization on GPU:** The `quantize_custom` method already runs on GPU, but results are immediately transferred to CPU numpy. If the ASMK library supported GPU tensors, this transfer could be eliminated.
-
-2. **Limit database size:** Prune old/redundant keyframes from the database based on spatial coverage.
-
-3. **Batch quantization and search:** Group multiple queries if keyframes arrive in bursts.
-
----
-
-## Bottleneck #8: Shared Memory Synchronization
-
-**Where:** `frame.py` (SharedStates, SharedKeyframes) — RLock on every read/write
-
-**What happens:** Both SharedStates and SharedKeyframes use `manager.RLock()` for thread safety. Every operation (get_mode, set_frame, append keyframe, read keyframe) acquires the lock. The backend process polls in a tight loop (10ms sleep) and the tracker writes on every frame.
-
-The `SlamBackend` context manager now properly manages the `mp.Manager` lifecycle, ensuring the lock server process is shut down on all exit paths.
-
-### Potential Solutions
-
-1. **Lock-free ring buffer:** Replace the locked buffer with a lock-free SPSC (single-producer, single-consumer) ring buffer for the keyframe queue.
-
-2. **Finer-grained locking:** Instead of one global RLock for all keyframes, use per-keyframe locks so the backend can read keyframe K while the tracker writes keyframe K+1.
-
-3. **Reduce lock contention in visualization:** The visualization loop (Bottleneck #3) holds the keyframes lock while iterating all keyframes. Moving visualization to a separate process with snapshot-based reads would eliminate this contention.
-
----
-
-## Summary: Bottleneck Priority Ranking
-
-| Priority | Bottleneck | Est. % of Frame Time | Difficulty |
-|---|---|---|---|
-| **1** | MASt3R decoder passes | ~50-60% | Medium (AMP, compile) |
-| **2** | Rerun visualization logging | ~15-20% | Low (dirty flags, caching) |
-| **3** | Dense matching kernels | ~10-15% | Medium (already optimized) |
-| **4** | Per-frame GN tracking | ~5-10% | Low (reduce iters, subsample) |
-| **5** | Image I/O + preprocessing | ~5% | Low (prefetch, GPU resize) |
-| **6** | Backend global GN solve | Async (blocks backend) | Low (windowing) |
-| **7** | Retrieval DB | Async (blocks backend) | Medium |
-| **8** | Shared memory sync | Indirect overhead | High (architectural) |
-
-## Recommended First Steps
-
-1. **Enable `torch.compile` on the decoder** — likely the single highest-impact change
-2. **Enable AMP (BF16) for decoder** — test accuracy impact, potentially 1.5-2x speedup
-3. **Enable dirty-flag visualization** — only re-log keyframes whose poses changed
-4. **Profile actual GN iteration counts** — reduce `max_iters` if convergence is typically fast
-5. **Add async image prefetch** — overlap I/O with GPU compute
-
-## Profiling Methodology
-
-To validate these estimates, instrument the pipeline with `torch.cuda.Event` timing:
-
-```python
-import torch
-
-start = torch.cuda.Event(enable_timing=True)
-end = torch.cuda.Event(enable_timing=True)
-
-start.record()
-# ... operation ...
-end.record()
-torch.cuda.synchronize()
-print(f"Operation: {start.elapsed_time(end):.2f}ms")
-```
-
-Add timing around:
-- `model._encode_image()` — encoder cost
-- `decoder()` — per-call decoder cost
-- `_matching_backends.iter_proj()` — matching kernel cost
-- `_matching_backends.refine_matches()` — refinement cost
-- `self.solve()` in tracker — per-GN-iteration cost
-- `rr_logger.log_frame()` — visualization cost
-- `create_frame()` — preprocessing cost
-
-The existing `tools/bench_matching_kernels.py` provides a good template for this approach.
+- With normal logging enabled, logging is a major bottleneck.
+- Without logging, the system is much faster and more stable.
+- After logging is addressed, the next major problem is backend scaling, especially decoder-heavy pair construction and global optimization on larger maps.
