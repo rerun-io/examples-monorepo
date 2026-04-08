@@ -752,9 +752,9 @@ outputs = [
 ]
 
 [feature.mast3r-slam.tasks._download-example-data]
-cmd = "hf download pablovela5620/mast3r-slam-example-data normal-apt-tour.mp4 --repo-type dataset --local-dir data/"
+cmd = "hf download pablovela5620/mast3r-slam-example-data normal-apt-tour.mp4 livingroom-tour.mp4 --repo-type dataset --local-dir data/"
 cwd = "packages/mast3r-slam"
-outputs = ["packages/mast3r-slam/data/normal-apt-tour.mp4"]
+outputs = ["packages/mast3r-slam/data/normal-apt-tour.mp4", "packages/mast3r-slam/data/livingroom-tour.mp4"]
 description = "Download example video data"
 
 # ── Test baseline task ──────────────────────────────────────────────────

@@ -32,6 +32,7 @@ State machine modes (``Mode`` enum):
 """
 
 import contextlib
+import queue
 import time
 from collections.abc import Generator
 from dataclasses import dataclass, field
@@ -40,21 +41,35 @@ from timeit import default_timer as timer
 from typing import Literal
 
 import lietorch
+import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 import torch
 import torch.multiprocessing as mp
-from jaxtyping import Float, Int
+from jaxtyping import Float, Float32, Int
 from mast3r.model import AsymmetricMASt3R
 from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
 
+from mast3r_slam.async_logger import (
+    AsyncRerunLogger,
+    compute_orient,
+    snapshot_current_frame,
+    snapshot_edges,
+    snapshot_keyframe,
+)
 from mast3r_slam.backend_lifecycle import SlamBackend
 from mast3r_slam.config import config, load_config
 from mast3r_slam.dataloader import MonocularDataset, load_dataset
 from mast3r_slam.frame import Frame, Mode, SharedKeyframes, SharedStates, create_frame
 from mast3r_slam.global_opt import FactorGraph
+from mast3r_slam.log_events import (
+    KeyframeSnapshot,
+    LogEvent,
+    LogMapUpdate,
+    LogText,
+)
 from mast3r_slam.mast3r_utils import (
     load_mast3r,
     load_retriever,
@@ -64,7 +79,6 @@ from mast3r_slam.nerfstudio_utils import save_kf_to_nerfstudio
 from mast3r_slam.rerun_log_utils import (
     FRAME_TIMELINE,
     VIDEO_TIMELINE,
-    RerunLogger,
     create_blueprints,
     log_video_for_dataset,
 )
@@ -138,19 +152,21 @@ def run_slam_pipeline(
     ns_save_path: Path | None = None,
     rr_application_id: str | None = None,
     handle: SlamPipelineHandle | None = None,
+    recording: rr.RecordingStream | None = None,
 ) -> Generator[str, None, None]:
     """Framework-agnostic SLAM tracking loop.
 
-    All ``rr.log()`` calls target whatever recording context the caller
-    has established (global recording for CLI, thread-local recording for
-    Gradio).
+    Logging is performed asynchronously by an ``AsyncRerunLogger`` thread.
+    The pipeline thread creates lightweight CPU snapshots (events) and
+    enqueues them; the logger thread does all the expensive work (JPEG
+    compression, focal estimation, ``rr.log()`` calls).
 
     Yields a status message string after each processed frame.
 
     The generator manages the full lifecycle:
 
     1. Load SLAM config and dataset.
-    2. Set up Rerun (video log, blueprint, ``RerunLogger``).
+    2. Set up Rerun (video log, blueprint, async logger).
     3. Check calibration.
     4. Spawn and manage backend via ``SlamBackend`` context manager.
     5. Run frame-by-frame tracking loop.
@@ -180,6 +196,8 @@ def run_slam_pipeline(
         ns_save_path: Optional path to export keyframes in NerfStudio format.
         rr_application_id: When set, backend subprocess connects to Rerun via gRPC.
         handle: Mutable handle populated with pipeline state.
+        recording: Rerun recording to pass to the async logger thread
+            (Gradio).  ``None`` uses the global recording (CLI).
 
     Yields:
         Status message string after each processed frame.
@@ -203,9 +221,15 @@ def run_slam_pipeline(
 
     # ── Rerun visualisation setup ──────────────────────────────────────────
     active_timeline: str = VIDEO_TIMELINE if frame_timestamps_ns is not None else FRAME_TIMELINE
-    rr_logger: RerunLogger = RerunLogger(parent_log_path, timeline=active_timeline)
     blueprint: rrb.Blueprint = create_blueprints(parent_log_path, timeline=active_timeline, n_keyframes=0)
     rr.send_blueprint(blueprint)
+
+    # Async logger: events are enqueued here, processed in a background thread.
+    # Used as a context manager further down so LogTerminate + join is automatic.
+    event_queue: queue.Queue[LogEvent] = queue.Queue(maxsize=32)
+    async_logger: AsyncRerunLogger = AsyncRerunLogger(
+        event_queue, parent_log_path, active_timeline, recording=recording,
+    )
 
     h: int
     w: int
@@ -228,7 +252,8 @@ def run_slam_pipeline(
     # SlamBackend.__enter__ creates the mp.Manager, shared keyframe/state
     # buffers, and spawns the backend process.  __exit__ guarantees cleanup
     # (backend shutdown, manager shutdown, GPU memory release).
-    with SlamBackend(config_path, model, h, w, K, device=device, rr_application_id=rr_application_id) as ctx:
+    # AsyncRerunLogger.__exit__ sends LogTerminate and joins the thread.
+    with SlamBackend(config_path, model, h, w, K, device=device, rr_application_id=rr_application_id) as ctx, async_logger:
         assert ctx.keyframes is not None
         assert ctx.states is not None
         keyframes: SharedKeyframes = ctx.keyframes
@@ -245,14 +270,13 @@ def run_slam_pipeline(
         i: int = 0
         fps_timer: float = time.time()
         start_time: float = timer()
+        last_orient_n_kf: int = 0
+        prev_edge_count: int = 0
 
         while True:
             # Check if the backend process crashed (raises BackendError if so).
             ctx.check_backend()
 
-            rr.set_time(FRAME_TIMELINE, sequence=i)
-            if frame_timestamps_ns is not None and i < len(frame_timestamps_ns):
-                rr.set_time(VIDEO_TIMELINE, duration=1e-9 * float(frame_timestamps_ns[i]))
             mode: Mode = states.get_mode()
 
             # Terminated by external signal (e.g. Gradio stop button).
@@ -265,6 +289,11 @@ def run_slam_pipeline(
             if i == n_frames:
                 states.set_mode(Mode.TERMINATED)
                 break
+
+            # Resolve timestamp for this frame.
+            ts_ns: int | None = (
+                int(frame_timestamps_ns[i]) if frame_timestamps_ns is not None and i < len(frame_timestamps_ns) else None
+            )
 
             _, rgb = dataset[i]
 
@@ -290,7 +319,21 @@ def run_slam_pipeline(
                 states.queue_global_optimization(len(keyframes) - 1)
                 states.set_mode(Mode.TRACKING)
                 states.set_frame(frame)
-                rr_logger.log_frame(frame, keyframes, states)
+
+                # ── Async logging for INIT frame ──────────────────────────
+                kf_idx_init: int = len(keyframes) - 1
+                n_kf_init: int = len(keyframes)
+                new_kfs_init: list[KeyframeSnapshot] = [snapshot_keyframe(frame, kf_idx_init)]
+                orient_init: tuple[Float32[ndarray, "3 3"], Float32[ndarray, "3"]] = compute_orient(keyframes, n_kf_init)
+                last_orient_n_kf = n_kf_init
+                event_queue.put(LogMapUpdate(
+                    frame_idx=i, timestamp_ns=ts_ns,
+                    new_keyframes=new_kfs_init, orient=orient_init,
+                ))
+                if not event_queue.full():
+                    with contextlib.suppress(queue.Full):
+                        event_queue.put_nowait(snapshot_current_frame(frame, i, ts_ns, keyframes))
+
                 i += 1
                 yield f"Processing frame {i}/{n_frames}"
                 continue
@@ -340,22 +383,66 @@ def run_slam_pipeline(
                             break
                     time.sleep(0.01)
 
-            # Log current frame, all keyframes, camera path, and factor graph
-            # edges to the Rerun viewer.
-            rr_logger.log_frame(frame, keyframes, states)
-            if i % 30 == 0:
+            # ── Async logging: create events and enqueue ──────────────────
+            # 1. Collect structural changes (non-droppable)
+            new_kfs: list[KeyframeSnapshot] = []
+            pose_updates: list[tuple[int, Float32[ndarray, "8"]]] = []
+            edge_pos: tuple[Float32[ndarray, "n 3"], Float32[ndarray, "n 3"]] | None = None
+            orient_data: tuple[Float32[ndarray, "3 3"], Float32[ndarray, "3"]] | None = None
+
+            if add_new_kf:
+                new_kfs.append(snapshot_keyframe(frame, len(keyframes) - 1))
+
+            dirty_idx: Int[Tensor, "n_dirty"] = keyframes.get_dirty_idx()
+            if dirty_idx.numel() > 0:
+                for idx_val in dirty_idx.tolist():
+                    sim3_cpu: Float32[ndarray, "8"] = (
+                        keyframes.world_sim3_cam[idx_val, 0].cpu().numpy().astype(np.float32)
+                    )
+                    pose_updates.append((int(idx_val), sim3_cpu))
+
+            # Edge update: resnapshot when edge count changes OR when poses
+            # were refined (global optimization moves endpoints without
+            # adding/removing factors).
+            with states.lock:
+                current_edge_count: int = len(states.edges_ii)
+            if current_edge_count != prev_edge_count or pose_updates:
+                edge_pos = snapshot_edges(states, keyframes)
+                prev_edge_count = current_edge_count
+
+            # Orient update (when keyframe count changes)
+            with keyframes.lock:
+                n_kf: int = len(keyframes)
+            if n_kf > 0 and n_kf != last_orient_n_kf:
+                orient_data = compute_orient(keyframes, n_kf)
+                last_orient_n_kf = n_kf
+
+            if new_kfs or pose_updates or edge_pos is not None or orient_data is not None:
+                event_queue.put(LogMapUpdate(
+                    frame_idx=i, timestamp_ns=ts_ns,
+                    new_keyframes=new_kfs, pose_updates=pose_updates,
+                    edge_positions=edge_pos, orient=orient_data,
+                ))
+
+            # 2. Current frame (droppable) — skip snapshot if queue is full
+            if not event_queue.full():
+                with contextlib.suppress(queue.Full):
+                    event_queue.put_nowait(snapshot_current_frame(frame, i, ts_ns, keyframes))
+
+            # FPS text log
+            if i % 30 == 0 and i > 0:
                 FPS: float = i / (time.time() - fps_timer)
-                rr.log(log_path, rr.TextLog(f"FPS: {FPS:.1f}", level="INFO"))
+                event_queue.put(LogText(path=log_path, message=f"FPS: {FPS:.1f}"))
             i += 1
 
             yield f"Processing frame {i}/{n_frames}"
 
-        # Post-loop: log timing, export nerfstudio, and wait for backend.
+        # ── Post-loop: flush logger, log timing, export nerfstudio ────────
         # Nerfstudio export MUST happen before ctx.join() / __exit__ because
         # SharedKeyframes uses mp.Manager-backed values (e.g. n_size) that
         # become invalid after the manager shuts down.
-        rr.log(log_path, rr.TextLog(f"Inference time: {format_time(timer() - start_time)}", level="INFO"))
-        rr.log(log_path, rr.TextLog(f"Processed {len(keyframes)} keyframes", level="INFO"))
+        event_queue.put(LogText(path=log_path, message=f"Inference time: {format_time(timer() - start_time)}"))
+        event_queue.put(LogText(path=log_path, message=f"Processed {len(keyframes)} keyframes"))
 
         stopped: bool = handle.stopped_early if handle is not None else False
         if not stopped and ns_save_path is not None:
@@ -369,6 +456,8 @@ def run_slam_pipeline(
             )
 
         ctx.join()
+
+    # async_logger.__exit__ has now run: LogTerminate sent, thread joined.
 
     # SlamBackend.__exit__ has now run: backend terminated, manager shut down,
     # GPU memory released via torch.cuda.empty_cache() + gc.collect().

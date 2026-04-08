@@ -92,6 +92,7 @@ def streaming_mast3r_slam_fn(
     global active_states
 
     stream = rr.binary_stream()
+    recording: rr.RecordingStream = rr.get_thread_local_data_recording()
 
     try:
         video_path: Path = Path(video_file)
@@ -129,6 +130,7 @@ def streaming_mast3r_slam_fn(
         subsample=subsample,
         ns_save_path=ns_output_dir,
         handle=handle,
+        recording=recording,
     ):
         active_states = handle.states
         yield stream.read(), None, msg
@@ -197,7 +199,7 @@ with gr.Blocks() as mast3r_slam_block:
                             minimum=1,
                             maximum=8,
                             step=1,
-                            value=1,
+                            value=4,
                         )
                         gr.Markdown(
                             "Base config file: `config/base.yaml`\n\n"
@@ -219,11 +221,12 @@ with gr.Blocks() as mast3r_slam_block:
 
                 examples = gr.Examples(
                     examples=[
-                    ["data/normal-apt-tour.mp4"],
-                ],
-                inputs=[video_file],
-                cache_examples=False,
-            )
+                        ["data/livingroom-tour.mp4"],
+                        ["data/normal-apt-tour.mp4"],
+                    ],
+                    inputs=[video_file],
+                    cache_examples=False,
+                )
 
         with gr.Column(scale=5):
             viewer = Rerun(
