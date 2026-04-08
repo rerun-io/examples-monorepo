@@ -66,7 +66,7 @@ def create_blueprints(
         origin=str(parent_log_path / "logs"),
         name="Logs",
     )
-    parent_log_root = f"/{parent_log_path}"
+    parent_log_root = f"/{str(parent_log_path).lstrip('/')}"
     spatial3d_contents: list[str] = [
         f"+ {parent_log_root}/**",
         f"- {parent_log_root}/current_camera/pinhole/video",
@@ -121,9 +121,10 @@ class RerunLogger:
         self.num_keyframes_logged: int = 0
         self.conf_thresh: int = 7
         self.image_plane_distance: float = 0.2
+        # Number of keyframes used in the last orientation update.
         self._last_orient_n_kf: int = 0
+        # Number of keyframes covered by the latest blueprint refresh.
         self._last_blueprint_n_kf: int = -1
-        """Number of keyframes used in the last orientation update."""
 
     def _refresh_blueprint(self, n_kf: int) -> None:
         rr.send_blueprint(create_blueprints(self.parent_log_path, timeline=self.timeline, n_keyframes=n_kf))
