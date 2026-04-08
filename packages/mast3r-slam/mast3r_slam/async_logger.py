@@ -4,8 +4,9 @@ Consumes ``LogEvent`` objects from a queue and performs all Rerun logging
 off the tracking hot-path.  The thread binds to the caller's
 ``RecordingStream`` (for Gradio) or uses the global recording (for CLI).
 
-Porting the rendering logic from :class:`RerunLogger.log_frame`
-(``rerun_log_utils.py``) into event-driven handlers.
+Handles JPEG compression, focal estimation, pointmap/depth conversion,
+camera path accumulation, and blueprint refreshes — all work that was
+previously synchronous on the tracking thread.
 """
 
 from __future__ import annotations
@@ -110,7 +111,7 @@ class AsyncRerunLogger:
         self._timeline: str = timeline
         self._thread: threading.Thread | None = None
 
-        # Internal state (mirrors RerunLogger)
+        # Internal visualization state
         self._path_list: list[list[float]] = []
         self._logged_keyframes: set[int] = set()
         self._last_kf_idx: int = -1
@@ -188,7 +189,7 @@ class AsyncRerunLogger:
         if timestamp_ns is not None:
             rr.set_time(VIDEO_TIMELINE, duration=1e-9 * float(timestamp_ns))
 
-    # ── Image helpers (ported from RerunLogger) ───────────────────────────
+    # ── Image helpers ─────────────────────────────────────────────────────
 
     def _log_rgb_image(self, image_path: str, rgb: Float32[ndarray, "H W 3"]) -> UInt8[ndarray, "H W 3"]:
         """Convert [0,1] float RGB to uint8, JPEG-compress, and log."""

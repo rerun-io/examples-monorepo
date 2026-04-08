@@ -49,7 +49,7 @@ This document explains the MASt3R-SLAM inference architecture: the multi-process
 │  Frame-by-frame tracking │  │  Global optimization loop     │
 │  Pose estimation (GN)    │  │  Factor graph construction    │
 │  Keyframe decisions      │  │  Image retrieval (loop close) │
-│  Rerun logging           │  │  Gauss-Newton solver          │
+│  CPU snapshots → queue   │  │  Gauss-Newton solver          │
 │                          │  │  Relocalization               │
 └──────────┬───────────────┘  └──────────────┬─────────────────┘
            │      SharedKeyframes            │
@@ -134,16 +134,19 @@ The core design challenge: the CLI and Gradio app need the **same tracking loop*
 sequenceDiagram
     participant C as CLI / Gradio
     participant G as run_slam_pipeline()<br/>(generator)
+    participant L as AsyncRerunLogger<br/>(thread)
     participant B as SlamBackend<br/>(subprocess)
     participant R as Rerun
 
     C->>G: next()
     Note over G: Load config, dataset,<br/>setup Rerun blueprint
+    G->>L: Start logger thread
     G->>B: SlamBackend.__enter__()<br/>spawn backend process
 
     loop Each frame
         G->>G: Track frame (INIT/TRACKING/RELOC)
-        G->>R: rr.log() — camera, pointcloud, edges
+        G->>L: CPU snapshot events via queue
+        L->>R: rr.log() — camera, pointcloud, edges
         G-->>C: yield "Processing frame 42/500"
 
         alt CLI
@@ -154,7 +157,7 @@ sequenceDiagram
         end
     end
 
-    G->>R: Log timing, keyframe count
+    G->>L: LogTerminate → flush & join
     G->>R: Nerfstudio export (if ns_save_path set)
     G->>B: Set TERMINATED, ctx.join()
     Note over G: SlamBackend.__exit__()<br/>cleanup GPU, manager
@@ -190,9 +193,33 @@ for msg in run_slam_pipeline(model=model, dataset_path=str(video_path), ...):
 
 Python generators keep `with` blocks alive across yields. The `with SlamBackend(...) as ctx:` inside the generator stays open for the entire tracking loop — the backend process runs continuously while the generator is suspended between yields. When the generator is exhausted (or garbage-collected if the Gradio client disconnects), `SlamBackend.__exit__` fires and handles all cleanup.
 
+## Async Logging
+
+Rerun logging is decoupled from the tracking hot-path via an `AsyncRerunLogger` thread. The pipeline thread creates lightweight CPU snapshots and enqueues them; the logger thread does all the expensive work (JPEG compression, focal estimation, pointmap conversion, `rr.log()` calls). This delivers a **2.73x speedup** on `example-base` with the live viewer (12m17s → 4m30s).
+
+### Event Model
+
+The pipeline produces 4 event types (defined in `log_events.py`):
+
+| Event | When sent | Droppable? |
+|---|---|---|
+| `LogCurrentFrame` | Every frame | Yes (viewer shows previous frame if dropped) |
+| `LogMapUpdate` | New keyframe, backend pose update, edge change, or orient update | No (structural) |
+| `LogText` | FPS / status messages | No |
+| `LogTerminate` | Pipeline done or stopped | No |
+
+Queue ordering per iteration: `LogMapUpdate` first (if any), then `LogCurrentFrame`. Structural changes are processed before the current camera that references them.
+
+### Why Not a Separate Process?
+
+A thread (not a process) is used because:
+- The Gradio recording can be shared directly via `rr.set_thread_local_data_recording()` — a separate process cannot share a `RecordingStream`
+- No serialization overhead for CPU numpy arrays (just reference passing via `queue.Queue`)
+- The GIL is not a bottleneck: JPEG compression, numpy, and `rr.log()` all release the GIL
+
 ## Rerun Recording Context
 
-The generator's `rr.log()` calls are **recording-agnostic** — they target whatever recording context the caller established:
+The logger thread's `rr.log()` calls are **recording-agnostic** — they target whatever recording context the caller established:
 
 ```mermaid
 flowchart LR
@@ -210,10 +237,10 @@ flowchart LR
     F -->|rr.log| G[Targets active<br/>recording context]
 ```
 
-| Caller | Recording setup | Where data goes |
-|--------|----------------|-----------------|
-| **CLI** | `RerunTyroConfig` calls `rr.init()` in `__post_init__` → global recording | RRD file, native viewer, or gRPC stream |
-| **Gradio** | `@rr.thread_local_stream("mast3r_slam")` decorator → per-call thread-local recording | `rr.binary_stream()` → `yield stream.read()` → embedded Rerun viewer |
+| Caller | Recording setup | Logger thread binding | Where data goes |
+|--------|----------------|---------------------|-----------------|
+| **CLI** | `RerunTyroConfig` calls `rr.init()` in `__post_init__` → global recording | None needed (falls through to global) | RRD file, native viewer, or gRPC stream |
+| **Gradio** | `@rr.thread_local_stream("mast3r_slam")` decorator → per-call thread-local recording | `rr.get_thread_local_data_recording()` → pass to logger → `rr.set_thread_local_data_recording()` | `rr.binary_stream()` → `yield stream.read()` → embedded Rerun viewer |
 
 ### Why `@rr.thread_local_stream` instead of explicit `RecordingStream`?
 
@@ -259,15 +286,18 @@ mast3r_slam/
 │   └── inference.py            # InferenceConfig, SlamPipelineHandle,
 │                                # run_slam_pipeline() (generator),
 │                                # mast3r_slam_inference() (CLI entry),
-│                                # run_backend(), relocalization()
+│                                # run_backend(), relocalization(),
+│                                # snapshot helpers for async logging
 ├── gradio/
 │   └── mast3r_slam_ui.py       # Gradio UI: streaming callback,
 │                                # @rr.thread_local_stream, nerfstudio zip
+├── async_logger.py              # AsyncRerunLogger thread (event consumer)
+├── log_events.py                # Frozen event dataclasses for async logging
 ├── backend_lifecycle.py         # SlamBackend context manager
 ├── tracker.py                   # FrameTracker (frontend pose estimation)
 ├── global_opt.py                # FactorGraph (backend graph optimization)
 ├── frame.py                     # Frame, SharedKeyframes, SharedStates, Mode
-├── rerun_log_utils.py           # RerunLogger, blueprints, video logging
+├── rerun_log_utils.py           # Blueprints, video logging, RerunLogger (legacy)
 ├── mast3r_utils.py              # Model loading, mono inference, matching
 ├── retrieval_database.py        # Image retrieval for loop closure
 ├── nerfstudio_utils.py          # Keyframe → NerfStudio format export

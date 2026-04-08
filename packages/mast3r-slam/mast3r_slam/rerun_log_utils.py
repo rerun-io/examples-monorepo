@@ -1,10 +1,12 @@
 """Rerun visualisation helpers for MASt3R-SLAM.
 
-Logs camera frustums, keyframe point clouds, the camera path, and
-factor-graph edges to a Rerun recording stream.  Uses ``simplecv``'s
-``PinholeParameters`` and ``log_pinhole`` for camera logging so the
-conversion from lietorch poses to Rerun transforms is done once in
-``frame_to_pinhole`` rather than repeated inline.
+Provides blueprint creation, video logging, and shared constants
+(``FRAME_TIMELINE``, ``VIDEO_TIMELINE``) used by both the pipeline
+and the async logger.
+
+The ``RerunLogger`` class is a **legacy synchronous fallback** retained
+for debugging and tests.  The active logging path is
+``AsyncRerunLogger`` in ``async_logger.py``.
 """
 
 from pathlib import Path
@@ -110,7 +112,11 @@ def log_video_for_dataset(
 
 
 class RerunLogger:
-    """Logs frames, keyframes, camera paths, and factor-graph edges to Rerun."""
+    """Legacy synchronous logger.  Retained as a fallback for debugging and tests.
+
+    The active logging path is :class:`~mast3r_slam.async_logger.AsyncRerunLogger`,
+    which consumes event objects from a queue on a background thread.
+    """
 
     def __init__(self, parent_log_path: Path, timeline: str = FRAME_TIMELINE) -> None:
         self.parent_log_path: Path = parent_log_path

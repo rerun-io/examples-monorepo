@@ -104,34 +104,34 @@ Several useful changes are already in the repo:
 
 These changes were enough to prove that logging overhead was real and to quantify its impact.
 
-## Logging Optimization Plan
+## Logging Optimization — Completed
 
-The next logging change should preserve the same viewer experience while removing logging from the tracking critical path.
+Logging has been moved off the tracking critical path via `AsyncRerunLogger` (a dedicated background thread). See `async_logger.py` and `log_events.py`.
 
-The current direction is:
+Measured result on `example-base` (full video, 512px, live viewer):
 
-1. Move logging to a dedicated worker process.
-2. Have that worker initialize Rerun through the existing `RerunTyroConfig`.
-3. Keep the frontend focused on producing tracking results, not compressing and sending visualization data.
-4. Use Rerun's latest-at and partial-update model correctly.
-   MASt3R-SLAM does not assume a fixed pinhole model. The paper explicitly allows generic, time-varying central camera models, so optimizations must not assume intrinsics stay constant across the sequence.
-   - log only components that are actually unchanged
-   - if the current frame's camera model changes, update those camera components for that frame
-   - send only changed transforms or changed components for dynamic entities
-   - stop rebuilding full-history entities every frame
-5. Keep blueprint handling static instead of refreshing it as the map grows.
+| Version | Wall time | Speedup |
+|---|---|---|
+| Synchronous logging | 12m17s | — |
+| Async logger thread | 4m30s | **2.73x** |
 
-This should address the main current issue: logging is still synchronous and still does too much repeated work on the frontend thread. The important constraint is that we should remove unnecessary relogs without weakening support for zooming or any other time-varying camera model.
+What the async logger does:
+
+1. The pipeline thread creates lightweight CPU snapshots (frozen dataclass events) and enqueues them.
+2. The logger thread consumes events and does all the expensive work: JPEG compression, focal estimation, pointmap conversion, `rr.log()` calls.
+3. Current-frame events are droppable (viewer shows previous frame if the logger is behind). Structural events (new keyframes, pose updates, edges) are never dropped.
+4. The logger only logs keyframe image/pointcloud data once (on creation), and only updates poses when dirty.
+5. Blueprint is refreshed only when keyframe count changes.
+
+The implementation preserves the same viewer experience while supporting time-varying camera models (intrinsics are re-estimated per frame in the logger thread).
 
 ## Recommended Next Steps
 
-1. Optimize the logging path first.
-   Use a worker process, reuse `RerunTyroConfig`, and remove unnecessary full-history relogs.
+1. ~~Optimize the logging path first.~~ **Done.** See "Logging Optimization — Completed" above.
 
-2. Rerun the full logged benchmarks.
-   The goal is to confirm that the logged path gets close to the no-logging baseline.
+2. ~~Rerun the full logged benchmarks.~~ **Done.** The logged path now runs at 2.73x the sync baseline.
 
-3. After logging is fixed, focus on backend pair construction.
+3. Focus on backend pair construction.
    The first candidates are decoder-side improvements such as AMP/BF16, `torch.compile`, and reducing backend pair volume.
 
 4. Then reduce backend optimization scaling.
@@ -141,6 +141,5 @@ This should address the main current issue: logging is still synchronous and sti
 
 If you are looking at MASt3R-SLAM performance for the first time, the current picture is:
 
-- With normal logging enabled, logging is a major bottleneck.
-- Without logging, the system is much faster and more stable.
-- After logging is addressed, the next major problem is backend scaling, especially decoder-heavy pair construction and global optimization on larger maps.
+- Logging has been moved to an async background thread and is no longer a bottleneck.
+- The main remaining bottleneck is backend scaling: decoder-heavy pair construction and global optimization on larger maps.

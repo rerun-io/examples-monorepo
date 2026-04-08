@@ -1,6 +1,8 @@
 # MASt3R-SLAM Logging Handoff
 
-Goal: reimplement the logging refactor cleanly on top of newer upstream changes. The code from this branch was intentionally removed.
+> **Status: Completed.** The async logging refactor was reimplemented and landed in commit `c6d3f3b`. Measured **2.73x speedup** on `example-base` with the live viewer (12m17s → 4m30s). See `async_logger.py`, `log_events.py`, and the updated `architecture.md`.
+
+Original goal: reimplement the logging refactor cleanly on top of newer upstream changes. The code from the earlier experimental branch was intentionally removed.
 
 ## Problem
 
