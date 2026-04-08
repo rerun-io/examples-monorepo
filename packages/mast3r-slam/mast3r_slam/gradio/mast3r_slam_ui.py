@@ -92,6 +92,7 @@ def streaming_mast3r_slam_fn(
     global active_states
 
     stream = rr.binary_stream()
+    recording: rr.RecordingStream = rr.get_thread_local_data_recording()
 
     try:
         video_path: Path = Path(video_file)
@@ -129,6 +130,7 @@ def streaming_mast3r_slam_fn(
         subsample=subsample,
         ns_save_path=ns_output_dir,
         handle=handle,
+        recording=recording,
     ):
         active_states = handle.states
         yield stream.read(), None, msg
