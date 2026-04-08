@@ -221,11 +221,12 @@ with gr.Blocks() as mast3r_slam_block:
 
                 examples = gr.Examples(
                     examples=[
-                    ["data/normal-apt-tour.mp4"],
-                ],
-                inputs=[video_file],
-                cache_examples=False,
-            )
+                        ["data/livingroom-tour.mp4"],
+                        ["data/normal-apt-tour.mp4"],
+                    ],
+                    inputs=[video_file],
+                    cache_examples=False,
+                )
 
         with gr.Column(scale=5):
             viewer = Rerun(
