@@ -226,10 +226,10 @@ fn native_options() -> eframe::NativeOptions {
     native_options.wgpu_options = eframe::egui_wgpu::WgpuConfiguration {
         present_mode: re_renderer::external::wgpu::PresentMode::AutoVsync,
         desired_maximum_frame_latency: None,
-        on_surface_error: Arc::new(|err| {
+        on_surface_status: Arc::new(|status| {
             // On non-Windows platforms, an "Outdated" surface just means the
             // window was resized — recreate the surface and carry on.
-            if err == re_renderer::external::wgpu::SurfaceError::Outdated
+            if matches!(status, re_renderer::external::wgpu::CurrentSurfaceTexture::Outdated)
                 && !cfg!(target_os = "windows")
             {
                 eframe::egui_wgpu::SurfaceErrorAction::RecreateSurface
@@ -269,7 +269,7 @@ fn native_options() -> eframe::NativeOptions {
                         },
                     }
                 }),
-                ..Default::default()
+                ..eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle()
             },
         ),
     };

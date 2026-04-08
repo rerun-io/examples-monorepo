@@ -103,7 +103,7 @@ Dev tasks (use `-e gsplat-rust-renderer-dev`):
 
 ```
 gsplat-rust-renderer/
-├── Cargo.toml                          # Rust crate: rerun 0.30.2 + re_* crates
+├── Cargo.toml                          # Rust crate: rerun 0.31.1 + re_* crates
 ├── Cargo.lock                          # Pinned Rust deps (committed for binary)
 ├── pyproject.toml                      # Python package metadata (hatchling)
 ├── src/

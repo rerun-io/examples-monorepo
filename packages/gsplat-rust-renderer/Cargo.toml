@@ -48,21 +48,21 @@ pollster = "0.4"
 rayon = "1.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-wgpu = "=27.0.1"
+wgpu = "=29.0.1"
 
 # ── Viewer-only deps (behind "viewer" feature flag) ───────────────────
-re_crash_handler = { version = "=0.30.2", optional = true }
-re_grpc_server = { version = "=0.30.2", optional = true }
-re_log_channel = { version = "=0.30.2", optional = true }
-re_log = { version = "=0.30.2", optional = true }
-re_log_types = { version = "=0.30.2", optional = true }
-re_query = { version = "=0.30.2", optional = true }
-re_renderer = { version = "=0.30.2", optional = true }
-re_sdk = { version = "=0.30.2", optional = true }
-re_sdk_types = { version = "=0.30.2", optional = true }
-re_view = { version = "=0.30.2", optional = true }
-re_view_spatial = { version = "=0.30.2", optional = true }
-re_viewer = { version = "=0.30.2", optional = true }
-re_viewer_context = { version = "=0.30.2", optional = true }
-rerun = { version = "=0.30.2", features = ["native_viewer"], optional = true }
+re_crash_handler = { version = "=0.31.1", optional = true }
+re_grpc_server = { version = "=0.31.1", optional = true }
+re_log_channel = { version = "=0.31.1", optional = true }
+re_log = { version = "=0.31.1", optional = true }
+re_log_types = { version = "=0.31.1", optional = true }
+re_query = { version = "=0.31.1", optional = true }
+re_renderer = { version = "=0.31.1", optional = true }
+re_sdk = { version = "=0.31.1", optional = true }
+re_sdk_types = { version = "=0.31.1", optional = true }
+re_view = { version = "=0.31.1", optional = true }
+re_view_spatial = { version = "=0.31.1", optional = true }
+re_viewer = { version = "=0.31.1", optional = true }
+re_viewer_context = { version = "=0.31.1", optional = true }
+rerun = { version = "=0.31.1", features = ["native_viewer"], optional = true }
 tokio = { version = "1.50", features = ["macros", "rt-multi-thread"], optional = true }

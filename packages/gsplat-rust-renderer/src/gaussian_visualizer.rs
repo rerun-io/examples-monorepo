@@ -206,7 +206,18 @@ impl IdentifiedViewSystem for GaussianSplatVisualizer {
 impl VisualizerSystem for GaussianSplatVisualizer {
     /// Tell Rerun which archetype this visualizer handles.
     fn visualizer_query_info(&self, _app_options: &AppOptions) -> VisualizerQueryInfo {
-        VisualizerQueryInfo::from_archetype::<GaussianSplats3D>()
+        let queried_components = [
+            GaussianSplats3D::descriptor_centers(),
+            GaussianSplats3D::descriptor_quaternions(),
+            GaussianSplats3D::descriptor_scales(),
+            GaussianSplats3D::descriptor_opacities(),
+            GaussianSplats3D::descriptor_colors(),
+            GaussianSplats3D::descriptor_sh_coefficients(),
+        ];
+        VisualizerQueryInfo::single_required_component::<rerun::components::Translation3D>(
+            &GaussianSplats3D::descriptor_centers(),
+            &queried_components,
+        )
     }
 
     /// Called once per frame.  This is the main entry point for the visualizer.

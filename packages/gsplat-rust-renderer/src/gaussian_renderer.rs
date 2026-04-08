@@ -1625,7 +1625,7 @@ impl Renderer for GaussianRenderer {
         );
 
         let mut depth_state = re_renderer::ViewBuilder::MAIN_TARGET_DEFAULT_DEPTH_STATE;
-        depth_state.depth_write_enabled = false;
+        depth_state.depth_write_enabled = Some(false);
 
         let tile_pipeline_desc = re_renderer::RenderPipelineDesc {
             label: "GaussianRenderer::tile_draw".into(),

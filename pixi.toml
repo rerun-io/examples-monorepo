@@ -34,9 +34,9 @@ xorg-libx11 = "*"
 xorg-xorgproto = "*"
 
 [feature.common.pypi-dependencies]
-rerun-sdk = "==0.30.2"
+rerun-sdk = "==0.31.1"
 gradio = "==6.8.0"
-gradio-rerun = "==0.30.2"
+gradio-rerun = "==0.31.1"
 simplecv = { git = "https://github.com/pablovela5620/simplecv.git", tag = "v0.7.2" }
 
 
@@ -829,7 +829,7 @@ brush = "==0.3.0"
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
 lpips = ">=0.1.4,<1"
 plyfile = ">=1.1,<2"
-rerun-sdk = "==0.30.2"
+rerun-sdk = "==0.31.1"
 simplecv = { git = "https://github.com/pablovela5620/simplecv.git", tag = "v0.7.2" }
 
 [feature.gsplat-rust-renderer.activation.env]
