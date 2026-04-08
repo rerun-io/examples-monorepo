@@ -199,7 +199,7 @@ with gr.Blocks() as mast3r_slam_block:
                             minimum=1,
                             maximum=8,
                             step=1,
-                            value=1,
+                            value=4,
                         )
                         gr.Markdown(
                             "Base config file: `config/base.yaml`\n\n"
