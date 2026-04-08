@@ -113,13 +113,15 @@ The current direction is:
 1. Move logging to a dedicated worker process.
 2. Have that worker initialize Rerun through the existing `RerunTyroConfig`.
 3. Keep the frontend focused on producing tracking results, not compressing and sending visualization data.
-4. Use Rerun's latest-at and partial-update model correctly:
-   - log static camera/pinhole state once
+4. Use Rerun's latest-at and partial-update model correctly.
+   MASt3R-SLAM does not assume a fixed pinhole model. The paper explicitly allows generic, time-varying central camera models, so optimizations must not assume intrinsics stay constant across the sequence.
+   - log only components that are actually unchanged
+   - if the current frame's camera model changes, update those camera components for that frame
    - send only changed transforms or changed components for dynamic entities
    - stop rebuilding full-history entities every frame
 5. Keep blueprint handling static instead of refreshing it as the map grows.
 
-This should address the main current issue: logging is still synchronous and still does too much repeated work on the frontend thread.
+This should address the main current issue: logging is still synchronous and still does too much repeated work on the frontend thread. The important constraint is that we should remove unnecessary relogs without weakening support for zooming or any other time-varying camera model.
 
 ## Recommended Next Steps
 
