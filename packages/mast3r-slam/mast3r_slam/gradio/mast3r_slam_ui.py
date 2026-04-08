@@ -1,38 +1,30 @@
+"""Gradio UI for MASt3R-SLAM.
+
+Provides an interactive web interface for running the MASt3R-SLAM pipeline.
+The left panel holds video upload, a run button, and config; the right panel
+streams results into an embedded Rerun viewer.
+
+The actual tracking loop lives in :func:`mast3r_slam.api.inference.run_slam_pipeline`.
+This module only handles Gradio-specific concerns: file validation, recording
+setup, binary streaming, and nerfstudio output zipping.
+"""
+
 import contextlib
 import shutil
 import subprocess
-import sys
-import time
+from collections.abc import Generator
 from pathlib import Path
 
 import beartype
 import gradio as gr
-import lietorch
 import rerun as rr
 import torch
 import torch.multiprocessing as mp
 from gradio_rerun import Rerun
-from simplecv.rerun_log_utils import log_video
-from jaxtyping import Int
-from numpy import ndarray
 
-from mast3r_slam.backend_lifecycle import SlamBackend
-from mast3r_slam.config import config, load_config
-from mast3r_slam.dataloader import load_dataset
-from mast3r_slam.frame import Frame, Mode, SharedStates, create_frame
-from mast3r_slam.mast3r_utils import (
-    load_mast3r,
-    mast3r_inference_mono,
-)
-from mast3r_slam.nerfstudio_utils import save_kf_to_nerfstudio
-from mast3r_slam.rerun_log_utils import (
-    FRAME_TIMELINE,
-    VIDEO_TIMELINE,
-    RerunLogger,
-    create_blueprints,
-    log_video_for_dataset,
-)
-from mast3r_slam.tracker import FrameTracker
+from mast3r_slam.api.inference import SlamPipelineHandle, run_slam_pipeline
+from mast3r_slam.frame import Mode, SharedStates
+from mast3r_slam.mast3r_utils import load_mast3r
 
 # Global reference to the active states so the stop button can signal termination.
 # The SlamBackend context manager handles all cleanup.
@@ -62,18 +54,47 @@ def stop_streaming():
     return None
 
 
+def _mov_to_mp4(video_path: Path) -> Path:
+    """Convert a MOV file to MP4 using ffmpeg."""
+    mp4_path: Path = video_path.with_suffix(".mp4")
+    try:
+        subprocess.run(
+            ["ffmpeg", "-i", str(video_path), "-c:v", "copy", "-an", "-y", str(mp4_path)],
+            check=True,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError as e:
+        raise gr.Error(f"Failed to convert MOV to MP4: {e.stderr.decode()}") from e
+    return mp4_path
+
+
 @rr.thread_local_stream("rerun_example_streaming_blur")
 def streaming_mast3r_slam_fn(
     video_file: str,
     subsample: int,
     progress=gr.Progress(),  # noqa: B008
-):
+) -> Generator[tuple[bytes | None, str | None, str], None, None]:
+    """Gradio streaming callback that runs the SLAM pipeline.
+
+    Uses ``@rr.thread_local_stream`` to create a per-call recording.
+    All ``rr.log()`` calls from the nested ``run_slam_pipeline()``
+    generator target this recording, and ``stream.read()`` yields
+    the accumulated bytes to the embedded Rerun viewer.
+
+    Args:
+        video_file: Path to the uploaded video file.
+        subsample: Frame subsample rate.
+        progress: Gradio progress callback.
+
+    Yields:
+        Tuple of (Rerun binary stream bytes, zip file path or None, status message).
+    """
     global active_states
 
     stream = rr.binary_stream()
 
     try:
-        video_path = Path(video_file)
+        video_path: Path = Path(video_file)
     except beartype.roar.BeartypeCallHintParamViolation:
         raise gr.Error(  # noqa: B904
             "Did you make sure the zipfile finished uploading?. Try to hit run again.",
@@ -84,225 +105,62 @@ def streaming_mast3r_slam_fn(
             f"Error: {e}\n Did you wait for zip file to upload?", duration=20
         )
 
+    # Convert MOV to MP4 if needed.
+    if video_path.suffix.lower() == ".mov":
+        video_path = _mov_to_mp4(video_path)
+
+    # Enable TF32 for faster matmuls on Ampere+ GPUs; disable autograd
+    # since the entire pipeline runs in inference mode.
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.set_grad_enabled(False)
 
-    progress(0.05, desc="Loading config")
-    inference_config = "config/base.yaml"
-    load_config(path=inference_config)
-    config["dataset"]["subsample"] = subsample
+    progress(0.05, desc="Loading pipeline")
+    handle: SlamPipelineHandle = SlamPipelineHandle()
 
-    progress(0.1, desc="Loading dataset")
-    dataset = load_dataset(dataset_path=str(video_path))
-    dataset.subsample(config["dataset"]["subsample"])
-    frame_timestamps_ns: Int[ndarray, "num_frames"] | None = None
+    # Nerfstudio export happens inside the generator (before
+    # SlamBackend.__exit__) because SharedKeyframes needs the mp.Manager.
+    ns_output_dir: Path = video_path.parent / "nerfstudio-output"
 
-    ## rerun setup
-    parent_log_path = Path("world")
-    frame_timestamps_ns = log_video_for_dataset(
-        dataset,
-        parent_log_path / "current_camera" / "pinhole" / "video",
-        timeline=VIDEO_TIMELINE,
-    )
-    active_timeline: str = VIDEO_TIMELINE if frame_timestamps_ns is not None else FRAME_TIMELINE
-    rr_logger = RerunLogger(parent_log_path, timeline=active_timeline)
-    blueprint = create_blueprints(parent_log_path=parent_log_path, timeline=active_timeline, n_keyframes=0)
-    rr.send_blueprint(blueprint)
+    for msg in run_slam_pipeline(
+        model=model,
+        dataset_path=str(video_path),
+        config_path="config/base.yaml",
+        device=DEVICE,
+        subsample=subsample,
+        ns_save_path=ns_output_dir,
+        handle=handle,
+    ):
+        active_states = handle.states
+        yield stream.read(), None, msg
 
-    h, w = dataset.get_img_shape()[0]
+    # Post-loop: either stopped early or completed.
+    if handle.stopped_early:
+        yield stream.read(), None, "MASt3R-SLAM stopped"
+        active_states = None
+        return
 
-    has_calib: bool = dataset.has_calib()
-    use_calib: bool = config["use_calib"]
-    if use_calib and not has_calib:
-        rr.log(f"{parent_log_path}/logs", rr.TextLog("No calibration provided for this dataset!", level="WARN"))
-        sys.exit(0)
-    K = None
-    if use_calib:
-        assert dataset.camera_intrinsics is not None
-        K = torch.from_numpy(dataset.camera_intrinsics.K_frame).to(
-            DEVICE, dtype=torch.float32
-        )
-
-    progress(0.15, desc="Starting Backend")
-
-    with SlamBackend(inference_config, model, h, w, K, device=DEVICE) as ctx:
-        assert ctx.keyframes is not None
-        assert ctx.states is not None
-        keyframes = ctx.keyframes
-        states = ctx.states
-        active_states = states  # expose to stop button
-        tracker = FrameTracker(model, keyframes, DEVICE)
-
-        i = 0
-        fps_timer: float = time.time()
-        stopped_early = False
-
-        while True:
-            ctx.check_backend()
-            rr.set_time(FRAME_TIMELINE, sequence=i)
-            if frame_timestamps_ns is not None and i < len(frame_timestamps_ns):
-                rr.set_time(VIDEO_TIMELINE, duration=1e-9 * float(frame_timestamps_ns[i]))
-            mode: Mode = states.get_mode()
-
-            if mode == Mode.TERMINATED:
-                stopped_early = i < len(dataset)
-                break
-
-            if i == len(dataset):
-                states.set_mode(Mode.TERMINATED)
-                break
-
-            _, rgb = dataset[i]
-
-            # get frames last camera pose
-            world_sim3_cam: lietorch.Sim3 = (
-                lietorch.Sim3.Identity(1, device=DEVICE)
-                if i == 0
-                else states.get_frame().world_sim3_cam
-            )
-            frame: Frame = create_frame(
-                i, rgb, world_sim3_cam, img_size=dataset.img_size, device=DEVICE
-            )
-
-            if mode == Mode.INIT:
-                X_init, C_init = mast3r_inference_mono(model, frame)
-                frame.update_pointmap(X_init, C_init)
-                keyframes.append(frame)
-                states.queue_global_optimization(len(keyframes) - 1)
-                states.set_mode(Mode.TRACKING)
-                states.set_frame(frame)
-                rr_logger.log_frame(frame, keyframes, states)
-                i += 1
-                continue
-
-            if mode == Mode.TRACKING:
-                add_new_kf, match_info, try_reloc = tracker.track(frame)
-                if try_reloc:
-                    states.set_mode(Mode.RELOC)
-                states.set_frame(frame)
-
-            elif mode == Mode.RELOC:
-                X, C = mast3r_inference_mono(model, frame)
-                frame.update_pointmap(X, C)
-                states.set_frame(frame)
-                states.queue_reloc()
-                while config["single_thread"]:
-                    with states.lock:
-                        if states.reloc_sem.value == 0:
-                            break
-                    time.sleep(0.01)
-
-            else:
-                raise RuntimeError(f"Unexpected MASt3R-SLAM mode: {mode}")
-
-            if add_new_kf:
-                keyframes.append(frame)
-                states.queue_global_optimization(len(keyframes) - 1)
-                while config["single_thread"]:
-                    with states.lock:
-                        if len(states.global_optimizer_tasks) == 0:
-                            break
-                    time.sleep(0.01)
-
-            ## rerun log stuff
-            rr_logger.log_frame(frame, keyframes, states)
-            if i % 30 == 0:
-                FPS = i / (time.time() - fps_timer)
-                rr.log(f"{parent_log_path}/logs", rr.TextLog(f"FPS: {FPS:.1f}", level="INFO"))
-            i += 1
-
-            yield stream.read(), None, f"Processing frame {i}/{len(dataset)}"
-
-        # Post-loop: either stopped early or completed
-        if stopped_early:
-            yield stream.read(), None, "MASt3R-SLAM stopped"
-            active_states = None
-            return
-
-        pcd = save_kf_to_nerfstudio(
-            ns_save_path=video_path.parent / "nerfstudio-output",
-            keyframes=keyframes,
-        )
-
-        rr.log(
-            f"{parent_log_path}/final_pointcloud",
-            rr.Points3D(positions=pcd.points, colors=pcd.colors),
-        )
-
-        # Zip the nerfstudio output
-        ns_output_dir = video_path.parent / "nerfstudio-output"
-        zip_output_path = video_path.parent / "nerfstudio-output.zip"
-
-        try:
-            if ns_output_dir.exists():
-                rr.log(f"{parent_log_path}/logs", rr.TextLog(f"Zipping nerfstudio output to {zip_output_path}", level="INFO"))
-                shutil.make_archive(
-                    base_name=str(zip_output_path.with_suffix("")),
-                    format="zip",
-                    root_dir=video_path.parent,
-                    base_dir="nerfstudio-output",
-                )
-        except Exception as e:
-            raise gr.Error(f"Failed to zip nerfstudio output: {e}") from e
-
-        assert zip_output_path.exists(), f"Zip file {zip_output_path} does not exist"
-
-        rr.log(f"{parent_log_path}/logs", rr.TextLog("Finished processing", level="INFO"))
-        yield stream.read(), str(zip_output_path), "MASt3R-SLAM complete"
-
-    # SlamBackend.__exit__ handles: backend shutdown, manager shutdown, GPU cleanup
-    active_states = None
-
-
-def mov_to_mp4(video_path: Path) -> Path:
-    mp4_path = video_path.with_suffix(".mp4")
-    try:
-        subprocess.run(
-            [
-                "ffmpeg",
-                "-i",
-                str(video_path),
-                "-c:v",
-                "copy",
-                "-an",
-                "-y",
-                str(mp4_path),
-            ],
-            check=True,
-            capture_output=True,
-        )
-        video_path = mp4_path
-    except subprocess.CalledProcessError as e:
-        raise gr.Error(f"Failed to convert MOV to MP4: {e.stderr.decode()}") from e
-    return video_path
-
-
-@rr.thread_local_stream("rr_show_video")
-def show_video_file(
-    video_file: str,
-):
-    stream = rr.binary_stream()
+    # Nerfstudio export already happened inside the generator.
+    # Only the zip step needs to happen here.
+    zip_output_path: Path = video_path.parent / "nerfstudio-output.zip"
 
     try:
-        video_path = Path(video_file)
-    except beartype.roar.BeartypeCallHintParamViolation:
-        raise gr.Error(  # noqa: B904
-            "Did you make sure the zipfile finished uploading?. Try to hit run again.",
-            duration=20,
-        )
+        if ns_output_dir.exists():
+            rr.log("world/logs", rr.TextLog(f"Zipping nerfstudio output to {zip_output_path}", level="INFO"))
+            shutil.make_archive(
+                base_name=str(zip_output_path.with_suffix("")),
+                format="zip",
+                root_dir=video_path.parent,
+                base_dir="nerfstudio-output",
+            )
     except Exception as e:
-        raise gr.Error(  # noqa: B904
-            f"Error: {e}\n Did you wait for zip file to upload?", duration=20
-        )
+        raise gr.Error(f"Failed to zip nerfstudio output: {e}") from e
 
-    # check if file is mov, if so convert to mp4
-    if video_path.suffix.lower() == ".mov":
-        video_path = mov_to_mp4(video_path)
+    assert zip_output_path.exists(), f"Zip file {zip_output_path} does not exist"
 
-    # Log video asset and frame timestamps using simplecv's helper
-    # (handles AssetVideo, frame timestamp extraction, and column logging).
-    log_video(video_path, Path("video"), timeline=VIDEO_TIMELINE)
-    yield stream.read(), f"Loaded preview for {video_path.name}"
+    rr.log("world/logs", rr.TextLog("Finished processing", level="INFO"))
+    yield stream.read(), str(zip_output_path), "MASt3R-SLAM complete"
+
+    active_states = None
 
 
 def _switch_to_outputs():
@@ -377,17 +235,6 @@ with gr.Blocks() as mast3r_slam_block:
                 },
                 height=800,
             )
-
-    video_file.upload(
-        fn=_switch_to_inputs,
-        inputs=None,
-        outputs=[tabs],
-        api_visibility="private",
-    ).then(
-        fn=show_video_file,
-        inputs=[video_file],
-        outputs=[viewer, status_text],
-    )
 
     if hasattr(examples, "load_input_event"):
         examples.load_input_event.then(

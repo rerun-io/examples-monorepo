@@ -32,9 +32,9 @@ State machine modes (``Mode`` enum):
 """
 
 import contextlib
-import sys
 import time
-from dataclasses import dataclass
+from collections.abc import Generator
+from dataclasses import dataclass, field
 from pathlib import Path
 from timeit import default_timer as timer
 from typing import Literal
@@ -108,40 +108,92 @@ class InferenceConfig:
     """Optional path to export keyframes in NerfStudio format."""
 
 
-def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
-    """Run the full MASt3R-SLAM inference pipeline.
+@dataclass
+class SlamPipelineHandle:
+    """Mutable handle populated by :func:`run_slam_pipeline`.
 
-    This is the main entry point for CLI inference.  It:
+    Callers inspect ``states`` to signal early stop (Gradio stop button)
+    and ``keyframes`` to read the final reconstruction after the generator
+    is exhausted.
+    """
 
-    1. Loads the MASt3R model and dataset.
-    2. Spawns a backend process inside a ``SlamBackend`` context manager.
-    3. Runs the tracking loop frame-by-frame in the main process.
-    4. Saves results (trajectory, reconstruction, keyframe images) on completion.
+    states: SharedStates | None = field(default=None, repr=False)
+    """Shared state between tracker and backend (populated after backend starts)."""
+    keyframes: SharedKeyframes | None = field(default=None, repr=False)
+    """Shared keyframe buffer (populated after backend starts)."""
+    stopped_early: bool = False
+    """True if the pipeline was terminated before processing all frames."""
 
-    The ``SlamBackend`` context manager ensures the backend process, manager
-    server, and GPU memory are always cleaned up — even on exceptions or Ctrl+C.
+
+def run_slam_pipeline(
+    *,
+    model: AsymmetricMASt3R,
+    dataset_path: str,
+    config_path: str = "config/base.yaml",
+    device: str = "cuda:0",
+    parent_log_path: Path = Path("world"),
+    max_frames: int | None = None,
+    img_size: Literal[224, 512] = 512,
+    subsample: int | None = None,
+    ns_save_path: Path | None = None,
+    rr_application_id: str | None = None,
+    handle: SlamPipelineHandle | None = None,
+) -> Generator[str, None, None]:
+    """Framework-agnostic SLAM tracking loop.
+
+    All ``rr.log()`` calls target whatever recording context the caller
+    has established (global recording for CLI, thread-local recording for
+    Gradio).
+
+    Yields a status message string after each processed frame.
+
+    The generator manages the full lifecycle:
+
+    1. Load SLAM config and dataset.
+    2. Set up Rerun (video log, blueprint, ``RerunLogger``).
+    3. Check calibration.
+    4. Spawn and manage backend via ``SlamBackend`` context manager.
+    5. Run frame-by-frame tracking loop.
+    6. Log FPS metrics and timing.
+    7. Export keyframes to NerfStudio format (if ``ns_save_path`` set).
+    8. Wait for backend to finish (``ctx.join()``).
+
+    Nerfstudio export happens inside the generator (before
+    ``SlamBackend.__exit__``) because ``SharedKeyframes`` depends on the
+    ``mp.Manager`` which is shut down on exit.
+
+    Callers are responsible for:
+
+    - Loading the model and calling ``share_memory()``.
+    - Setting up the Rerun recording context.
+    - Post-processing after the generator is exhausted (e.g. zipping).
 
     Args:
-        inf_config: Inference configuration dataclass (typically from ``tyro.cli``).
+        model: Pre-loaded MASt3R model with shared memory.
+        dataset_path: Path to input video or dataset directory.
+        config_path: Path to SLAM config YAML.
+        device: Torch device string.
+        parent_log_path: Root Rerun entity path.
+        max_frames: Stop after this many frames (None = all).
+        img_size: MASt3R encoder image size.
+        subsample: Frame subsample rate override (None = use config default).
+        ns_save_path: Optional path to export keyframes in NerfStudio format.
+        rr_application_id: When set, backend subprocess connects to Rerun via gRPC.
+        handle: Mutable handle populated with pipeline state.
+
+    Yields:
+        Status message string after each processed frame.
     """
-    # CUDA multiprocessing requires "spawn" start method (not "fork").
-    with contextlib.suppress(RuntimeError):
-        mp.set_start_method("spawn")
-
-    # Enable TF32 for faster matmuls on Ampere+ GPUs; disable autograd
-    # since the entire pipeline runs in inference mode.
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.set_grad_enabled(False)
-    device: str = "cuda:0"
-
     # ── Load SLAM config and dataset ───────────────────────────────────────
-    parent_log_path: Path = Path("/world")
     log_path: str = f"{parent_log_path}/logs"
-    load_config(inf_config.config)
-    rr.log(log_path, rr.TextLog(f"Dataset: {inf_config.dataset}", level="INFO"))
+    load_config(config_path)
+    if subsample is not None:
+        config["dataset"]["subsample"] = subsample
+
+    rr.log(log_path, rr.TextLog(f"Dataset: {dataset_path}", level="INFO"))
     rr.log(log_path, rr.TextLog(f"Config: {config}", level="DEBUG"))
 
-    dataset: MonocularDataset = load_dataset(inf_config.dataset, img_size=inf_config.img_size)
+    dataset: MonocularDataset = load_dataset(dataset_path, img_size=img_size)
     dataset.subsample(config["dataset"]["subsample"])
     frame_timestamps_ns: Int[ndarray, "num_frames"] | None = log_video_for_dataset(
         dataset,
@@ -159,18 +211,14 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
     w: int
     h, w = dataset.get_img_shape()[0]
 
-    # ── Load MASt3R model and share weights across processes ───────────────
-    # share_memory() makes the model's parameters accessible to the backend
-    # process without copying them (uses CUDA IPC for GPU tensors).
-    model = load_mast3r(device=device)
-    model.share_memory()
-
     # ── Camera calibration (optional) ──────────────────────────────────────
     has_calib: bool = dataset.has_calib()
     use_calib: bool = config["use_calib"]
     if use_calib and not has_calib:
         rr.log(log_path, rr.TextLog("No calibration provided for this dataset!", level="WARN"))
-        sys.exit(0)
+        if handle is not None:
+            handle.stopped_early = True
+        return
     K: Float[Tensor, "3 3"] | None = None
     if use_calib:
         assert dataset.camera_intrinsics is not None
@@ -180,15 +228,19 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
     # SlamBackend.__enter__ creates the mp.Manager, shared keyframe/state
     # buffers, and spawns the backend process.  __exit__ guarantees cleanup
     # (backend shutdown, manager shutdown, GPU memory release).
-    # Pass application_id to backend so it can connect to the same Rerun viewer via gRPC.
-    # Only works when the main process uses spawn/serve/connect (not save-to-file).
-    rr_app_id: str | None = None if inf_config.rr_config.save is not None else inf_config.rr_config.application_id
-    with SlamBackend(inf_config.config, model, h, w, K, device=device, rr_application_id=rr_app_id) as ctx:
+    with SlamBackend(config_path, model, h, w, K, device=device, rr_application_id=rr_application_id) as ctx:
         assert ctx.keyframes is not None
         assert ctx.states is not None
         keyframes: SharedKeyframes = ctx.keyframes
         states: SharedStates = ctx.states
+
+        # Populate handle so callers can access shared state.
+        if handle is not None:
+            handle.states = states
+            handle.keyframes = keyframes
+
         tracker: FrameTracker = FrameTracker(model, keyframes, device)
+        n_frames: int = len(dataset) if max_frames is None else min(max_frames, len(dataset))
 
         i: int = 0
         fps_timer: float = time.time()
@@ -203,8 +255,13 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
                 rr.set_time(VIDEO_TIMELINE, duration=1e-9 * float(frame_timestamps_ns[i]))
             mode: Mode = states.get_mode()
 
+            # Terminated by external signal (e.g. Gradio stop button).
+            if mode == Mode.TERMINATED:
+                if handle is not None:
+                    handle.stopped_early = i < n_frames
+                break
+
             # Stop condition: processed all requested frames.
-            n_frames: int = len(dataset) if inf_config.max_frames is None else min(inf_config.max_frames, len(dataset))
             if i == n_frames:
                 states.set_mode(Mode.TERMINATED)
                 break
@@ -235,6 +292,7 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
                 states.set_frame(frame)
                 rr_logger.log_frame(frame, keyframes, states)
                 i += 1
+                yield f"Processing frame {i}/{n_frames}"
                 continue
 
             match mode:
@@ -290,9 +348,19 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
                 rr.log(log_path, rr.TextLog(f"FPS: {FPS:.1f}", level="INFO"))
             i += 1
 
-        if inf_config.ns_save_path is not None:
+            yield f"Processing frame {i}/{n_frames}"
+
+        # Post-loop: log timing, export nerfstudio, and wait for backend.
+        # Nerfstudio export MUST happen before ctx.join() / __exit__ because
+        # SharedKeyframes uses mp.Manager-backed values (e.g. n_size) that
+        # become invalid after the manager shuts down.
+        rr.log(log_path, rr.TextLog(f"Inference time: {format_time(timer() - start_time)}", level="INFO"))
+        rr.log(log_path, rr.TextLog(f"Processed {len(keyframes)} keyframes", level="INFO"))
+
+        stopped: bool = handle.stopped_early if handle is not None else False
+        if not stopped and ns_save_path is not None:
             pcd = save_kf_to_nerfstudio(
-                ns_save_path=inf_config.ns_save_path,
+                ns_save_path=ns_save_path,
                 keyframes=keyframes,
             )
             rr.log(
@@ -300,16 +368,62 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
                 rr.Points3D(positions=pcd.points, colors=pcd.colors),
             )
 
-        rr.log(log_path, rr.TextLog("Done", level="INFO"))
-        rr.log(log_path, rr.TextLog(f"Inference time: {format_time(timer() - start_time)}", level="INFO"))
-        rr.log(log_path, rr.TextLog(f"Processed {len(keyframes)} keyframes", level="INFO"))
-
-        # Wait for the backend to finish its last optimisation task before
-        # the context manager shuts it down.
         ctx.join()
 
     # SlamBackend.__exit__ has now run: backend terminated, manager shut down,
     # GPU memory released via torch.cuda.empty_cache() + gc.collect().
+
+
+def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
+    """Run the full MASt3R-SLAM inference pipeline.
+
+    This is the main entry point for CLI inference.  It delegates to
+    :func:`run_slam_pipeline` for the tracking loop and handles model
+    loading, Rerun setup, and post-processing (nerfstudio export).
+
+    Args:
+        inf_config: Inference configuration dataclass (typically from ``tyro.cli``).
+    """
+    with contextlib.suppress(RuntimeError):
+        mp.set_start_method("spawn")
+
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.set_grad_enabled(False)
+    device: str = "cuda:0"
+
+    # Load MASt3R model and share weights across processes.
+    # share_memory() makes the model's parameters accessible to the backend
+    # process without copying them (uses CUDA IPC for GPU tensors).
+    model: AsymmetricMASt3R = load_mast3r(device=device)
+    model.share_memory()
+
+    # Pass application_id to backend so it can connect to the same Rerun viewer via gRPC.
+    # Only works when the main process uses spawn/serve/connect (not save-to-file).
+    rr_app_id: str | None = None if inf_config.rr_config.save is not None else inf_config.rr_config.application_id
+    parent_log_path: Path = Path("world")
+    log_path: str = f"{parent_log_path}/logs"
+    handle: SlamPipelineHandle = SlamPipelineHandle()
+
+    # Exhaust the generator — CLI doesn't need incremental streaming,
+    # but the generator must be fully consumed to run the tracking loop
+    # and trigger SlamBackend cleanup.  Nerfstudio export (if ns_save_path
+    # is set) happens inside the generator while SharedKeyframes is still
+    # accessible.
+    for _msg in run_slam_pipeline(
+        model=model,
+        dataset_path=inf_config.dataset,
+        config_path=inf_config.config,
+        device=device,
+        parent_log_path=parent_log_path,
+        max_frames=inf_config.max_frames,
+        img_size=inf_config.img_size,
+        ns_save_path=inf_config.ns_save_path,
+        rr_application_id=rr_app_id,
+        handle=handle,
+    ):
+        pass
+
+    rr.log(log_path, rr.TextLog("Done", level="INFO"))
     if not inf_config.no_viz:
         rr.log(log_path, rr.TextLog("All visualization processes terminated", level="INFO"))
 
