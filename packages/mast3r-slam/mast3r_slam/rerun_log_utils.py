@@ -75,10 +75,7 @@ def create_blueprints(
         f"- {parent_log_root}/last_keyframe/pointmap_depth",
     ]
     spatial3d_contents.extend(
-        [
-            f"- {parent_log_root}/keyframes/keyframe-{kf_idx}/pinhole/pointmap_depth"
-            for kf_idx in range(n_keyframes)
-        ]
+        [f"- {parent_log_root}/keyframes/keyframe-{kf_idx}/pinhole/pointmap_depth" for kf_idx in range(n_keyframes)]
     )
     blueprint: rrb.Blueprint = rrb.Blueprint(
         rrb.Horizontal(
@@ -87,7 +84,7 @@ def create_blueprints(
                 contents=spatial3d_contents,
             ),
             rrb.Tabs(views, logs, active_tab=0),
-            column_shares=(3, 1),
+            column_shares=(3, 2),
         ),
         rrb.TimePanel(timeline=timeline, state="collapsed"),
         collapse_panels=True,
@@ -204,9 +201,7 @@ class RerunLogger:
         )
         pointmap_hw3 = np.nan_to_num(pointmap_hw3, nan=0.0, posinf=0.0, neginf=0.0)
         depth_hw: Float32[ndarray, "H W"] = np.maximum(pointmap_hw3[..., 2], 0.0)
-        confidence_mask: Bool[ndarray, "H W"] = (
-            frame.C.detach().cpu().numpy().reshape(height, width) > self.conf_thresh
-        )
+        confidence_mask: Bool[ndarray, "H W"] = frame.C.detach().cpu().numpy().reshape(height, width) > self.conf_thresh
         filtered_depth_hw: Float32[ndarray, "H W"] = np.where(confidence_mask, depth_hw, 0.0)
 
         conf = frame.get_average_conf()
