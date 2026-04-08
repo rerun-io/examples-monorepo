@@ -114,7 +114,7 @@ pub fn create_filled_buffer<T: Pod>(
         mapped_at_creation: true,
     });
     let mut mapped = buffer.slice(..).get_mapped_range_mut();
-    mapped[..bytes.len()].copy_from_slice(bytes);
+    mapped.slice(..bytes.len()).copy_from_slice(bytes);
     drop(mapped);
     buffer.unmap();
     buffer
@@ -141,11 +141,12 @@ pub fn create_compute_pipeline(
     entry_point: &str,
     bind_group_layouts: &[&wgpu::BindGroupLayout],
 ) -> wgpu::ComputePipeline {
+    let bind_group_layouts = bind_group_layouts.iter().copied().map(Some).collect::<Vec<_>>();
     let pipeline_layout: wgpu::PipelineLayout =
         device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some(&format!("{label}::layout")),
-            bind_group_layouts,
-            push_constant_ranges: &[],
+            bind_group_layouts: &bind_group_layouts,
+            immediate_size: 0,
         });
     device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some(label),
