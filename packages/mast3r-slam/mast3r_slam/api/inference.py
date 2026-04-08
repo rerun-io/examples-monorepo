@@ -49,11 +49,16 @@ import torch.multiprocessing as mp
 from jaxtyping import Float, Float32, Int
 from mast3r.model import AsymmetricMASt3R
 from numpy import ndarray
-from simplecv.camera_orient_utils import auto_orient_and_center_poses
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
 
-from mast3r_slam.async_logger import AsyncRerunLogger
+from mast3r_slam.async_logger import (
+    AsyncRerunLogger,
+    compute_orient,
+    snapshot_current_frame,
+    snapshot_edges,
+    snapshot_keyframe,
+)
 from mast3r_slam.backend_lifecycle import SlamBackend
 from mast3r_slam.config import config, load_config
 from mast3r_slam.dataloader import MonocularDataset, load_dataset
@@ -61,14 +66,11 @@ from mast3r_slam.frame import Frame, Mode, SharedKeyframes, SharedStates, create
 from mast3r_slam.global_opt import FactorGraph
 from mast3r_slam.log_events import (
     KeyframeSnapshot,
-    LogCurrentFrame,
     LogEvent,
     LogMapUpdate,
-    LogTerminate,
     LogText,
 )
 from mast3r_slam.mast3r_utils import (
-    frame_to_extrinsics,
     load_mast3r,
     load_retriever,
     mast3r_inference_mono,
@@ -135,142 +137,6 @@ class SlamPipelineHandle:
     """Shared keyframe buffer (populated after backend starts)."""
     stopped_early: bool = False
     """True if the pipeline was terminated before processing all frames."""
-
-
-def _snapshot_current_frame(
-    frame: Frame,
-    frame_idx: int,
-    timestamp_ns: int | None,
-    keyframes: SharedKeyframes | None = None,
-) -> LogCurrentFrame:
-    """Create a CPU snapshot of the current frame for async logging.
-
-    Args:
-        frame: The current tracked frame.
-        frame_idx: Frame index in the sequence.
-        timestamp_ns: Video timestamp in nanoseconds, or None.
-        keyframes: Shared keyframe buffer (to snapshot the last keyframe's
-            evolving pointmap/confidence for the 2D panel). None skips it.
-
-    Returns:
-        A ``LogCurrentFrame`` event with CPU-only numpy arrays.
-    """
-    h: int = int(frame.img_shape.squeeze()[0].item())
-    w: int = int(frame.img_shape.squeeze()[1].item())
-    world_sim3_cam_data: Float32[ndarray, "8"] = frame.world_sim3_cam.data.squeeze().cpu().numpy().astype(np.float32)
-    rgb_cpu: Float32[ndarray, "H W 3"] = frame.rgb.numpy().astype(np.float32)
-    X_canon_cpu: Float32[ndarray, "hw 3"] | None = (
-        frame.X_canon.detach().cpu().numpy().astype(np.float32) if frame.X_canon is not None else None
-    )
-    C_cpu: Float32[ndarray, "hw 1"] | None = (
-        frame.C.detach().cpu().numpy().astype(np.float32) if frame.C is not None else None
-    )
-
-    # Snapshot the last keyframe's current state for the 2D panel.
-    # The tracker continuously updates the active keyframe's pointmap/
-    # confidence, so we re-read it each frame.
-    last_kf_rgb: Float32[ndarray, "H W 3"] | None = None
-    last_kf_X_canon: Float32[ndarray, "hw 3"] | None = None
-    last_kf_C: Float32[ndarray, "hw 1"] | None = None
-    if keyframes is not None:
-        last_kf: Frame | None = keyframes.last_keyframe()
-        if last_kf is not None:
-            last_kf_rgb = last_kf.rgb.numpy().astype(np.float32)
-            if last_kf.X_canon is not None:
-                last_kf_X_canon = last_kf.X_canon.detach().cpu().numpy().astype(np.float32)
-            if last_kf.C is not None:
-                last_kf_C = last_kf.C.detach().cpu().numpy().astype(np.float32)
-
-    return LogCurrentFrame(
-        frame_idx=frame_idx,
-        timestamp_ns=timestamp_ns,
-        world_sim3_cam_data=world_sim3_cam_data,
-        rgb=rgb_cpu,
-        X_canon=X_canon_cpu,
-        C=C_cpu,
-        img_shape=(h, w),
-        last_kf_rgb=last_kf_rgb,
-        last_kf_X_canon=last_kf_X_canon,
-        last_kf_C=last_kf_C,
-    )
-
-
-def _snapshot_keyframe(frame: Frame, kf_idx: int) -> KeyframeSnapshot:
-    """Create a CPU snapshot of a new keyframe for async logging.
-
-    Args:
-        frame: The keyframe frame.
-        kf_idx: Keyframe buffer index.
-
-    Returns:
-        A ``KeyframeSnapshot`` with CPU-only numpy arrays.
-    """
-    h: int = int(frame.img_shape.squeeze()[0].item())
-    w: int = int(frame.img_shape.squeeze()[1].item())
-    assert frame.X_canon is not None
-    assert frame.C is not None
-    return KeyframeSnapshot(
-        kf_idx=kf_idx,
-        world_sim3_cam_data=frame.world_sim3_cam.data.squeeze().cpu().numpy().astype(np.float32),
-        rgb=frame.rgb.numpy().astype(np.float32),
-        X_canon=frame.X_canon.detach().cpu().numpy().astype(np.float32),
-        C=frame.C.detach().cpu().numpy().astype(np.float32),
-        img_shape=(h, w),
-    )
-
-
-def _snapshot_edges(
-    states: SharedStates,
-    keyframes: SharedKeyframes,
-) -> tuple[Float32[ndarray, "n 3"], Float32[ndarray, "n 3"]] | None:
-    """Snapshot factor graph edge positions from shared state.
-
-    Args:
-        states: Shared system state (for edge index lists).
-        keyframes: Shared keyframe buffer (for poses).
-
-    Returns:
-        (positions_i, positions_j) tuple or None if no edges.
-    """
-    with states.lock:
-        ii: Int[Tensor, "num_edges"] = torch.tensor(states.edges_ii, dtype=torch.long)
-        jj: Int[Tensor, "num_edges"] = torch.tensor(states.edges_jj, dtype=torch.long)
-        if ii.numel() == 0 or jj.numel() == 0:
-            return None
-        world_sim3_cami: lietorch.Sim3 = lietorch.Sim3(keyframes.world_sim3_cam[ii, 0])
-        world_sim3_camj: lietorch.Sim3 = lietorch.Sim3(keyframes.world_sim3_cam[jj, 0])
-    positions_i: Float32[ndarray, "n 3"] = world_sim3_cami.matrix()[:, :3, 3].cpu().numpy().astype(np.float32)
-    positions_j: Float32[ndarray, "n 3"] = world_sim3_camj.matrix()[:, :3, 3].cpu().numpy().astype(np.float32)
-    return (positions_i, positions_j)
-
-
-def _compute_orient(
-    keyframes: SharedKeyframes,
-    n_kf: int,
-) -> tuple[Float32[ndarray, "3 3"], Float32[ndarray, "3"]]:
-    """Compute gravity-alignment transform from all keyframe poses.
-
-    Args:
-        keyframes: Shared keyframe buffer.
-        n_kf: Number of keyframes to use.
-
-    Returns:
-        (orient_R, orient_t) rotation and translation arrays.
-    """
-    world_T_cam_list: list[Float32[ndarray, "4 4"]] = []
-    for i in range(n_kf):
-        kf: Frame = keyframes[i]
-        kf_ext = frame_to_extrinsics(kf, camera_conventions="RUB")
-        assert kf_ext.world_T_cam is not None
-        world_T_cam_list.append(kf_ext.world_T_cam.astype(np.float32))
-
-    world_T_cam: Float32[ndarray, "n_kf 4 4"] = np.stack(world_T_cam_list)
-    orient_34: Float[ndarray, "3 4"] = auto_orient_and_center_poses(
-        world_T_cam, method="up", center_method="poses"
-    ).transform
-    orient_R: Float32[ndarray, "3 3"] = orient_34[:, :3].astype(np.float32)
-    orient_t: Float32[ndarray, "3"] = orient_34[:, 3].astype(np.float32)
-    return (orient_R, orient_t)
 
 
 def run_slam_pipeline(
@@ -359,11 +225,11 @@ def run_slam_pipeline(
     rr.send_blueprint(blueprint)
 
     # Async logger: events are enqueued here, processed in a background thread.
+    # Used as a context manager further down so LogTerminate + join is automatic.
     event_queue: queue.Queue[LogEvent] = queue.Queue(maxsize=32)
     async_logger: AsyncRerunLogger = AsyncRerunLogger(
         event_queue, parent_log_path, active_timeline, recording=recording,
     )
-    async_logger.start()
 
     h: int
     w: int
@@ -386,7 +252,8 @@ def run_slam_pipeline(
     # SlamBackend.__enter__ creates the mp.Manager, shared keyframe/state
     # buffers, and spawns the backend process.  __exit__ guarantees cleanup
     # (backend shutdown, manager shutdown, GPU memory release).
-    with SlamBackend(config_path, model, h, w, K, device=device, rr_application_id=rr_application_id) as ctx:
+    # AsyncRerunLogger.__exit__ sends LogTerminate and joins the thread.
+    with SlamBackend(config_path, model, h, w, K, device=device, rr_application_id=rr_application_id) as ctx, async_logger:
         assert ctx.keyframes is not None
         assert ctx.states is not None
         keyframes: SharedKeyframes = ctx.keyframes
@@ -456,8 +323,8 @@ def run_slam_pipeline(
                 # ── Async logging for INIT frame ──────────────────────────
                 kf_idx_init: int = len(keyframes) - 1
                 n_kf_init: int = len(keyframes)
-                new_kfs_init: list[KeyframeSnapshot] = [_snapshot_keyframe(frame, kf_idx_init)]
-                orient_init: tuple[Float32[ndarray, "3 3"], Float32[ndarray, "3"]] = _compute_orient(keyframes, n_kf_init)
+                new_kfs_init: list[KeyframeSnapshot] = [snapshot_keyframe(frame, kf_idx_init)]
+                orient_init: tuple[Float32[ndarray, "3 3"], Float32[ndarray, "3"]] = compute_orient(keyframes, n_kf_init)
                 last_orient_n_kf = n_kf_init
                 event_queue.put(LogMapUpdate(
                     frame_idx=i, timestamp_ns=ts_ns,
@@ -465,7 +332,7 @@ def run_slam_pipeline(
                 ))
                 if not event_queue.full():
                     with contextlib.suppress(queue.Full):
-                        event_queue.put_nowait(_snapshot_current_frame(frame, i, ts_ns, keyframes))
+                        event_queue.put_nowait(snapshot_current_frame(frame, i, ts_ns, keyframes))
 
                 i += 1
                 yield f"Processing frame {i}/{n_frames}"
@@ -524,7 +391,7 @@ def run_slam_pipeline(
             orient_data: tuple[Float32[ndarray, "3 3"], Float32[ndarray, "3"]] | None = None
 
             if add_new_kf:
-                new_kfs.append(_snapshot_keyframe(frame, len(keyframes) - 1))
+                new_kfs.append(snapshot_keyframe(frame, len(keyframes) - 1))
 
             dirty_idx: Int[Tensor, "n_dirty"] = keyframes.get_dirty_idx()
             if dirty_idx.numel() > 0:
@@ -540,14 +407,14 @@ def run_slam_pipeline(
             with states.lock:
                 current_edge_count: int = len(states.edges_ii)
             if current_edge_count != prev_edge_count or pose_updates:
-                edge_pos = _snapshot_edges(states, keyframes)
+                edge_pos = snapshot_edges(states, keyframes)
                 prev_edge_count = current_edge_count
 
             # Orient update (when keyframe count changes)
             with keyframes.lock:
                 n_kf: int = len(keyframes)
             if n_kf > 0 and n_kf != last_orient_n_kf:
-                orient_data = _compute_orient(keyframes, n_kf)
+                orient_data = compute_orient(keyframes, n_kf)
                 last_orient_n_kf = n_kf
 
             if new_kfs or pose_updates or edge_pos is not None or orient_data is not None:
@@ -560,7 +427,7 @@ def run_slam_pipeline(
             # 2. Current frame (droppable) — skip snapshot if queue is full
             if not event_queue.full():
                 with contextlib.suppress(queue.Full):
-                    event_queue.put_nowait(_snapshot_current_frame(frame, i, ts_ns, keyframes))
+                    event_queue.put_nowait(snapshot_current_frame(frame, i, ts_ns, keyframes))
 
             # FPS text log
             if i % 30 == 0 and i > 0:
@@ -588,19 +455,9 @@ def run_slam_pipeline(
                 rr.Points3D(positions=pcd.points, colors=pcd.colors),
             )
 
-        # Shut down the async logger and wait for all events to be processed.
-        event_queue.put(LogTerminate())
-        async_logger.join(timeout=30.0)
-        if async_logger.is_alive():
-            import warnings
-
-            warnings.warn(
-                f"Async logger thread did not finish within 30s ({event_queue.qsize()} events remaining). "
-                "Some trailing log entries may be lost.",
-                stacklevel=1,
-            )
-
         ctx.join()
+
+    # async_logger.__exit__ has now run: LogTerminate sent, thread joined.
 
     # SlamBackend.__exit__ has now run: backend terminated, manager shut down,
     # GPU memory released via torch.cuda.empty_cache() + gc.collect().
