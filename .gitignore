@@ -123,6 +123,8 @@ packages/wilor-nano/results/
 
 # Logs
 *.log
+packages/mast3r-slam/benchmark/**/frontend.jsonl
+packages/mast3r-slam/benchmark/**/backend.jsonl
 
 # pdm
 .pdm.toml
