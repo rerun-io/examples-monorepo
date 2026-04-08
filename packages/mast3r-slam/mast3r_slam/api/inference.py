@@ -141,6 +141,7 @@ def _snapshot_current_frame(
     frame: Frame,
     frame_idx: int,
     timestamp_ns: int | None,
+    keyframes: SharedKeyframes | None = None,
 ) -> LogCurrentFrame:
     """Create a CPU snapshot of the current frame for async logging.
 
@@ -148,6 +149,8 @@ def _snapshot_current_frame(
         frame: The current tracked frame.
         frame_idx: Frame index in the sequence.
         timestamp_ns: Video timestamp in nanoseconds, or None.
+        keyframes: Shared keyframe buffer (to snapshot the last keyframe's
+            evolving pointmap/confidence for the 2D panel). None skips it.
 
     Returns:
         A ``LogCurrentFrame`` event with CPU-only numpy arrays.
@@ -162,6 +165,22 @@ def _snapshot_current_frame(
     C_cpu: Float32[ndarray, "hw 1"] | None = (
         frame.C.detach().cpu().numpy().astype(np.float32) if frame.C is not None else None
     )
+
+    # Snapshot the last keyframe's current state for the 2D panel.
+    # The tracker continuously updates the active keyframe's pointmap/
+    # confidence, so we re-read it each frame.
+    last_kf_rgb: Float32[ndarray, "H W 3"] | None = None
+    last_kf_X_canon: Float32[ndarray, "hw 3"] | None = None
+    last_kf_C: Float32[ndarray, "hw 1"] | None = None
+    if keyframes is not None:
+        last_kf: Frame | None = keyframes.last_keyframe()
+        if last_kf is not None:
+            last_kf_rgb = last_kf.rgb.numpy().astype(np.float32)
+            if last_kf.X_canon is not None:
+                last_kf_X_canon = last_kf.X_canon.detach().cpu().numpy().astype(np.float32)
+            if last_kf.C is not None:
+                last_kf_C = last_kf.C.detach().cpu().numpy().astype(np.float32)
+
     return LogCurrentFrame(
         frame_idx=frame_idx,
         timestamp_ns=timestamp_ns,
@@ -170,6 +189,9 @@ def _snapshot_current_frame(
         X_canon=X_canon_cpu,
         C=C_cpu,
         img_shape=(h, w),
+        last_kf_rgb=last_kf_rgb,
+        last_kf_X_canon=last_kf_X_canon,
+        last_kf_C=last_kf_C,
     )
 
 
@@ -441,8 +463,9 @@ def run_slam_pipeline(
                     frame_idx=i, timestamp_ns=ts_ns,
                     new_keyframes=new_kfs_init, orient=orient_init,
                 ))
-                with contextlib.suppress(queue.Full):
-                    event_queue.put_nowait(_snapshot_current_frame(frame, i, ts_ns))
+                if not event_queue.full():
+                    with contextlib.suppress(queue.Full):
+                        event_queue.put_nowait(_snapshot_current_frame(frame, i, ts_ns, keyframes))
 
                 i += 1
                 yield f"Processing frame {i}/{n_frames}"
@@ -511,10 +534,12 @@ def run_slam_pipeline(
                     )
                     pose_updates.append((int(idx_val), sim3_cpu))
 
-            # Edge update (check if count changed)
+            # Edge update: resnapshot when edge count changes OR when poses
+            # were refined (global optimization moves endpoints without
+            # adding/removing factors).
             with states.lock:
                 current_edge_count: int = len(states.edges_ii)
-            if current_edge_count != prev_edge_count:
+            if current_edge_count != prev_edge_count or pose_updates:
                 edge_pos = _snapshot_edges(states, keyframes)
                 prev_edge_count = current_edge_count
 
@@ -532,9 +557,10 @@ def run_slam_pipeline(
                     edge_positions=edge_pos, orient=orient_data,
                 ))
 
-            # 2. Current frame (droppable)
-            with contextlib.suppress(queue.Full):
-                event_queue.put_nowait(_snapshot_current_frame(frame, i, ts_ns))
+            # 2. Current frame (droppable) — skip snapshot if queue is full
+            if not event_queue.full():
+                with contextlib.suppress(queue.Full):
+                    event_queue.put_nowait(_snapshot_current_frame(frame, i, ts_ns, keyframes))
 
             # FPS text log
             if i % 30 == 0 and i > 0:
@@ -564,7 +590,15 @@ def run_slam_pipeline(
 
         # Shut down the async logger and wait for all events to be processed.
         event_queue.put(LogTerminate())
-        async_logger.join(timeout=10.0)
+        async_logger.join(timeout=30.0)
+        if async_logger.is_alive():
+            import warnings
+
+            warnings.warn(
+                f"Async logger thread did not finish within 30s ({event_queue.qsize()} events remaining). "
+                "Some trailing log entries may be lost.",
+                stacklevel=1,
+            )
 
         ctx.join()
 

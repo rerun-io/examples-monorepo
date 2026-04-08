@@ -130,7 +130,7 @@ class AsyncRerunLogger:
         )
         self._thread.start()
 
-    def join(self, timeout: float | None = 10.0) -> None:
+    def join(self, timeout: float | None = 30.0) -> None:
         """Wait for the logger thread to finish.
 
         Args:
@@ -138,6 +138,10 @@ class AsyncRerunLogger:
         """
         if self._thread is not None:
             self._thread.join(timeout=timeout)
+
+    def is_alive(self) -> bool:
+        """Return True if the logger thread is still running."""
+        return self._thread is not None and self._thread.is_alive()
 
     def _run(self) -> None:
         """Main loop: bind recording, then process events until LogTerminate."""
@@ -290,13 +294,18 @@ class AsyncRerunLogger:
             ),
         )
 
-        # Last keyframe image (relog when a new KF appeared)
-        if self._n_keyframes > 0 and self._last_kf_idx >= 0:
-            # The last keyframe's static data was already logged in
-            # _handle_new_keyframe, but the "last_keyframe" 2D view expects
-            # the image at a special path that gets relogged each frame.
-            # We re-log it only when the last KF identity changes.
-            pass  # Handled in _handle_new_keyframe via _log_last_keyframe
+        # Last keyframe 2D panel — the tracker continuously updates the
+        # active keyframe's pointmap/confidence, so relog it every frame.
+        if event.last_kf_rgb is not None:
+            lk_path: str = f"{self._parent_log_path}/last_keyframe"
+            self._log_rgb_image(lk_path, event.last_kf_rgb)
+            if event.last_kf_X_canon is not None and event.last_kf_C is not None:
+                h_lk: int = event.last_kf_rgb.shape[0]
+                w_lk: int = event.last_kf_rgb.shape[1]
+                self._log_pointmap_and_confidence(
+                    event.last_kf_X_canon, event.last_kf_C,
+                    lk_path, h_lk, w_lk,
+                )
 
     def _handle_map_update(self, event: LogMapUpdate) -> None:
         """Handle batched structural changes: new keyframes, poses, edges, orient."""

@@ -54,6 +54,12 @@ class LogCurrentFrame:
     """Per-point confidence values, or None."""
     img_shape: tuple[int, int]
     """(height, width) of the processed image."""
+    last_kf_rgb: Float32[ndarray, "H W 3"] | None = None
+    """Last keyframe RGB (tracker continuously updates it). None if no KFs yet."""
+    last_kf_X_canon: Float32[ndarray, "hw 3"] | None = None
+    """Last keyframe pointmap (tracker continuously updates it)."""
+    last_kf_C: Float32[ndarray, "hw 1"] | None = None
+    """Last keyframe confidence (tracker continuously updates it)."""
 
 
 @dataclass(frozen=True, slots=True)
