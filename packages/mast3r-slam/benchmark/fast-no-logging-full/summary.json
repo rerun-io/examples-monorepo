@@ -1,0 +1,27 @@
+{
+  "frontend_frames": 504,
+  "backend_tasks": 87,
+  "frontend": {
+    "avg_frame_ms": 126.98383666374578,
+    "avg_fps": 7.875018004441054,
+    "max_frame_ms": 1086.1064960045042,
+    "avg_logging_ms": 0.0,
+    "avg_tracking_ms": 82.57880869216082,
+    "frame_ms_slope_per_frame": 0.06710002276388717,
+    "logging_ms_slope_per_frame": 0.0,
+    "logging_ms_slope_per_keyframe": 0.0,
+    "tracking_ms_slope_per_frame": 0.055808324767394696
+  },
+  "backend": {
+    "avg_task_ms": 209.29094218369974,
+    "max_task_ms": 507.17760001134593,
+    "avg_add_factors_ms": 139.13426440207144,
+    "avg_global_opt_ms": 56.66616627522985,
+    "task_ms_slope_per_keyframe": 1.6675367724216374
+  },
+  "diagnosis": [
+    "Tracking cost itself grows over time; inspect matcher warm starts, optimizer iteration counts, or cached state growth.",
+    "Backend pair construction dominates backend time; decoder plus dense matching remains the main backend bottleneck.",
+    "Backend work grows noticeably with map size; retrieval and global optimization are not staying constant-time."
+  ]
+}

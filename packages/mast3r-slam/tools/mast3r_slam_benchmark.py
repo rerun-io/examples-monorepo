@@ -16,6 +16,7 @@ class BenchmarkConfig:
     max_frames: int | None = None
     benchmark_dir: Path = Path("benchmark")
     no_viz: bool = False
+    disable_logging: bool = False
 
 
 if __name__ == "__main__":
@@ -26,6 +27,7 @@ if __name__ == "__main__":
             dataset=cfg.dataset,
             config=cfg.config,
             no_viz=cfg.no_viz,
+            disable_logging=cfg.disable_logging,
             img_size=cfg.img_size,
             max_frames=cfg.max_frames,
             benchmark_dir=cfg.benchmark_dir,

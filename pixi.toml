@@ -793,6 +793,12 @@ depends-on = ["_build-cuda-kernels", "_build-mojo-kernels", "_download-checkpoin
 cwd = "packages/mast3r-slam"
 description = "Run MASt3R-SLAM with deep per-stage benchmarking (base config, 512px)"
 
+[feature.mast3r-slam.tasks.benchmark-fast-no-logging]
+cmd = "python tools/mast3r_slam_benchmark.py --dataset data/normal-apt-tour.mp4 --img-size 224 --config config/fast.yaml --disable-logging --no-viz --benchmark-dir benchmark/fast-no-logging"
+depends-on = ["_build-cuda-kernels", "_build-mojo-kernels", "_download-checkpoints", "_download-example-data"]
+cwd = "packages/mast3r-slam"
+description = "Run MASt3R-SLAM benchmark with frontend logging disabled (fast config, 224px)"
+
 [feature.mast3r-slam.tasks.mast3r-slam-app]
 cmd = "python tools/gradio-app.py"
 depends-on = ["_build-cuda-kernels", "_build-mojo-kernels", "_download-checkpoints", "_download-example-data"]

@@ -102,6 +102,8 @@ class InferenceConfig:
     """Subdirectory name for saving results under ``logs/``."""
     no_viz: bool = False
     """If True, skip launching visualisation processes."""
+    disable_logging: bool = False
+    """If True, skip Rerun video/frame logging to isolate inference throughput."""
     img_size: Literal[224, 512] = 512
     """Target image size for MASt3R encoder."""
     max_frames: int | None = None
@@ -152,22 +154,28 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
         inf_config.benchmark_dir.mkdir(parents=True, exist_ok=True)
         frontend_benchmark = BenchmarkRecorder(inf_config.benchmark_dir / "frontend.jsonl")
         backend_benchmark_path = inf_config.benchmark_dir / "backend.jsonl"
-    rr.log(log_path, rr.TextLog(f"Dataset: {inf_config.dataset}", level="INFO"))
-    rr.log(log_path, rr.TextLog(f"Config: {config}", level="DEBUG"))
+    logging_enabled: bool = not inf_config.disable_logging
+    if logging_enabled:
+        rr.log(log_path, rr.TextLog(f"Dataset: {inf_config.dataset}", level="INFO"))
+        rr.log(log_path, rr.TextLog(f"Config: {config}", level="DEBUG"))
 
     dataset: MonocularDataset = load_dataset(inf_config.dataset, img_size=inf_config.img_size)
     dataset.subsample(config["dataset"]["subsample"])
-    frame_timestamps_ns: Int[ndarray, "num_frames"] | None = log_video_for_dataset(
-        dataset,
-        parent_log_path / "current_camera" / "pinhole" / "video",
-        timeline=VIDEO_TIMELINE,
-    )
+    frame_timestamps_ns: Int[ndarray, "num_frames"] | None = None
+    if logging_enabled:
+        frame_timestamps_ns = log_video_for_dataset(
+            dataset,
+            parent_log_path / "current_camera" / "pinhole" / "video",
+            timeline=VIDEO_TIMELINE,
+        )
 
     # ── Rerun visualisation setup ──────────────────────────────────────────
     active_timeline: str = VIDEO_TIMELINE if frame_timestamps_ns is not None else FRAME_TIMELINE
-    rr_logger: RerunLogger = RerunLogger(parent_log_path, timeline=active_timeline)
-    blueprint: rrb.Blueprint = create_blueprints(parent_log_path, timeline=active_timeline, n_keyframes=0)
-    rr.send_blueprint(blueprint)
+    rr_logger: RerunLogger | None = None
+    if logging_enabled:
+        rr_logger = RerunLogger(parent_log_path, timeline=active_timeline)
+        blueprint: rrb.Blueprint = create_blueprints(parent_log_path, timeline=active_timeline, n_keyframes=0)
+        rr.send_blueprint(blueprint)
 
     h: int
     w: int
@@ -222,9 +230,10 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
             # Check if the backend process crashed (raises BackendError if so).
             ctx.check_backend()
 
-            rr.set_time(FRAME_TIMELINE, sequence=i)
-            if frame_timestamps_ns is not None and i < len(frame_timestamps_ns):
-                rr.set_time(VIDEO_TIMELINE, duration=1e-9 * float(frame_timestamps_ns[i]))
+            if logging_enabled:
+                rr.set_time(FRAME_TIMELINE, sequence=i)
+                if frame_timestamps_ns is not None and i < len(frame_timestamps_ns):
+                    rr.set_time(VIDEO_TIMELINE, duration=1e-9 * float(frame_timestamps_ns[i]))
             mode: Mode = states.get_mode()
 
             # Stop condition: processed all requested frames.
@@ -262,8 +271,12 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
                     states.set_mode(Mode.TRACKING)
                     states.set_frame(frame)
                 frame_profile.update({f"init_{k}": v for k, v in init_profile.items()})
-                rr_logger.log_frame(frame, keyframes, states)
-                frame_profile.update(rr_logger.last_profile)
+                if logging_enabled:
+                    assert rr_logger is not None
+                    rr_logger.log_frame(frame, keyframes, states)
+                    frame_profile.update(rr_logger.last_profile)
+                else:
+                    frame_profile["logging_total_ms"] = 0.0
                 frame_profile["frame_idx"] = i
                 frame_profile["mode"] = "INIT"
                 frame_profile["n_keyframes"] = len(keyframes)
@@ -332,9 +345,13 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
 
             # Log current frame, all keyframes, camera path, and factor graph
             # edges to the Rerun viewer.
-            rr_logger.log_frame(frame, keyframes, states)
-            frame_profile.update(rr_logger.last_profile)
-            if i % 30 == 0:
+            if logging_enabled:
+                assert rr_logger is not None
+                rr_logger.log_frame(frame, keyframes, states)
+                frame_profile.update(rr_logger.last_profile)
+            else:
+                frame_profile["logging_total_ms"] = 0.0
+            if logging_enabled and i % 30 == 0:
                 FPS: float = i / (time.time() - fps_timer)
                 rr.log(log_path, rr.TextLog(f"FPS: {FPS:.1f}", level="INFO"))
             frame_profile["frame_idx"] = i
@@ -358,14 +375,16 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
                 ns_save_path=inf_config.ns_save_path,
                 keyframes=keyframes,
             )
-            rr.log(
-                f"{parent_log_path}/final_pointcloud",
-                rr.Points3D(positions=pcd.points, colors=pcd.colors),
-            )
+            if logging_enabled:
+                rr.log(
+                    f"{parent_log_path}/final_pointcloud",
+                    rr.Points3D(positions=pcd.points, colors=pcd.colors),
+                )
 
-        rr.log(log_path, rr.TextLog("Done", level="INFO"))
-        rr.log(log_path, rr.TextLog(f"Inference time: {format_time(timer() - start_time)}", level="INFO"))
-        rr.log(log_path, rr.TextLog(f"Processed {len(keyframes)} keyframes", level="INFO"))
+        if logging_enabled:
+            rr.log(log_path, rr.TextLog("Done", level="INFO"))
+            rr.log(log_path, rr.TextLog(f"Inference time: {format_time(timer() - start_time)}", level="INFO"))
+            rr.log(log_path, rr.TextLog(f"Processed {len(keyframes)} keyframes", level="INFO"))
 
         # Wait for the backend to finish its last optimisation task before
         # the context manager shuts it down.
@@ -380,7 +399,7 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
 
     # SlamBackend.__exit__ has now run: backend terminated, manager shut down,
     # GPU memory released via torch.cuda.empty_cache() + gc.collect().
-    if not inf_config.no_viz:
+    if logging_enabled and not inf_config.no_viz:
         rr.log(log_path, rr.TextLog("All visualization processes terminated", level="INFO"))
 
 
