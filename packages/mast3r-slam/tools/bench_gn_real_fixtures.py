@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -14,7 +14,7 @@ from torch import Tensor
 
 from mast3r_slam import _backends as cuda_be
 from mast3r_slam import gn_backends as selected_be
-from mast3r_slam.gn_fixture_utils import load_gn_fixture
+from mast3r_slam.gn_fixture_utils import iter_gn_fixture_paths, load_gn_fixture
 
 
 assert torch.cuda.is_available(), "CUDA not available"
@@ -149,13 +149,6 @@ def _pose_error_report(cuda_twc: Tensor, selected_twc: Tensor) -> dict[str, floa
     }
 
 
-def _iter_fixture_paths(path: Path) -> Iterable[Path]:
-    if path.is_file():
-        yield path
-        return
-    yield from sorted(path.glob("*.pt"))
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("fixture_path", type=Path, help="Fixture .pt file or directory of fixture files")
@@ -167,7 +160,7 @@ def main() -> None:
         f"{'fixture':<24} {'kind':<8} {'cuda ms':>10} {'selected ms':>12} {'ratio':>8} "
         f"{'dtrans':>10} {'dquat':>10} {'dscale':>10} {'ddx':>10}"
     )
-    for path in _iter_fixture_paths(args.fixture_path):
+    for path in iter_gn_fixture_paths(args.fixture_path):
         kind, inputs, metadata = _load_fixture_inputs(path)
         cuda_run = _run_backend(cuda_be, kind, inputs, warmup=args.warmup, runs=args.runs)
         selected_run = _run_backend(selected_be, kind, inputs, warmup=args.warmup, runs=args.runs)

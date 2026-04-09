@@ -483,7 +483,7 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
     # Load MASt3R model and share weights across processes.
     # share_memory() makes the model's parameters accessible to the backend
     # process without copying them (uses CUDA IPC for GPU tensors).
-    model: AsymmetricMASt3R = load_mast3r(device=device)
+    model: AsymmetricMASt3R = load_mast3r(device=device, img_size=inf_config.img_size)
     model.share_memory()
 
     # Pass application_id to backend so it can connect to the same Rerun viewer via gRPC.

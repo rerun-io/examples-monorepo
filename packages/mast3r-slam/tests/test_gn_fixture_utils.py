@@ -7,6 +7,7 @@ import torch
 from mast3r_slam.gn_fixture_utils import (
     GN_CAPTURE_DIR_ENV,
     GN_CAPTURE_LIMIT_ENV,
+    iter_gn_fixture_paths,
     load_gn_fixture,
     maybe_capture_gn_fixture,
 )
@@ -44,3 +45,15 @@ def test_capture_limit_is_respected(monkeypatch, tmp_path: Path) -> None:
     assert first is not None
     assert second is None
     assert len(list(tmp_path.glob("rays-*.pt"))) == 1
+
+
+def test_fixture_iterator_recurses_into_capture_subdirs(tmp_path: Path) -> None:
+    nested = tmp_path / "example-base"
+    nested.mkdir(parents=True)
+    first = tmp_path / "root.pt"
+    second = nested / "nested.pt"
+    torch.save({"kind": "rays", "inputs": {}, "metadata": {}}, first)
+    torch.save({"kind": "rays", "inputs": {}, "metadata": {}}, second)
+
+    found = list(iter_gn_fixture_paths(tmp_path))
+    assert set(found) == {first, second}

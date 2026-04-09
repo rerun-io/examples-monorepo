@@ -73,3 +73,10 @@ def load_gn_fixture(path: str | Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise TypeError(f"Expected dict payload in fixture file, got {type(payload)!r}")
     return payload
+
+
+def iter_gn_fixture_paths(path: str | Path) -> list[Path]:
+    fixture_path = Path(path)
+    if fixture_path.is_file():
+        return [fixture_path]
+    return sorted(fixture_path.rglob("*.pt"))

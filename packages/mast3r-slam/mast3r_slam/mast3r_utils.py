@@ -18,19 +18,28 @@ from mast3r_slam.lietorch_utils import as_SE3
 from mast3r_slam.retrieval_database import RetrievalDatabase
 
 
-def load_mast3r(path: str | None = None, device: str = "cuda") -> AsymmetricMASt3R:
+def load_mast3r(
+    path: str | None = None,
+    device: str = "cuda",
+    img_size: int | tuple[int, int] = 512,
+) -> AsymmetricMASt3R:
     """Load a pretrained MASt3R model from a checkpoint file.
 
     Args:
         path: Path to the model checkpoint. Falls back to the default
             ViTLarge checkpoint under ``checkpoints/`` when ``None``.
         device: Torch device string to move the model onto.
+        img_size: Input image size expected by the MASt3R head. The installed
+            upstream package currently expects a `(height, width)` tuple during
+            `from_pretrained(...)` construction.
 
     Returns:
         The loaded ``AsymmetricMASt3R`` model in eval mode on ``device``.
     """
     weights_path = "checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth" if path is None else path
-    model = AsymmetricMASt3R.from_pretrained(weights_path).to(device)
+    if isinstance(img_size, int):
+        img_size = (img_size, img_size)
+    model = AsymmetricMASt3R.from_pretrained(weights_path, img_size=img_size).to(device)
     return model
 
 
