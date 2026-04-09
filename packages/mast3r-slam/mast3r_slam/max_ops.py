@@ -29,7 +29,10 @@ def pose_retr(poses: Tensor, dx: Tensor, num_fix: int) -> Tensor:
     if device_index is None:
         raise ValueError("pose_retr requires a CUDA tensor")
     num_fix_tensor = _num_fix_tensor(device_index, num_fix)
-    ops.pose_retr(poses, poses, dx.contiguous(), num_fix_tensor)
+    if hasattr(ops, "pose_retr_launch"):
+        ops.pose_retr_launch(poses, poses, dx.contiguous(), num_fix_tensor)
+    else:
+        ops.pose_retr(poses, poses, dx.contiguous(), num_fix_tensor)
     return poses
 
 

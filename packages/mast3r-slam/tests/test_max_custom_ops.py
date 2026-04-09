@@ -21,6 +21,8 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA requ
 def test_load_gn_custom_ops() -> None:
     ops = max_ops.load_gn_custom_ops()
     assert hasattr(ops, "pose_retr")
+    assert hasattr(ops, "pose_retr_launch")
+    assert hasattr(ops, "pose_copy_launch")
 
 
 def test_pose_retr_matches_cuda() -> None:
@@ -37,6 +39,15 @@ def test_pose_retr_matches_cuda() -> None:
     max_ops.pose_retr(actual, dx, num_fix)
 
     torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-6)
+
+
+def test_pose_copy_launch_smoke() -> None:
+    ops = max_ops.load_gn_custom_ops()
+    gen = torch.Generator(device="cuda").manual_seed(2)
+    src = torch.randn(6, 8, device="cuda", generator=gen, dtype=torch.float32)
+    dst = torch.empty_like(src)
+    ops.pose_copy_launch(dst, src)
+    torch.testing.assert_close(dst, src, atol=0.0, rtol=0.0)
 
 
 def test_gn_pose_retr_prefers_max_when_available() -> None:
