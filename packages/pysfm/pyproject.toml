@@ -22,3 +22,9 @@ ignore = [
     "UP037",  # jaxtyping with type quotes
     "UP040",  # beartype compatibility
 ]
+
+[tool.vulture]
+paths = ["pysfm", "tests", "tools"]
+exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
+sort_by_size = true
+min_confidence = 60

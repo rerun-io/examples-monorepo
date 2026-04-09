@@ -257,6 +257,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/typing_inspect-0.9.0-pyhd8ed1ab_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/tzdata-2025c-hc9c84f9_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/urllib3-2.6.3-pyhd8ed1ab_0.conda
+      - conda: https://prefix.dev/conda-forge/noarch/vulture-2.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/wayland-1.25.0-hd6090a7_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wayland-protocols-1.47-hd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/x264-1!164.3095-h166bdaf_2.tar.bz2
@@ -590,6 +591,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/typing_inspect-0.9.0-pyhd8ed1ab_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/tzdata-2025c-hc9c84f9_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/urllib3-2.6.3-pyhd8ed1ab_0.conda
+      - conda: https://prefix.dev/conda-forge/noarch/vulture-2.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/wayland-1.25.0-h4f8a99f_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/x264-1!164.3095-h4e544f5_2.tar.bz2
       - conda: https://prefix.dev/conda-forge/linux-aarch64/x265-3.5-hdd96247_3.tar.bz2
@@ -1672,6 +1674,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/tyro-0.9.1-pyhff2d567_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/tzdata-2025c-hc9c84f9_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/urllib3-2.6.3-pyhd8ed1ab_0.conda
+      - conda: https://prefix.dev/conda-forge/noarch/vulture-2.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/wayland-1.25.0-hd6090a7_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wayland-protocols-1.47-hd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/x264-1!164.3095-h166bdaf_2.tar.bz2
@@ -2009,6 +2012,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/tyro-0.9.1-pyhff2d567_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/tzdata-2025c-hc9c84f9_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/urllib3-2.6.3-pyhd8ed1ab_0.conda
+      - conda: https://prefix.dev/conda-forge/noarch/vulture-2.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/wayland-1.25.0-h4f8a99f_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/x264-1!164.3095-h4e544f5_2.tar.bz2
       - conda: https://prefix.dev/conda-forge/linux-aarch64/x265-3.5-hdd96247_3.tar.bz2
@@ -3033,6 +3037,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/utfcpp-4.09-ha770c72_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/viskores-1.1.0-cuda12.9_h14fae2a_.conda
       - conda: https://prefix.dev/conda-forge/linux-64/vtk-base-9.6.0-py311h53b44c0_1.conda
+      - conda: https://prefix.dev/conda-forge/noarch/vulture-2.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/wayland-1.25.0-hd6090a7_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wayland-protocols-1.47-hd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.8-pyhcf101f3_0.conda
@@ -4283,6 +4288,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/utfcpp-4.09-ha770c72_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/viskores-1.1.0-cpu_h6262cab_.conda
       - conda: https://prefix.dev/conda-forge/linux-64/vtk-base-9.6.0-py312hfe0e207_1.conda
+      - conda: https://prefix.dev/conda-forge/noarch/vulture-2.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/wandb-0.19.11-py312h7545c40_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/wayland-1.24.0-hd6090a7_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/wayland-protocols-1.47-hd8ed1ab_0.conda
@@ -5308,6 +5314,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/utfcpp-4.09-ha770c72_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/viskores-1.1.0-cpu_hc82bd48_.conda
       - conda: https://prefix.dev/conda-forge/linux-64/vtk-base-9.6.0-py312hcf65a95_3.conda
+      - conda: https://prefix.dev/conda-forge/noarch/vulture-2.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/wayland-1.24.0-hd6090a7_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/wayland-protocols-1.47-hd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.6-pyhcf101f3_0.conda
@@ -6313,6 +6320,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/tzdata-2025c-hc9c84f9_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/urllib3-2.6.3-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/vlfeat-0.9.21-hd590300_1.conda
+      - conda: https://prefix.dev/conda-forge/noarch/vulture-2.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/wayland-1.25.0-hd6090a7_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wayland-protocols-1.47-hd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/x264-1!164.3095-h166bdaf_2.tar.bz2
@@ -7362,6 +7370,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/tyro-0.9.1-pyhff2d567_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/tzdata-2025c-hc9c84f9_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/urllib3-2.6.3-pyhd8ed1ab_0.conda
+      - conda: https://prefix.dev/conda-forge/noarch/vulture-2.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/wayland-1.25.0-hd6090a7_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wayland-protocols-1.47-hd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/x264-1!164.3095-h166bdaf_2.tar.bz2
@@ -7702,6 +7711,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/tyro-0.9.1-pyhff2d567_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/tzdata-2025c-hc9c84f9_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/urllib3-2.6.3-pyhd8ed1ab_0.conda
+      - conda: https://prefix.dev/conda-forge/noarch/vulture-2.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/wayland-1.25.0-h4f8a99f_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/x264-1!164.3095-h4e544f5_2.tar.bz2
       - conda: https://prefix.dev/conda-forge/linux-aarch64/x265-3.5-hdd96247_3.tar.bz2
@@ -8896,6 +8906,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/typing_inspect-0.9.0-pyhd8ed1ab_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/tzdata-2025c-hc9c84f9_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/urllib3-2.6.3-pyhd8ed1ab_0.conda
+      - conda: https://prefix.dev/conda-forge/noarch/vulture-2.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/wayland-1.24.0-hd6090a7_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/wayland-protocols-1.47-hd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wheel-0.46.3-pyhd8ed1ab_0.conda
@@ -9291,6 +9302,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/typing_inspect-0.9.0-pyhd8ed1ab_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/tzdata-2025c-hc9c84f9_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/urllib3-2.6.3-pyhd8ed1ab_0.conda
+      - conda: https://prefix.dev/conda-forge/noarch/vulture-2.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/wayland-1.24.0-h4f8a99f_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/wheel-0.46.3-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/linux-aarch64/x264-1!164.3095-h4e544f5_2.tar.bz2
@@ -10195,6 +10207,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/typing_inspect-0.9.0-pyhd8ed1ab_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/tzdata-2025c-hc9c84f9_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/urllib3-2.6.3-pyhd8ed1ab_0.conda
+      - conda: https://prefix.dev/conda-forge/noarch/vulture-2.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/wayland-1.24.0-hd6090a7_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/wayland-protocols-1.47-hd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/x264-1!164.3095-h166bdaf_2.tar.bz2
@@ -11251,6 +11264,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/utfcpp-4.09-ha770c72_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/viskores-1.1.0-cpu_hc82bd48_.conda
       - conda: https://prefix.dev/conda-forge/linux-64/vtk-base-9.6.0-py312hcf65a95_3.conda
+      - conda: https://prefix.dev/conda-forge/noarch/vulture-2.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/wayland-1.24.0-hd6090a7_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/wayland-protocols-1.47-hd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.6-pyhcf101f3_0.conda
@@ -12332,6 +12346,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/utfcpp-4.09-ha770c72_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/viskores-1.1.0-cuda12.9_h14fae2a_.conda
       - conda: https://prefix.dev/conda-forge/linux-64/vtk-base-9.6.0-py312h64f160b_4.conda
+      - conda: https://prefix.dev/conda-forge/noarch/vulture-2.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/wayland-1.25.0-hd6090a7_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wayland-protocols-1.47-hd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.7-pyhcf101f3_0.conda
@@ -13286,6 +13301,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/typing_inspect-0.9.0-pyhd8ed1ab_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/tzdata-2025c-hc9c84f9_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/urllib3-2.6.3-pyhd8ed1ab_0.conda
+      - conda: https://prefix.dev/conda-forge/noarch/vulture-2.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/wayland-1.24.0-hd6090a7_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/wayland-protocols-1.47-hd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/x264-1!164.3095-h166bdaf_2.tar.bz2
@@ -19321,7 +19337,7 @@ packages:
 - pypi: ./packages/gsplat-rust-renderer
   name: gsplat-rust-renderer
   version: 0.1.0
-  sha256: d9f3fa0bb5684ae7cff60500f829a3d0429d12478a929668aacc2fe791a01a79
+  sha256: 8c6924feb68896b950157c5a64873e650b1d250f4003aeff667f56d964cf75d7
   requires_python: '>=3.12'
 - conda: https://prefix.dev/conda-forge/linux-64/gst-plugins-base-1.24.11-h651a532_0.conda
   sha256: a497d2ba34fdfa4bead423cba5261b7e619df3ac491fb0b6231d91da45bd05fc
@@ -28012,7 +28028,7 @@ packages:
 - pypi: ./packages/mast3r-slam
   name: mast3r-slam
   version: 0.0.1
-  sha256: efdddc33ec20e7ea3bb369fef6f7969d973fd7ddfac25ba41c95671c172ff90e
+  sha256: 0b4aee916e8c2d2ec59834b954b865bab6ed3ddfd96e6b98de4f430965955f93
   requires_dist:
   - einops
   - natsort
@@ -28407,7 +28423,7 @@ packages:
 - pypi: ./packages/monoprior
   name: monopriors
   version: 0.3.2
-  sha256: 6c4bafc8fddd27a076923a72bbba443bd01e6bc5eec292776f8adeee06e3a50f
+  sha256: b9650205147a4a3586a725f8707c7e9f99eb229fc1228b1c8d465fa4c4d9cc6d
   requires_dist:
   - geffnet>=1.0.2
   - omnidata-tools>=0.0.23
@@ -32213,7 +32229,7 @@ packages:
 - pypi: ./packages/pysfm
   name: pysfm
   version: 0.1.0
-  sha256: a004089a859a27da0bd4abd3acd7bd60e12ebd7fc10749868d2c19bac6601035
+  sha256: 8d4a0847adbfa1ded34638ef72f214c2f80395b6ade07b65abd8299086a05db1
   requires_python: '>=3.11'
 - conda: https://prefix.dev/conda-forge/linux-64/pyside6-6.10.2-py311hf27b23e_2.conda
   sha256: 04fb70ae66672361aeb85f7706b12792b34194a601216eab6c2131fd5e98763b
@@ -32979,7 +32995,7 @@ packages:
 - pypi: ./packages/pyvrs-viewer
   name: pyvrs-viewer
   version: 0.1.0
-  sha256: d4135e44a60bcdda18583c60dee92a790daa42561237c70525a35134072c1edc
+  sha256: ee174c4adc55abebc7d7cdcd0b388e63a823723a813fab5d3b3d2a60ed1a405d
   requires_python: '>=3.12'
 - conda: https://prefix.dev/conda-forge/linux-64/pyyaml-6.0.3-py310h3406613_1.conda
   sha256: f23de6cc72541c6081d3d27482dbc9fc5dd03be93126d9155f06d0cf15d6e90e
@@ -33894,7 +33910,7 @@ packages:
 - pypi: ./packages/prompt-da
   name: rerun-prompt-da
   version: 0.1.0
-  sha256: 6010c475dca8016b74cdbd14fec5a399b674644eb3797dd861ad6c4670702b67
+  sha256: 745a5f6282ad01b5a906b256f8f803725a4eddb4f4e5f3561bb4465a0abdc24c
   requires_dist:
   - monopriors @ file:///var/tmp/vibe-kanban/worktrees/0c88-mast3r-slam-fix/examples-monorepo/packages/monoprior
   requires_python: '>=3.12'
@@ -34050,7 +34066,7 @@ packages:
 - pypi: ./packages/robocap-slam
   name: robocap-slam
   version: 0.1.0
-  sha256: e5e9b7afe3b28560960a5d77ca4c98e67b6da0f8bcd0229946da73c5e72817a1
+  sha256: 5cabb0e90bf8c6f1d23bf4ad3c7734a0a420f5d91ff3925f7c13b200b19090fc
   requires_dist:
   - pyyaml
   - pyarrow
@@ -34409,7 +34425,7 @@ packages:
 - pypi: ./packages/sam3-rerun
   name: sam3-rerun
   version: 0.1.0
-  sha256: d03756d33ea02d8b6452906fb2a966b57b5a7f37e4d9ead61aa104ecc844244b
+  sha256: 314786c153a414d7be1e2251eab0e5cb6db2f48d426407bddfe283c66bc46176
   requires_dist:
   - einops>=0.8.0
   - tyro>=0.9.1
@@ -34417,7 +34433,7 @@ packages:
 - pypi: ./packages/sam3d-body-rerun
   name: sam3d-body
   version: 0.1.0
-  sha256: a70099f7d594445eb44234f400c15f387145990769ac190ce489e96333eb682d
+  sha256: fafc5560ccaaa82432b7c4990084a15100631dda31f973ab22bb81ad38261c83
   requires_dist:
   - einops>=0.8.0
   - icecream>=2.1.3
@@ -37327,7 +37343,7 @@ packages:
 - pypi: ./packages/vistadream
   name: vistadream
   version: 0.1.0
-  sha256: 040445160e2ce50aa6695f139ee7258a27456ec50ee1fbcc9351b9e46aa686b5
+  sha256: a73114f7930cefc5fd61f7116a507c1ed218d5c909a24af0c113608ed440e827
   requires_dist:
   - einops>=0.8.1,<0.9
   - monopriors @ file:///var/tmp/vibe-kanban/worktrees/0c88-mast3r-slam-fix/examples-monorepo/packages/monoprior
@@ -37581,6 +37597,18 @@ packages:
   - pkg:pypi/vtk?source=hash-mapping
   size: 85574429
   timestamp: 1772669146387
+- conda: https://prefix.dev/conda-forge/noarch/vulture-2.16-pyhd8ed1ab_0.conda
+  sha256: 8110ce046263dfaf60b79f81e6b58189352ce0332dc9410e3e0f5dd05a6c17f0
+  md5: 07eb801541c33aef793e6ce25de33eab
+  depends:
+  - python >=3.10
+  - tomli >=1.1.0
+  license: MIT
+  license_family: MIT
+  purls:
+  - pkg:pypi/vulture?source=hash-mapping
+  size: 29832
+  timestamp: 1774490312775
 - conda: https://prefix.dev/conda-forge/linux-64/wandb-0.19.11-py312h7545c40_0.conda
   sha256: 34a2a7c1012a552ae89042fa2bc1a00a8d6cdd86fa9514ea70b55ceec4b757e3
   md5: f3ca0e2bab1df90f0cb456cea802b562
@@ -37804,7 +37832,7 @@ packages:
 - pypi: ./packages/wilor-nano
   name: wilor-nano
   version: 0.1.0
-  sha256: 90226910a61ac83b85d7db6fd03b7193f2169c91c433419b38d9d707742a317a
+  sha256: 4d9695a52af9cd93bcc16bca50eb34cd53ab2fe92e04164fd30ccf2e5065ccfd
   requires_dist:
   - timm
   - einops

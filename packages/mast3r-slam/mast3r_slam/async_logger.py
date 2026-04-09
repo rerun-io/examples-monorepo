@@ -32,8 +32,8 @@ import rerun as rr
 import torch
 from jaxtyping import Bool, Float, Float32, Int, UInt8, UInt16
 from numpy import ndarray
-from simplecv.camera_parameters import PinholeParameters
 from simplecv.camera_orient_utils import auto_orient_and_center_poses
+from simplecv.camera_parameters import PinholeParameters
 from simplecv.rerun_log_utils import log_pinhole
 from torch import Tensor
 
@@ -304,8 +304,7 @@ class AsyncRerunLogger:
             # Queue is stuck — the logger thread is likely dead.
             if self._error is not None:
                 warnings.warn(
-                    f"Async logger thread crashed: {self._error}. "
-                    f"{self._queue.qsize()} events were not processed.",
+                    f"Async logger thread crashed: {self._error}. {self._queue.qsize()} events were not processed.",
                     stacklevel=2,
                 )
             return
@@ -457,8 +456,12 @@ class AsyncRerunLogger:
 
         # Reconstruct Frame for frame_to_pinhole()
         frame: Frame = snapshot_to_frame(
-            event.world_sim3_cam_data, event.rgb, event.X_canon, event.C,
-            event.img_shape, frame_id=event.frame_idx,
+            event.world_sim3_cam_data,
+            event.rgb,
+            event.X_canon,
+            event.C,
+            event.img_shape,
+            frame_id=event.frame_idx,
         )
 
         cam_log_path: str = f"{self._parent_log_path}/current_camera"
@@ -471,15 +474,18 @@ class AsyncRerunLogger:
 
         # RGB image
         rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(
-            f"{cam_log_path}/pinhole/image", event.rgb,
+            f"{cam_log_path}/pinhole/image",
+            event.rgb,
         )
 
         # Pointmap, depth, confidence
         if event.X_canon is not None and event.C is not None:
             self._log_pointmap_and_confidence(
-                event.X_canon, event.C,
+                event.X_canon,
+                event.C,
                 f"{cam_log_path}/pinhole",
-                rgb_uint8.shape[0], rgb_uint8.shape[1],
+                rgb_uint8.shape[0],
+                rgb_uint8.shape[1],
             )
 
         # Camera path
@@ -504,8 +510,11 @@ class AsyncRerunLogger:
                 h_lk: int = event.last_kf_rgb.shape[0]
                 w_lk: int = event.last_kf_rgb.shape[1]
                 self._log_pointmap_and_confidence(
-                    event.last_kf_X_canon, event.last_kf_C,
-                    lk_path, h_lk, w_lk,
+                    event.last_kf_X_canon,
+                    event.last_kf_C,
+                    lk_path,
+                    h_lk,
+                    w_lk,
                 )
 
     def _handle_map_update(self, event: LogMapUpdate) -> None:
@@ -551,8 +560,12 @@ class AsyncRerunLogger:
 
         # Reconstruct Frame for frame_to_pinhole()
         frame: Frame = snapshot_to_frame(
-            kf.world_sim3_cam_data, kf.rgb, kf.X_canon, kf.C,
-            kf.img_shape, frame_id=kf.kf_idx,
+            kf.world_sim3_cam_data,
+            kf.rgb,
+            kf.X_canon,
+            kf.C,
+            kf.img_shape,
+            frame_id=kf.kf_idx,
         )
 
         # Camera transform
@@ -570,18 +583,21 @@ class AsyncRerunLogger:
 
         # RGB image
         kf_rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(
-            f"{kf_cam_log_path}/pinhole/image", kf.rgb,
+            f"{kf_cam_log_path}/pinhole/image",
+            kf.rgb,
         )
 
         # Pointmap + confidence
         self._log_pointmap_and_confidence(
-            kf.X_canon, kf.C,
+            kf.X_canon,
+            kf.C,
             f"{kf_cam_log_path}/pinhole",
-            kf.img_shape[0], kf.img_shape[1],
+            kf.img_shape[0],
+            kf.img_shape[1],
         )
 
         # Confidence-filtered point cloud
-        mask: Bool[ndarray, "hw"] = (kf.C.squeeze() > self._conf_thresh)
+        mask: Bool[ndarray, "hw"] = kf.C.squeeze() > self._conf_thresh
         positions: Float32[ndarray, "num_points 3"] = kf.X_canon
         colors: UInt8[ndarray, "num_points 3"] = kf_rgb_uint8.reshape(-1, 3)
         rr.log(
@@ -601,9 +617,11 @@ class AsyncRerunLogger:
         lk_path: str = f"{self._parent_log_path}/last_keyframe"
         self._log_rgb_image(lk_path, kf.rgb)
         self._log_pointmap_and_confidence(
-            kf.X_canon, kf.C,
+            kf.X_canon,
+            kf.C,
             lk_path,
-            kf.img_shape[0], kf.img_shape[1],
+            kf.img_shape[0],
+            kf.img_shape[1],
         )
 
     def _relog_keyframe_camera(self, kf_idx: int, world_sim3_cam_data: Float32[ndarray, "8"]) -> None:
