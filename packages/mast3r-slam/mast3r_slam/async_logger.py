@@ -90,6 +90,8 @@ def snapshot_current_frame(
     last_kf_rgb: Float32[ndarray, "H W 3"] | None = None
     last_kf_X_canon: Float32[ndarray, "hw 3"] | None = None
     last_kf_C: Float32[ndarray, "hw 1"] | None = None
+    # Track keyframe identity separately so the logger can skip redundant
+    # /last_keyframe RGB relogs when only its map/confidence changed.
     last_kf_idx: int | None = None
     if keyframes is not None:
         with keyframes.lock:
@@ -411,6 +413,7 @@ class AsyncRerunLogger:
         color_model: rr.ColorModel,
         channel_datatype: rr.datatypes.ChannelDatatype,
     ) -> None:
+        # Log static image metadata once so per-frame updates only send buffers.
         if image_path in self._logged_image_formats:
             return
         rr.log(
@@ -428,6 +431,7 @@ class AsyncRerunLogger:
         self._logged_image_formats.add(image_path)
 
     def _ensure_depth_format(self, depth_path: str, *, width: int, height: int, meter: float = 1000.0) -> None:
+        # Same idea as _ensure_image_format(), but for depth images.
         if depth_path in self._logged_image_formats:
             return
         rr.log(
@@ -457,6 +461,8 @@ class AsyncRerunLogger:
         )
         rr.log(
             image_path,
+            # Buffer-only updates benchmarked better than rebuilding/compressing
+            # full Image archetypes every frame.
             rr.Image.from_fields(buffer=rgb_uint8.reshape(-1)),
         )
         return rgb_uint8
@@ -535,6 +541,8 @@ class AsyncRerunLogger:
             channel_datatype=rr.datatypes.ChannelDatatype.U8,
         )
 
+        # Keep the same logged content, but reuse the static formats above so
+        # each frame only ships raw buffers.
         rr.log(pointmap_path, rr.Image.from_fields(buffer=pointmap_uint8.reshape(-1)))
         rr.log(depth_path, rr.DepthImage.from_fields(buffer=depth_uint16_mm.view(np.uint8).reshape(-1)))
         rr.log(confidence_path, rr.Image.from_fields(buffer=confidence_uint8.reshape(-1)))
@@ -590,6 +598,8 @@ class AsyncRerunLogger:
         if event.last_kf_rgb is not None:
             lk_path: str = f"{self._parent_log_path}/last_keyframe"
             if event.last_kf_idx != self._last_kf_idx:
+                # RGB is static for a given keyframe; only resend it when the
+                # "last keyframe" identity changes.
                 self._log_rgb_image(lk_path, event.last_kf_rgb)
             if event.last_kf_X_canon is not None and event.last_kf_C is not None:
                 h_lk: int = event.last_kf_rgb.shape[0]
@@ -713,6 +723,8 @@ class AsyncRerunLogger:
             frame_id=kf_idx,
         )
         extrinsics = frame_to_extrinsics(frame)
+        # Backend pose refinement only changes the camera transform; relogging
+        # the full pinhole stack was correct but measurably slower.
         rr.log(
             kf_cam_log_path,
             rr.Transform3D(

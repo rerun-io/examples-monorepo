@@ -61,7 +61,7 @@ class LogCurrentFrame:
     last_kf_C: Float32[ndarray, "hw 1"] | None = None
     """Last keyframe confidence (tracker continuously updates it)."""
     last_kf_idx: int | None = None
-    """Index of the current last keyframe, or None if no keyframes exist."""
+    """Index of the current last keyframe, used to avoid resending unchanged last-KF RGB."""
 
 
 @dataclass(frozen=True, slots=True)
