@@ -6,11 +6,10 @@ from torch import Tensor
 import mast3r_slam.image as img_utils
 from mast3r_slam.config import config
 
-# Matching kernel backend selection: prefer Mojo (faster, no C++ build step),
-# fall back to CUDA C++ if Mojo .so is not built. Both provide identical
-# iter_proj() and refine_matches() APIs.
-# Note: global_opt.py imports mast3r_slam._backends directly for the
-# Gauss-Newton solvers which have not been ported to Mojo.
+# Matching kernel backend selection: prefer Mojo, fall back to CUDA C++ if the
+# Mojo shared library is not built. The GN solver path follows the same rule in
+# global_opt.py, so example tasks should run on the split Mojo backend by
+# default whenever `mast3r_slam_mojo_backends.so` is available.
 try:
     import mast3r_slam_mojo_backends as _matching_backends  # pyrefly: ignore
 except ImportError:
