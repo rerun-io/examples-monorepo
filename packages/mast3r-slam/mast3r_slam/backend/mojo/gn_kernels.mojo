@@ -312,15 +312,53 @@ def gauss_newton_rays_step_kernel(
     var jx = Int(jj[edge])
     var pi = ix * POSE_STRIDE
     var pj = jx * POSE_STRIDE
+    var pose_shared = stack_allocation[
+        24,
+        Scalar[DType.float32],
+        address_space=AddressSpace.SHARED,
+    ]()
+    if tid < 8:
+        pose_shared[tid] = twc[pi + tid]
+    if tid < 8:
+        pose_shared[tid + 8] = twc[pj + tid]
+    barrier()
+    var ti0 = pose_shared[0][0]
+    var ti1 = pose_shared[1][0]
+    var ti2 = pose_shared[2][0]
+    var qi0 = pose_shared[3][0]
+    var qi1 = pose_shared[4][0]
+    var qi2 = pose_shared[5][0]
+    var qi3 = pose_shared[6][0]
+    var si0 = pose_shared[7][0]
+    var tj0 = pose_shared[8][0]
+    var tj1 = pose_shared[9][0]
+    var tj2 = pose_shared[10][0]
+    var qj0 = pose_shared[11][0]
+    var qj1 = pose_shared[12][0]
+    var qj2 = pose_shared[13][0]
+    var qj3 = pose_shared[14][0]
+    var sj0 = pose_shared[15][0]
 
-    var rel = rel_sim3_components(
-        twc[pi + 0], twc[pi + 1], twc[pi + 2],
-        twc[pi + 3], twc[pi + 4], twc[pi + 5], twc[pi + 6],
-        twc[pi + 7],
-        twc[pj + 0], twc[pj + 1], twc[pj + 2],
-        twc[pj + 3], twc[pj + 4], twc[pj + 5], twc[pj + 6],
-        twc[pj + 7],
-    )
+    if tid == 0:
+        var rel_once = rel_sim3_components(
+            ti0, ti1, ti2,
+            qi0, qi1, qi2, qi3,
+            si0,
+            tj0, tj1, tj2,
+            qj0, qj1, qj2, qj3,
+            sj0,
+        )
+        for r in range(8):
+            pose_shared[16 + r] = rel_once[r]
+    barrier()
+    var rel0 = pose_shared[16][0]
+    var rel1 = pose_shared[17][0]
+    var rel2 = pose_shared[18][0]
+    var rel3 = pose_shared[19][0]
+    var rel4 = pose_shared[20][0]
+    var rel5 = pose_shared[21][0]
+    var rel6 = pose_shared[22][0]
+    var rel7 = pose_shared[23][0]
 
     var hij = InlineArray[Float32, RAYS_HDIM](fill=0.0)
     var vi = InlineArray[Float32, POSE_DIM](fill=0.0)
@@ -357,7 +395,7 @@ def gauss_newton_rays_step_kernel(
         var ri2 = norm1_i_inv * xi2
 
         var xj_ci = act_sim3_components(
-            rel[0], rel[1], rel[2], rel[3], rel[4], rel[5], rel[6], rel[7], xj0, xj1, xj2
+            rel0, rel1, rel2, rel3, rel4, rel5, rel6, rel7, xj0, xj1, xj2
         )
         var norm2_j = squared_norm3_components(xj_ci[0], xj_ci[1], xj_ci[2])
         var norm1_j = sqrt(norm2_j)
@@ -400,8 +438,8 @@ def gauss_newton_rays_step_kernel(
             ji0: Float32, ji1: Float32, ji2: Float32, ji3: Float32, ji4: Float32, ji5: Float32, ji6: Float32,
         ):
             var jadj = apply_sim3_adj_inv_components(
-                twc[pi + 0], twc[pi + 1], twc[pi + 2],
-                twc[pi + 3], twc[pi + 4], twc[pi + 5], twc[pi + 6], twc[pi + 7],
+                ti0, ti1, ti2,
+                qi0, qi1, qi2, qi3, si0,
                 ji0, ji1, ji2, ji3, ji4, ji5, ji6,
             )
             for n in range(POSE_DIM):

@@ -2,14 +2,7 @@ from std.math import ceildiv, max
 from std.gpu.host import DeviceContext
 from std.python import Python, PythonObject
 
-from gn_kernels import (
-    POSE_DIM,
-    RAYS_THREADS,
-    assemble_b_dense_kernel,
-    assemble_h_dense_kernel,
-    gauss_newton_rays_step_kernel,
-    pose_retr_kernel,
-)
+from gn_kernels import POSE_DIM, RAYS_THREADS, gauss_newton_rays_step_kernel, pose_retr_kernel
 
 
 def get_cached_context_ptr() raises -> UnsafePointer[DeviceContext, MutAnyOrigin]:
@@ -45,72 +38,77 @@ def create_inds(
     return Python.tuple(ii_ind, jj_ind)
 
 
-def solve_dense_system(
-    h_dense: PythonObject,
-    b_dense: PythonObject,
+def solve_step_system(
+    hs: PythonObject,
+    gs: PythonObject,
+    ii_opt_cpu: PythonObject,
+    jj_opt_cpu: PythonObject,
     n_vars: Int,
+    out_device: PythonObject,
+    out_dtype: PythonObject,
 ) raises -> PythonObject:
     var torch = get_torch_module()
     if n_vars <= 0:
-        return torch.zeros(Python.list(0, POSE_DIM), device=h_dense.device, dtype=h_dense.dtype)
+        return torch.zeros(Python.list(0, POSE_DIM), device=out_device, dtype=out_dtype)
 
-    var h64 = h_dense.to(dtype=torch.float64)
-    var b64 = b_dense.to(dtype=torch.float64)
-    var rhs = -b64.reshape(n_vars * POSE_DIM, 1)
-    var eye = torch.eye(n_vars * POSE_DIM, device=h_dense.device, dtype=torch.float64)
-    var chol_h = h64 + 1e-9 * eye
-    var chol = torch.linalg.cholesky_ex(chol_h, upper=False)
-    var l_factor = chol[0]
-    var info = chol[1]
-    if Int(py=info.max().item()) != 0:
-        return torch.zeros(Python.list(n_vars, POSE_DIM), device=h_dense.device, dtype=h_dense.dtype)
-    var dx_vec = torch.cholesky_solve(rhs, l_factor, upper=False)
-    return dx_vec.to(dtype=h_dense.dtype).view(n_vars, POSE_DIM)
-
-
-def assemble_dense_system_gpu(
-    hs: PythonObject,
-    gs: PythonObject,
-    ii_opt: PythonObject,
-    jj_opt: PythonObject,
-    n_vars: Int,
-) raises -> PythonObject:
-    var torch = get_torch_module()
-    var num_edges = Int(py=hs.shape[1])
-    var dim = n_vars * POSE_DIM
-    var h_dense = torch.zeros(
-        Python.list(dim, dim),
-        device=hs.device,
+    var hs_cpu = hs.cpu().to(dtype=torch.float64)
+    var gs_cpu = gs.cpu().to(dtype=torch.float64)
+    var h_blocks = torch.zeros(
+        Python.list(n_vars, n_vars, POSE_DIM, POSE_DIM),
         dtype=torch.float64,
     )
     var b_dense = torch.zeros(
         Python.list(n_vars, POSE_DIM),
-        device=gs.device,
         dtype=torch.float64,
     )
-    if n_vars <= 0:
-        return Python.tuple(h_dense, b_dense)
 
-    var hs_ptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=Int(py=hs.data_ptr()))
-    var gs_ptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=Int(py=gs.data_ptr()))
-    var ii_ptr = UnsafePointer[Int64, MutAnyOrigin](unsafe_from_address=Int(py=ii_opt.contiguous().data_ptr()))
-    var jj_ptr = UnsafePointer[Int64, MutAnyOrigin](unsafe_from_address=Int(py=jj_opt.contiguous().data_ptr()))
-    var h_ptr = UnsafePointer[Float64, MutAnyOrigin](unsafe_from_address=Int(py=h_dense.data_ptr()))
-    var b_ptr = UnsafePointer[Float64, MutAnyOrigin](unsafe_from_address=Int(py=b_dense.data_ptr()))
+    var ii_mask = ii_opt_cpu >= 0
+    var jj_mask = jj_opt_cpu >= 0
+    var ij_mask = ii_mask & jj_mask
 
-    var ctx_ptr = get_cached_context_ptr()
-    ctx_ptr[].enqueue_function[assemble_h_dense_kernel, assemble_h_dense_kernel](
-        hs_ptr, ii_ptr, jj_ptr, h_ptr, num_edges, n_vars,
-        grid_dim=(ceildiv(dim, 16), ceildiv(dim, 16)),
-        block_dim=(16, 16),
-    )
-    ctx_ptr[].enqueue_function[assemble_b_dense_kernel, assemble_b_dense_kernel](
-        gs_ptr, ii_ptr, jj_ptr, b_ptr, num_edges, n_vars,
-        grid_dim=(ceildiv(n_vars, 16), 1),
-        block_dim=(16, POSE_DIM),
-    )
-    ctx_ptr[].synchronize()
-    return Python.tuple(h_dense, b_dense)
+    if Bool(ii_mask.any().item()):
+        var ii_idx = ii_opt_cpu[ii_mask]
+        h_blocks.index_put_(
+            Python.tuple(ii_idx, ii_idx),
+            hs_cpu[0][ii_mask],
+            accumulate=True,
+        )
+        b_dense.index_add_(0, ii_idx, gs_cpu[0][ii_mask])
+
+    if Bool(jj_mask.any().item()):
+        var jj_idx = jj_opt_cpu[jj_mask]
+        h_blocks.index_put_(
+            Python.tuple(jj_idx, jj_idx),
+            hs_cpu[3][jj_mask],
+            accumulate=True,
+        )
+        b_dense.index_add_(0, jj_idx, gs_cpu[1][jj_mask])
+
+    if Bool(ij_mask.any().item()):
+        var ii_cross = ii_opt_cpu[ij_mask]
+        var jj_cross = jj_opt_cpu[ij_mask]
+        h_blocks.index_put_(
+            Python.tuple(ii_cross, jj_cross),
+            hs_cpu[1][ij_mask],
+            accumulate=True,
+        )
+        h_blocks.index_put_(
+            Python.tuple(jj_cross, ii_cross),
+            hs_cpu[2][ij_mask],
+            accumulate=True,
+        )
+
+    var h_dense = h_blocks.permute(0, 2, 1, 3).reshape(n_vars * POSE_DIM, n_vars * POSE_DIM)
+    var rhs = -b_dense.reshape(n_vars * POSE_DIM, 1)
+    var eye = torch.eye(n_vars * POSE_DIM, dtype=torch.float64)
+    var chol_h = h_dense + 1e-9 * eye
+    var chol = torch.linalg.cholesky_ex(chol_h, upper=False)
+    var l_factor = chol[0]
+    var info = chol[1]
+    if Int(py=info.max().item()) != 0:
+        return torch.zeros(Python.list(n_vars, POSE_DIM), device=out_device, dtype=out_dtype)
+    var dx_vec = torch.cholesky_solve(rhs, l_factor, upper=False)
+    return dx_vec.view(n_vars, POSE_DIM).to(device=out_device, dtype=out_dtype)
 
 
 def pose_retr_py(
@@ -198,6 +196,8 @@ def gauss_newton_impl(
     var inds_opt = create_inds(unique_kf_idx, num_fix, ii, jj)
     var ii_opt = inds_opt[0]
     var jj_opt = inds_opt[1]
+    var ii_opt_cpu = ii_opt.cpu()
+    var jj_opt_cpu = jj_opt.cpu()
     var n_vars = num_poses - num_fix
 
     var dx = torch.zeros(
@@ -225,10 +225,7 @@ def gauss_newton_impl(
 
         var hs = step_out[0]
         var gs = step_out[1]
-        var sys = assemble_dense_system_gpu(hs, gs, ii_opt, jj_opt, n_vars)
-        var h_dense = sys[0]
-        var b_dense = sys[1]
-        dx = solve_dense_system(h_dense, b_dense, n_vars).to(dtype=Twc.dtype)
+        dx = solve_step_system(hs, gs, ii_opt_cpu, jj_opt_cpu, n_vars, Twc.device, Twc.dtype)
         _ = pose_retr_py(Twc, dx, PythonObject(num_fix))
         var delta_norm = torch.linalg.norm(dx)
         if Float64(py=delta_norm.item()) < delta_thresh:
