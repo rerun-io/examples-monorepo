@@ -709,6 +709,61 @@ pyaml = "*"
 [feature.mast3r-slam.activation.env]
 PACKAGE_DIR = "packages/mast3r-slam"
 
+[feature.mast3r-slam-max]
+channels = ["https://prefix.dev/ai-demos", "https://conda.modular.com/max/", "conda-forge"]
+platforms = ["linux-64"]
+
+[feature.mast3r-slam-max.dependencies]
+python = "3.11.*"
+numpy = "*"
+py-opencv = "*"
+jaxtyping = "<0.3"
+typing_extensions = ">=4.1.0,<4.13.0"
+scipy = "*"
+tqdm = "*"
+huggingface_hub = "*"
+transformers = ">=5.0.0"
+av = "*"
+eigen = ">=3.4.0,<4"
+ffmpeg = ">=7.1.0"
+faiss = "*"
+scikit-learn = "*"
+matplotlib = "*"
+trimesh = "*"
+
+[feature.mast3r-slam-max.target.linux-64.dependencies]
+lietorch = ">=0.3.0"
+mast3r = { path = "packages/mast3r" }
+asmk = { path = "packages/asmk" }
+
+[feature.mast3r-slam-max.pypi-dependencies]
+mast3r-slam = { path = "packages/mast3r-slam", editable = true }
+einops = ">=0.8.0"
+evo = "*"
+natsort = ">=8.4"
+pykdtree = "*"
+roma = "*"
+pyaml = "*"
+
+[feature.mast3r-slam-max.activation.env]
+PACKAGE_DIR = "packages/mast3r-slam"
+MAST3R_SLAM_MOJO_INTERFACE = "custom_op"
+
+[feature.mast3r-slam-max.tasks._install-max-nightly]
+cmd = "uv pip install --python $(which python) modular==26.3.0.dev2026040905 --index https://whl.modular.com/nightly/simple/ --prerelease allow"
+description = "Install MAX Python runtime into the dedicated mast3r-slam MAX env"
+
+[feature.mast3r-slam-max.tasks.check-max-python]
+cmd = "python -c \"import importlib; [print(mod, 'OK') for mod in ['max.experimental.torch', 'mast3r_slam.max_ops'] if not importlib.import_module(mod)]\""
+depends-on = ["_install-max-nightly"]
+description = "Verify MAX Python modules are importable in the max env"
+
+[feature.mast3r-slam-max.tasks.bench-gn-custom-op]
+cmd = "python tools/bench_gn_mojo_vs_cuda.py"
+cwd = "packages/mast3r-slam"
+depends-on = ["_install-max-nightly"]
+description = "Benchmark CUDA vs Mojo GN with the custom-op interface in the max env"
+
 # ── Build tasks (CUDA extensions compiled via setuptools, no pip) ────────
 [feature.mast3r-slam.tasks._build-cuda-kernels]
 cmd = "python setup.py build_ext --inplace"
@@ -1095,6 +1150,11 @@ mast3r-slam-dev = { features = [
     "mast3r-slam",
     "dev",
 ], solve-group = "mast3r-slam", no-default-feature = true }
+mast3r-slam-max-dev = { features = [
+    "cuda",
+    "mast3r-slam-max",
+    "dev",
+], solve-group = "mast3r-slam-max", no-default-feature = true }
 gsplat-rust-renderer = { features = [
     "gsplat-rust-renderer",
 ], solve-group = "gsplat-rust-renderer", no-default-feature = true }
