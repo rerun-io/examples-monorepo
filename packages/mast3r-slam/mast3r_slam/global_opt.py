@@ -16,6 +16,13 @@ from mast3r_slam.geometry import (
 from mast3r_slam.mast3r_utils import mast3r_match_symmetric
 
 
+def _call_gn_backend(name: str, *args: object) -> object:
+    fn = getattr(_backends, name)
+    if _backends.__name__ == "mast3r_slam_mojo_backends":
+        return fn(tuple(args))
+    return fn(*args)
+
+
 class FactorGraph:
     """Maintains pairwise factors between keyframes and solves global pose optimisation.
 
@@ -247,7 +254,8 @@ class FactorGraph:
         delta_thresh: float = self.cfg["delta_norm"]
 
         pose_data: Float[Tensor, "n_unique sim3_dim"] = world_sim3_cams.data[:, 0, :]
-        _backends.gauss_newton_rays(
+        _call_gn_backend(
+            "gauss_newton_rays",
             pose_data,
             Xs,
             Cs,
@@ -314,7 +322,8 @@ class FactorGraph:
         width: int
         height, width = img_size
 
-        _backends.gauss_newton_calib(
+        _call_gn_backend(
+            "gauss_newton_calib",
             pose_data,
             Xs,
             Cs,
