@@ -137,11 +137,10 @@ class RetrievalDatabase(Retriever):
         """
         step_params: dict = self.asmk.params.get("query_ivf")
 
-        images2: Float[ndarray, "..."]
         ranks: Float[ndarray, "..."]
         scores: Float[ndarray, "..."]
         topk: Int64[ndarray, "..."]
-        images2, ranks, scores, topk = self.accumulate_scores(
+        _images2, ranks, scores, topk = self.accumulate_scores(
             self.asmk.codebook,
             self.ivf_builder.kernel,
             self.ivf_builder.ivf,
@@ -197,7 +196,7 @@ class RetrievalDatabase(Retriever):
 
     def accumulate_scores(
         self,
-        cdb: Any,
+        _cdb: Any,
         kern: Any,
         ivf: Any,
         qvecs: Float32[ndarray, "n_local d"],
@@ -208,7 +207,7 @@ class RetrievalDatabase(Retriever):
         inverted_file and parameters.
 
         Args:
-            cdb: ASMK codebook.
+            _cdb: ASMK codebook.
             kern: ASMK kernel.
             ivf: ASMK inverted file.
             qvecs: 2-D array of local descriptors.

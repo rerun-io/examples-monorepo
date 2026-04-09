@@ -280,7 +280,6 @@ class AsyncRerunLogger:
         self._path_list: list[list[float]] = []
         self._logged_keyframes: set[int] = set()
         self._keyframe_pinhole_static: dict[int, PinholeParameters] = {}
-        self._last_kf_idx: int = -1
         self._last_blueprint_n_kf: int = -1
         self._n_keyframes: int = 0
         self._conf_thresh: int = 7
@@ -294,7 +293,7 @@ class AsyncRerunLogger:
         self.start()
         return self
 
-    def __exit__(self, exc_type: type | None, exc_val: BaseException | None, exc_tb: object) -> None:
+    def __exit__(self, _exc_type: type | None, _exc_val: BaseException | None, _exc_tb: object) -> None:
         """Send LogTerminate, join the thread, and warn if it outlives the timeout."""
         # Use a bounded put so we don't deadlock if the logger thread
         # crashed and the queue is full.
@@ -610,8 +609,6 @@ class AsyncRerunLogger:
 
         # Update last-keyframe 2D view
         self._log_last_keyframe(kf)
-        self._last_kf_idx = kf.kf_idx
-
     def _log_last_keyframe(self, kf: KeyframeSnapshot) -> None:
         """Log the last keyframe's image and pointmap to the 2D view."""
         lk_path: str = f"{self._parent_log_path}/last_keyframe"

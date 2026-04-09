@@ -27,6 +27,7 @@ from __future__ import annotations
 import lietorch
 import pytest
 import torch
+from torch import Tensor
 
 cuda_backends = pytest.importorskip("mast3r_slam._backends", reason="CUDA backends not built")
 mojo_backends = pytest.importorskip("mast3r_slam_mojo_backends", reason="Mojo backends not built")
@@ -206,7 +207,22 @@ def test_refine_matches_batched_f16_matches_cuda() -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-def _make_representative_rays_inputs() -> tuple[torch.Tensor | float | int, ...]:
+def _make_representative_rays_inputs() -> tuple[
+    Tensor,
+    Tensor,
+    Tensor,
+    Tensor,
+    Tensor,
+    Tensor,
+    Tensor,
+    Tensor,
+    float,
+    float,
+    float,
+    float,
+    int,
+    float,
+]:
     """Build one synthetic GN rays fixture shaped like the real base workload."""
     torch.manual_seed(1)
     n_poses = 10
@@ -264,14 +280,20 @@ def _make_representative_rays_inputs() -> tuple[torch.Tensor | float | int, ...]
 
 def test_gauss_newton_rays_matches_cuda_on_representative_base_shape() -> None:
     """Full GN solve: poses and increments should match CUDA within tolerance."""
-    args = _make_representative_rays_inputs()
+    twc, xs, cs, ii, jj, idx, valid, q, sigma_ray, sigma_dist, c_thresh, q_thresh, max_iter, delta_thresh = (
+        _make_representative_rays_inputs()
+    )
 
-    twc_cuda = args[0].clone()
-    dx_cuda = cuda_backends.gauss_newton_rays(twc_cuda, *args[1:])[0]
+    twc_cuda = twc.clone()
+    dx_cuda = cuda_backends.gauss_newton_rays(
+        twc_cuda, xs, cs, ii, jj, idx, valid, q, sigma_ray, sigma_dist, c_thresh, q_thresh, max_iter, delta_thresh
+    )[0]
     _sync()
 
-    twc_mojo = args[0].clone()
-    dx_mojo = mojo_backends.gauss_newton_rays((twc_mojo, *args[1:]))[0]
+    twc_mojo = twc.clone()
+    dx_mojo = mojo_backends.gauss_newton_rays(
+        (twc_mojo, xs, cs, ii, jj, idx, valid, q, sigma_ray, sigma_dist, c_thresh, q_thresh, max_iter, delta_thresh)
+    )[0]
     _sync()
 
     assert torch.allclose(dx_mojo, dx_cuda, atol=POSE_ATOL, rtol=POSE_RTOL)

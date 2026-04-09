@@ -133,55 +133,6 @@ def downsample(
     return X, C, D, Q
 
 
-@torch.inference_mode()
-def mast3r_symmetric_inference(
-    model: AsymmetricMASt3R, frame_i: Frame, frame_j: Frame
-) -> tuple[
-    Float[Tensor, "4 h w 3"],
-    Float[Tensor, "4 h w"],
-    Float[Tensor, "4 h w d"],
-    Float[Tensor, "4 h w"],
-]:
-    """Run symmetric two-frame MASt3R inference.
-
-    Encodes both frames (lazily, caching features on the frame objects), then
-    decodes in both directions (i->j and j->i) to produce four sets of 3D
-    point maps, confidence, descriptors, and descriptor confidence.
-
-    The output ordering along dim 0 is ``[res_ii, res_ji, res_jj, res_ij]``.
-
-    Args:
-        model: The MASt3R model.
-        frame_i: First frame (features cached on ``frame_i.feat``).
-        frame_j: Second frame (features cached on ``frame_j.feat``).
-
-    Returns:
-        A tuple ``(X, C, D, Q)`` each of shape ``(4, h, w, ...)``.
-    """
-    if frame_i.feat is None:
-        frame_i.feat, frame_i.pos, _ = model._encode_image(frame_i.rgb_tensor, frame_i.img_true_shape)
-    if frame_j.feat is None:
-        frame_j.feat, frame_j.pos, _ = model._encode_image(frame_j.rgb_tensor, frame_j.img_true_shape)
-
-    assert frame_i.pos is not None
-    assert frame_j.pos is not None
-    feat1, feat2 = frame_i.feat, frame_j.feat
-    pos1, pos2 = frame_i.pos, frame_j.pos
-    shape1, shape2 = frame_i.img_true_shape, frame_j.img_true_shape
-
-    res11, res21 = decoder(model, feat1, feat2, pos1, pos2, shape1, shape2)
-    res22, res12 = decoder(model, feat2, feat1, pos2, pos1, shape2, shape1)
-    res = [res11, res21, res22, res12]
-    X, C, D, Q = zip(
-        *[(r["pts3d"][0], r["conf"][0], r["desc"][0], r["desc_conf"][0]) for r in res],
-        strict=False,
-    )
-    # 4xhxwxc
-    X, C, D, Q = torch.stack(X), torch.stack(C), torch.stack(D), torch.stack(Q)
-    X, C, D, Q = downsample(X, C, D, Q)
-    return X, C, D, Q
-
-
 # NOTE: Assumes img shape the same
 @torch.inference_mode()
 def mast3r_decode_symmetric_batch(

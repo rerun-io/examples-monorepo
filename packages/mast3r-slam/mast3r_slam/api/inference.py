@@ -110,8 +110,6 @@ class InferenceConfig:
     """Path to the input dataset or video file."""
     config: str = "config/base.yaml"
     """Path to the SLAM config YAML file."""
-    save_as: str = "default"
-    """Subdirectory name for saving results under ``logs/``."""
     no_viz: bool = False
     """If True, skip launching visualisation processes."""
     img_size: Literal[224, 512] = 512
@@ -343,9 +341,9 @@ def run_slam_pipeline(
                     # Normal tracking: match this frame against the last keyframe,
                     # estimate its relative pose via Gauss-Newton, and decide
                     # whether the overlap is low enough to warrant a new keyframe.
-                    match_info: list
+                    _match_info: list
                     try_reloc: bool
-                    add_new_kf, match_info, try_reloc = tracker.track(frame)
+                    add_new_kf, _match_info, try_reloc = tracker.track(frame)
                     if try_reloc:
                         # Too few matches — tracking is lost, switch to reloc mode.
                         states.set_mode(Mode.RELOC)

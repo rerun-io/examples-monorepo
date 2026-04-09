@@ -28028,7 +28028,7 @@ packages:
 - pypi: ./packages/mast3r-slam
   name: mast3r-slam
   version: 0.0.1
-  sha256: 0b4aee916e8c2d2ec59834b954b865bab6ed3ddfd96e6b98de4f430965955f93
+  sha256: 3091afd1d4d4491d11ccebbecd42f36766cc0264340c6f06546a7fa54352534c
   requires_dist:
   - einops
   - natsort
