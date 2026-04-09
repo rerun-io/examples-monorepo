@@ -43,6 +43,11 @@ def choose_iter_proj_block(num_pts: Int) -> Int:
     return 128
 
 
+def choose_refine_block(num_pts: Int) -> Int:
+    if num_pts <= 1024: return 8
+    return 16
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # iter_proj GPU kernel + launcher
 # ══════════════════════════════════════════════════════════════════════════════
@@ -202,4 +207,134 @@ struct IterProj[max_iter: Int, lambda_init_x1e8: Int, cost_thresh_x1e6: Int]:
             dev_ctx, rays_lt, pts_lt, pinit_lt, pnew_lt, conv_lt,
             h, w, num_pts, batch,
             Self.max_iter, lambda_init, cost_thresh,
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# refine_matches: coarse-to-fine descriptor search
+# ══════════════════════════════════════════════════════════════════════════════
+
+def refine_matches_f16_gpu_kernel[
+    p1_dtype: DType, p1_layout: Layout,
+    p1_new_dtype: DType, p1_new_layout: Layout,
+](
+    D11: UnsafePointer[Float16, MutAnyOrigin],
+    D21: UnsafePointer[Float16, MutAnyOrigin],
+    p1: LayoutTensor[p1_dtype, p1_layout, MutAnyOrigin],
+    p1_new: LayoutTensor[p1_new_dtype, p1_new_layout, MutAnyOrigin],
+    h: Int, w: Int, num_pts: Int, fdim: Int, radius: Int, dilation_max: Int,
+):
+    """Descriptor-based match refinement kernel (f16). SIMD-8 vectorized dot product."""
+    var n: UInt = block_idx.x * block_dim.x + thread_idx.x
+    var b: Int = Int(block_idx.y)
+    if n >= UInt(num_pts):
+        return
+    var ni: Int = Int(n)
+
+    var d11_stride_b: Int = h * w * fdim
+    var d11_stride_v: Int = w * fdim
+    var d21_stride_b: Int = num_pts * fdim
+
+    var u0: Int = Int(p1[b, ni, 0])
+    var v0: Int = Int(p1[b, ni, 1])
+    var d21_base: Int = b * d21_stride_b + ni * fdim
+
+    var max_score: Float32 = -3.4028235e+38
+    var u_new: Int = u0
+    var v_new: Int = v0
+
+    for d in range(dilation_max, 0, -1):
+        var rd: Int = radius * d
+        var diam: Int = 2 * rd + 1
+        var i: Int = 0
+        while i < diam:
+            var j: Int = 0
+            while j < diam:
+                var u_cand: Int = u0 - rd + i
+                var v_cand: Int = v0 - rd + j
+                if v_cand >= 0 and v_cand < h and u_cand >= 0 and u_cand < w:
+                    var score: Float32 = 0.0
+                    var d11_base: Int = b * d11_stride_b + v_cand * d11_stride_v + u_cand * fdim
+                    var k: Int = 0
+                    while k + 8 <= fdim:
+                        var v21 = D21.load[width=8](d21_base + k)
+                        var v11 = D11.load[width=8](d11_base + k)
+                        score += (v21.cast[DType.float32]() * v11.cast[DType.float32]()).reduce_add()
+                        k += 8
+                    while k < fdim:
+                        score += Float32(D21[d21_base + k]) * Float32(D11[d11_base + k])
+                        k += 1
+                    if score > max_score:
+                        max_score = score
+                        u_new = u_cand
+                        v_new = v_cand
+                j += d
+            i += d
+        u0 = u_new
+        v0 = v_new
+
+    p1_new[b, ni, 0] = Scalar[p1_new_dtype](u_new)
+    p1_new[b, ni, 1] = Scalar[p1_new_dtype](v_new)
+
+
+def refine_matches_launch(
+    ctx: DeviceContext,
+    D11: LayoutTensor,
+    D21: LayoutTensor,
+    p1: LayoutTensor,
+    p1_new: LayoutTensor,
+    h: Int, w: Int, num_pts: Int, fdim: Int, batch: Int,
+    radius: Int, dilation_max: Int,
+) raises:
+    """Launch refine_matches with compile-time specialized types."""
+    # Extract raw f16 pointers for SIMD loads in the kernel
+    var d11_ptr = D11.ptr.bitcast[Float16]()
+    var d21_ptr = D21.ptr.bitcast[Float16]()
+
+    comptime kernel = refine_matches_f16_gpu_kernel[
+        p1.dtype, p1.layout,
+        p1_new.dtype, p1_new.layout,
+    ]
+    var block_size = choose_refine_block(num_pts)
+    ctx.enqueue_function_experimental[kernel](
+        d11_ptr, d21_ptr, p1, p1_new,
+        h, w, num_pts, fdim, radius, dilation_max,
+        grid_dim=(ceildiv(num_pts, block_size), batch),
+        block_dim=block_size,
+    )
+
+
+@register("refine_matches")
+struct RefineMatches[radius: Int, dilation_max: Int]:
+    """Coarse-to-fine descriptor refinement (§3.2 of the paper).
+
+    Compile-time params:
+        radius: search radius in pixels (typically 3)
+        dilation_max: max dilation level (typically 5)
+    """
+
+    @staticmethod
+    def execute[target: StaticString](
+        p1_new: OutputTensor[dtype=DType.int64, rank=3, ...],
+        D11: InputTensor[dtype=DType.float16, rank=4, ...],
+        D21: InputTensor[dtype=DType.float16, rank=3, ...],
+        p1: InputTensor[dtype=DType.int64, rank=3, ...],
+        ctx: DeviceContextPtr,
+    ) raises:
+        var d11_lt = D11.to_layout_tensor()
+        var d21_lt = D21.to_layout_tensor()
+        var p1_lt = p1.to_layout_tensor()
+        var p1_new_lt = p1_new.to_layout_tensor()
+
+        var batch = Int(d11_lt.dim[0]())
+        var h = Int(d11_lt.dim[1]())
+        var w = Int(d11_lt.dim[2]())
+        var fdim = Int(d11_lt.dim[3]())
+        var num_pts = Int(p1_lt.dim[1]())
+
+        var dev_ctx = ctx.get_device_context()
+        refine_matches_launch(
+            dev_ctx, d11_lt, d21_lt, p1_lt, p1_new_lt,
+            h, w, num_pts, fdim, batch,
+            Self.radius, Self.dilation_max,
         )
