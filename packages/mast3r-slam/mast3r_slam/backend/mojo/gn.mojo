@@ -233,12 +233,14 @@ def gauss_newton_impl(
     args_obj: PythonObject,
     step_name: String,
     step_argc: Int,
+    ii_arg_idx: Int,
+    jj_arg_idx: Int,
 ) raises -> PythonObject:
     var torch = get_torch_module()
     var cuda_be = get_cuda_backend_module()
     var Twc = args_obj[0]
-    var ii = args_obj[3]
-    var jj = args_obj[4]
+    var ii = args_obj[ii_arg_idx]
+    var jj = args_obj[jj_arg_idx]
     var max_iter = Int(py=args_obj[step_argc])
     var delta_thresh = Float64(py=args_obj[step_argc + 1])
 
@@ -278,7 +280,7 @@ def gauss_newton_impl(
             )
         else:
             step_out = cuda_be.gauss_newton_calib_step(
-                args_obj[0], args_obj[1], args_obj[2], args_obj[3], args_obj[4], args_obj[5], args_obj[6], args_obj[7], args_obj[8], args_obj[9], args_obj[10], args_obj[11], args_obj[12], args_obj[13], args_obj[14], args_obj[15],
+                args_obj[0], args_obj[1], args_obj[2], args_obj[3], args_obj[4], args_obj[5], args_obj[6], args_obj[7], args_obj[8], args_obj[9], args_obj[10], args_obj[11], args_obj[12], args_obj[13], args_obj[14], args_obj[15], args_obj[16],
             )
 
         var hs = step_out[0]
@@ -292,25 +294,138 @@ def gauss_newton_impl(
     return Python.tuple(dx)
 
 
-def gauss_newton_points_impl(args_obj: PythonObject) raises -> PythonObject:
-    return gauss_newton_impl(args_obj, "gauss_newton_points_step", 11)
+def prepare_gn_state(
+    args_obj: PythonObject,
+    step_argc: Int,
+    ii_arg_idx: Int,
+    jj_arg_idx: Int,
+) raises -> PythonObject:
+    var Twc = args_obj[0]
+    var ii = args_obj[ii_arg_idx]
+    var jj = args_obj[jj_arg_idx]
+    var max_iter = Int(py=args_obj[step_argc])
+    var delta_thresh = Float64(py=args_obj[step_argc + 1])
 
+    var num_poses = Int(py=Twc.shape[0])
+    var num_fix = 1
+    var unique_kf_idx = get_unique_kf_idx(ii, jj)
+    var inds_opt = create_inds(unique_kf_idx, num_fix, ii, jj)
+    var ii_opt = inds_opt[0]
+    var jj_opt = inds_opt[1]
+    var ii_opt_cpu = ii_opt.cpu()
+    var jj_opt_cpu = jj_opt.cpu()
+    var n_vars = num_poses - num_fix
 
-def gauss_newton_points_impl_idiomatic(args_obj: PythonObject) raises -> PythonObject:
-    return gauss_newton_impl(args_obj, "gauss_newton_points_step", 11)
-
-
-def gauss_newton_rays_impl(args_obj: PythonObject) raises -> PythonObject:
-    return gauss_newton_impl(args_obj, "gauss_newton_rays_step", 12)
+    return Python.tuple(Twc, ii_opt_cpu, jj_opt_cpu, n_vars, num_fix, max_iter, delta_thresh)
 
 
 def gauss_newton_rays_impl_idiomatic(args_obj: PythonObject) raises -> PythonObject:
-    return gauss_newton_impl(args_obj, "gauss_newton_rays_step", 12)
+    var torch = get_torch_module()
+    var state = prepare_gn_state(args_obj, 12, 3, 4)
+    var Twc = state[0]
+    var ii_opt_cpu = state[1]
+    var jj_opt_cpu = state[2]
+    var n_vars = Int(py=state[3])
+    var num_fix = Int(py=state[4])
+    var max_iter = Int(py=state[5])
+    var delta_thresh = Float64(py=state[6])
+
+    var dx = torch.zeros(
+        Python.list(max(n_vars, 0), POSE_DIM),
+        device=Twc.device,
+        dtype=Twc.dtype,
+    )
+
+    for _i in range(max_iter):
+        var step_out = gauss_newton_rays_step_idiomatic_py(
+            Python.tuple(
+                args_obj[0], args_obj[1], args_obj[2], args_obj[3], args_obj[4], args_obj[5], args_obj[6], args_obj[7], args_obj[8], args_obj[9], args_obj[10], args_obj[11],
+            )
+        )
+        var hs = step_out[0]
+        var gs = step_out[1]
+        dx = solve_step_system(hs, gs, ii_opt_cpu, jj_opt_cpu, n_vars, Twc.device, Twc.dtype)
+        _ = pose_retr_py(Twc, dx, PythonObject(num_fix))
+        var delta_norm = torch.linalg.norm(dx)
+        if Float64(py=delta_norm.item()) < delta_thresh:
+            break
+
+    return Python.tuple(dx)
+
+
+def gauss_newton_points_impl(args_obj: PythonObject) raises -> PythonObject:
+    return gauss_newton_impl(args_obj, "gauss_newton_points_step", 11, 3, 4)
+
+
+def gauss_newton_points_impl_idiomatic(args_obj: PythonObject) raises -> PythonObject:
+    var torch = get_torch_module()
+    var cuda_be = get_cuda_backend_module()
+    var state = prepare_gn_state(args_obj, 11, 3, 4)
+    var Twc = state[0]
+    var ii_opt_cpu = state[1]
+    var jj_opt_cpu = state[2]
+    var n_vars = Int(py=state[3])
+    var num_fix = Int(py=state[4])
+    var max_iter = Int(py=state[5])
+    var delta_thresh = Float64(py=state[6])
+
+    var dx = torch.zeros(
+        Python.list(max(n_vars, 0), POSE_DIM),
+        device=Twc.device,
+        dtype=Twc.dtype,
+    )
+
+    for _i in range(max_iter):
+        var step_out = cuda_be.gauss_newton_points_step(
+            args_obj[0], args_obj[1], args_obj[2], args_obj[3], args_obj[4], args_obj[5], args_obj[6], args_obj[7], args_obj[8], args_obj[9], args_obj[10],
+        )
+        var hs = step_out[0]
+        var gs = step_out[1]
+        dx = solve_step_system(hs, gs, ii_opt_cpu, jj_opt_cpu, n_vars, Twc.device, Twc.dtype)
+        _ = pose_retr_py(Twc, dx, PythonObject(num_fix))
+        var delta_norm = torch.linalg.norm(dx)
+        if Float64(py=delta_norm.item()) < delta_thresh:
+            break
+
+    return Python.tuple(dx)
+
+
+def gauss_newton_rays_impl(args_obj: PythonObject) raises -> PythonObject:
+    return gauss_newton_impl(args_obj, "gauss_newton_rays_step", 12, 3, 4)
 
 
 def gauss_newton_calib_impl(args_obj: PythonObject) raises -> PythonObject:
-    return gauss_newton_impl(args_obj, "gauss_newton_calib_step", 16)
+    return gauss_newton_impl(args_obj, "gauss_newton_calib_step", 16, 4, 5)
 
 
 def gauss_newton_calib_impl_idiomatic(args_obj: PythonObject) raises -> PythonObject:
-    return gauss_newton_impl(args_obj, "gauss_newton_calib_step", 16)
+    var torch = get_torch_module()
+    var cuda_be = get_cuda_backend_module()
+    var state = prepare_gn_state(args_obj, 16, 4, 5)
+    var Twc = state[0]
+    var ii_opt_cpu = state[1]
+    var jj_opt_cpu = state[2]
+    var n_vars = Int(py=state[3])
+    var num_fix = Int(py=state[4])
+    var max_iter = Int(py=state[5])
+    var delta_thresh = Float64(py=state[6])
+
+    var dx = torch.zeros(
+        Python.list(max(n_vars, 0), POSE_DIM),
+        device=Twc.device,
+        dtype=Twc.dtype,
+    )
+
+    for _i in range(max_iter):
+        var step_out = cuda_be.gauss_newton_calib_step(
+            args_obj[0], args_obj[1], args_obj[2], args_obj[3], args_obj[4], args_obj[5], args_obj[6], args_obj[7], args_obj[8], args_obj[9], args_obj[10], args_obj[11], args_obj[12], args_obj[13], args_obj[14], args_obj[15], args_obj[16],
+        )
+        var hs = step_out[0]
+        var gs = step_out[1]
+        dx = solve_step_system(hs, gs, ii_opt_cpu, jj_opt_cpu, n_vars, Twc.device, Twc.dtype)
+        _ = pose_retr_py(Twc, dx, PythonObject(num_fix))
+        var delta_norm = torch.linalg.norm(dx)
+        if Float64(py=delta_norm.item()) < delta_thresh:
+            break
+
+    return Python.tuple(dx)

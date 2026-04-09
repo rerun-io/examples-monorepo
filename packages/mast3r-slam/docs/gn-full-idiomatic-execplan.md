@@ -19,9 +19,12 @@ This plan is broader than the earlier idiomatic experiment. It is not limited to
 - [x] (2026-04-10 00:37 CDT) Extended the real-fixture benchmark surface selection so points and calib public idiomatic/current variants are representable when those exports exist.
 - [x] (2026-04-10 00:41 CDT) Rebuilt the Mojo shared library successfully and reran the GN tests after the new idiomatic points/calib entrypoints were added.
 - [x] (2026-04-10 00:44 CDT) Re-ran the normal-apt and livingroom real rays fixture benchmarks against the rebuilt module and confirmed that the idiomatic public path still matches the current Mojo path well inside the 10% window.
-- [ ] Replace the current export-level convergence with real standalone idiomatic Mojo implementations for rays, points, calib, and the public GN orchestration path.
-- [ ] Add real captured fixture coverage for calib and points so the new public idiomatic entrypoints can be measured against the 10% target the same way rays already is.
-- [ ] Validate the idiomatic GN implementation on real captured normal-apt and livingroom fixtures, plus the bounded example runs, against the relaxed `<= 1.10x` target.
+- [x] (2026-04-10 07:09 CDT) Replaced the export-level aliasing for the idiomatic public GN surface with explicit idiomatic public loops in `gn.mojo` for rays, points, and calib.
+- [x] (2026-04-10 07:10 CDT) Fixed two shared orchestration bugs uncovered while making the idiomatic public calib path real: calib uses `ii/jj` at argument slots `4/5` rather than `3/4`, and the calib step call must forward `Q_thresh`.
+- [x] (2026-04-10 07:12 CDT) Rebuilt the Mojo shared library and reran the GN tests after the public-loop rewrite. The suite passed: `13 passed`.
+- [x] (2026-04-10 07:14 CDT) Revalidated the idiomatic public rays path on the real normal-apt and livingroom fixtures. It remained effectively identical to the current Mojo public path and stayed well inside the 10% target.
+- [x] (2026-04-10 07:18 CDT) Benchmarked the current and idiomatic public points/calib paths directly on the synthetic GN fixture used in `test_gn_step_api.py`. Both public idiomatic paths stayed within 10% of the current Mojo public path.
+- [ ] Add real captured fixture coverage for calib and points if a real example path that exercises those surfaces exists in-repo.
 - [ ] Decide whether the idiomatic path is ready to become the default Mojo implementation, or whether specific surfaces must stay on the current implementation longer.
 
 ## Surprises & Discoveries
@@ -34,6 +37,12 @@ This plan is broader than the earlier idiomatic experiment. It is not limited to
 
 - Observation: the repository currently has reliable real-fixture capture and benchmark tooling for rays, but not the same depth of checked-in fixture corpus or benchmark reporting for points and calib.
   Evidence: `packages/mast3r-slam/tools/bench_gn_real_fixtures.py` already compares CUDA, current Mojo, and idiomatic Mojo for rays when the corresponding exports exist, while `packages/mast3r-slam/tools/bench_gn_kernels.py` still reports only the selected backend for `calib_step` and has no points benchmark row.
+
+- Observation: the checked-in normal-apt and livingroom example runs cannot currently produce live `calib` fixtures with the default signoff configs because those configs are uncalibrated.
+  Evidence: `config/base.yaml` and `config/fast.yaml` both set `use_calib: False`, so the capture harness only emitted `rays-000.pt` during bounded example runs.
+
+- Observation: even when rerun with `config/calib.yaml`, the normal-apt and livingroom bounded examples did not emit live `calib` fixtures in the current repo state.
+  Evidence: bounded captures into `artifacts/gn-fixtures/verify-normal-apt-calib` and `artifacts/gn-fixtures/verify-livingroom-calib` completed without writing fixture files.
 
 - Observation: the current Mojo public GN path in `packages/mast3r-slam/mast3r_slam/backend/mojo/gn.mojo` already contains a substantial amount of host-side orchestration, including index preparation, dense block assembly on the Python side, Cholesky solve, and pose retraction dispatch.
   Evidence: `gn.mojo` defines `get_unique_kf_idx`, `create_inds`, `solve_step_system`, `gauss_newton_impl`, and the public/exported GN wrapper functions.
@@ -75,9 +84,13 @@ This plan is broader than the earlier idiomatic experiment. It is not limited to
   Rationale: the module has already shown one LLVM lowering bug on this pattern. Using the lower-level implementation helper directly is safer for the shared-library build.
   Date/Author: 2026-04-10 / Codex
 
+- Decision: implement the next idiomatic milestone at the public orchestration layer first, even if the underlying points/calib step surfaces remain CUDA-backed.
+  Rationale: this makes the idiomatic public GN surface real and measurable now, while preserving the validated CUDA step oracles for the less frequently exercised points/calib paths.
+  Date/Author: 2026-04-10 / Codex
+
 ## Outcomes & Retrospective
 
-The first milestone is complete. The repository now exposes idiomatic public entrypoints for rays, points, and calib through the shared-library module and Python selector layer, so the full GN surface is at least selectable idiomatically. However, only the rays path has prior real-fixture measurement infrastructure, and the points/calib idiomatic public paths currently converge to the current implementation internally rather than providing standalone idiomatic kernels. That is useful progress, but it is not the end state this plan is aiming for.
+The second milestone is complete. The repository now has explicit idiomatic public GN loops for rays, points, and calib in `gn.mojo`, and the shared-library export surface no longer aliases the current public wrappers for the idiomatic path. The real-fixture rays signoff still holds after that rewrite, and the direct synthetic public checks for points and calib also keep the idiomatic path within the 10% target relative to current Mojo. The remaining gap is not the public GN implementation itself; it is the lack of a checked-in real example path that exercises the points and calib surfaces on normal-apt and livingroom.
 
 ## Context and Orientation
 
@@ -179,7 +192,7 @@ Run the synthetic benchmark for supporting evidence:
 
 As this plan progresses, add the corresponding real-fixture capture and benchmark commands for calib and points once those surfaces gain explicit idiomatic implementations.
 
-Observed output after the first milestone implementation:
+Observed output after the second milestone implementation:
 
     pixi run -e mast3r-slam-dev _build-mojo-kernels
     ...
@@ -214,6 +227,43 @@ Observed output after the first milestone implementation:
     rays-000                 mojo-current   public   rays        111.130     44.004    0.396   1.19e-07   3.73e-09   0.00e+00   1.10e-07
     rays-000                 mojo-idiomatic step     rays          6.364      1.974    0.310        nan        nan        nan   1.64e+04
     rays-000                 mojo-idiomatic public   rays        111.130     43.914    0.395   1.19e-07   3.73e-09   0.00e+00   1.10e-07
+
+    pixi run -e mast3r-slam-dev pytest \
+      packages/mast3r-slam/tests/test_gn_fixture_utils.py \
+      packages/mast3r-slam/tests/test_gn_step_api.py -q
+    .............
+    13 passed in 0.87s
+
+    cd packages/mast3r-slam
+    pixi run -e mast3r-slam-dev python tools/bench_gn_real_fixtures.py \
+      artifacts/gn-fixtures/verify-normal-apt/rays-000.pt \
+      --warmup 5 --runs 20
+    fixture                  backend        scope    kind        cuda ms     run ms    ratio     dtrans      dquat     dscale        ddx
+    rays-000                 cuda           step     rays          5.442      6.372    1.171        nan        nan        nan   0.00e+00
+    rays-000                 cuda           public   rays        111.089    111.096    1.000        nan        nan        nan        nan
+    rays-000                 mojo-current   step     rays          5.442      2.051    0.377        nan        nan        nan   1.64e+04
+    rays-000                 mojo-current   public   rays        111.089     43.789    0.394   2.98e-07   1.68e-08   5.96e-08   1.75e-07
+    rays-000                 mojo-idiomatic step     rays          5.442      2.046    0.376        nan        nan        nan   1.64e+04
+    rays-000                 mojo-idiomatic public   rays        111.089     43.931    0.395   2.98e-07   1.68e-08   5.96e-08   1.75e-07
+
+    cd packages/mast3r-slam
+    pixi run -e mast3r-slam-dev python tools/bench_gn_real_fixtures.py \
+      artifacts/gn-fixtures/verify-livingroom/rays-000.pt \
+      --warmup 5 --runs 20
+    fixture                  backend        scope    kind        cuda ms     run ms    ratio     dtrans      dquat     dscale        ddx
+    rays-000                 cuda           step     rays          6.358      5.437    0.855        nan        nan        nan   0.00e+00
+    rays-000                 cuda           public   rays        111.081    111.096    1.000        nan        nan        nan        nan
+    rays-000                 mojo-current   step     rays          6.358      1.998    0.314        nan        nan        nan   1.64e+04
+    rays-000                 mojo-current   public   rays        111.081     43.798    0.394   1.19e-07   3.73e-09   0.00e+00   1.10e-07
+    rays-000                 mojo-idiomatic step     rays          6.358      1.984    0.312        nan        nan        nan   1.64e+04
+    rays-000                 mojo-idiomatic public   rays        111.081     43.713    0.394   1.19e-07   3.73e-09   0.00e+00   1.10e-07
+
+    cd packages/mast3r-slam
+    pixi run -e mast3r-slam-dev python - <<'PY'
+    ...
+    points_public current=0.269 idiomatic=0.268 ratio=0.998
+    calib_public  current=0.264 idiomatic=0.267 ratio=1.014
+    PY
 
 ## Validation and Acceptance
 
