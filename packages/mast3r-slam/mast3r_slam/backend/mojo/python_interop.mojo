@@ -1,17 +1,30 @@
-"""Helpers for the shared-library Mojo <-> PyTorch interop boundary.
+"""Helpers for the shared-library Mojo ↔ PyTorch interop boundary.
 
-This module centralizes the intentionally unsafe parts of the shared-lib
-backend: retrieving the process-lifetime DeviceContext pointer cached on the
-Python module object and reinterpreting `tensor.data_ptr()` addresses as typed
-Mojo pointers.
+Why this file exists
+--------------------
+Mojo GPU kernels need two things that PyTorch doesn't natively provide:
 
-The safety contract for every `torch_*_ptr()` helper is:
-1. the caller has already converted the tensor to the expected dtype,
-2. the caller has already made the tensor contiguous, and
-3. the Python tensor object remains alive until the launched kernel finishes.
+  1. **A DeviceContext** — Mojo's GPU runtime handle for enqueueing kernels.
+     Unlike CUDA C++ extensions (which just call `<<<...>>>` launch syntax),
+     Mojo requires an explicit context object. Since Mojo shared libraries
+     can't hold module-level globals, we allocate a `DeviceContext` on the
+     heap at import time and store its address as a Python integer attribute
+     on the extension module (`_ctx_addr`). Every kernel launch recovers
+     the pointer via `get_cached_context_ptr()`.
 
-Those conditions already hold in the existing call sites; keeping the raw
-pointer logic here makes that boundary easier to audit.
+  2. **Raw typed pointers** into PyTorch tensor storage. PyTorch's
+     `tensor.data_ptr()` returns an integer address; the `torch_*_ptr()`
+     helpers here reinterpret-cast it to the appropriate Mojo pointer type.
+
+Safety contract
+---------------
+Every `torch_*_ptr()` helper assumes:
+  1. The tensor has already been cast to the expected dtype (.float(), etc.).
+  2. The tensor is contiguous in memory (.contiguous()).
+  3. The Python tensor object stays alive until the launched kernel finishes
+     (i.e. the caller holds a reference and calls synchronize before dropping).
+
+These conditions are enforced at the call sites in `gn.mojo` and `matching.mojo`.
 """
 
 from std.gpu.host import DeviceContext
@@ -19,15 +32,20 @@ from std.memory import alloc
 from std.python import Python, PythonObject
 
 
+# ── Module imports (cached by Python's import system) ────────────────────────
+
 def get_backend_module() raises -> PythonObject:
+    """Import the Mojo extension module itself (to access _ctx_addr)."""
     return Python.import_module("mast3r_slam_mojo_backends")
 
 
 def get_torch_module() raises -> PythonObject:
+    """Import PyTorch (used for tensor allocation and CUDA sync)."""
     return Python.import_module("torch")
 
 
 def get_cuda_backend_module() raises -> PythonObject:
+    """Import the original CUDA extension (used for point/calib fallbacks)."""
     return Python.import_module("mast3r_slam._backends")
 
 
@@ -54,10 +72,15 @@ def get_cached_context_ptr() raises -> UnsafePointer[DeviceContext, MutAnyOrigin
     )
 
 
+# ── Tensor → UnsafePointer casts ─────────────────────────────────────────────
+# Each helper reinterpret-casts tensor.data_ptr() (a Python int) to a typed
+# Mojo UnsafePointer. The caller MUST ensure the tensor dtype matches.
+
 @always_inline
 def torch_float32_ptr(
     tensor: PythonObject,
 ) raises -> UnsafePointer[Float32, MutAnyOrigin]:
+    """Cast a float32 tensor's data_ptr to a Mojo Float32 pointer."""
     return UnsafePointer[Float32, MutAnyOrigin](
         unsafe_from_address=Int(py=tensor.data_ptr())
     )
@@ -67,6 +90,7 @@ def torch_float32_ptr(
 def torch_float16_ptr(
     tensor: PythonObject,
 ) raises -> UnsafePointer[Float16, MutAnyOrigin]:
+    """Cast a float16 tensor's data_ptr to a Mojo Float16 pointer."""
     return UnsafePointer[Float16, MutAnyOrigin](
         unsafe_from_address=Int(py=tensor.data_ptr())
     )
@@ -76,6 +100,7 @@ def torch_float16_ptr(
 def torch_int64_ptr(
     tensor: PythonObject,
 ) raises -> UnsafePointer[Int64, MutAnyOrigin]:
+    """Cast an int64 tensor's data_ptr to a Mojo Int64 pointer."""
     return UnsafePointer[Int64, MutAnyOrigin](
         unsafe_from_address=Int(py=tensor.data_ptr())
     )
@@ -85,6 +110,7 @@ def torch_int64_ptr(
 def torch_uint8_ptr(
     tensor: PythonObject,
 ) raises -> UnsafePointer[UInt8, MutAnyOrigin]:
+    """Cast a uint8/bool tensor's data_ptr to a Mojo UInt8 pointer."""
     return UnsafePointer[UInt8, MutAnyOrigin](
         unsafe_from_address=Int(py=tensor.data_ptr())
     )

@@ -1,12 +1,34 @@
 """Mojo matching kernels used by the MASt3R-SLAM frontend.
 
-The paper's frontend alternates between:
-1. projecting a 3D point from one view into the other view's ray field, and
-2. refining that projected location with descriptor matching.
+This file is a **Mojo port of matching_kernels.cu** — the CUDA kernels that
+implement the frontend correspondence pipeline from §3.1–3.2 of the MASt3R-SLAM
+paper (arXiv 2412.12392).
 
-This file implements exactly those two stages. The kernels stay local and
-simple: each thread handles one query point, because the optimization is over
-many independent matches rather than one large coupled system.
+The paper's frontend establishes dense correspondences between pairs of keyframes
+in two stages:
+
+  1. **Iterative projection** (`iter_proj_kernel`):
+     Given a 3D point from view j, find the pixel in view i whose ray best aligns
+     with it. This is a per-point Levenberg-Marquardt (LM) optimisation over 2D
+     pixel coordinates — conceptually an inverse camera projection using the
+     MASt3R ray field instead of a parametric camera model.
+
+  2. **Descriptor refinement** (`refine_matches_kernel`):
+     After the projective search gives an approximate pixel, do a local
+     grid search in descriptor space to snap to the best-matching pixel within
+     a small neighbourhood. This corrects for ray-field noise and discretisation.
+
+Both stages are embarrassingly parallel — each thread handles one query point.
+No shared memory or inter-thread communication is needed within a block (except
+for the optimised cached variant that preloads query descriptors).
+
+Tensor layouts
+--------------
+All tensors are row-major (PyTorch default). The ray-field tensor `rays_img` has
+shape [batch, H, W, 9] where the 9 channels are:
+  [0..2] = ray direction (unnormalised)
+  [3..5] = ∂ray/∂u (gradient in the horizontal pixel direction)
+  [6..8] = ∂ray/∂v (gradient in the vertical pixel direction)
 """
 
 from std.math import ceildiv, sqrt, min, max, floor
@@ -23,9 +45,13 @@ from python_interop import (
 )
 
 
+# ── Block-size heuristics ─────────────────────────────────────────────────────
+# These choose the GPU block size based on the problem size. Smaller blocks
+# waste fewer threads when num_pts isn't a multiple of the block size; larger
+# blocks improve occupancy when there's plenty of work.
+
 def choose_iter_proj_block(num_pts: Int) -> Int:
-    # Small problems prefer smaller blocks to avoid wasting threads; larger
-    # batches need more threads per block to keep the GPU busy.
+    """Pick block size for the iterative projection kernel."""
     if num_pts <= 4096:
         return 16
     if num_pts <= 16384:
@@ -34,8 +60,7 @@ def choose_iter_proj_block(num_pts: Int) -> Int:
 
 
 def choose_refine_block(num_pts: Int, fdim: Int) -> Int:
-    # The refinement kernel is memory-bound, so the useful tuning knob here is
-    # mostly occupancy rather than complicated tile geometry.
+    """Pick block size for the descriptor refinement kernel."""
     if num_pts <= 1024:
         return 8
     return 16
@@ -261,6 +286,20 @@ def refine_matches_kernel(
 
     After projective search gives a plausible pixel, this kernel does a local
     descriptor search around that pixel and keeps the best-scoring candidate.
+
+    The search proceeds in a coarse-to-fine manner:
+      - Start at the highest dilation (largest step size), scanning a grid of
+        `(2·radius·d + 1)²` candidates spaced `d` pixels apart.
+      - Re-centre on the winner, then decrease `d` by 1 and repeat.
+      - At dilation=1 the search is pixel-dense within the radius.
+
+    This multi-scale approach matches the CUDA `refine_matches_kernel<scalar_t>`.
+
+    Args:
+        D11 — reference image descriptors, shape [B, H, W, fdim]
+        D21 — query point descriptors, shape [B, N_pts, fdim]
+        p1  — initial pixel locations from iterative projection, [B, N_pts, 2]
+        p1_new — OUTPUT: refined pixel locations, [B, N_pts, 2]
     """
     var n: UInt = block_idx.x * block_dim.x + thread_idx.x
     var b: UInt = block_idx.y
@@ -416,8 +455,19 @@ def refine_matches_kernel_f16_cached[
 ):
     """Specialized f16 refinement kernel for the common radius=2, dilation=2 case.
 
-    Each thread copies its query descriptor into shared memory once, then reuses
-    it across all candidate scores. This reduces repeated global reads of D21.
+    This is the **fast path** for MASt3R-SLAM's default configuration (16-dim
+    or 128-dim descriptors in half precision). Two compile-time optimisations:
+
+    1. **Shared-memory caching**: each thread loads its query descriptor into
+       shared memory once (FDIM/8 chunks of 8×f16), then reuses it across all
+       ~25 candidate dot products. This eliminates repeated global reads of D21.
+
+    2. **Compile-time unrolling**: `comptime for` over the descriptor chunks
+       lets the compiler fully unroll the inner dot product, enabling better
+       instruction scheduling.
+
+    The `FDIM` and `BLOCK_SIZE` compile-time parameters are specialised for
+    the two common configurations: (16, 8) and (128, 16).
     """
     var n: UInt = block_idx.x * block_dim.x + thread_idx.x
     var b: UInt = block_idx.y
@@ -579,9 +629,16 @@ def refine_matches_py(
 ) raises -> PythonObject:
     """Drop-in replacement for mast3r_slam_backends.refine_matches.
 
-    This wrapper dispatches to a few kernel variants, but they all implement
-    the same paper-level idea: local descriptor refinement around a projected
-    match instead of a global brute-force search.
+    Dispatches to one of three kernel variants based on dtype and parameters:
+      1. `refine_matches_kernel_f16_cached` — fast path for f16, radius=2, dilation=2
+         with compile-time-specialised fdim (16 or 128).
+      2. `refine_matches_kernel_f16` — generic f16 path for other configurations.
+      3. `refine_matches_kernel` — float32 fallback (casts from any other dtype).
+
+    All variants implement the same algorithm: coarse-to-fine local descriptor
+    search centred on the projective-search result.
+
+    Returns a tuple containing the refined pixel locations tensor.
     """
     var torch = Python.import_module("torch")
 

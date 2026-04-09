@@ -1,16 +1,38 @@
 """Python-facing Gauss-Newton wrappers for the Mojo backend.
 
-The paper formulates backend optimization as a pose graph over pairwise MASt3R
-predictions. Each edge contributes residuals and Jacobians, which are assembled
-into per-edge Hessian/gradient blocks, solved as a linear system, and then
-retracted back onto Sim(3) poses.
+Overview
+--------
+This file is the **orchestration layer** between Python/PyTorch and the low-level
+GPU kernels in `gn_kernels.mojo`. It implements the full GN iteration loop
+described in §3.3 of the MASt3R-SLAM paper (arXiv 2412.12392).
 
-This file keeps the high-level control flow in Python-friendly code:
-- prepare edge/pose indexing,
-- launch the Mojo step kernel for rays,
-- reduce per-block partials,
-- solve the dense linear system in PyTorch, and
-- apply the pose update with a small Mojo kernel.
+The Gauss-Newton (GN) loop works as follows (each iteration):
+
+  1. **Linearise** — launch `gauss_newton_rays_step_kernel` on the GPU to compute
+     per-edge Hessian (H) and gradient (g) blocks from all point correspondences.
+  2. **Reduce** — if an edge was split across multiple GPU blocks (large number
+     of points), sum the partial reductions.
+  3. **Assemble & solve** — `solve_step_system()` gathers edge blocks into one
+     dense normal-equation system  H·dx = −g  and solves it via Cholesky
+     factorisation (PyTorch, on CPU in float64 for numerical stability).
+  4. **Retract** — `pose_retr_kernel` applies the solved 7D Sim(3) increment
+     to each unfixed pose via the Exp map.
+  5. **Check convergence** — stop if ‖dx‖ < threshold.
+
+Gauge fixing
+------------
+The first pose is always fixed (not optimised). This removes the global Sim(3)
+gauge freedom — without it the system would be rank-deficient.
+
+Three step variants
+-------------------
+- `gauss_newton_rays` — ray-based cost, linearised in Mojo (this file).
+- `gauss_newton_points` — point-based cost, delegated to the CUDA backend.
+- `gauss_newton_calib` — calibration cost, delegated to the CUDA backend.
+
+Only the rays step is fully implemented in Mojo; the other two fall through to
+the existing CUDA extension so the Python pipeline can swap backends without
+changing call sites.
 """
 
 from std.math import ceildiv, max, min
@@ -26,10 +48,19 @@ from python_interop import (
     torch_uint8_ptr,
 )
 
+# Maximum number of GPU blocks per edge. Large edges (many points) are split
+# into up to this many partial reductions, then summed afterwards.
 comptime RAYS_BLOCKS_PER_EDGE_MAX = 8
 
 
+# ── Index helpers ─────────────────────────────────────────────────────────────
+
 def get_unique_kf_idx(ii: PythonObject, jj: PythonObject) raises -> PythonObject:
+    """Return the sorted, unique keyframe indices that appear in any edge.
+
+    Used to build the dense variable ordering: only keyframes that appear in
+    at least one edge are included in the normal-equation system.
+    """
     var torch = get_torch_module()
     return torch.unique(torch.cat(Python.list(ii, jj)), sorted=True)
 
@@ -40,11 +71,19 @@ def create_inds(
     ii: PythonObject,
     jj: PythonObject,
 ) raises -> PythonObject:
+    """Map raw keyframe indices (ii, jj) to dense optimisation-variable indices.
+
+    `pin` is the number of gauge-fixed poses (always 1). The result is shifted
+    by −pin so that the first optimisable variable has index 0. Fixed poses
+    get index −1, which is later masked out when filling the normal equations.
+    """
     var torch = get_torch_module()
     var ii_ind = torch.searchsorted(unique_kf_idx, ii) - pin
     var jj_ind = torch.searchsorted(unique_kf_idx, jj) - pin
     return Python.tuple(ii_ind, jj_ind)
 
+
+# ── Normal-equation assembly and solve ────────────────────────────────────────
 
 def solve_step_system(
     hs: PythonObject,
@@ -55,13 +94,28 @@ def solve_step_system(
     out_device: PythonObject,
     out_dtype: PythonObject,
 ) raises -> PythonObject:
+    """Assemble per-edge Hessian/gradient blocks into a dense system and solve.
+
+    The GPU kernel produces four 7×7 Hessian sub-blocks per edge:
+      hs[0] = H_ii   (pose i vs pose i)
+      hs[1] = H_ij   (pose i vs pose j, off-diagonal)
+      hs[2] = H_ji   (transpose of H_ij)
+      hs[3] = H_jj   (pose j vs pose j)
+    and two gradient vectors:
+      gs[0] = g_i, gs[1] = g_j
+
+    This function scatters those blocks into a dense (n_vars×7, n_vars×7)
+    matrix and (n_vars×7, 1) vector, adds a tiny Tikhonov regulariser (1e-9),
+    and solves via Cholesky decomposition in float64 for numerical stability.
+
+    Returns dx of shape [n_vars, 7] on the original device/dtype.
+    """
     var torch = get_torch_module()
     if n_vars <= 0:
         return torch.zeros(Python.list(0, POSE_DIM), device=out_device, dtype=out_dtype)
 
-    # The GPU kernel outputs per-edge 7x7 block terms, matching the paper's
-    # pairwise relative-pose formulation. Here we gather those blocks into one
-    # dense normal equation H dx = -g for the unfixed poses.
+    # Move everything to CPU float64 for the Cholesky solve — the GPU kernel
+    # uses float32 which isn't stable enough for the normal equations.
     var hs_cpu = hs.cpu().to(dtype=torch.float64)
     var gs_cpu = gs.cpu().to(dtype=torch.float64)
     var h_blocks = torch.zeros(
@@ -73,10 +127,13 @@ def solve_step_system(
         dtype=torch.float64,
     )
 
+    # Masks: edges where the i/j endpoint is an optimisable variable (index >= 0).
+    # Gauge-fixed poses have index −1 and are excluded from the system.
     var ii_mask = ii_opt_cpu >= 0
     var jj_mask = jj_opt_cpu >= 0
-    var ij_mask = ii_mask & jj_mask
+    var ij_mask = ii_mask & jj_mask  # both endpoints are optimisable
 
+    # ── Scatter diagonal blocks (H_ii and H_jj) ──
     if Bool(ii_mask.any().item()):
         var ii_idx = ii_opt_cpu[ii_mask]
         h_blocks.index_put_(
@@ -95,6 +152,7 @@ def solve_step_system(
         )
         b_dense.index_add_(0, jj_idx, gs_cpu[1][jj_mask])
 
+    # ── Scatter off-diagonal blocks (H_ij and H_ji) ──
     if Bool(ij_mask.any().item()):
         var ii_cross = ii_opt_cpu[ij_mask]
         var jj_cross = jj_opt_cpu[ij_mask]
@@ -109,33 +167,49 @@ def solve_step_system(
             accumulate=True,
         )
 
+    # ── Reshape from block form [n, n, 7, 7] to dense matrix [n*7, n*7] ──
     var h_dense = h_blocks.permute(0, 2, 1, 3).reshape(n_vars * POSE_DIM, n_vars * POSE_DIM)
     var rhs = -b_dense.reshape(n_vars * POSE_DIM, 1)
+
+    # ── Solve H·dx = −g via Cholesky ──
+    # A small Tikhonov regulariser (1e-9·I) ensures positive-definiteness
+    # even when some DOFs are poorly constrained.
     var eye = torch.eye(n_vars * POSE_DIM, dtype=torch.float64)
     var chol_h = h_dense + 1e-9 * eye
     var chol = torch.linalg.cholesky_ex(chol_h, upper=False)
     var l_factor = chol[0]
     var info = chol[1]
     if Int(py=info.max().item()) != 0:
+        # Cholesky failed (not positive-definite) — return zero update.
         return torch.zeros(Python.list(n_vars, POSE_DIM), device=out_device, dtype=out_dtype)
     var dx_vec = torch.cholesky_solve(rhs, l_factor, upper=False)
     return dx_vec.view(n_vars, POSE_DIM).to(device=out_device, dtype=out_dtype)
 
+
+# ── Pose retraction (Python entry point) ─────────────────────────────────────
 
 def pose_retr_py(
     poses_obj: PythonObject,
     dx_obj: PythonObject,
     num_fix_obj: PythonObject,
 ) raises -> PythonObject:
+    """Apply solved Sim(3) increments to the pose tensor (in-place on GPU).
+
+    Called from Python after the Cholesky solve. Launches the Mojo GPU kernel
+    `pose_retr_kernel` which does:  T_new[k] = Exp(dx[k]) · T_old[k]
+    for every unfixed pose k.
+
+    Args:
+        poses_obj: Tensor [N_kf, 8] of Sim(3) poses (modified in place).
+        dx_obj:    Tensor [N_vars, 7] of Lie-algebra increments.
+        num_fix_obj: Number of gauge-fixed poses (typically 1).
+    """
     var num_fix = Int(py=num_fix_obj)
     var num_poses = Int(py=poses_obj.shape[0])
     if num_fix >= num_poses:
         return Python.none()
     var poses = poses_obj.contiguous().float()
     var dx = dx_obj.contiguous().float()
-    # Retraction is the "apply Exp(xi) to the current pose" step from the
-    # paper's Sim(3) update rule. We do it in Mojo so the in-place pose write
-    # stays on the GPU.
     var poses_ptr = torch_float32_ptr(poses)
     var dx_ptr = torch_float32_ptr(dx)
     var ctx_ptr = get_cached_context_ptr()
@@ -150,7 +224,33 @@ def pose_retr_py(
     return Python.none()
 
 
+# ── Ray step: Python → Mojo GPU kernel ───────────────────────────────────────
+
 def gauss_newton_rays_step_py(args_obj: PythonObject) raises -> PythonObject:
+    """One linearisation pass for the ray cost — launches the Mojo GPU kernel.
+
+    Unpacks PyTorch tensors from the Python tuple, extracts raw GPU pointers,
+    launches `gauss_newton_rays_step_kernel`, synchronises, and reduces any
+    partial blocks.
+
+    Args (packed in args_obj tuple):
+        [0] twc          — Sim(3) poses [N_kf, 8]
+        [1] xs           — pointmaps [N_kf, N_pts, 3]
+        [2] cs           — confidences [N_kf, N_pts]
+        [3] ii           — edge i-indices [N_edges]
+        [4] jj           — edge j-indices [N_edges]
+        [5] idx_ii2jj    — point-match mapping [N_edges, N_pts]
+        [6] valid_match  — validity mask [N_edges, N_pts]
+        [7] q_tensor     — match quality [N_edges, N_pts]
+        [8] sigma_ray    — ray residual std dev
+        [9] sigma_dist   — distance residual std dev
+        [10] c_thresh    — confidence threshold
+        [11] q_thresh    — match quality threshold
+
+    Returns (hs, gs):
+        hs — Hessian blocks [4, N_edges, 7, 7]
+        gs — gradient blocks [2, N_edges, 7]
+    """
     var twc = args_obj[0].contiguous().float()
     var xs = args_obj[1].contiguous().float()
     var cs = args_obj[2].contiguous().float()
@@ -202,6 +302,8 @@ def gauss_newton_rays_step_py(args_obj: PythonObject) raises -> PythonObject:
     return Python.tuple(hs, gs)
 
 
+# ── Full GN iteration loop ───────────────────────────────────────────────────
+
 def gauss_newton_impl(
     args_obj: PythonObject,
     step_name: String,
@@ -209,6 +311,17 @@ def gauss_newton_impl(
     ii_arg_idx: Int,
     jj_arg_idx: Int,
 ) raises -> PythonObject:
+    """Generic Gauss-Newton iteration loop shared by all three cost variants.
+
+    Runs up to `max_iter` iterations of: linearise → solve → retract → check.
+    The `step_name` selects which linearisation kernel to use:
+      - "gauss_newton_rays_step"  → Mojo kernel (this backend)
+      - "gauss_newton_points_step" → CUDA extension (fallback)
+      - "gauss_newton_calib_step"  → CUDA extension (fallback)
+
+    `step_argc`, `ii_arg_idx`, `jj_arg_idx` parameterise the argument layout
+    so the three public entry points can share this implementation.
+    """
     var torch = get_torch_module()
     var Twc = args_obj[0]
     var ii = args_obj[ii_arg_idx]
@@ -274,8 +387,7 @@ def prepare_gn_state(
     ii_arg_idx: Int,
     jj_arg_idx: Int,
 ) raises -> PythonObject:
-    # Shared setup for the public GN entrypoints. The CUDA reference and Mojo
-    # path both use the same edge indexing and gauge-fixing convention.
+    """Shared initialisation for all GN entry points (index mapping + gauge fix)."""
     var Twc = args_obj[0]
     var ii = args_obj[ii_arg_idx]
     var jj = args_obj[jj_arg_idx]
@@ -295,14 +407,22 @@ def prepare_gn_state(
     return Python.tuple(Twc, ii_opt_cpu, jj_opt_cpu, n_vars, num_fix, max_iter, delta_thresh)
 
 
+# ── Public entry points (one per cost variant) ───────────────────────────────
+# These are registered in mast3r_slam_mojo_backends.mojo as the Python-callable
+# functions. The argument index parameters encode where ii/jj and max_iter sit
+# in each variant's argument tuple.
+
 def gauss_newton_points_impl(args_obj: PythonObject) raises -> PythonObject:
+    """GN loop with point-based cost (delegates linearisation to CUDA)."""
     return gauss_newton_impl(args_obj, "gauss_newton_points_step", 11, 3, 4)
 
 
 def gauss_newton_rays_impl(args_obj: PythonObject) raises -> PythonObject:
+    """GN loop with ray-based cost (linearisation runs in Mojo)."""
     return gauss_newton_impl(args_obj, "gauss_newton_rays_step", 12, 3, 4)
 
 
 def gauss_newton_calib_impl(args_obj: PythonObject) raises -> PythonObject:
+    """GN loop with calibration cost (delegates linearisation to CUDA)."""
     return gauss_newton_impl(args_obj, "gauss_newton_calib_step", 16, 4, 5)
 
