@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import torch
 import torch.nn.functional as F
 from jaxtyping import Bool, Float, Int
@@ -6,14 +8,24 @@ from torch import Tensor
 import mast3r_slam.image as img_utils
 from mast3r_slam.config import config
 
-# Matching kernel backend selection: prefer Mojo, fall back to CUDA C++ if the
-# Mojo shared library is not built. This comment only describes the matching
-# kernels selected in this module; calibrated and points GN flows may still
-# call into the CUDA backend via global_opt.py.
+# ── Matching kernel backend: CustomOpLibrary (Mojo) or CUDA C++ fallback ─────
+# CustomOpLibrary auto-compiles the Mojo operations/ directory at first use.
+# Falls back to the old CUDA C++ extension if max.experimental.torch is unavailable.
 try:
-    import mast3r_slam_mojo_backends as _matching_backends  # pyrefly: ignore
+    from max.experimental.torch import CustomOpLibrary  # pyrefly: ignore
+
+    _ops_dir: Path = Path(__file__).parent / "backend" / "mojo" / "operations"
+    _ops: CustomOpLibrary = CustomOpLibrary(_ops_dir)
+    _USE_CUSTOM_OPS: bool = True
 except ImportError:
-    from mast3r_slam import _backends as _matching_backends  # pyrefly: ignore
+    _USE_CUSTOM_OPS = False
+
+if not _USE_CUSTOM_OPS:
+    # Fall back to old shared-lib or CUDA backend
+    try:
+        import mast3r_slam_mojo_backends as _matching_backends  # pyrefly: ignore
+    except ImportError:
+        from mast3r_slam import _backends as _matching_backends  # pyrefly: ignore
 
 
 def match(
@@ -166,14 +178,30 @@ def match_iterative_proj(
     )
     p1: Float[Tensor, "b hw 2"]
     valid_proj2: Bool[Tensor, "b hw"]
-    p1, valid_proj2 = _matching_backends.iter_proj(
-        rays_with_grad_img,
-        pts3d_norm,
-        p_init,
-        cfg["max_iter"],
-        cfg["lambda_init"],
-        cfg["convergence_thresh"],
-    )
+
+    if _USE_CUSTOM_OPS:
+        # CustomOpLibrary path: destination-passing style, auto-sync, no manual pointers.
+        # Scalar params are compile-time specialized (encoded as scaled integers for floats).
+        iter_proj_op = _ops.iter_proj[{
+            "max_iter": cfg["max_iter"],
+            "lambda_init_x1e8": int(cfg["lambda_init"] * 1e8),
+            "cost_thresh_x1e6": int(cfg["convergence_thresh"] * 1e6),
+        }]
+        hw: int = h * w
+        p1 = torch.empty(b, hw, 2, device=device, dtype=torch.float32)
+        valid_proj2 = torch.empty(b, hw, device=device, dtype=torch.uint8)
+        iter_proj_op(p1, valid_proj2, rays_with_grad_img, pts3d_norm, p_init)
+        valid_proj2 = valid_proj2.bool()
+    else:
+        # Old shared-lib / CUDA fallback
+        p1, valid_proj2 = _matching_backends.iter_proj(
+            rays_with_grad_img,
+            pts3d_norm,
+            p_init,
+            cfg["max_iter"],
+            cfg["lambda_init"],
+            cfg["convergence_thresh"],
+        )
     p1 = p1.long()
 
     # Check for occlusion based on distances
@@ -185,13 +213,22 @@ def match_iterative_proj(
     valid_proj2 = valid_proj2 & valid_dists2
 
     if cfg["radius"] > 0:
-        (p1,) = _matching_backends.refine_matches(
-            D11.half(),
-            D21.view(b, h * w, -1).half(),
-            p1,
-            cfg["radius"],
-            cfg["dilation_max"],
-        )
+        if _USE_CUSTOM_OPS:
+            refine_op = _ops.refine_matches[{
+                "radius": cfg["radius"],
+                "dilation_max": cfg["dilation_max"],
+            }]
+            p1_refined: Int[Tensor, "b hw 2"] = torch.empty_like(p1)
+            refine_op(p1_refined, D11.half(), D21.view(b, h * w, -1).half(), p1)
+            p1 = p1_refined
+        else:
+            (p1,) = _matching_backends.refine_matches(
+                D11.half(),
+                D21.view(b, h * w, -1).half(),
+                p1,
+                cfg["radius"],
+                cfg["dilation_max"],
+            )
 
     # Convert to linear index
     idx_1_to_2: Int[Tensor, "b hw"] = pixel_to_lin(p1, w)
