@@ -158,6 +158,17 @@ std::vector<torch::Tensor> gauss_newton_calib_step(
       C_thresh, Q_thresh);
 }
 
+std::vector<torch::Tensor> pose_retr(
+  torch::Tensor poses,
+  torch::Tensor dx,
+  const int num_fix) {
+
+  CHECK_CONTIGUOUS(poses);
+  CHECK_CONTIGUOUS(dx);
+
+  return pose_retr_cuda(poses, dx, num_fix);
+}
+
 std::vector<torch::Tensor> iter_proj(
   torch::Tensor rays_img_with_grad, 
   torch::Tensor pts_3d_norm, 
@@ -197,6 +208,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gauss_newton_rays_step", &gauss_newton_rays_step, "gauss_newton ray accumulation step");
   m.def("gauss_newton_calib", &gauss_newton_calib, "gauss_newton calib adjustment");
   m.def("gauss_newton_calib_step", &gauss_newton_calib_step, "gauss_newton calib accumulation step");
+  m.def("pose_retr", &pose_retr, "Sim3 pose retraction");
 
   m.def("iter_proj", &iter_proj, "iterative projection with generic camera");
   m.def("refine_matches", &refine_matches, "refine match in local neighborhood");

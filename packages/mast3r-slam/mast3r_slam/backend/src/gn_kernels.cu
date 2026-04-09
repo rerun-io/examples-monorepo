@@ -452,6 +452,18 @@ __global__ void pose_retr_kernel(
   }
 }
 
+std::vector<torch::Tensor> pose_retr_cuda(
+  torch::Tensor poses,
+  torch::Tensor dx,
+  const int num_fix)
+{
+  pose_retr_kernel<<<1, THREADS>>>(
+    poses.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
+    dx.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
+    num_fix);
+  return {poses};
+}
+
 __global__ void point_align_kernel(
     const torch::PackedTensorAccessor32<float,2,torch::RestrictPtrTraits> Twc,
     const torch::PackedTensorAccessor32<float,3,torch::RestrictPtrTraits> Xs,

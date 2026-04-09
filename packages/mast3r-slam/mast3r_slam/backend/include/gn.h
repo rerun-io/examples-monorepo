@@ -150,6 +150,16 @@ std::vector<torch::Tensor> gauss_newton_calib_step(
   const float C_thresh,
   const float Q_thresh);
 
+std::vector<torch::Tensor> pose_retr_cuda(
+  torch::Tensor poses,
+  torch::Tensor dx,
+  const int num_fix);
+
+std::vector<torch::Tensor> pose_retr(
+  torch::Tensor poses,
+  torch::Tensor dx,
+  const int num_fix);
+
 std::vector<torch::Tensor> iter_proj(
   torch::Tensor rays_img_with_grad, 
   torch::Tensor pts_3d_norm, 
