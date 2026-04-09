@@ -10,9 +10,16 @@ Replace the current GN backend in `mast3r-slam` with a true Mojo drop-in replace
 Hard requirements:
 
 1. Numerical equivalence to the CUDA backend within explicit tolerances
-2. Throughput at least 95% of CUDA for:
-   - GN public API calls
-   - end-to-end `livingroom-tour.mp4` with base config
+2. Throughput at least 95% of CUDA on real workloads, not synthetic microbenchmarks
+3. End-to-end signoff on real example runs:
+   - `livingroom-tour.mp4` with base config
+   - `example-base`
+
+Signoff clarification:
+
+- synthetic microbenchmarks are diagnostic only
+- the hard 5% gate is on captured real GN fixtures and full example runs
+- microbench regressions still matter for profiling, but they are not the release gate by themselves
 
 ## Current Status
 
@@ -177,62 +184,33 @@ The actual stuck point is narrower:
 - the current public GN path depends on that kernel
 - without a faster `rays_step`, the hard 95% gate will not pass
 
-## Best Next Planning Questions
+## Revised Execution Plan
 
-The next agent should plan around these questions first:
+This is the recommended next plan after reviewing the current branch and re-checking the Modular docs.
 
-1. Can `gauss_newton_rays_step` be rewritten in Mojo to more closely match the CUDA kernel structure?
-   - shared pose load
-   - one relative pose computation per block
-   - fewer helper-function boundaries
-   - less `InlineArray` traffic
-   - fewer scalar temporaries
-   - more direct mapping to CUDA-style local arrays and reduction
+### 1. Freeze scope around `gauss_newton_rays_step`
 
-2. Should `rays_step` move to the MAX custom-op route instead of the shared-lib PythonModuleBuilder route?
-   - not for `pose_retr`
-   - specifically for the heavy accumulation kernel
+Do not widen the port until `gauss_newton_rays_step` is near parity on real fixtures.
 
-3. Should the signoff target be redefined around real captured graph fixtures before more micro-optimization?
-   - the synthetic benchmark is useful
-   - but the final gate must be on representative real optimizer states
+Leave these on CUDA for now:
 
-4. Should `points_step` and `calib_step` be left on CUDA until `rays_step` is fixed?
-   - probably yes
-   - `rays_step` is the critical path right now
+- `gauss_newton_points_step`
+- `gauss_newton_calib_step`
 
-## Concrete Recommendations
-
-### Recommendation 1
-
-Treat `gauss_newton_rays_step` as the only urgent kernel-performance problem.
-
-Do not spend more time on:
+Do not spend more time right now on:
 
 - `pose_retr`
-- Python selector cleanup
-- more MAX work on tiny ops
-- public host-path changes unrelated to the ray-step kernel
+- backend-selector cleanup
+- packaging refactors
+- host-path rewrites that do not directly move `rays_step`
 
-### Recommendation 2
+The branch evidence already says `rays_step` is the critical path.
 
-Build a real profiler-driven plan around the current Mojo `rays_step` kernel.
+### 2. Build the signoff harness around real fixtures
 
-The next agent should compare:
+Before more tuning, add captured GN fixtures at the `_backends.gauss_newton_*` call boundary.
 
-- register pressure
-- occupancy
-- memory traffic
-- reduction structure
-- generated PTX or lowerings if possible
-
-against the CUDA kernel in `gn_kernels.cu`.
-
-### Recommendation 3
-
-Add real captured graph-state fixtures before final signoff work.
-
-The right captured tensors are the `_backends.gauss_newton_*` call boundary:
+Required captured tensors:
 
 - `Twc`
 - `Xs`
@@ -244,16 +222,89 @@ The right captured tensors are the `_backends.gauss_newton_*` call boundary:
 - `Q`
 - plus `K`, `height`, `width` for calib
 
-### Recommendation 4
+Required checks:
 
-Keep the current modular split. It is cleaner and closer to the CUDA layout.
+- multi-iteration CUDA-vs-selected-backend parity
+- final `Twc` translation / quaternion / scale error report
+- iteration-count report
+- real-fixture benchmark rows for `gauss_newton_rays`
 
-Preferred structure:
+Signoff rule:
 
-- `gn_kernels.mojo` for kernels and math
-- `gn.mojo` for host orchestration and Python interop
-- `matching.mojo` for matching kernels
-- `mast3r_slam_mojo_backends.mojo` as the shared entrypoint
+- the hard `<= 1.05x` gate is on captured real fixtures and real example runs
+- synthetic step and kernel microbenches remain diagnostic only
+
+### 3. Profile like a kernel project
+
+Use `nsys` first for end-to-end time attribution, then Nsight Compute and/or `kbench` on the hot kernel.
+
+The next agent should record for `gauss_newton_rays_step` versus CUDA:
+
+- registers per thread
+- spills / local memory
+- achieved occupancy
+- shared-memory usage
+- memory transactions
+- barrier / reduction cost
+- kernel duration
+
+Doc notes verified against current Modular docs:
+
+- block reductions in `gpu.primitives.block` are explicitly documented as easier to use correctly and often more efficient than manual `barrier()` plus shared-memory reductions
+- MAX custom ops are documented under `max.experimental.torch.CustomOpLibrary`
+- `DeviceContext` is documented as a GPU execution stream abstraction
+
+### 4. Rewrite `gauss_newton_rays_step` to match CUDA more literally
+
+The current Mojo kernel still looks too helper-heavy in the hot loop.
+
+Rewrite priorities:
+
+- fewer helper boundaries inside the inner loop
+- scalar locals or fixed local arrays instead of excess `InlineArray` traffic
+- one relative Sim3 computation per block
+- accumulation order closer to the CUDA kernel
+- replace manual shared-memory tree reductions with Mojo block or warp reduction primitives where possible
+
+After the rewrite, retune thread/block size instead of assuming `RAYS_THREADS = 64` remains optimal.
+
+### 5. Treat stream / wrapper changes as a secondary experiment
+
+Do not lead with another architecture rewrite unless profiling proves the integration boundary is the main cost.
+
+If profiling later shows real boundary overhead between the shared-lib Mojo path and PyTorch/CUDA ordering, then the right follow-up is to:
+
+- align stream usage
+- or move only the hot surface into a proper MAX custom op
+
+Do not keep adding ad hoc sync behavior without proof it helps.
+
+### 6. Use MAX as Plan B, but only for the hot surface
+
+If the CUDA-shaped Mojo rewrite still leaves `gauss_newton_rays_step` materially off target, pivot only that surface to MAX.
+
+Suggested pivot threshold:
+
+- if `gauss_newton_rays_step` remains worse than about `1.15x` CUDA on the captured real fixture, stop iterating on the shared-lib path and try MAX for that one accumulation op
+
+Do not broaden MAX to the whole GN stack unless the single-op experiment proves it is the right direction.
+
+### 7. Only after `rays_step` is near parity should the rest move
+
+Once `rays_step` is close enough:
+
+- rerun the public `gauss_newton_rays` benchmark on the captured real fixture
+- rerun full pipeline benchmarks on `livingroom-tour.mp4` base config
+- rerun `example-base`
+
+Only then decide whether `points_step` and `calib_step` are worth porting.
+
+Keep the current file split:
+
+- `gn_kernels.mojo`
+- `gn.mojo`
+- `matching.mojo`
+- `mast3r_slam_mojo_backends.mojo`
 
 ## Reproduction Commands
 
