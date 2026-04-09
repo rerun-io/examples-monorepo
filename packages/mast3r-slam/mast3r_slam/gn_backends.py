@@ -29,12 +29,24 @@ def _mojo_rays_variant() -> str:
     return ""
 
 
+def _mojo_gn_variant() -> str:
+    variant = os.environ.get("MAST3R_SLAM_FORCE_MOJO_GN", "").strip().lower()
+    if variant in {"current", "idiomatic"}:
+        return variant
+    return ""
+
+
 def _require_mojo_backends() -> Any:
     assert _mojo_backends is not None
     return _mojo_backends
 
 
 def gauss_newton_points(*args: Any) -> tuple[Any, ...]:
+    variant = _mojo_gn_variant()
+    if variant == "idiomatic" and _use_mojo("gauss_newton_points_impl_idiomatic"):
+        return _require_mojo_backends().gauss_newton_points_impl_idiomatic(args)
+    if variant == "current" and _use_mojo("gauss_newton_points_impl"):
+        return _require_mojo_backends().gauss_newton_points_impl(args)
     if _use_mojo("gauss_newton_points_impl"):
         return _require_mojo_backends().gauss_newton_points_impl(args)
     return tuple(_cuda_backends.gauss_newton_points(*args))
@@ -52,6 +64,11 @@ def gauss_newton_rays(*args: Any) -> tuple[Any, ...]:
 
 
 def gauss_newton_calib(*args: Any) -> tuple[Any, ...]:
+    variant = _mojo_gn_variant()
+    if variant == "idiomatic" and _use_mojo("gauss_newton_calib_impl_idiomatic"):
+        return _require_mojo_backends().gauss_newton_calib_impl_idiomatic(args)
+    if variant == "current" and _use_mojo("gauss_newton_calib_impl"):
+        return _require_mojo_backends().gauss_newton_calib_impl(args)
     if _use_mojo("gauss_newton_calib_impl"):
         return _require_mojo_backends().gauss_newton_calib_impl(args)
     return tuple(_cuda_backends.gauss_newton_calib(*args))

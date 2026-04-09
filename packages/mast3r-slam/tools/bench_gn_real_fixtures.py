@@ -51,9 +51,19 @@ class BackendSpec:
 
 class _MojoCurrentBackend:
     @staticmethod
+    def gauss_newton_points(*args: Any) -> tuple[Any, ...]:
+        assert mojo_be is not None
+        return tuple(mojo_be.gauss_newton_points_impl(args))
+
+    @staticmethod
     def gauss_newton_rays(*args: Any) -> tuple[Any, ...]:
         assert mojo_be is not None
         return tuple(mojo_be.gauss_newton_rays_impl(args))
+
+    @staticmethod
+    def gauss_newton_calib(*args: Any) -> tuple[Any, ...]:
+        assert mojo_be is not None
+        return tuple(mojo_be.gauss_newton_calib_impl(args))
 
     @staticmethod
     def gauss_newton_rays_step(*args: Any) -> tuple[Any, ...]:
@@ -63,9 +73,19 @@ class _MojoCurrentBackend:
 
 class _MojoIdiomaticBackend:
     @staticmethod
+    def gauss_newton_points(*args: Any) -> tuple[Any, ...]:
+        assert mojo_be is not None
+        return tuple(mojo_be.gauss_newton_points_impl_idiomatic(args))
+
+    @staticmethod
     def gauss_newton_rays(*args: Any) -> tuple[Any, ...]:
         assert mojo_be is not None
         return tuple(mojo_be.gauss_newton_rays_impl_idiomatic(args))
+
+    @staticmethod
+    def gauss_newton_calib(*args: Any) -> tuple[Any, ...]:
+        assert mojo_be is not None
+        return tuple(mojo_be.gauss_newton_calib_impl_idiomatic(args))
 
     @staticmethod
     def gauss_newton_rays_step(*args: Any) -> tuple[Any, ...]:
@@ -254,6 +274,44 @@ def _backend_specs_for_kind(kind: str) -> list[BackendSpec]:
                     name="mojo-idiomatic",
                     public_backend=_MojoIdiomaticBackend(),
                     step_backend=_MojoIdiomaticBackend(),
+                )
+            )
+        return specs
+
+    if kind == "points" and mojo_be is not None:
+        if hasattr(mojo_be, "gauss_newton_points_impl"):
+            specs.append(
+                BackendSpec(
+                    name="mojo-current",
+                    public_backend=_MojoCurrentBackend(),
+                    step_backend=cuda_be,
+                )
+            )
+        if hasattr(mojo_be, "gauss_newton_points_impl_idiomatic"):
+            specs.append(
+                BackendSpec(
+                    name="mojo-idiomatic",
+                    public_backend=_MojoIdiomaticBackend(),
+                    step_backend=cuda_be,
+                )
+            )
+        return specs
+
+    if kind == "calib" and mojo_be is not None:
+        if hasattr(mojo_be, "gauss_newton_calib_impl"):
+            specs.append(
+                BackendSpec(
+                    name="mojo-current",
+                    public_backend=_MojoCurrentBackend(),
+                    step_backend=cuda_be,
+                )
+            )
+        if hasattr(mojo_be, "gauss_newton_calib_impl_idiomatic"):
+            specs.append(
+                BackendSpec(
+                    name="mojo-idiomatic",
+                    public_backend=_MojoIdiomaticBackend(),
+                    step_backend=cuda_be,
                 )
             )
         return specs

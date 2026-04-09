@@ -4,7 +4,9 @@ from std.python.bindings import PythonModuleBuilder
 
 from gn import (
     gauss_newton_calib_impl,
+    gauss_newton_calib_impl_idiomatic,
     gauss_newton_points_impl,
+    gauss_newton_points_impl_idiomatic,
     gauss_newton_rays_impl,
     gauss_newton_rays_step_py,
     pose_retr_py,
@@ -23,9 +25,11 @@ def PyInit_mast3r_slam_mojo_backends() -> PythonObject:
         m.def_function[gauss_newton_rays_step_py]("gauss_newton_rays_step")
         m.def_function[gauss_newton_rays_step_py]("gauss_newton_rays_step_idiomatic")
         m.def_function[gauss_newton_points_impl]("gauss_newton_points_impl")
+        m.def_function[gauss_newton_points_impl_idiomatic]("gauss_newton_points_impl_idiomatic")
         m.def_function[gauss_newton_rays_impl]("gauss_newton_rays_impl")
         m.def_function[gauss_newton_rays_impl]("gauss_newton_rays_impl_idiomatic")
         m.def_function[gauss_newton_calib_impl]("gauss_newton_calib_impl")
+        m.def_function[gauss_newton_calib_impl_idiomatic]("gauss_newton_calib_impl_idiomatic")
         var module = m.finalize()
         install_cached_context(module)
         return module

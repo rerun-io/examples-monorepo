@@ -73,11 +73,41 @@ def test_calib_step_shapes() -> None:
     assert gs.shape == (2, ii.numel(), 7)
 
 
+def test_points_public_idiomatic_matches_current(monkeypatch: pytest.MonkeyPatch) -> None:
+    if _mojo_backends is None or not hasattr(_mojo_backends, "gauss_newton_points_impl_idiomatic"):
+        pytest.skip("idiomatic mojo points impl not available")
+
+    monkeypatch.setenv("MAST3R_SLAM_FORCE_MOJO_GN", "idiomatic")
+    Twc, Xs, Cs, ii, jj, idx_ii2jj, valid_match, Q, _K = _make_fixture()
+    dx_env = gn_backends.gauss_newton_points(
+        Twc.clone(), Xs, Cs, ii, jj, idx_ii2jj, valid_match, Q, 0.05, 0.0, 1.5, 3, 1e-8
+    )[0]
+    dx_idio = _mojo_backends.gauss_newton_points_impl_idiomatic(
+        (Twc.clone(), Xs, Cs, ii, jj, idx_ii2jj, valid_match, Q, 0.05, 0.0, 1.5, 3, 1e-8)
+    )[0]
+    torch.testing.assert_close(dx_env, dx_idio, atol=1e-4, rtol=1e-4)
+
+
 def test_points_step_shapes() -> None:
     Twc, Xs, Cs, ii, jj, idx_ii2jj, valid_match, Q, _K = _make_fixture()
     Hs, gs = _backends.gauss_newton_points_step(Twc, Xs, Cs, ii, jj, idx_ii2jj, valid_match, Q, 0.05, 0.0, 1.5)
     assert Hs.shape == (4, ii.numel(), 7, 7)
     assert gs.shape == (2, ii.numel(), 7)
+
+
+def test_calib_public_idiomatic_matches_current(monkeypatch: pytest.MonkeyPatch) -> None:
+    if _mojo_backends is None or not hasattr(_mojo_backends, "gauss_newton_calib_impl_idiomatic"):
+        pytest.skip("idiomatic mojo calib impl not available")
+
+    monkeypatch.setenv("MAST3R_SLAM_FORCE_MOJO_GN", "idiomatic")
+    Twc, Xs, Cs, ii, jj, idx_ii2jj, valid_match, Q, K = _make_fixture()
+    dx_env = gn_backends.gauss_newton_calib(
+        Twc.clone(), Xs, Cs, K, ii, jj, idx_ii2jj, valid_match, Q, 64, 64, -10, 1e-6, 1.0, 10.0, 0.0, 1.5, 3, 1e-8
+    )[0]
+    dx_idio = _mojo_backends.gauss_newton_calib_impl_idiomatic(
+        (Twc.clone(), Xs, Cs, K, ii, jj, idx_ii2jj, valid_match, Q, 64, 64, -10, 1e-6, 1.0, 10.0, 0.0, 1.5, 3, 1e-8)
+    )[0]
+    torch.testing.assert_close(dx_env, dx_idio, atol=1e-4, rtol=1e-4)
 
 
 def test_rays_public_matches_cuda_shape() -> None:

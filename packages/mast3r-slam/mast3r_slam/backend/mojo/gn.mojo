@@ -296,6 +296,10 @@ def gauss_newton_points_impl(args_obj: PythonObject) raises -> PythonObject:
     return gauss_newton_impl(args_obj, "gauss_newton_points_step", 11)
 
 
+def gauss_newton_points_impl_idiomatic(args_obj: PythonObject) raises -> PythonObject:
+    return gauss_newton_impl(args_obj, "gauss_newton_points_step", 11)
+
+
 def gauss_newton_rays_impl(args_obj: PythonObject) raises -> PythonObject:
     return gauss_newton_impl(args_obj, "gauss_newton_rays_step", 12)
 
@@ -305,4 +309,8 @@ def gauss_newton_rays_impl_idiomatic(args_obj: PythonObject) raises -> PythonObj
 
 
 def gauss_newton_calib_impl(args_obj: PythonObject) raises -> PythonObject:
+    return gauss_newton_impl(args_obj, "gauss_newton_calib_step", 16)
+
+
+def gauss_newton_calib_impl_idiomatic(args_obj: PythonObject) raises -> PythonObject:
     return gauss_newton_impl(args_obj, "gauss_newton_calib_step", 16)
