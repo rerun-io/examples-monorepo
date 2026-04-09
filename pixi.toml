@@ -813,7 +813,6 @@ description = "Run MASt3R-SLAM inference (base config, 512px)"
 [feature.mast3r-slam.tasks.mast3r-slam-app]
 cmd = "python tools/gradio-app.py"
 depends-on = [
-    "_build-cuda-kernels",
     "_build-mojo-kernels",
     "_download-checkpoints",
     "_download-example-data",
