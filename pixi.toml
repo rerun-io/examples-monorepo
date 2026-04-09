@@ -726,7 +726,7 @@ outputs = [
 
 # ── Mojo kernel build ──────────────────────────────────────────────────
 [feature.mast3r-slam.tasks._build-mojo-kernels]
-cmd = "mojo build --emit shared-lib -o mast3r_slam_mojo_backends.so mast3r_slam/backend/mojo/matching_kernels.mojo"
+cmd = "mojo build --emit shared-lib -o mast3r_slam_mojo_backends.so mast3r_slam/backend/mojo/mast3r_slam_mojo_backends.mojo"
 cwd = "packages/mast3r-slam"
 description = "Build mast3r-slam Mojo backend kernels"
 inputs = [

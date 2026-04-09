@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Any, Literal
 
 import einops
@@ -18,6 +19,15 @@ from mast3r_slam.lietorch_utils import as_SE3
 from mast3r_slam.retrieval_database import RetrievalDatabase
 
 
+def _resolve_checkpoint_path(path: str) -> str:
+    candidate = Path(path)
+    if candidate.is_file():
+        return str(candidate)
+    pkg_root = Path(__file__).resolve().parent.parent
+    candidate = pkg_root / path
+    return str(candidate)
+
+
 def load_mast3r(path: str | None = None, device: str = "cuda") -> AsymmetricMASt3R:
     """Load a pretrained MASt3R model from a checkpoint file.
 
@@ -30,6 +40,7 @@ def load_mast3r(path: str | None = None, device: str = "cuda") -> AsymmetricMASt
         The loaded ``AsymmetricMASt3R`` model in eval mode on ``device``.
     """
     weights_path = "checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth" if path is None else path
+    weights_path = _resolve_checkpoint_path(weights_path)
     model = AsymmetricMASt3R.from_pretrained(weights_path).to(device)
     return model
 
@@ -57,6 +68,7 @@ def load_retriever(
         if retriever_path is None
         else retriever_path
     )
+    retriever_path = _resolve_checkpoint_path(retriever_path)
     retriever = RetrievalDatabase(retriever_path, backbone=mast3r_model, device=device)
     return retriever
 
