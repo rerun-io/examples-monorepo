@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from mast3r_slam import _backends
+from mast3r_slam import gn_backends
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -45,3 +46,26 @@ def test_points_step_shapes() -> None:
     Hs, gs = _backends.gauss_newton_points_step(Twc, Xs, Cs, ii, jj, idx_ii2jj, valid_match, Q, 0.05, 0.0, 1.5)
     assert Hs.shape == (4, ii.numel(), 7, 7)
     assert gs.shape == (2, ii.numel(), 7)
+
+
+def test_rays_public_matches_cuda_shape() -> None:
+    Twc, Xs, Cs, ii, jj, idx_ii2jj, valid_match, Q, _K = _make_fixture()
+    dx_cuda = _backends.gauss_newton_rays(
+        Twc.clone(), Xs, Cs, ii, jj, idx_ii2jj, valid_match, Q, 0.003, 10.0, 0.0, 1.5, 3, 1e-8
+    )[0]
+    dx_selected = gn_backends.gauss_newton_rays(
+        Twc.clone(), Xs, Cs, ii, jj, idx_ii2jj, valid_match, Q, 0.003, 10.0, 0.0, 1.5, 3, 1e-8
+    )[0]
+    assert dx_selected.shape == dx_cuda.shape
+
+
+def test_pose_retr_updates_tensor_in_place() -> None:
+    if not hasattr(gn_backends, "pose_retr"):
+        pytest.skip("pose_retr not available")
+
+    Twc, *_rest = _make_fixture()
+    dx = torch.zeros(3, 7, device=Twc.device, dtype=Twc.dtype)
+    dx[0, 0] = 0.1
+    before = Twc.clone()
+    gn_backends.pose_retr(Twc, dx, 1)
+    assert not torch.allclose(Twc[1:], before[1:])

@@ -46,6 +46,345 @@ def get_cached_context_ptr() raises -> UnsafePointer[DeviceContext, MutAnyOrigin
     )
 
 
+def get_torch_module() raises -> PythonObject:
+    return Python.import_module("torch")
+
+
+def get_cuda_backend_module() raises -> PythonObject:
+    return Python.import_module("mast3r_slam._backends")
+
+
+def get_lietorch_module() raises -> PythonObject:
+    return Python.import_module("lietorch")
+
+
+comptime POSE_DIM = 7
+
+
+def get_unique_kf_idx(ii: PythonObject, jj: PythonObject) raises -> PythonObject:
+    var torch = get_torch_module()
+    return torch.unique(torch.cat(Python.list(ii, jj)), sorted=True)
+
+
+def create_inds(
+    unique_kf_idx: PythonObject,
+    pin: Int,
+    ii: PythonObject,
+    jj: PythonObject,
+) raises -> PythonObject:
+    var torch = get_torch_module()
+    var ii_ind = torch.searchsorted(unique_kf_idx, ii) - pin
+    var jj_ind = torch.searchsorted(unique_kf_idx, jj) - pin
+    return Python.tuple(ii_ind, jj_ind)
+
+
+def assemble_dense_system(
+    hs: PythonObject,
+    gs: PythonObject,
+    ii_opt: PythonObject,
+    jj_opt: PythonObject,
+    n_vars: Int,
+) raises -> PythonObject:
+    var torch = get_torch_module()
+    var flat_h = torch.zeros(
+        Python.list(n_vars * n_vars, POSE_DIM * POSE_DIM),
+        device=hs.device,
+        dtype=hs.dtype,
+    )
+    var block_terms = torch.cat(Python.list(hs[0], hs[1], hs[2], hs[3]), dim=0).reshape(-1, POSE_DIM * POSE_DIM)
+    var rows = torch.cat(Python.list(ii_opt, ii_opt, jj_opt, jj_opt), dim=0)
+    var cols = torch.cat(Python.list(ii_opt, jj_opt, ii_opt, jj_opt), dim=0)
+    var valid_h = (rows >= 0) & (cols >= 0)
+    if Bool(py=valid_h.any().item()):
+        var block_indices = rows[valid_h] * n_vars + cols[valid_h]
+        flat_h.index_add_(0, block_indices, block_terms[valid_h])
+    var h_dense = flat_h.view(n_vars, n_vars, POSE_DIM, POSE_DIM).permute(0, 2, 1, 3).reshape(
+        n_vars * POSE_DIM,
+        n_vars * POSE_DIM,
+    )
+
+    var b_dense = torch.zeros(
+        Python.list(n_vars, POSE_DIM),
+        device=gs.device,
+        dtype=gs.dtype,
+    )
+    var rhs_terms = torch.cat(Python.list(gs[0], gs[1]), dim=0)
+    var rhs_rows = torch.cat(Python.list(ii_opt, jj_opt), dim=0)
+    var valid_b = rhs_rows >= 0
+    if Bool(py=valid_b.any().item()):
+        b_dense.index_add_(0, rhs_rows[valid_b], rhs_terms[valid_b])
+
+    return Python.tuple(h_dense, b_dense)
+
+
+def solve_dense_system(
+    h_dense: PythonObject,
+    b_dense: PythonObject,
+    n_vars: Int,
+) raises -> PythonObject:
+    var torch = get_torch_module()
+    if n_vars <= 0:
+        return torch.zeros(Python.list(0, POSE_DIM), device=h_dense.device, dtype=h_dense.dtype)
+
+    var h64 = h_dense.to(dtype=torch.float64)
+    var b64 = b_dense.to(dtype=torch.float64)
+    var rhs = -b64.reshape(n_vars * POSE_DIM, 1)
+    var eye = torch.eye(n_vars * POSE_DIM, device=h_dense.device, dtype=torch.float64)
+    var chol_h = h64 + 1e-9 * eye
+    var chol = torch.linalg.cholesky_ex(chol_h, upper=False)
+    var l_factor = chol[0]
+    var info = chol[1]
+    if Int(py=info.max().item()) != 0:
+        return torch.zeros(Python.list(n_vars, POSE_DIM), device=h_dense.device, dtype=h_dense.dtype)
+    var dx_vec = torch.cholesky_solve(rhs, l_factor, upper=False)
+    return dx_vec.to(dtype=h_dense.dtype).view(n_vars, POSE_DIM)
+
+
+def tensor_col(x: PythonObject, idx: Int) raises -> PythonObject:
+    return x.select(1, idx).unsqueeze(1)
+
+
+def quat_comp_tensor(qi: PythonObject, qj: PythonObject) raises -> PythonObject:
+    var torch = get_torch_module()
+    var qix = tensor_col(qi, 0)
+    var qiy = tensor_col(qi, 1)
+    var qiz = tensor_col(qi, 2)
+    var qiw = tensor_col(qi, 3)
+    var qjx = tensor_col(qj, 0)
+    var qjy = tensor_col(qj, 1)
+    var qjz = tensor_col(qj, 2)
+    var qjw = tensor_col(qj, 3)
+    var x = qiw * qjx + qix * qjw + qiy * qjz - qiz * qjy
+    var y = qiw * qjy - qix * qjz + qiy * qjw + qiz * qjx
+    var z = qiw * qjz + qix * qjy - qiy * qjx + qiz * qjw
+    var w = qiw * qjw - qix * qjx - qiy * qjy - qiz * qjz
+    return torch.cat(Python.list(x, y, z, w), dim=1)
+
+
+def act_so3_tensor(q: PythonObject, X: PythonObject) raises -> PythonObject:
+    var torch = get_torch_module()
+    var qx = tensor_col(q, 0)
+    var qy = tensor_col(q, 1)
+    var qz = tensor_col(q, 2)
+    var qw = tensor_col(q, 3)
+    var Xx = tensor_col(X, 0)
+    var Xy = tensor_col(X, 1)
+    var Xz = tensor_col(X, 2)
+
+    var uv0 = 2.0 * (qy * Xz - qz * Xy)
+    var uv1 = 2.0 * (qz * Xx - qx * Xz)
+    var uv2 = 2.0 * (qx * Xy - qy * Xx)
+
+    var Y0 = Xx + qw * uv0 + (qy * uv2 - qz * uv1)
+    var Y1 = Xy + qw * uv1 + (qz * uv0 - qx * uv2)
+    var Y2 = Xz + qw * uv2 + (qx * uv1 - qy * uv0)
+    return torch.cat(Python.list(Y0, Y1, Y2), dim=1)
+
+
+def exp_so3_tensor(phi: PythonObject) raises -> PythonObject:
+    var torch = get_torch_module()
+    var phi0 = tensor_col(phi, 0)
+    var phi1 = tensor_col(phi, 1)
+    var phi2 = tensor_col(phi, 2)
+    var theta_sq = phi0 * phi0 + phi1 * phi1 + phi2 * phi2
+    var theta_p4 = theta_sq * theta_sq
+    var theta = torch.sqrt(theta_sq)
+    var small = theta_sq < 1e-6
+
+    var imag_small = 0.5 - (1.0 / 48.0) * theta_sq + (1.0 / 3840.0) * theta_p4
+    var imag_large = torch.sin(0.5 * theta) / theta
+    var real_small = 1.0 - (1.0 / 8.0) * theta_sq + (1.0 / 384.0) * theta_p4
+    var real_large = torch.cos(0.5 * theta)
+
+    var imag = torch.where(small, imag_small, imag_large)
+    var real = torch.where(small, real_small, real_large)
+    return torch.cat(Python.list(imag * phi0, imag * phi1, imag * phi2, real), dim=1)
+
+
+def exp_sim3_tensor(xi: PythonObject) raises -> PythonObject:
+    var torch = get_torch_module()
+    var tau = xi.narrow(1, 0, 3)
+    var phi = xi.narrow(1, 3, 3)
+    var sigma = tensor_col(xi, 6)
+    var scale = torch.exp(sigma)
+
+    var q = exp_so3_tensor(phi)
+
+    var phi0 = tensor_col(phi, 0)
+    var phi1 = tensor_col(phi, 1)
+    var phi2 = tensor_col(phi, 2)
+    var theta_sq = phi0 * phi0 + phi1 * phi1 + phi2 * phi2
+    var theta = torch.sqrt(theta_sq)
+    var sigma_sq = sigma * sigma
+    var c = theta_sq + sigma_sq
+    var small_sigma = torch.abs(sigma) < 1e-6
+    var small_theta = torch.abs(theta) < 1e-6
+
+    var C = torch.where(small_sigma, torch.ones_like(sigma), (scale - 1.0) / sigma)
+
+    var A_small_sigma = torch.where(
+        small_theta,
+        torch.full_like(theta, 0.5),
+        (1.0 - torch.cos(theta)) / theta_sq,
+    )
+    var B_small_sigma = torch.where(
+        small_theta,
+        torch.full_like(theta, 1.0 / 6.0),
+        (theta - torch.sin(theta)) / (theta_sq * theta),
+    )
+
+    var A_large_sigma = torch.where(
+        small_theta,
+        ((sigma - 1.0) * scale + 1.0) / sigma_sq,
+        (scale * torch.sin(theta) * sigma + (1.0 - scale * torch.cos(theta)) * theta) / (theta * c),
+    )
+    var B_large_sigma = torch.where(
+        small_theta,
+        (scale * 0.5 * sigma_sq + scale - 1.0 - sigma * scale) / (sigma_sq * sigma),
+        (C - (((scale * torch.cos(theta) - 1.0) * sigma + scale * torch.sin(theta) * theta) / c)) / theta_sq,
+    )
+
+    var A = torch.where(small_sigma, A_small_sigma, A_large_sigma)
+    var B = torch.where(small_sigma, B_small_sigma, B_large_sigma)
+
+    var tau1 = torch.cross(phi, tau, dim=1)
+    var tau2 = torch.cross(phi, tau1, dim=1)
+    var t = C * tau + A * tau1 + B * tau2
+    return Python.tuple(t, q, scale)
+
+
+def pose_retr_py(
+    poses_obj: PythonObject,
+    dx_obj: PythonObject,
+    num_fix_obj: PythonObject,
+) raises -> PythonObject:
+    var num_fix = Int(py=num_fix_obj)
+    var num_poses = Int(py=poses_obj.shape[0])
+    if num_fix >= num_poses:
+        return Python.none()
+
+    var free_poses = poses_obj[num_fix:]
+    var exp_out = exp_sim3_tensor(dx_obj)
+    var dt = exp_out[0]
+    var dq = exp_out[1]
+    var ds = exp_out[2]
+    var t = free_poses.narrow(1, 0, 3)
+    var q = free_poses.narrow(1, 3, 4)
+    var s = tensor_col(free_poses, 7)
+    var q1 = quat_comp_tensor(dq, q)
+    var t1 = act_so3_tensor(dq, t) * ds + dt
+    var s1 = ds * s
+    var torch = get_torch_module()
+    var updated = torch.cat(Python.list(t1, q1, s1), dim=1)
+    var builtins = Python.import_module("builtins")
+    var free_slice = builtins.slice(num_fix, Python.none(), Python.none())
+    poses_obj.__setitem__(free_slice, value=updated)
+    return Python.none()
+
+
+def gauss_newton_impl(
+    args_obj: PythonObject,
+    step_name: String,
+    step_argc: Int,
+) raises -> PythonObject:
+    var torch = get_torch_module()
+    var cuda_be = get_cuda_backend_module()
+    var Twc = args_obj[0]
+    var ii = args_obj[3]
+    var jj = args_obj[4]
+    var max_iter = Int(py=args_obj[step_argc])
+    var delta_thresh = Float64(py=args_obj[step_argc + 1])
+
+    var num_poses = Int(py=Twc.shape[0])
+    var num_fix = 1
+    var unique_kf_idx = get_unique_kf_idx(ii, jj)
+    var inds_opt = create_inds(unique_kf_idx, num_fix, ii, jj)
+    var ii_opt = inds_opt[0]
+    var jj_opt = inds_opt[1]
+    var n_vars = num_poses - num_fix
+
+    var dx = torch.zeros(
+        Python.list(max(n_vars, 0), POSE_DIM),
+        device=Twc.device,
+        dtype=Twc.dtype,
+    )
+
+    for _i in range(max_iter):
+        var step_out: PythonObject
+        if step_name == "gauss_newton_points_step":
+            step_out = cuda_be.gauss_newton_points_step(
+                args_obj[0],
+                args_obj[1],
+                args_obj[2],
+                args_obj[3],
+                args_obj[4],
+                args_obj[5],
+                args_obj[6],
+                args_obj[7],
+                args_obj[8],
+                args_obj[9],
+                args_obj[10],
+            )
+        elif step_name == "gauss_newton_rays_step":
+            step_out = cuda_be.gauss_newton_rays_step(
+                args_obj[0],
+                args_obj[1],
+                args_obj[2],
+                args_obj[3],
+                args_obj[4],
+                args_obj[5],
+                args_obj[6],
+                args_obj[7],
+                args_obj[8],
+                args_obj[9],
+                args_obj[10],
+                args_obj[11],
+            )
+        else:
+            step_out = cuda_be.gauss_newton_calib_step(
+                args_obj[0],
+                args_obj[1],
+                args_obj[2],
+                args_obj[3],
+                args_obj[4],
+                args_obj[5],
+                args_obj[6],
+                args_obj[7],
+                args_obj[8],
+                args_obj[9],
+                args_obj[10],
+                args_obj[11],
+                args_obj[12],
+                args_obj[13],
+                args_obj[14],
+                args_obj[15],
+            )
+        var hs = step_out[0]
+        var gs = step_out[1]
+        var sys = assemble_dense_system(hs, gs, ii_opt, jj_opt, n_vars)
+        var h_dense = sys[0]
+        var b_dense = sys[1]
+        dx = solve_dense_system(h_dense, b_dense, n_vars)
+        _ = pose_retr_py(Twc, dx, PythonObject(num_fix))
+        var delta_norm = torch.linalg.norm(dx)
+        if Float64(py=delta_norm.item()) < delta_thresh:
+            break
+
+    return Python.tuple(dx)
+ 
+
+def gauss_newton_points_impl(args_obj: PythonObject) raises -> PythonObject:
+    return gauss_newton_impl(args_obj, "gauss_newton_points_step", 11)
+
+
+def gauss_newton_rays_impl(args_obj: PythonObject) raises -> PythonObject:
+    return gauss_newton_impl(args_obj, "gauss_newton_rays_step", 12)
+
+
+def gauss_newton_calib_impl(args_obj: PythonObject) raises -> PythonObject:
+    return gauss_newton_impl(args_obj, "gauss_newton_calib_step", 16)
+
+
 # ─── GPU Kernel Helpers ───────────────────────────────────────────────────────
 
 
@@ -684,6 +1023,10 @@ def PyInit_mast3r_slam_mojo_backends() -> PythonObject:
         var m = PythonModuleBuilder("mast3r_slam_mojo_backends")
         m.def_function[iter_proj_py]("iter_proj")
         m.def_function[refine_matches_py]("refine_matches")
+        m.def_function[pose_retr_py]("pose_retr")
+        m.def_function[gauss_newton_points_impl]("gauss_newton_points_impl")
+        m.def_function[gauss_newton_rays_impl]("gauss_newton_rays_impl")
+        m.def_function[gauss_newton_calib_impl]("gauss_newton_calib_impl")
         var module = m.finalize()
 
         # Keep one owning DeviceContext alive for the life of the extension so
