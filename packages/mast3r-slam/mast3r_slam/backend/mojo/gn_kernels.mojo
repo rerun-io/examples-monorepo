@@ -1,12 +1,34 @@
 from std.math import sqrt, exp, sin, cos, abs
-from std.gpu import global_idx, block_idx, block_dim, thread_idx, barrier
+from std.gpu import global_idx, block_idx, block_dim, thread_idx, barrier, lane_id
+from std.gpu.primitives import warp
 from std.gpu.memory import AddressSpace
 from std.memory import stack_allocation
 
 comptime POSE_DIM = 7
 comptime POSE_STRIDE = 8
 comptime RAYS_HDIM = 14 * (14 + 1) // 2
-comptime RAYS_THREADS = 64
+comptime RAYS_THREADS = 128
+comptime RAYS_WARPS = RAYS_THREADS // 32
+
+
+@always_inline
+def block_reduce_sum_64[origin: Origin[mut=True], //](
+    value: Float32,
+    tid: Int,
+    warp_partials: UnsafePointer[Scalar[DType.float32], origin, address_space=AddressSpace.SHARED],
+) -> Float32:
+    var reduced = warp.sum(value)
+    if Int(lane_id()) == 0:
+        warp_partials[tid // 32] = reduced
+    barrier()
+
+    var block_sum: Float32 = 0.0
+    if tid < RAYS_WARPS:
+        block_sum = warp_partials[tid][0]
+    if tid < 32:
+        block_sum = warp.sum(block_sum)
+    barrier()
+    return block_sum
 
 
 def assemble_h_dense_kernel(
@@ -81,6 +103,18 @@ def quat_comp_components(
 
 
 @always_inline
+def quat_comp_into(
+    aix: Float32, aiy: Float32, aiz: Float32, aiw: Float32,
+    bjx: Float32, bjy: Float32, bjz: Float32, bjw: Float32,
+    mut out0: Float32, mut out1: Float32, mut out2: Float32, mut out3: Float32,
+):
+    out0 = aiw * bjx + aix * bjw + aiy * bjz - aiz * bjy
+    out1 = aiw * bjy - aix * bjz + aiy * bjw + aiz * bjx
+    out2 = aiw * bjz + aix * bjy - aiy * bjx + aiz * bjw
+    out3 = aiw * bjw - aix * bjx - aiy * bjy - aiz * bjz
+
+
+@always_inline
 def act_so3_components(
     qx: Float32, qy: Float32, qz: Float32, qw: Float32,
     x0: Float32, x1: Float32, x2: Float32,
@@ -93,6 +127,20 @@ def act_so3_components(
     out[1] = x1 + qw * uv1 + (qz * uv0 - qx * uv2)
     out[2] = x2 + qw * uv2 + (qx * uv1 - qy * uv0)
     return out^
+
+
+@always_inline
+def act_so3_into(
+    qx: Float32, qy: Float32, qz: Float32, qw: Float32,
+    x0: Float32, x1: Float32, x2: Float32,
+    mut out0: Float32, mut out1: Float32, mut out2: Float32,
+):
+    var uv0 = 2.0 * (qy * x2 - qz * x1)
+    var uv1 = 2.0 * (qz * x0 - qx * x2)
+    var uv2 = 2.0 * (qx * x1 - qy * x0)
+    out0 = x0 + qw * uv0 + (qy * uv2 - qz * uv1)
+    out1 = x1 + qw * uv1 + (qz * uv0 - qx * uv2)
+    out2 = x2 + qw * uv2 + (qx * uv1 - qy * uv0)
 
 
 @always_inline
@@ -212,6 +260,20 @@ def act_sim3_components(
 
 
 @always_inline
+def act_sim3_into(
+    tx: Float32, ty: Float32, tz: Float32,
+    qx: Float32, qy: Float32, qz: Float32, qw: Float32,
+    s: Float32,
+    x0: Float32, x1: Float32, x2: Float32,
+    mut out0: Float32, mut out1: Float32, mut out2: Float32,
+):
+    act_so3_into(qx, qy, qz, qw, x0, x1, x2, out0, out1, out2)
+    out0 = out0 * s + tx
+    out1 = out1 * s + ty
+    out2 = out2 * s + tz
+
+
+@always_inline
 def dot3_components(
     a0: Float32, a1: Float32, a2: Float32,
     b0: Float32, b1: Float32, b2: Float32,
@@ -261,6 +323,34 @@ def rel_sim3_components(
 
 
 @always_inline
+def rel_sim3_into(
+    tix: Float32, tiy: Float32, tiz: Float32,
+    qix: Float32, qiy: Float32, qiz: Float32, qiw: Float32,
+    si: Float32,
+    tjx: Float32, tjy: Float32, tjz: Float32,
+    qjx: Float32, qjy: Float32, qjz: Float32, qjw: Float32,
+    sj: Float32,
+    mut out0: Float32, mut out1: Float32, mut out2: Float32,
+    mut out3: Float32, mut out4: Float32, mut out5: Float32, mut out6: Float32,
+    mut out7: Float32,
+):
+    var si_inv = 1.0 / si
+    var qi_inv0 = -qix
+    var qi_inv1 = -qiy
+    var qi_inv2 = -qiz
+    var qi_inv3 = qiw
+    quat_comp_into(qi_inv0, qi_inv1, qi_inv2, qi_inv3, qjx, qjy, qjz, qjw, out3, out4, out5, out6)
+    var dt0 = tjx - tix
+    var dt1 = tjy - tiy
+    var dt2 = tjz - tiz
+    act_so3_into(qi_inv0, qi_inv1, qi_inv2, qi_inv3, dt0, dt1, dt2, out0, out1, out2)
+    out0 = out0 * si_inv
+    out1 = out1 * si_inv
+    out2 = out2 * si_inv
+    out7 = si_inv * sj
+
+
+@always_inline
 def apply_sim3_adj_inv_components(
     tx: Float32, ty: Float32, tz: Float32,
     qx: Float32, qy: Float32, qz: Float32, qw: Float32,
@@ -284,6 +374,37 @@ def apply_sim3_adj_inv_components(
     return out^
 
 
+@always_inline
+def apply_sim3_adj_inv_into(
+    tx: Float32, ty: Float32, tz: Float32,
+    qx: Float32, qy: Float32, qz: Float32, qw: Float32,
+    s: Float32,
+    x0: Float32, x1: Float32, x2: Float32,
+    x3: Float32, x4: Float32, x5: Float32,
+    x6: Float32,
+    mut out0: Float32, mut out1: Float32, mut out2: Float32,
+    mut out3: Float32, mut out4: Float32, mut out5: Float32,
+    mut out6: Float32,
+):
+    var s_inv = 1.0 / s
+    var ra0: Float32 = 0.0
+    var ra1: Float32 = 0.0
+    var ra2: Float32 = 0.0
+    act_so3_into(qx, qy, qz, qw, x0, x1, x2, ra0, ra1, ra2)
+    out0 = s_inv * ra0
+    out1 = s_inv * ra1
+    out2 = s_inv * ra2
+
+    var rb0: Float32 = 0.0
+    var rb1: Float32 = 0.0
+    var rb2: Float32 = 0.0
+    act_so3_into(qx, qy, qz, qw, x3, x4, x5, rb0, rb1, rb2)
+    out3 = rb0 + s_inv * (ty * ra2 - tz * ra1)
+    out4 = rb1 + s_inv * (tz * ra0 - tx * ra2)
+    out5 = rb2 + s_inv * (tx * ra1 - ty * ra0)
+    out6 = x6 + s_inv * dot3_components(tx, ty, tz, ra0, ra1, ra2)
+
+
 def gauss_newton_rays_step_kernel(
     twc: UnsafePointer[Float32, MutAnyOrigin],
     xs: UnsafePointer[Float32, MutAnyOrigin],
@@ -297,12 +418,16 @@ def gauss_newton_rays_step_kernel(
     gs: UnsafePointer[Float32, MutAnyOrigin],
     num_points: Int,
     num_edges: Int,
+    blocks_per_edge: Int,
     sigma_ray: Float32,
     sigma_dist: Float32,
     c_thresh: Float32,
     q_thresh: Float32,
 ):
-    var edge = Int(block_idx.x)
+    var edge = Int(block_idx.x) // blocks_per_edge
+    var edge_block = Int(block_idx.x) % blocks_per_edge
+    var partial_edge = edge * blocks_per_edge + edge_block
+    var num_partials = num_edges * blocks_per_edge
     var tid = Int(thread_idx.x)
     var block_threads = Int(block_dim.x)
     if edge >= num_edges:
@@ -340,16 +465,31 @@ def gauss_newton_rays_step_kernel(
     var sj0 = pose_shared[15][0]
 
     if tid == 0:
-        var rel_once = rel_sim3_components(
+        var rel_out0: Float32 = 0.0
+        var rel_out1: Float32 = 0.0
+        var rel_out2: Float32 = 0.0
+        var rel_out3: Float32 = 0.0
+        var rel_out4: Float32 = 0.0
+        var rel_out5: Float32 = 0.0
+        var rel_out6: Float32 = 0.0
+        var rel_out7: Float32 = 0.0
+        rel_sim3_into(
             ti0, ti1, ti2,
             qi0, qi1, qi2, qi3,
             si0,
             tj0, tj1, tj2,
             qj0, qj1, qj2, qj3,
             sj0,
+            rel_out0, rel_out1, rel_out2, rel_out3, rel_out4, rel_out5, rel_out6, rel_out7,
         )
-        for r in range(8):
-            pose_shared[16 + r] = rel_once[r]
+        pose_shared[16] = rel_out0
+        pose_shared[17] = rel_out1
+        pose_shared[18] = rel_out2
+        pose_shared[19] = rel_out3
+        pose_shared[20] = rel_out4
+        pose_shared[21] = rel_out5
+        pose_shared[22] = rel_out6
+        pose_shared[23] = rel_out7
     barrier()
     var rel0 = pose_shared[16][0]
     var rel1 = pose_shared[17][0]
@@ -368,7 +508,7 @@ def gauss_newton_rays_step_kernel(
     var sigma_ray_inv = 1.0 / sigma_ray
     var sigma_dist_inv = 1.0 / sigma_dist
 
-    for k in range(tid, num_points, block_threads):
+    for k in range(edge_block * block_threads + tid, num_points, block_threads * blocks_per_edge):
         var valid_match_ind = valid_match[edge * num_points + k] != 0
         var ind_xi = Int(idx_ii2jj[edge * num_points + k])
         if not valid_match_ind:
@@ -394,15 +534,18 @@ def gauss_newton_rays_step_kernel(
         var ri1 = norm1_i_inv * xi1
         var ri2 = norm1_i_inv * xi2
 
-        var xj_ci = act_sim3_components(
-            rel0, rel1, rel2, rel3, rel4, rel5, rel6, rel7, xj0, xj1, xj2
+        var xj_ci0: Float32 = 0.0
+        var xj_ci1: Float32 = 0.0
+        var xj_ci2: Float32 = 0.0
+        act_sim3_into(
+            rel0, rel1, rel2, rel3, rel4, rel5, rel6, rel7, xj0, xj1, xj2, xj_ci0, xj_ci1, xj_ci2
         )
-        var norm2_j = squared_norm3_components(xj_ci[0], xj_ci[1], xj_ci[2])
+        var norm2_j = squared_norm3_components(xj_ci0, xj_ci1, xj_ci2)
         var norm1_j = sqrt(norm2_j)
         var norm1_j_inv = 1.0 / norm1_j
-        var rj0 = norm1_j_inv * xj_ci[0]
-        var rj1 = norm1_j_inv * xj_ci[1]
-        var rj2 = norm1_j_inv * xj_ci[2]
+        var rj0 = norm1_j_inv * xj_ci0
+        var rj1 = norm1_j_inv * xj_ci1
+        var rj2 = norm1_j_inv * xj_ci2
 
         var err0 = rj0 - ri0
         var err1 = rj1 - ri1
@@ -424,12 +567,12 @@ def gauss_newton_rays_step_kernel(
         var w3 = huber_scalar(sqrt_w_dist * err3) * sqrt_w_dist * sqrt_w_dist
 
         var norm3_j_inv = norm1_j_inv / norm2_j
-        var drx_dpx = norm1_j_inv - xj_ci[0] * xj_ci[0] * norm3_j_inv
-        var dry_dpy = norm1_j_inv - xj_ci[1] * xj_ci[1] * norm3_j_inv
-        var drz_dpz = norm1_j_inv - xj_ci[2] * xj_ci[2] * norm3_j_inv
-        var drx_dpy = -xj_ci[0] * xj_ci[1] * norm3_j_inv
-        var drx_dpz = -xj_ci[0] * xj_ci[2] * norm3_j_inv
-        var dry_dpz = -xj_ci[1] * xj_ci[2] * norm3_j_inv
+        var drx_dpx = norm1_j_inv - xj_ci0 * xj_ci0 * norm3_j_inv
+        var dry_dpy = norm1_j_inv - xj_ci1 * xj_ci1 * norm3_j_inv
+        var drz_dpz = norm1_j_inv - xj_ci2 * xj_ci2 * norm3_j_inv
+        var drx_dpy = -xj_ci0 * xj_ci1 * norm3_j_inv
+        var drx_dpz = -xj_ci0 * xj_ci2 * norm3_j_inv
+        var dry_dpz = -xj_ci1 * xj_ci2 * norm3_j_inv
 
         @parameter
         def accumulate_row(
@@ -437,14 +580,33 @@ def gauss_newton_rays_step_kernel(
             w: Float32,
             ji0: Float32, ji1: Float32, ji2: Float32, ji3: Float32, ji4: Float32, ji5: Float32, ji6: Float32,
         ):
-            var jadj = apply_sim3_adj_inv_components(
+            var jadj0: Float32 = 0.0
+            var jadj1: Float32 = 0.0
+            var jadj2: Float32 = 0.0
+            var jadj3: Float32 = 0.0
+            var jadj4: Float32 = 0.0
+            var jadj5: Float32 = 0.0
+            var jadj6: Float32 = 0.0
+            apply_sim3_adj_inv_into(
                 ti0, ti1, ti2,
                 qi0, qi1, qi2, qi3, si0,
                 ji0, ji1, ji2, ji3, ji4, ji5, ji6,
+                jadj0, jadj1, jadj2, jadj3, jadj4, jadj5, jadj6,
             )
-            for n in range(POSE_DIM):
-                jxv[n + 7] = jadj[n]
-                jxv[n] = -jadj[n]
+            jxv[0] = -jadj0
+            jxv[1] = -jadj1
+            jxv[2] = -jadj2
+            jxv[3] = -jadj3
+            jxv[4] = -jadj4
+            jxv[5] = -jadj5
+            jxv[6] = -jadj6
+            jxv[7] = jadj0
+            jxv[8] = jadj1
+            jxv[9] = jadj2
+            jxv[10] = jadj3
+            jxv[11] = jadj4
+            jxv[12] = jadj5
+            jxv[13] = jadj6
             var l = 0
             for n in range(14):
                 for m in range(n + 1):
@@ -459,57 +621,36 @@ def gauss_newton_rays_step_kernel(
         accumulate_row(err2, w2, drx_dpz, dry_dpz, drz_dpz, rj1, -rj0, 0.0, 0.0)
         accumulate_row(err3, w3, rj0, rj1, rj2, 0.0, 0.0, 0.0, norm1_j)
 
-    var sdata = stack_allocation[
-        RAYS_THREADS,
+    var warp_partials = stack_allocation[
+        RAYS_WARPS,
         Scalar[DType.float32],
         address_space=AddressSpace.SHARED,
     ]()
 
     for n in range(POSE_DIM):
-        sdata[tid] = vi[n]
-        barrier()
-        var active = block_threads // 2
-        while active > 0:
-            if tid < active:
-                sdata[tid] += sdata[tid + active]
-            barrier()
-            active = active // 2
+        var vi_sum = block_reduce_sum_64(vi[n], tid, warp_partials)
         if tid == 0:
-            gs[(0 * num_edges + edge) * POSE_DIM + n] = sdata[0][0]
+            gs[(0 * num_partials + partial_edge) * POSE_DIM + n] = vi_sum
 
-        sdata[tid] = vj[n]
-        barrier()
-        active = block_threads // 2
-        while active > 0:
-            if tid < active:
-                sdata[tid] += sdata[tid + active]
-            barrier()
-            active = active // 2
+        var vj_sum = block_reduce_sum_64(vj[n], tid, warp_partials)
         if tid == 0:
-            gs[(1 * num_edges + edge) * POSE_DIM + n] = sdata[0][0]
+            gs[(1 * num_partials + partial_edge) * POSE_DIM + n] = vj_sum
 
     var l = 0
     for n in range(14):
         for m in range(n + 1):
-            sdata[tid] = hij[l]
-            barrier()
-            var active_h = block_threads // 2
-            while active_h > 0:
-                if tid < active_h:
-                    sdata[tid] += sdata[tid + active_h]
-                barrier()
-                active_h = active_h // 2
+            var h_sum = block_reduce_sum_64(hij[l], tid, warp_partials)
             if tid == 0:
-                var val = sdata[0][0]
+                var val = h_sum
                 if n < 7 and m < 7:
-                    hs[((0 * num_edges + edge) * 49) + n * 7 + m] = val
-                    hs[((0 * num_edges + edge) * 49) + m * 7 + n] = val
+                    hs[((0 * num_partials + partial_edge) * 49) + n * 7 + m] = val
+                    hs[((0 * num_partials + partial_edge) * 49) + m * 7 + n] = val
                 elif n >= 7 and m < 7:
-                    hs[((1 * num_edges + edge) * 49) + m * 7 + (n - 7)] = val
-                    hs[((2 * num_edges + edge) * 49) + (n - 7) * 7 + m] = val
+                    hs[((1 * num_partials + partial_edge) * 49) + m * 7 + (n - 7)] = val
+                    hs[((2 * num_partials + partial_edge) * 49) + (n - 7) * 7 + m] = val
                 else:
-                    hs[((3 * num_edges + edge) * 49) + (n - 7) * 7 + (m - 7)] = val
-                    hs[((3 * num_edges + edge) * 49) + (m - 7) * 7 + (n - 7)] = val
+                    hs[((3 * num_partials + partial_edge) * 49) + (n - 7) * 7 + (m - 7)] = val
+                    hs[((3 * num_partials + partial_edge) * 49) + (m - 7) * 7 + (n - 7)] = val
             l += 1
 
 

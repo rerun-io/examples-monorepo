@@ -1,8 +1,10 @@
-from std.math import ceildiv, max
+from std.math import ceildiv, max, min
 from std.gpu.host import DeviceContext
 from std.python import Python, PythonObject
 
 from gn_kernels import POSE_DIM, RAYS_THREADS, gauss_newton_rays_step_kernel, pose_retr_kernel
+
+comptime RAYS_BLOCKS_PER_EDGE_MAX = 8
 
 
 def get_cached_context_ptr() raises -> UnsafePointer[DeviceContext, MutAnyOrigin]:
@@ -153,8 +155,10 @@ def gauss_newton_rays_step_py(args_obj: PythonObject) raises -> PythonObject:
     var torch = get_torch_module()
     var num_edges = Int(py=ii.shape[0])
     var num_points = Int(py=xs.shape[1])
-    var hs = torch.zeros(Python.list(4, num_edges, POSE_DIM, POSE_DIM), device=twc.device, dtype=twc.dtype)
-    var gs = torch.zeros(Python.list(2, num_edges, POSE_DIM), device=twc.device, dtype=twc.dtype)
+    var blocks_per_edge = max(1, min(RAYS_BLOCKS_PER_EDGE_MAX, ceildiv(num_points, 16384)))
+    var num_partials = num_edges * blocks_per_edge
+    var hs_partial = torch.zeros(Python.list(4, num_partials, POSE_DIM, POSE_DIM), device=twc.device, dtype=twc.dtype)
+    var gs_partial = torch.zeros(Python.list(2, num_partials, POSE_DIM), device=twc.device, dtype=twc.dtype)
 
     var twc_ptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=Int(py=twc.data_ptr()))
     var xs_ptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=Int(py=xs.data_ptr()))
@@ -164,16 +168,20 @@ def gauss_newton_rays_step_py(args_obj: PythonObject) raises -> PythonObject:
     var idx_ptr = UnsafePointer[Int64, MutAnyOrigin](unsafe_from_address=Int(py=idx_ii2jj.data_ptr()))
     var valid_ptr = UnsafePointer[UInt8, MutAnyOrigin](unsafe_from_address=Int(py=valid_match.data_ptr()))
     var q_ptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=Int(py=q_tensor.data_ptr()))
-    var hs_ptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=Int(py=hs.data_ptr()))
-    var gs_ptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=Int(py=gs.data_ptr()))
+    var hs_ptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=Int(py=hs_partial.data_ptr()))
+    var gs_ptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=Int(py=gs_partial.data_ptr()))
 
     var ctx_ptr = get_cached_context_ptr()
     ctx_ptr[].enqueue_function[gauss_newton_rays_step_kernel, gauss_newton_rays_step_kernel](
         twc_ptr, xs_ptr, cs_ptr, ii_ptr, jj_ptr, idx_ptr, valid_ptr, q_ptr, hs_ptr, gs_ptr,
-        num_points, num_edges, sigma_ray, sigma_dist, c_thresh, q_thresh,
-        grid_dim=num_edges,
+        num_points, num_edges, blocks_per_edge, sigma_ray, sigma_dist, c_thresh, q_thresh,
+        grid_dim=num_partials,
         block_dim=RAYS_THREADS,
     )
+    if blocks_per_edge == 1:
+        return Python.tuple(hs_partial, gs_partial)
+    var hs = hs_partial.reshape(4, num_edges, blocks_per_edge, POSE_DIM, POSE_DIM).sum(dim=2)
+    var gs = gs_partial.reshape(2, num_edges, blocks_per_edge, POSE_DIM).sum(dim=2)
     return Python.tuple(hs, gs)
 
 

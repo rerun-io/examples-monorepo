@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 try:
@@ -16,25 +17,27 @@ except Exception:
 
 
 def _use_mojo(name: str) -> bool:
+    if os.environ.get("MAST3R_SLAM_FORCE_CUDA_BACKENDS", "") not in ("", "0", "false", "False"):
+        return False
     return _mojo_backends is not None and hasattr(_mojo_backends, name)
 
 
 def gauss_newton_points(*args: Any) -> tuple[Any, ...]:
     if _use_mojo("gauss_newton_points_impl"):
         return _mojo_backends.gauss_newton_points_impl(args)
-    return _cuda_backends.gauss_newton_points(*args)
+    return tuple(_cuda_backends.gauss_newton_points(*args))
 
 
 def gauss_newton_rays(*args: Any) -> tuple[Any, ...]:
     if _use_mojo("gauss_newton_rays_impl"):
         return _mojo_backends.gauss_newton_rays_impl(args)
-    return _cuda_backends.gauss_newton_rays(*args)
+    return tuple(_cuda_backends.gauss_newton_rays(*args))
 
 
 def gauss_newton_calib(*args: Any) -> tuple[Any, ...]:
     if _use_mojo("gauss_newton_calib_impl"):
         return _mojo_backends.gauss_newton_calib_impl(args)
-    return _cuda_backends.gauss_newton_calib(*args)
+    return tuple(_cuda_backends.gauss_newton_calib(*args))
 
 
 def gauss_newton_points_step(*args: Any) -> tuple[Any, ...]:
