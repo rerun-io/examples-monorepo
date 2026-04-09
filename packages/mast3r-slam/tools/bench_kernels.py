@@ -31,6 +31,8 @@ from __future__ import annotations
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from importlib import import_module
+from typing import Any
 
 import lietorch
 import torch
@@ -38,17 +40,16 @@ from torch import Tensor
 
 # ── Backend imports ───────────────────────────────────────────────────────────
 
-try:
-    from mast3r_slam import _backends as cuda_be
-except ImportError:
-    print("ERROR: mast3r_slam._backends not found. Run: pixi run -e mast3r-slam _build-cuda-kernels")
-    sys.exit(1)
+def _import_required_module(module_name: str, install_hint: str) -> Any:
+    try:
+        return import_module(module_name)
+    except ImportError:
+        print(f"ERROR: {module_name} not found. Run: {install_hint}")
+        sys.exit(1)
 
-try:
-    import mast3r_slam_mojo_backends as mojo_be
-except ImportError:
-    print("ERROR: mast3r_slam_mojo_backends not found. Run: pixi run -e mast3r-slam _build-mojo-kernels")
-    sys.exit(1)
+
+cuda_be: Any = _import_required_module("mast3r_slam._backends", "pixi run -e mast3r-slam _build-cuda-kernels")
+mojo_be: Any = _import_required_module("mast3r_slam_mojo_backends", "pixi run -e mast3r-slam _build-mojo-kernels")
 
 assert torch.cuda.is_available(), "CUDA not available"
 DEVICE: torch.device = torch.device("cuda")
@@ -62,10 +63,6 @@ class BenchResult:
     """Timing statistics from a kernel benchmark."""
 
     median_ms: float
-    mean_ms: float
-    std_ms: float
-    min_ms: float
-    max_ms: float
 
 
 def bench(fn: Callable[..., object], warmup: int = 50, runs: int = 500) -> BenchResult:
@@ -87,10 +84,6 @@ def bench(fn: Callable[..., object], warmup: int = 50, runs: int = 500) -> Bench
     t: Tensor = torch.tensor(timings)
     return BenchResult(
         median_ms=float(t.median()),
-        mean_ms=float(t.mean()),
-        std_ms=float(t.std()),
-        min_ms=float(t.min()),
-        max_ms=float(t.max()),
     )
 
 
@@ -169,6 +162,35 @@ def make_gn_rays_data(
     return twc, xs, cs, ii, jj, idx, valid, q
 
 
+def make_gn_runner(
+    backend: Any,
+    twc: Tensor,
+    xs: Tensor,
+    cs: Tensor,
+    ii: Tensor,
+    jj: Tensor,
+    idx: Tensor,
+    valid: Tensor,
+    q: Tensor,
+    sigma_ray: float,
+    sigma_dist: float,
+    c_thresh: float,
+    q_thresh: float,
+    max_iter: int,
+    delta_thresh: float,
+) -> Callable[[], object]:
+    """Capture one GN rays benchmark configuration into a zero-argument runner."""
+
+    def run() -> object:
+        t_copy: Tensor = twc.clone()
+        args = (t_copy, xs, cs, ii, jj, idx, valid, q, sigma_ray, sigma_dist, c_thresh, q_thresh, max_iter, delta_thresh)
+        if backend is mojo_be:
+            return backend.gauss_newton_rays(args)
+        return backend.gauss_newton_rays(*args)
+
+    return run
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 
@@ -236,13 +258,12 @@ def main() -> None:
         max_iter: int = 10
         delta_thresh: float = 1e-6
 
-        def run_cuda(_t=twc.clone(), _x=xs, _c=cs, _i=ii, _j=jj, _idx=idx, _v=valid, _q=q) -> object:
-            t_copy: Tensor = _t.clone()
-            return cuda_be.gauss_newton_rays(t_copy, _x, _c, _i, _j, _idx, _v, _q, sigma_ray, sigma_dist, c_thresh, q_thresh, max_iter, delta_thresh)
-
-        def run_mojo(_t=twc.clone(), _x=xs, _c=cs, _i=ii, _j=jj, _idx=idx, _v=valid, _q=q) -> object:
-            t_copy: Tensor = _t.clone()
-            return mojo_be.gauss_newton_rays((t_copy, _x, _c, _i, _j, _idx, _v, _q, sigma_ray, sigma_dist, c_thresh, q_thresh, max_iter, delta_thresh))
+        run_cuda = make_gn_runner(
+            cuda_be, twc, xs, cs, ii, jj, idx, valid, q, sigma_ray, sigma_dist, c_thresh, q_thresh, max_iter, delta_thresh
+        )
+        run_mojo = make_gn_runner(
+            mojo_be, twc, xs, cs, ii, jj, idx, valid, q, sigma_ray, sigma_dist, c_thresh, q_thresh, max_iter, delta_thresh
+        )
 
         cuda_r = bench(run_cuda, warmup=10, runs=50)
         mojo_r = bench(run_mojo, warmup=10, runs=50)

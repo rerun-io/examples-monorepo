@@ -43,3 +43,9 @@ ignore = [
     "F821",  # Forward annotation false positive from jaxtyping. Should be caught by pyright.
     "UP037",
 ]
+
+[tool.vulture]
+paths = ["src/wilor_nano", "tests", "tools"]
+exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
+sort_by_size = true
+min_confidence = 60

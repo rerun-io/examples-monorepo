@@ -41,7 +41,6 @@ class MonocularDataset(torch.utils.data.Dataset):
         """Filesystem path to the dataset root, or None for live sources (webcam, realsense)."""
         self.camera_intrinsics = None  # Intrinsics | None — forward ref, typed by subclasses
         self.use_calibration: bool = config["use_calib"]
-        self.save_results: bool = True
 
     def __len__(self) -> int:
         """Return the number of frames in the dataset."""
@@ -225,7 +224,6 @@ class Webcam(MonocularDataset):
         self.dataset_path = None
         # load webcam using opencv
         self.cap = cv2.VideoCapture(-1)
-        self.save_results: bool = False
 
     def __len__(self) -> int:
         return 999999
@@ -423,7 +421,7 @@ def load_dataset(
     if "7-scenes" in split_dataset_type:
         return SevenScenesDataset(dataset_path, img_size)
     if "realsense" in split_dataset_type:
-        return RealsenseDataset(img_size)
+        raise NotImplementedError("RealSense input is not implemented in mast3r-slam.")
     if "webcam" in split_dataset_type:
         return Webcam(img_size)
 

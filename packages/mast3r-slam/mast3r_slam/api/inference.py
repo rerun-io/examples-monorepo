@@ -110,8 +110,6 @@ class InferenceConfig:
     """Path to the input dataset or video file."""
     config: str = "config/base.yaml"
     """Path to the SLAM config YAML file."""
-    save_as: str = "default"
-    """Subdirectory name for saving results under ``logs/``."""
     no_viz: bool = False
     """If True, skip launching visualisation processes."""
     img_size: Literal[224, 512] = 512
@@ -343,9 +341,9 @@ def run_slam_pipeline(
                     # Normal tracking: match this frame against the last keyframe,
                     # estimate its relative pose via Gauss-Newton, and decide
                     # whether the overlap is low enough to warrant a new keyframe.
-                    match_info: list
+                    _match_info: list
                     try_reloc: bool
-                    add_new_kf, match_info, try_reloc = tracker.track(frame)
+                    add_new_kf, _match_info, try_reloc = tracker.track(frame)
                     if try_reloc:
                         # Too few matches — tracking is lost, switch to reloc mode.
                         states.set_mode(Mode.RELOC)
@@ -390,16 +388,21 @@ def run_slam_pipeline(
             edge_pos: tuple[Float32[ndarray, "n 3"], Float32[ndarray, "n 3"]] | None = None
             orient_data: tuple[Float32[ndarray, "3 3"], Float32[ndarray, "3"]] | None = None
 
+            new_kf_idx: int | None = None
             if add_new_kf:
-                new_kfs.append(snapshot_keyframe(frame, len(keyframes) - 1))
+                new_kf_idx = len(keyframes) - 1
+                new_kfs.append(snapshot_keyframe(frame, new_kf_idx))
 
             dirty_idx: Int[Tensor, "n_dirty"] = keyframes.get_dirty_idx()
             if dirty_idx.numel() > 0:
                 for idx_val in dirty_idx.tolist():
+                    kf_idx_dirty: int = int(idx_val)
+                    if new_kf_idx is not None and kf_idx_dirty == new_kf_idx:
+                        continue
                     sim3_cpu: Float32[ndarray, "8"] = (
-                        keyframes.world_sim3_cam[idx_val, 0].cpu().numpy().astype(np.float32)
+                        keyframes.world_sim3_cam[kf_idx_dirty, 0].cpu().numpy().astype(np.float32)
                     )
-                    pose_updates.append((int(idx_val), sim3_cpu))
+                    pose_updates.append((kf_idx_dirty, sim3_cpu))
 
             # Edge update: resnapshot when edge count changes OR when poses
             # were refined (global optimization moves endpoints without
@@ -571,7 +574,10 @@ def relocalization(
                 rr.log("/world/logs", rr.TextLog("Relocalized successfully", level="INFO"))
                 successful_loop_closure = True
                 # Copy the pose from the matched keyframe as initial estimate.
-                keyframes.world_sim3_cam[n_kf - 1] = keyframes.world_sim3_cam[kf_idx[0]].clone()
+                keyframes.update_world_sim3_cams(
+                    lietorch.Sim3(keyframes.world_sim3_cam[kf_idx[0]].clone()),
+                    torch.tensor([n_kf - 1], device=keyframes.world_sim3_cam.device, dtype=torch.long),
+                )
             else:
                 keyframes.pop_last()
                 rr.log("/world/logs", rr.TextLog("Failed to relocalize", level="WARN"))

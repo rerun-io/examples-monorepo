@@ -124,7 +124,6 @@ class RerunLogger:
 
         self.path_list: list[list[float]] = []
         self.keyframe_logged_list: list[int] = []
-        self.num_keyframes_logged: int = 0
         self.conf_thresh: int = 7
         self.image_plane_distance: float = 0.2
         # Number of keyframes used in the last orientation update.

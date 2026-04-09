@@ -31,3 +31,9 @@ ignore = [
     "F821",  # Forward annotation false positive from jaxtyping. Should be caught by pyright.
     "UP037", # Remove quotes from type, false positive when using jaxtyping
 ]
+
+[tool.vulture]
+paths = ["src/vistadream", "tests", "tools"]
+exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
+sort_by_size = true
+min_confidence = 60

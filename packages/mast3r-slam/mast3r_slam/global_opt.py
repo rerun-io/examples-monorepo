@@ -88,7 +88,6 @@ class FactorGraph:
         self.valid_match_i: Bool[Tensor, "..."] = torch.as_tensor([], dtype=torch.bool, device=self.device)
         self.Q_ii2jj: Float32[Tensor, "..."] = torch.as_tensor([], dtype=torch.float32, device=self.device)
         self.Q_jj2ii: Float32[Tensor, "..."] = torch.as_tensor([], dtype=torch.float32, device=self.device)
-        self.window_size: float = self.cfg["window_size"]
 
         self.K: Float[Tensor, "3 3"] | None = K
 

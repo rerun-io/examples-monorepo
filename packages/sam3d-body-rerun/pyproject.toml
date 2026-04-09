@@ -62,3 +62,8 @@ ignore = [
 
 ]
 
+[tool.vulture]
+paths = ["src/sam3d_body", "tests"]
+exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
+sort_by_size = true
+min_confidence = 60

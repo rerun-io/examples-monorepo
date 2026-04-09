@@ -28,3 +28,8 @@ ignore = [
     "UP040",  # Beartype requires TypeAlias, not PEP 695 type
 ]
 
+[tool.vulture]
+paths = ["robocap_slam", "tests", "tools"]
+exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
+sort_by_size = true
+min_confidence = 60

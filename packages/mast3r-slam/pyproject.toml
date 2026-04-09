@@ -31,3 +31,10 @@ line-length = 150
 [tool.ruff.lint]
 select = ["E", "F", "UP", "B", "SIM", "I"]
 ignore = ["E501", "F722", "F821", "UP037", "UP040"]
+
+[tool.vulture]
+paths = ["mast3r_slam", "tests", "tools"]
+exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*", "*/thirdparty/*", "*/.ruff_cache/*"]
+ignore_names = ["RerunLogger", "log_frame", "pytestmark", "colmap_im_id", "k1", "k2", "p2", "camera_model", "applied_transform", "allow_tf32"]
+sort_by_size = true
+min_confidence = 60

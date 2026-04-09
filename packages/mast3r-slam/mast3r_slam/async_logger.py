@@ -33,6 +33,7 @@ import torch
 from jaxtyping import Bool, Float, Float32, Int, UInt8, UInt16
 from numpy import ndarray
 from simplecv.camera_orient_utils import auto_orient_and_center_poses
+from simplecv.camera_parameters import PinholeParameters
 from simplecv.rerun_log_utils import log_pinhole
 from torch import Tensor
 
@@ -278,7 +279,7 @@ class AsyncRerunLogger:
         # Internal visualization state
         self._path_list: list[list[float]] = []
         self._logged_keyframes: set[int] = set()
-        self._last_kf_idx: int = -1
+        self._keyframe_pinhole_static: dict[int, PinholeParameters] = {}
         self._last_blueprint_n_kf: int = -1
         self._n_keyframes: int = 0
         self._conf_thresh: int = 7
@@ -292,7 +293,7 @@ class AsyncRerunLogger:
         self.start()
         return self
 
-    def __exit__(self, exc_type: type | None, exc_val: BaseException | None, exc_tb: object) -> None:
+    def __exit__(self, _exc_type: type | None, _exc_val: BaseException | None, _exc_tb: object) -> None:
         """Send LogTerminate, join the thread, and warn if it outlives the timeout."""
         # Use a bounded put so we don't deadlock if the logger thread
         # crashed and the queue is full.
@@ -302,8 +303,7 @@ class AsyncRerunLogger:
             # Queue is stuck — the logger thread is likely dead.
             if self._error is not None:
                 warnings.warn(
-                    f"Async logger thread crashed: {self._error}. "
-                    f"{self._queue.qsize()} events were not processed.",
+                    f"Async logger thread crashed: {self._error}. {self._queue.qsize()} events were not processed.",
                     stacklevel=2,
                 )
             return
@@ -455,8 +455,12 @@ class AsyncRerunLogger:
 
         # Reconstruct Frame for frame_to_pinhole()
         frame: Frame = snapshot_to_frame(
-            event.world_sim3_cam_data, event.rgb, event.X_canon, event.C,
-            event.img_shape, frame_id=event.frame_idx,
+            event.world_sim3_cam_data,
+            event.rgb,
+            event.X_canon,
+            event.C,
+            event.img_shape,
+            frame_id=event.frame_idx,
         )
 
         cam_log_path: str = f"{self._parent_log_path}/current_camera"
@@ -469,15 +473,18 @@ class AsyncRerunLogger:
 
         # RGB image
         rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(
-            f"{cam_log_path}/pinhole/image", event.rgb,
+            f"{cam_log_path}/pinhole/image",
+            event.rgb,
         )
 
         # Pointmap, depth, confidence
         if event.X_canon is not None and event.C is not None:
             self._log_pointmap_and_confidence(
-                event.X_canon, event.C,
+                event.X_canon,
+                event.C,
                 f"{cam_log_path}/pinhole",
-                rgb_uint8.shape[0], rgb_uint8.shape[1],
+                rgb_uint8.shape[0],
+                rgb_uint8.shape[1],
             )
 
         # Camera path
@@ -502,8 +509,11 @@ class AsyncRerunLogger:
                 h_lk: int = event.last_kf_rgb.shape[0]
                 w_lk: int = event.last_kf_rgb.shape[1]
                 self._log_pointmap_and_confidence(
-                    event.last_kf_X_canon, event.last_kf_C,
-                    lk_path, h_lk, w_lk,
+                    event.last_kf_X_canon,
+                    event.last_kf_C,
+                    lk_path,
+                    h_lk,
+                    w_lk,
                 )
 
     def _handle_map_update(self, event: LogMapUpdate) -> None:
@@ -514,9 +524,9 @@ class AsyncRerunLogger:
         for kf_snapshot in event.new_keyframes:
             self._log_new_keyframe(kf_snapshot)
 
-        # Pose updates from backend
+        # Dirty keyframe pose updates from backend
         for kf_idx, world_sim3_cam_data in event.pose_updates:
-            self._log_pose_update(kf_idx, world_sim3_cam_data)
+            self._relog_keyframe_camera(kf_idx, world_sim3_cam_data)
 
         # Factor graph edges
         if event.edge_positions is not None:
@@ -549,8 +559,12 @@ class AsyncRerunLogger:
 
         # Reconstruct Frame for frame_to_pinhole()
         frame: Frame = snapshot_to_frame(
-            kf.world_sim3_cam_data, kf.rgb, kf.X_canon, kf.C,
-            kf.img_shape, frame_id=kf.kf_idx,
+            kf.world_sim3_cam_data,
+            kf.rgb,
+            kf.X_canon,
+            kf.C,
+            kf.img_shape,
+            frame_id=kf.kf_idx,
         )
 
         # Camera transform
@@ -560,21 +574,29 @@ class AsyncRerunLogger:
             cam_log_path=Path(kf_cam_log_path),
             image_plane_distance=self._image_plane_distance,
         )
+        self._keyframe_pinhole_static[kf.kf_idx] = PinholeParameters(
+            name=pinhole.name,
+            extrinsics=pinhole.extrinsics,
+            intrinsics=pinhole.intrinsics,
+        )
 
         # RGB image
         kf_rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(
-            f"{kf_cam_log_path}/pinhole/image", kf.rgb,
+            f"{kf_cam_log_path}/pinhole/image",
+            kf.rgb,
         )
 
         # Pointmap + confidence
         self._log_pointmap_and_confidence(
-            kf.X_canon, kf.C,
+            kf.X_canon,
+            kf.C,
             f"{kf_cam_log_path}/pinhole",
-            kf.img_shape[0], kf.img_shape[1],
+            kf.img_shape[0],
+            kf.img_shape[1],
         )
 
         # Confidence-filtered point cloud
-        mask: Bool[ndarray, "hw"] = (kf.C.squeeze() > self._conf_thresh)
+        mask: Bool[ndarray, "hw"] = kf.C.squeeze() > self._conf_thresh
         positions: Float32[ndarray, "num_points 3"] = kf.X_canon
         colors: UInt8[ndarray, "num_points 3"] = kf_rgb_uint8.reshape(-1, 3)
         rr.log(
@@ -587,48 +609,42 @@ class AsyncRerunLogger:
 
         # Update last-keyframe 2D view
         self._log_last_keyframe(kf)
-        self._last_kf_idx = kf.kf_idx
-
     def _log_last_keyframe(self, kf: KeyframeSnapshot) -> None:
         """Log the last keyframe's image and pointmap to the 2D view."""
         lk_path: str = f"{self._parent_log_path}/last_keyframe"
         self._log_rgb_image(lk_path, kf.rgb)
         self._log_pointmap_and_confidence(
-            kf.X_canon, kf.C,
+            kf.X_canon,
+            kf.C,
             lk_path,
-            kf.img_shape[0], kf.img_shape[1],
+            kf.img_shape[0],
+            kf.img_shape[1],
         )
 
-    def _log_pose_update(self, kf_idx: int, world_sim3_cam_data: Float32[ndarray, "8"]) -> None:
-        """Update a keyframe's camera transform after backend refinement."""
+    def _relog_keyframe_camera(self, kf_idx: int, world_sim3_cam_data: Float32[ndarray, "8"]) -> None:
+        """Replay a keyframe camera update after backend refinement using cached intrinsics."""
         kf_cam_log_path: str = f"{self._parent_log_path}/keyframes/keyframe-{kf_idx}"
-
-        # Reconstruct pose only (no X_canon needed for just the transform)
+        cached_pinhole: PinholeParameters | None = self._keyframe_pinhole_static.get(kf_idx)
+        if cached_pinhole is None:
+            return
         frame: Frame = snapshot_to_frame(
             world_sim3_cam_data,
             rgb=np.zeros((1, 1, 3), dtype=np.float32),
-            X_canon=None, C=None,
+            X_canon=None,
+            C=None,
             img_shape=(1, 1),
             frame_id=kf_idx,
         )
-
-        # We need X_canon for focal estimation in frame_to_pinhole, but
-        # for pose-only updates we use frame_to_extrinsics directly and
-        # skip intrinsics (the camera image/focal was logged once in
-        # _log_new_keyframe and doesn't change).
         extrinsics = frame_to_extrinsics(frame)
-        # Log only the transform, not the full pinhole
-        assert extrinsics.world_R_cam is not None
-        assert extrinsics.world_t_cam is not None
-        assert extrinsics.cam_R_world is not None
-        assert extrinsics.cam_t_world is not None
-        rr.log(
-            kf_cam_log_path,
-            rr.Transform3D(
-                mat3x3=extrinsics.cam_R_world,
-                translation=extrinsics.cam_t_world,
-                from_parent=True,
-            ),
+        pinhole = PinholeParameters(
+            name=cached_pinhole.name,
+            extrinsics=extrinsics,
+            intrinsics=cached_pinhole.intrinsics,
+        )
+        log_pinhole(
+            camera=pinhole,
+            cam_log_path=Path(kf_cam_log_path),
+            image_plane_distance=self._image_plane_distance,
         )
 
     def _log_edges(

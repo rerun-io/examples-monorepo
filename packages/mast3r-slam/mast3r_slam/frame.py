@@ -390,16 +390,6 @@ class SharedStates:
         with self.lock:
             self.mode.value = mode
 
-    def pause(self) -> None:
-        """Pause the system (backend will idle until unpaused)."""
-        with self.lock:
-            self.paused.value = 1
-
-    def unpause(self) -> None:
-        """Unpause the system."""
-        with self.lock:
-            self.paused.value = 0
-
     def is_paused(self) -> bool:
         """Return whether the system is currently paused."""
         with self.lock:
@@ -553,6 +543,7 @@ class SharedKeyframes:
         """
         with self.lock:
             self.world_sim3_cam[idx] = world_sim3_cams.data
+            self.is_dirty[idx] = True
 
     def get_dirty_idx(self) -> Int[Tensor, "n_dirty"]:
         """Return indices of keyframes modified since the last call, then clear the dirty flags.
@@ -574,13 +565,3 @@ class SharedKeyframes:
         assert config["use_calib"]
         with self.lock:
             self.K[:] = K
-
-    def get_intrinsics(self) -> Float[Tensor, "3 3"]:
-        """Return the shared camera intrinsic matrix (requires ``use_calib`` config).
-
-        Returns:
-            The 3x3 intrinsic matrix tensor.
-        """
-        assert config["use_calib"]
-        with self.lock:
-            return self.K

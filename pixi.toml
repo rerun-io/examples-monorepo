@@ -88,6 +88,7 @@ pytest = ">=8.0.0,<9"
 beartype = ">=0.22.9"
 pyrefly = "*"
 hypothesis = "*"
+vulture = "*"
 
 [feature.dev.pypi-dependencies]
 types-tqdm = "*"
@@ -102,6 +103,10 @@ description = "Lint the package"
 [feature.dev.tasks.typecheck]
 cmd = "cd $PACKAGE_DIR && pyrefly check -c ../../pyrefly.toml ."
 description = "Typecheck the package"
+
+[feature.dev.tasks.deadcode]
+cmd = "cd $PACKAGE_DIR && vulture --config pyproject.toml"
+description = "Find dead code in the package"
 
 [feature.dev.tasks.tests]
 cmd = "cd $PACKAGE_DIR && pytest -q"
@@ -813,7 +818,6 @@ description = "Run MASt3R-SLAM inference (base config, 512px)"
 [feature.mast3r-slam.tasks.mast3r-slam-app]
 cmd = "python tools/gradio-app.py"
 depends-on = [
-    "_build-cuda-kernels",
     "_build-mojo-kernels",
     "_download-checkpoints",
     "_download-example-data",

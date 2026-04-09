@@ -22,3 +22,9 @@ ignore = [
     "UP037",  # Remove quotes false positive with jaxtyping
     "UP040",  # Beartype requires TypeAlias, not PEP 695 type
 ]
+
+[tool.vulture]
+paths = ["gsplat_rust_renderer", "tests", "tools"]
+exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*", "*/.ruff_cache/*"]
+sort_by_size = true
+min_confidence = 60
