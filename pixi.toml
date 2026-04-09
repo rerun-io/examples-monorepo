@@ -748,7 +748,6 @@ pyaml = "*"
 
 [feature.mast3r-slam-max.activation.env]
 PACKAGE_DIR = "packages/mast3r-slam"
-MAST3R_SLAM_MOJO_INTERFACE = "custom_op"
 
 [feature.mast3r-slam-max.tasks.check-max-python]
 cmd = "python -c \"import importlib; [print(mod, 'OK') for mod in ['max.experimental.torch', 'mast3r_slam.max_ops'] if not importlib.import_module(mod)]\""

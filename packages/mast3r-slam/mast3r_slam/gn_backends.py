@@ -9,9 +9,6 @@ def _load_cuda_backend() -> Any:
 
 
 def _load_mojo_backend() -> Any:
-    from mast3r_slam.max_ops import gauss_newton_rays as gauss_newton_rays_custom_op
-    from mast3r_slam.max_ops import preferred_mojo_interface
-
     shared_backend: Any | None = None
 
     def _shared() -> Any:
@@ -27,8 +24,6 @@ def _load_mojo_backend() -> Any:
             return _shared().gauss_newton_points_impl_idiomatic(tuple(args))
 
         def gauss_newton_rays(self, *args: Any) -> Any:
-            if preferred_mojo_interface() == "custom_op":
-                return gauss_newton_rays_custom_op(*args)
             return _shared().gauss_newton_rays_impl_idiomatic(tuple(args))
 
         def gauss_newton_calib(self, *args: Any) -> Any:
