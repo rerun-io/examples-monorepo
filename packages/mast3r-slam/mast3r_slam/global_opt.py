@@ -4,7 +4,7 @@ from jaxtyping import Bool, Float, Float32, Int
 from mast3r.model import AsymmetricMASt3R
 from torch import Tensor
 
-from mast3r_slam import _backends  # pyrefly: ignore
+from mast3r_slam import gn_backends as _gn_backends  # pyrefly: ignore
 from mast3r_slam.config import config
 from mast3r_slam.frame import Frame, SharedKeyframes
 from mast3r_slam.geometry import (
@@ -244,7 +244,7 @@ class FactorGraph:
         delta_thresh: float = self.cfg["delta_norm"]
 
         pose_data: Float[Tensor, "n_unique sim3_dim"] = world_sim3_cams.data[:, 0, :]
-        _backends.gauss_newton_rays(
+        _gn_backends.gauss_newton_rays(
             pose_data,
             Xs,
             Cs,
@@ -311,7 +311,7 @@ class FactorGraph:
         width: int
         height, width = img_size
 
-        _backends.gauss_newton_calib(
+        _gn_backends.gauss_newton_calib(
             pose_data,
             Xs,
             Cs,
