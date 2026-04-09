@@ -137,10 +137,6 @@ class SlamPipelineHandle:
     """Shared keyframe buffer (populated after backend starts)."""
     stopped_early: bool = False
     """True if the pipeline was terminated before processing all frames."""
-    final_world_sim3_cam: Float32[Tensor, "n 8"] | None = field(default=None, repr=False)
-    """Final keyframe poses snapped before the backend/manager are torn down."""
-    final_dataset_idx: Int[Tensor, "n"] | None = field(default=None, repr=False)
-    """Dataset frame ids corresponding to ``final_world_sim3_cam``."""
 
 
 def run_slam_pipeline(
@@ -447,12 +443,6 @@ def run_slam_pipeline(
         # become invalid after the manager shuts down.
         event_queue.put(LogText(path=log_path, message=f"Inference time: {format_time(timer() - start_time)}"))
         event_queue.put(LogText(path=log_path, message=f"Processed {len(keyframes)} keyframes"))
-
-        if handle is not None:
-            with keyframes.lock:
-                n_final: int = len(keyframes)
-                handle.final_world_sim3_cam = keyframes.world_sim3_cam[:n_final, 0].detach().clone().cpu()
-                handle.final_dataset_idx = keyframes.dataset_idx[:n_final].detach().clone().cpu()
 
         stopped: bool = handle.stopped_early if handle is not None else False
         if not stopped and ns_save_path is not None:
