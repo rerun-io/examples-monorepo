@@ -70,3 +70,9 @@ cmd = "python tools/bench_max_pose_retr.py"
 cwd = ".."
 depends-on = ["_build-cuda-kernels", "check-max-gn-ops"]
 description = "Benchmark the GN pose_retr MAX custom op"
+
+[tasks.bench-max-pose-retr-sweep]
+cmd = "python tools/bench_max_pose_retr_sweep.py"
+cwd = ".."
+depends-on = ["_build-cuda-kernels", "check-max-gn-ops"]
+description = "Benchmark pose_retr across workload sizes"
