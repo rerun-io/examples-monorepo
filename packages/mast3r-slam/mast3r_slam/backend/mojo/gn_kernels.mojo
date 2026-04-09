@@ -227,6 +227,9 @@ struct TangentVec7(TrivialRegisterPassable):
 def block_reduce_sum[origin: Origin[mut=True], //](
     value: Float32,
     tid: Int,
+    # UnsafePointer is required here: this is GPU shared memory from stack_allocation,
+    # which returns UnsafePointer. Mojo's safe pointer types (Pointer, OwnedPointer)
+    # only support single values, not array-like access or AddressSpace parameters.
     warp_partials: UnsafePointer[Scalar[DType.float32], origin, address_space=AddressSpace.SHARED],
 ) -> Float32:
     """Sum `value` across all threads in the block. Only thread 0 gets the correct total."""

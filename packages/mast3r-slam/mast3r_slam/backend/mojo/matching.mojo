@@ -224,6 +224,10 @@ def iter_proj_kernel(
 
 
 def refine_matches_kernel_f16(
+    # D11/D21 use UnsafePointer because the inner dot product needs
+    # ptr.load[width=8](offset) for SIMD-vectorized access. Mojo's safe
+    # pointer types (Pointer, OwnedPointer) only support single values,
+    # and LayoutTensor doesn't support multi-dim + SIMD width loads.
     D11: UnsafePointer[Float16, MutAnyOrigin],
     D21: UnsafePointer[Float16, MutAnyOrigin],
     p1: LayoutTensor[DType.int64, PIX2_I64_LT, MutAnyOrigin],
@@ -302,6 +306,8 @@ def refine_matches_kernel_f16_cached[
     FDIM: Int,
     BLOCK_SIZE: Int,
 ](
+    # D11/D21 use UnsafePointer: SIMD load[width=8] requires array-like pointer
+    # access. Mojo's safe pointer types only support single values.
     D11: UnsafePointer[Float16, MutAnyOrigin],
     D21: UnsafePointer[Float16, MutAnyOrigin],
     p1: LayoutTensor[DType.int64, PIX2_I64_LT, MutAnyOrigin],
@@ -315,8 +321,6 @@ def refine_matches_kernel_f16_cached[
     Fast path for MASt3R-SLAM's default config (16- or 128-dim descriptors in
     half precision). Caches each thread's query descriptor in shared memory,
     compile-time-unrolls the inner dot product.
-
-    D11/D21 stay as UnsafePointer for SIMD-8 loads. p1/p1_new use LayoutTensor.
     """
     var n: UInt = block_idx.x * block_dim.x + thread_idx.x
     var b: Int = Int(block_idx.y)
