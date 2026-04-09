@@ -95,6 +95,84 @@ The checked-in real fixture corpus that matters today is:
 
 In this spec, “step function” means the per-iteration accumulation function that returns Hessian blocks and gradient blocks but does not apply the full GN loop. “Public GN function” means the function that runs multiple iterations, solves for `dx`, retracts the poses in place, and returns the final update tensor.
 
+## Mojo Best Practices That Must Be Followed
+
+This section exists because the new contributor is not allowed to depend on the current Mojo GN code. It states the implementation rules explicitly so the resulting code is clean and idiomatic rather than a literal CUDA transliteration.
+
+When writing Mojo, always use current syntax. Use `def`, not `fn`. Use `comptime`, not `alias` or `@parameter`. Use `from std...` imports, not the older import paths. If a helper or public wrapper can raise because it touches Python, it must be marked `raises`. If a kernel is pure device code, it must not raise.
+
+The clean separation of responsibilities is mandatory. Put low-level math helpers and GPU kernels in `gn_kernels.mojo`. Put public orchestration, Python argument unpacking, index preparation, linear-system assembly, and solve logic in `gn.mojo`. Put only shared-library export glue in `mast3r_slam_mojo_backends.mojo`. Do not mix Python binding code into the kernel file.
+
+Inside GPU code, think in Mojo GPU terms rather than CUDA terms. A kernel is just a `def`. Launches happen through `ctx.enqueue_function[kernel, kernel](...)`. Shared memory should use `stack_allocation` or other current Mojo shared-memory primitives. Thread indexing should use `block_idx`, `block_dim`, `thread_idx`, `global_idx`, `lane_id`, and the `warp` reduction helpers from `std.gpu.primitives`.
+
+The kernel style should be “thread-parallel outer loop, scalar math inside each thread” unless a measured workload proves otherwise. That matches the earlier successful GN work and matches the branch-heavy per-point residual math better than forcing extra SIMD structure into the hot loop. Use warp or block reductions where they simplify and stabilize the code. Do not hand-write large barrier-heavy shared-memory trees unless there is measured evidence that the built-in reduction primitives are insufficient.
+
+The Python interop boundary must be tiny and obvious. Shared-library functions will receive `PythonObject` arguments. Convert Python scalars with `Int(py=...)`, `Float32(py=...)`, `Float64(py=...)`, `Bool(py=...)`, and so on. Centralize all raw `tensor.data_ptr()` reinterpretation in one tiny helper area. Do not scatter pointer-casting logic across the implementation. Once a tensor address has been turned into a typed Mojo pointer, switch back to higher-level tensor or structured kernel code immediately.
+
+The public GN path should not become Python logic. Python is only the caller boundary. The public GN iteration loop, index remapping, solve step, and pose retraction orchestration all belong in Mojo in this scratch build. That keeps the final boundary aligned with the old extension model and avoids creating a second architecture by accident.
+
+The implementation must be structured for deletion of temporary scaffolding. If a temporary CUDA fallback is kept for points or calib, it should be isolated at the public-call dispatch layer in `gn.mojo` or `gn_backends.py`, not interwoven throughout every helper.
+
+## Mojo Anti-Patterns to Avoid
+
+Do not recreate multiple Mojo GN variants such as “current”, “idiomatic”, “experimental”, or “v2”. This scratch spec is explicitly for one canonical Mojo GN implementation. If a temporary benchmark-only experiment is necessary, give it a clearly temporary local name and do not export it as part of the public API.
+
+Do not write a literal CUDA-style port with CUDA spellings preserved conceptually. That means no giant file that mixes kernels, public wrappers, and host solve code; no sprawling global pointer logic; and no direct imitation of CUDA launch syntax in comments or abstractions.
+
+Do not spread unsafe pointer logic through every wrapper. The unsafe boundary should be centralized. The kernel and orchestration code should operate on typed pointers or structured buffers after that one conversion step.
+
+Do not introduce a Python-side GN loop as a shortcut. That would violate the architecture this document is specifying. The final public GN behavior should remain a Mojo extension boundary with Python acting only as caller.
+
+Do not judge success primarily by synthetic microbenchmarks. The public rays path on the checked-in real fixtures is the release gate.
+
+Do not assume all public GN entrypoints share the same positional layout for `ii` and `jj`. The calib path is different because `K` appears before the edge-index tensors.
+
+## Exact Mojo Architecture to Build
+
+The scratch implementation should create exactly three Mojo source files for GN.
+
+`packages/mast3r-slam/mast3r_slam/backend/mojo/gn_kernels.mojo` should contain:
+
+- compile-time constants such as pose dimensions and launch sizes
+- the Sim3 math helpers ported from `gn_kernels.cu`
+- `pose_retr_kernel`
+- `gauss_newton_rays_step_kernel`
+- later, if needed, `gauss_newton_points_step_kernel`
+- later, if needed, `gauss_newton_calib_step_kernel`
+
+`packages/mast3r-slam/mast3r_slam/backend/mojo/gn.mojo` should contain:
+
+- the Python argument-unpacking wrappers
+- unique-keyframe extraction and optimizer-index remapping
+- the GN iteration loop
+- linear-system assembly and solve code
+- the public `gauss_newton_*` wrappers
+- the public `gauss_newton_*_step` wrappers
+- the public `pose_retr` wrapper
+
+`packages/mast3r-slam/mast3r_slam/backend/mojo/mast3r_slam_mojo_backends.mojo` should contain:
+
+- `@export def PyInit_mast3r_slam_mojo_backends() -> PythonObject`
+- `PythonModuleBuilder`
+- one `def_function` registration per public GN function
+- no GN algorithm logic
+
+If helper files are needed, one additional helper for Python interop is acceptable, but it must remain narrow in scope. A good example is a helper that caches the device context and centralizes typed pointer conversion for PyTorch tensors.
+
+## Implementation Sequence in Detail
+
+Milestone one is the public boundary skeleton. Define the Python-visible module export and the Python backend selector before implementing all kernels. A contributor should be able to import the module and see the intended function names early. This keeps the integration path stable while the kernels are still being ported.
+
+Milestone two is pose retraction plus its tests. Port the math helpers needed for `retrSim3`, `expSim3`, and quaternion composition, then implement `pose_retr_kernel`. This is the smallest end-to-end slice because it reads pose/update tensors, performs a Sim3 retraction, and writes back in place. Validate it before moving on.
+
+Milestone three is the rays step kernel. Port `ray_align_kernel` into a Mojo kernel that returns `Hs` and `gs` with the exact expected shapes. Use one block per edge or edge-partial, keep per-thread math scalar, keep relative Sim3 shared across the block, and reduce the per-thread local accumulators into the per-edge block outputs. This is the first performance-critical surface and the first one with real checked-in fixture signoff.
+
+Milestone four is the public rays GN loop. Port the host-side logic required to go from step outputs to final `dx`: unique keyframes, index remapping, block-system assembly, double-precision solve, retraction, and convergence stopping. At the end of this milestone, the public rays path should be benchmarkable against the real rays fixtures.
+
+Milestone five is widening to points and calib. Reuse the public orchestration structure from rays. If time or benchmark coverage is limited, it is acceptable to reuse the same public Mojo orchestration while still dispatching the step surface to CUDA temporarily. If that temporary choice is made, document it explicitly in code comments and keep the dispatch localized.
+
+Milestone six is cleanup. Once the single Mojo GN path is working, remove any temporary naming or dispatch scaffolding that suggests there are multiple supported Mojo implementations.
+
 ## Required Public Interfaces
 
 The Mojo backend must expose exactly these public Python-callable functions, because they are the ones exported by the original extension in `gn.cpp`:
@@ -201,6 +279,81 @@ The public GN loop must stop either when `max_iter` is reached or when `norm(dx)
 The calib path has one important indexing detail that caused a bug in earlier work: in the public calib argument list, `ii` and `jj` are at positions `4` and `5` because `K` is inserted before them. Do not assume all public GN entrypoints place `ii` and `jj` at the same argument indices.
 
 The calib step call also requires forwarding `Q_thresh`. The original `gauss_newton_calib_step` takes seventeen arguments total, not sixteen.
+
+The shared-library export module must use `PythonModuleBuilder` and an exported `PyInit_mast3r_slam_mojo_backends` function. Exported functions should take `PythonObject` wrappers at the boundary, unpack their arguments in Mojo, and return `PythonObject` or Python-convertible values. This is the correct current pattern for shared-library Python interop in Mojo.
+
+The device-launch path should use a cached `DeviceContext` rather than creating a new one inside every call. That keeps the shared-library boundary simpler and matches the architecture that proved workable in the existing branch. The helper that installs or retrieves the cached device context should be narrow and isolated from the GN logic itself.
+
+The solve path should begin with a CPU-side dense or block-assembled solve in double precision. That is not because it is theoretically beautiful, but because the original backend already relies on CPU/Eigen for the solve and earlier attempts at a GPU dense solve were worse for these tiny systems. The spec is outcome-focused: start with the path most likely to reproduce correct behavior and acceptable real-workload timing.
+
+The kernel constants should be declared as `comptime` values. Launch sizes, pose dimensions, and small static array sizes should not be magic literals scattered through the code. Give them names near the top of `gn_kernels.mojo`.
+
+Any shared-memory scratch used for reductions should be small and explicit. If raw-pointer shared memory is used, keep it local to the reduction helper. If a tile or layout-backed shared buffer is used, keep the layout declaration adjacent to the buffer allocation.
+
+Comments should explain non-obvious structure, not line-by-line mechanics. Good comments here are things like “one block handles one edge-partial pair” or “the CPU solve path intentionally mirrors the original Eigen-based behavior.” Bad comments are things that simply repeat the code.
+
+## Embedded Mojo Coding Patterns
+
+The next contributor should use these patterns directly rather than inventing their own older syntax.
+
+For Python interop, boundary wrappers should look like this structurally:
+
+    from std.python import Python, PythonObject
+
+    def some_public_wrapper(args_obj: PythonObject) raises -> PythonObject:
+        var tensor0 = args_obj[0].contiguous().float()
+        var max_iter = Int(py=args_obj[12])
+        var delta_thresh = Float64(py=args_obj[13])
+        ...
+        return Python.tuple(result_tensor)
+
+For shared-library exports, the module shape should look like this structurally:
+
+    from std.os import abort
+    from std.python import PythonObject
+    from std.python.bindings import PythonModuleBuilder
+
+    @export
+    def PyInit_mast3r_slam_mojo_backends() -> PythonObject:
+        try:
+            var m = PythonModuleBuilder("mast3r_slam_mojo_backends")
+            m.def_function[gauss_newton_rays_impl]("gauss_newton_rays")
+            ...
+            return m.finalize()
+        except e:
+            abort(String("Failed to create mast3r_slam_mojo_backends module: ", e))
+
+For kernel launches, the host-side call should use:
+
+    ctx.enqueue_function[kernel, kernel](
+        args...,
+        grid_dim=num_blocks,
+        block_dim=threads_per_block,
+    )
+
+For warp or block reductions, prefer the built-in GPU primitives rather than large handwritten CUDA-style reduction trees. The intended pattern is:
+
+    from std.gpu.primitives import warp
+    from std.gpu import barrier, lane_id
+
+    var reduced = warp.sum(value)
+    if Int(lane_id()) == 0:
+        ...
+    barrier()
+
+For shared memory, use current Mojo allocation patterns. If a tile-style shared buffer is appropriate, use `stack_allocation` with shared address space. If a raw array is simpler, use a raw shared allocation but keep it local and typed.
+
+## How to Translate the CUDA Kernels Cleanly
+
+Do not port the CUDA kernels line by line. Translate them into three layers.
+
+Layer one is reusable scalar math helpers. This is where quaternion composition, inverse, Sim3 action, relative Sim3, adjoint application, and exponential-map helpers should live. These helpers should operate on scalar locals or small fixed-size arrays, not on giant tensor abstractions.
+
+Layer two is the per-edge GPU kernel. This is where one block owns one edge or edge-partial, shared pose state is loaded once, each thread iterates its stride over points, and the thread-local accumulators are reduced into the final `Hs` and `gs` outputs.
+
+Layer three is the public GN orchestration. This is where Python-visible tensors are unpacked, step kernels are launched, blocks are assembled into a linear system, the system is solved, poses are retracted, and convergence is checked.
+
+This separation is what “clean and idiomatic” means in practice for this repo. It is more important than reproducing the exact loop nesting or helper names from CUDA.
 
 ## Concrete Steps
 
