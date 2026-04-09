@@ -452,18 +452,6 @@ __global__ void pose_retr_kernel(
   }
 }
 
-std::vector<torch::Tensor> pose_retr_cuda(
-  torch::Tensor poses,
-  torch::Tensor dx,
-  const int num_fix)
-{
-  pose_retr_kernel<<<1, THREADS>>>(
-    poses.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
-    dx.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
-    num_fix);
-  return {poses};
-}
-
 __global__ void point_align_kernel(
     const torch::PackedTensorAccessor32<float,2,torch::RestrictPtrTraits> Twc,
     const torch::PackedTensorAccessor32<float,3,torch::RestrictPtrTraits> Xs,
@@ -820,39 +808,6 @@ std::vector<torch::Tensor> gauss_newton_points_cuda(
   }
 
   return {dx}; // For debugging
-}
-
-std::vector<torch::Tensor> gauss_newton_points_step_cuda(
-  torch::Tensor Twc, torch::Tensor Xs, torch::Tensor Cs,
-  torch::Tensor ii, torch::Tensor jj,
-  torch::Tensor idx_ii2jj, torch::Tensor valid_match,
-  torch::Tensor Q,
-  const float sigma_point,
-  const float C_thresh,
-  const float Q_thresh)
-{
-  auto opts = Twc.options();
-  const int num_edges = ii.size(0);
-  const int pose_dim = 7;
-
-  torch::Tensor Hs = torch::zeros({4, num_edges, pose_dim, pose_dim}, opts);
-  torch::Tensor gs = torch::zeros({2, num_edges, pose_dim}, opts);
-
-  point_align_kernel<<<num_edges, THREADS>>>(
-    Twc.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
-    Xs.packed_accessor32<float,3,torch::RestrictPtrTraits>(),
-    Cs.packed_accessor32<float,3,torch::RestrictPtrTraits>(),
-    ii.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
-    jj.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
-    idx_ii2jj.packed_accessor32<long,2,torch::RestrictPtrTraits>(),
-    valid_match.packed_accessor32<bool,3,torch::RestrictPtrTraits>(),
-    Q.packed_accessor32<float,3,torch::RestrictPtrTraits>(),
-    Hs.packed_accessor32<float,4,torch::RestrictPtrTraits>(),
-    gs.packed_accessor32<float,3,torch::RestrictPtrTraits>(),
-    sigma_point, C_thresh, Q_thresh
-  );
-
-  return {Hs, gs};
 }
 
 __global__ void ray_align_kernel(
@@ -1272,40 +1227,6 @@ std::vector<torch::Tensor> gauss_newton_rays_cuda(
   return {dx}; // For debugging
 }
 
-std::vector<torch::Tensor> gauss_newton_rays_step_cuda(
-  torch::Tensor Twc, torch::Tensor Xs, torch::Tensor Cs,
-  torch::Tensor ii, torch::Tensor jj,
-  torch::Tensor idx_ii2jj, torch::Tensor valid_match,
-  torch::Tensor Q,
-  const float sigma_ray,
-  const float sigma_dist,
-  const float C_thresh,
-  const float Q_thresh)
-{
-  auto opts = Twc.options();
-  const int num_edges = ii.size(0);
-  const int pose_dim = 7;
-
-  torch::Tensor Hs = torch::zeros({4, num_edges, pose_dim, pose_dim}, opts);
-  torch::Tensor gs = torch::zeros({2, num_edges, pose_dim}, opts);
-
-  ray_align_kernel<<<num_edges, THREADS>>>(
-    Twc.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
-    Xs.packed_accessor32<float,3,torch::RestrictPtrTraits>(),
-    Cs.packed_accessor32<float,3,torch::RestrictPtrTraits>(),
-    ii.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
-    jj.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
-    idx_ii2jj.packed_accessor32<long,2,torch::RestrictPtrTraits>(),
-    valid_match.packed_accessor32<bool,3,torch::RestrictPtrTraits>(),
-    Q.packed_accessor32<float,3,torch::RestrictPtrTraits>(),
-    Hs.packed_accessor32<float,4,torch::RestrictPtrTraits>(),
-    gs.packed_accessor32<float,3,torch::RestrictPtrTraits>(),
-    sigma_ray, sigma_dist, C_thresh, Q_thresh
-  );
-
-  return {Hs, gs};
-}
-
 
 __global__ void calib_proj_kernel(
     const torch::PackedTensorAccessor32<float,2,torch::RestrictPtrTraits> Twc,
@@ -1714,43 +1635,4 @@ std::vector<torch::Tensor> gauss_newton_calib_cuda(
   }
 
   return {dx}; // For debugging
-}
-
-std::vector<torch::Tensor> gauss_newton_calib_step_cuda(
-  torch::Tensor Twc, torch::Tensor Xs, torch::Tensor Cs,
-  torch::Tensor K,
-  torch::Tensor ii, torch::Tensor jj,
-  torch::Tensor idx_ii2jj, torch::Tensor valid_match,
-  torch::Tensor Q,
-  const int height, const int width,
-  const int pixel_border,
-  const float z_eps,
-  const float sigma_pixel, const float sigma_depth,
-  const float C_thresh,
-  const float Q_thresh)
-{
-  auto opts = Twc.options();
-  const int num_edges = ii.size(0);
-  const int pose_dim = 7;
-
-  torch::Tensor Hs = torch::zeros({4, num_edges, pose_dim, pose_dim}, opts);
-  torch::Tensor gs = torch::zeros({2, num_edges, pose_dim}, opts);
-
-  calib_proj_kernel<<<num_edges, THREADS>>>(
-    Twc.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
-    Xs.packed_accessor32<float,3,torch::RestrictPtrTraits>(),
-    Cs.packed_accessor32<float,3,torch::RestrictPtrTraits>(),
-    K.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
-    ii.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
-    jj.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
-    idx_ii2jj.packed_accessor32<long,2,torch::RestrictPtrTraits>(),
-    valid_match.packed_accessor32<bool,3,torch::RestrictPtrTraits>(),
-    Q.packed_accessor32<float,3,torch::RestrictPtrTraits>(),
-    Hs.packed_accessor32<float,4,torch::RestrictPtrTraits>(),
-    gs.packed_accessor32<float,3,torch::RestrictPtrTraits>(),
-    height, width, pixel_border, z_eps, sigma_pixel, sigma_depth,
-    C_thresh, Q_thresh
-  );
-
-  return {Hs, gs};
 }

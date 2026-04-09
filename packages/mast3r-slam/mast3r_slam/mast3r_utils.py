@@ -18,28 +18,19 @@ from mast3r_slam.lietorch_utils import as_SE3
 from mast3r_slam.retrieval_database import RetrievalDatabase
 
 
-def load_mast3r(
-    path: str | None = None,
-    device: str = "cuda",
-    img_size: int | tuple[int, int] = 512,
-) -> AsymmetricMASt3R:
+def load_mast3r(path: str | None = None, device: str = "cuda") -> AsymmetricMASt3R:
     """Load a pretrained MASt3R model from a checkpoint file.
 
     Args:
         path: Path to the model checkpoint. Falls back to the default
             ViTLarge checkpoint under ``checkpoints/`` when ``None``.
         device: Torch device string to move the model onto.
-        img_size: Input image size expected by the MASt3R head. The installed
-            upstream package currently expects a `(height, width)` tuple during
-            `from_pretrained(...)` construction.
 
     Returns:
         The loaded ``AsymmetricMASt3R`` model in eval mode on ``device``.
     """
     weights_path = "checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth" if path is None else path
-    if isinstance(img_size, int):
-        img_size = (img_size, img_size)
-    model = AsymmetricMASt3R.from_pretrained(weights_path, img_size=img_size).to(device)
+    model = AsymmetricMASt3R.from_pretrained(weights_path).to(device)
     return model
 
 
@@ -139,6 +130,55 @@ def downsample(
         C = C[..., ::downsample, ::downsample].contiguous()
         D = D[..., ::downsample, ::downsample, :].contiguous()
         Q = Q[..., ::downsample, ::downsample].contiguous()
+    return X, C, D, Q
+
+
+@torch.inference_mode()
+def mast3r_symmetric_inference(
+    model: AsymmetricMASt3R, frame_i: Frame, frame_j: Frame
+) -> tuple[
+    Float[Tensor, "4 h w 3"],
+    Float[Tensor, "4 h w"],
+    Float[Tensor, "4 h w d"],
+    Float[Tensor, "4 h w"],
+]:
+    """Run symmetric two-frame MASt3R inference.
+
+    Encodes both frames (lazily, caching features on the frame objects), then
+    decodes in both directions (i->j and j->i) to produce four sets of 3D
+    point maps, confidence, descriptors, and descriptor confidence.
+
+    The output ordering along dim 0 is ``[res_ii, res_ji, res_jj, res_ij]``.
+
+    Args:
+        model: The MASt3R model.
+        frame_i: First frame (features cached on ``frame_i.feat``).
+        frame_j: Second frame (features cached on ``frame_j.feat``).
+
+    Returns:
+        A tuple ``(X, C, D, Q)`` each of shape ``(4, h, w, ...)``.
+    """
+    if frame_i.feat is None:
+        frame_i.feat, frame_i.pos, _ = model._encode_image(frame_i.rgb_tensor, frame_i.img_true_shape)
+    if frame_j.feat is None:
+        frame_j.feat, frame_j.pos, _ = model._encode_image(frame_j.rgb_tensor, frame_j.img_true_shape)
+
+    assert frame_i.pos is not None
+    assert frame_j.pos is not None
+    feat1, feat2 = frame_i.feat, frame_j.feat
+    pos1, pos2 = frame_i.pos, frame_j.pos
+    shape1, shape2 = frame_i.img_true_shape, frame_j.img_true_shape
+
+    res11, res21 = decoder(model, feat1, feat2, pos1, pos2, shape1, shape2)
+    res22, res12 = decoder(model, feat2, feat1, pos2, pos1, shape2, shape1)
+    res = [res11, res21, res22, res12]
+    X, C, D, Q = zip(
+        *[(r["pts3d"][0], r["conf"][0], r["desc"][0], r["desc_conf"][0]) for r in res],
+        strict=False,
+    )
+    # 4xhxwxc
+    X, C, D, Q = torch.stack(X), torch.stack(C), torch.stack(D), torch.stack(Q)
+    X, C, D, Q = downsample(X, C, D, Q)
     return X, C, D, Q
 
 

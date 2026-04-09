@@ -171,10 +171,6 @@ def save_kf_to_nerfstudio(
 
     # use the last keyframe to estimate camera intrinsics
     intrinsics = frame_to_intri(keyframe, camera_conventions="RDF")
-    assert intrinsics.fl_x is not None
-    assert intrinsics.fl_y is not None
-    assert intrinsics.cx is not None
-    assert intrinsics.cy is not None
     # save to nerfstudio format, assumes no distortion
     ns_data: NerfstudioData = NerfstudioData(
         w=w,

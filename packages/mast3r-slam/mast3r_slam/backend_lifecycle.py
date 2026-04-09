@@ -105,9 +105,9 @@ class SlamBackend:
 
     def __exit__(
         self,
-        _exc_type: type[BaseException] | None,
-        _exc_val: BaseException | None,
-        _exc_tb: TracebackType | None,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
     ) -> None:
         self._shutdown_backend()
         self._shutdown_manager()

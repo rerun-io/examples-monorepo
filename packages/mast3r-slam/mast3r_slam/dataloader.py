@@ -41,6 +41,7 @@ class MonocularDataset(torch.utils.data.Dataset):
         """Filesystem path to the dataset root, or None for live sources (webcam, realsense)."""
         self.camera_intrinsics = None  # Intrinsics | None — forward ref, typed by subclasses
         self.use_calibration: bool = config["use_calib"]
+        self.save_results: bool = True
 
     def __len__(self) -> int:
         """Return the number of frames in the dataset."""
@@ -224,6 +225,7 @@ class Webcam(MonocularDataset):
         self.dataset_path = None
         # load webcam using opencv
         self.cap = cv2.VideoCapture(-1)
+        self.save_results: bool = False
 
     def __len__(self) -> int:
         return 999999
@@ -243,18 +245,6 @@ class Webcam(MonocularDataset):
         self.timestamps.append(idx / 30)
 
         return rgb
-
-
-class RealsenseDataset(Webcam):
-    """Temporary alias for the legacy live RealSense source.
-
-    The original dedicated RealSense dataset implementation is no longer
-    present in this repository, but `load_dataset("realsense", ...)` is still
-    part of the public dispatch surface. Reuse the live webcam behavior until
-    a RealSense-specific implementation returns.
-    """
-
-    pass
 
 
 class MP4Dataset(MonocularDataset):

@@ -16,3 +16,4 @@ def _is_rgb_normalized(rgb: ndarray) -> bool:
 
 
 RgbNormalized = Annotated[Float[ndarray, "h w 3"], Is[_is_rgb_normalized]]
+BgrNormalized = Annotated[Float[ndarray, "h w 3"], Is[_is_rgb_normalized]]

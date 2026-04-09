@@ -87,7 +87,6 @@ ruff = "*"
 pytest = ">=8.0.0,<9"
 beartype = ">=0.22.9"
 pyrefly = "*"
-vulture = "*"
 hypothesis = "*"
 
 [feature.dev.pypi-dependencies]
@@ -727,7 +726,7 @@ outputs = [
 
 # ── Mojo kernel build ──────────────────────────────────────────────────
 [feature.mast3r-slam.tasks._build-mojo-kernels]
-cmd = "mojo build --emit shared-lib -o mast3r_slam_mojo_backends.so mast3r_slam/backend/mojo/mast3r_slam_mojo_backends.mojo"
+cmd = "mojo build --emit shared-lib -o mast3r_slam_mojo_backends.so mast3r_slam/backend/mojo/matching_kernels.mojo"
 cwd = "packages/mast3r-slam"
 description = "Build mast3r-slam Mojo backend kernels"
 inputs = [
@@ -787,24 +786,6 @@ cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.mp4 
 depends-on = ["_build-cuda-kernels", "_build-mojo-kernels", "_download-checkpoints", "_download-example-data"]
 cwd = "packages/mast3r-slam"
 description = "Run MASt3R-SLAM inference (base config, 512px)"
-
-[feature.mast3r-slam.tasks.capture-gn-example-base]
-cmd = "MAST3R_SLAM_GN_CAPTURE_DIR=artifacts/gn-fixtures/example-base MAST3R_SLAM_GN_CAPTURE_LIMIT=4 python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.mp4 --img-size 512 --config config/base.yaml"
-depends-on = ["_build-cuda-kernels", "_build-mojo-kernels", "_download-checkpoints", "_download-example-data"]
-cwd = "packages/mast3r-slam"
-description = "Run example-base while capturing GN fixtures at the backend boundary"
-
-[feature.mast3r-slam.tasks.capture-gn-livingroom-base]
-cmd = "MAST3R_SLAM_GN_CAPTURE_DIR=artifacts/gn-fixtures/livingroom-base MAST3R_SLAM_GN_CAPTURE_LIMIT=4 python tools/mast3r_slam_inference.py --dataset data/livingroom-tour.mp4 --img-size 512 --config config/base.yaml"
-depends-on = ["_build-cuda-kernels", "_build-mojo-kernels", "_download-checkpoints", "_download-example-data"]
-cwd = "packages/mast3r-slam"
-description = "Run livingroom base config while capturing GN fixtures at the backend boundary"
-
-[feature.mast3r-slam.tasks.bench-gn-real-fixtures]
-cmd = "python tools/bench_gn_real_fixtures.py artifacts/gn-fixtures"
-depends-on = ["_build-cuda-kernels", "_build-mojo-kernels"]
-cwd = "packages/mast3r-slam"
-description = "Benchmark GN public APIs on captured real fixtures"
 
 [feature.mast3r-slam.tasks.mast3r-slam-app]
 cmd = "python tools/gradio-app.py"

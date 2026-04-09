@@ -137,10 +137,11 @@ class RetrievalDatabase(Retriever):
         """
         step_params: dict = self.asmk.params.get("query_ivf")
 
+        images2: Float[ndarray, "..."]
         ranks: Float[ndarray, "..."]
         scores: Float[ndarray, "..."]
         topk: Int64[ndarray, "..."]
-        _images2, ranks, scores, topk = self.accumulate_scores(
+        images2, ranks, scores, topk = self.accumulate_scores(
             self.asmk.codebook,
             self.ivf_builder.kernel,
             self.ivf_builder.ivf,
@@ -196,7 +197,7 @@ class RetrievalDatabase(Retriever):
 
     def accumulate_scores(
         self,
-        _cdb: Any,
+        cdb: Any,
         kern: Any,
         ivf: Any,
         qvecs: Float32[ndarray, "n_local d"],

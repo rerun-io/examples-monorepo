@@ -111,7 +111,7 @@ class InferenceConfig:
     config: str = "config/base.yaml"
     """Path to the SLAM config YAML file."""
     save_as: str = "default"
-    """Reserved output label kept for backwards-compatible CLI parsing."""
+    """Subdirectory name for saving results under ``logs/``."""
     no_viz: bool = False
     """If True, skip launching visualisation processes."""
     img_size: Literal[224, 512] = 512
@@ -343,8 +343,9 @@ def run_slam_pipeline(
                     # Normal tracking: match this frame against the last keyframe,
                     # estimate its relative pose via Gauss-Newton, and decide
                     # whether the overlap is low enough to warrant a new keyframe.
+                    match_info: list
                     try_reloc: bool
-                    add_new_kf, _match_info, try_reloc = tracker.track(frame)
+                    add_new_kf, match_info, try_reloc = tracker.track(frame)
                     if try_reloc:
                         # Too few matches — tracking is lost, switch to reloc mode.
                         states.set_mode(Mode.RELOC)
@@ -475,15 +476,14 @@ def mast3r_slam_inference(inf_config: InferenceConfig) -> None:
     with contextlib.suppress(RuntimeError):
         mp.set_start_method("spawn")
 
-    torch.backends.cuda.matmul.allow_tf32 = True  # vulture: live runtime backend flag
+    torch.backends.cuda.matmul.allow_tf32 = True
     torch.set_grad_enabled(False)
     device: str = "cuda:0"
-    _save_as = inf_config.save_as  # Keep the historical CLI option live even though output routing is now rr_config-driven.
 
     # Load MASt3R model and share weights across processes.
     # share_memory() makes the model's parameters accessible to the backend
     # process without copying them (uses CUDA IPC for GPU tensors).
-    model: AsymmetricMASt3R = load_mast3r(device=device, img_size=inf_config.img_size)
+    model: AsymmetricMASt3R = load_mast3r(device=device)
     model.share_memory()
 
     # Pass application_id to backend so it can connect to the same Rerun viewer via gRPC.
