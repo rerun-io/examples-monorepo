@@ -1,3 +1,25 @@
+"""Numerical parity tests: Mojo backend vs CUDA backend.
+
+Coverage
+--------
+- gauss_newton_rays: TESTED — the only GN variant fully implemented in Mojo.
+  The Mojo kernel handles linearisation (rays step) and pose retraction;
+  the Cholesky solve runs in PyTorch on both paths.
+
+- gauss_newton_points, gauss_newton_calib: NOT TESTED here — these are not
+  implemented in Mojo. The Mojo backend's wrapper delegates their linearisation
+  step to the CUDA extension (see gn.mojo `gauss_newton_impl`), and the Python
+  routing in global_opt.py forces the CUDA backend for these variants. There is
+  no Mojo-specific code path to validate.
+
+- iter_proj, refine_matches: NOT TESTED for numerical parity in this file.
+  These are validated indirectly by the end-to-end pipeline (example-fast),
+  which exercises both kernels on real video data. The throughput benchmark
+  (tools/bench_kernels.py) also exercises both but does not check correctness.
+
+See also: tools/bench_kernels.py for throughput comparisons across all families.
+"""
+
 from __future__ import annotations
 
 import lietorch

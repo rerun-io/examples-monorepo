@@ -29,8 +29,20 @@ from mast3r_slam.mast3r_utils import mast3r_match_symmetric
 
 
 def _call_gn_backend(name: str, *args: object) -> object:
-    # Only the rays GN path is fully implemented in the Mojo shared library.
-    # Points and calibrated GN still rely on the CUDA extension step kernels.
+    """Dispatch a Gauss-Newton call to the appropriate backend.
+
+    Backend routing:
+      - gauss_newton_rays:   Mojo (if available), else CUDA.
+        The Mojo backend implements the full rays step kernel + pose retraction
+        in Mojo GPU code. The Cholesky solve runs in PyTorch on both paths.
+
+      - gauss_newton_points: Always CUDA.
+      - gauss_newton_calib:  Always CUDA.
+        These two variants are NOT implemented in Mojo — the Mojo wrapper's
+        `gauss_newton_impl` would delegate the linearisation step to the CUDA
+        extension anyway. To avoid the extra Mojo→CUDA→Mojo indirection, we
+        route directly to the CUDA backend here.
+    """
     backend = _backends
     if (
         _mojo_backends is not None

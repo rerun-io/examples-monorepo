@@ -4,14 +4,23 @@
 Measures both backends under identical conditions using torch.cuda.Event
 timing (median of 500 runs after 50 warmup iterations).
 
-Covers all three kernel families:
+Coverage
+--------
+Covers all kernel families that have a Mojo implementation:
   - iter_proj (frontend: iterative projection)
   - refine_matches (frontend: descriptor refinement)
   - gauss_newton_rays (backend: GN linearisation + solve + retraction)
 
-Input shapes are taken from real pipeline runs:
-  - fast config: 224px, fdim=24, radius=3, dilation=5
-  - base config: 512px, fdim=24, radius=3, dilation=5
+NOT benchmarked (no Mojo implementation — always routed to CUDA):
+  - gauss_newton_points: linearisation step delegates to CUDA extension
+  - gauss_newton_calib: linearisation step delegates to CUDA extension
+  The Mojo wrappers for these call into the CUDA extension for the step kernel
+  (see gn.mojo `gauss_newton_impl` and global_opt.py `_call_gn_backend`).
+
+Input shapes are taken from real pipeline runs (instrumented with BENCH_LOG_SHAPES):
+  - fast config: 224px, fdim=24, radius=3, dilation=5, batch=1..8
+  - base config: 512px, fdim=24, same matching params
+  - GN rays: 10-30 keyframes, 50K-262K points, 30-80 edges
 
 Usage:
     PYTHONPATH=. pixi run -e mast3r-slam-dev python tools/bench_kernels.py
