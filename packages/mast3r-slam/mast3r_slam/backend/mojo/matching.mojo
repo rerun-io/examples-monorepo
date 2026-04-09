@@ -223,85 +223,6 @@ def iter_proj_kernel(
     p_new[b, ni, 1] = v
 
 
-def refine_matches_kernel(
-    D11: UnsafePointer[Float32, MutAnyOrigin],
-    D21: UnsafePointer[Float32, MutAnyOrigin],
-    p1: LayoutTensor[DType.int64, PIX2_I64_LT, MutAnyOrigin],
-    p1_new: LayoutTensor[DType.int64, PIX2_I64_LT, MutAnyOrigin],
-    h: Int,
-    w: Int,
-    num_pts: Int,
-    fdim: Int,
-    radius: Int,
-    dilation_max: Int,
-):
-    """Descriptor-based match refinement kernel (float32 path).
-
-    Coarse-to-fine descriptor search: at each dilation level d, scan a grid of
-    (2·radius·d + 1)² candidates spaced d pixels apart, re-centre, decrease d.
-
-    D11/D21 stay as UnsafePointer for SIMD-vectorized dot product loads.
-    p1/p1_new use LayoutTensor for clean [b, n, 2] indexing.
-    """
-    var n: UInt = block_idx.x * block_dim.x + thread_idx.x
-    var b: Int = Int(block_idx.y)
-
-    if n >= UInt(num_pts):
-        return
-    var ni: Int = Int(n)
-
-    # Descriptor strides (manual — needed for SIMD load[width=4] on raw ptr)
-    var d11_stride_b: Int = h * w * fdim
-    var d11_stride_v: Int = w * fdim
-    var d21_stride_b: Int = num_pts * fdim
-
-    var u0: Int = Int(p1[b, ni, 0])
-    var v0: Int = Int(p1[b, ni, 1])
-    var d21_base: Int = b * d21_stride_b + ni * fdim  # query descriptor base (loop-invariant)
-
-    var max_score: Float32 = -3.4028235e+38
-    var u_new: Int = u0
-    var v_new: Int = v0
-
-    for d in range(dilation_max, 0, -1):
-        var rd: Int = radius * d
-        var diam: Int = 2 * rd + 1
-        var i: Int = 0
-        while i < diam:
-            var j: Int = 0
-            while j < diam:
-                var u_cand: Int = u0 - rd + i
-                var v_cand: Int = v0 - rd + j
-
-                if v_cand >= 0 and v_cand < h and u_cand >= 0 and u_cand < w:
-                    var score: Float32 = 0.0
-                    var d11_base: Int = b * d11_stride_b + v_cand * d11_stride_v + u_cand * fdim
-                    # SIMD-4 vectorized dot product (raw pointer for perf)
-                    var k: Int = 0
-                    while k + 4 <= fdim:
-                        var v21 = D21.load[width=4](d21_base + k)
-                        var v11 = D11.load[width=4](d11_base + k)
-                        score += (v21 * v11).reduce_add()
-                        k += 4
-                    while k < fdim:
-                        score += D21[d21_base + k] * D11[d11_base + k]
-                        k += 1
-
-                    if score > max_score:
-                        max_score = score
-                        u_new = u_cand
-                        v_new = v_cand
-
-                j += d
-            i += d
-
-        u0 = u_new
-        v0 = v_new
-
-    p1_new[b, ni, 0] = Int64(u_new)
-    p1_new[b, ni, 1] = Int64(v_new)
-
-
 def refine_matches_kernel_f16(
     D11: UnsafePointer[Float16, MutAnyOrigin],
     D21: UnsafePointer[Float16, MutAnyOrigin],
@@ -621,56 +542,39 @@ def refine_matches_py(
     var block_size: Int = choose_refine_block(num_pts, fdim)
     var num_blocks_x: Int = ceildiv(num_pts, block_size)
 
-    # Dispatch float16 vs float32 to avoid half→float copy overhead (~7 µs)
-    var is_half: Bool = Bool(D11_obj.dtype == torch.float16)
+    # The production pipeline always passes .half() descriptors. We only
+    # support f16 — casting to f16 here if needed for robustness.
+    var D11: PythonObject = D11_obj.contiguous().half()
+    var D21: PythonObject = D21_obj.contiguous().half()
+    var d11_uptr = torch_float16_ptr(D11)
+    var d21_uptr = torch_float16_ptr(D21)
 
-    if is_half:
-        var D11: PythonObject = D11_obj.contiguous()
-        var D21: PythonObject = D21_obj.contiguous()
-        var d11_uptr = torch_float16_ptr(D11)
-        var d21_uptr = torch_float16_ptr(D21)
-
-        # Specialize the hot MASt3R-SLAM path so the compiler can unroll the
-        # inner dot product and we only read each query descriptor once.
-        if radius == 2 and dilation_max == 2 and block_size == 8 and fdim == 16:
-            comptime kernel = refine_matches_kernel_f16_cached[16, 8]
-            ctx_ptr[].enqueue_function[kernel, kernel](
-                d11_uptr,
-                d21_uptr,
-                p1_lt,
-                p1_new_lt,
-                h, w, num_pts,
-                grid_dim=(num_blocks_x, batch),
-                block_dim=block_size,
-            )
-        elif radius == 2 and dilation_max == 2 and block_size == 16 and fdim == 128:
-            comptime kernel = refine_matches_kernel_f16_cached[128, 16]
-            ctx_ptr[].enqueue_function[kernel, kernel](
-                d11_uptr,
-                d21_uptr,
-                p1_lt,
-                p1_new_lt,
-                h, w, num_pts,
-                grid_dim=(num_blocks_x, batch),
-                block_dim=block_size,
-            )
-        else:
-            ctx_ptr[].enqueue_function[refine_matches_kernel_f16, refine_matches_kernel_f16](
-                d11_uptr,
-                d21_uptr,
-                p1_lt,
-                p1_new_lt,
-                h, w, num_pts, fdim, radius, dilation_max,
-                grid_dim=(num_blocks_x, batch),
-                block_dim=block_size,
-            )
+    # Specialize the hot MASt3R-SLAM path so the compiler can unroll the
+    # inner dot product and we only read each query descriptor once.
+    if radius == 2 and dilation_max == 2 and block_size == 8 and fdim == 16:
+        comptime kernel = refine_matches_kernel_f16_cached[16, 8]
+        ctx_ptr[].enqueue_function[kernel, kernel](
+            d11_uptr,
+            d21_uptr,
+            p1_lt,
+            p1_new_lt,
+            h, w, num_pts,
+            grid_dim=(num_blocks_x, batch),
+            block_dim=block_size,
+        )
+    elif radius == 2 and dilation_max == 2 and block_size == 16 and fdim == 128:
+        comptime kernel = refine_matches_kernel_f16_cached[128, 16]
+        ctx_ptr[].enqueue_function[kernel, kernel](
+            d11_uptr,
+            d21_uptr,
+            p1_lt,
+            p1_new_lt,
+            h, w, num_pts,
+            grid_dim=(num_blocks_x, batch),
+            block_dim=block_size,
+        )
     else:
-        var D11: PythonObject = D11_obj.contiguous().float()
-        var D21: PythonObject = D21_obj.contiguous().float()
-        var d11_uptr = torch_float32_ptr(D11)
-        var d21_uptr = torch_float32_ptr(D21)
-
-        ctx_ptr[].enqueue_function[refine_matches_kernel, refine_matches_kernel](
+        ctx_ptr[].enqueue_function[refine_matches_kernel_f16, refine_matches_kernel_f16](
             d11_uptr,
             d21_uptr,
             p1_lt,
