@@ -37,9 +37,18 @@ def gauss_newton_calib(*args: Any) -> tuple[Any, ...]:
     return _cuda_backends.gauss_newton_calib(*args)
 
 
-gauss_newton_points_step = _cuda_backends.gauss_newton_points_step
-gauss_newton_rays_step = _cuda_backends.gauss_newton_rays_step
-gauss_newton_calib_step = _cuda_backends.gauss_newton_calib_step
+def gauss_newton_points_step(*args: Any) -> tuple[Any, ...]:
+    return tuple(_cuda_backends.gauss_newton_points_step(*args))
+
+
+def gauss_newton_rays_step(*args: Any) -> tuple[Any, ...]:
+    if _use_mojo("gauss_newton_rays_step"):
+        return tuple(_mojo_backends.gauss_newton_rays_step(args))
+    return tuple(_cuda_backends.gauss_newton_rays_step(*args))
+
+
+def gauss_newton_calib_step(*args: Any) -> tuple[Any, ...]:
+    return tuple(_cuda_backends.gauss_newton_calib_step(*args))
 
 
 def pose_retr(*args: Any) -> Any:

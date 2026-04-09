@@ -34,6 +34,18 @@ def test_rays_step_shapes() -> None:
     assert gs.shape == (2, ii.numel(), 7)
 
 
+def test_selected_rays_step_matches_cuda() -> None:
+    Twc, Xs, Cs, ii, jj, idx_ii2jj, valid_match, Q, _K = _make_fixture()
+    hs_cuda, gs_cuda = _backends.gauss_newton_rays_step(
+        Twc, Xs, Cs, ii, jj, idx_ii2jj, valid_match, Q, 0.003, 10.0, 0.0, 1.5
+    )
+    hs_sel, gs_sel = gn_backends.gauss_newton_rays_step(
+        Twc, Xs, Cs, ii, jj, idx_ii2jj, valid_match, Q, 0.003, 10.0, 0.0, 1.5
+    )
+    torch.testing.assert_close(hs_sel, hs_cuda, atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(gs_sel, gs_cuda, atol=1e-3, rtol=1e-4)
+
+
 def test_calib_step_shapes() -> None:
     Twc, Xs, Cs, ii, jj, idx_ii2jj, valid_match, Q, K = _make_fixture()
     Hs, gs = _backends.gauss_newton_calib_step(Twc, Xs, Cs, K, ii, jj, idx_ii2jj, valid_match, Q, 64, 64, -10, 1e-6, 1.0, 10.0, 0.0, 1.5)

@@ -59,6 +59,8 @@ def get_lietorch_module() raises -> PythonObject:
 
 
 comptime POSE_DIM = 7
+comptime POSE_STRIDE = 8
+comptime RAYS_HDIM = 14 * (14 + 1) // 2
 
 
 def get_unique_kf_idx(ii: PythonObject, jj: PythonObject) raises -> PythonObject:
@@ -313,6 +315,261 @@ def exp_sim3_components(
     return out^
 
 
+@always_inline
+def quat_inv_components(
+    qx: Float32, qy: Float32, qz: Float32, qw: Float32,
+) -> InlineArray[Float32, 4]:
+    var out = InlineArray[Float32, 4](fill=0.0)
+    out[0] = -qx
+    out[1] = -qy
+    out[2] = -qz
+    out[3] = qw
+    return out^
+
+
+@always_inline
+def act_sim3_components(
+    tx: Float32, ty: Float32, tz: Float32,
+    qx: Float32, qy: Float32, qz: Float32, qw: Float32,
+    s: Float32,
+    x0: Float32, x1: Float32, x2: Float32,
+) -> InlineArray[Float32, 3]:
+    var rot = act_so3_components(qx, qy, qz, qw, x0, x1, x2)
+    var out = InlineArray[Float32, 3](fill=0.0)
+    out[0] = rot[0] * s + tx
+    out[1] = rot[1] * s + ty
+    out[2] = rot[2] * s + tz
+    return out^
+
+
+@always_inline
+def dot3_components(
+    a0: Float32, a1: Float32, a2: Float32,
+    b0: Float32, b1: Float32, b2: Float32,
+) -> Float32:
+    return a0 * b0 + a1 * b1 + a2 * b2
+
+
+@always_inline
+def squared_norm3_components(x0: Float32, x1: Float32, x2: Float32) -> Float32:
+    return x0 * x0 + x1 * x1 + x2 * x2
+
+
+@always_inline
+def huber_scalar(r: Float32) -> Float32:
+    var r_abs = abs(r)
+    if r_abs < 1.345:
+        return 1.0
+    return 1.345 / r_abs
+
+
+@always_inline
+def rel_sim3_components(
+    tix: Float32, tiy: Float32, tiz: Float32,
+    qix: Float32, qiy: Float32, qiz: Float32, qiw: Float32,
+    si: Float32,
+    tjx: Float32, tjy: Float32, tjz: Float32,
+    qjx: Float32, qjy: Float32, qjz: Float32, qjw: Float32,
+    sj: Float32,
+) -> InlineArray[Float32, 8]:
+    var si_inv = 1.0 / si
+    var qi_inv = quat_inv_components(qix, qiy, qiz, qiw)
+    var qij = quat_comp_components(qi_inv[0], qi_inv[1], qi_inv[2], qi_inv[3], qjx, qjy, qjz, qjw)
+    var dt0 = tjx - tix
+    var dt1 = tjy - tiy
+    var dt2 = tjz - tiz
+    var rot_t = act_so3_components(qi_inv[0], qi_inv[1], qi_inv[2], qi_inv[3], dt0, dt1, dt2)
+    var out = InlineArray[Float32, 8](fill=0.0)
+    out[0] = rot_t[0] * si_inv
+    out[1] = rot_t[1] * si_inv
+    out[2] = rot_t[2] * si_inv
+    out[3] = qij[0]
+    out[4] = qij[1]
+    out[5] = qij[2]
+    out[6] = qij[3]
+    out[7] = si_inv * sj
+    return out^
+
+
+@always_inline
+def apply_sim3_adj_inv_components(
+    tx: Float32, ty: Float32, tz: Float32,
+    qx: Float32, qy: Float32, qz: Float32, qw: Float32,
+    s: Float32,
+    x0: Float32, x1: Float32, x2: Float32,
+    x3: Float32, x4: Float32, x5: Float32,
+    x6: Float32,
+) -> InlineArray[Float32, 7]:
+    var s_inv = 1.0 / s
+    var ra = act_so3_components(qx, qy, qz, qw, x0, x1, x2)
+    var out = InlineArray[Float32, 7](fill=0.0)
+    out[0] = s_inv * ra[0]
+    out[1] = s_inv * ra[1]
+    out[2] = s_inv * ra[2]
+
+    var rb = act_so3_components(qx, qy, qz, qw, x3, x4, x5)
+    out[3] = rb[0] + s_inv * (ty * ra[2] - tz * ra[1])
+    out[4] = rb[1] + s_inv * (tz * ra[0] - tx * ra[2])
+    out[5] = rb[2] + s_inv * (tx * ra[1] - ty * ra[0])
+    out[6] = x6 + s_inv * dot3_components(tx, ty, tz, ra[0], ra[1], ra[2])
+    return out^
+
+
+def gauss_newton_rays_step_kernel(
+    twc: UnsafePointer[Float32, MutAnyOrigin],
+    xs: UnsafePointer[Float32, MutAnyOrigin],
+    cs: UnsafePointer[Float32, MutAnyOrigin],
+    ii: UnsafePointer[Int64, MutAnyOrigin],
+    jj: UnsafePointer[Int64, MutAnyOrigin],
+    idx_ii2jj: UnsafePointer[Int64, MutAnyOrigin],
+    valid_match: UnsafePointer[UInt8, MutAnyOrigin],
+    q_tensor: UnsafePointer[Float32, MutAnyOrigin],
+    hs: UnsafePointer[Float32, MutAnyOrigin],
+    gs: UnsafePointer[Float32, MutAnyOrigin],
+    num_points: Int,
+    num_edges: Int,
+    sigma_ray: Float32,
+    sigma_dist: Float32,
+    c_thresh: Float32,
+    q_thresh: Float32,
+):
+    var edge = Int(global_idx.x)
+    if edge >= num_edges:
+        return
+
+    var ix = Int(ii[edge])
+    var jx = Int(jj[edge])
+    var pi = ix * POSE_STRIDE
+    var pj = jx * POSE_STRIDE
+
+    var rel = rel_sim3_components(
+        twc[pi + 0], twc[pi + 1], twc[pi + 2],
+        twc[pi + 3], twc[pi + 4], twc[pi + 5], twc[pi + 6],
+        twc[pi + 7],
+        twc[pj + 0], twc[pj + 1], twc[pj + 2],
+        twc[pj + 3], twc[pj + 4], twc[pj + 5], twc[pj + 6],
+        twc[pj + 7],
+    )
+
+    var hij = InlineArray[Float32, RAYS_HDIM](fill=0.0)
+    var vi = InlineArray[Float32, POSE_DIM](fill=0.0)
+    var vj = InlineArray[Float32, POSE_DIM](fill=0.0)
+    var jxv = InlineArray[Float32, 14](fill=0.0)
+
+    var sigma_ray_inv = 1.0 / sigma_ray
+    var sigma_dist_inv = 1.0 / sigma_dist
+
+    for k in range(num_points):
+        var valid_match_ind = valid_match[edge * num_points + k] != 0
+        var ind_xi = Int(idx_ii2jj[edge * num_points + k])
+        if not valid_match_ind:
+            ind_xi = 0
+
+        var xi_base = (ix * num_points + ind_xi) * 3
+        var xj_base = (jx * num_points + k) * 3
+        var ci = cs[ix * num_points + ind_xi]
+        var cj = cs[jx * num_points + k]
+        var qv = q_tensor[edge * num_points + k]
+
+        var xi0 = xs[xi_base + 0]
+        var xi1 = xs[xi_base + 1]
+        var xi2 = xs[xi_base + 2]
+        var xj0 = xs[xj_base + 0]
+        var xj1 = xs[xj_base + 1]
+        var xj2 = xs[xj_base + 2]
+
+        var norm2_i = squared_norm3_components(xi0, xi1, xi2)
+        var norm1_i = sqrt(norm2_i)
+        var norm1_i_inv = 1.0 / norm1_i
+        var ri0 = norm1_i_inv * xi0
+        var ri1 = norm1_i_inv * xi1
+        var ri2 = norm1_i_inv * xi2
+
+        var xj_ci = act_sim3_components(
+            rel[0], rel[1], rel[2], rel[3], rel[4], rel[5], rel[6], rel[7], xj0, xj1, xj2
+        )
+        var norm2_j = squared_norm3_components(xj_ci[0], xj_ci[1], xj_ci[2])
+        var norm1_j = sqrt(norm2_j)
+        var norm1_j_inv = 1.0 / norm1_j
+        var rj0 = norm1_j_inv * xj_ci[0]
+        var rj1 = norm1_j_inv * xj_ci[1]
+        var rj2 = norm1_j_inv * xj_ci[2]
+
+        var err0 = rj0 - ri0
+        var err1 = rj1 - ri1
+        var err2 = rj2 - ri2
+        var err3 = norm1_j - norm1_i
+
+        var valid = valid_match_ind and (qv > q_thresh) and (ci > c_thresh) and (cj > c_thresh)
+        var conf_weight: Float32 = qv
+        var sqrt_w_ray: Float32 = 0.0
+        var sqrt_w_dist: Float32 = 0.0
+        if valid:
+            var sqrt_conf = sqrt(conf_weight)
+            sqrt_w_ray = sigma_ray_inv * sqrt_conf
+            sqrt_w_dist = sigma_dist_inv * sqrt_conf
+
+        var w0 = huber_scalar(sqrt_w_ray * err0) * sqrt_w_ray * sqrt_w_ray
+        var w1 = huber_scalar(sqrt_w_ray * err1) * sqrt_w_ray * sqrt_w_ray
+        var w2 = huber_scalar(sqrt_w_ray * err2) * sqrt_w_ray * sqrt_w_ray
+        var w3 = huber_scalar(sqrt_w_dist * err3) * sqrt_w_dist * sqrt_w_dist
+
+        var norm3_j_inv = norm1_j_inv / norm2_j
+        var drx_dpx = norm1_j_inv - xj_ci[0] * xj_ci[0] * norm3_j_inv
+        var dry_dpy = norm1_j_inv - xj_ci[1] * xj_ci[1] * norm3_j_inv
+        var drz_dpz = norm1_j_inv - xj_ci[2] * xj_ci[2] * norm3_j_inv
+        var drx_dpy = -xj_ci[0] * xj_ci[1] * norm3_j_inv
+        var drx_dpz = -xj_ci[0] * xj_ci[2] * norm3_j_inv
+        var dry_dpz = -xj_ci[1] * xj_ci[2] * norm3_j_inv
+
+        @parameter
+        def accumulate_row(
+            err: Float32,
+            w: Float32,
+            ji0: Float32, ji1: Float32, ji2: Float32, ji3: Float32, ji4: Float32, ji5: Float32, ji6: Float32,
+        ):
+            var jadj = apply_sim3_adj_inv_components(
+                twc[pi + 0], twc[pi + 1], twc[pi + 2],
+                twc[pi + 3], twc[pi + 4], twc[pi + 5], twc[pi + 6], twc[pi + 7],
+                ji0, ji1, ji2, ji3, ji4, ji5, ji6,
+            )
+            for n in range(POSE_DIM):
+                jxv[n + 7] = jadj[n]
+                jxv[n] = -jadj[n]
+            var l = 0
+            for n in range(14):
+                for m in range(n + 1):
+                    hij[l] += w * jxv[n] * jxv[m]
+                    l += 1
+            for n in range(POSE_DIM):
+                vi[n] += w * err * jxv[n]
+                vj[n] += w * err * jxv[n + 7]
+
+        accumulate_row(err0, w0, drx_dpx, drx_dpy, drx_dpz, 0.0, rj2, -rj1, 0.0)
+        accumulate_row(err1, w1, drx_dpy, dry_dpy, dry_dpz, -rj2, 0.0, rj0, 0.0)
+        accumulate_row(err2, w2, drx_dpz, dry_dpz, drz_dpz, rj1, -rj0, 0.0, 0.0)
+        accumulate_row(err3, w3, rj0, rj1, rj2, 0.0, 0.0, 0.0, norm1_j)
+
+    for n in range(POSE_DIM):
+        gs[(0 * num_edges + edge) * POSE_DIM + n] = vi[n]
+        gs[(1 * num_edges + edge) * POSE_DIM + n] = vj[n]
+
+    var l = 0
+    for n in range(14):
+        for m in range(n + 1):
+            var val = hij[l]
+            if n < 7 and m < 7:
+                hs[((0 * num_edges + edge) * 49) + n * 7 + m] = val
+                hs[((0 * num_edges + edge) * 49) + m * 7 + n] = val
+            elif n >= 7 and m < 7:
+                hs[((1 * num_edges + edge) * 49) + m * 7 + (n - 7)] = val
+                hs[((2 * num_edges + edge) * 49) + (n - 7) * 7 + m] = val
+            else:
+                hs[((3 * num_edges + edge) * 49) + (n - 7) * 7 + (m - 7)] = val
+                hs[((3 * num_edges + edge) * 49) + (m - 7) * 7 + (n - 7)] = val
+            l += 1
+
+
 def pose_retr_kernel(
     poses: UnsafePointer[Float32, MutAnyOrigin],
     dx: UnsafePointer[Float32, MutAnyOrigin],
@@ -519,6 +776,48 @@ def pose_retr_py(
         return Python.none()
     _ = get_cuda_backend_module().pose_retr(poses_obj, dx_obj.contiguous(), num_fix)
     return Python.none()
+
+
+def gauss_newton_rays_step_py(args_obj: PythonObject) raises -> PythonObject:
+    var twc = args_obj[0].contiguous().float()
+    var xs = args_obj[1].contiguous().float()
+    var cs = args_obj[2].contiguous().float()
+    var ii = args_obj[3].contiguous()
+    var jj = args_obj[4].contiguous()
+    var idx_ii2jj = args_obj[5].contiguous()
+    var valid_match = args_obj[6].contiguous()
+    var q_tensor = args_obj[7].contiguous().float()
+    var sigma_ray = Float32(py=args_obj[8])
+    var sigma_dist = Float32(py=args_obj[9])
+    var c_thresh = Float32(py=args_obj[10])
+    var q_thresh = Float32(py=args_obj[11])
+
+    var torch = get_torch_module()
+    var num_edges = Int(py=ii.shape[0])
+    var num_points = Int(py=xs.shape[1])
+    var hs = torch.zeros(Python.list(4, num_edges, POSE_DIM, POSE_DIM), device=twc.device, dtype=twc.dtype)
+    var gs = torch.zeros(Python.list(2, num_edges, POSE_DIM), device=twc.device, dtype=twc.dtype)
+
+    var twc_ptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=Int(py=twc.data_ptr()))
+    var xs_ptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=Int(py=xs.data_ptr()))
+    var cs_ptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=Int(py=cs.data_ptr()))
+    var ii_ptr = UnsafePointer[Int64, MutAnyOrigin](unsafe_from_address=Int(py=ii.data_ptr()))
+    var jj_ptr = UnsafePointer[Int64, MutAnyOrigin](unsafe_from_address=Int(py=jj.data_ptr()))
+    var idx_ptr = UnsafePointer[Int64, MutAnyOrigin](unsafe_from_address=Int(py=idx_ii2jj.data_ptr()))
+    var valid_ptr = UnsafePointer[UInt8, MutAnyOrigin](unsafe_from_address=Int(py=valid_match.data_ptr()))
+    var q_ptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=Int(py=q_tensor.data_ptr()))
+    var hs_ptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=Int(py=hs.data_ptr()))
+    var gs_ptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=Int(py=gs.data_ptr()))
+
+    var ctx_ptr = get_cached_context_ptr()
+    ctx_ptr[].enqueue_function[gauss_newton_rays_step_kernel, gauss_newton_rays_step_kernel](
+        twc_ptr, xs_ptr, cs_ptr, ii_ptr, jj_ptr, idx_ptr, valid_ptr, q_ptr, hs_ptr, gs_ptr,
+        num_points, num_edges, sigma_ray, sigma_dist, c_thresh, q_thresh,
+        grid_dim=num_edges,
+        block_dim=1,
+    )
+    torch.cuda.synchronize()
+    return Python.tuple(hs, gs)
 
 
 def gauss_newton_impl(
@@ -1263,6 +1562,7 @@ def PyInit_mast3r_slam_mojo_backends() -> PythonObject:
         m.def_function[iter_proj_py]("iter_proj")
         m.def_function[refine_matches_py]("refine_matches")
         m.def_function[pose_retr_py]("pose_retr")
+        m.def_function[gauss_newton_rays_step_py]("gauss_newton_rays_step")
         m.def_function[gauss_newton_points_impl]("gauss_newton_points_impl")
         m.def_function[gauss_newton_rays_impl]("gauss_newton_rays_impl")
         m.def_function[gauss_newton_calib_impl]("gauss_newton_calib_impl")
