@@ -559,7 +559,7 @@ brush = "==0.3.0"
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.vistadream.dependencies]
 python = "3.12.*"
-pytorch-gpu = ">=2.10.0"  # tightens shared cuda floor; needed by Flux/diffusers
+pytorch-gpu = ">=2.10.0"        # tightens shared cuda floor; needed by Flux/diffusers
 cmake = ">=4.0.3,<5"
 open3d = ">=0.19.0,<0.20"
 scikit-learn = ">=1.7.1,<2"
@@ -674,7 +674,11 @@ description = "Benchmark 5 Quest + 5 Aria VRS files (requires download URL JSONs
 # mast3r-slam
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.mast3r-slam]
-channels = ["https://prefix.dev/ai-demos", "https://conda.modular.com/max-nightly/", "conda-forge"]
+channels = [
+    "https://prefix.dev/ai-demos",
+    "https://conda.modular.com/max-nightly/",
+    "conda-forge",
+]
 platforms = ["linux-64"]
 
 [feature.mast3r-slam.dependencies]
@@ -728,9 +732,7 @@ inputs = [
     "packages/mast3r-slam/mast3r_slam/backend/src/*.cu",
     "packages/mast3r-slam/mast3r_slam/backend/include/*.h",
 ]
-outputs = [
-    "packages/mast3r-slam/mast3r_slam/_backends*.so",
-]
+outputs = ["packages/mast3r-slam/mast3r_slam/_backends*.so"]
 
 # ── Mojo kernel build ──────────────────────────────────────────────────
 [feature.mast3r-slam.tasks._build-mojo-kernels]
@@ -741,12 +743,8 @@ pixi run -e mast3r-slam-mojo-build bash -lc '
 '
 """
 description = "Build mast3r-slam Mojo backend kernels"
-inputs = [
-    "packages/mast3r-slam/mast3r_slam/backend/mojo/*.mojo",
-]
-outputs = [
-    "packages/mast3r-slam/mast3r_slam_mojo_backends*.so",
-]
+inputs = ["packages/mast3r-slam/mast3r_slam/backend/mojo/*.mojo"]
+outputs = ["packages/mast3r-slam/mast3r_slam_mojo_backends*.so"]
 
 # ── Download tasks (hidden, used as depends-on) ─────────────────────────
 [feature.mast3r-slam.tasks._download-checkpoints]
@@ -766,7 +764,10 @@ outputs = [
 [feature.mast3r-slam.tasks._download-example-data]
 cmd = "hf download pablovela5620/mast3r-slam-example-data normal-apt-tour.mp4 livingroom-tour.mp4 --repo-type dataset --local-dir data/"
 cwd = "packages/mast3r-slam"
-outputs = ["packages/mast3r-slam/data/normal-apt-tour.mp4", "packages/mast3r-slam/data/livingroom-tour.mp4"]
+outputs = [
+    "packages/mast3r-slam/data/normal-apt-tour.mp4",
+    "packages/mast3r-slam/data/livingroom-tour.mp4",
+]
 description = "Download example video data"
 
 # ── Test baseline task ──────────────────────────────────────────────────
@@ -775,7 +776,12 @@ cmd = """python tools/mast3r_slam_inference.py \
   --dataset data/normal-apt-tour.mp4 --img-size 224 \
   --config config/test.yaml --max-frames 30 --no-viz \
   --rr-config.save tests/fixtures/baseline_30frames.rrd"""
-depends-on = ["_build-cuda-kernels", "_build-mojo-kernels", "_download-checkpoints", "_download-example-data"]
+depends-on = [
+    "_build-cuda-kernels",
+    "_build-mojo-kernels",
+    "_download-checkpoints",
+    "_download-example-data",
+]
 cwd = "packages/mast3r-slam"
 description = "Generate baseline .rrd for regression tests (30 frames, deterministic)"
 outputs = ["packages/mast3r-slam/tests/fixtures/baseline_30frames.rrd"]
@@ -783,25 +789,44 @@ outputs = ["packages/mast3r-slam/tests/fixtures/baseline_30frames.rrd"]
 # ── Demo tasks ───────────────────────────────────────────────────────────
 [feature.mast3r-slam.tasks.example-quick]
 cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.mp4 --img-size 224 --config config/fast.yaml --max-frames 100"
-depends-on = ["_build-cuda-kernels", "_build-mojo-kernels", "_download-checkpoints", "_download-example-data"]
+depends-on = [
+    "_build-mojo-kernels",
+    "_download-checkpoints",
+    "_download-example-data",
+]
 cwd = "packages/mast3r-slam"
 description = "Run MASt3R-SLAM on first 100 frames (fast config, ~2 min)"
 
 [feature.mast3r-slam.tasks.example-fast]
 cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.mp4 --img-size 224 --config config/fast.yaml"
-depends-on = ["_build-cuda-kernels", "_build-mojo-kernels", "_download-checkpoints", "_download-example-data"]
+depends-on = [
+    # "_build-cuda-kernels",
+    "_build-mojo-kernels",
+    "_download-checkpoints",
+    "_download-example-data",
+]
 cwd = "packages/mast3r-slam"
 description = "Run MASt3R-SLAM inference (fast config, 224px, full video)"
 
 [feature.mast3r-slam.tasks.example-base]
 cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.mp4 --img-size 512 --config config/base.yaml"
-depends-on = ["_build-cuda-kernels", "_build-mojo-kernels", "_download-checkpoints", "_download-example-data"]
+depends-on = [
+    "_build-cuda-kernels",
+    "_build-mojo-kernels",
+    "_download-checkpoints",
+    "_download-example-data",
+]
 cwd = "packages/mast3r-slam"
 description = "Run MASt3R-SLAM inference (base config, 512px)"
 
 [feature.mast3r-slam.tasks.mast3r-slam-app]
 cmd = "python tools/gradio-app.py"
-depends-on = ["_build-cuda-kernels", "_build-mojo-kernels", "_download-checkpoints", "_download-example-data"]
+depends-on = [
+    "_build-cuda-kernels",
+    "_build-mojo-kernels",
+    "_download-checkpoints",
+    "_download-example-data",
+]
 cwd = "packages/mast3r-slam"
 description = "Launch MASt3R-SLAM Gradio web UI"
 
