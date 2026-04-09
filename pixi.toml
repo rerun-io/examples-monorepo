@@ -87,6 +87,7 @@ ruff = "*"
 pytest = ">=8.0.0,<9"
 beartype = ">=0.22.9"
 pyrefly = "*"
+vulture = "*"
 hypothesis = "*"
 
 [feature.dev.pypi-dependencies]
