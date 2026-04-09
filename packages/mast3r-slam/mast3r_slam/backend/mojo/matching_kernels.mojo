@@ -61,6 +61,7 @@ def get_lietorch_module() raises -> PythonObject:
 comptime POSE_DIM = 7
 comptime POSE_STRIDE = 8
 comptime RAYS_HDIM = 14 * (14 + 1) // 2
+comptime RAYS_THREADS = 64
 
 
 def get_unique_kf_idx(ii: PythonObject, jj: PythonObject) raises -> PythonObject:
@@ -433,7 +434,9 @@ def gauss_newton_rays_step_kernel(
     c_thresh: Float32,
     q_thresh: Float32,
 ):
-    var edge = Int(global_idx.x)
+    var edge = Int(block_idx.x)
+    var tid = Int(thread_idx.x)
+    var block_threads = Int(block_dim.x)
     if edge >= num_edges:
         return
 
@@ -459,7 +462,7 @@ def gauss_newton_rays_step_kernel(
     var sigma_ray_inv = 1.0 / sigma_ray
     var sigma_dist_inv = 1.0 / sigma_dist
 
-    for k in range(num_points):
+    for k in range(tid, num_points, block_threads):
         var valid_match_ind = valid_match[edge * num_points + k] != 0
         var ind_xi = Int(idx_ii2jj[edge * num_points + k])
         if not valid_match_ind:
@@ -550,23 +553,57 @@ def gauss_newton_rays_step_kernel(
         accumulate_row(err2, w2, drx_dpz, dry_dpz, drz_dpz, rj1, -rj0, 0.0, 0.0)
         accumulate_row(err3, w3, rj0, rj1, rj2, 0.0, 0.0, 0.0, norm1_j)
 
+    var sdata = stack_allocation[
+        RAYS_THREADS,
+        Scalar[DType.float32],
+        address_space=AddressSpace.SHARED,
+    ]()
+
     for n in range(POSE_DIM):
-        gs[(0 * num_edges + edge) * POSE_DIM + n] = vi[n]
-        gs[(1 * num_edges + edge) * POSE_DIM + n] = vj[n]
+        sdata[tid] = vi[n]
+        barrier()
+        var active = block_threads // 2
+        while active > 0:
+            if tid < active:
+                sdata[tid] += sdata[tid + active]
+            barrier()
+            active = active // 2
+        if tid == 0:
+            gs[(0 * num_edges + edge) * POSE_DIM + n] = sdata[0][0]
+
+        sdata[tid] = vj[n]
+        barrier()
+        active = block_threads // 2
+        while active > 0:
+            if tid < active:
+                sdata[tid] += sdata[tid + active]
+            barrier()
+            active = active // 2
+        if tid == 0:
+            gs[(1 * num_edges + edge) * POSE_DIM + n] = sdata[0][0]
 
     var l = 0
     for n in range(14):
         for m in range(n + 1):
-            var val = hij[l]
-            if n < 7 and m < 7:
-                hs[((0 * num_edges + edge) * 49) + n * 7 + m] = val
-                hs[((0 * num_edges + edge) * 49) + m * 7 + n] = val
-            elif n >= 7 and m < 7:
-                hs[((1 * num_edges + edge) * 49) + m * 7 + (n - 7)] = val
-                hs[((2 * num_edges + edge) * 49) + (n - 7) * 7 + m] = val
-            else:
-                hs[((3 * num_edges + edge) * 49) + (n - 7) * 7 + (m - 7)] = val
-                hs[((3 * num_edges + edge) * 49) + (m - 7) * 7 + (n - 7)] = val
+            sdata[tid] = hij[l]
+            barrier()
+            var active_h = block_threads // 2
+            while active_h > 0:
+                if tid < active_h:
+                    sdata[tid] += sdata[tid + active_h]
+                barrier()
+                active_h = active_h // 2
+            if tid == 0:
+                var val = sdata[0][0]
+                if n < 7 and m < 7:
+                    hs[((0 * num_edges + edge) * 49) + n * 7 + m] = val
+                    hs[((0 * num_edges + edge) * 49) + m * 7 + n] = val
+                elif n >= 7 and m < 7:
+                    hs[((1 * num_edges + edge) * 49) + m * 7 + (n - 7)] = val
+                    hs[((2 * num_edges + edge) * 49) + (n - 7) * 7 + m] = val
+                else:
+                    hs[((3 * num_edges + edge) * 49) + (n - 7) * 7 + (m - 7)] = val
+                    hs[((3 * num_edges + edge) * 49) + (m - 7) * 7 + (n - 7)] = val
             l += 1
 
 
@@ -774,7 +811,19 @@ def pose_retr_py(
     var num_poses = Int(py=poses_obj.shape[0])
     if num_fix >= num_poses:
         return Python.none()
-    _ = get_cuda_backend_module().pose_retr(poses_obj, dx_obj.contiguous(), num_fix)
+    var poses = poses_obj.contiguous().float()
+    var dx = dx_obj.contiguous().float()
+    var poses_ptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=Int(py=poses.data_ptr()))
+    var dx_ptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=Int(py=dx.data_ptr()))
+    var ctx_ptr = get_cached_context_ptr()
+    ctx_ptr[].enqueue_function[pose_retr_kernel, pose_retr_kernel](
+        poses_ptr,
+        dx_ptr,
+        num_fix,
+        num_poses,
+        grid_dim=ceildiv(max(num_poses - num_fix, 0), 256),
+        block_dim=256,
+    )
     return Python.none()
 
 
@@ -814,9 +863,8 @@ def gauss_newton_rays_step_py(args_obj: PythonObject) raises -> PythonObject:
         twc_ptr, xs_ptr, cs_ptr, ii_ptr, jj_ptr, idx_ptr, valid_ptr, q_ptr, hs_ptr, gs_ptr,
         num_points, num_edges, sigma_ray, sigma_dist, c_thresh, q_thresh,
         grid_dim=num_edges,
-        block_dim=1,
+        block_dim=RAYS_THREADS,
     )
-    torch.cuda.synchronize()
     return Python.tuple(hs, gs)
 
 
@@ -864,19 +912,21 @@ def gauss_newton_impl(
                 args_obj[10],
             )
         elif step_name == "gauss_newton_rays_step":
-            step_out = cuda_be.gauss_newton_rays_step(
-                args_obj[0],
-                args_obj[1],
-                args_obj[2],
-                args_obj[3],
-                args_obj[4],
-                args_obj[5],
-                args_obj[6],
-                args_obj[7],
-                args_obj[8],
-                args_obj[9],
-                args_obj[10],
-                args_obj[11],
+            step_out = gauss_newton_rays_step_py(
+                Python.tuple(
+                    args_obj[0],
+                    args_obj[1],
+                    args_obj[2],
+                    args_obj[3],
+                    args_obj[4],
+                    args_obj[5],
+                    args_obj[6],
+                    args_obj[7],
+                    args_obj[8],
+                    args_obj[9],
+                    args_obj[10],
+                    args_obj[11],
+                )
             )
         else:
             step_out = cuda_be.gauss_newton_calib_step(
