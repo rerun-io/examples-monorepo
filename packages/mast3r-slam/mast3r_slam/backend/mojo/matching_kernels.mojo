@@ -7,6 +7,8 @@ Build: mojo build --emit shared-lib -o mast3r_slam_mojo_backends.so \
            mast3r_slam/backend/mojo/matching_kernels.mojo
 """
 
+from gn_kernels import GN_IMPORT_SENTINEL
+
 from std.os import abort
 from std.math import ceildiv, sqrt, min, max, floor, exp, sin, cos, abs
 from std.sys import has_accelerator

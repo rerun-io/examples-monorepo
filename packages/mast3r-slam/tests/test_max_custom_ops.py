@@ -17,6 +17,11 @@ from mast3r_slam import max_ops
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
+try:
+    import max  # noqa: F401
+except Exception:
+    pytestmark = pytest.mark.skip(reason="MAX Python package not installed in this environment")
+
 
 def test_load_gn_custom_ops() -> None:
     ops = max_ops.load_gn_custom_ops()
