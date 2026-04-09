@@ -20,6 +20,8 @@ The user-visible proof is unchanged behavior: the Mojo shared library still buil
 - [x] (2026-04-09 16:08 CDT) Added comments to the MAX custom-op module and documented in the nested `max-custom-ops/pixi.toml` why that workspace still exists.
 - [x] (2026-04-09 16:10 CDT) Marked `matching_kernels.mojo` as legacy reference code instead of a current source-of-truth module.
 - [x] (2026-04-09 16:20 CDT) Rebuilt the Mojo backend, reran the GN parity tests and MAX custom-op tests, and reran the real GN fixture benchmark without regression.
+- [x] (2026-04-09 17:05 CDT) Reviewed the Modular thread-vs-SIMD puzzle and structured-kernel guidance, then used that to tighten kernel comments and naming without changing the validated execution model.
+- [x] (2026-04-09 17:14 CDT) Rebuilt the Mojo backend, reran the GN parity tests and MAX custom-op tests, and reran the real GN fixture benchmark after the thread-vs-SIMD cleanup pass.
 
 ## Surprises & Discoveries
 
@@ -44,6 +46,14 @@ The user-visible proof is unchanged behavior: the Mojo shared library still buil
     `pixi run --manifest-path packages/mast3r-slam/max-custom-ops/pixi.toml test-max-custom-ops`
     reports `4 passed in 11.10s`.
 
+- Observation: the current GN kernels are thread-parallel but intentionally scalar within each thread.
+  Evidence: `gauss_newton_rays_step_kernel` in `packages/mast3r-slam/mast3r_slam/backend/mojo/gn_kernels.mojo` assigns one block to one edge-partial pair, then each thread walks a point strided loop and accumulates scalar residual/Jacobian terms before a block reduction.
+
+- Observation: the thread-vs-SIMD cleanup pass did not regress the verified real GN benchmark.
+  Evidence:
+    `pixi run -e mast3r-slam-dev python packages/mast3r-slam/tools/bench_gn_real_fixtures.py packages/mast3r-slam/artifacts/gn-fixtures/verify-base/rays-000.pt --warmup 5 --runs 20`
+    reported `public selected ms 21.891`, `ratio 0.421`, with `dtrans 2.98e-07`, `dquat 1.68e-08`, `dscale 5.96e-08`, `ddx 1.75e-07`.
+
 ## Decision Log
 
 - Decision: keep the nested `packages/mast3r-slam/max-custom-ops/pixi.toml` for now.
@@ -58,6 +68,10 @@ The user-visible proof is unchanged behavior: the Mojo shared library still buil
   Rationale: it is no longer the build target, but it is still referenced in the in-repo optimization notes and prior handoff artifacts. A prominent legacy note avoids misleading readers without risking accidental documentation breakage during this cleanup pass.
   Date/Author: 2026-04-09 / Codex
 
+- Decision: keep the current GN kernels thread-parallel and scalar instead of trying to force new SIMD structure into them during this cleanup.
+  Rationale: the linked Modular puzzle and structured-kernel material reinforce that GPU threads provide the outer parallel structure while SIMD is an inner optimization when the work is regular enough. The current GN kernels are branch-heavy and already validated for throughput, so this pass should document that choice instead of rewriting the execution model.
+  Date/Author: 2026-04-09 / Codex
+
 ## Outcomes & Retrospective
 
 The cleanup succeeded without changing the live behavior. The shared-lib backend now has one obvious place to audit every raw pointer conversion and cached `DeviceContext` lookup, and the MAX custom-op package better documents why it uses tensor abstractions instead of the raw-pointer pattern from the shared-lib extension.
@@ -65,6 +79,10 @@ The cleanup succeeded without changing the live behavior. The shared-lib backend
 The nested MAX Pixi workspace is still required today because the root monorepo environment cannot import `max.experimental.torch`. That means the cleanup should stop at documentation and structure for now; removing that workspace would be a separate environment project.
 
 No accuracy or throughput regression was observed on the real GN verification fixture. The public-path benchmark remained faster than CUDA, and the GN drift relative to CUDA stayed within the previously verified tiny tolerances.
+
+This document was later extended with one more non-functional cleanup pass driven by Modular’s thread-vs-SIMD and structured-kernel guidance. That pass keeps the same execution model but explains it more clearly in the kernel source.
+
+That follow-up pass also passed the same regression gate. The real GN public-path benchmark remained faster than CUDA, and the MAX parity tests still passed in the nested environment.
 
 ## Context and Orientation
 
@@ -89,6 +107,8 @@ Third, decide how to handle `packages/mast3r-slam/mast3r_slam/backend/mojo/match
 Finally, rerun the build, tests, and real-fixture benchmark, then update this document with the observed outputs and any throughput changes.
 
 That validation is now complete. The helper-module refactor did not change the selected-backend GN public-path result on the captured `rays-000` fixture in any material way.
+
+The follow-up cleanup pass uses the same validation commands. It only renames one reduction helper and clarifies, in source comments, that the GN kernels currently rely on thread-level parallelism with scalar per-thread math rather than extra SIMD structure.
 
 ## Concrete Steps
 
@@ -135,6 +155,26 @@ Observed outputs from this cleanup pass:
     rays-000                 step     rays          5.817        2.317    0.398        nan        nan        nan   1.64e+04
     rays-000                 public   rays         51.727       22.411    0.433   2.98e-07   1.68e-08   5.96e-08   1.75e-07
 
+Observed outputs after the thread-vs-SIMD cleanup:
+
+    pixi run -e mast3r-slam-dev pytest \
+      packages/mast3r-slam/tests/test_gn_fixture_utils.py \
+      packages/mast3r-slam/tests/test_gn_step_api.py -q
+    ...
+    9 passed in 0.96s
+
+    pixi run --manifest-path packages/mast3r-slam/max-custom-ops/pixi.toml test-max-custom-ops
+    ...
+    4 passed in 11.69s
+
+    pixi run -e mast3r-slam-dev python \
+      packages/mast3r-slam/tools/bench_gn_real_fixtures.py \
+      packages/mast3r-slam/artifacts/gn-fixtures/verify-base/rays-000.pt \
+      --warmup 5 --runs 20
+    fixture                  scope    kind        cuda ms  selected ms    ratio     dtrans      dquat     dscale        ddx
+    rays-000                 step     rays          5.793        2.329    0.402        nan        nan        nan   1.64e+04
+    rays-000                 public   rays         51.998       21.891    0.421   2.98e-07   1.68e-08   5.96e-08   1.75e-07
+
 ## Validation and Acceptance
 
 Acceptance means the code is cleaner without changing behavior. The Mojo shared library must still build. The GN tests must still pass. The real fixture benchmark must still report tiny GN drift relative to CUDA and must not show a throughput regression relative to the previously recorded signoff numbers for the selected backend.
@@ -149,6 +189,13 @@ This pass meets those acceptance criteria:
 - The real GN fixture benchmark kept the public-path ratio at `0.433` and the pose/update drift at the previously tiny levels.
 - The command proving the root environment still lacks MAX support is captured in `Surprises & Discoveries`.
 
+The follow-up thread-vs-SIMD cleanup also meets the same acceptance criteria:
+
+- `pixi run -e mast3r-slam-dev _build-mojo-kernels` succeeded again.
+- The GN tests again reported `9 passed`.
+- The nested MAX tests again reported `4 passed`.
+- The real GN fixture benchmark improved slightly to a public-path ratio of `0.421` with the same tiny pose/update drift.
+
 ## Idempotence and Recovery
 
 These steps are safe to rerun. The build task overwrites the shared library in place. The tests are read-only. The benchmark reads a captured fixture and does not mutate repository source files. If a Mojo refactor breaks compilation, rerun `_build-mojo-kernels` after each patch until the helper module and imports stabilize.
@@ -161,6 +208,7 @@ Key files changed in this cleanup:
 
 - `packages/mast3r-slam/mast3r_slam/backend/mojo/python_interop.mojo`
 - `packages/mast3r-slam/mast3r_slam/backend/mojo/gn.mojo`
+- `packages/mast3r-slam/mast3r_slam/backend/mojo/gn_kernels.mojo`
 - `packages/mast3r-slam/mast3r_slam/backend/mojo/matching.mojo`
 - `packages/mast3r-slam/mast3r_slam/backend/mojo/mast3r_slam_mojo_backends.mojo`
 - `packages/mast3r-slam/mast3r_slam/backend/max_ops/gn_ops/__init__.mojo`
@@ -182,3 +230,5 @@ The MAX custom-op package must continue to expose the registered ops loaded by `
 Revision note: created this ExecPlan to drive the Mojo/MAX cleanup requested after the GN port stabilized. The plan records that the nested MAX Pixi project remains necessary because the root monorepo environment cannot currently import `max.experimental.torch`.
 
 Revision note: updated after implementation to record the centralized interop helper module, the MAX documentation cleanup, the legacy status of `matching_kernels.mojo`, and the no-regression validation results.
+
+Revision note: updated again after reviewing Modular’s thread-vs-SIMD and structured-kernel guidance. This revision records that the current GN kernels intentionally stay thread-parallel and scalar within each thread, and that the cleanup pass only clarified and renamed that structure rather than changing behavior.

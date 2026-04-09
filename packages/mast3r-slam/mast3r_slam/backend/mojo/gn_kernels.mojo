@@ -1,3 +1,11 @@
+"""Low-level GN GPU kernels for the shared-library Mojo backend.
+
+These kernels use GPU threads for outer parallelism and keep the per-thread
+math scalar. That matches the current workload better than forcing additional
+SIMD structure into branchy per-point residual code, and it keeps the reduction
+logic explicit at the block level.
+"""
+
 from std.math import sqrt, exp, sin, cos, abs
 from std.gpu import global_idx, block_idx, block_dim, thread_idx, barrier, lane_id
 from std.gpu.primitives import warp
@@ -12,11 +20,15 @@ comptime RAYS_WARPS = RAYS_THREADS // 32
 
 
 @always_inline
-def block_reduce_sum_64[origin: Origin[mut=True], //](
+def block_reduce_sum[origin: Origin[mut=True], //](
     value: Float32,
     tid: Int,
     warp_partials: UnsafePointer[Scalar[DType.float32], origin, address_space=AddressSpace.SHARED],
 ) -> Float32:
+    # First reduce within each warp, then let one lane per warp publish to
+    # shared memory for the block-wide finish. This keeps the synchronization
+    # surface small while preserving the same accumulation order we validated
+    # against CUDA.
     var reduced = warp.sum(value)
     if Int(lane_id()) == 0:
         warp_partials[tid // 32] = reduced
@@ -424,6 +436,9 @@ def gauss_newton_rays_step_kernel(
     c_thresh: Float32,
     q_thresh: Float32,
 ):
+    # One thread block works on one edge-partial pair. Threads stride across
+    # the points for that edge, accumulate local Jacobian/Hessian terms, then
+    # reduce them once per block.
     var edge = Int(block_idx.x) // blocks_per_edge
     var edge_block = Int(block_idx.x) % blocks_per_edge
     var partial_edge = edge * blocks_per_edge + edge_block
@@ -628,18 +643,18 @@ def gauss_newton_rays_step_kernel(
     ]()
 
     for n in range(POSE_DIM):
-        var vi_sum = block_reduce_sum_64(vi[n], tid, warp_partials)
+        var vi_sum = block_reduce_sum(vi[n], tid, warp_partials)
         if tid == 0:
             gs[(0 * num_partials + partial_edge) * POSE_DIM + n] = vi_sum
 
-        var vj_sum = block_reduce_sum_64(vj[n], tid, warp_partials)
+        var vj_sum = block_reduce_sum(vj[n], tid, warp_partials)
         if tid == 0:
             gs[(1 * num_partials + partial_edge) * POSE_DIM + n] = vj_sum
 
     var l = 0
     for n in range(14):
         for m in range(n + 1):
-            var h_sum = block_reduce_sum_64(hij[l], tid, warp_partials)
+            var h_sum = block_reduce_sum(hij[l], tid, warp_partials)
             if tid == 0:
                 var val = h_sum
                 if n < 7 and m < 7:

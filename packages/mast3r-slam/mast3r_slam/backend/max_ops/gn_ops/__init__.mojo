@@ -7,7 +7,6 @@ by the custom op runtime.
 """
 
 from compiler import register
-from layout import LayoutTensor
 from tensor import InputTensor, OutputTensor, foreach
 from std.gpu import block_dim, block_idx, thread_idx
 from std.math import abs, cos, exp, sin, sqrt
@@ -187,7 +186,10 @@ struct PoseRetr:
         # This is the most direct and idiomatic MAX implementation: one element
         # callback expressed with `foreach`, leaving traversal and marshaling to
         # the runtime. It is easy to read and serves as the correctness-first
-        # reference for the launched GPU variant below.
+        # reference for the launched GPU variant below. We keep `simd_width=1`
+        # here on purpose: the pose update has column-dependent control flow, so
+        # a scalar reference path is clearer and avoids accidental divergence
+        # from the launched kernel.
         @parameter
         @always_inline
         def update_pose[
@@ -389,6 +391,9 @@ struct PoseRetrLaunch:
                 return pack_scalar[simd_width](q1[3])
             return pack_scalar[simd_width](xi[7] * s)
 
+        # The non-GPU fallback mirrors the scalar `foreach` reference path
+        # rather than trying to force extra vector structure into a tiny,
+        # branch-heavy kernel.
         foreach[update_pose_cpu, target=target, simd_width=1](poses_out, ctx)
 
 
@@ -444,4 +449,6 @@ struct PoseCopyLaunch:
         ](idx: IndexList[2]) -> SIMD[DType.float32, simd_width]:
             return poses_in.load[simd_width](idx)
 
+        # Copy is also kept scalar in the generic fallback so the behavior is
+        # identical across targets; the launched GPU path handles throughput.
         foreach[copy_pose_cpu, target=target, simd_width=1](poses_out, ctx)
