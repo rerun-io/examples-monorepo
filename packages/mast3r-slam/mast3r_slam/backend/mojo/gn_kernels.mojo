@@ -17,9 +17,6 @@ comptime POSE_STRIDE = 8
 comptime RAYS_HDIM = 14 * (14 + 1) // 2
 comptime RAYS_THREADS = 128
 comptime RAYS_WARPS = RAYS_THREADS // 32
-comptime SHARED_POSE_I_BASE = 0
-comptime SHARED_POSE_J_BASE = 8
-comptime SHARED_REL_BASE = 16
 
 
 @always_inline
@@ -44,27 +41,6 @@ def block_reduce_sum[origin: Origin[mut=True], //](
         block_sum = warp.sum(block_sum)
     barrier()
     return block_sum
-
-
-@always_inline
-def shared_scalar[
-    origin: Origin[mut=True], //,
-](
-    shared: UnsafePointer[Scalar[DType.float32], origin, address_space=AddressSpace.SHARED],
-    slot: Int,
-) -> Float32:
-    return shared[slot][0]
-
-
-@always_inline
-def set_shared_scalar[
-    origin: Origin[mut=True], //,
-](
-    shared: UnsafePointer[Scalar[DType.float32], origin, address_space=AddressSpace.SHARED],
-    slot: Int,
-    value: Float32,
-):
-    shared[slot] = value
 
 
 def assemble_h_dense_kernel(
@@ -476,36 +452,32 @@ def gauss_newton_rays_step_kernel(
     var jx = Int(jj[edge])
     var pi = ix * POSE_STRIDE
     var pj = jx * POSE_STRIDE
-    # Shared layout:
-    #   [0:8)   -> pose i (tx, ty, tz, qx, qy, qz, qw, s)
-    #   [8:16)  -> pose j
-    #   [16:24) -> relative Sim3(i <- j)
     var pose_shared = stack_allocation[
         24,
         Scalar[DType.float32],
         address_space=AddressSpace.SHARED,
     ]()
     if tid < 8:
-        set_shared_scalar(pose_shared, SHARED_POSE_I_BASE + tid, twc[pi + tid])
+        pose_shared[tid] = twc[pi + tid]
     if tid < 8:
-        set_shared_scalar(pose_shared, SHARED_POSE_J_BASE + tid, twc[pj + tid])
+        pose_shared[tid + 8] = twc[pj + tid]
     barrier()
-    var ti0 = shared_scalar(pose_shared, SHARED_POSE_I_BASE + 0)
-    var ti1 = shared_scalar(pose_shared, SHARED_POSE_I_BASE + 1)
-    var ti2 = shared_scalar(pose_shared, SHARED_POSE_I_BASE + 2)
-    var qi0 = shared_scalar(pose_shared, SHARED_POSE_I_BASE + 3)
-    var qi1 = shared_scalar(pose_shared, SHARED_POSE_I_BASE + 4)
-    var qi2 = shared_scalar(pose_shared, SHARED_POSE_I_BASE + 5)
-    var qi3 = shared_scalar(pose_shared, SHARED_POSE_I_BASE + 6)
-    var si0 = shared_scalar(pose_shared, SHARED_POSE_I_BASE + 7)
-    var tj0 = shared_scalar(pose_shared, SHARED_POSE_J_BASE + 0)
-    var tj1 = shared_scalar(pose_shared, SHARED_POSE_J_BASE + 1)
-    var tj2 = shared_scalar(pose_shared, SHARED_POSE_J_BASE + 2)
-    var qj0 = shared_scalar(pose_shared, SHARED_POSE_J_BASE + 3)
-    var qj1 = shared_scalar(pose_shared, SHARED_POSE_J_BASE + 4)
-    var qj2 = shared_scalar(pose_shared, SHARED_POSE_J_BASE + 5)
-    var qj3 = shared_scalar(pose_shared, SHARED_POSE_J_BASE + 6)
-    var sj0 = shared_scalar(pose_shared, SHARED_POSE_J_BASE + 7)
+    var ti0 = pose_shared[0][0]
+    var ti1 = pose_shared[1][0]
+    var ti2 = pose_shared[2][0]
+    var qi0 = pose_shared[3][0]
+    var qi1 = pose_shared[4][0]
+    var qi2 = pose_shared[5][0]
+    var qi3 = pose_shared[6][0]
+    var si0 = pose_shared[7][0]
+    var tj0 = pose_shared[8][0]
+    var tj1 = pose_shared[9][0]
+    var tj2 = pose_shared[10][0]
+    var qj0 = pose_shared[11][0]
+    var qj1 = pose_shared[12][0]
+    var qj2 = pose_shared[13][0]
+    var qj3 = pose_shared[14][0]
+    var sj0 = pose_shared[15][0]
 
     if tid == 0:
         var rel_out0: Float32 = 0.0
@@ -525,23 +497,23 @@ def gauss_newton_rays_step_kernel(
             sj0,
             rel_out0, rel_out1, rel_out2, rel_out3, rel_out4, rel_out5, rel_out6, rel_out7,
         )
-        set_shared_scalar(pose_shared, SHARED_REL_BASE + 0, rel_out0)
-        set_shared_scalar(pose_shared, SHARED_REL_BASE + 1, rel_out1)
-        set_shared_scalar(pose_shared, SHARED_REL_BASE + 2, rel_out2)
-        set_shared_scalar(pose_shared, SHARED_REL_BASE + 3, rel_out3)
-        set_shared_scalar(pose_shared, SHARED_REL_BASE + 4, rel_out4)
-        set_shared_scalar(pose_shared, SHARED_REL_BASE + 5, rel_out5)
-        set_shared_scalar(pose_shared, SHARED_REL_BASE + 6, rel_out6)
-        set_shared_scalar(pose_shared, SHARED_REL_BASE + 7, rel_out7)
+        pose_shared[16] = rel_out0
+        pose_shared[17] = rel_out1
+        pose_shared[18] = rel_out2
+        pose_shared[19] = rel_out3
+        pose_shared[20] = rel_out4
+        pose_shared[21] = rel_out5
+        pose_shared[22] = rel_out6
+        pose_shared[23] = rel_out7
     barrier()
-    var rel0 = shared_scalar(pose_shared, SHARED_REL_BASE + 0)
-    var rel1 = shared_scalar(pose_shared, SHARED_REL_BASE + 1)
-    var rel2 = shared_scalar(pose_shared, SHARED_REL_BASE + 2)
-    var rel3 = shared_scalar(pose_shared, SHARED_REL_BASE + 3)
-    var rel4 = shared_scalar(pose_shared, SHARED_REL_BASE + 4)
-    var rel5 = shared_scalar(pose_shared, SHARED_REL_BASE + 5)
-    var rel6 = shared_scalar(pose_shared, SHARED_REL_BASE + 6)
-    var rel7 = shared_scalar(pose_shared, SHARED_REL_BASE + 7)
+    var rel0 = pose_shared[16][0]
+    var rel1 = pose_shared[17][0]
+    var rel2 = pose_shared[18][0]
+    var rel3 = pose_shared[19][0]
+    var rel4 = pose_shared[20][0]
+    var rel5 = pose_shared[21][0]
+    var rel6 = pose_shared[22][0]
+    var rel7 = pose_shared[23][0]
 
     var hij = InlineArray[Float32, RAYS_HDIM](fill=0.0)
     var vi = InlineArray[Float32, POSE_DIM](fill=0.0)
@@ -664,9 +636,6 @@ def gauss_newton_rays_step_kernel(
         accumulate_row(err2, w2, drx_dpz, dry_dpz, drz_dpz, rj1, -rj0, 0.0, 0.0)
         accumulate_row(err3, w3, rj0, rj1, rj2, 0.0, 0.0, 0.0, norm1_j)
 
-    # A linear shared array is enough here because the reduction surface is a
-    # single value per warp. LayoutTensor would not remove any unsafe boundary
-    # at this point, so the simpler scratch buffer keeps the hot path obvious.
     var warp_partials = stack_allocation[
         RAYS_WARPS,
         Scalar[DType.float32],

@@ -4,15 +4,13 @@ from jaxtyping import Bool, Float, Float32, Int
 from mast3r.model import AsymmetricMASt3R
 from torch import Tensor
 
+from mast3r_slam import _backends  # pyrefly: ignore
 from mast3r_slam.config import config
 from mast3r_slam.frame import Frame, SharedKeyframes
 from mast3r_slam.geometry import (
     constrain_points_to_ray,
 )
-from mast3r_slam.gn_backends import load_gn_backend
 from mast3r_slam.mast3r_utils import mast3r_match_symmetric
-
-_backends = load_gn_backend()
 
 
 class FactorGraph:
