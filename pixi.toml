@@ -800,7 +800,6 @@ description = "Run MASt3R-SLAM on first 100 frames (fast config, ~2 min)"
 [feature.mast3r-slam.tasks.example-fast]
 cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.mp4 --img-size 224 --config config/fast.yaml"
 depends-on = [
-    # "_build-cuda-kernels",
     "_build-mojo-kernels",
     "_download-checkpoints",
     "_download-example-data",
@@ -811,7 +810,6 @@ description = "Run MASt3R-SLAM inference (fast config, 224px, full video)"
 [feature.mast3r-slam.tasks.example-base]
 cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.mp4 --img-size 512 --config config/base.yaml"
 depends-on = [
-    # "_build-cuda-kernels",
     "_build-mojo-kernels",
     "_download-checkpoints",
     "_download-example-data",

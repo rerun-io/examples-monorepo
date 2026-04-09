@@ -172,6 +172,9 @@ def gauss_newton_rays_step_py(args_obj: PythonObject) raises -> PythonObject:
         grid_dim=num_partials,
         block_dim=RAYS_THREADS,
     )
+    # The Mojo kernel launches on the cached DeviceContext stream. Synchronize
+    # before handing the partial tensors back to PyTorch reductions.
+    torch.cuda.synchronize(device=twc.device)
     if blocks_per_edge == 1:
         return Python.tuple(hs_partial, gs_partial)
     var hs = hs_partial.reshape(4, num_edges, blocks_per_edge, POSE_DIM, POSE_DIM).sum(dim=2)
@@ -222,6 +225,7 @@ def gauss_newton_rays_step_idiomatic_py(args_obj: PythonObject) raises -> Python
         grid_dim=num_partials,
         block_dim=RAYS_THREADS,
     )
+    torch.cuda.synchronize(device=twc.device)
     if blocks_per_edge == 1:
         return Python.tuple(hs_partial, gs_partial)
     var hs = hs_partial.reshape(4, num_edges, blocks_per_edge, POSE_DIM, POSE_DIM).sum(dim=2)
@@ -237,7 +241,6 @@ def gauss_newton_impl(
     jj_arg_idx: Int,
 ) raises -> PythonObject:
     var torch = get_torch_module()
-    var cuda_be = get_cuda_backend_module()
     var Twc = args_obj[0]
     var ii = args_obj[ii_arg_idx]
     var jj = args_obj[jj_arg_idx]
@@ -263,6 +266,7 @@ def gauss_newton_impl(
     for _i in range(max_iter):
         var step_out: PythonObject
         if step_name == "gauss_newton_points_step":
+            var cuda_be = get_cuda_backend_module()
             step_out = cuda_be.gauss_newton_points_step(
                 args_obj[0], args_obj[1], args_obj[2], args_obj[3], args_obj[4], args_obj[5], args_obj[6], args_obj[7], args_obj[8], args_obj[9], args_obj[10],
             )
@@ -279,6 +283,7 @@ def gauss_newton_impl(
                 )
             )
         else:
+            var cuda_be = get_cuda_backend_module()
             step_out = cuda_be.gauss_newton_calib_step(
                 args_obj[0], args_obj[1], args_obj[2], args_obj[3], args_obj[4], args_obj[5], args_obj[6], args_obj[7], args_obj[8], args_obj[9], args_obj[10], args_obj[11], args_obj[12], args_obj[13], args_obj[14], args_obj[15], args_obj[16],
             )
@@ -291,6 +296,7 @@ def gauss_newton_impl(
         if Float64(py=delta_norm.item()) < delta_thresh:
             break
 
+    torch.cuda.synchronize(device=Twc.device)
     return Python.tuple(dx)
 
 
@@ -350,6 +356,7 @@ def gauss_newton_rays_impl_idiomatic(args_obj: PythonObject) raises -> PythonObj
         if Float64(py=delta_norm.item()) < delta_thresh:
             break
 
+    torch.cuda.synchronize(device=Twc.device)
     return Python.tuple(dx)
 
 
@@ -387,6 +394,7 @@ def gauss_newton_points_impl_idiomatic(args_obj: PythonObject) raises -> PythonO
         if Float64(py=delta_norm.item()) < delta_thresh:
             break
 
+    torch.cuda.synchronize(device=Twc.device)
     return Python.tuple(dx)
 
 
@@ -428,4 +436,5 @@ def gauss_newton_calib_impl_idiomatic(args_obj: PythonObject) raises -> PythonOb
         if Float64(py=delta_norm.item()) < delta_thresh:
             break
 
+    torch.cuda.synchronize(device=Twc.device)
     return Python.tuple(dx)
