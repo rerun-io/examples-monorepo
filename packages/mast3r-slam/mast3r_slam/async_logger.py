@@ -32,6 +32,7 @@ import rerun as rr
 import torch
 from jaxtyping import Bool, Float, Float32, Int, UInt8, UInt16
 from numpy import ndarray
+from simplecv.camera_parameters import PinholeParameters
 from simplecv.camera_orient_utils import auto_orient_and_center_poses
 from simplecv.rerun_log_utils import log_pinhole
 from torch import Tensor
@@ -278,6 +279,7 @@ class AsyncRerunLogger:
         # Internal visualization state
         self._path_list: list[list[float]] = []
         self._logged_keyframes: set[int] = set()
+        self._keyframe_pinhole_static: dict[int, PinholeParameters] = {}
         self._last_kf_idx: int = -1
         self._last_blueprint_n_kf: int = -1
         self._n_keyframes: int = 0
@@ -514,9 +516,9 @@ class AsyncRerunLogger:
         for kf_snapshot in event.new_keyframes:
             self._log_new_keyframe(kf_snapshot)
 
-        # Dirty keyframes from backend updates
-        for keyframe in event.updated_keyframes:
-            self._relog_keyframe_camera(keyframe)
+        # Dirty keyframe pose updates from backend
+        for kf_idx, world_sim3_cam_data in event.pose_updates:
+            self._relog_keyframe_camera(kf_idx, world_sim3_cam_data)
 
         # Factor graph edges
         if event.edge_positions is not None:
@@ -560,6 +562,11 @@ class AsyncRerunLogger:
             cam_log_path=Path(kf_cam_log_path),
             image_plane_distance=self._image_plane_distance,
         )
+        self._keyframe_pinhole_static[kf.kf_idx] = PinholeParameters(
+            name=pinhole.name,
+            extrinsics=pinhole.extrinsics,
+            intrinsics=pinhole.intrinsics,
+        )
 
         # RGB image
         kf_rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(
@@ -599,23 +606,32 @@ class AsyncRerunLogger:
             kf.img_shape[0], kf.img_shape[1],
         )
 
-    def _relog_keyframe_camera(self, kf: KeyframeSnapshot) -> None:
-        """Replay the full keyframe camera update after backend refinement."""
-        kf_cam_log_path: str = f"{self._parent_log_path}/keyframes/keyframe-{kf.kf_idx}"
+    def _relog_keyframe_camera(self, kf_idx: int, world_sim3_cam_data: Float32[ndarray, "8"]) -> None:
+        """Replay a keyframe camera update after backend refinement using cached intrinsics."""
+        kf_cam_log_path: str = f"{self._parent_log_path}/keyframes/keyframe-{kf_idx}"
+        cached_pinhole: PinholeParameters | None = self._keyframe_pinhole_static.get(kf_idx)
+        if cached_pinhole is None:
+            return
 
         frame: Frame = snapshot_to_frame(
-            kf.world_sim3_cam_data, kf.rgb, kf.X_canon, kf.C,
-            kf.img_shape, frame_id=kf.kf_idx,
+            world_sim3_cam_data,
+            rgb=np.zeros((1, 1, 3), dtype=np.float32),
+            X_canon=None,
+            C=None,
+            img_shape=(1, 1),
+            frame_id=kf_idx,
         )
-        pinhole = frame_to_pinhole(frame)
+        extrinsics = frame_to_extrinsics(frame)
+        pinhole = PinholeParameters(
+            name=cached_pinhole.name,
+            extrinsics=extrinsics,
+            intrinsics=cached_pinhole.intrinsics,
+        )
         log_pinhole(
             camera=pinhole,
             cam_log_path=Path(kf_cam_log_path),
             image_plane_distance=self._image_plane_distance,
         )
-
-        if kf.kf_idx == self._last_kf_idx:
-            self._log_last_keyframe(kf)
 
     def _log_edges(
         self,
