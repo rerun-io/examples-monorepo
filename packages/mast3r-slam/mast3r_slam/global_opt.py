@@ -5,9 +5,21 @@ from mast3r.model import AsymmetricMASt3R
 from torch import Tensor
 
 try:
-    import mast3r_slam_mojo_backends as _backends  # pyrefly: ignore
+    import mast3r_slam_mojo_backends as _mojo_backends  # pyrefly: ignore
 except ImportError:
-    from mast3r_slam import _backends  # pyrefly: ignore
+    _mojo_backends = None
+
+try:
+    from mast3r_slam import _backends as _cuda_backends  # pyrefly: ignore
+except ImportError:
+    _cuda_backends = None
+
+if _mojo_backends is not None:
+    _backends = _mojo_backends
+elif _cuda_backends is not None:
+    _backends = _cuda_backends
+else:
+    raise ImportError("Neither mast3r_slam_mojo_backends nor mast3r_slam._backends is available")
 from mast3r_slam.config import config
 from mast3r_slam.frame import Frame, SharedKeyframes
 from mast3r_slam.geometry import (
@@ -17,8 +29,22 @@ from mast3r_slam.mast3r_utils import mast3r_match_symmetric
 
 
 def _call_gn_backend(name: str, *args: object) -> object:
-    fn = getattr(_backends, name)
-    if _backends.__name__ == "mast3r_slam_mojo_backends":
+    # Only the rays GN path is fully implemented in the Mojo shared library.
+    # Points and calibrated GN still rely on the CUDA extension step kernels.
+    backend = _backends
+    if (
+        _mojo_backends is not None
+        and name in {"gauss_newton_points", "gauss_newton_calib"}
+    ):
+        if _cuda_backends is None:
+            raise RuntimeError(
+                f"{name} requires mast3r_slam._backends; the current Mojo backend only "
+                "implements the rays GN path without the CUDA extension."
+            )
+        backend = _cuda_backends
+
+    fn = getattr(backend, name)
+    if backend.__name__ == "mast3r_slam_mojo_backends":
         return fn(tuple(args))
     return fn(*args)
 

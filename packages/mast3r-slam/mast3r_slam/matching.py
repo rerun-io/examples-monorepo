@@ -7,9 +7,9 @@ import mast3r_slam.image as img_utils
 from mast3r_slam.config import config
 
 # Matching kernel backend selection: prefer Mojo, fall back to CUDA C++ if the
-# Mojo shared library is not built. The GN solver path follows the same rule in
-# global_opt.py, so example tasks should run on the split Mojo backend by
-# default whenever `mast3r_slam_mojo_backends.so` is available.
+# Mojo shared library is not built. This comment only describes the matching
+# kernels selected in this module; calibrated and points GN flows may still
+# call into the CUDA backend via global_opt.py.
 try:
     import mast3r_slam_mojo_backends as _matching_backends  # pyrefly: ignore
 except ImportError:

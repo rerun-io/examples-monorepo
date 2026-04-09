@@ -8,13 +8,18 @@ The intended state is:
 - do not keep the MAX custom-op experiment in-tree
 - keep one representative synthetic GN rays test that matches the real `base` graph shape
 
+Important limitation:
+
+- only the rays GN path is fully implemented in Mojo today
+- calibrated and points GN still depend on the CUDA backend step kernels
+
 ## What the CUDA kernel is doing
 
 The CUDA backend lives behind:
 
-- [`gn.h`](/var/tmp/vibe-kanban/worktrees/4658-mast3r-slam-mojo/examples-monorepo/packages/mast3r-slam/mast3r_slam/backend/include/gn.h)
-- [`gn.cpp`](/var/tmp/vibe-kanban/worktrees/4658-mast3r-slam-mojo/examples-monorepo/packages/mast3r-slam/mast3r_slam/backend/src/gn.cpp)
-- [`gn_kernels.cu`](/var/tmp/vibe-kanban/worktrees/4658-mast3r-slam-mojo/examples-monorepo/packages/mast3r-slam/mast3r_slam/backend/src/gn_kernels.cu)
+- [`gn.h`](../mast3r_slam/backend/include/gn.h)
+- [`gn.cpp`](../mast3r_slam/backend/src/gn.cpp)
+- [`gn_kernels.cu`](../mast3r_slam/backend/src/gn_kernels.cu)
 
 For `gauss_newton_rays`, the important structure is:
 
@@ -37,9 +42,9 @@ The CUDA path remains the correctness oracle.
 
 The surviving Mojo implementation lives in:
 
-- [`gn.mojo`](/var/tmp/vibe-kanban/worktrees/4658-mast3r-slam-mojo/examples-monorepo/packages/mast3r-slam/mast3r_slam/backend/mojo/gn.mojo)
-- [`gn_kernels.mojo`](/var/tmp/vibe-kanban/worktrees/4658-mast3r-slam-mojo/examples-monorepo/packages/mast3r-slam/mast3r_slam/backend/mojo/gn_kernels.mojo)
-- [`python_interop.mojo`](/var/tmp/vibe-kanban/worktrees/4658-mast3r-slam-mojo/examples-monorepo/packages/mast3r-slam/mast3r_slam/backend/mojo/python_interop.mojo)
+- [`gn.mojo`](../mast3r_slam/backend/mojo/gn.mojo)
+- [`gn_kernels.mojo`](../mast3r_slam/backend/mojo/gn_kernels.mojo)
+- [`python_interop.mojo`](../mast3r_slam/backend/mojo/python_interop.mojo)
 
 The key decisions that worked:
 
@@ -49,6 +54,11 @@ The key decisions that worked:
 - use the CUDA kernel structure as the algorithmic reference
 - use one GPU block per edge-partial and reduce inside the block
 - keep the representative acceptance surface on synthetic GN inputs shaped like the real `base` workload
+
+The current scope is intentionally narrow:
+
+- `gauss_newton_rays` is the real Mojo implementation
+- `gauss_newton_points` and `gauss_newton_calib` still call CUDA step kernels underneath
 
 The idiomatic Mojo path is readable enough because:
 
@@ -87,7 +97,7 @@ Keep one synthetic GN rays test:
 
 That test lives in:
 
-- [`test_mojo_vs_cuda.py`](/var/tmp/vibe-kanban/worktrees/4658-mast3r-slam-mojo/examples-monorepo/packages/mast3r-slam/tests/test_mojo_vs_cuda.py)
+- [`test_mojo_vs_cuda.py`](../tests/test_mojo_vs_cuda.py)
 
 ## Practical recommendation
 
