@@ -37,8 +37,14 @@ changing call sites.
 
 from std.math import ceildiv, max, min
 from std.python import Python, PythonObject
+from std.utils.index import Index
+from layout import Layout, LayoutTensor, RuntimeLayout, UNKNOWN_VALUE
 
-from gn_kernels import POSE_DIM, RAYS_THREADS, gauss_newton_rays_step_kernel, pose_retr_kernel
+from gn_kernels import (
+    POSE_DIM, POSE_STRIDE, RAYS_THREADS,
+    POSES_LT, DX_LT, XS_LT, CS_LT, EDGES_LT, IDX_LT,
+    gauss_newton_rays_step_kernel, pose_retr_kernel,
+)
 from python_interop import (
     get_cached_context_ptr,
     get_cuda_backend_module,
@@ -210,12 +216,20 @@ def pose_retr_py(
         return Python.none()
     var poses = poses_obj.contiguous().float()
     var dx = dx_obj.contiguous().float()
-    var poses_ptr = torch_float32_ptr(poses)
-    var dx_ptr = torch_float32_ptr(dx)
+    var num_vars = num_poses - num_fix
+    # Wrap PyTorch tensors in LayoutTensors for structured kernel access.
+    var poses_lt = LayoutTensor[DType.float32, POSES_LT, MutAnyOrigin](
+        torch_float32_ptr(poses),
+        RuntimeLayout[POSES_LT].row_major(Index(num_poses, POSE_STRIDE)),
+    )
+    var dx_lt = LayoutTensor[DType.float32, DX_LT, MutAnyOrigin](
+        torch_float32_ptr(dx),
+        RuntimeLayout[DX_LT].row_major(Index(num_vars, POSE_DIM)),
+    )
     var ctx_ptr = get_cached_context_ptr()
     ctx_ptr[].enqueue_function[pose_retr_kernel, pose_retr_kernel](
-        poses_ptr,
-        dx_ptr,
+        poses_lt,
+        dx_lt,
         num_fix,
         num_poses,
         grid_dim=ceildiv(max(num_poses - num_fix, 0), 256),

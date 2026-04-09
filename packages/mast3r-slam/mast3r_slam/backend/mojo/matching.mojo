@@ -86,46 +86,12 @@ def choose_refine_block(num_pts: Int, fdim: Int) -> Int:
 
 
 @always_inline
-def bilinear_sample(
-    data: UnsafePointer[Float32, MutAnyOrigin],
-    off11: Int, off12: Int, off21: Int, off22: Int,
-    w11: Float32, w12: Float32, w21: Float32, w22: Float32,
-    ch: Int,
-) -> Float32:
-    """Sample a single channel from four bilinear corners.
-
-    The corners are named by their bilinear weight, NOT their spatial position
-    (pixels are opposite the area weights — same convention as the CUDA kernel).
-    """
-    return (
-        w11 * data[off11 + ch]
-        + w12 * data[off12 + ch]
-        + w21 * data[off21 + ch]
-        + w22 * data[off22 + ch]
-    )
-
-
-@always_inline
-def bilinear_corners(
-    base_b: Int, rays_stride_v: Int,
-    v11: Int, u11: Int,
-) -> InlineArray[Int, 4]:
-    """Compute the four corner offsets for bilinear interpolation.
-
-    Returns [bottom-right, bottom-left, top-right, top-left] offsets.
-    NOTE: pixels opposite the area weights (same as CUDA kernel).
-    """
-    var offsets = InlineArray[Int, 4](fill=0)
-    offsets[0] = base_b + (v11 + 1) * rays_stride_v + (u11 + 1) * RAYS_CHANNELS  # bottom-right
-    offsets[1] = base_b + (v11 + 1) * rays_stride_v + u11 * RAYS_CHANNELS        # bottom-left
-    offsets[2] = base_b + v11 * rays_stride_v + (u11 + 1) * RAYS_CHANNELS        # top-right
-    offsets[3] = base_b + v11 * rays_stride_v + u11 * RAYS_CHANNELS              # top-left
-    return offsets^
-
-
-@always_inline
 def bilinear_weights(du: Float32, dv: Float32) -> InlineArray[Float32, 4]:
-    """Compute bilinear interpolation weights from fractional pixel offsets."""
+    """Compute bilinear interpolation weights from fractional pixel offsets.
+
+    Returns [w11, w12, w21, w22] = [du*dv, (1-du)*dv, du*(1-dv), (1-du)*(1-dv)].
+    Note: pixels are opposite the area weights (same convention as CUDA kernel).
+    """
     var w = InlineArray[Float32, 4](fill=Float32(0.0))
     w[0] = du * dv
     w[1] = (1.0 - du) * dv
@@ -141,21 +107,6 @@ def normalize_ray(
     """Normalize a 3D ray direction to unit length."""
     var r_inv: Float32 = 1.0 / sqrt(r0 * r0 + r1 * r1 + r2 * r2)
     return Vec3(r0 * r_inv, r1 * r_inv, r2 * r_inv)
-
-
-@always_inline
-def bilinear_sample_vec3(
-    data: UnsafePointer[Float32, MutAnyOrigin],
-    off: InlineArray[Int, 4],
-    w: InlineArray[Float32, 4],
-    ch_start: Int,
-) -> Vec3:
-    """Sample three consecutive channels via bilinear interpolation."""
-    return Vec3(
-        bilinear_sample(data, off[0], off[1], off[2], off[3], w[0], w[1], w[2], w[3], ch_start),
-        bilinear_sample(data, off[0], off[1], off[2], off[3], w[0], w[1], w[2], w[3], ch_start + 1),
-        bilinear_sample(data, off[0], off[1], off[2], off[3], w[0], w[1], w[2], w[3], ch_start + 2),
-    )
 
 
 # ─── GPU Kernels ──────────────────────────────────────────────────────────────
@@ -275,8 +226,8 @@ def iter_proj_kernel(
 def refine_matches_kernel(
     D11: UnsafePointer[Float32, MutAnyOrigin],
     D21: UnsafePointer[Float32, MutAnyOrigin],
-    p1: UnsafePointer[Int64, MutAnyOrigin],
-    p1_new: UnsafePointer[Int64, MutAnyOrigin],
+    p1: LayoutTensor[DType.int64, PIX2_I64_LT, MutAnyOrigin],
+    p1_new: LayoutTensor[DType.int64, PIX2_I64_LT, MutAnyOrigin],
     h: Int,
     w: Int,
     num_pts: Int,
@@ -286,40 +237,27 @@ def refine_matches_kernel(
 ):
     """Descriptor-based match refinement kernel (float32 path).
 
-    After projective search gives a plausible pixel, this kernel does a local
-    descriptor search around that pixel and keeps the best-scoring candidate.
+    Coarse-to-fine descriptor search: at each dilation level d, scan a grid of
+    (2·radius·d + 1)² candidates spaced d pixels apart, re-centre, decrease d.
 
-    The search proceeds in a coarse-to-fine manner:
-      - Start at the highest dilation (largest step size), scanning a grid of
-        `(2·radius·d + 1)²` candidates spaced `d` pixels apart.
-      - Re-centre on the winner, then decrease `d` by 1 and repeat.
-      - At dilation=1 the search is pixel-dense within the radius.
-
-    This multi-scale approach matches the CUDA `refine_matches_kernel<scalar_t>`.
-
-    Args:
-        D11 — reference image descriptors, shape [B, H, W, fdim]
-        D21 — query point descriptors, shape [B, N_pts, fdim]
-        p1  — initial pixel locations from iterative projection, [B, N_pts, 2]
-        p1_new — OUTPUT: refined pixel locations, [B, N_pts, 2]
+    D11/D21 stay as UnsafePointer for SIMD-vectorized dot product loads.
+    p1/p1_new use LayoutTensor for clean [b, n, 2] indexing.
     """
     var n: UInt = block_idx.x * block_dim.x + thread_idx.x
-    var b: UInt = block_idx.y
+    var b: Int = Int(block_idx.y)
 
     if n >= UInt(num_pts):
         return
+    var ni: Int = Int(n)
 
+    # Descriptor strides (manual — needed for SIMD load[width=4] on raw ptr)
     var d11_stride_b: Int = h * w * fdim
     var d11_stride_v: Int = w * fdim
     var d21_stride_b: Int = num_pts * fdim
-    var p_stride_b: Int = num_pts * 2
 
-    var p_base: Int = Int(b) * p_stride_b + Int(n) * 2
-    var u0: Int = Int(p1[p_base + 0])
-    var v0: Int = Int(p1[p_base + 1])
-
-    # Pre-compute query descriptor base (loop-invariant)
-    var d21_base: Int = Int(b) * d21_stride_b + Int(n) * fdim
+    var u0: Int = Int(p1[b, ni, 0])
+    var v0: Int = Int(p1[b, ni, 1])
+    var d21_base: Int = b * d21_stride_b + ni * fdim  # query descriptor base (loop-invariant)
 
     var max_score: Float32 = -3.4028235e+38
     var u_new: Int = u0
@@ -337,15 +275,14 @@ def refine_matches_kernel(
 
                 if v_cand >= 0 and v_cand < h and u_cand >= 0 and u_cand < w:
                     var score: Float32 = 0.0
-                    var d11_base: Int = Int(b) * d11_stride_b + v_cand * d11_stride_v + u_cand * fdim
-                    # SIMD-4 vectorized dot product
+                    var d11_base: Int = b * d11_stride_b + v_cand * d11_stride_v + u_cand * fdim
+                    # SIMD-4 vectorized dot product (raw pointer for perf)
                     var k: Int = 0
                     while k + 4 <= fdim:
                         var v21 = D21.load[width=4](d21_base + k)
                         var v11 = D11.load[width=4](d11_base + k)
                         score += (v21 * v11).reduce_add()
                         k += 4
-                    # Scalar remainder
                     while k < fdim:
                         score += D21[d21_base + k] * D11[d11_base + k]
                         k += 1
@@ -361,15 +298,15 @@ def refine_matches_kernel(
         u0 = u_new
         v0 = v_new
 
-    p1_new[p_base + 0] = Int64(u_new)
-    p1_new[p_base + 1] = Int64(v_new)
+    p1_new[b, ni, 0] = Int64(u_new)
+    p1_new[b, ni, 1] = Int64(v_new)
 
 
 def refine_matches_kernel_f16(
     D11: UnsafePointer[Float16, MutAnyOrigin],
     D21: UnsafePointer[Float16, MutAnyOrigin],
-    p1: UnsafePointer[Int64, MutAnyOrigin],
-    p1_new: UnsafePointer[Int64, MutAnyOrigin],
+    p1: LayoutTensor[DType.int64, PIX2_I64_LT, MutAnyOrigin],
+    p1_new: LayoutTensor[DType.int64, PIX2_I64_LT, MutAnyOrigin],
     h: Int,
     w: Int,
     num_pts: Int,
@@ -379,24 +316,23 @@ def refine_matches_kernel_f16(
 ):
     """Descriptor-based match refinement kernel (float16 path).
 
-    Reads float16 descriptors directly, accumulates dot products in float32.
+    Reads float16 descriptors via raw pointer (for SIMD-8 loads),
+    accumulates dot products in float32 for precision.
     """
     var n: UInt = block_idx.x * block_dim.x + thread_idx.x
-    var b: UInt = block_idx.y
+    var b: Int = Int(block_idx.y)
 
     if n >= UInt(num_pts):
         return
+    var ni: Int = Int(n)
 
     var d11_stride_b: Int = h * w * fdim
     var d11_stride_v: Int = w * fdim
     var d21_stride_b: Int = num_pts * fdim
-    var p_stride_b: Int = num_pts * 2
 
-    var p_base: Int = Int(b) * p_stride_b + Int(n) * 2
-    var u0: Int = Int(p1[p_base + 0])
-    var v0: Int = Int(p1[p_base + 1])
-
-    var d21_base: Int = Int(b) * d21_stride_b + Int(n) * fdim
+    var u0: Int = Int(p1[b, ni, 0])
+    var v0: Int = Int(p1[b, ni, 1])
+    var d21_base: Int = b * d21_stride_b + ni * fdim
 
     var max_score: Float32 = -3.4028235e+38
     var u_new: Int = u0
@@ -413,17 +349,15 @@ def refine_matches_kernel_f16(
                 var v_cand: Int = v0 - rd + j
 
                 if v_cand >= 0 and v_cand < h and u_cand >= 0 and u_cand < w:
-                    # SIMD-8 vectorized dot product (8 × f16 = 128 bits),
-                    # accumulated in float32 for precision.
+                    # SIMD-8 vectorized dot product (8 × f16 = 128 bits)
                     var score: Float32 = 0.0
-                    var d11_base: Int = Int(b) * d11_stride_b + v_cand * d11_stride_v + u_cand * fdim
+                    var d11_base: Int = b * d11_stride_b + v_cand * d11_stride_v + u_cand * fdim
                     var k: Int = 0
                     while k + 8 <= fdim:
                         var v21 = D21.load[width=8](d21_base + k)
                         var v11 = D11.load[width=8](d11_base + k)
                         score += (v21.cast[DType.float32]() * v11.cast[DType.float32]()).reduce_add()
                         k += 8
-                    # Scalar remainder
                     while k < fdim:
                         score += Float32(D21[d21_base + k]) * Float32(D11[d11_base + k])
                         k += 1
@@ -439,8 +373,8 @@ def refine_matches_kernel_f16(
         u0 = u_new
         v0 = v_new
 
-    p1_new[p_base + 0] = Int64(u_new)
-    p1_new[p_base + 1] = Int64(v_new)
+    p1_new[b, ni, 0] = Int64(u_new)
+    p1_new[b, ni, 1] = Int64(v_new)
 
 
 def refine_matches_kernel_f16_cached[
@@ -449,33 +383,26 @@ def refine_matches_kernel_f16_cached[
 ](
     D11: UnsafePointer[Float16, MutAnyOrigin],
     D21: UnsafePointer[Float16, MutAnyOrigin],
-    p1: UnsafePointer[Int64, MutAnyOrigin],
-    p1_new: UnsafePointer[Int64, MutAnyOrigin],
+    p1: LayoutTensor[DType.int64, PIX2_I64_LT, MutAnyOrigin],
+    p1_new: LayoutTensor[DType.int64, PIX2_I64_LT, MutAnyOrigin],
     h: Int,
     w: Int,
     num_pts: Int,
 ):
     """Specialized f16 refinement kernel for the common radius=2, dilation=2 case.
 
-    This is the **fast path** for MASt3R-SLAM's default configuration (16-dim
-    or 128-dim descriptors in half precision). Two compile-time optimisations:
+    Fast path for MASt3R-SLAM's default config (16- or 128-dim descriptors in
+    half precision). Caches each thread's query descriptor in shared memory,
+    compile-time-unrolls the inner dot product.
 
-    1. **Shared-memory caching**: each thread loads its query descriptor into
-       shared memory once (FDIM/8 chunks of 8×f16), then reuses it across all
-       ~25 candidate dot products. This eliminates repeated global reads of D21.
-
-    2. **Compile-time unrolling**: `comptime for` over the descriptor chunks
-       lets the compiler fully unroll the inner dot product, enabling better
-       instruction scheduling.
-
-    The `FDIM` and `BLOCK_SIZE` compile-time parameters are specialised for
-    the two common configurations: (16, 8) and (128, 16).
+    D11/D21 stay as UnsafePointer for SIMD-8 loads. p1/p1_new use LayoutTensor.
     """
     var n: UInt = block_idx.x * block_dim.x + thread_idx.x
-    var b: UInt = block_idx.y
+    var b: Int = Int(block_idx.y)
 
     if n >= UInt(num_pts):
         return
+    var ni: Int = Int(n)
 
     comptime CHUNKS = FDIM // 8
 
@@ -488,14 +415,13 @@ def refine_matches_kernel_f16_cached[
     var d11_stride_b: Int = h * w * FDIM
     var d11_stride_v: Int = w * FDIM
     var d21_stride_b: Int = num_pts * FDIM
-    var p_stride_b: Int = num_pts * 2
 
-    var p_base: Int = Int(b) * p_stride_b + Int(n) * 2
-    var u0: Int = Int(p1[p_base + 0])
-    var v0: Int = Int(p1[p_base + 1])
-    var d21_base: Int = Int(b) * d21_stride_b + Int(n) * FDIM
+    var u0: Int = Int(p1[b, ni, 0])
+    var v0: Int = Int(p1[b, ni, 1])
+    var d21_base: Int = b * d21_stride_b + ni * FDIM
     var q_shared_base: Int = Int(thread_idx.x) * CHUNKS
 
+    # Cache query descriptor in shared memory (one load per thread)
     comptime for chunk in range(CHUNKS):
         q_shared[q_shared_base + chunk] = D21.load[width=8](
             d21_base + chunk * 8
@@ -518,7 +444,7 @@ def refine_matches_kernel_f16_cached[
 
                 if v_cand >= 0 and v_cand < h and u_cand >= 0 and u_cand < w:
                     var score: Float32 = 0.0
-                    var d11_base: Int = Int(b) * d11_stride_b + v_cand * d11_stride_v + u_cand * FDIM
+                    var d11_base: Int = b * d11_stride_b + v_cand * d11_stride_v + u_cand * FDIM
                     comptime for chunk in range(CHUNKS):
                         var q = q_shared[q_shared_base + chunk]
                         var v11 = D11.load[width=8](
@@ -539,8 +465,8 @@ def refine_matches_kernel_f16_cached[
         u0 = u_new
         v0 = v_new
 
-    p1_new[p_base + 0] = Int64(u_new)
-    p1_new[p_base + 1] = Int64(v_new)
+    p1_new[b, ni, 0] = Int64(u_new)
+    p1_new[b, ni, 1] = Int64(v_new)
 
 
 # ─── Python-facing wrapper functions ──────────────────────────────────────────
@@ -680,8 +606,16 @@ def refine_matches_py(
         dtype=p1.dtype,
     )
 
-    var p1_uptr = torch_int64_ptr(p1)
-    var p1_new_uptr = torch_int64_ptr(p1_new)
+    # Wrap pixel tensors in LayoutTensors — these are passed directly to the kernel.
+    # Descriptor pointers (D11, D21) stay as UnsafePointer for SIMD load[width=N].
+    var p1_lt = LayoutTensor[DType.int64, PIX2_I64_LT, MutAnyOrigin](
+        torch_int64_ptr(p1),
+        RuntimeLayout[PIX2_I64_LT].row_major(Index(batch, num_pts, 2)),
+    )
+    var p1_new_lt = LayoutTensor[DType.int64, PIX2_I64_LT, MutAnyOrigin](
+        torch_int64_ptr(p1_new),
+        RuntimeLayout[PIX2_I64_LT].row_major(Index(batch, num_pts, 2)),
+    )
 
     var ctx_ptr = get_cached_context_ptr()
     var block_size: Int = choose_refine_block(num_pts, fdim)
@@ -703,8 +637,8 @@ def refine_matches_py(
             ctx_ptr[].enqueue_function[kernel, kernel](
                 d11_uptr,
                 d21_uptr,
-                p1_uptr,
-                p1_new_uptr,
+                p1_lt,
+                p1_new_lt,
                 h, w, num_pts,
                 grid_dim=(num_blocks_x, batch),
                 block_dim=block_size,
@@ -714,8 +648,8 @@ def refine_matches_py(
             ctx_ptr[].enqueue_function[kernel, kernel](
                 d11_uptr,
                 d21_uptr,
-                p1_uptr,
-                p1_new_uptr,
+                p1_lt,
+                p1_new_lt,
                 h, w, num_pts,
                 grid_dim=(num_blocks_x, batch),
                 block_dim=block_size,
@@ -724,8 +658,8 @@ def refine_matches_py(
             ctx_ptr[].enqueue_function[refine_matches_kernel_f16, refine_matches_kernel_f16](
                 d11_uptr,
                 d21_uptr,
-                p1_uptr,
-                p1_new_uptr,
+                p1_lt,
+                p1_new_lt,
                 h, w, num_pts, fdim, radius, dilation_max,
                 grid_dim=(num_blocks_x, batch),
                 block_dim=block_size,
@@ -739,8 +673,8 @@ def refine_matches_py(
         ctx_ptr[].enqueue_function[refine_matches_kernel, refine_matches_kernel](
             d11_uptr,
             d21_uptr,
-            p1_uptr,
-            p1_new_uptr,
+            p1_lt,
+            p1_new_lt,
             h, w, num_pts, fdim, radius, dilation_max,
             grid_dim=(num_blocks_x, batch),
             block_dim=block_size,

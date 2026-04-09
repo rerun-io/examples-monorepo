@@ -45,6 +45,8 @@ from std.gpu import global_idx, block_idx, block_dim, thread_idx, barrier, lane_
 from std.gpu.primitives import warp
 from std.gpu.memory import AddressSpace
 from std.memory import stack_allocation
+from std.utils.index import Index
+from layout import Layout, LayoutTensor, RuntimeLayout, UNKNOWN_VALUE
 
 # ── Compile-time constants ───────────────────────────────────────────────────
 comptime POSE_DIM = 7       # DOF per Sim(3) pose (tx, ty, tz, qx, qy, qz, log_s)
@@ -52,6 +54,15 @@ comptime POSE_STRIDE = 8    # in-memory stride per pose (tx, ty, tz, qx, qy, qz,
 comptime RAYS_HDIM = 14 * (14 + 1) // 2  # lower-triangle of 14×14 block Hessian
 comptime RAYS_THREADS = 128  # block size for the rays step kernel (4 warps)
 comptime RAYS_WARPS = RAYS_THREADS // 32
+
+# ── Layout aliases for LayoutTensor ──────────────────────────────────────────
+# UNKNOWN_VALUE marks dimensions whose size is determined at runtime.
+comptime POSES_LT = Layout.row_major(UNKNOWN_VALUE, POSE_STRIDE)     # [N_kf, 8]
+comptime DX_LT = Layout.row_major(UNKNOWN_VALUE, POSE_DIM)           # [N_vars, 7]
+comptime XS_LT = Layout.row_major(UNKNOWN_VALUE, UNKNOWN_VALUE, 3)   # [N_kf, N_pts, 3]
+comptime CS_LT = Layout.row_major(UNKNOWN_VALUE, UNKNOWN_VALUE)      # [N_kf, N_pts]
+comptime EDGES_LT = Layout.row_major(UNKNOWN_VALUE)                   # [N_edges]
+comptime IDX_LT = Layout.row_major(UNKNOWN_VALUE, UNKNOWN_VALUE)     # [N_edges, N_pts]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -595,19 +606,38 @@ def gauss_newton_rays_step_kernel(
 # ══════════════════════════════════════════════════════════════════════════════
 
 def pose_retr_kernel(
-    poses: UnsafePointer[Float32, MutAnyOrigin],
-    dx: UnsafePointer[Float32, MutAnyOrigin],
+    poses: LayoutTensor[DType.float32, POSES_LT, MutAnyOrigin],
+    dx: LayoutTensor[DType.float32, DX_LT, MutAnyOrigin],
     num_fix: Int,
     num_poses: Int,
 ):
     """Apply Sim(3) tangent update to every unfixed pose: T_new = Exp(dx) · T_old.
 
-    One thread per unfixed pose. Equivalent to CUDA's `pose_retr_kernel()`.
+    One thread per unfixed pose. Uses LayoutTensor for structured [kf, dim]
+    access instead of raw pointer arithmetic.
+    Equivalent to CUDA's `pose_retr_kernel()`.
     """
     var k: Int = Int(global_idx.x) + num_fix
     if k >= num_poses:
         return
-    var xi = exp_sim3(TangentVec7.load(dx, (k - num_fix) * POSE_DIM))
-    var old_pose = Sim3Pose.load(poses, k * POSE_STRIDE)
-    var new_pose = xi.compose(old_pose)
-    new_pose.store(poses, k * POSE_STRIDE)
+    # Load the 7D tangent increment dx[k-fix, :] via LayoutTensor indexing
+    var dx_row: Int = k - num_fix
+    var xi_tangent = TangentVec7(
+        dx[dx_row, 0][0], dx[dx_row, 1][0], dx[dx_row, 2][0],
+        dx[dx_row, 3][0], dx[dx_row, 4][0], dx[dx_row, 5][0], dx[dx_row, 6][0],
+    )
+    # Load the current pose, compose with Exp(dx), write back
+    var old_pose = Sim3Pose(
+        Vec3(poses[k, 0][0], poses[k, 1][0], poses[k, 2][0]),
+        Quat(poses[k, 3][0], poses[k, 4][0], poses[k, 5][0], poses[k, 6][0]),
+        poses[k, 7][0],
+    )
+    var new_pose = exp_sim3(xi_tangent).compose(old_pose)
+    poses[k, 0] = new_pose.t.x
+    poses[k, 1] = new_pose.t.y
+    poses[k, 2] = new_pose.t.z
+    poses[k, 3] = new_pose.q.x
+    poses[k, 4] = new_pose.q.y
+    poses[k, 5] = new_pose.q.z
+    poses[k, 6] = new_pose.q.w
+    poses[k, 7] = new_pose.s
