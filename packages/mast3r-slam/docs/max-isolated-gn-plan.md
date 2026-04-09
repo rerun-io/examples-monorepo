@@ -2,6 +2,12 @@
 
 This note captures the clean path for building a true isolated MAX custom-op implementation of the GN rays kernel, while keeping the current idiomatic Mojo shared-library backend as the active production path.
 
+Validation status in this repo right now:
+
+- the plan has been checked against the current Modular custom-op and MAX environment guidance
+- the isolated Python wrapper `mast3r_slam.max_gn_rays` now loads its own `CustomOpLibrary` package successfully
+- the active GN backend path remains idiomatic Mojo, and the existing CUDA-vs-Mojo tests still pass
+
 ## Current repo state
 
 - Active GN backend path should remain the idiomatic Mojo shared-library implementation exposed by `mast3r_slam_mojo_backends`.

@@ -750,7 +750,7 @@ pyaml = "*"
 PACKAGE_DIR = "packages/mast3r-slam"
 
 [feature.mast3r-slam-max.tasks.check-max-python]
-cmd = "python -c \"import importlib; [print(mod, 'OK') for mod in ['max.experimental.torch', 'mast3r_slam.max_ops'] if not importlib.import_module(mod)]\""
+cmd = "python -c \"import importlib; [print(mod, 'OK') for mod in ['max.experimental.torch', 'mast3r_slam.max_ops', 'mast3r_slam.max_gn_rays'] if not importlib.import_module(mod)]\""
 description = "Verify MAX Python modules are importable in the max env"
 
 [feature.mast3r-slam-max.tasks.bench-gn-custom-op]
