@@ -32,7 +32,6 @@ import rerun as rr
 import torch
 from jaxtyping import Bool, Float, Float32, Int, UInt8, UInt16
 from numpy import ndarray
-from simplecv.camera_parameters import PinholeParameters
 from simplecv.camera_orient_utils import auto_orient_and_center_poses
 from simplecv.rerun_log_utils import log_pinhole
 from torch import Tensor
@@ -90,13 +89,7 @@ def snapshot_current_frame(
     last_kf_rgb: Float32[ndarray, "H W 3"] | None = None
     last_kf_X_canon: Float32[ndarray, "hw 3"] | None = None
     last_kf_C: Float32[ndarray, "hw 1"] | None = None
-    # Track keyframe identity separately so the logger can skip redundant
-    # /last_keyframe RGB relogs when only its map/confidence changed.
-    last_kf_idx: int | None = None
     if keyframes is not None:
-        with keyframes.lock:
-            if len(keyframes) > 0:
-                last_kf_idx = len(keyframes) - 1
         last_kf: Frame | None = keyframes.last_keyframe()
         if last_kf is not None:
             last_kf_rgb = last_kf.rgb.numpy().astype(np.float32)
@@ -116,7 +109,6 @@ def snapshot_current_frame(
         last_kf_rgb=last_kf_rgb,
         last_kf_X_canon=last_kf_X_canon,
         last_kf_C=last_kf_C,
-        last_kf_idx=last_kf_idx,
     )
 
 
@@ -286,8 +278,6 @@ class AsyncRerunLogger:
         # Internal visualization state
         self._path_list: list[list[float]] = []
         self._logged_keyframes: set[int] = set()
-        self._keyframe_pinhole_static: dict[int, PinholeParameters] = {}
-        self._logged_image_formats: set[str] = set()
         self._last_kf_idx: int = -1
         self._last_blueprint_n_kf: int = -1
         self._n_keyframes: int = 0
@@ -404,66 +394,12 @@ class AsyncRerunLogger:
 
     # ── Image helpers ─────────────────────────────────────────────────
 
-    def _ensure_image_format(
-        self,
-        image_path: str,
-        *,
-        width: int,
-        height: int,
-        color_model: rr.ColorModel,
-        channel_datatype: rr.datatypes.ChannelDatatype,
-    ) -> None:
-        # Log static image metadata once so per-frame updates only send buffers.
-        if image_path in self._logged_image_formats:
-            return
-        rr.log(
-            image_path,
-            rr.Image.from_fields(
-                format=rr.components.ImageFormat(
-                    width=width,
-                    height=height,
-                    color_model=color_model,
-                    channel_datatype=channel_datatype,
-                ),
-            ),
-            static=True,
-        )
-        self._logged_image_formats.add(image_path)
-
-    def _ensure_depth_format(self, depth_path: str, *, width: int, height: int, meter: float = 1000.0) -> None:
-        # Same idea as _ensure_image_format(), but for depth images.
-        if depth_path in self._logged_image_formats:
-            return
-        rr.log(
-            depth_path,
-            rr.DepthImage.from_fields(
-                format=rr.components.ImageFormat(
-                    width=width,
-                    height=height,
-                    color_model=rr.ColorModel.L,
-                    channel_datatype=rr.datatypes.ChannelDatatype.U16,
-                ),
-                meter=meter,
-            ),
-            static=True,
-        )
-        self._logged_image_formats.add(depth_path)
-
     def _log_rgb_image(self, image_path: str, rgb: Float32[ndarray, "H W 3"]) -> UInt8[ndarray, "H W 3"]:
-        """Convert [0,1] float RGB to uint8 and log via buffer-only updates."""
+        """Convert [0,1] float RGB to uint8, JPEG-compress, and log."""
         rgb_uint8: UInt8[ndarray, "H W 3"] = (rgb * 255).astype(np.uint8)
-        self._ensure_image_format(
-            image_path,
-            width=rgb_uint8.shape[1],
-            height=rgb_uint8.shape[0],
-            color_model=rr.ColorModel.RGB,
-            channel_datatype=rr.datatypes.ChannelDatatype.U8,
-        )
         rr.log(
             image_path,
-            # Buffer-only updates benchmarked better than rebuilding/compressing
-            # full Image archetypes every frame.
-            rr.Image.from_fields(buffer=rgb_uint8.reshape(-1)),
+            rr.Image(image=rgb_uint8, color_model=rr.ColorModel.RGB).compress(jpeg_quality=75),
         )
         return rgb_uint8
 
@@ -486,14 +422,15 @@ class AsyncRerunLogger:
         depth_mm: Float32[ndarray, "H W"] = np.clip(depth_meters * 1000.0, 0.0, float(np.iinfo(np.uint16).max))
         return depth_mm.astype(np.uint16)
 
-    def _prepare_pointmap_and_confidence_buffers(
+    def _log_pointmap_and_confidence(
         self,
         X_canon: Float32[ndarray, "hw 3"],
         C: Float32[ndarray, "hw 1"],
+        log_path: str,
         height: int,
         width: int,
-    ) -> tuple[UInt8[ndarray, "H W 3"], UInt16[ndarray, "H W"], UInt8[ndarray, "H W"]]:
-        """Prepare pointmap/depth/confidence visualization buffers."""
+    ) -> None:
+        """Log pointmap depth, pointmap image, and confidence to Rerun."""
         pointmap_hw3: Float32[ndarray, "H W 3"] = X_canon.reshape(height, width, 3).astype(np.float32)
         pointmap_hw3 = np.nan_to_num(pointmap_hw3, nan=0.0, posinf=0.0, neginf=0.0)
         depth_hw: Float32[ndarray, "H W"] = np.maximum(pointmap_hw3[..., 2], 0.0)
@@ -506,46 +443,9 @@ class AsyncRerunLogger:
         pointmap_uint8: UInt8[ndarray, "H W 3"] = self._normalize_to_uint8(pointmap_hw3)
         depth_uint16_mm: UInt16[ndarray, "H W"] = self._depth_meters_to_uint16_mm(filtered_depth_hw)
 
-        return pointmap_uint8, depth_uint16_mm, confidence_uint8
-
-    def _log_pointmap_and_confidence(
-        self,
-        X_canon: Float32[ndarray, "hw 3"],
-        C: Float32[ndarray, "hw 1"],
-        log_path: str,
-        height: int,
-        width: int,
-    ) -> None:
-        """Log pointmap depth, pointmap image, and confidence to Rerun."""
-        pointmap_uint8, depth_uint16_mm, confidence_uint8 = self._prepare_pointmap_and_confidence_buffers(
-            X_canon, C, height, width,
-        )
-
-        pointmap_path = f"{log_path}/pointmap"
-        depth_path = f"{log_path}/pointmap_depth"
-        confidence_path = f"{log_path}/confidence"
-
-        self._ensure_image_format(
-            pointmap_path,
-            width=width,
-            height=height,
-            color_model=rr.ColorModel.RGB,
-            channel_datatype=rr.datatypes.ChannelDatatype.U8,
-        )
-        self._ensure_depth_format(depth_path, width=width, height=height)
-        self._ensure_image_format(
-            confidence_path,
-            width=width,
-            height=height,
-            color_model=rr.ColorModel.L,
-            channel_datatype=rr.datatypes.ChannelDatatype.U8,
-        )
-
-        # Keep the same logged content, but reuse the static formats above so
-        # each frame only ships raw buffers.
-        rr.log(pointmap_path, rr.Image.from_fields(buffer=pointmap_uint8.reshape(-1)))
-        rr.log(depth_path, rr.DepthImage.from_fields(buffer=depth_uint16_mm.view(np.uint8).reshape(-1)))
-        rr.log(confidence_path, rr.Image.from_fields(buffer=confidence_uint8.reshape(-1)))
+        rr.log(f"{log_path}/pointmap", rr.Image(pointmap_uint8, color_model=rr.ColorModel.RGB).compress())
+        rr.log(f"{log_path}/pointmap_depth", rr.DepthImage(depth_uint16_mm, meter=1000.0).compress())
+        rr.log(f"{log_path}/confidence", rr.Image(confidence_uint8, color_model=rr.ColorModel.L).compress())
 
     # ── Event handlers ────────────────────────────────────────────────
 
@@ -597,10 +497,7 @@ class AsyncRerunLogger:
         # active keyframe's pointmap/confidence, so relog it every frame.
         if event.last_kf_rgb is not None:
             lk_path: str = f"{self._parent_log_path}/last_keyframe"
-            if event.last_kf_idx != self._last_kf_idx:
-                # RGB is static for a given keyframe; only resend it when the
-                # "last keyframe" identity changes.
-                self._log_rgb_image(lk_path, event.last_kf_rgb)
+            self._log_rgb_image(lk_path, event.last_kf_rgb)
             if event.last_kf_X_canon is not None and event.last_kf_C is not None:
                 h_lk: int = event.last_kf_rgb.shape[0]
                 w_lk: int = event.last_kf_rgb.shape[1]
@@ -617,9 +514,9 @@ class AsyncRerunLogger:
         for kf_snapshot in event.new_keyframes:
             self._log_new_keyframe(kf_snapshot)
 
-        # Dirty keyframe pose updates from backend
-        for kf_idx, world_sim3_cam_data in event.pose_updates:
-            self._relog_keyframe_camera(kf_idx, world_sim3_cam_data)
+        # Dirty keyframes from backend updates
+        for keyframe in event.updated_keyframes:
+            self._relog_keyframe_camera(keyframe)
 
         # Factor graph edges
         if event.edge_positions is not None:
@@ -663,11 +560,6 @@ class AsyncRerunLogger:
             cam_log_path=Path(kf_cam_log_path),
             image_plane_distance=self._image_plane_distance,
         )
-        self._keyframe_pinhole_static[kf.kf_idx] = PinholeParameters(
-            name=pinhole.name,
-            extrinsics=pinhole.extrinsics,
-            intrinsics=pinhole.intrinsics,
-        )
 
         # RGB image
         kf_rgb_uint8: UInt8[ndarray, "H W 3"] = self._log_rgb_image(
@@ -707,32 +599,23 @@ class AsyncRerunLogger:
             kf.img_shape[0], kf.img_shape[1],
         )
 
-    def _relog_keyframe_camera(self, kf_idx: int, world_sim3_cam_data: Float32[ndarray, "8"]) -> None:
-        """Replay a keyframe transform update after backend refinement."""
-        kf_cam_log_path: str = f"{self._parent_log_path}/keyframes/keyframe-{kf_idx}"
-        cached_pinhole: PinholeParameters | None = self._keyframe_pinhole_static.get(kf_idx)
-        if cached_pinhole is None:
-            return
+    def _relog_keyframe_camera(self, kf: KeyframeSnapshot) -> None:
+        """Replay the full keyframe camera update after backend refinement."""
+        kf_cam_log_path: str = f"{self._parent_log_path}/keyframes/keyframe-{kf.kf_idx}"
 
         frame: Frame = snapshot_to_frame(
-            world_sim3_cam_data,
-            rgb=np.zeros((1, 1, 3), dtype=np.float32),
-            X_canon=None,
-            C=None,
-            img_shape=(1, 1),
-            frame_id=kf_idx,
+            kf.world_sim3_cam_data, kf.rgb, kf.X_canon, kf.C,
+            kf.img_shape, frame_id=kf.kf_idx,
         )
-        extrinsics = frame_to_extrinsics(frame)
-        # Backend pose refinement only changes the camera transform; relogging
-        # the full pinhole stack was correct but measurably slower.
-        rr.log(
-            kf_cam_log_path,
-            rr.Transform3D(
-                translation=extrinsics.cam_t_world,
-                mat3x3=extrinsics.cam_R_world,
-                from_parent=True,
-            ),
+        pinhole = frame_to_pinhole(frame)
+        log_pinhole(
+            camera=pinhole,
+            cam_log_path=Path(kf_cam_log_path),
+            image_plane_distance=self._image_plane_distance,
         )
+
+        if kf.kf_idx == self._last_kf_idx:
+            self._log_last_keyframe(kf)
 
     def _log_edges(
         self,

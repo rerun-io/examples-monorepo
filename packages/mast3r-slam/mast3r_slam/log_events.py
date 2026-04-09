@@ -60,8 +60,6 @@ class LogCurrentFrame:
     """Last keyframe pointmap (tracker continuously updates it)."""
     last_kf_C: Float32[ndarray, "hw 1"] | None = None
     """Last keyframe confidence (tracker continuously updates it)."""
-    last_kf_idx: int | None = None
-    """Index of the current last keyframe, used to avoid resending unchanged last-KF RGB."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,8 +77,8 @@ class LogMapUpdate:
     """Video timestamp in nanoseconds, or None if not from MP4."""
     new_keyframes: list[KeyframeSnapshot] = field(default_factory=list)
     """Newly created keyframes this iteration (empty if none)."""
-    pose_updates: list[tuple[int, Float32[ndarray, "8"]]] = field(default_factory=list)
-    """(kf_idx, world_sim3_cam_data) pairs for backend-refined poses."""
+    updated_keyframes: list[KeyframeSnapshot] = field(default_factory=list)
+    """Dirty keyframes whose camera entities must be replayed after backend refinement."""
     edge_positions: tuple[Float32[ndarray, "n 3"], Float32[ndarray, "n 3"]] | None = None
     """(positions_i, positions_j) for factor graph edges, or None if unchanged."""
     orient: tuple[Float32[ndarray, "3 3"], Float32[ndarray, "3"]] | None = None
