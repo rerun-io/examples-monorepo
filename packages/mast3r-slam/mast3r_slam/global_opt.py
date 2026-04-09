@@ -7,6 +7,7 @@ from torch import Tensor
 from mast3r_slam import gn_backends as _gn_backends  # pyrefly: ignore
 from mast3r_slam.config import config
 from mast3r_slam.frame import Frame, SharedKeyframes
+from mast3r_slam.gn_fixture_utils import maybe_capture_gn_fixture
 from mast3r_slam.geometry import (
     constrain_points_to_ray,
 )
@@ -244,6 +245,32 @@ class FactorGraph:
         delta_thresh: float = self.cfg["delta_norm"]
 
         pose_data: Float[Tensor, "n_unique sim3_dim"] = world_sim3_cams.data[:, 0, :]
+        maybe_capture_gn_fixture(
+            "rays",
+            inputs={
+                "Twc": pose_data,
+                "Xs": Xs,
+                "Cs": Cs,
+                "ii": ii,
+                "jj": jj,
+                "idx_ii2jj": idx_ii2jj,
+                "valid_match": valid_match,
+                "Q": Q_ii2jj,
+                "sigma_ray": sigma_ray,
+                "sigma_dist": sigma_dist,
+                "C_thresh": C_thresh,
+                "Q_thresh": Q_thresh,
+                "max_iter": max_iter,
+                "delta_thresh": delta_thresh,
+            },
+            metadata={
+                "source": "FactorGraph.solve_GN_rays",
+                "pin": pin,
+                "n_unique_kf": n_unique_kf,
+                "num_edges": int(ii.numel()),
+                "num_points": int(Xs.shape[1]),
+            },
+        )
         _gn_backends.gauss_newton_rays(
             pose_data,
             Xs,
@@ -311,6 +338,37 @@ class FactorGraph:
         width: int
         height, width = img_size
 
+        maybe_capture_gn_fixture(
+            "calib",
+            inputs={
+                "Twc": pose_data,
+                "Xs": Xs,
+                "Cs": Cs,
+                "K": K,
+                "ii": ii,
+                "jj": jj,
+                "idx_ii2jj": idx_ii2jj,
+                "valid_match": valid_match,
+                "Q": Q_ii2jj,
+                "height": height,
+                "width": width,
+                "pixel_border": pixel_border,
+                "z_eps": z_eps,
+                "sigma_pixel": sigma_pixel,
+                "sigma_depth": sigma_depth,
+                "C_thresh": C_thresh,
+                "Q_thresh": Q_thresh,
+                "max_iter": max_iter,
+                "delta_thresh": delta_thresh,
+            },
+            metadata={
+                "source": "FactorGraph.solve_GN_calib",
+                "pin": pin,
+                "n_unique_kf": n_unique_kf,
+                "num_edges": int(ii.numel()),
+                "num_points": int(Xs.shape[1]),
+            },
+        )
         _gn_backends.gauss_newton_calib(
             pose_data,
             Xs,

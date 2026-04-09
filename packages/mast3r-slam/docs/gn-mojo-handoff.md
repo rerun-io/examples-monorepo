@@ -174,6 +174,11 @@ Missing for real signoff:
 - `livingroom-tour.mp4` end-to-end timing
 - `example-base` timing report
 
+The branch now includes the first part of that harness:
+
+- opt-in fixture capture at the live `FactorGraph.solve_GN_rays` and `FactorGraph.solve_GN_calib` backend boundary
+- a real-fixture public-API benchmark tool that compares CUDA vs the selected backend on captured `.pt` fixtures
+
 ## Likely Root Cause of Being Stuck
 
 The branch no longer looks blocked on packaging or backend-selection architecture. Those pieces exist.
@@ -326,6 +331,23 @@ pixi run -e mast3r-slam-dev pytest tests/test_gn_step_api.py -q
 ```bash
 cd packages/mast3r-slam
 pixi run -e mast3r-slam-dev python tools/bench_gn_kernels.py
+```
+
+### Capture real GN fixtures from a live run
+
+```bash
+cd packages/mast3r-slam
+export MAST3R_SLAM_GN_CAPTURE_DIR=artifacts/gn-fixtures
+export MAST3R_SLAM_GN_CAPTURE_LIMIT=4
+pixi run -e mast3r-slam-dev python tools/mast3r_slam_inference.py \
+  --dataset data/livingroom-tour.mp4 --img-size 512 --config config/base.yaml
+```
+
+### Benchmark captured real GN fixtures
+
+```bash
+cd packages/mast3r-slam
+pixi run -e mast3r-slam-dev python tools/bench_gn_real_fixtures.py artifacts/gn-fixtures
 ```
 
 ### MAX custom-op tests
