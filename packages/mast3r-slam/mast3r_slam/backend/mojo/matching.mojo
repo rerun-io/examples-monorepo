@@ -404,6 +404,10 @@ def refine_matches_kernel_f16_cached[
 
     comptime CHUNKS = FDIM // 8
 
+    # This is a simple per-thread linear staging buffer for descriptor chunks.
+    # A layout-backed view would not buy us much here because indexing is
+    # already one-dimensional and the underlying PyTorch pointer boundary is
+    # outside this kernel.
     var q_shared = stack_allocation[
         BLOCK_SIZE * CHUNKS,
         SIMD[DType.float16, 8],

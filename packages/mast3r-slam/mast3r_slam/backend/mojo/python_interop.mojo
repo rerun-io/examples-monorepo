@@ -12,6 +12,12 @@ The safety contract for every `torch_*_ptr()` helper is:
 
 Those conditions already hold in the existing call sites; keeping the raw
 pointer logic here makes that boundary easier to audit.
+
+`LayoutTensor` is intentionally not used here. It is a better fit once we are
+already inside Mojo kernel code with a typed pointer or shared allocation to
+wrap. At the Python extension boundary, we still need one explicit
+`tensor.data_ptr()` -> typed pointer conversion, so this module keeps that
+unsafe step isolated in one place instead of scattering it across wrappers.
 """
 
 from std.gpu.host import DeviceContext
