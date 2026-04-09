@@ -39,6 +39,17 @@ def custom_op_available() -> bool:
 
 
 @lru_cache(maxsize=1)
+def _get_shared_mojo_backend() -> Any:
+    import mast3r_slam_mojo_backends as mojo_backends  # pyrefly: ignore
+
+    return mojo_backends
+
+
+def _strict_custom_op_enabled() -> bool:
+    return os.environ.get("MAST3R_SLAM_CUSTOM_OP_STRICT", "0").strip() == "1"
+
+
+@lru_cache(maxsize=1)
 def _ensure_modular_runtime_loaded() -> None:
     spec = find_spec("modular")
     if spec is None:
@@ -178,7 +189,7 @@ def _pose_retr_inplace(twc: torch.Tensor, dx: torch.Tensor, num_fix: int) -> Non
     twc[num_fix:] = tail.retr(update).data.to(device=twc.device, dtype=twc.dtype)
 
 
-def gauss_newton_rays(
+def _gauss_newton_rays_custom_op_impl(
     Twc: torch.Tensor,
     Xs: torch.Tensor,
     Cs: torch.Tensor,
@@ -232,6 +243,62 @@ def gauss_newton_rays(
             break
 
     return (dx,)
+
+
+def gauss_newton_rays(
+    Twc: torch.Tensor,
+    Xs: torch.Tensor,
+    Cs: torch.Tensor,
+    ii: torch.Tensor,
+    jj: torch.Tensor,
+    idx_ii2jj: torch.Tensor,
+    valid_match: torch.Tensor,
+    Q: torch.Tensor,
+    sigma_ray: float,
+    sigma_dist: float,
+    c_thresh: float,
+    q_thresh: float,
+    max_iter: int,
+    delta_thresh: float,
+) -> tuple[torch.Tensor]:
+    if not _strict_custom_op_enabled():
+        try:
+            return _get_shared_mojo_backend().gauss_newton_rays_impl_idiomatic(
+                (
+                    Twc,
+                    Xs,
+                    Cs,
+                    ii,
+                    jj,
+                    idx_ii2jj,
+                    valid_match,
+                    Q,
+                    sigma_ray,
+                    sigma_dist,
+                    c_thresh,
+                    q_thresh,
+                    max_iter,
+                    delta_thresh,
+                )
+            )
+        except Exception:
+            pass
+    return _gauss_newton_rays_custom_op_impl(
+        Twc,
+        Xs,
+        Cs,
+        ii,
+        jj,
+        idx_ii2jj,
+        valid_match,
+        Q,
+        sigma_ray,
+        sigma_dist,
+        c_thresh,
+        q_thresh,
+        max_iter,
+        delta_thresh,
+    )
 
 
 def preferred_mojo_interface() -> str:
