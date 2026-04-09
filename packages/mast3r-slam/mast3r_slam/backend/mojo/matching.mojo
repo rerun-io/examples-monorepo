@@ -36,6 +36,8 @@ from std.gpu import block_idx, block_dim, thread_idx, barrier
 from std.gpu.memory import AddressSpace
 from std.memory import stack_allocation
 from std.python import Python, PythonObject
+from std.utils.index import Index
+from layout import Layout, LayoutTensor, RuntimeLayout, UNKNOWN_VALUE
 from python_interop import (
     get_cached_context_ptr,
     torch_float16_ptr,
@@ -45,7 +47,18 @@ from python_interop import (
 )
 from gn_kernels import Vec3
 
+# ── Compile-time constants and layout aliases ─────────────────────────────────
 comptime RAYS_CHANNELS = 9  # ray(3) + ∂ray/∂u(3) + ∂ray/∂v(3)
+
+# Tensor layout declarations: UNKNOWN_VALUE marks runtime-determined dimensions.
+# LayoutTensor uses these to provide multi-dim indexing without manual stride math.
+comptime RAYS_LT = Layout.row_major(UNKNOWN_VALUE, UNKNOWN_VALUE, UNKNOWN_VALUE, RAYS_CHANNELS)  # [B, H, W, 9]
+comptime PTS3_LT = Layout.row_major(UNKNOWN_VALUE, UNKNOWN_VALUE, 3)    # [B, N, 3]
+comptime PIX2_F32_LT = Layout.row_major(UNKNOWN_VALUE, UNKNOWN_VALUE, 2)  # [B, N, 2] float
+comptime PIX2_I64_LT = Layout.row_major(UNKNOWN_VALUE, UNKNOWN_VALUE, 2)  # [B, N, 2] int64
+comptime CONV_LT = Layout.row_major(UNKNOWN_VALUE, UNKNOWN_VALUE)        # [B, N]
+comptime DESC_REF_LT = Layout.row_major(UNKNOWN_VALUE, UNKNOWN_VALUE, UNKNOWN_VALUE, UNKNOWN_VALUE)  # [B, H, W, fdim]
+comptime DESC_QRY_LT = Layout.row_major(UNKNOWN_VALUE, UNKNOWN_VALUE, UNKNOWN_VALUE)  # [B, N, fdim]
 
 
 # ── Block-size heuristics ─────────────────────────────────────────────────────
@@ -148,11 +161,11 @@ def bilinear_sample_vec3(
 # ─── GPU Kernels ──────────────────────────────────────────────────────────────
 
 def iter_proj_kernel(
-    rays_img: UnsafePointer[Float32, MutAnyOrigin],
-    pts_3d_norm: UnsafePointer[Float32, MutAnyOrigin],
-    p_init: UnsafePointer[Float32, MutAnyOrigin],
-    p_new: UnsafePointer[Float32, MutAnyOrigin],
-    converged: UnsafePointer[UInt8, MutAnyOrigin],
+    rays_img: LayoutTensor[DType.float32, RAYS_LT, MutAnyOrigin],
+    pts_3d_norm: LayoutTensor[DType.float32, PTS3_LT, MutAnyOrigin],
+    p_init: LayoutTensor[DType.float32, PIX2_F32_LT, MutAnyOrigin],
+    p_new: LayoutTensor[DType.float32, PIX2_F32_LT, MutAnyOrigin],
+    converged: LayoutTensor[DType.uint8, CONV_LT, MutAnyOrigin],
     h: Int,
     w: Int,
     num_pts: Int,
@@ -170,49 +183,46 @@ def iter_proj_kernel(
     starting from an initial pixel, repeatedly adjust the pixel so the sampled
     ray in image i aligns with the target 3D direction coming from image j.
     """
-    # ── Thread indexing ──
     var n: UInt = block_idx.x * block_dim.x + thread_idx.x
-    var b: UInt = block_idx.y
+    var b: Int = Int(block_idx.y)
 
     if n >= UInt(num_pts):
         return
-
-    # ── Strides for row-major tensors ──
-    var rays_stride_b: Int = h * w * RAYS_CHANNELS
-    var rays_stride_v: Int = w * RAYS_CHANNELS
-    var pts_stride_b: Int = num_pts * 3
-    var p_stride_b: Int = num_pts * 2
-    var conv_stride_b: Int = num_pts
-
-    # ── Batch-invariant base offsets (hoisted out of loop) ──
-    var base_b: Int = Int(b) * rays_stride_b
-    var conv_idx: Int = Int(b) * conv_stride_b + Int(n)
+    var ni: Int = Int(n)
 
     # ── Load initial pixel and clamp to valid bilinear range ──
-    var u: Float32 = p_init[Int(b) * p_stride_b + Int(n) * 2 + 0]
-    var v: Float32 = p_init[Int(b) * p_stride_b + Int(n) * 2 + 1]
+    var u: Float32 = p_init[b, ni, 0][0]
+    var v: Float32 = p_init[b, ni, 1][0]
     u = min(max(u, Float32(1.0)), Float32(w - 2))
     v = min(max(v, Float32(1.0)), Float32(h - 2))
 
     # ── Load target point once (loop-invariant) ──
-    var pts_base: Int = Int(b) * pts_stride_b + Int(n) * 3
-    var t0: Float32 = pts_3d_norm[pts_base + 0]
-    var t1: Float32 = pts_3d_norm[pts_base + 1]
-    var t2: Float32 = pts_3d_norm[pts_base + 2]
+    var t0: Float32 = pts_3d_norm[b, ni, 0][0]
+    var t1: Float32 = pts_3d_norm[b, ni, 1][0]
+    var t2: Float32 = pts_3d_norm[b, ni, 2][0]
 
     var lam: Float32 = lambda_init
+
+    @always_inline
+    def _bsample(bi: Int, vi: Int, ui: Int, wt: InlineArray[Float32, 4], ch: Int) capturing -> Float32:
+        """Bilinear-sample one channel from rays_img via LayoutTensor indexing."""
+        return (
+            wt[0] * rays_img[bi, vi + 1, ui + 1, ch][0]
+            + wt[1] * rays_img[bi, vi + 1, ui, ch][0]
+            + wt[2] * rays_img[bi, vi, ui + 1, ch][0]
+            + wt[3] * rays_img[bi, vi, ui, ch][0]
+        )
 
     for _i in range(max_iter):
         # ── Bilinear interpolation at current pixel ──
         var u11: Int = Int(floor(u))
         var v11: Int = Int(floor(v))
         var wt = bilinear_weights(u - Float32(u11), v - Float32(v11))
-        var off = bilinear_corners(base_b, rays_stride_v, v11, u11)
 
-        # Interpolate ray (ch 0-2), gx (ch 3-5), gy (ch 6-8)
-        var ray = bilinear_sample_vec3(rays_img, off, wt, 0)
-        var gx = bilinear_sample_vec3(rays_img, off, wt, 3)
-        var gy = bilinear_sample_vec3(rays_img, off, wt, 6)
+        # Interpolate ray (ch 0-2), gx (ch 3-5), gy (ch 6-8) via LayoutTensor
+        var ray = Vec3(_bsample(b, v11, u11, wt, 0), _bsample(b, v11, u11, wt, 1), _bsample(b, v11, u11, wt, 2))
+        var gx = Vec3(_bsample(b, v11, u11, wt, 3), _bsample(b, v11, u11, wt, 4), _bsample(b, v11, u11, wt, 5))
+        var gy = Vec3(_bsample(b, v11, u11, wt, 6), _bsample(b, v11, u11, wt, 7), _bsample(b, v11, u11, wt, 8))
 
         # ── Normalize ray ──
         var r = normalize_ray(ray.x, ray.y, ray.z)
@@ -221,9 +231,7 @@ def iter_proj_kernel(
         var e = Vec3(r.x - t0, r.y - t1, r.z - t2)
         var cost: Float32 = e.squared_norm()
 
-        # Build the tiny 2x2 LM system for pixel coordinates (u, v). This is
-        # a per-point optimization, not the global GN pose solve used later in
-        # the backend.
+        # Build the tiny 2x2 LM system for pixel coordinates (u, v).
         var A00: Float32 = gx.squared_norm() + lam
         var A01: Float32 = gx.dot(gy)
         var A11: Float32 = gy.squared_norm() + lam
@@ -242,9 +250,8 @@ def iter_proj_kernel(
         var u11n: Int = Int(floor(u_new))
         var v11n: Int = Int(floor(v_new))
         var wtn = bilinear_weights(u_new - Float32(u11n), v_new - Float32(v11n))
-        var offn = bilinear_corners(base_b, rays_stride_v, v11n, u11n)
 
-        var nr_raw = bilinear_sample_vec3(rays_img, offn, wtn, 0)
+        var nr_raw = Vec3(_bsample(b, v11n, u11n, wtn, 0), _bsample(b, v11n, u11n, wtn, 1), _bsample(b, v11n, u11n, wtn, 2))
         var nr = normalize_ray(nr_raw.x, nr_raw.y, nr_raw.z)
 
         var ne = Vec3(nr.x - t0, nr.y - t1, nr.z - t2)
@@ -255,15 +262,14 @@ def iter_proj_kernel(
             u = u_new
             v = v_new
             lam *= 0.1
-            converged[conv_idx] = UInt8(1) if new_cost < cost_thresh else UInt8(0)
+            converged[b, ni] = UInt8(1) if new_cost < cost_thresh else UInt8(0)
         else:
             lam *= 10.0
-            converged[conv_idx] = UInt8(1) if cost < cost_thresh else UInt8(0)
+            converged[b, ni] = UInt8(1) if cost < cost_thresh else UInt8(0)
 
     # ── Write final pixel ──
-    var out_idx: Int = Int(b) * p_stride_b + Int(n) * 2
-    p_new[out_idx + 0] = u
-    p_new[out_idx + 1] = v
+    p_new[b, ni, 0] = u
+    p_new[b, ni, 1] = v
 
 
 def refine_matches_kernel(
@@ -584,21 +590,39 @@ def iter_proj_py(
         dtype=torch.bool,
     )
 
-    var rays_uptr = torch_float32_ptr(rays_img)
-    var pts_uptr = torch_float32_ptr(pts_3d_norm)
-    var pinit_uptr = torch_float32_ptr(p_init)
-    var pnew_uptr = torch_float32_ptr(p_new)
-    var conv_uptr = torch_uint8_ptr(converged)
+    # Wrap raw PyTorch pointers in LayoutTensors with runtime shapes.
+    # UnsafePointer is unavoidable at the torch bridge; LayoutTensor makes the
+    # kernel code safe and eliminates manual stride arithmetic.
+    var rays_lt = LayoutTensor[DType.float32, RAYS_LT, MutAnyOrigin](
+        torch_float32_ptr(rays_img),
+        RuntimeLayout[RAYS_LT].row_major(Index(batch, h, w, RAYS_CHANNELS)),
+    )
+    var pts_lt = LayoutTensor[DType.float32, PTS3_LT, MutAnyOrigin](
+        torch_float32_ptr(pts_3d_norm),
+        RuntimeLayout[PTS3_LT].row_major(Index(batch, num_pts, 3)),
+    )
+    var pinit_lt = LayoutTensor[DType.float32, PIX2_F32_LT, MutAnyOrigin](
+        torch_float32_ptr(p_init),
+        RuntimeLayout[PIX2_F32_LT].row_major(Index(batch, num_pts, 2)),
+    )
+    var pnew_lt = LayoutTensor[DType.float32, PIX2_F32_LT, MutAnyOrigin](
+        torch_float32_ptr(p_new),
+        RuntimeLayout[PIX2_F32_LT].row_major(Index(batch, num_pts, 2)),
+    )
+    var conv_lt = LayoutTensor[DType.uint8, CONV_LT, MutAnyOrigin](
+        torch_uint8_ptr(converged),
+        RuntimeLayout[CONV_LT].row_major(Index(batch, num_pts)),
+    )
 
     var ctx_ptr = get_cached_context_ptr()
     var block_size: Int = choose_iter_proj_block(num_pts)
     var num_blocks_x: Int = ceildiv(num_pts, block_size)
     ctx_ptr[].enqueue_function[iter_proj_kernel, iter_proj_kernel](
-        rays_uptr,
-        pts_uptr,
-        pinit_uptr,
-        pnew_uptr,
-        conv_uptr,
+        rays_lt,
+        pts_lt,
+        pinit_lt,
+        pnew_lt,
+        conv_lt,
         h,
         w,
         num_pts,
