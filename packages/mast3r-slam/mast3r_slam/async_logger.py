@@ -514,9 +514,9 @@ class AsyncRerunLogger:
         for kf_snapshot in event.new_keyframes:
             self._log_new_keyframe(kf_snapshot)
 
-        # Pose updates from backend
-        for kf_idx, world_sim3_cam_data in event.pose_updates:
-            self._log_pose_update(kf_idx, world_sim3_cam_data)
+        # Dirty keyframes from backend updates
+        for keyframe in event.updated_keyframes:
+            self._relog_keyframe_camera(keyframe)
 
         # Factor graph edges
         if event.edge_positions is not None:
@@ -599,37 +599,23 @@ class AsyncRerunLogger:
             kf.img_shape[0], kf.img_shape[1],
         )
 
-    def _log_pose_update(self, kf_idx: int, world_sim3_cam_data: Float32[ndarray, "8"]) -> None:
-        """Update a keyframe's camera transform after backend refinement."""
-        kf_cam_log_path: str = f"{self._parent_log_path}/keyframes/keyframe-{kf_idx}"
+    def _relog_keyframe_camera(self, kf: KeyframeSnapshot) -> None:
+        """Replay the full keyframe camera update after backend refinement."""
+        kf_cam_log_path: str = f"{self._parent_log_path}/keyframes/keyframe-{kf.kf_idx}"
 
-        # Reconstruct pose only (no X_canon needed for just the transform)
         frame: Frame = snapshot_to_frame(
-            world_sim3_cam_data,
-            rgb=np.zeros((1, 1, 3), dtype=np.float32),
-            X_canon=None, C=None,
-            img_shape=(1, 1),
-            frame_id=kf_idx,
+            kf.world_sim3_cam_data, kf.rgb, kf.X_canon, kf.C,
+            kf.img_shape, frame_id=kf.kf_idx,
+        )
+        pinhole = frame_to_pinhole(frame)
+        log_pinhole(
+            camera=pinhole,
+            cam_log_path=Path(kf_cam_log_path),
+            image_plane_distance=self._image_plane_distance,
         )
 
-        # We need X_canon for focal estimation in frame_to_pinhole, but
-        # for pose-only updates we use frame_to_extrinsics directly and
-        # skip intrinsics (the camera image/focal was logged once in
-        # _log_new_keyframe and doesn't change).
-        extrinsics = frame_to_extrinsics(frame)
-        # Log only the transform, not the full pinhole
-        assert extrinsics.world_R_cam is not None
-        assert extrinsics.world_t_cam is not None
-        assert extrinsics.cam_R_world is not None
-        assert extrinsics.cam_t_world is not None
-        rr.log(
-            kf_cam_log_path,
-            rr.Transform3D(
-                mat3x3=extrinsics.cam_R_world,
-                translation=extrinsics.cam_t_world,
-                from_parent=True,
-            ),
-        )
+        if kf.kf_idx == self._last_kf_idx:
+            self._log_last_keyframe(kf)
 
     def _log_edges(
         self,

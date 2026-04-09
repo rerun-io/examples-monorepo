@@ -386,27 +386,29 @@ def run_slam_pipeline(
             # ── Async logging: create events and enqueue ──────────────────
             # 1. Collect structural changes (non-droppable)
             new_kfs: list[KeyframeSnapshot] = []
-            pose_updates: list[tuple[int, Float32[ndarray, "8"]]] = []
+            updated_keyframes: list[KeyframeSnapshot] = []
             edge_pos: tuple[Float32[ndarray, "n 3"], Float32[ndarray, "n 3"]] | None = None
             orient_data: tuple[Float32[ndarray, "3 3"], Float32[ndarray, "3"]] | None = None
 
+            new_kf_idx: int | None = None
             if add_new_kf:
-                new_kfs.append(snapshot_keyframe(frame, len(keyframes) - 1))
+                new_kf_idx = len(keyframes) - 1
+                new_kfs.append(snapshot_keyframe(frame, new_kf_idx))
 
             dirty_idx: Int[Tensor, "n_dirty"] = keyframes.get_dirty_idx()
             if dirty_idx.numel() > 0:
                 for idx_val in dirty_idx.tolist():
-                    sim3_cpu: Float32[ndarray, "8"] = (
-                        keyframes.world_sim3_cam[idx_val, 0].cpu().numpy().astype(np.float32)
-                    )
-                    pose_updates.append((int(idx_val), sim3_cpu))
+                    kf_idx_dirty: int = int(idx_val)
+                    if new_kf_idx is not None and kf_idx_dirty == new_kf_idx:
+                        continue
+                    updated_keyframes.append(snapshot_keyframe(keyframes[kf_idx_dirty], kf_idx_dirty))
 
             # Edge update: resnapshot when edge count changes OR when poses
             # were refined (global optimization moves endpoints without
             # adding/removing factors).
             with states.lock:
                 current_edge_count: int = len(states.edges_ii)
-            if current_edge_count != prev_edge_count or pose_updates:
+            if current_edge_count != prev_edge_count or updated_keyframes:
                 edge_pos = snapshot_edges(states, keyframes)
                 prev_edge_count = current_edge_count
 
@@ -417,10 +419,10 @@ def run_slam_pipeline(
                 orient_data = compute_orient(keyframes, n_kf)
                 last_orient_n_kf = n_kf
 
-            if new_kfs or pose_updates or edge_pos is not None or orient_data is not None:
+            if new_kfs or updated_keyframes or edge_pos is not None or orient_data is not None:
                 event_queue.put(LogMapUpdate(
                     frame_idx=i, timestamp_ns=ts_ns,
-                    new_keyframes=new_kfs, pose_updates=pose_updates,
+                    new_keyframes=new_kfs, updated_keyframes=updated_keyframes,
                     edge_positions=edge_pos, orient=orient_data,
                 ))
 
@@ -571,7 +573,10 @@ def relocalization(
                 rr.log("/world/logs", rr.TextLog("Relocalized successfully", level="INFO"))
                 successful_loop_closure = True
                 # Copy the pose from the matched keyframe as initial estimate.
-                keyframes.world_sim3_cam[n_kf - 1] = keyframes.world_sim3_cam[kf_idx[0]].clone()
+                keyframes.update_world_sim3_cams(
+                    lietorch.Sim3(keyframes.world_sim3_cam[kf_idx[0]].clone()),
+                    torch.tensor([n_kf - 1], device=keyframes.world_sim3_cam.device, dtype=torch.long),
+                )
             else:
                 keyframes.pop_last()
                 rr.log("/world/logs", rr.TextLog("Failed to relocalize", level="WARN"))
