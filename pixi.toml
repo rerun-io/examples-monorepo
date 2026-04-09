@@ -713,13 +713,11 @@ pyaml = "*"
 [feature.mast3r-slam.activation.env]
 PACKAGE_DIR = "packages/mast3r-slam"
 
-[feature.mast3r-slam-mojo-build]
-channels = ["https://conda.modular.com/max-nightly/", "conda-forge"]
-platforms = ["linux-64"]
-
-[feature.mast3r-slam-mojo-build.dependencies]
-python = "3.11.*"
-modular = ">=26.3.0.dev2026040905,<27"
+# NOTE: mast3r-slam-mojo-build env removed. The mojo compiler is available
+# directly in the mast3r-slam feature (mojo = "*" + max-nightly channel).
+# Installing mojo separately (not via the modular metapackage) avoids pulling
+# in max-pipelines → uvicorn → starlette==1.0 which conflicts with gradio.
+# See docs/customoplibrary-migration-plan.md for the full package hierarchy.
 
 # ── Build tasks (CUDA extensions compiled via setuptools, no pip) ────────
 [feature.mast3r-slam.tasks._build-cuda-kernels]
@@ -736,12 +734,7 @@ outputs = ["packages/mast3r-slam/mast3r_slam/_backends*.so"]
 
 # ── Mojo kernel build ──────────────────────────────────────────────────
 [feature.mast3r-slam.tasks._build-mojo-kernels]
-cmd = """
-pixi run -e mast3r-slam-mojo-build bash -lc '
-  cd packages/mast3r-slam && \
-  mojo build --emit shared-lib -o mast3r_slam_mojo_backends.so mast3r_slam/backend/mojo/mast3r_slam_mojo_backends.mojo
-'
-"""
+cmd = "cd packages/mast3r-slam && mojo build --emit shared-lib -o mast3r_slam_mojo_backends.so mast3r_slam/backend/mojo/mast3r_slam_mojo_backends.mojo"
 description = "Build mast3r-slam Mojo backend kernels"
 inputs = ["packages/mast3r-slam/mast3r_slam/backend/mojo/*.mojo"]
 outputs = ["packages/mast3r-slam/mast3r_slam_mojo_backends*.so"]
@@ -1130,9 +1123,7 @@ mast3r-slam-dev = { features = [
     "mast3r-slam",
     "dev",
 ], solve-group = "mast3r-slam", no-default-feature = true }
-mast3r-slam-mojo-build = { features = [
-    "mast3r-slam-mojo-build",
-], solve-group = "mast3r-slam-mojo-build", no-default-feature = true }
+# mast3r-slam-mojo-build env removed — mojo compiler available in mast3r-slam directly
 gsplat-rust-renderer = { features = [
     "gsplat-rust-renderer",
 ], solve-group = "gsplat-rust-renderer", no-default-feature = true }
