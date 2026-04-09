@@ -43,6 +43,9 @@ from python_interop import (
     torch_int64_ptr,
     torch_uint8_ptr,
 )
+from gn_kernels import Vec3
+
+comptime RAYS_CHANNELS = 9  # ray(3) + ∂ray/∂u(3) + ∂ray/∂v(3)
 
 
 # ── Block-size heuristics ─────────────────────────────────────────────────────
@@ -100,10 +103,10 @@ def bilinear_corners(
     NOTE: pixels opposite the area weights (same as CUDA kernel).
     """
     var offsets = InlineArray[Int, 4](fill=0)
-    offsets[0] = base_b + (v11 + 1) * rays_stride_v + (u11 + 1) * 9  # bottom-right
-    offsets[1] = base_b + (v11 + 1) * rays_stride_v + u11 * 9        # bottom-left
-    offsets[2] = base_b + v11 * rays_stride_v + (u11 + 1) * 9        # top-right
-    offsets[3] = base_b + v11 * rays_stride_v + u11 * 9              # top-left
+    offsets[0] = base_b + (v11 + 1) * rays_stride_v + (u11 + 1) * RAYS_CHANNELS  # bottom-right
+    offsets[1] = base_b + (v11 + 1) * rays_stride_v + u11 * RAYS_CHANNELS        # bottom-left
+    offsets[2] = base_b + v11 * rays_stride_v + (u11 + 1) * RAYS_CHANNELS        # top-right
+    offsets[3] = base_b + v11 * rays_stride_v + u11 * RAYS_CHANNELS              # top-left
     return offsets^
 
 
@@ -121,15 +124,25 @@ def bilinear_weights(du: Float32, dv: Float32) -> InlineArray[Float32, 4]:
 @always_inline
 def normalize_ray(
     r0: Float32, r1: Float32, r2: Float32,
-) -> InlineArray[Float32, 3]:
+) -> Vec3:
     """Normalize a 3D ray direction to unit length."""
-    var r_norm: Float32 = sqrt(r0 * r0 + r1 * r1 + r2 * r2)
-    var r_inv: Float32 = 1.0 / r_norm
-    var out = InlineArray[Float32, 3](fill=Float32(0.0))
-    out[0] = r0 * r_inv
-    out[1] = r1 * r_inv
-    out[2] = r2 * r_inv
-    return out^
+    var r_inv: Float32 = 1.0 / sqrt(r0 * r0 + r1 * r1 + r2 * r2)
+    return Vec3(r0 * r_inv, r1 * r_inv, r2 * r_inv)
+
+
+@always_inline
+def bilinear_sample_vec3(
+    data: UnsafePointer[Float32, MutAnyOrigin],
+    off: InlineArray[Int, 4],
+    w: InlineArray[Float32, 4],
+    ch_start: Int,
+) -> Vec3:
+    """Sample three consecutive channels via bilinear interpolation."""
+    return Vec3(
+        bilinear_sample(data, off[0], off[1], off[2], off[3], w[0], w[1], w[2], w[3], ch_start),
+        bilinear_sample(data, off[0], off[1], off[2], off[3], w[0], w[1], w[2], w[3], ch_start + 1),
+        bilinear_sample(data, off[0], off[1], off[2], off[3], w[0], w[1], w[2], w[3], ch_start + 2),
+    )
 
 
 # ─── GPU Kernels ──────────────────────────────────────────────────────────────
@@ -165,8 +178,8 @@ def iter_proj_kernel(
         return
 
     # ── Strides for row-major tensors ──
-    var rays_stride_b: Int = h * w * 9
-    var rays_stride_v: Int = w * 9
+    var rays_stride_b: Int = h * w * RAYS_CHANNELS
+    var rays_stride_v: Int = w * RAYS_CHANNELS
     var pts_stride_b: Int = num_pts * 3
     var p_stride_b: Int = num_pts * 2
     var conv_stride_b: Int = num_pts
@@ -197,38 +210,25 @@ def iter_proj_kernel(
         var off = bilinear_corners(base_b, rays_stride_v, v11, u11)
 
         # Interpolate ray (ch 0-2), gx (ch 3-5), gy (ch 6-8)
-        var r0: Float32 = bilinear_sample(rays_img, off[0], off[1], off[2], off[3], wt[0], wt[1], wt[2], wt[3], 0)
-        var r1: Float32 = bilinear_sample(rays_img, off[0], off[1], off[2], off[3], wt[0], wt[1], wt[2], wt[3], 1)
-        var r2: Float32 = bilinear_sample(rays_img, off[0], off[1], off[2], off[3], wt[0], wt[1], wt[2], wt[3], 2)
-
-        var gx0: Float32 = bilinear_sample(rays_img, off[0], off[1], off[2], off[3], wt[0], wt[1], wt[2], wt[3], 3)
-        var gx1: Float32 = bilinear_sample(rays_img, off[0], off[1], off[2], off[3], wt[0], wt[1], wt[2], wt[3], 4)
-        var gx2: Float32 = bilinear_sample(rays_img, off[0], off[1], off[2], off[3], wt[0], wt[1], wt[2], wt[3], 5)
-
-        var gy0: Float32 = bilinear_sample(rays_img, off[0], off[1], off[2], off[3], wt[0], wt[1], wt[2], wt[3], 6)
-        var gy1: Float32 = bilinear_sample(rays_img, off[0], off[1], off[2], off[3], wt[0], wt[1], wt[2], wt[3], 7)
-        var gy2: Float32 = bilinear_sample(rays_img, off[0], off[1], off[2], off[3], wt[0], wt[1], wt[2], wt[3], 8)
+        var ray = bilinear_sample_vec3(rays_img, off, wt, 0)
+        var gx = bilinear_sample_vec3(rays_img, off, wt, 3)
+        var gy = bilinear_sample_vec3(rays_img, off, wt, 6)
 
         # ── Normalize ray ──
-        var r = normalize_ray(r0, r1, r2)
-        r0 = r[0]
-        r1 = r[1]
-        r2 = r[2]
+        var r = normalize_ray(ray.x, ray.y, ray.z)
 
         # ── Error and cost ──
-        var e0: Float32 = r0 - t0
-        var e1: Float32 = r1 - t1
-        var e2: Float32 = r2 - t2
-        var cost: Float32 = e0 * e0 + e1 * e1 + e2 * e2
+        var e = Vec3(r.x - t0, r.y - t1, r.z - t2)
+        var cost: Float32 = e.squared_norm()
 
         # Build the tiny 2x2 LM system for pixel coordinates (u, v). This is
         # a per-point optimization, not the global GN pose solve used later in
         # the backend.
-        var A00: Float32 = gx0 * gx0 + gx1 * gx1 + gx2 * gx2 + lam
-        var A01: Float32 = gx0 * gy0 + gx1 * gy1 + gx2 * gy2
-        var A11: Float32 = gy0 * gy0 + gy1 * gy1 + gy2 * gy2 + lam
-        var b0: Float32 = -(e0 * gx0 + e1 * gx1 + e2 * gx2)
-        var b1: Float32 = -(e0 * gy0 + e1 * gy1 + e2 * gy2)
+        var A00: Float32 = gx.squared_norm() + lam
+        var A01: Float32 = gx.dot(gy)
+        var A11: Float32 = gy.squared_norm() + lam
+        var b0: Float32 = -e.dot(gx)
+        var b1: Float32 = -e.dot(gy)
 
         # ── Solve 2x2 system via Cramer's rule ──
         var det_inv: Float32 = 1.0 / (A00 * A11 - A01 * A01)
@@ -244,15 +244,11 @@ def iter_proj_kernel(
         var wtn = bilinear_weights(u_new - Float32(u11n), v_new - Float32(v11n))
         var offn = bilinear_corners(base_b, rays_stride_v, v11n, u11n)
 
-        var nr0: Float32 = bilinear_sample(rays_img, offn[0], offn[1], offn[2], offn[3], wtn[0], wtn[1], wtn[2], wtn[3], 0)
-        var nr1: Float32 = bilinear_sample(rays_img, offn[0], offn[1], offn[2], offn[3], wtn[0], wtn[1], wtn[2], wtn[3], 1)
-        var nr2: Float32 = bilinear_sample(rays_img, offn[0], offn[1], offn[2], offn[3], wtn[0], wtn[1], wtn[2], wtn[3], 2)
-        var nr = normalize_ray(nr0, nr1, nr2)
+        var nr_raw = bilinear_sample_vec3(rays_img, offn, wtn, 0)
+        var nr = normalize_ray(nr_raw.x, nr_raw.y, nr_raw.z)
 
-        var ne0: Float32 = nr[0] - t0
-        var ne1: Float32 = nr[1] - t1
-        var ne2: Float32 = nr[2] - t2
-        var new_cost: Float32 = ne0 * ne0 + ne1 * ne1 + ne2 * ne2
+        var ne = Vec3(nr.x - t0, nr.y - t1, nr.z - t2)
+        var new_cost: Float32 = ne.squared_norm()
 
         # ── Accept/reject step (Levenberg-Marquardt) ──
         if new_cost < cost:
