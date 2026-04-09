@@ -4,13 +4,61 @@ from jaxtyping import Bool, Float, Float32, Int
 from mast3r.model import AsymmetricMASt3R
 from torch import Tensor
 
-from mast3r_slam import _backends  # pyrefly: ignore
+try:
+    import mast3r_slam_mojo_backends as _mojo_backends  # pyrefly: ignore
+except ImportError:
+    _mojo_backends = None
+
+try:
+    from mast3r_slam import _backends as _cuda_backends  # pyrefly: ignore
+except ImportError:
+    _cuda_backends = None
+
+if _mojo_backends is not None:
+    _backends = _mojo_backends
+elif _cuda_backends is not None:
+    _backends = _cuda_backends
+else:
+    raise ImportError("Neither mast3r_slam_mojo_backends nor mast3r_slam._backends is available")
 from mast3r_slam.config import config
 from mast3r_slam.frame import Frame, SharedKeyframes
 from mast3r_slam.geometry import (
     constrain_points_to_ray,
 )
 from mast3r_slam.mast3r_utils import mast3r_match_symmetric
+
+
+def _call_gn_backend(name: str, *args: object) -> object:
+    """Dispatch a Gauss-Newton call to the appropriate backend.
+
+    Backend routing:
+      - gauss_newton_rays:   Mojo (if available), else CUDA.
+        The Mojo backend implements the full rays step kernel + pose retraction
+        in Mojo GPU code. The Cholesky solve runs in PyTorch on both paths.
+
+      - gauss_newton_points: Always CUDA.
+      - gauss_newton_calib:  Always CUDA.
+        These two variants are NOT implemented in Mojo — the Mojo wrapper's
+        `gauss_newton_impl` would delegate the linearisation step to the CUDA
+        extension anyway. To avoid the extra Mojo→CUDA→Mojo indirection, we
+        route directly to the CUDA backend here.
+    """
+    backend = _backends
+    if (
+        _mojo_backends is not None
+        and name in {"gauss_newton_points", "gauss_newton_calib"}
+    ):
+        if _cuda_backends is None:
+            raise RuntimeError(
+                f"{name} requires mast3r_slam._backends; the current Mojo backend only "
+                "implements the rays GN path without the CUDA extension."
+            )
+        backend = _cuda_backends
+
+    fn = getattr(backend, name)
+    if backend.__name__ == "mast3r_slam_mojo_backends":
+        return fn(tuple(args))
+    return fn(*args)
 
 
 class FactorGraph:
@@ -244,7 +292,8 @@ class FactorGraph:
         delta_thresh: float = self.cfg["delta_norm"]
 
         pose_data: Float[Tensor, "n_unique sim3_dim"] = world_sim3_cams.data[:, 0, :]
-        _backends.gauss_newton_rays(
+        _call_gn_backend(
+            "gauss_newton_rays",
             pose_data,
             Xs,
             Cs,
@@ -311,7 +360,8 @@ class FactorGraph:
         width: int
         height, width = img_size
 
-        _backends.gauss_newton_calib(
+        _call_gn_backend(
+            "gauss_newton_calib",
             pose_data,
             Xs,
             Cs,
