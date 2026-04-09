@@ -6,6 +6,8 @@ import lietorch
 import torch
 
 from mast3r_slam.gn_backends import load_gn_backend
+from mast3r_slam.max_gn_rays import available as max_available
+from mast3r_slam.max_gn_rays import gauss_newton_rays as max_gauss_newton_rays
 
 DEVICE = "cuda:0"
 SYNTHETIC_ATOL = 1e-4
@@ -17,9 +19,13 @@ class BenchRow:
     name: str
     cuda_ms: float
     mojo_ms: float
-    ratio: float
-    max_abs: float
-    same: bool
+    max_ms: float
+    mojo_ratio: float
+    max_ratio: float
+    mojo_max_abs: float
+    max_max_abs: float
+    mojo_same: bool
+    max_same: bool
 
 
 @dataclass(frozen=True)
@@ -125,23 +131,50 @@ def _run_synthetic_backend(backend_name: str, args: tuple[torch.Tensor | float |
     return twc
 
 
+def _run_max_backend(args: tuple[torch.Tensor | float | int, ...]) -> torch.Tensor:
+    twc = args[0].clone()
+    max_gauss_newton_rays(
+        twc,
+        *args[1:],
+    )
+    _sync()
+    return twc
+
+
 def bench_preset(preset: RaysPreset) -> BenchRow:
     args = _make_representative_rays_inputs(preset)
+    if not max_available():
+        raise RuntimeError("MAX GN rays custom-op package is not available in this environment")
     cuda_pose = _run_synthetic_backend("cuda", args)
     mojo_pose = _run_synthetic_backend("mojo", args)
+    max_pose = _run_max_backend(args)
     cuda_ms = _benchmark(lambda: _run_synthetic_backend("cuda", args))
     mojo_ms = _benchmark(lambda: _run_synthetic_backend("mojo", args))
-    max_abs = float((cuda_pose - mojo_pose).abs().max().item())
-    same = bool(torch.allclose(cuda_pose, mojo_pose, atol=SYNTHETIC_ATOL, rtol=POSE_RTOL))
-    return BenchRow(preset.name, cuda_ms, mojo_ms, mojo_ms / cuda_ms, max_abs, same)
+    max_ms = _benchmark(lambda: _run_max_backend(args))
+    mojo_max_abs = float((cuda_pose - mojo_pose).abs().max().item())
+    max_max_abs = float((cuda_pose - max_pose).abs().max().item())
+    mojo_same = bool(torch.allclose(cuda_pose, mojo_pose, atol=SYNTHETIC_ATOL, rtol=POSE_RTOL))
+    max_same = bool(torch.allclose(cuda_pose, max_pose, atol=SYNTHETIC_ATOL, rtol=POSE_RTOL))
+    return BenchRow(
+        preset.name,
+        cuda_ms,
+        mojo_ms,
+        max_ms,
+        mojo_ms / cuda_ms,
+        max_ms / cuda_ms,
+        mojo_max_abs,
+        max_max_abs,
+        mojo_same,
+        max_same,
+    )
 
 
 def _print_table(rows: list[BenchRow]) -> None:
-    print("| benchmark | cuda ms | mojo ms | ratio | max abs diff | same |")
-    print("|---|---:|---:|---:|---:|---|")
+    print("| benchmark | cuda ms | mojo ms | max ms | mojo/cuda | max/cuda | mojo max abs diff | max max abs diff | mojo same | max same |")
+    print("|---|---:|---:|---:|---:|---:|---:|---:|---|---|")
     for row in rows:
         print(
-            f"| {row.name} | {row.cuda_ms:.3f} | {row.mojo_ms:.3f} | {row.ratio:.3f} | {row.max_abs:.2e} | {'yes' if row.same else 'no'} |"
+            f"| {row.name} | {row.cuda_ms:.3f} | {row.mojo_ms:.3f} | {row.max_ms:.3f} | {row.mojo_ratio:.3f} | {row.max_ratio:.3f} | {row.mojo_max_abs:.2e} | {row.max_max_abs:.2e} | {'yes' if row.mojo_same else 'no'} | {'yes' if row.max_same else 'no'} |"
         )
 
 

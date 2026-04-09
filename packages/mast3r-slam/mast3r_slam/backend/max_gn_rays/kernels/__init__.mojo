@@ -341,9 +341,9 @@ struct GaussNewtonRaysStepPartial:
         twc: InputTensor[dtype=DType.float32, rank=2, ...],
         xs: InputTensor[dtype=DType.float32, rank=3, ...],
         cs: InputTensor[dtype=DType.float32, rank=3, ...],
-        ii: InputTensor[dtype=DType.int32, rank=1, ...],
-        jj: InputTensor[dtype=DType.int32, rank=1, ...],
-        idx_ii2jj: InputTensor[dtype=DType.int32, rank=2, ...],
+        ii: InputTensor[dtype=DType.int64, rank=1, ...],
+        jj: InputTensor[dtype=DType.int64, rank=1, ...],
+        idx_ii2jj: InputTensor[dtype=DType.int64, rank=2, ...],
         valid_match: InputTensor[dtype=DType.uint8, rank=3, ...],
         q_tensor: InputTensor[dtype=DType.float32, rank=3, ...],
         sigma_ray: InputTensor[dtype=DType.float32, rank=1, ...],
@@ -439,6 +439,10 @@ struct GaussNewtonRaysStepPartial:
                 var cj = cs.load[1](IndexList[3](jx, k, 0))[0]
                 var qv = q_tensor.load[1](match_idx)[0]
 
+                var valid = valid_match_ind and (qv > q_thresh_value) and (ci > c_thresh_value) and (cj > c_thresh_value)
+                if not valid:
+                    continue
+
                 var xi0 = xs.load[1](IndexList[3](ix, ind_xi, 0))[0]
                 var xi1 = xs.load[1](IndexList[3](ix, ind_xi, 1))[0]
                 var xi2 = xs.load[1](IndexList[3](ix, ind_xi, 2))[0]
@@ -473,13 +477,9 @@ struct GaussNewtonRaysStepPartial:
                 var err2 = rj2 - ri2
                 var err3 = norm1_j - norm1_i
 
-                var valid = valid_match_ind and (qv > q_thresh_value) and (ci > c_thresh_value) and (cj > c_thresh_value)
-                var sqrt_w_ray: Float32 = 0.0
-                var sqrt_w_dist: Float32 = 0.0
-                if valid:
-                    var sqrt_conf = sqrt(qv)
-                    sqrt_w_ray = sigma_ray_inv * sqrt_conf
-                    sqrt_w_dist = sigma_dist_inv * sqrt_conf
+                var sqrt_conf = sqrt(qv)
+                var sqrt_w_ray = sigma_ray_inv * sqrt_conf
+                var sqrt_w_dist = sigma_dist_inv * sqrt_conf
 
                 var w0 = huber_scalar(sqrt_w_ray * err0) * sqrt_w_ray * sqrt_w_ray
                 var w1 = huber_scalar(sqrt_w_ray * err1) * sqrt_w_ray * sqrt_w_ray
@@ -609,6 +609,10 @@ struct GaussNewtonRaysStepPartial:
                 var cj = cs.load[1](IndexList[3](jx, k, 0))[0]
                 var qv = q_tensor.load[1](match_idx)[0]
 
+                var valid = valid_match_ind and (qv > q_thresh_value) and (ci > c_thresh_value) and (cj > c_thresh_value)
+                if not valid:
+                    continue
+
                 var xi0 = xs.load[1](IndexList[3](ix, ind_xi, 0))[0]
                 var xi1 = xs.load[1](IndexList[3](ix, ind_xi, 1))[0]
                 var xi2 = xs.load[1](IndexList[3](ix, ind_xi, 2))[0]
@@ -643,13 +647,9 @@ struct GaussNewtonRaysStepPartial:
                 var err2 = rj2 - ri2
                 var err3 = norm1_j - norm1_i
 
-                var valid = valid_match_ind and (qv > q_thresh_value) and (ci > c_thresh_value) and (cj > c_thresh_value)
-                var sqrt_w_ray: Float32 = 0.0
-                var sqrt_w_dist: Float32 = 0.0
-                if valid:
-                    var sqrt_conf = sqrt(qv)
-                    sqrt_w_ray = sigma_ray_inv * sqrt_conf
-                    sqrt_w_dist = sigma_dist_inv * sqrt_conf
+                var sqrt_conf = sqrt(qv)
+                var sqrt_w_ray = sigma_ray_inv * sqrt_conf
+                var sqrt_w_dist = sigma_dist_inv * sqrt_conf
 
                 var w0 = huber_scalar(sqrt_w_ray * err0) * sqrt_w_ray * sqrt_w_ray
                 var w1 = huber_scalar(sqrt_w_ray * err1) * sqrt_w_ray * sqrt_w_ray
@@ -709,8 +709,8 @@ struct GaussNewtonRaysStepPartial:
                 total += sign * w3 * err3 * g[row]
             return total
 
-        foreach[compute_hs, target=target](hs_partial, ctx)
-        foreach[compute_gs, target=target](gs_partial, ctx)
+        foreach[compute_hs, target=target, simd_width=1](hs_partial, ctx)
+        foreach[compute_gs, target=target, simd_width=1](gs_partial, ctx)
 
 
 @register("debug_rays_signature_zero")
