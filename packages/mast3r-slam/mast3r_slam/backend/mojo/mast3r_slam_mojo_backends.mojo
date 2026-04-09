@@ -1,7 +1,5 @@
 from std.os import abort
-from std.gpu.host import DeviceContext
-from std.memory import alloc
-from std.python import Python, PythonObject
+from std.python import PythonObject
 from std.python.bindings import PythonModuleBuilder
 
 from gn import (
@@ -12,6 +10,7 @@ from gn import (
     pose_retr_py,
 )
 from matching import iter_proj_py, refine_matches_py
+from python_interop import install_cached_context
 
 
 @export
@@ -26,11 +25,7 @@ def PyInit_mast3r_slam_mojo_backends() -> PythonObject:
         m.def_function[gauss_newton_rays_impl]("gauss_newton_rays_impl")
         m.def_function[gauss_newton_calib_impl]("gauss_newton_calib_impl")
         var module = m.finalize()
-
-        var ctx_storage = alloc[DeviceContext](1)
-        var cached_ctx = DeviceContext()
-        ctx_storage.init_pointee_move(cached_ctx^)
-        Python.add_object(module, "_ctx_addr", PythonObject(Int(ctx_storage)))
+        install_cached_context(module)
         return module
     except e:
         abort(String("Failed to create mast3r_slam_mojo_backends module: ", e))

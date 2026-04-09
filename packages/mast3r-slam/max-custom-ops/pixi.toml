@@ -3,6 +3,10 @@ name = "mast3r-slam-max-custom-ops"
 channels = ["conda-forge", "https://conda.modular.com/max/"]
 platforms = ["linux-64"]
 
+# This nested workspace is still required. The root `mast3r-slam-dev`
+# environment can build shared-library Mojo code, but it does not currently
+# provide the Python `max.experimental.torch` package used by the custom-op
+# loader and tests.
 [system-requirements]
 cuda = "12.9"
 

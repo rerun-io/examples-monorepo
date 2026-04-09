@@ -1,7 +1,9 @@
-"""Mojo GPU implementations of mast3r-slam matching kernels.
+"""Legacy combined Mojo backend kept only as reference material.
 
-Provides `iter_proj` and `refine_matches` as drop-in replacements
-for the CUDA implementations in mast3r_slam_backends.
+The current build target is `mast3r_slam/backend/mojo/mast3r_slam_mojo_backends.mojo`,
+which imports the split modules `matching.mojo`, `gn.mojo`, and
+`gn_kernels.mojo`. This file predates that split and is intentionally not the
+source of truth for new changes.
 
 Build: mojo build --emit shared-lib -o mast3r_slam_mojo_backends.so \
            mast3r_slam/backend/mojo/matching_kernels.mojo

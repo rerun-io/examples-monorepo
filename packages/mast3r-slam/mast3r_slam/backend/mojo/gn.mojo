@@ -1,26 +1,17 @@
 from std.math import ceildiv, max, min
-from std.gpu.host import DeviceContext
 from std.python import Python, PythonObject
 
 from gn_kernels import POSE_DIM, RAYS_THREADS, gauss_newton_rays_step_kernel, pose_retr_kernel
+from python_interop import (
+    get_cached_context_ptr,
+    get_cuda_backend_module,
+    get_torch_module,
+    torch_float32_ptr,
+    torch_int64_ptr,
+    torch_uint8_ptr,
+)
 
 comptime RAYS_BLOCKS_PER_EDGE_MAX = 8
-
-
-def get_cached_context_ptr() raises -> UnsafePointer[DeviceContext, MutAnyOrigin]:
-    var module = Python.import_module("mast3r_slam_mojo_backends")
-    var ctx_addr = Int(py=module._ctx_addr)
-    return UnsafePointer[DeviceContext, MutAnyOrigin](
-        unsafe_from_address=ctx_addr
-    )
-
-
-def get_torch_module() raises -> PythonObject:
-    return Python.import_module("torch")
-
-
-def get_cuda_backend_module() raises -> PythonObject:
-    return Python.import_module("mast3r_slam._backends")
 
 
 def get_unique_kf_idx(ii: PythonObject, jj: PythonObject) raises -> PythonObject:
@@ -124,8 +115,11 @@ def pose_retr_py(
         return Python.none()
     var poses = poses_obj.contiguous().float()
     var dx = dx_obj.contiguous().float()
-    var poses_ptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=Int(py=poses.data_ptr()))
-    var dx_ptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=Int(py=dx.data_ptr()))
+    # The helper functions are the only place where we reinterpret PyTorch
+    # storage addresses as Mojo pointers. Keeping that boundary centralized
+    # makes the shared-lib path easier to audit.
+    var poses_ptr = torch_float32_ptr(poses)
+    var dx_ptr = torch_float32_ptr(dx)
     var ctx_ptr = get_cached_context_ptr()
     ctx_ptr[].enqueue_function[pose_retr_kernel, pose_retr_kernel](
         poses_ptr,
@@ -160,16 +154,16 @@ def gauss_newton_rays_step_py(args_obj: PythonObject) raises -> PythonObject:
     var hs_partial = torch.zeros(Python.list(4, num_partials, POSE_DIM, POSE_DIM), device=twc.device, dtype=twc.dtype)
     var gs_partial = torch.zeros(Python.list(2, num_partials, POSE_DIM), device=twc.device, dtype=twc.dtype)
 
-    var twc_ptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=Int(py=twc.data_ptr()))
-    var xs_ptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=Int(py=xs.data_ptr()))
-    var cs_ptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=Int(py=cs.data_ptr()))
-    var ii_ptr = UnsafePointer[Int64, MutAnyOrigin](unsafe_from_address=Int(py=ii.data_ptr()))
-    var jj_ptr = UnsafePointer[Int64, MutAnyOrigin](unsafe_from_address=Int(py=jj.data_ptr()))
-    var idx_ptr = UnsafePointer[Int64, MutAnyOrigin](unsafe_from_address=Int(py=idx_ii2jj.data_ptr()))
-    var valid_ptr = UnsafePointer[UInt8, MutAnyOrigin](unsafe_from_address=Int(py=valid_match.data_ptr()))
-    var q_ptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=Int(py=q_tensor.data_ptr()))
-    var hs_ptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=Int(py=hs_partial.data_ptr()))
-    var gs_ptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=Int(py=gs_partial.data_ptr()))
+    var twc_ptr = torch_float32_ptr(twc)
+    var xs_ptr = torch_float32_ptr(xs)
+    var cs_ptr = torch_float32_ptr(cs)
+    var ii_ptr = torch_int64_ptr(ii)
+    var jj_ptr = torch_int64_ptr(jj)
+    var idx_ptr = torch_int64_ptr(idx_ii2jj)
+    var valid_ptr = torch_uint8_ptr(valid_match)
+    var q_ptr = torch_float32_ptr(q_tensor)
+    var hs_ptr = torch_float32_ptr(hs_partial)
+    var gs_ptr = torch_float32_ptr(gs_partial)
 
     var ctx_ptr = get_cached_context_ptr()
     ctx_ptr[].enqueue_function[gauss_newton_rays_step_kernel, gauss_newton_rays_step_kernel](

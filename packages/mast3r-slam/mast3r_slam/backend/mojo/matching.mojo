@@ -1,17 +1,15 @@
 from std.math import ceildiv, sqrt, min, max, floor
 from std.gpu import block_idx, block_dim, thread_idx, barrier
-from std.gpu.host import DeviceContext
 from std.gpu.memory import AddressSpace
 from std.memory import stack_allocation
 from std.python import Python, PythonObject
-
-
-def get_cached_context_ptr() raises -> UnsafePointer[DeviceContext, MutAnyOrigin]:
-    var module = Python.import_module("mast3r_slam_mojo_backends")
-    var ctx_addr = Int(py=module._ctx_addr)
-    return UnsafePointer[DeviceContext, MutAnyOrigin](
-        unsafe_from_address=ctx_addr
-    )
+from python_interop import (
+    get_cached_context_ptr,
+    torch_float16_ptr,
+    torch_float32_ptr,
+    torch_int64_ptr,
+    torch_uint8_ptr,
+)
 
 
 def choose_iter_proj_block(num_pts: Int) -> Int:
@@ -513,18 +511,11 @@ def iter_proj_py(
         dtype=torch.bool,
     )
 
-    # Get raw CUDA pointers
-    var rays_ptr: Int = Int(py=rays_img.data_ptr())
-    var pts_ptr: Int = Int(py=pts_3d_norm.data_ptr())
-    var pinit_ptr: Int = Int(py=p_init.data_ptr())
-    var pnew_ptr: Int = Int(py=p_new.data_ptr())
-    var conv_ptr: Int = Int(py=converged.data_ptr())
-
-    var rays_uptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=rays_ptr)
-    var pts_uptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=pts_ptr)
-    var pinit_uptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=pinit_ptr)
-    var pnew_uptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=pnew_ptr)
-    var conv_uptr = UnsafePointer[UInt8, MutAnyOrigin](unsafe_from_address=conv_ptr)
+    var rays_uptr = torch_float32_ptr(rays_img)
+    var pts_uptr = torch_float32_ptr(pts_3d_norm)
+    var pinit_uptr = torch_float32_ptr(p_init)
+    var pnew_uptr = torch_float32_ptr(p_new)
+    var conv_uptr = torch_uint8_ptr(converged)
 
     var ctx_ptr = get_cached_context_ptr()
     var block_size: Int = choose_iter_proj_block(num_pts)
@@ -580,10 +571,8 @@ def refine_matches_py(
         dtype=p1.dtype,
     )
 
-    var p1_ptr: Int = Int(py=p1.data_ptr())
-    var p1_new_ptr: Int = Int(py=p1_new.data_ptr())
-    var p1_uptr = UnsafePointer[Int64, MutAnyOrigin](unsafe_from_address=p1_ptr)
-    var p1_new_uptr = UnsafePointer[Int64, MutAnyOrigin](unsafe_from_address=p1_new_ptr)
+    var p1_uptr = torch_int64_ptr(p1)
+    var p1_new_uptr = torch_int64_ptr(p1_new)
 
     var ctx_ptr = get_cached_context_ptr()
     var block_size: Int = choose_refine_block(num_pts, fdim)
@@ -595,10 +584,8 @@ def refine_matches_py(
     if is_half:
         var D11: PythonObject = D11_obj.contiguous()
         var D21: PythonObject = D21_obj.contiguous()
-        var d11_ptr: Int = Int(py=D11.data_ptr())
-        var d21_ptr: Int = Int(py=D21.data_ptr())
-        var d11_uptr = UnsafePointer[Float16, MutAnyOrigin](unsafe_from_address=d11_ptr)
-        var d21_uptr = UnsafePointer[Float16, MutAnyOrigin](unsafe_from_address=d21_ptr)
+        var d11_uptr = torch_float16_ptr(D11)
+        var d21_uptr = torch_float16_ptr(D21)
 
         # Specialize the hot MASt3R-SLAM path so the compiler can unroll the
         # inner dot product and we only read each query descriptor once.
@@ -637,10 +624,8 @@ def refine_matches_py(
     else:
         var D11: PythonObject = D11_obj.contiguous().float()
         var D21: PythonObject = D21_obj.contiguous().float()
-        var d11_ptr: Int = Int(py=D11.data_ptr())
-        var d21_ptr: Int = Int(py=D21.data_ptr())
-        var d11_uptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=d11_ptr)
-        var d21_uptr = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=d21_ptr)
+        var d11_uptr = torch_float32_ptr(D11)
+        var d21_uptr = torch_float32_ptr(D21)
 
         ctx_ptr[].enqueue_function[refine_matches_kernel, refine_matches_kernel](
             d11_uptr,

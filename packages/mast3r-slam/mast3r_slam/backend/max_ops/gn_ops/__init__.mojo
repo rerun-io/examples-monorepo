@@ -1,3 +1,11 @@
+"""MAX custom ops for GN pose updates.
+
+The MAX path should stay tensor-oriented and avoid raw-pointer style APIs when
+possible. `InputTensor` and `OutputTensor` let MAX own marshaling and layout
+validation, while `DeviceContextPtr` gives access to the execution stream used
+by the custom op runtime.
+"""
+
 from compiler import register
 from layout import LayoutTensor
 from tensor import InputTensor, OutputTensor, foreach
@@ -176,6 +184,10 @@ struct PoseRetr:
         num_fix_in: InputTensor[dtype=DType.int32, rank=1, ...],
         ctx: DeviceContextPtr,
     ) raises:
+        # This is the most direct and idiomatic MAX implementation: one element
+        # callback expressed with `foreach`, leaving traversal and marshaling to
+        # the runtime. It is easy to read and serves as the correctness-first
+        # reference for the launched GPU variant below.
         @parameter
         @always_inline
         def update_pose[
@@ -245,6 +257,10 @@ struct PoseRetrLaunch:
         ctx: DeviceContextPtr,
     ) raises:
         if target == "gpu":
+            # The GPU fast path drops to a launched kernel because the pose
+            # update is large enough that explicit thread-level work pays off.
+            # We still keep MAX's tensor abstractions at the boundary, then
+            # convert once to layout tensors for the kernel launch.
             var device_ctx = ctx.get_device_context()
             var out_tensor = poses_out.to_layout_tensor()
             var in_tensor = poses_in.to_layout_tensor()
@@ -314,6 +330,9 @@ struct PoseRetrLaunch:
                 grid_dim=blocks,
                 block_dim=THREADS,
             )
+            # The current Python callers treat the op as complete on return, so
+            # keep the explicit synchronize here until the surrounding call path
+            # is refactored to rely purely on stream ordering.
             device_ctx.synchronize()
             return
 
@@ -389,6 +408,7 @@ struct PoseCopyLaunch:
             var device_ctx = ctx.get_device_context()
             var out_tensor = poses_out.to_layout_tensor()
             var in_tensor = poses_in.to_layout_tensor()
+
             @parameter
             def pose_copy_kernel_local(
                 poses_out_kernel: type_of(out_tensor),
