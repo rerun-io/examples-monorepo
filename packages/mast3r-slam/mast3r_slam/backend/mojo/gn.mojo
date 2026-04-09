@@ -42,7 +42,7 @@ from layout import Layout, LayoutTensor, RuntimeLayout, UNKNOWN_VALUE
 
 from gn_kernels import (
     POSE_DIM, POSE_STRIDE, RAYS_THREADS,
-    POSES_LT, DX_LT, XS_LT, CS_LT, EDGES_LT, IDX_LT,
+    POSES_LT, DX_LT, XS_LT, CS_LT, EDGES_LT, IDX_LT, HS_LT, GS_LT,
     gauss_newton_rays_step_kernel, pose_retr_kernel,
 )
 from python_interop import (
@@ -288,20 +288,35 @@ def gauss_newton_rays_step_py(args_obj: PythonObject) raises -> PythonObject:
     var hs_partial = torch.zeros(Python.list(4, num_partials, POSE_DIM, POSE_DIM), device=twc.device, dtype=twc.dtype)
     var gs_partial = torch.zeros(Python.list(2, num_partials, POSE_DIM), device=twc.device, dtype=twc.dtype)
 
-    var twc_ptr = torch_float32_ptr(twc)
-    var xs_ptr = torch_float32_ptr(xs)
-    var cs_ptr = torch_float32_ptr(cs)
-    var ii_ptr = torch_int64_ptr(ii)
-    var jj_ptr = torch_int64_ptr(jj)
-    var idx_ptr = torch_int64_ptr(idx_ii2jj)
-    var valid_ptr = torch_uint8_ptr(valid_match)
-    var q_ptr = torch_float32_ptr(q_tensor)
-    var hs_ptr = torch_float32_ptr(hs_partial)
-    var gs_ptr = torch_float32_ptr(gs_partial)
+    var num_poses = Int(py=twc.shape[0])
+
+    # Wrap PyTorch tensors in LayoutTensors with runtime shapes.
+    # UnsafePointer is only used at the torch bridge (python_interop.mojo);
+    # the kernel receives LayoutTensors with typed multi-dim indexing.
+    var twc_lt = LayoutTensor[DType.float32, POSES_LT, MutAnyOrigin](
+        torch_float32_ptr(twc), RuntimeLayout[POSES_LT].row_major(Index(num_poses, POSE_STRIDE)))
+    var xs_lt = LayoutTensor[DType.float32, XS_LT, MutAnyOrigin](
+        torch_float32_ptr(xs), RuntimeLayout[XS_LT].row_major(Index(num_poses, num_points, 3)))
+    var cs_lt = LayoutTensor[DType.float32, CS_LT, MutAnyOrigin](
+        torch_float32_ptr(cs), RuntimeLayout[CS_LT].row_major(Index(num_poses, num_points)))
+    var ii_lt = LayoutTensor[DType.int64, EDGES_LT, MutAnyOrigin](
+        torch_int64_ptr(ii), RuntimeLayout[EDGES_LT].row_major(Index(num_edges)))
+    var jj_lt = LayoutTensor[DType.int64, EDGES_LT, MutAnyOrigin](
+        torch_int64_ptr(jj), RuntimeLayout[EDGES_LT].row_major(Index(num_edges)))
+    var idx_lt = LayoutTensor[DType.int64, IDX_LT, MutAnyOrigin](
+        torch_int64_ptr(idx_ii2jj), RuntimeLayout[IDX_LT].row_major(Index(num_edges, num_points)))
+    var valid_lt = LayoutTensor[DType.uint8, IDX_LT, MutAnyOrigin](
+        torch_uint8_ptr(valid_match), RuntimeLayout[IDX_LT].row_major(Index(num_edges, num_points)))
+    var q_lt = LayoutTensor[DType.float32, IDX_LT, MutAnyOrigin](
+        torch_float32_ptr(q_tensor), RuntimeLayout[IDX_LT].row_major(Index(num_edges, num_points)))
+    var hs_lt = LayoutTensor[DType.float32, HS_LT, MutAnyOrigin](
+        torch_float32_ptr(hs_partial), RuntimeLayout[HS_LT].row_major(Index(4, num_partials, POSE_DIM, POSE_DIM)))
+    var gs_lt = LayoutTensor[DType.float32, GS_LT, MutAnyOrigin](
+        torch_float32_ptr(gs_partial), RuntimeLayout[GS_LT].row_major(Index(2, num_partials, POSE_DIM)))
 
     var ctx_ptr = get_cached_context_ptr()
     ctx_ptr[].enqueue_function[gauss_newton_rays_step_kernel, gauss_newton_rays_step_kernel](
-        twc_ptr, xs_ptr, cs_ptr, ii_ptr, jj_ptr, idx_ptr, valid_ptr, q_ptr, hs_ptr, gs_ptr,
+        twc_lt, xs_lt, cs_lt, ii_lt, jj_lt, idx_lt, valid_lt, q_lt, hs_lt, gs_lt,
         num_points, num_edges, blocks_per_edge, sigma_ray, sigma_dist, c_thresh, q_thresh,
         grid_dim=num_partials,
         block_dim=RAYS_THREADS,

@@ -57,12 +57,15 @@ comptime RAYS_WARPS = RAYS_THREADS // 32
 
 # ── Layout aliases for LayoutTensor ──────────────────────────────────────────
 # UNKNOWN_VALUE marks dimensions whose size is determined at runtime.
+# These replace UnsafePointer in kernel signatures, giving typed multi-dim indexing.
 comptime POSES_LT = Layout.row_major(UNKNOWN_VALUE, POSE_STRIDE)     # [N_kf, 8]
 comptime DX_LT = Layout.row_major(UNKNOWN_VALUE, POSE_DIM)           # [N_vars, 7]
 comptime XS_LT = Layout.row_major(UNKNOWN_VALUE, UNKNOWN_VALUE, 3)   # [N_kf, N_pts, 3]
 comptime CS_LT = Layout.row_major(UNKNOWN_VALUE, UNKNOWN_VALUE)      # [N_kf, N_pts]
 comptime EDGES_LT = Layout.row_major(UNKNOWN_VALUE)                   # [N_edges]
 comptime IDX_LT = Layout.row_major(UNKNOWN_VALUE, UNKNOWN_VALUE)     # [N_edges, N_pts]
+comptime HS_LT = Layout.row_major(UNKNOWN_VALUE, UNKNOWN_VALUE, POSE_DIM, POSE_DIM)  # [4, N_partials, 7, 7]
+comptime GS_LT = Layout.row_major(UNKNOWN_VALUE, UNKNOWN_VALUE, POSE_DIM)             # [2, N_partials, 7]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -107,11 +110,6 @@ struct Vec3(TrivialRegisterPassable):
             self.z * other.x - self.x * other.z,
             self.x * other.y - self.y * other.x,
         )
-
-    @always_inline
-    @staticmethod
-    def load(ptr: UnsafePointer[Float32, MutAnyOrigin], offset: Int) -> Vec3:
-        return Vec3(ptr[offset], ptr[offset + 1], ptr[offset + 2])
 
 
 @fieldwise_init
@@ -204,27 +202,6 @@ struct Sim3Pose(TrivialRegisterPassable):
             self.s * other.s,
         )
 
-    @always_inline
-    @staticmethod
-    def load(ptr: UnsafePointer[Float32, MutAnyOrigin], offset: Int) -> Sim3Pose:
-        """Load from flat [tx,ty,tz,qx,qy,qz,qw,s] buffer."""
-        return Sim3Pose(
-            Vec3(ptr[offset], ptr[offset + 1], ptr[offset + 2]),
-            Quat(ptr[offset + 3], ptr[offset + 4], ptr[offset + 5], ptr[offset + 6]),
-            ptr[offset + 7],
-        )
-
-    @always_inline
-    def store(self, ptr: UnsafePointer[Float32, MutAnyOrigin], offset: Int):
-        """Write to flat [tx,ty,tz,qx,qy,qz,qw,s] buffer."""
-        ptr[offset + 0] = self.t.x
-        ptr[offset + 1] = self.t.y
-        ptr[offset + 2] = self.t.z
-        ptr[offset + 3] = self.q.x
-        ptr[offset + 4] = self.q.y
-        ptr[offset + 5] = self.q.z
-        ptr[offset + 6] = self.q.w
-        ptr[offset + 7] = self.s
 
 
 @fieldwise_init
@@ -240,14 +217,6 @@ struct TangentVec7(TrivialRegisterPassable):
     var v4: Float32
     var v5: Float32
     var v6: Float32
-
-    @always_inline
-    @staticmethod
-    def load(ptr: UnsafePointer[Float32, MutAnyOrigin], offset: Int) -> TangentVec7:
-        return TangentVec7(
-            ptr[offset], ptr[offset + 1], ptr[offset + 2],
-            ptr[offset + 3], ptr[offset + 4], ptr[offset + 5], ptr[offset + 6],
-        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -392,16 +361,16 @@ def huber_scalar(r: Float32) -> Float32:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def gauss_newton_rays_step_kernel(
-    twc: UnsafePointer[Float32, MutAnyOrigin],
-    xs: UnsafePointer[Float32, MutAnyOrigin],
-    cs: UnsafePointer[Float32, MutAnyOrigin],
-    ii: UnsafePointer[Int64, MutAnyOrigin],
-    jj: UnsafePointer[Int64, MutAnyOrigin],
-    idx_ii2jj: UnsafePointer[Int64, MutAnyOrigin],
-    valid_match: UnsafePointer[UInt8, MutAnyOrigin],
-    q_tensor: UnsafePointer[Float32, MutAnyOrigin],
-    hs: UnsafePointer[Float32, MutAnyOrigin],
-    gs: UnsafePointer[Float32, MutAnyOrigin],
+    twc: LayoutTensor[DType.float32, POSES_LT, MutAnyOrigin],
+    xs: LayoutTensor[DType.float32, XS_LT, MutAnyOrigin],
+    cs: LayoutTensor[DType.float32, CS_LT, MutAnyOrigin],
+    ii: LayoutTensor[DType.int64, EDGES_LT, MutAnyOrigin],
+    jj: LayoutTensor[DType.int64, EDGES_LT, MutAnyOrigin],
+    idx_ii2jj: LayoutTensor[DType.int64, IDX_LT, MutAnyOrigin],
+    valid_match: LayoutTensor[DType.uint8, IDX_LT, MutAnyOrigin],
+    q_tensor: LayoutTensor[DType.float32, IDX_LT, MutAnyOrigin],
+    hs: LayoutTensor[DType.float32, HS_LT, MutAnyOrigin],
+    gs: LayoutTensor[DType.float32, GS_LT, MutAnyOrigin],
     num_points: Int,
     num_edges: Int,
     blocks_per_edge: Int,
@@ -433,9 +402,9 @@ def gauss_newton_rays_step_kernel(
         24, Scalar[DType.float32], address_space=AddressSpace.SHARED,
     ]()
     if tid < 8:
-        pose_shared[tid] = twc[ix * POSE_STRIDE + tid]
+        pose_shared[tid] = twc[ix, tid][0]       # pose_i → shared[0..7]
     if tid < 8:
-        pose_shared[tid + 8] = twc[jx * POSE_STRIDE + tid]
+        pose_shared[tid + 8] = twc[jx, tid][0]   # pose_j → shared[8..15]
     barrier()
 
     # Read cached poses into register structs
@@ -480,19 +449,18 @@ def gauss_newton_rays_step_kernel(
 
     # ── Main point loop ──
     for k in range(edge_block * block_threads + tid, num_points, block_threads * blocks_per_edge):
-        var valid_match_ind = valid_match[edge * num_points + k] != 0
-        var ind_xi = Int(idx_ii2jj[edge * num_points + k])
+        var valid_match_ind = valid_match[edge, k] != 0
+        var ind_xi = Int(idx_ii2jj[edge, k])
         if not valid_match_ind:
             ind_xi = 0
 
-        var xi_base = (ix * num_points + ind_xi) * 3
-        var xj_base = (jx * num_points + k) * 3
-        var ci = cs[ix * num_points + ind_xi]
-        var cj = cs[jx * num_points + k]
-        var qv = q_tensor[edge * num_points + k]
+        # LayoutTensor multi-dim indexing — [0] extracts scalar from SIMD[dtype, 1]
+        var ci = cs[ix, ind_xi][0]
+        var cj = cs[jx, k][0]
+        var qv = q_tensor[edge, k][0]
 
-        var pt_i = Vec3.load(xs, xi_base)
-        var pt_j = Vec3.load(xs, xj_base)
+        var pt_i = Vec3(xs[ix, ind_xi, 0][0], xs[ix, ind_xi, 1][0], xs[ix, ind_xi, 2][0])
+        var pt_j = Vec3(xs[jx, k, 0][0], xs[jx, k, 1][0], xs[jx, k, 2][0])
 
         # Unit ray for point in frame i: r̂_i = x_i / ‖x_i‖
         var norm1_i = sqrt(pt_i.squared_norm())
@@ -575,13 +543,15 @@ def gauss_newton_rays_step_kernel(
         RAYS_WARPS, Scalar[DType.float32], address_space=AddressSpace.SHARED,
     ]()
 
+    # ── Scatter reduced H/G blocks via LayoutTensor ──
+    # gs[block_idx, partial_edge, dim] and hs[block_idx, partial_edge, row, col]
     for n in range(POSE_DIM):
         var vi_sum = block_reduce_sum(vi[n], tid, warp_partials)
         if tid == 0:
-            gs[(0 * num_partials + partial_edge) * POSE_DIM + n] = vi_sum
+            gs[0, partial_edge, n] = vi_sum
         var vj_sum = block_reduce_sum(vj[n], tid, warp_partials)
         if tid == 0:
-            gs[(1 * num_partials + partial_edge) * POSE_DIM + n] = vj_sum
+            gs[1, partial_edge, n] = vj_sum
 
     var l = 0
     for n in range(14):
@@ -590,14 +560,14 @@ def gauss_newton_rays_step_kernel(
             if tid == 0:
                 var val = h_sum
                 if n < 7 and m < 7:
-                    hs[((0 * num_partials + partial_edge) * 49) + n * 7 + m] = val
-                    hs[((0 * num_partials + partial_edge) * 49) + m * 7 + n] = val
+                    hs[0, partial_edge, n, m] = val  # H_ii
+                    hs[0, partial_edge, m, n] = val
                 elif n >= 7 and m < 7:
-                    hs[((1 * num_partials + partial_edge) * 49) + m * 7 + (n - 7)] = val
-                    hs[((2 * num_partials + partial_edge) * 49) + (n - 7) * 7 + m] = val
+                    hs[1, partial_edge, m, n - 7] = val  # H_ij
+                    hs[2, partial_edge, n - 7, m] = val  # H_ji
                 else:
-                    hs[((3 * num_partials + partial_edge) * 49) + (n - 7) * 7 + (m - 7)] = val
-                    hs[((3 * num_partials + partial_edge) * 49) + (m - 7) * 7 + (n - 7)] = val
+                    hs[3, partial_edge, n - 7, m - 7] = val  # H_jj
+                    hs[3, partial_edge, m - 7, n - 7] = val
             l += 1
 
 
