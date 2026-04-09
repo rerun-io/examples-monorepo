@@ -24,13 +24,13 @@ from torch import Tensor
 # ── Backend imports ───────────────────────────────────────────────────────────
 
 try:
-    from mast3r_slam import _backends as cuda_be
+    import mast3r_slam._backends as cuda_be  # pyrefly: ignore[missing-import]
 except ImportError:
     print("ERROR: mast3r_slam._backends not found. Run: pixi run -e mast3r-slam-dev _build-cuda-kernels")
     sys.exit(1)
 
 try:
-    import mast3r_slam_mojo_backends as mojo_be
+    import mast3r_slam_mojo_backends as mojo_be  # pyrefly: ignore[missing-import]
 except ImportError:
     print("ERROR: mast3r_slam_mojo_backends not found. Run: pixi run -e mast3r-slam-dev _build-mojo-kernels")
     sys.exit(1)

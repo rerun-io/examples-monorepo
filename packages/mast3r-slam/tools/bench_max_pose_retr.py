@@ -1,17 +1,11 @@
 #!/usr/bin/env python
+# ruff: noqa: I001
 from __future__ import annotations
-
-import sys
-from pathlib import Path
 
 import torch
 
-PACKAGE_ROOT = Path(__file__).resolve().parents[1]
-if str(PACKAGE_ROOT) not in sys.path:
-    sys.path.insert(0, str(PACKAGE_ROOT))
-
-from mast3r_slam import _backends as cuda_be
-from mast3r_slam import max_ops
+import mast3r_slam._backends as cuda_be  # pyrefly: ignore[missing-import]
+import mast3r_slam.max_ops as max_ops
 
 
 def bench(fn, warmup: int = 20, runs: int = 100) -> float:

@@ -22,21 +22,26 @@ def _use_mojo(name: str) -> bool:
     return _mojo_backends is not None and hasattr(_mojo_backends, name)
 
 
+def _require_mojo_backends() -> Any:
+    assert _mojo_backends is not None
+    return _mojo_backends
+
+
 def gauss_newton_points(*args: Any) -> tuple[Any, ...]:
     if _use_mojo("gauss_newton_points_impl"):
-        return _mojo_backends.gauss_newton_points_impl(args)
+        return _require_mojo_backends().gauss_newton_points_impl(args)
     return tuple(_cuda_backends.gauss_newton_points(*args))
 
 
 def gauss_newton_rays(*args: Any) -> tuple[Any, ...]:
     if _use_mojo("gauss_newton_rays_impl"):
-        return _mojo_backends.gauss_newton_rays_impl(args)
+        return _require_mojo_backends().gauss_newton_rays_impl(args)
     return tuple(_cuda_backends.gauss_newton_rays(*args))
 
 
 def gauss_newton_calib(*args: Any) -> tuple[Any, ...]:
     if _use_mojo("gauss_newton_calib_impl"):
-        return _mojo_backends.gauss_newton_calib_impl(args)
+        return _require_mojo_backends().gauss_newton_calib_impl(args)
     return tuple(_cuda_backends.gauss_newton_calib(*args))
 
 
@@ -46,7 +51,7 @@ def gauss_newton_points_step(*args: Any) -> tuple[Any, ...]:
 
 def gauss_newton_rays_step(*args: Any) -> tuple[Any, ...]:
     if _use_mojo("gauss_newton_rays_step"):
-        return tuple(_mojo_backends.gauss_newton_rays_step(args))
+        return tuple(_require_mojo_backends().gauss_newton_rays_step(args))
     return tuple(_cuda_backends.gauss_newton_rays_step(*args))
 
 
@@ -58,5 +63,5 @@ def pose_retr(*args: Any) -> Any:
     if _max_ops is not None and _max_ops.has_pose_retr():
         return _max_ops.pose_retr(*args)
     if _use_mojo("pose_retr"):
-        return _mojo_backends.pose_retr(*args)
+        return _require_mojo_backends().pose_retr(*args)
     raise AttributeError("pose_retr is only available when mast3r_slam_mojo_backends is built")

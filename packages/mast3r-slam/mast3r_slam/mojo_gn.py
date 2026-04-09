@@ -1,11 +1,10 @@
 from __future__ import annotations
 
+import mast3r_slam_mojo_backends as _mojo_backends  # pyrefly: ignore
 import torch
 from torch import Tensor
 
-import mast3r_slam_mojo_backends as _mojo_backends  # pyrefly: ignore
 from mast3r_slam import _backends as _cuda_backends  # pyrefly: ignore
-
 
 POSE_DIM: int = 7
 

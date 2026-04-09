@@ -1,17 +1,11 @@
 #!/usr/bin/env python
+# ruff: noqa: I001
 from __future__ import annotations
-
-import sys
-from pathlib import Path
 
 import torch
 
-PACKAGE_ROOT = Path(__file__).resolve().parents[1]
-if str(PACKAGE_ROOT) not in sys.path:
-    sys.path.insert(0, str(PACKAGE_ROOT))
-
-from mast3r_slam import _backends as cuda_be
-from mast3r_slam import max_ops
+import mast3r_slam._backends as cuda_be  # pyrefly: ignore[missing-import]
+import mast3r_slam.max_ops as max_ops
 
 
 def bench(fn, warmup: int = 10, runs: int = 30) -> float:
@@ -41,8 +35,8 @@ def main() -> None:
             torch.randn(n - 1, 7, device="cuda", generator=gen, dtype=torch.float32)
             * 1e-3
         )
-        cuda_ms = bench(lambda: cuda_be.pose_retr(poses.clone(), dx, 1))
-        max_ms = bench(lambda: max_ops.pose_retr(poses.clone(), dx, 1))
+        cuda_ms = bench(lambda poses=poses, dx=dx: cuda_be.pose_retr(poses.clone(), dx, 1))
+        max_ms = bench(lambda poses=poses, dx=dx: max_ops.pose_retr(poses.clone(), dx, 1))
         print(f"{n:>8} {cuda_ms:>10.3f} {max_ms:>10.3f} {max_ms / max(cuda_ms, 1e-9):>8.3f}")
 
 

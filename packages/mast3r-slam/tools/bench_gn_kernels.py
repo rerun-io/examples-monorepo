@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 """Benchmark GN public APIs and one-step accumulators."""
+# ruff: noqa: I001
 
 from __future__ import annotations
 
@@ -10,8 +11,8 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
-from mast3r_slam import _backends as cuda_be
-from mast3r_slam import gn_backends as gn_be
+import mast3r_slam._backends as cuda_be  # pyrefly: ignore[missing-import]
+import mast3r_slam.gn_backends as gn_be
 
 assert torch.cuda.is_available(), "CUDA not available"
 DEVICE: torch.device = torch.device("cuda")

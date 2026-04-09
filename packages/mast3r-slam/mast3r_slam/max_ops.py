@@ -2,9 +2,17 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 import torch
 from torch import Tensor
+
+
+@runtime_checkable
+class GNOps(Protocol):
+    def pose_retr(self, dst: Tensor, poses: Tensor, dx: Tensor, num_fix: Tensor) -> object: ...
+    def pose_retr_launch(self, dst: Tensor, poses: Tensor, dx: Tensor, num_fix: Tensor) -> object: ...
+    def pose_copy_launch(self, dst: Tensor, src: Tensor) -> object: ...
 
 
 def _ops_root() -> Path:
@@ -12,8 +20,8 @@ def _ops_root() -> Path:
 
 
 @lru_cache(maxsize=1)
-def load_gn_custom_ops():
-    from max.experimental.torch import CustomOpLibrary
+def load_gn_custom_ops() -> GNOps:
+    from max.experimental.torch import CustomOpLibrary  # pyrefly: ignore[missing-import]
 
     return CustomOpLibrary(_ops_root())
 

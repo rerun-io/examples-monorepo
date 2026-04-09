@@ -7,10 +7,8 @@ from torch import Tensor
 from mast3r_slam import gn_backends as _gn_backends  # pyrefly: ignore
 from mast3r_slam.config import config
 from mast3r_slam.frame import Frame, SharedKeyframes
+from mast3r_slam.geometry import constrain_points_to_ray
 from mast3r_slam.gn_fixture_utils import maybe_capture_gn_fixture
-from mast3r_slam.geometry import (
-    constrain_points_to_ray,
-)
 from mast3r_slam.mast3r_utils import mast3r_match_symmetric
 
 
@@ -41,8 +39,6 @@ class FactorGraph:
         self.valid_match_i: Bool[Tensor, "..."] = torch.as_tensor([], dtype=torch.bool, device=self.device)
         self.Q_ii2jj: Float32[Tensor, "..."] = torch.as_tensor([], dtype=torch.float32, device=self.device)
         self.Q_jj2ii: Float32[Tensor, "..."] = torch.as_tensor([], dtype=torch.float32, device=self.device)
-        self.window_size: float = self.cfg["window_size"]
-
         self.K: Float[Tensor, "3 3"] | None = K
 
     def add_factors(

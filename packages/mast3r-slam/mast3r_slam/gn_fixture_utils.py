@@ -8,7 +8,6 @@ from typing import Any
 import torch
 from torch import Tensor
 
-
 GN_CAPTURE_DIR_ENV = "MAST3R_SLAM_GN_CAPTURE_DIR"
 GN_CAPTURE_LIMIT_ENV = "MAST3R_SLAM_GN_CAPTURE_LIMIT"
 
@@ -16,9 +15,9 @@ GN_CAPTURE_LIMIT_ENV = "MAST3R_SLAM_GN_CAPTURE_LIMIT"
 def _clone_for_capture(value: Any) -> Any:
     if isinstance(value, Tensor):
         return value.detach().cpu().contiguous()
-    if isinstance(value, (int, float, str, bool)) or value is None:
+    if isinstance(value, int | float | str | bool) or value is None:
         return value
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list | tuple):
         return type(value)(_clone_for_capture(item) for item in value)
     if isinstance(value, dict):
         return {key: _clone_for_capture(item) for key, item in value.items()}

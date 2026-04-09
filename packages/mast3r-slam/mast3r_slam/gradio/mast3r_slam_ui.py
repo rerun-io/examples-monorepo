@@ -92,7 +92,9 @@ def streaming_mast3r_slam_fn(
     global active_states
 
     stream = rr.binary_stream()
-    recording: rr.RecordingStream = rr.get_thread_local_data_recording()
+    recording = rr.get_thread_local_data_recording()
+    if recording is None:
+        raise RuntimeError("Expected an active Rerun thread-local recording")
 
     try:
         video_path: Path = Path(video_file)

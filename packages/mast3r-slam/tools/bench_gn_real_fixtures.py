@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 """Benchmark GN public APIs on captured real fixtures."""
+# ruff: noqa: I001
 
 from __future__ import annotations
 
@@ -12,10 +13,9 @@ from typing import Any
 import torch
 from torch import Tensor
 
-from mast3r_slam import _backends as cuda_be
-from mast3r_slam import gn_backends as selected_be
+import mast3r_slam._backends as cuda_be  # pyrefly: ignore[missing-import]
+import mast3r_slam.gn_backends as selected_be
 from mast3r_slam.gn_fixture_utils import iter_gn_fixture_paths, load_gn_fixture
-
 
 assert torch.cuda.is_available(), "CUDA not available"
 DEVICE = torch.device("cuda")

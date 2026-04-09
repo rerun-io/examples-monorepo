@@ -1,26 +1,19 @@
 from __future__ import annotations
+# ruff: noqa: I001
 
-import sys
-from pathlib import Path
+import importlib.util
 
 import pytest
 import torch
 
-PACKAGE_ROOT = Path(__file__).resolve().parents[1]
-if str(PACKAGE_ROOT) not in sys.path:
-    sys.path.insert(0, str(PACKAGE_ROOT))
+import mast3r_slam._backends as cuda_be  # pyrefly: ignore[missing-import]
+import mast3r_slam.gn_backends as gn_backends
+import mast3r_slam.max_ops as max_ops
 
-from mast3r_slam import _backends as cuda_be
-from mast3r_slam import gn_backends
-from mast3r_slam import max_ops
-
-
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-
-try:
-    import max  # noqa: F401
-except Exception:
-    pytestmark = pytest.mark.skip(reason="MAX Python package not installed in this environment")
+pytestmark = [
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"),
+    pytest.mark.skipif(importlib.util.find_spec("max") is None, reason="MAX Python package not installed in this environment"),
+]
 
 
 def test_load_gn_custom_ops() -> None:

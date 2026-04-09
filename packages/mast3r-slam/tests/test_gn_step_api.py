@@ -1,11 +1,11 @@
 from __future__ import annotations
+# ruff: noqa: I001
 
 import pytest
 import torch
 
-from mast3r_slam import _backends
-from mast3r_slam import gn_backends
-
+import mast3r_slam._backends as _backends  # pyrefly: ignore[missing-import]
+import mast3r_slam.gn_backends as gn_backends
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 
