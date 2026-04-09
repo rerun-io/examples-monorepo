@@ -43,64 +43,6 @@ def block_reduce_sum[origin: Origin[mut=True], //](
     return block_sum
 
 
-def assemble_h_dense_kernel(
-    hs: UnsafePointer[Float32, MutAnyOrigin],
-    ii_opt: UnsafePointer[Int64, MutAnyOrigin],
-    jj_opt: UnsafePointer[Int64, MutAnyOrigin],
-    h_dense: UnsafePointer[Float64, MutAnyOrigin],
-    num_edges: Int,
-    n_vars: Int,
-):
-    var row: Int = Int(global_idx.x)
-    var col: Int = Int(global_idx.y)
-    var dim: Int = n_vars * POSE_DIM
-    if row >= dim or col >= dim:
-        return
-
-    var bi = row // POSE_DIM
-    var bj = col // POSE_DIM
-    var ki = row % POSE_DIM
-    var kj = col % POSE_DIM
-
-    var acc: Float64 = 0.0
-    for e in range(num_edges):
-        var ii = Int(ii_opt[e])
-        var jj = Int(jj_opt[e])
-        if ii >= 0 and bj == ii and bi == ii:
-            acc += Float64(hs[((0 * num_edges + e) * POSE_DIM + ki) * POSE_DIM + kj])
-        if ii >= 0 and jj >= 0 and bi == ii and bj == jj:
-            acc += Float64(hs[((1 * num_edges + e) * POSE_DIM + ki) * POSE_DIM + kj])
-        if ii >= 0 and jj >= 0 and bi == jj and bj == ii:
-            acc += Float64(hs[((2 * num_edges + e) * POSE_DIM + ki) * POSE_DIM + kj])
-        if jj >= 0 and bi == jj and bj == jj:
-            acc += Float64(hs[((3 * num_edges + e) * POSE_DIM + ki) * POSE_DIM + kj])
-    h_dense[row * dim + col] = acc
-
-
-def assemble_b_dense_kernel(
-    gs: UnsafePointer[Float32, MutAnyOrigin],
-    ii_opt: UnsafePointer[Int64, MutAnyOrigin],
-    jj_opt: UnsafePointer[Int64, MutAnyOrigin],
-    b_dense: UnsafePointer[Float64, MutAnyOrigin],
-    num_edges: Int,
-    n_vars: Int,
-):
-    var row: Int = Int(global_idx.x)
-    var col: Int = Int(global_idx.y)
-    if row >= n_vars or col >= POSE_DIM:
-        return
-
-    var acc: Float64 = 0.0
-    for e in range(num_edges):
-        var ii = Int(ii_opt[e])
-        var jj = Int(jj_opt[e])
-        if ii >= 0 and row == ii:
-            acc += Float64(gs[(0 * num_edges + e) * POSE_DIM + col])
-        if jj >= 0 and row == jj:
-            acc += Float64(gs[(1 * num_edges + e) * POSE_DIM + col])
-    b_dense[row * POSE_DIM + col] = acc
-
-
 @always_inline
 def quat_comp_components(
     aix: Float32, aiy: Float32, aiz: Float32, aiw: Float32,

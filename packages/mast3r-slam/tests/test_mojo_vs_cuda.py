@@ -82,7 +82,7 @@ def test_gauss_newton_rays_matches_cuda_on_representative_base_shape() -> None:
     _sync()
 
     twc_mojo = args[0].clone()
-    dx_mojo = mojo_backends.gauss_newton_rays_impl_idiomatic((twc_mojo, *args[1:]))[0]
+    dx_mojo = mojo_backends.gauss_newton_rays((twc_mojo, *args[1:]))[0]
     _sync()
 
     assert torch.allclose(dx_mojo, dx_cuda, atol=POSE_ATOL, rtol=POSE_RTOL)
