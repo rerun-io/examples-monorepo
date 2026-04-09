@@ -1,3 +1,14 @@
+"""Mojo matching kernels used by the MASt3R-SLAM frontend.
+
+The paper's frontend alternates between:
+1. projecting a 3D point from one view into the other view's ray field, and
+2. refining that projected location with descriptor matching.
+
+This file implements exactly those two stages. The kernels stay local and
+simple: each thread handles one query point, because the optimization is over
+many independent matches rather than one large coupled system.
+"""
+
 from std.math import ceildiv, sqrt, min, max, floor
 from std.gpu import block_idx, block_dim, thread_idx, barrier
 from std.gpu.memory import AddressSpace
@@ -13,6 +24,8 @@ from python_interop import (
 
 
 def choose_iter_proj_block(num_pts: Int) -> Int:
+    # Small problems prefer smaller blocks to avoid wasting threads; larger
+    # batches need more threads per block to keep the GPU busy.
     if num_pts <= 4096:
         return 16
     if num_pts <= 16384:
@@ -21,6 +34,8 @@ def choose_iter_proj_block(num_pts: Int) -> Int:
 
 
 def choose_refine_block(num_pts: Int, fdim: Int) -> Int:
+    # The refinement kernel is memory-bound, so the useful tuning knob here is
+    # mostly occupancy rather than complicated tile geometry.
     if num_pts <= 1024:
         return 8
     return 16
@@ -113,7 +128,9 @@ def iter_proj_kernel(
     pixel, normalises, computes error against the target 3D direction, builds a
     2x2 LM system, solves for a pixel update, and accepts/rejects based on cost.
 
-    Mirrors the CUDA kernel in matching_kernels.cu:iter_proj_kernel (lines 119-275).
+    Conceptually this is the paper's local projective search from Fig. 2:
+    starting from an initial pixel, repeatedly adjust the pixel so the sampled
+    ray in image i aligns with the target 3D direction coming from image j.
     """
     # ── Thread indexing ──
     var n: UInt = block_idx.x * block_dim.x + thread_idx.x
@@ -179,7 +196,9 @@ def iter_proj_kernel(
         var e2: Float32 = r2 - t2
         var cost: Float32 = e0 * e0 + e1 * e1 + e2 * e2
 
-        # ── Build normal equations: J^T J + lambda * I, -J^T r ──
+        # Build the tiny 2x2 LM system for pixel coordinates (u, v). This is
+        # a per-point optimization, not the global GN pose solve used later in
+        # the backend.
         var A00: Float32 = gx0 * gx0 + gx1 * gx1 + gx2 * gx2 + lam
         var A01: Float32 = gx0 * gy0 + gx1 * gy1 + gx2 * gy2
         var A11: Float32 = gy0 * gy0 + gy1 * gy1 + gy2 * gy2 + lam
@@ -238,7 +257,11 @@ def refine_matches_kernel(
     radius: Int,
     dilation_max: Int,
 ):
-    """Descriptor-based match refinement kernel (float32 path)."""
+    """Descriptor-based match refinement kernel (float32 path).
+
+    After projective search gives a plausible pixel, this kernel does a local
+    descriptor search around that pixel and keeps the best-scoring candidate.
+    """
     var n: UInt = block_idx.x * block_dim.x + thread_idx.x
     var b: UInt = block_idx.y
 
@@ -478,7 +501,11 @@ def iter_proj_py(
     lambda_init_obj: PythonObject,
     cost_thresh_obj: PythonObject,
 ) raises -> PythonObject:
-    """Drop-in replacement for mast3r_slam_backends.iter_proj."""
+    """Drop-in replacement for mast3r_slam_backends.iter_proj.
+
+    Python owns tensor allocation and shape handling; Mojo owns the hot inner
+    loop that updates one pixel hypothesis per query point.
+    """
     var torch = Python.import_module("torch")
 
     # Ensure inputs are contiguous
@@ -550,7 +577,12 @@ def refine_matches_py(
     radius_obj: PythonObject,
     dilation_max_obj: PythonObject,
 ) raises -> PythonObject:
-    """Drop-in replacement for mast3r_slam_backends.refine_matches."""
+    """Drop-in replacement for mast3r_slam_backends.refine_matches.
+
+    This wrapper dispatches to a few kernel variants, but they all implement
+    the same paper-level idea: local descriptor refinement around a projected
+    match instead of a global brute-force search.
+    """
     var torch = Python.import_module("torch")
 
     var p1: PythonObject = p1_obj.contiguous()

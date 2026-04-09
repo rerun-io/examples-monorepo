@@ -180,6 +180,9 @@ def exp_so3_components(phi0: Float32, phi1: Float32, phi2: Float32) -> InlineArr
 def exp_sim3_components(
     xi0: Float32, xi1: Float32, xi2: Float32, xi3: Float32, xi4: Float32, xi5: Float32, xi6: Float32,
 ) -> InlineArray[Float32, 8]:
+    # Convert a 7D Sim(3) tangent update [translation, rotation, log-scale]
+    # into the finite transform used to retract a pose. This is the Exp map in
+    # Eq. 1 of the paper.
     var tau0: Float32 = xi0
     var tau1: Float32 = xi1
     var tau2: Float32 = xi2
@@ -315,6 +318,8 @@ def rel_sim3_components(
     qjx: Float32, qjy: Float32, qjz: Float32, qjw: Float32,
     sj: Float32,
 ) -> InlineArray[Float32, 8]:
+    # Compute T_ij = T_WC_i^{-1} * T_WC_j. The backend residuals are defined on
+    # relative poses between keyframes, not directly on world poses.
     var si_inv = 1.0 / si
     var qi_inv = quat_inv_components(qix, qiy, qiz, qiw)
     var qij = quat_comp_components(qi_inv[0], qi_inv[1], qi_inv[2], qi_inv[3], qjx, qjy, qjz, qjw)
@@ -457,6 +462,8 @@ def gauss_newton_rays_step_kernel(
         Scalar[DType.float32],
         address_space=AddressSpace.SHARED,
     ]()
+    # Cache both endpoint poses once in shared memory so every thread can reuse
+    # them while iterating over points on this edge.
     if tid < 8:
         pose_shared[tid] = twc[pi + tid]
     if tid < 8:
@@ -506,6 +513,7 @@ def gauss_newton_rays_step_kernel(
         pose_shared[22] = rel_out6
         pose_shared[23] = rel_out7
     barrier()
+    # pose_shared[16:24] now stores the relative Sim(3) for this edge.
     var rel0 = pose_shared[16][0]
     var rel1 = pose_shared[17][0]
     var rel2 = pose_shared[18][0]
@@ -524,6 +532,10 @@ def gauss_newton_rays_step_kernel(
     var sigma_dist_inv = 1.0 / sigma_dist
 
     for k in range(edge_block * block_threads + tid, num_points, block_threads * blocks_per_edge):
+        # Each point contributes two residual families from the paper:
+        # 1. ray-direction disagreement after transforming j into i,
+        # 2. distance disagreement to stabilize low-parallax / pure-rotation
+        #    cases where angular error alone is weak.
         var valid_match_ind = valid_match[edge * num_points + k] != 0
         var ind_xi = Int(idx_ii2jj[edge * num_points + k])
         if not valid_match_ind:
@@ -567,6 +579,8 @@ def gauss_newton_rays_step_kernel(
         var err2 = rj2 - ri2
         var err3 = norm1_j - norm1_i
 
+        # Confidence and validity thresholds decide whether MASt3R considers
+        # this correspondence trustworthy enough to influence optimization.
         var valid = valid_match_ind and (qv > q_thresh) and (ci > c_thresh) and (cj > c_thresh)
         var conf_weight: Float32 = qv
         var sqrt_w_ray: Float32 = 0.0
@@ -595,6 +609,9 @@ def gauss_newton_rays_step_kernel(
             w: Float32,
             ji0: Float32, ji1: Float32, ji2: Float32, ji3: Float32, ji4: Float32, ji5: Float32, ji6: Float32,
         ):
+            # Map the relative-pose Jacobian for this residual row into the two
+            # world-pose blocks it touches: pose i gets the negative term and
+            # pose j gets the positive term.
             var jadj0: Float32 = 0.0
             var jadj1: Float32 = 0.0
             var jadj2: Float32 = 0.0
@@ -642,6 +659,8 @@ def gauss_newton_rays_step_kernel(
         address_space=AddressSpace.SHARED,
     ]()
 
+    # The solver expects the same four 7x7 block layout as the CUDA backend:
+    # H_ii, H_ij, H_ji, H_jj and the two gradient blocks g_i, g_j.
     for n in range(POSE_DIM):
         var vi_sum = block_reduce_sum(vi[n], tid, warp_partials)
         if tid == 0:
@@ -675,6 +694,8 @@ def pose_retr_kernel(
     num_fix: Int,
     num_poses: Int,
 ):
+    # Apply the solved Sim(3) increment to every unfixed pose in place. This is
+    # the final "retraction" step after solving the linearized GN system.
     var k: Int = Int(global_idx.x) + num_fix
     if k >= num_poses:
         return

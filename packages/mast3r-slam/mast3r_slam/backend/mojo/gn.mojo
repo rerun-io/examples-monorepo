@@ -1,3 +1,18 @@
+"""Python-facing Gauss-Newton wrappers for the Mojo backend.
+
+The paper formulates backend optimization as a pose graph over pairwise MASt3R
+predictions. Each edge contributes residuals and Jacobians, which are assembled
+into per-edge Hessian/gradient blocks, solved as a linear system, and then
+retracted back onto Sim(3) poses.
+
+This file keeps the high-level control flow in Python-friendly code:
+- prepare edge/pose indexing,
+- launch the Mojo step kernel for rays,
+- reduce per-block partials,
+- solve the dense linear system in PyTorch, and
+- apply the pose update with a small Mojo kernel.
+"""
+
 from std.math import ceildiv, max, min
 from std.python import Python, PythonObject
 
@@ -44,6 +59,9 @@ def solve_step_system(
     if n_vars <= 0:
         return torch.zeros(Python.list(0, POSE_DIM), device=out_device, dtype=out_dtype)
 
+    # The GPU kernel outputs per-edge 7x7 block terms, matching the paper's
+    # pairwise relative-pose formulation. Here we gather those blocks into one
+    # dense normal equation H dx = -g for the unfixed poses.
     var hs_cpu = hs.cpu().to(dtype=torch.float64)
     var gs_cpu = gs.cpu().to(dtype=torch.float64)
     var h_blocks = torch.zeros(
@@ -115,9 +133,9 @@ def pose_retr_py(
         return Python.none()
     var poses = poses_obj.contiguous().float()
     var dx = dx_obj.contiguous().float()
-    # The helper functions are the only place where we reinterpret PyTorch
-    # storage addresses as Mojo pointers. Keeping that boundary centralized
-    # makes the shared-lib path easier to audit.
+    # Retraction is the "apply Exp(xi) to the current pose" step from the
+    # paper's Sim(3) update rule. We do it in Mojo so the in-place pose write
+    # stays on the GPU.
     var poses_ptr = torch_float32_ptr(poses)
     var dx_ptr = torch_float32_ptr(dx)
     var ctx_ptr = get_cached_context_ptr()
@@ -149,6 +167,8 @@ def gauss_newton_rays_step_py(args_obj: PythonObject) raises -> PythonObject:
     var torch = get_torch_module()
     var num_edges = Int(py=ii.shape[0])
     var num_points = Int(py=xs.shape[1])
+    # One block can process only a bounded chunk of points efficiently, so a
+    # large edge is split into several partial reductions and summed afterward.
     var blocks_per_edge = max(1, min(RAYS_BLOCKS_PER_EDGE_MAX, ceildiv(num_points, 16384)))
     var num_partials = num_edges * blocks_per_edge
     var hs_partial = torch.zeros(Python.list(4, num_partials, POSE_DIM, POSE_DIM), device=twc.device, dtype=twc.dtype)
@@ -172,8 +192,8 @@ def gauss_newton_rays_step_py(args_obj: PythonObject) raises -> PythonObject:
         grid_dim=num_partials,
         block_dim=RAYS_THREADS,
     )
-    # The Mojo kernel launches on the cached DeviceContext stream. Synchronize
-    # before handing the partial tensors back to PyTorch reductions.
+    # PyTorch reduces these partials on its own stream, so we need a barrier
+    # here to make the cross-runtime handoff deterministic.
     torch.cuda.synchronize(device=twc.device)
     if blocks_per_edge == 1:
         return Python.tuple(hs_partial, gs_partial)
@@ -249,6 +269,8 @@ def gauss_newton_impl(
 
     var num_poses = Int(py=Twc.shape[0])
     var num_fix = 1
+    # The first pose is gauge-fixed. Everything else is solved relative to it,
+    # which removes the global Sim(3) nullspace from the linear system.
     var unique_kf_idx = get_unique_kf_idx(ii, jj)
     var inds_opt = create_inds(unique_kf_idx, num_fix, ii, jj)
     var ii_opt = inds_opt[0]
@@ -264,6 +286,9 @@ def gauss_newton_impl(
     )
 
     for _i in range(max_iter):
+        # Each iteration does exactly what the paper describes for second-order
+        # backend optimization: linearize all edges, solve for a small pose
+        # increment, retract the poses, and stop once the update is tiny.
         var step_out: PythonObject
         if step_name == "gauss_newton_points_step":
             var cuda_be = get_cuda_backend_module()
@@ -306,6 +331,8 @@ def prepare_gn_state(
     ii_arg_idx: Int,
     jj_arg_idx: Int,
 ) raises -> PythonObject:
+    # Shared setup for the public GN entrypoints. The CUDA reference and Mojo
+    # path both use the same edge indexing and gauge-fixing convention.
     var Twc = args_obj[0]
     var ii = args_obj[ii_arg_idx]
     var jj = args_obj[jj_arg_idx]

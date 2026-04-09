@@ -21,6 +21,9 @@ from python_interop import install_cached_context
 def PyInit_mast3r_slam_mojo_backends() -> PythonObject:
     try:
         var m = PythonModuleBuilder("mast3r_slam_mojo_backends")
+        # This module intentionally mirrors the old CUDA extension's public API
+        # so the Python SLAM pipeline can swap backends without changing call
+        # sites. The Mojo implementations sit behind the same function names.
         m.def_function[iter_proj_py]("iter_proj")
         m.def_function[refine_matches_py]("refine_matches")
         m.def_function[pose_retr_py]("pose_retr")
