@@ -7,6 +7,11 @@ import torch
 import mast3r_slam._backends as _backends  # pyrefly: ignore[missing-import]
 import mast3r_slam.gn_backends as gn_backends
 
+try:
+    import mast3r_slam_mojo_backends as _mojo_backends  # pyrefly: ignore[missing-import]
+except ImportError:
+    _mojo_backends = None
+
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 
 
@@ -46,6 +51,21 @@ def test_selected_rays_step_matches_cuda() -> None:
     torch.testing.assert_close(gs_sel, gs_cuda, atol=1e-3, rtol=1e-4)
 
 
+def test_idiomatic_rays_step_matches_cuda() -> None:
+    if _mojo_backends is None or not hasattr(_mojo_backends, "gauss_newton_rays_step_idiomatic"):
+        pytest.skip("idiomatic mojo rays step not available")
+
+    Twc, Xs, Cs, ii, jj, idx_ii2jj, valid_match, Q, _K = _make_fixture()
+    hs_cuda, gs_cuda = _backends.gauss_newton_rays_step(
+        Twc, Xs, Cs, ii, jj, idx_ii2jj, valid_match, Q, 0.003, 10.0, 0.0, 1.5
+    )
+    hs_idio, gs_idio = _mojo_backends.gauss_newton_rays_step_idiomatic(
+        (Twc, Xs, Cs, ii, jj, idx_ii2jj, valid_match, Q, 0.003, 10.0, 0.0, 1.5)
+    )
+    torch.testing.assert_close(hs_idio, hs_cuda, atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(gs_idio, gs_cuda, atol=1e-3, rtol=1e-4)
+
+
 def test_calib_step_shapes() -> None:
     Twc, Xs, Cs, ii, jj, idx_ii2jj, valid_match, Q, K = _make_fixture()
     Hs, gs = _backends.gauss_newton_calib_step(Twc, Xs, Cs, K, ii, jj, idx_ii2jj, valid_match, Q, 64, 64, -10, 1e-6, 1.0, 10.0, 0.0, 1.5)
@@ -69,6 +89,22 @@ def test_rays_public_matches_cuda_shape() -> None:
         Twc.clone(), Xs, Cs, ii, jj, idx_ii2jj, valid_match, Q, 0.003, 10.0, 0.0, 1.5, 3, 1e-8
     )[0]
     assert dx_selected.shape == dx_cuda.shape
+
+
+def test_env_can_select_idiomatic_rays_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    if _mojo_backends is None or not hasattr(_mojo_backends, "gauss_newton_rays_step_idiomatic"):
+        pytest.skip("idiomatic mojo rays step not available")
+
+    monkeypatch.setenv("MAST3R_SLAM_FORCE_MOJO_RAYS", "idiomatic")
+    Twc, Xs, Cs, ii, jj, idx_ii2jj, valid_match, Q, _K = _make_fixture()
+    hs_env, gs_env = gn_backends.gauss_newton_rays_step(
+        Twc, Xs, Cs, ii, jj, idx_ii2jj, valid_match, Q, 0.003, 10.0, 0.0, 1.5
+    )
+    hs_idio, gs_idio = _mojo_backends.gauss_newton_rays_step_idiomatic(
+        (Twc, Xs, Cs, ii, jj, idx_ii2jj, valid_match, Q, 0.003, 10.0, 0.0, 1.5)
+    )
+    torch.testing.assert_close(hs_env, hs_idio, atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(gs_env, gs_idio, atol=1e-3, rtol=1e-4)
 
 
 def test_pose_retr_updates_tensor_in_place() -> None:

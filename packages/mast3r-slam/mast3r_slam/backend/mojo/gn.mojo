@@ -2,6 +2,7 @@ from std.math import ceildiv, max, min
 from std.python import Python, PythonObject
 
 from gn_kernels import POSE_DIM, RAYS_THREADS, gauss_newton_rays_step_kernel, pose_retr_kernel
+from gn_kernels_idiomatic import gauss_newton_rays_step_kernel_idiomatic
 from python_interop import (
     get_cached_context_ptr,
     get_cuda_backend_module,
@@ -179,6 +180,53 @@ def gauss_newton_rays_step_py(args_obj: PythonObject) raises -> PythonObject:
     return Python.tuple(hs, gs)
 
 
+def gauss_newton_rays_step_idiomatic_py(args_obj: PythonObject) raises -> PythonObject:
+    var twc = args_obj[0].contiguous().float()
+    var xs = args_obj[1].contiguous().float()
+    var cs = args_obj[2].contiguous().float()
+    var ii = args_obj[3].contiguous()
+    var jj = args_obj[4].contiguous()
+    var idx_ii2jj = args_obj[5].contiguous()
+    var valid_match = args_obj[6].contiguous()
+    var q_tensor = args_obj[7].contiguous().float()
+    var sigma_ray = Float32(py=args_obj[8])
+    var sigma_dist = Float32(py=args_obj[9])
+    var c_thresh = Float32(py=args_obj[10])
+    var q_thresh = Float32(py=args_obj[11])
+
+    var torch = get_torch_module()
+    var num_edges = Int(py=ii.shape[0])
+    var num_points = Int(py=xs.shape[1])
+    var blocks_per_edge = max(1, min(RAYS_BLOCKS_PER_EDGE_MAX, ceildiv(num_points, 16384)))
+    var num_partials = num_edges * blocks_per_edge
+    var hs_partial = torch.zeros(Python.list(4, num_partials, POSE_DIM, POSE_DIM), device=twc.device, dtype=twc.dtype)
+    var gs_partial = torch.zeros(Python.list(2, num_partials, POSE_DIM), device=twc.device, dtype=twc.dtype)
+
+    var twc_ptr = torch_float32_ptr(twc)
+    var xs_ptr = torch_float32_ptr(xs)
+    var cs_ptr = torch_float32_ptr(cs)
+    var ii_ptr = torch_int64_ptr(ii)
+    var jj_ptr = torch_int64_ptr(jj)
+    var idx_ptr = torch_int64_ptr(idx_ii2jj)
+    var valid_ptr = torch_uint8_ptr(valid_match)
+    var q_ptr = torch_float32_ptr(q_tensor)
+    var hs_ptr = torch_float32_ptr(hs_partial)
+    var gs_ptr = torch_float32_ptr(gs_partial)
+
+    var ctx_ptr = get_cached_context_ptr()
+    ctx_ptr[].enqueue_function[gauss_newton_rays_step_kernel_idiomatic, gauss_newton_rays_step_kernel_idiomatic](
+        twc_ptr, xs_ptr, cs_ptr, ii_ptr, jj_ptr, idx_ptr, valid_ptr, q_ptr, hs_ptr, gs_ptr,
+        num_points, num_edges, blocks_per_edge, sigma_ray, sigma_dist, c_thresh, q_thresh,
+        grid_dim=num_partials,
+        block_dim=RAYS_THREADS,
+    )
+    if blocks_per_edge == 1:
+        return Python.tuple(hs_partial, gs_partial)
+    var hs = hs_partial.reshape(4, num_edges, blocks_per_edge, POSE_DIM, POSE_DIM).sum(dim=2)
+    var gs = gs_partial.reshape(2, num_edges, blocks_per_edge, POSE_DIM).sum(dim=2)
+    return Python.tuple(hs, gs)
+
+
 def gauss_newton_impl(
     args_obj: PythonObject,
     step_name: String,
@@ -220,6 +268,12 @@ def gauss_newton_impl(
                     args_obj[0], args_obj[1], args_obj[2], args_obj[3], args_obj[4], args_obj[5], args_obj[6], args_obj[7], args_obj[8], args_obj[9], args_obj[10], args_obj[11],
                 )
             )
+        elif step_name == "gauss_newton_rays_step_idiomatic":
+            step_out = gauss_newton_rays_step_idiomatic_py(
+                Python.tuple(
+                    args_obj[0], args_obj[1], args_obj[2], args_obj[3], args_obj[4], args_obj[5], args_obj[6], args_obj[7], args_obj[8], args_obj[9], args_obj[10], args_obj[11],
+                )
+            )
         else:
             step_out = cuda_be.gauss_newton_calib_step(
                 args_obj[0], args_obj[1], args_obj[2], args_obj[3], args_obj[4], args_obj[5], args_obj[6], args_obj[7], args_obj[8], args_obj[9], args_obj[10], args_obj[11], args_obj[12], args_obj[13], args_obj[14], args_obj[15],
@@ -242,6 +296,10 @@ def gauss_newton_points_impl(args_obj: PythonObject) raises -> PythonObject:
 
 def gauss_newton_rays_impl(args_obj: PythonObject) raises -> PythonObject:
     return gauss_newton_impl(args_obj, "gauss_newton_rays_step", 12)
+
+
+def gauss_newton_rays_impl_idiomatic(args_obj: PythonObject) raises -> PythonObject:
+    return gauss_newton_impl(args_obj, "gauss_newton_rays_step_idiomatic", 12)
 
 
 def gauss_newton_calib_impl(args_obj: PythonObject) raises -> PythonObject:
