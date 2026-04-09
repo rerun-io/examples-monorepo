@@ -1,0 +1,310 @@
+# GN Mojo Handoff
+
+## Goal
+
+Replace the current GN backend in `mast3r-slam` with a true Mojo drop-in replacement for the CUDA/C++ path in:
+
+- `mast3r_slam/backend/src/gn_kernels.cu`
+- `mast3r_slam/backend/src/gn.cpp`
+
+Hard requirements:
+
+1. Numerical equivalence to the CUDA backend within explicit tolerances
+2. Throughput at least 95% of CUDA for:
+   - GN public API calls
+   - end-to-end `livingroom-tour.mp4` with base config
+
+## Current Status
+
+The branch contains real GN Mojo work, but it does **not** meet the throughput requirement yet.
+
+### What is implemented
+
+- A separate Mojo GN module layout now exists:
+  - `mast3r_slam/backend/mojo/gn_kernels.mojo`
+  - `mast3r_slam/backend/mojo/gn.mojo`
+  - `mast3r_slam/backend/mojo/mast3r_slam_mojo_backends.mojo`
+- Python now routes GN through `mast3r_slam/gn_backends.py`
+- There is a real Mojo implementation of `gauss_newton_rays_step`
+- There is a real Mojo implementation of `pose_retr`
+- There is a MAX custom-op prototype for `pose_retr`
+- Step-level CUDA-vs-selected-backend tests and benchmarks exist
+
+### What is still fallback or incomplete
+
+- `gauss_newton_points_step` still uses the CUDA extension
+- `gauss_newton_calib_step` still uses the CUDA extension
+- `gauss_newton_points` and `gauss_newton_calib` public functions currently go through the Mojo host wrapper, but their per-step accumulation still calls CUDA
+- `gauss_newton_rays` public function uses the Mojo host path plus Mojo `rays_step`, but is still slower than CUDA
+- No final signoff benchmark has been run yet for:
+  - `livingroom-tour.mp4`
+  - `example-base`
+  - real captured GN graph fixtures
+
+## Important Files
+
+### Primary implementation
+
+- `pixi.toml`
+- `packages/mast3r-slam/mast3r_slam/global_opt.py`
+- `packages/mast3r-slam/mast3r_slam/gn_backends.py`
+- `packages/mast3r-slam/mast3r_slam/backend/mojo/gn.mojo`
+- `packages/mast3r-slam/mast3r_slam/backend/mojo/gn_kernels.mojo`
+- `packages/mast3r-slam/mast3r_slam/backend/mojo/mast3r_slam_mojo_backends.mojo`
+- `packages/mast3r-slam/mast3r_slam/backend/mojo/matching.mojo`
+
+### CUDA oracle / existing backend
+
+- `packages/mast3r-slam/mast3r_slam/backend/include/gn.h`
+- `packages/mast3r-slam/mast3r_slam/backend/src/gn.cpp`
+- `packages/mast3r-slam/mast3r_slam/backend/src/gn_kernels.cu`
+
+### MAX custom-op exploration
+
+- `packages/mast3r-slam/mast3r_slam/max_ops.py`
+- `packages/mast3r-slam/mast3r_slam/backend/max_ops/gn_ops/__init__.mojo`
+- `packages/mast3r-slam/max-custom-ops/pixi.toml`
+
+### Tests and benchmarks
+
+- `packages/mast3r-slam/tests/test_gn_step_api.py`
+- `packages/mast3r-slam/tests/test_max_custom_ops.py`
+- `packages/mast3r-slam/tools/bench_gn_kernels.py`
+- `packages/mast3r-slam/tools/bench_max_pose_retr.py`
+- `packages/mast3r-slam/tools/bench_max_pose_retr_sweep.py`
+
+### Legacy / intermediate files worth reading but not necessarily keeping
+
+- `packages/mast3r-slam/mast3r_slam/backend/mojo/matching_kernels.mojo`
+- `packages/mast3r-slam/mast3r_slam/mojo_gn.py`
+
+## What Was Learned
+
+### 1. The biggest remaining blocker is `gauss_newton_rays_step`, not the host solve
+
+The current best measured numbers on the synthetic GN benchmark are:
+
+| Surface | CUDA median | Mojo median | Ratio |
+|---|---:|---:|---:|
+| `rays_step` | `0.060 ms` | `0.095 ms` | `1.594x` |
+| `calib_step` | `0.056 ms` | `0.056 ms` | `0.992x` |
+| `rays_public` | `0.178 ms` | `0.315 ms` | `1.762x` |
+
+Interpretation:
+
+- `calib_step` is effectively parity today, but only because it is still using CUDA
+- `rays_public` is too slow, but most of that gap is already explained by `rays_step`
+- once `rays_step` is fixed, the public path may become competitive
+
+### 2. The GPU dense-solve path was worse than a CPU-side block solve for these tiny GN systems
+
+I tried two host-side strategies in `gn.mojo`:
+
+- GPU dense assembly + GPU Cholesky in Torch
+- CPU-side block assembly + CPU Cholesky from `Hs` and `gs`, returning `dx` to CUDA
+
+Result:
+
+- the GPU dense solve path was clearly worse
+- the CPU-side block solve was materially better for the current small synthetic fixture
+
+This matches the existing CUDA backend more closely than expected, because the current C++ path already transfers data to CPU/Eigen for the sparse solve.
+
+### 3. MAX custom ops are technically viable, but small-op overhead is real
+
+MAX `CustomOpLibrary` and launched GPU kernels work in this repo. The first tested surface was `pose_retr`.
+
+Observed pose-retraction sweep:
+
+| Work size | MAX / CUDA ratio |
+|---|---:|
+| `64` | `5.958x` |
+| `256` | `5.258x` |
+| `1024` | `3.691x` |
+| `4096` | `1.953x` |
+| `16384` | `0.672x` |
+
+Interpretation:
+
+- MAX overhead amortizes on large workloads
+- MAX `pose_retr` alone is not a proof that GN will meet the requirement
+- if MAX is revisited, it should be for a heavy accumulation surface like `rays_step`, not for tiny helper ops
+
+### 4. Several obvious kernel tweaks did not close the gap
+
+These were tried on `gauss_newton_rays_step` in `gn_kernels.mojo`:
+
+- serial edge kernel
+- block-parallel reduction
+- `RAYS_THREADS = 64`
+- `RAYS_THREADS = 256`
+- caching pose data once per block
+- computing relative Sim3 once per block in shared memory
+
+Results:
+
+- `64` threads was better than `256`
+- shared pose and shared relative Sim3 did not materially change the benchmark
+- the kernel is still about 1.6x slower than CUDA
+
+This suggests the real issue is algorithmic/codegen quality in the current Mojo ray-step kernel, not just one missing cache or launch constant.
+
+### 5. The current testing is good enough for iteration, but not enough for final signoff
+
+Current correctness coverage:
+
+- `test_gn_step_api.py` passes
+- step-level parity for `rays_step` is checked
+- current tolerance in tests:
+  - `Hs`: `atol=1e-4`, `rtol=1e-4`
+  - `gs`: `atol=1e-3`, `rtol=1e-4`
+
+Missing for real signoff:
+
+- captured real GN graph fixtures
+- multi-iteration parity checks against CUDA
+- final `Twc` pose tolerance report
+- `livingroom-tour.mp4` end-to-end timing
+- `example-base` timing report
+
+## Likely Root Cause of Being Stuck
+
+The branch no longer looks blocked on packaging or backend-selection architecture. Those pieces exist.
+
+The actual stuck point is narrower:
+
+- the current Mojo implementation of `gauss_newton_rays_step` does not compile down to something competitive with the CUDA kernel
+- the current public GN path depends on that kernel
+- without a faster `rays_step`, the hard 95% gate will not pass
+
+## Best Next Planning Questions
+
+The next agent should plan around these questions first:
+
+1. Can `gauss_newton_rays_step` be rewritten in Mojo to more closely match the CUDA kernel structure?
+   - shared pose load
+   - one relative pose computation per block
+   - fewer helper-function boundaries
+   - less `InlineArray` traffic
+   - fewer scalar temporaries
+   - more direct mapping to CUDA-style local arrays and reduction
+
+2. Should `rays_step` move to the MAX custom-op route instead of the shared-lib PythonModuleBuilder route?
+   - not for `pose_retr`
+   - specifically for the heavy accumulation kernel
+
+3. Should the signoff target be redefined around real captured graph fixtures before more micro-optimization?
+   - the synthetic benchmark is useful
+   - but the final gate must be on representative real optimizer states
+
+4. Should `points_step` and `calib_step` be left on CUDA until `rays_step` is fixed?
+   - probably yes
+   - `rays_step` is the critical path right now
+
+## Concrete Recommendations
+
+### Recommendation 1
+
+Treat `gauss_newton_rays_step` as the only urgent kernel-performance problem.
+
+Do not spend more time on:
+
+- `pose_retr`
+- Python selector cleanup
+- more MAX work on tiny ops
+- public host-path changes unrelated to the ray-step kernel
+
+### Recommendation 2
+
+Build a real profiler-driven plan around the current Mojo `rays_step` kernel.
+
+The next agent should compare:
+
+- register pressure
+- occupancy
+- memory traffic
+- reduction structure
+- generated PTX or lowerings if possible
+
+against the CUDA kernel in `gn_kernels.cu`.
+
+### Recommendation 3
+
+Add real captured graph-state fixtures before final signoff work.
+
+The right captured tensors are the `_backends.gauss_newton_*` call boundary:
+
+- `Twc`
+- `Xs`
+- `Cs`
+- `ii`
+- `jj`
+- `idx_ii2jj`
+- `valid_match`
+- `Q`
+- plus `K`, `height`, `width` for calib
+
+### Recommendation 4
+
+Keep the current modular split. It is cleaner and closer to the CUDA layout.
+
+Preferred structure:
+
+- `gn_kernels.mojo` for kernels and math
+- `gn.mojo` for host orchestration and Python interop
+- `matching.mojo` for matching kernels
+- `mast3r_slam_mojo_backends.mojo` as the shared entrypoint
+
+## Reproduction Commands
+
+### Build
+
+```bash
+pixi run -e mast3r-slam-dev _build-mojo-kernels
+```
+
+### GN tests
+
+```bash
+cd packages/mast3r-slam
+pixi run -e mast3r-slam-dev pytest tests/test_gn_step_api.py -q
+```
+
+### GN microbench
+
+```bash
+cd packages/mast3r-slam
+pixi run -e mast3r-slam-dev python tools/bench_gn_kernels.py
+```
+
+### MAX custom-op tests
+
+```bash
+cd packages/mast3r-slam
+pixi run --manifest-path max-custom-ops/pixi.toml test-max-custom-ops
+```
+
+### MAX pose-retr microbench
+
+```bash
+cd packages/mast3r-slam
+pixi run --manifest-path max-custom-ops/pixi.toml bench-max-pose-retr
+pixi run --manifest-path max-custom-ops/pixi.toml python tools/bench_max_pose_retr_sweep.py
+```
+
+### Full pipeline signoff command that still needs to be run
+
+`example-base` uses `normal-apt-tour.mp4`, not `livingroom-tour.mp4`.
+
+```bash
+pixi run -e mast3r-slam-dev python tools/mast3r_slam_inference.py \
+  --dataset data/livingroom-tour.mp4 --img-size 512 --config config/base.yaml
+```
+
+## Notes For The Next Agent
+
+- The branch contains both shared-lib Mojo work and MAX custom-op experiments
+- The MAX work is exploratory, not production-ready
+- `matching_kernels.mojo` still contains old combined code and should be treated as legacy
+- The cleaned split files are the intended direction
+- The current branch is useful as a record of what was tried, even where it failed
