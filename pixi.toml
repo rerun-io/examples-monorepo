@@ -692,6 +692,12 @@ scikit-learn = "*"
 matplotlib = "*"
 trimesh = "*"
 mojo = "*"
+# max Python SDK (not the modular metapackage!) for max.experimental.torch.CustomOpLibrary.
+# Installing max directly avoids max-pipelines → uvicorn → starlette==1.0 which
+# conflicts with gradio's starlette<1.0 requirement. See the package hierarchy:
+#   modular (metapackage) → max-pipelines → uvicorn → starlette==1.0  ← conflicts with gradio
+#   max (Python SDK)       → max-core                                  ← no starlette
+max = { version = ">=26.3.0.dev2026040905,<27", channel = "https://conda.modular.com/max-nightly/" }
 
 [feature.mast3r-slam.target.linux-64.dependencies]
 lietorch = ">=0.3.0"
