@@ -1,89 +1,94 @@
-"""Default configuration for DPVO (Deep Patch Visual Odometry).
+"""Configuration for DPVO (Deep Patch Visual Odometry).
 
-Uses YACS :class:`CfgNode` to define a hierarchical, immutable-after-freeze
-configuration tree.  All tuneable hyper-parameters for the DPVO system are
-declared here with their default values.
+Defines a frozen dataclass :class:`DPVOConfig` with all tuneable
+hyper-parameters.  Preset factory class methods produce ``accurate``
+and ``fast`` configurations matching the former YAML presets.
 
 Typical usage::
 
-    from mini_dpvo.config import cfg
-    cfg.merge_from_file("my_config.yaml")
-    cfg.freeze()
+    from mini_dpvo.config import DPVOConfig
+    cfg = DPVOConfig.fast()
+    # or
+    cfg = DPVOConfig.accurate()
 
 See Teed et al. (2022), "Deep Patch Visual Odometry" for details on how
 each parameter affects the system.
 """
 
-from yacs.config import CfgNode as CN
+from __future__ import annotations
 
-_C = CN()
+from dataclasses import dataclass
+from typing import Literal
 
-# ---------------------------------------------------------------------------
-# Buffer
-# ---------------------------------------------------------------------------
-# Maximum number of keyframes that can be held in the sliding-window buffer.
-# Increase for longer sequences; the main DPVO class allocates fixed-size
-# GPU tensors of this length at startup.
-_C.BUFFER_SIZE = 2048
 
-# ---------------------------------------------------------------------------
-# Patch selection  (See Sec. 3.1 of Teed et al. 2022)
-# ---------------------------------------------------------------------------
-# When True, use gradient-biased sampling: sample 3x candidate patches and
-# keep the top-M by image gradient magnitude.  This concentrates patches on
-# textured regions where matching is more reliable.
-_C.GRADIENT_BIAS = True
+@dataclass(frozen=True)
+class DPVOConfig:
+    """All tuneable hyper-parameters for the DPVO visual odometry system.
 
-# ---------------------------------------------------------------------------
-# Visual Odometry core parameters
-# ---------------------------------------------------------------------------
-# Number of sparse 3x3 patches tracked per frame (M in the paper).
-# Higher values improve accuracy at the cost of compute.
-_C.PATCHES_PER_FRAME = 80
+    See Teed et al. (2022), "Deep Patch Visual Odometry" for details on
+    how each parameter affects the system.
+    """
 
-# Edges whose source patch belongs to a frame older than
-# (current_frame - REMOVAL_WINDOW) are pruned each iteration.
-_C.REMOVAL_WINDOW = 20
+    buffer_size: int = 2048
+    """Maximum number of keyframes held in the sliding-window buffer.
+    The main DPVO class allocates fixed-size GPU tensors of this length."""
 
-# Only poses within the last OPTIMIZATION_WINDOW frames are optimized
-# during bundle adjustment (after initialization).
-_C.OPTIMIZATION_WINDOW = 12
+    gradient_bias: bool = True
+    """Use gradient-biased patch sampling: sample 3x candidates and keep
+    the top-M by image gradient magnitude."""
 
-# Maximum temporal distance (in frames) for creating measurement edges
-# between a patch and an observing frame.  Controls the graph density.
-_C.PATCH_LIFETIME = 12
+    patches_per_frame: int = 80
+    """Number of sparse 3x3 patches tracked per frame (M in the paper)."""
 
-# ---------------------------------------------------------------------------
-# Keyframe management  (See Sec. 3.4 of Teed et al. 2022)
-# ---------------------------------------------------------------------------
-# Index offset from the newest frame used to identify the candidate
-# keyframe for removal.  The system checks motion between frames
-# (n - KEYFRAME_INDEX - 1) and (n - KEYFRAME_INDEX + 1).
-_C.KEYFRAME_INDEX = 4
+    removal_window: int = 20
+    """Edges with source older than ``(current - removal_window)`` are pruned."""
 
-# If the average bidirectional pixel flow between the candidate frame
-# and its neighbours is below this threshold (in pixels), the candidate
-# is removed as redundant.  Lower values retain more keyframes.
-_C.KEYFRAME_THRESH = 12.5
+    optimization_window: int = 12
+    """Only poses within the last ``optimization_window`` frames are optimized
+    during bundle adjustment (after initialization)."""
 
-# ---------------------------------------------------------------------------
-# Camera motion model  (See Sec. 3.3 of Teed et al. 2022)
-# ---------------------------------------------------------------------------
-# Motion model used to predict the initial pose of each new frame.
-# 'DAMPED_LINEAR': P_new = P_{n-1} * (P_{n-1} * P_{n-2}^{-1})^damping
-# This extrapolates the previous inter-frame motion with exponential damping.
-_C.MOTION_MODEL = 'DAMPED_LINEAR'
+    patch_lifetime: int = 12
+    """Maximum temporal distance (in frames) for creating measurement edges."""
 
-# Damping factor applied to the log of the relative motion.
-# 0.0 = constant position (no motion prediction),
-# 1.0 = constant velocity (full extrapolation).
-_C.MOTION_DAMPING = 0.5
+    keyframe_index: int = 4
+    """Index offset from the newest frame for the candidate keyframe removal check."""
 
-# ---------------------------------------------------------------------------
-# Precision
-# ---------------------------------------------------------------------------
-# Use mixed precision (float16) for the correlation and GRU update
-# computations.  Significantly reduces GPU memory and improves throughput.
-_C.MIXED_PRECISION = True
+    keyframe_thresh: float = 12.5
+    """Pixel flow threshold below which a keyframe is removed as redundant."""
 
-cfg: CN = _C
+    motion_model: Literal["DAMPED_LINEAR"] = "DAMPED_LINEAR"
+    """Motion model for pose extrapolation.
+    ``DAMPED_LINEAR``: ``P_new = P_{n-1} * (P_{n-1} * P_{n-2}^{-1})^damping``."""
+
+    motion_damping: float = 0.5
+    """Damping factor for the damped linear motion model.
+    0.0 = constant position, 1.0 = constant velocity."""
+
+    mixed_precision: bool = True
+    """Use float16 for correlation and GRU computations."""
+
+    @classmethod
+    def accurate(cls) -> DPVOConfig:
+        """Preset matching the former ``config/default.yaml`` (higher quality)."""
+        return cls(
+            patches_per_frame=96,
+            removal_window=22,
+            optimization_window=10,
+            patch_lifetime=13,
+            keyframe_thresh=15.0,
+            gradient_bias=False,
+            mixed_precision=True,
+        )
+
+    @classmethod
+    def fast(cls) -> DPVOConfig:
+        """Preset matching the former ``config/fast.yaml`` (lower latency)."""
+        return cls(
+            patches_per_frame=48,
+            removal_window=16,
+            optimization_window=7,
+            patch_lifetime=11,
+            keyframe_thresh=15.0,
+            gradient_bias=False,
+            mixed_precision=True,
+        )

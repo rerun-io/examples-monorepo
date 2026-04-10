@@ -34,10 +34,10 @@ import torch.nn.functional as F
 from jaxtyping import Float, Float32, Float64, Int, UInt8
 from lietorch import SE3
 from torch import Tensor
-from yacs.config import CfgNode
 
 from . import altcorr, fastba
 from . import projective_ops as pops
+from .config import DPVOConfig
 from .net import VONet
 from .utils import Timer, flatmeshgrid
 
@@ -56,15 +56,15 @@ class DPVO:
     :meth:`__call__`.
 
     Attributes:
-        cfg: YACS configuration node (see :mod:`mini_dpvo.config`).
+        cfg: DPVO configuration (see :class:`mini_dpvo.config.DPVOConfig`).
         network: The :class:`~mini_dpvo.net.VONet` neural network (in eval mode).
         is_initialized: ``True`` once 8 frames have been processed and the
             initial BA has converged.
         enable_timing: If ``True``, profile each update step with CUDA events.
         n: Number of active keyframes currently in the buffer.
         m: Total number of active patches (= ``n * M``).
-        M: Patches per frame (from ``cfg.PATCHES_PER_FRAME``).
-        N: Maximum buffer size (from ``cfg.BUFFER_SIZE``).
+        M: Patches per frame (from ``cfg.patches_per_frame``).
+        N: Maximum buffer size (from ``cfg.buffer_size``).
         ht: Image height (pixels).
         wd: Image width (pixels).
         DIM: GRU hidden state dimensionality (from network).
@@ -99,16 +99,16 @@ class DPVO:
         mem: Circular buffer capacity for feature maps (default 32).
     """
 
-    def __init__(self, cfg: CfgNode, network: str | VONet, ht: int = 480, wd: int = 640) -> None:
-        self.cfg: CfgNode = cfg
+    def __init__(self, cfg: DPVOConfig, network: str | VONet, ht: int = 480, wd: int = 640) -> None:
+        self.cfg: DPVOConfig = cfg
         self.load_weights(network)
         self.is_initialized: bool = False
         self.enable_timing: bool = False
 
         self.n: int = 0  # number of active keyframes
         self.m: int = 0  # total number of active patches
-        self.M: int = self.cfg.PATCHES_PER_FRAME
-        self.N: int = self.cfg.BUFFER_SIZE
+        self.M: int = self.cfg.patches_per_frame
+        self.N: int = self.cfg.buffer_size
 
         self.ht: int = ht  # image height
         self.wd: int = wd  # image width
@@ -141,7 +141,7 @@ class DPVO:
         # Circular buffer size for feature maps (to avoid storing all frames)
         self.mem: int = 32
 
-        if self.cfg.MIXED_PRECISION:
+        if self.cfg.mixed_precision:
             self.kwargs: dict[str, object] = {"device": "cuda", "dtype": torch.half}
             kwargs: dict[str, object] = self.kwargs
         else:
@@ -431,7 +431,7 @@ class DPVO:
         net: Float[Tensor, "1 M DIM"] = torch.zeros(1, len(ii), self.DIM, **self.kwargs)
         coords: Float[Tensor, "1 M 2 P P"] = self.reproject(indicies=(ii, jj, kk))
 
-        with autocast(enabled=self.cfg.MIXED_PRECISION):
+        with autocast(enabled=self.cfg.mixed_precision):
             corr: Float[Tensor, "1 M corr_feat"] = self.corr(coords, indicies=(kk, jj))
             ctx: Float[Tensor, "1 M DIM"] = self.imap[:, kk % (self.M * self.mem)]
             net: Float[Tensor, "1 M DIM"]
@@ -492,14 +492,14 @@ class DPVO:
         See Sec. 3.4 of Teed et al. (2022) for keyframe management.
         """
         # Check flow between frames flanking the candidate
-        i: int = self.n - self.cfg.KEYFRAME_INDEX - 1
-        j: int = self.n - self.cfg.KEYFRAME_INDEX + 1
+        i: int = self.n - self.cfg.keyframe_index - 1
+        j: int = self.n - self.cfg.keyframe_index + 1
         # Average bidirectional flow (i->j and j->i)
         m: float = self.motionmag(i, j) + self.motionmag(j, i)
 
-        if m / 2 < self.cfg.KEYFRAME_THRESH:
+        if m / 2 < self.cfg.keyframe_thresh:
             # Insufficient parallax: remove the candidate keyframe
-            k: int = self.n - self.cfg.KEYFRAME_INDEX
+            k: int = self.n - self.cfg.keyframe_index
             t0: float = self.tstamps_[k - 1].item()
             t1: float = self.tstamps_[k].item()
 
@@ -535,7 +535,7 @@ class DPVO:
             self.m -= self.M
 
         # Prune stale edges: remove edges whose source patch is too old
-        to_remove: Int[Tensor, "n_edges"] = self.ix[self.kk] < self.n - self.cfg.REMOVAL_WINDOW
+        to_remove: Int[Tensor, "n_edges"] = self.ix[self.kk] < self.n - self.cfg.removal_window
         self.remove_factors(to_remove)
 
     def update(self) -> None:
@@ -582,7 +582,7 @@ class DPVO:
         with Timer("BA", enabled=self.enable_timing):
             # Step 4: Bundle adjustment via the fast C++ backend
             # Only optimize poses from t0 to self.n (sliding window)
-            t0: int = self.n - self.cfg.OPTIMIZATION_WINDOW if self.is_initialized else 1
+            t0: int = self.n - self.cfg.optimization_window if self.is_initialized else 1
             t0: int = max(t0, 1)
 
             try:
@@ -640,7 +640,7 @@ class DPVO:
             Generator yielding ``(patch_indices, frame_indices)`` for the
             forward edges.
         """
-        r: int = self.cfg.PATCH_LIFETIME
+        r: int = self.cfg.patch_lifetime
         t0: int = self.M * max((self.n - r), 0)
         t1: int = self.M * max((self.n - 1), 0)
         return flatmeshgrid(
@@ -660,7 +660,7 @@ class DPVO:
             Generator yielding ``(patch_indices, frame_indices)`` for the
             backward edges.
         """
-        r: int = self.cfg.PATCH_LIFETIME
+        r: int = self.cfg.patch_lifetime
         t0: int = self.M * max((self.n - 1), 0)
         t1: int = self.M * max((self.n - 0), 0)
         return flatmeshgrid(
@@ -715,7 +715,7 @@ class DPVO:
         image: Float[Tensor, "1 1 3 ht wd"] = 2 * (image[None, None] / 255.0) - 0.5
 
         # Step 1: Feature extraction and patch sampling
-        with autocast(enabled=self.cfg.MIXED_PRECISION):
+        with autocast(enabled=self.cfg.mixed_precision):
             fmap: Float[Tensor, "1 1 128 h4 w4"]
             gmap: Float[Tensor, "1 M 128 P P"]
             imap: Float[Tensor, "1 M DIM 1 1"]
@@ -723,8 +723,8 @@ class DPVO:
             clr: Float[Tensor, "1 M 3"]
             fmap, gmap, imap, patches, _, clr = self.network.patchify(
                 image,
-                patches_per_image=self.cfg.PATCHES_PER_FRAME,
-                gradient_bias=self.cfg.GRADIENT_BIAS,
+                patches_per_image=self.cfg.patches_per_frame,
+                gradient_bias=self.cfg.gradient_bias,
                 return_color=True,
             )
 
@@ -743,13 +743,13 @@ class DPVO:
 
         # Step 2: Motion model -- predict initial pose for new frame
         if self.n > 1:
-            if self.cfg.MOTION_MODEL == "DAMPED_LINEAR":
+            if self.cfg.motion_model == "DAMPED_LINEAR":
                 # Damped constant-velocity model on SE3:
                 # P_new = exp(damping * log(P_{n-1} * P_{n-2}^{-1})) * P_{n-1}
                 P1: SE3 = SE3(self.poses_[self.n - 1])
                 P2: SE3 = SE3(self.poses_[self.n - 2])
 
-                xi: Float[Tensor, "6"] = self.cfg.MOTION_DAMPING * (P1 * P2.inv()).log()
+                xi: Float[Tensor, "6"] = self.cfg.motion_damping * (P1 * P2.inv()).log()
                 tvec_qvec: Float[Tensor, "7"] = (SE3.exp(xi) * P1).data
                 self.poses_[self.n] = tvec_qvec
             else:

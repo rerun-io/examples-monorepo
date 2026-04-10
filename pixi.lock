@@ -3563,7 +3563,6 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/xorg-libxshmfence-1.3.3-hb9d3cd8_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/xorg-libxtst-1.2.5-hb9d3cd8_3.conda
       - conda: https://prefix.dev/conda-forge/linux-64/xorg-libxxf86vm-1.1.7-hb03c661_0.conda
-      - conda: https://prefix.dev/conda-forge/noarch/yacs-0.1.8-pyh29332c3_2.conda
       - conda: https://prefix.dev/conda-forge/linux-64/yaml-0.2.5-h280c20c_3.conda
       - conda: https://prefix.dev/conda-forge/linux-64/zlib-ng-2.3.3-hceb46e0_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/zstd-1.5.7-hb78ec9c_6.conda
@@ -4111,7 +4110,6 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/xorg-libxshmfence-1.3.3-hb9d3cd8_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/xorg-libxtst-1.2.5-hb9d3cd8_3.conda
       - conda: https://prefix.dev/conda-forge/linux-64/xorg-libxxf86vm-1.1.7-hb03c661_0.conda
-      - conda: https://prefix.dev/conda-forge/noarch/yacs-0.1.8-pyh29332c3_2.conda
       - conda: https://prefix.dev/conda-forge/linux-64/yaml-0.2.5-h280c20c_3.conda
       - conda: https://prefix.dev/conda-forge/linux-64/zlib-ng-2.3.3-hceb46e0_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/zstd-1.5.7-hb78ec9c_6.conda
@@ -21451,6 +21449,7 @@ packages:
   - typing-extensions >=3.7.4.3
   - typing_extensions >=4.1.0
   license: Apache-2.0
+  license_family: APACHE
   purls:
   - pkg:pypi/huggingface-hub?source=hash-mapping
   size: 404200
@@ -30263,7 +30262,7 @@ packages:
   - pytorch-lightning>=2.5.1,<3
   - diffusers[torch]>=0.32.2
   - timm>=1.0.15,<2
-  - sam3-rerun @ file:///var/tmp/vibe-kanban/worktrees/5544-migrate-dpvo-int/examples-monorepo/packages/sam3-rerun
+  - sam3-rerun @ file:///var/tmp/vibe-kanban/worktrees/33de-convert-dpvo-to/examples-monorepo/packages/sam3-rerun
   requires_python: '>=3.11.0'
 - pypi: https://files.pythonhosted.org/packages/a4/8e/469e5a4a2f5855992e425f3cb33804cc07bf18d48f2db061aec61ce50270/more_itertools-10.8.0-py3-none-any.whl
   name: more-itertools
@@ -34268,6 +34267,7 @@ packages:
   constrains:
   - __glibc >=2.17
   license: MIT
+  license_family: MIT
   purls: []
   size: 10792676
   timestamp: 1775783182399
@@ -36173,7 +36173,7 @@ packages:
   version: 0.1.0
   sha256: 745a5f6282ad01b5a906b256f8f803725a4eddb4f4e5f3561bb4465a0abdc24c
   requires_dist:
-  - monopriors @ file:///var/tmp/vibe-kanban/worktrees/5544-migrate-dpvo-int/examples-monorepo/packages/monoprior
+  - monopriors @ file:///var/tmp/vibe-kanban/worktrees/33de-convert-dpvo-to/examples-monorepo/packages/monoprior
   requires_python: '>=3.12'
 - pypi: https://files.pythonhosted.org/packages/72/15/4e9929e536bda99ac1fe8b106e54c5f83846130b812350f76537f4806b19/rerun_sdk-0.31.1-cp310-abi3-manylinux_2_28_aarch64.whl
   name: rerun-sdk
@@ -36402,6 +36402,7 @@ packages:
   constrains:
   - __glibc >=2.17
   license: MIT
+  license_family: MIT
   purls:
   - pkg:pypi/ruff?source=compressed-mapping
   size: 9224697
@@ -36733,8 +36734,8 @@ packages:
   - omegaconf>=2.3.0,<3
   - termcolor>=3.2.0,<4
   - spaces>=0.43.0
-  - monopriors @ file:///var/tmp/vibe-kanban/worktrees/5544-migrate-dpvo-int/examples-monorepo/packages/monoprior
-  - sam3-rerun @ file:///var/tmp/vibe-kanban/worktrees/5544-migrate-dpvo-int/examples-monorepo/packages/sam3-rerun
+  - monopriors @ file:///var/tmp/vibe-kanban/worktrees/33de-convert-dpvo-to/examples-monorepo/packages/monoprior
+  - sam3-rerun @ file:///var/tmp/vibe-kanban/worktrees/33de-convert-dpvo-to/examples-monorepo/packages/sam3-rerun
   requires_python: '>=3.12'
 - pypi: https://files.pythonhosted.org/packages/f4/a2/70401a107d6d7466d64b466927e6b96fcefa99d57494b972608e2f8be50f/scikit_image-0.26.0-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl
   name: scikit-image
@@ -38737,6 +38738,7 @@ packages:
   - libcudnn >=9.10.2.21,<10.0a0
   - python_abi 3.11.* *_cp311
   license: BSD-3-Clause
+  license_family: BSD
   purls:
   - pkg:pypi/torchvision?source=hash-mapping
   size: 3200737
@@ -39862,7 +39864,7 @@ packages:
   sha256: a73114f7930cefc5fd61f7116a507c1ed218d5c909a24af0c113608ed440e827
   requires_dist:
   - einops>=0.8.1,<0.9
-  - monopriors @ file:///var/tmp/vibe-kanban/worktrees/5544-migrate-dpvo-int/examples-monorepo/packages/monoprior
+  - monopriors @ file:///var/tmp/vibe-kanban/worktrees/33de-convert-dpvo-to/examples-monorepo/packages/monoprior
   requires_python: '>=3.11'
 - conda: https://prefix.dev/conda-forge/linux-64/vlfeat-0.9.21-hd590300_1.conda
   sha256: f3fca24ef6a327072378dd654eba37c6a6da15499ca212eb20b0af422c1ad4c5
@@ -41078,19 +41080,6 @@ packages:
   sha256: 99f893e30497a4b66842821bac316386f7bd5c4f47ad35c9073ef089aa33af32
   requires_dist:
   - pyyaml
-- conda: https://prefix.dev/conda-forge/noarch/yacs-0.1.8-pyh29332c3_2.conda
-  sha256: d0ca7362561051750a503cec3eaffe1857a871840ddeeccd8fd88c2aef71ca80
-  md5: 5a30f948ad38eb0edd8bd6ef2522a742
-  depends:
-  - python >=3.9
-  - pyyaml
-  - python
-  license: Apache-2.0
-  license_family: APACHE
-  purls:
-  - pkg:pypi/yacs?source=hash-mapping
-  size: 20032
-  timestamp: 1737043264333
 - conda: https://prefix.dev/conda-forge/linux-64/yaml-0.2.5-h280c20c_3.conda
   sha256: 6d9ea2f731e284e9316d95fa61869fe7bbba33df7929f82693c121022810f4ad
   md5: a77f85f77be52ff59391544bfe73390a

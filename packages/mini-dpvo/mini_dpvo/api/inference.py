@@ -1,36 +1,63 @@
 """High-level inference pipeline for DPVO visual odometry.
 
 This module provides the main entry-point for running DPVO inference on
-image directories or video files. It handles frame reading (via multiprocessing),
+image directories or video files.  It handles frame reading (via multiprocessing),
 optional auto-calibration using DUSt3R, the DPVO SLAM loop, and Rerun-based
 visualization of camera trajectories, point clouds, and per-frame images.
 
-Typical usage::
+Both the CLI and Gradio UI consume the same :func:`run_dpvo_pipeline` generator.
 
-    prediction, elapsed = inference_dpvo(cfg, network_path, imagedir, calib)
+Typical CLI usage::
+
+    from mini_dpvo.api.inference import DPVOInferenceConfig, run_dpvo_pipeline
+    config = tyro.cli(DPVOInferenceConfig)
+    for msg in run_dpvo_pipeline(dpvo_config=config.dpvo_config, ...):
+        pass
 """
 
+from __future__ import annotations
+
 import os
-from dataclasses import dataclass
+from collections.abc import Generator
+from dataclasses import dataclass, field
 from multiprocessing import Process, Queue
 from pathlib import Path
 from timeit import default_timer as timer
+from typing import Annotated
 
 import cv2
 import mmcv
 import numpy as np
 import rerun as rr
 import torch
+import tyro
 from jaxtyping import Float32, Float64, UInt8
 from mini_dust3r.api import OptimizedResult, inferece_dust3r
 from mini_dust3r.model import AsymmetricCroCo3DStereo
 from scipy.spatial.transform import Rotation
+from simplecv.rerun_log_utils import RerunTyroConfig
 from tqdm import tqdm
-from yacs.config import CfgNode
 
+from mini_dpvo.config import DPVOConfig
 from mini_dpvo.dpvo import DPVO
 from mini_dpvo.stream import image_stream, video_stream
 from mini_dpvo.utils import Timer
+
+# ── Tyro subcommand aliases for DPVOConfig presets ──────────────────────
+AccurateDPVOConfig = Annotated[
+    DPVOConfig,
+    tyro.conf.subcommand(name="accurate", default=DPVOConfig.accurate()),
+]
+"""Subcommand alias for the accurate preset."""
+
+FastDPVOConfig = Annotated[
+    DPVOConfig,
+    tyro.conf.subcommand(name="fast", default=DPVOConfig.fast()),
+]
+"""Subcommand alias for the fast preset."""
+
+
+# ── Data classes ────────────────────────────────────────────────────────
 
 
 @dataclass
@@ -49,6 +76,42 @@ class DPVOPrediction:
     """Reconstructed 3-D points in world coordinates."""
     final_colors: UInt8[torch.Tensor, "buffer_size num_patches 3"]
     """RGB colors for each reconstructed point."""
+
+
+@dataclass
+class DPVOPipelineHandle:
+    """Mutable handle populated by :func:`run_dpvo_pipeline`.
+
+    Callers inspect ``prediction`` after the generator is exhausted.
+    """
+
+    prediction: DPVOPrediction | None = field(default=None, repr=False)
+    """Final prediction, populated after pipeline completes."""
+    elapsed_time: float = 0.0
+    """Total wall-clock seconds for the run."""
+
+
+@dataclass
+class DPVOInferenceConfig:
+    """Configuration for a DPVO inference run (CLI entry point)."""
+
+    rr_config: RerunTyroConfig
+    """Rerun recording configuration (save path, application id, etc.)."""
+    dpvo_config: AccurateDPVOConfig | FastDPVOConfig = field(default_factory=DPVOConfig.fast)
+    """DPVO solver configuration preset."""
+    imagedir: str = "data/movies/IMG_0493.MOV"
+    """Path to image directory or video file."""
+    network_path: str = "checkpoints/dpvo.pth"
+    """Path to DPVO network weights."""
+    calib: str | None = None
+    """Path to calibration file. If None, uses DUSt3R for estimation."""
+    stride: int = 2
+    """Frame stride for sampling."""
+    skip: int = 0
+    """Number of leading frames to skip."""
+
+
+# ── Rerun logging helpers ───────────────────────────────────────────────
 
 
 def log_trajectory(
@@ -204,6 +267,9 @@ def log_final(
         )
 
 
+# ── Frame I/O helpers ───────────────────────────────────────────────────
+
+
 def create_reader(
     imagedir: str, calib: str | None, stride: int, skip: int, queue: Queue
 ) -> Process:
@@ -327,19 +393,29 @@ def calib_from_dust3r(
     return K_33_original
 
 
+# ── Main pipeline generator ────────────────────────────────────────────
+
+
 @torch.no_grad()
-def inference_dpvo(
-    cfg: CfgNode,
+def run_dpvo_pipeline(
+    *,
+    dpvo_config: DPVOConfig,
     network_path: str,
     imagedir: str,
-    calib: str,
+    calib: str | None = None,
     stride: int = 1,
     skip: int = 0,
+    dust3r_model: AsymmetricCroCo3DStereo | None = None,
+    parent_log_path: Path = Path("world"),
+    handle: DPVOPipelineHandle | None = None,
+    recording: rr.RecordingStream | None = None,
     timeit: bool = False,
-) -> tuple[DPVOPrediction, float]:
+) -> Generator[str, None, None]:
     """Run the full DPVO visual-odometry pipeline on an image dir or video.
 
-    This is the main inference entry-point. It:
+    This is a **generator** that yields status strings after each processed
+    frame.  Both the CLI and Gradio UI consume it identically — the CLI
+    exhausts it silently while Gradio yields intermediate Rerun bytes.
 
     1. Spawns a background ``Process`` to read frames into a shared queue.
     2. Optionally estimates camera intrinsics with DUSt3R when no calibration
@@ -349,20 +425,26 @@ def inference_dpvo(
        system is initialized.
     5. Runs 12 additional update iterations after all frames are consumed
        for final refinement.
+    6. Populates ``handle.prediction`` and ``handle.elapsed_time``.
 
     Args:
-        cfg: YACS configuration node for the DPVO network and solver.
+        dpvo_config: DPVO solver configuration.
         network_path: File path to the pre-trained DPVO checkpoint.
         imagedir: Path to an image directory or video file.
         calib: Path to a calibration text file (``fx fy cx cy`` per line),
             or ``None`` to auto-estimate intrinsics via DUSt3R.
         stride: Keep every *stride*-th frame.
         skip: Number of leading frames to discard.
+        dust3r_model: Pre-loaded DUSt3R model (Gradio singleton).
+            ``None`` loads one on-the-fly (CLI path).
+        parent_log_path: Rerun entity path prefix.
+        handle: Mutable handle to store results in.
+        recording: Rerun recording stream for Gradio (thread-local).
+            ``None`` uses the global recording (CLI).
         timeit: If ``True``, print per-iteration timing via ``Timer``.
 
-    Returns:
-        A tuple of ``(DPVOPrediction, total_time)`` where *total_time* is
-        the wall-clock seconds for the entire run.
+    Yields:
+        Status message strings (e.g. ``"Frame 42/200"``).
     """
     slam: DPVO | None = None
     queue: Queue = Queue(maxsize=8)
@@ -370,7 +452,6 @@ def inference_dpvo(
     reader: Process = create_reader(imagedir, calib, stride, skip, queue)
     reader.start()
 
-    parent_log_path: Path = Path("world")
     rr.log(f"{parent_log_path}", rr.ViewCoordinates.RDF, static=True)
 
     start: float = timer()
@@ -380,16 +461,21 @@ def inference_dpvo(
     # from the very first frame pulled off the reader queue.
     intri_np_dust3r: Float64[np.ndarray, "4"] | None = None
     if calib is None:
-        dust3r_device: str = (
-            "mps"
-            if torch.backends.mps.is_available()
-            else "cuda"
-            if torch.cuda.is_available()
-            else "cpu"
-        )
-        dust3r_model: AsymmetricCroCo3DStereo = AsymmetricCroCo3DStereo.from_pretrained(
-            "naver/DUSt3R_ViTLarge_BaseDecoder_512_dpt"
-        ).to(dust3r_device)
+        yield "Estimating camera intrinsics with DUSt3R..."
+        if dust3r_model is None:
+            dust3r_device: str = (
+                "mps"
+                if torch.backends.mps.is_available()
+                else "cuda"
+                if torch.cuda.is_available()
+                else "cpu"
+            )
+            dust3r_model = AsymmetricCroCo3DStereo.from_pretrained(
+                "naver/DUSt3R_ViTLarge_BaseDecoder_512_dpt"
+            ).to(dust3r_device)
+        else:
+            dust3r_device = next(dust3r_model.parameters()).device.type
+
         _, bgr_hw3, _ = queue.get()
         K_33_pred: Float64[np.ndarray, "3 3"] = calib_from_dust3r(bgr_hw3, dust3r_model, dust3r_device)
         intri_np_dust3r = np.array(
@@ -398,6 +484,7 @@ def inference_dpvo(
 
     # path list for visualizing the trajectory
     path_list: list[list[float]] = []
+    frame_idx: int = 0
 
     with tqdm(total=total_frames, desc="Processing Frames") as pbar:
         while True:
@@ -418,7 +505,7 @@ def inference_dpvo(
             intri_torch: Float64[torch.Tensor, "4"] = torch.from_numpy(intri_np).cuda()
 
             if slam is None:
-                slam = DPVO(cfg, network_path, ht=bgr_3hw.shape[1], wd=bgr_3hw.shape[2])
+                slam = DPVO(dpvo_config, network_path, ht=bgr_3hw.shape[1], wd=bgr_3hw.shape[2])
 
             with Timer("SLAM", enabled=timeit):
                 slam(t, bgr_3hw, intri_torch)
@@ -438,9 +525,13 @@ def inference_dpvo(
                     bgr_hw3=bgr_hw3,
                     path_list=path_list,
                 )
+
+            frame_idx += 1
             pbar.update(1)
+            yield f"Frame {frame_idx}/{total_frames}"
 
     # Run additional update iterations for final bundle-adjustment refinement
+    yield "Running final bundle adjustment..."
     for _ in range(12):
         slam.update()
 
@@ -461,4 +552,7 @@ def inference_dpvo(
         final_points=final_points,
         final_colors=final_colors,
     )
-    return dpvo_pred, total_time
+
+    if handle is not None:
+        handle.prediction = dpvo_pred
+        handle.elapsed_time = total_time
