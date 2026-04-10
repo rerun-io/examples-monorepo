@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=70.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+authors = [{ name = "pablo vela", email = "pablovela5620@gmail.com" }]
+name = "mini-dpvo"
+version = "0.1.1"
+requires-python = ">= 3.11"
+dependencies = [
+    "mmcv-lite>=2.2.0,<3",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mini_dpvo", "mini_dpvo.*"]
+namespaces = false
+
+[tool.ruff]
+line-length = 150
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+ignore = ["E501", "F722", "F821", "UP037", "UP040"]
