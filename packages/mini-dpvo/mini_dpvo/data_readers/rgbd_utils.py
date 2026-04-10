@@ -1,3 +1,15 @@
+"""RGBD utility functions for TUM-format loading, pose conversion, and
+optical-flow-based distance matrices.
+
+Includes helpers for:
+
+- Parsing TUM-style text files (``rgb.txt``, ``depth.txt``, ``groundtruth.txt``).
+- Associating image, depth, and pose timestamps.
+- Converting 4x4 pose matrices to 7-D ``[t, q]`` vectors.
+- Computing pairwise distance matrices between camera frames based on
+  either Lie-algebra norms or induced optical-flow magnitudes.
+"""
+
 import os.path as osp
 
 import numpy as np
@@ -8,7 +20,15 @@ from scipy.spatial.transform import Rotation
 
 
 def parse_list(filepath: str, skiprows: int = 0) -> np.ndarray:
-    """ read list data """
+    """Read a whitespace-delimited text file into a numpy string array.
+
+    Args:
+        filepath: Path to the text file.
+        skiprows: Number of header rows to skip.
+
+    Returns:
+        A 2-D numpy array of unicode strings.
+    """
     data: np.ndarray = np.loadtxt(filepath, delimiter=' ', dtype=np.unicode_, skiprows=skiprows)
     return data
 
@@ -17,8 +37,25 @@ def associate_frames(
     tstamp_depth: Float64[np.ndarray, "n_depth"],
     tstamp_pose: Float64[np.ndarray, "n_pose"] | None,
     max_dt: float = 1.0,
-) -> list[tuple[int, ...]] :
-    """ pair images, depths, and poses """
+) -> list[tuple[int, ...]]:
+    """Associate image, depth, and (optionally) pose timestamps by nearest match.
+
+    For each image timestamp, finds the closest depth timestamp and (if
+    provided) pose timestamp. Pairs whose time difference exceeds ``max_dt``
+    are discarded.
+
+    Args:
+        tstamp_image: Timestamps for each image frame.
+        tstamp_depth: Timestamps for each depth frame.
+        tstamp_pose: Timestamps for each pose entry, or ``None`` to skip
+            pose association.
+        max_dt: Maximum allowed time difference (seconds) for a valid match.
+
+    Returns:
+        A list of index tuples. Each tuple is ``(image_idx, depth_idx)`` when
+        ``tstamp_pose`` is ``None``, or ``(image_idx, depth_idx, pose_idx)``
+        otherwise.
+    """
     associations: list[tuple[int, ...]] = []
     for i, t in enumerate(tstamp_image):
         if tstamp_pose is None:
@@ -43,7 +80,22 @@ def loadtum(datapath: str, frame_rate: int = -1) -> tuple[
     list[Float64[np.ndarray, "4"]] | None,
     list[float] | None,
 ]:
-    """ read video data in tum-rgbd format """
+    """Load an RGBD sequence in TUM-RGBD format.
+
+    Expects the directory to contain ``rgb.txt``, ``depth.txt``,
+    ``groundtruth.txt`` (or ``pose.txt``), and optionally
+    ``calibration.txt``.
+
+    Frames are sub-sampled every 5th associated entry.
+
+    Args:
+        datapath: Root directory of the TUM-RGBD sequence.
+        frame_rate: Unused; retained for API compatibility.
+
+    Returns:
+        A 5-tuple of ``(images, depths, poses, intrinsics, timestamps)``.
+        All elements are ``None`` if no ground-truth pose file is found.
+    """
     if osp.isfile(osp.join(datapath, 'groundtruth.txt')):
         pose_list: str = osp.join(datapath, 'groundtruth.txt')
 
@@ -106,7 +158,18 @@ def loadtum(datapath: str, frame_rate: int = -1) -> tuple[
 
 
 def all_pairs_distance_matrix(poses: list[Float64[np.ndarray, "7"]], beta: float = 2.5) -> Float32[np.ndarray, "n n"]:
-    """ compute distance matrix between all pairs of poses """
+    """Compute a pairwise distance matrix between all poses using Lie algebra.
+
+    Translations are scaled by ``beta`` before computing the SE(3) log-map
+    norm, balancing the contribution of rotation and translation.
+
+    Args:
+        poses: List of 7-D pose vectors ``[tx, ty, tz, qx, qy, qz, qw]``.
+        beta: Scaling factor applied to the translation component.
+
+    Returns:
+        Symmetric ``(n, n)`` distance matrix.
+    """
     poses_np: Float32[np.ndarray, "n 7"] = np.array(poses, dtype=np.float32)
     poses_np[:,:3] *= beta # scale to balence rot + trans
     poses_se3: SE3 = SE3(torch.from_numpy(poses_np))
@@ -115,7 +178,14 @@ def all_pairs_distance_matrix(poses: list[Float64[np.ndarray, "7"]], beta: float
     return r.norm(dim=-1).cpu().numpy()
 
 def pose_matrix_to_quaternion(pose: Float64[np.ndarray, "4 4"]) -> Float64[np.ndarray, "7"]:
-    """ convert 4x4 pose matrix to (t, q) """
+    """Convert a 4x4 homogeneous pose matrix to a 7-D ``[t, q]`` vector.
+
+    Args:
+        pose: A 4x4 rigid-body transformation matrix.
+
+    Returns:
+        A 7-D vector ``[tx, ty, tz, qx, qy, qz, qw]``.
+    """
     q: Float64[np.ndarray, "4"] = Rotation.from_matrix(pose[:3, :3]).as_quat()
     return np.concatenate([pose[:3, 3], q], axis=0)
 
@@ -124,7 +194,21 @@ def compute_distance_matrix_flow(
     disps: Float64[np.ndarray, "n h w"] | Float32[torch.Tensor, "1 n h w"],
     intrinsics: Float64[np.ndarray, "n 4"] | Float32[torch.Tensor, "1 n 4"],
 ) -> Float32[np.ndarray, "n n"]:
-    """ compute flow magnitude between all pairs of frames """
+    """Compute a pairwise distance matrix based on induced optical-flow magnitude.
+
+    For each pair ``(i, j)`` the function computes the optical flow induced
+    by the relative pose and disparity, takes the bidirectional average, and
+    stores the result. Pairs with low validity (< 70 %) are set to
+    ``inf``.
+
+    Args:
+        poses: Per-frame poses as numpy ``(n, 7)`` or a :class:`SE3` object.
+        disps: Per-frame disparity (inverse depth) maps.
+        intrinsics: Per-frame camera intrinsics ``[fx, fy, cx, cy]``.
+
+    Returns:
+        An ``(n, n)`` distance matrix of mean flow magnitudes.
+    """
     if not isinstance(poses, SE3):
         poses = torch.from_numpy(poses).float().cuda()[None]
         poses = SE3(poses).inv()
@@ -175,7 +259,22 @@ def compute_distance_matrix_flow2(
     intrinsics: Float32[torch.Tensor, "1 n 4"],
     beta: float = 0.4,
 ) -> Float32[np.ndarray, "n n"]:
-    """ compute flow magnitude between all pairs of frames """
+    """Compute a pairwise distance matrix using translation-only + full flow.
+
+    Similar to :func:`compute_distance_matrix_flow` but decomposes the
+    induced flow into a translation-only component and a full (rotation +
+    translation) component weighted by ``beta``. This gives finer control
+    over the relative importance of rotational motion.
+
+    Args:
+        poses: Per-frame poses as a :class:`SE3` object.
+        disps: Per-frame disparity (inverse depth) maps.
+        intrinsics: Per-frame camera intrinsics ``[fx, fy, cx, cy]``.
+        beta: Weight applied to the full-motion flow component.
+
+    Returns:
+        An ``(n, n)`` distance matrix of mean composite flow magnitudes.
+    """
     # if not isinstance(poses, SE3):
     #     poses = torch.from_numpy(poses).float().cuda()[None]
     #     poses = SE3(poses).inv()

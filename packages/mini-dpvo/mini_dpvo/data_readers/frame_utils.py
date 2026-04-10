@@ -1,3 +1,15 @@
+"""Low-level file I/O utilities for optical flow, depth, and camera data.
+
+Supports the following formats:
+
+- **Middlebury ``.flo``** -- standard optical-flow binary format.
+- **KITTI flow** -- 16-bit PNG with validity channel.
+- **PFM** -- Portable Float Map (used by some stereo benchmarks).
+- **DPT** -- tagged float-array depth format.
+- **``.cam``** -- binary camera file (intrinsic + extrinsic matrices).
+- Common image formats (PNG, JPEG, PPM) via PIL.
+"""
+
 import re
 from os.path import *
 from typing import IO
@@ -10,10 +22,23 @@ from scipy.spatial.transform import Rotation
 
 cv2.setNumThreads(0)
 
-
+# Magic number used by the Middlebury .flo and .dpt formats to validate files.
 TAG_CHAR: Float32[np.ndarray, "1"] = np.array([202021.25], np.float32)
 
+
 def readFlowKITTI(filename: str) -> tuple[Float32[np.ndarray, "h w 2"], Float32[np.ndarray, "h w"]]:
+    """Read a KITTI-format optical flow file (16-bit PNG).
+
+    The blue and green channels encode the horizontal and vertical flow
+    (scaled by 64, offset by 2^15). The red channel is the validity mask.
+
+    Args:
+        filename: Path to the KITTI flow PNG file.
+
+    Returns:
+        Tuple of ``(flow, valid)`` where ``flow`` has shape ``(h, w, 2)``
+        and ``valid`` has shape ``(h, w)`` with 1.0 for valid pixels.
+    """
     flow_bgr: Float32[np.ndarray, "h w 3"] = cv2.imread(filename, cv2.IMREAD_ANYDEPTH|cv2.IMREAD_COLOR)
     flow_bgr = flow_bgr[:,:,::-1].astype(np.float32)
     flow: Float32[np.ndarray, "h w 2"] = flow_bgr[:, :, :2]
@@ -22,12 +47,24 @@ def readFlowKITTI(filename: str) -> tuple[Float32[np.ndarray, "h w 2"], Float32[
     return flow, valid
 
 def readFlow(fn: str) -> Float32[np.ndarray, "h w 2"] | None:
-    """ Read .flo file in Middlebury format"""
-    # Code adapted from:
-    # http://stackoverflow.com/questions/28013200/reading-middlebury-flow-files-with-python-bytes-array-numpy
+    """Read a ``.flo`` optical-flow file in Middlebury format.
 
-    # WARNING: this will work on little-endian architectures (eg Intel x86) only!
-    # print 'fn = %s'%(fn)
+    The file starts with a float32 magic number (202021.25), followed by
+    width and height as int32, and then ``2 * w * h`` float32 flow values.
+
+    Note:
+        Only works on little-endian architectures (e.g. Intel x86).
+
+    Code adapted from:
+        http://stackoverflow.com/questions/28013200/reading-middlebury-flow-files-with-python-bytes-array-numpy
+
+    Args:
+        fn: Path to the ``.flo`` file.
+
+    Returns:
+        Flow array of shape ``(h, w, 2)`` or ``None`` if the magic number
+        does not match.
+    """
     with open(fn, 'rb') as f:
         magic: Float32[np.ndarray, "1"] = np.fromfile(f, np.float32, count=1)
         if magic != 202021.25:
@@ -43,6 +80,21 @@ def readFlow(fn: str) -> Float32[np.ndarray, "h w 2"] | None:
             return np.resize(data, (int(h), int(w), 2))
 
 def readPFM(file: str) -> Float32[np.ndarray, "..."] | Float32[np.ndarray, "h w 3"]:
+    """Read a Portable Float Map (``.pfm``) file.
+
+    Supports both single-channel (``Pf``) and three-channel (``PF``) formats.
+    The image is flipped vertically to match the top-left origin convention.
+
+    Args:
+        file: Path to the ``.pfm`` file.
+
+    Returns:
+        The loaded data as a float32 array. Shape is ``(h, w)`` for
+        greyscale or ``(h, w, 3)`` for colour.
+
+    Raises:
+        Exception: If the header is malformed or the magic bytes are invalid.
+    """
     file_handle: IO[bytes] = open(file, 'rb')
 
     color: bool | None = None
@@ -119,7 +171,20 @@ def writeFlow(filename: str, uv: Float32[np.ndarray, "h w 2"] | Float32[np.ndarr
 
 
 def readDPT(filename: str) -> Float32[np.ndarray, "h w"]:
-    """ Read depth data from file, return as numpy array. """
+    """Read a ``.dpt`` depth file in tagged float-array format.
+
+    The file starts with a float32 tag (202021.25), followed by int32
+    width/height, then ``w * h`` float32 depth values.
+
+    Args:
+        filename: Path to the ``.dpt`` file.
+
+    Returns:
+        Depth array of shape ``(h, w)``.
+
+    Raises:
+        AssertionError: If the tag or dimensions are invalid.
+    """
     f: IO[bytes] = open(filename,'rb')
     check: float = np.fromfile(f,dtype=np.float32,count=1)[0]
     TAG_FLOAT: float = 202021.25
@@ -133,11 +198,22 @@ def readDPT(filename: str) -> Float32[np.ndarray, "h w"]:
     return depth
 
 def cam_read(filename: str) -> tuple[Float64[np.ndarray, "7"], Float64[np.ndarray, "4"]]:
-    """ Read camera data, return (M,N) tuple.
-    M is the intrinsic matrix, N is the extrinsic matrix, so that
-    x = M*N*X,
-    with x being a point in homogeneous image pixel coordinates, X being a
-    point in homogeneous world coordinates."""
+    """Read a binary ``.cam`` camera file and return pose + intrinsics.
+
+    The file encodes a 3x3 intrinsic matrix **M** and a 3x4 extrinsic
+    matrix **N** such that ``x = M * N * X`` projects a homogeneous world
+    point **X** to pixel coordinates **x**.
+
+    The extrinsic rotation is converted to a unit quaternion and concatenated
+    with the translation to form a 7-D pose vector.
+
+    Args:
+        filename: Path to the ``.cam`` binary file.
+
+    Returns:
+        Tuple of ``(pvec, kvec)`` where ``pvec`` is ``[tx, ty, tz, qx, qy,
+        qz, qw]`` and ``kvec`` is ``[fx, fy, cx, cy]``.
+    """
     f: IO[bytes] = open(filename,'rb')
     check: float = np.fromfile(f,dtype=np.float32,count=1)[0]
     M: Float64[np.ndarray, "3 3"] = np.fromfile(f,dtype='float64',count=9).reshape((3,3))
@@ -159,6 +235,25 @@ def cam_read(filename: str) -> tuple[Float64[np.ndarray, "7"], Float64[np.ndarra
 
 
 def read_gen(file_name: str, pil: bool = False) -> Image.Image | np.ndarray | Float32[np.ndarray, "..."] | tuple[Float64[np.ndarray, "7"], Float64[np.ndarray, "4"]] | list:
+    """Generic file reader that dispatches on file extension.
+
+    Supported extensions:
+
+    - ``.png``, ``.jpeg``, ``.jpg``, ``.ppm`` -- image (via PIL).
+    - ``.bin``, ``.raw`` -- numpy binary (via :func:`numpy.load`).
+    - ``.flo`` -- Middlebury optical flow.
+    - ``.pfm`` -- Portable Float Map.
+    - ``.dpt`` -- tagged depth format.
+    - ``.cam`` -- binary camera file.
+
+    Args:
+        file_name: Path to the file.
+        pil: Unused; retained for API compatibility.
+
+    Returns:
+        The loaded data in a type appropriate to the format, or an empty
+        list if the extension is unrecognised.
+    """
     ext: str = splitext(file_name)[-1]
     if ext == '.png' or ext == '.jpeg' or ext == '.ppm' or ext == '.jpg':
         return Image.open(file_name)

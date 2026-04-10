@@ -1,3 +1,13 @@
+"""Gradio web interface for the Mini-DPVO visual odometry demo.
+
+Provides a streaming Rerun viewer that visualizes camera trajectories and
+point clouds in real time as DPVO processes an uploaded video. Camera
+intrinsics are auto-estimated via DUSt3R (no calibration file required).
+
+The module exposes a single ``dpvo_block`` :class:`gr.Blocks` instance that
+can be launched directly or composed into a larger Gradio application.
+"""
+
 try:
     import spaces  # type: ignore # noqa: F401
 
@@ -32,6 +42,8 @@ from mini_dpvo.api.inference import (
 from mini_dpvo.config import cfg as base_cfg
 from mini_dpvo.dpvo import DPVO
 
+# Heavy resources (model weights, device selection) are loaded once and
+# guarded by ``gr.NO_RELOAD`` so they survive Gradio's hot-reload cycles.
 if gr.NO_RELOAD:
     NETWORK_PATH: str = "checkpoints/dpvo.pth"
     DEVICE: str = (
@@ -56,7 +68,30 @@ def run_dpvo(
     config_type: Literal["accurate", "fast"] = "accurate",
     progress: gr.Progress = gr.Progress(),
 ) -> Generator[tuple[bytes, float], None, None]:
-    # create a stream to send data back to the rerun viewer
+    """Run DPVO on a video and stream Rerun binary data to the viewer.
+
+    This is a Gradio streaming callback: it ``yield`` s
+    ``(rerun_bytes, elapsed_seconds)`` after every initialized SLAM step so
+    the Rerun viewer updates incrementally.
+
+    The function auto-estimates camera intrinsics with DUSt3R, reads frames
+    via a background process, and feeds them through the DPVO SLAM system.
+
+    Args:
+        video_file_path: Local path to the uploaded video file.
+        jpg_quality: JPEG quality for image logging (passed through to
+            :func:`log_trajectory`).
+        stride: Keep every *stride*-th frame.
+        skip: Number of leading frames to discard.
+        config_type: Which DPVO config to load -- ``"accurate"`` merges
+            ``config/default.yaml``, ``"fast"`` merges ``config/fast.yaml``.
+        progress: Gradio progress tracker for the calibration step.
+
+    Yields:
+        A tuple of ``(rerun_binary_bytes, elapsed_time_seconds)`` after each
+        SLAM iteration once the system is initialized.
+    """
+    # Create a binary stream to incrementally send data to the Rerun viewer
     stream: rr.BinaryStream = rr.binary_stream()
     parent_log_path: Path = Path("world")
     rr.log(f"{parent_log_path}", rr.ViewCoordinates.RDF, static=True)
@@ -138,11 +173,24 @@ def run_dpvo(
                 yield stream.read(), timer() - start_time
 
 
+# Wrap the callback with HuggingFace Spaces GPU decorator when running
+# on Zero GPU infrastructure.
 if IN_SPACES:
     run_dpvo = spaces.GPU(run_dpvo)
 
 
 def on_file_upload(video_file_path: str) -> str:
+    """Extract and format basic video metadata for the Gradio info panel.
+
+    Called when a user uploads a new video file. Returns a Markdown string
+    showing frame count, FPS, and duration.
+
+    Args:
+        video_file_path: Local path to the uploaded video file.
+
+    Returns:
+        A Markdown-formatted string with video statistics.
+    """
     video_reader: mmcv.VideoReader = mmcv.VideoReader(video_file_path)
     video_info: str = f"""
     **Video Info:**
@@ -153,11 +201,15 @@ def on_file_upload(video_file_path: str) -> str:
     return video_info
 
 
+# ---------------------------------------------------------------------------
+# Gradio Blocks UI layout
+# ---------------------------------------------------------------------------
+# ``dpvo_block`` is the top-level Blocks instance. It can be launched
+# standalone via ``dpvo_block.launch()`` or mounted inside a larger app.
 with gr.Blocks(
     css=""".gradio-container {margin: 0 !important; min-width: 100%};""",
     title="Mini-DPVO Demo",
 ) as dpvo_block:
-    # scene state is save so that you can change conf_thr, cam_size... without rerunning the inference
     gr.HTML('<h2 style="text-align: center;">Mini-DPVO Demo</h2>')
     gr.HTML(
         '<p style="text-align: center;">Unofficial DPVO demo using the mini-dpvo. Learn more about mini-dpvo <a href="https://github.com/pablovela5620/mini-dpvo">here</a>.</p>'
@@ -209,7 +261,7 @@ with gr.Blocks(
             stop_btn = gr.Button("Stop")
         rr_viewer = Rerun(height=600, streaming=True)
 
-        # Example videos
+        # Pre-populate the examples gallery from bundled video directories
         base_example_params: list[int | str] = [50, 4, 0, "fast"]
         example_dpvo_dir: Path = Path("data/movies")
         example_iphone_dir: Path = Path("data/iphone")

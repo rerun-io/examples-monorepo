@@ -1,3 +1,15 @@
+"""High-level inference pipeline for DPVO visual odometry.
+
+This module provides the main entry-point for running DPVO inference on
+image directories or video files. It handles frame reading (via multiprocessing),
+optional auto-calibration using DUSt3R, the DPVO SLAM loop, and Rerun-based
+visualization of camera trajectories, point clouds, and per-frame images.
+
+Typical usage::
+
+    prediction, elapsed = inference_dpvo(cfg, network_path, imagedir, calib)
+"""
+
 import os
 from dataclasses import dataclass
 from multiprocessing import Process, Queue
@@ -23,10 +35,20 @@ from mini_dpvo.utils import Timer
 
 @dataclass
 class DPVOPrediction:
+    """Container for the final outputs of a DPVO inference run.
+
+    Holds the optimized keyframe poses (translation + quaternion), their
+    timestamps, and the associated 3-D point cloud with per-point colors.
+    """
+
     final_poses: Float32[torch.Tensor, "num_keyframes 7"]
+    """Keyframe poses as ``[tx, ty, tz, qx, qy, qz, qw]``."""
     tstamps: Float64[torch.Tensor, "num_keyframes"]  # noqa: F821
+    """Timestamp (frame index) of each keyframe."""
     final_points: Float32[torch.Tensor, "buffer_size*num_patches 3"]
+    """Reconstructed 3-D points in world coordinates."""
     final_colors: UInt8[torch.Tensor, "buffer_size num_patches 3"]
+    """RGB colors for each reconstructed point."""
 
 
 def log_trajectory(
@@ -39,6 +61,29 @@ def log_trajectory(
     path_list: list[list[float]],
     jpg_quality: int = 90,
 ) -> list[list[float]]:
+    """Log the current SLAM state to Rerun for live visualization.
+
+    For the most recent keyframe this logs:
+    * the camera image (JPEG-compressed),
+    * the pinhole intrinsics,
+    * the camera-to-world transform,
+    * the accumulated camera path as a 3-D line strip, and
+    * the point cloud (after radius-based outlier removal).
+
+    Args:
+        parent_log_path: Rerun entity path prefix (e.g. ``Path("world")``).
+        poses: All buffered keyframe poses ``[tx, ty, tz, qx, qy, qz, qw]``.
+        points: All buffered 3-D points (flattened across patches).
+        colors: Per-point RGB colors matching ``points``.
+        intri_np: Camera intrinsics as ``[fx, fy, cx, cy]``.
+        bgr_hw3: Current frame in BGR channel order.
+        path_list: Running list of world-space camera positions; updated
+            in-place and returned.
+        jpg_quality: JPEG compression quality for the image log (0--100).
+
+    Returns:
+        The updated ``path_list`` with the latest camera position appended.
+    """
     cam_log_path: str = f"{parent_log_path}/camera"
     rgb_hw3: UInt8[np.ndarray, "h w 3"] = mmcv.bgr2rgb(bgr_hw3)
     rr.log(
@@ -56,18 +101,21 @@ def log_trajectory(
         ),
     )
 
+    # Filter out zero-initialized (unused) buffer slots
     poses_mask: torch.Tensor = ~(poses[:, :6] == 0).all(dim=1)
     points_mask: torch.Tensor = ~(points == 0).all(dim=1)
 
     nonzero_poses: Float32[torch.Tensor, "num_nonzero 7"] = poses[poses_mask]
     nonzero_points: Float32[torch.Tensor, "num_nonzero 3"] = points[points_mask]
 
+    # Extract the most recent keyframe pose for the camera transform
     last_index: int = nonzero_poses.shape[0] - 1
-    # get last non-zero pose, and the index of the last non-zero pose
     quat_pose: Float32[np.ndarray, "7"] = nonzero_poses[last_index].numpy(force=True)
     trans_quat: Float32[np.ndarray, "3"] = quat_pose[:3]
     rotation_quat: Rotation = Rotation.from_quat(quat_pose[3:])
 
+    # Build the camera-to-world 4x4 transform (cam_T_world) and invert
+    # to get world_T_cam for Rerun logging (child-from-parent convention).
     cam_R_world: Float64[np.ndarray, "3 3"] = rotation_quat.as_matrix()
 
     cam_T_world: Float64[np.ndarray, "4 4"] = np.eye(4)
@@ -98,10 +146,12 @@ def log_trajectory(
         ),
     )
 
-    # outlier removal
+    # Outlier removal: discard points whose distance from the trajectory
+    # median exceeds 5x the maximum camera-center radius.
     trajectory_center: Float32[np.ndarray, "3"] = np.median(nonzero_poses[:, :3].numpy(force=True), axis=0)
 
     def radii(a: Float32[np.ndarray, "n 3"]) -> Float32[np.ndarray, "n"]:
+        """Compute Euclidean distance of each row to ``trajectory_center``."""
         return np.linalg.norm(a - trajectory_center, axis=1)
 
     points_np: Float32[np.ndarray, "num_points 3"] = nonzero_points.view(-1, 3).numpy(force=True)
@@ -130,6 +180,20 @@ def log_final(
     final_points: Float32[torch.Tensor, "buffer_size*num_patches 3"],
     final_colors: UInt8[torch.Tensor, "buffer_size num_patches 3"],
 ) -> None:
+    """Log the final optimized per-keyframe camera transforms to Rerun.
+
+    After DPVO terminates its SLAM loop and performs final bundle adjustment,
+    this function logs one ``rr.Transform3D`` per keyframe so the user can
+    inspect the full set of optimized camera poses.
+
+    Args:
+        parent_log_path: Rerun entity path prefix (e.g. ``Path("world")``).
+        final_poses: Optimized keyframe poses ``[tx, ty, tz, qx, qy, qz, qw]``.
+        tstamps: Timestamp (frame index) per keyframe.
+        final_points: Final 3-D point cloud (unused here, reserved for
+            future extensions).
+        final_colors: Per-point colors (unused here).
+    """
     for idx, (pose_quat, tstamp) in enumerate(zip(final_poses, tstamps)):
         cam_log_path: str = f"{parent_log_path}/camera_{idx}"
         trans_quat: torch.Tensor = pose_quat[:3]
@@ -143,6 +207,24 @@ def log_final(
 def create_reader(
     imagedir: str, calib: str | None, stride: int, skip: int, queue: Queue
 ) -> Process:
+    """Create a multiprocessing ``Process`` that reads frames into a queue.
+
+    If ``imagedir`` is a directory the reader uses :func:`image_stream`;
+    otherwise it treats the path as a video file and uses
+    :func:`video_stream`.
+
+    Args:
+        imagedir: Path to an image directory **or** a video file.
+        calib: Path to a calibration file (``fx fy cx cy`` per line), or
+            ``None`` to skip file-based calibration.
+        stride: Sample every *stride*-th frame.
+        skip: Number of leading frames to skip before sampling begins.
+        queue: Shared ``Queue`` into which ``(timestep, bgr_hw3, intrinsics)``
+            tuples are placed. A sentinel ``(-1, ...)`` signals end-of-stream.
+
+    Returns:
+        An unstarted ``Process`` ready to be ``.start()``-ed.
+    """
     reader: Process
     if os.path.isdir(imagedir):
         reader = Process(
@@ -157,7 +239,21 @@ def create_reader(
 
 
 def calculate_num_frames(video_or_image_dir: str, stride: int, skip: int) -> int:
-    # Determine the total number of frames
+    """Calculate the effective number of frames after applying skip and stride.
+
+    For an image directory the total is the number of regular files; for a
+    video file it is the frame count reported by OpenCV.  The returned value
+    accounts for both ``skip`` (dropped leading frames) and ``stride``
+    (sub-sampling interval).
+
+    Args:
+        video_or_image_dir: Path to an image directory or video file.
+        stride: Sampling interval (keep every *stride*-th frame).
+        skip: Number of leading frames to discard.
+
+    Returns:
+        The number of frames that will actually be processed.
+    """
     total_frames: int = 0
     if os.path.isdir(video_or_image_dir):
         total_frames = len(
@@ -181,22 +277,23 @@ def calib_from_dust3r(
     model: AsymmetricCroCo3DStereo,
     device: str,
 ) -> Float64[np.ndarray, "3 3"]:
-    """
-    Calculates the calibration matrix from mini-dust3r.
+    """Estimate a 3x3 camera intrinsic matrix from a single image using DUSt3R.
+
+    The image is temporarily saved to disk, fed through DUSt3R monocular
+    calibration, and the resulting intrinsics are up-scaled from the DUSt3R
+    processing resolution back to the original image dimensions.
 
     Args:
-        bgr_hw3: The input image in BGR format with shape (height, width, 3).
-        model: The Dust3D-R model used for inference.
-        device: The device to run the inference on.
+        bgr_hw3: Input image in BGR channel order with shape
+            ``(height, width, 3)``.
+        model: Pre-loaded DUSt3R ``AsymmetricCroCo3DStereo`` model.
+        device: Torch device string (e.g. ``"cuda"``, ``"cpu"``).
 
     Returns:
-        The calibration matrix with shape (3, 3).
-
-    Raises:
-        None.
+        The 3x3 intrinsic matrix ``K`` scaled to the original image size.
     """
     tmp_path: Path = Path("/tmp/dpvo/tmp.png")
-    # save image
+    # Save image to a temporary file for DUSt3R (expects a directory of images)
     mmcv.imwrite(bgr_hw3, str(tmp_path))
     optimized_results: OptimizedResult = inferece_dust3r(
         image_dir_or_list=tmp_path.parent,
@@ -204,10 +301,11 @@ def calib_from_dust3r(
         device=device,
         batch_size=1,
     )
-    # DELETE tmp file
+    # Clean up the temporary file
     tmp_path.unlink()
 
-    # get predicted intrinsics in original image size
+    # Scale the predicted intrinsics from DUSt3R's internal resolution
+    # back up to the original image dimensions.
     downscaled_h: int
     downscaled_w: int
     downscaled_h, downscaled_w, _ = optimized_results.rgb_hw3_list[0].shape
@@ -219,7 +317,7 @@ def calib_from_dust3r(
     scaling_factor_x: float = orig_w / downscaled_w
     scaling_factor_y: float = orig_h / downscaled_h
 
-    # Scale the intrinsic matrix to the original image size
+    # Apply per-axis scaling to fx, fy, cx, cy
     K_33_original: Float64[np.ndarray, "3 3"] = optimized_results.K_b33[0].copy()
     K_33_original[0, 0] *= scaling_factor_x  # fx
     K_33_original[1, 1] *= scaling_factor_y  # fy
@@ -239,6 +337,33 @@ def inference_dpvo(
     skip: int = 0,
     timeit: bool = False,
 ) -> tuple[DPVOPrediction, float]:
+    """Run the full DPVO visual-odometry pipeline on an image dir or video.
+
+    This is the main inference entry-point. It:
+
+    1. Spawns a background ``Process`` to read frames into a shared queue.
+    2. Optionally estimates camera intrinsics with DUSt3R when no calibration
+       file is provided.
+    3. Feeds each frame into the DPVO SLAM system.
+    4. Logs live trajectory, point cloud, and images to Rerun after the
+       system is initialized.
+    5. Runs 12 additional update iterations after all frames are consumed
+       for final refinement.
+
+    Args:
+        cfg: YACS configuration node for the DPVO network and solver.
+        network_path: File path to the pre-trained DPVO checkpoint.
+        imagedir: Path to an image directory or video file.
+        calib: Path to a calibration text file (``fx fy cx cy`` per line),
+            or ``None`` to auto-estimate intrinsics via DUSt3R.
+        stride: Keep every *stride*-th frame.
+        skip: Number of leading frames to discard.
+        timeit: If ``True``, print per-iteration timing via ``Timer``.
+
+    Returns:
+        A tuple of ``(DPVOPrediction, total_time)`` where *total_time* is
+        the wall-clock seconds for the entire run.
+    """
     slam: DPVO | None = None
     queue: Queue = Queue(maxsize=8)
 
@@ -251,7 +376,8 @@ def inference_dpvo(
     start: float = timer()
     total_frames: int = calculate_num_frames(imagedir, stride, skip)
 
-    # estimate camera intrinsics if not provided
+    # If no calibration file was provided, use DUSt3R to predict intrinsics
+    # from the very first frame pulled off the reader queue.
     intri_np_dust3r: Float64[np.ndarray, "4"] | None = None
     if calib is None:
         dust3r_device: str = (
@@ -314,6 +440,7 @@ def inference_dpvo(
                 )
             pbar.update(1)
 
+    # Run additional update iterations for final bundle-adjustment refinement
     for _ in range(12):
         slam.update()
 

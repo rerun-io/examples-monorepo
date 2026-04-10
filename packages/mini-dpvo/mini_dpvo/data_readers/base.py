@@ -1,3 +1,9 @@
+"""Base RGBD dataset class for DPVO training.
+
+Provides frame-graph-based sampling logic and data augmentation that is
+shared across all concrete dataset implementations (e.g. TartanAir).
+"""
+
 import os
 import os.path as osp
 import pickle
@@ -13,6 +19,17 @@ from .rgbd_utils import *
 
 
 class RGBDDataset(data.Dataset):
+    """Abstract base :class:`~torch.utils.data.Dataset` for RGBD video clips.
+
+    Subclasses must implement:
+
+    - :meth:`is_test_scene` -- classify a scene as train or validation.
+    - :meth:`image_read` / :meth:`depth_read` -- load a single frame/depth.
+
+    The base class handles frame-graph construction, difficulty-based
+    sampling, data augmentation, and depth normalisation.
+    """
+
     def __init__(
         self,
         name: str,
@@ -24,7 +41,22 @@ class RGBDDataset(data.Dataset):
         aug: bool = True,
         sample: bool = True,
     ) -> None:
-        """ Base class for RGBD dataset """
+        """Initialise the RGBD dataset.
+
+        Args:
+            name: Human-readable dataset name.
+            datapath: Root directory containing the dataset files.
+            n_frames: Number of frames per training clip.
+            crop_size: ``[height, width]`` for augmentation centre-crop.
+            fmin: Minimum optical-flow distance for frame sampling
+                (excludes trivially easy pairs).
+            fmax: Maximum optical-flow distance for frame sampling
+                (excludes overly hard pairs).
+            aug: Whether to enable data augmentation.
+            sample: If ``True``, sample frames stochastically within the
+                flow-distance window; otherwise use a deterministic greedy
+                strategy.
+        """
         self.aug: RGBDAugmentor | bool | None = None
         self.root: str = datapath
         self.name: str = name
@@ -33,8 +65,8 @@ class RGBDDataset(data.Dataset):
         self.sample: bool = sample
 
         self.n_frames: int = n_frames
-        self.fmin: float = fmin # exclude very easy examples
-        self.fmax: float = fmax # exclude very hard examples
+        self.fmin: float = fmin  # exclude very easy examples
+        self.fmax: float = fmax  # exclude very hard examples
 
         if self.aug:
             self.aug = RGBDAugmentor(crop_size=crop_size)
@@ -50,6 +82,12 @@ class RGBDDataset(data.Dataset):
         self._build_dataset_index()
 
     def _build_dataset_index(self) -> None:
+        """Build a flat list of ``(scene_id, start_frame)`` training indices.
+
+        Iterates over all scenes in :attr:`scene_info`, skipping test scenes
+        (as determined by :meth:`is_test_scene`). Each non-test scene
+        contributes one entry per valid starting frame.
+        """
         self.dataset_index: list[tuple[str, int]] = []
         for scene in self.scene_info:
             if not self.__class__.is_test_scene(scene):
@@ -62,10 +100,26 @@ class RGBDDataset(data.Dataset):
 
     @staticmethod
     def image_read(image_file: str) -> UInt8[np.ndarray, "h w 3"]:
+        """Read an image from disk via OpenCV (BGR channel order).
+
+        Args:
+            image_file: Absolute path to the image file.
+
+        Returns:
+            The loaded image as a uint8 array with shape ``(h, w, 3)``.
+        """
         return cv2.imread(image_file)
 
     @staticmethod
     def depth_read(depth_file: str) -> Float64[np.ndarray, "h w"]:
+        """Read a depth map from a ``.npy`` file.
+
+        Args:
+            depth_file: Absolute path to the ``.npy`` depth file.
+
+        Returns:
+            The depth map as a float64 array with shape ``(h, w)``.
+        """
         return np.load(depth_file)
 
     def build_frame_graph(
@@ -76,8 +130,26 @@ class RGBDDataset(data.Dataset):
         f: int = 16,
         max_flow: int = 256,
     ) -> dict[int, tuple[np.ndarray, np.ndarray]]:
-        """ compute optical flow distance between all pairs of frames """
+        """Build a co-visibility frame graph based on optical-flow distance.
+
+        For every frame *i*, the graph stores the set of frames *j* whose
+        induced optical flow magnitude is below ``max_flow``. This is used
+        later to sample training clips with appropriate difficulty.
+
+        Args:
+            poses: Per-frame poses ``[tx, ty, tz, qx, qy, qz, qw]``.
+            depths: List of depth file paths (one per frame).
+            intrinsics: Per-frame camera intrinsics ``[fx, fy, cx, cy]``.
+            f: Spatial down-sampling factor for disparity computation.
+            max_flow: Maximum allowed flow magnitude for an edge.
+
+        Returns:
+            A dict mapping each frame index to a ``(neighbours, distances)``
+            tuple of 1-D arrays.
+        """
+
         def read_disp(fn: str) -> Float64[np.ndarray, "h_sub w_sub"]:
+            """Read a depth file and convert to down-sampled inverse depth."""
             depth: Float64[np.ndarray, "h w"] = self.__class__.depth_read(fn)[f//2::f, f//2::f]
             depth[depth < 0.01] = np.mean(depth)
             return 1.0 / depth
@@ -96,8 +168,20 @@ class RGBDDataset(data.Dataset):
         return graph
 
     def __getitem__(self, index: int) -> tuple[Float32[torch.Tensor, "n 3 h w"], Float32[torch.Tensor, "n 7"], Float32[torch.Tensor, "n h w"], Float32[torch.Tensor, "n 4"]]:
-        """ return training video """
+        """Return a training clip of ``n_frames`` frames.
 
+        Sampling walks the frame graph starting from the indexed anchor,
+        preferring forward-in-time frames within the ``[fmin, fmax]``
+        flow-distance window. The returned disparity is normalised so that
+        the 98th-percentile value is 0.7, and the pose translations are
+        scaled by the same factor.
+
+        Args:
+            index: Dataset index (automatically wrapped modulo dataset size).
+
+        Returns:
+            Tuple of ``(images, poses, disparities, intrinsics)`` tensors.
+        """
         index = index % len(self.dataset_index)
         scene_id: str
         ix: int
@@ -188,8 +272,17 @@ class RGBDDataset(data.Dataset):
         return images_t, poses_t, disps, intrinsics_t
 
     def __len__(self) -> int:
+        """Return the total number of training clips available."""
         return len(self.dataset_index)
 
     def __imul__(self, x: int) -> "RGBDDataset":
+        """Repeat the dataset index ``x`` times (for oversampling).
+
+        Args:
+            x: Repetition multiplier.
+
+        Returns:
+            ``self`` with the expanded index.
+        """
         self.dataset_index *= x
         return self
