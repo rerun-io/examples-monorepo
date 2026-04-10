@@ -30031,7 +30031,7 @@ packages:
 - pypi: ./packages/mini-dpvo
   name: mini-dpvo
   version: 0.1.1
-  sha256: 6a9a8a3bd276f92421c35f90d7f2ae0f51f8129b7122026e6f6ad19c302c29f7
+  sha256: 09d202b2e79d1b5254dbc5b5ef566dd83cfbc13fc8950ad6eef3ca17bdec901f
   requires_dist:
   - mmcv-lite>=2.2.0,<3
   requires_python: '>=3.11'
