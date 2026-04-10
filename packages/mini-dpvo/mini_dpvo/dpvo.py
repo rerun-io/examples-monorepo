@@ -31,7 +31,7 @@ import lietorch
 import numpy as np
 import torch
 import torch.nn.functional as F
-from jaxtyping import Float, Float32, Float64, Int, UInt8
+from jaxtyping import Bool, Float, Float32, Float64, Int, UInt8
 from lietorch import SE3
 from torch import Tensor
 
@@ -271,7 +271,7 @@ class DPVO:
         t0, dP = self.delta[t]
         return dP * self.get_pose(t0)
 
-    def terminate(self) -> tuple[Float[np.ndarray, "n_frames 7"], Float64[np.ndarray, "n_frames"]]:
+    def terminate(self) -> tuple[Float32[np.ndarray, "n_frames 7"], Float64[np.ndarray, "n_frames"]]:
         """Finalize tracking: interpolate removed keyframes and return full trajectory.
 
         After the input stream ends, this method reconstructs the complete
@@ -292,7 +292,7 @@ class DPVO:
         # Build lookup from internal timestamp -> pose for active keyframes
         self.traj: dict[int, Float32[Tensor, "7"]] = {}
         for i in range(self.n):
-            current_t: int = self.tstamps_[i].item()
+            current_t: int = int(self.tstamps_[i].item())
             self.traj[current_t] = self.poses_[i]
 
         # Reconstruct poses for ALL timestamps (including removed keyframes)
@@ -392,7 +392,7 @@ class DPVO:
         net: Float[Tensor, "1 n_new DIM"] = torch.zeros(1, len(ii), self.DIM, **self.kwargs)
         self.net: Float[Tensor, "1 n_edges DIM"] = torch.cat([self.net, net], dim=1)
 
-    def remove_factors(self, m: Int[Tensor, "n_edges"]) -> None:
+    def remove_factors(self, m: Bool[Tensor, "n_edges"]) -> None:
         """Remove edges from the factor graph by boolean mask.
 
         Edges where ``m`` is ``True`` are removed.  The corresponding
@@ -461,7 +461,7 @@ class DPVO:
         Returns:
             Mean flow magnitude in pixels (scalar float).
         """
-        k: Int[Tensor, "n_edges"] = (self.ii == i) & (self.jj == j)
+        k: Bool[Tensor, "n_edges"] = (self.ii == i) & (self.jj == j)
         ii: Int[Tensor, "n_matched"] = self.ii[k]
         jj: Int[Tensor, "n_matched"] = self.jj[k]
         kk: Int[Tensor, "n_matched"] = self.kk[k]
@@ -500,15 +500,15 @@ class DPVO:
         if m / 2 < self.cfg.keyframe_thresh:
             # Insufficient parallax: remove the candidate keyframe
             k: int = self.n - self.cfg.keyframe_index
-            t0: float = self.tstamps_[k - 1].item()
-            t1: float = self.tstamps_[k].item()
+            t0: int = int(self.tstamps_[k - 1].item())
+            t1: int = int(self.tstamps_[k].item())
 
             # Store relative pose for interpolation at termination
             dP: SE3 = SE3(self.poses_[k]) * SE3(self.poses_[k - 1]).inv()
             self.delta[t1] = (t0, dP)
 
             # Remove all edges incident to the removed frame
-            to_remove: Int[Tensor, "n_edges"] = (self.ii == k) | (self.jj == k)
+            to_remove: Bool[Tensor, "n_edges"] = (self.ii == k) | (self.jj == k)
             self.remove_factors(to_remove)
 
             # Shift edge indices: patches after frame k move down by M,
@@ -535,7 +535,7 @@ class DPVO:
             self.m -= self.M
 
         # Prune stale edges: remove edges whose source patch is too old
-        to_remove: Int[Tensor, "n_edges"] = self.ix[self.kk] < self.n - self.cfg.removal_window
+        to_remove: Bool[Tensor, "n_edges"] = self.ix[self.kk] < self.n - self.cfg.removal_window
         self.remove_factors(to_remove)
 
     def update(self) -> None:

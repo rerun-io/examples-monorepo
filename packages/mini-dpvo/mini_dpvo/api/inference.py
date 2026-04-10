@@ -66,9 +66,9 @@ class DPVOPrediction:
     timestamps, and the associated 3-D point cloud with per-point colors.
     """
 
-    final_poses: Float32[torch.Tensor, "num_keyframes 7"]
+    final_poses: Float32[np.ndarray, "num_keyframes 7"]
     """Keyframe poses as ``[tx, ty, tz, qx, qy, qz, qw]``."""
-    tstamps: Float64[torch.Tensor, "num_keyframes"]  # noqa: F821
+    tstamps: Float64[np.ndarray, "num_keyframes"]  # noqa: F821
     """Timestamp (frame index) of each keyframe."""
     final_points: Float32[torch.Tensor, "num_points 3"]
     """Reconstructed 3-D points in world coordinates."""
@@ -117,7 +117,7 @@ def log_trajectory(
     poses: Float32[torch.Tensor, "buffer_size 7"],
     points: Float32[torch.Tensor, "num_points 3"],
     colors: UInt8[torch.Tensor, "buffer_size num_patches 3"],
-    intri_np: Float64[np.ndarray, "4"],
+    intri_np: Float32[np.ndarray, "4"],
     bgr_hw3: UInt8[np.ndarray, "h w 3"],
     path_list: list[list[float]],
     jpg_quality: int = 90,
@@ -168,6 +168,9 @@ def log_trajectory(
 
     nonzero_poses: Float32[torch.Tensor, "num_nonzero 7"] = poses[poses_mask]
     nonzero_points: Float32[torch.Tensor, "num_nonzero 3"] = points[points_mask]
+
+    if nonzero_poses.shape[0] == 0:
+        return path_list
 
     # Extract the most recent keyframe pose for the camera transform
     last_index: int = nonzero_poses.shape[0] - 1
@@ -257,7 +260,7 @@ def log_final(
     """
     for idx, (pose_quat, _tstamp) in enumerate(zip(final_poses, tstamps, strict=False)):
         cam_log_path: str = f"{parent_log_path}/camera_{idx}"
-        trans_quat: torch.Tensor = pose_quat[:3]
+        trans_quat: Float32[np.ndarray, "3"] = pose_quat[:3]
         R_33: Float64[np.ndarray, "3 3"] = Rotation.from_quat(pose_quat[3:]).as_matrix()
         rr.log(
             f"{cam_log_path}",
@@ -457,7 +460,7 @@ def run_dpvo_pipeline(
 
     # If no calibration file was provided, use DUSt3R to predict intrinsics
     # from the very first frame pulled off the reader queue.
-    intri_np_dust3r: Float64[np.ndarray, "4"] | None = None
+    intri_np_dust3r: Float32[np.ndarray, "4"] | None = None
     if calib is None:
         yield "Estimating camera intrinsics with DUSt3R..."
         if dust3r_model is None:
@@ -488,7 +491,7 @@ def run_dpvo_pipeline(
         while True:
             t: int
             bgr_hw3: UInt8[np.ndarray, "h w 3"]
-            intri_np: Float64[np.ndarray, "4"]
+            intri_np: Float32[np.ndarray, "4"]
             (t, bgr_hw3, intri_np_calib) = queue.get()
             intri_np = intri_np_calib if calib is not None else intri_np_dust3r
             # queue will have a (-1, image, intrinsics) tuple when the reader is done
@@ -497,8 +500,8 @@ def run_dpvo_pipeline(
 
             rr.set_time("timestep", sequence=t)
 
-            bgr_3hw = torch.from_numpy(bgr_hw3).permute(2, 0, 1).cuda()
-            intri_torch = torch.from_numpy(intri_np).cuda()
+            bgr_3hw: UInt8[torch.Tensor, "c ht wd"] = torch.from_numpy(bgr_hw3).permute(2, 0, 1).cuda()
+            intri_torch: Float32[torch.Tensor, "4"] = torch.from_numpy(intri_np).cuda()
 
             if slam is None:
                 slam = DPVO(dpvo_config, network_path, ht=bgr_3hw.shape[1], wd=bgr_3hw.shape[2])
