@@ -11,7 +11,7 @@ Supports the following formats:
 """
 
 import re
-from os.path import *
+from os.path import splitext
 from typing import IO
 
 import cv2
@@ -95,7 +95,7 @@ def readPFM(file: str) -> Float32[np.ndarray, "..."] | Float32[np.ndarray, "h w 
     Raises:
         Exception: If the header is malformed or the magic bytes are invalid.
     """
-    file_handle: IO[bytes] = open(file, 'rb')
+    file_handle: IO[bytes] = open(file, 'rb')  # noqa: SIM115
 
     color: bool | None = None
     width: int | None = None
@@ -113,7 +113,7 @@ def readPFM(file: str) -> Float32[np.ndarray, "..."] | Float32[np.ndarray, "h w 
 
     try:
         dim_match: re.Match | None = re.match(rb'^(\d+)\s(\d+)\s$', file_handle.readline())
-    except:
+    except Exception:
         dim_match = re.match(r'^(\d+)\s(\d+)\s$', file_handle.readline())
 
     if dim_match:
@@ -157,7 +157,7 @@ def writeFlow(filename: str, uv: Float32[np.ndarray, "h w 2"] | Float32[np.ndarr
     assert(u.shape == v.shape)
     height: int = u.shape[0]
     width: int = u.shape[1]
-    f: IO[bytes] = open(filename,'wb')
+    f: IO[bytes] = open(filename,'wb')  # noqa: SIM115
     # write the header
     f.write(TAG_CHAR)
     np.array(width).astype(np.int32).tofile(f)
@@ -185,10 +185,10 @@ def readDPT(filename: str) -> Float32[np.ndarray, "h w"]:
     Raises:
         AssertionError: If the tag or dimensions are invalid.
     """
-    f: IO[bytes] = open(filename,'rb')
+    f: IO[bytes] = open(filename,'rb')  # noqa: SIM115
     check: float = np.fromfile(f,dtype=np.float32,count=1)[0]
     TAG_FLOAT: float = 202021.25
-    TAG_CHAR_LOCAL: str = 'PIEH'
+    _TAG_CHAR_LOCAL: str = 'PIEH'
     assert check == TAG_FLOAT, f' depth_read:: Wrong tag in flow file (should be: {TAG_FLOAT}, is: {check}). Big-endian machine? '
     width: int = np.fromfile(f,dtype=np.int32,count=1)[0]
     height: int = np.fromfile(f,dtype=np.int32,count=1)[0]
@@ -214,8 +214,8 @@ def cam_read(filename: str) -> tuple[Float64[np.ndarray, "7"], Float64[np.ndarra
         Tuple of ``(pvec, kvec)`` where ``pvec`` is ``[tx, ty, tz, qx, qy,
         qz, qw]`` and ``kvec`` is ``[fx, fy, cx, cy]``.
     """
-    f: IO[bytes] = open(filename,'rb')
-    check: float = np.fromfile(f,dtype=np.float32,count=1)[0]
+    f: IO[bytes] = open(filename,'rb')  # noqa: SIM115
+    _check: float = np.fromfile(f,dtype=np.float32,count=1)[0]
     M: Float64[np.ndarray, "3 3"] = np.fromfile(f,dtype='float64',count=9).reshape((3,3))
     N: Float64[np.ndarray, "3 4"] = np.fromfile(f,dtype='float64',count=12).reshape((3,4))
 
@@ -234,7 +234,7 @@ def cam_read(filename: str) -> tuple[Float64[np.ndarray, "7"], Float64[np.ndarra
     return pvec, kvec
 
 
-def read_gen(file_name: str, pil: bool = False) -> Image.Image | np.ndarray | Float32[np.ndarray, "..."] | tuple[Float64[np.ndarray, "7"], Float64[np.ndarray, "4"]] | list:
+def read_gen(file_name: str, _pil: bool = False) -> Image.Image | np.ndarray | Float32[np.ndarray, "..."] | tuple[Float64[np.ndarray, "7"], Float64[np.ndarray, "4"]] | list:
     """Generic file reader that dispatches on file extension.
 
     Supported extensions:

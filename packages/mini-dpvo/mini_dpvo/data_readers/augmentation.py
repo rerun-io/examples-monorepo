@@ -67,7 +67,7 @@ class RGBDAugmentor:
         wd: int = images.shape[3]
 
         max_scale: float = self.max_scale
-        min_scale: float = np.log2(np.maximum(
+        _min_scale: float = np.log2(np.maximum(
             (self.crop_size[0] + 1) / float(ht),
             (self.crop_size[1] + 1) / float(wd)))
 

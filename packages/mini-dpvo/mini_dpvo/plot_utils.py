@@ -7,7 +7,6 @@ ground-truth trajectories, and export to TUM format for benchmarking.
 Requires the ``evo`` evaluation toolkit (https://github.com/MichaelGrupp/evo).
 """
 
-from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -145,7 +144,8 @@ def save_trajectory_tum_format(
         filename: Output file path.
     """
     traj_obj: PoseTrajectory3D = make_traj(traj)
-    tostr: Callable[[ndarray], str] = lambda a: ' '.join(map(str, a))
+    def tostr(a: ndarray) -> str:
+        return ' '.join(map(str, a))
     with Path(filename).open('w') as f:
         for i in range(traj_obj.num_poses):
             # Reorder quaternion from [qw, qx, qy, qz] to [qx, qy, qz, qw]

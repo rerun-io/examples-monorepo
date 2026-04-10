@@ -120,7 +120,7 @@ def coords_grid_with_index(
     h: int
     w: int
     b, n, h, w = d.shape
-    i: Float[Tensor, "b n h w"] = torch.ones_like(d)
+    _i: Float[Tensor, "b n h w"] = torch.ones_like(d)
     x: Float[Tensor, "w"] = torch.arange(0, w, dtype=torch.float, **kwargs)
     y: Float[Tensor, "h"] = torch.arange(0, h, dtype=torch.float, **kwargs)
 
@@ -165,7 +165,7 @@ def patchify(x: Float[Tensor, "b n c h w"], patch_size: int = 3) -> Float[Tensor
     return result
 
 
-def pyramidify(fmap: Float[Tensor, "b n c h w"], lvls: list[int] = [1]) -> list[Float[Tensor, "b n c h_l w_l"]]:
+def pyramidify(fmap: Float[Tensor, "b n c h w"], lvls: list[int] | None = None) -> list[Float[Tensor, "b n c h_l w_l"]]:
     """Build a multi-scale feature pyramid via average pooling.
 
     The correlation volume in DPVO is computed at two scales: stride-4
@@ -188,6 +188,8 @@ def pyramidify(fmap: Float[Tensor, "b n c h w"], lvls: list[int] = [1]) -> list[
     c: int
     h: int
     w: int
+    if lvls is None:
+        lvls = [1]
     b, n, c, h, w = fmap.shape
 
     pyramid: list[Float[Tensor, "b n c h_l w_l"]] = []

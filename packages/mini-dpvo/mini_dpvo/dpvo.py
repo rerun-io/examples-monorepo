@@ -600,7 +600,7 @@ class DPVO:
                     self.n,
                     2,  # number of BA iterations
                 )
-            except:
+            except Exception:
                 print("Warning BA failed...")
 
             # Step 5: Update 3-D point cloud from refined patches
@@ -778,11 +778,10 @@ class DPVO:
 
         # Step 4: Motion check (pre-initialization only)
         # Skip frames with insufficient parallax to avoid degenerate geometry
-        if self.n > 0 and not self.is_initialized:
-            if self.motion_probe() < 2.0:
-                # Store identity relative pose for later interpolation
-                self.delta[self.counter - 1] = (self.counter - 2, Id[0])
-                return
+        if self.n > 0 and not self.is_initialized and self.motion_probe() < 2.0:
+            # Store identity relative pose for later interpolation
+            self.delta[self.counter - 1] = (self.counter - 2, Id[0])
+            return
 
         self.n += 1
         self.m += self.M
@@ -796,7 +795,7 @@ class DPVO:
             # Initialization: run 12 BA iterations to bootstrap geometry
             self.is_initialized = True
 
-            for itr in range(12):
+            for _itr in range(12):
                 self.update()
 
         elif self.is_initialized:

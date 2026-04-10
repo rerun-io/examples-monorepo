@@ -30,7 +30,7 @@ from . import projective_ops as pops
 from .ba import BA
 from .blocks import GatedResidual, GradientClip, SoftAgg
 from .extractor import BasicEncoder4
-from .utils import *
+from .utils import coords_grid_with_index, flatmeshgrid, pyramidify, set_depth
 
 autocast = torch.cuda.amp.autocast
 
@@ -381,8 +381,10 @@ class CorrBlock:
         gmap: Float[Tensor, "1 num_patches 128 p p"],
         radius: int = 3,
         dropout: float = 0.2,
-        levels: list[int] = [1, 4],
+        levels: list[int] | None = None,
     ) -> None:
+        if levels is None:
+            levels = [1, 4]
         self.dropout: float = dropout
         self.radius: int = radius
         self.levels: list[int] = levels
@@ -445,7 +447,7 @@ class VONet(nn.Module):
         RES: Feature map stride relative to the input image (4).
     """
 
-    def __init__(self, use_viewer: bool = False) -> None:
+    def __init__(self, _use_viewer: bool = False) -> None:
         super().__init__()
         self.P: int = 3
         self.patchify: Patchifier = Patchifier(self.P)
@@ -466,7 +468,7 @@ class VONet(nn.Module):
         STEPS: int = 12,
         P: int = 1,
         structure_only: bool = False,
-        rescale: bool = False,
+        _rescale: bool = False,
     ) -> list[tuple[Float[Tensor, "..."], Float[Tensor, "..."], Float[Tensor, "..."], SE3, SE3, Tensor]]:
         """Training forward pass: run the full DPVO optimization loop.
 
@@ -558,7 +560,8 @@ class VONet(nn.Module):
             # After 8 warmup steps, incrementally add one frame per iteration
             if len(traj) >= 8 and n < images.shape[1]:
                 # Initialize new frame's pose from the previous frame
-                if not structure_only: Gs.data[:,n] = Gs.data[:,n-1]
+                if not structure_only:
+                    Gs.data[:,n] = Gs.data[:,n-1]
                 # Forward edges: all existing patches -> new frame
                 kk1: Int[Tensor, "new_edges1"]
                 jj1: Int[Tensor, "new_edges1"]
@@ -604,7 +607,7 @@ class VONet(nn.Module):
 
             # Run 2 iterations of bundle adjustment
             ep: int = 10
-            for itr in range(2):
+            for _itr in range(2):
                 Gs, patches = BA(Gs, patches, intrinsics, target, weight, lmbda, ii, jj, kk,
                     bounds, ep=ep, fixedp=1, structure_only=structure_only)
 

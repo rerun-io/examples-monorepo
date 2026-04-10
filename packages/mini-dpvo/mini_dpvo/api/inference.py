@@ -194,7 +194,7 @@ def log_final(
             future extensions).
         final_colors: Per-point colors (unused here).
     """
-    for idx, (pose_quat, tstamp) in enumerate(zip(final_poses, tstamps)):
+    for idx, (pose_quat, _tstamp) in enumerate(zip(final_poses, tstamps, strict=False)):
         cam_log_path: str = f"{parent_log_path}/camera_{idx}"
         trans_quat: torch.Tensor = pose_quat[:3]
         R_33: Float64[np.ndarray, "3 3"] = Rotation.from_quat(pose_quat[3:]).as_matrix()

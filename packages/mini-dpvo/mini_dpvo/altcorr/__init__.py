@@ -8,4 +8,5 @@ Re-exports the two main public functions:
   optional bilinear interpolation.
 """
 
-from .correlation import corr, patchify
+from .correlation import corr as corr
+from .correlation import patchify as patchify

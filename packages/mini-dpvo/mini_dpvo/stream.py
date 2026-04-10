@@ -97,7 +97,7 @@ def image_stream(
     for t, imfile in enumerate(image_list):
         image = cv2.imread(str(imfile))
 
-        if calib_data is not None:
+        if calib_data is not None:  # noqa: SIM108
             intrinsics = np.array([fx, fy, cx, cy])
         else:
             intrinsics = None
@@ -179,7 +179,7 @@ def video_stream(
         # Crop to make dimensions divisible by 16
         image = image[: h - h % 16, : w - w % 16]
 
-        if calib_data is not None:
+        if calib_data is not None:  # noqa: SIM108
             # Scale intrinsics by 0.5 to match the downscaled image
             intrinsics = np.array([fx * 0.5, fy * 0.5, cx * 0.5, cy * 0.5])
         else:

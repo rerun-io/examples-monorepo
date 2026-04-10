@@ -73,7 +73,7 @@ def associate_frames(
 
     return associations
 
-def loadtum(datapath: str, frame_rate: int = -1) -> tuple[
+def loadtum(datapath: str, _frame_rate: int = -1) -> tuple[
     list[str] | None,
     list[str] | None,
     list[Float64[np.ndarray, "7"]] | None,
@@ -299,8 +299,8 @@ def compute_distance_matrix_flow2(
         val1a: torch.Tensor
         flow1a, val1a = pops.induced_flow(poses, disps, intrinsics, ii[i:i+s], jj[i:i+s], tonly=True)
         flow1b: torch.Tensor
-        val1b: torch.Tensor
-        flow1b, val1b = pops.induced_flow(poses, disps, intrinsics, ii[i:i+s], jj[i:i+s])
+        _val1b: torch.Tensor
+        flow1b, _val1b = pops.induced_flow(poses, disps, intrinsics, ii[i:i+s], jj[i:i+s])
         flow2a: torch.Tensor
         val2a: torch.Tensor
         flow2a, val2a = pops.induced_flow(poses, disps, intrinsics, jj[i:i+s], ii[i:i+s], tonly=True)

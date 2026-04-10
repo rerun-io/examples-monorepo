@@ -7,4 +7,6 @@ Re-exports:
 - :func:`reproject` -- reproject 3-D patches into target frames.
 """
 
-from .ba import BA, neighbors, reproject
+from .ba import BA as BA
+from .ba import neighbors as neighbors
+from .ba import reproject as reproject

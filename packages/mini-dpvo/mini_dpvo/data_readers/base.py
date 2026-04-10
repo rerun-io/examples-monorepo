@@ -15,7 +15,7 @@ import torch.utils.data as data
 from jaxtyping import Float32, Float64, UInt8
 
 from .augmentation import RGBDAugmentor
-from .rgbd_utils import *
+from .rgbd_utils import compute_distance_matrix_flow
 
 
 class RGBDDataset(data.Dataset):
@@ -35,7 +35,7 @@ class RGBDDataset(data.Dataset):
         name: str,
         datapath: str,
         n_frames: int = 4,
-        crop_size: list[int] = [480, 640],
+        crop_size: list[int] | None = None,
         fmin: float = 10.0,
         fmax: float = 75.0,
         aug: bool = True,
@@ -57,6 +57,8 @@ class RGBDDataset(data.Dataset):
                 flow-distance window; otherwise use a deterministic greedy
                 strategy.
         """
+        if crop_size is None:
+            crop_size = [480, 640]
         self.aug: RGBDAugmentor | bool | None = None
         self.root: str = datapath
         self.name: str = name
@@ -77,7 +79,7 @@ class RGBDDataset(data.Dataset):
             os.mkdir(osp.join(cur_path, 'cache'))
 
         self.scene_info: dict = \
-            pickle.load(open('datasets/TartanAir.pickle', 'rb'))[0]
+            pickle.load(open('datasets/TartanAir.pickle', 'rb'))[0]  # noqa: SIM115
 
         self._build_dataset_index()
 

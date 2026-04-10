@@ -48,7 +48,7 @@ class Logger:
             print([k for k in self.running_loss])
 
         lr: float = self.scheduler.get_lr().pop()
-        metrics_data: list[float] = [self.running_loss[k]/SUM_FREQ for k in self.running_loss.keys()]
+        metrics_data: list[float] = [self.running_loss[k]/SUM_FREQ for k in self.running_loss]
         training_str: str = f"[{self.total_steps+1:6d}, {lr:10.7f}] "
         metrics_str: str = ("{:10.4f}, "*len(metrics_data)).format(*metrics_data)
 

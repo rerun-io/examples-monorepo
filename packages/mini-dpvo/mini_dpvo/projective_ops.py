@@ -236,7 +236,7 @@ def transform(
         H: Float[Tensor, "1 n_edges"]
         X, Y, Z, H = X1[...,p//2,p//2,:].unbind(dim=-1)
         o: Float[Tensor, "1 n_edges"] = torch.zeros_like(H)
-        i: Float[Tensor, "1 n_edges"] = torch.zeros_like(H)
+        _i: Float[Tensor, "1 n_edges"] = torch.zeros_like(H)
 
         fx: Float[Tensor, "1 n_edges"]
         fy: Float[Tensor, "1 n_edges"]

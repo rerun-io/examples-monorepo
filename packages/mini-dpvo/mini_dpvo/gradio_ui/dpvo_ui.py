@@ -66,7 +66,7 @@ def run_dpvo(
     stride: int = 1,
     skip: int = 0,
     config_type: Literal["accurate", "fast"] = "accurate",
-    progress: gr.Progress = gr.Progress(),
+    progress: gr.Progress = gr.Progress(),  # noqa: B008
 ) -> Generator[tuple[bytes, float], None, None]:
     """Run DPVO on a video and stream Rerun binary data to the viewer.
 
