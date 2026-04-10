@@ -15,8 +15,6 @@ See Teed et al. (2022), "Deep Patch Visual Odometry" for details on how
 each parameter affects the system.
 """
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Literal
 
@@ -68,7 +66,7 @@ class DPVOConfig:
     """Use float16 for correlation and GRU computations."""
 
     @classmethod
-    def accurate(cls) -> DPVOConfig:
+    def accurate(cls) -> "DPVOConfig":
         """Preset matching the former ``config/default.yaml`` (higher quality)."""
         return cls(
             patches_per_frame=96,
@@ -81,7 +79,7 @@ class DPVOConfig:
         )
 
     @classmethod
-    def fast(cls) -> DPVOConfig:
+    def fast(cls) -> "DPVOConfig":
         """Preset matching the former ``config/fast.yaml`` (lower latency)."""
         return cls(
             patches_per_frame=48,

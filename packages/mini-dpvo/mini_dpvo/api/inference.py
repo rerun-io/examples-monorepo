@@ -15,8 +15,6 @@ Typical CLI usage::
         pass
 """
 
-from __future__ import annotations
-
 import os
 from collections.abc import Generator
 from dataclasses import dataclass, field
@@ -342,7 +340,7 @@ def calib_from_dust3r(
     bgr_hw3: UInt8[np.ndarray, "height width 3"],
     model: AsymmetricCroCo3DStereo,
     device: str,
-) -> Float64[np.ndarray, "3 3"]:
+) -> Float32[np.ndarray, "3 3"]:
     """Estimate a 3x3 camera intrinsic matrix from a single image using DUSt3R.
 
     The image is temporarily saved to disk, fed through DUSt3R monocular
@@ -384,7 +382,7 @@ def calib_from_dust3r(
     scaling_factor_y: float = orig_h / downscaled_h
 
     # Apply per-axis scaling to fx, fy, cx, cy
-    K_33_original: Float64[np.ndarray, "3 3"] = optimized_results.K_b33[0].copy()
+    K_33_original: Float32[np.ndarray, "3 3"] = optimized_results.K_b33[0].copy()
     K_33_original[0, 0] *= scaling_factor_x  # fx
     K_33_original[1, 1] *= scaling_factor_y  # fy
     K_33_original[0, 2] *= scaling_factor_x  # cx
@@ -447,7 +445,7 @@ def run_dpvo_pipeline(
         Status message strings (e.g. ``"Frame 42/200"``).
     """
     slam: DPVO | None = None
-    queue: Queue = Queue(maxsize=8)
+    queue = Queue(maxsize=8)
 
     reader: Process = create_reader(imagedir, calib, stride, skip, queue)
     reader.start()
@@ -477,7 +475,7 @@ def run_dpvo_pipeline(
             dust3r_device = next(dust3r_model.parameters()).device.type
 
         _, bgr_hw3, _ = queue.get()
-        K_33_pred: Float64[np.ndarray, "3 3"] = calib_from_dust3r(bgr_hw3, dust3r_model, dust3r_device)
+        K_33_pred: Float32[np.ndarray, "3 3"] = calib_from_dust3r(bgr_hw3, dust3r_model, dust3r_device)
         intri_np_dust3r = np.array(
             [K_33_pred[0, 0], K_33_pred[1, 1], K_33_pred[0, 2], K_33_pred[1, 2]]
         )
