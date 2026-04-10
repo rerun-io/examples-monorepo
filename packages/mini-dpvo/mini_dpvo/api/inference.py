@@ -280,7 +280,7 @@ def inference_dpvo(
             if t < 0:
                 break
 
-            rr.set_time_sequence(timeline="timestep", sequence=t)
+            rr.set_time("timestep", sequence=t)
 
             bgr_3hw: UInt8[torch.Tensor, "h w 3"] = (
                 torch.from_numpy(bgr_hw3).permute(2, 0, 1).cuda()
