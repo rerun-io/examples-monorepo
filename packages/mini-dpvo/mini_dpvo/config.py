@@ -24,4 +24,4 @@ _C.MOTION_DAMPING = 0.5
 
 _C.MIXED_PRECISION = True
 
-cfg = _C
+cfg: CN = _C

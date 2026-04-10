@@ -1,34 +1,49 @@
-from argparse import ArgumentParser
-import rerun as rr
+from dataclasses import dataclass
+from pathlib import Path
+
+import tyro
+from simplecv.rerun_log_utils import RerunTyroConfig
+
 from mini_dpvo.api.inference import inference_dpvo
 from mini_dpvo.config import cfg as base_cfg
 
 
-if __name__ == "__main__":
-    parser = ArgumentParser()
-    parser.add_argument("--network-path", type=str, default="checkpoints/dpvo.pth")
-    parser.add_argument("--imagedir", type=str)
-    parser.add_argument("--calib", type=str)
-    parser.add_argument("--stride", type=int, default=2)
-    parser.add_argument("--skip", type=int, default=0)
-    parser.add_argument("--buffer", type=int, default=2048)
-    parser.add_argument("--config", default="config/fast.yaml")
-    rr.script_add_args(parser)
-    args = parser.parse_args()
-    rr.script_setup(args, "mini_dpvo")
+@dataclass
+class DPVODemoConfig:
+    """DPVO visual odometry demo."""
 
-    base_cfg.merge_from_file(args.config)
-    base_cfg.BUFFER_SIZE = args.buffer
+    rr_config: RerunTyroConfig
+    """Rerun recording configuration."""
+    imagedir: str = "data/movies/IMG_0493.MOV"
+    """Path to image directory or video file."""
+    network_path: str = "checkpoints/dpvo.pth"
+    """Path to DPVO network weights."""
+    calib: str | None = None
+    """Path to calibration file. If None, uses DUSt3R for estimation."""
+    stride: int = 2
+    """Frame stride for sampling."""
+    skip: int = 0
+    """Number of frames to skip at the start."""
+    buffer: int = 2048
+    """Maximum number of keyframes."""
+    config: Path = Path("config/fast.yaml")
+    """DPVO config YAML file."""
+
+
+if __name__ == "__main__":
+    demo_cfg: DPVODemoConfig = tyro.cli(DPVODemoConfig)
+
+    base_cfg.merge_from_file(str(demo_cfg.config))
+    base_cfg.BUFFER_SIZE = demo_cfg.buffer
 
     print("Running with config...")
     print(base_cfg)
 
     inference_dpvo(
         cfg=base_cfg,
-        network_path=args.network_path,
-        imagedir=args.imagedir,
-        calib=args.calib,
-        stride=args.stride,
-        skip=args.skip,
+        network_path=demo_cfg.network_path,
+        imagedir=demo_cfg.imagedir,
+        calib=demo_cfg.calib,
+        stride=demo_cfg.stride,
+        skip=demo_cfg.skip,
     )
-    rr.script_teardown(args)

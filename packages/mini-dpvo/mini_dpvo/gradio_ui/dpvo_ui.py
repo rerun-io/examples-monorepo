@@ -1,47 +1,47 @@
 try:
     import spaces  # type: ignore # noqa: F401
 
-    IN_SPACES = True
+    IN_SPACES: bool = True
 except ImportError:
     print("Not running on Zero")
     IN_SPACES = False
 
-import gradio as gr
-
-from gradio_rerun import Rerun
-import rerun as rr
-import rerun.blueprint as rrb
-import mmcv
+from collections.abc import Generator
+from multiprocessing import Process, Queue
+from pathlib import Path
 from timeit import default_timer as timer
 from typing import Literal
 
-from mini_dpvo.config import cfg as base_cfg
-from mini_dpvo.api.inference import (
-    log_trajectory,
-    calib_from_dust3r,
-    create_reader,
-    calculate_num_frames,
-)
-
-import torch
+import gradio as gr
+import mmcv
 import numpy as np
-from pathlib import Path
-from multiprocessing import Process, Queue
-from mini_dpvo.dpvo import DPVO
-from jaxtyping import UInt8, Float64, Float32
+import rerun as rr
+import rerun.blueprint as rrb
+import torch
+from gradio_rerun import Rerun
+from jaxtyping import Float32, Float64, UInt8
 from mini_dust3r.model import AsymmetricCroCo3DStereo
 from tqdm import tqdm
 
+from mini_dpvo.api.inference import (
+    calculate_num_frames,
+    calib_from_dust3r,
+    create_reader,
+    log_trajectory,
+)
+from mini_dpvo.config import cfg as base_cfg
+from mini_dpvo.dpvo import DPVO
+
 if gr.NO_RELOAD:
-    NETWORK_PATH = "checkpoints/dpvo.pth"
-    DEVICE = (
+    NETWORK_PATH: str = "checkpoints/dpvo.pth"
+    DEVICE: str = (
         "mps"
         if torch.backends.mps.is_available()
         else "cuda"
         if torch.cuda.is_available()
         else "cpu"
     )
-    MODEL = AsymmetricCroCo3DStereo.from_pretrained(
+    MODEL: AsymmetricCroCo3DStereo = AsymmetricCroCo3DStereo.from_pretrained(
         "nielsr/DUSt3R_ViTLarge_BaseDecoder_512_dpt"
     ).to(DEVICE)
 
@@ -54,14 +54,14 @@ def run_dpvo(
     stride: int = 1,
     skip: int = 0,
     config_type: Literal["accurate", "fast"] = "accurate",
-    progress=gr.Progress(),
-):
+    progress: gr.Progress = gr.Progress(),
+) -> Generator[tuple[bytes, float], None, None]:
     # create a stream to send data back to the rerun viewer
-    stream = rr.binary_stream()
-    parent_log_path = Path("world")
+    stream: rr.BinaryStream = rr.binary_stream()
+    parent_log_path: Path = Path("world")
     rr.log(f"{parent_log_path}", rr.ViewCoordinates.RDF, static=True)
 
-    blueprint = rrb.Blueprint(
+    blueprint: rrb.Blueprint = rrb.Blueprint(
         collapse_panels=True,
     )
 
@@ -75,9 +75,9 @@ def run_dpvo(
         raise ValueError("Invalid config type")
     base_cfg.BUFFER_SIZE = 2048
 
-    slam = None
-    start_time = timer()
-    queue = Queue(maxsize=8)
+    slam: DPVO | None = None
+    start_time: float = timer()
+    queue: Queue = Queue(maxsize=8)
 
     reader: Process = create_reader(video_file_path, None, stride, skip, queue)
     reader.start()
@@ -85,13 +85,13 @@ def run_dpvo(
     # get the first frame
     progress(progress=0.1, desc="Estimating Camera Intrinsics")
     _, bgr_hw3, _ = queue.get()
-    K_33_pred = calib_from_dust3r(bgr_hw3, MODEL, DEVICE)
+    K_33_pred: Float64[np.ndarray, "3 3"] = calib_from_dust3r(bgr_hw3, MODEL, DEVICE)
     intri_np: Float64[np.ndarray, "4"] = np.array(
         [K_33_pred[0, 0], K_33_pred[1, 1], K_33_pred[0, 2], K_33_pred[1, 2]]
     )
 
-    num_frames = calculate_num_frames(video_file_path, stride, skip)
-    path_list = []
+    num_frames: int = calculate_num_frames(video_file_path, stride, skip)
+    path_list: list[list[float]] = []
 
     with tqdm(total=num_frames, desc="Processing Frames") as pbar:
         while True:
@@ -111,6 +111,8 @@ def run_dpvo(
             intri_torch: Float64[torch.Tensor, "4"] = torch.from_numpy(intri_np).cuda()
 
             if slam is None:
+                h: int
+                w: int
                 _, h, w = bgr_3hw.shape
                 slam = DPVO(base_cfg, NETWORK_PATH, ht=h, wd=w)
 
@@ -141,8 +143,8 @@ if IN_SPACES:
 
 
 def on_file_upload(video_file_path: str) -> str:
-    video_reader = mmcv.VideoReader(video_file_path)
-    video_info = f"""
+    video_reader: mmcv.VideoReader = mmcv.VideoReader(video_file_path)
+    video_info: str = f"""
     **Video Info:**
     - Number of Frames: {video_reader.frame_cnt}
     - FPS: {round(video_reader.fps)}
@@ -177,48 +179,47 @@ with gr.Blocks(
                 time_taken = gr.Number(
                     label="Time Taken (s)", precision=2, interactive=False
                 )
-        with gr.Accordion(label="Advanced", open=False):
-            with gr.Row():
-                jpg_quality = gr.Radio(
-                    label="JPEG Quality %: Lower quality means faster streaming",
-                    choices=[10, 50, 90],
-                    value=90,
-                    type="value",
-                )
-                stride = gr.Slider(
-                    label="Stride: How many frames to sample between each prediction",
-                    minimum=1,
-                    maximum=5,
-                    step=1,
-                    value=5,
-                )
-                skip = gr.Number(
-                    label="Skip: How many frames to skip at the beginning",
-                    value=0,
-                    precision=0,
-                )
-                config_type = gr.Dropdown(
-                    label="Config Type: Choose between accurate and fast",
-                    value="fast",
-                    choices=["accurate", "fast"],
-                    max_choices=1,
-                )
+        with gr.Accordion(label="Advanced", open=False), gr.Row():
+            jpg_quality = gr.Radio(
+                label="JPEG Quality %: Lower quality means faster streaming",
+                choices=[10, 50, 90],
+                value=90,
+                type="value",
+            )
+            stride = gr.Slider(
+                label="Stride: How many frames to sample between each prediction",
+                minimum=1,
+                maximum=5,
+                step=1,
+                value=5,
+            )
+            skip = gr.Number(
+                label="Skip: How many frames to skip at the beginning",
+                value=0,
+                precision=0,
+            )
+            config_type = gr.Dropdown(
+                label="Config Type: Choose between accurate and fast",
+                value="fast",
+                choices=["accurate", "fast"],
+                max_choices=1,
+            )
         with gr.Row():
             start_btn = gr.Button("Run")
             stop_btn = gr.Button("Stop")
         rr_viewer = Rerun(height=600, streaming=True)
 
         # Example videos
-        base_example_params = [50, 4, 0, "fast"]
-        example_dpvo_dir = Path("data/movies")
-        example_iphone_dir = Path("data/iphone")
-        example_video_paths = sorted(example_iphone_dir.glob("*.MOV")) + sorted(
+        base_example_params: list[int | str] = [50, 4, 0, "fast"]
+        example_dpvo_dir: Path = Path("data/movies")
+        example_iphone_dir: Path = Path("data/iphone")
+        example_video_paths: list[Path] = sorted(example_iphone_dir.glob("*.MOV")) + sorted(
             example_dpvo_dir.glob("*.MOV")
         )
-        example_video_paths = [str(path) for path in example_video_paths]
+        example_video_paths_str: list[str] = [str(path) for path in example_video_paths]
 
         gr.Examples(
-            examples=[[path, *base_example_params] for path in example_video_paths],
+            examples=[[path, *base_example_params] for path in example_video_paths_str],
             inputs=[video_input, jpg_quality, stride, skip, config_type],
             cache_examples=False,
         )
