@@ -669,7 +669,7 @@ class DPVO:
             indexing="ij",
         )
 
-    def __call__(self, tstamp: int, image: Float[Tensor, "3 ht wd"], intrinsics: Float[Tensor, "4"]) -> None:
+    def __call__(self, tstamp: int, image: UInt8[Tensor, "3 ht wd"], intrinsics: Float[Tensor, "4"]) -> None:
         """Process a new frame: extract patches, predict pose, update and optimize.
 
         This is the main entry point called once per frame.  The full

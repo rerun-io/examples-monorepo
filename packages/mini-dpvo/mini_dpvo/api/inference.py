@@ -497,10 +497,8 @@ def run_dpvo_pipeline(
 
             rr.set_time("timestep", sequence=t)
 
-            bgr_3hw: UInt8[torch.Tensor, "h w 3"] = (
-                torch.from_numpy(bgr_hw3).permute(2, 0, 1).cuda()
-            )
-            intri_torch: Float64[torch.Tensor, "4"] = torch.from_numpy(intri_np).cuda()
+            bgr_3hw = torch.from_numpy(bgr_hw3).permute(2, 0, 1).cuda()
+            intri_torch = torch.from_numpy(intri_np).cuda()
 
             if slam is None:
                 slam = DPVO(dpvo_config, network_path, ht=bgr_3hw.shape[1], wd=bgr_3hw.shape[2])
