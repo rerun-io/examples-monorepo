@@ -70,7 +70,7 @@ class DPVOPrediction:
     """Keyframe poses as ``[tx, ty, tz, qx, qy, qz, qw]``."""
     tstamps: Float64[torch.Tensor, "num_keyframes"]  # noqa: F821
     """Timestamp (frame index) of each keyframe."""
-    final_points: Float32[torch.Tensor, "buffer_size*num_patches 3"]
+    final_points: Float32[torch.Tensor, "num_points 3"]
     """Reconstructed 3-D points in world coordinates."""
     final_colors: UInt8[torch.Tensor, "buffer_size num_patches 3"]
     """RGB colors for each reconstructed point."""
@@ -115,7 +115,7 @@ class DPVOInferenceConfig:
 def log_trajectory(
     parent_log_path: Path,
     poses: Float32[torch.Tensor, "buffer_size 7"],
-    points: Float32[torch.Tensor, "buffer_size*num_patches 3"],
+    points: Float32[torch.Tensor, "num_points 3"],
     colors: UInt8[torch.Tensor, "buffer_size num_patches 3"],
     intri_np: Float64[np.ndarray, "4"],
     bgr_hw3: UInt8[np.ndarray, "h w 3"],
@@ -238,7 +238,7 @@ def log_final(
     parent_log_path: Path,
     final_poses: Float32[torch.Tensor, "num_keyframes 7"],
     tstamps: Float64[torch.Tensor, "num_keyframes"],  # noqa: F821
-    final_points: Float32[torch.Tensor, "buffer_size*num_patches 3"],
+    final_points: Float32[torch.Tensor, "num_points 3"],
     final_colors: UInt8[torch.Tensor, "buffer_size num_patches 3"],
 ) -> None:
     """Log the final optimized per-keyframe camera transforms to Rerun.
@@ -508,7 +508,7 @@ def run_dpvo_pipeline(
 
             if slam.is_initialized:
                 poses: Float32[torch.Tensor, "buffer_size 7"] = slam.poses_
-                points: Float32[torch.Tensor, "buffer_size*num_patches 3"] = (
+                points: Float32[torch.Tensor, "num_points 3"] = (
                     slam.points_
                 )
                 colors: UInt8[torch.Tensor, "buffer_size num_patches 3"] = slam.colors_
@@ -540,7 +540,7 @@ def run_dpvo_pipeline(
     tstamps: Float64[torch.Tensor, "num_keyframes"]  # noqa: F821
 
     final_poses, tstamps = slam.terminate()
-    final_points: Float32[torch.Tensor, "buffer_size*num_patches 3"] = slam.points_
+    final_points: Float32[torch.Tensor, "num_points 3"] = slam.points_
     final_colors: UInt8[torch.Tensor, "buffer_size num_patches 3"] = slam.colors_
     dpvo_pred: DPVOPrediction = DPVOPrediction(
         final_poses=final_poses,

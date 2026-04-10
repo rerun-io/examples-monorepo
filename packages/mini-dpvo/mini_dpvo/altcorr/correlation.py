@@ -32,12 +32,12 @@ class CorrLayer(torch.autograd.Function):
         ctx: torch.autograd.function.FunctionCtx,
         fmap1: Float[Tensor, "1 mem channels h4 w4"],
         fmap2: Float[Tensor, "1 mem channels h8 w8"],
-        coords: Float[Tensor, "1 n_edges ps ps 2"],
+        coords: Float[Tensor, "1 n_edges 2 ps ps"],
         ii: Int[Tensor, "n_edges"],
         jj: Int[Tensor, "n_edges"],
         radius: int,
         dropout: float,
-    ) -> Float[Tensor, "1 n_edges corr_dim"]:
+    ) -> Float[Tensor, "..."]:
         """Compute forward correlation between feature maps at given coordinates.
 
         Args:
@@ -52,12 +52,11 @@ class CorrLayer(torch.autograd.Function):
                 (1.0 = keep all, <1.0 = randomly drop edges).
 
         Returns:
-            Correlation volume of shape ``(1, n_edges, corr_dim)``.
+            Correlation volume tensor.
         """
         ctx.save_for_backward(fmap1, fmap2, coords, ii, jj)
         ctx.radius = radius
         ctx.dropout = dropout
-        corr: Float[Tensor, "1 n_edges corr_dim"]
         corr, = _cuda_corr.forward(fmap1, fmap2, coords, ii, jj, radius)
 
         return corr

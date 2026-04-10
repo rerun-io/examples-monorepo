@@ -128,7 +128,7 @@ class SoftAgg(nn.Module):
         self.g: nn.Linear = nn.Linear(self.dim, self.dim)
         self.h: nn.Linear = nn.Linear(self.dim, self.dim)
 
-    def forward(self, x: Float[Tensor, "batch edges dim"], ix: Int[Tensor, "batch edges"]) -> Float[Tensor, "..."]:
+    def forward(self, x: Float[Tensor, "batch edges dim"], ix: Int[Tensor, "edges"]) -> Float[Tensor, "..."]:
         """Aggregate edge features by group index.
 
         Args:
@@ -181,7 +181,7 @@ class SoftAggBasic(nn.Module):
         self.g: nn.Linear = nn.Linear(self.dim,        1)
         self.h: nn.Linear = nn.Linear(self.dim, self.dim)
 
-    def forward(self, x: Float[Tensor, "batch edges dim"], ix: Int[Tensor, "batch edges"]) -> Float[Tensor, "..."]:
+    def forward(self, x: Float[Tensor, "batch edges dim"], ix: Int[Tensor, "edges"]) -> Float[Tensor, "..."]:
         """Aggregate edge features by group index with scalar attention.
 
         Args:

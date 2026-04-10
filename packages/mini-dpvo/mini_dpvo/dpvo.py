@@ -340,9 +340,9 @@ class DPVO:
         ii1: Int[Tensor, "n_edges"] = ii % (self.M * self.mem)
         jj1: Int[Tensor, "n_edges"] = jj % (self.mem)
         # Level 1: stride-4 features (coords as-is)
-        corr1: Float[Tensor, "1 n_edges corr1"] = altcorr.corr(self.gmap, self.pyramid[0], coords / 1, ii1, jj1, 3)
+        corr1 = altcorr.corr(self.gmap, self.pyramid[0], coords / 1, ii1, jj1, 3)
         # Level 2: stride-16 features (coords scaled by 1/4)
-        corr2: Float[Tensor, "1 n_edges corr2"] = altcorr.corr(self.gmap, self.pyramid[1], coords / 4, ii1, jj1, 3)
+        corr2 = altcorr.corr(self.gmap, self.pyramid[1], coords / 4, ii1, jj1, 3)
         return torch.stack([corr1, corr2], -1).view(1, len(ii), -1)
 
     def reproject(self, indicies: tuple[Int[Tensor, "n_edges"], Int[Tensor, "n_edges"], Int[Tensor, "n_edges"]] | None = None) -> Float[Tensor, "1 n_edges 2 P P"]:

@@ -16,7 +16,7 @@ from jaxtyping import Float, Int
 from torch import Tensor
 
 
-def _expand_index(index: Int[Tensor, "n"], src: Float[Tensor, "*shape"], dim: int) -> Float[Tensor, "*shape"]:
+def _expand_index(index: Int[Tensor, "n"], src: Float[Tensor, "*shape"], dim: int) -> Int[Tensor, "*shape"]:
     """Broadcast a 1-D index tensor so it can be used with ``scatter_add_``.
 
     ``scatter_add_`` requires the index tensor to have the same number of
@@ -34,7 +34,7 @@ def _expand_index(index: Int[Tensor, "n"], src: Float[Tensor, "*shape"], dim: in
     """
     view: list[int] = [1] * src.dim()
     view[dim] = index.shape[0]
-    expanded: Float[Tensor, "*shape"] = index.view(*view).expand_as(src)
+    expanded: Int[Tensor, "*shape"] = index.view(*view).expand_as(src)
     return expanded
 
 
