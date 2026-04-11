@@ -29,6 +29,7 @@ import numpy as np
 import rerun as rr
 import torch
 import tyro
+from einops import rearrange
 from jaxtyping import Float32, Float64, UInt8
 from mini_dust3r.api import OptimizedResult, inferece_dust3r
 from mini_dust3r.model import AsymmetricCroCo3DStereo
@@ -500,7 +501,7 @@ def run_dpvo_pipeline(
 
             rr.set_time("timestep", sequence=t)
 
-            bgr_3hw: UInt8[torch.Tensor, "c ht wd"] = torch.from_numpy(bgr_hw3).permute(2, 0, 1).cuda()
+            bgr_3hw: UInt8[torch.Tensor, "c ht wd"] = rearrange(torch.from_numpy(bgr_hw3), "h w c -> c h w").cuda()
             intri_torch: Float32[torch.Tensor, "4"] = torch.from_numpy(intri_np).cuda()
 
             if slam is None:

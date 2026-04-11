@@ -31,6 +31,7 @@ import lietorch
 import numpy as np
 import torch
 import torch.nn.functional as F
+from einops import rearrange
 from jaxtyping import Bool, Float, Float32, Float64, Int, UInt8
 from lietorch import SE3
 from torch import Tensor
@@ -214,17 +215,17 @@ class DPVO:
     @property
     def poses(self) -> Float32[Tensor, "1 N 7"]:
         """All poses as a batched tensor ``(1, N, 7)`` for projective_ops."""
-        return self.poses_.view(1, self.N, 7)
+        return rearrange(self.poses_, "n c -> 1 n c")
 
     @property
     def patches(self) -> Float32[Tensor, "1 NM 3 3 3"]:
         """All patches flattened to ``(1, N*M, 3, 3, 3)`` for projective_ops."""
-        return self.patches_.view(1, self.N * self.M, 3, 3, 3)
+        return rearrange(self.patches_, "n m c p1 p2 -> 1 (n m) c p1 p2")
 
     @property
     def intrinsics(self) -> Float32[Tensor, "1 N 4"]:
         """All intrinsics as a batched tensor ``(1, N, 4)``."""
-        return self.intrinsics_.view(1, self.N, 4)
+        return rearrange(self.intrinsics_, "n c -> 1 n c")
 
     @property
     def ix(self) -> Int[Tensor, "NM"]:
@@ -343,7 +344,7 @@ class DPVO:
         corr1 = altcorr.corr(self.gmap, self.pyramid[0], coords / 1, ii1, jj1, 3)
         # Level 2: stride-16 features (coords scaled by 1/4)
         corr2 = altcorr.corr(self.gmap, self.pyramid[1], coords / 4, ii1, jj1, 3)
-        return torch.stack([corr1, corr2], -1).view(1, len(ii), -1)
+        return rearrange(torch.stack([corr1, corr2], -1), "b e ... -> b e (...)")
 
     def reproject(self, indicies: tuple[Int[Tensor, "n_edges"], Int[Tensor, "n_edges"], Int[Tensor, "n_edges"]] | None = None) -> Float[Tensor, "1 n_edges 2 P P"]:
         """Reproject patches from their source frames into target frames.
@@ -370,7 +371,7 @@ class DPVO:
         coords: Float[Tensor, "1 n_edges P P 2"] = pops.transform(
             SE3(self.poses), self.patches, self.intrinsics, ii, jj, kk
         )
-        return coords.permute(0, 1, 4, 2, 3).contiguous()
+        return rearrange(coords, "b e p1 p2 c -> b e c p1 p2")
 
     def append_factors(self, ii: Int[Tensor, "n_new"], jj: Int[Tensor, "n_new"]) -> None:
         """Add new measurement edges to the factor graph.
