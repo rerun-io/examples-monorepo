@@ -55,8 +55,8 @@ class DPVOConfig:
     """Pixel flow threshold below which a keyframe is removed as redundant."""
 
     motion_model: Literal["DAMPED_LINEAR"] = "DAMPED_LINEAR"
-    """Motion model for pose extrapolation.
-    ``DAMPED_LINEAR``: ``P_new = P_{n-1} * (P_{n-1} * P_{n-2}^{-1})^damping``."""
+    """Motion model for pose extrapolation. Currently only ``DAMPED_LINEAR``
+    is implemented: ``P_new = P_{n-1} * (P_{n-1} * P_{n-2}^{-1})^damping``."""
 
     motion_damping: float = 0.5
     """Damping factor for the damped linear motion model.

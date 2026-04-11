@@ -32,7 +32,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from einops import rearrange
-from jaxtyping import Bool, Float, Float32, Float64, Int, UInt8
+from jaxtyping import Bool, Float, Float32, Int, UInt8
 from lietorch import SE3
 from torch import Tensor
 
@@ -125,7 +125,10 @@ class DPVO:
         self.image_: UInt8[Tensor, "ht wd 3"] = torch.zeros(self.ht, self.wd, 3, dtype=torch.uint8, device="cpu")
 
         # Fixed-size GPU buffers pre-allocated for the sliding window
-        self.tstamps_: Float64[Tensor, "N"] = torch.zeros(self.N, dtype=torch.float64, device="cuda")
+        # tstamps_ stores sequential frame indices (0, 1, 2, ...) from the
+        # video_stream/image_stream reader — NOT real timestamps in
+        # seconds or nanoseconds.  Used as dict keys for pose lookup.
+        self.tstamps_: Int[Tensor, "N"] = torch.zeros(self.N, dtype=torch.long, device="cuda")
         self.poses_: Float32[Tensor, "N 7"] = torch.zeros(self.N, 7, dtype=torch.float32, device="cuda")
         self.patches_: Float32[Tensor, "N M 3 P P"] = torch.zeros(
             self.N, self.M, 3, self.P, self.P, dtype=torch.float, device="cuda"
@@ -268,7 +271,7 @@ class DPVO:
         t0, dP = self.delta[t]
         return dP * self.get_pose(t0)
 
-    def terminate(self) -> tuple[Float32[np.ndarray, "n_frames 7"], Float64[np.ndarray, "n_frames"]]:
+    def terminate(self) -> tuple[Float32[np.ndarray, "n_frames 7"], Int[np.ndarray, "n_frames"]]:
         """Finalize tracking: interpolate removed keyframes and return full trajectory.
 
         After the input stream ends, this method reconstructs the complete
@@ -289,8 +292,7 @@ class DPVO:
         # Build lookup from internal timestamp -> pose for active keyframes
         self.traj: dict[int, Float32[Tensor, "7"]] = {}
         for i in range(self.n):
-            # tstamps_ stores frame indices as float64; convert to int for dict keys
-            current_t: int = int(self.tstamps_[i].item())
+            current_t: int = self.tstamps_[i].item()
             self.traj[current_t] = self.poses_[i]
 
         # Reconstruct poses for ALL timestamps (including removed keyframes)
@@ -298,7 +300,7 @@ class DPVO:
         poses: SE3 = lietorch.stack(poses, dim=0)
         # Invert: internal representation is world-to-camera, output is camera-to-world
         poses: Float[np.ndarray, "n_frames 7"] = poses.inv().data.cpu().numpy()
-        tstamps: Float64[np.ndarray, "n_frames"] = np.array(self.tlist, dtype=np.float64)
+        tstamps: Int[np.ndarray, "n_frames"] = np.array(self.tlist, dtype=np.int64)
         print("Done!")
 
         return poses, tstamps
@@ -338,9 +340,10 @@ class DPVO:
         ii1: Int[Tensor, "n_edges"] = ii % (self.M * self.mem)
         jj1: Int[Tensor, "n_edges"] = jj % (self.mem)
         # Level 1: stride-4 features (coords as-is)
-        corr1: Float[Tensor, "..."] = altcorr.corr(self.gmap, self.pyramid[0], coords / 1, ii1, jj1, 3)
+        # Output shape: (1, n_edges, 2R+1, 2R+1, P, P) where R=3, P=3
+        corr1: Float[Tensor, "1 n_edges neighborhood neighborhood P P"] = altcorr.corr(self.gmap, self.pyramid[0], coords / 1, ii1, jj1, 3)
         # Level 2: stride-16 features (coords scaled by 1/4)
-        corr2: Float[Tensor, "..."] = altcorr.corr(self.gmap, self.pyramid[1], coords / 4, ii1, jj1, 3)
+        corr2: Float[Tensor, "1 n_edges neighborhood neighborhood P P"] = altcorr.corr(self.gmap, self.pyramid[1], coords / 4, ii1, jj1, 3)
         return rearrange(torch.stack([corr1, corr2], -1), "b e ... -> b e (...)")
 
     def reproject(self, indicies: tuple[Int[Tensor, "n_edges"], Int[Tensor, "n_edges"], Int[Tensor, "n_edges"]] | None = None) -> Float[Tensor, "1 n_edges 2 P P"]:
@@ -499,9 +502,8 @@ class DPVO:
         if m / 2 < self.cfg.keyframe_thresh:
             # Insufficient parallax: remove the candidate keyframe
             k: int = self.n - self.cfg.keyframe_index
-            # tstamps_ stores frame indices as float64; convert to int for dict keys
-            t0: int = int(self.tstamps_[k - 1].item())
-            t1: int = int(self.tstamps_[k].item())
+            t0: int = self.tstamps_[k - 1].item()
+            t1: int = self.tstamps_[k].item()
 
             # Store relative pose for interpolation at termination
             dP: SE3 = SE3(self.poses_[k]) * SE3(self.poses_[k - 1]).inv()

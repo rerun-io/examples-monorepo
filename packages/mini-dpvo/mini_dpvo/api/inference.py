@@ -30,7 +30,7 @@ import rerun as rr
 import torch
 import tyro
 from einops import rearrange
-from jaxtyping import Float32, Float64, UInt8
+from jaxtyping import Float32, Float64, Int, UInt8
 from mini_dust3r.api import OptimizedResult, inferece_dust3r
 from mini_dust3r.model import AsymmetricCroCo3DStereo
 from scipy.spatial.transform import Rotation
@@ -69,10 +69,11 @@ class DPVOPrediction:
 
     final_poses: Float32[np.ndarray, "num_keyframes 7"]
     """Keyframe poses as ``[tx, ty, tz, qx, qy, qz, qw]``."""
-    tstamps: Float64[np.ndarray, "num_keyframes"]  # noqa: F821
-    """Timestamp (frame index) of each keyframe."""
+    tstamps: Int[np.ndarray, "num_keyframes"]
+    """Frame index of each keyframe."""
     final_points: Float32[torch.Tensor, "num_points 3"]
-    """Reconstructed 3-D points in world coordinates."""
+    """Reconstructed 3-D points in world coordinates.
+    ``num_points = buffer_size * patches_per_frame``."""
     final_colors: UInt8[torch.Tensor, "buffer_size num_patches 3"]
     """RGB colors for each reconstructed point."""
 

@@ -37,7 +37,7 @@ class CorrLayer(torch.autograd.Function):
         jj: Int[Tensor, "n_edges"],
         radius: int,
         dropout: float,
-    ) -> Float[Tensor, "..."]:
+    ) -> Float[Tensor, "1 n_edges neighborhood neighborhood ps ps"]:
         """Compute forward correlation between feature maps at given coordinates.
 
         Args:
@@ -52,7 +52,7 @@ class CorrLayer(torch.autograd.Function):
                 (1.0 = keep all, <1.0 = randomly drop edges).
 
         Returns:
-            Correlation volume tensor.
+            Correlation volume of shape ``(1, n_edges, 2R+1, 2R+1, ps, ps)``.
         """
         ctx.save_for_backward(fmap1, fmap2, coords, ii, jj)
         ctx.radius = radius
