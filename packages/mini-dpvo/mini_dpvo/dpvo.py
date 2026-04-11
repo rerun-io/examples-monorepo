@@ -32,7 +32,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from einops import rearrange
-from jaxtyping import Bool, Float, Float32, Int, UInt8
+from jaxtyping import Bool, Float, Float32, Float64, Int, UInt8
 from lietorch import SE3
 from torch import Tensor
 
@@ -125,10 +125,12 @@ class DPVO:
         self.image_: UInt8[Tensor, "ht wd 3"] = torch.zeros(self.ht, self.wd, 3, dtype=torch.uint8, device="cpu")
 
         # Fixed-size GPU buffers pre-allocated for the sliding window
-        # tstamps_ stores sequential frame indices (0, 1, 2, ...) from the
-        # video_stream/image_stream reader — NOT real timestamps in
-        # seconds or nanoseconds.  Used as dict keys for pose lookup.
-        self.tstamps_: Int[Tensor, "N"] = torch.zeros(self.N, dtype=torch.long, device="cuda")
+        # tstamps_ is float64 because evaluation datasets (EuRoC, TUM-RGBD)
+        # pass real-valued timestamps (nanoseconds / seconds).  The mini-dpvo
+        # video/image streams happen to use integer frame indices, but the
+        # original DPVO evaluation code relies on float timestamps for
+        # trajectory alignment via evo's associate_trajectories().
+        self.tstamps_: Float64[Tensor, "N"] = torch.zeros(self.N, dtype=torch.float64, device="cuda")
         self.poses_: Float32[Tensor, "N 7"] = torch.zeros(self.N, 7, dtype=torch.float32, device="cuda")
         self.patches_: Float32[Tensor, "N M 3 P P"] = torch.zeros(
             self.N, self.M, 3, self.P, self.P, dtype=torch.float, device="cuda"
@@ -271,7 +273,7 @@ class DPVO:
         t0, dP = self.delta[t]
         return dP * self.get_pose(t0)
 
-    def terminate(self) -> tuple[Float32[np.ndarray, "n_frames 7"], Int[np.ndarray, "n_frames"]]:
+    def terminate(self) -> tuple[Float32[np.ndarray, "n_frames 7"], Float64[np.ndarray, "n_frames"]]:
         """Finalize tracking: interpolate removed keyframes and return full trajectory.
 
         After the input stream ends, this method reconstructs the complete
@@ -292,7 +294,7 @@ class DPVO:
         # Build lookup from internal timestamp -> pose for active keyframes
         self.traj: dict[int, Float32[Tensor, "7"]] = {}
         for i in range(self.n):
-            current_t: int = self.tstamps_[i].item()
+            current_t: int = int(self.tstamps_[i].item())
             self.traj[current_t] = self.poses_[i]
 
         # Reconstruct poses for ALL timestamps (including removed keyframes)
@@ -300,7 +302,7 @@ class DPVO:
         poses: SE3 = lietorch.stack(poses, dim=0)
         # Invert: internal representation is world-to-camera, output is camera-to-world
         poses: Float[np.ndarray, "n_frames 7"] = poses.inv().data.cpu().numpy()
-        tstamps: Int[np.ndarray, "n_frames"] = np.array(self.tlist, dtype=np.int64)
+        tstamps: Float64[np.ndarray, "n_frames"] = np.array(self.tlist, dtype=np.float64)
         print("Done!")
 
         return poses, tstamps
@@ -502,8 +504,8 @@ class DPVO:
         if m / 2 < self.cfg.keyframe_thresh:
             # Insufficient parallax: remove the candidate keyframe
             k: int = self.n - self.cfg.keyframe_index
-            t0: int = self.tstamps_[k - 1].item()
-            t1: int = self.tstamps_[k].item()
+            t0: int = int(self.tstamps_[k - 1].item())
+            t1: int = int(self.tstamps_[k].item())
 
             # Store relative pose for interpolation at termination
             dP: SE3 = SE3(self.poses_[k]) * SE3(self.poses_[k - 1]).inv()

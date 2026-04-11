@@ -30,7 +30,7 @@ import rerun as rr
 import torch
 import tyro
 from einops import rearrange
-from jaxtyping import Float32, Float64, Int, UInt8
+from jaxtyping import Float32, Float64, UInt8
 from mini_dust3r.api import OptimizedResult, inferece_dust3r
 from mini_dust3r.model import AsymmetricCroCo3DStereo
 from scipy.spatial.transform import Rotation
@@ -69,8 +69,9 @@ class DPVOPrediction:
 
     final_poses: Float32[np.ndarray, "num_keyframes 7"]
     """Keyframe poses as ``[tx, ty, tz, qx, qy, qz, qw]``."""
-    tstamps: Int[np.ndarray, "num_keyframes"]
-    """Frame index of each keyframe."""
+    tstamps: Float64[np.ndarray, "num_keyframes"]
+    """Timestamp per keyframe. Integer frame indices for video/image streams,
+    real-valued (nanoseconds/seconds) for evaluation datasets (EuRoC, TUM-RGBD)."""
     final_points: Float32[torch.Tensor, "num_points 3"]
     """Reconstructed 3-D points in world coordinates.
     ``num_points = buffer_size * patches_per_frame``."""
@@ -242,7 +243,7 @@ def log_trajectory(
 def log_final(
     parent_log_path: Path,
     final_poses: Float32[np.ndarray, "num_keyframes 7"],
-    tstamps: Int[np.ndarray, "num_keyframes"],
+    tstamps: Float64[np.ndarray, "num_keyframes"],
     final_points: Float32[torch.Tensor, "num_points 3"],
     final_colors: UInt8[torch.Tensor, "buffer_size num_patches 3"],
 ) -> None:
