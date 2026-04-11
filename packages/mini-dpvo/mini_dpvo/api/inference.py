@@ -1,36 +1,62 @@
 """High-level inference pipeline for DPVO visual odometry.
 
 This module provides the main entry-point for running DPVO inference on
-image directories or video files. It handles frame reading (via multiprocessing),
+image directories or video files.  It handles frame reading (via multiprocessing),
 optional auto-calibration using DUSt3R, the DPVO SLAM loop, and Rerun-based
 visualization of camera trajectories, point clouds, and per-frame images.
 
-Typical usage::
+Both the CLI and Gradio UI consume the same :func:`run_dpvo_pipeline` generator.
 
-    prediction, elapsed = inference_dpvo(cfg, network_path, imagedir, calib)
+Typical CLI usage::
+
+    from mini_dpvo.api.inference import DPVOInferenceConfig, run_dpvo_pipeline
+    config = tyro.cli(DPVOInferenceConfig)
+    for msg in run_dpvo_pipeline(dpvo_config=config.dpvo_config, ...):
+        pass
 """
 
 import os
-from dataclasses import dataclass
+from collections.abc import Generator
+from dataclasses import dataclass, field
 from multiprocessing import Process, Queue
 from pathlib import Path
 from timeit import default_timer as timer
+from typing import Annotated
 
 import cv2
 import mmcv
 import numpy as np
 import rerun as rr
 import torch
+import tyro
+from einops import rearrange
 from jaxtyping import Float32, Float64, UInt8
 from mini_dust3r.api import OptimizedResult, inferece_dust3r
 from mini_dust3r.model import AsymmetricCroCo3DStereo
 from scipy.spatial.transform import Rotation
+from simplecv.rerun_log_utils import RerunTyroConfig
 from tqdm import tqdm
-from yacs.config import CfgNode
 
+from mini_dpvo.config import DPVOConfig
 from mini_dpvo.dpvo import DPVO
 from mini_dpvo.stream import image_stream, video_stream
 from mini_dpvo.utils import Timer
+
+# ── Tyro subcommand aliases for DPVOConfig presets ──────────────────────
+AccurateDPVOConfig = Annotated[
+    DPVOConfig,
+    tyro.conf.subcommand(name="accurate", default=DPVOConfig.accurate()),
+]
+"""Subcommand alias for the accurate preset."""
+
+FastDPVOConfig = Annotated[
+    DPVOConfig,
+    tyro.conf.subcommand(name="fast", default=DPVOConfig.fast()),
+]
+"""Subcommand alias for the fast preset."""
+
+
+# ── Data classes ────────────────────────────────────────────────────────
 
 
 @dataclass
@@ -41,22 +67,60 @@ class DPVOPrediction:
     timestamps, and the associated 3-D point cloud with per-point colors.
     """
 
-    final_poses: Float32[torch.Tensor, "num_keyframes 7"]
+    final_poses: Float32[np.ndarray, "num_keyframes 7"]
     """Keyframe poses as ``[tx, ty, tz, qx, qy, qz, qw]``."""
-    tstamps: Float64[torch.Tensor, "num_keyframes"]  # noqa: F821
-    """Timestamp (frame index) of each keyframe."""
-    final_points: Float32[torch.Tensor, "buffer_size*num_patches 3"]
-    """Reconstructed 3-D points in world coordinates."""
+    tstamps: Float64[np.ndarray, "num_keyframes"]
+    """Timestamp per keyframe. Integer frame indices for video/image streams,
+    real-valued (nanoseconds/seconds) for evaluation datasets (EuRoC, TUM-RGBD)."""
+    final_points: Float32[torch.Tensor, "num_points 3"]
+    """Reconstructed 3-D points in world coordinates.
+    ``num_points = buffer_size * patches_per_frame``."""
     final_colors: UInt8[torch.Tensor, "buffer_size num_patches 3"]
     """RGB colors for each reconstructed point."""
+
+
+@dataclass
+class DPVOPipelineHandle:
+    """Mutable handle populated by :func:`run_dpvo_pipeline`.
+
+    Callers inspect ``prediction`` after the generator is exhausted.
+    """
+
+    prediction: DPVOPrediction | None = field(default=None, repr=False)
+    """Final prediction, populated after pipeline completes."""
+    elapsed_time: float = 0.0
+    """Total wall-clock seconds for the run."""
+
+
+@dataclass
+class DPVOInferenceConfig:
+    """Configuration for a DPVO inference run (CLI entry point)."""
+
+    rr_config: RerunTyroConfig
+    """Rerun recording configuration (save path, application id, etc.)."""
+    dpvo_config: AccurateDPVOConfig | FastDPVOConfig = field(default_factory=DPVOConfig.fast)
+    """DPVO solver configuration preset."""
+    imagedir: str = "data/movies/IMG_0493.MOV"
+    """Path to image directory or video file."""
+    network_path: str = "checkpoints/dpvo.pth"
+    """Path to DPVO network weights."""
+    calib: str | None = None
+    """Path to calibration file. If None, uses DUSt3R for estimation."""
+    stride: int = 2
+    """Frame stride for sampling."""
+    skip: int = 0
+    """Number of leading frames to skip."""
+
+
+# ── Rerun logging helpers ───────────────────────────────────────────────
 
 
 def log_trajectory(
     parent_log_path: Path,
     poses: Float32[torch.Tensor, "buffer_size 7"],
-    points: Float32[torch.Tensor, "buffer_size*num_patches 3"],
+    points: Float32[torch.Tensor, "num_points 3"],
     colors: UInt8[torch.Tensor, "buffer_size num_patches 3"],
-    intri_np: Float64[np.ndarray, "4"],
+    intri_np: Float32[np.ndarray, "4"],
     bgr_hw3: UInt8[np.ndarray, "h w 3"],
     path_list: list[list[float]],
     jpg_quality: int = 90,
@@ -107,6 +171,9 @@ def log_trajectory(
 
     nonzero_poses: Float32[torch.Tensor, "num_nonzero 7"] = poses[poses_mask]
     nonzero_points: Float32[torch.Tensor, "num_nonzero 3"] = points[points_mask]
+
+    if nonzero_poses.shape[0] == 0:
+        return path_list
 
     # Extract the most recent keyframe pose for the camera transform
     last_index: int = nonzero_poses.shape[0] - 1
@@ -175,9 +242,9 @@ def log_trajectory(
 
 def log_final(
     parent_log_path: Path,
-    final_poses: Float32[torch.Tensor, "num_keyframes 7"],
-    tstamps: Float64[torch.Tensor, "num_keyframes"],  # noqa: F821
-    final_points: Float32[torch.Tensor, "buffer_size*num_patches 3"],
+    final_poses: Float32[np.ndarray, "num_keyframes 7"],
+    tstamps: Float64[np.ndarray, "num_keyframes"],
+    final_points: Float32[torch.Tensor, "num_points 3"],
     final_colors: UInt8[torch.Tensor, "buffer_size num_patches 3"],
 ) -> None:
     """Log the final optimized per-keyframe camera transforms to Rerun.
@@ -196,12 +263,15 @@ def log_final(
     """
     for idx, (pose_quat, _tstamp) in enumerate(zip(final_poses, tstamps, strict=False)):
         cam_log_path: str = f"{parent_log_path}/camera_{idx}"
-        trans_quat: torch.Tensor = pose_quat[:3]
+        trans_quat: Float32[np.ndarray, "3"] = pose_quat[:3]
         R_33: Float64[np.ndarray, "3 3"] = Rotation.from_quat(pose_quat[3:]).as_matrix()
         rr.log(
             f"{cam_log_path}",
             rr.Transform3D(translation=trans_quat, mat3x3=R_33, from_parent=False),
         )
+
+
+# ── Frame I/O helpers ───────────────────────────────────────────────────
 
 
 def create_reader(
@@ -276,7 +346,7 @@ def calib_from_dust3r(
     bgr_hw3: UInt8[np.ndarray, "height width 3"],
     model: AsymmetricCroCo3DStereo,
     device: str,
-) -> Float64[np.ndarray, "3 3"]:
+) -> Float32[np.ndarray, "3 3"]:
     """Estimate a 3x3 camera intrinsic matrix from a single image using DUSt3R.
 
     The image is temporarily saved to disk, fed through DUSt3R monocular
@@ -318,7 +388,7 @@ def calib_from_dust3r(
     scaling_factor_y: float = orig_h / downscaled_h
 
     # Apply per-axis scaling to fx, fy, cx, cy
-    K_33_original: Float64[np.ndarray, "3 3"] = optimized_results.K_b33[0].copy()
+    K_33_original: Float32[np.ndarray, "3 3"] = optimized_results.K_b33[0].copy()
     K_33_original[0, 0] *= scaling_factor_x  # fx
     K_33_original[1, 1] *= scaling_factor_y  # fy
     K_33_original[0, 2] *= scaling_factor_x  # cx
@@ -327,19 +397,30 @@ def calib_from_dust3r(
     return K_33_original
 
 
+# ── Main pipeline generator ────────────────────────────────────────────
+
+
 @torch.no_grad()
-def inference_dpvo(
-    cfg: CfgNode,
+def run_dpvo_pipeline(
+    *,
+    dpvo_config: DPVOConfig,
     network_path: str,
     imagedir: str,
-    calib: str,
+    calib: str | None = None,
     stride: int = 1,
     skip: int = 0,
+    dust3r_model: AsymmetricCroCo3DStereo | None = None,
+    parent_log_path: Path = Path("world"),
+    handle: DPVOPipelineHandle | None = None,
+    recording: rr.RecordingStream | None = None,
+    jpg_quality: int = 90,
     timeit: bool = False,
-) -> tuple[DPVOPrediction, float]:
+) -> Generator[str, None, None]:
     """Run the full DPVO visual-odometry pipeline on an image dir or video.
 
-    This is the main inference entry-point. It:
+    This is a **generator** that yields status strings after each processed
+    frame.  Both the CLI and Gradio UI consume it identically — the CLI
+    exhausts it silently while Gradio yields intermediate Rerun bytes.
 
     1. Spawns a background ``Process`` to read frames into a shared queue.
     2. Optionally estimates camera intrinsics with DUSt3R when no calibration
@@ -349,28 +430,34 @@ def inference_dpvo(
        system is initialized.
     5. Runs 12 additional update iterations after all frames are consumed
        for final refinement.
+    6. Populates ``handle.prediction`` and ``handle.elapsed_time``.
 
     Args:
-        cfg: YACS configuration node for the DPVO network and solver.
+        dpvo_config: DPVO solver configuration.
         network_path: File path to the pre-trained DPVO checkpoint.
         imagedir: Path to an image directory or video file.
         calib: Path to a calibration text file (``fx fy cx cy`` per line),
             or ``None`` to auto-estimate intrinsics via DUSt3R.
         stride: Keep every *stride*-th frame.
         skip: Number of leading frames to discard.
+        dust3r_model: Pre-loaded DUSt3R model (Gradio singleton).
+            ``None`` loads one on-the-fly (CLI path).
+        parent_log_path: Rerun entity path prefix.
+        handle: Mutable handle to store results in.
+        recording: Rerun recording stream for Gradio (thread-local).
+            ``None`` uses the global recording (CLI).
+        jpg_quality: JPEG compression quality (0--100) for Rerun image logging.
         timeit: If ``True``, print per-iteration timing via ``Timer``.
 
-    Returns:
-        A tuple of ``(DPVOPrediction, total_time)`` where *total_time* is
-        the wall-clock seconds for the entire run.
+    Yields:
+        Status message strings (e.g. ``"Frame 42/200"``).
     """
     slam: DPVO | None = None
-    queue: Queue = Queue(maxsize=8)
+    queue = Queue(maxsize=8)
 
     reader: Process = create_reader(imagedir, calib, stride, skip, queue)
     reader.start()
 
-    parent_log_path: Path = Path("world")
     rr.log(f"{parent_log_path}", rr.ViewCoordinates.RDF, static=True)
 
     start: float = timer()
@@ -378,32 +465,38 @@ def inference_dpvo(
 
     # If no calibration file was provided, use DUSt3R to predict intrinsics
     # from the very first frame pulled off the reader queue.
-    intri_np_dust3r: Float64[np.ndarray, "4"] | None = None
+    intri_np_dust3r: Float32[np.ndarray, "4"] | None = None
     if calib is None:
-        dust3r_device: str = (
-            "mps"
-            if torch.backends.mps.is_available()
-            else "cuda"
-            if torch.cuda.is_available()
-            else "cpu"
-        )
-        dust3r_model: AsymmetricCroCo3DStereo = AsymmetricCroCo3DStereo.from_pretrained(
-            "naver/DUSt3R_ViTLarge_BaseDecoder_512_dpt"
-        ).to(dust3r_device)
+        yield "Estimating camera intrinsics with DUSt3R..."
+        if dust3r_model is None:
+            dust3r_device: str = (
+                "mps"
+                if torch.backends.mps.is_available()
+                else "cuda"
+                if torch.cuda.is_available()
+                else "cpu"
+            )
+            dust3r_model = AsymmetricCroCo3DStereo.from_pretrained(
+                "naver/DUSt3R_ViTLarge_BaseDecoder_512_dpt"
+            ).to(dust3r_device)
+        else:
+            dust3r_device = next(dust3r_model.parameters()).device.type
+
         _, bgr_hw3, _ = queue.get()
-        K_33_pred: Float64[np.ndarray, "3 3"] = calib_from_dust3r(bgr_hw3, dust3r_model, dust3r_device)
+        K_33_pred: Float32[np.ndarray, "3 3"] = calib_from_dust3r(bgr_hw3, dust3r_model, dust3r_device)
         intri_np_dust3r = np.array(
             [K_33_pred[0, 0], K_33_pred[1, 1], K_33_pred[0, 2], K_33_pred[1, 2]]
         )
 
     # path list for visualizing the trajectory
     path_list: list[list[float]] = []
+    frame_idx: int = 0
 
     with tqdm(total=total_frames, desc="Processing Frames") as pbar:
         while True:
             t: int
             bgr_hw3: UInt8[np.ndarray, "h w 3"]
-            intri_np: Float64[np.ndarray, "4"]
+            intri_np: Float32[np.ndarray, "4"]
             (t, bgr_hw3, intri_np_calib) = queue.get()
             intri_np = intri_np_calib if calib is not None else intri_np_dust3r
             # queue will have a (-1, image, intrinsics) tuple when the reader is done
@@ -412,20 +505,18 @@ def inference_dpvo(
 
             rr.set_time("timestep", sequence=t)
 
-            bgr_3hw: UInt8[torch.Tensor, "h w 3"] = (
-                torch.from_numpy(bgr_hw3).permute(2, 0, 1).cuda()
-            )
-            intri_torch: Float64[torch.Tensor, "4"] = torch.from_numpy(intri_np).cuda()
+            bgr_3hw: UInt8[torch.Tensor, "c ht wd"] = rearrange(torch.from_numpy(bgr_hw3), "h w c -> c h w").cuda()
+            intri_torch: Float32[torch.Tensor, "4"] = torch.from_numpy(intri_np).cuda()
 
             if slam is None:
-                slam = DPVO(cfg, network_path, ht=bgr_3hw.shape[1], wd=bgr_3hw.shape[2])
+                slam = DPVO(dpvo_config, network_path, ht=bgr_3hw.shape[1], wd=bgr_3hw.shape[2])
 
             with Timer("SLAM", enabled=timeit):
                 slam(t, bgr_3hw, intri_torch)
 
             if slam.is_initialized:
                 poses: Float32[torch.Tensor, "buffer_size 7"] = slam.poses_
-                points: Float32[torch.Tensor, "buffer_size*num_patches 3"] = (
+                points: Float32[torch.Tensor, "num_points 3"] = (
                     slam.points_
                 )
                 colors: UInt8[torch.Tensor, "buffer_size num_patches 3"] = slam.colors_
@@ -437,23 +528,29 @@ def inference_dpvo(
                     intri_np=intri_np,
                     bgr_hw3=bgr_hw3,
                     path_list=path_list,
+                    jpg_quality=jpg_quality,
                 )
+
+            frame_idx += 1
             pbar.update(1)
+            yield f"Frame {frame_idx}/{total_frames}"
+
+    reader.join()
+
+    if slam is None:
+        yield "No frames processed"
+        return
 
     # Run additional update iterations for final bundle-adjustment refinement
+    yield "Running final bundle adjustment..."
     for _ in range(12):
         slam.update()
 
     total_time: float = timer() - start
     print(f"Total time: {total_time:.2f}s")
 
-    reader.join()
-
-    final_poses: Float32[torch.Tensor, "num_keyframes 7"]
-    tstamps: Float64[torch.Tensor, "num_keyframes"]  # noqa: F821
-
     final_poses, tstamps = slam.terminate()
-    final_points: Float32[torch.Tensor, "buffer_size*num_patches 3"] = slam.points_
+    final_points: Float32[torch.Tensor, "num_points 3"] = slam.points_
     final_colors: UInt8[torch.Tensor, "buffer_size num_patches 3"] = slam.colors_
     dpvo_pred: DPVOPrediction = DPVOPrediction(
         final_poses=final_poses,
@@ -461,4 +558,34 @@ def inference_dpvo(
         final_points=final_points,
         final_colors=final_colors,
     )
-    return dpvo_pred, total_time
+
+    if handle is not None:
+        handle.prediction = dpvo_pred
+        handle.elapsed_time = total_time
+
+
+def dpvo_inference(config: DPVOInferenceConfig) -> None:
+    """Run the DPVO inference pipeline from the command line.
+
+    This is the main CLI entry point. It exhausts the
+    :func:`run_dpvo_pipeline` generator silently and prints summary stats.
+
+    Args:
+        config: Inference configuration (typically from ``tyro.cli``).
+    """
+    handle: DPVOPipelineHandle = DPVOPipelineHandle()
+
+    for _msg in run_dpvo_pipeline(
+        dpvo_config=config.dpvo_config,
+        network_path=config.network_path,
+        imagedir=config.imagedir,
+        calib=config.calib,
+        stride=config.stride,
+        skip=config.skip,
+        handle=handle,
+    ):
+        pass  # CLI exhausts the generator silently
+
+    if handle.prediction is not None:
+        print(f"Processed in {handle.elapsed_time:.2f}s")
+        print(f"Keyframes: {handle.prediction.final_poses.shape[0]}")

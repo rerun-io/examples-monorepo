@@ -31,13 +31,14 @@ import lietorch
 import numpy as np
 import torch
 import torch.nn.functional as F
-from jaxtyping import Float, Float32, Float64, Int, UInt8
+from einops import rearrange
+from jaxtyping import Bool, Float, Float32, Float64, Int, UInt8
 from lietorch import SE3
 from torch import Tensor
-from yacs.config import CfgNode
 
 from . import altcorr, fastba
 from . import projective_ops as pops
+from .config import DPVOConfig
 from .net import VONet
 from .utils import Timer, flatmeshgrid
 
@@ -56,15 +57,15 @@ class DPVO:
     :meth:`__call__`.
 
     Attributes:
-        cfg: YACS configuration node (see :mod:`mini_dpvo.config`).
+        cfg: DPVO configuration (see :class:`mini_dpvo.config.DPVOConfig`).
         network: The :class:`~mini_dpvo.net.VONet` neural network (in eval mode).
         is_initialized: ``True`` once 8 frames have been processed and the
             initial BA has converged.
         enable_timing: If ``True``, profile each update step with CUDA events.
         n: Number of active keyframes currently in the buffer.
         m: Total number of active patches (= ``n * M``).
-        M: Patches per frame (from ``cfg.PATCHES_PER_FRAME``).
-        N: Maximum buffer size (from ``cfg.BUFFER_SIZE``).
+        M: Patches per frame (from ``cfg.patches_per_frame``).
+        N: Maximum buffer size (from ``cfg.buffer_size``).
         ht: Image height (pixels).
         wd: Image width (pixels).
         DIM: GRU hidden state dimensionality (from network).
@@ -99,16 +100,16 @@ class DPVO:
         mem: Circular buffer capacity for feature maps (default 32).
     """
 
-    def __init__(self, cfg: CfgNode, network: str | VONet, ht: int = 480, wd: int = 640) -> None:
-        self.cfg: CfgNode = cfg
+    def __init__(self, cfg: DPVOConfig, network: str | VONet, ht: int = 480, wd: int = 640) -> None:
+        self.cfg: DPVOConfig = cfg
         self.load_weights(network)
         self.is_initialized: bool = False
         self.enable_timing: bool = False
 
         self.n: int = 0  # number of active keyframes
         self.m: int = 0  # total number of active patches
-        self.M: int = self.cfg.PATCHES_PER_FRAME
-        self.N: int = self.cfg.BUFFER_SIZE
+        self.M: int = self.cfg.patches_per_frame
+        self.N: int = self.cfg.buffer_size
 
         self.ht: int = ht  # image height
         self.wd: int = wd  # image width
@@ -124,6 +125,11 @@ class DPVO:
         self.image_: UInt8[Tensor, "ht wd 3"] = torch.zeros(self.ht, self.wd, 3, dtype=torch.uint8, device="cpu")
 
         # Fixed-size GPU buffers pre-allocated for the sliding window
+        # tstamps_ is float64 because evaluation datasets (EuRoC, TUM-RGBD)
+        # pass real-valued timestamps (nanoseconds / seconds).  The mini-dpvo
+        # video/image streams happen to use integer frame indices, but the
+        # original DPVO evaluation code relies on float timestamps for
+        # trajectory alignment via evo's associate_trajectories().
         self.tstamps_: Float64[Tensor, "N"] = torch.zeros(self.N, dtype=torch.float64, device="cuda")
         self.poses_: Float32[Tensor, "N 7"] = torch.zeros(self.N, 7, dtype=torch.float32, device="cuda")
         self.patches_: Float32[Tensor, "N M 3 P P"] = torch.zeros(
@@ -141,28 +147,24 @@ class DPVO:
         # Circular buffer size for feature maps (to avoid storing all frames)
         self.mem: int = 32
 
-        if self.cfg.MIXED_PRECISION:
-            self.kwargs: dict[str, object] = {"device": "cuda", "dtype": torch.half}
-            kwargs: dict[str, object] = self.kwargs
-        else:
-            self.kwargs: dict[str, object] = {"device": "cuda", "dtype": torch.float}
-            kwargs: dict[str, object] = self.kwargs
+        # Feature dtype: half for mixed precision, float otherwise
+        self.feature_dtype: torch.dtype = torch.half if self.cfg.mixed_precision else torch.float
 
         # Circular buffers for per-frame network features
-        self.imap_: Float[Tensor, "mem M DIM"] = torch.zeros(self.mem, self.M, DIM, **kwargs)
-        self.gmap_: Float[Tensor, "mem M 128 P P"] = torch.zeros(self.mem, self.M, 128, self.P, self.P, **kwargs)
+        self.imap_: Float[Tensor, "mem M DIM"] = torch.zeros(self.mem, self.M, DIM, device="cuda", dtype=self.feature_dtype)
+        self.gmap_: Float[Tensor, "mem M 128 P P"] = torch.zeros(self.mem, self.M, 128, self.P, self.P, device="cuda", dtype=self.feature_dtype)
 
         ht: int = ht // RES
         wd: int = wd // RES
 
         # Two-level feature pyramid for correlation computation
-        self.fmap1_: Float[Tensor, "1 mem 128 h4 w4"] = torch.zeros(1, self.mem, 128, ht // 1, wd // 1, **kwargs)
-        self.fmap2_: Float[Tensor, "1 mem 128 h16 w16"] = torch.zeros(1, self.mem, 128, ht // 4, wd // 4, **kwargs)
+        self.fmap1_: Float[Tensor, "1 mem 128 h4 w4"] = torch.zeros(1, self.mem, 128, ht // 1, wd // 1, device="cuda", dtype=self.feature_dtype)
+        self.fmap2_: Float[Tensor, "1 mem 128 h16 w16"] = torch.zeros(1, self.mem, 128, ht // 4, wd // 4, device="cuda", dtype=self.feature_dtype)
 
         self.pyramid: tuple[Float[Tensor, "1 mem 128 h4 w4"], Float[Tensor, "1 mem 128 h16 w16"]] = (self.fmap1_, self.fmap2_)
 
         # GRU hidden state and factor graph edge indices (dynamically sized)
-        self.net: Float[Tensor, "1 n_edges DIM"] = torch.zeros(1, 0, DIM, **kwargs)
+        self.net: Float[Tensor, "1 n_edges DIM"] = torch.zeros(1, 0, DIM, device="cuda", dtype=self.feature_dtype)
         self.ii: Int[Tensor, "n_edges"] = torch.as_tensor([], dtype=torch.long, device="cuda")
         self.jj: Int[Tensor, "n_edges"] = torch.as_tensor([], dtype=torch.long, device="cuda")
         self.kk: Int[Tensor, "n_edges"] = torch.as_tensor([], dtype=torch.long, device="cuda")
@@ -214,17 +216,17 @@ class DPVO:
     @property
     def poses(self) -> Float32[Tensor, "1 N 7"]:
         """All poses as a batched tensor ``(1, N, 7)`` for projective_ops."""
-        return self.poses_.view(1, self.N, 7)
+        return rearrange(self.poses_, "n c -> 1 n c")
 
     @property
     def patches(self) -> Float32[Tensor, "1 NM 3 3 3"]:
         """All patches flattened to ``(1, N*M, 3, 3, 3)`` for projective_ops."""
-        return self.patches_.view(1, self.N * self.M, 3, 3, 3)
+        return rearrange(self.patches_, "n m c p1 p2 -> 1 (n m) c p1 p2")
 
     @property
     def intrinsics(self) -> Float32[Tensor, "1 N 4"]:
         """All intrinsics as a batched tensor ``(1, N, 4)``."""
-        return self.intrinsics_.view(1, self.N, 4)
+        return rearrange(self.intrinsics_, "n c -> 1 n c")
 
     @property
     def ix(self) -> Int[Tensor, "NM"]:
@@ -271,7 +273,7 @@ class DPVO:
         t0, dP = self.delta[t]
         return dP * self.get_pose(t0)
 
-    def terminate(self) -> tuple[Float[np.ndarray, "n_frames 7"], Float64[np.ndarray, "n_frames"]]:
+    def terminate(self) -> tuple[Float32[np.ndarray, "n_frames 7"], Float64[np.ndarray, "n_frames"]]:
         """Finalize tracking: interpolate removed keyframes and return full trajectory.
 
         After the input stream ends, this method reconstructs the complete
@@ -292,7 +294,7 @@ class DPVO:
         # Build lookup from internal timestamp -> pose for active keyframes
         self.traj: dict[int, Float32[Tensor, "7"]] = {}
         for i in range(self.n):
-            current_t: int = self.tstamps_[i].item()
+            current_t: int = int(self.tstamps_[i].item())
             self.traj[current_t] = self.poses_[i]
 
         # Reconstruct poses for ALL timestamps (including removed keyframes)
@@ -340,10 +342,11 @@ class DPVO:
         ii1: Int[Tensor, "n_edges"] = ii % (self.M * self.mem)
         jj1: Int[Tensor, "n_edges"] = jj % (self.mem)
         # Level 1: stride-4 features (coords as-is)
-        corr1: Float[Tensor, "1 n_edges corr1"] = altcorr.corr(self.gmap, self.pyramid[0], coords / 1, ii1, jj1, 3)
+        # Output shape: (1, n_edges, 2R+1, 2R+1, P, P) where R=3, P=3
+        corr1: Float[Tensor, "1 n_edges neighborhood neighborhood P P"] = altcorr.corr(self.gmap, self.pyramid[0], coords / 1, ii1, jj1, 3)
         # Level 2: stride-16 features (coords scaled by 1/4)
-        corr2: Float[Tensor, "1 n_edges corr2"] = altcorr.corr(self.gmap, self.pyramid[1], coords / 4, ii1, jj1, 3)
-        return torch.stack([corr1, corr2], -1).view(1, len(ii), -1)
+        corr2: Float[Tensor, "1 n_edges neighborhood neighborhood P P"] = altcorr.corr(self.gmap, self.pyramid[1], coords / 4, ii1, jj1, 3)
+        return rearrange(torch.stack([corr1, corr2], -1), "b e ... -> b e (...)")
 
     def reproject(self, indicies: tuple[Int[Tensor, "n_edges"], Int[Tensor, "n_edges"], Int[Tensor, "n_edges"]] | None = None) -> Float[Tensor, "1 n_edges 2 P P"]:
         """Reproject patches from their source frames into target frames.
@@ -370,7 +373,8 @@ class DPVO:
         coords: Float[Tensor, "1 n_edges P P 2"] = pops.transform(
             SE3(self.poses), self.patches, self.intrinsics, ii, jj, kk
         )
-        return coords.permute(0, 1, 4, 2, 3).contiguous()
+        # Move xy-coordinate dim before patch spatial dims for the correlation code
+        return rearrange(coords, "b e p1 p2 c -> b e c p1 p2")
 
     def append_factors(self, ii: Int[Tensor, "n_new"], jj: Int[Tensor, "n_new"]) -> None:
         """Add new measurement edges to the factor graph.
@@ -389,10 +393,10 @@ class DPVO:
         self.kk: Int[Tensor, "n_edges"] = torch.cat([self.kk, ii])
         self.ii: Int[Tensor, "n_edges"] = torch.cat([self.ii, self.ix[ii]])
 
-        net: Float[Tensor, "1 n_new DIM"] = torch.zeros(1, len(ii), self.DIM, **self.kwargs)
+        net: Float[Tensor, "1 n_new DIM"] = torch.zeros(1, len(ii), self.DIM, device="cuda", dtype=self.feature_dtype)
         self.net: Float[Tensor, "1 n_edges DIM"] = torch.cat([self.net, net], dim=1)
 
-    def remove_factors(self, m: Int[Tensor, "n_edges"]) -> None:
+    def remove_factors(self, m: Bool[Tensor, "n_edges"]) -> None:
         """Remove edges from the factor graph by boolean mask.
 
         Edges where ``m`` is ``True`` are removed.  The corresponding
@@ -428,10 +432,10 @@ class DPVO:
         jj: Int[Tensor, "M"] = self.n * torch.ones_like(kk)
         ii: Int[Tensor, "M"] = self.ix[kk]
 
-        net: Float[Tensor, "1 M DIM"] = torch.zeros(1, len(ii), self.DIM, **self.kwargs)
+        net: Float[Tensor, "1 M DIM"] = torch.zeros(1, len(ii), self.DIM, device="cuda", dtype=self.feature_dtype)
         coords: Float[Tensor, "1 M 2 P P"] = self.reproject(indicies=(ii, jj, kk))
 
-        with autocast(enabled=self.cfg.MIXED_PRECISION):
+        with autocast(enabled=self.cfg.mixed_precision):
             corr: Float[Tensor, "1 M corr_feat"] = self.corr(coords, indicies=(kk, jj))
             ctx: Float[Tensor, "1 M DIM"] = self.imap[:, kk % (self.M * self.mem)]
             net: Float[Tensor, "1 M DIM"]
@@ -461,7 +465,7 @@ class DPVO:
         Returns:
             Mean flow magnitude in pixels (scalar float).
         """
-        k: Int[Tensor, "n_edges"] = (self.ii == i) & (self.jj == j)
+        k: Bool[Tensor, "n_edges"] = (self.ii == i) & (self.jj == j)
         ii: Int[Tensor, "n_matched"] = self.ii[k]
         jj: Int[Tensor, "n_matched"] = self.jj[k]
         kk: Int[Tensor, "n_matched"] = self.kk[k]
@@ -492,23 +496,23 @@ class DPVO:
         See Sec. 3.4 of Teed et al. (2022) for keyframe management.
         """
         # Check flow between frames flanking the candidate
-        i: int = self.n - self.cfg.KEYFRAME_INDEX - 1
-        j: int = self.n - self.cfg.KEYFRAME_INDEX + 1
+        i: int = self.n - self.cfg.keyframe_index - 1
+        j: int = self.n - self.cfg.keyframe_index + 1
         # Average bidirectional flow (i->j and j->i)
         m: float = self.motionmag(i, j) + self.motionmag(j, i)
 
-        if m / 2 < self.cfg.KEYFRAME_THRESH:
+        if m / 2 < self.cfg.keyframe_thresh:
             # Insufficient parallax: remove the candidate keyframe
-            k: int = self.n - self.cfg.KEYFRAME_INDEX
-            t0: float = self.tstamps_[k - 1].item()
-            t1: float = self.tstamps_[k].item()
+            k: int = self.n - self.cfg.keyframe_index
+            t0: int = int(self.tstamps_[k - 1].item())
+            t1: int = int(self.tstamps_[k].item())
 
             # Store relative pose for interpolation at termination
             dP: SE3 = SE3(self.poses_[k]) * SE3(self.poses_[k - 1]).inv()
             self.delta[t1] = (t0, dP)
 
             # Remove all edges incident to the removed frame
-            to_remove: Int[Tensor, "n_edges"] = (self.ii == k) | (self.jj == k)
+            to_remove: Bool[Tensor, "n_edges"] = (self.ii == k) | (self.jj == k)
             self.remove_factors(to_remove)
 
             # Shift edge indices: patches after frame k move down by M,
@@ -535,7 +539,7 @@ class DPVO:
             self.m -= self.M
 
         # Prune stale edges: remove edges whose source patch is too old
-        to_remove: Int[Tensor, "n_edges"] = self.ix[self.kk] < self.n - self.cfg.REMOVAL_WINDOW
+        to_remove: Bool[Tensor, "n_edges"] = self.ix[self.kk] < self.n - self.cfg.removal_window
         self.remove_factors(to_remove)
 
     def update(self) -> None:
@@ -582,7 +586,7 @@ class DPVO:
         with Timer("BA", enabled=self.enable_timing):
             # Step 4: Bundle adjustment via the fast C++ backend
             # Only optimize poses from t0 to self.n (sliding window)
-            t0: int = self.n - self.cfg.OPTIMIZATION_WINDOW if self.is_initialized else 1
+            t0: int = self.n - self.cfg.optimization_window if self.is_initialized else 1
             t0: int = max(t0, 1)
 
             try:
@@ -640,7 +644,7 @@ class DPVO:
             Generator yielding ``(patch_indices, frame_indices)`` for the
             forward edges.
         """
-        r: int = self.cfg.PATCH_LIFETIME
+        r: int = self.cfg.patch_lifetime
         t0: int = self.M * max((self.n - r), 0)
         t1: int = self.M * max((self.n - 1), 0)
         return flatmeshgrid(
@@ -660,7 +664,7 @@ class DPVO:
             Generator yielding ``(patch_indices, frame_indices)`` for the
             backward edges.
         """
-        r: int = self.cfg.PATCH_LIFETIME
+        r: int = self.cfg.patch_lifetime
         t0: int = self.M * max((self.n - 1), 0)
         t1: int = self.M * max((self.n - 0), 0)
         return flatmeshgrid(
@@ -669,7 +673,7 @@ class DPVO:
             indexing="ij",
         )
 
-    def __call__(self, tstamp: int, image: Float[Tensor, "3 ht wd"], intrinsics: Float[Tensor, "4"]) -> None:
+    def __call__(self, tstamp: int, image: UInt8[Tensor, "3 ht wd"], intrinsics: Float[Tensor, "4"]) -> None:
         """Process a new frame: extract patches, predict pose, update and optimize.
 
         This is the main entry point called once per frame.  The full
@@ -715,7 +719,7 @@ class DPVO:
         image: Float[Tensor, "1 1 3 ht wd"] = 2 * (image[None, None] / 255.0) - 0.5
 
         # Step 1: Feature extraction and patch sampling
-        with autocast(enabled=self.cfg.MIXED_PRECISION):
+        with autocast(enabled=self.cfg.mixed_precision):
             fmap: Float[Tensor, "1 1 128 h4 w4"]
             gmap: Float[Tensor, "1 M 128 P P"]
             imap: Float[Tensor, "1 M DIM 1 1"]
@@ -723,8 +727,8 @@ class DPVO:
             clr: Float[Tensor, "1 M 3"]
             fmap, gmap, imap, patches, _, clr = self.network.patchify(
                 image,
-                patches_per_image=self.cfg.PATCHES_PER_FRAME,
-                gradient_bias=self.cfg.GRADIENT_BIAS,
+                patches_per_image=self.cfg.patches_per_frame,
+                gradient_bias=self.cfg.gradient_bias,
                 return_color=True,
             )
 
@@ -743,13 +747,13 @@ class DPVO:
 
         # Step 2: Motion model -- predict initial pose for new frame
         if self.n > 1:
-            if self.cfg.MOTION_MODEL == "DAMPED_LINEAR":
+            if self.cfg.motion_model == "DAMPED_LINEAR":
                 # Damped constant-velocity model on SE3:
                 # P_new = exp(damping * log(P_{n-1} * P_{n-2}^{-1})) * P_{n-1}
                 P1: SE3 = SE3(self.poses_[self.n - 1])
                 P2: SE3 = SE3(self.poses_[self.n - 2])
 
-                xi: Float[Tensor, "6"] = self.cfg.MOTION_DAMPING * (P1 * P2.inv()).log()
+                xi: Float[Tensor, "6"] = self.cfg.motion_damping * (P1 * P2.inv()).log()
                 tvec_qvec: Float[Tensor, "7"] = (SE3.exp(xi) * P1).data
                 self.poses_[self.n] = tvec_qvec
             else:
