@@ -556,3 +556,30 @@ def run_dpvo_pipeline(
     if handle is not None:
         handle.prediction = dpvo_pred
         handle.elapsed_time = total_time
+
+
+def dpvo_inference(config: DPVOInferenceConfig) -> None:
+    """Run the DPVO inference pipeline from the command line.
+
+    This is the main CLI entry point. It exhausts the
+    :func:`run_dpvo_pipeline` generator silently and prints summary stats.
+
+    Args:
+        config: Inference configuration (typically from ``tyro.cli``).
+    """
+    handle: DPVOPipelineHandle = DPVOPipelineHandle()
+
+    for _msg in run_dpvo_pipeline(
+        dpvo_config=config.dpvo_config,
+        network_path=config.network_path,
+        imagedir=config.imagedir,
+        calib=config.calib,
+        stride=config.stride,
+        skip=config.skip,
+        handle=handle,
+    ):
+        pass  # CLI exhausts the generator silently
+
+    if handle.prediction is not None:
+        print(f"Processed in {handle.elapsed_time:.2f}s")
+        print(f"Keyframes: {handle.prediction.final_poses.shape[0]}")

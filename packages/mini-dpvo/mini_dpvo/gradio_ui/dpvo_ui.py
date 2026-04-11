@@ -15,19 +15,13 @@ Rerun streaming follows the **mast3r-slam pattern**:
 with the recording passed through to the pipeline.
 """
 
-try:
-    import spaces  # type: ignore # noqa: F401
-
-    IN_SPACES: bool = True
-except ImportError:
-    IN_SPACES = False
-
 from collections.abc import Generator
 from pathlib import Path
 
 import gradio as gr
 import rerun as rr
 import rerun.blueprint as rrb
+import spaces  # type: ignore
 import torch
 from gradio_rerun import Rerun
 from mini_dust3r.model import AsymmetricCroCo3DStereo
@@ -121,10 +115,7 @@ def dpvo_streaming_fn(
     yield stream.read(), f"Complete ({elapsed})"
 
 
-# Wrap the callback with HuggingFace Spaces GPU decorator when running
-# on Zero GPU infrastructure.
-if IN_SPACES:
-    dpvo_streaming_fn = spaces.GPU(dpvo_streaming_fn)
+dpvo_streaming_fn = spaces.GPU(dpvo_streaming_fn)
 
 
 # ── UI helpers ──────────────────────────────────────────────────────────

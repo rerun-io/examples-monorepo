@@ -142,28 +142,24 @@ class DPVO:
         # Circular buffer size for feature maps (to avoid storing all frames)
         self.mem: int = 32
 
-        if self.cfg.mixed_precision:
-            self.kwargs: dict[str, object] = {"device": "cuda", "dtype": torch.half}
-            kwargs: dict[str, object] = self.kwargs
-        else:
-            self.kwargs: dict[str, object] = {"device": "cuda", "dtype": torch.float}
-            kwargs: dict[str, object] = self.kwargs
+        # Feature dtype: half for mixed precision, float otherwise
+        self.feature_dtype: torch.dtype = torch.half if self.cfg.mixed_precision else torch.float
 
         # Circular buffers for per-frame network features
-        self.imap_: Float[Tensor, "mem M DIM"] = torch.zeros(self.mem, self.M, DIM, **kwargs)
-        self.gmap_: Float[Tensor, "mem M 128 P P"] = torch.zeros(self.mem, self.M, 128, self.P, self.P, **kwargs)
+        self.imap_: Float[Tensor, "mem M DIM"] = torch.zeros(self.mem, self.M, DIM, device="cuda", dtype=self.feature_dtype)
+        self.gmap_: Float[Tensor, "mem M 128 P P"] = torch.zeros(self.mem, self.M, 128, self.P, self.P, device="cuda", dtype=self.feature_dtype)
 
         ht: int = ht // RES
         wd: int = wd // RES
 
         # Two-level feature pyramid for correlation computation
-        self.fmap1_: Float[Tensor, "1 mem 128 h4 w4"] = torch.zeros(1, self.mem, 128, ht // 1, wd // 1, **kwargs)
-        self.fmap2_: Float[Tensor, "1 mem 128 h16 w16"] = torch.zeros(1, self.mem, 128, ht // 4, wd // 4, **kwargs)
+        self.fmap1_: Float[Tensor, "1 mem 128 h4 w4"] = torch.zeros(1, self.mem, 128, ht // 1, wd // 1, device="cuda", dtype=self.feature_dtype)
+        self.fmap2_: Float[Tensor, "1 mem 128 h16 w16"] = torch.zeros(1, self.mem, 128, ht // 4, wd // 4, device="cuda", dtype=self.feature_dtype)
 
         self.pyramid: tuple[Float[Tensor, "1 mem 128 h4 w4"], Float[Tensor, "1 mem 128 h16 w16"]] = (self.fmap1_, self.fmap2_)
 
         # GRU hidden state and factor graph edge indices (dynamically sized)
-        self.net: Float[Tensor, "1 n_edges DIM"] = torch.zeros(1, 0, DIM, **kwargs)
+        self.net: Float[Tensor, "1 n_edges DIM"] = torch.zeros(1, 0, DIM, device="cuda", dtype=self.feature_dtype)
         self.ii: Int[Tensor, "n_edges"] = torch.as_tensor([], dtype=torch.long, device="cuda")
         self.jj: Int[Tensor, "n_edges"] = torch.as_tensor([], dtype=torch.long, device="cuda")
         self.kk: Int[Tensor, "n_edges"] = torch.as_tensor([], dtype=torch.long, device="cuda")
@@ -293,6 +289,7 @@ class DPVO:
         # Build lookup from internal timestamp -> pose for active keyframes
         self.traj: dict[int, Float32[Tensor, "7"]] = {}
         for i in range(self.n):
+            # tstamps_ stores frame indices as float64; convert to int for dict keys
             current_t: int = int(self.tstamps_[i].item())
             self.traj[current_t] = self.poses_[i]
 
@@ -341,9 +338,9 @@ class DPVO:
         ii1: Int[Tensor, "n_edges"] = ii % (self.M * self.mem)
         jj1: Int[Tensor, "n_edges"] = jj % (self.mem)
         # Level 1: stride-4 features (coords as-is)
-        corr1 = altcorr.corr(self.gmap, self.pyramid[0], coords / 1, ii1, jj1, 3)
+        corr1: Float[Tensor, "..."] = altcorr.corr(self.gmap, self.pyramid[0], coords / 1, ii1, jj1, 3)
         # Level 2: stride-16 features (coords scaled by 1/4)
-        corr2 = altcorr.corr(self.gmap, self.pyramid[1], coords / 4, ii1, jj1, 3)
+        corr2: Float[Tensor, "..."] = altcorr.corr(self.gmap, self.pyramid[1], coords / 4, ii1, jj1, 3)
         return rearrange(torch.stack([corr1, corr2], -1), "b e ... -> b e (...)")
 
     def reproject(self, indicies: tuple[Int[Tensor, "n_edges"], Int[Tensor, "n_edges"], Int[Tensor, "n_edges"]] | None = None) -> Float[Tensor, "1 n_edges 2 P P"]:
@@ -371,6 +368,7 @@ class DPVO:
         coords: Float[Tensor, "1 n_edges P P 2"] = pops.transform(
             SE3(self.poses), self.patches, self.intrinsics, ii, jj, kk
         )
+        # Move xy-coordinate dim before patch spatial dims for the correlation code
         return rearrange(coords, "b e p1 p2 c -> b e c p1 p2")
 
     def append_factors(self, ii: Int[Tensor, "n_new"], jj: Int[Tensor, "n_new"]) -> None:
@@ -390,7 +388,7 @@ class DPVO:
         self.kk: Int[Tensor, "n_edges"] = torch.cat([self.kk, ii])
         self.ii: Int[Tensor, "n_edges"] = torch.cat([self.ii, self.ix[ii]])
 
-        net: Float[Tensor, "1 n_new DIM"] = torch.zeros(1, len(ii), self.DIM, **self.kwargs)
+        net: Float[Tensor, "1 n_new DIM"] = torch.zeros(1, len(ii), self.DIM, device="cuda", dtype=self.feature_dtype)
         self.net: Float[Tensor, "1 n_edges DIM"] = torch.cat([self.net, net], dim=1)
 
     def remove_factors(self, m: Bool[Tensor, "n_edges"]) -> None:
@@ -429,7 +427,7 @@ class DPVO:
         jj: Int[Tensor, "M"] = self.n * torch.ones_like(kk)
         ii: Int[Tensor, "M"] = self.ix[kk]
 
-        net: Float[Tensor, "1 M DIM"] = torch.zeros(1, len(ii), self.DIM, **self.kwargs)
+        net: Float[Tensor, "1 M DIM"] = torch.zeros(1, len(ii), self.DIM, device="cuda", dtype=self.feature_dtype)
         coords: Float[Tensor, "1 M 2 P P"] = self.reproject(indicies=(ii, jj, kk))
 
         with autocast(enabled=self.cfg.mixed_precision):
@@ -501,6 +499,7 @@ class DPVO:
         if m / 2 < self.cfg.keyframe_thresh:
             # Insufficient parallax: remove the candidate keyframe
             k: int = self.n - self.cfg.keyframe_index
+            # tstamps_ stores frame indices as float64; convert to int for dict keys
             t0: int = int(self.tstamps_[k - 1].item())
             t1: int = int(self.tstamps_[k].item())
 
