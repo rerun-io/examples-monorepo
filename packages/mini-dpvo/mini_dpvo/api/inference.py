@@ -241,8 +241,8 @@ def log_trajectory(
 
 def log_final(
     parent_log_path: Path,
-    final_poses: Float32[torch.Tensor, "num_keyframes 7"],
-    tstamps: Float64[torch.Tensor, "num_keyframes"],  # noqa: F821
+    final_poses: Float32[np.ndarray, "num_keyframes 7"],
+    tstamps: Int[np.ndarray, "num_keyframes"],
     final_points: Float32[torch.Tensor, "num_points 3"],
     final_colors: UInt8[torch.Tensor, "buffer_size num_patches 3"],
 ) -> None:
@@ -412,6 +412,7 @@ def run_dpvo_pipeline(
     parent_log_path: Path = Path("world"),
     handle: DPVOPipelineHandle | None = None,
     recording: rr.RecordingStream | None = None,
+    jpg_quality: int = 90,
     timeit: bool = False,
 ) -> Generator[str, None, None]:
     """Run the full DPVO visual-odometry pipeline on an image dir or video.
@@ -444,6 +445,7 @@ def run_dpvo_pipeline(
         handle: Mutable handle to store results in.
         recording: Rerun recording stream for Gradio (thread-local).
             ``None`` uses the global recording (CLI).
+        jpg_quality: JPEG compression quality (0--100) for Rerun image logging.
         timeit: If ``True``, print per-iteration timing via ``Timer``.
 
     Yields:
@@ -525,11 +527,18 @@ def run_dpvo_pipeline(
                     intri_np=intri_np,
                     bgr_hw3=bgr_hw3,
                     path_list=path_list,
+                    jpg_quality=jpg_quality,
                 )
 
             frame_idx += 1
             pbar.update(1)
             yield f"Frame {frame_idx}/{total_frames}"
+
+    reader.join()
+
+    if slam is None:
+        yield "No frames processed"
+        return
 
     # Run additional update iterations for final bundle-adjustment refinement
     yield "Running final bundle adjustment..."
@@ -538,11 +547,6 @@ def run_dpvo_pipeline(
 
     total_time: float = timer() - start
     print(f"Total time: {total_time:.2f}s")
-
-    reader.join()
-
-    final_poses: Float32[torch.Tensor, "num_keyframes 7"]
-    tstamps: Float64[torch.Tensor, "num_keyframes"]  # noqa: F821
 
     final_poses, tstamps = slam.terminate()
     final_points: Float32[torch.Tensor, "num_points 3"] = slam.points_

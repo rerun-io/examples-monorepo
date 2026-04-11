@@ -84,8 +84,7 @@ def dpvo_streaming_fn(
         video_file_path: Local path to the uploaded video file.
         stride: Keep every *stride*-th frame.
         skip: Number of leading frames to discard.
-        jpg_quality: JPEG quality for image logging (unused by pipeline
-            directly — reserved for future per-frame quality control).
+        jpg_quality: JPEG compression quality (0--100) for Rerun image logging.
 
     Yields:
         Tuple of (Rerun binary stream bytes, status message string).
@@ -108,6 +107,7 @@ def dpvo_streaming_fn(
         dust3r_model=DUST3R_MODEL,
         handle=handle,
         recording=recording,
+        jpg_quality=jpg_quality,
     ):
         yield stream.read(), msg
 

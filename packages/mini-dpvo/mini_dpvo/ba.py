@@ -395,7 +395,7 @@ def BA(
     n: int = max(ii.max().item(), jj.max().item()) + 1
 
     # ----- Step 1: Reproject all edges and compute Jacobians -----
-    coords: Float[Tensor, "1 n_edges 2 ps ps"]
+    coords: Float[Tensor, "1 n_edges ps ps 2"]
     v: Float[Tensor, "1 n_edges ps ps"]
     Ji: Float[Tensor, "1 n_edges 2 6"]
     Jj: Float[Tensor, "1 n_edges 2 6"]
