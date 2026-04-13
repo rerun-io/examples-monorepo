@@ -145,7 +145,7 @@ def patchify(x: Float[Tensor, "b n c h w"], patch_size: int = 3) -> Float[Tensor
     Args:
         x: Input feature map of shape ``(b, n, c, h, w)``.
         patch_size: Side length of each square patch (default 3, matching
-            DPVO's 3x3 patches).
+            DPVO's 3×3 patches).
 
     Returns:
         Tensor of shape ``(b, n_patches, c, patch_size, patch_size)``
@@ -170,7 +170,7 @@ def pyramidify(fmap: Float[Tensor, "b n c h w"], lvls: list[int] | None = None) 
 
     The correlation volume in DPVO is computed at two scales: stride-4
     (``lvl=1``, i.e. the original feature map) and stride-16 (``lvl=4``).
-    This yields a ``(2R+1)^2 x 2`` correlation feature vector per edge.
+    This yields a ``(2R + 1)² × 2`` correlation feature vector per edge.
     See Sec. 3.2 of Teed et al. (2022).
 
     Args:

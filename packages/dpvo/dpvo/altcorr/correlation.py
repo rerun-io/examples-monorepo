@@ -21,7 +21,7 @@ class CorrLayer(torch.autograd.Function):
 
     Given two multi-frame feature maps and a set of 2-D coordinate grids,
     the forward pass computes dot-product correlation within a local
-    ``(2*radius+1)^2`` neighbourhood for each edge ``(ii[e], jj[e])``.
+    ``(2r + 1)²`` neighbourhood for each edge ``(ii[e], jj[e])``.
 
     The backward pass distributes gradients back to both feature maps,
     optionally applying random edge dropout to reduce memory/compute.
@@ -47,12 +47,12 @@ class CorrLayer(torch.autograd.Function):
             coords: 2-D lookup coordinates per edge and patch pixel.
             ii: Source frame indices for each edge.
             jj: Target frame indices for each edge.
-            radius: Search radius defining the ``(2r+1)^2`` neighbourhood.
+            radius: Search radius defining the ``(2r + 1)²`` neighbourhood.
             dropout: Fraction of edges to keep during the backward pass
                 (1.0 = keep all, <1.0 = randomly drop edges).
 
         Returns:
-            Correlation volume of shape ``(1, n_edges, 2R+1, 2R+1, ps, ps)``.
+            Correlation volume of shape ``(1, n_edges, 2R + 1, 2R + 1, ps, ps)``.
         """
         ctx.save_for_backward(fmap1, fmap2, coords, ii, jj)
         ctx.radius = radius
@@ -106,7 +106,7 @@ class PatchLayer(torch.autograd.Function):
     """Custom autograd function for extracting feature patches at coordinates.
 
     Given a feature tensor and a set of 2-D coordinates, the forward pass
-    extracts ``(2*radius+2)^2`` patches centred on each coordinate (the extra
+    extracts ``(2r + 2)²`` patches centred on each coordinate (the extra
     +1 in each dimension supports bilinear interpolation in
     :func:`patchify`).
     """
@@ -164,8 +164,8 @@ def patchify(net: Float[Tensor, "..."], coords: Float[Tensor, "..."], radius: in
 
     Delegates to :class:`PatchLayer` for the raw extraction and then
     optionally applies bilinear interpolation using the fractional part of
-    the coordinates to produce a ``(2*radius+1)^2`` patch from the
-    ``(2*radius+2)^2`` raw output.
+    the coordinates to produce a ``(2r + 1)²`` patch from the
+    ``(2r + 2)²`` raw output.
 
     Args:
         net: Feature tensor to extract patches from.

@@ -36,7 +36,7 @@ class DPVOConfig:
     the top-M by image gradient magnitude."""
 
     patches_per_frame: int = 80
-    """Number of sparse 3x3 patches tracked per frame (M in the paper)."""
+    """Number of sparse 3×3 patches tracked per frame (M in the paper)."""
 
     removal_window: int = 20
     """Edges with source older than ``(current - removal_window)`` are pruned."""
@@ -56,7 +56,7 @@ class DPVOConfig:
 
     motion_model: Literal["DAMPED_LINEAR"] = "DAMPED_LINEAR"
     """Motion model for pose extrapolation. Currently only ``DAMPED_LINEAR``
-    is implemented: ``P_new = P_{n-1} * (P_{n-1} * P_{n-2}^{-1})^damping``."""
+    is implemented: ``Pₙ = exp(d · log(Pₙ₋₁ · Pₙ₋₂⁻¹)) · Pₙ₋₁``."""
 
     motion_damping: float = 0.5
     """Damping factor for the damped linear motion model.

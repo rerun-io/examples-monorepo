@@ -201,8 +201,8 @@ def readDPT(filename: str) -> Float32[ndarray, "h w"]:
 def cam_read(filename: str) -> tuple[Float64[ndarray, "7"], Float64[ndarray, "4"]]:
     """Read a binary ``.cam`` camera file and return pose + intrinsics.
 
-    The file encodes a 3x3 intrinsic matrix **M** and a 3x4 extrinsic
-    matrix **N** such that ``x = M * N * X`` projects a homogeneous world
+    The file encodes a 3×3 intrinsic matrix **M** and a 3×4 extrinsic
+    matrix **N** such that ``x = M · N · X`` projects a homogeneous world
     point **X** to pixel coordinates **x**.
 
     The extrinsic rotation is converted to a unit quaternion and concatenated

@@ -112,6 +112,8 @@ class DPVOInferenceConfig:
     """Frame stride for sampling."""
     skip: int = 0
     """Number of leading frames to skip."""
+    max_frames: int = 0
+    """Maximum number of frames to process (0 = no limit)."""
 
 
 # ── Rerun logging helpers ───────────────────────────────────────────────
@@ -325,7 +327,7 @@ def calib_from_dust3r(
     model: AsymmetricCroCo3DStereo,
     device: str,
 ) -> Float32[ndarray, "3 3"]:
-    """Estimate a 3x3 camera intrinsic matrix from a single image using DUSt3R.
+    """Estimate a 3×3 camera intrinsic matrix from a single image using DUSt3R.
 
     The image is temporarily saved to disk, fed through DUSt3R monocular
     calibration, and the resulting intrinsics are up-scaled from the DUSt3R
@@ -338,7 +340,7 @@ def calib_from_dust3r(
         device: Torch device string (e.g. ``"cuda"``, ``"cpu"``).
 
     Returns:
-        The 3x3 intrinsic matrix ``K`` scaled to the original image size.
+        The 3×3 intrinsic matrix ``K`` scaled to the original image size.
     """
     tmp_path: Path = Path("/tmp/dpvo/tmp.png")
     # Save image to a temporary file for DUSt3R (expects a directory of images)
@@ -394,6 +396,7 @@ def run_dpvo_pipeline(
     recording: rr.RecordingStream | None = None,
     jpg_quality: int = 90,
     timeit: bool = False,
+    max_frames: int = 0,
 ) -> Generator[str, None, None]:
     """Run the full DPVO visual-odometry pipeline on an image dir or video.
 
@@ -476,6 +479,8 @@ def run_dpvo_pipeline(
             # queue will have a (-1, image, intrinsics) tuple when the reader is done
             if t < 0:
                 break
+            if max_frames > 0 and frame_idx >= max_frames:
+                break
 
             rr.set_time("timestep", sequence=t)
 
@@ -507,6 +512,7 @@ def run_dpvo_pipeline(
             pbar.update(1)
             yield f"Frame {frame_idx}/{total_frames}"
 
+    reader.kill()
     reader.join()
 
     if slam is None:
@@ -555,6 +561,7 @@ def dpvo_inference(config: DPVOInferenceConfig) -> None:
         stride=config.stride,
         skip=config.skip,
         handle=handle,
+        max_frames=config.max_frames,
     ):
         pass  # CLI exhausts the generator silently
 

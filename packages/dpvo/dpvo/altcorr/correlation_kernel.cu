@@ -7,7 +7,7 @@
  * This file implements four GPU kernels and their host-side launch wrappers:
  *
  *   Patchify (extract / scatter):
- *     - patchify_forward_kernel  : gather D x D patches from a feature map
+ *     - patchify_forward_kernel  : gather D × D patches from a feature map
  *     - patchify_backward_kernel : scatter gradients back via atomicAdd
  *
  *   Correlation (dot-product matching):
@@ -26,10 +26,10 @@
  *   H, W   = spatial dimensions of the feature map
  *   H2, W2 = spatial dimensions of the target feature map (may differ)
  *   R  = search radius (a hyperparameter, e.g. 3)
- *   D  = 2*R + 2   -- the "diameter" including one extra pixel for bilinear
+ *   D  = 2R + 2    -- the "diameter" including one extra pixel for bilinear
  *                      interpolation.  After interpolation the effective
- *                      neighborhood becomes (2*R+1) x (2*R+1).
- *   H_p, W_p = spatial dimensions of the 3x3 patch grid (typically 3x3)
+ *                      neighborhood becomes (2R + 1) × (2R + 1).
+ *   H_p, W_p = spatial dimensions of the 3×3 patch grid (typically 3×3)
  */
 
 #include <torch/extension.h>
@@ -58,15 +58,15 @@ bool within_bounds(int h, int w, int H, int W) {
 /* =========================================================================
  * PATCHIFY KERNELS
  * =========================================================================
- * "Patchify" extracts small D x D windows from a dense feature map at
+ * "Patchify" extracts small D × D windows from a dense feature map at
  * floating-point (x, y) locations.  The window is centered on floor(x),
  * floor(y) and extends from -R to R+1 in each axis.  The extra pixel on
- * each side (D = 2R+2 instead of 2R+1) lets the caller perform bilinear
+ * each side (D = 2R + 2 instead of 2R + 1) lets the caller perform bilinear
  * interpolation between four neighboring integer-offset patches to get
  * sub-pixel accurate features.
  *
  * Parallelization: one CUDA thread per (batch, patch_index, row, col)
- * tuple, i.e. B * M * D * D total threads.  Each thread copies one pixel
+ * tuple, i.e. B · M · D · D total threads.  Each thread copies one pixel
  * across all C channels.
  * ======================================================================= */
 
@@ -83,18 +83,18 @@ bool within_bounds(int h, int w, int H, int W) {
  *                 x is the horizontal (column) coordinate,
  *                 y is the vertical (row) coordinate.
  * @param patches  Output tensor, shape [B, M, C, D, D].
- *                 Each (b, m) slice is a D x D patch with C channels.
+ *                 Each (b, m) slice is a D × D patch with C channels.
  *
  * Thread indexing:
  *   The linear thread index `n` is decomposed in column-major order:
- *     ii = n % D        -> column within the D x D patch
- *     jj = (n/D) % D    -> row within the D x D patch
- *     m  = ... % M       -> patch index
- *     b  = ...           -> batch index
+ *     ii = n % D        → column within the D × D patch
+ *     jj = (n/D) % D    → row within the D × D patch
+ *     m  = ... % M       → patch index
+ *     b  = ...           → batch index
  *
  *   For each thread:
- *     i = floor(y) + (ii - R)   -> absolute row in the feature map
- *     j = floor(x) + (jj - R)   -> absolute column in the feature map
+ *     i = floor(y) + (ii - R)   → absolute row in the feature map
+ *     j = floor(x) + (jj - R)   → absolute column in the feature map
  *   Then for every channel k: patches[b][m][k][ii][jj] = net[b][k][i][j]
  */
 template <typename scalar_t>
@@ -103,7 +103,7 @@ __global__ void patchify_forward_kernel(int R,
     const torch::PackedTensorAccessor32<float,3,torch::RestrictPtrTraits> coords,
     torch::PackedTensorAccessor32<scalar_t,5,torch::RestrictPtrTraits> patches)
 {
-  // D = 2*R + 2: patch side length including the extra border for bilinear interp
+  // D = 2R + 2: patch side length including the extra border for bilinear interp
   const int D = 2*R + 2;
 
   const int B = coords.size(0);
@@ -198,31 +198,31 @@ __global__ void patchify_backward_kernel(int R,
  *     the reprojected (x, y) position in the target frame.
  *
  * The output is a "correlation volume" of shape [B, M, D, D, H_p, W_p]
- * where D x D is the search neighborhood and H_p x W_p is the 3x3 patch
+ * where D × D is the search neighborhood and H_p × W_p is the 3×3 patch
  * grid.  The host wrapper then applies bilinear interpolation across the
- * D x D grid to produce sub-pixel-accurate correlation at the fractional
- * (x, y) position, yielding shape [B, M, (2R+1), (2R+1), H_p, W_p].
+ * D × D grid to produce sub-pixel-accurate correlation at the fractional
+ * (x, y) position, yielding shape [B, M, (2R + 1), (2R + 1), H_p, W_p].
  *
  * Parallelization: one thread per (batch, patch, patch_row, patch_col,
- * search_row, search_col) = B * M * H_p * W_p * D * D total threads.
+ * search_row, search_col) = B · M · H_p · W_p · D · D total threads.
  * Each thread computes one dot product over C channels.
  * ======================================================================= */
 
 /**
  * Forward kernel: compute integer-grid dot-product correlations.
  *
- * For each edge (source frame ii -> target frame jj) and each pixel in the
- * 3x3 patch grid (i0, j0), this kernel evaluates the dot product:
+ * For each edge (source frame ii → target frame jj) and each pixel in the
+ * 3×3 patch grid (i0, j0), this kernel evaluates the dot product:
  *
  *   corr[b][m][ii_off][jj_off][i0][j0] =
- *       sum_c  fmap1[b][us[m]][c][i0][j0] * fmap2[b][vs[m]][c][i1][j1]
+ *       Σ_c fmap1[b][us[m]][c][i0][j0] · fmap2[b][vs[m]][c][i1][j1]
  *
  * where:
  *   (i1, j1) = ( floor(y) + ii_off - R,  floor(x) + jj_off - R )
  *   (x, y)   = coords[b][m][:][i0][j0]   -- the reprojected position
  *   us[m] / vs[m] = source / target frame indices for edge m
  *
- * The dot product over C=128 channels is unrolled 8-at-a-time for better
+ * The dot product over C = 128 channels is unrolled 8-at-a-time for better
  * instruction-level parallelism (ILP).  The #pragma unroll 8 hint tells
  * the compiler to process the outer loop in chunks of 8 channels.
  *
@@ -315,9 +315,9 @@ __global__ void corr_forward_kernel(int R,
  * Backward kernel: distribute correlation gradient to both feature maps.
  *
  * Given dL/d(corr), this kernel computes dL/d(fmap1) and dL/d(fmap2).
- * Since corr = sum_c fmap1[c] * fmap2[c], the chain rule gives:
- *   dL/d(fmap1[c]) += dL/d(corr) * fmap2[c]
- *   dL/d(fmap2[c]) += dL/d(corr) * fmap1[c]
+ * Since corr = Σ_c fmap1[c] · fmap2[c], the chain rule gives:
+ *   dL/d(fmap1[c]) += dL/d(corr) · fmap2[c]
+ *   dL/d(fmap2[c]) += dL/d(corr) · fmap1[c]
  *
  * Multiple threads may write to the same feature-map location (because
  * different patch-grid positions or search offsets can map to the same
@@ -408,18 +408,18 @@ __global__ void corr_backward_kernel(int R,
  * interpolation over the search neighborhood to get sub-pixel accuracy.
  *
  * The kernel computes correlation at integer grid offsets, producing a
- * D x D volume per patch pixel.  Bilinear interpolation between the four
- * nearest integer positions reduces this to (D-1) x (D-1) = (2R+1) x (2R+1),
+ * D × D volume per patch pixel.  Bilinear interpolation between the four
+ * nearest integer positions reduces this to (D - 1) × (D - 1) = (2R + 1) × (2R + 1),
  * weighted by the fractional part of the reprojected coordinates.
  *
  * Bilinear interpolation formula (for each output position):
- *   out = (1-dx)*(1-dy) * corr[0:D-1, 0:D-1]     (top-left)
- *       +    dx *(1-dy) * corr[0:D-1, 1:D  ]      (top-right)
- *       + (1-dx)*   dy  * corr[1:D,   0:D-1]      (bottom-left)
- *       +    dx *   dy  * corr[1:D,   1:D  ]      (bottom-right)
+ *   out = (1 - dx) · (1 - dy) · corr[0:D-1, 0:D-1]   (top-left)
+ *       +      dx · (1 - dy) · corr[0:D-1, 1:D]      (top-right)
+ *       + (1 - dx) ·      dy · corr[1:D,   0:D-1]    (bottom-left)
+ *       +      dx ·      dy · corr[1:D,   1:D]       (bottom-right)
  * where dx = x - floor(x), dy = y - floor(y).
  *
- * After interpolation the output is permuted to [B, M, (2R+1), (2R+1), H_p, W_p]
+ * After interpolation the output is permuted to [B, M, (2R + 1), (2R + 1), H_p, W_p]
  * with the search dimensions swapped to match the expected downstream layout.
  *
  * @param fmap1   Source features [B, N_frames, C, H, W].
@@ -429,7 +429,7 @@ __global__ void corr_backward_kernel(int R,
  * @param jj      Target frame index per edge [M].
  * @param radius  Search radius R.
  *
- * @return {out} where out has shape [B, M, (2R+1), (2R+1), H_p, W_p].
+ * @return {out} where out has shape [B, M, (2R + 1), (2R + 1), H_p, W_p].
  */
 std::vector<torch::Tensor> corr_cuda_forward(
   torch::Tensor fmap1,
@@ -473,15 +473,15 @@ std::vector<torch::Tensor> corr_cuda_forward(
    *            |                              |
    *     (floor(x), floor(y)+1) --- (floor(x)+1, floor(y)+1)
    *
-   * This is why D = 2R+2: we need one extra row and column beyond the
-   * 2R+1 search window so we have neighbors to interpolate with.
+   * This is why D = 2R + 2: we need one extra row and column beyond the
+   * 2R + 1 search window so we have neighbors to interpolate with.
    */
   torch::Tensor x = coords.index({Slice(), Slice(), 0, None, None});
   torch::Tensor y = coords.index({Slice(), Slice(), 1, None, None});
   torch::Tensor dx = x - x.floor(); dx = dx.to(fmap1.dtype()); // fractional x offset
   torch::Tensor dy = y - y.floor(); dy = dy.to(fmap2.dtype()); // fractional y offset
 
-  // Weighted sum of four corners -> (D-1) x (D-1) = (2R+1) x (2R+1) output
+  // Weighted sum of four corners → (D - 1) × (D - 1) = (2R + 1) × (2R + 1) output
   torch::Tensor out;
   out  = (1 - dx) * (1 - dy) * corr.index({Slice(), Slice(), Slice(0, D-1), Slice(0, D-1)});
   out +=     (dx) * (1 - dy) * corr.index({Slice(), Slice(), Slice(0, D-1), Slice(1, D-0)});
@@ -502,9 +502,9 @@ std::vector<torch::Tensor> corr_cuda_forward(
  *
  *   1. Un-permute the incoming gradient to match the kernel's layout.
  *   2. Distribute the gradient through the bilinear interpolation:
- *      each of the four corners receives grad * (its bilinear weight),
- *      placed into the appropriate D x D sub-region.
- *   3. Sum the four contributions into a single D x D gradient tensor.
+ *      each of the four corners receives grad · (its bilinear weight),
+ *      placed into the appropriate D × D sub-region.
+ *   3. Sum the four contributions into a single D × D gradient tensor.
  *   4. Launch the CUDA backward kernel, which uses the chain rule to
  *      compute dL/d(fmap1) and dL/d(fmap2) via atomicAdd.
  *
@@ -513,7 +513,7 @@ std::vector<torch::Tensor> corr_cuda_forward(
  * @param coords  Reprojected coordinates [B, M, 2, H_p, W_p].
  * @param ii      Source frame index per edge [M].
  * @param jj      Target frame index per edge [M].
- * @param grad    Upstream gradient, shape [B, M, (2R+1), (2R+1), H_p, W_p].
+ * @param grad    Upstream gradient, shape [B, M, (2R + 1), (2R + 1), H_p, W_p].
  * @param radius  Search radius R.
  *
  * @return {fmap1_grad, fmap2_grad}, each the same shape as the input fmaps.
@@ -545,17 +545,17 @@ std::vector<torch::Tensor> corr_cuda_backward(
   torch::Tensor dy = y - y.floor();
 
   /*
-   * Distribute the (2R+1)x(2R+1) gradient back to the D x D grid.
+   * Distribute the (2R + 1) × (2R + 1) gradient back to the D × D grid.
    *
    * In the forward pass:
-   *   out = (1-dx)*(1-dy)*corr[0:D-1, 0:D-1] + dx*(1-dy)*corr[0:D-1, 1:D]
-   *       + (1-dx)*dy*corr[1:D, 0:D-1] + dx*dy*corr[1:D, 1:D]
+   *   out = (1 - dx) · (1 - dy) · corr[0:D-1, 0:D-1] + dx · (1 - dy) · corr[0:D-1, 1:D]
+   *       + (1 - dx) · dy · corr[1:D, 0:D-1] + dx · dy · corr[1:D, 1:D]
    *
    * So d(out)/d(corr) distributes the gradient to the four corners:
-   *   g1[0:D-1, 0:D-1] = (1-dx)*(1-dy) * grad   (top-left contribution)
-   *   g2[0:D-1, 1:D  ] =    dx *(1-dy) * grad   (top-right)
-   *   g3[1:D,   0:D-1] = (1-dx)*   dy  * grad   (bottom-left)
-   *   g4[1:D,   1:D  ] =    dx *   dy  * grad   (bottom-right)
+   *   g1[0:D-1, 0:D-1] = (1 - dx) · (1 - dy) · grad   (top-left contribution)
+   *   g2[0:D-1, 1:D]   =      dx · (1 - dy) · grad    (top-right)
+   *   g3[1:D,   0:D-1] = (1 - dx) ·      dy · grad    (bottom-left)
+   *   g4[1:D,   1:D]   =      dx ·      dy · grad     (bottom-right)
    */
   auto opts = torch::TensorOptions().dtype(torch::kFloat).device(torch::kCUDA);
   torch::Tensor g1 = torch::zeros({B, M, D, D, H, W}, grad.options());
@@ -568,7 +568,7 @@ std::vector<torch::Tensor> corr_cuda_backward(
   g3.index_put_({Slice(), Slice(), Slice(1, D-0), Slice(0, D-1)}, (1 - dx) *     (dy) * grad);
   g4.index_put_({Slice(), Slice(), Slice(1, D-0), Slice(1, D-0)},     (dx) *     (dy) * grad);
 
-  // Sum to get the full D x D gradient for the kernel's backward pass
+  // Sum to get the full D × D gradient for the kernel's backward pass
   torch::Tensor corr_grad = g1 + g2 + g3 + g4;
 
   // Allocate zero-initialized gradient tensors for both feature maps
@@ -599,7 +599,7 @@ std::vector<torch::Tensor> corr_cuda_backward(
  *
  * @param net     Dense feature map [B, C, H, W].
  * @param coords  Patch center coordinates [B, M, 2].
- * @param radius  Patch half-size (output is D x D where D = 2R+2).
+ * @param radius  Patch half-size (output is D × D where D = 2R + 2).
  *
  * @return {patches} with shape [B, M, C, D, D].
  */

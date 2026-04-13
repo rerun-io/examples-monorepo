@@ -18,7 +18,7 @@
  *   - (qx, qy, qz, qw) = unit quaternion (Hamilton convention, scalar-last)
  *
  * The relative transform from frame i to frame j is:
- *   Gij = Tj * Ti^{-1}
+ *   Gᵢⱼ = Tⱼ · Tᵢ⁻¹
  * which maps points from frame i's coordinate system into frame j's.
  *
  * Quaternion layout in memory (arrays of length 4):
@@ -30,7 +30,7 @@
  *
  * The system minimizes a weighted reprojection error:
  *
- *   E = sum_n  w_n * || target_n - pi(Gij * backproject(patch_kk[center])) ||^2
+ *   E = Σₙ wₙ · ||targetₙ - π(Gᵢⱼ · backproject(patch_kk[center]))||²
  *
  * where n iterates over edges (ii[n], jj[n], kk[n]) in the factor graph,
  * pi() is the pinhole projection, and backproject lifts the patch center
@@ -41,24 +41,24 @@
  *
  * The Gauss-Newton normal equations are:
  *
- *   [ B   E ] [ dX ]   [ v ]
- *   [ E^T C ] [ dZ ] = [ u ]
+ *   [ B   E ] [dX]   [v]
+ *   [ Eᵀ  C ] [dZ] = [u]
  *
  * where:
- *   B  = pose-pose Hessian block       (6N x 6N, N = t1 - t0 active poses)
- *   E  = pose-depth cross-term         (6N x M,  M = number of unique patches)
- *   C  = depth-depth diagonal block    (M x 1, diagonal so stored as vector)
- *   v  = pose RHS                      (6N x 1)
- *   u  = depth RHS                     (M x 1)
- *   dX = pose updates                  (6N x 1, in Lie algebra se(3))
- *   dZ = inverse-depth updates         (M x 1)
+ *   B  = pose-pose Hessian block       (6N × 6N, N = t1 - t0 active poses)
+ *   E  = pose-depth cross-term         (6N × M,  M = number of unique patches)
+ *   C  = depth-depth diagonal block    (M × 1, diagonal so stored as vector)
+ *   v  = pose RHS                      (6N × 1)
+ *   u  = depth RHS                     (M × 1)
+ *   dX = pose updates                  (6N × 1, in Lie algebra se(3))
+ *   dZ = inverse-depth updates         (M × 1)
  *
  * The Schur complement eliminates the depth variables:
- *   Q = 1 / (C + lambda)              (element-wise, M x 1)
- *   S = B - E * Q * E^T               (6N x 6N reduced system)
- *   y = v - E * Q * u
- *   Solve S * dX = y  via Cholesky
- *   Then dZ = Q * (u - E^T * dX)      (back-substitution for depths)
+ *   Q = 1 / (C + λ)                    (element-wise, M × 1)
+ *   S = B - E · Q · Eᵀ                 (6N × 6N reduced system)
+ *   y = v - E · Q · u
+ *   Solve S · dX = y via Cholesky
+ *   Then dZ = Q · (u - Eᵀ · dX)        (back-substitution for depths)
  *
  * After solving, poses and patches are retracted on their respective
  * manifolds (SE3 for poses, positive reals for inverse depth).
@@ -71,7 +71,7 @@
  *   actSO3()    -- rotate a point by a quaternion
  *   actSE3()    -- apply an SE3 transform to a homogeneous point
  *   adjSE3()    -- adjoint representation of SE3 (maps twists)
- *   relSE3()    -- relative transform Tij = Tj * Ti^{-1}
+ *   relSE3()    -- relative transform Tᵢⱼ = Tⱼ · Tᵢ⁻¹
  *   expSO3()    -- axis-angle to quaternion (SO3 exponential map)
  *   expSE3()    -- Lie algebra to (t, q) (SE3 exponential map)
  *   retrSE3()   -- retraction: apply a Lie algebra update to a pose
@@ -121,12 +121,12 @@
  * Rotate a 3D point X by quaternion q, storing the result in Y.
  *
  * Uses the efficient Rodrigues-like formula that avoids building the full
- * 3x3 rotation matrix:
+ * 3×3 rotation matrix:
  *
- *   uv = 2 * (q_xyz x X)                   -- cross product, scaled by 2
- *   Y  = X + q_w * uv + (q_xyz x uv)       -- add rotation correction
+ *   uv = 2 · (q_xyz × X)                   -- cross product, scaled by 2
+ *   Y  = X + q_w · uv + (q_xyz × uv)       -- add rotation correction
  *
- * This is mathematically equivalent to R(q) * X where R(q) is the 3x3
+ * This is mathematically equivalent to R(q) · X where R(q) is the 3×3
  * rotation matrix corresponding to quaternion q, but uses fewer operations.
  *
  * @param q  Quaternion [qx, qy, qz, qw] (unit quaternion, scalar-last).
@@ -152,7 +152,7 @@ actSO3(const float *q, const float *X, float *Y) {
  *
  * Given a pose (t, q) and a point X = [x, y, z, w] in homogeneous
  * coordinates, compute:
- *   Y = [R(q)*[x,y,z] + w*t,  w]
+ *   Y = [R(q) · [x, y, z] + w · t,  w]
  *
  * The homogeneous coordinate w acts as a scaling factor on the translation.
  * For a standard 3D point, w = inverse_depth (from DPVO's patch
@@ -181,21 +181,21 @@ actSE3(const float *t, const float *q, const float *X, float *Y) {
  * The adjoint maps a 6D twist (velocity) from one frame to another.
  * Given a pose (t, q) representing Tij, this computes:
  *
- *   Y = Ad(Tij^{-1}) * X
+ *   Y = Ad(Tᵢⱼ⁻¹) · X
  *
  * where X = [v; omega] is a 6D twist (first 3 = translational, last 3 =
  * rotational), and:
  *
- *   Ad(T^{-1}) = [ R^T      0    ]
- *                [ -R^T[t]x R^T  ]
+ *   Ad(T⁻¹) = [ Rᵀ       0   ]
+ *             [ -Rᵀ[t]×  Rᵀ ]
  *
- * Here R^T is the inverse rotation (q_inv), and [t]x is the skew-symmetric
+ * Here Rᵀ is the inverse rotation (`q_inv`), and [t]× is the skew-symmetric
  * matrix of t.  The computation proceeds as:
- *   Y[0:3] = R^T * X[0:3]                   (rotate translational part)
- *   Y[3:6] = R^T * X[3:6] + R^T * (t x X[0:3])  (rotate + cross-couple)
+ *   Y[0:3] = Rᵀ · X[0:3]                         (rotate translational part)
+ *   Y[3:6] = Rᵀ · X[3:6] + Rᵀ · (t × X[0:3])    (rotate + cross-couple)
  *
  * In the BA context, this is used to transform the Jacobian w.r.t. pose j
- * into the Jacobian w.r.t. pose i:  Ji = -Adj(Gij)^T * Jj.
+ * into the Jacobian w.r.t. pose i:  Jᵢ = -Adj(Gᵢⱼ)ᵀ · Jⱼ.
  * (Note: actually Ji = adjSE3(Gij, Jj) with the specific sign convention
  * used in the BA kernel.)
  *
@@ -209,18 +209,18 @@ adjSE3(const float *t, const float *q, const float *X, float *Y) {
   // Conjugate quaternion = inverse rotation (for unit quaternions)
   float qinv[4] = {-q[0], -q[1], -q[2], q[3]};
 
-  // Rotate the translational part: Y[0:3] = R^T * X[0:3]
+  // Rotate the translational part: Y[0:3] = Rᵀ · X[0:3]
   actSO3(qinv, &X[0], &Y[0]);
-  // Rotate the rotational part: Y[3:6] = R^T * X[3:6]
+  // Rotate the rotational part: Y[3:6] = Rᵀ · X[3:6]
   actSO3(qinv, &X[3], &Y[3]);
 
-  // Compute u = t x X[0:3]  (cross product of translation with input's translational part)
+  // Compute u = t × X[0:3]  (cross product of translation with input's translational part)
   float u[3], v[3];
   u[0] = t[2]*X[1] - t[1]*X[2];
   u[1] = t[0]*X[2] - t[2]*X[0];
   u[2] = t[1]*X[0] - t[0]*X[1];
 
-  // Rotate the cross-coupling term: v = R^T * u
+  // Rotate the cross-coupling term: v = Rᵀ · u
   actSO3(qinv, u, v);
 
   // Add cross-coupling to the rotational output part
@@ -230,12 +230,12 @@ adjSE3(const float *t, const float *q, const float *X, float *Y) {
 }
 
 /**
- * Compute the relative SE3 transform: Tij = Tj * Ti^{-1}.
+ * Compute the relative SE3 transform: Tᵢⱼ = Tⱼ · Tᵢ⁻¹.
  *
  * This gives the transform that takes points from frame i to frame j.
  * The computation is:
- *   qij = qj * qi^{-1}        (quaternion multiplication with qi conjugated)
- *   tij = tj - R(qij) * ti    (rotate ti by the relative rotation, subtract)
+ *   qᵢⱼ = qⱼ · qᵢ⁻¹          (quaternion multiplication with qᵢ conjugated)
+ *   tᵢⱼ = tⱼ - R(qᵢⱼ) · tᵢ   (rotate tᵢ by the relative rotation, subtract)
  *
  * The quaternion product qj * qi^{-1} is expanded using Hamilton's formula
  * with qi^{-1} = (-qx_i, -qy_i, -qz_i, qw_i) for a unit quaternion.
@@ -250,8 +250,8 @@ adjSE3(const float *t, const float *q, const float *X, float *Y) {
 __device__ void
 relSE3(const float *ti, const float *qi, const float *tj, const float *qj, float *tij, float *qij) {
   /*
-   * Quaternion multiplication: qij = qj * qi^{-1}
-   * With qi^{-1} = (-qi[0], -qi[1], -qi[2], qi[3]) for unit quaternion.
+   * Quaternion multiplication: qᵢⱼ = qⱼ · qᵢ⁻¹
+   * With qᵢ⁻¹ = (-qi[0], -qi[1], -qi[2], qi[3]) for a unit quaternion.
    *
    * Hamilton product (scalar-last convention):
    *   qij.x = -qj.w*qi.x + qj.x*qi.w - qj.y*qi.z + qj.z*qi.y
@@ -274,20 +274,20 @@ relSE3(const float *ti, const float *qi, const float *tj, const float *qj, float
 
 
 /**
- * SO3 exponential map: convert an axis-angle vector phi to a unit quaternion q.
+ * SO3 exponential map: convert an axis-angle vector φ to a unit quaternion q.
  *
- * Given phi = theta * axis (where theta = ||phi|| is the rotation angle
+ * Given φ = θ · axis (where θ = ||φ|| is the rotation angle
  * and axis is the unit rotation axis), the quaternion is:
  *
- *   q = [sin(theta/2) / theta * phi,  cos(theta/2)]
- *     = [imag * phi,  real]
+ *   q = [sin(θ/2) / θ · φ,  cos(θ/2)]
+ *     = [imag · φ,  real]
  *
- * For small angles (theta^2 < 1e-8), a Taylor expansion is used to avoid
- * numerical instability in sin(theta/2)/theta:
- *   imag ~ 0.5 - theta^2/48 + theta^4/3840
- *   real ~ 1.0 - theta^2/8  + theta^4/384
+ * For small angles (θ² < 1e-8), a Taylor expansion is used to avoid
+ * numerical instability in sin(θ/2)/θ:
+ *   imag ≈ 0.5 - θ²/48 + θ⁴/3840
+ *   real ≈ 1.0 - θ²/8 + θ⁴/384
  *
- * @param phi  Axis-angle rotation vector [phi_x, phi_y, phi_z].
+ * @param phi  Axis-angle rotation vector [φₓ, φᵧ, φ_z].
  * @param q    Output unit quaternion [qx, qy, qz, qw].
  */
 __device__ void
@@ -315,7 +315,7 @@ expSO3(const float *phi, float* q) {
 }
 
 /**
- * Compute the cross product a x b and store the result back into b (in-place).
+ * Compute the cross product a × b and store the result back into b (in-place).
  *
  * @param a  First vector [a0, a1, a2] (read-only).
  * @param b  Second vector [b0, b1, b2]; overwritten with a x b on return.
@@ -334,31 +334,31 @@ crossInplace(const float* a, float *b) {
 }
 
 /**
- * SE3 exponential map: convert a Lie algebra element xi to a pose (t, q).
+ * SE3 exponential map: convert a Lie algebra element ξ to a pose (t, q).
  *
  * The Lie algebra of SE3 is se(3), represented as a 6-vector:
- *   xi = [v0, v1, v2, w0, w1, w2]
- * where v = xi[0:3] is the translational part and w = xi[3:6] is the
+ *   ξ = [v0, v1, v2, w0, w1, w2]
+ * where v = ξ[0:3] is the translational part and w = ξ[3:6] is the
  * rotational part (axis-angle).
  *
  * The exponential map computes:
  *   q = exp_SO3(w)           -- rotation quaternion
- *   t = J(w) * v             -- translation via the left Jacobian
+ *   t = J(w) · v             -- translation via the left Jacobian
  *
  * where J(w) is the left Jacobian of SO3:
- *   J(w) = I + a * [w]x + b * [w]x^2
+ *   J(w) = I + a · [w]× + b · [w]×²
  * with:
- *   a = (1 - cos(theta)) / theta^2
- *   b = (theta - sin(theta)) / theta^3
+ *   a = (1 - cos(θ)) / θ²
+ *   b = (θ - sin(θ)) / θ³
  *
  * The translation computation uses two successive cross products to build
- * J(w)*v without explicitly forming the 3x3 matrix:
+ * J(w) · v without explicitly forming the 3×3 matrix:
  *   tau = v
- *   tau += a * (w x tau)
- *   tau += b * (w x (w x v))   [the second cross is applied to the already-crossed result]
+ *   tau += a · (w × tau)
+ *   tau += b · (w × (w × v))   [the second cross is applied to the already-crossed result]
  *
- * For small angles (theta < 1e-4), the first-order approximation J ~ I
- * is used (i.e., t ~ v).
+ * For small angles (θ < 1e-4), the first-order approximation J ≈ I
+ * is used (i.e., t ≈ v).
  *
  * @param xi  6D Lie algebra element [v0, v1, v2, w0, w1, w2].
  * @param t   Output translation [tx, ty, tz].
@@ -381,17 +381,17 @@ expSE3(const float *xi, float* t, float* q) {
   t[2] = tau[2];
 
   if (theta > 1e-4) {
-    // a = (1 - cos(theta)) / theta^2
+    // a = (1 - cos(θ)) / θ²
     float a = (1 - cosf(theta)) / theta_sq;
-    // tau = phi x tau (in-place), then t += a * (phi x v)
+    // tau = φ × tau (in-place), then t += a · (φ × v)
     crossInplace(phi, tau);
     t[0] += a * tau[0];
     t[1] += a * tau[1];
     t[2] += a * tau[2];
 
-    // b = (theta - sin(theta)) / theta^3
+    // b = (θ - sin(θ)) / θ³
     float b = (theta - sinf(theta)) / (theta * theta_sq);
-    // tau = phi x tau (in-place again), so tau is now phi x (phi x v)
+    // tau = φ × tau (in-place again), so tau is now φ × (φ × v)
     crossInplace(phi, tau);
     t[0] += b * tau[0];
     t[1] += b * tau[1];
@@ -406,15 +406,15 @@ expSE3(const float *xi, float* t, float* q) {
  * existing pose.
  *
  * Computes:
- *   (t1, q1) = Exp(xi) * (t, q)
+ *   (t1, q1) = Exp(ξ) · (t, q)
  *
  * This is the standard left-multiplication retraction used in Lie-group
  * optimization.  The update xi is first converted to a small SE3 transform
  * (dt, dq) via the exponential map, then composed with the current pose
  * via quaternion multiplication and rotation of the translation.
  *
- * Quaternion composition: q1 = dq * q  (Hamilton product, scalar-last).
- * Translation: t1 = R(dq) * t + dt.
+ * Quaternion composition: q1 = dq · q  (Hamilton product, scalar-last).
+ * Translation: t1 = R(dq) · t + dt.
  *
  * @param xi  6D Lie algebra update [v0, v1, v2, w0, w1, w2].
  * @param t   Current translation [tx, ty, tz].
@@ -457,8 +457,8 @@ retrSE3(const float *xi, const float* t, const float* q, float* t1, float* q1) {
  * active camera pose.
  *
  * Each thread handles one pose.  The update vector update[i] contains the
- * 6D twist (v, omega) that is applied via left-multiplication:
- *   pose[t0+i] <- Exp(update[i]) * pose[t0+i]
+ * 6D twist (v, ω) that is applied via left-multiplication:
+ *   pose[t0 + i] ← Exp(update[i]) · pose[t0 + i]
  *
  * @param t0      Start of the active pose window (global pose index).
  * @param t1      End of the active pose window (exclusive).
@@ -563,7 +563,7 @@ __global__ void patch_retr_kernel(
  * For each edge n in the factor graph (connecting source frame ii[n] to
  * target frame jj[n] via patch kk[n]), this kernel:
  *
- *   1. Computes the relative pose: Gij = T_jj * T_ii^{-1}
+ *   1. Computes the relative pose: Gᵢⱼ = Tⱼⱼ · Tᵢᵢ⁻¹
  *
  *   2. Back-projects the patch center to 3D in frame ii's coordinates:
  *        Xi = [(px - cx)/fx,  (py - cy)/fy,  1,  d]
@@ -571,34 +571,34 @@ __global__ void patch_retr_kernel(
  *      d = patches[kk][2][1][1] (inverse depth).  The 4th component
  *      stores the inverse depth (homogeneous representation).
  *
- *   3. Transforms to the target frame:  Xj = Gij * Xi
+ *   3. Transforms to the target frame:  Xⱼ = Gᵢⱼ · Xᵢ
  *
  *   4. Projects to 2D:
- *        x1 = fx * Xj.x/Xj.z + cx
- *        y1 = fy * Xj.y/Xj.z + cy
+ *        x₁ = fₓ · Xⱼ.x / Xⱼ.z + cₓ
+ *        y₁ = fᵧ · Xⱼ.y / Xⱼ.z + cᵧ
  *
  *   5. Computes the 2D reprojection residual:
- *        r = target[n] - (x1, y1)
+ *        r = target[n] - (x₁, y₁)
  *
  *   6. Computes analytical Jacobians (derivatives of the projected point
  *      w.r.t. the optimization variables):
  *
- *      Jj = d(x1,y1)/d(xi_j)  -- 2x6 Jacobian w.r.t. target pose (Lie algebra)
- *      Ji = -Adj(Gij)^T * Jj  -- 2x6 Jacobian w.r.t. source pose (via adjoint)
- *      Jz = d(x1,y1)/d(d)     -- 2x1 Jacobian w.r.t. inverse depth
+ *      Jⱼ = d(x₁, y₁)/d(ξⱼ)   -- 2×6 Jacobian w.r.t. target pose (Lie algebra)
+ *      Jᵢ = -Adj(Gᵢⱼ)ᵀ · Jⱼ   -- 2×6 Jacobian w.r.t. source pose (via adjoint)
+ *      Jz = d(x₁, y₁)/d(d)    -- 2×1 Jacobian w.r.t. inverse depth
  *
- *      The Jacobian Jj for the x-component is derived from the pinhole
+ *      The Jacobian Jⱼ for the x-component is derived from the pinhole
  *      projection model and SE3 action:
- *        Jj_x = [fx*W/Z, 0, -fx*X*W/Z^2, -fx*X*Y/Z^2, fx*(1+X^2/Z^2), -fx*Y/Z]
- *      where X,Y,Z,W are the components of Xj.
- *      (Similarly for the y-component with fy.)
+ *        Jⱼₓ = [fₓ·W/Z, 0, -fₓ·X·W/Z², -fₓ·X·Y/Z², fₓ·(1+X²/Z²), -fₓ·Y/Z]
+ *      where X, Y, Z, W are the components of Xⱼ.
+ *      (Similarly for the y-component with fᵧ.)
  *
  *   7. Accumulates into the Hessian blocks using atomicAdd:
- *        B  += J^T * W * J           (pose-pose block, 6x6 per pose pair)
- *        E  += J_pose^T * W * Jz     (pose-depth cross term)
- *        C  += Jz^T * W * Jz         (depth-depth diagonal)
- *        v  += J_pose^T * W * r       (pose RHS)
- *        u  += Jz^T * W * r          (depth RHS)
+ *        B  += Jᵀ · W · J            (pose-pose block, 6×6 per pose pair)
+ *        E  += J_poseᵀ · W · Jz      (pose-depth cross term)
+ *        C  += Jzᵀ · W · Jz          (depth-depth diagonal)
+ *        v  += J_poseᵀ · W · r       (pose RHS)
+ *        u  += Jzᵀ · W · r           (depth RHS)
  *
  *      The x and y components of the residual are processed in separate
  *      blocks with their own Jacobians and weights.
@@ -621,10 +621,10 @@ __global__ void patch_retr_kernel(
  * Sign conventions for the Hessian accumulation:
  *   Because Ji comes from the adjoint (which negates), the B matrix
  *   cross-terms between pose i and pose j carry a minus sign:
- *     B[ix, jx] -= w * Ji * Jj^T
- *     B[jx, ix] -= w * Jj * Ji^T
- *   Similarly, E[ix, k] accumulates -w*Jz*Ji and E[jx, k] accumulates +w*Jz*Jj.
- *   And v[ix] accumulates -w*r*Ji, v[jx] accumulates +w*r*Jj.
+ *     B[ix, jx] -= w · Jᵢ · Jⱼᵀ
+ *     B[jx, ix] -= w · Jⱼ · Jᵢᵀ
+ *   Similarly, E[ix, k] accumulates -w · Jz · Jᵢ and E[jx, k] accumulates +w · Jz · Jⱼ.
+ *   And v[ix] accumulates -w · r · Jᵢ, v[jx] accumulates +w · r · Jⱼ.
  *
  * @param poses       Camera poses [N_total, 7].
  * @param patches     Patch data [N_patches, 3, P, P].
@@ -701,15 +701,15 @@ __global__ void reprojection_residuals_and_hessian(
     /* --- Step 3: Compute relative transform and transform point --- */
     float tij[3], qij[4];
     relSE3(ti, qi, tj, qj, tij, qij);  // Gij = Tj * Ti^{-1}
-    actSE3(tij, qij, Xi, Xj);          // Xj = Gij * Xi
+    actSE3(tij, qij, Xi, Xj);          // Xⱼ = Gᵢⱼ · Xᵢ
 
     const float X = Xj[0];   // X coordinate in target frame
     const float Y = Xj[1];   // Y coordinate in target frame
     const float Z = Xj[2];   // Z coordinate in target frame (depth)
     const float W = Xj[3];   // homogeneous weight (= inverse depth)
 
-    // Precompute 1/Z and 1/Z^2 for projection derivatives.
-    // If Z < 0.2, set d=0 to effectively zero out the Jacobians
+    // Precompute 1/Z and 1/Z² for projection derivatives.
+    // If Z < 0.2, set d = 0 to effectively zero out the Jacobians
     // (treats near/behind-camera points as degenerate).
     const float d = (Z >= 0.2) ? 1.0 / Z : 0.0;
     const float d2 = d * d;
@@ -741,43 +741,43 @@ __global__ void reprojection_residuals_and_hessian(
 
       /*
        * Jz: Jacobian of the x-projection w.r.t. inverse depth.
-       *   x1 = fx * X/Z + cx
+       *   x₁ = fₓ · X/Z + cₓ
        *   The inverse depth d_inv only affects X and Z through the
-       *   translation part of Gij (tij * d_inv), so:
-       *   dx1/d(d_inv) = fx * (tij_x / Z  -  tij_z * X / Z^2)
+       *   translation part of Gᵢⱼ (tᵢⱼ · d_inv), so:
+       *   dx₁/d(d_inv) = fₓ · (tᵢⱼₓ / Z - tᵢⱼ_z · X / Z²)
        */
       float Jz = fx * (tij[0] * d - tij[2] * (X * d2));
 
       /*
-       * Jj: 6D Jacobian of x1 w.r.t. the Lie algebra update of pose j.
+       * Jⱼ: 6D Jacobian of x₁ w.r.t. the Lie algebra update of pose j.
        *
        * The SE3 action on the point and the pinhole projection give:
-       *   Jj = [fx*W/Z, 0, -fx*X*W/Z^2, -fx*X*Y/Z^2, fx*(1+X^2/Z^2), -fx*Y/Z]
+       *   Jⱼ = [fₓ·W/Z, 0, -fₓ·X·W/Z², -fₓ·X·Y/Z², fₓ·(1+X²/Z²), -fₓ·Y/Z]
        *
-       * Components correspond to: [d/dtx, d/dty, d/dtz, d/dwx, d/dwy, d/dwz]
-       * where (tx,ty,tz) are the translational and (wx,wy,wz) the rotational
+       * Components correspond to: [d/dtₓ, d/dtᵧ, d/dt_z, d/dωₓ, d/dωᵧ, d/dω_z]
+       * where (tₓ, tᵧ, t_z) are the translational and (ωₓ, ωᵧ, ω_z) the rotational
        * parts of the Lie algebra.
        */
       float Ji[6], Jj[6] = {fx*W*d, 0, fx*-X*W*d2, fx*-X*Y*d2, fx*(1+X*X*d2), fx*-Y*d};
 
       /*
-       * Ji: Jacobian w.r.t. source pose i, computed via the adjoint.
-       *   Ji = Adj(Gij^{-1})^T * Jj  (with appropriate sign from the chain rule)
-       * The adjSE3 function computes Y = Ad(Gij^{-1}) * X.
+       * Jᵢ: Jacobian w.r.t. source pose i, computed via the adjoint.
+       *   Jᵢ = Adj(Gᵢⱼ⁻¹)ᵀ · Jⱼ  (with appropriate sign from the chain rule)
+       * The adjSE3 function computes Y = Ad(Gᵢⱼ⁻¹) · X.
        */
       adjSE3(tij, qij, Jj, Ji);
 
       /* Accumulate into Hessian blocks (all via atomicAdd for thread safety) */
       for (int i=0; i<6; i++) {
         for (int j=0; j<6; j++) {
-          // B[ii, ii] += w * Ji * Ji^T  (source-source pose block)
+          // B[ii, ii] += w · Jᵢ · Jᵢᵀ  (source-source pose block)
           if (ix >= 0)
             atomicAdd(&B[6*ix+i][6*ix+j],  w * Ji[i] * Ji[j]);
-          // B[jj, jj] += w * Jj * Jj^T  (target-target pose block)
+          // B[jj, jj] += w · Jⱼ · Jⱼᵀ  (target-target pose block)
           if (jx >= 0)
             atomicAdd(&B[6*jx+i][6*jx+j],  w * Jj[i] * Jj[j]);
-          // B[ii, jj] -= w * Ji * Jj^T  (cross-block, negative from chain rule)
-          // B[jj, ii] -= w * Jj * Ji^T  (symmetric counterpart)
+          // B[ii, jj] -= w · Jᵢ · Jⱼᵀ  (cross-block, negative from chain rule)
+          // B[jj, ii] -= w · Jⱼ · Jᵢᵀ  (symmetric counterpart)
           if (ix >= 0 && jx >= 0) {
             atomicAdd(&B[6*ix+i][6*jx+j], -w * Ji[i] * Jj[j]);
             atomicAdd(&B[6*jx+i][6*ix+j], -w * Jj[i] * Ji[j]);
@@ -812,14 +812,14 @@ __global__ void reprojection_residuals_and_hessian(
       const float w = mask * weight[n][1];        // y-weight (masked)
 
       /*
-       * Jz for y: same structure as x, but with fy and Y instead of fx and X.
-       *   dy1/d(d_inv) = fy * (tij_y / Z  -  tij_z * Y / Z^2)
+       * Jz for y: same structure as x, but with fᵧ and Y instead of fₓ and X.
+       *   dy₁/d(d_inv) = fᵧ · (tᵢⱼᵧ / Z - tᵢⱼ_z · Y / Z²)
        */
       float Jz = fy * (tij[1] * d - tij[2] * (Y * d2));
 
       /*
-       * Jj for y-component:
-       *   [0, fy*W/Z, -fy*Y*W/Z^2, -fy*(1+Y^2/Z^2), fy*X*Y/Z^2, fy*X/Z]
+       * Jⱼ for y-component:
+       *   [0, fᵧ·W/Z, -fᵧ·Y·W/Z², -fᵧ·(1+Y²/Z²), fᵧ·X·Y/Z², fᵧ·X/Z]
        */
       float Ji[6], Jj[6] = {0, fy*W*d, fy*-Y*W*d2, fy*(-1-Y*Y*d2), fy*(X*Y*d2), fy*X*d};
 
@@ -866,16 +866,16 @@ __global__ void reprojection_residuals_and_hessian(
  * Reprojects all pixels of each patch from the source frame into the
  * target frame using the current pose estimates.  Unlike the BA kernel
  * (which only uses the patch center), this kernel processes the full
- * P x P patch grid.
+ * P × P patch grid.
  * ======================================================================= */
 
 /**
  * Per-edge full-patch reprojection kernel.
  *
- * For each edge (ii[n], jj[n], kk[n]) and each pixel (i, j) in the P x P
+ * For each edge (ii[n], jj[n], kk[n]) and each pixel (i, j) in the P × P
  * patch grid:
  *   1. Back-project using pixel coords and inverse depth from the patch.
- *   2. Apply relative SE3 transform Gij = Tj * Ti^{-1}.
+ *   2. Apply relative SE3 transform Gᵢⱼ = Tⱼ · Tᵢ⁻¹.
  *   3. Project into the target frame using pinhole model.
  *
  * @param poses       Camera poses [N_total, 7].
@@ -966,17 +966,17 @@ __global__ void reproject(
  *      a. Zero all accumulators.
  *      b. Launch the reprojection_residuals_and_hessian kernel.
  *      c. Solve the reduced system via the Schur complement:
- *         - Q = 1 / (C + lambda)
- *         - S = B - E * Q * E^T  (reduced Hessian for poses only)
- *         - y = v - E * Q * u    (reduced RHS)
- *         - Regularize: S += (1e-4 * S + I) to ensure positive-definiteness.
- *         - Solve S * dX = y via Cholesky factorization.
- *         - Back-substitute: dZ = Q * (u - E^T * dX)
+ *         - Q = 1 / (C + λ)
+ *         - S = B - E · Q · Eᵀ    (reduced Hessian for poses only)
+ *         - y = v - E · Q · u     (reduced RHS)
+ *         - Regularize: S += (1e-4 · S + I) to ensure positive-definiteness.
+ *         - Solve S · dX = y via Cholesky factorization.
+ *         - Back-substitute: dZ = Q · (u - Eᵀ · dX)
  *      d. Retract: apply dX to poses, dZ to inverse depths.
  *
  * Special case: if t1 - t0 == 0, no poses are active (only depth is
  * optimized).  In this case the pose blocks are skipped and only the
- * depth update dZ = Q * u is applied.
+ * depth update dZ = Q · u is applied.
  *
  * @param poses       Camera poses [N_total, 7].  Modified in-place.
  * @param patches     Patch data [N_patches, 3, P, P].  Modified in-place.
@@ -1034,8 +1034,8 @@ std::vector<torch::Tensor> cuda_ba(
 
   /*
    * Allocate the Gauss-Newton system matrices:
-   *   B: pose-pose Hessian      [6N x 6N]
-   *   E: pose-depth cross-term  [6N x M]
+   *   B: pose-pose Hessian      [6N × 6N]
+   *   E: pose-depth cross-term  [6N × M]
    *   C: depth-depth diagonal   [M]     (stored as a flat vector)
    *   v: pose RHS               [6N]
    *   u: depth RHS              [M]
@@ -1085,7 +1085,7 @@ std::vector<torch::Tensor> cuda_ba(
     u = u.view({1*M, 1});
 
     /*
-     * Q = 1 / (C + lambda): element-wise inverse of the damped depth diagonal.
+     * Q = 1 / (C + λ): element-wise inverse of the damped depth diagonal.
      * This is the "inverse" of the depth block in the Schur complement.
      * Shape: [1, M] (row vector for broadcasting in matrix multiplies).
      */
@@ -1095,7 +1095,7 @@ std::vector<torch::Tensor> cuda_ba(
       /*
        * Special case: no active poses (only depth optimization).
        * Skip the Schur complement and just solve for depth:
-       *   dZ = Q * u
+       *   dZ = Q · u
        */
 
       torch::Tensor Qt = torch::transpose(Q, 0, 1);  // [M, 1]
@@ -1116,28 +1116,28 @@ std::vector<torch::Tensor> cuda_ba(
        * Full Schur complement solve.
        *
        * The joint Gauss-Newton system is:
-       *   [ B   E ] [ dX ]   [ v ]
-       *   [ E^T C ] [ dZ ] = [ u ]
+       *   [ B   E ] [dX]   [v]
+       *   [ Eᵀ  C ] [dZ] = [u]
        *
        * Eliminate dZ via the Schur complement:
-       *   S  = B - E * diag(Q) * E^T   (reduced system for poses)
-       *   y  = v - E * diag(Q) * u
-       *   Solve: S * dX = y
-       *   Back-sub: dZ = diag(Q) * (u - E^T * dX)
+       *   S  = B - E · diag(Q) · Eᵀ    (reduced system for poses)
+       *   y  = v - E · diag(Q) · u
+       *   Solve: S · dX = y
+       *   Back-sub: dZ = diag(Q) · (u - Eᵀ · dX)
        */
 
-      // EQ = E * diag(Q)  -- broadcasting Q as a row vector across E's columns
+      // EQ = E · diag(Q)  -- broadcasting Q as a row vector across E's columns
       torch::Tensor EQ = E * Q;
       torch::Tensor Et = torch::transpose(E, 0, 1);   // [M, 6N]
       torch::Tensor Qt = torch::transpose(Q, 0, 1);   // [M, 1]
 
-      // S = B - E * Q * E^T  (Schur complement matrix)
+      // S = B - E · Q · Eᵀ  (Schur complement matrix)
       torch::Tensor S = B - torch::matmul(EQ, Et);
-      // y = v - E * Q * u    (Schur complement RHS)
+      // y = v - E · Q · u    (Schur complement RHS)
       torch::Tensor y = v - torch::matmul(EQ,  u);
 
       /*
-       * Regularization: S += (1e-4 * diag(S) + I)
+       * Regularization: S += (1e-4 · diag(S) + I)
        * This adds a small multiple of the diagonal plus the identity
        * to ensure S is positive-definite for the Cholesky solver.
        * The 1e-4 * S term provides relative damping, while +1.0
@@ -1146,11 +1146,11 @@ std::vector<torch::Tensor> cuda_ba(
       torch::Tensor I = torch::eye(6*N, opts);
       S += I * (1e-4 * S + 1.0);
 
-      /* Solve S * dX = y via Cholesky factorization */
+      /* Solve S · dX = y via Cholesky factorization */
       torch::Tensor U = torch::linalg_cholesky(S);
       torch::Tensor dX = torch::cholesky_solve(y, U);
 
-      /* Back-substitute for depth updates: dZ = Q * (u - E^T * dX) */
+      /* Back-substitute for depth updates: dZ = Q · (u - Eᵀ · dX) */
       torch::Tensor dZ = Qt * (u - torch::matmul(Et, dX));
 
       dX = dX.view({N, 6});   // reshape to [N_poses, 6]

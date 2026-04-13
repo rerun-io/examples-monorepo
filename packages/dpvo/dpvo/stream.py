@@ -27,7 +27,7 @@ def load_calib(calib: str) -> tuple[Float64[ndarray, "3 3"], Float64[ndarray, "n
     """Load camera calibration from a space-delimited text file.
 
     Expected file format: ``fx fy cx cy [k1 k2 ...]`` on a single line.
-    The first four values are used to construct a 3x3 intrinsic matrix K;
+    The first four values are used to construct a 3×3 intrinsic matrix K;
     the full line (including optional distortion coefficients) is also
     returned for downstream use.
 
@@ -36,7 +36,7 @@ def load_calib(calib: str) -> tuple[Float64[ndarray, "3 3"], Float64[ndarray, "n
 
     Returns:
         A 2-tuple of:
-        - ``K``: 3x3 camera intrinsic matrix.
+        - ``K``: 3×3 camera intrinsic matrix.
         - ``calib_data``: Raw calibration values as a 1-D array.
     """
     calib_data: Float64[ndarray, "n"] = np.loadtxt(calib, delimiter=" ")

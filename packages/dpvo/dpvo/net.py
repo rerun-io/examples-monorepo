@@ -4,7 +4,7 @@ Implements the three main components of the DPVO neural network:
 
 - :class:`Patchifier` -- Feature extraction + gradient-biased patch sampling.
   Runs two stride-4 CNNs (feature net ``fnet`` and context net ``inet``)
-  on each frame, then selects M sparse 3x3 patches.
+  on each frame, then selects M sparse 3×3 patches.
 - :class:`Update` -- Recurrent GRU update operator that takes correlation
   features + context and predicts pixel displacement ``delta`` and
   confidence ``weight``.  Uses :class:`~dpvo.blocks.SoftAgg` for
@@ -68,8 +68,8 @@ class Update(nn.Module):
         agg_ij: Temporal neighbor aggregation (group by frame pair hash).
         gru: Two stacked GatedResidual blocks with layer norms.
         corr: MLP embedding for correlation features.  Input size is
-            ``2 * (2R+1)^2 * P^2 = 2 * 49 * 9 = 882`` for R=3, P=3
-            (two pyramid levels, 7x7 search window, 3x3 patch).
+            ``2 × (2R + 1)² × P² = 2 × 49 × 9 = 882`` for R = 3, P = 3
+            (two pyramid levels, 7×7 search window, 3×3 patch).
         d: Delta (pixel displacement) prediction head with gradient
             clipping.
         w: Weight (confidence) prediction head with gradient clipping
@@ -105,7 +105,7 @@ class Update(nn.Module):
         )
 
         # Correlation feature embedding.
-        # Input dim = 2 levels * (2*3+1)^2 * p^2 = 2 * 49 * p^2
+        # Input dim = 2 levels × (2·3 + 1)² × p² = 2 × 49 × p²
         self.corr: nn.Sequential = nn.Sequential(
             nn.Linear(2*49*p*p, DIM),
             nn.ReLU(inplace=True),
@@ -147,7 +147,7 @@ class Update(nn.Module):
             inp: Context features for each edge (from ``inet``), shape
                 ``(1, n_edges, DIM)``.
             corr: Multi-scale correlation features, shape
-                ``(1, n_edges, 2 * 49 * P^2)``.
+                ``(1, n_edges, 2 × 49 × P²)``.
             flow: Unused (kept for API compatibility).
             ii: Source frame index per edge.
             jj: Target frame index per edge.
@@ -206,9 +206,9 @@ class Patchifier(nn.Module):
       features injected into the GRU hidden state.  No normalization.
 
     Then selects M sparse patch locations per frame and extracts:
-    - ``gmap``: Local feature descriptors (128-dim, 3x3 patches) from ``fnet``.
+    - ``gmap``: Local feature descriptors (128-dim, 3×3 patches) from ``fnet``.
     - ``imap``: Context descriptors (DIM-dim, point samples) from ``inet``.
-    - ``patches``: Coordinate patches ``(x, y, inv_depth)`` of size 3x3.
+    - ``patches``: Coordinate patches ``(x, y, inv_depth)`` of size 3×3.
 
     See Sec. 3.1 of Teed et al. (2022) for patch selection details.
 
@@ -361,10 +361,10 @@ class CorrBlock:
     - Level 1 (stride-4): 1:1 feature map, captures fine detail.
     - Level 4 (stride-16): 4x pooled feature map, captures coarse context.
 
-    At each level, correlation is computed in a ``(2R+1) x (2R+1)``
-    neighborhood (R=3 by default, giving 7x7 = 49 values per level).
+    At each level, correlation is computed in a ``(2R + 1) × (2R + 1)``
+    neighborhood (R = 3 by default, giving 7×7 = 49 values per level).
     The total correlation feature dimension per patch pixel is
-    ``2 * 49 * P^2 = 882`` for P=3.  See Sec. 3.2 of Teed et al. (2022).
+    ``2 × 49 × P² = 882`` for P = 3.  See Sec. 3.2 of Teed et al. (2022).
 
     Attributes:
         dropout: Dropout probability applied during correlation computation
@@ -412,7 +412,7 @@ class CorrBlock:
 
         Returns:
             Stacked correlation features from all pyramid levels,
-            shape ``(1, n_edges, 2 * (2R+1)^2 * P^2)``.
+            shape ``(1, n_edges, 2 × (2R + 1)² × P²)``.
         """
         corrs: list[Float[Tensor, "..."]] = []
         for i in range(len(self.levels)):

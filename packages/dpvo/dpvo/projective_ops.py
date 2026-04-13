@@ -70,7 +70,7 @@ def iproj(patches: Float[Tensor, "... 3 ps ps"], intrinsics: Float[Tensor, "... 
     """Inverse projection: lift patches from image coordinates to 3-D homogeneous rays.
 
     Converts each patch pixel ``(u, v, d)`` (where ``d`` is inverse depth)
-    to the 4-vector ``((u - cx) / fx,  (v - cy) / fy,  1,  d)``.
+    to the 4-vector ``((u - cₓ) / fₓ,  (v - cᵧ) / fᵧ,  1,  d)``.
 
     This representation stores the point as ``(X/Z, Y/Z, 1, 1/Z)`` in
     camera coordinates, which is convenient because SE3 group actions in
@@ -110,11 +110,11 @@ def proj(X: Float[Tensor, "... 4"], intrinsics: Float[Tensor, "... 4"], depth: b
     """Forward projection: project 3-D homogeneous points to pixel coordinates.
 
     Given a point ``(X, Y, Z, W)`` in the homogeneous representation and
-    intrinsics ``(fx, fy, cx, cy)``, computes:
+    intrinsics ``(fₓ, fᵧ, cₓ, cᵧ)``, computes:
 
     - ``d = 1 / max(Z, 0.1)``  (inverse depth, clamped for stability)
-    - ``u = fx * d * X + cx``
-    - ``v = fy * d * Y + cy``
+    - ``u = fₓ · d · X + cₓ``
+    - ``v = fᵧ · d · Y + cᵧ``
 
     The depth clamping at ``Z = 0.1`` prevents division-by-zero for points
     near or behind the camera plane.
@@ -169,7 +169,7 @@ def transform(
 
     1. **Backproject** patch ``kk[e]`` using intrinsics of frame ``ii[e]``
        to get 3-D homogeneous point ``X0`` via :func:`iproj`.
-    2. **Transform** ``X0`` by the relative pose ``G_jj * G_ii^{-1}`` to
+    2. **Transform** ``X0`` by the relative pose ``Gjj · Gii⁻¹`` to
        get ``X1`` in frame ``jj[e]``'s coordinate system.
     3. **Project** ``X1`` into frame ``jj[e]`` using its intrinsics via
        :func:`proj`.
@@ -177,8 +177,8 @@ def transform(
     When ``jacobian=True``, analytical Jacobians are computed for the
     Gauss-Newton bundle adjustment (see :func:`~dpvo.ba.BA`):
 
-    - ``Ji``: Jacobian of pixel coords w.r.t. pose ``ii`` (shape ``[1, E, 2, 6]``).
-    - ``Jj``: Jacobian of pixel coords w.r.t. pose ``jj`` (shape ``[1, E, 2, 6]``).
+    - ``Jᵢ``: Jacobian of pixel coords w.r.t. pose ``ii`` (shape ``[1, E, 2, 6]``).
+    - ``Jⱼ``: Jacobian of pixel coords w.r.t. pose ``jj`` (shape ``[1, E, 2, 6]``).
     - ``Jz``: Jacobian of pixel coords w.r.t. inverse depth (shape ``[1, E, 2, 1]``).
 
     These are evaluated at the center pixel of the patch (``p//2, p//2``).
@@ -211,7 +211,7 @@ def transform(
     # Step 1: backproject patches from frame ii into 3D
     X0: Float[Tensor, "1 n_edges ps ps 4"] = iproj(patches[:,kk], intrinsics[:,ii])
 
-    # Step 2: compute relative transform G_j * G_i^{-1} and apply
+    # Step 2: compute the relative transform Gⱼ · Gᵢ⁻¹ and apply it
     Gij: SE3 = poses[:, jj] * poses[:, ii].inv()
 
     if tonly:
@@ -248,10 +248,10 @@ def transform(
         d: Float[Tensor, "1 n_edges"] = torch.zeros_like(Z)
         d[Z.abs() > 0.2] = 1.0 / Z[Z.abs() > 0.2]
 
-        # Ja: Jacobian of the SE3 action on the homogeneous point X1
+        # Jₐ: Jacobian of the SE3 action on the homogeneous point X₁
         # w.r.t. the 6-DoF Lie algebra perturbation (translation, rotation).
-        # For the action X' = exp(xi) * X on homogeneous coords (X,Y,Z,W):
-        #   dX'/d(xi) is a 4x6 matrix per edge.
+        # For the action X′ = exp(ξ) · X on homogeneous coords (X, Y, Z, W):
+        #   dX′/dξ is a 4×6 matrix per edge.
         Ja: Float[Tensor, "1 n_edges 4 6"] = torch.stack([
             H,  o,  o,  o,  Z, -Y,
             o,  H,  o, -Z,  o,  X,
@@ -259,22 +259,22 @@ def transform(
             o,  o,  o,  o,  o,  o,
         ], dim=-1).view(1, len(ii), 4, 6)
 
-        # Jp: Jacobian of the pinhole projection w.r.t. 3D point (X,Y,Z,W).
+        # Jₚ: Jacobian of the pinhole projection w.r.t. 3D point (X, Y, Z, W).
         # Maps from 4D homogeneous coords to 2D pixel coords.
         Jp: Float[Tensor, "1 n_edges 2 4"] = torch.stack([
              fx*d,     o, -fx*X*d*d,  o,
                 o,  fy*d, -fy*Y*d*d,  o,
         ], dim=-1).view(1, len(ii), 2, 4)
 
-        # Jj = Jp @ Ja: Jacobian of pixel coords w.r.t. target pose jj
+        # Jⱼ = Jₚ @ Jₐ: Jacobian of pixel coords w.r.t. target pose jj
         Jj: Float[Tensor, "1 n_edges 2 6"] = torch.matmul(Jp, Ja)
-        # Ji: Jacobian w.r.t. source pose ii, computed via the adjoint:
-        #   d(coords)/d(xi_i) = -Gij.adjT @ d(coords)/d(xi_j)
+        # Jᵢ: Jacobian w.r.t. source pose ii, computed via the adjoint:
+        #   d(coords)/dξᵢ = -Gij.adjT @ d(coords)/dξⱼ
         Ji: Float[Tensor, "1 n_edges 2 6"] = -Gij[:,:,None].adjT(Jj)
 
         # Jz: Jacobian of pixel coords w.r.t. inverse depth.
         # The inverse depth enters via the last column of the SE3 matrix
-        # (the translation component acts on the W=1/Z component).
+        # (the translation component acts on the W = 1/Z component).
         Jz: Float[Tensor, "1 n_edges 2 1"] = torch.matmul(Jp, Gij.matrix()[...,:,3:])
 
         return x1, (Z > 0.2).float(), (Ji, Jj, Jz)
