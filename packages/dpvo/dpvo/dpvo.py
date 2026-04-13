@@ -74,8 +74,10 @@ class DPVO:
         tlist: List of original timestamps for each processed frame.
         counter: Running count of all frames seen (including skipped ones).
         tstamps_: Per-keyframe internal timestamps, shape ``(N,)``.
-        poses_: Per-keyframe SE3 poses as ``[tx, ty, tz, qx, qy, qz, qw]``,
-            shape ``(N, 7)``.
+        poses_: Per-keyframe SE3 poses as ``[tx, ty, tz, qx, qy, qz, qw]``
+            in camera-from-world (``cam_se3_world``) convention, shape
+            ``(N, 7)``.  Use :meth:`terminate` to obtain world-from-camera
+            (``world_se3_cam``) poses for downstream consumers.
         patches_: Per-keyframe patch coordinates ``(x, y, inv_depth)``,
             shape ``(N, M, 3, P, P)``.
         intrinsics_: Per-keyframe camera intrinsics ``(fx, fy, cx, cy)``
@@ -281,13 +283,14 @@ class DPVO:
         removed by keyframe management).  Removed frames have their poses
         recovered via the relative pose deltas stored in :attr:`delta`.
 
-        The returned poses are *camera-to-world* (inverted from the
-        internal world-to-camera representation).
+        The returned poses are world-from-camera (``world_se3_cam``),
+        inverted from the internal camera-from-world (``cam_se3_world``)
+        representation.
 
         Returns:
             A 2-tuple of:
-            - ``poses``: Camera-to-world poses as ``[tx, ty, tz, qx, qy, qz, qw]``,
-              shape ``(n_frames, 7)``.
+            - ``poses``: World-from-camera (``world_se3_cam``) poses as
+              ``[tx, ty, tz, qx, qy, qz, qw]``, shape ``(n_frames, 7)``.
             - ``tstamps``: Original timestamps, shape ``(n_frames,)``.
         """
         print("Terminating...")
@@ -300,7 +303,7 @@ class DPVO:
         # Reconstruct poses for ALL timestamps (including removed keyframes)
         poses: list[SE3] = [self.get_pose(t) for t in range(self.counter)]
         poses: SE3 = lietorch.stack(poses, dim=0)
-        # Invert: internal representation is world-to-camera, output is camera-to-world
+        # Invert: internal cam_se3_world -> output world_se3_cam
         poses: Float[np.ndarray, "n_frames 7"] = poses.inv().data.cpu().numpy()
         tstamps: Float64[np.ndarray, "n_frames"] = np.array(self.tlist, dtype=np.float64)
         print("Done!")

@@ -68,7 +68,8 @@ class DPVOPrediction:
     """
 
     final_poses: Float32[np.ndarray, "num_keyframes 7"]
-    """Keyframe poses as ``[tx, ty, tz, qx, qy, qz, qw]``."""
+    """Keyframe poses as ``[tx, ty, tz, qx, qy, qz, qw]`` in
+    world-from-camera (``world_se3_cam``) convention."""
     tstamps: Float64[np.ndarray, "num_keyframes"]
     """Timestamp per keyframe. Integer frame indices for video/image streams,
     real-valued (nanoseconds/seconds) for evaluation datasets (EuRoC, TUM-RGBD)."""
@@ -136,7 +137,8 @@ def log_trajectory(
 
     Args:
         parent_log_path: Rerun entity path prefix (e.g. ``Path("world")``).
-        poses: All buffered keyframe poses ``[tx, ty, tz, qx, qy, qz, qw]``.
+        poses: All buffered keyframe poses ``[tx, ty, tz, qx, qy, qz, qw]``
+            in camera-from-world (``cam_se3_world``) convention.
         points: All buffered 3-D points (flattened across patches).
         colors: Per-point RGB colors matching ``points``.
         intri_np: Camera intrinsics as ``[fx, fy, cx, cy]``.
@@ -175,29 +177,30 @@ def log_trajectory(
     if nonzero_poses.shape[0] == 0:
         return path_list
 
-    # Extract the most recent keyframe pose for the camera transform
+    # Extract the most recent keyframe pose.
+    # poses_ stores cam_se3_world (camera-from-world) internally, so the
+    # raw [tx, ty, tz, qx, qy, qz, qw] encodes cam_T_world.
     last_index: int = nonzero_poses.shape[0] - 1
-    quat_pose: Float32[np.ndarray, "7"] = nonzero_poses[last_index].numpy(force=True)
-    trans_quat: Float32[np.ndarray, "3"] = quat_pose[:3]
-    rotation_quat: Rotation = Rotation.from_quat(quat_pose[3:])
+    cam_se3_world: Float32[np.ndarray, "7"] = nonzero_poses[last_index].numpy(force=True)
+    cam_t_world: Float32[np.ndarray, "3"] = cam_se3_world[:3]
+    cam_R_world: Float64[np.ndarray, "3 3"] = Rotation.from_quat(cam_se3_world[3:]).as_matrix()
 
-    # Build the camera-to-world 4x4 transform (cam_T_world) and invert
-    # to get world_T_cam for Rerun logging (child-from-parent convention).
-    cam_R_world: Float64[np.ndarray, "3 3"] = rotation_quat.as_matrix()
-
+    # Build cam_T_world 4×4, then invert to world_T_cam for Rerun logging.
     cam_T_world: Float64[np.ndarray, "4 4"] = np.eye(4)
     cam_T_world[:3, :3] = cam_R_world
-    cam_T_world[0:3, 3] = trans_quat
+    cam_T_world[:3, 3] = cam_t_world
 
     world_T_cam: Float64[np.ndarray, "4 4"] = np.linalg.inv(cam_T_world)
+    world_t_cam: Float64[np.ndarray, "3"] = world_T_cam[:3, 3]
+    world_R_cam: Float64[np.ndarray, "3 3"] = world_T_cam[:3, :3]
 
-    path_list.append(world_T_cam[:3, 3].copy().tolist())
+    path_list.append(world_t_cam.copy().tolist())
 
     rr.log(
         f"{cam_log_path}",
         rr.Transform3D(
-            translation=world_T_cam[:3, 3],
-            mat3x3=world_T_cam[:3, :3],
+            translation=world_t_cam,
+            mat3x3=world_R_cam,
             from_parent=False,
         ),
     )
@@ -215,9 +218,9 @@ def log_trajectory(
 
     # Outlier removal: discard points whose distance from the camera
     # trajectory median exceeds 5x the maximum camera-center radius.
-    # Use world-space camera positions (from path_list) instead of the
-    # internal world-to-camera translations (poses_[:, :3]) which live in
-    # a different coordinate frame than the backprojected points.
+    # Use world-space camera positions (world_t_cam from path_list)
+    # instead of cam_se3_world translations (poses_[:, :3]) which live
+    # in a different coordinate frame than the backprojected points.
     if len(path_list) < 2:
         # Not enough camera positions yet for meaningful outlier removal;
         # log all nonzero points unfiltered.
@@ -263,19 +266,22 @@ def log_final(
 
     Args:
         parent_log_path: Rerun entity path prefix (e.g. ``Path("world")``).
-        final_poses: Optimized keyframe poses ``[tx, ty, tz, qx, qy, qz, qw]``.
+        final_poses: Optimized keyframe poses ``[tx, ty, tz, qx, qy, qz, qw]``
+            in world-from-camera (``world_se3_cam``) convention, as returned
+            by :meth:`~dpvo.dpvo.DPVO.terminate`.
         tstamps: Timestamp (frame index) per keyframe.
         final_points: Final 3-D point cloud (unused here, reserved for
             future extensions).
         final_colors: Per-point colors (unused here).
     """
-    for idx, (pose_quat, _tstamp) in enumerate(zip(final_poses, tstamps, strict=False)):
+    for idx, (world_se3_cam, _tstamp) in enumerate(zip(final_poses, tstamps, strict=False)):
         cam_log_path: str = f"{parent_log_path}/camera_{idx}"
-        trans_quat: Float32[np.ndarray, "3"] = pose_quat[:3]
-        R_33: Float64[np.ndarray, "3 3"] = Rotation.from_quat(pose_quat[3:]).as_matrix()
+        # final_poses are world_se3_cam (world-from-camera) from terminate().
+        world_t_cam: Float32[np.ndarray, "3"] = world_se3_cam[:3]
+        world_R_cam: Float64[np.ndarray, "3 3"] = Rotation.from_quat(world_se3_cam[3:]).as_matrix()
         rr.log(
             f"{cam_log_path}",
-            rr.Transform3D(translation=trans_quat, mat3x3=R_33, from_parent=False),
+            rr.Transform3D(translation=world_t_cam, mat3x3=world_R_cam, from_parent=False),
         )
 
 
