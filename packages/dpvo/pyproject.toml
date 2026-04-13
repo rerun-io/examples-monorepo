@@ -7,9 +7,7 @@ authors = [{ name = "pablo vela", email = "pablovela5620@gmail.com" }]
 name = "dpvo"
 version = "0.1.1"
 requires-python = ">= 3.11"
-dependencies = [
-    "mmcv-lite>=2.2.0,<3",
-]
+dependencies = []
 
 [tool.setuptools.packages.find]
 where = ["."]

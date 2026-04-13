@@ -17,10 +17,10 @@ from multiprocessing import Queue
 from pathlib import Path
 
 import cv2
-import mmcv
 import numpy as np
 from jaxtyping import Float64, UInt8
 from numpy import ndarray
+from simplecv.video_io import VideoReader
 
 
 def load_calib(calib: str) -> tuple[Float64[ndarray, "3 3"], Float64[ndarray, "n"]]:
@@ -119,7 +119,7 @@ def video_stream(
 ) -> None:
     """Read frames from a video file and push them to a queue.
 
-    Uses ``mmcv.VideoReader`` to decode frames.  Frames are downscaled by
+    Uses ``simplecv.video_io.VideoReader`` to decode frames.  Frames are downscaled by
     0.5x (both axes) to reduce memory and compute requirements.  The
     intrinsics are correspondingly scaled by 0.5.
 
@@ -147,7 +147,7 @@ def video_stream(
         K, calib_data = load_calib(calib)
         fx, fy, cx, cy = float(K[0, 0]), float(K[1, 1]), float(K[0, 2]), float(K[1, 2])
 
-    video_reader: mmcv.VideoReader = mmcv.VideoReader(imagedir)
+    video_reader: VideoReader = VideoReader(Path(imagedir))
 
     t: int = 0
 

@@ -24,7 +24,6 @@ from timeit import default_timer as timer
 from typing import Annotated
 
 import cv2
-import mmcv
 import numpy as np
 import rerun as rr
 import torch
@@ -153,7 +152,7 @@ def log_trajectory(
         The updated ``path_list`` with the latest camera position appended.
     """
     cam_log_path: str = f"{parent_log_path}/camera"
-    rgb_hw3: UInt8[ndarray, "h w 3"] = mmcv.bgr2rgb(bgr_hw3)
+    rgb_hw3: UInt8[ndarray, "h w 3"] = cv2.cvtColor(bgr_hw3, cv2.COLOR_BGR2RGB)
     rr.log(
         f"{cam_log_path}/pinhole/image",
         rr.Image(rgb_hw3).compress(jpeg_quality=jpg_quality),
@@ -370,7 +369,8 @@ def calib_from_dust3r(
     """
     tmp_path: Path = Path("/tmp/dpvo/tmp.png")
     # Save image to a temporary file for DUSt3R (expects a directory of images)
-    mmcv.imwrite(bgr_hw3, str(tmp_path))
+    tmp_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(tmp_path), bgr_hw3)
     optimized_results: OptimizedResult = inferece_dust3r(
         image_dir_or_list=tmp_path.parent,
         model=model,

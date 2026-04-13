@@ -1170,8 +1170,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/de/1f/77fa3081e4f66ca3576c896ae5d31c3002ac6607f9747d2e3aa49227e464/markdown-3.10.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/af/33/ee4519fa02ed11a94aef9559552f3b17bb863f2ecfe1a35dc7f548cde231/matplotlib_inline-0.2.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/87/57/80116bef356054321bde3eb858f32e1c2ac6761d34f85b7662dce95f8114/mini_dust3r-0.1.1-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/59/bd/5d468c171f201d6169bec848d1116e95736854eec72307299bc68939fe45/mmcv_lite-2.2.0-py2.py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/98/8e/f98332248aad102511bea4ae19c0ddacd2f0a994f3ca4c82b7a369e0af8b/mmengine-0.10.7-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/cb/98/6af411189d9413534c3eb691182bff1f5c6d44ed2f93f2edfe52a1bbceb8/more_itertools-11.0.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5a/56/21b27c560c13822ed93133f08aa6372c53a8e067f11fbed37b4adcdac922/multidict-6.7.1-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/37/72/e61e3091e0e00fae9d3a8ef85ece9d2cd4b5966058e1f2901ce42679eebf/narwhals-2.19.0-py3-none-any.whl
@@ -1226,7 +1224,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/9c/d9/a5db55f88f258ac669a92858b70a714bbbd5acd993820b41ec4a96a4d77f/tensorboard-2.20.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/7a/13/e503968fefabd4c6b2650af21e110aa8466fe21432cd7c43a84577a89438/tensorboard_data_server-0.7.2-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/33/d1/8bb87d21e9aeb323cc03034f5eaf2c8f69841e40e4853c2627edf8111ed3/termcolor-3.3.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/32/d5/f9a850d79b0851d1d4ef6456097579a9005b31fea68726a4ae5f2d82ddd9/threadpoolctl-3.6.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bd/75/8539d011f6be8e29f339c42e633aae3cb73bffa95dd0f9adec09b9c58e85/tomlkit-0.13.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/00/c0/8f5d070730d7836adc9c9b6408dec68c6ced86b304a9b26a14df072a6e8c/traitlets-5.14.3-py3-none-any.whl
@@ -1239,7 +1236,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/93/8c/2e650f2afeb7ee576912636c23ddb621c91ac6a98e66dc8d29c3c69446e1/werkzeug-3.1.8-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/3f/0e/fa3b193432cfc60c93b42f3be03365f5f909d2b3ea410295cf36df739e31/widgetsnbextension-4.0.15-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b0/be/d7c88cd9293c859fc74b232abdc65a229bb953997995d6912fc85af18323/wrapt-2.1.2-cp311-cp311-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl
-      - pypi: https://files.pythonhosted.org/packages/37/81/6acd6601f61e31cfb8729d3da6d5df966f80f374b78eff83760714487338/yapf-0.43.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/9a/64/c53487d9f4968045b8afa51aed7ca44f58b2589e772f32745f3744476c82/yarl-1.23.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/2e/54/647ade08bf0db230bfea292f893923872fd20be6ac6f53b2b936ba839d75/zipp-3.23.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bb/1f/e9cfd801a3f9190bf3e759c422bbfd2247db9d7f3d54a56ecde70137791a/zstandard-0.25.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
@@ -1719,8 +1715,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/de/1f/77fa3081e4f66ca3576c896ae5d31c3002ac6607f9747d2e3aa49227e464/markdown-3.10.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/af/33/ee4519fa02ed11a94aef9559552f3b17bb863f2ecfe1a35dc7f548cde231/matplotlib_inline-0.2.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/87/57/80116bef356054321bde3eb858f32e1c2ac6761d34f85b7662dce95f8114/mini_dust3r-0.1.1-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/59/bd/5d468c171f201d6169bec848d1116e95736854eec72307299bc68939fe45/mmcv_lite-2.2.0-py2.py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/98/8e/f98332248aad102511bea4ae19c0ddacd2f0a994f3ca4c82b7a369e0af8b/mmengine-0.10.7-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/cb/98/6af411189d9413534c3eb691182bff1f5c6d44ed2f93f2edfe52a1bbceb8/more_itertools-11.0.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5a/56/21b27c560c13822ed93133f08aa6372c53a8e067f11fbed37b4adcdac922/multidict-6.7.1-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/37/72/e61e3091e0e00fae9d3a8ef85ece9d2cd4b5966058e1f2901ce42679eebf/narwhals-2.19.0-py3-none-any.whl
@@ -1775,7 +1769,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/9c/d9/a5db55f88f258ac669a92858b70a714bbbd5acd993820b41ec4a96a4d77f/tensorboard-2.20.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/7a/13/e503968fefabd4c6b2650af21e110aa8466fe21432cd7c43a84577a89438/tensorboard_data_server-0.7.2-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/33/d1/8bb87d21e9aeb323cc03034f5eaf2c8f69841e40e4853c2627edf8111ed3/termcolor-3.3.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/32/d5/f9a850d79b0851d1d4ef6456097579a9005b31fea68726a4ae5f2d82ddd9/threadpoolctl-3.6.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bd/75/8539d011f6be8e29f339c42e633aae3cb73bffa95dd0f9adec09b9c58e85/tomlkit-0.13.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/00/c0/8f5d070730d7836adc9c9b6408dec68c6ced86b304a9b26a14df072a6e8c/traitlets-5.14.3-py3-none-any.whl
@@ -1790,7 +1783,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/93/8c/2e650f2afeb7ee576912636c23ddb621c91ac6a98e66dc8d29c3c69446e1/werkzeug-3.1.8-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/3f/0e/fa3b193432cfc60c93b42f3be03365f5f909d2b3ea410295cf36df739e31/widgetsnbextension-4.0.15-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b0/be/d7c88cd9293c859fc74b232abdc65a229bb953997995d6912fc85af18323/wrapt-2.1.2-cp311-cp311-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl
-      - pypi: https://files.pythonhosted.org/packages/37/81/6acd6601f61e31cfb8729d3da6d5df966f80f374b78eff83760714487338/yapf-0.43.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/9a/64/c53487d9f4968045b8afa51aed7ca44f58b2589e772f32745f3744476c82/yarl-1.23.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/2e/54/647ade08bf0db230bfea292f893923872fd20be6ac6f53b2b936ba839d75/zipp-3.23.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bb/1f/e9cfd801a3f9190bf3e759c422bbfd2247db9d7f3d54a56ecde70137791a/zstandard-0.25.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
@@ -18683,9 +18675,7 @@ packages:
 - pypi: ./packages/dpvo
   name: dpvo
   version: 0.1.1
-  sha256: 736c8f782adf2f9051eb0c35aa72db1a8ea63d7da3c1818c0bb1b4fa04ff3ae6
-  requires_dist:
-  - mmcv-lite>=2.2.0,<3
+  sha256: f3b6ca5ff45ed10ef8c4f4120cfe690507fcc03bdfd46bebb2e8b2e9fc20c5e8
   requires_python: '>=3.11'
 - conda: https://prefix.dev/conda-forge/noarch/easydict-1.13-pyhff2d567_1.conda
   sha256: 1c7e3a43fe195e3f400bb284d09fa32e5728f029bc62edabfa293a71c5e70bf2
@@ -30146,102 +30136,6 @@ packages:
   purls: []
   size: 125431807
   timestamp: 1774449026019
-- pypi: https://files.pythonhosted.org/packages/59/bd/5d468c171f201d6169bec848d1116e95736854eec72307299bc68939fe45/mmcv_lite-2.2.0-py2.py3-none-any.whl
-  name: mmcv-lite
-  version: 2.2.0
-  sha256: a24ee8dd3df7556dfced282dbfe8c3f87df6de2d4dcaf1207e83e9a2d58455a6
-  requires_dist:
-  - addict
-  - mmengine>=0.3.0
-  - numpy
-  - packaging
-  - pillow
-  - pyyaml
-  - yapf
-  - opencv-python>=3
-  - regex ; sys_platform == 'win32'
-  - pytest-runner ; extra == 'all'
-  - ninja ; extra == 'all'
-  - psutil ; extra == 'all'
-  - addict ; extra == 'all'
-  - mmengine>=0.3.0 ; extra == 'all'
-  - numpy ; extra == 'all'
-  - packaging ; extra == 'all'
-  - pillow ; extra == 'all'
-  - pyyaml ; extra == 'all'
-  - yapf ; extra == 'all'
-  - coverage ; extra == 'all'
-  - lmdb ; extra == 'all'
-  - onnx ; extra == 'all'
-  - onnxoptimizer ; extra == 'all'
-  - onnxruntime ; extra == 'all'
-  - pytest ; extra == 'all'
-  - pyturbojpeg ; extra == 'all'
-  - scipy ; extra == 'all'
-  - tifffile ; extra == 'all'
-  - regex ; sys_platform == 'win32' and extra == 'all'
-  - pytest-runner ; extra == 'build'
-  - ninja ; extra == 'optional'
-  - psutil ; extra == 'optional'
-  - coverage ; extra == 'tests'
-  - lmdb ; extra == 'tests'
-  - onnx ; extra == 'tests'
-  - onnxoptimizer ; extra == 'tests'
-  - onnxruntime ; extra == 'tests'
-  - pytest ; extra == 'tests'
-  - pyturbojpeg ; extra == 'tests'
-  - scipy ; extra == 'tests'
-  - tifffile ; extra == 'tests'
-  requires_python: '>=3.7'
-- pypi: https://files.pythonhosted.org/packages/98/8e/f98332248aad102511bea4ae19c0ddacd2f0a994f3ca4c82b7a369e0af8b/mmengine-0.10.7-py3-none-any.whl
-  name: mmengine
-  version: 0.10.7
-  sha256: 262ac976a925562f78cd5fd14dd1bc9b680ed0aa81f0d85b723ef782f99c54ee
-  requires_dist:
-  - addict
-  - matplotlib
-  - numpy
-  - pyyaml
-  - rich
-  - termcolor
-  - yapf
-  - opencv-python>=3
-  - regex ; sys_platform == 'win32'
-  - addict ; extra == 'all'
-  - matplotlib ; extra == 'all'
-  - numpy ; extra == 'all'
-  - pyyaml ; extra == 'all'
-  - rich ; extra == 'all'
-  - termcolor ; extra == 'all'
-  - yapf ; extra == 'all'
-  - bitsandbytes ; extra == 'all'
-  - clearml ; extra == 'all'
-  - coverage ; extra == 'all'
-  - dadaptation ; extra == 'all'
-  - dvclive ; extra == 'all'
-  - lion-pytorch ; extra == 'all'
-  - lmdb ; extra == 'all'
-  - mlflow ; extra == 'all'
-  - parameterized ; extra == 'all'
-  - pydantic==1.10.9 ; extra == 'all'
-  - pytest ; extra == 'all'
-  - transformers ; extra == 'all'
-  - aim<=3.17.5 ; sys_platform != 'win32' and extra == 'all'
-  - regex ; sys_platform == 'win32' and extra == 'all'
-  - bitsandbytes ; extra == 'tests'
-  - clearml ; extra == 'tests'
-  - coverage ; extra == 'tests'
-  - dadaptation ; extra == 'tests'
-  - dvclive ; extra == 'tests'
-  - lion-pytorch ; extra == 'tests'
-  - lmdb ; extra == 'tests'
-  - mlflow ; extra == 'tests'
-  - parameterized ; extra == 'tests'
-  - pydantic==1.10.9 ; extra == 'tests'
-  - pytest ; extra == 'tests'
-  - transformers ; extra == 'tests'
-  - aim<=3.17.5 ; sys_platform != 'win32' and extra == 'tests'
-  requires_python: '>=3.7'
 - pypi: https://files.pythonhosted.org/packages/d7/96/bcb5141eae24474d80b8157b0c3055d25fa75f9804d4abb4a514695bbba9/moderngl-5.12.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
   name: moderngl
   version: 5.12.0
@@ -30306,7 +30200,7 @@ packages:
   - pytorch-lightning>=2.5.1,<3
   - diffusers[torch]>=0.32.2
   - timm>=1.0.15,<2
-  - sam3-rerun @ file:///var/tmp/vibe-kanban/worktrees/4123-dpvo-cleanup-in/examples-monorepo/packages/sam3-rerun
+  - sam3-rerun @ file:///var/tmp/vibe-kanban/worktrees/8048-dpvo-more-clean/examples-monorepo/packages/sam3-rerun
   requires_python: '>=3.11.0'
 - pypi: https://files.pythonhosted.org/packages/a4/8e/469e5a4a2f5855992e425f3cb33804cc07bf18d48f2db061aec61ce50270/more_itertools-10.8.0-py3-none-any.whl
   name: more-itertools
@@ -36217,7 +36111,7 @@ packages:
   version: 0.1.0
   sha256: 745a5f6282ad01b5a906b256f8f803725a4eddb4f4e5f3561bb4465a0abdc24c
   requires_dist:
-  - monopriors @ file:///var/tmp/vibe-kanban/worktrees/4123-dpvo-cleanup-in/examples-monorepo/packages/monoprior
+  - monopriors @ file:///var/tmp/vibe-kanban/worktrees/8048-dpvo-more-clean/examples-monorepo/packages/monoprior
   requires_python: '>=3.12'
 - pypi: https://files.pythonhosted.org/packages/72/15/4e9929e536bda99ac1fe8b106e54c5f83846130b812350f76537f4806b19/rerun_sdk-0.31.1-cp310-abi3-manylinux_2_28_aarch64.whl
   name: rerun-sdk
@@ -36792,8 +36686,8 @@ packages:
   - omegaconf>=2.3.0,<3
   - termcolor>=3.2.0,<4
   - spaces>=0.43.0
-  - monopriors @ file:///var/tmp/vibe-kanban/worktrees/4123-dpvo-cleanup-in/examples-monorepo/packages/monoprior
-  - sam3-rerun @ file:///var/tmp/vibe-kanban/worktrees/4123-dpvo-cleanup-in/examples-monorepo/packages/sam3-rerun
+  - monopriors @ file:///var/tmp/vibe-kanban/worktrees/8048-dpvo-more-clean/examples-monorepo/packages/monoprior
+  - sam3-rerun @ file:///var/tmp/vibe-kanban/worktrees/8048-dpvo-more-clean/examples-monorepo/packages/sam3-rerun
   requires_python: '>=3.12'
 - pypi: https://files.pythonhosted.org/packages/f4/a2/70401a107d6d7466d64b466927e6b96fcefa99d57494b972608e2f8be50f/scikit_image-0.26.0-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl
   name: scikit-image
@@ -39935,7 +39829,7 @@ packages:
   sha256: a73114f7930cefc5fd61f7116a507c1ed218d5c909a24af0c113608ed440e827
   requires_dist:
   - einops>=0.8.1,<0.9
-  - monopriors @ file:///var/tmp/vibe-kanban/worktrees/4123-dpvo-cleanup-in/examples-monorepo/packages/monoprior
+  - monopriors @ file:///var/tmp/vibe-kanban/worktrees/8048-dpvo-more-clean/examples-monorepo/packages/monoprior
   requires_python: '>=3.11'
 - conda: https://prefix.dev/conda-forge/linux-64/vlfeat-0.9.21-hd590300_1.conda
   sha256: f3fca24ef6a327072378dd654eba37c6a6da15499ca212eb20b0af422c1ad4c5
@@ -41172,14 +41066,6 @@ packages:
   purls: []
   size: 88088
   timestamp: 1753484092643
-- pypi: https://files.pythonhosted.org/packages/37/81/6acd6601f61e31cfb8729d3da6d5df966f80f374b78eff83760714487338/yapf-0.43.0-py3-none-any.whl
-  name: yapf
-  version: 0.43.0
-  sha256: 224faffbc39c428cb095818cf6ef5511fdab6f7430a10783fdfb292ccf2852ca
-  requires_dist:
-  - platformdirs>=3.5.1
-  - tomli>=2.0.1 ; python_full_version < '3.11'
-  requires_python: '>=3.7'
 - pypi: https://files.pythonhosted.org/packages/50/12/95a1d33f04a79c402664070d43b8b9f72dc18914e135b345b611b0b1f8cc/yarl-1.23.0-cp310-cp310-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
   name: yarl
   version: 1.23.0
