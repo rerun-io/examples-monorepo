@@ -288,33 +288,6 @@ def log_final(
 # ── Frame I/O helpers ───────────────────────────────────────────────────
 
 
-def create_reader(imagedir: str, calib: str | None, stride: int, skip: int, queue: Queue) -> Process:
-    """Create a multiprocessing ``Process`` that reads frames into a queue.
-
-    If ``imagedir`` is a directory the reader uses :func:`image_stream`;
-    otherwise it treats the path as a video file and uses
-    :func:`video_stream`.
-
-    Args:
-        imagedir: Path to an image directory **or** a video file.
-        calib: Path to a calibration file (``fx fy cx cy`` per line), or
-            ``None`` to skip file-based calibration.
-        stride: Sample every *stride*-th frame.
-        skip: Number of leading frames to skip before sampling begins.
-        queue: Shared ``Queue`` into which ``(timestep, bgr_hw3, intrinsics)``
-            tuples are placed. A sentinel ``(-1, ...)`` signals end-of-stream.
-
-    Returns:
-        An unstarted ``Process`` ready to be ``.start()``-ed.
-    """
-    reader: Process
-    if os.path.isdir(imagedir):
-        reader = Process(target=image_stream, args=(queue, imagedir, calib, stride, skip))
-    else:
-        reader = Process(target=video_stream, args=(queue, imagedir, calib, stride, skip))
-
-    return reader
-
 
 def calculate_num_frames(video_or_image_dir: str, stride: int, skip: int) -> int:
     """Calculate the effective number of frames after applying skip and stride.
@@ -460,7 +433,8 @@ def run_dpvo_pipeline(
     slam: DPVO | None = None
     queue = Queue(maxsize=8)
 
-    reader: Process = create_reader(imagedir, calib, stride, skip, queue)
+    stream_fn = image_stream if os.path.isdir(imagedir) else video_stream
+    reader: Process = Process(target=stream_fn, args=(queue, imagedir, calib, stride, skip))
     reader.start()
 
     rr.log(f"{parent_log_path}", rr.ViewCoordinates.RDF, static=True)
