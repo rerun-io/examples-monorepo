@@ -105,7 +105,7 @@ packages/sam3-rerun/data/
 packages/robocap-slam/data/
 packages/pysfm/data/
 packages/gsplat-rust-renderer/data/
-packages/mini-dpvo/data/
+packages/dpvo/data/
 packages/*/outputs/
 packages/*/checkpoints/
 packages/*/_checkpoints/

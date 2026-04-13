@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=70.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+authors = [{ name = "pablo vela", email = "pablovela5620@gmail.com" }]
+name = "dpvo"
+version = "0.1.1"
+requires-python = ">= 3.11"
+dependencies = [
+    "mmcv-lite>=2.2.0,<3",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["dpvo", "dpvo.*"]
+namespaces = false
+
+[tool.ruff]
+line-length = 150
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+ignore = ["E501", "F722", "F821", "UP037", "UP040"]
+
+[tool.vulture]
+paths = ["dpvo", "tools"]
+exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*"]
+sort_by_size = true
+min_confidence = 60
+ignore_names = [
+    # Public API / nn.Module classes that may be used externally or by training code
+    "BasicEncoder", "BottleneckBlock", "SoftAggBasic", "GradientZero", "GradMag", "LayerNorm1D",
+    # Logger class used during training
+    "Logger", "push", "write_dict",
+    # Training data readers
+    "dataset_factory", "loadtum", "_build_dataset", "all_pairs_distance_matrix",
+    "pose_matrix_to_quaternion", "compute_distance_matrix_flow2",
+    "readFlowKITTI", "writeFlow", "read_gen",
+    # Visualization / evaluation utilities
+    "plot_trajectory", "save_trajectory_tum_format", "log_final", "block_show",
+    # Utility functions referenced by training code
+    "coords_grid", "all_pairs_exclusive", "extract_intrinsics",
+    # Module constants and tuple-unpacking artifacts
+    "MIN_DEPTH", "W",
+    # __exit__ protocol params
+    "value", "traceback",
+    # Tyro config fields (used by CLI parser)
+    "rr_config",
+    # BasicEncoder multidim layers (not used in DPVO but part of the architecture)
+    "layer4", "layer5", "layer6", "layer7", "up1", "up2",
+    # DPVO internal attributes
+    "image_", "__edges_all",
+]
