@@ -119,7 +119,7 @@ class DPVOInferenceConfig:
 
 def log_trajectory(
     parent_log_path: Path,
-    poses: Float32[Tensor, "buffer_size 7"],
+    cam_se3_world_buffer: Float32[Tensor, "buffer_size 7"],
     points: Float32[Tensor, "num_points 3"],
     colors: UInt8[Tensor, "buffer_size num_patches 3"],
     intri_np: Float32[ndarray, "4"],
@@ -138,8 +138,9 @@ def log_trajectory(
 
     Args:
         parent_log_path: Rerun entity path prefix (e.g. ``Path("world")``).
-        poses: All buffered keyframe poses ``[tx, ty, tz, qx, qy, qz, qw]``
-            in camera-from-world (``cam_se3_world``) convention.
+        cam_se3_world_buffer: All buffered keyframe poses
+            ``[tx, ty, tz, qx, qy, qz, qw]`` in camera-from-world
+            (``cam_se3_world``) convention.
         points: All buffered 3-D points (flattened across patches).
         colors: Per-point RGB colors matching ``points``.
         intri_np: Camera intrinsics as ``[fx, fy, cx, cy]``.
@@ -168,10 +169,10 @@ def log_trajectory(
     )
 
     # Filter out zero-initialized (unused) buffer slots
-    poses_mask: Tensor = ~(poses[:, :6] == 0).all(dim=1)
+    poses_mask: Tensor = ~(cam_se3_world_buffer[:, :6] == 0).all(dim=1)
     points_mask: Tensor = ~(points == 0).all(dim=1)
 
-    nonzero_poses: Float32[Tensor, "num_nonzero 7"] = poses[poses_mask]
+    nonzero_poses: Float32[Tensor, "num_nonzero 7"] = cam_se3_world_buffer[poses_mask]
     nonzero_points: Float32[Tensor, "num_nonzero 3"] = points[points_mask]
 
     if nonzero_poses.shape[0] == 0:
@@ -488,12 +489,12 @@ def run_dpvo_pipeline(
                 slam(t, bgr_3hw, intri_torch)
 
             if slam.is_initialized:
-                poses: Float32[Tensor, "buffer_size 7"] = slam.poses_
+                cam_se3_world_buffer: Float32[Tensor, "buffer_size 7"] = slam.poses_
                 points: Float32[Tensor, "num_points 3"] = slam.points_
                 colors: UInt8[Tensor, "buffer_size num_patches 3"] = slam.colors_
                 path_list = log_trajectory(
                     parent_log_path=parent_log_path,
-                    poses=poses,
+                    cam_se3_world_buffer=cam_se3_world_buffer,
                     points=points,
                     colors=colors,
                     intri_np=intri_np,
