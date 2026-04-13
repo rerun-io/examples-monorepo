@@ -34,6 +34,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from jaxtyping import Bool, Float, Float32, Float64, Int, UInt8
 from lietorch import SE3
+from numpy import ndarray
 from torch import Tensor
 
 from . import altcorr, fastba
@@ -275,7 +276,7 @@ class DPVO:
         t0, dP = self.delta[t]
         return dP * self.get_pose(t0)
 
-    def terminate(self) -> tuple[Float32[np.ndarray, "n_frames 7"], Float64[np.ndarray, "n_frames"]]:
+    def terminate(self) -> tuple[Float32[ndarray, "n_frames 7"], Float64[ndarray, "n_frames"]]:
         """Finalize tracking: interpolate removed keyframes and return full trajectory.
 
         After the input stream ends, this method reconstructs the complete
@@ -304,8 +305,8 @@ class DPVO:
         poses: list[SE3] = [self.get_pose(t) for t in range(self.counter)]
         poses: SE3 = lietorch.stack(poses, dim=0)
         # Invert: internal cam_se3_world -> output world_se3_cam
-        poses: Float[np.ndarray, "n_frames 7"] = poses.inv().data.cpu().numpy()
-        tstamps: Float64[np.ndarray, "n_frames"] = np.array(self.tlist, dtype=np.float64)
+        poses: Float[ndarray, "n_frames 7"] = poses.inv().data.cpu().numpy()
+        tstamps: Float64[ndarray, "n_frames"] = np.array(self.tlist, dtype=np.float64)
         print("Done!")
 
         return poses, tstamps

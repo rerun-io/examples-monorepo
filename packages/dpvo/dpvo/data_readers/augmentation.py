@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 import torchvision.transforms as transforms
 from jaxtyping import Float32
+from torch import Tensor
 
 
 class RGBDAugmentor:
@@ -42,11 +43,11 @@ class RGBDAugmentor:
 
     def spatial_transform(
         self,
-        images: Float32[torch.Tensor, "n 3 h w"],
-        depths: Float32[torch.Tensor, "n h w"],
-        poses: Float32[torch.Tensor, "n 7"],
-        intrinsics: Float32[torch.Tensor, "n 4"],
-    ) -> tuple[Float32[torch.Tensor, "n 3 crop_h crop_w"], Float32[torch.Tensor, "n 7"], Float32[torch.Tensor, "n crop_h crop_w"], Float32[torch.Tensor, "n 4"]]:
+        images: Float32[Tensor, "n 3 h w"],
+        depths: Float32[Tensor, "n h w"],
+        poses: Float32[Tensor, "n 7"],
+        intrinsics: Float32[Tensor, "n 4"],
+    ) -> tuple[Float32[Tensor, "n 3 crop_h crop_w"], Float32[Tensor, "n 7"], Float32[Tensor, "n crop_h crop_w"], Float32[Tensor, "n 4"]]:
         """Randomly scale and centre-crop images, depths, and intrinsics.
 
         With 80 % probability a random scale in ``[1, 2^max_scale]`` is
@@ -96,7 +97,7 @@ class RGBDAugmentor:
         depths = depths.squeeze(dim=1)
         return images, poses, depths, intrinsics
 
-    def color_transform(self, images: Float32[torch.Tensor, "n 3 h w"]) -> Float32[torch.Tensor, "n 3 h w"]:
+    def color_transform(self, images: Float32[Tensor, "n 3 h w"]) -> Float32[Tensor, "n 3 h w"]:
         """Apply colour jitter uniformly across all frames in a clip.
 
         Frames are concatenated along the width axis so that the same
@@ -118,11 +119,11 @@ class RGBDAugmentor:
 
     def __call__(
         self,
-        images: Float32[torch.Tensor, "n 3 h w"],
-        poses: Float32[torch.Tensor, "n 7"],
-        depths: Float32[torch.Tensor, "n h w"],
-        intrinsics: Float32[torch.Tensor, "n 4"],
-    ) -> tuple[Float32[torch.Tensor, "n 3 crop_h crop_w"], Float32[torch.Tensor, "n 7"], Float32[torch.Tensor, "n crop_h crop_w"], Float32[torch.Tensor, "n 4"]]:
+        images: Float32[Tensor, "n 3 h w"],
+        poses: Float32[Tensor, "n 7"],
+        depths: Float32[Tensor, "n h w"],
+        intrinsics: Float32[Tensor, "n 4"],
+    ) -> tuple[Float32[Tensor, "n 3 crop_h crop_w"], Float32[Tensor, "n 7"], Float32[Tensor, "n crop_h crop_w"], Float32[Tensor, "n 4"]]:
         """Apply colour (50 % chance) then spatial augmentation.
 
         Args:

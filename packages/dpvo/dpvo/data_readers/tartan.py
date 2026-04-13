@@ -13,6 +13,7 @@ import os.path as osp
 import cv2
 import numpy as np
 from jaxtyping import Float64, UInt8
+from numpy import ndarray
 
 from .base import RGBDDataset
 
@@ -112,13 +113,13 @@ class TartanAir(RGBDDataset):
             if len(images) != len(depths):
                 continue
 
-            poses: Float64[np.ndarray, "n 7"] = np.loadtxt(osp.join(scene, 'pose_left.txt'), delimiter=' ')
+            poses: Float64[ndarray, "n 7"] = np.loadtxt(osp.join(scene, 'pose_left.txt'), delimiter=' ')
             poses = poses[:, [1, 2, 0, 4, 5, 3, 6]]
             poses[:,:3] /= TartanAir.DEPTH_SCALE
-            intrinsics: list[Float64[np.ndarray, "4"]] = [TartanAir.calib_read()] * len(images)
+            intrinsics: list[Float64[ndarray, "4"]] = [TartanAir.calib_read()] * len(images)
 
             # graph of co-visible frames based on flow
-            graph: dict[int, tuple[np.ndarray, np.ndarray]] = self.build_frame_graph(poses, depths, intrinsics)
+            graph: dict[int, tuple[ndarray, ndarray]] = self.build_frame_graph(poses, depths, intrinsics)
 
             scene = '/'.join(scene.split('/'))
             scene_info[scene] = {'images': images, 'depths': depths,
@@ -127,7 +128,7 @@ class TartanAir(RGBDDataset):
         return scene_info
 
     @staticmethod
-    def calib_read() -> Float64[np.ndarray, "4"]:
+    def calib_read() -> Float64[ndarray, "4"]:
         """Return the fixed TartanAir intrinsics ``[fx, fy, cx, cy]``.
 
         All TartanAir scenes share the same 640x480 pinhole camera with
@@ -139,7 +140,7 @@ class TartanAir(RGBDDataset):
         return np.array([320.0, 320.0, 320.0, 240.0])
 
     @staticmethod
-    def image_read(image_file: str) -> UInt8[np.ndarray, "h w 3"]:
+    def image_read(image_file: str) -> UInt8[ndarray, "h w 3"]:
         """Read an image from disk via OpenCV (BGR channel order).
 
         Args:
@@ -151,7 +152,7 @@ class TartanAir(RGBDDataset):
         return cv2.imread(image_file)
 
     @staticmethod
-    def depth_read(depth_file: str) -> Float64[np.ndarray, "h w"]:
+    def depth_read(depth_file: str) -> Float64[ndarray, "h w"]:
         """Read and scale a TartanAir depth map from a ``.npy`` file.
 
         The raw depth is divided by :attr:`DEPTH_SCALE`. ``NaN`` and
@@ -163,7 +164,7 @@ class TartanAir(RGBDDataset):
         Returns:
             Scaled depth map as a float64 array with shape ``(h, w)``.
         """
-        depth: Float64[np.ndarray, "h w"] = np.load(depth_file) / TartanAir.DEPTH_SCALE
+        depth: Float64[ndarray, "h w"] = np.load(depth_file) / TartanAir.DEPTH_SCALE
         depth[depth==np.nan] = 1.0
         depth[depth==np.inf] = 1.0
         return depth

@@ -39,11 +39,11 @@ def _expand_index(index: Int[Tensor, "n"], src: Float[Tensor, "*shape"], dim: in
 
 
 def scatter_sum(
-    src: torch.Tensor,
-    index: torch.Tensor,
+    src: Tensor,
+    index: Tensor,
     dim: int = 1,
     dim_size: int | None = None,
-) -> torch.Tensor:
+) -> Tensor:
     """Sum elements of ``src`` into bins defined by ``index`` along ``dim``.
 
     This is a drop-in replacement for ``torch_scatter.scatter_add`` used in
@@ -64,27 +64,27 @@ def scatter_sum(
         has size ``dim_size``.  Each bin contains the sum of the
         corresponding source elements.
     """
-    index: torch.Tensor = index.long()
+    index: Tensor = index.long()
     if dim_size is None:
         dim_size: int = int(index.max().item()) + 1 if index.numel() > 0 else 0
 
     out_shape: list[int] = list(src.shape)
     out_shape[dim] = dim_size
-    out: torch.Tensor = src.new_zeros(out_shape)
+    out: Tensor = src.new_zeros(out_shape)
     if dim_size == 0 or index.numel() == 0:
         return out
 
-    expanded_index: torch.Tensor = _expand_index(index, src, dim)
+    expanded_index: Tensor = _expand_index(index, src, dim)
     out.scatter_add_(dim, expanded_index, src)
     return out
 
 
 def scatter_softmax(
-    src: torch.Tensor,
-    index: torch.Tensor,
+    src: Tensor,
+    index: Tensor,
     dim: int = 1,
     dim_size: int | None = None,
-) -> torch.Tensor:
+) -> Tensor:
     """Compute group-wise softmax over ``src`` using ``index`` to define groups.
 
     For each unique value ``g`` in ``index``, this computes a numerically
@@ -112,23 +112,23 @@ def scatter_softmax(
         Tensor of the same shape as ``src`` where elements within each
         group sum to 1.
     """
-    index: torch.Tensor = index.long()
+    index: Tensor = index.long()
     if dim_size is None:
         dim_size: int = int(index.max().item()) + 1 if index.numel() > 0 else 0
     if dim_size == 0 or index.numel() == 0:
         return torch.zeros_like(src)
 
-    expanded_index: torch.Tensor = _expand_index(index, src, dim)
+    expanded_index: Tensor = _expand_index(index, src, dim)
     max_shape: list[int] = list(src.shape)
     max_shape[dim] = dim_size
     # Step 1: per-group max for numerical stability
-    max_per_group: torch.Tensor = torch.full(max_shape, -torch.inf, dtype=src.dtype, device=src.device)
+    max_per_group: Tensor = torch.full(max_shape, -torch.inf, dtype=src.dtype, device=src.device)
     max_per_group.scatter_reduce_(dim, expanded_index, src, reduce="amax", include_self=True)
-    gathered_max: torch.Tensor = max_per_group.gather(dim, expanded_index)
+    gathered_max: Tensor = max_per_group.gather(dim, expanded_index)
 
     # Step 2: exponentiate shifted values (max subtracted)
-    exp: torch.Tensor = torch.exp(src - gathered_max)
+    exp: Tensor = torch.exp(src - gathered_max)
     # Step 3: normalize by per-group sum
-    denom: torch.Tensor = scatter_sum(exp, index, dim=dim, dim_size=dim_size)
-    result: torch.Tensor = exp / denom.gather(dim, expanded_index).clamp_min(torch.finfo(src.dtype).tiny)
+    denom: Tensor = scatter_sum(exp, index, dim=dim, dim_size=dim_size)
+    result: Tensor = exp / denom.gather(dim, expanded_index).clamp_min(torch.finfo(src.dtype).tiny)
     return result

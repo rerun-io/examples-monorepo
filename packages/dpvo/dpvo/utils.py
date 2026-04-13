@@ -217,7 +217,7 @@ def all_pairs_exclusive(n: int, **kwargs: object) -> tuple[Int[Tensor, "n_pairs"
     ii: Int[Tensor, "n n"]
     jj: Int[Tensor, "n n"]
     ii, jj = torch.meshgrid(torch.arange(n, **kwargs), torch.arange(n, **kwargs))
-    k: torch.Tensor = ii != jj
+    k: Tensor = ii != jj
     return ii[k].reshape(-1), jj[k].reshape(-1)
 
 
@@ -241,7 +241,7 @@ def set_depth(
     return patches
 
 
-def flatmeshgrid(*args: torch.Tensor, **kwargs: object) -> Generator[torch.Tensor, None, None]:
+def flatmeshgrid(*args: Tensor, **kwargs: object) -> Generator[Tensor, None, None]:
     """Flattened Cartesian product of 1-D index tensors.
 
     Equivalent to :func:`torch.meshgrid` followed by ``.reshape(-1)`` on
@@ -258,5 +258,5 @@ def flatmeshgrid(*args: torch.Tensor, **kwargs: object) -> Generator[torch.Tenso
         One flattened tensor per input, each of length equal to the
         product of input lengths.
     """
-    grid: tuple[torch.Tensor, ...] = tuple(torch.meshgrid(*args, **kwargs))
+    grid: tuple[Tensor, ...] = tuple(torch.meshgrid(*args, **kwargs))
     return (x.reshape(-1) for x in grid)

@@ -16,10 +16,12 @@ import numpy as np
 import torch
 from jaxtyping import Float32, Float64
 from lietorch import SE3
+from numpy import ndarray
 from scipy.spatial.transform import Rotation
+from torch import Tensor
 
 
-def parse_list(filepath: str, skiprows: int = 0) -> np.ndarray:
+def parse_list(filepath: str, skiprows: int = 0) -> ndarray:
     """Read a whitespace-delimited text file into a numpy string array.
 
     Args:
@@ -29,13 +31,13 @@ def parse_list(filepath: str, skiprows: int = 0) -> np.ndarray:
     Returns:
         A 2-D numpy array of unicode strings.
     """
-    data: np.ndarray = np.loadtxt(filepath, delimiter=' ', dtype=np.unicode_, skiprows=skiprows)
+    data: ndarray = np.loadtxt(filepath, delimiter=' ', dtype=np.unicode_, skiprows=skiprows)
     return data
 
 def associate_frames(
-    tstamp_image: Float64[np.ndarray, "n_img"],
-    tstamp_depth: Float64[np.ndarray, "n_depth"],
-    tstamp_pose: Float64[np.ndarray, "n_pose"] | None,
+    tstamp_image: Float64[ndarray, "n_img"],
+    tstamp_depth: Float64[ndarray, "n_depth"],
+    tstamp_pose: Float64[ndarray, "n_pose"] | None,
     max_dt: float = 1.0,
 ) -> list[tuple[int, ...]]:
     """Associate image, depth, and (optionally) pose timestamps by nearest match.
@@ -76,8 +78,8 @@ def associate_frames(
 def loadtum(datapath: str, _frame_rate: int = -1) -> tuple[
     list[str] | None,
     list[str] | None,
-    list[Float64[np.ndarray, "7"]] | None,
-    list[Float64[np.ndarray, "4"]] | None,
+    list[Float64[ndarray, "7"]] | None,
+    list[Float64[ndarray, "4"]] | None,
     list[float] | None,
 ]:
     """Load an RGBD sequence in TUM-RGBD format.
@@ -109,19 +111,19 @@ def loadtum(datapath: str, _frame_rate: int = -1) -> tuple[
     depth_list: str = osp.join(datapath, 'depth.txt')
 
     calib_path: str = osp.join(datapath, 'calibration.txt')
-    intrinsic: Float64[np.ndarray, "4"] | None = None
+    intrinsic: Float64[ndarray, "4"] | None = None
     if osp.isfile(calib_path):
         intrinsic = np.loadtxt(calib_path, delimiter=' ')
         intrinsic = intrinsic.astype(np.float64)
 
-    image_data: np.ndarray = parse_list(image_list)
-    depth_data: np.ndarray = parse_list(depth_list)
-    pose_data: np.ndarray = parse_list(pose_list, skiprows=1)
-    pose_vecs: Float64[np.ndarray, "n 7"] = pose_data[:,1:].astype(np.float64)
+    image_data: ndarray = parse_list(image_list)
+    depth_data: ndarray = parse_list(depth_list)
+    pose_data: ndarray = parse_list(pose_list, skiprows=1)
+    pose_vecs: Float64[ndarray, "n 7"] = pose_data[:,1:].astype(np.float64)
 
-    tstamp_image: Float64[np.ndarray, "n_img"] = image_data[:,0].astype(np.float64)
-    tstamp_depth: Float64[np.ndarray, "n_depth"] = depth_data[:,0].astype(np.float64)
-    tstamp_pose: Float64[np.ndarray, "n_pose"] = pose_data[:,0].astype(np.float64)
+    tstamp_image: Float64[ndarray, "n_img"] = image_data[:,0].astype(np.float64)
+    tstamp_depth: Float64[ndarray, "n_depth"] = depth_data[:,0].astype(np.float64)
+    tstamp_pose: Float64[ndarray, "n_pose"] = pose_data[:,0].astype(np.float64)
     associations: list[tuple[int, ...]] = associate_frames(tstamp_image, tstamp_depth, tstamp_pose)
 
     # print(len(tstamp_image))
@@ -137,9 +139,9 @@ def loadtum(datapath: str, _frame_rate: int = -1) -> tuple[
     #         indicies += [ i ]
 
     images: list[str] = []
-    poses: list[Float64[np.ndarray, "7"]] = []
+    poses: list[Float64[ndarray, "7"]] = []
     depths: list[str] = []
-    intrinsics: list[Float64[np.ndarray, "4"]] = []
+    intrinsics: list[Float64[ndarray, "4"]] = []
     tstamps: list[float] = []
     for ix in indicies:
         i: int
@@ -157,7 +159,7 @@ def loadtum(datapath: str, _frame_rate: int = -1) -> tuple[
     return images, depths, poses, intrinsics, tstamps
 
 
-def all_pairs_distance_matrix(poses: list[Float64[np.ndarray, "7"]], beta: float = 2.5) -> Float32[np.ndarray, "n n"]:
+def all_pairs_distance_matrix(poses: list[Float64[ndarray, "7"]], beta: float = 2.5) -> Float32[ndarray, "n n"]:
     """Compute a pairwise distance matrix between all poses using Lie algebra.
 
     Translations are scaled by ``beta`` before computing the SE(3) log-map
@@ -170,14 +172,14 @@ def all_pairs_distance_matrix(poses: list[Float64[np.ndarray, "7"]], beta: float
     Returns:
         Symmetric ``(n, n)`` distance matrix.
     """
-    poses_np: Float32[np.ndarray, "n 7"] = np.array(poses, dtype=np.float32)
+    poses_np: Float32[ndarray, "n 7"] = np.array(poses, dtype=np.float32)
     poses_np[:,:3] *= beta # scale to balence rot + trans
     poses_se3: SE3 = SE3(torch.from_numpy(poses_np))
 
-    r: torch.Tensor = (poses_se3[:,None].inv() * poses_se3[None,:]).log()
+    r: Tensor = (poses_se3[:,None].inv() * poses_se3[None,:]).log()
     return r.norm(dim=-1).cpu().numpy()
 
-def pose_matrix_to_quaternion(pose: Float64[np.ndarray, "4 4"]) -> Float64[np.ndarray, "7"]:
+def pose_matrix_to_quaternion(pose: Float64[ndarray, "4 4"]) -> Float64[ndarray, "7"]:
     """Convert a 4x4 homogeneous pose matrix to a 7-D ``[t, q]`` vector.
 
     Args:
@@ -186,14 +188,14 @@ def pose_matrix_to_quaternion(pose: Float64[np.ndarray, "4 4"]) -> Float64[np.nd
     Returns:
         A 7-D vector ``[tx, ty, tz, qx, qy, qz, qw]``.
     """
-    q: Float64[np.ndarray, "4"] = Rotation.from_matrix(pose[:3, :3]).as_quat()
+    q: Float64[ndarray, "4"] = Rotation.from_matrix(pose[:3, :3]).as_quat()
     return np.concatenate([pose[:3, 3], q], axis=0)
 
 def compute_distance_matrix_flow(
-    poses: Float64[np.ndarray, "n 7"] | SE3,
-    disps: Float64[np.ndarray, "n h w"] | Float32[torch.Tensor, "1 n h w"],
-    intrinsics: Float64[np.ndarray, "n 4"] | Float32[torch.Tensor, "1 n 4"],
-) -> Float32[np.ndarray, "n n"]:
+    poses: Float64[ndarray, "n 7"] | SE3,
+    disps: Float64[ndarray, "n h w"] | Float32[Tensor, "1 n h w"],
+    intrinsics: Float64[ndarray, "n 4"] | Float32[Tensor, "1 n 4"],
+) -> Float32[ndarray, "n n"]:
     """Compute a pairwise distance matrix based on induced optical-flow magnitude.
 
     For each pair ``(i, j)`` the function computes the optical flow induced
@@ -218,36 +220,36 @@ def compute_distance_matrix_flow(
 
     N: int = poses.shape[1]
 
-    ii: torch.Tensor
-    jj: torch.Tensor
+    ii: Tensor
+    jj: Tensor
     ii, jj = torch.meshgrid(torch.arange(N), torch.arange(N))
     ii = ii.reshape(-1).cuda()
     jj = jj.reshape(-1).cuda()
 
     MAX_FLOW: float = 100.0
-    matrix: Float32[np.ndarray, "n n"] = np.zeros((N, N), dtype=np.float32)
+    matrix: Float32[ndarray, "n n"] = np.zeros((N, N), dtype=np.float32)
 
     s: int = 2048
     for i in range(0, ii.shape[0], s):
-        flow1: torch.Tensor
-        val1: torch.Tensor
+        flow1: Tensor
+        val1: Tensor
         flow1, val1 = pops.induced_flow(poses, disps, intrinsics, ii[i:i+s], jj[i:i+s])
-        flow2: torch.Tensor
-        val2: torch.Tensor
+        flow2: Tensor
+        val2: Tensor
         flow2, val2 = pops.induced_flow(poses, disps, intrinsics, jj[i:i+s], ii[i:i+s])
 
-        flow: torch.Tensor = torch.stack([flow1, flow2], dim=2)
-        val: torch.Tensor = torch.stack([val1, val2], dim=2)
+        flow: Tensor = torch.stack([flow1, flow2], dim=2)
+        val: Tensor = torch.stack([val1, val2], dim=2)
 
-        mag: torch.Tensor = flow.norm(dim=-1).clamp(max=MAX_FLOW)
+        mag: Tensor = flow.norm(dim=-1).clamp(max=MAX_FLOW)
         mag = mag.view(mag.shape[1], -1)
         val = val.view(val.shape[1], -1)
 
         mag = (mag * val).mean(-1) / val.mean(-1)
         mag[val.mean(-1) < 0.7] = np.inf
 
-        i1: np.ndarray = ii[i:i+s].cpu().numpy()
-        j1: np.ndarray = jj[i:i+s].cpu().numpy()
+        i1: ndarray = ii[i:i+s].cpu().numpy()
+        j1: ndarray = jj[i:i+s].cpu().numpy()
         matrix[i1, j1] = mag.cpu().numpy()
 
     return matrix
@@ -255,10 +257,10 @@ def compute_distance_matrix_flow(
 
 def compute_distance_matrix_flow2(
     poses: SE3,
-    disps: Float32[torch.Tensor, "1 n h w"],
-    intrinsics: Float32[torch.Tensor, "1 n 4"],
+    disps: Float32[Tensor, "1 n h w"],
+    intrinsics: Float32[Tensor, "1 n 4"],
     beta: float = 0.4,
-) -> Float32[np.ndarray, "n n"]:
+) -> Float32[ndarray, "n n"]:
     """Compute a pairwise distance matrix using translation-only + full flow.
 
     Similar to :func:`compute_distance_matrix_flow` but decomposes the
@@ -284,48 +286,48 @@ def compute_distance_matrix_flow2(
 
     N: int = poses.shape[1]
 
-    ii: torch.Tensor
-    jj: torch.Tensor
+    ii: Tensor
+    jj: Tensor
     ii, jj = torch.meshgrid(torch.arange(N), torch.arange(N))
     ii = ii.reshape(-1)
     jj = jj.reshape(-1)
 
     MAX_FLOW: float = 128.0
-    matrix: Float32[np.ndarray, "n n"] = np.zeros((N, N), dtype=np.float32)
+    matrix: Float32[ndarray, "n n"] = np.zeros((N, N), dtype=np.float32)
 
     s: int = 2048
     for i in range(0, ii.shape[0], s):
-        flow1a: torch.Tensor
-        val1a: torch.Tensor
+        flow1a: Tensor
+        val1a: Tensor
         flow1a, val1a = pops.induced_flow(poses, disps, intrinsics, ii[i:i+s], jj[i:i+s], tonly=True)
-        flow1b: torch.Tensor
-        _val1b: torch.Tensor
+        flow1b: Tensor
+        _val1b: Tensor
         flow1b, _val1b = pops.induced_flow(poses, disps, intrinsics, ii[i:i+s], jj[i:i+s])
-        flow2a: torch.Tensor
-        val2a: torch.Tensor
+        flow2a: Tensor
+        val2a: Tensor
         flow2a, val2a = pops.induced_flow(poses, disps, intrinsics, jj[i:i+s], ii[i:i+s], tonly=True)
-        flow2b: torch.Tensor
-        val2b: torch.Tensor
+        flow2b: Tensor
+        val2b: Tensor
         flow2b, val2b = pops.induced_flow(poses, disps, intrinsics, ii[i:i+s], jj[i:i+s])
 
-        flow1: torch.Tensor = flow1a + beta * flow1b
-        val1: torch.Tensor = val1a * val2b
+        flow1: Tensor = flow1a + beta * flow1b
+        val1: Tensor = val1a * val2b
 
-        flow2: torch.Tensor = flow2a + beta * flow2b
-        val2: torch.Tensor = val2a * val2b
+        flow2: Tensor = flow2a + beta * flow2b
+        val2: Tensor = val2a * val2b
 
-        flow: torch.Tensor = torch.stack([flow1, flow2], dim=2)
-        val: torch.Tensor = torch.stack([val1, val2], dim=2)
+        flow: Tensor = torch.stack([flow1, flow2], dim=2)
+        val: Tensor = torch.stack([val1, val2], dim=2)
 
-        mag: torch.Tensor = flow.norm(dim=-1).clamp(max=MAX_FLOW)
+        mag: Tensor = flow.norm(dim=-1).clamp(max=MAX_FLOW)
         mag = mag.view(mag.shape[1], -1)
         val = val.view(val.shape[1], -1)
 
         mag = (mag * val).mean(-1) / val.mean(-1)
         mag[val.mean(-1) < 0.8] = np.inf
 
-        i1: np.ndarray = ii[i:i+s].cpu().numpy()
-        j1: np.ndarray = jj[i:i+s].cpu().numpy()
+        i1: ndarray = ii[i:i+s].cpu().numpy()
+        j1: ndarray = jj[i:i+s].cpu().numpy()
         matrix[i1, j1] = mag.cpu().numpy()
 
     return matrix

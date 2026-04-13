@@ -33,8 +33,10 @@ from einops import rearrange
 from jaxtyping import Float32, Float64, UInt8
 from mini_dust3r.api import OptimizedResult, inferece_dust3r
 from mini_dust3r.model import AsymmetricCroCo3DStereo
+from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from simplecv.rerun_log_utils import RerunTyroConfig
+from torch import Tensor
 from tqdm import tqdm
 
 from dpvo.config import DPVOConfig
@@ -67,16 +69,16 @@ class DPVOPrediction:
     timestamps, and the associated 3-D point cloud with per-point colors.
     """
 
-    final_poses: Float32[np.ndarray, "num_keyframes 7"]
+    final_poses: Float32[ndarray, "num_keyframes 7"]
     """Keyframe poses as ``[tx, ty, tz, qx, qy, qz, qw]`` in
     world-from-camera (``world_se3_cam``) convention."""
-    tstamps: Float64[np.ndarray, "num_keyframes"]
+    tstamps: Float64[ndarray, "num_keyframes"]
     """Timestamp per keyframe. Integer frame indices for video/image streams,
     real-valued (nanoseconds/seconds) for evaluation datasets (EuRoC, TUM-RGBD)."""
-    final_points: Float32[torch.Tensor, "num_points 3"]
+    final_points: Float32[Tensor, "num_points 3"]
     """Reconstructed 3-D points in world coordinates.
     ``num_points = buffer_size * patches_per_frame``."""
-    final_colors: UInt8[torch.Tensor, "buffer_size num_patches 3"]
+    final_colors: UInt8[Tensor, "buffer_size num_patches 3"]
     """RGB colors for each reconstructed point."""
 
 
@@ -118,11 +120,11 @@ class DPVOInferenceConfig:
 
 def log_trajectory(
     parent_log_path: Path,
-    poses: Float32[torch.Tensor, "buffer_size 7"],
-    points: Float32[torch.Tensor, "num_points 3"],
-    colors: UInt8[torch.Tensor, "buffer_size num_patches 3"],
-    intri_np: Float32[np.ndarray, "4"],
-    bgr_hw3: UInt8[np.ndarray, "h w 3"],
+    poses: Float32[Tensor, "buffer_size 7"],
+    points: Float32[Tensor, "num_points 3"],
+    colors: UInt8[Tensor, "buffer_size num_patches 3"],
+    intri_np: Float32[ndarray, "4"],
+    bgr_hw3: UInt8[ndarray, "h w 3"],
     path_list: list[list[float]],
     jpg_quality: int = 90,
 ) -> list[list[float]]:
@@ -151,7 +153,7 @@ def log_trajectory(
         The updated ``path_list`` with the latest camera position appended.
     """
     cam_log_path: str = f"{parent_log_path}/camera"
-    rgb_hw3: UInt8[np.ndarray, "h w 3"] = mmcv.bgr2rgb(bgr_hw3)
+    rgb_hw3: UInt8[ndarray, "h w 3"] = mmcv.bgr2rgb(bgr_hw3)
     rr.log(
         f"{cam_log_path}/pinhole/image",
         rr.Image(rgb_hw3).compress(jpeg_quality=jpg_quality),
@@ -168,11 +170,11 @@ def log_trajectory(
     )
 
     # Filter out zero-initialized (unused) buffer slots
-    poses_mask: torch.Tensor = ~(poses[:, :6] == 0).all(dim=1)
-    points_mask: torch.Tensor = ~(points == 0).all(dim=1)
+    poses_mask: Tensor = ~(poses[:, :6] == 0).all(dim=1)
+    points_mask: Tensor = ~(points == 0).all(dim=1)
 
-    nonzero_poses: Float32[torch.Tensor, "num_nonzero 7"] = poses[poses_mask]
-    nonzero_points: Float32[torch.Tensor, "num_nonzero 3"] = points[points_mask]
+    nonzero_poses: Float32[Tensor, "num_nonzero 7"] = poses[poses_mask]
+    nonzero_points: Float32[Tensor, "num_nonzero 3"] = points[points_mask]
 
     if nonzero_poses.shape[0] == 0:
         return path_list
@@ -181,18 +183,18 @@ def log_trajectory(
     # poses_ stores cam_se3_world (camera-from-world) internally, so the
     # raw [tx, ty, tz, qx, qy, qz, qw] encodes cam_T_world.
     last_index: int = nonzero_poses.shape[0] - 1
-    cam_se3_world: Float32[np.ndarray, "7"] = nonzero_poses[last_index].numpy(force=True)
-    cam_t_world: Float32[np.ndarray, "3"] = cam_se3_world[:3]
-    cam_R_world: Float64[np.ndarray, "3 3"] = Rotation.from_quat(cam_se3_world[3:]).as_matrix()
+    cam_se3_world: Float32[ndarray, "7"] = nonzero_poses[last_index].numpy(force=True)
+    cam_t_world: Float32[ndarray, "3"] = cam_se3_world[:3]
+    cam_R_world: Float64[ndarray, "3 3"] = Rotation.from_quat(cam_se3_world[3:]).as_matrix()
 
     # Build cam_T_world 4×4, then invert to world_T_cam for Rerun logging.
-    cam_T_world: Float64[np.ndarray, "4 4"] = np.eye(4)
+    cam_T_world: Float64[ndarray, "4 4"] = np.eye(4)
     cam_T_world[:3, :3] = cam_R_world
     cam_T_world[:3, 3] = cam_t_world
 
-    world_T_cam: Float64[np.ndarray, "4 4"] = np.linalg.inv(cam_T_world)
-    world_t_cam: Float64[np.ndarray, "3"] = world_T_cam[:3, 3]
-    world_R_cam: Float64[np.ndarray, "3 3"] = world_T_cam[:3, :3]
+    world_T_cam: Float64[ndarray, "4 4"] = np.linalg.inv(cam_T_world)
+    world_t_cam: Float64[ndarray, "3"] = world_T_cam[:3, 3]
+    world_R_cam: Float64[ndarray, "3 3"] = world_T_cam[:3, :3]
 
     path_list.append(world_t_cam.copy().tolist())
 
@@ -227,16 +229,16 @@ def log_trajectory(
         points_filtered = nonzero_points.view(-1, 3).numpy(force=True)
         colors_filtered = colors.view(-1, 3)[points_mask].numpy(force=True)
     else:
-        cam_positions: Float32[np.ndarray, "n_cams 3"] = np.array(path_list, dtype=np.float32)
-        trajectory_center: Float32[np.ndarray, "3"] = np.median(cam_positions, axis=0)
+        cam_positions: Float32[ndarray, "n_cams 3"] = np.array(path_list, dtype=np.float32)
+        trajectory_center: Float32[ndarray, "3"] = np.median(cam_positions, axis=0)
 
-        def radii(a: Float32[np.ndarray, "n 3"]) -> Float32[np.ndarray, "n"]:
+        def radii(a: Float32[ndarray, "n 3"]) -> Float32[ndarray, "n"]:
             """Compute Euclidean distance of each row to ``trajectory_center``."""
             return np.linalg.norm(a - trajectory_center, axis=1)
 
-        points_np: Float32[np.ndarray, "num_points 3"] = nonzero_points.view(-1, 3).numpy(force=True)
-        colors_np: UInt8[np.ndarray, "num_points 3"] = colors.view(-1, 3)[points_mask].numpy(force=True)
-        inlier_mask: np.ndarray = radii(points_np) < radii(cam_positions).max() * 5
+        points_np: Float32[ndarray, "num_points 3"] = nonzero_points.view(-1, 3).numpy(force=True)
+        colors_np: UInt8[ndarray, "num_points 3"] = colors.view(-1, 3)[points_mask].numpy(force=True)
+        inlier_mask: ndarray = radii(points_np) < radii(cam_positions).max() * 5
         points_filtered = points_np[inlier_mask]
         colors_filtered = colors_np[inlier_mask]
 
@@ -253,10 +255,10 @@ def log_trajectory(
 
 def log_final(
     parent_log_path: Path,
-    final_poses: Float32[np.ndarray, "num_keyframes 7"],
-    tstamps: Float64[np.ndarray, "num_keyframes"],
-    final_points: Float32[torch.Tensor, "num_points 3"],
-    final_colors: UInt8[torch.Tensor, "buffer_size num_patches 3"],
+    final_poses: Float32[ndarray, "num_keyframes 7"],
+    tstamps: Float64[ndarray, "num_keyframes"],
+    final_points: Float32[Tensor, "num_points 3"],
+    final_colors: UInt8[Tensor, "buffer_size num_patches 3"],
 ) -> None:
     """Log the final optimized per-keyframe camera transforms to Rerun.
 
@@ -277,8 +279,8 @@ def log_final(
     for idx, (world_se3_cam, _tstamp) in enumerate(zip(final_poses, tstamps, strict=False)):
         cam_log_path: str = f"{parent_log_path}/camera_{idx}"
         # final_poses are world_se3_cam (world-from-camera) from terminate().
-        world_t_cam: Float32[np.ndarray, "3"] = world_se3_cam[:3]
-        world_R_cam: Float64[np.ndarray, "3 3"] = Rotation.from_quat(world_se3_cam[3:]).as_matrix()
+        world_t_cam: Float32[ndarray, "3"] = world_se3_cam[:3]
+        world_R_cam: Float64[ndarray, "3 3"] = Rotation.from_quat(world_se3_cam[3:]).as_matrix()
         rr.log(
             f"{cam_log_path}",
             rr.Transform3D(translation=world_t_cam, mat3x3=world_R_cam, from_parent=False),
@@ -347,10 +349,10 @@ def calculate_num_frames(video_or_image_dir: str, stride: int, skip: int) -> int
 
 
 def calib_from_dust3r(
-    bgr_hw3: UInt8[np.ndarray, "height width 3"],
+    bgr_hw3: UInt8[ndarray, "height width 3"],
     model: AsymmetricCroCo3DStereo,
     device: str,
-) -> Float32[np.ndarray, "3 3"]:
+) -> Float32[ndarray, "3 3"]:
     """Estimate a 3x3 camera intrinsic matrix from a single image using DUSt3R.
 
     The image is temporarily saved to disk, fed through DUSt3R monocular
@@ -392,7 +394,7 @@ def calib_from_dust3r(
     scaling_factor_y: float = orig_h / downscaled_h
 
     # Apply per-axis scaling to fx, fy, cx, cy
-    K_33_original: Float32[np.ndarray, "3 3"] = optimized_results.K_b33[0].copy()
+    K_33_original: Float32[ndarray, "3 3"] = optimized_results.K_b33[0].copy()
     K_33_original[0, 0] *= scaling_factor_x  # fx
     K_33_original[1, 1] *= scaling_factor_y  # fy
     K_33_original[0, 2] *= scaling_factor_x  # cx
@@ -469,7 +471,7 @@ def run_dpvo_pipeline(
 
     # If no calibration file was provided, use DUSt3R to predict intrinsics
     # from the very first frame pulled off the reader queue.
-    intri_np_dust3r: Float32[np.ndarray, "4"] | None = None
+    intri_np_dust3r: Float32[ndarray, "4"] | None = None
     if calib is None:
         yield "Estimating camera intrinsics with DUSt3R..."
         if dust3r_model is None:
@@ -483,7 +485,7 @@ def run_dpvo_pipeline(
             dust3r_device = next(dust3r_model.parameters()).device.type
 
         _, bgr_hw3, _ = queue.get()
-        K_33_pred: Float32[np.ndarray, "3 3"] = calib_from_dust3r(bgr_hw3, dust3r_model, dust3r_device)
+        K_33_pred: Float32[ndarray, "3 3"] = calib_from_dust3r(bgr_hw3, dust3r_model, dust3r_device)
         intri_np_dust3r = np.array([K_33_pred[0, 0], K_33_pred[1, 1], K_33_pred[0, 2], K_33_pred[1, 2]])
 
     # path list for visualizing the trajectory
@@ -493,8 +495,8 @@ def run_dpvo_pipeline(
     with tqdm(total=total_frames, desc="Processing Frames") as pbar:
         while True:
             t: int
-            bgr_hw3: UInt8[np.ndarray, "h w 3"]
-            intri_np: Float32[np.ndarray, "4"]
+            bgr_hw3: UInt8[ndarray, "h w 3"]
+            intri_np: Float32[ndarray, "4"]
             (t, bgr_hw3, intri_np_calib) = queue.get()
             intri_np = intri_np_calib if calib is not None else intri_np_dust3r
             # queue will have a (-1, image, intrinsics) tuple when the reader is done
@@ -503,8 +505,8 @@ def run_dpvo_pipeline(
 
             rr.set_time("timestep", sequence=t)
 
-            bgr_3hw: UInt8[torch.Tensor, "c ht wd"] = rearrange(torch.from_numpy(bgr_hw3), "h w c -> c h w").cuda()
-            intri_torch: Float32[torch.Tensor, "4"] = torch.from_numpy(intri_np).cuda()
+            bgr_3hw: UInt8[Tensor, "c ht wd"] = rearrange(torch.from_numpy(bgr_hw3), "h w c -> c h w").cuda()
+            intri_torch: Float32[Tensor, "4"] = torch.from_numpy(intri_np).cuda()
 
             if slam is None:
                 slam = DPVO(dpvo_config, network_path, ht=bgr_3hw.shape[1], wd=bgr_3hw.shape[2])
@@ -513,9 +515,9 @@ def run_dpvo_pipeline(
                 slam(t, bgr_3hw, intri_torch)
 
             if slam.is_initialized:
-                poses: Float32[torch.Tensor, "buffer_size 7"] = slam.poses_
-                points: Float32[torch.Tensor, "num_points 3"] = slam.points_
-                colors: UInt8[torch.Tensor, "buffer_size num_patches 3"] = slam.colors_
+                poses: Float32[Tensor, "buffer_size 7"] = slam.poses_
+                points: Float32[Tensor, "num_points 3"] = slam.points_
+                colors: UInt8[Tensor, "buffer_size num_patches 3"] = slam.colors_
                 path_list = log_trajectory(
                     parent_log_path=parent_log_path,
                     poses=poses,
@@ -546,8 +548,8 @@ def run_dpvo_pipeline(
     print(f"Total time: {total_time:.2f}s")
 
     final_poses, tstamps = slam.terminate()
-    final_points: Float32[torch.Tensor, "num_points 3"] = slam.points_
-    final_colors: UInt8[torch.Tensor, "buffer_size num_patches 3"] = slam.colors_
+    final_points: Float32[Tensor, "num_points 3"] = slam.points_
+    final_colors: UInt8[Tensor, "buffer_size num_patches 3"] = slam.colors_
     dpvo_pred: DPVOPrediction = DPVOPrediction(
         final_poses=final_poses,
         tstamps=tstamps,

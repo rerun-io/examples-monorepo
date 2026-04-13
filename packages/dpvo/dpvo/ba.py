@@ -480,7 +480,7 @@ def BA(
 
     w: Float[Tensor, "1 m 1 1"] = safe_scatter_add_vec(torch.matmul(wJzT,  r), kk, m)
 
-    if isinstance(lmbda, torch.Tensor):
+    if isinstance(lmbda, Tensor):
         lmbda: Float[Tensor, "..."] = lmbda.reshape(*C.shape)
 
     # Q = (C + lambda)^{-1}: inverse of the damped depth diagonal
