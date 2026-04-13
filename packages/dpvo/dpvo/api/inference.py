@@ -213,21 +213,29 @@ def log_trajectory(
         ),
     )
 
-    # Outlier removal: discard points whose distance from the trajectory
-    # median exceeds 5x the maximum camera-center radius.
-    trajectory_center: Float32[np.ndarray, "3"] = np.median(nonzero_poses[:, :3].numpy(force=True), axis=0)
+    # Outlier removal: discard points whose distance from the camera
+    # trajectory median exceeds 5x the maximum camera-center radius.
+    # Use world-space camera positions (from path_list) instead of the
+    # internal world-to-camera translations (poses_[:, :3]) which live in
+    # a different coordinate frame than the backprojected points.
+    if len(path_list) < 2:
+        # Not enough camera positions yet for meaningful outlier removal;
+        # log all nonzero points unfiltered.
+        points_filtered = nonzero_points.view(-1, 3).numpy(force=True)
+        colors_filtered = colors.view(-1, 3)[points_mask].numpy(force=True)
+    else:
+        cam_positions: Float32[np.ndarray, "n_cams 3"] = np.array(path_list, dtype=np.float32)
+        trajectory_center: Float32[np.ndarray, "3"] = np.median(cam_positions, axis=0)
 
-    def radii(a: Float32[np.ndarray, "n 3"]) -> Float32[np.ndarray, "n"]:
-        """Compute Euclidean distance of each row to ``trajectory_center``."""
-        return np.linalg.norm(a - trajectory_center, axis=1)
+        def radii(a: Float32[np.ndarray, "n 3"]) -> Float32[np.ndarray, "n"]:
+            """Compute Euclidean distance of each row to ``trajectory_center``."""
+            return np.linalg.norm(a - trajectory_center, axis=1)
 
-    points_np: Float32[np.ndarray, "num_points 3"] = nonzero_points.view(-1, 3).numpy(force=True)
-    colors_np: UInt8[np.ndarray, "num_points 3"] = colors.view(-1, 3)[points_mask].numpy(force=True)
-    inlier_mask: np.ndarray = (
-        radii(points_np) < radii(nonzero_poses[:, :3].numpy(force=True)).max() * 5
-    )
-    points_filtered: Float32[np.ndarray, "num_inliers 3"] = points_np[inlier_mask]
-    colors_filtered: UInt8[np.ndarray, "num_inliers 3"] = colors_np[inlier_mask]
+        points_np: Float32[np.ndarray, "num_points 3"] = nonzero_points.view(-1, 3).numpy(force=True)
+        colors_np: UInt8[np.ndarray, "num_points 3"] = colors.view(-1, 3)[points_mask].numpy(force=True)
+        inlier_mask: np.ndarray = radii(points_np) < radii(cam_positions).max() * 5
+        points_filtered = points_np[inlier_mask]
+        colors_filtered = colors_np[inlier_mask]
 
     # log all points and colors at the same time
     rr.log(
@@ -274,9 +282,7 @@ def log_final(
 # ── Frame I/O helpers ───────────────────────────────────────────────────
 
 
-def create_reader(
-    imagedir: str, calib: str | None, stride: int, skip: int, queue: Queue
-) -> Process:
+def create_reader(imagedir: str, calib: str | None, stride: int, skip: int, queue: Queue) -> Process:
     """Create a multiprocessing ``Process`` that reads frames into a queue.
 
     If ``imagedir`` is a directory the reader uses :func:`image_stream`;
@@ -297,13 +303,9 @@ def create_reader(
     """
     reader: Process
     if os.path.isdir(imagedir):
-        reader = Process(
-            target=image_stream, args=(queue, imagedir, calib, stride, skip)
-        )
+        reader = Process(target=image_stream, args=(queue, imagedir, calib, stride, skip))
     else:
-        reader = Process(
-            target=video_stream, args=(queue, imagedir, calib, stride, skip)
-        )
+        reader = Process(target=video_stream, args=(queue, imagedir, calib, stride, skip))
 
     return reader
 
@@ -327,11 +329,7 @@ def calculate_num_frames(video_or_image_dir: str, stride: int, skip: int) -> int
     total_frames: int = 0
     if os.path.isdir(video_or_image_dir):
         total_frames = len(
-            [
-                name
-                for name in os.listdir(video_or_image_dir)
-                if os.path.isfile(os.path.join(video_or_image_dir, name))
-            ]
+            [name for name in os.listdir(video_or_image_dir) if os.path.isfile(os.path.join(video_or_image_dir, name))]
         )
     else:
         cap: cv2.VideoCapture = cv2.VideoCapture(video_or_image_dir)
@@ -470,23 +468,17 @@ def run_dpvo_pipeline(
         yield "Estimating camera intrinsics with DUSt3R..."
         if dust3r_model is None:
             dust3r_device: str = (
-                "mps"
-                if torch.backends.mps.is_available()
-                else "cuda"
-                if torch.cuda.is_available()
-                else "cpu"
+                "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
             )
-            dust3r_model = AsymmetricCroCo3DStereo.from_pretrained(
-                "naver/DUSt3R_ViTLarge_BaseDecoder_512_dpt"
-            ).to(dust3r_device)
+            dust3r_model = AsymmetricCroCo3DStereo.from_pretrained("naver/DUSt3R_ViTLarge_BaseDecoder_512_dpt").to(
+                dust3r_device
+            )
         else:
             dust3r_device = next(dust3r_model.parameters()).device.type
 
         _, bgr_hw3, _ = queue.get()
         K_33_pred: Float32[np.ndarray, "3 3"] = calib_from_dust3r(bgr_hw3, dust3r_model, dust3r_device)
-        intri_np_dust3r = np.array(
-            [K_33_pred[0, 0], K_33_pred[1, 1], K_33_pred[0, 2], K_33_pred[1, 2]]
-        )
+        intri_np_dust3r = np.array([K_33_pred[0, 0], K_33_pred[1, 1], K_33_pred[0, 2], K_33_pred[1, 2]])
 
     # path list for visualizing the trajectory
     path_list: list[list[float]] = []
@@ -516,9 +508,7 @@ def run_dpvo_pipeline(
 
             if slam.is_initialized:
                 poses: Float32[torch.Tensor, "buffer_size 7"] = slam.poses_
-                points: Float32[torch.Tensor, "num_points 3"] = (
-                    slam.points_
-                )
+                points: Float32[torch.Tensor, "num_points 3"] = slam.points_
                 colors: UInt8[torch.Tensor, "buffer_size num_patches 3"] = slam.colors_
                 path_list = log_trajectory(
                     parent_log_path=parent_log_path,
