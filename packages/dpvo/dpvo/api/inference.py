@@ -152,10 +152,9 @@ def log_trajectory(
         The updated ``path_list`` with the latest camera position appended.
     """
     cam_log_path: str = f"{parent_log_path}/camera"
-    rgb_hw3: UInt8[ndarray, "h w 3"] = cv2.cvtColor(bgr_hw3, cv2.COLOR_BGR2RGB)
     rr.log(
         f"{cam_log_path}/pinhole/image",
-        rr.Image(rgb_hw3).compress(jpeg_quality=jpg_quality),
+        rr.Image(bgr_hw3, color_model=rr.ColorModel.BGR).compress(jpeg_quality=jpg_quality),
     )
     rr.log(
         f"{cam_log_path}/pinhole",
