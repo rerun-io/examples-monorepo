@@ -1,4 +1,4 @@
-"""Gradio web interface for the Mini-DPVO visual odometry demo.
+"""Gradio web interface for the DPVO visual odometry demo.
 
 Provides a streaming Rerun viewer that visualizes camera trajectories and
 point clouds in real time as DPVO processes an uploaded video.  Camera
@@ -7,7 +7,7 @@ intrinsics are auto-estimated via DUSt3R (no calibration file required).
 The module follows the **monoprior sync_config pattern**: a module-level
 ``_CONFIG`` singleton is kept in sync with UI widgets via ``_sync_config``,
 and the streaming callback delegates to the shared
-:func:`~mini_dpvo.api.inference.run_dpvo_pipeline` generator so CLI and
+:func:`~dpvo.api.inference.run_dpvo_pipeline` generator so CLI and
 Gradio always run the same code path.
 
 Rerun streaming follows the **mast3r-slam pattern**:
@@ -26,11 +26,11 @@ import torch
 from gradio_rerun import Rerun
 from mini_dust3r.model import AsymmetricCroCo3DStereo
 
-from mini_dpvo.api.inference import (
+from dpvo.api.inference import (
     DPVOPipelineHandle,
     run_dpvo_pipeline,
 )
-from mini_dpvo.config import DPVOConfig
+from dpvo.config import DPVOConfig
 
 # ── Heavy resources (loaded once, survive hot-reload) ───────────────────
 if gr.NO_RELOAD:
@@ -64,7 +64,7 @@ def _sync_config(preset: str) -> None:
 # ── Streaming callback (mast3r-slam pattern) ────────────────────────────
 
 
-@rr.thread_local_stream("mini_dpvo")
+@rr.thread_local_stream("dpvo")
 @torch.no_grad()
 def dpvo_streaming_fn(
     video_file_path: str,
@@ -135,7 +135,7 @@ def _switch_to_inputs():
 
 
 def main() -> gr.Blocks:
-    """Build and return the Mini-DPVO Gradio app.
+    """Build and return the DPVO Gradio app.
 
     Layout:
         - **Left column** (scale=1): Tabs with Inputs (file upload, run

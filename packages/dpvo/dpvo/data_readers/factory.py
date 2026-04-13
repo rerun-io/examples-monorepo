@@ -1,7 +1,7 @@
 """Factory function for constructing combined RGBD training datasets.
 
 Maps short dataset names (e.g. ``"tartan"``) to their concrete
-:class:`~mini_dpvo.data_readers.base.RGBDDataset` subclass and returns a
+:class:`~dpvo.data_readers.base.RGBDDataset` subclass and returns a
 :class:`~torch.utils.data.ConcatDataset` that merges them.
 """
 

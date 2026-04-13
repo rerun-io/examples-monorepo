@@ -102,7 +102,7 @@ class SoftAgg(nn.Module):
     4. Project aggregated features via ``h(y)`` and (if ``expand=True``)
        scatter back to per-edge resolution.
 
-    This is used twice in the :class:`~mini_dpvo.net.Update` operator:
+    This is used twice in the :class:`~dpvo.net.Update` operator:
     once grouping by patch index ``kk`` (spatial aggregation -- patches
     observed in different frames share information) and once by the hash
     ``ii * 12345 + jj`` (temporal aggregation -- different patches
@@ -237,7 +237,7 @@ class GradientClip(nn.Module):
     """Module wrapper around :class:`GradClip` for use in ``nn.Sequential``.
 
     Inserted after the delta and weight prediction heads in the
-    :class:`~mini_dpvo.net.Update` module to prevent large gradients
+    :class:`~dpvo.net.Update` module to prevent large gradients
     from destabilizing training.
     """
 

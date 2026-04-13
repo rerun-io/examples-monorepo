@@ -4,7 +4,7 @@ This module provides index-based aggregation primitives (sum and softmax) that
 operate along a specified dimension.  They are used throughout DPVO for
 accumulating per-edge quantities into per-node (pose or patch) buffers --
 e.g. assembling the normal equations in bundle adjustment, or computing
-attention-weighted messages in the :class:`~mini_dpvo.blocks.SoftAgg` module.
+attention-weighted messages in the :class:`~dpvo.blocks.SoftAgg` module.
 
 The implementations rely only on :func:`torch.Tensor.scatter_add_` and
 :func:`torch.Tensor.scatter_reduce_`, so no custom CUDA kernels or external
@@ -99,7 +99,7 @@ def scatter_softmax(
     3. Divide by the per-group sum of exponentials (computed via
        :func:`scatter_sum`).
 
-    This is used by :class:`~mini_dpvo.blocks.SoftAgg` to compute
+    This is used by :class:`~dpvo.blocks.SoftAgg` to compute
     attention weights within each spatial or temporal neighborhood.
 
     Args:

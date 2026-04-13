@@ -12,7 +12,7 @@ project-includes = [
     "packages/pyvrs-viewer/src/**/*",
     "packages/gsplat-rust-renderer/gsplat_rust_renderer/**/*",
     "packages/mast3r-slam/mast3r_slam/**/*",
-    "packages/mini-dpvo/mini_dpvo/**/*",
+    "packages/dpvo/dpvo/**/*",
 ]
 project-excludes = ["**/node_modules", "**/__pycache__", "**/*venv/**/*"]
 
@@ -33,7 +33,7 @@ search-path = [
     "packages/pyvrs-viewer/src",
     "packages/gsplat-rust-renderer",
     "packages/mast3r-slam",
-    "packages/mini-dpvo",
+    "packages/dpvo",
 ]
 
 # Third-party packages — all *-dev env site-packages so pyrefly can resolve
@@ -58,7 +58,7 @@ site-package-path = [
     # to sys.path at runtime.  Pyrefly doesn't process .pth files, so we
     # add the subdirectory explicitly.
     ".pixi/envs/mast3r-slam-dev/lib/python3.11/site-packages/rerun_sdk",
-    ".pixi/envs/mini-dpvo-dev/lib/python3.11/site-packages",
+    ".pixi/envs/dpvo-dev/lib/python3.11/site-packages",
 ]
 
 python-interpreter-path = ".pixi/envs/dev/bin/python"

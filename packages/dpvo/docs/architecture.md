@@ -1,6 +1,6 @@
-# Mini-DPVO Pipeline Architecture
+# DPVO Pipeline Architecture
 
-This document explains the mini-dpvo inference architecture: the patch-based visual odometry pipeline, its state machine, and the data flow from video input to 3D trajectory output.
+This document explains the DPVO inference architecture: the patch-based visual odometry pipeline, its state machine, and the data flow from video input to 3D trajectory output.
 
 ## System Overview
 

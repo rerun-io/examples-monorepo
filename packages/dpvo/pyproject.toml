@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 authors = [{ name = "pablo vela", email = "pablovela5620@gmail.com" }]
-name = "mini-dpvo"
+name = "dpvo"
 version = "0.1.1"
 requires-python = ">= 3.11"
 dependencies = [
@@ -13,7 +13,7 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["mini_dpvo", "mini_dpvo.*"]
+include = ["dpvo", "dpvo.*"]
 namespaces = false
 
 [tool.ruff]
@@ -24,7 +24,7 @@ select = ["E", "F", "UP", "B", "SIM", "I"]
 ignore = ["E501", "F722", "F821", "UP037", "UP040"]
 
 [tool.vulture]
-paths = ["mini_dpvo", "tools"]
+paths = ["dpvo", "tools"]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*"]
 sort_by_size = true
 min_confidence = 60

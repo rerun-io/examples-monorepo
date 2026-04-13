@@ -6,7 +6,7 @@ and ``fast`` configurations matching the former YAML presets.
 
 Typical usage::
 
-    from mini_dpvo.config import DPVOConfig
+    from dpvo.config import DPVOConfig
     cfg = DPVOConfig.fast()
     # or
     cfg = DPVOConfig.accurate()

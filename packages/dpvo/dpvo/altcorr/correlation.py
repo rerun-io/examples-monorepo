@@ -13,7 +13,7 @@ import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
-from mini_dpvo import _cuda_corr
+from dpvo import _cuda_corr
 
 
 class CorrLayer(torch.autograd.Function):

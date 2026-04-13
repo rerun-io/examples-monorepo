@@ -7,7 +7,7 @@ Implements the three main components of the DPVO neural network:
   on each frame, then selects M sparse 3x3 patches.
 - :class:`Update` -- Recurrent GRU update operator that takes correlation
   features + context and predicts pixel displacement ``delta`` and
-  confidence ``weight``.  Uses :class:`~mini_dpvo.blocks.SoftAgg` for
+  confidence ``weight``.  Uses :class:`~dpvo.blocks.SoftAgg` for
   neighbor communication.
 - :class:`CorrBlock` -- Multi-scale correlation computation wrapper.
 - :class:`VONet` -- Top-level module combining Patchifier + Update, with
@@ -431,7 +431,7 @@ class VONet(nn.Module):
 
     During inference, only the :class:`Patchifier` (via ``self.patchify``)
     and :class:`Update` (via ``self.update``) are called individually by
-    the :class:`~mini_dpvo.dpvo.DPVO` class.
+    the :class:`~dpvo.dpvo.DPVO` class.
 
     The ``forward`` method implements the *training-time* loop: given
     a sequence of images with known poses and depths, it runs the full
@@ -482,7 +482,7 @@ class VONet(nn.Module):
            a. Reproject all patches.
            b. Compute correlation features via :class:`CorrBlock`.
            c. Run the :class:`Update` GRU to predict displacements.
-           d. Run 2 iterations of :func:`~mini_dpvo.ba.BA` bundle adjustment.
+           d. Run 2 iterations of :func:`~dpvo.ba.BA` bundle adjustment.
         4. Collect trajectory snapshots for loss computation.
 
         Args:

@@ -14,9 +14,9 @@ The pipeline processes frames one at a time via :meth:`DPVO.__call__`:
    frame's patches to recent frames (forward edges) and recent patches
    to the new frame (backward edges).
 4. **Update**: Run one iteration of the recurrent GRU operator
-   (:class:`~mini_dpvo.net.Update`) to predict pixel displacements and
+   (:class:`~dpvo.net.Update`) to predict pixel displacements and
    confidence weights, then perform one Gauss-Newton bundle adjustment
-   step (:func:`~mini_dpvo.ba.BA`) to refine poses and depths.
+   step (:func:`~dpvo.ba.BA`) to refine poses and depths.
 5. **Keyframe management**: Remove redundant keyframes whose
    bidirectional pixel flow falls below ``KEYFRAME_THRESH``.
 
@@ -57,8 +57,8 @@ class DPVO:
     :meth:`__call__`.
 
     Attributes:
-        cfg: DPVO configuration (see :class:`mini_dpvo.config.DPVOConfig`).
-        network: The :class:`~mini_dpvo.net.VONet` neural network (in eval mode).
+        cfg: DPVO configuration (see :class:`dpvo.config.DPVOConfig`).
+        network: The :class:`~dpvo.net.VONet` neural network (in eval mode).
         is_initialized: ``True`` once 8 frames have been processed and the
             initial BA has converged.
         enable_timing: If ``True``, profile each update step with CUDA events.
@@ -126,7 +126,7 @@ class DPVO:
 
         # Fixed-size GPU buffers pre-allocated for the sliding window
         # tstamps_ is float64 because evaluation datasets (EuRoC, TUM-RGBD)
-        # pass real-valued timestamps (nanoseconds / seconds).  The mini-dpvo
+        # pass real-valued timestamps (nanoseconds / seconds).  The dpvo
         # video/image streams happen to use integer frame indices, but the
         # original DPVO evaluation code relies on float timestamps for
         # trajectory alignment via evo's associate_trajectories().
@@ -189,7 +189,7 @@ class DPVO:
 
         Args:
             network: Either a file path to a ``.pth`` checkpoint or an
-                already-instantiated :class:`~mini_dpvo.net.VONet`.
+                already-instantiated :class:`~dpvo.net.VONet`.
         """
         # load network from checkpoint file
         if isinstance(network, str):
@@ -453,7 +453,7 @@ class DPVO:
 
         Filters the factor graph for edges where ``ii == i`` and ``jj == j``,
         then computes the blended (translation + rotation) flow magnitude
-        via :func:`~mini_dpvo.projective_ops.flow_mag`.
+        via :func:`~dpvo.projective_ops.flow_mag`.
 
         Used by :meth:`keyframe` to assess whether a candidate keyframe
         has sufficient parallax to be worth keeping.

@@ -175,7 +175,7 @@ def transform(
        :func:`proj`.
 
     When ``jacobian=True``, analytical Jacobians are computed for the
-    Gauss-Newton bundle adjustment (see :func:`~mini_dpvo.ba.BA`):
+    Gauss-Newton bundle adjustment (see :func:`~dpvo.ba.BA`):
 
     - ``Ji``: Jacobian of pixel coords w.r.t. pose ``ii`` (shape ``[1, E, 2, 6]``).
     - ``Jj``: Jacobian of pixel coords w.r.t. pose ``jj`` (shape ``[1, E, 2, 6]``).

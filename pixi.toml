@@ -9,7 +9,7 @@ preview = ["pixi-build"]
 
 # ─── pypi-options (workspace-level) ─────────────────────────────────────────
 [pypi-options]
-no-build-isolation = ["moge", "gsplat", "mini_dpvo"]
+no-build-isolation = ["moge", "gsplat", "dpvo"]
 
 [pypi-options.dependency-overrides]
 iopath = ">=0.1.10"
@@ -1011,13 +1011,13 @@ cwd = "packages/gsplat-rust-renderer"
 description = "Load example PLY and log it to the running viewer"
 
 # ═══════════════════════════════════════════════════════════════════════════
-# mini-dpvo
+# dpvo
 # ═══════════════════════════════════════════════════════════════════════════
-[feature.mini-dpvo]
+[feature.dpvo]
 channels = ["https://prefix.dev/ai-demos", "https://prefix.dev/conda-forge"]
 platforms = ["linux-64"]
 
-[feature.mini-dpvo.dependencies]
+[feature.dpvo.dependencies]
 python = "3.11.*"
 eigen = ">=3.4.0,<3.5"
 einops = ">=0.8.0,<0.9"
@@ -1027,61 +1027,61 @@ lietorch = ">=0.3.0"
 plyfile = ">=1.0.3,<1.1"
 tyro = ">=0.9.1,<0.10"
 
-[feature.mini-dpvo.pypi-dependencies]
-mini_dpvo = { path = "packages/mini-dpvo", editable = true }
+[feature.dpvo.pypi-dependencies]
+dpvo = { path = "packages/dpvo", editable = true }
 mini-dust3r = ">=0.1.1,<0.2"
 evo = ">=1.28.0"
 opencv-python = ">=4.9.0.80"
 spaces = ">=0.32.0"
 
-[feature.mini-dpvo.activation.env]
-PACKAGE_DIR = "packages/mini-dpvo"
+[feature.dpvo.activation.env]
+PACKAGE_DIR = "packages/dpvo"
 
 # ── Download tasks (hidden, used as depends-on) ─────────────────────────
-[feature.mini-dpvo.tasks._download-dpvo-model]
+[feature.dpvo.tasks._download-dpvo-model]
 cmd = "hf download pablovela5620/dpvo dpvo.pth --repo-type model --local-dir checkpoints/"
-cwd = "packages/mini-dpvo"
-outputs = ["packages/mini-dpvo/checkpoints/dpvo.pth"]
+cwd = "packages/dpvo"
+outputs = ["packages/dpvo/checkpoints/dpvo.pth"]
 description = "Download DPVO model checkpoint"
 
-[feature.mini-dpvo.tasks._download-dpvo-data]
+[feature.dpvo.tasks._download-dpvo-data]
 cmd = "bash -lc 'hf download pablovela5620/dpvo-example-data movies.zip --repo-type dataset --local-dir . && unzip -o movies.zip -d data/ && rm -f movies.zip && if [ -d data/data/movies ]; then rm -rf data/movies && mv data/data/movies data/movies && rmdir data/data 2>/dev/null || true; fi'"
-cwd = "packages/mini-dpvo"
-outputs = ["packages/mini-dpvo/data/movies/IMG_0493.MOV"]
+cwd = "packages/dpvo"
+outputs = ["packages/dpvo/data/movies/IMG_0493.MOV"]
 description = "Download DPVO example video data"
 
-[feature.mini-dpvo.tasks._download-dpvo-iphone-data]
+[feature.dpvo.tasks._download-dpvo-iphone-data]
 cmd = "hf download pablovela5620/dpvo-example-data pool.MOV --repo-type dataset --local-dir data/iphone/"
-cwd = "packages/mini-dpvo"
-outputs = ["packages/mini-dpvo/data/iphone/pool.MOV"]
+cwd = "packages/dpvo"
+outputs = ["packages/dpvo/data/iphone/pool.MOV"]
 description = "Download DPVO iPhone example data"
 
 # ── Build tasks ──────────────────────────────────────────────────────────
-[feature.mini-dpvo.tasks._build-dpvo-cuda-kernels]
+[feature.dpvo.tasks._build-dpvo-cuda-kernels]
 cmd = "python setup.py build_ext --inplace"
-cwd = "packages/mini-dpvo"
-description = "Build mini-dpvo CUDA extensions (cuda_corr, cuda_ba)"
+cwd = "packages/dpvo"
+description = "Build DPVO CUDA extensions (cuda_corr, cuda_ba)"
 inputs = [
-    "packages/mini-dpvo/setup.py",
-    "packages/mini-dpvo/mini_dpvo/altcorr/*.cpp",
-    "packages/mini-dpvo/mini_dpvo/altcorr/*.cu",
-    "packages/mini-dpvo/mini_dpvo/fastba/*.cpp",
-    "packages/mini-dpvo/mini_dpvo/fastba/*.cu",
+    "packages/dpvo/setup.py",
+    "packages/dpvo/dpvo/altcorr/*.cpp",
+    "packages/dpvo/dpvo/altcorr/*.cu",
+    "packages/dpvo/dpvo/fastba/*.cpp",
+    "packages/dpvo/dpvo/fastba/*.cu",
 ]
-outputs = ["packages/mini-dpvo/mini_dpvo/_cuda_corr*.so", "packages/mini-dpvo/mini_dpvo/_cuda_ba*.so"]
+outputs = ["packages/dpvo/dpvo/_cuda_corr*.so", "packages/dpvo/dpvo/_cuda_ba*.so"]
 
 # ── Demo tasks ───────────────────────────────────────────────────────────
-[feature.mini-dpvo.tasks.dpvo-demo]
+[feature.dpvo.tasks.dpvo-demo]
 cmd = "python tools/demo.py --imagedir data/movies/IMG_0493.MOV"
 depends-on = ["_build-dpvo-cuda-kernels", "_download-dpvo-model", "_download-dpvo-data"]
-cwd = "packages/mini-dpvo"
+cwd = "packages/dpvo"
 description = "Run DPVO demo on example video"
 
 # ── App tasks ────────────────────────────────────────────────────────────
-[feature.mini-dpvo.tasks.dpvo-app]
+[feature.dpvo.tasks.dpvo-app]
 cmd = "python tools/gradio_app.py"
 depends-on = ["_build-dpvo-cuda-kernels", "_download-dpvo-model", "_download-dpvo-data", "_download-dpvo-iphone-data"]
-cwd = "packages/mini-dpvo"
+cwd = "packages/dpvo"
 description = "Launch DPVO Gradio web UI"
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1209,14 +1209,14 @@ gsplat-rust-renderer-dev = { features = [
     "gsplat-rust-renderer",
     "dev",
 ], solve-group = "gsplat-rust-renderer", no-default-feature = true }
-mini-dpvo = { features = [
+dpvo = { features = [
     "common",
     "cuda",
-    "mini-dpvo",
-], solve-group = "mini-dpvo", no-default-feature = true }
-mini-dpvo-dev = { features = [
+    "dpvo",
+], solve-group = "dpvo", no-default-feature = true }
+dpvo-dev = { features = [
     "common",
     "cuda",
-    "mini-dpvo",
+    "dpvo",
     "dev",
-], solve-group = "mini-dpvo", no-default-feature = true }
+], solve-group = "dpvo", no-default-feature = true }

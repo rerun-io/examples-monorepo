@@ -1,4 +1,4 @@
-from mini_dpvo.gradio_ui.dpvo_ui import main
+from dpvo.gradio_ui.dpvo_ui import main
 
 demo = main()
 

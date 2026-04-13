@@ -10,7 +10,7 @@ system from ``(6N + M)`` unknowns to a dense ``6N x 6N`` system (where
 See Sec. 3.3 of Teed et al. (2022).
 
 The normal equations are assembled from analytical Jacobians provided by
-:func:`~mini_dpvo.projective_ops.transform`:
+:func:`~dpvo.projective_ops.transform`:
 
 .. math::
 
@@ -349,7 +349,7 @@ def BA(
     The algorithm proceeds as follows:
 
     1. **Reproject** all patches and compute analytical Jacobians
-       ``(Ji, Jj, Jz)`` via :func:`~mini_dpvo.projective_ops.transform`.
+       ``(Ji, Jj, Jz)`` via :func:`~dpvo.projective_ops.transform`.
     2. **Filter** edges: discard points behind the camera (``Z < 0.2``),
        with large residuals (> 250 px), or outside ``bounds``.
     3. **Assemble** the weighted normal equations:

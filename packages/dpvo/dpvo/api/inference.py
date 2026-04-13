@@ -9,7 +9,7 @@ Both the CLI and Gradio UI consume the same :func:`run_dpvo_pipeline` generator.
 
 Typical CLI usage::
 
-    from mini_dpvo.api.inference import DPVOInferenceConfig, run_dpvo_pipeline
+    from dpvo.api.inference import DPVOInferenceConfig, run_dpvo_pipeline
     config = tyro.cli(DPVOInferenceConfig)
     for msg in run_dpvo_pipeline(dpvo_config=config.dpvo_config, ...):
         pass
@@ -37,10 +37,10 @@ from scipy.spatial.transform import Rotation
 from simplecv.rerun_log_utils import RerunTyroConfig
 from tqdm import tqdm
 
-from mini_dpvo.config import DPVOConfig
-from mini_dpvo.dpvo import DPVO
-from mini_dpvo.stream import image_stream, video_stream
-from mini_dpvo.utils import Timer
+from dpvo.config import DPVOConfig
+from dpvo.dpvo import DPVO
+from dpvo.stream import image_stream, video_stream
+from dpvo.utils import Timer
 
 # ── Tyro subcommand aliases for DPVOConfig presets ──────────────────────
 AccurateDPVOConfig = Annotated[

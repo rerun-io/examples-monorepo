@@ -100,7 +100,7 @@ def coords_grid_with_index(
 ) -> tuple[Float[Tensor, "b n 3 h w"], Float[Tensor, "b n 1 h w"]]:
     """Create a 3-channel coordinate grid ``(x, y, inverse_depth)`` plus a frame index volume.
 
-    This is used by the :class:`~mini_dpvo.net.Patchifier` to build the
+    This is used by the :class:`~dpvo.net.Patchifier` to build the
     initial patch representation.  Each pixel gets coordinates ``(x, y, d)``
     where ``d`` comes from the input disparity map, and a frame index
     channel that identifies which frame the pixel belongs to.
