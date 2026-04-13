@@ -13,7 +13,7 @@ convolution followed by stride-2 pooling).
 """
 
 from itertools import chain
-from multiprocessing import Queue
+from multiprocessing.queues import Queue
 from pathlib import Path
 
 import cv2
