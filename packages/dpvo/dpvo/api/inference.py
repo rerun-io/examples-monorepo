@@ -112,7 +112,9 @@ class DPVOInferenceConfig:
 
     rr_config: RerunTyroConfig
     """Rerun recording configuration (save path, application id, etc.)."""
-    dpvo_config: AccurateDPVOConfig | FastDPVOConfig | SlamDPVOConfig | SlamClassicDPVOConfig = field(default_factory=DPVOConfig.fast)
+    dpvo_config: AccurateDPVOConfig | FastDPVOConfig | SlamDPVOConfig | SlamClassicDPVOConfig = field(
+        default_factory=DPVOConfig.fast
+    )
     """DPVO solver configuration preset."""
     imagedir: str = "data/movies/IMG_0493.MOV"
     """Path to image directory or video file."""
@@ -178,7 +180,9 @@ def compute_orient_transform(
         world_T_cam_rub[i] = world_T_cam
 
     orient_34 = auto_orient_and_center_poses(
-        world_T_cam_rub.astype(np.float32), method="up", center_method="poses",
+        world_T_cam_rub.astype(np.float32),
+        method="up",
+        center_method="poses",
     ).transform
     orient_R: Float64[ndarray, "3 3"] = orient_34[:, :3]
     orient_t: Float64[ndarray, "3"] = orient_34[:, 3]
@@ -325,9 +329,10 @@ def log_trajectory(
         ),
     )
 
-    # Recompute gravity-alignment transform every N keyframes
+    # Recompute gravity-alignment transform periodically.
+    # Fire immediately once we have >= 3 poses, then every N keyframes.
     n_poses: int = nonzero_poses.shape[0]
-    if n_poses - last_orient_n >= _ORIENT_RECOMPUTE_INTERVAL:
+    if (last_orient_n == 0 and n_poses >= 3) or (n_poses - last_orient_n >= _ORIENT_RECOMPUTE_INTERVAL):
         orient = compute_orient_transform(cam_se3_world_buffer)
         if orient is not None:
             orient_R, orient_t = orient
@@ -379,13 +384,14 @@ def log_final(
             world_T_cam_rub[i, :3, :3] = Rotation.from_quat(final_poses[i, 3:]).as_matrix() @ _RDF_TO_RUB
             world_T_cam_rub[i, :3, 3] = final_poses[i, :3]
         orient_34 = auto_orient_and_center_poses(
-            world_T_cam_rub.astype(np.float32), method="up", center_method="poses",
+            world_T_cam_rub.astype(np.float32),
+            method="up",
+            center_method="poses",
         ).transform
         rr.log(f"{parent_log_path}", rr.Transform3D(mat3x3=orient_34[:, :3], translation=orient_34[:, 3]))
 
 
 # ── Frame I/O helpers ───────────────────────────────────────────────────
-
 
 
 def calculate_num_frames(video_or_image_dir: str, stride: int, skip: int) -> int:
@@ -533,17 +539,19 @@ def run_dpvo_pipeline(
     slam: DPVO | None = None
 
     with FrameReader(imagedir, calib, stride, skip) as (queue, total_frames):
-
-        # Log ViewCoordinates on the root entity, NOT on parent_log_path.
-        # The orient Transform3D goes on parent_log_path, and per rerun#9244
-        # a transform on the view origin entity is invisible.  By putting
-        # ViewCoordinates on "/" and the Spatial3DView origin at "/", the
-        # orient transform on parent_log_path becomes visible.
-        rr.log("/", rr.ViewCoordinates.RDF, static=True)
+        # Per rerun#9244, a Transform3D on the view origin entity is invisible.
+        # Set the Spatial3DView origin to "/" so the gravity-alignment transform
+        # on parent_log_path is visible.  No ViewCoordinates needed — the orient
+        # transform handles the scene orientation directly (same as mast3r-slam).
+        cam_image_path: str = f"{parent_log_path}/camera/pinhole/image"
         rr.send_blueprint(
             rr.blueprint.Blueprint(
-                rr.blueprint.Spatial3DView(origin="/"),
-                auto_layout=True,
+                rr.blueprint.Horizontal(
+                    rr.blueprint.Spatial3DView(origin="/", name="3D"),
+                    rr.blueprint.Spatial2DView(origin=cam_image_path, name="Camera"),
+                    column_shares=[3, 2],
+                ),
+                collapse_panels=True,
             )
         )
 
@@ -582,7 +590,9 @@ def run_dpvo_pipeline(
                 if calib is not None:
                     intri_np = intri_np_calib.astype(np.float32) if intri_np_calib is not None else intri_np_calib
                 else:
-                    assert intri_np_dust3r is not None, "DUSt3R intrinsics must be estimated when no calib file is provided"
+                    assert intri_np_dust3r is not None, (
+                        "DUSt3R intrinsics must be estimated when no calib file is provided"
+                    )
                     intri_np = intri_np_dust3r
                 # queue will have a (-1, image, intrinsics) tuple when the reader is done
                 if t < 0:
