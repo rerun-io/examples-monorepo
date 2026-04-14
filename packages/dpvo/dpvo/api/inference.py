@@ -451,12 +451,59 @@ def run_dpvo_pipeline(
 
     stream_fn = image_stream if os.path.isdir(imagedir) else video_stream
     reader: Process = Process(target=stream_fn, args=(queue, imagedir, calib, stride, skip))
+    reader.daemon = True  # die with parent — prevents zombie GPU processes
     reader.start()
 
-    rr.log(f"{parent_log_path}", rr.ViewCoordinates.RDF, static=True)
+    try:
+        yield from _run_dpvo_pipeline_inner(
+            slam=slam,
+            queue=queue,
+            reader=reader,
+            dpvo_config=dpvo_config,
+            network_path=network_path,
+            imagedir=imagedir,
+            calib=calib,
+            stride=stride,
+            skip=skip,
+            dust3r_model=dust3r_model,
+            parent_log_path=parent_log_path,
+            handle=handle,
+            recording=recording,
+            jpg_quality=jpg_quality,
+            timeit=timeit,
+            max_frames=max_frames,
+        )
+    finally:
+        if reader.is_alive():
+            reader.kill()
+        reader.join(timeout=5)
 
+
+@torch.no_grad()
+def _run_dpvo_pipeline_inner(
+    *,
+    slam: DPVO | None,
+    queue: Queue,
+    reader: Process,
+    dpvo_config: DPVOConfig,
+    network_path: str,
+    imagedir: str,
+    calib: str | None,
+    stride: int,
+    skip: int,
+    dust3r_model: AsymmetricCroCo3DStereo | None,
+    parent_log_path: Path,
+    handle: DPVOPipelineHandle | None,
+    recording: rr.RecordingStream | None,
+    jpg_quality: int,
+    timeit: bool,
+    max_frames: int,
+) -> Generator[str, None, None]:
+    """Inner implementation of the pipeline, wrapped by try/finally for cleanup."""
     start: float = timer()
     total_frames: int = calculate_num_frames(imagedir, stride, skip)
+
+    rr.log(f"{parent_log_path}", rr.ViewCoordinates.RDF, static=True)
 
     # If no calibration file was provided, use DUSt3R to predict intrinsics
     # from the very first frame pulled off the reader queue.
@@ -527,10 +574,6 @@ def run_dpvo_pipeline(
             frame_idx += 1
             pbar.update(1)
             yield f"Frame {frame_idx}/{total_frames}"
-
-    if reader.is_alive():
-        reader.kill()
-    reader.join()
 
     if slam is None:
         yield "No frames processed"
