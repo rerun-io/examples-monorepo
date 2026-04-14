@@ -547,7 +547,11 @@ def run_dpvo_pipeline(
         rr.send_blueprint(
             rr.blueprint.Blueprint(
                 rr.blueprint.Horizontal(
-                    rr.blueprint.Spatial3DView(origin="/", name="3D"),
+                    rr.blueprint.Spatial3DView(
+                        origin="/",
+                        name="3D",
+                        eye_controls=rr.blueprint.archetypes.EyeControls3D(spin_speed=0.25),
+                    ),
                     rr.blueprint.Spatial2DView(origin=cam_image_path, name="Camera"),
                     column_shares=[3, 2],
                 ),
