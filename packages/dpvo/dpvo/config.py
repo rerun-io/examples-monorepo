@@ -119,17 +119,31 @@ class DPVOConfig:
 
     @classmethod
     def slam(cls) -> "DPVOConfig":
-        """SLAM preset: accurate() base + proximity loop closure.
-
-        Uses the same VO parameters as ``accurate()`` (matching upstream
-        ``config/default.yaml``) with proximity loop closure enabled.
-        """
+        """SLAM preset: accurate() base + proximity loop closure."""
         return cls(
             buffer_size=4096,
             patches_per_frame=96,
             removal_window=22,
             optimization_window=10,
             patch_lifetime=13,
+            keyframe_thresh=15.0,
+            gradient_bias=False,
+            mixed_precision=True,
+            loop_closure=True,
+            backend_thresh=64.0,
+            max_edge_age=1000,
+            global_opt_freq=15,
+        )
+
+    @classmethod
+    def slam_fast(cls) -> "DPVOConfig":
+        """Fast SLAM preset: fast() base + proximity loop closure."""
+        return cls(
+            buffer_size=4096,
+            patches_per_frame=48,
+            removal_window=16,
+            optimization_window=7,
+            patch_lifetime=11,
             keyframe_thresh=15.0,
             gradient_bias=False,
             mixed_precision=True,
@@ -148,6 +162,27 @@ class DPVOConfig:
             removal_window=22,
             optimization_window=10,
             patch_lifetime=13,
+            keyframe_thresh=15.0,
+            gradient_bias=False,
+            mixed_precision=True,
+            loop_closure=True,
+            backend_thresh=64.0,
+            max_edge_age=1000,
+            global_opt_freq=15,
+            classic_loop_closure=True,
+            loop_close_window_size=3,
+            loop_retr_thresh=0.04,
+        )
+
+    @classmethod
+    def slam_classic_fast(cls) -> "DPVOConfig":
+        """Fast SLAM preset: fast() base + proximity + classical loop closure."""
+        return cls(
+            buffer_size=4096,
+            patches_per_frame=48,
+            removal_window=16,
+            optimization_window=7,
+            patch_lifetime=11,
             keyframe_thresh=15.0,
             gradient_bias=False,
             mixed_precision=True,

@@ -134,7 +134,7 @@ class LongTermLoopClosure:
         residual_val = (coords - target).norm(dim=-1).squeeze(0)
         assert residual_val.numel() == 2 * n_pts
 
-        from torch_scatter import scatter_max
+        from dpvo.scatter_utils import scatter_max
         mask = scatter_max(residual_val, kk)[0] < 2
 
         # Un-project keypoints

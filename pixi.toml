@@ -1036,6 +1036,8 @@ ninja = ">=1.13.2,<2"
 dpvo = { path = "packages/dpvo", editable = true }
 mini-dust3r = ">=0.1.1,<0.2"
 evo = ">=1.28.0"
+kornia = ">=0.7.0"
+pypose = ">=0.6.0"
 yacs = ">=0.1.8"
 opencv-python = ">=4.9.0.80"
 spaces = ">=0.32.0"
