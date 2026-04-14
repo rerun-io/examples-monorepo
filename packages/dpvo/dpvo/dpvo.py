@@ -288,7 +288,9 @@ class DPVO:
         t0: int
         dP: SE3
         t0, dP = self.delta[t]
-        return dP * self.get_pose(t0)
+        result = dP * self.get_pose(t0)
+        assert isinstance(result, SE3)
+        return result
 
     def terminate(self) -> tuple[Float32[ndarray, "n_frames 7"], Float64[ndarray, "n_frames"]]:
         """Finalize tracking: interpolate removed keyframes and return full trajectory.
@@ -316,10 +318,12 @@ class DPVO:
             self.traj[current_t] = self.poses_[i]
 
         # Reconstruct poses for ALL timestamps (including removed keyframes)
-        poses: list[SE3] = [self.get_pose(t) for t in range(self.counter)]
-        poses: SE3 = lietorch.stack(poses, dim=0)
+        poses_list: list[SE3] = [self.get_pose(t) for t in range(self.counter)]
+        poses_stacked: SE3 = lietorch.stack(poses_list, dim=0)
         # Invert: internal cam_se3_world -> output world_se3_cam
-        poses: Float[ndarray, "n_frames 7"] = poses.inv().data.cpu().numpy()
+        poses_inv = poses_stacked.inv()
+        assert poses_inv is not None
+        poses: Float32[ndarray, "n_frames 7"] = poses_inv.data.cpu().numpy()
         tstamps: Float64[ndarray, "n_frames"] = np.array(self.tlist, dtype=np.float64)
         print("Done!")
 
@@ -532,7 +536,8 @@ class DPVO:
             t1: int = int(self.tstamps_[k].item())
 
             # Store relative pose for interpolation at termination
-            dP: SE3 = SE3(self.poses_[k]) * SE3(self.poses_[k - 1]).inv()
+            dP = SE3(self.poses_[k]) * SE3(self.poses_[k - 1]).inv()
+            assert isinstance(dP, SE3)
             self.delta[t1] = (t0, dP)
 
             # Remove all edges incident to the removed frame
@@ -775,8 +780,12 @@ class DPVO:
                 P1: SE3 = SE3(self.poses_[self.n - 1])
                 P2: SE3 = SE3(self.poses_[self.n - 2])
 
-                xi: Float[Tensor, "6"] = self.cfg.motion_damping * (P1 * P2.inv()).log()
-                tvec_qvec: Float[Tensor, "7"] = (SE3.exp(xi) * P1).data
+                relative = P1 * P2.inv()
+                assert isinstance(relative, SE3)
+                xi: Float[Tensor, "6"] = self.cfg.motion_damping * relative.log()
+                predicted = SE3.exp(xi) * P1
+                assert isinstance(predicted, SE3)
+                tvec_qvec: Float[Tensor, "7"] = predicted.data
                 self.poses_[self.n] = tvec_qvec
             else:
                 # Constant position model (copy previous pose)

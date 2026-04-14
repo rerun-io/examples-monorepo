@@ -40,7 +40,9 @@ def readFlowKITTI(filename: str) -> tuple[Float32[ndarray, "h w 2"], Float32[nda
         Tuple of ``(flow, valid)`` where ``flow`` has shape ``(h, w, 2)``
         and ``valid`` has shape ``(h, w)`` with 1.0 for valid pixels.
     """
-    flow_bgr: Float32[ndarray, "h w 3"] = cv2.imread(filename, cv2.IMREAD_ANYDEPTH|cv2.IMREAD_COLOR)
+    flow_bgr_raw = cv2.imread(filename, cv2.IMREAD_ANYDEPTH|cv2.IMREAD_COLOR)
+    assert flow_bgr_raw is not None, f"Failed to read flow file: {filename}"
+    flow_bgr: Float32[ndarray, "h w 3"] = flow_bgr_raw
     flow_bgr = flow_bgr[:,:,::-1].astype(np.float32)
     flow: Float32[ndarray, "h w 2"] = flow_bgr[:, :, :2]
     valid: Float32[ndarray, "h w"] = flow_bgr[:, :, 2]
@@ -113,9 +115,9 @@ def readPFM(file: str) -> Float32[ndarray, "..."] | Float32[ndarray, "h w 3"]:
         raise Exception('Not a PFM file.')
 
     try:
-        dim_match: re.Match | None = re.match(rb'^(\d+)\s(\d+)\s$', file_handle.readline())
+        dim_match: re.Match[bytes] | None = re.match(rb'^(\d+)\s(\d+)\s$', file_handle.readline())
     except Exception:
-        dim_match = re.match(r'^(\d+)\s(\d+)\s$', file_handle.readline())
+        dim_match = re.match(rb'^(\d+)\s(\d+)\s$', file_handle.readline())
 
     if dim_match:
         width, height = map(int, dim_match.groups())
@@ -261,7 +263,9 @@ def read_gen(file_name: str, _pil: bool = False) -> Image.Image | ndarray | Floa
     elif ext == '.bin' or ext == '.raw':
         return np.load(file_name)
     elif ext == '.flo':
-        return readFlow(file_name).astype(np.float32)
+        flow = readFlow(file_name)
+        assert flow is not None, f"Failed to read .flo file: {file_name}"
+        return flow.astype(np.float32)
     elif ext == '.pfm':
         return readPFM(file_name).astype(np.float32)
     elif ext == '.dpt':

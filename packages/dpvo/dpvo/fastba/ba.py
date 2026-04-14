@@ -13,7 +13,7 @@ This module also re-exports two CUDA utility functions:
 from jaxtyping import Float, Int
 from torch import Tensor
 
-from dpvo import _cuda_ba
+from dpvo import _cuda_ba  # pyrefly: ignore[missing-module-attribute]
 
 neighbors = _cuda_ba.neighbors
 """Query the co-visibility neighbourhood of patches across frames."""

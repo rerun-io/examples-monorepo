@@ -5,6 +5,8 @@ Maps short dataset names (e.g. ``"tartan"``) to their concrete
 :class:`~torch.utils.data.ConcatDataset` that merges them.
 """
 
+from typing import Any
+
 from torch.utils.data import ConcatDataset
 
 from .base import RGBDDataset
@@ -13,7 +15,7 @@ from .base import RGBDDataset
 from .tartan import TartanAir
 
 
-def dataset_factory(dataset_list: list[str], **kwargs: object) -> ConcatDataset:
+def dataset_factory(dataset_list: list[str], **kwargs: Any) -> ConcatDataset:
     """Create a combined :class:`ConcatDataset` from named dataset keys.
 
     Args:

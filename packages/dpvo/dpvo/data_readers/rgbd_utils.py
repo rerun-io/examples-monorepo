@@ -20,6 +20,8 @@ from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from torch import Tensor
 
+from .. import projective_ops as pops
+
 
 def parse_list(filepath: str, skiprows: int = 0) -> ndarray:
     """Read a whitespace-delimited text file into a numpy string array.
@@ -31,7 +33,7 @@ def parse_list(filepath: str, skiprows: int = 0) -> ndarray:
     Returns:
         A 2-D numpy array of unicode strings.
     """
-    data: ndarray = np.loadtxt(filepath, delimiter=' ', dtype=np.unicode_, skiprows=skiprows)
+    data: ndarray = np.loadtxt(filepath, delimiter=' ', dtype=np.str_, skiprows=skiprows)
     return data
 
 def associate_frames(
@@ -61,13 +63,13 @@ def associate_frames(
     associations: list[tuple[int, ...]] = []
     for i, t in enumerate(tstamp_image):
         if tstamp_pose is None:
-            j: int = np.argmin(np.abs(tstamp_depth - t))
+            j: int = int(np.argmin(np.abs(tstamp_depth - t)))
             if (np.abs(tstamp_depth[j] - t) < max_dt):
                 associations.append((i, j))
 
         else:
-            j = np.argmin(np.abs(tstamp_depth - t))
-            k: int = np.argmin(np.abs(tstamp_pose - t))
+            j = int(np.argmin(np.abs(tstamp_depth - t)))
+            k: int = int(np.argmin(np.abs(tstamp_pose - t)))
 
             if (np.abs(tstamp_depth[j] - t) < max_dt) and \
                     (np.abs(tstamp_pose[k] - t) < max_dt):
@@ -176,7 +178,9 @@ def all_pairs_distance_matrix(poses: list[Float64[ndarray, "7"]], beta: float = 
     poses_np[:,:3] *= beta # scale to balence rot + trans
     poses_se3: SE3 = SE3(torch.from_numpy(poses_np))
 
-    r: Tensor = (poses_se3[:,None].inv() * poses_se3[None,:]).log()
+    relative = poses_se3[:,None].inv() * poses_se3[None,:]
+    assert isinstance(relative, SE3)
+    r: Tensor = relative.log()
     return r.norm(dim=-1).cpu().numpy()
 
 def pose_matrix_to_quaternion(pose: Float64[ndarray, "4 4"]) -> Float64[ndarray, "7"]:
@@ -211,14 +215,25 @@ def compute_distance_matrix_flow(
     Returns:
         An ``(n, n)`` distance matrix of mean flow magnitudes.
     """
+    poses_se3: SE3
+    disps_t: Float32[Tensor, "1 n h w"]
+    intrinsics_t: Float32[Tensor, "1 n 4"]
     if not isinstance(poses, SE3):
-        poses = torch.from_numpy(poses).float().cuda()[None]
-        poses = SE3(poses).inv()
+        poses_raw: Tensor = torch.from_numpy(poses).float().cuda()[None]
+        poses_inv = SE3(poses_raw).inv()
+        assert isinstance(poses_inv, SE3)
+        poses_se3 = poses_inv
 
-        disps = torch.from_numpy(disps).float().cuda()[None]
-        intrinsics = torch.from_numpy(intrinsics).float().cuda()[None]
+        disps_t = torch.from_numpy(disps).float().cuda()[None]
+        intrinsics_t = torch.from_numpy(intrinsics).float().cuda()[None]
+    else:
+        poses_se3 = poses
+        assert isinstance(disps, Tensor)
+        disps_t = disps
+        assert isinstance(intrinsics, Tensor)
+        intrinsics_t = intrinsics
 
-    N: int = poses.shape[1]
+    N: int = poses_se3.shape[1]
 
     ii: Tensor
     jj: Tensor
@@ -233,10 +248,10 @@ def compute_distance_matrix_flow(
     for i in range(0, ii.shape[0], s):
         flow1: Tensor
         val1: Tensor
-        flow1, val1 = pops.induced_flow(poses, disps, intrinsics, ii[i:i+s], jj[i:i+s])
+        flow1, val1 = pops.induced_flow(poses_se3, disps_t, intrinsics_t, ii[i:i+s], jj[i:i+s])
         flow2: Tensor
         val2: Tensor
-        flow2, val2 = pops.induced_flow(poses, disps, intrinsics, jj[i:i+s], ii[i:i+s])
+        flow2, val2 = pops.induced_flow(poses_se3, disps_t, intrinsics_t, jj[i:i+s], ii[i:i+s])
 
         flow: Tensor = torch.stack([flow1, flow2], dim=2)
         val: Tensor = torch.stack([val1, val2], dim=2)

@@ -349,7 +349,7 @@ def calib_from_dust3r(
     optimized_results: OptimizedResult = inferece_dust3r(
         image_dir_or_list=tmp_path.parent,
         model=model,
-        device=device,
+        device=device,  # pyrefly: ignore[bad-argument-type]
         batch_size=1,
     )
     # Clean up the temporary file
@@ -475,7 +475,11 @@ def run_dpvo_pipeline(
             bgr_hw3: UInt8[ndarray, "h w 3"]
             intri_np: Float32[ndarray, "4"]
             (t, bgr_hw3, intri_np_calib) = queue.get()
-            intri_np = intri_np_calib if calib is not None else intri_np_dust3r
+            if calib is not None:
+                intri_np = intri_np_calib
+            else:
+                assert intri_np_dust3r is not None, "DUSt3R intrinsics must be estimated when no calib file is provided"
+                intri_np = intri_np_dust3r
             # queue will have a (-1, image, intrinsics) tuple when the reader is done
             if t < 0:
                 break

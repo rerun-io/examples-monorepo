@@ -326,7 +326,7 @@ class Patchifier(nn.Module):
         # Extract feature descriptors as PxP patches (radius P//2 = 1 for P=3)
         gmap: Float[Tensor, "1 num_patches 128 p p"] = altcorr.patchify(fmap[0], coords, P//2).view(b, -1, 128, P, P)
 
-        clr: Float[Tensor, "1 num_patches 3"]
+        clr: Float[Tensor, "1 num_patches 3"] | None = None
         if return_color:
             # Sample RGB colors from the original image at patch locations
             # (scale coords by 4 to go from stride-4 to pixel resolution)
@@ -334,7 +334,7 @@ class Patchifier(nn.Module):
 
         if disps is None:
             # Default inverse-depth: ones (unit depth)
-            disps: Float[Tensor, "1 n h w"] = torch.ones(b, n, h, w, device="cuda")
+            disps = torch.ones(b, n, h, w, device="cuda")
 
         # Build coordinate grid (x, y, d) and extract PxP patches
         grid: Float[Tensor, "1 n 3 h w"]
@@ -343,10 +343,11 @@ class Patchifier(nn.Module):
         patches: Float[Tensor, "1 num_patches 3 p p"] = altcorr.patchify(grid[0], coords, P//2).view(b, -1, 3, P, P)
 
         # Frame index for each patch (which frame it came from)
-        index: Int[Tensor, "n 1"] = torch.arange(n, device="cuda").view(n, 1)
-        index: Int[Tensor, "num_patches"] = index.repeat(1, patches_per_image).reshape(-1)
+        index_2d: Int[Tensor, "n 1"] = torch.arange(n, device="cuda").view(n, 1)
+        index: Int[Tensor, "num_patches"] = index_2d.repeat(1, patches_per_image).reshape(-1)
 
         if return_color:
+            assert clr is not None
             return fmap, gmap, imap, patches, index, clr
 
         return fmap, gmap, imap, patches, index
@@ -551,14 +552,14 @@ class VONet(nn.Module):
 
         traj: list[tuple[Float[Tensor, "..."], Float[Tensor, "..."], Float[Tensor, "..."], SE3, SE3, Tensor]] = []
         # Relaxed image bounds (allow slight out-of-frame projections)
-        bounds: list[int] = [-64, -64, w + 64, h + 64]
+        bounds: tuple[float, float, float, float] = (-64.0, -64.0, float(w + 64), float(h + 64))
 
         while len(traj) < STEPS:
             # Detach to limit backprop through time (TBPTT-style)
             Gs = Gs.detach()
             patches = patches.detach()
 
-            n: int = ii.max() + 1
+            n: int = int(ii.max() + 1)
             # After 8 warmup steps, incrementally add one frame per iteration
             if len(traj) >= 8 and n < images.shape[1]:
                 # Initialize new frame's pose from the previous frame
@@ -590,7 +591,7 @@ class VONet(nn.Module):
 
                 # Initialize new frame's depth from median of recent frames
                 patches[:,ix==n,2] = torch.median(patches[:,(ix == n-1) | (ix == n-2),2])
-                n = ii.max() + 1
+                n = int(ii.max() + 1)
 
             # Reproject all patches and compute correlation
             coords: Float[Tensor, "1 n_edges p p 2"] = pops.transform(Gs, patches, intrinsics, ii, jj, kk)

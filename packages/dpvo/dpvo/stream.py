@@ -91,11 +91,12 @@ def image_stream(
         skip::stride
     ]
 
-    image: UInt8[ndarray, "h w 3"]
+    image: UInt8[ndarray, "h w 3"] | None = None
     intrinsics: Float64[ndarray, "4"] | None = None
 
     for t, imfile in enumerate(image_list):
         image = cv2.imread(str(imfile))
+        assert image is not None, f"Failed to read image: {imfile}"
 
         if calib_data is not None:  # noqa: SIM108
             intrinsics = np.array([fx, fy, cx, cy])

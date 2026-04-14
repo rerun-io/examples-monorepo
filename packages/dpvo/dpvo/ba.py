@@ -70,17 +70,17 @@ class CholeskySolver(torch.autograd.Function):
         U, info = torch.linalg.cholesky_ex(H)
 
         if torch.any(info):
-            ctx.failed = True
+            ctx.failed = True  # pyrefly: ignore[missing-attribute]
             return torch.zeros_like(b)
 
         xs: Float[Tensor, "batch n m"] = torch.cholesky_solve(b, U)
         ctx.save_for_backward(U, xs)
-        ctx.failed = False
+        ctx.failed = False  # pyrefly: ignore[missing-attribute]
 
         return xs
 
     @staticmethod
-    def backward(ctx: torch.autograd.function.FunctionCtx, grad_x: Float[Tensor, "batch n m"]) -> tuple[Float[Tensor, "batch n n"] | None, Float[Tensor, "batch n m"] | None]:
+    def backward(ctx: torch.autograd.function.FunctionCtx, grad_x: Float[Tensor, "batch n m"]) -> tuple[Float[Tensor, "batch n n"] | None, Float[Tensor, "batch n m"] | None]:  # pyrefly: ignore[bad-override]
         """Compute gradients through the linear solve.
 
         Uses the implicit function theorem:
@@ -94,12 +94,12 @@ class CholeskySolver(torch.autograd.Function):
             Gradients ``(dL/dH, dL/db)``, or ``(None, None)`` if the
             forward Cholesky failed.
         """
-        if ctx.failed:
+        if ctx.failed:  # pyrefly: ignore[missing-attribute]
             return None, None
 
         U: Float[Tensor, "batch n n"]
         xs: Float[Tensor, "batch n m"]
-        U, xs = ctx.saved_tensors
+        U, xs = ctx.saved_tensors  # pyrefly: ignore[missing-attribute]
         dz: Float[Tensor, "batch n m"] = torch.cholesky_solve(grad_x, U)
         dH: Float[Tensor, "batch n n"] = -torch.matmul(xs, dz.transpose(-1,-2))
 
@@ -295,7 +295,7 @@ def block_solve(
     # This ensures A' is positive-definite even when A is near-singular.
     A: Float[Tensor, "b n1_p1 m1_q1"] = A + (ep + lm * A) * torch.eye(n1*p1, device=A.device)
 
-    X: Float[Tensor, "b n1_p1 m2_q2"] = CholeskySolver.apply(A, B)
+    X: Float[Tensor, "b n1_p1 m2_q2"] = CholeskySolver.apply(A, B)  # pyrefly: ignore[bad-assignment]
     return X.reshape(b, n1, p1, m2, q2).permute(0, 1, 3, 2, 4)
 
 
@@ -389,7 +389,7 @@ def BA(
         A 2-tuple of ``(updated_poses, updated_patches)``.
     """
     b: int = 1
-    n: int = max(ii.max().item(), jj.max().item()) + 1
+    n: int = int(max(ii.max().item(), jj.max().item())) + 1
 
     # ----- Step 1: Reproject all edges and compute Jacobians -----
     coords: Float[Tensor, "1 n_edges ps ps 2"]
@@ -478,7 +478,7 @@ def BA(
     w: Float[Tensor, "1 m 1 1"] = safe_scatter_add_vec(torch.matmul(wJzT,  r), kk, m)
 
     if isinstance(lmbda, Tensor):
-        lmbda: Float[Tensor, "..."] = lmbda.reshape(*C.shape)
+        lmbda = lmbda.reshape(*C.shape)
 
     # Q = (C + λ)⁻¹: inverse of the damped depth diagonal
     Q: Float[Tensor, "1 m 1 1"] = 1.0 / (C + lmbda)
@@ -487,6 +487,7 @@ def BA(
     # EQ = E · Q (pre-multiply for efficiency)
     EQ: Float[Tensor, "1 n m 6 1"] = E * Q[:,None]
 
+    dX: Float[Tensor, "1 n_poses 6"] | None = None
     if structure_only or n == 0:
         # Structure-only: just update depths, no pose optimisation
         dZ: Float[Tensor, "1 m 1 1"] = (Q * w).view(b, -1, 1, 1)
@@ -497,12 +498,12 @@ def BA(
         # Reduced RHS: y = v - E · Q · w
         y: Float[Tensor, "1 n 1 6 1"] = v - block_matmul(EQ, w.unsqueeze(dim=2))
         # Solve for pose updates: S · dX = y
-        dX: Float[Tensor, "1 n 1 6 1"] = block_solve(S, y, ep=ep, lm=1e-4)
+        dX = block_solve(S, y, ep=ep, lm=1e-4)
 
         # Back-substitute for depth updates: dZ = Q · (w - Eᵀ · dX)
-        dZ: Float[Tensor, "1 m 1 1"] = Q * (w - block_matmul(E.permute(0,2,1,4,3), dX).squeeze(dim=-1))
-        dX: Float[Tensor, "1 n_poses 6"] = dX.view(b, -1, 6)
-        dZ: Float[Tensor, "1 m 1 1"] = dZ.view(b, -1, 1, 1)
+        dZ = Q * (w - block_matmul(E.permute(0,2,1,4,3), dX).squeeze(dim=-1))
+        dX = dX.view(b, -1, 6)
+        dZ = dZ.view(b, -1, 1, 1)
 
     # ----- Step 6: Apply retractions -----
     x: Float[Tensor, "1 n_patches ps ps"]
@@ -515,6 +516,7 @@ def BA(
 
     if not structure_only and n > 0:
         # SE3 retraction: pose_new = pose · exp(dX) for each optimised pose
-        poses: SE3 = pose_retr(poses, dX, fixedp + torch.arange(n))
+        assert dX is not None
+        poses = pose_retr(poses, dX, fixedp + torch.arange(n))
 
     return poses, patches
