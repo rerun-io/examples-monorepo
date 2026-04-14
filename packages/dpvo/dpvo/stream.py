@@ -14,15 +14,74 @@ convolution followed by stride-2 pooling).
 
 from __future__ import annotations
 
+import os
 from itertools import chain
+from multiprocessing import Process
+from multiprocessing import Queue as MpQueue
 from multiprocessing.queues import Queue
 from pathlib import Path
+from types import TracebackType
 
 import cv2
 import numpy as np
 from jaxtyping import Float64, UInt8
 from numpy import ndarray
 from simplecv.video_io import VideoReader
+
+
+class FrameReader:
+    """Context manager that runs a frame reader in a background process.
+
+    Automatically kills and joins the reader process on exit — whether
+    the block completes normally, raises an exception, or the generator
+    consumer stops early.  The reader is a daemon process, so it also
+    dies if the parent is killed.
+
+    Usage::
+
+        with FrameReader(imagedir, calib, stride) as (queue, total_frames):
+            while True:
+                t, image, intrinsics = queue.get()
+                if t < 0:
+                    break
+                ...
+    """
+
+    def __init__(self, imagedir: str, calib: str | None, stride: int, skip: int = 0) -> None:
+        self.imagedir = imagedir
+        self.calib = calib
+        self.stride = stride
+        self.skip = skip
+        self._queue: Queue = MpQueue(maxsize=8)
+        self._process: Process | None = None
+
+    def __enter__(self) -> tuple[Queue, int]:
+        stream_fn = image_stream if os.path.isdir(self.imagedir) else video_stream
+        self._process = Process(target=stream_fn, args=(self._queue, self.imagedir, self.calib, self.stride, self.skip))
+        self._process.daemon = True
+        self._process.start()
+        return self._queue, _calculate_num_frames(self.imagedir, self.stride, self.skip)
+
+    def __exit__(self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: TracebackType | None) -> None:
+        if self._process is not None:
+            if self._process.is_alive():
+                self._process.kill()
+            self._process.join(timeout=5)
+            self._process = None
+
+
+def _calculate_num_frames(video_or_image_dir: str, stride: int, skip: int) -> int:
+    """Calculate the effective number of frames after applying skip and stride."""
+    total_frames: int = 0
+    if os.path.isdir(video_or_image_dir):
+        total_frames = len(
+            [name for name in os.listdir(video_or_image_dir) if os.path.isfile(os.path.join(video_or_image_dir, name))]
+        )
+    else:
+        cap = cv2.VideoCapture(video_or_image_dir)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+    return max(0, (total_frames - skip) // stride)
 
 
 def load_calib(calib: str) -> tuple[Float64[ndarray, "3 3"], Float64[ndarray, "n"]]:
@@ -56,7 +115,7 @@ def load_calib(calib: str) -> tuple[Float64[ndarray, "3 3"], Float64[ndarray, "n
 
 
 def image_stream(
-    queue: Queue[tuple[int, ndarray | None, ndarray | None]], imagedir: str, calib: str | None, stride: int, skip: int = 0
+    queue: Queue, imagedir: str, calib: str | None, stride: int, skip: int = 0  # queue carries tuple[int, ndarray | None, ndarray | None]
 ) -> None:
     """Read frames from a directory of images and push them to a queue.
 
@@ -118,7 +177,7 @@ def image_stream(
 
 
 def video_stream(
-    queue: Queue[tuple[int, ndarray | None, ndarray | None]], imagedir: str, calib: str | None, stride: int, skip: int = 0
+    queue: Queue, imagedir: str, calib: str | None, stride: int, skip: int = 0  # queue carries tuple[int, ndarray | None, ndarray | None]
 ) -> None:
     """Read frames from a video file and push them to a queue.
 

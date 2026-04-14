@@ -18,7 +18,6 @@ Typical CLI usage::
 import os
 from collections.abc import Generator
 from dataclasses import dataclass, field
-from multiprocessing import Process, Queue
 from pathlib import Path
 from timeit import default_timer as timer
 from typing import Annotated
@@ -34,13 +33,14 @@ from mini_dust3r.api import OptimizedResult, inferece_dust3r
 from mini_dust3r.model import AsymmetricCroCo3DStereo
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
+from simplecv.camera_orient_utils import auto_orient_and_center_poses
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
 from tqdm import tqdm
 
 from dpvo.config import DPVOConfig
 from dpvo.dpvo import DPVO
-from dpvo.stream import image_stream, video_stream
+from dpvo.stream import FrameReader
 from dpvo.utils import Timer
 
 # ── Tyro subcommand aliases for DPVOConfig presets ──────────────────────
@@ -55,6 +55,18 @@ FastDPVOConfig = Annotated[
     tyro.conf.subcommand(name="fast", default=DPVOConfig.fast()),
 ]
 """Subcommand alias for the fast preset."""
+
+SlamDPVOConfig = Annotated[
+    DPVOConfig,
+    tyro.conf.subcommand(name="slam-proximity", default=DPVOConfig.slam()),
+]
+"""Subcommand alias for the SLAM preset (proximity loop closure)."""
+
+SlamClassicDPVOConfig = Annotated[
+    DPVOConfig,
+    tyro.conf.subcommand(name="slam-classic", default=DPVOConfig.slam_classic()),
+]
+"""Subcommand alias for the SLAM preset with classical (DBoW2) loop closure."""
 
 
 # ── Data classes ────────────────────────────────────────────────────────
@@ -100,7 +112,9 @@ class DPVOInferenceConfig:
 
     rr_config: RerunTyroConfig
     """Rerun recording configuration (save path, application id, etc.)."""
-    dpvo_config: AccurateDPVOConfig | FastDPVOConfig = field(default_factory=DPVOConfig.fast)
+    dpvo_config: AccurateDPVOConfig | FastDPVOConfig | SlamDPVOConfig | SlamClassicDPVOConfig = field(
+        default_factory=DPVOConfig.fast
+    )
     """DPVO solver configuration preset."""
     imagedir: str = "data/movies/IMG_0493.MOV"
     """Path to image directory or video file."""
@@ -116,6 +130,65 @@ class DPVOInferenceConfig:
     """Maximum number of frames to process (0 = no limit)."""
 
 
+# ── Camera orientation ──────────────────────────────────────────────────
+
+# RDF (OpenCV) → RUB (OpenGL) flip: negate Y and Z axes.
+# auto_orient_and_center_poses(method="up") assumes column 1 of the
+# rotation is the camera's up vector, which is true for RUB but not RDF.
+_RDF_TO_RUB: Float64[ndarray, "3 3"] = np.diag([1.0, -1.0, -1.0])
+
+# Recompute the orient transform every N keyframes to amortise the SVD cost.
+_ORIENT_RECOMPUTE_INTERVAL: int = 10
+
+
+def compute_orient_transform(
+    cam_se3_world_buffer: Float32[Tensor, "buffer_size 7"],
+) -> tuple[Float64[ndarray, "3 3"], Float64[ndarray, "3"]] | None:
+    """Compute a gravity-alignment transform from the current pose buffer.
+
+    Converts DPVO's internal cam-from-world (RDF) poses to world-from-camera
+    (RUB), then runs ``auto_orient_and_center_poses(method="up")`` to find
+    a rotation+translation that aligns the reconstruction's up-vector with
+    the viewer's +Y axis.
+
+    Args:
+        cam_se3_world_buffer: The raw pose buffer ``[tx, ty, tz, qx, qy, qz, qw]``
+            in cam-from-world convention (only nonzero slots are used).
+
+    Returns:
+        ``(orient_R, orient_t)`` — a 3x3 rotation and 3-vector translation
+        to log on the scene root via ``rr.Transform3D``.  Returns ``None``
+        if fewer than 3 nonzero poses are available.
+    """
+    poses_mask: Tensor = ~(cam_se3_world_buffer[:, :6] == 0).all(dim=1)
+    nonzero_poses: Float32[ndarray, "n 7"] = cam_se3_world_buffer[poses_mask].numpy(force=True)
+
+    if nonzero_poses.shape[0] < 3:
+        return None
+
+    # Build N × 4×4 world_T_cam matrices in RUB convention
+    n: int = nonzero_poses.shape[0]
+    world_T_cam_rub: Float64[ndarray, "n 4 4"] = np.zeros((n, 4, 4))
+    for i in range(n):
+        cam_R_world: Float64[ndarray, "3 3"] = Rotation.from_quat(nonzero_poses[i, 3:]).as_matrix()
+        cam_T_world: Float64[ndarray, "4 4"] = np.eye(4)
+        cam_T_world[:3, :3] = cam_R_world
+        cam_T_world[:3, 3] = nonzero_poses[i, :3]
+        world_T_cam: Float64[ndarray, "4 4"] = np.linalg.inv(cam_T_world)
+        # RDF → RUB: flip the camera axes so column 1 is "up"
+        world_T_cam[:3, :3] = world_T_cam[:3, :3] @ _RDF_TO_RUB
+        world_T_cam_rub[i] = world_T_cam
+
+    orient_34 = auto_orient_and_center_poses(
+        world_T_cam_rub.astype(np.float32),
+        method="up",
+        center_method="poses",
+    ).transform
+    orient_R: Float64[ndarray, "3 3"] = orient_34[:, :3]
+    orient_t: Float64[ndarray, "3"] = orient_34[:, 3]
+    return orient_R, orient_t
+
+
 # ── Rerun logging helpers ───────────────────────────────────────────────
 
 
@@ -127,8 +200,9 @@ def log_trajectory(
     intri_np: Float32[ndarray, "4"],
     bgr_hw3: UInt8[ndarray, "h w 3"],
     path_list: list[list[float]],
+    last_orient_n: int = 0,
     jpg_quality: int = 90,
-) -> list[list[float]]:
+) -> tuple[list[list[float]], int]:
     """Log the current SLAM state to Rerun for live visualization.
 
     For the most recent keyframe this logs:
@@ -149,10 +223,13 @@ def log_trajectory(
         bgr_hw3: Current frame in BGR channel order.
         path_list: Running list of world-space camera positions; updated
             in-place and returned.
+        last_orient_n: Number of poses used in the last orient recomputation.
+            Pass 0 on the first call.
         jpg_quality: JPEG compression quality for the image log (0--100).
 
     Returns:
-        The updated ``path_list`` with the latest camera position appended.
+        Tuple of ``(path_list, last_orient_n)`` — the updated path list and
+        the pose count at which the orient transform was last recomputed.
     """
     cam_log_path: str = f"{parent_log_path}/camera"
     rr.log(
@@ -178,7 +255,7 @@ def log_trajectory(
     nonzero_points: Float32[Tensor, "num_nonzero 3"] = points[points_mask]
 
     if nonzero_poses.shape[0] == 0:
-        return path_list
+        return path_list, last_orient_n
 
     # Extract the most recent keyframe pose.
     # poses_ stores cam_se3_world (camera-from-world) internally, so the
@@ -251,7 +328,18 @@ def log_trajectory(
             colors=colors_filtered,
         ),
     )
-    return path_list
+
+    # Recompute gravity-alignment transform periodically.
+    # Fire immediately once we have >= 3 poses, then every N keyframes.
+    n_poses: int = nonzero_poses.shape[0]
+    if (last_orient_n == 0 and n_poses >= 3) or (n_poses - last_orient_n >= _ORIENT_RECOMPUTE_INTERVAL):
+        orient = compute_orient_transform(cam_se3_world_buffer)
+        if orient is not None:
+            orient_R, orient_t = orient
+            rr.log(f"{parent_log_path}", rr.Transform3D(mat3x3=orient_R, translation=orient_t))
+            last_orient_n = n_poses
+
+    return path_list, last_orient_n
 
 
 def log_final(
@@ -287,9 +375,23 @@ def log_final(
             rr.Transform3D(translation=world_t_cam, mat3x3=world_R_cam, from_parent=False),
         )
 
+    # Gravity-align the final scene using all keyframe poses
+    if final_poses.shape[0] >= 3:
+        n: int = final_poses.shape[0]
+        world_T_cam_rub: Float64[ndarray, "n 4 4"] = np.zeros((n, 4, 4))
+        for i in range(n):
+            world_T_cam_rub[i] = np.eye(4)
+            world_T_cam_rub[i, :3, :3] = Rotation.from_quat(final_poses[i, 3:]).as_matrix() @ _RDF_TO_RUB
+            world_T_cam_rub[i, :3, 3] = final_poses[i, :3]
+        orient_34 = auto_orient_and_center_poses(
+            world_T_cam_rub.astype(np.float32),
+            method="up",
+            center_method="poses",
+        ).transform
+        rr.log(f"{parent_log_path}", rr.Transform3D(mat3x3=orient_34[:, :3], translation=orient_34[:, 3]))
+
 
 # ── Frame I/O helpers ───────────────────────────────────────────────────
-
 
 
 def calculate_num_frames(video_or_image_dir: str, stride: int, skip: int) -> int:
@@ -435,116 +537,128 @@ def run_dpvo_pipeline(
         Status message strings (e.g. ``"Frame 42/200"``).
     """
     slam: DPVO | None = None
-    queue = Queue(maxsize=8)
 
-    stream_fn = image_stream if os.path.isdir(imagedir) else video_stream
-    reader: Process = Process(target=stream_fn, args=(queue, imagedir, calib, stride, skip))
-    reader.start()
-
-    rr.log(f"{parent_log_path}", rr.ViewCoordinates.RDF, static=True)
-
-    start: float = timer()
-    total_frames: int = calculate_num_frames(imagedir, stride, skip)
-
-    # If no calibration file was provided, use DUSt3R to predict intrinsics
-    # from the very first frame pulled off the reader queue.
-    intri_np_dust3r: Float32[ndarray, "4"] | None = None
-    if calib is None:
-        yield "Estimating camera intrinsics with DUSt3R..."
-        if dust3r_model is None:
-            dust3r_device: str = (
-                "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
+    with FrameReader(imagedir, calib, stride, skip) as (queue, total_frames):
+        # Per rerun#9244, a Transform3D on the view origin entity is invisible.
+        # Set the Spatial3DView origin to "/" so the gravity-alignment transform
+        # on parent_log_path is visible.  No ViewCoordinates needed — the orient
+        # transform handles the scene orientation directly (same as mast3r-slam).
+        cam_image_path: str = f"{parent_log_path}/camera/pinhole/image"
+        rr.send_blueprint(
+            rr.blueprint.Blueprint(
+                rr.blueprint.Horizontal(
+                    rr.blueprint.Spatial3DView(
+                        origin="/",
+                        name="3D",
+                        eye_controls=rr.blueprint.archetypes.EyeControls3D(spin_speed=0.25),
+                    ),
+                    rr.blueprint.Spatial2DView(origin=cam_image_path, name="Camera"),
+                    column_shares=[3, 2],
+                ),
+                collapse_panels=True,
             )
-            dust3r_model = AsymmetricCroCo3DStereo.from_pretrained("naver/DUSt3R_ViTLarge_BaseDecoder_512_dpt").to(
-                dust3r_device
-            )
-        else:
-            dust3r_device = next(dust3r_model.parameters()).device.type
+        )
 
-        _, bgr_hw3, _ = queue.get()
-        K_33_pred: Float32[ndarray, "3 3"] = calib_from_dust3r(bgr_hw3, dust3r_model, dust3r_device)
-        intri_np_dust3r = np.array([K_33_pred[0, 0], K_33_pred[1, 1], K_33_pred[0, 2], K_33_pred[1, 2]])
+        start: float = timer()
 
-    # path list for visualizing the trajectory
-    path_list: list[list[float]] = []
-    frame_idx: int = 0
-
-    with tqdm(total=total_frames, desc="Processing Frames") as pbar:
-        while True:
-            t: int
-            bgr_hw3: UInt8[ndarray, "h w 3"]
-            intri_np: Float32[ndarray, "4"]
-            (t, bgr_hw3, intri_np_calib) = queue.get()
-            if calib is not None:
-                intri_np = intri_np_calib
-            else:
-                assert intri_np_dust3r is not None, "DUSt3R intrinsics must be estimated when no calib file is provided"
-                intri_np = intri_np_dust3r
-            # queue will have a (-1, image, intrinsics) tuple when the reader is done
-            if t < 0:
-                break
-            if max_frames > 0 and frame_idx >= max_frames:
-                break
-
-            rr.set_time("timestep", sequence=t)
-
-            bgr_3hw: UInt8[Tensor, "c ht wd"] = rearrange(torch.from_numpy(bgr_hw3), "h w c -> c h w").cuda()
-            intri_torch: Float32[Tensor, "4"] = torch.from_numpy(intri_np).cuda()
-
-            if slam is None:
-                slam = DPVO(dpvo_config, network_path, ht=bgr_3hw.shape[1], wd=bgr_3hw.shape[2])
-
-            with Timer("SLAM", enabled=timeit):
-                slam(t, bgr_3hw, intri_torch)
-
-            if slam.is_initialized:
-                cam_se3_world_buffer: Float32[Tensor, "buffer_size 7"] = slam.poses_
-                points: Float32[Tensor, "num_points 3"] = slam.points_
-                colors: UInt8[Tensor, "buffer_size num_patches 3"] = slam.colors_
-                path_list = log_trajectory(
-                    parent_log_path=parent_log_path,
-                    cam_se3_world_buffer=cam_se3_world_buffer,
-                    points=points,
-                    colors=colors,
-                    intri_np=intri_np,
-                    bgr_hw3=bgr_hw3,
-                    path_list=path_list,
-                    jpg_quality=jpg_quality,
+        # If no calibration file was provided, use DUSt3R to predict intrinsics
+        # from the very first frame pulled off the reader queue.
+        intri_np_dust3r: Float32[ndarray, "4"] | None = None
+        if calib is None:
+            yield "Estimating camera intrinsics with DUSt3R..."
+            if dust3r_model is None:
+                dust3r_device: str = (
+                    "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
                 )
+                dust3r_model = AsymmetricCroCo3DStereo.from_pretrained("naver/DUSt3R_ViTLarge_BaseDecoder_512_dpt").to(
+                    dust3r_device
+                )
+            else:
+                dust3r_device = next(dust3r_model.parameters()).device.type
 
-            frame_idx += 1
-            pbar.update(1)
-            yield f"Frame {frame_idx}/{total_frames}"
+            _, bgr_hw3, _ = queue.get()
+            K_33_pred: Float32[ndarray, "3 3"] = calib_from_dust3r(bgr_hw3, dust3r_model, dust3r_device)
+            intri_np_dust3r = np.array([K_33_pred[0, 0], K_33_pred[1, 1], K_33_pred[0, 2], K_33_pred[1, 2]])
 
-    if reader.is_alive():
-        reader.kill()
-    reader.join()
+        # path list for visualizing the trajectory
+        path_list: list[list[float]] = []
+        last_orient_n: int = 0
+        frame_idx: int = 0
 
-    if slam is None:
-        yield "No frames processed"
-        return
+        with tqdm(total=total_frames, desc="Processing Frames") as pbar:
+            while True:
+                t: int
+                bgr_hw3: UInt8[ndarray, "h w 3"]
+                intri_np: Float32[ndarray, "4"]
+                (t, bgr_hw3, intri_np_calib) = queue.get()
+                if calib is not None:
+                    assert intri_np_calib is not None, "Calibration file did not provide intrinsics"
+                    intri_np = intri_np_calib.astype(np.float32)
+                else:
+                    assert intri_np_dust3r is not None, (
+                        "DUSt3R intrinsics must be estimated when no calib file is provided"
+                    )
+                    intri_np = intri_np_dust3r
+                # queue will have a (-1, image, intrinsics) tuple when the reader is done
+                if t < 0:
+                    break
+                if max_frames > 0 and frame_idx >= max_frames:
+                    break
 
-    # Run additional update iterations for final bundle-adjustment refinement
-    yield "Running final bundle adjustment..."
-    for _ in range(12):
-        slam.update()
+                rr.set_time("timestep", sequence=t)
 
-    total_time: float = timer() - start
-    print(f"Total time: {total_time:.2f}s")
+                bgr_3hw: UInt8[Tensor, "c ht wd"] = rearrange(torch.from_numpy(bgr_hw3), "h w c -> c h w").cuda()
+                intri_torch: Float32[Tensor, "4"] = torch.from_numpy(intri_np).float().cuda()
 
-    final_poses, tstamps = slam.terminate()
-    final_points: Float32[Tensor, "num_points 3"] = slam.points_
-    final_colors: UInt8[Tensor, "buffer_size num_patches 3"] = slam.colors_
-    dpvo_pred: DPVOPrediction = DPVOPrediction(
-        final_poses=final_poses,
-        tstamps=tstamps,
-        final_points=final_points,
-        final_colors=final_colors,
-    )
+                if slam is None:
+                    slam = DPVO(dpvo_config, network_path, ht=bgr_3hw.shape[1], wd=bgr_3hw.shape[2])
 
-    if handle is not None:
-        handle.prediction = dpvo_pred
-        handle.elapsed_time = total_time
+                with Timer("SLAM", enabled=timeit):
+                    slam(t, bgr_3hw, intri_torch)
+
+                if slam.is_initialized:
+                    cam_se3_world_buffer: Float32[Tensor, "buffer_size 7"] = slam.poses_
+                    points: Float32[Tensor, "num_points 3"] = slam.points_
+                    colors: UInt8[Tensor, "buffer_size num_patches 3"] = slam.colors_
+                    path_list, last_orient_n = log_trajectory(
+                        parent_log_path=parent_log_path,
+                        cam_se3_world_buffer=cam_se3_world_buffer,
+                        points=points,
+                        colors=colors,
+                        intri_np=intri_np,
+                        bgr_hw3=bgr_hw3,
+                        path_list=path_list,
+                        last_orient_n=last_orient_n,
+                        jpg_quality=jpg_quality,
+                    )
+
+                frame_idx += 1
+                pbar.update(1)
+                yield f"Frame {frame_idx}/{total_frames}"
+
+        if slam is None:
+            yield "No frames processed"
+            return
+
+        # Terminate: runs loop closure finalization + 12 BA iterations
+        yield "Running final bundle adjustment..."
+
+        total_time: float = timer() - start
+        print(f"Total time: {total_time:.2f}s")
+
+        final_poses, tstamps = slam.terminate()
+        final_points: Float32[Tensor, "num_points 3"] = slam.points_
+        final_colors: UInt8[Tensor, "buffer_size num_patches 3"] = slam.colors_
+        dpvo_pred: DPVOPrediction = DPVOPrediction(
+            final_poses=final_poses,
+            tstamps=tstamps,
+            final_points=final_points,
+            final_colors=final_colors,
+        )
+
+        if handle is not None:
+            handle.prediction = dpvo_pred
+            handle.elapsed_time = total_time
 
 
 def dpvo_inference(config: DPVOInferenceConfig) -> None:

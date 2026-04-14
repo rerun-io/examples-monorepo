@@ -1,27 +1,35 @@
 /*
- * ba.cpp -- PyBind11 module exposing bundle adjustment, reprojection, and
- *           temporal neighbor-finding operations to Python.
+ * ba.cpp -- PyBind11 module exposing bundle adjustment, reprojection,
+ *           temporal neighbor-finding, and sparse PGO solve to Python.
  *
- * Part of DPVO (Deep Patch Visual Odometry, Teed et al., 2022).
+ * Part of DPV-SLAM (Deep Patch Visual SLAM, Lipson et al., 2024),
+ * extended from DPVO (Teed et al., 2022).
  *
- * This file provides three functions to the Python layer:
+ * This file provides four functions to the Python layer:
  *
- *   1. ba()         -- Runs Gauss-Newton bundle adjustment on camera poses
- *                      and patch inverse-depths.  Delegates to the CUDA
- *                      implementation in ba_cuda.cu.
+ *   1. ba()           -- Runs Gauss-Newton bundle adjustment on camera poses
+ *                        and patch inverse-depths.  Delegates to the CUDA
+ *                        implementation in ba_cuda.cu.  Supports both
+ *                        sliding-window (dense E) and global (efficient
+ *                        E-block) modes via the eff_impl flag.
  *
- *   2. reproject()  -- Projects patches from their source frames into target
- *                      frames using the current pose estimates.  Also
- *                      delegates to ba_cuda.cu.
+ *   2. reproject()    -- Projects patches from their source frames into target
+ *                        frames using the current pose estimates.  Also
+ *                        delegates to ba_cuda.cu.
  *
- *   3. neighbors()  -- A CPU-side function that computes temporal neighbor
- *                      indices for the GRU update network.  For each
- *                      observation of a patch, it finds the previous and
- *                      next observations (of the same patch) ordered by
- *                      target frame index.  This temporal linking enables
- *                      the GRU to aggregate information across time.
+ *   3. neighbors()    -- A CPU-side function that computes temporal neighbor
+ *                        indices for the GRU update network.  For each
+ *                        observation of a patch, it finds the previous and
+ *                        next observations (of the same patch) ordered by
+ *                        target frame index.  This temporal linking enables
+ *                        the GRU to aggregate information across time.
  *
- * The module is typically imported as `fastba_cuda` in Python.
+ *   4. solve_system() -- Sparse Sim(3) pose-graph optimization for classical
+ *                        loop closure.  Builds a sparse Jacobian from per-edge
+ *                        7x7 blocks, forms normal equations (JᵀJ), and solves
+ *                        via Cholesky factorization.
+ *
+ * The module is typically imported as `_cuda_ba` in Python.
  */
 
 #include <torch/extension.h>
@@ -29,6 +37,8 @@
 #include <unordered_map>
 #include <algorithm>
 #include <iostream>
+#include <Eigen/Core>
+#include <Eigen/Sparse>
 
 
 /* -------------------------------------------------------------------------
@@ -51,9 +61,12 @@
  * @param ii          Source frame index per edge [N_edges].
  * @param jj          Target frame index per edge [N_edges].
  * @param kk          Patch index per edge [N_edges].
+ * @param PPF         Patches per frame (used for E-block allocation when eff_impl=true).
  * @param t0          Start of the active pose window (poses before t0 are fixed).
  * @param t1          End of the active pose window (exclusive).
  * @param iterations  Number of Gauss-Newton iterations to run.
+ * @param eff_impl    If true, use efficient E-block (block_e.cu) for global BA.
+ *                    If false, use dense E matrix for sliding-window BA.
  *
  * @return Empty vector (poses and patches are updated in-place).
  */
@@ -67,7 +80,8 @@ std::vector<torch::Tensor> cuda_ba(
     torch::Tensor ii,
     torch::Tensor jj,
     torch::Tensor kk,
-    int t0, int t1, int iterations);
+    const int PPF,
+    int t0, int t1, int iterations, bool eff_impl);
 
 
 /**
@@ -105,8 +119,9 @@ std::vector<torch::Tensor> ba(
     torch::Tensor ii,
     torch::Tensor jj,
     torch::Tensor kk,
-    int t0, int t1, int iterations) {
-  return cuda_ba(poses, patches, intrinsics, target, weight, lmbda, ii, jj, kk, t0, t1, iterations);
+    int PPF,
+    int t0, int t1, int iterations, bool eff_impl) {
+  return cuda_ba(poses, patches, intrinsics, target, weight, lmbda, ii, jj, kk, PPF, t0, t1, iterations, eff_impl);
 }
 
 
@@ -124,71 +139,14 @@ torch::Tensor reproject(
  * neighbors() -- CPU implementation of temporal neighbor linking.
  * ---------------------------------------------------------------------- */
 
-/*
- * NOTE: The commented-out block below is an older implementation of the same
- * algorithm using std::unordered_map.  It has been replaced by the version
- * below that uses torch::_unique for cleaner grouping, but is preserved
- * here for reference.
- */
-
-// std::vector<torch::Tensor> neighbors(torch::Tensor ii, torch::Tensor jj)
-// {
-//   ii = ii.to(torch::kCPU);
-//   jj = jj.to(torch::kCPU);
-//   auto ii_data = ii.accessor<long,1>();
-//   auto jj_data = jj.accessor<long,1>();
-
-//   std::unordered_map<long, std::vector<long>> graph;
-//   std::unordered_map<long, std::vector<long>> index;
-//   for (int i=0; i < ii.size(0); i++) {
-//     const long ix = ii_data[i];
-//     const long jx = jj_data[i];
-//     if (graph.find(ix) == graph.end()) {
-//       graph[ix] = std::vector<long>();
-//       index[ix] = std::vector<long>();
-//     }
-//     graph[ix].push_back(jx);
-//     index[ix].push_back( i);
-//   }
-
-//   auto opts = torch::TensorOptions().dtype(torch::kInt64);
-//   torch::Tensor ix = torch::empty({ii.size(0)}, opts);
-//   torch::Tensor jx = torch::empty({jj.size(0)}, opts);
-
-//   auto ix_data = ix.accessor<long,1>();
-//   auto jx_data = jx.accessor<long,1>();
-
-//   for (std::pair<long, std::vector<long>> element : graph) {
-//     std::vector<long>& v = graph[element.first];
-//     std::vector<long>& idx = index[element.first];
-
-//     std::stable_sort(idx.begin(), idx.end(),
-//        [&v](size_t i, size_t j) {return v[i] < v[j];});
-
-//     ix_data[idx.front()] = -1;
-//     jx_data[idx.back()]  = -1;
-
-//     for (int i=0; i < idx.size(); i++) {
-//       ix_data[idx[i]] = (i > 0) ? idx[i-1] : -1;
-//       jx_data[idx[i]] = (i < idx.size() - 1) ? idx[i+1] : -1;
-//     }
-//   }
-
-//   ix = ix.to(torch::kCUDA);
-//   jx = jx.to(torch::kCUDA);
-
-//   return {ix, jx};
-// }
-
-
 /**
  * Build temporal neighbor indices for the GRU update network.
  *
- * In DPVO, each edge in the factor graph connects a source patch (indexed
- * by ii) to a target frame (indexed by jj).  A single patch may be
- * observed in multiple target frames.  The GRU update step needs to pass
- * messages along the temporal chain of observations for the same patch,
- * ordered by target frame index.
+ * Each edge in the factor graph connects a source patch (indexed by ii)
+ * to a target frame (indexed by jj).  A single patch may be observed in
+ * multiple target frames.  The GRU update step needs to pass messages
+ * along the temporal chain of observations for the same patch, ordered
+ * by target frame index.
  *
  * This function groups all edges by their patch index (ii), sorts each
  * group by target frame (jj), and then for each edge records:
@@ -197,40 +155,24 @@ torch::Tensor reproject(
  *   - jx[n]: the index of the next observation of the same patch
  *            (the one with the next-larger jj value), or -1 if none.
  *
- * Example:
- *   Suppose edges 3, 7, 12 all observe patch #5, with target frames
- *   jj[3]=10, jj[7]=20, jj[12]=15.
- *   After sorting by jj: order is [3, 12, 7] (frames 10, 15, 20).
- *   Then: ix[3]=-1, jx[3]=12   (edge 3 has no predecessor, successor is 12)
- *         ix[12]=3, jx[12]=7   (edge 12's predecessor is 3, successor is 7)
- *         ix[7]=12, jx[7]=-1   (edge 7's predecessor is 12, no successor)
- *
- * @param ii  Patch (source) index per edge, shape [N_edges].  Must be on
- *            GPU (will be moved to CPU internally for processing).
- * @param jj  Target frame index per edge, shape [N_edges].  Must be on GPU.
+ * @param ii  Patch (source) index per edge, shape [N_edges].
+ * @param jj  Target frame index per edge, shape [N_edges].
  *
  * @return {ix, jx} both shape [N_edges] on CUDA.
- *         ix[n] = index of the previous temporal neighbor for edge n, or -1.
- *         jx[n] = index of the next temporal neighbor for edge n, or -1.
+ *         ix[n] = index of the previous temporal neighbor, or -1.
+ *         jx[n] = index of the next temporal neighbor, or -1.
  */
 std::vector<torch::Tensor> neighbors(torch::Tensor ii, torch::Tensor jj)
 {
-  /*
-   * Step 1: Find unique patch indices and get a mapping from each edge
-   * to its group.  torch::_unique returns (unique_values, inverse_indices).
-   * perm[n] tells us which group (unique patch) edge n belongs to.
-   */
+  /* Step 1: Find unique patch indices and map each edge to its group. */
   auto tup = torch::_unique(ii, true, true);
-  torch::Tensor uniq = std::get<0>(tup).to(torch::kCPU);  // unique patch IDs
-  torch::Tensor perm = std::get<1>(tup).to(torch::kCPU);  // group membership for each edge
+  torch::Tensor uniq = std::get<0>(tup).to(torch::kCPU);
+  torch::Tensor perm = std::get<1>(tup).to(torch::kCPU);
 
   jj = jj.to(torch::kCPU);
   auto jj_accessor = jj.accessor<long,1>();
 
-  /*
-   * Step 2: Group edge indices by their patch.
-   * index[g] = list of edge indices that belong to patch group g.
-   */
+  /* Step 2: Group edge indices by their patch. */
   auto perm_accessor = perm.accessor<long,1>();
   std::vector<std::vector<long>> index(uniq.size(0));
   for (int i=0; i < ii.size(0); i++) {
@@ -238,16 +180,13 @@ std::vector<torch::Tensor> neighbors(torch::Tensor ii, torch::Tensor jj)
   }
 
   auto opts = torch::TensorOptions().dtype(torch::kInt64);
-  torch::Tensor ix = torch::empty({ii.size(0)}, opts);  // previous neighbor
-  torch::Tensor jx = torch::empty({ii.size(0)}, opts);  // next neighbor
+  torch::Tensor ix = torch::empty({ii.size(0)}, opts);
+  torch::Tensor jx = torch::empty({ii.size(0)}, opts);
 
   auto ix_accessor = ix.accessor<long,1>();
   auto jx_accessor = jx.accessor<long,1>();
 
-  /*
-   * Step 3: For each patch group, sort the edge indices by target frame
-   * (jj) and then link them into a doubly-linked list.
-   */
+  /* Step 3: Sort each group by target frame and link into a chain. */
   for (int i=0; i<uniq.size(0); i++) {
     std::vector<long>& idx = index[i];
 
@@ -257,30 +196,132 @@ std::vector<torch::Tensor> neighbors(torch::Tensor ii, torch::Tensor jj)
 
     // Link each edge to its predecessor and successor in temporal order
     for (int i=0; i < idx.size(); i++) {
-      ix_accessor[idx[i]] = (i > 0) ? idx[i-1] : -1;              // previous, or -1
-      jx_accessor[idx[i]] = (i < idx.size() - 1) ? idx[i+1] : -1; // next, or -1
+      ix_accessor[idx[i]] = (i > 0) ? idx[i-1] : -1;
+      jx_accessor[idx[i]] = (i < idx.size() - 1) ? idx[i+1] : -1;
     }
   }
 
-  // Move results back to GPU for downstream consumption
   ix = ix.to(torch::kCUDA);
   jx = jx.to(torch::kCUDA);
 
   return {ix, jx};
 }
 
+/* -------------------------------------------------------------------------
+ * solve_system() -- Sparse least-squares solve for pose-graph optimization.
+ *
+ * Used by loop closure PGO.  Builds sparse Jacobian from per-edge 7x7
+ * blocks, forms normal equations, solves via Cholesky.
+ * ---------------------------------------------------------------------- */
+
+typedef Eigen::SparseMatrix<double> SpMat;
+typedef Eigen::Triplet<double> T;
+
+Eigen::VectorXd solve(const SpMat &A, const Eigen::VectorXd &b, int freen){
+
+  if (freen < 0){
+    const Eigen::SimplicialCholesky<SpMat> chol(A);
+    return chol.solve(b);
+  }
+
+  const SpMat A_sub = A.topLeftCorner(freen, freen);
+  const Eigen::VectorXd b_sub = b.topRows(freen);
+  const Eigen::VectorXd delta = solve(A_sub, b_sub, -7);
+
+  Eigen::VectorXd delta2(b.rows());
+  delta2.setZero();
+  delta2.topRows(freen) = delta;
+
+  return delta2;
+}
+
+/**
+ * Sparse Sim(3) pose-graph optimization for classical loop closure.
+ *
+ * Builds a sparse Jacobian J from per-edge 7x7 blocks, forms the normal
+ * equations A = JᵀJ, b = -Jᵀr, adds LM damping, and solves via Cholesky.
+ *
+ * @param J_Ginv_i  Jacobian blocks w.r.t. pose i [N_edges, 7, 7].
+ * @param J_Ginv_j  Jacobian blocks w.r.t. pose j [N_edges, 7, 7].
+ * @param ii        Source pose index per edge [N_edges].
+ * @param jj        Target pose index per edge [N_edges].
+ * @param res       Residual vectors [N_edges, 7].
+ * @param ep        Epsilon for diagonal regularization.
+ * @param lm        Levenberg-Marquardt damping factor.
+ * @param freen     Number of free poses (first freen are optimized,
+ *                  rest are fixed).  Set to -1 to optimize all.
+ *
+ * @return {delta} pose updates [N_poses, 7] on the input device.
+ */
+std::vector<torch::Tensor> solve_system(torch::Tensor J_Ginv_i, torch::Tensor J_Ginv_j, torch::Tensor ii, torch::Tensor jj, torch::Tensor res, float ep, float lm, int freen)
+{
+
+  const torch::Device device = res.device();
+  J_Ginv_i = J_Ginv_i.to(torch::kCPU);
+  J_Ginv_j = J_Ginv_j.to(torch::kCPU);
+  ii = ii.to(torch::kCPU);
+  jj = jj.to(torch::kCPU);
+  res = res.clone().to(torch::kCPU);
+
+  const int r = res.size(0);
+  const int n = std::max(ii.max().item<long>(), jj.max().item<long>()) + 1;
+
+  res.resize_({r*7});
+  float *res_ptr = res.data_ptr<float>();
+  Eigen::Map<Eigen::VectorXf> v(res_ptr, r*7);
+
+  SpMat J(r*7, n*7);
+  std::vector<T> tripletList;
+  tripletList.reserve(r*7*7*2);
+
+  auto ii_acc = ii.accessor<long,1>();
+  auto jj_acc = jj.accessor<long,1>();
+  auto J_Ginv_i_acc = J_Ginv_i.accessor<float,3>();
+  auto J_Ginv_j_acc = J_Ginv_j.accessor<float,3>();
+
+  for (int x=0; x<r; x++){
+    const int i = ii_acc[x];
+    const int j = jj_acc[x];
+    for (int k=0; k<7; k++){
+      for (int l=0; l<7; l++){
+        if (i == j)
+          exit(1);
+        const float val_i = J_Ginv_i_acc[x][k][l];
+        tripletList.emplace_back(x*7 + k, i*7 + l, val_i);
+        const float val_j = J_Ginv_j_acc[x][k][l];
+        tripletList.emplace_back(x*7 + k, j*7 + l, val_j);
+      }
+    }
+  }
+
+  J.setFromTriplets(tripletList.begin(), tripletList.end());
+  const SpMat Jt = J.transpose();
+  Eigen::VectorXd b = -(Jt * v.cast<double>());
+  SpMat A = Jt * J;
+
+  A.diagonal() += (A.diagonal() * lm);
+  A.diagonal().array() += ep;
+  Eigen::VectorXf delta = solve(A, b, freen*7).cast<float>();
+
+  torch::Tensor delta_tensor = torch::from_blob(delta.data(), {n*7}).clone().to(device);
+  delta_tensor.resize_({n, 7});
+  return {delta_tensor};
+}
+
 
 /* -------------------------------------------------------------------------
  * Python module registration.
  *
- * Exposes three functions:
- *   forward(...)   -> ba (bundle adjustment)
- *   neighbors(...) -> temporal neighbor indices
- *   reproject(...) -> patch reprojection
+ * Exposes four functions:
+ *   forward(...)      -> ba (bundle adjustment)
+ *   neighbors(...)    -> temporal neighbor indices
+ *   reproject(...)    -> patch reprojection
+ *   solve_system(...) -> sparse Sim(3) PGO for loop closure
  * ---------------------------------------------------------------------- */
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("forward", &ba, "BA forward operator");
   m.def("neighbors", &neighbors, "temporal neighbor indices");
   m.def("reproject", &reproject, "reproject patches into target frames");
+  m.def("solve_system", &solve_system, "sparse pose-graph solve for loop closure PGO");
 
 }

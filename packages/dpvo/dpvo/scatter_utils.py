@@ -79,6 +79,42 @@ def scatter_sum(
     return out
 
 
+def scatter_max(
+    src: Tensor,
+    index: Tensor,
+    dim: int = 0,
+    dim_size: int | None = None,
+) -> tuple[Tensor, Tensor]:
+    """Max-reduce elements of ``src`` into bins defined by ``index``.
+
+    Drop-in replacement for ``torch_scatter.scatter_max``.
+
+    Note:
+        The ``argmax_indices`` tensor is a placeholder (always -1) because
+        ``torch.scatter_reduce_`` with ``reduce="amax"`` does not provide
+        argmax.  Only the max values are computed.  All current callers
+        use only ``scatter_max(...)[0]``.
+
+    Returns:
+        Tuple of ``(max_values, argmax_indices)`` with shape along ``dim``
+        equal to ``dim_size``.
+    """
+    index = index.long()
+    if dim_size is None:
+        dim_size = int(index.max().item()) + 1 if index.numel() > 0 else 0
+
+    out_shape: list[int] = list(src.shape)
+    out_shape[dim] = dim_size
+    out: Tensor = src.new_full(out_shape, float("-inf"))
+    argmax: Tensor = index.new_full(out_shape, -1)
+    if dim_size == 0 or index.numel() == 0:
+        return out, argmax
+
+    expanded_index: Tensor = _expand_index(index, src, dim)
+    out.scatter_reduce_(dim, expanded_index, src, reduce="amax", include_self=False)
+    return out, argmax
+
+
 def scatter_softmax(
     src: Tensor,
     index: Tensor,

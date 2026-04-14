@@ -24,7 +24,7 @@ Jacobian computation.  See Sec. 3 of Teed et al. (2022).
 from typing import Any, Literal, overload
 
 import torch
-from jaxtyping import Float, Int
+from jaxtyping import Bool, Float, Int
 from lietorch import SE3
 from torch import Tensor
 
@@ -349,7 +349,7 @@ def point_cloud(poses: SE3, patches: Float[Tensor, "..."], intrinsics: Float[Ten
     return result
 
 
-def flow_mag(poses: SE3, patches: Float[Tensor, "..."], intrinsics: Float[Tensor, "..."], ii: Int[Tensor, "n_edges"], jj: Int[Tensor, "n_edges"], kk: Int[Tensor, "n_edges"], beta: float = 0.3) -> Float[Tensor, "..."]:
+def flow_mag(poses: SE3, patches: Float[Tensor, "..."], intrinsics: Float[Tensor, "..."], ii: Int[Tensor, "n_edges"], jj: Int[Tensor, "n_edges"], kk: Int[Tensor, "n_edges"], beta: float = 0.3) -> tuple[Float[Tensor, "..."], Bool[Tensor, "..."]]:
     """Compute pixel flow magnitude between frames, decomposed into translation and full motion.
 
     Measures how much each patch moves in pixel space when reprojected
@@ -374,20 +374,22 @@ def flow_mag(poses: SE3, patches: Float[Tensor, "..."], intrinsics: Float[Tensor
         beta: Blending weight between full flow and translation-only flow.
 
     Returns:
-        Per-edge flow magnitude (in pixels).
+        Tuple of ``(flow, valid)`` where:
+        - ``flow``: Per-edge blended flow magnitude (in pixels).
+        - ``valid``: Boolean mask indicating valid reprojections (finite flow).
     """
     # Project patches from ii -> ii (identity, gives reference coordinates)
     coords0: Float[Tensor, "..."] = transform(poses, patches, intrinsics, ii, ii, kk)
-    # Project patches from ii -> jj with full SE3 motion
-    coords1: Float[Tensor, "..."] = transform(poses, patches, intrinsics, ii, jj, kk, tonly=False)
+    # Project patches from ii -> jj with full SE3 motion (with depth validity)
+    coords1, val = transform(poses, patches, intrinsics, ii, jj, kk, tonly=False, valid=True)
     # Project patches from ii -> jj with translation only (no rotation)
     coords2: Float[Tensor, "..."] = transform(poses, patches, intrinsics, ii, jj, kk, tonly=True)
 
     flow1: Float[Tensor, "..."] = (coords1 - coords0).norm(dim=-1)
     flow2: Float[Tensor, "..."] = (coords2 - coords0).norm(dim=-1)
 
-    # Weighted combination: beta * full_flow + (1 - beta) * translation_flow
-    return beta * flow1 + (1-beta) * flow2
+    flow: Float[Tensor, "..."] = beta * flow1 + (1 - beta) * flow2
+    return flow, (val > 0.5)
 
 
 def induced_flow(

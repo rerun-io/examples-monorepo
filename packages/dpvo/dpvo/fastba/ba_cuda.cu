@@ -2,7 +2,8 @@
  * ba_cuda.cu -- CUDA implementation of bundle adjustment and reprojection
  *               for the DPVO visual odometry pipeline.
  *
- * Part of DPVO (Deep Patch Visual Odometry, Teed et al., 2022).
+ * Part of DPV-SLAM (Deep Patch Visual SLAM, Lipson et al., 2024),
+ * extended from DPVO (Teed et al., 2022).
  *
  * This file contains the core Gauss-Newton bundle adjustment solver that
  * jointly optimizes camera poses (SE3) and patch inverse-depths.  It also
@@ -90,10 +91,14 @@
 #include <torch/extension.h>
 #include <vector>
 #include <iostream>
+#include <fstream>
+#include <string>
+#include <memory>
 
 #include <ATen/ATen.h>
 #include <ATen/NativeFunctions.h>
 #include <ATen/Parallel.h>
+#include "block_e.cuh"
 
 
 /*
@@ -654,15 +659,18 @@ __global__ void reprojection_residuals_and_hessian(
     const torch::PackedTensorAccessor32<float,2,torch::RestrictPtrTraits> target,
     const torch::PackedTensorAccessor32<float,2,torch::RestrictPtrTraits> weight,
     const torch::PackedTensorAccessor32<float,1,torch::RestrictPtrTraits> lmbda,
+    const torch::PackedTensorAccessor32<long,2,torch::RestrictPtrTraits> ij_xself,
     const torch::PackedTensorAccessor32<long,1,torch::RestrictPtrTraits> ii,
     const torch::PackedTensorAccessor32<long,1,torch::RestrictPtrTraits> jj,
     const torch::PackedTensorAccessor32<long,1,torch::RestrictPtrTraits> kk,
     const torch::PackedTensorAccessor32<long,1,torch::RestrictPtrTraits> ku,
-    torch::PackedTensorAccessor32<float,2,torch::RestrictPtrTraits> B,
-    torch::PackedTensorAccessor32<float,2,torch::RestrictPtrTraits> E,
-    torch::PackedTensorAccessor32<float,1,torch::RestrictPtrTraits> C,
-    torch::PackedTensorAccessor32<float,1,torch::RestrictPtrTraits> v,
-    torch::PackedTensorAccessor32<float,1,torch::RestrictPtrTraits> u, const int t0)
+    torch::PackedTensorAccessor32<double,1,torch::RestrictPtrTraits> r_total,
+    torch::PackedTensorAccessor32<mtype,3,torch::RestrictPtrTraits> E_lookup,
+    torch::PackedTensorAccessor32<mtype,2,torch::RestrictPtrTraits> B,
+    torch::PackedTensorAccessor32<mtype,2,torch::RestrictPtrTraits> E,
+    torch::PackedTensorAccessor32<mtype,1,torch::RestrictPtrTraits> C,
+    torch::PackedTensorAccessor32<mtype,1,torch::RestrictPtrTraits> v,
+    torch::PackedTensorAccessor32<mtype,1,torch::RestrictPtrTraits> u, const int t0, const int ppf)
 {
 
   /* Load camera intrinsics into shared memory (one load per block). */
@@ -674,6 +682,8 @@ __global__ void reprojection_residuals_and_hessian(
     cy = intrinsics[0][3];
   }
 
+  bool eff_impl = (ppf > 0);
+
   __syncthreads();
 
   GPU_1D_KERNEL_LOOP(n, ii.size(0)) {
@@ -681,6 +691,11 @@ __global__ void reprojection_residuals_and_hessian(
     int ix = ii[n];  // source frame global index
     int jx = jj[n];  // target frame global index
     int kx = kk[n];  // global patch index (for reading patch data)
+    int ijx, ijs;
+    if (eff_impl){
+      ijx = ij_xself[0][n];
+      ijs = ij_xself[1][n];
+    }
 
     /* --- Step 1: Load poses for source frame i and target frame j --- */
     float ti[3] = { poses[ix][0], poses[ix][1], poses[ix][2] };
@@ -734,98 +749,54 @@ __global__ void reprojection_residuals_and_hessian(
     ix = ix - t0;
     jx = jx - t0;
 
-    /* --- Step 6-7: X-component residual and Jacobians --- */
-    {
-      const float r = target[n][0] - x1;         // x-residual
-      const float w = mask * weight[n][0];        // x-weight (masked)
+    /* --- Process both x and y residual components --- */
+    for (int row=0; row<2; row++) {
+
+      float *Jj, Ji[6], Jz, r, w;
 
       /*
-       * Jz: Jacobian of the x-projection w.r.t. inverse depth.
-       *   x₁ = fₓ · X/Z + cₓ
-       *   The inverse depth d_inv only affects X and Z through the
-       *   translation part of Gᵢⱼ (tᵢⱼ · d_inv), so:
-       *   dx₁/d(d_inv) = fₓ · (tᵢⱼₓ / Z - tᵢⱼ_z · X / Z²)
+       * Compute residual, weight, and Jacobians for the current component.
+       *
+       * Jz: Jacobian of the projection w.r.t. inverse depth.
+       *   For the x-component: dx₁/d(d_inv) = fₓ · (tᵢⱼₓ/Z - tᵢⱼ_z · X/Z²)
+       *   For the y-component: dy₁/d(d_inv) = fᵧ · (tᵢⱼᵧ/Z - tᵢⱼ_z · Y/Z²)
+       *
+       * Jⱼ: 6D Jacobian w.r.t. the Lie algebra update of target pose j.
+       *   Components: [d/dtₓ, d/dtᵧ, d/dt_z, d/dωₓ, d/dωᵧ, d/dω_z]
+       *   For x: [fₓ·W/Z, 0, -fₓ·X·W/Z², -fₓ·X·Y/Z², fₓ·(1+X²/Z²), -fₓ·Y/Z]
+       *   For y: [0, fᵧ·W/Z, -fᵧ·Y·W/Z², -fᵧ·(1+Y²/Z²), fᵧ·X·Y/Z², fᵧ·X/Z]
        */
-      float Jz = fx * (tij[0] * d - tij[2] * (X * d2));
+      if (row == 0){
 
-      /*
-       * Jⱼ: 6D Jacobian of x₁ w.r.t. the Lie algebra update of pose j.
-       *
-       * The SE3 action on the point and the pinhole projection give:
-       *   Jⱼ = [fₓ·W/Z, 0, -fₓ·X·W/Z², -fₓ·X·Y/Z², fₓ·(1+X²/Z²), -fₓ·Y/Z]
-       *
-       * Components correspond to: [d/dtₓ, d/dtᵧ, d/dt_z, d/dωₓ, d/dωᵧ, d/dω_z]
-       * where (tₓ, tᵧ, t_z) are the translational and (ωₓ, ωᵧ, ω_z) the rotational
-       * parts of the Lie algebra.
-       */
-      float Ji[6], Jj[6] = {fx*W*d, 0, fx*-X*W*d2, fx*-X*Y*d2, fx*(1+X*X*d2), fx*-Y*d};
+        r = target[n][0] - x1;
+        w = mask * weight[n][0];
+
+        Jz = fx * (tij[0] * d - tij[2] * (X * d2));
+        Jj = (float[6]){fx*W*d, 0, fx*-X*W*d2, fx*-X*Y*d2, fx*(1+X*X*d2), fx*-Y*d};
+
+      } else {
+
+        r = target[n][1] - y1;
+        w = mask * weight[n][1];
+
+        Jz = fy * (tij[1] * d - tij[2] * (Y * d2));
+        Jj = (float[6]){0, fy*W*d, fy*-Y*W*d2, fy*(-1-Y*Y*d2), fy*(X*Y*d2), fy*X*d};
+
+      }
+
+      atomicAdd(&r_total[0],  w * r * r);
 
       /*
        * Jᵢ: Jacobian w.r.t. source pose i, computed via the adjoint.
-       *   Jᵢ = Adj(Gᵢⱼ⁻¹)ᵀ · Jⱼ  (with appropriate sign from the chain rule)
-       * The adjSE3 function computes Y = Ad(Gᵢⱼ⁻¹) · X.
+       *   Jᵢ = Adj(Gᵢⱼ⁻¹)ᵀ · Jⱼ  (chain rule through relative transform)
        */
       adjSE3(tij, qij, Jj, Ji);
 
-      /* Accumulate into Hessian blocks (all via atomicAdd for thread safety) */
-      for (int i=0; i<6; i++) {
-        for (int j=0; j<6; j++) {
-          // B[ii, ii] += w · Jᵢ · Jᵢᵀ  (source-source pose block)
-          if (ix >= 0)
-            atomicAdd(&B[6*ix+i][6*ix+j],  w * Ji[i] * Ji[j]);
-          // B[jj, jj] += w · Jⱼ · Jⱼᵀ  (target-target pose block)
-          if (jx >= 0)
-            atomicAdd(&B[6*jx+i][6*jx+j],  w * Jj[i] * Jj[j]);
-          // B[ii, jj] -= w · Jᵢ · Jⱼᵀ  (cross-block, negative from chain rule)
-          // B[jj, ii] -= w · Jⱼ · Jᵢᵀ  (symmetric counterpart)
-          if (ix >= 0 && jx >= 0) {
-            atomicAdd(&B[6*ix+i][6*jx+j], -w * Ji[i] * Jj[j]);
-            atomicAdd(&B[6*jx+i][6*ix+j], -w * Jj[i] * Ji[j]);
-          }
-        }
-      }
-
-      /* Pose-depth cross-term E */
-      for (int i=0; i<6; i++) {
-        if (ix >= 0)
-          atomicAdd(&E[6*ix+i][k], -w * Jz * Ji[i]);
-        if (jx >= 0)
-          atomicAdd(&E[6*jx+i][k],  w * Jz * Jj[i]);
-      }
-
-      /* Pose RHS vector v */
-      for (int i=0; i<6; i++) {
-        if (ix >= 0)
-          atomicAdd(&v[6*ix+i], -w * r * Ji[i]);
-        if (jx >= 0)
-          atomicAdd(&v[6*jx+i],  w * r * Jj[i]);
-      }
-
-      /* Depth-depth diagonal C and depth RHS u */
-      atomicAdd(&C[k], w * Jz * Jz);
-      atomicAdd(&u[k], w *  r * Jz);
-    }
-
-    /* --- Step 6-7 (repeated): Y-component residual and Jacobians --- */
-    {
-      const float r = target[n][1] - y1;         // y-residual
-      const float w = mask * weight[n][1];        // y-weight (masked)
-
-      /*
-       * Jz for y: same structure as x, but with fᵧ and Y instead of fₓ and X.
-       *   dy₁/d(d_inv) = fᵧ · (tᵢⱼᵧ / Z - tᵢⱼ_z · Y / Z²)
+      /* Accumulate into Hessian blocks (atomicAdd for thread safety):
+       *   B[ii,ii] += w · Jᵢ · Jᵢᵀ  (source-source pose block)
+       *   B[jj,jj] += w · Jⱼ · Jⱼᵀ  (target-target pose block)
+       *   B[ii,jj] -= w · Jᵢ · Jⱼᵀ  (cross-term, negative sign)
        */
-      float Jz = fy * (tij[1] * d - tij[2] * (Y * d2));
-
-      /*
-       * Jⱼ for y-component:
-       *   [0, fᵧ·W/Z, -fᵧ·Y·W/Z², -fᵧ·(1+Y²/Z²), fᵧ·X·Y/Z², fᵧ·X/Z]
-       */
-      float Ji[6], Jj[6] = {0, fy*W*d, fy*-Y*W*d2, fy*(-1-Y*Y*d2), fy*(X*Y*d2), fy*X*d};
-
-      adjSE3(tij, qij, Jj, Ji);
-
-      /* Accumulate into Hessian blocks (same pattern as x-component) */
       for (int i=0; i<6; i++) {
         for (int j=0; j<6; j++) {
           if (ix >= 0)
@@ -839,13 +810,23 @@ __global__ void reprojection_residuals_and_hessian(
         }
       }
 
+      /* Accumulate E-block: E[pose, depth] = -w · Jz · Jpose
+       * Dense path: directly into E matrix.
+       * Efficient path: into compressed (frame, patch) lookup table. */
       for (int i=0; i<6; i++) {
-        if (ix >= 0)
-          atomicAdd(&E[6*ix+i][k], -w * Jz * Ji[i]);
-        if (jx >= 0)
-          atomicAdd(&E[6*jx+i][k],  w * Jz * Jj[i]);
+        if (eff_impl){
+          atomicAdd(&E_lookup[ijs][kx % ppf][i],  -w * Jz * Ji[i]);
+          atomicAdd(&E_lookup[ijx][kx % ppf][i],  w * Jz * Jj[i]);
+        } else {
+          if (ix >= 0)
+            atomicAdd(&E[6*ix+i][k], -w * Jz * Ji[i]);
+          if (jx >= 0)
+            atomicAdd(&E[6*jx+i][k],  w * Jz * Jj[i]);
+        }
+
       }
 
+      /* Accumulate right-hand side: v[pose] = -w · r · Jpose */
       for (int i=0; i<6; i++) {
         if (ix >= 0)
           atomicAdd(&v[6*ix+i], -w * r * Ji[i]);
@@ -853,6 +834,7 @@ __global__ void reprojection_residuals_and_hessian(
           atomicAdd(&v[6*jx+i],  w * r * Jj[i]);
       }
 
+      /* Accumulate depth diagonal and RHS: C[k] += w·Jz², u[k] += w·r·Jz */
       atomicAdd(&C[k], w * Jz * Jz);
       atomicAdd(&u[k], w *  r * Jz);
     }
@@ -1003,26 +985,17 @@ std::vector<torch::Tensor> cuda_ba(
     torch::Tensor ii,
     torch::Tensor jj,
     torch::Tensor kk,
-    const int t0, const int t1, const int iterations)
+    const int PPF,
+    const int t0, const int t1, const int iterations, bool eff_impl)
 {
 
-  /*
-   * Map patch indices kk to unique sequential indices.
-   * kx = unique patch indices (sorted), shape [M]
-   * ku = inverse mapping such that kx[ku[n]] == kk[n], shape [N_edges]
-   * This is needed because different edges may reference the same patch,
-   * and the Hessian depth blocks are indexed by unique patch index.
-   */
   auto ktuple = torch::_unique(kk, true, true);
-  torch::Tensor kx = std::get<0>(ktuple);   // unique patch indices
-  torch::Tensor ku = std::get<1>(ktuple);   // inverse mapping (edge -> unique index)
+  torch::Tensor kx = std::get<0>(ktuple);
+  torch::Tensor ku = std::get<1>(ktuple);
 
   const int N = t1 - t0;    // number of active (optimizable) poses
   const int M = kx.size(0); // number of unique patches
-  const int P = patches.size(3); // patch grid dimension (e.g. 3)
-
-  auto opts = torch::TensorOptions()
-    .dtype(torch::kFloat32).device(torch::kCUDA);
+  const int P = patches.size(3); // patch grid dimension
 
   // Flatten tensors to 2D for efficient kernel access
   poses = poses.view({-1, 7});
@@ -1032,37 +1005,38 @@ std::vector<torch::Tensor> cuda_ba(
   target = target.view({-1, 2});
   weight = weight.view({-1, 2});
 
-  /*
-   * Allocate the Gauss-Newton system matrices:
-   *   B: pose-pose Hessian      [6N × 6N]
-   *   E: pose-depth cross-term  [6N × M]
-   *   C: depth-depth diagonal   [M]     (stored as a flat vector)
-   *   v: pose RHS               [6N]
-   *   u: depth RHS              [M]
-   */
   const int num = ii.size(0);
-  torch::Tensor B = torch::empty({6*N, 6*N}, opts);
-  torch::Tensor E = torch::empty({6*N, 1*M}, opts);
-  torch::Tensor C = torch::empty({M}, opts);
+  torch::Tensor B = torch::empty({6*N, 6*N}, mdtype);
+  torch::Tensor E = torch::empty({0, 0}, mdtype);
+  torch::Tensor C = torch::empty({M}, mdtype);
 
-  torch::Tensor v = torch::empty({6*N}, opts);
-  torch::Tensor u = torch::empty({1*M}, opts);
+  torch::Tensor v = torch::empty({6*N}, mdtype);
+  torch::Tensor u = torch::empty({1*M}, mdtype);
+
+  torch::Tensor r_total = torch::empty({1}, torch::dtype(torch::kFloat64).device(torch::kCUDA));
+
+  auto blockE = std::make_unique<EfficentE>();
+
+  if (eff_impl)
+    blockE = std::make_unique<EfficentE>(ii, jj, kx, PPF, t0);
+  else
+    E = torch::empty({6*N, 1*M}, mdtype);
 
   /* === Gauss-Newton iteration loop === */
   for (int itr=0; itr < iterations; itr++) {
 
-    // Zero all accumulators before each iteration (the kernel uses atomicAdd)
     B.zero_();
     E.zero_();
     C.zero_();
     v.zero_();
     u.zero_();
+    r_total.zero_();
+    blockE->E_lookup.zero_();
 
-    // Ensure v and u are 1D for the kernel's PackedTensorAccessor
     v = v.view({6*N});
     u = u.view({1*M});
 
-    /* Launch the main BA kernel: computes residuals and accumulates Hessian */
+    /* Launch the main BA kernel */
     reprojection_residuals_and_hessian<<<NUM_BLOCKS(ii.size(0)), NUM_THREADS>>>(
       poses.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
       patches.packed_accessor32<float,4,torch::RestrictPtrTraits>(),
@@ -1070,101 +1044,81 @@ std::vector<torch::Tensor> cuda_ba(
       target.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
       weight.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
       lmbda.packed_accessor32<float,1,torch::RestrictPtrTraits>(),
+      blockE->ij_xself.packed_accessor32<long,2,torch::RestrictPtrTraits>(),
       ii.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
       jj.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
       kk.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
       ku.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
-      B.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
-      E.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
-      C.packed_accessor32<float,1,torch::RestrictPtrTraits>(),
-      v.packed_accessor32<float,1,torch::RestrictPtrTraits>(),
-      u.packed_accessor32<float,1,torch::RestrictPtrTraits>(), t0);
+      r_total.packed_accessor32<double,1,torch::RestrictPtrTraits>(),
+      blockE->E_lookup.packed_accessor32<mtype,3,torch::RestrictPtrTraits>(),
+      B.packed_accessor32<mtype,2,torch::RestrictPtrTraits>(),
+      E.packed_accessor32<mtype,2,torch::RestrictPtrTraits>(),
+      C.packed_accessor32<mtype,1,torch::RestrictPtrTraits>(),
+      v.packed_accessor32<mtype,1,torch::RestrictPtrTraits>(),
+      u.packed_accessor32<mtype,1,torch::RestrictPtrTraits>(), t0, blockE->ppf);
 
-    // Reshape v and u to column vectors for matrix operations
     v = v.view({6*N, 1});
     u = u.view({1*M, 1});
 
-    /*
-     * Q = 1 / (C + λ): element-wise inverse of the damped depth diagonal.
-     * This is the "inverse" of the depth block in the Schur complement.
-     * Shape: [1, M] (row vector for broadcasting in matrix multiplies).
-     */
     torch::Tensor Q = 1.0 / (C + lmbda).view({1, M});
 
     if (t1 - t0 == 0) {
-      /*
-       * Special case: no active poses (only depth optimization).
-       * Skip the Schur complement and just solve for depth:
-       *   dZ = Q · u
-       */
 
-      torch::Tensor Qt = torch::transpose(Q, 0, 1);  // [M, 1]
+      torch::Tensor Qt = torch::transpose(Q, 0, 1);
       torch::Tensor dZ = Qt * u;
 
       dZ = dZ.view({M});
 
-      // Apply the depth update
       patch_retr_kernel<<<NUM_BLOCKS(M), NUM_THREADS>>>(
         kx.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
         patches.packed_accessor32<float,4,torch::RestrictPtrTraits>(),
-        dZ.packed_accessor32<float,1,torch::RestrictPtrTraits>());
+        dZ.packed_accessor32<mtype,1,torch::RestrictPtrTraits>());
 
-    }
+    }  else {
 
-    else {
-      /*
-       * Full Schur complement solve.
-       *
-       * The joint Gauss-Newton system is:
-       *   [ B   E ] [dX]   [v]
-       *   [ Eᵀ  C ] [dZ] = [u]
-       *
-       * Eliminate dZ via the Schur complement:
-       *   S  = B - E · diag(Q) · Eᵀ    (reduced system for poses)
-       *   y  = v - E · diag(Q) · u
-       *   Solve: S · dX = y
-       *   Back-sub: dZ = diag(Q) · (u - Eᵀ · dX)
-       */
+      torch::Tensor dX, dZ, Qt = torch::transpose(Q, 0, 1);
+      torch::Tensor I = torch::eye(6*N, mdtype);
 
-      // EQ = E · diag(Q)  -- broadcasting Q as a row vector across E's columns
-      torch::Tensor EQ = E * Q;
-      torch::Tensor Et = torch::transpose(E, 0, 1);   // [M, 6N]
-      torch::Tensor Qt = torch::transpose(Q, 0, 1);   // [M, 1]
+      if (eff_impl) {
 
-      // S = B - E · Q · Eᵀ  (Schur complement matrix)
-      torch::Tensor S = B - torch::matmul(EQ, Et);
-      // y = v - E · Q · u    (Schur complement RHS)
-      torch::Tensor y = v - torch::matmul(EQ,  u);
+        torch::Tensor EQEt = blockE->computeEQEt(N, Q);
+        torch::Tensor EQu = blockE->computeEv(N, Qt * u);
 
-      /*
-       * Regularization: S += (1e-4 · diag(S) + I)
-       * This adds a small multiple of the diagonal plus the identity
-       * to ensure S is positive-definite for the Cholesky solver.
-       * The 1e-4 * S term provides relative damping, while +1.0
-       * provides absolute damping.
-       */
-      torch::Tensor I = torch::eye(6*N, opts);
-      S += I * (1e-4 * S + 1.0);
+        torch::Tensor S = B - EQEt;
+        torch::Tensor y = v - EQu;
 
-      /* Solve S · dX = y via Cholesky factorization */
-      torch::Tensor U = torch::linalg_cholesky(S);
-      torch::Tensor dX = torch::cholesky_solve(y, U);
+        S += I * (1e-4 * S + 1.0);
+        torch::Tensor U = std::get<0>(at::linalg_cholesky_ex(S));
+        dX = torch::cholesky_solve(y, U);
+        torch::Tensor EtdX = blockE->computeEtv(M, dX);
+        dZ = Qt * (u - EtdX);
 
-      /* Back-substitute for depth updates: dZ = Q · (u - Eᵀ · dX) */
-      torch::Tensor dZ = Qt * (u - torch::matmul(Et, dX));
+      } else {
 
-      dX = dX.view({N, 6});   // reshape to [N_poses, 6]
-      dZ = dZ.view({M});      // reshape to [M_patches]
+        torch::Tensor EQ = E * Q;
+        torch::Tensor Et = torch::transpose(E, 0, 1);
 
-      /* Apply updates via retraction kernels */
+        torch::Tensor S = B - torch::matmul(EQ, Et);
+        torch::Tensor y = v - torch::matmul(EQ,  u);
+
+        S += I * (1e-4 * S + 1.0);
+        torch::Tensor U = std::get<0>(at::linalg_cholesky_ex(S));
+        dX = torch::cholesky_solve(y, U);
+        dZ = Qt * (u - torch::matmul(Et, dX));
+
+      }
+
+      dX = dX.view({N, 6});
+      dZ = dZ.view({M});
+
       pose_retr_kernel<<<NUM_BLOCKS(N), NUM_THREADS>>>(t0, t1,
           poses.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
-          dX.packed_accessor32<float,2,torch::RestrictPtrTraits>());
+          dX.packed_accessor32<mtype,2,torch::RestrictPtrTraits>());
 
       patch_retr_kernel<<<NUM_BLOCKS(M), NUM_THREADS>>>(
           kx.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
           patches.packed_accessor32<float,4,torch::RestrictPtrTraits>(),
-          dZ.packed_accessor32<float,1,torch::RestrictPtrTraits>());
+          dZ.packed_accessor32<mtype,1,torch::RestrictPtrTraits>());
     }
   }
 
