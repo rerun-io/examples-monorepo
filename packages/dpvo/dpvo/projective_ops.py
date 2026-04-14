@@ -24,7 +24,7 @@ Jacobian computation.  See Sec. 3 of Teed et al. (2022).
 from typing import Any, Literal, overload
 
 import torch
-from jaxtyping import Float, Int
+from jaxtyping import Bool, Float, Int
 from lietorch import SE3
 from torch import Tensor
 
@@ -349,7 +349,7 @@ def point_cloud(poses: SE3, patches: Float[Tensor, "..."], intrinsics: Float[Ten
     return result
 
 
-def flow_mag(poses: SE3, patches: Float[Tensor, "..."], intrinsics: Float[Tensor, "..."], ii: Int[Tensor, "n_edges"], jj: Int[Tensor, "n_edges"], kk: Int[Tensor, "n_edges"], beta: float = 0.3) -> tuple[Float[Tensor, "..."], Float[Tensor, "..."]]:
+def flow_mag(poses: SE3, patches: Float[Tensor, "..."], intrinsics: Float[Tensor, "..."], ii: Int[Tensor, "n_edges"], jj: Int[Tensor, "n_edges"], kk: Int[Tensor, "n_edges"], beta: float = 0.3) -> tuple[Float[Tensor, "..."], Bool[Tensor, "..."]]:
     """Compute pixel flow magnitude between frames, decomposed into translation and full motion.
 
     Measures how much each patch moves in pixel space when reprojected

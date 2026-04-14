@@ -7,6 +7,8 @@ Requires the ``dpretrieval`` workspace package.
 import os
 import time
 from multiprocessing import Process, Queue, Value
+from multiprocessing.queues import Queue as QueueType
+from multiprocessing.sharedctypes import Synchronized
 
 import numpy as np
 from einops import parse_shape
@@ -27,10 +29,10 @@ RAD = 50
 
 
 def _dbow_loop(
-    in_queue: "Queue[tuple[int, np.ndarray]]",
-    out_queue: "Queue[tuple[int, tuple[float, int, list]]]",
+    in_queue: QueueType,   # carries tuple[int, np.ndarray] (frame_idx, image)
+    out_queue: QueueType,  # carries tuple[int, tuple[float, int, list]] (frame_idx, query_result)
     vocab_path: str,
-    ready: Value,
+    ready: Synchronized,
 ) -> None:
     """Run DBoW retrieval in a background process."""
     dbow = dpretrieval.DPRetrieval(vocab_path, 50)
@@ -59,8 +61,8 @@ class RetrievalDBOW:
         self.prev_loop_closes: list[tuple[int, int]] = []
         self.found: list[tuple[int, int]] = []
 
-        self.in_queue: Queue = Queue(maxsize=20)   # carries tuple[int, np.ndarray] (frame_idx, image)
-        self.out_queue: Queue = Queue(maxsize=20)  # carries tuple[int, tuple[float, int, list]] (frame_idx, query_result)
+        self.in_queue: QueueType = Queue(maxsize=20)   # carries tuple[int, np.ndarray] (frame_idx, image)
+        self.out_queue: QueueType = Queue(maxsize=20)  # carries tuple[int, tuple[float, int, list]] (frame_idx, query_result)
         ready = Value("i", 0)
         self.proc: Process = Process(target=_dbow_loop, args=(self.in_queue, self.out_queue, vocab_path, ready))
         self.proc.start()

@@ -125,7 +125,7 @@ class PatchGraph:
             beta=0.5,
         )
         flow_mg_sum: Float[Tensor, "fl"] = reduce(flow_mg * val, "1 (fl M) 1 1 -> fl", "sum", M=self.M).float()
-        num_val: Float[Tensor, "fl"] = reduce(val, "1 (fl M) 1 1 -> fl", "sum", M=self.M).clamp(min=1)
+        num_val: Int[Tensor, "fl"] = reduce(val, "1 (fl M) 1 1 -> fl", "sum", M=self.M).clamp(min=1)
         flow_mag_vals: Float[Tensor, "fl"] = torch.where(num_val > (self.M * 0.75), flow_mg_sum / num_val, torch.inf)
 
         mask = flow_mag_vals < self.cfg.backend_thresh

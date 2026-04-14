@@ -7,6 +7,7 @@ load triplets of frames for keypoint triangulation.
 
 import os
 from multiprocessing import Pool
+from multiprocessing.pool import Pool as PoolType
 from tempfile import TemporaryDirectory
 
 import cv2
@@ -26,7 +27,7 @@ class ImageCache:
         self.image_buffer: dict[int, np.ndarray] = {}
         self.tmpdir: TemporaryDirectory = TemporaryDirectory()
         self.stored_indices: np.ndarray = np.zeros(100000, dtype=bool)
-        self.writer_pool: Pool = Pool(processes=1)
+        self.writer_pool: PoolType = Pool(processes=1)
         self.write_result = self.writer_pool.apply_async(cv2.imwrite, [f"{self.tmpdir.name}/warmup.png", BLANK, JPEG_QUALITY])
         self._wait()
 
