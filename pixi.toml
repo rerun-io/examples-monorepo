@@ -1092,6 +1092,18 @@ cwd = "packages/dpvo"
 outputs = ["packages/dpvo/ORBvoc.txt"]
 description = "Download ORB vocabulary for DBoW2 loop closure"
 
+# ── EuRoC evaluation tasks ───────────────────────────────────────────────
+[feature.dpvo.tasks._download-euroc]
+cmd = "python -c \"from dpvo.api.euroc import download_euroc; download_euroc()\""
+cwd = "packages/dpvo"
+description = "Download EuRoC MH_01-MH_05 sequences (~2GB each)"
+
+[feature.dpvo.tasks.eval-euroc]
+cmd = "python tools/eval_euroc.py --modes vo slam --stride 2 --trials 1"
+depends-on = ["_build-dpvo-cuda-kernels", "_download-dpvo-model", "_download-euroc"]
+cwd = "packages/dpvo"
+description = "Evaluate DPV-SLAM on EuRoC MH sequences (VO + SLAM)"
+
 # ── Demo tasks ───────────────────────────────────────────────────────────
 [feature.dpvo.tasks.dpvo-demo]
 cmd = "python tools/demo.py --imagedir data/movies/IMG_0493.MOV"

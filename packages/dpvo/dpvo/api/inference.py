@@ -488,7 +488,7 @@ def run_dpvo_pipeline(
             intri_np: Float32[ndarray, "4"]
             (t, bgr_hw3, intri_np_calib) = queue.get()
             if calib is not None:
-                intri_np = intri_np_calib
+                intri_np = intri_np_calib.astype(np.float32) if intri_np_calib is not None else intri_np_calib
             else:
                 assert intri_np_dust3r is not None, "DUSt3R intrinsics must be estimated when no calib file is provided"
                 intri_np = intri_np_dust3r
@@ -501,7 +501,7 @@ def run_dpvo_pipeline(
             rr.set_time("timestep", sequence=t)
 
             bgr_3hw: UInt8[Tensor, "c ht wd"] = rearrange(torch.from_numpy(bgr_hw3), "h w c -> c h w").cuda()
-            intri_torch: Float32[Tensor, "4"] = torch.from_numpy(intri_np).cuda()
+            intri_torch: Float32[Tensor, "4"] = torch.from_numpy(intri_np).float().cuda()
 
             if slam is None:
                 slam = DPVO(dpvo_config, network_path, ht=bgr_3hw.shape[1], wd=bgr_3hw.shape[2])

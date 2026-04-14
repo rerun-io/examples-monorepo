@@ -128,7 +128,7 @@ class PatchGraph:
         num_val: Float[Tensor, "fl"] = reduce(val, "1 (fl M) 1 1 -> fl", "sum", M=self.M).clamp(min=1)
         flow_mag_vals: Float[Tensor, "fl"] = torch.where(num_val > (self.M * 0.75), flow_mg_sum / num_val, torch.inf)
 
-        mask: Int[Tensor, "fl"] = flow_mag_vals < self.cfg.backend_thresh
+        mask = flow_mag_vals < self.cfg.backend_thresh
         es = reduce_edges(
             asnumpy(flow_mag_vals[mask]),
             asnumpy(ii[:: self.M][mask]),
