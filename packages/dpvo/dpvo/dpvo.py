@@ -131,7 +131,7 @@ class DPVO:
         try:
             from .loop_closure.long_term import LongTermLoopClosure
             self.long_term_lc: LongTermLoopClosure = LongTermLoopClosure(self.cfg, self.pg)
-        except ModuleNotFoundError as e:
+        except (ModuleNotFoundError, FileNotFoundError) as e:
             print(f"WARNING: Classical loop closure disabled: {e}")
 
     def load_weights(self, network: str | VONet) -> None:

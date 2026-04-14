@@ -92,12 +92,19 @@ class RetrievalDBOW:
         self.prev_loop_closes.append((i, j))
 
     def _repetition_check(self, idx: int, num_repeat: int) -> tuple[int, int] | None:
+        """Check that we've retrieved ``num_repeat`` consecutive frames.
+
+        Uses the second detection (index 1) as the candidate pair when
+        available, matching the upstream heuristic of using the "confirming"
+        detection rather than the initial trigger.
+        """
         if len(self.found) < num_repeat:
             return None
         latest = self.found[-num_repeat:]
-        (b, _), (i, j), _ = latest
+        b, _ = latest[0]                       # earliest detection's frame index
+        i, j = latest[min(1, num_repeat - 1)]  # confirming detection (index 1 when available)
         if (1 + idx - b) == num_repeat:
-            return (i, max(j, 1))
+            return (i, max(j, 1))  # max(j,1) avoids centering the triplet on frame 0
         return None
 
     def detect_loop(self, thresh: float, num_repeat: int = 1) -> tuple[int, int] | None:
