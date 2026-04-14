@@ -12,22 +12,24 @@ as required by the stride-4 feature extractor (which itself has a stride-2
 convolution followed by stride-2 pooling).
 """
 
+from __future__ import annotations
+
 from itertools import chain
-from multiprocessing import Queue
+from multiprocessing.queues import Queue
 from pathlib import Path
 
 import cv2
-import mmcv
 import numpy as np
 from jaxtyping import Float64, UInt8
 from numpy import ndarray
+from simplecv.video_io import VideoReader
 
 
 def load_calib(calib: str) -> tuple[Float64[ndarray, "3 3"], Float64[ndarray, "n"]]:
     """Load camera calibration from a space-delimited text file.
 
     Expected file format: ``fx fy cx cy [k1 k2 ...]`` on a single line.
-    The first four values are used to construct a 3x3 intrinsic matrix K;
+    The first four values are used to construct a 3×3 intrinsic matrix K;
     the full line (including optional distortion coefficients) is also
     returned for downstream use.
 
@@ -36,7 +38,7 @@ def load_calib(calib: str) -> tuple[Float64[ndarray, "3 3"], Float64[ndarray, "n
 
     Returns:
         A 2-tuple of:
-        - ``K``: 3x3 camera intrinsic matrix.
+        - ``K``: 3×3 camera intrinsic matrix.
         - ``calib_data``: Raw calibration values as a 1-D array.
     """
     calib_data: Float64[ndarray, "n"] = np.loadtxt(calib, delimiter=" ")
@@ -54,7 +56,7 @@ def load_calib(calib: str) -> tuple[Float64[ndarray, "3 3"], Float64[ndarray, "n
 
 
 def image_stream(
-    queue: Queue, imagedir: str, calib: str | None, stride: int, skip: int = 0
+    queue: Queue[tuple[int, ndarray | None, ndarray | None]], imagedir: str, calib: str | None, stride: int, skip: int = 0
 ) -> None:
     """Read frames from a directory of images and push them to a queue.
 
@@ -91,11 +93,12 @@ def image_stream(
         skip::stride
     ]
 
-    image: UInt8[ndarray, "h w 3"]
+    image: UInt8[ndarray, "h w 3"] | None = None
     intrinsics: Float64[ndarray, "4"] | None = None
 
     for t, imfile in enumerate(image_list):
         image = cv2.imread(str(imfile))
+        assert image is not None, f"Failed to read image: {imfile}"
 
         if calib_data is not None:  # noqa: SIM108
             intrinsics = np.array([fx, fy, cx, cy])
@@ -115,11 +118,11 @@ def image_stream(
 
 
 def video_stream(
-    queue: Queue, imagedir: str, calib: str | None, stride: int, skip: int = 0
+    queue: Queue[tuple[int, ndarray | None, ndarray | None]], imagedir: str, calib: str | None, stride: int, skip: int = 0
 ) -> None:
     """Read frames from a video file and push them to a queue.
 
-    Uses ``mmcv.VideoReader`` to decode frames.  Frames are downscaled by
+    Uses ``simplecv.video_io.VideoReader`` to decode frames.  Frames are downscaled by
     0.5x (both axes) to reduce memory and compute requirements.  The
     intrinsics are correspondingly scaled by 0.5.
 
@@ -147,7 +150,7 @@ def video_stream(
         K, calib_data = load_calib(calib)
         fx, fy, cx, cy = float(K[0, 0]), float(K[1, 1]), float(K[0, 2]), float(K[1, 2])
 
-    video_reader: mmcv.VideoReader = mmcv.VideoReader(imagedir)
+    video_reader: VideoReader = VideoReader(Path(imagedir))
 
     t: int = 0
 

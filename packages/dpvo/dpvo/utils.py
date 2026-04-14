@@ -17,6 +17,7 @@ This module provides low-level helpers used throughout the DPVO pipeline:
 
 from collections.abc import Generator
 from types import TracebackType
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -70,7 +71,7 @@ class Timer:
             print(f"{self.name}: {elapsed:.2f}ms")
 
 
-def coords_grid(b: int, n: int, h: int, w: int, **kwargs: object) -> Float[Tensor, "b n 2 h w"]:
+def coords_grid(b: int, n: int, h: int, w: int, **kwargs: Any) -> Float[Tensor, "b n 2 h w"]:
     """Create a batch of 2-D pixel coordinate grids.
 
     Returns a tensor where ``result[b, n, 0, y, x] = x`` and
@@ -96,7 +97,7 @@ def coords_grid(b: int, n: int, h: int, w: int, **kwargs: object) -> Float[Tenso
 
 
 def coords_grid_with_index(
-    d: Float[Tensor, "b n h w"], **kwargs: object
+    d: Float[Tensor, "b n h w"], **kwargs: Any
 ) -> tuple[Float[Tensor, "b n 3 h w"], Float[Tensor, "b n 1 h w"]]:
     """Create a 3-channel coordinate grid ``(x, y, inverse_depth)`` plus a frame index volume.
 
@@ -145,7 +146,7 @@ def patchify(x: Float[Tensor, "b n c h w"], patch_size: int = 3) -> Float[Tensor
     Args:
         x: Input feature map of shape ``(b, n, c, h, w)``.
         patch_size: Side length of each square patch (default 3, matching
-            DPVO's 3x3 patches).
+            DPVO's 3×3 patches).
 
     Returns:
         Tensor of shape ``(b, n_patches, c, patch_size, patch_size)``
@@ -170,7 +171,7 @@ def pyramidify(fmap: Float[Tensor, "b n c h w"], lvls: list[int] | None = None) 
 
     The correlation volume in DPVO is computed at two scales: stride-4
     (``lvl=1``, i.e. the original feature map) and stride-16 (``lvl=4``).
-    This yields a ``(2R+1)^2 x 2`` correlation feature vector per edge.
+    This yields a ``(2R + 1)² × 2`` correlation feature vector per edge.
     See Sec. 3.2 of Teed et al. (2022).
 
     Args:
@@ -200,7 +201,7 @@ def pyramidify(fmap: Float[Tensor, "b n c h w"], lvls: list[int] | None = None) 
     return pyramid
 
 
-def all_pairs_exclusive(n: int, **kwargs: object) -> tuple[Int[Tensor, "n_pairs"], Int[Tensor, "n_pairs"]]:
+def all_pairs_exclusive(n: int, **kwargs: Any) -> tuple[Int[Tensor, "n_pairs"], Int[Tensor, "n_pairs"]]:
     """Generate all ordered pairs ``(i, j)`` with ``i != j`` for ``i, j in 0..n-1``.
 
     Used during training to create a fully-connected measurement graph
@@ -241,7 +242,7 @@ def set_depth(
     return patches
 
 
-def flatmeshgrid(*args: Tensor, **kwargs: object) -> Generator[Tensor, None, None]:
+def flatmeshgrid(*args: Tensor, **kwargs: Any) -> Generator[Tensor, None, None]:
     """Flattened Cartesian product of 1-D index tensors.
 
     Equivalent to :func:`torch.meshgrid` followed by ``.reshape(-1)`` on

@@ -4,7 +4,7 @@ Implements the three main components of the DPVO neural network:
 
 - :class:`Patchifier` -- Feature extraction + gradient-biased patch sampling.
   Runs two stride-4 CNNs (feature net ``fnet`` and context net ``inet``)
-  on each frame, then selects M sparse 3x3 patches.
+  on each frame, then selects M sparse 3×3 patches.
 - :class:`Update` -- Recurrent GRU update operator that takes correlation
   features + context and predicts pixel displacement ``delta`` and
   confidence ``weight``.  Uses :class:`~dpvo.blocks.SoftAgg` for
@@ -16,6 +16,8 @@ Implements the three main components of the DPVO neural network:
 See Teed et al. (2022), "Deep Patch Visual Odometry", for the full
 architecture description (Sec. 3).
 """
+
+import functools
 
 import numpy as np
 import torch
@@ -32,7 +34,7 @@ from .blocks import GatedResidual, GradientClip, SoftAgg
 from .extractor import BasicEncoder4
 from .utils import coords_grid_with_index, flatmeshgrid, pyramidify, set_depth
 
-autocast = torch.cuda.amp.autocast
+autocast = functools.partial(torch.amp.autocast, "cuda")
 
 DIM: int = 384
 """Hidden state dimensionality for the GRU update operator.  This is also
@@ -68,8 +70,8 @@ class Update(nn.Module):
         agg_ij: Temporal neighbor aggregation (group by frame pair hash).
         gru: Two stacked GatedResidual blocks with layer norms.
         corr: MLP embedding for correlation features.  Input size is
-            ``2 * (2R+1)^2 * P^2 = 2 * 49 * 9 = 882`` for R=3, P=3
-            (two pyramid levels, 7x7 search window, 3x3 patch).
+            ``2 × (2R + 1)² × P² = 2 × 49 × 9 = 882`` for R = 3, P = 3
+            (two pyramid levels, 7×7 search window, 3×3 patch).
         d: Delta (pixel displacement) prediction head with gradient
             clipping.
         w: Weight (confidence) prediction head with gradient clipping
@@ -105,7 +107,7 @@ class Update(nn.Module):
         )
 
         # Correlation feature embedding.
-        # Input dim = 2 levels * (2*3+1)^2 * p^2 = 2 * 49 * p^2
+        # Input dim = 2 levels × (2·3 + 1)² × p² = 2 × 49 × p²
         self.corr: nn.Sequential = nn.Sequential(
             nn.Linear(2*49*p*p, DIM),
             nn.ReLU(inplace=True),
@@ -147,7 +149,7 @@ class Update(nn.Module):
             inp: Context features for each edge (from ``inet``), shape
                 ``(1, n_edges, DIM)``.
             corr: Multi-scale correlation features, shape
-                ``(1, n_edges, 2 * 49 * P^2)``.
+                ``(1, n_edges, 2 × 49 × P²)``.
             flow: Unused (kept for API compatibility).
             ii: Source frame index per edge.
             jj: Target frame index per edge.
@@ -206,9 +208,9 @@ class Patchifier(nn.Module):
       features injected into the GRU hidden state.  No normalization.
 
     Then selects M sparse patch locations per frame and extracts:
-    - ``gmap``: Local feature descriptors (128-dim, 3x3 patches) from ``fnet``.
+    - ``gmap``: Local feature descriptors (128-dim, 3×3 patches) from ``fnet``.
     - ``imap``: Context descriptors (DIM-dim, point samples) from ``inet``.
-    - ``patches``: Coordinate patches ``(x, y, inv_depth)`` of size 3x3.
+    - ``patches``: Coordinate patches ``(x, y, inv_depth)`` of size 3×3.
 
     See Sec. 3.1 of Teed et al. (2022) for patch selection details.
 
@@ -324,7 +326,7 @@ class Patchifier(nn.Module):
         # Extract feature descriptors as PxP patches (radius P//2 = 1 for P=3)
         gmap: Float[Tensor, "1 num_patches 128 p p"] = altcorr.patchify(fmap[0], coords, P//2).view(b, -1, 128, P, P)
 
-        clr: Float[Tensor, "1 num_patches 3"]
+        clr: Float[Tensor, "1 num_patches 3"] | None = None
         if return_color:
             # Sample RGB colors from the original image at patch locations
             # (scale coords by 4 to go from stride-4 to pixel resolution)
@@ -332,7 +334,7 @@ class Patchifier(nn.Module):
 
         if disps is None:
             # Default inverse-depth: ones (unit depth)
-            disps: Float[Tensor, "1 n h w"] = torch.ones(b, n, h, w, device="cuda")
+            disps = torch.ones(b, n, h, w, device="cuda")
 
         # Build coordinate grid (x, y, d) and extract PxP patches
         grid: Float[Tensor, "1 n 3 h w"]
@@ -341,10 +343,11 @@ class Patchifier(nn.Module):
         patches: Float[Tensor, "1 num_patches 3 p p"] = altcorr.patchify(grid[0], coords, P//2).view(b, -1, 3, P, P)
 
         # Frame index for each patch (which frame it came from)
-        index: Int[Tensor, "n 1"] = torch.arange(n, device="cuda").view(n, 1)
-        index: Int[Tensor, "num_patches"] = index.repeat(1, patches_per_image).reshape(-1)
+        index_2d: Int[Tensor, "n 1"] = torch.arange(n, device="cuda").view(n, 1)
+        index: Int[Tensor, "num_patches"] = index_2d.repeat(1, patches_per_image).reshape(-1)
 
         if return_color:
+            assert clr is not None
             return fmap, gmap, imap, patches, index, clr
 
         return fmap, gmap, imap, patches, index
@@ -361,10 +364,10 @@ class CorrBlock:
     - Level 1 (stride-4): 1:1 feature map, captures fine detail.
     - Level 4 (stride-16): 4x pooled feature map, captures coarse context.
 
-    At each level, correlation is computed in a ``(2R+1) x (2R+1)``
-    neighborhood (R=3 by default, giving 7x7 = 49 values per level).
+    At each level, correlation is computed in a ``(2R + 1) × (2R + 1)``
+    neighborhood (R = 3 by default, giving 7×7 = 49 values per level).
     The total correlation feature dimension per patch pixel is
-    ``2 * 49 * P^2 = 882`` for P=3.  See Sec. 3.2 of Teed et al. (2022).
+    ``2 × 49 × P² = 882`` for P = 3.  See Sec. 3.2 of Teed et al. (2022).
 
     Attributes:
         dropout: Dropout probability applied during correlation computation
@@ -412,7 +415,7 @@ class CorrBlock:
 
         Returns:
             Stacked correlation features from all pyramid levels,
-            shape ``(1, n_edges, 2 * (2R+1)^2 * P^2)``.
+            shape ``(1, n_edges, 2 × (2R + 1)² × P²)``.
         """
         corrs: list[Float[Tensor, "..."]] = []
         for i in range(len(self.levels)):
@@ -549,14 +552,14 @@ class VONet(nn.Module):
 
         traj: list[tuple[Float[Tensor, "..."], Float[Tensor, "..."], Float[Tensor, "..."], SE3, SE3, Tensor]] = []
         # Relaxed image bounds (allow slight out-of-frame projections)
-        bounds: list[int] = [-64, -64, w + 64, h + 64]
+        bounds: tuple[float, float, float, float] = (-64.0, -64.0, float(w + 64), float(h + 64))
 
         while len(traj) < STEPS:
             # Detach to limit backprop through time (TBPTT-style)
             Gs = Gs.detach()
             patches = patches.detach()
 
-            n: int = ii.max() + 1
+            n: int = int(ii.max() + 1)
             # After 8 warmup steps, incrementally add one frame per iteration
             if len(traj) >= 8 and n < images.shape[1]:
                 # Initialize new frame's pose from the previous frame
@@ -588,7 +591,7 @@ class VONet(nn.Module):
 
                 # Initialize new frame's depth from median of recent frames
                 patches[:,ix==n,2] = torch.median(patches[:,(ix == n-1) | (ix == n-2),2])
-                n = ii.max() + 1
+                n = int(ii.max() + 1)
 
             # Reproject all patches and compute correlation
             coords: Float[Tensor, "1 n_edges p p 2"] = pops.transform(Gs, patches, intrinsics, ii, jj, kk)

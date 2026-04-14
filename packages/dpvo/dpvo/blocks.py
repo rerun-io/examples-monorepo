@@ -16,6 +16,8 @@ This module contains:
   magnitudes).
 """
 
+from typing import Any
+
 import torch
 import torch.nn as nn
 from jaxtyping import Float, Int
@@ -227,8 +229,9 @@ class GradClip(torch.autograd.Function):
         return x
 
     @staticmethod
-    def backward(ctx: torch.autograd.function.FunctionCtx, grad_x: Float[Tensor, "*shape"]) -> Float[Tensor, "*shape"]:
+    def backward(ctx: Any, *grad_outputs: Any) -> Tensor:
         # Replace NaN gradients (can arise from degenerate projections)
+        grad_x: Tensor = grad_outputs[0]
         grad_x = torch.where(torch.isnan(grad_x), torch.zeros_like(grad_x), grad_x)
         return grad_x.clamp(min=-0.01, max=0.01)
 
@@ -245,7 +248,9 @@ class GradientClip(nn.Module):
         super().__init__()
 
     def forward(self, x: Float[Tensor, "*shape"]) -> Float[Tensor, "*shape"]:
-        return GradClip.apply(x)
+        result: Tensor | None = GradClip.apply(x)
+        assert isinstance(result, Tensor)
+        return result
 
 
 class GradZero(torch.autograd.Function):
@@ -262,7 +267,8 @@ class GradZero(torch.autograd.Function):
         return x
 
     @staticmethod
-    def backward(ctx: torch.autograd.function.FunctionCtx, grad_x: Float[Tensor, "*shape"]) -> Float[Tensor, "*shape"]:
+    def backward(ctx: Any, *grad_outputs: Any) -> Tensor:
+        grad_x: Tensor = grad_outputs[0]
         grad_x = torch.where(torch.isnan(grad_x), torch.zeros_like(grad_x), grad_x)
         grad_x = torch.where(torch.abs(grad_x) > GRAD_CLIP, torch.zeros_like(grad_x), grad_x)
         return grad_x
@@ -275,7 +281,9 @@ class GradientZero(nn.Module):
         super().__init__()
 
     def forward(self, x: Float[Tensor, "*shape"]) -> Float[Tensor, "*shape"]:
-        return GradZero.apply(x)
+        result: Tensor | None = GradZero.apply(x)
+        assert isinstance(result, Tensor)
+        return result
 
 
 class GradMag(torch.autograd.Function):
@@ -291,6 +299,7 @@ class GradMag(torch.autograd.Function):
         return x
 
     @staticmethod
-    def backward(ctx: torch.autograd.function.FunctionCtx, grad_x: Float[Tensor, "*shape"]) -> Float[Tensor, "*shape"]:
+    def backward(ctx: Any, *grad_outputs: Any) -> Tensor:
+        grad_x: Tensor = grad_outputs[0]
         print(grad_x.abs().mean())
         return grad_x

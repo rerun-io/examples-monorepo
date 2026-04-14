@@ -28,7 +28,7 @@ def BA(
     intrinsics: Float[Tensor, "..."],
     target: Float[Tensor, "..."],
     weight: Float[Tensor, "..."],
-    lmbda: float,
+    lmbda: Float[Tensor, "1"],
     ii: Int[Tensor, "n_edges"],
     jj: Int[Tensor, "n_edges"],
     kk: Int[Tensor, "n_edges"],
@@ -57,4 +57,4 @@ def BA(
         t1: End of the active keyframe window (exclusive).
         iterations: Number of Gauss-Newton iterations to run.
     """
-    return _cuda_ba.forward(poses.data, patches, intrinsics, target, weight, lmbda, ii, jj, kk, t0, t1, iterations)
+    _cuda_ba.forward(poses.data, patches, intrinsics, target, weight, lmbda, ii, jj, kk, t0, t1, iterations)

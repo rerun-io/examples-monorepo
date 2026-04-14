@@ -85,6 +85,20 @@ class RGBDDataset(data.Dataset):
 
         self._build_dataset_index()
 
+    @staticmethod
+    def is_test_scene(scene: str) -> bool:
+        """Check whether ``scene`` belongs to the validation/test split.
+
+        Subclasses should override this method.
+
+        Args:
+            scene: Scene path string.
+
+        Returns:
+            ``True`` if the scene is a test scene.
+        """
+        return False
+
     def _build_dataset_index(self) -> None:
         """Build a flat list of ``(scene_id, start_frame)`` training indices.
 
@@ -112,7 +126,9 @@ class RGBDDataset(data.Dataset):
         Returns:
             The loaded image as a uint8 array with shape ``(h, w, 3)``.
         """
-        return cv2.imread(image_file)
+        img = cv2.imread(image_file)
+        assert img is not None, f"Failed to read image: {image_file}"
+        return img
 
     @staticmethod
     def depth_read(depth_file: str) -> Float64[ndarray, "h w"]:
@@ -213,13 +229,13 @@ class RGBDDataset(data.Dataset):
 
                 # prefer frames forward in time
                 if np.count_nonzero(frames[frames > ix]):
-                    ix = np.random.choice(frames[frames > ix])
+                    ix = int(np.random.choice(frames[frames > ix]))
 
                 elif ix + 1 < len(images_list):
                     ix = ix + 1
 
                 elif np.count_nonzero(frames):
-                    ix = np.random.choice(frames)
+                    ix = int(np.random.choice(frames))
 
             else:
                 i: ndarray = frame_graph[ix][0].copy()
@@ -232,7 +248,7 @@ class RGBDDataset(data.Dataset):
                     g[i >= ix] = -1
 
                 if len(g) > 0 and np.max(g) > 0:
-                    ix = i[np.argmax(g)]
+                    ix = int(i[np.argmax(g)])
                 else:
                     if ix + s >= len(images_list) or ix + s < 0:
                         s *= -1
@@ -246,11 +262,11 @@ class RGBDDataset(data.Dataset):
         depths: list[Float64[ndarray, "h w"]] = []
         poses: list = []
         intrinsics: list = []
-        for i in inds:
-            images.append(self.__class__.image_read(images_list[i]))
-            depths.append(self.__class__.depth_read(depths_list[i]))
-            poses.append(poses_list[i])
-            intrinsics.append(intrinsics_list[i])
+        for frame_idx in inds:
+            images.append(self.__class__.image_read(images_list[int(frame_idx)]))
+            depths.append(self.__class__.depth_read(depths_list[frame_idx]))
+            poses.append(poses_list[frame_idx])
+            intrinsics.append(intrinsics_list[frame_idx])
 
         images_np: Float32[ndarray, "n h w 3"] = np.stack(images).astype(np.float32)
         depths_np: Float32[ndarray, "n h w"] = np.stack(depths).astype(np.float32)
@@ -264,7 +280,7 @@ class RGBDDataset(data.Dataset):
         poses_t: Float32[Tensor, "n 7"] = torch.from_numpy(poses_np)
         intrinsics_t: Float32[Tensor, "n 4"] = torch.from_numpy(intrinsics_np)
 
-        if self.aug:
+        if isinstance(self.aug, RGBDAugmentor):
             images_t, poses_t, disps, intrinsics_t = \
                 self.aug(images_t, poses_t, disps, intrinsics_t)
 

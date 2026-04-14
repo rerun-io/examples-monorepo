@@ -21,7 +21,7 @@ component.  This avoids explicit depth normalisation and simplifies the
 Jacobian computation.  See Sec. 3 of Teed et al. (2022).
 """
 
-from typing import Any
+from typing import Any, Literal, overload
 
 import torch
 from jaxtyping import Float, Int
@@ -43,7 +43,12 @@ def extract_intrinsics(intrinsics: Float[Tensor, "... 4"]) -> tuple[Float[Tensor
         4-tuple of ``(fx, fy, cx, cy)`` each with two trailing size-1
         dims for broadcasting over spatial (patch) dimensions.
     """
-    return intrinsics[...,None,None,:].unbind(dim=-1)
+    fx: Float[Tensor, "..."]
+    fy: Float[Tensor, "..."]
+    cx: Float[Tensor, "..."]
+    cy: Float[Tensor, "..."]
+    fx, fy, cx, cy = intrinsics[...,None,None,:].unbind(dim=-1)
+    return (fx, fy, cx, cy)
 
 
 def coords_grid(ht: int, wd: int, **kwargs: Any) -> Float[Tensor, "h w 2"]:
@@ -70,7 +75,7 @@ def iproj(patches: Float[Tensor, "... 3 ps ps"], intrinsics: Float[Tensor, "... 
     """Inverse projection: lift patches from image coordinates to 3-D homogeneous rays.
 
     Converts each patch pixel ``(u, v, d)`` (where ``d`` is inverse depth)
-    to the 4-vector ``((u - cx) / fx,  (v - cy) / fy,  1,  d)``.
+    to the 4-vector ``((u - cₓ) / fₓ,  (v - cᵧ) / fᵧ,  1,  d)``.
 
     This representation stores the point as ``(X/Z, Y/Z, 1, 1/Z)`` in
     camera coordinates, which is convenient because SE3 group actions in
@@ -110,11 +115,11 @@ def proj(X: Float[Tensor, "... 4"], intrinsics: Float[Tensor, "... 4"], depth: b
     """Forward projection: project 3-D homogeneous points to pixel coordinates.
 
     Given a point ``(X, Y, Z, W)`` in the homogeneous representation and
-    intrinsics ``(fx, fy, cx, cy)``, computes:
+    intrinsics ``(fₓ, fᵧ, cₓ, cᵧ)``, computes:
 
     - ``d = 1 / max(Z, 0.1)``  (inverse depth, clamped for stability)
-    - ``u = fx * d * X + cx``
-    - ``v = fy * d * Y + cy``
+    - ``u = fₓ · d · X + cₓ``
+    - ``v = fᵧ · d · Y + cᵧ``
 
     The depth clamping at ``Z = 0.1`` prevents division-by-zero for points
     near or behind the camera plane.
@@ -150,6 +155,24 @@ def proj(X: Float[Tensor, "... 4"], intrinsics: Float[Tensor, "... 4"], depth: b
     return torch.stack([x, y], dim=-1)
 
 
+@overload
+def transform(
+    poses: SE3,
+    patches: Float[Tensor, "1 n_patches 3 ps ps"],
+    intrinsics: Float[Tensor, "1 n_frames 4"],
+    ii: Int[Tensor, "n_edges"],
+    jj: Int[Tensor, "n_edges"],
+    kk: Int[Tensor, "n_edges"],
+    depth: bool = False,
+    valid: bool = False,
+    *,
+    jacobian: Literal[True],
+    tonly: bool = False,
+) -> tuple[Float[Tensor, "..."], Float[Tensor, "..."], tuple[Float[Tensor, "..."], Float[Tensor, "..."], Float[Tensor, "..."]]]:
+    ...
+
+
+@overload
 def transform(
     poses: SE3,
     patches: Float[Tensor, "1 n_patches 3 ps ps"],
@@ -161,7 +184,22 @@ def transform(
     valid: bool = False,
     jacobian: bool = False,
     tonly: bool = False,
-) -> Float[Tensor, "..."] | tuple[Float[Tensor, "..."], Float[Tensor, "..."], tuple[Float[Tensor, "..."], Float[Tensor, "..."], Float[Tensor, "..."]]]:
+) -> Float[Tensor, "..."]:
+    ...
+
+
+def transform(
+    poses: SE3,
+    patches: Float[Tensor, "1 n_patches 3 ps ps"],
+    intrinsics: Float[Tensor, "1 n_frames 4"],
+    ii: Int[Tensor, "n_edges"],
+    jj: Int[Tensor, "n_edges"],
+    kk: Int[Tensor, "n_edges"],
+    depth: bool = False,
+    valid: bool = False,
+    jacobian: bool = False,
+    tonly: bool = False,
+) -> Float[Tensor, "..."] | tuple[Float[Tensor, "..."], Float[Tensor, "..."]] | tuple[Float[Tensor, "..."], Float[Tensor, "..."], tuple[Float[Tensor, "..."], Float[Tensor, "..."], Float[Tensor, "..."]]]:
     """Full projective transform: reproject patch kk from frame ii into frame jj.
 
     This is the central geometric operation in DPVO.  For each measurement
@@ -169,7 +207,7 @@ def transform(
 
     1. **Backproject** patch ``kk[e]`` using intrinsics of frame ``ii[e]``
        to get 3-D homogeneous point ``X0`` via :func:`iproj`.
-    2. **Transform** ``X0`` by the relative pose ``G_jj * G_ii^{-1}`` to
+    2. **Transform** ``X0`` by the relative pose ``Gjj · Gii⁻¹`` to
        get ``X1`` in frame ``jj[e]``'s coordinate system.
     3. **Project** ``X1`` into frame ``jj[e]`` using its intrinsics via
        :func:`proj`.
@@ -177,8 +215,8 @@ def transform(
     When ``jacobian=True``, analytical Jacobians are computed for the
     Gauss-Newton bundle adjustment (see :func:`~dpvo.ba.BA`):
 
-    - ``Ji``: Jacobian of pixel coords w.r.t. pose ``ii`` (shape ``[1, E, 2, 6]``).
-    - ``Jj``: Jacobian of pixel coords w.r.t. pose ``jj`` (shape ``[1, E, 2, 6]``).
+    - ``Jᵢ``: Jacobian of pixel coords w.r.t. pose ``ii`` (shape ``[1, E, 2, 6]``).
+    - ``Jⱼ``: Jacobian of pixel coords w.r.t. pose ``jj`` (shape ``[1, E, 2, 6]``).
     - ``Jz``: Jacobian of pixel coords w.r.t. inverse depth (shape ``[1, E, 2, 1]``).
 
     These are evaluated at the center pixel of the patch (``p//2, p//2``).
@@ -211,15 +249,19 @@ def transform(
     # Step 1: backproject patches from frame ii into 3D
     X0: Float[Tensor, "1 n_edges ps ps 4"] = iproj(patches[:,kk], intrinsics[:,ii])
 
-    # Step 2: compute relative transform G_j * G_i^{-1} and apply
-    Gij: SE3 = poses[:, jj] * poses[:, ii].inv()
+    # Step 2: compute the relative transform Gⱼ · Gᵢ⁻¹ and apply it
+    Gij_result = poses[:, jj] * poses[:, ii].inv()
+    assert isinstance(Gij_result, SE3)
+    Gij: SE3 = Gij_result
 
     if tonly:
         # Zero out rotation (set quaternion to identity [0,0,0,1])
         Gij[...,3:] = torch.as_tensor([0,0,0,1], device=Gij.device)
 
     # Apply SE3 transform: X1 = G_ij * X0 (broadcasts over patch spatial dims)
-    X1: Float[Tensor, "1 n_edges ps ps 4"] = Gij[:,:,None,None] * X0
+    X1_result = Gij[:,:,None,None] * X0
+    assert isinstance(X1_result, Tensor)
+    X1: Float[Tensor, "1 n_edges ps ps 4"] = X1_result
 
     # Step 3: project transformed points into frame jj
     x1: Float[Tensor, "..."] = proj(X1, intrinsics[:,jj], depth)
@@ -248,10 +290,10 @@ def transform(
         d: Float[Tensor, "1 n_edges"] = torch.zeros_like(Z)
         d[Z.abs() > 0.2] = 1.0 / Z[Z.abs() > 0.2]
 
-        # Ja: Jacobian of the SE3 action on the homogeneous point X1
+        # Jₐ: Jacobian of the SE3 action on the homogeneous point X₁
         # w.r.t. the 6-DoF Lie algebra perturbation (translation, rotation).
-        # For the action X' = exp(xi) * X on homogeneous coords (X,Y,Z,W):
-        #   dX'/d(xi) is a 4x6 matrix per edge.
+        # For the action X′ = exp(ξ) · X on homogeneous coords (X, Y, Z, W):
+        #   dX′/dξ is a 4×6 matrix per edge.
         Ja: Float[Tensor, "1 n_edges 4 6"] = torch.stack([
             H,  o,  o,  o,  Z, -Y,
             o,  H,  o, -Z,  o,  X,
@@ -259,22 +301,22 @@ def transform(
             o,  o,  o,  o,  o,  o,
         ], dim=-1).view(1, len(ii), 4, 6)
 
-        # Jp: Jacobian of the pinhole projection w.r.t. 3D point (X,Y,Z,W).
+        # Jₚ: Jacobian of the pinhole projection w.r.t. 3D point (X, Y, Z, W).
         # Maps from 4D homogeneous coords to 2D pixel coords.
         Jp: Float[Tensor, "1 n_edges 2 4"] = torch.stack([
              fx*d,     o, -fx*X*d*d,  o,
                 o,  fy*d, -fy*Y*d*d,  o,
         ], dim=-1).view(1, len(ii), 2, 4)
 
-        # Jj = Jp @ Ja: Jacobian of pixel coords w.r.t. target pose jj
+        # Jⱼ = Jₚ @ Jₐ: Jacobian of pixel coords w.r.t. target pose jj
         Jj: Float[Tensor, "1 n_edges 2 6"] = torch.matmul(Jp, Ja)
-        # Ji: Jacobian w.r.t. source pose ii, computed via the adjoint:
-        #   d(coords)/d(xi_i) = -Gij.adjT @ d(coords)/d(xi_j)
+        # Jᵢ: Jacobian w.r.t. source pose ii, computed via the adjoint:
+        #   d(coords)/dξᵢ = -Gij.adjT @ d(coords)/dξⱼ
         Ji: Float[Tensor, "1 n_edges 2 6"] = -Gij[:,:,None].adjT(Jj)
 
         # Jz: Jacobian of pixel coords w.r.t. inverse depth.
         # The inverse depth enters via the last column of the SE3 matrix
-        # (the translation component acts on the W=1/Z component).
+        # (the translation component acts on the W = 1/Z component).
         Jz: Float[Tensor, "1 n_edges 2 1"] = torch.matmul(Jp, Gij.matrix()[...,:,3:])
 
         return x1, (Z > 0.2).float(), (Ji, Jj, Jz)
@@ -302,7 +344,9 @@ def point_cloud(poses: SE3, patches: Float[Tensor, "..."], intrinsics: Float[Ten
         World-space homogeneous points with the same spatial layout as
         the input patches.
     """
-    return poses[:,ix,None,None].inv() * iproj(patches, intrinsics[:,ix])
+    result = poses[:,ix,None,None].inv() * iproj(patches, intrinsics[:,ix])
+    assert isinstance(result, Tensor)
+    return result
 
 
 def flow_mag(poses: SE3, patches: Float[Tensor, "..."], intrinsics: Float[Tensor, "..."], ii: Int[Tensor, "n_edges"], jj: Int[Tensor, "n_edges"], kk: Int[Tensor, "n_edges"], beta: float = 0.3) -> Float[Tensor, "..."]:
@@ -344,3 +388,96 @@ def flow_mag(poses: SE3, patches: Float[Tensor, "..."], intrinsics: Float[Tensor
 
     # Weighted combination: beta * full_flow + (1 - beta) * translation_flow
     return beta * flow1 + (1-beta) * flow2
+
+
+def induced_flow(
+    poses: SE3,
+    disps: Float[Tensor, "1 n h w"],
+    intrinsics: Float[Tensor, "1 n 4"],
+    ii: Int[Tensor, "n_edges"],
+    jj: Int[Tensor, "n_edges"],
+    tonly: bool = False,
+) -> tuple[Float[Tensor, "1 n_edges h w 2"], Float[Tensor, "1 n_edges h w"]]:
+    """Compute the optical flow induced by camera motion between frames.
+
+    For each pair ``(ii[e], jj[e])``, computes the 2-D pixel flow field
+    by backprojecting the disparity map of frame ``ii[e]`` to 3-D,
+    transforming to frame ``jj[e]``'s coordinate system, and projecting
+    back to 2-D.  The flow is the difference between the projected
+    coordinates and the original pixel grid.
+
+    This function operates on *dense* disparity maps rather than sparse
+    patches, making it suitable for building co-visibility frame graphs
+    during dataset construction.
+
+    Args:
+        poses: SE3 poses for all frames.
+        disps: Per-frame inverse depth (disparity) maps.
+        intrinsics: Per-frame camera intrinsics ``[fx, fy, cx, cy]``.
+        ii: Source frame indices.
+        jj: Target frame indices.
+        tonly: If True, zero out the rotation component.
+
+    Returns:
+        A 2-tuple of ``(flow, valid)`` where ``flow`` has shape
+        ``(1, n_edges, h, w, 2)`` and ``valid`` has shape
+        ``(1, n_edges, h, w)`` with 1.0 for valid pixels.
+    """
+    ht: int = disps.shape[2]
+    wd: int = disps.shape[3]
+
+    y: Float[Tensor, "h w"]
+    x: Float[Tensor, "h w"]
+    y, x = torch.meshgrid(
+        torch.arange(ht).to(disps.device).float(),
+        torch.arange(wd).to(disps.device).float(),
+    )
+    coords0: Float[Tensor, "h w 2"] = torch.stack([x, y], dim=-1)
+
+    # Backproject using disparity as inverse depth
+    fx: Float[Tensor, "1 n_edges 1 1"]
+    fy: Float[Tensor, "1 n_edges 1 1"]
+    cx: Float[Tensor, "1 n_edges 1 1"]
+    cy: Float[Tensor, "1 n_edges 1 1"]
+    fx, fy, cx, cy = intrinsics[:, ii, :, None, None].unbind(dim=2)
+
+    d: Float[Tensor, "1 n_edges h w"] = disps[:, ii]
+    i_ones: Float[Tensor, "1 n_edges h w"] = torch.ones_like(d)
+    xn: Float[Tensor, "1 n_edges h w"] = (x - cx) / fx
+    yn: Float[Tensor, "1 n_edges h w"] = (y - cy) / fy
+
+    X0: Float[Tensor, "1 n_edges h w 4"] = torch.stack([xn, yn, i_ones, d], dim=-1)
+
+    # Compute relative transform
+    Gij_result = poses[:, jj] * poses[:, ii].inv()
+    assert isinstance(Gij_result, SE3)
+    Gij: SE3 = Gij_result
+
+    if tonly:
+        Gij[..., 3:] = torch.as_tensor([0, 0, 0, 1], device=Gij.device)
+
+    # Apply SE3 transform
+    X1 = Gij[:, :, None, None] * X0
+    assert isinstance(X1, Tensor)
+
+    # Project to 2D
+    X_: Float[Tensor, "1 n_edges h w"]
+    Y_: Float[Tensor, "1 n_edges h w"]
+    Z_: Float[Tensor, "1 n_edges h w"]
+    _W: Float[Tensor, "1 n_edges h w"]
+    X_, Y_, Z_, _W = X1.unbind(dim=-1)
+
+    fx2: Float[Tensor, "1 n_edges 1 1"]
+    fy2: Float[Tensor, "1 n_edges 1 1"]
+    cx2: Float[Tensor, "1 n_edges 1 1"]
+    cy2: Float[Tensor, "1 n_edges 1 1"]
+    fx2, fy2, cx2, cy2 = intrinsics[:, jj, :, None, None].unbind(dim=2)
+
+    d1: Float[Tensor, "1 n_edges h w"] = 1.0 / Z_.clamp(min=0.1)
+    x1: Float[Tensor, "1 n_edges h w"] = fx2 * (d1 * X_) + cx2
+    y1: Float[Tensor, "1 n_edges h w"] = fy2 * (d1 * Y_) + cy2
+
+    coords1: Float[Tensor, "1 n_edges h w 2"] = torch.stack([x1, y1], dim=-1)
+    valid: Float[Tensor, "1 n_edges h w"] = ((Z_ > MIN_DEPTH) & (d > 0)).float()
+
+    return coords1 - coords0, valid

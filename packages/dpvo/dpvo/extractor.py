@@ -24,17 +24,17 @@ from torch import Tensor
 class ResidualBlock(nn.Module):
     """Standard two-layer residual block with configurable normalization.
 
-    Architecture: ``conv3x3 -> norm -> relu -> conv3x3 -> norm -> relu``
-    with a skip connection.  When ``stride > 1`` a learned 1x1 convolution
+    Architecture: ``conv3×3 → norm → relu → conv3×3 → norm → relu``
+    with a skip connection.  When ``stride > 1`` a learned 1×1 convolution
     downsamples the skip path.
 
     Attributes:
-        conv1: First 3x3 convolution (may have stride > 1 for downsampling).
-        conv2: Second 3x3 convolution (always stride 1).
+        conv1: First 3×3 convolution (may have stride > 1 for downsampling).
+        conv2: Second 3×3 convolution (always stride 1).
         relu: Shared ReLU activation.
         norm1: Normalization after conv1.
         norm2: Normalization after conv2.
-        downsample: 1x1 conv + norm for the skip path when stride > 1,
+        downsample: 1×1 conv + norm for the skip path when stride > 1,
             or ``None`` when stride == 1.
     """
 
@@ -99,7 +99,7 @@ class ResidualBlock(nn.Module):
 
 
 class BottleneckBlock(nn.Module):
-    """Three-layer bottleneck residual block (1x1 -> 3x3 -> 1x1).
+    """Three-layer bottleneck residual block (1×1 → 3×3 → 1×1).
 
     The bottleneck reduces the channel count to ``planes // 4`` in the
     middle layer, then expands back to ``planes``.  This is more
@@ -107,14 +107,14 @@ class BottleneckBlock(nn.Module):
     but is not used by default in DPVO.
 
     Attributes:
-        conv1: 1x1 reduce convolution.
-        conv2: 3x3 spatial convolution (may have stride > 1).
-        conv3: 1x1 expand convolution.
+        conv1: 1×1 reduce convolution.
+        conv2: 3×3 spatial convolution (may have stride > 1).
+        conv3: 1×1 expand convolution.
         relu: Shared ReLU activation.
         norm1: Normalization after conv1.
         norm2: Normalization after conv2.
         norm3: Normalization after conv3.
-        downsample: 1x1 conv + norm for the skip path when stride > 1,
+        downsample: 1×1 conv + norm for the skip path when stride > 1,
             or ``None``.
     """
 
@@ -185,11 +185,11 @@ class BottleneckBlock(nn.Module):
 
 DIM: int = 32
 """Base channel width for the encoder architectures.  Layers are multiples
-of this value (DIM, 2*DIM, 4*DIM, ...)."""
+of this value (DIM, 2·DIM, 4·DIM, ...)."""
 
 
 class BasicEncoder(nn.Module):
-    """Stride-8 feature encoder (conv7x2 -> layer1 -> layer2/s2 -> layer3/s2 -> 1x1).
+    """Stride-8 feature encoder (conv7×7/s2 → layer1 → layer2/s2 → layer3/s2 → 1×1).
 
     Produces a feature map at 1/8 the input spatial resolution.  This is
     the deeper encoder used in RAFT; DPVO uses :class:`BasicEncoder4`
@@ -197,11 +197,11 @@ class BasicEncoder(nn.Module):
 
     The architecture is::
 
-        conv7x7/s2 -> norm -> relu
-        -> 2x ResBlock(DIM,   s1)       # layer1: 1/2 resolution
-        -> 2x ResBlock(2*DIM, s2)       # layer2: 1/4 resolution
-        -> 2x ResBlock(4*DIM, s2)       # layer3: 1/8 resolution
-        -> conv1x1 -> output_dim        # projection
+        conv7×7/s2 → norm → relu
+        → 2× ResBlock(DIM,   s1)        # layer1: 1/2 resolution
+        → 2× ResBlock(2·DIM, s2)        # layer2: 1/4 resolution
+        → 2× ResBlock(4·DIM, s2)        # layer3: 1/8 resolution
+        → conv1×1 → output_dim          # projection
 
     Weights are initialised with Kaiming normal (conv) and constant
     (norm layers).
@@ -238,7 +238,7 @@ class BasicEncoder(nn.Module):
         self.layer2: nn.Sequential = self._make_layer(2*DIM, stride=2)
         self.layer3: nn.Sequential = self._make_layer(4*DIM, stride=2)
 
-        # 1x1 projection to the desired output dimensionality
+        # 1×1 projection to the desired output dimensionality
         self.conv2: nn.Conv2d = nn.Conv2d(4*DIM, output_dim, kernel_size=1)
 
         if self.multidim:
@@ -327,10 +327,10 @@ class BasicEncoder4(nn.Module):
     A shallower variant of :class:`BasicEncoder` producing features at 1/4
     the input spatial resolution.  The architecture is::
 
-        conv7x7/s2 -> norm -> relu
-        -> 2x ResBlock(DIM,   s1)       # layer1: 1/2 resolution
-        -> 2x ResBlock(2*DIM, s2)       # layer2: 1/4 resolution
-        -> conv1x1 -> output_dim        # projection
+        conv7×7/s2 → norm → relu
+        → 2× ResBlock(DIM,   s1)        # layer1: 1/2 resolution
+        → 2× ResBlock(2·DIM, s2)        # layer2: 1/4 resolution
+        → conv1×1 → output_dim          # projection
 
     DPVO instantiates two copies:
 
@@ -368,7 +368,7 @@ class BasicEncoder4(nn.Module):
         self.layer1: nn.Sequential = self._make_layer(DIM,  stride=1)
         self.layer2: nn.Sequential = self._make_layer(2*DIM, stride=2)
 
-        # 1x1 projection to the desired output dimensionality
+        # 1×1 projection to the desired output dimensionality
         self.conv2: nn.Conv2d = nn.Conv2d(2*DIM, output_dim, kernel_size=1)
 
         if dropout > 0:

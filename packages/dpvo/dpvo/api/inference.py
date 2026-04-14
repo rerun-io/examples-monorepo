@@ -24,7 +24,6 @@ from timeit import default_timer as timer
 from typing import Annotated
 
 import cv2
-import mmcv
 import numpy as np
 import rerun as rr
 import torch
@@ -113,6 +112,8 @@ class DPVOInferenceConfig:
     """Frame stride for sampling."""
     skip: int = 0
     """Number of leading frames to skip."""
+    max_frames: int = 0
+    """Maximum number of frames to process (0 = no limit)."""
 
 
 # ── Rerun logging helpers ───────────────────────────────────────────────
@@ -120,7 +121,7 @@ class DPVOInferenceConfig:
 
 def log_trajectory(
     parent_log_path: Path,
-    poses: Float32[Tensor, "buffer_size 7"],
+    cam_se3_world_buffer: Float32[Tensor, "buffer_size 7"],
     points: Float32[Tensor, "num_points 3"],
     colors: UInt8[Tensor, "buffer_size num_patches 3"],
     intri_np: Float32[ndarray, "4"],
@@ -139,8 +140,9 @@ def log_trajectory(
 
     Args:
         parent_log_path: Rerun entity path prefix (e.g. ``Path("world")``).
-        poses: All buffered keyframe poses ``[tx, ty, tz, qx, qy, qz, qw]``
-            in camera-from-world (``cam_se3_world``) convention.
+        cam_se3_world_buffer: All buffered keyframe poses
+            ``[tx, ty, tz, qx, qy, qz, qw]`` in camera-from-world
+            (``cam_se3_world``) convention.
         points: All buffered 3-D points (flattened across patches).
         colors: Per-point RGB colors matching ``points``.
         intri_np: Camera intrinsics as ``[fx, fy, cx, cy]``.
@@ -153,10 +155,9 @@ def log_trajectory(
         The updated ``path_list`` with the latest camera position appended.
     """
     cam_log_path: str = f"{parent_log_path}/camera"
-    rgb_hw3: UInt8[ndarray, "h w 3"] = mmcv.bgr2rgb(bgr_hw3)
     rr.log(
         f"{cam_log_path}/pinhole/image",
-        rr.Image(rgb_hw3).compress(jpeg_quality=jpg_quality),
+        rr.Image(bgr_hw3, color_model=rr.ColorModel.BGR).compress(jpeg_quality=jpg_quality),
     )
     rr.log(
         f"{cam_log_path}/pinhole",
@@ -170,10 +171,10 @@ def log_trajectory(
     )
 
     # Filter out zero-initialized (unused) buffer slots
-    poses_mask: Tensor = ~(poses[:, :6] == 0).all(dim=1)
+    poses_mask: Tensor = ~(cam_se3_world_buffer[:, :6] == 0).all(dim=1)
     points_mask: Tensor = ~(points == 0).all(dim=1)
 
-    nonzero_poses: Float32[Tensor, "num_nonzero 7"] = poses[poses_mask]
+    nonzero_poses: Float32[Tensor, "num_nonzero 7"] = cam_se3_world_buffer[poses_mask]
     nonzero_points: Float32[Tensor, "num_nonzero 3"] = points[points_mask]
 
     if nonzero_poses.shape[0] == 0:
@@ -290,33 +291,6 @@ def log_final(
 # ── Frame I/O helpers ───────────────────────────────────────────────────
 
 
-def create_reader(imagedir: str, calib: str | None, stride: int, skip: int, queue: Queue) -> Process:
-    """Create a multiprocessing ``Process`` that reads frames into a queue.
-
-    If ``imagedir`` is a directory the reader uses :func:`image_stream`;
-    otherwise it treats the path as a video file and uses
-    :func:`video_stream`.
-
-    Args:
-        imagedir: Path to an image directory **or** a video file.
-        calib: Path to a calibration file (``fx fy cx cy`` per line), or
-            ``None`` to skip file-based calibration.
-        stride: Sample every *stride*-th frame.
-        skip: Number of leading frames to skip before sampling begins.
-        queue: Shared ``Queue`` into which ``(timestep, bgr_hw3, intrinsics)``
-            tuples are placed. A sentinel ``(-1, ...)`` signals end-of-stream.
-
-    Returns:
-        An unstarted ``Process`` ready to be ``.start()``-ed.
-    """
-    reader: Process
-    if os.path.isdir(imagedir):
-        reader = Process(target=image_stream, args=(queue, imagedir, calib, stride, skip))
-    else:
-        reader = Process(target=video_stream, args=(queue, imagedir, calib, stride, skip))
-
-    return reader
-
 
 def calculate_num_frames(video_or_image_dir: str, stride: int, skip: int) -> int:
     """Calculate the effective number of frames after applying skip and stride.
@@ -353,7 +327,7 @@ def calib_from_dust3r(
     model: AsymmetricCroCo3DStereo,
     device: str,
 ) -> Float32[ndarray, "3 3"]:
-    """Estimate a 3x3 camera intrinsic matrix from a single image using DUSt3R.
+    """Estimate a 3×3 camera intrinsic matrix from a single image using DUSt3R.
 
     The image is temporarily saved to disk, fed through DUSt3R monocular
     calibration, and the resulting intrinsics are up-scaled from the DUSt3R
@@ -366,15 +340,16 @@ def calib_from_dust3r(
         device: Torch device string (e.g. ``"cuda"``, ``"cpu"``).
 
     Returns:
-        The 3x3 intrinsic matrix ``K`` scaled to the original image size.
+        The 3×3 intrinsic matrix ``K`` scaled to the original image size.
     """
     tmp_path: Path = Path("/tmp/dpvo/tmp.png")
     # Save image to a temporary file for DUSt3R (expects a directory of images)
-    mmcv.imwrite(bgr_hw3, str(tmp_path))
+    tmp_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(tmp_path), bgr_hw3)
     optimized_results: OptimizedResult = inferece_dust3r(
         image_dir_or_list=tmp_path.parent,
         model=model,
-        device=device,
+        device=device,  # pyrefly: ignore[bad-argument-type]
         batch_size=1,
     )
     # Clean up the temporary file
@@ -421,6 +396,7 @@ def run_dpvo_pipeline(
     recording: rr.RecordingStream | None = None,
     jpg_quality: int = 90,
     timeit: bool = False,
+    max_frames: int = 0,
 ) -> Generator[str, None, None]:
     """Run the full DPVO visual-odometry pipeline on an image dir or video.
 
@@ -461,7 +437,8 @@ def run_dpvo_pipeline(
     slam: DPVO | None = None
     queue = Queue(maxsize=8)
 
-    reader: Process = create_reader(imagedir, calib, stride, skip, queue)
+    stream_fn = image_stream if os.path.isdir(imagedir) else video_stream
+    reader: Process = Process(target=stream_fn, args=(queue, imagedir, calib, stride, skip))
     reader.start()
 
     rr.log(f"{parent_log_path}", rr.ViewCoordinates.RDF, static=True)
@@ -498,9 +475,15 @@ def run_dpvo_pipeline(
             bgr_hw3: UInt8[ndarray, "h w 3"]
             intri_np: Float32[ndarray, "4"]
             (t, bgr_hw3, intri_np_calib) = queue.get()
-            intri_np = intri_np_calib if calib is not None else intri_np_dust3r
+            if calib is not None:
+                intri_np = intri_np_calib
+            else:
+                assert intri_np_dust3r is not None, "DUSt3R intrinsics must be estimated when no calib file is provided"
+                intri_np = intri_np_dust3r
             # queue will have a (-1, image, intrinsics) tuple when the reader is done
             if t < 0:
+                break
+            if max_frames > 0 and frame_idx >= max_frames:
                 break
 
             rr.set_time("timestep", sequence=t)
@@ -515,12 +498,12 @@ def run_dpvo_pipeline(
                 slam(t, bgr_3hw, intri_torch)
 
             if slam.is_initialized:
-                poses: Float32[Tensor, "buffer_size 7"] = slam.poses_
+                cam_se3_world_buffer: Float32[Tensor, "buffer_size 7"] = slam.poses_
                 points: Float32[Tensor, "num_points 3"] = slam.points_
                 colors: UInt8[Tensor, "buffer_size num_patches 3"] = slam.colors_
                 path_list = log_trajectory(
                     parent_log_path=parent_log_path,
-                    poses=poses,
+                    cam_se3_world_buffer=cam_se3_world_buffer,
                     points=points,
                     colors=colors,
                     intri_np=intri_np,
@@ -533,6 +516,8 @@ def run_dpvo_pipeline(
             pbar.update(1)
             yield f"Frame {frame_idx}/{total_frames}"
 
+    if reader.is_alive():
+        reader.kill()
     reader.join()
 
     if slam is None:
@@ -581,6 +566,7 @@ def dpvo_inference(config: DPVOInferenceConfig) -> None:
         stride=config.stride,
         skip=config.skip,
         handle=handle,
+        max_frames=config.max_frames,
     ):
         pass  # CLI exhausts the generator silently
 

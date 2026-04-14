@@ -66,7 +66,7 @@ def scatter_sum(
     """
     index: Tensor = index.long()
     if dim_size is None:
-        dim_size: int = int(index.max().item()) + 1 if index.numel() > 0 else 0
+        dim_size = int(index.max().item()) + 1 if index.numel() > 0 else 0
 
     out_shape: list[int] = list(src.shape)
     out_shape[dim] = dim_size
@@ -114,7 +114,7 @@ def scatter_softmax(
     """
     index: Tensor = index.long()
     if dim_size is None:
-        dim_size: int = int(index.max().item()) + 1 if index.numel() > 0 else 0
+        dim_size = int(index.max().item()) + 1 if index.numel() > 0 else 0
     if dim_size == 0 or index.numel() == 0:
         return torch.zeros_like(src)
 

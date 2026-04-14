@@ -9,6 +9,8 @@ Two high-level convenience functions are exposed:
   optional bilinear interpolation mode.
 """
 
+from typing import Any
+
 import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
@@ -21,7 +23,7 @@ class CorrLayer(torch.autograd.Function):
 
     Given two multi-frame feature maps and a set of 2-D coordinate grids,
     the forward pass computes dot-product correlation within a local
-    ``(2*radius+1)^2`` neighbourhood for each edge ``(ii[e], jj[e])``.
+    ``(2r + 1)²`` neighbourhood for each edge ``(ii[e], jj[e])``.
 
     The backward pass distributes gradients back to both feature maps,
     optionally applying random edge dropout to reduce memory/compute.
@@ -29,7 +31,7 @@ class CorrLayer(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        ctx: torch.autograd.function.FunctionCtx,
+        ctx: Any,
         fmap1: Float[Tensor, "1 mem channels h4 w4"],
         fmap2: Float[Tensor, "1 mem channels h8 w8"],
         coords: Float[Tensor, "1 n_edges 2 ps ps"],
@@ -47,12 +49,12 @@ class CorrLayer(torch.autograd.Function):
             coords: 2-D lookup coordinates per edge and patch pixel.
             ii: Source frame indices for each edge.
             jj: Target frame indices for each edge.
-            radius: Search radius defining the ``(2r+1)^2`` neighbourhood.
+            radius: Search radius defining the ``(2r + 1)²`` neighbourhood.
             dropout: Fraction of edges to keep during the backward pass
                 (1.0 = keep all, <1.0 = randomly drop edges).
 
         Returns:
-            Correlation volume of shape ``(1, n_edges, 2R+1, 2R+1, ps, ps)``.
+            Correlation volume of shape ``(1, n_edges, 2R + 1, 2R + 1, ps, ps)``.
         """
         ctx.save_for_backward(fmap1, fmap2, coords, ii, jj)
         ctx.radius = radius
@@ -62,10 +64,7 @@ class CorrLayer(torch.autograd.Function):
         return corr
 
     @staticmethod
-    def backward(
-        ctx: torch.autograd.function.FunctionCtx,
-        grad: Float[Tensor, "..."],
-    ) -> tuple[Float[Tensor, "..."], Float[Tensor, "..."], None, None, None, None, None]:
+    def backward(ctx: Any, *grad_outputs: Any) -> tuple[Float[Tensor, "..."], Float[Tensor, "..."], None, None, None, None, None]:
         """Backward pass for correlation -- distributes gradients to feature maps.
 
         When ``dropout < 1.0``, a random subset of edges is kept so that
@@ -73,12 +72,13 @@ class CorrLayer(torch.autograd.Function):
 
         Args:
             ctx: Autograd context containing saved tensors and attributes.
-            grad: Upstream gradient w.r.t. the correlation output.
+            *grad_outputs: Upstream gradient w.r.t. the correlation output.
 
         Returns:
             Gradients for ``(fmap1, fmap2)`` and ``None`` for non-differentiable
             inputs (coords, ii, jj, radius, dropout).
         """
+        grad: Tensor = grad_outputs[0]
         fmap1: Float[Tensor, "..."]
         fmap2: Float[Tensor, "..."]
         coords: Float[Tensor, "..."]
@@ -106,14 +106,14 @@ class PatchLayer(torch.autograd.Function):
     """Custom autograd function for extracting feature patches at coordinates.
 
     Given a feature tensor and a set of 2-D coordinates, the forward pass
-    extracts ``(2*radius+2)^2`` patches centred on each coordinate (the extra
+    extracts ``(2r + 2)²`` patches centred on each coordinate (the extra
     +1 in each dimension supports bilinear interpolation in
     :func:`patchify`).
     """
 
     @staticmethod
     def forward(
-        ctx: torch.autograd.function.FunctionCtx,
+        ctx: Any,
         net: Float[Tensor, "..."],
         coords: Float[Tensor, "..."],
         radius: int,
@@ -137,21 +137,19 @@ class PatchLayer(torch.autograd.Function):
         return patches
 
     @staticmethod
-    def backward(
-        ctx: torch.autograd.function.FunctionCtx,
-        grad: Float[Tensor, "..."],
-    ) -> tuple[Float[Tensor, "..."], None, None]:
+    def backward(ctx: Any, *grad_outputs: Any) -> tuple[Float[Tensor, "..."], None, None]:
         """Backward pass for patchification.
 
         Args:
             ctx: Autograd context containing the saved feature tensor and
                 coordinates.
-            grad: Upstream gradient w.r.t. the extracted patches.
+            *grad_outputs: Upstream gradient w.r.t. the extracted patches.
 
         Returns:
             Gradient for ``net`` and ``None`` for the non-differentiable
             inputs (coords, radius).
         """
+        grad: Tensor = grad_outputs[0]
         net: Float[Tensor, "..."]
         coords: Float[Tensor, "..."]
         net, coords = ctx.saved_tensors
@@ -164,8 +162,8 @@ def patchify(net: Float[Tensor, "..."], coords: Float[Tensor, "..."], radius: in
 
     Delegates to :class:`PatchLayer` for the raw extraction and then
     optionally applies bilinear interpolation using the fractional part of
-    the coordinates to produce a ``(2*radius+1)^2`` patch from the
-    ``(2*radius+2)^2`` raw output.
+    the coordinates to produce a ``(2r + 1)²`` patch from the
+    ``(2r + 2)²`` raw output.
 
     Args:
         net: Feature tensor to extract patches from.
@@ -178,7 +176,9 @@ def patchify(net: Float[Tensor, "..."], coords: Float[Tensor, "..."], radius: in
     Returns:
         Interpolated (or raw) feature patches.
     """
-    patches: Float[Tensor, "..."] = PatchLayer.apply(net, coords, radius)
+    patches_result: Tensor | None = PatchLayer.apply(net, coords, radius)
+    assert isinstance(patches_result, Tensor)
+    patches: Float[Tensor, "..."] = patches_result
 
     if mode == 'bilinear':
         # Compute sub-pixel offsets and perform bilinear interpolation
@@ -224,4 +224,6 @@ def corr(
     Returns:
         Correlation volume tensor.
     """
-    return CorrLayer.apply(fmap1, fmap2, coords, ii, jj, radius, dropout)
+    result: Tensor | None = CorrLayer.apply(fmap1, fmap2, coords, ii, jj, radius, dropout)
+    assert isinstance(result, Tensor)
+    return result

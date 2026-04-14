@@ -9,6 +9,7 @@ re-ordered from the TartanAir NED convention to the DPVO convention.
 
 import glob
 import os.path as osp
+from typing import Any
 
 import cv2
 import numpy as np
@@ -66,7 +67,7 @@ class TartanAir(RGBDDataset):
     DEPTH_SCALE: float = 5.0
     """Global depth scaling factor applied to both depths and translations."""
 
-    def __init__(self, mode: str = 'training', **kwargs: object) -> None:
+    def __init__(self, mode: str = 'training', **kwargs: Any) -> None:
         """Initialise the TartanAir dataset.
 
         Args:
@@ -149,7 +150,9 @@ class TartanAir(RGBDDataset):
         Returns:
             The loaded image as a uint8 array with shape ``(h, w, 3)``.
         """
-        return cv2.imread(image_file)
+        img = cv2.imread(image_file)
+        assert img is not None, f"Failed to read image: {image_file}"
+        return img
 
     @staticmethod
     def depth_read(depth_file: str) -> Float64[ndarray, "h w"]:

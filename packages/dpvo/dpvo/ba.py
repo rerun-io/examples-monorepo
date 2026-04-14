@@ -5,31 +5,30 @@ that jointly refines SE3 camera poses and per-patch inverse depths.
 The key algorithmic idea is the **Schur complement** trick: because each
 depth variable only connects to at most two poses, the depth block of the
 Hessian is diagonal and can be eliminated analytically, reducing the
-system from ``(6N + M)`` unknowns to a dense ``6N x 6N`` system (where
+system from ``(6N + M)`` unknowns to a dense ``6N × 6N`` system (where
 ``N`` is the number of active poses and ``M`` the number of patches).
 See Sec. 3.3 of Teed et al. (2022).
 
 The normal equations are assembled from analytical Jacobians provided by
 :func:`~dpvo.projective_ops.transform`:
 
-.. math::
+    [ B   E ] [δx] = [v]
+    [ Eᵀ  C ] [δz]   [w]
 
-    \\begin{bmatrix} B & E \\\\ E^T & C \\end{bmatrix}
-    \\begin{bmatrix} \\delta x \\\\ \\delta z \\end{bmatrix}
-    = \\begin{bmatrix} v \\\\ w \\end{bmatrix}
-
-where ``B`` is the pose-pose Hessian block (6x6 per pose pair), ``E`` is
+where ``B`` is the pose-pose Hessian block (6×6 per pose pair), ``E`` is
 the pose-depth cross term, ``C`` is the depth-depth diagonal, and ``v``,
 ``w`` are the corresponding gradient vectors.
 
 After eliminating depths via the Schur complement
-``S = B - E * C^{-1} * E^T``, the reduced system ``S * dx = v - E * C^{-1} * w``
+``S = B - E · C⁻¹ · Eᵀ``, the reduced system ``S · dX = v - E · C⁻¹ · w``
 is solved with :class:`CholeskySolver` (Cholesky factorisation).  Depths
-are then back-substituted: ``dz = C^{-1} * (w - E^T * dx)``.
+are then back-substituted: ``dZ = C⁻¹ · (w - Eᵀ · dX)``.
 
 Updates are applied via retraction on SE3 (exponential map) for poses
 and additive update for inverse depths.
 """
+
+from typing import Any
 
 import torch
 from jaxtyping import Bool, Float, Int
@@ -55,7 +54,7 @@ class CholeskySolver(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx: torch.autograd.function.FunctionCtx, H: Float[Tensor, "batch n n"], b: Float[Tensor, "batch n m"]) -> Float[Tensor, "batch n m"]:
+    def forward(ctx: Any, H: Float[Tensor, "batch n n"], b: Float[Tensor, "batch n m"]) -> Float[Tensor, "batch n m"]:
         """Solve H x = b via Cholesky decomposition.
 
         Args:
@@ -65,7 +64,7 @@ class CholeskySolver(torch.autograd.Function):
             b: Right-hand side, shape ``(batch, n, m)``.
 
         Returns:
-            Solution ``x = H^{-1} b``, or zeros if Cholesky fails.
+            Solution ``x = H⁻¹ b``, or zeros if Cholesky fails.
         """
         # cholesky_ex returns info=0 on success, nonzero on failure
         U: Float[Tensor, "batch n n"]
@@ -83,15 +82,15 @@ class CholeskySolver(torch.autograd.Function):
         return xs
 
     @staticmethod
-    def backward(ctx: torch.autograd.function.FunctionCtx, grad_x: Float[Tensor, "batch n m"]) -> tuple[Float[Tensor, "batch n n"] | None, Float[Tensor, "batch n m"] | None]:
+    def backward(ctx: Any, *grad_outputs: Any) -> tuple[Float[Tensor, "batch n n"] | None, Float[Tensor, "batch n m"] | None]:
         """Compute gradients through the linear solve.
 
         Uses the implicit function theorem:
-        ``dL/dH = -x * (H^{-1} dL/dx)^T`` and ``dL/db = H^{-1} dL/dx``.
+        ``dL/dH = -x · (H⁻¹ dL/dx)ᵀ`` and ``dL/db = H⁻¹ dL/dx``.
 
         Args:
             ctx: Autograd context with saved tensors.
-            grad_x: Upstream gradient w.r.t. the solution ``x``.
+            *grad_outputs: Upstream gradient w.r.t. the solution ``x``.
 
         Returns:
             Gradients ``(dL/dH, dL/db)``, or ``(None, None)`` if the
@@ -103,6 +102,7 @@ class CholeskySolver(torch.autograd.Function):
         U: Float[Tensor, "batch n n"]
         xs: Float[Tensor, "batch n m"]
         U, xs = ctx.saved_tensors
+        grad_x: Tensor = grad_outputs[0]
         dz: Float[Tensor, "batch n m"] = torch.cholesky_solve(grad_x, U)
         dH: Float[Tensor, "batch n n"] = -torch.matmul(xs, dz.transpose(-1,-2))
 
@@ -198,7 +198,7 @@ def pose_retr(
 
     Accumulates per-pose Lie algebra updates ``dx`` via scatter-add (in
     case multiple edges contribute to the same pose), then applies the
-    retraction ``pose_new = pose * exp(accumulated_dx)`` via lietorch's
+    retraction ``pose_new = pose · exp(accumulated_dx)`` via lietorch's
     ``.retr()`` method.
 
     Args:
@@ -215,7 +215,7 @@ def pose_retr(
 
 
 # ---------------------------------------------------------------------------
-# Block matrix operations for the 6x6 pose blocks
+# Block matrix operations for the 6×6 pose blocks
 # ---------------------------------------------------------------------------
 
 def block_matmul(
@@ -229,8 +229,8 @@ def block_matmul(
     then reshapes back.
 
     For DPVO, this multiplies ``(n, m, 6, 6)`` blocks -- e.g. computing
-    the Schur complement ``E * Q * E^T`` or the back-substitution
-    ``E^T * dX``.
+    the Schur complement ``E · Q · Eᵀ`` or the back-substitution
+    ``Eᵀ · dX``.
 
     Args:
         A: Left block matrix, shape ``(b, n1, m1, p1, q1)``.
@@ -267,7 +267,7 @@ def block_solve(
     """Solve a block linear system ``A x = B`` with Levenberg-Marquardt damping.
 
     Reshapes to standard matrix form, adds Levenberg-Marquardt-style
-    regularisation ``(ep + lm * diag(A)) * I`` to the diagonal for
+    regularisation ``(ep + lm · diag(A)) · I`` to the diagonal for
     numerical stability, then solves via :class:`CholeskySolver`.
 
     Args:
@@ -298,7 +298,7 @@ def block_solve(
     # This ensures A' is positive-definite even when A is near-singular.
     A: Float[Tensor, "b n1_p1 m1_q1"] = A + (ep + lm * A) * torch.eye(n1*p1, device=A.device)
 
-    X: Float[Tensor, "b n1_p1 m2_q2"] = CholeskySolver.apply(A, B)
+    X: Float[Tensor, "b n1_p1 m2_q2"] = CholeskySolver.apply(A, B)  # pyrefly: ignore[bad-assignment]
     return X.reshape(b, n1, p1, m2, q2).permute(0, 1, 3, 2, 4)
 
 
@@ -353,15 +353,15 @@ def BA(
     2. **Filter** edges: discard points behind the camera (``Z < 0.2``),
        with large residuals (> 250 px), or outside ``bounds``.
     3. **Assemble** the weighted normal equations:
-       - ``B``: 6x6 pose-pose Hessian blocks (scatter-accumulated per pose pair).
-       - ``E``: 6x1 pose-depth cross terms.
-       - ``C``: 1x1 depth-depth diagonal (scalar per patch).
+       - ``B``: 6×6 pose-pose Hessian blocks (scatter-accumulated per pose pair).
+       - ``E``: 6×1 pose-depth cross terms.
+       - ``C``: 1×1 depth-depth diagonal (scalar per patch).
        - ``v``, ``w``: gradient vectors.
     4. **Schur complement**: eliminate depths to get
-       ``S = B - E * C^{-1} * E^T`` and solve ``S * dX = v - E * C^{-1} * w``
+       ``S = B - E · C⁻¹ · Eᵀ`` and solve ``S · dX = v - E · C⁻¹ · w``
        for pose updates.
     5. **Back-substitute** to recover depth updates:
-       ``dZ = C^{-1} * (w - E^T * dX)``.
+       ``dZ = C⁻¹ · (w - Eᵀ · dX)``.
     6. **Apply retractions**: SE3 exponential map for poses, additive
        update (clamped to [1e-3, 10]) for inverse depths.
 
@@ -392,7 +392,7 @@ def BA(
         A 2-tuple of ``(updated_poses, updated_patches)``.
     """
     b: int = 1
-    n: int = max(ii.max().item(), jj.max().item()) + 1
+    n: int = int(max(ii.max().item(), jj.max().item())) + 1
 
     # ----- Step 1: Reproject all edges and compute Jacobians -----
     coords: Float[Tensor, "1 n_edges ps ps 2"]
@@ -429,22 +429,22 @@ def BA(
     weights: Float[Tensor, "1 n_edges 2 1"] = (v[...,None] * weights).unsqueeze(dim=-1)
 
     # ----- Step 3: Assemble the normal equations -----
-    # Weighted Jacobian transposes: w * J^T
+    # Weighted Jacobian transposes: w · Jᵀ
     wJiT: Float[Tensor, "1 n_edges 6 2"] = (weights * Ji).transpose(2,3)
     wJjT: Float[Tensor, "1 n_edges 6 2"] = (weights * Jj).transpose(2,3)
     wJzT: Float[Tensor, "1 n_edges 1 2"] = (weights * Jz).transpose(2,3)
 
-    # Pose-pose Hessian blocks: B = J^T W J (accumulated for all 4 (i,j) combinations)
+    # Pose-pose Hessian blocks: B = Jᵀ W J (accumulated for all 4 (i, j) combinations)
     Bii: Float[Tensor, "1 n_edges 6 6"] = torch.matmul(wJiT, Ji)
     Bij: Float[Tensor, "1 n_edges 6 6"] = torch.matmul(wJiT, Jj)
     Bji: Float[Tensor, "1 n_edges 6 6"] = torch.matmul(wJjT, Ji)
     Bjj: Float[Tensor, "1 n_edges 6 6"] = torch.matmul(wJjT, Jj)
 
-    # Pose-depth cross terms: E = J_pose^T W J_depth
+    # Pose-depth cross terms: E = J_poseᵀ W J_depth
     Eik: Float[Tensor, "1 n_edges 6 1"] = torch.matmul(wJiT, Jz)
     Ejk: Float[Tensor, "1 n_edges 6 1"] = torch.matmul(wJjT, Jz)
 
-    # Gradient vectors: v = J_pose^T W r,  w = J_depth^T W r
+    # Gradient vectors: v = J_poseᵀ W r,  w = J_depthᵀ W r
     vi: Float[Tensor, "1 n_edges 6 1"] = torch.matmul(wJiT, r)
     vj: Float[Tensor, "1 n_edges 6 1"] = torch.matmul(wJjT, r)
 
@@ -472,7 +472,7 @@ def BA(
     E: Float[Tensor, "1 n m 6 1"] = safe_scatter_add_mat(Eik, ii, kk, n, m).view(b, n, m, 6, 1) + \
         safe_scatter_add_mat(Ejk, jj, kk, n, m).view(b, n, m, 6, 1)
 
-    # C is diagonal (scalar per patch): J_z^T W J_z
+    # C is diagonal (scalar per patch): J_zᵀ W J_z
     C: Float[Tensor, "1 m 1 1"] = safe_scatter_add_vec(torch.matmul(wJzT, Jz), kk, m)
 
     v: Float[Tensor, "1 n 1 6 1"] = safe_scatter_add_vec(vi, ii, n).view(b, n, 1, 6, 1) + \
@@ -481,31 +481,32 @@ def BA(
     w: Float[Tensor, "1 m 1 1"] = safe_scatter_add_vec(torch.matmul(wJzT,  r), kk, m)
 
     if isinstance(lmbda, Tensor):
-        lmbda: Float[Tensor, "..."] = lmbda.reshape(*C.shape)
+        lmbda = lmbda.reshape(*C.shape)
 
-    # Q = (C + lambda)^{-1}: inverse of the damped depth diagonal
+    # Q = (C + λ)⁻¹: inverse of the damped depth diagonal
     Q: Float[Tensor, "1 m 1 1"] = 1.0 / (C + lmbda)
 
     # ----- Step 4 & 5: Schur complement solve -----
-    # EQ = E * Q (pre-multiply for efficiency)
+    # EQ = E · Q (pre-multiply for efficiency)
     EQ: Float[Tensor, "1 n m 6 1"] = E * Q[:,None]
 
+    dX: Float[Tensor, "1 n_poses 6"] | None = None
     if structure_only or n == 0:
         # Structure-only: just update depths, no pose optimisation
         dZ: Float[Tensor, "1 m 1 1"] = (Q * w).view(b, -1, 1, 1)
 
     else:
-        # Schur complement: S = B - E * Q * E^T
+        # Schur complement: S = B - E · Q · Eᵀ
         S: Float[Tensor, "1 n n 6 6"] = B - block_matmul(EQ, E.permute(0,2,1,4,3))
-        # Reduced RHS: y = v - E * Q * w
+        # Reduced RHS: y = v - E · Q · w
         y: Float[Tensor, "1 n 1 6 1"] = v - block_matmul(EQ, w.unsqueeze(dim=2))
-        # Solve for pose updates: S * dX = y
-        dX: Float[Tensor, "1 n 1 6 1"] = block_solve(S, y, ep=ep, lm=1e-4)
+        # Solve for pose updates: S · dX = y
+        dX = block_solve(S, y, ep=ep, lm=1e-4)
 
-        # Back-substitute for depth updates: dZ = Q * (w - E^T * dX)
-        dZ: Float[Tensor, "1 m 1 1"] = Q * (w - block_matmul(E.permute(0,2,1,4,3), dX).squeeze(dim=-1))
-        dX: Float[Tensor, "1 n_poses 6"] = dX.view(b, -1, 6)
-        dZ: Float[Tensor, "1 m 1 1"] = dZ.view(b, -1, 1, 1)
+        # Back-substitute for depth updates: dZ = Q · (w - Eᵀ · dX)
+        dZ = Q * (w - block_matmul(E.permute(0,2,1,4,3), dX).squeeze(dim=-1))
+        dX = dX.view(b, -1, 6)
+        dZ = dZ.view(b, -1, 1, 1)
 
     # ----- Step 6: Apply retractions -----
     x: Float[Tensor, "1 n_patches ps ps"]
@@ -517,7 +518,8 @@ def BA(
     patches: Float[Tensor, "1 n_patches 3 ps ps"] = torch.stack([x, y_coord, disps], dim=2)
 
     if not structure_only and n > 0:
-        # SE3 retraction: pose_new = pose * exp(dX) for each optimised pose
-        poses: SE3 = pose_retr(poses, dX, fixedp + torch.arange(n))
+        # SE3 retraction: pose_new = pose · exp(dX) for each optimised pose
+        assert dX is not None
+        poses = pose_retr(poses, dX, fixedp + torch.arange(n))
 
     return poses, patches
