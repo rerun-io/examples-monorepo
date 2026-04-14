@@ -9,11 +9,13 @@ Two high-level convenience functions are exposed:
   optional bilinear interpolation mode.
 """
 
+from typing import Any
+
 import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
-from dpvo import _cuda_corr  # pyrefly: ignore[missing-module-attribute]
+from dpvo import _cuda_corr
 
 
 class CorrLayer(torch.autograd.Function):
@@ -29,7 +31,7 @@ class CorrLayer(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        ctx: torch.autograd.function.FunctionCtx,
+        ctx: Any,
         fmap1: Float[Tensor, "1 mem channels h4 w4"],
         fmap2: Float[Tensor, "1 mem channels h8 w8"],
         coords: Float[Tensor, "1 n_edges 2 ps ps"],
@@ -55,17 +57,14 @@ class CorrLayer(torch.autograd.Function):
             Correlation volume of shape ``(1, n_edges, 2R + 1, 2R + 1, ps, ps)``.
         """
         ctx.save_for_backward(fmap1, fmap2, coords, ii, jj)
-        ctx.radius = radius  # pyrefly: ignore[missing-attribute]
-        ctx.dropout = dropout  # pyrefly: ignore[missing-attribute]
+        ctx.radius = radius
+        ctx.dropout = dropout
         corr, = _cuda_corr.forward(fmap1, fmap2, coords, ii, jj, radius)
 
         return corr
 
     @staticmethod
-    def backward(  # pyrefly: ignore[bad-override]
-        ctx: torch.autograd.function.FunctionCtx,
-        grad: Float[Tensor, "..."],
-    ) -> tuple[Float[Tensor, "..."], Float[Tensor, "..."], None, None, None, None, None]:
+    def backward(ctx: Any, *grad_outputs: Any) -> tuple[Float[Tensor, "..."], Float[Tensor, "..."], None, None, None, None, None]:
         """Backward pass for correlation -- distributes gradients to feature maps.
 
         When ``dropout < 1.0``, a random subset of edges is kept so that
@@ -73,22 +72,23 @@ class CorrLayer(torch.autograd.Function):
 
         Args:
             ctx: Autograd context containing saved tensors and attributes.
-            grad: Upstream gradient w.r.t. the correlation output.
+            *grad_outputs: Upstream gradient w.r.t. the correlation output.
 
         Returns:
             Gradients for ``(fmap1, fmap2)`` and ``None`` for non-differentiable
             inputs (coords, ii, jj, radius, dropout).
         """
+        grad: Tensor = grad_outputs[0]
         fmap1: Float[Tensor, "..."]
         fmap2: Float[Tensor, "..."]
         coords: Float[Tensor, "..."]
         ii: Int[Tensor, "..."]
         jj: Int[Tensor, "..."]
-        fmap1, fmap2, coords, ii, jj = ctx.saved_tensors  # pyrefly: ignore[missing-attribute]
+        fmap1, fmap2, coords, ii, jj = ctx.saved_tensors
 
         # Optionally drop a random subset of edges to save compute
-        if ctx.dropout < 1:  # pyrefly: ignore[missing-attribute]
-            perm: Bool[Tensor, "n_edges"] = torch.rand(len(ii), device="cuda") < ctx.dropout  # pyrefly: ignore[missing-attribute]
+        if ctx.dropout < 1:
+            perm: Bool[Tensor, "n_edges"] = torch.rand(len(ii), device="cuda") < ctx.dropout
             coords = coords[:,perm]
             grad = grad[:,perm]
             ii = ii[perm]
@@ -97,7 +97,7 @@ class CorrLayer(torch.autograd.Function):
         fmap1_grad: Float[Tensor, "..."]
         fmap2_grad: Float[Tensor, "..."]
         fmap1_grad, fmap2_grad = \
-            _cuda_corr.backward(fmap1, fmap2, coords, ii, jj, grad, ctx.radius)  # pyrefly: ignore[missing-attribute]
+            _cuda_corr.backward(fmap1, fmap2, coords, ii, jj, grad, ctx.radius)
 
         return fmap1_grad, fmap2_grad, None, None, None, None, None
 
@@ -113,7 +113,7 @@ class PatchLayer(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        ctx: torch.autograd.function.FunctionCtx,
+        ctx: Any,
         net: Float[Tensor, "..."],
         coords: Float[Tensor, "..."],
         radius: int,
@@ -129,7 +129,7 @@ class PatchLayer(torch.autograd.Function):
         Returns:
             Extracted patches tensor.
         """
-        ctx.radius = radius  # pyrefly: ignore[missing-attribute]
+        ctx.radius = radius
         ctx.save_for_backward(net, coords)
 
         patches: Float[Tensor, "..."]
@@ -137,25 +137,23 @@ class PatchLayer(torch.autograd.Function):
         return patches
 
     @staticmethod
-    def backward(  # pyrefly: ignore[bad-override]
-        ctx: torch.autograd.function.FunctionCtx,
-        grad: Float[Tensor, "..."],
-    ) -> tuple[Float[Tensor, "..."], None, None]:
+    def backward(ctx: Any, *grad_outputs: Any) -> tuple[Float[Tensor, "..."], None, None]:
         """Backward pass for patchification.
 
         Args:
             ctx: Autograd context containing the saved feature tensor and
                 coordinates.
-            grad: Upstream gradient w.r.t. the extracted patches.
+            *grad_outputs: Upstream gradient w.r.t. the extracted patches.
 
         Returns:
             Gradient for ``net`` and ``None`` for the non-differentiable
             inputs (coords, radius).
         """
+        grad: Tensor = grad_outputs[0]
         net: Float[Tensor, "..."]
         coords: Float[Tensor, "..."]
-        net, coords = ctx.saved_tensors  # pyrefly: ignore[missing-attribute]
-        grad, = _cuda_corr.patchify_backward(net, coords, grad, ctx.radius)  # pyrefly: ignore[missing-attribute]
+        net, coords = ctx.saved_tensors
+        grad, = _cuda_corr.patchify_backward(net, coords, grad, ctx.radius)
 
         return grad, None, None
 
@@ -178,7 +176,9 @@ def patchify(net: Float[Tensor, "..."], coords: Float[Tensor, "..."], radius: in
     Returns:
         Interpolated (or raw) feature patches.
     """
-    patches: Float[Tensor, "..."] = PatchLayer.apply(net, coords, radius)  # pyrefly: ignore[bad-assignment]
+    patches_result: Tensor | None = PatchLayer.apply(net, coords, radius)
+    assert isinstance(patches_result, Tensor)
+    patches: Float[Tensor, "..."] = patches_result
 
     if mode == 'bilinear':
         # Compute sub-pixel offsets and perform bilinear interpolation
@@ -224,4 +224,4 @@ def corr(
     Returns:
         Correlation volume tensor.
     """
-    return CorrLayer.apply(fmap1, fmap2, coords, ii, jj, radius, dropout)  # pyrefly: ignore[bad-return]
+    return CorrLayer.apply(fmap1, fmap2, coords, ii, jj, radius, dropout)

@@ -516,7 +516,8 @@ def run_dpvo_pipeline(
             pbar.update(1)
             yield f"Frame {frame_idx}/{total_frames}"
 
-    reader.kill()
+    if reader.is_alive():
+        reader.kill()
     reader.join()
 
     if slam is None:

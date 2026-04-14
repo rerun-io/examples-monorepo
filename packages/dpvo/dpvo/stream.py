@@ -54,7 +54,7 @@ def load_calib(calib: str) -> tuple[Float64[ndarray, "3 3"], Float64[ndarray, "n
 
 
 def image_stream(
-    queue: Queue, imagedir: str, calib: str | None, stride: int, skip: int = 0
+    queue: Queue[tuple[int, ndarray | None, ndarray | None]], imagedir: str, calib: str | None, stride: int, skip: int = 0
 ) -> None:
     """Read frames from a directory of images and push them to a queue.
 
@@ -116,7 +116,7 @@ def image_stream(
 
 
 def video_stream(
-    queue: Queue, imagedir: str, calib: str | None, stride: int, skip: int = 0
+    queue: Queue[tuple[int, ndarray | None, ndarray | None]], imagedir: str, calib: str | None, stride: int, skip: int = 0
 ) -> None:
     """Read frames from a video file and push them to a queue.
 

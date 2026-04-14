@@ -28,6 +28,8 @@ Updates are applied via retraction on SE3 (exponential map) for poses
 and additive update for inverse depths.
 """
 
+from typing import Any
+
 import torch
 from jaxtyping import Bool, Float, Int
 from lietorch import SE3
@@ -52,7 +54,7 @@ class CholeskySolver(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx: torch.autograd.function.FunctionCtx, H: Float[Tensor, "batch n n"], b: Float[Tensor, "batch n m"]) -> Float[Tensor, "batch n m"]:
+    def forward(ctx: Any, H: Float[Tensor, "batch n n"], b: Float[Tensor, "batch n m"]) -> Float[Tensor, "batch n m"]:
         """Solve H x = b via Cholesky decomposition.
 
         Args:
@@ -70,17 +72,17 @@ class CholeskySolver(torch.autograd.Function):
         U, info = torch.linalg.cholesky_ex(H)
 
         if torch.any(info):
-            ctx.failed = True  # pyrefly: ignore[missing-attribute]
+            ctx.failed = True
             return torch.zeros_like(b)
 
         xs: Float[Tensor, "batch n m"] = torch.cholesky_solve(b, U)
         ctx.save_for_backward(U, xs)
-        ctx.failed = False  # pyrefly: ignore[missing-attribute]
+        ctx.failed = False
 
         return xs
 
     @staticmethod
-    def backward(ctx: torch.autograd.function.FunctionCtx, grad_x: Float[Tensor, "batch n m"]) -> tuple[Float[Tensor, "batch n n"] | None, Float[Tensor, "batch n m"] | None]:  # pyrefly: ignore[bad-override]
+    def backward(ctx: Any, *grad_outputs: Any) -> tuple[Float[Tensor, "batch n n"] | None, Float[Tensor, "batch n m"] | None]:
         """Compute gradients through the linear solve.
 
         Uses the implicit function theorem:
@@ -88,18 +90,19 @@ class CholeskySolver(torch.autograd.Function):
 
         Args:
             ctx: Autograd context with saved tensors.
-            grad_x: Upstream gradient w.r.t. the solution ``x``.
+            *grad_outputs: Upstream gradient w.r.t. the solution ``x``.
 
         Returns:
             Gradients ``(dL/dH, dL/db)``, or ``(None, None)`` if the
             forward Cholesky failed.
         """
-        if ctx.failed:  # pyrefly: ignore[missing-attribute]
+        if ctx.failed:
             return None, None
 
         U: Float[Tensor, "batch n n"]
         xs: Float[Tensor, "batch n m"]
-        U, xs = ctx.saved_tensors  # pyrefly: ignore[missing-attribute]
+        U, xs = ctx.saved_tensors
+        grad_x: Tensor = grad_outputs[0]
         dz: Float[Tensor, "batch n m"] = torch.cholesky_solve(grad_x, U)
         dH: Float[Tensor, "batch n n"] = -torch.matmul(xs, dz.transpose(-1,-2))
 

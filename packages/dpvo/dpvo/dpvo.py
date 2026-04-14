@@ -119,7 +119,7 @@ class DPVO:
         self.ht: int = ht  # image height
         self.wd: int = wd  # image width
 
-        # Network Dimenions, gotten when self.load_weights() is called
+        # Network dimensions, obtained when self.load_weights() is called
         DIM: int = self.DIM
         RES: int = self.RES
 
