@@ -276,21 +276,21 @@ class DPVO:
             m: Boolean mask; ``True`` for edges to remove.
             store: If ``True``, save removed edges as inactive (for global BA).
         """
-        if store and self.pg.weight.shape[1] > 0:
-            assert self.pg.ii.numel() == self.pg.weight.shape[1]
+        assert self.pg.ii.numel() == self.pg.weight.shape[1]
+        if store:
             self.pg.ii_inac = torch.cat((self.pg.ii_inac, self.pg.ii[m]))
             self.pg.jj_inac = torch.cat((self.pg.jj_inac, self.pg.jj[m]))
             self.pg.kk_inac = torch.cat((self.pg.kk_inac, self.pg.kk[m]))
             self.pg.weight_inac = torch.cat((self.pg.weight_inac, self.pg.weight[:, m]), dim=1)
             self.pg.target_inac = torch.cat((self.pg.target_inac, self.pg.target[:, m]), dim=1)
-        if self.pg.weight.shape[1] > 0:
-            self.pg.weight = self.pg.weight[:, ~m]
-            self.pg.target = self.pg.target[:, ~m]
+        self.pg.weight = self.pg.weight[:, ~m]
+        self.pg.target = self.pg.target[:, ~m]
 
         self.pg.ii = self.pg.ii[~m]
         self.pg.jj = self.pg.jj[~m]
         self.pg.kk = self.pg.kk[~m]
         self.pg.net = self.pg.net[:, ~m]
+        assert self.pg.ii.numel() == self.pg.weight.shape[1]
 
     def motion_probe(self) -> Float[Tensor, ""]:
         """Check if there is sufficient parallax for system initialization."""
@@ -366,7 +366,7 @@ class DPVO:
                 self.pg.jj > (self.n - self.cfg.optimization_window)
             )
             to_remove = to_remove & ~lc_edges
-        self.remove_factors(to_remove, store=self.cfg.loop_closure)
+        self.remove_factors(to_remove, store=True)
 
     def __run_global_BA(self) -> None:
         """Global bundle adjustment including both active and inactive edges."""

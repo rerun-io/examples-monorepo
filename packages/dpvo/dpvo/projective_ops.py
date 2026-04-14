@@ -380,8 +380,8 @@ def flow_mag(poses: SE3, patches: Float[Tensor, "..."], intrinsics: Float[Tensor
     """
     # Project patches from ii -> ii (identity, gives reference coordinates)
     coords0: Float[Tensor, "..."] = transform(poses, patches, intrinsics, ii, ii, kk)
-    # Project patches from ii -> jj with full SE3 motion
-    coords1: Float[Tensor, "..."] = transform(poses, patches, intrinsics, ii, jj, kk, tonly=False)
+    # Project patches from ii -> jj with full SE3 motion (with depth validity)
+    coords1, val = transform(poses, patches, intrinsics, ii, jj, kk, tonly=False, valid=True)
     # Project patches from ii -> jj with translation only (no rotation)
     coords2: Float[Tensor, "..."] = transform(poses, patches, intrinsics, ii, jj, kk, tonly=True)
 
@@ -389,9 +389,7 @@ def flow_mag(poses: SE3, patches: Float[Tensor, "..."], intrinsics: Float[Tensor
     flow2: Float[Tensor, "..."] = (coords2 - coords0).norm(dim=-1)
 
     flow: Float[Tensor, "..."] = beta * flow1 + (1 - beta) * flow2
-    valid: Float[Tensor, "..."] = (flow1.isfinite() & flow2.isfinite()).float()
-
-    return flow, valid
+    return flow, (val > 0.5)
 
 
 def induced_flow(

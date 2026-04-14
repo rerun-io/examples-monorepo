@@ -119,15 +119,19 @@ class DPVOConfig:
 
     @classmethod
     def slam(cls) -> "DPVOConfig":
-        """SLAM preset with proximity-based loop closure enabled."""
+        """SLAM preset: accurate() base + proximity loop closure.
+
+        Uses the same VO parameters as ``accurate()`` (matching upstream
+        ``config/default.yaml``) with proximity loop closure enabled.
+        """
         return cls(
             buffer_size=4096,
-            patches_per_frame=80,
-            removal_window=20,
-            optimization_window=12,
-            patch_lifetime=12,
-            keyframe_thresh=12.5,
-            gradient_bias=True,
+            patches_per_frame=96,
+            removal_window=22,
+            optimization_window=10,
+            patch_lifetime=13,
+            keyframe_thresh=15.0,
+            gradient_bias=False,
             mixed_precision=True,
             loop_closure=True,
             backend_thresh=64.0,
@@ -137,15 +141,15 @@ class DPVOConfig:
 
     @classmethod
     def slam_classic(cls) -> "DPVOConfig":
-        """SLAM preset with both proximity and classical (DBoW2) loop closure."""
+        """SLAM preset: accurate() base + proximity + classical loop closure."""
         return cls(
             buffer_size=4096,
-            patches_per_frame=80,
-            removal_window=20,
-            optimization_window=12,
-            patch_lifetime=12,
-            keyframe_thresh=12.5,
-            gradient_bias=True,
+            patches_per_frame=96,
+            removal_window=22,
+            optimization_window=10,
+            patch_lifetime=13,
+            keyframe_thresh=15.0,
+            gradient_bias=False,
             mixed_precision=True,
             loop_closure=True,
             backend_thresh=64.0,
