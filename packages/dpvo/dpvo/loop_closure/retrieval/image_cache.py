@@ -10,7 +10,6 @@ from multiprocessing import Pool
 from tempfile import TemporaryDirectory
 
 import cv2
-import kornia as K
 import numpy as np
 from einops import parse_shape
 from torch import Tensor
@@ -48,6 +47,8 @@ class ImageCache:
         self.write_result = self.writer_pool.apply_async(cv2.imwrite, [filepath, img, JPEG_QUALITY])
 
     def load_frames(self, idxs: list[int], device: str = "cuda") -> Tensor:
+        import kornia as K
+
         self._wait()
         assert np.all(self.stored_indices[idxs])
         frame_list = [f"{self.tmpdir.name}/{i:08d}{IMEXT}" for i in idxs]
