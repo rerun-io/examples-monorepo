@@ -534,7 +534,18 @@ def run_dpvo_pipeline(
 
     with FrameReader(imagedir, calib, stride, skip) as (queue, total_frames):
 
-        rr.log(f"{parent_log_path}", rr.ViewCoordinates.RDF, static=True)
+        # Log ViewCoordinates on the root entity, NOT on parent_log_path.
+        # The orient Transform3D goes on parent_log_path, and per rerun#9244
+        # a transform on the view origin entity is invisible.  By putting
+        # ViewCoordinates on "/" and the Spatial3DView origin at "/", the
+        # orient transform on parent_log_path becomes visible.
+        rr.log("/", rr.ViewCoordinates.RDF, static=True)
+        rr.send_blueprint(
+            rr.blueprint.Blueprint(
+                rr.blueprint.Spatial3DView(origin="/"),
+                auto_layout=True,
+            )
+        )
 
         start: float = timer()
 
