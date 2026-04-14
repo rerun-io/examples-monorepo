@@ -1,7 +1,7 @@
 """DBoW2-based image retrieval for classical loop closure.
 
 Runs the DBoW2 vocabulary tree in a separate process for async operation.
-Requires the ``dpretrieval`` C++ extension (built from third_party/).
+Requires the ``dpretrieval`` workspace package.
 """
 
 import os

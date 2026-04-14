@@ -1,0 +1,32 @@
+# rattler-build recipe for dpretrieval
+# Builds DBoW2 (bag-of-words image retrieval) as a static library and links it
+# into a pybind11 Python extension module for ORB-based loop closure detection.
+package:
+  name: dpretrieval
+  version: "0.1.0"
+
+source:
+  path: .
+
+build:
+  number: 0
+  script:
+    # Clone the DBoW2 library (Lipson's fork used by DPV-SLAM)
+    - git clone --depth 1 https://github.com/lahavlipson/DBoW2.git DBoW2
+    - cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$PREFIX -GNinja
+    - cmake --build build
+    - cmake --install build
+
+requirements:
+  build:
+    - ${{ compiler('cxx') }}
+    - cmake
+    - ninja
+    - git
+  host:
+    - python 3.11.*
+    - pybind11
+    - libopencv
+  run:
+    - python 3.11.*
+    - libopencv

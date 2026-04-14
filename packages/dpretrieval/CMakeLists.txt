@@ -1,13 +1,9 @@
 # Build dpretrieval: a pybind11 module wrapping DBoW2 for ORB-based image retrieval.
 #
-# This builds DBoW2 as a static library and links it directly into the
-# pybind11 module, avoiding a separate install step.
+# DBoW2 is built as a static library and linked directly into the pybind11
+# module, avoiding a separate shared library install step.
 #
-# Usage (from packages/dpvo/):
-#   mkdir -p third_party/build && cd third_party/build
-#   cmake .. -DPYTHON_EXECUTABLE=$(which python)
-#   make -j$(nproc)
-#   # produces dpretrieval*.so in third_party/build/
+# DBoW2/ is cloned at build time by the recipe.yaml build script.
 
 cmake_minimum_required(VERSION 3.14...3.28)
 project(dpretrieval LANGUAGES CXX)
@@ -22,18 +18,16 @@ endif()
 # ── OpenCV ──────────────────────────────────────────────────────────────
 find_package(OpenCV REQUIRED COMPONENTS core features2d highgui)
 
-# ── pybind11 ────────────────────────────────────────────────────────────
-# Try system/conda pybind11 first, fall back to fetching it
-find_package(pybind11 QUIET)
-if(NOT pybind11_FOUND)
-  include(FetchContent)
-  FetchContent_Declare(
-    pybind11
-    GIT_REPOSITORY https://github.com/pybind/pybind11.git
-    GIT_TAG        v2.13.6
-  )
-  FetchContent_MakeAvailable(pybind11)
-endif()
+# ── pybind11 (provided by conda) ─────────────────────────────────────
+find_package(pybind11 REQUIRED)
+
+# ── Python (for install destination) ──────────────────────────────────
+find_package(Python REQUIRED COMPONENTS Interpreter)
+execute_process(
+  COMMAND ${Python_EXECUTABLE} -c "import site; print(site.getsitepackages()[0])"
+  OUTPUT_VARIABLE SP_DIR
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+)
 
 # ── DBoW2 (static library) ─────────────────────────────────────────────
 set(DBOW2_SRCS
@@ -51,6 +45,8 @@ target_include_directories(DBoW2 PUBLIC DBoW2/include DBoW2/include/DBoW2)
 target_link_libraries(DBoW2 PUBLIC ${OpenCV_LIBS})
 
 # ── dpretrieval pybind11 module ─────────────────────────────────────────
-pybind11_add_module(dpretrieval dpretrieval/src/main.cpp)
+pybind11_add_module(dpretrieval src/main.cpp)
 target_include_directories(dpretrieval PRIVATE DBoW2/include/DBoW2)
 target_link_libraries(dpretrieval PRIVATE DBoW2 ${OpenCV_LIBS})
+
+install(TARGETS dpretrieval LIBRARY DESTINATION ${SP_DIR})
