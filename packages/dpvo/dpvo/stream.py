@@ -12,6 +12,8 @@ as required by the stride-4 feature extractor (which itself has a stride-2
 convolution followed by stride-2 pooling).
 """
 
+from __future__ import annotations
+
 from itertools import chain
 from multiprocessing.queues import Queue
 from pathlib import Path

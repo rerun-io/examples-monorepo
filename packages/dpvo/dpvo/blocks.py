@@ -248,7 +248,9 @@ class GradientClip(nn.Module):
         super().__init__()
 
     def forward(self, x: Float[Tensor, "*shape"]) -> Float[Tensor, "*shape"]:
-        return GradClip.apply(x)
+        result: Tensor | None = GradClip.apply(x)
+        assert isinstance(result, Tensor)
+        return result
 
 
 class GradZero(torch.autograd.Function):
@@ -279,7 +281,9 @@ class GradientZero(nn.Module):
         super().__init__()
 
     def forward(self, x: Float[Tensor, "*shape"]) -> Float[Tensor, "*shape"]:
-        return GradZero.apply(x)
+        result: Tensor | None = GradZero.apply(x)
+        assert isinstance(result, Tensor)
+        return result
 
 
 class GradMag(torch.autograd.Function):
