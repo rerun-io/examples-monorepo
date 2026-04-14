@@ -366,7 +366,7 @@ class DPVO:
                 self.pg.jj > (self.n - self.cfg.optimization_window)
             )
             to_remove = to_remove & ~lc_edges
-        self.remove_factors(to_remove, store=True)
+        self.remove_factors(to_remove, store=self.cfg.loop_closure)
 
     def __run_global_BA(self) -> None:
         """Global bundle adjustment including both active and inactive edges."""
