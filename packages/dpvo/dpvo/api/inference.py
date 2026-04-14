@@ -33,6 +33,7 @@ from mini_dust3r.api import OptimizedResult, inferece_dust3r
 from mini_dust3r.model import AsymmetricCroCo3DStereo
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
+from simplecv.camera_orient_utils import auto_orient_and_center_poses
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
 from tqdm import tqdm
@@ -127,6 +128,63 @@ class DPVOInferenceConfig:
     """Maximum number of frames to process (0 = no limit)."""
 
 
+# ── Camera orientation ──────────────────────────────────────────────────
+
+# RDF (OpenCV) → RUB (OpenGL) flip: negate Y and Z axes.
+# auto_orient_and_center_poses(method="up") assumes column 1 of the
+# rotation is the camera's up vector, which is true for RUB but not RDF.
+_RDF_TO_RUB: Float64[ndarray, "3 3"] = np.diag([1.0, -1.0, -1.0])
+
+# Recompute the orient transform every N keyframes to amortise the SVD cost.
+_ORIENT_RECOMPUTE_INTERVAL: int = 10
+
+
+def compute_orient_transform(
+    cam_se3_world_buffer: Float32[Tensor, "buffer_size 7"],
+) -> tuple[Float64[ndarray, "3 3"], Float64[ndarray, "3"]] | None:
+    """Compute a gravity-alignment transform from the current pose buffer.
+
+    Converts DPVO's internal cam-from-world (RDF) poses to world-from-camera
+    (RUB), then runs ``auto_orient_and_center_poses(method="up")`` to find
+    a rotation+translation that aligns the reconstruction's up-vector with
+    the viewer's +Y axis.
+
+    Args:
+        cam_se3_world_buffer: The raw pose buffer ``[tx, ty, tz, qx, qy, qz, qw]``
+            in cam-from-world convention (only nonzero slots are used).
+
+    Returns:
+        ``(orient_R, orient_t)`` — a 3x3 rotation and 3-vector translation
+        to log on the scene root via ``rr.Transform3D``.  Returns ``None``
+        if fewer than 3 nonzero poses are available.
+    """
+    poses_mask: Tensor = ~(cam_se3_world_buffer[:, :6] == 0).all(dim=1)
+    nonzero_poses: Float32[ndarray, "n 7"] = cam_se3_world_buffer[poses_mask].numpy(force=True)
+
+    if nonzero_poses.shape[0] < 3:
+        return None
+
+    # Build N × 4×4 world_T_cam matrices in RUB convention
+    n: int = nonzero_poses.shape[0]
+    world_T_cam_rub: Float64[ndarray, "n 4 4"] = np.zeros((n, 4, 4))
+    for i in range(n):
+        cam_R_world: Float64[ndarray, "3 3"] = Rotation.from_quat(nonzero_poses[i, 3:]).as_matrix()
+        cam_T_world: Float64[ndarray, "4 4"] = np.eye(4)
+        cam_T_world[:3, :3] = cam_R_world
+        cam_T_world[:3, 3] = nonzero_poses[i, :3]
+        world_T_cam: Float64[ndarray, "4 4"] = np.linalg.inv(cam_T_world)
+        # RDF → RUB: flip the camera axes so column 1 is "up"
+        world_T_cam[:3, :3] = world_T_cam[:3, :3] @ _RDF_TO_RUB
+        world_T_cam_rub[i] = world_T_cam
+
+    orient_34 = auto_orient_and_center_poses(
+        world_T_cam_rub.astype(np.float32), method="up", center_method="poses",
+    ).transform
+    orient_R: Float64[ndarray, "3 3"] = orient_34[:, :3]
+    orient_t: Float64[ndarray, "3"] = orient_34[:, 3]
+    return orient_R, orient_t
+
+
 # ── Rerun logging helpers ───────────────────────────────────────────────
 
 
@@ -138,8 +196,9 @@ def log_trajectory(
     intri_np: Float32[ndarray, "4"],
     bgr_hw3: UInt8[ndarray, "h w 3"],
     path_list: list[list[float]],
+    last_orient_n: int = 0,
     jpg_quality: int = 90,
-) -> list[list[float]]:
+) -> tuple[list[list[float]], int]:
     """Log the current SLAM state to Rerun for live visualization.
 
     For the most recent keyframe this logs:
@@ -160,10 +219,13 @@ def log_trajectory(
         bgr_hw3: Current frame in BGR channel order.
         path_list: Running list of world-space camera positions; updated
             in-place and returned.
+        last_orient_n: Number of poses used in the last orient recomputation.
+            Pass 0 on the first call.
         jpg_quality: JPEG compression quality for the image log (0--100).
 
     Returns:
-        The updated ``path_list`` with the latest camera position appended.
+        Tuple of ``(path_list, last_orient_n)`` — the updated path list and
+        the pose count at which the orient transform was last recomputed.
     """
     cam_log_path: str = f"{parent_log_path}/camera"
     rr.log(
@@ -189,7 +251,7 @@ def log_trajectory(
     nonzero_points: Float32[Tensor, "num_nonzero 3"] = points[points_mask]
 
     if nonzero_poses.shape[0] == 0:
-        return path_list
+        return path_list, last_orient_n
 
     # Extract the most recent keyframe pose.
     # poses_ stores cam_se3_world (camera-from-world) internally, so the
@@ -262,7 +324,17 @@ def log_trajectory(
             colors=colors_filtered,
         ),
     )
-    return path_list
+
+    # Recompute gravity-alignment transform every N keyframes
+    n_poses: int = nonzero_poses.shape[0]
+    if n_poses - last_orient_n >= _ORIENT_RECOMPUTE_INTERVAL:
+        orient = compute_orient_transform(cam_se3_world_buffer)
+        if orient is not None:
+            orient_R, orient_t = orient
+            rr.log(f"{parent_log_path}", rr.Transform3D(mat3x3=orient_R, translation=orient_t))
+            last_orient_n = n_poses
+
+    return path_list, last_orient_n
 
 
 def log_final(
@@ -297,6 +369,19 @@ def log_final(
             f"{cam_log_path}",
             rr.Transform3D(translation=world_t_cam, mat3x3=world_R_cam, from_parent=False),
         )
+
+    # Gravity-align the final scene using all keyframe poses
+    if final_poses.shape[0] >= 3:
+        n: int = final_poses.shape[0]
+        world_T_cam_rub: Float64[ndarray, "n 4 4"] = np.zeros((n, 4, 4))
+        for i in range(n):
+            world_T_cam_rub[i] = np.eye(4)
+            world_T_cam_rub[i, :3, :3] = Rotation.from_quat(final_poses[i, 3:]).as_matrix() @ _RDF_TO_RUB
+            world_T_cam_rub[i, :3, 3] = final_poses[i, :3]
+        orient_34 = auto_orient_and_center_poses(
+            world_T_cam_rub.astype(np.float32), method="up", center_method="poses",
+        ).transform
+        rr.log(f"{parent_log_path}", rr.Transform3D(mat3x3=orient_34[:, :3], translation=orient_34[:, 3]))
 
 
 # ── Frame I/O helpers ───────────────────────────────────────────────────
@@ -474,6 +559,7 @@ def run_dpvo_pipeline(
 
         # path list for visualizing the trajectory
         path_list: list[list[float]] = []
+        last_orient_n: int = 0
         frame_idx: int = 0
 
         with tqdm(total=total_frames, desc="Processing Frames") as pbar:
@@ -508,7 +594,7 @@ def run_dpvo_pipeline(
                     cam_se3_world_buffer: Float32[Tensor, "buffer_size 7"] = slam.poses_
                     points: Float32[Tensor, "num_points 3"] = slam.points_
                     colors: UInt8[Tensor, "buffer_size num_patches 3"] = slam.colors_
-                    path_list = log_trajectory(
+                    path_list, last_orient_n = log_trajectory(
                         parent_log_path=parent_log_path,
                         cam_se3_world_buffer=cam_se3_world_buffer,
                         points=points,
@@ -516,6 +602,7 @@ def run_dpvo_pipeline(
                         intri_np=intri_np,
                         bgr_hw3=bgr_hw3,
                         path_list=path_list,
+                        last_orient_n=last_orient_n,
                         jpg_quality=jpg_quality,
                     )
 
