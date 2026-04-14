@@ -224,4 +224,6 @@ def corr(
     Returns:
         Correlation volume tensor.
     """
-    return CorrLayer.apply(fmap1, fmap2, coords, ii, jj, radius, dropout)
+    result: Tensor | None = CorrLayer.apply(fmap1, fmap2, coords, ii, jj, radius, dropout)
+    assert isinstance(result, Tensor)
+    return result
