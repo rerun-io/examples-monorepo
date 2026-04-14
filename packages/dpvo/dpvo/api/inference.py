@@ -18,7 +18,6 @@ Typical CLI usage::
 import os
 from collections.abc import Generator
 from dataclasses import dataclass, field
-from multiprocessing import Process, Queue
 from pathlib import Path
 from timeit import default_timer as timer
 from typing import Annotated
@@ -40,7 +39,7 @@ from tqdm import tqdm
 
 from dpvo.config import DPVOConfig
 from dpvo.dpvo import DPVO
-from dpvo.stream import image_stream, video_stream
+from dpvo.stream import FrameReader
 from dpvo.utils import Timer
 
 # ── Tyro subcommand aliases for DPVOConfig presets ──────────────────────
@@ -447,157 +446,106 @@ def run_dpvo_pipeline(
         Status message strings (e.g. ``"Frame 42/200"``).
     """
     slam: DPVO | None = None
-    queue = Queue(maxsize=8)
 
-    stream_fn = image_stream if os.path.isdir(imagedir) else video_stream
-    reader: Process = Process(target=stream_fn, args=(queue, imagedir, calib, stride, skip))
-    reader.daemon = True  # die with parent — prevents zombie GPU processes
-    reader.start()
+    with FrameReader(imagedir, calib, stride, skip) as (queue, total_frames):
 
-    try:
-        yield from _run_dpvo_pipeline_inner(
-            slam=slam,
-            queue=queue,
-            reader=reader,
-            dpvo_config=dpvo_config,
-            network_path=network_path,
-            imagedir=imagedir,
-            calib=calib,
-            stride=stride,
-            skip=skip,
-            dust3r_model=dust3r_model,
-            parent_log_path=parent_log_path,
-            handle=handle,
-            recording=recording,
-            jpg_quality=jpg_quality,
-            timeit=timeit,
-            max_frames=max_frames,
-        )
-    finally:
-        if reader.is_alive():
-            reader.kill()
-        reader.join(timeout=5)
+        rr.log(f"{parent_log_path}", rr.ViewCoordinates.RDF, static=True)
 
+        start: float = timer()
 
-@torch.no_grad()
-def _run_dpvo_pipeline_inner(
-    *,
-    slam: DPVO | None,
-    queue: Queue,
-    reader: Process,
-    dpvo_config: DPVOConfig,
-    network_path: str,
-    imagedir: str,
-    calib: str | None,
-    stride: int,
-    skip: int,
-    dust3r_model: AsymmetricCroCo3DStereo | None,
-    parent_log_path: Path,
-    handle: DPVOPipelineHandle | None,
-    recording: rr.RecordingStream | None,
-    jpg_quality: int,
-    timeit: bool,
-    max_frames: int,
-) -> Generator[str, None, None]:
-    """Inner implementation of the pipeline, wrapped by try/finally for cleanup."""
-    start: float = timer()
-    total_frames: int = calculate_num_frames(imagedir, stride, skip)
-
-    rr.log(f"{parent_log_path}", rr.ViewCoordinates.RDF, static=True)
-
-    # If no calibration file was provided, use DUSt3R to predict intrinsics
-    # from the very first frame pulled off the reader queue.
-    intri_np_dust3r: Float32[ndarray, "4"] | None = None
-    if calib is None:
-        yield "Estimating camera intrinsics with DUSt3R..."
-        if dust3r_model is None:
-            dust3r_device: str = (
-                "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
-            )
-            dust3r_model = AsymmetricCroCo3DStereo.from_pretrained("naver/DUSt3R_ViTLarge_BaseDecoder_512_dpt").to(
-                dust3r_device
-            )
-        else:
-            dust3r_device = next(dust3r_model.parameters()).device.type
-
-        _, bgr_hw3, _ = queue.get()
-        K_33_pred: Float32[ndarray, "3 3"] = calib_from_dust3r(bgr_hw3, dust3r_model, dust3r_device)
-        intri_np_dust3r = np.array([K_33_pred[0, 0], K_33_pred[1, 1], K_33_pred[0, 2], K_33_pred[1, 2]])
-
-    # path list for visualizing the trajectory
-    path_list: list[list[float]] = []
-    frame_idx: int = 0
-
-    with tqdm(total=total_frames, desc="Processing Frames") as pbar:
-        while True:
-            t: int
-            bgr_hw3: UInt8[ndarray, "h w 3"]
-            intri_np: Float32[ndarray, "4"]
-            (t, bgr_hw3, intri_np_calib) = queue.get()
-            if calib is not None:
-                intri_np = intri_np_calib.astype(np.float32) if intri_np_calib is not None else intri_np_calib
-            else:
-                assert intri_np_dust3r is not None, "DUSt3R intrinsics must be estimated when no calib file is provided"
-                intri_np = intri_np_dust3r
-            # queue will have a (-1, image, intrinsics) tuple when the reader is done
-            if t < 0:
-                break
-            if max_frames > 0 and frame_idx >= max_frames:
-                break
-
-            rr.set_time("timestep", sequence=t)
-
-            bgr_3hw: UInt8[Tensor, "c ht wd"] = rearrange(torch.from_numpy(bgr_hw3), "h w c -> c h w").cuda()
-            intri_torch: Float32[Tensor, "4"] = torch.from_numpy(intri_np).float().cuda()
-
-            if slam is None:
-                slam = DPVO(dpvo_config, network_path, ht=bgr_3hw.shape[1], wd=bgr_3hw.shape[2])
-
-            with Timer("SLAM", enabled=timeit):
-                slam(t, bgr_3hw, intri_torch)
-
-            if slam.is_initialized:
-                cam_se3_world_buffer: Float32[Tensor, "buffer_size 7"] = slam.poses_
-                points: Float32[Tensor, "num_points 3"] = slam.points_
-                colors: UInt8[Tensor, "buffer_size num_patches 3"] = slam.colors_
-                path_list = log_trajectory(
-                    parent_log_path=parent_log_path,
-                    cam_se3_world_buffer=cam_se3_world_buffer,
-                    points=points,
-                    colors=colors,
-                    intri_np=intri_np,
-                    bgr_hw3=bgr_hw3,
-                    path_list=path_list,
-                    jpg_quality=jpg_quality,
+        # If no calibration file was provided, use DUSt3R to predict intrinsics
+        # from the very first frame pulled off the reader queue.
+        intri_np_dust3r: Float32[ndarray, "4"] | None = None
+        if calib is None:
+            yield "Estimating camera intrinsics with DUSt3R..."
+            if dust3r_model is None:
+                dust3r_device: str = (
+                    "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
                 )
+                dust3r_model = AsymmetricCroCo3DStereo.from_pretrained("naver/DUSt3R_ViTLarge_BaseDecoder_512_dpt").to(
+                    dust3r_device
+                )
+            else:
+                dust3r_device = next(dust3r_model.parameters()).device.type
 
-            frame_idx += 1
-            pbar.update(1)
-            yield f"Frame {frame_idx}/{total_frames}"
+            _, bgr_hw3, _ = queue.get()
+            K_33_pred: Float32[ndarray, "3 3"] = calib_from_dust3r(bgr_hw3, dust3r_model, dust3r_device)
+            intri_np_dust3r = np.array([K_33_pred[0, 0], K_33_pred[1, 1], K_33_pred[0, 2], K_33_pred[1, 2]])
 
-    if slam is None:
-        yield "No frames processed"
-        return
+        # path list for visualizing the trajectory
+        path_list: list[list[float]] = []
+        frame_idx: int = 0
 
-    # Terminate: runs loop closure finalization + 12 BA iterations
-    yield "Running final bundle adjustment..."
+        with tqdm(total=total_frames, desc="Processing Frames") as pbar:
+            while True:
+                t: int
+                bgr_hw3: UInt8[ndarray, "h w 3"]
+                intri_np: Float32[ndarray, "4"]
+                (t, bgr_hw3, intri_np_calib) = queue.get()
+                if calib is not None:
+                    intri_np = intri_np_calib.astype(np.float32) if intri_np_calib is not None else intri_np_calib
+                else:
+                    assert intri_np_dust3r is not None, "DUSt3R intrinsics must be estimated when no calib file is provided"
+                    intri_np = intri_np_dust3r
+                # queue will have a (-1, image, intrinsics) tuple when the reader is done
+                if t < 0:
+                    break
+                if max_frames > 0 and frame_idx >= max_frames:
+                    break
 
-    total_time: float = timer() - start
-    print(f"Total time: {total_time:.2f}s")
+                rr.set_time("timestep", sequence=t)
 
-    final_poses, tstamps = slam.terminate()
-    final_points: Float32[Tensor, "num_points 3"] = slam.points_
-    final_colors: UInt8[Tensor, "buffer_size num_patches 3"] = slam.colors_
-    dpvo_pred: DPVOPrediction = DPVOPrediction(
-        final_poses=final_poses,
-        tstamps=tstamps,
-        final_points=final_points,
-        final_colors=final_colors,
-    )
+                bgr_3hw: UInt8[Tensor, "c ht wd"] = rearrange(torch.from_numpy(bgr_hw3), "h w c -> c h w").cuda()
+                intri_torch: Float32[Tensor, "4"] = torch.from_numpy(intri_np).float().cuda()
 
-    if handle is not None:
-        handle.prediction = dpvo_pred
-        handle.elapsed_time = total_time
+                if slam is None:
+                    slam = DPVO(dpvo_config, network_path, ht=bgr_3hw.shape[1], wd=bgr_3hw.shape[2])
+
+                with Timer("SLAM", enabled=timeit):
+                    slam(t, bgr_3hw, intri_torch)
+
+                if slam.is_initialized:
+                    cam_se3_world_buffer: Float32[Tensor, "buffer_size 7"] = slam.poses_
+                    points: Float32[Tensor, "num_points 3"] = slam.points_
+                    colors: UInt8[Tensor, "buffer_size num_patches 3"] = slam.colors_
+                    path_list = log_trajectory(
+                        parent_log_path=parent_log_path,
+                        cam_se3_world_buffer=cam_se3_world_buffer,
+                        points=points,
+                        colors=colors,
+                        intri_np=intri_np,
+                        bgr_hw3=bgr_hw3,
+                        path_list=path_list,
+                        jpg_quality=jpg_quality,
+                    )
+
+                frame_idx += 1
+                pbar.update(1)
+                yield f"Frame {frame_idx}/{total_frames}"
+
+        if slam is None:
+            yield "No frames processed"
+            return
+
+        # Terminate: runs loop closure finalization + 12 BA iterations
+        yield "Running final bundle adjustment..."
+
+        total_time: float = timer() - start
+        print(f"Total time: {total_time:.2f}s")
+
+        final_poses, tstamps = slam.terminate()
+        final_points: Float32[Tensor, "num_points 3"] = slam.points_
+        final_colors: UInt8[Tensor, "buffer_size num_patches 3"] = slam.colors_
+        dpvo_pred: DPVOPrediction = DPVOPrediction(
+            final_poses=final_poses,
+            tstamps=tstamps,
+            final_points=final_points,
+            final_colors=final_colors,
+        )
+
+        if handle is not None:
+            handle.prediction = dpvo_pred
+            handle.elapsed_time = total_time
 
 
 def dpvo_inference(config: DPVOInferenceConfig) -> None:
