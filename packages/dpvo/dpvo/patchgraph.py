@@ -142,7 +142,7 @@ class PatchGraph:
             return torch.empty(0, dtype=torch.long, device="cuda"), torch.empty(0, dtype=torch.long, device="cuda")
 
         ii_out, jj_out = repeat(edges, "E ij -> ij E M", M=self.M, ij=2)
-        kk_out: Int[Tensor, "EM"] = ii_out.mul(self.M) + torch.arange(self.M, device=ii.device)
+        kk_out = ii_out.mul(self.M) + torch.arange(self.M, device=ii.device)
         return kk_out.flatten(), jj_out.flatten()
 
     def normalize(self) -> None:
