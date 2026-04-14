@@ -17,6 +17,8 @@ See Teed et al. (2022), "Deep Patch Visual Odometry", for the full
 architecture description (Sec. 3).
 """
 
+import functools
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -32,7 +34,7 @@ from .blocks import GatedResidual, GradientClip, SoftAgg
 from .extractor import BasicEncoder4
 from .utils import coords_grid_with_index, flatmeshgrid, pyramidify, set_depth
 
-autocast = torch.cuda.amp.autocast
+autocast = functools.partial(torch.amp.autocast, "cuda")
 
 DIM: int = 384
 """Hidden state dimensionality for the GRU update operator.  This is also

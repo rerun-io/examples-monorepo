@@ -24,6 +24,7 @@ The system maintains fixed-size GPU buffers pre-allocated at construction
 time, avoiding dynamic memory allocation during tracking.
 """
 
+import functools
 from collections import OrderedDict
 from collections.abc import Generator
 
@@ -44,7 +45,7 @@ from .config import DPVOConfig
 from .net import VONet
 from .utils import Timer, flatmeshgrid
 
-autocast = torch.cuda.amp.autocast
+autocast = functools.partial(torch.amp.autocast, "cuda")
 Id: SE3 = SE3.Identity(1, device="cuda")
 """Pre-allocated identity SE3 element used as the relative pose for
 skipped frames during initialization."""
