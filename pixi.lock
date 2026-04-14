@@ -982,6 +982,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/libzlib-1.3.2-h25fd6f3_2.conda
       - conda: https://prefix.dev/ai-demos/linux-64/lietorch-0.3.0-hb0f4dca_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/llvm-openmp-22.1.3-h4922eb0_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/llvmlite-0.47.0-py311h41a00d4_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/markdown-it-py-4.0.0-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/markupsafe-3.0.3-py311h3778330_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/matplotlib-3.8.4-py311h38be061_2.conda
@@ -999,6 +1000,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/networkx-3.6.1-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/nspr-4.38-h29cc59b_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/nss-3.118-h445c969_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/numba-0.65.0-py311h3c884d5_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/numpy-2.4.3-py311h2e04523_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/ocl-icd-2.3.3-hb9d3cd8_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/opencl-headers-2025.06.13-hecca717_0.conda
@@ -1521,6 +1523,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/libzlib-1.3.2-h25fd6f3_2.conda
       - conda: https://prefix.dev/ai-demos/linux-64/lietorch-0.3.0-hb0f4dca_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/llvm-openmp-22.1.3-h4922eb0_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/llvmlite-0.47.0-py311h41a00d4_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/markdown-it-py-4.0.0-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/markupsafe-3.0.3-py311h3778330_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/matplotlib-3.8.4-py311h38be061_2.conda
@@ -1538,6 +1541,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/networkx-3.6.1-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/nspr-4.38-h29cc59b_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/nss-3.118-h445c969_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/numba-0.65.0-py311h3c884d5_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/numpy-2.4.3-py311h2e04523_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/ocl-icd-2.3.3-hb9d3cd8_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/opencl-headers-2025.06.13-hecca717_0.conda
@@ -18675,7 +18679,7 @@ packages:
 - pypi: ./packages/dpvo
   name: dpvo
   version: 0.1.1
-  sha256: f3b6ca5ff45ed10ef8c4f4120cfe690507fcc03bdfd46bebb2e8b2e9fc20c5e8
+  sha256: 3df212d9f4722755ecd3acaacef8337079ebfa186ab501ddac27f641b2db83ad
   requires_python: '>=3.11'
 - conda: https://prefix.dev/conda-forge/noarch/easydict-1.13-pyhff2d567_1.conda
   sha256: 1c7e3a43fe195e3f400bb284d09fa32e5728f029bc62edabfa293a71c5e70bf2
@@ -29480,6 +29484,22 @@ packages:
   purls: []
   size: 5890474
   timestamp: 1774564900611
+- conda: https://prefix.dev/conda-forge/linux-64/llvmlite-0.47.0-py311h41a00d4_1.conda
+  sha256: 689cc23dc0f80c008094931aaa54ec229dd9dbabd169e825e13ea262d5e6dade
+  md5: 62d9d69ab00067a2b3cdf60407f4c491
+  depends:
+  - __glibc >=2.17,<3.0.a0
+  - libgcc >=14
+  - libstdcxx >=14
+  - libzlib >=1.3.2,<2.0a0
+  - python >=3.11,<3.12.0a0
+  - python_abi 3.11.* *_cp311
+  - zstd >=1.5.7,<1.6.0a0
+  license: BSD-2-Clause
+  purls:
+  - pkg:pypi/llvmlite?source=compressed-mapping
+  size: 34108807
+  timestamp: 1776076742653
 - pypi: https://files.pythonhosted.org/packages/0c/29/0348de65b8cc732daa3e33e67806420b2ae89bdce2b04af740289c5c6c8c/loguru-0.7.3-py3-none-any.whl
   name: loguru
   version: 0.7.3
@@ -30200,7 +30220,7 @@ packages:
   - pytorch-lightning>=2.5.1,<3
   - diffusers[torch]>=0.32.2
   - timm>=1.0.15,<2
-  - sam3-rerun @ file:///var/tmp/vibe-kanban/worktrees/8048-dpvo-more-clean/examples-monorepo/packages/sam3-rerun
+  - sam3-rerun @ file:///var/tmp/vibe-kanban/worktrees/d2f4-dpvslam/examples-monorepo/packages/sam3-rerun
   requires_python: '>=3.11.0'
 - pypi: https://files.pythonhosted.org/packages/a4/8e/469e5a4a2f5855992e425f3cb33804cc07bf18d48f2db061aec61ce50270/more_itertools-10.8.0-py3-none-any.whl
   name: more-itertools
@@ -30824,6 +30844,32 @@ packages:
   purls: []
   size: 2057773
   timestamp: 1763485556350
+- conda: https://prefix.dev/conda-forge/linux-64/numba-0.65.0-py311h3c884d5_0.conda
+  sha256: a03bcfdda860c771df0abad4d0ab60bddca58a6c3b429f4f8fb504df63a10caa
+  md5: 20b895c8ee56603bd0a64e57d310bea6
+  depends:
+  - __glibc >=2.17,<3.0.a0
+  - _openmp_mutex >=4.5
+  - libgcc >=14
+  - libstdcxx >=14
+  - llvmlite >=0.47.0,<0.48.0a0
+  - numpy >=1.22.3,<2.5
+  - numpy >=1.23,<3
+  - python >=3.11,<3.12.0a0
+  - python_abi 3.11.* *_cp311
+  constrains:
+  - scipy >=1.0
+  - libopenblas !=0.3.6
+  - cuda-python >=11.6
+  - tbb >=2021.6.0
+  - cuda-version >=11.2
+  - cudatoolkit >=11.2
+  license: BSD-2-Clause
+  license_family: BSD
+  purls:
+  - pkg:pypi/numba?source=hash-mapping
+  size: 5838169
+  timestamp: 1775076099845
 - pypi: https://files.pythonhosted.org/packages/4c/1a/edbe839109518364ac0bd9e918cf874c755bb2c128040e920f198c494263/numexpr-2.14.1-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
   name: numexpr
   version: 2.14.1
@@ -36111,7 +36157,7 @@ packages:
   version: 0.1.0
   sha256: 745a5f6282ad01b5a906b256f8f803725a4eddb4f4e5f3561bb4465a0abdc24c
   requires_dist:
-  - monopriors @ file:///var/tmp/vibe-kanban/worktrees/8048-dpvo-more-clean/examples-monorepo/packages/monoprior
+  - monopriors @ file:///var/tmp/vibe-kanban/worktrees/d2f4-dpvslam/examples-monorepo/packages/monoprior
   requires_python: '>=3.12'
 - pypi: https://files.pythonhosted.org/packages/72/15/4e9929e536bda99ac1fe8b106e54c5f83846130b812350f76537f4806b19/rerun_sdk-0.31.1-cp310-abi3-manylinux_2_28_aarch64.whl
   name: rerun-sdk
@@ -36686,8 +36732,8 @@ packages:
   - omegaconf>=2.3.0,<3
   - termcolor>=3.2.0,<4
   - spaces>=0.43.0
-  - monopriors @ file:///var/tmp/vibe-kanban/worktrees/8048-dpvo-more-clean/examples-monorepo/packages/monoprior
-  - sam3-rerun @ file:///var/tmp/vibe-kanban/worktrees/8048-dpvo-more-clean/examples-monorepo/packages/sam3-rerun
+  - monopriors @ file:///var/tmp/vibe-kanban/worktrees/d2f4-dpvslam/examples-monorepo/packages/monoprior
+  - sam3-rerun @ file:///var/tmp/vibe-kanban/worktrees/d2f4-dpvslam/examples-monorepo/packages/sam3-rerun
   requires_python: '>=3.12'
 - pypi: https://files.pythonhosted.org/packages/f4/a2/70401a107d6d7466d64b466927e6b96fcefa99d57494b972608e2f8be50f/scikit_image-0.26.0-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl
   name: scikit-image
@@ -39829,7 +39875,7 @@ packages:
   sha256: a73114f7930cefc5fd61f7116a507c1ed218d5c909a24af0c113608ed440e827
   requires_dist:
   - einops>=0.8.1,<0.9
-  - monopriors @ file:///var/tmp/vibe-kanban/worktrees/8048-dpvo-more-clean/examples-monorepo/packages/monoprior
+  - monopriors @ file:///var/tmp/vibe-kanban/worktrees/d2f4-dpvslam/examples-monorepo/packages/monoprior
   requires_python: '>=3.11'
 - conda: https://prefix.dev/conda-forge/linux-64/vlfeat-0.9.21-hd590300_1.conda
   sha256: f3fca24ef6a327072378dd654eba37c6a6da15499ca212eb20b0af422c1ad4c5

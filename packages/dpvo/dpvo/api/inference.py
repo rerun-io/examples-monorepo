@@ -56,6 +56,18 @@ FastDPVOConfig = Annotated[
 ]
 """Subcommand alias for the fast preset."""
 
+SlamDPVOConfig = Annotated[
+    DPVOConfig,
+    tyro.conf.subcommand(name="slam", default=DPVOConfig.slam()),
+]
+"""Subcommand alias for the SLAM preset (proximity loop closure)."""
+
+SlamClassicDPVOConfig = Annotated[
+    DPVOConfig,
+    tyro.conf.subcommand(name="slam-classic", default=DPVOConfig.slam_classic()),
+]
+"""Subcommand alias for the SLAM preset with classical (DBoW2) loop closure."""
+
 
 # ── Data classes ────────────────────────────────────────────────────────
 
@@ -100,7 +112,7 @@ class DPVOInferenceConfig:
 
     rr_config: RerunTyroConfig
     """Rerun recording configuration (save path, application id, etc.)."""
-    dpvo_config: AccurateDPVOConfig | FastDPVOConfig = field(default_factory=DPVOConfig.fast)
+    dpvo_config: AccurateDPVOConfig | FastDPVOConfig | SlamDPVOConfig | SlamClassicDPVOConfig = field(default_factory=DPVOConfig.fast)
     """DPVO solver configuration preset."""
     imagedir: str = "data/movies/IMG_0493.MOV"
     """Path to image directory or video file."""
@@ -524,10 +536,8 @@ def run_dpvo_pipeline(
         yield "No frames processed"
         return
 
-    # Run additional update iterations for final bundle-adjustment refinement
+    # Terminate: runs loop closure finalization + 12 BA iterations
     yield "Running final bundle adjustment..."
-    for _ in range(12):
-        slam.update()
 
     total_time: float = timer() - start
     print(f"Total time: {total_time:.2f}s")

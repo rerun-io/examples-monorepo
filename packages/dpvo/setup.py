@@ -42,7 +42,7 @@ if "build_ext" in sys.argv:
             ),
             CUDAExtension(
                 "dpvo._cuda_ba",
-                sources=["dpvo/fastba/ba.cpp", "dpvo/fastba/ba_cuda.cu"],
+                sources=["dpvo/fastba/ba.cpp", "dpvo/fastba/ba_cuda.cu", "dpvo/fastba/block_e.cu"],
                 include_dirs=[os.path.join(conda_prefix, "include", "eigen3")],
                 extra_compile_args={"cxx": ["-O3"], "nvcc": ["-O3"]},
             ),

@@ -8,6 +8,7 @@ This module also re-exports two CUDA utility functions:
 
 - ``neighbors`` -- find co-visible patch/frame neighbourhoods.
 - ``reproject`` -- project 3-D patches into specified target frames.
+- ``solve_system`` -- sparse PGO solve for loop closure.
 """
 
 from jaxtyping import Float, Int
@@ -20,6 +21,9 @@ neighbors = _cuda_ba.neighbors
 
 reproject = _cuda_ba.reproject
 """Reproject 3-D patches into target camera frames using current poses."""
+
+solve_system = _cuda_ba.solve_system
+"""Sparse Jacobian-based solve for pose-graph optimization (loop closure PGO)."""
 
 
 def BA(
@@ -34,7 +38,9 @@ def BA(
     kk: Int[Tensor, "n_edges"],
     t0: int,
     t1: int,
+    M: int = -1,
     iterations: int = 2,
+    eff_impl: bool = False,
 ) -> None:
     """Run Gauss-Newton bundle adjustment with Schur complement in CUDA.
 
@@ -57,4 +63,4 @@ def BA(
         t1: End of the active keyframe window (exclusive).
         iterations: Number of Gauss-Newton iterations to run.
     """
-    _cuda_ba.forward(poses.data, patches, intrinsics, target, weight, lmbda, ii, jj, kk, t0, t1, iterations)
+    _cuda_ba.forward(poses.data, patches, intrinsics, target, weight, lmbda, ii, jj, kk, M, t0, t1, iterations, eff_impl)
