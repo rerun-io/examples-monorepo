@@ -70,7 +70,7 @@ class PatchGraph:
         self.delta: dict[int, tuple[int, SE3]] = {}
 
         ### Active edge information ###
-        self.net: Float[Tensor, "1 n_edges DIM"] = torch.zeros(1, 0, DIM, **kwargs)  # pyrefly: ignore[bad-argument-type]
+        self.net: Float[Tensor, "1 n_edges DIM"] = torch.zeros(1, 0, DIM, **kwargs)  # pyrefly: ignore[bad-argument-type,no-matching-overload]
         self.ii: Int[Tensor, "n_edges"] = torch.as_tensor([], dtype=torch.long, device="cuda")
         self.jj: Int[Tensor, "n_edges"] = torch.as_tensor([], dtype=torch.long, device="cuda")
         self.kk: Int[Tensor, "n_edges"] = torch.as_tensor([], dtype=torch.long, device="cuda")

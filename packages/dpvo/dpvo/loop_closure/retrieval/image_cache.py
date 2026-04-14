@@ -12,6 +12,7 @@ from tempfile import TemporaryDirectory
 
 import cv2
 import numpy as np
+import torch
 from einops import parse_shape
 from torch import Tensor
 
@@ -47,7 +48,7 @@ class ImageCache:
         self._wait()
         self.write_result = self.writer_pool.apply_async(cv2.imwrite, [filepath, img, JPEG_QUALITY])
 
-    def load_frames(self, idxs: list[int], device: str = "cuda") -> Tensor:
+    def load_frames(self, idxs: list[int], device: str | torch.device = "cuda") -> Tensor:
         import kornia as K
 
         self._wait()

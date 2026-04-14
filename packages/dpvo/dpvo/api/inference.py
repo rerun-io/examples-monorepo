@@ -592,7 +592,8 @@ def run_dpvo_pipeline(
                 intri_np: Float32[ndarray, "4"]
                 (t, bgr_hw3, intri_np_calib) = queue.get()
                 if calib is not None:
-                    intri_np = intri_np_calib.astype(np.float32) if intri_np_calib is not None else intri_np_calib
+                    assert intri_np_calib is not None, "Calibration file did not provide intrinsics"
+                    intri_np = intri_np_calib.astype(np.float32)
                 else:
                     assert intri_np_dust3r is not None, (
                         "DUSt3R intrinsics must be estimated when no calib file is provided"

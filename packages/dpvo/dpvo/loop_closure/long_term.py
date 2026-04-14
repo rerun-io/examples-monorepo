@@ -7,6 +7,7 @@ background process.
 """
 
 import os
+from typing import Any
 
 import kornia as K
 import kornia.feature as KF
@@ -44,7 +45,7 @@ class LongTermLoopClosure:
 
         # Process pool for async PGO
         self.lc_pool = mp.Pool(processes=1)
-        self.lc_process = self.lc_pool.apply_async(os.getpid)
+        self.lc_process: Any = self.lc_pool.apply_async(os.getpid)
         self.manager = mp.Manager()
         self.result_queue = self.manager.Queue()
         self.lc_in_progress: bool = False
@@ -242,6 +243,7 @@ class LongTermLoopClosure:
             return False
 
         # Run Pose-Graph Optimization (PGO)
+        assert r is not None and t is not None and s is not None
         far_rel_pose = make_pypose_Sim3(r, t, s)[None]
         Gi = pp.SE3(self.pg.poses[:, self.loop_ii])
         Gj = pp.SE3(self.pg.poses[:, self.loop_jj])

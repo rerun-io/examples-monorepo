@@ -10,6 +10,8 @@ The heavy dependencies (pypose, scipy) are imported lazily so that GPU
 loop closure works without them.
 """
 
+from typing import Any
+
 import numba as nb
 import numpy as np
 import torch
@@ -18,7 +20,7 @@ import torch
 # so that the GPU loop closure path (reduce_edges only) works without these deps.
 
 
-def make_pypose_Sim3(rot: np.ndarray, t: np.ndarray, s: float) -> object:
+def make_pypose_Sim3(rot: np.ndarray, t: np.ndarray, s: float) -> Any:
     """Create a PyPose Sim(3) element from rotation matrix, translation, and scale."""
     import pypose as pp
     from scipy.spatial.transform import Rotation as R
@@ -28,11 +30,11 @@ def make_pypose_Sim3(rot: np.ndarray, t: np.ndarray, s: float) -> object:
     return pp.Sim3(data)
 
 
-def SE3_to_Sim3(x: object) -> object:
+def SE3_to_Sim3(x: Any) -> Any:
     """Convert SE3 to Sim3 with unit scale."""
     import pypose as pp
 
-    out = torch.cat((x.data, torch.ones_like(x.data[..., :1])), dim=-1)
+    out = torch.cat((x.data, torch.ones_like(x.data[..., :1])), dim=-1)  # pyrefly: ignore[missing-attribute]
     return pp.Sim3(out)
 
 
@@ -50,7 +52,7 @@ def reduce_edges(flow_mag, ii, jj, max_num_edges, nms):
         return _format(es)
 
     Ni, Nj = (ii.max() + 1), (jj.max() + 1)
-    ignore_lookup = np.zeros((Ni, Nj), dtype=nb.bool_)
+    ignore_lookup = np.zeros((Ni, Nj), dtype=nb.bool_)  # pyrefly: ignore[no-matching-overload]
 
     idxs = np.argsort(flow_mag)
     for idx in idxs:
@@ -130,7 +132,7 @@ def ransac_umeyama(src_points, dst_points, iterations=1, threshold=0.1):
         if t is None:
             continue
 
-        transformed = (src_points @ (rot * s).T) + t
+        transformed = (src_points @ (rot * s).T) + t  # pyrefly: ignore[unsupported-operation]
         distances = np.sum((transformed - dst_points) ** 2, axis=1) ** 0.5
         inlier_mask = distances < threshold
         inliers = np.sum(inlier_mask)
@@ -209,7 +211,7 @@ def perform_updates(input_poses, dSloop, ii_loop, jj_loop, iters, ep=0.0, lmbda=
 
     input_poses = input_poses.clone()
 
-    freen = torch.cat((ii_loop, jj_loop)).max().item() + 1 if fix_opt_window else -1
+    freen: int = int(torch.cat((ii_loop, jj_loop)).max().item()) + 1 if fix_opt_window else -1
 
     Ginv = SE3_to_Sim3(input_poses).Inv().Log()
 
@@ -223,7 +225,7 @@ def perform_updates(input_poses, dSloop, ii_loop, jj_loop, iters, ep=0.0, lmbda=
         Ginv_tmp = Ginv + delta_pose
 
         new_resid = residual(Ginv_tmp, input_poses, dSloop, ii_loop, jj_loop)
-        if new_resid.square().mean() < residual_history[-1]:
+        if new_resid.square().mean() < residual_history[-1]:  # pyrefly: ignore[missing-attribute]
             Ginv = Ginv_tmp
             lmbda /= 2
         else:

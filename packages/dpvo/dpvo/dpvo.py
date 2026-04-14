@@ -108,8 +108,8 @@ class DPVO:
             self.last_global_ba: int = -1000
             self.pmem = self.cfg.max_edge_age
 
-        self.imap_: Float[Tensor, "pmem M DIM"] = torch.zeros(self.pmem, self.M, DIM, **self.kwargs)  # pyrefly: ignore[bad-argument-type]
-        self.gmap_: Float[Tensor, "pmem M 128 P P"] = torch.zeros(self.pmem, self.M, 128, self.P, self.P, **self.kwargs)  # pyrefly: ignore[bad-argument-type]
+        self.imap_: Float[Tensor, "pmem M DIM"] = torch.zeros(self.pmem, self.M, DIM, **self.kwargs)  # pyrefly: ignore[bad-argument-type,no-matching-overload]
+        self.gmap_: Float[Tensor, "pmem M 128 P P"] = torch.zeros(self.pmem, self.M, 128, self.P, self.P, **self.kwargs)  # pyrefly: ignore[bad-argument-type,no-matching-overload]
 
         # PatchGraph holds all buffer state
         self.pg: PatchGraph = PatchGraph(self.cfg, self.P, self.DIM, self.pmem, **self.kwargs)
@@ -121,8 +121,8 @@ class DPVO:
         ht_feat: int = ht // RES
         wd_feat: int = wd // RES
 
-        self.fmap1_: Float[Tensor, "1 mem 128 h4 w4"] = torch.zeros(1, self.mem, 128, ht_feat // 1, wd_feat // 1, **self.kwargs)  # pyrefly: ignore[bad-argument-type]
-        self.fmap2_: Float[Tensor, "1 mem 128 h16 w16"] = torch.zeros(1, self.mem, 128, ht_feat // 4, wd_feat // 4, **self.kwargs)  # pyrefly: ignore[bad-argument-type]
+        self.fmap1_: Float[Tensor, "1 mem 128 h4 w4"] = torch.zeros(1, self.mem, 128, ht_feat // 1, wd_feat // 1, **self.kwargs)  # pyrefly: ignore[bad-argument-type,no-matching-overload]
+        self.fmap2_: Float[Tensor, "1 mem 128 h16 w16"] = torch.zeros(1, self.mem, 128, ht_feat // 4, wd_feat // 4, **self.kwargs)  # pyrefly: ignore[bad-argument-type,no-matching-overload]
 
         self.pyramid: tuple[Tensor, Tensor] = (self.fmap1_, self.fmap2_)
 
@@ -290,7 +290,7 @@ class DPVO:
         self.pg.kk = torch.cat([self.pg.kk, ii])
         self.pg.ii = torch.cat([self.pg.ii, self.ix[ii]])
 
-        net: Float[Tensor, "1 n_new DIM"] = torch.zeros(1, len(ii), self.DIM, **self.kwargs)  # pyrefly: ignore[bad-argument-type]
+        net: Float[Tensor, "1 n_new DIM"] = torch.zeros(1, len(ii), self.DIM, **self.kwargs)  # pyrefly: ignore[bad-argument-type,no-matching-overload]
         self.pg.net = torch.cat([self.pg.net, net], dim=1)
 
     def remove_factors(self, m: Bool[Tensor, "n_edges"], store: bool) -> None:
@@ -322,7 +322,7 @@ class DPVO:
         jj: Int[Tensor, "M"] = self.n * torch.ones_like(kk)
         ii: Int[Tensor, "M"] = self.ix[kk]
 
-        net: Float[Tensor, "1 M DIM"] = torch.zeros(1, len(ii), self.DIM, **self.kwargs)  # pyrefly: ignore[bad-argument-type]
+        net: Float[Tensor, "1 M DIM"] = torch.zeros(1, len(ii), self.DIM, **self.kwargs)  # pyrefly: ignore[bad-argument-type,no-matching-overload]
         coords: Float[Tensor, "1 M 2 P P"] = self.reproject(indicies=(ii, jj, kk))
 
         with autocast(enabled=self.cfg.mixed_precision):
