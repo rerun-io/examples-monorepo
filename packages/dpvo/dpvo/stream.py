@@ -81,7 +81,7 @@ def _calculate_num_frames(video_or_image_dir: str, stride: int, skip: int) -> in
         cap = cv2.VideoCapture(video_or_image_dir)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         cap.release()
-    return (total_frames - skip) // stride
+    return max(0, (total_frames - skip) // stride)
 
 
 def load_calib(calib: str) -> tuple[Float64[ndarray, "3 3"], Float64[ndarray, "n"]]:

@@ -29,7 +29,7 @@ class ImageCache:
         self.tmpdir: TemporaryDirectory = TemporaryDirectory()
         self.stored_indices: np.ndarray = np.zeros(100000, dtype=bool)
         self.writer_pool: PoolType = Pool(processes=1)
-        self.write_result = self.writer_pool.apply_async(cv2.imwrite, [f"{self.tmpdir.name}/warmup.png", BLANK, JPEG_QUALITY])
+        self.write_result = self.writer_pool.apply_async(cv2.imwrite, [f"{self.tmpdir.name}/warmup{IMEXT}", BLANK, JPEG_QUALITY])
         self._wait()
 
     def __call__(self, image: np.ndarray, n: int) -> None:

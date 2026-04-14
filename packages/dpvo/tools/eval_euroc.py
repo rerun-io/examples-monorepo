@@ -56,7 +56,8 @@ def main(config: EvalConfig) -> None:
 
     # Validate modes
     for mode in config.modes:
-        assert mode in MODE_CONFIGS, f"Unknown mode '{mode}'. Must be one of: {list(MODE_CONFIGS.keys())}"
+        if mode not in MODE_CONFIGS:
+            raise ValueError(f"Unknown mode '{mode}'. Must be one of: {list(MODE_CONFIGS.keys())}")
 
     all_results: list[EvalResult] = []
 
