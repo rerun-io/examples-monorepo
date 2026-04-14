@@ -89,6 +89,12 @@ def scatter_max(
 
     Drop-in replacement for ``torch_scatter.scatter_max``.
 
+    Note:
+        The ``argmax_indices`` tensor is a placeholder (always -1) because
+        ``torch.scatter_reduce_`` with ``reduce="amax"`` does not provide
+        argmax.  Only the max values are computed.  All current callers
+        use only ``scatter_max(...)[0]``.
+
     Returns:
         Tuple of ``(max_values, argmax_indices)`` with shape along ``dim``
         equal to ``dim_size``.

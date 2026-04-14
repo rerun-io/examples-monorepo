@@ -59,6 +59,8 @@ from .utils import Timer, flatmeshgrid
 
 autocast = functools.partial(torch.amp.autocast, "cuda")
 Id: SE3 = SE3.Identity(1, device="cuda")
+"""Pre-allocated identity SE3 element used as the relative pose for
+skipped frames during initialization."""
 
 
 class DPVO:

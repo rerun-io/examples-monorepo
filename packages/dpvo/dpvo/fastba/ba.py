@@ -61,6 +61,11 @@ def BA(
         t0: Start of the active keyframe window (poses before ``t0`` are
             held fixed).
         t1: End of the active keyframe window (exclusive).
+        M: Patches per frame (used for E-block allocation when
+            ``eff_impl=True``).  Set to -1 for sliding-window BA.
         iterations: Number of Gauss-Newton iterations to run.
+        eff_impl: If ``True``, use efficient E-block (block_e.cu) for
+            global BA with many patches.  If ``False``, use the dense
+            E matrix path for sliding-window BA.
     """
     _cuda_ba.forward(poses.data, patches, intrinsics, target, weight, lmbda, ii, jj, kk, M, t0, t1, iterations, eff_impl)
