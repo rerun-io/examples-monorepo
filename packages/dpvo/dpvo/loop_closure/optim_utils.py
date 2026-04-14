@@ -37,12 +37,12 @@ def SE3_to_Sim3(x: object) -> object:
 
 
 @nb.njit(cache=True)
-def _format(es: list) -> np.ndarray:
+def _format(es):
     return np.asarray(es, dtype=np.int64).reshape((-1, 2))[1:]
 
 
 @nb.njit(cache=True)
-def reduce_edges(flow_mag: np.ndarray, ii: np.ndarray, jj: np.ndarray, max_num_edges: int, nms: int) -> np.ndarray:
+def reduce_edges(flow_mag, ii, jj, max_num_edges, nms):
     """NMS filtering of loop closure edge candidates sorted by flow magnitude."""
     es = [(-1, -1)]
 
@@ -81,7 +81,7 @@ def reduce_edges(flow_mag: np.ndarray, ii: np.ndarray, jj: np.ndarray, max_num_e
 
 
 @nb.njit(cache=True)
-def umeyama_alignment(x: np.ndarray, y: np.ndarray) -> tuple:
+def umeyama_alignment(x, y):
     """Umeyama alignment: least-squares Sim(m) between two point sets.
 
     See Umeyama (1991), "Least-squares estimation of transformation
@@ -115,9 +115,7 @@ def umeyama_alignment(x: np.ndarray, y: np.ndarray) -> tuple:
 
 
 @nb.njit(cache=True)
-def ransac_umeyama(
-    src_points: np.ndarray, dst_points: np.ndarray, iterations: int = 1, threshold: float = 0.1
-) -> tuple:
+def ransac_umeyama(src_points, dst_points, iterations=1, threshold=0.1):
     """RANSAC wrapper around Umeyama alignment for robust Sim(3) estimation."""
     best_inliers = 0
     best_R = None
