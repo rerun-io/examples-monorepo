@@ -57,7 +57,7 @@ FastDPVOConfig = Annotated[
 
 SlamDPVOConfig = Annotated[
     DPVOConfig,
-    tyro.conf.subcommand(name="slam", default=DPVOConfig.slam()),
+    tyro.conf.subcommand(name="slam-proximity", default=DPVOConfig.slam()),
 ]
 """Subcommand alias for the SLAM preset (proximity loop closure)."""
 

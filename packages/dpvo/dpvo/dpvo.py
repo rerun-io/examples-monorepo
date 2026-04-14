@@ -10,7 +10,29 @@ features from Lipson et al. (2024), "Deep Patch Visual SLAM":
   + Sim(3) pose-graph optimization.
 - **Enhanced global BA**: efficient Schur complement via block-E kernels.
 
-The pipeline processes frames one at a time via :meth:`DPVO.__call__`.
+The pipeline processes frames one at a time via :meth:`DPVO.__call__`:
+
+1. **Patchify**: Extract features with the stride-4 CNN backbone and
+   sample M = ``PATCHES_PER_FRAME`` sparse 3x3 patches using
+   gradient-biased sampling.
+2. **Motion model**: Predict the initial pose of the new frame using
+   damped linear extrapolation on SE3.
+3. **Graph construction**: Create measurement edges connecting the new
+   frame's patches to recent frames (forward edges) and recent patches
+   to the new frame (backward edges).
+4. **Update**: Run one iteration of the recurrent GRU operator
+   (:class:`~dpvo.net.Update`) to predict pixel displacements and
+   confidence weights, then perform one Gauss-Newton bundle adjustment
+   step (:func:`~dpvo.fastba.ba.BA`) to refine poses and depths.
+5. **Keyframe management**: Remove redundant keyframes whose
+   bidirectional pixel flow falls below ``KEYFRAME_THRESH``.
+6. **Loop closure** (SLAM only): Periodically detect revisited locations
+   and insert long-range edges for global bundle adjustment (proximity)
+   or run Sim(3) pose-graph optimization (classical DBoW2).
+
+The system maintains fixed-size GPU buffers pre-allocated at construction
+time via :class:`~dpvo.patchgraph.PatchGraph`, avoiding dynamic memory
+allocation during tracking.
 """
 
 import functools

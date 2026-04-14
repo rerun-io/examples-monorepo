@@ -11,8 +11,9 @@ source:
 build:
   number: 0
   script:
-    # Clone the DBoW2 library (Lipson's fork used by DPV-SLAM)
-    - git clone --depth 1 https://github.com/lahavlipson/DBoW2.git DBoW2
+    # Clone the DBoW2 library at a pinned commit (Lipson's fork used by DPV-SLAM)
+    - git clone https://github.com/lahavlipson/DBoW2.git DBoW2
+    - cd DBoW2 && git checkout 89f8b270270fa68a399c10cd90427a9f7ec4fa81 && cd ..
     - cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$PREFIX -GNinja
     - cmake --build build
     - cmake --install build

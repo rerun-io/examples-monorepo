@@ -754,6 +754,18 @@ __global__ void reprojection_residuals_and_hessian(
 
       float *Jj, Ji[6], Jz, r, w;
 
+      /*
+       * Compute residual, weight, and Jacobians for the current component.
+       *
+       * Jz: Jacobian of the projection w.r.t. inverse depth.
+       *   For the x-component: dx₁/d(d_inv) = fₓ · (tᵢⱼₓ/Z - tᵢⱼ_z · X/Z²)
+       *   For the y-component: dy₁/d(d_inv) = fᵧ · (tᵢⱼᵧ/Z - tᵢⱼ_z · Y/Z²)
+       *
+       * Jⱼ: 6D Jacobian w.r.t. the Lie algebra update of target pose j.
+       *   Components: [d/dtₓ, d/dtᵧ, d/dt_z, d/dωₓ, d/dωᵧ, d/dω_z]
+       *   For x: [fₓ·W/Z, 0, -fₓ·X·W/Z², -fₓ·X·Y/Z², fₓ·(1+X²/Z²), -fₓ·Y/Z]
+       *   For y: [0, fᵧ·W/Z, -fᵧ·Y·W/Z², -fᵧ·(1+Y²/Z²), fᵧ·X·Y/Z², fᵧ·X/Z]
+       */
       if (row == 0){
 
         r = target[n][0] - x1;
@@ -774,8 +786,17 @@ __global__ void reprojection_residuals_and_hessian(
 
       atomicAdd(&r_total[0],  w * r * r);
 
+      /*
+       * Jᵢ: Jacobian w.r.t. source pose i, computed via the adjoint.
+       *   Jᵢ = Adj(Gᵢⱼ⁻¹)ᵀ · Jⱼ  (chain rule through relative transform)
+       */
       adjSE3(tij, qij, Jj, Ji);
 
+      /* Accumulate into Hessian blocks (atomicAdd for thread safety):
+       *   B[ii,ii] += w · Jᵢ · Jᵢᵀ  (source-source pose block)
+       *   B[jj,jj] += w · Jⱼ · Jⱼᵀ  (target-target pose block)
+       *   B[ii,jj] -= w · Jᵢ · Jⱼᵀ  (cross-term, negative sign)
+       */
       for (int i=0; i<6; i++) {
         for (int j=0; j<6; j++) {
           if (ix >= 0)
@@ -789,6 +810,9 @@ __global__ void reprojection_residuals_and_hessian(
         }
       }
 
+      /* Accumulate E-block: E[pose, depth] = -w · Jz · Jpose
+       * Dense path: directly into E matrix.
+       * Efficient path: into compressed (frame, patch) lookup table. */
       for (int i=0; i<6; i++) {
         if (eff_impl){
           atomicAdd(&E_lookup[ijs][kx % ppf][i],  -w * Jz * Ji[i]);
@@ -802,6 +826,7 @@ __global__ void reprojection_residuals_and_hessian(
 
       }
 
+      /* Accumulate right-hand side: v[pose] = -w · r · Jpose */
       for (int i=0; i<6; i++) {
         if (ix >= 0)
           atomicAdd(&v[6*ix+i], -w * r * Ji[i]);
@@ -809,6 +834,7 @@ __global__ void reprojection_residuals_and_hessian(
           atomicAdd(&v[6*jx+i],  w * r * Jj[i]);
       }
 
+      /* Accumulate depth diagonal and RHS: C[k] += w·Jz², u[k] += w·r·Jz */
       atomicAdd(&C[k], w * Jz * Jz);
       atomicAdd(&u[k], w *  r * Jz);
     }

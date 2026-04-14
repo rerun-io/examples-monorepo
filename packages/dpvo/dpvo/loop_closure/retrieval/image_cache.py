@@ -71,6 +71,12 @@ class ImageCache:
                 self._write_image(n)
                 self.stored_indices[n] = True
 
+    def __enter__(self) -> "ImageCache":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
     def close(self) -> None:
         self._wait()
         self.tmpdir.cleanup()

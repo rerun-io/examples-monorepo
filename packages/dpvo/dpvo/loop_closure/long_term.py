@@ -15,6 +15,7 @@ import pypose as pp
 import torch
 import torch.multiprocessing as mp
 from einops import asnumpy, rearrange, repeat
+from jaxtyping import Float, Int, UInt8
 from lietorch import SE3
 from torch import Tensor
 
@@ -50,8 +51,8 @@ class LongTermLoopClosure:
 
         # Patch graph + accumulated loop edges
         self.pg: PatchGraph = patchgraph
-        self.loop_ii: Tensor = torch.zeros(0, dtype=torch.long)
-        self.loop_jj: Tensor = torch.zeros(0, dtype=torch.long)
+        self.loop_ii: Int[Tensor, "n_loops"] = torch.zeros(0, dtype=torch.long)
+        self.loop_jj: Int[Tensor, "n_loops"] = torch.zeros(0, dtype=torch.long)
 
         self.lc_count: int = 0
 
@@ -61,14 +62,14 @@ class LongTermLoopClosure:
         self.detector = KF.DISK.from_pretrained("depth").to("cuda").eval()
         self.matcher = KF.LightGlue("disk").to("cuda").eval()
 
-    def detect_keypoints(self, images: Tensor, num_features: int = 2048) -> list[dict]:
+    def detect_keypoints(self, images: Float[Tensor, "batch 3 height width"], num_features: int = 2048) -> list[dict]:
         """Detect DISK keypoints in a batch of images."""
         _, _, h, w = images.shape
         wh = torch.tensor([w, h]).view(1, 2).float().cuda()
         features = self.detector(images, num_features, pad_if_not_divisible=True, window_size=15, score_threshold=40.0)
         return [{"keypoints": f.keypoints[None], "descriptors": f.descriptors[None], "image_size": wh} for f in features]
 
-    def __call__(self, img: Tensor, n: int) -> None:
+    def __call__(self, img: UInt8[Tensor, "3 height width"], n: int) -> None:
         """Feed a new frame to the retrieval and image cache."""
         img_np = K.tensor_to_image(img)
         self.retrieval(img_np, n)
@@ -79,7 +80,7 @@ class LongTermLoopClosure:
         self.retrieval.keyframe(k)
         self.imcache.keyframe(k)
 
-    def estimate_3d_keypoints(self, i: int) -> tuple[Tensor, dict]:
+    def estimate_3d_keypoints(self, i: int) -> tuple[Float[Tensor, "N 3"], dict]:
         """Detect, match and triangulate 3D points from a triplet of frames."""
         image_orig = self.imcache.load_frames([i - 1, i, i + 1], self.pg.intrinsics.device)
         image = image_orig.float() / 255
@@ -175,7 +176,7 @@ class LongTermLoopClosure:
         self.retrieval.close()
         print(f"LC COUNT: {self.lc_count}")
 
-    def _rescale_deltas(self, s: Tensor) -> None:
+    def _rescale_deltas(self, s: Float[Tensor, "N"]) -> None:
         """Rescale the poses of removed frames by their predicted scales."""
         tstamp_2_rescale: dict[int, Tensor] = {}
         for i in range(self.pg.n):

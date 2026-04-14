@@ -14,7 +14,9 @@ from einops import parse_shape
 try:
     import dpretrieval
 
-    _cls = dpretrieval.DPRetrieval  # Verify the class exists
+    # Import-time check: verify the C++ class is loadable (fail fast).
+    # The temporary reference is deleted to avoid polluting module namespace.
+    _cls = dpretrieval.DPRetrieval
     del _cls
 except Exception as _err:
     raise ModuleNotFoundError("Couldn't load dpretrieval. It may not be installed.") from _err
@@ -24,7 +26,12 @@ NMS = 50
 RAD = 50
 
 
-def _dbow_loop(in_queue: Queue, out_queue: Queue, vocab_path: str, ready: Value) -> None:
+def _dbow_loop(
+    in_queue: "Queue[tuple[int, np.ndarray]]",
+    out_queue: "Queue[tuple[int, tuple[float, int, list]]]",
+    vocab_path: str,
+    ready: Value,
+) -> None:
     """Run DBoW retrieval in a background process."""
     dbow = dpretrieval.DPRetrieval(vocab_path, 50)
     ready.value = 1
@@ -52,8 +59,8 @@ class RetrievalDBOW:
         self.prev_loop_closes: list[tuple[int, int]] = []
         self.found: list[tuple[int, int]] = []
 
-        self.in_queue: Queue = Queue(maxsize=20)
-        self.out_queue: Queue = Queue(maxsize=20)
+        self.in_queue: Queue = Queue(maxsize=20)   # carries tuple[int, np.ndarray] (frame_idx, image)
+        self.out_queue: Queue = Queue(maxsize=20)  # carries tuple[int, tuple[float, int, list]] (frame_idx, query_result)
         ready = Value("i", 0)
         self.proc: Process = Process(target=_dbow_loop, args=(self.in_queue, self.out_queue, vocab_path, ready))
         self.proc.start()
@@ -118,6 +125,12 @@ class RetrievalDBOW:
         assert image.dtype == np.uint8
         assert parse_shape(image, "_ _ RGB") == dict(RGB=3)
         self.image_buffer[n] = image
+
+    def __enter__(self) -> "RetrievalDBOW":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
 
     def close(self) -> None:
         self.proc.terminate()

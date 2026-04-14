@@ -63,7 +63,12 @@ inline void release_assert(const char *file, int line, bool condition, const std
 typedef Eigen::Array<long, -1, -1> IndexLookup;
 
 /* -------------------------------------------------------------------------
- * EfficentE constructors
+ * EfficentE constructors.
+ *
+ * The main constructor builds three lookup structures:
+ *   1. E_lookup: [n_unique_pairs, ppf, 6] -- compressed E-block storage
+ *   2. ij_xself: maps each edge to its (i,j) and (i,i) entries in E_lookup
+ *   3. index_tensor: all (frame, pair, pair) triples for EQEt computation
  * ---------------------------------------------------------------------- */
 
 EfficentE::EfficentE() : ppf(0), t0(0) {

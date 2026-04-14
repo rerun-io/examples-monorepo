@@ -28,6 +28,14 @@ const auto mdtype = torch::dtype(torch::kFloat32).device(torch::kCUDA);
 
 typedef float mtype;
 
+/**
+ * Efficient E-block for global bundle adjustment.
+ *
+ * Stores the pose-depth cross-term E in a compressed per-(frame, patch)
+ * lookup table instead of materializing the dense 6N x M matrix.
+ * The lookup table is indexed by unique (source_frame, target_frame)
+ * pairs and patch-within-frame index (k % patches_per_frame).
+ */
 class EfficentE
 {
 private:
@@ -38,11 +46,18 @@ public:
     const int ppf;
     torch::Tensor E_lookup, ij_xself;
 
+    /** Construct from edge indices, building all lookup tables on GPU. */
     EfficentE(const torch::Tensor &ii, const torch::Tensor &jj, const torch::Tensor &ku, const int patches_per_frame, const int t0);
 
+    /** Default constructor (empty, zero-sized). */
     EfficentE();
 
+    /** Compute S_contribution = E · Q · Eᵀ (Schur complement pose-pose block). */
     torch::Tensor computeEQEt(const int N, const torch::Tensor &Q) const;
+
+    /** Compute E · vec (project depth-space vector to pose-space). */
     torch::Tensor computeEv(const int N, const torch::Tensor &vec) const;
+
+    /** Compute Eᵀ · vec (project pose-space vector to depth-space). */
     torch::Tensor computeEtv(const int M, const torch::Tensor &vec) const;
 };
