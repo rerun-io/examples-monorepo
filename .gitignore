@@ -142,3 +142,7 @@ __pypackages__/
 *.rdb
 *.aof
 repomix-output.xml
+
+# Root-level runtime outputs (downloaded datasets + ingested RRDs). Per-package
+# data lives under packages/<name>/data and has its own .gitignore rules.
+/data/

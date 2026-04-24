@@ -2,7 +2,14 @@
 authors = ["pablo vela <pablovela5620@gmail.com>"]
 channels = ["https://prefix.dev/ai-demos", "https://prefix.dev/conda-forge"]
 name = "examples-monorepo"
-platforms = ["linux-64", "linux-aarch64"]
+# Temporarily aarch64-only: the current dev host is linux-aarch64 and pixi's
+# uv build-dispatch cannot initialise for linux-64 when it needs to build
+# git-based PyPI deps (vggt / moge / gsplat / cuvslam) from an aarch64 host.
+# Restore to ["linux-64", "linux-aarch64"] once a linux-64 host is available
+# to regenerate the linux-64 lockfile entries; the feature-level
+# `platforms = ["linux-64"]` restrictions on the CUDA-only features are
+# already in place so that flip is a one-line change.
+platforms = ["linux-aarch64"]
 version = "0.1.0"
 requires-pixi = ">=0.40"
 preview = ["pixi-build"]
@@ -1126,6 +1133,48 @@ depends-on = ["_build-dpvo-cuda-kernels", "_download-dpvo-model", "_download-dpv
 cwd = "packages/dpvo"
 description = "Launch DPVO Gradio web UI"
 
+# ─── slam-evals feature (VSLAM-LAB benchmark → Rerun catalog ingester) ──────
+# Ingestion depends only on rerun-sdk, av, numpy, pyyaml, pyarrow — all
+# cross-platform. Platform is pinned to linux-aarch64 for now because the
+# current dev host is aarch64 and pixi's uv build-dispatch can't initialise
+# for linux-64 cross-builds from this host (see sibling CUDA features for
+# the same pattern). Flip to ["linux-64", "linux-aarch64"] once a linux-64
+# host is available to regenerate the linux-64 lockfile entries. The
+# PyCuVSLAM baseline will come later as a separate CUDA-only feature.
+[feature.slam-evals]
+platforms = ["linux-aarch64"]
+
+[feature.slam-evals.dependencies]
+python = "3.10.*"
+pyyaml = "*"
+pyarrow = ">=20.0.0,<21"
+tqdm = "*"
+pandas = "*"
+
+[feature.slam-evals.pypi-dependencies]
+slam-evals = { path = "packages/slam-evals", editable = true }
+tyro = ">=0.9,<1"
+
+[feature.slam-evals.activation.env]
+PACKAGE_DIR = "packages/slam-evals"
+VSLAM_LAB_BENCHMARK = "/home/pablo/0Dev/work/VSLAM-LAB-Benchmark"
+
+[feature.slam-evals.tasks.slam-evals-discover]
+cmd = "python tools/discover.py --benchmark-root $VSLAM_LAB_BENCHMARK --out ../../data/slam-evals/manifest.json"
+cwd = "packages/slam-evals"
+description = "Scan the benchmark root and write data/slam-evals/manifest.json"
+
+[feature.slam-evals.tasks.slam-evals-ingest]
+cmd = "python tools/ingest.py --manifest ../../data/slam-evals/manifest.json --out ../../data/slam-evals/rrd"
+cwd = "packages/slam-evals"
+depends-on = ["slam-evals-discover"]
+description = "Ingest every sequence in the manifest into per-sequence RRDs"
+
+[feature.slam-evals.tasks.slam-evals-catalog]
+cmd = "python tools/catalog.py --rrd-dir ../../data/slam-evals/rrd"
+cwd = "packages/slam-evals"
+description = "Mount the RRD directory as a Rerun catalog and print the segment summary"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1262,3 +1311,12 @@ dpvo-dev = { features = [
     "dpvo",
     "dev",
 ], solve-group = "dpvo", no-default-feature = true }
+slam-evals = { features = [
+    "common",
+    "slam-evals",
+], solve-group = "slam-evals", no-default-feature = true }
+slam-evals-dev = { features = [
+    "common",
+    "slam-evals",
+    "dev",
+], solve-group = "slam-evals", no-default-feature = true }
