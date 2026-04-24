@@ -1175,11 +1175,6 @@ cmd = "python tools/catalog.py --rrd-dir ../../data/slam-evals/rrd"
 cwd = "packages/slam-evals"
 description = "Mount the RRD directory as a Rerun catalog and print the segment summary"
 
-[feature.slam-evals.tasks.slam-evals-smoke]
-cmd = "python tools/smoke.py --out ../../data/slam-evals/smoke"
-cwd = "packages/slam-evals"
-description = "Build one tiny RRD per modality under data/slam-evals/smoke/ for visual inspection"
-
 # ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
