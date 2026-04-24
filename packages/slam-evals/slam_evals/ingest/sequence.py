@@ -1,16 +1,22 @@
 """Orchestrate ingestion of one VSLAM-LAB sequence into a single ``.rrd`` file.
 
-Entity layout written per sequence (only paths whose modality applies are populated):
+Scene-graph (only paths whose modality applies are populated):
 
-    /world/gt                                Transform3D stream (ground-truth poses)
-    /world/body                              Identity transform (body frame anchor)
-    /world/body/cam_0                        Transform3D (body -> rgb_0 extrinsic)
-    /world/body/cam_0/pinhole                Pinhole intrinsics + distortion
+    /world/body                              Transform3D STREAM (world_T_body from GT;
+                                             static identity fallback when GT is empty)
+    /world/body/cam_0                        Transform3D (body -> rgb_0 extrinsic, static)
+    /world/body/cam_0/pinhole                Pinhole intrinsics + distortion (static)
     /world/body/cam_0/pinhole/video          VideoStream (H.264, rgb_0)
     /world/body/cam_0/pinhole/depth          DepthImage stream (rgbd; registered to rgb_0)
     /world/body/cam_1/...                    Same tree for rgb_1 when stereo
     /world/body/cam_1/pinhole/depth          DepthImage stream (OPENLORIS-style stereo+rgbd)
     /imu/gyro, /imu/accel                    Scalars streams when *-vi
+
+The ground-truth pose is logged directly as the body entity's transform
+rather than on a separate ``/world/gt`` path — this makes every sensor
+under ``/world/body`` ride the GT trajectory automatically via the scene
+graph, matching simplecv's convention of logging extrinsics at the entity
+itself (see ``simplecv.rerun_log_utils.log_pinhole``).
 
 Rationale for shared pinhole: VSLAM-LAB's ``calibration.yaml`` already encodes
 ``cam_type: rgb+depth, depth_name: depth_0`` on a single camera entry, meaning
@@ -115,7 +121,16 @@ def ingest_sequence(
         rr.send_blueprint(build_blueprint(), make_active=True, make_default=True, recording=recording)
 
         rr.log("/", rr.ViewCoordinates.RDF, static=True, recording=recording)  # SLAM CV convention
-        rr.log("/world/body", rr.Transform3D(translation=[0.0, 0.0, 0.0]), static=True, recording=recording)
+        # Body frame: time-varying world_T_body from GT (logged further down).
+        # When GT is empty we still need an anchor so child sensor entities
+        # resolve, so fall back to a static identity transform.
+        if gt.ts_ns.shape[0] == 0:
+            rr.log(
+                "/world/body",
+                rr.Transform3D(translation=[0.0, 0.0, 0.0]),
+                static=True,
+                recording=recording,
+            )
 
         # Static per-camera calibration. depth_0 / depth_1 are *not* given
         # their own entity paths — depth is pre-registered to rgb_0 / rgb_1
@@ -185,10 +200,10 @@ def ingest_sequence(
             )
 
         # Some sequences (HAMLYN/*, HILTI2026/floor_3_*) ship an empty
-        # groundtruth.csv. Skip the trajectory log but keep the rest of the
-        # recording so the RGB + depth + IMU streams are still usable.
+        # groundtruth.csv. The static identity transform logged above stands in
+        # so every sensor entity still has a parent pose.
         if gt.ts_ns.shape[0] > 0:
-            log_groundtruth_columns(gt, recording=recording)
+            log_groundtruth_columns(gt, t0_ns=t0_ns, recording=recording)
 
         num_imu = 0
         if imu is not None:

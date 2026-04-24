@@ -17,13 +17,22 @@ from slam_evals.data.parse import GroundTruth, ImuSamples
 def log_groundtruth_columns(
     gt: GroundTruth,
     *,
-    entity_path: str = "/world/gt",
+    entity_path: str = "/world/body",
     timeline: str = "ts",
+    t0_ns: int | None = None,
     recording: rr.RecordingStream | None = None,
 ) -> None:
-    """Log the GT trajectory as a ``Transform3D`` stream."""
-    t0 = int(gt.ts_ns[0])
-    t_rel_s: Float64[ndarray, "n"] = (gt.ts_ns - t0).astype(np.float64) * 1e-9
+    """Log GT as a time-varying ``Transform3D`` stream on the body entity.
+
+    VSLAM-LAB's groundtruth gives ``(tx, ty, tz, qx, qy, qz, qw)`` as
+    ``world_T_body`` — the body's pose expressed in the world frame — which
+    maps to a default (``from_parent=False``) ``rr.Transform3D`` at
+    ``/world/body``. Sensor entities under ``/world/body`` (``cam_0``,
+    ``cam_1``) keep their own static body-from-sensor extrinsics and ride
+    this trajectory automatically via the scene graph.
+    """
+    anchor = int(t0_ns) if t0_ns is not None else int(gt.ts_ns[0])
+    t_rel_s: Float64[ndarray, "n"] = (gt.ts_ns - anchor).astype(np.float64) * 1e-9
 
     rr.send_columns(
         entity_path,
