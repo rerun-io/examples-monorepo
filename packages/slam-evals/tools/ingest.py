@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import tyro
+from beartype.roar import BeartypeException
 from tqdm import tqdm
 
 from slam_evals.data import discover_sequences
@@ -85,7 +86,10 @@ def main(cfg: IngestConfig) -> None:
         t0 = time.monotonic()
         try:
             ingest_sequence(seq, out_rrd)
-        except (OSError, ValueError, RuntimeError) as exc:
+        except BeartypeException:
+            # Never swallow type-contract violations — they're real bugs.
+            raise
+        except Exception as exc:  # noqa: BLE001 -- we intentionally continue past any other failure
             failed.append((seq.slug, f"{type(exc).__name__}: {exc}"))
             tqdm.write(f"FAIL {seq.slug}: {exc}")
             continue

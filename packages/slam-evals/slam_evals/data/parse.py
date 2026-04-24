@@ -61,13 +61,22 @@ def _read_csv(path: Path) -> tuple[list[str], list[list[str]]]:
     return rows[0], rows[1:]
 
 
+def _parse_ns(value: str) -> int:
+    """Parse a nanosecond timestamp that may be written as an int or float literal.
+
+    Some datasets (e.g. DRUNKARDS) emit ``10000000000.0`` rather than
+    ``10000000000``. Both round-trip to the same integer nanosecond value.
+    """
+    return int(float(value))
+
+
 def parse_rgb_csv(path: Path) -> RgbCsv:
     header, rows = _read_csv(path)
     idx = {name.strip(): i for i, name in enumerate(header)}
 
     def col_int64(key: str) -> Int64[ndarray, "n"]:
         i = idx[key]
-        return np.asarray([int(r[i]) for r in rows], dtype=np.int64)
+        return np.asarray([_parse_ns(r[i]) for r in rows], dtype=np.int64)
 
     def col_str(key: str) -> tuple[str, ...]:
         i = idx[key]
@@ -98,9 +107,17 @@ def parse_rgb_csv(path: Path) -> RgbCsv:
 def parse_groundtruth(path: Path) -> GroundTruth:
     header, rows = _read_csv(path)
     idx = {name.strip(): i for i, name in enumerate(header)}
-    data = np.asarray(rows, dtype=object)
 
-    ts_ns: Int64[ndarray, "n"] = np.asarray([int(r[idx["ts (ns)"]]) for r in rows], dtype=np.int64)
+    # HAMLYN and a few HILTI sequences ship a groundtruth.csv with just the
+    # header — return empty, correctly-shaped arrays rather than raising.
+    if not rows:
+        return GroundTruth(
+            ts_ns=np.zeros((0,), dtype=np.int64),
+            translation=np.zeros((0, 3), dtype=np.float64),
+            quaternion_xyzw=np.zeros((0, 4), dtype=np.float64),
+        )
+
+    ts_ns: Int64[ndarray, "n"] = np.asarray([_parse_ns(r[idx["ts (ns)"]]) for r in rows], dtype=np.int64)
     translation: Float64[ndarray, "n 3"] = np.asarray(
         [[float(r[idx["tx (m)"]]), float(r[idx["ty (m)"]]), float(r[idx["tz (m)"]])] for r in rows],
         dtype=np.float64,
@@ -109,7 +126,6 @@ def parse_groundtruth(path: Path) -> GroundTruth:
         [[float(r[idx["qx"]]), float(r[idx["qy"]]), float(r[idx["qz"]]), float(r[idx["qw"]])] for r in rows],
         dtype=np.float64,
     )
-    del data
     return GroundTruth(ts_ns=ts_ns, translation=translation, quaternion_xyzw=quaternion_xyzw)
 
 
@@ -117,7 +133,7 @@ def parse_imu(path: Path) -> ImuSamples:
     header, rows = _read_csv(path)
     idx = {name.strip(): i for i, name in enumerate(header)}
 
-    ts_ns: Int64[ndarray, "n"] = np.asarray([int(r[idx["ts (ns)"]]) for r in rows], dtype=np.int64)
+    ts_ns: Int64[ndarray, "n"] = np.asarray([_parse_ns(r[idx["ts (ns)"]]) for r in rows], dtype=np.int64)
     gyro: Float64[ndarray, "n 3"] = np.asarray(
         [[float(r[idx["wx (rad s^-1)"]]), float(r[idx["wy (rad s^-1)"]]), float(r[idx["wz (rad s^-1)"]])] for r in rows],
         dtype=np.float64,

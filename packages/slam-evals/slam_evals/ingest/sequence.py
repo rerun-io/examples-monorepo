@@ -184,7 +184,11 @@ def ingest_sequence(
                 recording=recording,
             )
 
-        log_groundtruth_columns(gt, recording=recording)
+        # Some sequences (HAMLYN/*, HILTI2026/floor_3_*) ship an empty
+        # groundtruth.csv. Skip the trajectory log but keep the rest of the
+        # recording so the RGB + depth + IMU streams are still usable.
+        if gt.ts_ns.shape[0] > 0:
+            log_groundtruth_columns(gt, recording=recording)
 
         num_imu = 0
         if imu is not None:
