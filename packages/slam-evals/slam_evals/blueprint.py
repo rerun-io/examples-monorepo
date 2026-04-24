@@ -1,8 +1,10 @@
 """Rerun blueprint shared across all slam-evals recordings.
 
-Panels for entities that don't exist in a given recording are silently empty,
-so one blueprint covers every modality (mono / stereo / rgbd, with or without
-IMU) without dispatching on the recording's metadata.
+With RGB and depth sharing the same pinhole tree (see
+``slam_evals/ingest/sequence.py`` module docstring), a single 2D view at
+``/world/body/cam_<i>/pinhole`` shows the VideoStream with the DepthImage
+automatically overlaid for rgbd modalities. Views whose origin entity
+doesn't exist in a given recording are silently empty.
 """
 
 from __future__ import annotations
@@ -18,7 +20,6 @@ def build_blueprint() -> rrb.Blueprint:
                 rrb.Vertical(
                     rrb.Spatial2DView(name="cam_0", origin="/world/body/cam_0/pinhole"),
                     rrb.Spatial2DView(name="cam_1", origin="/world/body/cam_1/pinhole"),
-                    rrb.Spatial2DView(name="depth", origin="/world/body/cam_depth"),
                 ),
             ),
             rrb.Horizontal(

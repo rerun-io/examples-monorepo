@@ -22,7 +22,11 @@ from slam_evals.data.types import Calibration, CameraIntrinsics
 
 @dataclass(frozen=True, slots=True)
 class RgbCsv:
-    """Parsed ``rgb.csv``. Columns that don't exist in the source come back empty."""
+    """Parsed ``rgb.csv``. Columns that don't exist in the source come back as ``None``.
+
+    ``depth_1`` only appears in stereo-rgbd layouts like OPENLORIS-D400. When present
+    it's the depth stream pre-registered to ``rgb_1`` (same sensor).
+    """
 
     ts_rgb_0_ns: Int64[ndarray, "n"]
     path_rgb_0: tuple[str, ...]
@@ -30,6 +34,8 @@ class RgbCsv:
     path_rgb_1: tuple[str, ...] | None
     ts_depth_0_ns: Int64[ndarray, "n"] | None
     path_depth_0: tuple[str, ...] | None
+    ts_depth_1_ns: Int64[ndarray, "n"] | None
+    path_depth_1: tuple[str, ...] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +80,8 @@ def parse_rgb_csv(path: Path) -> RgbCsv:
     path_rgb_1: tuple[str, ...] | None = col_str("path_rgb_1") if "path_rgb_1" in idx else None
     ts_depth_0_ns: Int64[ndarray, "n"] | None = col_int64("ts_depth_0 (ns)") if "ts_depth_0 (ns)" in idx else None
     path_depth_0: tuple[str, ...] | None = col_str("path_depth_0") if "path_depth_0" in idx else None
+    ts_depth_1_ns: Int64[ndarray, "n"] | None = col_int64("ts_depth_1 (ns)") if "ts_depth_1 (ns)" in idx else None
+    path_depth_1: tuple[str, ...] | None = col_str("path_depth_1") if "path_depth_1" in idx else None
 
     return RgbCsv(
         ts_rgb_0_ns=ts_rgb_0_ns,
@@ -82,6 +90,8 @@ def parse_rgb_csv(path: Path) -> RgbCsv:
         path_rgb_1=path_rgb_1,
         ts_depth_0_ns=ts_depth_0_ns,
         path_depth_0=path_depth_0,
+        ts_depth_1_ns=ts_depth_1_ns,
+        path_depth_1=path_depth_1,
     )
 
 

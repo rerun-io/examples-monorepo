@@ -2,14 +2,21 @@
 
 Entity layout written per sequence (only paths whose modality applies are populated):
 
-    /world/gt                    Transform3D stream (ground-truth poses)
-    /world/body                  Identity transform (body frame anchor)
-    /world/body/cam_0            Transform3D (body -> rgb_0 extrinsic)
-    /world/body/cam_0/pinhole    Pinhole intrinsics
-    /world/body/cam_0/pinhole/video   VideoStream (H.264, rgb_0)
-    /world/body/cam_1/...        Same tree for rgb_1 when stereo
-    /world/body/cam_depth/...    Transform3D + depth frames for rgbd
-    /imu/gyro, /imu/accel        Scalars streams when *-vi
+    /world/gt                                Transform3D stream (ground-truth poses)
+    /world/body                              Identity transform (body frame anchor)
+    /world/body/cam_0                        Transform3D (body -> rgb_0 extrinsic)
+    /world/body/cam_0/pinhole                Pinhole intrinsics + distortion
+    /world/body/cam_0/pinhole/video          VideoStream (H.264, rgb_0)
+    /world/body/cam_0/pinhole/depth          DepthImage stream (rgbd; registered to rgb_0)
+    /world/body/cam_1/...                    Same tree for rgb_1 when stereo
+    /world/body/cam_1/pinhole/depth          DepthImage stream (OPENLORIS-style stereo+rgbd)
+    /imu/gyro, /imu/accel                    Scalars streams when *-vi
+
+Rationale for shared pinhole: VSLAM-LAB's ``calibration.yaml`` already encodes
+``cam_type: rgb+depth, depth_name: depth_0`` on a single camera entry, meaning
+the depth stream is pre-registered to the RGB sensor. Mirroring
+``packages/monoprior/monopriors/rr_logging_utils.py:24-47``, RGB and depth
+sit under the same pinhole so the viewer hover-syncs them at the pixel level.
 
 Properties (``/__properties``):
     info              dataset, sequence, slug, modality, counts, fps, duration
@@ -21,6 +28,7 @@ from __future__ import annotations
 from pathlib import Path
 from uuid import uuid4
 
+import cv2
 import numpy as np
 import rerun as rr
 from jaxtyping import Int64
@@ -35,15 +43,6 @@ from slam_evals.ingest.properties import send_sequence_properties
 from slam_evals.ingest.video import encode_and_log_video
 
 
-def _cam_entity_path(cam_name: str) -> str:
-    """Map a calibration cam_name (``rgb_0``, ``rgb_1``, ``depth_0``, ...) to an entity path."""
-    return {
-        "rgb_0": "/world/body/cam_0",
-        "rgb_1": "/world/body/cam_1",
-        "depth_0": "/world/body/cam_depth",
-    }.get(cam_name, f"/world/body/{cam_name}")
-
-
 def _fps_from_timestamps(ts_ns: Int64[ndarray, "n"]) -> float | None:
     if ts_ns.shape[0] < 2:
         return None
@@ -53,7 +52,7 @@ def _fps_from_timestamps(ts_ns: Int64[ndarray, "n"]) -> float | None:
     return 1e9 / dt_ns
 
 
-def _log_depth_frames(
+def _log_depth_stream(
     *,
     seq_root: Path,
     paths: tuple[str, ...],
@@ -63,9 +62,14 @@ def _log_depth_frames(
     depth_factor: float | None,
     recording: rr.RecordingStream,
     timeline: str = "ts",
+    compress_level: int = 6,
 ) -> int:
-    import cv2  # local import; depth is optional and cv2 already used in video.py
+    """Stream depth frames as compressed PNG ``DepthImage`` entries.
 
+    ``compress_level=6`` matches the PNG DEFLATE default — on VSLAM-LAB depth
+    that shrinks frames ~6.5× vs the raw uint16 buffer for ~10 ms/frame of
+    extra CPU. ``0`` disables compression.
+    """
     meter: float | None = float(depth_factor) if depth_factor and depth_factor > 0 else None
     count = 0
     for i, rel in enumerate(paths):
@@ -74,7 +78,10 @@ def _log_depth_frames(
             continue
         t_rel_s = (int(timestamps_ns[i]) - t0_ns) * 1e-9
         rr.set_time(timeline, duration=t_rel_s, recording=recording)
-        rr.log(entity_path, rr.DepthImage(img, meter=meter), recording=recording)
+        depth = rr.DepthImage(img, meter=meter)
+        if compress_level > 0:
+            depth = depth.compress(compress_level=compress_level)
+        rr.log(entity_path, depth, recording=recording)
         count += 1
     return count
 
@@ -110,12 +117,15 @@ def ingest_sequence(
         rr.log("/", rr.ViewCoordinates.RDF, static=True, recording=recording)  # SLAM CV convention
         rr.log("/world/body", rr.Transform3D(translation=[0.0, 0.0, 0.0]), static=True, recording=recording)
 
+        # Static per-camera calibration. depth_0 / depth_1 are *not* given
+        # their own entity paths — depth is pre-registered to rgb_0 / rgb_1
+        # and logged as a sibling of the RGB VideoStream under the shared
+        # pinhole. See module docstring for the rationale.
         log_calibration_static(
             calib,
             cam_entity_paths={
                 "rgb_0": "/world/body/cam_0",
                 "rgb_1": "/world/body/cam_1",
-                "depth_0": "/world/body/cam_depth",
             },
             recording=recording,
         )
@@ -142,18 +152,35 @@ def ingest_sequence(
                 fps_hint=fps_rgb,
             )
 
+        # Depth streams (when present). Shared pinhole tree: depth_0 sits under
+        # cam_0's pinhole, depth_1 under cam_1's.
         if rgb_csv.path_depth_0 is not None and rgb_csv.ts_depth_0_ns is not None:
-            depth_factor = next(
-                (c.depth_factor for c in (calib.cameras if calib else ()) if c.cam_name == "depth_0"),
+            depth_factor_0 = next(
+                (c.depth_factor for c in (calib.cameras if calib else ()) if c.cam_name in ("rgb_0", "depth_0")),
                 None,
             )
-            _log_depth_frames(
+            _log_depth_stream(
                 seq_root=sequence.root,
                 paths=rgb_csv.path_depth_0,
                 timestamps_ns=rgb_csv.ts_depth_0_ns,
                 t0_ns=t0_ns,
-                entity_path="/world/body/cam_depth/depth",
-                depth_factor=depth_factor,
+                entity_path="/world/body/cam_0/pinhole/depth",
+                depth_factor=depth_factor_0,
+                recording=recording,
+            )
+
+        if rgb_csv.path_depth_1 is not None and rgb_csv.ts_depth_1_ns is not None:
+            depth_factor_1 = next(
+                (c.depth_factor for c in (calib.cameras if calib else ()) if c.cam_name in ("rgb_1", "depth_1")),
+                None,
+            )
+            _log_depth_stream(
+                seq_root=sequence.root,
+                paths=rgb_csv.path_depth_1,
+                timestamps_ns=rgb_csv.ts_depth_1_ns,
+                t0_ns=t0_ns,
+                entity_path="/world/body/cam_1/pinhole/depth",
+                depth_factor=depth_factor_1,
                 recording=recording,
             )
 
