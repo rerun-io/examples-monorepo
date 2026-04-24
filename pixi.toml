@@ -467,13 +467,13 @@ outputs = ["packages/robocap-slam/data/robocap/f408193e6447b3b0_session_14"]
 description = "Download example Robocap dataset from HuggingFace"
 
 [feature.robocap.tasks.robocap-track]
-cmd = "python tools/track_odometry.py"
+cmd = "python tools/track_odometry.py robocap"
 cwd = "packages/robocap-slam"
 depends-on = ["robocap-download-example"]
 description = "Run multicamera visual odometry on Robocap data"
 
 [feature.robocap.tasks.robocap-track-slam]
-cmd = "python tools/track_slam.py"
+cmd = "python tools/track_slam.py robocap"
 cwd = "packages/robocap-slam"
 depends-on = ["robocap-download-example"]
 description = "Run multicamera visual SLAM on Robocap data"
