@@ -17,7 +17,12 @@ track_dataset_defaults: dict[str, BaseTrackDatasetConfig] = {
 
 if TYPE_CHECKING:
     TrackDatasetUnion = BaseTrackDatasetConfig
-else:
+elif len(track_dataset_defaults) >= 2:
     TrackDatasetUnion = tyro.extras.subcommand_type_from_defaults(track_dataset_defaults, prefix_names=False)
+else:
+    # tyro.extras.subcommand_type_from_defaults requires >= 2 entries.
+    # With a single dataset there's nothing to choose between, so skip
+    # the subcommand layer and use the config type directly.
+    TrackDatasetUnion = type(next(iter(track_dataset_defaults.values())))
 
 AnnotatedTrackDatasetUnion = tyro.conf.OmitSubcommandPrefixes[TrackDatasetUnion]
