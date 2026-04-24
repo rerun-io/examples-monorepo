@@ -26,6 +26,7 @@ import rerun as rr
 from jaxtyping import Int64
 from numpy import ndarray
 
+from slam_evals.blueprint import build_blueprint
 from slam_evals.data.parse import parse_calibration, parse_groundtruth, parse_imu, parse_rgb_csv
 from slam_evals.data.types import Calibration, Sequence
 from slam_evals.ingest.calibration import log_calibration_static
@@ -102,6 +103,10 @@ def ingest_sequence(
     )
 
     with recording:
+        # Embed the default blueprint into the RRD so `rerun <file>.rrd` opens
+        # with the right 3D / 2D / timeseries layout for any modality.
+        rr.send_blueprint(build_blueprint(), make_active=True, make_default=True, recording=recording)
+
         rr.log("/", rr.ViewCoordinates.RDF, static=True, recording=recording)  # SLAM CV convention
         rr.log("/world/body", rr.Transform3D(translation=[0.0, 0.0, 0.0]), static=True, recording=recording)
 
