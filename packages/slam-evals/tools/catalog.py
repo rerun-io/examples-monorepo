@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Mount a directory of slam-evals RRDs as a Rerun catalog and query / view it."""
+"""Mount a directory of slam-evals RRDs as a Rerun catalog and serve it.
+
+Defaults: spin up the catalog on a fixed port, print the viewer-connectable
+URL, then optionally print the per-recording segment summary and block until
+Ctrl-C. Paste the URL into the Rerun viewer's "Open Data Source" UI (or pass
+it to ``rerun <url>``) to browse the catalog interactively.
+"""
 
 from __future__ import annotations
 
@@ -20,22 +26,33 @@ class CatalogConfig:
     dataset_name: str = "vslam"
     """Name of the catalog dataset to register the RRDs under."""
 
+    port: int = 9987
+    """gRPC port for the catalog server. Pick something different from the running viewer's port (default 9876)."""
+
     print_summary: bool = True
-    """Print the per-sequence segment summary to stdout."""
+    """Print the per-sequence segment summary to stdout once mounted."""
 
     filter_modality: str | None = None
-    """Optional substring filter on ``property:info:modality`` (e.g. ``stereo-vi``)."""
+    """Optional substring filter on ``property:info:modality`` (e.g. ``stereo-vi``) — applied to summary print only."""
 
     filter_dataset: str | None = None
-    """Optional substring filter on ``property:info:dataset`` (e.g. ``EUROC``)."""
+    """Optional substring filter on ``property:info:dataset`` (e.g. ``EUROC``) — applied to summary print only."""
 
-    serve: bool = False
-    """After mounting, block so a Rerun viewer can connect. Ctrl-C to stop."""
+    serve: bool = True
+    """Block after mounting so a Rerun viewer can connect. Ctrl-C to stop."""
 
 
 def main(cfg: CatalogConfig) -> None:
-    with mount_catalog(cfg.rrd_dir, dataset_name=cfg.dataset_name) as server:
+    with mount_catalog(cfg.rrd_dir, dataset_name=cfg.dataset_name, port=cfg.port) as server:
+        url = server.url()
         print(f"Mounted catalog '{cfg.dataset_name}' from {cfg.rrd_dir.resolve()}")
+        print()
+        print("─" * 72)
+        print(f"  Catalog URL:  {url}")
+        print()
+        print("  In the Rerun viewer:  + → Open Data Source → paste the URL")
+        print(f"  Or from a terminal:   rerun {url}")
+        print("─" * 72)
 
         if cfg.print_summary:
             df = segment_summary(server, dataset_name=cfg.dataset_name)
@@ -47,7 +64,7 @@ def main(cfg: CatalogConfig) -> None:
             print(df.to_string(index=False))
 
         if cfg.serve:
-            print("\nServer is up. Connect a Rerun viewer to it; Ctrl-C to stop.")
+            print("\nServer is up. Ctrl-C to stop.")
             try:
                 while True:
                     time.sleep(3600)
@@ -57,4 +74,4 @@ def main(cfg: CatalogConfig) -> None:
 
 if __name__ == "__main__":
     tyro.extras.set_accent_color("bright_cyan")
-    main(tyro.cli(CatalogConfig, description="Mount + query a slam-evals catalog."))
+    main(tyro.cli(CatalogConfig, description="Mount + serve a slam-evals catalog over gRPC."))
