@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -44,6 +45,9 @@ class IngestConfig:
     limit: int | None = None
     """Cap the number of sequences processed (post-filter)."""
 
+    workers: int = 4
+    """Process pool size. NVENC is GPU-bound so over-subscribing past ~4 doesn't help; ``1`` runs serially."""
+
 
 def _load_sequences(cfg: IngestConfig) -> list[Sequence]:
     if cfg.manifest is not None:
@@ -61,6 +65,18 @@ def _load_sequences(cfg: IngestConfig) -> list[Sequence]:
     return discover_sequences(cfg.benchmark_root.expanduser().resolve())
 
 
+def _ingest_one(seq: Sequence, out_rrd: Path) -> tuple[str, float]:
+    """Worker entrypoint: ingest a single sequence; return (slug, wall_seconds).
+
+    Runs inside a child process when ``workers > 1``. Beartype contract
+    violations propagate (the parent process re-raises them as the
+    submitting task fails); other exceptions surface via the future result.
+    """
+    t0 = time.monotonic()
+    ingest_sequence(seq, out_rrd)
+    return seq.slug, time.monotonic() - t0
+
+
 def main(cfg: IngestConfig) -> None:
     sequences = _load_sequences(cfg)
     sequences = filter_sequences(
@@ -72,32 +88,55 @@ def main(cfg: IngestConfig) -> None:
     if cfg.limit is not None:
         sequences = sequences[: cfg.limit]
 
-    print(f"Ingesting {len(sequences)} sequences -> {cfg.out}")
+    print(f"Ingesting {len(sequences)} sequences -> {cfg.out}  (workers={cfg.workers})")
     cfg.out.mkdir(parents=True, exist_ok=True)
 
-    succeeded = 0
-    failed: list[tuple[str, str]] = []
-    for seq in tqdm(sequences, desc="sequences"):
+    # Skip sequences whose RRD already exists (unless --force).
+    todo: list[tuple[Sequence, Path]] = []
+    skipped = 0
+    for seq in sequences:
         out_rrd = cfg.out / seq.dataset / f"{seq.name}.rrd"
         if out_rrd.exists() and not cfg.force:
-            tqdm.write(f"skip (exists): {seq.slug}")
-            succeeded += 1
+            skipped += 1
             continue
-        t0 = time.monotonic()
-        try:
-            ingest_sequence(seq, out_rrd)
-        except BeartypeException:
-            # Never swallow type-contract violations — they're real bugs.
-            raise
-        except Exception as exc:  # noqa: BLE001 -- we intentionally continue past any other failure
-            failed.append((seq.slug, f"{type(exc).__name__}: {exc}"))
-            tqdm.write(f"FAIL {seq.slug}: {exc}")
-            continue
-        dur = time.monotonic() - t0
-        tqdm.write(f"ok   {seq.slug} [{seq.modality}] in {dur:.1f}s -> {out_rrd}")
-        succeeded += 1
+        out_rrd.parent.mkdir(parents=True, exist_ok=True)
+        todo.append((seq, out_rrd))
 
-    print(f"\nDone: {succeeded}/{len(sequences)} succeeded, {len(failed)} failed.")
+    succeeded = skipped
+    failed: list[tuple[str, str]] = []
+
+    if cfg.workers <= 1 or len(todo) <= 1:
+        for seq, out_rrd in tqdm(todo, desc="sequences"):
+            try:
+                slug, dur = _ingest_one(seq, out_rrd)
+            except BeartypeException:
+                raise  # Never swallow type-contract violations.
+            except Exception as exc:  # noqa: BLE001 -- continue past any other failure
+                failed.append((seq.slug, f"{type(exc).__name__}: {exc}"))
+                tqdm.write(f"FAIL {seq.slug}: {exc}")
+                continue
+            tqdm.write(f"ok   {slug} [{seq.modality}] in {dur:.1f}s -> {out_rrd}")
+            succeeded += 1
+    else:
+        # NVENC is GPU-bound but per-sequence ingest still has plenty of
+        # CPU-side work (PNG decode, ndarray reformat, depth file reads).
+        # Over-subscribing past ~4 yields diminishing returns on this box.
+        with ProcessPoolExecutor(max_workers=cfg.workers) as pool:
+            futures = {pool.submit(_ingest_one, seq, out_rrd): (seq, out_rrd) for seq, out_rrd in todo}
+            for fut in tqdm(as_completed(futures), total=len(futures), desc="sequences"):
+                seq, out_rrd = futures[fut]
+                try:
+                    slug, dur = fut.result()
+                except BeartypeException:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    failed.append((seq.slug, f"{type(exc).__name__}: {exc}"))
+                    tqdm.write(f"FAIL {seq.slug}: {exc}")
+                    continue
+                tqdm.write(f"ok   {slug} [{seq.modality}] in {dur:.1f}s -> {out_rrd}")
+                succeeded += 1
+
+    print(f"\nDone: {succeeded}/{len(sequences)} succeeded ({skipped} skipped), {len(failed)} failed.")
     if failed:
         print("Failures:")
         for slug, err in failed:

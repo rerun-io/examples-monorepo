@@ -4,6 +4,10 @@ Materialises a tiny benchmark layout on disk (rgb_0/, optional rgb_1/,
 optional depth_0/, rgb.csv, groundtruth.csv, optional imu_0.csv,
 calibration.yaml) so the ingester's per-modality code paths can be
 exercised without touching the multi-GB real benchmark.
+
+Default dimensions are 192x128: NVENC's AV1 encoder rejects anything
+smaller than ~160x120, so we sit just above that lower bound to keep
+fixture build time minimal while still being a valid encoder input.
 """
 
 from __future__ import annotations
@@ -32,7 +36,7 @@ def _write_png(path: Path, img: np.ndarray) -> None:
         raise OSError(f"cv2.imwrite failed for {path}")
 
 
-def _make_rgb(i: int, *, w: int = 64, h: int = 48) -> np.ndarray:
+def _make_rgb(i: int, *, w: int = 192, h: int = 128) -> np.ndarray:
     # Per-frame gradient so the H.264 encoder doesn't collapse identical frames.
     x = np.linspace(0, 255, w, dtype=np.float32)
     y = np.linspace(0, 255, h, dtype=np.float32)[:, None]
@@ -42,7 +46,7 @@ def _make_rgb(i: int, *, w: int = 64, h: int = 48) -> np.ndarray:
     return np.stack([b, np.broadcast_to(g, (h, w)), np.broadcast_to(r, (h, w))], axis=-1)  # BGR for cv2
 
 
-def _make_depth_uint16(i: int, *, w: int = 64, h: int = 48) -> np.ndarray:
+def _make_depth_uint16(i: int, *, w: int = 192, h: int = 128) -> np.ndarray:
     base = 1000 + (i * 10)  # ~0.2 m at depth_factor=5000
     return np.full((h, w), base, dtype=np.uint16)
 
@@ -55,7 +59,7 @@ _IDENTITY_T_BS = (
 )
 
 
-def _write_calibration(seq_dir: Path, *, modality: Modality, w: int = 64, h: int = 48) -> None:
+def _write_calibration(seq_dir: Path, *, modality: Modality, w: int = 192, h: int = 128) -> None:
     cams: list[str] = []
 
     def _cam(cam_name: str, *, include_depth: bool = False, cam_type: str = "gray") -> str:
