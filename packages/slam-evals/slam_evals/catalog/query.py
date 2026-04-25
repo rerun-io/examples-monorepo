@@ -1,4 +1,14 @@
-"""Dataframe queries over the mounted slam-evals catalog."""
+"""Eager queries over the mounted slam-evals catalog.
+
+We materialise to ``pandas.DataFrame`` inside the helper rather than
+returning a lazy DataFusion ``DataFrame``: the rerun-sdk 0.31 catalog
+bindings can drop the underlying ``TaskContextProvider`` when a lazy
+frame escapes the original ``rr.server.Server`` context, and several
+``Expr`` methods the docs imply (``Expr.like`` etc.) aren't actually
+exposed in this datafusion-py build. Push filters into pandas — at
+catalog scale (109 rows of metadata here) the difference doesn't matter,
+and the API is reliable.
+"""
 
 from __future__ import annotations
 
@@ -30,9 +40,9 @@ _SUMMARY_COLUMNS: tuple[str, ...] = (
 
 
 def segment_summary(server: rr.server.Server, *, dataset_name: str = "vslam") -> pd.DataFrame:
-    """Return one row per recording with the ``info`` properties as columns.
+    """One row per recording with the standard ``info`` properties as columns.
 
-    Columns that don't exist in a given layer come back as nulls — that's
+    Columns absent in a given recording layer come back as nulls — that's
     fine; it just means the producer of that RRD didn't emit them.
     """
     dataset = server.client().get_dataset(dataset_name)

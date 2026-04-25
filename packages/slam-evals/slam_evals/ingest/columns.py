@@ -18,7 +18,7 @@ def log_groundtruth_columns(
     gt: GroundTruth,
     *,
     entity_path: str = "/world/body",
-    timeline: str = "ts",
+    timeline: str = "video_time",
     t0_ns: int | None = None,
     recording: rr.RecordingStream | None = None,
 ) -> None:
@@ -50,7 +50,7 @@ def log_imu_columns(
     *,
     gyro_path: str = "/imu/gyro",
     accel_path: str = "/imu/accel",
-    timeline: str = "ts",
+    timeline: str = "video_time",
     t0_ns: int | None = None,
     recording: rr.RecordingStream | None = None,
 ) -> None:

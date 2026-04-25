@@ -66,7 +66,7 @@ def _log_depth_stream(
     entity_path: str,
     depth_factor: float | None,
     recording: rr.RecordingStream,
-    timeline: str = "ts",
+    timeline: str = "video_time",
 ) -> int:
     """Stream depth frames straight from disk into ``EncodedDepthImage``.
 

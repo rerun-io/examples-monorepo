@@ -45,10 +45,10 @@ def test_ingest_modality_roundtrip(tmp_path: Path, fixture_factory, modality: Mo
     assert rrd.stat().st_size > 0, f"RRD empty for {modality}"
 
     with rr.server.Server(datasets={"vslam": [str(rrd)]}) as server:
-        df = segment_summary(server, dataset_name="vslam")
+        pdf = segment_summary(server, dataset_name="vslam")
 
-    assert len(df) == 1, f"expected exactly one segment, got {len(df)}"
-    row = df.iloc[0]
+    assert len(pdf) == 1, f"expected exactly one segment, got {len(pdf)}"
+    row = pdf.iloc[0]
 
     # Values in segment_table come back wrapped in a single-element list per
     # property column — unwrap with [0] before comparing.
@@ -86,5 +86,5 @@ def test_ingest_handles_empty_groundtruth(tmp_path: Path, fixture_factory) -> No
     assert rrd.stat().st_size > 0
 
     with rr.server.Server(datasets={"vslam": [str(rrd)]}) as server:
-        df = segment_summary(server, dataset_name="vslam")
-    assert df.iloc[0]["property:info:num_gt_poses"][0] == 0
+        pdf = segment_summary(server, dataset_name="vslam")
+    assert pdf.iloc[0]["property:info:num_gt_poses"][0] == 0

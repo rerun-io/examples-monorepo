@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Mount a directory of slam-evals RRDs as a Rerun catalog and serve it.
 
-Defaults: spin up the catalog on a fixed port, print the viewer-connectable
-URL, then optionally print the per-recording segment summary and block until
-Ctrl-C. Paste the URL into the Rerun viewer's "Open Data Source" UI (or pass
-it to ``rerun <url>``) to browse the catalog interactively.
+Defaults: spin up the catalog on a fixed port, register the slam-evals
+default blueprint at the dataset level (so the viewer applies it to every
+recording without each RRD needing a baked-in copy), print the
+viewer-connectable URL, optionally print the per-recording segment
+summary, and block until Ctrl-C.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from pathlib import Path
 
 import tyro
 
+from slam_evals.blueprint import build_blueprint
 from slam_evals.catalog import mount_catalog, segment_summary
 
 
@@ -33,17 +35,22 @@ class CatalogConfig:
     """Print the per-sequence segment summary to stdout once mounted."""
 
     filter_modality: str | None = None
-    """Optional substring filter on ``property:info:modality`` (e.g. ``stereo-vi``) — applied to summary print only."""
+    """Optional case-insensitive substring filter on ``property:info:modality``."""
 
     filter_dataset: str | None = None
-    """Optional substring filter on ``property:info:dataset`` (e.g. ``EUROC``) — applied to summary print only."""
+    """Optional case-insensitive substring filter on ``property:info:dataset``."""
 
     serve: bool = True
     """Block after mounting so a Rerun viewer can connect. Ctrl-C to stop."""
 
 
 def main(cfg: CatalogConfig) -> None:
-    with mount_catalog(cfg.rrd_dir, dataset_name=cfg.dataset_name, port=cfg.port) as server:
+    with mount_catalog(
+        cfg.rrd_dir,
+        dataset_name=cfg.dataset_name,
+        port=cfg.port,
+        blueprint=build_blueprint(),
+    ) as server:
         url = server.url()
         print(f"Mounted catalog '{cfg.dataset_name}' from {cfg.rrd_dir.resolve()}")
         print()

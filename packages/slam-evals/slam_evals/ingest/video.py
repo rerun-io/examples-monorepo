@@ -125,7 +125,7 @@ def encode_and_log_video(
     image_paths: list[Path],
     timestamps_ns: Int64[ndarray, "n"],
     recording: rr.RecordingStream,
-    timeline: str = "ts",
+    timeline: str = "video_time",
     fps_hint: float | None = None,
 ) -> tuple[int, int, int]:
     """Encode ``image_paths`` with H.264 and log as a ``rr.VideoStream``.
