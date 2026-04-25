@@ -1,13 +1,16 @@
-"""Encode PNG frames into an AV1 ``rr.VideoStream`` via NVENC.
+"""Encode PNG frames into an H.265 ``rr.VideoStream`` via NVENC.
 
 NVENC saturates the GB10 GPU at SLAM-benchmark resolutions (~1100 fps),
 so the practical bottleneck is PNG decode + ndarray reformat, not the
-encoder. Quality-normalised PSNR sweep showed AV1 –20…–36 % vs HEVC on
-color content at matched PSNR (and a tie on grayscale), so AV1 is the
-default codec.
+encoder. AV1 produces smaller files at matched PSNR but rerun's web /
+local viewers don't decode AV1 reliably yet — HEVC is the safe choice
+and at ``cq=32`` gives PSNR equal-or-better than AV1 ``cq=40`` on every
+test sequence (color and grayscale).
 
 ``yuv420p`` still requires even dimensions; sequences with odd width or
 height (e.g. ETH's 739x458) are centre-cropped 1px on the affected axis.
+B-frames are disabled so per-packet PTS equals the presentation time
+without reordering — ``rr.VideoStream`` explicitly rejects B-frames.
 """
 
 from __future__ import annotations
@@ -153,25 +156,26 @@ def encode_and_log_video(
     # CodecContext.create returns VideoCodecContext for video codecs but the
     # static signature is the base CodecContext; cast so pyrefly resolves the
     # video-specific width/height/pix_fmt/encode attributes.
-    codec_ctx = cast(av.VideoCodecContext, av.codec.CodecContext.create("av1_nvenc", "w"))
+    codec_ctx = cast(av.VideoCodecContext, av.codec.CodecContext.create("hevc_nvenc", "w"))
     codec_ctx.width = enc_w
     codec_ctx.height = enc_h
     codec_ctx.pix_fmt = "yuv420p"
     codec_ctx.framerate = Fraction(fps_int, 1)
     codec_ctx.time_base = Fraction(1, 1_000_000_000)  # PTS in nanoseconds
-    # NVENC AV1 with constant-quality VBR. p4 is the balanced preset; cq=40
-    # lands at ~32-40 dB PSNR depending on content (verified via PSNR sweep
-    # on ETH/einstein_1, YOUTUBE/fpv-drone, KITTI/04). "bf" is intentionally
-    # absent — av1_nvenc rejects the H.264-style flag, and the codec's own
-    # B-frame defaults are compatible with rr.VideoStream's playback model.
+    # NVENC HEVC with constant-quality VBR. p4 is the balanced preset; cq=32
+    # lands at ~31-39 dB PSNR depending on content (verified via PSNR sweep
+    # on ETH/einstein_1, YOUTUBE/fpv-drone, KITTI/04) — equal-or-better than
+    # av1_nvenc cq=40 on every test sequence. bf=0 disables B-frames per
+    # rr.VideoStream's no-reordering requirement.
     codec_ctx.options = {
         "preset": "p4",
         "rc": "vbr",
-        "cq": "40",
+        "cq": "32",
+        "bf": "0",
         "g": "30",
     }
 
-    rr.log(entity_path, rr.VideoStream(codec=rr.VideoCodec.AV1), static=True, recording=recording)
+    rr.log(entity_path, rr.VideoStream(codec=rr.VideoCodec.H265), static=True, recording=recording)
 
     t0 = int(timestamps_ns[0])
     emitted = 0
