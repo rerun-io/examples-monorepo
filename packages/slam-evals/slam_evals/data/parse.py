@@ -1,32 +1,100 @@
 """Parsers for VSLAM-LAB sequence CSV + calibration files.
 
-All timestamp columns are returned as ``int64`` nanoseconds; vector/scalar data
-as ``float64`` so downstream consumers can mix them with Rerun's ``Scalars``
-and ``Transform3D`` archetypes without per-call casts.
+Strategy: pyserde dataclass schemas describe the per-row CSV / per-camera
+YAML shapes (column → field via ``field(rename=...)``, with a custom
+``_ns`` deserializer for nanosecond timestamps that are sometimes written
+as float literals — DRUNKARDS emits ``10000000000.0`` rather than
+``10000000000``). For each input file we ``csv.DictReader`` (or
+``serde.yaml.from_yaml``) into typed row instances, then stack the rows
+into the numpy aggregate types (`RgbCsv`, `GroundTruth`, `ImuSamples`,
+`Calibration`) consumed by the ingester.
+
+All timestamp columns end up as ``int64`` nanoseconds; vector / scalar
+data as ``float64`` so downstream consumers can mix them with Rerun's
+``Scalars`` and ``Transform3D`` archetypes without per-call casts.
 """
 
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import cast
 
 import numpy as np
 import yaml
 from jaxtyping import Float64, Int64
 from numpy import ndarray
+from serde import SerdeError, coerce, field, from_dict, serde
+from serde.yaml import from_yaml
 
 from slam_evals.data.types import Calibration, CameraIntrinsics
+
+# ─── helpers ─────────────────────────────────────────────────────────────────
+
+
+def _ns(value: str | int | float) -> int:
+    """Parse a nanosecond timestamp written as int OR float (e.g. ``10000000000.0``)."""
+    return int(float(value))
+
+
+# ─── per-row CSV schemas (pyserde-deserialized) ──────────────────────────────
+
+
+@serde(type_check=coerce)
+@dataclass
+class _RgbRow:
+    """One row from ``rgb.csv``. Optional columns default to ``None`` so the
+    same schema covers mono, stereo, rgbd, and stereo+rgbd layouts."""
+
+    ts_rgb_0_ns: int = field(rename="ts_rgb_0 (ns)", deserializer=_ns)
+    path_rgb_0: str = field(rename="path_rgb_0")
+    ts_rgb_1_ns: int | None = field(default=None, rename="ts_rgb_1 (ns)", deserializer=_ns)
+    path_rgb_1: str | None = field(default=None, rename="path_rgb_1")
+    ts_depth_0_ns: int | None = field(default=None, rename="ts_depth_0 (ns)", deserializer=_ns)
+    path_depth_0: str | None = field(default=None, rename="path_depth_0")
+    ts_depth_1_ns: int | None = field(default=None, rename="ts_depth_1 (ns)", deserializer=_ns)
+    path_depth_1: str | None = field(default=None, rename="path_depth_1")
+
+
+@serde(type_check=coerce)
+@dataclass
+class _GtRow:
+    """One row from ``groundtruth.csv``: ``world_T_body`` translation + quaternion."""
+
+    ts_ns: int = field(rename="ts (ns)", deserializer=_ns)
+    tx: float = field(rename="tx (m)")
+    ty: float = field(rename="ty (m)")
+    tz: float = field(rename="tz (m)")
+    qx: float
+    qy: float
+    qz: float
+    qw: float
+
+
+@serde(type_check=coerce)
+@dataclass
+class _ImuRow:
+    """One row from ``imu_0.csv``: gyro (rad/s) + accel (m/s²)."""
+
+    ts_ns: int = field(rename="ts (ns)", deserializer=_ns)
+    wx: float = field(rename="wx (rad s^-1)")
+    wy: float = field(rename="wy (rad s^-1)")
+    wz: float = field(rename="wz (rad s^-1)")
+    ax: float = field(rename="ax (m s^-2)")
+    ay: float = field(rename="ay (m s^-2)")
+    az: float = field(rename="az (m s^-2)")
+
+
+# ─── numpy aggregate types consumed by the ingester ──────────────────────────
 
 
 @dataclass(frozen=True, slots=True)
 class RgbCsv:
-    """Parsed ``rgb.csv``. Columns that don't exist in the source come back as ``None``.
+    """Parsed ``rgb.csv``. Optional streams come back as ``None`` when their
+    columns weren't in the source file.
 
-    ``depth_1`` only appears in stereo-rgbd layouts like OPENLORIS-D400. When present
-    it's the depth stream pre-registered to ``rgb_1`` (same sensor).
-    """
+    ``depth_1`` only appears in stereo-rgbd layouts like OPENLORIS-D400 — the
+    depth stream pre-registered to ``rgb_1``."""
 
     ts_rgb_0_ns: Int64[ndarray, "n"]
     path_rgb_0: tuple[str, ...]
@@ -52,97 +120,80 @@ class ImuSamples:
     accel_ms2: Float64[ndarray, "n 3"]
 
 
-def _read_csv(path: Path) -> tuple[list[str], list[list[str]]]:
+# ─── CSV → row dicts ─────────────────────────────────────────────────────────
+
+
+def _read_dict_rows(path: Path) -> list[dict[str, str]]:
+    """``csv.DictReader`` rows with header keys stripped of leading/trailing whitespace."""
     with path.open() as fh:
-        reader = csv.reader(fh)
-        rows = list(reader)
-    if not rows:
-        raise ValueError(f"empty CSV: {path}")
-    return rows[0], rows[1:]
+        reader = csv.DictReader(fh)
+        return [{k.strip(): v for k, v in row.items() if k is not None} for row in reader]
 
 
-def _parse_ns(value: str) -> int:
-    """Parse a nanosecond timestamp that may be written as an int or float literal.
-
-    Some datasets (e.g. DRUNKARDS) emit ``10000000000.0`` rather than
-    ``10000000000``. Both round-trip to the same integer nanosecond value.
-    """
-    return int(float(value))
+# ─── public parsers ──────────────────────────────────────────────────────────
 
 
 def parse_rgb_csv(path: Path) -> RgbCsv:
-    header, rows = _read_csv(path)
-    idx = {name.strip(): i for i, name in enumerate(header)}
+    rows: list[_RgbRow] = [from_dict(_RgbRow, r) for r in _read_dict_rows(path)]
+    if not rows:
+        raise ValueError(f"empty CSV: {path}")
 
-    def col_int64(key: str) -> Int64[ndarray, "n"]:
-        i = idx[key]
-        return np.asarray([_parse_ns(r[i]) for r in rows], dtype=np.int64)
+    n = len(rows)
 
-    def col_str(key: str) -> tuple[str, ...]:
-        i = idx[key]
-        return tuple(r[i] for r in rows)
+    def _opt_int(values: list[int | None]) -> Int64[ndarray, "n"] | None:
+        if any(v is None for v in values):
+            return None
+        return np.fromiter(values, dtype=np.int64, count=n)
 
-    ts_rgb_0_ns: Int64[ndarray, "n"] = col_int64("ts_rgb_0 (ns)")
-    path_rgb_0: tuple[str, ...] = col_str("path_rgb_0")
-
-    ts_rgb_1_ns: Int64[ndarray, "n"] | None = col_int64("ts_rgb_1 (ns)") if "ts_rgb_1 (ns)" in idx else None
-    path_rgb_1: tuple[str, ...] | None = col_str("path_rgb_1") if "path_rgb_1" in idx else None
-    ts_depth_0_ns: Int64[ndarray, "n"] | None = col_int64("ts_depth_0 (ns)") if "ts_depth_0 (ns)" in idx else None
-    path_depth_0: tuple[str, ...] | None = col_str("path_depth_0") if "path_depth_0" in idx else None
-    ts_depth_1_ns: Int64[ndarray, "n"] | None = col_int64("ts_depth_1 (ns)") if "ts_depth_1 (ns)" in idx else None
-    path_depth_1: tuple[str, ...] | None = col_str("path_depth_1") if "path_depth_1" in idx else None
+    def _opt_str(values: list[str | None]) -> tuple[str, ...] | None:
+        # The any(v is None) guard narrows to all-strs, but pyrefly can't see
+        # that through a generator expression. The list comprehension below
+        # both narrows and copies — cheap at row counts in the thousands.
+        if any(v is None for v in values):
+            return None
+        return tuple(v for v in values if v is not None)
 
     return RgbCsv(
-        ts_rgb_0_ns=ts_rgb_0_ns,
-        path_rgb_0=path_rgb_0,
-        ts_rgb_1_ns=ts_rgb_1_ns,
-        path_rgb_1=path_rgb_1,
-        ts_depth_0_ns=ts_depth_0_ns,
-        path_depth_0=path_depth_0,
-        ts_depth_1_ns=ts_depth_1_ns,
-        path_depth_1=path_depth_1,
+        ts_rgb_0_ns=np.fromiter((r.ts_rgb_0_ns for r in rows), dtype=np.int64, count=n),
+        path_rgb_0=tuple(r.path_rgb_0 for r in rows),
+        ts_rgb_1_ns=_opt_int([r.ts_rgb_1_ns for r in rows]),
+        path_rgb_1=_opt_str([r.path_rgb_1 for r in rows]),
+        ts_depth_0_ns=_opt_int([r.ts_depth_0_ns for r in rows]),
+        path_depth_0=_opt_str([r.path_depth_0 for r in rows]),
+        ts_depth_1_ns=_opt_int([r.ts_depth_1_ns for r in rows]),
+        path_depth_1=_opt_str([r.path_depth_1 for r in rows]),
     )
 
 
 def parse_groundtruth(path: Path) -> GroundTruth:
-    header, rows = _read_csv(path)
-    idx = {name.strip(): i for i, name in enumerate(header)}
-
-    # HAMLYN and a few HILTI sequences ship a groundtruth.csv with just the
-    # header — return empty, correctly-shaped arrays rather than raising.
+    """Parse ``groundtruth.csv``. Empty body (header-only) returns zero-length
+    correctly-shaped arrays — HAMLYN and a few HILTI sequences ship that way."""
+    rows: list[_GtRow] = [from_dict(_GtRow, r) for r in _read_dict_rows(path)]
     if not rows:
         return GroundTruth(
             ts_ns=np.zeros((0,), dtype=np.int64),
             translation=np.zeros((0, 3), dtype=np.float64),
             quaternion_xyzw=np.zeros((0, 4), dtype=np.float64),
         )
-
-    ts_ns: Int64[ndarray, "n"] = np.asarray([_parse_ns(r[idx["ts (ns)"]]) for r in rows], dtype=np.int64)
-    translation: Float64[ndarray, "n 3"] = np.asarray(
-        [[float(r[idx["tx (m)"]]), float(r[idx["ty (m)"]]), float(r[idx["tz (m)"]])] for r in rows],
-        dtype=np.float64,
+    n = len(rows)
+    return GroundTruth(
+        ts_ns=np.fromiter((r.ts_ns for r in rows), dtype=np.int64, count=n),
+        translation=np.asarray([[r.tx, r.ty, r.tz] for r in rows], dtype=np.float64),
+        quaternion_xyzw=np.asarray([[r.qx, r.qy, r.qz, r.qw] for r in rows], dtype=np.float64),
     )
-    quaternion_xyzw: Float64[ndarray, "n 4"] = np.asarray(
-        [[float(r[idx["qx"]]), float(r[idx["qy"]]), float(r[idx["qz"]]), float(r[idx["qw"]])] for r in rows],
-        dtype=np.float64,
-    )
-    return GroundTruth(ts_ns=ts_ns, translation=translation, quaternion_xyzw=quaternion_xyzw)
 
 
 def parse_imu(path: Path) -> ImuSamples:
-    header, rows = _read_csv(path)
-    idx = {name.strip(): i for i, name in enumerate(header)}
+    rows: list[_ImuRow] = [from_dict(_ImuRow, r) for r in _read_dict_rows(path)]
+    n = len(rows)
+    return ImuSamples(
+        ts_ns=np.fromiter((r.ts_ns for r in rows), dtype=np.int64, count=n),
+        gyro_rads=np.asarray([[r.wx, r.wy, r.wz] for r in rows], dtype=np.float64),
+        accel_ms2=np.asarray([[r.ax, r.ay, r.az] for r in rows], dtype=np.float64),
+    )
 
-    ts_ns: Int64[ndarray, "n"] = np.asarray([_parse_ns(r[idx["ts (ns)"]]) for r in rows], dtype=np.int64)
-    gyro: Float64[ndarray, "n 3"] = np.asarray(
-        [[float(r[idx["wx (rad s^-1)"]]), float(r[idx["wy (rad s^-1)"]]), float(r[idx["wz (rad s^-1)"]])] for r in rows],
-        dtype=np.float64,
-    )
-    accel: Float64[ndarray, "n 3"] = np.asarray(
-        [[float(r[idx["ax (m s^-2)"]]), float(r[idx["ay (m s^-2)"]]), float(r[idx["az (m s^-2)"]])] for r in rows],
-        dtype=np.float64,
-    )
-    return ImuSamples(ts_ns=ts_ns, gyro_rads=gyro, accel_ms2=accel)
+
+# ─── calibration.yaml ────────────────────────────────────────────────────────
 
 
 _IDENTITY_T_BS: tuple[float, ...] = (
@@ -153,47 +204,83 @@ _IDENTITY_T_BS: tuple[float, ...] = (
 )
 
 
-def _parse_camera(raw: dict) -> CameraIntrinsics:
-    focal = raw.get("focal_length") or [0.0, 0.0]
-    principal = raw.get("principal_point") or [0.0, 0.0]
-    image_dim = raw.get("image_dimension") or [0, 0]
-    distortion = tuple(float(x) for x in raw.get("distortion_coefficients") or ())
-    t_bs_list = raw.get("T_BS")
-    t_bs = tuple(float(x) for x in t_bs_list) if t_bs_list else _IDENTITY_T_BS
+@serde(type_check=coerce)
+@dataclass
+class _CameraYaml:
+    """One entry from ``cameras:`` in calibration.yaml. Fields beyond what
+    we model (e.g. ``pixel_format``) are silently ignored — pyserde defaults
+    to allowing unknown fields."""
+
+    cam_name: str
+    cam_type: str | None = None
+    cam_model: str | None = None
+    distortion_type: str | None = None
+    focal_length: list[float] | None = None
+    principal_point: list[float] | None = None
+    distortion_coefficients: list[float] | None = None
+    image_dimension: list[int] | None = None
+    fps: float | None = None
+    T_BS: list[float] | None = None
+    depth_name: str | None = None
+    depth_factor: float | None = None
+
+
+@serde(type_check=coerce)
+@dataclass
+class _ImuYaml:
+    """One entry from ``imus:``. Per-IMU noise terms (a_max, sigma_g_c, etc.)
+    flow through unmodelled — we only need to know an IMU was declared."""
+
+    imu_name: str
+    fps: float | None = None
+    T_BS: list[float] | None = None
+
+
+@serde(type_check=coerce)
+@dataclass
+class _CalibrationYaml:
+    cameras: list[_CameraYaml] = field(default_factory=list)
+    imus: list[_ImuYaml] = field(default_factory=list)
+
+
+def _to_camera_intrinsics(c: _CameraYaml) -> CameraIntrinsics:
+    focal = c.focal_length or [0.0, 0.0]
+    principal = c.principal_point or [0.0, 0.0]
+    image_dim = c.image_dimension or [0, 0]
+    distortion = tuple(float(x) for x in (c.distortion_coefficients or ()))
+    t_bs = tuple(float(x) for x in c.T_BS) if c.T_BS else _IDENTITY_T_BS
     return CameraIntrinsics(
-        cam_name=str(raw["cam_name"]),
+        cam_name=c.cam_name,
         width=int(image_dim[0]),
         height=int(image_dim[1]),
         fx=float(focal[0]),
         fy=float(focal[1]),
         cx=float(principal[0]),
         cy=float(principal[1]),
-        distortion_type=str(raw["distortion_type"]) if raw.get("distortion_type") else None,
+        distortion_type=c.distortion_type,
         distortion_coefficients=distortion,
-        fps=float(raw["fps"]) if raw.get("fps") is not None else None,
+        fps=c.fps,
         t_bs=t_bs,
-        depth_factor=float(raw["depth_factor"]) if raw.get("depth_factor") is not None else None,
+        depth_factor=c.depth_factor,
     )
 
 
 def parse_calibration(path: Path) -> Calibration | None:
-    """Parse ``calibration.yaml``; return ``None`` on missing / malformed files."""
+    """Parse ``calibration.yaml``; return ``None`` on missing or malformed files."""
     if not path.exists():
         return None
     try:
-        doc = yaml.safe_load(path.read_text())
-    except yaml.YAMLError:
-        return None
-    if not isinstance(doc, dict):
+        doc: _CalibrationYaml = from_yaml(_CalibrationYaml, path.read_text())
+    except (SerdeError, yaml.YAMLError):
         return None
 
-    raw_cams = doc.get("cameras") or []
-    cams = tuple(_parse_camera(cast(dict, c)) for c in raw_cams if isinstance(c, dict))
-
+    cams = tuple(_to_camera_intrinsics(c) for c in doc.cameras)
+    # Preserve the declared IMU as an opaque dict for downstream `has_imu_params`
+    # detection. Per-IMU noise terms beyond imu_name / fps / T_BS are dropped
+    # (pyserde tolerates unknown YAML fields by default), which is fine — no
+    # current consumer reads them.
     imu_params: dict[str, float | list[float]] | None = None
-    raw_imus = doc.get("imus") or []
-    if raw_imus:
-        first = cast(dict, raw_imus[0])
-        imu_params = {k: v for k, v in first.items() if isinstance(v, int | float | list)}
+    if doc.imus:
+        imu_params = {k: v for k, v in asdict(doc.imus[0]).items() if v is not None}
 
     return Calibration(cameras=cams, imu_params=imu_params)
