@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Ingest sequences from a manifest into per-sequence RRD files."""
+"""Ingest sequences from a manifest into per-sequence RRD files.
+
+NVENC has a small per-process session limit, so when ``--workers > 1``
+the GPU encoder occasionally rejects ``avcodec_open2(hevc_nvenc)`` with
+``ExternalError [Errno 542398533]``. We catch those specific failures
+and retry them serially (workers=1) at the end of the run, so the corpus
+finishes 109/109 without manual cleanup.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +24,16 @@ from slam_evals.data import discover_sequences
 from slam_evals.data.discovery import filter_sequences
 from slam_evals.data.types import Modality, Sequence
 from slam_evals.ingest import ingest_sequence
+
+# Substring on the formatted exception that identifies a transient NVENC
+# session-contention failure. The raw error type is av.error.ExternalError
+# (errno 542398533, AVERROR_EXTERNAL); the encoder name in the message is
+# what makes the match unambiguous.
+_NVENC_RETRY_MARKERS: tuple[str, ...] = (
+    "avcodec_open2(hevc_nvenc)",
+    "avcodec_open2(h264_nvenc)",
+    "avcodec_open2(av1_nvenc)",
+)
 
 
 @dataclass
@@ -66,15 +83,36 @@ def _load_sequences(cfg: IngestConfig) -> list[Sequence]:
 
 
 def _ingest_one(seq: Sequence, out_rrd: Path) -> tuple[str, float]:
-    """Worker entrypoint: ingest a single sequence; return (slug, wall_seconds).
-
-    Runs inside a child process when ``workers > 1``. Beartype contract
-    violations propagate (the parent process re-raises them as the
-    submitting task fails); other exceptions surface via the future result.
-    """
+    """Worker entrypoint: ingest a single sequence; return (slug, wall_seconds)."""
     t0 = time.monotonic()
     ingest_sequence(seq, out_rrd)
     return seq.slug, time.monotonic() - t0
+
+
+def _is_nvenc_session_flake(err_message: str) -> bool:
+    return any(marker in err_message for marker in _NVENC_RETRY_MARKERS)
+
+
+def _run_serial(
+    todo: list[tuple[Sequence, Path]],
+    *,
+    desc: str,
+) -> tuple[list[tuple[str, str, float]], list[tuple[str, str]]]:
+    """Run ``todo`` sequentially. Returns (oks, fails). Each ok = (slug, modality, dur)."""
+    oks: list[tuple[str, str, float]] = []
+    fails: list[tuple[str, str]] = []
+    for seq, out_rrd in tqdm(todo, desc=desc):
+        try:
+            slug, dur = _ingest_one(seq, out_rrd)
+        except BeartypeException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            fails.append((seq.slug, f"{type(exc).__name__}: {exc}"))
+            tqdm.write(f"FAIL {seq.slug}: {exc}")
+            continue
+        oks.append((slug, str(seq.modality), dur))
+        tqdm.write(f"ok   {slug} [{seq.modality}] in {dur:.1f}s -> {out_rrd}")
+    return oks, fails
 
 
 def main(cfg: IngestConfig) -> None:
@@ -104,23 +142,13 @@ def main(cfg: IngestConfig) -> None:
 
     succeeded = skipped
     failed: list[tuple[str, str]] = []
+    nvenc_retries: list[tuple[Sequence, Path]] = []
 
     if cfg.workers <= 1 or len(todo) <= 1:
-        for seq, out_rrd in tqdm(todo, desc="sequences"):
-            try:
-                slug, dur = _ingest_one(seq, out_rrd)
-            except BeartypeException:
-                raise  # Never swallow type-contract violations.
-            except Exception as exc:  # noqa: BLE001 -- continue past any other failure
-                failed.append((seq.slug, f"{type(exc).__name__}: {exc}"))
-                tqdm.write(f"FAIL {seq.slug}: {exc}")
-                continue
-            tqdm.write(f"ok   {slug} [{seq.modality}] in {dur:.1f}s -> {out_rrd}")
-            succeeded += 1
+        oks, fails = _run_serial(todo, desc="sequences")
+        succeeded += len(oks)
+        failed.extend(fails)
     else:
-        # NVENC is GPU-bound but per-sequence ingest still has plenty of
-        # CPU-side work (PNG decode, ndarray reformat, depth file reads).
-        # Over-subscribing past ~4 yields diminishing returns on this box.
         with ProcessPoolExecutor(max_workers=cfg.workers) as pool:
             futures = {pool.submit(_ingest_one, seq, out_rrd): (seq, out_rrd) for seq, out_rrd in todo}
             for fut in tqdm(as_completed(futures), total=len(futures), desc="sequences"):
@@ -130,11 +158,23 @@ def main(cfg: IngestConfig) -> None:
                 except BeartypeException:
                     raise
                 except Exception as exc:  # noqa: BLE001
-                    failed.append((seq.slug, f"{type(exc).__name__}: {exc}"))
+                    msg = f"{type(exc).__name__}: {exc}"
+                    if _is_nvenc_session_flake(msg):
+                        # Don't count as failure yet — queue for serial retry.
+                        nvenc_retries.append((seq, out_rrd))
+                        tqdm.write(f"NVENC flake (will retry serially): {seq.slug}")
+                        continue
+                    failed.append((seq.slug, msg))
                     tqdm.write(f"FAIL {seq.slug}: {exc}")
                     continue
                 tqdm.write(f"ok   {slug} [{seq.modality}] in {dur:.1f}s -> {out_rrd}")
                 succeeded += 1
+
+    if nvenc_retries:
+        print(f"\nRetrying {len(nvenc_retries)} NVENC-flaked sequence(s) serially…")
+        oks, fails = _run_serial(nvenc_retries, desc="retries")
+        succeeded += len(oks)
+        failed.extend(fails)
 
     print(f"\nDone: {succeeded}/{len(sequences)} succeeded ({skipped} skipped), {len(failed)} failed.")
     if failed:
