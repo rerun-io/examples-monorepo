@@ -14,6 +14,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import rerun as rr
 import tyro
 
 from slam_evals.blueprint import build_blueprint
@@ -43,6 +44,12 @@ class CatalogConfig:
     serve: bool = True
     """Block after mounting so a Rerun viewer can connect. Ctrl-C to stop."""
 
+    open_browser: bool = True
+    """Spawn a local web viewer (port 9090 by default) and open the system browser pointed at the catalog URL — saves the manual ``+ → Open Data Source → paste`` dance. Set ``--no-open-browser`` to skip and use a desktop viewer instead."""
+
+    web_port: int = 9090
+    """Port for the served web viewer. Only used when ``open_browser`` is true."""
+
 
 def main(cfg: CatalogConfig) -> None:
     with mount_catalog(
@@ -69,6 +76,14 @@ def main(cfg: CatalogConfig) -> None:
                 df = df[df["property:info:modality"].astype(str).str.contains(cfg.filter_modality, case=False, na=False)]
             print(f"\n{len(df)} recordings:\n")
             print(df.to_string(index=False))
+
+        if cfg.open_browser:
+            # Hosts a local web viewer at ``http://127.0.0.1:<web_port>`` and
+            # opens the system browser pointed at it; the page auto-loads
+            # the catalog via ``connect_to`` so the user doesn't have to do
+            # the ``+ → Open Data Source → paste`` dance manually.
+            rr.serve_web_viewer(web_port=cfg.web_port, open_browser=True, connect_to=url)
+            print(f"\nWeb viewer hosted at http://127.0.0.1:{cfg.web_port} (catalog auto-loaded).")
 
         if cfg.serve:
             print("\nServer is up. Ctrl-C to stop.")
