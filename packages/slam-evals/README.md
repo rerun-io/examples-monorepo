@@ -20,17 +20,19 @@ on `discover.py` if it lives elsewhere).
 ## End-to-end workflow
 
 ```bash
-# 1. Discover sequences from the on-disk benchmark → manifest.json
-pixi run -e slam-evals --frozen slam-evals-discover
-
-# 2. Ingest each sequence into per-layer .rrd files
+# 1. Discover + ingest in one shot. The ingest task depends-on discover, so
+#    pixi runs the manifest scan first automatically.
 pixi run -e slam-evals --frozen slam-evals-ingest
 
-# 3. Mount the catalog server (prints a viewer-connectable URL; blocks)
+# 2. Mount the catalog server (prints a viewer-connectable URL; blocks)
 pixi run -e slam-evals --frozen slam-evals-catalog
 ```
 
-Step 3 prints something like:
+(If you want to refresh just the manifest without re-ingesting — e.g. to
+spot-check what discovery picked up — `pixi run … slam-evals-discover`
+runs the scan in isolation.)
+
+Step 2 prints something like:
 
 ```
 Catalog URL:  rerun+http://127.0.0.1:9987
