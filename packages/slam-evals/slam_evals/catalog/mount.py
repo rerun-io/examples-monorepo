@@ -72,10 +72,13 @@ def mount_catalog(
         ).wait()
 
     if blueprint is not None:
-        # ``register_blueprint`` wants a URI to a real .rbl on disk. We write
-        # it next to /tmp and let the OS clean up; lifetime > server lifetime.
+        # ``register_blueprint`` is implemented internally as
+        # ``blueprint_dataset.register(uri, …)`` and needs a real URL with a
+        # scheme — passing a bare ``str(rbl_path)`` raises
+        # ``ValueError: Could not parse URL: relative URL without a base``.
+        # ``Path.as_uri()`` gives the right ``file://…`` form.
         rbl_path = Path(tempfile.mkdtemp(prefix=f"{dataset_name}-")) / f"{dataset_name}.rbl"
         blueprint.save(application_id, path=str(rbl_path))
-        dataset.register_blueprint(str(rbl_path), set_default=True)
+        dataset.register_blueprint(rbl_path.resolve().as_uri(), set_default=True)
 
     return server
