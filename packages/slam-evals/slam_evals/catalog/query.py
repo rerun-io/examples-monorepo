@@ -39,6 +39,7 @@ _SUMMARY_COLUMNS: tuple[str, ...] = (
     "property:groundtruth:num_poses",
     "property:groundtruth:trajectory_len_m",
     "property:groundtruth:duration_s",
+    "property:groundtruth:has_rotation",
     # rgb cameras (rgb_<i>.rrd)
     "property:rgb_0:codec",
     "property:rgb_0:fps",
