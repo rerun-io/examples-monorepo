@@ -23,6 +23,7 @@ from slam_evals.ingest.layer_depth import write_depth_layer
 from slam_evals.ingest.layer_groundtruth import write_groundtruth_layer
 from slam_evals.ingest.layer_imu import write_imu_layer
 from slam_evals.ingest.layer_rgb import write_rgb_layer
+from slam_evals.ingest.layer_view_coordinates import write_view_coordinates_layer
 
 # Layer names follow source-stream names (matches docs/schema.md). Order
 # determines write order — calibration first so any layer-registration
@@ -30,6 +31,7 @@ from slam_evals.ingest.layer_rgb import write_rgb_layer
 _ALL_LAYERS: tuple[str, ...] = (
     "calibration",
     "groundtruth",
+    "view_coordinates",
     "rgb_0",
     "rgb_1",
     "depth_0",
@@ -43,8 +45,14 @@ def applicable_layers(sequence: Sequence) -> tuple[str, ...]:
 
     A subset of ``_ALL_LAYERS``. ``calibration`` and ``groundtruth`` are
     unconditional (calibration falls back to a no-camera no-property file
-    when absent; groundtruth falls back to identity for empty CSVs)."""
+    when absent; groundtruth falls back to identity for empty CSVs).
+    ``view_coordinates`` is gated on the dataset having a published
+    convention — see ``slam_evals.data.datasets``.
+    """
     layers: list[str] = ["calibration", "groundtruth", "rgb_0"]
+    spec = sequence.dataset_spec
+    if spec is not None and spec.world_view_coordinates is not None:
+        layers.append("view_coordinates")
     if sequence.has_camera(1):
         layers.append("rgb_1")
     if sequence.has_depth(0):
@@ -121,6 +129,11 @@ def ingest_sequence(
             groundtruth=_gt_loader(),
             t0_ns=t0_ns,
             out_path=seq_dir / "groundtruth.rrd",
+            application_id=application_id,
+        )),
+        ("view_coordinates", lambda: write_view_coordinates_layer(
+            sequence,
+            out_path=seq_dir / "view_coordinates.rrd",
             application_id=application_id,
         )),
         ("rgb_0", lambda: write_rgb_layer(

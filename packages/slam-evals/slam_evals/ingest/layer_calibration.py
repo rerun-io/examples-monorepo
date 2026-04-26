@@ -74,13 +74,12 @@ def write_calibration_layer(
         recording_id=sequence.recording_id,
         send_properties=True,
     )
+    # World-frame ViewCoordinates is *not* logged here — that's the
+    # ``view_coordinates`` layer's job (see ``layer_view_coordinates.py``).
+    # Splitting it out keeps spec changes additive: adding a new dataset
+    # entry only writes a fresh ``view_coordinates.rrd``, leaving every
+    # other layer file byte-identical.
     with rec:
-        # World-frame ViewCoordinates per the dataset's published convention
-        # (see ``slam_evals.data.datasets``). Skipped for unknown datasets so
-        # the viewer falls back to its default — current behavior preserved.
-        spec = sequence.dataset_spec
-        if spec is not None and spec.world_view_coordinates is not None:
-            rr.log("/world", spec.world_view_coordinates, static=True, recording=rec)
 
         if calibration is not None:
             # Camera intrinsics + extrinsics. Only ``rgb_<i>`` entries get

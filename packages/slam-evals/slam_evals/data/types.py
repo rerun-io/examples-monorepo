@@ -5,10 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from slam_evals.data.datasets import DatasetSpec
+from slam_evals.data.datasets import DatasetSpec
+from slam_evals.data.datasets import lookup as _dataset_lookup
 
 
 class Modality(str, Enum):
@@ -85,9 +84,7 @@ class Sequence:
         ``slam_evals.data.datasets`` — caller should treat that as "use
         viewer defaults" (i.e. don't log world ViewCoordinates).
         """
-        from slam_evals.data.datasets import lookup
-
-        return lookup(self.dataset)
+        return _dataset_lookup(self.dataset)
 
 
 @dataclass(frozen=True, slots=True)

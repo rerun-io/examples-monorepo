@@ -103,3 +103,25 @@ def test_layers_subset_is_idempotent(tmp_path: Path, fixture_factory) -> None:
     for stem, mtime in other_layers.items():
         new_mtime = (seq_dir / f"{stem}.rrd").stat().st_mtime_ns
         assert new_mtime == mtime, f"layer {stem!r} was unexpectedly rewritten"
+
+
+def test_view_coordinates_layer_emitted_for_spec_dataset(tmp_path: Path) -> None:
+    """When the fixture's dataset has a ``DatasetSpec`` with world coords,
+    ``applicable_layers`` includes ``view_coordinates`` and the layer file
+    is actually written. ``MOCK`` datasets (used elsewhere in this suite)
+    have no spec so the layer is omitted — unchanged from prior behavior."""
+    from slam_evals.data.synthetic import build_fixture
+
+    # ``EUROC`` has a spec (FLU). Build a fixture under that dataset name so
+    # Sequence.dataset_spec resolves, but use a unique sequence name so we
+    # don't collide with anything.
+    fx = build_fixture(tmp_path / "bench", modality=Modality.STEREO_VI, dataset="EUROC", name="mock_seq_for_view_coords")
+    assert fx.sequence.dataset_spec is not None  # sanity
+
+    rrd_dir = tmp_path / "rrd"
+    written = ingest_sequence(fx.sequence, rrd_dir)
+    seq_dir = rrd_dir / fx.sequence.dataset / fx.sequence.name
+
+    assert (seq_dir / "view_coordinates.rrd").exists()
+    assert "view_coordinates" in {p.stem for p in seq_dir.glob("*.rrd")}
+    assert "view_coordinates" in {p.stem for p in written}
