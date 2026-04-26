@@ -8,6 +8,10 @@ frame escapes the original ``rr.server.Server`` context, and several
 exposed in this datafusion-py build. Push filters into pandas — at
 catalog scale (109 rows of metadata here) the difference doesn't matter,
 and the API is reliable.
+
+Property columns follow the per-layer schema documented in
+``docs/schema.md``. Cross-cutting metadata lives on the calibration layer
+under ``info``; per-stream metadata lives on each stream's own layer.
 """
 
 from __future__ import annotations
@@ -15,13 +19,14 @@ from __future__ import annotations
 import pandas as pd
 import rerun as rr
 
-# Column names in the segment table follow the pattern
-# ``property:<property_name>:<archetype_or_custom>:<field>``. For AnyValues
-# properties the archetype segment is collapsed, so we see ``property:info:<field>``
-# directly. Keep this list in sync with ``send_sequence_properties``.
+# Columns the summary view tries to surface. The select() filter below drops
+# any that aren't actually present in the segment_table schema, so this list
+# can include columns from optional layers (rgb_1, depth_<i>, imu_0) — they
+# come back missing for sequences whose modality doesn't have those layers.
 _SUMMARY_COLUMNS: tuple[str, ...] = (
     "rerun_segment_id",
     "property:RecordingInfo:name",
+    # info — cross-cutting (calibration.rrd)
     "property:info:dataset",
     "property:info:sequence",
     "property:info:slug",
@@ -29,21 +34,55 @@ _SUMMARY_COLUMNS: tuple[str, ...] = (
     "property:info:has_imu",
     "property:info:has_depth",
     "property:info:has_stereo",
-    "property:info:num_rgb_frames",
-    "property:info:num_gt_poses",
-    "property:info:num_imu_samples",
-    "property:info:trajectory_len_m",
-    "property:info:duration_s",
-    "property:info:fps_rgb",
     "property:info:has_calibration",
+    # groundtruth — trajectory shape (groundtruth.rrd)
+    "property:groundtruth:num_poses",
+    "property:groundtruth:trajectory_len_m",
+    "property:groundtruth:duration_s",
+    # rgb cameras (rgb_<i>.rrd)
+    "property:rgb_0:codec",
+    "property:rgb_0:fps",
+    "property:rgb_0:num_frames",
+    "property:rgb_0:width",
+    "property:rgb_0:height",
+    "property:rgb_1:codec",
+    "property:rgb_1:fps",
+    "property:rgb_1:num_frames",
+    "property:rgb_1:width",
+    "property:rgb_1:height",
+    # depth cameras (depth_<i>.rrd)
+    "property:depth_0:depth_factor",
+    "property:depth_0:num_frames",
+    "property:depth_0:width",
+    "property:depth_0:height",
+    "property:depth_1:depth_factor",
+    "property:depth_1:num_frames",
+    "property:depth_1:width",
+    "property:depth_1:height",
+    # imu (imu_0.rrd)
+    "property:imu_0:num_samples",
+    "property:imu_0:rate_hz",
+    # calibration summary (calibration.rrd)
+    "property:calibration:num_cameras",
+    "property:calibration:cam0_name",
+    "property:calibration:cam0_width",
+    "property:calibration:cam0_height",
+    "property:calibration:cam0_fx",
+    "property:calibration:cam0_fy",
+    "property:calibration:cam0_cx",
+    "property:calibration:cam0_cy",
+    "property:calibration:cam0_distortion_type",
+    "property:calibration:depth_factor",
+    "property:calibration:has_imu_params",
 )
 
 
 def segment_summary(server: rr.server.Server, *, dataset_name: str = "vslam") -> pd.DataFrame:
-    """One row per recording with the standard ``info`` properties as columns.
+    """One row per segment with the standard properties as columns.
 
-    Columns absent in a given recording layer come back as nulls — that's
-    fine; it just means the producer of that RRD didn't emit them.
+    Columns absent for a given segment (e.g. ``property:rgb_1:codec`` on a
+    mono sequence) come back as nulls — that's the catalog server filling
+    in missing values across heterogeneous-modality rows.
     """
     dataset = server.client().get_dataset(dataset_name)
     table = dataset.segment_table()

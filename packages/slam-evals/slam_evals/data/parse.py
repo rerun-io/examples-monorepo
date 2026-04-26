@@ -279,7 +279,7 @@ def parse_calibration(path: Path) -> Calibration | None:
     # detection. Per-IMU noise terms beyond imu_name / fps / T_BS are dropped
     # (pyserde tolerates unknown YAML fields by default), which is fine — no
     # current consumer reads them.
-    imu_params: dict[str, float | list[float]] | None = None
+    imu_params: dict[str, float | list[float] | str] | None = None
     if doc.imus:
         imu_params = {k: v for k, v in asdict(doc.imus[0]).items() if v is not None}
 

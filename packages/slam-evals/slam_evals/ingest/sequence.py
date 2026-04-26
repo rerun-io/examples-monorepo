@@ -1,237 +1,173 @@
-"""Orchestrate ingestion of one VSLAM-LAB sequence into a single ``.rrd`` file.
+"""Orchestrate ingestion of one VSLAM-LAB sequence into per-stream layer ``.rrd`` files.
 
-Scene-graph (only paths whose modality applies are populated):
+Each sequence becomes a directory ``data/slam-evals/rrd/<dataset>/<sequence>/``
+with one ``.rrd`` file per source data stream. All layer files share
+``recording_id`` + ``application_id`` so the catalog server composes them
+into a single segment at query/view time. See ``docs/schema.md`` for the
+full schema description, the entity tree, and the per-layer property bags.
 
-    /world/body                              Transform3D STREAM (world_T_body from GT;
-                                             static identity fallback when GT is empty)
-    /world/body/cam_0                        Transform3D (body -> rgb_0 extrinsic, static)
-    /world/body/cam_0/pinhole                Pinhole intrinsics + distortion (static)
-    /world/body/cam_0/pinhole/video          VideoStream (H.264, rgb_0)
-    /world/body/cam_0/pinhole/depth          DepthImage stream (rgbd; registered to rgb_0)
-    /world/body/cam_1/...                    Same tree for rgb_1 when stereo
-    /world/body/cam_1/pinhole/depth          DepthImage stream (OPENLORIS-style stereo+rgbd)
-    /imu/gyro, /imu/accel                    Scalars streams when *-vi
-
-The ground-truth pose is logged directly as the body entity's transform
-rather than on a separate ``/world/gt`` path — this makes every sensor
-under ``/world/body`` ride the GT trajectory automatically via the scene
-graph, matching simplecv's convention of logging extrinsics at the entity
-itself (see ``simplecv.rerun_log_utils.log_pinhole``).
-
-Rationale for shared pinhole: VSLAM-LAB's ``calibration.yaml`` already encodes
-``cam_type: rgb+depth, depth_name: depth_0`` on a single camera entry, meaning
-the depth stream is pre-registered to the RGB sensor. Mirroring
-``packages/monoprior/monopriors/rr_logging_utils.py:24-47``, RGB and depth
-sit under the same pinhole so the viewer hover-syncs them at the pixel level.
-
-Properties (``/__properties``):
-    info              dataset, sequence, slug, modality, counts, fps, duration
-    calibration       num_cameras, cam0 intrinsics summary, depth_factor
+Layer count by modality: 3 (mono) → 7 (stereo-rgbd-vi). Driven off
+``Sequence.has_camera/has_depth/has_imu`` (disk presence checks) so adding
+a new sensor type later is just a new helper + a new ``write_*_layer``.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from uuid import uuid4
 
-import numpy as np
-import rerun as rr
-from jaxtyping import Int64
-from numpy import ndarray
+from slam_evals.data.parse import GroundTruth, ImuSamples, parse_calibration, parse_groundtruth, parse_imu, parse_rgb_csv
+from slam_evals.data.types import Sequence
+from slam_evals.ingest.layer_calibration import write_calibration_layer
+from slam_evals.ingest.layer_depth import write_depth_layer
+from slam_evals.ingest.layer_groundtruth import write_groundtruth_layer
+from slam_evals.ingest.layer_imu import write_imu_layer
+from slam_evals.ingest.layer_rgb import write_rgb_layer
 
-from slam_evals.blueprint import build_blueprint
-from slam_evals.data.parse import parse_calibration, parse_groundtruth, parse_imu, parse_rgb_csv
-from slam_evals.data.types import Calibration, Sequence
-from slam_evals.ingest.calibration import log_calibration_static
-from slam_evals.ingest.columns import log_groundtruth_columns, log_imu_columns, trajectory_length_m
-from slam_evals.ingest.properties import send_sequence_properties
-from slam_evals.ingest.video import encode_and_log_video
-
-
-def _fps_from_timestamps(ts_ns: Int64[ndarray, "n"]) -> float | None:
-    if ts_ns.shape[0] < 2:
-        return None
-    dt_ns = float(np.median(np.diff(ts_ns)))
-    if dt_ns <= 0:
-        return None
-    return 1e9 / dt_ns
+# Layer names follow source-stream names (matches docs/schema.md). Order
+# determines write order — calibration first so any layer-registration
+# smoke test sees property:info:* on the first file processed.
+_ALL_LAYERS: tuple[str, ...] = (
+    "calibration",
+    "groundtruth",
+    "rgb_0",
+    "rgb_1",
+    "depth_0",
+    "depth_1",
+    "imu_0",
+)
 
 
-def _log_depth_stream(
-    *,
-    seq_root: Path,
-    paths: tuple[str, ...],
-    timestamps_ns: Int64[ndarray, "n"],
-    t0_ns: int,
-    entity_path: str,
-    depth_factor: float | None,
-    recording: rr.RecordingStream,
-    timeline: str = "video_time",
-) -> int:
-    """Stream depth frames straight from disk into ``EncodedDepthImage``.
+def applicable_layers(sequence: Sequence) -> tuple[str, ...]:
+    """Layer names that have on-disk source data for ``sequence``.
 
-    VSLAM-LAB depth files are uniformly 16-bit single-channel PNG (audited
-    across all 29 rgbd / rgbd-vi sequences). Since rerun's RRD format
-    accepts pre-encoded image bytes, we ship the on-disk PNG bytes verbatim
-    instead of decoding to a ndarray and re-encoding via
-    ``DepthImage.compress(...)``. Saves both libpng round-trips —
-    ~12 ms/frame becomes ~0.07 ms/frame.
-
-    Tradeoff: source PNGs use looser filter selection than rerun's libpng
-    path would, so the RRD is ~28% larger on average than re-compressed
-    output. Acceptable for a benchmark catalog where ingest is rare and
-    visualisation is the hot path.
-    """
-    meter: float | None = float(depth_factor) if depth_factor and depth_factor > 0 else None
-    count = 0
-    for i, rel in enumerate(paths):
-        path = seq_root / rel
-        try:
-            blob = path.read_bytes()
-        except OSError:
-            continue
-        t_rel_s = (int(timestamps_ns[i]) - t0_ns) * 1e-9
-        rr.set_time(timeline, duration=t_rel_s, recording=recording)
-        depth = rr.archetypes.EncodedDepthImage.from_fields(
-            blob=blob,
-            media_type="image/png",
-            meter=meter,
-        )
-        rr.log(entity_path, depth, recording=recording)
-        count += 1
-    return count
+    A subset of ``_ALL_LAYERS``. ``calibration`` and ``groundtruth`` are
+    unconditional (calibration falls back to a no-camera no-property file
+    when absent; groundtruth falls back to identity for empty CSVs)."""
+    layers: list[str] = ["calibration", "groundtruth", "rgb_0"]
+    if sequence.has_camera(1):
+        layers.append("rgb_1")
+    if sequence.has_depth(0):
+        layers.append("depth_0")
+    if sequence.has_depth(1):
+        layers.append("depth_1")
+    if sequence.has_imu(0):
+        layers.append("imu_0")
+    return tuple(layers)
 
 
 def ingest_sequence(
     sequence: Sequence,
-    out_rrd_path: Path,
+    out_dir: Path,
     *,
+    layers: set[str] | None = None,
     application_id: str = "slam-evals",
-) -> Path:
-    """Ingest ``sequence`` into a fresh RRD at ``out_rrd_path``. Returns the path."""
-    out_rrd_path.parent.mkdir(parents=True, exist_ok=True)
+) -> tuple[Path, ...]:
+    """Ingest ``sequence`` into a directory of layer ``.rrd`` files.
 
+    Parameters
+    ----------
+    sequence:
+        The discovered sequence.
+    out_dir:
+        Output directory. Layer files land at
+        ``<out_dir>/<dataset>/<name>/<layer_name>.rrd``.
+    layers:
+        Optional subset of layer names to (re-)emit. Defaults to all
+        applicable layers for the sequence's modality. Use this for
+        selective re-ingestion (e.g. ``{"rgb_0"}`` to only re-encode
+        camera 0 video after an NVENC flake).
+    application_id:
+        Application id stamped onto every layer's RecordingStream — must
+        match the catalog mount's expected app id, default ``"slam-evals"``.
+
+    Returns
+    -------
+    tuple of paths to the layer files actually written this call.
+    """
+    seq_dir = out_dir / sequence.dataset / sequence.name
+    seq_dir.mkdir(parents=True, exist_ok=True)
+
+    applicable = set(applicable_layers(sequence))
+    selected = applicable if layers is None else applicable & set(layers)
+    if not selected:
+        return ()
+
+    # Parse only what's needed for the selected layers. rgb.csv carries
+    # timestamps + paths for rgb_<i> and depth_<i>, so it's needed by
+    # most layers; the t0 epoch comes from rgb.csv too.
     rgb_csv = parse_rgb_csv(sequence.root / "rgb.csv")
-    gt = parse_groundtruth(sequence.root / "groundtruth.csv")
-    imu = parse_imu(sequence.root / "imu_0.csv") if sequence.modality.has_imu else None
-    calib: Calibration | None = parse_calibration(sequence.root / "calibration.yaml")
+    t0_ns = int(rgb_csv.ts_rgb_0_ns[0])
 
-    # Fresh, isolated stream per sequence. Using it as a context manager makes
-    # it the active recording for any default-recording calls inside; helper
-    # functions that accept ``recording=`` still get it passed explicitly for
-    # clarity.
-    recording = rr.RecordingStream(
-        application_id=application_id,
-        recording_id=f"{sequence.recording_id}__{uuid4().hex[:8]}",
-    )
+    calibration = parse_calibration(sequence.root / "calibration.yaml") if sequence.has_calibration else None
 
-    with recording:
-        # Embed the default blueprint into the RRD so `rerun <file>.rrd` opens
-        # with the right 3D / 2D / timeseries layout for any modality.
-        rr.send_blueprint(build_blueprint(), make_active=True, make_default=True, recording=recording)
+    # Lazy parse: only read GT / IMU when those layers are selected.
+    def _gt_loader() -> GroundTruth:
+        return parse_groundtruth(sequence.root / "groundtruth.csv")
 
-        rr.log("/", rr.ViewCoordinates.RDF, static=True, recording=recording)  # SLAM CV convention
-        # Body frame: time-varying world_T_body from GT (logged further down).
-        # When GT is empty we still need an anchor so child sensor entities
-        # resolve, so fall back to a static identity transform.
-        if gt.ts_ns.shape[0] == 0:
-            rr.log(
-                "/world/body",
-                rr.Transform3D(translation=[0.0, 0.0, 0.0]),
-                static=True,
-                recording=recording,
-            )
+    def _imu_loader() -> ImuSamples:
+        return parse_imu(sequence.root / "imu_0.csv")
 
-        # Static per-camera calibration. depth_0 / depth_1 are *not* given
-        # their own entity paths — depth is pre-registered to rgb_0 / rgb_1
-        # and logged as a sibling of the RGB VideoStream under the shared
-        # pinhole. See module docstring for the rationale.
-        log_calibration_static(
-            calib,
-            cam_entity_paths={
-                "rgb_0": "/world/body/cam_0",
-                "rgb_1": "/world/body/cam_1",
-            },
-            recording=recording,
-        )
+    written: list[Path] = []
+    todo: list[tuple[str, Callable[[], Path]]] = [
+        ("calibration", lambda: write_calibration_layer(
+            sequence,
+            calibration,
+            out_path=seq_dir / "calibration.rrd",
+            application_id=application_id,
+        )),
+        ("groundtruth", lambda: write_groundtruth_layer(
+            sequence,
+            groundtruth=_gt_loader(),
+            t0_ns=t0_ns,
+            out_path=seq_dir / "groundtruth.rrd",
+            application_id=application_id,
+        )),
+        ("rgb_0", lambda: write_rgb_layer(
+            sequence,
+            cam_idx=0,
+            rgb_csv=rgb_csv,
+            out_path=seq_dir / "rgb_0.rrd",
+            application_id=application_id,
+        )),
+        ("rgb_1", lambda: write_rgb_layer(
+            sequence,
+            cam_idx=1,
+            rgb_csv=rgb_csv,
+            out_path=seq_dir / "rgb_1.rrd",
+            application_id=application_id,
+        )),
+        ("depth_0", lambda: write_depth_layer(
+            sequence,
+            cam_idx=0,
+            rgb_csv=rgb_csv,
+            calibration=calibration,
+            t0_ns=t0_ns,
+            out_path=seq_dir / "depth_0.rrd",
+            application_id=application_id,
+        )),
+        ("depth_1", lambda: write_depth_layer(
+            sequence,
+            cam_idx=1,
+            rgb_csv=rgb_csv,
+            calibration=calibration,
+            t0_ns=t0_ns,
+            out_path=seq_dir / "depth_1.rrd",
+            application_id=application_id,
+        )),
+        ("imu_0", lambda: write_imu_layer(
+            sequence,
+            imu_idx=0,
+            imu=_imu_loader(),
+            calibration=calibration,
+            t0_ns=t0_ns,
+            out_path=seq_dir / "imu_0.rrd",
+            application_id=application_id,
+        )),
+    ]
 
-        t0_ns: int = int(rgb_csv.ts_rgb_0_ns[0])
+    for name, fn in todo:
+        if name in selected:
+            written.append(fn())
 
-        rgb_0_paths = [sequence.root / p for p in rgb_csv.path_rgb_0]
-        fps_rgb = _fps_from_timestamps(rgb_csv.ts_rgb_0_ns)
-        encode_and_log_video(
-            entity_path="/world/body/cam_0/pinhole/video",
-            image_paths=rgb_0_paths,
-            timestamps_ns=rgb_csv.ts_rgb_0_ns,
-            recording=recording,
-            fps_hint=fps_rgb,
-        )
-
-        if sequence.modality.has_stereo and rgb_csv.path_rgb_1 is not None and rgb_csv.ts_rgb_1_ns is not None:
-            rgb_1_paths = [sequence.root / p for p in rgb_csv.path_rgb_1]
-            encode_and_log_video(
-                entity_path="/world/body/cam_1/pinhole/video",
-                image_paths=rgb_1_paths,
-                timestamps_ns=rgb_csv.ts_rgb_1_ns,
-                recording=recording,
-                fps_hint=fps_rgb,
-            )
-
-        # Depth streams (when present). Shared pinhole tree: depth_0 sits under
-        # cam_0's pinhole, depth_1 under cam_1's.
-        if rgb_csv.path_depth_0 is not None and rgb_csv.ts_depth_0_ns is not None:
-            depth_factor_0 = next(
-                (c.depth_factor for c in (calib.cameras if calib else ()) if c.cam_name in ("rgb_0", "depth_0")),
-                None,
-            )
-            _log_depth_stream(
-                seq_root=sequence.root,
-                paths=rgb_csv.path_depth_0,
-                timestamps_ns=rgb_csv.ts_depth_0_ns,
-                t0_ns=t0_ns,
-                entity_path="/world/body/cam_0/pinhole/depth",
-                depth_factor=depth_factor_0,
-                recording=recording,
-            )
-
-        if rgb_csv.path_depth_1 is not None and rgb_csv.ts_depth_1_ns is not None:
-            depth_factor_1 = next(
-                (c.depth_factor for c in (calib.cameras if calib else ()) if c.cam_name in ("rgb_1", "depth_1")),
-                None,
-            )
-            _log_depth_stream(
-                seq_root=sequence.root,
-                paths=rgb_csv.path_depth_1,
-                timestamps_ns=rgb_csv.ts_depth_1_ns,
-                t0_ns=t0_ns,
-                entity_path="/world/body/cam_1/pinhole/depth",
-                depth_factor=depth_factor_1,
-                recording=recording,
-            )
-
-        # Some sequences (HAMLYN/*, HILTI2026/floor_3_*) ship an empty
-        # groundtruth.csv. The static identity transform logged above stands in
-        # so every sensor entity still has a parent pose.
-        if gt.ts_ns.shape[0] > 0:
-            log_groundtruth_columns(gt, t0_ns=t0_ns, recording=recording)
-
-        num_imu = 0
-        if imu is not None:
-            log_imu_columns(imu, t0_ns=t0_ns, recording=recording)
-            num_imu = int(imu.ts_ns.shape[0])
-
-        duration_s = float((int(rgb_csv.ts_rgb_0_ns[-1]) - t0_ns) * 1e-9)
-        send_sequence_properties(
-            sequence=sequence,
-            num_rgb_frames=int(rgb_csv.ts_rgb_0_ns.shape[0]),
-            num_gt_poses=int(gt.ts_ns.shape[0]),
-            trajectory_len_m=trajectory_length_m(gt.translation),
-            duration_s=duration_s,
-            fps_rgb=fps_rgb,
-            num_imu_samples=num_imu,
-            calibration=calib,
-            recording=recording,
-        )
-
-    recording.save(str(out_rrd_path))
-    return out_rrd_path
+    return tuple(written)

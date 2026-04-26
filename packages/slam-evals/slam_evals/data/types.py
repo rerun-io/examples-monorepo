@@ -56,6 +56,23 @@ class Sequence:
     def recording_id(self) -> str:
         return f"{self.dataset}__{self.name}"
 
+    # Per-stream presence checks — drive ingest off what's actually on disk
+    # rather than the modality enum, so adding new sensor types later is just a
+    # new helper + a new layer writer (no enum surgery). The modality enum
+    # under-reports content on stereo-rgbd sequences (e.g. OPENLORIS-D400 is
+    # classified as STEREO/STEREO_VI but also ships depth_0 / depth_1).
+
+    def has_camera(self, idx: int) -> bool:
+        if idx == 0:
+            return True  # rgb_0 is part of the required-files triad
+        return (self.root / f"rgb_{idx}").is_dir()
+
+    def has_depth(self, idx: int) -> bool:
+        return (self.root / f"depth_{idx}").is_dir()
+
+    def has_imu(self, idx: int) -> bool:
+        return (self.root / f"imu_{idx}.csv").is_file()
+
 
 @dataclass(frozen=True, slots=True)
 class CameraIntrinsics:
@@ -78,5 +95,7 @@ class CameraIntrinsics:
 @dataclass(frozen=True, slots=True)
 class Calibration:
     cameras: tuple[CameraIntrinsics, ...]
-    # IMU noise params are parsed verbatim and forwarded as recording properties.
-    imu_params: dict[str, float | list[float]] | None = None
+    # IMU fields parsed verbatim from calibration.yaml's `imus[0]` block.
+    # Values can be str (imu_name), float (fps, noise terms), or list[float] (T_BS).
+    # None entries are filtered out by the parser.
+    imu_params: dict[str, float | list[float] | str] | None = None
