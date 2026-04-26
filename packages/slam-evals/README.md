@@ -17,14 +17,19 @@ pixi install -e slam-evals
 `/home/pablo/0Dev/work/VSLAM-LAB-Benchmark` (override with `--benchmark-root`
 on `tools/ingest.py` if it lives elsewhere).
 
+> The `pixi -q` flag below silences pixi's workspace-level warnings about
+> `linux-64` target selectors on features (`wilor`, `gsplat-rust-renderer`)
+> while the workspace is pinned to `linux-aarch64`. Drop `-q` if you want to
+> see those warnings.
+
 ## End-to-end workflow
 
 ```bash
 # 1. Walk the benchmark root + ingest every sequence into per-layer .rrd files
-pixi run -e slam-evals --frozen slam-evals-ingest
+pixi -q run -e slam-evals --frozen slam-evals-ingest
 
 # 2. Mount the catalog server (prints a viewer-connectable URL; blocks)
-pixi run -e slam-evals --frozen slam-evals-catalog
+pixi -q run -e slam-evals --frozen slam-evals-catalog
 ```
 
 Step 2 prints something like:
@@ -50,12 +55,12 @@ Each layer file is independent. To re-emit only one stream after a change
 
 ```bash
 # Re-emit only the rgb_0 layer for one sequence
-pixi run -e slam-evals --frozen python tools/ingest.py \
+pixi -q run -e slam-evals --frozen python tools/ingest.py \
     --out ../../data/slam-evals/rrd \
     --only EUROC/MH_01_easy --layers rgb_0 --force
 
 # Re-emit view_coordinates for every sequence (after adding a new DatasetSpec)
-pixi run -e slam-evals --frozen python tools/ingest.py \
+pixi -q run -e slam-evals --frozen python tools/ingest.py \
     --out ../../data/slam-evals/rrd \
     --layers view_coordinates --force
 ```
@@ -86,7 +91,7 @@ picks, which often looks sideways. To fix:
 2. Re-emit the `view_coordinates` layer:
 
    ```bash
-   pixi run -e slam-evals --frozen python tools/ingest.py \
+   pixi -q run -e slam-evals --frozen python tools/ingest.py \
        --out ../../data/slam-evals/rrd \
        --only MYDATASET --layers view_coordinates --force
    ```
@@ -123,5 +128,5 @@ Wipe and rebuild from source data:
 ```bash
 mv ../../data/slam-evals/rrd ../../data/slam-evals/rrd.bak  # safety
 mkdir -p ../../data/slam-evals/rrd
-pixi run -e slam-evals --frozen slam-evals-ingest  # ~3-4 min on 4-worker NVENC pool
+pixi -q run -e slam-evals --frozen slam-evals-ingest  # ~3-4 min on 4-worker NVENC pool
 ```
