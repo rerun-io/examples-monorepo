@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from slam_evals.data.datasets import DatasetSpec
 
 
 class Modality(str, Enum):
@@ -72,6 +76,18 @@ class Sequence:
 
     def has_imu(self, idx: int) -> bool:
         return (self.root / f"imu_{idx}.csv").is_file()
+
+    @property
+    def dataset_spec(self) -> DatasetSpec | None:
+        """Static frame-convention metadata for this sequence's dataset.
+
+        Returns ``None`` for datasets without an entry in
+        ``slam_evals.data.datasets`` — caller should treat that as "use
+        viewer defaults" (i.e. don't log world ViewCoordinates).
+        """
+        from slam_evals.data.datasets import lookup
+
+        return lookup(self.dataset)
 
 
 @dataclass(frozen=True, slots=True)

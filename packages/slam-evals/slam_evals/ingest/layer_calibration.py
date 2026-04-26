@@ -75,8 +75,12 @@ def write_calibration_layer(
         send_properties=True,
     )
     with rec:
-        # World coordinate convention — matches simplecv / robocap-slam usage.
-        rr.log("/", rr.ViewCoordinates.RDF, static=True, recording=rec)
+        # World-frame ViewCoordinates per the dataset's published convention
+        # (see ``slam_evals.data.datasets``). Skipped for unknown datasets so
+        # the viewer falls back to its default — current behavior preserved.
+        spec = sequence.dataset_spec
+        if spec is not None and spec.world_view_coordinates is not None:
+            rr.log("/world", spec.world_view_coordinates, static=True, recording=rec)
 
         if calibration is not None:
             # Camera intrinsics + extrinsics. Only ``rgb_<i>`` entries get
