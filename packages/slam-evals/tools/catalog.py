@@ -44,8 +44,8 @@ class CatalogConfig:
     serve: bool = True
     """Block after mounting so a Rerun viewer can connect. Ctrl-C to stop."""
 
-    open_browser: bool = True
-    """Spawn a local web viewer (port 9090 by default) and open the system browser pointed at the catalog URL — saves the manual ``+ → Open Data Source → paste`` dance. Set ``--no-open-browser`` to skip and use a desktop viewer instead."""
+    open_browser: bool = False
+    """Opt-in: also host a local web viewer (port 9090 by default) and open the system browser pointed at the catalog URL. Default is off — point your existing native viewer at the printed catalog URL instead."""
 
     web_port: int = 9090
     """Port for the served web viewer. Only used when ``open_browser`` is true."""
