@@ -14,6 +14,7 @@ from pathlib import Path
 
 import rerun as rr
 import rerun.blueprint as rrb
+from tqdm import tqdm
 
 
 def mount_catalog(
@@ -23,6 +24,7 @@ def mount_catalog(
     port: int | None = None,
     blueprint: rrb.Blueprint | None = None,
     application_id: str = "slam-evals",
+    show_progress: bool = True,
 ) -> rr.server.Server:
     """Spin up a local catalog server, register every layer ``.rrd`` under ``rrd_dir``.
 
@@ -53,6 +55,9 @@ def mount_catalog(
         Application id stamped into the saved ``.rbl``. Must match the
         ``application_id`` used at ingest time (``"slam-evals"`` by default);
         otherwise rerun won't apply the blueprint.
+    show_progress:
+        Render a tqdm bar over the per-layer ``dataset.register(...)`` loop.
+        Default on; turn off for non-interactive callers (tests).
     """
     rrd_dir = rrd_dir.expanduser().resolve()
     layer_files = sorted(rrd_dir.rglob("*.rrd"))
@@ -61,11 +66,15 @@ def mount_catalog(
 
     # Start with an empty dataset, then explicitly register each layer file
     # under its filename stem. Files sharing a recording_id collapse into
-    # one segment automatically.
+    # one segment automatically. Each ``register().wait()`` is ~30-100 ms,
+    # and 500+ files takes nearly a minute — wrap the loop in tqdm so
+    # interactive callers see something happening.
+    print(f"Mounting catalog from {rrd_dir} ({len(layer_files)} layer files)…", flush=True)
     server = rr.server.Server(datasets={dataset_name: []}, port=port)
     dataset = server.client().get_dataset(dataset_name)
 
-    for layer_file in layer_files:
+    iterator = tqdm(layer_files, desc="register", unit="layer", disable=not show_progress)
+    for layer_file in iterator:
         dataset.register(
             [layer_file.resolve().as_uri()],
             layer_name=layer_file.stem,
