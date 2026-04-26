@@ -50,7 +50,8 @@ class DatasetSpec:
 # ─── confident specs ────────────────────────────────────────────────────────
 # Add a new entry here when a dataset's viewer rendering looks wrong;
 # verify in the catalog after a `--layers calibration --force` re-ingest.
-# Names must match the on-disk dataset directory names exactly (see manifest).
+# Names must match the on-disk dataset directory names exactly
+# (i.e. ``<benchmark_root>/<name>/<sequence>/...``).
 
 EUROC = DatasetSpec(name="EUROC", world_view_coordinates=rr.ViewCoordinates.FLU)
 KITTI = DatasetSpec(name="KITTI", world_view_coordinates=rr.ViewCoordinates.RDF)

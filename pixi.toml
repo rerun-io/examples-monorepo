@@ -1159,16 +1159,10 @@ tyro = ">=0.9,<1"
 PACKAGE_DIR = "packages/slam-evals"
 VSLAM_LAB_BENCHMARK = "/home/pablo/0Dev/work/VSLAM-LAB-Benchmark"
 
-[feature.slam-evals.tasks.slam-evals-discover]
-cmd = "python tools/discover.py --benchmark-root $VSLAM_LAB_BENCHMARK --out ../../data/slam-evals/manifest.json"
-cwd = "packages/slam-evals"
-description = "Scan the benchmark root and write data/slam-evals/manifest.json"
-
 [feature.slam-evals.tasks.slam-evals-ingest]
-cmd = "python tools/ingest.py --manifest ../../data/slam-evals/manifest.json --out ../../data/slam-evals/rrd"
+cmd = "python tools/ingest.py --benchmark-root $VSLAM_LAB_BENCHMARK --out ../../data/slam-evals/rrd"
 cwd = "packages/slam-evals"
-depends-on = ["slam-evals-discover"]
-description = "Ingest every sequence in the manifest into per-sequence RRDs"
+description = "Discover + ingest every sequence under $VSLAM_LAB_BENCHMARK into per-layer RRDs"
 
 [feature.slam-evals.tasks.slam-evals-catalog]
 cmd = "python tools/catalog.py --rrd-dir ../../data/slam-evals/rrd"

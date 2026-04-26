@@ -15,22 +15,17 @@ pixi install -e slam-evals
 
 `VSLAM_LAB_BENCHMARK` is pinned in the env to
 `/home/pablo/0Dev/work/VSLAM-LAB-Benchmark` (override with `--benchmark-root`
-on `discover.py` if it lives elsewhere).
+on `tools/ingest.py` if it lives elsewhere).
 
 ## End-to-end workflow
 
 ```bash
-# 1. Discover + ingest in one shot. The ingest task depends-on discover, so
-#    pixi runs the manifest scan first automatically.
+# 1. Walk the benchmark root + ingest every sequence into per-layer .rrd files
 pixi run -e slam-evals --frozen slam-evals-ingest
 
 # 2. Mount the catalog server (prints a viewer-connectable URL; blocks)
 pixi run -e slam-evals --frozen slam-evals-catalog
 ```
-
-(If you want to refresh just the manifest without re-ingesting — e.g. to
-spot-check what discovery picked up — `pixi run … slam-evals-discover`
-runs the scan in isolation.)
 
 Step 2 prints something like:
 
@@ -56,13 +51,11 @@ Each layer file is independent. To re-emit only one stream after a change
 ```bash
 # Re-emit only the rgb_0 layer for one sequence
 pixi run -e slam-evals --frozen python tools/ingest.py \
-    --manifest ../../data/slam-evals/manifest.json \
     --out ../../data/slam-evals/rrd \
     --only EUROC/MH_01_easy --layers rgb_0 --force
 
 # Re-emit view_coordinates for every sequence (after adding a new DatasetSpec)
 pixi run -e slam-evals --frozen python tools/ingest.py \
-    --manifest ../../data/slam-evals/manifest.json \
     --out ../../data/slam-evals/rrd \
     --layers view_coordinates --force
 ```
@@ -94,7 +87,6 @@ picks, which often looks sideways. To fix:
 
    ```bash
    pixi run -e slam-evals --frozen python tools/ingest.py \
-       --manifest ../../data/slam-evals/manifest.json \
        --out ../../data/slam-evals/rrd \
        --only MYDATASET --layers view_coordinates --force
    ```
@@ -119,13 +111,15 @@ segments (the filters are pandas-side, after `segment_table()`).
 ## Where things live
 
 - `slam_evals/data/` — discovery, parsing, types
+- `slam_evals/data/discovery.py` — `discover_sequences(benchmark_root)` walks
+  the disk + classifies modality (called from `tools/ingest.py`; no separate CLI)
 - `slam_evals/data/datasets.py` — per-dataset `DatasetSpec` registry
 - `slam_evals/ingest/layer_*.py` — one writer per source stream
 - `slam_evals/catalog/mount.py` — `rr.server.Server` wrapper that registers
   every layer file with `dataset.register([uri], layer_name=stem)`
 - `slam_evals/blueprint.py` — default 3D + per-camera 2D + IMU timeseries
   layout; registered at the catalog level so it applies to every segment
-- `tools/{discover,ingest,catalog}.py` — CLIs
+- `tools/{ingest,catalog}.py` — CLIs
 - `docs/schema.md` — full schema description
 
 ## Re-ingest from scratch

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ingest sequences from a manifest into per-stream layer RRD files.
+"""Ingest sequences from a VSLAM-LAB benchmark root into per-stream layer RRD files.
 
 Each sequence becomes a directory ``<out>/<dataset>/<seq>/`` with one ``.rrd``
 file per source data stream (calibration, groundtruth, rgb_<i>, depth_<i>,
@@ -15,7 +15,6 @@ finishes 109/109 without manual cleanup.
 
 from __future__ import annotations
 
-import json
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -43,11 +42,8 @@ _NVENC_RETRY_MARKERS: tuple[str, ...] = (
 
 @dataclass
 class IngestConfig:
-    manifest: Path | None = None
-    """Manifest JSON produced by ``discover.py``. If unset, ``benchmark_root`` is scanned on the fly."""
-
     benchmark_root: Path = field(default_factory=lambda: Path("/home/pablo/0Dev/work/VSLAM-LAB-Benchmark"))
-    """Used only when ``manifest`` is unset."""
+    """VSLAM-LAB-style benchmark root. Walked + classified at every invocation."""
 
     out: Path = field(default_factory=lambda: Path("data/slam-evals/rrd"))
     """Output directory. Each sequence writes layer files to ``<out>/<dataset>/<name>/<layer>.rrd``."""
@@ -75,18 +71,6 @@ class IngestConfig:
 
 
 def _load_sequences(cfg: IngestConfig) -> list[Sequence]:
-    if cfg.manifest is not None:
-        raw = json.loads(cfg.manifest.read_text())
-        return [
-            Sequence(
-                dataset=s["dataset"],
-                name=s["name"],
-                root=Path(s["root"]),
-                modality=Modality(s["modality"]),
-                has_calibration=bool(s.get("has_calibration", False)),
-            )
-            for s in raw["sequences"]
-        ]
     return discover_sequences(cfg.benchmark_root.expanduser().resolve())
 
 
