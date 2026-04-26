@@ -208,12 +208,11 @@ _IDENTITY_T_BS: tuple[float, ...] = (
 @dataclass
 class _CameraYaml:
     """One entry from ``cameras:`` in calibration.yaml. Fields beyond what
-    we model (e.g. ``pixel_format``) are silently ignored — pyserde defaults
-    to allowing unknown fields."""
+    we model (``cam_model``, ``cam_type``, ``depth_name``, ``pixel_format``,
+    …) are silently ignored — pyserde defaults to allowing unknown fields."""
 
     cam_name: str
     cam_type: str | None = None
-    cam_model: str | None = None
     distortion_type: str | None = None
     focal_length: list[float] | None = None
     principal_point: list[float] | None = None
@@ -221,17 +220,17 @@ class _CameraYaml:
     image_dimension: list[int] | None = None
     fps: float | None = None
     T_BS: list[float] | None = None
-    depth_name: str | None = None
     depth_factor: float | None = None
 
 
 @serde(type_check=coerce)
 @dataclass
 class _ImuYaml:
-    """One entry from ``imus:``. Per-IMU noise terms (a_max, sigma_g_c, etc.)
-    flow through unmodelled — we only need to know an IMU was declared."""
+    """One entry from ``imus:``. ``imu_name`` and per-IMU noise terms
+    (a_max, sigma_g_c, etc.) flow through unmodelled here — only ``fps``
+    and ``T_BS`` are read directly. The noise terms re-surface on the
+    ``imu_0`` layer's property bag when present."""
 
-    imu_name: str
     fps: float | None = None
     T_BS: list[float] | None = None
 
@@ -275,11 +274,12 @@ def parse_calibration(path: Path) -> Calibration | None:
         return None
 
     cams = tuple(_to_camera_intrinsics(c) for c in doc.cameras)
-    # Preserve the declared IMU as an opaque dict for downstream `has_imu_params`
-    # detection. Per-IMU noise terms beyond imu_name / fps / T_BS are dropped
-    # (pyserde tolerates unknown YAML fields by default), which is fine — no
+    # Preserve the declared IMU's modelled fields (``fps``, ``T_BS``) as an
+    # opaque dict for downstream ``has_imu_params`` detection and for the
+    # ``imu_0`` layer's property bag. Other YAML fields (``imu_name``, noise
+    # terms) are dropped by pyserde's default unknown-field handling — no
     # current consumer reads them.
-    imu_params: dict[str, float | list[float] | str] | None = None
+    imu_params: dict[str, float | list[float]] | None = None
     if doc.imus:
         imu_params = {k: v for k, v in asdict(doc.imus[0]).items() if v is not None}
 

@@ -108,7 +108,8 @@ class CameraIntrinsics:
 @dataclass(frozen=True, slots=True)
 class Calibration:
     cameras: tuple[CameraIntrinsics, ...]
-    # IMU fields parsed verbatim from calibration.yaml's `imus[0]` block.
-    # Values can be str (imu_name), float (fps, noise terms), or list[float] (T_BS).
-    # None entries are filtered out by the parser.
-    imu_params: dict[str, float | list[float] | str] | None = None
+    # Modelled IMU fields parsed from calibration.yaml's ``imus[0]`` block:
+    # ``fps`` (float) and ``T_BS`` (list[float]). Other YAML fields
+    # (``imu_name``, per-IMU noise terms like ``a_max``, ``sigma_g_c``) are
+    # dropped at parse time. None entries are filtered out.
+    imu_params: dict[str, float | list[float]] | None = None

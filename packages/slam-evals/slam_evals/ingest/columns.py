@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import numpy as np
 import rerun as rr
-from jaxtyping import Float64, Int64
+from jaxtyping import Float64
 from numpy import ndarray
 
 from slam_evals.data.parse import GroundTruth, ImuSamples
@@ -83,8 +83,3 @@ def trajectory_length_m(translation_xyz: Float64[ndarray, "n 3"]) -> float:
         return 0.0
     diffs: Float64[ndarray, "n 3"] = np.diff(translation_xyz, axis=0)
     return float(np.linalg.norm(diffs, axis=1).sum())
-
-
-def ts_to_relative_seconds(ts_ns: Int64[ndarray, "n"], *, anchor_ns: int | None = None) -> Float64[ndarray, "n"]:
-    anchor = int(anchor_ns) if anchor_ns is not None else int(ts_ns[0])
-    return (ts_ns - anchor).astype(np.float64) * 1e-9

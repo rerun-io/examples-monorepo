@@ -31,7 +31,7 @@ from simplecv.camera_parameters import (
 )
 from simplecv.rerun_log_utils import log_pinhole
 
-from slam_evals.data.types import Calibration, CameraIntrinsics
+from slam_evals.data.types import CameraIntrinsics
 
 
 def _t_bs_to_matrix(t_bs: tuple[float, ...]) -> Float64[ndarray, "4 4"]:
@@ -110,23 +110,3 @@ def log_camera_static(
     )
 
 
-def log_calibration_static(
-    calib: Calibration | None,
-    *,
-    cam_entity_paths: dict[str, str],
-    recording: rr.RecordingStream | None = None,
-) -> None:
-    """Log every camera in ``calib`` under its mapped entity path.
-
-    Cameras whose ``cam_name`` isn't in ``cam_entity_paths`` are silently
-    skipped — VSLAM-LAB's ``depth_0`` /``depth_1`` are deliberately omitted
-    because they're pre-registered to ``rgb_0`` / ``rgb_1`` and share those
-    cameras' pinholes.
-    """
-    if calib is None:
-        return
-    for cam in calib.cameras:
-        path = cam_entity_paths.get(cam.cam_name)
-        if path is None:
-            continue
-        log_camera_static(cam, entity_path=path, recording=recording)
