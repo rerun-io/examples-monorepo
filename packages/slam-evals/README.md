@@ -102,12 +102,6 @@ catalog auto-loads via the `connect_to` hint). Use this when you don't have a
 desktop viewer running. Default is off — point your existing viewer at the
 printed URL instead.
 
-## Filtering
-
-`tools/catalog.py --filter-modality stereo-vi` or `--filter-dataset EUROC`
-restrict the printed segment summary; the catalog itself still serves all
-segments (the filters are pandas-side, after `segment_table()`).
-
 ## Where things live
 
 - `slam_evals/data/` — discovery, parsing, types

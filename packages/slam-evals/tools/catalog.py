@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Mount a directory of slam-evals RRDs as a Rerun catalog and serve it.
 
-Defaults: spin up the catalog on a fixed port, register the slam-evals
-default blueprint at the dataset level (so the viewer applies it to every
-recording without each RRD needing a baked-in copy), print the
-viewer-connectable URL, optionally print the per-recording segment
-summary, and block until Ctrl-C.
+Spins up the catalog on a fixed port, registers the slam-evals default
+blueprint at the dataset level (so the viewer applies it to every recording
+without each RRD needing a baked-in copy), prints the viewer-connectable URL,
+and blocks until Ctrl-C. Per-segment metadata is browsable in the viewer's
+catalog panel — nothing extra to print here.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import rerun as rr
 import tyro
 
 from slam_evals.blueprint import build_blueprint
-from slam_evals.catalog import mount_catalog, segment_summary
+from slam_evals.catalog import mount_catalog
 
 
 @dataclass
@@ -31,15 +31,6 @@ class CatalogConfig:
 
     port: int = 9987
     """gRPC port for the catalog server. Pick something different from the running viewer's port (default 9876)."""
-
-    print_summary: bool = True
-    """Print the per-sequence segment summary to stdout once mounted."""
-
-    filter_modality: str | None = None
-    """Optional case-insensitive substring filter on ``property:info:modality``."""
-
-    filter_dataset: str | None = None
-    """Optional case-insensitive substring filter on ``property:info:dataset``."""
 
     serve: bool = True
     """Block after mounting so a Rerun viewer can connect. Ctrl-C to stop."""
@@ -67,15 +58,6 @@ def main(cfg: CatalogConfig) -> None:
         print("  In the Rerun viewer:  + → Open Data Source → paste the URL")
         print(f"  Or from a terminal:   rerun {url}")
         print("─" * 72)
-
-        if cfg.print_summary:
-            df = segment_summary(server, dataset_name=cfg.dataset_name)
-            if cfg.filter_dataset and "property:info:dataset" in df.columns:
-                df = df[df["property:info:dataset"].astype(str).str.contains(cfg.filter_dataset, case=False, na=False)]
-            if cfg.filter_modality and "property:info:modality" in df.columns:
-                df = df[df["property:info:modality"].astype(str).str.contains(cfg.filter_modality, case=False, na=False)]
-            print(f"\n{len(df)} recordings:\n")
-            print(df.to_string(index=False))
 
         if cfg.open_browser:
             # Hosts a local web viewer at ``http://127.0.0.1:<web_port>`` and
