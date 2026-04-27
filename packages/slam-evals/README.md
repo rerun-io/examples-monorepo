@@ -48,28 +48,53 @@ applied automatically).
 
 Stop the catalog with `Ctrl-C`.
 
-## Selective re-ingestion
+The cold mount parses ~25 GB of RRD content (depth_0 alone is 20+ GB on the
+local benchmark) and takes ~30-40 s. That cost is server-side and unavoidable;
+**don't pay it on every iteration** — see *Dev loop* below.
 
-Each layer file is independent. To re-emit only one stream after a change
-(e.g. a new dataset entry, an NVENC flake, a tweaked codec):
+## Dev loop: edit → re-ingest → refresh (no restart)
+
+Once the catalog is mounted, push edits into the running server with
+`tools/catalog.py --refresh` instead of restarting it. The refresh path uses
+`OnDuplicateSegmentLayer.REPLACE` over the gRPC catalog client, so only the
+files you actually changed get parsed — typical refresh is **sub-second**, vs.
+30-40 s for a full restart.
+
+Two-terminal workflow:
 
 ```bash
-# Re-emit only the rgb_0 layer for one sequence
-pixi -q run -e slam-evals --frozen python tools/ingest.py \
-    --out ../../data/slam-evals/rrd \
-    --only EUROC/MH_01_easy --layers rgb_0 --force
+# Terminal A — leave running
+pixi -q run -e slam-evals --frozen slam-evals-catalog
 
-# Re-emit view_coordinates for every sequence (after adding a new DatasetSpec)
-pixi -q run -e slam-evals --frozen python tools/ingest.py \
-    --out ../../data/slam-evals/rrd \
-    --layers view_coordinates --force
+# Terminal B — every time you change something
+pixi -q run -e slam-evals --frozen python packages/slam-evals/tools/ingest.py \
+    --layers <stem> --datasets <NAME> --force
+pixi -q run -e slam-evals --frozen python packages/slam-evals/tools/catalog.py \
+    --refresh --datasets <NAME> --layers <stem>
+
+# In the viewer: reload the segment to see the change
+```
+
+The same `--datasets`, `--layers`, and `--only` filters that gate `ingest.py`
+also gate `--refresh`. Common patterns:
+
+```bash
+# Re-emit + push only one layer for one segment
+python tools/ingest.py --only EUROC/MH_01_easy --layers rgb_0 --force
+python tools/catalog.py --refresh --only EUROC/MH_01_easy --layers rgb_0
+
+# Re-emit + push view_coordinates for every sequence (after adding a DatasetSpec)
+python tools/ingest.py --layers view_coordinates --force
+python tools/catalog.py --refresh --layers view_coordinates
 ```
 
 Available layer names: `calibration`, `groundtruth`, `view_coordinates`,
 `rgb_0`, `rgb_1`, `depth_0`, `depth_1`, `imu_0` (only the ones applicable to a
-sequence's modality are emitted). The catalog server caches registered URIs
-at startup, so any re-ingest while the server is running requires a server
-restart to take effect.
+sequence's modality are emitted).
+
+Restart the catalog only when you change `tools/catalog.py` itself, the
+blueprint, or want a clean slate. Routine spec/code changes go through
+`--refresh`.
 
 ## Adding a new dataset's world-frame convention
 
@@ -88,16 +113,19 @@ picks, which often looks sideways. To fix:
    directory name exactly. Pick the right convention from the
    [Rerun ViewCoordinates docs](https://rerun.io/docs/reference/types/archetypes/view_coordinates).
 
-2. Re-emit the `view_coordinates` layer:
+2. Re-emit the `view_coordinates` layer for that dataset, then push it
+   into the running catalog:
 
    ```bash
    pixi -q run -e slam-evals --frozen python tools/ingest.py \
-       --out ../../data/slam-evals/rrd \
-       --only MYDATASET --layers view_coordinates --force
+       --datasets MYDATASET --layers view_coordinates --force
+   pixi -q run -e slam-evals --frozen python tools/catalog.py \
+       --refresh --datasets MYDATASET --layers view_coordinates
    ```
 
-3. Restart the catalog server, click into a `MYDATASET` segment in the
-   viewer, confirm the rig is upright.
+3. Reload the segment in the viewer, confirm the rig is upright. If it
+   isn't, swap the convention in `datasets.py` and repeat — the whole
+   loop is a few seconds.
 
 ## Optional: web viewer auto-popup
 
@@ -114,8 +142,13 @@ printed URL instead.
   the disk + classifies modality (called from `tools/ingest.py`; no separate CLI)
 - `slam_evals/data/datasets.py` — per-dataset `DatasetSpec` registry
 - `slam_evals/ingest/layer_*.py` — one writer per source stream
-- `slam_evals/catalog/mount.py` — `rr.server.Server` wrapper that registers
-  every layer file with `dataset.register([uri], layer_name=stem)`
+- `slam_evals/catalog/mount.py` — `mount_catalog` (in-process server,
+  registers all layer files at startup) and `refresh_catalog` (connects to
+  a running server via `CatalogClient` and pushes a subset with
+  `OnDuplicateSegmentLayer.REPLACE`). Both share a per-layer-name batched
+  registration helper that issues one `dataset.register(uris,
+  layer_name=stem)` call per stem rather than per file — bulk path on the
+  server side.
 - `slam_evals/blueprint.py` — default 3D + per-camera 2D + IMU timeseries
   layout; registered at the catalog level so it applies to every segment
 - `tools/{ingest,catalog}.py` — CLIs
