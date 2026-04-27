@@ -35,10 +35,20 @@ from slam_evals.data.parse import GroundTruth
 from slam_evals.data.types import Sequence
 from slam_evals.ingest.columns import log_groundtruth_columns, trajectory_length_m
 
-# Solid colour used for the GT path linestrip (RGBA, 0-255). Green is the
-# default convention for ground-truth trajectories — predictions get their
-# own colours per algorithm later.
-_GT_PATH_COLOR: tuple[int, int, int, int] = (40, 200, 80, 255)
+# Endpoints of the GT path's start→end colour gradient (RGBA, 0-255). Green
+# at frame 0, red at the final pose, so the trajectory's traversal direction
+# is obvious in the viewer without scrubbing the timeline. Predictions get
+# their own colours per algorithm later.
+_GT_PATH_START: tuple[int, int, int, int] = (40, 200, 80, 255)
+_GT_PATH_END: tuple[int, int, int, int] = (220, 60, 40, 255)
+
+
+def _gradient_colors(n_segments: int) -> np.ndarray:
+    """RGBA8 colours linearly interpolating ``_GT_PATH_START`` → ``_GT_PATH_END``."""
+    t = np.linspace(0.0, 1.0, n_segments)[:, None]
+    start = np.array(_GT_PATH_START, dtype=np.float64)
+    end = np.array(_GT_PATH_END, dtype=np.float64)
+    return ((1.0 - t) * start + t * end).astype(np.uint8)
 
 
 def _has_meaningful_rotation(quaternion_xyzw: np.ndarray, *, tol: float = 1e-6) -> bool:
@@ -87,16 +97,21 @@ def write_groundtruth_layer(
             )
             duration_s = float((int(groundtruth.ts_ns[-1]) - t0_ns) * 1e-9)
 
-            # PyCuVSLAM-style path visualisation. One LineStrips3D containing
-            # all GT translations as a single connected polyline, in world
-            # frame. Static — the path itself doesn't change as the timeline
-            # advances, only the live frustum (which sits on /world/rig_0).
+            # PyCuVSLAM-style path visualisation. We split the trajectory
+            # into N-1 two-point strips so each segment can carry its own
+            # colour in a green→red gradient (start → end), making
+            # traversal direction obvious without scrubbing. Static — the
+            # path itself doesn't change as the timeline advances, only the
+            # live frustum (which sits on /world/rig_0).
+            translation = groundtruth.translation.astype(np.float64)
+            n_segments = translation.shape[0] - 1
+            segment_strips = [translation[i:i + 2] for i in range(n_segments)]
             rr.log(
                 "/world/rig_0_path",
                 rr.LineStrips3D(
-                    [groundtruth.translation.astype(np.float64)],
-                    colors=[_GT_PATH_COLOR],
-                    radii=[0.01],
+                    segment_strips,
+                    colors=_gradient_colors(n_segments),
+                    radii=np.full(n_segments, 0.01, dtype=np.float32),
                 ),
                 static=True,
                 recording=rec,
