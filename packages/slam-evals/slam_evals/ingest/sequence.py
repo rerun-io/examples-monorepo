@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import Literal, get_args
 
 from slam_evals.data.parse import GroundTruth, ImuSamples, parse_calibration, parse_groundtruth, parse_imu, parse_rgb_csv
 from slam_evals.data.types import Sequence
@@ -27,8 +28,11 @@ from slam_evals.ingest.layer_view_coordinates import write_view_coordinates_laye
 
 # Layer names follow source-stream names (matches docs/schema.md). Order
 # determines write order — calibration first so any layer-registration
-# smoke test sees property:info:* on the first file processed.
-_ALL_LAYERS: tuple[str, ...] = (
+# smoke test sees property:info:* on the first file processed. The
+# ``LayerName`` Literal is the source of truth so tyro CLIs can show
+# the choices in --help; ``_ALL_LAYERS`` derives from it for runtime
+# iteration.
+LayerName = Literal[
     "calibration",
     "groundtruth",
     "view_coordinates",
@@ -37,7 +41,8 @@ _ALL_LAYERS: tuple[str, ...] = (
     "depth_0",
     "depth_1",
     "imu_0",
-)
+]
+_ALL_LAYERS: tuple[LayerName, ...] = get_args(LayerName)
 
 
 def applicable_layers(sequence: Sequence) -> tuple[str, ...]:

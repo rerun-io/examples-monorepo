@@ -27,6 +27,7 @@ import tyro
 
 from slam_evals.blueprint import build_blueprint
 from slam_evals.catalog import mount_catalog, refresh_catalog
+from slam_evals.ingest import LayerName
 
 
 @dataclass
@@ -58,7 +59,7 @@ class CatalogConfig:
     datasets: tuple[str, ...] = ()
     """Refresh-mode filter: restrict to specific dataset directories (e.g. ``EUROC KITTI``). Empty = all."""
 
-    layers: tuple[str, ...] = ()
+    layers: tuple[LayerName, ...] = ()
     """Refresh-mode filter: restrict to specific layer names (e.g. ``view_coordinates groundtruth``). Empty = all."""
 
     only: tuple[str, ...] = ()

@@ -27,7 +27,7 @@ from tqdm import tqdm
 from slam_evals.data import discover_sequences
 from slam_evals.data.discovery import filter_sequences
 from slam_evals.data.types import Modality, Sequence
-from slam_evals.ingest import applicable_layers, ingest_sequence
+from slam_evals.ingest import LayerName, applicable_layers, ingest_sequence
 
 # Substring on the formatted exception that identifies a transient NVENC
 # session-contention failure. The raw error type is av.error.ExternalError
@@ -57,7 +57,7 @@ class IngestConfig:
     modalities: tuple[Modality, ...] = ()
     """Restrict to specific modalities."""
 
-    layers: tuple[str, ...] = ()
+    layers: tuple[LayerName, ...] = ()
     """Restrict to specific layer names (e.g. ``rgb_0`` to only re-encode camera 0). Default: all applicable to each sequence."""
 
     force: bool = False
