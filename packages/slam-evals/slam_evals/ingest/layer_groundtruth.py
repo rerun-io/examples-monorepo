@@ -118,9 +118,9 @@ def write_groundtruth_layer(
             )
 
             # Endpoint markers reinforce the gradient direction at a glance —
-            # green dot + "S" label at frame 0, red dot + "E" label at the
-            # final pose. Slightly larger radius than the linestrip so they
-            # stay legible when zoomed out.
+            # green dot + "start" label at frame 0, red dot + "end" label
+            # at the final pose. Slightly larger radius than the linestrip
+            # so they stay legible when zoomed out.
             endpoints = np.stack([translation[0], translation[-1]])
             rr.log(
                 "/world/rig_0_path/endpoints",
@@ -128,7 +128,7 @@ def write_groundtruth_layer(
                     endpoints,
                     colors=[_GT_PATH_START, _GT_PATH_END],
                     radii=[0.05, 0.05],
-                    labels=["S", "E"],
+                    labels=["start", "end"],
                 ),
                 static=True,
                 recording=rec,
