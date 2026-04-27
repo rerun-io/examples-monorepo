@@ -64,36 +64,25 @@ def mount_catalog(
     if not layer_files:
         raise FileNotFoundError(f"no RRDs found under {rrd_dir}")
 
-    # Start with an empty dataset, then register every layer file under its
-    # filename stem in a single batched call. Files sharing a recording_id
-    # collapse into one segment automatically.
-    #
-    # The batched ``register(uris, layer_name=names)`` form is what the SDK's
-    # ``RegistrationHandle`` API was designed for — one client call, per-URI
-    # error reporting via ``iter_results()``, no manual loop bookkeeping.
-    # Note that the wall-clock cost (~40 s for 500 files / 25 GB on the local
-    # benchmark) is dominated by server-side .rrd parsing, not client
-    # roundtrips, so batching here is a code-clarity win rather than a
-    # latency win — by the time ``register()`` returns, the handle is
-    # already fully resolved and ``iter_results`` exits in milliseconds.
+    # Start with an empty dataset, then explicitly register each layer file
+    # under its filename stem. Files sharing a recording_id collapse into
+    # one segment automatically. Each ``register().wait()`` is ~30-100 ms,
+    # and 500+ files takes nearly a minute — wrap the loop in tqdm so
+    # interactive callers see live per-file progress. Batching all URIs
+    # into a single ``register()`` call works too, but the SDK's
+    # ``register()`` is synchronous (handle is fully resolved on return,
+    # so ``iter_results()`` exits instantly) — that gave us no wall-clock
+    # win and lost the live progress, so we keep the per-file loop.
     print(f"Mounting catalog from {rrd_dir} ({len(layer_files)} layer files)…", flush=True)
     server = rr.server.Server(datasets={dataset_name: []}, port=port)
     dataset = server.client().get_dataset(dataset_name)
 
-    uris = [f.resolve().as_uri() for f in layer_files]
-    layer_names = [f.stem for f in layer_files]
-    handle = dataset.register(uris, layer_name=layer_names)
-
-    errors: list[tuple[str, str]] = []
-    with tqdm(total=len(layer_files), desc="register", unit="layer", disable=not show_progress) as bar:
-        for result in handle.iter_results():
-            bar.update(1)
-            if result.is_error and result.error is not None:
-                errors.append((result.uri, result.error))
-
-    if errors:
-        msg = "\n  ".join(f"{u}: {e}" for u, e in errors)
-        raise RuntimeError(f"failed to register {len(errors)}/{len(layer_files)} layer(s):\n  {msg}")
+    iterator = tqdm(layer_files, desc="register", unit="layer", disable=not show_progress)
+    for layer_file in iterator:
+        dataset.register(
+            [layer_file.resolve().as_uri()],
+            layer_name=layer_file.stem,
+        ).wait()
 
     if blueprint is not None:
         # ``register_blueprint`` is implemented internally as
