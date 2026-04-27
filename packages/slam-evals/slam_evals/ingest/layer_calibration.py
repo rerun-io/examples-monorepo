@@ -29,6 +29,11 @@ import rerun as rr
 from slam_evals.data.types import Calibration, Sequence
 from slam_evals.ingest.calibration import log_camera_static
 
+# Wireframe colour for cam_0 — the rig's reference sensor — so it's
+# trivially distinguishable from cam_1 in stereo views. Same green as the
+# GT path's start marker for visual consistency.
+_REFERENCE_CAM_COLOR: tuple[int, int, int, int] = (40, 200, 80, 255)
+
 
 def _log_imu_extrinsic_static(
     *,
@@ -90,7 +95,13 @@ def write_calibration_layer(
                 if not cam.cam_name.startswith("rgb_"):
                     continue
                 idx = cam.cam_name.split("_", 1)[1]
-                log_camera_static(cam, entity_path=f"/world/rig_0/cam_{idx}", recording=rec)
+                color = _REFERENCE_CAM_COLOR if idx == "0" else None
+                log_camera_static(
+                    cam,
+                    entity_path=f"/world/rig_0/cam_{idx}",
+                    color=color,
+                    recording=rec,
+                )
 
             # IMU extrinsic. ``imu_params`` is the first IMU's full field bag
             # from calibration.yaml; we only need ``T_BS`` to place the IMU

@@ -92,12 +92,17 @@ def log_camera_static(
     cam: CameraIntrinsics,
     *,
     entity_path: str,
+    color: tuple[int, int, int, int] | None = None,
     recording: rr.RecordingStream | None = None,
 ) -> None:
     """Log one camera's intrinsics + body-from-sensor extrinsics at ``entity_path``.
 
     Delegates to ``simplecv.rerun_log_utils.log_pinhole`` so distortion
-    coefficients are preserved alongside the Pinhole archetype.
+    coefficients are preserved alongside the Pinhole archetype. When
+    ``color`` is provided, additionally log it as a partial update on the
+    pinhole entity so the viewer renders the frustum wireframe in that
+    colour — used to highlight the rig's reference sensor (cam_0) in
+    multi-camera setups.
     """
     # log_pinhole logs the extrinsic Transform3D at `entity_path` and the
     # PinholeWithDistortion at `entity_path/pinhole`.
@@ -108,5 +113,12 @@ def log_camera_static(
         static=True,
         recording=recording,
     )
+    if color is not None:
+        rr.log(
+            f"{entity_path}/pinhole",
+            rr.Pinhole.from_fields(image_plane_distance=0.5, color=color),
+            static=True,
+            recording=recording,
+        )
 
 
