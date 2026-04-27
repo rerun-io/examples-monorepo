@@ -57,6 +57,7 @@ EUROC = DatasetSpec(name="EUROC", world_view_coordinates=rr.ViewCoordinates.FLU)
 KITTI = DatasetSpec(name="KITTI", world_view_coordinates=rr.ViewCoordinates.RDF)
 TARTANAIR = DatasetSpec(name="TARTANAIR", world_view_coordinates=rr.ViewCoordinates.FRD)
 RGBDTUM = DatasetSpec(name="RGBDTUM", world_view_coordinates=rr.ViewCoordinates.RDF)
+SEVENSCENES = DatasetSpec(name="7SCENES", world_view_coordinates=rr.ViewCoordinates.RDF)
 NUIM = DatasetSpec(name="NUIM", world_view_coordinates=rr.ViewCoordinates.RUB)
 REPLICA = DatasetSpec(name="REPLICA", world_view_coordinates=rr.ViewCoordinates.RUB)
 
@@ -66,6 +67,7 @@ DATASETS: tuple[DatasetSpec, ...] = (
     KITTI,
     TARTANAIR,
     RGBDTUM,
+    SEVENSCENES,
     NUIM,
     REPLICA,
 )
