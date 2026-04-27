@@ -14,6 +14,9 @@ from numpy import ndarray
 from slam_evals.data.parse import GroundTruth, ImuSamples
 
 
+_IDENTITY_QUATERNION_XYZW: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
+
+
 def log_groundtruth_columns(
     gt: GroundTruth,
     *,
@@ -30,16 +33,30 @@ def log_groundtruth_columns(
     ``/world/body``. Sensor entities under ``/world/body`` (``cam_0``,
     ``cam_1``) keep their own static body-from-sensor extrinsics and ride
     this trajectory automatically via the scene graph.
+
+    Some datasets ship position-only GT padded with degenerate quaternions
+    (e.g. ROVER-T265's ``0 0 0 0`` rows from GPS-RTK tracking with no
+    orientation source). Feeding those into ``Transform3D`` breaks the
+    rotation chain — all child entities under this path stop tracking.
+    We sanitise per-row: any non-unit-norm quaternion gets replaced with
+    identity so translation keeps applying correctly even when rotation
+    GT is missing.
     """
     anchor = int(t0_ns) if t0_ns is not None else int(gt.ts_ns[0])
     t_rel_s: Float64[ndarray, "n"] = (gt.ts_ns - anchor).astype(np.float64) * 1e-9
+
+    quaternion = gt.quaternion_xyzw.astype(np.float64).copy()
+    norms = np.linalg.norm(quaternion, axis=1)
+    bad = np.abs(norms - 1.0) > 1e-3
+    if bad.any():
+        quaternion[bad] = _IDENTITY_QUATERNION_XYZW
 
     rr.send_columns(
         entity_path,
         indexes=[rr.TimeColumn(timeline, duration=t_rel_s)],
         columns=rr.Transform3D.columns(
             translation=gt.translation.astype(np.float64),
-            quaternion=gt.quaternion_xyzw.astype(np.float64),
+            quaternion=quaternion,
         ),
         recording=recording,
     )
