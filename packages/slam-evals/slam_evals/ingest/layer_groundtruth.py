@@ -116,6 +116,23 @@ def write_groundtruth_layer(
                 static=True,
                 recording=rec,
             )
+
+            # Endpoint markers reinforce the gradient direction at a glance —
+            # green dot + "S" label at frame 0, red dot + "E" label at the
+            # final pose. Slightly larger radius than the linestrip so they
+            # stay legible when zoomed out.
+            endpoints = np.stack([translation[0], translation[-1]])
+            rr.log(
+                "/world/rig_0_path/endpoints",
+                rr.Points3D(
+                    endpoints,
+                    colors=[_GT_PATH_START, _GT_PATH_END],
+                    radii=[0.05, 0.05],
+                    labels=["S", "E"],
+                ),
+                static=True,
+                recording=rec,
+            )
         else:
             # Empty GT — log a static identity so child sensor entities
             # still have a parent pose to inherit.
