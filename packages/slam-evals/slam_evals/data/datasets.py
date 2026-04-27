@@ -60,7 +60,7 @@ RGBDTUM = DatasetSpec(name="RGBDTUM", world_view_coordinates=rr.ViewCoordinates.
 SEVENSCENES = DatasetSpec(name="7SCENES", world_view_coordinates=rr.ViewCoordinates.RDF)
 NUIM = DatasetSpec(name="NUIM", world_view_coordinates=rr.ViewCoordinates.RUB)
 REPLICA = DatasetSpec(name="REPLICA", world_view_coordinates=rr.ViewCoordinates.RFU)
-MSD = DatasetSpec(name="MSD", world_view_coordinates=rr.ViewCoordinates.ULB)
+MSD = DatasetSpec(name="MSD", world_view_coordinates=rr.ViewCoordinates.DRB)
 
 
 DATASETS: tuple[DatasetSpec, ...] = (
