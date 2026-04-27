@@ -1,10 +1,22 @@
-"""Mount per-sequence layer ``.rrd`` directories as a Rerun catalog dataset.
+"""Mount + refresh per-sequence layer ``.rrd`` directories as a Rerun catalog dataset.
 
 Each sequence on disk is laid out as one directory per ``<dataset>/<seq>/``
 containing 3-7 ``.rrd`` files (one per source data stream). All layer files
 share the sequence's ``recording_id``, so registering each one under its
 filename stem as ``layer_name`` collapses them into a single segment per
 sequence at query/view time. See ``docs/schema.md`` for the schema.
+
+Two entry points share the same per-layer-group registration helper:
+
+* ``mount_catalog`` starts a new in-process gRPC server, registers every
+  matching layer file, and returns the long-lived ``Server`` to the
+  caller. Used at startup.
+
+* ``refresh_catalog`` connects to an already-running catalog server via
+  ``CatalogClient`` and re-registers a subset of files using
+  ``OnDuplicateSegmentLayer.REPLACE``. Used to push edits without
+  restarting the server (avoids the 30-40 s parse cost of the full
+  corpus on every dev-loop iteration).
 """
 
 from __future__ import annotations
@@ -15,7 +27,76 @@ from pathlib import Path
 
 import rerun as rr
 import rerun.blueprint as rrb
+from rerun.catalog import CatalogClient, OnDuplicateSegmentLayer
 from tqdm import tqdm
+
+
+def _filter_layer_files(
+    rrd_dir: Path,
+    *,
+    datasets: tuple[str, ...] = (),
+    layers: tuple[str, ...] = (),
+    only: tuple[str, ...] = (),
+) -> list[Path]:
+    """Apply ingest-style filters to the recursive ``*.rrd`` glob.
+
+    Files live at ``<rrd_dir>/<dataset>/<seq>/<layer>.rrd``, so:
+
+    * ``datasets``: keep only files whose grandparent directory matches.
+    * ``layers``: keep only files whose stem (= layer name) matches.
+    * ``only``: keep only files whose ``<dataset>/<seq>`` slug matches.
+
+    Empty filter tuples mean "no restriction" for that axis, mirroring
+    ``tools/ingest.py``'s ``IngestConfig`` semantics.
+    """
+    files = sorted(rrd_dir.rglob("*.rrd"))
+    if datasets:
+        ds_set = set(datasets)
+        files = [f for f in files if f.parent.parent.name in ds_set]
+    if layers:
+        layer_set = set(layers)
+        files = [f for f in files if f.stem in layer_set]
+    if only:
+        only_set = set(only)
+        files = [f for f in files if f"{f.parent.parent.name}/{f.parent.name}" in only_set]
+    return files
+
+
+def _register_layer_groups(
+    dataset: object,
+    layer_files: list[Path],
+    *,
+    on_duplicate: OnDuplicateSegmentLayer,
+    show_progress: bool,
+) -> None:
+    """Register ``layer_files`` against ``dataset``, batched per layer name.
+
+    Per advice from rerun engineers: the server has a fast path when
+    ``register`` is called with a single ``layer_name`` and many URIs —
+    it processes the URIs as one bulk operation instead of one (uri,
+    layer_name) pair at a time. Group files by their filename stem
+    (which is also their layer name) and issue one register call per
+    group; for ~500 files this drops the round-trip overhead from ~10 s
+    to under 1 s. Server-side .rrd parsing dominates the rest, and
+    grouping doesn't speed that up.
+    """
+    layers_by_stem: dict[str, list[Path]] = defaultdict(list)
+    for f in layer_files:
+        layers_by_stem[f.stem].append(f)
+
+    iterator = tqdm(
+        sorted(layers_by_stem.items()),
+        desc="register",
+        unit="layer-group",
+        disable=not show_progress,
+    )
+    for stem, files in iterator:
+        iterator.set_postfix_str(f"{stem} ({len(files)} files)")
+        uris = [f.resolve().as_uri() for f in files]
+        # pyrefly can't see ``register`` because we accept ``dataset`` as
+        # ``object`` (DatasetEntry vs the catalog-client variant — both
+        # quack the same on this method).
+        dataset.register(uris, layer_name=stem, on_duplicate=on_duplicate).wait()  # type: ignore[attr-defined]
 
 
 def mount_catalog(
@@ -57,47 +138,24 @@ def mount_catalog(
         ``application_id`` used at ingest time (``"slam-evals"`` by default);
         otherwise rerun won't apply the blueprint.
     show_progress:
-        Render a tqdm bar over the per-layer ``dataset.register(...)`` loop.
-        Default on; turn off for non-interactive callers (tests).
+        Render a tqdm bar over the per-layer-group ``dataset.register(...)``
+        loop. Default on; turn off for non-interactive callers (tests).
     """
     rrd_dir = rrd_dir.expanduser().resolve()
     layer_files = sorted(rrd_dir.rglob("*.rrd"))
     if not layer_files:
         raise FileNotFoundError(f"no RRDs found under {rrd_dir}")
 
-    # Start with an empty dataset, then register one batch per layer name
-    # (calibration, groundtruth, view_coordinates, rgb_<i>, depth_<i>,
-    # imu_<i>). Files sharing a recording_id collapse into one segment
-    # automatically — the catalog uses ``recording_id`` from the .rrd
-    # itself as the segment key, regardless of how we group at register
-    # time, so grouping by layer name is purely a transport optimisation.
-    #
-    # Per-call register is ~30-100 ms of fixed overhead and the server
-    # has a fast path when ``layer_name`` is a single string — it can
-    # process the URIs as one bulk operation instead of one (uri,
-    # layer_name) pair at a time. Per advice from rerun engineers: for
-    # ~500 files this drops mount time from ~40 s to a few seconds.
-    # tqdm shows per-layer-group progress so the operator can see what's
-    # happening; ``iter_results`` would give per-file granularity but
-    # exits instantly because the SDK's ``register`` is synchronous.
     print(f"Mounting catalog from {rrd_dir} ({len(layer_files)} layer files)…", flush=True)
     server = rr.server.Server(datasets={dataset_name: []}, port=port)
     dataset = server.client().get_dataset(dataset_name)
 
-    layers_by_stem: dict[str, list[Path]] = defaultdict(list)
-    for f in layer_files:
-        layers_by_stem[f.stem].append(f)
-
-    iterator = tqdm(
-        sorted(layers_by_stem.items()),
-        desc="register",
-        unit="layer-group",
-        disable=not show_progress,
+    _register_layer_groups(
+        dataset,
+        layer_files,
+        on_duplicate=OnDuplicateSegmentLayer.ERROR,
+        show_progress=show_progress,
     )
-    for stem, files in iterator:
-        iterator.set_postfix_str(f"{stem} ({len(files)} files)")
-        uris = [f.resolve().as_uri() for f in files]
-        dataset.register(uris, layer_name=stem).wait()
 
     if blueprint is not None:
         # ``register_blueprint`` is implemented internally as
@@ -110,3 +168,50 @@ def mount_catalog(
         dataset.register_blueprint(rbl_path.resolve().as_uri(), set_default=True)
 
     return server
+
+
+def refresh_catalog(
+    rrd_dir: Path,
+    *,
+    catalog_url: str,
+    dataset_name: str = "vslam",
+    datasets: tuple[str, ...] = (),
+    layers: tuple[str, ...] = (),
+    only: tuple[str, ...] = (),
+    show_progress: bool = True,
+) -> int:
+    """Push a subset of layer files into an already-running catalog server.
+
+    Connects to ``catalog_url`` (typically ``rerun+http://127.0.0.1:9987``)
+    via ``CatalogClient`` and re-registers the matching layer files with
+    ``OnDuplicateSegmentLayer.REPLACE`` so existing entries are swapped
+    in-place. Use this to apply edits to the running catalog without
+    paying the ~30-40 s cold-mount cost.
+
+    Parameters mirror ``tools/ingest.py``'s filter flags so the same
+    invocation pattern works (``--datasets``, ``--layers``, ``--only``).
+
+    Returns the number of files registered. Zero means no files matched
+    the filters; the caller should treat that as a no-op rather than an
+    error so ``--datasets X --layers Y`` is safe to script.
+    """
+    rrd_dir = rrd_dir.expanduser().resolve()
+    layer_files = _filter_layer_files(rrd_dir, datasets=datasets, layers=layers, only=only)
+    if not layer_files:
+        print(f"No layer files matched filters under {rrd_dir}; nothing to refresh.")
+        return 0
+
+    print(
+        f"Refreshing catalog at {catalog_url} ({len(layer_files)} layer files)…",
+        flush=True,
+    )
+    client = CatalogClient(catalog_url)
+    dataset = client.get_dataset(dataset_name)
+
+    _register_layer_groups(
+        dataset,
+        layer_files,
+        on_duplicate=OnDuplicateSegmentLayer.REPLACE,
+        show_progress=show_progress,
+    )
+    return len(layer_files)
