@@ -10,6 +10,7 @@ sequence at query/view time. See ``docs/schema.md`` for the schema.
 from __future__ import annotations
 
 import tempfile
+from collections import defaultdict
 from pathlib import Path
 
 import rerun as rr
@@ -64,25 +65,39 @@ def mount_catalog(
     if not layer_files:
         raise FileNotFoundError(f"no RRDs found under {rrd_dir}")
 
-    # Start with an empty dataset, then explicitly register each layer file
-    # under its filename stem. Files sharing a recording_id collapse into
-    # one segment automatically. Each ``register().wait()`` is ~30-100 ms,
-    # and 500+ files takes nearly a minute — wrap the loop in tqdm so
-    # interactive callers see live per-file progress. Batching all URIs
-    # into a single ``register()`` call works too, but the SDK's
-    # ``register()`` is synchronous (handle is fully resolved on return,
-    # so ``iter_results()`` exits instantly) — that gave us no wall-clock
-    # win and lost the live progress, so we keep the per-file loop.
+    # Start with an empty dataset, then register one batch per layer name
+    # (calibration, groundtruth, view_coordinates, rgb_<i>, depth_<i>,
+    # imu_<i>). Files sharing a recording_id collapse into one segment
+    # automatically — the catalog uses ``recording_id`` from the .rrd
+    # itself as the segment key, regardless of how we group at register
+    # time, so grouping by layer name is purely a transport optimisation.
+    #
+    # Per-call register is ~30-100 ms of fixed overhead and the server
+    # has a fast path when ``layer_name`` is a single string — it can
+    # process the URIs as one bulk operation instead of one (uri,
+    # layer_name) pair at a time. Per advice from rerun engineers: for
+    # ~500 files this drops mount time from ~40 s to a few seconds.
+    # tqdm shows per-layer-group progress so the operator can see what's
+    # happening; ``iter_results`` would give per-file granularity but
+    # exits instantly because the SDK's ``register`` is synchronous.
     print(f"Mounting catalog from {rrd_dir} ({len(layer_files)} layer files)…", flush=True)
     server = rr.server.Server(datasets={dataset_name: []}, port=port)
     dataset = server.client().get_dataset(dataset_name)
 
-    iterator = tqdm(layer_files, desc="register", unit="layer", disable=not show_progress)
-    for layer_file in iterator:
-        dataset.register(
-            [layer_file.resolve().as_uri()],
-            layer_name=layer_file.stem,
-        ).wait()
+    layers_by_stem: dict[str, list[Path]] = defaultdict(list)
+    for f in layer_files:
+        layers_by_stem[f.stem].append(f)
+
+    iterator = tqdm(
+        sorted(layers_by_stem.items()),
+        desc="register",
+        unit="layer-group",
+        disable=not show_progress,
+    )
+    for stem, files in iterator:
+        iterator.set_postfix_str(f"{stem} ({len(files)} files)")
+        uris = [f.resolve().as_uri() for f in files]
+        dataset.register(uris, layer_name=stem).wait()
 
     if blueprint is not None:
         # ``register_blueprint`` is implemented internally as
