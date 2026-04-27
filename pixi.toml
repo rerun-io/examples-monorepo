@@ -1169,6 +1169,11 @@ cmd = "python tools/catalog.py --rrd-dir ../../data/slam-evals/rrd"
 cwd = "packages/slam-evals"
 description = "Mount the RRD directory as a Rerun catalog and print the segment summary"
 
+[feature.slam-evals.tasks.slam-evals-refresh]
+cmd = "python tools/catalog.py --refresh --rrd-dir ../../data/slam-evals/rrd"
+cwd = "packages/slam-evals"
+description = "Push edited layer files into the running catalog (append --datasets / --layers / --only filters; defaults to all)"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════

@@ -67,25 +67,24 @@ Two-terminal workflow:
 pixi -q run -e slam-evals --frozen slam-evals-catalog
 
 # Terminal B — every time you change something
-pixi -q run -e slam-evals --frozen python packages/slam-evals/tools/ingest.py \
-    --layers <stem> --datasets <NAME> --force
-pixi -q run -e slam-evals --frozen python packages/slam-evals/tools/catalog.py \
-    --refresh --datasets <NAME> --layers <stem>
+pixi -q run -e slam-evals --frozen slam-evals-ingest --layers <stem> --datasets <NAME> --force
+pixi -q run -e slam-evals --frozen slam-evals-refresh --datasets <NAME> --layers <stem>
 
 # In the viewer: reload the segment to see the change
 ```
 
-The same `--datasets`, `--layers`, and `--only` filters that gate `ingest.py`
-also gate `--refresh`. Common patterns:
+`slam-evals-ingest` and `slam-evals-refresh` are pixi tasks that wrap the
+underlying CLIs (so they work from any directory and honour `--datasets /
+--layers / --only` directly as extra args). Common patterns:
 
 ```bash
 # Re-emit + push only one layer for one segment
-python tools/ingest.py --only EUROC/MH_01_easy --layers rgb_0 --force
-python tools/catalog.py --refresh --only EUROC/MH_01_easy --layers rgb_0
+pixi -q run -e slam-evals --frozen slam-evals-ingest  --only EUROC/MH_01_easy --layers rgb_0 --force
+pixi -q run -e slam-evals --frozen slam-evals-refresh --only EUROC/MH_01_easy --layers rgb_0
 
 # Re-emit + push view_coordinates for every sequence (after adding a DatasetSpec)
-python tools/ingest.py --layers view_coordinates --force
-python tools/catalog.py --refresh --layers view_coordinates
+pixi -q run -e slam-evals --frozen slam-evals-ingest  --layers view_coordinates --force
+pixi -q run -e slam-evals --frozen slam-evals-refresh --layers view_coordinates
 ```
 
 Available layer names: `calibration`, `groundtruth`, `view_coordinates`,
@@ -117,10 +116,8 @@ picks, which often looks sideways. To fix:
    into the running catalog:
 
    ```bash
-   pixi -q run -e slam-evals --frozen python tools/ingest.py \
-       --datasets MYDATASET --layers view_coordinates --force
-   pixi -q run -e slam-evals --frozen python tools/catalog.py \
-       --refresh --datasets MYDATASET --layers view_coordinates
+   pixi -q run -e slam-evals --frozen slam-evals-ingest  --datasets MYDATASET --layers view_coordinates --force
+   pixi -q run -e slam-evals --frozen slam-evals-refresh --datasets MYDATASET --layers view_coordinates
    ```
 
 3. Reload the segment in the viewer, confirm the rig is upright. If it
