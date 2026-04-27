@@ -52,6 +52,36 @@ The cold mount parses ~25 GB of RRD content (depth_0 alone is 20+ GB on the
 local benchmark) and takes ~30-40 s. That cost is server-side and unavoidable;
 **don't pay it on every iteration** — see *Dev loop* below.
 
+## Viewer conventions (decoder ring)
+
+Things you'll see in the 3D view that aren't obvious from the entity tree:
+
+- **Green camera frustum at `/world/rig_0/cam_0`.** This is the rig's
+  *reference sensor* — the primary camera the body pose is anchored to,
+  and the one stereo / multi-cam baselines treat as the "left" / "main"
+  view. Other cameras (`cam_1`, …) keep the viewer's default frustum
+  colour. cam_0 is the reference by convention across every dataset
+  spec; it's also implicit in the schema (the time-varying GT pose
+  composes onto cam_0's static extrinsic). The convention is also
+  surfaced as `property:calibration:cam0_name` for programmatic
+  consumers.
+- **GT trajectory polyline at `/world/rig_0_path`** — green→red
+  gradient. Green is the *first frame*, red is the *final frame*.
+  Endpoint marker dots labeled `start` / `end` reinforce the gradient
+  direction. This is purely a viewer aid; the underlying GT timestamps
+  are unchanged.
+- **`property:groundtruth:has_rotation`** in `segment_table()` — `False`
+  for sequences whose source GT is position-only (ROVER-* mostly).
+  These segments have their rig translate along the path with identity
+  rotation; expect static-orientation cameras since the dataset doesn't
+  publish rotation GT. See `slam_evals.ingest.columns` for how zero /
+  non-unit-norm quaternions get sanitised to identity.
+- **First-frame snap-to-trajectory.** When GT starts later than the
+  first RGB frame (most EUROC / HILTI / ARIEL sequences — Vicon
+  warm-up), we prepend a synthetic Transform3D at `t=0` holding the
+  first GT pose so cameras start at the right place instead of
+  teleporting from the world origin once GT begins.
+
 ## Dev loop: edit → re-ingest → refresh (no restart)
 
 Once the catalog is mounted, push edits into the running server with
