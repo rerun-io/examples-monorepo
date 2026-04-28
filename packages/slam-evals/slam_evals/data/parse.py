@@ -26,8 +26,16 @@ from jaxtyping import Float64, Int64
 from numpy import ndarray
 from serde import SerdeError, coerce, field, from_dict, serde
 from serde.yaml import from_yaml
+from simplecv.camera_parameters import (
+    BrownConradyDistortion,
+    Extrinsics,
+    Fisheye62Parameters,
+    Intrinsics,
+    KannalaBrandtDistortion,
+    PinholeParameters,
+)
 
-from slam_evals.data.types import Calibration, CameraIntrinsics
+from slam_evals.data.types import Calibration, CameraSpec
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -205,7 +213,7 @@ def parse_imu(path: Path) -> ImuSamples:
 # ─── calibration.yaml ────────────────────────────────────────────────────────
 
 
-_IDENTITY_T_BS: tuple[float, ...] = (
+_IDENTITY_RIG_T_CAM: tuple[float, ...] = (
     1.0, 0.0, 0.0, 0.0,
     0.0, 1.0, 0.0, 0.0,
     0.0, 0.0, 1.0, 0.0,
@@ -251,26 +259,74 @@ class _CalibrationYaml:
     imus: list[_ImuYaml] = field(default_factory=list)
 
 
-def _to_camera_intrinsics(c: _CameraYaml) -> CameraIntrinsics:
+def _build_distortion(
+    distortion_type: str | None,
+    coefficients: list[float] | None,
+) -> BrownConradyDistortion | KannalaBrandtDistortion | None:
+    """Map VSLAM-LAB ``distortion_type`` + coefficients to a simplecv distortion dataclass."""
+    dt = (distortion_type or "").lower()
+    coeffs = coefficients or []
+    if not dt or not coeffs:
+        return None
+    if dt.startswith("radtan"):
+        # radtan4: [k1, k2, p1, p2]; radtan5 adds k3. Extras beyond 5 ignored.
+        k1, k2, p1, p2 = (list(coeffs) + [0.0, 0.0, 0.0, 0.0])[:4]
+        k3 = coeffs[4] if len(coeffs) >= 5 else 0.0
+        return BrownConradyDistortion(k1=k1, k2=k2, p1=p1, p2=p2, k3=k3)
+    if dt.startswith("equid") or dt.startswith("kannala"):
+        # equid4: [k1, k2, k3, k4]
+        padded = list(coeffs) + [0.0] * 4
+        return KannalaBrandtDistortion(k1=padded[0], k2=padded[1], k3=padded[2], k4=padded[3])
+    return None
+
+
+def _to_camera_spec(c: _CameraYaml) -> CameraSpec:
+    """Build a ``CameraSpec`` directly from the parsed YAML row.
+
+    Maps to simplecv's ``PinholeParameters`` (or ``Fisheye62Parameters``
+    for fisheye / Kannala-Brandt distortion). VSLAM-LAB's ``T_BS`` is the
+    rig→camera extrinsic (rig = body); we feed it as
+    ``Extrinsics(world_R_cam=R, world_t_cam=t)`` with the convention that
+    "world" inside simplecv = our rig frame here.
+    """
     focal = c.focal_length or [0.0, 0.0]
     principal = c.principal_point or [0.0, 0.0]
     image_dim = c.image_dimension or [0, 0]
-    distortion = tuple(float(x) for x in (c.distortion_coefficients or ()))
-    t_bs = tuple(float(x) for x in c.T_BS) if c.T_BS else _IDENTITY_T_BS
-    return CameraIntrinsics(
-        cam_name=c.cam_name,
-        width=int(image_dim[0]),
-        height=int(image_dim[1]),
-        fx=float(focal[0]),
-        fy=float(focal[1]),
+    rig_T_cam_flat = tuple(float(x) for x in c.T_BS) if c.T_BS else _IDENTITY_RIG_T_CAM
+    rig_T_cam = np.asarray(rig_T_cam_flat, dtype=np.float64).reshape(4, 4)
+
+    intrinsics = Intrinsics.from_focal_principal_point(
+        camera_conventions="RDF",
+        fl_x=float(focal[0]),
+        fl_y=float(focal[1]),
         cx=float(principal[0]),
         cy=float(principal[1]),
-        distortion_type=c.distortion_type,
-        distortion_coefficients=distortion,
-        fps=c.fps,
-        t_bs=t_bs,
-        depth_factor=c.depth_factor,
+        height=int(image_dim[1]),
+        width=int(image_dim[0]),
     )
+    extrinsics = Extrinsics(
+        world_R_cam=rig_T_cam[:3, :3].astype(np.float64),
+        world_t_cam=rig_T_cam[:3, 3].astype(np.float64),
+    )
+    distortion = _build_distortion(c.distortion_type, c.distortion_coefficients)
+
+    parameters: PinholeParameters | Fisheye62Parameters
+    if isinstance(distortion, KannalaBrandtDistortion):
+        parameters = Fisheye62Parameters(
+            name=c.cam_name,
+            extrinsics=extrinsics,
+            intrinsics=intrinsics,
+            distortion=distortion,
+        )
+    else:
+        parameters = PinholeParameters(
+            name=c.cam_name,
+            extrinsics=extrinsics,
+            intrinsics=intrinsics,
+            distortion=distortion,
+        )
+
+    return CameraSpec(parameters=parameters, fps=c.fps, depth_factor=c.depth_factor)
 
 
 def parse_calibration(path: Path) -> Calibration | None:
@@ -282,7 +338,7 @@ def parse_calibration(path: Path) -> Calibration | None:
     except (SerdeError, yaml.YAMLError):
         return None
 
-    cams = tuple(_to_camera_intrinsics(c) for c in doc.cameras)
+    cams = tuple(_to_camera_spec(c) for c in doc.cameras)
     # Preserve the declared IMU's modelled fields (``fps``, ``T_BS``) as an
     # opaque dict for downstream ``has_imu_params`` detection and for the
     # ``imu_0`` layer's property bag. Other YAML fields (``imu_name``, noise

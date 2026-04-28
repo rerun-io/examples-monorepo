@@ -11,10 +11,13 @@ metadata fields (e.g. depth-factor defaults, eval masks, citations) are
 added to the dataclass and per-dataset constructor calls without
 scattering match-arms across N functions.
 
-Unknown dataset names from disk fall through to ``None`` in ``lookup``;
-the caller (``layer_calibration``) treats that as "skip the /world
-ViewCoordinates log" so the viewer uses its default. That preserves
-today's behavior for every dataset we haven't explicitly classified.
+Every dataset that appears under ``<benchmark_root>/`` gets an entry
+here, even if we haven't classified its world frame yet. Datasets with
+``world_view_coordinates=None`` skip the ``/world`` ViewCoordinates log
+so the viewer falls back to its default — same effective behaviour as
+having no entry at all, but explicit registration documents which
+datasets we know about and which ones still need a convention pinned
+down. Add the ``ViewCoordinates`` value the day you visually verify it.
 """
 
 from __future__ import annotations
@@ -48,10 +51,8 @@ class DatasetSpec:
 
 
 # ─── confident specs ────────────────────────────────────────────────────────
-# Add a new entry here when a dataset's viewer rendering looks wrong;
-# verify in the catalog after a `--layers calibration --force` re-ingest.
-# Names must match the on-disk dataset directory names exactly
-# (i.e. ``<benchmark_root>/<name>/<sequence>/...``).
+# Visually verified against viewer playback. Names must match the on-disk
+# dataset directory names exactly (``<benchmark_root>/<name>/<sequence>/...``).
 
 EUROC = DatasetSpec(name="EUROC", world_view_coordinates=rr.ViewCoordinates.FLU)
 KITTI = DatasetSpec(name="KITTI", world_view_coordinates=rr.ViewCoordinates.RDF)
@@ -63,7 +64,40 @@ REPLICA = DatasetSpec(name="REPLICA", world_view_coordinates=rr.ViewCoordinates.
 MSD = DatasetSpec(name="MSD", world_view_coordinates=rr.ViewCoordinates.LUF)
 
 
+# ─── unclassified ───────────────────────────────────────────────────────────
+# Every dataset that appears under ``<benchmark_root>/`` is declared here
+# with ``world_view_coordinates=None`` until we visually verify and pin its
+# convention. ``lookup`` still returns the spec, but the view_coordinates
+# layer is skipped (see ``slam_evals.ingest.sequence.applicable_layers``)
+# so the viewer falls back to its default world frame.
+#
+# When you classify one of these, move it up to the "confident specs"
+# block and set the ``ViewCoordinates`` value.
+
+ARIEL = DatasetSpec(name="ARIEL")
+CAVES = DatasetSpec(name="CAVES")
+DRUNKARDS = DatasetSpec(name="DRUNKARDS")
+ETH = DatasetSpec(name="ETH")
+HAMLYN = DatasetSpec(name="HAMLYN")
+HILTI2022 = DatasetSpec(name="HILTI2022")
+HILTI2026 = DatasetSpec(name="HILTI2026")
+OPENLORIS = DatasetSpec(name="OPENLORIS")
+OPENLORIS_D400 = DatasetSpec(name="OPENLORIS-D400")
+OPENLORIS_T265 = DatasetSpec(name="OPENLORIS-T265")
+ROVER = DatasetSpec(name="ROVER")
+ROVER_D435I = DatasetSpec(name="ROVER-D435I")
+ROVER_PICAM = DatasetSpec(name="ROVER-PICAM")
+ROVER_T265 = DatasetSpec(name="ROVER-T265")
+S3LI = DatasetSpec(name="S3LI")
+SWEETCORALS = DatasetSpec(name="SWEETCORALS")
+UT_CODA = DatasetSpec(name="UT-CODA")
+VIDEOS = DatasetSpec(name="VIDEOS")
+VITUM = DatasetSpec(name="VITUM")
+YOUTUBE = DatasetSpec(name="YOUTUBE")
+
+
 DATASETS: tuple[DatasetSpec, ...] = (
+    # confident
     EUROC,
     KITTI,
     TARTANAIR,
@@ -72,6 +106,27 @@ DATASETS: tuple[DatasetSpec, ...] = (
     NUIM,
     REPLICA,
     MSD,
+    # unclassified (world_view_coordinates=None)
+    ARIEL,
+    CAVES,
+    DRUNKARDS,
+    ETH,
+    HAMLYN,
+    HILTI2022,
+    HILTI2026,
+    OPENLORIS,
+    OPENLORIS_D400,
+    OPENLORIS_T265,
+    ROVER,
+    ROVER_D435I,
+    ROVER_PICAM,
+    ROVER_T265,
+    S3LI,
+    SWEETCORALS,
+    UT_CODA,
+    VIDEOS,
+    VITUM,
+    YOUTUBE,
 )
 
 _BY_NAME: dict[str, DatasetSpec] = {d.name: d for d in DATASETS}

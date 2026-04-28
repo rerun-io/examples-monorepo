@@ -10,11 +10,11 @@ from slam_evals.data.parse import (
     parse_imu,
     parse_rgb_csv,
 )
-from slam_evals.data.types import Calibration, CameraIntrinsics, Modality, Sequence
+from slam_evals.data.types import Calibration, CameraSpec, Modality, Sequence
 
 __all__ = [
     "Calibration",
-    "CameraIntrinsics",
+    "CameraSpec",
     "GroundTruth",
     "ImuSamples",
     "Modality",

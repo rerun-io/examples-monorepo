@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
+
 from slam_evals.data.datasets import DatasetSpec
 from slam_evals.data.datasets import lookup as _dataset_lookup
 
@@ -88,26 +90,32 @@ class Sequence:
 
 
 @dataclass(frozen=True, slots=True)
-class CameraIntrinsics:
-    """Pinhole intrinsics + body-sensor extrinsic ``T_BS`` (row-major 4x4)."""
+class CameraSpec:
+    """One camera's full calibration, modelled on simplecv's parameter classes.
 
-    cam_name: str
-    width: int
-    height: int
-    fx: float
-    fy: float
-    cx: float
-    cy: float
-    distortion_type: str | None
-    distortion_coefficients: tuple[float, ...]
-    fps: float | None
-    t_bs: tuple[float, ...]  # 16 floats, row-major 4x4; (1,0,0,0, 0,1,0,0, ...) if missing
-    depth_factor: float | None = None  # rgbd only; divisor that maps uint16 -> metres
+    Holds simplecv's ``PinholeParameters`` (or ``Fisheye62Parameters`` for
+    fisheye) directly — that's where intrinsics, extrinsics, distortion,
+    and the derived projection matrix live. The two extra fields here
+    (``fps``, ``depth_factor``) are VSLAM-LAB calibration-yaml metadata
+    that simplecv doesn't carry, so we keep them alongside.
+
+    Use ``parameters`` when handing the camera to simplecv helpers
+    (``log_pinhole``, etc.); the convenience properties below let
+    callers read ``cam.cam_name`` instead of ``cam.parameters.name``.
+    """
+
+    parameters: PinholeParameters | Fisheye62Parameters
+    fps: float | None = None
+    depth_factor: float | None = None  # rgbd only; divisor that maps uint16 → metres
+
+    @property
+    def cam_name(self) -> str:
+        return self.parameters.name
 
 
 @dataclass(frozen=True, slots=True)
 class Calibration:
-    cameras: tuple[CameraIntrinsics, ...]
+    cameras: tuple[CameraSpec, ...]
     # Modelled IMU fields parsed from calibration.yaml's ``imus[0]`` block:
     # ``fps`` (float) and ``T_BS`` (list[float]). Other YAML fields
     # (``imu_name``, per-IMU noise terms like ``a_max``, ``sigma_g_c``) are

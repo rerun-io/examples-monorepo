@@ -41,19 +41,24 @@ _REFERENCE_CAM_COLOR: tuple[int, int, int, int] = (40, 200, 80, 255)
 def _log_imu_extrinsic_static(
     *,
     imu_idx: int,
-    t_bs_flat: list[float] | None,
+    rig_T_imu: list[float] | None,
     recording: rr.RecordingStream,
 ) -> None:
     """Log ``rig_0_T_imu_<idx>`` as a static ``Transform3D``.
 
-    VSLAM-LAB calibration.yaml stores ``T_BS`` as a flat list of 16 floats
-    (row-major 4x4). ``T_BS`` is body-from-sensor — exactly the
-    parent-to-child transform Rerun's ``Transform3D`` defaults to when
-    logged at the child entity path.
+    The parameter is the rig→IMU extrinsic — the parent-to-child
+    transform Rerun's ``Transform3D`` defaults to when logged at the
+    child entity path. Its on-disk source is VSLAM-LAB's calibration
+    YAML field ``T_BS`` (body-from-sensor), which is the same quantity
+    by a different name; we read it once at parse time and use the
+    project's own ``rig_T_sensor`` naming everywhere else.
+
+    Pass it as a flat 16-float list in row-major 4×4 order, the
+    natural shape coming out of YAML.
     """
-    if t_bs_flat is None or len(t_bs_flat) != 16:
+    if rig_T_imu is None or len(rig_T_imu) != 16:
         return
-    m = np.asarray(t_bs_flat, dtype=np.float64).reshape(4, 4)
+    m = np.asarray(rig_T_imu, dtype=np.float64).reshape(4, 4)
     rr.log(
         f"/world/rig_0/imu_{imu_idx}",
         rr.Transform3D(translation=m[:3, 3].tolist(), mat3x3=m[:3, :3].tolist()),
@@ -107,13 +112,14 @@ def write_calibration_layer(
                 )
 
             # IMU extrinsic. ``imu_params`` is the first IMU's full field bag
-            # from calibration.yaml; we only need ``T_BS`` to place the IMU
-            # in the rig frame. Sequences whose IMU is the rig reference
-            # (EUROC-style) have ``T_BS = identity`` already.
+            # from calibration.yaml. We pull ``T_BS`` (the YAML's own field
+            # name, body-from-sensor) and log it as ``rig_0_T_imu_0`` —
+            # the project-internal name for the same transform. Sequences
+            # whose IMU is the rig reference (EUROC-style) ship identity.
             if calibration.imu_params is not None and sequence.has_imu(0):
-                t_bs = calibration.imu_params.get("T_BS")
-                if isinstance(t_bs, list):
-                    _log_imu_extrinsic_static(imu_idx=0, t_bs_flat=t_bs, recording=rec)
+                rig_T_imu = calibration.imu_params.get("T_BS")
+                if isinstance(rig_T_imu, list):
+                    _log_imu_extrinsic_static(imu_idx=0, rig_T_imu=rig_T_imu, recording=rec)
 
         # Cross-cutting `info` properties — visible at the segment level
         # via segment_table() as ``property:info:<key>``.
@@ -134,18 +140,22 @@ def write_calibration_layer(
 
         if calibration is not None and calibration.cameras:
             cam0 = calibration.cameras[0]
+            cam0_intr = cam0.parameters.intrinsics
+            cam0_distortion = (
+                type(cam0.parameters.distortion).__name__ if cam0.parameters.distortion is not None else ""
+            )
             rec.send_property(
                 "calibration",
                 rr.AnyValues(
                     num_cameras=len(calibration.cameras),
                     cam0_name=cam0.cam_name,
-                    cam0_width=cam0.width,
-                    cam0_height=cam0.height,
-                    cam0_fx=cam0.fx,
-                    cam0_fy=cam0.fy,
-                    cam0_cx=cam0.cx,
-                    cam0_cy=cam0.cy,
-                    cam0_distortion_type=cam0.distortion_type or "",
+                    cam0_width=int(cam0_intr.width),
+                    cam0_height=int(cam0_intr.height),
+                    cam0_fx=float(cam0_intr.fl_x or 0.0),
+                    cam0_fy=float(cam0_intr.fl_y or 0.0),
+                    cam0_cx=float(cam0_intr.cx or 0.0),
+                    cam0_cy=float(cam0_intr.cy or 0.0),
+                    cam0_distortion_type=cam0_distortion,
                     has_imu_params=calibration.imu_params is not None,
                     depth_factor=cam0.depth_factor if cam0.depth_factor is not None else -1.0,
                 ),
