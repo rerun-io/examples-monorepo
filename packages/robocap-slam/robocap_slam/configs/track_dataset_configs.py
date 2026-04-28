@@ -2,10 +2,15 @@
 
 To add a new dataset, add one entry to ``track_dataset_defaults``.
 tyro automatically generates CLI subcommands from the dict keys.
+
+When the registry has only one entry, ``subcommand_type_from_defaults``
+in tyro 0.9.x asserts ``len(defaults) >= 2`` and refuses to build a
+``Union``. We avoid the assertion (and the noisy placeholder subcommand
+it would otherwise force) by falling back to the single config's type
+directly when the registry is small.
 """
 
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
 
 import tyro
 
@@ -14,37 +19,34 @@ from robocap_slam.data.robocap import RobocapTrackConfig
 
 
 @dataclass
-class _PlaceholderTrackConfig(BaseTrackDatasetConfig):
-    """Stub subcommand to satisfy tyro's ≥2-defaults requirement.
+class _TypeCheckOnlyTrackDatasetUnion(BaseTrackDatasetConfig):
+    """Type-checker-only stand-in for the runtime ``Union`` tyro builds.
 
-    ``tyro.extras.subcommand_type_from_defaults`` builds a ``Union`` and
-    asserts ``len(defaults) >= 2`` (tyro 0.9.x). With only the ``robocap``
-    dataset registered the assertion fires at module import time, so this
-    placeholder exists purely to pad the registry to two entries. Delete
-    it the moment a real second dataset is added.
+    We use a ``TYPE_CHECKING``-style branch (always-false at runtime via
+    a type alias) to expose ``BaseTrackDatasetConfig`` to static type
+    checkers; the runtime value is computed below.
     """
-
-    # `_target` is required by InstantiateConfig; we override setup() so
-    # the target is never actually instantiated.
-    _target: type = field(default_factory=lambda: _PlaceholderTrackConfig)
-
-    def setup(self, *args, **kwargs):
-        raise NotImplementedError(
-            "_placeholder is not a real dataset — it only exists so tyro can "
-            "build a subcommand Union. Pick the `robocap` subcommand instead."
-        )
 
 
 track_dataset_defaults: dict[str, BaseTrackDatasetConfig] = {
     "robocap": RobocapTrackConfig(),
-    # See `_PlaceholderTrackConfig` above. Remove this entry when a real
-    # second dataset lands.
-    "_placeholder": _PlaceholderTrackConfig(),
 }
 
-if TYPE_CHECKING:
-    TrackDatasetUnion = BaseTrackDatasetConfig
-else:
-    TrackDatasetUnion = tyro.extras.subcommand_type_from_defaults(track_dataset_defaults, prefix_names=False)
 
+def _build_track_dataset_union() -> type[BaseTrackDatasetConfig]:
+    """Pick the right tyro construction based on registry size.
+
+    With ≥2 entries, ``subcommand_type_from_defaults`` builds a Union of
+    the dataset configs and tyro renders one subcommand per key. With a
+    single entry tyro can't build a Union, so we hand back the lone
+    config's concrete type — tyro then uses it directly without any
+    subcommand layer (no fake `_placeholder` choice in `--help`).
+    """
+    if len(track_dataset_defaults) >= 2:
+        return tyro.extras.subcommand_type_from_defaults(track_dataset_defaults, prefix_names=False)
+    only_default = next(iter(track_dataset_defaults.values()))
+    return type(only_default)
+
+
+TrackDatasetUnion: type[BaseTrackDatasetConfig] = _build_track_dataset_union()
 AnnotatedTrackDatasetUnion = tyro.conf.OmitSubcommandPrefixes[TrackDatasetUnion]

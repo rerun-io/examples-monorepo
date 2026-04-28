@@ -184,7 +184,16 @@ def parse_groundtruth(path: Path) -> GroundTruth:
 
 
 def parse_imu(path: Path) -> ImuSamples:
+    """Parse ``imu_0.csv``. Empty body (header-only) returns zero-length
+    correctly-shaped arrays — same defensive shape contract as
+    :func:`parse_groundtruth`."""
     rows: list[_ImuRow] = [from_dict(_ImuRow, r) for r in _read_dict_rows(path)]
+    if not rows:
+        return ImuSamples(
+            ts_ns=np.zeros((0,), dtype=np.int64),
+            gyro_rads=np.zeros((0, 3), dtype=np.float64),
+            accel_ms2=np.zeros((0, 3), dtype=np.float64),
+        )
     n = len(rows)
     return ImuSamples(
         ts_ns=np.fromiter((r.ts_ns for r in rows), dtype=np.int64, count=n),

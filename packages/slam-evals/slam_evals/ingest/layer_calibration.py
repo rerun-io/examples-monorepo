@@ -6,7 +6,10 @@ What this layer contributes to the composed segment:
 - static ``Pinhole``/``PinholeWithDistortion`` at ``/world/rig_0/cam_<i>/pinhole``
 - static ``Transform3D`` (``rig_0_T_imu_<i>``) at ``/world/rig_0/imu_<i>`` when
   ``calibration.yaml`` declares an IMU with a ``T_BS``
-- static world view convention (``RDF``) at ``/``
+
+(World-frame ``ViewCoordinates`` is logged separately by
+``layer_view_coordinates.py`` — see that module for the per-dataset
+convention registry.)
 
 Recording properties on this layer:
 

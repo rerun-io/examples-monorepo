@@ -16,8 +16,11 @@ entity downstream):
 
 from __future__ import annotations
 
+import csv
 from collections.abc import Iterable
 from pathlib import Path
+
+from serde import SerdeError
 
 from slam_evals.data.parse import parse_rgb_csv
 from slam_evals.data.types import Modality, Sequence
@@ -26,7 +29,7 @@ from slam_evals.data.types import Modality, Sequence
 def _classify(rgb_csv: Path, has_rgb_1_dir: bool, has_depth_0_dir: bool, has_imu: bool) -> Modality | None:
     try:
         parsed = parse_rgb_csv(rgb_csv)
-    except (ValueError, KeyError, OSError):
+    except (ValueError, KeyError, OSError, SerdeError, csv.Error):
         return None
 
     has_rgb_1 = has_rgb_1_dir and parsed.path_rgb_1 is not None

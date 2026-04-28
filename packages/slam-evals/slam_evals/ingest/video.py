@@ -63,16 +63,24 @@ def _iter_rgb_frames_threaded(
     worker finishes first. ``cv2.imread`` releases the GIL during libpng
     decode, so 2–4 worker threads recover most of the I/O gap on top of a
     GPU encoder.
+
+    Workers honour a shared ``cancel`` event so an exception or generator
+    teardown stops them promptly; the ``finally`` block always joins
+    threads (drained or not) so file handles and decoded buffers don't
+    outlive the call.
     """
     n = len(image_paths)
     if n == 0:
         return
     n_workers = max(1, min(n_workers, n))
     q: queue.Queue[tuple[int, np.ndarray] | BaseException] = queue.Queue(maxsize=queue_size)
+    cancel = threading.Event()
 
     def worker(start: int) -> None:
         try:
             for i in range(start, n, n_workers):
+                if cancel.is_set():
+                    return
                 q.put((i, _decode_one(image_paths[i])))
         except BaseException as exc:  # noqa: BLE001 -- propagate to consumer
             q.put(exc)
@@ -84,22 +92,33 @@ def _iter_rgb_frames_threaded(
     pending: dict[int, np.ndarray] = {}
     next_idx = 0
     seen = 0
-    while seen < n:
-        item = q.get()
-        if isinstance(item, BaseException):
-            raise item
-        idx, rgb = item
-        seen += 1
-        if idx == next_idx:
-            yield rgb
-            next_idx += 1
-            while next_idx in pending:
-                yield pending.pop(next_idx)
+    try:
+        while seen < n:
+            item = q.get()
+            if isinstance(item, BaseException):
+                raise item
+            idx, rgb = item
+            seen += 1
+            if idx == next_idx:
+                yield rgb
                 next_idx += 1
-        else:
-            pending[idx] = rgb
-    for t in threads:
-        t.join()
+                while next_idx in pending:
+                    yield pending.pop(next_idx)
+                    next_idx += 1
+            else:
+                pending[idx] = rgb
+    finally:
+        cancel.set()
+        # Drain anything the workers already enqueued so they can return
+        # past their bounded ``q.put`` calls and exit; we don't need the
+        # values on the abort path.
+        while True:
+            try:
+                q.get_nowait()
+            except queue.Empty:
+                break
+        for t in threads:
+            t.join()
 
 
 def _probe_dimensions(first_path: Path) -> tuple[int, int]:
@@ -128,7 +147,7 @@ def encode_and_log_video(
     timeline: str = "video_time",
     fps_hint: float | None = None,
 ) -> tuple[int, int, int]:
-    """Encode ``image_paths`` with H.264 and log as a ``rr.VideoStream``.
+    """Encode ``image_paths`` with HEVC (NVENC) and log as a ``rr.VideoStream``.
 
     Returns ``(width, height, num_frames_emitted)``. ``num_frames_emitted`` may
     be smaller than ``len(image_paths)`` if the encoder drops duplicate frames;
@@ -144,7 +163,8 @@ def encode_and_log_video(
     enc_w = width - (width % 2)
     enc_h = height - (height % 2)
 
-    # H.264 wants an integer framerate; derive from source deltas when possible.
+    # HEVC (and the underlying av container) wants an integer framerate;
+    # derive it from source deltas when ``rgb.csv`` doesn't supply one.
     if fps_hint is None or fps_hint <= 0:
         if len(timestamps_ns) > 1:
             dt_ns = np.median(np.diff(timestamps_ns))

@@ -13,7 +13,6 @@ from numpy import ndarray
 
 from slam_evals.data.parse import GroundTruth, ImuSamples
 
-
 _IDENTITY_QUATERNION_XYZW: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
 
 

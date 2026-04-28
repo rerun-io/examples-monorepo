@@ -21,7 +21,9 @@ Two entry points share the same per-layer-group registration helper:
 
 from __future__ import annotations
 
+import atexit
 import tempfile
+import weakref
 from collections import defaultdict
 from pathlib import Path
 
@@ -163,7 +165,16 @@ def mount_catalog(
         # scheme — passing a bare ``str(rbl_path)`` raises
         # ``ValueError: Could not parse URL: relative URL without a base``.
         # ``Path.as_uri()`` gives the right ``file://…`` form.
-        rbl_path = Path(tempfile.mkdtemp(prefix=f"{dataset_name}-")) / f"{dataset_name}.rbl"
+        #
+        # We use ``TemporaryDirectory`` (kept alive for the server's lifetime
+        # via ``weakref.finalize``) plus an ``atexit`` belt-and-suspenders
+        # so the rbl tempdir is removed when the server is GCed *or* when
+        # the process exits. Using ``mkdtemp`` directly leaked one
+        # directory per mount.
+        tmp_dir = tempfile.TemporaryDirectory(prefix=f"{dataset_name}-")
+        weakref.finalize(server, tmp_dir.cleanup)
+        atexit.register(tmp_dir.cleanup)
+        rbl_path = Path(tmp_dir.name) / f"{dataset_name}.rbl"
         blueprint.save(application_id, path=str(rbl_path))
         dataset.register_blueprint(rbl_path.resolve().as_uri(), set_default=True)
 

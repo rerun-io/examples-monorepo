@@ -42,6 +42,7 @@ The catalog stores each sequence as **one segment with multiple layers**, where 
 data/slam-evals/rrd/EUROC/MH_01_easy/
 ├── calibration.rrd       # layer="calibration"
 ├── groundtruth.rrd       # layer="groundtruth"
+├── view_coordinates.rrd  # layer="view_coordinates" (per-dataset world axes)
 ├── rgb_0.rrd             # layer="rgb_0"
 ├── rgb_1.rrd             # layer="rgb_1"   (stereo only)
 ├── depth_0.rrd           # layer="depth_0" (rgbd only)
@@ -51,17 +52,20 @@ data/slam-evals/rrd/EUROC/MH_01_easy/
 
 All layer files for a given sequence share `recording_id = f"{dataset}__{sequence}"` and `application_id = "slam-evals"`. The catalog uses these to know they belong to the same segment.
 
-Layer count by modality:
+Layer count by modality (counts include `view_coordinates.rrd` when the
+dataset has a `DatasetSpec` registered in `slam_evals.data.datasets`;
+sequences in unregistered datasets ship without that layer and the
+viewer falls back to its default world frame):
 
-| Modality       | Layers                                                         | Count |
-|----------------|----------------------------------------------------------------|-------|
-| mono           | calibration, groundtruth, rgb_0                                | 3     |
-| mono-vi        | + imu_0                                                        | 4     |
-| stereo         | + rgb_1                                                        | 4     |
-| stereo-vi      | + rgb_1, imu_0                                                 | 5     |
-| rgbd           | + depth_0                                                      | 4     |
-| rgbd-vi        | + depth_0, imu_0                                               | 5     |
-| stereo-rgbd-vi | calibration, groundtruth, rgb_0, rgb_1, depth_0, depth_1, imu_0 | 7    |
+| Modality       | Layers (with view_coordinates)                                                     | Count |
+|----------------|------------------------------------------------------------------------------------|-------|
+| mono           | calibration, groundtruth, view_coordinates, rgb_0                                  | 4     |
+| mono-vi        | + imu_0                                                                            | 5     |
+| stereo         | + rgb_1                                                                            | 5     |
+| stereo-vi      | + rgb_1, imu_0                                                                     | 6     |
+| rgbd           | + depth_0                                                                          | 5     |
+| rgbd-vi        | + depth_0, imu_0                                                                   | 6     |
+| stereo-rgbd-vi | calibration, groundtruth, view_coordinates, rgb_0, rgb_1, depth_0, depth_1, imu_0  | 8     |
 
 ## How the catalog works (mental model)
 
@@ -129,10 +133,11 @@ After the catalog stitches the layers together, a stereo-rgbd-vi segment looks l
 
 ## Layer-by-layer entity paths and properties
 
-| Layer file        | Layer name    | Entity paths logged                                                                              | Layer-level recording properties                                                                                       |
-|-------------------|---------------|---------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------|
-| `calibration.rrd` | `calibration` | static `Transform3D` at `/world/rig_0/cam_<i>` and `/world/rig_0/imu_<i>` (each `rig_0_T_sensor`); static `Pinhole/PinholeWithDistortion` at `/world/rig_0/cam_<i>/pinhole` | `info.{modality, dataset, sequence, slug, has_calibration}`; `calibration.{num_cameras, cam0_*, depth_factor, has_imu_params}` |
-| `groundtruth.rrd` | `groundtruth` | time-varying `Transform3D` (`world_T_rig_0`) at `/world/rig_0` over `video_time`                  | `groundtruth.{num_poses, trajectory_len_m, duration_s}`                                                                |
+| Layer file              | Layer name          | Entity paths logged                                                                              | Layer-level recording properties                                                                                       |
+|-------------------------|---------------------|---------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------|
+| `calibration.rrd`       | `calibration`       | static `Transform3D` at `/world/rig_0/cam_<i>` and `/world/rig_0/imu_<i>` (each `rig_0_T_sensor`); static `Pinhole/PinholeWithDistortion` at `/world/rig_0/cam_<i>/pinhole` | `info.{modality, dataset, sequence, slug, has_calibration}`; `calibration.{num_cameras, cam0_*, depth_factor, has_imu_params}` |
+| `groundtruth.rrd`       | `groundtruth`       | time-varying `Transform3D` (`world_T_rig_0`) at `/world/rig_0` over `video_time`; static `LineStrips3D` GT path at `/world/rig_0_path`; static start/end `Points3D` markers at `/world/rig_0_path/endpoints` | `groundtruth.{num_poses, trajectory_len_m, duration_s, has_rotation}` |
+| `view_coordinates.rrd`  | `view_coordinates`  | static `ViewCoordinates` at `/world` (per-dataset axis convention from `slam_evals.data.datasets`) | none                                                                                                                   |
 | `rgb_0.rrd`       | `rgb_0`       | static `VideoStream(codec=H265)` at `/world/rig_0/cam_0/pinhole/video`; per-packet logs over `video_time` | `rgb_0.{codec, fps, num_frames, width, height}`                                                                        |
 | `rgb_1.rrd`       | `rgb_1`       | same shape at `/world/rig_0/cam_1/pinhole/video`                                                  | `rgb_1.{codec, fps, num_frames, width, height}`                                                                        |
 | `depth_0.rrd`     | `depth_0`     | per-frame `EncodedDepthImage` (PNG passthrough) at `/world/rig_0/cam_0/pinhole/depth` over `video_time` | `depth_0.{depth_factor, num_frames, width, height}`                                                                    |
