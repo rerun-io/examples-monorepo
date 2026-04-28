@@ -109,7 +109,6 @@ The entity tree follows COLMAP's rig/sensor model (https://colmap.github.io/conc
 - **Sensors are peer children of the rig**, each carrying a static `Transform3D` for `rig_<i>_T_sensor` (a.k.a. T_BS in VSLAM-LAB terms). Cameras and IMU sit at the same level — IMU is **not** nested under a camera.
 - **Reference sensor** (per COLMAP, "the sensor that defines the rig origin") has `rig_T_sensor = identity`. For EUROC-style data this is the IMU; for KITTI-style it's typically `cam_0`. We log everyone's `T_BS` verbatim from `calibration.yaml` regardless.
 - **Sensor-specific data** (image stream, depth stream, gyro/accel scalars) hangs off the sensor entity.
-- A **frame** in COLMAP is a synchronized measurement set at a timestamp. In Rerun this is implicit via the shared `video_time` timeline; partial frames (some sensor missing a sample at time *t*) are handled by per-entity chunking.
 
 Composition along the entity path: `world_T_cam_0 = world_T_rig_0 @ rig_0_T_cam_0` — Rerun does this automatically when rendering.
 
