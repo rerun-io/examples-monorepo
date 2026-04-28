@@ -93,13 +93,14 @@ def write_depth_layer(
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     depth_factor = _depth_factor_for_cam(calibration, cam_idx)
-    # VSLAM-LAB's ``depth_factor`` is the divisor that maps native uint16
-    # depth values to metres (``metres = pixel / depth_factor``). Rerun's
-    # ``EncodedDepthImage(meter=...)`` is the *multiplier* in the opposite
-    # direction (``metres = pixel * meter``), so the right value to pass
-    # is ``1 / depth_factor`` — passing ``depth_factor`` directly scales
-    # the rendered depth by ``depth_factor**2``.
-    meter: float | None = (1.0 / depth_factor) if depth_factor is not None and depth_factor > 0 else None
+    # VSLAM-LAB's ``depth_factor`` and rerun's ``meter`` describe the same
+    # quantity from opposite directions of the same equation. VSLAM-LAB:
+    # ``metres = pixel / depth_factor`` (depth_factor = native units per
+    # metre). Rerun's DepthImage docstring: "specifies how long a meter is
+    # in the native depth units. For instance: with uint16, perhaps
+    # meter=1000 which would mean you have millimeter precision."
+    # So ``meter == depth_factor`` and we pass it through directly.
+    meter: float | None = depth_factor
 
     rec = rr.RecordingStream(
         application_id=application_id,
