@@ -73,14 +73,14 @@ def _register_layer_groups(
 ) -> None:
     """Register ``layer_files`` against ``dataset``, batched per layer name.
 
-    Per advice from rerun engineers: the server has a fast path when
-    ``register`` is called with a single ``layer_name`` and many URIs —
-    it processes the URIs as one bulk operation instead of one (uri,
-    layer_name) pair at a time. Group files by their filename stem
-    (which is also their layer name) and issue one register call per
-    group; for ~500 files this drops the round-trip overhead from ~10 s
-    to under 1 s. Server-side .rrd parsing dominates the rest, and
-    grouping doesn't speed that up.
+    The server has a fast path when ``register`` is called with a
+    single ``layer_name`` and many URIs — it processes the URIs as one
+    bulk operation instead of one (uri, layer_name) pair at a time.
+    Group files by their filename stem (which is also their layer
+    name) and issue one register call per group; for ~500 files this
+    drops the round-trip overhead from ~10 s to under 1 s. Server-side
+    .rrd parsing dominates the rest, and grouping doesn't speed that
+    up.
     """
     layers_by_stem: dict[str, list[Path]] = defaultdict(list)
     for f in layer_files:

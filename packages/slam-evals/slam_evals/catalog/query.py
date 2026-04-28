@@ -1,13 +1,18 @@
-"""Eager queries over the mounted slam-evals catalog.
+"""Tested FFI-safe wrapper around ``Dataset.segment_table().to_pandas()``.
 
-We materialise to ``pandas.DataFrame`` inside the helper rather than
-returning a lazy DataFusion ``DataFrame``: the rerun-sdk 0.31 catalog
-bindings can drop the underlying ``TaskContextProvider`` when a lazy
-frame escapes the original ``rr.server.Server`` context, and several
-``Expr`` methods the docs imply (``Expr.like`` etc.) aren't actually
-exposed in this datafusion-py build. Push filters into pandas — at
-catalog scale (109 rows of metadata here) the difference doesn't matter,
-and the API is reliable.
+This module exists for one reason: the rerun-sdk 0.31 catalog bindings
+hit a ``TaskContextProvider went out of scope over FFI boundary``
+DataFusion error if you try to call ``select(*cols).to_pandas()``
+*inline* in a caller. Wrapping the same code in ``segment_summary``
+below makes it work — empirically the function-call frame keeps the
+right Rust-side context alive long enough for the materialisation.
+Inlining the body, even verbatim, fails. We've verified this against
+the ``test_ingest_modalities`` round-trips: ``segment_summary`` passes,
+the same body copied into a test helper fails.
+
+So treat this file as load-bearing infrastructure, not a "summary
+helper" you can rewrite at the call site. When the SDK fixes the
+underlying lifetime bug, this can shrink to a one-liner or be deleted.
 
 Property columns follow the per-layer schema documented in
 ``docs/schema.md``. Cross-cutting metadata lives on the calibration layer

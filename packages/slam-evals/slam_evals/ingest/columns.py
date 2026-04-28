@@ -44,9 +44,9 @@ def log_groundtruth_columns(
     anchor = int(t0_ns) if t0_ns is not None else int(gt.ts_ns[0])
     t_rel_s: Float64[ndarray, "n"] = (gt.ts_ns - anchor).astype(np.float64) * 1e-9
 
-    translation = gt.translation.astype(np.float64)
-    quaternion = gt.quaternion_xyzw.astype(np.float64).copy()
-    norms = np.linalg.norm(quaternion, axis=1)
+    translation: Float64[ndarray, "n 3"] = gt.translation.astype(np.float64)
+    quaternion: Float64[ndarray, "n 4"] = gt.quaternion_xyzw.astype(np.float64).copy()
+    norms: Float64[ndarray, "n"] = np.linalg.norm(quaternion, axis=1)
     bad = np.abs(norms - 1.0) > 1e-3
     if bad.any():
         quaternion[bad] = _IDENTITY_QUATERNION_XYZW
@@ -59,9 +59,9 @@ def log_groundtruth_columns(
     # so latest-at lookups see a valid pose for the entire visible
     # timeline. No-op when GT already covers t=0 (negative first offset).
     if t_rel_s[0] > 0:
-        t_rel_s = np.concatenate([[0.0], t_rel_s])
-        translation = np.concatenate([translation[:1], translation], axis=0)
-        quaternion = np.concatenate([quaternion[:1], quaternion], axis=0)
+        t_rel_s: Float64[ndarray, "n_aug"] = np.concatenate([[0.0], t_rel_s])  # type: ignore[no-redef]
+        translation: Float64[ndarray, "n_aug 3"] = np.concatenate([translation[:1], translation], axis=0)  # type: ignore[no-redef]
+        quaternion: Float64[ndarray, "n_aug 4"] = np.concatenate([quaternion[:1], quaternion], axis=0)  # type: ignore[no-redef]
 
     rr.send_columns(
         entity_path,

@@ -19,7 +19,6 @@ from typing import Literal, get_args
 
 from slam_evals.data.parse import GroundTruth, ImuSamples, parse_calibration, parse_groundtruth, parse_imu, parse_rgb_csv
 from slam_evals.data.types import Sequence
-from slam_evals.ingest.compact import compact_rrd
 from slam_evals.ingest.layer_calibration import write_calibration_layer
 from slam_evals.ingest.layer_depth import write_depth_layer
 from slam_evals.ingest.layer_groundtruth import write_groundtruth_layer
@@ -189,14 +188,6 @@ def ingest_sequence(
 
     for name, fn in todo:
         if name in selected:
-            path = fn()
-            # Compact each layer file in place after the writer's
-            # ``rec.save(...)`` returns. The catalog's mount-time parse
-            # cost scales with chunk count, and a freshly-written .rrd
-            # carries one chunk per send_columns / log call. Compacting
-            # merges them so subsequent reads are faster — see
-            # ``slam_evals.ingest.compact``.
-            compact_rrd(path)
-            written.append(path)
+            written.append(fn())
 
     return tuple(written)
