@@ -2,9 +2,9 @@
 """Ingest sequences from a VSLAM-LAB benchmark root into per-stream layer RRD files.
 
 Each sequence becomes a directory ``<out>/<dataset>/<seq>/`` with one ``.rrd``
-file per source data stream (calibration, groundtruth, rgb_<i>, depth_<i>,
-imu_<i>). Layer files share the sequence's ``recording_id`` so the catalog
-composes them into a single segment.
+file per source data stream (calibration, groundtruth, view_coordinates,
+video_<i>, depth_<i>, imu_<i>). Layer files share the sequence's
+``recording_id`` so the catalog composes them into a single segment.
 
 NVENC has a small per-process session limit; with ``--workers > 1`` the GPU
 encoder occasionally rejects ``avcodec_open2(hevc_nvenc)`` with
@@ -58,7 +58,7 @@ class IngestConfig:
     """Restrict to specific modalities."""
 
     layers: tuple[LayerName, ...] = ()
-    """Restrict to specific layer names (e.g. ``rgb_0`` to only re-encode camera 0). Default: all applicable to each sequence."""
+    """Restrict to specific layer names (e.g. ``video_0`` to only re-encode camera 0). Default: all applicable to each sequence."""
 
     force: bool = False
     """Re-ingest layer files that already exist."""
