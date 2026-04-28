@@ -161,7 +161,7 @@ Filter at the pandas layer: `df.query("`property:info:modality`.str.startswith('
 
 - `rig_<i>` zero-indexed. Anticipates multi-rig setups (exoego, multi-agent). VSLAM-LAB has a single rig per sequence today (`rig_0`).
 - `cam_<i>`, `depth_<i>`, `imu_<i>` per source stream (entity-tree level). Index matches VSLAM-LAB's source file naming (`rgb_0`, `imu_0`, …). Layer files on the catalog side are payload-typed instead — `video_<i>.rrd` carries the image stream that hangs off `cam_<i>` (so the layer name doesn't pretend grayscale data is RGB; see `slam_evals/ingest/layer_video.py`).
-- Semantic role (ego / exo / fixed / etc.) lives as a property on `calibration.rrd`, **not** in the entity path.
+- Semantic role (ego / exo / fixed / etc.) is **deferred** — VSLAM-LAB sequences are uniformly single-rig single-perspective, so we don't need to commit to "role lives at path `/world/<role>/rig_<i>/...`" vs "role is a queryable property" vs anything else until we actually ingest a dataset that has heterogeneous roles. Both placements have real downsides (path encoding bakes role into every per-stream layer file; property placement hides role from blueprints) and the right answer depends on what the role is *used for* in the eventual dataset. Decide when we have data, not before.
 - Contrast with simplecv's `exoego_schema.md`: that schema is optimised for many-cameras-as-many-rigs (each camera under `/world/exo` or `/world/ego` is essentially its own one-sensor rig). slam-evals is the inverse — one rig with many tightly-calibrated sensors moving together.
 
 ## GT vs predictions (forward-looking; not implemented in this slice)
