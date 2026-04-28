@@ -87,6 +87,8 @@ dataset.register([uri], layer_name="rgb_0").wait()
 ```
 Files sharing a `recording_id` collapse into one segment automatically.
 
+> **Why one `vslam` dataset and not per-source-benchmark datasets** (`euroc`, `kitti`, …): the source benchmark is already a column (`property:info:dataset`) so per-dataset filtering is one expression, and cross-benchmark analytics — the killer feature once baselines + ATE land — stays a single `segment_table()` call instead of an N-way join across catalog datasets. Splitting is a mechanical refactor (loop over dataset names at mount, one extra path level on disk) we can do the day per-dataset blueprints become a real need.
+
 **3. Query** aggregates properties across all layers in the segment:
 ```python
 df = dataset.segment_table().to_pandas()
