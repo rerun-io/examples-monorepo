@@ -109,8 +109,8 @@ underlying CLIs (so they work from any directory and honour `--datasets /
 
 ```bash
 # Re-emit + push only one layer for one segment
-pixi -q run -e slam-evals --frozen slam-evals-ingest  --only EUROC/MH_01_easy --layers rgb_0 --force
-pixi -q run -e slam-evals --frozen slam-evals-refresh --only EUROC/MH_01_easy --layers rgb_0
+pixi -q run -e slam-evals --frozen slam-evals-ingest  --only EUROC/MH_01_easy --layers video_0 --force
+pixi -q run -e slam-evals --frozen slam-evals-refresh --only EUROC/MH_01_easy --layers video_0
 
 # Re-emit + push view_coordinates for every sequence (after adding a DatasetSpec)
 pixi -q run -e slam-evals --frozen slam-evals-ingest  --layers view_coordinates --force
@@ -118,7 +118,7 @@ pixi -q run -e slam-evals --frozen slam-evals-refresh --layers view_coordinates
 ```
 
 Available layer names: `calibration`, `groundtruth`, `view_coordinates`,
-`rgb_0`, `rgb_1`, `depth_0`, `depth_1`, `imu_0` (only the ones applicable to a
+`video_0`, `video_1`, `depth_0`, `depth_1`, `imu_0` (only the ones applicable to a
 sequence's modality are emitted).
 
 Restart the catalog only when you change `tools/catalog.py` itself, the

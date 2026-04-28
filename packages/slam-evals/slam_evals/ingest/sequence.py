@@ -23,7 +23,7 @@ from slam_evals.ingest.layer_calibration import write_calibration_layer
 from slam_evals.ingest.layer_depth import write_depth_layer
 from slam_evals.ingest.layer_groundtruth import write_groundtruth_layer
 from slam_evals.ingest.layer_imu import write_imu_layer
-from slam_evals.ingest.layer_rgb import write_rgb_layer
+from slam_evals.ingest.layer_video import write_video_layer
 from slam_evals.ingest.layer_view_coordinates import write_view_coordinates_layer
 
 # Layer names follow source-stream names (matches docs/schema.md). Order
@@ -36,8 +36,8 @@ LayerName = Literal[
     "calibration",
     "groundtruth",
     "view_coordinates",
-    "rgb_0",
-    "rgb_1",
+    "video_0",
+    "video_1",
     "depth_0",
     "depth_1",
     "imu_0",
@@ -54,12 +54,12 @@ def applicable_layers(sequence: Sequence) -> tuple[str, ...]:
     ``view_coordinates`` is gated on the dataset having a published
     convention — see ``slam_evals.data.datasets``.
     """
-    layers: list[str] = ["calibration", "groundtruth", "rgb_0"]
+    layers: list[str] = ["calibration", "groundtruth", "video_0"]
     spec = sequence.dataset_spec
     if spec is not None and spec.world_view_coordinates is not None:
         layers.append("view_coordinates")
     if sequence.has_camera(1):
-        layers.append("rgb_1")
+        layers.append("video_1")
     if sequence.has_depth(0):
         layers.append("depth_0")
     if sequence.has_depth(1):
@@ -88,7 +88,7 @@ def ingest_sequence(
     layers:
         Optional subset of layer names to (re-)emit. Defaults to all
         applicable layers for the sequence's modality. Use this for
-        selective re-ingestion (e.g. ``{"rgb_0"}`` to only re-encode
+        selective re-ingestion (e.g. ``{"video_0"}`` to only re-encode
         camera 0 video after an NVENC flake).
     application_id:
         Application id stamped onto every layer's RecordingStream — must
@@ -107,8 +107,10 @@ def ingest_sequence(
         return ()
 
     # Parse only what's needed for the selected layers. rgb.csv carries
-    # timestamps + paths for rgb_<i> and depth_<i>, so it's needed by
-    # most layers; the t0 epoch comes from rgb.csv too.
+    # timestamps + paths for video_<i> and depth_<i> (the source dir
+    # naming is upstream VSLAM-LAB's ``rgb_<i>``; the layer name on our
+    # side is ``video_<i>``), so it's needed by most layers; the t0
+    # epoch comes from rgb.csv too.
     rgb_csv = parse_rgb_csv(sequence.root / "rgb.csv")
     t0_ns = int(rgb_csv.ts_rgb_0_ns[0])
 
@@ -141,18 +143,18 @@ def ingest_sequence(
             out_path=seq_dir / "view_coordinates.rrd",
             application_id=application_id,
         )),
-        ("rgb_0", lambda: write_rgb_layer(
+        ("video_0", lambda: write_video_layer(
             sequence,
             cam_idx=0,
             rgb_csv=rgb_csv,
-            out_path=seq_dir / "rgb_0.rrd",
+            out_path=seq_dir / "video_0.rrd",
             application_id=application_id,
         )),
-        ("rgb_1", lambda: write_rgb_layer(
+        ("video_1", lambda: write_video_layer(
             sequence,
             cam_idx=1,
             rgb_csv=rgb_csv,
-            out_path=seq_dir / "rgb_1.rrd",
+            out_path=seq_dir / "video_1.rrd",
             application_id=application_id,
         )),
         ("depth_0", lambda: write_depth_layer(

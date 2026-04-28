@@ -43,8 +43,8 @@ data/slam-evals/rrd/EUROC/MH_01_easy/
 ├── calibration.rrd       # layer="calibration"
 ├── groundtruth.rrd       # layer="groundtruth"
 ├── view_coordinates.rrd  # layer="view_coordinates" (per-dataset world axes)
-├── rgb_0.rrd             # layer="rgb_0"
-├── rgb_1.rrd             # layer="rgb_1"   (stereo only)
+├── video_0.rrd           # layer="video_0"
+├── video_1.rrd           # layer="video_1" (stereo only)
 ├── depth_0.rrd           # layer="depth_0" (rgbd only)
 ├── depth_1.rrd           # layer="depth_1" (stereo-rgbd only)
 └── imu_0.rrd             # layer="imu_0"   (-vi only)
@@ -57,15 +57,15 @@ dataset has a `DatasetSpec` registered in `slam_evals.data.datasets`;
 sequences in unregistered datasets ship without that layer and the
 viewer falls back to its default world frame):
 
-| Modality       | Layers (with view_coordinates)                                                     | Count |
-|----------------|------------------------------------------------------------------------------------|-------|
-| mono           | calibration, groundtruth, view_coordinates, rgb_0                                  | 4     |
-| mono-vi        | + imu_0                                                                            | 5     |
-| stereo         | + rgb_1                                                                            | 5     |
-| stereo-vi      | + rgb_1, imu_0                                                                     | 6     |
-| rgbd           | + depth_0                                                                          | 5     |
-| rgbd-vi        | + depth_0, imu_0                                                                   | 6     |
-| stereo-rgbd-vi | calibration, groundtruth, view_coordinates, rgb_0, rgb_1, depth_0, depth_1, imu_0  | 8     |
+| Modality       | Layers (with view_coordinates)                                                          | Count |
+|----------------|-----------------------------------------------------------------------------------------|-------|
+| mono           | calibration, groundtruth, view_coordinates, video_0                                     | 4     |
+| mono-vi        | + imu_0                                                                                 | 5     |
+| stereo         | + video_1                                                                               | 5     |
+| stereo-vi      | + video_1, imu_0                                                                        | 6     |
+| rgbd           | + depth_0                                                                               | 5     |
+| rgbd-vi        | + depth_0, imu_0                                                                        | 6     |
+| stereo-rgbd-vi | calibration, groundtruth, view_coordinates, video_0, video_1, depth_0, depth_1, imu_0   | 8     |
 
 ## How the catalog works (mental model)
 
@@ -74,16 +74,16 @@ The catalog is **an index over `.rrd` files**, not a separate store. Three steps
 **1. Ingest** writes recording properties INTO each `.rrd` via `send_property()`:
 ```python
 rec = rr.RecordingStream(application_id="slam-evals", recording_id=rec_id, send_properties=True)
-rec.send_property("rgb_0", rr.AnyValues(codec="hevc", fps=30.0, num_frames=487, width=640, height=480))
+rec.send_property("video_0", rr.AnyValues(codec="hevc", fps=30.0, num_frames=487, width=640, height=480))
 # … log video stream chunks at /world/rig_0/cam_0/pinhole/video …
-rec.save("rgb_0.rrd")
+rec.save("video_0.rrd")
 ```
 
 **2. Catalog mount** registers each layer file under the right layer name:
 ```python
 server = rr.server.Server(datasets={"vslam": []})
 dataset = server.client().get_dataset("vslam")
-dataset.register([uri], layer_name="rgb_0").wait()
+dataset.register([uri], layer_name="video_0").wait()
 ```
 Files sharing a `recording_id` collapse into one segment automatically.
 
@@ -92,7 +92,7 @@ Files sharing a `recording_id` collapse into one segment automatically.
 **3. Query** aggregates properties across all layers in the segment:
 ```python
 df = dataset.segment_table().to_pandas()
-# columns include property:info:modality, property:rgb_0:codec,
+# columns include property:info:modality, property:video_0:codec,
 # property:depth_0:depth_factor, property:imu_0:rate_hz, …
 ```
 
@@ -122,11 +122,11 @@ After the catalog stitches the layers together, a stereo-rgbd-vi segment looks l
   rig_0/                                 # world_T_rig_0 over time = GT (groundtruth.rrd)
     cam_0/                               # rig_0_T_cam_0 (static, calibration.rrd)
       pinhole/                           # Pinhole + distortion (static, calibration.rrd)
-        video                            # HEVC VideoStream (rgb_0.rrd)
+        video                            # HEVC VideoStream (video_0.rrd)
         depth                            # EncodedDepthImage stream (depth_0.rrd)
     cam_1/                               # rig_0_T_cam_1 (static, calibration.rrd)
       pinhole/
-        video                            # HEVC VideoStream (rgb_1.rrd)
+        video                            # HEVC VideoStream (video_1.rrd)
         depth                            # EncodedDepthImage stream (depth_1.rrd)
     imu_0/                               # rig_0_T_imu_0 (static, calibration.rrd)
       gyro                               # 3-component Scalars (imu_0.rrd)
@@ -140,8 +140,8 @@ After the catalog stitches the layers together, a stereo-rgbd-vi segment looks l
 | `calibration.rrd`       | `calibration`       | static `Transform3D` at `/world/rig_0/cam_<i>` and `/world/rig_0/imu_<i>` (each `rig_0_T_sensor`); static `Pinhole/PinholeWithDistortion` at `/world/rig_0/cam_<i>/pinhole` | `info.{modality, dataset, sequence, slug, has_calibration}`; `calibration.{num_cameras, cam0_*, depth_factor, has_imu_params}` |
 | `groundtruth.rrd`       | `groundtruth`       | time-varying `Transform3D` (`world_T_rig_0`) at `/world/rig_0` over `video_time`; static `LineStrips3D` GT path at `/world/rig_0_path`; static start/end `Points3D` markers at `/world/rig_0_path/endpoints` | `groundtruth.{num_poses, trajectory_len_m, duration_s, has_rotation}` |
 | `view_coordinates.rrd`  | `view_coordinates`  | static `ViewCoordinates` at `/world` (per-dataset axis convention from `slam_evals.data.datasets`) | none                                                                                                                   |
-| `rgb_0.rrd`       | `rgb_0`       | static `VideoStream(codec=H265)` at `/world/rig_0/cam_0/pinhole/video`; per-packet logs over `video_time` | `rgb_0.{codec, fps, num_frames, width, height}`                                                                        |
-| `rgb_1.rrd`       | `rgb_1`       | same shape at `/world/rig_0/cam_1/pinhole/video`                                                  | `rgb_1.{codec, fps, num_frames, width, height}`                                                                        |
+| `video_0.rrd`           | `video_0`           | static `VideoStream(codec=H265)` at `/world/rig_0/cam_0/pinhole/video`; per-packet logs over `video_time` | `video_0.{codec, fps, num_frames, width, height}` |
+| `video_1.rrd`           | `video_1`           | same shape at `/world/rig_0/cam_1/pinhole/video`                                                  | `video_1.{codec, fps, num_frames, width, height}` |
 | `depth_0.rrd`     | `depth_0`     | per-frame `EncodedDepthImage` (PNG passthrough) at `/world/rig_0/cam_0/pinhole/depth` over `video_time` | `depth_0.{depth_factor, num_frames, width, height}`                                                                    |
 | `depth_1.rrd`     | `depth_1`     | same at `/world/rig_0/cam_1/pinhole/depth`                                                        | `depth_1.{depth_factor, num_frames, width, height}`                                                                    |
 | `imu_0.rrd`       | `imu_0`       | 3-component `Scalars` at `/world/rig_0/imu_0/gyro` and `/world/rig_0/imu_0/accel` over `video_time` | `imu_0.{num_samples, rate_hz}` (+ noise terms when present in calibration.yaml)                                        |
@@ -149,10 +149,10 @@ After the catalog stitches the layers together, a stereo-rgbd-vi segment looks l
 ### Worked `segment_table()` example
 
 ```
-rerun_segment_id          rerun_layer_names                                  property:info:modality   property:info:slug          property:rgb_0:codec   property:rgb_0:fps   property:depth_0:depth_factor   property:imu_0:rate_hz
-EUROC__MH_01_easy         [calibration, groundtruth, rgb_0, rgb_1, imu_0]    stereo-vi                EUROC/MH_01_easy            hevc                   20.0                 NULL                            200.0
-ETH__cables_1             [calibration, groundtruth, rgb_0, depth_0]         rgbd                     ETH/cables_1                hevc                   30.0                 5000.0                          NULL
-TUM_RGBD__freiburg1_xyz   [calibration, groundtruth, rgb_0, depth_0]         rgbd                     TUM_RGBD/freiburg1_xyz      hevc                   30.0                 5000.0                          NULL
+rerun_segment_id          rerun_layer_names                                      property:info:modality   property:info:slug          property:video_0:codec   property:video_0:fps   property:depth_0:depth_factor   property:imu_0:rate_hz
+EUROC__MH_01_easy         [calibration, groundtruth, video_0, video_1, imu_0]    stereo-vi                EUROC/MH_01_easy            hevc                     20.0                   NULL                            200.0
+ETH__cables_1             [calibration, groundtruth, video_0, depth_0]           rgbd                     ETH/cables_1                hevc                     30.0                   5000.0                          NULL
+TUM_RGBD__freiburg1_xyz   [calibration, groundtruth, video_0, depth_0]           rgbd                     TUM_RGBD/freiburg1_xyz      hevc                     30.0                   5000.0                          NULL
 ```
 
 Filter at the pandas layer: `df.query("`property:info:modality`.str.startswith('stereo')")`.
@@ -160,7 +160,7 @@ Filter at the pandas layer: `df.query("`property:info:modality`.str.startswith('
 ## Naming conventions
 
 - `rig_<i>` zero-indexed. Anticipates multi-rig setups (exoego, multi-agent). VSLAM-LAB has a single rig per sequence today (`rig_0`).
-- `cam_<i>`, `depth_<i>`, `imu_<i>` per source stream. Index matches VSLAM-LAB's source file naming (`rgb_0`, `imu_0`, …).
+- `cam_<i>`, `depth_<i>`, `imu_<i>` per source stream (entity-tree level). Index matches VSLAM-LAB's source file naming (`rgb_0`, `imu_0`, …). Layer files on the catalog side are payload-typed instead — `video_<i>.rrd` carries the image stream that hangs off `cam_<i>` (so the layer name doesn't pretend grayscale data is RGB; see `slam_evals/ingest/layer_video.py`).
 - Semantic role (ego / exo / fixed / etc.) lives as a property on `calibration.rrd`, **not** in the entity path.
 - Contrast with simplecv's `exoego_schema.md`: that schema is optimised for many-cameras-as-many-rigs (each camera under `/world/exo` or `/world/ego` is essentially its own one-sensor rig). slam-evals is the inverse — one rig with many tightly-calibrated sensors moving together.
 

@@ -1,4 +1,4 @@
-"""Write a ``rgb_<i>`` layer — one per camera with image data.
+"""Write a ``video_<i>`` layer — one per camera with image data.
 
 What this layer contributes to the composed segment:
 
@@ -8,9 +8,16 @@ What this layer contributes to the composed segment:
 
 Recording properties on this layer:
 
-- ``rgb_<i>`` — codec, fps, num_frames, encoded width/height. Source
+- ``video_<i>`` — codec, fps, num_frames, encoded width/height. Source
   resolution is centre-cropped 1px on odd-dimensioned axes (HEVC requires
   even dims for ``yuv420p``).
+
+The ``video_<i>`` name is intentionally payload-typed (parallel to
+``depth_<i>``, ``imu_<i>``) rather than mirroring VSLAM-LAB's source
+folder name ``rgb_<i>/``. Most VSLAM-LAB sequences are grayscale (EUROC,
+KITTI, MSD) — calling the layer "rgb" would be a misleading source-tree
+leak. The source-side ``rgb.csv`` and ``rgb_<i>/`` references are
+untouched; only our layer name + property bag are payload-typed.
 
 Encoding details (NVENC HEVC at PSNR-balanced cq=32) are inherited from
 ``slam_evals.ingest.video.encode_and_log_video`` — the layer writer is just
@@ -50,7 +57,7 @@ def _fps_from_timestamps(ts_ns: Int64[ndarray, "n"]) -> float | None:
     return 1e9 / dt_ns
 
 
-def write_rgb_layer(
+def write_video_layer(
     sequence: Sequence,
     *,
     cam_idx: int,
@@ -58,7 +65,7 @@ def write_rgb_layer(
     out_path: Path,
     application_id: str = "slam-evals",
 ) -> Path:
-    """Write ``rgb_<cam_idx>.rrd`` for ``sequence``. Returns the output path.
+    """Write ``video_<cam_idx>.rrd`` for ``sequence``. Returns the output path.
 
     Raises ``ValueError`` if ``cam_idx`` doesn't have a corresponding stream
     in ``rgb.csv`` — caller should gate via ``sequence.has_camera(cam_idx)``.
@@ -87,7 +94,7 @@ def write_rgb_layer(
         )
 
         rec.send_property(
-            f"rgb_{cam_idx}",
+            f"video_{cam_idx}",
             rr.AnyValues(
                 codec="hevc",
                 fps=float(fps) if fps is not None else -1.0,

@@ -59,11 +59,11 @@ def test_ingest_modality_roundtrip(tmp_path: Path, fixture_factory, modality: Mo
     assert bool(row["property:info:has_stereo"][0]) == modality.has_stereo
 
     # Per-layer counts now live on their own layer's property bag.
-    assert row["property:rgb_0:num_frames"][0] == fx.n_frames
+    assert row["property:video_0:num_frames"][0] == fx.n_frames
     assert row["property:groundtruth:num_poses"][0] == fx.n_frames
 
     if modality.has_stereo:
-        assert row["property:rgb_1:num_frames"][0] == fx.n_frames
+        assert row["property:video_1:num_frames"][0] == fx.n_frames
     if modality.has_depth:
         assert row["property:depth_0:num_frames"][0] == fx.n_frames
     if modality.has_imu:
@@ -89,16 +89,16 @@ def test_ingest_handles_empty_groundtruth(tmp_path: Path, fixture_factory) -> No
 
 
 def test_layers_subset_is_idempotent(tmp_path: Path, fixture_factory) -> None:
-    """Re-emitting only ``rgb_0`` should leave other layer mtimes untouched."""
+    """Re-emitting only ``video_0`` should leave other layer mtimes untouched."""
     fx = fixture_factory(Modality.STEREO_VI)
     rrd_dir = tmp_path / "rrd"
     ingest_sequence(fx.sequence, rrd_dir)
 
     seq_dir = rrd_dir / fx.sequence.dataset / fx.sequence.name
-    other_layers = {p.stem: p.stat().st_mtime_ns for p in seq_dir.glob("*.rrd") if p.stem != "rgb_0"}
+    other_layers = {p.stem: p.stat().st_mtime_ns for p in seq_dir.glob("*.rrd") if p.stem != "video_0"}
 
-    written = ingest_sequence(fx.sequence, rrd_dir, layers={"rgb_0"})
-    assert {p.stem for p in written} == {"rgb_0"}
+    written = ingest_sequence(fx.sequence, rrd_dir, layers={"video_0"})
+    assert {p.stem for p in written} == {"video_0"}
 
     for stem, mtime in other_layers.items():
         new_mtime = (seq_dir / f"{stem}.rrd").stat().st_mtime_ns
