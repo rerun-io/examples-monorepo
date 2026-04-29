@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from slam_evals.catalog import mount_catalog, segment_summary
+from slam_evals.catalog import mount_catalog
 from slam_evals.data.types import Modality
 from slam_evals.ingest import applicable_layers, ingest_sequence
 
@@ -27,7 +27,7 @@ _ALL_MODALITIES: list[Modality] = [
 
 
 @pytest.mark.parametrize("modality", _ALL_MODALITIES, ids=lambda m: m.value)
-def test_ingest_modality_roundtrip(tmp_path: Path, fixture_factory, modality: Modality) -> None:
+def test_ingest_modality_roundtrip(tmp_path: Path, fixture_factory, segment_summary, modality: Modality) -> None:
     fx = fixture_factory(modality)
     rrd_dir = tmp_path / "rrd"
 
@@ -42,8 +42,8 @@ def test_ingest_modality_roundtrip(tmp_path: Path, fixture_factory, modality: Mo
     written_layers = {p.stem for p in seq_dir.glob("*.rrd")}
     assert written_layers == set(expected_layers), f"on-disk layers {written_layers} != expected {set(expected_layers)}"
 
-    with mount_catalog(rrd_dir, dataset_name="vslam") as server:
-        pdf = segment_summary(server, dataset_name="vslam")
+    with mount_catalog(rrd_dir) as server:
+        pdf = segment_summary(server, source=fx.sequence.dataset)
 
     assert len(pdf) == 1, f"expected exactly one segment, got {len(pdf)}"
     row = pdf.iloc[0]
@@ -70,7 +70,7 @@ def test_ingest_modality_roundtrip(tmp_path: Path, fixture_factory, modality: Mo
         assert row["property:imu_0:num_samples"][0] == fx.n_frames * 10
 
 
-def test_ingest_handles_empty_groundtruth(tmp_path: Path, fixture_factory) -> None:
+def test_ingest_handles_empty_groundtruth(tmp_path: Path, fixture_factory, segment_summary) -> None:
     fx = fixture_factory(Modality.MONO)
 
     # Truncate groundtruth.csv to just the header — mirrors HAMLYN / HILTI2026
@@ -83,8 +83,8 @@ def test_ingest_handles_empty_groundtruth(tmp_path: Path, fixture_factory) -> No
     written = ingest_sequence(fx.sequence, rrd_dir)
     assert len(written) > 0
 
-    with mount_catalog(rrd_dir, dataset_name="vslam") as server:
-        pdf = segment_summary(server, dataset_name="vslam")
+    with mount_catalog(rrd_dir) as server:
+        pdf = segment_summary(server, source=fx.sequence.dataset)
     assert pdf.iloc[0]["property:groundtruth:num_poses"][0] == 0
 
 

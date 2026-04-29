@@ -33,10 +33,7 @@ from slam_evals.ingest import LayerName
 @dataclass
 class CatalogConfig:
     rrd_dir: Path = field(default_factory=lambda: Path("data/slam-evals/rrd"))
-    """Directory containing ``*.rrd`` files (recursively scanned)."""
-
-    dataset_name: str = "vslam"
-    """Name of the catalog dataset to register the RRDs under."""
+    """Directory containing ``*.rrd`` files (recursively scanned). One catalog Dataset is created per first-level subdir, named after the lowercased dir (``EUROC`` → ``euroc``)."""
 
     port: int = 9987
     """gRPC port for the catalog server. Pick something different from the running viewer's port (default 9876)."""
@@ -57,7 +54,7 @@ class CatalogConfig:
     """URL of the running catalog server. Only used in --refresh mode. Defaults match the mount-mode ``--port`` so a refresh against a default-mounted catalog is a no-arg invocation."""
 
     datasets: tuple[str, ...] = ()
-    """Refresh-mode filter: restrict to specific dataset directories (e.g. ``EUROC KITTI``). Empty = all."""
+    """Refresh-mode filter: restrict to specific source directories (e.g. ``EUROC KITTI``). Each maps to its lowercased catalog Dataset. Empty = all."""
 
     layers: tuple[LayerName, ...] = ()
     """Refresh-mode filter: restrict to specific layer names (e.g. ``view_coordinates groundtruth``). Empty = all."""
@@ -70,7 +67,6 @@ def _run_refresh(cfg: CatalogConfig) -> None:
     n = refresh_catalog(
         cfg.rrd_dir,
         catalog_url=cfg.catalog_url,
-        dataset_name=cfg.dataset_name,
         datasets=cfg.datasets,
         layers=cfg.layers,
         only=cfg.only,
@@ -83,12 +79,11 @@ def _run_refresh(cfg: CatalogConfig) -> None:
 def _run_mount(cfg: CatalogConfig) -> None:
     with mount_catalog(
         cfg.rrd_dir,
-        dataset_name=cfg.dataset_name,
         port=cfg.port,
         blueprint=build_blueprint(),
     ) as server:
         url = server.url()
-        print(f"Mounted catalog '{cfg.dataset_name}' from {cfg.rrd_dir.resolve()}")
+        print(f"Mounted catalog from {cfg.rrd_dir.resolve()}")
         print()
         print("─" * 72)
         print(f"  Catalog URL:  {url}")
@@ -98,7 +93,7 @@ def _run_mount(cfg: CatalogConfig) -> None:
         print()
         print("  To push edits without restart, in another terminal:")
         print("    pixi run -e slam-evals slam-evals-catalog --refresh \\")
-        print("        --datasets <NAME> --layers <stem>")
+        print("        --datasets <SRC> --layers <stem>")
         print("─" * 72)
 
         if cfg.open_browser:

@@ -165,46 +165,49 @@ Two issues are handled inside `log_groundtruth_columns`:
 
 ## 5. Stage 4 — Catalog mount (`slam_evals.catalog.mount`)
 
-### Everything funnels into one dataset
+### One Dataset per source benchmark
 
 ```python
-server = rr.server.Server(datasets={"vslam": []}, port=9987)
-dataset = server.client().get_dataset("vslam")
+sources = sorted({f.parent.parent.name for f in rrd_dir.rglob("*.rrd")})
+server = rr.server.Server(datasets={s.lower(): [] for s in sources}, port=9987)
+for src in sources:
+    ds = server.client().get_dataset(src.lower())
+    # … register that source's layer files …
 ```
 
-A single catalog dataset called `vslam` holds all 109 segments. The source benchmark name (EUROC, KITTI, …) is a queryable property column (`property:info:dataset`), not a separate catalog dataset — see the rationale in [`schema.md`](schema.md).
+The catalog exposes one Rerun Dataset per source benchmark — the lowercased first-level dir name (`euroc`, `kitti`, `7scenes`, …). Each Dataset holds only that source's segments. This matches Rerun's idiomatic shape: a Dataset is "a collection of recorded runs of a given task" with semantically related episodes and a minimum of schema self-consistency. VSLAM-LAB benchmarks are different tasks with different rigs, world frames, and layer sets, so each gets its own Dataset. Cross-source aggregates are a documented client-side concat (see [`schema.md`](schema.md)).
 
 ### Layer-grouped registration
 
-Per advice from rerun engineers, the server has a fast path for `register(uris, layer_name=stem)` when many URIs share one layer name:
+The server has a fast path for `register(uris, layer_name=stem)` when many URIs share one layer name. We group per source:
 
 ```python
-layers_by_stem: dict[str, list[Path]] = group rrd files by filename stem
-for stem, files in layers_by_stem.items():        # 8 groups, not 510 files
+layers_by_stem: dict[str, list[Path]] = group THIS source's rrd files by filename stem
+for stem, files in layers_by_stem.items():        # ~8 groups per source
     uris = [f.resolve().as_uri() for f in files]
     dataset.register(uris, layer_name=stem).wait()
 ```
 
-8 `register` calls cover the whole 510-file corpus instead of 510 individual round-trips. Cold mount takes ~35 s — dominated by server-side `.rrd` parsing (especially the ~21 GB depth_0 layer), not client roundtrips.
+For the full corpus, that's roughly `8 register calls × N sources` instead of 510 individual round-trips. Cold mount takes ~35 s — dominated by server-side `.rrd` parsing (especially the ~21 GB depth_0 layer), not client roundtrips.
 
 ### Recording-id collapse
 
-All layer files for one sequence share the same `recording_id = "<DATASET>__<seq>"`. The catalog server stitches them into one **segment** at query/view time:
+All layer files for one sequence share the same `recording_id = "<DATASET>__<seq>"`. The catalog server stitches them into one **segment** within their source's Dataset at query/view time:
 
 ```
 EUROC/MH_01_easy/calibration.rrd        ─┐
 EUROC/MH_01_easy/groundtruth.rrd         │
-EUROC/MH_01_easy/view_coordinates.rrd    │   recording_id =
-EUROC/MH_01_easy/video_0.rrd             ├─  "EUROC__MH_01_easy"   ───►  ONE segment
-EUROC/MH_01_easy/video_1.rrd             │   (8 layers merged
+EUROC/MH_01_easy/view_coordinates.rrd    │   recording_id =          inside the
+EUROC/MH_01_easy/video_0.rrd             ├─  "EUROC__MH_01_easy"  ─►  `euroc` Dataset:
+EUROC/MH_01_easy/video_1.rrd             │   (8 layers merged           ONE segment
 EUROC/MH_01_easy/imu_0.rrd              ─┘    by the catalog)
 ```
 
-This is what makes selective re-emit cheap: editing one dataset spec → re-emit `view_coordinates` for that dataset → 8 small files change → push into running catalog → seconds.
+This is what makes selective re-emit cheap: editing one dataset spec → re-emit `view_coordinates` for that source → 8 small files change → push into running catalog → seconds.
 
 ### Blueprint
 
-`slam_evals.blueprint.build_blueprint()` returns an `rrb.Blueprint` describing the default 3D + per-camera 2D + IMU timeseries layout. Saved to a `TemporaryDirectory` (lifetime tied to the server via `weakref.finalize` + `atexit`) and registered at the dataset level so every segment picks it up automatically.
+`slam_evals.blueprint.build_blueprint()` returns an `rrb.Blueprint` describing the default 3D + per-camera 2D + IMU timeseries layout. The blueprint uses universal entity paths (`/world/rig_0/cam_<i>/pinhole`, `/world/rig_0/imu_0/{gyro,accel}`), so the same blueprint registers cleanly to every source's Dataset. Saved per-source to a `TemporaryDirectory` (lifetime tied to the server via `weakref.finalize` + `atexit`).
 
 ---
 
@@ -234,13 +237,30 @@ The mount and refresh paths share `_register_layer_groups` — same layer-groupe
 
 ---
 
-## 7. Stage 6 — Query (`slam_evals.catalog.query`)
+## 7. Stage 6 — Query
 
-`segment_summary(server)` materialises a `pandas.DataFrame` with one row per segment and one column per known property (`property:info:dataset`, `property:rgb_0:codec`, `property:groundtruth:trajectory_len_m`, …). Used by tests and ad-hoc scripts.
+Single-source query is the idiomatic Rerun pattern:
 
-This module exists to wrap a known SDK 0.31 FFI lifetime issue: calling `select(*cols).to_pandas()` *inline* in a caller raises `TaskContextProvider went out of scope`, but wrapping the same code in `segment_summary` works (the function call frame keeps the right Rust-side context alive long enough). Treat it as load-bearing infrastructure, not a stylistic helper — the docstring explains the empirical evidence.
+```python
+df = client.get_dataset("euroc").segment_table().to_pandas()
+# columns include rerun_segment_id, property:info:modality,
+# property:groundtruth:trajectory_len_m, property:video_0:codec, …
+```
 
-When the SDK fixes the underlying lifetime bug, this module can shrink to a one-liner or be deleted.
+Cross-source aggregates are an explicit client-side concat — the path Rerun's docs describe for cross-Dataset analytics:
+
+```python
+import pandas as pd
+sources = ("euroc", "kitti", "7scenes", "replica")
+all_segments = pd.concat(
+    [client.get_dataset(s).segment_table().to_pandas().assign(source=s) for s in sources],
+    ignore_index=True,
+)
+```
+
+There's no packaged "all-segments" helper — it's a one-liner above and stays clearer at the call site than abstracted away.
+
+The test suite uses a private `_segment_summary` helper in `tests/conftest.py` that wraps `select(*cols).to_pandas()` to side-step a known SDK 0.31 FFI lifetime issue: calling it inline raises `TaskContextProvider went out of scope`, but the function-call frame keeps the right Rust-side context alive. When the SDK fixes the underlying lifetime bug, the helper can shrink to a one-liner or move back inline.
 
 ---
 
@@ -281,14 +301,13 @@ packages/slam-evals/
 │   │   └── layer_*.py          # one writer per layer name (calibration, groundtruth,
 │   │                             view_coordinates, video, depth, imu)
 │   ├── catalog/
-│   │   ├── mount.py            # mount_catalog (server) + refresh_catalog (client)
-│   │   └── query.py            # segment_summary (FFI-safe materialisation)
+│   │   └── mount.py            # mount_catalog (server, one Dataset per source) + refresh_catalog (client)
 │   └── blueprint.py            # default 3D + 2D + timeseries view layout
 ├── tools/
 │   ├── ingest.py               # discover + write CLI (tyro)
 │   └── catalog.py              # mount or refresh CLI (tyro)
 └── tests/
-    ├── conftest.py             # fixture_factory + segment_table_df helper
+    ├── conftest.py             # fixture_factory + _segment_summary FFI-safe helper
     ├── test_import.py
     ├── test_datasets.py
     └── test_ingest_modalities.py

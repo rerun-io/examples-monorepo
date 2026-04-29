@@ -1,16 +1,25 @@
-"""Mount + refresh per-sequence layer ``.rrd`` directories as a Rerun catalog dataset.
+"""Mount + refresh per-sequence layer ``.rrd`` directories as Rerun catalog datasets.
 
-Each sequence on disk is laid out as one directory per ``<dataset>/<seq>/``
+Each sequence on disk is laid out as one directory per ``<DATASET>/<seq>/``
 containing 3-7 ``.rrd`` files (one per source data stream). All layer files
 share the sequence's ``recording_id``, so registering each one under its
 filename stem as ``layer_name`` collapses them into a single segment per
 sequence at query/view time. See ``docs/schema.md`` for the schema.
 
+The catalog exposes one Rerun ``Dataset`` per source benchmark — the
+lowercased first-level directory name (``euroc``, ``kitti``, ``7scenes``,
+…). This matches Rerun's idiomatic shape: a Dataset is "a collection of
+recorded runs of a given task", semantically related and schema-consistent.
+VSLAM-LAB benchmarks are different tasks with different sensor rigs, world
+frames, and layer sets, so each becomes its own Dataset. Cross-source
+analytics is a client-side concat across per-Dataset ``segment_table()``
+calls.
+
 Two entry points share the same per-layer-group registration helper:
 
-* ``mount_catalog`` starts a new in-process gRPC server, registers every
-  matching layer file, and returns the long-lived ``Server`` to the
-  caller. Used at startup.
+* ``mount_catalog`` starts a new in-process gRPC server, discovers source
+  directories under ``rrd_dir``, creates one catalog Dataset per source,
+  and registers each source's layer files into its Dataset.
 
 * ``refresh_catalog`` connects to an already-running catalog server via
   ``CatalogClient`` and re-registers a subset of files using
@@ -101,40 +110,53 @@ def _register_layer_groups(
         dataset.register(uris, layer_name=stem, on_duplicate=on_duplicate).wait()  # type: ignore[attr-defined]
 
 
+def _group_files_by_source(layer_files: list[Path]) -> dict[str, list[Path]]:
+    """Group ``<rrd_dir>/<DATASET>/<seq>/<layer>.rrd`` files by source dir name."""
+    groups: dict[str, list[Path]] = defaultdict(list)
+    for f in layer_files:
+        groups[f.parent.parent.name].append(f)
+    return dict(groups)
+
+
 def mount_catalog(
     rrd_dir: Path,
     *,
-    dataset_name: str = "vslam",
     port: int | None = None,
     blueprint: rrb.Blueprint | None = None,
     application_id: str = "slam-evals",
     show_progress: bool = True,
 ) -> rr.server.Server:
-    """Spin up a local catalog server, register every layer ``.rrd`` under ``rrd_dir``.
+    """Spin up a local catalog server with one Dataset per source benchmark.
+
+    Source benchmarks are discovered as the first-level subdirs of ``rrd_dir``
+    that contain ≥1 ``.rrd``. Each becomes a catalog Dataset named after the
+    lowercased dir name (``EUROC`` → ``euroc``). All sequences from that
+    source register into that Dataset; segment IDs stay
+    ``f"{DATASET}__{seq}"`` (e.g. ``EUROC__MH_01_easy``).
 
     Use as a context manager::
 
         with mount_catalog(Path("data/slam-evals/rrd"), port=9987,
                            blueprint=build_blueprint()) as server:
-            print(server.url())  # rerun+http://127.0.0.1:9987 — connect viewer here
-            ds = server.client().get_dataset("vslam")
+            print(server.url())  # rerun+http://127.0.0.1:9987
+            ds = server.client().get_dataset("euroc")
             df = ds.segment_table().to_pandas()
 
     Parameters
     ----------
     rrd_dir:
         Directory containing layer files at
-        ``<rrd_dir>/<dataset>/<seq>/<layer_name>.rrd``. Globbed recursively;
+        ``<rrd_dir>/<DATASET>/<seq>/<layer_name>.rrd``. Globbed recursively;
         each ``.rrd`` becomes a layer named after its filename stem.
-    dataset_name:
-        Logical name the catalog exposes the segments under.
     port:
         Pin a stable, viewer-connectable port; default picks a free random one.
     blueprint:
-        Optional default blueprint to register on the dataset. Saved once
-        to a ``.rbl`` tempfile and pointed at via
+        Optional default blueprint to register on every Dataset. Saved once
+        per Dataset to a ``.rbl`` tempfile and pointed at via
         ``DatasetEntry.register_blueprint``. The viewer picks this up for
-        every segment in the dataset.
+        every segment in the Dataset. The current blueprint is source-agnostic
+        (entity paths like ``/world/rig_0/cam_0/pinhole`` are universal), so
+        the same one applies cleanly across all sources.
     application_id:
         Application id stamped into the saved ``.rbl``. Must match the
         ``application_id`` used at ingest time (``"slam-evals"`` by default);
@@ -148,35 +170,43 @@ def mount_catalog(
     if not layer_files:
         raise FileNotFoundError(f"no RRDs found under {rrd_dir}")
 
-    print(f"Mounting catalog from {rrd_dir} ({len(layer_files)} layer files)…", flush=True)
-    server = rr.server.Server(datasets={dataset_name: []}, port=port)
-    dataset = server.client().get_dataset(dataset_name)
+    by_source = _group_files_by_source(layer_files)
+    sources = sorted(by_source)
 
-    _register_layer_groups(
-        dataset,
-        layer_files,
-        on_duplicate=OnDuplicateSegmentLayer.ERROR,
-        show_progress=show_progress,
+    print(
+        f"Mounting catalog from {rrd_dir} "
+        f"({len(layer_files)} layer files across {len(sources)} sources: {', '.join(s.lower() for s in sources)})…",
+        flush=True,
     )
+    server = rr.server.Server(datasets={src.lower(): [] for src in sources}, port=port)
+    client = server.client()
 
-    if blueprint is not None:
-        # ``register_blueprint`` is implemented internally as
-        # ``blueprint_dataset.register(uri, …)`` and needs a real URL with a
-        # scheme — passing a bare ``str(rbl_path)`` raises
-        # ``ValueError: Could not parse URL: relative URL without a base``.
-        # ``Path.as_uri()`` gives the right ``file://…`` form.
-        #
-        # We use ``TemporaryDirectory`` (kept alive for the server's lifetime
-        # via ``weakref.finalize``) plus an ``atexit`` belt-and-suspenders
-        # so the rbl tempdir is removed when the server is GCed *or* when
-        # the process exits. Using ``mkdtemp`` directly leaked one
-        # directory per mount.
-        tmp_dir = tempfile.TemporaryDirectory(prefix=f"{dataset_name}-")
-        weakref.finalize(server, tmp_dir.cleanup)
-        atexit.register(tmp_dir.cleanup)
-        rbl_path = Path(tmp_dir.name) / f"{dataset_name}.rbl"
-        blueprint.save(application_id, path=str(rbl_path))
-        dataset.register_blueprint(rbl_path.resolve().as_uri(), set_default=True)
+    for src in sources:
+        dataset = client.get_dataset(src.lower())
+        _register_layer_groups(
+            dataset,
+            by_source[src],
+            on_duplicate=OnDuplicateSegmentLayer.ERROR,
+            show_progress=show_progress,
+        )
+
+        if blueprint is not None:
+            # ``register_blueprint`` is implemented internally as
+            # ``blueprint_dataset.register(uri, …)`` and needs a real URL with
+            # a scheme — passing a bare ``str(rbl_path)`` raises
+            # ``ValueError: Could not parse URL: relative URL without a base``.
+            # ``Path.as_uri()`` gives the right ``file://…`` form.
+            #
+            # We use ``TemporaryDirectory`` (kept alive for the server's
+            # lifetime via ``weakref.finalize``) plus an ``atexit``
+            # belt-and-suspenders so the rbl tempdir is removed when the
+            # server is GCed *or* when the process exits.
+            tmp_dir = tempfile.TemporaryDirectory(prefix=f"{src.lower()}-")
+            weakref.finalize(server, tmp_dir.cleanup)
+            atexit.register(tmp_dir.cleanup)
+            rbl_path = Path(tmp_dir.name) / f"{src.lower()}.rbl"
+            blueprint.save(application_id, path=str(rbl_path))
+            dataset.register_blueprint(rbl_path.resolve().as_uri(), set_default=True)
 
     return server
 
@@ -185,7 +215,6 @@ def refresh_catalog(
     rrd_dir: Path,
     *,
     catalog_url: str,
-    dataset_name: str = "vslam",
     datasets: tuple[str, ...] = (),
     layers: tuple[str, ...] = (),
     only: tuple[str, ...] = (),
@@ -194,10 +223,11 @@ def refresh_catalog(
     """Push a subset of layer files into an already-running catalog server.
 
     Connects to ``catalog_url`` (typically ``rerun+http://127.0.0.1:9987``)
-    via ``CatalogClient`` and re-registers the matching layer files with
-    ``OnDuplicateSegmentLayer.REPLACE`` so existing entries are swapped
-    in-place. Use this to apply edits to the running catalog without
-    paying the ~30-40 s cold-mount cost.
+    via ``CatalogClient`` and re-registers the matching layer files into
+    each source's Dataset (one per first-level dir under ``rrd_dir``,
+    lowercased) with ``OnDuplicateSegmentLayer.REPLACE`` so existing
+    entries are swapped in-place. Use this to apply edits to the running
+    catalog without paying the ~30-40 s cold-mount cost.
 
     Parameters mirror ``tools/ingest.py``'s filter flags so the same
     invocation pattern works (``--datasets``, ``--layers``, ``--only``).
@@ -212,17 +242,20 @@ def refresh_catalog(
         print(f"No layer files matched filters under {rrd_dir}; nothing to refresh.")
         return 0
 
+    by_source = _group_files_by_source(layer_files)
     print(
-        f"Refreshing catalog at {catalog_url} ({len(layer_files)} layer files)…",
+        f"Refreshing catalog at {catalog_url} "
+        f"({len(layer_files)} layer files across {len(by_source)} sources: {', '.join(s.lower() for s in sorted(by_source))})…",
         flush=True,
     )
     client = CatalogClient(catalog_url)
-    dataset = client.get_dataset(dataset_name)
 
-    _register_layer_groups(
-        dataset,
-        layer_files,
-        on_duplicate=OnDuplicateSegmentLayer.REPLACE,
-        show_progress=show_progress,
-    )
+    for src in sorted(by_source):
+        dataset = client.get_dataset(src.lower())
+        _register_layer_groups(
+            dataset,
+            by_source[src],
+            on_duplicate=OnDuplicateSegmentLayer.REPLACE,
+            show_progress=show_progress,
+        )
     return len(layer_files)

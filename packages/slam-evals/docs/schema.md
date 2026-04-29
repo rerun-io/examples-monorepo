@@ -79,21 +79,33 @@ rec.send_property("video_0", rr.AnyValues(codec="hevc", fps=30.0, num_frames=487
 rec.save("video_0.rrd")
 ```
 
-**2. Catalog mount** registers each layer file under the right layer name:
+**2. Catalog mount** creates one Dataset per source benchmark (lowercased dir name) and registers each layer file under the right layer name:
 ```python
-server = rr.server.Server(datasets={"vslam": []})
-dataset = server.client().get_dataset("vslam")
-dataset.register([uri], layer_name="video_0").wait()
+sources = sorted({f.parent.parent.name for f in rrd_dir.rglob("*.rrd")})
+server = rr.server.Server(datasets={s.lower(): [] for s in sources})
+for src in sources:
+    ds = server.client().get_dataset(src.lower())
+    ds.register(uris_for(src), layer_name="video_0").wait()
 ```
-Files sharing a `recording_id` collapse into one segment automatically.
+Files sharing a `recording_id` collapse into one segment within their source's Dataset automatically.
 
-> **Why one `vslam` dataset and not per-source-benchmark datasets** (`euroc`, `kitti`, …): the source benchmark is already a column (`property:info:dataset`) so per-dataset filtering is one expression, and cross-benchmark analytics — the killer feature once baselines + ATE land — stays a single `segment_table()` call instead of an N-way join across catalog datasets. Splitting is a mechanical refactor (loop over dataset names at mount, one extra path level on disk) we can do the day per-dataset blueprints become a real need.
+> **Why per-source Datasets and not one unified `vslam` Dataset.** Rerun's catalog object model defines a Dataset as "a collection of recorded runs of *a given task*" with "semantically related" episodes and a "minimal level of schema self-consistency". VSLAM-LAB benchmarks are different tasks (drone-MAV vs car-driving vs handheld-RGBD), with different sensor rigs, world frames (FLU vs RDF vs RUB vs …), and layer sets (IMU/no-IMU, depth/no-depth, fisheye/pinhole). Mixing them in one Dataset would conflict with all three of those properties. Queries are also Dataset-scoped in Rerun's idiomatic API — `dataset.segment_table()` returns one Dataset's segments; cross-Dataset analytics is an explicit client-side concat (see step 3 below). The on-disk layout already encodes the source as a directory level, so this split is purely a mount-time loop.
 
-**3. Query** aggregates properties across all layers in the segment:
+**3. Query** is Dataset-scoped. Single-source query:
 ```python
-df = dataset.segment_table().to_pandas()
+df = client.get_dataset("euroc").segment_table().to_pandas()
 # columns include property:info:modality, property:video_0:codec,
 # property:depth_0:depth_factor, property:imu_0:rate_hz, …
+```
+
+Cross-source aggregate (the path Rerun's docs describe — client-side concat or `register_view` + SQL UNION):
+```python
+import pandas as pd
+sources = ("euroc", "kitti", "7scenes", "replica")
+all_segments = pd.concat(
+    [client.get_dataset(s).segment_table().to_pandas().assign(source=s) for s in sources],
+    ignore_index=True,
+)
 ```
 
 Two consequences:
