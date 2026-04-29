@@ -11511,7 +11511,7 @@ packages:
 - pypi: ./packages/slam-evals
   name: slam-evals
   version: 0.1.0
-  sha256: 93cf9831dc243c30db3423e5aa7145f0974fa286e7d874fc3548adbcc94ee91b
+  sha256: 39b95ff855babdc62636ac879c9a9507223537129f01f814528b7a3e6153a28a
   requires_dist:
   - pyyaml
   - pyarrow

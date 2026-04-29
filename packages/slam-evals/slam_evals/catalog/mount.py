@@ -79,6 +79,8 @@ def _register_layer_groups(
     *,
     on_duplicate: OnDuplicateSegmentLayer,
     show_progress: bool,
+    position: int = 0,
+    leave: bool = True,
 ) -> None:
     """Register ``layer_files`` against ``dataset``, batched per layer name.
 
@@ -90,6 +92,10 @@ def _register_layer_groups(
     drops the round-trip overhead from ~10 s to under 1 s. Server-side
     .rrd parsing dominates the rest, and grouping doesn't speed that
     up.
+
+    ``position`` and ``leave`` are forwarded to the inner tqdm so callers
+    can nest this bar under an outer "sources" bar (use ``position=1,
+    leave=False`` for the inner bar to redraw cleanly per source).
     """
     layers_by_stem: dict[str, list[Path]] = defaultdict(list)
     for f in layer_files:
@@ -100,6 +106,8 @@ def _register_layer_groups(
         desc="register",
         unit="layer-group",
         disable=not show_progress,
+        position=position,
+        leave=leave,
     )
     for stem, files in iterator:
         iterator.set_postfix_str(f"{stem} ({len(files)} files)")
@@ -181,13 +189,23 @@ def mount_catalog(
     server = rr.server.Server(datasets={src.lower(): [] for src in sources}, port=port)
     client = server.client()
 
-    for src in sources:
+    outer = tqdm(
+        sources,
+        desc="sources",
+        unit="source",
+        disable=not show_progress,
+        position=0,
+    )
+    for src in outer:
+        outer.set_postfix_str(src.lower())
         dataset = client.get_dataset(src.lower())
         _register_layer_groups(
             dataset,
             by_source[src],
             on_duplicate=OnDuplicateSegmentLayer.ERROR,
             show_progress=show_progress,
+            position=1,
+            leave=False,
         )
 
         if blueprint is not None:
@@ -250,12 +268,22 @@ def refresh_catalog(
     )
     client = CatalogClient(catalog_url)
 
-    for src in sorted(by_source):
+    outer = tqdm(
+        sorted(by_source),
+        desc="sources",
+        unit="source",
+        disable=not show_progress,
+        position=0,
+    )
+    for src in outer:
+        outer.set_postfix_str(src.lower())
         dataset = client.get_dataset(src.lower())
         _register_layer_groups(
             dataset,
             by_source[src],
             on_duplicate=OnDuplicateSegmentLayer.REPLACE,
             show_progress=show_progress,
+            position=1,
+            leave=False,
         )
     return len(layer_files)
