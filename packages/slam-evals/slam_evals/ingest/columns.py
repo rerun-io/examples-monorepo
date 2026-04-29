@@ -19,19 +19,19 @@ _IDENTITY_QUATERNION_XYZW: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1
 def log_groundtruth_columns(
     gt: GroundTruth,
     *,
-    entity_path: str = "/world/body",
+    entity_path: str = "/world/rig_0",
     timeline: str = "video_time",
     t0_ns: int | None = None,
     recording: rr.RecordingStream | None = None,
 ) -> None:
-    """Log GT as a time-varying ``Transform3D`` stream on the body entity.
+    """Log GT as a time-varying ``Transform3D`` stream on the rig entity.
 
     VSLAM-LAB's groundtruth gives ``(tx, ty, tz, qx, qy, qz, qw)`` as
-    ``world_T_body`` — the body's pose expressed in the world frame — which
+    ``world_T_rig_0`` — the rig's pose expressed in the world frame — which
     maps to a default (``from_parent=False``) ``rr.Transform3D`` at
-    ``/world/body``. Sensor entities under ``/world/body`` (``cam_0``,
-    ``cam_1``) keep their own static body-from-sensor extrinsics and ride
-    this trajectory automatically via the scene graph.
+    ``/world/rig_0``. Sensor entities under ``/world/rig_0`` (``cam_0``,
+    ``cam_1``, ``imu_0``) keep their own static rig-from-sensor extrinsics
+    and ride this trajectory automatically via the scene graph.
 
     Some datasets ship position-only GT padded with degenerate quaternions
     (e.g. ROVER-T265's ``0 0 0 0`` rows from GPS-RTK tracking with no
@@ -77,8 +77,8 @@ def log_groundtruth_columns(
 def log_imu_columns(
     imu: ImuSamples,
     *,
-    gyro_path: str = "/imu/gyro",
-    accel_path: str = "/imu/accel",
+    gyro_path: str = "/world/rig_0/imu_0/gyro",
+    accel_path: str = "/world/rig_0/imu_0/accel",
     timeline: str = "video_time",
     t0_ns: int | None = None,
     recording: rr.RecordingStream | None = None,
