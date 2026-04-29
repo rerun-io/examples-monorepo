@@ -1,5 +1,9 @@
 # slam-evals
 
+<p align="center">
+  <img src="media/slam-evals.gif" alt="example output" width="720" />
+</p>
+
 Ingest VSLAM-LAB benchmark sequences into a Rerun catalog and browse them in
 the viewer. Each sequence becomes one segment composed of multiple `.rrd`
 layer files (one per source data stream); the catalog stitches them together
