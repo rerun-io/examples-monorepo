@@ -13,6 +13,7 @@ project-includes = [
     "packages/gsplat-rust-renderer/gsplat_rust_renderer/**/*",
     "packages/mast3r-slam/mast3r_slam/**/*",
     "packages/dpvo/dpvo/**/*",
+    "packages/slam-evals/slam_evals/**/*",
 ]
 project-excludes = ["**/node_modules", "**/__pycache__", "**/*venv/**/*"]
 
@@ -34,6 +35,7 @@ search-path = [
     "packages/gsplat-rust-renderer",
     "packages/mast3r-slam",
     "packages/dpvo",
+    "packages/slam-evals",
 ]
 
 # Third-party packages — all *-dev env site-packages so pyrefly can resolve
@@ -59,6 +61,7 @@ site-package-path = [
     # add the subdirectory explicitly.
     ".pixi/envs/mast3r-slam-dev/lib/python3.11/site-packages/rerun_sdk",
     ".pixi/envs/dpvo-dev/lib/python3.11/site-packages",
+    ".pixi/envs/slam-evals-dev/lib/python3.10/site-packages",
 ]
 
 python-interpreter-path = ".pixi/envs/dev/bin/python"

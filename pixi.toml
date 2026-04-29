@@ -2,7 +2,14 @@
 authors = ["pablo vela <pablovela5620@gmail.com>"]
 channels = ["https://prefix.dev/ai-demos", "https://prefix.dev/conda-forge"]
 name = "examples-monorepo"
-platforms = ["linux-64", "linux-aarch64"]
+# Temporarily aarch64-only: the current dev host is linux-aarch64 and pixi's
+# uv build-dispatch cannot initialise for linux-64 when it needs to build
+# git-based PyPI deps (vggt / moge / gsplat / cuvslam) from an aarch64 host.
+# Restore to ["linux-64", "linux-aarch64"] once a linux-64 host is available
+# to regenerate the linux-64 lockfile entries; the feature-level
+# `platforms = ["linux-64"]` restrictions on the CUDA-only features are
+# already in place so that flip is a one-line change.
+platforms = ["linux-aarch64"]
 version = "0.1.0"
 requires-pixi = ">=0.40"
 preview = ["pixi-build"]
@@ -115,6 +122,9 @@ description = "Run package tests"
 # ═══════════════════════════════════════════════════════════════════════════
 # monoprior
 # ═══════════════════════════════════════════════════════════════════════════
+[feature.monoprior]
+platforms = ["linux-64"]
+
 [feature.monoprior.dependencies]
 python = "3.12.*"
 icecream = ">=2.1.3,<2.2"
@@ -253,6 +263,9 @@ cwd = "packages/monoprior"
 # ═══════════════════════════════════════════════════════════════════════════
 # prompt-da
 # ═══════════════════════════════════════════════════════════════════════════
+[feature.prompt-da]
+platforms = ["linux-64"]
+
 [feature.prompt-da.dependencies]
 python = "3.12.*"
 open3d = ">=0.19.0,<0.20"
@@ -324,6 +337,9 @@ description = "Run WiLoR inference on example video"
 # ═══════════════════════════════════════════════════════════════════════════
 # sam3d-body-rerun
 # ═══════════════════════════════════════════════════════════════════════════
+[feature.sam3d]
+platforms = ["linux-64"]
+
 [feature.sam3d.dependencies]
 python = "3.12.*"
 tomlkit = "==0.12.0"
@@ -395,6 +411,9 @@ description = "Multiview 3D body mesh fitting with per-camera estimation"
 # ═══════════════════════════════════════════════════════════════════════════
 # sam3-rerun
 # ═══════════════════════════════════════════════════════════════════════════
+[feature.sam3-rerun]
+platforms = ["linux-64"]
+
 [feature.sam3-rerun.dependencies]
 python = "3.12.*"
 
@@ -469,6 +488,9 @@ description = "Run multicamera visual SLAM on Robocap data"
 # ═══════════════════════════════════════════════════════════════════════════
 # pysfm
 # ═══════════════════════════════════════════════════════════════════════════
+[feature.pysfm]
+platforms = ["linux-64"]
+
 [feature.pysfm.dependencies]
 python = "3.12.*"
 pycolmap = "==4.0.2"
@@ -562,6 +584,9 @@ brush = "==0.3.0"
 # ═══════════════════════════════════════════════════════════════════════════
 # vistadream
 # ═══════════════════════════════════════════════════════════════════════════
+[feature.vistadream]
+platforms = ["linux-64"]
+
 [feature.vistadream.dependencies]
 python = "3.12.*"
 pytorch-gpu = ">=2.10.0"        # tightens shared cuda floor; needed by Flux/diffusers
@@ -1108,6 +1133,47 @@ depends-on = ["_build-dpvo-cuda-kernels", "_download-dpvo-model", "_download-dpv
 cwd = "packages/dpvo"
 description = "Launch DPVO Gradio web UI"
 
+# ─── slam-evals feature (VSLAM-LAB benchmark → Rerun catalog ingester) ──────
+# Ingestion depends only on rerun-sdk, av, numpy, pyyaml, pyarrow — all
+# cross-platform. Platform is pinned to linux-aarch64 for now because the
+# current dev host is aarch64 and pixi's uv build-dispatch can't initialise
+# for linux-64 cross-builds from this host (see sibling CUDA features for
+# the same pattern). Flip to ["linux-64", "linux-aarch64"] once a linux-64
+# host is available to regenerate the linux-64 lockfile entries. The
+# PyCuVSLAM baseline will come later as a separate CUDA-only feature.
+[feature.slam-evals]
+platforms = ["linux-aarch64"]
+
+[feature.slam-evals.dependencies]
+python = "3.10.*"
+pyyaml = "*"
+pyarrow = ">=20.0.0,<21"
+tqdm = "*"
+pandas = "*"
+
+[feature.slam-evals.pypi-dependencies]
+slam-evals = { path = "packages/slam-evals", editable = true }
+tyro = ">=0.9,<1"
+
+[feature.slam-evals.activation.env]
+PACKAGE_DIR = "packages/slam-evals"
+VSLAM_LAB_BENCHMARK = "/home/pablo/0Dev/work/VSLAM-LAB-Benchmark"
+
+[feature.slam-evals.tasks.slam-evals-ingest]
+cmd = "python tools/ingest.py --benchmark-root $VSLAM_LAB_BENCHMARK --out ../../data/slam-evals/rrd"
+cwd = "packages/slam-evals"
+description = "Discover + ingest every sequence under $VSLAM_LAB_BENCHMARK into per-layer RRDs"
+
+[feature.slam-evals.tasks.slam-evals-catalog]
+cmd = "python tools/catalog.py --rrd-dir ../../data/slam-evals/rrd"
+cwd = "packages/slam-evals"
+description = "Mount the RRD directory as a Rerun catalog and print the segment summary"
+
+[feature.slam-evals.tasks.slam-evals-refresh]
+cmd = "python tools/catalog.py --refresh --rrd-dir ../../data/slam-evals/rrd"
+cwd = "packages/slam-evals"
+description = "Push edited layer files into the running catalog (append --datasets / --layers / --only filters; defaults to all)"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1244,3 +1310,12 @@ dpvo-dev = { features = [
     "dpvo",
     "dev",
 ], solve-group = "dpvo", no-default-feature = true }
+slam-evals = { features = [
+    "common",
+    "slam-evals",
+], solve-group = "slam-evals", no-default-feature = true }
+slam-evals-dev = { features = [
+    "common",
+    "slam-evals",
+    "dev",
+], solve-group = "slam-evals", no-default-feature = true }

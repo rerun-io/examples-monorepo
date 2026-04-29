@@ -1,0 +1,158 @@
+"""Write the ``groundtruth`` layer — time-varying rig pose ``world_T_rig_0``.
+
+What this layer contributes to the composed segment:
+
+- time-varying ``Transform3D`` (``world_T_rig_0``) at ``/world/rig_0`` over
+  the ``video_time`` timeline. When ``groundtruth.csv`` is empty (HAMLYN /
+  HILTI2026 ship that way), we fall back to a static identity transform so
+  child sensor entities still resolve under a parent.
+- static ``LineStrips3D`` at ``/world/rig_0_path`` showing the full rig
+  trajectory in world frame (one line connecting every GT translation).
+  PyCuVSLAM-style: makes "where has the rig been?" obvious without scrubbing
+  the timeline. Logged at world level (sibling of ``/world/rig_0``) so the
+  rig's time-varying transform doesn't deform the line.
+
+Recording properties on this layer:
+
+- ``groundtruth`` — ``num_poses``, ``trajectory_len_m``, ``duration_s``,
+  ``has_rotation`` (false when source GT has all-identity quaternions —
+  e.g. VSLAM-LAB-Benchmark's EUROC has zero rotation variance, a known
+  upstream conversion bug).
+
+The ``video_time`` epoch (``t0_ns``) is anchored to the first RGB-0 frame
+timestamp so all per-frame timelines (GT, depth, IMU) share an origin with
+the rgb_0 video stream's PTS.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+import rerun as rr
+
+from slam_evals.data.parse import GroundTruth
+from slam_evals.data.types import Sequence
+from slam_evals.ingest.columns import log_groundtruth_columns, trajectory_length_m
+
+# Endpoints of the GT path's start→end colour gradient (RGBA, 0-255). Green
+# at frame 0, red at the final pose, so the trajectory's traversal direction
+# is obvious in the viewer without scrubbing the timeline. Predictions get
+# their own colours per algorithm later.
+_GT_PATH_START: tuple[int, int, int, int] = (40, 200, 80, 255)
+_GT_PATH_END: tuple[int, int, int, int] = (220, 60, 40, 255)
+
+
+def _gradient_colors(n_segments: int) -> np.ndarray:
+    """RGBA8 colours linearly interpolating ``_GT_PATH_START`` → ``_GT_PATH_END``."""
+    t = np.linspace(0.0, 1.0, n_segments)[:, None]
+    start = np.array(_GT_PATH_START, dtype=np.float64)
+    end = np.array(_GT_PATH_END, dtype=np.float64)
+    return ((1.0 - t) * start + t * end).astype(np.uint8)
+
+
+def _has_meaningful_rotation(quaternion_xyzw: np.ndarray, *, tol: float = 1e-6) -> bool:
+    """True iff GT quaternions actually vary across frames.
+
+    Sequences like VSLAM-LAB's EUROC have all-zero variance on the
+    quaternion columns (their conversion script dropped rotation data);
+    we surface that as ``property:groundtruth:has_rotation = False`` so
+    consumers can treat such GT as positional-only.
+    """
+    if quaternion_xyzw.shape[0] < 2:
+        return False
+    return bool(np.any(np.var(quaternion_xyzw, axis=0) > tol))
+
+
+def write_groundtruth_layer(
+    sequence: Sequence,
+    *,
+    groundtruth: GroundTruth,
+    t0_ns: int,
+    out_path: Path,
+    application_id: str = "slam-evals",
+) -> Path:
+    """Write ``groundtruth.rrd`` for ``sequence``. Returns the output path.
+
+    ``t0_ns`` is the timeline epoch (typically ``rgb.csv`` row 0); GT
+    timestamps are converted to seconds relative to it.
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    rec = rr.RecordingStream(
+        application_id=application_id,
+        recording_id=sequence.recording_id,
+        send_properties=True,
+    )
+    has_gt = groundtruth.ts_ns.shape[0] > 0
+
+    with rec:
+        if has_gt:
+            # Time-varying world_T_rig_0 at /world/rig_0.
+            log_groundtruth_columns(
+                groundtruth,
+                entity_path="/world/rig_0",
+                t0_ns=t0_ns,
+                recording=rec,
+            )
+            duration_s = float((int(groundtruth.ts_ns[-1]) - t0_ns) * 1e-9)
+
+            # PyCuVSLAM-style path visualisation. We split the trajectory
+            # into N-1 two-point strips so each segment can carry its own
+            # colour in a green→red gradient (start → end), making
+            # traversal direction obvious without scrubbing. Static — the
+            # path itself doesn't change as the timeline advances, only the
+            # live frustum (which sits on /world/rig_0).
+            translation = groundtruth.translation.astype(np.float64)
+            n_segments = translation.shape[0] - 1
+            segment_strips = [translation[i:i + 2] for i in range(n_segments)]
+            rr.log(
+                "/world/rig_0_path",
+                rr.LineStrips3D(
+                    segment_strips,
+                    colors=_gradient_colors(n_segments),
+                    radii=np.full(n_segments, 0.01, dtype=np.float32),
+                ),
+                static=True,
+                recording=rec,
+            )
+
+            # Endpoint markers reinforce the gradient direction at a glance —
+            # green dot + "start" label at frame 0, red dot + "end" label
+            # at the final pose. Slightly larger radius than the linestrip
+            # so they stay legible when zoomed out.
+            endpoints = np.stack([translation[0], translation[-1]])
+            rr.log(
+                "/world/rig_0_path/endpoints",
+                rr.Points3D(
+                    endpoints,
+                    colors=[_GT_PATH_START, _GT_PATH_END],
+                    radii=[0.05, 0.05],
+                    labels=["start", "end"],
+                ),
+                static=True,
+                recording=rec,
+            )
+        else:
+            # Empty GT — log a static identity so child sensor entities
+            # still have a parent pose to inherit.
+            rr.log(
+                "/world/rig_0",
+                rr.Transform3D(translation=[0.0, 0.0, 0.0]),
+                static=True,
+                recording=rec,
+            )
+            duration_s = 0.0
+
+        rec.send_property(
+            "groundtruth",
+            rr.AnyValues(
+                num_poses=int(groundtruth.ts_ns.shape[0]),
+                trajectory_len_m=float(trajectory_length_m(groundtruth.translation)) if has_gt else 0.0,
+                duration_s=duration_s,
+                has_rotation=_has_meaningful_rotation(groundtruth.quaternion_xyzw) if has_gt else False,
+            ),
+        )
+
+    rec.save(str(out_path))
+    return out_path
