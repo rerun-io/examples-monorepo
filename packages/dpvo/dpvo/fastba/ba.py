@@ -1,10 +1,6 @@
-"""Python wrapper for the CUDA bundle adjustment solver.
+"""Python wrapper for the configured bundle adjustment solver.
 
-The heavy lifting is performed by ``_cuda_ba.forward`` which runs
-Gauss-Newton iterations with a Schur complement to jointly optimize camera
-poses and 3-D patch depths.
-
-This module also re-exports two CUDA utility functions:
+This module also re-exports three backend utility functions:
 
 - ``neighbors`` -- find co-visible patch/frame neighbourhoods.
 - ``reproject`` -- project 3-D patches into specified target frames.
@@ -14,15 +10,42 @@ This module also re-exports two CUDA utility functions:
 from jaxtyping import Float, Int
 from torch import Tensor
 
-from dpvo import _cuda_ba
+import os
+from typing import Any
 
-neighbors = _cuda_ba.neighbors
+
+def _load_backend() -> Any:
+    """Load the configured fastba backend.
+
+    ``auto`` and ``mojo`` use the standalone Mojo package. CUDA is only used
+    when ``DPVO_FASTBA_BACKEND=cuda`` is set explicitly.
+    """
+    backend = os.environ.get("DPVO_FASTBA_BACKEND", "auto").lower()
+    if backend not in {"auto", "mojo", "cuda"}:
+        raise ValueError(
+            "DPVO_FASTBA_BACKEND must be one of 'auto', 'mojo', or 'cuda', "
+            f"got {backend!r}"
+        )
+
+    if backend in {"auto", "mojo"}:
+        from dpvo_fastba_mojo import backend as mojo_ba
+
+        return mojo_ba
+
+    from dpvo import _cuda_ba
+
+    return _cuda_ba
+
+
+_ba_backend = _load_backend()
+
+neighbors = _ba_backend.neighbors
 """Query the co-visibility neighbourhood of patches across frames."""
 
-reproject = _cuda_ba.reproject
+reproject = _ba_backend.reproject
 """Reproject 3-D patches into target camera frames using current poses."""
 
-solve_system = _cuda_ba.solve_system
+solve_system = _ba_backend.solve_system
 """Sparse Jacobian-based solve for pose-graph optimization (loop closure PGO)."""
 
 
@@ -68,4 +91,4 @@ def BA(
             global BA with many patches.  If ``False``, use the dense
             E matrix path for sliding-window BA.
     """
-    _cuda_ba.forward(poses.data, patches, intrinsics, target, weight, lmbda, ii, jj, kk, M, t0, t1, iterations, eff_impl)
+    _ba_backend.forward(poses.data, patches, intrinsics, target, weight, lmbda, ii, jj, kk, M, t0, t1, iterations, eff_impl)

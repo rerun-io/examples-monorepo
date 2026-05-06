@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=70.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+authors = [{ name = "pablo vela", email = "pablovela5620@gmail.com" }]
+name = "dpvo-fastba-mojo"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["dpvo_fastba_mojo", "dpvo_fastba_mojo.*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+dpvo_fastba_mojo = ["operations/*.mojo", "native/*.mojo", "*.so"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 150
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+ignore = ["E501"]

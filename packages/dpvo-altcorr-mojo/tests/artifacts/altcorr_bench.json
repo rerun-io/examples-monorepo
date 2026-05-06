@@ -1,0 +1,42 @@
+{
+  "gpu_name": "NVIDIA GeForce RTX 5090",
+  "max_ratio": 1.05,
+  "passed": true,
+  "cases": [
+    {
+      "name": "patchify_forward_r0_c128",
+      "cuda_ms": 0.026655999943614006,
+      "mojo_ms": 0.01679999940097332,
+      "ratio": 0.630252079701032,
+      "passed": true
+    },
+    {
+      "name": "patchify_forward_r1_c128",
+      "cuda_ms": 0.028192000463604927,
+      "mojo_ms": 0.02127999998629093,
+      "ratio": 0.75482405066511,
+      "passed": true
+    },
+    {
+      "name": "patchify_backward_r1_c128",
+      "cuda_ms": 0.02502400055527687,
+      "mojo_ms": 0.024351999163627625,
+      "ratio": 0.9731457250344594,
+      "passed": true
+    },
+    {
+      "name": "corr_forward_hot_r3_c128_p3",
+      "cuda_ms": 0.08892799913883209,
+      "mojo_ms": 0.06230400130152702,
+      "ratio": 0.7006117522588091,
+      "passed": true
+    },
+    {
+      "name": "corr_backward_hot_r3_c128_p3",
+      "cuda_ms": 0.6794559955596924,
+      "mojo_ms": 0.6910079717636108,
+      "ratio": 1.0170018018523814,
+      "passed": true
+    }
+  ]
+}

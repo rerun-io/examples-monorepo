@@ -1,21 +1,46 @@
-"""Python wrappers for CUDA-accelerated correlation and patchification kernels.
+"""Python wrappers for accelerated correlation and patchification kernels.
 
 This module provides custom :class:`torch.autograd.Function` subclasses that
-delegate their forward and backward passes to the ``_cuda_corr`` extension.
-Two high-level convenience functions are exposed:
+delegate their forward and backward passes to the configured backend. Two
+high-level convenience functions are exposed:
 
 - :func:`corr` -- correlation volume lookup between two feature maps.
 - :func:`patchify` -- patch extraction at sub-pixel coordinates with an
   optional bilinear interpolation mode.
 """
 
+import os
 from typing import Any
 
 import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
-from dpvo import _cuda_corr
+
+def _load_backend() -> Any:
+    """Load the configured altcorr backend.
+
+    ``auto`` and ``mojo`` use the standalone Mojo package. CUDA is only used
+    when ``DPVO_ALTCORR_BACKEND=cuda`` is set explicitly.
+    """
+    backend = os.environ.get("DPVO_ALTCORR_BACKEND", "auto").lower()
+    if backend not in {"auto", "mojo", "cuda"}:
+        raise ValueError(
+            "DPVO_ALTCORR_BACKEND must be one of 'auto', 'mojo', or 'cuda', "
+            f"got {backend!r}"
+        )
+
+    if backend in {"auto", "mojo"}:
+        from dpvo_altcorr_mojo import backend as mojo_corr
+
+        return mojo_corr
+
+    from dpvo import _cuda_corr
+
+    return _cuda_corr
+
+
+_corr_backend = _load_backend()
 
 
 class CorrLayer(torch.autograd.Function):
@@ -59,7 +84,7 @@ class CorrLayer(torch.autograd.Function):
         ctx.save_for_backward(fmap1, fmap2, coords, ii, jj)
         ctx.radius = radius
         ctx.dropout = dropout
-        corr, = _cuda_corr.forward(fmap1, fmap2, coords, ii, jj, radius)
+        corr, = _corr_backend.forward(fmap1, fmap2, coords, ii, jj, radius)
 
         return corr
 
@@ -97,7 +122,7 @@ class CorrLayer(torch.autograd.Function):
         fmap1_grad: Float[Tensor, "..."]
         fmap2_grad: Float[Tensor, "..."]
         fmap1_grad, fmap2_grad = \
-            _cuda_corr.backward(fmap1, fmap2, coords, ii, jj, grad, ctx.radius)
+            _corr_backend.backward(fmap1, fmap2, coords, ii, jj, grad, ctx.radius)
 
         return fmap1_grad, fmap2_grad, None, None, None, None, None
 
@@ -133,7 +158,7 @@ class PatchLayer(torch.autograd.Function):
         ctx.save_for_backward(net, coords)
 
         patches: Float[Tensor, "..."]
-        patches, = _cuda_corr.patchify_forward(net, coords, radius)
+        patches, = _corr_backend.patchify_forward(net, coords, radius)
         return patches
 
     @staticmethod
@@ -153,7 +178,7 @@ class PatchLayer(torch.autograd.Function):
         net: Float[Tensor, "..."]
         coords: Float[Tensor, "..."]
         net, coords = ctx.saved_tensors
-        grad, = _cuda_corr.patchify_backward(net, coords, grad, ctx.radius)
+        grad, = _corr_backend.patchify_backward(net, coords, grad, ctx.radius)
 
         return grad, None, None
 

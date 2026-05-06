@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mojo GPU Idioms"
+  short_description: "Idiomatic Mojo GPU kernels and custom ops"
+  default_prompt: "Use $mojo-gpu-idioms to write or review idiomatic Mojo GPU code."

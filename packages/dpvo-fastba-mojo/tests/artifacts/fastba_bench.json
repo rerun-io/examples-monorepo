@@ -1,0 +1,21 @@
+{
+  "gpu_name": "NVIDIA GeForce RTX 5090",
+  "max_ratio": 1.05,
+  "passed": true,
+  "cases": [
+    {
+      "name": "reproject_p3_edges8192",
+      "cuda_ms": 0.01104000024497509,
+      "mojo_ms": 0.011392000131309032,
+      "ratio": 1.0318840469676762,
+      "passed": true
+    },
+    {
+      "name": "ba_dense_iter2_edges8192_p3",
+      "cuda_ms": 0.7710719704627991,
+      "mojo_ms": 0.668832004070282,
+      "ratio": 0.8674054169922005,
+      "passed": true
+    }
+  ]
+}

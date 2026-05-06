@@ -2,14 +2,9 @@
 authors = ["pablo vela <pablovela5620@gmail.com>"]
 channels = ["https://prefix.dev/ai-demos", "https://prefix.dev/conda-forge"]
 name = "examples-monorepo"
-# Temporarily aarch64-only: the current dev host is linux-aarch64 and pixi's
-# uv build-dispatch cannot initialise for linux-64 when it needs to build
-# git-based PyPI deps (vggt / moge / gsplat / cuvslam) from an aarch64 host.
-# Restore to ["linux-64", "linux-aarch64"] once a linux-64 host is available
-# to regenerate the linux-64 lockfile entries; the feature-level
-# `platforms = ["linux-64"]` restrictions on the CUDA-only features are
-# already in place so that flip is a one-line change.
-platforms = ["linux-aarch64"]
+# Keep both workspace platforms so target-specific selectors below remain
+# valid. CUDA-only features restrict themselves to linux-64.
+platforms = ["linux-64", "linux-aarch64"]
 version = "0.1.0"
 requires-pixi = ">=0.40"
 preview = ["pixi-build"]
@@ -20,7 +15,7 @@ no-build-isolation = ["moge", "gsplat", "dpvo"]
 
 [pypi-options.dependency-overrides]
 iopath = ">=0.1.10"
-fsspec = ">=2025.3"
+fsspec = ">=2025.3,<=2026.2.0"
 
 # ─── common feature (shared loose base deps) ───────────────────────────────
 [feature.common.dependencies]
@@ -348,6 +343,7 @@ pydub = "*"
 open3d = ">=0.19.0,<0.20"
 h5py = ">=3.11"
 torchcodec = "*"
+fsspec = ">=2025.3,<=2026.2.0"
 
 [feature.sam3d.pypi-dependencies]
 sam3d_body = { path = "packages/sam3d-body-rerun", editable = true }
@@ -355,7 +351,6 @@ moge = { git = "https://github.com/microsoft/MoGe.git" }
 timm = ">=0.9"
 natsort = ">=8.4"
 datasets = ">=2.20"
-fsspec = ">=2025.3"
 kernels = ">=0.11.3"
 
 [feature.sam3d.activation.env]
@@ -1039,12 +1034,18 @@ description = "Load example PLY and log it to the running viewer"
 # dpvo
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.dpvo]
-channels = ["https://prefix.dev/ai-demos", "https://prefix.dev/conda-forge"]
+channels = [
+    "https://prefix.dev/ai-demos",
+    "https://conda.modular.com/max-nightly/",
+    "https://prefix.dev/conda-forge",
+]
 platforms = ["linux-64"]
 
 [feature.dpvo.dependencies]
 python = "3.11.*"
 dpretrieval = { path = "packages/dpretrieval" }
+max = { version = ">=26.3.0.dev2026040905,<27", channel = "https://conda.modular.com/max-nightly/" }
+mojo = "*"
 eigen = ">=3.4.0,<3.5"
 einops = ">=0.8.0,<0.9"
 matplotlib = ">=3.8.4,<3.9"
@@ -1057,6 +1058,8 @@ ninja = ">=1.13.2,<2"
 
 [feature.dpvo.pypi-dependencies]
 dpvo = { path = "packages/dpvo", editable = true }
+dpvo-altcorr-mojo = { path = "packages/dpvo-altcorr-mojo", editable = true }
+dpvo-fastba-mojo = { path = "packages/dpvo-fastba-mojo", editable = true }
 mini-dust3r = ">=0.1.1,<0.2"
 evo = ">=1.28.0"
 kornia = ">=0.7.0"
@@ -1099,7 +1102,24 @@ inputs = [
     "packages/dpvo/dpvo/fastba/*.cpp",
     "packages/dpvo/dpvo/fastba/*.cu",
 ]
-outputs = ["packages/dpvo/dpvo/_cuda_corr*.so", "packages/dpvo/dpvo/_cuda_ba*.so"]
+outputs = [
+    "packages/dpvo/dpvo/_cuda_corr*.so",
+    "packages/dpvo/dpvo/_cuda_ba*.so",
+]
+
+[feature.dpvo.tasks._build-dpvo-altcorr-mojo-native]
+cmd = "mojo build --emit shared-lib -o dpvo_altcorr_mojo/dpvo_altcorr_mojo_backends.so dpvo_altcorr_mojo/native/dpvo_altcorr_mojo_backends.mojo"
+cwd = "packages/dpvo-altcorr-mojo"
+description = "Build DPVO altcorr Mojo native shared-library backend"
+inputs = ["packages/dpvo-altcorr-mojo/dpvo_altcorr_mojo/native/*.mojo"]
+outputs = ["packages/dpvo-altcorr-mojo/dpvo_altcorr_mojo/dpvo_altcorr_mojo_backends*.so"]
+
+[feature.dpvo.tasks._build-dpvo-fastba-mojo-native]
+cmd = "mojo build --emit shared-lib -o dpvo_fastba_mojo/dpvo_fastba_mojo_backends.so dpvo_fastba_mojo/native/dpvo_fastba_mojo_backends.mojo"
+cwd = "packages/dpvo-fastba-mojo"
+description = "Build DPVO fastba Mojo native shared-library backend"
+inputs = ["packages/dpvo-fastba-mojo/dpvo_fastba_mojo/native/*.mojo"]
+outputs = ["packages/dpvo-fastba-mojo/dpvo_fastba_mojo/dpvo_fastba_mojo_backends*.so"]
 
 [feature.dpvo.tasks._download-orb-vocab]
 cmd = "bash -lc 'if [ ! -f ORBvoc.txt ]; then curl -L https://github.com/UZ-SLAMLab/ORB_SLAM3/raw/master/Vocabulary/ORBvoc.txt.tar.gz | tar xz; fi'"
@@ -1115,21 +1135,34 @@ description = "Download EuRoC MH_01-MH_05 sequences (~2GB each)"
 
 [feature.dpvo.tasks.eval-euroc]
 cmd = "python tools/eval_euroc.py --modes vo slam --stride 2 --trials 1"
-depends-on = ["_build-dpvo-cuda-kernels", "_download-dpvo-model", "_download-euroc"]
+depends-on = [
+    "_build-dpvo-cuda-kernels",
+    "_download-dpvo-model",
+    "_download-euroc",
+]
 cwd = "packages/dpvo"
 description = "Evaluate DPV-SLAM on EuRoC MH sequences (VO + SLAM)"
 
 # ── Demo tasks ───────────────────────────────────────────────────────────
 [feature.dpvo.tasks.dpvo-demo]
 cmd = "python tools/demo.py --imagedir data/movies/IMG_0493.MOV"
-depends-on = ["_build-dpvo-cuda-kernels", "_download-dpvo-model", "_download-dpvo-data"]
+depends-on = [
+    "_build-dpvo-cuda-kernels",
+    "_download-dpvo-model",
+    "_download-dpvo-data",
+]
 cwd = "packages/dpvo"
 description = "Run DPVO demo on example video"
 
 # ── App tasks ────────────────────────────────────────────────────────────
 [feature.dpvo.tasks.dpvo-app]
 cmd = "python tools/gradio_app.py"
-depends-on = ["_build-dpvo-cuda-kernels", "_download-dpvo-model", "_download-dpvo-data", "_download-dpvo-iphone-data"]
+depends-on = [
+    "_build-dpvo-cuda-kernels",
+    "_download-dpvo-model",
+    "_download-dpvo-data",
+    "_download-dpvo-iphone-data",
+]
 cwd = "packages/dpvo"
 description = "Launch DPVO Gradio web UI"
 
@@ -1142,7 +1175,7 @@ description = "Launch DPVO Gradio web UI"
 # host is available to regenerate the linux-64 lockfile entries. The
 # PyCuVSLAM baseline will come later as a separate CUDA-only feature.
 [feature.slam-evals]
-platforms = ["linux-aarch64"]
+platforms = ["linux-aarch64", "linux-64"]
 
 [feature.slam-evals.dependencies]
 python = "3.10.*"
