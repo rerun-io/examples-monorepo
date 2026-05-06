@@ -2,14 +2,9 @@
 authors = ["pablo vela <pablovela5620@gmail.com>"]
 channels = ["https://prefix.dev/ai-demos", "https://prefix.dev/conda-forge"]
 name = "examples-monorepo"
-# Temporarily aarch64-only: the current dev host is linux-aarch64 and pixi's
-# uv build-dispatch cannot initialise for linux-64 when it needs to build
-# git-based PyPI deps (vggt / moge / gsplat / cuvslam) from an aarch64 host.
-# Restore to ["linux-64", "linux-aarch64"] once a linux-64 host is available
-# to regenerate the linux-64 lockfile entries; the feature-level
-# `platforms = ["linux-64"]` restrictions on the CUDA-only features are
-# already in place so that flip is a one-line change.
-platforms = ["linux-aarch64"]
+# Keep both workspace platforms so target-specific selectors below remain
+# valid. CUDA-only features restrict themselves to linux-64.
+platforms = ["linux-64", "linux-aarch64"]
 version = "0.1.0"
 requires-pixi = ">=0.40"
 preview = ["pixi-build"]
@@ -20,7 +15,7 @@ no-build-isolation = ["moge", "gsplat", "dpvo"]
 
 [pypi-options.dependency-overrides]
 iopath = ">=0.1.10"
-fsspec = ">=2025.3"
+fsspec = ">=2025.3,<=2026.2.0"
 
 # ─── common feature (shared loose base deps) ───────────────────────────────
 [feature.common.dependencies]
@@ -41,9 +36,9 @@ xorg-libx11 = "*"
 xorg-xorgproto = "*"
 
 [feature.common.pypi-dependencies]
-rerun-sdk = "==0.31.1"
+rerun-sdk = ">=0.31.1"
 gradio = "==6.8.0"
-gradio-rerun = "==0.31.1"
+gradio-rerun = ">=0.31.1"
 simplecv = { git = "https://github.com/pablovela5620/simplecv.git", tag = "v0.7.2" }
 
 
@@ -348,6 +343,7 @@ pydub = "*"
 open3d = ">=0.19.0,<0.20"
 h5py = ">=3.11"
 torchcodec = "*"
+fsspec = ">=2025.3,<=2026.2.0"
 
 [feature.sam3d.pypi-dependencies]
 sam3d_body = { path = "packages/sam3d-body-rerun", editable = true }
@@ -355,7 +351,6 @@ moge = { git = "https://github.com/microsoft/MoGe.git" }
 timm = ">=0.9"
 natsort = ">=8.4"
 datasets = ">=2.20"
-fsspec = ">=2025.3"
 kernels = ">=0.11.3"
 
 [feature.sam3d.activation.env]
@@ -474,13 +469,13 @@ outputs = ["packages/robocap-slam/data/robocap/f408193e6447b3b0_session_14"]
 description = "Download example Robocap dataset from HuggingFace"
 
 [feature.robocap.tasks.robocap-track]
-cmd = "python tools/track_odometry.py robocap"
+cmd = "python tools/track_odometry.py"
 cwd = "packages/robocap-slam"
 depends-on = ["robocap-download-example"]
 description = "Run multicamera visual odometry on Robocap data"
 
 [feature.robocap.tasks.robocap-track-slam]
-cmd = "python tools/track_slam.py robocap"
+cmd = "python tools/track_slam.py"
 cwd = "packages/robocap-slam"
 depends-on = ["robocap-download-example"]
 description = "Run multicamera visual SLAM on Robocap data"
@@ -1099,7 +1094,10 @@ inputs = [
     "packages/dpvo/dpvo/fastba/*.cpp",
     "packages/dpvo/dpvo/fastba/*.cu",
 ]
-outputs = ["packages/dpvo/dpvo/_cuda_corr*.so", "packages/dpvo/dpvo/_cuda_ba*.so"]
+outputs = [
+    "packages/dpvo/dpvo/_cuda_corr*.so",
+    "packages/dpvo/dpvo/_cuda_ba*.so",
+]
 
 [feature.dpvo.tasks._download-orb-vocab]
 cmd = "bash -lc 'if [ ! -f ORBvoc.txt ]; then curl -L https://github.com/UZ-SLAMLab/ORB_SLAM3/raw/master/Vocabulary/ORBvoc.txt.tar.gz | tar xz; fi'"
@@ -1115,21 +1113,34 @@ description = "Download EuRoC MH_01-MH_05 sequences (~2GB each)"
 
 [feature.dpvo.tasks.eval-euroc]
 cmd = "python tools/eval_euroc.py --modes vo slam --stride 2 --trials 1"
-depends-on = ["_build-dpvo-cuda-kernels", "_download-dpvo-model", "_download-euroc"]
+depends-on = [
+    "_build-dpvo-cuda-kernels",
+    "_download-dpvo-model",
+    "_download-euroc",
+]
 cwd = "packages/dpvo"
 description = "Evaluate DPV-SLAM on EuRoC MH sequences (VO + SLAM)"
 
 # ── Demo tasks ───────────────────────────────────────────────────────────
 [feature.dpvo.tasks.dpvo-demo]
 cmd = "python tools/demo.py --imagedir data/movies/IMG_0493.MOV"
-depends-on = ["_build-dpvo-cuda-kernels", "_download-dpvo-model", "_download-dpvo-data"]
+depends-on = [
+    "_build-dpvo-cuda-kernels",
+    "_download-dpvo-model",
+    "_download-dpvo-data",
+]
 cwd = "packages/dpvo"
 description = "Run DPVO demo on example video"
 
 # ── App tasks ────────────────────────────────────────────────────────────
 [feature.dpvo.tasks.dpvo-app]
 cmd = "python tools/gradio_app.py"
-depends-on = ["_build-dpvo-cuda-kernels", "_download-dpvo-model", "_download-dpvo-data", "_download-dpvo-iphone-data"]
+depends-on = [
+    "_build-dpvo-cuda-kernels",
+    "_download-dpvo-model",
+    "_download-dpvo-data",
+    "_download-dpvo-iphone-data",
+]
 cwd = "packages/dpvo"
 description = "Launch DPVO Gradio web UI"
 
