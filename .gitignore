@@ -102,6 +102,7 @@ packages/prompt-da/data/
 packages/wilor-nano/data/
 packages/sam3d-body-rerun/data/
 packages/sam3-rerun/data/
+packages/sapiens2-pose/data/
 packages/robocap-slam/data/
 packages/pysfm/data/
 packages/gsplat-rust-renderer/data/
@@ -121,6 +122,7 @@ packages/wilor-nano/pretrained_models/
 packages/wilor-nano/onnx_models/
 packages/wilor-nano/demo/
 packages/wilor-nano/results/
+packages/sapiens2-pose/comparison_outputs/
 
 # Logs
 *.log
