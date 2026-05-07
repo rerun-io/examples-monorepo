@@ -493,6 +493,32 @@ cwd = "packages/sam3-rerun"
 description = "Launch SAM3 segmentation Gradio app with annotated image"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# sapiens2-pose
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.sapiens2-pose]
+platforms = ["linux-64"]
+
+[feature.sapiens2-pose.dependencies]
+python = "3.12.*"
+
+[feature.sapiens2-pose.pypi-dependencies]
+sapiens2-pose = { path = "packages/sapiens2-pose", editable = true }
+
+[feature.sapiens2-pose.activation.env]
+PACKAGE_DIR = "packages/sapiens2-pose"
+SAPIENS_PRELOAD_MODELS = "0"
+
+[feature.sapiens2-pose.tasks.sapiens2-pose-app]
+cmd = "python tools/gradio_app.py"
+cwd = "packages/sapiens2-pose"
+description = "Launch the Sapiens2 pose Gradio app"
+
+[feature.sapiens2-pose.tasks.sapiens2-pose-dev-app]
+cmd = "gradio tools/gradio_app.py"
+cwd = "packages/sapiens2-pose"
+description = "Launch the Sapiens2 pose Gradio app in dev mode"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # robocap-slam
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.robocap.dependencies]
@@ -1298,6 +1324,17 @@ sam3-rerun-dev = { features = [
     "sam3-rerun",
     "dev",
 ], solve-group = "sam3-rerun", no-default-feature = true }
+sapiens2-pose = { features = [
+    "common",
+    "cuda",
+    "sapiens2-pose",
+], solve-group = "sapiens2-pose", no-default-feature = true }
+sapiens2-pose-dev = { features = [
+    "common",
+    "cuda",
+    "sapiens2-pose",
+    "dev",
+], solve-group = "sapiens2-pose", no-default-feature = true }
 robocap = { features = [
     "common",
     "robocap",

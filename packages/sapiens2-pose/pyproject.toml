@@ -1,0 +1,34 @@
+[project]
+name = "sapiens2-pose"
+version = "0.1.0"
+authors = [{ name = "pablo vela", email = "pablovela5620@gmail.com" }]
+requires-python = ">=3.12"
+dependencies = [
+    # common: numpy, scipy, jaxtyping, rerun-sdk, gradio, gradio-rerun,
+    #         huggingface_hub, hf-transfer, tqdm, pyserde, av, opencv, transformers
+    # cuda: pytorch-gpu, torchvision
+    "safetensors",
+    "timm",
+    "spaces>=0.43.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sapiens2_pose"]
+
+[tool.ruff]
+exclude = ["src/sapiens2_pose/assets", "src/sapiens2_pose/sapiens_lite"]
+line-length = 150
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+ignore = ["E501", "F722", "F821", "UP037", "UP040"]
+
+[tool.vulture]
+paths = ["src/sapiens2_pose", "tests", "tools"]
+exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
+sort_by_size = true
+min_confidence = 60
