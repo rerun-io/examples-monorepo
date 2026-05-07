@@ -352,7 +352,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8e/e1/202a31727b0d096a04380f78e809074d7a1d0a22d9d5a39fea1d2353fd02/shtab-1.8.0-py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bd/75/8539d011f6be8e29f339c42e633aae3cb73bffa95dd0f9adec09b9c58e85/tomlkit-0.13.3-py3-none-any.whl
@@ -691,7 +691,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8e/e1/202a31727b0d096a04380f78e809074d7a1d0a22d9d5a39fea1d2353fd02/shtab-1.8.0-py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bd/75/8539d011f6be8e29f339c42e633aae3cb73bffa95dd0f9adec09b9c58e85/tomlkit-0.13.3-py3-none-any.whl
@@ -1233,7 +1233,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/83/11/00d3c3dfc25ad54e731d91449895a79e4bf2384dc3ac01809010ba88f6d5/seaborn-0.13.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/d9/71/e6cd4440e996df93b9630b21e446fcf52bc2e174ccb0687e001e3e71ffe2/spaces-0.49.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/f1/7b/ce1eafaf1a76852e2ec9b22edecf1daa58175c090266e9f6c64afcd81d91/stack_data-0.6.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
@@ -1790,7 +1790,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/83/11/00d3c3dfc25ad54e731d91449895a79e4bf2384dc3ac01809010ba88f6d5/seaborn-0.13.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/d9/71/e6cd4440e996df93b9630b21e446fcf52bc2e174ccb0687e001e3e71ffe2/spaces-0.49.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/f1/7b/ce1eafaf1a76852e2ec9b22edecf1daa58175c090266e9f6c64afcd81d91/stack_data-0.6.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
@@ -2358,7 +2358,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/f4/a2/70401a107d6d7466d64b466927e6b96fcefa99d57494b972608e2f8be50f/scikit_image-0.26.0-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b4/af/ce4df3ca29122d219c45d3e86e5ff9a9df03b8cf31afd76817b662c803a3/tifffile-2026.5.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/68/99/2018622d268f6017ddfa5ee71f070bad5d07590374793166baa102849d17/timm-0.9.16-py3-none-any.whl
@@ -2927,7 +2927,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/f4/a2/70401a107d6d7466d64b466927e6b96fcefa99d57494b972608e2f8be50f/scikit_image-0.26.0-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b4/af/ce4df3ca29122d219c45d3e86e5ff9a9df03b8cf31afd76817b662c803a3/tifffile-2026.5.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/68/99/2018622d268f6017ddfa5ee71f070bad5d07590374793166baa102849d17/timm-0.9.16-py3-none-any.whl
@@ -4874,7 +4874,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8e/e1/202a31727b0d096a04380f78e809074d7a1d0a22d9d5a39fea1d2353fd02/shtab-1.8.0-py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bd/75/8539d011f6be8e29f339c42e633aae3cb73bffa95dd0f9adec09b9c58e85/tomlkit-0.13.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/3a/7a/882d99539b19b1490cac5d77c67338d126e4122c8276bf640e411650c830/twine-6.2.0-py3-none-any.whl
@@ -5413,7 +5413,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8e/e1/202a31727b0d096a04380f78e809074d7a1d0a22d9d5a39fea1d2353fd02/shtab-1.8.0-py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bd/75/8539d011f6be8e29f339c42e633aae3cb73bffa95dd0f9adec09b9c58e85/tomlkit-0.13.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/3a/7a/882d99539b19b1490cac5d77c67338d126e4122c8276bf640e411650c830/twine-6.2.0-py3-none-any.whl
@@ -6028,7 +6028,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/2e/a3/0f0b7d78e2f1eb9e8e1afbff1d2bff8d60144aee17aca51c065b516743dd/safehttpx-0.1.7-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6f/e9/bebf3d50e3fc847378988235f87c37ad3ac26d386041ab915d15e92025cd/timm-1.0.26-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bd/75/8539d011f6be8e29f339c42e633aae3cb73bffa95dd0f9adec09b9c58e85/tomlkit-0.13.3-py3-none-any.whl
@@ -6652,7 +6652,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/2e/a3/0f0b7d78e2f1eb9e8e1afbff1d2bff8d60144aee17aca51c065b516743dd/safehttpx-0.1.7-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6f/e9/bebf3d50e3fc847378988235f87c37ad3ac26d386041ab915d15e92025cd/timm-1.0.26-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bd/75/8539d011f6be8e29f339c42e633aae3cb73bffa95dd0f9adec09b9c58e85/tomlkit-0.13.3-py3-none-any.whl
@@ -7162,7 +7162,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8e/e1/202a31727b0d096a04380f78e809074d7a1d0a22d9d5a39fea1d2353fd02/shtab-1.8.0-py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6f/e9/bebf3d50e3fc847378988235f87c37ad3ac26d386041ab915d15e92025cd/timm-1.0.26-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bd/75/8539d011f6be8e29f339c42e633aae3cb73bffa95dd0f9adec09b9c58e85/tomlkit-0.13.3-py3-none-any.whl
@@ -7681,7 +7681,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8e/e1/202a31727b0d096a04380f78e809074d7a1d0a22d9d5a39fea1d2353fd02/shtab-1.8.0-py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6f/e9/bebf3d50e3fc847378988235f87c37ad3ac26d386041ab915d15e92025cd/timm-1.0.26-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bd/75/8539d011f6be8e29f339c42e633aae3cb73bffa95dd0f9adec09b9c58e85/tomlkit-0.13.3-py3-none-any.whl
@@ -8175,7 +8175,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/2e/a3/0f0b7d78e2f1eb9e8e1afbff1d2bff8d60144aee17aca51c065b516743dd/safehttpx-0.1.7-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bd/75/8539d011f6be8e29f339c42e633aae3cb73bffa95dd0f9adec09b9c58e85/tomlkit-0.13.3-py3-none-any.whl
@@ -8671,7 +8671,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/2e/a3/0f0b7d78e2f1eb9e8e1afbff1d2bff8d60144aee17aca51c065b516743dd/safehttpx-0.1.7-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bd/75/8539d011f6be8e29f339c42e633aae3cb73bffa95dd0f9adec09b9c58e85/tomlkit-0.13.3-py3-none-any.whl
@@ -9024,7 +9024,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/2e/a3/0f0b7d78e2f1eb9e8e1afbff1d2bff8d60144aee17aca51c065b516743dd/safehttpx-0.1.7-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bd/75/8539d011f6be8e29f339c42e633aae3cb73bffa95dd0f9adec09b9c58e85/tomlkit-0.13.3-py3-none-any.whl
@@ -9358,7 +9358,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/2e/a3/0f0b7d78e2f1eb9e8e1afbff1d2bff8d60144aee17aca51c065b516743dd/safehttpx-0.1.7-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bd/75/8539d011f6be8e29f339c42e633aae3cb73bffa95dd0f9adec09b9c58e85/tomlkit-0.13.3-py3-none-any.whl
@@ -9721,7 +9721,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/2e/a3/0f0b7d78e2f1eb9e8e1afbff1d2bff8d60144aee17aca51c065b516743dd/safehttpx-0.1.7-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bd/75/8539d011f6be8e29f339c42e633aae3cb73bffa95dd0f9adec09b9c58e85/tomlkit-0.13.3-py3-none-any.whl
@@ -10067,7 +10067,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/2e/a3/0f0b7d78e2f1eb9e8e1afbff1d2bff8d60144aee17aca51c065b516743dd/safehttpx-0.1.7-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bd/75/8539d011f6be8e29f339c42e633aae3cb73bffa95dd0f9adec09b9c58e85/tomlkit-0.13.3-py3-none-any.whl
@@ -10466,7 +10466,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8e/e1/202a31727b0d096a04380f78e809074d7a1d0a22d9d5a39fea1d2353fd02/shtab-1.8.0-py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl
@@ -10847,7 +10847,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8e/e1/202a31727b0d096a04380f78e809074d7a1d0a22d9d5a39fea1d2353fd02/shtab-1.8.0-py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl
@@ -11255,7 +11255,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8e/e1/202a31727b0d096a04380f78e809074d7a1d0a22d9d5a39fea1d2353fd02/shtab-1.8.0-py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl
@@ -11647,7 +11647,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8e/e1/202a31727b0d096a04380f78e809074d7a1d0a22d9d5a39fea1d2353fd02/shtab-1.8.0-py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl
@@ -12097,7 +12097,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8e/e1/202a31727b0d096a04380f78e809074d7a1d0a22d9d5a39fea1d2353fd02/shtab-1.8.0-py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d9/71/e6cd4440e996df93b9630b21e446fcf52bc2e174ccb0687e001e3e71ffe2/spaces-0.49.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
@@ -12552,7 +12552,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8e/e1/202a31727b0d096a04380f78e809074d7a1d0a22d9d5a39fea1d2353fd02/shtab-1.8.0-py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d9/71/e6cd4440e996df93b9630b21e446fcf52bc2e174ccb0687e001e3e71ffe2/spaces-0.49.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
@@ -13080,7 +13080,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8e/e1/202a31727b0d096a04380f78e809074d7a1d0a22d9d5a39fea1d2353fd02/shtab-1.8.0-py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/d9/71/e6cd4440e996df93b9630b21e446fcf52bc2e174ccb0687e001e3e71ffe2/spaces-0.49.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/33/d1/8bb87d21e9aeb323cc03034f5eaf2c8f69841e40e4853c2627edf8111ed3/termcolor-3.3.0-py3-none-any.whl
@@ -13623,7 +13623,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8e/e1/202a31727b0d096a04380f78e809074d7a1d0a22d9d5a39fea1d2353fd02/shtab-1.8.0-py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/d9/71/e6cd4440e996df93b9630b21e446fcf52bc2e174ccb0687e001e3e71ffe2/spaces-0.49.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/33/d1/8bb87d21e9aeb323cc03034f5eaf2c8f69841e40e4853c2627edf8111ed3/termcolor-3.3.0-py3-none-any.whl
@@ -14079,7 +14079,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8e/e1/202a31727b0d096a04380f78e809074d7a1d0a22d9d5a39fea1d2353fd02/shtab-1.8.0-py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d9/71/e6cd4440e996df93b9630b21e446fcf52bc2e174ccb0687e001e3e71ffe2/spaces-0.49.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
@@ -14535,7 +14535,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8e/e1/202a31727b0d096a04380f78e809074d7a1d0a22d9d5a39fea1d2353fd02/shtab-1.8.0-py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d9/71/e6cd4440e996df93b9630b21e446fcf52bc2e174ccb0687e001e3e71ffe2/spaces-0.49.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
@@ -14917,7 +14917,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8e/e1/202a31727b0d096a04380f78e809074d7a1d0a22d9d5a39fea1d2353fd02/shtab-1.8.0-py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bd/75/8539d011f6be8e29f339c42e633aae3cb73bffa95dd0f9adec09b9c58e85/tomlkit-0.13.3-py3-none-any.whl
@@ -15306,7 +15306,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8e/e1/202a31727b0d096a04380f78e809074d7a1d0a22d9d5a39fea1d2353fd02/shtab-1.8.0-py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bd/75/8539d011f6be8e29f339c42e633aae3cb73bffa95dd0f9adec09b9c58e85/tomlkit-0.13.3-py3-none-any.whl
@@ -15836,7 +15836,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8e/e1/202a31727b0d096a04380f78e809074d7a1d0a22d9d5a39fea1d2353fd02/shtab-1.8.0-py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6f/e9/bebf3d50e3fc847378988235f87c37ad3ac26d386041ab915d15e92025cd/timm-1.0.26-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bd/75/8539d011f6be8e29f339c42e633aae3cb73bffa95dd0f9adec09b9c58e85/tomlkit-0.13.3-py3-none-any.whl
@@ -16380,7 +16380,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8e/e1/202a31727b0d096a04380f78e809074d7a1d0a22d9d5a39fea1d2353fd02/shtab-1.8.0-py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6f/e9/bebf3d50e3fc847378988235f87c37ad3ac26d386041ab915d15e92025cd/timm-1.0.26-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bd/75/8539d011f6be8e29f339c42e633aae3cb73bffa95dd0f9adec09b9c58e85/tomlkit-0.13.3-py3-none-any.whl
@@ -16857,7 +16857,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8e/e1/202a31727b0d096a04380f78e809074d7a1d0a22d9d5a39fea1d2353fd02/shtab-1.8.0-py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b4/af/ce4df3ca29122d219c45d3e86e5ff9a9df03b8cf31afd76817b662c803a3/tifffile-2026.5.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6f/e9/bebf3d50e3fc847378988235f87c37ad3ac26d386041ab915d15e92025cd/timm-1.0.26-py3-none-any.whl
@@ -17339,7 +17339,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6a/23/8146aad7d88f4fcb3a6218f41a60f6c2d4e3a72de72da1825dc7c8f7877c/semantic_version-2.10.0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/8e/e1/202a31727b0d096a04380f78e809074d7a1d0a22d9d5a39fea1d2353fd02/shtab-1.8.0-py3-none-any.whl
-      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
+      - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
       - pypi: https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b4/af/ce4df3ca29122d219c45d3e86e5ff9a9df03b8cf31afd76817b662c803a3/tifffile-2026.5.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/6f/e9/bebf3d50e3fc847378988235f87c37ad3ac26d386041ab915d15e92025cd/timm-1.0.26-py3-none-any.whl
@@ -36712,6 +36712,27 @@ packages:
   - pkg:pypi/shtab?source=hash-mapping
   size: 20495
   timestamp: 1763470677024
+- pypi: git+https://github.com/pablovela5620/simplecv.git?tag=7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1#7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1
+  name: simplecv
+  version: 0.7.2
+  requires_dist:
+  - jaxtyping>=0.2.36,<0.3.0
+  - numpy>=2.0
+  - einops>=0.8.0
+  - icecream>=2.1.3
+  - opencv-python>=4.10.0
+  - pyserde>=0.20.0,<0.30
+  - typing-extensions>=4.1.0,<4.13.0
+  - rerun-sdk[datafusion]>=0.30
+  - tyro>=0.9.1
+  - tqdm
+  - hf-transfer>=0.1.9
+  - lovely-numpy>=0.2.13,<0.3
+  - pandas>=2.3.3
+  - onnxruntime>=1.22.0,<2
+  - universal-pathlib>=0.3.7
+  - s3fs>=2025.3.0
+  requires_python: '>=3.10'
 - pypi: git+https://github.com/pablovela5620/simplecv.git?tag=v0.7.2#17c226dd405cc040b00f48c67bd18072d312527a
   name: simplecv
   version: 0.7.2

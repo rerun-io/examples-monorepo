@@ -39,7 +39,7 @@ xorg-xorgproto = "*"
 rerun-sdk = "==0.31.3"
 gradio = "==6.13.0"
 gradio-rerun = "==0.31.3"
-simplecv = { git = "https://github.com/pablovela5620/simplecv.git", tag = "v0.7.2" }
+simplecv = { git = "https://github.com/pablovela5620/simplecv.git", tag = "7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1" }
 
 
 # ─── CUDA 12.9 feature (shared across all GPU envs) ─────────────────────────
