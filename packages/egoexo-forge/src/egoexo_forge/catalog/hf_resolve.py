@@ -72,7 +72,11 @@ def resolve_hf_rrds(
         )
         for filename in iterator:
             local_path_str: str = hf_hub_download(repo_id=repo_id, filename=filename, repo_type="dataset")
-            uris.append(Path(local_path_str).resolve().as_uri())
+            # Don't ``.resolve()`` — that follows the HF cache symlink to the
+            # hash-named blob (no extension), which the rerun viewer's
+            # data-loader rejects ("No data-loader support for ..."). Keep the
+            # snapshot symlink path so the ``.rrd`` extension is preserved.
+            uris.append(Path(local_path_str).absolute().as_uri())
         out[source] = uris
 
     return out

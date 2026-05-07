@@ -14,6 +14,10 @@ Steps:
 
 Output: ``data/egoexo-forge/screenshots/catalog_spike.png`` (relative to
 repo root). Exits 0 on success, non-zero on any verification failure.
+
+Requires a working display + GPU/wgpu surface — wgpu can't render through
+``xvfb-run`` without DRI3, so the screenshot step is no-op in pure-headless
+sandboxes (the catalog/segment-count steps still verify there).
 """
 
 from __future__ import annotations
@@ -35,6 +39,7 @@ from egoexo_forge.catalog.hf_resolve import ALL_SOURCES, SourceName
 EXPECTED_PER_SOURCE: int = 5
 VIEWER_PORT: int = 9876
 VIEWER_STARTUP_SECONDS: float = 8.0
+SCREENSHOT_FLUSH_SECONDS: float = 5.0
 
 
 @dataclass
@@ -108,7 +113,9 @@ def main(cfg: VerifyConfig) -> None:
             viewer = ViewerClient(addr=f"127.0.0.1:{VIEWER_PORT}")
             viewer.save_screenshot(str(cfg.out_path.resolve()))
 
-            time.sleep(1.0)
+            # save_screenshot is async (gRPC message to the viewer); give the
+            # viewer time to render and write the PNG before the size check.
+            time.sleep(SCREENSHOT_FLUSH_SECONDS)
             if not cfg.out_path.exists() or cfg.out_path.stat().st_size < 1024:
                 raise AssertionError(
                     f"screenshot at {cfg.out_path} is missing or too small (<1KB)",
