@@ -367,16 +367,6 @@ cmd = "python tools/batch_convert.py"
 cwd = "packages/egoexo-forge"
 description = "Convert supported ego/exo datasets into Rerun .rrd files"
 
-[feature.egoexo-forge-demo.tasks.egoexo-forge-reencode-assembly101-videos]
-cmd = "python tools/reencode_assembly101_videos.py"
-cwd = "packages/egoexo-forge"
-description = "Re-encode Assembly101 videos for faster downstream processing"
-
-[feature.egoexo-forge-demo.tasks.egoexo-forge-robocap-hand-tracking]
-cmd = "python tools/robocap_hand_tracking.py"
-cwd = "packages/egoexo-forge"
-description = "Run WiLoR-based Robocap ego hand tracking"
-
 [feature.egoexo-forge-demo.tasks.egoexo-forge-catalog]
 cmd = "python tools/catalog.py"
 cwd = "packages/egoexo-forge"
