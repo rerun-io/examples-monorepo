@@ -1,0 +1,17 @@
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# Python
+__pycache__
+*.egg-info
+build
+dist
+
+# Data and runtime outputs
+/data/
+/outputs/
+
+# IDE
+.idea
+.vscode

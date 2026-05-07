@@ -330,6 +330,54 @@ cwd = "packages/wilor-nano"
 description = "Run WiLoR inference on example video"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# egoexo-forge
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.egoexo-forge.dependencies]
+python = "3.12.*"
+icecream = ">=2.1.3,<3"
+tyro = ">=0.9.1,<0.10"
+open3d = ">=0.19.0,<0.20"
+h5py = ">=3.13.0,<4"
+natsort = ">=8.4.0,<9"
+
+[feature.egoexo-forge.target.linux-64.dependencies]
+datasets = ">=4.0.0"
+
+[feature.egoexo-forge.pypi-dependencies]
+egoexo-forge = { path = "packages/egoexo-forge", editable = true }
+timm = "<1.0"
+rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
+
+[feature.egoexo-forge.target.linux-64.pypi-dependencies]
+onnxruntime-gpu = ">=1.23.2,<2"
+
+[feature.egoexo-forge.target.linux-aarch64.pypi-dependencies]
+onnxruntime = ">=1.23.2,<2"
+
+[feature.egoexo-forge.activation.env]
+PACKAGE_DIR = "packages/egoexo-forge"
+
+[feature.egoexo-forge-demo.tasks.egoexo-forge-app]
+cmd = "python tools/app.py"
+cwd = "packages/egoexo-forge"
+description = "Launch the EgoExo Forge Gradio viewer"
+
+[feature.egoexo-forge-demo.tasks.egoexo-forge-batch-convert]
+cmd = "python tools/batch_convert.py"
+cwd = "packages/egoexo-forge"
+description = "Convert supported ego/exo datasets into Rerun .rrd files"
+
+[feature.egoexo-forge-demo.tasks.egoexo-forge-reencode-assembly101-videos]
+cmd = "python tools/reencode_assembly101_videos.py"
+cwd = "packages/egoexo-forge"
+description = "Re-encode Assembly101 videos for faster downstream processing"
+
+[feature.egoexo-forge-demo.tasks.egoexo-forge-robocap-hand-tracking]
+cmd = "python tools/robocap_hand_tracking.py"
+cwd = "packages/egoexo-forge"
+description = "Run WiLoR-based Robocap ego hand tracking"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # sam3d-body-rerun
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.sam3d]
@@ -1291,6 +1339,18 @@ pyvrs-viewer-dev = { features = [
     "pyvrs-viewer",
     "dev",
 ], solve-group = "pyvrs-viewer", no-default-feature = true }
+egoexo-forge = { features = [
+    "common",
+    "cuda",
+    "egoexo-forge",
+    "egoexo-forge-demo",
+], solve-group = "egoexo-forge", no-default-feature = true }
+egoexo-forge-dev = { features = [
+    "common",
+    "cuda",
+    "egoexo-forge",
+    "dev",
+], solve-group = "egoexo-forge", no-default-feature = true }
 mast3r-slam = { features = [
     "common",
     "cuda",
