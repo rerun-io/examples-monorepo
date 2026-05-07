@@ -5,61 +5,16 @@ Provides example implementations of data streaming, keypoint annotation, and dyn
 visualization across multiple Gradio tabs using Rerun's recording and visualization capabilities.
 """
 
-import html
-import json
 from pathlib import Path
 from typing import Literal
 
 import gradio as gr
+from gradio_rerun import Rerun
 from huggingface_hub import HfApi
 
 API = HfApi()  # thin REST wrapper
-RERUN_WEB_VIEWER_VERSION = "0.31.4"
 
 AVAILABLE_DATASETS = ["egoexo-forge-hocap", "egoexo-forge-egodex", "egoexo-forge-assembly101"]
-
-
-def build_rerun_embed(rrd_url: str | None, *, height: int = 800) -> str:
-    if not rrd_url:
-        return "<div style='height: 800px; display: grid; place-items: center; border: 1px solid #2a2a2a; border-radius: 12px; color: #666;'>No recording selected.</div>"
-
-    srcdoc = f"""<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <style>
-      html, body, #viewer {{
-        margin: 0;
-        width: 100%;
-        height: 100%;
-        background: #0f1115;
-      }}
-    </style>
-  </head>
-  <body>
-    <div id="viewer"></div>
-    <script type="module">
-      import {{ WebViewer }} from "https://esm.sh/@rerun-io/web-viewer@{RERUN_WEB_VIEWER_VERSION}?bundle";
-      const viewer = new WebViewer();
-      await viewer.start(
-        {json.dumps(rrd_url)},
-        document.getElementById("viewer"),
-        {{
-          hide_welcome_screen: true,
-          allow_fullscreen: true,
-          width: "",
-          height: "",
-        }},
-      );
-    </script>
-  </body>
-</html>"""
-    escaped_srcdoc = html.escape(srcdoc, quote=True)
-    return (
-        f'<iframe srcdoc="{escaped_srcdoc}" '
-        f'style="width: 100%; height: {height}px; border: 0; border-radius: 12px; background: #0f1115;" '
-        'allow="fullscreen"></iframe>'
-    )
 
 
 def show_dataset(
@@ -67,7 +22,7 @@ def show_dataset(
 ):
     episode_index = f"{int(episode_index):05d}"
     url_str = f"https://huggingface.co/datasets/pablovela5620/{repo_name}/resolve/main/{episode_index}.rrd"
-    return build_rerun_embed(url_str)
+    return url_str
 
 
 def list_episodes(dataset: Literal["egoexo-forge-hocap"]) -> list[str]:
@@ -141,9 +96,13 @@ with gr.Blocks() as demo:
                 button = gr.Button("Show Dataset")
                 gr.Markdown(dataset_description)
             with gr.Column(scale=4):
-                viewer = gr.HTML(
-                    value=build_rerun_embed(None),
-                    show_label=False,
-                    container=False,
+                viewer = Rerun(
+                    streaming=True,
+                    height=800,
+                    panel_states={
+                        "time": "collapsed",
+                        "blueprint": "hidden",
+                        "selection": "hidden",
+                    },
                 )
         button.click(fn=show_dataset, inputs=[task_name, episode_index], outputs=[viewer])
