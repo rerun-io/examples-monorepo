@@ -377,6 +377,16 @@ cmd = "python tools/robocap_hand_tracking.py"
 cwd = "packages/egoexo-forge"
 description = "Run WiLoR-based Robocap ego hand tracking"
 
+[feature.egoexo-forge-demo.tasks.egoexo-forge-catalog]
+cmd = "python tools/catalog.py"
+cwd = "packages/egoexo-forge"
+description = "Mount HF-hosted egoexo-forge RRDs (5 per source) as a Rerun catalog server"
+
+[feature.egoexo-forge-demo.tasks.egoexo-forge-catalog-screenshot]
+cmd = "python tools/verify_catalog_screenshot.py"
+cwd = "packages/egoexo-forge"
+description = "Verify the catalog spike end-to-end and save a screenshot of one rendered RRD"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # sam3d-body-rerun
 # ═══════════════════════════════════════════════════════════════════════════
