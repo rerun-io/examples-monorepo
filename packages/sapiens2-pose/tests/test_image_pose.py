@@ -5,8 +5,16 @@ from jaxtyping import Float32, UInt8
 from numpy import ndarray
 from PIL import Image
 
+from sapiens2_pose.api import image_pose, runtime
 from sapiens2_pose.api.image_pose import ImagePoseConfig, run_image_pose
 from sapiens2_pose.api.pose_artifact import PosePredictionArtifact, load_pose_prediction_artifact
+
+
+def test_image_pose_reuses_shared_runtime_helpers() -> None:
+    assert image_pose.detect_persons is runtime.detect_persons
+    assert image_pose.estimate_frame_pose_from_bboxes is runtime.estimate_frame_pose_from_bboxes
+    assert "_detector_cache" not in vars(image_pose)
+    assert "_pose_model_cache" not in vars(image_pose)
 
 
 def test_run_image_pose_writes_rrd_and_numeric_artifact_with_mocked_inference(tmp_path: Path) -> None:

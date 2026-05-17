@@ -292,10 +292,19 @@ def estimate_frame_pose_from_bboxes_tensorrt(
     return _pose_artifact_to_estimation(artifact)
 
 
-def _make_effective_bbox_pose_fn(config: SapiensVideoPoseConfig, bbox_pose_fn: BboxPoseFn) -> BboxPoseFn:
+def _make_effective_bbox_pose_fn(
+    config: SapiensVideoPoseConfig,
+    bbox_pose_fn: BboxPoseFn,
+    *,
+    tensorrt_bbox_pose_fn: BboxPoseFn | None = None,
+) -> BboxPoseFn:
     """Return the box-pose function selected by the video pose backend."""
-    if config.pose_backend != "tensorrt" or bbox_pose_fn is not estimate_frame_pose_from_bboxes:
+    if config.pose_backend != "tensorrt":
         return bbox_pose_fn
+
+    if tensorrt_bbox_pose_fn is not None:
+        return tensorrt_bbox_pose_fn
+
     if config.tensorrt_engine_path is None:
         raise ValueError("pose_backend='tensorrt' requires tensorrt_engine_path.")
 
@@ -326,6 +335,7 @@ def run_video_pose_pipeline(
     *,
     frame_pose_fn: FramePoseFn = estimate_frame_pose,
     bbox_pose_fn: BboxPoseFn = estimate_frame_pose_from_bboxes,
+    tensorrt_bbox_pose_fn: BboxPoseFn | None = None,
     detect_persons_fn: DetectPersonsFn = detect_persons,
     tracker_factory: TrackerFactory = _default_tracker_factory,
     log_video_fn: LogVideoFn = log_video,
@@ -341,7 +351,11 @@ def run_video_pose_pipeline(
     if not config.video_path.exists():
         raise FileNotFoundError(f"Video not found: {config.video_path}")
 
-    effective_bbox_pose_fn: BboxPoseFn = _make_effective_bbox_pose_fn(config, bbox_pose_fn)
+    effective_bbox_pose_fn: BboxPoseFn = _make_effective_bbox_pose_fn(
+        config,
+        bbox_pose_fn,
+        tensorrt_bbox_pose_fn=tensorrt_bbox_pose_fn,
+    )
     metadata: VideoMetadata = probe_video(config.video_path)
     schema: PoseSchema = get_pose_schema(config.keypoint_schema)
     selected_frame_count: int = _selected_frame_count(
@@ -522,6 +536,7 @@ def write_video_pose_rrd(
     *,
     frame_pose_fn: FramePoseFn = estimate_frame_pose,
     bbox_pose_fn: BboxPoseFn = estimate_frame_pose_from_bboxes,
+    tensorrt_bbox_pose_fn: BboxPoseFn | None = None,
     detect_persons_fn: DetectPersonsFn = detect_persons,
     tracker_factory: TrackerFactory = _default_tracker_factory,
     log_video_fn: LogVideoFn = log_video,
@@ -532,6 +547,7 @@ def write_video_pose_rrd(
         config,
         frame_pose_fn=frame_pose_fn,
         bbox_pose_fn=bbox_pose_fn,
+        tensorrt_bbox_pose_fn=tensorrt_bbox_pose_fn,
         detect_persons_fn=detect_persons_fn,
         tracker_factory=tracker_factory,
         log_video_fn=log_video_fn,

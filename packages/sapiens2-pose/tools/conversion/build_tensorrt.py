@@ -7,7 +7,7 @@ from pathlib import Path
 
 import tyro
 
-from sapiens2_pose.api.image_pose import ModelSize
+from sapiens2_pose.api.runtime import ModelSize
 from sapiens2_pose.api.tensorrt_pose import (
     TensorRtBuildConfig,
     build_tensorrt_engine,

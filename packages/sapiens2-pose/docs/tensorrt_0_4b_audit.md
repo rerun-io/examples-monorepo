@@ -11,6 +11,7 @@ The codebase now keeps the fastest strict-accuracy floating-point path from the 
 - Runtime mode: CUDA Graph replay
 - ONNX source: portable static batch-1 Sapiens2 pose graph
 - TensorRT engine: machine-local, rebuilt per target GPU/driver/TensorRT version
+- Video app default engine path: `${XDG_CACHE_HOME:-~/.cache}/sapiens2-pose/tensorrt/sapiens2_0_4b_pose_static_b1_bf16_current_static_graph.trt`
 
 The prior FP8, INT8, INT4, NVFP4, per-layer precision forcing, dynamic batch, and layer-profiling experiment code was removed because it did not contribute to the current deployable path.
 

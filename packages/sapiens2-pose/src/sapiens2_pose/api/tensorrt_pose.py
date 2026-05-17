@@ -17,15 +17,17 @@ from jaxtyping import Float32, UInt8
 from numpy import ndarray
 
 from sapiens2_pose.api.image_pose import (
-    POSE_MODELS,
-    DeviceChoice,
     ImagePoseConfig,
     ImagePoseSummary,
-    ModelSize,
-    resolve_device,
     run_image_pose,
 )
 from sapiens2_pose.api.pose_artifact import PosePredictionArtifact
+from sapiens2_pose.api.runtime import (
+    POSE_MODELS,
+    DeviceChoice,
+    ModelSize,
+    resolve_device,
+)
 from sapiens2_pose.sapiens_lite.backbones.sapiens2 import RopePositionEmbedding
 from sapiens2_pose.sapiens_lite.pose import MODEL_SPECS, ImagePreprocessor, UDPHeatmap, init_pose_model, prepare_pose_sample
 

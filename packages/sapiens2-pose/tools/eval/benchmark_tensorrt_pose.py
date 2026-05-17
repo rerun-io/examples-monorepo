@@ -17,8 +17,8 @@ from jaxtyping import Float32, UInt8
 from numpy import ndarray
 from PIL import Image
 
-from sapiens2_pose.api.image_pose import DeviceChoice, ModelSize, get_pose_model, resolve_device
 from sapiens2_pose.api.pose_artifact import PosePredictionArtifact, load_pose_prediction_artifact
+from sapiens2_pose.api.runtime import DeviceChoice, ModelSize, get_pose_model, resolve_device
 from sapiens2_pose.api.tensorrt_pose import TensorRtPoseHeatmapRunner
 from sapiens2_pose.sapiens_lite.pose import MODEL_SPECS, ImagePreprocessor, prepare_pose_sample
 

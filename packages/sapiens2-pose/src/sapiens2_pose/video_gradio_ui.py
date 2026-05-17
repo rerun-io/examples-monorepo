@@ -27,7 +27,7 @@ DEFAULT_SIZE: ModelSize = DEFAULT_MODEL_SIZE
 DEFAULT_SCHEMA: KeypointSchemaName = "coco133"
 DEFAULT_TRACKING_BACKEND: TrackingBackend = "sam3_tracking"
 DEFAULT_TENSORRT_ENGINE_ENV_VAR: str = "SAPIENS2_POSE_TENSORRT_ENGINE_PATH"
-DEFAULT_TENSORRT_ENGINE_PATH: str = "/tmp/sapiens2_pose_trt_goal/trt/sapiens2_0_4b_pose_static_b1_bf16_current_static_graph.trt"
+DEFAULT_TENSORRT_ENGINE_FILENAME: str = "sapiens2_0_4b_pose_static_b1_bf16_current_static_graph.trt"
 
 
 def _server_port() -> int:
@@ -81,7 +81,14 @@ def _remux_mov_for_rerun(video_path: Path, output_dir: Path) -> Path:
 
 def _default_tensorrt_engine_path() -> str:
     """Return the app's default TensorRT engine path."""
-    return os.environ.get(DEFAULT_TENSORRT_ENGINE_ENV_VAR, DEFAULT_TENSORRT_ENGINE_PATH)
+    explicit_engine_path: str | None = os.environ.get(DEFAULT_TENSORRT_ENGINE_ENV_VAR)
+    if explicit_engine_path is not None:
+        return explicit_engine_path
+
+    xdg_cache_home: str | None = os.environ.get("XDG_CACHE_HOME")
+    cache_root: Path = Path(xdg_cache_home).expanduser() if xdg_cache_home is not None else Path.home() / ".cache"
+    engine_path: Path = cache_root / "sapiens2-pose" / "tensorrt" / DEFAULT_TENSORRT_ENGINE_FILENAME
+    return str(engine_path)
 
 
 def _format_video_inference_status(*, status: str, backend_label: str, elapsed_seconds: float) -> str:

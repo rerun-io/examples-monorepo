@@ -7,7 +7,7 @@ from pathlib import Path
 
 import tyro
 
-from sapiens2_pose.api.image_pose import DeviceChoice, ModelSize
+from sapiens2_pose.api.runtime import DeviceChoice, ModelSize
 from sapiens2_pose.api.tensorrt_pose import SapiensPoseOnnxExportConfig, export_sapiens_pose_onnx, resolve_sapiens_pose_checkpoint
 
 
