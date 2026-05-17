@@ -33,7 +33,7 @@ class ModelSpec:
     patch_size: int = 16
     input_size: Tuple[int, int] = (768, 1024)
     heatmap_size: Tuple[int, int] = (192, 256)
-    sigma: int = 6
+    sigma: float = 6.0
     num_keypoints: int = 308
 
 
@@ -616,9 +616,9 @@ def nms(dets: np.ndarray, thr: float) -> List[int]:
     areas = (x2 - x1 + 1) * (y2 - y1 + 1)
     order = scores.argsort()[::-1]
 
-    keep = []
+    keep: list[int] = []
     while len(order) > 0:
-        i = order[0]
+        i = int(order[0])
         keep.append(i)
         xx1 = np.maximum(x1[i], x1[order[1:]])
         yy1 = np.maximum(y1[i], y1[order[1:]])
