@@ -14,6 +14,7 @@ project-includes = [
     "packages/mast3r-slam/mast3r_slam/**/*",
     "packages/dpvo/dpvo/**/*",
     "packages/slam-evals/slam_evals/**/*",
+    "packages/sapiens2-pose/src/**/*",
 ]
 project-excludes = ["**/node_modules", "**/__pycache__", "**/*venv/**/*"]
 
@@ -36,6 +37,8 @@ search-path = [
     "packages/mast3r-slam",
     "packages/dpvo",
     "packages/slam-evals",
+    "packages/sapiens2-pose",
+    "packages/sapiens2-pose/src",
 ]
 
 # Third-party packages — all *-dev env site-packages so pyrefly can resolve
@@ -62,6 +65,8 @@ site-package-path = [
     ".pixi/envs/mast3r-slam-dev/lib/python3.11/site-packages/rerun_sdk",
     ".pixi/envs/dpvo-dev/lib/python3.11/site-packages",
     ".pixi/envs/slam-evals-dev/lib/python3.10/site-packages",
+    ".pixi/envs/sapiens2-pose-dev/lib/python3.12/site-packages",
+    ".pixi/envs/sapiens2-pose-dev/lib/python3.12/site-packages/rerun_sdk",
 ]
 
 python-interpreter-path = ".pixi/envs/dev/bin/python"
