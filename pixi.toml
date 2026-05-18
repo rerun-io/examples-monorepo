@@ -411,7 +411,7 @@ cwd = "packages/mv-api"
 description = "Run the node-based mv-api full exo/ego composite app"
 
 [feature.mv-api.tasks.mv-api-hocap-download]
-cmd = "test -e data/hocap/sample || (mkdir -p data/hocap && hf download pablovela5620/hocap-sample sample.zip --repo-type dataset --local-dir data/hocap && python -m zipfile -e data/hocap/sample.zip data/hocap)"
+cmd = "test -e data/hocap/sample || (rm -rf data/hocap/.sample-tmp data/hocap/sample && mkdir -p data/hocap/.sample-tmp && hf download pablovela5620/hocap-sample sample.zip --repo-type dataset --local-dir data/hocap/.sample-tmp && python -m zipfile -e data/hocap/.sample-tmp/sample.zip data/hocap/.sample-tmp && mv data/hocap/.sample-tmp/sample data/hocap/sample && rm -rf data/hocap/.sample-tmp)"
 cwd = "packages/mv-api"
 outputs = ["packages/mv-api/data/hocap/sample"]
 description = "Download and extract the raw HoCap sample"

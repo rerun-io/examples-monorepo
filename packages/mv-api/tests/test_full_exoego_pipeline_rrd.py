@@ -258,7 +258,7 @@ def test_pipeline_writes_rrd_with_expected_scene_paths(
 
     monkeypatch.setattr(HocapConfig, "setup", fake_setup)
     monkeypatch.setattr(full_exoego_pipeline, "setup_scene", fake_setup_scene)
-    monkeypatch.setattr(full_exoego_pipeline, "_run_model_backed_pipeline", fake_model_backed_pipeline)
+    monkeypatch.setattr(full_exoego_pipeline, "run_model_backed_pipeline", fake_model_backed_pipeline)
 
     rr_config: RerunTyroConfig = RerunTyroConfig(
         application_id="mv_api_test",

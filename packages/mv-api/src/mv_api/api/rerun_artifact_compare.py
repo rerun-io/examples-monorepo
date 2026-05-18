@@ -88,6 +88,9 @@ def query_rrd_stats(*, rrd_path: Path) -> RRDStatsQueryResult:
     overview: dict[str, float]
     entity_chunk_counts: dict[str, int]
     overview, entity_chunk_counts = _parse_rrd_stats_stdout(stats_result.stdout)
+    if stats_result.returncode == 0 and not overview and not entity_chunk_counts:
+        msg: str = "Unable to parse `rerun rrd stats` output; CLI format may have changed."
+        raise ValueError(msg)
     return RRDStatsQueryResult(
         rrd_path=rrd_path,
         returncode=stats_result.returncode,

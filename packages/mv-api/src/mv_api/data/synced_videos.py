@@ -18,11 +18,20 @@ from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
 from simplecv.image_types import BGRList
 
 
-def _sorted_mp4_paths(*, root_directory: Path, glob_pattern: str, stream_kind: str) -> list[Path]:
+def _require_root_directory(root_directory: Path | None) -> Path:
+    """Return a configured root directory or raise a targeted configuration error."""
+    if root_directory is None:
+        msg: str = "SyncedVideoExoEgoConfig.root_directory must be provided for synced video datasets."
+        raise ValueError(msg)
+    return root_directory
+
+
+def _sorted_mp4_paths(*, root_directory: Path | None, glob_pattern: str, stream_kind: str) -> list[Path]:
     """Return sorted MP4 paths for one stream kind."""
-    paths: list[Path] = sorted(root_directory.glob(glob_pattern))
+    video_root: Path = _require_root_directory(root_directory)
+    paths: list[Path] = sorted(video_root.glob(glob_pattern))
     if not paths:
-        msg: str = f"No {stream_kind} MP4 files matched '{glob_pattern}' under {root_directory}."
+        msg: str = f"No {stream_kind} MP4 files matched '{glob_pattern}' under {video_root}."
         raise FileNotFoundError(msg)
 
     for path in paths:
@@ -37,7 +46,7 @@ def _entity_name_from_video_path(video_path: Path) -> str:
     return "_".join(video_path.stem.split())
 
 
-def _frame_timestamps_from_reader(reader: Any) -> Int[ndarray, "n_frames"]:
+def frame_timestamps_from_reader(reader: Any) -> Int[ndarray, "n_frames"]:
     """Compute nanosecond timestamps from a decoded video reader."""
     fps: float = float(reader.fps)
     frame_count: int = int(reader.frame_cnt)
@@ -57,8 +66,8 @@ class SyncedVideoExoEgoConfig(BaseExoEgoDatasetConfig):
     """Target class to instantiate."""
     load_labels: bool = False
     """Whether to load labels for this sequence. Generic synced videos do not provide labels."""
-    root_directory: Path = Path()
-    """Directory containing synced exo and ego MP4 subdirectories."""
+    root_directory: Path | None = None
+    """Directory containing synced exo and ego MP4 subdirectories. Required for setup."""
     exo_glob: str = "exo/*.mp4"
     """Glob, relative to root_directory, selecting exo camera videos."""
     ego_glob: str = "ego/*.mp4"
@@ -166,7 +175,7 @@ class SyncedVideoExoEgoSequence(BaseExoEgoSequence[SyncedVideoExoEgoConfig]):
         )
 
     def load_stream_timestamps_ns(self) -> dict[str, Int[ndarray, "n_frames"]]:
-        """Return per-stream video timestamps from the MP4 assets."""
+        """Return per-stream timestamps and cache aligned ego/exo stream names."""
         stream_timestamps: dict[str, Int[ndarray, "n_frames"]] = {}
         self._ego_stream_names.clear()
         self._exo_stream_names.clear()
@@ -177,7 +186,7 @@ class SyncedVideoExoEgoSequence(BaseExoEgoSequence[SyncedVideoExoEgoConfig]):
             ):
                 stream_name: str = f"exo/{name}"
                 reader: Any = self.exo_sequence.exo_video_readers.video_readers[stream_idx]
-                timestamps: Int[ndarray, "n_frames"] = _frame_timestamps_from_reader(reader)
+                timestamps: Int[ndarray, "n_frames"] = frame_timestamps_from_reader(reader)
                 stream_timestamps[stream_name] = timestamps
                 self._exo_stream_names.append(stream_name)
 
@@ -187,7 +196,7 @@ class SyncedVideoExoEgoSequence(BaseExoEgoSequence[SyncedVideoExoEgoConfig]):
             ):
                 stream_name = f"ego/{name}"
                 reader = self.ego_sequence.ego_video_readers.video_readers[stream_idx]
-                timestamps = _frame_timestamps_from_reader(reader)
+                timestamps = frame_timestamps_from_reader(reader)
                 stream_timestamps[stream_name] = timestamps
                 self._ego_stream_names.append(stream_name)
 
@@ -221,7 +230,8 @@ class SyncedVideoExoEgoSequence(BaseExoEgoSequence[SyncedVideoExoEgoConfig]):
         for stream_idx, stream_name in enumerate(self._ego_stream_names):
             stream_ts: Int[ndarray, "n_frames"] = self.stream_timestamps_ns[stream_name]
             frame_idx: int = self.timestamp_to_frame_index(timestamp_ns, stream_ts)
-            frame_obj: object = self.ego_sequence.ego_video_readers.video_readers[stream_idx].get_frame(frame_idx)
+            reader: Any = self.ego_sequence.ego_video_readers.video_readers[stream_idx]
+            frame_obj: object = reader[frame_idx]
             if frame_obj is None:
                 msg: str = f"Missing ego frame {frame_idx} for {stream_name}."
                 raise ValueError(msg)

@@ -38,7 +38,7 @@ class FullExoEgoOracleComparisonConfig:
     """Fixed Rerun recording id used for both outputs."""
     dataset: AnnotatedMVAPIDatasetUnion = field(default_factory=HocapConfig)
     """Dataset factory used by both the legacy and node-based runs."""
-    calib_confg: MultiViewCalibratorConfig = field(
+    calib_config: MultiViewCalibratorConfig = field(
         default_factory=lambda: MultiViewCalibratorConfig(refine_depth_maps=False, segment_people=False)
     )
     """Calibration config used by both runs."""
@@ -93,7 +93,7 @@ def _build_pipeline_config(
     pipeline_config: RRDPipelineConfig = RRDPipelineConfig(
         rr_config=rr_config,
         dataset=copy.deepcopy(config.dataset),
-        calib_confg=copy.deepcopy(config.calib_confg),
+        calib_config=copy.deepcopy(config.calib_config),
         tracker_config=copy.deepcopy(config.tracker_config),
         calib_ts_nano=config.calib_ts_nano,
         max_frames=config.max_frames,

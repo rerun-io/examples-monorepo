@@ -659,7 +659,7 @@
                     <h3>Rerun scene scaffolding is created up front</h3>
                     <p>
                       The pipeline logs the world coordinate system, COCO-133 annotation context, video streams,
-                      and the initial blueprint using <code>setup_scene()</code> and <code>_send_scene_blueprint()</code>.
+                      and the initial blueprint using <code>setup_scene()</code> and <code>send_scene_blueprint()</code>.
                     </p>
                     <div class="paths">Side effects: <code>rr.log()</code>, <code>rr.send_blueprint()</code></div>
                   </div>
@@ -881,7 +881,7 @@
               <tr>
                 <td><code>&lt;Name&gt;Node</code> class loads models once</td>
                 <td><span class="tag missing">Missing</span></td>
-                <td>Models are instantiated inside <code>_run_model_backed_pipeline()</code>.</td>
+                <td>Models are instantiated inside <code>run_model_backed_pipeline()</code>.</td>
                 <td>Move model lifecycle into node constructors with fakeable interfaces for tests.</td>
               </tr>
               <tr>
@@ -893,7 +893,7 @@
               <tr>
                 <td>Shared <code>create_&lt;name&gt;_blueprint()</code></td>
                 <td><span class="tag partial">Partial</span></td>
-                <td><code>_send_scene_blueprint()</code> exists but is tied to the full scene.</td>
+                <td><code>send_scene_blueprint()</code> exists but is tied to the full scene.</td>
                 <td>Add stage blueprints and a composite blueprint assembled by the app.</td>
               </tr>
               <tr>

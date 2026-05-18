@@ -1,6 +1,8 @@
+import subprocess
 from pathlib import Path
 
 import numpy as np
+import pytest
 import rerun as rr
 from jaxtyping import Float32
 from numpy import ndarray
@@ -34,3 +36,17 @@ def test_rerun_artifact_compare_queries_stats_and_exact_match(tmp_path: Path) ->
     assert stats.entity_chunk_counts["/world/points"] == 1
     assert comparison.exact_match
     assert comparison.returncode == 0
+
+
+def test_query_rrd_stats_rejects_unparsed_successful_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del args, kwargs
+        return subprocess.CompletedProcess(args=["rerun"], returncode=0, stdout="Summary\n-------\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(ValueError, match="Unable to parse"):
+        query_rrd_stats(rrd_path=tmp_path / "sample.rrd")

@@ -145,6 +145,31 @@ def test_compute_square_bbox_expands_and_clips_to_intrinsics() -> None:
     np.testing.assert_allclose(bbox, np.array([5.0, 15.0, 35.0, 45.0], dtype=np.float32))
 
 
+def test_compute_square_bbox_uses_finite_hand_keypoints() -> None:
+    intrinsics: Intrinsics = Intrinsics.from_focal_principal_point(
+        camera_conventions="RDF",
+        fl_x=50.0,
+        fl_y=50.0,
+        cx=50.0,
+        cy=40.0,
+        height=80,
+        width=100,
+    )
+    hand_uv: Float32[ndarray, "21 2"] = np.full((21, 2), np.nan, dtype=np.float32)
+    hand_uv[0] = np.array([10.0, 20.0], dtype=np.float32)
+    hand_uv[1] = np.array([30.0, 40.0], dtype=np.float32)
+    hand_uv[2] = np.array([20.0, 30.0], dtype=np.float32)
+
+    bbox: Float32[ndarray, "4"] | None = compute_square_bbox(
+        hand_uv=hand_uv,
+        intrinsics=intrinsics,
+        expansion_ratio=0.5,
+    )
+
+    assert bbox is not None
+    np.testing.assert_allclose(bbox, np.array([5.0, 15.0, 35.0, 45.0], dtype=np.float32))
+
+
 def test_extract_wilor_uv_converts_keypoint_results_to_float32() -> None:
     keypoints_2d: ndarray = np.arange(42, dtype=np.float64).reshape(1, 21, 2)
     scores: ndarray = np.ones((1, 21), dtype=np.float64)

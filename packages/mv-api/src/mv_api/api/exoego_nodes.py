@@ -73,7 +73,7 @@ class ScenePreparationNode:
             log_exo=self.config.log_exo,
             recording=recording,
         )
-        full_exoego_pipeline._send_scene_blueprint(log_paths=scene_setup_result.log_paths, recording=recording)
+        full_exoego_pipeline.send_scene_blueprint(log_paths=scene_setup_result.log_paths, recording=recording)
 
         return ScenePreparationResult(
             exoego_sequence=exoego_sequence,
@@ -121,7 +121,7 @@ class ModelBackedPipelineNode:
         scene: ScenePreparationResult,
         recording: rr.RecordingStream | None,
     ) -> ModelBackedPipelineResult:
-        full_exoego_pipeline._run_model_backed_pipeline(
+        full_exoego_pipeline.run_model_backed_pipeline(
             config=pipeline_config,
             exoego_sequence=scene.exoego_sequence,
             scene_setup_result=scene.scene_setup_result,

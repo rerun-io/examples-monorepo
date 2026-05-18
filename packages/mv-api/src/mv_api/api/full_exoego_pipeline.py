@@ -43,8 +43,13 @@ from simplecv.video_io import MultiVideoReader, TorchCodecMultiVideoReader
 from tqdm import tqdm
 from wilor_nano.hand_keypoints import FinalWilorPred, HandKeypointDetectorConfig, KeypointResults, WilorHandKeypointDetector
 
-from mv_api.data.synced_videos import SyncedVideoExoEgoConfig
-from mv_api.multiview_pose_estimator import MultiviewBodyTracker, MultiviewBodyTrackerConfig, MVHistory
+from mv_api.data.synced_videos import SyncedVideoExoEgoConfig, frame_timestamps_from_reader
+from mv_api.multiview_pose_estimator import (
+    MultiviewBodyTracker,
+    MultiviewBodyTrackerConfig,
+    MVHistory,
+    compute_square_bbox_from_uv,
+)
 
 np.set_printoptions(suppress=True)
 
@@ -80,11 +85,8 @@ class RRDPipelineConfig:
     """Rerun logging configuration."""
     dataset: AnnotatedMVAPIDatasetUnion = field(default_factory=HocapConfig)
     """Dataset factory capable of producing an annotated exo/ego sequence."""
-    calib_confg: MultiViewCalibratorConfig = field(default_factory=MultiViewCalibratorConfig)
-    """Parameters forwarded to the multi-view calibrator.
-
-    The field name preserves the legacy CLI spelling.
-    """
+    calib_config: MultiViewCalibratorConfig = field(default_factory=MultiViewCalibratorConfig)
+    """Parameters forwarded to the multi-view calibrator."""
     tracker_config: MultiviewBodyTrackerConfig = field(default_factory=MultiviewBodyTrackerConfig)
     """Configuration for the multiview body tracker."""
     calib_ts_nano: int | None = None
@@ -118,9 +120,9 @@ def resize_images_to_common_resolution(
     target_height: int = int(target_size[1])
     resized: list[UInt8[ndarray, "H W 3"]] = []
     for image in images:
-        height: int = int(image.shape[0])
-        width: int = int(image.shape[1])
-        if width == target_width and height == target_height:
+        image_height: int = int(image.shape[0])
+        image_width: int = int(image.shape[1])
+        if image_width == target_width and image_height == target_height:
             resized.append(image)
             continue
         resized_image: UInt8[ndarray, "H W 3"] = cv2.resize(
@@ -252,36 +254,11 @@ def compute_square_bbox(
     expansion_ratio: float,
 ) -> Float32[ndarray, "4"] | None:
     """Return an expanded square ``XYXY`` box clipped to camera bounds."""
-    if not np.isfinite(hand_uv).all():
-        return None
-
-    min_xy: Float32[ndarray, "2"] = np.nanmin(hand_uv, axis=0).astype(np.float32, copy=False)
-    max_xy: Float32[ndarray, "2"] = np.nanmax(hand_uv, axis=0).astype(np.float32, copy=False)
-    side_length: float = float(max(max_xy[0] - min_xy[0], max_xy[1] - min_xy[1]))
-    if not np.isfinite(side_length) or side_length <= 0.0:
-        return None
-
-    center_xy: Float32[ndarray, "2"] = ((min_xy + max_xy) / np.float32(2.0)).astype(np.float32, copy=False)
-    half_side: float = 0.5 * side_length * (1.0 + expansion_ratio)
-    if half_side <= 0.0:
-        return None
-
-    x1: float = float(center_xy[0] - half_side)
-    y1: float = float(center_xy[1] - half_side)
-    x2: float = float(center_xy[0] + half_side)
-    y2: float = float(center_xy[1] + half_side)
-
-    width_limit: float = float(intrinsics.width - 1)
-    height_limit: float = float(intrinsics.height - 1)
-    x1 = float(np.clip(x1, 0.0, width_limit))
-    x2 = float(np.clip(x2, 0.0, width_limit))
-    y1 = float(np.clip(y1, 0.0, height_limit))
-    y2 = float(np.clip(y2, 0.0, height_limit))
-    if x2 <= x1 or y2 <= y1:
-        return None
-
-    xyxy: Float32[ndarray, "4"] = np.array([x1, y1, x2, y2], dtype=np.float32)
-    return xyxy
+    return compute_square_bbox_from_uv(
+        hand_uv=hand_uv,
+        image_shape=(int(intrinsics.height), int(intrinsics.width)),
+        expansion_ratio=expansion_ratio,
+    )
 
 
 def set_annotation_context(*, recording: rr.RecordingStream | None) -> None:
@@ -310,7 +287,7 @@ def set_annotation_context(*, recording: rr.RecordingStream | None) -> None:
     rr.log("/", rr.AnnotationContext(class_descriptions), static=True, recording=recording)
 
 
-def _send_scene_blueprint(*, log_paths: LogPaths, recording: rr.RecordingStream | None) -> None:
+def send_scene_blueprint(*, log_paths: LogPaths, recording: rr.RecordingStream | None) -> None:
     container: rrb.ContainerLike = create_container(
         exo_video_log_paths=log_paths.exo_video_log_paths,
         ego_video_log_paths=log_paths.ego_video_log_paths,
@@ -338,15 +315,6 @@ def frame_index_to_timestamp(frame_timestamps_ns: Int[ndarray, "num_frames"], fr
         raise IndexError(msg)
     timestamp_ns: int = int(frame_timestamps_ns[frame_index])
     return timestamp_ns
-
-
-def get_frame_timestamps_from_reader(video_reader: Any) -> Int[ndarray, "num_frames"]:
-    """Compute frame timestamps from video reader FPS and frame count metadata."""
-    fps: float = float(video_reader.fps)
-    frame_cnt: int = int(video_reader.frame_cnt)
-    ns_per_frame: float = 1e9 / fps
-    timestamps: Int[ndarray, "num_frames"] = (np.arange(frame_cnt) * ns_per_frame).astype(np.int64)
-    return timestamps
 
 
 def _read_bgr_frame(*, reader: Any, frame_idx: int, stream_name: str) -> UInt8[ndarray, "H W 3"]:
@@ -391,11 +359,12 @@ def predict_kpts3d_from_calibrated_videos(
         [cam.projection_matrix for cam in exo_cam_list]
     ).astype(np.float32)
     exo_frame_timestamps_list: list[Int[ndarray, "num_frames"]] = [
-        get_frame_timestamps_from_reader(reader) for reader in exo_video_readers.video_readers
+        frame_timestamps_from_reader(reader) for reader in exo_video_readers.video_readers
     ]
 
     total: int = len(shortest_timestamp) if max_frames is None else min(len(shortest_timestamp), max_frames)
-    pbar = tqdm(shortest_timestamp, total=total)
+    timestamps_to_process: Int[ndarray, "num_frames"] = shortest_timestamp[:total]
+    pbar = tqdm(timestamps_to_process, total=total)
     conf_thresh: float = pose_tracker.config.keypoint_threshold
     num_keypoints: int = int(pose_tracker.num_keypoints)
     mv_output: MVHistory = MVHistory()
@@ -441,6 +410,7 @@ def predict_kpts3d_from_calibrated_videos(
         right_hand_scores: Float32[ndarray, "n_right_hand"] = vis_scores_3d[RIGHT_HAND_IDX]
         left_hand_valid_scores: Float32[ndarray, "n_left_hand_valid"] = left_hand_scores[np.isfinite(left_hand_scores)]
         right_hand_valid_scores: Float32[ndarray, "n_right_hand_valid"] = right_hand_scores[np.isfinite(right_hand_scores)]
+        # Gate each hand as a coherent group to avoid logging fragmented hand skeletons.
         left_hand_conf: float = float(np.mean(left_hand_valid_scores, dtype=np.float32)) if left_hand_valid_scores.size else float("nan")
         right_hand_conf: float = (
             float(np.mean(right_hand_valid_scores, dtype=np.float32)) if right_hand_valid_scores.size else float("nan")
@@ -512,7 +482,7 @@ def predict_kpts3d_from_calibrated_videos(
     return xyzc_list
 
 
-def _run_model_backed_pipeline(
+def run_model_backed_pipeline(
     *,
     config: RRDPipelineConfig,
     exoego_sequence: BaseExoEgoSequence,
@@ -562,7 +532,7 @@ def _run_model_backed_pipeline(
     ego_rgb_video_log_paths: list[Path] = [ego_video_log_paths[idx] for idx in ego_rgb_indices]
 
     exo_frame_timestamp_list: list[Int[ndarray, "num_frames"]] = [
-        get_frame_timestamps_from_reader(reader) for reader in exo_mv_reader.video_readers
+        frame_timestamps_from_reader(reader) for reader in exo_mv_reader.video_readers
     ]
     exo_calib_indices: list[int] = [
         timestamp_to_frame_index(time_ns=calib_timestamp_ns, frame_timestamps_ns=frame_timestamps)
@@ -577,7 +547,7 @@ def _run_model_backed_pipeline(
     ]
 
     ego_frame_timestamp_list: list[Int[ndarray, "num_frames"]] = [
-        get_frame_timestamps_from_reader(reader) for reader in ego_mv_reader.video_readers
+        frame_timestamps_from_reader(reader) for reader in ego_mv_reader.video_readers
     ]
     ego_calib_indices: list[int] = [
         timestamp_to_frame_index(time_ns=calib_timestamp_ns, frame_timestamps_ns=frame_timestamps)
@@ -605,7 +575,7 @@ def _run_model_backed_pipeline(
     hand_kpt_detector: WilorHandKeypointDetector = WilorHandKeypointDetector(
         cfg=HandKeypointDetectorConfig(verbose=False)
     )
-    mv_calibrator: MultiViewCalibrator = MultiViewCalibrator(parent_log_path=parent_log_path, config=config.calib_confg)
+    mv_calibrator: MultiViewCalibrator = MultiViewCalibrator(parent_log_path=parent_log_path, config=config.calib_config)
     mv_calib_results: MVCalibResults = mv_calibrator(rgb_list=rgb_list)
 
     pinhole_param_list: list[PinholeParameters] = mv_calib_results.pinhole_param_list
@@ -903,8 +873,8 @@ def run_full_exoego_pipeline(config: RRDPipelineConfig) -> None:
         log_exo=True,
         recording=recording,
     )
-    _send_scene_blueprint(log_paths=scene_setup_result.log_paths, recording=recording)
-    _run_model_backed_pipeline(
+    send_scene_blueprint(log_paths=scene_setup_result.log_paths, recording=recording)
+    run_model_backed_pipeline(
         config=config,
         exoego_sequence=exoego_sequence,
         scene_setup_result=scene_setup_result,

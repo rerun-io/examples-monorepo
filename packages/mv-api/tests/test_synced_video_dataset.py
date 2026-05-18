@@ -1,18 +1,21 @@
 from pathlib import Path
+from typing import Any, cast
 
 import cv2
 import numpy as np
 import pytest
-from jaxtyping import UInt8
+from jaxtyping import Int, UInt8
 from numpy import ndarray
 
-from mv_api.data.synced_videos import SyncedVideoExoEgoConfig
+from mv_api.data.synced_videos import SyncedVideoExoEgoConfig, SyncedVideoExoEgoSequence
 
 
-def test_synced_video_config_default_root_directory_is_not_developer_local() -> None:
+def test_synced_video_config_requires_root_directory_before_setup() -> None:
     config: SyncedVideoExoEgoConfig = SyncedVideoExoEgoConfig()
 
-    assert config.root_directory == Path()
+    assert config.root_directory is None
+    with pytest.raises(ValueError, match="root_directory"):
+        config.setup()
 
 
 def _write_test_mp4(path: Path, *, rgb: tuple[int, int, int]) -> None:
@@ -52,3 +55,33 @@ def test_synced_video_config_builds_sequence_from_exo_ego_mp4s(tmp_path: Path) -
     assert sample.ego_bgr_list is not None
     assert len(sample.exo_bgr_list) == 2
     assert len(sample.ego_bgr_list) == 1
+
+
+class _GetItemOnlyReader:
+    def __getitem__(self, frame_idx: int) -> UInt8[ndarray, "h w 3"]:
+        assert frame_idx == 0
+        return np.full((12, 16, 3), 127, dtype=np.uint8)
+
+
+class _FakeEgoVideoReaders:
+    def __init__(self) -> None:
+        self.video_readers: list[_GetItemOnlyReader] = [_GetItemOnlyReader()]
+
+
+class _FakeEgoSequence:
+    def __init__(self) -> None:
+        self.ego_video_readers: _FakeEgoVideoReaders = _FakeEgoVideoReaders()
+
+
+def test_synced_video_sequence_samples_ego_frames_with_reader_getitem() -> None:
+    sequence: SyncedVideoExoEgoSequence = object.__new__(SyncedVideoExoEgoSequence)
+    sequence.ego_sequence = cast(Any, _FakeEgoSequence())
+    sequence._ego_stream_names = ["ego/top"]
+    timestamps: Int[ndarray, "n_frames"] = np.array([0], dtype=np.int64)
+    sequence.stream_timestamps_ns = {"ego/top": timestamps}
+
+    ego_bgr_list = sequence._sample_ego_frames(timestamp_ns=0)
+
+    assert ego_bgr_list is not None
+    assert len(ego_bgr_list) == 1
+    assert int(ego_bgr_list[0][0, 0, 0]) == 127

@@ -18,6 +18,48 @@ WILOR_CONFIDENCE_THRESHOLD: float = 0.5
 WILOR_BBOX_EXPANSION_RATIO: float = 0.25
 
 
+def compute_square_bbox_from_uv(
+    *,
+    hand_uv: Float32[ndarray, "hand 2"],
+    image_shape: tuple[int, int],
+    expansion_ratio: float,
+) -> Float32[ndarray, "4"] | None:
+    """Return an expanded square ``XYXY`` box from finite hand keypoints."""
+    valid_mask: Bool[ndarray, "hand"] = np.isfinite(hand_uv[:, 0]) & np.isfinite(hand_uv[:, 1])
+    if not bool(np.any(valid_mask)):
+        return None
+
+    valid_uv: Float32[ndarray, "valid 2"] = hand_uv[valid_mask, :]
+    min_xy: Float32[ndarray, "2"] = np.nanmin(valid_uv, axis=0).astype(np.float32, copy=False)
+    max_xy: Float32[ndarray, "2"] = np.nanmax(valid_uv, axis=0).astype(np.float32, copy=False)
+    side_length: float = float(max(max_xy[0] - min_xy[0], max_xy[1] - min_xy[1]))
+    if not np.isfinite(side_length) or side_length <= 0.0:
+        return None
+
+    center_xy: Float32[ndarray, "2"] = ((min_xy + max_xy) * 0.5).astype(np.float32, copy=False)
+    half_side: float = 0.5 * side_length * (1.0 + expansion_ratio)
+    if half_side <= 0.0:
+        return None
+
+    x1: float = float(center_xy[0] - half_side)
+    y1: float = float(center_xy[1] - half_side)
+    x2: float = float(center_xy[0] + half_side)
+    y2: float = float(center_xy[1] + half_side)
+
+    height: int
+    width: int
+    height, width = image_shape
+    x1 = float(np.clip(x1, 0.0, float(width - 1)))
+    x2 = float(np.clip(x2, 0.0, float(width - 1)))
+    y1 = float(np.clip(y1, 0.0, float(height - 1)))
+    y2 = float(np.clip(y2, 0.0, float(height - 1)))
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    bbox: Float32[ndarray, "4"] = np.array([x1, y1, x2, y2], dtype=np.float32)
+    return bbox
+
+
 def project_multiview(
     xyzc: Float[ndarray, "n_kpts 4"],
     pall: Float[ndarray, "n_views 3 4"],
@@ -156,11 +198,23 @@ class MultiviewBodyTracker:
         recording: rr.RecordingStream | None = None,
     ) -> MVHistory:
         """Estimate and triangulate one COCO-133 person across camera views."""
-        pall: Float32[ndarray, "n_views 3 4"] = np.array(
-            [pinhole.projection_matrix for pinhole in pinhole_list], dtype=np.float32
+        selected_view_indices: list[int] = (
+            [int(idx) for idx in self.config.cams_for_detection_idx]
+            if self.config.cams_for_detection_idx is not None
+            else list(range(len(bgr_list)))
         )
-        if self.config.cams_for_detection_idx is not None:
-            pall = np.array([pall[i] for i in self.config.cams_for_detection_idx], dtype=np.float32)
+        if not selected_view_indices:
+            raise ValueError("At least one camera must be selected for multiview body tracking.")
+        for selected_view_idx in selected_view_indices:
+            if selected_view_idx < 0 or selected_view_idx >= len(bgr_list) or selected_view_idx >= len(pinhole_list):
+                msg: str = f"Selected camera index {selected_view_idx} is outside the available view range."
+                raise IndexError(msg)
+
+        selected_bgr_list: list[UInt8[ndarray, "H W 3"]] = [bgr_list[idx] for idx in selected_view_indices]
+        selected_pinhole_list: list[PinholeParameters] = [pinhole_list[idx] for idx in selected_view_indices]
+        pall: Float32[ndarray, "n_views 3 4"] = np.array(
+            [pinhole.projection_matrix for pinhole in selected_pinhole_list], dtype=np.float32
+        )
 
         xyzc_extrap: Float32[ndarray, "n_kpts 4"] | None = None
         bboxes_extrap: Float32[ndarray, "n_views 4"] | None = None
@@ -177,9 +231,11 @@ class MultiviewBodyTracker:
             bboxes_extrap = np.concatenate([uv_min, uv_max], axis=1).astype(np.float32)
 
         uvc_list: list[Float32[ndarray, "n_kpts 3"]] = []
-        for image_idx, bgr in enumerate(bgr_list):
+        for selected_idx, (original_view_idx, bgr, pinhole) in enumerate(
+            zip(selected_view_indices, selected_bgr_list, selected_pinhole_list, strict=True)
+        ):
             if xyzc_extrap is not None and bboxes_extrap is not None:
-                bboxes: Float32[ndarray, "n_dets 4"] = rearrange(bboxes_extrap[image_idx], "b -> 1 b")
+                bboxes: Float32[ndarray, "n_dets 4"] = rearrange(bboxes_extrap[selected_idx], "b -> 1 b")
             else:
                 det_output: np.ndarray | tuple[np.ndarray, ...] = self.det_model(bgr)
                 det_bboxes_np: np.ndarray = det_output[0] if isinstance(det_output, tuple) else det_output
@@ -207,8 +263,8 @@ class MultiviewBodyTracker:
 
             if self.config.verbose:
                 self._log_uvc_layer(
-                    view_idx=image_idx,
-                    pinhole=pinhole_list[image_idx],
+                    view_idx=original_view_idx,
+                    pinhole=pinhole,
                     keypoints=filtered_keypoints,
                     confidences=filtered_scores,
                     layer=Coco133AnnotationLayer.RAW_2D,
@@ -216,10 +272,10 @@ class MultiviewBodyTracker:
                     recording=recording,
                 )
                 if tracked_confidences is not None and pred_state.uvc_extrap is not None:
-                    tracked_uv: Float32[ndarray, "n_kpts 2"] = pred_state.uvc_extrap[image_idx, :, 0:2]
+                    tracked_uv: Float32[ndarray, "n_kpts 2"] = pred_state.uvc_extrap[selected_idx, :, 0:2]
                     self._log_uvc_layer(
-                        view_idx=image_idx,
-                        pinhole=pinhole_list[image_idx],
+                        view_idx=original_view_idx,
+                        pinhole=pinhole,
                         keypoints=tracked_uv,
                         confidences=tracked_confidences,
                         layer=Coco133AnnotationLayer.TRACKED_2D,
@@ -318,11 +374,10 @@ class MultiviewBodyTracker:
 
             xyxy: Float32[ndarray, "1 4"] = bbox[np.newaxis, :]
             wilor_pred: FinalWilorPred | KeypointResults = engine(rgb_hw3=rgb_hw3, xyxy=xyxy, handedness=handedness)
-            pred_uv: Float32[ndarray, "1 21 2"] = (
-                wilor_pred.keypoints_2d
-                if isinstance(wilor_pred, KeypointResults)
-                else wilor_pred.pred_keypoints_2d.astype(np.float32, copy=False)
+            raw_pred_uv: Float[ndarray, "1 21 2"] = (
+                wilor_pred.keypoints_2d if isinstance(wilor_pred, KeypointResults) else wilor_pred.pred_keypoints_2d
             )
+            pred_uv: Float32[ndarray, "1 21 2"] = np.asarray(raw_pred_uv, dtype=np.float32)
             refined_hand_uv: Float32[ndarray, "21 2"] = pred_uv[0]
             refined_hand_uv[:, 0] = np.clip(refined_hand_uv[:, 0], 0.0, float(width - 1))
             refined_hand_uv[:, 1] = np.clip(refined_hand_uv[:, 1], 0.0, float(height - 1))
@@ -337,37 +392,11 @@ class MultiviewBodyTracker:
         image_shape: tuple[int, int],
         expansion_ratio: float,
     ) -> Float32[ndarray, "4"] | None:
-        valid_mask: Bool[ndarray, "hand"] = np.isfinite(hand_uv[:, 0]) & np.isfinite(hand_uv[:, 1])
-        if not bool(np.any(valid_mask)):
-            return None
-
-        valid_uv: Float32[ndarray, "valid 2"] = hand_uv[valid_mask, :]
-        min_xy: Float32[ndarray, "2"] = np.nanmin(valid_uv, axis=0).astype(np.float32, copy=False)
-        max_xy: Float32[ndarray, "2"] = np.nanmax(valid_uv, axis=0).astype(np.float32, copy=False)
-        side_length: float = float(max(max_xy[0] - min_xy[0], max_xy[1] - min_xy[1]))
-        if not np.isfinite(side_length) or side_length <= 0.0:
-            return None
-
-        center_xy: Float32[ndarray, "2"] = ((min_xy + max_xy) * 0.5).astype(np.float32, copy=False)
-        half_side: float = 0.5 * side_length * (1.0 + expansion_ratio)
-        if half_side <= 0.0:
-            return None
-
-        x1: float = float(center_xy[0] - half_side)
-        y1: float = float(center_xy[1] - half_side)
-        x2: float = float(center_xy[0] + half_side)
-        y2: float = float(center_xy[1] + half_side)
-
-        height, width = image_shape
-        x1 = float(np.clip(x1, 0.0, float(width - 1)))
-        x2 = float(np.clip(x2, 0.0, float(width - 1)))
-        y1 = float(np.clip(y1, 0.0, float(height - 1)))
-        y2 = float(np.clip(y2, 0.0, float(height - 1)))
-        if x2 <= x1 or y2 <= y1:
-            return None
-
-        bbox: Float32[ndarray, "4"] = np.array([x1, y1, x2, y2], dtype=np.float32)
-        return bbox
+        return compute_square_bbox_from_uv(
+            hand_uv=hand_uv,
+            image_shape=image_shape,
+            expansion_ratio=expansion_ratio,
+        )
 
     def extrapolate_3d_keypoints(
         self,

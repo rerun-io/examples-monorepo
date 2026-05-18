@@ -118,7 +118,7 @@ def test_node_app_rrd_matches_legacy_pipeline_oracle(
 
     monkeypatch.setattr(HocapConfig, "setup", fake_setup)
     monkeypatch.setattr(full_exoego_pipeline, "setup_scene", fake_setup_scene)
-    monkeypatch.setattr(full_exoego_pipeline, "_run_model_backed_pipeline", fake_model_backed_pipeline)
+    monkeypatch.setattr(full_exoego_pipeline, "run_model_backed_pipeline", fake_model_backed_pipeline)
 
     legacy_config: RRDPipelineConfig = RRDPipelineConfig(
         rr_config=RerunTyroConfig(
