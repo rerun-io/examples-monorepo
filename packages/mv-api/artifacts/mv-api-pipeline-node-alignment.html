@@ -1,0 +1,1330 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MV API Pipeline Node Alignment</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #111417;
+      --panel: #171c21;
+      --panel-2: #1d242b;
+      --ink: #edf2f4;
+      --muted: #a9b5bf;
+      --soft: #778590;
+      --line: #2b353f;
+      --accent: #69b7c9;
+      --accent-2: #c1a66d;
+      --danger: #e28476;
+      --ok: #8dc28b;
+      --shadow: 0 16px 48px rgba(0, 0, 0, 0.32);
+      --radius: 8px;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      background:
+        linear-gradient(180deg, rgba(105, 183, 201, 0.08), transparent 320px),
+        var(--bg);
+      color: var(--ink);
+      font-family: var(--sans);
+      line-height: 1.55;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    a:hover {
+      text-decoration: underline;
+    }
+
+    code,
+    pre {
+      font-family: var(--mono);
+    }
+
+    code {
+      color: #dce8ec;
+      background: rgba(105, 183, 201, 0.09);
+      border: 1px solid rgba(105, 183, 201, 0.16);
+      border-radius: 5px;
+      padding: 0.08rem 0.32rem;
+      font-size: 0.92em;
+    }
+
+    pre {
+      margin: 0;
+      padding: 1rem;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #101418;
+      color: #dbe5e9;
+      font-size: 0.88rem;
+    }
+
+    .shell {
+      min-height: 100vh;
+    }
+
+    .hero {
+      padding: 3.5rem 1.25rem 1.5rem;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .hero-inner,
+    .content {
+      width: min(1180px, calc(100vw - 2rem));
+      margin: 0 auto;
+    }
+
+    .kicker {
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-size: 0.76rem;
+      font-weight: 700;
+    }
+
+    h1 {
+      margin: 0.55rem 0 0.65rem;
+      max-width: 940px;
+      font-size: clamp(2rem, 4vw, 4.1rem);
+      line-height: 1.03;
+      letter-spacing: 0;
+    }
+
+    .lead {
+      max-width: 780px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 1.05rem;
+    }
+
+    .status-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 0.75rem;
+      margin-top: 1.5rem;
+    }
+
+    .status-card {
+      min-height: 112px;
+      padding: 0.95rem;
+      background: rgba(23, 28, 33, 0.92);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+
+    .status-card b {
+      display: block;
+      margin-bottom: 0.35rem;
+      font-size: 0.9rem;
+    }
+
+    .status-card span {
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .content {
+      display: grid;
+      grid-template-columns: 260px minmax(0, 1fr);
+      gap: 1.25rem;
+      padding: 1.5rem 0 3rem;
+    }
+
+    .toc {
+      position: sticky;
+      top: 1rem;
+      height: calc(100vh - 2rem);
+      padding: 1rem;
+      overflow: auto;
+      background: rgba(23, 28, 33, 0.84);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+    }
+
+    .toc h2 {
+      margin: 0 0 0.7rem;
+      font-size: 0.88rem;
+      color: var(--soft);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .toc a {
+      display: block;
+      padding: 0.55rem 0.45rem;
+      border-radius: 6px;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .toc a:hover,
+    .toc a.active {
+      color: var(--ink);
+      background: var(--panel-2);
+      text-decoration: none;
+    }
+
+    main {
+      min-width: 0;
+    }
+
+    section {
+      margin-bottom: 1rem;
+      padding: 1.15rem;
+      background: rgba(23, 28, 33, 0.9);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+    }
+
+    section h2 {
+      margin: 0;
+      font-size: 1.35rem;
+      line-height: 1.22;
+    }
+
+    section > p {
+      max-width: 76ch;
+      color: var(--muted);
+    }
+
+    h3 {
+      margin: 1.2rem 0 0.55rem;
+      font-size: 1rem;
+    }
+
+    .decision {
+      margin-top: 0.9rem;
+      padding: 1rem;
+      background: rgba(105, 183, 201, 0.08);
+      border: 1px solid rgba(105, 183, 201, 0.28);
+      border-radius: var(--radius);
+    }
+
+    .decision strong {
+      color: var(--accent);
+    }
+
+    .section-head {
+      display: flex;
+      align-items: start;
+      justify-content: space-between;
+      gap: 1rem;
+      margin-bottom: 0.8rem;
+    }
+
+    .button-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+
+    button {
+      appearance: none;
+      cursor: pointer;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel-2);
+      color: var(--ink);
+      padding: 0.48rem 0.7rem;
+      font: inherit;
+      font-size: 0.88rem;
+    }
+
+    button:hover,
+    button:focus-visible {
+      border-color: rgba(105, 183, 201, 0.68);
+      outline: none;
+    }
+
+    .tabs {
+      margin-top: 0.9rem;
+    }
+
+    .tab-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+      margin-bottom: 0.7rem;
+    }
+
+    .tab-list button[aria-selected="true"] {
+      background: rgba(105, 183, 201, 0.16);
+      border-color: rgba(105, 183, 201, 0.52);
+      color: var(--ink);
+    }
+
+    .tab-panel[hidden] {
+      display: none;
+    }
+
+    .timeline {
+      display: grid;
+      gap: 0.7rem;
+      counter-reset: step;
+    }
+
+    .step {
+      display: grid;
+      grid-template-columns: 2.5rem minmax(0, 1fr);
+      gap: 0.85rem;
+      padding: 0.85rem;
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+    }
+
+    .step::before {
+      counter-increment: step;
+      content: counter(step);
+      width: 2.1rem;
+      height: 2.1rem;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      color: #0f1518;
+      background: var(--accent);
+      font-weight: 800;
+    }
+
+    .step h3 {
+      margin: 0 0 0.2rem;
+      font-size: 0.98rem;
+    }
+
+    .step p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.93rem;
+    }
+
+    .step .paths {
+      margin-top: 0.45rem;
+      color: var(--soft);
+      font-size: 0.85rem;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.8rem;
+    }
+
+    .note {
+      padding: 0.85rem;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel-2);
+    }
+
+    .note h3 {
+      margin-top: 0;
+    }
+
+    .note p,
+    .note li {
+      color: var(--muted);
+    }
+
+    ul {
+      margin: 0.5rem 0 0;
+      padding-left: 1.2rem;
+    }
+
+    li + li {
+      margin-top: 0.28rem;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 0.8rem;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+    }
+
+    th,
+    td {
+      padding: 0.75rem;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+      text-align: left;
+    }
+
+    th {
+      color: var(--ink);
+      background: #20272f;
+      font-size: 0.82rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    td {
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 1.45rem;
+      padding: 0.1rem 0.45rem;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      color: var(--ink);
+      font-size: 0.78rem;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .tag.missing {
+      color: #ffd7d1;
+      border-color: rgba(226, 132, 118, 0.45);
+      background: rgba(226, 132, 118, 0.12);
+    }
+
+    .tag.partial {
+      color: #f0e3bd;
+      border-color: rgba(193, 166, 109, 0.45);
+      background: rgba(193, 166, 109, 0.12);
+    }
+
+    .tag.good {
+      color: #d6efd4;
+      border-color: rgba(141, 194, 139, 0.45);
+      background: rgba(141, 194, 139, 0.12);
+    }
+
+    .split-list {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 0.75rem;
+      margin-top: 0.8rem;
+    }
+
+    .module-card {
+      padding: 0.85rem;
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+    }
+
+    .module-card h3 {
+      margin: 0 0 0.35rem;
+      color: var(--ink);
+    }
+
+    .module-card p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 0.55rem;
+      margin-top: 0.8rem;
+    }
+
+    .flow-item {
+      position: relative;
+      min-height: 92px;
+      padding: 0.72rem;
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+    }
+
+    .flow-item h3 {
+      margin: 0 0 0.3rem;
+      font-size: 0.9rem;
+    }
+
+    .flow-item p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.82rem;
+    }
+
+    .flow-item:not(:last-child)::after {
+      content: ">";
+      position: absolute;
+      right: -0.45rem;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--soft);
+      z-index: 1;
+    }
+
+    details {
+      margin-top: 0.7rem;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel-2);
+    }
+
+    summary {
+      cursor: pointer;
+      padding: 0.85rem;
+      color: var(--ink);
+      font-weight: 700;
+    }
+
+    details > div {
+      padding: 0 0.85rem 0.85rem;
+      color: var(--muted);
+    }
+
+    .footer {
+      color: var(--soft);
+      font-size: 0.85rem;
+      padding: 1rem 0 0;
+    }
+
+    @media (max-width: 920px) {
+      .status-grid,
+      .grid-2,
+      .split-list,
+      .flow {
+        grid-template-columns: 1fr;
+      }
+
+      .flow-item:not(:last-child)::after {
+        content: "";
+      }
+
+      .content {
+        grid-template-columns: 1fr;
+      }
+
+      .toc {
+        position: static;
+        height: auto;
+      }
+    }
+
+    @media print {
+      :root {
+        color-scheme: light;
+        --bg: #ffffff;
+        --panel: #ffffff;
+        --panel-2: #f5f7f8;
+        --ink: #111417;
+        --muted: #3f4a52;
+        --soft: #56636d;
+        --line: #d8e0e5;
+        --accent: #006f86;
+        --accent-2: #7a5b00;
+        --shadow: none;
+      }
+
+      body {
+        background: #ffffff;
+      }
+
+      .toc,
+      .button-row,
+      .tab-list {
+        display: none;
+      }
+
+      .content {
+        display: block;
+      }
+
+      .tab-panel[hidden] {
+        display: block;
+      }
+
+      section,
+      .status-card {
+        break-inside: avoid;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="hero">
+      <div class="hero-inner">
+        <div class="kicker">MV API port architecture review</div>
+        <h1>Make the exo/ego pipeline modular enough to test and reuse</h1>
+        <p class="lead">
+          The current <code>full_exoego_pipeline.py</code> works as a runnable HoCap/LG validation path,
+          but it combines dataset loading, model construction, calibration, tracking, hand refinement,
+          Rerun logging, and visual validation in one surface. This map shows the exact execution path,
+          then aligns it with the create-node recipe.
+        </p>
+        <div class="status-grid" aria-label="Summary">
+          <div class="status-card">
+            <b>Current shape</b>
+            <span>One CLI module with helpers plus a large model-backed orchestration function.</span>
+          </div>
+          <div class="status-card">
+            <b>Correct target</b>
+            <span>A composite app that orchestrates several single-purpose nodes.</span>
+          </div>
+          <div class="status-card">
+            <b>Main risk</b>
+            <span>Rerun side effects and model calls are mixed with array transforms, which hides test seams.</span>
+          </div>
+          <div class="status-card">
+            <b>Validation need</b>
+            <span>Stage outputs must be screenshotable per 2D view, not only saved as one full RRD.</span>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <div class="content">
+      <nav class="toc" aria-label="Sections">
+        <h2>Sections</h2>
+        <a href="#current">Current Pipeline</a>
+        <a href="#alignment">Create-Node Alignment</a>
+        <a href="#modularity">Modularity Plan</a>
+        <a href="#tests">Test Strategy</a>
+        <a href="#next">Extraction Order</a>
+      </nav>
+
+      <main>
+        <section id="current">
+          <div class="section-head">
+            <div>
+              <h2>Current Pipeline</h2>
+              <p>
+                This is the execution path in <code>packages/mv-api/src/mv_api/api/full_exoego_pipeline.py</code>
+                as it exists now. The important observation is that nearly every step logs to Rerun or constructs
+                heavyweight models inside the same call stack.
+              </p>
+            </div>
+          </div>
+
+          <div class="tabs" data-tabs>
+            <div class="tab-list" role="tablist" aria-label="Current pipeline views">
+              <button role="tab" aria-selected="true" aria-controls="pipeline-steps" id="tab-steps">Step by step</button>
+              <button role="tab" aria-selected="false" aria-controls="pipeline-contracts" id="tab-contracts">Implicit contracts</button>
+              <button role="tab" aria-selected="false" aria-controls="pipeline-pain" id="tab-pain">Pain points</button>
+            </div>
+
+            <div class="tab-panel" id="pipeline-steps" role="tabpanel" aria-labelledby="tab-steps">
+              <div class="timeline">
+                <article class="step">
+                  <div>
+                    <h3>CLI config selects the dataset and model parameters</h3>
+                    <p>
+                      <code>RRDPipelineConfig</code> wraps <code>RerunTyroConfig</code>, a Tyro dataset union,
+                      <code>MultiViewCalibratorConfig</code>, <code>MultiviewBodyTrackerConfig</code>,
+                      optional calibration timestamp, and <code>max_frames</code>.
+                    </p>
+                    <div class="paths">Entry point: <code>tools/run_exoego_full.py</code> -> <code>main(config)</code></div>
+                  </div>
+                </article>
+
+                <article class="step">
+                  <div>
+                    <h3>Dataset setup produces the exo/ego sequence</h3>
+                    <p>
+                      <code>config.dataset.setup()</code> returns a <code>BaseExoEgoSequence</code> with exo readers,
+                      ego readers, optional dataset cameras, timestamps, and the world coordinate system.
+                    </p>
+                    <div class="paths">Adapters: <code>HocapConfig</code>, <code>SyncedVideoExoEgoConfig</code></div>
+                  </div>
+                </article>
+
+                <article class="step">
+                  <div>
+                    <h3>Rerun scene scaffolding is created up front</h3>
+                    <p>
+                      The pipeline logs the world coordinate system, COCO-133 annotation context, video streams,
+                      and the initial blueprint using <code>setup_scene()</code> and <code>_send_scene_blueprint()</code>.
+                    </p>
+                    <div class="paths">Side effects: <code>rr.log()</code>, <code>rr.send_blueprint()</code></div>
+                  </div>
+                </article>
+
+                <article class="step">
+                  <div>
+                    <h3>Calibration timestamp and frames are selected</h3>
+                    <p>
+                      The calibration timestamp defaults to the last shortest timestamp. Exo frames and RGB ego frames
+                      are read through frame timestamp lookup, converted from BGR to RGB, and filtered to RGB ego streams.
+                    </p>
+                    <div class="paths">Helpers: <code>timestamp_to_frame_index()</code>, <code>_read_bgr_frame()</code>, <code>_bgr_to_rgb()</code></div>
+                  </div>
+                </article>
+
+                <article class="step">
+                  <div>
+                    <h3>Calibration inputs are resized and joined</h3>
+                    <p>
+                      Exo and selected ego RGB images are resized to <code>1280x720</code>. The code keeps original frame
+                      shapes so calibrated pinholes can later be scaled back to native video resolution.
+                    </p>
+                    <div class="paths">Constant: <code>CALIB_TARGET_RESOLUTION</code></div>
+                  </div>
+                </article>
+
+                <article class="step">
+                  <div>
+                    <h3>Model-backed calibration runs</h3>
+                    <p>
+                      <code>WilorHandKeypointDetector</code> and <code>MultiViewCalibrator</code> are instantiated inside
+                      the orchestration function. The calibrator returns pinholes, point cloud, optional depth maps,
+                      and calibration artifacts.
+                    </p>
+                    <div class="paths">Models: <code>WilorHandKeypointDetector</code>, <code>MultiViewCalibrator</code></div>
+                  </div>
+                </article>
+
+                <article class="step">
+                  <div>
+                    <h3>Pinholes are split, named, scaled, and optionally replaced</h3>
+                    <p>
+                      Calibrated cameras are split into exo and ego sets, renamed from log paths, scaled to native image
+                      dimensions, and replaced with dataset-provided pose cameras when both exo and ego cameras exist.
+                    </p>
+                    <div class="paths">Helpers: <code>_scale_pinhole_to_image_shape()</code>, <code>_dataset_exo_pinhole_params()</code></div>
+                  </div>
+                </article>
+
+                <article class="step">
+                  <div>
+                    <h3>Scene geometry is logged</h3>
+                    <p>
+                      The pipeline logs pinholes when using calibrated cameras, a downsampled environment point cloud,
+                      and a TSDF-fused mesh when depth outputs are available.
+                    </p>
+                    <div class="paths">Side effects: <code>log_pinhole()</code>, <code>rr.Points3D</code>, <code>rr.Mesh3D</code></div>
+                  </div>
+                </article>
+
+                <article class="step">
+                  <div>
+                    <h3>Exo multiview body tracking predicts 3D COCO-133</h3>
+                    <p>
+                      <code>MultiviewBodyTracker</code> runs over synchronized exo frames. The loop filters to upper body,
+                      face, and hands, thresholds confidence, logs 3D points, projects them back into exo camera views,
+                      masks out-of-bounds points, and logs 2D overlays.
+                    </p>
+                    <div class="paths">Function: <code>predict_kpts3d_from_calibrated_videos()</code></div>
+                  </div>
+                </article>
+
+                <article class="step">
+                  <div>
+                    <h3>Ego projection and hand refinement run per frame</h3>
+                    <p>
+                      The 3D result is projected into ego camera trajectories. Invalid depth is masked, hand bboxes are
+                      computed, WiLor refines left/right hands when bboxes are valid, and final ego 2D overlays are logged.
+                    </p>
+                    <div class="paths">Helpers: <code>compute_square_bbox()</code>, <code>_extract_wilor_uv()</code>, <code>_mask_points_outside_intrinsics()</code></div>
+                  </div>
+                </article>
+
+                <article class="step">
+                  <div>
+                    <h3>The recording is flushed</h3>
+                    <p>
+                      The CLI returns only after the Rerun recording stream flushes. The current public API returns
+                      <code>None</code>, so downstream checks have to inspect RRD files or monkeypatch internals.
+                    </p>
+                    <div class="paths">Final call: <code>recording.flush(timeout_sec=30.0)</code></div>
+                  </div>
+                </article>
+              </div>
+            </div>
+
+            <div class="tab-panel" id="pipeline-contracts" role="tabpanel" aria-labelledby="tab-contracts" hidden>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Boundary</th>
+                    <th>Actual data contract</th>
+                    <th>Why it matters</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>Dataset -> scene setup</td>
+                    <td><code>BaseExoEgoSequence</code> with exo/ego sequence objects and reader collections.</td>
+                    <td>Good domain boundary, but validation code still reaches directly into nested reader details.</td>
+                  </tr>
+                  <tr>
+                    <td>Scene setup -> model pipeline</td>
+                    <td><code>SceneSetupResult</code> with log paths and shortest timestamp.</td>
+                    <td>This should become a typed <code>PreparedScene</code> record to isolate timestamp and log-path rules.</td>
+                  </tr>
+                  <tr>
+                    <td>Calibration -> pose stages</td>
+                    <td><code>MVCalibResults</code> plus split/scaled camera lists, point cloud, and optional depth maps.</td>
+                    <td>Calibration data is transformed inline, so tests cannot assert camera normalization separately.</td>
+                  </tr>
+                  <tr>
+                    <td>Exo tracking -> ego refinement</td>
+                    <td><code>list[Float32[ndarray, "n_kpts 4"]]</code> where columns are XYZ confidence.</td>
+                    <td>This should be a result dataclass with timestamps and skeleton metadata, not a bare list.</td>
+                  </tr>
+                  <tr>
+                    <td>Compute -> Rerun</td>
+                    <td>Most stages call <code>rr.log()</code> directly during computation.</td>
+                    <td>Final-result logging should be shared helpers; intermediate logging should be verbose-gated.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="tab-panel" id="pipeline-pain" role="tabpanel" aria-labelledby="tab-pain" hidden>
+              <div class="grid-2">
+                <div class="note">
+                  <h3>Test seams are indirect</h3>
+                  <p>
+                    Existing tests have to monkeypatch model constructors, readers, or internal functions because there
+                    is no stable public stage API for calibration, exo pose, ego projection, or Rerun logging.
+                  </p>
+                </div>
+                <div class="note">
+                  <h3>Side effects hide data bugs</h3>
+                  <p>
+                    The 2D alignment issue only became obvious through screenshots. A stage result should expose counts
+                    such as finite points, in-frame points, invalid depth points, and bbox validity per view.
+                  </p>
+                </div>
+                <div class="note">
+                  <h3>Models are built inside the run</h3>
+                  <p>
+                    WiLor, the calibrator, and body tracker are constructed in the full pipeline call. That makes reuse,
+                    app streaming, and fake model injection harder than needed.
+                  </p>
+                </div>
+                <div class="note">
+                  <h3>Full pipeline is not a node</h3>
+                  <p>
+                    A node should wrap one model or algorithm. This full path combines several algorithms, so it belongs
+                    in <code>apps/</code> as a composite orchestrator after the nodes are extracted.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="alignment">
+          <div class="section-head">
+            <div>
+              <h2>Create-Node Alignment</h2>
+              <p>
+                The referenced recipe defines a node as a single-purpose CV unit with three layers: API,
+                Gradio UI, and entry points. It also makes a strong distinction between reusable nodes and
+                composite apps that orchestrate multiple nodes.
+              </p>
+            </div>
+          </div>
+
+          <div class="decision">
+            <strong>Recommendation:</strong>
+            do not turn <code>full_exoego_pipeline.py</code> into one large node. Keep the full workflow as a
+            composite app, and extract model-backed, testable nodes underneath it.
+          </div>
+
+          <h3>Recipe expectation vs. current state</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Create-node requirement</th>
+                <th>Status</th>
+                <th>Current evidence</th>
+                <th>Required change</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>API file per node in <code>&lt;module&gt;/apis/&lt;name&gt;.py</code></td>
+                <td><span class="tag partial">Partial</span></td>
+                <td>There is one API file, but it contains the full composite pipeline.</td>
+                <td>Create smaller API modules for calibration, exo body pose, and ego hand refinement.</td>
+              </tr>
+              <tr>
+                <td>Config dataclass with field docs and <code>verbose: bool</code></td>
+                <td><span class="tag partial">Partial</span></td>
+                <td><code>RRDPipelineConfig</code> exists, but node-level configs do not.</td>
+                <td>Move model-specific knobs into node configs and add verbose-gated intermediate logging.</td>
+              </tr>
+              <tr>
+                <td>Result dataclass with jaxtyping arrays</td>
+                <td><span class="tag missing">Missing</span></td>
+                <td>The main pipeline returns <code>None</code>; exo tracking returns a bare list of arrays.</td>
+                <td>Add result records for prepared scene, calibration, exo pose, ego refinement, and full app summary.</td>
+              </tr>
+              <tr>
+                <td><code>&lt;Name&gt;Node</code> class loads models once</td>
+                <td><span class="tag missing">Missing</span></td>
+                <td>Models are instantiated inside <code>_run_model_backed_pipeline()</code>.</td>
+                <td>Move model lifecycle into node constructors with fakeable interfaces for tests.</td>
+              </tr>
+              <tr>
+                <td>Shared <code>log_&lt;name&gt;_result()</code></td>
+                <td><span class="tag missing">Missing</span></td>
+                <td>Rerun logs are interleaved with compute loops.</td>
+                <td>Separate final result logging from computation; keep intermediate logs behind <code>verbose</code>.</td>
+              </tr>
+              <tr>
+                <td>Shared <code>create_&lt;name&gt;_blueprint()</code></td>
+                <td><span class="tag partial">Partial</span></td>
+                <td><code>_send_scene_blueprint()</code> exists but is tied to the full scene.</td>
+                <td>Add stage blueprints and a composite blueprint assembled by the app.</td>
+              </tr>
+              <tr>
+                <td>Gradio node UI with streaming Rerun</td>
+                <td><span class="tag missing">Missing</span></td>
+                <td>No <code>gradio_ui/nodes/</code> layer exists for mv-api yet.</td>
+                <td>Defer until the API nodes are stable, then add one UI per reusable node and one composite app UI.</td>
+              </tr>
+              <tr>
+                <td>Three-line entry points in <code>tools/nodes</code> and <code>tools/demos</code></td>
+                <td><span class="tag partial">Partial</span></td>
+                <td><code>tools/run_exoego_full.py</code> is a CLI wrapper, but naming does not match node/app layout.</td>
+                <td>Move full workflow launcher to <code>tools/apps/</code>; add node demos as nodes are extracted.</td>
+              </tr>
+              <tr>
+                <td>Bundled or downloadable example data</td>
+                <td><span class="tag partial">Partial</span></td>
+                <td>HoCap sample data and raw LG paths exist, but stage examples are not split by node.</td>
+                <td>Use tiny recorded fixtures for unit tests and keep dataset downloads as pixi tasks.</td>
+              </tr>
+              <tr>
+                <td>CLI integration test saves a non-empty RRD</td>
+                <td><span class="tag good">Good base</span></td>
+                <td>There are CLI/RRD tests and real HoCap/LG validation artifacts.</td>
+                <td>Promote visual per-view screenshot checks into repeatable acceptance scripts.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>Where each piece should live</h3>
+          <div class="split-list">
+            <article class="module-card">
+              <h3>Reusable nodes</h3>
+              <p>
+                <code>mv_api/apis/multiview_calibration.py</code>,
+                <code>mv_api/apis/exo_body_pose.py</code>, and
+                <code>mv_api/apis/ego_hand_refinement.py</code>.
+              </p>
+            </article>
+            <article class="module-card">
+              <h3>Composite app</h3>
+              <p>
+                <code>mv_api/apis/full_exoego_app.py</code> orchestrates nodes and owns full-run Rerun layout,
+                dataset selection, and workflow-level config.
+              </p>
+            </article>
+            <article class="module-card">
+              <h3>Data adapters</h3>
+              <p>
+                <code>mv_api/data/</code> keeps HoCap/SyncedVideo adapters and creates typed prepared scene records.
+              </p>
+            </article>
+          </div>
+        </section>
+
+        <section id="modularity">
+          <div class="section-head">
+            <div>
+              <h2>Modularity Plan</h2>
+              <p>
+                The useful split is not by file size. It is by runtime contract: each stage gets typed inputs,
+                typed outputs, isolated model ownership, and one shared final-result logger.
+              </p>
+            </div>
+            <div class="button-row">
+              <button type="button" data-copy="#plan-copy">Copy stage plan</button>
+            </div>
+          </div>
+
+          <div class="flow" aria-label="Proposed runtime flow">
+            <article class="flow-item">
+              <h3>Prepare Scene</h3>
+              <p>Dataset setup, readers, log paths, timestamps, RGB stream selection.</p>
+            </article>
+            <article class="flow-item">
+              <h3>Calibrate Views</h3>
+              <p>Image resize, model calibration, camera scaling, point cloud and mesh outputs.</p>
+            </article>
+            <article class="flow-item">
+              <h3>Track Exo Pose</h3>
+              <p>Multiview body tracking, 3D skeletons, exo 2D projections.</p>
+            </article>
+            <article class="flow-item">
+              <h3>Refine Ego Hands</h3>
+              <p>Ego projection, invalid-depth masking, bboxes, WiLor refinement.</p>
+            </article>
+            <article class="flow-item">
+              <h3>Log and Validate</h3>
+              <p>Shared result loggers, blueprints, RRD save, per-view screenshots.</p>
+            </article>
+          </div>
+
+          <h3>Proposed stage contracts</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Stage</th>
+                <th>Owns</th>
+                <th>Returns</th>
+                <th>Tests become simple because</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>PreparedSceneBuilder</code></td>
+                <td>Dataset setup, reader extraction, timestamp selection, ego RGB stream filtering.</td>
+                <td><code>PreparedScene</code> dataclass with readers, log paths, timestamps, frame shapes, and camera names.</td>
+                <td>Fake readers can prove timestamp matching and stream filtering without model dependencies.</td>
+              </tr>
+              <tr>
+                <td><code>MultiviewCalibrationNode</code></td>
+                <td><code>MultiViewCalibrator</code> lifecycle and camera normalization.</td>
+                <td><code>CalibrationResult</code> with exo cameras, ego camera trajectories, point cloud, mesh inputs, and diagnostics.</td>
+                <td>Calibration can be tested with a fake calibrator returning deterministic pinholes.</td>
+              </tr>
+              <tr>
+                <td><code>ExoBodyPoseNode</code></td>
+                <td><code>MultiviewBodyTracker</code> lifecycle and exo projection.</td>
+                <td><code>ExoPoseResult</code> with timestamps, XYZC frames, exo UV frames, finite/in-frame counts.</td>
+                <td>Projection and masking can be asserted before any Rerun logging happens.</td>
+              </tr>
+              <tr>
+                <td><code>EgoHandRefinementNode</code></td>
+                <td>3D-to-ego projection, depth masking, hand bbox generation, WiLor hand refinement.</td>
+                <td><code>EgoHandRefinementResult</code> with ego UV frames, bboxes, invalid-depth counts, and WiLor status.</td>
+                <td>The LG zero-finite-ego-points case becomes an explicit diagnostic rather than a screenshot surprise.</td>
+              </tr>
+              <tr>
+                <td><code>FullExoEgoApp</code></td>
+                <td>Dataset choice, node wiring, timeline, recording, app-level blueprint, and final flush.</td>
+                <td><code>FullExoEgoResult</code> summarizing artifact paths and per-stage diagnostics.</td>
+                <td>The orchestrator can run entirely with fake nodes to prove call order and data handoff.</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <details>
+            <summary>Interface sketch for the first extraction</summary>
+            <div>
+              <pre><code>from dataclasses import dataclass
+from pathlib import Path
+
+from jaxtyping import Float32, Int, UInt8
+from numpy import ndarray
+from simplecv.camera_parameters import PinholeParameters
+
+
+@dataclass(slots=True)
+class PreparedScene:
+    """Dataset-derived scene inputs for full exo/ego processing."""
+
+    exo_video_log_paths: list[Path]
+    """Rerun log paths for exo video streams."""
+    ego_video_log_paths: list[Path]
+    """Rerun log paths for ego video streams."""
+    shortest_timestamp: Int[ndarray, "n_frames"]
+    """Common timeline used by the pipeline."""
+    ego_rgb_indices: list[int]
+    """Indices of ego streams treated as RGB inputs."""
+
+
+@dataclass(slots=True)
+class ExoPoseResult:
+    """Tracked and projected COCO-133 pose outputs from exo views."""
+
+    timestamps_ns: Int[ndarray, "n_frames"]
+    """Timestamps for each pose frame."""
+    xyzc: Float32[ndarray, "n_frames n_kpts 4"]
+    """World-space XYZ plus confidence for each keypoint."""
+    exo_uv: Float32[ndarray, "n_frames n_views n_kpts 2"]
+    """Projected exo pixel coordinates after image-bound masking."""
+    finite_counts: Int[ndarray, "n_frames n_views"]
+    """Number of finite projected 2D keypoints per frame and view."""</code></pre>
+            </div>
+          </details>
+
+          <pre id="plan-copy" hidden>1. Keep the full exo/ego workflow as a composite app, not one node.
+2. Extract typed scene preparation before touching model behavior.
+3. Extract calibration, exo pose, and ego hand refinement as separate node APIs.
+4. Give each node a config dataclass, result dataclass, node class, log_result helper, and blueprint helper.
+5. Make the full app orchestrate nodes and return a summary result with diagnostics.
+6. Promote RRD plus per-view screenshot checks to acceptance validation.</pre>
+        </section>
+
+        <section id="tests">
+          <h2>Test Strategy</h2>
+          <p>
+            The goal is to avoid only proving that the command exits. Each stage should produce inspectable
+            typed results before it writes to Rerun, then the Rerun artifact and screenshots should validate
+            that the viewer actually represents those results correctly.
+          </p>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Tier</th>
+                <th>Scope</th>
+                <th>Example assertion</th>
+                <th>Uses real models?</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>T0 import</td>
+                <td>Package, APIs, CLI wrappers.</td>
+                <td><code>import mv_api</code> and each node module succeeds under <code>mv-api-dev</code>.</td>
+                <td>No</td>
+              </tr>
+              <tr>
+                <td>T1 pure helpers</td>
+                <td>Timestamps, camera scaling, projection masking, bbox clipping.</td>
+                <td>Off-image points become <code>NaN</code>; clipped bbox never leaves intrinsics bounds.</td>
+                <td>No</td>
+              </tr>
+              <tr>
+                <td>T2 node units</td>
+                <td>One node at a time with fake calibrator/tracker/WiLor.</td>
+                <td>Node returns typed result arrays and diagnostics with expected shapes/counts.</td>
+                <td>No</td>
+              </tr>
+              <tr>
+                <td>T3 app integration</td>
+                <td>Full app with fake nodes and tiny real readers.</td>
+                <td>Orchestrator calls stages in order and passes camera/timestamp contracts correctly.</td>
+                <td>No</td>
+              </tr>
+              <tr>
+                <td>T4 artifact integration</td>
+                <td>HoCap sample and LG sample one-frame saves.</td>
+                <td>RRD exists, has expected entity paths, and per-view screenshots show in-frame overlays.</td>
+                <td>Yes</td>
+              </tr>
+              <tr>
+                <td>T5 UI E2E</td>
+                <td>Future Gradio node/app surfaces.</td>
+                <td>Upload examples, run, stream non-empty Rerun bytes, and screenshot rendered viewer.</td>
+                <td>Optional</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="grid-2">
+            <div class="note">
+              <h3>HoCap acceptance</h3>
+              <ul>
+                <li>Run the one-frame pipeline against the raw HoCap sample.</li>
+                <li>Save RRD and screenshots for each named exo/ego 2D view.</li>
+                <li>Assert 2D overlays are in-bounds after masking and no view autoscale is dominated by bogus coordinates.</li>
+              </ul>
+            </div>
+            <div class="note">
+              <h3>LG acceptance</h3>
+              <ul>
+                <li>Run the synced-videos path against <code>/mnt/8tb/data/exoego-self-collected/lg/...</code>.</li>
+                <li>Record finite/in-frame counts per ego view as diagnostics.</li>
+                <li>Treat zero finite ego keypoints as a stage output to debug, not just a visual anomaly.</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
+        <section id="next">
+          <h2>Extraction Order</h2>
+          <p>
+            This order keeps behavior anchored to current RRD artifacts while creating testable contracts one at
+            a time. Each step should start with a characterization test, then the smallest extraction that keeps
+            HoCap and LG smoke runs green.
+          </p>
+
+          <div class="timeline">
+            <article class="step">
+              <div>
+                <h3>Characterize current outputs</h3>
+                <p>
+                  Keep the existing HoCap/LG one-frame RRD files and per-view screenshots as comparison artifacts.
+                  Add a small script that records entity paths and finite 2D counts.
+                </p>
+              </div>
+            </article>
+            <article class="step">
+              <div>
+                <h3>Extract scene preparation</h3>
+                <p>
+                  Pull dataset setup, log path extraction, timestamp selection, ego RGB filtering, and initial frame
+                  reads into a pure-ish builder with fakes in tests.
+                </p>
+              </div>
+            </article>
+            <article class="step">
+              <div>
+                <h3>Extract camera and projection utilities</h3>
+                <p>
+                  Move scaling, timestamp mapping, BGR/RGB conversion, projection masking, and bbox clipping into
+                  small modules that carry existing unit tests.
+                </p>
+              </div>
+            </article>
+            <article class="step">
+              <div>
+                <h3>Create the calibration node</h3>
+                <p>
+                  Wrap <code>MultiViewCalibrator</code> in a node class, return <code>CalibrationResult</code>, and
+                  move point cloud/mesh logging into <code>log_multiview_calibration_result()</code>.
+                </p>
+              </div>
+            </article>
+            <article class="step">
+              <div>
+                <h3>Create the exo pose node</h3>
+                <p>
+                  Wrap <code>MultiviewBodyTracker</code>, return batched XYZC and exo UV results, and expose confidence,
+                  in-frame, and hand-validity diagnostics.
+                </p>
+              </div>
+            </article>
+            <article class="step">
+              <div>
+                <h3>Create the ego refinement node</h3>
+                <p>
+                  Wrap WiLor and ego projection, return bboxes plus refined UVs, and make invalid-depth and zero-finite
+                  cases first-class diagnostics.
+                </p>
+              </div>
+            </article>
+            <article class="step">
+              <div>
+                <h3>Rename the full workflow as an app</h3>
+                <p>
+                  Move the workflow launcher to <code>tools/apps/full_exoego_app.py</code> and keep a temporary legacy
+                  CLI alias if needed for existing validation commands.
+                </p>
+              </div>
+            </article>
+            <article class="step">
+              <div>
+                <h3>Add UI only after API contracts settle</h3>
+                <p>
+                  Build node UIs and a composite app UI following the recipe once the result dataclasses, loggers,
+                  and blueprints stop changing.
+                </p>
+              </div>
+            </article>
+          </div>
+
+          <div class="footer">
+            Source context: <code>packages/mv-api/src/mv_api/api/full_exoego_pipeline.py</code> and the
+            <code>recipes/create-node/SKILL.md</code> recipe from <code>pablovela5620/my-skill-forge</code>.
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    const tabContainers = document.querySelectorAll("[data-tabs]");
+    for (const container of tabContainers) {
+      const tabs = Array.from(container.querySelectorAll('[role="tab"]'));
+      const panels = Array.from(container.querySelectorAll('[role="tabpanel"]'));
+
+      function activateTab(tab) {
+        for (const currentTab of tabs) {
+          currentTab.setAttribute("aria-selected", String(currentTab === tab));
+        }
+        for (const panel of panels) {
+          panel.hidden = panel.id !== tab.getAttribute("aria-controls");
+        }
+      }
+
+      for (const tab of tabs) {
+        tab.addEventListener("click", () => activateTab(tab));
+        tab.addEventListener("keydown", (event) => {
+          const index = tabs.indexOf(tab);
+          if (event.key === "ArrowRight") {
+            event.preventDefault();
+            const next = tabs[(index + 1) % tabs.length];
+            activateTab(next);
+            next.focus();
+          }
+          if (event.key === "ArrowLeft") {
+            event.preventDefault();
+            const previous = tabs[(index - 1 + tabs.length) % tabs.length];
+            activateTab(previous);
+            previous.focus();
+          }
+        });
+      }
+    }
+
+    const copyButtons = document.querySelectorAll("[data-copy]");
+    for (const button of copyButtons) {
+      button.addEventListener("click", async () => {
+        const target = document.querySelector(button.getAttribute("data-copy"));
+        if (!target) {
+          return;
+        }
+        const original = button.textContent;
+        try {
+          await navigator.clipboard.writeText(target.textContent.trim());
+          button.textContent = "Copied";
+          window.setTimeout(() => {
+            button.textContent = original;
+          }, 1400);
+        } catch {
+          button.textContent = "Copy unavailable";
+          window.setTimeout(() => {
+            button.textContent = original;
+          }, 1400);
+        }
+      });
+    }
+
+    const links = Array.from(document.querySelectorAll(".toc a"));
+    const sections = links
+      .map((link) => document.querySelector(link.getAttribute("href")))
+      .filter(Boolean);
+
+    const observer = new IntersectionObserver((entries) => {
+      const visible = entries
+        .filter((entry) => entry.isIntersecting)
+        .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+      if (!visible) {
+        return;
+      }
+      for (const link of links) {
+        link.classList.toggle("active", link.getAttribute("href") === "#" + visible.target.id);
+      }
+    }, { rootMargin: "-20% 0px -70% 0px", threshold: [0.1, 0.25, 0.5] });
+
+    for (const section of sections) {
+      observer.observe(section);
+    }
+  </script>
+</body>
+</html>

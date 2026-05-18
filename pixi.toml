@@ -2,6 +2,9 @@
 authors = ["pablo vela <pablovela5620@gmail.com>"]
 channels = ["https://prefix.dev/ai-demos", "https://prefix.dev/conda-forge"]
 name = "examples-monorepo"
+# Keep Pixi's conda/PyPI name mapping explicit and local so dependency
+# overrides remain deterministic when PyPI-only CUDA wheels are selected.
+conda-pypi-map = { conda-forge = "conda-pypi-map.json" }
 # Keep both workspace platforms so target-specific selectors below remain
 # valid. CUDA-only features restrict themselves to linux-64.
 platforms = ["linux-64", "linux-aarch64"]
@@ -36,10 +39,10 @@ xorg-libx11 = "*"
 xorg-xorgproto = "*"
 
 [feature.common.pypi-dependencies]
-rerun-sdk = "==0.31.3"
+rerun-sdk = "==0.32.0"
 gradio = "==6.13.0"
-gradio-rerun = "==0.31.3"
-simplecv = { git = "https://github.com/pablovela5620/simplecv.git", tag = "7a7572e2761167ae9bf8cf0f2c8d48c8c3f9fef1" }
+gradio-rerun = "==0.32.0"
+simplecv = { git = "https://github.com/pablovela5620/simplecv.git", rev = "f7b66c6e3874cec0c009e464b212afe1f393352e" }
 
 
 # ─── CUDA 12.9 feature (shared across all GPU envs) ─────────────────────────
@@ -78,6 +81,9 @@ libnvjitlink = "*"
 # PyTorch
 pytorch-gpu = ">=2.8.0"
 torchvision = "*"
+
+[feature.cuda.pypi-dependencies]
+onnxruntime-gpu = ">=1.23.2,<2"
 
 # ─── ide feature (standalone dev env for Zed/IDE tooling) ────────────────────
 [feature.ide.dependencies]
@@ -310,9 +316,6 @@ pyrender = "*"
 wilor_nano = { path = "packages/wilor-nano", editable = true }
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 
-[feature.wilor.target.linux-64.pypi-dependencies]
-onnxruntime-gpu = ">=1.23.2,<2"
-
 [feature.wilor.target.linux-aarch64.pypi-dependencies]
 onnxruntime = ">=1.23.2,<2"
 
@@ -348,9 +351,6 @@ egoexo-forge = { path = "packages/egoexo-forge", editable = true }
 timm = "<1.0"
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 
-[feature.egoexo-forge.target.linux-64.pypi-dependencies]
-onnxruntime-gpu = ">=1.23.2,<2"
-
 [feature.egoexo-forge.target.linux-aarch64.pypi-dependencies]
 onnxruntime = ">=1.23.2,<2"
 
@@ -371,6 +371,50 @@ description = "Convert supported ego/exo datasets into Rerun .rrd files"
 cmd = "python tools/catalog.py"
 cwd = "packages/egoexo-forge"
 description = "Mount HF-hosted egoexo-forge RRDs (5 per source) as a Rerun catalog server"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# mv-api
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.mv-api]
+platforms = ["linux-64"]
+
+[feature.mv-api.dependencies]
+python = "3.12.*"
+h5py = ">=3.13.0,<4"
+natsort = ">=8.4.0,<9"
+open3d = ">=0.19.0,<0.20"
+scikit-image = ">=0.24.0,<0.25"
+tyro = ">=0.9.1,<0.10"
+
+[feature.mv-api.target.linux-64.dependencies]
+datasets = ">=4.0.0"
+
+[feature.mv-api.pypi-dependencies]
+mv-api = { path = "packages/mv-api", editable = true }
+monopriors = { path = "packages/monoprior", editable = true }
+wilor_nano = { path = "packages/wilor-nano", editable = true }
+rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
+vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c" }
+moge = { git = "https://github.com/microsoft/MoGe.git" }
+
+[feature.mv-api.activation.env]
+PACKAGE_DIR = "packages/mv-api"
+
+[feature.mv-api.tasks.mv-api-hocap-full]
+cmd = "python tools/run_exoego_full.py"
+cwd = "packages/mv-api"
+description = "Run the mv-api full exo/ego pipeline on raw HoCap data"
+
+[feature.mv-api.tasks.mv-api-full-app]
+cmd = "python tools/apps/full_exoego_app.py"
+cwd = "packages/mv-api"
+description = "Run the node-based mv-api full exo/ego composite app"
+
+[feature.mv-api.tasks.mv-api-hocap-download]
+cmd = "test -e data/hocap/sample || (mkdir -p data/hocap && hf download pablovela5620/hocap-sample sample.zip --repo-type dataset --local-dir data/hocap && python -m zipfile -e data/hocap/sample.zip data/hocap)"
+cwd = "packages/mv-api"
+outputs = ["packages/mv-api/data/hocap/sample"]
+description = "Download and extract the raw HoCap sample"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # sam3d-body-rerun
@@ -1383,6 +1427,17 @@ egoexo-forge-dev = { features = [
     "egoexo-forge",
     "dev",
 ], solve-group = "egoexo-forge", no-default-feature = true }
+mv-api = { features = [
+    "common",
+    "cuda",
+    "mv-api",
+], solve-group = "mv-api", no-default-feature = true }
+mv-api-dev = { features = [
+    "common",
+    "cuda",
+    "mv-api",
+    "dev",
+], solve-group = "mv-api", no-default-feature = true }
 mast3r-slam = { features = [
     "common",
     "cuda",
