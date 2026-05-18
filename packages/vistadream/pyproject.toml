@@ -17,6 +17,9 @@ dependencies = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.uv.sources]
+monopriors = { path = "../monoprior", editable = true }
+
 [tool.ruff]
 line-length = 150
 

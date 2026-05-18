@@ -8,6 +8,9 @@ dependencies = [
     "wilor-nano",
 ]
 
+[tool.uv.sources]
+wilor-nano = { path = "../wilor-nano", editable = true }
+
 [build-system]
 build-backend = "hatchling.build"
 requires = ["hatchling"]

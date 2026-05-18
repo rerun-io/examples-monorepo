@@ -1117,7 +1117,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/tzdata-2025c-hc9c84f9_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/urllib3-2.6.3-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wayland-protocols-1.47-hd8ed1ab_0.conda
-      - conda_source: dpretrieval[f0cdd4bb] @ packages/dpretrieval
+      - conda_source: dpretrieval[9c7325e1] @ packages/dpretrieval
       - pypi: git+https://github.com/pablovela5620/simplecv.git?rev=f7b66c6e3874cec0c009e464b212afe1f393352e#f7b66c6e3874cec0c009e464b212afe1f393352e
       - pypi: https://files.pythonhosted.org/packages/02/10/5da547df7a391dcde17f59520a231527b8571e6f46fc8efb02ccb370ab12/docutils-0.22.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/04/96/92447566d16df59b2a776c0fb82dbc4d9e07cd95062562af01e408583fc4/itsdangerous-2.2.0-py3-none-any.whl
@@ -1672,7 +1672,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/urllib3-2.6.3-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/vulture-2.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wayland-protocols-1.47-hd8ed1ab_0.conda
-      - conda_source: dpretrieval[f0cdd4bb] @ packages/dpretrieval
+      - conda_source: dpretrieval[9c7325e1] @ packages/dpretrieval
       - pypi: git+https://github.com/pablovela5620/simplecv.git?rev=f7b66c6e3874cec0c009e464b212afe1f393352e#f7b66c6e3874cec0c009e464b212afe1f393352e
       - pypi: https://files.pythonhosted.org/packages/02/10/5da547df7a391dcde17f59520a231527b8571e6f46fc8efb02ccb370ab12/docutils-0.22.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/04/96/92447566d16df59b2a776c0fb82dbc4d9e07cd95062562af01e408583fc4/itsdangerous-2.2.0-py3-none-any.whl
@@ -5950,6 +5950,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.8-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wslink-2.5.6-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-3.23.1-pyhcf101f3_0.conda
+      - pypi: ../sam3-rerun
       - pypi: git+https://github.com/EasternJournalist/pipeline.git?rev=866f059d2a05cde05e4a52211ec5051fd5f276d6#866f059d2a05cde05e4a52211ec5051fd5f276d6
       - pypi: git+https://github.com/EasternJournalist/utils3d.git?rev=3fab839f0be9931dac7c8488eb0e1600c236e183#3fab839f0be9931dac7c8488eb0e1600c236e183
       - pypi: git+https://github.com/microsoft/MoGe.git#07444410f1e33f402353b99d6ccd26bd31e469e8
@@ -6018,7 +6019,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/fd/c4/813bb09f0985cb21e959f21f2464169eca882656849adf727ac7bb7e1767/jaraco_functools-4.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ff/9a/9afaade874b2fa6c752c36f1548f718b5b83af81ed9b76628329dab81c1b/rfc3986-2.0.0-py2.py3-none-any.whl
       - pypi: packages/monoprior
-      - pypi: packages/sam3-rerun
   monoprior-dev:
     channels:
     - url: https://prefix.dev/ai-demos/
@@ -6572,6 +6572,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.8-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wslink-2.5.6-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-3.23.1-pyhcf101f3_0.conda
+      - pypi: ../sam3-rerun
       - pypi: git+https://github.com/EasternJournalist/pipeline.git?rev=866f059d2a05cde05e4a52211ec5051fd5f276d6#866f059d2a05cde05e4a52211ec5051fd5f276d6
       - pypi: git+https://github.com/EasternJournalist/utils3d.git?rev=3fab839f0be9931dac7c8488eb0e1600c236e183#3fab839f0be9931dac7c8488eb0e1600c236e183
       - pypi: git+https://github.com/microsoft/MoGe.git#07444410f1e33f402353b99d6ccd26bd31e469e8
@@ -6642,7 +6643,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/fd/c4/813bb09f0985cb21e959f21f2464169eca882656849adf727ac7bb7e1767/jaraco_functools-4.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ff/9a/9afaade874b2fa6c752c36f1548f718b5b83af81ed9b76628329dab81c1b/rfc3986-2.0.0-py2.py3-none-any.whl
       - pypi: packages/monoprior
-      - pypi: packages/sam3-rerun
   mv-api:
     channels:
     - url: https://prefix.dev/ai-demos/
@@ -7137,6 +7137,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.8-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wslink-2.5.7-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-3.23.1-pyhcf101f3_0.conda
+      - pypi: ../sam3-rerun
       - pypi: git+https://github.com/EasternJournalist/pipeline.git?rev=866f059d2a05cde05e4a52211ec5051fd5f276d6#866f059d2a05cde05e4a52211ec5051fd5f276d6
       - pypi: git+https://github.com/EasternJournalist/utils3d.git?rev=3fab839f0be9931dac7c8488eb0e1600c236e183#3fab839f0be9931dac7c8488eb0e1600c236e183
       - pypi: git+https://github.com/microsoft/MoGe.git#07444410f1e33f402353b99d6ccd26bd31e469e8
@@ -7230,7 +7231,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/ff/9a/9afaade874b2fa6c752c36f1548f718b5b83af81ed9b76628329dab81c1b/rfc3986-2.0.0-py2.py3-none-any.whl
       - pypi: packages/monoprior
       - pypi: packages/mv-api
-      - pypi: packages/sam3-rerun
       - pypi: packages/wilor-nano
   mv-api-dev:
     channels:
@@ -7735,6 +7735,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.8-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wslink-2.5.7-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-3.23.1-pyhcf101f3_0.conda
+      - pypi: ../sam3-rerun
       - pypi: git+https://github.com/EasternJournalist/pipeline.git?rev=866f059d2a05cde05e4a52211ec5051fd5f276d6#866f059d2a05cde05e4a52211ec5051fd5f276d6
       - pypi: git+https://github.com/EasternJournalist/utils3d.git?rev=3fab839f0be9931dac7c8488eb0e1600c236e183#3fab839f0be9931dac7c8488eb0e1600c236e183
       - pypi: git+https://github.com/microsoft/MoGe.git#07444410f1e33f402353b99d6ccd26bd31e469e8
@@ -7830,7 +7831,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/ff/9a/9afaade874b2fa6c752c36f1548f718b5b83af81ed9b76628329dab81c1b/rfc3986-2.0.0-py2.py3-none-any.whl
       - pypi: packages/monoprior
       - pypi: packages/mv-api
-      - pypi: packages/sam3-rerun
       - pypi: packages/wilor-nano
   prompt-da:
     channels:
@@ -8257,6 +8257,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.8-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wslink-2.5.6-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-3.23.1-pyhcf101f3_0.conda
+      - pypi: ../sam3-rerun
       - pypi: git+https://github.com/pablovela5620/simplecv.git?rev=f7b66c6e3874cec0c009e464b212afe1f393352e#f7b66c6e3874cec0c009e464b212afe1f393352e
       - pypi: https://files.pythonhosted.org/packages/02/10/5da547df7a391dcde17f59520a231527b8571e6f46fc8efb02ccb370ab12/docutils-0.22.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/0c/29/0348de65b8cc732daa3e33e67806420b2ae89bdce2b04af740289c5c6c8c/loguru-0.7.3-py3-none-any.whl
@@ -8339,7 +8340,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/ff/9a/9afaade874b2fa6c752c36f1548f718b5b83af81ed9b76628329dab81c1b/rfc3986-2.0.0-py2.py3-none-any.whl
       - pypi: packages/monoprior
       - pypi: packages/prompt-da
-      - pypi: packages/sam3-rerun
   prompt-da-dev:
     channels:
     - url: https://prefix.dev/ai-demos/
@@ -8774,6 +8774,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.8-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wslink-2.5.6-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-3.23.1-pyhcf101f3_0.conda
+      - pypi: ../sam3-rerun
       - pypi: git+https://github.com/pablovela5620/simplecv.git?rev=f7b66c6e3874cec0c009e464b212afe1f393352e#f7b66c6e3874cec0c009e464b212afe1f393352e
       - pypi: https://files.pythonhosted.org/packages/02/10/5da547df7a391dcde17f59520a231527b8571e6f46fc8efb02ccb370ab12/docutils-0.22.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/0c/29/0348de65b8cc732daa3e33e67806420b2ae89bdce2b04af740289c5c6c8c/loguru-0.7.3-py3-none-any.whl
@@ -8858,7 +8859,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/ff/9a/9afaade874b2fa6c752c36f1548f718b5b83af81ed9b76628329dab81c1b/rfc3986-2.0.0-py2.py3-none-any.whl
       - pypi: packages/monoprior
       - pypi: packages/prompt-da
-      - pypi: packages/sam3-rerun
   pysfm:
     channels:
     - url: https://prefix.dev/ai-demos/
@@ -13148,6 +13148,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/tzdata-2025c-hc9c84f9_1.conda
       - conda: https://prefix.dev/conda-forge/noarch/urllib3-2.6.3-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wayland-protocols-1.47-hd8ed1ab_0.conda
+      - pypi: ../sam3-rerun
       - pypi: git+https://github.com/pablovela5620/simplecv.git?rev=f7b66c6e3874cec0c009e464b212afe1f393352e#f7b66c6e3874cec0c009e464b212afe1f393352e
       - pypi: https://files.pythonhosted.org/packages/02/10/5da547df7a391dcde17f59520a231527b8571e6f46fc8efb02ccb370ab12/docutils-0.22.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/0c/c3/44f3fbbfa403ea2a7c779186dc20772604442dde72947e7d01069cbe98e3/pycparser-3.0-py3-none-any.whl
@@ -13226,7 +13227,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/fb/76/641ae371508676492379f16e2fa48f4e2c11741bd63c48be4b12a6b09cba/aiosignal-1.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/fd/c4/813bb09f0985cb21e959f21f2464169eca882656849adf727ac7bb7e1767/jaraco_functools-4.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ff/9a/9afaade874b2fa6c752c36f1548f718b5b83af81ed9b76628329dab81c1b/rfc3986-2.0.0-py2.py3-none-any.whl
-      - pypi: packages/sam3-rerun
   sam3-rerun-dev:
     channels:
     - url: https://prefix.dev/ai-demos/
@@ -13602,6 +13602,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/urllib3-2.6.3-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/vulture-2.16-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wayland-protocols-1.47-hd8ed1ab_0.conda
+      - pypi: ../sam3-rerun
       - pypi: git+https://github.com/pablovela5620/simplecv.git?rev=f7b66c6e3874cec0c009e464b212afe1f393352e#f7b66c6e3874cec0c009e464b212afe1f393352e
       - pypi: https://files.pythonhosted.org/packages/02/10/5da547df7a391dcde17f59520a231527b8571e6f46fc8efb02ccb370ab12/docutils-0.22.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/0c/c3/44f3fbbfa403ea2a7c779186dc20772604442dde72947e7d01069cbe98e3/pycparser-3.0-py3-none-any.whl
@@ -13682,7 +13683,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/fb/76/641ae371508676492379f16e2fa48f4e2c11741bd63c48be4b12a6b09cba/aiosignal-1.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/fd/c4/813bb09f0985cb21e959f21f2464169eca882656849adf727ac7bb7e1767/jaraco_functools-4.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ff/9a/9afaade874b2fa6c752c36f1548f718b5b83af81ed9b76628329dab81c1b/rfc3986-2.0.0-py2.py3-none-any.whl
-      - pypi: packages/sam3-rerun
   sam3d:
     channels:
     - url: https://prefix.dev/ai-demos/
@@ -14117,6 +14117,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.8-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wslink-2.5.6-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-3.23.1-pyhcf101f3_0.conda
+      - pypi: ../sam3-rerun
       - pypi: git+https://github.com/EasternJournalist/pipeline.git?rev=866f059d2a05cde05e4a52211ec5051fd5f276d6#866f059d2a05cde05e4a52211ec5051fd5f276d6
       - pypi: git+https://github.com/EasternJournalist/utils3d.git?rev=3fab839f0be9931dac7c8488eb0e1600c236e183#3fab839f0be9931dac7c8488eb0e1600c236e183
       - pypi: git+https://github.com/microsoft/MoGe.git#07444410f1e33f402353b99d6ccd26bd31e469e8
@@ -14213,7 +14214,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/fd/c4/813bb09f0985cb21e959f21f2464169eca882656849adf727ac7bb7e1767/jaraco_functools-4.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ff/9a/9afaade874b2fa6c752c36f1548f718b5b83af81ed9b76628329dab81c1b/rfc3986-2.0.0-py2.py3-none-any.whl
       - pypi: packages/monoprior
-      - pypi: packages/sam3-rerun
       - pypi: packages/sam3d-body-rerun
   sam3d-dev:
     channels:
@@ -14658,6 +14658,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.8-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wslink-2.5.6-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-3.23.1-pyhcf101f3_0.conda
+      - pypi: ../sam3-rerun
       - pypi: git+https://github.com/EasternJournalist/pipeline.git?rev=866f059d2a05cde05e4a52211ec5051fd5f276d6#866f059d2a05cde05e4a52211ec5051fd5f276d6
       - pypi: git+https://github.com/EasternJournalist/utils3d.git?rev=3fab839f0be9931dac7c8488eb0e1600c236e183#3fab839f0be9931dac7c8488eb0e1600c236e183
       - pypi: git+https://github.com/microsoft/MoGe.git#07444410f1e33f402353b99d6ccd26bd31e469e8
@@ -14756,7 +14757,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/fd/c4/813bb09f0985cb21e959f21f2464169eca882656849adf727ac7bb7e1767/jaraco_functools-4.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ff/9a/9afaade874b2fa6c752c36f1548f718b5b83af81ed9b76628329dab81c1b/rfc3986-2.0.0-py2.py3-none-any.whl
       - pypi: packages/monoprior
-      - pypi: packages/sam3-rerun
       - pypi: packages/sam3d-body-rerun
   sapiens2-pose:
     channels:
@@ -16877,6 +16877,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.8-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wslink-2.5.6-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-3.23.1-pyhcf101f3_0.conda
+      - pypi: ../sam3-rerun
       - pypi: git+https://github.com/EasternJournalist/pipeline.git?rev=866f059d2a05cde05e4a52211ec5051fd5f276d6#866f059d2a05cde05e4a52211ec5051fd5f276d6
       - pypi: git+https://github.com/EasternJournalist/utils3d.git?rev=3fab839f0be9931dac7c8488eb0e1600c236e183#3fab839f0be9931dac7c8488eb0e1600c236e183
       - pypi: git+https://github.com/microsoft/MoGe.git#07444410f1e33f402353b99d6ccd26bd31e469e8
@@ -16968,7 +16969,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/fd/c4/813bb09f0985cb21e959f21f2464169eca882656849adf727ac7bb7e1767/jaraco_functools-4.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ff/9a/9afaade874b2fa6c752c36f1548f718b5b83af81ed9b76628329dab81c1b/rfc3986-2.0.0-py2.py3-none-any.whl
       - pypi: packages/monoprior
-      - pypi: packages/sam3-rerun
       - pypi: packages/vistadream
   vistadream-dev:
     channels:
@@ -17419,6 +17419,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/werkzeug-3.1.8-pyhcf101f3_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/wslink-2.5.6-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-3.23.1-pyhcf101f3_0.conda
+      - pypi: ../sam3-rerun
       - pypi: git+https://github.com/EasternJournalist/pipeline.git?rev=866f059d2a05cde05e4a52211ec5051fd5f276d6#866f059d2a05cde05e4a52211ec5051fd5f276d6
       - pypi: git+https://github.com/EasternJournalist/utils3d.git?rev=3fab839f0be9931dac7c8488eb0e1600c236e183#3fab839f0be9931dac7c8488eb0e1600c236e183
       - pypi: git+https://github.com/microsoft/MoGe.git#07444410f1e33f402353b99d6ccd26bd31e469e8
@@ -17512,7 +17513,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/fd/c4/813bb09f0985cb21e959f21f2464169eca882656849adf727ac7bb7e1767/jaraco_functools-4.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/ff/9a/9afaade874b2fa6c752c36f1548f718b5b83af81ed9b76628329dab81c1b/rfc3986-2.0.0-py2.py3-none-any.whl
       - pypi: packages/monoprior
-      - pypi: packages/sam3-rerun
       - pypi: packages/vistadream
   wilor:
     channels:
@@ -18965,6 +18965,21 @@ packages:
     - aws-c-io >=0.26.3,<0.26.4.0a0
   size: 181583
   timestamp: 1777471132287
+- conda: https://prefix.dev/conda-forge/linux-64/aws-c-io-0.26.3-hb18f61d_2.conda
+  sha256: eee7f7aa2c5b9e0a31edba7b81482036fbe751c40bc6697fd057fbd2c656406b
+  md5: d1337309873c443bcc9f118b67eed84e
+  depends:
+  - __glibc >=2.17,<3.0.a0
+  - libgcc >=14
+  - aws-c-cal >=0.9.13,<0.9.14.0a0
+  - s2n >=1.7.3,<1.7.4.0a0
+  - aws-c-common >=0.12.6,<0.12.7.0a0
+  license: Apache-2.0
+  run_exports:
+    weak:
+    - aws-c-io >=0.26.3,<0.26.4.0a0
+  size: 181606
+  timestamp: 1779133007375
 - conda: https://prefix.dev/conda-forge/linux-64/aws-c-mqtt-0.15.2-hc1936db_2.conda
   sha256: 236ab4138ff4600f95903d2da94125df78577055f6687afa8806db0f6ed2e1a8
   md5: 9120bc47b6f837f3cea90928c3e9a8fa
@@ -29434,6 +29449,20 @@ packages:
     - s2n >=1.7.2,<1.7.3.0a0
   size: 387306
   timestamp: 1777466173323
+- conda: https://prefix.dev/conda-forge/linux-64/s2n-1.7.3-hc5a330e_0.conda
+  sha256: 150a0a5254e8b15ad737549721c7d13406cd96432f3f446e07073dbd98bb2491
+  md5: f2bd09e21c5844a12e2f5eefcd075555
+  depends:
+  - __glibc >=2.17,<3.0.a0
+  - libgcc >=14
+  - openssl >=3.5.6,<4.0a0
+  license: Apache-2.0
+  license_family: Apache
+  run_exports:
+    weak:
+    - s2n >=1.7.3,<1.7.4.0a0
+  size: 388111
+  timestamp: 1778113913631
 - conda: https://prefix.dev/conda-forge/linux-64/safetensors-0.7.0-py310hdfeec95_0.conda
   sha256: a8a95e662dff8b3d864bf126e569a021bbb56472f1de596e7cd041ac97dc90d5
   md5: 2b88b39db90a04bef04db640ca693b14
@@ -38781,7 +38810,7 @@ packages:
   - conda: https://prefix.dev/conda-forge/noarch/setuptools-82.0.1-pyh332efcf_0.conda
   - conda: https://prefix.dev/conda-forge/noarch/tzdata-2025c-hc9c84f9_1.conda
   - conda: https://prefix.dev/conda-forge/noarch/wheel-0.47.0-pyhd8ed1ab_0.conda
-- conda_source: dpretrieval[f0cdd4bb] @ packages/dpretrieval
+- conda_source: dpretrieval[9c7325e1] @ packages/dpretrieval
   variants:
     target_platform: linux-64
   depends:
@@ -38844,7 +38873,7 @@ packages:
   - conda: https://prefix.dev/conda-forge/linux-64/aws-c-common-0.12.6-hb03c661_0.conda
   - conda: https://prefix.dev/conda-forge/linux-64/aws-c-compression-0.3.2-h8b1a151_0.conda
   - conda: https://prefix.dev/conda-forge/linux-64/aws-c-http-0.10.13-h4bacb7b_0.conda
-  - conda: https://prefix.dev/conda-forge/linux-64/aws-c-io-0.26.3-h692f434_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/aws-c-io-0.26.3-hb18f61d_2.conda
   - conda: https://prefix.dev/conda-forge/linux-64/aws-c-s3-0.12.2-he6ee468_1.conda
   - conda: https://prefix.dev/conda-forge/linux-64/aws-c-sdkutils-0.2.4-h8b1a151_4.conda
   - conda: https://prefix.dev/conda-forge/linux-64/aws-checksums-0.2.10-h8b1a151_0.conda
@@ -38989,7 +39018,7 @@ packages:
   - conda: https://prefix.dev/conda-forge/linux-64/qt6-main-6.11.1-pl5321h16c4a6b_0.conda
   - conda: https://prefix.dev/conda-forge/linux-64/rav1e-0.8.1-h1fbca29_0.conda
   - conda: https://prefix.dev/conda-forge/linux-64/readline-8.3-h853b02a_0.conda
-  - conda: https://prefix.dev/conda-forge/linux-64/s2n-1.7.2-hc5a330e_1.conda
+  - conda: https://prefix.dev/conda-forge/linux-64/s2n-1.7.3-hc5a330e_0.conda
   - conda: https://prefix.dev/conda-forge/linux-64/sdl2-2.32.56-h54a6638_0.conda
   - conda: https://prefix.dev/conda-forge/linux-64/sdl3-3.4.8-hdeec2a5_0.conda
   - conda: https://prefix.dev/conda-forge/linux-64/shaderc-2026.2-h718be3e_0.conda
@@ -39098,6 +39127,12 @@ packages:
   - conda: https://prefix.dev/conda-forge/noarch/setuptools-82.0.1-pyh332efcf_0.conda
   - conda: https://prefix.dev/conda-forge/noarch/tzdata-2025c-hc9c84f9_1.conda
   - conda: https://prefix.dev/conda-forge/noarch/wheel-0.47.0-pyhd8ed1ab_0.conda
+- pypi: ../sam3-rerun
+  name: sam3-rerun
+  requires_dist:
+  - einops>=0.8.0
+  - tyro>=0.9.1
+  requires_python: '>=3.12'
 - pypi: ./packages/gsplat-rust-renderer
   name: gsplat-rust-renderer
   requires_python: '>=3.12'
@@ -44070,7 +44105,7 @@ packages:
 - pypi: packages/egoexo-forge
   name: egoexo-forge
   requires_dist:
-  - wilor-nano
+  - wilor-nano @ ../wilor-nano
   requires_python: '>=3.12'
 - pypi: packages/mast3r-slam
   name: mast3r-slam
@@ -44087,7 +44122,7 @@ packages:
   - pytorch-lightning>=2.5.1,<3
   - diffusers[torch]>=0.32.2
   - timm>=1.0.15,<2
-  - sam3-rerun>=0.1.0
+  - sam3-rerun @ ../sam3-rerun
   requires_python: '>=3.11.0'
 - pypi: packages/mv-api
   name: mv-api
@@ -44100,7 +44135,7 @@ packages:
 - pypi: packages/prompt-da
   name: rerun-prompt-da
   requires_dist:
-  - monopriors>=0.3.2
+  - monopriors @ ../monoprior
   requires_python: '>=3.12'
 - pypi: packages/pysfm
   name: pysfm
@@ -44115,12 +44150,6 @@ packages:
   - pyarrow
   - tyro
   requires_python: '>=3.10'
-- pypi: packages/sam3-rerun
-  name: sam3-rerun
-  requires_dist:
-  - einops>=0.8.0
-  - tyro>=0.9.1
-  requires_python: '>=3.12'
 - pypi: packages/sam3d-body-rerun
   name: sam3d-body
   requires_dist:
@@ -44136,8 +44165,8 @@ packages:
   - omegaconf>=2.3.0,<3
   - termcolor>=3.2.0,<4
   - spaces>=0.43.0
-  - monopriors>=0.3.2
-  - sam3-rerun>=0.1.0
+  - monopriors @ ../monoprior
+  - sam3-rerun @ ../sam3-rerun
   requires_python: '>=3.12'
 - pypi: packages/sapiens2-pose
   name: sapiens2-pose
@@ -44158,7 +44187,7 @@ packages:
   name: vistadream
   requires_dist:
   - einops>=0.8.1,<0.9
-  - monopriors>=0.3.2
+  - monopriors @ ../monoprior
   requires_python: '>=3.11'
 - pypi: packages/wilor-nano
   name: wilor-nano
