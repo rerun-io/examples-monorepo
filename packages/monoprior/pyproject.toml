@@ -16,9 +16,6 @@ dependencies = [
     "sam3-rerun>=0.1.0",
 ]
 
-[tool.uv.sources]
-sam3-rerun = { path = "../sam3-rerun", editable = true }
-
 [tool.setuptools.packages.find]
 include = ["monopriors*", "tools*"]
 
