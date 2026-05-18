@@ -542,6 +542,13 @@ python = "3.12.*"
 
 [feature.sapiens2-pose.pypi-dependencies]
 sapiens2-pose = { path = "packages/sapiens2-pose", editable = true }
+onnx = "*"
+onnxscript = "*"
+
+[feature.sapiens2-pose.target.linux-64.pypi-dependencies]
+# TensorRT engines are machine-local artifacts; keep ONNX portable and rebuild engines per target GPU.
+tensorrt-cu12 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
+cuda-python = "*"
 
 [feature.sapiens2-pose.activation.env]
 PACKAGE_DIR = "packages/sapiens2-pose"
@@ -552,10 +559,60 @@ cmd = "python tools/gradio_app.py"
 cwd = "packages/sapiens2-pose"
 description = "Launch the Sapiens2 pose Gradio app"
 
+[feature.sapiens2-pose.tasks.sapiens2-pose-video-app]
+cmd = "python tools/video_gradio_app.py"
+cwd = "packages/sapiens2-pose"
+description = "Launch the Sapiens2 video pose Gradio app"
+
+[feature.sapiens2-pose.tasks.sapiens2-pose-image]
+cmd = "python tools/demos/image_pose.py"
+cwd = "packages/sapiens2-pose"
+description = "Run Sapiens2 image pose inference and write Rerun/numeric artifacts"
+
+[feature.sapiens2-pose.tasks.sapiens2-pose-video]
+cmd = "python tools/demos/video_pose.py"
+cwd = "packages/sapiens2-pose"
+description = "Run Sapiens2 video pose inference and write a Rerun RRD"
+
+[feature.sapiens2-pose.tasks.sapiens2-pose-export-onnx]
+cmd = "python tools/conversion/export_onnx.py"
+cwd = "packages/sapiens2-pose"
+description = "Export a Sapiens2 pose checkpoint to ONNX"
+
+[feature.sapiens2-pose.tasks.sapiens2-pose-build-trt]
+cmd = "python tools/conversion/build_tensorrt.py"
+cwd = "packages/sapiens2-pose"
+description = "Build a machine-local TensorRT engine from a Sapiens2 pose ONNX graph"
+
+[feature.sapiens2-pose.tasks.sapiens2-pose-trt-image]
+cmd = "python tools/demos/tensorrt_image_pose.py"
+cwd = "packages/sapiens2-pose"
+description = "Run Sapiens2 pose inference with a TensorRT heatmap backend"
+
+[feature.sapiens2-pose.tasks.sapiens2-pose-compare-artifacts]
+cmd = "python tools/eval/compare_pose_artifacts.py"
+cwd = "packages/sapiens2-pose"
+description = "Compare two Sapiens2 pose numeric artifacts"
+
+[feature.sapiens2-pose.tasks.sapiens2-pose-compare-rrds]
+cmd = "python tools/eval/compare_pose_rrds.py"
+cwd = "packages/sapiens2-pose"
+description = "Compare Sapiens2 pose values queried from two Rerun recordings"
+
+[feature.sapiens2-pose.tasks.sapiens2-pose-benchmark-trt]
+cmd = "python tools/eval/benchmark_tensorrt_pose.py"
+cwd = "packages/sapiens2-pose"
+description = "Benchmark PyTorch vs TensorRT Sapiens2 pose heatmap inference"
+
 [feature.sapiens2-pose.tasks.sapiens2-pose-dev-app]
 cmd = "gradio tools/gradio_app.py"
 cwd = "packages/sapiens2-pose"
 description = "Launch the Sapiens2 pose Gradio app in dev mode"
+
+[feature.sapiens2-pose.tasks.sapiens2-pose-dev-video-app]
+cmd = "GRADIO_SERVER_PORT=7861 gradio tools/video_gradio_app.py"
+cwd = "packages/sapiens2-pose"
+description = "Launch the Sapiens2 video pose Gradio app in dev mode"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # robocap-slam

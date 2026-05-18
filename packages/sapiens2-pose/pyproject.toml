@@ -10,6 +10,7 @@ dependencies = [
     "safetensors",
     "timm",
     "spaces>=0.43.0",
+    "tyro>=0.9.1",
 ]
 
 [build-system]
