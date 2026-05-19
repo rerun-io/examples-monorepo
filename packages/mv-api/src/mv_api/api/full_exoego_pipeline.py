@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 from timeit import default_timer as timer
-from typing import TYPE_CHECKING, Any, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 import cv2
 import numpy as np
@@ -67,6 +67,9 @@ else:
 
 AnnotatedMVAPIDatasetUnion = tyro.conf.OmitSubcommandPrefixes[MVAPIDatasetUnion]
 
+CameraSource = Literal["auto", "estimated", "dataset"]
+ResolvedCameraSource = Literal["estimated", "dataset"]
+
 
 class MaskedPoints2D(NamedTuple):
     """2D points and confidences after applying image-domain visibility masks."""
@@ -75,6 +78,20 @@ class MaskedPoints2D(NamedTuple):
     """Pixel coordinates with invalid or out-of-image keypoints set to NaN."""
     confidences: Float32[ndarray, "n_kpts"]
     """Per-keypoint confidence values with invalid or out-of-image entries set to NaN."""
+
+
+@dataclass(frozen=True, slots=True)
+class PoseCameraSelection:
+    """Camera parameters selected for pose tracking and ego reprojection."""
+
+    source: ResolvedCameraSource
+    """Resolved camera source after applying automatic dataset-camera fallback."""
+    exo_pinhole_param_list: list[PinholeParameters]
+    """Exocentric camera parameters ordered like the exo video log paths."""
+    ego_pinhole_param_lists: list[list[PinholeParameters]]
+    """Egocentric camera trajectories ordered like the filtered ego RGB video log paths."""
+    log_estimated_pinholes: bool
+    """Whether estimated calibration pinholes should be logged over the scene pinholes."""
 
 
 @dataclass
@@ -89,6 +106,13 @@ class RRDPipelineConfig:
     """Parameters forwarded to the multi-view calibrator."""
     tracker_config: MultiviewBodyTrackerConfig = field(default_factory=MultiviewBodyTrackerConfig)
     """Configuration for the multiview body tracker."""
+    camera_source: CameraSource = "auto"
+    """
+    Camera parameters used for pose tracking and reprojection.
+    auto uses dataset-provided cameras when both exo and ego cameras exist, otherwise estimated cameras.
+    estimated always uses cameras from the multi-view calibrator.
+    dataset requires dataset-provided cameras and fails when they are unavailable.
+    """
     calib_ts_nano: int | None = None
     """Optional nanosecond timestamp used to select calibration frames for cameras and hand models."""
     max_frames: int | None = None
@@ -245,6 +269,61 @@ def _dataset_ego_pinhole_param_lists(
             camera_list.append(camera)
         ordered_camera_lists.append(camera_list)
     return ordered_camera_lists
+
+
+def _select_pose_camera_params(
+    *,
+    camera_source: CameraSource,
+    estimated_exo_pinhole_param_list: list[PinholeParameters],
+    estimated_ego_pinhole_param_list: list[PinholeParameters],
+    dataset_exo_pinhole_param_list: list[PinholeParameters] | None,
+    dataset_ego_pinhole_param_lists: list[list[PinholeParameters]] | None,
+) -> PoseCameraSelection:
+    """Select dataset or estimated cameras for pose tracking and ego reprojection."""
+    estimated_ego_pinhole_param_lists: list[list[PinholeParameters]] = [
+        [camera] for camera in estimated_ego_pinhole_param_list
+    ]
+    dataset_cameras_available: bool = (
+        dataset_exo_pinhole_param_list is not None and dataset_ego_pinhole_param_lists is not None
+    )
+
+    if camera_source == "estimated":
+        return PoseCameraSelection(
+            source="estimated",
+            exo_pinhole_param_list=estimated_exo_pinhole_param_list,
+            ego_pinhole_param_lists=estimated_ego_pinhole_param_lists,
+            log_estimated_pinholes=True,
+        )
+
+    if camera_source == "dataset":
+        if not dataset_cameras_available:
+            msg: str = "camera_source='dataset' requires dataset-provided exo and ego cameras."
+            raise ValueError(msg)
+        assert dataset_exo_pinhole_param_list is not None
+        assert dataset_ego_pinhole_param_lists is not None
+        return PoseCameraSelection(
+            source="dataset",
+            exo_pinhole_param_list=dataset_exo_pinhole_param_list,
+            ego_pinhole_param_lists=dataset_ego_pinhole_param_lists,
+            log_estimated_pinholes=False,
+        )
+
+    if dataset_cameras_available:
+        assert dataset_exo_pinhole_param_list is not None
+        assert dataset_ego_pinhole_param_lists is not None
+        return PoseCameraSelection(
+            source="dataset",
+            exo_pinhole_param_list=dataset_exo_pinhole_param_list,
+            ego_pinhole_param_lists=dataset_ego_pinhole_param_lists,
+            log_estimated_pinholes=False,
+        )
+
+    return PoseCameraSelection(
+        source="estimated",
+        exo_pinhole_param_list=estimated_exo_pinhole_param_list,
+        ego_pinhole_param_lists=estimated_ego_pinhole_param_lists,
+        log_estimated_pinholes=True,
+    )
 
 
 def compute_square_bbox(
@@ -521,7 +600,6 @@ def run_model_backed_pipeline(
     exo_mv_reader: MultiVideoReader | TorchCodecMultiVideoReader = exo_sequence.exo_video_readers
     ego_mv_reader: MultiVideoReader | TorchCodecMultiVideoReader = ego_sequence.ego_video_readers
 
-    calib_timestamp_ns: int = int(shortest_timestamp[-1]) if config.calib_ts_nano is None else int(config.calib_ts_nano)
     ego_camera_names: list[str] = [path.parent.parent.name for path in ego_video_log_paths]
     ego_rgb_indices: list[int] = [
         idx for idx, camera_name in enumerate(ego_camera_names) if "rgb" in camera_name.lower()
@@ -531,82 +609,6 @@ def run_model_backed_pipeline(
     ego_rgb_index_set: set[int] = set(ego_rgb_indices)
     ego_rgb_video_log_paths: list[Path] = [ego_video_log_paths[idx] for idx in ego_rgb_indices]
 
-    exo_frame_timestamp_list: list[Int[ndarray, "num_frames"]] = [
-        frame_timestamps_from_reader(reader) for reader in exo_mv_reader.video_readers
-    ]
-    exo_calib_indices: list[int] = [
-        timestamp_to_frame_index(time_ns=calib_timestamp_ns, frame_timestamps_ns=frame_timestamps)
-        for frame_timestamps in exo_frame_timestamp_list
-    ]
-    bgr_list_exo: list[UInt8[ndarray, "H W 3"]] = [
-        _read_bgr_frame(reader=reader, frame_idx=frame_idx, stream_name=f"exo/{frame_idx}")
-        for reader, frame_idx in zip(exo_mv_reader.video_readers, exo_calib_indices, strict=True)
-    ]
-    exo_frame_shapes: list[tuple[int, int]] = [
-        (int(frame.shape[0]), int(frame.shape[1])) for frame in bgr_list_exo
-    ]
-
-    ego_frame_timestamp_list: list[Int[ndarray, "num_frames"]] = [
-        frame_timestamps_from_reader(reader) for reader in ego_mv_reader.video_readers
-    ]
-    ego_calib_indices: list[int] = [
-        timestamp_to_frame_index(time_ns=calib_timestamp_ns, frame_timestamps_ns=frame_timestamps)
-        for frame_timestamps in ego_frame_timestamp_list
-    ]
-    bgr_list_ego: list[UInt8[ndarray, "H W 3"]] = []
-    for camera_idx, reader in enumerate(ego_mv_reader.video_readers):
-        if camera_idx not in ego_rgb_index_set:
-            continue
-        frame_idx: int = ego_calib_indices[camera_idx]
-        bgr_list_ego.append(_read_bgr_frame(reader=reader, frame_idx=frame_idx, stream_name=f"ego/{camera_idx}"))
-    ego_rgb_frame_shapes: list[tuple[int, int]] = [
-        (int(frame.shape[0]), int(frame.shape[1])) for frame in bgr_list_ego
-    ]
-
-    rgb_list_exo: list[UInt8[ndarray, "H W 3"]] = [_bgr_to_rgb(bgr) for bgr in bgr_list_exo]
-    rgb_list_ego: list[UInt8[ndarray, "H W 3"]] = [_bgr_to_rgb(bgr) for bgr in bgr_list_ego]
-    rgb_list: list[UInt8[ndarray, "H W 3"]] = resize_images_to_common_resolution(
-        images=[*rgb_list_exo, *rgb_list_ego],
-        target_size=CALIB_TARGET_RESOLUTION,
-    )
-    input_log_paths: list[Path] = [*exo_video_log_paths, *ego_rgb_video_log_paths]
-
-    rr.set_time(timeline=timeline, duration=np.timedelta64(0, "ns"), recording=recording)
-    hand_kpt_detector: WilorHandKeypointDetector = WilorHandKeypointDetector(
-        cfg=HandKeypointDetectorConfig(verbose=False)
-    )
-    mv_calibrator: MultiViewCalibrator = MultiViewCalibrator(parent_log_path=parent_log_path, config=config.calib_config)
-    mv_calib_results: MVCalibResults = mv_calibrator(rgb_list=rgb_list)
-
-    pinhole_param_list: list[PinholeParameters] = mv_calib_results.pinhole_param_list
-    exo_pinhole_param_list: list[PinholeParameters] = pinhole_param_list[: len(rgb_list_exo)]
-    ego_pinhole_param_list: list[PinholeParameters] = pinhole_param_list[len(rgb_list_exo) :]
-    for cam, log_path in zip(exo_pinhole_param_list, exo_video_log_paths, strict=True):
-        cam.name = log_path.parent.parent.name
-    for cam, log_path in zip(ego_pinhole_param_list, ego_rgb_video_log_paths, strict=True):
-        cam.name = log_path.parent.parent.name
-
-    if len(exo_pinhole_param_list) != len(rgb_list_exo):
-        raise ValueError("Calibrator did not return one pinhole per exo calibration frame.")
-    if len(ego_pinhole_param_list) != len(rgb_list_ego):
-        raise ValueError("Calibrator did not return one pinhole per ego RGB calibration frame.")
-
-    exo_video_pinhole_param_list: list[PinholeParameters] = [
-        _scale_pinhole_to_image_shape(
-            camera=cam,
-            image_shape=frame_shape,
-            source_size=CALIB_TARGET_RESOLUTION,
-        )
-        for cam, frame_shape in zip(exo_pinhole_param_list, exo_frame_shapes, strict=True)
-    ]
-    ego_video_pinhole_param_list: list[PinholeParameters] = [
-        _scale_pinhole_to_image_shape(
-            camera=cam,
-            image_shape=frame_shape,
-            source_size=CALIB_TARGET_RESOLUTION,
-        )
-        for cam, frame_shape in zip(ego_pinhole_param_list, ego_rgb_frame_shapes, strict=True)
-    ]
     dataset_exo_pinhole_param_list: list[PinholeParameters] | None = _dataset_exo_pinhole_params(
         exo_sequence=exo_sequence,
         exo_video_log_paths=exo_video_log_paths,
@@ -615,23 +617,106 @@ def run_model_backed_pipeline(
         ego_sequence=ego_sequence,
         ego_video_log_paths=ego_rgb_video_log_paths,
     )
-    use_dataset_pose_cameras: bool = (
+    dataset_cameras_available: bool = (
         dataset_exo_pinhole_param_list is not None and dataset_ego_pinhole_param_lists is not None
     )
-    pose_exo_pinhole_param_list: list[PinholeParameters] = (
-        dataset_exo_pinhole_param_list if dataset_exo_pinhole_param_list is not None else exo_video_pinhole_param_list
-    )
-    pose_ego_pinhole_param_lists: list[list[PinholeParameters]] = (
-        dataset_ego_pinhole_param_lists
-        if dataset_ego_pinhole_param_lists is not None
-        else [[camera] for camera in ego_video_pinhole_param_list]
-    )
 
-    pcd: o3d.geometry.PointCloud = mv_calib_results.pcd
-    voxel_size: float = estimate_voxel_size(np.asarray(pcd.points, dtype=np.float32), target_points=50_000)
-    pcd_ds: o3d.geometry.PointCloud = pcd.voxel_down_sample(voxel_size)
+    rr.set_time(timeline=timeline, duration=np.timedelta64(0, "ns"), recording=recording)
+    hand_kpt_detector: WilorHandKeypointDetector = WilorHandKeypointDetector(
+        cfg=HandKeypointDetectorConfig(verbose=False)
+    )
+    camera_selection: PoseCameraSelection | None = None
+    if config.camera_source == "dataset" or (config.camera_source == "auto" and dataset_cameras_available):
+        camera_selection = _select_pose_camera_params(
+            camera_source="dataset",
+            estimated_exo_pinhole_param_list=[],
+            estimated_ego_pinhole_param_list=[],
+            dataset_exo_pinhole_param_list=dataset_exo_pinhole_param_list,
+            dataset_ego_pinhole_param_lists=dataset_ego_pinhole_param_lists,
+        )
 
-    if not use_dataset_pose_cameras:
+    if camera_selection is None:
+        calib_timestamp_ns: int = int(shortest_timestamp[-1]) if config.calib_ts_nano is None else int(config.calib_ts_nano)
+        exo_frame_timestamp_list: list[Int[ndarray, "num_frames"]] = [
+            frame_timestamps_from_reader(reader) for reader in exo_mv_reader.video_readers
+        ]
+        exo_calib_indices: list[int] = [
+            timestamp_to_frame_index(time_ns=calib_timestamp_ns, frame_timestamps_ns=frame_timestamps)
+            for frame_timestamps in exo_frame_timestamp_list
+        ]
+        bgr_list_exo: list[UInt8[ndarray, "H W 3"]] = [
+            _read_bgr_frame(reader=reader, frame_idx=frame_idx, stream_name=f"exo/{frame_idx}")
+            for reader, frame_idx in zip(exo_mv_reader.video_readers, exo_calib_indices, strict=True)
+        ]
+        exo_frame_shapes: list[tuple[int, int]] = [
+            (int(frame.shape[0]), int(frame.shape[1])) for frame in bgr_list_exo
+        ]
+
+        ego_frame_timestamp_list: list[Int[ndarray, "num_frames"]] = [
+            frame_timestamps_from_reader(reader) for reader in ego_mv_reader.video_readers
+        ]
+        ego_calib_indices: list[int] = [
+            timestamp_to_frame_index(time_ns=calib_timestamp_ns, frame_timestamps_ns=frame_timestamps)
+            for frame_timestamps in ego_frame_timestamp_list
+        ]
+        bgr_list_ego: list[UInt8[ndarray, "H W 3"]] = []
+        for camera_idx, reader in enumerate(ego_mv_reader.video_readers):
+            if camera_idx not in ego_rgb_index_set:
+                continue
+            frame_idx: int = ego_calib_indices[camera_idx]
+            bgr_list_ego.append(_read_bgr_frame(reader=reader, frame_idx=frame_idx, stream_name=f"ego/{camera_idx}"))
+        ego_rgb_frame_shapes: list[tuple[int, int]] = [
+            (int(frame.shape[0]), int(frame.shape[1])) for frame in bgr_list_ego
+        ]
+
+        rgb_list_exo: list[UInt8[ndarray, "H W 3"]] = [_bgr_to_rgb(bgr) for bgr in bgr_list_exo]
+        rgb_list_ego: list[UInt8[ndarray, "H W 3"]] = [_bgr_to_rgb(bgr) for bgr in bgr_list_ego]
+        rgb_list: list[UInt8[ndarray, "H W 3"]] = resize_images_to_common_resolution(
+            images=[*rgb_list_exo, *rgb_list_ego],
+            target_size=CALIB_TARGET_RESOLUTION,
+        )
+        input_log_paths: list[Path] = [*exo_video_log_paths, *ego_rgb_video_log_paths]
+
+        mv_calibrator: MultiViewCalibrator = MultiViewCalibrator(parent_log_path=parent_log_path, config=config.calib_config)
+        mv_calib_results: MVCalibResults = mv_calibrator(rgb_list=rgb_list)
+
+        pinhole_param_list: list[PinholeParameters] = mv_calib_results.pinhole_param_list
+        exo_pinhole_param_list: list[PinholeParameters] = pinhole_param_list[: len(rgb_list_exo)]
+        ego_pinhole_param_list: list[PinholeParameters] = pinhole_param_list[len(rgb_list_exo) :]
+        for cam, log_path in zip(exo_pinhole_param_list, exo_video_log_paths, strict=True):
+            cam.name = log_path.parent.parent.name
+        for cam, log_path in zip(ego_pinhole_param_list, ego_rgb_video_log_paths, strict=True):
+            cam.name = log_path.parent.parent.name
+
+        if len(exo_pinhole_param_list) != len(rgb_list_exo):
+            raise ValueError("Calibrator did not return one pinhole per exo calibration frame.")
+        if len(ego_pinhole_param_list) != len(rgb_list_ego):
+            raise ValueError("Calibrator did not return one pinhole per ego RGB calibration frame.")
+
+        exo_video_pinhole_param_list: list[PinholeParameters] = [
+            _scale_pinhole_to_image_shape(
+                camera=cam,
+                image_shape=frame_shape,
+                source_size=CALIB_TARGET_RESOLUTION,
+            )
+            for cam, frame_shape in zip(exo_pinhole_param_list, exo_frame_shapes, strict=True)
+        ]
+        ego_video_pinhole_param_list: list[PinholeParameters] = [
+            _scale_pinhole_to_image_shape(
+                camera=cam,
+                image_shape=frame_shape,
+                source_size=CALIB_TARGET_RESOLUTION,
+            )
+            for cam, frame_shape in zip(ego_pinhole_param_list, ego_rgb_frame_shapes, strict=True)
+        ]
+        camera_selection = _select_pose_camera_params(
+            camera_source="estimated",
+            estimated_exo_pinhole_param_list=exo_video_pinhole_param_list,
+            estimated_ego_pinhole_param_list=ego_video_pinhole_param_list,
+            dataset_exo_pinhole_param_list=dataset_exo_pinhole_param_list,
+            dataset_ego_pinhole_param_lists=dataset_ego_pinhole_param_lists,
+        )
+
         video_pinhole_param_list: list[PinholeParameters] = [
             *exo_video_pinhole_param_list,
             *ego_video_pinhole_param_list,
@@ -646,45 +731,52 @@ def run_model_backed_pipeline(
                 recording=recording,
             )
 
-    filtered_points: Float32[ndarray, "final_points 3"] = np.asarray(pcd_ds.points, dtype=np.float32)
-    filtered_colors: Float32[ndarray, "final_points 3"] = np.asarray(pcd_ds.colors, dtype=np.float32)
-    rr.log(
-        str(parent_log_path / "gt" / "env_pointcloud"),
-        rr.Points3D(filtered_points, colors=filtered_colors),
-        static=True,
-        recording=recording,
-    )
-
-    if mv_calib_results.depth_list and mv_calib_results.pinhole_param_list:
-        depth_fuser: Open3DScaleInvariantFuser = Open3DScaleInvariantFuser(grid_resolution=512)
-        reference_points: Float32[ndarray, "num_points 3"] = np.asarray(pcd.points, dtype=np.float32)
-        depth_fuser.initialise_from_points(reference_points)
-
-        for depth_map, pinhole_param, rgb in zip(
-            mv_calib_results.depth_list,
-            mv_calib_results.pinhole_param_list,
-            rgb_list,
-            strict=True,
-        ):
-            depth_fuser.fuse_frame(depth_hw=depth_map, pinhole=pinhole_param, rgb_hw3=rgb)
-
-        gt_mesh: o3d.geometry.TriangleMesh = depth_fuser.get_mesh()
-        gt_mesh.compute_vertex_normals()
-        vertex_positions: Float32[ndarray, "num_vertices 3"] = np.asarray(gt_mesh.vertices, dtype=np.float32)
-        triangle_indices: Int[ndarray, "num_faces 3"] = np.asarray(gt_mesh.triangles, dtype=np.int32)
-        vertex_normals: Float32[ndarray, "num_vertices 3"] = np.asarray(gt_mesh.vertex_normals, dtype=np.float32)
-        vertex_colors: Float32[ndarray, "num_vertices 3"] = np.asarray(gt_mesh.vertex_colors, dtype=np.float32)
+        pcd: o3d.geometry.PointCloud = mv_calib_results.pcd
+        voxel_size: float = estimate_voxel_size(np.asarray(pcd.points, dtype=np.float32), target_points=50_000)
+        pcd_ds: o3d.geometry.PointCloud = pcd.voxel_down_sample(voxel_size)
+        filtered_points: Float32[ndarray, "final_points 3"] = np.asarray(pcd_ds.points, dtype=np.float32)
+        filtered_colors: Float32[ndarray, "final_points 3"] = np.asarray(pcd_ds.colors, dtype=np.float32)
         rr.log(
-            str(parent_log_path / "gt" / "env_mesh"),
-            rr.Mesh3D(
-                vertex_positions=vertex_positions,
-                triangle_indices=triangle_indices,
-                vertex_normals=vertex_normals,
-                vertex_colors=vertex_colors,
-            ),
+            str(parent_log_path / "gt" / "env_pointcloud"),
+            rr.Points3D(filtered_points, colors=filtered_colors),
             static=True,
             recording=recording,
         )
+
+        if mv_calib_results.depth_list and mv_calib_results.pinhole_param_list:
+            depth_fuser: Open3DScaleInvariantFuser = Open3DScaleInvariantFuser(grid_resolution=512)
+            reference_points: Float32[ndarray, "num_points 3"] = np.asarray(pcd.points, dtype=np.float32)
+            depth_fuser.initialise_from_points(reference_points)
+
+            for depth_map, pinhole_param, rgb in zip(
+                mv_calib_results.depth_list,
+                mv_calib_results.pinhole_param_list,
+                rgb_list,
+                strict=True,
+            ):
+                depth_fuser.fuse_frame(depth_hw=depth_map, pinhole=pinhole_param, rgb_hw3=rgb)
+
+            gt_mesh: o3d.geometry.TriangleMesh = depth_fuser.get_mesh()
+            gt_mesh.compute_vertex_normals()
+            vertex_positions: Float32[ndarray, "num_vertices 3"] = np.asarray(gt_mesh.vertices, dtype=np.float32)
+            triangle_indices: Int[ndarray, "num_faces 3"] = np.asarray(gt_mesh.triangles, dtype=np.int32)
+            vertex_normals: Float32[ndarray, "num_vertices 3"] = np.asarray(gt_mesh.vertex_normals, dtype=np.float32)
+            vertex_colors: Float32[ndarray, "num_vertices 3"] = np.asarray(gt_mesh.vertex_colors, dtype=np.float32)
+            rr.log(
+                str(parent_log_path / "gt" / "env_mesh"),
+                rr.Mesh3D(
+                    vertex_positions=vertex_positions,
+                    triangle_indices=triangle_indices,
+                    vertex_normals=vertex_normals,
+                    vertex_colors=vertex_colors,
+                ),
+                static=True,
+                recording=recording,
+            )
+
+    assert camera_selection is not None
+    pose_exo_pinhole_param_list: list[PinholeParameters] = camera_selection.exo_pinhole_param_list
+    pose_ego_pinhole_param_lists: list[list[PinholeParameters]] = camera_selection.ego_pinhole_param_lists
 
     upper_body_filter_idx: Int[ndarray, "upper_body"] = np.array([5, 6, 7, 8, 9, 10], dtype=np.int64)
     wb_upper_body_filter_idx: Int[ndarray, "upper_body_plus"] = np.concatenate(

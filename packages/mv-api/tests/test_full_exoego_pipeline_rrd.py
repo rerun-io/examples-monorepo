@@ -22,7 +22,7 @@ from simplecv.video_io import MultiVideoReader, VideoReader
 from wilor_nano.hand_keypoints import WilorHandKeypointDetector
 
 from mv_api.api import full_exoego_pipeline
-from mv_api.api.full_exoego_pipeline import RRDPipelineConfig
+from mv_api.api.full_exoego_pipeline import CameraSource, RRDPipelineConfig
 from mv_api.multiview_pose_estimator import MultiviewBodyTracker, MultiviewBodyTrackerConfig, MVHistory
 
 
@@ -139,6 +139,30 @@ class FakeModelBackedSequence(FakeExoEgoSequence):
     def __init__(self) -> None:
         self.exo_sequence: BaseExoSequence[HocapConfig] | None = FakeExoSequence()
         self.ego_sequence: BaseEgoSequence[HocapConfig] | None = FakeEgoSequence()
+
+
+class FakeDatasetCameraExoSequence(FakeExoSequence):
+    def __init__(self) -> None:
+        super().__init__()
+        self._exo_cam_list: list[PinholeParameters | None] = [_fake_pinhole("cam0")]
+
+
+class FakeDatasetCameraEgoSequence(FakeEgoSequence):
+    def __init__(self) -> None:
+        super().__init__()
+        self._dataset_ego_cam_dict: dict[str, list[CameraParam]] = {
+            "hololens_kv5h72": [_fake_pinhole("hololens_kv5h72")]
+        }
+
+    @property
+    def ego_cam_dict(self) -> dict[str, list[CameraParam]]:
+        return self._dataset_ego_cam_dict
+
+
+class FakeDatasetCameraModelBackedSequence(FakeExoEgoSequence):
+    def __init__(self) -> None:
+        self.exo_sequence: BaseExoSequence[HocapConfig] | None = FakeDatasetCameraExoSequence()
+        self.ego_sequence: BaseEgoSequence[HocapConfig] | None = FakeDatasetCameraEgoSequence()
 
 
 def _fake_pinhole(name: str) -> PinholeParameters:
@@ -357,6 +381,83 @@ def test_model_backed_hook_logs_calibrated_predictions_with_fake_models(
     )
     assert stats_result.returncode == 0, stats_result.stderr
     assert "/world/gt/env_pointcloud" in stats_result.stdout
+    assert "/world/gt/coco133_xyz" in stats_result.stdout
+    assert "/world/exo/cam0/pinhole/gt/coco133_uv" in stats_result.stdout
+    assert "/world/ego/hololens_kv5h72/pinhole/pred/coco133_uv/projected" in stats_result.stdout
+
+
+@pytest.mark.parametrize("camera_source", ["auto", "dataset"])
+def test_dataset_camera_sources_skip_estimated_environment_logging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    camera_source: CameraSource,
+) -> None:
+    rrd_path: Path = tmp_path / f"hocap-{camera_source}-cameras.rrd"
+
+    def fake_setup(self: HocapConfig) -> FakeDatasetCameraModelBackedSequence:
+        del self
+        return FakeDatasetCameraModelBackedSequence()
+
+    def fake_setup_scene(
+        exoego_sequence: FakeDatasetCameraModelBackedSequence,
+        *,
+        parent_log_path: Path,
+        timeline: str,
+        log_ego: bool,
+        log_exo: bool,
+        recording: rr.RecordingStream | None = None,
+    ) -> SceneSetupResult:
+        del exoego_sequence, log_ego, log_exo
+        rr.set_time(timeline, duration=np.timedelta64(0, "ns"), recording=recording)
+        rr.log(str(parent_log_path / "exo" / "cam0" / "pinhole" / "video"), rr.TextDocument("exo"), recording=recording)
+        rr.log(
+            str(parent_log_path / "ego" / "hololens_kv5h72" / "pinhole" / "video"),
+            rr.TextDocument("ego"),
+            recording=recording,
+        )
+        timestamps: Int[ndarray, "n_frames"] = np.array([0], dtype=np.int64)
+        return SceneSetupResult(
+            log_paths=LogPaths(
+                exo_video_log_paths=[parent_log_path / "exo" / "cam0" / "pinhole" / "video"],
+                ego_video_log_paths=[parent_log_path / "ego" / "hololens_kv5h72" / "pinhole" / "video"],
+            ),
+            shortest_timestamp=timestamps,
+        )
+
+    class FailingMultiViewCalibrator(FakeMultiViewCalibrator):
+        def __call__(self, *, rgb_list: list[UInt8[ndarray, "H W 3"]]) -> MVCalibResults:
+            del rgb_list
+            raise AssertionError("GT camera mode should not estimate cameras")
+
+    monkeypatch.setattr(HocapConfig, "setup", fake_setup)
+    monkeypatch.setattr(full_exoego_pipeline, "setup_scene", fake_setup_scene)
+    monkeypatch.setattr(full_exoego_pipeline, "MultiViewCalibrator", FailingMultiViewCalibrator)
+    monkeypatch.setattr(full_exoego_pipeline, "MultiviewBodyTracker", FakeBodyTracker)
+    monkeypatch.setattr(full_exoego_pipeline, "WilorHandKeypointDetector", FakeHandKeypointDetector)
+
+    rr_config: RerunTyroConfig = RerunTyroConfig(
+        application_id="mv_api_dataset_camera_test",
+        save=rrd_path,
+        headless=True,
+    )
+    config: RRDPipelineConfig = RRDPipelineConfig(
+        rr_config=rr_config,
+        dataset=HocapConfig(),
+        camera_source=camera_source,
+        max_frames=1,
+    )
+
+    full_exoego_pipeline.run_full_exoego_pipeline(config=config)
+
+    stats_result: subprocess.CompletedProcess[str] = subprocess.run(
+        ["rerun", "rrd", "stats", str(rrd_path)],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert stats_result.returncode == 0, stats_result.stderr
+    assert "/world/gt/env_pointcloud" not in stats_result.stdout
+    assert "/world/gt/env_mesh" not in stats_result.stdout
     assert "/world/gt/coco133_xyz" in stats_result.stdout
     assert "/world/exo/cam0/pinhole/gt/coco133_uv" in stats_result.stdout
     assert "/world/ego/hololens_kv5h72/pinhole/pred/coco133_uv/projected" in stats_result.stdout

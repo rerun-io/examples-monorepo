@@ -10,11 +10,29 @@ from mv_api.api.full_exoego_pipeline import (
     _extract_wilor_uv,
     _mask_points_outside_intrinsics,
     _scale_pinhole_to_image_shape,
+    _select_pose_camera_params,
     compute_square_bbox,
     frame_index_to_timestamp,
     resize_images_to_common_resolution,
     timestamp_to_frame_index,
 )
+
+
+def _fake_pinhole(name: str) -> PinholeParameters:
+    intrinsics: Intrinsics = Intrinsics.from_focal_principal_point(
+        camera_conventions="RDF",
+        fl_x=50.0,
+        fl_y=50.0,
+        cx=16.0,
+        cy=16.0,
+        height=32,
+        width=32,
+    )
+    extrinsics: Extrinsics = Extrinsics(
+        world_R_cam=np.eye(3, dtype=np.float32),
+        world_t_cam=np.zeros(3, dtype=np.float32),
+    )
+    return PinholeParameters(name=name, intrinsics=intrinsics, extrinsics=extrinsics)
 
 
 def test_timestamp_helpers_map_to_closest_frame_at_or_before_timestamp() -> None:
@@ -78,6 +96,66 @@ def test_scale_pinhole_to_image_shape_maps_resized_calibration_back_to_video_pix
     assert video_camera.intrinsics.fl_y == pytest.approx(480.0)
     assert video_camera.intrinsics.cx == pytest.approx(320.0)
     assert video_camera.intrinsics.cy == pytest.approx(240.0)
+
+
+def test_select_pose_camera_params_uses_dataset_in_auto_and_allows_estimated_override() -> None:
+    estimated_exo: list[PinholeParameters] = [_fake_pinhole("estimated_exo")]
+    estimated_ego: list[PinholeParameters] = [_fake_pinhole("estimated_ego")]
+    dataset_exo: list[PinholeParameters] = [_fake_pinhole("dataset_exo")]
+    dataset_ego: list[list[PinholeParameters]] = [[_fake_pinhole("dataset_ego")]]
+
+    auto_selection = _select_pose_camera_params(
+        camera_source="auto",
+        estimated_exo_pinhole_param_list=estimated_exo,
+        estimated_ego_pinhole_param_list=estimated_ego,
+        dataset_exo_pinhole_param_list=dataset_exo,
+        dataset_ego_pinhole_param_lists=dataset_ego,
+    )
+
+    assert auto_selection.source == "dataset"
+    assert auto_selection.exo_pinhole_param_list is dataset_exo
+    assert auto_selection.ego_pinhole_param_lists is dataset_ego
+    assert not auto_selection.log_estimated_pinholes
+
+    estimated_selection = _select_pose_camera_params(
+        camera_source="estimated",
+        estimated_exo_pinhole_param_list=estimated_exo,
+        estimated_ego_pinhole_param_list=estimated_ego,
+        dataset_exo_pinhole_param_list=dataset_exo,
+        dataset_ego_pinhole_param_lists=dataset_ego,
+    )
+
+    assert estimated_selection.source == "estimated"
+    assert estimated_selection.exo_pinhole_param_list is estimated_exo
+    assert estimated_selection.ego_pinhole_param_lists == [[estimated_ego[0]]]
+    assert estimated_selection.log_estimated_pinholes
+
+
+def test_select_pose_camera_params_falls_back_to_estimated_and_requires_dataset_when_forced() -> None:
+    estimated_exo: list[PinholeParameters] = [_fake_pinhole("estimated_exo")]
+    estimated_ego: list[PinholeParameters] = [_fake_pinhole("estimated_ego")]
+
+    auto_selection = _select_pose_camera_params(
+        camera_source="auto",
+        estimated_exo_pinhole_param_list=estimated_exo,
+        estimated_ego_pinhole_param_list=estimated_ego,
+        dataset_exo_pinhole_param_list=None,
+        dataset_ego_pinhole_param_lists=None,
+    )
+
+    assert auto_selection.source == "estimated"
+    assert auto_selection.exo_pinhole_param_list is estimated_exo
+    assert auto_selection.ego_pinhole_param_lists == [[estimated_ego[0]]]
+    assert auto_selection.log_estimated_pinholes
+
+    with pytest.raises(ValueError, match="camera_source='dataset'"):
+        _select_pose_camera_params(
+            camera_source="dataset",
+            estimated_exo_pinhole_param_list=estimated_exo,
+            estimated_ego_pinhole_param_list=estimated_ego,
+            dataset_exo_pinhole_param_list=None,
+            dataset_ego_pinhole_param_lists=None,
+        )
 
 
 def test_mask_points_outside_intrinsics_removes_off_image_keypoints() -> None:
