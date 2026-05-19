@@ -5,6 +5,4 @@ __pycache__/
 
 /data/
 /pretrained_models/
-/artifacts/**/*.rrd
-/artifacts/**/*.rbl
-/artifacts/**/*.png
+/artifacts/
