@@ -60,26 +60,6 @@ def compute_square_bbox_from_uv(
     return bbox
 
 
-def project_multiview(
-    xyzc: Float[ndarray, "n_kpts 4"],
-    pall: Float[ndarray, "n_views 3 4"],
-) -> Float[ndarray, "n_views n_kpts 3"]:
-    """Project 3D keypoints with confidence to multiple 2D camera views."""
-    n_kpts: int = int(xyzc.shape[0])
-    original_conf: Float[ndarray, "n_kpts"] = xyzc[:, 3].copy()
-    xyz_h: Float[ndarray, "n_kpts 4"] = np.hstack((xyzc[:, :3], np.ones((n_kpts, 1), dtype=xyzc.dtype)))
-    uvw: Float[ndarray, "n_views n_kpts 3"] = np.einsum("vmn,kn->vkm", pall, xyz_h, optimize=True)
-    depth: Float[ndarray, "n_views n_kpts 1"] = uvw[..., 2:3]
-    valid_depth: Bool[ndarray, "n_views n_kpts 1"] = np.abs(depth) > 1e-8
-    with np.errstate(divide="ignore", invalid="ignore"):
-        uv: Float[ndarray, "n_views n_kpts 2"] = uvw[..., :2] / depth
-    uv = np.where(valid_depth, uv, np.nan)
-    projected: Float[ndarray, "n_views n_kpts 3"] = np.concatenate((uv, depth), axis=-1)
-    confidence_mask: Float[ndarray, "n_kpts 1"] = (original_conf[:, None] > 0.0).astype(projected.dtype)
-    projected[..., 2:3] *= confidence_mask
-    return projected
-
-
 @dataclass
 class MVHistory:
     """Temporal state for multiview keypoint tracking."""

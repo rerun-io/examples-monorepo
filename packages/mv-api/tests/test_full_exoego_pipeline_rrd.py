@@ -21,7 +21,7 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.video_io import MultiVideoReader, VideoReader
 from wilor_nano.hand_keypoints import WilorHandKeypointDetector
 
-from mv_api.api import full_exoego_pipeline
+from mv_api.api import exoego_nodes, full_exoego_app, full_exoego_pipeline
 from mv_api.api.full_exoego_pipeline import CameraSource, RRDPipelineConfig
 from mv_api.multiview_pose_estimator import MultiviewBodyTracker, MultiviewBodyTrackerConfig, MVHistory
 
@@ -281,7 +281,7 @@ def test_pipeline_writes_rrd_with_expected_scene_paths(
         )
 
     monkeypatch.setattr(HocapConfig, "setup", fake_setup)
-    monkeypatch.setattr(full_exoego_pipeline, "setup_scene", fake_setup_scene)
+    monkeypatch.setattr(exoego_nodes, "setup_scene", fake_setup_scene)
     monkeypatch.setattr(full_exoego_pipeline, "run_model_backed_pipeline", fake_model_backed_pipeline)
 
     rr_config: RerunTyroConfig = RerunTyroConfig(
@@ -295,10 +295,14 @@ def test_pipeline_writes_rrd_with_expected_scene_paths(
         max_frames=1,
     )
 
-    full_exoego_pipeline.run_full_exoego_pipeline(config=config)
+    run_result: full_exoego_app.FullExoEgoRunResult = full_exoego_app.run_full_exoego_app(config=config)
 
     assert rrd_path.exists()
     assert rrd_path.stat().st_size > 0
+    assert run_result.rrd_path == rrd_path
+    assert run_result.parent_log_path == Path("world")
+    assert run_result.timeline == "video_time"
+    np.testing.assert_array_equal(run_result.model_backed.processed_timestamps, np.array([0], dtype=np.int64))
 
     stats_result: subprocess.CompletedProcess[str] = subprocess.run(
         ["rerun", "rrd", "stats", str(rrd_path)],
@@ -350,7 +354,7 @@ def test_model_backed_hook_logs_calibrated_predictions_with_fake_models(
         )
 
     monkeypatch.setattr(HocapConfig, "setup", fake_setup)
-    monkeypatch.setattr(full_exoego_pipeline, "setup_scene", fake_setup_scene)
+    monkeypatch.setattr(exoego_nodes, "setup_scene", fake_setup_scene)
     monkeypatch.setattr(full_exoego_pipeline, "MultiViewCalibrator", FakeMultiViewCalibrator)
     monkeypatch.setattr(full_exoego_pipeline, "MultiviewBodyTracker", FakeBodyTracker)
     monkeypatch.setattr(full_exoego_pipeline, "WilorHandKeypointDetector", FakeHandKeypointDetector)
@@ -371,7 +375,7 @@ def test_model_backed_hook_logs_calibrated_predictions_with_fake_models(
         max_frames=1,
     )
 
-    full_exoego_pipeline.run_full_exoego_pipeline(config=config)
+    full_exoego_app.run_full_exoego_app(config=config)
 
     stats_result: subprocess.CompletedProcess[str] = subprocess.run(
         ["rerun", "rrd", "stats", str(rrd_path)],
@@ -430,7 +434,7 @@ def test_dataset_camera_sources_skip_estimated_environment_logging(
             raise AssertionError("GT camera mode should not estimate cameras")
 
     monkeypatch.setattr(HocapConfig, "setup", fake_setup)
-    monkeypatch.setattr(full_exoego_pipeline, "setup_scene", fake_setup_scene)
+    monkeypatch.setattr(exoego_nodes, "setup_scene", fake_setup_scene)
     monkeypatch.setattr(full_exoego_pipeline, "MultiViewCalibrator", FailingMultiViewCalibrator)
     monkeypatch.setattr(full_exoego_pipeline, "MultiviewBodyTracker", FakeBodyTracker)
     monkeypatch.setattr(full_exoego_pipeline, "WilorHandKeypointDetector", FakeHandKeypointDetector)
@@ -447,7 +451,7 @@ def test_dataset_camera_sources_skip_estimated_environment_logging(
         max_frames=1,
     )
 
-    full_exoego_pipeline.run_full_exoego_pipeline(config=config)
+    full_exoego_app.run_full_exoego_app(config=config)
 
     stats_result: subprocess.CompletedProcess[str] = subprocess.run(
         ["rerun", "rrd", "stats", str(rrd_path)],

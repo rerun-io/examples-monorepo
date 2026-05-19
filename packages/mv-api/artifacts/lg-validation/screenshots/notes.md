@@ -13,12 +13,13 @@
 ## Command
 
 ```bash
-pixi run -e mv-api mv-api-hocap-full -- \
+pixi run -e mv-api mv-api-full-app \
   --rr-config.save artifacts/lg-validation/lg-full-synced-videos-1f.rrd \
   --rr-config.headless \
-  --calib-confg.no-refine-depth-maps \
-  --calib-confg.no-segment-people \
+  --calib-config.no-refine-depth-maps \
+  --calib-config.no-segment-people \
   --max-frames 1 \
+  --camera-source estimated \
   synced-videos \
   --root-directory /mnt/8tb/data/exoego-self-collected/lg/ServerAssembly_4Views_11-3-25
 ```

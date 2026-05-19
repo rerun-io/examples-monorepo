@@ -5,7 +5,7 @@ from typing import Any
 import rerun as rr
 from jaxtyping import Int
 from numpy import ndarray
-from simplecv.apis.view_exoego import SceneSetupResult
+from simplecv.apis.view_exoego import SceneSetupResult, setup_scene
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
 
@@ -65,7 +65,7 @@ class ScenePreparationNode:
         rr.log("/", exoego_sequence.world_coordinate_system, static=True, recording=recording)
         full_exoego_pipeline.set_annotation_context(recording=recording)
 
-        scene_setup_result: SceneSetupResult = full_exoego_pipeline.setup_scene(
+        scene_setup_result: SceneSetupResult = setup_scene(
             exoego_sequence,
             parent_log_path=self.parent_log_path,
             timeline=self.timeline,
@@ -101,7 +101,7 @@ class ModelBackedPipelineResult:
 
 
 class ModelBackedPipelineNode:
-    """Run the legacy model-backed stage behind a node-shaped interface."""
+    """Run the model-backed stage behind a node-shaped interface."""
 
     def __init__(
         self,

@@ -33,3 +33,22 @@ paths = ["src/mv_api", "tests", "tools"]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true
 min_confidence = 60
+ignore_names = [
+    # simplecv dataset protocol hooks called dynamically by base sequence setup.
+    "_build_ego",
+    "_build_exo",
+    "align_cams_and_videos",
+    "image_plane_distance",
+    "iter_episode_sequences",
+    "load_ego_cams",
+    "load_exo_cams",
+    "load_labels",
+    "load_stream_timestamps_ns",
+    "load_video_paths",
+    "num_sequences_for_config",
+    # test doubles provide attributes consumed by simplecv video reader/sequence bases.
+    "_exo_cam_list",
+    "_fps",
+    "_height",
+    "_width",
+]

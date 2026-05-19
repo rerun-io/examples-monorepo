@@ -2,49 +2,41 @@
 
 Date: 2026-05-17
 
-## Numeric Oracle Checks
+## Numeric Checks
 
 HoCap command, run from `packages/mv-api`:
 
 ```bash
-/home/pablo/0Dev/work/rerun-projects/examples-monorepo/.pixi/envs/mv-api-dev/bin/python tools/validation/compare_full_exoego_app.py \
-  --legacy-rrd-path artifacts/node-validation/hocap-legacy.rrd \
-  --node-rrd-path artifacts/node-validation/hocap-node-app.rrd \
-  --application-id mv_api_hocap_node_oracle \
-  --recording-id mv_api_hocap_node_oracle \
-  --max-frames 1
+pixi run -e mv-api-dev mv-api-full-app \
+  --rr-config.save artifacts/node-validation/hocap-node-app.rrd \
+  --rr-config.headless \
+  --max-frames 1 \
+  --camera-source dataset
 ```
 
 Result:
 
-- `exact_rrd_match=False`
-- `world_entity_counts_match=True`
-- `legacy_num_rows=10932.0`
 - `node_num_rows=10932.0`
 - `node_processed_timestamps=1085`
 
 LG command, run from `packages/mv-api`:
 
 ```bash
-/home/pablo/0Dev/work/rerun-projects/examples-monorepo/.pixi/envs/mv-api-dev/bin/python tools/validation/compare_full_exoego_app.py \
-  --legacy-rrd-path artifacts/node-validation/lg-legacy.rrd \
-  --node-rrd-path artifacts/node-validation/lg-node-app.rrd \
-  --application-id mv_api_lg_node_oracle \
-  --recording-id mv_api_lg_node_oracle \
+pixi run -e mv-api-dev mv-api-full-app \
+  --rr-config.save artifacts/node-validation/lg-node-app.rrd \
+  --rr-config.headless \
   --max-frames 1 \
+  --camera-source estimated \
   synced-videos \
   --root-directory /mnt/8tb/data/exoego-self-collected/lg/ServerAssembly_4Views_11-3-25
 ```
 
 Result:
 
-- `exact_rrd_match=False`
-- `world_entity_counts_match=True`
-- `legacy_num_rows=18100.0`
 - `node_num_rows=18100.0`
 - `node_processed_timestamps=4513`
 
-`rerun rrd compare` is stricter than the invariant we need here. It failed on nondeterministic chunk ordering/row metadata, while the parsed `/world/...` entity chunk counts and total row counts matched.
+Use `rerun rrd stats <rrd>` for entity-count checks against the node app output.
 
 ## Native Viewer Screenshots
 

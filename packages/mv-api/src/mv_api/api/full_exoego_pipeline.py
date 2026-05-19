@@ -12,7 +12,7 @@ import tyro
 from jaxtyping import Bool, Float, Float32, Int, UInt8
 from monopriors.apis.multiview_calibration import MultiViewCalibrator, MultiViewCalibratorConfig, MVCalibResults
 from numpy import ndarray
-from simplecv.apis.view_exoego import LogPaths, SceneSetupResult, create_container, setup_scene
+from simplecv.apis.view_exoego import LogPaths, SceneSetupResult, create_container
 from simplecv.camera_parameters import Intrinsics, PinholeParameters
 from simplecv.configs.exoego_dataset_configs import dataset_defaults as simplecv_dataset_defaults
 from simplecv.data.ego.base_ego import BaseEgoSequence
@@ -945,38 +945,3 @@ def run_model_backed_pipeline(
                 )
 
     print(f"Inference completed in {timer() - start:.2f} seconds")
-
-
-def run_full_exoego_pipeline(config: RRDPipelineConfig) -> None:
-    """Run the full exo/ego pipeline."""
-    parent_log_path: Path = Path("world")
-    timeline: str = "video_time"
-    recording: rr.RecordingStream = config.rr_config.rec_stream
-
-    exoego_sequence: BaseExoEgoSequence = config.dataset.setup()
-    rr.log("/", exoego_sequence.world_coordinate_system, static=True, recording=recording)
-    set_annotation_context(recording=recording)
-
-    scene_setup_result: SceneSetupResult = setup_scene(
-        exoego_sequence,
-        parent_log_path=parent_log_path,
-        timeline=timeline,
-        log_ego=True,
-        log_exo=True,
-        recording=recording,
-    )
-    send_scene_blueprint(log_paths=scene_setup_result.log_paths, recording=recording)
-    run_model_backed_pipeline(
-        config=config,
-        exoego_sequence=exoego_sequence,
-        scene_setup_result=scene_setup_result,
-        parent_log_path=parent_log_path,
-        timeline=timeline,
-        recording=recording,
-    )
-    recording.flush(timeout_sec=30.0)
-
-
-def main(config: RRDPipelineConfig) -> None:
-    """Tyro-compatible entrypoint for the full exo/ego pipeline."""
-    run_full_exoego_pipeline(config=config)

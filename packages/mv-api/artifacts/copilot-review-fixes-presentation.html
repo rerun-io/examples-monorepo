@@ -1,0 +1,1111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mv-api Copilot Review Fixes</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101415;
+      --panel: #171d1f;
+      --panel-2: #20282a;
+      --ink: #eef4f1;
+      --muted: #aab7b1;
+      --faint: #6f7f78;
+      --line: #33403c;
+      --accent: #62c7a6;
+      --accent-2: #f0b66b;
+      --danger: #f08383;
+      --ok: #83d391;
+      --code: #d8e6df;
+      --radius: 8px;
+      --shadow: 0 18px 45px rgba(0, 0, 0, 0.28);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      line-height: 1.5;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    a:hover {
+      text-decoration: underline;
+    }
+
+    code {
+      color: var(--code);
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 5px;
+      padding: 0.08rem 0.28rem;
+      font-size: 0.92em;
+    }
+
+    .shell {
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: minmax(230px, 290px) minmax(0, 1fr);
+    }
+
+    aside {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 24px 18px;
+      border-right: 1px solid var(--line);
+      background: #121819;
+      overflow: auto;
+    }
+
+    .brand {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-bottom: 28px;
+    }
+
+    .brand strong {
+      font-size: 1.08rem;
+      letter-spacing: 0;
+    }
+
+    .brand span {
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    nav {
+      display: grid;
+      gap: 7px;
+    }
+
+    nav a {
+      display: block;
+      padding: 9px 10px;
+      color: var(--muted);
+      border-radius: 7px;
+      border: 1px solid transparent;
+    }
+
+    nav a:hover,
+    nav a:focus {
+      color: var(--ink);
+      border-color: var(--line);
+      background: rgba(255, 255, 255, 0.04);
+      text-decoration: none;
+      outline: none;
+    }
+
+    main {
+      min-width: 0;
+      padding: 28px clamp(18px, 3vw, 48px) 48px;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) minmax(260px, 0.6fr);
+      gap: 20px;
+      align-items: stretch;
+      margin-bottom: 24px;
+    }
+
+    .hero-copy {
+      padding: 30px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+
+    h1,
+    h2,
+    h3 {
+      margin: 0;
+      line-height: 1.12;
+      letter-spacing: 0;
+    }
+
+    h1 {
+      font-size: clamp(2rem, 5vw, 4.6rem);
+      max-width: 9.5em;
+    }
+
+    .hero-copy p {
+      color: var(--muted);
+      max-width: 70ch;
+      margin: 18px 0 0;
+      font-size: 1.02rem;
+    }
+
+    .summary-panel {
+      display: grid;
+      gap: 10px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: var(--radius);
+    }
+
+    .metric {
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel-2);
+    }
+
+    .metric b {
+      display: block;
+      font-size: 1.55rem;
+      color: var(--accent);
+    }
+
+    .metric span {
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    section {
+      scroll-margin-top: 22px;
+      margin-top: 24px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      overflow: hidden;
+    }
+
+    .section-head {
+      padding: 20px 22px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: flex-end;
+    }
+
+    .section-head p {
+      margin: 8px 0 0;
+      color: var(--muted);
+      max-width: 78ch;
+    }
+
+    .content {
+      padding: 22px;
+    }
+
+    .status-strip {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .pill,
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 4px 9px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 0.84rem;
+      white-space: nowrap;
+    }
+
+    .tag.fixed {
+      color: #d6f5dd;
+      border-color: rgba(131, 211, 145, 0.45);
+      background: rgba(131, 211, 145, 0.12);
+    }
+
+    .tag.nochange {
+      color: #ffe0ad;
+      border-color: rgba(240, 182, 107, 0.45);
+      background: rgba(240, 182, 107, 0.12);
+    }
+
+    .tag.note {
+      color: #d5ede4;
+      border-color: rgba(98, 199, 166, 0.4);
+      background: rgba(98, 199, 166, 0.1);
+    }
+
+    .toolbar {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+    }
+
+    input[type="search"] {
+      min-width: min(100%, 310px);
+      flex: 1;
+      border: 1px solid var(--line);
+      background: #111719;
+      color: var(--ink);
+      border-radius: 7px;
+      padding: 10px 12px;
+      font: inherit;
+    }
+
+    button {
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      color: var(--ink);
+      border-radius: 7px;
+      padding: 9px 11px;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    button[aria-pressed="true"] {
+      border-color: rgba(98, 199, 166, 0.65);
+      background: rgba(98, 199, 166, 0.16);
+    }
+
+    .issue-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    article.issue {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel-2);
+      padding: 16px;
+      display: grid;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .issue-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: flex-start;
+    }
+
+    .issue h3 {
+      font-size: 1rem;
+    }
+
+    .issue p {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .issue dl {
+      margin: 0;
+      display: grid;
+      gap: 8px;
+    }
+
+    .issue dt {
+      color: var(--ink);
+      font-weight: 700;
+      font-size: 0.86rem;
+    }
+
+    .issue dd {
+      margin: 2px 0 0;
+      color: var(--muted);
+    }
+
+    .issue .file {
+      color: var(--faint);
+      font-size: 0.82rem;
+      overflow-wrap: anywhere;
+    }
+
+    .table-wrap {
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 760px;
+      background: var(--panel-2);
+    }
+
+    th,
+    td {
+      text-align: left;
+      vertical-align: top;
+      padding: 11px 12px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    th {
+      color: var(--ink);
+      font-size: 0.86rem;
+      background: #151b1d;
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+
+    td {
+      color: var(--muted);
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .ok {
+      color: var(--ok);
+    }
+
+    .warn {
+      color: var(--accent-2);
+    }
+
+    .bad {
+      color: var(--danger);
+    }
+
+    .checks {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .check {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel-2);
+      padding: 14px;
+    }
+
+    .check b {
+      display: block;
+      margin-bottom: 4px;
+      color: var(--ink);
+    }
+
+    .check span {
+      color: var(--muted);
+    }
+
+    .footnote {
+      color: var(--faint);
+      font-size: 0.88rem;
+      margin-top: 16px;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    @media (max-width: 920px) {
+      .shell {
+        display: block;
+      }
+
+      aside {
+        position: static;
+        height: auto;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      nav {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .hero {
+        grid-template-columns: 1fr;
+      }
+
+      .status-strip,
+      .issue-grid,
+      .checks {
+        grid-template-columns: 1fr;
+      }
+
+      .section-head {
+        display: block;
+      }
+    }
+
+    @media (max-width: 560px) {
+      main {
+        padding: 16px 12px 36px;
+      }
+
+      .hero-copy,
+      .content,
+      .section-head {
+        padding: 16px;
+      }
+
+      nav {
+        grid-template-columns: 1fr;
+      }
+
+      .toolbar {
+        display: grid;
+      }
+
+      button,
+      input[type="search"] {
+        width: 100%;
+      }
+    }
+
+    @media print {
+      :root {
+        color-scheme: light;
+        --bg: #ffffff;
+        --panel: #ffffff;
+        --panel-2: #f4f7f6;
+        --ink: #17211e;
+        --muted: #33433e;
+        --faint: #63706c;
+        --line: #cdd8d4;
+      }
+
+      aside,
+      .toolbar {
+        display: none;
+      }
+
+      .shell {
+        display: block;
+      }
+
+      main {
+        padding: 0;
+      }
+
+      section,
+      .hero-copy,
+      .summary-panel,
+      article.issue {
+        box-shadow: none;
+        break-inside: avoid;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside>
+      <div class="brand">
+        <strong>mv-api PR Review</strong>
+        <span>Copilot comments, decisions, fixes, and serve audit.</span>
+      </div>
+      <nav aria-label="Presentation sections">
+        <a href="#overview">Overview</a>
+        <a href="#decisions">Decision Map</a>
+        <a href="#issues">All 18 Issues</a>
+        <a href="#validation">Validation</a>
+        <a href="#tailscale">Tailscale Serve</a>
+      </nav>
+    </aside>
+
+    <main>
+      <div class="hero" id="overview">
+        <div class="hero-copy">
+          <p class="pill">PR #39 - commit <code>b76ef3d</code></p>
+          <h1>Copilot review triage for the mv-api port</h1>
+          <p>
+            Each comment was treated as a hypothesis, not an instruction. The valid behavioral and
+            maintainability findings were fixed with focused tests where practical; the comments that did
+            not match the current code path were answered and resolved on GitHub.
+          </p>
+          <p>
+            PR: <a href="https://github.com/rerun-io/examples-monorepo/pull/39">rerun-io/examples-monorepo#39</a>
+          </p>
+        </div>
+        <div class="summary-panel" aria-label="Review summary">
+          <div class="metric">
+            <b>18</b>
+            <span>Copilot review threads triaged and resolved</span>
+          </div>
+          <div class="metric">
+            <b>15</b>
+            <span>Code or docs fixes applied</span>
+          </div>
+          <div class="metric">
+            <b>2</b>
+            <span>Resolved as not applicable after checking the code path</span>
+          </div>
+          <div class="metric">
+            <b>20</b>
+            <span>mv-api tests passing after the patch</span>
+          </div>
+        </div>
+      </div>
+
+      <section id="decisions">
+        <div class="section-head">
+          <div>
+            <h2>Decision Map</h2>
+            <p>The changes are grouped by the kind of risk each comment pointed at.</p>
+          </div>
+          <span class="pill">All GitHub threads resolved</span>
+        </div>
+        <div class="content">
+          <div class="status-strip">
+            <div class="metric">
+              <b>Behavior</b>
+              <span>Camera filtering, frame iteration, reader API, bbox NaN handling, RRD parser guard.</span>
+            </div>
+            <div class="metric">
+              <b>API Surface</b>
+              <span>Public helper names, typo-free Tyro config, explicit synced-video root.</span>
+            </div>
+            <div class="metric">
+              <b>Maintainability</b>
+              <span>Shared bbox and timestamp helpers, clearer variable names and docstrings.</span>
+            </div>
+            <div class="metric">
+              <b>Rejected</b>
+              <span>Exo-only verbose logging path and CUDA platform warning were checked and explained.</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="issues">
+        <div class="section-head">
+          <div>
+            <h2>All 18 Issues</h2>
+            <p>Use the filters to scan fixed issues, documented choices, and no-change resolutions.</p>
+          </div>
+        </div>
+        <div class="content">
+          <div class="toolbar" aria-label="Issue filters">
+            <input id="issueSearch" type="search" placeholder="Search issue, file, or fix">
+            <button type="button" data-filter="all" aria-pressed="true">All</button>
+            <button type="button" data-filter="fixed" aria-pressed="false">Fixed</button>
+            <button type="button" data-filter="note" aria-pressed="false">Documented</button>
+            <button type="button" data-filter="nochange" aria-pressed="false">No code change</button>
+          </div>
+
+          <div class="issue-grid" id="issueGrid">
+            <article class="issue" data-kind="fixed" data-text="camera filtering cams_for_detection_idx multiview pose estimator">
+              <div class="issue-top">
+                <h3>1. Selected detection cameras were only applied to projection matrices</h3>
+                <span class="tag fixed">Fixed</span>
+              </div>
+              <p class="file">packages/mv-api/src/mv_api/multiview_pose_estimator.py</p>
+              <dl>
+                <div>
+                  <dt>Why it mattered</dt>
+                  <dd><code>cams_for_detection_idx</code> filtered <code>pall</code> but not images or pinholes, so tracking could index the wrong bbox or go out of bounds.</dd>
+                </div>
+                <div>
+                  <dt>Fix</dt>
+                  <dd>Build one selected-view list and filter <code>bgr_list</code>, <code>pinhole_list</code>, and projection matrices together. Logging still uses the original view index.</dd>
+                </div>
+                <div>
+                  <dt>Test</dt>
+                  <dd>Added a fake tracker test proving only the selected camera image reaches the pose model.</dd>
+                </div>
+              </dl>
+            </article>
+
+            <article class="issue" data-kind="nochange" data-text="uvc layer exo path ego log path">
+              <div class="issue-top">
+                <h3>2. Verbose 2D logging hardcodes the exo entity path</h3>
+                <span class="tag nochange">No code change</span>
+              </div>
+              <p class="file">packages/mv-api/src/mv_api/multiview_pose_estimator.py</p>
+              <dl>
+                <div>
+                  <dt>Assessment</dt>
+                  <dd>The helper is private to <code>MultiviewBodyTracker</code>, which only logs exo multiview detections. Ego/WiLor logging happens elsewhere with ego log paths.</dd>
+                </div>
+                <div>
+                  <dt>Resolution</dt>
+                  <dd>Replied on GitHub and resolved. If this helper becomes shared later, it should take an explicit parent log path then.</dd>
+                </div>
+              </dl>
+            </article>
+
+            <article class="issue" data-kind="fixed" data-text="wilor dtype float32 keypointresults">
+              <div class="issue-top">
+                <h3>3. WiLor <code>KeypointResults</code> branch could remain float64</h3>
+                <span class="tag fixed">Fixed</span>
+              </div>
+              <p class="file">packages/mv-api/src/mv_api/multiview_pose_estimator.py</p>
+              <dl>
+                <div>
+                  <dt>Why it mattered</dt>
+                  <dd>The code annotated <code>Float32</code>, but one branch reused raw output and relied on NumPy assignment to downcast later.</dd>
+                </div>
+                <div>
+                  <dt>Fix</dt>
+                  <dd>Normalize both WiLor output branches through <code>np.asarray(..., dtype=np.float32)</code>.</dd>
+                </div>
+              </dl>
+            </article>
+
+            <article class="issue" data-kind="fixed" data-text="private helper exoego nodes public facade">
+              <div class="issue-top">
+                <h3>4. Node layer depended on private pipeline helpers</h3>
+                <span class="tag fixed">Fixed</span>
+              </div>
+              <p class="file">packages/mv-api/src/mv_api/api/exoego_nodes.py</p>
+              <dl>
+                <div>
+                  <dt>Why it mattered</dt>
+                  <dd>The node API was calling underscore-prefixed functions that had become part of its required integration surface.</dd>
+                </div>
+                <div>
+                  <dt>Fix</dt>
+                  <dd>Promoted <code>send_scene_blueprint</code> and <code>run_model_backed_pipeline</code> to public helpers and updated call sites/tests.</dd>
+                </div>
+              </dl>
+            </article>
+
+            <article class="issue" data-kind="fixed" data-text="root_directory default Path current working directory synced videos">
+              <div class="issue-top">
+                <h3>5. Synced-video root silently defaulted to current directory</h3>
+                <span class="tag fixed">Fixed</span>
+              </div>
+              <p class="file">packages/mv-api/src/mv_api/data/synced_videos.py</p>
+              <dl>
+                <div>
+                  <dt>Why it mattered</dt>
+                  <dd>A missing <code>--root-directory</code> could glob from the wrong working directory and fail unclearly.</dd>
+                </div>
+                <div>
+                  <dt>Fix</dt>
+                  <dd>Changed the default to <code>None</code> and raise a targeted <code>ValueError</code> during setup.</dd>
+                </div>
+                <div>
+                  <dt>Test</dt>
+                  <dd>Updated the dataset config test to assert the explicit error path.</dd>
+                </div>
+              </dl>
+            </article>
+
+            <article class="issue" data-kind="fixed" data-text="reader get_frame getitem synced video ego sampling">
+              <div class="issue-top">
+                <h3>6. Ego frame sampling used a different reader API</h3>
+                <span class="tag fixed">Fixed</span>
+              </div>
+              <p class="file">packages/mv-api/src/mv_api/data/synced_videos.py</p>
+              <dl>
+                <div>
+                  <dt>Why it mattered</dt>
+                  <dd>The rest of the pipeline uses <code>reader[frame_idx]</code>; <code>get_frame</code> would fail on readers that only implement indexing.</dd>
+                </div>
+                <div>
+                  <dt>Fix</dt>
+                  <dd>Use <code>reader[frame_idx]</code> consistently.</dd>
+                </div>
+                <div>
+                  <dt>Test</dt>
+                  <dd>Added a getitem-only fake ego reader test.</dd>
+                </div>
+              </dl>
+            </article>
+
+            <article class="issue" data-kind="fixed" data-text="height width reannotation resize images static checker">
+              <div class="issue-top">
+                <h3>7. Reannotated <code>height</code>/<code>width</code> in one function scope</h3>
+                <span class="tag fixed">Fixed</span>
+              </div>
+              <p class="file">packages/mv-api/src/mv_api/api/full_exoego_pipeline.py</p>
+              <dl>
+                <div>
+                  <dt>Why it mattered</dt>
+                  <dd>Some static checkers flag repeated annotated assignments in a shared Python function scope.</dd>
+                </div>
+                <div>
+                  <dt>Fix</dt>
+                  <dd>Renamed the per-image locals to <code>image_height</code> and <code>image_width</code>.</dd>
+                </div>
+              </dl>
+            </article>
+
+            <article class="issue" data-kind="fixed" data-text="calib_confg typo calib_config tyro cli">
+              <div class="issue-top">
+                <h3>8. New public config field had a typo</h3>
+                <span class="tag fixed">Fixed</span>
+              </div>
+              <p class="file">packages/mv-api/src/mv_api/api/full_exoego_pipeline.py</p>
+              <dl>
+                <div>
+                  <dt>Why it mattered</dt>
+                  <dd><code>calib_confg</code> would become part of the Tyro CLI even though this package has no legacy compatibility burden yet.</dd>
+                </div>
+                <div>
+                  <dt>Fix</dt>
+                  <dd>Renamed to <code>calib_config</code> and updated tests/validation tooling.</dd>
+                </div>
+              </dl>
+            </article>
+
+            <article class="issue" data-kind="fixed" data-text="tqdm max_frames shortest_timestamp total">
+              <div class="issue-top">
+                <h3>9. Progress iterator ignored <code>max_frames</code></h3>
+                <span class="tag fixed">Fixed</span>
+              </div>
+              <p class="file">packages/mv-api/src/mv_api/api/full_exoego_pipeline.py</p>
+              <dl>
+                <div>
+                  <dt>Why it mattered</dt>
+                  <dd>The progress bar total could say a short run while the iterable still covered the whole video.</dd>
+                </div>
+                <div>
+                  <dt>Fix</dt>
+                  <dd>Slice the timestamp array first: <code>timestamps_to_process = shortest_timestamp[:total]</code>.</dd>
+                </div>
+              </dl>
+            </article>
+
+            <article class="issue" data-kind="fixed" data-text="hocap download temp directory partial state pixi">
+              <div class="issue-top">
+                <h3>10. HoCap download task could leave confusing partial state</h3>
+                <span class="tag fixed">Fixed</span>
+              </div>
+              <p class="file">pixi.toml</p>
+              <dl>
+                <div>
+                  <dt>Why it mattered</dt>
+                  <dd>A failed download or unzip could leave partial files under the final directory.</dd>
+                </div>
+                <div>
+                  <dt>Fix</dt>
+                  <dd>Download and extract into <code>data/hocap/.sample-tmp</code>, then rename to <code>sample</code> only after success.</dd>
+                </div>
+              </dl>
+            </article>
+
+            <article class="issue" data-kind="nochange" data-text="onnxruntime-gpu cuda feature linux-64 linux-aarch64 pixi">
+              <div class="issue-top">
+                <h3>11. CUDA dependency warning broadened platform support</h3>
+                <span class="tag nochange">No code change</span>
+              </div>
+              <p class="file">pixi.toml</p>
+              <dl>
+                <div>
+                  <dt>Assessment</dt>
+                  <dd>The shared <code>[feature.cuda]</code> already declares <code>platforms = ["linux-64"]</code>, so <code>onnxruntime-gpu</code> did not expand to linux-aarch64.</dd>
+                </div>
+                <div>
+                  <dt>Resolution</dt>
+                  <dd>Replied on GitHub and resolved without changing the manifest.</dd>
+                </div>
+              </dl>
+            </article>
+
+            <article class="issue" data-kind="fixed" data-text="pyproject non pypi dependencies pixi workspace README">
+              <div class="issue-top">
+                <h3>12. Package dependencies rely on Pixi workspace sources</h3>
+                <span class="tag fixed">Fixed</span>
+              </div>
+              <p class="file">packages/mv-api/README.md</p>
+              <dl>
+                <div>
+                  <dt>Why it mattered</dt>
+                  <dd><code>monopriors</code>, <code>wilor-nano</code>, and <code>rtmlib</code> are resolved by root Pixi sources, not standalone PyPI packages.</dd>
+                </div>
+                <div>
+                  <dt>Fix</dt>
+                  <dd>Documented that <code>mv-api</code> is intended to run from the Pixi workspace.</dd>
+                </div>
+              </dl>
+            </article>
+
+            <article class="issue" data-kind="fixed" data-text="load_stream_timestamps side effect stream names docstring">
+              <div class="issue-top">
+                <h3>13. Timestamp loader mutates cached stream names</h3>
+                <span class="tag fixed">Fixed</span>
+              </div>
+              <p class="file">packages/mv-api/src/mv_api/data/synced_videos.py</p>
+              <dl>
+                <div>
+                  <dt>Why it mattered</dt>
+                  <dd>The method name sounded read-only even though it resets and repopulates ego/exo stream-name caches.</dd>
+                </div>
+                <div>
+                  <dt>Fix</dt>
+                  <dd>Updated the docstring to state the side effect explicitly.</dd>
+                </div>
+              </dl>
+            </article>
+
+            <article class="issue" data-kind="fixed" data-text="duplicate bbox helper compute_square_bbox tracker">
+              <div class="issue-top">
+                <h3>14. Two hand bbox helpers could drift</h3>
+                <span class="tag fixed">Fixed</span>
+              </div>
+              <p class="file">packages/mv-api/src/mv_api/multiview_pose_estimator.py</p>
+              <dl>
+                <div>
+                  <dt>Why it mattered</dt>
+                  <dd>The pipeline and tracker had nearly identical bbox logic with subtly different NaN behavior.</dd>
+                </div>
+                <div>
+                  <dt>Fix</dt>
+                  <dd>Added shared <code>compute_square_bbox_from_uv</code>; both call sites delegate to it.</dd>
+                </div>
+              </dl>
+            </article>
+
+            <article class="issue" data-kind="fixed" data-text="compute_square_bbox nan finite rows occluded fingertip">
+              <div class="issue-top">
+                <h3>15. Ego bbox helper rejected any NaN keypoint</h3>
+                <span class="tag fixed">Fixed</span>
+              </div>
+              <p class="file">packages/mv-api/src/mv_api/api/full_exoego_pipeline.py</p>
+              <dl>
+                <div>
+                  <dt>Why it mattered</dt>
+                  <dd>One occluded fingertip could skip WiLor refinement for an otherwise usable hand.</dd>
+                </div>
+                <div>
+                  <dt>Fix</dt>
+                  <dd>The shared bbox helper filters finite rows and computes the box from the valid subset.</dd>
+                </div>
+                <div>
+                  <dt>Test</dt>
+                  <dd>Added a partially-NaN hand-keypoint test.</dd>
+                </div>
+              </dl>
+            </article>
+
+            <article class="issue" data-kind="note" data-text="hand mean gate group confidence skeleton visualization">
+              <div class="issue-top">
+                <h3>16. Group-level hand confidence gate needed intent</h3>
+                <span class="tag note">Documented</span>
+              </div>
+              <p class="file">packages/mv-api/src/mv_api/api/full_exoego_pipeline.py</p>
+              <dl>
+                <div>
+                  <dt>Assessment</dt>
+                  <dd>The group gate is intentional for the Rerun skeleton visualization, so low-confidence hands disappear as a coherent unit.</dd>
+                </div>
+                <div>
+                  <dt>Fix</dt>
+                  <dd>Added a code comment documenting that behavior and replied on GitHub.</dd>
+                </div>
+              </dl>
+            </article>
+
+            <article class="issue" data-kind="fixed" data-text="duplicate frame timestamp helper fps reader synced videos">
+              <div class="issue-top">
+                <h3>17. Duplicate frame timestamp helpers</h3>
+                <span class="tag fixed">Fixed</span>
+              </div>
+              <p class="file">packages/mv-api/src/mv_api/api/full_exoego_pipeline.py</p>
+              <dl>
+                <div>
+                  <dt>Why it mattered</dt>
+                  <dd>Two FPS-to-timestamp implementations could drift; one already had validation the other lacked.</dd>
+                </div>
+                <div>
+                  <dt>Fix</dt>
+                  <dd>Promoted <code>frame_timestamps_from_reader</code> from the synced-video module and reused it in the pipeline.</dd>
+                </div>
+              </dl>
+            </article>
+
+            <article class="issue" data-kind="fixed" data-text="rerun rrd stats parser empty maps vacuous comparison">
+              <div class="issue-top">
+                <h3>18. RRD stats parser could silently accept changed CLI output</h3>
+                <span class="tag fixed">Fixed</span>
+              </div>
+              <p class="file">packages/mv-api/src/mv_api/api/rerun_artifact_compare.py</p>
+              <dl>
+                <div>
+                  <dt>Why it mattered</dt>
+                  <dd>If <code>rerun rrd stats</code> changed its text format, both parsed maps could be empty and comparisons could pass vacuously.</dd>
+                </div>
+                <div>
+                  <dt>Fix</dt>
+                  <dd>Raise <code>ValueError</code> when the CLI succeeds but no overview or entity counts can be parsed.</dd>
+                </div>
+                <div>
+                  <dt>Test</dt>
+                  <dd>Added a fake successful stats output test that must fail parsing.</dd>
+                </div>
+              </dl>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="validation">
+        <div class="section-head">
+          <div>
+            <h2>Validation</h2>
+            <p>The patch was committed and pushed after these checks completed locally.</p>
+          </div>
+          <span class="pill">Commit <code>b76ef3d</code></span>
+        </div>
+        <div class="content">
+          <div class="checks">
+            <div class="check">
+              <b>Test suite</b>
+              <span><code>pixi run -e mv-api-dev pytest -q packages/mv-api/tests</code> -> <span class="ok">20 passed</span></span>
+            </div>
+            <div class="check">
+              <b>Ruff</b>
+              <span><code>pixi run -e mv-api-dev ruff check packages/mv-api</code> -> <span class="ok">passed</span></span>
+            </div>
+            <div class="check">
+              <b>Pyrefly</b>
+              <span><code>pixi run -e mv-api-dev pyrefly check packages/mv-api</code> -> <span class="ok">0 errors</span></span>
+            </div>
+            <div class="check">
+              <b>Whitespace</b>
+              <span><code>git diff --check</code> -> <span class="ok">clean</span></span>
+            </div>
+          </div>
+          <p class="footnote">
+            The unrelated local change in <code>packages/egoexo-forge/tools/batch_convert.py</code> was left unstaged and was not included in the review-fix commit.
+          </p>
+        </div>
+      </section>
+
+      <section id="tailscale">
+        <div class="section-head">
+          <div>
+            <h2>Tailscale Serve Audit</h2>
+            <p>These are the routes present before deploying this artifact. "Live" means the local upstream is listening and the HTTPS route returned a response.</p>
+          </div>
+        </div>
+        <div class="content">
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>URL</th>
+                  <th>Upstream</th>
+                  <th>Likely owner</th>
+                  <th>Status</th>
+                  <th>Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>https://pablo-dl-server.ilish-ruler.ts.net:10443/</code></td>
+                  <td><code>127.0.0.1:39037</code></td>
+                  <td>vibe-kanban</td>
+                  <td class="ok">Live, HTTP 200</td>
+                  <td>Important route. Process <code>vibe-kanban</code> is listening.</td>
+                </tr>
+                <tr>
+                  <td><code>https://pablo-dl-server.ilish-ruler.ts.net:10444/</code></td>
+                  <td><code>127.0.0.1:39036</code></td>
+                  <td>minimal-vk relay server</td>
+                  <td class="warn">Live, HTTP 404 at root</td>
+                  <td>Docker proxy is listening; likely part of the Kanban stack rather than a stale route.</td>
+                </tr>
+                <tr>
+                  <td><code>https://pablo-dl-server.ilish-ruler.ts.net:10445/</code></td>
+                  <td><code>127.0.0.1:39035</code></td>
+                  <td>minimal-vk remote server</td>
+                  <td class="ok">Live, HTTP 200</td>
+                  <td>Docker proxy is listening; likely part of the Kanban stack.</td>
+                </tr>
+                <tr>
+                  <td><code>https://pablo-dl-server.ilish-ruler.ts.net:10446/</code></td>
+                  <td><code>127.0.0.1:39039</code></td>
+                  <td>minimal-vk Azurite</td>
+                  <td class="warn">Live, HTTP 400 at root</td>
+                  <td>Root 400 is expected for Azurite blob service. Docker proxy is listening.</td>
+                </tr>
+                <tr>
+                  <td><code>https://pablo-dl-server.ilish-ruler.ts.net:10447/</code></td>
+                  <td><code>127.0.0.1:9094</code></td>
+                  <td>old Rerun web viewer</td>
+                  <td class="bad">Stale, HTTP 502</td>
+                  <td>No local listener on <code>9094</code>.</td>
+                </tr>
+                <tr>
+                  <td><code>https://pablo-dl-server.ilish-ruler.ts.net:10448/</code></td>
+                  <td><code>127.0.0.1:9878</code></td>
+                  <td>old Rerun proxy</td>
+                  <td class="bad">Stale, HTTP 502</td>
+                  <td>No local listener on <code>9878</code>. A separate Rerun process is listening on <code>9876</code>, but this route points to <code>9878</code>.</td>
+                </tr>
+                <tr>
+                  <td><code>https://pablo-dl-server.ilish-ruler.ts.net/</code></td>
+                  <td><code>127.0.0.1:8765</code></td>
+                  <td>EPFL pyserde HTML report</td>
+                  <td class="ok">Live, HTTP 200</td>
+                  <td>Backed by <code>python -m http.server 8765 -d artifacts/epfl-pyserde-json-report</code>.</td>
+                </tr>
+                <tr>
+                  <td><code>https://pablo-dl-server.ilish-ruler.ts.net/hydrus</code></td>
+                  <td><code>127.0.0.1:5800</code></td>
+                  <td>Hydrus noVNC</td>
+                  <td class="ok">Live, HTTP 200</td>
+                  <td>Docker-backed noVNC route.</td>
+                </tr>
+                <tr>
+                  <td><code>https://pablo-dl-server.ilish-ruler.ts.net:8444/</code></td>
+                  <td><code>127.0.0.1:6754</code></td>
+                  <td>unknown old route</td>
+                  <td class="bad">Stale, HTTP 502</td>
+                  <td>No local listener on <code>6754</code>.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="footnote">
+            Tailscale Serve does not expose per-route traffic counters from <code>tailscale serve status</code>. The audit above is based on the configured upstream, local listeners, Docker process names, and HTTPS response checks.
+          </p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    const searchInput = document.querySelector("#issueSearch");
+    const filterButtons = [...document.querySelectorAll("[data-filter]")];
+    const issues = [...document.querySelectorAll(".issue")];
+    let activeFilter = "all";
+
+    function normalize(value) {
+      return value.toLowerCase().trim();
+    }
+
+    function applyFilters() {
+      const query = normalize(searchInput.value);
+      for (const issue of issues) {
+        const kind = issue.dataset.kind;
+        const text = normalize(issue.innerText + " " + issue.dataset.text);
+        const kindMatches = activeFilter === "all" || kind === activeFilter;
+        const textMatches = query.length === 0 || text.includes(query);
+        issue.classList.toggle("hidden", !(kindMatches && textMatches));
+      }
+    }
+
+    for (const button of filterButtons) {
+      button.addEventListener("click", () => {
+        activeFilter = button.dataset.filter;
+        for (const other of filterButtons) {
+          other.setAttribute("aria-pressed", String(other === button));
+        }
+        applyFilters();
+      });
+    }
+
+    searchInput.addEventListener("input", applyFilters);
+  </script>
+</body>
+</html>

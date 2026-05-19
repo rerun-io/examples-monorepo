@@ -400,15 +400,10 @@ moge = { git = "https://github.com/microsoft/MoGe.git" }
 [feature.mv-api.activation.env]
 PACKAGE_DIR = "packages/mv-api"
 
-[feature.mv-api.tasks.mv-api-hocap-full]
-cmd = "python tools/run_exoego_full.py"
-cwd = "packages/mv-api"
-description = "Run the mv-api full exo/ego pipeline on raw HoCap data"
-
 [feature.mv-api.tasks.mv-api-full-app]
 cmd = "python tools/apps/full_exoego_app.py"
 cwd = "packages/mv-api"
-description = "Run the node-based mv-api full exo/ego composite app"
+description = "Run the mv-api full exo/ego node app"
 
 [feature.mv-api.tasks.mv-api-hocap-download]
 cmd = "test -e data/hocap/sample || (rm -rf data/hocap/.sample-tmp data/hocap/sample && mkdir -p data/hocap/.sample-tmp && hf download pablovela5620/hocap-sample sample.zip --repo-type dataset --local-dir data/hocap/.sample-tmp && python -m zipfile -e data/hocap/.sample-tmp/sample.zip data/hocap/.sample-tmp && mv data/hocap/.sample-tmp/sample data/hocap/sample && rm -rf data/hocap/.sample-tmp)"
