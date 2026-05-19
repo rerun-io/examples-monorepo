@@ -1,6 +1,6 @@
 import tyro
 
-from egoexo_forge.api.batch_raw_to_rrd import BatchConvertConfig, batch_raw_to_rrd
+from egoexo_forge.api.batch_ingest_rrd import BatchConvertConfig, batch_raw_to_rrd
 
 # Example usage
 if __name__ == "__main__":
