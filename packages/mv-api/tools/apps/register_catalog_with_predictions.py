@@ -70,11 +70,27 @@ class RegisteredPrediction:
 
 
 @dataclass(frozen=True, slots=True)
+class RegisteredReviewTable:
+    """One dataset review table registered into the catalog."""
+
+    dataset_name: str
+    """Source catalog dataset represented by the table."""
+    table_name: str
+    """Catalog table name."""
+    table_url: str
+    """Rerun catalog URL for opening the table."""
+    row_count: int
+    """Number of source RRD rows in the table."""
+
+
+@dataclass(frozen=True, slots=True)
 class CatalogRegistrationResult:
     """Running catalog server plus prediction registration summary."""
 
     catalog_url: str
     """Rerun catalog URL exposed by the running server."""
+    registered_review_tables: list[RegisteredReviewTable]
+    """Dataset review/index tables registered into the running catalog."""
     registered_predictions: list[RegisteredPrediction]
     """Prediction layers registered into the running catalog."""
     server: Any
@@ -154,6 +170,51 @@ def register_prediction_rrds(*, client: Any, config: CatalogRegistrationConfig, 
     return registered_predictions
 
 
+def register_dataset_review_tables(
+    *,
+    client: Any,
+    config: CatalogRegistrationConfig,
+    rrd_root: Path,
+    catalog_url: str,
+) -> list[RegisteredReviewTable]:
+    """Create SimpleCV's dataset review tables with embedded table-card blueprints."""
+    from simplecv.apis.exoego_forge_catalog import (
+        build_rrd_index_rows_from_dataset,
+        create_rrd_index_table,
+        discover_rrd_paths,
+        table_name_for_dataset,
+    )
+
+    paths_by_dataset: dict[str, list[Path]] = discover_rrd_paths(rrd_root, datasets=config.datasets)
+    registered_tables: list[RegisteredReviewTable] = []
+    for dataset_name in sorted(paths_by_dataset):
+        dataset_dir: Path = rrd_root / dataset_name
+        dataset_entry: Any = client.get_dataset(dataset_name)
+        rows: list[Any] = build_rrd_index_rows_from_dataset(
+            dataset_entry,
+            dataset_dir=dataset_dir,
+            dataset_name=dataset_name,
+        )
+        table_name: str = table_name_for_dataset(dataset_name)
+        total_size_bytes: int = sum(row.size_bytes for row in rows)
+        print(f"Creating {table_name} ({len(rows)} RRDs, {total_size_bytes:,} bytes).", flush=True)
+        table: Any = create_rrd_index_table(
+            client,
+            dataset_name=dataset_name,
+            table_name=table_name,
+            rows=rows,
+        )
+        registered_tables.append(
+            RegisteredReviewTable(
+                dataset_name=dataset_name,
+                table_name=table_name,
+                table_url=f"{catalog_url}/entry/{table.id}",
+                row_count=len(rows),
+            )
+        )
+    return registered_tables
+
+
 def mount_catalog_with_predictions(config: CatalogRegistrationConfig) -> CatalogRegistrationResult:
     """Mount the full SimpleCV catalog and register prediction RRD layers."""
     from simplecv.apis.exoego_forge_catalog import mount_catalog
@@ -174,15 +235,22 @@ def mount_catalog_with_predictions(config: CatalogRegistrationConfig) -> Catalog
     server: Any = mount_catalog(rrd_root, **mount_kwargs)
     try:
         client: Any = server.client()
+        catalog_url: str = str(server.url())
+        registered_review_tables: list[RegisteredReviewTable] = register_dataset_review_tables(
+            client=client,
+            config=config,
+            rrd_root=rrd_root,
+            catalog_url=catalog_url,
+        )
         prediction_rrds: list[Path] = discover_prediction_rrd_paths(config)
         registered_predictions: list[RegisteredPrediction] = register_prediction_rrds(
             client=client,
             config=config,
             prediction_rrds=prediction_rrds,
         )
-        catalog_url: str = str(server.url())
         return CatalogRegistrationResult(
             catalog_url=catalog_url,
+            registered_review_tables=registered_review_tables,
             registered_predictions=registered_predictions,
             server=server,
         )
@@ -201,6 +269,10 @@ def print_summary(result: CatalogRegistrationResult, *, config: CatalogRegistrat
     print(f"Catalog URL: {result.catalog_url}")
     print(f"Catalog scope: {dataset_scope}")
     print()
+    print("Dataset review tables:")
+    for registered_table in result.registered_review_tables:
+        print(f"  {registered_table.table_name}: {registered_table.table_url} ({registered_table.row_count} rows)")
+    print()
     print("Registered prediction layers:")
     for registered_prediction in result.registered_predictions:
         print(
@@ -208,7 +280,8 @@ def print_summary(result: CatalogRegistrationResult, *, config: CatalogRegistrat
             f"from {registered_prediction.rrd_path}"
         )
     print()
-    print("SimpleCV registered the default catalog blueprints while mounting each dataset.")
+    print("SimpleCV registered default segment blueprints and dataset review table blueprints.")
+    print("Enable: Settings > Experimental > Table cards and blueprints")
     if config.exit_after_register:
         print("Exiting now; in-memory catalog registration will not remain served.")
     else:

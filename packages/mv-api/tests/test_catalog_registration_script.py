@@ -2,7 +2,7 @@ import importlib.util
 import sys
 import tomllib
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -94,7 +94,14 @@ def test_pixi_mac_registration_env_is_mac_only_and_lean() -> None:
     task: dict[str, Any] = feature["tasks"]["mv-api-catalog-register"]
 
     assert feature["platforms"] == ["osx-arm64"]
-    assert feature["dependencies"] == {"python": "3.12.*"}
+    assert feature["dependencies"] == {
+        "av": "*",
+        "datasets": ">=4.0.0",
+        "h5py": ">=3.13.0,<4",
+        "natsort": ">=8.4.0,<9",
+        "python": "3.12.*",
+        "scipy": "*",
+    }
     assert set(feature["pypi-dependencies"]) == {"rerun-sdk", "simplecv", "tyro"}
     assert feature["pypi-dependencies"]["simplecv"]["rev"] == "178479b53d14b9dd4a79b212dd2c5a3be52b4de8"
     assert feature["pypi-dependencies"]["rerun-sdk"]["extras"] == ["datafusion"]
@@ -106,7 +113,7 @@ def test_pixi_mac_registration_env_is_mac_only_and_lean() -> None:
     assert "mv-api" not in environment["features"]
 
 
-def test_mount_catalog_with_predictions_uses_simplecv_blueprints_and_registers_prediction_rrds(
+def test_mount_catalog_with_predictions_uses_simplecv_blueprints_review_tables_and_registers_prediction_rrds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -117,6 +124,7 @@ def test_mount_catalog_with_predictions_uses_simplecv_blueprints_and_registers_p
     prediction_rrd.parent.mkdir(parents=True, exist_ok=True)
     prediction_rrd.write_bytes(b"rrd")
     captured_mount_kwargs: dict[str, Any] = {}
+    captured_review_table_kwargs: dict[str, Any] = {}
 
     class _FakeRegistrationHandle:
         def __init__(self) -> None:
@@ -156,10 +164,29 @@ def test_mount_catalog_with_predictions_uses_simplecv_blueprints_and_registers_p
         captured_mount_kwargs["kwargs"] = kwargs
         return _FakeServer()
 
+    def _fake_discover_rrd_paths(path: Path, **kwargs: Any) -> dict[str, list[Path]]:
+        captured_review_table_kwargs["discover"] = {"path": path, **kwargs}
+        return {"assembly101": [rrd_root / "assembly101" / "all" / "seq_a.rrd"]}
+
+    def _fake_build_rrd_index_rows_from_dataset(*args: Any, **kwargs: Any) -> list[Any]:
+        captured_review_table_kwargs["build_rows"] = {"args": args, "kwargs": kwargs}
+        return [SimpleNamespace(size_bytes=123)]
+
+    def _fake_table_name_for_dataset(dataset_name: str) -> str:
+        return f"{dataset_name}_table"
+
+    def _fake_create_rrd_index_table(*args: Any, **kwargs: Any) -> Any:
+        captured_review_table_kwargs["create_table"] = {"args": args, "kwargs": kwargs}
+        return SimpleNamespace(id="assembly101-table-id")
+
     simplecv_module: ModuleType = ModuleType("simplecv")
     simplecv_apis_module: ModuleType = ModuleType("simplecv.apis")
     catalog_module: ModuleType = ModuleType("simplecv.apis.exoego_forge_catalog")
     cast(Any, catalog_module).mount_catalog = _fake_mount_catalog
+    cast(Any, catalog_module).discover_rrd_paths = _fake_discover_rrd_paths
+    cast(Any, catalog_module).build_rrd_index_rows_from_dataset = _fake_build_rrd_index_rows_from_dataset
+    cast(Any, catalog_module).table_name_for_dataset = _fake_table_name_for_dataset
+    cast(Any, catalog_module).create_rrd_index_table = _fake_create_rrd_index_table
     monkeypatch.setitem(sys.modules, "simplecv", simplecv_module)
     monkeypatch.setitem(sys.modules, "simplecv.apis", simplecv_apis_module)
     monkeypatch.setitem(sys.modules, "simplecv.apis.exoego_forge_catalog", catalog_module)
@@ -179,9 +206,20 @@ def test_mount_catalog_with_predictions_uses_simplecv_blueprints_and_registers_p
     assert captured_mount_kwargs["kwargs"]["port"] == 9991
     assert captured_mount_kwargs["kwargs"]["optimize_for_catalog"] is False
     assert captured_mount_kwargs["kwargs"]["optimize_datasets"] == ("assembly101",)
+    assert captured_review_table_kwargs["discover"] == {"path": rrd_root.resolve(), "datasets": ()}
+    assert captured_review_table_kwargs["build_rows"]["kwargs"] == {
+        "dataset_dir": rrd_root.resolve() / "assembly101",
+        "dataset_name": "assembly101",
+    }
+    assert captured_review_table_kwargs["create_table"]["kwargs"]["dataset_name"] == "assembly101"
+    assert captured_review_table_kwargs["create_table"]["kwargs"]["table_name"] == "assembly101_table"
+    assert len(captured_review_table_kwargs["create_table"]["kwargs"]["rows"]) == 1
     assert dataset_entry.register_calls == [
         ([prediction_rrd.resolve().as_uri()], {"layer_name": "mvapi_coco133_upper_body_v1_full_red"})
     ]
     assert dataset_entry.registration_handle.wait_called is True
     assert result.catalog_url == "rerun+http://127.0.0.1:9991"
+    assert result.registered_review_tables[0].table_name == "assembly101_table"
+    assert result.registered_review_tables[0].table_url == "rerun+http://127.0.0.1:9991/entry/assembly101-table-id"
+    assert result.registered_review_tables[0].row_count == 1
     assert result.registered_predictions[0].dataset_name == "assembly101"

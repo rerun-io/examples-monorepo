@@ -468,7 +468,12 @@ description = "Run focused catalog-native MVAPI prediction-layer tests"
 platforms = ["osx-arm64"]
 
 [feature.mv-api-catalog-register-mac.dependencies]
+av = "*"
+datasets = ">=4.0.0"
+h5py = ">=3.13.0,<4"
+natsort = ">=8.4.0,<9"
 python = "3.12.*"
+scipy = "*"
 
 [feature.mv-api-catalog-register-mac.pypi-dependencies]
 tyro = ">=0.9.1,<0.10"
