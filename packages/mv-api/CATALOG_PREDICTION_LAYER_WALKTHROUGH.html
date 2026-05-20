@@ -1,0 +1,1145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Catalog-native MVAPI prediction layer walkthrough</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0d1117;
+      --panel: #141a22;
+      --panel-2: #111821;
+      --panel-3: #0f1720;
+      --text: #edf2f7;
+      --muted: #9ba9b8;
+      --line: #2a3543;
+      --soft-line: #1f2a36;
+      --accent: #2eaadc;
+      --accent-2: #7cc36d;
+      --accent-3: #f2b84b;
+      --accent-4: #ef6461;
+      --violet: #b68cff;
+      --code: #080c11;
+      --shadow: 0 20px 70px rgb(0 0 0 / 0.35);
+      --radius: 8px;
+      font-family:
+        Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+        sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 20% 0%, rgb(46 170 220 / 0.12), transparent 30rem),
+        linear-gradient(180deg, #0d1117 0%, #0a0e13 100%);
+      color: var(--text);
+      line-height: 1.55;
+    }
+
+    a {
+      color: #7dcfff;
+      text-decoration: none;
+    }
+
+    a:hover {
+      text-decoration: underline;
+    }
+
+    code,
+    pre {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    }
+
+    code {
+      padding: 0.13rem 0.32rem;
+      border: 1px solid var(--soft-line);
+      border-radius: 5px;
+      background: var(--code);
+      color: #dbeafe;
+      font-size: 0.92em;
+    }
+
+    pre {
+      overflow: auto;
+      margin: 0;
+      padding: 1rem;
+      border: 1px solid var(--soft-line);
+      border-radius: var(--radius);
+      background: var(--code);
+      color: #d9e6f2;
+      font-size: 0.88rem;
+    }
+
+    .page {
+      width: min(1440px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 28px 0 64px;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.65fr);
+      gap: 24px;
+      align-items: stretch;
+      padding: 28px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: linear-gradient(135deg, rgb(20 26 34 / 0.96), rgb(15 23 32 / 0.94));
+      box-shadow: var(--shadow);
+    }
+
+    .kicker {
+      margin: 0 0 8px;
+      color: #7dcfff;
+      font-size: 0.83rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    h1,
+    h2,
+    h3 {
+      margin: 0;
+      letter-spacing: 0;
+      line-height: 1.12;
+    }
+
+    h1 {
+      max-width: 13ch;
+      font-size: clamp(2.2rem, 4vw, 4.6rem);
+    }
+
+    h2 {
+      margin-bottom: 14px;
+      font-size: clamp(1.55rem, 2.4vw, 2.35rem);
+    }
+
+    h3 {
+      margin-bottom: 9px;
+      font-size: 1.06rem;
+    }
+
+    p {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .lede {
+      max-width: 74ch;
+      margin-top: 16px;
+      color: #c8d4e1;
+      font-size: 1.08rem;
+    }
+
+    .hero-side {
+      display: grid;
+      gap: 12px;
+      align-content: start;
+    }
+
+    .fact {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 14px;
+      background: rgb(8 12 17 / 0.55);
+    }
+
+    .fact strong {
+      display: block;
+      margin-bottom: 4px;
+      color: var(--text);
+      font-size: 0.92rem;
+    }
+
+    .toc {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 22px 0 0;
+    }
+
+    .toc a {
+      display: inline-flex;
+      align-items: center;
+      min-height: 34px;
+      padding: 7px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgb(8 12 17 / 0.45);
+      color: #dce8f3;
+      font-size: 0.9rem;
+    }
+
+    section {
+      margin-top: 24px;
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgb(20 26 34 / 0.88);
+      box-shadow: 0 12px 42px rgb(0 0 0 / 0.2);
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .card {
+      min-width: 0;
+      border: 1px solid var(--soft-line);
+      border-radius: var(--radius);
+      padding: 16px;
+      background: var(--panel-2);
+    }
+
+    .card p + p {
+      margin-top: 10px;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(190px, 1fr));
+      gap: 14px;
+      margin-top: 18px;
+    }
+
+    .stage {
+      position: relative;
+      min-height: 250px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-top-width: 4px;
+      border-radius: var(--radius);
+      background: var(--panel-3);
+    }
+
+    .stage:not(:last-child)::after {
+      content: "";
+      position: absolute;
+      top: 50%;
+      right: -17px;
+      width: 20px;
+      height: 20px;
+      transform: translateY(-50%) rotate(45deg);
+      border-top: 2px solid var(--line);
+      border-right: 2px solid var(--line);
+      background: transparent;
+      z-index: 2;
+    }
+
+    .stage-1 {
+      border-top-color: var(--accent);
+    }
+
+    .stage-2 {
+      border-top-color: var(--accent-2);
+    }
+
+    .stage-3 {
+      border-top-color: var(--accent-3);
+    }
+
+    .stage-4 {
+      border-top-color: var(--accent-4);
+    }
+
+    .stage-num {
+      display: inline-grid;
+      place-items: center;
+      width: 32px;
+      height: 32px;
+      margin-bottom: 12px;
+      border-radius: 50%;
+      color: #081017;
+      font-weight: 800;
+    }
+
+    .stage-1 .stage-num {
+      background: var(--accent);
+    }
+
+    .stage-2 .stage-num {
+      background: var(--accent-2);
+    }
+
+    .stage-3 .stage-num {
+      background: var(--accent-3);
+    }
+
+    .stage-4 .stage-num {
+      background: var(--accent-4);
+    }
+
+    .stage ul,
+    .list {
+      margin: 12px 0 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .stage li,
+    .list li {
+      position: relative;
+      margin: 9px 0;
+      padding-left: 18px;
+      color: var(--muted);
+    }
+
+    .stage li::before,
+    .list li::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0.72em;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #65758b;
+    }
+
+    .pipeline {
+      display: grid;
+      grid-template-columns: minmax(220px, 0.85fr) minmax(0, 1.15fr);
+      gap: 18px;
+      margin-top: 16px;
+    }
+
+    .swimlane {
+      display: grid;
+      gap: 10px;
+    }
+
+    .node {
+      border: 1px solid var(--soft-line);
+      border-radius: var(--radius);
+      padding: 12px;
+      background: #0d141d;
+    }
+
+    .node strong {
+      display: block;
+      color: #ecf4fb;
+      font-size: 0.93rem;
+    }
+
+    .node span {
+      display: block;
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 0.86rem;
+    }
+
+    .arrow-down {
+      display: grid;
+      place-items: center;
+      height: 18px;
+      color: #6f8196;
+      font-size: 1.2rem;
+      line-height: 1;
+    }
+
+    .detail {
+      display: grid;
+      gap: 14px;
+    }
+
+    .step {
+      border: 1px solid var(--soft-line);
+      border-radius: var(--radius);
+      background: #0d141d;
+      overflow: hidden;
+    }
+
+    .step summary {
+      cursor: pointer;
+      padding: 14px 16px;
+      color: #f0f6fc;
+      font-weight: 700;
+    }
+
+    .step summary::marker {
+      color: #7dcfff;
+    }
+
+    .step-body {
+      padding: 0 16px 16px;
+    }
+
+    .step-body p + pre,
+    .step-body p + .table-wrap,
+    .step-body .list + pre {
+      margin-top: 12px;
+    }
+
+    .label {
+      display: inline-flex;
+      align-items: center;
+      margin: 0 6px 6px 0;
+      padding: 4px 8px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #0a1017;
+      color: #cfe2f2;
+      font-size: 0.82rem;
+      white-space: nowrap;
+    }
+
+    .table-wrap {
+      overflow: auto;
+      border: 1px solid var(--soft-line);
+      border-radius: var(--radius);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 720px;
+      background: #0d141d;
+    }
+
+    th,
+    td {
+      padding: 11px 12px;
+      border-bottom: 1px solid var(--soft-line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: #edf2f7;
+      font-size: 0.82rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      background: #101925;
+    }
+
+    td {
+      color: var(--muted);
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .callout {
+      margin-top: 16px;
+      border: 1px solid rgb(242 184 75 / 0.35);
+      border-left: 4px solid var(--accent-3);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+      background: rgb(242 184 75 / 0.08);
+    }
+
+    .callout strong {
+      color: #ffd98a;
+    }
+
+    .timeline {
+      display: grid;
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    .timeline-row {
+      display: grid;
+      grid-template-columns: 170px minmax(0, 1fr);
+      gap: 12px;
+      align-items: start;
+    }
+
+    .time-label {
+      position: sticky;
+      top: 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 10px 12px;
+      background: #0d141d;
+      color: #f0f6fc;
+      font-weight: 700;
+    }
+
+    .time-content {
+      border-left: 2px solid var(--line);
+      padding-left: 14px;
+    }
+
+    .shape-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    .shape {
+      border: 1px solid var(--soft-line);
+      border-radius: var(--radius);
+      padding: 13px;
+      background: #0d141d;
+    }
+
+    .shape strong {
+      display: block;
+      margin-bottom: 6px;
+      color: #f0f6fc;
+    }
+
+    .shape code {
+      display: inline-block;
+      margin-top: 6px;
+    }
+
+    .footer {
+      margin-top: 24px;
+      color: #7b8796;
+      font-size: 0.9rem;
+    }
+
+    @media (max-width: 1180px) {
+      .hero,
+      .pipeline {
+        grid-template-columns: 1fr;
+      }
+
+      .flow,
+      .shape-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .stage:not(:last-child)::after {
+        display: none;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .page {
+        width: min(100vw - 20px, 100%);
+        padding-top: 10px;
+      }
+
+      .hero,
+      section {
+        padding: 18px;
+      }
+
+      .grid-2,
+      .grid-3,
+      .flow,
+      .shape-grid,
+      .timeline-row {
+        grid-template-columns: 1fr;
+      }
+
+      h1 {
+        max-width: none;
+      }
+
+      .time-label {
+        position: static;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="hero">
+      <div>
+        <p class="kicker">MVAPI catalog-native prediction layer</p>
+        <h1>Step-by-step pipeline map</h1>
+        <p class="lede">
+          This document explains the v1 flow from the registered SimpleCV/Rerun catalog,
+          through the Rerun experimental PyTorch dataloader, into MVAPI inference, and back
+          into the catalog as a new prediction layer on the same Assembly101 segment.
+        </p>
+        <nav class="toc" aria-label="Sections">
+          <a href="#flow">Flow</a>
+          <a href="#catalog">1. Catalog</a>
+          <a href="#loader">2. Catalog to loader</a>
+          <a href="#inference">3. Inference</a>
+          <a href="#registration">4. Layer registration</a>
+          <a href="#shapes">Data contracts</a>
+          <a href="#debug">Debugging notes</a>
+        </nav>
+      </div>
+      <aside class="hero-side" aria-label="Key facts">
+        <div class="fact">
+          <strong>Primary implementation</strong>
+          <p><code>packages/mv-api/src/mv_api/api/catalog_prediction_layer.py</code></p>
+        </div>
+        <div class="fact">
+          <strong>CLI wrapper</strong>
+          <p><code>packages/mv-api/tools/apps/catalog_prediction_layer.py</code></p>
+        </div>
+        <div class="fact">
+          <strong>Default segment</strong>
+          <p><code>assembly101</code> row <code>120</code>, sequence <code>all/nusar-2021_action_both_9034-c02b_9034_user_id_2021-02-04_160111</code></p>
+        </div>
+        <div class="fact">
+          <strong>Core invariant</strong>
+          <p>The prediction RRD preserves the source recording id so Rerun can overlay it as a layer on the original segment.</p>
+        </div>
+      </aside>
+    </header>
+
+    <section id="flow">
+      <h2>High-level Flow</h2>
+      <p>
+        The important mental model is that the catalog remains the source of truth. The new
+        tool does not rebuild the Assembly101 reader directly. It asks the catalog what data
+        exists, builds a dataloader over that registered data, runs MVAPI on decoded EXO frames,
+        writes a prediction RRD, then registers that RRD back to the same catalog segment.
+      </p>
+
+      <div class="flow" role="list" aria-label="Four stage flow">
+        <article class="stage stage-1" role="listitem">
+          <div class="stage-num">1</div>
+          <h3>Mount and select catalog data</h3>
+          <p>Mount the full SimpleCV catalog, then choose one Assembly101 segment for the inference run.</p>
+          <ul>
+            <li>Use SimpleCV catalog mounting.</li>
+            <li>Preserve source dataset and segment ids.</li>
+            <li>Discover EXO cameras from schema.</li>
+          </ul>
+        </article>
+
+        <article class="stage stage-2" role="listitem">
+          <div class="stage-num">2</div>
+          <h3>Build Rerun dataloader</h3>
+          <p>Convert catalog schema and timestamps into Rerun dataloader fields and a PyTorch loader.</p>
+          <ul>
+            <li>Require <code>VideoStream:sample</code>.</li>
+            <li>Use exact common <code>video_time</code> packets.</li>
+            <li>Decode all calibrated EXO camera views.</li>
+          </ul>
+        </article>
+
+        <article class="stage stage-3" role="listitem">
+          <div class="stage-num">3</div>
+          <h3>Run MVAPI inference</h3>
+          <p>Feed decoded frames into the existing MVAPI tracker for single-person COCO133 prediction.</p>
+          <ul>
+            <li>Predict 2D keypoints per EXO view.</li>
+            <li>Triangulate 3D keypoints from 2D predictions.</li>
+            <li>Keep MVAPI upper-body filtering.</li>
+          </ul>
+        </article>
+
+        <article class="stage stage-4" role="listitem">
+          <div class="stage-num">4</div>
+          <h3>Register prediction layer</h3>
+          <p>Log 2D and 3D predictions to a new RRD and register it as a catalog layer.</p>
+          <ul>
+            <li>Log on <code>video_time</code>.</li>
+            <li>Use same recording id as source segment.</li>
+            <li>Call <code>dataset_entry.register(...)</code>.</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section>
+      <h2>End-to-end Data Path</h2>
+      <div class="pipeline">
+        <div class="swimlane" aria-label="Pipeline nodes">
+          <div class="node">
+            <strong>SimpleCV catalog root</strong>
+            <span><code>/mnt/8tb/data/exoego-forge-catalog</code></span>
+          </div>
+          <div class="arrow-down">v</div>
+          <div class="node">
+            <strong>Mounted Rerun catalog</strong>
+            <span>Dataset entry plus segment metadata.</span>
+          </div>
+          <div class="arrow-down">v</div>
+          <div class="node">
+            <strong>Schema discovery</strong>
+            <span>Find <code>/world/exo/{camera}/pinhole/video</code> sample streams.</span>
+          </div>
+          <div class="arrow-down">v</div>
+          <div class="node">
+            <strong>Exact timestamp plan</strong>
+            <span>Common EXO packet timestamps on <code>video_time</code>.</span>
+          </div>
+          <div class="arrow-down">v</div>
+          <div class="node">
+            <strong>RerunIterableDataset</strong>
+            <span>Rerun fields with AV1 <code>VideoFrameDecoder</code>.</span>
+          </div>
+          <div class="arrow-down">v</div>
+          <div class="node">
+            <strong>PyTorch DataLoader</strong>
+            <span><code>batch_size=1</code>, <code>num_workers=0</code>.</span>
+          </div>
+          <div class="arrow-down">v</div>
+          <div class="node">
+            <strong>MVAPI tracker</strong>
+            <span>2D COCO133 predictions plus triangulated 3D.</span>
+          </div>
+          <div class="arrow-down">v</div>
+          <div class="node">
+            <strong>Prediction RRD</strong>
+            <span>Same recording id, new prediction entities.</span>
+          </div>
+          <div class="arrow-down">v</div>
+          <div class="node">
+            <strong>Registered catalog layer</strong>
+            <span>Overlayable in Rerun on the source segment.</span>
+          </div>
+        </div>
+
+        <div class="detail">
+          <details class="step" open>
+            <summary>The source recording is never copied into the prediction layer</summary>
+            <div class="step-body">
+              <p>
+                The prediction RRD contains only the new prediction entities and their static metadata.
+                Rerun catalog layering works because the new RRD uses the same recording id as the
+                selected source segment. The catalog then knows that the prediction file belongs on
+                top of that segment instead of beside it as an unrelated recording.
+              </p>
+            </div>
+          </details>
+
+          <details class="step" open>
+            <summary>The dataloader consumes catalog data directly</summary>
+            <div class="step-body">
+              <p>
+                The pipeline does not go through the old SimpleCV interface to materialize the dataset.
+                SimpleCV is used to mount/register and expose the Rerun catalog. The actual samples come
+                from Rerun's experimental dataloader API over catalog-backed streams.
+              </p>
+            </div>
+          </details>
+
+          <details class="step" open>
+            <summary>The inference surface stays MVAPI-native</summary>
+            <div class="step-body">
+              <p>
+                Once frames are decoded, the tool converts them into the image format expected by MVAPI
+                and calls the existing <code>MultiviewBodyTracker</code>. That keeps model loading,
+                detection, pose prediction, tracking, triangulation, and the current upper-body filter
+                aligned with the existing oracle pipeline.
+              </p>
+            </div>
+          </details>
+        </div>
+      </div>
+    </section>
+
+    <section id="catalog">
+      <h2>1. Catalog Stuff</h2>
+      <div class="grid-2">
+        <article class="card">
+          <h3>What gets mounted</h3>
+          <p>
+            The tool mounts the full ExoEgo Forge catalog using SimpleCV's catalog helper. In the v1
+            design, the catalog is registered broadly, but inference is intentionally scoped to one
+            default Assembly101 segment so the run is inspectable.
+          </p>
+          <ul class="list">
+            <li>Catalog root: <code>/mnt/8tb/data/exoego-forge-catalog</code></li>
+            <li>Dataset: <code>assembly101</code></li>
+            <li>Default row id: <code>120</code></li>
+            <li>Default sequence key: <code>all/nusar-2021_action_both_9034-c02b_9034_user_id_2021-02-04_160111</code></li>
+          </ul>
+        </article>
+
+        <article class="card">
+          <h3>Why row 120</h3>
+          <p>
+            The default row is not meant to be semantically special. It is a practical default chosen
+            because it has the expected schema and usable video samples. Earlier rows can expose the
+            schema while still producing null samples for the video fields, which is not a valid
+            inference input.
+          </p>
+          <p>
+            The v1 contract is intentionally loud: if the chosen segment does not provide usable
+            <code>VideoStream:sample</code> data for the discovered EXO cameras, the tool fails instead
+            of silently falling back to another path.
+          </p>
+        </article>
+      </div>
+
+      <div class="timeline">
+        <div class="timeline-row">
+          <div class="time-label">Catalog mount</div>
+          <div class="time-content">
+            <p>
+              SimpleCV mounts the catalog and returns dataset entries that Rerun can serve. This is
+              where the tool gets a catalog-backed handle to Assembly101 rather than manually walking
+              Assembly101 files.
+            </p>
+          </div>
+        </div>
+        <div class="timeline-row">
+          <div class="time-label">Segment select</div>
+          <div class="time-content">
+            <p>
+              The Assembly101 rows are sorted by their sequence key. The configured row id selects one
+              segment. The selected segment provides the source recording id, segment id, and schema.
+            </p>
+          </div>
+        </div>
+        <div class="timeline-row">
+          <div class="time-label">Camera discovery</div>
+          <div class="time-content">
+            <p>
+              The tool reads the catalog schema and finds EXO video sample streams shaped like
+              <code>/world/exo/{camera}/pinhole/video:VideoStream:sample</code>. It then checks that
+              those cameras also have the pinhole and transform data needed for projection and
+              triangulation.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="loader">
+      <h2>2. Catalog to Data Loader</h2>
+      <p>
+        This is the most catalog-specific part of the pipeline. The goal is to turn registered Rerun
+        catalog streams into a normal PyTorch-style iterator where each sample gives the decoded EXO
+        frames for one shared <code>video_time</code>.
+      </p>
+
+      <div class="grid-3" style="margin-top: 16px;">
+        <article class="card">
+          <h3>Discover fields</h3>
+          <p>
+            Each EXO camera contributes one Rerun dataloader field for its video sample stream. The
+            field path is catalog-derived, not hard-coded as a fixed camera list.
+          </p>
+          <p>
+            In practice the default segment exposes eight EXO cameras:
+            <span class="label">C10095</span>
+            <span class="label">C10115</span>
+            <span class="label">C10118</span>
+            <span class="label">C10119</span>
+            <span class="label">C10379</span>
+            <span class="label">C10390</span>
+            <span class="label">C10395</span>
+            <span class="label">C10404</span>
+          </p>
+        </article>
+
+        <article class="card">
+          <h3>Choose timestamps</h3>
+          <p>
+            The loader targets exact packet timestamps that all selected EXO streams have in common.
+            This matters because target timestamps are passed into Rerun's fill-latest query path.
+          </p>
+          <p>
+            A synthetic fixed 30 Hz grid can accidentally ask for filled AV1 packet rows more than
+            once, which can produce duplicate decode inputs. The fix is to use common packet times and
+            then downsample them to the requested approximate frame rate.
+          </p>
+        </article>
+
+        <article class="card">
+          <h3>Decode frames</h3>
+          <p>
+            Rerun's experimental dataloader decodes the video with <code>VideoFrameDecoder</code>.
+            The keyframe window gives the decoder enough context while the output sample remains tied
+            to the requested <code>video_time</code>.
+          </p>
+          <p>
+            <code>num_workers=0</code> keeps the loader simple and avoids multiprocessing surprises
+            while the Rerun dataloader API is still prerelease.
+          </p>
+        </article>
+      </div>
+
+      <div class="callout">
+        <strong>Important timeline detail:</strong>
+        predictions should be logged on <code>video_time</code>. Starting at <code>0s</code> is the
+        correct segment-relative behavior. A decoder keyframe context window, such as 10 seconds, is
+        not a reason to skip the first 10 seconds of predictions.
+      </div>
+
+      <details class="step" open style="margin-top: 16px;">
+        <summary>Loader construction in plain language</summary>
+        <div class="step-body">
+          <pre><code>catalog segment
+  -> schema says which EXO VideoStream samples exist
+  -> calibration check keeps only usable cameras
+  -> common video_time packet timestamps become sample index
+  -> RerunIterableDataset asks Rerun for decoded frames
+  -> PyTorch DataLoader yields one multi-camera sample at a time</code></pre>
+        </div>
+      </details>
+    </section>
+
+    <section id="inference">
+      <h2>3. Inference</h2>
+      <div class="grid-2">
+        <article class="card">
+          <h3>Input to MVAPI</h3>
+          <p>
+            Rerun yields decoded image tensors per camera. Before calling MVAPI, the tool converts each
+            camera frame from RGB CHW tensor form into the BGR HWC image layout expected by the tracker.
+          </p>
+          <ul class="list">
+            <li>One frame per discovered calibrated EXO camera.</li>
+            <li>All views are used for detection in v1, even though it is slower.</li>
+            <li>The camera list is paired with SimpleCV pinhole parameters for triangulation.</li>
+          </ul>
+        </article>
+
+        <article class="card">
+          <h3>Tracker contract</h3>
+          <p>
+            The tool reuses MVAPI's existing <code>MultiviewBodyTracker</code>. That means this new
+            path is catalog-native at the data access and registration layers, but it does not invent
+            a separate pose model or triangulation algorithm.
+          </p>
+          <ul class="list">
+            <li>Mode: <code>wholebody</code></li>
+            <li>Backend: <code>onnxruntime</code></li>
+            <li>Device request: <code>cuda</code></li>
+            <li>Single-person contract for v1.</li>
+            <li>MVAPI upper-body filtering remains in place.</li>
+          </ul>
+        </article>
+      </div>
+
+      <div class="table-wrap" style="margin-top: 16px;">
+        <table>
+          <thead>
+            <tr>
+              <th>Product</th>
+              <th>Meaning</th>
+              <th>Where it is logged</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>uvc_t</code></td>
+              <td>Per-camera 2D COCO133 keypoints plus confidence.</td>
+              <td><code>/world/exo/{camera}/pinhole/pred/mvapi/coco133_uv</code></td>
+            </tr>
+            <tr>
+              <td><code>xyzc_t</code></td>
+              <td>Triangulated 3D COCO133 keypoints plus confidence.</td>
+              <td><code>/world/pred/mvapi/coco133_xyz</code></td>
+            </tr>
+            <tr>
+              <td>Static metadata</td>
+              <td>COCO133 keypoint ids, class ids, and skeleton connectivity.</td>
+              <td>Logged once in the prediction recording before dynamic rows.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout">
+        <strong>Performance expectation:</strong>
+        this path is slow because it decodes all EXO videos and runs detector plus pose inference over
+        every selected view. GPU is requested through ONNX Runtime, but some graph nodes can still be
+        assigned to CPU. That is not automatically a bug; the useful checks are whether CUDA execution
+        providers are active and whether GPU utilization rises during pose inference.
+      </div>
+    </section>
+
+    <section id="registration">
+      <h2>4. Layer Re-registration</h2>
+      <p>
+        The output is a normal Rerun recording file, but its identity is chosen carefully so the catalog
+        can treat it as a layer on top of the source segment.
+      </p>
+
+      <div class="grid-2" style="margin-top: 16px;">
+        <article class="card">
+          <h3>RRD write</h3>
+          <p>
+            The tool creates a recording stream with the prediction application id and the selected
+            source segment's recording id. It logs static metadata, then sends dynamic columns indexed
+            by <code>video_time</code>.
+          </p>
+          <pre style="margin-top: 12px;"><code>application_id = "assembly101_mvapi_coco133"
+recording_id = source_segment.recording_id
+timeline = "video_time"</code></pre>
+        </article>
+
+        <article class="card">
+          <h3>Catalog registration</h3>
+          <p>
+            After the RRD is written, the tool immediately registers that file back into the selected
+            dataset entry with a layer name. Rerun can then display the source segment and prediction
+            layer together from the catalog.
+          </p>
+          <pre style="margin-top: 12px;"><code>dataset_entry.register(
+    [rrd_path.resolve().as_uri()],
+    layer_name=layer_name,
+)</code></pre>
+        </article>
+      </div>
+
+      <details class="step" open style="margin-top: 16px;">
+        <summary>Why same recording id matters</summary>
+        <div class="step-body">
+          <p>
+            If the prediction RRD uses a different recording id, Rerun sees it as a separate recording.
+            If it uses the source segment's recording id, Rerun can align the prediction entities with
+            the original images, pinholes, transforms, and timelines for that segment.
+          </p>
+        </div>
+      </details>
+    </section>
+
+    <section id="shapes">
+      <h2>Data Contracts and Shapes</h2>
+      <p>
+        These are the practical contracts to keep in mind when reading or changing the code.
+      </p>
+
+      <div class="shape-grid">
+        <div class="shape">
+          <strong>Catalog video sample</strong>
+          <p>Required Rerun component for every selected EXO camera.</p>
+          <code>VideoStream:sample</code>
+        </div>
+        <div class="shape">
+          <strong>Decoded frame</strong>
+          <p>Rerun dataloader output before MVAPI conversion.</p>
+          <code>UInt8[tensor, "3 h w"]</code>
+        </div>
+        <div class="shape">
+          <strong>MVAPI image</strong>
+          <p>Per-camera OpenCV-style image handed to the tracker.</p>
+          <code>UInt8[np.ndarray, "h w 3"]</code>
+        </div>
+        <div class="shape">
+          <strong>2D predictions</strong>
+          <p>COCO133 uv plus confidence, per view.</p>
+          <code>Float[np.ndarray, "n_views 133 3"]</code>
+        </div>
+        <div class="shape">
+          <strong>3D predictions</strong>
+          <p>Triangulated xyz plus confidence.</p>
+          <code>Float[np.ndarray, "133 4"]</code>
+        </div>
+        <div class="shape">
+          <strong>Timeline</strong>
+          <p>Every dynamic prediction row is indexed here.</p>
+          <code>video_time</code>
+        </div>
+        <div class="shape">
+          <strong>Layer path</strong>
+          <p>RRD file under the package artifact directory.</p>
+          <code>artifacts/catalog_layers/...</code>
+        </div>
+        <div class="shape">
+          <strong>Layer name</strong>
+          <p>Catalog layer label used when registering.</p>
+          <code>mvapi_coco133_upper_body_v1</code>
+        </div>
+      </div>
+    </section>
+
+    <section id="debug">
+      <h2>Debugging Notes</h2>
+      <div class="grid-2">
+        <article class="card">
+          <h3>When the loader fails</h3>
+          <ul class="list">
+            <li>Check that the selected segment has non-null <code>VideoStream:sample</code> values.</li>
+            <li>Check that all discovered EXO cameras also have pinhole and transform components.</li>
+            <li>Check that the target timestamps are exact common packet timestamps, not synthetic times.</li>
+            <li>Keep <code>num_workers=0</code> while debugging dataloader behavior.</li>
+          </ul>
+        </article>
+
+        <article class="card">
+          <h3>When the layer looks wrong</h3>
+          <ul class="list">
+            <li>Confirm dynamic logs use the <code>video_time</code> timeline.</li>
+            <li>Confirm the prediction RRD uses the source segment's recording id.</li>
+            <li>Inspect both 2D EXO overlays and the 3D triangulated skeleton.</li>
+            <li>If predicted skeleton color is hard to read, change the logged prediction color at the prediction logging point.</li>
+          </ul>
+        </article>
+      </div>
+
+      <div class="table-wrap" style="margin-top: 16px;">
+        <table>
+          <thead>
+            <tr>
+              <th>Symptom</th>
+              <th>Likely cause</th>
+              <th>Concrete check</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Decoded samples fail with duplicate packet errors.</td>
+              <td>Targeting synthetic timestamps that trigger duplicated fill-latest AV1 packet rows.</td>
+              <td>Use exact common packet timestamps on <code>video_time</code>.</td>
+            </tr>
+            <tr>
+              <td>Predictions appear offset or not aligned with video.</td>
+              <td>Rows were logged to the wrong timeline or wrong recording id.</td>
+              <td>Check <code>rr.TimeColumn("video_time", ...)</code> and source recording id preservation.</td>
+            </tr>
+            <tr>
+              <td>Catalog viewer shows prediction-only recording.</td>
+              <td>Layer registration did not attach to the source dataset/segment.</td>
+              <td>Verify <code>dataset_entry.register(..., layer_name=...)</code> ran successfully.</td>
+            </tr>
+            <tr>
+              <td>Run is much slower than expected.</td>
+              <td>All eight cameras are decoded and processed, detector plus pose runs per view.</td>
+              <td>Watch CUDA provider setup, GPU utilization, decode rate, and per-frame tracker timing.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section>
+      <h2>Minimal Checklist</h2>
+      <div class="grid-2">
+        <article class="card">
+          <h3>Before running</h3>
+          <ul class="list">
+            <li>Pixi environment uses prerelease Rerun and latest SimpleCV git revision.</li>
+            <li>The catalog root is reachable.</li>
+            <li>The selected Assembly101 segment has usable EXO video samples.</li>
+            <li>CUDA provider is available if GPU inference is expected.</li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3>After running</h3>
+          <ul class="list">
+            <li>The output RRD exists under <code>packages/mv-api/artifacts/catalog_layers</code>.</li>
+            <li>The catalog layer is registered under the expected layer name.</li>
+            <li>The Rerun viewer shows original source data plus prediction layer together.</li>
+            <li>Each EXO 2D view shows predicted COCO133 overlays on <code>video_time</code>.</li>
+            <li>The 3D view shows triangulated keypoints from those 2D predictions.</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <p class="footer">
+      Generated as an explanatory artifact for the catalog-native MVAPI prediction-layer pipeline.
+      This file documents the intended data flow and debugging model; it does not execute the pipeline.
+    </p>
+  </main>
+</body>
+</html>

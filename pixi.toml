@@ -33,6 +33,7 @@ scipy = "*"
 huggingface_hub = "*"
 tqdm = "*"
 transformers = ">=5.0.0"
+jupyterlab = "*"
 
 [feature.common.target.linux-aarch64.dependencies]
 xorg-libx11 = "*"
@@ -43,6 +44,38 @@ rerun-sdk = "==0.32.0"
 gradio = "==6.13.0"
 gradio-rerun = "==0.32.0"
 simplecv = { git = "https://github.com/pablovela5620/simplecv.git", rev = "f7b66c6e3874cec0c009e464b212afe1f393352e" }
+
+# ─── catalog common feature (Rerun catalog prerelease lane) ────────────────
+[feature.catalog-common.dependencies]
+av = "*"
+py-opencv = "*"
+numpy = "*"
+pyserde = ">=0.31.2,<0.32"
+jaxtyping = "<0.3"
+typing_extensions = ">=4.1.0,<4.13.0"
+hf-transfer = "*"
+scipy = "*"
+huggingface_hub = "*"
+tqdm = "*"
+transformers = ">=5.0.0"
+
+[feature.catalog-common.target.linux-aarch64.dependencies]
+xorg-libx11 = "*"
+xorg-xorgproto = "*"
+
+[feature.catalog-common.pypi-dependencies]
+simplecv = { git = "https://github.com/pablovela5620/simplecv.git", rev = "178479b53d14b9dd4a79b212dd2c5a3be52b4de8" }
+
+[feature.rerun-prerelease.pypi-dependencies]
+rerun-sdk = { version = "==0.33.0a1+dev", extras = [
+    "datafusion",
+    "dataloader",
+] }
+
+[feature.rerun-prerelease.pypi-options]
+index-url = "https://pypi.org/simple"
+find-links = [{ url = "https://build.rerun.io/commit/5f732f2/wheels/" }]
+prerelease-mode = "allow"
 
 
 # ─── CUDA 12.9 feature (shared across all GPU envs) ─────────────────────────
@@ -143,6 +176,7 @@ natsort = ">=8.4.0,<9"
 
 [feature.monoprior.pypi-dependencies]
 monopriors = { path = "packages/monoprior", editable = true }
+sam3-rerun = { path = "packages/sam3-rerun", editable = true }
 vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c" }
 moge = { git = "https://github.com/microsoft/MoGe.git" }
 
@@ -273,6 +307,8 @@ open3d = ">=0.19.0,<0.20"
 
 [feature.prompt-da.pypi-dependencies]
 rerun-prompt-da = { path = "packages/prompt-da", editable = true }
+monopriors = { path = "packages/monoprior", editable = true }
+sam3-rerun = { path = "packages/sam3-rerun", editable = true }
 
 [feature.prompt-da.activation.env]
 PACKAGE_DIR = "packages/prompt-da"
@@ -392,6 +428,7 @@ datasets = ">=4.0.0"
 [feature.mv-api.pypi-dependencies]
 mv-api = { path = "packages/mv-api", editable = true }
 monopriors = { path = "packages/monoprior", editable = true }
+sam3-rerun = { path = "packages/sam3-rerun", editable = true }
 wilor_nano = { path = "packages/wilor-nano", editable = true }
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c" }
@@ -411,6 +448,48 @@ cwd = "packages/mv-api"
 outputs = ["packages/mv-api/data/hocap/sample"]
 description = "Download and extract the raw HoCap sample"
 
+[feature.mv-api-catalog]
+platforms = ["linux-64"]
+
+[feature.mv-api-catalog.activation.env]
+PACKAGE_DIR = "packages/mv-api"
+
+[feature.mv-api-catalog.tasks.mv-api-catalog-prediction-layer]
+cmd = "python tools/apps/catalog_prediction_layer.py"
+cwd = "packages/mv-api"
+description = "Generate and register the catalog-native MVAPI COCO133 prediction layer"
+
+[feature.mv-api-catalog.tasks.mv-api-catalog-tests]
+cmd = "python -m pytest -q tests/test_catalog_prediction_layer.py"
+cwd = "packages/mv-api"
+description = "Run focused catalog-native MVAPI prediction-layer tests"
+
+[feature.mv-api-catalog-register-mac]
+platforms = ["osx-arm64"]
+
+[feature.mv-api-catalog-register-mac.dependencies]
+python = "3.12.*"
+
+[feature.mv-api-catalog-register-mac.pypi-dependencies]
+tyro = ">=0.9.1,<0.10"
+simplecv = { git = "https://github.com/pablovela5620/simplecv.git", rev = "178479b53d14b9dd4a79b212dd2c5a3be52b4de8" }
+rerun-sdk = { version = "==0.33.0a1+dev", extras = [
+    "datafusion",
+] }
+
+[feature.mv-api-catalog-register-mac.pypi-options]
+index-url = "https://pypi.org/simple"
+find-links = [{ url = "https://build.rerun.io/commit/5f732f2/wheels/" }]
+prerelease-mode = "allow"
+
+[feature.mv-api-catalog-register-mac.activation.env]
+PACKAGE_DIR = "packages/mv-api"
+
+[feature.mv-api-catalog-register-mac.tasks.mv-api-catalog-register]
+cmd = "python tools/apps/register_catalog_with_predictions.py"
+cwd = "packages/mv-api"
+description = "Mount the full catalog and register existing prediction RRD layers on macOS"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # sam3d-body-rerun
 # ═══════════════════════════════════════════════════════════════════════════
@@ -429,6 +508,8 @@ fsspec = ">=2025.3,<=2026.2.0"
 
 [feature.sam3d.pypi-dependencies]
 sam3d_body = { path = "packages/sam3d-body-rerun", editable = true }
+monopriors = { path = "packages/monoprior", editable = true }
+sam3-rerun = { path = "packages/sam3-rerun", editable = true }
 moge = { git = "https://github.com/microsoft/MoGe.git" }
 timm = ">=0.9"
 natsort = ">=8.4"
@@ -764,6 +845,8 @@ splat-transform = "*"
 
 [feature.vistadream.pypi-dependencies]
 vistadream = { path = "packages/vistadream", editable = true }
+monopriors = { path = "packages/monoprior", editable = true }
+sam3-rerun = { path = "packages/sam3-rerun", editable = true }
 vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c" }
 moge = { git = "https://github.com/microsoft/MoGe.git" }
 gsplat = { git = "https://github.com/nerfstudio-project/gsplat.git", rev = "970dd84803ecf8570651f8e121e328bfef567fb9" }
@@ -1490,6 +1573,24 @@ mv-api-dev = { features = [
     "mv-api",
     "dev",
 ], solve-group = "mv-api", no-default-feature = true }
+mv-api-catalog = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "mv-api",
+    "mv-api-catalog",
+], solve-group = "mv-api-catalog", no-default-feature = true }
+mv-api-catalog-dev = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "mv-api",
+    "mv-api-catalog",
+    "dev",
+], solve-group = "mv-api-catalog", no-default-feature = true }
+mv-api-catalog-register-mac = { features = [
+    "mv-api-catalog-register-mac",
+], solve-group = "mv-api-catalog-register-mac", no-default-feature = true }
 mast3r-slam = { features = [
     "common",
     "cuda",
