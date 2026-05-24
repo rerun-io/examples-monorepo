@@ -5,7 +5,7 @@
 I have simplified WiLoR, focusing on the inference process. Now it can be installed via pip and used directly, and it will automatically download the model.
 
 ## Updates
-- PyTorch/CUDA: Upgraded to PyTorch >= 2.7 with CUDA 12.8 wheels, enabling RTX 50xx/Blackwell support. Pinned `ultralytics==8.3.162` to avoid the weights_only change in PyTorch 2.7+.
+- PyTorch/CUDA: Upgraded to PyTorch >= 2.7 with CUDA 12.8 wheels, enabling RTX 50xx/Blackwell support. Pinned `ultralytics==8.4.52` for YOLO26 support while keeping WiLoR detector checkpoint loading stable.
 - Packaging: Modern `pyproject.toml` with Hatchling; project name `wilor-nano` (import path `wilor_nano`); requires Python >= 3.11.
 - Typing: Added comprehensive type hints using jaxtyping across models, pipelines, and utils. Package-wide runtime checks via beartype are enabled only in the Pixi dev environment (`PIXI_ENVIRONMENT_NAME=dev`).
 - Models: ViT attention uses `torch.nn.functional.scaled_dot_product_attention`; MANO via `ManoSimpleLayer`; rotations handled with 6D→rotmat and `roma`; tensor shapes documented in signatures.

@@ -11,6 +11,7 @@ main/vis*
 tool/AGORA/vis*
 tool/SHAPY/vis*
 onnx_models
+benchmark_outputs/
 demo/
 *egg-info/
 .idea/

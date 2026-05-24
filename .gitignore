@@ -150,3 +150,5 @@ repomix-output.xml
 # data lives under packages/<name>/data and has its own .gitignore rules.
 /data/
 /pretrained_models/
+/typings/
+yolo*

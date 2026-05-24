@@ -29,7 +29,13 @@ from sapiens2_pose.api.runtime import (
     resolve_device,
 )
 from sapiens2_pose.sapiens_lite.backbones.sapiens2 import RopePositionEmbedding
-from sapiens2_pose.sapiens_lite.pose import MODEL_SPECS, ImagePreprocessor, UDPHeatmap, init_pose_model, prepare_pose_sample
+from sapiens2_pose.sapiens_lite.pose import (
+    MODEL_SPECS,
+    ImagePreprocessor,
+    UDPHeatmap,
+    init_pose_model,
+    prepare_pose_sample,
+)
 
 TensorRtPrecision = Literal["bf16"]
 """The retained TensorRT precision. BF16 was the fastest strict-accuracy floating-point engine in the 0.4B sweep."""
@@ -339,7 +345,9 @@ def estimate_sapiens_pose_with_heatmap_runner(
     with torch.no_grad():
         heatmaps_value: torch.Tensor | Float32[ndarray, "n k h w"] = heatmap_runner(inputs)
     if isinstance(heatmaps_value, torch.Tensor):
-        heatmaps: Float32[ndarray, "n k h w"] = heatmaps_value.detach().float().cpu().numpy().astype(np.float32, copy=False)
+        heatmaps: Float32[ndarray, "n k h w"] = (
+            heatmaps_value.detach().float().cpu().numpy().astype(np.float32, copy=False)
+        )
     else:
         heatmaps = np.asarray(heatmaps_value, dtype=np.float32)
 
@@ -390,7 +398,9 @@ def build_tensorrt_engine(config: TensorRtBuildConfig) -> TensorRtBuildSummary:
     config.engine_path.write_bytes(bytes(serialized_engine))
     manifest_path: Path = config.engine_path.with_suffix(config.engine_path.suffix + ".json")
     cuda_device_name: str = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "unknown"
-    manifest: dict[str, object] = config.to_manifest(tensorrt_version=str(trt.__version__), cuda_device_name=cuda_device_name)
+    manifest: dict[str, object] = config.to_manifest(
+        tensorrt_version=str(trt.__version__), cuda_device_name=cuda_device_name
+    )
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 
     return TensorRtBuildSummary(
@@ -572,7 +582,9 @@ def run_tensorrt_image_pose(config: TensorRtImagePoseConfig) -> ImagePoseSummary
     return run_image_pose(image_config, estimate_pose_fn=estimate_pose_fn)
 
 
-def _add_static_b1_optimization_profile(builder: Any, network: Any, builder_config: Any, config: TensorRtBuildConfig) -> None:
+def _add_static_b1_optimization_profile(
+    builder: Any, network: Any, builder_config: Any, config: TensorRtBuildConfig
+) -> None:
     spec: Any = MODEL_SPECS[config.model_size]
     profile: Any = builder.create_optimization_profile()
     input_tensor: Any = network.get_input(0)

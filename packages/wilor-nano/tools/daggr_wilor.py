@@ -8,10 +8,9 @@ Then run this script to launch the daggr graph:
 - pixi run -e dev python tools/daggr_wilor.py
 """
 
-from daggr import GradioNode, Graph
 import gradio as gr
+from daggr import GradioNode, Graph
 from gradio_rerun import Rerun
-
 
 # Shared image input - both detection and keypoint nodes use this
 shared_image = gr.Image(label="Input Image")

@@ -40,9 +40,10 @@ xorg-libx11 = "*"
 xorg-xorgproto = "*"
 
 [feature.common.pypi-dependencies]
-rerun-sdk = "==0.32.0"
+rerun-sdk = "==0.32.2"
+# rerun-sdk = { path = "/home/pablo/0Dev/work/rerun-projects/reality/rerun/target/wheels/rerun_sdk-0.33.0a1+dev-cp310-abi3-manylinux_2_39_x86_64.whl" }
 gradio = "==6.13.0"
-gradio-rerun = "==0.32.0"
+gradio-rerun = "==0.32.2"
 simplecv = { git = "https://github.com/pablovela5620/simplecv.git", rev = "f7b66c6e3874cec0c009e464b212afe1f393352e" }
 
 # ─── catalog common feature (Rerun catalog prerelease lane) ────────────────
@@ -127,7 +128,7 @@ python = "3.12.*"
 ruff = "*"
 pytest = ">=8.0.0,<9"
 beartype = ">=0.22.9"
-pyrefly = "*"
+pyrefly = ">=1.0.0"
 hypothesis = "*"
 vulture = "*"
 
@@ -350,7 +351,14 @@ pyrender = "*"
 
 [feature.wilor.pypi-dependencies]
 wilor_nano = { path = "packages/wilor-nano", editable = true }
+daggr = { path = "/home/pablo/0Dev/personal/daggr", editable = true }
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
+onnx = ">=1.12.0,<1.18.0"
+
+[feature.wilor.target.linux-64.pypi-dependencies]
+# TensorRT engines are machine-local artifacts; keep ONNX portable and rebuild engines per target GPU.
+tensorrt-cu12 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
+cuda-python = "*"
 
 [feature.wilor.target.linux-aarch64.pypi-dependencies]
 onnxruntime = ">=1.23.2,<2"
@@ -478,9 +486,7 @@ scipy = "*"
 [feature.mv-api-catalog-register-mac.pypi-dependencies]
 tyro = ">=0.9.1,<0.10"
 simplecv = { git = "https://github.com/pablovela5620/simplecv.git", rev = "178479b53d14b9dd4a79b212dd2c5a3be52b4de8" }
-rerun-sdk = { version = "==0.33.0a1+dev", extras = [
-    "datafusion",
-] }
+rerun-sdk = { version = "==0.33.0a1+dev", extras = ["datafusion"] }
 
 [feature.mv-api-catalog-register-mac.pypi-options]
 index-url = "https://pypi.org/simple"

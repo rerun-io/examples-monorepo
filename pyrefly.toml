@@ -23,8 +23,13 @@ project-excludes = ["**/node_modules", "**/__pycache__", "**/*venv/**/*"]
 # not per-file guesses (critical for monorepo with multiple source roots)
 disable-search-path-heuristics = true
 
+# Enable Pyrefly's experimental tensor-shape inference for torch.Tensor and
+# jaxtyping annotations. Shape-aware torch stubs are provided in search-path.
+tensor-shapes = true
+
 # Source roots — where first-party imports are resolved from
 search-path = [
+    "typings/pyrefly/tensor_shapes/fixtures",
     "packages/monoprior",
     "packages/prompt-da/src",
     "packages/wilor-nano/src",
@@ -53,7 +58,7 @@ site-package-path = [
     ".pixi/envs/monoprior-dev/lib/python3.12/site-packages",
     ".pixi/envs/prompt-da-dev/lib/python3.12/site-packages",
     ".pixi/envs/wilor-dev/lib/python3.12/site-packages",
-    ".pixi/envs/sam3d-body-dev/lib/python3.12/site-packages",
+    ".pixi/envs/sam3d-dev/lib/python3.12/site-packages",
     ".pixi/envs/sam3-rerun-dev/lib/python3.12/site-packages",
     ".pixi/envs/mv-api-dev/lib/python3.12/site-packages",
     ".pixi/envs/robocap-dev/lib/python3.10/site-packages",

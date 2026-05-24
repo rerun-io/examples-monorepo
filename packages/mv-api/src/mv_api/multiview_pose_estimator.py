@@ -12,7 +12,12 @@ from simplecv.data.skeleton.coco133_layers import COCO133_PREDICTION_LAYER_TO_PA
 from simplecv.data.skeleton.coco_133 import COCO_133_IDS, LEFT_HAND_IDX, RIGHT_HAND_IDX
 from simplecv.ops.triangulate import batch_triangulate, projectN3
 from simplecv.rerun_custom_types import Points2DWithConfidence, confidence_scores_to_rgb
-from wilor_nano.hand_keypoints import FinalWilorPred, HandKeypointDetectorConfig, KeypointResults, WilorHandKeypointDetector
+from wilor_nano.hand_keypoints import (
+    FinalWilorPred,
+    HandKeypointDetectorConfig,
+    KeypointResults,
+    WilorHandKeypointDetector,
+)
 
 WILOR_CONFIDENCE_THRESHOLD: float = 0.5
 WILOR_BBOX_EXPANSION_RATIO: float = 0.25
@@ -179,7 +184,7 @@ class MultiviewBodyTracker:
     ) -> MVHistory:
         """Estimate and triangulate one COCO-133 person across camera views."""
         selected_view_indices: list[int] = (
-            [int(idx) for idx in self.config.cams_for_detection_idx]
+            [idx for idx in self.config.cams_for_detection_idx]
             if self.config.cams_for_detection_idx is not None
             else list(range(len(bgr_list)))
         )

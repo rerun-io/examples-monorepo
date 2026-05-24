@@ -5,10 +5,9 @@ dependencies = [
     #         huggingface_hub, hf-transfer, tqdm, pyserde, av, opencv
     "timm",
     "einops",
-    "ultralytics==8.3.162",       # needed to avoid weights_only bug in pytorch 2.7+
+    "ultralytics==8.4.52",
     "scikit-image",
     "roma",
-    "daggr>=0.7.0",
 ]
 name = "wilor-nano"
 requires-python = ">= 3.11"
@@ -17,6 +16,9 @@ version = "0.1.0"
 [build-system]
 build-backend = "hatchling.build"
 requires = ["hatchling"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.ruff]
 line-length = 150
@@ -46,6 +48,12 @@ ignore = [
 
 [tool.vulture]
 paths = ["src/wilor_nano", "tests", "tools"]
-exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
+exclude = [
+    "*/.pixi/*",
+    "*/__pycache__/*",
+    "*/build/*",
+    "*/dist/*",
+    "*/node_modules/*",
+]
 sort_by_size = true
 min_confidence = 60
