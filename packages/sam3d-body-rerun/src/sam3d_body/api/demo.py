@@ -130,13 +130,18 @@ def main(cfg: Sam3DBodyDemoConfig):
     else:
         raise ValueError("Either image_path or image_folder must be specified.")
 
+    if not images_list:
+        raise ValueError(f"No images found for image_path={cfg.image_path} image_folder={cfg.image_folder}")
+
     # load end to end model
     sam3D_body_e2e = SAM3DBodyE2E(cfg.sam3_e2e_config)
 
     for idx, image_path in enumerate(tqdm(images_list)):
         rr.set_time(timeline="image_sequence", sequence=idx)
         # load image and convert to RGB
-        bgr_hw3: UInt8[ndarray, "h w 3"] = cv2.imread(image_path)
+        bgr_hw3: UInt8[ndarray, "h w 3"] | None = cv2.imread(image_path)
+        if bgr_hw3 is None:
+            raise ValueError(f"OpenCV could not read image: {image_path}")
         rgb_hw3: UInt8[ndarray, "h w 3"] = cv2.cvtColor(bgr_hw3, cv2.COLOR_BGR2RGB)
 
         outputs: tuple[list[FinalPosePrediction], MetricDepthPrediction] = sam3D_body_e2e.predict_single_image(rgb_hw3)
