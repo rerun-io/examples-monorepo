@@ -1,0 +1,3664 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Examples Monorepo Modularity Review</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --page: #101719;
+      --surface: #172124;
+      --surface-2: #1e2b2e;
+      --surface-3: #243337;
+      --text: #eef5f2;
+      --muted: #a8b7b2;
+      --soft: #d3ded9;
+      --line: #395053;
+      --accent: #58d2bf;
+      --accent-2: #f2c15f;
+      --good: #8fd17f;
+      --warn: #f2c15f;
+      --bad: #ef8b7a;
+      --blue: #8ab8f5;
+      --radius: 8px;
+      --radius-sm: 5px;
+      --shadow: 0 18px 48px rgb(0 0 0 / 0.24);
+      --max: 1240px;
+      --measure: 72ch;
+      --font: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      background: var(--page);
+      color: var(--text);
+      font-family: var(--font);
+      line-height: 1.55;
+      letter-spacing: 0;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    a:hover,
+    a:focus-visible {
+      text-decoration: underline;
+    }
+
+    code,
+    pre {
+      font-family: var(--mono);
+      font-size: 0.92rem;
+    }
+
+    pre {
+      overflow: auto;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      background: #111b1d;
+      color: #dce8e4;
+    }
+
+    button,
+    input {
+      font: inherit;
+    }
+
+    button {
+      min-height: 42px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      background: var(--surface-2);
+      color: var(--text);
+      cursor: pointer;
+      padding: 8px 12px;
+    }
+
+    button:hover,
+    button:focus-visible {
+      border-color: var(--accent);
+      outline: none;
+    }
+
+    button[aria-pressed="true"] {
+      background: #173832;
+      border-color: var(--accent);
+      color: #eafffa;
+    }
+
+    input[type="search"] {
+      width: 100%;
+      min-height: 42px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      background: #111b1d;
+      color: var(--text);
+      padding: 8px 12px;
+    }
+
+    input[type="search"]:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .shell {
+      display: grid;
+      grid-template-columns: 260px minmax(0, 1fr);
+      min-height: 100vh;
+    }
+
+    .toc {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow: auto;
+      padding: 22px 18px;
+      border-right: 1px solid var(--line);
+      background: #0e1517;
+    }
+
+    .toc h2 {
+      margin: 0 0 16px;
+      font-size: 0.92rem;
+      letter-spacing: 0.02em;
+      color: var(--soft);
+    }
+
+    .toc a {
+      display: block;
+      padding: 9px 10px;
+      border-radius: var(--radius-sm);
+      color: var(--muted);
+      font-size: 0.94rem;
+    }
+
+    .toc a:hover,
+    .toc a:focus-visible {
+      background: var(--surface);
+      color: var(--text);
+      text-decoration: none;
+    }
+
+    main {
+      min-width: 0;
+    }
+
+    .hero,
+    .section {
+      padding: 56px clamp(20px, 4vw, 56px);
+    }
+
+    .hero {
+      border-bottom: 1px solid var(--line);
+      background: #121d1f;
+    }
+
+    .inner {
+      max-width: var(--max);
+      margin: 0 auto;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 12px;
+      color: var(--accent-2);
+      font-size: 0.92rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    h1,
+    h2,
+    h3 {
+      margin: 0;
+      line-height: 1.08;
+      text-wrap: balance;
+      letter-spacing: 0;
+    }
+
+    h1 {
+      max-width: 980px;
+      font-size: 3rem;
+    }
+
+    h2 {
+      font-size: 2rem;
+      margin-bottom: 18px;
+    }
+
+    h3 {
+      font-size: 1.18rem;
+      margin-bottom: 8px;
+    }
+
+    p {
+      max-width: var(--measure);
+      margin: 0 0 14px;
+      color: var(--soft);
+      text-wrap: pretty;
+    }
+
+    .lede {
+      max-width: 880px;
+      margin-top: 18px;
+      color: var(--soft);
+      font-size: 1.18rem;
+    }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 26px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 32px;
+      padding: 5px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--surface);
+      color: var(--muted);
+      font-size: 0.9rem;
+      white-space: nowrap;
+    }
+
+    .grid {
+      display: grid;
+      gap: 16px;
+    }
+
+    .grid.two {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .grid.three {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .grid.four {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      padding: 18px;
+      box-shadow: var(--shadow);
+    }
+
+    .card.compact {
+      padding: 14px;
+      box-shadow: none;
+    }
+
+    .model-inventory-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      margin: 18px 0;
+    }
+
+    .model-card {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      padding: 16px;
+      box-shadow: var(--shadow);
+    }
+
+    .model-card h3 {
+      font-size: 1.05rem;
+      margin-bottom: 4px;
+    }
+
+    .model-card p {
+      max-width: none;
+    }
+
+    .model-card dl {
+      display: grid;
+      grid-template-columns: 118px minmax(0, 1fr);
+      gap: 7px 12px;
+      margin: 12px 0 0;
+    }
+
+    .model-card dt {
+      color: var(--muted);
+      font-size: 0.78rem;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .model-card dd {
+      min-width: 0;
+      margin: 0;
+      color: var(--soft);
+    }
+
+    .model-card code,
+    #model-inventory code {
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    .model-title-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: baseline;
+      justify-content: space-between;
+    }
+
+    .capability-list {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin: 18px 0 24px;
+    }
+
+    .capability-item {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      background: #142023;
+      padding: 13px;
+    }
+
+    .capability-item h3 {
+      margin-bottom: 7px;
+      font-size: 1rem;
+    }
+
+    .capability-item p {
+      max-width: none;
+      margin-bottom: 9px;
+      font-size: 0.9rem;
+    }
+
+    .example-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin: 18px 0 24px;
+    }
+
+    .example-card {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      padding: 15px;
+      box-shadow: var(--shadow);
+    }
+
+    .example-card h3 {
+      font-size: 1rem;
+      margin-bottom: 8px;
+    }
+
+    .example-card pre {
+      margin: 0;
+      padding: 12px;
+      font-size: 0.82rem;
+    }
+
+    .flow-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin: 18px 0 24px;
+    }
+
+    .flow-step {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      padding: 15px;
+      box-shadow: var(--shadow);
+    }
+
+    .flow-step .step-index {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      margin-bottom: 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #132326;
+      color: var(--accent-2);
+      font-size: 0.82rem;
+      font-weight: 800;
+    }
+
+    .flow-step h3 {
+      font-size: 1rem;
+      margin-bottom: 7px;
+    }
+
+    .flow-step p,
+    .flow-step li {
+      max-width: none;
+      font-size: 0.92rem;
+    }
+
+    .boundary-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      margin: 18px 0 24px;
+    }
+
+    .boundary-card {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #142023;
+      padding: 16px;
+    }
+
+    .boundary-card h3 {
+      font-size: 1rem;
+    }
+
+    .boundary-card p,
+    .boundary-card li {
+      max-width: none;
+      font-size: 0.92rem;
+    }
+
+    .tab-shell {
+      margin-top: 18px;
+    }
+
+    .tab-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+
+    .tab-button {
+      min-height: 38px;
+      border-color: var(--line);
+      background: #142023;
+      color: var(--muted);
+    }
+
+    .tab-button[aria-selected="true"] {
+      border-color: #5ea196;
+      background: #193630;
+      color: var(--text);
+    }
+
+    .tab-panel[hidden] {
+      display: none;
+    }
+
+    .pattern-grid {
+      display: grid;
+      grid-template-columns: 0.9fr 1.1fr;
+      gap: 16px;
+      align-items: start;
+    }
+
+    .pattern-grid .card,
+    .pattern-grid .table-wrap {
+      min-width: 0;
+    }
+
+    .compact-list {
+      margin: 10px 0 0;
+      padding-left: 19px;
+      color: var(--soft);
+    }
+
+    .compact-list li {
+      margin: 7px 0;
+    }
+
+    .card p:last-child,
+    .callout p:last-child {
+      margin-bottom: 0;
+    }
+
+    .summary-band {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr 0.8fr;
+      gap: 16px;
+      margin-top: 30px;
+    }
+
+    .summary-band .card {
+      min-height: 160px;
+    }
+
+    .label {
+      color: var(--muted);
+      font-size: 0.88rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .value {
+      margin: 8px 0 10px;
+      font-size: 1.35rem;
+      font-weight: 800;
+      color: var(--text);
+    }
+
+    .list {
+      margin: 12px 0 0;
+      padding-left: 20px;
+      color: var(--soft);
+    }
+
+    .list li {
+      margin: 8px 0;
+    }
+
+    .section:nth-child(even) {
+      background: #111b1d;
+    }
+
+    .callout {
+      margin: 22px 0;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface-2);
+    }
+
+    .callout strong {
+      color: var(--text);
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      background: #101a1c;
+      font-size: 0.8rem;
+      white-space: nowrap;
+    }
+
+    .tag.good {
+      color: #dff8d8;
+      border-color: #4d7a45;
+      background: #172719;
+    }
+
+    .tag.warn {
+      color: #fff1cd;
+      border-color: #80652f;
+      background: #2d2516;
+    }
+
+    .tag.bad {
+      color: #ffe2dc;
+      border-color: #8b493f;
+      background: #2b1c1a;
+    }
+
+    .tag.blue {
+      color: #e3efff;
+      border-color: #4c668f;
+      background: #172232;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 900px;
+      font-size: 0.93rem;
+    }
+
+    caption {
+      caption-side: top;
+      padding: 12px 14px;
+      color: var(--muted);
+      text-align: left;
+      font-weight: 700;
+    }
+
+    th,
+    td {
+      padding: 12px 14px;
+      border-top: 1px solid var(--line);
+      vertical-align: top;
+      text-align: left;
+    }
+
+    th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: #142022;
+      color: var(--text);
+      font-size: 0.82rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    td {
+      color: var(--soft);
+    }
+
+    tr[hidden] {
+      display: none;
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) auto;
+      gap: 12px;
+      margin: 16px 0;
+      align-items: center;
+    }
+
+    .button-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+
+    .diagram {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(120px, 1fr));
+      gap: 10px;
+      align-items: stretch;
+      margin: 18px 0;
+    }
+
+    .node-box {
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      background: #142023;
+      padding: 14px;
+      min-height: 120px;
+    }
+
+    .node-box strong {
+      display: block;
+      margin-bottom: 6px;
+    }
+
+    .node-box span {
+      display: block;
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 10px;
+      margin: 18px 0 4px;
+    }
+
+    .step {
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      padding: 12px;
+      background: var(--surface);
+      min-height: 116px;
+    }
+
+    .step-number {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 26px;
+      height: 26px;
+      border-radius: 50%;
+      background: #173832;
+      color: var(--accent);
+      font-weight: 800;
+      margin-bottom: 8px;
+    }
+
+    .source-list {
+      columns: 2;
+      column-gap: 32px;
+    }
+
+    .source-list li {
+      break-inside: avoid;
+      margin-bottom: 10px;
+    }
+
+    #sources .source-list {
+      columns: 1;
+      padding-left: 20px;
+    }
+
+    #sources .source-list li,
+    #sources .source-list code,
+    #sources .source-list a {
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    .small {
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .divider {
+      height: 1px;
+      background: var(--line);
+      margin: 28px 0;
+    }
+
+    .print-note {
+      display: none;
+    }
+
+    @media (max-width: 980px) {
+      .shell {
+        grid-template-columns: 1fr;
+      }
+
+      .toc {
+        position: static;
+        height: auto;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .toc nav {
+        display: flex;
+        gap: 4px;
+        overflow-x: auto;
+        padding-bottom: 4px;
+      }
+
+      .toc a {
+        white-space: nowrap;
+      }
+
+      .grid.two,
+      .grid.three,
+      .grid.four,
+      .summary-band,
+      .diagram,
+      .flow,
+      .model-inventory-grid,
+      .capability-list,
+      .example-grid,
+      .flow-grid,
+      .boundary-grid,
+      .pattern-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .model-card dl {
+        grid-template-columns: 1fr;
+      }
+
+      h1 {
+        font-size: 2.2rem;
+      }
+
+      h2 {
+        font-size: 1.65rem;
+      }
+
+      .controls {
+        grid-template-columns: 1fr;
+      }
+
+      .button-row {
+        justify-content: flex-start;
+      }
+    }
+
+    @media print {
+      :root {
+        color-scheme: light;
+        --page: #ffffff;
+        --surface: #ffffff;
+        --surface-2: #f6f8f7;
+        --surface-3: #edf2f0;
+        --text: #172124;
+        --muted: #4b5c59;
+        --soft: #263633;
+        --line: #b8c6c2;
+        --accent: #0b766a;
+        --accent-2: #805400;
+      }
+
+      body {
+        background: #ffffff;
+      }
+
+      .shell {
+        display: block;
+      }
+
+      .toc {
+        display: none;
+      }
+
+      .section,
+      .hero {
+        break-inside: avoid;
+        padding: 28px 0;
+        background: #ffffff !important;
+      }
+
+      .card,
+      .model-card,
+      .table-wrap,
+      .callout,
+      .node-box,
+      .step,
+      pre {
+        box-shadow: none;
+        background: #ffffff;
+      }
+
+      button,
+      input {
+        display: none;
+      }
+
+      .print-note {
+        display: block;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="toc" aria-label="Presentation navigation">
+      <h2>Modularity Review</h2>
+      <nav>
+        <a href="#thesis">Thesis</a>
+        <a href="#map">Repo Map</a>
+        <a href="#patterns">Repeated Patterns</a>
+        <a href="#pain">What Is Not Modular</a>
+        <a href="#pixi">Pixi Shape</a>
+        <a href="#comparisons">External References</a>
+        <a href="#kornia-decision">Kornia Decision</a>
+        <a href="#shared-language">Shared Language</a>
+        <a href="#node-spec">Node Contract</a>
+        <a href="#example-layout">Example Layout</a>
+        <a href="#monorepo-shape">Monorepo Shape</a>
+        <a href="#capability-taxonomy">Capability Types</a>
+        <a href="#model-inventory">Model Inventory</a>
+        <a href="#model-patterns">Model Patterns</a>
+        <a href="#mvapi-focus">MVAPI Focus</a>
+        <a href="#target">Target Architecture</a>
+        <a href="#migration">Migration Plan</a>
+        <a href="#risks">Risks</a>
+        <a href="#sources">Sources</a>
+      </nav>
+    </aside>
+
+    <main>
+      <header class="hero" id="thesis">
+        <div class="inner">
+          <div class="eyebrow">Snapshot: May 20, 2026</div>
+          <h1>Examples Monorepo Modularity Review</h1>
+          <p class="lede">
+            The repo already has the right instinct: each CV capability wants a typed API, a CLI, a Gradio surface, and Rerun logging. The current problem is that those pieces are repeated with slightly different shapes, so the reusable unit is not always obvious.
+          </p>
+
+          <div class="meta" aria-label="Scope">
+            <span class="pill">21 package directories inspected</span>
+            <span class="pill">16 Python package manifests</span>
+            <span class="pill">Root Pixi workspace reviewed</span>
+            <span class="pill">Pixi, Kornia, Kornia-RS, create-node compared</span>
+          </div>
+
+          <div class="summary-band">
+            <article class="card">
+              <div class="label">Main recommendation</div>
+              <div class="value">Standardize around a strict NodeSpec</div>
+              <p>
+                A node is one model, algorithm, or utility with a typed input/output contract. Apps orchestrate nodes. Entry points stay thin.
+              </p>
+            </article>
+            <article class="card">
+              <div class="label">Keep</div>
+              <div class="value">Root Pixi as source of truth</div>
+              <p>
+                Pixi package-local dev/task workflows are still preview/design territory. The root feature/env model is the stable practical option today.
+              </p>
+            </article>
+            <article class="card">
+              <div class="label">First migration target</div>
+              <div class="value">VGGT calibration family</div>
+              <p>
+                It has real reuse pressure, existing docs, and clear node boundaries: VGGT, SAM3, metric depth, alignment, fusion.
+              </p>
+            </article>
+          </div>
+        </div>
+      </header>
+
+      <section class="section" id="map">
+        <div class="inner">
+          <h2>Repo Map</h2>
+          <p>
+            The monorepo is a Pixi workspace of CV examples and adjacent tooling. Most packages share the API plus tools plus Gradio pattern, but the exact file layout varies enough that a contributor has to rediscover the convention package by package.
+          </p>
+
+          <div class="controls" aria-label="Package table filters">
+            <input id="packageSearch" type="search" placeholder="Filter packages by name, role, or note" aria-label="Filter packages">
+            <div class="button-row">
+              <button type="button" data-filter="all" aria-pressed="true">All</button>
+              <button type="button" data-filter="node">Node-heavy</button>
+              <button type="button" data-filter="pipeline">Workflow-heavy</button>
+              <button type="button" data-filter="data">Data and eval</button>
+              <button type="button" data-filter="native">Native or build</button>
+            </div>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <caption>Package inventory and modularity notes</caption>
+              <thead>
+                <tr>
+                  <th>Package</th>
+                  <th>Role</th>
+                  <th>Layout</th>
+                  <th>Surfaces</th>
+                  <th>Modularity note</th>
+                </tr>
+              </thead>
+              <tbody id="packageRows">
+                <tr data-kind="node pipeline" data-text="monoprior geometric priors vggt depth normals calibration gradio cli">
+                  <td><code>monoprior</code></td>
+                  <td>Monocular and multiview geometric priors</td>
+                  <td>Flat package: <code>monopriors/</code></td>
+                  <td>Many CLIs, many Gradio apps, docs</td>
+                  <td>Best place to prove the node/app split. It has repeated API/UI/Rerun patterns and existing decomposition docs.</td>
+                </tr>
+                <tr data-kind="node pipeline" data-text="pysfm structure from motion colmap video to image gradio cli">
+                  <td><code>pysfm</code></td>
+                  <td>SfM and COLMAP workflows</td>
+                  <td>Flat package: <code>pysfm/</code></td>
+                  <td>CLIs, Gradio nodes, brush helper</td>
+                  <td>Video-to-image is the strongest current NodeSpec reference, but still misses a shared <code>log_result</code> helper.</td>
+                </tr>
+                <tr data-kind="node pipeline" data-text="sam3-rerun sam3 segmentation video gradio cli">
+                  <td><code>sam3-rerun</code></td>
+                  <td>SAM3 segmentation with Rerun</td>
+                  <td><code>src/sam3_rerun/</code></td>
+                  <td>Video CLIs and Gradio apps</td>
+                  <td>Good candidate for a single-image segmentation node consumed by calibration and other apps.</td>
+                </tr>
+                <tr data-kind="node pipeline" data-text="wilor hand pose daggr detection keypoint gradio cli">
+                  <td><code>wilor-nano</code></td>
+                  <td>Hand detection and keypoint estimation</td>
+                  <td><code>src/wilor_nano/</code></td>
+                  <td>CLIs, two Gradio apps, Daggr graph</td>
+                  <td>Best composition reference. It shows independent nodes can be wired into a workflow.</td>
+                </tr>
+                <tr data-kind="node pipeline" data-text="sapiens2 pose image video tensorrt gradio cli">
+                  <td><code>sapiens2-pose</code></td>
+                  <td>Pose estimation and TensorRT export</td>
+                  <td><code>src/sapiens2_pose/</code></td>
+                  <td>Image/video CLIs, Gradio, conversion, eval</td>
+                  <td>Better test depth than many packages. UI lives as top-level files, so it would benefit from <code>gradio_ui/nodes</code>.</td>
+                </tr>
+                <tr data-kind="node" data-text="prompt-da depth completion polycam gradio cli">
+                  <td><code>prompt-da</code></td>
+                  <td>PromptDA depth completion on Polycam data</td>
+                  <td><code>src/rerun_prompt_da/</code></td>
+                  <td>CLI and Gradio app</td>
+                  <td>Small enough to normalize quickly and use as a migration example after <code>pysfm</code>.</td>
+                </tr>
+                <tr data-kind="pipeline" data-text="sam3d-body-rerun 3d body sam rerun gradio cli tool singular">
+                  <td><code>sam3d-body-rerun</code></td>
+                  <td>3D body estimation demos</td>
+                  <td><code>src/sam3d_body/</code>, launcher dir is <code>tool/</code></td>
+                  <td>Several CLI demos and Gradio launchers</td>
+                  <td>The singular <code>tool/</code> directory is a standing exception. Normalize only when references and Pixi tasks are migrated together.</td>
+                </tr>
+                <tr data-kind="pipeline" data-text="dpvo visual odometry slam gradio cli">
+                  <td><code>dpvo</code></td>
+                  <td>Visual odometry demo and evaluation</td>
+                  <td>Flat package: <code>dpvo/</code></td>
+                  <td>CLI, Euroc eval, Gradio app</td>
+                  <td>Mostly workflow-oriented. NodeSpec still helps by separating model inference, logging, and app glue.</td>
+                </tr>
+                <tr data-kind="pipeline" data-text="mast3r-slam slam gradio api cuda mojo">
+                  <td><code>mast3r-slam</code></td>
+                  <td>MASt3R-SLAM with kernels and Gradio</td>
+                  <td>Flat package: <code>mast3r_slam/</code>, UI dir is <code>gradio/</code></td>
+                  <td>CLI, app, kernel tests</td>
+                  <td>Has stronger tests. Naming differs from <code>gradio_ui</code>, and native build steps need isolated responsibility.</td>
+                </tr>
+                <tr data-kind="pipeline" data-text="robocap-slam visual odometry slam multicamera cli">
+                  <td><code>robocap-slam</code></td>
+                  <td>Multicamera visual odometry and SLAM</td>
+                  <td>Flat package: <code>robocap_slam/</code></td>
+                  <td>CLIs only</td>
+                  <td>Good example of typed tyro command structure without Gradio pressure.</td>
+                </tr>
+                <tr data-kind="data" data-text="slam-evals catalog ingest benchmark rerun cli">
+                  <td><code>slam-evals</code></td>
+                  <td>VSLAM ingest and Rerun catalog serving</td>
+                  <td>Flat package: <code>slam_evals/</code></td>
+                  <td>Ingest and catalog CLIs</td>
+                  <td>Single-responsibility is clearer here: discovery, parse, write, serve. Use it as a CLI-only contrast.</td>
+                </tr>
+                <tr data-kind="data pipeline" data-text="mv-api multiview api exo ego catalog tests">
+                  <td><code>mv-api</code></td>
+                  <td>Multiview API and exo/ego workflows</td>
+                  <td><code>src/mv_api/</code></td>
+                  <td>Apps, catalog tooling, strong tests</td>
+                  <td>Good behavior-test reference. It has more integration coverage than most packages.</td>
+                </tr>
+                <tr data-kind="data" data-text="egoexo-forge exo ego data conversion gradio catalog">
+                  <td><code>egoexo-forge</code></td>
+                  <td>Ego/exo data conversion and catalog UI</td>
+                  <td><code>src/egoexo_forge/</code></td>
+                  <td>Batch convert, catalog, Gradio app</td>
+                  <td>Should share any future catalog or data-source abstractions with <code>mv-api</code> and <code>slam-evals</code>.</td>
+                </tr>
+                <tr data-kind="data" data-text="pyvrs-viewer vrs rerun benchmark cli">
+                  <td><code>pyvrs-viewer</code></td>
+                  <td>VRS to Rerun conversion and benchmarking</td>
+                  <td><code>src/pyvrs_viewer/</code></td>
+                  <td>Demo CLI and benchmark CLI</td>
+                  <td>Focused package. Good fit for a data adapter boundary, not a model node.</td>
+                </tr>
+                <tr data-kind="pipeline node" data-text="vistadream gaussian reconstruction flux gradio cli">
+                  <td><code>vistadream</code></td>
+                  <td>Single-image 3D reconstruction</td>
+                  <td><code>src/vistadream/</code></td>
+                  <td>Several CLIs and Gradio app</td>
+                  <td>Should separate reconstruction core, Flux/outpainting ops, and app orchestration.</td>
+                </tr>
+                <tr data-kind="native pipeline" data-text="gsplat-rust-renderer rust gaussian splatting render cli tests">
+                  <td><code>gsplat-rust-renderer</code></td>
+                  <td>Rust-based Gaussian rendering utilities</td>
+                  <td>Flat Python wrapper plus Rust source</td>
+                  <td>CLI, Rust tasks, behavior tests</td>
+                  <td>Use Kornia-RS as the reference for native boundaries: core crates separate from Python bindings and examples.</td>
+                </tr>
+                <tr data-kind="native" data-text="asmk pixi-build native dependency package">
+                  <td><code>asmk</code></td>
+                  <td>Pixi-build package</td>
+                  <td><code>pixi.toml</code> package manifest only</td>
+                  <td>No Python app surface</td>
+                  <td>Dependency package. Keep out of the app/node taxonomy except as a build dependency.</td>
+                </tr>
+                <tr data-kind="native" data-text="dpretrieval pixi-build dependency">
+                  <td><code>dpretrieval</code></td>
+                  <td>Pixi-build package</td>
+                  <td><code>pixi.toml</code> package manifest plus <code>src/</code></td>
+                  <td>No app surface found</td>
+                  <td>Dependency package. Treat as native/build infrastructure until it exposes a real app or library API.</td>
+                </tr>
+                <tr data-kind="native" data-text="mast3r pixi-build dependency upstream">
+                  <td><code>mast3r</code></td>
+                  <td>Pixi-build package</td>
+                  <td><code>pixi.toml</code> package manifest only</td>
+                  <td>No Python app surface</td>
+                  <td>Dependency package. Its existence supports the root Pixi feature strategy.</td>
+                </tr>
+                <tr data-kind="native" data-text="dpvo-altcorr-mojo skeleton">
+                  <td><code>dpvo-altcorr-mojo</code></td>
+                  <td>Mojo extension skeleton</td>
+                  <td>No package manifest found</td>
+                  <td>Tests/cache dirs only</td>
+                  <td>Decide whether this is an active package, a build artifact, or a staged future dependency.</td>
+                </tr>
+                <tr data-kind="native" data-text="dpvo-fastba-mojo skeleton">
+                  <td><code>dpvo-fastba-mojo</code></td>
+                  <td>Mojo extension skeleton</td>
+                  <td>No package manifest found</td>
+                  <td>Tests/cache dirs only</td>
+                  <td>Same cleanup question as <code>dpvo-altcorr-mojo</code>.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="patterns">
+        <div class="inner">
+          <h2>Repeated Patterns Worth Preserving</h2>
+          <div class="grid three">
+            <article class="card">
+              <span class="tag good">Keep</span>
+              <h3>Typed config and tyro CLIs</h3>
+              <p>
+                Packages frequently expose dataclass configs and thin tyro wrappers. That is the right public API shape for reproducible demos.
+              </p>
+            </article>
+            <article class="card">
+              <span class="tag good">Keep</span>
+              <h3>Gradio as a separate adapter</h3>
+              <p>
+                The best packages put UI code in a dedicated module and keep <code>tools/apps/*.py</code> launchers almost empty.
+              </p>
+            </article>
+            <article class="card">
+              <span class="tag good">Keep</span>
+              <h3>Rerun as the visualization contract</h3>
+              <p>
+                Rerun gives CLI and Gradio a shared output target. The strongest abstraction is: computation logs to the active recording context.
+              </p>
+            </article>
+            <article class="card">
+              <span class="tag good">Keep</span>
+              <h3>Root dev tasks</h3>
+              <p>
+                <code>lint</code>, <code>typecheck</code>, <code>tests</code>, and <code>deadcode</code> are shared through the root <code>dev</code> feature and <code>PACKAGE_DIR</code>.
+              </p>
+            </article>
+            <article class="card">
+              <span class="tag good">Keep</span>
+              <h3>Package-specific environments</h3>
+              <p>
+                Heavy CV stacks need isolation. One prod and one dev environment per package is reasonable given CUDA and model dependency conflicts.
+              </p>
+            </article>
+            <article class="card">
+              <span class="tag good">Keep</span>
+              <h3>Example data tasks</h3>
+              <p>
+                Idempotent <code>hf download</code> tasks make demos repeatable without committing large assets.
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="pain">
+        <div class="inner">
+          <h2>What Is Not Modular Yet</h2>
+          <p>
+            The repo has many local successes, but the boundaries are not yet uniform enough for a new node to feel obvious.
+          </p>
+
+          <div class="grid two">
+            <article class="card">
+              <h3>Surface names drift</h3>
+              <p>
+                API directories alternate between <code>api</code> and <code>apis</code>. Gradio modules alternate between <code>gradio_ui</code>, <code>gradio</code>, and top-level files. One package uses <code>tool/</code> instead of <code>tools/</code>.
+              </p>
+              <p class="small">Effect: code review and migration require package-specific memory.</p>
+            </article>
+            <article class="card">
+              <h3>Some API files carry too much responsibility</h3>
+              <p>
+                Several modules combine model loading, workflow orchestration, config, CLI, Rerun logging, and serialization. That makes reuse hard even when the algorithm is valuable.
+              </p>
+              <p class="small">Effect: every Gradio app and CLI tends to grow custom glue.</p>
+            </article>
+            <article class="card">
+              <h3>Shared glue is copied, not factored</h3>
+              <p>
+                Rerun binary streams, recording IDs, viewer setup, launch boilerplate, and widget-to-config sync appear in multiple packages with small variations.
+              </p>
+              <p class="small">Effect: improvements and bug fixes do not propagate.</p>
+            </article>
+            <article class="card">
+              <h3>Tests are uneven</h3>
+              <p>
+                Many packages only have import tests. A few packages have behavior and Rerun artifact checks. NodeSpec needs a small required test tier so refactors can be trusted.
+              </p>
+              <p class="small">Effect: modularization would otherwise be a large, risky rename.</p>
+            </article>
+            <article class="card">
+              <h3>Package metadata is inconsistent</h3>
+              <p>
+                Layout alternates between flat and <code>src/</code>. Some packages specify wheel packages through Hatch; others use setuptools discovery. <code>monoprior</code> includes <code>tools*</code> in installable package discovery.
+              </p>
+              <p class="small">Effect: installed surfaces are not clearly separated from development launchers.</p>
+            </article>
+            <article class="card">
+              <h3>Pixi has a policy violation</h3>
+              <p>
+                <code>feature.monoprior.tasks.build-wheel</code> and <code>upload-pypi</code> run <code>python -m pip install</code>. That conflicts with the repo rule that dependency management goes through Pixi.
+              </p>
+              <p class="small">Effect: the build path can escape the locked environment.</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="pixi">
+        <div class="inner">
+          <h2>Pixi Dependency Shape</h2>
+          <p>
+            For this repo, Pixi is not just a package manager. It is the workspace boundary between incompatible model stacks. The current root feature/env model is mostly correct.
+          </p>
+
+          <div class="grid two">
+            <article class="card">
+              <h3>Current shape</h3>
+              <ul class="list">
+                <li><code>[feature.common]</code> holds shared CV, Rerun, Gradio, and utility deps.</li>
+                <li><code>[feature.cuda]</code> centralizes CUDA 12.9 and PyTorch GPU dependencies.</li>
+                <li><code>[feature.dev]</code> centralizes ruff, pytest, beartype, pyrefly, hypothesis, vulture.</li>
+                <li>Each package gets a prod and dev environment with the same solve group.</li>
+                <li>Package <code>pyproject.toml</code> files mostly stay standard Python metadata.</li>
+              </ul>
+            </article>
+            <article class="card">
+              <h3>Recommendation</h3>
+              <ul class="list">
+                <li>Keep root <code>pixi.toml</code> canonical until Pixi package-local dev/task workflows stabilize.</li>
+                <li>Split shared features only when they represent real responsibility boundaries, not just shorter files.</li>
+                <li>Use package features for package deps, app tasks, data download tasks, and <code>PACKAGE_DIR</code>.</li>
+                <li>Remove pip installs from Pixi tasks. Add build tools as Pixi deps or dedicated build features.</li>
+                <li>Do not adopt UV-backed Kornia tasks because this repo explicitly forbids UV.</li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="callout">
+            <p>
+              <strong>Pixi issue read:</strong> Discussion #4956 says multi-package workspace work is in scope, but the maintainer pointed to <code>pixi-build</code> and warned to expect changes. Issue #4721 proposed package dev dependency collection, but solve group behavior and package-local task behavior remain unsettled. So the practical strategy is to keep root-level dependency/task orchestration now, and design the code layout so it can move later without changing public node contracts.
+            </p>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <caption>Feature split proposal</caption>
+              <thead>
+                <tr>
+                  <th>Feature</th>
+                  <th>Responsibility</th>
+                  <th>What belongs</th>
+                  <th>What does not belong</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>common</code></td>
+                  <td>Lowest common runtime surface</td>
+                  <td>numpy, scipy, jaxtyping, rerun, simplecv, huggingface_hub</td>
+                  <td>Model-specific frameworks or optional app deps that only one package needs</td>
+                </tr>
+                <tr>
+                  <td><code>gradio-app</code> or keep in <code>common</code></td>
+                  <td>Interactive UI surface</td>
+                  <td>gradio, gradio-rerun, shared app launcher helpers</td>
+                  <td>Model weights, data downloads, package-specific widgets</td>
+                </tr>
+                <tr>
+                  <td><code>cuda</code></td>
+                  <td>GPU runtime and build substrate</td>
+                  <td>CUDA, cuDNN, PyTorch GPU, GPU-only runtimes</td>
+                  <td>Per-model packages that can vary independently</td>
+                </tr>
+                <tr>
+                  <td><code>dev</code></td>
+                  <td>Quality tools</td>
+                  <td>ruff, pytest, beartype, pyrefly, vulture, hypothesis</td>
+                  <td>Runtime deps needed by users of a package</td>
+                </tr>
+                <tr>
+                  <td><code>&lt;package&gt;</code></td>
+                  <td>One package's runtime</td>
+                  <td>editable package, model-specific deps, package tasks, data tasks</td>
+                  <td>General node framework code that several packages need</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="comparisons">
+        <div class="inner">
+          <h2>External References</h2>
+          <div class="grid three">
+            <article class="card">
+              <span class="tag blue">Kornia</span>
+              <h3>Useful for domain API layout</h3>
+              <p>
+                <code>kornia/kornia</code> is a Python-first library with one main package split by domains such as geometry, filters, feature, io, models, and augmentation.
+              </p>
+              <p>
+                Take the clear domain namespaces and test/docs discipline. Do not copy the monolithic distribution shape or UV-backed Pixi tasks.
+              </p>
+            </article>
+            <article class="card">
+              <span class="tag blue">Kornia-RS</span>
+              <h3>Useful for workspace modularity</h3>
+              <p>
+                <code>kornia-rs</code> is closer to what this repo needs: core crates, standalone examples, Python bindings, C++ bindings, docs, tests, and Pixi tasks.
+              </p>
+              <p>
+                Take the idea of default core members, standalone examples, and explicit binding boundaries. Avoid native complexity unless needed.
+              </p>
+            </article>
+            <article class="card">
+              <span class="tag blue">create-node</span>
+              <h3>Useful as the local abstraction</h3>
+              <p>
+                The create-node skill already names the right unit: one reusable CV node with typed config/result, CLI, Gradio, Rerun, examples, and Pixi tasks.
+              </p>
+              <p>
+                Tighten it before scaling: require <code>log_result</code>, define config categories, document concurrency, and add test tiers.
+              </p>
+            </article>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="grid two">
+            <article class="card">
+              <h3>Adopt</h3>
+              <ul class="list">
+                <li>Examples as first-class workspace units, like Kornia-RS <code>examples/*</code>.</li>
+                <li>Umbrella plus direct module access, where users can either run an app or import a node directly.</li>
+                <li>Public APIs arranged by domain, not by how the demo happened to grow.</li>
+                <li>Default checks that do not accidentally build every heavyweight demo.</li>
+              </ul>
+            </article>
+            <article class="card">
+              <h3>Do not adopt</h3>
+              <ul class="list">
+                <li>UV workflows from Kornia, because this repo requires Pixi and forbids UV.</li>
+                <li>One giant Python package for all examples.</li>
+                <li>Rust/PyO3 binding complexity unless a specific package has native shared core needs.</li>
+                <li>Broad root-level tests that hide local package ownership.</li>
+              </ul>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="kornia-decision">
+        <div class="inner">
+          <h2>Kornia Decision</h2>
+          <p>
+            Kornia is useful, but not as a complete template. <code>kornia/kornia</code> and <code>kornia-rs</code> teach different lessons.
+          </p>
+
+          <div class="table-wrap">
+            <table>
+              <caption>How much to copy from each repo</caption>
+              <thead>
+                <tr>
+                  <th>Repo</th>
+                  <th>What it is</th>
+                  <th>Good reference for</th>
+                  <th>Bad reference for</th>
+                  <th>Apply here</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>kornia/kornia</code></td>
+                  <td>One Python library package with domain modules, docs, tests, benchmarks, and Pixi dev tasks.</td>
+                  <td>Public API taxonomy: <code>geometry</code>, <code>filters</code>, <code>feature</code>, <code>models</code>, <code>io</code>, etc.</td>
+                  <td>A multi-package examples monorepo. It is not trying to isolate many heavyweight app stacks.</td>
+                  <td>Borrow domain naming and testing discipline. Do not copy the one-big-package shape.</td>
+                </tr>
+                <tr>
+                  <td><code>kornia-rs</code></td>
+                  <td>Real workspace: Rust crates, standalone examples, Python bindings, C++ bindings, docs, tests, and Pixi tasks.</td>
+                  <td>Workspace boundaries: core libraries separate from examples and bindings.</td>
+                  <td>Pure Python CV demos unless you actually need Rust/PyO3/C++ binding complexity.</td>
+                  <td>Borrow the structure: core packages, examples/apps, bindings/adapters. Keep implementation Python-first unless native code is needed.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="grid two">
+            <article class="card">
+              <h3>What Kornia gets right</h3>
+              <ul class="list">
+                <li>Users import stable domain namespaces instead of random demo scripts.</li>
+                <li>Docs and tests live at predictable paths.</li>
+                <li>Domain APIs are the public product, not the internal folder history.</li>
+                <li>It separates low-level fast image operations through <code>kornia_rs</code> while keeping higher-level Python APIs in <code>kornia</code>.</li>
+              </ul>
+            </article>
+            <article class="card">
+              <h3>What Kornia-RS gets right</h3>
+              <ul class="list">
+                <li><code>crates/*</code> are core reusable libraries.</li>
+                <li><code>examples/*</code> are first-class runnable examples, not hidden inside the core.</li>
+                <li><code>kornia-py</code> and <code>kornia-cpp</code> are adapters/bindings with their own build surfaces.</li>
+                <li>Pixi tasks expose separate Rust, Python, C++, and CUDA workflows.</li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="callout">
+            <p>
+              <strong>Translation for this repo:</strong> use Kornia-style domain APIs inside model packages, and Kornia-RS-style workspace boundaries across packages. That means <code>monopriors/depth</code>, <code>monopriors/normals</code>, and <code>monopriors/multiview</code> are library domains, while calibration workbenches and Gradio flows are apps/workflows that depend on those domains.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="shared-language">
+        <div class="inner">
+          <h2>Shared Language</h2>
+          <p>
+            Use these words consistently. The goal is that a file path, a Pixi task, a test name, and a PR description all point to the same architectural idea.
+          </p>
+
+          <div class="callout">
+            <p>
+              <strong>Workflow is the primary term.</strong> Use it for the thing a user is trying to accomplish. Use <code>pipeline</code> only when you specifically mean the implementation path inside code, where objects move from one function or node to the next.
+            </p>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <caption>Vocabulary for this monorepo</caption>
+              <thead>
+                <tr>
+                  <th>Term</th>
+                  <th>Definition</th>
+                  <th>Owns</th>
+                  <th>Does not own</th>
+                  <th>Example name</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Package</td>
+                  <td>Pixi/Python unit with its own dependencies, tests, source module, and tasks.</td>
+                  <td>Dependency boundary, source root, package-local tests, package tasks.</td>
+                  <td>Unrelated model families just because they are convenient.</td>
+                  <td><code>monopriors</code>, <code>sam3-rerun</code>, <code>pysfm</code></td>
+                </tr>
+                <tr>
+                  <td>Capability</td>
+                  <td>A domain of work the repo can do.</td>
+                  <td>Language for grouping packages and nodes.</td>
+                  <td>Implementation details.</td>
+                  <td>depth estimation, pose estimation, SLAM</td>
+                </tr>
+                <tr>
+                  <td>Node</td>
+                  <td>Smallest reusable executable CV unit. Usually one model or one algorithm with typed input/output.</td>
+                  <td>Config, model loading, pure execution, typed result, optional verbose Rerun logging.</td>
+                  <td>Gradio layout, CLI parsing, file dialogs, user workflow decisions.</td>
+                  <td><code>MetricDepthNode</code>, <code>VideoToImageNode</code></td>
+                </tr>
+                <tr>
+                  <td>Implementation pipeline</td>
+                  <td>Implementation detail inside a workflow: code-level composition where Python objects flow between steps.</td>
+                  <td>Ordering, branching, typed in-memory handoff.</td>
+                  <td>User-facing naming, package identity, UI layout, or Pixi task policy.</td>
+                  <td><code>run_calibration_pipeline()</code></td>
+                </tr>
+                <tr>
+                  <td>Workflow</td>
+                  <td>User-level job made from one or more nodes plus data loading, parameters, outputs, and optional UI.</td>
+                  <td>End-to-end task semantics: what the user is trying to accomplish.</td>
+                  <td>Low-level model internals.</td>
+                  <td>multiview calibration workflow</td>
+                </tr>
+                <tr>
+                  <td>App</td>
+                  <td>User-facing workflow surface. Usually a Gradio app in this repo.</td>
+                  <td>UX, widgets, examples, status, Rerun viewer, orchestration calls.</td>
+                  <td>Model implementation.</td>
+                  <td>depth compare app, calibration app</td>
+                </tr>
+                <tr>
+                  <td>GUI</td>
+                  <td>Interactive Gradio surface for a node or app.</td>
+                  <td>Widget-to-config sync, uploads, tabs, streaming callback.</td>
+                  <td>Core computation or CLI-only batch behavior.</td>
+                  <td><code>gradio_ui/nodes/metric_depth_ui.py</code></td>
+                </tr>
+                <tr>
+                  <td>CLI</td>
+                  <td>Command-line adapter over a node or workflow.</td>
+                  <td>Tyro config, input/output paths, Rerun save/connect/spawn options.</td>
+                  <td>Gradio state or widget behavior.</td>
+                  <td><code>tools/demos/metric_depth.py</code></td>
+                </tr>
+                <tr>
+                  <td>Launcher</td>
+                  <td>Thin file under <code>tools/</code> that imports and runs a CLI or GUI.</td>
+                  <td>Only process entry-point wiring.</td>
+                  <td>Business logic, model loading decisions, result logging policy.</td>
+                  <td><code>tools/apps/calibration_app.py</code></td>
+                </tr>
+                <tr>
+                  <td>Artifact</td>
+                  <td>Output that can be saved, compared, or consumed later.</td>
+                  <td>Stable serialized output contract.</td>
+                  <td>Transient UI state.</td>
+                  <td><code>.rrd</code>, pose JSON, extracted images, catalog layer</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="grid two">
+            <article class="card">
+              <h3>GUI vs CLI rule</h3>
+              <p>
+                GUI and CLI are adapters over the same node or workflow. They should not duplicate model logic, step ordering, or final Rerun logging.
+              </p>
+              <ul class="list">
+                <li>CLI owns paths, batch flags, and <code>RerunTyroConfig</code>.</li>
+                <li>GUI owns widgets, uploads, session state, and streaming bytes.</li>
+                <li>Both call the same node or workflow function and the same <code>log_result()</code>.</li>
+                <li>If behavior differs between GUI and CLI, the difference should be explicit adapter behavior.</li>
+              </ul>
+            </article>
+            <article class="card">
+              <h3>App vs node rule</h3>
+              <p>
+                A node is reusable machinery. An app is the user-facing experience built from machinery.
+              </p>
+              <ul class="list">
+                <li>One model with one typed result is probably a node.</li>
+                <li>Several nodes plus user decisions is probably an app/workflow.</li>
+                <li>A data converter can be a node if it is reusable across workflows.</li>
+                <li>A workbench with tabs, examples, and comparison views is an app.</li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <caption>Test tiers by boundary</caption>
+              <thead>
+                <tr>
+                  <th>Tier</th>
+                  <th>Boundary tested</th>
+                  <th>What the test proves</th>
+                  <th>Typical command</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>T0 import</td>
+                  <td>Package</td>
+                  <td>The package imports in its Pixi dev environment with beartype enabled.</td>
+                  <td><code>pytest -q tests/test_import.py</code></td>
+                </tr>
+                <tr>
+                  <td>T1 node API</td>
+                  <td>Node</td>
+                  <td>Given a tiny fixture input, the public node returns the typed result with expected shapes/files.</td>
+                  <td><code>pytest -q tests/test_metric_depth_api.py</code></td>
+                </tr>
+                <tr>
+                  <td>T2 Rerun logging</td>
+                  <td>Rerun adapter</td>
+                  <td><code>create_blueprint()</code> and <code>log_result()</code> produce a non-empty stream or saved RRD.</td>
+                  <td><code>pytest -q tests/test_metric_depth_rerun.py</code></td>
+                </tr>
+                <tr>
+                  <td>T3 CLI</td>
+                  <td>Command adapter</td>
+                  <td>The thin CLI runs from a subprocess and writes the expected artifact.</td>
+                  <td><code>pixi run -e &lt;pkg&gt;-dev --frozen tests</code></td>
+                </tr>
+                <tr>
+                  <td>T4 GUI callback</td>
+                  <td>Gradio adapter</td>
+                  <td>The callback can be invoked with fixture inputs and yields status plus Rerun bytes.</td>
+                  <td><code>pytest -q tests/test_metric_depth_gradio.py</code></td>
+                </tr>
+                <tr>
+                  <td>T5 app E2E</td>
+                  <td>Full user workflow</td>
+                  <td>A browser can load the app, run an example, and see a non-empty viewer/output.</td>
+                  <td>Playwright, only for important apps</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="callout">
+            <p>
+              <strong>Testing rule:</strong> every new node gets T0, T1, and T2. Every public CLI gets T3. GUI callback tests are for reusable node GUIs. Full browser tests are reserved for important apps because they are slower and more fragile.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="node-spec">
+        <div class="inner">
+          <h2>Node Contract</h2>
+          <p>
+            The right abstraction is not "a Gradio app" and not "a Pixi environment." It is a typed, reusable CV node. CLI and Gradio are adapters. Apps are orchestrators.
+          </p>
+
+          <div class="diagram" aria-label="Node contract diagram">
+            <div class="node-box">
+              <strong>Config</strong>
+              <span>Dataclass, jaxtyping where needed, field docs, tyro-compatible.</span>
+            </div>
+            <div class="node-box">
+              <strong>Node</strong>
+              <span>Loads model once, owns computation, logs intermediate details when verbose.</span>
+            </div>
+            <div class="node-box">
+              <strong>Result</strong>
+              <span>Dataclass or NamedTuple with typed arrays and domain names.</span>
+            </div>
+            <div class="node-box">
+              <strong>Rerun</strong>
+              <span><code>log_result</code> and <code>create_blueprint</code> shared by CLI and Gradio.</span>
+            </div>
+            <div class="node-box">
+              <strong>Adapters</strong>
+              <span>CLI loads paths. Gradio syncs widgets and streams. Apps compose nodes.</span>
+            </div>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <caption>Single-responsibility boundary for every "thing"</caption>
+              <thead>
+                <tr>
+                  <th>Piece</th>
+                  <th>Owns</th>
+                  <th>Does not own</th>
+                  <th>Testable behavior</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>types.py</code></td>
+                  <td>Config, result, domain enums, serialization schema</td>
+                  <td>Model imports, Rerun, Gradio, file dialogs</td>
+                  <td>Construct configs and validate defaults</td>
+                </tr>
+                <tr>
+                  <td><code>node.py</code></td>
+                  <td>Model loading, pure execution, verbose intermediate logging</td>
+                  <td>CLI parsing, Gradio widget state, app layout</td>
+                  <td>Run on fixture input and assert result shape/types</td>
+                </tr>
+                <tr>
+                  <td><code>rerun_logging.py</code></td>
+                  <td>Final output logging and blueprint construction</td>
+                  <td>Model execution and input loading</td>
+                  <td>Write non-empty RRD stream for fixture result</td>
+                </tr>
+                <tr>
+                  <td><code>cli.py</code></td>
+                  <td>Path parsing, RerunTyroConfig, batch entry point</td>
+                  <td>Widget state, model internals</td>
+                  <td>Subprocess exits zero and produces output artifact</td>
+                </tr>
+                <tr>
+                  <td><code>gradio_ui/nodes/*_ui.py</code></td>
+                  <td>Widgets, config sync, input parsing, streaming callback</td>
+                  <td>Core algorithm and final Rerun log policy</td>
+                  <td>Import app, invoke callback with fixture, stream bytes</td>
+                </tr>
+                <tr>
+                  <td><code>gradio_ui/apps/*_ui.py</code></td>
+                  <td>Composition of multiple nodes into a user workflow</td>
+                  <td>Model details from child nodes</td>
+                  <td>Chain nodes and verify passed artifacts/results</td>
+                </tr>
+                <tr>
+                  <td><code>tools/*</code></td>
+                  <td>Thin launcher scripts only</td>
+                  <td>Business logic</td>
+                  <td>Import smoke plus task invocation</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="callout">
+            <p>
+              <strong>Concurrency correction:</strong> keep model singletons, but do not mutate one global runtime config per request. Use a model cache keyed by model-loading config and pass a per-request runtime config into <code>node(...)</code>. That preserves GPU efficiency while avoiding cross-session Gradio config bleed.
+            </p>
+          </div>
+
+          <pre aria-label="Recommended node file tree">packages/&lt;name&gt;/
+  pyproject.toml
+  src/&lt;module&gt;/
+    api/
+      &lt;thing&gt;/
+        __init__.py
+        types.py
+        node.py
+        rerun_logging.py
+        cli.py
+    gradio_ui/
+      nodes/&lt;thing&gt;_ui.py
+      apps/&lt;workflow&gt;_ui.py
+  tools/
+    demos/&lt;thing&gt;.py
+    nodes/&lt;thing&gt;_node.py
+    apps/&lt;workflow&gt;_app.py
+  tests/
+    test_&lt;thing&gt;_api.py
+    test_&lt;thing&gt;_rerun.py
+    test_&lt;thing&gt;_cli.py</pre>
+        </div>
+      </section>
+
+      <section class="section" id="example-layout">
+        <div class="inner">
+          <h2>Example Package Layout</h2>
+          <p>
+            Yes: migrate one package at a time. The repo should not try to normalize every package in one pass. Pick one package, define its local node/app boundary, add tests around that boundary, then carry the pattern to the next package.
+          </p>
+
+          <div class="grid two">
+            <article class="card">
+              <h3>Recommended first package: <code>pysfm</code></h3>
+              <p>
+                Start here if the goal is to prove the layout with low risk. <code>pysfm</code> already has a class-based <code>VideoToImageNode</code>, thin launchers, and Gradio node files. It is close enough that the migration is mostly tightening the contract.
+              </p>
+              <ul class="list">
+                <li>Add the missing shared <code>log_video_to_image_result()</code>.</li>
+                <li>Split one large API module only after a characterization test exists.</li>
+                <li>Use it as the canonical package template for future nodes.</li>
+              </ul>
+            </article>
+            <article class="card">
+              <h3>Recommended second package: <code>monoprior</code></h3>
+              <p>
+                Move here once the layout is proven. <code>monoprior</code> has the highest abstraction payoff because VGGT calibration already wants separate VGGT, SAM3, metric depth, alignment, and fusion responsibilities.
+              </p>
+              <ul class="list">
+                <li>Keep the current calibration app as the user-facing orchestrator.</li>
+                <li>Extract reusable nodes underneath it one at a time.</li>
+                <li>Do not rename every old file before the node contracts are green.</li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="callout">
+            <p>
+              <strong>Package-first rule:</strong> inside one package, finish one vertical slice before moving on: typed API, Rerun logging, CLI, Gradio UI, Pixi tasks, and tests for one node. Avoid repo-wide mechanical renames until at least two packages follow the same shape.
+            </p>
+          </div>
+
+          <div class="grid two">
+            <article class="card">
+              <h3>Concrete tree for one package</h3>
+              <pre>packages/pysfm/
+  pyproject.toml
+  pysfm/
+    __init__.py
+    api/
+      video_to_image/
+        __init__.py
+        types.py          # VideoToImageConfig, VideoToImageResult
+        node.py           # VideoToImageNode
+        rerun_logging.py  # log_result, create_blueprint
+        cli.py            # VideoToImageCLIConfig, main()
+      sfm_reconstruction/
+        __init__.py
+        types.py
+        node.py
+        rerun_logging.py
+        cli.py
+    gradio_ui/
+      nodes/
+        video_to_image_ui.py
+        sfm_reconstruction_ui.py
+      apps/
+        reconstruction_workflow_ui.py
+  tools/
+    demos/
+      video_to_image.py
+      sfm_reconstruction.py
+    nodes/
+      video_to_image_node.py
+      sfm_reconstruction_node.py
+    apps/
+      reconstruction_workflow_app.py
+  tests/
+    test_video_to_image_api.py
+    test_video_to_image_rerun.py
+    test_video_to_image_cli.py</pre>
+            </article>
+            <article class="card">
+              <h3>What this means in practice</h3>
+              <div class="table-wrap">
+                <table>
+                  <caption>One-package migration checklist</caption>
+                  <thead>
+                    <tr>
+                      <th>Step</th>
+                      <th>Done when</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>1. Choose one node</td>
+                      <td>It has a real single responsibility and a real input/output contract.</td>
+                    </tr>
+                    <tr>
+                      <td>2. Characterize current behavior</td>
+                      <td>A fixture test proves current output shape, files, or Rerun stream.</td>
+                    </tr>
+                    <tr>
+                      <td>3. Split only the seam you need</td>
+                      <td>Types, node, Rerun logging, CLI, and UI call the same core path.</td>
+                    </tr>
+                    <tr>
+                      <td>4. Keep launchers thin</td>
+                      <td><code>tools/*</code> imports <code>main</code> and does almost nothing else.</td>
+                    </tr>
+                    <tr>
+                      <td>5. Wire Pixi tasks</td>
+                      <td>Demo, node app, dev app, and data download tasks use package paths.</td>
+                    </tr>
+                    <tr>
+                      <td>6. Stop and write down the pattern</td>
+                      <td>The package README or root node contract explains the local convention.</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </article>
+          </div>
+
+          <div class="grid three">
+            <article class="card compact">
+              <span class="tag good">Do</span>
+              <h3>One vertical node</h3>
+              <p>Finish one node end to end before touching the next package.</p>
+            </article>
+            <article class="card compact">
+              <span class="tag warn">Wait</span>
+              <h3>Repo-wide src move</h3>
+              <p>Flat versus <code>src/</code> layout matters less than the API/UI boundary.</p>
+            </article>
+            <article class="card compact">
+              <span class="tag bad">Avoid</span>
+              <h3>Big rename pass</h3>
+              <p>Renames without behavior tests will create churn without proving modularity.</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="monorepo-shape">
+        <div class="inner">
+          <h2>Model Packages Vs App Packages</h2>
+          <p>
+            <code>monoprior</code> is currently doing two jobs: it is a library of reusable geometric prior models, and it is also a collection of end-user apps. That is why it feels vague. I would split the responsibilities conceptually first, then physically when tests make it safe.
+          </p>
+
+          <div class="grid three">
+            <article class="card">
+              <span class="tag bad">Avoid</span>
+              <h3>One giant models package</h3>
+              <p>
+                A single <code>models</code> package sounds clean, but it will quickly inherit every heavy dependency: SAM, VGGT, MoGe, pose, TensorRT, SfM, CUDA kernels. That creates a slow, fragile solve and makes small apps pay for unrelated model stacks.
+              </p>
+            </article>
+            <article class="card">
+              <span class="tag warn">Use carefully</span>
+              <h3>Domain model libraries</h3>
+              <p>
+                Group reusable model wrappers by dependency and domain: depth/normal/multiview priors, segmentation, pose, SfM, VRS/data. These packages expose typed nodes and results, but they do not own large composite apps.
+              </p>
+            </article>
+            <article class="card">
+              <span class="tag good">Prefer</span>
+              <h3>Workflow app packages</h3>
+              <p>
+                Apps depend on one or more model libraries and own the user experience: Gradio layouts, CLI workflows, example data, Pixi tasks, and orchestration. This makes "what does this package do?" much easier to answer.
+              </p>
+            </article>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <caption>Three possible shapes for <code>monoprior</code></caption>
+              <thead>
+                <tr>
+                  <th>Shape</th>
+                  <th>Pros</th>
+                  <th>Cons</th>
+                  <th>Recommendation</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Keep <code>monoprior</code> as everything</td>
+                  <td>Few package moves. Existing imports and Pixi tasks keep working.</td>
+                  <td>The package keeps accumulating depth, normals, multiview, calibration apps, data tools, and UI glue.</td>
+                  <td>Acceptable short term, but document internal boundaries immediately.</td>
+                </tr>
+                <tr>
+                  <td>Split into <code>monopriors</code> library plus <code>monoprior-apps</code></td>
+                  <td>Clear distinction between reusable model nodes and user-facing workflows.</td>
+                  <td>Some import churn. Apps still share the same broad model dependency family.</td>
+                  <td>Best next step for this repo.</td>
+                </tr>
+                <tr>
+                  <td>Split every model family into separate packages now</td>
+                  <td>Maximum isolation and clear dependency ownership.</td>
+                  <td>High migration cost. Easy to over-split before real reuse patterns are known.</td>
+                  <td>Do only after the library/app split exposes real dependency pressure.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="grid two">
+            <article class="card">
+              <h3>Full monorepo shape I would aim for</h3>
+              <pre>examples-monorepo/
+  pixi.toml                 # root envs, deps, tasks remain canonical
+  pyrefly.toml
+  packages/
+    cv-demo-core/            # lightweight shared infra only
+      src/cv_demo_core/
+        rerun/
+        gradio/
+        typing/
+        examples/
+
+    monopriors/              # reusable depth/normal/multiview model nodes
+      src/monopriors/
+        depth/
+        normals/
+        multiview/
+        alignment/
+        fusion/
+
+    monoprior-apps/          # apps that compose monopriors nodes
+      src/monoprior_apps/
+        gradio_ui/apps/
+        workflows/
+      tools/apps/
+      tools/demos/
+
+    sam3-rerun/              # segmentation model library + simple apps
+    pysfm/                   # SfM and reconstruction model/workflow package
+    wilor-nano/              # hand model package
+    sapiens2-pose/           # pose model package
+    mv-api/                  # multiview data/API workflows
+    slam-evals/              # eval/catalog workflows
+    pyvrs-viewer/            # VRS data adapter
+    native/
+      asmk/
+      mast3r/
+      dpretrieval/</pre>
+            </article>
+            <article class="card">
+              <h3>Responsibility boundaries</h3>
+              <ul class="list">
+                <li><code>cv-demo-core</code>: no heavyweight model deps. Only shared Rerun/Gradio launch glue, typed helpers, example-data utilities, and maybe generic serialization helpers.</li>
+                <li><code>monopriors</code>: model wrappers and reusable nodes for geometric priors. It can expose CLIs for each node, but not the big user-facing workbench apps.</li>
+                <li><code>monoprior-apps</code>: calibration workbench, depth compare, depth alignment UI, and any app that composes multiple <code>monopriors</code> nodes.</li>
+                <li><code>sam3-rerun</code>, <code>wilor-nano</code>, <code>sapiens2-pose</code>: stay separate because their model stacks and user surfaces are different enough.</li>
+                <li><code>mv-api</code>, <code>slam-evals</code>, <code>pyvrs-viewer</code>: data/catalog/eval packages, not model packages.</li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="callout">
+            <p>
+              <strong>Pragmatic path:</strong> do not physically split <code>monoprior</code> first. First create the internal layout as if the split already happened: <code>monopriors/depth</code>, <code>monopriors/normals</code>, <code>monopriors/multiview</code>, <code>monopriors/apps</code>. Once imports and tests are stable, moving <code>apps</code> into <code>monoprior-apps</code> becomes a small packaging change instead of an architecture rewrite.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="capability-taxonomy">
+        <div class="inner">
+          <h2>Capability Types</h2>
+          <p>
+            The repo is not one kind of thing. It mixes reusable model primitives, geometry workflows, data adapters, visualization tools, and end-user apps. Naming those categories makes package boundaries much easier to reason about.
+          </p>
+
+          <div class="table-wrap">
+            <table>
+              <caption>What this monorepo is actually doing</caption>
+              <thead>
+                <tr>
+                  <th>Capability family</th>
+                  <th>Examples in this repo</th>
+                  <th>Reusable unit</th>
+                  <th>Best package type</th>
+                  <th>Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Depth and geometric priors</td>
+                  <td><code>monoprior</code>, <code>prompt-da</code>, metric depth, relative depth, depth completion</td>
+                  <td>Single-image or multiview depth node with typed depth/confidence outputs</td>
+                  <td>Model library, plus separate apps</td>
+                  <td>This is the clearest candidate for <code>monopriors</code> as a reusable model library.</td>
+                </tr>
+                <tr>
+                  <td>Surface normals</td>
+                  <td><code>monoprior</code> normal predictors</td>
+                  <td>Image-to-normal node</td>
+                  <td>Model library</td>
+                  <td>Probably belongs beside depth under geometric priors, not as a separate top-level package yet.</td>
+                </tr>
+                <tr>
+                  <td>Multiview geometry and calibration</td>
+                  <td>VGGT calibration, multiview inference, SfM reconstruction</td>
+                  <td>Multiview node or workflow app depending on coupling</td>
+                  <td>Model library for VGGT/SfM primitives; app package for calibration workbench</td>
+                  <td>Joint multiview models are nodes; full calibration UX is an app/workflow.</td>
+                </tr>
+                <tr>
+                  <td>Segmentation and masks</td>
+                  <td><code>sam3-rerun</code>, SAM3 people masks inside calibration</td>
+                  <td>Image or video segmentation node</td>
+                  <td>Separate model package</td>
+                  <td>Keep separate because SAM dependencies and prompt/mask semantics are different from depth.</td>
+                </tr>
+                <tr>
+                  <td>2D and 3D pose estimation</td>
+                  <td><code>wilor-nano</code>, <code>sapiens2-pose</code>, <code>sam3d-body-rerun</code>, <code>mv-api</code> pose layers</td>
+                  <td>Detector node, keypoint node, pose artifact/result schema</td>
+                  <td>Model package per model family; shared schemas if reuse emerges</td>
+                  <td>Pose has enough variety that one generic pose package may be premature.</td>
+                </tr>
+                <tr>
+                  <td>SfM, visual odometry, and SLAM</td>
+                  <td><code>pysfm</code>, <code>robocap-slam</code>, <code>dpvo</code>, <code>mast3r-slam</code>, <code>slam-evals</code></td>
+                  <td>Trajectory, reconstruction, keyframe, or RRD layer artifact</td>
+                  <td>Workflow/model packages plus eval package</td>
+                  <td>These are workflows more than single model calls; app boundaries matter.</td>
+                </tr>
+                <tr>
+                  <td>Rendering and 3D assets</td>
+                  <td><code>gsplat-rust-renderer</code>, <code>vistadream</code>, Brush training tasks</td>
+                  <td>Renderer, Gaussian artifact, training/rendering CLI</td>
+                  <td>Native/model package plus app workflows</td>
+                  <td>Native code and training tasks should stay isolated from general CV model deps.</td>
+                </tr>
+                <tr>
+                  <td>Data adapters and conversion</td>
+                  <td><code>pyvrs-viewer</code>, <code>egoexo-forge</code>, Polycam, VRS, video-to-image</td>
+                  <td>Dataset reader, converter, artifact writer</td>
+                  <td>Data package or utility node</td>
+                  <td>These should be dependency-light and broadly reusable by model/app packages.</td>
+                </tr>
+                <tr>
+                  <td>Evaluation and cataloging</td>
+                  <td><code>slam-evals</code>, <code>mv-api</code> catalog layers, Rerun catalog apps</td>
+                  <td>Ingest task, metric task, catalog layer writer/server</td>
+                  <td>Eval/catalog package</td>
+                  <td>Keep separate from model inference; it consumes artifacts produced elsewhere.</td>
+                </tr>
+                <tr>
+                  <td>Composite apps and workbenches</td>
+                  <td>Depth compare, calibration app, full exo/ego app, Daggr workflows</td>
+                  <td>Workflow that composes nodes and data adapters</td>
+                  <td>App package</td>
+                  <td>Apps should own UX and orchestration, not model internals.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="grid three">
+            <article class="card">
+              <h3>Model libraries</h3>
+              <p>
+                Own reusable inference units: configs, model loading, typed results, and Rerun logging. They may expose simple demos, but they should not become workbench packages.
+              </p>
+              <p class="small">Examples: <code>monopriors</code>, <code>sam3-rerun</code>, <code>wilor-nano</code>, <code>sapiens2-pose</code>.</p>
+            </article>
+            <article class="card">
+              <h3>Data and artifact packages</h3>
+              <p>
+                Own reading, conversion, synchronization, catalogs, and artifact schemas. They should stay as dependency-light as possible so many apps can use them.
+              </p>
+              <p class="small">Examples: <code>pyvrs-viewer</code>, <code>egoexo-forge</code>, <code>slam-evals</code>, parts of <code>mv-api</code>.</p>
+            </article>
+            <article class="card">
+              <h3>App/workflow packages</h3>
+              <p>
+                Own end-user experiences: Gradio layout, CLI workflows, orchestration, example datasets, Pixi tasks, and Daggr graphs.
+              </p>
+              <p class="small">Examples: future <code>monoprior-apps</code>, calibration workbench, full exo/ego app.</p>
+            </article>
+          </div>
+
+          <div class="callout">
+            <p>
+              <strong>Rule of thumb:</strong> if a package answers "how do I run this model?", it is a model library. If it answers "how do I turn this dataset into an artifact?", it is a data package. If it answers "how do I complete this user workflow?", it is an app package.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="model-inventory">
+        <div class="inner">
+          <h2>Model Inventory And Placement</h2>
+          <p>
+            This is the concrete split I would use to decide where each thing lives. A "model" here means either a learned checkpoint runtime or a reusable algorithm runtime. Full user journeys stay outside those model homes.
+          </p>
+
+          <div class="callout">
+            <p>
+              <strong>Placement rule:</strong> model packages own weights, model construction, runtime configs, typed result objects, and the reusable node call. App packages own Gradio screens, CLI workflows, dataset choices, Rerun sessions, and composition across multiple nodes. Data and eval packages own readers, converters, catalogs, metrics, and artifacts.
+            </p>
+          </div>
+
+          <h3>Concise Capability List</h3>
+          <div class="capability-list" aria-label="Concise model capability list">
+            <article class="capability-item">
+              <h3>depth</h3>
+              <p><code>monoprior</code>: relative, metric, completion, MoGe, UniDepth, Depth Anything.</p>
+              <span class="tag good">catalog presets</span>
+            </article>
+            <article class="capability-item">
+              <h3>video-depth</h3>
+              <p><code>monoprior</code>: temporal depth predictors and video inference flows.</p>
+              <span class="tag blue">explicit class</span>
+            </article>
+            <article class="capability-item">
+              <h3>surface-normal</h3>
+              <p><code>monoprior</code>: DSINE, OmniNormal, MoGe normals, StableNormal candidate.</p>
+              <span class="tag blue">explicit class</span>
+            </article>
+            <article class="capability-item">
+              <h3>segmentation</h3>
+              <p><code>sam3-rerun</code>: image/video masks, prompts, batch/chunk/stream modes.</p>
+              <span class="tag good">catalog presets</span>
+            </article>
+            <article class="capability-item">
+              <h3>pose-estimation</h3>
+              <p><code>sapiens2-pose</code>, <code>sam3d-body</code>, <code>mv-api</code>: body and whole-body pose.</p>
+              <span class="tag good">catalog presets</span>
+            </article>
+            <article class="capability-item">
+              <h3>hand-pose</h3>
+              <p><code>wilor-nano</code>: detector, keypoints, MANO layer, RTMPose hand backend.</p>
+              <span class="tag good">catalog presets</span>
+            </article>
+            <article class="capability-item">
+              <h3>multiview-geometry</h3>
+              <p>VGGT, calibration, triangulation, body tracking, reconstruction helpers.</p>
+              <span class="tag warn">named workflows</span>
+            </article>
+            <article class="capability-item">
+              <h3>SfM</h3>
+              <p><code>pysfm</code>: pycolmap, video recon, rig recon, ALIKED/LightGlue.</p>
+              <span class="tag blue">configs enough</span>
+            </article>
+            <article class="capability-item">
+              <h3>SLAM</h3>
+              <p><code>dpvo</code>, <code>mast3r-slam</code>, <code>robocap-slam</code>: stateful runtimes.</p>
+              <span class="tag blue">explicit classes</span>
+            </article>
+            <article class="capability-item">
+              <h3>rendering</h3>
+              <p><code>gsplat-rust-renderer</code>, Brush, VistaDream Gaussian outputs.</p>
+              <span class="tag blue">concrete classes</span>
+            </article>
+            <article class="capability-item">
+              <h3>data/eval</h3>
+              <p><code>slam-evals</code>, <code>pyvrs-viewer</code>, <code>egoexo-forge</code>: datasets and catalogs.</p>
+              <span class="tag good">catalog helps</span>
+            </article>
+            <article class="capability-item">
+              <h3>video/io</h3>
+              <p>VRS, extracted frames, encoded streams, catalog ingest, Rerun video layers.</p>
+              <span class="tag good">source catalog</span>
+            </article>
+          </div>
+
+          <div class="model-inventory-grid">
+            <article class="model-card">
+              <div class="model-title-row">
+                <h3>Relative Depth</h3>
+                <span class="tag good">model node</span>
+              </div>
+              <p><code>DepthAnythingV1Predictor</code>, <code>DepthAnythingV2Predictor</code>, <code>UniDepthRelativePredictor</code>, and <code>MogeV1Predictor</code>.</p>
+              <dl>
+                <dt>Current</dt>
+                <dd><code>monopriors.models.relative_depth</code>, used by depth compare, relative depth, and calibration flows.</dd>
+                <dt>Home</dt>
+                <dd>Keep under <code>monopriors/depth/relative</code> or equivalent. This is a reusable model family.</dd>
+                <dt>Surface</dt>
+                <dd>Thin CLI and Gradio node are allowed, but comparison and calibration apps should live in an app layer.</dd>
+                <dt>Tests</dt>
+                <dd>Constructor/catalog test, tiny image inference smoke test when weights are available, typed depth/confidence output contract.</dd>
+              </dl>
+            </article>
+
+            <article class="model-card">
+              <div class="model-title-row">
+                <h3>Video Depth</h3>
+                <span class="tag good">model node</span>
+              </div>
+              <p><code>VideoDepthAnythingPredictor</code> and <code>BaseVideoRelativePredictor</code>.</p>
+              <dl>
+                <dt>Current</dt>
+                <dd><code>monopriors.models.relative_depth.video_depth_anything</code>, plus video demo and inference scripts.</dd>
+                <dt>Home</dt>
+                <dd>Same depth package, but a separate <code>depth/video</code> namespace because temporal state changes the contract.</dd>
+                <dt>Surface</dt>
+                <dd>Video CLI and Gradio node call the same predictor; video workbench stays app-level.</dd>
+                <dt>Tests</dt>
+                <dd>Two or three frame fixture, stable frame count, stable depth sequence metadata.</dd>
+              </dl>
+            </article>
+
+            <article class="model-card">
+              <div class="model-title-row">
+                <h3>Metric Depth</h3>
+                <span class="tag good">model node</span>
+              </div>
+              <p><code>UniDepthMetricPredictor</code> and <code>MoGeV2MetricPredictor</code>.</p>
+              <dl>
+                <dt>Current</dt>
+                <dd><code>monopriors.models.metric_depth</code> and <code>monopriors.apis.metric_depth</code>.</dd>
+                <dt>Home</dt>
+                <dd><code>monopriors/depth/metric</code>. The node contract should expose metric scale assumptions explicitly.</dd>
+                <dt>Surface</dt>
+                <dd>Metric-depth UI and CLI are node demos; depth compare and calibration are apps.</dd>
+                <dt>Tests</dt>
+                <dd>Config validation, output units, Rerun logging contract, no hidden app dependency.</dd>
+              </dl>
+            </article>
+
+            <article class="model-card">
+              <div class="model-title-row">
+                <h3>Depth Completion</h3>
+                <span class="tag good">model node</span>
+              </div>
+              <p><code>PromptDAPredictor</code>, <code>PromptDA.from_pretrained()</code>, and PromptDA checkpoints.</p>
+              <dl>
+                <dt>Current</dt>
+                <dd>Model wrapper in <code>monopriors</code>; Polycam/Rerun workflows in <code>prompt-da</code>.</dd>
+                <dt>Home</dt>
+                <dd>Keep the reusable depth-completion node in <code>monopriors/depth/completion</code>.</dd>
+                <dt>Surface</dt>
+                <dd><code>prompt-da</code> should be an app/workflow package that consumes the node.</dd>
+                <dt>Tests</dt>
+                <dd>Input sparse-depth schema, mask handling, completed-depth artifact, app-level Polycam fixture.</dd>
+              </dl>
+            </article>
+
+            <article class="model-card">
+              <div class="model-title-row">
+                <h3>Surface Normals</h3>
+                <span class="tag good">model node</span>
+              </div>
+              <p><code>DSineNormalPredictor</code>, <code>OmniNormalPredictor</code>, <code>MoGeV2NormalPredictor</code>, and the currently not-exposed <code>StableNormalPredictor</code>.</p>
+              <dl>
+                <dt>Current</dt>
+                <dd><code>monopriors.models.surface_normal</code>.</dd>
+                <dt>Home</dt>
+                <dd><code>monopriors/normals</code>, beside depth as geometric priors.</dd>
+                <dt>Surface</dt>
+                <dd>Surface-normal CLI and Gradio node. Combined depth-normal demos move to app/workflow code.</dd>
+                <dt>Tests</dt>
+                <dd>Constructor coverage for all exposed predictors, normal vector shape/range checks, weight-path validation for OmniNormal.</dd>
+              </dl>
+            </article>
+
+            <article class="model-card">
+              <div class="model-title-row">
+                <h3>Mono-Prior Composites</h3>
+                <span class="tag warn">workflow node</span>
+              </div>
+              <p><code>DsineAndUnidepth</code>, <code>MoGeV2MonoPrior</code>, and <code>get_monoprior_model()</code>.</p>
+              <dl>
+                <dt>Current</dt>
+                <dd><code>monopriors.models.monoprior.monoprior_models</code>.</dd>
+                <dt>Home</dt>
+                <dd>A small <code>monopriors/composites</code> layer that composes depth and normal nodes without owning their internals.</dd>
+                <dt>Surface</dt>
+                <dd>Polycam and mono-prior inference are apps because they choose data, logging, and combined UX.</dd>
+                <dt>Tests</dt>
+                <dd>Composition test with fake nodes, result schema test, one real smoke test when checkpoints exist.</dd>
+              </dl>
+            </article>
+
+            <article class="model-card">
+              <div class="model-title-row">
+                <h3>VGGT Multiview Geometry</h3>
+                <span class="tag good">model node</span>
+              </div>
+              <p><code>VGGTPredictor</code>, <code>VGGTPredictions</code>, and <code>MultiviewPred</code>.</p>
+              <dl>
+                <dt>Current</dt>
+                <dd><code>monopriors.models.multiview.vggt_model</code>, used by multiview geometry and calibration.</dd>
+                <dt>Home</dt>
+                <dd><code>monopriors/multiview/vggt</code>. Keep prediction and typed camera/depth artifacts here.</dd>
+                <dt>Surface</dt>
+                <dd>VGGT CLI and Gradio node are demos. Calibration workbench remains app-level.</dd>
+                <dt>Tests</dt>
+                <dd>Small image-set fixture, camera/depth output schema, no direct dependency on calibration UI.</dd>
+              </dl>
+            </article>
+
+            <article class="model-card">
+              <div class="model-title-row">
+                <h3>Calibration, Alignment, Fusion</h3>
+                <span class="tag warn">workflow</span>
+              </div>
+              <p><code>MultiViewCalibrator</code>, <code>run_depth_alignment()</code>, <code>run_fusion()</code>, TSDF fusion, VGGT plus SAM3 plus MoGe.</p>
+              <dl>
+                <dt>Current</dt>
+                <dd><code>monopriors.apis.multiview_calibration</code>, <code>depth_alignment</code>, and <code>fusion</code>.</dd>
+                <dt>Home</dt>
+                <dd>Reusable math can live in <code>monopriors/geometry</code>; the full calibrator is an app/workflow.</dd>
+                <dt>Surface</dt>
+                <dd>Gradio calibration and CLI calibration live in <code>monoprior-apps</code> or an internal <code>apps</code> namespace.</dd>
+                <dt>Tests</dt>
+                <dd>Fake-node integration test, fixture reconstruction, Rerun artifact smoke test.</dd>
+              </dl>
+            </article>
+
+            <article class="model-card">
+              <div class="model-title-row">
+                <h3>COLMAP SfM And Rig Recon</h3>
+                <span class="tag blue">algorithm node</span>
+              </div>
+              <p><code>run_sfm()</code>, <code>run_vid_recon()</code>, <code>run_rig_recon()</code>, ALIKED/LightGlue, and pycolmap.</p>
+              <dl>
+                <dt>Current</dt>
+                <dd><code>pysfm.apis</code>, with video, rig, and Gradio surfaces.</dd>
+                <dt>Home</dt>
+                <dd><code>pysfm</code> is a good first reference package. It is an algorithm/workflow library, not a model zoo.</dd>
+                <dt>Surface</dt>
+                <dd>CLI and Gradio wrappers stay thin and call shared reconstruction functions.</dd>
+                <dt>Tests</dt>
+                <dd>Video-to-images fixture, config propagation, reconstruction result schema, Rerun logging helper.</dd>
+              </dl>
+            </article>
+
+            <article class="model-card">
+              <div class="model-title-row">
+                <h3>SAM3 Image Segmentation</h3>
+                <span class="tag good">model node</span>
+              </div>
+              <p><code>facebook/sam3</code>, <code>Sam3Model</code>, <code>Sam3Processor</code>, <code>SAM3Predictor</code>, and <code>SAM3Results</code>.</p>
+              <dl>
+                <dt>Current</dt>
+                <dd><code>sam3_rerun.api.predictor</code>.</dd>
+                <dt>Home</dt>
+                <dd>Keep as its own model package. Segmentation semantics and deps are separate from depth and pose.</dd>
+                <dt>Surface</dt>
+                <dd>Rerun app, annotation UI, and demo launchers are app surfaces around the same predictor.</dd>
+                <dt>Tests</dt>
+                <dd>Prompt parsing, mask result schema, Rerun layer emission, model-load smoke test behind checkpoint gate.</dd>
+              </dl>
+            </article>
+
+            <article class="model-card">
+              <div class="model-title-row">
+                <h3>SAM3 Video Segmentation</h3>
+                <span class="tag warn">needs consolidation</span>
+              </div>
+              <p><code>Sam3VideoModel</code>, <code>Sam3VideoProcessor</code>, <code>Sam3VideoInferenceSession</code>, batch/chunk/stream variants.</p>
+              <dl>
+                <dt>Current</dt>
+                <dd>Duplicated across <code>video_batch</code>, <code>video_chunk</code>, and <code>video_stream</code>.</dd>
+                <dt>Home</dt>
+                <dd>Create a shared <code>sam3_rerun.api.video_predictor</code> node and leave strategy wrappers thin.</dd>
+                <dt>Surface</dt>
+                <dd>Batch, chunk, and stream demos are apps or tools. They should not each reload/redefine model logic.</dd>
+                <dt>Tests</dt>
+                <dd>Shared session contract, frame-index stability, prompt carryover, one batch/chunk equivalence fixture.</dd>
+              </dl>
+            </article>
+
+            <article class="model-card">
+              <div class="model-title-row">
+                <h3>SAM3D Body</h3>
+                <span class="tag good">model node</span>
+              </div>
+              <p><code>facebook/sam-3d-body-dinov3</code>, <code>SAM3DBody</code>, <code>SAM3DBodyEstimator</code>, <code>FinalPosePrediction</code>, DINOv3 backbone, heads, prompt encoder, and decoder.</p>
+              <dl>
+                <dt>Current</dt>
+                <dd><code>sam3d_body</code> core plus API demo, Gradio UI, and singular <code>tool/</code> launcher directory.</dd>
+                <dt>Home</dt>
+                <dd>Core model files stay in the package. Demo and multiview/body-fitting flows should sit outside core.</dd>
+                <dt>Surface</dt>
+                <dd>Gradio and CLI are app layers. Rename <code>tool</code> to <code>tools</code> only with Pixi task updates.</dd>
+                <dt>Tests</dt>
+                <dd>Estimator result schema, asset resolution, app smoke test with fake or tiny fixture.</dd>
+              </dl>
+            </article>
+
+            <article class="model-card">
+              <div class="model-title-row">
+                <h3>Sapiens2 Pose</h3>
+                <span class="tag good">model node</span>
+              </div>
+              <p><code>facebook/sapiens2-pose-0.4b</code>, <code>0.8b</code>, <code>1b</code>, <code>5b</code>, DETR person detection, <code>Sapiens2</code>, <code>TopDownPoseModel</code>, and <code>PoseHeatmapHead</code>.</p>
+              <dl>
+                <dt>Current</dt>
+                <dd><code>sapiens2_pose.api.runtime</code>, <code>image_pose</code>, <code>video</code>, Gradio, and tools.</dd>
+                <dt>Home</dt>
+                <dd>Model runtime stays in <code>api.runtime</code> or a clearer <code>nodes/pose</code> module. Image/video are workflows.</dd>
+                <dt>Surface</dt>
+                <dd>Image CLI, video CLI, and Gradio should share the same runtime node and result schema.</dd>
+                <dt>Tests</dt>
+                <dd>Detector-to-pose integration with fixture, keypoint schema, model-size config validation.</dd>
+              </dl>
+            </article>
+
+            <article class="model-card">
+              <div class="model-title-row">
+                <h3>Sapiens2 TensorRT</h3>
+                <span class="tag blue">deploy node</span>
+              </div>
+              <p><code>SapiensPoseOnnxExportConfig</code>, <code>TensorRtBuildConfig</code>, <code>TensorRtPoseHeatmapRunner</code>, and <code>estimate_sapiens_pose_tensorrt</code>.</p>
+              <dl>
+                <dt>Current</dt>
+                <dd><code>sapiens2_pose.api.tensorrt_pose</code> plus conversion and benchmark tools.</dd>
+                <dt>Home</dt>
+                <dd>A deployment/runtime node under Sapiens, separate from the PyTorch runtime but with the same output contract.</dd>
+                <dt>Surface</dt>
+                <dd>Export, build, and benchmark CLIs are tools. They should not leak into normal app imports.</dd>
+                <dt>Tests</dt>
+                <dd>Config serialization, engine path validation, output parity smoke where hardware is available.</dd>
+              </dl>
+            </article>
+
+            <article class="model-card">
+              <div class="model-title-row">
+                <h3>WiLoR Hand Pose</h3>
+                <span class="tag good">model nodes</span>
+              </div>
+              <p>YOLO hand detector, <code>WiLor</code>, ViT backbone, <code>RefineNet</code>, <code>ManoSimpleLayer</code>, RTMPose hand keypoints, <code>FinalWilorPred</code>, and <code>KeypointResults</code>.</p>
+              <dl>
+                <dt>Current</dt>
+                <dd><code>wilor_nano.hand_detection</code>, <code>hand_keypoints</code>, <code>models</code>, inference API, Daggr, and Gradio.</dd>
+                <dt>Home</dt>
+                <dd>Split detector node and hand-pose node. Keep the old all-in-one pipeline marked as workflow or legacy.</dd>
+                <dt>Surface</dt>
+                <dd>Detection UI, hand-pose UI, Daggr node, and CLIs should call shared detector/keypoint nodes.</dd>
+                <dt>Tests</dt>
+                <dd>Detector schema, MANO asset resolution, keypoint output shape, pipeline fixture with mocked detector.</dd>
+              </dl>
+            </article>
+
+            <article class="model-card">
+              <div class="model-title-row">
+                <h3>Multiview Body Tracker</h3>
+                <span class="tag warn">model-backed workflow</span>
+              </div>
+              <p>YOLOX, RTMPose/RTMW, optional WiLoR, <code>MultiviewBodyTracker</code>, <code>MVHistory</code>, and model asset presets.</p>
+              <dl>
+                <dt>Current</dt>
+                <dd><code>mv_api.multiview_pose_estimator</code>, full exo/ego app, and catalog prediction tools.</dd>
+                <dt>Home</dt>
+                <dd>Tracker node in <code>mv-api</code>; full exo/ego orchestration in an app/workflow layer.</dd>
+                <dt>Surface</dt>
+                <dd>Catalog prediction, full exo/ego Gradio, and CLI workflows compose tracker plus calibration plus data adapters.</dd>
+                <dt>Tests</dt>
+                <dd>Asset config test, multiview result schema, fake-camera integration, catalog-layer emission.</dd>
+              </dl>
+            </article>
+
+            <article class="model-card">
+              <div class="model-title-row">
+                <h3>DPVO And DPV-SLAM</h3>
+                <span class="tag good">model plus backend</span>
+              </div>
+              <p><code>DPVO</code>, <code>VONet</code>, <code>Patchifier</code>, update network, correlation block, patch graph, CUDA BA/FastBA, loop closure, DBoW2, DISK/LightGlue, and DUSt3R intrinsics.</p>
+              <dl>
+                <dt>Current</dt>
+                <dd><code>dpvo</code> core, inference/evaluate APIs, demo tools, and Gradio.</dd>
+                <dt>Home</dt>
+                <dd>Keep DPVO as its own package. Treat neural VO, BA backend, and loop closure as internal nodes.</dd>
+                <dt>Surface</dt>
+                <dd>Rerun demo, Gradio, and evaluation CLIs are workflows around the core runtime.</dd>
+                <dt>Tests</dt>
+                <dd>Config/load smoke, tiny sequence trajectory schema, backend availability checks, eval fixture.</dd>
+              </dl>
+            </article>
+
+            <article class="model-card">
+              <div class="model-title-row">
+                <h3>MASt3R-SLAM</h3>
+                <span class="tag good">model plus backend</span>
+              </div>
+              <p><code>AsymmetricMASt3R</code>, frame tracker, factor graph, Sim3 Gauss-Newton, ASMK retrieval, relocalization, CUDA/Mojo kernels.</p>
+              <dl>
+                <dt>Current</dt>
+                <dd><code>mast3r_slam</code>, examples, Gradio directory, kernels, and tests.</dd>
+                <dt>Home</dt>
+                <dd>Keep as separate SLAM package. Put MASt3R matching and GN backend behind clear runtime contracts.</dd>
+                <dt>Surface</dt>
+                <dd>Multi-process SLAM lifecycle, examples, and Gradio are workflow surfaces.</dd>
+                <dt>Tests</dt>
+                <dd>Kernel tests, tiny sequence smoke, pose-graph artifact contract, relocalization fixture if feasible.</dd>
+              </dl>
+            </article>
+
+            <article class="model-card">
+              <div class="model-title-row">
+                <h3>Robocap cuVSLAM</h3>
+                <span class="tag blue">vendor runtime node</span>
+              </div>
+              <p>NVIDIA <code>cuvslam.Tracker</code>, odometry/SLAM configs, pose graph, loop closures, landmarks, and Robocap fisheye rig adapter.</p>
+              <dl>
+                <dt>Current</dt>
+                <dd><code>robocap_slam</code> with odometry and SLAM CLIs.</dd>
+                <dt>Home</dt>
+                <dd>Vendor tracker wrapper in <code>robocap-slam</code>; rig/data adapters stay separate from the tracker runtime.</dd>
+                <dt>Surface</dt>
+                <dd>Odometry CLI and full SLAM CLI are workflows over the same wrapper.</dd>
+                <dt>Tests</dt>
+                <dd>Config mapping, rig calibration loading, trajectory artifact schema, vendor availability skip behavior.</dd>
+              </dl>
+            </article>
+
+            <article class="model-card">
+              <div class="model-title-row">
+                <h3>Gaussian Splatting Renderer</h3>
+                <span class="tag blue">render node</span>
+              </div>
+              <p><code>Gaussians3D</code>, <code>RenderGaussianCloud</code>, wgpu/WGSL renderer, SH evaluation, covariance/projection, CPU culling/sorting, PLY and NeRF camera loaders, PSNR/SSIM/LPIPS.</p>
+              <dl>
+                <dt>Current</dt>
+                <dd><code>gsplat-rust-renderer</code> plus Python logging and metrics surfaces.</dd>
+                <dt>Home</dt>
+                <dd>Native render core stays isolated. Python should expose artifact IO and Rerun logging, not absorb model packages.</dd>
+                <dt>Surface</dt>
+                <dd>Viewer, render CLI, and PLY logger are app/tool surfaces.</dd>
+                <dt>Tests</dt>
+                <dd>PLY load fixture, render nonblank image, camera projection contract, metric smoke tests.</dd>
+              </dl>
+            </article>
+
+            <article class="model-card">
+              <div class="model-title-row">
+                <h3>VistaDream</h3>
+                <span class="tag warn">composite app</span>
+              </div>
+              <p>VGGT, MoGe, FLUX Fill, <code>Gaussian_Scene</code>, <code>Gaussian_Frame</code>, <code>GS_Train_Tool</code>, trajectories, COLMAP export, and older HackSD pieces.</p>
+              <dl>
+                <dt>Current</dt>
+                <dd><code>vistadream</code> mixes generative fill, geometry priors, Gaussian training, and app workflows.</dd>
+                <dt>Home</dt>
+                <dd>Treat VistaDream as an app package first. Pull reusable FLUX, geometry, and Gaussian training nodes out only after tests exist.</dd>
+                <dt>Surface</dt>
+                <dd>Single-view and multiview VistaDream flows are apps, not base model APIs.</dd>
+                <dt>Tests</dt>
+                <dd>Workflow fixture with fake nodes, export contract, training config validation, optional real smoke tests.</dd>
+              </dl>
+            </article>
+
+            <article class="model-card">
+              <div class="model-title-row">
+                <h3>Data, Catalog, And Eval Packages</h3>
+                <span class="tag">not models</span>
+              </div>
+              <p><code>pyvrs-viewer</code>, <code>egoexo-forge</code>, and <code>slam-evals</code>.</p>
+              <dl>
+                <dt>Current</dt>
+                <dd>VRS viewing/conversion, ego/exo dataset and COCO-133 projection utilities, VSLAM-LAB ingestion, RRD/catalog writers.</dd>
+                <dt>Home</dt>
+                <dd>Keep dependency-light data/eval packages. They should consume model artifacts rather than own model loading.</dd>
+                <dt>Surface</dt>
+                <dd>Viewers, catalog apps, converters, and benchmark tasks.</dd>
+                <dt>Tests</dt>
+                <dd>Reader fixtures, artifact schema tests, catalog-layer emission, no heavyweight model import at package import time.</dd>
+              </dl>
+            </article>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <caption>Boundary-crossers to clean up first</caption>
+              <thead>
+                <tr>
+                  <th>Package</th>
+                  <th>Why it feels mixed</th>
+                  <th>Refactor direction</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>monoprior</code></td>
+                  <td>Holds depth, normals, VGGT, calibration, alignment, fusion, app UIs, and demo CLIs.</td>
+                  <td>Create internal <code>depth</code>, <code>normals</code>, <code>multiview</code>, <code>geometry</code>, and <code>apps</code> boundaries before creating a physical <code>monoprior-apps</code> package.</td>
+                </tr>
+                <tr>
+                  <td><code>sam3-rerun</code></td>
+                  <td>Image predictor is clean, but video model setup repeats across batch, chunk, and stream paths.</td>
+                  <td>Centralize video runtime in one node; keep batch/chunk/stream as strategy wrappers.</td>
+                </tr>
+                <tr>
+                  <td><code>sapiens2-pose</code></td>
+                  <td>Runtime, image workflow, video workflow, SAM3 tracking, TensorRT export, Gradio, and tools live close together.</td>
+                  <td>Separate PyTorch runtime node, TensorRT runtime node, tracking helper, and image/video app workflows.</td>
+                </tr>
+                <tr>
+                  <td><code>wilor-nano</code></td>
+                  <td>Detector, keypoint model, MANO layer, all-in-one inference, Daggr, and Gradio overlap.</td>
+                  <td>Make detector and hand-pose nodes first-class; keep old all-in-one pipeline as workflow until replaced.</td>
+                </tr>
+                <tr>
+                  <td><code>mv-api</code></td>
+                  <td>Contains model-backed pose tracking and also full exo/ego app orchestration.</td>
+                  <td>Keep <code>MultiviewBodyTracker</code> as the node. Move scene prep, catalog prediction, and full exo/ego UX into workflow/app modules.</td>
+                </tr>
+                <tr>
+                  <td><code>vistadream</code></td>
+                  <td>Combines generative fill, geometry priors, Gaussian training, trajectories, and export.</td>
+                  <td>Leave it as a composite app for now. Extract only the pieces that gain a second consumer.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="model-patterns">
+        <div class="inner">
+          <h2>Model Pattern Options</h2>
+          <p>
+            The cleaner choice is one style everywhere: explicit config-driven node classes. Catalogs can list presets for CLI and Gradio, but catalogs should not become hidden runtime factories or make unrelated workflows look interchangeable.
+          </p>
+
+          <div class="callout">
+            <p>
+              <strong>No core model factories:</strong> every model node gets an explicit <code>Config</code>, explicit node class, and typed <code>Result</code>. Construction is direct or through <code>from_config(config)</code>. Package-local catalogs are declarative metadata for presets, docs, dropdowns, and CLI choices; they do not replace the explicit class API.
+            </p>
+          </div>
+
+          <h3>Simple Examples By Model Type</h3>
+          <p>
+            These names are the target shape, not a claim that every class exists today. The repeated pattern is <code>Config -> Node -> Request -> Result</code>. Catalogs can choose a preset config, but they do not construct hidden runtime objects.
+          </p>
+          <div class="example-grid" aria-label="Simple API examples by model type">
+            <article class="example-card">
+              <h3>depth</h3>
+              <pre><code>config = MogeV2MetricDepthConfig(device="cuda")
+node = MogeV2MetricDepthNode.from_config(config)
+result = node.run(DepthRequest(image=image))
+depth_map = result.depth_meters</code></pre>
+            </article>
+
+            <article class="example-card">
+              <h3>video-depth</h3>
+              <pre><code>config = VideoDepthAnythingConfig(device="cuda")
+node = VideoDepthAnythingNode.from_config(config)
+result = node.run(VideoDepthRequest(video=video))
+depth_sequence = result.depth_frames</code></pre>
+            </article>
+
+            <article class="example-card">
+              <h3>surface-normal</h3>
+              <pre><code>config = DsineNormalConfig(device="cuda")
+node = DsineNormalNode.from_config(config)
+result = node.run(NormalRequest(image=image))
+normals = result.normals_camera</code></pre>
+            </article>
+
+            <article class="example-card">
+              <h3>segmentation</h3>
+              <pre><code>config = Sam3ImageSegmentationConfig(device="cuda")
+node = Sam3ImageSegmentationNode.from_config(config)
+result = node.run(SegmentationRequest(image=image, prompt=prompt))
+masks = result.masks</code></pre>
+            </article>
+
+            <article class="example-card">
+              <h3>pose-estimation</h3>
+              <pre><code>config = SapiensPoseConfig(model_size="1b", device="cuda")
+node = SapiensPoseNode.from_config(config)
+result = node.run(PoseRequest(image=image))
+keypoints = result.keypoints_2d</code></pre>
+            </article>
+
+            <article class="example-card">
+              <h3>hand-pose</h3>
+              <pre><code>config = WilorHandPoseConfig(device="cuda")
+node = WilorHandPoseNode.from_config(config)
+result = node.run(HandPoseRequest(image=image))
+mano_mesh = result.hand_mesh</code></pre>
+            </article>
+
+            <article class="example-card">
+              <h3>multiview-geometry</h3>
+              <pre><code>config = VggtMultiviewConfig(device="cuda")
+node = VggtMultiviewGeometryNode.from_config(config)
+result = node.run(MultiviewRequest(images=images))
+cameras = result.cameras</code></pre>
+            </article>
+
+            <article class="example-card">
+              <h3>SfM</h3>
+              <pre><code>config = ColmapSfmConfig(camera_model="OPENCV")
+node = ColmapSfmNode.from_config(config)
+result = node.run(SfmRequest(image_dir=image_dir))
+reconstruction = result.reconstruction</code></pre>
+            </article>
+
+            <article class="example-card">
+              <h3>SLAM</h3>
+              <pre><code>config = DpvoSlamConfig(checkpoint=dpvo_weights)
+node = DpvoSlamNode.from_config(config)
+result = node.run(SlamRequest(video=video))
+trajectory = result.trajectory</code></pre>
+            </article>
+
+            <article class="example-card">
+              <h3>rendering</h3>
+              <pre><code>config = GaussianRendererConfig(device="cuda")
+node = GaussianRendererNode.from_config(config)
+result = node.run(RenderRequest(gaussians=cloud, camera=camera))
+image = result.rgb</code></pre>
+            </article>
+
+            <article class="example-card">
+              <h3>data/eval</h3>
+              <pre><code>config = SlamEvalDatasetConfig(name="euroc")
+node = SlamEvalDatasetNode.from_config(config)
+result = node.run(DatasetRequest(sequence="MH_01"))
+recording = result.rrd_path</code></pre>
+            </article>
+
+            <article class="example-card">
+              <h3>video/io</h3>
+              <pre><code>config = VrsVideoSourceConfig(stream="camera-rgb")
+node = VrsVideoSourceNode.from_config(config)
+result = node.run(VideoSourceRequest(path=vrs_path))
+frames = result.frames</code></pre>
+            </article>
+          </div>
+
+          <div class="tab-shell">
+            <div class="tab-list" role="tablist" aria-label="Model abstraction references">
+              <button class="tab-button" type="button" role="tab" id="tab-decision" data-pattern-tab="decision" aria-selected="true" aria-controls="panel-decision">Decision</button>
+              <button class="tab-button" type="button" role="tab" id="tab-kornia" data-pattern-tab="kornia" aria-selected="false" aria-controls="panel-kornia">Kornia</button>
+              <button class="tab-button" type="button" role="tab" id="tab-modular" data-pattern-tab="modular" aria-selected="false" aria-controls="panel-modular">Modular MAX</button>
+              <button class="tab-button" type="button" role="tab" id="tab-transformers" data-pattern-tab="transformers" aria-selected="false" aria-controls="panel-transformers">Transformers</button>
+            </div>
+
+            <div class="tab-panel" id="panel-decision" role="tabpanel" aria-labelledby="tab-decision" data-pattern-panel="decision">
+              <div class="pattern-grid">
+                <article class="card">
+                  <h3>Unified Style Decision</h3>
+                  <p>
+                    The core API is explicit. A user or app should be able to see the model family from the class name, the runtime choices from the config, and the artifact contract from the result type.
+                  </p>
+                  <pre><code>config = MogeV2MetricDepthConfig(device="cuda")
+node = MogeV2MetricDepthNode.from_config(config)
+result = node.predict(image)</code></pre>
+                  <ul class="compact-list">
+                    <li><strong>One style:</strong> explicit <code>Config</code>, explicit node class, typed <code>Result</code>.</li>
+                    <li><strong>Catalogs:</strong> metadata for presets, UI dropdowns, CLI choices, docs, and example task names.</li>
+                    <li><strong>No runtime factory:</strong> no global <code>get_model("moge-v2")</code> as the architecture.</li>
+                    <li><strong>Composition:</strong> apps wire concrete nodes together instead of asking a broad catalog for runtime objects.</li>
+                    <li><strong>Shared contracts:</strong> reuse <code>DepthResult</code>, <code>PoseResult</code>, <code>SegmentationResult</code>, etc. only when the artifact contract is truly shared.</li>
+                  </ul>
+                </article>
+
+                <div class="table-wrap">
+                  <table>
+                    <caption>Unified style by capability</caption>
+                    <thead>
+                      <tr>
+                        <th>Capability</th>
+                        <th>Core API</th>
+                        <th>Catalog use</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td><code>depth</code></td>
+                        <td><code>MogeV2MetricDepthNode(config)</code>, <code>DepthAnythingRelativeDepthNode(config)</code></td>
+                        <td>Dropdown presets such as <code>moge-v2</code>, <code>unidepth</code>, <code>depth-anything-v2</code>.</td>
+                      </tr>
+                      <tr>
+                        <td><code>video-depth</code></td>
+                        <td><code>VideoDepthAnythingNode(config)</code></td>
+                        <td>Catalog records frame rate, chunking support, memory profile, and supported input sources.</td>
+                      </tr>
+                      <tr>
+                        <td><code>surface-normal</code></td>
+                        <td><code>DsineNormalNode(config)</code>, <code>MoGeNormalNode(config)</code></td>
+                        <td>Catalog labels which normal models need local weights, HF weights, or paired depth.</td>
+                      </tr>
+                      <tr>
+                        <td><code>pose</code> / <code>hand-pose</code></td>
+                        <td><code>SapiensPoseNode(config)</code>, <code>WilorHandPoseNode(config)</code></td>
+                        <td>Catalog exposes model size, backend, detector, keypoint schema, and hardware requirements.</td>
+                      </tr>
+                      <tr>
+                        <td><code>segmentation</code></td>
+                        <td><code>Sam3ImageSegmentationNode(config)</code>, <code>Sam3VideoSegmentationNode(config)</code></td>
+                        <td>Catalog separates model identity from batch, chunk, stream, and prompt strategy options.</td>
+                      </tr>
+                      <tr>
+                        <td><code>SLAM</code></td>
+                        <td><code>DpvoSlamNode(config)</code>, <code>Mast3rSlamNode(config)</code>, <code>CuvslamNode(config)</code></td>
+                        <td>Catalog only documents datasets, required assets, output artifacts, and Pixi tasks.</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <div class="tab-panel" id="panel-kornia" role="tabpanel" aria-labelledby="tab-kornia" data-pattern-panel="kornia" hidden>
+              <div class="pattern-grid">
+                <article class="card">
+                  <h3>Kornia Pattern</h3>
+                  <p>
+                    <a href="https://github.com/kornia/kornia/tree/main/kornia/models">Kornia models</a> are organized by family: SAM, RT-DETR, depth estimation, segmentation, EfficientViT, processors, and related utilities. The useful part for this repo is the family folder, explicit model class, config object, and high-level wrapper outside the raw model family.
+                  </p>
+                  <ul class="compact-list">
+                    <li><strong>Borrow:</strong> family folders, thin public <code>__init__</code> exports, config dataclasses, model/preprocessor/postprocessor split.</li>
+                    <li><strong>Borrow:</strong> builders for complete runnable pipelines when a demo needs model plus preprocessing plus postprocessing.</li>
+                    <li><strong>Translate:</strong> Kornia-style preset constructors become package-local catalog entries here.</li>
+                    <li><strong>Avoid:</strong> inconsistent constructor names, runtime factories, and ad hoc pretrained metadata.</li>
+                    <li><strong>Best fit here:</strong> <code>monopriors/depth</code>, <code>sam3_rerun</code>, <code>wilor_nano</code>, and <code>sapiens2_pose</code>.</li>
+                  </ul>
+                </article>
+
+                <div class="table-wrap">
+                  <table>
+                    <caption>What Kornia teaches this repo</caption>
+                    <thead>
+                      <tr>
+                        <th>Area</th>
+                        <th>Takeaway</th>
+                        <th>Local translation</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td>Model families</td>
+                        <td>Use one folder per family, not one mega registry.</td>
+                        <td><code>depth/relative</code>, <code>depth/metric</code>, <code>normals</code>, <code>sam3</code>, <code>wilor</code>.</td>
+                      </tr>
+                      <tr>
+                        <td>Config</td>
+                        <td><code>from_config(config)</code> is the stable constructor.</td>
+                        <td>Every node gets a typed config and result dataclass.</td>
+                      </tr>
+                      <tr>
+                        <td>Pretrained</td>
+                        <td>Known URLs and checkpoint loaders help, but metadata can drift.</td>
+                        <td>Standardize model id, source, hash, license, input shape, output schema, and cache path.</td>
+                      </tr>
+                      <tr>
+                        <td>Tests</td>
+                        <td>Shape, dtype, config variants, postprocessors, ONNX/export smoke.</td>
+                        <td>Add cheap contract tests and mark real-weight tests as slow.</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <div class="tab-panel" id="panel-modular" role="tabpanel" aria-labelledby="tab-modular" data-pattern-panel="modular" hidden>
+              <div class="pattern-grid">
+                <article class="card">
+                  <h3>Modular MAX Pattern</h3>
+                  <p>
+                    <a href="https://docs.modular.com/max/develop/model-bringup-workflow/">MAX model bring-up</a> is strongest as a lifecycle reference: classify the model, adapt config and weights, isolate graph changes, then validate through the same runtime path. It is production LLM serving oriented, so copy the discipline, not the machinery.
+                  </p>
+                  <ul class="compact-list">
+                    <li><strong>Borrow:</strong> model introduction ladder: wrapper only, adapter only, changed component, new model package, custom kernel escape hatch.</li>
+                    <li><strong>Borrow:</strong> separate config adapter, checkpoint adapter, compute graph/model, pipeline/runtime, and architecture metadata.</li>
+                    <li><strong>Avoid:</strong> KV-cache/tokenizer/serving assumptions for normal CV demos.</li>
+                    <li><strong>Best fit here:</strong> DPVO, MASt3R-SLAM, Sapiens TensorRT, Gaussian renderer, any checkpoint-heavy model.</li>
+                  </ul>
+                </article>
+
+                <div class="table-wrap">
+                  <table>
+                    <caption>MAX bring-up translated to CV packages</caption>
+                    <thead>
+                      <tr>
+                        <th>MAX concept</th>
+                        <th>CV monorepo equivalent</th>
+                        <th>Test gate</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td>Architecture registry</td>
+                        <td>Package-local catalog metadata for curated presets and required assets.</td>
+                        <td>Duplicate id and import tests.</td>
+                      </tr>
+                      <tr>
+                        <td>Config mapping</td>
+                        <td>Typed config from HF repo, checkpoint metadata, local path, or Pixi task output.</td>
+                        <td>Config parse and validation tests.</td>
+                      </tr>
+                      <tr>
+                        <td>Weight adapter</td>
+                        <td>Checkpoint key mapping, asset resolution, TensorRT/ONNX engine path, model cache.</td>
+                        <td>Asset existence, hash, and smoke-load tests.</td>
+                      </tr>
+                      <tr>
+                        <td>Pipeline model</td>
+                        <td>Processor plus model plus postprocessor plus typed result.</td>
+                        <td>Shape/dtype contract and CLI smoke.</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <div class="tab-panel" id="panel-transformers" role="tabpanel" aria-labelledby="tab-transformers" data-pattern-panel="transformers" hidden>
+              <div class="pattern-grid">
+                <article class="card">
+                  <h3>Transformers Pattern</h3>
+                  <p>
+                    The <a href="https://transformers-community-transformers-tenets.hf.space/">Transformers tenets</a> are the clearest warning against over-abstraction: make model code readable, standardize public surfaces, keep configs and processors explicit, and avoid hiding model-specific behavior behind clever base classes.
+                  </p>
+                  <ul class="compact-list">
+                    <li><strong>Borrow:</strong> explicit design tenets, stable configs, processor/model/result split, minimal user API, compatibility tests.</li>
+                    <li><strong>Translate:</strong> <code>Auto*</code>-style discovery becomes declarative catalogs, not runtime factories.</li>
+                    <li><strong>Avoid:</strong> remote-code loading, huge global registries, runtime factories, and compatibility layers with no expiry plan.</li>
+                    <li><strong>Best fit here:</strong> model packages that need stable user-facing presets, not one-off workflows.</li>
+                  </ul>
+                </article>
+
+                <div class="table-wrap">
+                  <table>
+                    <caption>Transformers lessons without copying Transformers scale</caption>
+                    <thead>
+                      <tr>
+                        <th>Pattern</th>
+                        <th>Use here</th>
+                        <th>Constraint</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td>Config plus processor plus model</td>
+                        <td>Every node owns config, input adapter, runtime, and typed result.</td>
+                        <td>No loose kwargs as the main API.</td>
+                      </tr>
+                      <tr>
+                        <td>Auto classes / factories</td>
+                        <td>Use local catalogs for UI/CLI choices such as <code>moge-v2</code> or <code>sapiens-1b</code>.</td>
+                        <td>No global auto-discovery, hidden imports, or factory-returned runtime objects.</td>
+                      </tr>
+                      <tr>
+                        <td>Standardize, do not abstract</td>
+                        <td>Keep model-specific math in the model file; share only generic loading, config, logging, and testing helpers.</td>
+                        <td>No abstract base class that hides behavior.</td>
+                      </tr>
+                      <tr>
+                        <td>Deprecation path</td>
+                        <td>Warn first, document migration, then remove aliases in planned cleanup passes.</td>
+                        <td>No silent behavior changes.</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="mvapi-focus">
+        <div class="inner">
+          <div class="eyebrow">Focused page</div>
+          <h2>MVAPI Multi-View Pose Pipeline</h2>
+          <p>
+            MVAPI is the best package to use as the next modularity exercise because it is useful, concrete, and currently mixes several responsibilities in one model-backed stage. The goal is not to split it into many tiny files. The goal is to make each computational boundary obvious and keep image tensors on the right device until a boundary truly needs CPU data.
+          </p>
+
+          <div class="callout">
+            <p>
+              <strong>Recommended direction:</strong> treat MVAPI as an app/workflow composed from nodes. Keep <code>mv-api</code> as the package that owns the exo/ego pose application, but move the reusable pieces into explicit node contracts: scene source, calibration, pose tracking, triangulation, ego reprojection, hand refinement, and Rerun artifact logging.
+            </p>
+          </div>
+
+          <h3>Current Shape</h3>
+          <div class="flow-grid" aria-label="Current MVAPI pipeline flow">
+            <article class="flow-step">
+              <span class="step-index">1</span>
+              <h3>Scene setup</h3>
+              <p><code>ScenePreparationNode</code> calls the selected dataset config, logs the exo/ego scene shell, and returns synchronized timestamps plus Rerun log paths.</p>
+            </article>
+            <article class="flow-step">
+              <span class="step-index">2</span>
+              <h3>Camera choice</h3>
+              <p><code>run_model_backed_pipeline</code> chooses dataset cameras when available, otherwise reads calibration frames and runs <code>MultiViewCalibrator</code>.</p>
+            </article>
+            <article class="flow-step">
+              <span class="step-index">3</span>
+              <h3>Exo pose</h3>
+              <p><code>MultiviewBodyTracker</code> runs YOLOX, RTMPose, optional WiLoR, temporal extrapolation, and triangulation into COCO-133 3D keypoints.</p>
+            </article>
+            <article class="flow-step">
+              <span class="step-index">4</span>
+              <h3>Ego projection</h3>
+              <p>The same stage projects 3D keypoints into ego cameras, runs WiLoR hand refinement, logs bboxes, masks invalid points, and writes Rerun layers.</p>
+            </article>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <caption>Where responsibilities are currently bundled</caption>
+              <thead>
+                <tr>
+                  <th>Responsibility</th>
+                  <th>Current location</th>
+                  <th>Modularity issue</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Dataset/video source</td>
+                  <td><code>data/synced_videos.py</code>, SimpleCV datasets, <code>MultiVideoReader</code>, <code>TorchCodecMultiVideoReader</code></td>
+                  <td>The package can read synchronized streams, but downstream APIs mostly accept NumPy BGR frame lists.</td>
+                </tr>
+                <tr>
+                  <td>Calibration</td>
+                  <td><code>run_model_backed_pipeline</code> plus <code>MultiViewCalibrator</code></td>
+                  <td>Calibration frame sampling, RGB conversion, resize, camera scaling, point cloud logging, and mesh logging are one block.</td>
+                </tr>
+                <tr>
+                  <td>2D pose detection</td>
+                  <td><code>MultiviewBodyTracker.__call__</code></td>
+                  <td>Detection, body pose, hand refinement, selected-camera filtering, Rerun debug layers, and triangulation are coupled.</td>
+                </tr>
+                <tr>
+                  <td>3D keypoints</td>
+                  <td><code>batch_triangulate</code> inside <code>MultiviewBodyTracker</code></td>
+                  <td>The tracker returns state, not a typed per-frame result that can be tested, cached, or reused by another app.</td>
+                </tr>
+                <tr>
+                  <td>Rerun artifact logging</td>
+                  <td>Spread across scene setup, exo prediction, ego projection, calibration, and tracker debug paths</td>
+                  <td>Logging is valuable but should be a consumer of typed results, not the organizing principle of the compute path.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>Proposed Component Split</h3>
+          <div class="boundary-grid" aria-label="Proposed MVAPI component boundaries">
+            <article class="boundary-card">
+              <h3>Source node</h3>
+              <p><code>ExoEgoFrameSourceNode</code> owns dataset setup, stream sync, timestamp selection, and frame batches.</p>
+              <ul class="compact-list">
+                <li>Returns <code>FrameBatch</code> with exo frames, ego frames, timestamps, stream names, and optional camera params.</li>
+                <li>Can expose torch GPU tensors when the Rerun data loader or TorchCodec path can provide them.</li>
+              </ul>
+            </article>
+            <article class="boundary-card">
+              <h3>Calibration node</h3>
+              <p><code>MultiviewCalibrationNode</code> owns camera estimation and conversion back to native video resolution.</p>
+              <ul class="compact-list">
+                <li>Input is a small calibration batch, not the whole application config.</li>
+                <li>Result is <code>CalibrationResult</code>: exo cameras, ego cameras, optional point cloud, optional mesh.</li>
+              </ul>
+            </article>
+            <article class="boundary-card">
+              <h3>Box detector node</h3>
+              <p><code>PersonBBoxDetectorNode</code> owns only person box detection for selected exo cameras.</p>
+              <ul class="compact-list">
+                <li>Input is a torch RGB frame batch from the catalog loader.</li>
+                <li>Result is boxes, scores, labels, camera names, and timestamp. RTMPose is a separate keypoint node.</li>
+              </ul>
+            </article>
+            <article class="boundary-card">
+              <h3>Triangulation node</h3>
+              <p><code>PoseTriangulationNode</code> owns projection matrices, min-view policy, temporal state, and 3D confidence filtering.</p>
+              <ul class="compact-list">
+                <li>Input is typed 2D keypoints plus cameras.</li>
+                <li>Result is <code>Pose3DFrameResult</code> with <code>xyzc</code>, extrapolated projections, and validity masks.</li>
+              </ul>
+            </article>
+            <article class="boundary-card">
+              <h3>Ego projection node</h3>
+              <p><code>EgoPoseProjectionNode</code> owns projecting exo-fused 3D pose into ego cameras.</p>
+              <ul class="compact-list">
+                <li>Applies depth and image-bound validity masks.</li>
+                <li>Can call the hand refinement node on ego crops without depending on the full pipeline.</li>
+              </ul>
+            </article>
+            <article class="boundary-card">
+              <h3>Artifact node</h3>
+              <p><code>MVAPIRerunLogger</code> owns Rerun entity paths, annotation context, debug layers, and blueprint decisions.</p>
+              <ul class="compact-list">
+                <li>Consumes typed results from nodes.</li>
+                <li>Allows compute tests to run without initializing Rerun.</li>
+              </ul>
+            </article>
+          </div>
+
+          <h3>First Primitive Node: Person Boxes</h3>
+          <p>
+            You are right: if a node means one responsibility, then the first node is not "2D pose." It is person bounding-box detection. The catalog path should produce a torch frame batch, the box detector should return torch boxes, and a later composed stage can feed those boxes into RTMPose.
+          </p>
+
+          <div class="callout">
+            <p>
+              <strong>Correct split:</strong> <code>PersonBBoxDetectorNode</code> detects people. <code>BodyKeypoint2DNode</code> estimates keypoints inside supplied boxes. <code>CatalogPose2DStage</code> or <code>MVAPIPoseWorkflow</code> composes detector plus keypoint node plus optional hand refinement.
+            </p>
+          </div>
+
+          <div class="grid two">
+            <article class="card">
+              <h3>Person Box Request</h3>
+              <pre><code>@dataclass(slots=True)
+class PersonBBoxRequest:
+    timestamp_ns: int
+    camera_names: list[str]
+    rgb_chw: UInt8[Tensor, "n_views 3 h w"]
+
+@dataclass(slots=True)
+class PersonBBoxResult:
+    boxes_xyxy: Float32[Tensor, "n_views max_dets 4"]
+    scores: Float32[Tensor, "n_views max_dets"]
+    labels: Int[Tensor, "n_views max_dets"]
+    valid: Bool[Tensor, "n_views max_dets"]
+    timestamp_ns: int
+    camera_names: list[str]</code></pre>
+            </article>
+            <article class="card">
+              <h3>Usage From Catalog</h3>
+              <pre><code>source = CatalogExoFrameSourceNode.from_config(source_config)
+detector = PersonBBoxDetectorNode.from_config(
+    PersonBBoxDetectorConfig(model="yolox", device="cuda")
+)
+
+for frame_batch in source:
+    boxes = detector.run(
+        PersonBBoxRequest(
+            timestamp_ns=frame_batch.timestamp_ns,
+            camera_names=frame_batch.camera_names,
+            rgb_chw=frame_batch.rgb_chw,
+        )
+    )</code></pre>
+            </article>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <caption>Person box node boundary decisions</caption>
+              <thead>
+                <tr>
+                  <th>Boundary</th>
+                  <th>Decision</th>
+                  <th>Why</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Input</td>
+                  <td><code>UInt8[Tensor, "n_views 3 h w"]</code></td>
+                  <td>Matches the catalog dataloader's decoded RGB CHW direction and keeps the first interface PyTorch-first.</td>
+                </tr>
+                <tr>
+                  <td>Device</td>
+                  <td>Configured and checked at runtime, not encoded in the type</td>
+                  <td>Jaxtyping can express dtype and shape; device is a runtime property like <code>tensor.device.type</code>.</td>
+                </tr>
+                <tr>
+                  <td>Output</td>
+                  <td>Padded torch tensors plus a boolean validity mask</td>
+                  <td>Different cameras can have different detection counts; padded tensors batch cleanly for downstream nodes.</td>
+                </tr>
+                <tr>
+                  <td>Backend today</td>
+                  <td>YOLOX/RTMLib adapter hidden behind the node</td>
+                  <td>If RTMLib still requires NumPy BGR, the adapter performs that conversion locally. The public node stays torch-first.</td>
+                </tr>
+                <tr>
+                  <td>Backend later</td>
+                  <td>Torch-native detector with the same request/result</td>
+                  <td>The workflow should not change when the detector implementation changes.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>What This Is Not</h3>
+          <div class="grid three">
+            <article class="card compact">
+              <h3>Not RTMPose</h3>
+              <p>RTMPose belongs in <code>BodyKeypoint2DNode</code>, which consumes boxes and frames.</p>
+            </article>
+            <article class="card compact">
+              <h3>Not tracking</h3>
+              <p>Temporal extrapolation and box reuse belong in a tracker or workflow policy layer.</p>
+            </article>
+            <article class="card compact">
+              <h3>Not logging</h3>
+              <p>Rerun conversion and columns belong in <code>MVAPIRerunLogger</code>.</p>
+            </article>
+          </div>
+
+          <h3>Torch vs NumPy Boundary</h3>
+          <div class="grid two">
+            <article class="card">
+              <h3>Keep on GPU as long as possible</h3>
+              <p>
+                If the Rerun data loader provides GPU torch tensors, the source contract should preserve them. The pipeline can then avoid repeated <code>np.asarray</code>, BGR/RGB copies, and CPU round trips for model inference.
+              </p>
+              <pre><code>@dataclass(slots=True)
+class FrameBatch:
+    timestamp_ns: int
+    exo_rgb: UInt8[Tensor, "n_views h w 3"] | None
+    exo_bgr_np: list[UInt8[ndarray, "h w 3"]] | None
+    ego_rgb: UInt8[Tensor, "n_ego h w 3"] | None
+    cameras: CameraBatch | None</code></pre>
+            </article>
+            <article class="card">
+              <h3>Convert only at adapter edges</h3>
+              <p>
+                Some dependencies still want NumPy or CPU OpenCV arrays: RTMLib, Open3D, Rerun logging, and some SimpleCV geometry helpers. That is fine if the conversion happens in named adapters instead of being scattered through the app.
+              </p>
+              <pre><code>frames = source.next(timestamp_ns)
+boxes = person_box_node.run(frames.exo_rgb)
+pose2d = body_keypoint_node.run(frames.exo_rgb, boxes)
+pose3d = triangulation_node.run(pose2d, cameras)
+ego_uv = ego_projection_node.run(pose3d, ego_cameras)
+rerun_logger.log_frame(frames, pose2d, pose3d, ego_uv)</code></pre>
+            </article>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <caption>Boundary policy for MVAPI data types</caption>
+              <thead>
+                <tr>
+                  <th>Layer</th>
+                  <th>Preferred internal type</th>
+                  <th>Allowed conversion point</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Frame loading</td>
+                  <td><code>torch.Tensor</code> on GPU when available, otherwise typed NumPy fallback</td>
+                  <td>Only the source node decides how frames are decoded and batched.</td>
+                </tr>
+                <tr>
+                  <td>Model inference</td>
+                  <td>Backend-native tensor type: torch for torch models, NumPy only for ONNX/RTMLib adapters that require it</td>
+                  <td>Inside the model adapter node, with one helper such as <code>frames.to_rtmlib_numpy()</code>.</td>
+                </tr>
+                <tr>
+                  <td>Geometry</td>
+                  <td>One explicit choice per node. Prefer torch if projection and triangulation are part of the GPU path.</td>
+                  <td>At the triangulation/projection node boundary, not inside app orchestration.</td>
+                </tr>
+                <tr>
+                  <td>Rerun logging</td>
+                  <td>CPU arrays accepted by Rerun archetypes</td>
+                  <td>Only in <code>MVAPIRerunLogger</code>. Logging should not force the compute path to be CPU-first.</td>
+                </tr>
+                <tr>
+                  <td>Open3D fusion</td>
+                  <td>NumPy/Open3D CPU data</td>
+                  <td>Keep this in a calibration artifact adapter; do not leak it into pose tracking.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>Package Shape For This One Package</h3>
+          <pre><code>packages/mv-api/src/mv_api/
+  data/
+    exoego_source.py          # FrameBatch, CameraBatch, timestamp sync, loader adapters
+    synced_videos.py          # Generic synced MP4 dataset adapter
+  models/
+    person_boxes.py           # PersonBBoxDetectorNode and YOLOX/RTMLib adapter
+    body_keypoints_2d.py      # BodyKeypoint2DNode and RTMPose adapter
+    wilor_hands.py            # WiLoR adapter for hand crops
+  geometry/
+    calibration.py            # MultiviewCalibrationNode around VGGT/monoprior calibration
+    triangulation.py          # PoseTriangulationNode and temporal MVHistory
+    projection.py             # EgoPoseProjectionNode and image-bound/depth masking
+  artifacts/
+    rerun_logging.py          # Annotation contexts, paths, blueprints, frame logging
+    catalog_layers.py         # Catalog layer registration helpers
+  apps/
+    full_exoego_pose.py       # Wires nodes together for CLI/Gradio/catalog use
+  cli/
+    full_exoego_app.py        # Thin tyro entry point
+  gradio_ui/
+    full_exoego_pose_ui.py    # Future UI; config only, no compute logic
+  tests/
+    test_source_contract.py
+    test_calibration_contract.py
+    test_person_box_contract.py
+    test_body_keypoint_2d_contract.py
+    test_triangulation_contract.py
+    test_ego_projection_contract.py
+    test_rerun_logging_contract.py</code></pre>
+
+          <div class="callout">
+            <p>
+              <strong>First refactor slice:</strong> define the catalog <code>FrameBatch</code> contract and the <code>PersonBBoxDetectorNode</code> contract before touching RTMPose, triangulation, or logging. That lets us agree on the smallest useful torch-first node.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="target">
+        <div class="inner">
+          <h2>Target Architecture</h2>
+          <p>
+            Use a small set of explicit layers. The value is not the folder names by themselves. The value is that every layer can be replaced or tested independently.
+          </p>
+
+          <div class="flow" aria-label="Architecture flow">
+            <div class="step">
+              <div class="step-number">1</div>
+              <strong>Domain data</strong>
+              <p class="small">Typed arrays, paths, camera models, masks, depth maps, videos.</p>
+            </div>
+            <div class="step">
+              <div class="step-number">2</div>
+              <strong>Node</strong>
+              <p class="small">One model or algorithm. Real network I/O only.</p>
+            </div>
+            <div class="step">
+              <div class="step-number">3</div>
+              <strong>Result</strong>
+              <p class="small">Typed output dataclass with no UI assumptions.</p>
+            </div>
+            <div class="step">
+              <div class="step-number">4</div>
+              <strong>Rerun adapter</strong>
+              <p class="small">Blueprints and final result logging.</p>
+            </div>
+            <div class="step">
+              <div class="step-number">5</div>
+              <strong>CLI or Gradio</strong>
+              <p class="small">Path loading, widget config, streaming.</p>
+            </div>
+            <div class="step">
+              <div class="step-number">6</div>
+              <strong>App</strong>
+              <p class="small">User workflow that composes nodes.</p>
+            </div>
+          </div>
+
+          <div class="grid two">
+            <article class="card">
+              <h3>VGGT calibration as the reference split</h3>
+              <pre>shared_images
+  -> VGGT geometry
+  -> SAM3 people masks
+  -> Metric depth
+  -> Depth alignment
+  -> Fusion
+  -> Calibration app</pre>
+              <p>
+                VGGT is a multiview node because the model sees all views jointly. SAM3 and metric depth stay single-image nodes because that is their actual model contract. Alignment and fusion are generic utility nodes.
+              </p>
+            </article>
+            <article class="card">
+              <h3>Config categories</h3>
+              <ul class="list">
+                <li><strong>Model-loading:</strong> checkpoint, model name, device, precision. Cache key.</li>
+                <li><strong>Runtime:</strong> thresholds, prompts, frame counts, verbose. Per request.</li>
+                <li><strong>Input:</strong> paths, uploads, selected examples. Adapter-owned.</li>
+                <li><strong>Rerun:</strong> save/connect/spawn, blueprint policy. CLI/app-owned.</li>
+                <li><strong>UI-only:</strong> selected tab, status text, examples. Never part of core config.</li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="callout">
+            <p>
+              <strong>Shared abstraction should be small:</strong> create a tiny monorepo helper package only for launcher and Rerun/Gradio session glue. Keep model factories, CV math, and package-specific data loading out of it. If a helper is broadly useful outside this monorepo, move it to <code>simplecv</code> instead.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="migration">
+        <div class="inner">
+          <h2>Migration Plan</h2>
+          <p>
+            The safest path is not a repo-wide rename. It is a sequence of characterization tests, one reference node, one workflow split, then mechanical normalization.
+          </p>
+
+          <div class="grid three">
+            <article class="card">
+              <span class="tag warn">Phase 1</span>
+              <h3>Codify the contract</h3>
+              <ul class="list">
+                <li>Update create-node to require <code>log_result</code> and test tiers.</li>
+                <li>Add a short <code>docs/node_contract.md</code> at repo root.</li>
+                <li>Define accepted names: <code>api</code>, <code>gradio_ui</code>, <code>tools</code>, <code>nodes</code>, <code>apps</code>.</li>
+                <li>Fix Pixi pip tasks by making build/upload deps Pixi-managed.</li>
+              </ul>
+            </article>
+            <article class="card">
+              <span class="tag warn">Phase 2</span>
+              <h3>Make one reference node complete</h3>
+              <ul class="list">
+                <li>Use <code>pysfm</code> video-to-image as the low-risk reference.</li>
+                <li>Add missing <code>log_video_to_image_result()</code>.</li>
+                <li>Add import, API, Rerun stream, CLI tests.</li>
+                <li>Use it to update the create-node templates.</li>
+              </ul>
+            </article>
+            <article class="card">
+              <span class="tag warn">Phase 3</span>
+              <h3>Decompose VGGT calibration</h3>
+              <ul class="list">
+                <li>Extract VGGT geometry config shared by inference and calibration.</li>
+                <li>Wrap SAM3 as a reusable single-image segmentation node.</li>
+                <li>Extract metric depth, alignment, and fusion nodes.</li>
+                <li>Keep the current calibration app as an orchestrator during migration.</li>
+              </ul>
+            </article>
+            <article class="card">
+              <span class="tag warn">Phase 4</span>
+              <h3>Normalize easy package shapes</h3>
+              <ul class="list">
+                <li>Move <code>sam3d-body-rerun/tool</code> to <code>tools</code> with Pixi task updates.</li>
+                <li>Rename <code>mast3r_slam/gradio</code> to <code>gradio_ui</code> only after import shims or references are handled.</li>
+                <li>Remove <code>tools*</code> from installable package discovery unless there is a concrete reason.</li>
+              </ul>
+            </article>
+            <article class="card">
+              <span class="tag warn">Phase 5</span>
+              <h3>Extract shared glue</h3>
+              <ul class="list">
+                <li>Rerun streaming helper for <code>RecordingStream</code>, binary stream, and early blueprint yield.</li>
+                <li>Gradio launcher helper for queue/launch defaults.</li>
+                <li>Example data helper for static paths and idempotent downloads.</li>
+                <li>Keep helpers dependency-light and test them directly.</li>
+              </ul>
+            </article>
+            <article class="card">
+              <span class="tag warn">Phase 6</span>
+              <h3>Raise the baseline</h3>
+              <ul class="list">
+                <li>Every new node gets T0 import and T1 API tests.</li>
+                <li>Nodes with Rerun get a non-empty stream/RRD check.</li>
+                <li>Public CLIs get one subprocess smoke test.</li>
+                <li>Gradio E2E only for high-value workflows.</li>
+              </ul>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="risks">
+        <div class="inner">
+          <h2>Pros, Cons, And Guardrails</h2>
+          <div class="grid two">
+            <article class="card">
+              <h3>Pros</h3>
+              <ul class="list">
+                <li>Every capability becomes importable, scriptable, and demoable through the same core code.</li>
+                <li>Rerun output is no longer duplicated between CLI and Gradio.</li>
+                <li>Gradio apps become orchestration layers instead of hidden model wrappers.</li>
+                <li>Tests can target stable contracts instead of UI internals.</li>
+                <li>Pixi stays conservative while the code becomes ready for future package-local workflows.</li>
+              </ul>
+            </article>
+            <article class="card">
+              <h3>Cons</h3>
+              <ul class="list">
+                <li>Initial migration is real work, especially for large API files that grew organically.</li>
+                <li>A shared helper package can become a dumping ground if its boundary is not enforced.</li>
+                <li>Gradio singleton caches require clear model-config versus runtime-config separation.</li>
+                <li>Daggr serialization boundaries are still immature compared with typed Python dataclasses.</li>
+                <li>Too many tiny files can hurt readability if split before a second user exists.</li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <caption>Decision guardrails</caption>
+              <thead>
+                <tr>
+                  <th>Question</th>
+                  <th>Answer</th>
+                  <th>Why</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Should every package move to <code>src/</code> immediately?</td>
+                  <td>No</td>
+                  <td>Layout normalization is lower value than API/UI/Rerun contract normalization. Do it when touching a package.</td>
+                </tr>
+                <tr>
+                  <td>Should every demo be a node?</td>
+                  <td>No</td>
+                  <td>Nodes are reusable units. Apps and one-off conversion tools can stay as apps or CLIs.</td>
+                </tr>
+                <tr>
+                  <td>Should Gradio config mutate global state?</td>
+                  <td>Only model cache state</td>
+                  <td>Runtime settings should be per request to avoid cross-session bleed.</td>
+                </tr>
+                <tr>
+                  <td>Should Pixi tasks move into package pyprojects?</td>
+                  <td>Not yet</td>
+                  <td>Pixi's package/dev task workflow is still changing. Keep root Pixi canonical.</td>
+                </tr>
+                <tr>
+                  <td>Should Daggr drive the architecture?</td>
+                  <td>No, but support it</td>
+                  <td>Typed NodeSpec should be primary. Serialize at Gradio/Daggr boundaries.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="callout">
+            <p>
+              <strong>Pragmatic endpoint:</strong> when someone adds a new capability, they should know exactly where to put computation, config, result types, Rerun logging, CLI, Gradio widgets, examples, Pixi tasks, and tests. That is the modularity win.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="sources">
+        <div class="inner">
+          <h2>Sources And Local Files</h2>
+          <p>
+            This artifact combines local repo inspection, subagent summaries, and primary external references.
+          </p>
+
+          <div class="grid two">
+            <article class="card">
+              <h3>Primary external references</h3>
+              <ul class="source-list">
+                <li><a href="https://github.com/prefix-dev/pixi/discussions/4956">Pixi discussion #4956</a> - pypi + conda deps monorepo best practices.</li>
+                <li><a href="https://github.com/prefix-dev/pixi/issues/4721">Pixi issue #4721</a> - development dependencies from Pixi packages.</li>
+                <li><a href="https://pixi.prefix.dev/latest/build/getting_started/">Pixi build getting started</a> - pixi-build preview and limitations.</li>
+                <li><a href="https://pixi.prefix.dev/latest/build/workspace/">Pixi multiple packages in workspace</a> - current multi-package docs.</li>
+                <li><a href="https://github.com/kornia/kornia">kornia/kornia</a> - Python-first CV library reference.</li>
+                <li><a href="https://github.com/kornia/kornia/tree/main/kornia/models">kornia/models</a> - family-oriented model package reference.</li>
+                <li><a href="https://github.com/kornia/kornia-rs">kornia/kornia-rs</a> - Rust workspace, examples, bindings reference.</li>
+                <li><a href="https://docs.modular.com/max/develop/model-bringup-workflow/">MAX model bring-up workflow</a> - model lifecycle and adapter reference.</li>
+                <li><a href="https://docs.modular.com/max/develop/">MAX model development overview</a> - architecture components and boundaries.</li>
+                <li><a href="https://transformers-community-transformers-tenets.hf.space/">Transformers tenets</a> - model library maintainability principles.</li>
+                <li><a href="https://huggingface.co/blog/transformers-v5">Transformers v5 blog</a> - model definitions and inference direction.</li>
+                <li><a href="https://github.com/huggingface/transformers/releases/tag/v5.0.0">Transformers v5.0.0 release notes</a> - compatibility and API cleanup reference.</li>
+                <li><a href="https://github.com/pablovela5620/my-skill-forge/blob/main/recipes/create-node/SKILL.md">create-node skill on GitHub</a> - node abstraction source.</li>
+              </ul>
+            </article>
+            <article class="card">
+              <h3>Local references</h3>
+              <ul class="source-list">
+                <li><code>README.md</code> - package and Pixi workspace overview.</li>
+                <li><code>AGENTS.md</code> - repo policy and gotchas.</li>
+                <li><code>pixi.toml</code> - workspace dependencies, features, tasks, environments.</li>
+                <li><code>pyrefly.toml</code> - monorepo-wide type-check source roots.</li>
+                <li><code>packages/monoprior/docs/app_architecture.md</code> - current CLI/Gradio/Rerun layering.</li>
+                <li><code>packages/monoprior/docs/node_decomposition_plan.md</code> - VGGT calibration decomposition plan.</li>
+                <li><code>packages/pysfm/pysfm/apis/video_to_image.py</code> - current class-based node reference.</li>
+                <li><code>/home/pablo/0Dev/personal/my-skill-forge/recipes/create-node/SKILL.md</code> - local create-node source.</li>
+              </ul>
+            </article>
+          </div>
+
+          <p class="print-note small">
+            Printed copy generated from the local file <code>monorepo-modularity-presentation.html</code>.
+          </p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    const search = document.querySelector("#packageSearch");
+    const rows = Array.from(document.querySelectorAll("#packageRows tr"));
+    const filterButtons = Array.from(document.querySelectorAll("[data-filter]"));
+    let activeFilter = "all";
+
+    function applyFilters() {
+      const query = (search.value || "").trim().toLowerCase();
+      rows.forEach((row) => {
+        const kind = row.dataset.kind || "";
+        const text = `${row.dataset.text || ""} ${row.textContent || ""}`.toLowerCase();
+        const matchesFilter = activeFilter === "all" || kind.includes(activeFilter);
+        const matchesSearch = query === "" || text.includes(query);
+        row.hidden = !(matchesFilter && matchesSearch);
+      });
+    }
+
+    filterButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        activeFilter = button.dataset.filter || "all";
+        filterButtons.forEach((candidate) => {
+          candidate.setAttribute("aria-pressed", String(candidate === button));
+        });
+        applyFilters();
+      });
+    });
+
+    search.addEventListener("input", applyFilters);
+
+    const patternTabs = Array.from(document.querySelectorAll("[data-pattern-tab]"));
+    const patternPanels = Array.from(document.querySelectorAll("[data-pattern-panel]"));
+
+    function activatePatternTab(tabName) {
+      patternTabs.forEach((button) => {
+        const selected = button.dataset.patternTab === tabName;
+        button.setAttribute("aria-selected", String(selected));
+      });
+      patternPanels.forEach((panel) => {
+        panel.hidden = panel.dataset.patternPanel !== tabName;
+      });
+    }
+
+    patternTabs.forEach((button) => {
+      button.addEventListener("click", () => {
+        activatePatternTab(button.dataset.patternTab || "decision");
+      });
+    });
+  </script>
+</body>
+</html>

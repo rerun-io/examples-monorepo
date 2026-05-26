@@ -1,15 +1,29 @@
 import os
 from pathlib import Path
+from typing import TypedDict, cast
 
 import numpy as np
 import roma
 import torch
 from jaxtyping import Float
+from simplecv.ops.mano.mano_torch import ManoSimpleLayer
 from torch import Tensor, nn
 
-from wilor_nano.mano_pytorch_simple import ManoSimpleLayer
 from wilor_nano.models.refinement_net import RefineNet, RefineNetOutput
 from wilor_nano.models.vit import vit
+
+ManoOutput = tuple[Float[Tensor, "b n_verts=778 3"], Float[Tensor, "b joints_and_tips=21 3"]]
+
+
+class WiLorOutput(TypedDict):
+    """Final WiLor model output after MANO decoding."""
+
+    global_orient: Float[Tensor, "b 1 3"]
+    hand_pose: Float[Tensor, "b 15 3"]
+    betas: Float[Tensor, "b 10"]
+    pred_cam: Float[Tensor, "b 3"]
+    pred_keypoints_3d: Float[Tensor, "b joints_and_tips=21 3"]
+    pred_vertices: Float[Tensor, "b n_verts=778 3"]
 
 
 class WiLor(nn.Module):
@@ -31,7 +45,7 @@ class WiLor(nn.Module):
         self.IMAGE_MEAN = torch.from_numpy(np.array([0.485, 0.456, 0.406]).reshape(1, 1, 1, 3))
         self.IMAGE_STD = torch.from_numpy(np.array([0.229, 0.224, 0.225])).reshape(1, 1, 1, 3)
 
-    def forward(self, x: Float[Tensor, "b h=256 w=256 3"]) -> RefineNetOutput:
+    def forward(self, x: Float[Tensor, "b h=256 w=256 3"]) -> WiLorOutput:
         x = x.flip(dims=[-1]) / 255.0
         x = (x - self.IMAGE_MEAN.to(x.device, dtype=x.dtype)) / self.IMAGE_STD.to(x.device, dtype=x.dtype)
         x = x.permute(0, 3, 1, 2)
@@ -60,8 +74,8 @@ class WiLor(nn.Module):
         temp_betas: Float[Tensor, "b n_betas=10"] = temp_mano_params["betas"]
         temp_trans: Float[Tensor, "b dim=3"] = torch.zeros(batch_size, 3, device=x.device, dtype=x.dtype)
 
-        temp_mano_output: tuple[Float[Tensor, "b n_verts=778 3"], Float[Tensor, "b joints_and_tips=21 3"]] = (
-            self.mano.forward(th_pose_coeffs=temp_pose_coeffs, th_betas=temp_betas, th_trans=temp_trans)
+        temp_mano_output: ManoOutput = self.mano.forward(
+            th_pose_coeffs=temp_pose_coeffs, th_betas=temp_betas, th_trans=temp_trans
         )
         temp_vertices = temp_mano_output[0].to(x.device, dtype=x.dtype) / 1000
 
@@ -83,14 +97,15 @@ class WiLor(nn.Module):
         # https://chatgpt.com/share/68ae1c26-20e0-8008-ba27-fc4a8e4a4ad1
         final_trans: Float[Tensor, "b dim=3"] = torch.zeros(batch_size, 3, device=x.device, dtype=x.dtype)
 
-        final_mano_output: tuple[Float[Tensor, "b n_verts=778 3"], Float[Tensor, "b joints_and_tips=21 3"]] = (
-            self.mano.forward(th_pose_coeffs=final_pose_coeffs, th_betas=final_betas, th_trans=final_trans)
+        final_mano_output: ManoOutput = self.mano.forward(
+            th_pose_coeffs=final_pose_coeffs, th_betas=final_betas, th_trans=final_trans
         )
         pred_keypoints_3d = final_mano_output[1] / 1000
         pred_vertices = final_mano_output[0] / 1000
 
-        pred_mano_params["pred_keypoints_3d"] = pred_keypoints_3d.reshape(batch_size, -1, 3)
-        pred_mano_params["pred_vertices"] = pred_vertices.reshape(batch_size, -1, 3)
-        pred_mano_params["global_orient"] = roma.rotmat_to_rotvec(pred_mano_params["global_orient"])
-        pred_mano_params["hand_pose"] = roma.rotmat_to_rotvec(pred_mano_params["hand_pose"])
-        return pred_mano_params
+        pred_mano_output: WiLorOutput = cast(WiLorOutput, pred_mano_params)
+        pred_mano_output["pred_keypoints_3d"] = pred_keypoints_3d.reshape(batch_size, -1, 3)
+        pred_mano_output["pred_vertices"] = pred_vertices.reshape(batch_size, -1, 3)
+        pred_mano_output["global_orient"] = roma.rotmat_to_rotvec(pred_mano_params["global_orient"])
+        pred_mano_output["hand_pose"] = roma.rotmat_to_rotvec(pred_mano_params["hand_pose"])
+        return cast(WiLorOutput, pred_mano_output)

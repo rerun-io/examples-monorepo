@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # @Time    : 2024/10/14
 # @Author  : wenshao
 # @Project : WiLoR-mini
@@ -11,13 +10,12 @@ pip install pyrender
 """
 
 import os
-import pdb
 import time
 
-import trimesh
-import pyrender
 import numpy as np
+import pyrender
 import torch
+import trimesh
 
 
 def create_raymond_lights():
@@ -29,7 +27,7 @@ def create_raymond_lights():
 
     nodes = []
 
-    for phi, theta in zip(phis, thetas):
+    for phi, theta in zip(phis, thetas, strict=True):
         xp = np.sin(theta) * np.cos(phi)
         yp = np.sin(theta) * np.sin(phi)
         zp = np.cos(theta)
@@ -58,7 +56,7 @@ def get_light_poses(n_lights=5, elevation=np.pi / 3, dist=12):
     phis = 2 * np.pi * np.arange(n_lights) / n_lights
     poses = []
     trans = make_translation(torch.tensor([0, 0, dist]))
-    for phi, theta in zip(phis, thetas):
+    for phi, theta in zip(phis, thetas, strict=True):
         rot = make_rotation(rx=-theta, ry=phi, order="xyz")
         poses.append((rot @ trans).numpy())
     return poses
@@ -84,6 +82,8 @@ def make_rotation(rx=0, ry=0, rz=0, order="xyz"):
         R = Rx @ Ry @ Rz
     elif order == "zxy":
         R = Ry @ Rx @ Rz
+    else:
+        raise ValueError(f"Unsupported rotation order: {order}")
     return make_4x4_pose(R, torch.zeros(3))
 
 
@@ -138,7 +138,7 @@ def rotz(theta):
 
 class Renderer:
 
-    def __init__(self, faces: np.array):
+    def __init__(self, faces: np.ndarray):
         """
         Wrapper around the pyrender renderer to render MANO meshes.
         Args:
@@ -166,11 +166,12 @@ class Renderer:
         self.faces_left = self.faces[:, [0, 2, 1]]
 
     def vertices_to_trimesh(self, vertices, camera_translation, mesh_base_color=(1.0, 1.0, 0.9),
-                            rot_axis=[1, 0, 0], rot_angle=0, is_right=1):
+                            rot_axis=None, rot_angle=0, is_right=1):
         # material = pyrender.MetallicRoughnessMaterial(
         #     metallicFactor=0.0,
         #     alphaMode='OPAQUE',
         #     baseColorFactor=(*mesh_base_color, 1.0))
+        rot_axis = [1, 0, 0] if rot_axis is None else rot_axis
         vertex_colors = np.array([(*mesh_base_color, 1.0)] * vertices.shape[0])
         if is_right:
             mesh = trimesh.Trimesh(vertices.copy() + camera_translation, self.faces.copy(), vertex_colors=vertex_colors)
@@ -190,20 +191,22 @@ class Renderer:
 
     def render_rgba(
             self,
-            vertices: np.array,
+            vertices: np.ndarray,
             cam_t=None,
             rot=None,
-            rot_axis=[1, 0, 0],
+            rot_axis=None,
             rot_angle=0,
             camera_z=3,
             # camera_translation: np.array,
             mesh_base_color=(1.0, 1.0, 0.9),
             scene_bg_color=(0, 0, 0),
-            render_res=[256, 256],
+            render_res=None,
             focal_length=None,
             is_right=None,
     ):
 
+        rot_axis = [1, 0, 0] if rot_axis is None else rot_axis
+        render_res = [256, 256] if render_res is None else render_res
         renderer = pyrender.OffscreenRenderer(viewport_width=render_res[0],
                                               viewport_height=render_res[1],
                                               point_size=1.0)
@@ -216,6 +219,8 @@ class Renderer:
             camera_translation = cam_t.copy()
             camera_translation[0] *= -1.
         else:
+            if focal_length is None:
+                raise ValueError("focal_length is required when cam_t is not provided")
             camera_translation = np.array([0, 0, camera_z * focal_length / render_res[1]])
         if is_right:
             mesh_base_color = mesh_base_color[::-1]
@@ -244,14 +249,15 @@ class Renderer:
         for node in light_nodes:
             scene.add_node(node)
 
-        color, rend_depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
+        color, _rend_depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
         color = color.astype(np.float32) / 255.0
         renderer.delete()
 
         return color
 
-    def add_lighting(self, scene, cam_node, color=np.ones(3), intensity=1.0):
+    def add_lighting(self, scene, cam_node, color=None, intensity=1.0):
         # from phalp.visualize.py_renderer import get_light_poses
+        color = np.ones(3) if color is None else color
         light_poses = get_light_poses()
         light_poses.append(np.eye(4))
         cam_pose = scene.get_pose(cam_node)
@@ -266,8 +272,9 @@ class Renderer:
                 continue
             scene.add_node(node)
 
-    def add_point_lighting(self, scene, cam_node, color=np.ones(3), intensity=1.0):
+    def add_point_lighting(self, scene, cam_node, color=None, intensity=1.0):
         # from phalp.visualize.py_renderer import get_light_poses
+        color = np.ones(3) if color is None else color
         light_poses = get_light_poses(dist=0.5)
         light_poses.append(np.eye(4))
         cam_pose = scene.get_pose(cam_node)
@@ -290,10 +297,10 @@ class Renderer:
 
 def test_wilor_image_pipeline():
     import cv2
-    import torch
     import numpy as np
-    import os
-    from wilor_mini.pipelines.wilor_hand_pose3d_estimation_pipeline import WiLorHandPose3dEstimationPipeline
+    import torch
+
+    from wilor_nano.pipelines.wilor_hand_pose3d_estimation_pipeline import WiLorHandPose3dEstimationPipeline
 
     LIGHT_PURPLE = (0.25098039, 0.274117647, 0.65882353)
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -302,6 +309,7 @@ def test_wilor_image_pipeline():
     pipe = WiLorHandPose3dEstimationPipeline(device=device, dtype=dtype, verbose=False)
     img_path = "assets/img.png"
     image = cv2.imread(img_path)
+    assert image is not None
     for _ in range(20):
         t0 = time.time()
         outputs = pipe.predict(image)
@@ -309,7 +317,8 @@ def test_wilor_image_pipeline():
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     save_dir = "./results"
     os.makedirs(save_dir, exist_ok=True)
-    renderer = Renderer(pipe.wilor_model.mano.faces)
+    mano_faces = getattr(pipe.wilor_model.mano, "th_faces").cpu().numpy()  # noqa: B009
+    renderer = Renderer(mano_faces)
 
     render_image = image.copy()
     render_image = render_image.astype(np.float32)[:, :, ::-1] / 255.0
@@ -348,10 +357,10 @@ def test_wilor_image_pipeline():
 
 def test_wilor_video_pipeline():
     import cv2
-    import torch
     import numpy as np
-    import os
-    from wilor_mini.pipelines.wilor_hand_pose3d_estimation_pipeline import WiLorHandPose3dEstimationPipeline
+    import torch
+
+    from wilor_nano.pipelines.wilor_hand_pose3d_estimation_pipeline import WiLorHandPose3dEstimationPipeline
 
     LIGHT_PURPLE = (0.25098039, 0.274117647, 0.65882353)
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -361,7 +370,8 @@ def test_wilor_video_pipeline():
     video_path = "assets/video.mp4"
     save_dir = "./results"
     os.makedirs(save_dir, exist_ok=True)
-    renderer = Renderer(pipe.wilor_model.mano.faces)
+    mano_faces = getattr(pipe.wilor_model.mano, "th_faces").cpu().numpy()  # noqa: B009
+    renderer = Renderer(mano_faces)
 
     # Open the video file
     cap = cv2.VideoCapture(video_path)
@@ -373,7 +383,7 @@ def test_wilor_video_pipeline():
 
     # Create VideoWriter object
     output_path = os.path.join(save_dir, os.path.basename(video_path))
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    fourcc = getattr(cv2, "VideoWriter_fourcc")(*'mp4v')  # noqa: B009
     vout = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
     frame_count = 0
@@ -390,7 +400,7 @@ def test_wilor_video_pipeline():
         render_image = image.copy()
         render_image = render_image.astype(np.float32)[:, :, ::-1] / 255.0
 
-        for i, out in enumerate(outputs):
+        for out in outputs:
             verts = out["wilor_preds"]['pred_vertices'][0]
             is_right = out['is_right']
             cam_t = out["wilor_preds"]['pred_cam_t_full'][0]

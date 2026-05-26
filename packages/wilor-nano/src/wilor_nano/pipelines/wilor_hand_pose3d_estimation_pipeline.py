@@ -1,17 +1,19 @@
 from pathlib import Path
-from typing import NotRequired, TypedDict
+from typing import Any, NotRequired, TypedDict, cast
 
 import cv2
 import numpy as np
 import torch
 from huggingface_hub import hf_hub_download
 from jaxtyping import Float, Int, Num, UInt8
+from numpy import ndarray
 from skimage.filters import gaussian
+from torch import Tensor
 from tqdm import tqdm
 from ultralytics import YOLO
 from ultralytics.engine.results import Results
 
-from wilor_nano.models.wilor import WiLor
+from wilor_nano.models.wilor import WiLor, WiLorOutput
 from wilor_nano.utils import utils
 
 
@@ -23,15 +25,15 @@ class WilorPreds(TypedDict):
     are extracted per-hand after batched inference.
     """
 
-    pred_cam: Float[np.ndarray, "1 3"]
-    global_orient: Float[np.ndarray, "1 1 3"]
-    hand_pose: Float[np.ndarray, "1 15 3"]
-    betas: Float[np.ndarray, "1 10"]
-    pred_keypoints_3d: Float[np.ndarray, "1 n_joints=21 3"]
-    pred_vertices: Float[np.ndarray, "1 n_verts=778 3"]
-    pred_cam_t_full: Float[np.ndarray, "1 3"]
+    pred_cam: Float[ndarray, "1 3"]
+    global_orient: Float[ndarray, "1 1 3"]
+    hand_pose: Float[ndarray, "1 15 3"]
+    betas: Float[ndarray, "1 10"]
+    pred_keypoints_3d: Float[ndarray, "1 n_joints=21 3"]
+    pred_vertices: Float[ndarray, "1 n_verts=778 3"]
+    pred_cam_t_full: Float[ndarray, "1 3"]
     scaled_focal_length: float
-    pred_keypoints_2d: Float[np.ndarray, "1 n_joints=21 2"]
+    pred_keypoints_2d: Float[ndarray, "1 n_joints=21 2"]
 
 
 class Detection(TypedDict, total=False):
@@ -118,7 +120,7 @@ class WiLorHandPose3dEstimationPipeline:
     @torch.no_grad()
     def predict(
         self,
-        rgb_hw3: UInt8[np.ndarray, "h w 3"],
+        rgb_hw3: UInt8[ndarray, "h w 3"],
         hand_conf: float = 0.3,
         rescale_factor: float = 2.5,
     ) -> list[Detection]:
@@ -128,20 +130,21 @@ class WiLorHandPose3dEstimationPipeline:
         bbox_list: list[list[float]] = []
         is_rights: list[int] = []
         for det in detections:
-            hand_bbox: Float[np.ndarray, "6"] = det.boxes.data.cpu().detach().squeeze().numpy()
-            is_rights.append(int(det.boxes.cls.cpu().detach().squeeze().item()))
+            boxes = cast(Any, det.boxes)
+            hand_bbox: Float[ndarray, "6"] = boxes.data.cpu().detach().squeeze().numpy()
+            is_rights.append(int(boxes.cls.cpu().detach().squeeze().item()))
             bbox_list.append(hand_bbox[:4].tolist())
             detect_rets.append({"hand_bbox": bbox_list[-1], "is_right": is_rights[-1]})
 
         if len(bbox_list) == 0:
             return detect_rets
 
-        bboxes: Float[np.ndarray, "n 4"] = np.stack(bbox_list)
+        bboxes: Float[ndarray, "n 4"] = np.stack(bbox_list)
 
-        center: Float[np.ndarray, "n 2"] = (bboxes[:, 2:4] + bboxes[:, 0:2]) / 2.0
-        scale: Float[np.ndarray, "n 2"] = rescale_factor * (bboxes[:, 2:4] - bboxes[:, 0:2])
-        img_patches_list: list[np.ndarray] = []
-        img_size: Int[np.ndarray, "2"] = np.array([rgb_hw3.shape[1], rgb_hw3.shape[0]])
+        center: Float[ndarray, "n 2"] = (bboxes[:, 2:4] + bboxes[:, 0:2]) / 2.0
+        scale: Float[ndarray, "n 2"] = rescale_factor * (bboxes[:, 2:4] - bboxes[:, 0:2])
+        img_patches_list: list[ndarray] = []
+        img_size: Int[ndarray, "2"] = np.array([rgb_hw3.shape[1], rgb_hw3.shape[0]])
         for i in tqdm(range(bboxes.shape[0]), disable=not self.verbose):
             bbox_size = scale[i].max()
             patch_width = patch_height = self.IMAGE_SIZE
@@ -149,7 +152,7 @@ class WiLorHandPose3dEstimationPipeline:
             flip: bool = right == 0
             box_center = center[i]
 
-            cvimg: UInt8[np.ndarray, "h w 3"] = rgb_hw3.copy()
+            cvimg: UInt8[ndarray, "h w 3"] = rgb_hw3.copy()
             # Blur image to avoid aliasing artifacts
             downsampling_factor = (bbox_size * 1.0) / patch_width
             downsampling_factor = downsampling_factor / 2.0
@@ -170,10 +173,19 @@ class WiLorHandPose3dEstimationPipeline:
                 border_mode=cv2.BORDER_CONSTANT,
             )
             img_patches_list.append(img_patch_cv)
-        img_patches: Num[np.ndarray, "n 256 256 3"] = np.stack(img_patches_list)
-        img_patches = torch.from_numpy(img_patches).to(device=self.device, dtype=self.dtype)
-        wilor_output = self.wilor_model(img_patches)
-        wilor_output = {k: v.cpu().float().numpy() for k, v in wilor_output.items()}
+        img_patches_np: Num[ndarray, "n 256 256 3"] = np.stack(img_patches_list)
+        img_patches: Float[Tensor, "n 256 256 3"] = torch.from_numpy(img_patches_np).to(
+            device=self.device, dtype=self.dtype
+        )
+        wilor_output_raw: WiLorOutput = self.wilor_model(img_patches)
+        wilor_output: dict[str, ndarray] = {
+            "global_orient": wilor_output_raw["global_orient"].cpu().float().numpy(),
+            "hand_pose": wilor_output_raw["hand_pose"].cpu().float().numpy(),
+            "betas": wilor_output_raw["betas"].cpu().float().numpy(),
+            "pred_cam": wilor_output_raw["pred_cam"].cpu().float().numpy(),
+            "pred_keypoints_3d": wilor_output_raw["pred_keypoints_3d"].cpu().float().numpy(),
+            "pred_vertices": wilor_output_raw["pred_vertices"].cpu().float().numpy(),
+        }
 
         for i in range(len(detect_rets)):
             wilor_output_i = {key: val[[i]] for key, val in wilor_output.items()}
@@ -198,7 +210,7 @@ class WiLorHandPose3dEstimationPipeline:
             )
             wilor_output_i["pred_cam_t_full"] = pred_cam_t_full
             wilor_output_i["scaled_focal_length"] = scaled_focal_length
-            pred_keypoints_2d: Float[np.ndarray, "1 21 2"] = utils.perspective_projection(
+            pred_keypoints_2d: Float[ndarray, "1 21 2"] = utils.perspective_projection(
                 wilor_output_i["pred_keypoints_3d"],
                 translation=pred_cam_t_full,
                 focal_length=np.array([scaled_focal_length] * 2)[None],
@@ -212,9 +224,9 @@ class WiLorHandPose3dEstimationPipeline:
     @torch.no_grad()
     def predict_with_bboxes(
         self,
-        image: UInt8[np.ndarray, "h w 3"],
-        bboxes: Float[np.ndarray, "n 4"],
-        is_rights: Int[np.ndarray, "n"],
+        image: UInt8[ndarray, "h w 3"],
+        bboxes: Float[ndarray, "n 4"],
+        is_rights: Int[ndarray, "n"],
         **kwargs,
     ) -> list[Detection]:
         detect_rets: list[Detection] = []
@@ -223,10 +235,10 @@ class WiLorHandPose3dEstimationPipeline:
         for i in range(bboxes.shape[0]):
             detect_rets.append({"hand_bbox": bboxes[i, :4].tolist(), "is_right": is_rights[i]})
         rescale_factor = kwargs.get("rescale_factor", 2.5)
-        center: Float[np.ndarray, "n 2"] = (bboxes[:, 2:4] + bboxes[:, 0:2]) / 2.0
-        scale: Float[np.ndarray, "n 2"] = rescale_factor * (bboxes[:, 2:4] - bboxes[:, 0:2])
-        img_patches_list: list[np.ndarray] = []
-        img_size: Int[np.ndarray, "2"] = np.array([image.shape[1], image.shape[0]])
+        center: Float[ndarray, "n 2"] = (bboxes[:, 2:4] + bboxes[:, 0:2]) / 2.0
+        scale: Float[ndarray, "n 2"] = rescale_factor * (bboxes[:, 2:4] - bboxes[:, 0:2])
+        img_patches_list: list[ndarray] = []
+        img_size: Int[ndarray, "2"] = np.array([image.shape[1], image.shape[0]])
         for i in tqdm(range(bboxes.shape[0]), disable=not self.verbose):
             bbox_size = scale[i].max()
             patch_width = patch_height = self.IMAGE_SIZE
@@ -257,10 +269,19 @@ class WiLorHandPose3dEstimationPipeline:
             )
             img_patches_list.append(img_patch_cv)
 
-        img_patches: Num[np.ndarray, "n 256 256 3"] = np.stack(img_patches_list)
-        img_patches = torch.from_numpy(img_patches).to(device=self.device, dtype=self.dtype)
-        wilor_output = self.wilor_model(img_patches)
-        wilor_output = {k: v.cpu().float().numpy() for k, v in wilor_output.items()}
+        img_patches_np: Num[ndarray, "n 256 256 3"] = np.stack(img_patches_list)
+        img_patches: Float[Tensor, "n 256 256 3"] = torch.from_numpy(img_patches_np).to(
+            device=self.device, dtype=self.dtype
+        )
+        wilor_output_raw: WiLorOutput = self.wilor_model(img_patches)
+        wilor_output: dict[str, ndarray] = {
+            "global_orient": wilor_output_raw["global_orient"].cpu().float().numpy(),
+            "hand_pose": wilor_output_raw["hand_pose"].cpu().float().numpy(),
+            "betas": wilor_output_raw["betas"].cpu().float().numpy(),
+            "pred_cam": wilor_output_raw["pred_cam"].cpu().float().numpy(),
+            "pred_keypoints_3d": wilor_output_raw["pred_keypoints_3d"].cpu().float().numpy(),
+            "pred_vertices": wilor_output_raw["pred_vertices"].cpu().float().numpy(),
+        }
 
         for i in range(len(detect_rets)):
             wilor_output_i = {key: val[[i]] for key, val in wilor_output.items()}
@@ -285,7 +306,7 @@ class WiLorHandPose3dEstimationPipeline:
             )
             wilor_output_i["pred_cam_t_full"] = pred_cam_t_full
             wilor_output_i["scaled_focal_length"] = scaled_focal_length
-            pred_keypoints_2d: Float[np.ndarray, "1 21 2"] = utils.perspective_projection(
+            pred_keypoints_2d: Float[ndarray, "1 21 2"] = utils.perspective_projection(
                 wilor_output_i["pred_keypoints_3d"],
                 translation=pred_cam_t_full,
                 focal_length=np.array([scaled_focal_length] * 2)[None],

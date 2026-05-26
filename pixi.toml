@@ -348,6 +348,7 @@ python = "3.12.*"
 dill = ">=0.4.0,<0.5"
 trimesh = "*"
 pyrender = "*"
+torchvision = ">=0.25,<0.26"
 
 [feature.wilor.pypi-dependencies]
 wilor_nano = { path = "packages/wilor-nano", editable = true }
@@ -375,6 +376,16 @@ description = "Run WiLoR inference on example image"
 cmd = "python tools/wilor_inference.py --video-path assets/video.mp4"
 cwd = "packages/wilor-nano"
 description = "Run WiLoR inference on example video"
+
+[feature.wilor.tasks.wilor-generate-reference-rrd]
+cmd = "python tools/wilor_inference.py --video-path assets/video.mp4 --max-frames 30 --rr-config.save tests/reference_data/wilor_video_30.rrd --rr-config.headless"
+cwd = "packages/wilor-nano"
+description = "Generate the 30-frame WiLoR reference RRD"
+
+[feature.wilor.tasks.wilor-compare-reference]
+cmd = "python tools/compare_rrd_reference.py --reference-rrd tests/reference_data/wilor_video_30.rrd --candidate-rrd /tmp/wilor_candidate.rrd --index video_time"
+cwd = "packages/wilor-nano"
+description = "Compare a candidate WiLoR RRD against the checked-in reference RRD"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # egoexo-forge

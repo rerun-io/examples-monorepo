@@ -21491,7 +21491,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/tbb-2023.0.0-hab88423_2.conda
       - conda: https://prefix.dev/conda-forge/linux-64/tk-8.6.13-noxft_h366c992_103.conda
       - conda: https://prefix.dev/conda-forge/linux-64/tokenizers-0.22.2-py312hf875000_0.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/torchvision-0.26.0-cuda129_py312_h69a17e1_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/torchvision-0.25.0-cuda129_py312_h69a17e1_5.conda
       - conda: https://prefix.dev/conda-forge/linux-64/tornado-6.5.5-py312h4c3975b_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/triton-3.6.0-cuda129py312h811769c_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/wayland-1.25.0-hd6090a7_0.conda
@@ -22050,7 +22050,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/tbb-2023.0.0-hab88423_2.conda
       - conda: https://prefix.dev/conda-forge/linux-64/tk-8.6.13-noxft_h366c992_103.conda
       - conda: https://prefix.dev/conda-forge/linux-64/tokenizers-0.22.2-py312hf875000_0.conda
-      - conda: https://prefix.dev/conda-forge/linux-64/torchvision-0.26.0-cuda129_py312_h69a17e1_0.conda
+      - conda: https://prefix.dev/conda-forge/linux-64/torchvision-0.25.0-cuda129_py312_h69a17e1_5.conda
       - conda: https://prefix.dev/conda-forge/linux-64/tornado-6.5.5-py312h4c3975b_0.conda
       - conda: https://prefix.dev/conda-forge/linux-64/triton-3.6.0-cuda129py312h811769c_1.conda
       - conda: https://prefix.dev/conda-forge/linux-64/wayland-1.25.0-hd6090a7_0.conda
@@ -33820,6 +33820,37 @@ packages:
   run_exports: {}
   size: 3192054
   timestamp: 1762096288078
+- conda: https://prefix.dev/conda-forge/linux-64/torchvision-0.25.0-cuda129_py312_h69a17e1_5.conda
+  sha256: 7ed24074d04db94ed163543462233015fecd9194342b53a9687c48bd673d8255
+  md5: d2e08530a5b256495b49bbf266e5e467
+  depends:
+  - python
+  - pytorch * cuda*
+  - pillow >=5.3.0,!=8.3.0,!=8.3.1
+  - __glibc >=2.17,<3.0.a0
+  - libgcc >=14
+  - libstdcxx >=14
+  - cuda-version >=12.9,<13
+  - libnvjpeg >=12.4.0.76,<13.0a0
+  - libwebp-base >=1.6.0,<2.0a0
+  - libpng >=1.6.57,<1.7.0a0
+  - python_abi 3.12.* *_cp312
+  - libcusparse >=12.5.10.65,<13.0a0
+  - libcusolver >=11.7.5.82,<12.0a0
+  - libcublas >=12.9.1.4,<13.0a0
+  - pytorch >=2.10.0,<2.11.0a0
+  - libtorch >=2.10.0,<2.11.0a0
+  - giflib >=5.2.2,<5.3.0a0
+  - libcudnn >=9.10.2.21,<10.0a0
+  - libjpeg-turbo >=3.1.2,<4.0a0
+  - numpy >=1.23,<3
+  license: BSD-3-Clause
+  license_family: BSD
+  purls:
+  - pkg:pypi/torchvision?source=hash-mapping
+  run_exports: {}
+  size: 3194730
+  timestamp: 1775701350077
 - conda: https://prefix.dev/conda-forge/linux-64/torchvision-0.26.0-cpu_py312_h1fea287_0.conda
   sha256: 46958a67c3ac324c9266290bd9432a8c8707fec54e4ba2e0fa0b002a8c555b72
   md5: 28fb287dad0d0cf3b7801befa1ed44ee

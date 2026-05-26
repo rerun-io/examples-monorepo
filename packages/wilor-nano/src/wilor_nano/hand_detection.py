@@ -17,7 +17,7 @@ from pathlib import Path
 
 import torch
 from huggingface_hub import hf_hub_download
-from jaxtyping import Float, Int, UInt8
+from jaxtyping import Bool, Float, Int, UInt8
 from numpy import ndarray
 from torch import Tensor
 from ultralytics import YOLO
@@ -89,15 +89,15 @@ class HandDetector:
         # Vectorized tensors on model device
         # NOTE: Boxes.xyxy returns Tensor | ndarray; on GPU it's always Tensor
         xyxy: Float[Tensor, "n 4"] = torch.as_tensor(b.xyxy)
-        conf_t: Tensor = torch.as_tensor(b.conf)  # (N,1) or (N,)
-        cls_t_raw: Tensor = torch.as_tensor(b.cls)  # (N,1) or (N,)
+        conf_t: Float[Tensor, "..."] = torch.as_tensor(b.conf)  # (N,1) or (N,)
+        cls_t_raw: Float[Tensor, "..."] = torch.as_tensor(b.cls)  # (N,1) or (N,)
 
         # Normalize shapes and dtypes
         conf: Float[Tensor, "n"] = conf_t.view(-1)
         cls: Int[Tensor, "n"] = cls_t_raw.view(-1).to(torch.int64)
 
         # Left hand (class 0)
-        m_left: Tensor = (cls == 0) & (conf >= hand_conf)
+        m_left: Bool[Tensor, "n"] = (cls == 0) & (conf >= hand_conf)
         if torch.any(m_left):
             idx_rel_left: int = int(torch.argmax(conf[m_left]).item())
             left_xyxy_t: Float[Tensor, "4"] = xyxy[m_left][idx_rel_left]
@@ -105,7 +105,7 @@ class HandDetector:
             out.left_xyxy = left_xyxy
 
         # Right hand (class 1)
-        m_right: Tensor = (cls == 1) & (conf >= hand_conf)
+        m_right: Bool[Tensor, "n"] = (cls == 1) & (conf >= hand_conf)
         if torch.any(m_right):
             idx_rel_right: int = int(torch.argmax(conf[m_right]).item())
             right_xyxy_t: Float[Tensor, "4"] = xyxy[m_right][idx_rel_right]
