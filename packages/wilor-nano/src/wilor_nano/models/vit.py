@@ -1,4 +1,24 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+# ## Inventory
+# - [x] ViTManoParams — TypedDict
+# - [x] ViTManoFeats — TypedDict
+# - [x] rot6d_to_rotmat
+# - [x] vit — factory, no tensors
+# - [x] DropPath.__init__ — int: none; float: drop_prob
+# - [x] DropPath.forward
+# - [x] Mlp.__init__ — Dims: in_features, hidden_features, out_features; int: none
+# - [x] Mlp.forward
+# - [x] Attention.__init__ — Dims: dim, num_heads, attn_head_dim; int: none
+# - [x] Attention.forward
+# - [x] Block.__init__ — Dims: dim, num_heads, attn_head_dim; int: none
+# - [x] Block.forward
+# - [x] PatchEmbed.__init__ — Dims: img_size, patch_size, in_chans, embed_dim, ratio; int: none
+# - [x] PatchEmbed.forward
+# - [x] HybridEmbed.__init__ — Dims: img_size, feature_size, in_chans, embed_dim; int: none
+# - [x] HybridEmbed.forward
+# - [x] ViT.__init__ — Dims: img_size, patch_size, in_chans, embed_dim, num_heads, ratio; int: num_classes, depth, frozen_stages
+# - [x] ViT.forward_features
+# - [x] ViT.forward
 import os
 from collections.abc import Callable
 from functools import partial
@@ -48,13 +68,15 @@ def rot6d_to_rotmat(x: Float[Tensor, "*batch n_rot6"]) -> Float[Tensor, "n_rot 3
     Returns:
         torch.Tensor: Batch of corresponding rotation matrices with shape (B,3,3).
     """
-    x = x.reshape(-1, 2, 3).permute(0, 2, 1).contiguous()
-    a1 = x[:, :, 0]
-    a2 = x[:, :, 1]
-    b1 = F.normalize(a1)
-    b2 = F.normalize(a2 - torch.einsum("bi,bi->b", b1, a2).unsqueeze(-1) * b1)
-    b3 = torch_linalg.cross(b1, b2)
-    return torch.stack((b1, b2, b3), dim=-1)
+    rot6d: Float[Tensor, "n_rot 3 2"] = x.reshape(-1, 2, 3).permute(0, 2, 1).contiguous()
+    a1: Float[Tensor, "n_rot 3"] = rot6d[:, :, 0]
+    a2: Float[Tensor, "n_rot 3"] = rot6d[:, :, 1]
+    b1: Float[Tensor, "n_rot 3"] = F.normalize(a1)
+    b1_dot_a2: Float[Tensor, "n_rot"] = torch.einsum("bi,bi->b", b1, a2)
+    b2: Float[Tensor, "n_rot 3"] = F.normalize(a2 - b1_dot_a2.unsqueeze(-1) * b1)
+    b3: Float[Tensor, "n_rot 3"] = torch_linalg.cross(b1, b2)
+    rotmat: Float[Tensor, "n_rot 3 3"] = torch.stack((b1, b2, b3), dim=-1)
+    return rotmat
 
 
 def vit(**kwargs: Any) -> "ViT":
@@ -81,7 +103,8 @@ class DropPath(nn.Module):
         self.drop_prob = drop_prob
 
     def forward(self, x: Float[Tensor, "*batch"]) -> Float[Tensor, "*batch"]:
-        return drop_path(x, self.drop_prob, self.training)
+        dropped: Float[Tensor, "*batch"] = drop_path(x, self.drop_prob, self.training)
+        return dropped
 
 
 class Mlp(nn.Module):
@@ -102,11 +125,11 @@ class Mlp(nn.Module):
         self.drop = nn.Dropout(drop)
 
     def forward(self, x: Float[Tensor, "batch tokens channels"]) -> Float[Tensor, "batch tokens channels_out"]:
-        x = self.fc1(x)
-        x = self.act(x)
-        x = self.fc2(x)
-        x = self.drop(x)
-        return x
+        fc1_out: Float[Tensor, "batch tokens hidden_features"] = self.fc1(x)
+        act_out: Float[Tensor, "batch tokens hidden_features"] = self.act(fc1_out)
+        fc2_out: Float[Tensor, "batch tokens channels_out"] = self.fc2(act_out)
+        dropped: Float[Tensor, "batch tokens channels_out"] = self.drop(fc2_out)
+        return dropped
 
 
 class Attention(nn.Module):
@@ -138,19 +161,26 @@ class Attention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
 
     def forward(self, x: Float[Tensor, "batch tokens channels"]) -> Float[Tensor, "batch tokens channels"]:
-        B, N, _C = x.shape
-        qkv = self.qkv(x)
-        qkv = qkv.reshape(B, N, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]
+        batch_size: int = x.shape[0]
+        token_count: int = x.shape[1]
+        qkv_flat: Float[Tensor, "batch tokens qkv_channels"] = self.qkv(x)
+        qkv: Float[Tensor, "three batch heads tokens head_dim"] = qkv_flat.reshape(
+            batch_size, token_count, 3, self.num_heads, -1
+        ).permute(2, 0, 3, 1, 4)
+        q: Float[Tensor, "batch heads tokens head_dim"] = qkv[0]
+        k: Float[Tensor, "batch heads tokens head_dim"] = qkv[1]
+        v: Float[Tensor, "batch heads tokens head_dim"] = qkv[2]
 
         # 使用 scaled_dot_product_attention
-        attn = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.attn_drop)
+        attn: Float[Tensor, "batch heads tokens head_dim"] = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=None, dropout_p=self.attn_drop
+        )
 
-        x = attn.transpose(1, 2).reshape(B, N, -1)
-        x = self.proj(x)
-        x = self.proj_drop(x)
+        attn_flat: Float[Tensor, "batch tokens channels"] = attn.transpose(1, 2).reshape(batch_size, token_count, -1)
+        projected: Float[Tensor, "batch tokens channels"] = self.proj(attn_flat)
+        dropped: Float[Tensor, "batch tokens channels"] = self.proj_drop(projected)
 
-        return x
+        return dropped
 
 
 class Block(nn.Module):
@@ -188,9 +218,13 @@ class Block(nn.Module):
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
     def forward(self, x: Float[Tensor, "batch tokens channels"]) -> Float[Tensor, "batch tokens channels"]:
-        x = x + self.drop_path(self.attn(self.norm1(x)))
-        x = x + self.drop_path(self.mlp(self.norm2(x)))
-        return x
+        norm1_out: Float[Tensor, "batch tokens channels"] = self.norm1(x)
+        attn_out: Float[Tensor, "batch tokens channels"] = self.attn(norm1_out)
+        attn_residual: Float[Tensor, "batch tokens channels"] = x + self.drop_path(attn_out)
+        norm2_out: Float[Tensor, "batch tokens channels"] = self.norm2(attn_residual)
+        mlp_out: Float[Tensor, "batch tokens channels"] = self.mlp(norm2_out)
+        output: Float[Tensor, "batch tokens channels"] = attn_residual + self.drop_path(mlp_out)
+        return output
 
 
 class PatchEmbed(nn.Module):
@@ -225,12 +259,16 @@ class PatchEmbed(nn.Module):
         x: Float[Tensor, "batch channels height width"],
         **kwargs: Any,
     ) -> tuple[Float[Tensor, "batch n_patches embed_dim"], tuple[int, int]]:
-        _B, _C, _H, _W = x.shape
-        x = self.proj(x)
-        Hp, Wp = x.shape[2], x.shape[3]
+        _batch_size: int = x.shape[0]
+        _channel_count: int = x.shape[1]
+        _height: int = x.shape[2]
+        _width: int = x.shape[3]
+        projected: Float[Tensor, "batch embed_dim patch_height patch_width"] = self.proj(x)
+        patch_height: int = projected.shape[2]
+        patch_width: int = projected.shape[3]
 
-        x = x.flatten(2).transpose(1, 2)
-        return x, (Hp, Wp)
+        tokens: Float[Tensor, "batch n_patches embed_dim"] = projected.flatten(2).transpose(1, 2)
+        return tokens, (patch_height, patch_width)
 
 
 class HybridEmbed(nn.Module):
@@ -268,10 +306,10 @@ class HybridEmbed(nn.Module):
         self.proj = nn.Linear(feature_dim, embed_dim)
 
     def forward(self, x: Float[Tensor, "batch channels height width"]) -> Float[Tensor, "batch n_patches embed_dim"]:
-        x = self.backbone(x)[-1]
-        x = x.flatten(2).transpose(1, 2)
-        x = self.proj(x)
-        return x
+        backbone_feat: Float[Tensor, "batch feature_dim feature_height feature_width"] = self.backbone(x)[-1]
+        tokens: Float[Tensor, "batch n_patches feature_dim"] = backbone_feat.flatten(2).transpose(1, 2)
+        projected: Float[Tensor, "batch n_patches embed_dim"] = self.proj(tokens)
+        return projected
 
 
 class ViT(nn.Module):
@@ -376,35 +414,56 @@ class ViT(nn.Module):
             trunc_normal_(self.pos_embed, std=0.02)
 
     def forward_features(self, x: Float[Tensor, "batch channels height width"]) -> ViTOutput:
-        B, _C, _H, _W = x.shape
-        x, (Hp, Wp) = self.patch_embed(x)
+        batch_size: int = x.shape[0]
+        _channel_count: int = x.shape[1]
+        _height: int = x.shape[2]
+        _width: int = x.shape[3]
+        patch_tokens: Float[Tensor, "batch n_patches embed_dim"]
+        patch_grid_shape: tuple[int, int]
+        patch_tokens, patch_grid_shape = self.patch_embed(x)
+        patch_height: int = patch_grid_shape[0]
+        patch_width: int = patch_grid_shape[1]
 
         if self.pos_embed is not None:
             # fit for multiple GPU training
             # since the first element for pos embed (sin-cos manner) is zero, it will cause no difference
-            x = x + self.pos_embed[:, 1:] + self.pos_embed[:, :1]
+            patch_tokens = patch_tokens + self.pos_embed[:, 1:] + self.pos_embed[:, :1]
         # X [B, 192, 1280]
         # x cat [ mean_pose, mean_shape, mean_cam] tokens
-        pose_tokens = self.pose_emb(
-            self.init_hand_pose.reshape(1, self.NUM_HAND_JOINTS + 1, self.joint_rep_dim)
-        ).repeat(B, 1, 1)
-        shape_tokens = self.shape_emb(self.init_betas).unsqueeze(1).repeat(B, 1, 1)
-        cam_tokens = self.cam_emb(self.init_cam).unsqueeze(1).repeat(B, 1, 1)
+        init_pose: Float[Tensor, "1 joints_and_root=16 joint_rep_dim=6"] = self.init_hand_pose.reshape(
+            1, self.NUM_HAND_JOINTS + 1, self.joint_rep_dim
+        )
+        pose_tokens: Float[Tensor, "batch joints_and_root=16 embed_dim"] = self.pose_emb(
+            init_pose
+        ).repeat(batch_size, 1, 1)
+        shape_tokens: Float[Tensor, "batch shape_tokens=1 embed_dim"] = self.shape_emb(self.init_betas).unsqueeze(1).repeat(
+            batch_size, 1, 1
+        )
+        cam_tokens: Float[Tensor, "batch cam_tokens=1 embed_dim"] = self.cam_emb(self.init_cam).unsqueeze(1).repeat(
+            batch_size, 1, 1
+        )
 
-        x = torch.cat([pose_tokens, shape_tokens, cam_tokens, x], 1)
+        transformer_tokens: Float[Tensor, "batch total_tokens embed_dim"] = torch.cat(
+            (pose_tokens, shape_tokens, cam_tokens, patch_tokens), 1
+        )
         for blk in self.blocks:
-            x = blk(x)
+            transformer_tokens = blk(transformer_tokens)
 
-        x = self.last_norm(x)
+        normalized_tokens: Float[Tensor, "batch total_tokens embed_dim"] = self.last_norm(transformer_tokens)
 
-        pose_feat = x[:, : (self.NUM_HAND_JOINTS + 1)]
-        shape_feat = x[:, (self.NUM_HAND_JOINTS + 1) : 1 + (self.NUM_HAND_JOINTS + 1)]
-        cam_feat = x[:, 1 + (self.NUM_HAND_JOINTS + 1) : 2 + (self.NUM_HAND_JOINTS + 1)]
+        pose_feat: Float[Tensor, "batch joints_and_root=16 embed_dim"] = normalized_tokens[:, : (self.NUM_HAND_JOINTS + 1)]
+        shape_feat: Float[Tensor, "batch shape_tokens=1 embed_dim"] = normalized_tokens[
+            :, (self.NUM_HAND_JOINTS + 1) : 1 + (self.NUM_HAND_JOINTS + 1)
+        ]
+        cam_feat: Float[Tensor, "batch cam_tokens=1 embed_dim"] = normalized_tokens[
+            :, 1 + (self.NUM_HAND_JOINTS + 1) : 2 + (self.NUM_HAND_JOINTS + 1)
+        ]
 
-        # print(pose_feat.shape, shape_feat.shape, cam_feat.shape)
-        pred_hand_pose = self.decpose(pose_feat).reshape(B, -1) + self.init_hand_pose  # B , 96
-        pred_betas = self.decshape(shape_feat).reshape(B, -1) + self.init_betas  # B , 10
-        pred_cam = self.deccam(cam_feat).reshape(B, -1) + self.init_cam  # B , 3
+        pred_hand_pose: Float[Tensor, "batch n_pose=96"] = (
+            self.decpose(pose_feat).reshape(batch_size, -1) + self.init_hand_pose
+        )
+        pred_betas: Float[Tensor, "batch 10"] = self.decshape(shape_feat).reshape(batch_size, -1) + self.init_betas
+        pred_cam: Float[Tensor, "batch 3"] = self.deccam(cam_feat).reshape(batch_size, -1) + self.init_cam
 
         pred_mano_feats: ViTManoFeats = {
             "hand_pose": pred_hand_pose,
@@ -412,16 +471,20 @@ class ViT(nn.Module):
             "cam": pred_cam,
         }
 
-        pred_hand_pose = rot6d_to_rotmat(pred_hand_pose).view(B, self.NUM_HAND_JOINTS + 1, 3, 3)
+        pred_hand_rotmat: Float[Tensor, "batch joints_and_root=16 3 3"] = rot6d_to_rotmat(pred_hand_pose).view(
+            batch_size, self.NUM_HAND_JOINTS + 1, 3, 3
+        )
         pred_mano_params: ViTManoParams = {
-            "global_orient": pred_hand_pose[:, [0]],
-            "hand_pose": pred_hand_pose[:, 1:],
+            "global_orient": pred_hand_rotmat[:, [0]],
+            "hand_pose": pred_hand_rotmat[:, 1:],
             "betas": pred_betas,
         }
 
-        img_feat = x[:, 2 + (self.NUM_HAND_JOINTS + 1) :].reshape(B, Hp, Wp, -1).permute(0, 3, 1, 2)
+        img_feat: Float[Tensor, "batch embed_dim patch_height patch_width"] = normalized_tokens[
+            :, 2 + (self.NUM_HAND_JOINTS + 1) :
+        ].reshape(batch_size, patch_height, patch_width, -1).permute(0, 3, 1, 2)
         return pred_mano_params, pred_cam, pred_mano_feats, img_feat
 
     def forward(self, x: Float[Tensor, "batch channels height width"]) -> ViTOutput:
-        output = self.forward_features(x)
+        output: ViTOutput = self.forward_features(x)
         return output

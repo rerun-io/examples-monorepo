@@ -1,3 +1,14 @@
+# ## Inventory
+# - [x] RefineNetOutput — TypedDict
+# - [x] RefineInputManoFeats — TypedDict
+# - [x] make_conv_layers — Dims: feat_dims elements, kernel, stride, padding; int: none
+# - [x] make_deconv_layers — Dims: feat_dims elements; int: none
+# - [x] sample_joint_features
+# - [x] perspective_projection
+# - [x] DeConvNet.__init__ — Dims: feat_dim; int: upscale
+# - [x] DeConvNet.forward
+# - [x] RefineNet.__init__ — Dims: feat_dim; int: upscale
+# - [x] RefineNet.forward
 import math
 from collections.abc import Sequence
 from typing import TypedDict
@@ -86,13 +97,17 @@ def sample_joint_features(
     img_feat: Float[Tensor, "batch channels height width"],
     joint_xy: Float[Tensor, "batch joints 2"],
 ) -> Float[Tensor, "batch joints channels"]:
-    height, width = img_feat.shape[2:]
-    x = joint_xy[:, :, 0] / (width - 1) * 2 - 1
-    y = joint_xy[:, :, 1] / (height - 1) * 2 - 1
-    grid = torch.stack((x, y), 2)[:, :, None, :]
-    img_feat = F.grid_sample(img_feat, grid, align_corners=True)[:, :, :, 0]  # batch_size, channel_dim, joint_num
-    img_feat = img_feat.permute(0, 2, 1).contiguous()  # batch_size, joint_num, channel_dim
-    return img_feat
+    height: int = img_feat.shape[2]
+    width: int = img_feat.shape[3]
+    x_norm: Float[Tensor, "batch joints"] = joint_xy[:, :, 0] / (width - 1) * 2 - 1
+    y_norm: Float[Tensor, "batch joints"] = joint_xy[:, :, 1] / (height - 1) * 2 - 1
+    grid: Float[Tensor, "batch joints sample_width=1 2"] = torch.stack((x_norm, y_norm), 2)[:, :, None, :]
+    sampled: Float[Tensor, "batch channels joints sample_width=1"] = F.grid_sample(
+        img_feat, grid, align_corners=True
+    )
+    sampled_squeezed: Float[Tensor, "batch channels joints"] = sampled[:, :, :, 0]
+    joint_features: Float[Tensor, "batch joints channels"] = sampled_squeezed.permute(0, 2, 1).contiguous()
+    return joint_features
 
 
 def perspective_projection(
@@ -119,20 +134,20 @@ def perspective_projection(
     if camera_center is None:
         camera_center = torch.zeros(batch_size, 2, device=points.device, dtype=points.dtype)
     # Populate intrinsic camera matrix K.
-    K = torch.zeros((batch_size, 3, 3), device=points.device, dtype=points.dtype)
+    K: Float[Tensor, "batch 3 3"] = torch.zeros((batch_size, 3, 3), device=points.device, dtype=points.dtype)
     K[:, 0, 0] = focal_length[:, 0]
     K[:, 1, 1] = focal_length[:, 1]
     K[:, 2, 2] = 1.0
     K[:, :-1, -1] = camera_center
     # Transform points
-    points = torch.einsum("bij,bkj->bki", rotation, points)
-    points = points + translation.unsqueeze(1)
+    rotated_points: Float[Tensor, "batch points 3"] = torch.einsum("bij,bkj->bki", rotation, points)
+    translated_points: Float[Tensor, "batch points 3"] = rotated_points + translation.unsqueeze(1)
 
     # Apply perspective distortion
-    projected_points = points / points[:, :, -1].unsqueeze(-1)
+    normalized_points: Float[Tensor, "batch points 3"] = translated_points / translated_points[:, :, -1].unsqueeze(-1)
 
     # Apply camera intrinsics
-    projected_points = torch.einsum("bij,bkj->bki", K, projected_points)
+    projected_points: Float[Tensor, "batch points 3"] = torch.einsum("bij,bkj->bki", K, normalized_points)
 
     return projected_points[:, :, :-1]
 
@@ -151,12 +166,12 @@ class DeConvNet(nn.Module):
                 self.deconv.append(make_deconv_layers([feat_dim // 2, feat_dim // 4, feat_dim // 8, feat_dim // 8]))
 
     def forward(self, img_feat: Float[Tensor, "batch channels height width"]) -> list[Float[Tensor, "batch channels height width"]]:
-        face_img_feats = []
-        img_feat = self.first_conv(img_feat)
-        face_img_feats.append(img_feat)
+        face_img_feats: list[Float[Tensor, "batch channels height width"]] = []
+        first_feat: Float[Tensor, "batch channels height width"] = self.first_conv(img_feat)
+        face_img_feats.append(first_feat)
         for deconv in self.deconv:
-            img_feat_i = deconv(img_feat)
-            face_img_feat = img_feat_i
+            img_feat_i: Float[Tensor, "batch channels height width"] = deconv(first_feat)
+            face_img_feat: Float[Tensor, "batch channels height width"] = img_feat_i
             face_img_feats.append(face_img_feat)
         return face_img_feats[::-1]  # high resolution -> low resolution
 
@@ -182,46 +197,48 @@ class RefineNet(nn.Module):
         pred_mano_feats: RefineInputManoFeats,
         focal_length: Float[Tensor, "batch 2"],
     ) -> RefineNetOutput:
-        B = img_feat.shape[0]
+        batch_size: int = img_feat.shape[0]
 
-        img_feats = self.deconv(img_feat)
+        img_feats: list[Float[Tensor, "batch channels height width"]] = self.deconv(img_feat)
 
-        img_feat_sizes = [img_feat.shape[2] for img_feat in img_feats]
+        img_feat_sizes: list[int] = [img_feat_i.shape[2] for img_feat_i in img_feats]
 
-        temp_cams = [
+        temp_cams: list[Float[Tensor, "batch 3"]] = [
             torch.stack(
-                [pred_cam[:, 1], pred_cam[:, 2], 2 * focal_length[:, 0] / (img_feat_size * pred_cam[:, 0] + 1e-9)],
+                (pred_cam[:, 1], pred_cam[:, 2], 2 * focal_length[:, 0] / (img_feat_size * pred_cam[:, 0] + 1e-9)),
                 dim=-1,
             )
             for img_feat_size in img_feat_sizes
         ]
 
-        verts_2d = [
+        verts_2d: list[Float[Tensor, "batch n_verts 2"]] = [
             perspective_projection(verts_3d, translation=temp_cams[i], focal_length=focal_length / img_feat_sizes[i])
             for i in range(len(img_feat_sizes))
         ]
 
-        vert_feats = [
+        vert_feats_by_scale: list[Float[Tensor, "batch channels"]] = [
             sample_joint_features(img_feats[i], verts_2d[i]).max(1).values for i in range(len(img_feat_sizes))
         ]
 
-        vert_feats = torch.cat(vert_feats, dim=-1)
+        vert_feats: Float[Tensor, "batch channels"] = torch.cat(vert_feats_by_scale, dim=-1)
 
-        delta_pose = self.dec_pose(vert_feats)
-        delta_betas = self.dec_shape(vert_feats)
-        delta_cam = self.dec_cam(vert_feats)
+        delta_pose: Float[Tensor, "batch n_pose=96"] = self.dec_pose(vert_feats)
+        delta_betas: Float[Tensor, "batch 10"] = self.dec_shape(vert_feats)
+        delta_cam: Float[Tensor, "batch 3"] = self.dec_cam(vert_feats)
 
-        pred_hand_pose = pred_mano_feats["hand_pose"] + delta_pose
-        pred_betas = pred_mano_feats["betas"] + delta_betas
-        pred_cam = pred_mano_feats["cam"] + delta_cam
+        pred_hand_pose_6d: Float[Tensor, "batch n_pose=96"] = pred_mano_feats["hand_pose"] + delta_pose
+        pred_betas: Float[Tensor, "batch 10"] = pred_mano_feats["betas"] + delta_betas
+        refined_cam: Float[Tensor, "batch 3"] = pred_mano_feats["cam"] + delta_cam
 
-        pred_hand_pose = rot6d_to_rotmat(pred_hand_pose).view(B, -1, 3, 3)
+        pred_hand_pose: Float[Tensor, "batch joints_and_root=16 3 3"] = rot6d_to_rotmat(pred_hand_pose_6d).view(
+            batch_size, -1, 3, 3
+        )
 
         pred_mano_params: RefineNetOutput = {
             "global_orient": pred_hand_pose[:, :1],
             "hand_pose": pred_hand_pose[:, 1:],
             "betas": pred_betas,
-            "pred_cam": pred_cam,
+            "pred_cam": refined_cam,
         }
 
         return pred_mano_params
