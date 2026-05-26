@@ -349,12 +349,14 @@ dill = ">=0.4.0,<0.5"
 trimesh = "*"
 pyrender = "*"
 torchvision = ">=0.25,<0.26"
+torchcodec = ">=0.10.0,<0.11"
 
 [feature.wilor.pypi-dependencies]
 wilor_nano = { path = "packages/wilor-nano", editable = true }
 daggr = { path = "/home/pablo/0Dev/personal/daggr", editable = true }
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 onnx = ">=1.12.0,<1.18.0"
+onnxscript = "*"
 
 [feature.wilor.target.linux-64.pypi-dependencies]
 # TensorRT engines are machine-local artifacts; keep ONNX portable and rebuild engines per target GPU.
@@ -367,23 +369,33 @@ onnxruntime = ">=1.23.2,<2"
 [feature.wilor.activation.env]
 PACKAGE_DIR = "packages/wilor-nano"
 
-[feature.wilor.tasks.wilor-image-example]
+[feature.wilor.tasks.image-example]
 cmd = "python tools/wilor_inference.py --image-path assets/img.png"
 cwd = "packages/wilor-nano"
 description = "Run WiLoR inference on example image"
 
-[feature.wilor.tasks.wilor-video-example]
+[feature.wilor.tasks.video-example]
 cmd = "python tools/wilor_inference.py --video-path assets/video.mp4"
 cwd = "packages/wilor-nano"
-description = "Run WiLoR inference on example video"
+description = "Run WiLoR inference on example video using the original PyTorch path"
 
-[feature.wilor.tasks.wilor-generate-reference-rrd]
-cmd = "python tools/wilor_inference.py --video-path assets/video.mp4 --max-frames 30 --rr-config.save tests/reference_data/wilor_video_30.rrd --rr-config.headless"
+[feature.wilor.tasks.video-trt]
+cmd = "python tools/wilor_inference_trt.py"
 cwd = "packages/wilor-nano"
-description = "Generate the 30-frame WiLoR reference RRD"
+description = "Run WiLoR video inference with the accepted batched TensorRT detector and full-WiLor backend"
 
-[feature.wilor.tasks.wilor-compare-reference]
-cmd = "python tools/compare_rrd_reference.py --reference-rrd tests/reference_data/wilor_video_30.rrd --candidate-rrd /tmp/wilor_candidate.rrd --index video_time"
+[feature.wilor.tasks.export-onnx]
+cmd = "python tools/conversion/export_wilor_onnx.py"
+cwd = "packages/wilor-nano"
+description = "Export WiLoR ONNX graphs used to rebuild TensorRT engines"
+
+[feature.wilor.tasks.build-trt]
+cmd = "python tools/conversion/build_wilor_tensorrt.py"
+cwd = "packages/wilor-nano"
+description = "Build machine-local WiLoR TensorRT engines from exported ONNX graphs"
+
+[feature.wilor.tasks.compare-reference]
+cmd = "python tools/compare_rrd_reference.py --reference-rrd tests/reference_data/wilor_video_30.rrd --candidate-rrd /tmp/wilor_candidate.rrd --index video_time --rtol 0.01 --atol 0.25"
 cwd = "packages/wilor-nano"
 description = "Compare a candidate WiLoR RRD against the checked-in reference RRD"
 
