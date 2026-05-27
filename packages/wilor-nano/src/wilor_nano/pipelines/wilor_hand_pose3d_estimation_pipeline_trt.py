@@ -310,8 +310,8 @@ class WiLorHandPose3dEstimationPipeline:
             is_rights: list[int] = [int(value) for value in is_right_tensor.detach().cpu().tolist()]
             patch_start: int = patch_cursor
             if num_detections > 0:
-                frame_indices: Int[Tensor, "n"] = is_right_tensor * 0 + int(frame_idx)
-                frame_indices_for_crop.append(frame_indices)
+                frame_indices_for_frame: Int[Tensor, "n"] = is_right_tensor * 0 + int(frame_idx)
+                frame_indices_for_crop.append(frame_indices_for_frame)
                 centers_for_crop.append(center_tensor)
                 box_sizes_for_crop.append(scale_tensor.max(dim=1).values)
                 flips_for_crop.append(is_right_tensor == 0)
@@ -322,13 +322,13 @@ class WiLorHandPose3dEstimationPipeline:
         if len(frame_indices_for_crop) == 0:
             return records, None
 
-        frame_indices: Int[Tensor, "n"] = torch.cat(frame_indices_for_crop)
+        all_frame_indices: Int[Tensor, "n"] = torch.cat(frame_indices_for_crop)
         centers_xy: Float[Tensor, "n 2"] = torch.cat(centers_for_crop)
         box_sizes: Float[Tensor, "n"] = torch.cat(box_sizes_for_crop)
         flips: Bool[Tensor, "n"] = torch.cat(flips_for_crop)
         patches: Float[Tensor, "n 256 256 3"] = generate_rgb_image_patches_torch(
             frames_rgb,
-            frame_indices=frame_indices,
+            frame_indices=all_frame_indices,
             centers_xy=centers_xy,
             box_sizes=box_sizes,
             flips=flips,

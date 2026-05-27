@@ -16,8 +16,8 @@ from gradio_rerun import Rerun
 
 from wilor_nano.gradio_ui.simple_pipeline_shared import DEFAULT_IMAGE_PATH
 
-DETECTION_APP_URL: str = os.environ.get("WILOR_SIMPLE_DETECTION_URL", "http://localhost:7860")
-KEYPOINT_APP_URL: str = os.environ.get("WILOR_SIMPLE_KEYPOINT_URL", "http://localhost:7861")
+DETECTION_APP_URL: str = os.environ.get("WILOR_SIMPLE_DETECTION_URL", "http://localhost:7863")
+KEYPOINT_APP_URL: str = os.environ.get("WILOR_SIMPLE_KEYPOINT_URL", "http://localhost:7864")
 
 shared_image = gr.Image(label="Input Image", value=str(DEFAULT_IMAGE_PATH))
 
