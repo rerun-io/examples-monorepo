@@ -152,3 +152,4 @@ repomix-output.xml
 /pretrained_models/
 /typings/
 yolo*
+artifacts/*

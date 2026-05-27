@@ -46,6 +46,24 @@ pixi run -e egoexo-forge --frozen egoexo-forge-app
 ```
 ### CLI
 
+#### SAM-3D-Body Parquet to RRD
+Convert one accepted `facebook/sam-3d-body-dataset` parquet shard into a chunk-processed Rerun recording with semantic camera, bbox, keypoint, and optional mesh streams:
+
+```bash
+pixi run -e egoexo-forge --frozen egoexo-forge-sam3d-parquet-to-rrd -- \
+  --parquet-path /path/to/000000.parquet \
+  --rrd-path artifacts/sam3d-body.rrd
+```
+
+By default the output keeps only derived Rerun components. Add `--include-source-columns` to also preserve the raw parquet columns under `/source/sam3d_body/parquet`:
+
+```bash
+pixi run -e egoexo-forge --frozen egoexo-forge-sam3d-parquet-to-rrd -- \
+  --parquet-path /path/to/000000.parquet \
+  --rrd-path artifacts/sam3d-body.rrd \
+  --include-source-columns
+```
+
 #### View ExoEgo Datasets
 Use `pixi run -e egoexo-forge --frozen egoexo-forge-batch-convert -- --help` to inspect the dataset conversion CLI, or run `simplecv-view-exoego` inside the `egoexo-forge` environment to visualize various ego/exo datasets with Rerun:
 
