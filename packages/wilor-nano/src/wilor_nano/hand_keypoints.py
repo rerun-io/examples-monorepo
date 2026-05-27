@@ -24,7 +24,7 @@ Conventions:
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypedDict
+from typing import Literal
 
 import cv2
 import numpy as np
@@ -36,8 +36,7 @@ from rtmlib.tools.pose_estimation.rtmpose import RTMPose
 from serde import from_dict, serde
 from skimage.filters import gaussian
 
-from wilor_nano.models.refinement_net import RefineNetOutput
-from wilor_nano.models.wilor import WiLor
+from wilor_nano.models.wilor import WiLor, WiLorOutput
 from wilor_nano.runtime import get_rtmpose_device, get_torch_device, get_torch_dtype
 from wilor_nano.utils import utils
 
@@ -50,19 +49,6 @@ class HandKeypointDetectorConfig:
     focal_length: int = 5000
     image_size: int = 256
     use_keypoints_results: bool = True
-
-
-class RefineNetNPOutput(TypedDict):
-    """
-    TypedDict for the output of RefineNet.
-
-    This defines the structure and types of the dictionary returned by the RefineNet forward method.
-    """
-
-    global_orient: Float[torch.Tensor, "batch"]
-    hand_pose: Float[torch.Tensor, "batch 15 3"]
-    betas: Float[torch.Tensor, "batch 10"]
-    pred_cam: Float[torch.Tensor, "batch 3"]
 
 
 @serde
@@ -328,13 +314,19 @@ class WilorHandKeypointDetector:
             device=self.device, dtype=self.dtype
         )
         # Run the WiLor model: outputs are PyTorch tensors keyed by component name
-        wilor_output_raw: RefineNetOutput = self.wilor_model(img_patches)
+        wilor_output_raw: WiLorOutput = self.wilor_model(img_patches)
 
         # Optional shape/type sanity check (e.g., with a serde-typed container).
         # Converts tensors to numpy for validation/logging, does not alter wilor_output_raw.
-        raw_wilor_preds: RawWilorPred = from_dict(
-            RawWilorPred, {k: v.cpu().float().numpy() for k, v in wilor_output_raw.items()}
-        )
+        raw_wilor_pred_values: dict[str, np.ndarray] = {
+            "global_orient": wilor_output_raw["global_orient"].cpu().float().numpy(),
+            "hand_pose": wilor_output_raw["hand_pose"].cpu().float().numpy(),
+            "betas": wilor_output_raw["betas"].cpu().float().numpy(),
+            "pred_cam": wilor_output_raw["pred_cam"].cpu().float().numpy(),
+            "pred_keypoints_3d": wilor_output_raw["pred_keypoints_3d"].cpu().float().numpy(),
+            "pred_vertices": wilor_output_raw["pred_vertices"].cpu().float().numpy(),
+        }
+        raw_wilor_preds: RawWilorPred = from_dict(RawWilorPred, raw_wilor_pred_values)
 
         final_preds: FinalWilorPred = self.post_process(
             raw_wilor_preds=raw_wilor_preds,

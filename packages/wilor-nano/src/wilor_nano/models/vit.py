@@ -1,16 +1,65 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import math
+# ## Inventory
+# - [x] ViTManoParams — TypedDict
+# - [x] ViTManoFeats — TypedDict
+# - [x] rot6d_to_rotmat
+# - [x] vit — factory, no tensors
+# - [x] DropPath.__init__ — int: none; float: drop_prob
+# - [x] DropPath.forward
+# - [x] Mlp.__init__ — Dims: in_features, hidden_features, out_features; int: none
+# - [x] Mlp.forward
+# - [x] Attention.__init__ — Dims: dim, num_heads, attn_head_dim; int: none
+# - [x] Attention.forward
+# - [x] Block.__init__ — Dims: dim, num_heads, attn_head_dim; int: none
+# - [x] Block.forward
+# - [x] PatchEmbed.__init__ — Dims: img_size, patch_size, in_chans, embed_dim, ratio; int: none
+# - [x] PatchEmbed.forward
+# - [x] HybridEmbed.__init__ — Dims: img_size, feature_size, in_chans, embed_dim; int: none
+# - [x] HybridEmbed.forward
+# - [x] ViT.__init__ — Dims: img_size, patch_size, in_chans, embed_dim, num_heads, ratio; int: num_classes, depth, frozen_stages
+# - [x] ViT.forward_features
+# - [x] ViT.forward
+import os
+from collections.abc import Callable
+from functools import partial
+from typing import Any, TypedDict, cast
+
 import numpy as np
 import torch
-from functools import partial
+import torch.linalg as torch_linalg
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.utils.checkpoint as checkpoint
+from jaxtyping import Float
 from timm.models.layers import drop_path, to_2tuple, trunc_normal_
-import os
+from torch import Tensor
 
 
-def rot6d_to_rotmat(x: torch.Tensor) -> torch.Tensor:
+class ViTManoParams(TypedDict):
+    """Initial MANO parameters predicted by the ViT backbone."""
+
+    global_orient: Float[Tensor, "batch 1 3 3"]
+    hand_pose: Float[Tensor, "batch 15 3 3"]
+    betas: Float[Tensor, "batch 10"]
+
+
+class ViTManoFeats(TypedDict):
+    """Intermediate MANO predictions used by RefineNet."""
+
+    hand_pose: Float[Tensor, "batch n_pose=96"]
+    betas: Float[Tensor, "batch 10"]
+    # Vulture does not connect string-keyed TypedDict access to class-style fields.
+    cam: Float[Tensor, "batch 3"]  # noqa
+
+
+ViTOutput = tuple[
+    ViTManoParams,
+    Float[Tensor, "batch 3"],
+    ViTManoFeats,
+    Float[Tensor, "batch channels height width"],
+]
+
+
+def rot6d_to_rotmat(x: Float[Tensor, "*batch n_rot6"]) -> Float[Tensor, "n_rot 3 3"]:
     """
     Convert 6D rotation representation to 3x3 rotation matrix.
     Based on Zhou et al., "On the Continuity of Rotation Representations in Neural Networks", CVPR 2019
@@ -19,16 +68,18 @@ def rot6d_to_rotmat(x: torch.Tensor) -> torch.Tensor:
     Returns:
         torch.Tensor: Batch of corresponding rotation matrices with shape (B,3,3).
     """
-    x = x.reshape(-1, 2, 3).permute(0, 2, 1).contiguous()
-    a1 = x[:, :, 0]
-    a2 = x[:, :, 1]
-    b1 = F.normalize(a1)
-    b2 = F.normalize(a2 - torch.einsum('bi,bi->b', b1, a2).unsqueeze(-1) * b1)
-    b3 = torch.linalg.cross(b1, b2)
-    return torch.stack((b1, b2, b3), dim=-1)
+    rot6d: Float[Tensor, "n_rot 3 2"] = x.reshape(-1, 2, 3).permute(0, 2, 1).contiguous()
+    a1: Float[Tensor, "n_rot 3"] = rot6d[:, :, 0]
+    a2: Float[Tensor, "n_rot 3"] = rot6d[:, :, 1]
+    b1: Float[Tensor, "n_rot 3"] = F.normalize(a1)
+    b1_dot_a2: Float[Tensor, "n_rot"] = torch.einsum("bi,bi->b", b1, a2)
+    b2: Float[Tensor, "n_rot 3"] = F.normalize(a2 - b1_dot_a2.unsqueeze(-1) * b1)
+    b3: Float[Tensor, "n_rot 3"] = torch_linalg.cross(b1, b2)
+    rotmat: Float[Tensor, "n_rot 3 3"] = torch.stack((b1, b2, b3), dim=-1)
+    return rotmat
 
 
-def vit(**kwargs):
+def vit(**kwargs: Any) -> "ViT":
     return ViT(
         img_size=(256, 192),
         patch_size=16,
@@ -37,64 +88,34 @@ def vit(**kwargs):
         num_heads=16,
         ratio=1,
         use_checkpoint=False,
-        mlp_ratio=4,
+        mlp_ratio=4.0,
         qkv_bias=True,
         drop_path_rate=0.55,
-        **kwargs
+        **kwargs,
     )
 
 
-def get_abs_pos(abs_pos, h, w, ori_h, ori_w, has_cls_token=True):
-    """
-    Calculate absolute positional embeddings. If needed, resize embeddings and remove cls_token
-        dimension for the original embeddings.
-    Args:
-        abs_pos (Tensor): absolute positional embeddings with (1, num_position, C).
-        has_cls_token (bool): If true, has 1 embedding in abs_pos for cls token.
-        hw (Tuple): size of input image tokens.
-
-    Returns:
-        Absolute positional embeddings after processing with shape (1, H, W, C)
-    """
-    cls_token = None
-    B, L, C = abs_pos.shape
-    if has_cls_token:
-        cls_token = abs_pos[:, 0:1]
-        abs_pos = abs_pos[:, 1:]
-
-    if ori_h != h or ori_w != w:
-        new_abs_pos = F.interpolate(
-            abs_pos.reshape(1, ori_h, ori_w, -1).permute(0, 3, 1, 2),
-            size=(h, w),
-            mode="bicubic",
-            align_corners=False,
-        ).permute(0, 2, 3, 1).reshape(B, -1, C)
-
-    else:
-        new_abs_pos = abs_pos
-
-    if cls_token is not None:
-        new_abs_pos = torch.cat([cls_token, new_abs_pos], dim=1)
-    return new_abs_pos
-
-
 class DropPath(nn.Module):
-    """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks).
-    """
+    """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks)."""
 
-    def __init__(self, drop_prob=None):
-        super(DropPath, self).__init__()
+    def __init__(self, drop_prob: float = 0.0) -> None:
+        super().__init__()
         self.drop_prob = drop_prob
 
-    def forward(self, x):
-        return drop_path(x, self.drop_prob, self.training)
-
-    def extra_repr(self):
-        return 'p={}'.format(self.drop_prob)
+    def forward(self, x: Float[Tensor, "*batch"]) -> Float[Tensor, "*batch"]:
+        dropped: Float[Tensor, "*batch"] = drop_path(x, self.drop_prob, self.training)
+        return dropped
 
 
 class Mlp(nn.Module):
-    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
+    def __init__(
+        self,
+        in_features: int,
+        hidden_features: int | None = None,
+        out_features: int | None = None,
+        act_layer: Callable[[], nn.Module] = nn.GELU,
+        drop: float = 0.0,
+    ) -> None:
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
@@ -103,18 +124,25 @@ class Mlp(nn.Module):
         self.fc2 = nn.Linear(hidden_features, out_features)
         self.drop = nn.Dropout(drop)
 
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.act(x)
-        x = self.fc2(x)
-        x = self.drop(x)
-        return x
+    def forward(self, x: Float[Tensor, "batch tokens channels"]) -> Float[Tensor, "batch tokens channels_out"]:
+        fc1_out: Float[Tensor, "batch tokens hidden_features"] = self.fc1(x)
+        act_out: Float[Tensor, "batch tokens hidden_features"] = self.act(fc1_out)
+        fc2_out: Float[Tensor, "batch tokens channels_out"] = self.fc2(act_out)
+        dropped: Float[Tensor, "batch tokens channels_out"] = self.drop(fc2_out)
+        return dropped
 
 
 class Attention(nn.Module):
     def __init__(
-            self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0.,
-            proj_drop=0., attn_head_dim=None, ):
+        self,
+        dim: int,
+        num_heads: int = 8,
+        qkv_bias: bool = False,
+        qk_scale: float | None = None,
+        attn_drop: float = 0.0,
+        proj_drop: float = 0.0,
+        attn_head_dim: int | None = None,
+    ) -> None:
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
@@ -124,7 +152,7 @@ class Attention(nn.Module):
             head_dim = attn_head_dim
         all_head_dim = head_dim * self.num_heads
 
-        self.scale = qk_scale or head_dim ** -0.5
+        self.scale = qk_scale or head_dim**-0.5
 
         self.qkv = nn.Linear(dim, all_head_dim * 3, bias=qkv_bias)
 
@@ -132,84 +160,133 @@ class Attention(nn.Module):
         self.proj = nn.Linear(all_head_dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-    def forward(self, x):
-        B, N, C = x.shape
-        qkv = self.qkv(x)
-        qkv = qkv.reshape(B, N, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]
+    def forward(self, x: Float[Tensor, "batch tokens channels"]) -> Float[Tensor, "batch tokens channels"]:
+        batch_size: int = x.shape[0]
+        token_count: int = x.shape[1]
+        qkv_flat: Float[Tensor, "batch tokens qkv_channels"] = self.qkv(x)
+        qkv: Float[Tensor, "three batch heads tokens head_dim"] = qkv_flat.reshape(
+            batch_size, token_count, 3, self.num_heads, -1
+        ).permute(2, 0, 3, 1, 4)
+        q: Float[Tensor, "batch heads tokens head_dim"] = qkv[0]
+        k: Float[Tensor, "batch heads tokens head_dim"] = qkv[1]
+        v: Float[Tensor, "batch heads tokens head_dim"] = qkv[2]
 
         # 使用 scaled_dot_product_attention
-        attn = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.attn_drop)
+        attn: Float[Tensor, "batch heads tokens head_dim"] = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=None, dropout_p=self.attn_drop
+        )
 
-        x = attn.transpose(1, 2).reshape(B, N, -1)
-        x = self.proj(x)
-        x = self.proj_drop(x)
+        attn_flat: Float[Tensor, "batch tokens channels"] = attn.transpose(1, 2).reshape(batch_size, token_count, -1)
+        projected: Float[Tensor, "batch tokens channels"] = self.proj(attn_flat)
+        dropped: Float[Tensor, "batch tokens channels"] = self.proj_drop(projected)
 
-        return x
+        return dropped
 
 
 class Block(nn.Module):
-
-    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None,
-                 drop=0., attn_drop=0., drop_path=0., act_layer=nn.GELU,
-                 norm_layer=nn.LayerNorm, attn_head_dim=None
-                 ):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        mlp_ratio: float = 4.0,
+        qkv_bias: bool = False,
+        qk_scale: float | None = None,
+        drop: float = 0.0,
+        attn_drop: float = 0.0,
+        drop_path: float = 0.0,
+        act_layer: Callable[[], nn.Module] = nn.GELU,
+        norm_layer: Callable[[int], nn.Module] = nn.LayerNorm,
+        attn_head_dim: int | None = None,
+    ) -> None:
         super().__init__()
 
         self.norm1 = norm_layer(dim)
         self.attn = Attention(
-            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale,
-            attn_drop=attn_drop, proj_drop=drop, attn_head_dim=attn_head_dim
+            dim,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            qk_scale=qk_scale,
+            attn_drop=attn_drop,
+            proj_drop=drop,
+            attn_head_dim=attn_head_dim,
         )
 
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
-    def forward(self, x):
-        x = x + self.drop_path(self.attn(self.norm1(x)))
-        x = x + self.drop_path(self.mlp(self.norm2(x)))
-        return x
+    def forward(self, x: Float[Tensor, "batch tokens channels"]) -> Float[Tensor, "batch tokens channels"]:
+        norm1_out: Float[Tensor, "batch tokens channels"] = self.norm1(x)
+        attn_out: Float[Tensor, "batch tokens channels"] = self.attn(norm1_out)
+        attn_residual: Float[Tensor, "batch tokens channels"] = x + self.drop_path(attn_out)
+        norm2_out: Float[Tensor, "batch tokens channels"] = self.norm2(attn_residual)
+        mlp_out: Float[Tensor, "batch tokens channels"] = self.mlp(norm2_out)
+        output: Float[Tensor, "batch tokens channels"] = attn_residual + self.drop_path(mlp_out)
+        return output
 
 
 class PatchEmbed(nn.Module):
-    """ Image to Patch Embedding
-    """
+    """Image to Patch Embedding"""
 
-    def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768, ratio=1):
+    def __init__(
+        self,
+        img_size: int | tuple[int, int] = 224,
+        patch_size: int | tuple[int, int] = 16,
+        in_chans: int = 3,
+        embed_dim: int = 768,
+        ratio: int = 1,
+    ) -> None:
         super().__init__()
-        img_size = to_2tuple(img_size)
-        patch_size = to_2tuple(patch_size)
-        num_patches = (img_size[1] // patch_size[1]) * (img_size[0] // patch_size[0]) * (ratio ** 2)
-        self.patch_shape = (int(img_size[0] // patch_size[0] * ratio), int(img_size[1] // patch_size[1] * ratio))
-        self.origin_patch_shape = (int(img_size[0] // patch_size[0]), int(img_size[1] // patch_size[1]))
+        img_size = cast(tuple[int, int], tuple(int(value) for value in to_2tuple(img_size)))
+        patch_size = cast(tuple[int, int], tuple(int(value) for value in to_2tuple(patch_size)))
+        num_patches = (img_size[1] // patch_size[1]) * (img_size[0] // patch_size[0]) * (ratio**2)
         self.img_size = img_size
         self.patch_size = patch_size
         self.num_patches = num_patches
 
-        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=(patch_size[0] // ratio),
-                              padding=4 + 2 * (ratio // 2 - 1))
+        self.proj = nn.Conv2d(
+            in_chans,
+            embed_dim,
+            kernel_size=patch_size,
+            stride=(patch_size[0] // ratio),
+            padding=4 + 2 * (ratio // 2 - 1),
+        )
 
-    def forward(self, x, **kwargs):
-        B, C, H, W = x.shape
-        x = self.proj(x)
-        Hp, Wp = x.shape[2], x.shape[3]
+    def forward(
+        self,
+        x: Float[Tensor, "batch channels height width"],
+        **kwargs: Any,
+    ) -> tuple[Float[Tensor, "batch n_patches embed_dim"], tuple[int, int]]:
+        _batch_size: int = x.shape[0]
+        _channel_count: int = x.shape[1]
+        _height: int = x.shape[2]
+        _width: int = x.shape[3]
+        projected: Float[Tensor, "batch embed_dim patch_height patch_width"] = self.proj(x)
+        patch_height: int = projected.shape[2]
+        patch_width: int = projected.shape[3]
 
-        x = x.flatten(2).transpose(1, 2)
-        return x, (Hp, Wp)
+        tokens: Float[Tensor, "batch n_patches embed_dim"] = projected.flatten(2).transpose(1, 2)
+        return tokens, (patch_height, patch_width)
 
 
 class HybridEmbed(nn.Module):
-    """ CNN Feature Map Embedding
+    """CNN Feature Map Embedding
     Extract feature map from CNN, flatten, project to embedding dim.
     """
 
-    def __init__(self, backbone, img_size=224, feature_size=None, in_chans=3, embed_dim=768):
+    def __init__(
+        self,
+        backbone: nn.Module,
+        img_size: int | tuple[int, int] = 224,
+        feature_size: tuple[int, int] | None = None,
+        in_chans: int = 3,
+        embed_dim: int = 768,
+    ) -> None:
         super().__init__()
         assert isinstance(backbone, nn.Module)
-        img_size = to_2tuple(img_size)
+        img_size = cast(tuple[int, int], tuple(int(value) for value in to_2tuple(img_size)))
         self.img_size = img_size
         self.backbone = backbone
         if feature_size is None:
@@ -222,29 +299,48 @@ class HybridEmbed(nn.Module):
                 feature_dim = o.shape[1]
                 backbone.train(training)
         else:
-            feature_size = to_2tuple(feature_size)
-            feature_dim = self.backbone.feature_info.channels()[-1]
+            feature_size = cast(tuple[int, int], tuple(int(value) for value in to_2tuple(feature_size)))
+            feature_info = getattr(self.backbone, "feature_info")  # noqa: B009
+            feature_dim = feature_info.channels()[-1]
         self.num_patches = feature_size[0] * feature_size[1]
         self.proj = nn.Linear(feature_dim, embed_dim)
 
-    def forward(self, x):
-        x = self.backbone(x)[-1]
-        x = x.flatten(2).transpose(1, 2)
-        x = self.proj(x)
-        return x
+    def forward(self, x: Float[Tensor, "batch channels height width"]) -> Float[Tensor, "batch n_patches embed_dim"]:
+        backbone_feat: Float[Tensor, "batch feature_dim feature_height feature_width"] = self.backbone(x)[-1]
+        tokens: Float[Tensor, "batch n_patches feature_dim"] = backbone_feat.flatten(2).transpose(1, 2)
+        projected: Float[Tensor, "batch n_patches embed_dim"] = self.proj(tokens)
+        return projected
 
 
 class ViT(nn.Module):
-
-    def __init__(self,
-                 img_size=224, patch_size=16, in_chans=3, num_classes=80, embed_dim=768, depth=12,
-                 num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
-                 drop_path_rate=0., hybrid_backbone=None, norm_layer=None, use_checkpoint=False,
-                 frozen_stages=-1, ratio=1, last_norm=True,
-                 patch_padding='pad', freeze_attn=False, freeze_ffn=False, **kwargs
-                 ):
+    def __init__(
+        self,
+        img_size: int | tuple[int, int] = 224,
+        patch_size: int | tuple[int, int] = 16,
+        in_chans: int = 3,
+        num_classes: int = 80,
+        embed_dim: int = 768,
+        depth: int = 12,
+        num_heads: int = 12,
+        mlp_ratio: float = 4.0,
+        qkv_bias: bool = False,
+        qk_scale: float | None = None,
+        drop_rate: float = 0.0,
+        attn_drop_rate: float = 0.0,
+        drop_path_rate: float = 0.0,
+        hybrid_backbone: nn.Module | None = None,
+        norm_layer: Callable[[int], nn.Module] | None = None,
+        use_checkpoint: bool = False,
+        frozen_stages: int = -1,
+        ratio: int = 1,
+        last_norm: bool = True,
+        patch_padding: str = "pad",
+        freeze_attn: bool = False,
+        freeze_ffn: bool = False,
+        **kwargs,
+    ) -> None:
         # Protect mutable default arguments
-        super(ViT, self).__init__()
+        super().__init__()
         norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
@@ -256,28 +352,32 @@ class ViT(nn.Module):
         self.depth = depth
 
         if hybrid_backbone is not None:
-            self.patch_embed = HybridEmbed(
-                hybrid_backbone, img_size=img_size, in_chans=in_chans, embed_dim=embed_dim)
+            self.patch_embed: HybridEmbed | PatchEmbed
+            self.patch_embed = HybridEmbed(hybrid_backbone, img_size=img_size, in_chans=in_chans, embed_dim=embed_dim)
         else:
             self.patch_embed = PatchEmbed(
-                img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim, ratio=ratio)
+                img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim, ratio=ratio
+            )
         num_patches = self.patch_embed.num_patches
 
         ##########################################
-        self.joint_rep_type = '6d'
-        self.joint_rep_dim = {'6d': 6, 'aa': 3}[self.joint_rep_type]
+        self.joint_rep_type = "6d"
+        self.joint_rep_dim = {"6d": 6, "aa": 3}[self.joint_rep_type]
         self.NUM_HAND_JOINTS = 15
         npose = self.joint_rep_dim * (self.NUM_HAND_JOINTS + 1)
         self.npose = npose
-        mano_mean_path = kwargs.get("mano_mean_path", None)
+        mano_mean_path = kwargs.get("mano_mean_path")
         assert mano_mean_path and os.path.exists(mano_mean_path), f"{mano_mean_path} not exists!"
         mean_params = np.load(mano_mean_path)
-        init_cam = torch.from_numpy(mean_params['cam'].astype(np.float32)).unsqueeze(0)
-        self.register_buffer('init_cam', init_cam)
-        init_hand_pose = torch.from_numpy(mean_params['pose'].astype(np.float32)).unsqueeze(0)
-        init_betas = torch.from_numpy(mean_params['shape'].astype('float32')).unsqueeze(0)
-        self.register_buffer('init_hand_pose', init_hand_pose)
-        self.register_buffer('init_betas', init_betas)
+        init_cam: Float[Tensor, "1 3"] = torch.from_numpy(mean_params["cam"].astype(np.float32)).unsqueeze(0)
+        self.register_buffer("init_cam", init_cam)
+        init_hand_pose: Float[Tensor, "1 n_pose=96"] = torch.from_numpy(mean_params["pose"].astype(np.float32)).unsqueeze(0)
+        init_betas: Float[Tensor, "1 10"] = torch.from_numpy(mean_params["shape"].astype("float32")).unsqueeze(0)
+        self.register_buffer("init_hand_pose", init_hand_pose)
+        self.register_buffer("init_betas", init_betas)
+        self.init_cam: Float[Tensor, "1 3"]
+        self.init_hand_pose: Float[Tensor, "1 n_pose=96"]
+        self.init_betas: Float[Tensor, "1 10"]
 
         self.pose_emb = nn.Linear(self.joint_rep_dim, embed_dim)
         self.shape_emb = nn.Linear(10, embed_dim)
@@ -288,68 +388,103 @@ class ViT(nn.Module):
         self.deccam = nn.Linear(self.num_features, 3)
 
         # since the pretraining model has class token
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
+        pos_embed: Float[Tensor, "1 n_patches_plus_cls embed_dim"] = torch.zeros(1, num_patches + 1, embed_dim)
+        self.pos_embed = nn.Parameter(pos_embed)
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
 
         self.blocks = nn.ModuleList([
             Block(
-                dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
-                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer,
+                dim=embed_dim,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                qk_scale=qk_scale,
+                drop=drop_rate,
+                attn_drop=attn_drop_rate,
+                drop_path=dpr[i],
+                norm_layer=norm_layer,
             )
-            for i in range(depth)])
+            for i in range(depth)
+        ])
 
         self.last_norm = norm_layer(embed_dim) if last_norm else nn.Identity()
 
         if self.pos_embed is not None:
-            trunc_normal_(self.pos_embed, std=.02)
+            trunc_normal_(self.pos_embed, std=0.02)
 
-    def get_num_layers(self):
-        return len(self.blocks)
-
-    def forward_features(self, x):
-        B, C, H, W = x.shape
-        x, (Hp, Wp) = self.patch_embed(x)
+    def forward_features(self, x: Float[Tensor, "batch channels height width"]) -> ViTOutput:
+        batch_size: int = x.shape[0]
+        _channel_count: int = x.shape[1]
+        _height: int = x.shape[2]
+        _width: int = x.shape[3]
+        patch_tokens: Float[Tensor, "batch n_patches embed_dim"]
+        patch_grid_shape: tuple[int, int]
+        patch_tokens, patch_grid_shape = self.patch_embed(x)
+        patch_height: int = patch_grid_shape[0]
+        patch_width: int = patch_grid_shape[1]
 
         if self.pos_embed is not None:
             # fit for multiple GPU training
             # since the first element for pos embed (sin-cos manner) is zero, it will cause no difference
-            x = x + self.pos_embed[:, 1:] + self.pos_embed[:, :1]
+            patch_tokens = patch_tokens + self.pos_embed[:, 1:] + self.pos_embed[:, :1]
         # X [B, 192, 1280]
         # x cat [ mean_pose, mean_shape, mean_cam] tokens
-        pose_tokens = self.pose_emb(
-            self.init_hand_pose.reshape(1, self.NUM_HAND_JOINTS + 1, self.joint_rep_dim)).repeat(B, 1, 1)
-        shape_tokens = self.shape_emb(self.init_betas).unsqueeze(1).repeat(B, 1, 1)
-        cam_tokens = self.cam_emb(self.init_cam).unsqueeze(1).repeat(B, 1, 1)
+        init_pose: Float[Tensor, "1 joints_and_root=16 joint_rep_dim=6"] = self.init_hand_pose.reshape(
+            1, self.NUM_HAND_JOINTS + 1, self.joint_rep_dim
+        )
+        pose_tokens: Float[Tensor, "batch joints_and_root=16 embed_dim"] = self.pose_emb(
+            init_pose
+        ).repeat(batch_size, 1, 1)
+        shape_tokens: Float[Tensor, "batch shape_tokens=1 embed_dim"] = self.shape_emb(self.init_betas).unsqueeze(1).repeat(
+            batch_size, 1, 1
+        )
+        cam_tokens: Float[Tensor, "batch cam_tokens=1 embed_dim"] = self.cam_emb(self.init_cam).unsqueeze(1).repeat(
+            batch_size, 1, 1
+        )
 
-        x = torch.cat([pose_tokens, shape_tokens, cam_tokens, x], 1)
+        transformer_tokens: Float[Tensor, "batch total_tokens embed_dim"] = torch.cat(
+            (pose_tokens, shape_tokens, cam_tokens, patch_tokens), 1
+        )
         for blk in self.blocks:
-            x = blk(x)
+            transformer_tokens = blk(transformer_tokens)
 
-        x = self.last_norm(x)
+        normalized_tokens: Float[Tensor, "batch total_tokens embed_dim"] = self.last_norm(transformer_tokens)
 
-        pose_feat = x[:, :(self.NUM_HAND_JOINTS + 1)]
-        shape_feat = x[:, (self.NUM_HAND_JOINTS + 1):1 + (self.NUM_HAND_JOINTS + 1)]
-        cam_feat = x[:, 1 + (self.NUM_HAND_JOINTS + 1):2 + (self.NUM_HAND_JOINTS + 1)]
+        pose_feat: Float[Tensor, "batch joints_and_root=16 embed_dim"] = normalized_tokens[:, : (self.NUM_HAND_JOINTS + 1)]
+        shape_feat: Float[Tensor, "batch shape_tokens=1 embed_dim"] = normalized_tokens[
+            :, (self.NUM_HAND_JOINTS + 1) : 1 + (self.NUM_HAND_JOINTS + 1)
+        ]
+        cam_feat: Float[Tensor, "batch cam_tokens=1 embed_dim"] = normalized_tokens[
+            :, 1 + (self.NUM_HAND_JOINTS + 1) : 2 + (self.NUM_HAND_JOINTS + 1)
+        ]
 
-        # print(pose_feat.shape, shape_feat.shape, cam_feat.shape)
-        pred_hand_pose = self.decpose(pose_feat).reshape(B, -1) + self.init_hand_pose  # B , 96
-        pred_betas = self.decshape(shape_feat).reshape(B, -1) + self.init_betas  # B , 10
-        pred_cam = self.deccam(cam_feat).reshape(B, -1) + self.init_cam  # B , 3
+        pred_hand_pose: Float[Tensor, "batch n_pose=96"] = (
+            self.decpose(pose_feat).reshape(batch_size, -1) + self.init_hand_pose
+        )
+        pred_betas: Float[Tensor, "batch 10"] = self.decshape(shape_feat).reshape(batch_size, -1) + self.init_betas
+        pred_cam: Float[Tensor, "batch 3"] = self.deccam(cam_feat).reshape(batch_size, -1) + self.init_cam
 
-        pred_mano_feats = {}
-        pred_mano_feats['hand_pose'] = pred_hand_pose
-        pred_mano_feats['betas'] = pred_betas
-        pred_mano_feats['cam'] = pred_cam
+        pred_mano_feats: ViTManoFeats = {
+            "hand_pose": pred_hand_pose,
+            "betas": pred_betas,
+            "cam": pred_cam,
+        }
 
-        pred_hand_pose = rot6d_to_rotmat(pred_hand_pose).view(B, self.NUM_HAND_JOINTS + 1, 3, 3)
-        pred_mano_params = {'global_orient': pred_hand_pose[:, [0]],
-                            'hand_pose': pred_hand_pose[:, 1:],
-                            'betas': pred_betas}
+        pred_hand_rotmat: Float[Tensor, "batch joints_and_root=16 3 3"] = rot6d_to_rotmat(pred_hand_pose).view(
+            batch_size, self.NUM_HAND_JOINTS + 1, 3, 3
+        )
+        pred_mano_params: ViTManoParams = {
+            "global_orient": pred_hand_rotmat[:, [0]],
+            "hand_pose": pred_hand_rotmat[:, 1:],
+            "betas": pred_betas,
+        }
 
-        img_feat = x[:, 2 + (self.NUM_HAND_JOINTS + 1):].reshape(B, Hp, Wp, -1).permute(0, 3, 1, 2)
+        img_feat: Float[Tensor, "batch embed_dim patch_height patch_width"] = normalized_tokens[
+            :, 2 + (self.NUM_HAND_JOINTS + 1) :
+        ].reshape(batch_size, patch_height, patch_width, -1).permute(0, 3, 1, 2)
         return pred_mano_params, pred_cam, pred_mano_feats, img_feat
 
-    def forward(self, x):
-        x = self.forward_features(x)
-        return x
+    def forward(self, x: Float[Tensor, "batch channels height width"]) -> ViTOutput:
+        output: ViTOutput = self.forward_features(x)
+        return output

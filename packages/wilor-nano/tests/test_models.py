@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # @Time    : 2024/10/29
 # @Author  : wenshao
 # @Email   : wenshaoguo1026@gmail.com
@@ -6,14 +5,16 @@
 # @FileName: test_models.py
 import pdb
 import time
+from pathlib import Path
 
 
 def test_wilor_model():
+
     import cv2
-    import torch
     import numpy as np
-    import os
-    from wilor_mini.pipelines.wilor_hand_pose3d_estimation_pipeline import WiLorHandPose3dEstimationPipeline
+    import torch
+
+    from wilor_nano.pipelines.wilor_hand_pose3d_estimation_pipeline import WiLorHandPose3dEstimationPipeline
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     dtype = torch.float16
@@ -21,6 +22,7 @@ def test_wilor_model():
     pipe = WiLorHandPose3dEstimationPipeline(device=device, dtype=dtype, verbose=False)
     img_path = "assets/img.png"
     image = cv2.imread(img_path)
+    assert image is not None
     outputs = pipe.predict(image)
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     hand_bboxs = []
@@ -35,10 +37,12 @@ def test_wilor_model():
 
 
 def test_vit_profiler():
-    import torch
     import os
+
+    import torch
     import torch.profiler
-    from wilor_mini.models.vit import vit
+
+    from wilor_nano.models.vit import vit
     # 创建模型和数据
     wilor_pretrained_dir = "./wilor_mini/"
     os.makedirs(wilor_pretrained_dir, exist_ok=True)
@@ -60,12 +64,12 @@ def test_vit_profiler():
             with_flops=True
     ) as prof:
         # 运行模型
-        output = model(data)
+        model(data)
 
     with torch.no_grad():
         for _ in range(100):
             t0 = time.time()
-            output = model(data)
+            model(data)
             print(time.time() - t0)
     # 打印分析结果
     print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
@@ -73,10 +77,12 @@ def test_vit_profiler():
 
 
 def test_wilor_profiler():
-    import torch
     import os
+
+    import torch
     import torch.profiler
-    from wilor_mini.models.wilor import WiLor
+
+    from wilor_nano.models.wilor import WiLor
     # 创建模型和数据
     wilor_pretrained_dir = "./wilor_mini/"
     os.makedirs(wilor_pretrained_dir, exist_ok=True)
@@ -84,9 +90,12 @@ def test_wilor_profiler():
     mano_model_path = os.path.join(wilor_pretrained_dir, "pretrained_models", "MANO_RIGHT.pkl")
     FOCAL_LENGTH = 5000
     IMAGE_SIZE = 256
-    model = WiLor(mano_model_path=mano_model_path, mano_mean_path=mano_mean_path,
-                  focal_length=FOCAL_LENGTH,
-                  image_size=IMAGE_SIZE)
+    model = WiLor(
+        mano_root_dir=Path(mano_model_path).parent,
+        mano_mean_path=mano_mean_path,
+        focal_length=FOCAL_LENGTH,
+        image_size=IMAGE_SIZE,
+    )
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     dtype = torch.float16
     data = torch.randn(2, 256, 256, 3).to(device, dtype=dtype)  # 示例输入，8是batch size
@@ -102,12 +111,12 @@ def test_wilor_profiler():
             with_flops=True
     ) as prof:
         # 运行模型
-        output = model(data)
+        model(data)
 
     with torch.no_grad():
         for _ in range(100):
             t0 = time.time()
-            output = model(data)
+            model(data)
             print(time.time() - t0)
     # 打印分析结果
     print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))

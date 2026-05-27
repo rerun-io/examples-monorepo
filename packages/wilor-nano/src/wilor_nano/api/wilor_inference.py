@@ -18,10 +18,13 @@ from wilor_nano.pipelines.wilor_hand_pose3d_estimation_pipeline import (
 )
 from wilor_nano.runtime import get_torch_device, get_torch_dtype
 
+ImageEntity = Literal["image", "video"]
+
 
 @dataclass
 class WilorConfig:
-    rr_config: RerunTyroConfig
+    # Vulture cannot see that tyro constructs this field for Rerun setup side effects.
+    rr_config: RerunTyroConfig  # noqa
     image_path: Path | None = None
     video_path: Path | None = None
     max_frames: int | None = None
@@ -30,19 +33,77 @@ class WilorConfig:
 def set_annotation_context() -> None:
     rr.log(
         "/",
-        rr.AnnotationContext(
-            [
-                rr.ClassDescription(
-                    info=rr.AnnotationInfo(id=0, label="Hand", color=(0, 0, 255)),
-                    keypoint_annotations=[
-                        rr.AnnotationInfo(id=id, label=name) for id, name in MEDIAPIPE_ID2NAME.items()
-                    ],
-                    keypoint_connections=MEDIAPIPE_LINKS,
-                ),
-            ]
-        ),
+        rr.AnnotationContext([
+            rr.ClassDescription(
+                info=rr.AnnotationInfo(id=0, label="Hand", color=(0, 0, 255)),
+                keypoint_annotations=[rr.AnnotationInfo(id=id, label=name) for id, name in MEDIAPIPE_ID2NAME.items()],
+                keypoint_connections=MEDIAPIPE_LINKS,
+            ),
+        ]),
         static=True,
     )
+
+
+def _handedness(output: Detection) -> Literal["left", "right"]:
+    return "right" if output["is_right"] == 1.0 else "left"
+
+
+def clear_missing_detections(outputs: list[Detection], *, image_entity: ImageEntity) -> None:
+    has_right: bool = any(output.get("is_right", 0.0) == 1.0 for output in outputs)
+    has_left: bool = any(output.get("is_right", 0.0) == 0.0 for output in outputs)
+
+    if not has_right:
+        rr.log(f"{image_entity}/right_box", rr.Clear(recursive=True))
+        rr.log(f"{image_entity}/right_keypoints", rr.Clear(recursive=True))
+        rr.log("right_xyz", rr.Clear(recursive=True))
+
+    if not has_left:
+        rr.log(f"{image_entity}/left_box", rr.Clear(recursive=True))
+        rr.log(f"{image_entity}/left_keypoints", rr.Clear(recursive=True))
+        rr.log("left_xyz", rr.Clear(recursive=True))
+
+
+def log_detections(
+    outputs: list[Detection],
+    *,
+    image_entity: ImageEntity,
+    clear_missing: bool = False,
+) -> None:
+    if clear_missing:
+        clear_missing_detections(outputs, image_entity=image_entity)
+
+    for output in outputs:
+        handedness: Literal["left", "right"] = _handedness(output)
+        hand_bbox: list[float] = output["hand_bbox"]
+        wilor_preds: WilorPreds = output["wilor_preds"]
+        hand_keypoints: Float[ndarray, "1 n_joints=21 2"] = wilor_preds["pred_keypoints_2d"]
+        xyz: Float[ndarray, "1 n_joints=21 3"] = wilor_preds["pred_keypoints_3d"]
+
+        rr.log(
+            f"{handedness}_xyz",
+            rr.Points3D(
+                positions=xyz,
+                class_ids=0,
+                keypoint_ids=MEDIAPIPE_IDS,
+                show_labels=False,
+                colors=(0, 255, 0),
+            ),
+        )
+
+        rr.log(
+            f"{image_entity}/{handedness}_box",
+            rr.Boxes2D(array=hand_bbox, array_format=rr.Box2DFormat.XYXY, show_labels=True),
+        )
+        rr.log(
+            f"{image_entity}/{handedness}_keypoints",
+            rr.Points2D(
+                positions=hand_keypoints,
+                class_ids=0,
+                keypoint_ids=MEDIAPIPE_IDS,
+                show_labels=False,
+                colors=(0, 255, 0),
+            ),
+        )
 
 
 def main(config: WilorConfig):
@@ -55,41 +116,13 @@ def main(config: WilorConfig):
     # make sure one is not none
     assert config.image_path is not None or config.video_path is not None
     if config.image_path:
-        bgr: UInt8[ndarray, "h w 3"] = cv2.imread(str(config.image_path))
+        bgr: UInt8[ndarray, "h w 3"] | None = cv2.imread(str(config.image_path))
+        if bgr is None:
+            raise FileNotFoundError(f"Image not found: {config.image_path}")
         rgb: UInt8[ndarray, "h w 3"] = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         rr.log("image", rr.Image(rgb, color_model=rr.ColorModel.RGB))
         outputs: list[Detection] = pipe.predict(rgb)
-        for output in outputs:
-            handedness: Literal["left", "right"] = "right" if output["is_right"] == 1.0 else "left"
-            hand_bbox: list[float] = output["hand_bbox"]
-            wilor_preds: WilorPreds = output["wilor_preds"]
-            hand_keypoints: Float[ndarray, "1 n_joints=21 2"] = wilor_preds["pred_keypoints_2d"]
-            xyz: Float[ndarray, "1 n_joints=21 3"] = wilor_preds["pred_keypoints_3d"]
-            rr.log(
-                f"{handedness}_xyz",
-                rr.Points3D(
-                    positions=xyz,
-                    class_ids=0,
-                    keypoint_ids=MEDIAPIPE_IDS,
-                    show_labels=False,
-                    colors=(0, 255, 0),
-                ),
-            )
-
-            rr.log(
-                f"image/{handedness}_box",
-                rr.Boxes2D(array=hand_bbox, array_format=rr.Box2DFormat.XYXY, show_labels=True),
-            )
-            rr.log(
-                f"image/{handedness}_keypoints",
-                rr.Points2D(
-                    positions=hand_keypoints,
-                    class_ids=0,
-                    keypoint_ids=MEDIAPIPE_IDS,
-                    show_labels=False,
-                    colors=(0, 255, 0),
-                ),
-            )
+        log_detections(outputs, image_entity="image")
 
     if config.video_path:
         video_reader = VideoReader(filename=config.video_path)
@@ -112,52 +145,4 @@ def main(config: WilorConfig):
             rr.set_time("video_time", duration=1e-9 * ts)
             rgb: UInt8[ndarray, "h w 3"] = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             outputs: list[Detection] = pipe.predict(rgb)
-
-            # check if left or right hand are in outputs if not clear them in rerun
-            # After populating `outputs` and logging hands for this frame:
-            has_right: bool = any(o.get("is_right", 0.0) == 1.0 for o in outputs)
-            has_left: bool = any(o.get("is_right", 0.0) == 0.0 for o in outputs)
-
-            # Clear right-hand logs if no right hand this frame
-            if not has_right:
-                rr.log("video/right_box", rr.Clear(recursive=True))
-                rr.log("video/right_keypoints", rr.Clear(recursive=True))
-                rr.log("right_xyz", rr.Clear(recursive=True))
-
-            # Clear left-hand logs if no left hand this frame
-            if not has_left:
-                rr.log("video/left_box", rr.Clear(recursive=True))
-                rr.log("video/left_keypoints", rr.Clear(recursive=True))
-                rr.log("left_xyz", rr.Clear(recursive=True))
-
-            for output in outputs:
-                handedness: Literal["left", "right"] = "right" if output["is_right"] == 1.0 else "left"
-                hand_bbox: list[float] = output["hand_bbox"]
-                wilor_preds: WilorPreds = output["wilor_preds"]
-                hand_keypoints: Float[ndarray, "1 n_joints=21 2"] = wilor_preds["pred_keypoints_2d"]
-                xyz: Float[ndarray, "1 n_joints=21 3"] = wilor_preds["pred_keypoints_3d"]
-                rr.log(
-                    f"{handedness}_xyz",
-                    rr.Points3D(
-                        positions=xyz,
-                        class_ids=0,
-                        keypoint_ids=MEDIAPIPE_IDS,
-                        show_labels=False,
-                        colors=(0, 255, 0),
-                    ),
-                )
-
-                rr.log(
-                    f"video/{handedness}_box",
-                    rr.Boxes2D(array=hand_bbox, array_format=rr.Box2DFormat.XYXY, show_labels=True),
-                )
-                rr.log(
-                    f"video/{handedness}_keypoints",
-                    rr.Points2D(
-                        positions=hand_keypoints,
-                        class_ids=0,
-                        keypoint_ids=MEDIAPIPE_IDS,
-                        show_labels=False,
-                        colors=(0, 255, 0),
-                    ),
-                )
+            log_detections(outputs, image_entity="video", clear_missing=True)

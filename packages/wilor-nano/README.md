@@ -1,51 +1,142 @@
-## WiLoR-mini: Simplifying WiLoR into a Python package
+# WiLoR Nano
 
-**Original repository: [WiLoR](https://github.com/rolpotamias/WiLoR), thanks to the authors for sharing**
+Hand detection and 3D hand pose estimation with [WiLoR](https://github.com/rolpotamias/WiLoR), packaged for the examples monorepo with Rerun logging.
 
-I have simplified WiLoR, focusing on the inference process. Now it can be installed via pip and used directly, and it will automatically download the model.
+- **Original project:** [rolpotamias/WiLoR](https://github.com/rolpotamias/WiLoR)
+- **Package:** `wilor-nano`
+- **Import path:** `wilor_nano`
+- **Pixi envs:** `wilor`, `wilor-dev`
 
-## Updates
-- PyTorch/CUDA: Upgraded to PyTorch >= 2.7 with CUDA 12.8 wheels, enabling RTX 50xx/Blackwell support. Pinned `ultralytics==8.4.52` for YOLO26 support while keeping WiLoR detector checkpoint loading stable.
-- Packaging: Modern `pyproject.toml` with Hatchling; project name `wilor-nano` (import path `wilor_nano`); requires Python >= 3.11.
-- Typing: Added comprehensive type hints using jaxtyping across models, pipelines, and utils. Package-wide runtime checks via beartype are enabled only in the Pixi dev environment (`PIXI_ENVIRONMENT_NAME=dev`).
-- Models: ViT attention uses `torch.nn.functional.scaled_dot_product_attention`; MANO via `ManoSimpleLayer`; rotations handled with 6D→rotmat and `roma`; tensor shapes documented in signatures.
-- Pipeline: Encapsulated inference in `WiLorHandPose3dEstimationPipeline` with typed `TypedDict` outputs, YOLO-based hand detection, and automatic HF model downloads; camera projection utilities are typed NumPy/Torch.
-- Reproducibility: Managed with Pixi and a committed `pixi.lock`. Dev tasks/tools available in the `dev` environment (ruff, pytest). Examples:
-  - `pixi shell -e dev`
-  - `pixi run -e dev pytest`
-  - `pixi run -e dev ruff check .`
+## Run
 
-### Pixi Tasks
-- `image-example`: Runs the demo image inference using `assets/img.png`.
-  - `pixi run image-example`
-  - Equivalent raw command: `pixi run python tools/wilor_inference.py --image-path assets/img.png`
-- `video-example`: Runs the demo video inference using `assets/video.mp4`.
-  - `pixi run video-example`
-  - Equivalent raw command: `pixi run python tools/wilor_inference.py --video-path assets/video.mp4`
+Run commands from the workspace root:
 
-Notes:
-- These tasks are defined under the Pixi `dev` feature and resolve automatically if unique. They invoke `tools/wilor_inference.py` which logs results with Rerun and downloads pretrained weights on first run.
-- List available tasks: `pixi task list`
-
-### How to use?
-Note: make sure you are using Python3.10
-* install: `pip install git+https://github.com/warmshao/WiLoR-mini`
-* Usage:
-```python
-import torch
-import cv2
-from wilor_mini.pipelines.wilor_hand_pose3d_estimation_pipeline import WiLorHandPose3dEstimationPipeline
-device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-dtype = torch.float16
-
-pipe = WiLorHandPose3dEstimationPipeline(device=device, dtype=dtype)
-img_path = "assets/img.png"
-image = cv2.imread(img_path)
-image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-outputs = pipe.predict(image)
-
+```bash
+pixi run -e wilor --frozen image-example
+pixi run -e wilor --frozen video-example
+pixi run -e wilor --frozen video-trt --video-path assets/video.mp4
 ```
-For more usage examples, please refer to: `tests/test_pipelines.py`
 
-### Demo
-<video src="https://github.com/user-attachments/assets/ca7329fe-0b66-4eb6-87a5-4cb5cbe9ec43" controls="controls" width="300" height="500">您的浏览器不支持播放该视频！</video>
+Available WiLoR tasks:
+
+```bash
+pixi task list -e wilor
+```
+
+Current task surface:
+
+- `image-example`: original PyTorch image path.
+- `video-example`: original PyTorch video path, one frame at a time.
+- `video-trt`: optimized batched TensorRT video path.
+- `export-onnx`: export portable ONNX graphs.
+- `build-trt`: build machine-local TensorRT engines from ONNX.
+- `compare-reference`: compare `/tmp/wilor_candidate.rrd` against the checked-in 30-frame reference RRD.
+
+## Pipelines
+
+### Original PyTorch Path
+
+The original path keeps the public WiLoR inference flow simple and processes video frame by frame.
+
+```mermaid
+flowchart LR
+    A["Frame"] --> B["NumPy RGB"]
+    B --> C["Pipeline predict"]
+    C --> D["YOLO"]
+    D --> E["CPU crop"]
+    E --> F["PyTorch WiLoR"]
+    F --> G["MANO"]
+    G --> H["Detection"]
+    H --> I["Rerun"]
+```
+
+Use it when you want the baseline behavior or a simple reference path:
+
+```bash
+pixi run -e wilor --frozen video-example --video-path /path/to/video.mp4
+```
+
+### Batched TensorRT Path
+
+The optimized path is intentionally separate from the original path. It keeps frames and crops on CUDA until the final records are prepared for Rerun.
+
+```mermaid
+flowchart LR
+    A["Video"] --> B["CUDA decode"]
+    B --> C["Frame batches"]
+    C --> D["TRT detector"]
+    D --> E["GPU NMS"]
+    E --> F["Torch crop"]
+    F --> G["Crop batches"]
+    G --> H["TRT WiLoR"]
+    H --> I["Records"]
+    I --> J["Rerun"]
+```
+
+Use it for fast video processing:
+
+```bash
+pixi run -e wilor --frozen video-trt --video-path /path/to/video.mp4
+```
+
+The default TensorRT engines are expected under:
+
+```text
+packages/wilor-nano/pretrained_models/tensorrt/wilor_full_postcrop_static_b224_fp16.trt
+packages/wilor-nano/pretrained_models/tensorrt/detector_raw_static_b110_512x416_tf32.trt
+```
+
+TensorRT engines are machine-local artifacts. Keep ONNX as the portable artifact and rebuild `.trt` engines on the target GPU.
+
+## TensorRT Conversion
+
+Export the full WiLoR and detector ONNX graphs:
+
+```bash
+pixi run -e wilor --frozen export-onnx --artifact.target full_postcrop
+pixi run -e wilor --frozen export-onnx --artifact.target detector_raw
+```
+
+Build the machine-local TensorRT engines:
+
+```bash
+pixi run -e wilor --frozen build-trt --artifact.target full_postcrop
+pixi run -e wilor --frozen build-trt --artifact.target detector_raw
+```
+
+For a small conversion smoke test that does not overwrite the production engine paths:
+
+```bash
+pixi run -e wilor --frozen export-onnx --artifact.target full_postcrop --artifact.batch-size 1 --artifact.onnx-path pretrained_models/tensorrt/smoke/wilor_full_postcrop_static_b1.onnx
+pixi run -e wilor --frozen build-trt --artifact.target full_postcrop --artifact.batch-size 1 --artifact.onnx-path pretrained_models/tensorrt/smoke/wilor_full_postcrop_static_b1.onnx --engine-path pretrained_models/tensorrt/smoke/wilor_full_postcrop_static_b1_fp16.trt
+
+pixi run -e wilor --frozen export-onnx --artifact.target detector_raw --artifact.batch-size 1 --artifact.onnx-path pretrained_models/tensorrt/smoke/detector_raw_static_b1_512x416.onnx
+pixi run -e wilor --frozen build-trt --artifact.target detector_raw --artifact.batch-size 1 --artifact.onnx-path pretrained_models/tensorrt/smoke/detector_raw_static_b1_512x416.onnx --engine-path pretrained_models/tensorrt/smoke/detector_raw_static_b1_512x416_tf32.trt
+```
+
+## RRD Comparison
+
+Generate a 30-frame TensorRT candidate and compare it against the reference recording:
+
+```bash
+pixi run -e wilor --frozen video-trt --max-frames 30 --rr-config.save /tmp/wilor_candidate.rrd --rr-config.headless
+pixi run -e wilor --frozen compare-reference
+```
+
+The current TensorRT comparison tolerance is `rtol=0.01, atol=0.25` because CUDA video decode is not bit-exact with the OpenCV-generated reference.
+
+## Development
+
+Use the dev environment for tests, linting, type checking, and runtime beartype validation:
+
+```bash
+pixi run -e wilor-dev --frozen pytest -q packages/wilor-nano/tests
+pixi run -e wilor-dev --frozen ruff check packages/wilor-nano
+pixi run -e wilor-dev --frozen pyrefly check packages/wilor-nano
+```
+
+The package downloads required model weights on first use.
+
+## Acknowledgements
+
+This package is based on [WiLoR](https://github.com/rolpotamias/WiLoR). Thanks to the original authors for releasing the model and code.
