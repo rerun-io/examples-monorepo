@@ -59,6 +59,7 @@ def pred_fn(rgb_hw3: UInt8[ndarray, "h w 3"] | None, recording_id: uuid.UUID | s
         raise gr.Error("No image provided")
     rec: rr.RecordingStream = get_recording(recording_id)
     stream: rr.BinaryStream = rec.binary_stream()
+
     rec.set_time("iteration", sequence=0)
     rec.log("image", rr.Image(image=rgb_hw3))
     result: DetectionResult = hand_detector(rgb_hw3=rgb_hw3, hand_conf=0.2)

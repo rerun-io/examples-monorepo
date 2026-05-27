@@ -1,27 +1,8 @@
+from typing import no_type_check
+
 import cv2
 import numpy as np
 from numpy import ndarray
-
-
-def expand_to_aspect_ratio(input_shape, target_aspect_ratio=None):
-    """Increase the size of the bounding box to match the target shape."""
-    if target_aspect_ratio is None:
-        return input_shape
-
-    try:
-        w, h = input_shape
-    except (ValueError, TypeError):
-        return input_shape
-
-    w_t, h_t = target_aspect_ratio
-    if h / w < h_t / w_t:
-        h_new = max(w * h_t / w_t, h)
-        w_new = w
-    else:
-        h_new = h
-        w_new = max(h * w_t / h_t, w)
-    # Return as numpy array (previously mis-used numpy.ndarray constructor)
-    return np.array([w_new, h_new], dtype=np.float32)
 
 
 def rotate_2d(pt_2d: np.ndarray, rot_rad: float) -> ndarray:
@@ -39,9 +20,6 @@ def rotate_2d(pt_2d: np.ndarray, rot_rad: float) -> ndarray:
     xx = x * cs - y * sn
     yy = x * sn + y * cs
     return np.array([xx, yy], dtype=np.float32)
-
-
-from typing import no_type_check
 
 
 @no_type_check
@@ -133,7 +111,7 @@ def generate_image_patch_cv2(
         trans (ndarray): Transformation matrix.
     """
 
-    img_height, img_width, img_channels = img.shape
+    _img_height, img_width, _img_channels = img.shape
     if do_flip:
         img = img[:, ::-1, :]
         c_x = img_width - c_x - 1

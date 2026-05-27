@@ -1,5 +1,3 @@
-# -*- coding: utf-8 -*-
-# @Time    : 2024/10/14
-# @Author  : wenshao
-# @Project : WiLoR-mini
-# @FileName: __init__.py.py
+from wilor_nano.pipelines.wilor_hand_pose3d_estimation_pipeline import WiLorHandPose3dEstimationPipeline
+
+__all__ = ["WiLorHandPose3dEstimationPipeline"]
