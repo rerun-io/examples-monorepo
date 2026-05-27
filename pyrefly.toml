@@ -16,6 +16,7 @@ project-includes = [
     "packages/dpvo/dpvo/**/*",
     "packages/slam-evals/slam_evals/**/*",
     "packages/sapiens2-pose/src/**/*",
+    "packages/egoexo-forge/src/**/*",
 ]
 project-excludes = ["**/node_modules", "**/__pycache__", "**/*venv/**/*"]
 
@@ -46,6 +47,7 @@ search-path = [
     "packages/slam-evals",
     "packages/sapiens2-pose",
     "packages/sapiens2-pose/src",
+    "packages/egoexo-forge/src",
 ]
 
 # Third-party packages — all *-dev env site-packages so pyrefly can resolve
@@ -75,6 +77,8 @@ site-package-path = [
     ".pixi/envs/slam-evals-dev/lib/python3.10/site-packages",
     ".pixi/envs/sapiens2-pose-dev/lib/python3.12/site-packages",
     ".pixi/envs/sapiens2-pose-dev/lib/python3.12/site-packages/rerun_sdk",
+    ".pixi/envs/egoexo-forge-dev/lib/python3.12/site-packages",
+    ".pixi/envs/egoexo-forge-dev/lib/python3.12/site-packages/rerun_sdk",
 ]
 
 python-interpreter-path = ".pixi/envs/dev/bin/python"
