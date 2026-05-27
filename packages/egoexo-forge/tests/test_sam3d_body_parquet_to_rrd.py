@@ -1,3 +1,4 @@
+import pickle
 from pathlib import Path
 from typing import Any, cast
 
@@ -10,6 +11,7 @@ from jaxtyping import Float32
 from numpy import ndarray
 from rerun.experimental import RrdReader
 
+from egoexo_forge.api.sam3d_body_mesh import _load_mesh_faces
 from egoexo_forge.api.sam3d_body_parquet_to_rrd import (
     Sam3dBodyParquetToRrdConfig,
     convert_sam3d_body_parquet_to_rrd,
@@ -225,6 +227,29 @@ def test_convert_sam3d_body_parquet_to_rrd_reads_images_colocated_with_parquet_b
     assert bytes(first_image_blob) == _TINY_PNG
 
 
+def test_convert_sam3d_body_parquet_to_rrd_reads_uppercase_coco_dataset_images(tmp_path: Path) -> None:
+    parquet_path: Path = tmp_path / "000000.parquet"
+    rrd_path: Path = tmp_path / "sam3d-body-uppercase-coco.rrd"
+    image_name: str = "COCO_train2014_000000000001.png"
+    image_path: Path = tmp_path / "train2014" / image_name
+    image_path.parent.mkdir(parents=True)
+    image_path.write_bytes(_TINY_PNG)
+    _write_bbox_parquet(parquet_path, dataset="COCO", image_name=image_name)
+
+    convert_sam3d_body_parquet_to_rrd(
+        Sam3dBodyParquetToRrdConfig(
+            parquet_path=parquet_path,
+            rrd_path=rrd_path,
+            parquet_reader_summary=False,
+        )
+    )
+
+    image_blobs: list[object] = _component_values(rrd_path, "/world/cam/pinhole/image", "EncodedImage:blob")
+    first_image_blob_batches: list[object] = cast(list[object], image_blobs[0])
+    first_image_blob: list[int] = cast(list[int], first_image_blob_batches[0])
+    assert bytes(first_image_blob) == _TINY_PNG
+
+
 def test_convert_sam3d_body_parquet_to_rrd_reads_images_next_to_coco_split_dir_by_default(tmp_path: Path) -> None:
     parquet_path: Path = tmp_path / "coco_train" / "000000.parquet"
     rrd_path: Path = tmp_path / "sam3d-body-with-coco-image.rrd"
@@ -313,6 +338,23 @@ def test_convert_sam3d_body_parquet_to_rrd_rejects_unsupported_bbox_format(tmp_p
         )
 
 
+def test_convert_sam3d_body_parquet_to_rrd_rejects_missing_image_column_with_clear_error(tmp_path: Path) -> None:
+    parquet_path: Path = tmp_path / "000000.parquet"
+    rrd_path: Path = tmp_path / "sam3d-body.rrd"
+    _write_bbox_parquet(parquet_path)
+    table_without_image: pa.Table = pq.read_table(parquet_path).drop_columns(["image"])
+    pq.write_table(table_without_image, parquet_path)
+
+    with pytest.raises(ValueError, match=r"SAM-3D-Body parquet is missing required columns: \['image'\]"):
+        convert_sam3d_body_parquet_to_rrd(
+            Sam3dBodyParquetToRrdConfig(
+                parquet_path=parquet_path,
+                rrd_path=rrd_path,
+                parquet_reader_summary=False,
+            )
+        )
+
+
 def test_convert_sam3d_body_parquet_to_rrd_rejects_non_coco_rows(tmp_path: Path) -> None:
     parquet_path: Path = tmp_path / "000000.parquet"
     rrd_path: Path = tmp_path / "sam3d-body.rrd"
@@ -354,3 +396,90 @@ def test_convert_sam3d_body_parquet_to_rrd_logs_mhr_mesh_when_assets_are_availab
     first_vertices: list[object] = cast(list[object], vertices[0])
     first_vertex: Float32[ndarray, "xyz"] = np.asarray(first_vertices[0], dtype=np.float32)
     np.testing.assert_allclose(first_vertex, np.asarray([1.0, 2.0, 3.0], dtype=np.float32), atol=1e-6)
+
+
+def test_convert_sam3d_body_parquet_to_rrd_skips_mesh_when_metadata_columns_are_missing(tmp_path: Path) -> None:
+    parquet_path: Path = tmp_path / "000000.parquet"
+    rrd_path: Path = tmp_path / "sam3d-body-no-mesh-columns.rrd"
+    mhr_model_path: Path = tmp_path / "mhr_model.pt"
+    checkpoint_path: Path = tmp_path / "model.ckpt"
+    _write_bbox_parquet(parquet_path)
+    table_without_mesh: pa.Table = pq.read_table(parquet_path).drop_columns(["person_id", "model_params", "shape_params"])
+    pq.write_table(table_without_mesh, parquet_path)
+    _write_fake_mhr_assets(mhr_model_path=mhr_model_path, checkpoint_path=checkpoint_path)
+
+    convert_sam3d_body_parquet_to_rrd(
+        Sam3dBodyParquetToRrdConfig(
+            parquet_path=parquet_path,
+            rrd_path=rrd_path,
+            mhr_model_path=mhr_model_path,
+            sam3d_body_checkpoint_path=checkpoint_path,
+            parquet_reader_summary=False,
+        )
+    )
+
+    summary: str = RrdReader(rrd_path).store().summary()
+    assert "/world/gt/mhr_mesh" not in summary
+
+
+def test_convert_sam3d_body_parquet_to_rrd_requires_mesh_metadata_columns_when_mesh_is_required(tmp_path: Path) -> None:
+    parquet_path: Path = tmp_path / "000000.parquet"
+    rrd_path: Path = tmp_path / "sam3d-body-required-mesh-columns.rrd"
+    mhr_model_path: Path = tmp_path / "mhr_model.pt"
+    checkpoint_path: Path = tmp_path / "model.ckpt"
+    _write_bbox_parquet(parquet_path)
+    table_without_mesh: pa.Table = pq.read_table(parquet_path).drop_columns(["person_id", "model_params", "shape_params"])
+    pq.write_table(table_without_mesh, parquet_path)
+    _write_fake_mhr_assets(mhr_model_path=mhr_model_path, checkpoint_path=checkpoint_path)
+
+    with pytest.raises(ValueError, match="MHR mesh logging requires parquet columns"):
+        convert_sam3d_body_parquet_to_rrd(
+            Sam3dBodyParquetToRrdConfig(
+                parquet_path=parquet_path,
+                rrd_path=rrd_path,
+                mhr_model_path=mhr_model_path,
+                sam3d_body_checkpoint_path=checkpoint_path,
+                require_mesh=True,
+                parquet_reader_summary=False,
+            )
+        )
+
+
+def test_load_mesh_faces_uses_weights_only_checkpoint_loading_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    checkpoint_path: Path = tmp_path / "model.ckpt"
+    checkpoint_path.touch()
+    weights_only_values: list[bool | None] = []
+
+    def fake_torch_load(path: str, *, map_location: str, weights_only: bool | None = None) -> dict[str, dict[str, torch.Tensor]]:
+        assert path == str(checkpoint_path)
+        assert map_location == "cpu"
+        weights_only_values.append(weights_only)
+        return {"state_dict": {"head_pose.faces": torch.tensor([[0, 1, 2]], dtype=torch.int64)}}
+
+    monkeypatch.setattr(torch, "load", fake_torch_load)
+
+    faces: np.ndarray = _load_mesh_faces(checkpoint_path)
+
+    np.testing.assert_array_equal(faces, np.asarray([[0, 1, 2]], dtype=np.int32))
+    assert weights_only_values == [True]
+
+
+def test_load_mesh_faces_falls_back_for_legacy_checkpoint_loading(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    checkpoint_path: Path = tmp_path / "model.ckpt"
+    checkpoint_path.touch()
+    weights_only_values: list[bool | None] = []
+
+    def fake_torch_load(path: str, *, map_location: str, weights_only: bool | None = None) -> dict[str, dict[str, torch.Tensor]]:
+        assert path == str(checkpoint_path)
+        assert map_location == "cpu"
+        weights_only_values.append(weights_only)
+        if weights_only is True:
+            raise pickle.UnpicklingError("legacy checkpoint")
+        return {"state_dict": {"head_pose.faces": torch.tensor([[0, 1, 2]], dtype=torch.int64)}}
+
+    monkeypatch.setattr(torch, "load", fake_torch_load)
+
+    faces: np.ndarray = _load_mesh_faces(checkpoint_path)
+
+    np.testing.assert_array_equal(faces, np.asarray([[0, 1, 2]], dtype=np.int32))
+    assert weights_only_values == [True, False]

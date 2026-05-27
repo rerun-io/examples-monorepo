@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pickle
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, cast
 
@@ -182,7 +183,12 @@ def _sam3d_body_hf_snapshot_candidates() -> list[Path]:
 def _load_mesh_faces(checkpoint_path: Path) -> Int32[ndarray, "n_faces 3"]:
     import torch
 
-    checkpoint: Any = torch.load(str(checkpoint_path), map_location="cpu", weights_only=False)
+    try:
+        checkpoint: Any = torch.load(str(checkpoint_path), map_location="cpu", weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(str(checkpoint_path), map_location="cpu")
+    except (RuntimeError, pickle.UnpicklingError):
+        checkpoint = torch.load(str(checkpoint_path), map_location="cpu", weights_only=False)
     state_dict: Any = checkpoint.get("state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
     if not isinstance(state_dict, dict):
         raise ValueError(f"SAM-3D-Body checkpoint did not contain a state dict: {checkpoint_path}")

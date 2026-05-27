@@ -32,7 +32,8 @@ BBOX_ENTITY_PATH: str = f"{IMAGE_ENTITY_PATH}/pred/bbox"
 KEYPOINTS_2D_ENTITY_PATH: str = f"{IMAGE_ENTITY_PATH}/pred/mhr70_uv"
 KEYPOINTS_3D_ENTITY_PATH: str = "/world/gt/mhr70_xyz"
 MESH_ENTITY_PATH: str = "/world/gt/mhr_mesh"
-SAM3D_BODY_REQUIRED_COLUMNS: frozenset[str] = frozenset(("bbox", "bbox_format", "cam_int", "keypoints_2d", "keypoints_3d"))
+SAM3D_BODY_REQUIRED_COLUMNS: frozenset[str] = frozenset(("dataset", "image", "bbox", "bbox_format", "cam_int", "keypoints_2d", "keypoints_3d"))
+SAM3D_BODY_MESH_COLUMNS: frozenset[str] = frozenset(("person_id", "model_params", "shape_params"))
 SUPPORTED_BBOX_FORMATS: dict[str, rr.Box2DFormat] = {
     "xywh": rr.Box2DFormat.XYWH,
     "xyxy": rr.Box2DFormat.XYXY,
@@ -332,6 +333,13 @@ def _keypoint_position_rows(parquet_path: Path, *, column_name: str, channels: i
 
 
 def _mesh_stream(config: Sam3dBodyParquetToRrdConfig) -> LazyChunkStream | None:
+    schema: pa.Schema = pq.read_schema(config.parquet_path)
+    missing_mesh_columns: list[str] = sorted(SAM3D_BODY_MESH_COLUMNS - set(schema.names))
+    if missing_mesh_columns:
+        if config.require_mesh:
+            raise ValueError(f"MHR mesh logging requires parquet columns: {missing_mesh_columns}")
+        return None
+
     mesh_reconstructor: Sam3dBodyMeshReconstructor | None = create_mesh_reconstructor(
         mhr_model_path=config.mhr_model_path,
         sam3d_body_checkpoint_path=config.sam3d_body_checkpoint_path,
@@ -416,7 +424,7 @@ def _default_coco_image_root(parquet_path: Path) -> Path:
 
 
 def _dataset_image_relative_path(*, dataset: str, image_name: str) -> Path:
-    if dataset != "coco":
+    if dataset.lower() != "coco":
         raise ValueError(f"Only dataset='coco' is supported for image lookup, got {dataset!r}.")
     image_parts: list[str] = image_name.split("_")
     if len(image_parts) < 3 or image_parts[0] != "COCO":
@@ -475,5 +483,5 @@ def _validate_coco_rows(parquet_path: Path) -> None:
     invalid_datasets: list[object] = [dataset for dataset in datasets if str(dataset).lower() != "coco"]
     if invalid_datasets:
         raise ValueError("Only dataset='coco' rows are supported by this parquet-to-RRD converter.")
-    for image in images:
-        _dataset_image_relative_path(dataset="coco", image_name=str(image))
+    for dataset, image in zip(datasets, images, strict=True):
+        _dataset_image_relative_path(dataset=str(dataset), image_name=str(image))
