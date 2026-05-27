@@ -111,6 +111,7 @@ packages/dpvo/data/
 packages/*/outputs/
 packages/*/checkpoints/
 packages/*/_checkpoints/
+packages/*/pretrained_models/
 
 packages/vistadream/ckpt/
 
@@ -119,7 +120,6 @@ packages/gsplat-rust-renderer/target/
 packages/gsplat-rust-renderer/examples/*.ply
 
 # Package-specific ignores
-packages/wilor-nano/pretrained_models/
 packages/wilor-nano/onnx_models/
 packages/wilor-nano/demo/
 packages/wilor-nano/results/
