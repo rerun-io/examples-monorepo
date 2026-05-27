@@ -730,6 +730,60 @@ cwd = "packages/sapiens2-pose"
 description = "Launch the Sapiens2 video pose Gradio app in dev mode"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# sapiens-coco133-pose
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.sapiens-coco133-pose]
+platforms = ["linux-64"]
+
+[feature.sapiens-coco133-pose.dependencies]
+python = "3.12.*"
+torchcodec = ">=0.10.0,<0.11"
+tyro = ">=0.9.1,<0.10"
+
+[feature.sapiens-coco133-pose.pypi-dependencies]
+sapiens-coco133-pose = { path = "packages/sapiens-coco133-pose", editable = true }
+sapiens2-pose = { path = "packages/sapiens2-pose", editable = true }
+mv-api = { path = "packages/mv-api", editable = true }
+wilor_nano = { path = "packages/wilor-nano", editable = true }
+rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
+onnx = "*"
+onnxscript = "*"
+
+[feature.sapiens-coco133-pose.target.linux-64.pypi-dependencies]
+# TensorRT engines are machine-local artifacts; keep ONNX portable and rebuild engines per target GPU.
+tensorrt-cu12 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
+cuda-python = "*"
+
+[feature.sapiens-coco133-pose.activation.env]
+PACKAGE_DIR = "packages/sapiens-coco133-pose"
+SAPIENS_PRELOAD_MODELS = "0"
+
+[feature.sapiens-coco133-pose.tasks.iterable-video]
+cmd = "python tools/demos/iterable_video_pose.py"
+cwd = "packages/sapiens-coco133-pose"
+description = "Run non-batched RTMLib YOLOX + Sapiens COCO-133 video pose and write the golden RRD/artifact"
+
+[feature.sapiens-coco133-pose.tasks.video-trt]
+cmd = "python tools/demos/batched_tensorrt_video_pose.py"
+cwd = "packages/sapiens-coco133-pose"
+description = "Run batched CUDA/TensorRT COCO-133 video pose"
+
+[feature.sapiens-coco133-pose.tasks.export-pose-onnx]
+cmd = "python tools/conversion/export_sapiens_pose_onnx.py"
+cwd = "packages/sapiens-coco133-pose"
+description = "Export static-batch FP16 Sapiens2 pose ONNX"
+
+[feature.sapiens-coco133-pose.tasks.build-trt]
+cmd = "python tools/conversion/build_tensorrt_engine.py"
+cwd = "packages/sapiens-coco133-pose"
+description = "Build a static-batch FP16 TensorRT engine from ONNX"
+
+[feature.sapiens-coco133-pose.tasks.benchmark]
+cmd = "python tools/eval/benchmark.py"
+cwd = "packages/sapiens-coco133-pose"
+description = "Benchmark iterable golden path against batched TensorRT path"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # robocap-slam
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.robocap.dependencies]
@@ -1548,6 +1602,17 @@ sapiens2-pose-dev = { features = [
     "sapiens2-pose",
     "dev",
 ], solve-group = "sapiens2-pose", no-default-feature = true }
+sapiens-coco133-pose = { features = [
+    "common",
+    "cuda",
+    "sapiens-coco133-pose",
+], solve-group = "sapiens-coco133-pose", no-default-feature = true }
+sapiens-coco133-pose-dev = { features = [
+    "common",
+    "cuda",
+    "sapiens-coco133-pose",
+    "dev",
+], solve-group = "sapiens-coco133-pose", no-default-feature = true }
 robocap = { features = [
     "common",
     "robocap",

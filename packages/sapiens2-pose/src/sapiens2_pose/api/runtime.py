@@ -60,6 +60,11 @@ _pose_model_cache: dict[tuple[ModelSize, str], Any] = {}
 _detector_cache: dict[str, tuple[Any, Any]] = {}
 
 
+def clear_pose_model_cache() -> None:
+    """Clear cached Sapiens pose models held by this runtime module."""
+    _pose_model_cache.clear()
+
+
 def resolve_device(device: DeviceChoice = "auto") -> str:
     """Resolve a user device choice into a concrete torch device string."""
     if device == "auto":
