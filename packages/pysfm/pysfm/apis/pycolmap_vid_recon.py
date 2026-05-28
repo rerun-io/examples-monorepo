@@ -74,7 +74,7 @@ class TimingLogger:
             yield
         finally:
             elapsed: float = time.perf_counter() - t_start
-            minutes: int
+            minutes: float
             seconds: float
             minutes, seconds = divmod(elapsed, 60)
             time_str: str = f"{int(minutes)}m {seconds:.1f}s"
@@ -85,7 +85,7 @@ class TimingLogger:
     def log_total(self) -> None:
         """Append a total row to the timing table."""
         total: float = time.perf_counter() - self.start_time
-        minutes: int
+        minutes: float
         seconds: float
         minutes, seconds = divmod(total, 60)
         time_str: str = f"{int(minutes)}m {seconds:.1f}s"
@@ -198,7 +198,7 @@ def run_vid_recon(*, config: VidReconConfig, timer: TimingLogger | None = None) 
     pycolmap.set_random_seed(0)
 
     if config.verbose:
-        pycolmap.logging.minloglevel = pycolmap.logging.INFO
+        pycolmap.logging.minloglevel = int(pycolmap.logging.INFO)
 
     reader_options: pycolmap.ImageReaderOptions = pycolmap.ImageReaderOptions()
     reader_options.camera_model = config.camera_model

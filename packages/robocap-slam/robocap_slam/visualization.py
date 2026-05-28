@@ -74,12 +74,14 @@ def log_orient_transform(R: Float64[ndarray, "3 3"], t: Float64[ndarray, "3"]) -
 def log_static_cameras_and_videos(
     dataset: BaseTrackDataset,
     timeline: str = "video_time",
+    log_videos: bool = True,
 ) -> None:
     """Log pinholes, extrinsics, and video assets (all static, called once).
 
     Args:
         dataset: Track dataset providing camera params and video paths.
         timeline: Timeline name for video frame timestamps.
+        log_videos: Whether to log video assets and frame references.
     """
     for i, cam_name in enumerate(dataset.cam_names):
         cam_log_path: Path = Path(f"world/rig/cam{i}")
@@ -92,8 +94,7 @@ def log_static_cameras_and_videos(
             static=True,
         )
 
-        # Log video asset + frame references (static)
-        if cam_name in dataset.video_paths:
+        if log_videos and cam_name in dataset.video_paths:
             log_video(
                 dataset.video_paths[cam_name],
                 cam_log_path / "pinhole" / "video",
@@ -117,7 +118,7 @@ def log_frame_visuals(
     """
     rr.log(
         "world/rig",
-        rr.Transform3D(translation=odom_pose.translation, quaternion=odom_pose.rotation),
+        rr.Transform3D(translation=odom_pose.translation, quaternion=rr.Quaternion(xyzw=odom_pose.rotation)),
     )
 
     if landmarks:

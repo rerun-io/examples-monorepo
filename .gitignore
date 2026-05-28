@@ -98,6 +98,7 @@ cython_debug/
 
 # Package top-level data directories (downloaded assets, not Python package data/)
 packages/monoprior/data/
+packages/simplecv/data/
 packages/prompt-da/data/
 packages/wilor-nano/data/
 packages/sam3d-body-rerun/data/
@@ -124,6 +125,7 @@ packages/wilor-nano/onnx_models/
 packages/wilor-nano/demo/
 packages/wilor-nano/results/
 packages/sapiens2-pose/comparison_outputs/
+packages/simplecv/artifacts/
 
 # Logs
 *.log

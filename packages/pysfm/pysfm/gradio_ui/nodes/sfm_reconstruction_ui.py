@@ -38,6 +38,9 @@ Note: .parents[3] navigates from pysfm/gradio_ui/nodes/sfm_reconstruction_ui.py
 up to the package root.
 """
 
+FOUNTAIN_IMAGES_DIR: Final[Path] = EXAMPLE_DATA_DIR / "Fountain" / "images"
+"""Path to the Fountain example images used by the CLI demo."""
+
 gr.set_static_paths([str(EXAMPLE_DATA_DIR)])
 
 
@@ -106,6 +109,17 @@ def _prepare_image_dir(
     # All files from a directory upload share the same parent
     image_dir: Path = file_paths[0].parent
     return image_dir
+
+
+def _fountain_example_files() -> list[list[list[str]]]:
+    """Return the Gradio example row for the downloaded Fountain images."""
+    image_paths: list[Path] = sorted(FOUNTAIN_IMAGES_DIR.glob("*.png"))
+    if not image_paths:
+        image_paths = sorted(FOUNTAIN_IMAGES_DIR.glob("*.jpg"))
+    if not image_paths:
+        return []
+
+    return [[[str(image_path) for image_path in image_paths]]]
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +300,14 @@ def main() -> gr.Blocks:
 
                     with gr.TabItem("Outputs", id="outputs"):
                         status_text = gr.Textbox(label="Status", interactive=False)
+
+                gr.Examples(
+                    examples=_fountain_example_files(),
+                    inputs=[input_files],
+                    cache_examples=False,
+                    label="Examples",
+                    example_labels=["Fountain images"],
+                )
 
             # ---- Right column: Rerun viewer ----
             with gr.Column(scale=5):

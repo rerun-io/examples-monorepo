@@ -196,13 +196,15 @@ with gr.Blocks() as prompt_da_block:
         max_depth_range_meter=max_depth_range_meter,
         depth_fusion_resolution=depth_fusion_resolution,
     )
-    gr.Examples(
-        examples=[
-            ["data/6G-room-example.zip", 4.0, 0.02],
-        ],
-        inputs=input_params.to_list(),
-        cache_examples=False,
-    )
+    example_zip_path: Path = Path("data/6G-room-example.zip")
+    if example_zip_path.exists():
+        gr.Examples(
+            examples=[
+                [str(example_zip_path), 4.0, 0.02],
+            ],
+            inputs=input_params.to_list(),
+            cache_examples=False,
+        )
     # The callback yields binary stream chunks that the viewer consumes live.
     prompt_da_event = prompt_da_btn.click(
         stream_polycam_da,

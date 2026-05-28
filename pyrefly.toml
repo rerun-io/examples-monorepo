@@ -2,6 +2,7 @@
 # package-local `[tool.pyrefly]` sections in `packages/*/pyproject.toml`.
 project-includes = [
     "packages/monoprior/monopriors/**/*",
+    "packages/simplecv/simplecv/**/*",
     "packages/prompt-da/src/**/*",
     "packages/wilor-nano/src/**/*",
     "packages/sam3d-body-rerun/src/**/*",
@@ -33,6 +34,7 @@ tensor-shapes = true
 search-path = [
     "typings/pyrefly/tensor_shapes/fixtures",
     "packages/monoprior",
+    "packages/simplecv",
     "packages/prompt-da/src",
     "packages/wilor-nano/src",
     "packages/sam3d-body-rerun/src",
@@ -60,12 +62,14 @@ site-package-path = [
     # Common deps (rerun, numpy, etc.) are resolved from the python-interpreter-path
     # (dev env) automatically — no need to list .pixi/envs/dev here.
     ".pixi/envs/monoprior-dev/lib/python3.12/site-packages",
+    ".pixi/envs/simplecv-dev/lib/python3.12/site-packages",
+    ".pixi/envs/simplecv-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/prompt-da-dev/lib/python3.12/site-packages",
     ".pixi/envs/wilor-dev/lib/python3.12/site-packages",
     ".pixi/envs/sam3d-dev/lib/python3.12/site-packages",
     ".pixi/envs/sam3-rerun-dev/lib/python3.12/site-packages",
     ".pixi/envs/mv-api-dev/lib/python3.12/site-packages",
-    ".pixi/envs/robocap-dev/lib/python3.10/site-packages",
+    ".pixi/envs/robocap-dev/lib/python3.12/site-packages",
     ".pixi/envs/pysfm-dev/lib/python3.12/site-packages",
     ".pixi/envs/vistadream-dev/lib/python3.12/site-packages",
     ".pixi/envs/pyvrs-viewer-dev/lib/python3.12/site-packages",

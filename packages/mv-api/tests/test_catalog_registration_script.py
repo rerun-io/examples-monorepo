@@ -103,7 +103,7 @@ def test_pixi_mac_registration_env_is_mac_only_and_lean() -> None:
         "scipy": "*",
     }
     assert set(feature["pypi-dependencies"]) == {"rerun-sdk", "simplecv", "tyro"}
-    assert feature["pypi-dependencies"]["simplecv"]["rev"] == "178479b53d14b9dd4a79b212dd2c5a3be52b4de8"
+    assert feature["pypi-dependencies"]["simplecv"] == {"path": "packages/simplecv", "editable": True}
     assert feature["pypi-dependencies"]["rerun-sdk"]["extras"] == ["datafusion"]
     assert task["cmd"] == "python tools/apps/register_catalog_with_predictions.py"
     assert task["cwd"] == "packages/mv-api"

@@ -6,6 +6,7 @@ A pixi workspace containing multiple computer vision example projects, each with
 
 | Package | Prod env | Dev env | Python | GPU | Description |
 |---|---|---|---|---|---|
+| [simplecv](packages/simplecv/) | `simplecv` | `simplecv-dev` | 3.12 | CUDA 12.9 | Shared computer vision utilities, datasets, Rerun logging, and geometry helpers |
 | [monoprior](packages/monoprior/) | `monoprior` | `monoprior-dev` | 3.12 | CUDA 12.9 | Monocular geometric priors (depth, normals) |
 | [prompt-da](packages/prompt-da/) | `prompt-da` | `prompt-da-dev` | 3.12 | CUDA 12.9 | Prompt Depth Anything — depth completion on Polycam data |
 | [wilor-nano](packages/wilor-nano/) | `wilor` | `wilor-dev` | 3.12 | CUDA 12.9 | Hand pose estimation |
@@ -106,6 +107,7 @@ The root `pixi.toml` is structured around **features** that compose into **envir
 [feature.dev]                   # ruff, pytest, beartype, pyrefly, hypothesis + PIXI_DEV_MODE=1
 [feature.ide]                   # Standalone IDE/editor tooling (Python 3.12)
 
+[feature.simplecv]              # Shared CV utilities and SimpleCV tasks
 [feature.monoprior]             # Package-specific: conda deps, pypi deps, tasks, PACKAGE_DIR
 [feature.prompt-da]             #   "
 [feature.wilor]                 #   "
