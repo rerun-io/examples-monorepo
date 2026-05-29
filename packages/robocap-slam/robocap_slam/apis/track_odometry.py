@@ -11,6 +11,7 @@ from scipy.spatial.transform import Rotation
 from simplecv.rerun_log_utils import RerunTyroConfig
 from tqdm.auto import tqdm
 
+from robocap_slam.apis.tracking_utils import bounded_frame_count
 from robocap_slam.configs.track_dataset_configs import AnnotatedTrackDatasetUnion
 from robocap_slam.data.base import BaseTrackDataset
 from robocap_slam.visualization import (
@@ -33,6 +34,10 @@ class TrackOdometryConfig:
     """Dataset to track (e.g., robocap)."""
     auto_orient: bool = True
     """Gravity-align the 3D view using auto_orient_and_center_poses."""
+    max_frames: int | None = None
+    """Optional frame cap for deterministic validation/reference runs."""
+    log_videos: bool = True
+    """Whether to log static video assets and frame references."""
 
 
 def main(config: TrackOdometryConfig) -> None:
@@ -50,7 +55,7 @@ def main(config: TrackOdometryConfig) -> None:
     tracker_cfg = cuvslam.Tracker.OdometryConfig(
         enable_observations_export=True,
         enable_final_landmarks_export=True,
-        horizontal_stereo_camera=False,
+        rectified_stereo_camera=False,
         odometry_mode=cuvslam.Tracker.OdometryMode.Multicamera,
     )
 
@@ -80,7 +85,7 @@ def main(config: TrackOdometryConfig) -> None:
         )
     )
     rr.log("/", rr.ViewCoordinates.LFD, static=True)
-    log_static_cameras_and_videos(dataset, timeline="video_time")
+    log_static_cameras_and_videos(dataset, timeline="video_time", log_videos=config.log_videos)
     log_rig_mesh(dataset.mesh_path)
 
     # Tracking loop
@@ -92,7 +97,8 @@ def main(config: TrackOdometryConfig) -> None:
         first_cam_name: str = dataset.cam_names[0]
         rig_from_cam = dataset.cam_params[first_cam_name].extrinsics.world_T_cam
 
-    for frame_idx in tqdm(range(dataset.n_frames), desc="Tracking"):
+    frame_count: int = bounded_frame_count(dataset.n_frames, config.max_frames)
+    for frame_idx in tqdm(range(frame_count), desc="Tracking"):
         images: list[UInt8[np.ndarray, "h w 3"]] = dataset.get_frame(frame_idx)
         timestamp_ns: int = int(dataset.video_timestamps_ns[frame_idx])
 
@@ -120,12 +126,12 @@ def main(config: TrackOdometryConfig) -> None:
             world_from_rig_matrices.append(mat)
 
         # Re-log trajectory every 10 frames to avoid O(n^2) data transmission
-        is_batch_frame: bool = frame_idx % 10 == 0 or frame_idx == dataset.n_frames - 1
+        is_batch_frame: bool = frame_idx % 10 == 0 or frame_idx == frame_count - 1
         if is_batch_frame:
             rr.log("world/trajectory", rr.LineStrips3D(trajectory, colors=[[0, 200, 255]]))
 
         # Periodically update gravity-alignment (rotation only, no centering)
-        if config.auto_orient and is_batch_frame:
+        if config.auto_orient and rig_from_cam is not None and is_batch_frame:
             orient_result = compute_orient_transform(world_from_rig_matrices, rig_from_cam, center=False)
             if orient_result is not None:
                 log_orient_transform(*orient_result)
@@ -135,12 +141,12 @@ def main(config: TrackOdometryConfig) -> None:
     log_final_landmarks(tracker)
 
     # Final orient with centering
-    if config.auto_orient and world_from_rig_matrices:
+    if config.auto_orient and rig_from_cam is not None and world_from_rig_matrices:
         orient_result = compute_orient_transform(world_from_rig_matrices, rig_from_cam, center=True)
         if orient_result is not None:
             log_orient_transform(*orient_result)
 
-    print(f"\nDone. Tracked {len(trajectory)}/{dataset.n_frames} frames.")
+    print(f"\nDone. Tracked {len(trajectory)}/{frame_count} frames.")
 
 
 def entrypoint() -> None:

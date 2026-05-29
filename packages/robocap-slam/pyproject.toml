@@ -2,7 +2,7 @@
 name = "robocap-slam"
 version = "0.1.0"
 authors = [{name = "Pablo Vela", email = "pablovela5620@gmail.com"}]
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     # common: numpy, scipy, jaxtyping, rerun-sdk, gradio, gradio-rerun,
     #         huggingface_hub, hf-transfer, tqdm, pyserde, av, opencv

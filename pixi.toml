@@ -25,7 +25,7 @@ fsspec = ">=2025.3,<=2026.2.0"
 av = "*"
 py-opencv = "*"
 numpy = "*"
-pyserde = ">=0.20,<0.30"
+pyserde = ">=0.31.2,<0.32"
 jaxtyping = "<0.3"
 typing_extensions = ">=4.1.0,<4.13.0"
 hf-transfer = "*"
@@ -44,7 +44,7 @@ rerun-sdk = "==0.32.2"
 # rerun-sdk = { path = "/home/pablo/0Dev/work/rerun-projects/reality/rerun/target/wheels/rerun_sdk-0.33.0a1+dev-cp310-abi3-manylinux_2_39_x86_64.whl" }
 gradio = "==6.13.0"
 gradio-rerun = "==0.32.2"
-simplecv = { git = "https://github.com/pablovela5620/simplecv.git", rev = "f7b66c6e3874cec0c009e464b212afe1f393352e" }
+simplecv = { path = "packages/simplecv", editable = true }
 
 # ─── catalog common feature (Rerun catalog prerelease lane) ────────────────
 [feature.catalog-common.dependencies]
@@ -65,7 +65,7 @@ xorg-libx11 = "*"
 xorg-xorgproto = "*"
 
 [feature.catalog-common.pypi-dependencies]
-simplecv = { git = "https://github.com/pablovela5620/simplecv.git", rev = "178479b53d14b9dd4a79b212dd2c5a3be52b4de8" }
+simplecv = { path = "packages/simplecv", editable = true }
 
 [feature.rerun-prerelease.pypi-dependencies]
 rerun-sdk = { version = "==0.33.0a1+dev", extras = [
@@ -117,7 +117,7 @@ pytorch-gpu = ">=2.8.0"
 torchvision = "*"
 
 [feature.cuda.pypi-dependencies]
-onnxruntime-gpu = ">=1.23.2,<2"
+onnxruntime-gpu = { version = ">=1.24.0.dev0,<2", index = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-13-nightly/pypi/simple/" }
 
 # ─── ide feature (standalone dev env for Zed/IDE tooling) ────────────────────
 [feature.ide.dependencies]
@@ -137,13 +137,15 @@ types-tqdm = "*"
 
 [feature.dev.activation.env]
 PIXI_DEV_MODE = "1"
+PYREFLY_TARGET = "."
+PYREFLY_EXTRA_ARGS = ""
 
 [feature.dev.tasks.lint]
 cmd = "cd $PACKAGE_DIR && ruff check ."
 description = "Lint the package"
 
 [feature.dev.tasks.typecheck]
-cmd = "cd $PACKAGE_DIR && pyrefly check -c ../../pyrefly.toml ."
+cmd = "cd $PACKAGE_DIR && pyrefly check -c ../../pyrefly.toml $PYREFLY_TARGET $PYREFLY_EXTRA_ARGS"
 description = "Typecheck the package"
 
 [feature.dev.tasks.deadcode]
@@ -153,6 +155,123 @@ description = "Find dead code in the package"
 [feature.dev.tasks.tests]
 cmd = "cd $PACKAGE_DIR && pytest -q"
 description = "Run package tests"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# simplecv
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.simplecv]
+platforms = ["linux-64"]
+
+[feature.simplecv.dependencies]
+python = "3.12.*"
+einops = ">=0.8.0,<0.9"
+icecream = ">=2.1.3,<3"
+pandas = ">=2.3.3,<2.4"
+tyro = ">=0.9.1,<0.10"
+open3d = ">=0.19.0,<0.20"
+natsort = ">=8.4.0,<9"
+libjpeg-turbo = "*"
+requests = "*"
+torchcodec = "*"
+hdf5 = "*"
+h5py = ">=3.12.1,<4"
+dill = ">=0.3.8,<0.4.1"
+datasets = ">=4.0.0"
+
+[feature.simplecv.pypi-dependencies]
+jax = ">=0.6.0,<0.7"
+jaxopt = ">=0.8.5,<0.9"
+lovely-jax = "*"
+rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
+wilor-nano = { path = "packages/wilor-nano", editable = true }
+timm = "<1.0"
+vrs = ">=1.1.0"
+PyTurboJPEG = ">=1.7.0"
+
+[feature.simplecv.activation.env]
+PACKAGE_DIR = "packages/simplecv"
+PYREFLY_TARGET = "simplecv"
+PYREFLY_EXTRA_ARGS = "--baseline pyrefly-baseline.json"
+
+[feature.simplecv.tasks.simplecv-view-polycam-data]
+cmd = "python tools/view_polycam.py --polycam-zip-path data/example-room-scan-poly.zip"
+depends-on = ["_download-simplecv-example-polycam-data"]
+cwd = "packages/simplecv"
+description = "View example Polycam data"
+
+[feature.simplecv.tasks.simplecv-view-exoego-data]
+cmd = "python tools/view_exoego.py"
+depends-on = ["_download-simplecv-hocap-sample"]
+cwd = "packages/simplecv"
+description = "View example HoCap exo/ego data"
+
+[feature.simplecv.tasks.simplecv-download-hot3d]
+cmd = "python tools/download_hot3d.py"
+cwd = "packages/simplecv"
+description = "Download HOT3D Aria sequences from CDN URLs"
+
+[feature.simplecv.tasks.simplecv-preprocess-hot3d]
+cmd = "python tools/preprocess_hot3d.py"
+cwd = "packages/simplecv"
+description = "Convert HOT3D VRS files to AV1 MP4 for SimpleCV"
+
+[feature.simplecv.tasks.simplecv-download-aria-gen2-pilot]
+cmd = "python tools/download_aria_gen2_pilot.py"
+cwd = "packages/simplecv"
+description = "Download Aria Gen2 Pilot sequences from CDN URLs"
+
+[feature.simplecv.tasks.simplecv-preprocess-aria-gen2-pilot]
+cmd = "python tools/preprocess_aria_gen2_pilot.py"
+cwd = "packages/simplecv"
+description = "Convert Aria Gen2 Pilot VRS files to AV1 MP4 for SimpleCV"
+
+[feature.simplecv.tasks.simplecv-preprocess-epfl-smart-kitchen]
+cmd = "python tools/preprocess_epfl_smart_kitchen.py"
+cwd = "packages/simplecv"
+description = "Build an AV1-transcoded EPFL-Smart-Kitchen mirror for SimpleCV"
+
+[feature.simplecv.tasks.simplecv-catalog]
+# Keep the default task fast for interactive browsing. Without
+# --no-optimize-for-catalog, SimpleCV pre-optimizes missing RRD cache copies before Rerun registration/ingestion.
+cmd = "python tools/catalog.py --rrd-root /mnt/8tb/data/exoego-forge-catalog --no-optimize-for-catalog"
+cwd = "packages/simplecv"
+description = "Host the ExoEgo Forge RRD catalog index"
+
+[feature.simplecv.tasks._download-simplecv-example-polycam-data]
+cmd = "test -e data/example-room-scan-poly.zip || hf download pablovela5620/polycam-example-data example-room-scan-poly.zip --repo-type dataset --local-dir data/"
+cwd = "packages/simplecv"
+outputs = ["packages/simplecv/data/example-room-scan-poly.zip"]
+description = "Download an example Polycam dataset from Hugging Face"
+
+[feature.simplecv.tasks._download-simplecv-example-easymocap-data]
+cmd = "test -e data/412-hand.zip || hf download pablovela5620/easymocap-example-data 412-hand.zip --repo-type dataset --local-dir data/"
+cwd = "packages/simplecv"
+outputs = ["packages/simplecv/data/412-hand.zip"]
+description = "Download an example EasyMocap dataset from Hugging Face"
+
+[feature.simplecv.tasks._download-simplecv-hocap-sample]
+cmd = "test -e data/hocap/sample.zip && test -e data/hocap/sample || (mkdir -p data/hocap/ && hf download pablovela5620/hocap-sample sample.zip --repo-type dataset --local-dir data/hocap/ && python -m zipfile -e data/hocap/sample.zip data/hocap/)"
+cwd = "packages/simplecv"
+outputs = ["packages/simplecv/data/hocap/sample.zip", "packages/simplecv/data/hocap/sample"]
+description = "Download and extract an example HoCap dataset from Hugging Face"
+
+[feature.simplecv.tasks._download-simplecv-epfl-smart-kitchen-sample]
+cmd = "test -e data/epfl-smart-kitchen/sample.zip && test -e data/epfl-smart-kitchen/sample || (mkdir -p data/epfl-smart-kitchen/ && hf download pablovela5620/epfl-smart-kitchen-sample sample.zip --repo-type dataset --local-dir data/epfl-smart-kitchen/ && python -m zipfile -e data/epfl-smart-kitchen/sample.zip data/epfl-smart-kitchen/)"
+cwd = "packages/simplecv"
+outputs = ["packages/simplecv/data/epfl-smart-kitchen/sample.zip", "packages/simplecv/data/epfl-smart-kitchen/sample"]
+description = "Download and extract an example EPFL-Smart-Kitchen dataset from Hugging Face"
+
+[feature.simplecv.tasks._download-simplecv-assembly101-sample]
+cmd = "test -e data/assembly101-sample || hf download pablovela5620/Assembly101-Sample --repo-type dataset --include 'assembly101-sample/**' --local-dir data/"
+cwd = "packages/simplecv"
+outputs = ["packages/simplecv/data/assembly101-sample"]
+description = "Download an example Assembly101 dataset from Hugging Face"
+
+[feature.simplecv.tasks._download-simplecv-assembly101-720-sample]
+cmd = "test -e data/assembly101-720-sample || hf download pablovela5620/Assembly101-Sample --repo-type dataset --include 'assembly101-720-sample/**' --local-dir data/"
+cwd = "packages/simplecv"
+outputs = ["packages/simplecv/data/assembly101-720-sample"]
+description = "Download an example Assembly101 720p dataset from Hugging Face"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # monoprior
@@ -364,7 +483,7 @@ tensorrt-cu12 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
 cuda-python = "*"
 
 [feature.wilor.target.linux-aarch64.pypi-dependencies]
-onnxruntime = ">=1.23.2,<2"
+onnxruntime-gpu = { version = ">=1.24.0.dev0,<2", index = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-13-nightly/pypi/simple/" }
 
 [feature.wilor.activation.env]
 PACKAGE_DIR = "packages/wilor-nano"
@@ -419,7 +538,7 @@ timm = "<1.0"
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 
 [feature.egoexo-forge.target.linux-aarch64.pypi-dependencies]
-onnxruntime = ">=1.23.2,<2"
+onnxruntime-gpu = { version = ">=1.24.0.dev0,<2", index = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-13-nightly/pypi/simple/" }
 
 [feature.egoexo-forge.activation.env]
 PACKAGE_DIR = "packages/egoexo-forge"
@@ -513,7 +632,7 @@ scipy = "*"
 
 [feature.mv-api-catalog-register-mac.pypi-dependencies]
 tyro = ">=0.9.1,<0.10"
-simplecv = { git = "https://github.com/pablovela5620/simplecv.git", rev = "178479b53d14b9dd4a79b212dd2c5a3be52b4de8" }
+simplecv = { path = "packages/simplecv", editable = true }
 rerun-sdk = { version = "==0.33.0a1+dev", extras = ["datafusion"] }
 
 [feature.mv-api-catalog-register-mac.pypi-options]
@@ -787,19 +906,27 @@ description = "Benchmark iterable golden path against batched TensorRT path"
 # robocap-slam
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.robocap.dependencies]
-python = "3.10.*"
-cuvslam = "==0.2.0"
+python = "3.12.*"
 pyyaml = "*"
+cuda-version = "13.*"
+libcublas = "*"
+libcusolver = "*"
 libstdcxx-ng = ">=14.2"
 pyarrow = ">=20.0.0,<21"
-pip = ">=25.1.1,<26"
 
 [feature.robocap.pypi-dependencies]
 robocap-slam = { path = "packages/robocap-slam", editable = true }
 tyro = ">=0.9,<1"
 
+[feature.robocap.target.linux-64.pypi-dependencies]
+cuvslam = { url = "https://github.com/nvidia-isaac/cuVSLAM/releases/download/v15.0.0/cuvslam-15.0.0%2Bcu13-cp312-abi3-manylinux_2_39_x86_64.whl" }
+
+[feature.robocap.target.linux-aarch64.pypi-dependencies]
+cuvslam = { url = "https://github.com/nvidia-isaac/cuVSLAM/releases/download/v15.0.0/cuvslam-15.0.0%2Bcu13-cp312-abi3-manylinux_2_39_aarch64.whl" }
+
 [feature.robocap.activation.env]
 PACKAGE_DIR = "packages/robocap-slam"
+LD_LIBRARY_PATH = "${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH}"
 
 [feature.robocap.tasks.robocap-download-example]
 cmd = """test -d data/robocap/f408193e6447b3b0_session_14 || hf download pablovela5620/robocap-example --repo-type dataset --local-dir data/robocap"""
@@ -818,6 +945,17 @@ cmd = "python tools/track_slam.py"
 cwd = "packages/robocap-slam"
 depends-on = ["robocap-download-example"]
 description = "Run multicamera visual SLAM on Robocap data"
+
+[feature.robocap.tasks.robocap-track-candidate]
+cmd = "python tools/track_odometry.py --rr-config.save /tmp/robocap_cuvslam_15_candidate.rrd --rr-config.headless --no-auto-orient --max-frames 30 --no-log-videos"
+cwd = "packages/robocap-slam"
+depends-on = ["robocap-download-example"]
+description = "Run a bounded Robocap odometry smoke and save the migrated cuVSLAM candidate RRD"
+
+[feature.robocap.tasks.robocap-compare-reference]
+cmd = "python tools/compare_rrd_reference.py --reference-rrd /tmp/robocap_cuvslam_0_2_0_baseline.rrd --candidate-rrd /tmp/robocap_cuvslam_15_candidate.rrd --index video_time --max-rows 30 --rtol 0.01 --atol 0.25"
+cwd = "packages/robocap-slam"
+description = "Compare migrated Robocap pose output against the saved cuVSLAM 0.2.0 baseline"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # pysfm
@@ -870,6 +1008,7 @@ description = "Run COLMAP SfM reconstruction on Fountain dataset with Rerun view
 # ── App tasks ────────────────────────────────────────────────────────────
 [feature.pysfm.tasks.sfm-reconstruction-app]
 cmd = "python tools/nodes/sfm_reconstruction_app.py"
+depends-on = ["_download-sfm-example"]
 cwd = "packages/pysfm"
 description = "Launch COLMAP SfM Gradio app with Rerun viewer"
 
@@ -1203,7 +1342,7 @@ py-opencv = "*"
 huggingface_hub = "*"
 hf-transfer = "*"
 tyro = ">=0.9.1,<0.10"
-pyserde = ">=0.20,<0.30"
+pyserde = ">=0.31.2,<0.32"
 # CPU-only PyTorch for lpips metrics (no CUDA requirement).
 pytorch-cpu = ">=2.8.0"
 torchvision = "*"
@@ -1222,8 +1361,8 @@ brush = "==0.3.0"
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
 lpips = ">=0.1.4,<1"
 plyfile = ">=1.1,<2"
-rerun-sdk = "==0.31.1"
-simplecv = { git = "https://github.com/pablovela5620/simplecv.git", tag = "v0.7.2" }
+rerun-sdk = "==0.32.2"
+simplecv = { path = "packages/simplecv", editable = true }
 
 [feature.gsplat-rust-renderer.activation.env]
 PACKAGE_DIR = "packages/gsplat-rust-renderer"
@@ -1535,6 +1674,17 @@ dev = { features = [
     "dev",
     "common",
 ], solve-group = "dev", no-default-feature = true }
+simplecv = { features = [
+    "common",
+    "cuda",
+    "simplecv",
+], solve-group = "simplecv", no-default-feature = true }
+simplecv-dev = { features = [
+    "common",
+    "cuda",
+    "simplecv",
+    "dev",
+], solve-group = "simplecv", no-default-feature = true }
 monoprior = { features = [
     "common",
     "cuda",

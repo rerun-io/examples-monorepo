@@ -14,16 +14,14 @@ import shutil
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypeAlias
+from typing import Literal, TypeAlias
 
 import numpy as np
+import pycolmap
+import rerun.blueprint as rrb
 from jaxtyping import Float32, Float64, UInt8
 from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
-
-if TYPE_CHECKING:
-    import pycolmap
-    import rerun.blueprint as rrb
 
 TIMELINE: str = "frame"
 """Timeline name used for sequential camera logging."""

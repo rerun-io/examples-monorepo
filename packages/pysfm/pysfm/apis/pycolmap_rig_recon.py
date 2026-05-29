@@ -358,7 +358,7 @@ def run_rig_recon(*, config: RigReconConfig, timer: TimingLogger | None = None) 
     pycolmap.set_random_seed(0)
 
     if config.verbose:
-        pycolmap.logging.minloglevel = pycolmap.logging.INFO
+        pycolmap.logging.minloglevel = int(pycolmap.logging.INFO)
 
     reader_options: pycolmap.ImageReaderOptions = pycolmap.ImageReaderOptions()
     reader_options.camera_model = config.camera_model

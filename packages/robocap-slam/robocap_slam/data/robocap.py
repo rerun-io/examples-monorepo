@@ -49,9 +49,10 @@ def fisheye62_to_cuvslam_camera(params: Fisheye62Parameters) -> cuvslam.Camera:
 
     # rig_from_camera = imu_T_cam = world_T_cam (IMU frame treated as world)
     # Extrinsics stores cam_T_world, so we need its inverse
-    world_T_cam = params.extrinsics.world_T_cam
-    quat_xyzw = Rotation.from_matrix(world_T_cam[:3, :3]).as_quat()
-    cam.rig_from_camera = cuvslam.Pose(rotation=quat_xyzw, translation=world_T_cam[:3, 3])
+    world_T_cam: ndarray = params.extrinsics.world_T_cam
+    quat_xyzw: list[float] = Rotation.from_matrix(world_T_cam[:3, :3]).as_quat().tolist()
+    translation: list[float] = world_T_cam[:3, 3].tolist()
+    cam.rig_from_camera = cuvslam.Pose(rotation=quat_xyzw, translation=translation)
 
     return cam
 
