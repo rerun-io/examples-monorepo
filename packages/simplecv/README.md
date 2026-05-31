@@ -55,6 +55,10 @@ pixi run -e simplecv --frozen python tools/batch_raw_to_rrd.py \
 
 That command writes under `/mnt/8tb/data/exoego-forge-catalog/epfl-smart-kitchen/{train,test}/...` and intentionally omits MANO vertex normals.
 
+#### Known catalog data issues
+
+- `hocap/subject_1/20231025_170650.rrd` is not label-complete. The exo video streams run to about `24.666667s`, but ego/2D/3D label streams only run to about `7.633333s`; avoid using this sequence for label-complete validation or timeline screenshots.
+
 ### Visualize Polycam Data
 Quick example
 ```

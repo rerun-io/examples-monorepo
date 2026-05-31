@@ -40,10 +40,9 @@ xorg-libx11 = "*"
 xorg-xorgproto = "*"
 
 [feature.common.pypi-dependencies]
-rerun-sdk = "==0.32.2"
-# rerun-sdk = { path = "/home/pablo/0Dev/work/rerun-projects/reality/rerun/target/wheels/rerun_sdk-0.33.0a1+dev-cp310-abi3-manylinux_2_39_x86_64.whl" }
+rerun-sdk = "==0.33.0"
 gradio = "==6.13.0"
-gradio-rerun = "==0.32.2"
+gradio-rerun = "==0.33.0"
 simplecv = { path = "packages/simplecv", editable = true }
 
 # ─── catalog common feature (Rerun catalog prerelease lane) ────────────────
