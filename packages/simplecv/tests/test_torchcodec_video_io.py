@@ -14,6 +14,7 @@ from jaxtyping import UInt8
 from numpy import ndarray
 
 from simplecv.video_io import (
+    TorchCodecCudaMultiVideoReader,
     TorchCodecMultiVideoReader,
     TorchCodecVideoReader,
     VideoReader,
@@ -232,3 +233,92 @@ class TestTorchCodecMultiVideoReader:
         assert len(reader) > 0
         frame_list: list = reader[0]
         assert len(frame_list) == 3
+
+
+class TestTorchCodecCudaMultiVideoReader:
+    """Tests for the simple TorchCodec CUDA-style multiview reader."""
+
+    def test_reader_exposes_chunked_decode_only(self) -> None:
+        """The CUDA reader should not expose a full materialization API."""
+        assert not hasattr(TorchCodecCudaMultiVideoReader, "read_all")
+
+    def test_iter_chunks_decodes_full_sequence_in_windows(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Iterate over the full sequence without materializing every frame at once."""
+        import sys
+        import types
+
+        import torch
+
+        class _Metadata:
+            width: int = 4
+            height: int = 2
+            num_frames: int = 5
+            average_fps: float = 60.0
+
+        class _FrameBatch:
+            def __init__(self, data: torch.Tensor) -> None:
+                self.data: torch.Tensor = data
+
+        class _FakeVideoDecoder:
+            def __init__(self, source: str | Path, **_kwargs: object) -> None:
+                self.source: str | Path = source
+                self.metadata: _Metadata = _Metadata()
+
+            def get_frames_in_range(self, start: int, stop: int, step: int = 1) -> _FrameBatch:
+                frames: torch.Tensor = torch.arange(start, stop, step, dtype=torch.uint8)[:, None, None, None]
+                return _FrameBatch(frames.expand(-1, 3, self.metadata.height, self.metadata.width).contiguous())
+
+        fake_decoders_module = types.SimpleNamespace(VideoDecoder=_FakeVideoDecoder)
+        monkeypatch.setitem(sys.modules, "torchcodec.decoders", fake_decoders_module)
+
+        reader: TorchCodecCudaMultiVideoReader = TorchCodecCudaMultiVideoReader(
+            [Path("cam0.mp4"), Path("cam1.mp4")],
+            device="cpu",
+            num_workers=1,
+        )
+        chunks = list(reader.iter_chunks(chunk_size=2))
+
+        assert [chunk.start for chunk in chunks] == [0, 2, 4]
+        assert [chunk.stop for chunk in chunks] == [2, 4, 5]
+        assert [chunk.videos[0].shape[0] for chunk in chunks] == [2, 2, 1]
+        assert int(chunks[-1].videos[0][0, 0, 0, 0].item()) == 4
+
+    def test_reader_defaults_to_approximate_seek(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The simple CUDA reader defaults to the selected approximate seek mode."""
+        import sys
+        import types
+
+        import torch
+
+        class _Metadata:
+            width: int = 4
+            height: int = 2
+            num_frames: int = 6
+            average_fps: float = 60.0
+
+        class _FrameBatch:
+            def __init__(self, data: torch.Tensor) -> None:
+                self.data: torch.Tensor = data
+
+        class _FakeVideoDecoder:
+            def __init__(self, source: str | Path, **_kwargs: object) -> None:
+                self.source: str | Path = source
+                self.kwargs: dict[str, object] = dict(_kwargs)
+                self.metadata: _Metadata = _Metadata()
+                decoder_kwargs.append(self.kwargs)
+
+            def get_frames_in_range(self, start: int, stop: int, step: int = 1) -> _FrameBatch:
+                frames: torch.Tensor = torch.arange(start, stop, step, dtype=torch.uint8)[:, None, None, None]
+                return _FrameBatch(frames.expand(-1, 3, self.metadata.height, self.metadata.width).contiguous())
+
+        decoder_kwargs: list[dict[str, object]] = []
+        fake_decoders_module = types.SimpleNamespace(VideoDecoder=_FakeVideoDecoder)
+        monkeypatch.setitem(sys.modules, "torchcodec.decoders", fake_decoders_module)
+
+        TorchCodecCudaMultiVideoReader(
+            [Path("cam0.mp4"), Path("cam1.mp4")],
+            device="cpu",
+            num_workers=1,
+        )
+
+        assert {kwargs["seek_mode"] for kwargs in decoder_kwargs} == {"approximate"}

@@ -1,10 +1,15 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from collections import OrderedDict
 from collections.abc import Generator
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from itertools import repeat
 from pathlib import Path
+from typing import Any, Literal
 
 import cv2
 import numpy as np
+import torch
 from cv2 import (
     CAP_PROP_FOURCC,
     CAP_PROP_FPS,
@@ -13,8 +18,21 @@ from cv2 import (
     CAP_PROP_FRAME_WIDTH,
     CAP_PROP_POS_FRAMES,
 )
+from jaxtyping import UInt8
 
 from simplecv.image_types import BGRList, ImageBGR
+
+
+@dataclass(frozen=True, slots=True)
+class TorchCodecVideoChunk:
+    """Synchronized multiview video chunk."""
+
+    start: int
+    """Inclusive start frame index."""
+    stop: int
+    """Exclusive stop frame index."""
+    videos: list[UInt8[torch.Tensor, "b 3 h w"]]
+    """One RGB BCHW uint8 tensor per video."""
 
 
 class Cache:
@@ -541,3 +559,112 @@ class TorchCodecMultiVideoReader:
             frame: ImageBGR = reader.get_frame(idx)
             bgr_list.append(frame)
         return bgr_list
+
+
+class TorchCodecCudaMultiVideoReader:
+    """Decode synchronized videos to RGB BCHW uint8 tensors on one device."""
+
+    def __init__(
+        self,
+        video_paths: list[Path],
+        device: str = "cuda",
+        num_workers: int | None = None,
+        num_ffmpeg_threads: int = 0,
+        seek_mode: Literal["exact", "approximate"] = "approximate",
+    ) -> None:
+        """Initialize the TorchCodec multiview tensor reader.
+
+        Args:
+            video_paths: Video paths in camera order.
+            device: TorchCodec decode device. Use ``"cuda"`` to keep output frames on GPU.
+            num_workers: Number of cameras to decode concurrently. Defaults to one worker per video.
+            num_ffmpeg_threads: FFmpeg thread count passed to each decoder.
+            seek_mode: TorchCodec seek mode.
+        """
+        self.video_paths: list[Path] = video_paths
+        self.device: str = device
+        self.num_ffmpeg_threads: int = num_ffmpeg_threads
+        if len(video_paths) == 0:
+            raise ValueError("video_paths must contain at least one video")
+        self.num_workers: int = len(video_paths) if num_workers is None else num_workers
+        self.seek_mode: Literal["exact", "approximate"] = seek_mode
+
+        from torchcodec.decoders import VideoDecoder
+
+        self._decoders: list[Any] = [
+            VideoDecoder(
+                video_path,
+                device=self.device,
+                dimension_order="NCHW",
+                num_ffmpeg_threads=self.num_ffmpeg_threads,
+                seek_mode=self.seek_mode,
+            )
+            for video_path in video_paths
+        ]
+        metadata: list[Any] = [decoder.metadata for decoder in self._decoders]
+        self._height: int = self._required_int(metadata[0].height, "height")
+        self._width: int = self._required_int(metadata[0].width, "width")
+        self._fps: float = self._required_float(metadata[0].average_fps, "average_fps")
+        self._frame_cnt: int = min(self._required_int(item.num_frames, "num_frames") for item in metadata)
+
+    @staticmethod
+    def _required_int(value: int | None, name: str) -> int:
+        if value is None:
+            raise ValueError(f"TorchCodec metadata field {name} is missing")
+        return int(value)
+
+    @staticmethod
+    def _required_float(value: float | None, name: str) -> float:
+        if value is None:
+            raise ValueError(f"TorchCodec metadata field {name} is missing")
+        return float(value)
+
+    @property
+    def height(self) -> int:
+        return self._height
+
+    @property
+    def width(self) -> int:
+        return self._width
+
+    @property
+    def fps(self) -> float:
+        return self._fps
+
+    @property
+    def frame_cnt(self) -> int:
+        return self._frame_cnt
+
+    def __len__(self) -> int:
+        return self.frame_cnt
+
+    @staticmethod
+    def _decode_range(decoder: Any, start: int, stop: int) -> UInt8[torch.Tensor, "b 3 h w"]:
+        video: UInt8[torch.Tensor, "b 3 h w"] = decoder.get_frames_in_range(start, stop).data
+        return video
+
+    def iter_chunks(
+        self,
+        chunk_size: int = 32,
+        max_frames: int | None = None,
+    ) -> Generator[TorchCodecVideoChunk, None, None]:
+        """Decode the full multiview sequence in bounded GPU chunks.
+
+        Args:
+            chunk_size: Number of frames per video to decode at a time.
+            max_frames: Optional cap for benchmarks or smoke tests.
+
+        Yields:
+            Synchronized chunks with one ``BCHW`` RGB tensor per video.
+        """
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+
+        frame_count: int = len(self) if max_frames is None else min(max_frames, len(self))
+        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+            for start in range(0, frame_count, chunk_size):
+                stop: int = min(start + chunk_size, frame_count)
+                videos: list[UInt8[torch.Tensor, "b 3 h w"]] = list(
+                    executor.map(self._decode_range, self._decoders, repeat(start), repeat(stop))
+                )
+                yield TorchCodecVideoChunk(start=start, stop=stop, videos=videos)
