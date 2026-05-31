@@ -1,0 +1,1088 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CV Monorepo — Consolidation Blueprint</title>
+<style>
+  :root {
+    --bg: oklch(0.17 0.012 260);
+    --surface: oklch(0.21 0.014 260);
+    --panel: oklch(0.245 0.016 260);
+    --panel-hi: oklch(0.29 0.018 260);
+    --border: oklch(0.34 0.018 260);
+    --border-soft: oklch(0.28 0.015 260);
+    --text: oklch(0.9 0.012 260);
+    --text-dim: oklch(0.72 0.014 260);
+    --text-faint: oklch(0.58 0.013 260);
+    --head: oklch(0.97 0.01 260);
+    --accent: oklch(0.74 0.13 215);
+    --accent-dim: oklch(0.6 0.09 215);
+    --good: oklch(0.78 0.13 155);
+    --warn: oklch(0.8 0.13 80);
+    --bad: oklch(0.72 0.15 25);
+    --violet: oklch(0.74 0.12 300);
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --r: 10px;
+    --r-sm: 6px;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .layout { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 0; max-width: 1400px; margin: 0 auto; }
+
+  /* ---- Nav ---- */
+  nav {
+    position: sticky; top: 0; align-self: start; height: 100vh; overflow-y: auto;
+    padding: 28px 18px 40px 24px; border-right: 1px solid var(--border-soft);
+  }
+  nav .brand { font-size: 0.78rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); font-weight: 700; margin-bottom: 4px; }
+  nav .sub { font-size: 0.74rem; color: var(--text-faint); margin-bottom: 22px; }
+  nav ol { list-style: none; padding: 0; margin: 0; counter-reset: nav; }
+  nav li { margin: 1px 0; }
+  nav a {
+    display: block; color: var(--text-dim); text-decoration: none; font-size: 0.84rem;
+    padding: 5px 10px; border-radius: var(--r-sm); border-left: 2px solid transparent; transition: background .15s, color .15s;
+  }
+  nav a:hover { background: var(--panel); color: var(--head); }
+  nav a.active { color: var(--head); background: var(--panel); border-left-color: var(--accent); }
+  nav a .n { color: var(--text-faint); font-variant-numeric: tabular-nums; margin-right: 8px; font-size: 0.78rem; }
+
+  /* ---- Main ---- */
+  main { padding: 40px 48px 120px; min-width: 0; }
+  header.hero { margin-bottom: 14px; }
+  .eyebrow { font-size: 0.78rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent-dim); font-weight: 600; }
+  h1 { font-size: 2.1rem; line-height: 1.15; margin: 8px 0 6px; color: var(--head); text-wrap: balance; letter-spacing: -0.01em; }
+  .lede { font-size: 1.06rem; color: var(--text-dim); max-width: 72ch; text-wrap: pretty; }
+
+  section { margin-top: 56px; scroll-margin-top: 24px; }
+  h2 { font-size: 1.4rem; color: var(--head); margin: 0 0 4px; letter-spacing: -0.01em; }
+  h2 .num { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: 12px; font-size: 1.1rem; font-weight: 600; }
+  h3 { font-size: 1.05rem; color: var(--head); margin: 28px 0 10px; }
+  .section-sub { color: var(--text-faint); font-size: 0.95rem; margin: 0 0 22px; max-width: 74ch; }
+  p { max-width: 74ch; }
+  a.inline { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-dim); }
+  code { font-family: var(--mono); font-size: 0.85em; background: var(--panel); padding: 1px 6px; border-radius: 4px; color: oklch(0.86 0.04 215); border: 1px solid var(--border-soft); }
+
+  /* ---- Thesis band ---- */
+  .thesis { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: 24px 26px; }
+  .thesis .key { display: flex; gap: 14px; align-items: baseline; margin-bottom: 14px; }
+  .thesis .key:last-child { margin-bottom: 0; }
+  .thesis .tag {
+    flex: none; font-size: 0.7rem; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
+    padding: 3px 9px; border-radius: 100px; margin-top: 3px;
+  }
+  .tag.found { background: oklch(0.3 0.06 215); color: oklch(0.85 0.1 215); }
+  .tag.gold { background: oklch(0.32 0.08 80); color: oklch(0.88 0.12 80); }
+  .tag.move { background: oklch(0.3 0.06 300); color: oklch(0.85 0.1 300); }
+  .thesis .key p { margin: 0; }
+  .thesis b { color: var(--head); }
+
+  /* ---- Stats strip ---- */
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 1px; background: var(--border-soft); border: 1px solid var(--border-soft); border-radius: var(--r); overflow: hidden; margin: 22px 0; }
+  .stat { background: var(--surface); padding: 16px 18px; }
+  .stat .v { font-size: 1.7rem; font-weight: 700; color: var(--head); font-variant-numeric: tabular-nums; line-height: 1; }
+  .stat .l { font-size: 0.78rem; color: var(--text-faint); margin-top: 6px; }
+
+  /* ---- Tables ---- */
+  .tbl-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--r); margin: 8px 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.88rem; }
+  th, td { text-align: left; padding: 9px 13px; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+  thead th { background: var(--panel); color: var(--text-dim); font-weight: 600; font-size: 0.76rem; text-transform: uppercase; letter-spacing: 0.04em; position: sticky; top: 0; }
+  tbody tr:hover { background: var(--panel); }
+  tbody tr:last-child td { border-bottom: none; }
+  td .pkg { font-family: var(--mono); font-size: 0.82rem; color: var(--head); font-weight: 600; }
+  td.mono, code.path { font-family: var(--mono); font-size: 0.8rem; color: var(--text-dim); }
+  .muted { color: var(--text-faint); }
+
+  /* family + shape pills */
+  .pill { display: inline-block; font-size: 0.7rem; font-weight: 600; padding: 2px 8px; border-radius: 100px; white-space: nowrap; border: 1px solid transparent; }
+  .fam-foundation { background: oklch(0.3 0.05 215); color: oklch(0.86 0.09 215); }
+  .fam-depth      { background: oklch(0.3 0.05 155); color: oklch(0.86 0.09 155); }
+  .fam-human      { background: oklch(0.32 0.06 25);  color: oklch(0.86 0.11 25); }
+  .fam-seg        { background: oklch(0.32 0.06 300); color: oklch(0.86 0.1 300); }
+  .fam-slam       { background: oklch(0.32 0.06 80);  color: oklch(0.88 0.11 80); }
+  .fam-recon      { background: oklch(0.32 0.06 340); color: oklch(0.86 0.1 340); }
+  .fam-data       { background: oklch(0.3 0.03 260);  color: oklch(0.82 0.04 260); }
+  .fam-vendored   { background: oklch(0.26 0.012 260); color: var(--text-faint); border-color: var(--border); }
+  .v-skip  { background: oklch(0.3 0.05 25);  color: oklch(0.84 0.11 25); }
+  .v-adopt { background: oklch(0.3 0.06 155); color: oklch(0.84 0.11 155); }
+
+  .shape { font-size: 0.74rem; font-weight: 600; }
+  .s-gold { color: var(--warn); }
+  .s-class { color: oklch(0.8 0.1 25); }
+  .s-func { color: var(--text-faint); }
+  .s-gen { color: oklch(0.8 0.1 80); }
+  .s-cfg { color: oklch(0.78 0.08 300); }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+  .yes { color: var(--good); } .no { color: var(--text-faint); }
+
+  /* filter chips */
+  .filters { display: flex; flex-wrap: wrap; gap: 7px; margin: 16px 0 12px; align-items: center; }
+  .filters .lbl { font-size: 0.78rem; color: var(--text-faint); margin-right: 4px; }
+  .chip {
+    font-family: var(--sans); font-size: 0.78rem; padding: 5px 12px; border-radius: 100px; cursor: pointer;
+    background: var(--panel); color: var(--text-dim); border: 1px solid var(--border); transition: all .14s;
+  }
+  .chip:hover { border-color: var(--accent-dim); color: var(--head); }
+  .chip[aria-pressed="true"] { background: var(--accent); color: oklch(0.18 0.02 215); border-color: var(--accent); font-weight: 600; }
+  tr.hidden { display: none; }
+
+  /* ---- Cards / panels ---- */
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); padding: 18px 20px; }
+  .panel h4 { margin: 0 0 4px; color: var(--head); font-size: 0.98rem; }
+  .panel .meta { font-size: 0.76rem; color: var(--text-faint); margin-bottom: 10px; }
+  .panel ul { margin: 8px 0 0; padding-left: 18px; }
+  .panel li { margin: 4px 0; font-size: 0.88rem; color: var(--text-dim); }
+
+  /* inconsistency split */
+  .split-row { display: grid; grid-template-columns: 180px 1fr; gap: 14px; padding: 14px 0; border-bottom: 1px solid var(--border-soft); align-items: baseline; }
+  .split-row:last-child { border-bottom: none; }
+  .split-row .axis { font-weight: 600; color: var(--head); font-size: 0.92rem; }
+  .split-row .axis .q { display: block; font-size: 0.76rem; color: var(--text-faint); font-weight: 400; margin-top: 3px; }
+  .variants { display: flex; flex-wrap: wrap; gap: 8px; }
+  .variant { background: var(--panel); border: 1px solid var(--border-soft); border-radius: var(--r-sm); padding: 6px 11px; font-size: 0.8rem; }
+  .variant code { background: none; border: none; padding: 0; color: var(--head); }
+  .variant .count { color: var(--text-faint); font-size: 0.74rem; margin-left: 5px; }
+  .variant.win { border-color: var(--good); }
+  .variant.win::before { content: "→ pick "; color: var(--good); font-size: 0.7rem; font-weight: 700; }
+
+  /* code blocks */
+  pre { background: oklch(0.14 0.01 260); border: 1px solid var(--border); border-radius: var(--r); padding: 16px 18px; overflow-x: auto; font-family: var(--mono); font-size: 0.82rem; line-height: 1.55; color: var(--text-dim); }
+  pre .c { color: var(--text-faint); font-style: italic; }
+  pre .k { color: oklch(0.78 0.11 300); }
+  pre .s { color: oklch(0.82 0.1 155); }
+  pre .t { color: oklch(0.83 0.09 215); }
+  pre .d { color: var(--warn); }
+
+  /* layered anatomy diagram */
+  .anatomy { border: 1px solid var(--border); border-radius: var(--r); overflow: hidden; }
+  .anatomy .layer { display: grid; grid-template-columns: 150px 1fr; border-bottom: 1px solid var(--border-soft); }
+  .anatomy .layer:last-child { border-bottom: none; }
+  .anatomy .ltag { padding: 14px 16px; font-family: var(--mono); font-size: 0.82rem; font-weight: 600; color: var(--head); background: var(--panel); border-right: 1px solid var(--border-soft); display: flex; flex-direction: column; justify-content: center; }
+  .anatomy .ltag small { font-family: var(--sans); font-weight: 400; color: var(--text-faint); font-size: 0.72rem; margin-top: 3px; }
+  .anatomy .lbody { padding: 14px 18px; background: var(--surface); }
+  .anatomy .lbody p { margin: 0 0 6px; font-size: 0.87rem; }
+  .anatomy .lbody .ex { font-size: 0.78rem; color: var(--text-faint); }
+  .anatomy .lbody .ex code { font-size: 0.78rem; }
+
+  /* migration steps */
+  ol.steps { counter-reset: step; list-style: none; padding: 0; margin: 0; }
+  ol.steps > li { position: relative; padding: 0 0 22px 52px; }
+  ol.steps > li::before {
+    counter-increment: step; content: counter(step);
+    position: absolute; left: 0; top: 0; width: 34px; height: 34px; border-radius: 50%;
+    background: var(--panel-hi); border: 1px solid var(--border); color: var(--accent);
+    display: flex; align-items: center; justify-content: center; font-weight: 700; font-variant-numeric: tabular-nums;
+  }
+  ol.steps > li::after { content: ""; position: absolute; left: 17px; top: 36px; bottom: 0; width: 1px; background: var(--border-soft); }
+  ol.steps > li:last-child::after { display: none; }
+  ol.steps .st { font-weight: 600; color: var(--head); font-size: 0.98rem; }
+  ol.steps .ph { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint); margin-left: 8px; }
+  ol.steps p { margin: 5px 0 0; font-size: 0.88rem; color: var(--text-dim); }
+
+  /* open questions */
+  details.q { background: var(--surface); border: 1px solid var(--border); border-radius: var(--r); margin: 10px 0; overflow: hidden; }
+  details.q summary { padding: 14px 18px; cursor: pointer; font-weight: 600; color: var(--head); list-style: none; display: flex; gap: 10px; align-items: center; }
+  details.q summary::-webkit-details-marker { display: none; }
+  details.q summary::before { content: "?"; flex: none; width: 22px; height: 22px; border-radius: 50%; background: var(--panel-hi); border: 1px solid var(--border); color: var(--accent); display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: 700; }
+  details.q[open] summary { border-bottom: 1px solid var(--border-soft); }
+  details.q .qbody { padding: 14px 18px 16px 50px; font-size: 0.9rem; color: var(--text-dim); }
+  details.q .qbody .rec { color: var(--good); font-weight: 600; }
+
+  .callout { border: 1px solid var(--border); border-left: 3px solid var(--accent); background: var(--surface); border-radius: var(--r-sm); padding: 12px 16px; margin: 16px 0; font-size: 0.9rem; color: var(--text-dim); }
+  .callout b { color: var(--head); }
+
+  footer { margin-top: 70px; padding-top: 20px; border-top: 1px solid var(--border-soft); color: var(--text-faint); font-size: 0.8rem; }
+
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: 1fr; }
+    nav { position: static; height: auto; border-right: none; border-bottom: 1px solid var(--border-soft); }
+    nav ol { columns: 2; }
+    main { padding: 28px 20px 80px; }
+    .grid2, .grid3 { grid-template-columns: 1fr; }
+    .split-row { grid-template-columns: 1fr; gap: 6px; }
+    .anatomy .layer { grid-template-columns: 1fr; }
+    .anatomy .ltag { border-right: none; border-bottom: 1px solid var(--border-soft); }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; scroll-behavior: auto; } }
+</style>
+</head>
+<body>
+<div class="layout">
+  <nav aria-label="Table of contents">
+    <div class="brand">CV Monorepo</div>
+    <div class="sub">Consolidation Blueprint</div>
+    <ol>
+      <li><a href="#thesis"><span class="n">00</span>The thesis</a></li>
+      <li><a href="#inventory"><span class="n">01</span>Package inventory</a></li>
+      <li><a href="#shared"><span class="n">02</span>What's already shared</a></li>
+      <li><a href="#drift"><span class="n">03</span>Where it drifts</a></li>
+      <li><a href="#taxonomy"><span class="n">04</span>Proposed taxonomy</a></li>
+      <li><a href="#tiers"><span class="n">05</span>Monorepo layout</a></li>
+      <li><a href="#foundation-stack"><span class="n">06</span>kornia + simplecv</a></li>
+      <li><a href="#contract"><span class="n">07</span>The unified contract</a></li>
+      <li><a href="#types"><span class="n">08</span>Shared result types</a></li>
+      <li><a href="#anatomy"><span class="n">09</span>Package anatomy</a></li>
+      <li><a href="#io-contract"><span class="n">10</span>Image boundary &amp; loading</a></li>
+      <li><a href="#composition"><span class="n">11</span>Composition &amp; deployment</a></li>
+      <li><a href="#migration"><span class="n">12</span>Migration path</a></li>
+      <li><a href="#decisions"><span class="n">13</span>Open decisions</a></li>
+      <li><a href="#future-models"><span class="n">14</span>Future models</a></li>
+    </ol>
+  </nav>
+
+  <main>
+    <header class="hero">
+      <div class="eyebrow">Architecture working document · 18 first-party packages + 3 vendored</div>
+      <h1>Consolidating the CV monorepo into one consistent framework</h1>
+      <p class="lede">You don't need to invent the framework — two packages already prove it. <code>monoprior</code> shows the model-wrapper pattern (ABC + factory + typed result), and <code>simplecv</code> is already the shared foundation almost every package imports. The work is naming the pattern, lifting shared types into the foundation, and bringing the other ~15 packages onto the same contract.</p>
+    </header>
+
+    <!-- ============ THESIS ============ -->
+    <section id="thesis">
+      <h2><span class="num">00</span>The thesis in three claims</h2>
+      <div class="thesis">
+        <div class="key">
+          <span class="tag found">already true</span>
+          <p><b>simplecv is the de-facto foundation.</b> 13 of 15 first-party app packages import it for camera parameters, pose conventions, Rerun logging (<code>RerunTyroConfig</code>, <code>log_pinhole</code>, <code>log_video</code>), video IO, triangulation, TSDF fusion, and skeleton definitions. It is the foundation in fact — it just isn't declared as one or scoped deliberately.</p>
+        </div>
+        <div class="key">
+          <span class="tag gold">already proven</span>
+          <p><b>monoprior is the reference pattern.</b> Its <code>models/&lt;task&gt;/</code> layout pairs a <code>Base&lt;Task&gt;Predictor(ABC)</code> with a <code>get_&lt;task&gt;_predictor(name)</code> factory and a jaxtyping-annotated result dataclass (<code>RelativeDepthPrediction</code>). Every other model package reinvents a weaker version of this. Standardize on it.</p>
+        </div>
+        <div class="key">
+          <span class="tag move">the actual work</span>
+          <p><b>Group by capability, not by paper.</b> Five human-pose packages all do <code>image → detections → keypoints/mesh</code> but share no types. Four SLAM/VO/SfM packages all do <code>frames → trajectory + map</code>. Collapse these into capability packages over a shared foundation, with one inference contract.</p>
+        </div>
+      </div>
+
+      <div class="stats">
+        <div class="stat"><div class="v">21</div><div class="l">packages total (18 first-party)</div></div>
+        <div class="stat"><div class="v">6</div><div class="l">capability families</div></div>
+        <div class="stat"><div class="v">8</div><div class="l">distinct inference-entrypoint shapes</div></div>
+        <div class="stat"><div class="v">2 / 3</div><div class="l">naming forks: <code>api/</code> vs <code>apis/</code>, <code>gradio/</code> vs <code>gradio_ui/</code></div></div>
+        <div class="stat"><div class="v">1</div><div class="l">package with the gold-standard pattern</div></div>
+      </div>
+    </section>
+
+    <!-- ============ INVENTORY ============ -->
+    <section id="inventory">
+      <h2><span class="num">01</span>Package inventory</h2>
+      <p class="section-sub">Every package, its capability family, how you actually invoke inference today, and whether it leans on the shared foundation. Filter by family to see each cluster's internal inconsistency.</p>
+
+      <div class="filters" role="group" aria-label="Filter packages by family">
+        <span class="lbl">Family:</span>
+        <button class="chip" data-f="all" aria-pressed="true">All</button>
+        <button class="chip" data-f="foundation" aria-pressed="false">Foundation</button>
+        <button class="chip" data-f="depth" aria-pressed="false">Depth / geometry</button>
+        <button class="chip" data-f="human" aria-pressed="false">Human pose</button>
+        <button class="chip" data-f="seg" aria-pressed="false">Segmentation</button>
+        <button class="chip" data-f="slam" aria-pressed="false">SLAM / SfM</button>
+        <button class="chip" data-f="recon" aria-pressed="false">Reconstruction</button>
+        <button class="chip" data-f="data" aria-pressed="false">Data / IO</button>
+        <button class="chip" data-f="vendored" aria-pressed="false">Vendored</button>
+      </div>
+
+      <div class="tbl-wrap">
+      <table id="inv">
+        <thead>
+          <tr><th>Package</th><th>Family</th><th>Does</th><th>Inference entrypoint (today)</th><th>simplecv</th></tr>
+        </thead>
+        <tbody>
+          <tr data-fam="foundation">
+            <td><span class="pkg">simplecv</span></td>
+            <td><span class="pill fam-foundation">foundation</span></td>
+            <td>Camera params, conventions, Rerun logging, video IO, triangulation, TSDF, skeletons, dataset loaders</td>
+            <td><span class="shape s-func">— (library; large <code>apis/</code> of tools)</span></td>
+            <td class="muted">is the hub</td>
+          </tr>
+          <tr data-fam="depth">
+            <td><span class="pkg">monoprior</span></td>
+            <td><span class="pill fam-depth">depth</span></td>
+            <td>Relative + metric depth, normals, depth completion, multiview (VGGT)</td>
+            <td><span class="shape s-gold">★ ABC + <code>get_relative_predictor()</code> factory + result dataclass</span></td>
+            <td><span class="dot" style="background:var(--good)"></span><span class="yes">yes</span></td>
+          </tr>
+          <tr data-fam="depth">
+            <td><span class="pkg">prompt-da</span></td>
+            <td><span class="pill fam-depth">depth</span></td>
+            <td>Prompt Depth Anything completion on Polycam data</td>
+            <td><span class="shape s-cfg">config orchestrator; predictor actually lives in monoprior</span></td>
+            <td><span class="dot" style="background:var(--good)"></span><span class="yes">yes</span></td>
+          </tr>
+          <tr data-fam="human">
+            <td><span class="pkg">wilor-nano</span></td>
+            <td><span class="pill fam-human">human</span></td>
+            <td>Hand detection + 3D hand pose (Torch + TensorRT)</td>
+            <td><span class="shape s-class"><code>WiLorHandPose3dEstimationPipeline.predict()</code> → TypedDict</span></td>
+            <td><span class="dot" style="background:var(--good)"></span><span class="yes">yes</span></td>
+          </tr>
+          <tr data-fam="human">
+            <td><span class="pkg">sapiens2-pose</span></td>
+            <td><span class="pill fam-human">human</span></td>
+            <td>308-keypoint body pose, DETR person detection</td>
+            <td><span class="shape s-func">free functions + module caches → NamedTuple</span></td>
+            <td><span class="dot" style="background:var(--good)"></span><span class="yes">yes</span></td>
+          </tr>
+          <tr data-fam="human">
+            <td><span class="pkg">sapiens-coco133-pose</span></td>
+            <td><span class="pill fam-human">human</span></td>
+            <td>COCO-133 wholebody pose, switchable Sapiens / RTMW backend</td>
+            <td><span class="shape s-func">Protocol callables (<code>NativePoseEstimatorFn</code>) → dataclass</span></td>
+            <td><span class="dot" style="background:var(--good)"></span><span class="yes">yes</span></td>
+          </tr>
+          <tr data-fam="human">
+            <td><span class="pkg">sam3d-body-rerun</span></td>
+            <td><span class="pill fam-human">human</span></td>
+            <td>SAM-3D body: 3D keypoints + mesh per person</td>
+            <td><span class="shape s-class"><code>SAM3DBodyEstimator.__call__()</code> → dataclass</span></td>
+            <td><span class="dot" style="background:var(--good)"></span><span class="yes">yes</span></td>
+          </tr>
+          <tr data-fam="human">
+            <td><span class="pkg">mv-api</span></td>
+            <td><span class="pill fam-human">human</span></td>
+            <td>Multiview exo/ego pose pipeline (HoCap), triangulation, TSDF</td>
+            <td><span class="shape s-cfg">Node composition (<code>ScenePreparationNode</code>, <code>FullExoEgoApp</code>)</span></td>
+            <td><span class="dot" style="background:var(--good)"></span><span class="yes">heavy</span></td>
+          </tr>
+          <tr data-fam="seg">
+            <td><span class="pkg">sam3-rerun</span></td>
+            <td><span class="pill fam-seg">segmentation</span></td>
+            <td>Text-conditioned instance segmentation (SAM3)</td>
+            <td><span class="shape s-class"><code>SAM3Predictor.predict_single_image()</code> → dataclass</span></td>
+            <td><span class="dot" style="background:var(--good)"></span><span class="yes">yes</span></td>
+          </tr>
+          <tr data-fam="slam">
+            <td><span class="pkg">robocap-slam</span></td>
+            <td><span class="pill fam-slam">slam</span></td>
+            <td>Multi-camera visual odometry / SLAM (cuVSLAM)</td>
+            <td><span class="shape s-cfg"><code>main(config)</code>; <code>BaseTrackDataset</code> + <code>_target</code> factory</span></td>
+            <td><span class="dot" style="background:var(--good)"></span><span class="yes">yes</span></td>
+          </tr>
+          <tr data-fam="slam">
+            <td><span class="pkg">mast3r-slam</span></td>
+            <td><span class="pill fam-slam">slam</span></td>
+            <td>Dense monocular SLAM with MASt3R priors</td>
+            <td><span class="shape s-gen"><code>run_slam_pipeline()</code> generator + <code>SlamPipelineHandle</code></span></td>
+            <td><span class="dot" style="background:var(--good)"></span><span class="yes">yes</span></td>
+          </tr>
+          <tr data-fam="slam">
+            <td><span class="pkg">dpvo</span></td>
+            <td><span class="pill fam-slam">slam</span></td>
+            <td>Deep Patch Visual Odometry (+ loop closure)</td>
+            <td><span class="shape s-gen"><code>run_dpvo_pipeline()</code> generator + handle + <code>DPVOPrediction</code></span></td>
+            <td><span class="dot" style="background:var(--good)"></span><span class="yes">yes</span></td>
+          </tr>
+          <tr data-fam="slam">
+            <td><span class="pkg">pysfm</span></td>
+            <td><span class="pill fam-slam">slam</span></td>
+            <td>COLMAP Structure-from-Motion (pycolmap)</td>
+            <td><span class="shape s-cfg"><code>main(config)</code> → <code>SfMResult</code> dataclass</span></td>
+            <td><span class="dot" style="background:var(--good)"></span><span class="yes">yes</span></td>
+          </tr>
+          <tr data-fam="slam">
+            <td><span class="pkg">slam-evals</span></td>
+            <td><span class="pill fam-slam">slam</span></td>
+            <td>Ingest VSLAM-LAB benchmarks into a Rerun catalog</td>
+            <td><span class="shape s-func">functional: <code>ingest_sequence()</code>, <code>mount_catalog()</code></span></td>
+            <td><span class="dot" style="background:var(--good)"></span><span class="yes">light</span></td>
+          </tr>
+          <tr data-fam="recon">
+            <td><span class="pkg">vistadream</span></td>
+            <td><span class="pill fam-recon">reconstruction</span></td>
+            <td>Single/multi image → 3D Gaussians (Flux outpaint + GS)</td>
+            <td><span class="shape s-class"><code>SingleImagePipeline.__call__()</code>; reuses monoprior's factory</span></td>
+            <td><span class="dot" style="background:var(--good)"></span><span class="yes">yes</span></td>
+          </tr>
+          <tr data-fam="recon">
+            <td><span class="pkg">gsplat-rust-renderer</span></td>
+            <td><span class="pill fam-recon">reconstruction</span></td>
+            <td>Rust/wgpu Gaussian-splat viewer for Rerun</td>
+            <td><span class="shape s-func"><code>Gaussians3D.from_ply()</code> dataclass (<code>rr.AsComponents</code>)</span></td>
+            <td><span class="dot" style="background:var(--warn)"></span><span class="muted">minimal</span></td>
+          </tr>
+          <tr data-fam="data">
+            <td><span class="pkg">egoexo-forge</span></td>
+            <td><span class="pill fam-data">data / io</span></td>
+            <td>Ego/exo dataset → RRD conversion + catalog + Gradio</td>
+            <td><span class="shape s-cfg">converter fns <code>convert_*(config)</code> → result dataclass</span></td>
+            <td><span class="dot" style="background:var(--good)"></span><span class="yes">heavy</span></td>
+          </tr>
+          <tr data-fam="data">
+            <td><span class="pkg">pyvrs-viewer</span></td>
+            <td><span class="pill fam-data">data / io</span></td>
+            <td>VRS sensor recordings → Rerun RRD (AV1 encode)</td>
+            <td><span class="shape s-cfg"><code>vrs_to_rerun(config)</code> function</span></td>
+            <td><span class="dot" style="background:var(--warn)"></span><span class="muted">minimal</span></td>
+          </tr>
+          <tr data-fam="vendored">
+            <td><span class="pkg">mast3r</span></td>
+            <td><span class="pill fam-vendored">vendored</span></td>
+            <td>MASt3R + DUSt3R + CroCo packaged as a conda recipe</td>
+            <td><span class="shape s-func">recipe build — upstream library, no first-party code</span></td>
+            <td><span class="no">no</span></td>
+          </tr>
+          <tr data-fam="vendored">
+            <td><span class="pkg">asmk</span></td>
+            <td><span class="pill fam-vendored">vendored</span></td>
+            <td>ASMK image retrieval (loop closure for MASt3R-SLAM)</td>
+            <td><span class="shape s-func">recipe build — Cython upstream, no first-party code</span></td>
+            <td><span class="no">no</span></td>
+          </tr>
+          <tr data-fam="vendored">
+            <td><span class="pkg">dpretrieval</span></td>
+            <td><span class="pill fam-vendored">vendored</span></td>
+            <td>DBoW2 ORB retrieval (loop closure for DPVO)</td>
+            <td><span class="shape s-func">pybind11/CMake build — C++ binding, no first-party code</span></td>
+            <td><span class="no">no</span></td>
+          </tr>
+        </tbody>
+      </table>
+      </div>
+      <p class="muted" style="font-size:0.8rem;margin-top:8px;">★ = the pattern worth standardizing on. The <code>egoexo-forge</code> / <code>mv-api</code> / <code>pyvrs-viewer</code> / <code>slam-evals</code> jobs are data conversion + visualization, not model inference — they belong to a different layer (see §05).</p>
+    </section>
+
+    <!-- ============ SHARED ============ -->
+    <section id="shared">
+      <h2><span class="num">02</span>What's already shared (lean into it)</h2>
+      <p class="section-sub">These conventions already span the repo. They are the seams the consolidated framework should be built along — not things to invent.</p>
+      <div class="grid3">
+        <div class="panel">
+          <h4>simplecv as substrate</h4>
+          <div class="meta">imported by 13/15 app packages</div>
+          <ul>
+            <li><code>camera_parameters</code> — Intrinsics, Extrinsics, Pinhole, Fisheye62</li>
+            <li><code>ops.conventions</code> — <code>convert_pose</code>, camera conventions</li>
+            <li><code>camera_orient_utils</code> — gravity align / center</li>
+            <li><code>ops</code> — triangulate, TSDF fuser, pc_utils</li>
+            <li><code>data.skeleton</code> — mediapipe, COCO-133</li>
+          </ul>
+        </div>
+        <div class="panel">
+          <h4>Rerun is the universal output</h4>
+          <div class="meta">every single package logs to Rerun</div>
+          <ul>
+            <li><code>RerunTyroConfig</code> — the shared CLI/viewer config, embedded in almost every <code>*Config</code></li>
+            <li><code>log_video</code>, <code>log_pinhole</code> — common loggers</li>
+            <li><code>rerun_custom_types</code> — <code>Points2D/3DWithConfidence</code></li>
+            <li>Output is "log to Rerun / write .rrd", not "return arrays" — for most packages</li>
+          </ul>
+        </div>
+        <div class="panel">
+          <h4>tyro + config dataclass</h4>
+          <div class="meta">the universal CLI mechanism</div>
+          <ul>
+            <li>Every demo is <code>tyro.cli(SomeConfig)</code> → <code>main(config)</code></li>
+            <li>Configs are dataclasses embedding <code>rr_config: RerunTyroConfig</code></li>
+            <li>Per-package <code>PACKAGE_DIR</code> + pixi tasks with <code>depends-on</code> download chains</li>
+            <li>jaxtyping + beartype (dev) on array shapes everywhere</li>
+          </ul>
+        </div>
+      </div>
+      <div class="callout"><b>Implication:</b> the foundation already exists and the I/O boundary is already uniform (config in, Rerun out). The inconsistency is concentrated in <em>one layer</em> — how a model is wrapped and invoked — and in <em>directory naming</em>. That's a narrow, tractable surface to standardize.</div>
+    </section>
+
+    <!-- ============ DRIFT ============ -->
+    <section id="drift">
+      <h2><span class="num">03</span>Where it drifts (the mess, made concrete)</h2>
+      <p class="section-sub">Six axes of divergence. For each, the variants that exist today, their rough counts, and a suggested single winner. None of these are hard problems — they're decisions that were never made once and propagated.</p>
+
+      <div class="panel" style="padding: 6px 22px;">
+        <div class="split-row">
+          <div class="axis">Inference-layer dir<span class="q">where the model wrapper lives</span></div>
+          <div class="variants">
+            <span class="variant win"><code>api/</code><span class="count">×8</span></span>
+            <span class="variant"><code>apis/</code><span class="count">×4</span></span>
+            <span class="variant muted">(both name the same thing)</span>
+          </div>
+        </div>
+        <div class="split-row">
+          <div class="axis">Gradio dir<span class="q">where the UI block lives</span></div>
+          <div class="variants">
+            <span class="variant win"><code>gradio_ui/</code><span class="count">×6</span></span>
+            <span class="variant"><code>gradio/</code><span class="count">×3</span></span>
+            <span class="variant muted">+ pysfm nests under <code>gradio_ui/nodes/</code></span>
+          </div>
+        </div>
+        <div class="split-row">
+          <div class="axis">CLI dir<span class="q">where demos/apps live</span></div>
+          <div class="variants">
+            <span class="variant win"><code>tools/</code><span class="count">×17</span></span>
+            <span class="variant"><code>tool/</code><span class="count">×1 (sam3d)</span></span>
+            <span class="variant muted">subdir split varies: <code>demos/+apps/</code> vs <code>demos/+nodes/</code> vs flat <code>app_*.py</code></span>
+          </div>
+        </div>
+        <div class="split-row">
+          <div class="axis">Source layout<span class="q">module location</span></div>
+          <div class="variants">
+            <span class="variant win"><code>src/&lt;module&gt;/</code><span class="count">×10</span></span>
+            <span class="variant"><code>&lt;module&gt;/</code> at root<span class="count">×8</span></span>
+          </div>
+        </div>
+        <div class="split-row">
+          <div class="axis">Inference entrypoint<span class="q">how you run the model</span></div>
+          <div class="variants">
+            <span class="variant win">ABC + factory + result dataclass <span class="count">(monoprior)</span></span>
+            <span class="variant">bare Predictor class <span class="count">×4</span></span>
+            <span class="variant">free funcs / Protocol <span class="count">×2</span></span>
+            <span class="variant">pipeline generator + handle <span class="count">×2</span></span>
+            <span class="variant">config orchestrator <span class="count">×5</span></span>
+            <span class="variant">node composition <span class="count">×1</span></span>
+          </div>
+        </div>
+        <div class="split-row">
+          <div class="axis">Result type<span class="q">what inference returns</span></div>
+          <div class="variants">
+            <span class="variant win">jaxtyping dataclass <span class="count">(most)</span></span>
+            <span class="variant">TypedDict <span class="count">(wilor)</span></span>
+            <span class="variant">NamedTuple <span class="count">(sapiens2)</span></span>
+            <span class="variant">Rerun-only side effect <span class="count">(slam/sfm)</span></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout"><b>The expensive one is the entrypoint shape.</b> The same task is expressed six ways, so nothing composes: you can't write one viewer, one benchmark harness, or one Gradio shell that takes "a pose model" because there's no shared notion of what a pose model <em>is</em>. The directory-name forks are cheap to fix; the entrypoint contract is where the real consolidation value is (§07).</div>
+    </section>
+
+    <!-- ============ TAXONOMY ============ -->
+    <section id="taxonomy">
+      <h2><span class="num">04</span>Proposed taxonomy — capabilities are task primitives</h2>
+      <p class="section-sub">Group not by domain (the old "human" bucket) and not by paper, but by <b>task primitive — the output contract</b>. That's what makes <code>detection</code> first-class: DETR, YOLOX, WiLoR's hand detector and RTMDet all map <code>image → Detections</code>, and every top-down pose pipeline consumes them. A capability is one output type behind one factory; anything shaped like detect→crop→estimate is a <em>composition</em>, so it lives in the app tier (§05).</p>
+
+      <div class="callout"><b>The insight your question surfaces:</b> "human perception" was never a capability — it was three primitives in a trenchcoat: <code>detection</code> (person/hand boxes), <code>keypoints</code> (2D/3D pose), and <code>body-mesh</code> (parametric body), plus the apps that chain them. Detection is the primitive every top-down pipeline shares; promoting it to its own capability gives DETR / YOLOX / YOLO-hand / RTMDet one home and lets hand-pose and body-pose <em>reuse</em> it. The detect→crop→estimate chain is literally a pipeline — which is exactly why it belongs at the app tier, not buried inside one package.</div>
+
+      <h3>Capabilities — the nodes (one output contract each)</h3>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Capability</th><th>Contract</th><th>Backends in the repo today</th></tr></thead>
+          <tbody>
+            <tr><td><span class="pill fam-human">detection + seg</span></td><td class="mono">image (+prompt) → Detections {boxes·scores·labels·<b>masks?</b>}</td><td>DETR · YOLOX · YOLO-hand · RTMDet (boxes) · RF-DETR-Seg · Mask R-CNN · SAM3 (boxes+masks)</td></tr>
+            <tr><td><span class="pill fam-human">keypoints</span></td><td class="mono">(image, boxes) → Keypoints2D / 3D</td><td>Sapiens (308) · RTMW/RTMPose (133) · WiLoR hand (21)</td></tr>
+            <tr><td><span class="pill fam-depth">depth</span></td><td class="mono">image (+K) → DepthMap</td><td>DepthAnything v1/v2 · MoGe · UniDepth · PromptDA (completion)</td></tr>
+            <tr><td><span class="pill fam-depth">normals</span></td><td class="mono">image → NormalMap</td><td>DSINE · StableNormal · OmniNormal · MoGe-v2</td></tr>
+            <tr><td><span class="pill fam-human">body-mesh</span></td><td class="mono">(image, boxes) → Mesh + params</td><td>SAM-3D body</td></tr>
+            <tr><td><span class="pill fam-depth">multiview</span></td><td class="mono">images → pointmaps + poses</td><td>VGGT · MASt3R / DUSt3R</td></tr>
+            <tr><td><span class="pill fam-slam">slam / vo / sfm</span></td><td class="mono">frames (+calib) → CameraTrajectory + PointCloud</td><td>dpvo · mast3r-slam · robocap · pysfm <span class="muted">(slam-evals = harness)</span></td></tr>
+            <tr><td><span class="pill fam-recon">reconstruction</span></td><td class="mono">image(s) → GaussianSplats / Mesh</td><td>vistadream</td></tr>
+            <tr><td><span class="pill fam-recon">rendering</span></td><td class="mono">GaussianSplats → image</td><td>gsplat-rust-renderer</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout"><b>Why detection &amp; instance-seg are one capability (your RF-DETR point):</b> a mask is just a finer-grained detection — its box is the mask's bounding rect. RF-DETR-Seg, Mask R-CNN, YOLO-seg and SAM3 all emit boxes <em>and</em> masks from a single model, so splitting them would force one backend to register twice. Keep them unified behind <code>Detections{… masks?}</code> — box-only detectors leave <code>masks=None</code>; instance segmenters fill it. The genuinely separate contract is <b>semantic segmentation</b> (<code>image → SegmentationMap[h w]</code> of class-ids, no instances) — none in the repo yet; make it its own capability if it appears. Pure interactive SAM (point/box prompt → one mask, no labels) is a different <em>input</em> contract too, but SAM3's text-prompted labeled instances fit the unified type.</div>
+
+      <h3>Apps — compositions of nodes (the app tier, §05)</h3>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>App</th><th>Composes</th><th>Was</th></tr></thead>
+          <tbody>
+            <tr><td>body-pose</td><td class="mono">detection(person) → keypoints(body)</td><td>sapiens2-pose</td></tr>
+            <tr><td>wholebody-pose</td><td class="mono">detection(person) → keypoints(COCO-133)</td><td>sapiens-coco133-pose</td></tr>
+            <tr><td>hand-pose</td><td class="mono">detection(hand) → keypoints(hand) [+ body-mesh/MANO]</td><td>wilor-nano</td></tr>
+            <tr><td>3d-body</td><td class="mono">detection → body-mesh</td><td>sam3d-body</td></tr>
+            <tr><td>multiview-calibrator</td><td class="mono">multiview + detection(masks) + depth → align + fuse</td><td>mv-api / monoprior demo</td></tr>
+            <tr><td>scene-gen</td><td class="mono">depth → reconstruction</td><td>vistadream</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p class="muted" style="font-size:0.82rem;margin-top:8px;"><b>Granularity is a dial (open decision, §13).</b> <code>depth</code> + <code>normals</code> can share one "monocular-geometry" package since MoGe-v2 already does both; <code>rendering</code> is a single backend that could nest inside <code>reconstruction</code>; <code>multiview</code> could fold into <code>slam</code>. But <code>detection+seg</code> and <code>keypoints</code> are genuinely distinct contracts and earn their own packages. <b>Data &amp; IO</b> (egoexo-forge · pyvrs-viewer · dataset loaders) isn't a capability at all — it's converters/loaders that stay in the foundation or split out (§13).</p>
+    </section>
+
+    <!-- ============ TIERS ============ -->
+    <section id="tiers">
+      <h2><span class="num">05</span>Monorepo layout — foundation · capabilities · apps</h2>
+      <p class="section-sub">You already have <code>packages/simplecv</code> as the foundation; the open question is where the <em>nodes</em> and the <em>compositions</em> live. Three tiers, dependencies pointing strictly down. The pivotal insight you flagged: an app like the multiview calibrator spans several capability packages, so by the no-sibling-imports rule it <b>cannot</b> live inside one — it becomes its own <b>app package</b>. That's what defines the app tier.</p>
+
+      <div class="anatomy">
+        <div class="layer">
+          <div class="ltag">app packages<small>node compositions</small></div>
+          <div class="lbody">
+            <p>Compositions of nodes from one or more capability packages — e.g. the multiview calibrator (VGGT + SAM3 + MoGe → align → fuse). <b>The only tier allowed to import several capabilities</b>, and it holds <b>no models of its own</b> — just an in-process pipeline (<code>api/</code>), a Gradio UI, and optionally a daggr graph (<code>tools/graphs/</code>).</p>
+            <p class="ex">Single-capability demos stay in that capability's <code>tools/{demos,apps}/</code>; only cross-capability apps get promoted to packages. <code>mv-api</code> and <code>vistadream</code> are already app packages in disguise.</p>
+          </div>
+        </div>
+        <div class="layer">
+          <div class="ltag">capability pkgs<small>the models</small></div>
+          <div class="lbody">
+            <p><code>detection+seg</code> · <code>keypoints</code> · <code>depth</code> · <code>body-mesh</code> · <code>multiview</code> · <code>slam</code> · <code>reconstruction</code> (§04). Each exposes a factory + ABC + typed results. May depend on <b>foundation only</b> — never on each other (compose at the app layer).</p>
+            <p class="ex">Pattern source of truth: <code>monoprior/models/&lt;task&gt;/</code></p>
+          </div>
+        </div>
+        <div class="layer">
+          <div class="ltag">foundation<small>simplecv + kornia</small></div>
+          <div class="lbody">
+            <p>Two pieces: <b>kornia</b> for GPU/differentiable geometry primitives, and <b>simplecv</b> for everything kornia doesn't do — Rerun logging/types, video IO, dataset loaders, skeletons, N-view triangulation, gravity-align, TSDF, plus the base ABCs + result types + registry helper. <b>Depends on nothing first-party.</b> This is the "make everything PyTorch-based" anchor — refined in §06.</p>
+            <p class="ex">Promote shared abstractions here (§08). Today simplecv also holds dataset loaders + a large <code>apis/</code> — decide whether those split out (§13).</p>
+          </div>
+        </div>
+      </div>
+
+      <pre>packages/
+  foundation/
+    simplecv/              <span class="c"># types · ImageInput · ops · video IO · Rerun · registry   (+ kornia dep)</span>
+  capabilities/            <span class="c"># the nodes — each depends on foundation ONLY, never a sibling</span>
+    detection/             <span class="c"># DETR · YOLOX · RF-DETR-Seg · SAM3          → Detections {boxes, masks?}</span>
+    keypoints/             <span class="c"># Sapiens · RTMW · WiLoR-hand                → Keypoints2D/3D</span>
+    depth/                 <span class="c"># DepthAnything · MoGe · UniDepth · PromptDA → DepthMap   (+ normals)</span>
+    body-mesh/             <span class="c"># SAM-3D body                                → Mesh + params</span>
+    multiview/             <span class="c"># VGGT · MASt3R                              → pointmaps + poses</span>
+    slam/                  <span class="c"># dpvo · mast3r-slam · robocap · pysfm       → trajectory + map</span>
+    reconstruction/        <span class="c"># vistadream  (+ gsplat renderer)            → splats / mesh</span>
+  apps/                    <span class="c"># compositions of nodes — depend on ≥1 capability (+ foundation)</span>
+    body-pose/             <span class="c"># detection → keypoints              (was sapiens2 / coco133)</span>
+    hand-pose/             <span class="c"># detection → keypoints (+ MANO)     (was wilor-nano)</span>
+    multiview-calibrator/  <span class="c"># multiview + detection(masks) + depth → align + fuse</span>
+    ...                    <span class="c"># each app = api/ pipeline + gradio_ui/ + tools/graphs/ (daggr)</span>
+  vendored/                <span class="c"># recipe builds — mast3r · asmk · dpretrieval   (no first-party code)</span>
+
+<span class="c"># dependency arrows point one way:   apps → capabilities → foundation → kornia</span></pre>
+      <p class="muted" style="font-size:0.82rem;margin-top:8px;">Pixi treats these paths cosmetically — each package is still its own feature + environment — so the subdirectories cost nothing and make the tier (and the legal dependency direction) visible at a glance. If you'd rather stay flat (<code>packages/&lt;name&gt;</code>), keep the tiers as a naming / docs convention instead; the dependency rule is what matters, not the nesting.</p>
+
+      <div class="callout"><b>The one rule that keeps it clean:</b> dependencies only point <em>down</em> — <code>apps → capabilities → foundation → kornia</code>. Capability packages never import each other; the foundation imports nothing first-party. Cross-capability work doesn't bend this rule, it <em>defines the app tier</em>: the multiview calibrator imports <code>multiview</code> + <code>detection</code> + <code>depth</code> and wires them in-process (§11). <code>mv-api</code> and <code>vistadream</code> already work this way — formalizing the tier just gives them a home and a name.</div>
+    </section>
+
+    <!-- ============ FOUNDATION STACK ============ -->
+    <section id="foundation-stack">
+      <h2><span class="num">06</span>Foundation stack — kornia for geometry, simplecv for the rest</h2>
+      <p class="section-sub">"simplecv is NumPy-based" conflates two different things, and only one is a throughput problem. The fix isn't migrating simplecv to torch — it's depending on <a class="inline" href="https://github.com/kornia/kornia">kornia</a> for GPU geometry, keeping simplecv for everything kornia doesn't do, and making torch tensors (not NumPy) the type that flows through the predictor contract.</p>
+
+      <div class="callout"><b>Reframe:</b> NumPy is only slow for <b>heavy per-pixel data</b> — images, depth maps, heatmaps, masks — where it forces host↔GPU round-trips. For <b>tiny metadata</b> — a 3×3 <code>K</code>, a pose, a voxel size — device location is irrelevant; keeping those as jaxtyping dataclasses is fine. The throughput fix is narrow: keep heavy tensors on-device through the predictors, not "torch-ify all of simplecv."</div>
+
+      <h3>Three options, one answer</h3>
+      <div class="grid3">
+        <div class="panel">
+          <h4>Emulate kornia <span class="pill v-skip">skip</span></h4>
+          <p style="font-size:0.88rem;margin:8px 0 0;color:var(--text-dim);">Rebuilding batched, differentiable geometry shadows an 11k-star, Apache-2.0 library that's been at it since 2018 — and you'd stay permanently behind. Pure cost, no upside.</p>
+        </div>
+        <div class="panel">
+          <h4>Migrate all of simplecv <span class="pill v-skip">skip</span></h4>
+          <p style="font-size:0.88rem;margin:8px 0 0;color:var(--text-dim);">~70% of simplecv is out of kornia's scope — logging, IO, loaders, skeletons, TSDF, N-view triangulation. Torch-ifying a dataset loader or a Rerun logger buys nothing.</p>
+        </div>
+        <div class="panel">
+          <h4>Depend on kornia <span class="pill v-adopt">adopt</span></h4>
+          <p style="font-size:0.88rem;margin:8px 0 0;color:var(--text-dim);">Delete simplecv's overlapping geometry internals; have its ops call kornia under the hood. Batched, on-device, autograd geometry for free; keep your typed API on top.</p>
+        </div>
+      </div>
+
+      <h3>Who owns what</h3>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Capability</th><th>Owner</th><th>Why</th></tr></thead>
+          <tbody>
+            <tr><td>Projection / unprojection, depth→3D, rotation &amp; pose conversions, SO3/SE3 Lie groups, distortion (incl. Kannala-Brandt fisheye), OpenGL↔OpenCV conventions</td><td><span class="pill v-adopt">kornia</span></td><td>batched, on-device, differentiable, JIT/compile-tested</td></tr>
+            <tr><td><code>Intrinsics</code> / <code>Extrinsics</code> / <code>PinholeParameters</code> dataclasses</td><td><span class="pill fam-foundation">simplecv</span> <span class="muted">ops → kornia</span></td><td>keep jaxtyping + frozen-dataclass API; kornia's camera is a mutable <code>nn.Module</code> you don't want to expose</td></tr>
+            <tr><td>N-view triangulation, gravity-align / <code>auto_orient_and_center_poses</code>, TSDF fusion, pc_utils</td><td><span class="pill fam-foundation">simplecv</span></td><td>kornia has only 2-view triangulation; no pose-registration / orient utility</td></tr>
+            <tr><td>Rerun logging &amp; custom types, video IO, dataset loaders, keypoint skeletons (MediaPipe / COCO-133), tyro config</td><td><span class="pill fam-foundation">simplecv</span></td><td>fully out of kornia's scope — this is simplecv's reason to exist</td></tr>
+            <tr><td>Predictor result types (<code>DepthMap</code>, <code>Keypoints</code>, <code>Masks</code>…)</td><td><span class="pill fam-foundation">simplecv</span> <span class="muted">torch-backed</span></td><td><code>.cpu().numpy()</code> only at the Rerun edge — the actual throughput fix</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout"><b>The boundary rule:</b> heavy tensors stay <code>torch</code> on-device from model input through every predictor and result type; collapse to NumPy only at the Rerun logging edge — which wants CPU/NumPy anyway. And <b>wrap kornia, don't expose it</b>: your public API stays jaxtyping + dataclasses, kornia is an implementation detail behind it — so beartype/jaxtyping discipline is preserved (kornia documents shapes in docstrings only).</div>
+
+      <div class="panel">
+        <h4>Caveats to plan around</h4>
+        <ul>
+          <li><b>conda-forge trails PyPI</b> by ~1 release (0.8.2 vs 0.8.3). Pin via conda-forge, or use pixi <code>pypi-dependencies</code> if you need the latest.</li>
+          <li><b><code>kornia_rs</code> image IO is Linux-only.</b> Non-issue here, and you already have your own video IO — you don't need <code>kornia.io</code>.</li>
+          <li><b>N-view triangulation and gravity-align stay yours forever</b> — kornia won't fill those two gaps.</li>
+          <li><b>Style mismatch is real:</b> kornia is plain-tensor + <code>nn.Module</code> + docstring shapes. Wrapping it is what keeps your dataclass / jaxtyping API intact.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- ============ CONTRACT ============ -->
+    <section id="contract">
+      <h2><span class="num">07</span>The unified inference contract</h2>
+      <p class="section-sub">Generalize monoprior's existing pattern verbatim. Three pieces per task: a result dataclass, a base predictor ABC, and a string-keyed factory. This is what makes models swappable and lets one viewer/benchmark/UI take "any depth model" or "any pose model."</p>
+
+      <h3>The pattern monoprior already ships</h3>
+      <pre><span class="c"># monoprior/models/relative_depth/__init__.py  — this already exists</span>
+RELATIVE_PREDICTORS = <span class="t">Literal</span>[
+    <span class="s">"DepthAnythingV2Predictor"</span>, <span class="s">"MogeV1Predictor"</span>, <span class="s">"UniDepthRelativePredictor"</span>, ...
+]
+
+<span class="k">def</span> <span class="t">get_relative_predictor</span>(name: RELATIVE_PREDICTORS) -> Callable[..., BaseRelativePredictor]:
+    <span class="k">match</span> name:
+        <span class="k">case</span> <span class="s">"MogeV1Predictor"</span>: <span class="k">return</span> MogeV1Predictor
+        ...</pre>
+
+      <h3>Generalized as a foundation contract (one per capability)</h3>
+      <pre><span class="c"># simplecv/inference/base.py  — promote the shape, keep it tiny</span>
+<span class="d">@dataclass</span>
+<span class="k">class</span> <span class="t">DepthMap</span>:                          <span class="c"># result types are jaxtyping dataclasses</span>
+    depth: Float32[np.ndarray, <span class="s">"h w"</span>]
+    confidence: Float32[np.ndarray, <span class="s">"h w"</span>]
+    K_33: Float32[np.ndarray, <span class="s">"3 3"</span>]
+
+<span class="k">class</span> <span class="t">BasePredictor</span>[InputT, ResultT](ABC):   <span class="c"># the universal model wrapper</span>
+    <span class="d">@abstractmethod</span>
+    <span class="k">def</span> <span class="t">__call__</span>(self, x: InputT) -> ResultT: ...
+    <span class="k">def</span> <span class="t">set_model_device</span>(self, device: Device = <span class="s">"cuda"</span>) -> <span class="k">None</span>: self.model.to(device)
+
+<span class="c"># each capability package then declares its own Literal + factory:</span>
+<span class="c">#   get_depth_predictor(name)  -> BasePredictor[Image, DepthMap]</span>
+<span class="c">#   get_pose_predictor(name)   -> BasePredictor[Image, Keypoints2D]</span>
+<span class="c">#   get_segmentor(name)        -> BasePredictor[ImageAndPrompt, Masks]</span></pre>
+
+      <h3>And a Pipeline contract for streaming/multi-frame work</h3>
+      <p>SLAM/VO/SfM and video predictors aren't single-shot — keep dpvo &amp; mast3r-slam's existing good idea (a generator that yields progress + a mutable <code>Handle</code>) but name it once:</p>
+      <pre><span class="k">class</span> <span class="t">BasePipeline</span>[ConfigT, ResultT](ABC):
+    <span class="k">def</span> <span class="t">run</span>(self, cfg: ConfigT) -> Generator[Progress, <span class="k">None</span>, ResultT]: ...
+<span class="c"># SlamPipelineHandle / DPVOPrediction already match this shape — just unify the names.</span></pre>
+
+      <div class="callout"><b>Vocabulary to settle (you flagged this):</b> <code>Predictor</code> = single-shot model wrapper (<code>__call__(input) → Result</code>). <code>Pipeline</code> = orchestrates predictors + IO over a stream/dataset (<code>run(config) → Result</code>, may yield progress). <code>App</code> = a Gradio UI. <code>Demo</code> = a tyro CLI. Pick these four words and ban the synonyms (Estimator, Tracker, Runner, Node, *3dEstimationPipeline) — or remap them deliberately.</div>
+    </section>
+
+    <!-- ============ TYPES ============ -->
+    <section id="types">
+      <h2><span class="num">08</span>Shared result types to lift into the foundation</h2>
+      <p class="section-sub">Right now <code>(n,4)</code> xyxy boxes and <code>(n,K,2)</code> keypoints are redefined in wilor, sapiens2, sapiens-coco133, sam3d, and sam3 — five private copies of the same thing. Promote one set of jaxtyping dataclasses into <code>simplecv</code>, each able to log itself to Rerun (<code>rr.AsComponents</code>, like <code>gsplat-rust-renderer</code>'s <code>Gaussians3D</code> already does).</p>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Type</th><th>Shape</th><th>Replaces today's…</th><th>Used by</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">Detections</td><td class="mono">boxes (n 4) · scores (n) · labels (n) · masks? (n h w)</td><td>wilor TypedDict, sapiens bboxes, sam3 boxes+masks, sam3d bbox</td><td>detection + instance-seg</td></tr>
+            <tr><td class="mono">Keypoints2D</td><td class="mono">kpts (n k 2) · scores (n k)</td><td>sapiens2 NamedTuple, coco133 dataclass, wilor 2d</td><td>all pose</td></tr>
+            <tr><td class="mono">Keypoints3D</td><td class="mono">kpts (n k 3) · scores (n k)</td><td>wilor 3d, sam3d 3d keypoints</td><td>3d pose, hand</td></tr>
+            <tr><td class="mono">SegmentationMap</td><td class="mono">(h w) class-ids</td><td>— semantic seg (none in repo yet)</td><td>(future) semantic seg</td></tr>
+            <tr><td class="mono">DepthMap / NormalMap</td><td class="mono">(h w) · (h w 3) · conf · K</td><td>monoprior RelativeDepthPrediction (already canonical)</td><td>depth</td></tr>
+            <tr><td class="mono">Mesh</td><td class="mono">verts (v 3) · faces (f 3)</td><td>sam3d pred_vertices, vistadream</td><td>3d body, recon</td></tr>
+            <tr><td class="mono">CameraTrajectory</td><td class="mono">poses (t 7\|4 4) · tstamps (t)</td><td>dpvo final_poses, slam handles, sfm poses</td><td>all slam/sfm</td></tr>
+            <tr><td class="mono">PointCloud</td><td class="mono">xyz (n 3) · rgb (n 3)</td><td>dpvo points, sfm SfMResult, mv-api fused</td><td>slam/sfm, recon</td></tr>
+            <tr><td class="mono">GaussianSplats</td><td class="mono">means · scales · quats · opacity · SH</td><td>gsplat Gaussians3D (already AsComponents)</td><td>reconstruction</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="muted" style="font-size:0.82rem;margin-top:8px;">Skeleton/topology metadata (mediapipe, COCO-133 links) already lives in <code>simplecv.data.skeleton</code> — attach it to <code>Keypoints*</code> rather than re-importing constants in each package (wilor and mv-api both do this today). Every result type is <b>batch-first</b> — a leading batch axis present even when 1 — so the PyTorch reference path is shape-identical to its ONNX/TensorRT export (§10).</p>
+    </section>
+
+    <!-- ============ ANATOMY ============ -->
+    <section id="anatomy">
+      <h2><span class="num">09</span>The one package anatomy</h2>
+      <p class="section-sub">After settling the naming forks (§03), every capability package looks identical — and each is a self-contained, composable unit. The rule that makes it modular <em>and</em> fast: <b>a predictor is a DAG node</b>, compositions run in-process, and nothing in <code>src/</code> imports an orchestrator (§11).</p>
+      <pre>packages/&lt;capability&gt;/
+  pyproject.toml              <span class="c"># [project] + build + [tool.ruff] only (pixi config stays in root)</span>
+  src/&lt;module&gt;/               <span class="c"># src-layout everywhere (§13)</span>
+    __init__.py               <span class="c"># beartype activation (PIXI_DEV_MODE)</span>
+    models/                   <span class="c"># ← swappable core; the ONLY place weights/forward live</span>
+      &lt;task&gt;/
+        base.py               <span class="c"># Base&lt;Task&gt;Predictor(ABC) + result dataclass (batch-first §08)</span>
+        __init__.py           <span class="c"># Literal of names + get_&lt;task&gt;_predictor() factory (§07)</span>
+        &lt;backend&gt;.py          <span class="c"># one file per model backend</span>
+        conversion/           <span class="c"># torch → ONNX → TRT export + engine build (§10 · Decision 3)</span>
+    api/                      <span class="c"># config-driven orchestration + in-process DAG pipelines (§07 · §11)</span>
+    gradio_ui/                <span class="c"># Gradio blocks — one per predictor / pipeline</span>
+  tools/
+    demos/                    <span class="c"># tyro CLI entrypoints (headless)</span>
+    apps/                     <span class="c"># gradio launchers — what daggr GradioNodes point at</span>
+    graphs/                   <span class="c"># daggr graph defs — OPTIONAL, app tier, never imported by src/</span>
+  tests/
+
+<span class="c"># deps:  simplecv (foundation) + kornia (geometry).  NEVER another capability pkg.  NEVER daggr.</span></pre>
+      <div class="callout"><b>Why this shape:</b> <code>models/</code> is the swappable core — each predictor is a typed DAG node (factory + ABC + batch-first result, §07). <code>api/</code> composes nodes <em>in-process</em> into pipelines (tensors stay on the GPU between stages, §11). <code>gradio_ui/</code> + <code>tools/</code> are disposable presentation. Two rules keep it modular without lock-in: a package depends only on the foundation + kornia (cross-capability work composes at the app tier, never by importing a sibling), and <b>nothing in <code>src/</code> imports daggr</b> — orchestrators consume the package, not the reverse.</div>
+    </section>
+
+    <!-- ============ IO CONTRACT ============ -->
+    <section id="io-contract">
+      <h2><span class="num">10</span>The image boundary — format, loading &amp; batching</h2>
+      <p class="section-sub">Three questions decide throughput: what format crosses the boundary, how frames get there, and whether everything is batch-first. The table is the ground truth from each model's preprocessing — the tensor that actually hits <code>forward()</code> after every <code>cvtColor</code>/<code>permute</code>/<code>normalize</code>. The decisions under it settle one canonical boundary, one loader, and one batching rule. The recurring theme: <b>the foundation fights itself</b> — IO hands out BGR-on-CPU-NumPy while models want RGB-on-GPU-tensor, and torchcodec is already a dependency wired to throw its own advantages away.</p>
+
+      <div class="stats">
+        <div class="stat"><div class="v">14 : 7</div><div class="l">RGB vs <b>BGR</b> consumed at the network — you cannot assume RGB</div></div>
+        <div class="stat"><div class="v">3</div><div class="l">paths feed <b>BHWC</b> (channels-last) — all ONNX / rtmlib + WiLoR's forward</div></div>
+        <div class="stat"><div class="v">4</div><div class="l">meanings of the batch axis: whole-image · person-crop · view · frame</div></div>
+        <div class="stat"><div class="v">5</div><div class="l">distinct normalizations: ImageNet · 0–1 · ±0.5 · 0–255 · lib-internal</div></div>
+      </div>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr><th>Package</th><th>Network</th><th>Color</th><th>Layout</th><th>Batch axis =</th><th>Normalization</th><th>Input size</th><th>dtype</th></tr>
+        </thead>
+        <tbody>
+          <!-- monoprior / depth -->
+          <tr><td rowspan="9"><span class="pill fam-depth">monoprior</span></td><td>Depth Anything V1</td><td><span class="pill v-adopt">RGB</span></td><td><code>BCHW</code></td><td>1</td><td>0–1 (PIL)</td><td>518, ×14</td><td>f32</td></tr>
+          <tr><td>Depth Anything V2</td><td><span class="pill v-skip">BGR</span></td><td><code>BCHW</code></td><td>1</td><td>ImageNet</td><td>518, ×14</td><td>f32</td></tr>
+          <tr><td>MoGe v1 / v2</td><td><span class="pill v-adopt">RGB</span></td><td><code>CHW</code> <span class="muted">+batch internal</span></td><td>1</td><td>0–1</td><td>any</td><td>f32</td></tr>
+          <tr><td>UniDepth (rel / metric)</td><td><span class="pill v-adopt">RGB</span></td><td><code>CHW</code> <span class="muted">→B in .infer</span></td><td>1</td><td>lib-internal</td><td>any</td><td>f32</td></tr>
+          <tr><td>DSINE (normals)</td><td><span class="pill v-adopt">RGB</span></td><td><code>BCHW</code></td><td>1</td><td>ImageNet</td><td>pad ×32</td><td>f32</td></tr>
+          <tr><td>OmniNormal</td><td><span class="pill v-adopt">RGB</span></td><td><code>BCHW</code></td><td>1</td><td>0–1</td><td>384²</td><td>f32</td></tr>
+          <tr><td>StableNormal</td><td><span class="pill v-adopt">RGB</span></td><td><span class="pill fam-vendored">internal</span> (PIL)</td><td>1</td><td>lib-internal</td><td>any</td><td>f32</td></tr>
+          <tr><td>PromptDA (completion)</td><td><span class="pill v-adopt">RGB</span></td><td><code>BCHW</code></td><td>1</td><td>0–1</td><td>≤1008, ×14</td><td>f32</td></tr>
+          <tr><td>VGGT (multiview)</td><td><span class="pill v-adopt">RGB</span></td><td><code>BCHW</code></td><td><b>N views</b></td><td>0–1</td><td>518, ×14</td><td>f32</td></tr>
+          <!-- wilor / human -->
+          <tr><td rowspan="3"><span class="pill fam-human">wilor-nano</span></td><td>YOLO hand detector</td><td><span class="pill v-adopt">RGB</span></td><td><span class="pill fam-vendored">internal</span> (ultralytics)</td><td>1</td><td>0–255</td><td>auto</td><td>uint8</td></tr>
+          <tr><td>WiLoR pose</td><td><span class="pill v-skip">BGR</span> <span class="muted">flips internally</span></td><td><code>BHWC</code>→<code>BCHW</code></td><td>1 / hand</td><td>ImageNet</td><td>256²</td><td>f16 / f32</td></tr>
+          <tr><td>RTMPose (alt hand kpts)</td><td><span class="pill v-adopt">RGB</span></td><td><code>HWC</code> (onnx)</td><td>1 / hand</td><td>lib-internal</td><td>256²</td><td>f32</td></tr>
+          <!-- sapiens2 / human -->
+          <tr><td rowspan="3"><span class="pill fam-human">sapiens2-pose</span></td><td>DETR person detector</td><td><span class="pill v-skip">BGR</span></td><td><code>BCHW</code></td><td>1</td><td>ImageNet (HF)</td><td>any</td><td>f32</td></tr>
+          <tr><td>Sapiens2 pose (torch)</td><td><span class="pill v-skip">BGR</span> <span class="muted">flips internally</span></td><td><code>BCHW</code></td><td><b>N persons</b></td><td>ImageNet <span class="muted">[123.7,116.3,103.5]</span></td><td>768×1024</td><td>f32</td></tr>
+          <tr><td>Sapiens2 pose (TensorRT)</td><td><span class="pill v-adopt">RGB</span></td><td><code>BCHW</code></td><td>1 (static)</td><td>ImageNet</td><td>1024×768</td><td>bf16</td></tr>
+          <!-- coco133 / human -->
+          <tr><td rowspan="2"><span class="pill fam-human">sapiens-coco133</span></td><td>RTMLib YOLOX detector</td><td><span class="pill v-skip">BGR</span></td><td><code>BHWC</code></td><td>1</td><td>onnx-internal</td><td>model-dep</td><td>f32</td></tr>
+          <tr><td>RTMLib RTMW pose</td><td><span class="pill v-skip">BGR</span></td><td><code>BHWC</code></td><td><b>N persons</b></td><td>onnx-internal</td><td>model-dep</td><td>f32</td></tr>
+          <!-- sam3d / human -->
+          <tr><td><span class="pill fam-human">sam3d-body</span></td><td>SAM-3D Body (DINOv3)</td><td><span class="pill v-adopt">RGB</span></td><td><code>BCHW</code></td><td><b>N persons</b></td><td>ImageNet (ToTensor)</td><td>512²</td><td>f32</td></tr>
+          <!-- sam3 / seg -->
+          <tr><td><span class="pill fam-seg">sam3-rerun</span></td><td>SAM3 segmentation</td><td><span class="pill v-adopt">RGB</span></td><td><span class="pill fam-vendored">internal</span> (HF proc)</td><td>1</td><td>HF-internal</td><td>any</td><td>f32</td></tr>
+          <!-- dpvo / slam -->
+          <tr><td><span class="pill fam-slam">dpvo</span></td><td>DPVO VONet</td><td><span class="pill v-skip">BGR</span></td><td><code>BCHW</code> (1CHW)</td><td>1 / frame</td><td>±0.5 <span class="muted">2·x/255−0.5</span></td><td>any</td><td>f32→f16</td></tr>
+          <!-- mast3r-slam / slam -->
+          <tr><td><span class="pill fam-slam">mast3r-slam</span></td><td>MASt3R encoder</td><td><span class="pill v-adopt">RGB</span></td><td><code>BCHW</code> (1CHW)</td><td>1 / frame</td><td>ImageNet (DUSt3R)</td><td>224 / 512</td><td>f32</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p class="muted" style="font-size:0.8rem;margin-top:8px;">Color = what the network consumes <em>after</em> any internal flip (e.g. WiLoR &amp; Sapiens2-torch take RGB at the API but flip to BGR before forward). "internal" = preprocessing fully delegated to a vendored lib (transformers / ultralytics / rtmlib) so the wrapper hands it an HWC uint8 array. classical backends (pycolmap in pysfm, cuVSLAM in robocap) are omitted — no neural-net image input.</p>
+
+      <div class="callout" style="border-left-color:var(--warn);"><b>⚠ The foundation contradicts itself today.</b> simplecv's image types are <em>BGR</em> (<code>ImageBGR</code>, <code>BGRList</code>), and every reader — including all three <code>TorchCodec*</code> variants — hardcodes <code>device="cpu"</code>, <code>dimension_order="NHWC"</code>, and <code>cv2.cvtColor(RGB→BGR)</code> to stay OpenCV-compatible (<code>video_io.py</code>). So torchcodec decodes RGB, the wrapper flips it to BGR on the CPU as NumPy, and most predictors then flip it <em>back</em> to RGB and copy it to the GPU. Two needless conversions and a host→device copy per frame — exactly the cost you want to remove.</div>
+
+      <h3>Decision 1 — canonical format <span class="pill v-adopt">RGB · uint8 · NCHW · on-device</span></h3>
+      <div class="panel">
+        <ul>
+          <li><b>Color = RGB</b> — the ecosystem default, not a preference. <code>torchvision.io.read_image</code> and torchcodec both return RGB uint8; BGR is purely an OpenCV artifact. The 7 BGR-needing models keep flipping <em>internally</em> and declare it — the boundary itself stops being BGR.</li>
+          <li><b>Layout = NCHW</b> — the PyTorch idiom: <code>nn.Conv2d</code> defaults to NCHW, a torchvision Tensor Image is <code>(C,H,W)</code> and a batch is <code>(B,C,H,W)</code>, and torchcodec's default <code>dimension_order</code> is NCHW. So no per-call permute.</li>
+          <li><b>NHWC is a memory format, not a different shape.</b> <code>tensor.to(memory_format=torch.channels_last)</code> keeps the logical <code>(B,C,H,W)</code> shape but stores NHWC physically — which is what NVIDIA Tensor Cores want (fp16/bf16, ~22% faster convs on ResNet50). Reach for it on the GPU/TRT perf path; the API stays NCHW. This is also why the ONNX/rtmlib rows in the table want channels-last — it's a perf choice, not a different contract.</li>
+          <li><b>dtype = uint8 at the boundary.</b> The 5 normalization schemes differ per model, so normalization is the predictor's job — keep the transfer cheap (uint8) and normalize on-device.</li>
+          <li><b>On-device.</b> The tensor crossing into a predictor already lives on the GPU; <code>.cpu().numpy()</code> happens only at the Rerun edge.</li>
+          <li><b>HWC NumPy survives only as an explicit CPU adapter</b> — cv2 affine crops in top-down pose, Rerun overlays — never the hot path.</li>
+        </ul>
+      </div>
+      <div class="callout" style="font-size:0.84rem;"><b>Ecosystem-confirmed (checked May 2026):</b> RGB + NCHW is the torch convention, not a house style — <a class="inline" href="https://docs.pytorch.org/vision/stable/io.html">torchvision <code>read_image</code></a> returns RGB uint8 CHW; <a class="inline" href="https://meta-pytorch.org/torchcodec/stable/generated_examples/decoding/basic_cuda_example.html">torchcodec</a> defaults to RGB NCHW uint8 and decodes straight to GPU with <code>device="cuda"</code> (NVDEC); <a class="inline" href="https://docs.pytorch.org/tutorials/intermediate/memory_format_tutorial.html">channels_last</a> keeps the NCHW logical shape while delivering Tensor-Core speed. The current simplecv readers override <em>all three</em> defaults (cpu / NHWC / BGR-numpy) — they're swimming against the ecosystem.</div>
+
+      <h3>Decision 2 — loading <span class="pill v-adopt">torchcodec, used properly</span></h3>
+      <div class="panel">
+        <ul>
+          <li><b>Already a dependency</b> (pinned <code>&gt;=0.10,&lt;0.11</code>, linux-64). Standardize on it; retire <code>cv2.VideoCapture</code> (10 files) and PyAV (8).</li>
+          <li><b>Fix the readers:</b> expose <code>device="cuda"</code> (NVDEC decode), <code>dimension_order="NCHW"</code>, return RGB uint8 tensors on the GPU — drop the BGR/CPU/NumPy shim. Keep a thin <code>.to_bgr_numpy()</code> adapter only for code still on cv2 mid-migration.</li>
+          <li><b>Wins:</b> hardware NVDEC decode, frames land on-device (no host→device copy), batched range reads (<code>decoder[a:b] → (T,C,H,W)</code>), fast seeking.</li>
+          <li><b>Encode side too:</b> reconcile torchcodec encoding with the existing pyvrs-viewer NVENC/AV1 encoder + <code>simplecv.video_encoder</code> so encode is one path, not three.</li>
+          <li><b>Caveat:</b> CUDA decode needs an NVDEC-enabled ffmpeg build (linux-64, already the repo's GPU constraint). Keep CPU decode for the None-GPU envs (robocap, pyvrs).</li>
+        </ul>
+      </div>
+
+      <h3>Decision 3 — batch-first, for torch → ONNX → TRT <span class="pill v-adopt">leading batch axis, always</span></h3>
+      <div class="panel">
+        <ul>
+          <li><b>Result types and predictor I/O are batch-first</b> — a leading batch axis is always present, even when 1. The PyTorch path is then <em>shape-identical</em> to its ONNX/TRT export, so conversion is trivial and engine shapes match what the wrapper already emits.</li>
+          <li><b>Name the two batch axes:</b> frame/clip batch <code>T</code> (whole-image models — torchcodec hands you this for free) vs instance batch <code>N</code> (persons / detections / hands in top-down models). <code>sam3d-body</code> already folds them (<code>B*N</code>); the contract should label them, not bury them.</li>
+          <li><b>Export with a dynamic batch axis</b> (<code>dynamic_axes</code>) + TRT optimization profiles (min/opt/max). Today's <code>sapiens2</code> TRT engine is <em>batch=1 static</em> — the anti-pattern: it forces a per-person Python loop and discards TRT's batched throughput.</li>
+          <li><b>The repo already proves the payoff:</b> <code>sapiens-coco133</code> ships an iterable-PyTorch "golden" path <em>and</em> a batched-TensorRT path, with a benchmark asserting a minimum speedup. Batch-first is what keeps that second path clean.</li>
+        </ul>
+      </div>
+
+      <div class="callout"><b>Net — the <code>ImageInput</code> boundary:</b> the predictor contract (§07) takes a foundation <code>ImageInput</code> — RGB · uint8 · NCHW · on-device · <b>batch-first</b> — and each predictor declares its deviations (<code>expects_bgr</code>, <code>wants_nhwc</code>, <code>norm=…</code>, <code>input_size=…</code>, <code>batch_kind=frames|instances</code>). One shared <code>preprocess()</code> applies flip / permute / normalize / resize <b>on-device, once</b>; torchcodec delivers the tensor already on the GPU; and the same shapes flow straight through ONNX and TRT. Color and geometry conversions use kornia (§06).</div>
+    </section>
+
+    <!-- ============ COMPOSITION ============ -->
+    <section id="composition">
+      <h2><span class="num">11</span>Composition &amp; deployment — DAG nodes without lock-in</h2>
+      <p class="section-sub">You want modular <em>and</em> composable, and you're right to be wary of daggr. The resolution: make the <b>predictor the node</b> and keep the <b>transport swappable</b>. Composability comes from the uniform contract (§07) + the shared <code>ImageInput</code> / result types (§08, §10) — not from any one orchestrator. Then the same DAG runs three ways and you only pay the performance cost where you choose to.</p>
+
+      <div class="grid3">
+        <div class="panel">
+          <h4>In-process <span class="pill v-adopt">hot path</span></h4>
+          <p style="font-size:0.88rem;margin:8px 0 0;color:var(--text-dim);">Wire predictors as Python nodes in one process; tensors stay on the GPU between stages — no serialization, no host copies. This is <code>BasePipeline</code> (§07), or daggr with <code>FnNode</code> / <code>graph.invoke()</code>. Use for throughput, batch jobs, and tests.</p>
+        </div>
+        <div class="panel">
+          <h4>daggr / Gradio HTTP <span class="pill" style="background:oklch(0.32 0.06 80);color:oklch(0.88 0.11 80);">demo only</span></h4>
+          <p style="font-size:0.88rem;margin:8px 0 0;color:var(--text-dim);"><code>GradioNode("http://…")</code> wires running Gradio apps — yours or remote HF Spaces — into a visual DAG. Great for debugging, sharing, Space reuse. But every edge serializes images over HTTP across processes, so it is <b>not</b> the hot path. (Your multiview-calib graph: VGGT + SAM3 + MoGe → align → fuse.)</p>
+        </div>
+        <div class="panel">
+          <h4>bubbaloop <span class="pill" style="background:oklch(0.3 0.06 300);color:oklch(0.86 0.1 300);">edge / robot</span></h4>
+          <p style="font-size:0.88rem;margin:8px 0 0;color:var(--text-dim);">kornia-org's single ~13 MB Rust binary: Zenoh pub/sub (µs latency), RTSP cameras, Jetson / Pi. Fed by your ONNX/TRT artifacts (§10 · Decision 3); same kornia lineage as your geometry dep (§06). North-star for on-robot serving — not an immediate dependency.</p>
+        </div>
+      </div>
+
+      <h3>Resolving the daggr worry</h3>
+      <div class="panel">
+        <ul>
+          <li><b>The worry is real only if daggr is the hot path.</b> HTTP edges + per-node serialization kill throughput. Fix: run the performance path in-process (left column); reserve daggr-over-HTTP for visual/demo composition and remote Spaces.</li>
+          <li><b>The deeper risk is lock-in — solve it with one rule: <code>src/</code> never imports daggr.</b> daggr graphs live in <code>tools/graphs/</code> and point at the package's Gradio apps or call its predictor functions. The package's <code>models/</code> and <code>api/</code> carry zero daggr import, so daggr is a swappable consumer and the package stays self-contained.</li>
+          <li><b>Don't maintain two implementations.</b> The repo's own <code>daggr_proposal.md</code> already names this pain — a daggr graph <em>and</em> a hand-written Gradio app per pipeline, kept in sync by hand. Its proposed <code>graph.as_gradio()</code> / <code>graph.invoke()</code> is the fix: one graph definition → visual canvas, Gradio app, <em>or</em> headless in-process call. Until that lands, write the unit as an in-process <code>Pipeline</code> and expose a thin Gradio app; let daggr wire the apps for demos.</li>
+        </ul>
+      </div>
+
+      <div class="callout"><b>The principle:</b> modularity is a property of the <em>contract</em>, not the <em>transport</em>. You don't lose performance by being modular — you lose it by forcing the hot path across process / HTTP boundaries. Same typed nodes, three transports: in-process on the GPU for speed, daggr for demos, bubbaloop for the edge. <span class="muted">(bubbaloop caveat: its documented models are VLMs like Paligemma; arbitrary-model runtime support isn't fully specified yet — treat it as the target the ONNX/TRT work feeds, not a drop-in.)</span></div>
+    </section>
+
+    <!-- ============ MIGRATION ============ -->
+    <section id="migration">
+      <h2><span class="num">12</span>Migration path — cheap to expensive</h2>
+      <p class="section-sub">Ordered so early steps are mechanical and reversible, and you get a consistent repo long before you commit to any package merges. Nothing here requires a big-bang rewrite.</p>
+      <ol class="steps">
+        <li>
+          <div><span class="st">Settle vocabulary &amp; naming forks</span><span class="ph">mechanical · low risk</span></div>
+          <p>Decide: <code>api/</code>, <code>gradio_ui/</code>, <code>tools/{demos,apps}/</code>, <code>src/</code>-layout, and the four words (Predictor/Pipeline/App/Demo). Write it into <code>AGENTS.md</code>. This alone removes most of the "feels like a mess" without touching logic.</p>
+        </li>
+        <li>
+          <div><span class="st">Codify the contract in simplecv</span><span class="ph">additive · low risk</span></div>
+          <p>Add <code>simplecv/inference/base.py</code> (<code>BasePredictor</code>, <code>BasePipeline</code>) and <code>simplecv/types/</code> (the §08 result dataclasses, each <code>rr.AsComponents</code>). Nothing depends on it yet — pure addition. monoprior's existing types are the seed.</p>
+        </li>
+        <li>
+          <div><span class="st">Rename dirs + adopt the contract per package</span><span class="ph">per-package · isolated</span></div>
+          <p>One package at a time: rename to the standard layout, make its predictor subclass <code>BasePredictor</code>, return a shared result type. Start with the easy class-based ones (sam3, wilor); leave free-function ones (sapiens2) for when you touch them anyway.</p>
+        </li>
+        <li>
+          <div><span class="st">Pilot one capability merge: human perception</span><span class="ph">highest value</span></div>
+          <p>Collapse wilor + sapiens2 + sapiens-coco133 + sam3d into one <code>human</code> package with <code>models/{detection,pose2d,pose3d,hand,mesh}/</code> behind factories. This is where shared <code>Detections</code>/<code>Keypoints</code> pay off most. <code>mv-api</code> becomes an app over it.</p>
+        </li>
+        <li>
+          <div><span class="st">Fold redundant wrappers into demos</span><span class="ph">cleanup</span></div>
+          <p><code>prompt-da</code>'s predictor already lives in monoprior — demote it to a depth demo. Audit for other thin wrappers around foundation/capability code.</p>
+        </li>
+        <li>
+          <div><span class="st">Merge SLAM family + unify the Pipeline handle</span><span class="ph">larger · do last</span></div>
+          <p>dpvo + mast3r-slam + robocap + pysfm into one <code>slam</code> package returning <code>CameraTrajectory + PointCloud</code>; <code>slam-evals</code> becomes its benchmark harness. Vendored recipes (mast3r/asmk/dpretrieval) stay separate as build deps.</p>
+        </li>
+      </ol>
+    </section>
+
+    <!-- ============ DECISIONS ============ -->
+    <section id="decisions">
+      <h2><span class="num">13</span>Open decisions (only you can make these)</h2>
+      <p class="section-sub">The structure above has a few genuine forks where I have a recommendation but the call depends on your intent. These are worth settling before step 1.</p>
+
+      <details class="q">
+        <summary>Does <code>simplecv</code> stay one foundation, or split into <code>simplecv-core</code> + <code>simplecv-data</code>?</summary>
+        <div class="qbody">Today simplecv carries both lightweight primitives (camera params, conventions, Rerun types) <em>and</em> heavy dataset machinery (HoCap/Aria/EPFL loaders, catalog tooling, a 25-file <code>apis/</code>). Capability packages only need the primitives. <span class="rec">Recommendation:</span> split — a thin <code>simplecv</code> foundation (types, ops, Rerun, camera) that capability packages depend on, and a separate <code>data</code>/forge package for dataset converters &amp; catalogs (absorbing egoexo-forge, pyvrs-viewer). Keeps the foundation's dependency surface small.</div>
+      </details>
+      <details class="q">
+        <summary>"Make everything PyTorch-based" — how literally?</summary>
+        <div class="qbody">Largely settled in <a class="inline" href="#foundation-stack">§06</a>: depend on kornia for GPU geometry, keep simplecv for the rest, and make <em>heavy</em> data (images, depth, masks) torch tensors on-device through the predictor contract while small metadata (<code>K</code>, poses) and the Rerun edge stay NumPy. Several backends deliberately aren't torch — cuVSLAM (robocap), pycolmap (pysfm), the Rust gsplat renderer, DBoW2/ASMK retrieval — and shouldn't be rewritten. <span class="rec">Still yours:</span> how hard to pin kornia (conda-forge trails PyPI by a release), and whether to expose kornia types or wrap them behind simplecv dataclasses.</div>
+      </details>
+      <details class="q">
+        <summary>Capability packages vs one mega-package with submodules?</summary>
+        <div class="qbody">You floated "separate packages like pose-estimation, depth-prediction." <span class="rec">Recommendation:</span> separate pixi-environment packages (matches the current per-package env model and keeps GPU/dep stacks isolated — Sapiens, SAM3, and cuVSLAM have very different dep trees). The shared contract lives in the foundation, so packages stay consistent without sharing one environment.</div>
+      </details>
+      <details class="q">
+        <summary>Is consolidation worth disturbing working code at all?</summary>
+        <div class="qbody">These are example/demo packages — churn risk is real and the payoff is consistency, not new capability. <span class="rec">Recommendation:</span> do steps 1–3 (naming + contract + per-package adoption) regardless — they're cheap and high-readability-value. Treat the capability <em>merges</em> (steps 4, 6) as opt-in: only merge a family when you're already doing real work in it, so the refactor rides along with a feature rather than being pure overhead.</div>
+      </details>
+    </section>
+
+    <!-- ============ FUTURE MODELS ============ -->
+    <section id="future-models">
+      <h2><span class="num">14</span>Future models — pressure-testing the contract</h2>
+      <p class="section-sub">Four models slated to land next, chosen because each breaks the contract (§07) and the result types (§08) in a <em>different</em> way: a third-party return type, two multi-output bundles, and a loose tensor dict. They are the real test of "is this the right pattern?" — and they answer it.</p>
+
+      <div class="stats">
+        <div class="stat"><div class="v">4</div><div class="l">models queued to land</div></div>
+        <div class="stat"><div class="v">4</div><div class="l">distinct upstream return types — 3rd-party · 2 bundles · loose dict</div></div>
+        <div class="stat"><div class="v">0</div><div class="l">expose a base class you own — you wrap all four</div></div>
+        <div class="stat"><div class="v">3 + 1</div><div class="l">contract refinements + one open decision settled</div></div>
+      </div>
+
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Model</th><th>Capability</th><th>Upstream output today</th><th>How you get a model</th><th>Variant axis</th><th>Lands as (§08)</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><span class="pkg">rf-detr</span><br><span class="muted" style="font-size:0.72rem;">roboflow/rf-detr</span></td>
+              <td><span class="pill fam-human">detection + seg</span></td>
+              <td class="mono">supervision.Detections <span class="muted">(3rd-party · mask? optional)</span></td>
+              <td class="mono">RFDETRLarge() · from_checkpoint(path)</td>
+              <td>separate classes <span class="muted">(Nano…Large · Seg*)</span></td>
+              <td class="mono">Detections{boxes·scores·labels·masks?}</td>
+            </tr>
+            <tr>
+              <td><span class="pkg">mini-dust3r</span><br><span class="muted" style="font-size:0.72rem;">pablovela5620/mini-dust3r</span></td>
+              <td><span class="pill fam-depth">multiview</span></td>
+              <td class="mono">OptimizedResult <span class="muted">(bundle: per-view depth+conf+cam · cloud · mesh)</span></td>
+              <td class="mono">AsymmetricCroCo3DStereo.from_pretrained()</td>
+              <td>weights string</td>
+              <td class="mono">MultiviewResult <span class="muted">(DepthMap[] + CameraTrajectory + PointCloud + Mesh)</span></td>
+            </tr>
+            <tr>
+              <td><span class="pkg">depth-anything-3</span><br><span class="muted" style="font-size:0.72rem;">bytedance-seed/depth-anything-3</span></td>
+              <td><span class="pill fam-depth">depth + multiview</span></td>
+              <td class="mono">Prediction <span class="muted">(bundle: depth · conf · extrinsics · intrinsics · gaussians?)</span></td>
+              <td class="mono">DepthAnything3.from_pretrained(hub_id)</td>
+              <td><b>HF hub-id</b> <span class="muted">— 7 sizes, one class</span></td>
+              <td class="mono">DepthMap <span class="muted">and/or</span> MultiviewResult <span class="muted">(+ GaussianSplats)</span></td>
+            </tr>
+            <tr>
+              <td><span class="pkg">mammanet</span><br><span class="muted" style="font-size:0.72rem;">cuevhv/mamma · ma_2d stage</span></td>
+              <td><span class="pill fam-human">keypoints</span></td>
+              <td class="mono">dict[str, Tensor] <span class="muted">(512 dense pts + sigma + contact heads)</span></td>
+              <td class="mono">DenseLdmks2DViT(cfg) + eval(model_name)</td>
+              <td>Hydra config name</td>
+              <td class="mono">Keypoints2D <span class="muted">(+ extras: visibility · contact)</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="muted" style="font-size:0.8rem;margin-top:8px;">Capability families map onto the §04 taxonomy with <b>no new buckets</b>: rf-detr is a <code>detection + seg</code> backend, mammanet a top-down <code>keypoints</code> node, mini-dust3r a <code>multiview</code> backend, and DA3 spans <code>depth</code> + <code>multiview</code> at once (below).</p>
+
+      <div class="callout"><b>Verdict — the contract holds.</b> Despite a third-party type, two heterogeneous bundles, and a research dict, all four collapse into the same shape once wrapped: <em>construct-by-string → call-with-image → typed result</em>. That collapse <em>is</em> the pattern earning its keep — the wrapper is where upstream chaos goes to die. They don't refute the design; they sharpen three parts of it and settle one open decision.</div>
+
+      <h3>Three refinements they force</h3>
+      <div class="grid3">
+        <div class="panel">
+          <h4>1 · Results must compose <span class="pill v-adopt">atoms + bundles</span></h4>
+          <p style="font-size:0.88rem;margin:8px 0 0;color:var(--text-dim);">DA3 and mini-dust3r each return depth <em>and</em> poses <em>and</em> a point cloud (+ splats/mesh) from one call — a flat <code>DepthMap</code> cannot type them. Keep the §08 types as small <b>atoms</b>, then add <b>bundles that hold atoms</b>: <code>MultiviewResult{ views: DepthMap[] · cameras: CameraTrajectory · cloud: PointCloud · splats? }</code>. mini-dust3r already proves it — its result embeds simplecv's <code>PinholeParameters</code> instead of re-rolling cameras. Add optional fields (rf-detr <code>masks?</code>) and an <code>extras</code> hatch (mammanet <code>contact</code>).</p>
+        </div>
+        <div class="panel">
+          <h4>2 · ABC for producers, Protocol for consumers <span class="pill v-adopt">both, with roles</span></h4>
+          <p style="font-size:0.88rem;margin:8px 0 0;color:var(--text-dim);">You wrap all four <em>by composition</em> — you own none of these classes — so Protocol's "let it fit structurally" buys little. Keep the tiny <code>BasePredictor[InputT, ResultT]</code> ABC: it is the home for shared <code>to(device)</code>, the on-device <code>preprocess()</code> (§10), and boundary flags (<code>expects_bgr</code>, <code>needs_bbox</code>), and beartype enforces the typed return. Reserve a <code>@runtime_checkable</code> Protocol for the <em>consumption</em> seam (a benchmark that takes "any depth model") and for <code>rr.AsComponents</code> on the result types.</p>
+        </div>
+        <div class="panel">
+          <h4>3 · Factory: split arch from weights <span class="pill v-adopt">keep the Literal</span></h4>
+          <p style="font-size:0.88rem;margin:8px 0 0;color:var(--text-dim);">rf-detr selects by <em>separate classes</em>; DA3 by <em>one class, 7 checkpoints</em>; mammanet by <em>config name</em>. Keep the closed <code>Literal</code> + <code>match</code> factory (the curated menu tyro validates) but make it <b>one entry per architecture</b> — push size/checkpoint to a constructor arg. A registry-decorator only pays off for third-party plugins you don't author; you author every wrapper, so don't trade away the static <code>Literal</code>.</p>
+        </div>
+      </div>
+
+      <div class="callout"><b>The open decision they settle (§13 · "granularity is a dial"):</b> DA3 is a single forward that is simultaneously depth, camera pose, multiview reconstruction, and 3DGS — it openly breaks "one capability → one output type." Don't force it into one bucket: have its wrapper return the composite <code>MultiviewResult</code> and <b>register the same wrapper under several capability factories</b> — <code>get_depth_predictor("DA3")</code> projects just the <code>DepthMap</code>; <code>get_multiview_predictor("DA3")</code> returns the full bundle. That one model now spans both is the concrete argument for folding <code>depth</code> and <code>multiview</code> into a single package.</div>
+
+      <p class="muted" style="font-size:0.82rem;margin-top:8px;"><b>Per-model wrinkles the adapter must absorb:</b> <b>rf-detr</b> already returns <code>supervision.Detections</code> (decide: re-export it, or wrap it), with <code>mask=None</code> on box-only variants and class <em>names</em> tucked in <code>.data["class_name"]</code>. <b>DA3 / mini-dust3r</b> are multi-output bundles — pointmaps are <em>derived</em> by unprojecting depth with the predicted intrinsics/extrinsics, not a stored field. <b>mammanet</b> emits a <code>sigma</code> (inverse-confidence — flip it at the adapter), <code>contact</code>/<code>floor_contact</code> heads (no standard slot → the <code>extras</code> hatch), and <b>512 non-skeleton landmarks</b> (an SMPL-X vertex subsampling) that need a length-agnostic <code>Keypoints2D</code>; it also requires a person bbox upstream — i.e. it is a top-down keypoints node that <em>consumes</em> <code>Detections</code>, reinforcing §04's case for detection as its own capability.</p>
+    </section>
+
+    <footer>
+      Working document · derived from reading the repo at <code>examples-monorepo</code> (18 first-party packages + 3 vendored recipes). Complements the existing <code>monorepo-modularity-presentation.html</code> deck. Inventory and entrypoint shapes verified against source, not just READMEs. §14 pressure-tests the contract against four incoming models — rf-detr, mini-dust3r, depth-anything-3, mammanet.
+    </footer>
+  </main>
+</div>
+
+<script>
+  // Filter inventory by family
+  const chips = document.querySelectorAll('.chip');
+  const rows = document.querySelectorAll('#inv tbody tr');
+  chips.forEach(chip => {
+    chip.addEventListener('click', () => {
+      chips.forEach(c => c.setAttribute('aria-pressed', 'false'));
+      chip.setAttribute('aria-pressed', 'true');
+      const f = chip.dataset.f;
+      rows.forEach(r => {
+        r.classList.toggle('hidden', f !== 'all' && r.dataset.fam !== f);
+      });
+    });
+  });
+
+  // Scroll-spy for nav
+  const navLinks = [...document.querySelectorAll('nav a')];
+  const sections = navLinks.map(a => document.querySelector(a.getAttribute('href')));
+  const spy = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        const id = '#' + e.target.id;
+        navLinks.forEach(a => a.classList.toggle('active', a.getAttribute('href') === id));
+      }
+    });
+  }, { rootMargin: '-20% 0px -70% 0px' });
+  sections.forEach(s => s && spy.observe(s));
+</script>
+</body>
+</html>
