@@ -5,12 +5,10 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-import pytest
-
 
 def _load_benchmark_module() -> ModuleType:
-    module_path: Path = Path(__file__).parent.parent / "tools" / "benchmark_torchcodec_cuda_multiview.py"
-    spec = importlib.util.spec_from_file_location("benchmark_torchcodec_cuda_multiview", module_path)
+    module_path: Path = Path(__file__).parent.parent / "simplecv" / "apis" / "benchmark_torchcodec_cuda_multiview.py"
+    spec = importlib.util.spec_from_file_location("simplecv.apis.benchmark_torchcodec_cuda_multiview", module_path)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -19,33 +17,48 @@ def _load_benchmark_module() -> ModuleType:
     return module
 
 
-def test_epfl_exo_rgb_paths_returns_configured_camera_order(tmp_path: Path) -> None:
-    """EPFL benchmark inputs follow the dataset's exo camera order."""
+def test_find_video_paths_searches_directory_in_sorted_order(tmp_path: Path) -> None:
+    """Benchmark inputs are discovered as sorted mp4s from a directory."""
     module: ModuleType = _load_benchmark_module()
-    video_dir: Path = tmp_path / "Public_release_videos" / "train" / "YH2002" / "2023_12_04_10_15_23" / "videos"
-    video_dir.mkdir(parents=True)
-    for camera_name in module.EPFL_EXO_CAMERA_NAMES:
-        (video_dir / f"{camera_name}.mp4").touch()
+    video_dir: Path = tmp_path / "videos"
+    video_dir.mkdir()
+    (video_dir / "cam_b.mp4").touch()
+    (video_dir / "notes.txt").touch()
+    (video_dir / "cam_a.mp4").touch()
 
-    video_paths: list[Path] = module.epfl_exo_rgb_paths(tmp_path, "train", "YH2002", "2023_12_04_10_15_23")
+    video_paths: list[Path] = module.find_video_paths(video_dir)
 
-    assert [path.name for path in video_paths] == [f"{camera_name}.mp4" for camera_name in module.EPFL_EXO_CAMERA_NAMES]
+    assert [path.name for path in video_paths] == ["cam_a.mp4", "cam_b.mp4"]
 
 
-def test_benchmark_parser_defaults_to_chunked_approximate_decode() -> None:
+def test_find_video_paths_prefers_rgb_low_videos(tmp_path: Path) -> None:
+    """Assembly101-style RGB exo videos are selected when mixed mp4s exist."""
+    module: ModuleType = _load_benchmark_module()
+    video_dir: Path = tmp_path / "videos"
+    video_dir.mkdir()
+    (video_dir / "C10095_rgb_low.mp4").touch()
+    (video_dir / "C10115_rgb_low.mp4").touch()
+    (video_dir / "HMC_84346135_mono10bit_low.mp4").touch()
+
+    video_paths: list[Path] = module.find_video_paths(video_dir)
+
+    assert [path.name for path in video_paths] == ["C10095_rgb_low.mp4", "C10115_rgb_low.mp4"]
+
+
+def test_benchmark_config_defaults_to_chunked_approximate_decode(tmp_path: Path) -> None:
     """The benchmark defaults to the chosen simple chunked CUDA path."""
     module: ModuleType = _load_benchmark_module()
 
-    args = module.build_parser().parse_args([])
+    config = module.BenchmarkConfig(video_dir=tmp_path)
 
-    assert args.chunk_size == 32
-    assert args.seek_mode == "approximate"
-    assert not hasattr(args, "temporal_shards")
+    assert config.chunk_size == 32
+    assert config.seek_mode == "approximate"
 
 
-def test_benchmark_parser_rejects_materialized_decode_mode() -> None:
-    """The benchmark should only expose positive chunked decode."""
-    module: ModuleType = _load_benchmark_module()
+def test_tool_is_minimal_tyro_wrapper() -> None:
+    """The CLI tool should delegate parsing to tyro and implementation to the API."""
+    tool_path: Path = Path(__file__).parent.parent / "tools" / "benchmark_torchcodec_cuda_multiview.py"
+    tool_text: str = tool_path.read_text()
 
-    with pytest.raises(SystemExit):
-        module.build_parser().parse_args(["--chunk-size", "0"])
+    assert "tyro.cli(BenchmarkConfig" in tool_text
+    assert "from simplecv.apis.benchmark_torchcodec_cuda_multiview import BenchmarkConfig, main" in tool_text
