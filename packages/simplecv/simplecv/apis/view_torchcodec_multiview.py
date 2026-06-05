@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import get_args
 
 import rerun as rr
 import rerun.blueprint as rrb
@@ -12,31 +11,24 @@ from jaxtyping import Int, UInt8
 from numpy import ndarray
 from tqdm import tqdm
 
-from simplecv.data.exo.hocap_exo import ExoCameraIDs
 from simplecv.rerun_log_utils import log_video
 from simplecv.video_io import TorchCodecMultiVideoReader
 
-DEFAULT_HOCAP_ROOT: Path = Path("data/hocap/sample")
-DEFAULT_SAVE_PATH: Path = Path("/tmp/hocap_torchcodec_multiview.rrd")
+DEFAULT_SAVE_PATH: Path = Path("/tmp/torchcodec_multiview.rrd")
 TIMELINE: str = "video_time"
 PREVIEW_SECONDS: float = 1.0
-HOCAP_EXO_CAMERA_NAMES: tuple[str, ...] = tuple(get_args(ExoCameraIDs))
 
 
 @dataclass
-class HocapTorchCodecViewConfig:
-    """HOCAP TorchCodec multiview Rerun viewer config."""
+class TorchCodecMultiviewConfig:
+    """TorchCodec multiview Rerun viewer config."""
 
-    root_directory: Path = DEFAULT_HOCAP_ROOT
-    """HOCAP sample/full root directory containing ``subject_<id>/<sequence>``."""
-    subject_id: str = "8"
-    """HOCAP subject id."""
-    sequence_name: str = "20231024_180733"
-    """HOCAP sequence name."""
+    video_dir: Path
+    """Directory containing one or more ``.mp4`` videos."""
     save_path: Path = DEFAULT_SAVE_PATH
     """Path to save the generated Rerun recording."""
-    max_videos: int = len(HOCAP_EXO_CAMERA_NAMES)
-    """Maximum number of exo camera videos to log for the side-by-side check."""
+    max_videos: int = 0
+    """Maximum videos to log for the side-by-side check. Use ``0`` for all videos."""
     max_frames: int = 32
     """Maximum decoded frames per video to log as ``rr.Image``."""
     chunk_size: int = 32
@@ -45,32 +37,39 @@ class HocapTorchCodecViewConfig:
     """TorchCodec decode device."""
 
 
-def find_hocap_video_paths(root_directory: Path, subject_id: str, sequence_name: str, max_videos: int) -> list[Path]:
-    """Find sorted HOCAP exo camera videos under one sequence directory."""
-    if max_videos <= 0:
-        raise ValueError("max_videos must be positive")
-    sequence_dir: Path = root_directory / f"subject_{subject_id}" / sequence_name
-    if not sequence_dir.is_dir():
-        raise FileNotFoundError(f"HOCAP sequence directory does not exist: {sequence_dir}")
+def discover_video_paths(video_dir: Path, max_videos: int) -> list[Path]:
+    """Find sorted ``.mp4`` videos under a directory."""
+    if max_videos < 0:
+        raise ValueError("max_videos must be non-negative")
+    if not video_dir.is_dir():
+        raise FileNotFoundError(f"Video directory does not exist: {video_dir}")
 
-    video_paths: list[Path] = []
-    for camera_name in HOCAP_EXO_CAMERA_NAMES:
-        video_path: Path = sequence_dir / camera_name / "output.mp4"
-        if video_path.is_file():
-            video_paths.append(video_path)
+    video_paths: list[Path] = sorted(video_path for video_path in video_dir.rglob("*.mp4") if video_path.is_file())
     if not video_paths:
-        raise FileNotFoundError(f"No HOCAP output.mp4 videos found under {sequence_dir}")
+        raise FileNotFoundError(f"No .mp4 videos found under {video_dir}")
+    if max_videos == 0:
+        return video_paths
     return video_paths[:max_videos]
 
 
-def build_blueprint(camera_names: list[str]) -> rrb.Blueprint:
+def video_entity_names(video_dir: Path, video_paths: list[Path]) -> list[str]:
+    """Derive stable Rerun entity names from video paths."""
+    entity_names: list[str] = []
+    for video_path in video_paths:
+        relative_path: Path = video_path.relative_to(video_dir)
+        entity_name: str = relative_path.with_suffix("").as_posix()
+        entity_names.append(entity_name)
+    return entity_names
+
+
+def build_blueprint(video_names: list[str]) -> rrb.Blueprint:
     """Build a compact video-stream vs decoded-image comparison blueprint."""
     rows: list[rrb.Horizontal] = []
-    for camera_name in camera_names:
-        camera_root: str = f"/hocap/{camera_name}"
+    for video_name in video_names:
+        video_root: str = f"/videos/{video_name}"
         row: rrb.Horizontal = rrb.Horizontal(
-            rrb.Spatial2DView(origin=f"{camera_root}/video", name=f"{camera_name} video"),
-            rrb.Spatial2DView(origin=f"{camera_root}/decoded", name=f"{camera_name} decoded"),
+            rrb.Spatial2DView(origin=f"{video_root}/video", name=f"{video_name} video"),
+            rrb.Spatial2DView(origin=f"{video_root}/decoded", name=f"{video_name} decoded"),
             column_shares=[1, 1],
         )
         rows.append(row)
@@ -97,7 +96,7 @@ def rgb_chw_to_rgb_hwc_numpy(rgb_chw: UInt8[torch.Tensor, "3 h w"]) -> UInt8[nda
 def log_torchcodec_decoded_images(
     *,
     reader: TorchCodecMultiVideoReader,
-    camera_names: list[str],
+    video_names: list[str],
     frame_timestamps_by_video: list[Int[ndarray, "num_frames"]],
     max_frames: int,
     chunk_size: int,
@@ -114,9 +113,9 @@ def log_torchcodec_decoded_images(
         )
     ):
         start_frame_idx: int = chunk_start * chunk_size
-        for camera_idx, video in enumerate(videos):
-            camera_name: str = camera_names[camera_idx]
-            frame_timestamps_ns: Int[ndarray, "num_frames"] = frame_timestamps_by_video[camera_idx]
+        for video_idx, video in enumerate(videos):
+            video_name: str = video_names[video_idx]
+            frame_timestamps_ns: Int[ndarray, "num_frames"] = frame_timestamps_by_video[video_idx]
             for local_frame_idx in range(int(video.shape[0])):
                 frame_idx: int = start_frame_idx + local_frame_idx
                 if frame_idx >= len(frame_timestamps_ns):
@@ -126,38 +125,33 @@ def log_torchcodec_decoded_images(
                 rr.set_time(TIMELINE, duration=float(frame_timestamps_ns[frame_idx]) * 1e-9, recording=recording)
                 rr.set_time("frame", sequence=frame_idx, recording=recording)
                 rr.log(
-                    f"/hocap/{camera_name}/decoded",
+                    f"/videos/{video_name}/decoded",
                     rr.Image(rgb_hwc, color_model=rr.ColorModel.RGB).compress(jpeg_quality=80),
                     recording=recording,
                 )
 
 
-def main(config: HocapTorchCodecViewConfig) -> None:
-    """Log HOCAP native video streams and TorchCodec decoded image frames to Rerun."""
+def main(config: TorchCodecMultiviewConfig) -> None:
+    """Log native video streams and TorchCodec decoded image frames to Rerun."""
     if config.device.startswith("cuda") and not torch.cuda.is_available():
         raise SystemExit("CUDA was requested, but torch.cuda.is_available() is false. Use --device cpu for a smoke run.")
 
-    video_paths: list[Path] = find_hocap_video_paths(
-        config.root_directory,
-        subject_id=config.subject_id,
-        sequence_name=config.sequence_name,
-        max_videos=config.max_videos,
-    )
-    camera_names: list[str] = [path.parent.name for path in video_paths]
+    video_paths: list[Path] = discover_video_paths(config.video_dir, max_videos=config.max_videos)
+    video_names: list[str] = video_entity_names(config.video_dir, video_paths)
 
     config.save_path.parent.mkdir(parents=True, exist_ok=True)
     recording: rr.RecordingStream = rr.RecordingStream(
-        application_id="hocap_torchcodec_multiview",
-        recording_id=f"subject_{config.subject_id}_{config.sequence_name}",
+        application_id="torchcodec_multiview",
+        recording_id=f"torchcodec_multiview_{config.video_dir.name}",
     )
     recording.save(str(config.save_path))
-    rr.send_blueprint(build_blueprint(camera_names), recording=recording)
+    rr.send_blueprint(build_blueprint(video_names), recording=recording)
 
     frame_timestamps_by_video: list[Int[ndarray, "num_frames"]] = []
-    for camera_name, video_path in zip(camera_names, video_paths, strict=True):
+    for video_name, video_path in zip(video_names, video_paths, strict=True):
         frame_timestamps_ns: Int[ndarray, "num_frames"] = log_video(
             video_path,
-            video_log_path=Path(f"/hocap/{camera_name}/video"),
+            video_log_path=Path(f"/videos/{video_name}/video"),
             timeline=TIMELINE,
             recording=recording,
         )
@@ -171,7 +165,7 @@ def main(config: HocapTorchCodecViewConfig) -> None:
     )
     log_torchcodec_decoded_images(
         reader=reader,
-        camera_names=camera_names,
+        video_names=video_names,
         frame_timestamps_by_video=frame_timestamps_by_video,
         max_frames=config.max_frames,
         chunk_size=config.chunk_size,
