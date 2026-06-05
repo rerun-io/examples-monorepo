@@ -204,6 +204,12 @@ depends-on = ["_download-simplecv-hocap-sample"]
 cwd = "packages/simplecv"
 description = "View example HoCap exo/ego data"
 
+[feature.simplecv.tasks.simplecv-view-hocap-torchcodec-multiview]
+cmd = "python tools/view_hocap_torchcodec_multiview.py"
+depends-on = ["_download-simplecv-hocap-sample"]
+cwd = "packages/simplecv"
+description = "View HOCAP exo videos with TorchCodec CUDA multiview decoding"
+
 [feature.simplecv.tasks.simplecv-download-hot3d]
 cmd = "python tools/download_hot3d.py"
 cwd = "packages/simplecv"
