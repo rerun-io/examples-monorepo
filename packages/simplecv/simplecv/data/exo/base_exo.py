@@ -73,7 +73,9 @@ class BaseExoSequence(ABC, Generic[ConfigT]):
         self._exo_cam_list: list[PinholeParameters | None] = self.load_exo_cams()
         # Only create MultiVideoReader if not already set by subclass (e.g., RRD sequences)
         if not hasattr(self, "exo_video_readers") or self.exo_video_readers is None:
-            self.exo_video_readers: MultiVideoReader = MultiVideoReader(video_paths=[video_path for video_path in self._video_path_list])
+            self.exo_video_readers: MultiVideoReader = MultiVideoReader(
+                video_paths=[video_path for video_path in self._video_path_list]
+            )
 
     def __len__(self) -> int:
         return len(self.exo_video_readers)

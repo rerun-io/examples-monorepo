@@ -2,10 +2,9 @@
 from collections import OrderedDict
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 from itertools import repeat
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 import cv2
 import numpy as np
@@ -18,21 +17,21 @@ from cv2 import (
     CAP_PROP_FRAME_WIDTH,
     CAP_PROP_POS_FRAMES,
 )
+from einops import rearrange
 from jaxtyping import UInt8
 
 from simplecv.image_types import BGRList, ImageBGR
 
 
-@dataclass(frozen=True, slots=True)
-class TorchCodecVideoChunk:
-    """Synchronized multiview video chunk."""
+def rgb_chw_tensor_to_bgr_hwc(rgb_chw: UInt8[torch.Tensor, "3 h w"]) -> ImageBGR:
+    """Convert an RGB ``CHW`` uint8 tensor to a BGR ``HWC`` numpy image."""
+    if rgb_chw.ndim != 3 or rgb_chw.shape[0] != 3:
+        raise ValueError(f"Expected RGB tensor with shape (3, *, *), got {tuple(rgb_chw.shape)}.")
 
-    start: int
-    """Inclusive start frame index."""
-    stop: int
-    """Exclusive stop frame index."""
-    videos: list[UInt8[torch.Tensor, "b 3 h w"]]
-    """One RGB BCHW uint8 tensor per video."""
+    bgr_chw: UInt8[torch.Tensor, "3 h w"] = torch.flip(rgb_chw.detach(), dims=(0,))
+    bgr_hwc_tensor: UInt8[torch.Tensor, "h w 3"] = rearrange(bgr_chw, "c h w -> h w c")
+    bgr_hwc: ImageBGR = np.ascontiguousarray(bgr_hwc_tensor.cpu().numpy(), dtype=np.uint8)
+    return bgr_hwc
 
 
 class Cache:
@@ -301,54 +300,56 @@ class MultiVideoReader:
 
 
 class TorchCodecVideoReader:
-    """TorchCodec-based video reader supporting both file paths and in-memory bytes.
+    """TorchCodec reader that returns RGB uint8 tensors in ``CHW``/``NCHW`` order."""
 
-    This reader uses TorchCodec for faster decoding compared to OpenCV's VideoCapture.
-    It outputs BGR numpy arrays for compatibility with existing OpenCV-based code.
-
-    Supports both file paths and raw video bytes (e.g., extracted from RRD recordings).
-
-    Examples:
-        >>> from pathlib import Path
-        >>> reader = TorchCodecVideoReader(Path("video.mp4"))
-        >>> len(reader)  # total frame count
-        300
-        >>> for frame in reader:  # iterate sequentially (fastest)
-        ...     process(frame)
-        >>> reader[50]  # random access (slower, requires seek)
-    """
-
-    def __init__(self, source: Path | bytes) -> None:
-        """Initialize the TorchCodec video reader.
+    def __init__(
+        self,
+        source: Path | bytes,
+        device: str | torch.device | None = None,
+        num_ffmpeg_threads: int = 0,
+        seek_mode: Literal["exact", "approximate"] = "approximate",
+    ) -> None:
+        """Initialize the TorchCodec tensor video reader.
 
         Args:
-            source: Path to video file or raw video bytes.
+            source: Path to a video file or raw encoded video bytes.
+            device: TorchCodec decode device. Defaults to CUDA when available.
+            num_ffmpeg_threads: FFmpeg thread count passed to TorchCodec.
+            seek_mode: TorchCodec seek mode.
         """
         from torchcodec.decoders import VideoDecoder
 
         self._source: Path | bytes = source
-        self._is_bytes: bool = isinstance(source, bytes)
+        self.device: str = str(device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu"))
+        self.num_ffmpeg_threads: int = num_ffmpeg_threads
+        self.seek_mode: Literal["exact", "approximate"] = seek_mode
 
-        # Create decoder - TorchCodec accepts str path or bytes
-        decoder_source: str | bytes = source if isinstance(source, bytes) else str(source)
         self._decoder: VideoDecoder = VideoDecoder(
-            decoder_source,
-            device="cpu",
-            seek_mode="exact",
-            num_ffmpeg_threads=0,  # Auto-managed threading
-            dimension_order="NHWC",
+            source,
+            device=self.device,
+            seek_mode=self.seek_mode,
+            num_ffmpeg_threads=self.num_ffmpeg_threads,
+            dimension_order="NCHW",
         )
 
-        # Cache metadata (type ignores: TorchCodec metadata types are Optional but never None in practice)
         metadata = self._decoder.metadata
-        self._width: int = int(metadata.width)  # type: ignore[arg-type]
-        self._height: int = int(metadata.height)  # type: ignore[arg-type]
-        self._fps: float = float(metadata.average_fps)  # type: ignore[arg-type]
-        self._frame_cnt: int = int(metadata.num_frames)  # type: ignore[arg-type]
-
-        # Iterator state
+        self._width: int = self._required_int(metadata.width, "width")
+        self._height: int = self._required_int(metadata.height, "height")
+        self._fps: float = self._required_float(metadata.average_fps, "average_fps")
+        self._frame_cnt: int = self._required_int(metadata.num_frames, "num_frames")
         self._position: int = 0
-        self._iterator = None
+
+    @staticmethod
+    def _required_int(value: int | None, name: str) -> int:
+        if value is None:
+            raise ValueError(f"TorchCodec metadata field {name} is missing")
+        return int(value)
+
+    @staticmethod
+    def _required_float(value: float | None, name: str) -> float:
+        if value is None:
+            raise ValueError(f"TorchCodec metadata field {name} is missing")
+        return float(value)
 
     @property
     def width(self) -> int:
@@ -380,41 +381,20 @@ class TorchCodecVideoReader:
         """Path | bytes: Original source (file path or bytes)."""
         return self._source
 
-    def _frame_to_bgr(self, frame_tensor) -> ImageBGR:
-        """Convert TorchCodec frame tensor (RGB) to BGR numpy array.
-
-        Args:
-            frame_tensor: Torch tensor in NHWC format (1, H, W, 3) RGB.
-
-        Returns:
-            BGR numpy array (H, W, 3).
-        """
-        # Squeeze batch dimension and convert to numpy
-        rgb_frame: np.ndarray = frame_tensor.squeeze(0).numpy()
-        # Convert RGB to BGR for OpenCV compatibility
-        bgr_frame: ImageBGR = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2BGR)
-        return bgr_frame
-
-    def read(self) -> ImageBGR | None:
+    def read(self) -> UInt8[torch.Tensor, "3 h w"] | None:
         """Read the next frame sequentially.
 
         Returns:
-            BGR numpy array or None if end of video.
+            RGB ``CHW`` uint8 tensor or ``None`` if end of video.
         """
         if self._position >= self._frame_cnt:
             return None
 
-        if self._iterator is None:
-            self._iterator = iter(self._decoder)  # type: ignore[arg-type]
+        frame: UInt8[torch.Tensor, "3 h w"] = self.get_frame(self._position)
+        self._position += 1
+        return frame
 
-        try:
-            frame_tensor = next(self._iterator)
-            self._position += 1
-            return self._frame_to_bgr(frame_tensor)
-        except StopIteration:
-            return None
-
-    def get_frame(self, frame_id: int) -> ImageBGR:
+    def get_frame(self, frame_id: int) -> UInt8[torch.Tensor, "3 h w"]:
         """Get frame by index (random access).
 
         Note: Random access is slower than sequential iteration due to seeking.
@@ -423,7 +403,7 @@ class TorchCodecVideoReader:
             frame_id: Index of the expected frame, 0-based.
 
         Returns:
-            BGR numpy array.
+            RGB ``CHW`` uint8 tensor.
 
         Raises:
             IndexError: If frame_id is out of range.
@@ -431,55 +411,60 @@ class TorchCodecVideoReader:
         if frame_id < 0 or frame_id >= self._frame_cnt:
             raise IndexError(f'"frame_id" must be between 0 and {self._frame_cnt - 1}')
 
-        frame = self._decoder.get_frame_at(frame_id)
-        # With dimension_order="NHWC", Frame.data is HWC format, add batch dim for _frame_to_bgr
-        frame_tensor = frame.data.unsqueeze(0)
-        return self._frame_to_bgr(frame_tensor)
+        frame: UInt8[torch.Tensor, "3 h w"] = self._decoder.get_frame_at(frame_id).data
+        return frame
+
+    def get_frames_in_range(self, start: int, stop: int) -> UInt8[torch.Tensor, "b 3 h w"]:
+        """Get an RGB ``NCHW`` uint8 frame range."""
+        if start < 0:
+            raise IndexError("start must be non-negative")
+        if stop < start:
+            raise ValueError("stop must be greater than or equal to start")
+        clamped_stop: int = min(stop, self._frame_cnt)
+        if start >= clamped_stop:
+            empty: UInt8[torch.Tensor, "b 3 h w"] = torch.empty(
+                (0, 3, self._height, self._width),
+                dtype=torch.uint8,
+                device=self.device,
+            )
+            return empty
+        video: UInt8[torch.Tensor, "b 3 h w"] = self._decoder.get_frames_in_range(start, clamped_stop).data
+        return video
 
     def __len__(self) -> int:
         return self._frame_cnt
 
-    def __getitem__(self, index: int | slice) -> ImageBGR | list[ImageBGR]:
+    def __getitem__(self, index: int | slice) -> UInt8[torch.Tensor, "3 h w"] | UInt8[torch.Tensor, "b 3 h w"]:
         if isinstance(index, slice):
-            frames: list[ImageBGR] = [self.get_frame(i) for i in range(*index.indices(self._frame_cnt))]
-            return frames
+            indices: list[int] = list(range(*index.indices(self._frame_cnt)))
+            if not indices:
+                empty: UInt8[torch.Tensor, "b 3 h w"] = torch.empty(
+                    (0, 3, self._height, self._width),
+                    dtype=torch.uint8,
+                    device=self.device,
+                )
+                return empty
+            if index.step in (None, 1):
+                return self.get_frames_in_range(indices[0], indices[-1] + 1)
+            stepped_frames: UInt8[torch.Tensor, "b 3 h w"] = torch.stack([self.get_frame(i) for i in indices], dim=0)
+            return stepped_frames
         if index < 0:
             index += self._frame_cnt
             if index < 0:
                 raise IndexError("index out of range")
-        frame: ImageBGR = self.get_frame(index)
+        frame: UInt8[torch.Tensor, "3 h w"] = self.get_frame(index)
         return frame
 
     def __iter__(self):
         """Reset iterator for sequential access."""
-        from torchcodec.decoders import VideoDecoder
-
-        # Create fresh decoder for iteration
-        decoder_source: str | bytes = str(self._source) if isinstance(self._source, Path) else self._source
-        fresh_decoder: VideoDecoder = VideoDecoder(
-            decoder_source,
-            device="cpu",
-            seek_mode="exact",
-            num_ffmpeg_threads=0,
-            dimension_order="NHWC",
-        )
-        self._iter_decoder = fresh_decoder
-        self._iter_position = 0
+        self._position = 0
         return self
 
-    def __next__(self) -> ImageBGR:
-        if self._iter_position >= self._frame_cnt:
+    def __next__(self) -> UInt8[torch.Tensor, "3 h w"]:
+        frame: UInt8[torch.Tensor, "3 h w"] | None = self.read()
+        if frame is None:
             raise StopIteration
-
-        try:
-            # Use iterator on the fresh decoder
-            if not hasattr(self, "_iter_iterator"):
-                self._iter_iterator = iter(self._iter_decoder)  # type: ignore[arg-type]
-            frame_tensor = next(self._iter_iterator)
-            self._iter_position += 1
-            return self._frame_to_bgr(frame_tensor)
-        except StopIteration:
-            raise StopIteration from None
+        return frame
 
     def __enter__(self):
         return self
@@ -489,85 +474,17 @@ class TorchCodecVideoReader:
 
 
 class TorchCodecMultiVideoReader:
-    """Multi-video reader using TorchCodec for synchronized multi-camera setups.
+    """Decode synchronized videos to RGB uint8 tensors on one device.
 
-    Supports mixed inputs: file paths and/or raw video bytes.
+    The reader accepts file paths and raw encoded video bytes. Indexed access
+    returns one ``CHW`` RGB tensor per video; chunked access returns one
+    ``BCHW`` RGB tensor per video.
     """
-
-    def __init__(self, video_sources: list[Path | bytes]) -> None:
-        """Initialize with list of video sources.
-
-        Args:
-            video_sources: List of video file paths or raw bytes.
-        """
-        self._video_sources: list[Path | bytes] = video_sources
-        self._video_readers: list[TorchCodecVideoReader] = [
-            TorchCodecVideoReader(source) for source in video_sources
-        ]
-
-        # Extract paths for compatibility with existing code
-        self._video_paths: list[Path] = [
-            source if isinstance(source, Path) else Path(f"<bytes_{i}>")
-            for i, source in enumerate(video_sources)
-        ]
-
-    @property
-    def video_paths(self) -> list[Path]:
-        """list[Path]: Video file paths (placeholder for bytes sources)."""
-        return self._video_paths
-
-    @property
-    def video_readers(self) -> list[TorchCodecVideoReader]:
-        """list[TorchCodecVideoReader]: Individual video readers."""
-        return self._video_readers
-
-    @property
-    def height(self) -> int:
-        """int: Height of first video's frames."""
-        return self._video_readers[0].height
-
-    @property
-    def width(self) -> int:
-        """int: Width of first video's frames."""
-        return self._video_readers[0].width
-
-    def __len__(self) -> int:
-        """Use minimum length to ensure safe iteration."""
-        return min(len(reader) for reader in self._video_readers)
-
-    def __iter__(self) -> Generator[BGRList | None, None, None]:
-        """Iterate through all videos frame-by-frame."""
-        # Create fresh iterators for each reader
-        iterators = [iter(reader) for reader in self._video_readers]
-
-        while True:
-            bgr_list: BGRList = []
-            for iterator in iterators:
-                try:
-                    bgr_image: ImageBGR = next(iterator)
-                    bgr_list.append(bgr_image)
-                except StopIteration:
-                    return
-            yield bgr_list
-
-    def __getitem__(self, idx: int) -> BGRList:
-        if idx < 0 or idx >= len(self):
-            raise IndexError("Index out of range")
-        # Collect frames from each reader
-        bgr_list: BGRList = []
-        for reader in self._video_readers:
-            frame: ImageBGR = reader.get_frame(idx)
-            bgr_list.append(frame)
-        return bgr_list
-
-
-class TorchCodecCudaMultiVideoReader:
-    """Decode synchronized videos to RGB BCHW uint8 tensors on one device."""
 
     def __init__(
         self,
-        video_paths: list[Path],
-        device: str = "cuda",
+        video_sources: list[Path | bytes],
+        device: str | torch.device | None = None,
         num_workers: int | None = None,
         num_ffmpeg_threads: int = 0,
         seek_mode: Literal["exact", "approximate"] = "approximate",
@@ -575,49 +492,48 @@ class TorchCodecCudaMultiVideoReader:
         """Initialize the TorchCodec multiview tensor reader.
 
         Args:
-            video_paths: Video paths in camera order.
-            device: TorchCodec decode device. Use ``"cuda"`` to keep output frames on GPU.
-            num_workers: Number of cameras to decode concurrently. Defaults to one worker per video.
+            video_sources: Video paths or encoded video bytes in camera order.
+            device: TorchCodec decode device. Defaults to CUDA when available.
+            num_workers: Number of camera decode workers. Defaults to one worker per video.
             num_ffmpeg_threads: FFmpeg thread count passed to each decoder.
             seek_mode: TorchCodec seek mode.
         """
-        self.video_paths: list[Path] = video_paths
-        self.device: str = device
+        if len(video_sources) == 0:
+            raise ValueError("video_sources must contain at least one video")
+        self.device: str = str(device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu"))
         self.num_ffmpeg_threads: int = num_ffmpeg_threads
-        if len(video_paths) == 0:
-            raise ValueError("video_paths must contain at least one video")
-        self.num_workers: int = len(video_paths) if num_workers is None else num_workers
+        self.num_workers: int = len(video_sources) if num_workers is None else num_workers
+        if self.num_workers <= 0:
+            raise ValueError("num_workers must be positive")
         self.seek_mode: Literal["exact", "approximate"] = seek_mode
 
-        from torchcodec.decoders import VideoDecoder
-
-        self._decoders: list[Any] = [
-            VideoDecoder(
-                video_path,
+        self._video_readers: list[TorchCodecVideoReader] = [
+            TorchCodecVideoReader(
+                source,
                 device=self.device,
-                dimension_order="NCHW",
                 num_ffmpeg_threads=self.num_ffmpeg_threads,
                 seek_mode=self.seek_mode,
             )
-            for video_path in video_paths
+            for source in video_sources
         ]
-        metadata: list[Any] = [decoder.metadata for decoder in self._decoders]
-        self._height: int = self._required_int(metadata[0].height, "height")
-        self._width: int = self._required_int(metadata[0].width, "width")
-        self._fps: float = self._required_float(metadata[0].average_fps, "average_fps")
-        self._frame_cnt: int = min(self._required_int(item.num_frames, "num_frames") for item in metadata)
+        self._video_paths: list[Path] = [
+            source if isinstance(source, Path) else Path(f"<bytes_{idx}>")
+            for idx, source in enumerate(video_sources)
+        ]
+        self._height: int = self._video_readers[0].height
+        self._width: int = self._video_readers[0].width
+        self._fps: float = self._video_readers[0].fps
+        self._frame_cnt: int = min(len(reader) for reader in self._video_readers)
 
-    @staticmethod
-    def _required_int(value: int | None, name: str) -> int:
-        if value is None:
-            raise ValueError(f"TorchCodec metadata field {name} is missing")
-        return int(value)
+    @property
+    def video_paths(self) -> list[Path]:
+        """Video file paths, with placeholders for byte-backed sources."""
+        return self._video_paths
 
-    @staticmethod
-    def _required_float(value: float | None, name: str) -> float:
-        if value is None:
-            raise ValueError(f"TorchCodec metadata field {name} is missing")
-        return float(value)
+    @property
+    def video_readers(self) -> list[TorchCodecVideoReader]:
+        """Individual synchronized video readers."""
+        return self._video_readers
 
     @property
     def height(self) -> int:
@@ -638,24 +554,41 @@ class TorchCodecCudaMultiVideoReader:
     def __len__(self) -> int:
         return self.frame_cnt
 
+    def __iter__(self) -> Generator[list[UInt8[torch.Tensor, "3 h w"]], None, None]:
+        """Iterate synchronized frames across all videos."""
+        for idx in range(len(self)):
+            yield self[idx]
+
+    def __getitem__(self, idx: int) -> list[UInt8[torch.Tensor, "3 h w"]]:
+        if idx < 0:
+            idx += len(self)
+        if idx < 0 or idx >= len(self):
+            raise IndexError("Index out of range")
+        rgb_list: list[UInt8[torch.Tensor, "3 h w"]] = [reader.get_frame(idx) for reader in self._video_readers]
+        return rgb_list
+
     @staticmethod
-    def _decode_range(decoder: Any, start: int, stop: int) -> UInt8[torch.Tensor, "b 3 h w"]:
-        video: UInt8[torch.Tensor, "b 3 h w"] = decoder.get_frames_in_range(start, stop).data
+    def _decode_range(
+        reader: TorchCodecVideoReader,
+        start: int,
+        stop: int,
+    ) -> UInt8[torch.Tensor, "b 3 h w"]:
+        video: UInt8[torch.Tensor, "b 3 h w"] = reader.get_frames_in_range(start, stop)
         return video
 
     def iter_chunks(
         self,
         chunk_size: int = 32,
         max_frames: int | None = None,
-    ) -> Generator[TorchCodecVideoChunk, None, None]:
-        """Decode the full multiview sequence in bounded GPU chunks.
+    ) -> Generator[list[UInt8[torch.Tensor, "b 3 h w"]], None, None]:
+        """Decode the full multiview sequence in bounded chunks.
 
         Args:
             chunk_size: Number of frames per video to decode at a time.
             max_frames: Optional cap for benchmarks or smoke tests.
 
         Yields:
-            Synchronized chunks with one ``BCHW`` RGB tensor per video.
+            One RGB ``BCHW`` uint8 tensor per video.
         """
         if chunk_size <= 0:
             raise ValueError("chunk_size must be positive")
@@ -665,6 +598,6 @@ class TorchCodecCudaMultiVideoReader:
             for start in range(0, frame_count, chunk_size):
                 stop: int = min(start + chunk_size, frame_count)
                 videos: list[UInt8[torch.Tensor, "b 3 h w"]] = list(
-                    executor.map(self._decode_range, self._decoders, repeat(start), repeat(stop))
+                    executor.map(self._decode_range, self._video_readers, repeat(start), repeat(stop))
                 )
-                yield TorchCodecVideoChunk(start=start, stop=stop, videos=videos)
+                yield videos

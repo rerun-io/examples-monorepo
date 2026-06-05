@@ -7,6 +7,7 @@ from typing import Any, Self, cast
 
 import numpy as np
 import rerun as rr
+import torch
 from jaxtyping import Int, UInt8
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
@@ -16,6 +17,7 @@ from simplecv.data.exo.base_exo import BaseExoSequence, ExoData
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels, ExoEgoSample
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
 from simplecv.image_types import BGRList
+from simplecv.video_io import rgb_chw_tensor_to_bgr_hwc
 
 
 def _require_root_directory(root_directory: Path | None) -> Path:
@@ -235,6 +237,14 @@ class SyncedVideoExoEgoSequence(BaseExoEgoSequence[SyncedVideoExoEgoConfig]):
             if frame_obj is None:
                 msg: str = f"Missing ego frame {frame_idx} for {stream_name}."
                 raise ValueError(msg)
-            bgr_frame: UInt8[ndarray, "H W 3"] = np.asarray(frame_obj, dtype=np.uint8)
+            # TorchCodec readers return RGB CHW tensors; this sequence still exposes legacy BGR HWC frames.
+            if torch.is_tensor(frame_obj):
+                rgb_chw: UInt8[torch.Tensor, "3 H W"] = frame_obj.detach()
+                try:
+                    bgr_frame: UInt8[ndarray, "H W 3"] = rgb_chw_tensor_to_bgr_hwc(rgb_chw)
+                except ValueError as exc:
+                    raise ValueError(f"{exc} for {stream_name}.") from exc
+            else:
+                bgr_frame: UInt8[ndarray, "H W 3"] = np.asarray(frame_obj, dtype=np.uint8)
             bgr_list.append(bgr_frame)
         return cast(BGRList, bgr_list)

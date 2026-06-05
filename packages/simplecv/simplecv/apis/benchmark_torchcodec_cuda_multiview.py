@@ -6,10 +6,10 @@ from pathlib import Path
 from typing import Literal
 
 import torch
-from jaxtyping import Int64
+from jaxtyping import Int64, UInt8
 from tqdm import tqdm
 
-from simplecv.video_io import MultiVideoReader, TorchCodecCudaMultiVideoReader, TorchCodecVideoChunk
+from simplecv.video_io import MultiVideoReader, TorchCodecMultiVideoReader
 
 RGB_LOW_VIDEO_GLOB: str = "*_rgb_low.mp4"
 DEFAULT_VIDEO_GLOB: str = "*.mp4"
@@ -133,8 +133,9 @@ def benchmark_torchcodec_chunked(
     """Decode the multiview sequence in GPU-resident chunks."""
     maybe_synchronize(device)
     start: float = time.perf_counter()
-    reader: TorchCodecCudaMultiVideoReader = TorchCodecCudaMultiVideoReader(
-        video_paths,
+    video_sources: list[Path | bytes] = list(video_paths)
+    reader: TorchCodecMultiVideoReader = TorchCodecMultiVideoReader(
+        video_sources,
         device=device,
         num_workers=num_workers,
         num_ffmpeg_threads=num_ffmpeg_threads,
@@ -151,8 +152,8 @@ def benchmark_torchcodec_chunked(
         unit="chunk",
         mininterval=5.0,
     ):
-        chunk_data: TorchCodecVideoChunk = chunk
-        for video in chunk_data.videos:
+        videos: list[UInt8[torch.Tensor, "b 3 h w"]] = chunk
+        for video in videos:
             camera_frames += int(video.shape[0])
             partial_checksum: Int64[torch.Tensor, ""] = video[:, 0, 0, 0].sum(dtype=torch.int64)
             checksum_tensor = partial_checksum if checksum_tensor is None else checksum_tensor + partial_checksum

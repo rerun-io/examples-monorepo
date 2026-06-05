@@ -5,11 +5,12 @@ import tempfile
 import warnings
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 import rerun.experimental as rre
-from jaxtyping import Float32
+import torch
+from jaxtyping import Float32, UInt8
 from numpy import ndarray
 
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
@@ -20,7 +21,7 @@ from simplecv.rerun_log_utils import (
     read_h264_samples_from_rrd,
 )
 from simplecv.rrd_query_utils import RRDQuerySession, first_valid_value
-from simplecv.video_io import TorchCodecMultiVideoReader
+from simplecv.video_io import TorchCodecMultiVideoReader, rgb_chw_tensor_to_bgr_hwc
 
 if TYPE_CHECKING:
     from simplecv.data.exoego.rrd_exoego import RRDExoEgoConfig
@@ -62,9 +63,11 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
         super().__init__(cfg)
 
     def __getitem__(self, idx: int) -> ExoData:
-        bgr_list = self.exo_video_readers[idx]
+        reader: TorchCodecMultiVideoReader = cast(TorchCodecMultiVideoReader, self.exo_video_readers)
+        rgb_list: list[UInt8[torch.Tensor, "3 h w"]] = reader[idx]
+        bgr_list: list[UInt8[ndarray, "H W 3"]] = [rgb_chw_tensor_to_bgr_hwc(rgb_chw) for rgb_chw in rgb_list]
         return ExoData(
-            cam_params_list=self.exo_cam_list,
+            cam_params_list=cast(list[PinholeParameters], self.exo_cam_list),
             bgr_list=bgr_list,
             xyz=None,
             uv_dict=None,
@@ -98,6 +101,8 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
         self._video_timeline: str = self._select_timeline(schema)
         self._camera_streams: list[_RRDCameraStream] = self._discover_camera_streams(schema)
         assert self._camera_streams, "No exo camera streams found in recording"
+        video_blobs = self._video_blobs
+        assert video_blobs is not None
 
         video_sources: list[Path | bytes] = []
         video_paths: list[Path] = []  # For compatibility with base class
@@ -115,7 +120,7 @@ class RRDExoSequence(BaseExoSequence[RRDExoEgoConfig]):
                     timeline=self._video_timeline,
                     query_session=self._query_session,
                 )
-                self._video_blobs[camera_stream.name] = video_bytes
+                video_blobs[camera_stream.name] = video_bytes
                 video_sources.append(video_bytes)
                 # Create placeholder path for compatibility
                 video_paths.append(Path(f"<rrd:{camera_stream.name}>"))

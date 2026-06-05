@@ -8,6 +8,7 @@ import numpy as np
 import open3d as o3d
 import rerun as rr
 import rerun.blueprint as rrb
+import torch
 import tyro
 from jaxtyping import Bool, Float, Float32, Int, UInt8
 from monopriors.apis.multiview_calibration import MultiViewCalibrator, MultiViewCalibratorConfig, MVCalibResults
@@ -39,7 +40,7 @@ from simplecv.ops.triangulate import proj_3d_vectorized
 from simplecv.ops.tsdf_depth_fuser import Open3DScaleInvariantFuser
 from simplecv.rerun_custom_types import Points2DWithConfidence, Points3DWithConfidence, confidence_scores_to_rgb
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole
-from simplecv.video_io import MultiVideoReader, TorchCodecMultiVideoReader
+from simplecv.video_io import MultiVideoReader, TorchCodecMultiVideoReader, rgb_chw_tensor_to_bgr_hwc
 from tqdm import tqdm
 from wilor_nano.hand_keypoints import FinalWilorPred, HandKeypointDetectorConfig, KeypointResults, WilorHandKeypointDetector
 
@@ -400,6 +401,12 @@ def _read_bgr_frame(*, reader: Any, frame_idx: int, stream_name: str) -> UInt8[n
     frame_obj: object = reader[frame_idx]
     if frame_obj is None:
         raise ValueError(f"Missing frame {frame_idx} for {stream_name}.")
+    if torch.is_tensor(frame_obj):
+        rgb_chw: UInt8[torch.Tensor, "3 H W"] = frame_obj.detach()
+        try:
+            return rgb_chw_tensor_to_bgr_hwc(rgb_chw)
+        except ValueError as exc:
+            raise ValueError(f"{exc} for {stream_name}.") from exc
     frame_array: UInt8[ndarray, "H W 3"] = np.asarray(frame_obj, dtype=np.uint8)
     if frame_array.ndim != 3 or frame_array.shape[2] != 3:
         raise ValueError(f"Expected BGR frame with shape (*, *, 3), got {frame_array.shape} for {stream_name}.")

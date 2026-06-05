@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Literal, cast
 
 import numpy as np
 import rerun.experimental as rre
+import torch
 from jaxtyping import Float32, UInt8
 from numpy import ndarray
 from rerun.catalog import ComponentColumnDescriptor, IndexColumnDescriptor, Schema
@@ -15,7 +16,7 @@ from simplecv.camera_parameters import BrownConradyDistortion, Extrinsics, Intri
 from simplecv.data.ego.base_ego import BaseEgoSequence, CameraParam, CamNameType, EgoData
 from simplecv.rerun_log_utils import extract_asset_video_blob_fast
 from simplecv.rrd_query_utils import RRDQuerySession, first_valid_value
-from simplecv.video_io import TorchCodecMultiVideoReader, TorchCodecVideoReader
+from simplecv.video_io import TorchCodecMultiVideoReader, TorchCodecVideoReader, rgb_chw_tensor_to_bgr_hwc
 
 if TYPE_CHECKING:
     from simplecv.data.exoego.rrd_exoego import RRDExoEgoConfig
@@ -79,8 +80,10 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
         assert rrd_path.exists(), f"RRD path {rrd_path} does not exist"
 
         # Extract video blobs directly into memory (FAST PATH)
-        video_sources: list[bytes] = []
+        video_sources: list[Path | bytes] = []
         video_path_map: dict[str, Path] = {}
+        video_blobs = self._video_blobs
+        assert video_blobs is not None
 
         for cam_name in self.cam_names:
             video_entity: str = f"world/ego/{cam_name}/pinhole/video"
@@ -89,7 +92,7 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
                 timeline=timeline_name,
                 query_session=self._query_session,
             )
-            self._video_blobs[cam_name] = video_bytes
+            video_blobs[cam_name] = video_bytes
             video_sources.append(video_bytes)
             # Create placeholder path for compatibility
             video_path_map[cam_name] = Path(f"<rrd:{cam_name}>")
@@ -99,7 +102,7 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
         # Create TorchCodec reader with in-memory bytes
         # Note: We set this directly here since base class will try to create
         # MultiVideoReader with the returned paths
-        self._video_sources: list[bytes] = video_sources
+        self._video_sources: list[Path | bytes] = video_sources
 
         ordered_paths: list[Path] = [video_path_map[cam_name] for cam_name in self.cam_names]
         return ordered_paths
@@ -221,10 +224,10 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
             # Get video length from blob or file
             video_blob: bytes | None = self._video_blobs.get(cam_name) if self._video_blobs else None
             if video_blob is not None:
-                reader = TorchCodecVideoReader(video_blob)
+                reader = TorchCodecVideoReader(video_blob, device="cpu")
                 aligned_sources.append(video_blob)
             else:
-                reader = TorchCodecVideoReader(video_path)
+                reader = TorchCodecVideoReader(video_path, device="cpu")
                 aligned_sources.append(video_path.read_bytes())
 
             video_len: int = len(reader)
@@ -247,7 +250,8 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
         ordered_video_map: dict[str, Path] = {name: aligned_video_map[name] for name in ordered_names}
 
         # Create TorchCodec reader with aligned sources
-        ordered_sources: list[bytes] = [self._video_blobs[name] for name in ordered_names if self._video_blobs and name in self._video_blobs]
+        aligned_video_blobs: dict[str, bytes] = self._video_blobs or {}
+        ordered_sources: list[Path | bytes] = [aligned_video_blobs[name] for name in ordered_names if name in aligned_video_blobs]
         if ordered_sources:
             self.ego_video_readers = TorchCodecMultiVideoReader(ordered_sources)
 
@@ -258,9 +262,12 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
 
     def __getitem__(self, idx: int) -> EgoData:
         cam_params_list: list[CameraParam] = [cam_list[idx] for cam_list in self._ego_cam_dict.values()]
+        reader: TorchCodecMultiVideoReader = cast(TorchCodecMultiVideoReader, self.ego_video_readers)
+        rgb_list: list[UInt8[torch.Tensor, "3 h w"]] = reader[idx]
+        bgr_list: list[UInt8[ndarray, "H W 3"]] = [rgb_chw_tensor_to_bgr_hwc(rgb_chw) for rgb_chw in rgb_list]
         return EgoData(
             cam_params_list=cam_params_list,
-            bgr_list=self.ego_video_readers[idx],
+            bgr_list=bgr_list,
         )
 
     def __len__(self) -> int:  # type: ignore[override]
