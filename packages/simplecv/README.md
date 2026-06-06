@@ -90,6 +90,9 @@ Visualizing RRD-based exo/ego datasets remuxes the embedded video streams once a
 - Set `SIMPLECV_VIDEO_CACHE_DISABLE=1` to opt out entirely; the remux step will run every time.
 - The cache auto-invalidates if the source `.rrd` changes (mtime or size). To reclaim disk space manually, delete the directory shown above.
 
+### Video Decode Format Tradeoffs
+For the current TorchCodec CUDA default, benchmark summary, and fallback checks, see [docs/video_decode_format_tradeoffs.md](docs/video_decode_format_tradeoffs.md).
+
 ### Batch Processing ExoEgo from S3
 
 Process multiple ExoEgo sequences from S3 in batch. The pipeline downloads, cuts, and optionally ingests recordings.
