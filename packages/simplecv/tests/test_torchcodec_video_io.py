@@ -124,6 +124,45 @@ class TestTorchCodecVideoReader:
 
         assert frame_count == max_frames, f"Expected {max_frames} frames, got {frame_count}"
 
+    def test_sequential_read_uses_range_decode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Sequential reads should avoid per-frame random access."""
+        import sys
+        import types
+
+        class _Metadata:
+            width: int = 4
+            height: int = 2
+            num_frames: int = 3
+            average_fps: float = 60.0
+
+        class _FrameBatch:
+            def __init__(self, data: torch.Tensor) -> None:
+                self.data: torch.Tensor = data
+
+        class _FakeVideoDecoder:
+            def __init__(self, source: str | Path, **_kwargs: object) -> None:
+                self.source: str | Path = source
+                self.metadata: _Metadata = _Metadata()
+
+            def get_frame_at(self, frame_id: int) -> _FrameBatch:
+                raise AssertionError(f"sequential read used random access for frame {frame_id}")
+
+            def get_frames_in_range(self, start: int, stop: int, step: int = 1) -> _FrameBatch:
+                frames: torch.Tensor = torch.arange(start, stop, step, dtype=torch.uint8)[:, None, None, None]
+                return _FrameBatch(frames.expand(-1, 3, self.metadata.height, self.metadata.width).contiguous())
+
+        fake_decoders_module = types.SimpleNamespace(VideoDecoder=_FakeVideoDecoder)
+        monkeypatch.setitem(sys.modules, "torchcodec.decoders", fake_decoders_module)
+
+        reader: TorchCodecVideoReader = TorchCodecVideoReader(Path("cam0.mp4"), device="cpu")
+        first_frame: UInt8[torch.Tensor, "3 h w"] | None = reader.read()
+        second_frame: UInt8[torch.Tensor, "3 h w"] | None = reader.read()
+
+        assert first_frame is not None
+        assert second_frame is not None
+        assert int(first_frame[0, 0, 0].item()) == 0
+        assert int(second_frame[0, 0, 0].item()) == 1
+
     def test_random_access(self, sample_video_path: Path) -> None:
         """Test random access to frames."""
         reader: TorchCodecVideoReader = TorchCodecVideoReader(sample_video_path, device="cpu")
@@ -231,6 +270,47 @@ class TestTorchCodecMultiVideoReader:
                 break
 
         assert frame_count == max_frames
+
+    def test_multi_video_iteration_uses_chunked_decode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Multiview iteration should avoid random-access frame reads."""
+        import sys
+        import types
+
+        class _Metadata:
+            width: int = 4
+            height: int = 2
+            num_frames: int = 3
+            average_fps: float = 60.0
+
+        class _FrameBatch:
+            def __init__(self, data: torch.Tensor) -> None:
+                self.data: torch.Tensor = data
+
+        class _FakeVideoDecoder:
+            def __init__(self, source: str | Path, **_kwargs: object) -> None:
+                self.source: str | Path = source
+                self.metadata: _Metadata = _Metadata()
+
+            def get_frame_at(self, frame_id: int) -> _FrameBatch:
+                raise AssertionError(f"multiview iteration used random access for frame {frame_id}")
+
+            def get_frames_in_range(self, start: int, stop: int, step: int = 1) -> _FrameBatch:
+                frames: torch.Tensor = torch.arange(start, stop, step, dtype=torch.uint8)[:, None, None, None]
+                return _FrameBatch(frames.expand(-1, 3, self.metadata.height, self.metadata.width).contiguous())
+
+        fake_decoders_module = types.SimpleNamespace(VideoDecoder=_FakeVideoDecoder)
+        monkeypatch.setitem(sys.modules, "torchcodec.decoders", fake_decoders_module)
+
+        reader: TorchCodecMultiVideoReader = TorchCodecMultiVideoReader(
+            [Path("cam0.mp4"), Path("cam1.mp4")],
+            device="cpu",
+            num_workers=1,
+        )
+        frame_batches: list[list[UInt8[torch.Tensor, "3 h w"]]] = list(reader)
+
+        assert len(frame_batches) == 3
+        assert int(frame_batches[0][0][0, 0, 0].item()) == 0
+        assert int(frame_batches[1][0][0, 0, 0].item()) == 1
 
     def test_multi_video_indexing(self, multi_video_paths: list[Path]) -> None:
         """Test random access to synchronized frames."""

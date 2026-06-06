@@ -40,6 +40,24 @@ class _RRDEgoCameraStream:
     data_kind: Literal["video_stream", "asset_video"]
 
 
+def ordered_video_sources(
+    ordered_names: list[str],
+    ordered_video_map: dict[str, Path],
+    video_blobs: dict[str, bytes] | None,
+) -> list[Path | bytes]:
+    """Return video sources in camera order, preferring in-memory blobs."""
+    aligned_video_blobs: dict[str, bytes] = video_blobs or {}
+    ordered_sources: list[Path | bytes] = []
+    for name in ordered_names:
+        video_blob: bytes | None = aligned_video_blobs.get(name)
+        if video_blob is not None:
+            ordered_sources.append(video_blob)
+        else:
+            video_path: Path = ordered_video_map[name]
+            ordered_sources.append(video_path.read_bytes())
+    return ordered_sources
+
+
 class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
     """RRD-backed ego sequence using TorchCodec for fast in-memory video decoding.
 
@@ -214,8 +232,6 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
 
         aligned_cam_dict: dict[str, list[CameraParam]] = {}
         aligned_video_map: dict[str, Path] = {}
-        aligned_sources: list[bytes] = []
-
         for cam_name, cam_params in ego_cam_dict.items():
             video_path = video_by_name.get(cam_name)
             if video_path is None:
@@ -223,12 +239,11 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
 
             # Get video length from blob or file
             video_blob: bytes | None = self._video_blobs.get(cam_name) if self._video_blobs else None
-            if video_blob is not None:
-                reader = TorchCodecVideoReader(video_blob, device="cpu")
-                aligned_sources.append(video_blob)
-            else:
-                reader = TorchCodecVideoReader(video_path, device="cpu")
-                aligned_sources.append(video_path.read_bytes())
+            reader: TorchCodecVideoReader = (
+                TorchCodecVideoReader(video_blob, device="cpu")
+                if video_blob is not None
+                else TorchCodecVideoReader(video_path, device="cpu")
+            )
 
             video_len: int = len(reader)
             if not cam_params:
@@ -250,8 +265,11 @@ class RRDEgoSequence(BaseEgoSequence[RRDExoEgoConfig]):
         ordered_video_map: dict[str, Path] = {name: aligned_video_map[name] for name in ordered_names}
 
         # Create TorchCodec reader with aligned sources
-        aligned_video_blobs: dict[str, bytes] = self._video_blobs or {}
-        ordered_sources: list[Path | bytes] = [aligned_video_blobs[name] for name in ordered_names if name in aligned_video_blobs]
+        ordered_sources: list[Path | bytes] = ordered_video_sources(
+            ordered_names=ordered_names,
+            ordered_video_map=ordered_video_map,
+            video_blobs=self._video_blobs,
+        )
         if ordered_sources:
             self.ego_video_readers = TorchCodecMultiVideoReader(ordered_sources)
 

@@ -338,6 +338,10 @@ class TorchCodecVideoReader:
         self._fps: float = self._required_float(metadata.average_fps, "average_fps")
         self._frame_cnt: int = self._required_int(metadata.num_frames, "num_frames")
         self._position: int = 0
+        self._read_chunk_size: int = 32
+        self._read_buffer: UInt8[torch.Tensor, "b 3 h w"] | None = None
+        self._read_buffer_start: int = 0
+        self._read_buffer_stop: int = 0
 
     @staticmethod
     def _required_int(value: int | None, name: str) -> int:
@@ -390,7 +394,15 @@ class TorchCodecVideoReader:
         if self._position >= self._frame_cnt:
             return None
 
-        frame: UInt8[torch.Tensor, "3 h w"] = self.get_frame(self._position)
+        if self._read_buffer is None or self._position < self._read_buffer_start or self._position >= self._read_buffer_stop:
+            read_stop: int = min(self._position + self._read_chunk_size, self._frame_cnt)
+            self._read_buffer = self.get_frames_in_range(self._position, read_stop)
+            self._read_buffer_start = self._position
+            self._read_buffer_stop = read_stop
+
+        assert self._read_buffer is not None
+        local_idx: int = self._position - self._read_buffer_start
+        frame: UInt8[torch.Tensor, "3 h w"] = self._read_buffer[local_idx]
         self._position += 1
         return frame
 
@@ -458,6 +470,9 @@ class TorchCodecVideoReader:
     def __iter__(self):
         """Reset iterator for sequential access."""
         self._position = 0
+        self._read_buffer = None
+        self._read_buffer_start = 0
+        self._read_buffer_stop = 0
         return self
 
     def __next__(self) -> UInt8[torch.Tensor, "3 h w"]:
@@ -556,8 +571,11 @@ class TorchCodecMultiVideoReader:
 
     def __iter__(self) -> Generator[list[UInt8[torch.Tensor, "3 h w"]], None, None]:
         """Iterate synchronized frames across all videos."""
-        for idx in range(len(self)):
-            yield self[idx]
+        for videos in self.iter_chunks():
+            chunk_frame_count: int = min(int(video.shape[0]) for video in videos)
+            for local_idx in range(chunk_frame_count):
+                rgb_list: list[UInt8[torch.Tensor, "3 h w"]] = [video[local_idx] for video in videos]
+                yield rgb_list
 
     def __getitem__(self, idx: int) -> list[UInt8[torch.Tensor, "3 h w"]]:
         if idx < 0:
