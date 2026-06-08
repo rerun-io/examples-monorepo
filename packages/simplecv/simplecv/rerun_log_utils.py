@@ -302,7 +302,9 @@ def _log_asset_video(
     recording: rr.RecordingStream | None,
 ) -> Int[ndarray, "num_frames"]:
     """Embed the MP4 as an ``rr.AssetVideo`` and emit ``VideoFrameReference`` rows."""
-    video_asset = rr.AssetVideo(contents=video_source) if isinstance(video_source, bytes) else rr.AssetVideo(path=video_source)
+    video_asset = (
+        rr.AssetVideo(contents=video_source) if isinstance(video_source, bytes) else rr.AssetVideo(path=video_source)
+    )
 
     rr.log(str(video_log_path), video_asset, static=True, recording=recording)
 
@@ -370,7 +372,7 @@ def _log_video_stream(
     is_keyframes: list[bool] = []
     try:
         in_stream: av.video.stream.VideoStream = container.streams.video[0]
-        codec_id: int = int(in_stream.codec_context.codec.id)
+        codec_id: int = in_stream.codec_context.codec.id
         codec_name: str = in_stream.codec_context.name
         codec: rr.VideoCodec | None = _CODEC_ID_MAP.get(codec_id)
         if codec is None:
@@ -381,7 +383,9 @@ def _log_video_stream(
             )
 
         bsf_name: str | None = _BSF_FOR_CODEC_ID.get(codec_id)
-        bsf: av.BitStreamFilterContext | None = av.BitStreamFilterContext(bsf_name, in_stream) if bsf_name is not None else None
+        bsf: av.BitStreamFilterContext | None = (
+            av.BitStreamFilterContext(bsf_name, in_stream) if bsf_name is not None else None
+        )
 
         rr.log(
             str(video_log_path),
@@ -440,7 +444,9 @@ def _log_video_stream(
     return frame_timestamps_ns
 
 
-def read_video_stream_from_rrd(rrd_path: str, video_entity: str, timeline: str) -> tuple[rr.VideoCodec, ChunkedArray, ChunkedArray]:
+def read_video_stream_from_rrd(
+    rrd_path: str, video_entity: str, timeline: str
+) -> tuple[rr.VideoCodec, ChunkedArray, ChunkedArray]:
     """Read a ``rr.VideoStream`` entity back from an ``.rrd`` recording.
 
     Args:

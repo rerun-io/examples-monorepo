@@ -51,6 +51,17 @@ packages/<name>/
 
 **pyrefly** config is monorepo-wide in root `pyrefly.toml`. Do not add `[tool.pyrefly]` to per-package `pyproject.toml`.
 
+## Rerun Tools
+
+When adding or updating Tyro-facing Rerun CLIs, prefer the shared `RerunTyroConfig`
+from `simplecv.rerun_log_utils` instead of hand-rolling viewer/save/connect
+flags or creating a local `rr.RecordingStream`. Add it as a nested dataclass
+field such as `rr_config: RerunTyroConfig`, let its `__post_init__` configure
+spawn/connect/save/serve/headless behavior, and then use the normal global
+`rr.*` logging calls unless a test or library boundary specifically requires an
+explicit recording stream. This preserves the flexible viewer and save behavior
+expected across SimpleCV tools.
+
 ## Gotchas
 
 - **Never use pip** — all dependency management goes through Pixi
