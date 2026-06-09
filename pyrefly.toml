@@ -54,6 +54,9 @@ search-path = [
     "packages/sapiens-coco133-pose/src",
     "packages/egoexo-forge/src",
     "packages/mamma/src",
+    # Vendored sam2 fork is installed editable; pyrefly can't follow the
+    # __editable__ finder, so resolve `sam2.*` from the source tree directly.
+    "packages/sam2-streaming",
 ]
 
 # Third-party packages — all *-dev env site-packages so pyrefly can resolve

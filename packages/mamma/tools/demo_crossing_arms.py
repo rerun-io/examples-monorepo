@@ -1,23 +1,24 @@
 """Streaming pipeline demo on a MAMMA-format capture (crossing_arms by default).
 
-M1 scope: NVDEC 4K decode -> GPU resize to 720p -> NVENC H.264 -> per-camera
-Rerun VideoStreams + posed pinholes. Model stages land in M2+.
+M1: NVDEC 4K decode -> GPU resize to 720p -> NVENC H.264 -> per-camera Rerun
+VideoStreams + posed pinholes. M2: + causal person tracking (YOLO bootstrap,
+CLIP+epipolar identity, streaming SAM2 masks). Landmarks/fitting land in M3+.
 """
 
 from __future__ import annotations
 
-import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-import torch
 import tyro
-from jaxtyping import UInt8
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.video_io import TorchCodecMultiVideoReader
 
+from mamma.calibration.npz_contract import CameraCalibration
 from mamma.datasets.mamma_npz import load_mamma_sequence
 from mamma.datasets.sequence import MultiViewSequence
+from mamma.engine.pipeline import PipelineStats, StreamingPipeline
+from mamma.tracking.tracker import MultiViewTracker, TrackerConfig
 from mamma.viz.stream_logger import StreamLogger
 
 
@@ -25,6 +26,8 @@ from mamma.viz.stream_logger import StreamLogger
 class DemoConfig:
     rr_config: RerunTyroConfig
     """Rerun viewer/save/connect behavior."""
+    tracker: TrackerConfig = field(default_factory=TrackerConfig)
+    """Streaming tracker settings (SAM2/YOLO checkpoints, re-detect cadence)."""
     data_dir: Path = Path("data/inputs/indoors/crossing_arms")
     """MAMMA-format capture directory (meta/ + videos_light/)."""
     resize_hw: tuple[int, int] = (720, 1280)
@@ -33,6 +36,10 @@ class DemoConfig:
     """Frames decoded per camera per chunk."""
     max_frames: int | None = None
     """Optional frame cap for quick runs."""
+    start_frame: int = 0
+    """First frame to process."""
+    no_tracking: bool = False
+    """Disable tracking (M1 video-only mode)."""
     device: str = "cuda"
     """Decode/compute device."""
 
@@ -47,23 +54,23 @@ def main(config: DemoConfig) -> None:
         resize_hw=config.resize_hw,
     )
     logger: StreamLogger = StreamLogger(sequence, resize_hw=config.resize_hw)
-    logger.setup()
 
-    start: float = time.perf_counter()
-    frame_idx: int = 0
-    for chunk in reader.iter_chunks(chunk_size=config.chunk_size, max_frames=config.max_frames):
-        chunk_len: int = min(int(video.shape[0]) for video in chunk)
-        for local_idx in range(chunk_len):
-            frames: list[UInt8[torch.Tensor, "3 h w"]] = [video[local_idx] for video in chunk]
-            logger.log_tick_video(frame_idx, frames)
-            frame_idx += 1
-    logger.flush()
+    tracker: MultiViewTracker | None = None
+    if not config.no_tracking:
+        scaled_cameras: list[CameraCalibration] = [
+            cam.scaled_to(height=config.resize_hw[0], width=config.resize_hw[1]) for cam in sequence.cameras
+        ]
+        config.tracker.device = config.device
+        tracker = MultiViewTracker(scaled_cameras, config.tracker)
 
-    elapsed: float = time.perf_counter() - start
-    clip_seconds: float = frame_idx / sequence.fps
-    print(f"processed {frame_idx} frames x {len(sequence.cameras)} cams in {elapsed:.2f}s (clip {clip_seconds:.2f}s, {frame_idx / elapsed:.1f} ticks/s)")
-    for cam_name, stats in logger.encoder_stats.items():
-        print(f"  {cam_name}: encoder={stats['encoder']} avg={stats['avg_ms_per_frame']}ms/frame bytes={stats['total_bytes']}")
+    pipeline: StreamingPipeline = StreamingPipeline(sequence, reader, logger, tracker=tracker)
+    stats: PipelineStats = pipeline.run(
+        chunk_size=config.chunk_size, max_frames=config.max_frames, start_frame=config.start_frame
+    )
+
+    clip_seconds: float = stats.ticks / sequence.fps
+    print(f"processed {stats.ticks} ticks x {len(sequence.cameras)} cams in {stats.elapsed_s:.2f}s (clip {clip_seconds:.2f}s, {stats.ticks_per_s:.1f} ticks/s)")
+    print(stats.profiler.report())
 
 
 if __name__ == "__main__":

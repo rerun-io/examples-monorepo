@@ -1720,7 +1720,7 @@ outputs = ["packages/mamma/data/assembly101-720-sample"]
 description = "Download the Assembly101 720p sample dataset"
 
 [feature.mamma.tasks.mamma-demo-crossing-arms]
-cmd = "python tools/demo_crossing_arms.py"
+cmd = "python tools/demo_crossing_arms.py --tracker.expected-subjects 1"
 depends-on = ["_download-mamma-inputs", "_download-mamma-weights"]
 cwd = "packages/mamma"
 description = "Streaming pipeline on crossing_arms (4x 4K cams), live Rerun viewer"

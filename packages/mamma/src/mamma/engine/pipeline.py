@@ -1,0 +1,87 @@
+"""The resident streaming loop: decode -> track -> (landmarks/fit, M3+) -> log.
+
+No disk writes happen anywhere in this loop; outputs exist only as Rerun logs
+(and in-memory results returned to the caller).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+import torch
+from jaxtyping import UInt8
+from simplecv.video_io import TorchCodecMultiVideoReader
+
+from mamma.datasets.sequence import MultiViewSequence
+from mamma.engine.profiler import StageProfiler
+from mamma.engine.types import CameraTracks
+from mamma.tracking.tracker import MultiViewTracker
+from mamma.viz.stream_logger import StreamLogger
+
+
+@dataclass(slots=True)
+class PipelineStats:
+    """Wall-clock summary of one streaming run."""
+
+    ticks: int
+    """Synchronized frame sets processed."""
+    elapsed_s: float
+    """Total wall time of the loop (excluding model construction)."""
+    profiler: StageProfiler = field(repr=False)
+    """Per-stage timing breakdown."""
+
+    @property
+    def ticks_per_s(self) -> float:
+        """Sustained throughput."""
+        return self.ticks / self.elapsed_s if self.elapsed_s > 0 else 0.0
+
+
+class StreamingPipeline:
+    """Owns the per-tick loop over a multiview sequence."""
+
+    def __init__(
+        self,
+        sequence: MultiViewSequence,
+        reader: TorchCodecMultiVideoReader,
+        logger: StreamLogger,
+        tracker: MultiViewTracker | None = None,
+    ) -> None:
+        self.sequence: MultiViewSequence = sequence
+        self.reader: TorchCodecMultiVideoReader = reader
+        self.logger: StreamLogger = logger
+        self.tracker: MultiViewTracker | None = tracker
+
+    def run(self, chunk_size: int = 32, max_frames: int | None = None, start_frame: int = 0) -> PipelineStats:
+        """Stream the sequence tick by tick; returns timing stats."""
+        import time
+
+        profiler: StageProfiler = StageProfiler()
+        self.logger.setup()
+
+        start: float = time.perf_counter()
+        frame_idx: int = start_frame
+        frame_count: int = self.reader.frame_cnt if max_frames is None else min(start_frame + max_frames, self.reader.frame_cnt)
+        for chunk_start in range(start_frame, frame_count, chunk_size):
+            chunk_stop: int = min(chunk_start + chunk_size, frame_count)
+            with profiler.stage("decode"):
+                chunk: list[UInt8[torch.Tensor, "b 3 h w"]] = [
+                    reader.get_frames_in_range(chunk_start, chunk_stop) for reader in self.reader.video_readers
+                ]
+            chunk_len: int = min(int(video.shape[0]) for video in chunk)
+            for local_idx in range(chunk_len):
+                frames: list[UInt8[torch.Tensor, "3 h w"]] = [video[local_idx] for video in chunk]
+                tracks: list[CameraTracks] | None = None
+                if self.tracker is not None:
+                    with profiler.stage("track"):
+                        tracks = self.tracker.step(frame_idx, frames)
+                with profiler.stage("log_video"):
+                    self.logger.log_tick_video(frame_idx, frames)
+                if tracks is not None:
+                    with profiler.stage("log_tracks"):
+                        self.logger.log_tick_tracks(frame_idx, tracks)
+                frame_idx += 1
+        with profiler.stage("log_video"):
+            self.logger.flush()
+
+        elapsed: float = time.perf_counter() - start
+        return PipelineStats(ticks=frame_idx - start_frame, elapsed_s=elapsed, profiler=profiler)

@@ -9,6 +9,9 @@ path never re-decodes source video.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import numpy as np
 import rerun as rr
 import torch
 from jaxtyping import UInt8
@@ -18,7 +21,20 @@ from simplecv.rerun_log_utils import log_pinhole
 from simplecv.video_encoder import VideoCodecChoice, VideoEncoder
 
 from mamma.datasets.sequence import MultiViewSequence
+from mamma.engine.types import CameraTracks
 from mamma.viz.blueprint import WORLD_TAG, camera_entity, default_blueprint, pinhole_entity
+
+_ID_PALETTE: list[tuple[int, int, int]] = [
+    (230, 110, 80),
+    (90, 160, 230),
+    (120, 200, 120),
+    (220, 180, 80),
+    (180, 120, 220),
+    (90, 200, 200),
+    (230, 140, 180),
+    (160, 160, 160),
+]
+"""Stable per-person colors; person ``obj_id`` indexes modulo this palette."""
 
 TIMELINE: str = "time"
 """Shared timeline name; ticks are elapsed seconds (``frame_idx / fps``)."""
@@ -58,12 +74,27 @@ class StreamLogger:
         """Send blueprint and static scene structure (run once, before the loop)."""
         rr.send_blueprint(default_blueprint(self.sequence.camera_names))
         rr.log(WORLD_TAG, rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
+        rr.log(
+            WORLD_TAG,
+            rr.AnnotationContext(
+                [
+                    # Explicit transparent background: without an id=0 entry the
+                    # viewer auto-colors class 0, tinting the whole frame.
+                    rr.AnnotationInfo(id=0, label="background", color=(0, 0, 0, 0)),
+                ]
+                + [
+                    rr.AnnotationInfo(id=obj_id + 1, label=f"person_{obj_id}", color=_ID_PALETTE[obj_id % len(_ID_PALETTE)])
+                    for obj_id in range(len(_ID_PALETTE))
+                ]
+            ),
+            static=True,
+        )
         height: int
         width: int
         height, width = self.resize_hw
         for cam in self.sequence.cameras:
             pinhole: PinholeParameters = cam.scaled_to(height=height, width=width).to_pinhole_parameters()
-            log_pinhole(pinhole, cam_log_path=camera_entity(cam.name), image_plane_distance=0.4, static=True)
+            log_pinhole(pinhole, cam_log_path=Path(camera_entity(cam.name)), image_plane_distance=0.4, static=True)
             rr.log(f"{pinhole_entity(cam.name)}/video", rr.VideoStream(codec=self._rerun_codec), static=True)
 
     def log_tick_video(self, frame_idx: int, frames: list[UInt8[torch.Tensor, "3 h w"]]) -> None:
@@ -72,6 +103,43 @@ class StreamLogger:
             rgb_hwc: UInt8[ndarray, "h w 3"] = frame_chw.permute(1, 2, 0).contiguous().cpu().numpy()
             packets: list[tuple[int, bytes]] = self._encoders[cam_name].encode_frame(rgb_hwc)
             self._log_packets(cam_name, packets)
+
+    def log_tick_tracks(self, frame_idx: int, tracks: list[CameraTracks], seg_stride: int = 5) -> None:
+        """Log per-camera person boxes every tick + segmentation ids at a stride.
+
+        Full-resolution segmentation images every tick would dominate the RRD
+        (~1 MB/cam/tick raw), so masks are logged only every ``seg_stride``
+        ticks (full resolution — they must share the pinhole pixel space);
+        boxes are logged every tick.
+        """
+        set_tick_time(frame_idx, self.fps)
+        for cam_name, cam_tracks in zip(self.sequence.camera_names, tracks, strict=True):
+            boxes: list[ndarray] = []
+            class_ids: list[int] = []
+            for obj_id, track in sorted(cam_tracks.items()):
+                if track.bbox_xyxy is not None:
+                    boxes.append(track.bbox_xyxy)
+                    class_ids.append(obj_id + 1)
+            entity: str = pinhole_entity(cam_name)
+            if boxes:
+                boxes_arr: ndarray = np.stack(boxes, axis=0)
+                rr.log(
+                    f"{entity}/persons",
+                    rr.Boxes2D(
+                        array=boxes_arr,
+                        array_format=rr.Box2DFormat.XYXY,
+                        class_ids=class_ids,
+                    ),
+                )
+            if frame_idx % seg_stride == 0 and cam_tracks:
+                seg: torch.Tensor = torch.zeros(
+                    self.resize_hw,
+                    dtype=torch.uint8,
+                    device=next(iter(cam_tracks.values())).mask.device,
+                )
+                for obj_id, track in sorted(cam_tracks.items()):
+                    seg[track.mask] = obj_id + 1
+                rr.log(f"{entity}/mask", rr.SegmentationImage(seg.cpu().numpy()))
 
     def flush(self) -> None:
         """Drain buffered encoder packets (run once, after the loop)."""
