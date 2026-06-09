@@ -16,7 +16,11 @@ from simplecv.video_io import (
     TorchCodecMultiVideoReader,
     TorchCodecVideoReader,
     VideoReader,
+    bgr_hwc_frames_to_rgb_nchw_tensor,
+    required_torchcodec_float,
+    required_torchcodec_int,
     rgb_chw_tensor_to_bgr_hwc,
+    validate_video_file_path,
 )
 
 # Test data directory
@@ -39,6 +43,58 @@ def test_rgb_chw_tensor_to_bgr_hwc_converts_layout_and_channels() -> None:
 
     assert bgr_hwc.flags.c_contiguous
     assert np.array_equal(bgr_hwc, expected_bgr_hwc)
+
+
+def test_bgr_hwc_frames_to_rgb_nchw_tensor_converts_batch_layout_and_channels() -> None:
+    """Convert BGR HWC numpy frames to RGB NCHW tensor batches for model input."""
+    first_bgr: UInt8[np.ndarray, "h w 3"] = np.array([[[1, 2, 3], [4, 5, 6]]], dtype=np.uint8)
+    second_bgr: UInt8[np.ndarray, "h w 3"] = np.array([[[7, 8, 9], [10, 11, 12]]], dtype=np.uint8)
+
+    rgb_nchw: UInt8[torch.Tensor, "b 3 h w"] = bgr_hwc_frames_to_rgb_nchw_tensor(
+        [first_bgr, second_bgr],
+        device="cpu",
+    )
+
+    expected_rgb_nchw: UInt8[torch.Tensor, "b 3 h w"] = torch.tensor(
+        [
+            [[[3, 6]], [[2, 5]], [[1, 4]]],
+            [[[9, 12]], [[8, 11]], [[7, 10]]],
+        ],
+        dtype=torch.uint8,
+    )
+    assert rgb_nchw.device.type == "cpu"
+    assert rgb_nchw.dtype == torch.uint8
+    assert rgb_nchw.is_contiguous()
+    assert torch.equal(rgb_nchw, expected_rgb_nchw)
+
+
+def test_required_torchcodec_metadata_helpers_cast_values() -> None:
+    """TorchCodec metadata helpers reject missing fields and cast present values."""
+    frame_count: int = required_torchcodec_int(12, "num_frames")
+    average_fps: float = required_torchcodec_float(29.0, "average_fps")
+
+    assert frame_count == 12
+    assert average_fps == 29.0
+
+    with pytest.raises(ValueError, match="TorchCodec metadata field height is missing"):
+        required_torchcodec_int(None, "height")
+
+    with pytest.raises(ValueError, match="TorchCodec metadata field average_fps is missing"):
+        required_torchcodec_float(None, "average_fps")
+
+
+def test_validate_video_file_path_requires_existing_file(tmp_path: Path) -> None:
+    """Video path validation accepts files and rejects missing paths or directories."""
+    video_path: Path = tmp_path / "sample.mp4"
+    video_path.touch()
+    directory_path: Path = tmp_path / "videos"
+    directory_path.mkdir()
+
+    assert validate_video_file_path(video_path) == video_path
+    with pytest.raises(FileNotFoundError, match="Video file does not exist"):
+        validate_video_file_path(tmp_path / "missing.mp4")
+    with pytest.raises(ValueError, match="Video path must be a file"):
+        validate_video_file_path(directory_path)
 
 
 @pytest.fixture

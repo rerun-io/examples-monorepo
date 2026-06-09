@@ -23,6 +23,29 @@ from jaxtyping import UInt8
 from simplecv.image_types import BGRList, ImageBGR
 
 
+def validate_video_file_path(video_path: Path) -> Path:
+    """Return a valid local video file path."""
+    if not video_path.exists():
+        raise FileNotFoundError(f"Video file does not exist: {video_path}")
+    if not video_path.is_file():
+        raise ValueError(f"Video path must be a file: {video_path}")
+    return video_path
+
+
+def required_torchcodec_int(value: int | None, name: str) -> int:
+    """Return a required TorchCodec metadata integer."""
+    if value is None:
+        raise ValueError(f"TorchCodec metadata field {name} is missing")
+    return int(value)
+
+
+def required_torchcodec_float(value: float | None, name: str) -> float:
+    """Return a required TorchCodec metadata float."""
+    if value is None:
+        raise ValueError(f"TorchCodec metadata field {name} is missing")
+    return float(value)
+
+
 def rgb_chw_tensor_to_bgr_hwc(rgb_chw: UInt8[torch.Tensor, "3 h w"]) -> ImageBGR:
     """Convert an RGB ``CHW`` uint8 tensor to a BGR ``HWC`` numpy image."""
     if rgb_chw.ndim != 3 or rgb_chw.shape[0] != 3:
@@ -32,6 +55,22 @@ def rgb_chw_tensor_to_bgr_hwc(rgb_chw: UInt8[torch.Tensor, "3 h w"]) -> ImageBGR
     bgr_hwc_tensor: UInt8[torch.Tensor, "h w 3"] = rearrange(bgr_chw, "c h w -> h w c")
     bgr_hwc: ImageBGR = np.ascontiguousarray(bgr_hwc_tensor.cpu().numpy(), dtype=np.uint8)
     return bgr_hwc
+
+
+def bgr_hwc_frames_to_rgb_nchw_tensor(
+    bgr_frames: list[ImageBGR],
+    device: str | torch.device,
+) -> UInt8[torch.Tensor, "b 3 h w"]:
+    """Convert BGR ``HWC`` numpy frames to a contiguous RGB ``NCHW`` tensor."""
+    if not bgr_frames:
+        raise ValueError("bgr_frames must contain at least one frame")
+
+    bgr_nhwc: UInt8[np.ndarray, "b h w 3"] = np.stack(bgr_frames, axis=0)
+    bgr_nhwc_cpu: UInt8[torch.Tensor, "b h w 3"] = torch.from_numpy(bgr_nhwc)
+    bgr_nhwc_tensor: UInt8[torch.Tensor, "b h w 3"] = bgr_nhwc_cpu.to(device=device)
+    bgr_nchw: UInt8[torch.Tensor, "b 3 h w"] = rearrange(bgr_nhwc_tensor, "b h w c -> b c h w")
+    rgb_nchw: UInt8[torch.Tensor, "b 3 h w"] = torch.flip(bgr_nchw, dims=(1,)).contiguous()
+    return rgb_nchw
 
 
 class Cache:
@@ -333,27 +372,15 @@ class TorchCodecVideoReader:
         )
 
         metadata = self._decoder.metadata
-        self._width: int = self._required_int(metadata.width, "width")
-        self._height: int = self._required_int(metadata.height, "height")
-        self._fps: float = self._required_float(metadata.average_fps, "average_fps")
-        self._frame_cnt: int = self._required_int(metadata.num_frames, "num_frames")
+        self._width: int = required_torchcodec_int(metadata.width, "width")
+        self._height: int = required_torchcodec_int(metadata.height, "height")
+        self._fps: float = required_torchcodec_float(metadata.average_fps, "average_fps")
+        self._frame_cnt: int = required_torchcodec_int(metadata.num_frames, "num_frames")
         self._position: int = 0
         self._read_chunk_size: int = 32
         self._read_buffer: UInt8[torch.Tensor, "b 3 h w"] | None = None
         self._read_buffer_start: int = 0
         self._read_buffer_stop: int = 0
-
-    @staticmethod
-    def _required_int(value: int | None, name: str) -> int:
-        if value is None:
-            raise ValueError(f"TorchCodec metadata field {name} is missing")
-        return int(value)
-
-    @staticmethod
-    def _required_float(value: float | None, name: str) -> float:
-        if value is None:
-            raise ValueError(f"TorchCodec metadata field {name} is missing")
-        return float(value)
 
     @property
     def width(self) -> int:
@@ -442,6 +469,21 @@ class TorchCodecVideoReader:
             return empty
         video: UInt8[torch.Tensor, "b 3 h w"] = self._decoder.get_frames_in_range(start, clamped_stop).data
         return video
+
+    def iter_chunks(
+        self,
+        chunk_size: int = 32,
+        max_frames: int | None = None,
+    ) -> Generator[UInt8[torch.Tensor, "b 3 h w"], None, None]:
+        """Decode the video in bounded RGB ``NCHW`` chunks."""
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+
+        frame_count: int = len(self) if max_frames is None else min(max_frames, len(self))
+        for start in range(0, frame_count, chunk_size):
+            stop: int = min(start + chunk_size, frame_count)
+            video: UInt8[torch.Tensor, "b 3 h w"] = self.get_frames_in_range(start, stop)
+            yield video
 
     def __len__(self) -> int:
         return self._frame_cnt

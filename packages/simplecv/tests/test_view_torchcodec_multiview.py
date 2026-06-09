@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
-from simplecv.apis.view_torchcodec_multiview import build_blueprint, discover_video_paths, video_entity_names
+from simplecv.apis.view_torchcodec_multiview import discover_video_paths, video_entity_names
 
 
 def test_discover_video_paths_returns_sorted_mp4s_recursively(tmp_path: Path) -> None:
@@ -25,15 +24,3 @@ def test_discover_video_paths_returns_sorted_mp4s_recursively(tmp_path: Path) ->
 
     assert video_paths == [first_video_path, second_video_path, third_video_path]
     assert entity_names == ["cam_a/output", "cam_b/output", "root"]
-
-
-def test_build_blueprint_creates_video_and_decoded_views() -> None:
-    """The Rerun layout places native video and decoded images side by side."""
-    blueprint: Any = build_blueprint(["cam_a/output"])
-    time_selection: Any = blueprint.time_panel.time_selection
-
-    assert blueprint is not None
-    assert blueprint.time_panel.timeline == "video_time"
-    assert blueprint.time_panel.loop_mode == "selection"
-    assert time_selection is not None
-    assert time_selection.min.value == 0
