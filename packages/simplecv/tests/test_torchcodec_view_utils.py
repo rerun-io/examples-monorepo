@@ -88,3 +88,17 @@ def test_log_torchcodec_decoded_chunks_logs_bgr_images_with_video_time(monkeypat
     assert logged_images[0].image[0, 0].tolist() == [3, 2, 1]
     assert logged_images[0].color_model == "BGR"
     assert logged_images[0].jpeg_quality == 80
+
+
+def test_log_torchcodec_decoded_chunks_rejects_nonpositive_chunk_size() -> None:
+    """Chunk logging fails clearly before deriving progress totals."""
+    frame_timestamps: Int[np.ndarray, "num_frames"] = np.array([10], dtype=np.int64)
+
+    with pytest.raises(ValueError, match="chunk_size must be positive"):
+        view_utils.log_torchcodec_decoded_chunks(
+            chunked_videos=[],
+            video_names=["cam"],
+            frame_timestamps_by_video=[frame_timestamps],
+            total_frames=1,
+            chunk_size=0,
+        )

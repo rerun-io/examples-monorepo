@@ -45,7 +45,7 @@ def main(config: TorchCodecSingleviewConfig) -> None:
         timeline=TIMELINE,
     )
 
-    video_source: Path = config.video_path
+    video_source: Path = video_path
     torch_reader: TorchCodecVideoReader = TorchCodecVideoReader(
         video_source,
         device=config.device,

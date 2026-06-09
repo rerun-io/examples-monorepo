@@ -51,6 +51,9 @@ def log_torchcodec_decoded_chunks(
     chunk_size: int,
 ) -> None:
     """Log TorchCodec RGB chunks as decoded-image streams next to native videos."""
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+
     total_chunks: int = (total_frames + chunk_size - 1) // chunk_size
     for chunk_idx, videos in enumerate(
         tqdm(
