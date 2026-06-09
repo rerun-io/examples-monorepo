@@ -178,9 +178,40 @@ the whole frame (cost an hour of debugging; the masks were always correct).</p><
 batch + <code>forward_embeddings</code> per camera, efficienttam_ti, torch.compile, mask-refresh stride.
 Decode (1.35 s/32-frame chunk) and tracking currently serialize; decode-ahead overlap is the other big lever.</p></details>
 
+<h2>M3 — MammaNet dense landmarks port <span class="meta">(2026-06-09)</span></h2>
+
+<h3>What landed</h3>
+<p><code>landmarks/</code>: resolved <code>MammaNetConfig</code> (hydra interpolations evaluated by hand — 384×512
+crops, 512 landmarks, ViT-B/16 + 6-layer DETR decoder + SAM-style mask embedding), inference-only ports of
+<code>vit.py</code>/<code>decoder.py</code>/<code>mask_embed.py</code> with checkpoint-identical state-dict keys
+(strict load passes, 135.1M params), the validated closed-form GPU crop (<code>box_geometry</code> +
+<code>gpu_crop_batch</code> from <code>run_ma_2d.py</code>, grid_sample align_corners=True, 1.2× box +
+aspect fit), un-projection, and a per-tick <code>LandmarkEstimator</code> batching all cameras×persons into
+one fp16 forward. Pipeline + Rerun Points2D wiring (visibility-colored).</p>
+
+<h3>Verification — the M5 tolerance calibrator</h3>
+<table>
+<tr><th>Camera</th><th>px p50 (4K space)</th><th>px p99 (4K)</th><th>vis p99</th></tr>
+<tr><td>A001</td><td>5.19</td><td>10.38</td><td>0.116</td></tr>
+<tr><td>B001</td><td>5.24</td><td>10.81</td><td>0.117</td></tr>
+<tr><td>C001</td><td>5.53</td><td>12.13</td><td>0.121</td></tr>
+<tr><td>D001</td><td>4.73</td><td>10.86</td><td>0.136</td></tr>
+</table>
+<p>vs golden ma_2d over frames 60:90. The original repo's own run-to-run nondeterminism tolerance was
+3px p99 (4K); our 720p crops + forward-only masks land at ~11px p99 ≈ <b>3.7px at 720p ≈ ~2cm
+worst-case on the subject</b> — the feared 720p accuracy cliff (risk #1) did not materialize.
+Decision: no 4K crop re-decode needed; proceed at 720p.</p>
+
+<details open><summary><span class="tag decision">DECISION</span> Landmark stage costs 18ms/tick batched</summary>
+<p>All cameras×persons in one fp16 forward: 18ms/tick (4 crops). Track 82ms + landmarks 18ms + decode
+~45ms/tick (serialized today) = the M6 overlap work has clear targets.</p></details>
+<details open><summary><span class="tag deviation">DEVIATION</span> Inference-only module ports</summary>
+<p>DropPath/dropout/checkpointing/ViTPose-remap/loss heads dropped (parameter-free or training-only;
+state-dict unaffected). The DETR decoder returns only the final layer instead of all intermediates
+(original indexes [-1] downstream anyway).</p></details>
+
 <h2 id="next">Planned next</h2>
-<p>M3: MammaNet port (vit.py/decoder/mask_embed → plain nn.Module + safetensors load) + validated GPU
-crop from tracked masks; px-delta diagnostics vs golden ma_2d calibrate the M5 tolerance.</p>
+<p>M4: GPU triangulation (weighted DLT via batched eigh) + sliding-window warm-started SMPL-X fitter; mesh/skeleton Rerun logging; rough MPJPE printed.</p>
 
 </main>
 </body>

@@ -15,8 +15,31 @@ from simplecv.video_io import TorchCodecMultiVideoReader
 from mamma.datasets.sequence import MultiViewSequence
 from mamma.engine.profiler import StageProfiler
 from mamma.engine.types import CameraTracks
+from mamma.landmarks.estimator import CameraLandmarks, LandmarkEstimator
 from mamma.tracking.tracker import MultiViewTracker
 from mamma.viz.stream_logger import StreamLogger
+
+
+class ResultCollector:
+    """In-memory accumulator of per-tick outputs (for validation/benchmarks).
+
+    Keeps everything in RAM — the streaming loop itself never writes to disk.
+    """
+
+    def __init__(self) -> None:
+        self.frame_indices: list[int] = []
+        self.tracks: list[list[CameraTracks] | None] = []
+        self.landmarks: list[list[CameraLandmarks] | None] = []
+
+    def collect(
+        self,
+        frame_idx: int,
+        tracks: list[CameraTracks] | None,
+        landmarks: list[CameraLandmarks] | None,
+    ) -> None:
+        self.frame_indices.append(frame_idx)
+        self.tracks.append(tracks)
+        self.landmarks.append(landmarks)
 
 
 @dataclass(slots=True)
@@ -45,11 +68,15 @@ class StreamingPipeline:
         reader: TorchCodecMultiVideoReader,
         logger: StreamLogger,
         tracker: MultiViewTracker | None = None,
+        landmarks: LandmarkEstimator | None = None,
+        collector: "ResultCollector | None" = None,
     ) -> None:
         self.sequence: MultiViewSequence = sequence
         self.reader: TorchCodecMultiVideoReader = reader
         self.logger: StreamLogger = logger
         self.tracker: MultiViewTracker | None = tracker
+        self.landmarks: LandmarkEstimator | None = landmarks
+        self.collector: ResultCollector | None = collector
 
     def run(self, chunk_size: int = 32, max_frames: int | None = None, start_frame: int = 0) -> PipelineStats:
         """Stream the sequence tick by tick; returns timing stats."""
@@ -71,14 +98,23 @@ class StreamingPipeline:
             for local_idx in range(chunk_len):
                 frames: list[UInt8[torch.Tensor, "3 h w"]] = [video[local_idx] for video in chunk]
                 tracks: list[CameraTracks] | None = None
+                landmarks: list[CameraLandmarks] | None = None
                 if self.tracker is not None:
                     with profiler.stage("track"):
                         tracks = self.tracker.step(frame_idx, frames)
+                if self.landmarks is not None and tracks is not None:
+                    with profiler.stage("landmarks"):
+                        landmarks = self.landmarks.estimate(frames, tracks)
                 with profiler.stage("log_video"):
                     self.logger.log_tick_video(frame_idx, frames)
                 if tracks is not None:
                     with profiler.stage("log_tracks"):
                         self.logger.log_tick_tracks(frame_idx, tracks)
+                if landmarks is not None:
+                    with profiler.stage("log_landmarks"):
+                        self.logger.log_tick_landmarks(frame_idx, landmarks)
+                if self.collector is not None:
+                    self.collector.collect(frame_idx, tracks, landmarks)
                 frame_idx += 1
         with profiler.stage("log_video"):
             self.logger.flush()

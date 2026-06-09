@@ -1,0 +1,108 @@
+"""Per-tick dense landmark estimation over all cameras x tracked persons."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+import torch
+from jaxtyping import Float32, Float64
+from numpy import ndarray
+
+from mamma.engine.types import CameraTracks
+from mamma.landmarks.config import DEFAULT_MAMMANET_CONFIG, MammaNetConfig
+from mamma.landmarks.crops import box_geometry, gpu_crop_batch, unproject_joints2d
+from mamma.landmarks.mammanet import MammaNet, load_mammanet
+
+
+@dataclass(slots=True)
+class LandmarkResult:
+    """Dense 2D landmarks for one person in one camera at one tick."""
+
+    obj_id: int
+    """Person id, consistent with the tracker."""
+    joints2d: Float32[torch.Tensor, "j 3"]
+    """``[x_px, y_px, log_variance]`` in engine-resolution pixel coords."""
+    visibility: Float32[torch.Tensor, "j"]
+    """Per-landmark visibility probability (sigmoid applied)."""
+    contact: Float32[torch.Tensor, "j"]
+    """Per-landmark self-contact probability."""
+    floor_contact: Float32[torch.Tensor, "j"]
+    """Per-landmark floor-contact probability."""
+
+
+CameraLandmarks = dict[int, LandmarkResult]
+"""Per-person landmark results in one camera, keyed by ``obj_id``."""
+
+
+class LandmarkEstimator:
+    """Batches MammaNet over every (camera, person) crop of a tick."""
+
+    def __init__(
+        self,
+        weights_path: Path,
+        device: str = "cuda",
+        config: MammaNetConfig = DEFAULT_MAMMANET_CONFIG,
+    ) -> None:
+        self.config: MammaNetConfig = config
+        self.device: str = device
+        self.model: MammaNet = load_mammanet(weights_path, device=device, config=config)
+
+    def estimate(
+        self,
+        frames: list[Float32[torch.Tensor, "3 h w"]] | list[torch.Tensor],
+        tracks: list[CameraTracks],
+    ) -> list[CameraLandmarks]:
+        """One synchronized tick: frames (uint8 or float RGB CHW) + tracks -> landmarks."""
+        # Gather every (cam, person) entry with a usable box into one batch.
+        entries: list[tuple[int, int]] = []
+        centers_list: list[Float64[ndarray, "2"]] = []
+        sizes_list: list[Float64[ndarray, "2"]] = []
+        crop_frames: list[torch.Tensor] = []
+        crop_masks: list[torch.Tensor] = []
+        for cam_idx, cam_tracks in enumerate(tracks):
+            frame_f32: torch.Tensor = frames[cam_idx].float()
+            for obj_id, track in sorted(cam_tracks.items()):
+                if track.bbox_xyxy is None:
+                    continue
+                center, bbox_size = box_geometry(track.bbox_xyxy, self.config)
+                entries.append((cam_idx, obj_id))
+                centers_list.append(center)
+                sizes_list.append(bbox_size)
+                crop_frames.append(frame_f32)
+                crop_masks.append(track.mask.unsqueeze(0).float() * 255.0)
+
+        results: list[CameraLandmarks] = [{} for _ in tracks]
+        if not entries:
+            return results
+
+        frames_batch: Float32[torch.Tensor, "n 3 h w"] = torch.stack(crop_frames, dim=0)
+        masks_batch: Float32[torch.Tensor, "n 1 h w"] = torch.stack(crop_masks, dim=0)
+        import numpy as np
+
+        centers: Float64[ndarray, "n 2"] = np.stack(centers_list, axis=0)
+        sizes: Float64[ndarray, "n 2"] = np.stack(sizes_list, axis=0)
+
+        img_crops, mask_crops = gpu_crop_batch(frames_batch, centers, sizes, masks_batch, self.config)
+        with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16, enabled="cuda" in self.device):
+            out: dict[str, torch.Tensor | None] = self.model(img_crops, mask_crops)
+
+        joints2d_raw = out["joints2d"]
+        visibility_raw = out["visibility"]
+        contact_raw = out["contact"]
+        floor_raw = out["floor_contact"]
+        assert joints2d_raw is not None and visibility_raw is not None and contact_raw is not None and floor_raw is not None
+        joints2d_px: Float32[torch.Tensor, "n j 3"] = unproject_joints2d(joints2d_raw.float(), centers, sizes, self.config)
+        visibility: Float32[torch.Tensor, "n j"] = torch.sigmoid(visibility_raw.squeeze(-1).float())
+        contact: Float32[torch.Tensor, "n j"] = torch.sigmoid(contact_raw.squeeze(-1).float())
+        floor_contact: Float32[torch.Tensor, "n j"] = torch.sigmoid(floor_raw.squeeze(-1).float())
+
+        for row, (cam_idx, obj_id) in enumerate(entries):
+            results[cam_idx][obj_id] = LandmarkResult(
+                obj_id=obj_id,
+                joints2d=joints2d_px[row],
+                visibility=visibility[row],
+                contact=contact[row],
+                floor_contact=floor_contact[row],
+            )
+        return results

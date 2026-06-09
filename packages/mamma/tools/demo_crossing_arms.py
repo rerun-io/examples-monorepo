@@ -18,6 +18,7 @@ from mamma.calibration.npz_contract import CameraCalibration
 from mamma.datasets.mamma_npz import load_mamma_sequence
 from mamma.datasets.sequence import MultiViewSequence
 from mamma.engine.pipeline import PipelineStats, StreamingPipeline
+from mamma.landmarks.estimator import LandmarkEstimator
 from mamma.tracking.tracker import MultiViewTracker, TrackerConfig
 from mamma.viz.stream_logger import StreamLogger
 
@@ -40,6 +41,10 @@ class DemoConfig:
     """First frame to process."""
     no_tracking: bool = False
     """Disable tracking (M1 video-only mode)."""
+    mammanet_weights: Path = Path("data/weights/ma_2d/mamma_mask_full_cvpr.safetensors")
+    """Converted MammaNet state-dict; landmarks are skipped if tracking is off."""
+    no_landmarks: bool = False
+    """Disable dense 2D landmark estimation."""
     device: str = "cuda"
     """Decode/compute device."""
 
@@ -63,7 +68,11 @@ def main(config: DemoConfig) -> None:
         config.tracker.device = config.device
         tracker = MultiViewTracker(scaled_cameras, config.tracker)
 
-    pipeline: StreamingPipeline = StreamingPipeline(sequence, reader, logger, tracker=tracker)
+    landmarks: LandmarkEstimator | None = None
+    if tracker is not None and not config.no_landmarks:
+        landmarks = LandmarkEstimator(config.mammanet_weights, device=config.device)
+
+    pipeline: StreamingPipeline = StreamingPipeline(sequence, reader, logger, tracker=tracker, landmarks=landmarks)
     stats: PipelineStats = pipeline.run(
         chunk_size=config.chunk_size, max_frames=config.max_frames, start_frame=config.start_frame
     )

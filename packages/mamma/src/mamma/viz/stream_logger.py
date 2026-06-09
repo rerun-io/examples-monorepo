@@ -22,6 +22,7 @@ from simplecv.video_encoder import VideoCodecChoice, VideoEncoder
 
 from mamma.datasets.sequence import MultiViewSequence
 from mamma.engine.types import CameraTracks
+from mamma.landmarks.estimator import CameraLandmarks
 from mamma.viz.blueprint import WORLD_TAG, camera_entity, default_blueprint, pinhole_entity
 
 _ID_PALETTE: list[tuple[int, int, int]] = [
@@ -140,6 +141,23 @@ class StreamLogger:
                 for obj_id, track in sorted(cam_tracks.items()):
                     seg[track.mask] = obj_id + 1
                 rr.log(f"{entity}/mask", rr.SegmentationImage(seg.cpu().numpy()))
+
+    def log_tick_landmarks(self, frame_idx: int, landmarks: list[CameraLandmarks]) -> None:
+        """Log dense 2D landmarks per camera/person, colored by visibility."""
+        set_tick_time(frame_idx, self.fps)
+        for cam_name, cam_landmarks in zip(self.sequence.camera_names, landmarks, strict=True):
+            entity_base: str = pinhole_entity(cam_name)
+            for obj_id, result in sorted(cam_landmarks.items()):
+                positions: ndarray = result.joints2d[:, :2].cpu().numpy()
+                vis: ndarray = result.visibility.cpu().numpy()
+                colors: ndarray = np.zeros((positions.shape[0], 4), dtype=np.uint8)
+                colors[:, 1] = (vis * 255).astype(np.uint8)
+                colors[:, 0] = ((1.0 - vis) * 255).astype(np.uint8)
+                colors[:, 3] = 255
+                rr.log(
+                    f"{entity_base}/landmarks/person_{obj_id}",
+                    rr.Points2D(positions=positions, colors=colors, radii=1.5),
+                )
 
     def flush(self) -> None:
         """Drain buffered encoder packets (run once, after the loop)."""
