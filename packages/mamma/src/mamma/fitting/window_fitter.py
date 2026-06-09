@@ -90,9 +90,9 @@ class _WindowFrame:
     vis_per_cam: list[Float32[torch.Tensor, "n"]]
     anchors3d: Float32[torch.Tensor, "n 3"]
     anchors_valid: Float32[torch.Tensor, "n"]
-    global_orient: Float32[torch.Tensor, "3"] | None = field(repr=False, default=None)
-    body_pose: Float32[torch.Tensor, "63"] | None = field(repr=False, default=None)
-    trans: Float32[torch.Tensor, "3"] | None = field(repr=False, default=None)
+    global_orient: Float32[torch.Tensor, "3"] = field(repr=False)
+    body_pose: Float32[torch.Tensor, "63"] = field(repr=False)
+    trans: Float32[torch.Tensor, "3"] = field(repr=False)
 
 
 def _initial_body_pose(device: str) -> Float32[torch.Tensor, "63"]:
@@ -151,27 +151,31 @@ class SlidingWindowFitter:
     ) -> FitResult | None:
         """Add one tick's observations; returns the newest frame's fit (or None
         before the first window fills)."""
+        anchors_valid_f: Float32[torch.Tensor, "n"] = anchors_valid.float().detach()
+        anchors3d_d: Float32[torch.Tensor, "n 3"] = anchors3d.detach()
+        if self._window:
+            prev = self._window[-1]
+            global_orient: Float32[torch.Tensor, "3"] = prev.global_orient.detach().clone()
+            body_pose: Float32[torch.Tensor, "63"] = prev.body_pose.detach().clone()
+            trans: Float32[torch.Tensor, "3"] = prev.trans.detach().clone()
+        else:
+            global_orient = torch.zeros(3, device=self.device)
+            body_pose = _initial_body_pose(self.device)
+            trans = self._init_trans()
+            # Anchor-centroid warm start: when enough triangulated points
+            # exist, snap the first translation guess to their centroid.
+            if anchors_valid_f.sum() > 50:
+                trans = anchors3d_d[anchors_valid_f > 0].mean(dim=0)
         frame = _WindowFrame(
             frame_idx=frame_idx,
             pts2d_per_cam=[p.detach() for p in pts2d_per_cam],
             vis_per_cam=[v.detach() for v in vis_per_cam],
-            anchors3d=anchors3d.detach(),
-            anchors_valid=anchors_valid.float().detach(),
+            anchors3d=anchors3d_d,
+            anchors_valid=anchors_valid_f,
+            global_orient=global_orient,
+            body_pose=body_pose,
+            trans=trans,
         )
-        if self._window:
-            prev = self._window[-1]
-            frame.global_orient = prev.global_orient.detach().clone()
-            frame.body_pose = prev.body_pose.detach().clone()
-            frame.trans = prev.trans.detach().clone()
-        else:
-            frame.global_orient = torch.zeros(3, device=self.device)
-            frame.body_pose = _initial_body_pose(self.device)
-            frame.trans = self._init_trans()
-        # Anchor-centroid warm start: when enough triangulated points exist,
-        # snap the translation guess toward their centroid (fast, robust).
-        if frame.anchors_valid.sum() > 50:
-            centroid: Float32[torch.Tensor, "3"] = frame.anchors3d[frame.anchors_valid > 0].mean(dim=0)
-            frame.trans = frame.trans if self._window else centroid
         self._window.append(frame)
         if len(self._window) > self.config.window_size:
             self._window.pop(0)

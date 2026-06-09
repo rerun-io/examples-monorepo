@@ -1738,7 +1738,7 @@ cwd = "packages/mamma"
 description = "Streaming pipeline on the Assembly101 720p sample (ingestion + visual check)"
 
 [feature.mamma.tasks.mamma-validate-golden]
-cmd = "python tools/validate_golden.py"
+cmd = "python tools/validate_golden.py --rr-config.headless"
 depends-on = ["_download-mamma-inputs", "_download-mamma-weights"]
 cwd = "packages/mamma"
 description = "Run streaming pipeline on crossing_arms frames 60:90 and gate MPJPE/PVE vs golden ma_3d"

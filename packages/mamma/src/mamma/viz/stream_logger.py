@@ -188,7 +188,7 @@ class StreamLogger:
             rr.log(f"{WORLD_TAG}/triangulated/person_{obj_id}", rr.Points3D(positions=cloud, radii=0.008))
         for obj_id, fit in fits.items():
             color: tuple[int, int, int] = _ID_PALETTE[obj_id % len(_ID_PALETTE)]
-            normals: ndarray = _vertex_normals(fit.vertices, faces) if faces is not None else None
+            normals: ndarray | None = _vertex_normals(fit.vertices, faces) if faces is not None else None
             rr.log(
                 f"{WORLD_TAG}/meshes/person_{obj_id}",
                 rr.Mesh3D(
