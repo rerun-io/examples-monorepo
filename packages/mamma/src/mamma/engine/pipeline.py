@@ -85,8 +85,15 @@ class StreamingPipeline:
         self.collector: ResultCollector | None = collector
 
     def run(self, chunk_size: int = 32, max_frames: int | None = None, start_frame: int = 0) -> PipelineStats:
-        """Stream the sequence tick by tick; returns timing stats."""
+        """Stream the sequence tick by tick; returns timing stats.
+
+        Decode runs one chunk ahead on background threads (one per camera)
+        so NVDEC overlaps with model compute; wall time approaches
+        ``max(decode, compute)`` instead of their sum.
+        """
         import time
+        from concurrent.futures import Future, ThreadPoolExecutor
+        from itertools import repeat
 
         profiler: StageProfiler = StageProfiler()
         self.logger.setup()
@@ -94,12 +101,29 @@ class StreamingPipeline:
         start: float = time.perf_counter()
         frame_idx: int = start_frame
         frame_count: int = self.reader.frame_cnt if max_frames is None else min(start_frame + max_frames, self.reader.frame_cnt)
-        for chunk_start in range(start_frame, frame_count, chunk_size):
-            chunk_stop: int = min(chunk_start + chunk_size, frame_count)
-            with profiler.stage("decode"):
-                chunk: list[UInt8[torch.Tensor, "b 3 h w"]] = [
-                    reader.get_frames_in_range(chunk_start, chunk_stop) for reader in self.reader.video_readers
-                ]
+        chunk_ranges: list[tuple[int, int]] = [
+            (s, min(s + chunk_size, frame_count)) for s in range(start_frame, frame_count, chunk_size)
+        ]
+
+        def decode_chunk(bounds: tuple[int, int]) -> list[UInt8[torch.Tensor, "b 3 h w"]]:
+            with ThreadPoolExecutor(max_workers=len(self.reader.video_readers)) as cam_pool:
+                return list(
+                    cam_pool.map(
+                        lambda reader, b: reader.get_frames_in_range(b[0], b[1]),
+                        self.reader.video_readers,
+                        repeat(bounds),
+                    )
+                )
+
+        prefetcher = ThreadPoolExecutor(max_workers=1)
+        pending: Future | None = prefetcher.submit(decode_chunk, chunk_ranges[0]) if chunk_ranges else None
+        for chunk_idx in range(len(chunk_ranges)):
+            with profiler.stage("decode_wait"):
+                assert pending is not None
+                chunk: list[UInt8[torch.Tensor, "b 3 h w"]] = pending.result()
+            pending = (
+                prefetcher.submit(decode_chunk, chunk_ranges[chunk_idx + 1]) if chunk_idx + 1 < len(chunk_ranges) else None
+            )
             chunk_len: int = min(int(video.shape[0]) for video in chunk)
             for local_idx in range(chunk_len):
                 frames: list[UInt8[torch.Tensor, "3 h w"]] = [video[local_idx] for video in chunk]
@@ -131,6 +155,7 @@ class StreamingPipeline:
                 frame_idx += 1
         with profiler.stage("log_video"):
             self.logger.flush()
+        prefetcher.shutdown(wait=False)
 
         elapsed: float = time.perf_counter() - start
         return PipelineStats(ticks=frame_idx - start_frame, elapsed_s=elapsed, profiler=profiler)

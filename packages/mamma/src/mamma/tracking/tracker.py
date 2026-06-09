@@ -43,16 +43,20 @@ LOST_TICKS_BEFORE_REPROMPT: int = 5
 class TrackerConfig:
     """Streaming tracker configuration."""
 
-    sam2_config: str = "configs/sam2.1/sam2.1_hiera_s.yaml"
-    """Hydra config name inside the vendored sam2 package."""
-    sam2_checkpoint: Path = Path("data/weights/sam2/sam2.1_hiera_small.pt")
-    """SAM2 (or EfficientTAM via build_sam2_generic*) checkpoint path."""
+    sam2_config: str = "configs/efficienttam/efficienttam_ti_512x512.yaml"
+    """Hydra config name inside the vendored sam2 package. EfficientTAM-ti@512
+    is the default (21.8ms/tick for 4 cams batched vs 52.6 for hiera-small);
+    the golden gate passes with it (see implementation-notes)."""
+    sam2_checkpoint: Path = Path("data/weights/efficienttam/efficienttam_ti.pt")
+    """SAM2-family checkpoint path (EfficientTAM via build_sam2_generic*)."""
     yolo_checkpoint: Path = Path("data/weights/yolo/yolo12x.pt")
     """YOLO person detector checkpoint."""
     expected_subjects: int | None = None
     """Number of people to track; ``None`` infers from bootstrap detections."""
-    redetect_interval: int = 30
-    """Ticks between sparse YOLO+CLIP re-detect passes (bank update + re-acquire)."""
+    redetect_interval: int = 120
+    """Ticks between routine YOLO+CLIP re-detect passes (bank refresh). A
+    re-detect also fires immediately whenever any track has been lost for
+    ``LOST_TICKS_BEFORE_REPROMPT`` ticks, so this can stay slow (~1s/pass)."""
     memory_window_size: int = 7
     """Sliding window of non-conditional SAM2 memories kept per object."""
     device: str = "cuda"
@@ -165,7 +169,11 @@ class MultiViewTracker:
             return self._try_bootstrap(frame_idx, frames)
 
         prompts_per_cam: list[dict[int, Float32[ndarray, "4"]]] = [{} for _ in self.cameras]
-        if self.config.redetect_interval > 0 and frame_idx % self.config.redetect_interval == 0:
+        any_lost: bool = any(
+            ticks >= LOST_TICKS_BEFORE_REPROMPT for cam in self._lost_ticks for ticks in cam.values()
+        )
+        routine: bool = self.config.redetect_interval > 0 and frame_idx % self.config.redetect_interval == 0
+        if any_lost or routine:
             prompts_per_cam = self._redetect(frames)
         return self._forward_all(frame_idx, frames, prompts_per_cam)
 
@@ -199,8 +207,14 @@ class MultiViewTracker:
     ) -> list[CameraTracks]:
         from sam2.modeling.sam2_prompt import SAM2Prompt
 
+        # Batch the (dominant) image-encoder cost across cameras, then run the
+        # cheap per-camera memory/decoder via forward_embeddings.
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+            batch: UInt8[torch.Tensor, "c 3 h w"] = torch.stack(frames, dim=0)
+            embeddings, pos_embeddings = self.predictor.encode_image(batch)
+
         results: list[CameraTracks] = []
-        for cam_idx, frame in enumerate(frames):
+        for cam_idx in range(len(frames)):
             prompts: list[SAM2Prompt] = [
                 SAM2Prompt(obj_id=obj_id, boxes=torch.as_tensor(box, device=self.device).reshape(1, 4))
                 for obj_id, box in prompts_per_cam[cam_idx].items()
@@ -209,25 +223,49 @@ class MultiViewTracker:
             if not prompts and not state.memory_bank.known_obj_ids:
                 results.append({})
                 continue
+            cam_embeddings = [level[cam_idx : cam_idx + 1] for level in embeddings]
+            cam_pos = [level[cam_idx : cam_idx + 1] for level in pos_embeddings]
             with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
                 # Single-mask output: with multimask the predicted-IoU argmax
                 # intermittently selects the whole-scene candidate during
                 # propagation (observed as full-frame masks on crossing_arms).
-                raw: dict = self.predictor.forward(state, frame_idx, frame, prompts=prompts, multimask_output=False)
-            tracks: CameraTracks = {}
+                raw: dict = self.predictor.forward_embeddings(
+                    state, frame_idx, cam_embeddings, cam_pos, prompts=prompts, multimask_output=False
+                )
+            # Stay sync-free inside the loop: gather per-object stats on GPU and
+            # do ONE device->host copy per camera at the end (each .item()/
+            # .tolist() in the loop would stall the pipeline ~1-2 ms).
+            entries: list[tuple[int, Bool[torch.Tensor, "h w"]]] = []
+            stats_rows: list[torch.Tensor] = []
+            h: int = frames[cam_idx].shape[1]
+            w: int = frames[cam_idx].shape[2]
             for obj_id, result in raw.items():
-                best: int = int(result.ious[0].argmax())
-                mask: Bool[torch.Tensor, "h w"] = result.masks_logits[0, best] > 0.0
-                score: float = float(result.ious[0, best])
-                nonzero: torch.Tensor = mask.nonzero()
-                bbox: Float32[ndarray, "4"] | None = None
-                if nonzero.shape[0] > 0:
-                    y_min, x_min = nonzero.min(dim=0).values.tolist()
-                    y_max, x_max = nonzero.max(dim=0).values.tolist()
-                    bbox = np.array([x_min, y_min, x_max, y_max], dtype=np.float32)
-                    self._lost_ticks[cam_idx][obj_id] = 0
-                else:
-                    self._lost_ticks[cam_idx][obj_id] = self._lost_ticks[cam_idx].get(obj_id, 0) + 1
-                tracks[obj_id] = TrackedObject(obj_id=obj_id, mask=mask, bbox_xyxy=bbox, score=score)
+                # multimask_output=False -> exactly one mask candidate.
+                mask: Bool[torch.Tensor, "h w"] = result.masks_logits[0, 0] > 0.0
+                rows: torch.Tensor = mask.any(dim=1).int()
+                cols: torch.Tensor = mask.any(dim=0).int()
+                stats: torch.Tensor = torch.stack(
+                    [
+                        rows.sum(),
+                        cols.argmax(),  # x_min (0 when empty)
+                        rows.argmax(),  # y_min
+                        (w - 1) - cols.flip(0).argmax(),  # x_max
+                        (h - 1) - rows.flip(0).argmax(),  # y_max
+                    ]
+                ).float()
+                stats = torch.cat([stats, result.ious[0, 0:1].float()])
+                entries.append((obj_id, mask))
+                stats_rows.append(stats)
+            tracks: CameraTracks = {}
+            if entries:
+                all_stats: Float32[ndarray, "k 6"] = torch.stack(stats_rows).cpu().numpy()
+                for (obj_id, mask), row in zip(entries, all_stats, strict=True):
+                    bbox: Float32[ndarray, "4"] | None = None
+                    if row[0] > 0:
+                        bbox = row[1:5].astype(np.float32)
+                        self._lost_ticks[cam_idx][obj_id] = 0
+                    else:
+                        self._lost_ticks[cam_idx][obj_id] = self._lost_ticks[cam_idx].get(obj_id, 0) + 1
+                    tracks[obj_id] = TrackedObject(obj_id=obj_id, mask=mask, bbox_xyxy=bbox, score=float(row[5]))
             results.append(tracks)
         return results

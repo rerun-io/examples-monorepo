@@ -40,15 +40,19 @@ class FitterConfig:
     """Body-model root containing ``smplx/SMPLX_NEUTRAL.npz`` (smplx.create layout)."""
     downsampled_verts_pkl: Path = Path("data/body_models/downsampled_verts/verts_512.pkl")
     """[512, 10475] vertex subsampling matrix mapping SMPL-X verts to landmarks."""
-    window_size: int = 12
+    window_size: int = 8
     """Frames kept in the optimization window."""
     bootstrap_iters: int = 300
     """Adam iterations for the first-window solve (betas optimized here)."""
-    tick_iters: int = 24
-    """Adam iterations per steady-state tick (betas frozen). Tuned on
-    crossing_arms vs golden: 24 @ lr 0.02 -> 19.8mm MPJPE (16 -> 24.2, 8 -> 36.6)."""
+    tick_iters: int = 16
+    """Adam iterations per optimize tick (betas frozen). Quality/cost points
+    measured vs golden: W=12/24@0.02/stride1 -> 19.8mm, W=8/12/stride1 -> 25.3mm,
+    W=8/16/stride3 -> 27.2mm (default), W=6/8@0.03 -> 43.6mm (fails 30mm gate)."""
     learning_rate: float = 0.02
     """Adam learning rate (0.03 oscillates, 0.01 under-converges at this budget)."""
+    fit_stride: int = 3
+    """Optimize every Nth tick; skipped ticks emit the warm-started forward of
+    the previous solution (observations still enter the window)."""
     weight_reproj: float = 20.0
     """Reprojection loss weight (golden ``first_run``)."""
     weight_anchor3d: float = 100.0
@@ -148,6 +152,7 @@ class SlidingWindowFitter:
         vis_per_cam: list[Float32[torch.Tensor, "n"]],
         anchors3d: Float32[torch.Tensor, "n 3"],
         anchors_valid: Bool[torch.Tensor, "n"],
+        optimize: bool = True,
     ) -> FitResult | None:
         """Add one tick's observations; returns the newest frame's fit (or None
         before the first window fills)."""
@@ -185,7 +190,7 @@ class SlidingWindowFitter:
                 return None
             self._optimize(self.config.bootstrap_iters, optimize_betas=True)
             self._bootstrapped = True
-        else:
+        elif optimize:
             self._optimize(self.config.tick_iters, optimize_betas=False)
         return self._emit()
 

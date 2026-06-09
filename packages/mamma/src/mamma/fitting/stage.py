@@ -73,7 +73,8 @@ class FittingStage:
                 self._fitters[obj_id] = fitter
                 if self.faces is None:
                     self.faces = fitter.model.faces
-            result: FitResult | None = fitter.push(frame_idx, pts2d_all, vis_all, points3d, valid)
+            optimize: bool = self.config.fit_stride <= 1 or frame_idx % self.config.fit_stride == 0
+            result: FitResult | None = fitter.push(frame_idx, pts2d_all, vis_all, points3d, valid, optimize=optimize)
             if result is not None:
                 fits[obj_id] = result
         return TickFitOutput(fits=fits, triangulated=triangulated)
