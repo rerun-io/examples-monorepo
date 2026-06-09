@@ -18,6 +18,8 @@ from mamma.calibration.npz_contract import CameraCalibration
 from mamma.datasets.mamma_npz import load_mamma_sequence
 from mamma.datasets.sequence import MultiViewSequence
 from mamma.engine.pipeline import PipelineStats, StreamingPipeline
+from mamma.fitting.stage import FittingStage
+from mamma.fitting.window_fitter import FitterConfig
 from mamma.landmarks.estimator import LandmarkEstimator
 from mamma.tracking.tracker import MultiViewTracker, TrackerConfig
 from mamma.viz.stream_logger import StreamLogger
@@ -29,6 +31,8 @@ class DemoConfig:
     """Rerun viewer/save/connect behavior."""
     tracker: TrackerConfig = field(default_factory=TrackerConfig)
     """Streaming tracker settings (SAM2/YOLO checkpoints, re-detect cadence)."""
+    fitter: FitterConfig = field(default_factory=FitterConfig)
+    """Sliding-window SMPL-X fitter settings."""
     data_dir: Path = Path("data/inputs/indoors/crossing_arms")
     """MAMMA-format capture directory (meta/ + videos_light/)."""
     resize_hw: tuple[int, int] = (720, 1280)
@@ -45,6 +49,8 @@ class DemoConfig:
     """Converted MammaNet state-dict; landmarks are skipped if tracking is off."""
     no_landmarks: bool = False
     """Disable dense 2D landmark estimation."""
+    no_fitting: bool = False
+    """Disable triangulation + SMPL-X fitting."""
     device: str = "cuda"
     """Decode/compute device."""
 
@@ -72,7 +78,17 @@ def main(config: DemoConfig) -> None:
     if tracker is not None and not config.no_landmarks:
         landmarks = LandmarkEstimator(config.mammanet_weights, device=config.device)
 
-    pipeline: StreamingPipeline = StreamingPipeline(sequence, reader, logger, tracker=tracker, landmarks=landmarks)
+    fitting: FittingStage | None = None
+    if landmarks is not None and not config.no_fitting:
+        scaled_cams: list[CameraCalibration] = [
+            cam.scaled_to(height=config.resize_hw[0], width=config.resize_hw[1]) for cam in sequence.cameras
+        ]
+        config.fitter.device = config.device
+        fitting = FittingStage(scaled_cams, config.fitter)
+
+    pipeline: StreamingPipeline = StreamingPipeline(
+        sequence, reader, logger, tracker=tracker, landmarks=landmarks, fitting=fitting
+    )
     stats: PipelineStats = pipeline.run(
         chunk_size=config.chunk_size, max_frames=config.max_frames, start_frame=config.start_frame
     )

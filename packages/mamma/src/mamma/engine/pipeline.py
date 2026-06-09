@@ -15,6 +15,7 @@ from simplecv.video_io import TorchCodecMultiVideoReader
 from mamma.datasets.sequence import MultiViewSequence
 from mamma.engine.profiler import StageProfiler
 from mamma.engine.types import CameraTracks
+from mamma.fitting.stage import FittingStage, TickFitOutput
 from mamma.landmarks.estimator import CameraLandmarks, LandmarkEstimator
 from mamma.tracking.tracker import MultiViewTracker
 from mamma.viz.stream_logger import StreamLogger
@@ -30,16 +31,19 @@ class ResultCollector:
         self.frame_indices: list[int] = []
         self.tracks: list[list[CameraTracks] | None] = []
         self.landmarks: list[list[CameraLandmarks] | None] = []
+        self.fits: list[TickFitOutput | None] = []
 
     def collect(
         self,
         frame_idx: int,
         tracks: list[CameraTracks] | None,
         landmarks: list[CameraLandmarks] | None,
+        fit_output: TickFitOutput | None = None,
     ) -> None:
         self.frame_indices.append(frame_idx)
         self.tracks.append(tracks)
         self.landmarks.append(landmarks)
+        self.fits.append(fit_output)
 
 
 @dataclass(slots=True)
@@ -69,6 +73,7 @@ class StreamingPipeline:
         logger: StreamLogger,
         tracker: MultiViewTracker | None = None,
         landmarks: LandmarkEstimator | None = None,
+        fitting: FittingStage | None = None,
         collector: "ResultCollector | None" = None,
     ) -> None:
         self.sequence: MultiViewSequence = sequence
@@ -76,6 +81,7 @@ class StreamingPipeline:
         self.logger: StreamLogger = logger
         self.tracker: MultiViewTracker | None = tracker
         self.landmarks: LandmarkEstimator | None = landmarks
+        self.fitting: FittingStage | None = fitting
         self.collector: ResultCollector | None = collector
 
     def run(self, chunk_size: int = 32, max_frames: int | None = None, start_frame: int = 0) -> PipelineStats:
@@ -105,6 +111,10 @@ class StreamingPipeline:
                 if self.landmarks is not None and tracks is not None:
                     with profiler.stage("landmarks"):
                         landmarks = self.landmarks.estimate(frames, tracks)
+                fit_output: TickFitOutput | None = None
+                if self.fitting is not None and landmarks is not None:
+                    with profiler.stage("fit"):
+                        fit_output = self.fitting.step(frame_idx, landmarks)
                 with profiler.stage("log_video"):
                     self.logger.log_tick_video(frame_idx, frames)
                 if tracks is not None:
@@ -113,8 +123,11 @@ class StreamingPipeline:
                 if landmarks is not None:
                     with profiler.stage("log_landmarks"):
                         self.logger.log_tick_landmarks(frame_idx, landmarks)
+                if fit_output is not None and self.fitting is not None:
+                    with profiler.stage("log_fit"):
+                        self.logger.log_tick_fit(frame_idx, fit_output.fits, fit_output.triangulated, self.fitting.faces)
                 if self.collector is not None:
-                    self.collector.collect(frame_idx, tracks, landmarks)
+                    self.collector.collect(frame_idx, tracks, landmarks, fit_output)
                 frame_idx += 1
         with profiler.stage("log_video"):
             self.logger.flush()

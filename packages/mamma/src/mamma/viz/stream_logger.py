@@ -22,8 +22,23 @@ from simplecv.video_encoder import VideoCodecChoice, VideoEncoder
 
 from mamma.datasets.sequence import MultiViewSequence
 from mamma.engine.types import CameraTracks
+from mamma.fitting.window_fitter import FitResult
 from mamma.landmarks.estimator import CameraLandmarks
 from mamma.viz.blueprint import WORLD_TAG, camera_entity, default_blueprint, pinhole_entity
+
+
+def _vertex_normals(vertices: ndarray, faces: ndarray) -> ndarray:
+    """Area-weighted vertex normals (port of the original ``_vertex_normals``)."""
+    v0: ndarray = vertices[faces[:, 0]]
+    v1: ndarray = vertices[faces[:, 1]]
+    v2: ndarray = vertices[faces[:, 2]]
+    face_normals: ndarray = np.cross(v1 - v0, v2 - v0)
+    normals: ndarray = np.zeros_like(vertices)
+    np.add.at(normals, faces[:, 0], face_normals)
+    np.add.at(normals, faces[:, 1], face_normals)
+    np.add.at(normals, faces[:, 2], face_normals)
+    lengths: ndarray = np.linalg.norm(normals, axis=1, keepdims=True)
+    return normals / np.clip(lengths, 1e-8, None)
 
 _ID_PALETTE: list[tuple[int, int, int]] = [
     (230, 110, 80),
@@ -158,6 +173,32 @@ class StreamLogger:
                     f"{entity_base}/landmarks/person_{obj_id}",
                     rr.Points2D(positions=positions, colors=colors, radii=1.5),
                 )
+
+    def log_tick_fit(
+        self,
+        frame_idx: int,
+        fits: "dict[int, FitResult]",
+        triangulated: dict[int, tuple[torch.Tensor, torch.Tensor]],
+        faces: ndarray | None,
+    ) -> None:
+        """Log SMPL-X meshes + triangulated landmark clouds for one tick."""
+        set_tick_time(frame_idx, self.fps)
+        for obj_id, (points3d, valid) in triangulated.items():
+            cloud: ndarray = points3d[valid].cpu().numpy()
+            rr.log(f"{WORLD_TAG}/triangulated/person_{obj_id}", rr.Points3D(positions=cloud, radii=0.008))
+        for obj_id, fit in fits.items():
+            color: tuple[int, int, int] = _ID_PALETTE[obj_id % len(_ID_PALETTE)]
+            normals: ndarray = _vertex_normals(fit.vertices, faces) if faces is not None else None
+            rr.log(
+                f"{WORLD_TAG}/meshes/person_{obj_id}",
+                rr.Mesh3D(
+                    vertex_positions=fit.vertices,
+                    triangle_indices=faces,
+                    vertex_normals=normals,
+                    albedo_factor=[color[0] / 255.0, color[1] / 255.0, color[2] / 255.0, 1.0],
+                ),
+            )
+            rr.log(f"{WORLD_TAG}/joints/person_{obj_id}", rr.Points3D(positions=fit.joints, radii=0.012, colors=color))
 
     def flush(self) -> None:
         """Drain buffered encoder packets (run once, after the loop)."""

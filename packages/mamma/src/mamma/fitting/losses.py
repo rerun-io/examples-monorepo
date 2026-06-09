@@ -1,0 +1,91 @@
+"""Fitting losses — ports of the subset of ``optimization/losses/losses.py``
+used by the streaming sliding-window fitter (geman-mcclure reprojection,
+3D anchor MSE, shape prior, temporal smoothness).
+"""
+
+from __future__ import annotations
+
+import torch
+from jaxtyping import Float32
+
+
+def geman_mcclure(
+    target: Float32[torch.Tensor, "... d"],
+    pred: Float32[torch.Tensor, "... d"],
+    delta: float,
+    weight: Float32[torch.Tensor, "... 1"] | float = 1.0,
+    uncertainties: Float32[torch.Tensor, "... 1"] | float = 1.0,
+) -> Float32[torch.Tensor, ""]:
+    """Robust Geman-McClure penalty (original ``geman_mcclure_loss``)."""
+    x_squared = ((target - pred) / uncertainties) ** 2
+    loss = weight * x_squared / (delta**2 + x_squared)
+    return loss.mean()
+
+
+def reprojection_loss(
+    pts2d_per_cam: list[Float32[torch.Tensor, "t n 3"]],
+    pts3d_world: Float32[torch.Tensor, "t n 3"],
+    k_per_cam: list[Float32[torch.Tensor, "3 3"]],
+    world_to_cam_per_cam: list[Float32[torch.Tensor, "4 4"]],
+    vis_per_cam: list[Float32[torch.Tensor, "t n"]] | None,
+    vis_clip_value: float = 0.8,
+    img_size_px: float = 512.0,
+    weight: float = 1.0,
+) -> Float32[torch.Tensor, ""]:
+    """Geman-McClure 2D reprojection over all cameras (original ``proj_pts_loss``).
+
+    The landmark third channel is a log-variance; sigma in crop pixels is
+    ``exp(0.5*logvar)/2*img_size`` clamped to [1, 50] (the original stored
+    sigma directly; we convert from logvar here — same operating range).
+    """
+    total: Float32[torch.Tensor, ""] = pts3d_world.new_zeros(())
+    n_cams: int = len(pts2d_per_cam)
+    for cam_id in range(n_cams):
+        w2c: Float32[torch.Tensor, "4 4"] = world_to_cam_per_cam[cam_id]
+        pts_cam: Float32[torch.Tensor, "t n 3"] = pts3d_world @ w2c[:3, :3].T + w2c[:3, 3]
+        proj: Float32[torch.Tensor, "t n 3"] = pts_cam @ k_per_cam[cam_id].T
+        proj = proj / proj[..., 2:3].clamp(min=1e-6)
+        pts2d: Float32[torch.Tensor, "t n 3"] = pts2d_per_cam[cam_id]
+        in_img: Float32[torch.Tensor, "t n 1"] = (pts2d[..., :2].sum(-1, keepdim=True) > 0).float()
+        sigma: Float32[torch.Tensor, "t n 1"] = (torch.exp(0.5 * pts2d[..., 2:3]) / 2.0 * img_size_px).clamp(1.0, 50.0)
+        point_weight: Float32[torch.Tensor, "t n 1"] = weight * in_img
+        if vis_per_cam is not None:
+            point_weight = torch.clip(vis_per_cam[cam_id][..., None], min=vis_clip_value) * point_weight
+        error: Float32[torch.Tensor, ""] = geman_mcclure(
+            proj[..., :2], pts2d[..., :2], delta=8.0, weight=point_weight, uncertainties=sigma
+        )
+        if torch.isnan(error) or torch.isinf(error):
+            error = pts3d_world.new_zeros(())
+        total = total + error / n_cams
+    return total
+
+
+def anchor3d_loss(
+    pts3d_pred: Float32[torch.Tensor, "t n 3"],
+    pts3d_anchor: Float32[torch.Tensor, "t n 3"],
+    valid: Float32[torch.Tensor, "t n"],
+    weight: float = 1.0,
+) -> Float32[torch.Tensor, ""]:
+    """MSE to triangulated anchors over valid points (original ``l2_loss_3d_points``)."""
+    diff: Float32[torch.Tensor, "t n"] = ((pts3d_pred - pts3d_anchor) ** 2).sum(-1)
+    denom: Float32[torch.Tensor, ""] = valid.sum().clamp(min=1.0)
+    return weight * (diff * valid).sum() / denom
+
+
+def shape_prior_loss(betas: Float32[torch.Tensor, "1 nb"], weight: float = 1.0) -> Float32[torch.Tensor, ""]:
+    """L2 shrinkage on shape coefficients (original ``body_shape_prior_loss``)."""
+    return weight * torch.mean(betas**2)
+
+
+def temporal_smoothness_loss(
+    trans: Float32[torch.Tensor, "t 3"],
+    pose_aa: Float32[torch.Tensor, "t p"],
+    weight_trans: float = 1.0,
+    weight_pose: float = 1.0,
+) -> Float32[torch.Tensor, ""]:
+    """First-difference smoothness over the window (aa variant of the originals)."""
+    if trans.shape[0] < 2:
+        return trans.new_zeros(())
+    trans_term: Float32[torch.Tensor, ""] = ((trans[1:] - trans[:-1]) ** 2).sum(-1).mean()
+    pose_term: Float32[torch.Tensor, ""] = ((pose_aa[1:] - pose_aa[:-1]) ** 2).mean()
+    return weight_trans * trans_term + weight_pose * pose_term
