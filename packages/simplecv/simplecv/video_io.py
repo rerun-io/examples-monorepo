@@ -347,6 +347,7 @@ class TorchCodecVideoReader:
         device: str | torch.device | None = None,
         num_ffmpeg_threads: int = 0,
         seek_mode: Literal["exact", "approximate"] = "approximate",
+        resize_hw: tuple[int, int] | None = None,
     ) -> None:
         """Initialize the TorchCodec tensor video reader.
 
@@ -355,6 +356,14 @@ class TorchCodecVideoReader:
             device: TorchCodec decode device. Defaults to CUDA when available.
             num_ffmpeg_threads: FFmpeg thread count passed to TorchCodec.
             seek_mode: TorchCodec seek mode.
+            resize_hw: Optional ``(height, width)`` of yielded frames. On CUDA
+                devices frames are NVDEC-decoded at native resolution and
+                resized on the GPU (``F.interpolate`` area mode); on CPU the
+                resize happens during decoding via TorchCodec's FFmpeg-backed
+                decode-time transforms so full-resolution frames are never
+                materialized. ``width``/``height``/``resolution`` report the
+                post-resize dimensions; use ``source_width``/``source_height``
+                for the native ones.
         """
         from torchcodec.decoders import VideoDecoder
 
@@ -362,6 +371,15 @@ class TorchCodecVideoReader:
         self.device: str = str(device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu"))
         self.num_ffmpeg_threads: int = num_ffmpeg_threads
         self.seek_mode: Literal["exact", "approximate"] = seek_mode
+        self.resize_hw: tuple[int, int] | None = resize_hw
+
+        # On CPU, resize during decoding (FFmpeg scale filter). On CUDA, decode
+        # native via NVDEC and resize on-GPU after decode.
+        decode_time_transforms: list | None = None
+        if resize_hw is not None and not self.device.startswith("cuda"):
+            from torchcodec.transforms import Resize as _TorchCodecResize
+
+            decode_time_transforms = [_TorchCodecResize(size=list(resize_hw))]
 
         self._decoder: VideoDecoder = VideoDecoder(
             source,
@@ -369,11 +387,17 @@ class TorchCodecVideoReader:
             seek_mode=self.seek_mode,
             num_ffmpeg_threads=self.num_ffmpeg_threads,
             dimension_order="NCHW",
+            transforms=decode_time_transforms,
         )
 
         metadata = self._decoder.metadata
-        self._width: int = required_torchcodec_int(metadata.width, "width")
-        self._height: int = required_torchcodec_int(metadata.height, "height")
+        self._source_width: int = required_torchcodec_int(metadata.width, "width")
+        self._source_height: int = required_torchcodec_int(metadata.height, "height")
+        self._width: int = self._source_width if resize_hw is None else int(resize_hw[1])
+        self._height: int = self._source_height if resize_hw is None else int(resize_hw[0])
+        # CPU decode-time transforms already produce resized frames; only the
+        # CUDA path needs a post-decode resize.
+        self._needs_post_resize: bool = resize_hw is not None and self.device.startswith("cuda")
         self._fps: float = required_torchcodec_float(metadata.average_fps, "average_fps")
         self._frame_cnt: int = required_torchcodec_int(metadata.num_frames, "num_frames")
         self._position: int = 0
@@ -384,17 +408,27 @@ class TorchCodecVideoReader:
 
     @property
     def width(self) -> int:
-        """int: Width of video frames."""
+        """int: Width of yielded frames (post-resize when ``resize_hw`` is set)."""
         return self._width
 
     @property
     def height(self) -> int:
-        """int: Height of video frames."""
+        """int: Height of yielded frames (post-resize when ``resize_hw`` is set)."""
         return self._height
 
     @property
+    def source_width(self) -> int:
+        """int: Native width of the encoded video."""
+        return self._source_width
+
+    @property
+    def source_height(self) -> int:
+        """int: Native height of the encoded video."""
+        return self._source_height
+
+    @property
     def resolution(self) -> tuple[int, int]:
-        """tuple: Video resolution (width, height)."""
+        """tuple: Yielded resolution (width, height), post-resize when ``resize_hw`` is set."""
         return (self._width, self._height)
 
     @property
@@ -451,7 +485,19 @@ class TorchCodecVideoReader:
             raise IndexError(f'"frame_id" must be between 0 and {self._frame_cnt - 1}')
 
         frame: UInt8[torch.Tensor, "3 h w"] = self._decoder.get_frame_at(frame_id).data
+        if self._needs_post_resize:
+            frame = self._maybe_resize(frame.unsqueeze(0)).squeeze(0)
         return frame
+
+    def _maybe_resize(self, frames: UInt8[torch.Tensor, "b 3 h w"]) -> UInt8[torch.Tensor, "b 3 h w"]:
+        """Resize a decoded NCHW uint8 batch on-device to ``resize_hw`` if needed."""
+        if not self._needs_post_resize or frames.shape[0] == 0:
+            return frames
+        assert self.resize_hw is not None
+        resized: UInt8[torch.Tensor, "b 3 h w"] = (
+            torch.nn.functional.interpolate(frames.float(), size=self.resize_hw, mode="area").round_().clamp_(0, 255).to(torch.uint8)
+        )
+        return resized
 
     def get_frames_in_range(self, start: int, stop: int) -> UInt8[torch.Tensor, "b 3 h w"]:
         """Get an RGB ``NCHW`` uint8 frame range."""
@@ -468,6 +514,7 @@ class TorchCodecVideoReader:
             )
             return empty
         video: UInt8[torch.Tensor, "b 3 h w"] = self._decoder.get_frames_in_range(start, clamped_stop).data
+        video = self._maybe_resize(video)
         return video
 
     def iter_chunks(
@@ -545,6 +592,7 @@ class TorchCodecMultiVideoReader:
         num_workers: int | None = None,
         num_ffmpeg_threads: int = 0,
         seek_mode: Literal["exact", "approximate"] = "approximate",
+        resize_hw: tuple[int, int] | None = None,
     ) -> None:
         """Initialize the TorchCodec multiview tensor reader.
 
@@ -554,6 +602,9 @@ class TorchCodecMultiVideoReader:
             num_workers: Number of camera decode workers. Defaults to one worker per video.
             num_ffmpeg_threads: FFmpeg thread count passed to each decoder.
             seek_mode: TorchCodec seek mode.
+            resize_hw: Optional ``(height, width)`` of yielded frames; see
+                :class:`TorchCodecVideoReader`. ``height``/``width`` report
+                the post-resize dimensions.
         """
         if len(video_sources) == 0:
             raise ValueError("video_sources must contain at least one video")
@@ -563,6 +614,7 @@ class TorchCodecMultiVideoReader:
         if self.num_workers <= 0:
             raise ValueError("num_workers must be positive")
         self.seek_mode: Literal["exact", "approximate"] = seek_mode
+        self.resize_hw: tuple[int, int] | None = resize_hw
 
         self._video_readers: list[TorchCodecVideoReader] = [
             TorchCodecVideoReader(
@@ -570,6 +622,7 @@ class TorchCodecMultiVideoReader:
                 device=self.device,
                 num_ffmpeg_threads=self.num_ffmpeg_threads,
                 seek_mode=self.seek_mode,
+                resize_hw=self.resize_hw,
             )
             for source in video_sources
         ]

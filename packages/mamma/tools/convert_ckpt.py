@@ -39,7 +39,7 @@ def main() -> None:
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         load_mode = "weights_only=False"
 
-    state_dict: dict[str, torch.Tensor] = ckpt["state_dict"] if "state_dict" in ckpt else ckpt
+    state_dict: dict[str, torch.Tensor] = ckpt.get("state_dict", ckpt)
     prefixes: set[str] = {k.split(".", 1)[0] for k in state_dict}
     print(f"loaded via {load_mode}; {len(state_dict)} tensors; top-level prefixes: {sorted(prefixes)}")
 
