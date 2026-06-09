@@ -16,13 +16,18 @@ class StageProfiler:
 
     @contextmanager
     def stage(self, name: str) -> Generator[None, None, None]:
+        import torch.profiler
+
         start: float = time.perf_counter()
-        try:
-            yield
-        finally:
-            elapsed: float = time.perf_counter() - start
-            self.totals[name] = self.totals.get(name, 0.0) + elapsed
-            self.counts[name] = self.counts.get(name, 0) + 1
+        # record_function makes stage boundaries visible in torch.profiler /
+        # nsys traces; it is a cheap no-op when no profiler is attached.
+        with torch.profiler.record_function(f"stage::{name}"):
+            try:
+                yield
+            finally:
+                elapsed: float = time.perf_counter() - start
+                self.totals[name] = self.totals.get(name, 0.0) + elapsed
+                self.counts[name] = self.counts.get(name, 0) + 1
 
     def report(self) -> str:
         """Human-readable per-stage table sorted by total time."""
