@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mamma package — implementation notes</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel2: #1d212b; --text: #d7dce4;
+    --muted: #8a93a5; --accent: #e0a458; --green: #6fbf73; --red: #e06c75;
+    --blue: #61afef; --border: #2a2f3a;
+  }
+  body { background: var(--bg); color: var(--text); font: 15px/1.55 system-ui, sans-serif; margin: 0; }
+  main { max-width: 980px; margin: 0 auto; padding: 2rem 1.5rem 4rem; }
+  h1 { font-size: 1.6rem; border-bottom: 2px solid var(--accent); padding-bottom: .4rem; }
+  h2 { font-size: 1.2rem; color: var(--accent); margin-top: 2.2rem; }
+  h3 { font-size: 1rem; color: var(--blue); }
+  code, pre { font-family: ui-monospace, monospace; font-size: .86em; }
+  code { background: var(--panel2); padding: .1em .35em; border-radius: 4px; }
+  pre { background: var(--panel2); padding: .8rem 1rem; border-radius: 8px; overflow-x: auto; border: 1px solid var(--border); }
+  table { border-collapse: collapse; width: 100%; margin: .8rem 0; font-size: .92em; }
+  th, td { border: 1px solid var(--border); padding: .45rem .6rem; text-align: left; vertical-align: top; }
+  th { background: var(--panel); color: var(--muted); font-weight: 600; }
+  .tag { display: inline-block; padding: .05rem .5rem; border-radius: 999px; font-size: .75em; font-weight: 700; margin-right: .4rem; }
+  .decision { background: #2b3a4d; color: var(--blue); }
+  .deviation { background: #4d3b2b; color: var(--accent); }
+  .tradeoff { background: #2b4d33; color: var(--green); }
+  .open { background: #4d2b2e; color: var(--red); }
+  .pass { color: var(--green); font-weight: 700; }
+  .meta { color: var(--muted); font-size: .85em; }
+  details { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: .6rem 1rem; margin: .6rem 0; }
+  summary { cursor: pointer; font-weight: 600; }
+</style>
+</head>
+<body>
+<main>
+<h1>mamma — streaming multiview body capture: implementation notes</h1>
+<p class="meta">Running log of how the implementation diverges from / interprets the approved plan
+(<code>~/.claude-work/plans/lets-make-a-plan-abstract-nest.md</code>). Updated at every milestone.
+Visual claims are backed by <code>rerun-viewer-validation</code> screenshots from M1 onward.</p>
+
+<h2>M0 — Scaffold, data plumbing, risk spikes <span class="meta">(2026-06-09)</span></h2>
+
+<h3>Spike results (all PASS)</h3>
+<table>
+<tr><th>Spike</th><th>Result</th></tr>
+<tr><td>1. TorchCodec CUDA decode of 4K HEVC <code>videos_light</code></td>
+<td class="pass">PASS — NVDEC decodes straight to CUDA uint8 <code>[32,3,2160,3840]</code>; GPU <code>F.interpolate(mode="area")</code> → 720p works.</td></tr>
+<tr><td>2. torchcodec 0.10 CPU decode-time resize</td>
+<td class="pass">PASS — <code>VideoDecoder(src, transforms=[torchcodec.transforms.Resize(size=(720,1280))])</code> yields resized frames (build <code>0.10.0a0+9c6407c</code>).</td></tr>
+<tr><td>3. h264_nvenc + Rerun per-tick VideoStream</td>
+<td class="pass">PASS — conda-forge PyAV 17.1 opens <code>h264_nvenc</code> (bf=0, tune=ull); rerun 0.33 accepts per-tick <code>rr.VideoStream.from_fields(sample=...)</code> after a static codec log.</td></tr>
+<tr><td>4. sam2 fork streaming forward</td>
+<td class="pass">PASS — <code>build_sam2_generic_video_predictor('configs/sam2.1/sam2.1_hiera_s.yaml', ...)</code> + <code>SAM2ForgetfulObjectMemoryBank</code>; two-frame forward (box prompt on frame 0, propagate on frame 1) under bf16 autocast, numpy 2.4.6 fine, hydra resolves configs from the vendored editable install.</td></tr>
+<tr><td>5. Converted MammaNet weights</td>
+<td class="pass">PASS — 282 tensors, 135.1M params; ViT-B/16 backbone (<code>backbone.patch_embed.proj.weight [768,3,16,16]</code>), DETR-style decoder, nested <code>mask_downscaling.mask_downscaling.N.*</code> naming (MaskEmbedding wraps an inner Sequential).</td></tr>
+</table>
+
+<h3>Decisions &amp; deviations</h3>
+<details open><summary><span class="tag deviation">DEVIATION</span> Vendored sam2 fork is trimmed, not pristine</summary>
+<p>Removed <code>demo/</code>, <code>notebooks/</code>, <code>sav_dataset/</code>, <code>assets/</code>, <code>training/</code>, <code>tools/</code>, docker files (~65&nbsp;MB → 720&nbsp;KB). No Python in <code>sam2/</code> itself was touched, so "code modifications: none" still holds. Recorded in <code>packages/sam2-streaming/VENDOR.md</code>. Rationale: repo size; those trees are unused by the pipeline.</p></details>
+
+<details open><summary><span class="tag decision">DECISION</span> Checkpoint keys kept verbatim; optimizer state dropped</summary>
+<p>The 1.6&nbsp;GB Lightning ckpt is mostly optimizer state — the state_dict alone is 0.54&nbsp;GB
+(<code>weights_only=True</code> fails to unpickle; conversion ran <code>weights_only=False</code> inside the frozen
+original env, see <code>tools/convert_ckpt.py</code>). Keys keep their original names
+(<code>backbone.*, decoder.*, mask_downscaling.*</code>) so the ported module mirrors the original
+attribute names instead of inventing a renaming map. The monorepo never imports pytorch-lightning.</p></details>
+
+<details open><summary><span class="tag decision">DECISION</span> sam2 fork API notes for M2</summary>
+<p><code>SAM2Prompt</code> takes <code>points_coords/points_labels/boxes/masks_logits</code> (not <code>points</code>); box prompts are
+<code>[N,4]</code> tensors. Counter helpers on the memory bank differ slightly from the research notes
+(e.g. <code>non_conditional_memories</code>) — check attribute names against the vendored source, not the notes.</p></details>
+
+<details open><summary><span class="tag tradeoff">TRADEOFF</span> EfficientTAM variants staged but sam2.1_hiera_small is the M2 default</summary>
+<p>Uploaded <code>efficienttam_{ti,s}.pt</code> as M6 perf levers (the fork's EfficientTAM configs only work
+via <code>build_sam2_generic*</code>). Starting tracking quality work on <code>sam2.1_hiera_small</code>, which the
+original ma_masks used, keeps M2 visually comparable to golden masks before any speed-driven swap.</p></details>
+
+<details open><summary><span class="tag open">OPEN</span> HF upload blocked by sandbox — needs Pablo</summary>
+<p>The private repo <code>pablovela5620/mamma-streaming-data</code> exists, the 2.7&nbsp;GB tree is staged at
+<code>/tmp/mamma-hf-stage</code> (with provenance README: golden = <code>baseline</code> run @ optimize-10x commit
+<code>a912ded</code>), but Claude's sandbox classifier denies the bulk upload of license-gated data.
+Run: <code>hf upload pablovela5620/mamma-streaming-data /tmp/mamma-hf-stage . --repo-type dataset</code>.
+Local <code>packages/mamma/data/</code> is already populated, so nothing downstream is blocked on this machine.</p></details>
+
+<details open><summary><span class="tag decision">DECISION</span> Dataset/weight redistribution stance</summary>
+<p>MAMMA data + MammaNet weights are account-gated (MPI-IS license); SMPL-X likewise. Everything
+goes to ONE <b>private</b> HF dataset repo. Nothing license-gated lands in git. Public checkpoints
+(YOLO12x, SAM2.1, EfficientTAM) are mirrored in the same private repo purely for reproducible setup.</p></details>
+
+<h2 id="next">Planned next</h2>
+<p>M1: simplecv <code>resize_hw</code> + <code>VideoCodecChoice.H264</code>; decode→resize→NVENC→VideoStream demo on
+crossing_arms with model stages stubbed; rerun-viewer-validation screenshots land here.</p>
+
+</main>
+</body>
+</html>
