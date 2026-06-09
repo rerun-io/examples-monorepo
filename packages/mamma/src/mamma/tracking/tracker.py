@@ -125,7 +125,7 @@ class MultiViewTracker:
             return [{} for _ in self.cameras]
 
         n_subjects: int = min(len(ref), expected) if expected is not None else len(ref)
-        ref_order: list[int] = list(np.argsort(-ref.scores)[:n_subjects])
+        ref_order: list[int] = [int(i) for i in np.argsort(-ref.scores)[:n_subjects]]
         obj_ids: list[int] = list(range(n_subjects))
 
         ref_feats: Float32[torch.Tensor, "n 512"] = self.encoder.encode([ref.crops[i] for i in ref_order])

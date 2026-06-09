@@ -1684,6 +1684,7 @@ einops = ">=0.8.0,<0.9"
 tyro = ">=0.9.1,<0.10"
 torchcodec = "*"
 pyyaml = "*"
+natsort = ">=8.4.0,<9"
 
 [feature.mamma.pypi-dependencies]
 mamma = { path = "packages/mamma", editable = true }

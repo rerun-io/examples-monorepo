@@ -177,7 +177,7 @@ class StreamLogger:
     def log_tick_fit(
         self,
         frame_idx: int,
-        fits: "dict[int, FitResult]",
+        fits: dict[int, FitResult],
         triangulated: dict[int, tuple[torch.Tensor, torch.Tensor]],
         faces: ndarray | None,
     ) -> None:

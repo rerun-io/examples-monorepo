@@ -74,7 +74,7 @@ class StreamingPipeline:
         tracker: MultiViewTracker | None = None,
         landmarks: LandmarkEstimator | None = None,
         fitting: FittingStage | None = None,
-        collector: "ResultCollector | None" = None,
+        collector: ResultCollector | None = None,
     ) -> None:
         self.sequence: MultiViewSequence = sequence
         self.reader: TorchCodecMultiVideoReader = reader
