@@ -1,6 +1,7 @@
 """Realtime benchmark: process the full crossing_arms clip (363 frames x 4 cams)
 through the complete streaming pipeline, including Rerun logging, and gate wall
-time against the clip duration (12.1 s = 30 fps sustained).
+time against the gate (15 s = at worst 80% of realtime for the 12.1 s clip;
+Pablo 2026-06-10: track_stride=1 mask quality is worth the slack).
 
 Exit code 0 = PASS, 1 = FAIL. Run in the non-dev env (beartype off).
 """
@@ -13,17 +14,12 @@ from pathlib import Path
 
 import tyro
 from simplecv.rerun_log_utils import RerunTyroConfig
-from simplecv.video_io import TorchCodecMultiVideoReader
 
-from mamma.calibration.npz_contract import CameraCalibration
 from mamma.datasets.mamma_npz import load_mamma_sequence
 from mamma.datasets.sequence import MultiViewSequence
-from mamma.engine.pipeline import StreamingPipeline
-from mamma.fitting.stage import FittingStage
+from mamma.engine.pipeline import StreamingPipeline, build_streaming_pipeline
 from mamma.fitting.window_fitter import FitterConfig
-from mamma.landmarks.estimator import LandmarkEstimator
-from mamma.tracking.tracker import MultiViewTracker, TrackerConfig
-from mamma.viz.stream_logger import StreamLogger
+from mamma.tracking.tracker import TrackerConfig
 
 
 @dataclass
@@ -43,8 +39,9 @@ class BenchmarkConfig:
     """Engine resolution."""
     trt_engine: Path | None = None
     """Optional MammaNet TensorRT engine plan."""
-    gate_seconds: float = 12.1
-    """PASS bound on wall time for the full clip (clip duration = realtime)."""
+    gate_seconds: float = 15.0
+    """PASS bound on wall time for the full clip (>=80% of realtime; the
+    12.1 s clip duration would be exact realtime)."""
     warmup_frames: int = 33
     """Frames run once beforehand to absorb model load/compile/cudnn autotune."""
     device: str = "cuda"
@@ -52,20 +49,18 @@ class BenchmarkConfig:
 
 
 def build_pipeline(config: BenchmarkConfig, sequence: MultiViewSequence) -> StreamingPipeline:
-    scaled_cams: list[CameraCalibration] = [
-        cam.scaled_to(height=config.resize_hw[0], width=config.resize_hw[1]) for cam in sequence.cameras
-    ]
-    reader = TorchCodecMultiVideoReader(list(sequence.video_paths), device=config.device, resize_hw=config.resize_hw)
-    logger = StreamLogger(sequence, resize_hw=config.resize_hw)
-    tracker = MultiViewTracker(scaled_cams, config.tracker)
-    estimator = LandmarkEstimator(config.mammanet_weights, device=config.device, engine_path=config.trt_engine)
-    fitting = FittingStage(scaled_cams, config.fitter)
-    return StreamingPipeline(sequence, reader, logger, tracker=tracker, landmarks=estimator, fitting=fitting)
+    return build_streaming_pipeline(
+        sequence,
+        resize_hw=config.resize_hw,
+        device=config.device,
+        tracker_config=config.tracker,
+        fitter_config=config.fitter,
+        mammanet_weights=config.mammanet_weights,
+        trt_engine=config.trt_engine,
+    )
 
 
 def main(config: BenchmarkConfig) -> int:
-    config.tracker.device = config.device
-    config.fitter.device = config.device
     sequence: MultiViewSequence = load_mamma_sequence(config.data_dir)
 
     # Warmup pass: fresh pipeline, short slice; absorbs weight load + autotune.

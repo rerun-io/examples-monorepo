@@ -12,17 +12,12 @@ from pathlib import Path
 
 import tyro
 from simplecv.rerun_log_utils import RerunTyroConfig
-from simplecv.video_io import TorchCodecMultiVideoReader
 
-from mamma.calibration.npz_contract import CameraCalibration
 from mamma.datasets.mamma_npz import load_mamma_sequence
 from mamma.datasets.sequence import MultiViewSequence
-from mamma.engine.pipeline import PipelineStats, StreamingPipeline
-from mamma.fitting.stage import FittingStage
+from mamma.engine.pipeline import PipelineStats, StreamingPipeline, build_streaming_pipeline
 from mamma.fitting.window_fitter import FitterConfig
-from mamma.landmarks.estimator import LandmarkEstimator
-from mamma.tracking.tracker import MultiViewTracker, TrackerConfig
-from mamma.viz.stream_logger import StreamLogger
+from mamma.tracking.tracker import TrackerConfig
 
 
 @dataclass
@@ -61,35 +56,14 @@ def main(config: DemoConfig) -> None:
     sequence: MultiViewSequence = load_mamma_sequence(config.data_dir)
     print(f"sequence {sequence.name}: {len(sequence.cameras)} cameras, {sequence.frame_count} frames @ {sequence.fps} fps")
 
-    reader: TorchCodecMultiVideoReader = TorchCodecMultiVideoReader(
-        list(sequence.video_paths),
-        device=config.device,
+    pipeline: StreamingPipeline = build_streaming_pipeline(
+        sequence,
         resize_hw=config.resize_hw,
-    )
-    logger: StreamLogger = StreamLogger(sequence, resize_hw=config.resize_hw)
-
-    tracker: MultiViewTracker | None = None
-    if not config.no_tracking:
-        scaled_cameras: list[CameraCalibration] = [
-            cam.scaled_to(height=config.resize_hw[0], width=config.resize_hw[1]) for cam in sequence.cameras
-        ]
-        config.tracker.device = config.device
-        tracker = MultiViewTracker(scaled_cameras, config.tracker)
-
-    landmarks: LandmarkEstimator | None = None
-    if tracker is not None and not config.no_landmarks:
-        landmarks = LandmarkEstimator(config.mammanet_weights, device=config.device, engine_path=config.trt_engine)
-
-    fitting: FittingStage | None = None
-    if landmarks is not None and not config.no_fitting:
-        scaled_cams: list[CameraCalibration] = [
-            cam.scaled_to(height=config.resize_hw[0], width=config.resize_hw[1]) for cam in sequence.cameras
-        ]
-        config.fitter.device = config.device
-        fitting = FittingStage(scaled_cams, config.fitter)
-
-    pipeline: StreamingPipeline = StreamingPipeline(
-        sequence, reader, logger, tracker=tracker, landmarks=landmarks, fitting=fitting
+        device=config.device,
+        tracker_config=None if config.no_tracking else config.tracker,
+        fitter_config=None if config.no_fitting else config.fitter,
+        mammanet_weights=None if config.no_landmarks else config.mammanet_weights,
+        trt_engine=config.trt_engine,
     )
     stats: PipelineStats = pipeline.run(
         chunk_size=config.chunk_size, max_frames=config.max_frames, start_frame=config.start_frame

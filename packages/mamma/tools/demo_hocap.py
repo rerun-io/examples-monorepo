@@ -12,17 +12,12 @@ from pathlib import Path
 
 import tyro
 from simplecv.rerun_log_utils import RerunTyroConfig
-from simplecv.video_io import TorchCodecMultiVideoReader
 
-from mamma.calibration.npz_contract import CameraCalibration
 from mamma.datasets.hocap import load_hocap_sequence
 from mamma.datasets.sequence import MultiViewSequence
-from mamma.engine.pipeline import PipelineStats, StreamingPipeline
-from mamma.fitting.stage import FittingStage
+from mamma.engine.pipeline import PipelineStats, build_streaming_pipeline
 from mamma.fitting.window_fitter import FitterConfig
-from mamma.landmarks.estimator import LandmarkEstimator
-from mamma.tracking.tracker import MultiViewTracker, TrackerConfig
-from mamma.viz.stream_logger import StreamLogger
+from mamma.tracking.tracker import TrackerConfig
 
 
 @dataclass
@@ -55,18 +50,14 @@ def main(config: DemoConfig) -> None:
     )
     print(f"{sequence.name}: {len(sequence.cameras)} cameras, {sequence.frame_count} frames @ {sequence.fps} fps")
 
-    scaled_cams: list[CameraCalibration] = [
-        cam.scaled_to(height=config.resize_hw[0], width=config.resize_hw[1]) for cam in sequence.cameras
-    ]
-    config.tracker.device = config.device
-    config.fitter.device = config.device
-    reader = TorchCodecMultiVideoReader(list(sequence.video_paths), device=config.device, resize_hw=config.resize_hw)
-    logger = StreamLogger(sequence, resize_hw=config.resize_hw)
-    tracker = MultiViewTracker(scaled_cams, config.tracker)
-    estimator = LandmarkEstimator(Path("data/weights/ma_2d/mamma_mask_full_cvpr.safetensors"), device=config.device)
-    fitting = FittingStage(scaled_cams, config.fitter)
-
-    pipeline = StreamingPipeline(sequence, reader, logger, tracker=tracker, landmarks=estimator, fitting=fitting)
+    pipeline = build_streaming_pipeline(
+        sequence,
+        resize_hw=config.resize_hw,
+        device=config.device,
+        tracker_config=config.tracker,
+        fitter_config=config.fitter,
+        mammanet_weights=Path("data/weights/ma_2d/mamma_mask_full_cvpr.safetensors"),
+    )
     stats: PipelineStats = pipeline.run(max_frames=config.max_frames)
     print(f"processed {stats.ticks} ticks x {len(sequence.cameras)} cams in {stats.elapsed_s:.2f}s ({stats.ticks_per_s:.1f} ticks/s)")
     print(stats.profiler.report())

@@ -37,3 +37,7 @@ class MultiViewSequence:
     def camera_names(self) -> list[str]:
         """Camera names in capture order."""
         return [cam.name for cam in self.cameras]
+
+    def scaled_cameras(self, resize_hw: tuple[int, int]) -> list[CameraCalibration]:
+        """Calibrations rescaled to the engine resolution ``(height, width)``."""
+        return [cam.scaled_to(height=resize_hw[0], width=resize_hw[1]) for cam in self.cameras]

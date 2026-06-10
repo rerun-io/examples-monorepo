@@ -1755,7 +1755,7 @@ description = "Run streaming pipeline on crossing_arms frames 60:90 and gate MPJ
 cmd = "python tools/benchmark.py"
 depends-on = ["_download-mamma-inputs", "_download-mamma-weights"]
 cwd = "packages/mamma"
-description = "Timed full-clip run (363 frames x 4 cams): PASS if <=12.1s wall after warmup incl. Rerun logging"
+description = "Timed full-clip run (363 frames x 4 cams): PASS if <=15s wall (>=80% realtime) after warmup incl. Rerun logging"
 
 [feature.mamma.tasks.mamma-goal-check]
 cmd = "python tools/goal_check.py"

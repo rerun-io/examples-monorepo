@@ -15,18 +15,13 @@ import tyro
 from jaxtyping import Float32
 from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
-from simplecv.video_io import TorchCodecMultiVideoReader
 
-from mamma.calibration.npz_contract import CameraCalibration
 from mamma.datasets.mamma_npz import load_mamma_sequence
 from mamma.datasets.sequence import MultiViewSequence
-from mamma.engine.pipeline import ResultCollector, StreamingPipeline
+from mamma.engine.pipeline import ResultCollector, StreamingPipeline, build_streaming_pipeline
 from mamma.eval.golden import GOLDEN_FRAME_END, GOLDEN_FRAME_START, fit3d_comparison, landmarks_diagnostics
-from mamma.fitting.stage import FittingStage
 from mamma.fitting.window_fitter import FitResult, FitterConfig
-from mamma.landmarks.estimator import LandmarkEstimator
-from mamma.tracking.tracker import MultiViewTracker, TrackerConfig
-from mamma.viz.stream_logger import StreamLogger
+from mamma.tracking.tracker import TrackerConfig
 
 
 @dataclass
@@ -59,22 +54,16 @@ class ValidateConfig:
 
 def main(config: ValidateConfig) -> int:
     sequence: MultiViewSequence = load_mamma_sequence(config.data_dir)
-    scaled_cams: list[CameraCalibration] = [
-        cam.scaled_to(height=config.resize_hw[0], width=config.resize_hw[1]) for cam in sequence.cameras
-    ]
-    config.tracker.device = config.device
-    config.fitter.device = config.device
-
-    reader: TorchCodecMultiVideoReader = TorchCodecMultiVideoReader(
-        list(sequence.video_paths), device=config.device, resize_hw=config.resize_hw
-    )
-    logger: StreamLogger = StreamLogger(sequence, resize_hw=config.resize_hw)
-    tracker: MultiViewTracker = MultiViewTracker(scaled_cams, config.tracker)
-    estimator: LandmarkEstimator = LandmarkEstimator(config.mammanet_weights, device=config.device, engine_path=config.trt_engine)
-    fitting: FittingStage = FittingStage(scaled_cams, config.fitter)
     collector: ResultCollector = ResultCollector()
-    pipeline: StreamingPipeline = StreamingPipeline(
-        sequence, reader, logger, tracker=tracker, landmarks=estimator, fitting=fitting, collector=collector
+    pipeline: StreamingPipeline = build_streaming_pipeline(
+        sequence,
+        resize_hw=config.resize_hw,
+        device=config.device,
+        tracker_config=config.tracker,
+        fitter_config=config.fitter,
+        mammanet_weights=config.mammanet_weights,
+        trt_engine=config.trt_engine,
+        collector=collector,
     )
 
     # Start one window early so the fitter has emitted every golden-slice frame.

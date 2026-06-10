@@ -7,17 +7,20 @@ No disk writes happen anywhere in this loop; outputs exist only as Rerun logs
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import torch
 from jaxtyping import UInt8
 from simplecv.video_io import TorchCodecMultiVideoReader
 
+from mamma.calibration.npz_contract import CameraCalibration
 from mamma.datasets.sequence import MultiViewSequence
 from mamma.engine.profiler import StageProfiler
 from mamma.engine.types import CameraTracks
 from mamma.fitting.stage import FittingStage, TickFitOutput
+from mamma.fitting.window_fitter import FitterConfig
 from mamma.landmarks.estimator import CameraLandmarks, LandmarkEstimator
-from mamma.tracking.tracker import MultiViewTracker
+from mamma.tracking.tracker import MultiViewTracker, TrackerConfig
 from mamma.viz.stream_logger import StreamLogger
 
 
@@ -206,3 +209,42 @@ class StreamingPipeline:
         if self.mp_decoder is not None:
             self.mp_decoder.close()
             self.mp_decoder = None
+
+
+def build_streaming_pipeline(
+    sequence: MultiViewSequence,
+    resize_hw: tuple[int, int],
+    device: str,
+    tracker_config: TrackerConfig | None = None,
+    fitter_config: FitterConfig | None = None,
+    mammanet_weights: Path | None = None,
+    trt_engine: Path | None = None,
+    collector: ResultCollector | None = None,
+) -> StreamingPipeline:
+    """Assemble the standard decode->track->landmarks->fit->log pipeline.
+
+    The single construction path shared by every tool (demos, benchmark,
+    golden validation). Stages are optional and cumulative: tracking needs
+    ``tracker_config``; landmarks additionally need ``mammanet_weights``;
+    fitting additionally needs ``fitter_config``. ``device`` is propagated
+    into the stage configs here so callers never mutate them.
+    """
+    scaled_cams: list[CameraCalibration] = sequence.scaled_cameras(resize_hw)
+    reader = TorchCodecMultiVideoReader(list(sequence.video_paths), device=device, resize_hw=resize_hw)
+    logger = StreamLogger(sequence, resize_hw=resize_hw)
+
+    tracker: MultiViewTracker | None = None
+    if tracker_config is not None:
+        tracker_config.device = device
+        tracker = MultiViewTracker(scaled_cams, tracker_config)
+
+    landmarks: LandmarkEstimator | None = None
+    if tracker is not None and mammanet_weights is not None:
+        landmarks = LandmarkEstimator(mammanet_weights, device=device, engine_path=trt_engine)
+
+    fitting: FittingStage | None = None
+    if landmarks is not None and fitter_config is not None:
+        fitter_config.device = device
+        fitting = FittingStage(scaled_cams, fitter_config)
+
+    return StreamingPipeline(sequence, reader, logger, tracker=tracker, landmarks=landmarks, fitting=fitting, collector=collector)

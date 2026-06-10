@@ -2,7 +2,7 @@
 
 Clauses:
   1. golden    — MPJPE/PVE vs golden ma_3d within tolerance (tools/validate_golden.py)
-  2. realtime  — full clip <= 12.1 s wall incl. Rerun logging (tools/benchmark.py)
+  2. realtime  — full clip <= 15 s wall (>=80% of realtime) incl. Rerun logging (tools/benchmark.py)
   3. datasets  — HOCap + Assembly101 demos run end-to-end and produce RRDs
   4. no-writes — streaming loop creates no files (tests/test_no_disk_writes.py)
   5. hygiene   — ruff + pyrefly + pytest clean in the mamma-dev env
