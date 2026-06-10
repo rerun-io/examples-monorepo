@@ -1,11 +1,14 @@
 """Aggregate goal verification — runs every goal clause and prints PASS/FAIL.
 
 Clauses:
-  1. golden    — MPJPE/PVE vs golden ma_3d within tolerance (tools/validate_golden.py)
-  2. realtime  — full clip <= 15 s wall (>=80% of realtime) incl. Rerun logging (tools/benchmark.py)
-  3. datasets  — HOCap + Assembly101 demos run end-to-end and produce RRDs
-  4. no-writes — streaming loop creates no files (tests/test_no_disk_writes.py)
-  5. hygiene   — ruff + pyrefly + pytest clean in the mamma-dev env
+  1. golden      — crossing_arms MPJPE/PVE vs golden ma_3d <= 30 mm (tools/validate_golden.py)
+  2. dynamic     — running_jumping per-frame PVE p95+max <= 30 mm vs the original
+                   DAG's output on dynamic motion (tools/validate_dynamic.py)
+  3. realtime    — BOTH clips <= 2x clip duration wall (>=50% of realtime) incl.
+                   Rerun logging (tools/benchmark.py)
+  4. datasets    — HOCap + Assembly101 demos run end-to-end and produce RRDs
+  5. no-writes   — streaming loop creates no files (tests/test_no_disk_writes.py)
+  6. hygiene     — ruff + pyrefly + pytest clean in the mamma-dev env
 
 Exit 0 only when all clauses PASS. Run from packages/mamma in the mamma env.
 """
@@ -36,19 +39,31 @@ def main() -> int:
     engine_args: list[str] = ["--trt-engine", str(engine[-1])] if engine else []
     if not engine:
         print("note: no TRT engine in .trt_cache (run tools/build_trt_engine.py); using eager MammaNet")
-    print("[1/5] golden gate (validate_golden)")
+    print("[1/6] golden gate (validate_golden, crossing_arms)")
     ok, out = run([py, "tools/validate_golden.py", "--rr-config.headless", *engine_args], PKG)
     print(out)
     results["golden"] = ok
 
     print("=" * 70)
-    print("[2/5] realtime benchmark (full clip, incl. Rerun logging)")
-    ok, out = run([py, "tools/benchmark.py", "--rr-config.headless", *engine_args], PKG, tail=8)
+    print("[2/6] dynamic golden gate (validate_dynamic, running_jumping vs original DAG)")
+    ok, out = run([py, "tools/validate_dynamic.py", "--rr-config.headless", *engine_args], PKG)
     print(out)
-    results["realtime"] = ok
+    results["dynamic"] = ok
 
     print("=" * 70)
-    print("[3/5] dataset demos (HOCap + Assembly101 -> RRD)")
+    print("[3/6] realtime benchmarks (>=50% of realtime, incl. Rerun logging)")
+    ok_ca, out = run([py, "tools/benchmark.py", "--rr-config.headless", *engine_args], PKG, tail=4)
+    print(out)
+    ok_rj, out = run(
+        [py, "tools/benchmark.py", "--rr-config.headless", *engine_args, "--data-dir", "data/inputs/outdoors/running_jumping"],
+        PKG,
+        tail=4,
+    )
+    print(out)
+    results["realtime"] = ok_ca and ok_rj
+
+    print("=" * 70)
+    print("[4/6] dataset demos (HOCap + Assembly101 -> RRD)")
     with tempfile.TemporaryDirectory() as tmp:
         hocap_rrd: Path = Path(tmp) / "hocap.rrd"
         ok_h, out = run(
@@ -71,7 +86,7 @@ def main() -> int:
     results["datasets"] = ok_h and ok_a
 
     print("=" * 70)
-    print("[4/5] no-disk-writes (pytest tests/test_no_disk_writes.py)")
+    print("[5/6] no-disk-writes (pytest tests/test_no_disk_writes.py)")
     # pytest lives in the dev env, not the prod env this script runs in.
     dev_python: Path = REPO_ROOT / ".pixi/envs/mamma-dev/bin/python"
     ok, out = run([str(dev_python), "-m", "pytest", "tests/test_no_disk_writes.py", "-q"], PKG, tail=3)
@@ -79,7 +94,7 @@ def main() -> int:
     results["no-writes"] = ok
 
     print("=" * 70)
-    print("[5/5] hygiene (lint + typecheck + tests in mamma-dev)")
+    print("[6/6] hygiene (lint + typecheck + tests in mamma-dev)")
     hygiene: bool = True
     for task in ("lint", "typecheck", "tests"):
         ok, out = run(["pixi", "run", "-e", "mamma-dev", "--frozen", task], REPO_ROOT, tail=2)

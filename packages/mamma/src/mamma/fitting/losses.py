@@ -138,3 +138,19 @@ def acceleration_loss(
     vel: Float32[torch.Tensor, "tv n 3"] = (pts3d[1:] - pts3d[:-1]) / dt
     acc: Float32[torch.Tensor, "ta n 3"] = (vel[1:] - vel[:-1]) / dt
     return weight * acc.pow(2).mean()
+
+
+def floor_contact_loss(
+    pts3d: Float32[torch.Tensor, "t n 3"],
+    floor_contact: Float32[torch.Tensor, "t n"],
+    weight: float = 1.0,
+) -> Float32[torch.Tensor, ""]:
+    """Pull landmarks MammaNet predicts in floor contact toward world z=0.
+
+    Probability-weighted z**2 (probabilities are camera-fused and zeroed below
+    0.25 upstream). The original DAG carries these same per-landmark
+    predictions; using them is what keeps a bent-over fit planted instead of
+    floating on biased landmarks.
+    """
+    denom: Float32[torch.Tensor, ""] = floor_contact.sum().clamp(min=1.0)
+    return weight * (floor_contact * pts3d[..., 2].pow(2)).sum() / denom

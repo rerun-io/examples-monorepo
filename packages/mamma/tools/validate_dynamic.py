@@ -103,6 +103,10 @@ def main(config: ValidateDynamicConfig) -> int:
         hires_crops=config.hires_crops,
     )
     stats = pipeline.run(chunk_size=config.chunk_size)
+    if pipeline.fitting is not None:
+        # Fixed-lag emission holds the last emit_lag frames; flush them.
+        for tail in pipeline.fitting.drain():
+            collector.collect(-1, None, None, tail)
     pipeline.close()
     print(f"pipeline: {stats.ticks} ticks in {stats.elapsed_s:.1f}s ({stats.ticks_per_s:.1f} ticks/s)")
 

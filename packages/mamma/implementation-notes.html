@@ -205,6 +205,18 @@ runtime &le; 50% of realtime. The reference artifact is the original pipeline's 
 <tr><td>E13d</td><td>full 4K everything (ceiling probe)</td><td>21</td><td>26</td><td>37</td><td>quality ceiling confirmed, but 74 s wall — can't pass runtime</td></tr>
 <tr><td>E14-15</td><td><b>dual-res</b>: decode native 4K, track/log at 720p, crop landmarks from 4K + resolution-corrected GM delta (8 px was 4K-relative; 2.7 px is the 720p equivalent)</td><td>21</td><td><b>25 PASS</b></td><td>39</td><td>the reprojection robustness scale was silently resolution-dependent</td></tr>
 </table>
+<p><b>OUTCOME (E19&#8594;E24): the gate PASSES with margin — per-frame PVE mean 15.4 / p95 18.6 / max 23.4 mm
+vs the original DAG, at pure shipped defaults.</b> The last three structural fixes after the table above:
+(1) <b>fixed-lag emission</b> (emit_lag=4: each frame leaves the window after 4 refinement ticks — 133 ms
+output latency, the principled causal answer to an offline smoother's future knowledge);
+(2) <b>floor model</b> — ground plane at the calibrated z=0, one-sided penetration penalty, plus a pull-to-ground
+on landmarks MammaNet itself predicts in floor contact (gated by triangulated height so jumps stay airborne);
+(3) <b>the original's actual loss balance</b> — agent archaeology revealed its YAML 'optimizer: Adam' is dead
+config (hardcoded LBFGS everywhere) AND its refinement stages drop the triangulated-anchor term entirely:
+reprojection-dominant weights (120 vs 20) closed the final 14 mm. The crossing_arms static gate also improved
+under the new defaults: 23.3 &#8594; 20.5 mm MPJPE. An anchor-count-triggered LBFGS polish was implemented and
+benched — it confirmed Adam had already converged (identical results), localizing the gap to the objective,
+not the optimizer.</p>
 <p>Dead ends kept for the record: positional acceleration loss (the original ships it commented out too —
 at 30 fps even weight 0.002 crushed real jump accelerations, +29 mm mean); strong first-difference smoothing
 (halved the bend error, doubled everything else). Remaining gap: ~9 mm on five frames (f111-125, the bend) —

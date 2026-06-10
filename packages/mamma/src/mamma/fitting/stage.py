@@ -56,16 +56,26 @@ class FittingStage:
             # (excluded by the validity masks inside triangulation/reprojection).
             pts2d_all: list[Float32[torch.Tensor, "n 3"]] = []
             vis_all: list[Float32[torch.Tensor, "n"]] = []
+            fc_all: list[Float32[torch.Tensor, "n"]] = []
             for cam_landmarks in landmarks:
                 if obj_id in cam_landmarks:
                     pts2d_all.append(cam_landmarks[obj_id].joints2d)
                     vis_all.append(cam_landmarks[obj_id].visibility)
+                    fc_all.append(cam_landmarks[obj_id].floor_contact)
                 else:
                     pts2d_all.append(torch.zeros(n_landmarks, 3, device=device))
                     vis_all.append(torch.zeros(n_landmarks, device=device))
+            # Fused per-landmark floor-contact probability (mean over observing
+            # cameras, like the original's contact fusion), low-prob zeroed.
+            floor_contact: Float32[torch.Tensor, "n"] = torch.stack(fc_all, dim=0).mean(dim=0)
+            floor_contact = torch.where(floor_contact < 0.25, torch.zeros_like(floor_contact), floor_contact)
 
             points3d, valid = triangulate_points(pts2d_all, self.k_per_cam, self.world_to_cam_per_cam, vis_all)
             triangulated[obj_id] = (points3d, valid)
+            # Contact prediction alone fires mid-jump (feet visually near the
+            # grass) — gate the pull by the triangulated height: only landmarks
+            # the geometry also places near the ground get pulled to it.
+            floor_contact = floor_contact * valid.float() * torch.exp(-(points3d[:, 2] / 0.05) ** 2)
 
             fitter: SlidingWindowFitter | None = self._fitters.get(obj_id)
             if fitter is None:
@@ -74,7 +84,15 @@ class FittingStage:
                 if self.faces is None:
                     self.faces = fitter.model.faces
             optimize: bool = self.config.fit_stride <= 1 or frame_idx % self.config.fit_stride == 0
-            result: FitResult | None = fitter.push(frame_idx, pts2d_all, vis_all, points3d, valid, optimize=optimize)
+            result: FitResult | None = fitter.push(frame_idx, pts2d_all, vis_all, points3d, valid, floor_contact=floor_contact, optimize=optimize)
             if result is not None:
                 fits[obj_id] = result
         return TickFitOutput(fits=fits, triangulated=triangulated)
+
+    def drain(self) -> list[TickFitOutput]:
+        """Flush fixed-lag tails of every fitter at end of stream (one output per frame)."""
+        outputs: list[TickFitOutput] = []
+        for obj_id, fitter in self._fitters.items():
+            for result in fitter.drain():
+                outputs.append(TickFitOutput(fits={obj_id: result}, triangulated={}))
+        return outputs

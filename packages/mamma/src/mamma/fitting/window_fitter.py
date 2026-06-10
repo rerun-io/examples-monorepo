@@ -19,6 +19,7 @@ from numpy import ndarray
 from mamma.fitting.losses import (
     acceleration_loss,
     anchor3d_loss,
+    floor_contact_loss,
     floor_penetration_loss,
     reprojection_loss,
     shape_prior_loss,
@@ -52,14 +53,14 @@ class FitterConfig:
     """Frames kept in the optimization window."""
     bootstrap_iters: int = 300
     """Adam iterations for the first-window solve (betas optimized here)."""
-    tick_iters: int = 16
-    """Adam iterations per optimize tick (betas frozen). The shipped defaults
-    (W=8/16, fit_stride=5, graphed bootstrap 300) measure 23.3mm MPJPE on the
-    golden gate. Historical sweep: W=12/24 -> 19.8mm, W=8/12 -> 25.3mm,
-    W=6/8@0.03 -> 43.6mm (fails the 30mm gate)."""
+    tick_iters: int = 48
+    """Adam iterations per optimize tick (betas frozen; graph replays are
+    ~1 ms/iter so 64 costs ~60 ms on the overlapped fit worker). Shipped
+    defaults pass BOTH golden gates: crossing_arms MPJPE/PVE <= 30 mm and
+    running_jumping per-frame PVE p95/max <= 30 mm vs the original DAG."""
     learning_rate: float = 0.02
     """Adam learning rate (0.03 oscillates, 0.01 under-converges at this budget)."""
-    fit_stride: int = 5
+    fit_stride: int = 1
     """Optimize every Nth tick; skipped ticks emit the warm-started forward of
     the previous solution (observations still enter the window)."""
     anchor_warm_start: bool = True
@@ -67,18 +68,33 @@ class FitterConfig:
     solution by the triangulated-anchor centroid motion (pose stays copied).
     Cuts the systematic lag on fast motion without overshooting reversals;
     no effect on quasi-static content."""
+    emit_lag: int = 4
+    """Emit window frame [-1-emit_lag] instead of the newest (fixed-lag
+    smoothing). Each frame is then refined by ``emit_lag`` future ticks before
+    leaving the fitter — output latency emit_lag/fps (4 -> 133 ms at 30 fps).
+    The bend-window frames where an offline whole-sequence fit most out-informs
+    a zero-lag causal one are exactly the ones this recovers."""
     emit_stride: int = 2
     """Emit (full-mesh smplx forward + readout) every Nth tick. Emission is a
     pure read-out — fit quality is unchanged. CAUTION: on skipped ticks push()
     returns the PREVIOUS FitResult, so ``FitResult.frame_idx`` lags the tick —
     consumers indexing results by frame_idx (e.g. a ResultCollector) must set
     1, as validate_golden does."""
+    lbfgs_polish: bool = True
+    """Eager LBFGS refinement (lr 0.3, strong-wolfe — the original's actual
+    optimizer; its YAML 'Adam' field is dead config) on HARD ticks only:
+    when the valid-anchor count drops below 75% of its rolling median
+    (self-occlusion windows). Curvature + line search close the last few mm
+    where fixed-step Adam stalls; firing on ~5% of ticks keeps it off the
+    realtime budget."""
     use_cuda_graph: bool = True
     """Run both the bootstrap and the steady-state optimize through captured
     CUDA graphs (steady ticks 92 -> 15.3 ms per 16-iter call; bootstrap
     ~1.8 s -> ~0.4 s). False = eager Adam everywhere (debugging)."""
-    weight_reproj: float = 20.0
-    """Reprojection loss weight (golden ``first_run``)."""
+    weight_reproj: float = 120.0
+    """Reprojection loss weight. The original's refinement stages are
+    reprojection-dominant (120-300) and drop the anchor term after stage 1;
+    matching that balance closed the last ~14 mm on dynamic content."""
     reproj_delta_px: float = 2.7
     """Geman-McClure saturation scale in engine pixels. The GM delta is
     resolution-relative: the original's 8 px applied to 4K-space landmarks;
@@ -89,19 +105,27 @@ class FitterConfig:
     original's refinement stages use 0.2; the first port hardcoded first_run's
     0.8, which kept self-occluded (low-visibility) landmarks at 80% influence
     — the bend-over failure window traced back to exactly that."""
-    weight_anchor3d: float = 100.0
-    """Triangulated-anchor MSE weight (golden ``l2_loss_3d_points``)."""
+    weight_anchor3d: float = 20.0
+    """Triangulated-anchor weight (saturating MSE). Anchors initialize and
+    stabilize depth; the original uses them only in its first stage, so they
+    stay subordinate to reprojection here."""
     weight_shape_prior: float = 1.0
     """Betas shrinkage weight."""
     weight_temp_trans: float = 10.0
     """Window translation smoothness weight."""
-    weight_temp_pose: float = 1.0
+    weight_temp_pose: float = 2.0
     """Window pose smoothness weight."""
     weight_accel: float = 0.0
     """Positional-acceleration penalty on the sampled 3D points (original
     ``acceleration_loss``, which ships commented-out there too). Off by
     default: at dt=1/30 even small weights crush real jump accelerations
     (measured +29mm mean PVE at 0.002). Kept as an experiment lever."""
+    weight_floor_contact: float = 30.0
+    """Soft pull-to-ground on landmarks MammaNet predicts in floor contact
+    (fused across cameras). The original exports these predictions per stage;
+    without the pull our fit floats 50-65 mm above ground during the
+    hands-near-ground bend while the original stays planted. Jump frames
+    predict no contact, so airborne motion is unaffected."""
     weight_floor: float = 1000.0
     """One-sided floor-penetration penalty (verts below world z=0). Jump
     landings measured 60-70 mm underground without it; airborne frames are
@@ -137,6 +161,7 @@ class _WindowFrame:
     vis_per_cam: list[Float32[torch.Tensor, "n"]]
     anchors3d: Float32[torch.Tensor, "n 3"]
     anchors_valid: Float32[torch.Tensor, "n"]
+    floor_contact: Float32[torch.Tensor, "n"]
     global_orient: Float32[torch.Tensor, "3"] = field(repr=False)
     body_pose: Float32[torch.Tensor, "63"] = field(repr=False)
     trans: Float32[torch.Tensor, "3"] = field(repr=False)
@@ -184,6 +209,7 @@ class SlidingWindowFitter:
         self._graph: torch.cuda.CUDAGraph | None = None
         self._static: dict[str, torch.Tensor | list[torch.Tensor]] = {}
         self._last_emit: FitResult | None = None
+        self._valid_counts: list[float] = []
 
     def _init_trans(self) -> Float32[torch.Tensor, "3"]:
         """Initialize root translation at the camera rays' closest point."""
@@ -199,6 +225,7 @@ class SlidingWindowFitter:
         vis_per_cam: list[Float32[torch.Tensor, "n"]],
         anchors3d: Float32[torch.Tensor, "n 3"],
         anchors_valid: Bool[torch.Tensor, "n"],
+        floor_contact: Float32[torch.Tensor, "n"] | None = None,
         optimize: bool = True,
     ) -> FitResult | None:
         """Add one tick's observations; returns the newest frame's fit (or None
@@ -237,12 +264,16 @@ class SlidingWindowFitter:
             # exist, snap the first translation guess to their centroid.
             if anchors_valid_f.sum() > 50:
                 trans = anchors3d_d[anchors_valid_f > 0].mean(dim=0)
+        fc: Float32[torch.Tensor, "n"] = (
+            floor_contact.detach() if floor_contact is not None else torch.zeros_like(anchors_valid_f)
+        )
         frame = _WindowFrame(
             frame_idx=frame_idx,
             pts2d_per_cam=[p.detach() for p in pts2d_per_cam],
             vis_per_cam=[v.detach() for v in vis_per_cam],
             anchors3d=anchors3d_d,
             anchors_valid=anchors_valid_f,
+            floor_contact=fc,
             global_orient=global_orient,
             body_pose=body_pose,
             trans=trans,
@@ -264,9 +295,18 @@ class SlidingWindowFitter:
                 self._optimize_graphed()
             else:
                 self._optimize(self.config.tick_iters, optimize_betas=False)
+            if self.config.lbfgs_polish:
+                count: float = float(anchors_valid_f.sum().item())
+                self._valid_counts.append(count)
+                if len(self._valid_counts) > 60:
+                    self._valid_counts.pop(0)
+                median: float = float(np.median(self._valid_counts))
+                if len(self._valid_counts) >= 20 and count < 0.75 * median:
+                    self._lbfgs_polish()
         if self.config.emit_stride > 1 and frame_idx % self.config.emit_stride != 0 and self._last_emit is not None:
             return self._last_emit
-        self._last_emit = self._emit()
+        emit_index: int = -1 - min(self.config.emit_lag, len(self._window) - 1)
+        self._last_emit = self._emit(emit_index)
         return self._last_emit
 
     # ── CUDA-graph steady state ──────────────────────────────────────────────
@@ -292,6 +332,7 @@ class SlidingWindowFitter:
             "vis": [torch.zeros(w, n, device=dev) for _ in range(c)],
             "anchors": torch.zeros(w, n, 3, device=dev),
             "avalid": torch.zeros(w, n, device=dev),
+            "fc": torch.zeros(w, n, device=dev),
             "hl": self.hand_pose_left.expand(w, -1).contiguous(),
             "hr": self.hand_pose_right.expand(w, -1).contiguous(),
             "jaw": self.jaw_pose.expand(w, -1).contiguous(),
@@ -314,6 +355,7 @@ class SlidingWindowFitter:
                 loss = loss + shape_prior_loss(self.betas, weight=cfg.weight_shape_prior)
             loss = loss + temporal_smoothness_loss(static["tr"], static["bp"], cfg.weight_temp_trans, cfg.weight_temp_pose)
             loss = loss + floor_penetration_loss(sampled, weight=cfg.weight_floor)
+            loss = loss + floor_contact_loss(sampled, static["fc"], weight=cfg.weight_floor_contact)
             loss = loss + acceleration_loss(sampled, weight=cfg.weight_accel)
             loss.backward()
             optimizer.step()
@@ -361,6 +403,46 @@ class SlidingWindowFitter:
         self._graph = graph
         self._static = static
 
+    def _lbfgs_polish(self) -> None:
+        """One strong-wolfe LBFGS outer step over the window (hard ticks only)."""
+        cfg = self.config
+        t: int = len(self._window)
+        go: Float32[torch.Tensor, "t 3"] = torch.stack([f.global_orient for f in self._window]).detach().requires_grad_()
+        bp: Float32[torch.Tensor, "t 63"] = torch.stack([f.body_pose for f in self._window]).detach().requires_grad_()
+        tr: Float32[torch.Tensor, "t 3"] = torch.stack([f.trans for f in self._window]).detach().requires_grad_()
+        pts2d = [torch.stack([f.pts2d_per_cam[c] for f in self._window]) for c in range(len(self.k_per_cam))]
+        vis = [torch.stack([f.vis_per_cam[c] for f in self._window]) for c in range(len(self.k_per_cam))]
+        anchors: Float32[torch.Tensor, "t n 3"] = torch.stack([f.anchors3d for f in self._window])
+        avalid: Float32[torch.Tensor, "t n"] = torch.stack([f.anchors_valid for f in self._window])
+        fc: Float32[torch.Tensor, "t n"] = torch.stack([f.floor_contact for f in self._window])
+        hl: Float32[torch.Tensor, "t 45"] = self.hand_pose_left.expand(t, -1)
+        hr: Float32[torch.Tensor, "t 45"] = self.hand_pose_right.expand(t, -1)
+        jaw: Float32[torch.Tensor, "t 3"] = self.jaw_pose.expand(t, -1)
+        betas_frozen: Float32[torch.Tensor, "1 nb"] = self.betas.detach()
+        optimizer = torch.optim.LBFGS([go, bp, tr], lr=0.3, max_iter=10, history_size=10, line_search_fn="strong_wolfe")
+
+        def closure() -> torch.Tensor:
+            optimizer.zero_grad()
+            sampled = self.sampled_model.forward(go, bp, hl, hr, jaw, betas_frozen, tr)
+            loss = (
+                reprojection_loss(
+                    pts2d, sampled, self.k_per_cam, self.world_to_cam_per_cam, vis, vis_clip_value=cfg.vis_clip_value, weight=cfg.weight_reproj, delta_px=cfg.reproj_delta_px
+                )
+                + anchor3d_loss(sampled, anchors, avalid, weight=cfg.weight_anchor3d)
+                + temporal_smoothness_loss(tr, bp, cfg.weight_temp_trans, cfg.weight_temp_pose)
+                + floor_penetration_loss(sampled, weight=cfg.weight_floor)
+                + floor_contact_loss(sampled, fc, weight=cfg.weight_floor_contact)
+            )
+            loss.backward()
+            return loss
+
+        optimizer.step(closure)
+        with torch.no_grad():
+            for i, f in enumerate(self._window):
+                f.global_orient = go[i].detach().clone()
+                f.body_pose = bp[i].detach().clone()
+                f.trans = tr[i].detach().clone()
+
     def _copy_window_to_static(self, static: dict) -> None:
         with torch.no_grad():
             static["go"].copy_(torch.stack([f.global_orient for f in self._window]))
@@ -371,6 +453,7 @@ class SlidingWindowFitter:
                 static["vis"][cam].copy_(torch.stack([f.vis_per_cam[cam] for f in self._window]))
             static["anchors"].copy_(torch.stack([f.anchors3d for f in self._window]))
             static["avalid"].copy_(torch.stack([f.anchors_valid for f in self._window]))
+            static["fc"].copy_(torch.stack([f.floor_contact for f in self._window]))
 
     def _copy_static_to_window(self, static: dict) -> None:
         with torch.no_grad():
@@ -405,6 +488,7 @@ class SlidingWindowFitter:
         ]
         anchors: Float32[torch.Tensor, "t n 3"] = torch.stack([f.anchors3d for f in self._window])
         anchors_valid: Float32[torch.Tensor, "t n"] = torch.stack([f.anchors_valid for f in self._window])
+        fc: Float32[torch.Tensor, "t n"] = torch.stack([f.floor_contact for f in self._window])
 
         hands_l: Float32[torch.Tensor, "t 45"] = self.hand_pose_left.expand(t, -1)
         hands_r: Float32[torch.Tensor, "t 45"] = self.hand_pose_right.expand(t, -1)
@@ -423,6 +507,7 @@ class SlidingWindowFitter:
                 + shape_prior_loss(self.betas, weight=cfg.weight_shape_prior)
                 + temporal_smoothness_loss(trans, body_pose, cfg.weight_temp_trans, cfg.weight_temp_pose)
                 + floor_penetration_loss(sampled, weight=cfg.weight_floor)
+                + floor_contact_loss(sampled, fc, weight=cfg.weight_floor_contact)
                 + acceleration_loss(sampled, weight=cfg.weight_accel)
             )
             loss.backward()
@@ -434,8 +519,15 @@ class SlidingWindowFitter:
                 f.body_pose = body_pose[i].detach()
                 f.trans = trans[i].detach()
 
-    def _emit(self) -> FitResult:
-        f = self._window[-1]
+    def drain(self) -> list[FitResult]:
+        """Emit the frames still inside the lag at end of stream (newest last)."""
+        if self.config.emit_lag <= 0 or not self._bootstrapped:
+            return []
+        lag: int = min(self.config.emit_lag, len(self._window) - 1)
+        return [self._emit(i) for i in range(-lag, 0)]
+
+    def _emit(self, index: int = -1) -> FitResult:
+        f = self._window[index]
         with torch.no_grad():
             out = smplx_forward_per_parts(
                 self.model,

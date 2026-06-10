@@ -252,7 +252,7 @@ def build_streaming_pipeline(
     trt_engine: Path | None = None,
     collector: ResultCollector | None = None,
     use_mp_decode: bool = True,
-    hires_crops: bool = False,
+    hires_crops: bool = True,
 ) -> StreamingPipeline:
     """Assemble the standard decode->track->landmarks->fit->log pipeline.
 

@@ -70,6 +70,10 @@ def main(config: ValidateConfig) -> int:
     start_frame: int = GOLDEN_FRAME_START - config.fitter.window_size
     n_frames: int = GOLDEN_FRAME_END - start_frame
     stats = pipeline.run(max_frames=n_frames, start_frame=start_frame)
+    if pipeline.fitting is not None:
+        # Fixed-lag emission holds the last emit_lag frames; flush them.
+        for tail in pipeline.fitting.drain():
+            collector.collect(-1, None, None, tail)
     print(f"pipeline: {stats.ticks} ticks in {stats.elapsed_s:.1f}s ({stats.ticks_per_s:.1f} ticks/s)")
 
     # Collect per-frame outputs for the golden slice.
