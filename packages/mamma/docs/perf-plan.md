@@ -87,3 +87,26 @@ enqueueV2 / kFP16 (removed in TRT 11), reusing engines across GPUs (name
    memory ops, try torch.compile on TAM image encoder, then 4 CUDA streams.
 4. Re-profile; only then decide whether TRT engines (TAM/MammaNet) are still
    needed to reach 33 ms/tick.
+
+
+## Campaign progress (2026-06-09, round 1)
+
+| Wall (363-frame clip) | Change |
+|---|---|
+| 132.6 s | M6 baseline (efficienttam-ti + batched encode + decode-ahead + fit_stride) |
+| 65.9 s | (carried) |
+| 46.4 s | CUDA-graphed fitter: sampled 512-vert SMPL-X (exact, 5e-7) + capture-legal rigid chain; 92 -> 15.3 ms per 16-iter optimize |
+| **43.7 s** | async video logging worker (13.4 -> 0.7 ms/tick); single autocast ctx per track tick |
+
+Golden gate after each change: PASS (improved to 21.6 mm MPJPE / 18.7 mm PVE — persistent Adam momentum).
+
+Two upstream smplx bugs found (worth an issue/PR): `batch_rigid_transform` indexes
+`transform_chain[parents[i]]` with a 0-dim GPU tensor (54 hidden host syncs per forward,
+serializes any optimizer built on smplx and blocks CUDA-graph capture); list
+fancy-indexing in the same function does an H2D copy under capture.
+
+**Remaining wall ≈ 43.7 s: track 27.8 s (76 ms/tick avg; ~40 steady + redetect/bleed),
+landmarks 6.6 s, fit 6.0 s, misc ~3 s.** Next: tracker deep-dive (memory-bank ops +
+per-camera decoder python; candidates: CUDA-graph/compile the TAM encoder+decoder,
+TRT engine per perf-plan step 2), then MammaNet fp16 TRT (step 4). Target 12.1 s needs
+track to ~15 ms/tick and landmarks ~6 ms/tick.
