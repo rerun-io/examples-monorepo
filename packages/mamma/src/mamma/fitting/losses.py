@@ -69,6 +69,10 @@ def anchor3d_loss(
 ) -> Float32[torch.Tensor, ""]:
     """MSE to triangulated anchors over valid points (original ``l2_loss_3d_points``)."""
     diff: Float32[torch.Tensor, "t n"] = ((pts3d_pred - pts3d_anchor) ** 2).sum(-1)
+    # eigh on a degenerate-but-valid system (>=2 near-collinear cameras) can
+    # emit NaN anchors; NaN * 0-mask is still NaN, so scrub before masking
+    # (same guard as reprojection_loss).
+    diff = torch.nan_to_num(diff, nan=0.0, posinf=0.0, neginf=0.0)
     denom: Float32[torch.Tensor, ""] = valid.sum().clamp(min=1.0)
     return weight * (diff * valid).sum() / denom
 

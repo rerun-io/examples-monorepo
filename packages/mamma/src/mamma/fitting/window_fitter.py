@@ -57,8 +57,10 @@ class FitterConfig:
     the previous solution (observations still enter the window)."""
     emit_stride: int = 2
     """Emit (full-mesh smplx forward + readout) every Nth tick. Emission is a
-    pure read-out — fit quality is unchanged. validate_golden sets 1 because
-    its collector needs every golden frame."""
+    pure read-out — fit quality is unchanged. CAUTION: on skipped ticks push()
+    returns the PREVIOUS FitResult, so ``FitResult.frame_idx`` lags the tick —
+    consumers indexing results by frame_idx (e.g. a ResultCollector) must set
+    1, as validate_golden does."""
     use_cuda_graph: bool = True
     """Run both the bootstrap and the steady-state optimize through captured
     CUDA graphs (steady ticks 92 -> 15.3 ms per 16-iter call; bootstrap

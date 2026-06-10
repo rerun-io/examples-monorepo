@@ -72,9 +72,12 @@ def main(config: BenchmarkConfig) -> int:
     main_recording = rr.get_global_data_recording()
     rr.set_global_data_recording(rr.RecordingStream(application_id="mamma-benchmark-warmup"))
     warmup: StreamingPipeline = build_pipeline(config, sequence)
-    warmup.run(max_frames=config.warmup_frames)
-    if main_recording is not None:
-        rr.set_global_data_recording(main_recording)
+    try:
+        warmup.run(max_frames=config.warmup_frames)
+    finally:
+        warmup.close()  # terminate the warmup decode workers (NVDEC + CUDA ctx each)
+        if main_recording is not None:
+            rr.set_global_data_recording(main_recording)
     print(f"warmup done ({config.warmup_frames} frames)")
     # Release the warmup pipeline's models + NVDEC contexts before building the
     # timed one — two resident copies exhaust CUDA memory (scale_cuda OOM).
@@ -82,7 +85,6 @@ def main(config: BenchmarkConfig) -> int:
 
     import torch
 
-    warmup.close()  # terminate the warmup decode workers (NVDEC + CUDA ctx each)
     del warmup
     gc.collect()
     torch.cuda.empty_cache()

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import torch
 from jaxtyping import Float32, Float64
 from numpy import ndarray
@@ -98,8 +99,6 @@ class LandmarkEstimator:
 
         frames_batch: Float32[torch.Tensor, "n 3 h w"] = torch.stack(crop_frames, dim=0)
         masks_batch: Float32[torch.Tensor, "n 1 h w"] = torch.stack(crop_masks, dim=0)
-        import numpy as np
-
         centers: Float64[ndarray, "n 2"] = np.stack(centers_list, axis=0)
         sizes: Float64[ndarray, "n 2"] = np.stack(sizes_list, axis=0)
 
