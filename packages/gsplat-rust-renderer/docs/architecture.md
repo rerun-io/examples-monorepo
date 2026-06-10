@@ -7,7 +7,7 @@ Detailed internals of the gsplat-rust-renderer for developers who want to unders
 1. **`gsplat_core` is the single source of truth** — all algorithm code, GPU types, pipeline definitions, and math live in the Rerun-free `gsplat_core/` module
 2. **GPU-only rendering, no CPU fallback** — follows the [Brush](https://github.com/ArthurBrussee/brush) approach
 3. **Two rendering paths, shared pipeline** — the Rerun viewer and the standalone CLI both use the same WGSL shaders, bind group layouts, compute pipelines, and GPU buffer types
-4. **Clean dependency boundary** — `gsplat_core/` depends only on `glam`, `rayon`, `wgpu`, `bytemuck`; the viewer adds `re_*` crates behind a feature flag
+4. **Clean dependency boundary** — `gsplat_core/` depends only on `glam`, `wgpu`, `bytemuck`; the viewer adds `re_*` crates behind a feature flag
 
 ## High-Level Architecture
 
@@ -16,16 +16,15 @@ Detailed internals of the gsplat-rust-renderer for developers who want to unders
 │                         gsplat_core/ (Rerun-free)                          │
 │                                                                             │
 │  types.rs          Data structures: RenderGaussianCloud, CameraApproximation│
-│  constants.rs      SH_C0, MAX_SPLATS_RENDERED, SIGMA_COVERAGE, etc.        │
-│  projection.rs     3D→2D Gaussian projection (camera Jacobian)             │
+│  constants.rs      SH_C0, SIGMA_COVERAGE, BRUSH_COVARIANCE_BLUR_PX, etc.   │
+│  projection.rs     Quaternion helpers                                      │
 │  sh.rs             Spherical harmonics evaluation (degrees 0-4)            │
 │  covariance.rs     2D covariance from 3D Gaussian + view transform         │
-│  culling.rs        CPU frustum culling + depth sorting (pre-GPU pass)      │
 │  camera.rs         Camera constructors (look-at, NeRF transform, fallback) │
 │  gpu_types.rs      GPU buffer structs, bind group layouts, compute         │
 │                    pipelines, helpers — SINGLE SOURCE OF TRUTH              │
 │  gpu_context.rs    Headless wgpu device/queue initialization               │
-│  gpu_renderer.rs   Standalone 7-stage GPU compute pipeline + readback      │
+│  gpu_renderer.rs   Standalone GPU-only compute pipeline + readback         │
 │                                                                             │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  ply_loader.rs     Rust PLY parser (mirrors Python Gaussians3D.from_ply)   │
@@ -48,18 +47,17 @@ Detailed internals of the gsplat-rust-renderer for developers who want to unders
 
 ```
 render_cli.rs ──► gsplat_core/gpu_renderer ──► gsplat_core/gpu_types ◄── gaussian_renderer.rs
-                  gsplat_core/gpu_context       gsplat_core/culling
-                  gsplat_core/types             gsplat_core/constants
-                  ply_loader                    gsplat_core/sh
-                  nerf_camera                   gsplat_core/projection
-                                                gsplat_core/covariance
+                  gsplat_core/gpu_context       gsplat_core/constants
+                  gsplat_core/types             gsplat_core/sh
+                  ply_loader                    gsplat_core/projection
+                  nerf_camera                   gsplat_core/covariance
                                                 gsplat_core/camera
 ```
 
 Both rendering paths share:
 - **5 WGSL shaders** (`shader/*.wgsl`) — unchanged, no Rerun-specific code
-- **12 bind group layouts** (`GpuBindGroupLayouts` in `gpu_types.rs`)
-- **13 compute pipelines** (`GpuComputePipelines` in `gpu_types.rs`)
+- **13 bind group layouts** (`GpuBindGroupLayouts` in `gpu_types.rs`)
+- **14 compute pipelines** (`GpuComputePipelines` in `gpu_types.rs`)
 - **7 GPU buffer structs** (`ProjectUniformBuffer`, `ScanUniformBuffer`, etc.)
 - **All helper functions** (buffer creation, data packing, dispatch sizing)
 
@@ -75,9 +73,8 @@ PLY file + NeRF JSON ──► ply_loader + nerf_camera
                               │
                               ▼
                     gpu_render() in gpu_renderer.rs
-                      ├─ CPU cull + sort (culling.rs)
                       ├─ Upload to GPU buffers
-                      ├─ 7-stage compute pipeline
+                      ├─ GPU-only compute pipeline (cull + sort on GPU)
                       ├─ Readback raster texture
                       └─► RenderOutput → PNG
 ```
@@ -92,50 +89,58 @@ Python rr.log() ──gRPC──► Rerun Data Store
                               ▼
                     GaussianSplatVisualizer::execute()
                       ├─ Query archetype components
-                      ├─ Build RenderGaussianCloud
+                      ├─ Build or reuse RenderGaussianCloud (cached per entity)
                       ├─ Extract camera from view state
-                      ├─ CPU cull + sort (gsplat_core/culling.rs)
-                      └─► GaussianDrawData::add_batch()
+                      └─► GaussianDrawData::add_batch()  (full cloud — GPU culls + sorts)
                               │
                               ▼
                     gaussian_renderer.rs prepare_compute_batch()
-                      ├─ Upload to GPU buffers
-                      ├─ 7-stage compute pipeline (same shaders!)
+                      ├─ Reuse/grow cached GPU buffers, write uniforms
+                      ├─ GPU-only compute pipeline (same shaders!)
                       ├─ Composite to Rerun viewport
                       └─► Rerun draw phase
 ```
 
 Built with default features (all `re_*` crates). Uses `re_renderer::RenderContext` for wgpu access.
 
-## GPU Compute Pipeline (7 Stages)
+## GPU Compute Pipeline (9 Stages)
 
-Both paths execute the same 7-stage pipeline. The shaders are the single source of truth — defined once in `shader/`, loaded via `include_str!()`.
+Both paths execute the same GPU-only pipeline (the standalone path skips the final composite). There is no CPU pre-pass — the GPU is handed the full cloud each frame and culls and depth-sorts it itself. The shaders are the single source of truth — defined once in `shader/`, loaded via `include_str!()`.
 
 ```
-CPU Pre-pass: frustum cull + depth sort (gsplat_core/culling.rs)
+Upload full splat cloud + uniforms to GPU (no CPU cull/sort)
           │
-          ▼ Upload sorted indices + splat data to GPU
-          │
-Stage 1:  PROJECT              gaussian_project.wgsl :: project_main
+          ▼
+Stage 1:  CULL + COMPACT       gaussian_project.wgsl :: project_forward_main
+          │  Full-cloud GPU cull (near plane, opacity, finite
+          │  projection, on-screen bbox)
+          │  Survivors append (global_gid, depth bits) via
+          │  atomicAdd(num_visible) — no visibility flags, no
+          │  separate compaction pass
+          ▼
+Stage 2:  DEPTH ARGSORT        gaussian_dynamic_sort.wgsl :: sort_*_main
+          │  Gid canonicalization sort first (atomicAdd compaction is
+          │  racy; ties must resolve deterministically), then radix
+          │  argsort ascending by f32 depth bits → front-to-back order
+          ▼
+Stage 3:  PROJECT              gaussian_project.wgsl :: project_visible_main
           │  Build 3D covariance (R·diag(s²)·Rᵀ)
           │  Project to 2D via camera Jacobian
           │  Evaluate SH for view-dependent color
           │  Compute tile bounding box + hit count
-          │  Write visibility flags
           ▼
-Stage 2:  COMPACT              gaussian_project.wgsl :: scan_blocks_main
+Stage 4:  SCAN                 gaussian_project.wgsl :: scan_blocks_main
           │                                          :: scan_block_sums_main
-          │  Parallel prefix sum (Blelloch scan)
-          │  Remove invisible splats
-          │  Pack visible into dense array
+          │  3-level prefix sum over per-splat tile hit counts
+          │  (supports clouds beyond 262,144 splats)
           ▼
-Stage 3:  MAP INTERSECTIONS    gaussian_map_intersections.wgsl :: map_main
+Stage 5:  MAP INTERSECTIONS    gaussian_map_intersections.wgsl :: map_main
           │                                                    :: clamp_count_main
-          │  Scatter (tile_id, splat_id) pairs
+          │  Scatter (tile_id, compact_gid) pairs
           │  One entry per overlapped tile per splat
           │  Clamp total to intersection capacity
           ▼
-Stage 4:  RADIX SORT           gaussian_dynamic_sort.wgsl :: sort_count_main
+Stage 6:  TILE SORT            gaussian_dynamic_sort.wgsl :: sort_count_main
           │                                               :: sort_reduce_main
           │                                               :: sort_scan_main
           │                                               :: sort_scan_compose_main
@@ -143,19 +148,19 @@ Stage 4:  RADIX SORT           gaussian_dynamic_sort.wgsl :: sort_count_main
           │                                               :: sort_scatter_main
           │  4-bit radix sort by tile_id
           │  Groups all splats for the same tile together
-          │  Multiple passes: ceil(log2(tile_count)) / 4
+          │  Pass count: ceil(bits(tile_count) / 4)
           ▼
-Stage 5:  TILE OFFSETS         gaussian_tile_offsets.wgsl :: main
+Stage 7:  TILE OFFSETS         gaussian_tile_offsets.wgsl :: main
           │  Find [start, end) range per tile
           │  in the sorted intersection list
           ▼
-Stage 6:  RASTERIZE            gaussian_raster_tiles.wgsl :: main
+Stage 8:  RASTERIZE            gaussian_raster_tiles.wgsl :: main
           │  One workgroup (256 threads) per 16×16 tile
           │  Load splats in batches into shared memory
           │  Per-pixel Gaussian evaluation + alpha blend
           │  Early termination when transmittance < 1e-4
           ▼
-Stage 7:  COMPOSITE (viewer only)  gaussian_composite.wgsl
+Stage 9:  COMPOSITE (viewer only)  gaussian_composite.wgsl
           │  Fullscreen triangle blit to Rerun viewport
           │  (Standalone path skips this — reads back texture directly)
           ▼
@@ -182,8 +187,8 @@ This is the **single source of truth** for all GPU pipeline definitions. Both th
 
 | Resource | Function |
 |----------|----------|
-| `GpuBindGroupLayouts` | 12 bind group layouts for all pipeline stages |
-| `GpuComputePipelines` | 13 compute pipelines from 5 WGSL shaders |
+| `GpuBindGroupLayouts` | 13 bind group layouts for all pipeline stages |
+| `GpuComputePipelines` | 14 compute pipelines from 5 WGSL shaders |
 | `create_compute_bind_group_layouts()` | Creates all layouts from a `wgpu::Device` |
 | `create_compute_pipelines()` | Creates all pipelines given layouts |
 | `create_raster_texture()` | Shared texture creation with `extra_usage` param |
@@ -225,9 +230,7 @@ All metrics apply 8-bit roundtrip quantization to match Brush's eval convention.
 
 | Constant | Value | Purpose |
 |---|---|---|
-| `MAX_SPLATS_RENDERED` | 200,000 | Hard cap per frame |
 | `TILE_WIDTH` | 16 px | Tile size for compute raster |
-| `PARALLEL_SPLAT_THRESHOLD` | 16,384 | Switch to rayon parallel |
 | `SIGMA_COVERAGE` | 3.0 | Standard deviations for bbox |
 | `BRUSH_COVARIANCE_BLUR_PX` | 0.3 | Anti-aliasing blur (matches Brush) |
 | `SH_C0` | 0.28209 | Zeroth SH coefficient |
@@ -252,10 +255,9 @@ packages/gsplat-rust-renderer/
 │       ├── mod.rs                 # Public API + re-exports
 │       ├── types.rs               # Data structures + RenderOutput
 │       ├── constants.rs           # Shared constants
-│       ├── projection.rs          # 3D→2D Gaussian projection
+│       ├── projection.rs          # Quaternion helpers
 │       ├── sh.rs                  # Spherical harmonics evaluation
 │       ├── covariance.rs          # 2D covariance math
-│       ├── culling.rs             # CPU frustum culling + depth sort
 │       ├── camera.rs              # Camera constructors
 │       ├── gpu_types.rs           # ★ GPU single source of truth ★
 │       ├── gpu_context.rs         # Headless wgpu init
@@ -272,7 +274,8 @@ packages/gsplat-rust-renderer/
 │   ├── gaussians3d.py             # PLY loader + rr.AsComponents
 │   └── metrics.py                 # PSNR + SSIM + LPIPS
 ├── tools/
-│   └── log_gaussian_ply.py        # CLI: load PLY → log to viewer
+│   ├── log_gaussian_ply.py        # CLI: load PLY → log to viewer
+│   └── calibration_scene.py       # CLI: generate/check cross-renderer calibration scene
 ├── tests/                         # Python tests
 └── docs/
     ├── architecture.md            # This file

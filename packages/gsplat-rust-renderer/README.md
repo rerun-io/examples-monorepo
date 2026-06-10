@@ -103,20 +103,20 @@ Dev tasks (use `-e gsplat-rust-renderer-dev`):
 
 ```
 gsplat-rust-renderer/
-├── Cargo.toml                          # Rust crate: rerun 0.31.1 + re_* crates
+├── Cargo.toml                          # Rust crate: rerun 0.33.0 + re_* crates
 ├── Cargo.lock                          # Pinned Rust deps (committed for binary)
 ├── pyproject.toml                      # Python package metadata (hatchling)
 ├── src/
 │   ├── main.rs                         # Viewer binary: gRPC listener + visualizer registration
-│   ├── gaussian_visualizer.rs          # VisualizerSystem: query → cloud → cull → sort → submit
+│   ├── gaussian_visualizer.rs          # VisualizerSystem: query → build/reuse cloud → submit (GPU culls + sorts)
 │   └── gaussian_renderer.rs            # GPU renderer: compute pipelines + viewport composite
-├── shader/                             # WGSL compute shaders (7-stage pipeline)
-│   ├── gaussian_project.wgsl           # Stage 1: 3D→2D projection + SH evaluation
-│   ├── gaussian_map_intersections.wgsl # Stage 3: scatter (splat, tile) pairs
-│   ├── gaussian_dynamic_sort.wgsl      # Stage 4: radix sort by tile ID
-│   ├── gaussian_tile_offsets.wgsl      # Stage 5: find per-tile [start, end) ranges
-│   ├── gaussian_raster_tiles.wgsl      # Stage 6: per-pixel alpha blending per tile
-│   └── gaussian_composite.wgsl         # Stage 7: blit raster texture to viewport
+├── shader/                             # WGSL compute shaders (9-stage pipeline)
+│   ├── gaussian_project.wgsl           # Stages 1+3+4: GPU cull/compact, projection + SH, prefix scan
+│   ├── gaussian_dynamic_sort.wgsl      # Stages 2+6: radix sort (depth argsort, tile-id sort)
+│   ├── gaussian_map_intersections.wgsl # Stage 5: scatter (tile, splat) pairs
+│   ├── gaussian_tile_offsets.wgsl      # Stage 7: find per-tile [start, end) ranges
+│   ├── gaussian_raster_tiles.wgsl      # Stage 8: per-pixel alpha blending per tile
+│   └── gaussian_composite.wgsl         # Stage 9: blit raster texture to viewport (viewer only)
 ├── gsplat_rust_renderer/               # Python package
 │   ├── __init__.py                     # Beartype activation (dev env only)
 │   └── gaussians3d.py                  # Gaussians3D dataclass + PLY parser
@@ -131,7 +131,7 @@ gsplat-rust-renderer/
 
 ## Architecture
 
-Two-process design: a **Rust viewer** with a custom GPU pipeline and a **Python client** that parses PLY files and logs Rerun component batches over gRPC. The GPU renderer uses a 7-stage compute pipeline inspired by [Brush](https://github.com/ArthurBrussee/brush) — project, compact, map intersections, radix sort, tile offsets, tile raster, composite. No CUDA required (uses wgpu/Vulkan).
+Two-process design: a **Rust viewer** with a custom GPU pipeline and a **Python client** that parses PLY files and logs Rerun component batches over gRPC. The GPU renderer uses a 9-stage GPU-only compute pipeline inspired by [Brush](https://github.com/ArthurBrussee/brush) — project_forward cull + compact, depth argsort, project_visible, prefix scan, map intersections, tile radix sort, tile offsets, tile raster, composite. No CUDA required (uses wgpu/Vulkan).
 
 For detailed internals (per-frame pipeline, GPU stages, component contract, buffer management, constants), see **[docs/architecture.md](docs/architecture.md)**.
 

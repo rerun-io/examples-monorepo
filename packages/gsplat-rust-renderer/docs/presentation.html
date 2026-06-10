@@ -1,0 +1,1282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>gsplat-rust-renderer — Architecture Deep Dive</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg-slide: #11161f;
+    --panel: #161d29;
+    --panel2: #1b2435;
+    --border: #2a3550;
+    --text: #dbe4f0;
+    --muted: #8b98ad;
+    --accent: #58a6ff;          /* core / rust blue */
+    --py: #e3c567;              /* python yellow */
+    --rust: #f0883e;            /* rust orange */
+    --gpu: #bc8cff;             /* gpu purple */
+    --shader: #ff7eb6;          /* shader pink */
+    --ok: #3fb950;
+    --code-bg: #0b0f16;
+    --mono: "JetBrains Mono", "Fira Code", "SF Mono", Consolas, "Liberation Mono", monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif; }
+  #deck { position: relative; width: 100%; height: 100%; overflow: hidden; }
+  .slide {
+    position: absolute; inset: 0; display: none; flex-direction: column;
+    padding: 34px 56px 64px; overflow-y: auto;
+    background: radial-gradient(1200px 600px at 75% -10%, #16213a 0%, var(--bg-slide) 55%);
+  }
+  .slide.active { display: flex; animation: fadein .25s ease; }
+  @keyframes fadein { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+  h1 { font-size: 44px; font-weight: 800; letter-spacing: -0.5px; }
+  h2 { font-size: 30px; font-weight: 750; margin-bottom: 6px; letter-spacing: -0.3px; }
+  h2 .tag { font-size: 13px; font-weight: 600; vertical-align: middle; margin-left: 12px; }
+  h3 { font-size: 17px; font-weight: 700; margin-bottom: 6px; }
+  p, li { font-size: 15.5px; line-height: 1.55; color: var(--text); }
+  .sub { color: var(--muted); font-size: 15px; margin-bottom: 18px; }
+  .muted { color: var(--muted); }
+  ul { padding-left: 20px; } li { margin: 4px 0; }
+  b { color: #fff; }
+  code, .file { font-family: var(--mono); font-size: 0.92em; background: #1c2435; border: 1px solid var(--border);
+    border-radius: 4px; padding: 1px 5px; color: #9ecbff; white-space: nowrap; }
+  .file { color: var(--py); }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; overflow-x: auto; font-family: var(--mono); font-size: 13px; line-height: 1.5;
+    color: #c9d6e8; margin: 8px 0; }
+  pre code { background: none; border: none; padding: 0; color: inherit; white-space: pre; }
+  .c { color: #6b7a90; } .k { color: #c792ea; } .f { color: #ffd479; } .s { color: #9ccc65; }
+  .n { color: #f78c6c; } .t { color: #82aaff; }
+
+  .tag { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px;
+    font-weight: 700; letter-spacing: .4px; text-transform: uppercase; }
+  .tag.py    { background: #3a3422; color: var(--py); border: 1px solid #5a5030; }
+  .tag.rust  { background: #3a2a1a; color: var(--rust); border: 1px solid #5e4426; }
+  .tag.core  { background: #16314f; color: var(--accent); border: 1px solid #28507c; }
+  .tag.gpu   { background: #2e2347; color: var(--gpu); border: 1px solid #4b3a73; }
+  .tag.shader{ background: #43243a; color: var(--shader); border: 1px solid #6e3a5e; }
+
+  .cols { display: grid; gap: 18px; margin-top: 8px; }
+  .cols.c2 { grid-template-columns: 1fr 1fr; }
+  .cols.c3 { grid-template-columns: 1fr 1fr 1fr; }
+  .cols.c32 { grid-template-columns: 3fr 2fr; }
+  .cols.c23 { grid-template-columns: 2fr 3fr; }
+
+  .box { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .box h3 { display: flex; align-items: center; gap: 8px; }
+  .box.py    { border-left: 3px solid var(--py); }
+  .box.rust  { border-left: 3px solid var(--rust); }
+  .box.core  { border-left: 3px solid var(--accent); }
+  .box.gpu   { border-left: 3px solid var(--gpu); }
+  .box.shader{ border-left: 3px solid var(--shader); }
+
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; margin: 8px 0; }
+  th, td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--panel2); color: #fff; font-weight: 700; }
+  td code { font-size: 12px; }
+  tr:nth-child(even) td { background: rgba(255,255,255,0.018); }
+
+  /* pipeline stage cards */
+  .pipe { display: flex; flex-direction: column; gap: 0; margin-top: 10px; }
+  .stage { display: grid; grid-template-columns: 56px 280px 1fr; gap: 14px; align-items: center;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px 16px; }
+  .stage + .stage { margin-top: 26px; position: relative; }
+  .stage + .stage::before { content: "▼"; position: absolute; top: -23px; left: 26px; color: var(--gpu); font-size: 14px; }
+  .stage .num { width: 40px; height: 40px; border-radius: 50%; background: #2e2347; color: var(--gpu);
+    border: 1px solid #4b3a73; display: flex; align-items: center; justify-content: center;
+    font-weight: 800; font-size: 17px; font-family: var(--mono); }
+  .stage .num.cpu { background: #16314f; color: var(--accent); border-color: #28507c; }
+  .stage .what b { display: block; font-size: 15px; }
+  .stage .what code { font-size: 11.5px; }
+  .stage .desc { font-size: 13.5px; color: var(--muted); line-height: 1.45; }
+  .stage .desc b { color: var(--text); }
+
+  /* footer chrome */
+  #hud { position: fixed; bottom: 0; left: 0; right: 0; height: 44px; display: flex; align-items: center;
+    justify-content: space-between; padding: 0 20px; background: rgba(10,13,20,0.85);
+    border-top: 1px solid var(--border); backdrop-filter: blur(6px); z-index: 50; }
+  #hud .title { font-size: 12.5px; color: var(--muted); font-family: var(--mono); }
+  #hud .nav { display: flex; align-items: center; gap: 10px; }
+  #hud button { background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px 14px; cursor: pointer; font-size: 14px; }
+  #hud button:hover { background: #243049; }
+  #counter { font-family: var(--mono); font-size: 13px; color: var(--muted); min-width: 64px; text-align: center; }
+  #progress { position: fixed; top: 0; left: 0; height: 3px; background: linear-gradient(90deg, var(--accent), var(--gpu)); z-index: 60; transition: width .2s; }
+  .hint { color: var(--muted); font-size: 12px; }
+  kbd { font-family: var(--mono); background: var(--panel2); border: 1px solid var(--border);
+    border-bottom-width: 2px; border-radius: 4px; padding: 0 6px; font-size: 12px; }
+
+  /* TOC overlay */
+  #toc { position: fixed; inset: 0; background: rgba(8,11,17,0.96); z-index: 100; display: none;
+    padding: 48px 64px; overflow-y: auto; }
+  #toc.open { display: block; }
+  #toc h2 { margin-bottom: 18px; }
+  #toc ol { columns: 2; gap: 48px; padding-left: 28px; }
+  #toc li { font-size: 15px; margin: 5px 0; cursor: pointer; color: var(--muted); }
+  #toc li:hover { color: #fff; }
+
+  svg text { font-family: -apple-system, "Segoe UI", sans-serif; }
+  svg .mono { font-family: var(--mono); }
+
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 10px; }
+  .legend span { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); }
+  .dot { width: 11px; height: 11px; border-radius: 3px; display: inline-block; }
+
+  .formula { font-family: var(--mono); background: var(--code-bg); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 14px; font-size: 14.5px; color: #ffd479; margin: 8px 0;
+    text-align: center; line-height: 1.7; }
+  .formula .dim { color: var(--muted); font-size: 12.5px; }
+
+  .flow { display: flex; align-items: stretch; gap: 0; flex-wrap: wrap; margin: 10px 0; }
+  .flow .step { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 12px; font-size: 13px; display: flex; flex-direction: column; justify-content: center; }
+  .flow .step b { font-size: 13.5px; }
+  .flow .arr { display: flex; align-items: center; padding: 0 7px; color: var(--gpu); font-size: 15px; }
+
+  .footnote { margin-top: auto; padding-top: 14px; font-size: 12.5px; color: var(--muted); }
+  .footnote code { font-size: 11.5px; }
+</style>
+</head>
+<body>
+<div id="progress"></div>
+<div id="deck">
+
+<!-- ════════════════════════ 1. TITLE ════════════════════════ -->
+<section class="slide">
+  <div style="margin: auto; max-width: 1000px; text-align: center;">
+    <div style="margin-bottom: 18px;">
+      <span class="tag rust">Rust</span>
+      <span class="tag gpu">wgpu / Vulkan</span>
+      <span class="tag shader">WGSL</span>
+      <span class="tag py">Python</span>
+    </div>
+    <h1 style="font-size: 54px; background: linear-gradient(90deg, #58a6ff, #bc8cff, #ff7eb6); -webkit-background-clip: text; background-clip: text; color: transparent;">gsplat-rust-renderer</h1>
+    <p style="font-size: 21px; color: var(--muted); margin-top: 14px;">
+      A GPU-accelerated <b style="color:var(--text)">3D Gaussian Splatting</b> viewer built as a
+      <b style="color:var(--text)">custom Rerun visualizer</b> — a complete architecture walkthrough.
+    </p>
+    <div style="margin-top: 36px; display: inline-block; text-align: left;">
+      <pre style="font-size: 14px;"><code><span class="c"># Terminal 1 — build &amp; launch the custom viewer</span>
+pixi run --frozen -e gsplat-rust-renderer viewer
+
+<span class="c"># Terminal 2 — stream a PLY scene into it over gRPC</span>
+pixi run --frozen -e gsplat-rust-renderer log-ply</code></pre>
+    </div>
+    <p class="hint" style="margin-top: 40px;">Navigate with <kbd>←</kbd> <kbd>→</kbd> &nbsp;·&nbsp; <kbd>t</kbd> table of contents &nbsp;·&nbsp; <kbd>Home</kbd>/<kbd>End</kbd></p>
+  </div>
+</section>
+
+<!-- ════════════════════════ 2. WHAT IS GAUSSIAN SPLATTING ════════════════════════ -->
+<section class="slide">
+  <h2>Background: what is 3D Gaussian Splatting?</h2>
+  <p class="sub">Kerbl et al., SIGGRAPH 2023 — a scene representation made of millions of fuzzy, colored ellipsoids.</p>
+  <div class="cols c2">
+    <div class="box core">
+      <h3>The representation</h3>
+      <p>A trained scene is a cloud of <b>anisotropic 3D Gaussians</b>. Each splat carries:</p>
+      <ul>
+        <li><b>center</b> μ ∈ ℝ³ — world position</li>
+        <li><b>rotation</b> q (quaternion) + <b>scale</b> s ∈ ℝ³ — together they define the covariance <span class="formula" style="display:inline; padding: 1px 8px;">Σ = R·diag(s²)·Rᵀ</span></li>
+        <li><b>opacity</b> α ∈ [0, 1]</li>
+        <li><b>color</b> — spherical-harmonic (SH) coefficients up to degree 4, so color shifts with viewing direction (specular-ish effects)</li>
+      </ul>
+    </div>
+    <div class="box gpu">
+      <h3>Rendering = project → sort → blend</h3>
+      <ul>
+        <li>Project each 3D Gaussian to a <b>2D Gaussian on screen</b> (an ellipse with a 2×2 covariance) using a local linearization of the camera (the <b>Jacobian</b>)</li>
+        <li>Sort splats by depth — alpha blending is <b>order-dependent</b></li>
+        <li>For each pixel, accumulate <b>α-weighted color front-to-back</b> until the pixel is opaque</li>
+      </ul>
+      <p style="margin-top: 8px;">There is no triangle geometry and no ray tracing — it is closer to a massively parallel, depth-sorted particle renderer.</p>
+    </div>
+  </div>
+  <div class="box" style="margin-top: 18px;">
+    <h3>What this package does</h3>
+    <p>It implements that renderer <b>twice over a single shared core</b>: once embedded inside the Rerun viewer (interactive), and once as a headless CLI that renders PNGs for quality evaluation. The GPU pipeline is a tile-based <b>compute-shader</b> design (no CUDA — pure wgpu/Vulkan) modeled on
+    <a style="color:var(--accent)" href="https://github.com/ArthurBrussee/brush">Brush</a>, so its output is numerically comparable to a reference implementation.</p>
+  </div>
+</section>
+
+<!-- ════════════════════════ 3. PACKAGE AT A GLANCE ════════════════════════ -->
+<section class="slide">
+  <h2>The package at a glance</h2>
+  <p class="sub"><code>packages/gsplat-rust-renderer/</code> — one Rust crate (a library + two binaries), one small Python package, five WGSL shaders.</p>
+  <div class="cols c2">
+    <div>
+<pre style="font-size: 12.5px;"><code>Cargo.toml                  <span class="c"># lib + 2 binaries, "viewer" feature gate</span>
+src/
+├─ lib.rs                   <span class="c"># crate root: gates the Rerun modules</span>
+├─ main.rs                  <span class="c">★ viewer binary: gRPC + visualizer reg.</span>
+├─ gaussian_visualizer.rs   <span class="c">★ Rerun VisualizerSystem (query→cull→submit)</span>
+├─ gaussian_renderer.rs     <span class="c">★ Rerun Renderer (buffers + GPU dispatch)</span>
+├─ render_cli.rs            <span class="c"># gsplat-render binary (NO Rerun deps)</span>
+├─ ply_loader.rs            <span class="c"># Rust 3DGS PLY parser</span>
+├─ nerf_camera.rs           <span class="c"># NeRF transforms_*.json camera loader</span>
+└─ gsplat_core/             <span class="c">★★ Rerun-free algorithm core ★★</span>
+   ├─ types.rs constants.rs <span class="c"># RenderGaussianCloud, CameraApproximation</span>
+   ├─ projection.rs sh.rs   <span class="c"># quat utils, SH eval (deg 0–4)</span>
+   ├─ covariance.rs         <span class="c"># 3D→2D covariance (Jacobian) ref impl</span>
+   ├─ culling.rs camera.rs  <span class="c"># CPU cull+sort, camera constructors</span>
+   ├─ gpu_types.rs          <span class="c"># SINGLE SOURCE OF TRUTH: 12 layouts,</span>
+   │                        <span class="c">#   13 pipelines, buffer structs, helpers</span>
+   ├─ gpu_context.rs        <span class="c"># headless wgpu device/queue</span>
+   └─ gpu_renderer.rs       <span class="c"># standalone 7-stage pipeline + readback</span>
+shader/                     <span class="c"># 5 WGSL files (shared by both paths)</span>
+gsplat_rust_renderer/       <span class="c"># Python: Gaussians3D + metrics</span>
+tools/log_gaussian_ply.py   <span class="c"># Python CLI: PLY → rr.log over gRPC</span></code></pre>
+    </div>
+    <div>
+      <div class="box rust">
+        <h3><span class="tag rust">binary 1</span> gsplat-rust-renderer</h3>
+        <p>The <b>interactive viewer</b>. A lightly customized stock Rerun viewer: same UI, timeline, blueprint — plus a gRPC ingest server and one extra visualizer registered on the built-in 3D view. Built with the <code>viewer</code> feature (pulls in 14 <code>re_*</code> crates, pinned to <code>=0.31.1</code>).</p>
+      </div>
+      <div class="box core" style="margin-top: 14px;">
+        <h3><span class="tag core">binary 2</span> gsplat-render</h3>
+        <p>The <b>headless evaluator</b>. PLY + NeRF camera JSON in, PNG out. Built with <code>--no-default-features</code> — zero Rerun crates, raw <code>wgpu</code> only. Used to compute PSNR/SSIM/LPIPS against reference renders.</p>
+      </div>
+      <div class="box py" style="margin-top: 14px;">
+        <h3><span class="tag py">python</span> gsplat_rust_renderer</h3>
+        <p>Loads 3DGS PLY files into NumPy, packages them as Rerun <b>component batches</b>, and streams them to the viewer with <code>rr.log()</code> over gRPC. Also home to the eval metrics (PSNR / SSIM / LPIPS).</p>
+      </div>
+      <div class="box" style="margin-top: 14px;">
+        <h3>Design principles <span class="muted">(docs/architecture.md)</span></h3>
+        <ul style="font-size: 14px;">
+          <li><b>gsplat_core is the single source of truth</b> — all math, GPU types &amp; pipelines live in the Rerun-free module</li>
+          <li><b>GPU-only rendering</b>, no CPU fallback (the Brush approach)</li>
+          <li><b>Two render paths, one pipeline</b> — same WGSL, same layouts, same buffer structs</li>
+          <li><b>Clean dependency boundary</b> — core needs only <code>glam</code>, <code>rayon</code>, <code>wgpu</code>, <code>bytemuck</code></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════════ 4. BIG ARCHITECTURE DIAGRAM ════════════════════════ -->
+<section class="slide">
+  <h2>Architecture — the whole system on one page</h2>
+  <p class="sub">Two processes, two render paths, one shared Rerun-free core. Solid arrows = data flow each frame; the dashed band is code shared by both paths.</p>
+  <svg viewBox="0 0 1300 700" style="width: 100%; max-height: calc(100% - 110px);" font-size="13">
+    <defs>
+      <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#8b98ad"/>
+      </marker>
+      <marker id="arrB" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z" fill="#58a6ff"/>
+      </marker>
+    </defs>
+
+    <!-- ── Python process ── -->
+    <rect x="15" y="30" width="300" height="380" rx="12" fill="#1d1a10" stroke="#5a5030"/>
+    <text x="165" y="56" text-anchor="middle" fill="#e3c567" font-weight="700" font-size="15">PYTHON PROCESS</text>
+    <text x="165" y="74" text-anchor="middle" fill="#8b98ad" font-size="11">(any rerun SDK client)</text>
+
+    <rect x="35" y="90" width="260" height="58" rx="8" fill="#161d29" stroke="#2a3550"/>
+    <text x="165" y="113" text-anchor="middle" fill="#dbe4f0" font-weight="600">tools/log_gaussian_ply.py</text>
+    <text x="165" y="132" text-anchor="middle" fill="#8b98ad" font-size="11">tyro CLI · RerunTyroConfig · blueprint</text>
+
+    <rect x="35" y="168" width="260" height="74" rx="8" fill="#161d29" stroke="#2a3550"/>
+    <text x="165" y="190" text-anchor="middle" fill="#dbe4f0" font-weight="600">Gaussians3D.from_ply()</text>
+    <text x="165" y="208" text-anchor="middle" fill="#8b98ad" font-size="11">plyfile → NumPy · exp(scales)</text>
+    <text x="165" y="224" text-anchor="middle" fill="#8b98ad" font-size="11">sigmoid(opacity) · SH [N,C,3]</text>
+
+    <rect x="35" y="262" width="260" height="74" rx="8" fill="#161d29" stroke="#2a3550"/>
+    <text x="165" y="284" text-anchor="middle" fill="#dbe4f0" font-weight="600">rr.log(entity, gaussians)</text>
+    <text x="165" y="302" text-anchor="middle" fill="#8b98ad" font-size="11">implements rr.AsComponents →</text>
+    <text x="165" y="318" text-anchor="middle" fill="#8b98ad" font-size="11">6 component batches (the contract)</text>
+
+    <line x1="165" y1="148" x2="165" y2="166" stroke="#8b98ad" marker-end="url(#arr)"/>
+    <line x1="165" y1="242" x2="165" y2="260" stroke="#8b98ad" marker-end="url(#arr)"/>
+
+    <!-- gRPC arrow -->
+    <line x1="295" y1="299" x2="370" y2="299" stroke="#e3c567" stroke-width="2" marker-end="url(#arr)"/>
+    <text x="333" y="284" text-anchor="middle" fill="#e3c567" font-size="11" font-weight="600">gRPC</text>
+    <text x="333" y="318" text-anchor="middle" fill="#8b98ad" font-size="10">:9876/proxy</text>
+
+    <!-- ── Rust viewer process ── -->
+    <rect x="372" y="30" width="560" height="540" rx="12" fill="#1c150e" stroke="#5e4426"/>
+    <text x="652" y="56" text-anchor="middle" fill="#f0883e" font-weight="700" font-size="15">RUST PROCESS — gsplat-rust-renderer (main.rs)</text>
+
+    <rect x="392" y="72" width="250" height="56" rx="8" fill="#161d29" stroke="#2a3550"/>
+    <text x="517" y="94" text-anchor="middle" fill="#dbe4f0" font-weight="600">re_grpc_server :9876</text>
+    <text x="517" y="112" text-anchor="middle" fill="#8b98ad" font-size="11">spawn_with_recv → log channel</text>
+
+    <rect x="662" y="72" width="250" height="56" rx="8" fill="#161d29" stroke="#2a3550"/>
+    <text x="787" y="94" text-anchor="middle" fill="#dbe4f0" font-weight="600">Rerun data store</text>
+    <text x="787" y="112" text-anchor="middle" fill="#8b98ad" font-size="11">entities · components · timelines</text>
+    <line x1="642" y1="100" x2="660" y2="100" stroke="#8b98ad" marker-end="url(#arr)"/>
+
+    <rect x="392" y="148" width="520" height="50" rx="8" fill="#161d29" stroke="#2a3550"/>
+    <text x="652" y="169" text-anchor="middle" fill="#dbe4f0" font-weight="600">re_viewer::App + eframe/egui window — stock Spatial3DView</text>
+    <text x="652" y="187" text-anchor="middle" fill="#8b98ad" font-size="11">UI, blueprint, timeline, selection — all inherited unchanged · extend_view_class() registers ↓</text>
+    <line x1="787" y1="128" x2="787" y2="146" stroke="#8b98ad" marker-end="url(#arr)"/>
+
+    <rect x="392" y="218" width="520" height="84" rx="8" fill="#16202e" stroke="#3b5070"/>
+    <text x="652" y="240" text-anchor="middle" fill="#9ecbff" font-weight="700">gaussian_visualizer.rs — GaussianSplatVisualizer::execute()  (every frame)</text>
+    <text x="652" y="260" text-anchor="middle" fill="#8b98ad" font-size="11.5">query GaussianSplats3D archetype → build/reuse cached RenderGaussianCloud</text>
+    <text x="652" y="277" text-anchor="middle" fill="#8b98ad" font-size="11.5">→ camera from 3D view state → CPU frustum cull + back-to-front sort (rayon)</text>
+    <text x="652" y="294" text-anchor="middle" fill="#8b98ad" font-size="11.5">→ GaussianDrawData::add_batch()</text>
+    <line x1="652" y1="198" x2="652" y2="216" stroke="#8b98ad" marker-end="url(#arr)"/>
+
+    <rect x="392" y="322" width="520" height="80" rx="8" fill="#16202e" stroke="#3b5070"/>
+    <text x="652" y="344" text-anchor="middle" fill="#9ecbff" font-weight="700">gaussian_renderer.rs — prepare_compute_batch()</text>
+    <text x="652" y="364" text-anchor="middle" fill="#8b98ad" font-size="11.5">per-entity GPU buffer cache (grow-only) → write uniforms → upload sorted indices</text>
+    <text x="652" y="381" text-anchor="middle" fill="#8b98ad" font-size="11.5">→ encode the 7-stage compute pipeline · async intersection-count readback</text>
+    <line x1="652" y1="302" x2="652" y2="320" stroke="#8b98ad" marker-end="url(#arr)"/>
+
+    <rect x="392" y="422" width="520" height="62" rx="8" fill="#221a35" stroke="#4b3a73"/>
+    <text x="652" y="445" text-anchor="middle" fill="#bc8cff" font-weight="700">GPU (wgpu / Vulkan) — compute pipeline</text>
+    <text x="652" y="466" text-anchor="middle" fill="#c9b8ec" font-size="11.5" class="mono">project ▸ scan ▸ map ▸ radix-sort ▸ tile offsets ▸ raster (16×16 tiles)</text>
+    <line x1="652" y1="402" x2="652" y2="420" stroke="#8b98ad" marker-end="url(#arr)"/>
+
+    <rect x="392" y="500" width="520" height="50" rx="8" fill="#161d29" stroke="#2a3550"/>
+    <text x="652" y="521" text-anchor="middle" fill="#dbe4f0" font-weight="600">composite: fullscreen-triangle blit into the Rerun viewport</text>
+    <text x="652" y="539" text-anchor="middle" fill="#8b98ad" font-size="11">premultiplied-alpha blend · Transparent draw phase · gaussian_composite.wgsl</text>
+    <line x1="652" y1="484" x2="652" y2="498" stroke="#8b98ad" marker-end="url(#arr)"/>
+
+    <!-- ── Standalone path ── -->
+    <rect x="960" y="30" width="320" height="540" rx="12" fill="#0f1b2b" stroke="#28507c"/>
+    <text x="1120" y="56" text-anchor="middle" fill="#58a6ff" font-weight="700" font-size="15">STANDALONE PATH — gsplat-render</text>
+    <text x="1120" y="74" text-anchor="middle" fill="#8b98ad" font-size="11">--no-default-features · zero re_* crates</text>
+
+    <rect x="985" y="92" width="270" height="56" rx="8" fill="#161d29" stroke="#2a3550"/>
+    <text x="1120" y="114" text-anchor="middle" fill="#dbe4f0" font-weight="600">render_cli.rs (clap)</text>
+    <text x="1120" y="132" text-anchor="middle" fill="#8b98ad" font-size="11">--ply --camera --frame --benchmark</text>
+
+    <rect x="985" y="168" width="270" height="56" rx="8" fill="#161d29" stroke="#2a3550"/>
+    <text x="1120" y="190" text-anchor="middle" fill="#dbe4f0" font-weight="600">ply_loader.rs · nerf_camera.rs</text>
+    <text x="1120" y="208" text-anchor="middle" fill="#8b98ad" font-size="11">PLY → RenderGaussianCloud · c2w → camera</text>
+
+    <rect x="985" y="244" width="270" height="74" rx="8" fill="#221a35" stroke="#4b3a73"/>
+    <text x="1120" y="268" text-anchor="middle" fill="#bc8cff" font-weight="700">gpu_render()  (gpu_renderer.rs)</text>
+    <text x="1120" y="288" text-anchor="middle" fill="#8b98ad" font-size="11">same shaders, layouts &amp; pipeline —</text>
+    <text x="1120" y="304" text-anchor="middle" fill="#8b98ad" font-size="11">headless GpuContext, raw wgpu</text>
+
+    <rect x="985" y="338" width="270" height="56" rx="8" fill="#161d29" stroke="#2a3550"/>
+    <text x="1120" y="360" text-anchor="middle" fill="#dbe4f0" font-weight="600">texture readback → PNG</text>
+    <text x="1120" y="378" text-anchor="middle" fill="#8b98ad" font-size="11">Rgba8 staging buffer → image crate</text>
+
+    <rect x="985" y="414" width="270" height="56" rx="8" fill="#1d1a10" stroke="#5a5030"/>
+    <text x="1120" y="436" text-anchor="middle" fill="#e3c567" font-weight="600">metrics.py — PSNR · SSIM · LPIPS</text>
+    <text x="1120" y="454" text-anchor="middle" fill="#8b98ad" font-size="11">vs. reference renders (Brush convention)</text>
+
+    <line x1="1120" y1="148" x2="1120" y2="166" stroke="#8b98ad" marker-end="url(#arr)"/>
+    <line x1="1120" y1="224" x2="1120" y2="242" stroke="#8b98ad" marker-end="url(#arr)"/>
+    <line x1="1120" y1="318" x2="1120" y2="336" stroke="#8b98ad" marker-end="url(#arr)"/>
+    <line x1="1120" y1="394" x2="1120" y2="412" stroke="#8b98ad" marker-end="url(#arr)"/>
+
+    <!-- ── shared core band ── -->
+    <rect x="372" y="592" width="908" height="86" rx="12" fill="#0e1d33" stroke="#58a6ff" stroke-dasharray="7 5" stroke-width="1.5"/>
+    <text x="826" y="618" text-anchor="middle" fill="#58a6ff" font-weight="700" font-size="15">gsplat_core/ — SHARED, RERUN-FREE CORE</text>
+    <text x="826" y="640" text-anchor="middle" fill="#9ecbff" font-size="12" class="mono">types · constants · sh · covariance · culling · camera · gpu_types (12 bind-group layouts, 13 compute pipelines) · gpu_context · gpu_renderer</text>
+    <text x="826" y="662" text-anchor="middle" fill="#ff7eb6" font-size="12" class="mono">shader/*.wgsl — project · map_intersections · dynamic_sort · tile_offsets · raster_tiles (+ composite, viewer-only)</text>
+
+    <line x1="652" y1="590" x2="652" y2="556" stroke="#58a6ff" stroke-dasharray="4 4" marker-end="url(#arrB)"/>
+    <line x1="1120" y1="590" x2="1120" y2="478" stroke="#58a6ff" stroke-dasharray="4 4" marker-end="url(#arrB)"/>
+  </svg>
+  <div class="legend">
+    <span><span class="dot" style="background:#e3c567"></span>Python</span>
+    <span><span class="dot" style="background:#f0883e"></span>Rust viewer (feature "viewer")</span>
+    <span><span class="dot" style="background:#9ecbff"></span>Rerun glue layers</span>
+    <span><span class="dot" style="background:#bc8cff"></span>GPU compute</span>
+    <span><span class="dot" style="background:#58a6ff"></span>Shared Rerun-free core</span>
+  </div>
+</section>
+
+<!-- ════════════════════════ 5. COMPONENT CONTRACT ════════════════════════ -->
+<section class="slide">
+  <h2>The component contract <span class="tag py">Python</span> <span class="muted" style="font-size:20px">⇄</span> <span class="tag rust">Rust</span></h2>
+  <p class="sub">Both sides independently define a custom <code>GaussianSplats3D</code> archetype. They never share code — they agree on <b>names and shapes</b>. This is the entire API between the two processes.</p>
+  <table>
+    <tr><th>Component</th><th>Rerun type</th><th>Shape</th><th>Meaning</th><th>Required?</th></tr>
+    <tr><td><code>GaussianSplats3D:centers</code></td><td><code>Translation3D</code></td><td>[N, 3] f32</td><td>World-space Gaussian centers</td><td>✅ required</td></tr>
+    <tr><td><code>GaussianSplats3D:quaternions</code></td><td><code>RotationQuat</code></td><td>[N, 4] f32</td><td>Rotations, <b>xyzw</b> order, unit length</td><td>✅ required</td></tr>
+    <tr><td><code>GaussianSplats3D:scales</code></td><td><code>Scale3D</code></td><td>[N, 3] f32</td><td>Per-axis scales (already <b>exp()</b>'d, clamped ≥ 1e-6)</td><td>✅ required</td></tr>
+    <tr><td><code>GaussianSplats3D:opacities</code></td><td><code>Opacity</code></td><td>[N] f32</td><td>Per-splat opacity ∈ [0, 1] (already <b>sigmoid()</b>'d)</td><td>✅ required</td></tr>
+    <tr><td><code>GaussianSplats3D:colors</code></td><td><code>Color</code></td><td>[N] u32</td><td>Base RGB from the SH DC coefficient (packed RGBA32)</td><td>✅ required</td></tr>
+    <tr><td><code>GaussianSplats3D:sh_coefficients</code></td><td><code>TensorData</code></td><td>[N, C, 3] f32</td><td>Full SH set; C ∈ {1, 4, 9, 16, 25} → degree 0–4</td><td>optional</td></tr>
+  </table>
+  <div class="cols c2">
+    <div>
+      <h3 style="margin-top:8px;"><span class="tag py">python</span> producer — <span class="file">gaussians3d.py</span></h3>
+<pre><code><span class="k">@dataclass</span>(frozen=<span class="k">True</span>)
+<span class="k">class</span> <span class="t">Gaussians3D</span>(rr.AsComponents):
+    centers: Float32[np.ndarray, <span class="s">"n 3"</span>]
+    quaternions_xyzw: Float32[np.ndarray, <span class="s">"n 4"</span>]
+    ...
+    <span class="k">def</span> <span class="f">as_component_batches</span>(self):
+        <span class="k">return</span> [rr.components.Translation3DBatch(self.centers)
+                  .described(_component_descriptor(
+                      <span class="s">"GaussianSplats3D:centers"</span>, ...)), ...]</code></pre>
+    </div>
+    <div>
+      <h3 style="margin-top:8px;"><span class="tag rust">rust</span> consumer — <span class="file">gaussian_visualizer.rs</span></h3>
+<pre><code><span class="k">impl</span> rerun::Archetype <span class="k">for</span> <span class="t">GaussianSplats3D</span> {
+    <span class="k">fn</span> <span class="f">name</span>() -&gt; ArchetypeName { <span class="s">"GaussianSplats3D"</span>.into() }
+    <span class="k">fn</span> <span class="f">required_components</span>() -&gt; ... {
+        vec![<span class="t">Self</span>::descriptor_centers(),
+             <span class="t">Self</span>::descriptor_quaternions(), ...] }
+    <span class="k">fn</span> <span class="f">optional_components</span>() -&gt; ... {
+        vec![<span class="t">Self</span>::descriptor_sh_coefficients()] }
+}</code></pre>
+    </div>
+  </div>
+  <p class="footnote">The blueprint binds an entity to the visualizer explicitly: <code>overrides={entity: rrb.Visualizer("GaussianSplats3D")}</code> — that string must match <code>IdentifiedViewSystem::identifier()</code> on the Rust side.</p>
+</section>
+
+<!-- ════════════════════════ 6. MAIN.RS ════════════════════════ -->
+<section class="slide">
+  <h2>Entry point: <span class="file">main.rs</span> — a stock viewer, plus two things <span class="tag rust">rust</span></h2>
+  <p class="sub">277 lines. Everything else (UI, blueprint, timeline, selection) is inherited from <code>re_viewer</code> unchanged.</p>
+  <div class="cols c32">
+    <div>
+      <div class="flow">
+        <div class="step"><b>1 · parse_cli()</b><span class="muted">only --port / --version; silently ignores stock rerun flags → drop-in replacement</span></div>
+        <div class="arr">→</div>
+        <div class="step"><b>2 · logging + crash handlers</b><span class="muted">re_log, re_crash_handler</span></div>
+        <div class="arr">→</div>
+        <div class="step"><b>3 · gRPC server</b><span class="muted">spawn_with_recv(127.0.0.1:9876) → grpc_rx channel</span></div>
+      </div>
+      <div class="flow">
+        <div class="step"><b>4 · eframe::run_native</b><span class="muted">opens the OS window, owns the render loop</span></div>
+        <div class="arr">→</div>
+        <div class="step"><b>5 · customize_eframe_and_setup_renderer(cc)</b><span class="muted">Rerun installs re_renderer on the shared wgpu device</span></div>
+        <div class="arr">→</div>
+        <div class="step"><b>6 · App::new + add_log_receiver(grpc_rx)</b><span class="muted">incoming log messages flow into the data store</span></div>
+      </div>
+<pre><code><span class="c">// 7 · The one line that makes this a "custom viewer":</span>
+viewer.<span class="f">extend_view_class</span>(
+    re_sdk_types::blueprint::views::<span class="t">Spatial3DView</span>::identifier(),
+    |registrator| {
+        registrator.<span class="f">register_visualizer</span>::&lt;<span class="t">GaussianSplatVisualizer</span>&gt;()?;
+        <span class="k">Ok</span>(())
+    },
+)?;</code></pre>
+      <p>The visualizer is added <b>to the existing 3D view class</b> — entities matching the archetype get the custom GPU pipeline; everything else still renders with stock visualizers in the same viewport.</p>
+    </div>
+    <div>
+      <div class="box gpu">
+        <h3>wgpu configuration (<code>native_options()</code>)</h3>
+        <ul style="font-size: 14px;">
+          <li><b>AutoVsync</b> present mode — no tearing</li>
+          <li>Adapter selection delegated to <b>re_renderer</b> (Vulkan on Linux, Metal on macOS) so both renderers share one device</li>
+          <li><b>Full adapter limits</b> requested — the default conservative wgpu limits would cap storage buffers &amp; workgroup sizes needed by the compute pipeline (11 storage buffers in one shader stage!)</li>
+          <li><code>MAPPABLE_PRIMARY_BUFFERS</code> excluded — unneeded, flaky on some drivers</li>
+          <li>Resized surface → <code>RecreateSurface</code> (non-Windows)</li>
+        </ul>
+      </div>
+      <div class="box rust" style="margin-top: 14px;">
+        <h3>Runtime shape</h3>
+        <ul style="font-size: 14px;">
+          <li><code>#[tokio::main]</code> — the gRPC server needs an async runtime…</li>
+          <li>…but the viewer runs on the <b>main thread</b> (windowing requirement), proven by <code>MainThreadToken</code></li>
+          <li><code>persist_state: false</code> — every launch starts fresh</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════════ 7. VISUALIZER EXECUTE ════════════════════════ -->
+<section class="slide">
+  <h2>The visualizer: <code>execute()</code> — once per frame <span class="tag rust">rust</span></h2>
+  <p class="sub"><span class="file">gaussian_visualizer.rs</span> (624 lines) sits between Rerun's data store and the GPU renderer. It implements two Rerun traits: <code>IdentifiedViewSystem</code> (the name) and <code>VisualizerSystem</code> (the work).</p>
+  <div class="cols c32">
+    <div>
+      <div class="pipe" style="gap: 0;">
+        <div class="stage"><div class="num cpu">1</div><div class="what"><b>Query components</b><code>query.iter_visualizer_instruction_for(...)</code></div><div class="desc">For each entity bound to this visualizer: fetch the 5 required component arrays + the optional SH tensor (fetched separately via <code>latest_at</code> as a single <code>TensorData</code>).</div></div>
+        <div class="stage"><div class="num cpu">2</div><div class="what"><b>Resolve transform</b><code>TransformTreeContext</code></div><div class="desc">Get the entity→view affine from the transform tree context system (falls back to identity).</div></div>
+        <div class="stage"><div class="num cpu">3</div><div class="what"><b>Build or reuse cloud</b><code>CloudSignature</code> cache</div><div class="desc">Rebuild the packed <code>RenderGaussianCloud</code> <b>only when the signature changes</b>; otherwise reuse the cached <code>Arc</code>. Stale entries evicted via an <code>active_labels</code> set.</div></div>
+        <div class="stage"><div class="num cpu">4</div><div class="what"><b>Extract camera</b><code>camera_from_view()</code></div><div class="desc">Read the interactive orbit eye from <code>SpatialViewState</code>; fall back to a synthetic camera framing the cloud's bbox so splats are visible before any interaction.</div></div>
+        <div class="stage"><div class="num cpu">5</div><div class="what"><b>Cull + sort (CPU)</b><code>rebuild_visible_indices()</code></div><div class="desc">Approximate frustum cull, cap at 200 k closest, sort <b>back-to-front</b> by camera depth (gsplat_core::culling — next slides).</div></div>
+        <div class="stage"><div class="num cpu">6</div><div class="what"><b>Submit</b><code>draw_data.add_batch(...)</code></div><div class="desc">Hands cloud + camera + sorted indices to <code>GaussianDrawData</code>, which drives the GPU pipeline. Output: one drawable per entity in the <b>Transparent</b> phase.</div></div>
+      </div>
+    </div>
+    <div>
+      <div class="box core">
+        <h3>The cache key — <code>CloudSignature</code></h3>
+<pre><code><span class="k">struct</span> <span class="t">CloudSignature</span> {
+    expected_splats: <span class="t">usize</span>,
+    sh_coeffs_per_channel: <span class="t">Option</span>&lt;<span class="t">usize</span>&gt;,
+    <span class="c">// bit-exact 3×4 affine — no float compares</span>
+    transform_bits: [<span class="t">u32</span>; <span class="n">12</span>],
+}</code></pre>
+        <p style="font-size: 14px;">Cloud building (unpacking arrow arrays, baking the transform, normalizing quats) is the expensive CPU part — for a static scene it happens <b>once</b>, and camera motion costs nothing here.</p>
+      </div>
+      <div class="box rust" style="margin-top: 14px;">
+        <h3>SH validation (<code>extract_sh_coefficients</code>)</h3>
+        <ul style="font-size: 13.5px;">
+          <li>Shape must be <code>[N, C, 3]</code> with N == splat count</li>
+          <li>C must map to a degree: {1, 4, 9, 16, 25}</li>
+          <li>dtype must be F32; total length checked with overflow-safe math</li>
+          <li>Any violation is a hard <code>ViewSystemExecutionError</code> — bad data fails loudly, not silently</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════════ 8. BUILD RENDER CLOUD ════════════════════════ -->
+<section class="slide">
+  <h2>Building the cloud — <code>build_render_cloud()</code> <span class="tag rust">rust</span> → <span class="tag core">core</span></h2>
+  <p class="sub">The only place that understands Rerun's query-result format. Everything downstream sees flat arrays.</p>
+  <div class="cols c2">
+    <div>
+<pre><code><span class="c">// range_zip_1x4 walks the 5 component columns in lockstep.</span>
+<span class="k">for</span> (_idx, centers, quats, scales, opacities, colors) <span class="k">in</span>
+    re_query::<span class="f">range_zip_1x4</span>(centers, quaternions, scales,
+                            opacities, colors)
+{
+    <span class="c">// defensive: min length across all five columns</span>
+    <span class="k">let</span> count = centers.len().min(quats.len())
+        .min(scales.len()).min(opacities.len()).min(colors.len());
+
+    <span class="k">for</span> row <span class="k">in</span> <span class="n">0</span>..count {
+        <span class="c">// ★ only POSITIONS get the entity transform</span>
+        means_world.push(transform.<span class="f">transform_point3</span>(center));
+        quats_world.push(<span class="f">normalize_quat_or_identity</span>(q));
+        scales_world.push(scale.<span class="f">max</span>(<span class="t">Vec3</span>::splat(<span class="n">1e-6</span>)));
+        opacities_world.push(opacity.<span class="f">clamp</span>(<span class="n">0.0</span>, <span class="n">1.0</span>));
+        colors_world.push(<span class="f">rerun_color_to_rgb</span>(color)); <span class="c">// u32→[f32;3]</span>
+    }
+}</code></pre>
+    </div>
+    <div>
+      <div class="box core">
+        <h3>The resulting type — <code>RenderGaussianCloud</code> <span class="muted">(types.rs)</span></h3>
+<pre><code><span class="k">pub struct</span> <span class="t">RenderGaussianCloud</span> {
+    <span class="k">pub</span> means_world: <span class="t">Arc</span>&lt;[<span class="t">Vec3</span>]&gt;,
+    <span class="k">pub</span> quats:       <span class="t">Arc</span>&lt;[<span class="t">Quat</span>]&gt;,
+    <span class="k">pub</span> scales:      <span class="t">Arc</span>&lt;[<span class="t">Vec3</span>]&gt;,
+    <span class="k">pub</span> opacities:   <span class="t">Arc</span>&lt;[<span class="t">f32</span>]&gt;,
+    <span class="k">pub</span> colors_dc:   <span class="t">Arc</span>&lt;[[<span class="t">f32</span>; <span class="n">3</span>]]&gt;,
+    <span class="k">pub</span> sh_coeffs:   <span class="t">Option</span>&lt;<span class="t">RenderShCoefficients</span>&gt;,
+    <span class="k">pub</span> bounds_world: <span class="t">Option</span>&lt;(<span class="t">Vec3</span>, <span class="t">Vec3</span>)&gt;, <span class="c">// for fallback cam</span>
+}</code></pre>
+        <p style="font-size:13.5px;"><code>Arc</code> slices: cheap to clone into the renderer each frame; immutable, shared, no copies.</p>
+      </div>
+      <div class="box rust" style="margin-top: 14px;">
+        <h3>⚠ Why only positions are transformed</h3>
+        <p style="font-size: 14px;">Quaternions and scales stay in <b>entity-local space</b> — intentionally, matching Brush. The GPU shader builds the 3D covariance from raw quat + scale, then applies the <b>view matrix inside the Jacobian projection</b>. Baking an arbitrary affine into the covariance would require decomposing rotation from non-uniform scale, which is fragile. Trade-off: non-rigid entity transforms (shear/non-uniform scale) only move centers, not splat shapes.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════════ 9. CAMERA ════════════════════════ -->
+<section class="slide">
+  <h2>Camera extraction — turning Rerun's orbit eye into render uniforms</h2>
+  <p class="sub">Everything downstream (CPU cull and GPU shaders) consumes one simple struct: <code>CameraApproximation</code>.</p>
+  <div class="cols c2">
+    <div>
+      <div class="box core">
+        <h3><code>CameraApproximation</code> <span class="muted">(gsplat_core/types.rs)</span></h3>
+<pre><code><span class="k">pub struct</span> <span class="t">CameraApproximation</span> {
+    <span class="k">pub</span> view_from_world: <span class="t">Affine3A</span>,   <span class="c">// world → view (RH, −Z fwd)</span>
+    <span class="k">pub</span> projection_from_view: <span class="t">Mat4</span>,  <span class="c">// perspective_infinite_rh</span>
+    <span class="k">pub</span> world_position: <span class="t">Vec3</span>,        <span class="c">// for SH view direction</span>
+    <span class="k">pub</span> viewport_size_px: <span class="t">Vec2</span>,      <span class="c">// PHYSICAL pixels</span>
+    <span class="k">pub</span> near_plane: <span class="t">f32</span>,
+}</code></pre>
+      </div>
+      <div class="box rust" style="margin-top: 14px;">
+        <h3>From the live 3D view <span class="muted">(camera_from_spatial_view_state)</span></h3>
+        <ul style="font-size: 14px;">
+          <li>Downcast generic view state → <code>SpatialViewState</code>, read <code>state_3d.eye_state.last_eye</code> (+ its <code>fov_y</code>, <code>near()</code>)</li>
+          <li>Rerun stores <code>world_from_rub_view</code> — <b>invert</b> it to get view-from-world</li>
+          <li>Viewport rect comes from the egui <code>ViewRectPublisher</code> cache, shrunk by 2.5 pt to dodge edge artifacts, then × <code>pixels_per_point</code> → physical pixels</li>
+        </ul>
+      </div>
+    </div>
+    <div>
+      <div class="box core">
+        <h3>Fallback camera <span class="muted">(gsplat_core/camera.rs)</span></h3>
+        <p style="font-size:14px;">Before the user ever touches the view, <code>last_eye</code> is <code>None</code>. The fallback frames the cloud's bounding box:</p>
+        <ul style="font-size: 14px;">
+          <li>eye = center + (d, d/2, d) where d = 1.5 × ‖extent‖</li>
+          <li>55° vertical FOV, 1600×900 viewport, near = 0.01</li>
+        </ul>
+        <p style="font-size:14px;">So splats are visible on first frame — same logic the Python blueprint mirrors with <code>EyeControls3D</code>.</p>
+      </div>
+      <div class="box core" style="margin-top: 14px;">
+        <h3>Third constructor: NeRF cameras <span class="muted">(camera_from_nerf_transform)</span></h3>
+        <p style="font-size:14px;">For the standalone path: a 4×4 camera-to-world from <code>transforms_*.json</code> (OpenGL convention, row-major in JSON → transposed) is inverted; vertical FOV is derived from the dataset's horizontal <code>camera_angle_x</code> and the aspect ratio:</p>
+        <div class="formula" style="font-size:13.5px;">fov_y = 2·atan( tan(camera_angle_x / 2) / aspect )</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════════ 10. CPU CULLING ════════════════════════ -->
+<section class="slide">
+  <h2>CPU pre-pass: cull + sort <span class="tag core">gsplat_core/culling.rs</span></h2>
+  <p class="sub">An <b>approximate, conservative</b> first pass. The GPU re-does projection exactly — this pass exists to (a) bound the GPU workload and (b) establish the global depth order that alpha blending requires.</p>
+  <div class="cols c2">
+    <div>
+      <h3>Per-splat rejection test — <code>build_compute_candidate()</code></h3>
+      <ul>
+        <li>opacity × OPACITY_SCALE ≤ 0 → <b>reject</b></li>
+        <li>view-space depth (−z) ≤ near plane or non-finite → <b>reject</b> (behind camera)</li>
+        <li>clip-space w ≈ 0 → <b>reject</b> (degenerate projection)</li>
+        <li>|NDC x| or |NDC y| &gt; <b>1.5</b> → <b>reject</b> (generous 50% margin keeps splats whose <i>center</i> is offscreen but whose ellipse still touches the screen)</li>
+      </ul>
+      <p>Survivors become <code>SortedSplatIndex { splat_index: u32, camera_depth: f32 }</code>.</p>
+      <h3 style="margin-top: 14px;">Then two ordering steps</h3>
+      <ul>
+        <li><b>Cap to 200 000:</b> <code>select_nth_unstable_by</code> — an O(n) partial sort that keeps the <i>closest</i> splats when over budget (far splats get dropped first)</li>
+        <li><b>Sort back-to-front</b> (descending depth) — the order alpha compositing needs</li>
+      </ul>
+    </div>
+    <div>
+      <div class="box core">
+        <h3>Adaptive parallelism</h3>
+<pre><code><span class="k">if</span> cloud.len() &gt;= PARALLEL_SPLAT_THRESHOLD { <span class="c">// 16 384</span>
+    <span class="c">// rayon: par_iter().filter_map() + par_sort_unstable_by</span>
+} <span class="k">else</span> {
+    <span class="c">// plain single-threaded iteration — threading</span>
+    <span class="c">// overhead isn't worth it for small clouds</span>
+}</code></pre>
+      </div>
+      <div class="box gpu" style="margin-top: 14px;">
+        <h3>Why sort on the CPU at all?</h3>
+        <p style="font-size: 14px;">The GPU radix sort (stage 4) sorts by <b>tile ID only</b> — it's a <i>stable</i> sort, so within each tile, splats keep the order they were submitted in. The CPU's global depth sort is what makes that within-tile order front-to-back. Depth ordering is established once on the CPU; tile grouping happens later on the GPU.</p>
+      </div>
+      <div class="box" style="margin-top: 14px;">
+        <h3>Handoff detail</h3>
+        <p style="font-size: 14px;">The visualizer sorts <b>back-to-front</b>, but the renderer uploads the index list <b>reversed</b> (<code>visible.iter().rev()</code>) — the GPU rasterizer blends <b>front-to-back</b> with a transmittance accumulator, which enables early termination per pixel.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════════ 11. RENDERER STRUCTURE ════════════════════════ -->
+<section class="slide">
+  <h2>The GPU renderer: <span class="file">gaussian_renderer.rs</span> <span class="tag rust">rust</span> <span class="tag gpu">gpu</span></h2>
+  <p class="sub">2 545 lines — the biggest file. It implements re_renderer's <code>Renderer</code> trait and owns all GPU resources for the viewer path.</p>
+  <div class="cols c2">
+    <div>
+      <div class="box rust">
+        <h3>Created once — <code>create_renderer()</code></h3>
+        <ul style="font-size: 14px;">
+          <li><b>13 compute pipelines</b> from 5 WGSL shaders (embedded via <code>include_str!</code> at compile time)</li>
+          <li><b>11 compute bind-group layouts</b> + 1 composite layout</li>
+          <li>1 <b>render pipeline</b> for the composite blit: re_renderer's shared screen-triangle vertex shader + <code>fs_main</code> from <code>gaussian_composite.wgsl</code>, premultiplied-alpha blending, <b>depth-write disabled</b></li>
+          <li>The composite shader is registered into re_renderer's virtual filesystem (<code>register_embedded_shaders()</code>, once)</li>
+        </ul>
+      </div>
+      <div class="box rust" style="margin-top: 14px;">
+        <h3>Per entity, cached — <code>batch_cache: Mutex&lt;HashMap&lt;String, CachedBatchResources&gt;&gt;</code></h3>
+        <p style="font-size: 14px;">~35 buffers + ~17 bind groups per logged entity, keyed by <code>"gaussian_splats::{entity_path}"</code>. Buffers are <b>grow-only</b> (never shrink) so a static scene re-renders with <b>zero allocations</b> — camera movement only rewrites uniforms and the index buffer.</p>
+      </div>
+    </div>
+    <div>
+      <h3>Per-frame: <code>prepare_compute_batch()</code></h3>
+      <div class="flow" style="flex-direction: column; gap: 6px;">
+        <div class="step"><b>1 · Ensure capacity</b> <span class="muted">grow instance buffers if visible count &gt; capacity (next power of two, min 1024); rebuild affected bind groups</span></div>
+        <div class="step"><b>2 · Poll readbacks</b> <span class="muted">async intersection-count readback may demand bigger intersection buffers (slide 21)</span></div>
+        <div class="step"><b>3 · Ensure raster target</b> <span class="muted">tile_offsets buffer + Rgba8 raster texture sized to ⌈viewport/16⌉ tiles</span></div>
+        <div class="step"><b>4 · Write uniforms</b> <span class="muted">camera matrices, viewport, SH degree, σ-coverage (f32 bits packed in u32 fields)</span></div>
+        <div class="step"><b>5 · Upload indices</b> <span class="muted">CPU's back-to-front list, reversed → front-to-back, one <code>write_buffer</code></span></div>
+        <div class="step"><b>6 · Encode compute</b> <span class="muted">all 7 stages recorded into re_renderer's <code>before_view_builder_encoder</code> — guaranteed to run <b>before</b> the frame's draw passes</span></div>
+        <div class="step"><b>7 · Return batch</b> <span class="muted">just the composite bind group; the draw phase needs nothing else</span></div>
+      </div>
+      <div class="box" style="margin-top: 12px;">
+        <h3><code>draw()</code> — almost trivial by design</h3>
+        <p style="font-size: 14px;">By draw time the image already exists in the raster texture. The draw call is 3 vertices: <code>pass.draw(0..3, 0..1)</code> in the <b>Transparent</b> phase.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════════ 12. PIPELINE OVERVIEW ════════════════════════ -->
+<section class="slide">
+  <h2>The GPU pipeline — 7 stages, 5 shaders, 13 entry points</h2>
+  <p class="sub">Identical for both render paths. Loaded with <code>include_str!()</code> — the WGSL files are the single source of truth.</p>
+  <div class="pipe">
+    <div class="stage">
+      <div class="num cpu">0</div>
+      <div class="what"><b>CPU pre-pass</b><code>gsplat_core/culling.rs</code></div>
+      <div class="desc">Frustum cull + depth sort on CPU (rayon). Upload <b>front-to-back</b> index list + canonical splat buffers.</div>
+    </div>
+    <div class="stage">
+      <div class="num">1</div>
+      <div class="what"><b>PROJECT</b><code>gaussian_project.wgsl :: project_main</code></div>
+      <div class="desc">One thread per splat: 3D→2D covariance via camera <b>Jacobian</b>, SH color eval, tile bounding box + exact per-tile hit count. Writes <code>ProjectedTileSplat</code> (64 B) + hit counts.</div>
+    </div>
+    <div class="stage">
+      <div class="num">2</div>
+      <div class="what"><b>SCAN</b><code>:: scan_blocks_main · scan_block_sums_main</code></div>
+      <div class="desc">Two-level parallel <b>prefix sum</b> over per-splat tile-hit counts → each splat's write offset into the intersection array + the <b>total intersection count</b> (kept on GPU).</div>
+    </div>
+    <div class="stage">
+      <div class="num">3</div>
+      <div class="what"><b>MAP</b><code>gaussian_map_intersections.wgsl :: map_main · clamp_count_main</code></div>
+      <div class="desc">Scatter one <b>(tile_id, splat_id)</b> pair per overlapped tile, at the offsets from stage 2. Then clamp the GPU-side total to buffer capacity (1 thread).</div>
+    </div>
+    <div class="stage">
+      <div class="num">4</div>
+      <div class="what"><b>RADIX SORT</b><code>gaussian_dynamic_sort.wgsl</code> — 6 entry points</div>
+      <div class="desc"><b>4-bit radix sort by tile_id</b>, ⌈bits(tile_count)/4⌉ passes, ping-pong buffers, key count read from a GPU buffer — <b>no CPU sync</b>. Stable → preserves the depth order within each tile.</div>
+    </div>
+    <div class="stage">
+      <div class="num">5</div>
+      <div class="what"><b>TILE OFFSETS</b><code>gaussian_tile_offsets.wgsl :: main</code></div>
+      <div class="desc">Boundary detection in the sorted list → per-tile <b>[start, end)</b> ranges.</div>
+    </div>
+    <div class="stage">
+      <div class="num">6</div>
+      <div class="what"><b>RASTERIZE</b><code>gaussian_raster_tiles.wgsl :: main</code></div>
+      <div class="desc">One 256-thread workgroup per <b>16×16 tile</b>. Splats stream through shared memory; each pixel alpha-blends front-to-back, early-exits when transmittance &lt; 1e-4. Writes Rgba8 storage texture.</div>
+    </div>
+    <div class="stage">
+      <div class="num">7</div>
+      <div class="what"><b>COMPOSITE</b> <span class="muted">(viewer only)</span><code>gaussian_composite.wgsl</code></div>
+      <div class="desc">Fullscreen-triangle blit of the raster texture into the Rerun viewport (premultiplied alpha). The standalone path skips this and <b>reads the texture back</b> instead.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════════ 13. STAGE 1 PROJECT ════════════════════════ -->
+<section class="slide">
+  <h2>Stage 1 — Project <span class="tag shader">gaussian_project.wgsl :: project_main</span></h2>
+  <p class="sub">128 threads per workgroup, one thread per CPU-selected candidate. The exact projection the CPU pass only approximated.</p>
+  <div class="cols c2">
+    <div>
+      <h3>The math, in order</h3>
+      <div class="formula">Σ<sub>world</sub> = R(q) · diag(s²) · R(q)ᵀ <span class="dim">3D covariance from quat + scale</span></div>
+      <div class="formula">Σ<sub>view</sub> = V · Σ<sub>world</sub> · Vᵀ <span class="dim">V = 3×3 linear part of view matrix</span></div>
+      <div class="formula">Σ<sub>px</sub> = J · Σ<sub>view</sub> · Jᵀ <span class="dim">J = 2×3 Jacobian of pixel projection at the mean (EWA-style local linearization)</span></div>
+      <div class="formula">Σ′<sub>px</sub> = Σ<sub>px</sub> + 0.3·I <span class="dim">anti-aliasing blur (BRUSH_COVARIANCE_BLUR_PX) — no sub-pixel needles</span></div>
+      <div class="formula">conic = Σ′<sub>px</sub>⁻¹ <span class="dim">inverse 2×2, what the rasterizer evaluates per pixel</span></div>
+      <p style="font-size: 13.5px;" class="muted">The Jacobian rows clamp UVs to 15% beyond the viewport (<code>lims_pos/lims_neg</code>) — splats at screen edges stay numerically sane. Identical Rust reference implementations live in <code>gsplat_core/covariance.rs</code> for testing.</p>
+    </div>
+    <div>
+      <h3>Culling &amp; output (per thread)</h3>
+      <ul style="font-size: 14.5px;">
+        <li><b>Cull on GPU:</b> behind near plane · opacity &lt; 1/255 · power threshold ≤ 0 · radius &lt; 0.35 px · ellipse fully offscreen · any non-finite intermediate</li>
+        <li><b>Power threshold</b> = ln(255·α) — the Mahalanobis level where the splat's contribution drops below 1/255 (invisible at 8-bit)</li>
+        <li><b>Screen bbox</b> = √(2·threshold·variance) per axis → converted to a <b>tile-space bbox</b> (16-px tiles, with a y-flip: NDC is y-up, the raster texture is y-down)</li>
+        <li><b>Exact tile test:</b> for each tile in the bbox, <code>will_primitive_contribute()</code> finds the point of maximum Gaussian power inside the tile rect — only genuinely-touched tiles are counted → <code>num_tiles_hit</code></li>
+        <li><b>SH color</b> evaluated here if present (next slide)</li>
+      </ul>
+      <div class="box gpu" style="margin-top: 10px;">
+        <h3>What gets written</h3>
+<pre><code><span class="k">struct</span> <span class="t">ProjectedTileSplat</span> {        <span class="c">// 64 bytes, checked by a Rust test</span>
+    xy_px: <span class="t">vec2f</span>,                  <span class="c">// raster-space center</span>
+    conic_xyy_opacity: <span class="t">vec4f</span>,      <span class="c">// inverse covariance + α</span>
+    color_rgba: <span class="t">vec4f</span>,             <span class="c">// SH-evaluated RGB + α</span>
+    tile_bbox_min_max: <span class="t">vec4u</span>,      <span class="c">// tile-space bounds</span>
+}
+<span class="c">+ projected_tile_hit_counts[i] = num_tiles_hit
++ visibility_flags[i] = 1</span></code></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════════ 14. SH ════════════════════════ -->
+<section class="slide">
+  <h2>Spherical harmonics — view-dependent color <span class="tag shader">wgsl</span> <span class="tag core">sh.rs</span></h2>
+  <p class="sub">Implemented twice with identical constants — WGSL for the GPU and Rust as a tested reference. Same basis ordering as 3DGS, Brush, and gsplat.</p>
+  <div class="cols c2">
+    <div>
+      <h3>How it works</h3>
+      <ul>
+        <li>View direction = <code>normalize(splat_center − camera_position)</code> in <b>world space</b></li>
+        <li>Color = Σ basisᵢ(dir) · coeffᵢ over all coefficients, per RGB channel</li>
+        <li>Activation: <b>color = max(raw + 0.5, 0)</b> — the +0.5 bias makes a zero SH field mid-gray instead of black</li>
+        <li>Degree fully unrolled in the shader with early returns — degree-0 scenes pay for one multiply, not 25</li>
+      </ul>
+      <table style="margin-top: 10px;">
+        <tr><th>Coeffs / channel</th><th>SH degree</th><th>Adds</th></tr>
+        <tr><td>1</td><td>0</td><td>DC only (flat color)</td></tr>
+        <tr><td>4</td><td>1</td><td>3 linear terms (x, y, z)</td></tr>
+        <tr><td>9</td><td>2</td><td>5 quadratic terms</td></tr>
+        <tr><td>16</td><td>3</td><td>7 cubic terms</td></tr>
+        <tr><td>25</td><td>4</td><td>9 quartic terms</td></tr>
+      </table>
+    </div>
+    <div>
+<pre><code><span class="c">// gaussian_project.wgsl — degree 1 excerpt (constants match
+// gsplat_core/sh.rs to the last digit)</span>
+<span class="k">var</span> colors = SH_C0 * read_sh_coeff(base, <span class="n">0u</span>);   <span class="c">// 0.2820948…</span>
+<span class="k">if</span> degree == <span class="n">0u</span> { <span class="k">return</span> max(colors + <span class="t">vec3f</span>(<span class="n">0.5</span>), <span class="t">vec3f</span>(<span class="n">0.0</span>)); }
+
+<span class="k">let</span> fTmp0A = <span class="n">0.48860251190292</span>;
+colors += fTmp0A * (-y * read_sh_coeff(base, <span class="n">1u</span>)
+                  +  z * read_sh_coeff(base, <span class="n">2u</span>)
+                  -  x * read_sh_coeff(base, <span class="n">3u</span>));
+...</code></pre>
+      <div class="box core">
+        <h3>Memory layout</h3>
+        <p style="font-size: 14px;">Coefficients are stored <b>interleaved</b>: <code>[splat][coeff][rgb]</code>, flat <code>Arc&lt;[f32]&gt;</code> on the CPU, padded to <code>vec4f</code> stride on the GPU. The PLY format stores them <b>channel-major</b> (all R, then G, then B) — both loaders re-interleave at load time, and pad with zeros up to the next supported size {1, 4, 9, 16, 25}.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════════ 15. STAGE 2 SCAN ════════════════════════ -->
+<section class="slide">
+  <h2>Stage 2 — Prefix sum (“compact”) <span class="tag shader">scan_blocks_main · scan_block_sums_main</span></h2>
+  <p class="sub">Answers one question entirely on the GPU: <b>where does each splat write its tile intersections, and how many are there in total?</b></p>
+  <div class="cols c2">
+    <div>
+      <h3>Two-level scan</h3>
+      <ul style="font-size: 14.5px;">
+        <li><b>Level 1 — <code>scan_blocks_main</code>:</b> 256 threads handle <b>512 items</b> per block (2 each) in shared memory (<code>scan_scratch</code>). A Hillis–Steele inclusive scan, converted to <b>exclusive</b> by subtracting each item's own value. Writes per-item <code>local_offsets</code> + each block's total into <code>block_offsets</code>.</li>
+        <li><b>Level 2 — <code>scan_block_sums_main</code>:</b> one single workgroup exclusive-scans the block totals in place (512 blocks × 512 items = 262 144 splats max — comfortably above the 200 k cap).</li>
+        <li>The grand total lands in <code>draw_indirect_args[1]</code> — a <code>DrawIndirectArgs</code>-shaped buffer that stays <b>on the GPU</b>.</li>
+      </ul>
+      <div class="formula" style="font-size:13.5px;">global_write_offset(i) = local_offsets[i] + block_offsets[block(i)]</div>
+    </div>
+    <div>
+      <h3>Worked example</h3>
+<pre><code>tile_hit_counts   = [ 3, 0, 2, 5, 1, ... ]   <span class="c">// from project</span>
+                      │  invisible splat: 0 hits
+                      ▼  exclusive prefix sum
+tile_hit_offsets  = [ 0, 3, 3, 5, 10, ... ]
+total (on GPU)    = 11  → draw_indirect_args[1]</code></pre>
+      <div class="box gpu">
+        <h3>Why this <i>is</i> the compaction</h3>
+        <p style="font-size: 14px;">Splats culled in stage 1 simply report <b>0 tile hits</b>, so they occupy zero space in the intersection array — no separate compaction step is needed for the tile path. (The shader still carries a legacy instanced-quad path — <code>scatter_main</code>, an <code>InstanceData</code> output and bindings 32–37 — which the current pipeline never dispatches.)</p>
+      </div>
+      <p class="footnote" style="padding-top:8px;">These same two entry points are <b>reused inside the radix sort</b> (stage 4) to scan digit histograms — one scan implementation, two jobs.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════════ 16. STAGE 3 MAP ════════════════════════ -->
+<section class="slide">
+  <h2>Stage 3 — Map intersections <span class="tag shader">gaussian_map_intersections.wgsl</span></h2>
+  <p class="sub">The “scatter” that turns per-splat tile coverage into a flat, sortable list.</p>
+  <div class="cols c2">
+    <div>
+      <h3><code>map_main</code> — one thread per splat</h3>
+      <ul style="font-size: 14.5px;">
+        <li>Re-walks the tile bbox from stage 1, repeating the exact <code>will_primitive_contribute()</code> test (recomputing is cheaper than storing the per-tile mask)</li>
+        <li>For each contributing tile, writes a pair at <code>base + written</code>:
+          <ul><li><code>tile_id_from_isect[k] = tx + ty·tile_bounds_x</code> — the sort <b>key</b></li>
+          <li><code>compact_gid_from_isect[k] = splat_slot</code> — the sort <b>value</b></li></ul></li>
+        <li>Every write is bounds-checked against <code>intersection_capacity</code> — dense scenes can overflow the allocation; overflowing pairs are dropped this frame (and the async readback grows the buffer for the next — slide 21)</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Example</h3>
+<pre><code><span class="c">// splat #42 covers tiles 5, 6, 9, 10 → four entries:</span>
+tile_id_from_isect      = [ ...  5,  6,  9, 10 ... ]
+compact_gid_from_isect  = [ ... 42, 42, 42, 42 ... ]</code></pre>
+      <div class="box gpu">
+        <h3><code>clamp_count_main</code> — a one-thread dispatch</h3>
+<pre><code>num_intersections[<span class="n">0</span>] = min(intersection_count_words[<span class="n">1</span>],
+                           map_uniforms.intersection_capacity);</code></pre>
+        <p style="font-size: 14px;">The clamped count is what every later stage (sort, tile offsets, raster) reads as its element count — directly from GPU memory. This is the trick that keeps the whole frame free of CPU↔GPU round-trips.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════════ 17. STAGE 4 RADIX SORT ════════════════════════ -->
+<section class="slide">
+  <h2>Stage 4 — GPU radix sort <span class="tag shader">gaussian_dynamic_sort.wgsl</span></h2>
+  <p class="sub">The heaviest machinery in the codebase: a multi-pass, GPU-driven, <b>stable</b> 4-bit LSD radix sort of (tile_id → splat_id) pairs.</p>
+  <div class="cols c32">
+    <div>
+      <h3>One pass = 6 dispatches <span class="muted">(repeated per 4-bit digit)</span></h3>
+      <div class="flow" style="flex-direction: column; gap: 5px;">
+        <div class="step"><b>1 · sort_count_main</b> <span class="muted">per-workgroup histogram of the current 4-bit digit (16 bins, shared-memory atomics) → <code>counts[bin·num_wgs + wg]</code></span></div>
+        <div class="step"><b>2 · sort_reduce_main</b> <span class="muted">tree-reduce histogram chunks → <code>reduced[]</code> partial sums</span></div>
+        <div class="step"><b>3+4 · scan_blocks / scan_block_sums</b> <span class="muted">exclusive scan of <code>reduced[]</code> — reusing the stage-2 scan entry points</span></div>
+        <div class="step"><b>5 · sort_scan_compose + sort_scan_add</b> <span class="muted">fold the scanned block offsets back: each workgroup's <code>counts</code> entry becomes a <b>global base offset</b> for its digit</span></div>
+        <div class="step"><b>6 · sort_scatter_main</b> <span class="muted">per workgroup: loop over the 16 bins, intra-workgroup prefix scan ranks the matching keys, then write key+value to <code>base + rank</code> — order-preserving (stable)</span></div>
+      </div>
+    </div>
+    <div>
+      <div class="box gpu">
+        <h3>Pass count is data-driven</h3>
+<pre><code>tile_count_bits = bits_needed(tile_count)
+sort_passes     = ceil(tile_count_bits / <span class="n">4</span>)</code></pre>
+        <p style="font-size: 13.5px;">1080p → 120×68 = 8 160 tiles → 13 bits → <b>4 passes</b> (24 dispatches). Only the bits that can actually differ get sorted.</p>
+      </div>
+      <div class="box gpu" style="margin-top: 12px;">
+        <h3>Ping-pong buffers</h3>
+        <p style="font-size: 13.5px;">Even passes: <code>tile_id/gid → sort_keys/alt</code>. Odd passes: back again. If the pass count is odd, a final <code>copy_buffer_to_buffer</code> restores results to the primary pair.</p>
+      </div>
+      <div class="box gpu" style="margin-top: 12px;">
+        <h3>No CPU in the loop</h3>
+        <p style="font-size: 13.5px;">Every entry point starts with <code>let total = num_keys()</code> — read from the GPU buffer stage 3 clamped. Dispatch sizes are based on buffer <i>capacity</i>; surplus workgroups exit immediately.</p>
+      </div>
+    </div>
+  </div>
+  <p class="footnote">Why stable matters: keys are tile IDs only — depth is not in the key. Stability preserves the CPU's front-to-back submission order within each tile, which is exactly what the rasterizer's front-to-back blending assumes. (<code>sort_scan_main</code>, a single-workgroup scan variant, is compiled but the shipped path uses the shared two-level scan instead.)</p>
+</section>
+
+<!-- ════════════════════════ 18. STAGE 5 TILE OFFSETS ════════════════════════ -->
+<section class="slide">
+  <h2>Stage 5 — Tile offsets <span class="tag shader">gaussian_tile_offsets.wgsl</span></h2>
+  <p class="sub">70 lines that convert the sorted list into per-tile ranges. The simplest stage — and the one that makes stage 6 fast.</p>
+  <div class="cols c2">
+    <div>
+      <h3>Boundary detection</h3>
+      <ul style="font-size: 14.5px;">
+        <li>The <code>tile_offsets</code> buffer (2 × u32 per tile) is <b>cleared to zero</b> first — tiles nothing touches keep {0, 0} = an empty range</li>
+        <li>Each thread inspects <b>8 consecutive</b> sorted entries (<code>CHECKS_PER_ITER</code>) to amortize dispatch overhead</li>
+        <li>Where <code>tile_id != prev_tile_id</code>: close the previous tile's range and open the new one; entry 0 and entry total−1 handle the ends</li>
+      </ul>
+<pre><code><span class="k">if</span> tile_id != prev_tile_id {
+    tile_offsets[prev_tile_id * <span class="n">2u</span> + <span class="n">1u</span>] = isect_id;  <span class="c">// end</span>
+    tile_offsets[tile_id      * <span class="n">2u</span>     ] = isect_id;  <span class="c">// start</span>
+}</code></pre>
+    </div>
+    <div>
+      <h3>Example</h3>
+<pre><code>sorted_tile_ids = [ 0, 0, 0, 1, 1, 2, 2, 2, 2, 3 ]
+
+tile_offsets[0] = { start: 0, end: 3 }
+tile_offsets[1] = { start: 3, end: 5 }
+tile_offsets[2] = { start: 5, end: 9 }
+tile_offsets[3] = { start: 9, end: 10 }
+tile_offsets[7] = { start: 0, end: 0 }   <span class="c">// untouched tile → empty</span></code></pre>
+      <div class="box gpu">
+        <h3>Why ranges instead of lists</h3>
+        <p style="font-size: 14px;">In stage 6, each tile's workgroup reads exactly two u32s and then streams a <b>contiguous slice</b> of the sorted arrays. Contiguity is what makes the shared-memory batching in the rasterizer coalesced and fast.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════════ 19. STAGE 6 RASTER ════════════════════════ -->
+<section class="slide">
+  <h2>Stage 6 — Tile rasterization <span class="tag shader">gaussian_raster_tiles.wgsl</span></h2>
+  <p class="sub">Where pixels are actually shaded. One workgroup = 256 threads = one 16×16 tile; one thread = one pixel.</p>
+  <div class="cols c2">
+    <div>
+      <h3>Cooperative inner loop</h3>
+      <ul style="font-size: 14.5px;">
+        <li>Lane 0 fetches the tile's <b>[start, end)</b> range once into workgroup memory</li>
+        <li>Pixels are mapped within the tile in <b>Morton (Z-curve) order</b> (<code>decode_morton_2d</code>) — neighboring threads shade neighboring pixels, improving memory locality</li>
+        <li>Splats are processed in <b>batches of 256</b>: each thread loads one <code>ProjectedTileSplat</code> into shared memory (<code>local_batch</code>), barrier, then every pixel iterates the whole batch — 256 global reads serve 65 536 pixel-splat evaluations</li>
+      </ul>
+      <h3 style="margin-top: 10px;">Per pixel, per splat</h3>
+      <div class="formula" style="font-size: 13.5px;">
+        σ = ½·(c.x·Δx² + c.z·Δy²) + c.y·Δx·Δy <span class="dim">Mahalanobis²/2 via the conic</span><br>
+        α = min(0.999, opacity · e<sup>−σ</sup>)<br>
+        color += rgb · α · T &nbsp;&nbsp;·&nbsp;&nbsp; T ← T·(1 − α) <span class="dim">front-to-back “over”</span>
+      </div>
+    </div>
+    <div>
+      <div class="box gpu">
+        <h3>Early termination — the big win</h3>
+<pre><code><span class="k">if</span> transmittance &lt;= <span class="n">1e-4</span> { done = <span class="k">true</span>; <span class="k">break</span>; }</code></pre>
+        <p style="font-size: 14px;">Once a pixel is effectively opaque it stops evaluating splats entirely. This is <b>why</b> everything upstream worked so hard to deliver splats front-to-back: in dense scenes most pixels saturate after a handful of splats and skip hundreds more.</p>
+      </div>
+      <div class="box gpu" style="margin-top: 12px;">
+        <h3>Output</h3>
+<pre><code>textureStore(out_img, pixel,
+    <span class="t">vec4f</span>(color_out, <span class="n">1.0</span> - transmittance));</code></pre>
+        <p style="font-size: 14px;">RGB is <b>premultiplied</b>; alpha = accumulated coverage. The texture is <code>Rgba8Unorm</code>, sized to whole tiles (⌈w/16⌉·16 × ⌈h/16⌉·16) — edge pixels outside the viewport are computed but masked by the <code>inside</code> flag.</p>
+      </div>
+      <div class="box" style="margin-top: 12px;">
+        <h3>Guard rails</h3>
+        <p style="font-size: 14px;">α capped at 0.999 (T never reaches exactly 0 → no NaNs), splats with σ &lt; 0 or α &lt; 1/255 skipped, all threads stay in the batch loop for barriers even when <code>done</code>.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════════ 20. STAGE 7 COMPOSITE ════════════════════════ -->
+<section class="slide">
+  <h2>Stage 7 — Composite into the Rerun viewport <span class="tag shader">gaussian_composite.wgsl</span> <span class="tag rust">rust</span></h2>
+  <p class="sub">The only stage that is viewer-specific — it is how a compute-shader image re-enters Rerun's normal render graph.</p>
+  <div class="cols c2">
+    <div>
+      <h3>Fullscreen triangle, no vertex buffer</h3>
+<pre><code><span class="c">// vertex: 3 hard-coded positions that cover the screen</span>
+<span class="k">var</span> positions = <span class="t">array</span>&lt;<span class="t">vec2f</span>, <span class="n">3</span>&gt;(
+    <span class="t">vec2f</span>(-<span class="n">1.0</span>, -<span class="n">1.0</span>), <span class="t">vec2f</span>(-<span class="n">1.0</span>, <span class="n">3.0</span>), <span class="t">vec2f</span>(<span class="n">3.0</span>, -<span class="n">1.0</span>));
+
+<span class="c">// fragment: direct unfiltered pixel fetch, clamped to image</span>
+<span class="k">let</span> pixel = min(<span class="t">vec2u</span>(in.position.xy), dims - <span class="n">1</span>);
+<span class="k">return</span> textureLoad(raster_color, <span class="t">vec2i</span>(pixel), <span class="n">0</span>);</code></pre>
+      <p style="font-size:14px;">One oversized triangle beats two quads — no diagonal seam, fewer helper invocations. <code>textureLoad</code> (not sampled): raster texture and viewport are pixel-aligned, so filtering would only blur.</p>
+    </div>
+    <div>
+      <div class="box rust">
+        <h3>How it plugs into re_renderer</h3>
+        <ul style="font-size: 14px;">
+          <li><code>GaussianDrawData::collect_drawables()</code> emits one drawable per entity into the <b>Transparent</b> draw phase</li>
+          <li>The render pipeline blends with <code>PREMULTIPLIED_ALPHA_BLENDING</code> — matching the rasterizer's premultiplied output</li>
+          <li><b>depth_write_enabled = false</b>: splats composite over already-drawn opaque geometry (point clouds, meshes in the same view) but never occlude it in the depth buffer</li>
+          <li>The whole draw is <code>pass.set_bind_group(...); pass.draw(0..3, 0..1)</code></li>
+        </ul>
+      </div>
+      <div class="box" style="margin-top: 12px;">
+        <h3>Ordering guarantee</h3>
+        <p style="font-size: 14px;">The compute work was recorded into <code>before_view_builder_encoder</code>, which re_renderer submits <b>before</b> any view rendering — so by the time the Transparent phase samples the raster texture, the image for this frame is complete. No fences or callbacks needed.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════════ 21. BUFFERS & READBACK ════════════════════════ -->
+<section class="slide">
+  <h2>Buffer management &amp; the async readback trick</h2>
+  <p class="sub">The renderer can never know in advance how many (tile, splat) pairs a frame will produce — it depends on the camera. The solution: optimistic capacity + a non-blocking feedback loop.</p>
+  <div class="cols c2">
+    <div>
+      <h3>Capacity policy <span class="muted">(gpu_types.rs)</span></h3>
+      <table>
+        <tr><th>Resource</th><th>Sizing rule</th></tr>
+        <tr><td>instance / per-splat buffers</td><td><code>next_capacity(n)</code> = next pow-2, min 1024 — grow-only</td></tr>
+        <tr><td>intersection buffers</td><td><b>32 ×</b> instance capacity, next pow-2 (<code>INTERSECTION_CAPACITY_MULTIPLIER</code>)</td></tr>
+        <tr><td>scan block buffers</td><td>⌈n / 512⌉ blocks, next pow-2</td></tr>
+        <tr><td>sort histogram buffers</td><td>derived from intersection capacity / 256-key blocks</td></tr>
+        <tr><td>tile offsets + raster texture</td><td>resized when the <b>viewport</b> tile grid changes</td></tr>
+      </table>
+      <p style="font-size: 14px;">Growth rebuilds the affected buffers and <b>all bind groups that reference them</b> (<code>refresh_compute_bind_groups()</code> — bind groups bake buffer handles in wgpu).</p>
+    </div>
+    <div>
+      <h3>Intersection-count readback — a 3-state machine, 2 slots</h3>
+      <div class="flow" style="flex-direction: column; gap: 5px;">
+        <div class="step"><b>Frame N — Idle → CopySubmitted</b> <span class="muted"><code>copy_buffer_to_buffer</code>: GPU intersection counter → a small MAP_READ staging buffer (16 B)</span></div>
+        <div class="step"><b>Frame N+1 — CopySubmitted → Mapping</b> <span class="muted"><code>map_async</code> requested; completion flag delivered via <code>Arc&lt;Mutex&lt;Option&lt;bool&gt;&gt;&gt;</code></span></div>
+        <div class="step"><b>Frame N+2 — Mapping → Idle</b> <span class="muted">read <code>words[1]</code> (the total). If it exceeds capacity → grow buffers + refresh bind groups for the <i>next</i> frame</span></div>
+      </div>
+      <div class="box gpu" style="margin-top: 12px;">
+        <h3>The trade</h3>
+        <p style="font-size: 14px;">The render path <b>never blocks</b> on the GPU. The cost: when capacity is exceeded, that frame silently drops the overflow intersections (bounds-checked writes in stage 3) and <code>intersection_capacity_saturated</code> is flagged — correct again within ~2 frames. Two slots ping-pong so a copy can be in flight every frame.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════════ 22. STANDALONE PATH ════════════════════════ -->
+<section class="slide">
+  <h2>Path B — the standalone renderer <span class="tag core">gsplat-render</span></h2>
+  <p class="sub">Same pipeline, zero Rerun. Exists so rendering quality can be measured headlessly (CI, benchmarks) against reference implementations.</p>
+  <div class="cols c2">
+    <div>
+<pre><code>gsplat-render \
+  --ply data/trained/chair.ply \
+  --camera data/nerf-synthetic/chair/transforms_test.json \
+  --frame <span class="n">0</span> --width <span class="n">800</span> --height <span class="n">800</span> \
+  --background <span class="n">1,1,1</span> \
+  --output /tmp/chair_test_0.png     <span class="c"># or: --benchmark</span></code></pre>
+      <h3>Differences from the viewer path</h3>
+      <ul style="font-size: 14.5px;">
+        <li><b><code>GpuContext</code></b> (gpu_context.rs): headless wgpu — no window/surface, high-performance adapter, hard-fails if the adapter can't do <b>11 storage buffers per stage</b></li>
+        <li><b><code>gpu_render()</code></b> (gpu_renderer.rs, 731 lines): allocates everything per call — no caching, no async readback (it sizes intersection buffers at 32× up front and blocks at the end anyway)</li>
+        <li><b>No composite:</b> the raster texture is copied to a staging buffer (rows padded to wgpu's 256-byte alignment), mapped with <code>pollster</code>, and converted to RGB8 over the background color (<code>RenderOutput::to_rgb8</code>)</li>
+        <li><b>Cameras from disk:</b> <code>nerf_camera.rs</code> parses <code>transforms_*.json</code>; <code>ply_loader.rs</code> mirrors the Python PLY parsing field-for-field</li>
+      </ul>
+    </div>
+    <div>
+      <div class="box core">
+        <h3>What “same pipeline” means concretely</h3>
+        <p style="font-size: 14px;">Both paths call the <b>identical</b> functions from <code>gsplat_core/gpu_types.rs</code>:</p>
+        <ul style="font-size: 14px;">
+          <li><code>create_compute_bind_group_layouts()</code> — 12 layouts</li>
+          <li><code>create_compute_pipelines()</code> — 13 pipelines from the same 5 <code>include_str!</code> shaders</li>
+          <li><code>fill_project_uniform()</code> / <code>fill_scan_uniform()</code> / <code>fill_map_uniform()</code></li>
+          <li><code>pack_vec3s / pack_quats / pack_scales_opacity / pack_rgb / pack_sh_coefficients</code></li>
+          <li>all dispatch-sizing helpers (<code>dispatch_grid_1d</code> splits &gt;65 535 workgroups into a 2D grid)</li>
+        </ul>
+        <p style="font-size: 14px;">A pixel rendered by the CLI and a pixel rendered in the viewer went through the same WGSL — so PSNR measured on PNGs validates the interactive viewer too.</p>
+      </div>
+      <div class="box py" style="margin-top: 14px;">
+        <h3>Quality numbers <span class="muted">(docs/architecture.md, RTX 5090)</span></h3>
+        <table>
+          <tr><th>Scene</th><th>PSNR</th><th>SSIM</th><th>LPIPS</th><th>Time</th></tr>
+          <tr><td>Chair (40 k splats)</td><td>29.05 dB</td><td>0.948</td><td>0.061</td><td>7.4 ms (135 FPS)</td></tr>
+          <tr><td>Hotdog (19 k splats)</td><td>26.65 dB</td><td>0.939</td><td>0.118</td><td>7.5 ms</td></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════════ 23. PYTHON SIDE ════════════════════════ -->
+<section class="slide">
+  <h2>The Python side — loading &amp; logging <span class="tag py">python</span></h2>
+  <p class="sub">Deliberately thin: parse a PLY, normalize the data once, hand Rerun well-described component batches.</p>
+  <div class="cols c2">
+    <div>
+      <h3><code>Gaussians3D.from_ply()</code> — the 3DGS PLY dialect</h3>
+      <table>
+        <tr><th>PLY field(s)</th><th>Transform applied</th><th>Becomes</th></tr>
+        <tr><td><code>x y z</code></td><td>—</td><td>centers [N,3]</td></tr>
+        <tr><td><code>rot_0..3</code></td><td><b>wxyz → xyzw</b>, normalize (zero → identity)</td><td>quaternions [N,4]</td></tr>
+        <tr><td><code>scale_0..2</code></td><td><b>exp()</b> (stored in log-space), clamp ≥ 1e-6</td><td>scales [N,3]</td></tr>
+        <tr><td><code>opacity</code></td><td><b>sigmoid()</b> (stored as logits), clip [0,1]</td><td>opacities [N]</td></tr>
+        <tr><td><code>f_dc_0..2</code></td><td><b>SH_C0·dc + 0.5</b>, clamp ≥ 0</td><td>colors_dc [N,3]</td></tr>
+        <tr><td><code>f_rest_*</code></td><td>channel-major → interleaved [N,C,3]; zero-pad C up to {1,4,9,16,25}</td><td>sh_coefficients</td></tr>
+        <tr><td><code>red/green/blue</code></td><td>fallback when no SH; ints normalized by dtype max</td><td>colors_dc</td></tr>
+      </table>
+      <p style="font-size: 13.5px;" class="muted">The Rust <code>ply_loader.rs</code> performs the same transforms field-for-field — both loaders are kept in lockstep and unit-tested.</p>
+    </div>
+    <div>
+      <h3>Logging + blueprint <span class="muted">(tools/log_gaussian_ply.py)</span></h3>
+<pre><code>gaussians = <span class="t">Gaussians3D</span>.from_ply(config.ply_path)
+
+rr.send_blueprint(splat_blueprint(entity_path, gaussians))
+rr.log(entity_path, rr.Clear(recursive=<span class="k">True</span>), static=<span class="k">True</span>)
+rr.log(entity_path, gaussians, static=<span class="k">True</span>)  <span class="c"># AsComponents!</span></code></pre>
+      <div class="box py">
+        <h3>The blueprint does two jobs</h3>
+        <ul style="font-size: 14px;">
+          <li><b>Binds the visualizer:</b> <code>overrides={entity: rrb.Visualizer("GaussianSplats3D")}</code> — without this the entity would fall back to stock rendering</li>
+          <li><b>Sets the initial eye</b> with <code>EyeControls3D</code>, computed from the cloud's bounding box at distance 1.5×‖extent‖ — mirroring the Rust fallback camera</li>
+        </ul>
+      </div>
+      <div class="box py" style="margin-top: 12px;">
+        <h3>Validation up front</h3>
+        <p style="font-size: 14px;"><code>__post_init__</code> (a frozen dataclass) re-normalizes quaternions, clamps scales/opacities/colors, and checks every array's leading dimension — bad data is rejected in Python before it ever crosses gRPC. Beartype + jaxtyping enforce dtypes/shapes at runtime in the dev environment.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════════ 24. CONSTANTS ════════════════════════ -->
+<section class="slide">
+  <h2>The knobs — constants that shape the renderer <span class="tag core">gsplat_core/constants.rs · gpu_types.rs</span></h2>
+  <p class="sub">All chosen to match Brush, so output is numerically comparable to a reference implementation.</p>
+  <div class="cols c2">
+    <div>
+      <table>
+        <tr><th>Constant</th><th>Value</th><th>Effect</th></tr>
+        <tr><td><code>MAX_SPLATS_RENDERED</code></td><td>200 000</td><td>Hard per-frame cap; closest splats win</td></tr>
+        <tr><td><code>TILE_WIDTH</code></td><td>16 px</td><td>Raster tile size → 256-thread workgroups</td></tr>
+        <tr><td><code>SIGMA_COVERAGE</code></td><td>3.0</td><td>σ extent for screen bboxes (~99.7% of energy)</td></tr>
+        <tr><td><code>BRUSH_COVARIANCE_BLUR_PX</code></td><td>0.3</td><td>AA blur added to projected covariance</td></tr>
+        <tr><td><code>MIN_RADIUS_PX</code></td><td>0.35</td><td>Sub-pixel splats discarded in stage 1</td></tr>
+        <tr><td><code>BRUSH_VISIBILITY_ALPHA_THRESHOLD</code></td><td>1/255</td><td>Below this α a splat can't affect 8-bit output</td></tr>
+        <tr><td><code>PARALLEL_SPLAT_THRESHOLD</code></td><td>16 384</td><td>CPU cull/sort switches to rayon</td></tr>
+        <tr><td><code>SH_C0</code></td><td>0.2820948</td><td>1/(2√π) — DC coefficient → base color</td></tr>
+      </table>
+    </div>
+    <div>
+      <table>
+        <tr><th>GPU constant</th><th>Value</th><th>Used by</th></tr>
+        <tr><td><code>PROJECT_WORKGROUP_SIZE</code></td><td>128</td><td>project / map dispatches</td></tr>
+        <tr><td><code>COMPACTION_BLOCK_SIZE</code></td><td>512 (256 × 2)</td><td>prefix-sum blocks</td></tr>
+        <tr><td><code>SORT_WORKGROUP_SIZE / BLOCK_SIZE</code></td><td>256</td><td>radix sort</td></tr>
+        <tr><td><code>SORT_BIN_COUNT</code></td><td>16 (4-bit digits)</td><td>radix sort</td></tr>
+        <tr><td><code>INTERSECTION_CAPACITY_MULTIPLIER</code></td><td>32×</td><td>intersection buffer sizing</td></tr>
+        <tr><td><code>TILE_OFFSET_CHECKS_PER_ITER</code></td><td>8</td><td>stage-5 thread workload</td></tr>
+        <tr><td><code>RASTER_TEXTURE_FORMAT</code></td><td>Rgba8Unorm</td><td>raster target + composite</td></tr>
+      </table>
+      <div class="box" style="margin-top: 12px;">
+        <h3>Version pins that matter</h3>
+        <p style="font-size: 14px;"><code>rerun = "=0.31.1"</code> (and all 13 <code>re_*</code> crates) and <code>wgpu = "=29.0.1"</code> are pinned <b>exactly</b> — the renderer reaches into re_renderer internals (encoders, shader FS, draw phases) and shares its wgpu device, so ABI/API drift would break the build or worse, the frame.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════════════ 25. DESIGN DECISIONS ════════════════════════ -->
+<section class="slide">
+  <h2>Design decisions worth stealing (and quirks worth knowing)</h2>
+  <div class="cols c2">
+    <div>
+      <div class="box core">
+        <h3>✅ Single source of truth for GPU plumbing</h3>
+        <p style="font-size: 14px;">Bind-group layouts, pipeline creation, buffer structs, packing and dispatch math all live once in <code>gpu_types.rs</code>. The two paths can't drift apart — a layout change breaks both or neither. A Rust unit test even asserts <code>TileProjectedSplat</code>'s field offsets match the WGSL stride.</p>
+      </div>
+      <div class="box core" style="margin-top: 12px;">
+        <h3>✅ Rerun-free core = testable core</h3>
+        <p style="font-size: 14px;">CPU reference implementations (covariance, SH, culling) mirror the WGSL and are unit-tested without a GPU or a viewer. The standalone binary turns the whole pipeline into a measurable function: <code>(PLY, camera) → PNG → PSNR</code>.</p>
+      </div>
+      <div class="box gpu" style="margin-top: 12px;">
+        <h3>✅ The frame never blocks on the GPU</h3>
+        <p style="font-size: 14px;">Counts that later stages need are produced, clamped, and consumed <b>on the GPU</b>; the only readback is async with 2-frame latency and only tunes capacity. Worst case under growth: a frame drops some far intersections, never a stall.</p>
+      </div>
+    </div>
+    <div>
+      <div class="box rust">
+        <h3>⚠ Hybrid CPU/GPU sorting</h3>
+        <p style="font-size: 14px;">Depth order comes from the CPU (global sort, capped at 200 k); the GPU only groups by tile (stable radix). Cost: large clouds re-sort on the CPU when the camera moves. Brush sorts depth on the GPU too — this design trades that for simplicity and gets away with it under the 200 k cap.</p>
+      </div>
+      <div class="box rust" style="margin-top: 12px;">
+        <h3>⚠ Legacy remnants of an instanced-quad path</h3>
+        <p style="font-size: 14px;"><code>InstanceData</code> outputs (binding 6), <code>visibility_flags</code>, and <code>scatter_main</code> are still written/compiled but never consumed by the tile path. They're kept as documented lifetime anchors / compat — useful to know before “cleaning up” bindings.</p>
+      </div>
+      <div class="box rust" style="margin-top: 12px;">
+        <h3>⚠ Coordinate flips live in exactly one place</h3>
+        <p style="font-size: 14px;">NDC is y-up; the raster texture is y-down. Stage 1 flips once (<code>mean_px_raster = (x, h − y)</code>) and everything downstream is consistently raster-space. Quaternion order differs per format too: PLY stores <b>wxyz</b>, everything internal is <b>xyzw</b>.</p>
+      </div>
+      <div class="box" style="margin-top: 12px;">
+        <h3>The one-sentence summary</h3>
+        <p style="font-size: 14px;">A Python client streams Gaussian clouds over gRPC into a barely-modified Rerun viewer, where a cached visualizer culls and depth-sorts on the CPU, and a Brush-style 7-stage wgpu compute pipeline — shared verbatim with a headless evaluation CLI — projects, tile-sorts, and alpha-blends them into the viewport at interactive rates.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+</div>
+
+<div id="hud">
+  <div class="title">gsplat-rust-renderer · architecture deep dive</div>
+  <div class="nav">
+    <button id="prev">←</button>
+    <span id="counter">1 / 1</span>
+    <button id="next">→</button>
+    <button id="tocBtn" title="Table of contents (t)">☰</button>
+  </div>
+</div>
+
+<div id="toc">
+  <h2>Table of contents <span class="muted" style="font-size:14px;">(click to jump · <kbd>Esc</kbd> to close)</span></h2>
+  <ol id="tocList"></ol>
+</div>
+
+<script>
+(function () {
+  const slides = Array.from(document.querySelectorAll('.slide'));
+  const counter = document.getElementById('counter');
+  const progress = document.getElementById('progress');
+  const toc = document.getElementById('toc');
+  const tocList = document.getElementById('tocList');
+  let idx = 0;
+
+  // Build TOC from slide headings
+  slides.forEach((s, i) => {
+    const h = s.querySelector('h1, h2');
+    const li = document.createElement('li');
+    li.textContent = (i + 1) + '. ' + (h ? h.textContent.replace(/\s+/g, ' ').trim() : 'Slide');
+    li.addEventListener('click', () => { toc.classList.remove('open'); go(i); });
+    tocList.appendChild(li);
+  });
+
+  function go(n) {
+    idx = Math.max(0, Math.min(slides.length - 1, n));
+    slides.forEach((s, i) => s.classList.toggle('active', i === idx));
+    counter.textContent = (idx + 1) + ' / ' + slides.length;
+    progress.style.width = ((idx + 1) / slides.length * 100) + '%';
+    location.hash = '#' + (idx + 1);
+    slides[idx].scrollTop = 0;
+  }
+
+  document.getElementById('prev').addEventListener('click', () => go(idx - 1));
+  document.getElementById('next').addEventListener('click', () => go(idx + 1));
+  document.getElementById('tocBtn').addEventListener('click', () => toc.classList.toggle('open'));
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { toc.classList.remove('open'); return; }
+    if (toc.classList.contains('open')) return;
+    if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') { e.preventDefault(); go(idx + 1); }
+    else if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); go(idx - 1); }
+    else if (e.key === 'Home') go(0);
+    else if (e.key === 'End') go(slides.length - 1);
+    else if (e.key === 't' || e.key === 'T') toc.classList.add('open');
+  });
+
+  const fromHash = parseInt(location.hash.slice(1), 10);
+  go(Number.isFinite(fromHash) ? fromHash - 1 : 0);
+})();
+</script>
+</body>
+</html>
