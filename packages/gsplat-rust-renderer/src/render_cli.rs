@@ -25,7 +25,8 @@ use std::time::Instant;
 use clap::Parser;
 
 use gsplat_lib::gsplat_core::gpu_context::GpuContext;
-use gsplat_lib::gsplat_core::gpu_renderer::{GpuRenderer, gpu_render};
+use gsplat_lib::gsplat_core::gpu_renderer::{GpuRenderResources, GpuRenderer};
+use gsplat_lib::gsplat_core::types::RenderOutput;
 use gsplat_lib::nerf_camera;
 use gsplat_lib::ply_loader;
 
@@ -47,7 +48,8 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     frame: usize,
 
-    /// Output PNG path (required unless --benchmark).
+    /// Output PNG path (required unless --benchmark; with --benchmark,
+    /// optionally saves the last benchmark frame).
     #[arg(long, required_unless_present = "benchmark")]
     output: Option<PathBuf>,
 
@@ -115,11 +117,22 @@ fn main() -> anyhow::Result<()> {
 
     let renderer: GpuRenderer = GpuRenderer::new(&ctx.device);
 
+    // Persistent per-(cloud, resolution) resources: splat upload, scratch
+    // buffers, and bind groups happen once here, not per frame (Brush model —
+    // its benchmark harness reuses resources the same way).
+    let resources_start: Instant = Instant::now();
+    let resources: GpuRenderResources =
+        GpuRenderResources::new(&ctx.device, &renderer, &cloud, camera.viewport_size_px);
+    eprintln!(
+        "GPU resources built in {:.1}ms",
+        resources_start.elapsed().as_secs_f64() * 1000.0
+    );
+
     if args.benchmark {
         // Warmup frame (pipeline compilation happens here).
         eprintln!("Warming up (compiling GPU pipelines)...");
         let warmup_start: Instant = Instant::now();
-        let _warmup = gpu_render(&ctx, &renderer, &cloud, &camera, background);
+        let _warmup = resources.render(&ctx, &renderer, &camera);
         eprintln!(
             "Warmup: {:.1}ms",
             warmup_start.elapsed().as_secs_f64() * 1000.0
@@ -127,21 +140,35 @@ fn main() -> anyhow::Result<()> {
 
         eprintln!("Benchmarking {} frames...", args.num_frames);
         let mut total_ms: f64 = 0.0;
+        let mut last_output: Option<RenderOutput> = None;
         for i in 0..args.num_frames {
             let start: Instant = Instant::now();
-            let _output = gpu_render(&ctx, &renderer, &cloud, &camera, background);
+            let output = resources.render(&ctx, &renderer, &camera);
             let ms: f64 = start.elapsed().as_secs_f64() * 1000.0;
             total_ms += ms;
             eprintln!("  Frame {i}: {ms:.1}ms");
+            last_output = Some(output);
         }
         let avg_ms: f64 = total_ms / args.num_frames as f64;
         let fps: f64 = 1000.0 / avg_ms;
         eprintln!(
-            "Average: {avg_ms:.1}ms/frame ({fps:.1} FPS), {} splats, {}x{}",
+            "Average: {avg_ms:.3}ms/frame ({fps:.1} FPS), {} splats, {}x{}",
             cloud.len(),
             args.width,
             args.height,
         );
+        // Optionally save the last frame — proves buffer reuse stays correct.
+        if let (Some(output_path), Some(output)) = (&args.output, &last_output) {
+            let rgb8: Vec<u8> = output.to_rgb8(background);
+            image::save_buffer(
+                output_path,
+                &rgb8,
+                output.width,
+                output.height,
+                image::ColorType::Rgb8,
+            )?;
+            eprintln!("Saved last benchmark frame to {:?}", output_path);
+        }
     } else {
         let output_path = args
             .output
@@ -149,7 +176,7 @@ fn main() -> anyhow::Result<()> {
             .ok_or_else(|| anyhow::anyhow!("--output is required when not in benchmark mode"))?;
 
         let start: Instant = Instant::now();
-        let output = gpu_render(&ctx, &renderer, &cloud, &camera, background);
+        let output = resources.render(&ctx, &renderer, &camera);
         let render_ms: f64 = start.elapsed().as_secs_f64() * 1000.0;
         eprintln!("Rendered in {render_ms:.1}ms");
 

@@ -99,9 +99,10 @@ pub struct CameraApproximation {
 
 /// Output of the GPU rasterizer.
 pub struct RenderOutput {
-    /// RGBA pixels in row-major order (top-left origin), float32 per channel.
-    /// Each pixel is `[R, G, B, A]` with values in `[0, 1]`.
-    pub pixels: Vec<[f32; 4]>,
+    /// RGBA8 pixels straight from the raster texture: tightly packed,
+    /// row-major (top-left origin), 4 bytes per pixel.  Color is
+    /// alpha-premultiplied over a transparent background.
+    pub pixels: Vec<u8>,
     /// Image width in pixels.
     pub width: u32,
     /// Image height in pixels.
@@ -114,11 +115,11 @@ impl RenderOutput {
     /// Returns a flat byte array of length `width * height * 3` in row-major RGB order.
     pub fn to_rgb8(&self, background: [f32; 3]) -> Vec<u8> {
         let mut bytes: Vec<u8> = Vec::with_capacity(self.width as usize * self.height as usize * 3);
-        for pixel in &self.pixels {
-            let alpha: f32 = pixel[3];
-            let r: f32 = pixel[0] + background[0] * (1.0 - alpha);
-            let g: f32 = pixel[1] + background[1] * (1.0 - alpha);
-            let b: f32 = pixel[2] + background[2] * (1.0 - alpha);
+        for pixel in self.pixels.chunks_exact(4) {
+            let alpha: f32 = pixel[3] as f32 / 255.0;
+            let r: f32 = pixel[0] as f32 / 255.0 + background[0] * (1.0 - alpha);
+            let g: f32 = pixel[1] as f32 / 255.0 + background[1] * (1.0 - alpha);
+            let b: f32 = pixel[2] as f32 / 255.0 + background[2] * (1.0 - alpha);
             bytes.push((r.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
             bytes.push((g.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
             bytes.push((b.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);

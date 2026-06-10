@@ -103,7 +103,7 @@
 <h1>gsplat-rust-renderer vs Brush</h1>
 <p class="sub" style="font-size:17px; margin-top:8px;">Pixel-level comparison, calibration, and interactive-viewer validation of our wgpu/WGSL Gaussian-splat renderer against the Brush reference implementation.</p>
 <div class="hdr-meta">
-  date: 2026-06-10 &nbsp;·&nbsp; ours: <code>git describe 2a9e55e-dirty</code> (branch <code>worktree-feature-splatting</code>, Rerun&nbsp;0.33 upgrade + phase-3 covariance z-sign fix + phase-4 GPU-only pipeline port in working tree)
+  date: 2026-06-10 &nbsp;·&nbsp; ours: branch <code>worktree-feature-splatting</code> (z-sign fix + Rerun&nbsp;0.33/headless + GPU-only port committed as <code>9f767c3..7590879</code>; phase-5 perf work on top)
   &nbsp;·&nbsp; Brush: <code>f043db46</code> (&quot;Catch unwinds in C API&quot;, 2026-06-06, HEAD) &nbsp;·&nbsp; GPU: RTX&nbsp;5090 / Vulkan &nbsp;·&nbsp; Rerun 0.33.0
 </div>
 <nav class="toc">
@@ -118,6 +118,7 @@
     <li><a href="#brush-evolution">Brush evolution &amp; recommendations</a></li>
     <li><a href="#upgrade">Rerun 0.33 upgrade</a></li>
     <li><a href="#phase4">Phase 4 — GPU-only pipeline &amp; throughput</a></li>
+    <li><a href="#phase5">Phase 5 — performance: passing Brush</a></li>
     <li><a href="#appendix">Appendix: reproduction commands</a></li>
   </ol>
 </nav>
@@ -738,7 +739,41 @@ contributing branch; blending math unchanged. <b>Parity: all 24 views + calibrat
 4.1 &rarr; 4.0 ms on ship f0 (within run jitter — the CLI path is allocation-dominated).</p>
 </div>
 
-<h2 id="appendix">10. Appendix — reproduction commands</h2>
+<h2 id="phase5">10. Phase 5 — performance: closing (and passing) the Brush gap</h2>
+<p class="sub">Goal gates: &ge;90% of Brush throughput per cell, &ge;98% of Brush accuracy on all 24 views, viewer intact, ~10% LOC reduction.
+Worktree committed in 4 slices first (z-sign fix / 0.33+headless / GPU-only port / calibration+docs) so each perf change diffs cleanly.</p>
+
+<h3 id="phase5-e5">10.1 E5 — persistent GPU resources + RGBA8 readback (standalone CLI)</h3>
+<p>Phase-4 profiling showed the biggest cost in the standalone path was the harness, not the pipeline: <code>gpu_render()</code> re-created ~30 buffers
+and 11 bind groups, re-uploaded ~12.8&nbsp;MB of splat data <i>per call</i>, then round-tripped every pixel u8&rarr;f32&rarr;u8 through a 10&nbsp;MB Vec.
+E5 moves all of it into a persistent <code>GpuRenderResources</code> built once per (cloud, resolution): splat upload, scratch buffers, radix-sort
+pass bind groups (prebuilt per shift &times; src/dst parity, shift uniforms shared by all three sorts), raster texture and the mappable staging buffer.
+Per frame the CPU writes one ~450-byte camera uniform, encodes the (unchanged) dispatch sequence, and reads back raw RGBA8 rows with the padding
+stripped — no per-pixel conversion. Each radix sort also now encodes all its passes inside a single compute pass (dispatch order identical; WebGPU
+guarantees dispatch-order visibility within a pass).</p>
+<p>This also makes the benchmark <b>apples-to-apples with Brush</b>, whose harness reuses resources across iterations the same way.
+<code>--benchmark --output</code> saves the <i>last</i> benchmark frame as a standing buffer-reuse proof: frame 50 must (and does) equal a
+single-shot render byte-for-byte.</p>
+<table>
+<thead><tr><th>scene @ res</th><th class="num">phase 4 (fresh resources/frame)</th><th class="num">after E5 (persistent)</th>
+<th class="num">speedup</th><th class="num">Brush render_ply</th><th class="num">ours vs Brush</th><th class="num">gate (&le; Brush/0.9)</th></tr></thead>
+<tbody>
+<tr><td>chair @ 800&times;800 <span class='muted'>(39.9k splats)</span></td><td class='num'>4.7 ms</td><td class='num'><b>1.230 ms / 813 FPS</b></td><td class='num'>3.8x</td><td class='num'>1.852 ms</td><td class='num'><b>1.51&times; faster</b></td><td class='num'>2.06 ms ✅</td></tr>
+<tr><td>chair @ 1600&times;1600</td><td class='num'>9.0 ms</td><td class='num'><b>2.208 ms / 453 FPS</b></td><td class='num'>4.1x</td><td class='num'>2.819 ms</td><td class='num'><b>1.28&times; faster</b></td><td class='num'>3.13 ms ✅</td></tr>
+<tr><td>hotdog @ 800&times;800 <span class='muted'>(18.7k)</span></td><td class='num'>3.9 ms</td><td class='num'><b>1.201 ms / 833 FPS</b></td><td class='num'>3.2x</td><td class='num'>1.846 ms</td><td class='num'><b>1.54&times; faster</b></td><td class='num'>2.05 ms ✅</td></tr>
+<tr><td>hotdog @ 1600&times;1600</td><td class='num'>8.0 ms</td><td class='num'><b>2.492 ms / 401 FPS</b></td><td class='num'>3.2x</td><td class='num'>2.901 ms</td><td class='num'><b>1.16&times; faster</b></td><td class='num'>3.22 ms ✅</td></tr>
+<tr><td>ship @ 800&times;800 <span class='muted'>(19.4k)</span></td><td class='num'>4.1 ms</td><td class='num'><b>1.285 ms / 779 FPS</b></td><td class='num'>3.2x</td><td class='num'>1.892 ms</td><td class='num'><b>1.47&times; faster</b></td><td class='num'>2.10 ms ✅</td></tr>
+<tr><td>ship @ 1600&times;1600</td><td class='num'>8.3 ms</td><td class='num'><b>2.757 ms / 363 FPS</b></td><td class='num'>3.2x</td><td class='num'>3.296 ms</td><td class='num'><b>1.20&times; faster</b></td><td class='num'>3.66 ms ✅</td></tr>
+</tbody>
+</table>
+<p class="sub">Protocol identical to &sect;9.4: <code>--benchmark --num-frames 50</code> per cell, run twice, second run reported, 1 untimed warmup
+excluded; single GPU job, nvidia-smi memory.used 529&nbsp;MiB. Brush numbers re-used from the 2026-06-10 measurement (same machine, same protocol).
+Raw logs: <code>/tmp/gsplat-e5-bench/</code>. <b>The speed gate is passed in all six cells after E5 alone</b> — ours is now 1.16&ndash;1.54&times;
+faster than Brush. Accuracy: all 24 views, the calibration scene, and the 309,888-splat cloud render <b>bit-identical</b> to the phase-4 baseline
+(<code>cmp</code> on PNGs); clippy <code>-D warnings</code> + 13 tests green on both feature sets. The 310k single-shot render also dropped
+34.5 &rarr; 6.6 ms (resource build now amortized out of the frame).</p>
+
+<h2 id="appendix">11. Appendix — reproduction commands</h2>
 <pre><code><span class="c"># Paths
 # PKG = packages/gsplat-rust-renderer (worktree .claude/worktrees/feature-splatting)
 # ENVBIN = &lt;worktree&gt;/.pixi/envs/gsplat-rust-renderer/bin  (python w/ rerun-sdk 0.33, rerun CLI)</span>

@@ -42,7 +42,7 @@ pub use covariance::{
     compensate_covariance_px, mat3_from_affine, regularize_covariance,
 };
 pub use gpu_context::GpuContext;
-pub use gpu_renderer::{GpuRenderer, gpu_render};
+pub use gpu_renderer::{GpuRenderResources, GpuRenderer};
 pub use projection::normalize_quat_or_identity;
 pub use sh::{evaluate_sh_rgb, sh_degree_from_coeffs};
 pub use types::{
