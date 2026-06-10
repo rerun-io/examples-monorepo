@@ -43,10 +43,20 @@ class LandmarkEstimator:
         weights_path: Path,
         device: str = "cuda",
         config: MammaNetConfig = DEFAULT_MAMMANET_CONFIG,
+        compile_model: bool = False,
     ) -> None:
         self.config: MammaNetConfig = config
         self.device: str = device
         self.model: MammaNet = load_mammanet(weights_path, device=device, config=config)
+        if compile_model:
+            import torch._dynamo
+
+            # 15.8 -> 10.2 ms per 4-crop forward standalone, but inductor's
+            # cudagraphs fight the fitter's manual CUDA graph in-pipeline
+            # (landmarks 17.6 -> 35 ms/tick observed) — off by default until
+            # the two share a pool or MammaNet moves to TRT.
+            torch._dynamo.config.cache_size_limit = 16
+            self.model = torch.compile(self.model, mode="reduce-overhead")
 
     def estimate(
         self,

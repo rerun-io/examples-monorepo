@@ -59,6 +59,10 @@ class TrackerConfig:
     ``LOST_TICKS_BEFORE_REPROMPT`` ticks, so this can stay slow (~1s/pass)."""
     memory_window_size: int = 7
     """Sliding window of non-conditional SAM2 memories kept per object."""
+    track_stride: int = 2
+    """Run the mask tracker every Nth tick; skipped ticks reuse the previous
+    masks (person silhouettes move a few px/frame at 30 fps — landmark crops
+    tolerate a one-frame-old mask; verified by the golden gate)."""
     device: str = "cuda"
     """Compute device."""
 
@@ -95,6 +99,8 @@ class MultiViewTracker:
         self.bank: FeatureBank = FeatureBank()
         self.bootstrapped: bool = False
         self._lost_ticks: list[dict[int, int]] = [{} for _ in cameras]
+        self._last_tracks: list[CameraTracks] | None = None
+        self._ticks_seen: int = 0
         # Per camera-pair geometry for epipolar identity transfer.
         self._sigma_px: float
         self._max_dist_px: float
@@ -166,7 +172,14 @@ class MultiViewTracker:
     def step(self, frame_idx: int, frames: list[UInt8[torch.Tensor, "3 h w"]]) -> list[CameraTracks]:
         """Process one synchronized tick; returns per-camera tracks."""
         if not self.bootstrapped:
-            return self._try_bootstrap(frame_idx, frames)
+            tracks = self._try_bootstrap(frame_idx, frames)
+            if self.bootstrapped:
+                self._last_tracks = tracks
+            return tracks
+
+        self._ticks_seen += 1
+        if self.config.track_stride > 1 and self._ticks_seen % self.config.track_stride != 0 and self._last_tracks is not None:
+            return self._last_tracks
 
         prompts_per_cam: list[dict[int, Float32[ndarray, "4"]]] = [{} for _ in self.cameras]
         any_lost: bool = any(
@@ -175,7 +188,9 @@ class MultiViewTracker:
         routine: bool = self.config.redetect_interval > 0 and frame_idx % self.config.redetect_interval == 0
         if any_lost or routine:
             prompts_per_cam = self._redetect(frames)
-        return self._forward_all(frame_idx, frames, prompts_per_cam)
+        tracks = self._forward_all(frame_idx, frames, prompts_per_cam)
+        self._last_tracks = tracks
+        return tracks
 
     def _redetect(self, frames: list[UInt8[torch.Tensor, "3 h w"]]) -> list[dict[int, Float32[ndarray, "4"]]]:
         """Sparse YOLO+CLIP pass: refresh feature banks, re-prompt lost tracks."""
