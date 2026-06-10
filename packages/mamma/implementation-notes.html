@@ -40,19 +40,39 @@
 <a href="viewer.html?rrd=gate-cross.rrd" style="color:#61afef">gate-crossing run (11.79 s)</a> ·
 <a href="viewer.html?rrd=current.rrd" style="color:#61afef">intermediate optimized run</a> ·
 <a href="perf-plan.md" style="color:#61afef">perf plan</a></p>
-<p class="meta">Running log of how the implementation diverges from / interprets the approved plan
-(<code>~/.claude-work/plans/lets-make-a-plan-abstract-nest.md</code>). Updated at every milestone.
-Visual claims are backed by <code>rerun-viewer-validation</code> screenshots from M1 onward.</p>
+<p><b>Context.</b> MAMMA is a multiview markerless motion-capture pipeline (CVPR 2026): four synchronized
+cameras in, full-body SMPL-X meshes out. The research release runs as five separate programs passing files
+through disk at <b>~12 seconds per frame</b>. This page documents rewriting it as a single causal streaming
+process — decode &#8594; track &#8594; landmarks &#8594; triangulate &#8594; fit &#8594; log, no disk writes in the
+loop — running at <b>40.7 ms per frame</b> (~295&#215;, &#8805;80% of realtime on 4 cameras), with final 3D accuracy
+validated to 23.3 mm MPJPE against the original's own output. Kept as a running log during development;
+the full build history lives in the appendix at the bottom.</p>
+
+<h2>Why this was possible: the recording is the ground truth</h2>
+<p>A 295&#215; rewrite is easy to make fast and hard to keep <i>correct</i> — every optimization is a chance to
+silently break quality. Two Rerun capabilities turned that risk into routine checks:</p>
+<p><b>1. The golden artifact is an RRD, not a metrics file.</b> Before touching anything, one full run of the
+original pipeline was frozen as a Rerun recording. An <code>.rrd</code> preserves every intermediate as
+queryable data on a shared timeline — the camera video, every person mask, every 2D landmark, every fitted
+mesh — not just final numbers. That made validation <i>data analysis</i> instead of guesswork: the 30 mm
+golden gate every optimization had to pass is computed against it; when masks looked off, the
+<code>SegmentationImage</code> series was read straight out of two recordings and compared per-frame
+(IoU 0.999 at stride 1, collapses to 0.17 at stride 4 — which reverted a "passing" default); when SMPL-X
+params looked wrong on dynamic motion, mesh vertices were diffed frame-by-frame between recordings
+(11 cm mean divergence — which reverted another). Both regressions had passed the numeric gate;
+the recordings held the evidence to catch, localize, and prove them.</p>
+<p><b>2. The headless viewer makes "does it actually look right?" scriptable.</b> Rerun 0.33's native
+<code>ViewerClient.spawn(headless=True)</code> runs a real viewer with no window: load an
+<code>.rrd</code>, render, save a screenshot. Every change here ended with save &#8594; reload &#8594;
+screenshot &#8594; inspect, at the same cadence as running the test suite. That loop caught what metrics
+can't see: a missing transparent-background entry tinting whole frames, H.264 corruption from duplicate
+timestamps (warmup and timed passes sharing one timeline), masks flickering during fast motion. Render-level
+regressions became reviewable artifacts instead of "it looked fine on my machine."</p>
 
 
 <h2>Overview — what changed vs the original implementation, and why it's ~300&times; faster</h2>
-<p>The original MAMMA (the version generating the baseline comparison runs) is <b>five separate programs
-chained by disk</b>: <code>ma_cap → ma_masks → ma_2d → ma_3d → ma_vis</code>, each spawned as a subprocess that
-reads the previous stage's files and writes its own — every 4K frame extracted to JPEG, every mask written as
-PNG, landmarks/params shuttled as NPZs, models reloaded per stage. Measured: <b>~12 s per frame</b>
-(364 s for a 30-frame slice; a 478-frame clip takes on the order of 2 hours). The port is <b>one resident
-process</b> where frames stay on the GPU from NVDEC decode to Rerun log: <b>40.7 ms per frame</b>
-(14.79 s for the 363-frame / 12.1 s crossing_arms clip, including Rerun logging) — <b>~295&times; end-to-end</b>.</p>
+<p>Original: five subprocesses chained by disk (~12 s/frame, ~2 h for a 478-frame clip).
+Port: one resident GPU process (40.7 ms/frame — 14.79 s for the 363-frame crossing_arms clip, Rerun logging included).</p>
 <table>
 <tr><th>Stage</th><th>Original</th><th>This port</th><th>Why it's faster</th></tr>
 <tr><td>Ingest</td><td>extract every 4K frame to JPEG on disk, per stage re-read</td><td>NVDEC decode → GPU resize to 720p, frames never leave VRAM; per-camera decode worker processes (~400 cam-fps)</td><td>no disk I/O, no JPEG codec round-trip, decode overlaps compute</td></tr>
@@ -170,6 +190,7 @@ function ddShow(i){
 }
 </script>
 
+<details style="margin-top:1.4rem"><summary style="font-size:1.15em;font-weight:700;color:#e5c07b">Appendix — full build log (current state, mask validation evidence, milestones M0&#8594;M7)</summary>
 <h2>Current state — shipped defaults: 5/5 PASS at full mask quality <span class="meta">(2026-06-10, latest)</span></h2>
 <p><b>Shipped defaults: track_stride 1 (masks pixel-identical to per-frame tracking), 14.79 s wall ≤ 15 s gate (≥80% of realtime, Pablo decision after the mask-collapse evidence below), golden 23.3 mm MPJPE / 21.4 mm PVE; canonical <code>mamma-goal-check</code> exits 0 with 5/5 PASS.</b> The historical fastest point — 11.76 s, faster than realtime, at track_stride 4 — remains one flag away (<code>--tracker.track-stride 4</code>) and is preserved as gate-cross.rrd. Original campaign:</p>
 <p>
@@ -473,6 +494,8 @@ audit + runtime file-tree diff), and lint/typecheck/tests in mamma-dev.</p></det
 <h2 id="next">Planned next</h2>
 <p>Remaining: HF upload (user action), the 30 fps TRT campaign (pending Pablo decision), WebViewer exact-playhead captures.</p>
 
+
+</details>
 </main>
 </body>
 </html>
