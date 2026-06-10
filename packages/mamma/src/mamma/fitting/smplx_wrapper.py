@@ -13,10 +13,45 @@ NUM_BETAS: int = 16
 """Shape coefficients optimized per body (golden ``n_betas: 16``)."""
 
 
+def _patch_smplx_rigid_transform() -> None:
+    """Replace ``smplx.lbs.batch_rigid_transform`` with a sync-free version.
+
+    Upstream indexes ``transform_chain[parents[i]]`` with a 0-dim GPU tensor —
+    an implicit ``.item()`` host sync 54x per forward (~10 ms of stalls per
+    full-model call, paid on every emitted tick).
+    """
+    import smplx.lbs as _lbs
+    import torch.nn.functional as F
+
+    if getattr(_lbs, "_mamma_sync_free", False):
+        return
+
+    def batch_rigid_transform(rot_mats, joints, parents, dtype=torch.float32):
+        parent_ints: list[int] = [int(p) for p in parents.tolist()]
+        joints = torch.unsqueeze(joints, dim=-1)
+        rel_joints = joints.clone()
+        rel_joints[:, 1:] -= joints[:, parent_ints[1:]]
+        transforms_mat = _lbs.transform_mat(rot_mats.reshape(-1, 3, 3), rel_joints.reshape(-1, 3, 1)).reshape(
+            -1, joints.shape[1], 4, 4
+        )
+        chain = [transforms_mat[:, 0]]
+        for i in range(1, len(parent_ints)):
+            chain.append(torch.matmul(chain[parent_ints[i]], transforms_mat[:, i]))
+        transforms = torch.stack(chain, dim=1)
+        posed_joints = transforms[:, :, :3, 3]
+        joints_homogen = F.pad(joints, [0, 0, 0, 1])
+        rel_transforms = transforms - F.pad(torch.matmul(transforms, joints_homogen), [3, 0, 0, 0, 0, 0, 0, 0])
+        return posed_joints, rel_transforms
+
+    _lbs.batch_rigid_transform = batch_rigid_transform
+    _lbs._mamma_sync_free = True
+
+
 def build_smplx_neutral(model_folder: Path, device: str = "cuda"):
     """Neutral SMPL-X model matching ``utils_smplx.get_smplx_models``."""
     import smplx
 
+    _patch_smplx_rigid_transform()
     return smplx.create(
         str(model_folder),
         model_type="smplx",
