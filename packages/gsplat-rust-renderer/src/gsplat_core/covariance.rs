@@ -46,8 +46,17 @@ pub fn brush_covariance_in_pixels(
     focal_px: Vec2,
     pixel_center: Vec2,
 ) -> Mat2 {
-    // Transform covariance from world to view space: Σ_view = V * Σ_world * Vᵀ
-    let view_linear = mat3_from_affine(camera.view_from_world);
+    // Transform covariance from world to view space: Σ_view = V * Σ_world * Vᵀ.
+    // The world-to-view rotation is OpenGL-style (camera looks down -z), but
+    // `mean_camera` uses a z-forward frame (z = -view.z).  Express the
+    // covariance in that same z-forward frame by negating the z row of the
+    // rotation (flips sigma_xz / sigma_yz; the other entries are unchanged).
+    let view_linear_gl = mat3_from_affine(camera.view_from_world);
+    let view_linear = Mat3::from_cols(
+        Vec3::new(view_linear_gl.x_axis.x, view_linear_gl.x_axis.y, -view_linear_gl.x_axis.z),
+        Vec3::new(view_linear_gl.y_axis.x, view_linear_gl.y_axis.y, -view_linear_gl.y_axis.z),
+        Vec3::new(view_linear_gl.z_axis.x, view_linear_gl.z_axis.y, -view_linear_gl.z_axis.z),
+    );
     let covariance_view = view_linear * covariance_world * view_linear.transpose();
     // Compute the Jacobian rows of the pixel projection at the splat mean.
     let [row0, row1] = brush_camera_jacobian_rows(
