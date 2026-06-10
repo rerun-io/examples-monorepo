@@ -53,9 +53,9 @@ use crate::gsplat_core::gpu_types::{
     DEPTH_SORT_PASSES, GpuBindGroupLayouts, GpuComputePipelines, PROJECT_WORKGROUP_SIZE,
     PipelineBindGroups, PipelineBuffers, RadixSort, RadixSortBuffers, RadixSortScratch,
     SORT_BIN_COUNT,
-    SORT_BLOCK_SIZE, SORT_WORKGROUP_SIZE, TILE_OFFSET_CHECKS_PER_ITER, TILE_OFFSET_WORKGROUP_SIZE, TILE_WIDTH,
+    SORT_WORKGROUP_SIZE, TILE_OFFSET_CHECKS_PER_ITER, TILE_OFFSET_WORKGROUP_SIZE, TILE_WIDTH,
     build_radix_sort, calc_raster_extent, calc_tile_bounds, compaction_block_count,
-    create_sort_shift_uniforms,
+    create_sort_shift_uniforms, sort_workgroup_count_for,
     create_compute_bind_group_layouts, create_compute_pipelines, create_filled_buffer,
     create_pipeline_bind_groups, create_sized_buffer, dispatch_grid_1d,
     dispatch_grid_for_workgroups, fill_map_uniform, fill_project_uniform, fill_scan_uniform,
@@ -602,9 +602,7 @@ impl GaussianRenderer {
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
         ));
-        let sort_workgroup_count = intersection_capacity
-            .div_ceil(SORT_BLOCK_SIZE as usize)
-            .max(1);
+        let sort_workgroup_count = sort_workgroup_count_for(intersection_capacity) as usize;
         let sort_counts_buffer = Arc::new(create_sized_buffer(
             &ctx.device,
             &format!("{label}::sort_counts"),
@@ -657,9 +655,7 @@ impl GaussianRenderer {
             raster_extent,
         );
 
-        let depth_sort_workgroup_count = initial_capacity
-            .div_ceil(SORT_BLOCK_SIZE as usize)
-            .max(1);
+        let depth_sort_workgroup_count = sort_workgroup_count_for(initial_capacity) as usize;
 
         let buffers = ComputeBuffers {
             project_uniform_buffer,
@@ -843,12 +839,9 @@ impl GaussianRenderer {
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
         ));
-        let sort_workgroup_count = compute
-            .intersection_capacity
-            .div_ceil(SORT_BLOCK_SIZE as usize)
-            .max(1);
-        compute.sort_workgroup_count = sort_workgroup_count as u32;
-        let sort_reduce_wg_count = sort_reduce_workgroup_count(sort_workgroup_count as u32) as usize;
+        compute.sort_workgroup_count = sort_workgroup_count_for(compute.intersection_capacity);
+        let sort_workgroup_count = compute.sort_workgroup_count as usize;
+        let sort_reduce_wg_count = sort_reduce_workgroup_count(compute.sort_workgroup_count) as usize;
         compute.buffers.sort_counts_buffer = Arc::new(create_sized_buffer(
             &ctx.device,
             &format!("{label}::sort_counts"),
@@ -1025,8 +1018,7 @@ impl GaussianRenderer {
             splat_capacity * std::mem::size_of::<u32>(),
             wgpu::BufferUsages::STORAGE,
         ));
-        compute.depth_sort_workgroup_count =
-            splat_capacity.div_ceil(SORT_BLOCK_SIZE as usize).max(1) as u32;
+        compute.depth_sort_workgroup_count = sort_workgroup_count_for(splat_capacity);
         compute.buffers.projected_tile_splats_buffer = Arc::new(create_sized_buffer(
             &ctx.device,
             &format!("{label}::projected_tile_splats"),

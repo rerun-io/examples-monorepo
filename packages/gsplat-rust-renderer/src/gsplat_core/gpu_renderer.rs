@@ -156,13 +156,10 @@ impl GpuRenderResources {
         let block_capacity: usize = next_block_capacity(total_splats);
         let block2_capacity: usize = next_block_capacity(block_capacity);
         let isect_capacity: usize = intersection_capacity_for_instances(instance_capacity);
-        let tile_sort_wg_count: u32 = (isect_capacity as u32).div_ceil(SORT_BLOCK_SIZE).max(1);
-        let depth_sort_wg_count: u32 = (instance_capacity as u32).div_ceil(SORT_BLOCK_SIZE).max(1);
+        let tile_sort_wg_count: u32 = sort_workgroup_count_for(isect_capacity);
+        let depth_sort_wg_count: u32 = sort_workgroup_count_for(instance_capacity);
         let sort_reduce_wg_count: u32 = sort_reduce_workgroup_count(tile_sort_wg_count);
-        let sort_scan_block_capacity: usize = (sort_reduce_wg_count as usize)
-            .div_ceil(COMPACTION_BLOCK_SIZE as usize)
-            .next_power_of_two()
-            .max(1);
+        let sort_scan_block_capacity: usize = next_block_capacity(sort_reduce_wg_count as usize);
 
         // ── Uniform buffers ──────────────────────────────────────────────
         let block_count: u32 = compaction_block_count(total_splats) as u32;

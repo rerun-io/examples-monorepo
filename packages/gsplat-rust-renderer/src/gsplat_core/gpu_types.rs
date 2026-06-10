@@ -255,6 +255,12 @@ pub fn compaction_block_count(required: usize) -> usize {
     required.max(1).div_ceil(COMPACTION_BLOCK_SIZE as usize)
 }
 
+/// Number of count/scatter workgroups for a radix sort over `num_elements`
+/// key slots (one thread per slot).
+pub fn sort_workgroup_count_for(num_elements: usize) -> u32 {
+    (num_elements as u32).div_ceil(SORT_BLOCK_SIZE).max(1)
+}
+
 /// Number of `sort_reduce` workgroups for a radix sort with `sort_wg_count`
 /// count/scatter workgroups: one reduction slot per bin per reduce block.
 pub fn sort_reduce_workgroup_count(sort_wg_count: u32) -> u32 {

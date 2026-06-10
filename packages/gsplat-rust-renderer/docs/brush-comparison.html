@@ -791,6 +791,31 @@ clean, save→reload→screenshot PASS, 309,888-splat viewer render PASS (report
 trade away bit-identical renders (subgroup ops reorder float operations) or add kernels/LOC for speed the gates don't need.  Kept as future
 work in §7's adoption list — relevant again only if a much heavier workload (multi-million splats, 4K) reopens the gap.</p>
 
+<h3 id="phase5-final">10.4 Final numbers — all four goal gates green</h3>
+<table>
+<thead><tr><th>scene @ res</th><th class="num">phase-4 baseline</th><th class="num"><b>final</b></th><th class="num">Brush render_ply</th><th class="num">ours vs Brush</th><th class="num">gate (&le; Brush/0.9)</th></tr></thead>
+<tbody>
+<tr><td>chair @ 800&times;800</td><td class='num'>4.7 ms</td><td class='num'><b>1.181 ms / 847 FPS</b></td><td class='num'>1.852 ms</td><td class='num'><b>1.57&times; faster</b></td><td class='num'>2.06 ms ✅</td></tr>
+<tr><td>chair @ 1600&times;1600</td><td class='num'>9.0 ms</td><td class='num'><b>1.990 ms / 502 FPS</b></td><td class='num'>2.819 ms</td><td class='num'><b>1.42&times; faster</b></td><td class='num'>3.13 ms ✅</td></tr>
+<tr><td>hotdog @ 800&times;800</td><td class='num'>3.9 ms</td><td class='num'><b>1.165 ms / 858 FPS</b></td><td class='num'>1.846 ms</td><td class='num'><b>1.58&times; faster</b></td><td class='num'>2.05 ms ✅</td></tr>
+<tr><td>hotdog @ 1600&times;1600</td><td class='num'>8.0 ms</td><td class='num'><b>2.249 ms / 445 FPS</b></td><td class='num'>2.901 ms</td><td class='num'><b>1.29&times; faster</b></td><td class='num'>3.22 ms ✅</td></tr>
+<tr><td>ship @ 800&times;800</td><td class='num'>4.1 ms</td><td class='num'><b>1.262 ms / 792 FPS</b></td><td class='num'>1.892 ms</td><td class='num'><b>1.50&times; faster</b></td><td class='num'>2.10 ms ✅</td></tr>
+<tr><td>ship @ 1600&times;1600</td><td class='num'>8.3 ms</td><td class='num'><b>2.487 ms / 402 FPS</b></td><td class='num'>3.296 ms</td><td class='num'><b>1.33&times; faster</b></td><td class='num'>3.66 ms ✅</td></tr>
+</tbody>
+</table>
+<p class="sub">Protocol as &sect;9.4 (50 frames &times; 2 runs, 2nd reported, 1 untimed warmup; single job; nvidia-smi memory.used 481 MiB;
+raw logs <code>/tmp/gsplat-final-bench/</code>; Brush numbers measured 2026-06-10 on the same machine).
+<b>Speed:</b> 1.29&ndash;1.58&times; faster than Brush in all six cells (gate: &ge;90% of Brush — exceeded everywhere).
+<b>Accuracy:</b> all 24 views, the calibration scene (9/9 color-resolvable markers &le;0.11 px, depth probe occluded), the 309,888-splat cloud,
+and frame 50 of a 50-frame benchmark are <b>bit-identical</b> to the phase-4 validated baseline — ours-vs-GT therefore still equals
+Brush-vs-GT &plusmn;0.01 dB on every view (gate: &ge;98% — held at 100%).
+<b>Viewer:</b> headless screenshot pixel-identical to the originally validated one (SSIM 1.0000; matched-pose vs CLI 0.9922),
+<code>rrd verify</code> clean, save&rarr;reload round-trip and 310k-splat viewer render pass.
+<b>LOC:</b> 8,264 &rarr; <b>7,441</b> Rust+WGSL (&minus;10.0%).
+A 7-angle code review (3 correctness + reuse/simplification/efficiency/altitude finders, adversarially verified) surfaced two small reuse
+cleanups (shared <code>sort_workgroup_count_for</code> helper; <code>next_block_capacity</code> reuse) — applied; the one correctness-class
+candidate (sort scratch over-allocation) was refuted against the code.</p>
+
 <h2 id="appendix">11. Appendix — reproduction commands</h2>
 <pre><code><span class="c"># Paths
 # PKG = packages/gsplat-rust-renderer (worktree .claude/worktrees/feature-splatting)
