@@ -61,14 +61,9 @@ _SMPLX_PARENTS: list[int] = [
     21, 40, 41, 21, 43, 44, 21, 46, 47, 21, 49, 50, 21, 52, 53,
 ]
 _SMPLX_BONES: list[tuple[int, int]] = [(p, i) for i, p in enumerate(_SMPLX_PARENTS) if p >= 0]
-def _smplx_entity_paths(root: str) -> list[str]:
-    """Entity path per tree joint, nested along the kinematic chain — the
-    Rerun transform hierarchy IS the skeleton."""
-    paths: list[str] = []
-    for j, parent in enumerate(_SMPLX_PARENTS):
-        name: str = _SMPLX_JOINT_NAMES[j] if j < len(_SMPLX_JOINT_NAMES) else f"j{j}"
-        paths.append(f"{root}/{name}" if parent < 0 else f"{paths[parent]}/{name}")
-    return paths
+def _smplx_joint_name(j: int) -> str:
+    """Human name for tree joint ``j`` (generic for the hand chain tail)."""
+    return _SMPLX_JOINT_NAMES[j] if j < len(_SMPLX_JOINT_NAMES) else f"j{j}"
 
 
 _SMPLX_JOINT_NAMES: list[str] = [
@@ -121,6 +116,7 @@ class StreamLogger:
             VideoCodecChoice.AV1: rr.VideoCodec.AV1,
         }
         self._rerun_codec: rr.VideoCodec = rerun_codec_by_choice[video_codec]
+        self._skeleton_frames_logged: set[int] = set()
 
     def setup(self) -> None:
         """Send blueprint and static scene structure (run once, before the loop)."""
@@ -304,11 +300,18 @@ class StreamLogger:
                 ),
             )
             # SMPL-X parameters logged as what they ARE: a kinematic tree of
-            # relative transforms. global_orient+trans = root transform; each
-            # tree joint = axis-angle rotation relative to its parent with a
-            # constant (betas-determined) bone offset. The entity hierarchy is
-            # the skeleton; gizmos show per-joint local rotations.
-            paths: list[str] = _smplx_entity_paths(f"{WORLD_TAG}/skeleton/person_{obj_id}")
+            # relative transforms, expressed as 0.33 NAMED TRANSFORM FRAMES
+            # (tf2-style): flat entity paths, each joint bound to a named frame
+            # via CoordinateFrame, and the frame graph carrying the per-joint
+            # axis-angle rotation relative to its parent frame with the
+            # constant (betas-determined) bone offset. Root frame parents to
+            # the world's implicit frame.
+            root: str = f"{WORLD_TAG}/skeleton/person_{obj_id}"
+            frames_: list[str] = [f"person{obj_id}/{_smplx_joint_name(j)}" for j in range(len(_SMPLX_PARENTS))]
+            if obj_id not in self._skeleton_frames_logged:
+                for j in range(len(_SMPLX_PARENTS)):
+                    rr.log(f"{root}/{_smplx_joint_name(j)}", rr.CoordinateFrame(frames_[j]), static=True)
+                self._skeleton_frames_logged.add(obj_id)
             pose_aa: ndarray = fit.pose.reshape(55, 3)
             rest: ndarray = fit.rest_joints
             for j, parent in enumerate(_SMPLX_PARENTS):
@@ -316,10 +319,12 @@ class StreamLogger:
                 angle: float = float(np.linalg.norm(pose_aa[j]))
                 axis: ndarray = pose_aa[j] / angle if angle > 1e-8 else np.array([1.0, 0.0, 0.0])
                 rr.log(
-                    paths[j],
+                    f"{root}/{_smplx_joint_name(j)}",
                     rr.Transform3D(
                         translation=offset,
                         rotation=rr.RotationAxisAngle(axis=axis, angle=angle),
+                        child_frame=frames_[j],
+                        parent_frame=f"tf#{WORLD_TAG}" if parent < 0 else frames_[parent],
                     ),
                 )
             rr.log(f"metrics/params/person_{obj_id}/trans", rr.Scalars(fit.trans))
