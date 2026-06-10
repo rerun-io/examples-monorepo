@@ -35,7 +35,7 @@
 <body>
 <main>
 <h1>mamma — streaming multiview body capture: implementation notes</h1>
-<p><b>Interactive RRD comparison:</b> <a href="compare3.html" style="color:#61afef">original vs first optimization vs final (3-way)</a> · <a href="compare.html" style="color:#61afef">baseline vs final side-by-side</a>
+<p><b>Interactive RRD comparison:</b> <a href="compare-rj.html" style="color:#61afef">dynamic clip: original DAG vs broken default vs gate-pass (3-way)</a> · <a href="compare3.html" style="color:#61afef">crossing_arms: original vs first optimization vs final</a> · <a href="compare.html" style="color:#61afef">baseline vs final</a>
 (in-browser Rerun viewers; ~190 MB each, give them a moment) ·
 <a href="viewer.html?rrd=gate-cross.rrd" style="color:#61afef">gate-crossing run (11.79 s)</a> ·
 <a href="viewer.html?rrd=current.rrd" style="color:#61afef">intermediate optimized run</a> ·
@@ -43,10 +43,27 @@
 <p><b>Context.</b> MAMMA is a multiview markerless motion-capture pipeline (CVPR 2026): four synchronized
 cameras in, full-body SMPL-X meshes out. The research release runs as five separate programs passing files
 through disk at <b>~12 seconds per frame</b>. This page documents rewriting it as a single causal streaming
-process — decode &#8594; track &#8594; landmarks &#8594; triangulate &#8594; fit &#8594; log, no disk writes in the
-loop — running at <b>40.7 ms per frame</b> (~295&#215;, &#8805;80% of realtime on 4 cameras), with final 3D accuracy
-validated to 23.3 mm MPJPE against the original's own output. Kept as a running log during development;
-the full build history lives in the appendix at the bottom.</p>
+process &mdash; decode &#8594; track &#8594; landmarks &#8594; triangulate &#8594; fit &#8594; log, no disk writes in the
+loop &mdash; validated against the original's own output on <b>two golden artifacts</b>: a quasi-static clip
+(20.5 mm MPJPE) and a fast-motion runs-and-jumps clip (per-frame PVE max 23.4 mm). Two operating points:
+quality defaults at &#8805;50% of realtime (~190&#215;), and a faster-than-realtime configuration (~295&#215;)
+one flag away. The full build history lives in the appendix at the bottom.</p>
+
+<h2>Current setup &mdash; gates and shipped defaults</h2>
+<table>
+<tr><th>Gate (all six in <code>mamma-goal-check</code>)</th><th>Criterion</th><th>Current</th></tr>
+<tr><td>1 &#183; golden (static)</td><td>crossing_arms frames 60:90 MPJPE/PVE vs original &#8804; 30 mm</td><td>20.5 / 15.2 mm</td></tr>
+<tr><td>2 &#183; golden (dynamic)</td><td>running_jumping per-frame PVE vs original, <b>p95 AND max &#8804; 30 mm</b>, all 469 frames</td><td>p95 18.6, max 23.4 mm</td></tr>
+<tr><td>3 &#183; realtime</td><td>both clips: wall &#8804; 2&#215; clip duration (&#8805;50% of realtime) incl. Rerun logging</td><td>gated per run</td></tr>
+<tr><td>4 &#183; datasets</td><td>HOCap + Assembly101 ingest &#8594; validated RRDs</td><td>PASS</td></tr>
+<tr><td>5 &#183; no-writes</td><td>streaming loop creates no files</td><td>PASS</td></tr>
+<tr><td>6 &#183; hygiene</td><td>ruff + pyrefly + pytest clean</td><td>PASS</td></tr>
+</table>
+<p>Shipped defaults (one config passes every gate): <b>dual-resolution pipeline</b> (decode native 4K,
+track/log at 720p, MammaNet crops sampled from native), all strides 1, 48 graph-replayed Adam iterations per
+tick, <b>fixed-lag emission</b> (4 frames = 133 ms), reprojection-dominant loss (120 vs 20 anchors,
+visibility-gated observations), floor model (penetration + height-gated contact pull), graphed 300-iteration
+bootstrap, TensorRT MammaNet, multiprocess NVDEC decode.</p>
 
 <h2>Why this was possible: the recording is the ground truth</h2>
 <p>A 295&#215; rewrite is easy to make fast and hard to keep <i>correct</i> — every optimization is a chance to
@@ -81,14 +98,13 @@ Port: one resident GPU process (40.7 ms/frame — 14.79 s for the 363-frame cros
 <tr><td>3D fit</td><td>whole-sequence 4-stage LBFGS over all frames at once (inherently offline)</td><td>causal sliding-window Adam (W=8) over an exact 512-vertex sampled SMPL-X; the whole optimizer step is a replayed CUDA graph, including the 300-iter bootstrap</td><td>512 vs 10,475 verts per iteration, graph replay kills per-iter launch overhead (92 → 15.3 ms per 16-iter tick), sync-free rigid chain (smplx upstream hides 54 host syncs per forward)</td></tr>
 <tr><td>Visualization</td><td>separate ma_vis pass: pyrender overlay videos + scene.rrd re-reading everything from disk</td><td>logging happens inside the loop: NVENC H.264 → <code>rr.VideoStream</code> per camera, GPU YUV conversion, async worker thread</td><td>visualization is free-riding on the streaming pass instead of a sixth program</td></tr>
 </table>
-<p>Two design rules made the speed trustworthy rather than just fast: (1) a <b>golden gate</b> — every change
-re-validated against the frozen original output (MPJPE/PVE ≤ 30 mm on crossing_arms; shipped defaults measure
-23.3 mm); (2) when a speed lever degraded quality outside what the gate covers, <b>quality won the default</b>:
-track_stride and fit_stride both shipped at 1 after mask-collapse / dynamic-motion evidence (see the mask
-validation section and perf-plan round 7), relaxing the wall-time gate to 15 s (≥80% of realtime). The fastest
-verified configuration (11.76 s, faster than realtime) remains available via flags. What the port gives up by
-design: causality (no future frames — the original's whole-sequence LBFGS sees the entire clip), and 720p
-inference instead of 4K.</p>
+<p>Two design rules made the speed trustworthy rather than just fast: (1) <b>golden gates</b> &mdash; every change
+re-validated against frozen original outputs, now on BOTH a quasi-static clip (MPJPE/PVE &#8804; 30 mm) and a
+fast-motion clip (per-frame PVE p95+max &#8804; 30 mm &mdash; the gate that caught and then drove out every dynamic
+regression); (2) when speed levers degraded quality anywhere, <b>quality won the defaults</b> and the runtime
+gate moved instead (now wall &#8804; 2&#215; clip duration). The fastest verified configuration (11.76 s for the
+12.1 s clip, faster than realtime) remains available via flags. What the port gives up by design: 133 ms of
+output latency (fixed-lag emission), and the original's whole-sequence hindsight.</p>
 
 
 <h2 id="deep-dives">Deep dives — each optimization, with architecture</h2>
@@ -217,6 +233,7 @@ reprojection-dominant weights (120 vs 20) closed the final 14 mm. The crossing_a
 under the new defaults: 23.3 &#8594; 20.5 mm MPJPE. An anchor-count-triggered LBFGS polish was implemented and
 benched — it confirmed Adam had already converged (identical results), localizing the gap to the objective,
 not the optimizer.</p>
+<p>Recordings: <a href="viewer.html?rrd=iphone-rj-gatepass.rrd" style="color:#61afef">gate-passing run</a> &#183; <a href="viewer.html?rrd=iphone-rj-original.rrd" style="color:#61afef">original DAG reference</a> &#183; <a href="viewer.html?rrd=iphone-running-jumping.rrd" style="color:#61afef">the broken stride-5 default that started this</a>.</p>
 <p>Dead ends kept for the record: positional acceleration loss (the original ships it commented out too —
 at 30 fps even weight 0.002 crushed real jump accelerations, +29 mm mean); strong first-difference smoothing
 (halved the bend error, doubled everything else). Remaining gap: ~9 mm on five frames (f111-125, the bend) —
