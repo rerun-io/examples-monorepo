@@ -3,7 +3,9 @@
 //! Implements the same GPU-only compute pipeline as `gaussian_renderer.rs`
 //! (project_forward cull → depth argsort → project_visible → map intersections
 //! → tile radix sort → tile offsets → rasterize) but uses raw `wgpu` directly
-//! instead of `re_renderer`.
+//! instead of `re_renderer`.  The bind group layouts, pipelines, bind groups,
+//! and radix sorts all come from [`super::gpu_types`] — the single source of
+//! truth shared with the viewer path.
 //!
 //! All GPU resources — splat data, scratch buffers, bind groups, the radix
 //! sort passes, and the readback staging buffer — live in
@@ -22,11 +24,13 @@ use super::types::{CameraApproximation, RenderGaussianCloud, RenderOutput};
 // Renderer (holds reusable pipelines)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Holds all compute pipelines and bind group layouts.
-/// Created once from the shared definitions in `gpu_types`, reused across frames.
+/// Holds all compute pipelines, bind group layouts, and the radix-sort shift
+/// uniforms.  Created once from the shared definitions in `gpu_types`,
+/// reused across frames.
 pub struct GpuRenderer {
     pub layouts: GpuBindGroupLayouts,
     pub pipelines: GpuComputePipelines,
+    shift_ubs: Vec<wgpu::Buffer>,
 }
 
 impl GpuRenderer {
@@ -34,227 +38,11 @@ impl GpuRenderer {
     pub fn new(device: &wgpu::Device) -> Self {
         let layouts = create_compute_bind_group_layouts(device);
         let pipelines = create_compute_pipelines(device, &layouts);
-        Self { layouts, pipelines }
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// GPU radix argsort (count-buffer driven, brush v0.3.0 pattern)
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/// Buffers for one GPU radix argsort over `(key, value)` pairs.
-///
-/// The number of keys is read on the GPU from `num_keys[0]` — dispatches are
-/// capacity-sized and early-exit, so no CPU readback or indirect dispatch is
-/// needed.  Used three times per frame: gid canonicalization + depth argsort
-/// (keys = f32 depth bits, values = global gids) and tile-id sort (keys =
-/// tile ids, values = compact gids).
-struct RadixSortBuffers<'a> {
-    keys_primary: &'a wgpu::Buffer,
-    vals_primary: &'a wgpu::Buffer,
-    keys_alt: &'a wgpu::Buffer,
-    vals_alt: &'a wgpu::Buffer,
-    /// GPU buffer whose first u32 is the number of keys to sort.
-    num_keys: &'a wgpu::Buffer,
-    counts: &'a wgpu::Buffer,
-    reduced: &'a wgpu::Buffer,
-    scan_offsets: &'a wgpu::Buffer,
-    scan_block_offsets: &'a wgpu::Buffer,
-    scan_totals: &'a wgpu::Buffer,
-}
-
-/// Bind groups that depend on the radix pass index — the 4-bit shift uniform
-/// and the src/dst buffer parity (even passes read primary, odd read alt).
-struct RadixSortPassBindGroups {
-    count_bg: wgpu::BindGroup,
-    reduce_bg: wgpu::BindGroup,
-    scan_add_bg: wgpu::BindGroup,
-    scatter_bg: wgpu::BindGroup,
-}
-
-/// Prebuilt bind groups and dispatch grids for one radix argsort instance.
-///
-/// With an even pass count the sorted data lands back in the primary buffers;
-/// for an odd count the caller must copy back from the alt buffers.
-struct RadixSort {
-    passes: Vec<RadixSortPassBindGroups>,
-    scan_blocks_bg: wgpu::BindGroup,
-    scan_block_sums_bg: wgpu::BindGroup,
-    compose_bg: wgpu::BindGroup,
-    /// Grid for the count + scatter kernels (one thread per key slot).
-    count_grid: (u32, u32),
-    /// Grid for the reduce + scan_add kernels.
-    reduce_grid: (u32, u32),
-    scan_blocks_grid: (u32, u32),
-    compose_grid: (u32, u32),
-}
-
-/// Build the per-pass bind groups for `num_passes` 4-bit radix sort passes.
-///
-/// `shift_ubs[i]` must hold a [`SortUniformBuffer`] with `shift = i * 4`.
-fn build_radix_sort(
-    device: &wgpu::Device,
-    layouts: &GpuBindGroupLayouts,
-    shift_ubs: &[wgpu::Buffer],
-    buffers: &RadixSortBuffers<'_>,
-    sort_wg_count: u32,
-    num_passes: u32,
-) -> RadixSort {
-    let sort_reduce_wg_count: u32 = sort_reduce_workgroup_count(sort_wg_count.max(1));
-    let reduced_total: u32 = sort_reduce_wg_count;
-    let reduced_block_count: u32 = compaction_block_count(reduced_total as usize) as u32;
-    let scan_sort_uniform: ScanUniformBuffer = fill_scan_uniform(reduced_total as usize);
-    let scan_sort_ub: wgpu::Buffer = create_filled_buffer(
-        device,
-        "scan_sort_ub",
-        wgpu::BufferUsages::UNIFORM,
-        bytemuck::bytes_of(&scan_sort_uniform),
-    );
-
-    let passes: Vec<RadixSortPassBindGroups> = (0..num_passes)
-        .map(|pass_index| {
-            let sort_ub: &wgpu::Buffer = &shift_ubs[pass_index as usize];
-            let use_primary: bool = pass_index % 2 == 0;
-            let (src_keys, src_vals, dst_keys, dst_vals) = if use_primary {
-                (
-                    buffers.keys_primary,
-                    buffers.vals_primary,
-                    buffers.keys_alt,
-                    buffers.vals_alt,
-                )
-            } else {
-                (
-                    buffers.keys_alt,
-                    buffers.vals_alt,
-                    buffers.keys_primary,
-                    buffers.vals_primary,
-                )
-            };
-
-            RadixSortPassBindGroups {
-                count_bg: device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("sort_count_bg"),
-                    layout: &layouts.sort_count,
-                    entries: &[
-                        storage_buffer_entry(0, sort_ub),
-                        storage_buffer_entry(1, src_keys),
-                        storage_buffer_entry(2, buffers.counts),
-                        storage_buffer_entry(6, buffers.num_keys),
-                    ],
-                }),
-                reduce_bg: device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("sort_reduce_bg"),
-                    layout: &layouts.sort_reduce,
-                    entries: &[
-                        storage_buffer_entry(0, sort_ub),
-                        storage_buffer_entry(1, buffers.counts),
-                        storage_buffer_entry(2, buffers.reduced),
-                        storage_buffer_entry(6, buffers.num_keys),
-                    ],
-                }),
-                scan_add_bg: device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("sort_scan_add_bg"),
-                    layout: &layouts.sort_scan_add,
-                    entries: &[
-                        storage_buffer_entry(0, sort_ub),
-                        storage_buffer_entry(1, buffers.reduced),
-                        storage_buffer_entry(2, buffers.counts),
-                        storage_buffer_entry(6, buffers.num_keys),
-                    ],
-                }),
-                scatter_bg: device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("sort_scatter_bg"),
-                    layout: &layouts.sort_scatter,
-                    entries: &[
-                        storage_buffer_entry(0, sort_ub),
-                        storage_buffer_entry(1, src_keys),
-                        storage_buffer_entry(2, src_vals),
-                        storage_buffer_entry(3, buffers.counts),
-                        storage_buffer_entry(4, dst_keys),
-                        storage_buffer_entry(5, dst_vals),
-                        storage_buffer_entry(6, buffers.num_keys),
-                    ],
-                }),
-            }
-        })
-        .collect();
-
-    RadixSort {
-        passes,
-        scan_blocks_bg: device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("sort_scan_blocks_bg"),
-            layout: &layouts.scan,
-            entries: &[
-                storage_buffer_entry(16, buffers.reduced),
-                storage_buffer_entry(17, buffers.scan_offsets),
-                storage_buffer_entry(18, buffers.scan_block_offsets),
-                storage_buffer_entry(19, &scan_sort_ub),
-            ],
-        }),
-        scan_block_sums_bg: device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("sort_scan_block_sums_bg"),
-            layout: &layouts.scan_block_sums,
-            entries: &[
-                storage_buffer_entry(24, buffers.scan_block_offsets),
-                storage_buffer_entry(25, buffers.scan_totals),
-                storage_buffer_entry(26, &scan_sort_ub),
-            ],
-        }),
-        compose_bg: device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("sort_scan_compose_bg"),
-            layout: &layouts.sort_scan_compose,
-            entries: &[
-                storage_buffer_entry(8, buffers.scan_offsets),
-                storage_buffer_entry(9, buffers.scan_block_offsets),
-                storage_buffer_entry(10, buffers.reduced),
-                storage_buffer_entry(11, &scan_sort_ub),
-            ],
-        }),
-        count_grid: dispatch_grid_for_workgroups(sort_wg_count.max(1)),
-        reduce_grid: dispatch_grid_for_workgroups(sort_reduce_wg_count),
-        scan_blocks_grid: dispatch_grid_1d(reduced_block_count, 1),
-        compose_grid: dispatch_grid_1d(reduced_total, SORT_WORKGROUP_SIZE),
-    }
-}
-
-impl RadixSort {
-    /// Encode all radix passes into one compute pass.  Dispatch order is
-    /// identical to encoding each pass separately — WebGPU guarantees
-    /// dispatch-order visibility within a compute pass.
-    fn encode(&self, encoder: &mut wgpu::CommandEncoder, pipelines: &GpuComputePipelines) {
-        let mut pass: wgpu::ComputePass<'_> =
-            encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("radix_sort"),
-                timestamp_writes: None,
-            });
-        for pass_bgs in &self.passes {
-            pass.set_pipeline(&pipelines.sort_count);
-            pass.set_bind_group(0, &pass_bgs.count_bg, &[]);
-            pass.dispatch_workgroups(self.count_grid.0, self.count_grid.1, 1);
-
-            pass.set_pipeline(&pipelines.sort_reduce);
-            pass.set_bind_group(0, &pass_bgs.reduce_bg, &[]);
-            pass.dispatch_workgroups(self.reduce_grid.0, self.reduce_grid.1, 1);
-
-            pass.set_pipeline(&pipelines.scan_blocks);
-            pass.set_bind_group(0, &self.scan_blocks_bg, &[]);
-            pass.dispatch_workgroups(self.scan_blocks_grid.0, self.scan_blocks_grid.1, 1);
-
-            pass.set_pipeline(&pipelines.scan_block_sums);
-            pass.set_bind_group(0, &self.scan_block_sums_bg, &[]);
-            pass.dispatch_workgroups(1, 1, 1);
-
-            pass.set_pipeline(&pipelines.sort_scan_compose);
-            pass.set_bind_group(0, &self.compose_bg, &[]);
-            pass.dispatch_workgroups(self.compose_grid.0, self.compose_grid.1, 1);
-
-            pass.set_pipeline(&pipelines.sort_scan_add);
-            pass.set_bind_group(0, &pass_bgs.scan_add_bg, &[]);
-            pass.dispatch_workgroups(self.reduce_grid.0, self.reduce_grid.1, 1);
-
-            pass.set_pipeline(&pipelines.sort_scatter);
-            pass.set_bind_group(0, &pass_bgs.scatter_bg, &[]);
-            pass.dispatch_workgroups(self.count_grid.0, self.count_grid.1, 1);
+        let shift_ubs = create_sort_shift_uniforms(device);
+        Self {
+            layouts,
+            pipelines,
+            shift_ubs,
         }
     }
 }
@@ -290,22 +78,12 @@ pub struct GpuRenderResources {
     tile_offsets_grid: (u32, u32),
     raster_grid: (u32, u32),
 
-    // Pipeline bind groups.
-    project_forward_bg: wgpu::BindGroup,
-    project_visible_bg: wgpu::BindGroup,
-    scan_bg: wgpu::BindGroup,
-    scan_l2_bg: wgpu::BindGroup,
-    scan_block_sums_bg: wgpu::BindGroup,
-    scan_compose_bg: wgpu::BindGroup,
-    map_bg: wgpu::BindGroup,
-    tile_offsets_bg: wgpu::BindGroup,
-    rasterize_bg: wgpu::BindGroup,
+    bind_groups: PipelineBindGroups,
 
     // Radix sorts (gid canonicalization, depth argsort, tile-id sort).
     gid_sort: RadixSort,
     depth_sort: RadixSort,
     tile_sort: RadixSort,
-    num_tile_sort_passes: u32,
     isect_capacity: usize,
 
     // Buffers touched by encoder-level ops (clears / copies) each frame.
@@ -431,24 +209,6 @@ impl GpuRenderResources {
             wgpu::BufferUsages::UNIFORM,
             bytemuck::bytes_of(&raster_uniform),
         );
-        // Radix sort shift uniforms — shift = pass * 4, shared by all sorts.
-        let max_sort_passes: u32 = DEPTH_SORT_PASSES
-            .max(gid_sort_passes(total_splats))
-            .max(tile_sort_passes(n_tiles));
-        let shift_ubs: Vec<wgpu::Buffer> = (0..max_sort_passes)
-            .map(|pass_index| {
-                create_filled_buffer(
-                    device,
-                    "sort_shift_ub",
-                    wgpu::BufferUsages::UNIFORM,
-                    bytemuck::bytes_of(&SortUniformBuffer {
-                        shift: pass_index * SORT_BITS_PER_PASS,
-                        total_keys_unused: 0,
-                        _pad: [0; 2],
-                    }),
-                )
-            })
-            .collect();
 
         // ── Intermediate buffers ─────────────────────────────────────────
         let sz = |n: usize, elem: usize| n * elem;
@@ -629,7 +389,7 @@ impl GpuRenderResources {
         let gid_sort: RadixSort = build_radix_sort(
             device,
             &renderer.layouts,
-            &shift_ubs,
+            &renderer.shift_ubs,
             &RadixSortBuffers {
                 keys_primary: &global_from_compact_buf,
                 vals_primary: &depth_keys_buf,
@@ -648,7 +408,7 @@ impl GpuRenderResources {
         let depth_sort: RadixSort = build_radix_sort(
             device,
             &renderer.layouts,
-            &shift_ubs,
+            &renderer.shift_ubs,
             &RadixSortBuffers {
                 keys_primary: &depth_keys_buf,
                 vals_primary: &global_from_compact_buf,
@@ -664,11 +424,10 @@ impl GpuRenderResources {
             depth_sort_wg_count,
             DEPTH_SORT_PASSES,
         );
-        let num_tile_sort_passes: u32 = tile_sort_passes(n_tiles);
         let tile_sort: RadixSort = build_radix_sort(
             device,
             &renderer.layouts,
-            &shift_ubs,
+            &renderer.shift_ubs,
             &RadixSortBuffers {
                 keys_primary: &tile_id_from_isect_buf,
                 vals_primary: &compact_gid_from_isect_buf,
@@ -682,124 +441,41 @@ impl GpuRenderResources {
                 scan_totals: &sort_scan_totals_buf,
             },
             tile_sort_wg_count,
-            num_tile_sort_passes,
+            tile_sort_passes(n_tiles),
         );
 
-        // ── Pipeline bind groups ─────────────────────────────────────────
-        let project_forward_bg: wgpu::BindGroup =
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("project_forward_bg"),
-                layout: &renderer.layouts.project_forward,
-                entries: &[
-                    storage_buffer_entry(0, &means_buf),
-                    storage_buffer_entry(1, &quats_buf),
-                    storage_buffer_entry(2, &scales_opacity_buf),
-                    storage_buffer_entry(8, &project_ub),
-                    storage_buffer_entry(12, &global_from_compact_buf),
-                    storage_buffer_entry(13, &depth_keys_buf),
-                    storage_buffer_entry(14, &num_visible_buf),
-                ],
-            });
-        let project_visible_bg: wgpu::BindGroup =
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("project_visible_bg"),
-                layout: &renderer.layouts.project_visible,
-                entries: &[
-                    storage_buffer_entry(0, &means_buf),
-                    storage_buffer_entry(1, &quats_buf),
-                    storage_buffer_entry(2, &scales_opacity_buf),
-                    storage_buffer_entry(3, &colors_buf),
-                    storage_buffer_entry(4, &sh_buf),
-                    storage_buffer_entry(5, &global_from_compact_buf),
-                    storage_buffer_entry(8, &project_ub),
-                    storage_buffer_entry(9, &projected_buf),
-                    storage_buffer_entry(10, &tile_hit_counts_buf),
-                    storage_buffer_entry(11, &num_visible_buf),
-                ],
-            });
-        let scan_bg: wgpu::BindGroup = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("scan_bg"),
-            layout: &renderer.layouts.scan,
-            entries: &[
-                storage_buffer_entry(16, &tile_hit_counts_buf), // scan input: per-splat tile hit counts
-                storage_buffer_entry(17, &tile_hit_offsets_buf), // scan output: prefix-sum offsets
-                storage_buffer_entry(18, &tile_hit_block_offsets_buf),
-                storage_buffer_entry(19, &scan_ub),
-            ],
-        });
-        // Level 2: scan the level-1 block sums so clouds larger than
-        // 512 blocks * 512 elements = 262,144 splats scan correctly.
-        let scan_l2_bg: wgpu::BindGroup = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("scan_l2_bg"),
-            layout: &renderer.layouts.scan,
-            entries: &[
-                storage_buffer_entry(16, &tile_hit_block_offsets_buf),
-                storage_buffer_entry(17, &block_local_offsets_buf),
-                storage_buffer_entry(18, &block2_offsets_buf),
-                storage_buffer_entry(19, &scan_l2_ub),
-            ],
-        });
-        let scan_block_sums_bg: wgpu::BindGroup =
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("scan_block_sums_bg"),
-                layout: &renderer.layouts.scan_block_sums,
-                entries: &[
-                    storage_buffer_entry(24, &block2_offsets_buf),
-                    storage_buffer_entry(25, &tile_isect_count_buf), // total intersection count
-                    storage_buffer_entry(26, &scan_l2_ub),
-                ],
-            });
-        // Compose the two scan levels back into flat per-block offsets.
-        let scan_compose_bg: wgpu::BindGroup =
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("scan_compose_bg"),
-                layout: &renderer.layouts.sort_scan_compose,
-                entries: &[
-                    storage_buffer_entry(8, &block_local_offsets_buf),
-                    storage_buffer_entry(9, &block2_offsets_buf),
-                    storage_buffer_entry(10, &tile_hit_block_offsets_buf),
-                    storage_buffer_entry(11, &scan_l2_ub),
-                ],
-            });
-        let map_bg: wgpu::BindGroup = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("map_bg"),
-            layout: &renderer.layouts.map,
-            entries: &[
-                storage_buffer_entry(0, &projected_buf),
-                storage_buffer_entry(1, &tile_hit_offsets_buf),
-                storage_buffer_entry(2, &tile_hit_counts_buf),
-                storage_buffer_entry(3, &tile_hit_block_offsets_buf),
-                storage_buffer_entry(4, &tile_id_from_isect_buf),
-                storage_buffer_entry(5, &compact_gid_from_isect_buf),
-                storage_buffer_entry(6, &map_ub),
-                storage_buffer_entry(7, &tile_isect_count_buf),
-                storage_buffer_entry(8, &num_isect_buf),
-            ],
-        });
-        let tile_offsets_bg: wgpu::BindGroup =
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("tile_offsets_bg"),
-                layout: &renderer.layouts.tile_offsets,
-                entries: &[
-                    storage_buffer_entry(0, &tile_id_from_isect_buf),
-                    storage_buffer_entry(1, &tile_offsets_buf),
-                    storage_buffer_entry(2, &num_isect_buf),
-                ],
-            });
-        let rasterize_bg: wgpu::BindGroup = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("rasterize_bg"),
-            layout: &renderer.layouts.rasterize,
-            entries: &[
-                storage_buffer_entry(0, &compact_gid_from_isect_buf),
-                storage_buffer_entry(1, &tile_offsets_buf),
-                storage_buffer_entry(2, &projected_buf),
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&raster_view),
-                },
-                storage_buffer_entry(4, &raster_ub),
-            ],
-        });
+        // ── Pipeline bind groups (shared wiring with the viewer) ─────────
+        let bind_groups: PipelineBindGroups = create_pipeline_bind_groups(
+            device,
+            &renderer.layouts,
+            &PipelineBuffers {
+                means: &means_buf,
+                quats: &quats_buf,
+                scales_opacity: &scales_opacity_buf,
+                colors: &colors_buf,
+                sh_coeffs: &sh_buf,
+                project_ub: &project_ub,
+                scan_ub: &scan_ub,
+                scan_l2_ub: &scan_l2_ub,
+                map_ub: &map_ub,
+                raster_ub: &raster_ub,
+                num_visible: &num_visible_buf,
+                global_from_compact: &global_from_compact_buf,
+                depth_keys: &depth_keys_buf,
+                projected: &projected_buf,
+                tile_hit_counts: &tile_hit_counts_buf,
+                tile_hit_offsets: &tile_hit_offsets_buf,
+                tile_hit_block_offsets: &tile_hit_block_offsets_buf,
+                block_local_offsets: &block_local_offsets_buf,
+                block2_offsets: &block2_offsets_buf,
+                tile_isect_count: &tile_isect_count_buf,
+                num_isect: &num_isect_buf,
+                tile_id_from_isect: &tile_id_from_isect_buf,
+                compact_gid_from_isect: &compact_gid_from_isect_buf,
+                tile_offsets: &tile_offsets_buf,
+                raster_view: &raster_view,
+            },
+        );
 
         // ── Dispatch grids ───────────────────────────────────────────────
         let project_grid: (u32, u32) =
@@ -826,19 +502,10 @@ impl GpuRenderResources {
             scan_compose_grid,
             tile_offsets_grid,
             raster_grid,
-            project_forward_bg,
-            project_visible_bg,
-            scan_bg,
-            scan_l2_bg,
-            scan_block_sums_bg,
-            scan_compose_bg,
-            map_bg,
-            tile_offsets_bg,
-            rasterize_bg,
+            bind_groups,
             gid_sort,
             depth_sort,
             tile_sort,
-            num_tile_sort_passes,
             isect_capacity,
             num_visible_buf,
             tile_offsets_buf,
@@ -888,15 +555,22 @@ impl GpuRenderResources {
                     timestamp_writes: None,
                 });
             pass.set_pipeline(&renderer.pipelines.project_forward);
-            pass.set_bind_group(0, &self.project_forward_bg, &[]);
+            pass.set_bind_group(0, &self.bind_groups.project_forward, &[]);
             pass.dispatch_workgroups(self.project_grid.0, self.project_grid.1, 1);
         }
 
         // Stage 2a: canonicalize the compact order by gid (see `new`).
-        self.gid_sort.encode(&mut encoder, &renderer.pipelines);
         // Stage 2b: depth argsort (ascending f32 bits => front-to-back compact
         // order).  8 passes (even), so results land back in the primary buffers.
-        self.depth_sort.encode(&mut encoder, &renderer.pipelines);
+        {
+            let mut pass: wgpu::ComputePass<'_> =
+                encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("gid_and_depth_sort"),
+                    timestamp_writes: None,
+                });
+            self.gid_sort.encode(&mut pass, &renderer.pipelines);
+            self.depth_sort.encode(&mut pass, &renderer.pipelines);
+        }
 
         // Stage 3-5: project visible splats, prefix-scan tile counts, map intersections.
         {
@@ -907,39 +581,46 @@ impl GpuRenderResources {
                 });
 
             pass.set_pipeline(&renderer.pipelines.project_visible);
-            pass.set_bind_group(0, &self.project_visible_bg, &[]);
+            pass.set_bind_group(0, &self.bind_groups.project_visible, &[]);
             pass.dispatch_workgroups(self.project_grid.0, self.project_grid.1, 1);
 
             pass.set_pipeline(&renderer.pipelines.scan_blocks);
-            pass.set_bind_group(0, &self.scan_bg, &[]);
+            pass.set_bind_group(0, &self.bind_groups.scan, &[]);
             pass.dispatch_workgroups(self.scan_l1_grid.0, self.scan_l1_grid.1, 1);
 
             pass.set_pipeline(&renderer.pipelines.scan_blocks);
-            pass.set_bind_group(0, &self.scan_l2_bg, &[]);
+            pass.set_bind_group(0, &self.bind_groups.scan_l2, &[]);
             pass.dispatch_workgroups(self.scan_l2_grid.0, self.scan_l2_grid.1, 1);
 
             pass.set_pipeline(&renderer.pipelines.scan_block_sums);
-            pass.set_bind_group(0, &self.scan_block_sums_bg, &[]);
+            pass.set_bind_group(0, &self.bind_groups.scan_block_sums, &[]);
             pass.dispatch_workgroups(1, 1, 1);
 
             pass.set_pipeline(&renderer.pipelines.sort_scan_compose);
-            pass.set_bind_group(0, &self.scan_compose_bg, &[]);
+            pass.set_bind_group(0, &self.bind_groups.scan_compose, &[]);
             pass.dispatch_workgroups(self.scan_compose_grid.0, self.scan_compose_grid.1, 1);
 
             pass.set_pipeline(&renderer.pipelines.map_intersections);
-            pass.set_bind_group(0, &self.map_bg, &[]);
+            pass.set_bind_group(0, &self.bind_groups.map, &[]);
             pass.dispatch_workgroups(self.project_grid.0, self.project_grid.1, 1);
 
             pass.set_pipeline(&renderer.pipelines.clamp_intersection_count);
-            pass.set_bind_group(0, &self.map_bg, &[]);
+            pass.set_bind_group(0, &self.bind_groups.map, &[]);
             pass.dispatch_workgroups(1, 1, 1);
         }
 
         // Stage 6: radix sort intersections by tile ID.
-        self.tile_sort.encode(&mut encoder, &renderer.pipelines);
+        {
+            let mut pass: wgpu::ComputePass<'_> =
+                encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("tile_sort"),
+                    timestamp_writes: None,
+                });
+            self.tile_sort.encode(&mut pass, &renderer.pipelines);
+        }
 
         // Copy back to primary if odd number of passes.
-        if self.num_tile_sort_passes % 2 == 1 {
+        if self.tile_sort.num_passes() % 2 == 1 {
             let bytes: u64 = (self.isect_capacity * std::mem::size_of::<u32>()) as u64;
             encoder.copy_buffer_to_buffer(
                 &self.sort_keys_buf,
@@ -966,7 +647,7 @@ impl GpuRenderResources {
                     timestamp_writes: None,
                 });
             pass.set_pipeline(&renderer.pipelines.tile_offsets);
-            pass.set_bind_group(0, &self.tile_offsets_bg, &[]);
+            pass.set_bind_group(0, &self.bind_groups.tile_offsets, &[]);
             pass.dispatch_workgroups(self.tile_offsets_grid.0, self.tile_offsets_grid.1, 1);
         }
 
@@ -978,7 +659,7 @@ impl GpuRenderResources {
                     timestamp_writes: None,
                 });
             pass.set_pipeline(&renderer.pipelines.rasterize);
-            pass.set_bind_group(0, &self.rasterize_bg, &[]);
+            pass.set_bind_group(0, &self.bind_groups.rasterize, &[]);
             pass.dispatch_workgroups(self.raster_grid.0, self.raster_grid.1, 1);
         }
 

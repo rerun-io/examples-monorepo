@@ -685,6 +685,418 @@ pub fn create_compute_pipelines(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Shared pipeline bind groups
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Borrowed references to every buffer (and the raster texture view) the
+/// non-sort pipeline stages bind.  Single source of truth for the WGSL
+/// binding wiring, shared by the viewer and the standalone renderer.
+pub struct PipelineBuffers<'a> {
+    pub means: &'a wgpu::Buffer,
+    pub quats: &'a wgpu::Buffer,
+    pub scales_opacity: &'a wgpu::Buffer,
+    pub colors: &'a wgpu::Buffer,
+    pub sh_coeffs: &'a wgpu::Buffer,
+    pub project_ub: &'a wgpu::Buffer,
+    pub scan_ub: &'a wgpu::Buffer,
+    pub scan_l2_ub: &'a wgpu::Buffer,
+    pub map_ub: &'a wgpu::Buffer,
+    pub raster_ub: &'a wgpu::Buffer,
+    pub num_visible: &'a wgpu::Buffer,
+    pub global_from_compact: &'a wgpu::Buffer,
+    pub depth_keys: &'a wgpu::Buffer,
+    pub projected: &'a wgpu::Buffer,
+    pub tile_hit_counts: &'a wgpu::Buffer,
+    pub tile_hit_offsets: &'a wgpu::Buffer,
+    pub tile_hit_block_offsets: &'a wgpu::Buffer,
+    pub block_local_offsets: &'a wgpu::Buffer,
+    pub block2_offsets: &'a wgpu::Buffer,
+    pub tile_isect_count: &'a wgpu::Buffer,
+    pub num_isect: &'a wgpu::Buffer,
+    pub tile_id_from_isect: &'a wgpu::Buffer,
+    pub compact_gid_from_isect: &'a wgpu::Buffer,
+    pub tile_offsets: &'a wgpu::Buffer,
+    pub raster_view: &'a wgpu::TextureView,
+}
+
+/// Bind groups for the non-sort pipeline stages, in dispatch order.
+pub struct PipelineBindGroups {
+    pub project_forward: wgpu::BindGroup,
+    pub project_visible: wgpu::BindGroup,
+    pub scan: wgpu::BindGroup,
+    pub scan_l2: wgpu::BindGroup,
+    pub scan_block_sums: wgpu::BindGroup,
+    pub scan_compose: wgpu::BindGroup,
+    pub map: wgpu::BindGroup,
+    pub tile_offsets: wgpu::BindGroup,
+    pub rasterize: wgpu::BindGroup,
+}
+
+/// Create the bind groups for every non-sort pipeline stage.
+pub fn create_pipeline_bind_groups(
+    device: &wgpu::Device,
+    layouts: &GpuBindGroupLayouts,
+    b: &PipelineBuffers<'_>,
+) -> PipelineBindGroups {
+    PipelineBindGroups {
+        project_forward: device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("project_forward_bg"),
+            layout: &layouts.project_forward,
+            entries: &[
+                storage_buffer_entry(0, b.means),
+                storage_buffer_entry(1, b.quats),
+                storage_buffer_entry(2, b.scales_opacity),
+                storage_buffer_entry(8, b.project_ub),
+                storage_buffer_entry(12, b.global_from_compact),
+                storage_buffer_entry(13, b.depth_keys),
+                storage_buffer_entry(14, b.num_visible),
+            ],
+        }),
+        project_visible: device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("project_visible_bg"),
+            layout: &layouts.project_visible,
+            entries: &[
+                storage_buffer_entry(0, b.means),
+                storage_buffer_entry(1, b.quats),
+                storage_buffer_entry(2, b.scales_opacity),
+                storage_buffer_entry(3, b.colors),
+                storage_buffer_entry(4, b.sh_coeffs),
+                storage_buffer_entry(5, b.global_from_compact),
+                storage_buffer_entry(8, b.project_ub),
+                storage_buffer_entry(9, b.projected),
+                storage_buffer_entry(10, b.tile_hit_counts),
+                storage_buffer_entry(11, b.num_visible),
+            ],
+        }),
+        scan: device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scan_bg"),
+            layout: &layouts.scan,
+            entries: &[
+                storage_buffer_entry(16, b.tile_hit_counts), // scan input: per-splat tile hit counts
+                storage_buffer_entry(17, b.tile_hit_offsets), // scan output: prefix-sum offsets
+                storage_buffer_entry(18, b.tile_hit_block_offsets),
+                storage_buffer_entry(19, b.scan_ub),
+            ],
+        }),
+        // Level 2: scan the level-1 block sums so clouds larger than
+        // 512 blocks * 512 elements = 262,144 splats scan correctly.
+        scan_l2: device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scan_l2_bg"),
+            layout: &layouts.scan,
+            entries: &[
+                storage_buffer_entry(16, b.tile_hit_block_offsets),
+                storage_buffer_entry(17, b.block_local_offsets),
+                storage_buffer_entry(18, b.block2_offsets),
+                storage_buffer_entry(19, b.scan_l2_ub),
+            ],
+        }),
+        scan_block_sums: device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scan_block_sums_bg"),
+            layout: &layouts.scan_block_sums,
+            entries: &[
+                storage_buffer_entry(24, b.block2_offsets),
+                storage_buffer_entry(25, b.tile_isect_count), // total intersection count
+                storage_buffer_entry(26, b.scan_l2_ub),
+            ],
+        }),
+        // Compose the two scan levels back into flat per-block offsets.
+        scan_compose: device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scan_compose_bg"),
+            layout: &layouts.sort_scan_compose,
+            entries: &[
+                storage_buffer_entry(8, b.block_local_offsets),
+                storage_buffer_entry(9, b.block2_offsets),
+                storage_buffer_entry(10, b.tile_hit_block_offsets),
+                storage_buffer_entry(11, b.scan_l2_ub),
+            ],
+        }),
+        map: device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("map_bg"),
+            layout: &layouts.map,
+            entries: &[
+                storage_buffer_entry(0, b.projected),
+                storage_buffer_entry(1, b.tile_hit_offsets),
+                storage_buffer_entry(2, b.tile_hit_counts),
+                storage_buffer_entry(3, b.tile_hit_block_offsets),
+                storage_buffer_entry(4, b.tile_id_from_isect),
+                storage_buffer_entry(5, b.compact_gid_from_isect),
+                storage_buffer_entry(6, b.map_ub),
+                storage_buffer_entry(7, b.tile_isect_count),
+                storage_buffer_entry(8, b.num_isect),
+            ],
+        }),
+        tile_offsets: device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("tile_offsets_bg"),
+            layout: &layouts.tile_offsets,
+            entries: &[
+                storage_buffer_entry(0, b.tile_id_from_isect),
+                storage_buffer_entry(1, b.tile_offsets),
+                storage_buffer_entry(2, b.num_isect),
+            ],
+        }),
+        rasterize: device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("rasterize_bg"),
+            layout: &layouts.rasterize,
+            entries: &[
+                storage_buffer_entry(0, b.compact_gid_from_isect),
+                storage_buffer_entry(1, b.tile_offsets),
+                storage_buffer_entry(2, b.projected),
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(b.raster_view),
+                },
+                storage_buffer_entry(4, b.raster_ub),
+            ],
+        }),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GPU radix argsort (count-buffer driven, brush v0.3.0 pattern)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Maximum number of 4-bit radix passes over 32-bit keys.
+pub const MAX_SORT_PASSES: u32 = 32 / SORT_BITS_PER_PASS;
+
+/// Create the [`MAX_SORT_PASSES`] shift uniform buffers (`shift = pass * 4`).
+/// Globally constant — create once per renderer and share across all sorts.
+pub fn create_sort_shift_uniforms(device: &wgpu::Device) -> Vec<wgpu::Buffer> {
+    (0..MAX_SORT_PASSES)
+        .map(|pass_index| {
+            create_filled_buffer(
+                device,
+                "sort_shift_ub",
+                wgpu::BufferUsages::UNIFORM,
+                bytemuck::bytes_of(&SortUniformBuffer {
+                    shift: pass_index * SORT_BITS_PER_PASS,
+                    total_keys_unused: 0,
+                    _pad: [0; 2],
+                }),
+            )
+        })
+        .collect()
+}
+
+/// Buffers for one GPU radix argsort over `(key, value)` pairs.
+///
+/// The number of keys is read on the GPU from `num_keys[0]` — dispatches are
+/// capacity-sized and early-exit, so no CPU readback or indirect dispatch is
+/// needed.  Used three times per frame: gid canonicalization + depth argsort
+/// (keys = f32 depth bits, values = global gids) and tile-id sort (keys =
+/// tile ids, values = compact gids).
+pub struct RadixSortBuffers<'a> {
+    pub keys_primary: &'a wgpu::Buffer,
+    pub vals_primary: &'a wgpu::Buffer,
+    pub keys_alt: &'a wgpu::Buffer,
+    pub vals_alt: &'a wgpu::Buffer,
+    /// GPU buffer whose first u32 is the number of keys to sort.
+    pub num_keys: &'a wgpu::Buffer,
+    pub counts: &'a wgpu::Buffer,
+    pub reduced: &'a wgpu::Buffer,
+    pub scan_offsets: &'a wgpu::Buffer,
+    pub scan_block_offsets: &'a wgpu::Buffer,
+    pub scan_totals: &'a wgpu::Buffer,
+}
+
+/// Bind groups that depend on the radix pass index — the 4-bit shift uniform
+/// and the src/dst buffer parity (even passes read primary, odd read alt).
+struct RadixSortPassBindGroups {
+    count_bg: wgpu::BindGroup,
+    reduce_bg: wgpu::BindGroup,
+    scan_add_bg: wgpu::BindGroup,
+    scatter_bg: wgpu::BindGroup,
+}
+
+/// Prebuilt bind groups and dispatch grids for one radix argsort instance.
+///
+/// With an even pass count the sorted data lands back in the primary buffers;
+/// for an odd count the caller must copy back from the alt buffers
+/// (check [`RadixSort::num_passes`]).
+pub struct RadixSort {
+    passes: Vec<RadixSortPassBindGroups>,
+    scan_blocks_bg: wgpu::BindGroup,
+    scan_block_sums_bg: wgpu::BindGroup,
+    compose_bg: wgpu::BindGroup,
+    /// Grid for the count + scatter kernels (one thread per key slot).
+    count_grid: (u32, u32),
+    /// Grid for the reduce + scan_add kernels.
+    reduce_grid: (u32, u32),
+    scan_blocks_grid: (u32, u32),
+    compose_grid: (u32, u32),
+}
+
+/// Build the per-pass bind groups for `num_passes` 4-bit radix sort passes.
+///
+/// `shift_ubs` comes from [`create_sort_shift_uniforms`].
+pub fn build_radix_sort(
+    device: &wgpu::Device,
+    layouts: &GpuBindGroupLayouts,
+    shift_ubs: &[wgpu::Buffer],
+    buffers: &RadixSortBuffers<'_>,
+    sort_wg_count: u32,
+    num_passes: u32,
+) -> RadixSort {
+    let sort_reduce_wg_count: u32 = sort_reduce_workgroup_count(sort_wg_count.max(1));
+    let reduced_total: u32 = sort_reduce_wg_count;
+    let reduced_block_count: u32 = compaction_block_count(reduced_total as usize) as u32;
+    let scan_sort_uniform: ScanUniformBuffer = fill_scan_uniform(reduced_total as usize);
+    let scan_sort_ub: wgpu::Buffer = create_filled_buffer(
+        device,
+        "scan_sort_ub",
+        wgpu::BufferUsages::UNIFORM,
+        bytemuck::bytes_of(&scan_sort_uniform),
+    );
+
+    let passes: Vec<RadixSortPassBindGroups> = (0..num_passes)
+        .map(|pass_index| {
+            let sort_ub: &wgpu::Buffer = &shift_ubs[pass_index as usize];
+            let use_primary: bool = pass_index % 2 == 0;
+            let (src_keys, src_vals, dst_keys, dst_vals) = if use_primary {
+                (
+                    buffers.keys_primary,
+                    buffers.vals_primary,
+                    buffers.keys_alt,
+                    buffers.vals_alt,
+                )
+            } else {
+                (
+                    buffers.keys_alt,
+                    buffers.vals_alt,
+                    buffers.keys_primary,
+                    buffers.vals_primary,
+                )
+            };
+
+            RadixSortPassBindGroups {
+                count_bg: device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("sort_count_bg"),
+                    layout: &layouts.sort_count,
+                    entries: &[
+                        storage_buffer_entry(0, sort_ub),
+                        storage_buffer_entry(1, src_keys),
+                        storage_buffer_entry(2, buffers.counts),
+                        storage_buffer_entry(6, buffers.num_keys),
+                    ],
+                }),
+                reduce_bg: device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("sort_reduce_bg"),
+                    layout: &layouts.sort_reduce,
+                    entries: &[
+                        storage_buffer_entry(0, sort_ub),
+                        storage_buffer_entry(1, buffers.counts),
+                        storage_buffer_entry(2, buffers.reduced),
+                        storage_buffer_entry(6, buffers.num_keys),
+                    ],
+                }),
+                scan_add_bg: device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("sort_scan_add_bg"),
+                    layout: &layouts.sort_scan_add,
+                    entries: &[
+                        storage_buffer_entry(0, sort_ub),
+                        storage_buffer_entry(1, buffers.reduced),
+                        storage_buffer_entry(2, buffers.counts),
+                        storage_buffer_entry(6, buffers.num_keys),
+                    ],
+                }),
+                scatter_bg: device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("sort_scatter_bg"),
+                    layout: &layouts.sort_scatter,
+                    entries: &[
+                        storage_buffer_entry(0, sort_ub),
+                        storage_buffer_entry(1, src_keys),
+                        storage_buffer_entry(2, src_vals),
+                        storage_buffer_entry(3, buffers.counts),
+                        storage_buffer_entry(4, dst_keys),
+                        storage_buffer_entry(5, dst_vals),
+                        storage_buffer_entry(6, buffers.num_keys),
+                    ],
+                }),
+            }
+        })
+        .collect();
+
+    RadixSort {
+        passes,
+        scan_blocks_bg: device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sort_scan_blocks_bg"),
+            layout: &layouts.scan,
+            entries: &[
+                storage_buffer_entry(16, buffers.reduced),
+                storage_buffer_entry(17, buffers.scan_offsets),
+                storage_buffer_entry(18, buffers.scan_block_offsets),
+                storage_buffer_entry(19, &scan_sort_ub),
+            ],
+        }),
+        scan_block_sums_bg: device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sort_scan_block_sums_bg"),
+            layout: &layouts.scan_block_sums,
+            entries: &[
+                storage_buffer_entry(24, buffers.scan_block_offsets),
+                storage_buffer_entry(25, buffers.scan_totals),
+                storage_buffer_entry(26, &scan_sort_ub),
+            ],
+        }),
+        compose_bg: device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sort_scan_compose_bg"),
+            layout: &layouts.sort_scan_compose,
+            entries: &[
+                storage_buffer_entry(8, buffers.scan_offsets),
+                storage_buffer_entry(9, buffers.scan_block_offsets),
+                storage_buffer_entry(10, buffers.reduced),
+                storage_buffer_entry(11, &scan_sort_ub),
+            ],
+        }),
+        count_grid: dispatch_grid_for_workgroups(sort_wg_count.max(1)),
+        reduce_grid: dispatch_grid_for_workgroups(sort_reduce_wg_count),
+        scan_blocks_grid: dispatch_grid_1d(reduced_block_count, 1),
+        compose_grid: dispatch_grid_1d(reduced_total, SORT_WORKGROUP_SIZE),
+    }
+}
+
+impl RadixSort {
+    /// Total radix passes; odd means the result is in the alt buffers and the
+    /// caller must copy back to primary.
+    pub fn num_passes(&self) -> u32 {
+        self.passes.len() as u32
+    }
+
+    /// Encode all radix passes into the given compute pass.  Dispatch order is
+    /// identical to encoding each pass separately — WebGPU guarantees
+    /// dispatch-order visibility within a compute pass.
+    pub fn encode(&self, pass: &mut wgpu::ComputePass<'_>, pipelines: &GpuComputePipelines) {
+        for pass_bgs in &self.passes {
+            pass.set_pipeline(&pipelines.sort_count);
+            pass.set_bind_group(0, &pass_bgs.count_bg, &[]);
+            pass.dispatch_workgroups(self.count_grid.0, self.count_grid.1, 1);
+
+            pass.set_pipeline(&pipelines.sort_reduce);
+            pass.set_bind_group(0, &pass_bgs.reduce_bg, &[]);
+            pass.dispatch_workgroups(self.reduce_grid.0, self.reduce_grid.1, 1);
+
+            pass.set_pipeline(&pipelines.scan_blocks);
+            pass.set_bind_group(0, &self.scan_blocks_bg, &[]);
+            pass.dispatch_workgroups(self.scan_blocks_grid.0, self.scan_blocks_grid.1, 1);
+
+            pass.set_pipeline(&pipelines.scan_block_sums);
+            pass.set_bind_group(0, &self.scan_block_sums_bg, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+
+            pass.set_pipeline(&pipelines.sort_scan_compose);
+            pass.set_bind_group(0, &self.compose_bg, &[]);
+            pass.dispatch_workgroups(self.compose_grid.0, self.compose_grid.1, 1);
+
+            pass.set_pipeline(&pipelines.sort_scan_add);
+            pass.set_bind_group(0, &pass_bgs.scan_add_bg, &[]);
+            pass.dispatch_workgroups(self.reduce_grid.0, self.reduce_grid.1, 1);
+
+            pass.set_pipeline(&pipelines.sort_scatter);
+            pass.set_bind_group(0, &pass_bgs.scatter_bg, &[]);
+            pass.dispatch_workgroups(self.count_grid.0, self.count_grid.1, 1);
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Uniform buffer fill helpers
 // ═══════════════════════════════════════════════════════════════════════════════
 
