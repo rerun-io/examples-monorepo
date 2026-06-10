@@ -214,6 +214,37 @@ class MultiViewTracker:
                     prompts_per_cam[cam_idx][obj_id] = dets.boxes_xyxy[col]
         return prompts_per_cam
 
+    def _tracks_from_batched(self, batched, frames: list[UInt8[torch.Tensor, "3 h w"]]) -> list[CameraTracks]:
+        """Convert a B=n_cams SAM2Result into per-camera tracks (sync-free)."""
+        results: list[CameraTracks] = []
+        h: int = frames[0].shape[1]
+        w: int = frames[0].shape[2]
+        masks: Bool[torch.Tensor, "c h w"] = batched.masks_logits[:, 0] > 0.0
+        rows: torch.Tensor = masks.any(dim=2).int()
+        cols: torch.Tensor = masks.any(dim=1).int()
+        stats: torch.Tensor = torch.stack(
+            [
+                rows.sum(dim=1),
+                cols.argmax(dim=1),
+                rows.argmax(dim=1),
+                (w - 1) - cols.flip(1).argmax(dim=1),
+                (h - 1) - rows.flip(1).argmax(dim=1),
+            ],
+            dim=1,
+        ).float()
+        stats = torch.cat([stats, batched.ious[:, 0:1].float()], dim=1)
+        all_stats: Float32[ndarray, "c 6"] = stats.cpu().numpy()
+        for cam_idx in range(len(frames)):
+            row = all_stats[cam_idx]
+            bbox: Float32[ndarray, "4"] | None = None
+            if row[0] > 0:
+                bbox = row[1:5].astype(np.float32)
+                self._lost_ticks[cam_idx][0] = 0
+            else:
+                self._lost_ticks[cam_idx][0] = self._lost_ticks[cam_idx].get(0, 0) + 1
+            results.append({0: TrackedObject(obj_id=0, mask=masks[cam_idx], bbox_xyxy=bbox, score=float(row[5]))})
+        return results
+
     def _forward_all(
         self,
         frame_idx: int,
@@ -230,6 +261,19 @@ class MultiViewTracker:
         with torch.inference_mode(), autocast:
             batch: UInt8[torch.Tensor, "c 3 h w"] = torch.stack(frames, dim=0)
             embeddings, pos_embeddings = self.predictor.encode_image(batch)
+
+        # Steady-state fast path: one B=n_cams propagation (memory attention,
+        # mask decode, memory encode batched across cameras) instead of the
+        # fork's per-camera python loop. Falls back below on prompts/misalign.
+        if not any(prompts_per_cam):
+            from mamma.tracking.batched_forward import batched_propagate
+
+            with torch.inference_mode(), autocast:
+                batched = batched_propagate(
+                    self.predictor, self._states, frame_idx, embeddings, pos_embeddings, self._video_hw
+                )
+            if batched is not None:
+                return self._tracks_from_batched(batched, frames)
 
         results: list[CameraTracks] = []
         for cam_idx in range(len(frames)):
