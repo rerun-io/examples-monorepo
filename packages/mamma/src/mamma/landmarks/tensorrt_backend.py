@@ -11,6 +11,7 @@ Engines are machine-local artifacts (sm-specific): built once into
 
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 from typing import Any
 
@@ -60,7 +61,7 @@ def export_mammanet_onnx(model: MammaNet, onnx_path: Path, config: MammaNetConfi
 
 def build_engine(onnx_path: Path, engine_path: Path) -> None:
     """Build an FP16 TensorRT engine from the exported ONNX graph."""
-    import tensorrt as trt
+    trt: Any = importlib.import_module("tensorrt")  # no type stubs shipped
 
     logger = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -84,7 +85,7 @@ class MammaNetTrtRunner:
     """Static-batch TRT inference with a captured launch (torch-tensor I/O)."""
 
     def __init__(self, engine_path: Path, config: MammaNetConfig = DEFAULT_MAMMANET_CONFIG) -> None:
-        import tensorrt as trt
+        trt: Any = importlib.import_module("tensorrt")  # no type stubs shipped
 
         self.config = config
         logger = trt.Logger(trt.Logger.WARNING)

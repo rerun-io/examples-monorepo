@@ -20,8 +20,11 @@ def _patch_smplx_rigid_transform() -> None:
     an implicit ``.item()`` host sync 54x per forward (~10 ms of stalls per
     full-model call, paid on every emitted tick).
     """
-    import smplx.lbs as _lbs
+    from typing import Any
+
     import torch.nn.functional as F
+
+    _lbs: Any = __import__("smplx.lbs", fromlist=["lbs"])  # loose-typed: we monkeypatch it
 
     if getattr(_lbs, "_mamma_sync_free", False):
         return
