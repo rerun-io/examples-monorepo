@@ -69,8 +69,17 @@ def main(config: BenchmarkConfig) -> int:
     sequence: MultiViewSequence = load_mamma_sequence(config.data_dir)
 
     # Warmup pass: fresh pipeline, short slice; absorbs weight load + autotune.
+    # Its Rerun output goes to a sink-less throwaway recording — with a --save
+    # sink, warmup + timed samples on one timeline duplicate VideoStream PTS
+    # and corrupt H.264 decode in the viewer.
+    import rerun as rr
+
+    main_recording = rr.get_global_data_recording()
+    rr.set_global_data_recording(rr.RecordingStream(application_id="mamma-benchmark-warmup"))
     warmup: StreamingPipeline = build_pipeline(config, sequence)
     warmup.run(max_frames=config.warmup_frames)
+    if main_recording is not None:
+        rr.set_global_data_recording(main_recording)
     print(f"warmup done ({config.warmup_frames} frames)")
     # Release the warmup pipeline's models + NVDEC contexts before building the
     # timed one — two resident copies exhaust CUDA memory (scale_cuda OOM).
@@ -78,12 +87,14 @@ def main(config: BenchmarkConfig) -> int:
 
     import torch
 
+    warmup.close()  # terminate the warmup decode workers (NVDEC + CUDA ctx each)
     del warmup
     gc.collect()
     torch.cuda.empty_cache()
 
     timed: StreamingPipeline = build_pipeline(config, sequence)
     stats = timed.run()
+    timed.close()
     clip_seconds: float = stats.ticks / sequence.fps
     cam_fps: float = stats.ticks_per_s * len(sequence.cameras)
 

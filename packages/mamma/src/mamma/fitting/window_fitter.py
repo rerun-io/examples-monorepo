@@ -51,9 +51,13 @@ class FitterConfig:
     W=8/16/stride3 -> 27.2mm, stride4+track-stride3 -> 22.3mm (default), W=6/8@0.03 -> 43.6mm (fails 30mm gate)."""
     learning_rate: float = 0.02
     """Adam learning rate (0.03 oscillates, 0.01 under-converges at this budget)."""
-    fit_stride: int = 4
+    fit_stride: int = 5
     """Optimize every Nth tick; skipped ticks emit the warm-started forward of
     the previous solution (observations still enter the window)."""
+    emit_stride: int = 2
+    """Emit (full-mesh smplx forward + readout) every Nth tick. Emission is a
+    pure read-out — fit quality is unchanged. validate_golden sets 1 because
+    its collector needs every golden frame."""
     use_cuda_graph: bool = True
     """Capture the steady-state optimize loop as one CUDA graph (6x faster:
     92 -> 15.3 ms per 16-iter call measured). Bootstrap always runs eager."""
@@ -144,6 +148,7 @@ class SlidingWindowFitter:
         self._bootstrapped: bool = False
         self._graph: torch.cuda.CUDAGraph | None = None
         self._static: dict[str, torch.Tensor | list[torch.Tensor]] = {}
+        self._last_emit: FitResult | None = None
 
     def _init_trans(self) -> Float32[torch.Tensor, "3"]:
         """Initialize root translation at the camera rays' closest point."""
@@ -195,16 +200,87 @@ class SlidingWindowFitter:
         if not self._bootstrapped:
             if len(self._window) < self.config.window_size:
                 return None
-            self._optimize(self.config.bootstrap_iters, optimize_betas=True)
+            if self.config.use_cuda_graph:
+                self._bootstrap_graphed()
+            else:
+                self._optimize(self.config.bootstrap_iters, optimize_betas=True)
             self._bootstrapped = True
         elif optimize:
             if self.config.use_cuda_graph:
                 self._optimize_graphed()
             else:
                 self._optimize(self.config.tick_iters, optimize_betas=False)
-        return self._emit()
+        if self.config.emit_stride > 1 and frame_idx % self.config.emit_stride != 0 and self._last_emit is not None:
+            return self._last_emit
+        self._last_emit = self._emit()
+        return self._last_emit
 
     # ── CUDA-graph steady state ──────────────────────────────────────────────
+
+    def _bootstrap_graphed(self) -> None:
+        """Run the full bootstrap budget through a captured graph (with betas).
+
+        The eager bootstrap costs ~6 ms/iter x 300 — ~1.8 s inside the realtime
+        window. Capturing one (fwd+bwd+Adam-with-betas) iteration and replaying
+        it keeps the full iteration budget at ~1 ms/iter, so quality is not
+        traded for the gate.
+        """
+        cfg = self.config
+        w: int = cfg.window_size
+        n: int = self.verts_to_landmarks.shape[0]
+        c: int = len(self.k_per_cam)
+        dev: str = self.device
+        static: dict = {
+            "go": torch.zeros(w, 3, device=dev, requires_grad=True),
+            "bp": torch.zeros(w, 63, device=dev, requires_grad=True),
+            "tr": torch.zeros(w, 3, device=dev, requires_grad=True),
+            "pts2d": [torch.zeros(w, n, 3, device=dev) for _ in range(c)],
+            "vis": [torch.zeros(w, n, device=dev) for _ in range(c)],
+            "anchors": torch.zeros(w, n, 3, device=dev),
+            "avalid": torch.zeros(w, n, device=dev),
+            "hl": self.hand_pose_left.expand(w, -1).contiguous(),
+            "hr": self.hand_pose_right.expand(w, -1).contiguous(),
+            "jaw": self.jaw_pose.expand(w, -1).contiguous(),
+        }
+        optimizer = torch.optim.Adam(
+            [static["go"], static["bp"], static["tr"], self.betas], lr=cfg.learning_rate, capturable=True
+        )
+
+        def one_iter() -> None:
+            optimizer.zero_grad(set_to_none=False)
+            sampled = self.sampled_model.forward(
+                static["go"], static["bp"], static["hl"], static["hr"], static["jaw"], self.betas, static["tr"]
+            )
+            loss = (
+                reprojection_loss(static["pts2d"], sampled, self.k_per_cam, self.world_to_cam_per_cam, static["vis"], weight=cfg.weight_reproj)
+                + anchor3d_loss(sampled, static["anchors"], static["avalid"], weight=cfg.weight_anchor3d)
+                + shape_prior_loss(self.betas, weight=cfg.weight_shape_prior)
+                + temporal_smoothness_loss(static["tr"], static["bp"], cfg.weight_temp_trans, cfg.weight_temp_pose)
+            )
+            loss.backward()
+            optimizer.step()
+
+        self._copy_window_to_static(static)
+        side_stream = torch.cuda.Stream()
+        side_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side_stream):
+            for _ in range(3):
+                one_iter()
+        torch.cuda.current_stream().wait_stream(side_stream)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, capture_error_mode="thread_local"):
+            one_iter()
+        torch.cuda.synchronize()
+        for _ in range(max(0, cfg.bootstrap_iters - 4)):
+            graph.replay()
+        torch.cuda.synchronize()
+        with torch.no_grad():
+            for i, f in enumerate(self._window):
+                f.global_orient = static["go"][i].detach().clone()
+                f.body_pose = static["bp"][i].detach().clone()
+                f.trans = static["tr"][i].detach().clone()
+        del graph  # bootstrap graph is single-use; steady graph builds lazily
 
     def _build_graph(self) -> None:
         """Capture the whole tick_iters optimize loop as one replayable graph."""

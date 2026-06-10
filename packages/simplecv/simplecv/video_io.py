@@ -490,13 +490,23 @@ class TorchCodecVideoReader:
         return frame
 
     def _maybe_resize(self, frames: UInt8[torch.Tensor, "b 3 h w"]) -> UInt8[torch.Tensor, "b 3 h w"]:
-        """Resize a decoded NCHW uint8 batch on-device to ``resize_hw`` if needed."""
+        """Resize a decoded NCHW uint8 batch on-device to ``resize_hw`` if needed.
+
+        Processes in slices of 8 frames: the float32 intermediate of native-4K
+        frames is ~100 MB each, so an unsliced 24-frame chunk peaks at ~2.4 GB
+        of scratch — enough to OOM when several decoder processes share a GPU.
+        """
         if not self._needs_post_resize or frames.shape[0] == 0:
             return frames
         assert self.resize_hw is not None
-        resized: UInt8[torch.Tensor, "b 3 h w"] = (
-            torch.nn.functional.interpolate(frames.float(), size=self.resize_hw, mode="area").round_().clamp_(0, 255).to(torch.uint8)
+        resized: UInt8[torch.Tensor, "b 3 h w"] = torch.empty(
+            (frames.shape[0], 3, *self.resize_hw), dtype=torch.uint8, device=frames.device
         )
+        for start in range(0, frames.shape[0], 8):
+            piece: torch.Tensor = frames[start : start + 8].float()
+            resized[start : start + 8] = (
+                torch.nn.functional.interpolate(piece, size=self.resize_hw, mode="area").round_().clamp_(0, 255).to(torch.uint8)
+            )
         return resized
 
     def get_frames_in_range(self, start: int, stop: int) -> UInt8[torch.Tensor, "b 3 h w"]:

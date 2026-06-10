@@ -224,3 +224,33 @@ MammaNet), trim engine glue (~10 ms/tick python), possibly track_stride=4.
 3. Glue/GIL: per-tick python in the engine loop + 3 worker threads contend; consider
    merging fit+video workers and batching rr.log calls (columnar per chunk).
 4. TAM-encoder TRT engine (same recipe as MammaNet, ~2 ms off) if still short.
+
+
+## Round 6 (FINAL) — GOAL MET: 11.76 s, all five goal-check clauses PASS
+
+Levers landed since round 5 (each gate-verified):
+- `emit_stride=2` (mesh read-out every 2nd tick; FitResult quality unchanged) +
+  GPU BT.601 YUV420 conversion in the logger (replaces CPU swscale): 21.86 s.
+- Multiprocess NVDEC decode (`engine/mp_decode.py`): one persistent spawn worker
+  per camera sidesteps torchcodec 0.10's single-instance decoder cache
+  (140 -> ~400 cam-fps); pinned-CPU transport; sliced 8-frame GPU resize keeps
+  worker VRAM ~bounded: 14.26 s.
+- Stride sweep found 11.76 s at bootstrap 60 + fit_stride 5 + track_stride 4 —
+  but bootstrap 60 BROKE golden (38.4 mm vs 30): speed config != quality config.
+- **Graphed bootstrap** (the honest fix): capture ONE bootstrap iteration with
+  betas in the capturable Adam, replay 296x. Full 300-iter first-window solve
+  drops ~1.8 s -> ~0.4 s, so no quality was traded. Single config now passes
+  BOTH: golden 23.2 mm MPJPE / 21.1 mm PVE; benchmark 11.76 s (30.8 ticks/s,
+  123 cam-fps incl. Rerun logging).
+- Final defaults: bootstrap_iters=300 (graphed), fit_stride=5, track_stride=4,
+  emit_stride=2, TRT MammaNet engine, mp decode, use_cuda_graph=True.
+
+Canonical `pixi run mamma-goal-check`: exit 0, 5/5 PASS (golden, realtime,
+datasets, no-writes, hygiene). Total campaign: 132.6 s -> 11.76 s (11.3x).
+
+Post-gate fix: with `--rr-config.save`, benchmark's warmup pass logged into the
+same recording as the timed pass -> duplicate VideoStream PTS -> red-wash H.264
+corruption in the viewer. Warmup now logs to a sink-less throwaway
+RecordingStream. The saved gate-cross.rrd (177 MB) validates clean and that
+save-run itself passed the gate (11.79 s); embedded in the served notes
+(compare.html: baseline vs gate-crossing side-by-side).

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import torch
@@ -59,7 +60,7 @@ class TrackerConfig:
     ``LOST_TICKS_BEFORE_REPROMPT`` ticks, so this can stay slow (~1s/pass)."""
     memory_window_size: int = 7
     """Sliding window of non-conditional SAM2 memories kept per object."""
-    track_stride: int = 3
+    track_stride: int = 4
     """Run the mask tracker every Nth tick; skipped ticks reuse the previous
     masks (person silhouettes move a few px/frame at 30 fps — landmark crops
     tolerate a one-frame-old mask; verified by the golden gate)."""
@@ -260,7 +261,11 @@ class MultiViewTracker:
         autocast = torch.autocast("cuda", dtype=torch.bfloat16)
         with torch.inference_mode(), autocast:
             batch: UInt8[torch.Tensor, "c 3 h w"] = torch.stack(frames, dim=0)
-            embeddings, pos_embeddings = self.predictor.encode_image(batch)
+            # The fork annotates encode_image as Tensor pairs, but it returns
+            # multi-level lists (one tensor per FPN level) at runtime.
+            encoded = cast("tuple[list[torch.Tensor], list[torch.Tensor]]", self.predictor.encode_image(batch))
+            embeddings: list[torch.Tensor] = encoded[0]
+            pos_embeddings: list[torch.Tensor] = encoded[1]
 
         # Steady-state fast path: one B=n_cams propagation (memory attention,
         # mask decode, memory encode batched across cameras) instead of the

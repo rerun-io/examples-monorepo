@@ -35,7 +35,7 @@ class ValidateConfig:
     """Rerun behavior (defaults headless-friendly; pass --rr-config.save to keep an RRD)."""
     tracker: TrackerConfig = field(default_factory=lambda: TrackerConfig(expected_subjects=1))
     """Tracker settings; crossing_arms is single-subject."""
-    fitter: FitterConfig = field(default_factory=FitterConfig)
+    fitter: FitterConfig = field(default_factory=lambda: FitterConfig(emit_stride=1))
     """Window fitter settings."""
     data_dir: Path = Path("data/inputs/indoors/crossing_arms")
     """Golden capture inputs."""

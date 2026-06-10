@@ -1,0 +1,105 @@
+"""Multiprocess NVDEC decode: one persistent worker process per camera.
+
+torchcodec 0.10 (conda-forge ceiling) caps in-process multi-stream CUDA decode
+at ~140 cam-fps: its decoder cache holds a single NVDEC instance per
+(codec, resolution), so identical streams thrash with ~60 ms re-inits (fixed
+upstream in 0.11, PR #1232 — unavailable here). Separate processes sidestep
+the shared cache entirely: ~400 cam-fps measured for 4x 4K HEVC.
+
+Workers are spawned once at construction (torch import + NVDEC open happen
+outside any timed region) and serve decode jobs over command queues. Frames
+travel as pinned CPU uint8 (CUDA-IPC across spawn deadlocked; two PCIe copies
+of resized frames are ~0.2 ms/frame — noise next to NVDEC).
+
+NOTE: ``spawn`` re-imports ``__main__`` — drive this from a real script with
+an ``if __name__ == "__main__"`` guard, never from stdin/REPL.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import torch
+import torch.multiprocessing as mp
+from jaxtyping import UInt8
+
+
+def _decode_worker(video_path: str, resize_hw: tuple[int, int], cmd_queue, out_queue) -> None:
+    from simplecv.video_io import TorchCodecVideoReader
+
+    reader = TorchCodecVideoReader(Path(video_path), device="cuda", resize_hw=resize_hw)
+    out_queue.put(("ready", None, None))
+    while True:
+        job = cmd_queue.get()
+        if job is None:
+            return
+        start_frame, frame_count, chunk_size = job
+        for chunk_start in range(start_frame, frame_count, chunk_size):
+            chunk_stop: int = min(chunk_start + chunk_size, frame_count)
+            chunk: UInt8[torch.Tensor, "b 3 h w"] = reader.get_frames_in_range(chunk_start, chunk_stop)
+            out_queue.put(("chunk", chunk_start, chunk.to("cpu").pin_memory()))
+        out_queue.put(("done", None, None))
+
+
+class MultiprocessDecoder:
+    """Persistent per-camera decode workers; chunk iterator per job."""
+
+    def __init__(
+        self,
+        video_paths: list[Path],
+        resize_hw: tuple[int, int],
+        chunk_size: int = 24,
+        queue_depth: int = 3,
+    ) -> None:
+        self.video_paths: list[Path] = video_paths
+        self.resize_hw: tuple[int, int] = resize_hw
+        self.chunk_size: int = chunk_size
+        ctx = mp.get_context("spawn")
+        self._cmd_queues = [ctx.Queue() for _ in video_paths]
+        self._out_queues = [ctx.Queue(maxsize=queue_depth) for _ in video_paths]
+        self._procs = [
+            ctx.Process(
+                target=_decode_worker,
+                args=(str(path), resize_hw, cmd_q, out_q),
+                daemon=True,
+            )
+            for path, cmd_q, out_q in zip(video_paths, self._cmd_queues, self._out_queues, strict=True)
+        ]
+        for proc in self._procs:
+            proc.start()
+        for out_q in self._out_queues:  # wait for NVDEC open (construction time)
+            kind, _, _ = out_q.get()
+            assert kind == "ready"
+
+    def iter_chunks(self, start_frame: int, frame_count: int):
+        """Yield ``(chunk_start, [per-camera UInt8 CUDA tensors])`` in order."""
+        for cmd_q in self._cmd_queues:
+            cmd_q.put((start_frame, frame_count, self.chunk_size))
+        import queue as queue_mod
+
+        while True:
+            items = []
+            for proc, out_q in zip(self._procs, self._out_queues, strict=True):
+                while True:
+                    try:
+                        items.append(out_q.get(timeout=30))
+                        break
+                    except queue_mod.Empty:
+                        if not proc.is_alive():
+                            raise RuntimeError("decode worker died (see worker stderr)") from None
+            kinds = {item[0] for item in items}
+            if kinds == {"done"}:
+                return
+            assert kinds == {"chunk"}, f"decode workers out of sync: {kinds}"
+            chunk_start: int = items[0][1]
+            assert all(item[1] == chunk_start for item in items)
+            yield chunk_start, [item[2].to("cuda", non_blocking=True) for item in items]
+
+    def close(self) -> None:
+        for cmd_q in self._cmd_queues:
+            cmd_q.put(None)
+        for proc in self._procs:
+            proc.join(timeout=5)
+            if proc.is_alive():
+                proc.terminate()
+        self._procs = []

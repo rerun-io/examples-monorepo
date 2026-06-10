@@ -75,6 +75,7 @@ class StreamingPipeline:
         landmarks: LandmarkEstimator | None = None,
         fitting: FittingStage | None = None,
         collector: ResultCollector | None = None,
+        use_mp_decode: bool = True,
     ) -> None:
         self.sequence: MultiViewSequence = sequence
         self.reader: TorchCodecMultiVideoReader = reader
@@ -83,6 +84,15 @@ class StreamingPipeline:
         self.landmarks: LandmarkEstimator | None = landmarks
         self.fitting: FittingStage | None = fitting
         self.collector: ResultCollector | None = collector
+        self.mp_decoder = None
+        if use_mp_decode:
+            from mamma.engine.mp_decode import MultiprocessDecoder
+
+            # Persistent decode workers (~400 vs 140 cam-fps in-process on
+            # torchcodec 0.10); spawned here so run() never pays startup.
+            self.mp_decoder = MultiprocessDecoder(
+                list(sequence.video_paths), resize_hw=(reader.height, reader.width)
+            )
 
     def run(self, chunk_size: int = 32, max_frames: int | None = None, start_frame: int = 0) -> PipelineStats:
         """Stream the sequence tick by tick; returns timing stats.
@@ -115,20 +125,29 @@ class StreamingPipeline:
                     )
                 )
 
-        prefetcher = ThreadPoolExecutor(max_workers=1)
+        def chunk_iter():
+            if self.mp_decoder is not None:
+                yield from self.mp_decoder.iter_chunks(start_frame, frame_count)
+                return
+            prefetcher = ThreadPoolExecutor(max_workers=1)
+            pending_chunk: Future | None = prefetcher.submit(decode_chunk, chunk_ranges[0]) if chunk_ranges else None
+            for chunk_idx in range(len(chunk_ranges)):
+                assert pending_chunk is not None
+                chunk = pending_chunk.result()
+                pending_chunk = (
+                    prefetcher.submit(decode_chunk, chunk_ranges[chunk_idx + 1])
+                    if chunk_idx + 1 < len(chunk_ranges)
+                    else None
+                )
+                yield chunk_ranges[chunk_idx][0], chunk
+            prefetcher.shutdown(wait=False)
+
         # Fit + its logging run one tick deep on a worker: fit(t) overlaps
         # track/landmarks(t+1) — fit feeds nothing upstream. With a collector
         # (validation) the tail is awaited inline to keep results exact-ordered.
         fit_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fit")
         pending_fit: Future | None = None
-        pending: Future | None = prefetcher.submit(decode_chunk, chunk_ranges[0]) if chunk_ranges else None
-        for chunk_idx in range(len(chunk_ranges)):
-            with profiler.stage("decode_wait"):
-                assert pending is not None
-                chunk: list[UInt8[torch.Tensor, "b 3 h w"]] = pending.result()
-            pending = (
-                prefetcher.submit(decode_chunk, chunk_ranges[chunk_idx + 1]) if chunk_idx + 1 < len(chunk_ranges) else None
-            )
+        for _chunk_start, chunk in chunk_iter():
             chunk_len: int = min(int(video.shape[0]) for video in chunk)
             for local_idx in range(chunk_len):
                 frames: list[UInt8[torch.Tensor, "3 h w"]] = [video[local_idx] for video in chunk]
@@ -177,8 +196,13 @@ class StreamingPipeline:
             if pending_fit is not None:
                 pending_fit.result()
             self.logger.flush()
-        prefetcher.shutdown(wait=False)
         fit_worker.shutdown(wait=True)
 
         elapsed: float = time.perf_counter() - start
         return PipelineStats(ticks=frame_idx - start_frame, elapsed_s=elapsed, profiler=profiler)
+
+    def close(self) -> None:
+        """Terminate persistent decode workers (call before discarding the pipeline)."""
+        if self.mp_decoder is not None:
+            self.mp_decoder.close()
+            self.mp_decoder = None
