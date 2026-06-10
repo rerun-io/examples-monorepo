@@ -31,6 +31,7 @@ def reprojection_loss(
     vis_clip_value: float = 0.8,
     img_size_px: float = 512.0,
     weight: float = 1.0,
+    delta_px: float = 8.0,
 ) -> Float32[torch.Tensor, ""]:
     """Geman-McClure 2D reprojection over all cameras (original ``proj_pts_loss``).
 
@@ -52,7 +53,7 @@ def reprojection_loss(
         if vis_per_cam is not None:
             point_weight = torch.clip(vis_per_cam[cam_id][..., None], min=vis_clip_value) * point_weight
         error: Float32[torch.Tensor, ""] = geman_mcclure(
-            proj[..., :2], pts2d[..., :2], delta=8.0, weight=point_weight, uncertainties=sigma
+            proj[..., :2], pts2d[..., :2], delta=delta_px, weight=point_weight, uncertainties=sigma
         )
         # Sync-free NaN/Inf guard: `if torch.isnan(error)` forces a host sync
         # per camera per iteration (and invalidates CUDA-graph capture).
@@ -67,14 +68,23 @@ def anchor3d_loss(
     valid: Float32[torch.Tensor, "t n"],
     weight: float = 1.0,
 ) -> Float32[torch.Tensor, ""]:
-    """MSE to triangulated anchors over valid points (original ``l2_loss_3d_points``)."""
+    """Saturating MSE to triangulated anchors over valid points.
+
+    For small residuals this is exactly the original ``l2_loss_3d_points`` MSE
+    (delta**2 * x/(delta**2 + x) ~= x for x << delta**2); a mis-triangulated
+    anchor's influence saturates at delta**2 instead of growing unboundedly —
+    self-occluded windows (bend-overs) produce valid-but-displaced anchors that
+    plain MSE at this weight would force the fit to chase.
+    """
+    delta_m: float = 0.1
     diff: Float32[torch.Tensor, "t n"] = ((pts3d_pred - pts3d_anchor) ** 2).sum(-1)
     # eigh on a degenerate-but-valid system (>=2 near-collinear cameras) can
     # emit NaN anchors; NaN * 0-mask is still NaN, so scrub before masking
     # (same guard as reprojection_loss).
     diff = torch.nan_to_num(diff, nan=0.0, posinf=0.0, neginf=0.0)
+    robust: Float32[torch.Tensor, "t n"] = delta_m**2 * diff / (delta_m**2 + diff)
     denom: Float32[torch.Tensor, ""] = valid.sum().clamp(min=1.0)
-    return weight * (diff * valid).sum() / denom
+    return weight * (robust * valid).sum() / denom
 
 
 def shape_prior_loss(betas: Float32[torch.Tensor, "1 nb"], weight: float = 1.0) -> Float32[torch.Tensor, ""]:
@@ -94,3 +104,37 @@ def temporal_smoothness_loss(
     trans_term: Float32[torch.Tensor, ""] = ((trans[1:] - trans[:-1]) ** 2).sum(-1).mean()
     pose_term: Float32[torch.Tensor, ""] = ((pose_aa[1:] - pose_aa[:-1]) ** 2).mean()
     return weight_trans * trans_term + weight_pose * pose_term
+
+
+def floor_penetration_loss(
+    verts: Float32[torch.Tensor, "t n 3"],
+    weight: float = 1.0,
+) -> Float32[torch.Tensor, ""]:
+    """One-sided penalty on vertices below the calibrated ground plane (z=0).
+
+    The original ma_3d carries full floor-contact machinery; this is the safe
+    subset for a causal fitter — penetration is always wrong (jump landings
+    measured 60-70mm underground without it), while airborne frames are
+    untouched because the penalty is one-sided.
+    """
+    below: Float32[torch.Tensor, "t n"] = torch.relu(-verts[..., 2])
+    return weight * (below**2).mean()
+
+
+def acceleration_loss(
+    pts3d: Float32[torch.Tensor, "t n 3"],
+    weight: float = 1.0,
+    dt: float = 1.0 / 30.0,
+) -> Float32[torch.Tensor, ""]:
+    """Second-difference (acceleration) penalty on 3D point trajectories.
+
+    Port of the original ``acceleration_loss`` (applied to the sampled SMPL-X
+    points): constant-velocity motion costs nothing, so unlike first-difference
+    smoothness this bridges bad-observation windows without lagging runs or
+    jumps.
+    """
+    if pts3d.shape[0] < 3:
+        return pts3d.new_zeros(())
+    vel: Float32[torch.Tensor, "tv n 3"] = (pts3d[1:] - pts3d[:-1]) / dt
+    acc: Float32[torch.Tensor, "ta n 3"] = (vel[1:] - vel[:-1]) / dt
+    return weight * acc.pow(2).mean()

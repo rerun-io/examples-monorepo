@@ -118,3 +118,32 @@ def unproject_joints2d(
     out[:, :, 0] = out[:, :, 0] * bs[:, 0:1] - bs[:, 0:1] / 2.0 + c[:, 0:1]
     out[:, :, 1] = out[:, :, 1] * bs[:, 1:2] - bs[:, 1:2] / 2.0 + c[:, 1:2]
     return out
+
+
+def gpu_mask_crop_batch(
+    masks: Float32[torch.Tensor, "n 1 h w"],
+    centers: Float64[ndarray, "n 2"],
+    bbox_sizes: Float64[ndarray, "n 2"],
+    config: MammaNetConfig,
+) -> Float32[torch.Tensor, "n 1 ch cw"]:
+    """Mask-only variant of :func:`gpu_crop_batch` (same analytic grid).
+
+    Used by the dual-resolution path where RGB crops sample a hi-res frame
+    but masks come from the engine-resolution tracker output.
+    """
+    n: int = masks.shape[0]
+    h_img: int = masks.shape[2]
+    w_img: int = masks.shape[3]
+    pw: int = config.crop_width
+    ph: int = config.crop_height
+    dev: torch.device = masks.device
+
+    c: Float32[torch.Tensor, "n 2"] = torch.as_tensor(np.asarray(centers), dtype=torch.float32, device=dev)
+    bs: Float32[torch.Tensor, "n 2"] = torch.as_tensor(np.asarray(bbox_sizes), dtype=torch.float32, device=dev)
+    ys: Float32[torch.Tensor, "ph"] = torch.arange(ph, dtype=torch.float32, device=dev)
+    xs: Float32[torch.Tensor, "pw"] = torch.arange(pw, dtype=torch.float32, device=dev)
+    gy, gx = torch.meshgrid(ys, xs, indexing="ij")
+    src_x: Float32[torch.Tensor, "n ph pw"] = c[:, 0].view(n, 1, 1) + (gx.unsqueeze(0) - pw / 2.0) * (bs[:, 0].view(n, 1, 1) / pw)
+    src_y: Float32[torch.Tensor, "n ph pw"] = c[:, 1].view(n, 1, 1) + (gy.unsqueeze(0) - ph / 2.0) * (bs[:, 1].view(n, 1, 1) / ph)
+    grid: Float32[torch.Tensor, "n ph pw 2"] = torch.stack([src_x / (w_img - 1) * 2.0 - 1.0, src_y / (h_img - 1) * 2.0 - 1.0], dim=-1)
+    return F.grid_sample(masks, grid, mode="nearest", padding_mode="zeros", align_corners=True) / 255.0

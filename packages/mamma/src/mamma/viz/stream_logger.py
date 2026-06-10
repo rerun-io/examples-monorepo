@@ -99,6 +99,18 @@ class StreamLogger:
         """Send blueprint and static scene structure (run once, before the loop)."""
         rr.send_blueprint(default_blueprint(self.sequence.camera_names))
         rr.log(WORLD_TAG, rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
+        # Calibrated ground plane (world z=0) — the same plane the fitter's
+        # floor-penetration loss references; matches the original scene.rrd.
+        half: float = 6.0
+        rr.log(
+            f"{WORLD_TAG}/ground",
+            rr.Mesh3D(
+                vertex_positions=[[-half, -half, 0.0], [half, -half, 0.0], [half, half, 0.0], [-half, half, 0.0]],
+                triangle_indices=[[0, 1, 2], [0, 2, 3]],
+                vertex_colors=[[70, 80, 90, 110]] * 4,
+            ),
+            static=True,
+        )
         rr.log(
             WORLD_TAG,
             rr.AnnotationContext(

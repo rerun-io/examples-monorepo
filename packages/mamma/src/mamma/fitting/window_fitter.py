@@ -16,7 +16,14 @@ import torch
 from jaxtyping import Bool, Float32
 from numpy import ndarray
 
-from mamma.fitting.losses import anchor3d_loss, reprojection_loss, shape_prior_loss, temporal_smoothness_loss
+from mamma.fitting.losses import (
+    acceleration_loss,
+    anchor3d_loss,
+    floor_penetration_loss,
+    reprojection_loss,
+    shape_prior_loss,
+    temporal_smoothness_loss,
+)
 from mamma.fitting.sampled_smplx import SampledSmplx
 from mamma.fitting.smplx_wrapper import NUM_BETAS, build_smplx_neutral, smplx_forward_per_parts
 
@@ -55,6 +62,11 @@ class FitterConfig:
     fit_stride: int = 5
     """Optimize every Nth tick; skipped ticks emit the warm-started forward of
     the previous solution (observations still enter the window)."""
+    anchor_warm_start: bool = True
+    """Initialize each new frame's root translation by shifting the previous
+    solution by the triangulated-anchor centroid motion (pose stays copied).
+    Cuts the systematic lag on fast motion without overshooting reversals;
+    no effect on quasi-static content."""
     emit_stride: int = 2
     """Emit (full-mesh smplx forward + readout) every Nth tick. Emission is a
     pure read-out — fit quality is unchanged. CAUTION: on skipped ticks push()
@@ -67,6 +79,16 @@ class FitterConfig:
     ~1.8 s -> ~0.4 s). False = eager Adam everywhere (debugging)."""
     weight_reproj: float = 20.0
     """Reprojection loss weight (golden ``first_run``)."""
+    reproj_delta_px: float = 2.7
+    """Geman-McClure saturation scale in engine pixels. The GM delta is
+    resolution-relative: the original's 8 px applied to 4K-space landmarks;
+    at a 1280-wide engine the equivalent robustness is 8 * 1280/3840 = 2.7
+    (8 px at 720p let outliers pull 3x harder)."""
+    vis_clip_value: float = 0.2
+    """Floor on per-landmark visibility weight in the reprojection loss. The
+    original's refinement stages use 0.2; the first port hardcoded first_run's
+    0.8, which kept self-occluded (low-visibility) landmarks at 80% influence
+    — the bend-over failure window traced back to exactly that."""
     weight_anchor3d: float = 100.0
     """Triangulated-anchor MSE weight (golden ``l2_loss_3d_points``)."""
     weight_shape_prior: float = 1.0
@@ -75,6 +97,15 @@ class FitterConfig:
     """Window translation smoothness weight."""
     weight_temp_pose: float = 1.0
     """Window pose smoothness weight."""
+    weight_accel: float = 0.0
+    """Positional-acceleration penalty on the sampled 3D points (original
+    ``acceleration_loss``, which ships commented-out there too). Off by
+    default: at dt=1/30 even small weights crush real jump accelerations
+    (measured +29mm mean PVE at 0.002). Kept as an experiment lever."""
+    weight_floor: float = 1000.0
+    """One-sided floor-penetration penalty (verts below world z=0). Jump
+    landings measured 60-70 mm underground without it; airborne frames are
+    unaffected (one-sided)."""
     device: str = "cuda"
     """Compute device."""
 
@@ -179,6 +210,25 @@ class SlidingWindowFitter:
             global_orient: Float32[torch.Tensor, "3"] = prev.global_orient.detach().clone()
             body_pose: Float32[torch.Tensor, "63"] = prev.body_pose.detach().clone()
             trans: Float32[torch.Tensor, "3"] = prev.trans.detach().clone()
+            if self.config.anchor_warm_start:
+                # Measurement-driven warm start: shift the root by the motion of
+                # the triangulated landmark centroid since the previous frame.
+                # A static warm start makes Adam spend its budget catching up on
+                # fast motion (PVE correlates 0.53 with speed); constant-velocity
+                # extrapolation overshoots at direction reversals — the anchors
+                # track real motion either way.
+                both: Float32[torch.Tensor, "n"] = anchors_valid_f * prev.anchors_valid
+                if both.sum() > 50:
+                    mask = both > 0
+                    # Component-wise median of per-anchor motion (robust to a
+                    # subset of mis-triangulated anchors), clamped to a sane
+                    # per-frame root speed so one glitchy tick can't teleport
+                    # the init (~0.12 m/frame = 3.6 m/s; jumps measure ~0.06).
+                    per_anchor: Float32[torch.Tensor, "m 3"] = anchors3d_d[mask] - prev.anchors3d[mask]
+                    delta: Float32[torch.Tensor, "3"] = per_anchor.median(dim=0).values
+                    speed: Float32[torch.Tensor, ""] = torch.linalg.norm(delta)
+                    delta = torch.where(speed > 0.12, delta * (0.12 / speed.clamp(min=1e-6)), delta)
+                    trans = (prev.trans + delta).detach()
         else:
             global_orient = torch.zeros(3, device=self.device)
             body_pose = _initial_body_pose(self.device)
@@ -258,11 +308,13 @@ class SlidingWindowFitter:
                 static["go"], static["bp"], static["hl"], static["hr"], static["jaw"], betas, static["tr"]
             )
             loss = reprojection_loss(
-                static["pts2d"], sampled, self.k_per_cam, self.world_to_cam_per_cam, static["vis"], weight=cfg.weight_reproj
+                static["pts2d"], sampled, self.k_per_cam, self.world_to_cam_per_cam, static["vis"], vis_clip_value=cfg.vis_clip_value, weight=cfg.weight_reproj, delta_px=cfg.reproj_delta_px
             ) + anchor3d_loss(sampled, static["anchors"], static["avalid"], weight=cfg.weight_anchor3d)
             if optimize_betas:
                 loss = loss + shape_prior_loss(self.betas, weight=cfg.weight_shape_prior)
             loss = loss + temporal_smoothness_loss(static["tr"], static["bp"], cfg.weight_temp_trans, cfg.weight_temp_pose)
+            loss = loss + floor_penetration_loss(sampled, weight=cfg.weight_floor)
+            loss = loss + acceleration_loss(sampled, weight=cfg.weight_accel)
             loss.backward()
             optimizer.step()
 
@@ -366,10 +418,12 @@ class SlidingWindowFitter:
                 global_orient, body_pose, hands_l, hands_r, jaw, self.betas, trans
             )
             loss = (
-                reprojection_loss(pts2d, sampled, self.k_per_cam, self.world_to_cam_per_cam, vis, weight=cfg.weight_reproj)
+                reprojection_loss(pts2d, sampled, self.k_per_cam, self.world_to_cam_per_cam, vis, vis_clip_value=cfg.vis_clip_value, weight=cfg.weight_reproj, delta_px=cfg.reproj_delta_px)
                 + anchor3d_loss(sampled, anchors, anchors_valid, weight=cfg.weight_anchor3d)
                 + shape_prior_loss(self.betas, weight=cfg.weight_shape_prior)
                 + temporal_smoothness_loss(trans, body_pose, cfg.weight_temp_trans, cfg.weight_temp_pose)
+                + floor_penetration_loss(sampled, weight=cfg.weight_floor)
+                + acceleration_loss(sampled, weight=cfg.weight_accel)
             )
             loss.backward()
             optimizer.step()

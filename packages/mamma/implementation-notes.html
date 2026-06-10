@@ -190,6 +190,28 @@ function ddShow(i){
 }
 </script>
 
+<h2>Dynamic golden gate campaign — matching the original on fast motion <span class="meta">(2026-06-10, in progress)</span></h2>
+<p><b>Goal:</b> a second golden gate on <code>running_jumping</code> (478 frames of runs, jumps, and a
+hands-near-ground bend) — per-frame PVE vs the original DAG's SMPL-X output, <b>p95 AND max &le; 30 mm</b>,
+runtime &le; 50% of realtime. The reference artifact is the original pipeline's own output on this clip
+(generated in 1h47m; frozen as <code>data/golden/ma_3d_dynamic/...</code>).</p>
+<table>
+<tr><th>Exp</th><th>Change</th><th>mean</th><th>p95</th><th>max (mm)</th><th>Lesson</th></tr>
+<tr><td>E0</td><td>shipped defaults (fit_stride 5)</td><td>124</td><td>246</td><td>412</td><td>frozen-replay between solves cannot track dynamic motion</td></tr>
+<tr><td>E1</td><td>fit_stride 1 + emit 1 + velocity warm-start</td><td>30</td><td>47</td><td>257</td><td>constant-velocity extrapolation overshoots at direction reversals</td></tr>
+<tr><td>E2-3</td><td>anchor-centroid warm-start (median, clamped) + saturating anchor loss</td><td>24</td><td>32</td><td>220</td><td>robustness can't fix anchors that are <i>consistently</i> displaced</td></tr>
+<tr><td>E4-6</td><td>1080p crops + saturation 0.1 m</td><td>24</td><td>31</td><td>115</td><td>crop resolution is real: the original fed MammaNet 4K crops</td></tr>
+<tr><td>E11</td><td><b>visibility gating</b>: triangulate only vis&gt;0.5; reproj vis-clip 0.8&#8594;0.2 (original's refinement value)</td><td>22</td><td>30</td><td>50</td><td>the bend window was self-occluded landmarks entering at 80% weight — the single biggest fix</td></tr>
+<tr><td>E13d</td><td>full 4K everything (ceiling probe)</td><td>21</td><td>26</td><td>37</td><td>quality ceiling confirmed, but 74 s wall — can't pass runtime</td></tr>
+<tr><td>E14-15</td><td><b>dual-res</b>: decode native 4K, track/log at 720p, crop landmarks from 4K + resolution-corrected GM delta (8 px was 4K-relative; 2.7 px is the 720p equivalent)</td><td>21</td><td><b>25 PASS</b></td><td>39</td><td>the reprojection robustness scale was silently resolution-dependent</td></tr>
+</table>
+<p>Dead ends kept for the record: positional acceleration loss (the original ships it commented out too —
+at 30 fps even weight 0.002 crushed real jump accelerations, +29 mm mean); strong first-difference smoothing
+(halved the bend error, doubled everything else). Remaining gap: ~9 mm on five frames (f111-125, the bend) —
+the causal-vs-offline residual where the original's whole-sequence context sees through a window ours must
+ride out. Floor model added along the way: ground plane logged at world z=0 + one-sided floor-penetration
+loss (jump landings measured 60-70 mm underground without it).</p>
+
 <details style="margin-top:1.4rem"><summary style="font-size:1.15em;font-weight:700;color:#e5c07b">Appendix — full build log (current state, mask validation evidence, milestones M0&#8594;M7)</summary>
 <h2>Current state — shipped defaults: 5/5 PASS at full mask quality <span class="meta">(2026-06-10, latest)</span></h2>
 <p><b>Shipped defaults: track_stride 1 (masks pixel-identical to per-frame tracking), 14.79 s wall ≤ 15 s gate (≥80% of realtime, Pablo decision after the mask-collapse evidence below), golden 23.3 mm MPJPE / 21.4 mm PVE; canonical <code>mamma-goal-check</code> exits 0 with 5/5 PASS.</b> The historical fastest point — 11.76 s, faster than realtime, at track_stride 4 — remains one flag away (<code>--tracker.track-stride 4</code>) and is preserved as gate-cross.rrd. Original campaign:</p>

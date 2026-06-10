@@ -12,7 +12,7 @@ from numpy import ndarray
 
 from mamma.engine.types import CameraTracks
 from mamma.landmarks.config import DEFAULT_MAMMANET_CONFIG, MammaNetConfig
-from mamma.landmarks.crops import box_geometry, gpu_crop_batch, unproject_joints2d
+from mamma.landmarks.crops import box_geometry, gpu_crop_batch, gpu_mask_crop_batch, unproject_joints2d
 from mamma.landmarks.mammanet import MammaNet, load_mammanet
 
 
@@ -73,16 +73,25 @@ class LandmarkEstimator:
         self,
         frames: list[Float32[torch.Tensor, "3 h w"]] | list[torch.Tensor],
         tracks: list[CameraTracks],
+        frames_hires: list[torch.Tensor] | None = None,
+        hires_scale: float = 1.0,
     ) -> list[CameraLandmarks]:
-        """One synchronized tick: frames (uint8 or float RGB CHW) + tracks -> landmarks."""
+        """One synchronized tick: frames (uint8 or float RGB CHW) + tracks -> landmarks.
+
+        With ``frames_hires`` the RGB crops are sampled from those frames
+        (geometry scaled by ``hires_scale``) while masks, un-projection, and
+        all outputs stay in the engine (``frames``) pixel space — sharper
+        MammaNet inputs without touching anything downstream.
+        """
         # Gather every (cam, person) entry with a usable box into one batch.
         entries: list[tuple[int, int]] = []
         centers_list: list[Float64[ndarray, "2"]] = []
         sizes_list: list[Float64[ndarray, "2"]] = []
         crop_frames: list[torch.Tensor] = []
         crop_masks: list[torch.Tensor] = []
+        rgb_source: list[Float32[torch.Tensor, "3 h w"]] | list[torch.Tensor] = frames_hires if frames_hires is not None else frames
         for cam_idx, cam_tracks in enumerate(tracks):
-            frame_f32: torch.Tensor = frames[cam_idx].float()
+            frame_f32: torch.Tensor = rgb_source[cam_idx].float()
             for obj_id, track in sorted(cam_tracks.items()):
                 if track.bbox_xyxy is None:
                     continue
@@ -98,11 +107,15 @@ class LandmarkEstimator:
             return results
 
         frames_batch: Float32[torch.Tensor, "n 3 h w"] = torch.stack(crop_frames, dim=0)
-        masks_batch: Float32[torch.Tensor, "n 1 h w"] = torch.stack(crop_masks, dim=0)
+        masks_batch: Float32[torch.Tensor, "n 1 h2 w2"] = torch.stack(crop_masks, dim=0)
         centers: Float64[ndarray, "n 2"] = np.stack(centers_list, axis=0)
         sizes: Float64[ndarray, "n 2"] = np.stack(sizes_list, axis=0)
 
-        img_crops, mask_crops = gpu_crop_batch(frames_batch, centers, sizes, masks_batch, self.config)
+        # RGB sampled from the (possibly hi-res) source; masks sampled from the
+        # engine-res tracker output. Same normalized region either way.
+        s: float = hires_scale if frames_hires is not None else 1.0
+        img_crops, _ = gpu_crop_batch(frames_batch, centers * s, sizes * s, None, self.config)
+        mask_crops = gpu_mask_crop_batch(masks_batch, centers, sizes, self.config)
         if self.runner is not None and img_crops.shape[0] <= 4:
             out: dict[str, torch.Tensor | None] = dict(self.runner(img_crops, mask_crops))
         else:

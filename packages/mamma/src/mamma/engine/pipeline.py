@@ -79,6 +79,7 @@ class StreamingPipeline:
         fitting: FittingStage | None = None,
         collector: ResultCollector | None = None,
         use_mp_decode: bool = True,
+        engine_hw: tuple[int, int] | None = None,
     ) -> None:
         self.sequence: MultiViewSequence = sequence
         self.reader: TorchCodecMultiVideoReader = reader
@@ -87,6 +88,13 @@ class StreamingPipeline:
         self.landmarks: LandmarkEstimator | None = landmarks
         self.fitting: FittingStage | None = fitting
         self.collector: ResultCollector | None = collector
+        # Dual-resolution mode: the reader decodes at NATIVE resolution and
+        # each tick derives an engine_hw copy for tracking/logging, while
+        # landmark crops sample the native frame (sharper MammaNet input —
+        # the original fed it 4K crops; 720p crops cost ~20mm PVE on
+        # self-occluded poses).
+        self.engine_hw: tuple[int, int] | None = engine_hw
+        self._hires_scale: float = 1.0 if engine_hw is None else reader.width / engine_hw[1]
         self.mp_decoder = None
         if use_mp_decode:
             from mamma.engine.mp_decode import MultiprocessDecoder
@@ -159,6 +167,16 @@ class StreamingPipeline:
                 chunk_len: int = min(int(video.shape[0]) for video in chunk)
                 for local_idx in range(chunk_len):
                     frames: list[UInt8[torch.Tensor, "3 h w"]] = [video[local_idx] for video in chunk]
+                    frames_hires: list[UInt8[torch.Tensor, "3 hh ww"]] | None = None
+                    if self.engine_hw is not None:
+                        frames_hires = frames
+                        lo: UInt8[torch.Tensor, "c 3 h w"] = (
+                            torch.nn.functional.interpolate(torch.stack(frames).float(), size=self.engine_hw, mode="area")
+                            .round_()
+                            .clamp_(0, 255)
+                            .to(torch.uint8)
+                        )
+                        frames = [lo[i] for i in range(lo.shape[0])]
                     tracks: list[CameraTracks] | None = None
                     landmarks: list[CameraLandmarks] | None = None
                     if self.tracker is not None:
@@ -166,7 +184,7 @@ class StreamingPipeline:
                             tracks = self.tracker.step(frame_idx, frames)
                     if self.landmarks is not None and tracks is not None:
                         with profiler.stage("landmarks"):
-                            landmarks = self.landmarks.estimate(frames, tracks)
+                            landmarks = self.landmarks.estimate(frames, tracks, frames_hires=frames_hires, hires_scale=self._hires_scale)
                     if self.fitting is not None and landmarks is not None:
                         with profiler.stage("fit_wait"):
                             if pending_fit is not None:
@@ -233,6 +251,8 @@ def build_streaming_pipeline(
     mammanet_weights: Path | None = None,
     trt_engine: Path | None = None,
     collector: ResultCollector | None = None,
+    use_mp_decode: bool = True,
+    hires_crops: bool = False,
 ) -> StreamingPipeline:
     """Assemble the standard decode->track->landmarks->fit->log pipeline.
 
@@ -243,7 +263,9 @@ def build_streaming_pipeline(
     into the stage configs here so callers never mutate them.
     """
     scaled_cams: list[CameraCalibration] = sequence.scaled_cameras(resize_hw)
-    reader = TorchCodecMultiVideoReader(list(sequence.video_paths), device=device, resize_hw=resize_hw)
+    # hires_crops: decode at native resolution; the pipeline downscales to
+    # resize_hw per tick for tracking/logging and crops landmarks from native.
+    reader = TorchCodecMultiVideoReader(list(sequence.video_paths), device=device, resize_hw=None if hires_crops else resize_hw)
     logger = StreamLogger(sequence, resize_hw=resize_hw)
 
     tracker: MultiViewTracker | None = None
@@ -260,4 +282,14 @@ def build_streaming_pipeline(
         fitter_config.device = device
         fitting = FittingStage(scaled_cams, fitter_config)
 
-    return StreamingPipeline(sequence, reader, logger, tracker=tracker, landmarks=landmarks, fitting=fitting, collector=collector)
+    return StreamingPipeline(
+        sequence,
+        reader,
+        logger,
+        tracker=tracker,
+        landmarks=landmarks,
+        fitting=fitting,
+        collector=collector,
+        use_mp_decode=use_mp_decode,
+        engine_hw=resize_hw if hires_crops else None,
+    )

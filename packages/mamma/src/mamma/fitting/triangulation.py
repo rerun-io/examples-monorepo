@@ -18,7 +18,7 @@ def triangulate_points(
     world_to_cam_per_cam: list[Float32[torch.Tensor, "4 4"]],
     vis_per_cam: list[Float32[torch.Tensor, "n"]] | None = None,
     img_size_px: float = 512.0,
-    vis_thresh: float = 0.0,
+    vis_thresh: float = 0.5,
     clamp_sigma: tuple[float, float] = (1.0, 24.0),
 ) -> tuple[Float32[torch.Tensor, "n 3"], Bool[torch.Tensor, "n"]]:
     """Triangulate one tick's landmarks from multiple cameras.
@@ -28,7 +28,8 @@ def triangulate_points(
         k_per_cam: Per-camera intrinsics (engine resolution).
         world_to_cam_per_cam: Per-camera world->cam transforms.
         vis_per_cam: Per-camera visibility in [0, 1]; points at/below
-            ``vis_thresh`` are excluded for that camera.
+            ``vis_thresh`` are excluded for that camera (0.5: only confident
+            landmarks triangulate — occluded ones poisoned the anchors).
         img_size_px: Crop size that scales the log-variance to pixel sigma
             (matches the original: ``sigma = exp(0.5*logvar) * img_size/2``).
         clamp_sigma: Pixel-sigma clamp range.

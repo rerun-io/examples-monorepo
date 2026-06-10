@@ -397,7 +397,11 @@ class TorchCodecVideoReader:
         self._height: int = self._source_height if resize_hw is None else int(resize_hw[0])
         # CPU decode-time transforms already produce resized frames; only the
         # CUDA path needs a post-decode resize.
-        self._needs_post_resize: bool = resize_hw is not None and self.device.startswith("cuda")
+        self._needs_post_resize: bool = (
+            resize_hw is not None
+            and self.device.startswith("cuda")
+            and resize_hw != (self._source_height, self._source_width)
+        )
         self._fps: float = required_torchcodec_float(metadata.average_fps, "average_fps")
         self._frame_cnt: int = required_torchcodec_int(metadata.num_frames, "num_frames")
         self._position: int = 0
