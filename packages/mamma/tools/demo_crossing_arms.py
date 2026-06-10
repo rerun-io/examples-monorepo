@@ -51,6 +51,8 @@ class DemoConfig:
     """Disable dense 2D landmark estimation."""
     no_fitting: bool = False
     """Disable triangulation + SMPL-X fitting."""
+    trt_engine: Path | None = None
+    """Optional MammaNet TensorRT engine (.trt_cache/*.plan from tools/build_trt_engine.py)."""
     device: str = "cuda"
     """Decode/compute device."""
 
@@ -76,7 +78,7 @@ def main(config: DemoConfig) -> None:
 
     landmarks: LandmarkEstimator | None = None
     if tracker is not None and not config.no_landmarks:
-        landmarks = LandmarkEstimator(config.mammanet_weights, device=config.device)
+        landmarks = LandmarkEstimator(config.mammanet_weights, device=config.device, engine_path=config.trt_engine)
 
     fitting: FittingStage | None = None
     if landmarks is not None and not config.no_fitting:

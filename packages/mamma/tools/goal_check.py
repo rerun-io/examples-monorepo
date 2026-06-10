@@ -32,14 +32,18 @@ def main() -> int:
     results: dict[str, bool] = {}
 
     print("=" * 70)
+    engine = sorted(PKG.glob(".trt_cache/mammanet_*.plan"))
+    engine_args: list[str] = ["--trt-engine", str(engine[-1])] if engine else []
+    if not engine:
+        print("note: no TRT engine in .trt_cache (run tools/build_trt_engine.py); using eager MammaNet")
     print("[1/5] golden gate (validate_golden)")
-    ok, out = run([py, "tools/validate_golden.py", "--rr-config.headless"], PKG)
+    ok, out = run([py, "tools/validate_golden.py", "--rr-config.headless", *engine_args], PKG)
     print(out)
     results["golden"] = ok
 
     print("=" * 70)
     print("[2/5] realtime benchmark (full clip, incl. Rerun logging)")
-    ok, out = run([py, "tools/benchmark.py", "--rr-config.headless"], PKG, tail=8)
+    ok, out = run([py, "tools/benchmark.py", "--rr-config.headless", *engine_args], PKG, tail=8)
     print(out)
     results["realtime"] = ok
 

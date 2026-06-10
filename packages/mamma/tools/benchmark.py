@@ -41,6 +41,8 @@ class BenchmarkConfig:
     """Converted MammaNet weights."""
     resize_hw: tuple[int, int] = (720, 1280)
     """Engine resolution."""
+    trt_engine: Path | None = None
+    """Optional MammaNet TensorRT engine plan."""
     gate_seconds: float = 12.1
     """PASS bound on wall time for the full clip (clip duration = realtime)."""
     warmup_frames: int = 33
@@ -56,7 +58,7 @@ def build_pipeline(config: BenchmarkConfig, sequence: MultiViewSequence) -> Stre
     reader = TorchCodecMultiVideoReader(list(sequence.video_paths), device=config.device, resize_hw=config.resize_hw)
     logger = StreamLogger(sequence, resize_hw=config.resize_hw)
     tracker = MultiViewTracker(scaled_cams, config.tracker)
-    estimator = LandmarkEstimator(config.mammanet_weights, device=config.device)
+    estimator = LandmarkEstimator(config.mammanet_weights, device=config.device, engine_path=config.trt_engine)
     fitting = FittingStage(scaled_cams, config.fitter)
     return StreamingPipeline(sequence, reader, logger, tracker=tracker, landmarks=estimator, fitting=fitting)
 

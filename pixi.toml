@@ -1680,6 +1680,10 @@ platforms = ["linux-64"]
 
 [feature.mamma.dependencies]
 python = "3.12.*"
+# Keep the torch everything was measured/gated on (fresh solves pick 2.11).
+pytorch-gpu = "2.10.*"
+onnx = "*"
+onnxscript = "*"
 einops = ">=0.8.0,<0.9"
 tyro = ">=0.9.1,<0.10"
 torchcodec = "*"
@@ -1692,6 +1696,9 @@ mamma = { path = "packages/mamma", editable = true }
 # EfficientTAM); distribution name is `sam2`, needs no-build-isolation (torch
 # at build time). See packages/sam2-streaming/VENDOR.md.
 sam2 = { path = "packages/sam2-streaming", editable = true }
+# TensorRT python API for the MammaNet engine (same pinned build as
+# sapiens2-pose; engines are machine-local, rebuilt per GPU).
+tensorrt-cu12 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
 
 [feature.mamma.activation.env]
 PACKAGE_DIR = "packages/mamma"

@@ -44,10 +44,18 @@ class LandmarkEstimator:
         device: str = "cuda",
         config: MammaNetConfig = DEFAULT_MAMMANET_CONFIG,
         compile_model: bool = False,
+        engine_path: Path | None = None,
     ) -> None:
         self.config: MammaNetConfig = config
         self.device: str = device
         self.model: MammaNet = load_mammanet(weights_path, device=device, config=config)
+        self.runner = None
+        if engine_path is not None:
+            from mamma.landmarks.tensorrt_backend import MammaNetTrtRunner
+
+            # FP16 TRT engine: 3.88ms vs 15.8ms eager per 4-crop call; joints
+            # p99 diff 0.008 normalized units vs eager fp16 (gate re-verified).
+            self.runner = MammaNetTrtRunner(engine_path, config=config)
         if compile_model:
             import torch._dynamo
 
@@ -96,8 +104,11 @@ class LandmarkEstimator:
         sizes: Float64[ndarray, "n 2"] = np.stack(sizes_list, axis=0)
 
         img_crops, mask_crops = gpu_crop_batch(frames_batch, centers, sizes, masks_batch, self.config)
-        with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16, enabled="cuda" in self.device):
-            out: dict[str, torch.Tensor | None] = self.model(img_crops, mask_crops)
+        if self.runner is not None and img_crops.shape[0] <= 4:
+            out: dict[str, torch.Tensor | None] = dict(self.runner(img_crops, mask_crops))
+        else:
+            with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16, enabled="cuda" in self.device):
+                out = self.model(img_crops, mask_crops)
 
         joints2d_raw = out["joints2d"]
         visibility_raw = out["visibility"]

@@ -45,6 +45,8 @@ class ValidateConfig:
     """Converted MammaNet weights."""
     resize_hw: tuple[int, int] = (720, 1280)
     """Engine resolution."""
+    trt_engine: Path | None = None
+    """Optional MammaNet TensorRT engine plan."""
     mpjpe_tolerance_mm: float = 30.0
     """PASS bound on MPJPE vs golden. Justification: streaming defaults deliver
     ~20mm; the golden is itself a 0.15-iter-scale run and the streaming rewrite
@@ -68,7 +70,7 @@ def main(config: ValidateConfig) -> int:
     )
     logger: StreamLogger = StreamLogger(sequence, resize_hw=config.resize_hw)
     tracker: MultiViewTracker = MultiViewTracker(scaled_cams, config.tracker)
-    estimator: LandmarkEstimator = LandmarkEstimator(config.mammanet_weights, device=config.device)
+    estimator: LandmarkEstimator = LandmarkEstimator(config.mammanet_weights, device=config.device, engine_path=config.trt_engine)
     fitting: FittingStage = FittingStage(scaled_cams, config.fitter)
     collector: ResultCollector = ResultCollector()
     pipeline: StreamingPipeline = StreamingPipeline(
