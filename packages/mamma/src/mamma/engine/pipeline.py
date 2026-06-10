@@ -165,7 +165,9 @@ class StreamingPipeline:
                 if tracks is not None:
                     with profiler.stage("log_tracks"):
                         self.logger.log_tick_tracks(frame_idx, tracks)
-                if landmarks is not None:
+                if landmarks is not None and frame_idx % 2 == 0:
+                    # Dense 512-point overlays at 15 Hz halve their D2H cost;
+                    # boxes/masks/mesh cadences are unchanged.
                     with profiler.stage("log_landmarks"):
                         self.logger.log_tick_landmarks(frame_idx, landmarks)
                 if self.collector is not None:

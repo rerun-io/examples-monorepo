@@ -201,3 +201,26 @@ Validate numerics vs fork path (mask IoU ~1.0) + golden gate.
 Estimated: tracker ~33 -> ~12-15 ms/executed tick -> wall ~26.8 -> ~17-19 s.
 Remaining to 12.1 s after that: engine-ify TAM encoder (TRT, same recipe as
 MammaNet), trim engine glue (~10 ms/tick python), possibly track_stride=4.
+
+
+## Round 5 (fork batching landed!) — 23.4 s; canonical benchmark 22.75 s
+
+- `tracking/batched_forward.py`: B=4 steady-state propagation (lockstep cameras ->
+  identical memory frame-index structure -> stack memory slots across cameras; one
+  batched memory-attention + mask-decode [empty prompts expanded] + memory-encode).
+  Steady tracker 33.3 -> 12.7 ms/tick. Gate 23.0 mm PASS, 10/10 tests.
+- Landmark overlay logging at 15 Hz (halved D2H), benchmark 22.75 s (16 ticks/s).
+- True sync'd steady composition now: track 10.5, landmarks 4.5 (TRT), fit steady
+  ~15 (bootstrap skews short windows) -> models ~30 ms/tick. The remaining
+  ~30 ms/tick is engine/logging glue + GIL interplay between the three worker
+  threads + per-tick emit (full smplx fwd + numpy).
+
+### Next tranche to 12.1 s (gap 1.88x)
+1. Emit cost: full-mesh smplx forward + numpy every tick (~6 ms) -> emit mesh at
+   stride 2 for logging while keeping per-frame FitResult for the collector path,
+   or fold emission into the graphed sampled model + a full-LBS pass per N ticks.
+2. Bootstrap amortization: 300 eager iters once (~2 s of the wall) -> run bootstrap
+   through the CUDA graph too (capture once at window-fill with betas as input).
+3. Glue/GIL: per-tick python in the engine loop + 3 worker threads contend; consider
+   merging fit+video workers and batching rr.log calls (columnar per chunk).
+4. TAM-encoder TRT engine (same recipe as MammaNet, ~2 ms off) if still short.
