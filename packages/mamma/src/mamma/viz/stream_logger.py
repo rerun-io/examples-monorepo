@@ -79,6 +79,7 @@ class StreamLogger:
         self._encoders: dict[str, VideoEncoder] = {
             name: VideoEncoder(codec=video_codec, fps=sequence.fps) for name in sequence.camera_names
         }
+        self._pts_offset: dict[str, int] = dict.fromkeys(sequence.camera_names, 0)
         rerun_codec_by_choice: dict[VideoCodecChoice, rr.VideoCodec] = {
             VideoCodecChoice.H264: rr.VideoCodec.H264,
             VideoCodecChoice.H265: rr.VideoCodec.H265,
@@ -201,14 +202,22 @@ class StreamLogger:
             rr.log(f"{WORLD_TAG}/joints/person_{obj_id}", rr.Points3D(positions=fit.joints, radii=0.012, colors=color))
 
     def flush(self) -> None:
-        """Drain buffered encoder packets (run once, after the loop)."""
+        """Drain buffered encoder packets and reset encoders for reuse.
+
+        A flushed libav context is in EOF state and cannot encode again, so
+        fresh encoders replace the drained ones; the per-camera PTS offset
+        keeps the shared timeline monotonic across multiple ``run()`` calls.
+        """
         for cam_name, encoder in self._encoders.items():
             self._log_packets(cam_name, encoder.flush())
+            self._pts_offset[cam_name] += encoder.next_pts
+            self._encoders[cam_name] = VideoEncoder(codec=self._video_codec, fps=self.fps)
 
     def _log_packets(self, cam_name: str, packets: list[tuple[int, bytes]]) -> None:
         entity: str = f"{pinhole_entity(cam_name)}/video"
+        offset: int = self._pts_offset[cam_name]
         for pts, data in packets:
-            rr.set_time(TIMELINE, duration=pts / self.fps)
+            rr.set_time(TIMELINE, duration=(offset + pts) / self.fps)
             rr.log(entity, rr.VideoStream.from_fields(sample=data))
 
     @property

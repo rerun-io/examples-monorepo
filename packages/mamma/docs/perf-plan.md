@@ -57,3 +57,33 @@ preemptive BF16, TRT for the fit loop (training-style fwd+bwd — graphs are the
 tool), detailed profilingVerbosity in production engines, TorchScript IR /
 enqueueV2 / kFP16 (removed in TRT 11), reusing engines across GPUs (name
 `*_trt11_sm120.plan`, keep in gitignored `.trt_cache/`, rebuild via pixi task).
+
+
+## Profile results (Step 0 executed, 2026-06-09)
+
+`tools/profile_pipeline.py`, 48 steady ticks after 45 warmup, crossing_arms:
+
+- **Total CUDA kernel time 78 ms/tick vs ~181 ms/tick wall** (234 under profiler)
+  -> the pipeline is CPU/launch-bound overall; TRT engines alone cannot close the gap.
+- Launch storm: aten::bmm 55,440 calls + aten::copy_ 136,536 calls per 48 ticks
+  (~1,150 + 2,840 launches/tick), concentrated in the smplx fit and the
+  per-camera tracker loop. log_video burns 25.8 ms/tick of CPU (PyAV swscale+NVENC submit).
+- Fit microbench truth: one 16-iter optimize call = 92 ms wall, ~67 ms genuine GPU
+  (4.2 ms/iter fwd+bwd over ALL 10,475 SMPL-X vertices). torch.compile default: no
+  gain; reduce-overhead + compiled autograd: 82.5 ms; manual CUDA-graph capture
+  fails (smplx forward performs a capture-illegal op, likely a per-call H2D const).
+- Fixed along the way: per-camera-per-iter host sync in reprojection_loss
+  (`if torch.isnan(...)` -> nan_to_num), benchmark warmup pipeline leak (2x models
+  resident -> scale_cuda OOM), goal_check pytest env, encoder EOF on logger reuse.
+
+## Revised next steps (highest leverage first)
+
+1. **512-vertex LBS**: pre-multiply verts_512 into smplx skinning weights /
+   shapedirs / posedirs so each fit iteration deforms 512 verts, not 10,475
+   (~20x vertex math). Full mesh only once per tick for Rerun emission.
+   Est: fit 92 -> ~20-25 ms per optimize call (~8 ms/tick amortized).
+2. **NVENC + D2H logging on a worker thread** (25.8 ms CPU/tick off the loop).
+3. **Tracker CPU overhead**: 74 ms wall vs ~11 ms CUDA — batch per-camera
+   memory ops, try torch.compile on TAM image encoder, then 4 CUDA streams.
+4. Re-profile; only then decide whether TRT engines (TAM/MammaNet) are still
+   needed to reach 33 ms/tick.

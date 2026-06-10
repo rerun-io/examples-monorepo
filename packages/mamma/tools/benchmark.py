@@ -70,6 +70,15 @@ def main(config: BenchmarkConfig) -> int:
     warmup: StreamingPipeline = build_pipeline(config, sequence)
     warmup.run(max_frames=config.warmup_frames)
     print(f"warmup done ({config.warmup_frames} frames)")
+    # Release the warmup pipeline's models + NVDEC contexts before building the
+    # timed one — two resident copies exhaust CUDA memory (scale_cuda OOM).
+    import gc
+
+    import torch
+
+    del warmup
+    gc.collect()
+    torch.cuda.empty_cache()
 
     timed: StreamingPipeline = build_pipeline(config, sequence)
     stats = timed.run()

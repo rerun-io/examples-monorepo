@@ -49,6 +49,12 @@ ignore = [
     "UP040", # Beartype fails if not using this for typealias
 ]
 
+[tool.pytest.ini_options]
+# A flaky CUDA/decoder deadlock was observed under pytest (rerun tokio + libav
+# threads + torchcodec); dump all thread stacks after 5 minutes instead of
+# hanging silently so the next occurrence is diagnosable.
+faulthandler_timeout = 300
+
 [tool.vulture]
 paths = ["src/mamma", "tests"]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]

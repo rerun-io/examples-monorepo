@@ -54,8 +54,9 @@ def reprojection_loss(
         error: Float32[torch.Tensor, ""] = geman_mcclure(
             proj[..., :2], pts2d[..., :2], delta=8.0, weight=point_weight, uncertainties=sigma
         )
-        if torch.isnan(error) or torch.isinf(error):
-            error = pts3d_world.new_zeros(())
+        # Sync-free NaN/Inf guard: `if torch.isnan(error)` forces a host sync
+        # per camera per iteration (and invalidates CUDA-graph capture).
+        error = torch.nan_to_num(error, nan=0.0, posinf=0.0, neginf=0.0)
         total = total + error / n_cams
     return total
 

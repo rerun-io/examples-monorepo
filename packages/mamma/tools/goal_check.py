@@ -68,7 +68,9 @@ def main() -> int:
 
     print("=" * 70)
     print("[4/5] no-disk-writes (pytest tests/test_no_disk_writes.py)")
-    ok, out = run([py, "-m", "pytest", "tests/test_no_disk_writes.py", "-q"], PKG, tail=3)
+    # pytest lives in the dev env, not the prod env this script runs in.
+    dev_python: Path = REPO_ROOT / ".pixi/envs/mamma-dev/bin/python"
+    ok, out = run([str(dev_python), "-m", "pytest", "tests/test_no_disk_writes.py", "-q"], PKG, tail=3)
     print(out)
     results["no-writes"] = ok
 
