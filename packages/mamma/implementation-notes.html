@@ -206,6 +206,62 @@ function ddShow(i){
 }
 </script>
 
+<h2>Artifacts &amp; logging — saved, logged, and could-be-logged</h2>
+<p>Three buckets, from a full inventory of the original DAG's output tree (the 1h47m run produced ~470 MB
+of artifacts plus ~6 GB of intermediate masks), our StreamLogger, and a sweep of the Rerun archetype
+reference + logging patterns across this monorepo.</p>
+
+<h3>1 &#183; Saved to disk by the original (not in its scene.rrd)</h3>
+<table>
+<tr><th>Stage</th><th>Artifact</th><th>Size (this run)</th><th>Purpose</th><th>In our streaming port</th></tr>
+<tr><td>ma_cap</td><td>calibration NPZs (global + per-camera)</td><td>~24 KB</td><td>pipeline coupling</td><td>read directly; never re-written</td></tr>
+<tr><td>ma_masks</td><td><code>masks.npy</code> per camera</td><td><b>~1.5 GB &#215; 4</b></td><td>pipeline coupling &#8594; ma_2d</td><td>in-VRAM only, logged as SegmentationImage</td></tr>
+<tr><td>ma_masks</td><td>subject feature bank, anchor reports/viz, crop collages, masked-output mp4s</td><td>~15 MB</td><td>diagnostic</td><td>feature bank in-memory; viz not ported</td></tr>
+<tr><td>ma_2d</td><td>per-camera NPZ: landmarks + visibility + contact + floor-contact (477&#215;512 each)</td><td>5.6 MB/cam</td><td>pipeline coupling &#8594; ma_3d</td><td>in-VRAM; visibility logged as color, contact heads consumed by the floor loss</td></tr>
+<tr><td>ma_2d</td><td>keypoint-overlay mp4 per camera</td><td>~2 MB/cam</td><td>diagnostic</td><td>equivalent = Points2D over VideoStream (live)</td></tr>
+<tr><td>ma_3d</td><td><code>verts_joints</code> NPZ (10475 verts + 127 joints &#215; 477 frames)</td><td>116 MB</td><td>coupling &#8594; ma_vis; <b>now our golden artifact</b></td><td>in-memory FitResults; mesh/joints logged</td></tr>
+<tr><td>ma_3d</td><td><code>smplx_params</code> NPZ (pose 165, betas 16, trans, triangulated cloud, contact labels)</td><td>5 MB</td><td>coupling + diagnostic</td><td>in-memory; params not logged anywhere (see bucket 3)</td></tr>
+<tr><td>ma_3d</td><td>detection_analysis (9 CSVs + 10 heatmap PNGs), reid_debug mp4 + stats, contact HTMLs &#215;2</td><td>~23 MB</td><td>diagnostic</td><td>not ported — the candidates below cover the same questions live</td></tr>
+<tr><td>ma_vis</td><td>preview.mp4 (4-cam pyrender collage) + per-camera overlay mp4s</td><td>~39 MB</td><td>diagnostic</td><td>superseded: the RRD itself is the interactive version</td></tr>
+</table>
+
+<h3>2 &#183; Logged to Rerun</h3>
+<table>
+<tr><th>Entity</th><th>Archetype</th><th>Cadence</th><th>Original scene.rrd</th><th>Ours</th></tr>
+<tr><td>cameras (pose + intrinsics)</td><td>Pinhole + Transform3D</td><td>static</td><td>yes</td><td>yes</td></tr>
+<tr><td>camera video</td><td>VideoStream (H.264)</td><td>per tick</td><td>yes (source res)</td><td>yes (720p, NVENC, async worker)</td></tr>
+<tr><td>person masks</td><td>SegmentationImage</td><td>per tick</td><td>optional</td><td>yes</td></tr>
+<tr><td>person boxes</td><td>Boxes2D</td><td>per tick</td><td>no</td><td>yes</td></tr>
+<tr><td>2D landmarks</td><td>Points2D (visibility &#8594; red/green color)</td><td>every 2nd tick</td><td>yes</td><td>yes</td></tr>
+<tr><td>SMPL-X mesh</td><td>Mesh3D (+normals)</td><td>per emit</td><td>yes</td><td>yes</td></tr>
+<tr><td>joints (127)</td><td>Points3D</td><td>per emit</td><td>yes (22 body)</td><td>yes — <b>but no bones</b> (see below)</td></tr>
+<tr><td>triangulated cloud</td><td>Points3D</td><td>per tick</td><td>yes (contact-colored)</td><td>yes (uncolored)</td></tr>
+<tr><td>ground plane</td><td>Mesh3D</td><td>static</td><td>yes</td><td>yes</td></tr>
+<tr><td>contact count series</td><td>Scalars</td><td>per frame</td><td><b>yes</b></td><td><b>no — the one parity gap</b></td></tr>
+</table>
+
+<h3>3 &#183; Computed but neither saved nor logged — and fits an archetype</h3>
+<p>Everything below already exists per tick in the pipeline; logging it is wiring, not computation.
+Ranked by debugging value:</p>
+<table>
+<tr><th>Data (where it lives)</th><th>Archetype</th><th>Why</th></tr>
+<tr><td><b>Skeleton bones</b> — we log 127 joints as bare points</td><td>AnnotationContext <code>keypoint_connections</code> + keypoint_ids (pattern: sam3d-body-rerun, wilor)</td><td>cheapest single upgrade: free labeled wireframe skeleton in 2D+3D, zero per-tick cost</td></tr>
+<tr><td><b>Per-stage timings</b> (StageProfiler already measures track/landmarks/fit/log)</td><td>Scalars + a TimeSeriesView docked under the camera grid (pattern: slam-evals blueprint)</td><td>a stall becomes a visible spike you scrub to, instead of an end-of-run text table</td></tr>
+<tr><td><b>Per-frame fit residuals</b> — reprojection px per camera, valid-anchor count (already computed for the LBFGS trigger)</td><td>Scalars</td><td>the bend-window collapse would have been a visible dip on the timeline months before anyone eyeballed a mesh</td></tr>
+<tr><td><b>Contact / floor-contact probabilities</b> (MammaNet heads, camera-fused in the fitting stage)</td><td>Scalars or the new StateChange state-timeline; color/radius modulation of contact joints</td><td>restores original parity AND shows when the floor-contact pull is active vs gated (jumps)</td></tr>
+<tr><td><b>Landmark uncertainty</b> — the log-variance channel is computed and used by triangulation, shown nowhere</td><td>color gradient + queryable confidence component (simplecv <code>Points2DWithConfidence</code>)</td><td>turns "why did this landmark pull the fit" into a hover</td></tr>
+<tr><td><b>Tracker events</b> — re-detects, lost tracks, ID decisions, YOLO/CLIP scores at bootstrap</td><td>TextLog (WARN/DEBUG levels; pattern: mast3r-slam)</td><td>correlate "mesh glitched here" with "tracker re-detected here" on one timeline</td></tr>
+<tr><td><b>Loss components</b> — 7 terms summed inside the CUDA graph (reproj, anchors, priors, floor&#8230;)</td><td>Scalars (caveat: trapped in-graph — log from the eager bootstrap/polish, or a periodic eager eval)</td><td>optimizer behavior becomes observable; today only the final geometry is</td></tr>
+<tr><td><b>Root trajectory + warm-start deltas</b> (trans per frame, anchor-centroid motion)</td><td>LineStrips3D trail + Arrows3D</td><td>jitter vs real motion at a glance; reversal-overshoot bugs become visible paths</td></tr>
+<tr><td><b>Triangulation confidence</b> — per-point validity + DLT weights</td><td>radius- or color-scaled Points3D (Ellipsoids3D if covariance derived)</td><td>exposes 2-camera depth degeneracy — the anchor failure mode of the bend window</td></tr>
+<tr><td><b>SMPL-X params over time</b> (pose 165 / betas 16 / trans — the original saves these as NPZ)</td><td>Scalars (selected dims) or Tensor</td><td>shape drift and pose oscillation become scrubbable curves</td></tr>
+<tr><td><b>Run config + gate results</b></td><td>static TextDocument (JSON/markdown)</td><td>every RRD becomes self-describing — which config produced this recording</td></tr>
+</table>
+<p class="meta">Mechanics worth adopting alongside: <code>send_columns</code> for offline/validation paths (~280&#215;
+faster than per-row logging), <code>rr.Clear(recursive=True)</code> hygiene for variable-count entities, and
+per-layer ClassDescriptions (detected vs triangulated-projected vs SMPL-X-projected 2D overlays in distinct
+colors — answers "which stage introduced the error" in one glance).</p>
+
 <h2>Dynamic golden gate campaign — matching the original on fast motion <span class="meta">(2026-06-10, in progress)</span></h2>
 <p><b>Goal:</b> a second golden gate on <code>running_jumping</code> (478 frames of runs, jumps, and a
 hands-near-ground bend) — per-frame PVE vs the original DAG's SMPL-X output, <b>p95 AND max &le; 30 mm</b>,
