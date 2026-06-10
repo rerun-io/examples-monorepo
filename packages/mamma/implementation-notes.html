@@ -55,6 +55,27 @@ batched propagation, multiprocess NVDEC decode (~400 cam-fps), CUDA-graphed stea
 logging with GPU YUV conversion. The <a href="viewer.html?rrd=gate-cross.rrd" style="color:#61afef">embedded
 gate-cross.rrd</a> was saved during a benchmark run that itself passed the gate (11.79 s wall including the save).
 Full campaign log + Mojo/MAX NO-GO verdict: <code>docs/perf-plan.md</code>.</p>
+<h2>Mask validation — gate-cross vs baseline <span class="meta">(2026-06-10)</span></h2>
+<p><b>Finding: the optimized run's masks transiently collapse to the head during fast motion; root cause is
+<code>track_stride=4</code>, not the B=4 batched SAM2 path.</b> Quantified by reading the
+<code>SegmentationImage</code> series straight out of both RRDs and comparing the <i>displayed</i> mask
+(latest-at semantics, 363-frame 30 fps grid) against baseline:</p>
+<table>
+<tr><th>Config</th><th>IoU vs baseline (mean / p5 / min, worst cam)</th><th>Mask-area collapses (&lt;15k px)</th></tr>
+<tr><td>gate-cross (track_stride=4)</td><td>0.824 / 0.259 / <b>0.174</b> (A001)</td><td>windows at t≈4.2 s (arm-cross), 9.7–10.7 s, 12.0 s — area drops 30k → ~5k px</td></tr>
+<tr><td>diagnostic: track_stride=1, all else identical</td><td>0.999 / 0.996 / 0.989 (A001)</td><td>none</td></tr>
+</table>
+<p>So EfficientTAM's memory bank starves when the tracker runs every 4th frame: during fast motion the
+propagated mask keeps only the head until the next good memory refresh (self-recovers within ~0.5–1 s).
+The B=4 batched propagation is numerically clean (0.999 IoU at stride 1). Note the golden gate
+(frames 60:90 ≈ t 2–3 s) does not overlap the collapse windows — 3D accuracy is gated, mask cosmetics are not.
+Lowering to track_stride=3 costs ~+0.5 s → ~12.3 s (fails the gate), so candidate fixes are:
+(a) collapse-triggered re-track — re-run the tracker immediately when mask area drops &gt;40% vs running median
+(pay only on collapse ticks), (b) re-prompt from the previous bbox on collapse, (c) accept the cosmetic
+artifact since fits are unaffected. Open for Pablo.</p>
+<p>Worst-frame evidence (left = baseline full-body mask, right = gate-cross head-only collapse;
+rows: A001 t=4.2 s, C001 t=8.85 s, A001 t=12 s, and a healthy frame B001 t=6 s for contrast):</p>
+<p><img alt="mask collapse evidence" style="max-width:86%;border:1px solid var(--border);border-radius:8px" src="mask-evidence.png"></p>
 <p>Native headless screenshot of <code>gate-cross.rrd</code> (rerun-viewer-validation, Rerun 0.33,
 default playhead): mesh overlays the person in all four 720p H.264 camera views, four posed frustums
 plus the fitted SMPL-X mesh in the 3D World view, no decode artifacts:</p>
