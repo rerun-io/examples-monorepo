@@ -60,10 +60,13 @@ class TrackerConfig:
     ``LOST_TICKS_BEFORE_REPROMPT`` ticks, so this can stay slow (~1s/pass)."""
     memory_window_size: int = 7
     """Sliding window of non-conditional SAM2 memories kept per object."""
-    track_stride: int = 4
+    track_stride: int = 1
     """Run the mask tracker every Nth tick; skipped ticks reuse the previous
-    masks (person silhouettes move a few px/frame at 30 fps — landmark crops
-    tolerate a one-frame-old mask; verified by the golden gate)."""
+    masks. Default 1 (Pablo, 2026-06-10): stride 4 starves EfficientTAM's
+    memory during fast motion and masks transiently collapse to the head
+    (displayed-mask IoU vs per-frame baseline bottoms at 0.17); stride 1 is
+    pixel-identical (0.999 IoU) at ~15.0 s vs 11.76 s wall for the 12.1 s clip.
+    Set 4 to prioritize the realtime gate over mask cosmetics."""
     device: str = "cuda"
     """Compute device."""
 
