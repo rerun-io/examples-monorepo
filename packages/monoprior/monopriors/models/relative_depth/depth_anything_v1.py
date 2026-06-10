@@ -14,10 +14,24 @@ from .base_relative_depth import BaseRelativePredictor, RelativeDepthPrediction
 
 
 class DepthDict(TypedDict):
-    predicted_depth: (
-        Float32[torch.Tensor, "1 518 756"] | Float32[torch.Tensor, "1 756 518"]
-    )
+    predicted_depth: Float32[torch.Tensor, "1 h w"]
     depth: Image.Image
+
+
+def _parse_depth_pipeline_output(output: object) -> DepthDict:
+    """Validate the transformers depth-estimation pipeline output."""
+
+    if not isinstance(output, dict):
+        raise TypeError(f"DepthAnything pipeline returned {type(output).__name__}, expected dict.")
+    predicted_depth_raw: object = output.get("predicted_depth")
+    depth_raw: object = output.get("depth")
+    if not isinstance(predicted_depth_raw, torch.Tensor):
+        raise TypeError("DepthAnything pipeline output missing tensor 'predicted_depth'.")
+    if not isinstance(depth_raw, Image.Image):
+        raise TypeError("DepthAnything pipeline output missing PIL 'depth'.")
+    predicted_depth: Float32[torch.Tensor, "1 h w"] = predicted_depth_raw
+    depth: Image.Image = depth_raw
+    return {"predicted_depth": predicted_depth, "depth": depth}
 
 
 class DepthAnythingV1Predictor(BaseRelativePredictor):
@@ -41,7 +55,7 @@ class DepthAnythingV1Predictor(BaseRelativePredictor):
         h, w, _ = rgb.shape
         # Transformers pipeline doesn't work with numpy/cv2, requires pil
         pil_img: Image.Image = Image.fromarray(rgb)
-        depth_dict: DepthDict = self.pipe(pil_img)
+        depth_dict: DepthDict = _parse_depth_pipeline_output(self.pipe(pil_img))
 
         # depth is actually disparity here, interpolate to the original size
         disparity_bchw: Float32[torch.Tensor, "1 1 h w"] = (

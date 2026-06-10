@@ -7,6 +7,7 @@ video encoding benchmarks: CRF=30, GOP=30, preset=8 (SVT-AV1).
 
 import logging
 import time
+from collections.abc import Iterable
 from enum import Enum
 from fractions import Fraction
 
@@ -61,6 +62,17 @@ def _encoder_options(name: str) -> dict[str, str]:
     return {}
 
 
+def _packets_with_pts(encoded_packets: Iterable[av.Packet]) -> list[tuple[int, bytes]]:
+    """Return encoded packet bytes, requiring each packet to carry a PTS."""
+    packets: list[tuple[int, bytes]] = []
+    for packet in encoded_packets:
+        pts: int | None = packet.pts
+        if pts is None:
+            raise RuntimeError("Encoder emitted a packet without PTS")
+        packets.append((pts, bytes(packet)))
+    return packets
+
+
 class VideoEncoder:
     """Per-stream video encoder. Prefers NVENC (hardware), software fallback.
 
@@ -109,7 +121,10 @@ class VideoEncoder:
         candidates: list[str] = _ENCODER_CANDIDATES[self._codec]
         for name in candidates:
             try:
-                ctx: av.VideoCodecContext = av.CodecContext.create(name, "w")
+                ctx_raw: av.CodecContext = av.CodecContext.create(name, "w")
+                if not isinstance(ctx_raw, av.VideoCodecContext):
+                    raise TypeError(f"{name} did not create a video codec context.")
+                ctx: av.VideoCodecContext = ctx_raw
                 ctx.width = width
                 ctx.height = height
                 ctx.pix_fmt = "yuv420p"
@@ -152,23 +167,24 @@ class VideoEncoder:
 
         # Construct YUV420P frame directly from planes
         frame: av.VideoFrame = av.VideoFrame(width=width, height=height, format="yuv420p")
-        frame.planes[0].update(y_plane)
+        frame.planes[0].update(y_plane.tobytes())
         if u_plane is not None and v_plane is not None:
-            frame.planes[1].update(u_plane)
-            frame.planes[2].update(v_plane)
+            frame.planes[1].update(u_plane.tobytes())
+            frame.planes[2].update(v_plane.tobytes())
         else:
             # Grayscale: fill U/V with 128 (neutral chroma), cached to avoid repeated allocation
             if self._neutral_uv is None or self._neutral_uv.shape != (height // 2, width // 2):
                 self._neutral_uv = np.full((height // 2, width // 2), 128, dtype=np.uint8)
-            frame.planes[1].update(self._neutral_uv)
-            frame.planes[2].update(self._neutral_uv)
+            neutral_uv: UInt8[np.ndarray, "h2 w2"] = self._neutral_uv
+            frame.planes[1].update(neutral_uv.tobytes())
+            frame.planes[2].update(neutral_uv.tobytes())
 
         frame.pts = self._frame_number
         self._frame_number += 1
 
         assert self._ctx is not None
         t0: float = time.perf_counter()
-        packets: list[tuple[int, bytes]] = [(pkt.pts, bytes(pkt)) for pkt in self._ctx.encode(frame)]
+        packets: list[tuple[int, bytes]] = _packets_with_pts(self._ctx.encode(frame))
         self._total_encode_sec += time.perf_counter() - t0
 
         for _pts, p in packets:
@@ -213,7 +229,7 @@ class VideoEncoder:
 
         assert self._ctx is not None
         t0: float = time.perf_counter()
-        packets: list[tuple[int, bytes]] = [(pkt.pts, bytes(pkt)) for pkt in self._ctx.encode(frame)]
+        packets: list[tuple[int, bytes]] = _packets_with_pts(self._ctx.encode(frame))
         self._total_encode_sec += time.perf_counter() - t0
 
         for _pts, p in packets:
@@ -229,7 +245,7 @@ class VideoEncoder:
         if self._ctx is None:
             return []
         t0: float = time.perf_counter()
-        packets: list[tuple[int, bytes]] = [(pkt.pts, bytes(pkt)) for pkt in self._ctx.encode(None)]
+        packets: list[tuple[int, bytes]] = _packets_with_pts(self._ctx.encode(None))
         self._total_encode_sec += time.perf_counter() - t0
 
         for _pts, p in packets:

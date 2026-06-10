@@ -1,8 +1,9 @@
+from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from timeit import default_timer as timer
-from typing import Literal
+from typing import Literal, TypeVar
 
 import numpy as np
 import rerun as rr
@@ -28,18 +29,27 @@ from vistadream.ops.gs.train import GS_Train_Tool
 from vistadream.ops.trajs import _generate_trajectory
 from vistadream.resize_utils import add_border_and_mask, process_image
 
+T = TypeVar("T")
+
+
+def _require(value: T | None, name: str) -> T:
+    if value is None:
+        raise ValueError(f"Expected {name} to be populated")
+    return value
+
 
 def log_frame(parent_log_path: Path, frame: Frame, cam_params: PinholeParameters, log_pcd: bool = False) -> None:
     cam_log_path: Path = parent_log_path / cam_params.name
     pinhole_log_path: Path = cam_log_path / "pinhole"
     # extract values from frame
-    rgb_hw3: UInt8[np.ndarray, "H W 3"] = (deepcopy(frame.rgb) * 255).astype(np.uint8)
-    depth_hw: Float[np.ndarray, "H W"] = deepcopy(frame.dpt)
+    rgb_f32: Float[np.ndarray, "H W 3"] = deepcopy(_require(frame.rgb, "frame.rgb"))
+    rgb_hw3: UInt8[np.ndarray, "H W 3"] = (rgb_f32 * 255).astype(np.uint8)
+    depth_hw: Float[np.ndarray, "H W"] = deepcopy(_require(frame.dpt, "frame.dpt"))
     edges_mask: Bool[np.ndarray, "h w"] = depth_edges_mask(depth_hw, threshold=0.01)
     masked_depth_hw: Float[np.ndarray, "h w"] = depth_hw * ~edges_mask
-    inpaint_mask: Bool[np.ndarray, "H W"] = deepcopy(frame.inpaint)
-    inpaint_wo_edge_mask: Bool[np.ndarray, "H W"] = deepcopy(frame.inpaint_wo_edge)
-    depth_conf_mask: Bool[np.ndarray, "H W"] = deepcopy(frame.dpt_conf_mask)
+    inpaint_mask: Bool[np.ndarray, "H W"] = deepcopy(_require(frame.inpaint, "frame.inpaint"))
+    inpaint_wo_edge_mask: Bool[np.ndarray, "H W"] = deepcopy(_require(frame.inpaint_wo_edge, "frame.inpaint_wo_edge"))
+    depth_conf_mask: Bool[np.ndarray, "H W"] = deepcopy(_require(frame.dpt_conf_mask, "frame.dpt_conf_mask"))
     # convert masked_depth to uint16 for depth image
     masked_depth_hw = (masked_depth_hw * 1000).astype(np.uint16)  # Convert to uint16 for depth image
 
@@ -62,9 +72,10 @@ def log_frame(parent_log_path: Path, frame: Frame, cam_params: PinholeParameters
     if log_pcd:
         # convert back to f32 for point cloud logging
         depth_1hw: Float[np.ndarray, "1 h w"] = rearrange(masked_depth_hw, "h w -> 1 h w").astype(np.float32) / 1000
-        pts_3d: Float[np.ndarray, "h w 3"] = depth_to_points(
-            depth_1hw, cam_params.intrinsics.k_matrix.astype(np.float32)
-        )
+        K_33: Float[np.ndarray, "3 3"] | None = cam_params.intrinsics.k_matrix
+        if K_33 is None:
+            raise ValueError("Point cloud logging requires camera intrinsics.")
+        pts_3d: Float[np.ndarray, "h w 3"] = depth_to_points(depth_1hw, K_33.astype(np.float32))
         rr.log(
             f"{parent_log_path}/{cam_params.name}_point_cloud",
             rr.Points3D(
@@ -104,13 +115,13 @@ def pose_to_frame(scene: Gaussian_Scene, cam_T_world: Float[np.ndarray, "4 4"], 
         Frame object with rendered content for inpainting
     """
     # Calculate expanded dimensions
-    base_height: int = scene.frames[0].H
-    base_width: int = scene.frames[0].W
+    base_height: int = _require(scene.frames[0].H, "scene.frames[0].H")
+    base_width: int = _require(scene.frames[0].W, "scene.frames[0].W")
     expanded_height: int = base_height + margin
     expanded_width: int = base_width + margin
 
     # Create adjusted intrinsics for expanded frame
-    base_intrinsic: Float[np.ndarray, "3 3"] = deepcopy(scene.frames[0].intrinsic)
+    base_intrinsic: Float[np.ndarray, "3 3"] = deepcopy(_require(scene.frames[0].intrinsic, "scene.frames[0].intrinsic"))
     adjusted_intrinsic: Float[np.ndarray, "3 3"] = base_intrinsic.copy()
     adjusted_intrinsic[0, 2] = expanded_width / 2.0  # cx - principal point x
     adjusted_intrinsic[1, 2] = expanded_height / 2.0  # cy - principal point y
@@ -200,12 +211,14 @@ class SingleImagePipeline:
 
             # Inpaint the selected frame
             inpainted_frame: Frame = self._inpaint_next_frame(next_frame)
+            shared_intrinsics: Intrinsics = _require(self.shared_intrinsics, "shared_intrinsics")
+            cam_T_world: Float[np.ndarray, "4 4"] = _require(inpainted_frame.cam_T_world, "inpainted_frame.cam_T_world")
             cam_params: PinholeParameters = PinholeParameters(
                 name=f"camera_{cam_idx}",
-                intrinsics=self.shared_intrinsics,
+                intrinsics=shared_intrinsics,
                 extrinsics=Extrinsics(
-                    cam_R_world=inpainted_frame.cam_T_world[:3, :3],
-                    cam_t_world=inpainted_frame.cam_T_world[:3, 3],
+                    cam_R_world=cam_T_world[:3, :3],
+                    cam_t_world=cam_T_world[:3, 3],
                 ),
             )
             log_frame(self.parent_log_path, inpainted_frame, cam_params)
@@ -234,7 +247,7 @@ class SingleImagePipeline:
 
         for _pose_idx, cam_T_world in enumerate(dense_cam_T_world_traj):
             temp_frame: Frame = pose_to_frame(self.scene, cam_T_world, margin)
-            inpaint_mask: Bool[np.ndarray, "H W"] = temp_frame.inpaint
+            inpaint_mask: Bool[np.ndarray, "H W"] = _require(temp_frame.inpaint, "temp_frame.inpaint")
             inpaint_ratio: float = float(np.mean(inpaint_mask.astype(np.float32)))
             inpaint_area_ratios.append(inpaint_ratio)
 
@@ -281,8 +294,10 @@ class SingleImagePipeline:
             Inpainted frame with updated RGB, depth, and masks
         """
         # Convert frame RGB and mask for Flux inpainting
-        frame_rgb_hw3: UInt8[np.ndarray, "H W 3"] = (frame.rgb * 255).astype(np.uint8)
-        frame_mask: UInt8[np.ndarray, "H W"] = frame.inpaint.astype(np.uint8) * 255
+        frame_rgb: Float[np.ndarray, "H W 3"] = _require(frame.rgb, "frame.rgb")
+        frame_inpaint: Bool[np.ndarray, "H W"] = _require(frame.inpaint, "frame.inpaint")
+        frame_rgb_hw3: UInt8[np.ndarray, "H W 3"] = (frame_rgb * 255).astype(np.uint8)
+        frame_mask: UInt8[np.ndarray, "H W"] = frame_inpaint.astype(np.uint8) * 255
 
         # Inpaint RGB using Flux
         inpainted_image: Image.Image = self.flux_inpainter(rgb_hw3=frame_rgb_hw3, mask=frame_mask)
@@ -292,20 +307,21 @@ class SingleImagePipeline:
         frame.rgb = inpainted_rgb_hw3.astype(np.float32) / 255.0  # Convert to [0,1] range
 
         # Predict depth for the inpainted frame
-        depth_prediction: RelativeDepthPrediction = self.predictor.__call__(rgb=inpainted_rgb_hw3, K_33=frame.intrinsic)
+        frame_intrinsic: Float[np.ndarray, "3 3"] = _require(frame.intrinsic, "frame.intrinsic")
+        depth_prediction: RelativeDepthPrediction = self.predictor.__call__(rgb=inpainted_rgb_hw3, K_33=frame_intrinsic)
         predicted_depth_hw: Float[np.ndarray, "H W"] = depth_prediction.depth
 
         # Remove any nans or infs and set them to 0
         predicted_depth_hw[np.isnan(predicted_depth_hw) | np.isinf(predicted_depth_hw)] = 0
 
         # Get the original rendered depth from the scene for alignment
-        original_rendered_depth: Float[np.ndarray, "H W"] = frame.dpt
+        original_rendered_depth: Float[np.ndarray, "H W"] = _require(frame.dpt, "frame.dpt")
 
         # Align predicted depth with rendered depth using smooth connector
         aligned_depth_hw: Float[np.ndarray, "H W"] = self.smooth_connector._affine_dpt_to_GS(
             render_dpt=original_rendered_depth,
             inpaint_dpt=predicted_depth_hw,
-            inpaint_msk=frame.inpaint,
+            inpaint_msk=frame_inpaint,
         ).astype(np.float32)
         # aligned_depth_hw = predicted_depth_hw
 
@@ -316,7 +332,7 @@ class SingleImagePipeline:
         edges_mask: Bool[np.ndarray, "H W"] = depth_edges_mask(aligned_depth_hw, threshold=0.01)
 
         # Update inpaint mask without edges
-        frame.inpaint_wo_edge = frame.inpaint & ~edges_mask
+        frame.inpaint_wo_edge = frame_inpaint & ~edges_mask
 
         # Get depth confidence mask from depth prediction confidence
         dpt_conf_mask: Float[np.ndarray, "H W"] = depth_prediction.confidence
@@ -326,7 +342,7 @@ class SingleImagePipeline:
         # Further refine inpaint_wo_edge with depth confidence mask
         frame.inpaint_wo_edge = frame.inpaint_wo_edge & dpt_conf_mask_bool
 
-        print(f"[INFO] Inpainted frame with {np.sum(frame.inpaint)}/{frame.inpaint.size} inpaint pixels")
+        print(f"[INFO] Inpainted frame with {np.sum(frame_inpaint)}/{frame_inpaint.size} inpaint pixels")
 
         return frame
 
@@ -339,10 +355,10 @@ class SingleImagePipeline:
         rr.send_blueprint(blueprint=self._create_blueprint(tab_idx=2))
         # log the splats as point clouds
         g_xyz: Float[torch.Tensor, "n_splats 3"] = torch.cat(
-            [gf.xyz.reshape(-1, 3) for gf in self.scene.gaussian_frames], dim=0
+            [_require(gf.xyz, "gaussian_frame.xyz").reshape(-1, 3) for gf in self.scene.gaussian_frames], dim=0
         )
         g_rgb: Float[torch.Tensor, "n_splats 3"] = torch.sigmoid(
-            torch.cat([gf.rgb.reshape(-1, 3) for gf in self.scene.gaussian_frames], dim=0)
+            torch.cat([_require(gf.rgb, "gaussian_frame.rgb").reshape(-1, 3) for gf in self.scene.gaussian_frames], dim=0)
         )
 
         # log the gaussian scene
@@ -357,15 +373,20 @@ class SingleImagePipeline:
 
         for i, cam_T_world in enumerate(cam_T_world_traj, start=0):
             rr.set_time("time", sequence=i)
+            shared_intrinsics: Intrinsics = _require(self.shared_intrinsics, "shared_intrinsics")
             frame = Frame(
-                H=self.shared_intrinsics.height,
-                W=self.shared_intrinsics.width,
-                intrinsic=self.shared_intrinsics.k_matrix,
+                H=shared_intrinsics.height,
+                W=shared_intrinsics.width,
+                intrinsic=shared_intrinsics.k_matrix,
                 cam_T_world=cam_T_world,
             )
-            rgb, dpt, alpha = self.scene._render_RGBD(frame)
-            rgb: Float[np.ndarray, "H W 3"] = rgb.detach().float().cpu().numpy()
-            dpt: Float[np.ndarray, "H W"] = dpt.detach().float().cpu().numpy()
+            render_output: tuple[Float[torch.Tensor, "H W 3"], Float[torch.Tensor, "H W"], Float[torch.Tensor, "1 H W 1"]] = (
+                self.scene._render_RGBD(frame)
+            )
+            rgb_tensor: Float[torch.Tensor, "H W 3"] = render_output[0]
+            dpt_tensor: Float[torch.Tensor, "H W"] = render_output[1]
+            rgb: Float[np.ndarray, "H W 3"] = rgb_tensor.detach().float().cpu().numpy()
+            dpt: Float[np.ndarray, "H W"] = dpt_tensor.detach().float().cpu().numpy()
 
             rgb = (rgb * 255).astype(np.uint8)
 
@@ -374,7 +395,7 @@ class SingleImagePipeline:
             pinhole_log_path: Path = cam_log_path / "pinhole"
             pinhole_param = PinholeParameters(
                 name="camera",
-                intrinsics=self.shared_intrinsics,
+                intrinsics=shared_intrinsics,
                 extrinsics=Extrinsics(
                     cam_R_world=cam_T_world[:3, :3],
                     cam_t_world=cam_T_world[:3, 3],
@@ -401,7 +422,7 @@ class SingleImagePipeline:
         if self.config.stage == "no-outpaint":
             # No outpainting, just use the input image directly
             outpaint_img: Image.Image = input_image
-            outpaint_mask: Image.Image = Image.new("L", input_image.size, 0)
+            outpaint_mask_image: Image.Image = Image.new("L", input_image.size, 0)
             # Just use the input image for depth prediction since there's no outpainting
             outpaint_rgb_hw3: UInt8[np.ndarray, "H W 3"] = np.array(outpaint_img.convert("RGB"))
             outpaint_rel_depth: RelativeDepthPrediction = self.predictor.__call__(rgb=outpaint_rgb_hw3, K_33=None)
@@ -412,7 +433,7 @@ class SingleImagePipeline:
             outpaint_depth_hw: Float[np.ndarray, "H W"] = outpaint_rel_depth.depth
 
             # convert to numpy arrays
-            outpaint_mask: Bool[np.ndarray, "H W"] = np.array(outpaint_mask).astype(np.bool_)
+            outpaint_mask: Bool[np.ndarray, "H W"] = np.array(outpaint_mask_image).astype(np.bool_)
             outpaint_edges_mask: Bool[np.ndarray, "H W"] = depth_edges_mask(outpaint_depth_hw, threshold=0.01)
             # inpaint/outpaint mask without edges (True where inpainting is applied, False near edges and where no inpainting)
             outpaint_wo_edges: Bool[np.ndarray, "H W"] = outpaint_mask & ~outpaint_edges_mask
@@ -434,10 +455,10 @@ class SingleImagePipeline:
                 overlap=0,
             )
             outpaint_img: Image.Image = border_output[0]
-            outpaint_mask: Image.Image = border_output[1]
+            outpaint_mask_image: Image.Image = border_output[1]
             # Create outpainted image using Flux Inpainting
             outpaint_img: Image.Image = self.flux_inpainter(
-                rgb_hw3=np.array(outpaint_img), mask=np.array(outpaint_mask)
+                rgb_hw3=np.array(outpaint_img), mask=np.array(outpaint_mask_image)
             )
 
             outpaint_rgb_hw3: UInt8[np.ndarray, "H W 3"] = np.array(outpaint_img.convert("RGB"))
@@ -450,7 +471,7 @@ class SingleImagePipeline:
             # remove any nans or infs and set them to 0
             outpaint_depth_hw[np.isnan(outpaint_depth_hw) | np.isinf(outpaint_depth_hw)] = 0
             # mask showing where outpainting (inpainting) is applied
-            outpaint_mask: Bool[np.ndarray, "H W"] = np.array(outpaint_mask).astype(np.bool_)
+            outpaint_mask = np.array(outpaint_mask_image).astype(np.bool_)
             # depth edges, True near edges, False otherwise
             outpaint_edges_mask: Bool[np.ndarray, "H W"] = depth_edges_mask(outpaint_depth_hw, threshold=0.01)
             # inpaint/outpaint mask without edges (True where inpainting is applied, False near edges and where no inpainting)
@@ -583,12 +604,12 @@ class SingleImagePipeline:
         rr.send_blueprint(blueprint=self._create_blueprint())
         rr.log("/", rr.ViewCoordinates.RDF, static=True)
 
-    def _create_blueprint(self, tab_idx: int = 0, debug: bool = False) -> rrb.Blueprint:
+    def _create_blueprint(self, tab_idx: int = 0) -> rrb.Blueprint:
         """
         Create a rerun blueprint for the pipeline.
         """
 
-        def create_camera_views_panel(camera_ids: list[int | str]) -> rrb.Horizontal:
+        def create_camera_views_panel(camera_ids: Sequence[int | str]) -> rrb.Horizontal:
             """
             Creates a horizontal panel of vertical 2D views for a list of camera identifiers.
             """
@@ -631,7 +652,7 @@ class SingleImagePipeline:
             return rrb.Horizontal(*contents)
 
         # create tabs
-        initial_cameras = ["input", "outpaint"]
+        initial_cameras: list[int | str] = ["input", "outpaint"]
         initialization_2d_views = create_camera_views_panel(initial_cameras)
 
         # Adjust column shares based on image orientation
@@ -662,7 +683,7 @@ class SingleImagePipeline:
 
         initialization_view = rrb.Horizontal(
             rrb.Spatial3DView(
-                origin=self.parent_log_path,
+                origin=str(self.parent_log_path),
                 contents=init_content_3d,
             ),
             initialization_2d_views,
@@ -683,16 +704,16 @@ class SingleImagePipeline:
         # fmt: off
         content_3d = [
             "+ $origin/**",
-            *[f"- {self.parent_log_path}/camera_{i}/pinhole/depth" for i in self.logged_cam_idx_list + initial_cameras],
-            *[f"- {self.parent_log_path}/camera_{i}/pinhole/dpt_conf_mask" for i in self.logged_cam_idx_list + initial_cameras],
-            *[f"- {self.parent_log_path}/camera_{i}/pinhole/inpaint_mask" for i in self.logged_cam_idx_list + initial_cameras],
-            *[f"- {self.parent_log_path}/camera_{i}/pinhole/inpaint_wo_edges_mask" for i in self.logged_cam_idx_list + initial_cameras],
+            *[f"- {self.parent_log_path}/camera_{i}/pinhole/depth" for i in [*self.logged_cam_idx_list, *initial_cameras]],
+            *[f"- {self.parent_log_path}/camera_{i}/pinhole/dpt_conf_mask" for i in [*self.logged_cam_idx_list, *initial_cameras]],
+            *[f"- {self.parent_log_path}/camera_{i}/pinhole/inpaint_mask" for i in [*self.logged_cam_idx_list, *initial_cameras]],
+            *[f"- {self.parent_log_path}/camera_{i}/pinhole/inpaint_wo_edges_mask" for i in [*self.logged_cam_idx_list, *initial_cameras]],
         ]
         # fmt: on
 
         # coarse scene view
         coarse_scene_view = rrb.Horizontal(
-            rrb.Spatial3DView(origin=self.parent_log_path, contents=content_3d),
+            rrb.Spatial3DView(origin=str(self.parent_log_path), contents=content_3d),
             grid_view,
             column_shares=[5, 3],
             name="Coarse Scene",
@@ -700,7 +721,7 @@ class SingleImagePipeline:
 
         final_scene_view = rrb.Horizontal(
             rrb.Spatial3DView(
-                origin=self.final_log_path,
+                origin=str(self.final_log_path),
                 contents=[
                     "+ $origin/**",
                 ],

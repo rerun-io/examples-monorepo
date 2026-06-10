@@ -48,11 +48,11 @@ def log_relative_pred(
 
     depth_hw: Float32[np.ndarray, "h w"] = relative_pred.depth
     # filter out any inf/nan values
-    depth_hw = np.nan_to_num(depth_hw, nan=0.0, posinf=0.0, neginf=0.0)
+    depth_hw = np.asarray(np.nan_to_num(depth_hw, nan=0.0, posinf=0.0, neginf=0.0), dtype=np.float32)
 
     if remove_flying_pixels:
         edges_mask: Bool[np.ndarray, "h w"] = depth_edges_mask(depth_hw, threshold=depth_edge_threshold)
-        depth_hw: Float32[np.ndarray, "h w"] = depth_hw * ~edges_mask
+        depth_hw = np.asarray(depth_hw * ~edges_mask, dtype=np.float32)
 
     rr.log(f"{pinhole_path}/depth", rr.DepthImage(depth_hw))
 
@@ -153,7 +153,7 @@ def log_metric_pred(
     depth_hw: Float32[np.ndarray, "h w"] = metric_pred.depth_meters
     if remove_flying_pixels:
         edges_mask: Bool[np.ndarray, "h w"] = depth_edges_mask(depth_hw, threshold=depth_edge_threshold)
-        depth_hw: Float32[np.ndarray, "h w"] = depth_hw * ~edges_mask
+        depth_hw = np.asarray(depth_hw * ~edges_mask, dtype=np.float32)
 
     rr.log(f"{pinhole_path}/depth", rr.DepthImage(depth_hw, meter=1.0))
 

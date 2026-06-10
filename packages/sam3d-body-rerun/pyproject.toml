@@ -32,6 +32,13 @@ allow-direct-references = true
 
 [tool.ruff]
 line-length = 150
+exclude = [
+    "src/sam3d_body/data/transforms",
+    "src/sam3d_body/data/utils",
+    "src/sam3d_body/models",
+    "src/sam3d_body/transforms",
+    "src/sam3d_body/utils",
+]
 
 [tool.ruff.lint]
 select = [
@@ -59,7 +66,28 @@ ignore = [
 ]
 
 [tool.vulture]
-paths = ["src/sam3d_body", "tests"]
-exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
+paths = [
+    "src/sam3d_body/api",
+    "src/sam3d_body/gradio_ui",
+    "src/sam3d_body/ops",
+    "src/sam3d_body/build_models.py",
+    "src/sam3d_body/sam_3d_body_estimator.py",
+    "src/sam3d_body/metadata",
+    "tests",
+]
+exclude = [
+    "*/.pixi/*",
+    "*/__pycache__/*",
+    "*/build/*",
+    "*/dist/*",
+    "*/node_modules/*",
+    "*/data/transforms/*",
+    "*/data/utils/*",
+    "*/models/*",
+    "*/transforms/*",
+    "*/utils/*",
+]
 sort_by_size = true
-min_confidence = 60
+# This package exposes Tyro configs, metadata constants, and dataclass schemas that
+# Vulture reports at 60% despite being runtime/public interfaces.
+min_confidence = 80

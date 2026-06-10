@@ -20,10 +20,10 @@ See Also:
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
-import time
 
 import cv2
 import numpy as np
@@ -32,10 +32,10 @@ import rerun.blueprint as rrb
 import torch
 from jaxtyping import Bool, Float32, Int, UInt8
 from numpy import ndarray
-from torch import Tensor
 from simplecv.configs.exoego_dataset_configs import AnnotatedExoEgoDatasetUnion
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoSample
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
+from torch import Tensor
 from tqdm import tqdm
 from transformers import Sam3VideoConfig, Sam3VideoModel, Sam3VideoProcessor
 
@@ -47,8 +47,10 @@ from sam3d_body.api.visualization import (
 )
 from sam3d_body.build_models import load_sam_3d_body_hf
 from sam3d_body.metadata.mhr70 import MHR70_ID2NAME, MHR70_IDS, MHR70_LINKS
+from sam3d_body.models.heads.mhr_head import MHRHead
 from sam3d_body.models.meta_arch import SAM3DBody
 from sam3d_body.ops import MultiviewBodyOptimizer, MultiviewOptimizerConfig, validate_reprojection
+from sam3d_body.ops.mhr_output import expect_mhr_tensor_tuple, expect_mhr_vertices
 from sam3d_body.sam_3d_body_estimator import FinalPosePrediction, SAM3DBodyEstimator
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -546,11 +548,15 @@ def main(cfg: Sam3MVBodyDemoConfig) -> None:
 
     # Initialize multiview optimizer (reused across frames for temporal smoothing)
     optimizer: MultiviewBodyOptimizer | None = None
+    mhr_head: MHRHead | None = None
     first_world_T_cam: Float32[ndarray, "4 4"] | None = None
     if n_views >= 2:
         first_world_T_cam = world_T_cam_list[0]
         # Get MHR head from body_estimator for differentiable forward kinematics
-        mhr_head = body_estimator.model.head_pose
+        head_pose = body_estimator.model.head_pose
+        if not isinstance(head_pose, MHRHead):
+            raise TypeError(f"Expected MHRHead for multiview optimization, got {type(head_pose).__name__}.")
+        mhr_head = head_pose
         optimizer = MultiviewBodyOptimizer(
             projection_matrices=projection_matrices,
             first_world_T_cam=first_world_T_cam,
@@ -682,7 +688,7 @@ def main(cfg: Sam3MVBodyDemoConfig) -> None:
                 assert first_world_T_cam is not None  # We are in multiview mode
 
                 # Get mesh vertices from mhr_forward (same FK as validation keypoints)
-                mhr_head = body_estimator.model.head_pose
+                assert mhr_head is not None
                 with torch.no_grad():
                     # Prepare optimized params
                     opt_global_rot_mesh: Float32[Tensor, "1 3"] = torch.from_numpy(
@@ -706,15 +712,17 @@ def main(cfg: Sam3MVBodyDemoConfig) -> None:
                     zero_trans_mesh: Float32[Tensor, "1 3"] = torch.zeros(1, 3, device=device, dtype=torch.float32)
 
                     # Run mhr_forward for vertices
-                    mhr_mesh_output = mhr_head.mhr_forward(
-                        global_trans=zero_trans_mesh,
-                        global_rot=opt_global_rot_mesh,
-                        body_pose_params=opt_body_pose_mesh,
-                        hand_pose_params=hand_params_mesh,
-                        scale_params=scale_params_mesh,
-                        shape_params=shape_params_mesh,
-                        expr_params=expr_params_mesh,
-                        return_keypoints=False,  # Just vertices
+                    mhr_mesh_output: Float32[Tensor, "1 n_verts 3"] = expect_mhr_vertices(
+                        mhr_head.mhr_forward(
+                            global_trans=zero_trans_mesh,
+                            global_rot=opt_global_rot_mesh,
+                            body_pose_params=opt_body_pose_mesh,
+                            hand_pose_params=hand_params_mesh,
+                            scale_params=scale_params_mesh,
+                            shape_params=shape_params_mesh,
+                            expr_params=expr_params_mesh,
+                            return_keypoints=False,  # Just vertices
+                        ),
                     )
                     verts_fk: Float32[Tensor, "1 n_verts 3"] = mhr_mesh_output
 
@@ -848,7 +856,7 @@ def main(cfg: Sam3MVBodyDemoConfig) -> None:
                 # This ensures consistency with the optimizer's FK
                 assert first_world_T_cam is not None  # We are in multiview mode
 
-                mhr_head = body_estimator.model.head_pose
+                assert mhr_head is not None
                 with torch.no_grad():
                     # Prepare optimized params as batched tensors
                     opt_global_rot: Float32[Tensor, "1 3"] = torch.from_numpy(
@@ -878,15 +886,18 @@ def main(cfg: Sam3MVBodyDemoConfig) -> None:
                     # Run mhr_forward with optimized params
                     # NOTE: mhr_forward uses global_trans=0 internally, pred_cam_t applied post-FK
                     zero_trans_v: Float32[Tensor, "1 3"] = torch.zeros(1, 3, device=device, dtype=torch.float32)
-                    mhr_output_v = mhr_head.mhr_forward(
-                        global_trans=zero_trans_v,  # Always zero
-                        global_rot=opt_global_rot,
-                        body_pose_params=opt_body_pose,
-                        hand_pose_params=hand_params_v,
-                        scale_params=scale_params_v,
-                        shape_params=shape_params_v,
-                        expr_params=expr_params_v,
-                        return_keypoints=True,
+                    mhr_output_v: tuple[Tensor, ...] = expect_mhr_tensor_tuple(
+                        mhr_head.mhr_forward(
+                            global_trans=zero_trans_v,  # Always zero
+                            global_rot=opt_global_rot,
+                            body_pose_params=opt_body_pose,
+                            hand_pose_params=hand_params_v,
+                            scale_params=scale_params_v,
+                            shape_params=shape_params_v,
+                            expr_params=expr_params_v,
+                            return_keypoints=True,
+                        ),
+                        min_len=2,
                     )
                     # mhr_output_v = (vertices, keypoints_308)
                     keypoints_308_v: Float32[Tensor, "1 308 3"] = mhr_output_v[1]

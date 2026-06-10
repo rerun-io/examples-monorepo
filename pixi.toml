@@ -306,6 +306,7 @@ moge = { git = "https://github.com/microsoft/MoGe.git" }
 
 [feature.monoprior.activation.env]
 PACKAGE_DIR = "packages/monoprior"
+PYREFLY_TARGET = "monopriors/apis monopriors/data monopriors/gradio_ui monopriors/models monopriors/dc_utils.py monopriors/depth_utils.py monopriors/rr_logging_utils.py monopriors/scale_utils.py monopriors/__init__.py"
 
 # ── Download tasks (hidden, used as depends-on) ─────────────────────────
 [feature.monoprior.tasks._download-single-image]
@@ -546,6 +547,7 @@ onnxruntime-gpu = { version = ">=1.24.0.dev0,<2", index = "https://aiinfra.pkgs.
 
 [feature.egoexo-forge.activation.env]
 PACKAGE_DIR = "packages/egoexo-forge"
+PYREFLY_TARGET = "src/egoexo_forge tools"
 
 [feature.egoexo-forge-demo.tasks.egoexo-forge-app]
 cmd = "python tools/app.py"
@@ -680,6 +682,7 @@ kernels = ">=0.11.3"
 
 [feature.sam3d.activation.env]
 PACKAGE_DIR = "packages/sam3d-body-rerun"
+PYREFLY_TARGET = "src/sam3d_body/api src/sam3d_body/gradio_ui src/sam3d_body/ops src/sam3d_body/build_models.py src/sam3d_body/sam_3d_body_estimator.py src/sam3d_body/metadata src/sam3d_body/__init__.py"
 
 [feature.sam3d.tasks.sam3d-app]
 cmd = "python tool/gradio_sam3d_body.py"
@@ -790,6 +793,7 @@ cuda-python = "*"
 
 [feature.sapiens2-pose.activation.env]
 PACKAGE_DIR = "packages/sapiens2-pose"
+PYREFLY_TARGET = "src/sapiens2_pose/api src/sapiens2_pose/gradio_ui.py src/sapiens2_pose/video_gradio_ui.py src/sapiens2_pose/__init__.py tools"
 SAPIENS_PRELOAD_MODELS = "0"
 
 [feature.sapiens2-pose.tasks.sapiens2-pose-app]
@@ -1097,6 +1101,7 @@ omegaconf = "*"
 
 [feature.vistadream.activation.env]
 PACKAGE_DIR = "packages/vistadream"
+PYREFLY_TARGET = "src/vistadream/api src/vistadream/gradio src/vistadream/resize_utils.py src/vistadream/__init__.py tools"
 TORCH_CUDA_ARCH_LIST = "7.5 8.6 8.9 12.0 12.1"
 CUDA_HOME = "${CONDA_PREFIX}/targets/x86_64-linux"
 CPATH = "${CONDA_PREFIX}/targets/x86_64-linux/include:${CPATH}"

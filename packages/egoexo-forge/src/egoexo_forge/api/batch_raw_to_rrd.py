@@ -11,7 +11,7 @@ from jaxtyping import Float, Int, UInt8
 from numpy import ndarray
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.configs.ego_dataset_configs import AnnotatedEgoDatasetUnion
-from simplecv.data.ego.base_ego import BaseEgoSequence, CamNameType
+from simplecv.data.ego.base_ego import BaseEgoSequence, CameraParam
 from simplecv.data.exo.base_exo import BaseExoSequence
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels
 from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_IDS, COCO_133_LINKS
@@ -35,6 +35,28 @@ class BatchConvertConfig:
     num_to_log: int | None = None
     log_exo: bool = True
     log_ego: bool = True
+
+
+def _calibrated_exo_cameras(exo_sequence: BaseExoSequence) -> list[PinholeParameters]:
+    exo_cameras: list[PinholeParameters] = []
+    for exo_cam in exo_sequence.exo_cam_list:
+        if exo_cam is not None:
+            exo_cameras.append(exo_cam)
+    return exo_cameras
+
+
+def _camera_translation(camera: CameraParam) -> Float[ndarray, "3"]:
+    world_t_cam: Float[ndarray, "3"] | None = camera.extrinsics.world_t_cam
+    if world_t_cam is None:
+        raise ValueError(f"Camera {camera.name} is missing world_t_cam extrinsics.")
+    return world_t_cam
+
+
+def _camera_rotation(camera: CameraParam) -> Float[ndarray, "3 3"]:
+    world_R_cam: Float[ndarray, "3 3"] | None = camera.extrinsics.world_R_cam
+    if world_R_cam is None:
+        raise ValueError(f"Camera {camera.name} is missing world_R_cam extrinsics.")
+    return world_R_cam
 
 
 def set_annotation_context() -> None:
@@ -128,7 +150,7 @@ def create_blueprint(
 
 def filter_out_of_bounds_keypoints(
     uv_stack: Float[ndarray, "... 2"],
-    camera_params: PinholeParameters,
+    camera_params: CameraParam,
     margin_percentage: float = 0.2,
 ) -> Float[ndarray, "... 2"]:
     """Filters out-of-bounds 2D keypoints by setting them to NaN."""
@@ -163,7 +185,7 @@ def log_exoego_batch(
     if ego_sequence is not None and config.log_ego:
         ego_video_readers: MultiVideoReader = ego_sequence.ego_video_readers
         ego_video_files: list[Path] = ego_video_readers.video_paths
-        ego_cam_dict: dict[CamNameType, list[PinholeParameters]] = ego_sequence.ego_cam_dict
+        ego_cam_dict: dict[str, list[CameraParam]] = ego_sequence.ego_cam_dict
         ego_cam_log_paths: list[Path] = [parent_log_path / ego_cam_name for ego_cam_name in ego_cam_dict]
         ego_video_log_paths: list[Path] = [cam_log_paths / "pinhole" / "video" for cam_log_paths in ego_cam_log_paths]
 
@@ -178,11 +200,12 @@ def log_exoego_batch(
     if exo_sequence is not None and config.log_exo:
         exo_video_readers: MultiVideoReader = exo_sequence.exo_video_readers
         exo_video_files: list[Path] = exo_video_readers.video_paths
-        exo_cam_log_paths: list[Path] = [parent_log_path / exo_cam.name for exo_cam in exo_sequence.exo_cam_list]
+        exo_cam_param_list: list[PinholeParameters] = _calibrated_exo_cameras(exo_sequence)
+        exo_cam_log_paths: list[Path] = [parent_log_path / exo_video_name for exo_video_name in exo_sequence.exo_video_names]
         exo_video_log_paths: list[Path] = [cam_log_paths / "pinhole" / "video" for cam_log_paths in exo_cam_log_paths]
 
         # log stationary exo cameras and video assets
-        for exo_cam in exo_sequence.exo_cam_list:
+        for exo_cam in exo_cam_param_list:
             cam_log_path: Path = parent_log_path / exo_cam.name
             log_pinhole(
                 camera=exo_cam,
@@ -201,56 +224,107 @@ def log_exoego_batch(
 
     # if ego_sequence is not None and timestamps:
     # Find the timestamp list with the maximum length.
+    if not timestamps:
+        raise ValueError("No ego or exo videos were logged; cannot align pose timestamps.")
     shortest_timestamp: Int[ndarray, "num_frames"] = min(timestamps, key=len)  # noqa: UP037
-    assert len(shortest_timestamp) == len(ego_sequence) or len(shortest_timestamp) == len(exo_sequence), (
-        f"Length of timestamps {len(shortest_timestamp)} and sequence {len(ego_sequence)} do not match"
+    sequence_lengths: list[int] = []
+    if ego_sequence is not None:
+        sequence_lengths.append(len(ego_sequence))
+    if exo_sequence is not None:
+        sequence_lengths.append(len(exo_sequence))
+    assert any(len(shortest_timestamp) == sequence_length for sequence_length in sequence_lengths), (
+        f"Length of timestamps {len(shortest_timestamp)} does not match any sequence length {sequence_lengths}"
     )
+    ################################
+    # batch send all ego cam poses #
+    ################################
+    if ego_sequence is not None and config.log_ego:
+        for cam_name, ego_cam_param_list in ego_sequence.ego_cam_dict.items():
+            # We assume that all cameras have the intrinsics
+            first_cam: CameraParam = ego_cam_param_list[0]
+            cam_log_path: Path = parent_log_path / cam_name
+            pinhole_log_path: Path = cam_log_path / "pinhole"
+            rr.log(
+                f"{pinhole_log_path}",
+                rr.Pinhole(
+                    image_from_camera=first_cam.intrinsics.k_matrix,
+                    height=first_cam.intrinsics.height,
+                    width=first_cam.intrinsics.width,
+                    camera_xyz=getattr(
+                        rr.ViewCoordinates,
+                        first_cam.intrinsics.camera_conventions,
+                    ),
+                    image_plane_distance=ego_sequence.image_plane_distance,
+                ),
+                static=True,
+            )
+            batch_world_t_cam: Float[ndarray, "num_frames 3"] = np.array(
+                [_camera_translation(ego_cam_param) for ego_cam_param in ego_cam_param_list]
+            )
+            batch_world_R_cam: Float[ndarray, "num_frames 3 3"] = np.array(
+                [_camera_rotation(ego_cam_param) for ego_cam_param in ego_cam_param_list]
+            )
+            total_send_ego_cams: int = min(len(batch_world_t_cam), len(shortest_timestamp))
+            # camera extrinsics, there's no from_parent=True so need to send as world_x_cam
+            rr.send_columns(
+                f"{cam_log_path}",
+                indexes=[rr.TimeNanosColumn(timeline, shortest_timestamp[0:total_send_ego_cams])],
+                columns=[
+                    *rr.Transform3D.columns(
+                        translation=rearrange(batch_world_t_cam[:total_send_ego_cams], "f d -> (f) d"),
+                        mat3x3=rearrange(batch_world_R_cam[:total_send_ego_cams], "f r c -> (f) r c"),
+                    ),
+                ],
+            )
+
     ########################
     # LOG 3D SHARED LABELS #
     ########################
     exoego_labels: ExoEgoLabels | None = exoego_sequence.exoego_labels
-    if exoego_labels is not None:
-        xyzc_stack: Float[ndarray, "num_frames 133 4"] = exoego_labels.xyzc_stack
-        xyz_stack: Float[ndarray, "num_frames 133 3"] = xyzc_stack[:, :, :3]
-        xyz_hom_stack: Float[ndarray, "num_frames 133 4"] = np.concatenate(
-            [xyz_stack, np.ones_like(xyz_stack[..., :1])], axis=-1
-        )
-        conf_stack: Float[ndarray, "num_frames 133"] = xyzc_stack[:, :, 3]
-        colors: UInt8[ndarray, "num_frames 133 3"] = confidence_scores_to_rgb(
-            confidence_scores=conf_stack[..., np.newaxis]
-        )
-        total_send: int = min(len(xyz_hom_stack), len(shortest_timestamp))
-        rr.log(
-            f"{parent_log_path}/keypoints",
-            rr.Points3D.from_fields(
-                class_ids=0,
-                keypoint_ids=COCO_133_IDS,
-                show_labels=False,
-            ),
-            static=True,
-        )
-        rr.send_columns(
-            f"{parent_log_path}/keypoints",
-            indexes=[rr.TimeNanosColumn(timeline, shortest_timestamp[0:total_send])],
-            columns=[
-                *rr.Points3D.columns(
-                    positions=rearrange(
-                        xyz_stack,
-                        "num_frames kpts dim -> (num_frames kpts) dim",
-                    ),
-                    colors=rearrange(
-                        colors,
-                        "num_frames kpts dim -> (num_frames kpts) dim",
-                    ),
-                ).partition(lengths=[len(COCO_133_IDS)] * total_send),
-            ],
-        )
+    if exoego_labels is None:
+        return
+
+    xyzc_stack: Float[ndarray, "num_frames 133 4"] = exoego_labels.xyzc_stack
+    xyz_stack: Float[ndarray, "num_frames 133 3"] = xyzc_stack[:, :, :3]
+    xyz_hom_stack: Float[ndarray, "num_frames 133 4"] = np.concatenate(
+        [xyz_stack, np.ones_like(xyz_stack[..., :1])], axis=-1
+    )
+    conf_stack: Float[ndarray, "num_frames 133"] = xyzc_stack[:, :, 3]
+    colors: UInt8[ndarray, "num_frames 133 3"] = confidence_scores_to_rgb(
+        confidence_scores=conf_stack[..., np.newaxis]
+    )
+    total_send: int = min(len(xyz_hom_stack), len(shortest_timestamp))
+    rr.log(
+        f"{parent_log_path}/keypoints",
+        rr.Points3D.from_fields(
+            class_ids=0,
+            keypoint_ids=COCO_133_IDS,
+            show_labels=False,
+        ),
+        static=True,
+    )
+    rr.send_columns(
+        f"{parent_log_path}/keypoints",
+        indexes=[rr.TimeNanosColumn(timeline, shortest_timestamp[0:total_send])],
+        columns=[
+            *rr.Points3D.columns(
+                positions=rearrange(
+                    xyz_stack,
+                    "num_frames kpts dim -> (num_frames kpts) dim",
+                ),
+                colors=rearrange(
+                    colors,
+                    "num_frames kpts dim -> (num_frames kpts) dim",
+                ),
+            ).partition(lengths=[len(COCO_133_IDS)] * total_send),
+        ],
+    )
 
     ###########################
     # batch send all exo cams #
     ###########################
     if exo_sequence is not None and config.log_exo:
-        exo_cam_param_list: list[PinholeParameters] = exo_sequence.exo_cam_list
+        exo_cam_param_list: list[PinholeParameters] = _calibrated_exo_cameras(exo_sequence)
         Pall_exo: Float[ndarray, "n_views 3 4"] = np.stack(
             [pinhole.projection_matrix for pinhole in exo_cam_param_list]
         )
@@ -290,47 +364,13 @@ def log_exoego_batch(
                 ],
             )
 
-    ###########################
-    # batch send all ego cams #
-    ###########################
+    ####################################
+    # batch send all ego cam keypoints #
+    ####################################
     if ego_sequence is not None and config.log_ego:
         for cam_name, ego_cam_param_list in ego_sequence.ego_cam_dict.items():
-            # We assume that all cameras have the intrinsics
-            first_cam: PinholeParameters = ego_cam_param_list[0]
-            cam_log_path: Path = parent_log_path / cam_name
-            pinhole_log_path: Path = cam_log_path / "pinhole"
-            rr.log(
-                f"{pinhole_log_path}",
-                rr.Pinhole(
-                    image_from_camera=first_cam.intrinsics.k_matrix,
-                    height=first_cam.intrinsics.height,
-                    width=first_cam.intrinsics.width,
-                    camera_xyz=getattr(
-                        rr.ViewCoordinates,
-                        first_cam.intrinsics.camera_conventions,
-                    ),
-                    image_plane_distance=exoego_sequence.ego_sequence.image_plane_distance,
-                ),
-                static=True,
-            )
-            batch_world_t_cam: Float[ndarray, "num_frames 3"] = np.array(
-                [ego_cam_param.extrinsics.world_t_cam for ego_cam_param in ego_cam_param_list]
-            )
-            batch_world_R_cam: Float[ndarray, "num_frames 3 3"] = np.array(
-                [ego_cam_param.extrinsics.world_R_cam for ego_cam_param in ego_cam_param_list]
-            )
-            total_send_ego_cams: int = min(len(batch_world_t_cam), len(shortest_timestamp))
-            # camera extrinsics, there's no from_parent=True so need to send as world_x_cam
-            rr.send_columns(
-                f"{cam_log_path}",
-                indexes=[rr.TimeNanosColumn(timeline, shortest_timestamp[0:total_send_ego_cams])],
-                columns=[
-                    *rr.Transform3D.columns(
-                        translation=rearrange(batch_world_t_cam[:total_send_ego_cams], "f d -> (f) d"),
-                        mat3x3=rearrange(batch_world_R_cam[:total_send_ego_cams], "f r c -> (f) r c"),
-                    ),
-                ],
-            )
+            first_cam: CameraParam = ego_cam_param_list[0]
+            pinhole_log_path: Path = parent_log_path / cam_name / "pinhole"
 
             # make Pall for specific camera
             Pall: Float[ndarray, "num_frames 3 4"] = np.stack(
@@ -344,8 +384,8 @@ def log_exoego_batch(
                 end_idx: int = min(start_idx + batch_size, len(xyz_hom_stack))
 
                 # Get batch data
-                xyz_hom_batch = xyz_hom_stack[start_idx:end_idx]  # (batch_frames, 133, 4)
-                P_batch = Pall[start_idx:end_idx]  # (batch_frames, 3, 4)
+                xyz_hom_batch: Float[ndarray, "batch_frames 133 4"] = xyz_hom_stack[start_idx:end_idx]
+                P_batch: Float[ndarray, "batch_frames 3 4"] = Pall[start_idx:end_idx]
 
                 # Use the vectorized projection function on the batch
                 uv_batch: Float[ndarray, "batch_frames batch_frames 133 2"] = proj_3d_vectorized(
@@ -353,8 +393,8 @@ def log_exoego_batch(
                 )
 
                 # Extract diagonal to get frame-to-frame correspondence
-                batch_len = end_idx - start_idx
-                uv_batch_diagonal = uv_batch[np.arange(batch_len), np.arange(batch_len)]  # (batch_frames, 133, 2)
+                batch_len: int = end_idx - start_idx
+                uv_batch_diagonal: Float[ndarray, "batch_frames 133 2"] = uv_batch[np.arange(batch_len), np.arange(batch_len)]
 
                 # Store results
                 uv_ego_stack[start_idx:end_idx] = uv_batch_diagonal
@@ -388,7 +428,7 @@ def log_exoego_batch(
             )
 
 
-def batch_raw_to_rrd(config: BatchConvertConfig):
+def batch_raw_to_rrd(config: BatchConvertConfig) -> None:
     start_time: float = timer()
     exoego_sequence: BaseExoEgoSequence = config.dataset.setup()
 
@@ -407,16 +447,16 @@ def batch_raw_to_rrd(config: BatchConvertConfig):
 
         ego_video_log_paths: list[Path] | None = None
         if ego_sequence is not None and config.log_ego:
-            ego_cam_dict: dict[CamNameType, list[PinholeParameters]] = ego_sequence.ego_cam_dict
+            ego_cam_dict: dict[str, list[CameraParam]] = ego_sequence.ego_cam_dict
             ego_cam_log_paths: list[Path] = [parent_log_path / ego_cam_name for ego_cam_name in ego_cam_dict]
-            ego_video_log_paths: list[Path] = [
+            ego_video_log_paths = [
                 cam_log_paths / "pinhole" / "video" for cam_log_paths in ego_cam_log_paths
             ]
 
         exo_video_log_paths: list[Path] | None = None
         if exo_sequence is not None and config.log_exo:
-            exo_cam_log_paths: list[Path] = [parent_log_path / exo_cam.name for exo_cam in exo_sequence.exo_cam_list]
-            exo_video_log_paths: list[Path] = [
+            exo_cam_log_paths: list[Path] = [parent_log_path / exo_video_name for exo_video_name in exo_sequence.exo_video_names]
+            exo_video_log_paths = [
                 cam_log_paths / "pinhole" / "video" for cam_log_paths in exo_cam_log_paths
             ]
 

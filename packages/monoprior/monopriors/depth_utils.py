@@ -62,10 +62,10 @@ def depth_to_points(
     world_t_cam: Float32[ndarray, "3"] | None = None,
 ) -> Float32[ndarray, "h w 3"]:
     K_33_inv: Float32[ndarray, "3 3"] = np.linalg.inv(K_33)
-    if world_R_cam is None:
-        world_R_cam: Float32[ndarray, "3 3"] = np.eye(3, dtype=np.float32)
-    if world_t_cam is None:
-        world_t_cam: Float32[ndarray, "3"] = np.zeros(3, dtype=np.float32)
+    world_R_cam_arr: Float32[ndarray, "3 3"] = (
+        np.eye(3, dtype=np.float32) if world_R_cam is None else world_R_cam
+    )
+    world_t_cam_arr: Float32[ndarray, "3"] = np.zeros(3, dtype=np.float32) if world_t_cam is None else world_t_cam
 
     _, height, width = depth_1hw.shape
 
@@ -84,8 +84,8 @@ def depth_to_points(
     pts3D_1 = depth_1hw11 * rearrange(K_33_inv, "h w -> 1 1 1 h w") @ rearrange(coord, "1 h w c -> 1 h w c 1")
 
     # transform from camera to world coordinate system
-    pts3D_2: Float32[ndarray, "1 h w 3 1"] = rearrange(world_R_cam, "h w -> 1 1 1 h w") @ pts3D_1 + rearrange(
-        world_t_cam, "s -> 1 1 1 s 1"
+    pts3D_2: Float32[ndarray, "1 h w 3 1"] = rearrange(world_R_cam_arr, "h w -> 1 1 1 h w") @ pts3D_1 + rearrange(
+        world_t_cam_arr, "s -> 1 1 1 s 1"
     )
 
     # rearrange to 3D points

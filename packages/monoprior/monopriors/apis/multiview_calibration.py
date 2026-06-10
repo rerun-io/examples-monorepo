@@ -267,9 +267,13 @@ def mv_pred_to_pointcloud(
     ).astype(np.float32)
 
     # Gather intrinsics matrices so each depth map can be unprojected using its matching camera model
-    K_b33: Float32[ndarray, "b 3 3"] = np.stack(
-        [mv_pred.pinhole_param.intrinsics.k_matrix for mv_pred in mv_pred_list], axis=0
-    ).astype(np.float32)
+    K_list: list[Float32[ndarray, "3 3"]] = []
+    for mv_pred in mv_pred_list:
+        K_33: Float32[ndarray, "3 3"] | None = mv_pred.pinhole_param.intrinsics.k_matrix
+        if K_33 is None:
+            raise ValueError("VGGT prediction must include camera intrinsics.")
+        K_list.append(K_33.astype(np.float32))
+    K_b33: Float32[ndarray, "b 3 3"] = np.stack(K_list, axis=0).astype(np.float32)
 
     # Lift each pixel into 3D world space, yielding one point per depth value
     world_points: Float32[ndarray, "b h w 3"] = multidepth_to_points(
@@ -453,8 +457,8 @@ class MultiViewCalibrator:
         pcd.colors = o3d.utility.Vector3dVector(filtered_colors / 255.0)
 
         # 3. Optional depth refinement: MoGe + depth alignment per view
+        refined_depths_list: list[Float32[ndarray, "H W"]] = []
         if self.config.refine_depth_maps:
-            refined_depths_list: list[Float32[ndarray, "H W"]] = []
             alignment_config: DepthAlignmentConfig = DepthAlignmentConfig(edge_threshold=0.01, scale_only=False)
 
             for idx, mv_pred in enumerate(mv_pred_list):
@@ -462,9 +466,10 @@ class MultiViewCalibrator:
                 filtered_depth_map: Float32[ndarray, "H W"] = np.where(depth_conf > 0, mv_pred.depth_map, 0)
 
                 # Run MoGe relative depth on this view
-                relative_pred: RelativeDepthPrediction = self.moge_predictor(
-                    rgb=mv_pred.rgb_image, K_33=mv_pred.pinhole_param.intrinsics.k_matrix
-                )
+                K_33: Float32[ndarray, "3 3"] | None = mv_pred.pinhole_param.intrinsics.k_matrix
+                if K_33 is None:
+                    raise ValueError("MoGe depth refinement requires camera intrinsics.")
+                relative_pred: RelativeDepthPrediction = self.moge_predictor(rgb=mv_pred.rgb_image, K_33=K_33)
 
                 # Align MoGe depth to VGGT's coordinate frame using decomposed alignment node
                 alignment_result: DepthAlignmentResult = run_depth_alignment(

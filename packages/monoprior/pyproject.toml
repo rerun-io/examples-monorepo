@@ -21,6 +21,9 @@ include = ["monopriors*", "tools*"]
 
 [tool.ruff]
 line-length = 150
+exclude = ["monopriors/third_party", "notebooks"]
+
+[tool.ruff.lint]
 select = [
     # pycodestyle
     "E",
@@ -48,3 +51,33 @@ paths = ["monopriors", "tests", "tools"]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*", "*/third_party/*"]
 sort_by_size = true
 min_confidence = 60
+ignore_names = [
+    "StableNormalPredictor",
+    "aabb",
+    "camera_model",
+    "camtoworld",
+    "collider_type",
+    "examples",
+    "extract_zip",
+    "far",
+    "find_keyframes_dir",
+    "foreground_mask",
+    "has_mono_prior",
+    "local_path",
+    "near",
+    "new_size",
+    "orientation_override",
+    "original_size",
+    "padding",
+    "pairs",
+    "radius",
+    "repo_path",
+    "resolution_level",
+    "rr_config",
+    "run_fusion",
+    "set_model_device",
+    "sfm_sparse_points_view",
+    "unload_vggt_model",
+    "validate_zip",
+    "worldtogt",
+]

@@ -14,7 +14,7 @@ lazy re-initialisation of the calibrator.
 import uuid
 from collections.abc import Generator
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 
 import gradio as gr
 import rerun as rr
@@ -50,6 +50,16 @@ _MV_CALIBRATOR: MultiViewCalibrator = MultiViewCalibrator(
 config fields are toggled ON (see ``_sync_config``)."""
 
 
+def _parse_preprocessing_mode(preprocessing_mode: str) -> Literal["crop", "pad"]:
+    """Validate a Gradio string choice as a VGGT preprocessing mode."""
+
+    if preprocessing_mode == "crop":
+        return "crop"
+    if preprocessing_mode == "pad":
+        return "pad"
+    raise gr.Error("Preprocessing mode must be crop or pad.")
+
+
 def _sync_config(
     keep_top_percent: int | float,
     refine_depth_maps: bool,
@@ -72,6 +82,7 @@ def _sync_config(
         preprocessing_mode: Image preprocessing strategy ("crop" or "pad").
     """
     global _MV_CONFIG, _MV_CALIBRATOR
+    preprocessing_mode_literal: Literal["crop", "pad"] = _parse_preprocessing_mode(preprocessing_mode)
 
     needs_reinit: bool = False
     if segment_people and not _MV_CONFIG.segment_people:
@@ -83,7 +94,7 @@ def _sync_config(
         keep_top_percent=keep_top_percent,
         refine_depth_maps=refine_depth_maps,
         segment_people=segment_people,
-        preprocessing_mode=preprocessing_mode,
+        preprocessing_mode=preprocessing_mode_literal,
         device="cuda",
         verbose=True,
     )
@@ -94,7 +105,7 @@ def _sync_config(
     else:
         _MV_CONFIG = new_config
         _MV_CALIBRATOR.config = new_config
-        _MV_CALIBRATOR.vggt_predictor.preprocessing_mode = preprocessing_mode
+        _MV_CALIBRATOR.vggt_predictor.preprocessing_mode = preprocessing_mode_literal
 
 
 def get_recording(recording_id: uuid.UUID) -> rr.RecordingStream:

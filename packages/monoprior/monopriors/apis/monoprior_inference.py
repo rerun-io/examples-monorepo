@@ -63,7 +63,9 @@ def monoprior_from_img(config: MonoPriorConfig) -> None:
     )
     rr.send_blueprint(blueprint=blueprint)
 
-    bgr_hw3: UInt8[np.ndarray, "h w 3"] = cv2.imread(str(config.image_path))
+    bgr_hw3: UInt8[np.ndarray, "h w 3"] | None = cv2.imread(str(config.image_path))
+    if bgr_hw3 is None:
+        raise FileNotFoundError(f"Failed to read image {config.image_path}")
     rgb_hw3: UInt8[np.ndarray, "h w 3"] = cv2.cvtColor(bgr_hw3, cv2.COLOR_BGR2RGB)
 
     model: MonoPriorModel = get_monoprior_model(config.model_name)

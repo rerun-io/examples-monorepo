@@ -1,6 +1,5 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
-from typing import Union
 
 import torch
 import torch.nn as nn
@@ -23,7 +22,7 @@ class LayerScale(nn.Module):
     def __init__(
         self,
         dim: int,
-        layer_scale_init_value: Union[float, torch.Tensor] = 1e-5,
+        layer_scale_init_value: float | torch.Tensor = 1e-5,
         inplace: bool = False,
         data_format: str = "channels_last",
     ):

@@ -56,9 +56,7 @@ class Dinov3Backbone(nn.Module):
 
         param_name = param_name[len(prefix) :]
 
-        if param_name in ("cls_token", "pos_embed", "storage_tokens"):
-            layer_depth = 0
-        elif param_name.startswith("patch_embed"):
+        if param_name in ("cls_token", "pos_embed", "storage_tokens") or param_name.startswith("patch_embed"):
             layer_depth = 0
         elif param_name.startswith("blocks"):
             layer_id = int(param_name.split(".")[1])

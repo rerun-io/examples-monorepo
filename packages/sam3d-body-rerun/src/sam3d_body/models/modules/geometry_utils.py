@@ -1,13 +1,11 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
-from typing import Optional
 
 import cv2
-
 import numpy as np
 import torch
-from torch.nn import functional as F
 from jaxtyping import Float
+from torch.nn import functional as F
 
 
 def cam_crop_to_full(cam_bbox, box_center, box_size, img_size, focal_length=5000.0):
@@ -155,8 +153,8 @@ def rot_aa(aa: Float[np.ndarray, "3"], rot: float) -> Float[np.ndarray, "3"]:
 
 def transform_points(
     points: torch.Tensor,
-    translation: Optional[torch.Tensor] = None,
-    rotation: Optional[torch.Tensor] = None,
+    translation: torch.Tensor | None = None,
+    rotation: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     Transform a set of 3D points given translation and rotation.

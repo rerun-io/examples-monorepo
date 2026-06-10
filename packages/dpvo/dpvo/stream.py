@@ -62,7 +62,7 @@ class FrameReader:
         self._process.start()
         return self._queue, _calculate_num_frames(self.imagedir, self.stride, self.skip)
 
-    def __exit__(self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: TracebackType | None) -> None:
+    def __exit__(self, _exc_type: type[BaseException] | None, _exc_val: BaseException | None, _exc_tb: TracebackType | None) -> None:
         if self._process is not None:
             if self._process.is_alive():
                 self._process.kill()

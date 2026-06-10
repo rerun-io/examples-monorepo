@@ -1,12 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
-import pickle
-from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
 
-from ..modules.transformer import build_norm_layer, TransformerDecoderLayer
+from ..modules.transformer import TransformerDecoderLayer, build_norm_layer
 
 
 class PromptableDecoder(nn.Module):
@@ -51,7 +49,7 @@ class PromptableDecoder(nn.Module):
         drop_path_rate: float = 0.0,
         ffn_type: str = "origin",
         act_layer: nn.Module = nn.GELU,
-        norm_cfg: Dict = dict(type="LN", eps=1e-6),
+        norm_cfg: dict = dict(type="LN", eps=1e-6),
         enable_twoway: bool = False,
         repeat_pe: bool = False,
         frozen: bool = False,
@@ -95,9 +93,9 @@ class PromptableDecoder(nn.Module):
         self,
         token_embedding: torch.Tensor,
         image_embedding: torch.Tensor,
-        token_augment: Optional[torch.Tensor] = None,
-        image_augment: Optional[torch.Tensor] = None,
-        token_mask: Optional[torch.Tensor] = None,
+        token_augment: torch.Tensor | None = None,
+        image_augment: torch.Tensor | None = None,
+        token_mask: torch.Tensor | None = None,
         channel_first: bool = True,
         token_to_pose_output_fn=None,
         keypoint_token_update_fn=None,

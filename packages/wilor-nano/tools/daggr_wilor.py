@@ -9,7 +9,7 @@ Then run this script to launch the daggr graph:
 """
 
 import gradio as gr
-from daggr import GradioNode, Graph
+from daggr import GradioNode, Graph  # pyrefly: ignore[missing-import]
 from gradio_rerun import Rerun
 
 # Shared image input - both detection and keypoint nodes use this

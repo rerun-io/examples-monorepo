@@ -27,7 +27,6 @@ from sam3_rerun.viz_constants import BOX_PALETTE, SEG_CLASS_OFFSET, SEG_OVERLAY_
 CFG: SAM3Config = SAM3Config()
 MODEL_E2E: SAM3Predictor = SAM3Predictor(config=CFG)
 DONE_STATUS: Final[str] = "Ready"
-RUNNING_STATUS: Final[str] = "Running prediction..."
 
 # Default config values for the UI
 _TEXT_PROMPT: str = "person"
@@ -131,11 +130,11 @@ def sam3d_prediction_fn(
     yield stream.read(), DONE_STATUS
 
 
-def _switch_to_outputs() -> gr.Tabs:
+def _switch_to_outputs() -> dict[str, object]:
     return gr.update(selected="outputs")
 
 
-def _switch_to_inputs() -> gr.Tabs:
+def _switch_to_inputs() -> dict[str, object]:
     return gr.update(selected="inputs")
 
 

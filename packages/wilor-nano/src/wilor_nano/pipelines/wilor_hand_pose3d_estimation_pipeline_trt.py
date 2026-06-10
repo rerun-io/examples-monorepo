@@ -68,7 +68,7 @@ class _FrameRecord:
     patch_end: int
 
 
-@dataclass(slots=True)
+@dataclass(init=False, slots=True)
 class WilorPipelineConfig:
     detector_engine_path: Path
     """Machine-local raw detector TensorRT engine."""
@@ -78,7 +78,7 @@ class WilorPipelineConfig:
     """Static batch size baked into the detector engine."""
     wilor_static_batch_size: int
     """Static batch size baked into the full WiLor engine."""
-    device: torch.device = torch.device("cuda")
+    _device: torch.device
     """CUDA device used for TensorRT execution."""
     dtype: torch.dtype = torch.float16
     """Input dtype for full WiLor TensorRT execution."""
@@ -86,6 +86,31 @@ class WilorPipelineConfig:
     """Focal length used by WiLor camera conversion."""
     detector_max_det: int = 300
     """Maximum detector boxes retained per frame."""
+
+    def __init__(
+        self,
+        detector_engine_path: Path,
+        wilor_engine_path: Path,
+        detector_static_batch_size: int,
+        wilor_static_batch_size: int,
+        device: torch.device | None = None,
+        dtype: torch.dtype = torch.float16,
+        focal_length: float = 5000.0,
+        detector_max_det: int = 300,
+    ) -> None:
+        self.detector_engine_path = detector_engine_path
+        self.wilor_engine_path = wilor_engine_path
+        self.detector_static_batch_size = detector_static_batch_size
+        self.wilor_static_batch_size = wilor_static_batch_size
+        self._device = torch.device("cuda") if device is None else device
+        self.dtype = dtype
+        self.focal_length = focal_length
+        self.detector_max_det = detector_max_det
+
+    @property
+    def device(self) -> torch.device:
+        """CUDA device used for TensorRT execution."""
+        return self._device
 
 
 class WiLorHandPose3dEstimationPipeline:

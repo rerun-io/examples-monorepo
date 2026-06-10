@@ -33,7 +33,7 @@ class NoCollate:
 
 def prepare_batch(
     img: UInt8[ndarray, "h w 3"],
-    transform: Callable[[dict[str, Any]], dict[str, Any]],
+    transform: Callable[[dict[str, Any]], dict[str, Any] | None],
     boxes: Float[ndarray, "n 4"],
     masks: Float[ndarray, "n h w"] | None = None,
     masks_score: Float[ndarray, "n"] | None = None,
@@ -59,7 +59,10 @@ def prepare_batch(
             data_info["mask"] = np.zeros((height, width, 1), dtype=np.uint8)
             data_info["mask_score"] = np.array(0.0, dtype=np.float32)
 
-        data_list.append(transform(data_info))
+        transformed: dict[str, Any] | None = transform(data_info)
+        if transformed is None:
+            raise ValueError("SAM 3D body transform returned None for an input detection.")
+        data_list.append(transformed)
 
     batch = default_collate(data_list)
 

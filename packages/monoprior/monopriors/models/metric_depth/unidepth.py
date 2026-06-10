@@ -1,5 +1,5 @@
 from timeit import default_timer as timer
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -22,19 +22,16 @@ class UniDepthMetricPredictor(BaseMetricPredictor):
         super().__init__()
         print("Loading UniDepth model...")
         start = timer()
-        self.model = (
-            torch.hub.load(
-                "lpiccinelli-eth/UniDepth",
-                "UniDepth",
-                version=version,
-                backbone=backbone,
-                pretrained=True,
-                trust_repo=True,
-                force_reload=True,
-            )
-            .to(device)
-            .eval()
+        loaded_model: Any = torch.hub.load(
+            "lpiccinelli-eth/UniDepth",
+            "UniDepth",
+            version=version,
+            backbone=backbone,
+            pretrained=True,
+            trust_repo=True,
+            force_reload=True,
         )
+        self.model = loaded_model.to(device).eval()
         self.model.resolution_level = 0
         print(f"UniDepth model loaded. Time: {timer() - start:.2f}s")
 
@@ -45,14 +42,14 @@ class UniDepthMetricPredictor(BaseMetricPredictor):
     ) -> MetricDepthPrediction:
         # Load the RGB image and the normalization will be taken care of by the model
         # rgb = torch.from_numpy(rgb).permute(2, 0, 1)  # C, H, W
-        rgb = rearrange(rgb, "h w c -> c h w")
-        rgb = torch.from_numpy(rgb)
+        rgb_chw: UInt8[np.ndarray, "3 h w"] = rearrange(rgb, "h w c -> c h w")
+        rgb_tensor: UInt8[torch.Tensor, "3 h w"] = torch.from_numpy(rgb_chw)
 
         if K_33 is None:
-            predictions = self.model.infer(rgb)
+            predictions = self.model.infer(rgb_tensor)
         else:
-            K_33 = torch.from_numpy(K_33)
-            predictions = self.model.infer(rgb, K_33)
+            K_33_tensor: Float[torch.Tensor, "3 3"] = torch.from_numpy(K_33)
+            predictions = self.model.infer(rgb_tensor, K_33_tensor)
 
         depth_b1hw: Float[torch.Tensor, "b 1 h w"] = predictions["depth"]
         K_b33: Float[torch.Tensor, "b 3 3"] = predictions["intrinsics"]
@@ -67,12 +64,12 @@ class UniDepthMetricPredictor(BaseMetricPredictor):
         depth_hw = rearrange(depth_b1hw, "1 1 h w -> h w").numpy(force=True)
         conf_hw = rearrange(conf_b1hw, "1 1 h w -> h w").numpy(force=True)
         # rearrange doesn't work here?
-        K_33 = K_b33.squeeze(0).numpy(force=True)
+        K_33_np: Float[np.ndarray, "3 3"] = K_b33.squeeze(0).numpy(force=True)
 
         metric_pred = MetricDepthPrediction(
             depth_meters=depth_hw,
             confidence=conf_hw,
-            K_33=K_33,
+            K_33=K_33_np,
         )
 
         return metric_pred

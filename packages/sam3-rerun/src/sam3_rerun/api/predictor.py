@@ -67,8 +67,9 @@ class SAM3Predictor:
         with torch.no_grad():
             outputs = self.sam3_model(**inputs)
 
+        original_sizes: Tensor = inputs["original_sizes"]
         results: SAM3ResultsDict = self.sam3_processor.post_process_instance_segmentation(
-            outputs, threshold=0.5, mask_threshold=0.5, target_sizes=inputs.get("original_sizes").tolist()
+            outputs, threshold=0.5, mask_threshold=0.5, target_sizes=original_sizes.tolist()
         )[0]
 
         mask_probs: Float32[ndarray, "n h w"] = results["masks"].detach().cpu().numpy().astype(np.float32, copy=False)

@@ -338,13 +338,10 @@ def load_sam3_model(
     Returns:
         Tuple of (model, processor) ready for inference.
     """
-    config_kwargs: dict[str, float] = {
-        "score_threshold_detection": config.score_threshold_detection,
-        "new_det_thresh": config.new_det_thresh or config.score_threshold_detection,
-    }
-
     model_cfg: Sam3VideoConfig = Sam3VideoConfig.from_pretrained(
-        config.checkpoint, **config_kwargs
+        config.checkpoint,
+        score_threshold_detection=config.score_threshold_detection,
+        new_det_thresh=config.new_det_thresh or config.score_threshold_detection,
     )
     model: Sam3VideoModel = Sam3VideoModel.from_pretrained(
         config.checkpoint, config=model_cfg
@@ -389,13 +386,14 @@ def main(cfg: Sam3VideoDemoConfig) -> None:
     model, processor = load_sam3_model(cfg.model_config, device, dtype)
 
     # Load video frames into memory
+    from transformers.video_utils import Path as TransformersVideoPath
     from transformers.video_utils import load_video
 
     # Check video constraints (duration + resolution)
     check_video_constraints(cfg.video_path, cfg.max_frames)
 
     video_frames_np, video_metadata = load_video(
-        str(cfg.video_path),
+        TransformersVideoPath(str(cfg.video_path)),
         num_frames=cfg.max_frames,
     )
     video_frames: UInt8[ndarray, "t h w 3"] = video_frames_np  # type: ignore[assignment]

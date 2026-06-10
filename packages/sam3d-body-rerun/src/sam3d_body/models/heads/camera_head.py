@@ -1,13 +1,13 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
-from typing import Optional, Sequence, Tuple
+from collections.abc import Sequence
 
 import torch
 import torch.nn as nn
 
 from sam3d_body.models.modules.geometry_utils import perspective_projection
 
-from ..modules import get_intrinsic_matrix, to_2tuple
+from ..modules import to_2tuple
 from ..modules.transformer import FFN
 
 
@@ -20,7 +20,7 @@ class PerspectiveHead(nn.Module):
     def __init__(
         self,
         input_dim: int,
-        img_size: Tuple[int, int] | Sequence[int],  # model input size (W, H)
+        img_size: tuple[int, int] | Sequence[int],  # model input size (W, H)
         mlp_depth: int = 1,
         drop_ratio: float = 0.0,
         mlp_channel_div_factor: int = 8,
@@ -45,7 +45,7 @@ class PerspectiveHead(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        init_estimate: Optional[torch.Tensor] = None,
+        init_estimate: torch.Tensor | None = None,
     ):
         """
         Args:

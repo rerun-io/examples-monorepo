@@ -1,12 +1,11 @@
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
 
 
 @dataclass
 class SceneBox:
-    aabb: List[List[float]]
+    aabb: list[list[float]]
     near: float
     far: float
     radius: float
@@ -16,13 +15,13 @@ class SceneBox:
 @dataclass
 class SDFStudioFrame:
     # Assuming basic structure for a frame; add or remove fields as necessary
-    rgb_path: Optional[str] = None
-    camtoworld: Optional[List[List[float]]] = None
-    intrinsics: Optional[List[List[float]]] = None
-    mono_depth_path: Optional[str] = None
-    mono_normal_path: Optional[str] = None
-    foreground_mask: Optional[str] = None
-    sfm_sparse_points_view: Optional[str] = None
+    rgb_path: str | None = None
+    camtoworld: list[list[float]] | None = None
+    intrinsics: list[list[float]] | None = None
+    mono_depth_path: str | None = None
+    mono_normal_path: str | None = None
+    foreground_mask: str | None = None
+    sfm_sparse_points_view: str | None = None
 
 
 @dataclass
@@ -31,21 +30,23 @@ class SDFStudioData:
     height: int
     width: int
     has_mono_prior: bool
-    pairs: Optional[str]
-    worldtogt: List[List[float]]
+    pairs: str | None
+    worldtogt: list[list[float]]
     scene_box: SceneBox
-    frames: List[SDFStudioFrame]
+    frames: list[SDFStudioFrame]
 
 
 def load_sdfstudio_from_json(json_path: Path) -> SDFStudioData:
     # load the meta.json file
-    with open(json_path, "r") as f:
+    with open(json_path) as f:
         data = json.load(f)
 
     scene_box_data = data.pop(
         "scene_box", {}
     )  # Use pop to remove 'scene_box' from 'data'
     scene_box = SceneBox(**scene_box_data) if scene_box_data else None
+    if scene_box is None:
+        raise ValueError(f"Missing scene_box in {json_path}")
 
     frames_data = data.pop("frames", [])  # Similarly, remove 'frames' from 'data'
     frames = (

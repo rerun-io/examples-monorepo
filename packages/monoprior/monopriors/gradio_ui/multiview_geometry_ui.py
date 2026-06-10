@@ -14,7 +14,7 @@ lazy re-initialisation of the predictor.
 import uuid
 from collections.abc import Generator
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 
 import gradio as gr
 import numpy as np
@@ -115,6 +115,16 @@ _PREDICTOR: VGGTPredictor = VGGTPredictor(
 """Module-level VGGT singleton. Re-created only when preprocessing_mode changes."""
 
 
+def _parse_preprocessing_mode(preprocessing_mode: str) -> Literal["crop", "pad"]:
+    """Validate a Gradio string choice as a VGGT preprocessing mode."""
+
+    if preprocessing_mode == "crop":
+        return "crop"
+    if preprocessing_mode == "pad":
+        return "pad"
+    raise gr.Error("Preprocessing mode must be crop or pad.")
+
+
 def _sync_config(
     keep_top_percent: int | float,
     preprocessing_mode: str,
@@ -128,12 +138,13 @@ def _sync_config(
         verbose: Whether to log per-camera detail.
     """
     global _CONFIG, _PREDICTOR
+    preprocessing_mode_literal: Literal["crop", "pad"] = _parse_preprocessing_mode(preprocessing_mode)
 
-    needs_reinit: bool = preprocessing_mode != _CONFIG.preprocessing_mode
+    needs_reinit: bool = preprocessing_mode_literal != _CONFIG.preprocessing_mode
 
     _CONFIG = MultiviewGeometryConfig(
         keep_top_percent=keep_top_percent,
-        preprocessing_mode=preprocessing_mode,
+        preprocessing_mode=preprocessing_mode_literal,
         device="cuda",
         verbose=verbose,
     )
@@ -144,7 +155,7 @@ def _sync_config(
             preprocessing_mode=_CONFIG.preprocessing_mode,
         )
     else:
-        _PREDICTOR.preprocessing_mode = preprocessing_mode
+        _PREDICTOR.preprocessing_mode = preprocessing_mode_literal
 
 
 def _get_recording(recording_id: uuid.UUID) -> rr.RecordingStream:

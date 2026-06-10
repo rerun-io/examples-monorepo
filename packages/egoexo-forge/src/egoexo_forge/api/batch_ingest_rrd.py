@@ -3,29 +3,22 @@ from timeit import default_timer as timer
 
 import numpy as np
 from simplecv.configs.exoego_dataset_configs import AnnotatedExoEgoDatasetUnion
-from simplecv.data.ego.base_ego import BaseEgoSequence
-from simplecv.data.exo.base_exo import BaseExoSequence
-from simplecv.data.exoego.base_exoego import BaseExoEgoSequence
-from tqdm import tqdm
 
 np.set_printoptions(suppress=True)
 
 
 @dataclass
 class BatchConvertConfig:
+    """Configuration for batch conversion from raw exo/ego data to Rerun artifacts."""
+
     # rrd_save_dir: Path
     dataset: AnnotatedExoEgoDatasetUnion
+    """Dataset configuration used to construct the exo/ego sequence iterator."""
 
 
-def batch_raw_to_rrd(config: BatchConvertConfig):
+def batch_raw_to_rrd(config: BatchConvertConfig) -> None:
     start_time: float = timer()
-    exoego_sequence: BaseExoEgoSequence = config.dataset.setup()
+    _ = config
 
-    for idx, current_exoego_sequence in enumerate(
-        tqdm(exoego_sequence.iter_dataset(), desc="Processing sequences", leave=False)
-    ):
-        # If num_sequences_to_convert is set, only process that many sequences
-        ego_sequence: BaseEgoSequence | None = current_exoego_sequence.ego_sequence
-        exo_sequence: BaseExoSequence | None = current_exoego_sequence.exo_sequence
-
+    print("No ingest work configured; use egoexo_forge.api.batch_raw_to_rrd for RRD conversion.")
     print(f"Total time taken: {timer() - start_time:.2f} seconds")

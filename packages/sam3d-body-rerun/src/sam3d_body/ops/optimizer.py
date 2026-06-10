@@ -17,11 +17,13 @@ from numpy import ndarray
 from simplecv.ops.triangulate import batch_triangulate
 from torch import Tensor
 
+from sam3d_body.models.heads.mhr_head import MHRHead
 from sam3d_body.ops.losses import (
     LossWeights,
     MultiviewLossOutput,
     MultiviewOptimizationLoss,
 )
+from sam3d_body.ops.mhr_output import expect_mhr_tensor_tuple
 from sam3d_body.sam_3d_body_estimator import FinalPosePrediction
 
 
@@ -111,7 +113,7 @@ class MultiviewBodyOptimizer:
         self,
         projection_matrices: Float[ndarray, "n_views 3 4"],
         first_world_T_cam: Float[ndarray, "4 4"],
-        mhr_head: "torch.nn.Module",  # MHRHead from models.heads
+        mhr_head: MHRHead,
         config: MultiviewOptimizerConfig | None = None,
         device: str = "cuda",
     ) -> None:
@@ -142,7 +144,7 @@ class MultiviewBodyOptimizer:
         ).to(device)
 
         # Store MHR head for forward kinematics
-        self.mhr_head = mhr_head
+        self.mhr_head: MHRHead = mhr_head
 
         # Loss function
         self.loss_fn = MultiviewOptimizationLoss(weights=self.config.loss_weights)
@@ -338,22 +340,23 @@ class MultiviewBodyOptimizer:
             zero_trans: Float32[Tensor, "1 3"] = torch.zeros(1, 3, device=self.device, dtype=torch.float32)
 
             # Run MHR forward kinematics to get keypoints from pose parameters
-            mhr_output = self.mhr_head.mhr_forward(
-                global_trans=zero_trans,  # Always zero, translation applied post-FK
-                global_rot=global_rot_batch,
-                body_pose_params=body_pose_batch,
-                hand_pose_params=hand_params,
-                scale_params=scale_params,
-                shape_params=shape_params,
-                expr_params=expr_params,
-                return_keypoints=True,
-                return_joint_coords=True,
+            mhr_output: tuple[Tensor, ...] = expect_mhr_tensor_tuple(
+                self.mhr_head.mhr_forward(
+                    global_trans=zero_trans,  # Always zero, translation applied post-FK
+                    global_rot=global_rot_batch,
+                    body_pose_params=body_pose_batch,
+                    hand_pose_params=hand_params,
+                    scale_params=scale_params,
+                    shape_params=shape_params,
+                    expr_params=expr_params,
+                    return_keypoints=True,
+                    return_joint_coords=True,
+                ),
+                min_len=3,
             )
             # mhr_output = (vertices, keypoints, joint_coords)
-            vertices: Float32[Tensor, "1 n_verts 3"]
             keypoints_308: Float32[Tensor, "1 308 3"]
-            joint_coords: Float32[Tensor, "1 n_joints 3"]
-            vertices, keypoints_308, joint_coords = mhr_output[0], mhr_output[1], mhr_output[2]
+            keypoints_308 = mhr_output[1]
 
             # Slice from 308 -> 70 keypoints (MHR70 format, same as head.forward)
             keypoints: Float32[Tensor, "1 70 3"] = keypoints_308[:, :70, :]

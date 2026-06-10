@@ -1,7 +1,6 @@
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
 
 
 @dataclass
@@ -14,19 +13,19 @@ class NerfStudioFrame:
     w: int
     h: int
     file_path: str
-    transform_matrix: List[List[float]]
+    transform_matrix: list[list[float]]
 
 
 @dataclass
 class NerfStudioData:
     camera_model: str
     orientation_override: str
-    frames: List[NerfStudioFrame]
+    frames: list[NerfStudioFrame]
 
 
 def load_nerfstudio_from_json(json_path: Path) -> NerfStudioData:
     # load the meta.json file
-    with open(json_path, "r") as f:
+    with open(json_path) as f:
         data = json.load(f)
 
     frames_data = data.pop("frames", [])  # Use pop to remove 'scene_box' from 'data'

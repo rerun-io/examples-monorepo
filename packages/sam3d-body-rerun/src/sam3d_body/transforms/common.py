@@ -1,16 +1,16 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from collections.abc import Callable
 
 import cv2
 import numpy as np
 import torch.nn as nn
 import torchvision.transforms.functional as F
 from PIL import Image
+
 from sam3d_body.models.modules import to_2tuple
 
 from .bbox_utils import (
-    bbox_cs2xyxy,
     bbox_xywh2cs,
     bbox_xyxy2cs,
     fix_aspect_ratio,
@@ -27,13 +27,12 @@ class Compose:
             object or config dict to be composed.
     """
 
-    def __init__(self, transforms: Optional[List[Callable]] = None):
+    def __init__(self, transforms: list[Callable] | None = None):
         if transforms is None:
             transforms = []
-        else:
-            self.transforms = transforms
+        self.transforms = transforms
 
-    def __call__(self, data: dict) -> Optional[dict]:
+    def __call__(self, data: dict) -> dict | None:
         """Call function to apply transforms sequentially.
 
         Args:
@@ -72,7 +71,7 @@ class VisionTransformWrapper:
     def __init__(self, transform: Callable):
         self.transform = transform
 
-    def __call__(self, results: Dict) -> Optional[dict]:
+    def __call__(self, results: dict) -> dict | None:
         results["img"] = self.transform(results["img"])
         return results
 
@@ -112,7 +111,7 @@ class GetBBoxCenterScale(nn.Module):
 
         self.padding = padding
 
-    def forward(self, results: Dict) -> Optional[dict]:
+    def forward(self, results: dict) -> dict | None:
         """The transform function of :class:`GetBBoxCenterScale`.
 
         Args:
@@ -148,7 +147,7 @@ class GetBBoxCenterScale(nn.Module):
 
 
 class SquarePad:
-    def __call__(self, results: Dict) -> Optional[dict]:
+    def __call__(self, results: dict) -> dict | None:
         assert isinstance(results["img"], Image.Image)
         w, h = results["img"].size
 
@@ -171,7 +170,7 @@ class SquarePad:
 
 
 class ToPIL:
-    def __call__(self, results: Dict) -> Optional[dict]:
+    def __call__(self, results: dict) -> dict | None:
         if isinstance(results["img"], list):
             if isinstance(results["img"][0], np.ndarray):
                 results["img"] = [Image.fromarray(img) for img in results["img"]]
@@ -180,7 +179,7 @@ class ToPIL:
 
 
 class ToCv2:
-    def __call__(self, results: Dict) -> Optional[dict]:
+    def __call__(self, results: dict) -> dict | None:
         if isinstance(results["img"], list):
             if isinstance(results["img"][0], Image.Image):
                 results["img"] = [np.array(img) for img in results["img"]]
@@ -222,7 +221,7 @@ class TopdownAffine(nn.Module):
 
     def __init__(
         self,
-        input_size: Union[int, Tuple[int, int]],
+        input_size: int | tuple[int, int],
         use_udp: bool = False,
         aspect_ratio: float = 0.75,
         fix_square: bool = False,
@@ -234,7 +233,7 @@ class TopdownAffine(nn.Module):
         self.aspect_ratio = aspect_ratio
         self.fix_square = fix_square
 
-    def forward(self, results: Dict) -> Optional[dict]:
+    def forward(self, results: dict) -> dict | None:
         """The transform function of :class:`TopdownAffine`.
 
         See ``transform()`` method of :class:`BaseTransform` for details.
@@ -297,7 +296,7 @@ class TopdownAffine(nn.Module):
             results["ori_img_size"] = np.array([width, height])
             results["img"] = cv2.warpAffine(results["img"], warp_mat, warp_size, flags=cv2.INTER_LINEAR)
 
-        if results.get("keypoints_2d", None) is not None:
+        if results.get("keypoints_2d") is not None:
             results["orig_keypoints_2d"] = results["keypoints_2d"].copy()
             transformed_keypoints = results["keypoints_2d"].copy()
             # Only transform (x, y) coordinates
@@ -305,7 +304,7 @@ class TopdownAffine(nn.Module):
             transformed_keypoints[:, :2] = cv2.transform(results["keypoints_2d"][None, :, :2], warp_mat)[0]
             results["keypoints_2d"] = transformed_keypoints
 
-        if results.get("mask", None) is not None:
+        if results.get("mask") is not None:
             results["mask"] = cv2.warpAffine(results["mask"], warp_mat, warp_size, flags=cv2.INTER_LINEAR)
 
         results["img_size"] = np.array([w, h])
@@ -337,7 +336,7 @@ class NormalizeKeypoint(nn.Module):
         - keypoints_2d
     """
 
-    def forward(self, results: Dict) -> Optional[dict]:
+    def forward(self, results: dict) -> dict | None:
         if "keypoints_2d" in results:
             img_size = results.get("img_size", results["input_size"])
 

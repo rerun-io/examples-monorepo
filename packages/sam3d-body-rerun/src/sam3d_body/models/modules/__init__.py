@@ -14,5 +14,4 @@ from .geometry_utils import (
     undo_focal_length_normalization,
     undo_log_depth,
 )
-
 from .misc import to_2tuple, to_3tuple, to_4tuple, to_ntuple

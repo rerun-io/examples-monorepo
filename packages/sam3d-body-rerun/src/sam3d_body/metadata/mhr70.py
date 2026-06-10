@@ -2,7 +2,7 @@
 
 """The first 70 of 308 MHR keypoints, ignoring the rest for face keypoints"""
 
-from typing import Final
+from typing import Any, Final
 
 mhr_names = [
     "nose",
@@ -895,16 +895,50 @@ pose_info = dict(
 # These mirror the COCO‑133 helpers exposed by ``simplecv.data.skeleton.coco_133``
 # so downstream code can build annotation contexts without re‑deriving names/links.
 
-MHR70_ID2NAME: Final[dict[int, str]] = {
-    idx: info["name"] for idx, info in pose_info["keypoint_info"].items()
-}
+
+def _metadata_table(value: object, name: str) -> dict[int, dict[str, Any]]:
+    """Validate a pose metadata table keyed by integer ids."""
+
+    if not isinstance(value, dict):
+        raise TypeError(f"{name} must be a dictionary.")
+    table: dict[int, dict[str, Any]] = {}
+    for key, item in value.items():
+        if not isinstance(key, int):
+            raise TypeError(f"{name} key {key!r} must be an integer.")
+        if not isinstance(item, dict):
+            raise TypeError(f"{name}[{key}] must be a dictionary.")
+        table[key] = dict(item)
+    return table
+
+
+def _string_value(value: object, name: str) -> str:
+    """Validate a metadata string value."""
+
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string.")
+    return value
+
+
+def _link_value(value: object, name: str) -> tuple[str, str]:
+    """Validate a skeleton link entry as a pair of keypoint names."""
+
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise TypeError(f"{name} must be a two-item list or tuple.")
+    return (_string_value(value[0], f"{name}[0]"), _string_value(value[1], f"{name}[1]"))
+
+
+_KEYPOINT_INFO: Final[dict[int, dict[str, Any]]] = _metadata_table(pose_info["keypoint_info"], "keypoint_info")
+_SKELETON_INFO: Final[dict[int, dict[str, Any]]] = _metadata_table(pose_info["skeleton_info"], "skeleton_info")
+
+MHR70_ID2NAME: Final[dict[int, str]] = {idx: _string_value(info["name"], f"keypoint_info[{idx}].name") for idx, info in _KEYPOINT_INFO.items()}
 
 MHR70_IDS: Final[list[int]] = sorted(MHR70_ID2NAME.keys())
 
 _NAME_TO_ID = {name: idx for idx, name in MHR70_ID2NAME.items()}
 MHR70_LINKS: Final[list[tuple[int, int]]] = [
-    (_NAME_TO_ID[link_info["link"][0]], _NAME_TO_ID[link_info["link"][1]])
-    for link_info in pose_info["skeleton_info"].values()
+    (_NAME_TO_ID[link[0]], _NAME_TO_ID[link[1]])
+    for link_info in _SKELETON_INFO.values()
+    for link in [_link_value(link_info["link"], "skeleton link")]
 ]
 
 __all__ = [

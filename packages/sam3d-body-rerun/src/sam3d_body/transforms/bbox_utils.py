@@ -1,7 +1,6 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
 import math
-from typing import Tuple
 
 import cv2
 import numpy as np
@@ -44,7 +43,7 @@ def bbox_xywh2xyxy(bbox_xywh: np.ndarray) -> np.ndarray:
 
 def bbox_xyxy2cs(
     bbox: np.ndarray, padding: float = 1.0
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:
     """Transform the bbox format from (x,y,w,h) into (center, scale)
 
     Args:
@@ -78,7 +77,7 @@ def bbox_xyxy2cs(
 
 def bbox_xywh2cs(
     bbox: np.ndarray, padding: float = 1.0
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:
     """Transform the bbox format from (x,y,w,h) into (center, scale)
 
     Args:
@@ -177,7 +176,7 @@ def bbox_cs2xywh(
 
 def flip_bbox(
     bbox: np.ndarray,
-    image_size: Tuple[int, int],
+    image_size: tuple[int, int],
     bbox_format: str = "xywh",
     direction: str = "horizontal",
 ) -> np.ndarray:
@@ -258,7 +257,7 @@ def get_udp_warp_matrix(
     center: np.ndarray,
     scale: np.ndarray,
     rot: float,
-    output_size: Tuple[int, int],
+    output_size: tuple[int, int],
 ) -> np.ndarray:
     """Calculate the affine transformation matrix under the unbiased
     constraint. See `UDP (CVPR 2020)`_ for details.
@@ -309,8 +308,8 @@ def get_warp_matrix(
     center: np.ndarray,
     scale: np.ndarray,
     rot: float,
-    output_size: Tuple[int, int],
-    shift: Tuple[float, float] = (0.0, 0.0),
+    output_size: tuple[int, int],
+    shift: tuple[float, float] = (0.0, 0.0),
     inv: bool = False,
 ) -> np.ndarray:
     """Calculate the affine transformation matrix that can warp the bbox area

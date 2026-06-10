@@ -2,12 +2,11 @@
 
 import os
 import time
-from typing import Any, List
+from typing import Any
 
 import braceexpand
 import cv2
 import numpy as np
-
 from PIL import Image
 
 
@@ -15,7 +14,7 @@ def expand(s):
     return os.path.expanduser(os.path.expandvars(s))
 
 
-def expand_urls(urls: str | List[str]):
+def expand_urls(urls: str | list[str]):
     if isinstance(urls, str):
         urls = [urls]
     urls = [u for url in urls for u in braceexpand.braceexpand(expand(url))]
@@ -61,15 +60,15 @@ def load_image(
         elif backend == "cv2":
             img = _cv2_load(path, image_format)
         else:
-            raise ValueError("Invalid backend {} for loading image.".format(backend))
+            raise ValueError(f"Invalid backend {backend} for loading image.")
 
         if img is not None:
             return img
         else:
-            print("Reading {} failed. Will retry.".format(path))
+            print(f"Reading {path} failed. Will retry.")
             time.sleep(1.0)
         if i_try == retry - 1:
-            raise Exception("Failed to load image {}".format(path))
+            raise Exception(f"Failed to load image {path}")
 
 
 def resize_image(img, target_size, center=None, scale=None):

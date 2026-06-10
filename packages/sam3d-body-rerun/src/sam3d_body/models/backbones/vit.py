@@ -149,14 +149,14 @@ class DropPath(nn.Module):
     """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks)."""
 
     def __init__(self, drop_prob=None):
-        super(DropPath, self).__init__()
+        super().__init__()
         self.drop_prob = drop_prob
 
     def forward(self, x):
         return drop_path(x, self.drop_prob, self.training)
 
     def extra_repr(self):
-        return "p={}".format(self.drop_prob)
+        return f"p={self.drop_prob}"
 
 
 class Mlp(nn.Module):
@@ -490,7 +490,7 @@ class ViT(nn.Module):
         no_patch_padding=False,
     ):
         # Protect mutable default arguments
-        super(ViT, self).__init__()
+        super().__init__()
         norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
         self.num_classes = num_classes
         self.num_features = self.embed_dim = self.embed_dims = (

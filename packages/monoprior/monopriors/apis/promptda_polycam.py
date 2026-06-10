@@ -4,7 +4,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import rerun as rr
-from jaxtyping import UInt8, UInt16
+from jaxtyping import Float32, UInt8, UInt16
 from numpy import ndarray
 from simplecv.camera_parameters import Intrinsics, rescale_intri
 from simplecv.data.polycam import (
@@ -46,10 +46,18 @@ def log_polycam_data(
     # resize images to be half the size
     target_height: int = rgb.shape[0] // rescale_factor
     target_width: int = rgb.shape[1] // rescale_factor
-    rgb_resized = cv2.resize(rgb, (target_width, target_height))
-    depth_resized = cv2.resize(depth, (target_width, target_height))
-    confidence_resized = cv2.resize(confidence, (target_width, target_height))
-    depth_pred_resized = cv2.resize(depth_pred, (target_width, target_height))
+    rgb_resized: UInt8[np.ndarray, "target_height target_width 3"] = np.asarray(
+        cv2.resize(rgb, (target_width, target_height)), dtype=np.uint8
+    )
+    depth_resized: UInt16[np.ndarray, "target_height target_width"] = np.asarray(
+        cv2.resize(depth, (target_width, target_height)), dtype=np.uint16
+    )
+    confidence_resized: UInt8[np.ndarray, "target_height target_width"] = np.asarray(
+        cv2.resize(confidence, (target_width, target_height)), dtype=np.uint8
+    )
+    depth_pred_resized: UInt16[np.ndarray, "target_height target_width"] = np.asarray(
+        cv2.resize(depth_pred, (target_width, target_height)), dtype=np.uint16
+    )
 
     # rescale intrinsics to match the image size
     rescaled_intrinsics: Intrinsics = rescale_intri(
@@ -109,9 +117,12 @@ def pda_polycam_inference(
         )
 
         # fuse the predicted depth and the ground truth depth
+        K_33: Float32[np.ndarray, "3 3"] | None = polycam_data.pinhole_params.intrinsics.k_matrix
+        if K_33 is None:
+            raise ValueError("Polycam frame is missing camera intrinsics.")
         pred_fuser.fuse_frames(
             depth_hw=pred_filtered_depth_mm,
-            K_33=polycam_data.pinhole_params.intrinsics.k_matrix,
+            K_33=K_33,
             cam_T_world_44=polycam_data.pinhole_params.extrinsics.cam_T_world,
             rgb_hw3=polycam_data.rgb_hw3,
         )

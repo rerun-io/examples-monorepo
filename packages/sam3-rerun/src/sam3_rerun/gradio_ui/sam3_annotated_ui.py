@@ -1,4 +1,5 @@
 import warnings
+from tempfile import SpooledTemporaryFile
 
 import gradio as gr
 import numpy as np
@@ -38,11 +39,12 @@ def segment(image: Image.Image, text: str, threshold: float, mask_threshold: flo
         with torch.no_grad():
             outputs = model(**inputs)
 
+        original_sizes: torch.Tensor = inputs["original_sizes"]
         results = processor.post_process_instance_segmentation(
             outputs,
             threshold=threshold,
             mask_threshold=mask_threshold,
-            target_sizes=inputs.get("original_sizes").tolist(),
+            target_sizes=original_sizes.tolist(),
         )[0]
 
         n_masks = len(results["masks"])
@@ -76,7 +78,14 @@ def clear_all():
 def segment_example(image_path: str, prompt: str):
     """Handle example clicks"""
     if image_path.startswith("http"):
-        image = Image.open(requests.get(image_path, stream=True).raw).convert("RGB")
+        with requests.get(image_path, stream=True, timeout=30) as response:
+            response.raise_for_status()
+            with SpooledTemporaryFile(max_size=8 * 1024 * 1024) as image_file:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        image_file.write(chunk)
+                image_file.seek(0)
+                image = Image.open(image_file).convert("RGB")
     else:
         image = Image.open(image_path).convert("RGB")
     return segment(image, prompt, 0.5, 0.5)

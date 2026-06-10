@@ -252,11 +252,11 @@ class SAM3DBodyEstimator:
         n_dets: int = xyxy.shape[0]
 
         #################### Construct batch data samples ####################
-        batch: PreparedBatchDict = prepare_batch(rgb_hw3, self.transform, xyxy, masks, masks_score)
+        transform: Callable[[dict[str, Any]], dict[str, Any] | None] = self.transform
+        batch: PreparedBatchDict = prepare_batch(rgb_hw3, transform, xyxy, masks, masks_score)
 
         #################### Run model inference on an image ####################
         batch: PreparedBatchDict = recursive_to(batch, "cuda")
-        self.model._initialize_batch(batch)
         batch_img: Float[Tensor, "B=1 N 3 H W"] = batch["img"]
 
         # Handle camera intrinsics
@@ -270,9 +270,12 @@ class SAM3DBodyEstimator:
             )
             batch["cam_int"] = K_b33.clone()
 
+        batch_dict: dict[Any, Any] = dict(batch)
+        self.model._initialize_batch(batch_dict)
+
         outputs: BodyPredContainer = self.model.run_inference(
             rgb_hw3,
-            batch,
+            batch_dict,
             inference_type=inference_type,
             transform_hand=self.transform_hand,
             thresh_wrist_angle=self.thresh_wrist_angle,

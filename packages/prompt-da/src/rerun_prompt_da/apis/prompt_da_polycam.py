@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-from jaxtyping import UInt8, UInt16
+from jaxtyping import Float, UInt8, UInt16
 from monopriors.models.depth_completion.base_completion_depth import (
     CompletionDepthPrediction,
 )
@@ -43,6 +43,36 @@ class PDAPolycamConfig:
     log_incremental_mesh: bool = True
 
 
+def _resize_uint8_hw3(image: UInt8[ndarray, "h w 3"], target_size: tuple[int, int]) -> UInt8[ndarray, "h2 w2 3"]:
+    """Resize an RGB uint8 image with an explicit dtype-preserving return type."""
+
+    resized = cv2.resize(image, target_size)
+    if resized is None:
+        raise ValueError("Failed to resize RGB image.")
+    resized_array: UInt8[ndarray, "h2 w2 3"] = np.asarray(resized, dtype=np.uint8)
+    return resized_array
+
+
+def _resize_uint8_hw(image: UInt8[ndarray, "h w"], target_size: tuple[int, int]) -> UInt8[ndarray, "h2 w2"]:
+    """Resize a single-channel uint8 image with an explicit dtype-preserving return type."""
+
+    resized = cv2.resize(image, target_size)
+    if resized is None:
+        raise ValueError("Failed to resize uint8 image.")
+    resized_array: UInt8[ndarray, "h2 w2"] = np.asarray(resized, dtype=np.uint8)
+    return resized_array
+
+
+def _resize_uint16_hw(image: UInt16[ndarray, "h w"], target_size: tuple[int, int]) -> UInt16[ndarray, "h2 w2"]:
+    """Resize a single-channel uint16 image with an explicit dtype-preserving return type."""
+
+    resized = cv2.resize(image, target_size)
+    if resized is None:
+        raise ValueError("Failed to resize uint16 image.")
+    resized_array: UInt16[ndarray, "h2 w2"] = np.asarray(resized, dtype=np.uint16)
+    return resized_array
+
+
 def log_polycam_data(
     parent_path: Path,
     polycam_data: PolycamData,
@@ -66,10 +96,11 @@ def log_polycam_data(
     # Resize all logged images together so the pinhole stream stays aligned.
     target_height: int = rgb.shape[0] // rescale_factor
     target_width: int = rgb.shape[1] // rescale_factor
-    rgb_resized = cv2.resize(rgb, (target_width, target_height))
-    depth_resized = cv2.resize(depth, (target_width, target_height))
-    confidence_resized = cv2.resize(confidence, (target_width, target_height))
-    depth_pred_resized = cv2.resize(depth_pred, (target_width, target_height))
+    target_size: tuple[int, int] = (target_width, target_height)
+    rgb_resized: UInt8[ndarray, "h2 w2 3"] = _resize_uint8_hw3(rgb, target_size)
+    depth_resized: UInt16[ndarray, "h2 w2"] = _resize_uint16_hw(depth, target_size)
+    confidence_resized: UInt8[ndarray, "h2 w2"] = _resize_uint8_hw(confidence, target_size)
+    depth_pred_resized: UInt16[ndarray, "h2 w2"] = _resize_uint16_hw(depth_pred, target_size)
 
     # Rerun's pinhole view expects intrinsics that match the logged resolution.
     rescaled_intrinsics: Intrinsics = rescale_intri(
@@ -107,8 +138,8 @@ def create_blueprint(parent_log_path: Path) -> rrb.Blueprint:
         rrb.Horizontal(
             rrb.Spatial3DView(),
             rrb.Vertical(
-                rrb.Spatial2DView(origin=parent_log_path / "cam" / "pinhole" / "arkit_depth"),
-                rrb.Spatial2DView(origin=parent_log_path / "cam" / "pinhole" / "pred_depth"),
+                rrb.Spatial2DView(origin=str(parent_log_path / "cam" / "pinhole" / "arkit_depth")),
+                rrb.Spatial2DView(origin=str(parent_log_path / "cam" / "pinhole" / "pred_depth")),
             ),
             column_shares=[20, 9],
         ),
@@ -167,9 +198,13 @@ def pda_polycam_inference(config: PDAPolycamConfig) -> None:
             max_depth_meter=config.max_depth_range_meter,
         )
         # We fuse the completed depth, but still log the unfiltered prediction.
+        k_matrix: Float[ndarray, "3 3"] | None = polycam_data.pinhole_params.intrinsics.k_matrix
+        if k_matrix is None:
+            raise ValueError("Polycam pinhole intrinsics must include a 3x3 k_matrix for TSDF fusion.")
+
         pred_fuser.fuse_frames(
             depth_hw=pred_filtered_depth_mm,
-            K_33=polycam_data.pinhole_params.intrinsics.k_matrix,
+            K_33=k_matrix,
             cam_T_world_44=polycam_data.pinhole_params.extrinsics.cam_T_world,
             rgb_hw3=polycam_data.rgb_hw3,
         )

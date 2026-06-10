@@ -407,13 +407,10 @@ def load_sam3_model(
     Returns:
         Tuple of (model, processor) ready for inference.
     """
-    config_kwargs: dict[str, float] = {
-        "score_threshold_detection": config.score_threshold_detection,
-        "new_det_thresh": config.new_det_thresh or config.score_threshold_detection,
-    }
-
     model_cfg: Sam3VideoConfig = Sam3VideoConfig.from_pretrained(
-        config.checkpoint, **config_kwargs
+        config.checkpoint,
+        score_threshold_detection=config.score_threshold_detection,
+        new_det_thresh=config.new_det_thresh or config.score_threshold_detection,
     )
     model: Sam3VideoModel = Sam3VideoModel.from_pretrained(
         config.checkpoint, config=model_cfg

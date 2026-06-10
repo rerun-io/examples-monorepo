@@ -56,14 +56,15 @@ def sam3d_prediction_fn(
     )
     # We eventually want to clean up the RRD file after it's sent to the viewer, so tracking
     # any pending files to be cleaned up when the state is deleted.
-    temp = tempfile.NamedTemporaryFile(prefix="cube_", suffix=".rrd", delete=False)
+    with tempfile.NamedTemporaryFile(prefix="cube_", suffix=".rrd", delete=False) as temp:
+        rrd_path: str = temp.name
 
     if pending_cleanup is not None:
-        pending_cleanup.append(temp.name)
+        pending_cleanup.append(rrd_path)
 
     view: rrb.ContainerLike = create_view(log_metric_depth)
     blueprint = rrb.Blueprint(view, collapse_panels=True)
-    rr.save(path=temp.name, default_blueprint=blueprint)
+    rr.save(path=rrd_path, default_blueprint=blueprint)
     set_annotation_context()
     parent_log_path = Path("/world")
     rr.log("/", rr.ViewCoordinates.RDF, static=True)
@@ -94,7 +95,7 @@ def sam3d_prediction_fn(
             pending_cleanup.extend(glb_files)
             pending_cleanup.append(str(glb_dir))
 
-    return temp.name, STATE, glb_files
+    return rrd_path, STATE, glb_files
 
 
 def cleanup_rrds(pending_cleanup: list[str]) -> None:
@@ -105,7 +106,7 @@ def cleanup_rrds(pending_cleanup: list[str]) -> None:
             os.unlink(f)
 
 
-def _switch_to_outputs() -> gr.Tabs:
+def _switch_to_outputs() -> dict[str, object]:
     return gr.update(selected="outputs")
 
 

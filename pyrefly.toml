@@ -20,7 +20,17 @@ project-includes = [
     "packages/sapiens-coco133-pose/src/**/*",
     "packages/egoexo-forge/src/**/*",
 ]
-project-excludes = ["**/node_modules", "**/__pycache__", "**/*venv/**/*"]
+project-excludes = [
+    "**/node_modules",
+    "**/__pycache__",
+    "**/*.ipynb",
+    "**/*venv/**/*",
+    "**/third_party/**/*",
+    "monopriors/third_party/**/*",
+    "packages/monoprior/monopriors/third_party/**/*",
+    "packages/sapiens2-pose/src/sapiens2_pose/assets/**/*",
+    "packages/sapiens2-pose/src/sapiens2_pose/sapiens_lite/**/*",
+]
 
 # Disable heuristics so pyrefly uses only our explicit search-path,
 # not per-file guesses (critical for monorepo with multiple source roots)

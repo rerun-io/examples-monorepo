@@ -1,13 +1,11 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
-from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from .drop_path import DropPath
-
 from .layer_scale import LayerScale
 from .swiglu_ffn import SwiGLUFFNFused
 
@@ -35,7 +33,7 @@ class LayerNorm32(nn.LayerNorm):
         return super().forward(x.float()).type(x.dtype)
 
 
-def build_norm_layer(cfg: Dict, num_features: int):
+def build_norm_layer(cfg: dict, num_features: int):
     """Build normalization layer.
 
     Args:
@@ -351,7 +349,7 @@ class Attention(nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
+        attn_mask: torch.Tensor | None = None,
     ):
         B, N, _ = q.shape
         q = self._separate_heads(self.q_proj(q))
@@ -507,7 +505,7 @@ class TransformerDecoderLayer(nn.Module):
         drop_path_rate: float = 0.0,
         ffn_type: str = "origin",
         act_layer: type[nn.Module] | nn.Module = nn.GELU,
-        norm_cfg: Dict = dict(type="LN", eps=1e-6),
+        norm_cfg: dict = dict(type="LN", eps=1e-6),
         enable_twoway: bool = False,
         repeat_pe: bool = False,
         skip_first_pe: bool = False,
@@ -589,9 +587,9 @@ class TransformerDecoderLayer(nn.Module):
         self,
         x: torch.Tensor,
         context: torch.Tensor,
-        x_pe: Optional[torch.Tensor] = None,
-        context_pe: Optional[torch.Tensor] = None,
-        x_mask: Optional[torch.Tensor] = None,
+        x_pe: torch.Tensor | None = None,
+        context_pe: torch.Tensor | None = None,
+        x_mask: torch.Tensor | None = None,
     ):
         """
         Args:

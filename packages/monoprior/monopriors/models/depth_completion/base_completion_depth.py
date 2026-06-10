@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 from jaxtyping import Float, UInt8, UInt16
@@ -19,6 +19,8 @@ class CompletionDepthPrediction:
 
 
 class BaseCompletionPredictor(ABC):
+    model: Any
+
     @abstractmethod
     def __call__(self, rgb: UInt8[np.ndarray, "h w 3"]) -> CompletionDepthPrediction:
         raise NotImplementedError

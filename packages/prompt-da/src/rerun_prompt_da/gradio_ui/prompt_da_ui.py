@@ -13,11 +13,12 @@ import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 from gradio_rerun import Rerun
-from jaxtyping import UInt16
+from jaxtyping import Float, UInt16
 from monopriors.models.depth_completion.base_completion_depth import (
     CompletionDepthPrediction,
 )
 from monopriors.models.depth_completion.prompt_da import PromptDAPredictor
+from numpy import ndarray
 from simplecv.data.polycam import (
     DepthConfidenceLevel,
     PolycamData,
@@ -115,9 +116,13 @@ def stream_polycam_da(
             max_depth_meter=parameters.max_depth_range_meter,
         )
 
+        k_matrix: Float[ndarray, "3 3"] | None = polycam_data.pinhole_params.intrinsics.k_matrix
+        if k_matrix is None:
+            raise ValueError("Polycam pinhole intrinsics must include a 3x3 k_matrix for TSDF fusion.")
+
         pred_fuser.fuse_frames(
             depth_hw=pred_filtered_depth_mm,
-            K_33=polycam_data.pinhole_params.intrinsics.k_matrix,
+            K_33=k_matrix,
             cam_T_world_44=polycam_data.pinhole_params.extrinsics.cam_T_world,
             rgb_hw3=polycam_data.rgb_hw3,
         )

@@ -68,9 +68,13 @@ def run_fusion(
         [p.extrinsics.world_T_cam for p in pinhole_param_list], axis=0
     ).astype(np.float32)
 
-    K_b33: Float32[ndarray, "b 3 3"] = np.stack(
-        [p.intrinsics.k_matrix for p in pinhole_param_list], axis=0
-    ).astype(np.float32)
+    K_list: list[Float32[ndarray, "3 3"]] = []
+    for pinhole_param in pinhole_param_list:
+        K_33: Float32[ndarray, "3 3"] | None = pinhole_param.intrinsics.k_matrix
+        if K_33 is None:
+            raise ValueError("Pinhole intrinsics must include a calibration matrix for fusion.")
+        K_list.append(K_33.astype(np.float32))
+    K_b33: Float32[ndarray, "b 3 3"] = np.stack(K_list, axis=0).astype(np.float32)
 
     from monopriors.depth_utils import multidepth_to_points
 

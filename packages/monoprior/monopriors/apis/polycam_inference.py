@@ -102,7 +102,10 @@ def polycam_inference(config: PolycamConfig) -> None:
         rr.set_time("timestep", sequence=idx)
         rgb_hw3: UInt8[np.ndarray, "h w 3"] = polycam_data.rgb_hw3
         pinhole_params: PinholeParameters = polycam_data.pinhole_params
-        K_33: Float32[np.ndarray, "3 3"] = pinhole_params.intrinsics.k_matrix.astype(np.float32)
+        K_33_raw: Float32[np.ndarray, "3 3"] | None = pinhole_params.intrinsics.k_matrix
+        if K_33_raw is None:
+            raise ValueError("Polycam frame is missing camera intrinsics.")
+        K_33: Float32[np.ndarray, "3 3"] = K_33_raw.astype(np.float32)
 
         pred: MonoPriorPrediction = model.__call__(rgb_hw3, K_33)
         # convert to mm and Uint16

@@ -32,6 +32,7 @@ paths = ["slam_evals", "tests", "tools"]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true
 min_confidence = 60
+ignore_names = ["pix_fmt", "framerate", "time_base", "options"]
 
 [tool.pytest.ini_options]
 # Silence simplecv's `from_parent` DeprecationWarning (needs an upstream fix

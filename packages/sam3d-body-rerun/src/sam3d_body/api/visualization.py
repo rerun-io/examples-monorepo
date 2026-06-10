@@ -333,10 +333,7 @@ def visualize_sample(
 
         conf_mask: Bool[ndarray, "h w"] = conf_hw >= MIN_DEPTH_CONFIDENCE
         depth_full: Float32[ndarray, "h w"] = depth_hw * conf_mask
-
         background_mask: Bool[ndarray, "h w"] = np.logical_not(human_mask)
-        depth_background: Float32[ndarray, "h w"] = depth_full * background_mask
-        depth_foreground: Float32[ndarray, "h w"] = depth_full * human_mask
 
         # Skip logging depth images; keep point clouds only to visualize full/background/foreground variants.
 

@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 from jaxtyping import Float32, UInt8
@@ -19,6 +19,8 @@ class RelativeDepthPrediction:
 
 
 class BaseRelativePredictor(ABC):
+    model: Any
+
     @abstractmethod
     def __call__(
         self, rgb: UInt8[np.ndarray, "h w 3"], K_33: Float32[np.ndarray, "3 3"] | None
@@ -30,6 +32,8 @@ class BaseRelativePredictor(ABC):
 
 
 class BaseVideoRelativePredictor(ABC):
+    model: Any
+
     @abstractmethod
     def __call__(
         self, rgb_frames: UInt8[np.ndarray, "T H W 3"], K_33: Float32[np.ndarray, "3 3"] | None

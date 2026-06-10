@@ -1,15 +1,8 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
-import json
-import math
-import os.path as osp
-import pickle
 
 import cv2
-
-import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
 

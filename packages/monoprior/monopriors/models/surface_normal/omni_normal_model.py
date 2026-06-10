@@ -24,7 +24,7 @@ class OmniNormalPredictor(BaseNormalPredictor):
         model = DPTDepthModel(backbone="vitb_rn50_384", num_channels=3)  # DPT Hybrid
         omnidata_pretrained_weights_path = omnidata_pretrained_weights_path / "omnidata_dpt_normal_v2.ckpt"
         assert omnidata_pretrained_weights_path.exists(), "Weights not found"
-        map_location = (lambda storage, loc: storage.cuda()) if torch.cuda.is_available() else torch.device("cpu")
+        map_location = (lambda storage, _loc: storage.cuda()) if torch.cuda.is_available() else torch.device("cpu")
         checkpoint = torch.load(omnidata_pretrained_weights_path, map_location=map_location)
 
         if "state_dict" in checkpoint:
@@ -45,7 +45,7 @@ class OmniNormalPredictor(BaseNormalPredictor):
         img_3hw = torch.from_numpy(rgb).permute(2, 0, 1)
         _, H, W = img_3hw.shape
         # omnidata normal model expects 384x384 images
-        img_3hw = TF.resize(img_3hw, (self.image_size, self.image_size), antialias=None)
+        img_3hw = TF.resize(img_3hw, [self.image_size, self.image_size], antialias=None)
         img_b3hw = img_3hw.unsqueeze(0).to(self.device)
 
         # return normal_b3hw
@@ -53,8 +53,8 @@ class OmniNormalPredictor(BaseNormalPredictor):
         normal_3hw = rearrange(normal_b3hw, "1 c h w -> c h w")
         # normal_3hw = normal_b3hw.squeeze(0)
         # reshape back to original size
-        if normal_3hw.shape[1] != H and normal_3hw.shape[2] != W:
-            normal_3hw = TF.resize(normal_3hw, (H, W), antialias=None)
+        if normal_3hw.shape[1] != H or normal_3hw.shape[2] != W:
+            normal_3hw = TF.resize(normal_3hw, [H, W], antialias=None)
 
         # generates normal that is between 0-1 in the OpenCV Format (RDF)
         # no confidence map is returned from omnidata model
