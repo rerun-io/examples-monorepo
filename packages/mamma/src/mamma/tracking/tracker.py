@@ -208,8 +208,11 @@ class MultiViewTracker:
         from sam2.modeling.sam2_prompt import SAM2Prompt
 
         # Batch the (dominant) image-encoder cost across cameras, then run the
-        # cheap per-camera memory/decoder via forward_embeddings.
-        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+        # cheap per-camera memory/decoder via forward_embeddings. One autocast/
+        # inference_mode context for the whole tick (entering per camera costs
+        # measurable CPU at this rate).
+        autocast = torch.autocast("cuda", dtype=torch.bfloat16)
+        with torch.inference_mode(), autocast:
             batch: UInt8[torch.Tensor, "c 3 h w"] = torch.stack(frames, dim=0)
             embeddings, pos_embeddings = self.predictor.encode_image(batch)
 
@@ -225,7 +228,7 @@ class MultiViewTracker:
                 continue
             cam_embeddings = [level[cam_idx : cam_idx + 1] for level in embeddings]
             cam_pos = [level[cam_idx : cam_idx + 1] for level in pos_embeddings]
-            with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+            with torch.inference_mode(), autocast:
                 # Single-mask output: with multimask the predicted-IoU argmax
                 # intermittently selects the whole-scene candidate during
                 # propagation (observed as full-frame masks on crossing_arms).

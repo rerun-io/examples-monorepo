@@ -80,6 +80,14 @@ class StreamLogger:
             name: VideoEncoder(codec=video_codec, fps=sequence.fps) for name in sequence.camera_names
         }
         self._pts_offset: dict[str, int] = dict.fromkeys(sequence.camera_names, 0)
+        # Video encode+log runs on a worker thread: the D2H copy + swscale +
+        # NVENC submission cost ~13 ms/tick of CPU that otherwise serializes
+        # with model enqueue. Rerun's clock is per-thread, so the worker sets
+        # its own timeline position. Bounded queue gives backpressure.
+        from concurrent.futures import ThreadPoolExecutor
+
+        self._video_worker: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="video-log")
+        self._video_pending: list = []
         rerun_codec_by_choice: dict[VideoCodecChoice, rr.VideoCodec] = {
             VideoCodecChoice.H264: rr.VideoCodec.H264,
             VideoCodecChoice.H265: rr.VideoCodec.H265,
@@ -115,11 +123,18 @@ class StreamLogger:
             rr.log(f"{pinhole_entity(cam.name)}/video", rr.VideoStream(codec=self._rerun_codec), static=True)
 
     def log_tick_video(self, frame_idx: int, frames: list[UInt8[torch.Tensor, "3 h w"]]) -> None:
-        """Encode and log one synchronized frame per camera at this tick."""
-        for cam_name, frame_chw in zip(self.sequence.camera_names, frames, strict=True):
-            rgb_hwc: UInt8[ndarray, "h w 3"] = frame_chw.permute(1, 2, 0).contiguous().cpu().numpy()
-            packets: list[tuple[int, bytes]] = self._encoders[cam_name].encode_frame(rgb_hwc)
-            self._log_packets(cam_name, packets)
+        """Encode and log one synchronized frame per camera (async worker)."""
+
+        def encode_and_log(frames_gpu: list[UInt8[torch.Tensor, "3 h w"]]) -> None:
+            for cam_name, frame_chw in zip(self.sequence.camera_names, frames_gpu, strict=True):
+                rgb_hwc: UInt8[ndarray, "h w 3"] = frame_chw.permute(1, 2, 0).contiguous().cpu().numpy()
+                packets: list[tuple[int, bytes]] = self._encoders[cam_name].encode_frame(rgb_hwc)
+                self._log_packets(cam_name, packets)
+
+        # Backpressure: never queue more than 4 ticks of frames.
+        if len(self._video_pending) >= 4:
+            self._video_pending.pop(0).result()
+        self._video_pending.append(self._video_worker.submit(encode_and_log, list(frames)))
 
     def log_tick_tracks(self, frame_idx: int, tracks: list[CameraTracks], seg_stride: int = 5) -> None:
         """Log per-camera person boxes every tick + segmentation ids at a stride.
@@ -208,6 +223,9 @@ class StreamLogger:
         fresh encoders replace the drained ones; the per-camera PTS offset
         keeps the shared timeline monotonic across multiple ``run()`` calls.
         """
+        for pending in self._video_pending:
+            pending.result()
+        self._video_pending.clear()
         for cam_name, encoder in self._encoders.items():
             self._log_packets(cam_name, encoder.flush())
             self._pts_offset[cam_name] += encoder.next_pts
