@@ -65,6 +65,33 @@ tick, <b>fixed-lag emission</b> (4 frames = 133 ms), reprojection-dominant loss 
 visibility-gated observations), floor model (penetration + height-gated contact pull), graphed 300-iteration
 bootstrap, TensorRT MammaNet, multiprocess NVDEC decode.</p>
 
+<h2 id="presets">Two presets &mdash; quality &amp; fast <span class="meta">(2026-06-10, in progress)</span></h2>
+<p>The single shipped config is splitting into two named presets over the <i>same</i> resident streaming
+process (RAM-resident, TRT MammaNet, no disk writes). The quality preset's gate is no longer "how long did it
+take" but "does <i>every</i> logged artifact match the original DAG" — 2D keypoints, triangulated 3D
+keypoints, SMPL-X parameters, and segmentation masks, each within 2%. The fast preset keeps the 30&nbsp;mm
+vertex gate but must run at &#8805;75% of realtime while still holding SMPL-X parameters to 5% and masks to
+10%.</p>
+<table>
+<tr><th>Gate</th><th>quality</th><th>fast</th></tr>
+<tr><td>2D keypoints vs original ma_2d</td><td>&#8804; 2%</td><td>&mdash;</td></tr>
+<tr><td>Triangulated 3D vs original</td><td>&#8804; 2%</td><td>&mdash;</td></tr>
+<tr><td>SMPL-X parameters vs original</td><td>&#8804; 2%</td><td>&#8804; 5%</td></tr>
+<tr><td>Segmentation masks vs original</td><td>&#8804; 2%</td><td>&#8804; 10%</td></tr>
+<tr><td>Mesh vertices (PVE p95 + max)</td><td>(implied by the above)</td><td>&#8804; 30 mm</td></tr>
+<tr><td>Wall time (running_jumping, 15.9 s clip)</td><td>&#8804; 4&#215; clip = 63.6 s (&#8805;25% realtime)</td><td>&#8804; 1.33&#215; clip = 21.2 s (&#8805;75% realtime)</td></tr>
+</table>
+<p>The "%" thresholds need concrete metric definitions per artifact class (px error normalization for
+keypoints, geodesic distance for rotations, IoU for masks) — being pinned by a four-agent dig over the real
+data: a metrics-definition pass, a mask-gap audit vs the original's 4K reverse-propagated masks, a
+2D/3D/SMPL-X delta audit, and a runtime-budget pass on an idle GPU. A new
+<code>tools/dump_artifacts.py</code> runs the pipeline once and dumps every per-tick artifact (masks, 2D
+landmarks, triangulated clouds, SMPL-X params) to NPZs so the analysis never re-pays GPU time. One structural
+caveat found immediately: the original mask stage ran with <code>propagate_reverse: true</code> — its golden
+masks benefit from <i>bidirectional</i> SAM2 propagation that a causal tracker cannot replicate, so the mask
+metric must be read with that asymmetry in mind. Results and the final metric definitions land here as they
+arrive.</p>
+
 <h2>Why this was possible: the recording is the ground truth</h2>
 <p>A 295&#215; rewrite is easy to make fast and hard to keep <i>correct</i> — every optimization is a chance to
 silently break quality. Two Rerun capabilities turned that risk into routine checks:</p>
