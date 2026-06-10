@@ -174,3 +174,30 @@ stack; >=2.11 wheels require torch 2.11+. Options for the MammaNet engine step:
 io_binding on torch tensors — `onnxruntime-gpu` is already in the cuda feature,
 (c) trtexec-built engine + TensorRT python API directly. (b) is the least invasive
 and the recommended next experiment.
+
+
+## Round 4 results + the final block (2026-06-09, end of session 1)
+
+| Wall | Change |
+|---|---|
+| 31.6 s | round 2b end |
+| 31.4 s | pipelined fit tail (thread_local capture) |
+| **26.8 s** | MammaNet TensorRT engine (3.88 vs 15.8 ms per 4-crop call; gate 23.1 mm PASS) |
+
+Negative result: thread-parallel per-camera `forward_embeddings` is WORSE
+(43 vs 33 ms/tick — GIL contention). Confirms batching is the only tracker fix.
+
+### SAM2-fork batching surgery — concrete plan (next session)
+Steady-state fast path (bootstrapped, no prompts, 1 obj/cam, saturated banks ->
+identical memory shapes across cameras), in `mamma/tracking/batched_forward.py`:
+1. encode_image already batched [4,...] (done).
+2. Stack each camera's `select_memories` output -> memory_attention as B=4
+   (verify rotary/positional handling under batch; obj-ptr tokens concat).
+3. `sam_mask_decoder` B=4 (it natively supports batch).
+4. `encode_memory` B=4; split results back per camera for bank.try_add/prune
+   (python bookkeeping stays per camera - cheap).
+Fallback to the fork loop when preconditions fail (prompts/re-detect/multi-person).
+Validate numerics vs fork path (mask IoU ~1.0) + golden gate.
+Estimated: tracker ~33 -> ~12-15 ms/executed tick -> wall ~26.8 -> ~17-19 s.
+Remaining to 12.1 s after that: engine-ify TAM encoder (TRT, same recipe as
+MammaNet), trim engine glue (~10 ms/tick python), possibly track_stride=4.
