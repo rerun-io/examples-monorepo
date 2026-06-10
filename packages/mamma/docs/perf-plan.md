@@ -110,3 +110,31 @@ landmarks 6.6 s, fit 6.0 s, misc ~3 s.** Next: tracker deep-dive (memory-bank op
 per-camera decoder python; candidates: CUDA-graph/compile the TAM encoder+decoder,
 TRT engine per perf-plan step 2), then MammaNet fp16 TRT (step 4). Target 12.1 s needs
 track to ~15 ms/tick and landmarks ~6 ms/tick.
+
+
+## Round 2 results (2026-06-09, late)
+
+| Wall | Change |
+|---|---|
+| 43.7 s | round 1 end |
+| 35.8 s | track_stride=2 (mask reuse between tracker ticks; gate unchanged) |
+| **31.6 s** | track_stride=3 + fit_stride=4 defaults (gate 22.3 mm, 7.7 mm margin) |
+
+Canonical `mamma-goal-check`: **4/5 PASS** (golden 22.3 mm, datasets, no-writes,
+hygiene); realtime FAIL at 31.58 s vs 12.1 s.
+
+Findings: TAM encode_image is only 3.5 ms — track cost is per-camera decoder/
+memory PYTHON (compile of submodules: 40→35 ms, not the fix). MammaNet compiles
+15.8→10.2 ms standalone but inductor cudagraphs conflict with the fitter's manual
+graph in-process (landmarks 2x WORSE); flag default-off. Triton on sm_120 needs
+CONDA_PREFIX (pixi run) for the ptxas-blackwell fallback.
+
+## Remaining 2.6x — structural tier (each a half/multi-day item)
+1. torch_tensorrt (dynamo) engines for TAM encoder+decoder and MammaNet —
+   replaces inductor cudagraphs (no pool conflict), targets track ~15 and
+   landmarks ~8 ms/tick.
+2. Fork surgery: batch the 4 per-camera forward_embeddings into one B=4 pass
+   (saturated forgetful banks have static shapes) — removes the per-camera
+   python that compile cannot.
+3. Multiprocess NVDEC decode workers (proven ~400 cam-fps vs 140 in-process)
+   if decode resurfaces once compute shrinks.
