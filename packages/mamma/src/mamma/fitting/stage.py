@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from jaxtyping import Bool, Float32
@@ -21,6 +21,8 @@ class TickFitOutput:
     """Per-person newest-frame SMPL-X fits (absent while a fitter warms up)."""
     triangulated: dict[int, tuple[Float32[torch.Tensor, "n 3"], Bool[torch.Tensor, "n"]]]
     """Per-person triangulated landmark clouds + validity."""
+    metrics: dict[str, float] = field(default_factory=dict)
+    """Per-tick fit health scalars (valid anchor count, contact landmark count)."""
 
 
 class FittingStage:
@@ -46,6 +48,7 @@ class FittingStage:
 
         fits: dict[int, FitResult] = {}
         triangulated: dict[int, tuple[Float32[torch.Tensor, "n 3"], Bool[torch.Tensor, "n"]]] = {}
+        metrics: dict[str, float] = {}
         for obj_id in sorted(obj_ids):
             cam_indices: list[int] = [c for c, cl in enumerate(landmarks) if obj_id in cl]
             if len(cam_indices) < 2:
@@ -87,7 +90,10 @@ class FittingStage:
             result: FitResult | None = fitter.push(frame_idx, pts2d_all, vis_all, points3d, valid, floor_contact=floor_contact, optimize=optimize)
             if result is not None:
                 fits[obj_id] = result
-        return TickFitOutput(fits=fits, triangulated=triangulated)
+            if obj_id == 0:
+                metrics["valid_anchors"] = float(valid.sum().item())
+                metrics["floor_contacts"] = float((floor_contact > 0.25).sum().item())
+        return TickFitOutput(fits=fits, triangulated=triangulated, metrics=metrics)
 
     def drain(self) -> list[TickFitOutput]:
         """Flush fixed-lag tails of every fitter at end of stream (one output per frame)."""

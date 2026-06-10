@@ -150,6 +150,10 @@ class FitResult:
     """Shared shape coefficients."""
     trans: Float32[ndarray, "3"]
     """Root translation in world meters."""
+    rest_joints: Float32[ndarray, "55 3"]
+    """Zero-pose (rest) positions of the 55 kinematic-tree joints for this
+    person's betas — constant after bootstrap; lets consumers decompose the
+    pose into the relative-transform tree it actually parameterizes."""
 
 
 @dataclass(slots=True)
@@ -210,6 +214,7 @@ class SlidingWindowFitter:
         self._static: dict[str, torch.Tensor | list[torch.Tensor]] = {}
         self._last_emit: FitResult | None = None
         self._valid_counts: list[float] = []
+        self._rest_joints: Float32[ndarray, "55 3"] | None = None
 
     def _init_trans(self) -> Float32[torch.Tensor, "3"]:
         """Initialize root translation at the camera rays' closest point."""
@@ -527,6 +532,20 @@ class SlidingWindowFitter:
         return [self._emit(i) for i in range(-lag, 0)]
 
     def _emit(self, index: int = -1) -> FitResult:
+        if self._rest_joints is None:
+            zero3: Float32[torch.Tensor, "1 3"] = torch.zeros(1, 3, device=self.device)
+            with torch.no_grad():
+                rest = smplx_forward_per_parts(
+                    self.model,
+                    zero3,
+                    torch.zeros(1, 63, device=self.device),
+                    torch.zeros(1, 45, device=self.device),
+                    torch.zeros(1, 45, device=self.device),
+                    zero3,
+                    self.betas,
+                    torch.zeros(1, 3, device=self.device),
+                )
+            self._rest_joints = rest.joints[0, :55].cpu().numpy()
         f = self._window[index]
         with torch.no_grad():
             out = smplx_forward_per_parts(
@@ -551,4 +570,5 @@ class SlidingWindowFitter:
             pose=pose_full,
             betas=self.betas[0].detach().cpu().numpy(),
             trans=f.trans.cpu().numpy(),
+            rest_joints=self._rest_joints,
         )

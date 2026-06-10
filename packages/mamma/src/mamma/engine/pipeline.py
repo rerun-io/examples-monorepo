@@ -194,6 +194,8 @@ class StreamingPipeline:
                             assert self.fitting is not None
                             out: TickFitOutput = self.fitting.step(idx, lms)
                             self.logger.log_tick_fit(idx, out.fits, out.triangulated, self.fitting.faces)
+                            if out.metrics:
+                                self.logger.log_tick_metrics(idx, {}, out.metrics)
                             return out
 
                         pending_fit = fit_worker.submit(fit_tail, frame_idx, landmarks)
@@ -217,6 +219,8 @@ class StreamingPipeline:
                             self.logger.log_tick_landmarks(frame_idx, landmarks)
                     if self.collector is not None:
                         self.collector.collect(frame_idx, tracks, landmarks, fit_output)
+                    with profiler.stage("log_metrics"):
+                        self.logger.log_tick_metrics(frame_idx, dict(profiler.last_ms), {})
                     frame_idx += 1
             with profiler.stage("log_video"):
                 if pending_fit is not None:

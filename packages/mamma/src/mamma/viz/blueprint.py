@@ -46,7 +46,16 @@ def default_blueprint(camera_names: list[str]) -> rrb.Blueprint:
     else:
         camera_container = rrb.Grid(*camera_views, grid_columns=2, name="Camera Images")
 
+    metrics_view: rrb.Horizontal = rrb.Horizontal(
+        rrb.TimeSeriesView(origin="/metrics/timing", name="Stage timings (ms)"),
+        rrb.TimeSeriesView(origin="/metrics/fit", name="Fit health"),
+        rrb.TimeSeriesView(origin="/metrics/params", name="SMPL-X params", contents="$origin/**"),
+    )
     return rrb.Blueprint(
-        rrb.Horizontal(world_view, camera_container, column_shares=[1, 1]),
+        rrb.Vertical(
+            rrb.Horizontal(world_view, camera_container, column_shares=[1, 1]),
+            metrics_view,
+            row_shares=[3, 1],
+        ),
         collapse_panels=True,
     )

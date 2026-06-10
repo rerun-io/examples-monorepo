@@ -52,6 +52,33 @@ _ID_PALETTE: list[tuple[int, int, int]] = [
 ]
 """Stable per-person colors; person ``obj_id`` indexes modulo this palette."""
 
+# SMPL-X kinematic parents (kintree_table row 0 of SMPLX_NEUTRAL.npz; 55 tree
+# joints: 0-21 body, 22 jaw, 23-24 eyes, 25-39 left hand, 40-54 right hand).
+# Joints 55+ in the 127-joint output are regressed landmarks with no bones.
+_SMPLX_PARENTS: list[int] = [
+    -1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17, 18, 19,
+    15, 15, 15, 20, 25, 26, 20, 28, 29, 20, 31, 32, 20, 34, 35, 20, 37, 38,
+    21, 40, 41, 21, 43, 44, 21, 46, 47, 21, 49, 50, 21, 52, 53,
+]
+_SMPLX_BONES: list[tuple[int, int]] = [(p, i) for i, p in enumerate(_SMPLX_PARENTS) if p >= 0]
+def _smplx_entity_paths(root: str) -> list[str]:
+    """Entity path per tree joint, nested along the kinematic chain — the
+    Rerun transform hierarchy IS the skeleton."""
+    paths: list[str] = []
+    for j, parent in enumerate(_SMPLX_PARENTS):
+        name: str = _SMPLX_JOINT_NAMES[j] if j < len(_SMPLX_JOINT_NAMES) else f"j{j}"
+        paths.append(f"{root}/{name}" if parent < 0 else f"{paths[parent]}/{name}")
+    return paths
+
+
+_SMPLX_JOINT_NAMES: list[str] = [
+    "pelvis", "left_hip", "right_hip", "spine1", "left_knee", "right_knee", "spine2",
+    "left_ankle", "right_ankle", "spine3", "left_foot", "right_foot", "neck",
+    "left_collar", "right_collar", "head", "left_shoulder", "right_shoulder",
+    "left_elbow", "right_elbow", "left_wrist", "right_wrist", "jaw", "left_eye", "right_eye",
+]
+
+
 TIMELINE: str = "time"
 """Shared timeline name; ticks are elapsed seconds (``frame_idx / fps``)."""
 
@@ -111,21 +138,38 @@ class StreamLogger:
             ),
             static=True,
         )
+        keypoint_names: list[rr.AnnotationInfo] = [
+            rr.AnnotationInfo(id=j, label=_SMPLX_JOINT_NAMES[j] if j < len(_SMPLX_JOINT_NAMES) else f"j{j}")
+            for j in range(127)
+        ]
         rr.log(
             WORLD_TAG,
             rr.AnnotationContext(
                 [
                     # Explicit transparent background: without an id=0 entry the
                     # viewer auto-colors class 0, tinting the whole frame.
-                    rr.AnnotationInfo(id=0, label="background", color=(0, 0, 0, 0)),
+                    rr.ClassDescription(info=rr.AnnotationInfo(id=0, label="background", color=(0, 0, 0, 0))),
                 ]
                 + [
-                    rr.AnnotationInfo(id=obj_id + 1, label=f"person_{obj_id}", color=_ID_PALETTE[obj_id % len(_ID_PALETTE)])
+                    # keypoint_connections turn the bare 127-joint Points3D into a
+                    # labeled wireframe skeleton (bones exist for tree joints 0-54).
+                    rr.ClassDescription(
+                        info=rr.AnnotationInfo(
+                            id=obj_id + 1, label=f"person_{obj_id}", color=_ID_PALETTE[obj_id % len(_ID_PALETTE)]
+                        ),
+                        keypoint_annotations=keypoint_names,
+                        keypoint_connections=_SMPLX_BONES,
+                    )
                     for obj_id in range(len(_ID_PALETTE))
                 ]
             ),
             static=True,
         )
+        # Time-series styling for the metrics panel (names once, static).
+        for stage_name in ("track", "landmarks", "fit_wait", "log_video", "log_tracks", "log_landmarks"):
+            rr.log(f"metrics/timing/{stage_name}", rr.SeriesLines(names=stage_name, widths=1.5), static=True)
+        rr.log("metrics/fit/valid_anchors", rr.SeriesLines(names="valid anchors (of 512)", widths=1.5), static=True)
+        rr.log("metrics/fit/floor_contacts", rr.SeriesLines(names="floor-contact landmarks", widths=1.5), static=True)
         height: int
         width: int
         height, width = self.resize_hw
@@ -250,7 +294,44 @@ class StreamLogger:
                     albedo_factor=[color[0] / 255.0, color[1] / 255.0, color[2] / 255.0, 1.0],
                 ),
             )
-            rr.log(f"{WORLD_TAG}/joints/person_{obj_id}", rr.Points3D(positions=fit.joints, radii=0.012, colors=color))
+            rr.log(
+                f"{WORLD_TAG}/joints/person_{obj_id}",
+                rr.Points3D(
+                    positions=fit.joints,
+                    radii=0.012,
+                    class_ids=obj_id + 1,
+                    keypoint_ids=list(range(fit.joints.shape[0])),
+                ),
+            )
+            # SMPL-X parameters logged as what they ARE: a kinematic tree of
+            # relative transforms. global_orient+trans = root transform; each
+            # tree joint = axis-angle rotation relative to its parent with a
+            # constant (betas-determined) bone offset. The entity hierarchy is
+            # the skeleton; gizmos show per-joint local rotations.
+            paths: list[str] = _smplx_entity_paths(f"{WORLD_TAG}/skeleton/person_{obj_id}")
+            pose_aa: ndarray = fit.pose.reshape(55, 3)
+            rest: ndarray = fit.rest_joints
+            for j, parent in enumerate(_SMPLX_PARENTS):
+                offset: ndarray = rest[j] + fit.trans if parent < 0 else rest[j] - rest[parent]
+                angle: float = float(np.linalg.norm(pose_aa[j]))
+                axis: ndarray = pose_aa[j] / angle if angle > 1e-8 else np.array([1.0, 0.0, 0.0])
+                rr.log(
+                    paths[j],
+                    rr.Transform3D(
+                        translation=offset,
+                        rotation=rr.RotationAxisAngle(axis=axis, angle=angle),
+                    ),
+                )
+            rr.log(f"metrics/params/person_{obj_id}/trans", rr.Scalars(fit.trans))
+            rr.log(f"metrics/params/person_{obj_id}/betas", rr.BarChart(fit.betas))
+
+    def log_tick_metrics(self, frame_idx: int, timings_ms: dict[str, float], fit_metrics: dict[str, float]) -> None:
+        """Per-tick scalars: stage timings + fit health (valid anchors, contacts)."""
+        set_tick_time(frame_idx, self.fps)
+        for stage_name, ms in timings_ms.items():
+            rr.log(f"metrics/timing/{stage_name}", rr.Scalars(ms))
+        for name, value in fit_metrics.items():
+            rr.log(f"metrics/fit/{name}", rr.Scalars(value))
 
     def flush(self) -> None:
         """Drain buffered encoder packets and reset encoders for reuse.
