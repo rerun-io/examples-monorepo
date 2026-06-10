@@ -116,6 +116,11 @@ class StreamingPipeline:
                 )
 
         prefetcher = ThreadPoolExecutor(max_workers=1)
+        # Fit + its logging run one tick deep on a worker: fit(t) overlaps
+        # track/landmarks(t+1) — fit feeds nothing upstream. With a collector
+        # (validation) the tail is awaited inline to keep results exact-ordered.
+        fit_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fit")
+        pending_fit: Future | None = None
         pending: Future | None = prefetcher.submit(decode_chunk, chunk_ranges[0]) if chunk_ranges else None
         for chunk_idx in range(len(chunk_ranges)):
             with profiler.stage("decode_wait"):
@@ -135,10 +140,26 @@ class StreamingPipeline:
                 if self.landmarks is not None and tracks is not None:
                     with profiler.stage("landmarks"):
                         landmarks = self.landmarks.estimate(frames, tracks)
-                fit_output: TickFitOutput | None = None
                 if self.fitting is not None and landmarks is not None:
-                    with profiler.stage("fit"):
-                        fit_output = self.fitting.step(frame_idx, landmarks)
+                    with profiler.stage("fit_wait"):
+                        if pending_fit is not None:
+                            pending_fit.result()
+
+                    def fit_tail(idx: int, lms: list[CameraLandmarks]) -> TickFitOutput:
+                        assert self.fitting is not None
+                        out: TickFitOutput = self.fitting.step(idx, lms)
+                        self.logger.log_tick_fit(idx, out.fits, out.triangulated, self.fitting.faces)
+                        return out
+
+                    pending_fit = fit_worker.submit(fit_tail, frame_idx, landmarks)
+                    if self.collector is not None:
+                        with profiler.stage("fit_wait"):
+                            fit_output: TickFitOutput | None = pending_fit.result()
+                            pending_fit = None
+                    else:
+                        fit_output = None
+                else:
+                    fit_output = None
                 with profiler.stage("log_video"):
                     self.logger.log_tick_video(frame_idx, frames)
                 if tracks is not None:
@@ -147,15 +168,15 @@ class StreamingPipeline:
                 if landmarks is not None:
                     with profiler.stage("log_landmarks"):
                         self.logger.log_tick_landmarks(frame_idx, landmarks)
-                if fit_output is not None and self.fitting is not None:
-                    with profiler.stage("log_fit"):
-                        self.logger.log_tick_fit(frame_idx, fit_output.fits, fit_output.triangulated, self.fitting.faces)
                 if self.collector is not None:
                     self.collector.collect(frame_idx, tracks, landmarks, fit_output)
                 frame_idx += 1
         with profiler.stage("log_video"):
+            if pending_fit is not None:
+                pending_fit.result()
             self.logger.flush()
         prefetcher.shutdown(wait=False)
+        fit_worker.shutdown(wait=True)
 
         elapsed: float = time.perf_counter() - start
         return PipelineStats(ticks=frame_idx - start_frame, elapsed_s=elapsed, profiler=profiler)

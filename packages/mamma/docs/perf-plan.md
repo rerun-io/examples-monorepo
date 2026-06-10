@@ -138,3 +138,27 @@ CONDA_PREFIX (pixi run) for the ptxas-blackwell fallback.
    python that compile cannot.
 3. Multiprocess NVDEC decode workers (proven ~400 cam-fps vs 140 in-process)
    if decode resurfaces once compute shrinks.
+
+
+## Mojo/MAX feasibility verdict (workflow, 2026-06-09)
+
+**NO-GO across all five components** (full reasoning preserved here):
+- Tracker python: bottleneck is CPython dispatch/object churn, which Mojo cannot see;
+  Python->Mojo FFI has no zero-copy GPU tensor path today. Incumbent fork-batching wins (~10-15ms, 1-2wk).
+- MammaNet: MAX has no torch/ONNX importer (2-4wk rewrite in max.graph), sm_120 only
+  "known compatible for development". torch_tensorrt (torch_compile ir, fp16) wins: ~9-11ms, 1-3 days.
+- TAM encoder: already batched at 3.5ms — defer. MAX serving of streaming TAM: do not attempt.
+- Fit loop: already manually CUDA-graphed; Mojo ops inside capture undocumented — don't touch.
+  Only future Mojo candidate: fused-LBS mesh emit (~3ms prize) — and a plain CUDA extension
+  likely matches it without toolchain risk.
+- Decode: fixed-function NVDEC; language-irrelevant.
+Re-evaluate Mojo/MAX in 6-12 months (zero-copy DLPack GPU interop, documented graph-capture
+compat, CI-tested sm_120 kernels).
+
+## Round 3 (2026-06-09, late)
+- sync-free smplx patch (emit no longer pays 54 syncs); fit-tail pipelined on a worker
+  (thread_local graph capture). Wall 32.0 -> **31.4s**; gate 22.3mm PASS; tests 10/10.
+- Current true bottleneck split (sync'd): track ~20ms/tick (SAM2-fork per-camera python),
+  landmarks ~17.8ms (MammaNet GPU), fit+emit ~10ms, glue ~25-30ms (engine/logging python).
+- NEXT (per verdict): torch_tensorrt MammaNet, then SAM2-fork 4-camera vectorization —
+  the only identified path to 33ms/tick.

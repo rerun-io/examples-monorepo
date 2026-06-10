@@ -253,7 +253,9 @@ class SlidingWindowFitter:
         torch.cuda.current_stream().wait_stream(side_stream)
         torch.cuda.synchronize()
         graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
+        # thread_local capture: the engine pipelines fit on a worker thread,
+        # so other threads legitimately launch kernels during capture.
+        with torch.cuda.graph(graph, capture_error_mode="thread_local"):
             one_iter()
         torch.cuda.synchronize()
         for _ in range(cfg.tick_iters - 4):  # finish the build tick's budget
