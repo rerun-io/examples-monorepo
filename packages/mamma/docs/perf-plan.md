@@ -254,3 +254,31 @@ corruption in the viewer. Warmup now logs to a sink-less throwaway
 RecordingStream. The saved gate-cross.rrd (177 MB) validates clean and that
 save-run itself passed the gate (11.79 s); embedded in the served notes
 (compare.html: baseline vs gate-crossing side-by-side).
+
+
+## Round 7 (SHIPPED DEFAULTS) — mask quality over the last 2.5 s
+
+Mask validation (reading SegmentationImage series straight from the RRDs)
+showed track_stride=4 transiently collapses masks to head-only during fast
+motion (displayed-mask IoU vs per-frame baseline bottoms at 0.17; collapse
+windows at t≈4.2 s, 9.7–10.7 s, 12.0 s). A stride-1 diagnostic with everything
+else identical was pixel-identical to baseline (0.999 IoU) — the B=4 batched
+propagation is numerically clean; sparse memory updates alone cause the
+collapse.
+
+Pablo decision (2026-06-10): ship track_stride=1 and relax the gate to 15 s
+(≥80% of realtime). Shipped defaults: bootstrap_iters=300 (graphed),
+fit_stride=5, **track_stride=1**, emit_stride=2, TRT MammaNet, mp decode.
+Canonical sweep: golden 23.3 mm / 21.4 mm, wall 14.79 s ≤ 15 s, 5/5 PASS.
+The 11.8 s stride-4 operating point remains one flag away
+(`--tracker.track-stride 4`).
+
+### Remaining tranche to true realtime at stride 1 (gap ~2.4 s)
+1. EfficientTAM image-encoder TRT engine (same recipe as MammaNet; the encoder
+   dominates per-tick cost at stride 1).
+2. Columnar rr.log batching + fit/video worker consolidation (GIL glue).
+3. Fallback: collapse-triggered re-track — stride 4 cadence, densify when mask
+   area drops >40% vs running median (~10 of 363 ticks pay the cost).
+4. Delete engine/mp_decode.py once conda-forge ships torchcodec ≥0.11
+   (decoder-cache fix, upstream PR #1232) — ~150 lines of multiprocessing
+   removed, use_mp_decode=False becomes the only path.

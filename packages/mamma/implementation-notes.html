@@ -44,8 +44,9 @@
 (<code>~/.claude-work/plans/lets-make-a-plan-abstract-nest.md</code>). Updated at every milestone.
 Visual claims are backed by <code>rerun-viewer-validation</code> screenshots from M1 onward.</p>
 
-<h2>Current state — GOAL MET: all five clauses PASS <span class="meta">(2026-06-09, latest)</span></h2>
-<p><b>Full clip: 132.6 s → 11.76 s (11.3×, faster than realtime); canonical <code>mamma-goal-check</code> exits 0 with 5/5 PASS</b>
+<h2>Current state — shipped defaults: 5/5 PASS at full mask quality <span class="meta">(2026-06-10, latest)</span></h2>
+<p><b>Shipped defaults: track_stride 1 (masks pixel-identical to per-frame tracking), 14.79 s wall ≤ 15 s gate (≥80% of realtime, Pablo decision after the mask-collapse evidence below), golden 23.3 mm MPJPE / 21.4 mm PVE; canonical <code>mamma-goal-check</code> exits 0 with 5/5 PASS.</b> The historical fastest point — 11.76 s, faster than realtime, at track_stride 4 — remains one flag away (<code>--tracker.track-stride 4</code>) and is preserved as gate-cross.rrd. Original campaign:</p>
+<p>
 — golden 23.2 mm MPJPE / 21.1 mm PVE (≤30 mm), realtime 11.76 s ≤ 12.1 s (30.8 ticks/s, 123 cam-fps,
 incl. Rerun logging), HOCap + Assembly101 RRDs, no-disk-writes, lint+typecheck+tests clean.
 One config passes both quality and speed: <b>graphed bootstrap</b> (the full 300-iteration first-window solve
