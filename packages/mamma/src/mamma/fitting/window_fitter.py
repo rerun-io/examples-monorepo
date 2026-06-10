@@ -48,10 +48,10 @@ class FitterConfig:
     tick_iters: int = 16
     """Adam iterations per optimize tick (betas frozen). Quality/cost points
     measured vs golden: W=12/24@0.02/stride1 -> 19.8mm, W=8/12/stride1 -> 25.3mm,
-    W=8/16/stride3 -> 27.2mm (default), W=6/8@0.03 -> 43.6mm (fails 30mm gate)."""
+    W=8/16/stride3 -> 27.2mm, stride4+track-stride3 -> 22.3mm (default), W=6/8@0.03 -> 43.6mm (fails 30mm gate)."""
     learning_rate: float = 0.02
     """Adam learning rate (0.03 oscillates, 0.01 under-converges at this budget)."""
-    fit_stride: int = 3
+    fit_stride: int = 4
     """Optimize every Nth tick; skipped ticks emit the warm-started forward of
     the previous solution (observations still enter the window)."""
     use_cuda_graph: bool = True

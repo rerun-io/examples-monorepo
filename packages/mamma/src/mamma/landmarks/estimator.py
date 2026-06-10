@@ -56,7 +56,9 @@ class LandmarkEstimator:
             # (landmarks 17.6 -> 35 ms/tick observed) — off by default until
             # the two share a pool or MammaNet moves to TRT.
             torch._dynamo.config.cache_size_limit = 16
-            self.model = torch.compile(self.model, mode="reduce-overhead")
+            from typing import Any, cast
+
+            self.model = cast(Any, torch.compile(self.model, mode="reduce-overhead"))
 
     def estimate(
         self,

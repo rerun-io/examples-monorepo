@@ -59,7 +59,7 @@ class TrackerConfig:
     ``LOST_TICKS_BEFORE_REPROMPT`` ticks, so this can stay slow (~1s/pass)."""
     memory_window_size: int = 7
     """Sliding window of non-conditional SAM2 memories kept per object."""
-    track_stride: int = 2
+    track_stride: int = 3
     """Run the mask tracker every Nth tick; skipped ticks reuse the previous
     masks (person silhouettes move a few px/frame at 30 fps — landmark crops
     tolerate a one-frame-old mask; verified by the golden gate)."""
