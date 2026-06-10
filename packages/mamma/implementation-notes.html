@@ -44,6 +44,32 @@
 (<code>~/.claude-work/plans/lets-make-a-plan-abstract-nest.md</code>). Updated at every milestone.
 Visual claims are backed by <code>rerun-viewer-validation</code> screenshots from M1 onward.</p>
 
+
+<h2>Overview — what changed vs the original implementation, and why it's ~300&times; faster</h2>
+<p>The original MAMMA (the version generating the baseline comparison runs) is <b>five separate programs
+chained by disk</b>: <code>ma_cap → ma_masks → ma_2d → ma_3d → ma_vis</code>, each spawned as a subprocess that
+reads the previous stage's files and writes its own — every 4K frame extracted to JPEG, every mask written as
+PNG, landmarks/params shuttled as NPZs, models reloaded per stage. Measured: <b>~12 s per frame</b>
+(364 s for a 30-frame slice; a 478-frame clip takes on the order of 2 hours). The port is <b>one resident
+process</b> where frames stay on the GPU from NVDEC decode to Rerun log: <b>40.7 ms per frame</b>
+(14.79 s for the 363-frame / 12.1 s crossing_arms clip, including Rerun logging) — <b>~295&times; end-to-end</b>.</p>
+<table>
+<tr><th>Stage</th><th>Original</th><th>This port</th><th>Why it's faster</th></tr>
+<tr><td>Ingest</td><td>extract every 4K frame to JPEG on disk, per stage re-read</td><td>NVDEC decode → GPU resize to 720p, frames never leave VRAM; per-camera decode worker processes (~400 cam-fps)</td><td>no disk I/O, no JPEG codec round-trip, decode overlaps compute</td></tr>
+<tr><td>Person masks</td><td>SAM2-hiera-<b>large</b> offline over 4K stills, per camera, mask PNGs to disk</td><td>streaming EfficientTAM-ti@512 (vendored fork with forgetful memory bank), all 4 cameras batched through one B=4 forward per tick</td><td>~30&times; smaller model at 1/36 the pixels, batched, no PNG round-trip — quality guarded by the golden gate + mask-IoU validation (track_stride=1 default)</td></tr>
+<tr><td>Dense landmarks</td><td>MammaNet via PyTorch Lightning checkpoint, full eager fp32</td><td>same weights, plain module + TensorRT FP16 engine, B=4 CUDA-graphed (15.8 → 3.88 ms)</td><td>TRT kernel fusion + fp16; zero accuracy cost vs golden</td></tr>
+<tr><td>3D fit</td><td>whole-sequence 4-stage LBFGS over all frames at once (inherently offline)</td><td>causal sliding-window Adam (W=8) over an exact 512-vertex sampled SMPL-X; the whole optimizer step is a replayed CUDA graph, including the 300-iter bootstrap</td><td>512 vs 10,475 verts per iteration, graph replay kills per-iter launch overhead (92 → 15.3 ms per 16-iter tick), sync-free rigid chain (smplx upstream hides 54 host syncs per forward)</td></tr>
+<tr><td>Visualization</td><td>separate ma_vis pass: pyrender overlay videos + scene.rrd re-reading everything from disk</td><td>logging happens inside the loop: NVENC H.264 → <code>rr.VideoStream</code> per camera, GPU YUV conversion, async worker thread</td><td>visualization is free-riding on the streaming pass instead of a sixth program</td></tr>
+</table>
+<p>Two design rules made the speed trustworthy rather than just fast: (1) a <b>golden gate</b> — every change
+re-validated against the frozen original output (MPJPE/PVE ≤ 30 mm on crossing_arms; shipped defaults measure
+23.3 mm); (2) when a speed lever degraded quality outside what the gate covers, <b>quality won the default</b>:
+track_stride and fit_stride both shipped at 1 after mask-collapse / dynamic-motion evidence (see the mask
+validation section and perf-plan round 7), relaxing the wall-time gate to 15 s (≥80% of realtime). The fastest
+verified configuration (11.76 s, faster than realtime) remains available via flags. What the port gives up by
+design: causality (no future frames — the original's whole-sequence LBFGS sees the entire clip), and 720p
+inference instead of 4K.</p>
+
 <h2>Current state — shipped defaults: 5/5 PASS at full mask quality <span class="meta">(2026-06-10, latest)</span></h2>
 <p><b>Shipped defaults: track_stride 1 (masks pixel-identical to per-frame tracking), 14.79 s wall ≤ 15 s gate (≥80% of realtime, Pablo decision after the mask-collapse evidence below), golden 23.3 mm MPJPE / 21.4 mm PVE; canonical <code>mamma-goal-check</code> exits 0 with 5/5 PASS.</b> The historical fastest point — 11.76 s, faster than realtime, at track_stride 4 — remains one flag away (<code>--tracker.track-stride 4</code>) and is preserved as gate-cross.rrd. Original campaign:</p>
 <p>
