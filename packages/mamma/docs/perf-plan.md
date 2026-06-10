@@ -162,3 +162,15 @@ compat, CI-tested sm_120 kernels).
   landmarks ~17.8ms (MammaNet GPU), fit+emit ~10ms, glue ~25-30ms (engine/logging python).
 - NEXT (per verdict): torch_tensorrt MammaNet, then SAM2-fork 4-camera vectorization —
   the only identified path to 33ms/tick.
+
+
+## torch_tensorrt install finding (2026-06-09)
+
+PyPI `torch-tensorrt` 2.10 wheels target **CUDA 13** (depend on prerelease
+`nvidia-cuda-runtime-cu13`) — incompatible with this conda-forge torch 2.10/cu129
+stack; >=2.11 wheels require torch 2.11+. Options for the MammaNet engine step:
+(a) bump the whole env to torch 2.11 + cu13-era wheels and re-validate everything,
+(b) ONNX export (dynamo, opset>=17) -> onnxruntime-gpu TensorRT/CUDA EP with
+io_binding on torch tensors — `onnxruntime-gpu` is already in the cuda feature,
+(c) trtexec-built engine + TensorRT python API directly. (b) is the least invasive
+and the recommended next experiment.
