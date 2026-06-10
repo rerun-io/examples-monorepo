@@ -3,9 +3,10 @@
 //! # Overview
 //!
 //! This module integrates the GPU compute pipeline with Rerun's rendering
-//! system.  The visualizer ([`crate::gaussian_visualizer`]) hands it a
-//! pre-sorted batch of visible splats each frame; the renderer uploads them
-//! and dispatches the 7-stage compute pipeline.
+//! system.  The visualizer ([`crate::gaussian_visualizer`]) hands it the full
+//! splat cloud and camera each frame; everything else — culling, depth
+//! sorting, projection, rasterization — runs on the GPU.  Per-frame CPU work
+//! is uniform writes and command encoding only.
 //!
 //! GPU types, bind group layouts, compute pipelines, and helper functions
 //! are imported from [`crate::gsplat_core::gpu_types`] — the single source
@@ -15,13 +16,15 @@
 //!
 //! | Stage | Shader | Description |
 //! |-------|--------|-------------|
-//! | 1. Project | `gaussian_project.wgsl` | 3D→2D Gaussian projection + SH evaluation |
-//! | 2. Compact | `gaussian_project.wgsl` (scan) | Prefix sum to remove invisible splats |
-//! | 3. Map | `gaussian_map_intersections.wgsl` | Scatter (splat, tile) pairs |
-//! | 4. Sort | `gaussian_dynamic_sort.wgsl` | Radix sort by tile ID |
-//! | 5. Offsets | `gaussian_tile_offsets.wgsl` | Per-tile start/end range |
-//! | 6. Raster | `gaussian_raster_tiles.wgsl` | Per-pixel alpha blending |
-//! | 7. Composite | `gaussian_composite.wgsl` | Blit to Rerun viewport |
+//! | 1. Cull | `gaussian_project.wgsl` (project_forward) | Full-cloud GPU cull, compact (gid, depth) |
+//! | 2. Depth sort | `gaussian_dynamic_sort.wgsl` | Radix argsort ascending by depth bits |
+//! | 3. Project | `gaussian_project.wgsl` (project_visible) | 3D→2D projection + SH evaluation |
+//! | 4. Scan | `gaussian_project.wgsl` (scan) | Prefix sum over per-splat tile hit counts |
+//! | 5. Map | `gaussian_map_intersections.wgsl` | Scatter (tile, splat) pairs |
+//! | 6. Tile sort | `gaussian_dynamic_sort.wgsl` | Radix sort by tile ID |
+//! | 7. Offsets | `gaussian_tile_offsets.wgsl` | Per-tile start/end range |
+//! | 8. Raster | `gaussian_raster_tiles.wgsl` | Per-pixel alpha blending |
+//! | 9. Composite | `gaussian_composite.wgsl` | Blit to Rerun viewport |
 //!
 //! # Buffer Management
 //!
@@ -33,8 +36,8 @@
 //! # Per-frame flow
 //!
 //! 1. Reuse or grow persistent GPU buffers for the entity
-//! 2. Upload splat data (means, quats, scales, opacities, colors, SH) to GPU
-//! 3. Dispatch 7-stage compute pipeline
+//! 2. Write uniforms (camera, counts)
+//! 3. Dispatch the GPU-only compute pipeline
 //! 4. Composite raster texture into Rerun's viewport via fullscreen blit
 
 use std::borrow::Cow;
@@ -47,19 +50,18 @@ use re_renderer::external::wgpu;
 use re_renderer::renderer::{DrawData, DrawDataDrawable, DrawError, DrawInstruction, Renderer};
 
 use self::gpu_types as gpu_data;
-use crate::gsplat_core::constants::{
-    MAX_SPLATS_RENDERED, MIN_RADIUS_PX, OPACITY_SCALE, SIGMA_COVERAGE,
-};
 use crate::gsplat_core::gpu_types::{
-    PROJECT_WORKGROUP_SIZE, RASTER_TEXTURE_FORMAT, SORT_BIN_COUNT, SORT_BLOCK_SIZE,
-    SORT_WORKGROUP_SIZE, TILE_OFFSET_CHECKS_PER_ITER, TILE_OFFSET_WORKGROUP_SIZE,
-    calc_raster_extent, calc_tile_bounds, compaction_block_count, create_compute_pipeline,
-    create_filled_buffer, create_sized_buffer, dispatch_grid_1d, dispatch_grid_for_workgroups,
-    intersection_capacity_for_instances, next_block_capacity, next_capacity, pack_quats, pack_rgb,
-    pack_scales_opacity, pack_sh_coefficients, pack_vec3s, storage_buffer_entry,
-    storage_layout_entry, tile_count, uniform_layout_entry,
+    DEPTH_SORT_PASSES, PROJECT_WORKGROUP_SIZE, RASTER_TEXTURE_FORMAT, SORT_BIN_COUNT,
+    SORT_BITS_PER_PASS, SORT_BLOCK_SIZE, SORT_WORKGROUP_SIZE, TILE_OFFSET_CHECKS_PER_ITER,
+    TILE_OFFSET_WORKGROUP_SIZE, calc_raster_extent, calc_tile_bounds, compaction_block_count,
+    create_compute_pipeline, create_filled_buffer, create_sized_buffer, dispatch_grid_1d,
+    dispatch_grid_for_workgroups, fill_map_uniform, fill_project_uniform, fill_scan_uniform,
+    gid_sort_passes, intersection_capacity_for_instances, next_block_capacity, next_capacity,
+    pack_quats, pack_rgb, pack_scales_opacity, pack_sh_coefficients, pack_vec3s,
+    sort_reduce_workgroup_count, storage_buffer_entry, storage_layout_entry, tile_count,
+    tile_sort_passes, uniform_layout_entry,
 };
-use crate::gsplat_core::{CameraApproximation, RenderGaussianCloud, SortedSplatIndex};
+use crate::gsplat_core::{CameraApproximation, RenderGaussianCloud};
 
 const INTERSECTION_READBACK_SLOT_COUNT: usize = 2;
 
@@ -89,14 +91,6 @@ mod tests {
     }
 
     #[test]
-    fn compaction_limit_covers_default_render_cap() {
-        let limit = std::hint::black_box(super::intersection_capacity_for_instances(
-            super::MAX_SPLATS_RENDERED,
-        ));
-        assert!(limit >= super::MAX_SPLATS_RENDERED);
-    }
-
-    #[test]
     fn compaction_block_count_rounds_up() {
         use crate::gsplat_core::gpu_types::COMPACTION_BLOCK_SIZE;
         assert_eq!(super::compaction_block_count(1), 1);
@@ -108,13 +102,6 @@ mod tests {
             super::compaction_block_count(COMPACTION_BLOCK_SIZE as usize + 1),
             2
         );
-    }
-
-    #[test]
-    fn descending_depth_sort_key_orders_farther_first() {
-        let far = super::encode_descending_depth_key(10.0);
-        let near = super::encode_descending_depth_key(2.0);
-        assert!(far < near);
     }
 
     #[test]
@@ -140,8 +127,10 @@ pub struct GaussianRenderer {
 // lifetime of cached compute batches, even when not every field is read after construction.
 #[allow(dead_code)]
 struct ComputePipelines {
-    project_bind_group_layout: Arc<wgpu::BindGroupLayout>,
-    project_pipeline: wgpu::ComputePipeline,
+    project_forward_bind_group_layout: Arc<wgpu::BindGroupLayout>,
+    project_forward_pipeline: wgpu::ComputePipeline,
+    project_visible_bind_group_layout: Arc<wgpu::BindGroupLayout>,
+    project_visible_pipeline: wgpu::ComputePipeline,
     scan_bind_group_layout: Arc<wgpu::BindGroupLayout>,
     scan_blocks_pipeline: wgpu::ComputePipeline,
     scan_block_sums_bind_group_layout: Arc<wgpu::BindGroupLayout>,
@@ -200,11 +189,9 @@ struct GaussianBatchPayload {
     composite_bind_group: Arc<wgpu::BindGroup>,
 }
 
-// Some fields are retained as lifetime anchors for GPU resources.
-#[allow(dead_code)]
 struct CachedBatchResources {
-    instance_buffer: Arc<wgpu::Buffer>,
-    instance_capacity: usize,
+    /// Per-splat buffer capacity (power-of-two >= cloud.len()).
+    splat_capacity: usize,
     compute: CachedComputeResources,
 }
 
@@ -215,19 +202,15 @@ struct CachedBatchResources {
 struct CachedComputeResources {
     project_uniform_buffer: Arc<wgpu::Buffer>,
     scan_uniform_buffer: Arc<wgpu::Buffer>,
-    sort_uniform_buffer: Arc<wgpu::Buffer>,
+    scan_l2_uniform_buffer: Arc<wgpu::Buffer>,
     map_uniform_buffer: Arc<wgpu::Buffer>,
-    project_bind_group: Arc<wgpu::BindGroup>,
+    project_forward_bind_group: Arc<wgpu::BindGroup>,
+    project_visible_bind_group: Arc<wgpu::BindGroup>,
     tile_count_scan_bind_group: Arc<wgpu::BindGroup>,
+    tile_count_scan_l2_bind_group: Arc<wgpu::BindGroup>,
     tile_count_scan_block_sums_bind_group: Arc<wgpu::BindGroup>,
+    tile_count_scan_compose_bind_group: Arc<wgpu::BindGroup>,
     map_intersections_bind_group: Arc<wgpu::BindGroup>,
-    dynamic_sort_count_bind_group_primary: Arc<wgpu::BindGroup>,
-    dynamic_sort_count_bind_group_alt: Arc<wgpu::BindGroup>,
-    dynamic_sort_reduce_bind_group: Arc<wgpu::BindGroup>,
-    dynamic_sort_scan_bind_group: Arc<wgpu::BindGroup>,
-    dynamic_sort_scan_add_bind_group: Arc<wgpu::BindGroup>,
-    dynamic_sort_scatter_bind_group_primary: Arc<wgpu::BindGroup>,
-    dynamic_sort_scatter_bind_group_alt: Arc<wgpu::BindGroup>,
     tile_offsets_bind_group: Arc<wgpu::BindGroup>,
     rasterize_bind_group: Arc<wgpu::BindGroup>,
     composite_bind_group: Arc<wgpu::BindGroup>,
@@ -236,12 +219,18 @@ struct CachedComputeResources {
     scales_opacity_buffer: Arc<wgpu::Buffer>,
     colors_buffer: Arc<wgpu::Buffer>,
     sh_coeffs_buffer: Arc<wgpu::Buffer>,
-    index_buffer: Arc<wgpu::Buffer>,
-    visibility_flags_buffer: Arc<wgpu::Buffer>,
+    // GPU cull + depth-sort buffers (project_forward outputs / sort ping-pong).
+    num_visible_buffer: Arc<wgpu::Buffer>,
+    global_from_compact_buffer: Arc<wgpu::Buffer>,
+    depth_keys_buffer: Arc<wgpu::Buffer>,
+    global_from_compact_alt_buffer: Arc<wgpu::Buffer>,
+    depth_keys_alt_buffer: Arc<wgpu::Buffer>,
     projected_tile_splats_buffer: Arc<wgpu::Buffer>,
     tile_hit_counts_buffer: Arc<wgpu::Buffer>,
     tile_hit_offsets_buffer: Arc<wgpu::Buffer>,
     tile_hit_block_offsets_buffer: Arc<wgpu::Buffer>,
+    block_local_offsets_buffer: Arc<wgpu::Buffer>,
+    block2_offsets_buffer: Arc<wgpu::Buffer>,
     tile_intersection_count_buffer: Arc<wgpu::Buffer>,
     intersection_count_readback_slots: Vec<IntersectionCountReadbackSlot>,
     num_intersections_buffer: Arc<wgpu::Buffer>,
@@ -259,16 +248,13 @@ struct CachedComputeResources {
     raster_texture: Arc<wgpu::Texture>,
     raster_texture_view: Arc<wgpu::TextureView>,
     raster_extent: glam::UVec2,
-    index_capacity: usize,
     block_capacity: usize,
     intersection_capacity: usize,
     tile_offset_capacity: usize,
     latest_intersection_count: usize,
     intersection_capacity_saturated: bool,
     sort_workgroup_count: u32,
-    sort_reduce_workgroup_count: u32,
-    sort_scan_block_capacity: usize,
-    cpu_indices: Vec<u32>,
+    depth_sort_workgroup_count: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -297,6 +283,7 @@ impl DrawData for GaussianDrawData {
                 re_renderer::DrawPhase::Transparent,
                 DrawDataDrawable {
                     distance_sort_key: 0.0,
+                    secondary_sort_key: 0.0,
                     draw_data_payload: index as u32,
                 },
             );
@@ -318,24 +305,15 @@ impl GaussianDrawData {
         label: &str,
         cloud: &Arc<RenderGaussianCloud>,
         camera: &CameraApproximation,
-        visible_indices: &[SortedSplatIndex],
-        farthest_depth: f32,
     ) -> BatchSubmission {
         let renderer = ctx.renderer::<GaussianRenderer>();
-        if visible_indices.is_empty() {
+        if cloud.is_empty() {
             return BatchSubmission {
                 extra_draw_data: None,
             };
         }
 
-        let submission = renderer.prepare_compute_batch(
-            ctx,
-            label,
-            cloud,
-            camera,
-            visible_indices,
-            farthest_depth,
-        );
+        let submission = renderer.prepare_compute_batch(ctx, label, cloud, camera);
         let PreparedBatch {
             batch,
             upload_ms,
@@ -363,24 +341,14 @@ impl GaussianRenderer {
         ctx: &re_renderer::RenderContext,
         label: &str,
         cloud: &Arc<RenderGaussianCloud>,
-        initial_capacity: usize,
     ) -> CachedBatchResources {
         // These buffers live per entity so camera movement reuses GPU allocations instead of
         // rebuilding everything every frame.
-        let instance_capacity = next_capacity(initial_capacity);
-        let instance_buffer = Arc::new(create_sized_buffer(
-            &ctx.device,
-            &format!("{label}::instances"),
-            instance_capacity * std::mem::size_of::<gpu_data::InstanceData>(),
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        ));
-
-        let compute =
-            self.create_compute_resources(ctx, label, cloud, &instance_buffer, instance_capacity);
+        let splat_capacity = next_capacity(cloud.len().max(1));
+        let compute = self.create_compute_resources(ctx, label, cloud, splat_capacity);
 
         CachedBatchResources {
-            instance_buffer,
-            instance_capacity,
+            splat_capacity,
             compute,
         }
     }
@@ -390,7 +358,6 @@ impl GaussianRenderer {
         ctx: &re_renderer::RenderContext,
         label: &str,
         cloud: &Arc<RenderGaussianCloud>,
-        output_instance_buffer: &Arc<wgpu::Buffer>,
         initial_capacity: usize,
     ) -> CachedComputeResources {
         // The compute path keeps most per-cloud data resident on the GPU:
@@ -408,9 +375,9 @@ impl GaussianRenderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
-        let sort_uniform_buffer = Arc::new(ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(&format!("{label}::sort_uniform")),
-            size: std::mem::size_of::<gpu_data::SortUniformBuffer>() as u64,
+        let scan_l2_uniform_buffer = Arc::new(ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(&format!("{label}::scan_l2_uniform")),
+            size: std::mem::size_of::<gpu_data::ScanUniformBuffer>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
@@ -452,18 +419,37 @@ impl GaussianRenderer {
             &pack_sh_coefficients(cloud),
         ));
 
-        let index_capacity = next_capacity(cloud.len().max(1));
-        let index_buffer = Arc::new(create_sized_buffer(
+        // GPU cull + depth-sort buffers.  project_forward appends (gid, depth
+        // bits) pairs; the radix argsort ping-pongs between primary and alt.
+        let num_visible_buffer = Arc::new(create_sized_buffer(
             &ctx.device,
-            &format!("{label}::indices"),
-            index_capacity * std::mem::size_of::<u32>(),
+            &format!("{label}::num_visible"),
+            std::mem::size_of::<u32>(),
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         ));
-        let visibility_flags_buffer = Arc::new(create_sized_buffer(
+        let global_from_compact_buffer = Arc::new(create_sized_buffer(
             &ctx.device,
-            &format!("{label}::visibility_flags"),
+            &format!("{label}::global_from_compact"),
             initial_capacity * std::mem::size_of::<u32>(),
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            wgpu::BufferUsages::STORAGE,
+        ));
+        let depth_keys_buffer = Arc::new(create_sized_buffer(
+            &ctx.device,
+            &format!("{label}::depth_keys"),
+            initial_capacity * std::mem::size_of::<u32>(),
+            wgpu::BufferUsages::STORAGE,
+        ));
+        let global_from_compact_alt_buffer = Arc::new(create_sized_buffer(
+            &ctx.device,
+            &format!("{label}::global_from_compact_alt"),
+            initial_capacity * std::mem::size_of::<u32>(),
+            wgpu::BufferUsages::STORAGE,
+        ));
+        let depth_keys_alt_buffer = Arc::new(create_sized_buffer(
+            &ctx.device,
+            &format!("{label}::depth_keys_alt"),
+            initial_capacity * std::mem::size_of::<u32>(),
+            wgpu::BufferUsages::STORAGE,
         ));
         let projected_tile_splats_buffer = Arc::new(create_sized_buffer(
             &ctx.device,
@@ -489,6 +475,20 @@ impl GaussianRenderer {
             &format!("{label}::tile_hit_block_offsets"),
             block_capacity * std::mem::size_of::<u32>(),
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        ));
+        // Level-2 scan buffers: scan the level-1 block sums so clouds larger
+        // than 512 blocks * 512 elements = 262,144 splats scan correctly.
+        let block_local_offsets_buffer = Arc::new(create_sized_buffer(
+            &ctx.device,
+            &format!("{label}::block_local_offsets"),
+            block_capacity * std::mem::size_of::<u32>(),
+            wgpu::BufferUsages::STORAGE,
+        ));
+        let block2_offsets_buffer = Arc::new(create_sized_buffer(
+            &ctx.device,
+            &format!("{label}::block2_offsets"),
+            next_block_capacity(block_capacity) * std::mem::size_of::<u32>(),
+            wgpu::BufferUsages::STORAGE,
         ));
         let tile_intersection_count_buffer = Arc::new(create_filled_buffer(
             &ctx.device,
@@ -549,22 +549,20 @@ impl GaussianRenderer {
             sort_workgroup_count * SORT_BIN_COUNT as usize * std::mem::size_of::<u32>(),
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         ));
-        let sort_reduce_workgroup_count = (sort_workgroup_count.div_ceil(SORT_BLOCK_SIZE as usize)
-            * SORT_BIN_COUNT as usize)
-            .max(1);
+        let sort_reduce_wg_count = sort_reduce_workgroup_count(sort_workgroup_count as u32) as usize;
         let sort_reduced_buffer = Arc::new(create_sized_buffer(
             &ctx.device,
             &format!("{label}::sort_reduced"),
-            sort_reduce_workgroup_count * std::mem::size_of::<u32>(),
+            sort_reduce_wg_count * std::mem::size_of::<u32>(),
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         ));
         let sort_scan_offsets_buffer = Arc::new(create_sized_buffer(
             &ctx.device,
             &format!("{label}::sort_scan_offsets"),
-            sort_reduce_workgroup_count * std::mem::size_of::<u32>(),
+            sort_reduce_wg_count * std::mem::size_of::<u32>(),
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         ));
-        let sort_scan_block_capacity = next_block_capacity(sort_reduce_workgroup_count);
+        let sort_scan_block_capacity = next_block_capacity(sort_reduce_wg_count);
         let sort_scan_block_offsets_buffer = Arc::new(create_sized_buffer(
             &ctx.device,
             &format!("{label}::sort_scan_block_offsets"),
@@ -597,7 +595,18 @@ impl GaussianRenderer {
             raster_extent,
         );
 
-        let project_bind_group = Arc::new(self.create_project_bind_group(
+        let project_forward_bind_group = Arc::new(self.create_project_forward_bind_group(
+            ctx,
+            label,
+            &means_buffer,
+            &quats_buffer,
+            &scales_opacity_buffer,
+            &project_uniform_buffer,
+            &global_from_compact_buffer,
+            &depth_keys_buffer,
+            &num_visible_buffer,
+        ));
+        let project_visible_bind_group = Arc::new(self.create_project_visible_bind_group(
             ctx,
             label,
             &means_buffer,
@@ -605,13 +614,11 @@ impl GaussianRenderer {
             &scales_opacity_buffer,
             &colors_buffer,
             &sh_coeffs_buffer,
-            &index_buffer,
-            output_instance_buffer,
-            &visibility_flags_buffer,
+            &global_from_compact_buffer,
             &project_uniform_buffer,
             &projected_tile_splats_buffer,
             &tile_hit_counts_buffer,
-            "project_bind_group",
+            &num_visible_buffer,
         ));
         let tile_count_scan_bind_group = Arc::new(self.create_scan_bind_group(
             ctx,
@@ -621,13 +628,31 @@ impl GaussianRenderer {
             &tile_hit_block_offsets_buffer,
             &scan_uniform_buffer,
         ));
+        let tile_count_scan_l2_bind_group = Arc::new(self.create_scan_bind_group(
+            ctx,
+            label,
+            &tile_hit_block_offsets_buffer,
+            &block_local_offsets_buffer,
+            &block2_offsets_buffer,
+            &scan_l2_uniform_buffer,
+        ));
         let tile_count_scan_block_sums_bind_group =
             Arc::new(self.create_scan_block_sums_bind_group(
                 ctx,
                 label,
-                &tile_hit_block_offsets_buffer,
+                &block2_offsets_buffer,
                 &tile_intersection_count_buffer,
-                &scan_uniform_buffer,
+                &scan_l2_uniform_buffer,
+            ));
+        let tile_count_scan_compose_bind_group =
+            Arc::new(self.create_dynamic_sort_scan_compose_bind_group(
+                ctx,
+                label,
+                &block_local_offsets_buffer,
+                &block2_offsets_buffer,
+                &tile_hit_block_offsets_buffer,
+                &scan_l2_uniform_buffer,
+                "tile_count_scan_compose_bind_group",
             ));
         let map_intersections_bind_group = Arc::new(self.create_map_intersections_bind_group(
             ctx,
@@ -642,76 +667,6 @@ impl GaussianRenderer {
             &num_intersections_buffer,
             &map_uniform_buffer,
         ));
-        let dynamic_sort_count_bind_group_primary =
-            Arc::new(self.create_dynamic_sort_count_bind_group(
-                ctx,
-                label,
-                &tile_id_from_isect_buffer,
-                &sort_counts_buffer,
-                &sort_uniform_buffer,
-                &num_intersections_buffer,
-                "dynamic_sort_count_bind_group_primary",
-            ));
-        let dynamic_sort_count_bind_group_alt =
-            Arc::new(self.create_dynamic_sort_count_bind_group(
-                ctx,
-                label,
-                &sort_keys_buffer,
-                &sort_counts_buffer,
-                &sort_uniform_buffer,
-                &num_intersections_buffer,
-                "dynamic_sort_count_bind_group_alt",
-            ));
-        let dynamic_sort_reduce_bind_group = Arc::new(self.create_dynamic_sort_reduce_bind_group(
-            ctx,
-            label,
-            &sort_counts_buffer,
-            &sort_reduced_buffer,
-            &sort_uniform_buffer,
-            &num_intersections_buffer,
-        ));
-        let dynamic_sort_scan_bind_group = Arc::new(self.create_dynamic_sort_scan_bind_group(
-            ctx,
-            label,
-            &sort_reduced_buffer,
-            &sort_uniform_buffer,
-            &num_intersections_buffer,
-        ));
-        let dynamic_sort_scan_add_bind_group =
-            Arc::new(self.create_dynamic_sort_scan_add_bind_group(
-                ctx,
-                label,
-                &sort_reduced_buffer,
-                &sort_counts_buffer,
-                &sort_uniform_buffer,
-                &num_intersections_buffer,
-            ));
-        let dynamic_sort_scatter_bind_group_primary =
-            Arc::new(self.create_dynamic_sort_scatter_bind_group(
-                ctx,
-                label,
-                &tile_id_from_isect_buffer,
-                &compact_gid_from_isect_buffer,
-                &sort_counts_buffer,
-                &sort_keys_buffer,
-                &sorted_indices_alt_buffer,
-                &sort_uniform_buffer,
-                &num_intersections_buffer,
-                "dynamic_sort_scatter_bind_group_primary",
-            ));
-        let dynamic_sort_scatter_bind_group_alt =
-            Arc::new(self.create_dynamic_sort_scatter_bind_group(
-                ctx,
-                label,
-                &sort_keys_buffer,
-                &sorted_indices_alt_buffer,
-                &sort_counts_buffer,
-                &tile_id_from_isect_buffer,
-                &compact_gid_from_isect_buffer,
-                &sort_uniform_buffer,
-                &num_intersections_buffer,
-                "dynamic_sort_scatter_bind_group_alt",
-            ));
         let tile_offsets_bind_group = Arc::new(self.create_tile_offsets_bind_group(
             ctx,
             label,
@@ -735,22 +690,22 @@ impl GaussianRenderer {
             &raster_uniform_buffer,
         ));
 
+        let depth_sort_workgroup_count = initial_capacity
+            .div_ceil(SORT_BLOCK_SIZE as usize)
+            .max(1);
+
         CachedComputeResources {
             project_uniform_buffer,
             scan_uniform_buffer,
-            sort_uniform_buffer,
+            scan_l2_uniform_buffer,
             map_uniform_buffer,
-            project_bind_group,
+            project_forward_bind_group,
+            project_visible_bind_group,
             tile_count_scan_bind_group,
+            tile_count_scan_l2_bind_group,
             tile_count_scan_block_sums_bind_group,
+            tile_count_scan_compose_bind_group,
             map_intersections_bind_group,
-            dynamic_sort_count_bind_group_primary,
-            dynamic_sort_count_bind_group_alt,
-            dynamic_sort_reduce_bind_group,
-            dynamic_sort_scan_bind_group,
-            dynamic_sort_scan_add_bind_group,
-            dynamic_sort_scatter_bind_group_primary,
-            dynamic_sort_scatter_bind_group_alt,
             tile_offsets_bind_group,
             rasterize_bind_group,
             composite_bind_group,
@@ -759,12 +714,17 @@ impl GaussianRenderer {
             scales_opacity_buffer,
             colors_buffer,
             sh_coeffs_buffer,
-            index_buffer,
-            visibility_flags_buffer,
+            num_visible_buffer,
+            global_from_compact_buffer,
+            depth_keys_buffer,
+            global_from_compact_alt_buffer,
+            depth_keys_alt_buffer,
             projected_tile_splats_buffer,
             tile_hit_counts_buffer,
             tile_hit_offsets_buffer,
             tile_hit_block_offsets_buffer,
+            block_local_offsets_buffer,
+            block2_offsets_buffer,
             tile_intersection_count_buffer,
             intersection_count_readback_slots: create_intersection_count_readback_slots(
                 &ctx.device,
@@ -785,21 +745,52 @@ impl GaussianRenderer {
             raster_texture,
             raster_texture_view,
             raster_extent,
-            index_capacity,
             block_capacity,
             intersection_capacity,
             tile_offset_capacity,
             latest_intersection_count: 0,
             intersection_capacity_saturated: false,
             sort_workgroup_count: sort_workgroup_count as u32,
-            sort_reduce_workgroup_count: sort_reduce_workgroup_count as u32,
-            sort_scan_block_capacity,
-            cpu_indices: Vec::with_capacity(index_capacity),
+            depth_sort_workgroup_count: depth_sort_workgroup_count as u32,
         }
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn create_project_bind_group(
+    fn create_project_forward_bind_group(
+        &self,
+        ctx: &re_renderer::RenderContext,
+        label: &str,
+        means_buffer: &Arc<wgpu::Buffer>,
+        quats_buffer: &Arc<wgpu::Buffer>,
+        scales_opacity_buffer: &Arc<wgpu::Buffer>,
+        project_uniform_buffer: &Arc<wgpu::Buffer>,
+        global_from_compact_buffer: &Arc<wgpu::Buffer>,
+        depth_keys_buffer: &Arc<wgpu::Buffer>,
+        num_visible_buffer: &Arc<wgpu::Buffer>,
+    ) -> wgpu::BindGroup {
+        ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(&format!("{label}::project_forward_bind_group")),
+            layout: self
+                .compute_pipelines
+                .project_forward_bind_group_layout
+                .as_ref(),
+            entries: &[
+                storage_buffer_entry(0, means_buffer),
+                storage_buffer_entry(1, quats_buffer),
+                storage_buffer_entry(2, scales_opacity_buffer),
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: project_uniform_buffer.as_entire_binding(),
+                },
+                storage_buffer_entry(12, global_from_compact_buffer),
+                storage_buffer_entry(13, depth_keys_buffer),
+                storage_buffer_entry(14, num_visible_buffer),
+            ],
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_project_visible_bind_group(
         &self,
         ctx: &re_renderer::RenderContext,
         label: &str,
@@ -808,32 +799,32 @@ impl GaussianRenderer {
         scales_opacity_buffer: &Arc<wgpu::Buffer>,
         colors_buffer: &Arc<wgpu::Buffer>,
         sh_coeffs_buffer: &Arc<wgpu::Buffer>,
-        index_buffer: &Arc<wgpu::Buffer>,
-        output_instance_buffer: &Arc<wgpu::Buffer>,
-        visibility_flags_buffer: &Arc<wgpu::Buffer>,
+        global_from_compact_buffer: &Arc<wgpu::Buffer>,
         project_uniform_buffer: &Arc<wgpu::Buffer>,
         projected_tile_splats_buffer: &Arc<wgpu::Buffer>,
         tile_hit_counts_buffer: &Arc<wgpu::Buffer>,
-        label_suffix: &str,
+        num_visible_buffer: &Arc<wgpu::Buffer>,
     ) -> wgpu::BindGroup {
         ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some(&format!("{label}::{label_suffix}")),
-            layout: self.compute_pipelines.project_bind_group_layout.as_ref(),
+            label: Some(&format!("{label}::project_visible_bind_group")),
+            layout: self
+                .compute_pipelines
+                .project_visible_bind_group_layout
+                .as_ref(),
             entries: &[
                 storage_buffer_entry(0, means_buffer),
                 storage_buffer_entry(1, quats_buffer),
                 storage_buffer_entry(2, scales_opacity_buffer),
                 storage_buffer_entry(3, colors_buffer),
                 storage_buffer_entry(4, sh_coeffs_buffer),
-                storage_buffer_entry(5, index_buffer),
-                storage_buffer_entry(6, output_instance_buffer),
-                storage_buffer_entry(7, visibility_flags_buffer),
+                storage_buffer_entry(5, global_from_compact_buffer),
                 wgpu::BindGroupEntry {
                     binding: 8,
                     resource: project_uniform_buffer.as_entire_binding(),
                 },
                 storage_buffer_entry(9, projected_tile_splats_buffer),
                 storage_buffer_entry(10, tile_hit_counts_buffer),
+                storage_buffer_entry(11, num_visible_buffer),
             ],
         })
     }
@@ -842,7 +833,7 @@ impl GaussianRenderer {
         &self,
         ctx: &re_renderer::RenderContext,
         label: &str,
-        visibility_flags_buffer: &Arc<wgpu::Buffer>,
+        scan_input_buffer: &Arc<wgpu::Buffer>,
         local_offsets_buffer: &Arc<wgpu::Buffer>,
         block_offsets_buffer: &Arc<wgpu::Buffer>,
         scan_uniform_buffer: &Arc<wgpu::Buffer>,
@@ -851,7 +842,7 @@ impl GaussianRenderer {
             label: Some(&format!("{label}::scan_bind_group")),
             layout: self.compute_pipelines.scan_bind_group_layout.as_ref(),
             entries: &[
-                storage_buffer_entry(16, visibility_flags_buffer),
+                storage_buffer_entry(16, scan_input_buffer),
                 storage_buffer_entry(17, local_offsets_buffer),
                 storage_buffer_entry(18, block_offsets_buffer),
                 wgpu::BindGroupEntry {
@@ -951,31 +942,6 @@ impl GaussianRenderer {
                 },
                 storage_buffer_entry(1, counts_buffer),
                 storage_buffer_entry(2, reduced_buffer),
-                storage_buffer_entry(6, total_keys_buffer),
-            ],
-        })
-    }
-
-    fn create_dynamic_sort_scan_bind_group(
-        &self,
-        ctx: &re_renderer::RenderContext,
-        label: &str,
-        reduced_buffer: &Arc<wgpu::Buffer>,
-        sort_uniform_buffer: &Arc<wgpu::Buffer>,
-        total_keys_buffer: &Arc<wgpu::Buffer>,
-    ) -> wgpu::BindGroup {
-        ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some(&format!("{label}::dynamic_sort_scan_bind_group")),
-            layout: self
-                .compute_pipelines
-                .dynamic_sort_scan_bind_group_layout
-                .as_ref(),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: sort_uniform_buffer.as_entire_binding(),
-                },
-                storage_buffer_entry(1, reduced_buffer),
                 storage_buffer_entry(6, total_keys_buffer),
             ],
         })
@@ -1181,9 +1147,19 @@ impl GaussianRenderer {
         ctx: &re_renderer::RenderContext,
         label: &str,
         compute: &mut CachedComputeResources,
-        output_instance_buffer: &Arc<wgpu::Buffer>,
     ) {
-        compute.project_bind_group = Arc::new(self.create_project_bind_group(
+        compute.project_forward_bind_group = Arc::new(self.create_project_forward_bind_group(
+            ctx,
+            label,
+            &compute.means_buffer,
+            &compute.quats_buffer,
+            &compute.scales_opacity_buffer,
+            &compute.project_uniform_buffer,
+            &compute.global_from_compact_buffer,
+            &compute.depth_keys_buffer,
+            &compute.num_visible_buffer,
+        ));
+        compute.project_visible_bind_group = Arc::new(self.create_project_visible_bind_group(
             ctx,
             label,
             &compute.means_buffer,
@@ -1191,13 +1167,11 @@ impl GaussianRenderer {
             &compute.scales_opacity_buffer,
             &compute.colors_buffer,
             &compute.sh_coeffs_buffer,
-            &compute.index_buffer,
-            output_instance_buffer,
-            &compute.visibility_flags_buffer,
+            &compute.global_from_compact_buffer,
             &compute.project_uniform_buffer,
             &compute.projected_tile_splats_buffer,
             &compute.tile_hit_counts_buffer,
-            "project_bind_group",
+            &compute.num_visible_buffer,
         ));
         compute.tile_count_scan_bind_group = Arc::new(self.create_scan_bind_group(
             ctx,
@@ -1207,13 +1181,31 @@ impl GaussianRenderer {
             &compute.tile_hit_block_offsets_buffer,
             &compute.scan_uniform_buffer,
         ));
+        compute.tile_count_scan_l2_bind_group = Arc::new(self.create_scan_bind_group(
+            ctx,
+            label,
+            &compute.tile_hit_block_offsets_buffer,
+            &compute.block_local_offsets_buffer,
+            &compute.block2_offsets_buffer,
+            &compute.scan_l2_uniform_buffer,
+        ));
         compute.tile_count_scan_block_sums_bind_group =
             Arc::new(self.create_scan_block_sums_bind_group(
                 ctx,
                 label,
-                &compute.tile_hit_block_offsets_buffer,
+                &compute.block2_offsets_buffer,
                 &compute.tile_intersection_count_buffer,
-                &compute.scan_uniform_buffer,
+                &compute.scan_l2_uniform_buffer,
+            ));
+        compute.tile_count_scan_compose_bind_group =
+            Arc::new(self.create_dynamic_sort_scan_compose_bind_group(
+                ctx,
+                label,
+                &compute.block_local_offsets_buffer,
+                &compute.block2_offsets_buffer,
+                &compute.tile_hit_block_offsets_buffer,
+                &compute.scan_l2_uniform_buffer,
+                "tile_count_scan_compose_bind_group",
             ));
         compute.map_intersections_bind_group = Arc::new(self.create_map_intersections_bind_group(
             ctx,
@@ -1228,77 +1220,6 @@ impl GaussianRenderer {
             &compute.num_intersections_buffer,
             &compute.map_uniform_buffer,
         ));
-        compute.dynamic_sort_count_bind_group_primary =
-            Arc::new(self.create_dynamic_sort_count_bind_group(
-                ctx,
-                label,
-                &compute.tile_id_from_isect_buffer,
-                &compute.sort_counts_buffer,
-                &compute.sort_uniform_buffer,
-                &compute.num_intersections_buffer,
-                "dynamic_sort_count_bind_group_primary",
-            ));
-        compute.dynamic_sort_count_bind_group_alt =
-            Arc::new(self.create_dynamic_sort_count_bind_group(
-                ctx,
-                label,
-                &compute.sort_keys_buffer,
-                &compute.sort_counts_buffer,
-                &compute.sort_uniform_buffer,
-                &compute.num_intersections_buffer,
-                "dynamic_sort_count_bind_group_alt",
-            ));
-        compute.dynamic_sort_reduce_bind_group =
-            Arc::new(self.create_dynamic_sort_reduce_bind_group(
-                ctx,
-                label,
-                &compute.sort_counts_buffer,
-                &compute.sort_reduced_buffer,
-                &compute.sort_uniform_buffer,
-                &compute.num_intersections_buffer,
-            ));
-        compute.dynamic_sort_scan_bind_group = Arc::new(self.create_dynamic_sort_scan_bind_group(
-            ctx,
-            label,
-            &compute.sort_reduced_buffer,
-            &compute.sort_uniform_buffer,
-            &compute.num_intersections_buffer,
-        ));
-        compute.dynamic_sort_scan_add_bind_group =
-            Arc::new(self.create_dynamic_sort_scan_add_bind_group(
-                ctx,
-                label,
-                &compute.sort_reduced_buffer,
-                &compute.sort_counts_buffer,
-                &compute.sort_uniform_buffer,
-                &compute.num_intersections_buffer,
-            ));
-        compute.dynamic_sort_scatter_bind_group_primary =
-            Arc::new(self.create_dynamic_sort_scatter_bind_group(
-                ctx,
-                label,
-                &compute.tile_id_from_isect_buffer,
-                &compute.compact_gid_from_isect_buffer,
-                &compute.sort_counts_buffer,
-                &compute.sort_keys_buffer,
-                &compute.sorted_indices_alt_buffer,
-                &compute.sort_uniform_buffer,
-                &compute.num_intersections_buffer,
-                "dynamic_sort_scatter_bind_group_primary",
-            ));
-        compute.dynamic_sort_scatter_bind_group_alt =
-            Arc::new(self.create_dynamic_sort_scatter_bind_group(
-                ctx,
-                label,
-                &compute.sort_keys_buffer,
-                &compute.sorted_indices_alt_buffer,
-                &compute.sort_counts_buffer,
-                &compute.tile_id_from_isect_buffer,
-                &compute.compact_gid_from_isect_buffer,
-                &compute.sort_uniform_buffer,
-                &compute.num_intersections_buffer,
-                "dynamic_sort_scatter_bind_group_alt",
-            ));
         compute.tile_offsets_bind_group = Arc::new(self.create_tile_offsets_bind_group(
             ctx,
             label,
@@ -1372,10 +1293,7 @@ impl GaussianRenderer {
             .div_ceil(SORT_BLOCK_SIZE as usize)
             .max(1);
         compute.sort_workgroup_count = sort_workgroup_count as u32;
-        let sort_reduce_workgroup_count = (sort_workgroup_count.div_ceil(SORT_BLOCK_SIZE as usize)
-            * SORT_BIN_COUNT as usize)
-            .max(1);
-        compute.sort_reduce_workgroup_count = sort_reduce_workgroup_count as u32;
+        let sort_reduce_wg_count = sort_reduce_workgroup_count(sort_workgroup_count as u32) as usize;
         compute.sort_counts_buffer = Arc::new(create_sized_buffer(
             &ctx.device,
             &format!("{label}::sort_counts"),
@@ -1385,20 +1303,20 @@ impl GaussianRenderer {
         compute.sort_reduced_buffer = Arc::new(create_sized_buffer(
             &ctx.device,
             &format!("{label}::sort_reduced"),
-            sort_reduce_workgroup_count * std::mem::size_of::<u32>(),
+            sort_reduce_wg_count * std::mem::size_of::<u32>(),
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         ));
         compute.sort_scan_offsets_buffer = Arc::new(create_sized_buffer(
             &ctx.device,
             &format!("{label}::sort_scan_offsets"),
-            sort_reduce_workgroup_count * std::mem::size_of::<u32>(),
+            sort_reduce_wg_count * std::mem::size_of::<u32>(),
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         ));
-        compute.sort_scan_block_capacity = next_block_capacity(sort_reduce_workgroup_count);
+        let sort_scan_block_capacity = next_block_capacity(sort_reduce_wg_count);
         compute.sort_scan_block_offsets_buffer = Arc::new(create_sized_buffer(
             &ctx.device,
             &format!("{label}::sort_scan_block_offsets"),
-            compute.sort_scan_block_capacity * std::mem::size_of::<u32>(),
+            sort_scan_block_capacity * std::mem::size_of::<u32>(),
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         ));
         true
@@ -1409,7 +1327,6 @@ impl GaussianRenderer {
         ctx: &re_renderer::RenderContext,
         label: &str,
         compute: &mut CachedComputeResources,
-        output_instance_buffer: &Arc<wgpu::Buffer>,
     ) {
         let _ = ctx.device.poll(wgpu::PollType::Poll);
 
@@ -1434,6 +1351,10 @@ impl GaussianRenderer {
                     if mapped_ok {
                         let bytes = slot.buffer.slice(..).get_mapped_range();
                         let words = bytemuck::cast_slice::<u8, u32>(&bytes);
+                        // The totals buffer keeps a legacy DrawIndirect-shaped
+                        // layout: word[0] is an unused legacy quad vertex count
+                        // (6), word[1] holds the total written by
+                        // scan_block_sums_main.
                         let total_intersections = words.get(1).copied().unwrap_or(0) as usize;
                         drop(bytes);
                         slot.buffer.unmap();
@@ -1459,7 +1380,7 @@ impl GaussianRenderer {
         if required_capacity.is_some_and(|required| {
             self.ensure_intersection_capacity(ctx, label, compute, required)
         }) {
-            self.refresh_compute_bind_groups(ctx, label, compute, output_instance_buffer);
+            self.refresh_compute_bind_groups(ctx, label, compute);
         }
     }
 
@@ -1468,7 +1389,6 @@ impl GaussianRenderer {
         ctx: &re_renderer::RenderContext,
         label: &str,
         compute: &mut CachedComputeResources,
-        output_instance_buffer: &Arc<wgpu::Buffer>,
         viewport_size_px: glam::Vec2,
     ) {
         let tile_bounds = calc_tile_bounds(viewport_size_px);
@@ -1500,7 +1420,7 @@ impl GaussianRenderer {
         }
 
         if changed {
-            self.refresh_compute_bind_groups(ctx, label, compute, output_instance_buffer);
+            self.refresh_compute_bind_groups(ctx, label, compute);
         }
 
         let raster_uniform = gpu_data::RasterUniformBuffer {
@@ -1514,46 +1434,63 @@ impl GaussianRenderer {
         );
     }
 
-    fn grow_instance_buffer(
+    /// Grow all per-splat buffers (used when an entity is re-logged with a
+    /// larger cloud).
+    fn grow_splat_capacity(
         &self,
         ctx: &re_renderer::RenderContext,
         label: &str,
         resources: &mut CachedBatchResources,
         required_capacity: usize,
     ) {
-        resources.instance_capacity = next_capacity(required_capacity);
-        resources.instance_buffer = Arc::new(create_sized_buffer(
-            &ctx.device,
-            &format!("{label}::instances"),
-            resources.instance_capacity * std::mem::size_of::<gpu_data::InstanceData>(),
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        ));
+        resources.splat_capacity = next_capacity(required_capacity);
+        let splat_capacity = resources.splat_capacity;
         let compute = &mut resources.compute;
-        compute.visibility_flags_buffer = Arc::new(create_sized_buffer(
+        compute.global_from_compact_buffer = Arc::new(create_sized_buffer(
             &ctx.device,
-            &format!("{label}::visibility_flags"),
-            resources.instance_capacity * std::mem::size_of::<u32>(),
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            &format!("{label}::global_from_compact"),
+            splat_capacity * std::mem::size_of::<u32>(),
+            wgpu::BufferUsages::STORAGE,
         ));
+        compute.depth_keys_buffer = Arc::new(create_sized_buffer(
+            &ctx.device,
+            &format!("{label}::depth_keys"),
+            splat_capacity * std::mem::size_of::<u32>(),
+            wgpu::BufferUsages::STORAGE,
+        ));
+        compute.global_from_compact_alt_buffer = Arc::new(create_sized_buffer(
+            &ctx.device,
+            &format!("{label}::global_from_compact_alt"),
+            splat_capacity * std::mem::size_of::<u32>(),
+            wgpu::BufferUsages::STORAGE,
+        ));
+        compute.depth_keys_alt_buffer = Arc::new(create_sized_buffer(
+            &ctx.device,
+            &format!("{label}::depth_keys_alt"),
+            splat_capacity * std::mem::size_of::<u32>(),
+            wgpu::BufferUsages::STORAGE,
+        ));
+        compute.depth_sort_workgroup_count =
+            splat_capacity.div_ceil(SORT_BLOCK_SIZE as usize).max(1) as u32;
         compute.projected_tile_splats_buffer = Arc::new(create_sized_buffer(
             &ctx.device,
             &format!("{label}::projected_tile_splats"),
-            resources.instance_capacity * std::mem::size_of::<gpu_data::TileProjectedSplat>(),
+            splat_capacity * std::mem::size_of::<gpu_data::TileProjectedSplat>(),
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         ));
         compute.tile_hit_counts_buffer = Arc::new(create_sized_buffer(
             &ctx.device,
             &format!("{label}::tile_hit_counts"),
-            resources.instance_capacity * std::mem::size_of::<u32>(),
+            splat_capacity * std::mem::size_of::<u32>(),
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         ));
         compute.tile_hit_offsets_buffer = Arc::new(create_sized_buffer(
             &ctx.device,
             &format!("{label}::tile_hit_offsets"),
-            resources.instance_capacity * std::mem::size_of::<u32>(),
+            splat_capacity * std::mem::size_of::<u32>(),
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         ));
-        let required_block_capacity = next_block_capacity(resources.instance_capacity);
+        let required_block_capacity = next_block_capacity(splat_capacity);
         if required_block_capacity > compute.block_capacity {
             compute.block_capacity = required_block_capacity;
             compute.tile_hit_block_offsets_buffer = Arc::new(create_sized_buffer(
@@ -1562,11 +1499,22 @@ impl GaussianRenderer {
                 compute.block_capacity * std::mem::size_of::<u32>(),
                 wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             ));
+            compute.block_local_offsets_buffer = Arc::new(create_sized_buffer(
+                &ctx.device,
+                &format!("{label}::block_local_offsets"),
+                compute.block_capacity * std::mem::size_of::<u32>(),
+                wgpu::BufferUsages::STORAGE,
+            ));
+            compute.block2_offsets_buffer = Arc::new(create_sized_buffer(
+                &ctx.device,
+                &format!("{label}::block2_offsets"),
+                next_block_capacity(compute.block_capacity) * std::mem::size_of::<u32>(),
+                wgpu::BufferUsages::STORAGE,
+            ));
         }
-        let required_intersection_capacity =
-            intersection_capacity_for_instances(resources.instance_capacity);
+        let required_intersection_capacity = intersection_capacity_for_instances(splat_capacity);
         self.ensure_intersection_capacity(ctx, label, compute, required_intersection_capacity);
-        self.refresh_compute_bind_groups(ctx, label, compute, &resources.instance_buffer);
+        self.refresh_compute_bind_groups(ctx, label, compute);
     }
 }
 
@@ -1624,8 +1572,7 @@ impl Renderer for GaussianRenderer {
             },
         );
 
-        let mut depth_state = re_renderer::ViewBuilder::MAIN_TARGET_DEFAULT_DEPTH_STATE;
-        depth_state.depth_write_enabled = Some(false);
+        let depth_state = re_renderer::ViewBuilder::MAIN_TARGET_DEFAULT_DEPTH_STATE_NO_WRITE;
 
         let tile_pipeline_desc = re_renderer::RenderPipelineDesc {
             label: "GaussianRenderer::tile_draw".into(),
@@ -1696,9 +1643,23 @@ impl Renderer for GaussianRenderer {
                     "../shader/gaussian_raster_tiles.wgsl"
                 ))),
             });
-        let project_bind_group_layout = Arc::new(ctx.device.create_bind_group_layout(
+        let project_forward_bind_group_layout = Arc::new(ctx.device.create_bind_group_layout(
             &wgpu::BindGroupLayoutDescriptor {
-                label: Some("GaussianRenderer::project_bind_group_layout"),
+                label: Some("GaussianRenderer::project_forward_bind_group_layout"),
+                entries: &[
+                    storage_layout_entry(0, true),
+                    storage_layout_entry(1, true),
+                    storage_layout_entry(2, true),
+                    uniform_layout_entry(8, std::mem::size_of::<gpu_data::ProjectUniformBuffer>()),
+                    storage_layout_entry(12, false),
+                    storage_layout_entry(13, false),
+                    storage_layout_entry(14, false),
+                ],
+            },
+        ));
+        let project_visible_bind_group_layout = Arc::new(ctx.device.create_bind_group_layout(
+            &wgpu::BindGroupLayoutDescriptor {
+                label: Some("GaussianRenderer::project_visible_bind_group_layout"),
                 entries: &[
                     storage_layout_entry(0, true),
                     storage_layout_entry(1, true),
@@ -1706,11 +1667,10 @@ impl Renderer for GaussianRenderer {
                     storage_layout_entry(3, true),
                     storage_layout_entry(4, true),
                     storage_layout_entry(5, true),
-                    storage_layout_entry(6, false),
-                    storage_layout_entry(7, false),
                     uniform_layout_entry(8, std::mem::size_of::<gpu_data::ProjectUniformBuffer>()),
                     storage_layout_entry(9, false),
                     storage_layout_entry(10, false),
+                    storage_layout_entry(11, true),
                 ],
             },
         ));
@@ -1855,12 +1815,19 @@ impl Renderer for GaussianRenderer {
                 ],
             },
         ));
-        let project_pipeline = create_compute_pipeline(
+        let project_forward_pipeline = create_compute_pipeline(
             &ctx.device,
-            "GaussianRenderer::project_compute",
+            "GaussianRenderer::project_forward_compute",
             &project_shader,
-            "project_main",
-            &[project_bind_group_layout.as_ref()],
+            "project_forward_main",
+            &[project_forward_bind_group_layout.as_ref()],
+        );
+        let project_visible_pipeline = create_compute_pipeline(
+            &ctx.device,
+            "GaussianRenderer::project_visible_compute",
+            &project_shader,
+            "project_visible_main",
+            &[project_visible_bind_group_layout.as_ref()],
         );
         let scan_blocks_pipeline = create_compute_pipeline(
             &ctx.device,
@@ -1948,8 +1915,10 @@ impl Renderer for GaussianRenderer {
         );
 
         let compute_pipelines = ComputePipelines {
-            project_bind_group_layout,
-            project_pipeline,
+            project_forward_bind_group_layout,
+            project_forward_pipeline,
+            project_visible_bind_group_layout,
+            project_visible_pipeline,
             scan_bind_group_layout,
             scan_blocks_pipeline,
             scan_block_sums_bind_group_layout,
@@ -2049,11 +2018,6 @@ fn create_intersection_count_readback_slots(
         .collect()
 }
 
-#[cfg(test)]
-fn encode_descending_depth_key(camera_depth: f32) -> u32 {
-    u32::MAX - camera_depth.to_bits()
-}
-
 fn register_embedded_shaders() {
     static ONCE: OnceLock<()> = OnceLock::new();
     ONCE.get_or_init(|| {
@@ -2069,314 +2033,157 @@ fn register_embedded_shaders() {
 }
 
 mod compute {
-    //! Brush-inspired compute/tile preparation path.
+    //! Brush-style GPU-only compute/tile preparation path.
     //!
-    //! The public facade decides when compute is available. This module owns the per-frame GPU work
-    //! that dispatches the 7-stage GPU compute pipeline ending at tile raster/composite.
+    //! This module owns the per-frame GPU work: cull the full cloud
+    //! (project_forward), depth-argsort the survivors, project them
+    //! (project_visible), and run the map/sort/raster stages ending at the
+    //! tile raster/composite.  Per-frame CPU work here is uniform writes and
+    //! command encoding only.
 
     use std::sync::Arc;
     use std::time::Instant;
 
     use super::*;
-    use crate::gsplat_core::sh_degree_from_coeffs;
+
+    /// Buffers for one GPU radix argsort over `(key, value)` pairs.
+    ///
+    /// The number of keys is read on the GPU from `num_keys[0]` — dispatches
+    /// are capacity-sized and the shaders early-exit, so no CPU readback or
+    /// indirect dispatch is needed (brush v0.3.0 pattern).  Used twice per
+    /// frame: depth argsort (keys = f32 depth bits, values = global gids) and
+    /// tile-id sort (keys = tile ids, values = compact gids).
+    struct RadixSortBuffers<'a> {
+        keys_primary: &'a Arc<wgpu::Buffer>,
+        vals_primary: &'a Arc<wgpu::Buffer>,
+        keys_alt: &'a Arc<wgpu::Buffer>,
+        vals_alt: &'a Arc<wgpu::Buffer>,
+        num_keys: &'a Arc<wgpu::Buffer>,
+        counts: &'a Arc<wgpu::Buffer>,
+        reduced: &'a Arc<wgpu::Buffer>,
+        scan_offsets: &'a Arc<wgpu::Buffer>,
+        scan_block_offsets: &'a Arc<wgpu::Buffer>,
+        scan_totals: &'a Arc<wgpu::Buffer>,
+    }
 
     impl GaussianRenderer {
-        #[allow(clippy::too_many_arguments)]
-        pub(super) fn prepare_compute_batch(
+        /// Encode `num_passes` 4-bit radix sort passes.  With an even pass
+        /// count the sorted data lands back in the primary buffers; for an
+        /// odd count the caller must copy back from the alt buffers.
+        fn encode_radix_sort(
             &self,
             ctx: &re_renderer::RenderContext,
             label: &str,
-            cloud: &Arc<RenderGaussianCloud>,
-            camera: &CameraApproximation,
-            visible_indices: &[SortedSplatIndex],
-            _farthest_depth: f32,
-        ) -> PreparedBatch {
-            let upload_start = Instant::now();
-            let mut cache = self.batch_cache.lock().unwrap();
-            let resources = cache.entry(label.to_owned()).or_insert_with(|| {
-                self.create_batch_resources(ctx, label, cloud, visible_indices.len().max(1))
-            });
+            buffers: &RadixSortBuffers<'_>,
+            sort_wg_count: u32,
+            num_passes: u32,
+        ) {
             let pipelines = &self.compute_pipelines;
-            let selected_limit = visible_indices.len().max(1);
+            let sort_reduce_wg_count: u32 = sort_reduce_workgroup_count(sort_wg_count.max(1));
+            let (sort_count_x, sort_count_y) = dispatch_grid_for_workgroups(sort_wg_count.max(1));
+            let (sort_reduce_x, sort_reduce_y) = dispatch_grid_for_workgroups(sort_reduce_wg_count);
 
-            // Step 1: make sure the persistent per-cloud buffers are large enough for this frame.
-            if resources.instance_capacity < selected_limit {
-                self.grow_instance_buffer(ctx, label, resources, selected_limit);
-            }
-            let compute = &mut resources.compute;
-            self.process_intersection_count_readbacks(
-                ctx,
-                label,
-                compute,
-                &resources.instance_buffer,
-            );
-            self.ensure_tile_raster_resources(
-                ctx,
-                label,
-                compute,
-                &resources.instance_buffer,
-                camera.viewport_size_px,
-            );
+            let reduced_total = sort_reduce_wg_count;
+            let reduced_block_count = compaction_block_count(reduced_total as usize) as u32;
+            let scan_sort_uniform = fill_scan_uniform(reduced_total as usize);
+            let scan_sort_uniform_buffer = Arc::new(create_filled_buffer(
+                &ctx.device,
+                &format!("{label}::sort_scan_uniform"),
+                wgpu::BufferUsages::UNIFORM,
+                bytemuck::bytes_of(&scan_sort_uniform),
+            ));
 
-            let coeffs_per_channel = cloud
-                .sh_coeffs
-                .as_ref()
-                .map_or(0_u32, |sh| sh.coeffs_per_channel as u32);
-            let sh_degree = sh_degree_from_coeffs(coeffs_per_channel as usize).unwrap_or(0);
-            let block_count = compaction_block_count(selected_limit) as u32;
-            let tile_bounds = calc_tile_bounds(camera.viewport_size_px);
-            let project_uniform = gpu_data::ProjectUniformBuffer {
-                view_from_world: glam::Mat4::from(camera.view_from_world).to_cols_array_2d(),
-                projection_from_view: camera.projection_from_view.to_cols_array_2d(),
-                camera_world_position: camera.world_position.extend(0.0).to_array(),
-                viewport_and_near: [
-                    camera.viewport_size_px.x,
-                    camera.viewport_size_px.y,
-                    camera.near_plane,
-                    MIN_RADIUS_PX,
-                ],
-                sigma_and_counts: [
-                    SIGMA_COVERAGE.to_bits(),
-                    selected_limit as u32,
-                    coeffs_per_channel,
-                    sh_degree,
-                ],
-                _pad: [[
-                    u32::from(cloud.sh_coeffs.is_some()),
-                    OPACITY_SCALE.to_bits(),
-                    MAX_SPLATS_RENDERED.min(u32::MAX as usize) as u32,
-                    0,
-                ]],
-            };
-            let scan_uniform = gpu_data::ScanUniformBuffer {
-                total_selected: selected_limit as u32,
-                block_count,
-                _pad: [0; 2],
-            };
-            let map_uniform = gpu_data::MapUniformBuffer {
-                total_selected: selected_limit as u32,
-                intersection_capacity: compute.intersection_capacity.min(u32::MAX as usize) as u32,
-                tile_bounds_x: tile_bounds.x,
-                tile_bounds_y: tile_bounds.y,
-            };
-            ctx.queue.write_buffer(
-                &compute.project_uniform_buffer,
-                0,
-                bytemuck::bytes_of(&project_uniform),
-            );
-            ctx.queue.write_buffer(
-                &compute.scan_uniform_buffer,
-                0,
-                bytemuck::bytes_of(&scan_uniform),
-            );
-            ctx.queue.write_buffer(
-                &compute.map_uniform_buffer,
-                0,
-                bytemuck::bytes_of(&map_uniform),
-            );
-
-            // Step 2: upload the pre-sorted candidate ordering from the CPU visibility pass.
-            // The GPU projection/raster work
-            // onto the GPU.
-            compute.cpu_indices.clear();
-            compute.cpu_indices.reserve(visible_indices.len());
-            compute.cpu_indices.extend(
-                visible_indices
-                    .iter()
-                    .rev()
-                    .map(|visible| visible.splat_index),
-            );
-            ctx.queue.write_buffer(
-                &compute.index_buffer,
-                0,
-                bytemuck::cast_slice(compute.cpu_indices.as_slice()),
-            );
-
-            let (project_x, project_y) =
-                dispatch_grid_1d(selected_limit as u32, PROJECT_WORKGROUP_SIZE);
-            {
-                // Step 3: project, count tile intersections, and map each splat to its tile coverage.
-                let mut encoder = ctx.active_frame.before_view_builder_encoder.lock();
-                let mut compute_pass =
-                    encoder
-                        .get()
-                        .begin_compute_pass(&wgpu::ComputePassDescriptor {
-                            label: Some(label),
-                            timestamp_writes: None,
-                        });
-
-                compute_pass.set_pipeline(&pipelines.project_pipeline);
-                compute_pass.set_bind_group(0, compute.project_bind_group.as_ref(), &[]);
-                compute_pass.dispatch_workgroups(project_x, project_y, 1);
-
-                let (scan_x, scan_y) = dispatch_grid_1d(block_count, 1);
-                compute_pass.set_pipeline(&pipelines.scan_blocks_pipeline);
-                compute_pass.set_bind_group(0, compute.tile_count_scan_bind_group.as_ref(), &[]);
-                compute_pass.dispatch_workgroups(scan_x, scan_y, 1);
-
-                compute_pass.set_pipeline(&pipelines.scan_block_sums_pipeline);
-                compute_pass.set_bind_group(
-                    0,
-                    compute.tile_count_scan_block_sums_bind_group.as_ref(),
-                    &[],
-                );
-                compute_pass.dispatch_workgroups(1, 1, 1);
-
-                compute_pass.set_pipeline(&pipelines.map_intersections_pipeline);
-                compute_pass.set_bind_group(0, compute.map_intersections_bind_group.as_ref(), &[]);
-                compute_pass.dispatch_workgroups(project_x, project_y, 1);
-
-                compute_pass.set_pipeline(&pipelines.clamp_intersection_count_pipeline);
-                compute_pass.set_bind_group(0, compute.map_intersections_bind_group.as_ref(), &[]);
-                compute_pass.dispatch_workgroups(1, 1, 1);
-            }
-
-            if let Some(slot) = compute
-                .intersection_count_readback_slots
-                .iter_mut()
-                .find(|slot| slot.state == IntersectionCountReadbackState::Idle)
-            {
-                // Read back the exact intersection demand so dense scenes can grow the staging buffers
-                // safely on a later frame without stalling the normal render path.
-                *slot.result.lock().unwrap() = None;
-                let mut encoder = ctx.active_frame.before_view_builder_encoder.lock();
-                encoder.get().copy_buffer_to_buffer(
-                    &compute.tile_intersection_count_buffer,
-                    0,
-                    &slot.buffer,
-                    0,
-                    std::mem::size_of::<gpu_data::DrawIndirectArgs>() as u64,
-                );
-                slot.state = IntersectionCountReadbackState::CopySubmitted;
-            }
-
-            let tile_count_bits =
-                (u32::BITS - (tile_count(tile_bounds).max(1) as u32).leading_zeros()).max(1);
-            let sort_passes = tile_count_bits.div_ceil(4);
-            let (sort_count_x, sort_count_y) =
-                dispatch_grid_for_workgroups(compute.sort_workgroup_count.max(1));
-            let (sort_reduce_x, sort_reduce_y) =
-                dispatch_grid_for_workgroups(compute.sort_reduce_workgroup_count.max(1));
-            for pass_index in 0..sort_passes {
-                // Step 4: radix-sort the tile intersections so each tile can consume a contiguous
-                // intersection range during raster.
-                let sort_uniform_buffer =
-                    Arc::new(ctx.device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some(&format!("{label}::sort_uniform_pass_{pass_index}")),
-                        size: std::mem::size_of::<gpu_data::SortUniformBuffer>() as u64,
-                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    }));
+            for pass_index in 0..num_passes {
                 let sort_uniform = gpu_data::SortUniformBuffer {
-                    shift: pass_index * 4,
+                    shift: pass_index * SORT_BITS_PER_PASS,
                     total_keys_unused: 0,
                     _pad: [0; 2],
                 };
-                ctx.queue
-                    .write_buffer(&sort_uniform_buffer, 0, bytemuck::bytes_of(&sort_uniform));
+                let sort_uniform_buffer = Arc::new(create_filled_buffer(
+                    &ctx.device,
+                    &format!("{label}::sort_uniform_pass_{pass_index}"),
+                    wgpu::BufferUsages::UNIFORM,
+                    bytemuck::bytes_of(&sort_uniform),
+                ));
 
                 let use_primary_as_source = pass_index % 2 == 0;
-                let (
-                    src_keys_buffer,
-                    src_values_buffer,
-                    dst_keys_buffer,
-                    dst_values_buffer,
-                    suffix,
-                ) = if use_primary_as_source {
-                    (
-                        &compute.tile_id_from_isect_buffer,
-                        &compute.compact_gid_from_isect_buffer,
-                        &compute.sort_keys_buffer,
-                        &compute.sorted_indices_alt_buffer,
-                        "dynamic_sort_primary_to_alt",
-                    )
-                } else {
-                    (
-                        &compute.sort_keys_buffer,
-                        &compute.sorted_indices_alt_buffer,
-                        &compute.tile_id_from_isect_buffer,
-                        &compute.compact_gid_from_isect_buffer,
-                        "dynamic_sort_alt_to_primary",
-                    )
-                };
+                let (src_keys_buffer, src_values_buffer, dst_keys_buffer, dst_values_buffer, suffix) =
+                    if use_primary_as_source {
+                        (
+                            buffers.keys_primary,
+                            buffers.vals_primary,
+                            buffers.keys_alt,
+                            buffers.vals_alt,
+                            "radix_sort_primary_to_alt",
+                        )
+                    } else {
+                        (
+                            buffers.keys_alt,
+                            buffers.vals_alt,
+                            buffers.keys_primary,
+                            buffers.vals_primary,
+                            "radix_sort_alt_to_primary",
+                        )
+                    };
                 let count_bind_group = self.create_dynamic_sort_count_bind_group(
                     ctx,
                     label,
                     src_keys_buffer,
-                    &compute.sort_counts_buffer,
+                    buffers.counts,
                     &sort_uniform_buffer,
-                    &compute.num_intersections_buffer,
+                    buffers.num_keys,
                     suffix,
                 );
                 let reduce_bind_group = self.create_dynamic_sort_reduce_bind_group(
                     ctx,
                     label,
-                    &compute.sort_counts_buffer,
-                    &compute.sort_reduced_buffer,
+                    buffers.counts,
+                    buffers.reduced,
                     &sort_uniform_buffer,
-                    &compute.num_intersections_buffer,
-                );
-                let reduced_total = compute.sort_reduce_workgroup_count.max(1);
-                let reduced_block_count = compaction_block_count(reduced_total as usize) as u32;
-                let sort_scan_uniform_buffer =
-                    Arc::new(ctx.device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some(&format!("{label}::sort_scan_uniform_pass_{pass_index}")),
-                        size: std::mem::size_of::<gpu_data::ScanUniformBuffer>() as u64,
-                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    }));
-                let sort_scan_uniform = gpu_data::ScanUniformBuffer {
-                    total_selected: reduced_total,
-                    block_count: reduced_block_count,
-                    _pad: [0; 2],
-                };
-                ctx.queue.write_buffer(
-                    &sort_scan_uniform_buffer,
-                    0,
-                    bytemuck::bytes_of(&sort_scan_uniform),
+                    buffers.num_keys,
                 );
                 let scan_blocks_bind_group = self.create_scan_bind_group(
                     ctx,
                     label,
-                    &compute.sort_reduced_buffer,
-                    &compute.sort_scan_offsets_buffer,
-                    &compute.sort_scan_block_offsets_buffer,
-                    &sort_scan_uniform_buffer,
+                    buffers.reduced,
+                    buffers.scan_offsets,
+                    buffers.scan_block_offsets,
+                    &scan_sort_uniform_buffer,
                 );
                 let scan_block_sums_bind_group = self.create_scan_block_sums_bind_group(
                     ctx,
                     label,
-                    &compute.sort_scan_block_offsets_buffer,
-                    &compute.sort_scan_totals_buffer,
-                    &sort_scan_uniform_buffer,
+                    buffers.scan_block_offsets,
+                    buffers.scan_totals,
+                    &scan_sort_uniform_buffer,
                 );
                 let scan_compose_bind_group = self.create_dynamic_sort_scan_compose_bind_group(
                     ctx,
                     label,
-                    &compute.sort_scan_offsets_buffer,
-                    &compute.sort_scan_block_offsets_buffer,
-                    &compute.sort_reduced_buffer,
-                    &sort_scan_uniform_buffer,
+                    buffers.scan_offsets,
+                    buffers.scan_block_offsets,
+                    buffers.reduced,
+                    &scan_sort_uniform_buffer,
                     suffix,
                 );
                 let scan_add_bind_group = self.create_dynamic_sort_scan_add_bind_group(
                     ctx,
                     label,
-                    &compute.sort_reduced_buffer,
-                    &compute.sort_counts_buffer,
+                    buffers.reduced,
+                    buffers.counts,
                     &sort_uniform_buffer,
-                    &compute.num_intersections_buffer,
+                    buffers.num_keys,
                 );
                 let scatter_bind_group = self.create_dynamic_sort_scatter_bind_group(
                     ctx,
                     label,
                     src_keys_buffer,
                     src_values_buffer,
-                    &compute.sort_counts_buffer,
+                    buffers.counts,
                     dst_keys_buffer,
                     dst_values_buffer,
                     &sort_uniform_buffer,
-                    &compute.num_intersections_buffer,
+                    buffers.num_keys,
                     suffix,
                 );
                 let (sort_scan_blocks_x, sort_scan_blocks_y) =
@@ -2389,7 +2196,7 @@ mod compute {
                     encoder
                         .get()
                         .begin_compute_pass(&wgpu::ComputePassDescriptor {
-                            label: Some("gaussian_dynamic_sort"),
+                            label: Some("gaussian_radix_sort"),
                             timestamp_writes: None,
                         });
                 compute_pass.set_pipeline(&pipelines.dynamic_sort_count_pipeline);
@@ -2420,6 +2227,223 @@ mod compute {
                 compute_pass.set_bind_group(0, &scatter_bind_group, &[]);
                 compute_pass.dispatch_workgroups(sort_count_x, sort_count_y, 1);
             }
+        }
+
+        pub(super) fn prepare_compute_batch(
+            &self,
+            ctx: &re_renderer::RenderContext,
+            label: &str,
+            cloud: &Arc<RenderGaussianCloud>,
+            camera: &CameraApproximation,
+        ) -> PreparedBatch {
+            let upload_start = Instant::now();
+            let mut cache = self.batch_cache.lock().unwrap();
+            let resources = cache
+                .entry(label.to_owned())
+                .or_insert_with(|| self.create_batch_resources(ctx, label, cloud));
+            let pipelines = &self.compute_pipelines;
+            let total_splats = cloud.len().max(1);
+
+            // Step 1: make sure the persistent per-cloud buffers are large enough for this frame.
+            if resources.splat_capacity < total_splats {
+                self.grow_splat_capacity(ctx, label, resources, total_splats);
+            }
+            let compute = &mut resources.compute;
+            self.process_intersection_count_readbacks(ctx, label, compute);
+            self.ensure_tile_raster_resources(ctx, label, compute, camera.viewport_size_px);
+
+            // Step 2: write this frame's uniforms (camera + counts).  This and
+            // command encoding below are the only per-frame CPU work.
+            let block_count = compaction_block_count(total_splats) as u32;
+            let block2_count = compaction_block_count(block_count as usize) as u32;
+            let tile_bounds = calc_tile_bounds(camera.viewport_size_px);
+            let project_uniform = fill_project_uniform(camera, total_splats, cloud);
+            let scan_uniform = fill_scan_uniform(total_splats);
+            // Level-2 scan: scans the level-1 block sums (block_count entries).
+            let scan_l2_uniform = fill_scan_uniform(block_count as usize);
+            let map_uniform =
+                fill_map_uniform(total_splats, compute.intersection_capacity, tile_bounds);
+            ctx.queue.write_buffer(
+                &compute.project_uniform_buffer,
+                0,
+                bytemuck::bytes_of(&project_uniform),
+            );
+            ctx.queue.write_buffer(
+                &compute.scan_uniform_buffer,
+                0,
+                bytemuck::bytes_of(&scan_uniform),
+            );
+            ctx.queue.write_buffer(
+                &compute.scan_l2_uniform_buffer,
+                0,
+                bytemuck::bytes_of(&scan_l2_uniform),
+            );
+            ctx.queue.write_buffer(
+                &compute.map_uniform_buffer,
+                0,
+                bytemuck::bytes_of(&map_uniform),
+            );
+
+            let (project_x, project_y) =
+                dispatch_grid_1d(total_splats as u32, PROJECT_WORKGROUP_SIZE);
+            {
+                // Step 3: cull the FULL cloud on the GPU, compacting
+                // (global_gid, depth bits) pairs via atomicAdd(num_visible).
+                let mut encoder = ctx.active_frame.before_view_builder_encoder.lock();
+                encoder
+                    .get()
+                    .clear_buffer(&compute.num_visible_buffer, 0, None);
+                let mut compute_pass =
+                    encoder
+                        .get()
+                        .begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("gaussian_project_forward"),
+                            timestamp_writes: None,
+                        });
+                compute_pass.set_pipeline(&pipelines.project_forward_pipeline);
+                compute_pass.set_bind_group(0, compute.project_forward_bind_group.as_ref(), &[]);
+                compute_pass.dispatch_workgroups(project_x, project_y, 1);
+            }
+
+            // Step 4a: canonicalize the compact order by gid.
+            // project_forward's atomicAdd compaction is racy; sorting by gid
+            // first makes depth-bit ties resolve in ascending-gid order so the
+            // render is deterministic.
+            self.encode_radix_sort(
+                ctx,
+                label,
+                &RadixSortBuffers {
+                    keys_primary: &compute.global_from_compact_buffer,
+                    vals_primary: &compute.depth_keys_buffer,
+                    keys_alt: &compute.global_from_compact_alt_buffer,
+                    vals_alt: &compute.depth_keys_alt_buffer,
+                    num_keys: &compute.num_visible_buffer,
+                    counts: &compute.sort_counts_buffer,
+                    reduced: &compute.sort_reduced_buffer,
+                    scan_offsets: &compute.sort_scan_offsets_buffer,
+                    scan_block_offsets: &compute.sort_scan_block_offsets_buffer,
+                    scan_totals: &compute.sort_scan_totals_buffer,
+                },
+                compute.depth_sort_workgroup_count,
+                gid_sort_passes(total_splats),
+            );
+
+            // Step 4b: depth argsort, ascending by f32 depth bits — compact
+            // order becomes front-to-back.  Even pass count (8), so the sorted
+            // pairs land back in the primary buffers.
+            self.encode_radix_sort(
+                ctx,
+                label,
+                &RadixSortBuffers {
+                    keys_primary: &compute.depth_keys_buffer,
+                    vals_primary: &compute.global_from_compact_buffer,
+                    keys_alt: &compute.depth_keys_alt_buffer,
+                    vals_alt: &compute.global_from_compact_alt_buffer,
+                    num_keys: &compute.num_visible_buffer,
+                    counts: &compute.sort_counts_buffer,
+                    reduced: &compute.sort_reduced_buffer,
+                    scan_offsets: &compute.sort_scan_offsets_buffer,
+                    scan_block_offsets: &compute.sort_scan_block_offsets_buffer,
+                    scan_totals: &compute.sort_scan_totals_buffer,
+                },
+                compute.depth_sort_workgroup_count,
+                DEPTH_SORT_PASSES,
+            );
+
+            {
+                // Step 5: project visible splats in depth order, prefix-scan
+                // their tile hit counts (3-level scan), and map each splat to
+                // its tile coverage.
+                let (scan_x, scan_y) = dispatch_grid_1d(block_count, 1);
+                let (scan_l2_x, scan_l2_y) = dispatch_grid_1d(block2_count, 1);
+                let (compose_x, compose_y) = dispatch_grid_1d(block_count, SORT_WORKGROUP_SIZE);
+
+                let mut encoder = ctx.active_frame.before_view_builder_encoder.lock();
+                let mut compute_pass =
+                    encoder
+                        .get()
+                        .begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some(label),
+                            timestamp_writes: None,
+                        });
+
+                compute_pass.set_pipeline(&pipelines.project_visible_pipeline);
+                compute_pass.set_bind_group(0, compute.project_visible_bind_group.as_ref(), &[]);
+                compute_pass.dispatch_workgroups(project_x, project_y, 1);
+
+                compute_pass.set_pipeline(&pipelines.scan_blocks_pipeline);
+                compute_pass.set_bind_group(0, compute.tile_count_scan_bind_group.as_ref(), &[]);
+                compute_pass.dispatch_workgroups(scan_x, scan_y, 1);
+
+                compute_pass.set_pipeline(&pipelines.scan_blocks_pipeline);
+                compute_pass.set_bind_group(0, compute.tile_count_scan_l2_bind_group.as_ref(), &[]);
+                compute_pass.dispatch_workgroups(scan_l2_x, scan_l2_y, 1);
+
+                compute_pass.set_pipeline(&pipelines.scan_block_sums_pipeline);
+                compute_pass.set_bind_group(
+                    0,
+                    compute.tile_count_scan_block_sums_bind_group.as_ref(),
+                    &[],
+                );
+                compute_pass.dispatch_workgroups(1, 1, 1);
+
+                compute_pass.set_pipeline(&pipelines.dynamic_sort_scan_compose_pipeline);
+                compute_pass.set_bind_group(
+                    0,
+                    compute.tile_count_scan_compose_bind_group.as_ref(),
+                    &[],
+                );
+                compute_pass.dispatch_workgroups(compose_x, compose_y, 1);
+
+                compute_pass.set_pipeline(&pipelines.map_intersections_pipeline);
+                compute_pass.set_bind_group(0, compute.map_intersections_bind_group.as_ref(), &[]);
+                compute_pass.dispatch_workgroups(project_x, project_y, 1);
+
+                compute_pass.set_pipeline(&pipelines.clamp_intersection_count_pipeline);
+                compute_pass.set_bind_group(0, compute.map_intersections_bind_group.as_ref(), &[]);
+                compute_pass.dispatch_workgroups(1, 1, 1);
+            }
+
+            if let Some(slot) = compute
+                .intersection_count_readback_slots
+                .iter_mut()
+                .find(|slot| slot.state == IntersectionCountReadbackState::Idle)
+            {
+                // Read back the exact intersection demand so dense scenes can grow the staging buffers
+                // safely on a later frame without stalling the normal render path.
+                *slot.result.lock().unwrap() = None;
+                let mut encoder = ctx.active_frame.before_view_builder_encoder.lock();
+                encoder.get().copy_buffer_to_buffer(
+                    &compute.tile_intersection_count_buffer,
+                    0,
+                    &slot.buffer,
+                    0,
+                    std::mem::size_of::<gpu_data::DrawIndirectArgs>() as u64,
+                );
+                slot.state = IntersectionCountReadbackState::CopySubmitted;
+            }
+
+            // Step 6: radix-sort the tile intersections so each tile can
+            // consume a contiguous intersection range during raster.
+            let sort_passes = tile_sort_passes(tile_count(tile_bounds));
+            self.encode_radix_sort(
+                ctx,
+                label,
+                &RadixSortBuffers {
+                    keys_primary: &compute.tile_id_from_isect_buffer,
+                    vals_primary: &compute.compact_gid_from_isect_buffer,
+                    keys_alt: &compute.sort_keys_buffer,
+                    vals_alt: &compute.sorted_indices_alt_buffer,
+                    num_keys: &compute.num_intersections_buffer,
+                    counts: &compute.sort_counts_buffer,
+                    reduced: &compute.sort_reduced_buffer,
+                    scan_offsets: &compute.sort_scan_offsets_buffer,
+                    scan_block_offsets: &compute.sort_scan_block_offsets_buffer,
+                    scan_totals: &compute.sort_scan_totals_buffer,
+                },
+                compute.sort_workgroup_count,
+                sort_passes,
+            );
 
             if sort_passes % 2 == 1 {
                 let bytes = (compute.intersection_capacity * std::mem::size_of::<u32>()) as u64;
@@ -2441,7 +2465,7 @@ mod compute {
             }
 
             {
-                // Step 5: turn sorted tile intersections into per-tile ranges, raster each tile, then
+                // Step 7: turn sorted tile intersections into per-tile ranges, raster each tile, then
                 // queue a fullscreen composite back into the normal Rerun draw graph.
                 let mut encoder = ctx.active_frame.before_view_builder_encoder.lock();
                 encoder
@@ -2503,25 +2527,12 @@ mod gpu_types {
     //! from `gsplat_core::gpu_types` — the single source of truth.  Only
     //! Rerun-specific types live here.
 
-    use bytemuck::{Pod, Zeroable};
-
     // Re-export shared GPU types from gsplat_core so existing `gpu_data::*`
     // references throughout this file continue to work unchanged.
     pub use crate::gsplat_core::gpu_types::{
         DrawIndirectArgs, MapUniformBuffer, ProjectUniformBuffer, RasterUniformBuffer,
         ScanUniformBuffer, SortUniformBuffer, TileProjectedSplat,
     };
-
-    /// Per-instance data layout -- matches the WGSL shader's output format. Used for buffer sizing.
-    #[repr(C)]
-    #[derive(Clone, Copy, Debug, Pod, Zeroable)]
-    pub struct InstanceData {
-        pub center_ndc: [f32; 2],
-        pub ndc_depth: f32,
-        pub radius_ndc: f32,
-        pub inv_cov_ndc_xx_xy_yy_pad: [f32; 4],
-        pub color_opacity: [f32; 4],
-    }
 
     #[cfg(test)]
     mod tests {

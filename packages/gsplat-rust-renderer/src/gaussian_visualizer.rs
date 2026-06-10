@@ -13,15 +13,9 @@
 //!    representation of the Gaussian data.  Clouds are cached per entity path
 //!    and only rebuilt when the data or transform signature changes.
 //!
-//! 3. **Culls** splats that are behind the camera or outside the frustum using
-//!    a fast approximate test on the CPU.  This is intentionally conservative;
-//!    the GPU shader does the exact projection later.
-//!
-//! 4. **Sorts** the surviving candidates back-to-front by camera depth.  Alpha
-//!    blending requires this ordering for correct compositing.
-//!
-//! 5. **Submits** the sorted candidate list to [`GaussianDrawData`] which
-//!    drives the actual GPU render pass.
+//! 3. **Submits** the full cloud + camera to [`GaussianDrawData`] which
+//!    drives the GPU render pass.  Culling and depth sorting happen entirely
+//!    on the GPU (Brush model) — there is no CPU pre-pass.
 //!
 //! # Rerun Extension Points
 //!
@@ -35,7 +29,7 @@
 //!   the Rerun viewer with the current view context and query.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::gaussian_renderer::GaussianDrawData;
 use glam::{Affine3A, Quat, Vec2, Vec3};
@@ -51,7 +45,7 @@ use rerun::{Archetype as _, Component as _};
 // ── Imports from gsplat_core (the Rerun-free algorithm module) ───────────
 use crate::gsplat_core::{
     CameraApproximation, RenderGaussianCloud, RenderShCoefficients, approximate_bounds_from_points,
-    fallback_camera, normalize_quat_or_identity, rebuild_visible_indices, sh_degree_from_coeffs,
+    fallback_camera, normalize_quat_or_identity, sh_degree_from_coeffs,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -169,7 +163,11 @@ impl GaussianSplats3D {
 pub struct GaussianSplatVisualizer {
     /// One cached render cloud per entity path.  The key is
     /// `"gaussian_splats::{entity_path}"`.
-    clouds: HashMap<String, CachedCloud>,
+    ///
+    /// Wrapped in a `Mutex` because since Rerun 0.33,
+    /// [`VisualizerSystem::execute`] takes `&self` instead of `&mut self`.
+    /// The lock is taken once at the top of `execute`.
+    clouds: Mutex<HashMap<String, CachedCloud>>,
 }
 
 /// A cached cloud together with the signature that was used to build it.
@@ -229,15 +227,17 @@ impl VisualizerSystem for GaussianSplatVisualizer {
     /// 2. Compute a cache signature (splat count + SH shape + transform)
     /// 3. Build or reuse the `RenderGaussianCloud`
     /// 4. Extract the current camera from the 3D view state
-    /// 5. Cull splats outside the frustum (approximate, on CPU)
-    /// 6. Sort survivors back-to-front by depth
-    /// 7. Submit to `GaussianDrawData` for GPU rendering
+    /// 5. Submit to `GaussianDrawData` for GPU rendering (the GPU culls and
+    ///    depth-sorts — no CPU pre-pass)
     fn execute(
-        &mut self,
+        &self,
         ctx: &ViewContext<'_>,
         query: &ViewQuery<'_>,
         context_systems: &ViewContextCollection,
     ) -> Result<VisualizerExecutionOutput, ViewSystemExecutionError> {
+        // Lock the cloud cache once for the whole frame (`execute` takes
+        // `&self` since Rerun 0.33; the viewer never runs us re-entrantly).
+        let mut clouds = self.clouds.lock().expect("cloud cache mutex poisoned");
         let mut output = VisualizerExecutionOutput::default();
         // The transform tree tells us how each entity's coordinate frame
         // relates to the view's coordinate frame.
@@ -280,9 +280,11 @@ impl VisualizerSystem for GaussianSplatVisualizer {
                     &latest_at_query,
                     Some(instruction),
                 );
-            let sh_coefficients = extract_sh_coefficients(&latest_at_results, expected_splats)
-                .map_err(|err| {
-                    ViewSystemExecutionError::DrawDataCreationError(Box::new(std::io::Error::new(
+            // Validate the SH tensor every frame (cheap, no copy); the payload
+            // itself is only copied below when the cloud is (re)built.
+            let sh_coeffs_per_channel =
+                sh_meta(&latest_at_results, expected_splats).map_err(|err| {
+                    ViewSystemExecutionError::DrawDataCreationError(Arc::new(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         err,
                     )))
@@ -306,15 +308,14 @@ impl VisualizerSystem for GaussianSplatVisualizer {
             let label = format!("gaussian_splats::{}", data_result.entity_path);
             let signature = CloudSignature {
                 expected_splats,
-                sh_coeffs_per_channel: sh_coefficients.as_ref().map(|sh| sh.coeffs_per_channel),
+                sh_coeffs_per_channel,
                 transform_bits: transform.to_cols_array().map(f32::to_bits),
             };
             active_labels.insert(label.clone());
 
             // `or_insert_with` only builds the cloud if this is the first time
             // we've seen this entity path.
-            let cache_entry = self
-                .clouds
+            let cache_entry = clouds
                 .entry(label.clone())
                 .or_insert_with(|| CachedCloud {
                     signature: signature.clone(),
@@ -325,7 +326,9 @@ impl VisualizerSystem for GaussianSplatVisualizer {
                         opacities.slice::<f32>(),
                         colors.slice::<u32>(),
                         transform,
-                        sh_coefficients.clone(),
+                        sh_coeffs_per_channel.and_then(|coeffs_per_channel| {
+                            materialize_sh_coefficients(&latest_at_results, coeffs_per_channel)
+                        }),
                     )),
                 });
 
@@ -340,7 +343,9 @@ impl VisualizerSystem for GaussianSplatVisualizer {
                     opacities.slice::<f32>(),
                     colors.slice::<u32>(),
                     transform,
-                    sh_coefficients,
+                    sh_coeffs_per_channel.and_then(|coeffs_per_channel| {
+                        materialize_sh_coefficients(&latest_at_results, coeffs_per_channel)
+                    }),
                 ));
             }
 
@@ -352,27 +357,17 @@ impl VisualizerSystem for GaussianSplatVisualizer {
             let camera =
                 camera_from_view(ctx, query).unwrap_or_else(|| fallback_camera(cloud.bounds_world));
 
-            // ── Step 5 & 6: Cull and sort ─────────────────────────────
-            let mut visible = Vec::new();
-            rebuild_visible_indices(&mut visible, &cloud, &camera);
-            let farthest_depth = visible.first().map_or(0.0, |visible| visible.camera_depth);
-
-            // ── Step 7: Submit to the GPU renderer ────────────────────
-            let submission = draw_data.add_batch(
-                ctx.render_ctx(),
-                &label,
-                &cloud,
-                &camera,
-                &visible,
-                farthest_depth,
-            );
+            // ── Step 5: Submit to the GPU renderer ────────────────────
+            // Culling and depth sorting happen on the GPU (Brush model);
+            // the full cloud + camera is all the renderer needs.
+            let submission = draw_data.add_batch(ctx.render_ctx(), &label, &cloud, &camera);
             if let Some(extra) = submission.extra_draw_data {
                 extra_draw_data.push(extra);
             }
         }
 
         // Evict cached clouds for entities that are no longer in the view.
-        self.clouds.retain(|label, _| active_labels.contains(label));
+        clouds.retain(|label, _| active_labels.contains(label));
         output.draw_data = vec![draw_data.into()];
         output.draw_data.extend(extra_draw_data);
         Ok(output)
@@ -490,15 +485,21 @@ where
 // SH coefficient extraction (Rerun-specific)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Extract spherical harmonic coefficients from the data store.
+/// Validate the SH tensor and return its coefficient count per channel
+/// **without copying the coefficient data**.
 ///
 /// The SH tensor is expected to have shape `[N, coeffs_per_channel, 3]` where
 /// `N` matches the number of splats and `coeffs_per_channel` is one of
 /// `{1, 4, 9, 16, 25}` (corresponding to SH degrees 0–4).
-fn extract_sh_coefficients(
+///
+/// This runs every frame (so shape/dtype errors surface immediately, not only
+/// on cache misses); the actual payload copy is deferred to
+/// [`materialize_sh_coefficients`], which only runs when the cloud is
+/// (re)built.
+fn sh_meta(
     latest_at_results: &re_view::BlueprintResolvedLatestAtResults<'_>,
     expected_splats: usize,
-) -> Result<Option<RenderShCoefficients>, String> {
+) -> Result<Option<usize>, String> {
     let Some(tensor) = latest_at_results.get_mono::<re_sdk_types::components::TensorData>(
         GaussianSplats3D::descriptor_sh_coefficients().component,
     ) else {
@@ -534,8 +535,8 @@ fn extract_sh_coefficients(
         ));
     }
 
-    let coefficients: Arc<[f32]> = match &tensor.buffer {
-        re_sdk_types::datatypes::TensorBuffer::F32(values) => Arc::from(values.as_ref()),
+    let values_len = match &tensor.buffer {
+        re_sdk_types::datatypes::TensorBuffer::F32(values) => values.len(),
         other => {
             return Err(format!(
                 "invalid SH tensor dtype {:?}: expected Float32",
@@ -548,18 +549,32 @@ fn extract_sh_coefficients(
         .checked_mul(coeffs_per_channel)
         .and_then(|value| value.checked_mul(3))
         .ok_or_else(|| "SH tensor size overflow".to_owned())?;
-    if coefficients.len() != expected_len {
+    if values_len != expected_len {
         return Err(format!(
             "invalid SH tensor payload: expected {} floats, got {}",
-            expected_len,
-            coefficients.len()
+            expected_len, values_len
         ));
     }
 
-    Ok(Some(RenderShCoefficients {
+    Ok(Some(coeffs_per_channel))
+}
+
+/// Copy the SH tensor payload (already validated by [`sh_meta`]) into a packed
+/// [`RenderShCoefficients`].  Only called when the cloud is (re)built.
+fn materialize_sh_coefficients(
+    latest_at_results: &re_view::BlueprintResolvedLatestAtResults<'_>,
+    coeffs_per_channel: usize,
+) -> Option<RenderShCoefficients> {
+    let tensor = latest_at_results.get_mono::<re_sdk_types::components::TensorData>(
+        GaussianSplats3D::descriptor_sh_coefficients().component,
+    )?;
+    let re_sdk_types::datatypes::TensorBuffer::F32(values) = &tensor.buffer else {
+        return None;
+    };
+    Some(RenderShCoefficients {
         coeffs_per_channel,
-        coefficients,
-    }))
+        coefficients: Arc::from(values.as_ref()),
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

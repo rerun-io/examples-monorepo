@@ -1,19 +1,20 @@
 //! Standalone GPU renderer for Gaussian splats — no Rerun dependency.
 //!
-//! Implements the same 7-stage compute pipeline as `gaussian_renderer.rs`
-//! (project → compact → map intersections → radix sort → tile offsets →
-//! rasterize) but uses raw `wgpu` directly instead of `re_renderer`.
+//! Implements the same GPU-only compute pipeline as `gaussian_renderer.rs`
+//! (project_forward cull → depth argsort → project_visible → map intersections
+//! → tile radix sort → tile offsets → rasterize) but uses raw `wgpu` directly
+//! instead of `re_renderer`.
 //!
 //! The output is read back from the GPU as an RGBA8 image buffer.
 //! This module follows the [Brush](https://github.com/ArthurBrussee/brush)
-//! approach: pure GPU rendering.
+//! approach: pure GPU rendering — the CPU only writes uniforms and encodes
+//! commands; culling and depth sorting happen on the GPU.
 
 use std::sync::Arc;
 
-use super::culling::rebuild_visible_indices;
 use super::gpu_context::GpuContext;
 use super::gpu_types::*;
-use super::types::{CameraApproximation, RenderGaussianCloud, RenderOutput, SortedSplatIndex};
+use super::types::{CameraApproximation, RenderGaussianCloud, RenderOutput};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Renderer (holds reusable pipelines)
@@ -35,11 +36,200 @@ impl GpuRenderer {
     }
 }
 
-// NOTE: The old ~280-line inline constructor that defined all bind group layouts
-// and compute pipelines has been replaced by shared functions in gpu_types.rs:
-//   create_compute_bind_group_layouts() + create_compute_pipelines()
+// ═══════════════════════════════════════════════════════════════════════════════
+// GPU radix argsort (count-buffer driven, brush v0.3.0 pattern)
+// ═══════════════════════════════════════════════════════════════════════════════
 
-// (Old ~280-line inline constructor deleted — see gpu_types.rs)
+/// Buffers for one GPU radix argsort over `(key, value)` pairs.
+///
+/// The number of keys is read on the GPU from `num_keys[0]` — dispatches are
+/// capacity-sized and early-exit, so no CPU readback or indirect dispatch is
+/// needed.  Used twice per frame: depth argsort (keys = f32 depth bits,
+/// values = global gids) and tile-id sort (keys = tile ids, values =
+/// compact gids).
+struct RadixSortBuffers<'a> {
+    keys_primary: &'a wgpu::Buffer,
+    vals_primary: &'a wgpu::Buffer,
+    keys_alt: &'a wgpu::Buffer,
+    vals_alt: &'a wgpu::Buffer,
+    /// GPU buffer whose first u32 is the number of keys to sort.
+    num_keys: &'a wgpu::Buffer,
+    counts: &'a wgpu::Buffer,
+    reduced: &'a wgpu::Buffer,
+    scan_offsets: &'a wgpu::Buffer,
+    scan_block_offsets: &'a wgpu::Buffer,
+    scan_totals: &'a wgpu::Buffer,
+}
+
+/// Encode `num_passes` 4-bit radix sort passes.  With an even pass count the
+/// sorted data lands back in the primary buffers; for an odd count the caller
+/// must copy back from the alt buffers.
+#[allow(clippy::too_many_arguments)]
+fn encode_radix_sort(
+    device: &wgpu::Device,
+    encoder: &mut wgpu::CommandEncoder,
+    renderer: &GpuRenderer,
+    buffers: &RadixSortBuffers<'_>,
+    sort_wg_count: u32,
+    num_passes: u32,
+) {
+    let sort_reduce_wg_count: u32 = sort_reduce_workgroup_count(sort_wg_count.max(1));
+    let (sort_count_x, sort_count_y) = dispatch_grid_for_workgroups(sort_wg_count.max(1));
+    let (sort_reduce_x, sort_reduce_y) = dispatch_grid_for_workgroups(sort_reduce_wg_count);
+
+    let reduced_total: u32 = sort_reduce_wg_count;
+    let reduced_block_count: u32 = compaction_block_count(reduced_total as usize) as u32;
+    let scan_sort_uniform: ScanUniformBuffer = fill_scan_uniform(reduced_total as usize);
+    let scan_sort_ub: wgpu::Buffer = create_filled_buffer(
+        device,
+        "scan_sort_ub",
+        wgpu::BufferUsages::UNIFORM,
+        bytemuck::bytes_of(&scan_sort_uniform),
+    );
+
+    for pass_index in 0..num_passes {
+        let sort_uniform: SortUniformBuffer = SortUniformBuffer {
+            shift: pass_index * SORT_BITS_PER_PASS,
+            total_keys_unused: 0,
+            _pad: [0; 2],
+        };
+        let sort_ub: wgpu::Buffer = create_filled_buffer(
+            device,
+            "sort_ub",
+            wgpu::BufferUsages::UNIFORM,
+            bytemuck::bytes_of(&sort_uniform),
+        );
+
+        let use_primary: bool = pass_index % 2 == 0;
+        let (src_keys, src_vals, dst_keys, dst_vals) = if use_primary {
+            (
+                buffers.keys_primary,
+                buffers.vals_primary,
+                buffers.keys_alt,
+                buffers.vals_alt,
+            )
+        } else {
+            (
+                buffers.keys_alt,
+                buffers.vals_alt,
+                buffers.keys_primary,
+                buffers.vals_primary,
+            )
+        };
+
+        let count_bg: wgpu::BindGroup = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sort_count_bg"),
+            layout: &renderer.layouts.sort_count,
+            entries: &[
+                storage_buffer_entry(0, &sort_ub),
+                storage_buffer_entry(1, src_keys),
+                storage_buffer_entry(2, buffers.counts),
+                storage_buffer_entry(6, buffers.num_keys),
+            ],
+        });
+        let reduce_bg: wgpu::BindGroup = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sort_reduce_bg"),
+            layout: &renderer.layouts.sort_reduce,
+            entries: &[
+                storage_buffer_entry(0, &sort_ub),
+                storage_buffer_entry(1, buffers.counts),
+                storage_buffer_entry(2, buffers.reduced),
+                storage_buffer_entry(6, buffers.num_keys),
+            ],
+        });
+        let scan_blocks_bg: wgpu::BindGroup =
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("sort_scan_blocks_bg"),
+                layout: &renderer.layouts.scan,
+                entries: &[
+                    storage_buffer_entry(16, buffers.reduced),
+                    storage_buffer_entry(17, buffers.scan_offsets),
+                    storage_buffer_entry(18, buffers.scan_block_offsets),
+                    storage_buffer_entry(19, &scan_sort_ub),
+                ],
+            });
+        let scan_block_sums_bg: wgpu::BindGroup =
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("sort_scan_block_sums_bg"),
+                layout: &renderer.layouts.scan_block_sums,
+                entries: &[
+                    storage_buffer_entry(24, buffers.scan_block_offsets),
+                    storage_buffer_entry(25, buffers.scan_totals),
+                    storage_buffer_entry(26, &scan_sort_ub),
+                ],
+            });
+        let compose_bg: wgpu::BindGroup = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sort_scan_compose_bg"),
+            layout: &renderer.layouts.sort_scan_compose,
+            entries: &[
+                storage_buffer_entry(8, buffers.scan_offsets),
+                storage_buffer_entry(9, buffers.scan_block_offsets),
+                storage_buffer_entry(10, buffers.reduced),
+                storage_buffer_entry(11, &scan_sort_ub),
+            ],
+        });
+        let scan_add_bg: wgpu::BindGroup = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sort_scan_add_bg"),
+            layout: &renderer.layouts.sort_scan_add,
+            entries: &[
+                storage_buffer_entry(0, &sort_ub),
+                storage_buffer_entry(1, buffers.reduced),
+                storage_buffer_entry(2, buffers.counts),
+                storage_buffer_entry(6, buffers.num_keys),
+            ],
+        });
+        let scatter_bg: wgpu::BindGroup = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sort_scatter_bg"),
+            layout: &renderer.layouts.sort_scatter,
+            entries: &[
+                storage_buffer_entry(0, &sort_ub),
+                storage_buffer_entry(1, src_keys),
+                storage_buffer_entry(2, src_vals),
+                storage_buffer_entry(3, buffers.counts),
+                storage_buffer_entry(4, dst_keys),
+                storage_buffer_entry(5, dst_vals),
+                storage_buffer_entry(6, buffers.num_keys),
+            ],
+        });
+
+        let (ssb_x, ssb_y) = dispatch_grid_1d(reduced_block_count, 1);
+        let (ssc_x, ssc_y) = dispatch_grid_1d(reduced_total, SORT_WORKGROUP_SIZE);
+
+        let mut pass: wgpu::ComputePass<'_> =
+            encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("radix_sort"),
+                timestamp_writes: None,
+            });
+        pass.set_pipeline(&renderer.pipelines.sort_count);
+        pass.set_bind_group(0, &count_bg, &[]);
+        pass.dispatch_workgroups(sort_count_x, sort_count_y, 1);
+
+        pass.set_pipeline(&renderer.pipelines.sort_reduce);
+        pass.set_bind_group(0, &reduce_bg, &[]);
+        pass.dispatch_workgroups(sort_reduce_x, sort_reduce_y, 1);
+
+        pass.set_pipeline(&renderer.pipelines.scan_blocks);
+        pass.set_bind_group(0, &scan_blocks_bg, &[]);
+        pass.dispatch_workgroups(ssb_x, ssb_y, 1);
+
+        pass.set_pipeline(&renderer.pipelines.scan_block_sums);
+        pass.set_bind_group(0, &scan_block_sums_bg, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+
+        pass.set_pipeline(&renderer.pipelines.sort_scan_compose);
+        pass.set_bind_group(0, &compose_bg, &[]);
+        pass.dispatch_workgroups(ssc_x, ssc_y, 1);
+
+        pass.set_pipeline(&renderer.pipelines.sort_scan_add);
+        pass.set_bind_group(0, &scan_add_bg, &[]);
+        pass.dispatch_workgroups(sort_reduce_x, sort_reduce_y, 1);
+
+        pass.set_pipeline(&renderer.pipelines.sort_scatter);
+        pass.set_bind_group(0, &scatter_bg, &[]);
+        pass.dispatch_workgroups(sort_count_x, sort_count_y, 1);
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Main render function
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -47,17 +237,20 @@ impl GpuRenderer {
 /// Render a Gaussian cloud from a camera viewpoint using the GPU compute pipeline.
 ///
 /// This is the standalone equivalent of the Rerun viewer's compute tile path,
-/// following Brush's approach of pure GPU rendering.
+/// following Brush's approach of pure GPU rendering: the CPU only uploads
+/// data, writes uniforms, and encodes commands.
 ///
 /// # Pipeline stages
 ///
-/// 1. **CPU pre-pass**: frustum cull + depth sort (reuses `rebuild_visible_indices`)
-/// 2. **GPU project**: 3D→2D projection + SH evaluation + tile coverage
-/// 3. **GPU compact**: prefix sum to remove invisible splats
-/// 4. **GPU map intersections**: scatter (tile_id, splat_id) pairs
-/// 5. **GPU radix sort**: sort by tile_id
-/// 6. **GPU tile offsets**: per-tile intersection ranges
-/// 7. **GPU rasterize**: per-pixel alpha blending in 16×16 tiles
+/// 1. **project_forward**: cull the FULL cloud on the GPU, compact
+///    `(global_gid, depth)` pairs via `atomicAdd(num_visible)`
+/// 2. **Depth argsort**: GPU radix sort ascending by f32 depth bits — compact
+///    order becomes front-to-back
+/// 3. **project_visible**: exact 3D→2D projection + SH evaluation + tile coverage
+/// 4. **Prefix scan** over per-splat tile hit counts (3-level, supports >262k splats)
+/// 5. **Map intersections**: scatter (tile_id, compact_gid) pairs
+/// 6. **Tile radix sort**: sort intersections by tile_id
+/// 7. **Tile offsets** + **rasterize**: per-pixel alpha blending in 16×16 tiles
 /// 8. **Readback**: copy raster texture to CPU as RGBA8
 #[allow(clippy::too_many_lines)]
 pub fn gpu_render(
@@ -73,17 +266,14 @@ pub fn gpu_render(
     let width: u32 = camera.viewport_size_px.x.max(1.0) as u32;
     let height: u32 = camera.viewport_size_px.y.max(1.0) as u32;
 
-    // ── Stage 0: CPU cull + sort ─────────────────────────────────────────
-    let mut visible: Vec<SortedSplatIndex> = Vec::new();
-    rebuild_visible_indices(&mut visible, cloud, camera);
-    if visible.is_empty() {
+    if cloud.is_empty() {
         return RenderOutput {
             pixels: vec![[0.0; 4]; (width as usize) * (height as usize)],
             width,
             height,
         };
     }
-    let selected_limit: usize = visible.len().max(1);
+    let total_splats: usize = cloud.len();
 
     // ── Upload splat data to GPU ─────────────────────────────────────────
     let storage_usage: wgpu::BufferUsages = wgpu::BufferUsages::STORAGE;
@@ -118,37 +308,30 @@ pub fn gpu_render(
         &pack_sh_coefficients(cloud),
     ));
 
-    // Upload the CPU-sorted index list (reversed to front-to-back for the GPU).
-    let cpu_indices: Vec<u32> = visible.iter().rev().map(|v| v.splat_index).collect();
-    let index_buf: Arc<wgpu::Buffer> = Arc::new(create_filled_buffer(
-        device,
-        "indices",
-        storage_usage,
-        &cpu_indices,
-    ));
-
     // ── Sizing ───────────────────────────────────────────────────────────
     let tile_bounds: glam::UVec2 = calc_tile_bounds(camera.viewport_size_px);
     let raster_extent: glam::UVec2 = calc_raster_extent(camera.viewport_size_px);
     let n_tiles: usize = tile_count(tile_bounds);
-    let instance_capacity: usize = next_capacity(selected_limit);
-    let block_capacity: usize = next_block_capacity(selected_limit);
+    let instance_capacity: usize = next_capacity(total_splats);
+    let block_capacity: usize = next_block_capacity(total_splats);
+    let block2_capacity: usize = next_block_capacity(block_capacity);
     let isect_capacity: usize = intersection_capacity_for_instances(instance_capacity);
-    let sort_wg_count: u32 = (isect_capacity as u32).div_ceil(SORT_BLOCK_SIZE).max(1);
-    let sort_reduce_wg_count: u32 = ((sort_wg_count.div_ceil(SORT_BLOCK_SIZE) as usize)
-        * SORT_BIN_COUNT as usize)
-        .max(1) as u32;
+    let tile_sort_wg_count: u32 = (isect_capacity as u32).div_ceil(SORT_BLOCK_SIZE).max(1);
+    let depth_sort_wg_count: u32 = (instance_capacity as u32).div_ceil(SORT_BLOCK_SIZE).max(1);
+    let sort_reduce_wg_count: u32 = sort_reduce_workgroup_count(tile_sort_wg_count);
     let sort_scan_block_capacity: usize = (sort_reduce_wg_count as usize)
         .div_ceil(COMPACTION_BLOCK_SIZE as usize)
         .next_power_of_two()
         .max(1);
 
     // ── Uniform buffers ──────────────────────────────────────────────────
-    let block_count: u32 = compaction_block_count(selected_limit) as u32;
-    let project_uniform: ProjectUniformBuffer = fill_project_uniform(camera, selected_limit, cloud);
-    let scan_uniform: ScanUniformBuffer = fill_scan_uniform(selected_limit);
-    let map_uniform: MapUniformBuffer =
-        fill_map_uniform(selected_limit, isect_capacity, tile_bounds);
+    let block_count: u32 = compaction_block_count(total_splats) as u32;
+    let block2_count: u32 = compaction_block_count(block_count as usize) as u32;
+    let project_uniform: ProjectUniformBuffer = fill_project_uniform(camera, total_splats, cloud);
+    let scan_uniform: ScanUniformBuffer = fill_scan_uniform(total_splats);
+    // Level-2 scan: scans the level-1 block sums (block_count entries).
+    let scan_uniform_l2: ScanUniformBuffer = fill_scan_uniform(block_count as usize);
+    let map_uniform: MapUniformBuffer = fill_map_uniform(total_splats, isect_capacity, tile_bounds);
     let raster_uniform: RasterUniformBuffer = RasterUniformBuffer {
         tile_bounds: [tile_bounds.x, tile_bounds.y],
         img_size: [raster_extent.x, raster_extent.y],
@@ -165,6 +348,12 @@ pub fn gpu_render(
         "scan_ub",
         wgpu::BufferUsages::UNIFORM,
         bytemuck::bytes_of(&scan_uniform),
+    ));
+    let scan_l2_ub: Arc<wgpu::Buffer> = Arc::new(create_filled_buffer(
+        device,
+        "scan_l2_ub",
+        wgpu::BufferUsages::UNIFORM,
+        bytemuck::bytes_of(&scan_uniform_l2),
     ));
     let map_ub: Arc<wgpu::Buffer> = Arc::new(create_filled_buffer(
         device,
@@ -184,12 +373,38 @@ pub fn gpu_render(
     let su32 = std::mem::size_of::<u32>();
     let s_splat = std::mem::size_of::<TileProjectedSplat>();
 
-    let visibility_buf: Arc<wgpu::Buffer> = Arc::new(create_sized_buffer(
+    // GPU cull + depth sort buffers (project_forward outputs).
+    let num_visible_buf: Arc<wgpu::Buffer> = Arc::new(create_sized_buffer(
         device,
-        "visibility",
-        sz(instance_capacity, su32),
+        "num_visible",
+        su32,
         storage_usage | wgpu::BufferUsages::COPY_DST,
     ));
+    let global_from_compact_buf: Arc<wgpu::Buffer> = Arc::new(create_sized_buffer(
+        device,
+        "global_from_compact",
+        sz(instance_capacity, su32),
+        storage_usage,
+    ));
+    let depth_keys_buf: Arc<wgpu::Buffer> = Arc::new(create_sized_buffer(
+        device,
+        "depth_keys",
+        sz(instance_capacity, su32),
+        storage_usage,
+    ));
+    let global_from_compact_alt_buf: Arc<wgpu::Buffer> = Arc::new(create_sized_buffer(
+        device,
+        "global_from_compact_alt",
+        sz(instance_capacity, su32),
+        storage_usage,
+    ));
+    let depth_keys_alt_buf: Arc<wgpu::Buffer> = Arc::new(create_sized_buffer(
+        device,
+        "depth_keys_alt",
+        sz(instance_capacity, su32),
+        storage_usage,
+    ));
+
     let projected_buf: Arc<wgpu::Buffer> = Arc::new(create_sized_buffer(
         device,
         "projected",
@@ -212,6 +427,18 @@ pub fn gpu_render(
         device,
         "tile_hit_block_offsets",
         sz(block_capacity, su32),
+        storage_usage,
+    ));
+    let block_local_offsets_buf: Arc<wgpu::Buffer> = Arc::new(create_sized_buffer(
+        device,
+        "block_local_offsets",
+        sz(block_capacity, su32),
+        storage_usage,
+    ));
+    let block2_offsets_buf: Arc<wgpu::Buffer> = Arc::new(create_sized_buffer(
+        device,
+        "block2_offsets",
+        sz(block2_capacity, su32),
         storage_usage,
     ));
     let tile_isect_count_buf: Arc<wgpu::Buffer> = Arc::new(create_filled_buffer(
@@ -255,34 +482,30 @@ pub fn gpu_render(
         sz(isect_capacity, su32),
         storage_usage | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
     ));
+    // Sort scratch buffers are sized for the (larger) tile sort and reused by
+    // the depth sort — the two sorts run sequentially in the same encoder.
     let sort_counts_buf: Arc<wgpu::Buffer> = Arc::new(create_sized_buffer(
         device,
         "sort_counts",
-        sz(sort_wg_count as usize * SORT_BIN_COUNT as usize, su32),
+        sz(tile_sort_wg_count as usize * SORT_BIN_COUNT as usize, su32),
         storage_usage,
     ));
     let sort_reduced_buf: Arc<wgpu::Buffer> = Arc::new(create_sized_buffer(
         device,
         "sort_reduced",
-        sz(
-            sort_reduce_wg_count as usize * SORT_BIN_COUNT as usize,
-            su32,
-        ),
+        sz(sort_reduce_wg_count as usize, su32),
         storage_usage,
     ));
     let sort_scan_offsets_buf: Arc<wgpu::Buffer> = Arc::new(create_sized_buffer(
         device,
         "sort_scan_offsets",
-        sz(
-            sort_reduce_wg_count as usize * SORT_BIN_COUNT as usize,
-            su32,
-        ),
+        sz(sort_reduce_wg_count as usize, su32),
         storage_usage,
     ));
     let sort_scan_block_offsets_buf: Arc<wgpu::Buffer> = Arc::new(create_sized_buffer(
         device,
         "sort_scan_block_offsets",
-        sz(sort_scan_block_capacity * SORT_BIN_COUNT as usize, su32),
+        sz(sort_scan_block_capacity, su32),
         storage_usage,
     ));
     let sort_scan_totals_buf: Arc<wgpu::Buffer> = Arc::new(create_sized_buffer(
@@ -317,32 +540,37 @@ pub fn gpu_render(
         };
     }
 
-    // Binding 6 is the instance output buffer (legacy, written by the shader but not consumed).
-    // Kept as a dummy to satisfy the bind group layout.
-    let dummy_instance_buf: Arc<wgpu::Buffer> = Arc::new(create_sized_buffer(
-        device,
-        "dummy_instances",
-        sz(instance_capacity, std::mem::size_of::<TileProjectedSplat>()),
-        storage_usage,
-    ));
-
-    let project_bg: wgpu::BindGroup = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("project_bg"),
-        layout: &renderer.layouts.project,
-        entries: &[
-            storage_buffer_entry(0, &means_buf),
-            storage_buffer_entry(1, &quats_buf),
-            storage_buffer_entry(2, &scales_opacity_buf),
-            storage_buffer_entry(3, &colors_buf),
-            storage_buffer_entry(4, &sh_buf),
-            storage_buffer_entry(5, &index_buf),
-            storage_buffer_entry(6, &dummy_instance_buf), // instance output (unused)
-            storage_buffer_entry(7, &visibility_buf),
-            ube!(8, &project_ub),
-            storage_buffer_entry(9, &projected_buf),
-            storage_buffer_entry(10, &tile_hit_counts_buf),
-        ],
-    });
+    let project_forward_bg: wgpu::BindGroup =
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("project_forward_bg"),
+            layout: &renderer.layouts.project_forward,
+            entries: &[
+                storage_buffer_entry(0, &means_buf),
+                storage_buffer_entry(1, &quats_buf),
+                storage_buffer_entry(2, &scales_opacity_buf),
+                ube!(8, &project_ub),
+                storage_buffer_entry(12, &global_from_compact_buf),
+                storage_buffer_entry(13, &depth_keys_buf),
+                storage_buffer_entry(14, &num_visible_buf),
+            ],
+        });
+    let project_visible_bg: wgpu::BindGroup =
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("project_visible_bg"),
+            layout: &renderer.layouts.project_visible,
+            entries: &[
+                storage_buffer_entry(0, &means_buf),
+                storage_buffer_entry(1, &quats_buf),
+                storage_buffer_entry(2, &scales_opacity_buf),
+                storage_buffer_entry(3, &colors_buf),
+                storage_buffer_entry(4, &sh_buf),
+                storage_buffer_entry(5, &global_from_compact_buf),
+                ube!(8, &project_ub),
+                storage_buffer_entry(9, &projected_buf),
+                storage_buffer_entry(10, &tile_hit_counts_buf),
+                storage_buffer_entry(11, &num_visible_buf),
+            ],
+        });
     let scan_bg: wgpu::BindGroup = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("scan_bg"),
         layout: &renderer.layouts.scan,
@@ -353,16 +581,39 @@ pub fn gpu_render(
             ube!(19, &scan_ub),
         ],
     });
+    // Level 2: scan the level-1 block sums so clouds larger than
+    // 512 blocks * 512 elements = 262,144 splats scan correctly.
+    let scan_l2_bg: wgpu::BindGroup = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("scan_l2_bg"),
+        layout: &renderer.layouts.scan,
+        entries: &[
+            storage_buffer_entry(16, &tile_hit_block_offsets_buf),
+            storage_buffer_entry(17, &block_local_offsets_buf),
+            storage_buffer_entry(18, &block2_offsets_buf),
+            ube!(19, &scan_l2_ub),
+        ],
+    });
     let scan_block_sums_bg: wgpu::BindGroup =
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("scan_block_sums_bg"),
             layout: &renderer.layouts.scan_block_sums,
             entries: &[
-                storage_buffer_entry(24, &tile_hit_block_offsets_buf),
+                storage_buffer_entry(24, &block2_offsets_buf),
                 storage_buffer_entry(25, &tile_isect_count_buf), // total intersection count
-                ube!(26, &scan_ub),
+                ube!(26, &scan_l2_ub),
             ],
         });
+    // Compose the two scan levels back into flat per-block offsets.
+    let scan_compose_bg: wgpu::BindGroup = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("scan_compose_bg"),
+        layout: &renderer.layouts.sort_scan_compose,
+        entries: &[
+            storage_buffer_entry(8, &block_local_offsets_buf),
+            storage_buffer_entry(9, &block2_offsets_buf),
+            storage_buffer_entry(10, &tile_hit_block_offsets_buf),
+            ube!(11, &scan_l2_ub),
+        ],
+    });
     let map_bg: wgpu::BindGroup = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("map_bg"),
         layout: &renderer.layouts.map,
@@ -408,32 +659,99 @@ pub fn gpu_render(
             label: Some("gsplat_render"),
         });
 
-    // Clear buffers that accumulate atomically.
-    encoder.clear_buffer(&visibility_buf, 0, None);
-    encoder.clear_buffer(&tile_hit_counts_buf, 0, None);
+    // The visible counter accumulates atomically — reset it each frame.
+    encoder.clear_buffer(&num_visible_buf, 0, None);
 
-    // Stage 1-3: project, compact, map intersections.
+    let (px, py) = dispatch_grid_1d(total_splats as u32, PROJECT_WORKGROUP_SIZE);
+
+    // Stage 1: cull the full cloud, compact (gid, depth) pairs.
     {
-        let (px, py) = dispatch_grid_1d(selected_limit as u32, PROJECT_WORKGROUP_SIZE);
-        let (sx, sy) = dispatch_grid_1d(block_count, 1);
+        let mut pass: wgpu::ComputePass<'_> =
+            encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("project_forward"),
+                timestamp_writes: None,
+            });
+        pass.set_pipeline(&renderer.pipelines.project_forward);
+        pass.set_bind_group(0, &project_forward_bg, &[]);
+        pass.dispatch_workgroups(px, py, 1);
+    }
+
+    // Stage 2a: canonicalize the compact order by gid.  project_forward's
+    // atomicAdd compaction is racy; sorting by gid first makes depth-bit ties
+    // resolve in ascending-gid order so the render is deterministic.
+    encode_radix_sort(
+        device,
+        &mut encoder,
+        renderer,
+        &RadixSortBuffers {
+            keys_primary: &global_from_compact_buf,
+            vals_primary: &depth_keys_buf,
+            keys_alt: &global_from_compact_alt_buf,
+            vals_alt: &depth_keys_alt_buf,
+            num_keys: &num_visible_buf,
+            counts: &sort_counts_buf,
+            reduced: &sort_reduced_buf,
+            scan_offsets: &sort_scan_offsets_buf,
+            scan_block_offsets: &sort_scan_block_offsets_buf,
+            scan_totals: &sort_scan_totals_buf,
+        },
+        depth_sort_wg_count,
+        gid_sort_passes(total_splats),
+    );
+
+    // Stage 2b: depth argsort (ascending f32 bits => front-to-back compact
+    // order).  8 passes (even), so results land back in the primary buffers.
+    encode_radix_sort(
+        device,
+        &mut encoder,
+        renderer,
+        &RadixSortBuffers {
+            keys_primary: &depth_keys_buf,
+            vals_primary: &global_from_compact_buf,
+            keys_alt: &depth_keys_alt_buf,
+            vals_alt: &global_from_compact_alt_buf,
+            num_keys: &num_visible_buf,
+            counts: &sort_counts_buf,
+            reduced: &sort_reduced_buf,
+            scan_offsets: &sort_scan_offsets_buf,
+            scan_block_offsets: &sort_scan_block_offsets_buf,
+            scan_totals: &sort_scan_totals_buf,
+        },
+        depth_sort_wg_count,
+        DEPTH_SORT_PASSES,
+    );
+
+    // Stage 3-5: project visible splats, prefix-scan tile counts, map intersections.
+    {
+        let (s1x, s1y) = dispatch_grid_1d(block_count, 1);
+        let (s2x, s2y) = dispatch_grid_1d(block2_count, 1);
+        let (cx, cy) = dispatch_grid_1d(block_count, SORT_WORKGROUP_SIZE);
 
         let mut pass: wgpu::ComputePass<'_> =
             encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("project_compact_map"),
+                label: Some("project_visible_scan_map"),
                 timestamp_writes: None,
             });
 
-        pass.set_pipeline(&renderer.pipelines.project);
-        pass.set_bind_group(0, &project_bg, &[]);
+        pass.set_pipeline(&renderer.pipelines.project_visible);
+        pass.set_bind_group(0, &project_visible_bg, &[]);
         pass.dispatch_workgroups(px, py, 1);
 
         pass.set_pipeline(&renderer.pipelines.scan_blocks);
         pass.set_bind_group(0, &scan_bg, &[]);
-        pass.dispatch_workgroups(sx, sy, 1);
+        pass.dispatch_workgroups(s1x, s1y, 1);
+
+        pass.set_pipeline(&renderer.pipelines.scan_blocks);
+        pass.set_bind_group(0, &scan_l2_bg, &[]);
+        pass.dispatch_workgroups(s2x, s2y, 1);
 
         pass.set_pipeline(&renderer.pipelines.scan_block_sums);
         pass.set_bind_group(0, &scan_block_sums_bg, &[]);
         pass.dispatch_workgroups(1, 1, 1);
+
+        pass.set_pipeline(&renderer.pipelines.sort_scan_compose);
+        pass.set_bind_group(0, &scan_compose_bg, &[]);
+        pass.dispatch_workgroups(cx, cy, 1);
 
         pass.set_pipeline(&renderer.pipelines.map_intersections);
         pass.set_bind_group(0, &map_bg, &[]);
@@ -444,171 +762,30 @@ pub fn gpu_render(
         pass.dispatch_workgroups(1, 1, 1);
     }
 
-    // Stage 4: radix sort by tile ID.
-    let tile_count_bits: u32 = (u32::BITS - (n_tiles.max(1) as u32).leading_zeros()).max(1);
-    let sort_passes: u32 = tile_count_bits.div_ceil(4);
-    let (sort_count_x, sort_count_y) = dispatch_grid_for_workgroups(sort_wg_count.max(1));
-    let (sort_reduce_x, sort_reduce_y) = dispatch_grid_for_workgroups(sort_reduce_wg_count.max(1));
-
-    for pass_index in 0..sort_passes {
-        let sort_uniform: SortUniformBuffer = SortUniformBuffer {
-            shift: pass_index * 4,
-            total_keys_unused: 0,
-            _pad: [0; 2],
-        };
-        let sort_ub: Arc<wgpu::Buffer> = Arc::new(create_filled_buffer(
-            device,
-            "sort_ub",
-            wgpu::BufferUsages::UNIFORM,
-            bytemuck::bytes_of(&sort_uniform),
-        ));
-
-        let use_primary: bool = pass_index % 2 == 0;
-        let (src_keys, src_vals, dst_keys, dst_vals) = if use_primary {
-            (
-                &tile_id_from_isect_buf,
-                &compact_gid_from_isect_buf,
-                &sort_keys_buf,
-                &sorted_indices_alt_buf,
-            )
-        } else {
-            (
-                &sort_keys_buf,
-                &sorted_indices_alt_buf,
-                &tile_id_from_isect_buf,
-                &compact_gid_from_isect_buf,
-            )
-        };
-
-        let count_bg: wgpu::BindGroup = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("sort_count_bg"),
-            layout: &renderer.layouts.sort_count,
-            entries: &[
-                ube!(0, &sort_ub),
-                storage_buffer_entry(1, src_keys),
-                storage_buffer_entry(2, &sort_counts_buf),
-                storage_buffer_entry(6, &num_isect_buf),
-            ],
-        });
-        let reduce_bg: wgpu::BindGroup = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("sort_reduce_bg"),
-            layout: &renderer.layouts.sort_reduce,
-            entries: &[
-                ube!(0, &sort_ub),
-                storage_buffer_entry(1, &sort_counts_buf),
-                storage_buffer_entry(2, &sort_reduced_buf),
-                storage_buffer_entry(6, &num_isect_buf),
-            ],
-        });
-
-        let reduced_total: u32 = sort_reduce_wg_count.max(1);
-        let reduced_block_count: u32 = compaction_block_count(reduced_total as usize) as u32;
-        let scan_sort_uniform: ScanUniformBuffer = ScanUniformBuffer {
-            total_selected: reduced_total,
-            block_count: reduced_block_count,
-            _pad: [0; 2],
-        };
-        let scan_sort_ub: Arc<wgpu::Buffer> = Arc::new(create_filled_buffer(
-            device,
-            "scan_sort_ub",
-            wgpu::BufferUsages::UNIFORM,
-            bytemuck::bytes_of(&scan_sort_uniform),
-        ));
-
-        let scan_blocks_bg: wgpu::BindGroup =
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("sort_scan_blocks_bg"),
-                layout: &renderer.layouts.scan,
-                entries: &[
-                    storage_buffer_entry(16, &sort_reduced_buf),
-                    storage_buffer_entry(17, &sort_scan_offsets_buf),
-                    storage_buffer_entry(18, &sort_scan_block_offsets_buf),
-                    ube!(19, &scan_sort_ub),
-                ],
-            });
-        let scan_block_sums_bg2: wgpu::BindGroup =
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("sort_scan_block_sums_bg"),
-                layout: &renderer.layouts.scan_block_sums,
-                entries: &[
-                    storage_buffer_entry(24, &sort_scan_block_offsets_buf),
-                    storage_buffer_entry(25, &sort_scan_totals_buf),
-                    ube!(26, &scan_sort_ub),
-                ],
-            });
-        let compose_bg: wgpu::BindGroup = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("sort_scan_compose_bg"),
-            layout: &renderer.layouts.sort_scan_compose,
-            entries: &[
-                storage_buffer_entry(8, &sort_scan_offsets_buf),
-                storage_buffer_entry(9, &sort_scan_block_offsets_buf),
-                storage_buffer_entry(10, &sort_reduced_buf),
-                ube!(11, &scan_sort_ub),
-            ],
-        });
-        let scan_add_bg: wgpu::BindGroup = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("sort_scan_add_bg"),
-            layout: &renderer.layouts.sort_scan_add,
-            entries: &[
-                ube!(0, &sort_ub),
-                storage_buffer_entry(1, &sort_reduced_buf),
-                storage_buffer_entry(2, &sort_counts_buf),
-                storage_buffer_entry(6, &num_isect_buf),
-            ],
-        });
-        let scatter_bg: wgpu::BindGroup = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("sort_scatter_bg"),
-            layout: &renderer.layouts.sort_scatter,
-            entries: &[
-                ube!(0, &sort_ub),
-                storage_buffer_entry(1, src_keys),
-                storage_buffer_entry(2, src_vals),
-                storage_buffer_entry(3, &sort_counts_buf),
-                storage_buffer_entry(4, dst_keys),
-                storage_buffer_entry(5, dst_vals),
-                storage_buffer_entry(6, &num_isect_buf),
-            ],
-        });
-
-        let (ssb_x, ssb_y) = dispatch_grid_1d(reduced_block_count, 1);
-        let (ssc_x, ssc_y) = dispatch_grid_1d(reduced_total, SORT_WORKGROUP_SIZE);
-
-        let mut pass: wgpu::ComputePass<'_> =
-            encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("radix_sort"),
-                timestamp_writes: None,
-            });
-        pass.set_pipeline(&renderer.pipelines.sort_count);
-        pass.set_bind_group(0, &count_bg, &[]);
-        pass.dispatch_workgroups(sort_count_x, sort_count_y, 1);
-
-        pass.set_pipeline(&renderer.pipelines.sort_reduce);
-        pass.set_bind_group(0, &reduce_bg, &[]);
-        pass.dispatch_workgroups(sort_reduce_x, sort_reduce_y, 1);
-
-        pass.set_pipeline(&renderer.pipelines.scan_blocks);
-        pass.set_bind_group(0, &scan_blocks_bg, &[]);
-        pass.dispatch_workgroups(ssb_x, ssb_y, 1);
-
-        pass.set_pipeline(&renderer.pipelines.scan_block_sums);
-        pass.set_bind_group(0, &scan_block_sums_bg2, &[]);
-        pass.dispatch_workgroups(1, 1, 1);
-
-        pass.set_pipeline(&renderer.pipelines.sort_scan_compose);
-        pass.set_bind_group(0, &compose_bg, &[]);
-        pass.dispatch_workgroups(ssc_x, ssc_y, 1);
-
-        pass.set_pipeline(&renderer.pipelines.sort_scan_add);
-        pass.set_bind_group(0, &scan_add_bg, &[]);
-        pass.dispatch_workgroups(sort_reduce_x, sort_reduce_y, 1);
-
-        pass.set_pipeline(&renderer.pipelines.sort_scatter);
-        pass.set_bind_group(0, &scatter_bg, &[]);
-        pass.dispatch_workgroups(sort_count_x, sort_count_y, 1);
-    }
+    // Stage 6: radix sort intersections by tile ID.
+    let num_tile_sort_passes: u32 = tile_sort_passes(n_tiles);
+    encode_radix_sort(
+        device,
+        &mut encoder,
+        renderer,
+        &RadixSortBuffers {
+            keys_primary: &tile_id_from_isect_buf,
+            vals_primary: &compact_gid_from_isect_buf,
+            keys_alt: &sort_keys_buf,
+            vals_alt: &sorted_indices_alt_buf,
+            num_keys: &num_isect_buf,
+            counts: &sort_counts_buf,
+            reduced: &sort_reduced_buf,
+            scan_offsets: &sort_scan_offsets_buf,
+            scan_block_offsets: &sort_scan_block_offsets_buf,
+            scan_totals: &sort_scan_totals_buf,
+        },
+        tile_sort_wg_count,
+        num_tile_sort_passes,
+    );
 
     // Copy back to primary if odd number of passes.
-    if sort_passes % 2 == 1 {
+    if num_tile_sort_passes % 2 == 1 {
         let bytes: u64 = (isect_capacity * std::mem::size_of::<u32>()) as u64;
         encoder.copy_buffer_to_buffer(&sort_keys_buf, 0, &tile_id_from_isect_buf, 0, bytes);
         encoder.copy_buffer_to_buffer(
@@ -620,7 +797,7 @@ pub fn gpu_render(
         );
     }
 
-    // Stage 5: tile offsets.
+    // Stage 7: tile offsets.
     encoder.clear_buffer(&tile_offsets_buf, 0, None);
     {
         let tile_offset_elements: u32 = isect_capacity.max(1) as u32;
@@ -638,7 +815,7 @@ pub fn gpu_render(
         pass.dispatch_workgroups(tox, toy, 1);
     }
 
-    // Stage 6: rasterize.
+    // Stage 8: rasterize.
     {
         let tile_workgroups: u32 = n_tiles.max(1) as u32;
         let (rx, ry) = dispatch_grid_for_workgroups(tile_workgroups);

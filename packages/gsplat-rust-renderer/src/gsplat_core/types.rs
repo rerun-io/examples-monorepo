@@ -79,7 +79,7 @@ impl RenderGaussianCloud {
 
 /// Simplified camera parameters for rendering.
 ///
-/// Used for CPU frustum culling (pre-GPU pass) and as uniforms for the GPU shaders.
+/// Provides the uniforms for the GPU shaders (the GPU does all culling).
 /// Can be constructed from a Rerun 3D view state, a NeRF transforms JSON,
 /// or manually via [`CameraApproximation::from_look_at`].
 #[derive(Clone, Debug)]
@@ -95,16 +95,6 @@ pub struct CameraApproximation {
     pub viewport_size_px: Vec2,
     /// Distance to the near clipping plane.
     pub near_plane: f32,
-}
-
-/// A splat that passed the CPU visibility pre-pass, carrying its index back into
-/// the cloud arrays and its depth from the camera (for sorting).
-#[derive(Clone, Copy, Debug)]
-pub struct SortedSplatIndex {
-    /// Index back into the cached render cloud arrays.
-    pub splat_index: u32,
-    /// Positive distance from camera.  Larger = farther away.
-    pub camera_depth: f32,
 }
 
 /// Output of the GPU rasterizer.

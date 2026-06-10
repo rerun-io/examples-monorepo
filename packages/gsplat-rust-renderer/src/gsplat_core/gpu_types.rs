@@ -5,7 +5,6 @@
 //! mirror the WGSL storage/uniform layouts used by the compute shaders.
 
 use std::borrow::Cow;
-use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
@@ -23,7 +22,8 @@ pub const INTERSECTION_CAPACITY_MULTIPLIER: usize = 32;
 pub const SORT_WORKGROUP_SIZE: u32 = 256;
 pub const SORT_ELEMENTS_PER_THREAD: u32 = 1;
 pub const SORT_BLOCK_SIZE: u32 = SORT_WORKGROUP_SIZE * SORT_ELEMENTS_PER_THREAD;
-pub const SORT_BIN_COUNT: u32 = 16;
+pub const SORT_BITS_PER_PASS: u32 = 4;
+pub const SORT_BIN_COUNT: u32 = 1 << SORT_BITS_PER_PASS;
 pub const TILE_WIDTH: u32 = 16;
 pub const TILE_OFFSET_WORKGROUP_SIZE: u32 = 256;
 pub const TILE_OFFSET_CHECKS_PER_ITER: u32 = 8;
@@ -188,7 +188,7 @@ pub fn uniform_layout_entry(binding: u32, size_bytes: usize) -> wgpu::BindGroupL
     }
 }
 
-pub fn storage_buffer_entry(binding: u32, buffer: &Arc<wgpu::Buffer>) -> wgpu::BindGroupEntry<'_> {
+pub fn storage_buffer_entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
     wgpu::BindGroupEntry {
         binding,
         resource: buffer.as_entire_binding(),
@@ -253,6 +253,18 @@ pub fn intersection_capacity_for_instances(instance_capacity: usize) -> usize {
 
 pub fn compaction_block_count(required: usize) -> usize {
     required.max(1).div_ceil(COMPACTION_BLOCK_SIZE as usize)
+}
+
+/// Number of `sort_reduce` workgroups for a radix sort with `sort_wg_count`
+/// count/scatter workgroups: one reduction slot per bin per reduce block.
+pub fn sort_reduce_workgroup_count(sort_wg_count: u32) -> u32 {
+    (sort_wg_count.div_ceil(SORT_BLOCK_SIZE) * SORT_BIN_COUNT).max(1)
+}
+
+/// Number of radix-sort passes needed to cover all tile-id bits for `n_tiles`
+/// tiles.  May be odd — the caller copies back from the alt buffers then.
+pub fn tile_sort_passes(n_tiles: usize) -> u32 {
+    ((u32::BITS - (n_tiles.max(1) as u32).leading_zeros()).max(1)).div_ceil(SORT_BITS_PER_PASS)
 }
 
 pub fn next_block_capacity(required: usize) -> usize {
@@ -336,13 +348,14 @@ pub fn create_raster_texture(
 // Shared bind group layouts + compute pipelines
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// All bind group layouts for the 7-stage Gaussian splat compute pipeline.
+/// All bind group layouts for the GPU-only Gaussian splat compute pipeline.
 ///
 /// These layouts are shared between the Rerun viewer path and the
 /// standalone GPU renderer — both bind buffers with the same WGSL
 /// shader bindings.
 pub struct GpuBindGroupLayouts {
-    pub project: wgpu::BindGroupLayout,
+    pub project_forward: wgpu::BindGroupLayout,
+    pub project_visible: wgpu::BindGroupLayout,
     pub scan: wgpu::BindGroupLayout,
     pub scan_block_sums: wgpu::BindGroupLayout,
     pub map: wgpu::BindGroupLayout,
@@ -356,22 +369,33 @@ pub struct GpuBindGroupLayouts {
     pub rasterize: wgpu::BindGroupLayout,
 }
 
-/// Create all 12 bind group layouts for the compute pipeline.
+/// Create all 13 bind group layouts for the compute pipeline.
 pub fn create_compute_bind_group_layouts(device: &wgpu::Device) -> GpuBindGroupLayouts {
-    let project = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("project_bgl"),
+    let project_forward = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("project_forward_bgl"),
         entries: &[
-            storage_layout_entry(0, true),  // means_world
-            storage_layout_entry(1, true),  // quats_xyzw
-            storage_layout_entry(2, true),  // scales_opacity
-            storage_layout_entry(3, true),  // colors_dc
-            storage_layout_entry(4, true),  // sh_coefficients
-            storage_layout_entry(5, true),  // sorted_indices
-            storage_layout_entry(6, false), // project_output_instances
-            storage_layout_entry(7, false), // visibility_flags
+            storage_layout_entry(0, true), // means_world
+            storage_layout_entry(1, true), // quats_xyzw
+            storage_layout_entry(2, true), // scales_opacity
+            uniform_layout_entry(8, std::mem::size_of::<ProjectUniformBuffer>()),
+            storage_layout_entry(12, false), // forward_global_from_compact
+            storage_layout_entry(13, false), // forward_depth_keys
+            storage_layout_entry(14, false), // forward_num_visible (atomic)
+        ],
+    });
+    let project_visible = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("project_visible_bgl"),
+        entries: &[
+            storage_layout_entry(0, true), // means_world
+            storage_layout_entry(1, true), // quats_xyzw
+            storage_layout_entry(2, true), // scales_opacity
+            storage_layout_entry(3, true), // colors_dc
+            storage_layout_entry(4, true), // sh_coefficients
+            storage_layout_entry(5, true), // global_from_compact (depth-sorted)
             uniform_layout_entry(8, std::mem::size_of::<ProjectUniformBuffer>()),
             storage_layout_entry(9, false),  // projected_tile_splats
             storage_layout_entry(10, false), // projected_tile_hit_counts
+            storage_layout_entry(11, true),  // num_visible_in
         ],
     });
     let scan = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -490,7 +514,8 @@ pub fn create_compute_bind_group_layouts(device: &wgpu::Device) -> GpuBindGroupL
     });
 
     GpuBindGroupLayouts {
-        project,
+        project_forward,
+        project_visible,
         scan,
         scan_block_sums,
         map,
@@ -505,12 +530,13 @@ pub fn create_compute_bind_group_layouts(device: &wgpu::Device) -> GpuBindGroupL
     }
 }
 
-/// All compute pipelines for the 7-stage Gaussian splat pipeline.
+/// All compute pipelines for the GPU-only Gaussian splat pipeline.
 // Some pipelines are retained as lifetime anchors even when not directly
 // referenced in every dispatch path.
 #[allow(dead_code)]
 pub struct GpuComputePipelines {
-    pub project: wgpu::ComputePipeline,
+    pub project_forward: wgpu::ComputePipeline,
+    pub project_visible: wgpu::ComputePipeline,
     pub scan_blocks: wgpu::ComputePipeline,
     pub scan_block_sums: wgpu::ComputePipeline,
     pub map_intersections: wgpu::ComputePipeline,
@@ -525,7 +551,7 @@ pub struct GpuComputePipelines {
     pub rasterize: wgpu::ComputePipeline,
 }
 
-/// Create all 13 compute pipelines from the 5 embedded WGSL shaders.
+/// Create all 14 compute pipelines from the 5 embedded WGSL shaders.
 pub fn create_compute_pipelines(
     device: &wgpu::Device,
     layouts: &GpuBindGroupLayouts,
@@ -557,12 +583,19 @@ pub fn create_compute_pipelines(
     );
 
     GpuComputePipelines {
-        project: create_compute_pipeline(
+        project_forward: create_compute_pipeline(
             device,
-            "project",
+            "project_forward",
             &project_shader,
-            "project_main",
-            &[&layouts.project],
+            "project_forward_main",
+            &[&layouts.project_forward],
+        ),
+        project_visible: create_compute_pipeline(
+            device,
+            "project_visible",
+            &project_shader,
+            "project_visible_main",
+            &[&layouts.project_visible],
         ),
         scan_blocks: create_compute_pipeline(
             device,
@@ -656,9 +689,12 @@ pub fn create_compute_pipelines(
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Fill the project uniform buffer from camera and cloud parameters.
+///
+/// `total_splats` is the full cloud size — the GPU project_forward pass culls
+/// the whole cloud itself (no CPU pre-pass).
 pub fn fill_project_uniform(
     camera: &super::types::CameraApproximation,
-    selected_limit: usize,
+    total_splats: usize,
     cloud: &super::types::RenderGaussianCloud,
 ) -> ProjectUniformBuffer {
     let coeffs_per_channel: u32 = cloud
@@ -678,38 +714,92 @@ pub fn fill_project_uniform(
         ],
         sigma_and_counts: [
             super::constants::SIGMA_COVERAGE.to_bits(),
-            selected_limit as u32,
+            total_splats.min(u32::MAX as usize) as u32,
             coeffs_per_channel,
             sh_degree,
         ],
         _pad: [[
             u32::from(cloud.sh_coeffs.is_some()),
             super::constants::OPACITY_SCALE.to_bits(),
-            super::constants::MAX_SPLATS_RENDERED.min(u32::MAX as usize) as u32,
+            0,
             0,
         ]],
     }
 }
 
-/// Fill the scan uniform buffer.
-pub fn fill_scan_uniform(selected_limit: usize) -> ScanUniformBuffer {
+/// Fill the scan uniform buffer for a scan over `total_elements` entries.
+pub fn fill_scan_uniform(total_elements: usize) -> ScanUniformBuffer {
     ScanUniformBuffer {
-        total_selected: selected_limit as u32,
-        block_count: compaction_block_count(selected_limit) as u32,
+        total_selected: total_elements as u32,
+        block_count: compaction_block_count(total_elements) as u32,
         _pad: [0; 2],
     }
 }
 
 /// Fill the map uniform buffer.
 pub fn fill_map_uniform(
-    selected_limit: usize,
+    total_splats: usize,
     intersection_capacity: usize,
     tile_bounds: glam::UVec2,
 ) -> MapUniformBuffer {
     MapUniformBuffer {
-        total_selected: selected_limit as u32,
+        total_selected: total_splats.min(u32::MAX as usize) as u32,
         intersection_capacity: intersection_capacity.min(u32::MAX as usize) as u32,
         tile_bounds_x: tile_bounds.x,
         tile_bounds_y: tile_bounds.y,
+    }
+}
+
+/// Number of radix-sort passes for the GPU depth argsort: 32-bit keys at
+/// 4 bits per pass.  Even, so sorted results land back in the primary buffers
+/// without a copy-back.
+pub const DEPTH_SORT_PASSES: u32 = 32 / SORT_BITS_PER_PASS;
+
+/// Number of radix-sort passes to canonicalize the compacted gid order before
+/// the depth sort.
+///
+/// project_forward compacts visible splats with `atomicAdd`, so the compact
+/// order is nondeterministic (brush has the same race).  Distinct splats can
+/// share identical f32 depth bits, and the stable depth sort preserves input
+/// order for equal keys — so without canonicalization the blend order of
+/// depth-tied splats (and thus the rendered image) varies run to run.
+/// Sorting the (gid, depth) pairs by gid first makes depth ties resolve in
+/// ascending-gid order, deterministically.  Rounded up to an even pass count
+/// so results land back in the primary buffers.
+pub fn gid_sort_passes(total_splats: usize) -> u32 {
+    let max_gid: u32 = total_splats.saturating_sub(1).max(1).min(u32::MAX as usize) as u32;
+    let bits: u32 = u32::BITS - max_gid.leading_zeros();
+    let passes: u32 = bits.div_ceil(SORT_BITS_PER_PASS);
+    passes + (passes % 2)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn positive_f32_depth_bits_sort_ascending_as_u32() {
+        // project_forward stores bitcast<u32>(camera_depth); positive floats
+        // compare identically as unsigned ints, so the radix argsort yields
+        // front-to-back order directly.
+        let near: u32 = 2.0_f32.to_bits();
+        let mid: u32 = 10.5_f32.to_bits();
+        let far: u32 = 1.0e6_f32.to_bits();
+        assert!(near < mid);
+        assert!(mid < far);
+    }
+
+    #[test]
+    fn depth_sort_pass_count_is_even() {
+        assert_eq!(super::DEPTH_SORT_PASSES % 2, 0);
+        assert_eq!(super::DEPTH_SORT_PASSES * 4, 32);
+    }
+
+    #[test]
+    fn gid_sort_passes_cover_all_gid_bits_and_are_even() {
+        for total in [1usize, 2, 17, 256, 40_000, 262_145, 2_000_000] {
+            let passes = super::gid_sort_passes(total);
+            assert_eq!(passes % 2, 0, "total={total}");
+            let max_gid = total.saturating_sub(1) as u64;
+            assert!(u64::from(passes) * 4 >= 64 - u64::from(max_gid.max(1).leading_zeros()));
+        }
     }
 }

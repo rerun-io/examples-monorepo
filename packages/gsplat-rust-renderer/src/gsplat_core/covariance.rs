@@ -120,17 +120,3 @@ pub fn brush_bbox_extent_px(covariance_px: Mat2, power_threshold: f32) -> Vec2 {
             .sqrt(),
     )
 }
-
-/// Scale a pixel-space covariance matrix to NDC (normalized device coordinates).
-/// NDC ranges from `[-1, 1]` across the viewport, so the scale factor is
-/// `2 / viewport_size` along each axis.
-pub fn pixel_covariance_to_ndc(covariance_px: Mat2, viewport_size_px: Vec2) -> Mat2 {
-    let scale = Vec2::new(
-        2.0 / viewport_size_px.x.max(1.0),
-        2.0 / viewport_size_px.y.max(1.0),
-    );
-    let xx = covariance_px.x_axis.x * scale.x * scale.x;
-    let xy = covariance_px.x_axis.y * scale.x * scale.y;
-    let yy = covariance_px.y_axis.y * scale.y * scale.y;
-    Mat2::from_cols(Vec2::new(xx, xy), Vec2::new(xy, yy))
-}

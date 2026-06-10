@@ -1,41 +1,39 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// gaussian_project.wgsl — Stage 1: Projection + Compaction
+// gaussian_project.wgsl — Stages 1+2: GPU Culling, Depth Compaction, Projection
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// Pipeline position: FIRST compute stage — runs on the GPU after the CPU
-// provides a roughly-sorted candidate list.
+// Pipeline position: FIRST compute stages — the GPU is handed the FULL splat
+// cloud each frame.  There is no CPU pre-pass; culling and depth ordering
+// happen entirely on the GPU, following Brush's project_forward /
+// project_visible split (brush v0.3.0 render.rs + d0eaca6f WGSL kernels).
 //
-// Purpose: For each candidate splat, perform the exact 3D → 2D Gaussian
-// projection on the GPU (the CPU only did an approximate frustum test).
-// This includes:
+//   1. project_forward_main: one thread per splat over the whole cloud.
+//      Applies every visibility gate (near-plane, opacity, finite projection,
+//      bbox-extent on-screen test) and, for survivors, appends
+//      (global_gid, depth bits) to a compact list via atomicAdd(num_visible).
+//   2. A GPU radix sort (gaussian_dynamic_sort.wgsl) then argsorts the compact
+//      list ASCENDING by view-space depth (positive f32 bits sort monotonically
+//      as u32), so compact order is front-to-back — exactly what the tile
+//      raster's front-to-back alpha blending consumes.
+//   3. project_visible_main: one thread per compact slot.  Re-reads the splat
+//      via the depth-sorted global_from_compact mapping, recomputes the exact
+//      3D → 2D Gaussian projection (Brush recomputes rather than caching),
+//      evaluates SH color, and writes the ProjectedTileSplat + tile hit count
+//      consumed by the map/sort/raster stages.  Slots past num_visible are
+//      zeroed so the downstream capacity-sized prefix scan sees zeros.
 //
-//   1. Transform the 3D Gaussian center to view/clip space
-//   2. Build the 3D covariance matrix from rotation + scale
-//   3. Project it to a 2D covariance in pixel space using the camera Jacobian
-//      (Brush-style local linearization: J * Σ_view * Jᵀ)
-//   4. Evaluate spherical harmonics for view-dependent color (if SH data exists)
-//   5. Compute the screen-space tile bounding box (which 16×16 tiles overlap)
-//   6. Set a visibility flag and tile hit count for the compaction stages
-//
-// This shader also contains the **compaction sub-passes** (scan_blocks_main,
-// scan_block_sums_main, scatter_main) which use a parallel prefix sum to
-// remove invisible splats and pack the visible ones into a dense array.
-//
-// Entry points:
-//   - project_main:          Per-splat projection (128 threads/workgroup)
-//   - scan_blocks_main:      Blelloch prefix scan within blocks (compaction step 1)
-//   - scan_block_sums_main:  Scan across block sums (compaction step 2)
-//   - scatter_main:          Write visible splats to compacted output (compaction step 3)
+// This shader also contains the **prefix-scan sub-passes** (scan_blocks_main,
+// scan_block_sums_main) used both for the tile-hit-count scan and inside the
+// radix sort.
 //
 // Key math concepts:
 //   - Covariance: Σ = R * diag(s²) * Rᵀ  (rotation * squared-scale * rotation-transpose)
 //   - Projection: Σ_2D = J * V * Σ_3D * Vᵀ * Jᵀ  (Jacobian * view-transform * covariance)
 //   - SH evaluation: color = Σ(basis_i(dir) * coeff_i) for each RGB channel
 //
-// Input: CPU-provided visible candidate ordering plus the canonical Gaussian buffers.
-// Output:
-// - projected tile splats for the tile raster path
-// - visibility flags and tile hit counts used by later compute stages
+// project_forward_main is the sole visibility gate; project_visible_main
+// trusts it and never culls.  Both entry points share the same helper
+// functions in this module, so their math agrees bit-for-bit.
 
 struct ProjectUniformBuffer {
     view_from_world: mat4x4f,
@@ -52,14 +50,6 @@ struct ScanUniformBuffer {
     pad: vec2u,
 };
 
-struct InstanceData {
-    center_ndc: vec2f,
-    ndc_depth: f32,
-    radius_ndc: f32,
-    inv_cov_ndc_xx_xy_yy_pad: vec4f,
-    color_opacity: vec4f,
-};
-
 struct ProjectedTileSplat {
     xy_px: vec2f,
     conic_xyy_opacity: vec4f,
@@ -72,33 +62,31 @@ struct ProjectedTileSplat {
 @group(0) @binding(2) var<storage, read> scales_opacity: array<vec4f>;
 @group(0) @binding(3) var<storage, read> colors_dc: array<vec4f>;
 @group(0) @binding(4) var<storage, read> sh_coefficients: array<vec4f>;
-@group(0) @binding(5) var<storage, read> sorted_indices: array<u32>;
-@group(0) @binding(6) var<storage, read_write> project_output_instances: array<InstanceData>;
-@group(0) @binding(7) var<storage, read_write> visibility_flags: array<u32>;
+@group(0) @binding(5) var<storage, read> global_from_compact: array<u32>;
 @group(0) @binding(8) var<uniform> project_uniforms: ProjectUniformBuffer;
 @group(0) @binding(9) var<storage, read_write> projected_tile_splats: array<ProjectedTileSplat>;
 @group(0) @binding(10) var<storage, read_write> projected_tile_hit_counts: array<u32>;
+@group(0) @binding(11) var<storage, read> num_visible_in: array<u32>;
 
-@group(0) @binding(16) var<storage, read> scan_visibility_flags: array<u32>;
+@group(0) @binding(12) var<storage, read_write> forward_global_from_compact: array<u32>;
+@group(0) @binding(13) var<storage, read_write> forward_depth_keys: array<u32>;
+@group(0) @binding(14) var<storage, read_write> forward_num_visible: atomic<u32>;
+
+@group(0) @binding(16) var<storage, read> scan_input_values: array<u32>;
 @group(0) @binding(17) var<storage, read_write> local_offsets: array<u32>;
 @group(0) @binding(18) var<storage, read_write> block_offsets: array<u32>;
 @group(0) @binding(19) var<uniform> scan_uniforms: ScanUniformBuffer;
 
 @group(0) @binding(24) var<storage, read_write> block_sums_for_scan: array<u32>;
-@group(0) @binding(25) var<storage, read_write> draw_indirect_args: array<u32>;
+// Scan totals output.  The layout is legacy-DrawIndirect-shaped (word[0] = 6,
+// an unused legacy quad vertex count; word[1] = total) and is kept that way
+// for buffer compatibility with the Rust-side readback.
+@group(0) @binding(25) var<storage, read_write> scan_totals_out: array<u32>;
 @group(0) @binding(26) var<uniform> scan_block_sums_uniforms: ScanUniformBuffer;
-
-@group(0) @binding(32) var<storage, read> compacted_temp_instances: array<InstanceData>;
-@group(0) @binding(33) var<storage, read> compacted_visibility_flags: array<u32>;
-@group(0) @binding(34) var<storage, read> compacted_local_offsets: array<u32>;
-@group(0) @binding(35) var<storage, read> compacted_block_offsets: array<u32>;
-@group(0) @binding(36) var<storage, read_write> compacted_out_instances: array<InstanceData>;
-@group(0) @binding(37) var<uniform> scatter_uniforms: ScanUniformBuffer;
 
 const PROJECT_WORKGROUP_SIZE: u32 = 128u;
 const COMPACTION_WORKGROUP_SIZE: u32 = 256u;
 const COMPACTION_BLOCK_SIZE: u32 = COMPACTION_WORKGROUP_SIZE * 2u;
-const INVALID_SORTED_INDEX: u32 = 0xffffffffu;
 const SH_C0: f32 = 0.2820947917738781f;
 const DEFAULT_SIGMA_COVERAGE: f32 = 3.0f;
 const BRUSH_COVARIANCE_BLUR_PX: f32 = 0.3f;
@@ -106,16 +94,6 @@ const BRUSH_VISIBILITY_ALPHA_THRESHOLD: f32 = 1.0f / 255.0f;
 const TILE_WIDTH: u32 = 16u;
 
 var<workgroup> scan_scratch: array<u32, 512>;
-
-fn zero_instance() -> InstanceData {
-    return InstanceData(
-        vec2f(0.0, 0.0),
-        0.0,
-        0.0,
-        vec4f(0.0, 0.0, 0.0, 0.0),
-        vec4f(0.0, 0.0, 0.0, 0.0),
-    );
-}
 
 fn zero_projected_tile_splat() -> ProjectedTileSplat {
     return ProjectedTileSplat(
@@ -333,14 +311,6 @@ fn will_primitive_contribute(rect: vec4f, mean: vec2f, conic: vec3f, power_thres
     return max_power_in_tile <= power_threshold;
 }
 
-fn pixel_covariance_to_ndc(covariance_px: mat2x2f, viewport_size_px: vec2f) -> mat2x2f {
-    let scale = vec2f(2.0f / max(viewport_size_px.x, 1.0), 2.0f / max(viewport_size_px.y, 1.0));
-    let xx = covariance_px[0][0] * scale.x * scale.x;
-    let xy = covariance_px[1][0] * scale.x * scale.y;
-    let yy = covariance_px[1][1] * scale.y * scale.y;
-    return mat2x2f(vec2f(xx, xy), vec2f(xy, yy));
-}
-
 fn evaluate_sh_rgb(view_direction: vec3f, degree: u32, base_index: u32) -> vec3f {
     var colors = SH_C0 * read_sh_coeff(base_index, 0u);
 
@@ -440,44 +410,40 @@ fn evaluate_sh_rgb(view_direction: vec3f, degree: u32, base_index: u32) -> vec3f
     return max(colors + vec3f(0.5), vec3f(0.0));
 }
 
-@compute
-@workgroup_size(PROJECT_WORKGROUP_SIZE, 1, 1)
-fn project_main(
-    @builtin(workgroup_id) workgroup_id: vec3u,
-    @builtin(num_workgroups) num_workgroups: vec3u,
-    @builtin(local_invocation_index) local_index: u32,
-) {
-    let global_index =
-        linear_workgroup_id(workgroup_id, num_workgroups) * PROJECT_WORKGROUP_SIZE + local_index;
-    let total_selected = project_uniforms.sigma_and_counts.y;
-    if global_index >= total_selected {
-        return;
-    }
+// Shared projection state computed identically by project_forward_main and
+// project_visible_main.  Both entry points call `project_splat`, so the
+// culling decision (forward) and the rasterization payload (visible) agree
+// bit-for-bit — the Brush model where project_forward is the sole gate.
+struct ProjectedSplatInfo {
+    visible: bool,
+    camera_depth: f32,
+    mean_px: vec2f,
+    extent_px: vec2f,
+    power_threshold: f32,
+    compensated_covariance_px: mat2x2f,
+};
 
-    visibility_flags[global_index] = 0u;
-    project_output_instances[global_index] = zero_instance();
-    projected_tile_splats[global_index] = zero_projected_tile_splat();
-    projected_tile_hit_counts[global_index] = 0u;
+fn project_splat(splat_index: u32) -> ProjectedSplatInfo {
+    var info = ProjectedSplatInfo(
+        false, 0.0, vec2f(0.0), vec2f(0.0), 0.0,
+        mat2x2f(vec2f(0.0, 0.0), vec2f(0.0, 0.0)),
+    );
 
-    let splat_index = sorted_indices[global_index];
-    if splat_index == INVALID_SORTED_INDEX {
-        return;
-    }
     let mean_world = means_world[splat_index].xyz;
     let quat = quats_xyzw[splat_index];
     let scale_opacity = scales_opacity[splat_index];
     let scale = max(scale_opacity.xyz, vec3f(1e-6));
-    let base_opacity = scale_opacity.w;
     let opacity_scale = max(bitcast<f32>(project_uniforms.pad.y), 0.0);
-    let effective_opacity = base_opacity * opacity_scale;
+    let effective_opacity = scale_opacity.w * opacity_scale;
 
     let mean_view = (project_uniforms.view_from_world * vec4f(mean_world, 1.0)).xyz;
     let camera_depth = -mean_view.z;
+    info.camera_depth = camera_depth;
     if !(camera_depth > project_uniforms.viewport_and_near.z) {
-        return;
+        return info;
     }
     if effective_opacity < BRUSH_VISIBILITY_ALPHA_THRESHOLD {
-        return;
+        return info;
     }
 
     let rotation = quat_to_mat_xyzw(quat);
@@ -487,10 +453,17 @@ fn project_main(
         vec3f(0.0, 0.0, scale.z * scale.z),
     );
     let covariance_world = rotation * scale_diag * transpose(rotation);
+    // The world-to-view rotation is OpenGL-style (camera looks down -z), but
+    // mean_camera below uses a z-forward frame (z = -view.z).  Express the
+    // covariance in that same z-forward frame by negating the z row of the
+    // rotation (flips sigma_xz / sigma_yz; the other entries are unchanged).
+    let vc0 = project_uniforms.view_from_world[0].xyz;
+    let vc1 = project_uniforms.view_from_world[1].xyz;
+    let vc2 = project_uniforms.view_from_world[2].xyz;
     let view_linear = mat3x3f(
-        project_uniforms.view_from_world[0].xyz,
-        project_uniforms.view_from_world[1].xyz,
-        project_uniforms.view_from_world[2].xyz,
+        vec3f(vc0.x, vc0.y, -vc0.z),
+        vec3f(vc1.x, vc1.y, -vc1.z),
+        vec3f(vc2.x, vc2.y, -vc2.z),
     );
     let viewport_size_px = project_uniforms.viewport_and_near.xy;
     let pixel_center = viewport_size_px * 0.5;
@@ -502,7 +475,7 @@ fn project_main(
     let mean_camera = vec3f(mean_view.x, mean_view.y, camera_depth);
     let mean_px = focal_px * mean_camera.xy / camera_depth + pixel_center;
     if !is_reasonable_vec2(mean_px) {
-        return;
+        return info;
     }
 
     let sigma_coverage = bitcast<f32>(project_uniforms.sigma_and_counts.x);
@@ -518,55 +491,101 @@ fn project_main(
     let compensated_covariance_px = compensate_covariance_px(covariance_px);
     let power_threshold = log(effective_opacity * 255.0);
     if !is_reasonable_scalar(power_threshold) || power_threshold <= 0.0 {
-        return;
+        return info;
     }
 
     let extent_px =
         brush_bbox_extent_px(compensated_covariance_px, power_threshold) * coverage_scale;
     if !is_reasonable_vec2(extent_px) {
-        return;
+        return info;
     }
 
     let radius_px = max(extent_px.x, extent_px.y);
     if radius_px < project_uniforms.viewport_and_near.w {
-        return;
+        return info;
     }
 
+    // Extent-aware on-screen test (Brush's mean±extent vs viewport overlap):
+    // replaces the old CPU |NDC| > 1.5 center cull.
     if mean_px.x + extent_px.x <= 0.0 ||
         mean_px.x - extent_px.x >= viewport_size_px.x ||
         mean_px.y + extent_px.y <= 0.0 ||
         mean_px.y - extent_px.y >= viewport_size_px.y {
+        return info;
+    }
+
+    info.visible = true;
+    info.mean_px = mean_px;
+    info.extent_px = extent_px;
+    info.power_threshold = power_threshold;
+    info.compensated_covariance_px = compensated_covariance_px;
+    return info;
+}
+
+// Stage 1: cull the FULL cloud and compact (global_gid, depth) pairs.
+// One thread per splat, capacity-dispatched on the statically known cloud size.
+@compute
+@workgroup_size(PROJECT_WORKGROUP_SIZE, 1, 1)
+fn project_forward_main(
+    @builtin(workgroup_id) workgroup_id: vec3u,
+    @builtin(num_workgroups) num_workgroups: vec3u,
+    @builtin(local_invocation_index) local_index: u32,
+) {
+    let global_gid =
+        linear_workgroup_id(workgroup_id, num_workgroups) * PROJECT_WORKGROUP_SIZE + local_index;
+    let total_splats = project_uniforms.sigma_and_counts.y;
+    if global_gid >= total_splats {
         return;
     }
 
-    let ndc_per_pixel = vec2f(
-        2.0f / max(viewport_size_px.x, 1.0),
-        2.0f / max(viewport_size_px.y, 1.0),
-    );
-    let center_ndc = (mean_px - pixel_center) * ndc_per_pixel;
-    if !is_reasonable_vec2(center_ndc) {
+    let info = project_splat(global_gid);
+    if !info.visible {
         return;
     }
 
-    let covariance_ndc = regularize_covariance(
-        pixel_covariance_to_ndc(compensated_covariance_px, viewport_size_px),
-    );
-    let extent_ndc = extent_px * ndc_per_pixel;
-    let radius_ndc = max(extent_ndc.x, extent_ndc.y);
-    if !is_reasonable_scalar(radius_ndc) || radius_ndc <= 0.0 {
+    // Positive f32 depths bitcast to u32 sort monotonically as unsigned, so
+    // the radix argsort over these keys yields ascending (front-to-back) order.
+    let write_id = atomicAdd(&forward_num_visible, 1u);
+    forward_global_from_compact[write_id] = global_gid;
+    forward_depth_keys[write_id] = bitcast<u32>(info.camera_depth);
+}
+
+// Stage 2 (after the GPU depth argsort): exact projection of visible splats.
+// One thread per compact slot, capacity-dispatched on the cloud size with an
+// early-exit on the GPU-side visible count.
+@compute
+@workgroup_size(PROJECT_WORKGROUP_SIZE, 1, 1)
+fn project_visible_main(
+    @builtin(workgroup_id) workgroup_id: vec3u,
+    @builtin(num_workgroups) num_workgroups: vec3u,
+    @builtin(local_invocation_index) local_index: u32,
+) {
+    let compact_id =
+        linear_workgroup_id(workgroup_id, num_workgroups) * PROJECT_WORKGROUP_SIZE + local_index;
+    let total_splats = project_uniforms.sigma_and_counts.y;
+    if compact_id >= total_splats {
         return;
     }
 
-    let clip = project_uniforms.projection_from_view * vec4f(mean_view, 1.0);
-    let ndc_depth = clip.z / clip.w;
-    if !is_reasonable_scalar(ndc_depth) {
+    // Zero the tail so the capacity-sized tile-count scan sees zeros.
+    let num_visible = num_visible_in[0];
+    if compact_id >= num_visible {
+        projected_tile_splats[compact_id] = zero_projected_tile_splat();
+        projected_tile_hit_counts[compact_id] = 0u;
         return;
     }
 
-    let inverse_cov = inverse_2x2(covariance_ndc);
+    let splat_index = global_from_compact[compact_id];
+    // project_forward_main already gated visibility; recompute (Brush model)
+    // and trust that the result is visible.
+    let info = project_splat(splat_index);
+
+    let viewport_size_px = project_uniforms.viewport_and_near.xy;
+    let base_opacity = scales_opacity[splat_index].w;
     let has_sh = project_uniforms.pad.x != 0u;
     var color = max(colors_dc[splat_index].xyz, vec3f(0.0));
     if has_sh {
+        let mean_world = means_world[splat_index].xyz;
         let camera_position = project_uniforms.camera_world_position.xyz;
         let view_direction = safe_normalize(mean_world - camera_position);
         let coeffs_per_channel = project_uniforms.sigma_and_counts.z;
@@ -575,25 +594,17 @@ fn project_main(
         color = evaluate_sh_rgb(view_direction, sh_degree, coeff_base);
     }
 
-    project_output_instances[global_index] = InstanceData(
-        center_ndc,
-        ndc_depth,
-        radius_ndc,
-        vec4f(inverse_cov[0][0], inverse_cov[1][0], inverse_cov[1][1], 0.0),
-        vec4f(color, base_opacity),
-    );
-
-    let mean_px_raster = vec2f(mean_px.x, viewport_size_px.y - mean_px.y);
+    let mean_px_raster = vec2f(info.mean_px.x, viewport_size_px.y - info.mean_px.y);
     let tile_bounds = vec2u(
         u32(ceil(viewport_size_px.x / f32(TILE_WIDTH))),
         u32(ceil(viewport_size_px.y / f32(TILE_WIDTH))),
     );
-    let tile_bbox = get_tile_bbox(mean_px_raster, extent_px, tile_bounds);
+    let tile_bbox = get_tile_bbox(mean_px_raster, info.extent_px, tile_bounds);
     let tile_bbox_min = tile_bbox.xy;
     let tile_bbox_max = tile_bbox.zw;
     let tile_bbox_width = tile_bbox_max.x - tile_bbox_min.x;
     let num_tiles_bbox = (tile_bbox_max.y - tile_bbox_min.y) * tile_bbox_width;
-    let conic_px = inverse_2x2(compensated_covariance_px);
+    let conic_px = inverse_2x2(info.compensated_covariance_px);
     let packed_conic_px = vec3f(conic_px[0][0], -conic_px[1][0], conic_px[1][1]);
 
     var num_tiles_hit = 0u;
@@ -601,19 +612,18 @@ fn project_main(
         let tx = (tile_idx % tile_bbox_width) + tile_bbox_min.x;
         let ty = (tile_idx / tile_bbox_width) + tile_bbox_min.y;
         let rect = tile_rect(vec2u(tx, ty));
-        if will_primitive_contribute(rect, mean_px_raster, packed_conic_px, power_threshold) {
+        if will_primitive_contribute(rect, mean_px_raster, packed_conic_px, info.power_threshold) {
             num_tiles_hit += 1u;
         }
     }
 
-    projected_tile_splats[global_index] = ProjectedTileSplat(
+    projected_tile_splats[compact_id] = ProjectedTileSplat(
         mean_px_raster,
         vec4f(packed_conic_px, base_opacity),
         vec4f(color, base_opacity),
         vec4u(tile_bbox_min, tile_bbox_max),
     );
-    projected_tile_hit_counts[global_index] = num_tiles_hit;
-    visibility_flags[global_index] = 1u;
+    projected_tile_hit_counts[compact_id] = num_tiles_hit;
 }
 
 @compute
@@ -634,8 +644,8 @@ fn scan_blocks_main(
     let global0 = base + local0;
     let global1 = base + local1;
 
-    let flag0 = select(0u, scan_visibility_flags[global0], global0 < scan_uniforms.total_selected);
-    let flag1 = select(0u, scan_visibility_flags[global1], global1 < scan_uniforms.total_selected);
+    let flag0 = select(0u, scan_input_values[global0], global0 < scan_uniforms.total_selected);
+    let flag1 = select(0u, scan_input_values[global1], global1 < scan_uniforms.total_selected);
     scan_scratch[local0] = flag0;
     scan_scratch[local1] = flag1;
     workgroupBarrier();
@@ -704,30 +714,12 @@ fn scan_block_sums_main(@builtin(local_invocation_index) local_index: u32) {
     workgroupBarrier();
     if local_index == 0u {
         let total_visible = select(0u, scan_scratch[block_count - 1u], block_count > 0u);
-        draw_indirect_args[0] = 6u;
-        draw_indirect_args[1] = total_visible;
-        draw_indirect_args[2] = 0u;
-        draw_indirect_args[3] = 0u;
+        // Legacy-DrawIndirect-shaped layout, kept for buffer compatibility:
+        // word[0] is an unused legacy quad vertex count, word[1] is the total.
+        scan_totals_out[0] = 6u;
+        scan_totals_out[1] = total_visible;
+        scan_totals_out[2] = 0u;
+        scan_totals_out[3] = 0u;
     }
 }
 
-@compute
-@workgroup_size(PROJECT_WORKGROUP_SIZE, 1, 1)
-fn scatter_main(
-    @builtin(workgroup_id) workgroup_id: vec3u,
-    @builtin(num_workgroups) num_workgroups: vec3u,
-    @builtin(local_invocation_index) local_index: u32,
-) {
-    let global_index =
-        linear_workgroup_id(workgroup_id, num_workgroups) * PROJECT_WORKGROUP_SIZE + local_index;
-    if global_index >= scatter_uniforms.total_selected {
-        return;
-    }
-    if compacted_visibility_flags[global_index] == 0u {
-        return;
-    }
-
-    let block_index = global_index / COMPACTION_BLOCK_SIZE;
-    let dst_index = compacted_block_offsets[block_index] + compacted_local_offsets[global_index];
-    compacted_out_instances[dst_index] = compacted_temp_instances[global_index];
-}
