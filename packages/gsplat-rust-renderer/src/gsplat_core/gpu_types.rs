@@ -361,7 +361,6 @@ pub struct GpuBindGroupLayouts {
     pub map: wgpu::BindGroupLayout,
     pub sort_count: wgpu::BindGroupLayout,
     pub sort_reduce: wgpu::BindGroupLayout,
-    pub sort_scan: wgpu::BindGroupLayout,
     pub sort_scan_compose: wgpu::BindGroupLayout,
     pub sort_scan_add: wgpu::BindGroupLayout,
     pub sort_scatter: wgpu::BindGroupLayout,
@@ -369,7 +368,7 @@ pub struct GpuBindGroupLayouts {
     pub rasterize: wgpu::BindGroupLayout,
 }
 
-/// Create all 13 bind group layouts for the compute pipeline.
+/// Create all 12 bind group layouts for the compute pipeline.
 pub fn create_compute_bind_group_layouts(device: &wgpu::Device) -> GpuBindGroupLayouts {
     let project_forward = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("project_forward_bgl"),
@@ -447,14 +446,6 @@ pub fn create_compute_bind_group_layouts(device: &wgpu::Device) -> GpuBindGroupL
             storage_layout_entry(6, true),  // num_intersections
         ],
     });
-    let sort_scan = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("sort_scan_bgl"),
-        entries: &[
-            uniform_layout_entry(0, std::mem::size_of::<SortUniformBuffer>()),
-            storage_layout_entry(1, false), // reduced
-            storage_layout_entry(6, true),  // num_intersections
-        ],
-    });
     let sort_scan_compose = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("sort_scan_compose_bgl"),
         entries: &[
@@ -521,7 +512,6 @@ pub fn create_compute_bind_group_layouts(device: &wgpu::Device) -> GpuBindGroupL
         map,
         sort_count,
         sort_reduce,
-        sort_scan,
         sort_scan_compose,
         sort_scan_add,
         sort_scatter,
@@ -531,9 +521,6 @@ pub fn create_compute_bind_group_layouts(device: &wgpu::Device) -> GpuBindGroupL
 }
 
 /// All compute pipelines for the GPU-only Gaussian splat pipeline.
-// Some pipelines are retained as lifetime anchors even when not directly
-// referenced in every dispatch path.
-#[allow(dead_code)]
 pub struct GpuComputePipelines {
     pub project_forward: wgpu::ComputePipeline,
     pub project_visible: wgpu::ComputePipeline,
@@ -543,7 +530,6 @@ pub struct GpuComputePipelines {
     pub clamp_intersection_count: wgpu::ComputePipeline,
     pub sort_count: wgpu::ComputePipeline,
     pub sort_reduce: wgpu::ComputePipeline,
-    pub sort_scan: wgpu::ComputePipeline,
     pub sort_scan_compose: wgpu::ComputePipeline,
     pub sort_scan_add: wgpu::ComputePipeline,
     pub sort_scatter: wgpu::ComputePipeline,
@@ -551,7 +537,7 @@ pub struct GpuComputePipelines {
     pub rasterize: wgpu::ComputePipeline,
 }
 
-/// Create all 14 compute pipelines from the 5 embedded WGSL shaders.
+/// Create all 13 compute pipelines from the 5 embedded WGSL shaders.
 pub fn create_compute_pipelines(
     device: &wgpu::Device,
     layouts: &GpuBindGroupLayouts,
@@ -638,13 +624,6 @@ pub fn create_compute_pipelines(
             &sort_shader,
             "sort_reduce_main",
             &[&layouts.sort_reduce],
-        ),
-        sort_scan: create_compute_pipeline(
-            device,
-            "sort_scan",
-            &sort_shader,
-            "sort_scan_main",
-            &[&layouts.sort_scan],
         ),
         sort_scan_compose: create_compute_pipeline(
             device,
@@ -891,6 +870,12 @@ pub struct RadixSortBuffers<'a> {
     pub vals_alt: &'a wgpu::Buffer,
     /// GPU buffer whose first u32 is the number of keys to sort.
     pub num_keys: &'a wgpu::Buffer,
+}
+
+/// Scratch buffers for the radix sort.  The sorts in a frame run
+/// sequentially in one encoder, so a single set (sized for the largest sort)
+/// serves all of them.
+pub struct RadixSortScratch<'a> {
     pub counts: &'a wgpu::Buffer,
     pub reduced: &'a wgpu::Buffer,
     pub scan_offsets: &'a wgpu::Buffer,
@@ -933,6 +918,7 @@ pub fn build_radix_sort(
     layouts: &GpuBindGroupLayouts,
     shift_ubs: &[wgpu::Buffer],
     buffers: &RadixSortBuffers<'_>,
+    scratch: &RadixSortScratch<'_>,
     sort_wg_count: u32,
     num_passes: u32,
 ) -> RadixSort {
@@ -974,7 +960,7 @@ pub fn build_radix_sort(
                     entries: &[
                         storage_buffer_entry(0, sort_ub),
                         storage_buffer_entry(1, src_keys),
-                        storage_buffer_entry(2, buffers.counts),
+                        storage_buffer_entry(2, scratch.counts),
                         storage_buffer_entry(6, buffers.num_keys),
                     ],
                 }),
@@ -983,8 +969,8 @@ pub fn build_radix_sort(
                     layout: &layouts.sort_reduce,
                     entries: &[
                         storage_buffer_entry(0, sort_ub),
-                        storage_buffer_entry(1, buffers.counts),
-                        storage_buffer_entry(2, buffers.reduced),
+                        storage_buffer_entry(1, scratch.counts),
+                        storage_buffer_entry(2, scratch.reduced),
                         storage_buffer_entry(6, buffers.num_keys),
                     ],
                 }),
@@ -993,8 +979,8 @@ pub fn build_radix_sort(
                     layout: &layouts.sort_scan_add,
                     entries: &[
                         storage_buffer_entry(0, sort_ub),
-                        storage_buffer_entry(1, buffers.reduced),
-                        storage_buffer_entry(2, buffers.counts),
+                        storage_buffer_entry(1, scratch.reduced),
+                        storage_buffer_entry(2, scratch.counts),
                         storage_buffer_entry(6, buffers.num_keys),
                     ],
                 }),
@@ -1005,7 +991,7 @@ pub fn build_radix_sort(
                         storage_buffer_entry(0, sort_ub),
                         storage_buffer_entry(1, src_keys),
                         storage_buffer_entry(2, src_vals),
-                        storage_buffer_entry(3, buffers.counts),
+                        storage_buffer_entry(3, scratch.counts),
                         storage_buffer_entry(4, dst_keys),
                         storage_buffer_entry(5, dst_vals),
                         storage_buffer_entry(6, buffers.num_keys),
@@ -1021,9 +1007,9 @@ pub fn build_radix_sort(
             label: Some("sort_scan_blocks_bg"),
             layout: &layouts.scan,
             entries: &[
-                storage_buffer_entry(16, buffers.reduced),
-                storage_buffer_entry(17, buffers.scan_offsets),
-                storage_buffer_entry(18, buffers.scan_block_offsets),
+                storage_buffer_entry(16, scratch.reduced),
+                storage_buffer_entry(17, scratch.scan_offsets),
+                storage_buffer_entry(18, scratch.scan_block_offsets),
                 storage_buffer_entry(19, &scan_sort_ub),
             ],
         }),
@@ -1031,8 +1017,8 @@ pub fn build_radix_sort(
             label: Some("sort_scan_block_sums_bg"),
             layout: &layouts.scan_block_sums,
             entries: &[
-                storage_buffer_entry(24, buffers.scan_block_offsets),
-                storage_buffer_entry(25, buffers.scan_totals),
+                storage_buffer_entry(24, scratch.scan_block_offsets),
+                storage_buffer_entry(25, scratch.scan_totals),
                 storage_buffer_entry(26, &scan_sort_ub),
             ],
         }),
@@ -1040,9 +1026,9 @@ pub fn build_radix_sort(
             label: Some("sort_scan_compose_bg"),
             layout: &layouts.sort_scan_compose,
             entries: &[
-                storage_buffer_entry(8, buffers.scan_offsets),
-                storage_buffer_entry(9, buffers.scan_block_offsets),
-                storage_buffer_entry(10, buffers.reduced),
+                storage_buffer_entry(8, scratch.scan_offsets),
+                storage_buffer_entry(9, scratch.scan_block_offsets),
+                storage_buffer_entry(10, scratch.reduced),
                 storage_buffer_entry(11, &scan_sort_ub),
             ],
         }),

@@ -773,6 +773,24 @@ faster than Brush. Accuracy: all 24 views, the calibration scene, and the 309,88
 (<code>cmp</code> on PNGs); clippy <code>-D warnings</code> + 13 tests green on both feature sets. The 310k single-shot render also dropped
 34.5 &rarr; 6.6 ms (resource build now amortized out of the frame).</p>
 
+<h3 id="phase5-r1e1">10.2 R1+R2+E1 — one render path, no per-frame object churn in the viewer</h3>
+<p>The viewer and the standalone CLI used to define the same 13 bind-group layouts, 14 compute pipelines, radix-sort encoder, and 9 pipeline
+bind-group wirings twice.  Now <code>gpu_types.rs</code> is the single source of truth: <code>RadixSort</code> (prebuilt per-pass bind groups; all
+passes of one sort encoded into a single compute pass) and <code>create_pipeline_bind_groups</code> are shared by both paths.  The viewer's
+per-frame <code>encode_radix_sort</code> — which created ~19 uniform buffers, ~110 bind groups, and ~110 label <code>String</code>s every frame
+across the gid/depth/tile sorts — is gone; three prebuilt <code>RadixSort</code>s live in the per-entity cache and are rebuilt only when buffers
+grow or the raster extent changes.  <code>gaussian_renderer.rs</code> shrank 2,556 → 1,565 lines; Rust+WGSL total 8,422 → <b>7,524</b>
+(pre-phase-5 baseline 8,264).</p>
+<p class="sub">Gates: all 24 views, the calibration scene, and the 310k cloud stay <b>bit-identical</b>; CLI bench equal or better
+(1600² cells improved ~3–7%, e.g. chair 2.208 → 2.108 ms — fewer compute-pass boundaries); full viewer validation pass — matched-pose
+best-aligned SSIM vs CLI <b>0.9922</b> (identical to the pre-change value), new-vs-old screenshot SSIM <b>1.0000</b>, <code>rrd verify</code>
+clean, save→reload→screenshot PASS, 309,888-splat viewer render PASS (report: <code>/tmp/rerun-viewer-validation/20260610-gsplat-r1e1/</code>).</p>
+
+<h3 id="phase5-decision">10.3 Deliberately not ported: subgroup sort (#386), scan compaction (E3), indirect dispatch (E4)</h3>
+<p>These were ranked as the path to close a 2.2× gap; after E5 + R1/R2/E1 ours is <b>faster than Brush in all six cells</b>, so they would now
+trade away bit-identical renders (subgroup ops reorder float operations) or add kernels/LOC for speed the gates don't need.  Kept as future
+work in §7's adoption list — relevant again only if a much heavier workload (multi-million splats, 4K) reopens the gap.</p>
+
 <h2 id="appendix">11. Appendix — reproduction commands</h2>
 <pre><code><span class="c"># Paths
 # PKG = packages/gsplat-rust-renderer (worktree .claude/worktrees/feature-splatting)

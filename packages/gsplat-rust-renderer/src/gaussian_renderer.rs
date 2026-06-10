@@ -51,9 +51,9 @@ use re_renderer::renderer::{DrawData, DrawDataDrawable, DrawError, DrawInstructi
 use self::gpu_types as gpu_data;
 use crate::gsplat_core::gpu_types::{
     DEPTH_SORT_PASSES, GpuBindGroupLayouts, GpuComputePipelines, PROJECT_WORKGROUP_SIZE,
-    PipelineBindGroups, PipelineBuffers, RadixSort, RadixSortBuffers, SORT_BIN_COUNT,
-    SORT_BLOCK_SIZE,
-    SORT_WORKGROUP_SIZE, TILE_OFFSET_CHECKS_PER_ITER, TILE_OFFSET_WORKGROUP_SIZE, TILE_WIDTH,
+    PipelineBindGroups, PipelineBuffers, RadixSort, RadixSortBuffers, RadixSortScratch,
+    SORT_BIN_COUNT,
+    SORT_BLOCK_SIZE, SORT_WORKGROUP_SIZE, TILE_OFFSET_CHECKS_PER_ITER, TILE_OFFSET_WORKGROUP_SIZE, TILE_WIDTH,
     build_radix_sort, calc_raster_extent, calc_tile_bounds, compaction_block_count,
     create_sort_shift_uniforms,
     create_compute_bind_group_layouts, create_compute_pipelines, create_filled_buffer,
@@ -357,6 +357,13 @@ impl GaussianRenderer {
         depth_sort_workgroup_count: u32,
         raster_extent: glam::UVec2,
     ) -> (RadixSort, RadixSort, RadixSort) {
+        let scratch = RadixSortScratch {
+            counts: &buffers.sort_counts_buffer,
+            reduced: &buffers.sort_reduced_buffer,
+            scan_offsets: &buffers.sort_scan_offsets_buffer,
+            scan_block_offsets: &buffers.sort_scan_block_offsets_buffer,
+            scan_totals: &buffers.sort_scan_totals_buffer,
+        };
         let gid_sort = build_radix_sort(
             &ctx.device,
             &self.layouts,
@@ -367,12 +374,8 @@ impl GaussianRenderer {
                 keys_alt: &buffers.global_from_compact_alt_buffer,
                 vals_alt: &buffers.depth_keys_alt_buffer,
                 num_keys: &buffers.num_visible_buffer,
-                counts: &buffers.sort_counts_buffer,
-                reduced: &buffers.sort_reduced_buffer,
-                scan_offsets: &buffers.sort_scan_offsets_buffer,
-                scan_block_offsets: &buffers.sort_scan_block_offsets_buffer,
-                scan_totals: &buffers.sort_scan_totals_buffer,
             },
+            &scratch,
             depth_sort_workgroup_count,
             gid_sort_passes(splat_capacity),
         );
@@ -386,12 +389,8 @@ impl GaussianRenderer {
                 keys_alt: &buffers.depth_keys_alt_buffer,
                 vals_alt: &buffers.global_from_compact_alt_buffer,
                 num_keys: &buffers.num_visible_buffer,
-                counts: &buffers.sort_counts_buffer,
-                reduced: &buffers.sort_reduced_buffer,
-                scan_offsets: &buffers.sort_scan_offsets_buffer,
-                scan_block_offsets: &buffers.sort_scan_block_offsets_buffer,
-                scan_totals: &buffers.sort_scan_totals_buffer,
             },
+            &scratch,
             depth_sort_workgroup_count,
             DEPTH_SORT_PASSES,
         );
@@ -406,12 +405,8 @@ impl GaussianRenderer {
                 keys_alt: &buffers.sort_keys_buffer,
                 vals_alt: &buffers.sorted_indices_alt_buffer,
                 num_keys: &buffers.num_intersections_buffer,
-                counts: &buffers.sort_counts_buffer,
-                reduced: &buffers.sort_reduced_buffer,
-                scan_offsets: &buffers.sort_scan_offsets_buffer,
-                scan_block_offsets: &buffers.sort_scan_block_offsets_buffer,
-                scan_totals: &buffers.sort_scan_totals_buffer,
             },
+            &scratch,
             sort_workgroup_count,
             tile_sort_passes(n_tiles),
         );
@@ -981,17 +976,18 @@ impl GaussianRenderer {
 
         if changed {
             self.refresh_compute_bind_groups(ctx, label, compute);
+            // The raster uniform only depends on the tile grid, so it only
+            // needs rewriting when that changed.
+            let raster_uniform = gpu_data::RasterUniformBuffer {
+                tile_bounds: tile_bounds.to_array(),
+                img_size: raster_extent.to_array(),
+            };
+            ctx.queue.write_buffer(
+                &compute.buffers.raster_uniform_buffer,
+                0,
+                bytemuck::bytes_of(&raster_uniform),
+            );
         }
-
-        let raster_uniform = gpu_data::RasterUniformBuffer {
-            tile_bounds: tile_bounds.to_array(),
-            img_size: raster_extent.to_array(),
-        };
-        ctx.queue.write_buffer(
-            &compute.buffers.raster_uniform_buffer,
-            0,
-            bytemuck::bytes_of(&raster_uniform),
-        );
     }
 
     /// Grow all per-splat buffers (used when an entity is re-logged with a

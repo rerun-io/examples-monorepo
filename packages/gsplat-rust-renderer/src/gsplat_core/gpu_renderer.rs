@@ -386,6 +386,13 @@ impl GpuRenderResources {
         // Stage 2a sorts (gid, depth) pairs ascending by gid to canonicalize
         // project_forward's racy atomicAdd compaction order; stage 2b then
         // argsorts by f32 depth bits (stable, so gid order breaks ties).
+        let scratch = RadixSortScratch {
+            counts: &sort_counts_buf,
+            reduced: &sort_reduced_buf,
+            scan_offsets: &sort_scan_offsets_buf,
+            scan_block_offsets: &sort_scan_block_offsets_buf,
+            scan_totals: &sort_scan_totals_buf,
+        };
         let gid_sort: RadixSort = build_radix_sort(
             device,
             &renderer.layouts,
@@ -396,12 +403,8 @@ impl GpuRenderResources {
                 keys_alt: &global_from_compact_alt_buf,
                 vals_alt: &depth_keys_alt_buf,
                 num_keys: &num_visible_buf,
-                counts: &sort_counts_buf,
-                reduced: &sort_reduced_buf,
-                scan_offsets: &sort_scan_offsets_buf,
-                scan_block_offsets: &sort_scan_block_offsets_buf,
-                scan_totals: &sort_scan_totals_buf,
             },
+            &scratch,
             depth_sort_wg_count,
             gid_sort_passes(total_splats),
         );
@@ -415,12 +418,8 @@ impl GpuRenderResources {
                 keys_alt: &depth_keys_alt_buf,
                 vals_alt: &global_from_compact_alt_buf,
                 num_keys: &num_visible_buf,
-                counts: &sort_counts_buf,
-                reduced: &sort_reduced_buf,
-                scan_offsets: &sort_scan_offsets_buf,
-                scan_block_offsets: &sort_scan_block_offsets_buf,
-                scan_totals: &sort_scan_totals_buf,
             },
+            &scratch,
             depth_sort_wg_count,
             DEPTH_SORT_PASSES,
         );
@@ -434,12 +433,8 @@ impl GpuRenderResources {
                 keys_alt: &sort_keys_buf,
                 vals_alt: &sorted_indices_alt_buf,
                 num_keys: &num_isect_buf,
-                counts: &sort_counts_buf,
-                reduced: &sort_reduced_buf,
-                scan_offsets: &sort_scan_offsets_buf,
-                scan_block_offsets: &sort_scan_block_offsets_buf,
-                scan_totals: &sort_scan_totals_buf,
             },
+            &scratch,
             tile_sort_wg_count,
             tile_sort_passes(n_tiles),
         );

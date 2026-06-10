@@ -204,6 +204,17 @@ Maintained by Claude during the validation workflows — started 2026-06-10.</p>
 <p>(1) <b>gid-canonicalization sort before the depth sort</b> — Brush doesn't have it and is consequently nondeterministic on depth-bit ties; we chose determinism (bit-identical renders) at the cost of extra sort passes. (2) <b>near-plane cull uses <code>camera.near_plane</code></b> instead of Brush's hard-coded 0.01 (keeps our pre-existing camera contract). (3) <b>capacity dispatch + GPU-buffer counts instead of Brush v0.3.0's indirect dispatch</b> — same GPU-only property, less machinery, consistent with how our tile sort already worked.</p>
 </div>
 
+<div class="entry decision"><span class="ts">2026-06-10</span>
+<h3><span class="kind decision">decision</span>Subgroup sort / E3 / E4: deliberately NOT ported — the speed gate is already exceeded</h3>
+<p>The perf roadmap (subgroup radix sort #386, scan-based gid compaction E3, indirect tile-sort dispatch E4) was ranked to close a
+2.2× throughput gap to Brush. After E5 + R1/R2/E1 the gap is closed <i>with margin</i> — ours is 1.16–1.54× <b>faster</b> than Brush in all six
+bench cells. The remaining items would now trade away properties the project values more than unneeded speed: the subgroup sort changes
+float op ordering (forfeits bit-identical renders — the 98% accuracy headroom existed precisely for this, but spending it for nothing is
+strictly worse), and E3/E4 add kernels/complexity (LOC up, against the 10% reduction goal) for ~0.2–0.6 ms we don't need.
+They remain documented as future work in <code>brush-comparison.html</code> §7 if a heavier workload (e.g. multi-million-splat scenes at 4K)
+ever reopens the gap.</p>
+</div>
+
 <h2>Open questions</h2>
 
 <div class="entry decision"><span class="ts">2026-06-10</span>
