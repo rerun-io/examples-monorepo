@@ -1,12 +1,13 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// gaussian_dynamic_sort.wgsl — Stage 4: Radix Sort by Tile ID
+// gaussian_dynamic_sort.wgsl — Stages 2 + 6: Radix Argsort (depth) / Sort (tile ID)
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// Pipeline position: Runs after intersection mapping (stage 3).
-//
-// Purpose: Sort all (tile_id, splat_id) pairs by tile_id so that all splats
-// for the same tile are contiguous in memory.  This enables the raster stage
-// to process one tile at a time without random-access lookups.
+// Pipeline position: Used twice per frame.  Stage 2: argsort the compacted
+// (gid, depth-bits) pairs after project_forward (preceded by the gid
+// canonicalization pre-sort).  Stage 6: after intersection mapping (stage 5),
+// sort all (tile_id, splat_id) pairs by tile_id so that all splats for the
+// same tile are contiguous in memory — this enables the raster stage to
+// process one tile at a time without random-access lookups.
 //
 // Algorithm: Multi-pass 4-bit radix sort (16 bins per pass).  For a 32-bit
 // tile ID, this takes up to 8 passes.  Each pass consists of:

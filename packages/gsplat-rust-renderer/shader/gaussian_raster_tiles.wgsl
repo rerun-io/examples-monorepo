@@ -1,8 +1,8 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// gaussian_raster_tiles.wgsl — Stage 6: Tile Rasterization
+// gaussian_raster_tiles.wgsl — Stage 8: Tile Rasterization
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// Pipeline position: Runs after tile offsets (stage 5), before composite (stage 7).
+// Pipeline position: Runs after tile offsets (stage 7), before composite (stage 9).
 //
 // Purpose: This is where the actual pixel colors are computed.  Each workgroup
 // (256 threads = one 16×16 tile) processes all the splats that overlap its tile,

@@ -1,8 +1,8 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// gaussian_map_intersections.wgsl — Stage 3: Tile Intersection Mapping
+// gaussian_map_intersections.wgsl — Stage 5: Tile Intersection Mapping
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// Pipeline position: Runs after projection + compaction (stages 1-2).
+// Pipeline position: Runs after projection + prefix scan (stages 3-4).
 //
 // Purpose: Each visible splat overlaps one or more screen tiles (16×16 pixel
 // regions).  This shader "scatters" each splat into all the tiles it touches,

@@ -313,30 +313,14 @@ impl VisualizerSystem for GaussianSplatVisualizer {
             };
             active_labels.insert(label.clone());
 
-            // `or_insert_with` only builds the cloud if this is the first time
-            // we've seen this entity path.
-            let cache_entry = clouds
-                .entry(label.clone())
-                .or_insert_with(|| CachedCloud {
-                    signature: signature.clone(),
-                    cloud: Arc::new(build_render_cloud(
-                        centers.slice::<[f32; 3]>(),
-                        quaternions.slice::<[f32; 4]>(),
-                        scales.slice::<[f32; 3]>(),
-                        opacities.slice::<f32>(),
-                        colors.slice::<u32>(),
-                        transform,
-                        sh_coeffs_per_channel.and_then(|coeffs_per_channel| {
-                            materialize_sh_coefficients(&latest_at_results, coeffs_per_channel)
-                        }),
-                    )),
-                });
-
-            // If the signature changed (e.g. different splat count after
-            // re-logging), rebuild the cloud from the new data.
-            if cache_entry.signature != signature {
-                cache_entry.signature = signature;
-                cache_entry.cloud = Arc::new(build_render_cloud(
+            // Build the cloud only when this entity path is new or its
+            // signature changed (e.g. different splat count after re-logging);
+            // steady-state frames reuse the cached copy.
+            let needs_build = clouds
+                .get(&label)
+                .is_none_or(|entry| entry.signature != signature);
+            if needs_build {
+                let cloud = Arc::new(build_render_cloud(
                     centers.slice::<[f32; 3]>(),
                     quaternions.slice::<[f32; 4]>(),
                     scales.slice::<[f32; 3]>(),
@@ -347,10 +331,15 @@ impl VisualizerSystem for GaussianSplatVisualizer {
                         materialize_sh_coefficients(&latest_at_results, coeffs_per_channel)
                     }),
                 ));
+                clouds.insert(label.clone(), CachedCloud { signature, cloud });
             }
 
             // ── Step 4: Extract camera ────────────────────────────────
-            let cloud = cache_entry.cloud.clone();
+            let cloud = clouds
+                .get(&label)
+                .expect("cloud cache entry inserted above")
+                .cloud
+                .clone();
             // Prefer the interactive 3D camera from the view state.  Fall back
             // to a synthetic camera positioned around the cloud's bounding box
             // (so the splats are visible even before the user orbits).

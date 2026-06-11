@@ -1,9 +1,10 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// gaussian_project.wgsl — Stages 1+2: GPU Culling, Depth Compaction, Projection
+// gaussian_project.wgsl — Stages 1, 3, 4: GPU Cull, Projection, Prefix Scan
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // Pipeline position: FIRST compute stages — the GPU is handed the FULL splat
-// cloud each frame.  There is no CPU pre-pass; culling and depth ordering
+// cloud each frame.  (The stage-2 depth argsort between project_forward and
+// project_visible lives in gaussian_dynamic_sort.wgsl.)  There is no CPU pre-pass; culling and depth ordering
 // happen entirely on the GPU, following Brush's project_forward /
 // project_visible split (brush v0.3.0 render.rs + d0eaca6f WGSL kernels).
 //
