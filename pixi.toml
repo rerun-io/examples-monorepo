@@ -1363,6 +1363,19 @@ xorg-libxinerama = "*"
 xorg-libxrandr = "*"
 brush = "==0.3.0"
 
+# Same viewer build deps for aarch64 (DGX Spark). brush is linux-64-only on
+# conda-forge and only needed for the benchmark comparisons, so it is
+# deliberately absent here.
+[feature.gsplat-rust-renderer.target.linux-aarch64.dependencies]
+libudev = "257.*"
+libxkbcommon = "*"
+wayland = "*"
+xorg-libx11 = "*"
+xorg-libxcursor = "*"
+xorg-libxi = "*"
+xorg-libxinerama = "*"
+xorg-libxrandr = "*"
+
 [feature.gsplat-rust-renderer.pypi-dependencies]
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
 lpips = ">=0.1.4,<1"
