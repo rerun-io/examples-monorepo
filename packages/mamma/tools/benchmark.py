@@ -18,6 +18,7 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 from mamma.datasets.mamma_npz import load_mamma_sequence
 from mamma.datasets.sequence import MultiViewSequence
 from mamma.engine.pipeline import StreamingPipeline, build_streaming_pipeline
+from mamma.engine.presets import PresetName, get_preset
 from mamma.fitting.window_fitter import FitterConfig
 from mamma.tracking.tracker import TrackerConfig
 
@@ -27,6 +28,9 @@ class BenchmarkConfig:
     rr_config: RerunTyroConfig
     """Rerun behavior; logging cost is part of the gate, so the default
     headless+in-memory sink still exercises the full logging path."""
+    preset: PresetName | None = None
+    """When set ('quality'|'fast'), overrides tracker/fitter/resize/hires_crops
+    AND gate_realtime_fraction with that preset's operating point."""
     tracker: TrackerConfig = field(default_factory=lambda: TrackerConfig(expected_subjects=1))
     """Tracker settings."""
     fitter: FitterConfig = field(default_factory=FitterConfig)
@@ -37,6 +41,8 @@ class BenchmarkConfig:
     """Converted MammaNet weights."""
     resize_hw: tuple[int, int] = (720, 1280)
     """Engine resolution."""
+    hires_crops: bool = True
+    """Decode native res; sample MammaNet crops from it."""
     trt_engine: Path | None = None
     """Optional MammaNet TensorRT engine plan."""
     gate_realtime_fraction: float = 0.5
@@ -49,19 +55,31 @@ class BenchmarkConfig:
 
 
 def build_pipeline(config: BenchmarkConfig, sequence: MultiViewSequence) -> StreamingPipeline:
+    tracker_cfg: TrackerConfig = config.tracker
+    fitter_cfg: FitterConfig = config.fitter
+    resize_hw: tuple[int, int] = config.resize_hw
+    hires_crops: bool = config.hires_crops
+    if config.preset is not None:
+        preset = get_preset(config.preset)
+        tracker_cfg, fitter_cfg, resize_hw, hires_crops = preset.tracker, preset.fitter, preset.resize_hw, preset.hires_crops
     return build_streaming_pipeline(
         sequence,
-        resize_hw=config.resize_hw,
+        resize_hw=resize_hw,
         device=config.device,
-        tracker_config=config.tracker,
-        fitter_config=config.fitter,
+        tracker_config=tracker_cfg,
+        fitter_config=fitter_cfg,
         mammanet_weights=config.mammanet_weights,
         trt_engine=config.trt_engine,
+        hires_crops=hires_crops,
     )
 
 
 def main(config: BenchmarkConfig) -> int:
     sequence: MultiViewSequence = load_mamma_sequence(config.data_dir)
+    gate_fraction: float = config.gate_realtime_fraction
+    if config.preset is not None:
+        gate_fraction = get_preset(config.preset).realtime_fraction
+        print(f"preset={config.preset}: realtime_fraction={gate_fraction}")
 
     # Warmup pass: fresh pipeline, short slice; absorbs weight load + autotune.
     # Its Rerun output goes to a sink-less throwaway recording — with a --save
@@ -99,9 +117,9 @@ def main(config: BenchmarkConfig) -> int:
     print(stats.profiler.report())
     print(f"\n  wall      {stats.elapsed_s:7.2f} s   (clip duration {clip_seconds:.2f} s)")
     print(f"  throughput {stats.ticks_per_s:6.1f} ticks/s ({cam_fps:.0f} cam-fps); realtime needs {sequence.fps:.0f} ticks/s")
-    gate_seconds: float = clip_seconds / config.gate_realtime_fraction
+    gate_seconds: float = clip_seconds / gate_fraction
     ok: bool = stats.elapsed_s <= gate_seconds
-    print(f"  gate      {gate_seconds:.1f} s ({config.gate_realtime_fraction:.0%} of realtime)  ->  {'PASS' if ok else 'FAIL'}")
+    print(f"  gate      {gate_seconds:.1f} s ({gate_fraction:.0%} of realtime)  ->  {'PASS' if ok else 'FAIL'}")
     print(f"\nRESULT: {'PASS' if ok else 'FAIL'}")
     return 0 if ok else 1
 

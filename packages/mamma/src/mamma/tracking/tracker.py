@@ -69,11 +69,14 @@ class TrackerConfig:
     suddenly (a single-tick drop well below the rolling-median area) — bridges
     1-2 tick identity flips onto distractors (e.g. a mask jumping onto a cone)
     that the empty-mask lost path cannot catch, and arms a re-prompt."""
-    transient_area_frac: float = 0.55
+    transient_area_frac: float = 0.65
     """Single-tick area as a fraction of the rolling-median healthy area below
     which a non-empty mask is treated as a transient collapse and the previous
-    mask held. Conservative: real motion rarely halves projected area in a tick
-    (mask errors anti-correlate with speed)."""
+    mask held (a >35% one-tick drop). Real motion changes projected area only
+    ~5%/tick even at the fastest jump apex (mask errors anti-correlate with
+    speed), so the 0.65..0.95 gap is pure safety margin; the threshold is set
+    to catch the single jump-apex undersegmentation glitch (f252 on
+    running_jumping, ~0.6x) that an offline bidirectional pass smooths over."""
     memory_window_size: int = 7
     """Sliding window of non-conditional SAM2 memories kept per object."""
     track_stride: int = 1

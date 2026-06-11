@@ -24,6 +24,7 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 from mamma.datasets.mamma_npz import load_mamma_sequence
 from mamma.datasets.sequence import MultiViewSequence
 from mamma.engine.pipeline import ResultCollector, StreamingPipeline, build_streaming_pipeline
+from mamma.engine.presets import PresetName, get_preset
 from mamma.engine.types import CameraTracks
 from mamma.fitting.stage import TickFitOutput
 from mamma.fitting.window_fitter import FitResult, FitterConfig
@@ -87,6 +88,9 @@ class DumpConfig:
     """Rerun behavior (headless by default; the dump itself needs no viewer)."""
     out_dir: Path = Path("/tmp/qfdig/current_run")
     """Where the artifact NPZs land."""
+    preset: PresetName | None = None
+    """When set ('quality'|'fast'), overrides tracker/fitter/resize/hires_crops
+    with that preset's operating point (tracker/fitter flags below are ignored)."""
     tracker: TrackerConfig = field(default_factory=lambda: TrackerConfig(expected_subjects=1))
     """Tracker settings; running_jumping is single-subject."""
     fitter: FitterConfig = field(default_factory=lambda: FitterConfig(emit_stride=1))
@@ -113,18 +117,26 @@ class DumpConfig:
 
 def main(config: DumpConfig) -> int:
     sequence: MultiViewSequence = load_mamma_sequence(config.data_dir)
+    tracker_cfg: TrackerConfig = config.tracker
+    fitter_cfg: FitterConfig = config.fitter
+    resize_hw: tuple[int, int] = config.resize_hw
+    hires_crops: bool = config.hires_crops
+    if config.preset is not None:
+        preset = get_preset(config.preset)
+        tracker_cfg, fitter_cfg, resize_hw, hires_crops = preset.tracker, preset.fitter, preset.resize_hw, preset.hires_crops
+        print(f"preset={config.preset}: tracker={tracker_cfg.sam2_config} redetect={tracker_cfg.redetect_interval} tick_iters={fitter_cfg.tick_iters}")
     collector = _DumpCollector(n_cams=len(sequence.camera_names), obj_id=config.obj_id)
     pipeline: StreamingPipeline = build_streaming_pipeline(
         sequence,
-        resize_hw=config.resize_hw,
+        resize_hw=resize_hw,
         device=config.device,
-        tracker_config=config.tracker,
-        fitter_config=config.fitter,
+        tracker_config=tracker_cfg,
+        fitter_config=fitter_cfg,
         mammanet_weights=config.mammanet_weights,
         trt_engine=config.trt_engine,
         collector=collector,
         use_mp_decode=config.mp_decode,
-        hires_crops=config.hires_crops,
+        hires_crops=hires_crops,
     )
     stats = pipeline.run(chunk_size=config.chunk_size)
     if pipeline.fitting is not None:
@@ -176,8 +188,12 @@ def main(config: DumpConfig) -> int:
         "clip_seconds": sequence.frame_count / sequence.fps,
         "stage_totals_s": stats.profiler.totals,
         "stage_counts": stats.profiler.counts,
-        "resize_hw": list(config.resize_hw),
-        "hires_crops": config.hires_crops,
+        "preset": config.preset,
+        "resize_hw": list(resize_hw),
+        "hires_crops": hires_crops,
+        "sam2_config": tracker_cfg.sam2_config,
+        "redetect_interval": tracker_cfg.redetect_interval,
+        "tick_iters": fitter_cfg.tick_iters,
         "trt_engine": str(config.trt_engine) if config.trt_engine else None,
     }
     (config.out_dir / "timing.json").write_text(json.dumps(timing, indent=2))
