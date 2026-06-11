@@ -30,6 +30,28 @@
   .meta { color: var(--muted); font-size: .85em; }
   details { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: .6rem 1rem; margin: .6rem 0; }
   summary { cursor: pointer; font-weight: 600; }
+  /* ---- visual showcase ---- */
+  .lead { font-size: 1.1rem; line-height: 1.5; color: #c4ccd8; margin: 1rem 0 1.3rem; }
+  video.hero { width: 100%; border-radius: 12px; border: 1px solid var(--border); display: block; background: #000; }
+  .statgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .7rem; margin: 1.2rem 0; }
+  .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: .85rem .95rem; }
+  .stat .v { font-size: 1.55rem; font-weight: 800; line-height: 1.05; }
+  .stat .l { color: var(--muted); font-size: .78rem; margin-top: .25rem; line-height: 1.35; }
+  .stat.b .v { color: var(--blue); } .stat.g .v { color: var(--green); }
+  .stat.a .v { color: var(--accent); } .stat.r .v { color: var(--red); }
+  .gallery { display: grid; gap: .55rem; margin: .9rem 0; }
+  .gallery.cols5 { grid-template-columns: repeat(5, 1fr); }
+  .gallery.cols4 { grid-template-columns: repeat(4, 1fr); }
+  .gallery.cols3 { grid-template-columns: repeat(3, 1fr); }
+  .gallery.cols2 { grid-template-columns: repeat(2, 1fr); }
+  .gallery figure { margin: 0; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .gallery img { width: 100%; display: block; aspect-ratio: 16 / 9; object-fit: cover; background: #0b0d12; }
+  .gallery figcaption { padding: .35rem .55rem; font-size: .75rem; color: var(--muted); line-height: 1.35; }
+  .gallery figcaption b { color: var(--text); font-weight: 600; }
+  .flow { display: flex; align-items: center; gap: .35rem; flex-wrap: wrap; color: var(--muted); font-size: .85rem; margin: .3rem 0 .6rem; }
+  .flow .step { color: var(--blue); font-weight: 700; }
+  .sectlabel { color: var(--accent); font-size: .76rem; letter-spacing: .09em; text-transform: uppercase; font-weight: 700; margin: 1.8rem 0 .2rem; }
+  @media (max-width: 760px) { .gallery.cols5, .gallery.cols4, .gallery.cols3 { grid-template-columns: repeat(2, 1fr); } }
 </style>
 </head>
 <body>
@@ -40,6 +62,208 @@
 <a href="viewer.html?rrd=gate-cross.rrd" style="color:#61afef">gate-crossing run (11.79 s)</a> ·
 <a href="viewer.html?rrd=current.rrd" style="color:#61afef">intermediate optimized run</a> ·
 <a href="perf-plan.md" style="color:#61afef">perf plan</a></p>
+
+<!-- ===================== VISUAL SHOWCASE ===================== -->
+<p class="lead">Four 4K cameras in, full-body SMPL-X meshes out. The research release runs as five separate programs passing files through disk at <b>~12&nbsp;s/frame</b>. This port re-builds it as a single resident streaming process at <b style="color:#6fbf73">40.7&nbsp;ms/frame</b> &mdash; every logged artifact held within a few&nbsp;% of the original.</p>
+
+<video class="hero" autoplay loop muted playsinline poster="media/quality_run_poster.jpg">
+  <source src="media/quality_run.mp4" type="video/mp4">
+</video>
+<p class="meta" style="text-align:center;margin:.4rem 0 0">The <b style="color:#d7dce4">quality</b> preset on <code>running_jumping</code>, live in the Rerun viewer — 4 camera streams with person masks, the 3D triangulated cloud and fitted SMPL-X mesh, and per-tick fit-health / SMPL-X parameter graphs.</p>
+
+<div class="statgrid">
+  <div class="stat g"><div class="v">≈295×</div><div class="l">faster per frame than the offline DAG (40.7&nbsp;ms vs ~12&nbsp;s)</div></div>
+  <div class="stat b"><div class="v">15.5&nbsp;mm</div><div class="l">per-vertex error vs the original — gate is&nbsp;≤&nbsp;30&nbsp;mm</div></div>
+  <div class="stat a"><div class="v">0.972</div><div class="l">mask IoU vs the original — gate is&nbsp;≥&nbsp;0.90</div></div>
+  <div class="stat"><div class="v">0</div><div class="l">intermediate files — frames stay in VRAM end&nbsp;to&nbsp;end</div></div>
+</div>
+
+<div class="sectlabel">The critical change — five programs through disk → one resident process</div>
+<p class="meta">The whole speed-up comes from one structural change. The research release is five separate
+programs that hand artifacts to each other <i>through disk</i>, each re-launching Python and reloading its
+models every run. This port is a single process that keeps every frame in VRAM and the models resident —
+decode straight into track, landmarks, triangulation and the fit, logging to Rerun as it goes, with no
+intermediate files anywhere.</p>
+<svg viewBox="0 0 900 300" style="width:100%;max-width:980px;display:block;margin:.6rem auto;background:#0d1016;border:1px solid #2a2f3a;border-radius:10px" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="cag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8a93a5"/></marker>
+    <marker id="cagn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#6fbf73"/></marker>
+  </defs>
+  <text x="24" y="50" fill="#e06c75" font-family="system-ui" font-size="11" font-weight="700">ORIGINAL — 5 subprocesses, disk between every pair</text>
+  <rect x="24"  y="62" width="120" height="42" rx="8" fill="#2a1d20" stroke="#e06c75" stroke-width="1.5"/><text x="84"  y="88" text-anchor="middle" fill="#d7dce4" font-family="system-ui" font-size="12">ma_cap</text>
+  <rect x="207" y="62" width="120" height="42" rx="8" fill="#2a1d20" stroke="#e06c75" stroke-width="1.5"/><text x="267" y="88" text-anchor="middle" fill="#d7dce4" font-family="system-ui" font-size="12">ma_masks</text>
+  <rect x="390" y="62" width="120" height="42" rx="8" fill="#2a1d20" stroke="#e06c75" stroke-width="1.5"/><text x="450" y="88" text-anchor="middle" fill="#d7dce4" font-family="system-ui" font-size="12">ma_2d</text>
+  <rect x="573" y="62" width="120" height="42" rx="8" fill="#2a1d20" stroke="#e06c75" stroke-width="1.5"/><text x="633" y="88" text-anchor="middle" fill="#d7dce4" font-family="system-ui" font-size="12">ma_3d</text>
+  <rect x="756" y="62" width="120" height="42" rx="8" fill="#2a1d20" stroke="#e06c75" stroke-width="1.5"/><text x="816" y="88" text-anchor="middle" fill="#d7dce4" font-family="system-ui" font-size="12">ma_vis</text>
+  <path d="M146,83 L205,83" stroke="#8a93a5" stroke-width="1.5" marker-end="url(#cag)"/>
+  <path d="M329,83 L388,83" stroke="#8a93a5" stroke-width="1.5" marker-end="url(#cag)"/>
+  <path d="M512,83 L571,83" stroke="#8a93a5" stroke-width="1.5" marker-end="url(#cag)"/>
+  <path d="M695,83 L754,83" stroke="#8a93a5" stroke-width="1.5" marker-end="url(#cag)"/>
+  <text x="175" y="120" text-anchor="middle" fill="#8a93a5" font-family="system-ui" font-size="10">⇄ disk</text>
+  <text x="358" y="120" text-anchor="middle" fill="#8a93a5" font-family="system-ui" font-size="10">⇄ disk</text>
+  <text x="541" y="120" text-anchor="middle" fill="#8a93a5" font-family="system-ui" font-size="10">⇄ disk</text>
+  <text x="724" y="120" text-anchor="middle" fill="#8a93a5" font-family="system-ui" font-size="10">⇄ disk</text>
+  <text x="24" y="143" fill="#8a93a5" font-family="system-ui" font-size="11">spawn Python + reload models + read the prior stage from disk + write its own artifacts &mdash; <tspan fill="#e06c75" font-weight="700">~12 s / frame</tspan></text>
+  <path d="M450,151 L450,171" stroke="#6fbf73" stroke-width="2.5" marker-end="url(#cagn)"/>
+  <text x="466" y="167" fill="#6fbf73" font-family="system-ui" font-size="13" font-weight="700">≈ 295× faster</text>
+  <text x="24" y="190" fill="#6fbf73" font-family="system-ui" font-size="11" font-weight="700">THIS PORT — one resident process, frames stay in VRAM</text>
+  <rect x="24" y="198" width="852" height="54" rx="10" fill="#1d2a1f" stroke="#6fbf73" stroke-width="1.5"/>
+  <rect x="40"  y="210" width="118" height="30" rx="8" fill="#24304a" stroke="#61afef" stroke-width="1.5"/><text x="99"  y="230" text-anchor="middle" fill="#d7dce4" font-family="system-ui" font-size="12">decode</text>
+  <rect x="178" y="210" width="118" height="30" rx="8" fill="#24304a" stroke="#61afef" stroke-width="1.5"/><text x="237" y="230" text-anchor="middle" fill="#d7dce4" font-family="system-ui" font-size="12">track</text>
+  <rect x="316" y="210" width="118" height="30" rx="8" fill="#24304a" stroke="#61afef" stroke-width="1.5"/><text x="375" y="230" text-anchor="middle" fill="#d7dce4" font-family="system-ui" font-size="12">landmarks</text>
+  <rect x="454" y="210" width="118" height="30" rx="8" fill="#24304a" stroke="#61afef" stroke-width="1.5"/><text x="513" y="230" text-anchor="middle" fill="#d7dce4" font-family="system-ui" font-size="12">triangulate</text>
+  <rect x="592" y="210" width="118" height="30" rx="8" fill="#24304a" stroke="#61afef" stroke-width="1.5"/><text x="651" y="230" text-anchor="middle" fill="#d7dce4" font-family="system-ui" font-size="12">fit</text>
+  <rect x="730" y="210" width="118" height="30" rx="8" fill="#24304a" stroke="#61afef" stroke-width="1.5"/><text x="789" y="230" text-anchor="middle" fill="#d7dce4" font-family="system-ui" font-size="12">log</text>
+  <path d="M160,225 L176,225" stroke="#6fbf73" stroke-width="2" marker-end="url(#cagn)"/>
+  <path d="M298,225 L314,225" stroke="#6fbf73" stroke-width="2" marker-end="url(#cagn)"/>
+  <path d="M436,225 L452,225" stroke="#6fbf73" stroke-width="2" marker-end="url(#cagn)"/>
+  <path d="M574,225 L590,225" stroke="#6fbf73" stroke-width="2" marker-end="url(#cagn)"/>
+  <path d="M712,225 L728,225" stroke="#6fbf73" stroke-width="2" marker-end="url(#cagn)"/>
+  <text x="24" y="272" fill="#8a93a5" font-family="system-ui" font-size="11">one process · one CUDA context · frames never touch disk &mdash; <tspan fill="#6fbf73" font-weight="700">40.7 ms / frame</tspan> incl. Rerun logging</text>
+</svg>
+
+<div class="sectlabel">The pipeline, one frame at a time</div>
+<div class="flow"><span class="step">decode</span> &rarr; <span class="step">track</span> &rarr; <span class="step">landmarks</span> &rarr; <span class="step">triangulate</span> &rarr; <span class="step">fit</span> &rarr; <span class="step">log</span></div>
+<p class="meta">Same frame, overlays added stage by stage — each camera's mask, dense 2D landmarks and box, then the cross-camera triangulated cloud and the fitted, semi-transparent SMPL-X mesh.</p>
+<div class="gallery cols5">
+  <figure><img src="media/stage_raw.jpg" loading="lazy"><figcaption><b>1 · decode</b> 4K → 720p frame</figcaption></figure>
+  <figure><img src="media/stage_mask.jpg" loading="lazy"><figcaption><b>2 · track</b> EfficientTAM mask</figcaption></figure>
+  <figure><img src="media/stage_keypoints.jpg" loading="lazy"><figcaption><b>3 · landmarks</b> 512 MammaNet points</figcaption></figure>
+  <figure><img src="media/stage_box.jpg" loading="lazy"><figcaption><b>4 · box</b> mask-derived bbox</figcaption></figure>
+  <figure><img src="media/stage_overlay.jpg" loading="lazy"><figcaption><b>2D combined</b> all overlays</figcaption></figure>
+</div>
+<div class="gallery cols3">
+  <figure><img src="media/stage_cloud.jpg" loading="lazy"><figcaption><b>5 · triangulate</b> weighted-DLT 512-point cloud</figcaption></figure>
+  <figure><img src="media/stage_mesh.jpg" loading="lazy"><figcaption><b>6 · fit</b> sliding-window SMPL-X mesh (semi-transparent, α&nbsp;0.65)</figcaption></figure>
+  <figure><img src="media/stage_full3d.jpg" loading="lazy"><figcaption><b>+ skeleton</b> joints &amp; kinematic tree</figcaption></figure>
+</div>
+
+<div class="sectlabel">Run → jump → land, tracked through the clip</div>
+<div class="gallery cols5">
+  <figure><img src="media/motion_0.jpg" loading="lazy"></figure>
+  <figure><img src="media/motion_1.jpg" loading="lazy"></figure>
+  <figure><img src="media/motion_2.jpg" loading="lazy"></figure>
+  <figure><img src="media/motion_3.jpg" loading="lazy"></figure>
+  <figure><img src="media/motion_4.jpg" loading="lazy"></figure>
+</div>
+<p class="meta">The A001 camera tile sampled across the clip — the mask and fit stay locked through the fast vertical motion of the jump.</p>
+
+<div class="sectlabel">~295× faster — and still within a few % of the original</div>
+<svg viewBox="0 0 900 280" style="width:100%;max-width:980px;display:block;margin:.6rem auto;background:#0d1016;border:1px solid #2a2f3a;border-radius:10px" xmlns="http://www.w3.org/2000/svg">
+  <text x="24" y="24" fill="#d7dce4" font-family="system-ui" font-size="13" font-weight="700">Throughput: offline DAG vs streaming port</text>
+  <text x="24" y="42" fill="#8a93a5" font-family="system-ui" font-size="11">Per-frame latency, 4 cameras/frame — log scale (ms)</text>
+  <line x1="150" y1="70" x2="150" y2="210" stroke="#2a2f3a" stroke-width="1"/>
+  <line x1="150" y1="210" x2="820" y2="210" stroke="#2a2f3a" stroke-width="1"/>
+  <line x1="150" y1="70" x2="150" y2="210" stroke="#2a2f3a" stroke-width="1" stroke-dasharray="3 3"/>
+  <text x="150" y="228" fill="#8a93a5" font-family="system-ui" font-size="11" text-anchor="middle">10</text>
+  <line x1="373.3" y1="70" x2="373.3" y2="210" stroke="#2a2f3a" stroke-width="1" stroke-dasharray="3 3"/>
+  <text x="373.3" y="228" fill="#8a93a5" font-family="system-ui" font-size="11" text-anchor="middle">100</text>
+  <line x1="596.7" y1="70" x2="596.7" y2="210" stroke="#2a2f3a" stroke-width="1" stroke-dasharray="3 3"/>
+  <text x="596.7" y="228" fill="#8a93a5" font-family="system-ui" font-size="11" text-anchor="middle">1000</text>
+  <line x1="820" y1="70" x2="820" y2="210" stroke="#2a2f3a" stroke-width="1" stroke-dasharray="3 3"/>
+  <text x="820" y="228" fill="#8a93a5" font-family="system-ui" font-size="11" text-anchor="middle">10000</text>
+  <text x="24" y="100" fill="#8a93a5" font-family="system-ui" font-size="11">Original 5-process DAG</text>
+  <rect x="150" y="86" width="685" height="26" rx="4" fill="#2a2417" stroke="#e0a458" stroke-width="1.5"/>
+  <text x="826" y="104" text-anchor="end" fill="#d7dce4" font-family="system-ui" font-size="12" font-weight="700">12 000 ms/frame</text>
+  <text x="24" y="166" fill="#8a93a5" font-family="system-ui" font-size="11">This port (incl. Rerun)</text>
+  <rect x="150" y="152" width="136.3" height="26" rx="4" fill="#24304a" stroke="#61afef" stroke-width="1.5"/>
+  <text x="296" y="170" fill="#d7dce4" font-family="system-ui" font-size="12" font-weight="700">40.7 ms/frame</text>
+  <text x="470" y="252" fill="#6fbf73" font-family="system-ui" font-size="13" font-weight="700" text-anchor="middle">≈ 295× faster</text>
+  <text x="24" y="270" fill="#8a93a5" font-family="system-ui" font-size="11">478 frames × 4 cameras; clip is 15.9 s of real time.</text>
+</svg>
+<svg viewBox="0 0 900 280" style="width:100%;max-width:980px;display:block;margin:.6rem auto;background:#0d1016;border:1px solid #2a2f3a;border-radius:10px" xmlns="http://www.w3.org/2000/svg">
+  <text x="24" y="24" fill="#d7dce4" font-family="system-ui" font-size="13" font-weight="700">Wall time to process the 15.9 s clip</text>
+  <text x="24" y="42" fill="#8a93a5" font-family="system-ui" font-size="11">Seconds (linear) — lower is better</text>
+  <line x1="150" y1="70" x2="150" y2="210" stroke="#2a2f3a" stroke-width="1"/>
+  <line x1="150" y1="210" x2="820" y2="210" stroke="#2a2f3a" stroke-width="1"/>
+  <line x1="150" y1="210" x2="150" y2="215" stroke="#2a2f3a"/>
+  <text x="150" y="228" fill="#8a93a5" font-family="system-ui" font-size="11" text-anchor="middle">0</text>
+  <line x1="317.5" y1="70" x2="317.5" y2="210" stroke="#2a2f3a" stroke-dasharray="3 3"/>
+  <text x="317.5" y="228" fill="#8a93a5" font-family="system-ui" font-size="11" text-anchor="middle">30</text>
+  <line x1="485" y1="70" x2="485" y2="210" stroke="#2a2f3a" stroke-dasharray="3 3"/>
+  <text x="485" y="228" fill="#8a93a5" font-family="system-ui" font-size="11" text-anchor="middle">60</text>
+  <line x1="652.5" y1="70" x2="652.5" y2="210" stroke="#2a2f3a" stroke-dasharray="3 3"/>
+  <text x="652.5" y="228" fill="#8a93a5" font-family="system-ui" font-size="11" text-anchor="middle">90</text>
+  <line x1="820" y1="70" x2="820" y2="210" stroke="#2a2f3a" stroke-dasharray="3 3"/>
+  <text x="820" y="228" fill="#8a93a5" font-family="system-ui" font-size="11" text-anchor="middle">120</text>
+  <line x1="238.8" y1="64" x2="238.8" y2="210" stroke="#e06c75" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <text x="238.8" y="60" fill="#e06c75" font-family="system-ui" font-size="11" text-anchor="middle">real-time (15.9 s)</text>
+  <text x="24" y="98" fill="#8a93a5" font-family="system-ui" font-size="11">real-time ref</text>
+  <rect x="150" y="84" width="88.8" height="24" rx="4" fill="#171a21" stroke="#8a93a5" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <text x="248" y="101" fill="#d7dce4" font-family="system-ui" font-size="11">15.9 s</text>
+  <text x="24" y="138" fill="#8a93a5" font-family="system-ui" font-size="11">fast preset</text>
+  <rect x="150" y="124" width="245.7" height="24" rx="4" fill="#1d2a1f" stroke="#6fbf73" stroke-width="1.5"/>
+  <text x="405" y="141" fill="#d7dce4" font-family="system-ui" font-size="11" font-weight="700">44 s · 2.8× realtime</text>
+  <text x="24" y="178" fill="#8a93a5" font-family="system-ui" font-size="11">quality preset</text>
+  <rect x="150" y="164" width="502.5" height="24" rx="4" fill="#24304a" stroke="#61afef" stroke-width="1.5"/>
+  <text x="662" y="181" fill="#d7dce4" font-family="system-ui" font-size="11" font-weight="700">90 s · 5.7× realtime</text>
+  <text x="820" y="258" fill="#e0a458" font-family="system-ui" font-size="11" text-anchor="end">original offline DAG off-chart: ~1h47m</text>
+  <text x="24" y="270" fill="#8a93a5" font-family="system-ui" font-size="11">Lower is better; the offline DAG is ~70× longer and omitted from scale.</text>
+</svg>
+<svg viewBox="0 0 900 320" style="width:100%;max-width:980px;display:block;margin:.6rem auto;background:#0d1016;border:1px solid #2a2f3a;border-radius:10px" xmlns="http://www.w3.org/2000/svg">
+  <text x="24" y="24" fill="#d7dce4" font-family="system-ui" font-size="13" font-weight="700">Fidelity vs the original DAG — both presets clear every gate</text>
+  <text x="80" y="58" fill="#8a93a5" font-family="system-ui" font-size="11">Per-vertex error (PVE), mm</text>
+  <line x1="80" y1="70" x2="80" y2="250" stroke="#2a2f3a"/>
+  <line x1="80" y1="250" x2="400" y2="250" stroke="#2a2f3a"/>
+  <text x="74" y="254" fill="#8a93a5" font-family="system-ui" font-size="11" text-anchor="end">0</text>
+  <line x1="76" y1="198.6" x2="80" y2="198.6" stroke="#2a2f3a"/>
+  <text x="74" y="202.6" fill="#8a93a5" font-family="system-ui" font-size="11" text-anchor="end">10</text>
+  <line x1="76" y1="147.1" x2="80" y2="147.1" stroke="#2a2f3a"/>
+  <text x="74" y="151.1" fill="#8a93a5" font-family="system-ui" font-size="11" text-anchor="end">20</text>
+  <line x1="76" y1="95.7" x2="80" y2="95.7" stroke="#2a2f3a"/>
+  <text x="74" y="99.7" fill="#8a93a5" font-family="system-ui" font-size="11" text-anchor="end">30</text>
+  <line x1="80" y1="95.7" x2="400" y2="95.7" stroke="#e06c75" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <text x="396" y="90" fill="#e06c75" font-family="system-ui" font-size="11" text-anchor="end">gate ≤ 30 mm</text>
+  <rect x="150" y="170.3" width="70" height="79.7" rx="4" fill="#24304a" stroke="#61afef" stroke-width="1.5"/>
+  <text x="185" y="164" fill="#d7dce4" font-family="system-ui" font-size="11" text-anchor="middle" font-weight="700">15.5</text>
+  <text x="185" y="266" fill="#8a93a5" font-family="system-ui" font-size="11" text-anchor="middle">quality</text>
+  <rect x="260" y="166.7" width="70" height="83.3" rx="4" fill="#1d2a1f" stroke="#6fbf73" stroke-width="1.5"/>
+  <text x="295" y="160.5" fill="#d7dce4" font-family="system-ui" font-size="11" text-anchor="middle" font-weight="700">16.2</text>
+  <text x="295" y="266" fill="#8a93a5" font-family="system-ui" font-size="11" text-anchor="middle">fast</text>
+  <text x="540" y="58" fill="#8a93a5" font-family="system-ui" font-size="11">Mask IoU vs original</text>
+  <line x1="540" y1="70" x2="540" y2="250" stroke="#2a2f3a"/>
+  <line x1="540" y1="250" x2="860" y2="250" stroke="#2a2f3a"/>
+  <text x="534" y="254" fill="#8a93a5" font-family="system-ui" font-size="11" text-anchor="end">0.80</text>
+  <line x1="536" y1="205" x2="540" y2="205" stroke="#2a2f3a"/>
+  <text x="534" y="209" fill="#8a93a5" font-family="system-ui" font-size="11" text-anchor="end">0.85</text>
+  <line x1="536" y1="160" x2="540" y2="160" stroke="#2a2f3a"/>
+  <text x="534" y="164" fill="#8a93a5" font-family="system-ui" font-size="11" text-anchor="end">0.90</text>
+  <line x1="536" y1="115" x2="540" y2="115" stroke="#2a2f3a"/>
+  <text x="534" y="119" fill="#8a93a5" font-family="system-ui" font-size="11" text-anchor="end">0.95</text>
+  <line x1="536" y1="70" x2="540" y2="70" stroke="#2a2f3a"/>
+  <text x="534" y="74" fill="#8a93a5" font-family="system-ui" font-size="11" text-anchor="end">1.00</text>
+  <line x1="540" y1="160" x2="860" y2="160" stroke="#e06c75" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <text x="856" y="154" fill="#e06c75" font-family="system-ui" font-size="11" text-anchor="end">gate ≥ 0.90</text>
+  <rect x="610" y="95.2" width="70" height="154.8" rx="4" fill="#24304a" stroke="#61afef" stroke-width="1.5"/>
+  <text x="645" y="89" fill="#d7dce4" font-family="system-ui" font-size="11" text-anchor="middle" font-weight="700">0.972</text>
+  <text x="645" y="266" fill="#8a93a5" font-family="system-ui" font-size="11" text-anchor="middle">quality</text>
+  <rect x="720" y="159.1" width="70" height="90.9" rx="4" fill="#1d2a1f" stroke="#6fbf73" stroke-width="1.5"/>
+  <text x="755" y="153" fill="#d7dce4" font-family="system-ui" font-size="11" text-anchor="middle" font-weight="700">0.901</text>
+  <text x="755" y="266" fill="#8a93a5" font-family="system-ui" font-size="11" text-anchor="middle">fast</text>
+  <text x="24" y="300" fill="#8a93a5" font-family="system-ui" font-size="11">Measured on running_jumping, 478 frames, aligned to the original DAG output.</text>
+</svg>
+<div class="sectlabel">Original DAG vs quality vs fast — same frame, three operating points</div>
+<p class="meta">The offline DAG is the ground truth (~1h47m of compute). The two streaming presets reproduce it from
+the <i>same</i> resident process at different speed/fidelity trade-offs — and both clear every gate. Same
+frame across all three; the meshes and masks are visually hard to tell apart.</p>
+<div class="gallery cols3">
+  <figure><img src="media/cmp_original_3d.jpg" loading="lazy"><figcaption><b>original</b> · offline DAG · ground truth</figcaption></figure>
+  <figure><img src="media/cmp_quality_3d.jpg" loading="lazy"><figcaption><b>quality</b> · PVE 15.5&nbsp;mm · 90&nbsp;s</figcaption></figure>
+  <figure><img src="media/cmp_fast_3d.jpg" loading="lazy"><figcaption><b>fast</b> · PVE 16.2&nbsp;mm · 44&nbsp;s</figcaption></figure>
+</div>
+<div class="gallery cols3">
+  <figure><img src="media/cmp_original_cam.jpg" loading="lazy"><figcaption><b>original</b> · mask + 512 landmarks</figcaption></figure>
+  <figure><img src="media/cmp_quality_cam.jpg" loading="lazy"><figcaption><b>quality</b> · mask IoU 0.972</figcaption></figure>
+  <figure><img src="media/cmp_fast_cam.jpg" loading="lazy"><figcaption><b>fast</b> · mask IoU 0.901</figcaption></figure>
+</div>
+<p class="meta"><b>Top row:</b> fitted SMPL-X mesh + triangulated cloud in the 3D world view. <b>Bottom row:</b>
+the A001 camera with the person mask and dense 2D landmarks. <b>quality</b> tracks the original within 2%
+on every logged artifact; <b>fast</b> halves the wall time and stays within the documented bands (PVE
+&#8804;&nbsp;30&nbsp;mm, mask IoU &#8805;&nbsp;0.90) — visible mostly as a slightly looser mask at the limbs.</p>
+
+<p class="meta">Full numbers, definitions, and the runtime trade-off are in the sections below; the architecture changes that bought the speed-up are in <a href="#" onclick="document.querySelectorAll('details').forEach(d=>d.open=true);return false" style="color:#61afef">the deep dives</a>.</p>
+<!-- =================== END VISUAL SHOWCASE =================== -->
+
 <p><b>Context.</b> MAMMA is a multiview markerless motion-capture pipeline (CVPR 2026): four synchronized
 cameras in, full-body SMPL-X meshes out. The research release runs as five separate programs passing files
 through disk at <b>~12 seconds per frame</b>. This page documents rewriting it as a single causal streaming
@@ -161,16 +385,23 @@ is the offline DAG replayed from its saved artifacts, quality and fast are the l
 <figure style="margin:0;flex:1;min-width:300px"><img src="media/quality_compare.png" style="width:100%;border-radius:8px"><figcaption class="meta"><b>quality</b> &mdash; SAM2.1-small &middot; masks 0.972 / PVE 15.5 mm &middot; 90 s</figcaption></figure>
 <figure style="margin:0;flex:1;min-width:300px"><img src="media/fast_compare.png" style="width:100%;border-radius:8px"><figcaption class="meta"><b>fast</b> &mdash; EfficientTAM-ti, lean fit &middot; masks 0.901 / PVE 16.2 mm &middot; 44 s</figcaption></figure>
 </div>
-<p class="meta">Getting the streaming recordings to read like the offline original took four
+<p class="meta">Getting the streaming recordings to read like the offline original took five
 viewer-fidelity fixes (all verified against the data): <b>(1)</b> stamp the emitted mesh at its true frame, not
 the current tick &mdash; the fixed-lag fitter emits <code>frame &minus; emit_lag</code>, so the cloud was
 leading the mesh by up to 114&nbsp;mm at the jump apex (now ~20&nbsp;mm, the intrinsic cloud-to-surface gap);
 <b>(2)</b> log a <b>dense</b> 512-marker triangulated cloud (&sigma;/log-variance-weighted, like the original)
 instead of the vis&gt;0.5-gated ~265 &mdash; the fit still anchors only to the confident points, so PVE is
 unchanged, and dense-vs-dense actually <i>improved</i> tri3d to 14&nbsp;mm; <b>(3)</b> log the fitter's
-fixed-lag <b>tail meshes</b> so the mesh covers the final frames (the cloud no longer outruns a frozen mesh at
-the clip end); <b>(4)</b> center the <b>ground plane</b> under the camera rig (the calibration origin sits at
-one camera, so a square at the world origin left the far camera overhanging empty floor).</p>
+fixed-lag <b>tail <i>and</i> bootstrap-window head meshes</b> so the mesh covers the <i>full</i> clip &mdash;
+the window fitter bootstraps once the window fills and then emits <code>frame &minus; emit_lag</code>, so the
+first <code>window&minus;1&minus;emit_lag</code> frames (and the last <code>emit_lag</code>) were solved but
+never emitted, leaving a cloud with no mesh at frame&nbsp;0 and again at the clip end; both ends are now
+backfilled (mesh spans 0&ndash;477, matching the original DAG which fits every frame); <b>(4)</b> center the
+<b>ground plane</b> under the camera rig (the calibration origin sits at
+one camera, so a square at the world origin left the far camera overhanging empty floor);
+<b>(5)</b> render the SMPL-X mesh <b>semi-transparent</b> (<code>albedo_factor</code> alpha&nbsp;0.65) so the
+triangulated cloud and joints underneath stay visible through the surface, making the mesh-vs-anchor
+agreement readable in the 3D view.</p>
 
 <h3>Run it yourself</h3>
 <pre style="background:#0c0e13;border:1px solid #2a3142;border-radius:8px;padding:14px;overflow-x:auto;font-size:12px;line-height:1.5"><code>cd packages/mamma
@@ -213,10 +444,47 @@ no masks, no boxes, no triangulation, no contacts). But <i>every</i> artifact it
 (4K mask PNGs, ma_2d landmark NPZs, ma_3d SMPL-X/triangulation NPZs). So <code>tools/relog_original.py</code>
 replays those saved artifacts through the same logger as our streaming port and produces a fully-enriched
 recording &mdash; per-camera video + per-frame masks + (mask-derived) boxes + keypoints, plus the 3D mesh,
-joints, skeleton transform tree, ground, and triangulated cloud &mdash; in <b>~3 minutes</b>, not the ~1h47m
+joints, skeleton transform tree, ground, and triangulated cloud &mdash; in <b>~28 seconds</b>, not the ~1h47m
 a native re-run costs. (Boxes are the tight extent of each frame's mask; YOLO only runs at bootstrap/re-detect
 to prompt SAM2, it is never the per-frame box source. Masks log every frame here, so they track the subject
 with no lag.)</p>
+<p class="meta">The relog is pure I/O: profiling showed <b>92&nbsp;%</b> of its wall went to <i>reading</i> &mdash; decoding
+4K mask PNGs (64&nbsp;%) and video frames (28&nbsp;%) sequentially &mdash; while the Rerun logging itself was under
+6&nbsp;%. A thread-pool over the 4 cameras for both read paths (and dropping a pointless CPU&rarr;GPU&rarr;CPU mask
+round-trip) cut it from ~3&nbsp;minutes to ~28&nbsp;s:</p>
+<svg viewBox="0 0 900 340" style="width:100%;max-width:980px;display:block;margin:.6rem auto;background:#0d1016;border:1px solid #2a2f3a;border-radius:10px" xmlns="http://www.w3.org/2000/svg">
+  <text x="24" y="24" fill="#d7dce4" font-family="system-ui" font-size="13" font-weight="700">Relog speedup: parallelizing the reads</text>
+  <text x="24" y="42" fill="#8a93a5" font-family="system-ui" font-size="11">Full 477-frame relog, seconds (linear) — before (orange) vs after (green)</text>
+  <line x1="230" y1="64" x2="230" y2="276" stroke="#2a2f3a"/>
+  <line x1="230" y1="276" x2="800" y2="276" stroke="#2a2f3a"/>
+  <text x="230" y="294" fill="#8a93a5" font-family="system-ui" font-size="11" text-anchor="middle">0</text>
+  <line x1="372.5" y1="64" x2="372.5" y2="276" stroke="#2a2f3a" stroke-dasharray="3 3"/>
+  <text x="372.5" y="294" fill="#8a93a5" font-family="system-ui" font-size="11" text-anchor="middle">50</text>
+  <line x1="515" y1="64" x2="515" y2="276" stroke="#2a2f3a" stroke-dasharray="3 3"/>
+  <text x="515" y="294" fill="#8a93a5" font-family="system-ui" font-size="11" text-anchor="middle">100</text>
+  <line x1="657.5" y1="64" x2="657.5" y2="276" stroke="#2a2f3a" stroke-dasharray="3 3"/>
+  <text x="657.5" y="294" fill="#8a93a5" font-family="system-ui" font-size="11" text-anchor="middle">150</text>
+  <line x1="800" y1="64" x2="800" y2="276" stroke="#2a2f3a" stroke-dasharray="3 3"/>
+  <text x="800" y="294" fill="#8a93a5" font-family="system-ui" font-size="11" text-anchor="middle">200</text>
+  <text x="24" y="92" fill="#8a93a5" font-family="system-ui" font-size="11">mask 4K-PNG decode</text>
+  <rect x="230" y="80" width="111.2" height="18" rx="3" fill="#2a2417" stroke="#e0a458" stroke-width="1.5"/>
+  <text x="349" y="94" fill="#d7dce4" font-family="system-ui" font-size="11">39 s</text>
+  <rect x="230" y="102" width="15.7" height="18" rx="3" fill="#1d2a1f" stroke="#6fbf73" stroke-width="1.5"/>
+  <text x="253" y="116" fill="#d7dce4" font-family="system-ui" font-size="11">5.5 s</text>
+  <text x="24" y="148" fill="#8a93a5" font-family="system-ui" font-size="11">video decode</text>
+  <rect x="230" y="136" width="48.5" height="18" rx="3" fill="#2a2417" stroke="#e0a458" stroke-width="1.5"/>
+  <text x="286" y="150" fill="#d7dce4" font-family="system-ui" font-size="11">17 s</text>
+  <rect x="230" y="158" width="39.9" height="18" rx="3" fill="#1d2a1f" stroke="#6fbf73" stroke-width="1.5"/>
+  <text x="277" y="172" fill="#d7dce4" font-family="system-ui" font-size="11">14 s</text>
+  <text x="24" y="204" fill="#8a93a5" font-family="system-ui" font-size="11">total wall</text>
+  <rect x="230" y="192" width="513" height="18" rx="3" fill="#2a2417" stroke="#e0a458" stroke-width="1.5"/>
+  <text x="751" y="206" fill="#d7dce4" font-family="system-ui" font-size="11" font-weight="700">~180 s</text>
+  <rect x="230" y="214" width="79.8" height="18" rx="3" fill="#1d2a1f" stroke="#6fbf73" stroke-width="1.5"/>
+  <text x="317" y="228" fill="#d7dce4" font-family="system-ui" font-size="11" font-weight="700">28 s</text>
+  <text x="540" y="252" fill="#6fbf73" font-family="system-ui" font-size="13" font-weight="700">~6× faster overall</text>
+  <text x="540" y="270" fill="#8a93a5" font-family="system-ui" font-size="11">logging itself was always &lt;6% of wall — the cost was sequential reads</text>
+  <text x="24" y="320" fill="#8a93a5" font-family="system-ui" font-size="11">Thread-pool over the 4 cameras for both PNG and video decode.</text>
+</svg>
 
 <h3>How slow the original actually is (and the right way to show it)</h3>
 <p>A per-tick timing graph is meaningless for an offline 5-stage DAG, so the original's timing is logged as a
@@ -606,10 +874,15 @@ take an async frame source so either backend slots in.</p></details>
 <p>15.4 s total vs 11.4 s decode+D2H: the gap is PyAV <code>rgb24→yuv420p</code> reformat + per-frame
 copies in the logging path. M6 options: batched D2H per chunk, GPU RGB→YUV before a planar
 <code>encode_yuv_planes</code> call, encoder threads per camera. Not optimized in M1 by design.</p></details>
-<details open><summary><span class="tag open">OPEN</span> WebViewer exact-playhead screenshots flaky in this environment</summary>
-<p>Native headless screenshots (above) prove decode/render; the WebViewer+Playwright route for
-exact begin/mid/end playhead captures hung on first attempts (chromium headless + wasm load).
-Will retry as part of M7's final validation sweep; native evidence considered sufficient for M1.</p></details>
+<details open><summary><span class="tag decision">RESOLVED</span> Capture route: native headless for stills, x11grab for video</summary>
+<p>The WebViewer+Playwright route has a hard limit here: a static seek never decodes the H.264 camera
+tiles (they decode only during continuous playback), and <code>page.screenshot()</code> captures those
+video textures as black regardless. The working routes, used for every visual on this page: <b>native
+headless</b> <code>ViewerClient.save_screenshot</code> with per-view blueprint overrides for crisp stills
+(the stage-progression and comparison shots), and, for the hero <b>video</b>, screen-grabbing a real
+Chrome <code>--app</code> window <i>during playback</i> with <code>ffmpeg x11grab</code> at CRF&nbsp;18 —
+Playwright's <code>recordVideo</code> (VP8 ~0.96&nbsp;Mbps) was too low-bitrate and visibly blocky.
+Geometry-only 3D views screenshot fine at any frame.</p></details>
 
 <h2>M2 — Causal multiview tracking <span class="meta">(2026-06-09)</span></h2>
 
@@ -715,11 +988,12 @@ ported — single-person crossing_arms doesn't exercise them; flagged for multi-
 <details open><summary><span class="tag decision">DECISION</span> Per-tick triangulated anchors do double duty</summary>
 <p>The instant triangulation both anchors the fit (l2_loss_3d_points analog) and logs as the world
 point cloud — no whole-sequence triangulation pass exists anymore.</p></details>
-<details open><summary><span class="tag open">OPEN</span> M5 tolerance proposal</summary>
+<details open><summary><span class="tag decision">DECISION</span> M5 tolerance (shipped gate)</summary>
 <p>Gate at <b>MPJPE ≤ 30 mm and PVE ≤ 30 mm</b>: defaults deliver ~20/15 mm, leaving margin for
 run-to-run nondeterminism (cudnn benchmark, SAM2/YOLO variance) while staying far below
 visually-wrong territory. Justification: the golden itself is a 0.15-iter-scale run; the original
-repo's bit-level tolerance (5 mm) is unreachable by design at a different operating point.</p></details>
+repo's bit-level tolerance (5 mm) is unreachable by design at a different operating point. This is the
+gate every preset is now validated against (and both clear it — see the fidelity chart above).</p></details>
 
 <h2>M6 — Performance (COMPLETE: 132.6 s → 11.76 s; gate PASSED) <span class="meta">(2026-06-09)</span></h2>
 
@@ -769,8 +1043,12 @@ HOCap's JPEG sequences are encoded to per-camera MP4s on first load by the simpl
 golden gate, realtime benchmark, both dataset demos→RRD, the no-disk-writes pytest (static write-call
 audit + runtime file-tree diff), and lint/typecheck/tests in mamma-dev.</p></details>
 
-<h2 id="next">Planned next</h2>
-<p>Remaining: HF upload (user action), the 30 fps TRT campaign (pending Pablo decision), WebViewer exact-playhead captures.</p>
+<h2 id="next">Open items</h2>
+<p>One real decision remains: the <b>fast preset's operating point</b> &mdash; accept full fidelity at
+~40% of realtime, or trade scope (fewer cameras / less logging / a looser mask band) to reach the
+&#8805;75%-realtime target (see the runtime section above). Everything else is done: both presets clear
+their fidelity gates, the original DAG is comprehensively relogged from its saved artifacts, the relog is
+~6&times; faster, and this visual walkthrough is complete.</p>
 
 
 </details>
