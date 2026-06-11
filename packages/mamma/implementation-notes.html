@@ -151,19 +151,15 @@ frame is a structurally causal jump-apex undersegmentation the offline bidirecti
 future frames. Open decision for Pablo: accept fast's full-fidelity operating point at ~40% of realtime, or
 trade scope (fewer cameras / less logging / a looser mask band) to chase 75%.</p>
 
-<h3>Presets in action</h3>
-<p>The full Rerun viewer playing the run+jump sequence end to end &mdash; 3D mesh, posed camera frustums,
-per-camera H.264 video with mask overlays, and the live metric plots. Captured at <b>realtime</b> (1&times;)
-by playing the WebViewer in GPU-accelerated Chrome (ANGLE/OpenGL on the NVIDIA GPU) and recording the page,
-so the camera video actually decodes and the 3D is hardware-rendered.</p>
-<div style="display:flex;gap:16px;flex-wrap:wrap">
-<figure style="margin:0;flex:1;min-width:340px"><video src="media/quality_scene.mp4" controls loop muted playsinline style="width:100%;border-radius:8px"></video><figcaption class="meta"><b>quality</b> &mdash; SAM2.1-small masks &middot; masks 0.972 / PVE 15.5 mm</figcaption></figure>
-<figure style="margin:0;flex:1;min-width:340px"><video src="media/fast_scene.mp4" controls loop muted playsinline style="width:100%;border-radius:8px"></video><figcaption class="meta"><b>fast</b> &mdash; EfficientTAM-ti, lean fit &middot; masks 0.901 / PVE 16.2 mm</figcaption></figure>
-</div>
-<p class="meta">High-resolution stills of each preset's viewer:</p>
-<div style="display:flex;gap:16px;flex-wrap:wrap">
-<figure style="margin:0;flex:1;min-width:320px"><img src="media/quality-full.png" style="width:100%;border-radius:8px"><figcaption class="meta">quality preset viewer</figcaption></figure>
-<figure style="margin:0;flex:1;min-width:320px"><img src="media/fast-full.png" style="width:100%;border-radius:8px"><figcaption class="meta">fast preset viewer</figcaption></figure>
+<h3>Presets in action &mdash; original vs quality vs fast</h3>
+<p>The same run+jump tick in each pipeline's Rerun recording: per-camera video + person mask + bounding box +
+2D keypoints, the 3D SMPL-X mesh / joints / skeleton / ground / triangulated cloud, and a per-stage timing
+panel. All three are logged with the identical entity layout, so they line up directly &mdash; the original
+is the offline DAG replayed from its saved artifacts, quality and fast are the live streaming presets.</p>
+<div style="display:flex;gap:12px;flex-wrap:wrap">
+<figure style="margin:0;flex:1;min-width:300px"><img src="media/original_compare.png" style="width:100%;border-radius:8px"><figcaption class="meta"><b>original DAG</b> &mdash; offline, ~1h47m / 405&times; realtime</figcaption></figure>
+<figure style="margin:0;flex:1;min-width:300px"><img src="media/quality_compare.png" style="width:100%;border-radius:8px"><figcaption class="meta"><b>quality</b> &mdash; SAM2.1-small &middot; masks 0.972 / PVE 15.5 mm &middot; 90 s</figcaption></figure>
+<figure style="margin:0;flex:1;min-width:300px"><img src="media/fast_compare.png" style="width:100%;border-radius:8px"><figcaption class="meta"><b>fast</b> &mdash; EfficientTAM-ti, lean fit &middot; masks 0.901 / PVE 16.2 mm &middot; 44 s</figcaption></figure>
 </div>
 
 <h3>Run it yourself</h3>
@@ -200,6 +196,35 @@ rerun /tmp/quality.rrd</code></pre>
   mesh PVE p95 (mm)                 15.5          16.2
   trans p95 (mm)                    14.5          33.8
   % of realtime                      18%           36%</code></pre>
+
+<h3>The original, comprehensively logged &mdash; without re-running it</h3>
+<p>The original DAG's own <code>scene.rrd</code> logs almost nothing (camera image, 2D keypoints, mesh, ground &mdash;
+no masks, no boxes, no triangulation, no contacts). But <i>every</i> artifact it computes is saved to disk
+(4K mask PNGs, ma_2d landmark NPZs, ma_3d SMPL-X/triangulation NPZs). So <code>tools/relog_original.py</code>
+replays those saved artifacts through the same logger as our streaming port and produces a fully-enriched
+recording &mdash; per-camera video + per-frame masks + (mask-derived) boxes + keypoints, plus the 3D mesh,
+joints, skeleton transform tree, ground, and triangulated cloud &mdash; in <b>~3 minutes</b>, not the ~1h47m
+a native re-run costs. (Boxes are the tight extent of each frame's mask; YOLO only runs at bootstrap/re-detect
+to prompt SAM2, it is never the per-frame box source. Masks log every frame here, so they track the subject
+with no lag.)</p>
+
+<h3>How slow the original actually is (and the right way to show it)</h3>
+<p>A per-tick timing graph is meaningless for an offline 5-stage DAG, so the original's timing is logged as a
+Rerun <code>TextDocument</code> (markdown table) &mdash; the clearest archetype for a one-shot per-stage
+breakdown (Rerun 0.33's <code>BarChart</code> can't even label bars; a <code>DataframeView</code> needs a
+fake timeline). Durations are read straight from each stage's <code>DONE</code> timestamp:</p>
+<table>
+<tr><th>stage (running_jumping, 477 frames / 15.9 s)</th><th>wall</th><th>share</th></tr>
+<tr><td>ma_masks &mdash; SAM2 person masks (4K, bidirectional)</td><td>42m40s</td><td>40%</td></tr>
+<tr><td>ma_2d &mdash; MammaNet dense 2D landmarks</td><td>34m24s</td><td>32%</td></tr>
+<tr><td>ma_vis &mdash; visualization + RRD/overlay export</td><td>28m28s</td><td>27%</td></tr>
+<tr><td>ma_3d &mdash; triangulation + whole-sequence LBFGS fit</td><td>1m41s</td><td>2%</td></tr>
+<tr><td><b>total</b></td><td><b>~1h47m</b></td><td><b>&#8776; 405&times; realtime</b></td></tr>
+<tr><td><b>streaming port, same clip</b></td><td><b>quality 90 s &middot; fast 44 s</b></td><td><b>~70&ndash;145&times; faster</b></td></tr>
+</table>
+<p>The same <code>timing_summary</code> TextDocument panel is logged for the quality and fast recordings too
+(per-stage ms/tick + total wall + % of realtime), so the original and both presets line up for a direct
+three-way comparison in the viewer.</p>
 
 <h2>Why this was possible: the recording is the ground truth</h2>
 <p>A 295&#215; rewrite is easy to make fast and hard to keep <i>correct</i> — every optimization is a chance to
