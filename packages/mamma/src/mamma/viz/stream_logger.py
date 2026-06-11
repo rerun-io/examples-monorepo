@@ -86,6 +86,7 @@ class StreamLogger:
         sequence: MultiViewSequence,
         resize_hw: tuple[int, int],
         video_codec: VideoCodecChoice = VideoCodecChoice.H264,
+        seg_stride: int = 5,
     ) -> None:
         """Args:
         sequence: The capture being processed (native-resolution calibration).
@@ -93,9 +94,13 @@ class StreamLogger:
             pinholes are logged rescaled to this grid so video, 2D overlays,
             and reprojections all share one pixel space.
         video_codec: Codec for the per-camera VideoStreams.
+        seg_stride: Log full-resolution masks every Nth tick (default 5 keeps the
+            RRD small; set 1 for a showcase recording where the mask must track
+            the person every frame).
         """
         self.sequence: MultiViewSequence = sequence
         self.resize_hw: tuple[int, int] = resize_hw
+        self.seg_stride: int = seg_stride
         self.fps: float = sequence.fps
         self._video_codec: VideoCodecChoice = video_codec
         self._encoders: dict[str, VideoEncoder] = {
@@ -118,9 +123,13 @@ class StreamLogger:
         self._rerun_codec: rr.VideoCodec = rerun_codec_by_choice[video_codec]
         self._skeleton_frames_logged: set[int] = set()
 
-    def setup(self) -> None:
-        """Send blueprint and static scene structure (run once, before the loop)."""
-        rr.send_blueprint(default_blueprint(self.sequence.camera_names))
+    def setup(self, timing_doc: bool = False) -> None:
+        """Send blueprint and static scene structure (run once, before the loop).
+
+        ``timing_doc`` selects the relog layout (a ``/timing_summary`` text view
+        instead of the per-tick stage-timings graph).
+        """
+        rr.send_blueprint(default_blueprint(self.sequence.camera_names, timing_doc=timing_doc))
         rr.log(WORLD_TAG, rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
         # Calibrated ground plane (world z=0) — the same plane the fitter's
         # floor-penetration loss references; matches the original scene.rrd.
@@ -212,7 +221,7 @@ class StreamLogger:
             self._video_pending.pop(0).result()
         self._video_pending.append(self._video_worker.submit(encode_and_log, list(frames)))
 
-    def log_tick_tracks(self, frame_idx: int, tracks: list[CameraTracks], seg_stride: int = 5) -> None:
+    def log_tick_tracks(self, frame_idx: int, tracks: list[CameraTracks], seg_stride: int | None = None) -> None:
         """Log per-camera person boxes every tick + segmentation ids at a stride.
 
         Full-resolution segmentation images every tick would dominate the RRD
@@ -220,6 +229,7 @@ class StreamLogger:
         ticks (full resolution — they must share the pinhole pixel space);
         boxes are logged every tick.
         """
+        stride: int = seg_stride if seg_stride is not None else self.seg_stride
         set_tick_time(frame_idx, self.fps)
         for cam_name, cam_tracks in zip(self.sequence.camera_names, tracks, strict=True):
             boxes: list[ndarray] = []
@@ -239,7 +249,7 @@ class StreamLogger:
                         class_ids=class_ids,
                     ),
                 )
-            if frame_idx % seg_stride == 0 and cam_tracks:
+            if frame_idx % stride == 0 and cam_tracks:
                 seg: torch.Tensor = torch.zeros(
                     self.resize_hw,
                     dtype=torch.uint8,
@@ -337,6 +347,36 @@ class StreamLogger:
             rr.log(f"metrics/timing/{stage_name}", rr.Scalars(ms))
         for name, value in fit_metrics.items():
             rr.log(f"metrics/fit/{name}", rr.Scalars(value))
+
+    def log_timing_summary(self, stage_totals_s: dict[str, float], stage_counts: dict[str, int], elapsed_s: float, ticks: int, label: str = "") -> None:
+        """Log a per-stage wall-time TextDocument (markdown) for this run.
+
+        Mirrors the original DAG's ``timing_summary`` panel so a streaming
+        recording compares like-for-like: per-stage mean ms/tick + total wall +
+        realtime factor. ``stage_totals_s``/``stage_counts`` come from
+        ``PipelineStats.profiler``.
+        """
+        clip_s: float = ticks / self.fps
+        ranked: list[tuple[str, float]] = sorted(stage_totals_s.items(), key=lambda kv: -kv[1])
+        mx: float = max((v for _, v in ranked), default=1.0)
+        rows: list[str] = []
+        for name, total in ranked:
+            count: int = max(stage_counts.get(name, 1), 1)
+            ms: float = 1000.0 * total / count
+            bar: str = "█" * round(18 * total / mx) if mx > 0 else ""
+            rows.append(f"| `{name}` | {ms:6.1f} | {total:5.1f} | `{bar:<18}` |")
+        realtime_pct: float = 100.0 * clip_s / elapsed_s if elapsed_s > 0 else 0.0
+        title: str = f"{label} preset" if label else "Streaming pipeline"
+        md: str = (
+            f"# {title} — timing\n"
+            f"**{ticks} frames · {clip_s:.1f} s clip · incl. Rerun logging**\n\n"
+            "| stage | ms/tick | total s | |\n|---|--:|--:|:--|\n"
+            + "\n".join(rows)
+            + f"\n| **WALL** | | **{elapsed_s:.1f} s** | |\n\n"
+            f"> **{elapsed_s:.1f} s wall** for a {clip_s:.1f} s clip = **{realtime_pct:.0f}% of realtime**.\n\n"
+            "_Per-tick stage detail is in the metrics/timing time-series; the original DAG took ~1h47m for the same clip._"
+        )
+        rr.log("timing_summary", rr.TextDocument(md, media_type=rr.MediaType.MARKDOWN), static=True)
 
     def flush(self) -> None:
         """Drain buffered encoder packets and reset encoders for reuse.

@@ -28,8 +28,13 @@ def pinhole_entity(name: str) -> str:
     return f"{CAM_TAG}/{name}/pinhole"
 
 
-def default_blueprint(camera_names: list[str]) -> rrb.Blueprint:
-    """Build the default layout: 3D world view | camera grid (or tabs of 4)."""
+def default_blueprint(camera_names: list[str], timing_doc: bool = False) -> rrb.Blueprint:
+    """Build the default layout: 3D world view | camera grid (or tabs of 4).
+
+    ``timing_doc`` swaps the per-tick "Stage timings" time-series (meaningless
+    for an offline relog) for a ``/timing_summary`` TextDocument view — the
+    per-stage wall-time table.
+    """
     world_view: rrb.Spatial3DView = rrb.Spatial3DView(origin=f"/{WORLD_TAG}", name="World")
     camera_views: list[rrb.Spatial2DView] = [
         rrb.Spatial2DView(origin=pinhole_entity(name), name=name) for name in camera_names
@@ -46,8 +51,13 @@ def default_blueprint(camera_names: list[str]) -> rrb.Blueprint:
     else:
         camera_container = rrb.Grid(*camera_views, grid_columns=2, name="Camera Images")
 
+    timing_view: rrb.View = (
+        rrb.TextDocumentView(origin="/timing_summary", name="Stage wall time")
+        if timing_doc
+        else rrb.TimeSeriesView(origin="/metrics/timing", name="Stage timings (ms)")
+    )
     metrics_view: rrb.Horizontal = rrb.Horizontal(
-        rrb.TimeSeriesView(origin="/metrics/timing", name="Stage timings (ms)"),
+        timing_view,
         rrb.TimeSeriesView(origin="/metrics/fit", name="Fit health"),
         rrb.TimeSeriesView(origin="/metrics/params", name="SMPL-X params", contents="$origin/**"),
     )

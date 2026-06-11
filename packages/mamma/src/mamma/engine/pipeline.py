@@ -105,7 +105,7 @@ class StreamingPipeline:
                 list(sequence.video_paths), resize_hw=(reader.height, reader.width)
             )
 
-    def run(self, chunk_size: int = 32, max_frames: int | None = None, start_frame: int = 0) -> PipelineStats:
+    def run(self, chunk_size: int = 32, max_frames: int | None = None, start_frame: int = 0, timing_doc: bool = False) -> PipelineStats:
         """Stream the sequence tick by tick; returns timing stats.
 
         Decode runs one chunk ahead on background threads (one per camera)
@@ -117,7 +117,7 @@ class StreamingPipeline:
         from itertools import repeat
 
         profiler: StageProfiler = StageProfiler()
-        self.logger.setup()
+        self.logger.setup(timing_doc=timing_doc)
 
         start: float = time.perf_counter()
         frame_idx: int = start_frame
@@ -211,7 +211,7 @@ class StreamingPipeline:
                         self.logger.log_tick_video(frame_idx, frames)
                     if tracks is not None:
                         with profiler.stage("log_tracks"):
-                            self.logger.log_tick_tracks(frame_idx, tracks)
+                            self.logger.log_tick_tracks(frame_idx, tracks, seg_stride=self.logger.seg_stride)
                     if landmarks is not None and frame_idx % 2 == 0:
                         # Dense 512-point overlays at 15 Hz halve their D2H cost;
                         # boxes/masks/mesh cadences are unchanged.
@@ -258,6 +258,7 @@ def build_streaming_pipeline(
     use_mp_decode: bool = True,
     hires_crops: bool = True,
     proxy_dir: Path | None = None,
+    seg_stride: int = 5,
 ) -> StreamingPipeline:
     """Assemble the standard decode->track->landmarks->fit->log pipeline.
 
@@ -288,7 +289,7 @@ def build_streaming_pipeline(
     # hires_crops: decode at native resolution; the pipeline downscales to
     # resize_hw per tick for tracking/logging and crops landmarks from native.
     reader = TorchCodecMultiVideoReader(list(decode_sequence.video_paths), device=device, resize_hw=None if hires_crops else resize_hw)
-    logger = StreamLogger(sequence, resize_hw=resize_hw)
+    logger = StreamLogger(sequence, resize_hw=resize_hw, seg_stride=seg_stride)
 
     tracker: MultiViewTracker | None = None
     if tracker_config is not None:

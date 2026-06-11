@@ -108,6 +108,9 @@ class DumpConfig:
     proxy_dir: Path | None = None
     """720p proxy video dir (tools/make_proxies.py). Decodes proxies instead of
     4K source (forces hires_crops=False); the runtime lever for the presets."""
+    seg_stride: int = 1
+    """Log full-res masks every Nth tick in the saved RRD (1 = per-frame, so the
+    mask tracks the person with no lag — for showcase recordings)."""
     mp_decode: bool = True
     """Multiprocess decode workers (disable at high engine resolutions)."""
     hires_crops: bool = True
@@ -141,11 +144,17 @@ def main(config: DumpConfig) -> int:
         use_mp_decode=config.mp_decode,
         hires_crops=hires_crops,
         proxy_dir=config.proxy_dir,
+        seg_stride=config.seg_stride,
     )
-    stats = pipeline.run(chunk_size=config.chunk_size)
+    stats = pipeline.run(chunk_size=config.chunk_size, timing_doc=True)
     if pipeline.fitting is not None:
         for tail in pipeline.fitting.drain():
             collector.collect(-1, None, None, tail)
+    # Per-stage timing TextDocument (matches the original relog's timing panel).
+    pipeline.logger.log_timing_summary(
+        dict(stats.profiler.totals), dict(stats.profiler.counts), stats.elapsed_s, stats.ticks, label=config.preset or ""
+    )
+    pipeline.logger.flush()
     pipeline.close()
     print(f"pipeline: {stats.ticks} ticks in {stats.elapsed_s:.1f}s ({stats.ticks_per_s:.1f} ticks/s)")
     print(stats.profiler.report())

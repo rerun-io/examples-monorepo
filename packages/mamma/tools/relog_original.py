@@ -186,7 +186,7 @@ def main(config: RelogConfig) -> int:
     faces: ndarray = model.faces
 
     logger = StreamLogger(sequence, resize_hw=config.resize_hw)
-    logger.setup()
+    logger.setup(timing_doc=True)
     _log_stage_timing(config.ma3d_dir, sequence.fps, n_frames)
     reader = TorchCodecMultiVideoReader(list(sequence.video_paths), device=config.device, resize_hw=config.resize_hw)
 
