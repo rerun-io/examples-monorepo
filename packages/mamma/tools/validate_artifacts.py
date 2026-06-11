@@ -146,7 +146,11 @@ def main(config: ValidateArtifactsConfig) -> int:
         d = np.load(config.golden_ma2d_dir / f"{cam}.npz", allow_pickle=True)
         g_xy[:, ci] = d["landmarks"][:, config.body_id, :, :2].astype(np.float64) * config.src_to_engine_scale
         g_vis[:, ci] = d["visibilities"][:, config.body_id].astype(np.float64)
-    rows: ndarray = np.array([o_lm_pos[f] for f in range(n_golden)])
+    # Frames the dump never recorded (subject missing in some camera that tick)
+    # are excluded — mirrors the SMPL-X `common` guard below; a bare o_lm_pos[f]
+    # would KeyError. Missing frames stay NaN in e_fc and drop out at nanmean.
+    present_lm: Bool[ndarray, "f"] = np.array([f in o_lm_pos for f in range(n_golden)])
+    rows: ndarray = np.array([o_lm_pos.get(f, 0) for f in range(n_golden)])
     o_xy: Float64[ndarray, "f c j 2"] = o_xy_all[rows]
     o_vis: Float64[ndarray, "f c j"] = o_vis_all[rows]
     both_vis: Bool[ndarray, "f c j"] = (g_vis > 0.5) & (o_vis > 0.5)
@@ -154,6 +158,8 @@ def main(config: ValidateArtifactsConfig) -> int:
     px_err: Float64[ndarray, "f c j"] = np.linalg.norm(o_xy - g_xy, axis=-1)
     e_fc: Float64[ndarray, "f c"] = np.full((n_golden, n_cams), np.nan)
     for f in range(n_golden):
+        if not present_lm[f]:
+            continue
         for c in range(n_cams):
             gm: Bool[ndarray, "j"] = golden_vis[f, c]
             if gm.sum() < 2:
@@ -172,7 +178,8 @@ def main(config: ValidateArtifactsConfig) -> int:
     # ----------------------------------------------------------- triangulated 3D
     tric = np.load(config.run_dir / "triangulated.npz")
     t_pos: dict[int, int] = {int(f): i for i, f in enumerate(tric["frame_indices"])}
-    trows: ndarray = np.array([t_pos[f] for f in range(n_golden)])
+    present_tri: Bool[ndarray, "f"] = np.array([f in t_pos for f in range(n_golden)])
+    trows: ndarray = np.array([t_pos.get(f, 0) for f in range(n_golden)])
     t_pts: Float64[ndarray, "f j 3"] = tric["points"][trows].astype(np.float64)
     t_val: Bool[ndarray, "f j"] = tric["valid"][trows]
     g_tri: Float64[ndarray, "f j 3"] = gsm["triangulated_3d_pts"].astype(np.float64)
@@ -180,7 +187,7 @@ def main(config: ValidateArtifactsConfig) -> int:
     e3: Float64[ndarray, "f j"] = np.linalg.norm(t_pts - g_tri, axis=-1)
     ef3: Float64[ndarray, "f"] = np.full(n_golden, np.nan)
     for f in range(n_golden):
-        if both3d[f].sum() >= 8:
+        if present_tri[f] and both3d[f].sum() >= 8:
             ef3[f] = e3[f][both3d[f]].mean()
     ef3g: Float64[ndarray, "f"] = ef3[frames]
     ef3g = ef3g[~np.isnan(ef3g)]
@@ -245,6 +252,8 @@ def main(config: ValidateArtifactsConfig) -> int:
     hw: int = int(gmask["mask_hw"][0]) * int(gmask["mask_hw"][1])
     iou: Float64[ndarray, "f c"] = np.full((n_golden, n_cams), np.nan)
     for f in range(n_golden):
+        if f not in c_pos:
+            continue  # frame absent from the dump; iou[f] stays NaN and is dropped below
         cf: int = c_pos[f]
         for c in range(n_cams):
             a_m: Bool[ndarray, "hw"] = np.unpackbits(g_pk[f, c])[:hw].astype(bool)
@@ -252,6 +261,7 @@ def main(config: ValidateArtifactsConfig) -> int:
             union: int = int(np.logical_or(a_m, b_m).sum())
             iou[f, c] = 1.0 if union == 0 else float(np.logical_and(a_m, b_m).sum()) / union
     iou_g: Float64[ndarray, "n"] = iou[frames].ravel()
+    iou_g = iou_g[~np.isnan(iou_g)]  # drop (frame,cam) pairs from frames absent in the dump
     mean_iou: float = float(iou_g.mean())
     p5_iou: float = float(np.percentile(iou_g, 5))
     p1_iou: float = float(np.percentile(iou_g, 1))

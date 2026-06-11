@@ -50,6 +50,8 @@ def _metrics(run_dir: Path, cfg: CompareConfig, gvj, gsm, g_masks, h_m: float) -
     hw: int = int(g_masks["mask_hw"][0]) * int(g_masks["mask_hw"][1])
     iou: list[float] = []
     for f in frames:
+        if int(f) not in cpos:
+            continue  # frame absent from this run's dump (subject not in all cameras that tick)
         cf: int = cpos[int(f)]
         for c in range(n_cams):
             a = np.unpackbits(g_pk[f, c])[:hw].astype(bool)
