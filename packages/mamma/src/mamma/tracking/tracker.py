@@ -57,7 +57,23 @@ class TrackerConfig:
     redetect_interval: int = 120
     """Ticks between routine YOLO+CLIP re-detect passes (bank refresh). A
     re-detect also fires immediately whenever any track has been lost for
-    ``LOST_TICKS_BEFORE_REPROMPT`` ticks, so this can stay slow (~1s/pass)."""
+    ``LOST_TICKS_BEFORE_REPROMPT`` ticks, so this can stay slow (~1s/pass).
+    Presets lower this (~45) to anchor more often (mask-drift fix)."""
+    reprompt_alive_on_routine: bool = True
+    """On routine re-detect passes, re-prompt confidently-matched tracks even
+    when they are not lost — anchor refresh, parity with the original DAG's
+    ~22 anchors/camera. Corrects slow mask drift (e.g. a head/shoulder mask
+    sliding off over the clip) that never triggers the empty-mask lost path."""
+    transient_hold: bool = True
+    """Hold the previous mask for a tick when a non-empty mask's area collapses
+    suddenly (a single-tick drop well below the rolling-median area) — bridges
+    1-2 tick identity flips onto distractors (e.g. a mask jumping onto a cone)
+    that the empty-mask lost path cannot catch, and arms a re-prompt."""
+    transient_area_frac: float = 0.55
+    """Single-tick area as a fraction of the rolling-median healthy area below
+    which a non-empty mask is treated as a transient collapse and the previous
+    mask held. Conservative: real motion rarely halves projected area in a tick
+    (mask errors anti-correlate with speed)."""
     memory_window_size: int = 7
     """Sliding window of non-conditional SAM2 memories kept per object."""
     track_stride: int = 1
@@ -103,6 +119,11 @@ class MultiViewTracker:
         self.bank: FeatureBank = FeatureBank()
         self.bootstrapped: bool = False
         self._lost_ticks: list[dict[int, int]] = [{} for _ in cameras]
+        self._area_hist: list[dict[int, list[float]]] = [{} for _ in cameras]
+        """Rolling window of recent healthy mask areas per camera/object (for
+        transient-collapse detection); collapsed/empty ticks are not appended."""
+        self._held_ticks: list[dict[int, int]] = [{} for _ in cameras]
+        """Consecutive ticks the previous mask has been held for an object."""
         self._last_tracks: list[CameraTracks] | None = None
         self._ticks_seen: int = 0
         # Per camera-pair geometry for epipolar identity transfer.
@@ -191,13 +212,20 @@ class MultiViewTracker:
         )
         routine: bool = self.config.redetect_interval > 0 and frame_idx % self.config.redetect_interval == 0
         if any_lost or routine:
-            prompts_per_cam = self._redetect(frames)
+            prompts_per_cam = self._redetect(frames, reprompt_alive=routine and self.config.reprompt_alive_on_routine)
         tracks = self._forward_all(frame_idx, frames, prompts_per_cam)
         self._last_tracks = tracks
         return tracks
 
-    def _redetect(self, frames: list[UInt8[torch.Tensor, "3 h w"]]) -> list[dict[int, Float32[ndarray, "4"]]]:
-        """Sparse YOLO+CLIP pass: refresh feature banks, re-prompt lost tracks."""
+    def _redetect(
+        self, frames: list[UInt8[torch.Tensor, "3 h w"]], reprompt_alive: bool = False
+    ) -> list[dict[int, Float32[ndarray, "4"]]]:
+        """Sparse YOLO+CLIP pass: refresh feature banks, re-prompt tracks.
+
+        Always re-prompts lost tracks. When ``reprompt_alive`` (a routine
+        anchor pass), also re-prompts confidently-matched live tracks to reset
+        their SAM2 conditioning before drift accumulates.
+        """
         prompts_per_cam: list[dict[int, Float32[ndarray, "4"]]] = [{} for _ in self.cameras]
         obj_ids: list[int] = self.bank.obj_ids
         for cam_idx, frame in enumerate(frames):
@@ -212,11 +240,65 @@ class MultiViewTracker:
             matches: dict[int, int] = assign_hungarian(s_clip, min_score=BOOTSTRAP_MIN_SCORE)
             for row, col in matches.items():
                 obj_id: int = obj_ids[row]
-                if s_clip[row, col] >= BANK_UPDATE_MIN_SCORE:
+                confident: bool = bool(s_clip[row, col] >= BANK_UPDATE_MIN_SCORE)
+                if confident:
                     self.bank.append(obj_id, det_feats[col])
-                if obj_id in lost:
+                # Lost tracks always re-prompt; live tracks only on a confident
+                # match during a routine anchor pass (a weak box would drag the
+                # mask off the person).
+                if obj_id in lost or (reprompt_alive and confident):
                     prompts_per_cam[cam_idx][obj_id] = dets.boxes_xyxy[col]
         return prompts_per_cam
+
+    def _resolve_track(
+        self,
+        cam_idx: int,
+        obj_id: int,
+        mask: Bool[torch.Tensor, "h w"],
+        stat_row: Float32[ndarray, "6"],
+    ) -> TrackedObject:
+        """Finalize one object's track: bookkeeping + transient-collapse hold.
+
+        ``stat_row`` is ``[area_px, x_min, y_min, x_max, y_max, pred_iou]`` from
+        the GPU stats (already host-copied). Runs no CUDA sync. On a sudden
+        single-tick area collapse it returns the previous tick's mask/bbox and
+        arms a re-prompt; otherwise it updates the rolling-area history and the
+        lost-tick counter exactly as before.
+        """
+        area: float = float(stat_row[0])
+        score: float = float(stat_row[5])
+        hist: list[float] = self._area_hist[cam_idx].setdefault(obj_id, [])
+        median_area: float = float(np.median(hist)) if hist else 0.0
+        prev: TrackedObject | None = (
+            self._last_tracks[cam_idx].get(obj_id) if self._last_tracks is not None else None
+        )
+        collapsed: bool = (
+            self.config.transient_hold
+            and area > 0.0
+            and median_area > 0.0
+            and area < self.config.transient_area_frac * median_area
+            and self._held_ticks[cam_idx].get(obj_id, 0) < LOST_TICKS_BEFORE_REPROMPT
+            and prev is not None
+            and prev.bbox_xyxy is not None
+        )
+        if collapsed:
+            assert prev is not None and prev.bbox_xyxy is not None
+            # Hold the previous good mask; arm the lost-track re-prompt without
+            # appending the collapsed area to the healthy-area history.
+            self._held_ticks[cam_idx][obj_id] = self._held_ticks[cam_idx].get(obj_id, 0) + 1
+            self._lost_ticks[cam_idx][obj_id] = self._lost_ticks[cam_idx].get(obj_id, 0) + 1
+            return TrackedObject(obj_id=obj_id, mask=prev.mask, bbox_xyxy=prev.bbox_xyxy, score=score)
+        self._held_ticks[cam_idx][obj_id] = 0
+        bbox: Float32[ndarray, "4"] | None = None
+        if area > 0.0:
+            bbox = stat_row[1:5].astype(np.float32)
+            self._lost_ticks[cam_idx][obj_id] = 0
+            hist.append(area)
+            if len(hist) > 7:
+                hist.pop(0)
+        else:
+            self._lost_ticks[cam_idx][obj_id] = self._lost_ticks[cam_idx].get(obj_id, 0) + 1
+        return TrackedObject(obj_id=obj_id, mask=mask, bbox_xyxy=bbox, score=score)
 
     def _tracks_from_batched(self, batched, frames: list[UInt8[torch.Tensor, "3 h w"]]) -> list[CameraTracks]:
         """Convert a B=n_cams SAM2Result into per-camera tracks (sync-free)."""
@@ -239,14 +321,7 @@ class MultiViewTracker:
         stats = torch.cat([stats, batched.ious[:, 0:1].float()], dim=1)
         all_stats: Float32[ndarray, "c 6"] = stats.cpu().numpy()
         for cam_idx in range(len(frames)):
-            row = all_stats[cam_idx]
-            bbox: Float32[ndarray, "4"] | None = None
-            if row[0] > 0:
-                bbox = row[1:5].astype(np.float32)
-                self._lost_ticks[cam_idx][0] = 0
-            else:
-                self._lost_ticks[cam_idx][0] = self._lost_ticks[cam_idx].get(0, 0) + 1
-            results.append({0: TrackedObject(obj_id=0, mask=masks[cam_idx], bbox_xyxy=bbox, score=float(row[5]))})
+            results.append({0: self._resolve_track(cam_idx, 0, masks[cam_idx], all_stats[cam_idx])})
         return results
 
     def _forward_all(
@@ -330,12 +405,6 @@ class MultiViewTracker:
             if entries:
                 all_stats: Float32[ndarray, "k 6"] = torch.stack(stats_rows).cpu().numpy()
                 for (obj_id, mask), row in zip(entries, all_stats, strict=True):
-                    bbox: Float32[ndarray, "4"] | None = None
-                    if row[0] > 0:
-                        bbox = row[1:5].astype(np.float32)
-                        self._lost_ticks[cam_idx][obj_id] = 0
-                    else:
-                        self._lost_ticks[cam_idx][obj_id] = self._lost_ticks[cam_idx].get(obj_id, 0) + 1
-                    tracks[obj_id] = TrackedObject(obj_id=obj_id, mask=mask, bbox_xyxy=bbox, score=float(row[5]))
+                    tracks[obj_id] = self._resolve_track(cam_idx, obj_id, mask, row)
             results.append(tracks)
         return results
