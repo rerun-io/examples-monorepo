@@ -18,8 +18,7 @@ Detailed internals of the gsplat-rust-renderer for developers who want to unders
 │  types.rs          Data structures: RenderGaussianCloud, CameraApproximation│
 │  constants.rs      SH_C0, SIGMA_COVERAGE, BRUSH_COVARIANCE_BLUR_PX, etc.   │
 │  projection.rs     Quaternion helpers                                      │
-│  sh.rs             Spherical harmonics evaluation (degrees 0-4)            │
-│  covariance.rs     2D covariance from 3D Gaussian + view transform         │
+│  sh.rs             SH metadata (degree from coefficient count)            │
 │  camera.rs         Camera constructors (look-at, NeRF transform, fallback) │
 │  gpu_types.rs      GPU buffer structs, bind group layouts, compute         │
 │                    pipelines, helpers — SINGLE SOURCE OF TRUTH              │
@@ -50,14 +49,14 @@ render_cli.rs ──► gsplat_core/gpu_renderer ──► gsplat_core/gpu_types
                   gsplat_core/gpu_context       gsplat_core/constants
                   gsplat_core/types             gsplat_core/sh
                   ply_loader                    gsplat_core/projection
-                  nerf_camera                   gsplat_core/covariance
+                  nerf_camera
                                                 gsplat_core/camera
 ```
 
 Both rendering paths share:
 - **5 WGSL shaders** (`shader/*.wgsl`) — unchanged, no Rerun-specific code
-- **13 bind group layouts** (`GpuBindGroupLayouts` in `gpu_types.rs`)
-- **14 compute pipelines** (`GpuComputePipelines` in `gpu_types.rs`)
+- **12 bind group layouts** (`GpuBindGroupLayouts` in `gpu_types.rs`)
+- **13 compute pipelines** (`GpuComputePipelines` in `gpu_types.rs`)
 - **7 GPU buffer structs** (`ProjectUniformBuffer`, `ScanUniformBuffer`, etc.)
 - **All helper functions** (buffer creation, data packing, dispatch sizing)
 
@@ -187,8 +186,8 @@ This is the **single source of truth** for all GPU pipeline definitions. Both th
 
 | Resource | Function |
 |----------|----------|
-| `GpuBindGroupLayouts` | 13 bind group layouts for all pipeline stages |
-| `GpuComputePipelines` | 14 compute pipelines from 5 WGSL shaders |
+| `GpuBindGroupLayouts` | 12 bind group layouts for all pipeline stages |
+| `GpuComputePipelines` | 13 compute pipelines from 5 WGSL shaders |
 | `create_compute_bind_group_layouts()` | Creates all layouts from a `wgpu::Device` |
 | `create_compute_pipelines()` | Creates all pipelines given layouts |
 | `create_raster_texture()` | Shared texture creation with `extra_usage` param |
@@ -256,19 +255,18 @@ packages/gsplat-rust-renderer/
 │       ├── types.rs               # Data structures + RenderOutput
 │       ├── constants.rs           # Shared constants
 │       ├── projection.rs          # Quaternion helpers
-│       ├── sh.rs                  # Spherical harmonics evaluation
-│       ├── covariance.rs          # 2D covariance math
+│       ├── sh.rs                  # SH metadata (degree from coeff count)
 │       ├── camera.rs              # Camera constructors
 │       ├── gpu_types.rs           # ★ GPU single source of truth ★
 │       ├── gpu_context.rs         # Headless wgpu init
 │       └── gpu_renderer.rs        # Standalone GPU compute pipeline
 ├── shader/                        # WGSL compute shaders (shared)
-│   ├── gaussian_project.wgsl      # Stages 1-2: project + compact
-│   ├── gaussian_map_intersections.wgsl  # Stage 3: tile assignment
-│   ├── gaussian_dynamic_sort.wgsl      # Stage 4: radix sort
-│   ├── gaussian_tile_offsets.wgsl      # Stage 5: tile ranges
-│   ├── gaussian_raster_tiles.wgsl      # Stage 6: per-pixel rasterize
-│   └── gaussian_composite.wgsl         # Stage 7: viewport blit (viewer only)
+│   ├── gaussian_project.wgsl      # Stages 1, 3, 4: cull, project, scan
+│   ├── gaussian_map_intersections.wgsl  # Stage 5: tile assignment
+│   ├── gaussian_dynamic_sort.wgsl      # Stages 2 + 6: depth / tile radix sort
+│   ├── gaussian_tile_offsets.wgsl      # Stage 7: tile ranges
+│   ├── gaussian_raster_tiles.wgsl      # Stage 8: per-pixel rasterize
+│   └── gaussian_composite.wgsl         # Stage 9: viewport blit (viewer only)
 ├── gsplat_rust_renderer/          # Python module
 │   ├── __init__.py                # Beartype activation
 │   ├── gaussians3d.py             # PLY loader + rr.AsComponents

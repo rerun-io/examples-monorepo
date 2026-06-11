@@ -281,9 +281,7 @@ class Gaussians3D(rr.AsComponents):
         quaternions_xyzw: Float32[np.ndarray, "n 4"] = np.stack(
             [vertex["rot_1"], vertex["rot_2"], vertex["rot_3"], vertex["rot_0"]], axis=1
         ).astype(np.float32)
-        opacities: Float32[np.ndarray, "n"] = _sigmoid(
-            np.asarray(vertex["opacity"], dtype=np.float32)
-        ).astype(np.float32)
+        opacities: Float32[np.ndarray, "n"] = _sigmoid(np.asarray(vertex["opacity"], dtype=np.float32))
 
         dc_coefficients: Float32[np.ndarray, "n 3"] | None = None
         if {"f_dc_0", "f_dc_1", "f_dc_2"} <= names:

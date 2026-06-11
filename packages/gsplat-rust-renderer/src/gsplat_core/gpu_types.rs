@@ -41,6 +41,10 @@ pub struct ProjectUniformBuffer {
     pub camera_world_position: [f32; 4],
     pub viewport_and_near: [f32; 4],
     pub sigma_and_counts: [u32; 4],
+    /// NOT free padding — carries bit-packed values: `_pad[0][0]` = has-SH
+    /// flag, `_pad[0][1]` = `OPACITY_SCALE` f32 bits.  Read as
+    /// `project_uniforms.pad.x` / `.pad.y` in `gaussian_project.wgsl`;
+    /// written by [`fill_project_uniform`].
     pub _pad: [[u32; 4]; 1],
 }
 
@@ -49,6 +53,7 @@ pub struct ProjectUniformBuffer {
 pub struct ScanUniformBuffer {
     pub total_selected: u32,
     pub block_count: u32,
+    /// Pads the uniform to 16 bytes (WGSL uniform-buffer alignment).
     pub _pad: [u32; 2],
 }
 
@@ -57,6 +62,7 @@ pub struct ScanUniformBuffer {
 pub struct SortUniformBuffer {
     pub shift: u32,
     pub total_keys_unused: u32,
+    /// Pads the uniform to 16 bytes (WGSL uniform-buffer alignment).
     pub _pad: [u32; 2],
 }
 
@@ -80,6 +86,8 @@ pub struct RasterUniformBuffer {
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct TileProjectedSplat {
     pub xy_px: [f32; 2],
+    /// Aligns the next `vec4` member to 16 bytes (WGSL storage layout — see
+    /// the layout test in `gaussian_renderer.rs`).
     pub _pad0: [f32; 2],
     pub conic_xyy_opacity: [f32; 4],
     pub color_rgba: [f32; 4],

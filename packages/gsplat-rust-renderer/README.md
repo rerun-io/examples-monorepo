@@ -26,6 +26,14 @@ Restart your shell so the new `pixi` binary is on `PATH`.
 
 This is Linux only (Vulkan GPU required, no CUDA needed).
 
+> **Note (local Rerun checkout):** the `viewer` feature currently builds against a local Rerun
+> checkout via path dependencies in `Cargo.toml` (`/home/pablo/0Dev/work/rerun-projects/reality/rerun`,
+> 0.34-dev) and mirrors that workspace's egui-fork `[patch.crates-io]` entries — so the viewer binary
+> only builds on a machine with that checkout. The `gsplat-render` CLI (`--no-default-features`) has no
+> Rerun dependency and builds anywhere. When building with `cargo` outside a pixi-activated shell, set
+> `PKG_CONFIG_PATH=<repo>/.pixi/envs/gsplat-rust-renderer/lib/pkgconfig` (provides `libudev.pc` for the
+> viewer's gamepad dependency).
+
 ## Quick Start
 
 Two terminals — one for the viewer, one for logging data:
@@ -103,7 +111,7 @@ Dev tasks (use `-e gsplat-rust-renderer-dev`):
 
 ```
 gsplat-rust-renderer/
-├── Cargo.toml                          # Rust crate: rerun 0.33.0 + re_* crates
+├── Cargo.toml                          # Rust crate: rerun + re_* crates (local 0.34-dev checkout, see below)
 ├── Cargo.lock                          # Pinned Rust deps (committed for binary)
 ├── pyproject.toml                      # Python package metadata (hatchling)
 ├── src/

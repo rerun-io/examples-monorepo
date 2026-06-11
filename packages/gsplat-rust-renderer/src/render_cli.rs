@@ -4,8 +4,9 @@
 //! producing a PNG image.  No Rerun dependency — this binary is built with
 //! `--no-default-features` to exclude all `re_*` crates.
 //!
-//! Uses the same 7-stage GPU compute pipeline as the Rerun viewer but runs
-//! headless via raw `wgpu`.
+//! Uses the same GPU compute pipeline as the Rerun viewer (stages 1-8 of the
+//! 9-stage pipeline in `gaussian_renderer.rs`; the viewer-only composite blit
+//! is replaced by a texture readback) but runs headless via raw `wgpu`.
 //!
 //! # Usage
 //!
