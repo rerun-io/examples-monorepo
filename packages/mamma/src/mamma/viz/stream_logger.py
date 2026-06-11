@@ -131,13 +131,26 @@ class StreamLogger:
         """
         rr.send_blueprint(default_blueprint(self.sequence.camera_names, timing_doc=timing_doc))
         rr.log(WORLD_TAG, rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
-        # Calibrated ground plane (world z=0) — the same plane the fitter's
-        # floor-penetration loss references; matches the original scene.rrd.
-        half: float = 6.0
+        # Ground plane at world z=0 (the plane the fitter's floor loss
+        # references), centered UNDER THE RIG rather than the world origin: the
+        # calibration's origin sits at one camera, so a square at (0,0) leaves
+        # the far cameras overhanging empty floor. Center on the camera XY
+        # centroid and size it to enclose every camera (+ margin).
+        cam_centers: ndarray = np.array(
+            [(-np.asarray(cam.world_to_cam)[:3, :3].T @ np.asarray(cam.world_to_cam)[:3, 3]) for cam in self.sequence.cameras]
+        )
+        cx: float = float(cam_centers[:, 0].mean())
+        cy: float = float(cam_centers[:, 1].mean())
+        half: float = float(np.abs(cam_centers[:, :2] - np.array([cx, cy])).max()) + 2.0
         rr.log(
             f"{WORLD_TAG}/ground",
             rr.Mesh3D(
-                vertex_positions=[[-half, -half, 0.0], [half, -half, 0.0], [half, half, 0.0], [-half, half, 0.0]],
+                vertex_positions=[
+                    [cx - half, cy - half, 0.0],
+                    [cx + half, cy - half, 0.0],
+                    [cx + half, cy + half, 0.0],
+                    [cx - half, cy + half, 0.0],
+                ],
                 triangle_indices=[[0, 1, 2], [0, 2, 3]],
                 vertex_colors=[[70, 80, 90, 110]] * 4,
             ),
