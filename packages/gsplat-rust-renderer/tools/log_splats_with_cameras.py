@@ -26,11 +26,11 @@ Examples:
         --eye 2.84 -4.09 -6.12 --look-target 0.43 -0.07 0.31 --eye-up 0 -1 0
 """
 
-import io
 import json
 import struct
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import rerun as rr
@@ -57,6 +57,13 @@ class LogSplatsWithCamerasConfig:
     """Trained 3DGS PLY to render through the GaussianSplats3D visualizer."""
     max_cameras: int = 0
     """Cap on the number of cameras logged (0 = all)."""
+    browser: Literal["tabs", "pages"] = "tabs"
+    """Image panel style.  'tabs': one named tab per camera — every view is
+    individually inspectable, but each view in the blueprint costs ~0.2 ms of
+    CPU per frame whether or not its tab is showing, so hundreds of cameras
+    pull the frame rate down (200 ≈ 15-20 FPS).  'pages': four fixed views
+    paging through all images on the 'page' sequence timeline — stays at
+    60 FPS at any camera count."""
     image_plane_distance: float = 0.1
     """Frustum image-plane distance in world units."""
     eye: tuple[float, float, float] | None = None
@@ -191,23 +198,22 @@ def load_colmap_cameras(scene_dir: Path) -> list[tuple[PinholeParameters, Path]]
     return cameras
 
 
-def encoded_image(image_path: Path) -> rr.EncodedImage:
-    """GT image as compressed bytes — the store keeps them compressed (~10x
-    lighter than raw ``rr.Image`` rows) and the viewer decodes on demand.
+def load_rgb_on_white(image_path: Path) -> UInt8[ndarray, "h w 3"]:
+    """Load a GT image as raw RGB, compositing any alpha onto white (the
+    NeRF-synthetic images are RGBA over transparent; the splat renders use a
+    white background).
 
-    JPEGs are passed through from disk untouched.  The NeRF-synthetic GT
-    images are RGBA-over-transparent PNGs, so they are composited onto white
-    (matching the splat render background) and re-encoded as JPEG.
+    Raw ``rr.Image`` on purpose: ``rr.EncodedImage`` from the 0.33 SDK makes
+    this 0.34-alpha viewer re-decode every visible JPEG every frame (decode
+    cache misses under the version skew) — 200 image planes pegged a core and
+    dropped frames to seconds.  Raw rows cost more memory but render at
+    60 FPS.
     """
-    if image_path.suffix.lower() in (".jpg", ".jpeg"):
-        return rr.EncodedImage(path=image_path)
     with Image.open(image_path) as img:
         rgba: UInt8[ndarray, "h w c"] = np.asarray(img.convert("RGBA"))
     alpha: Float64[ndarray, "h w 1"] = rgba[..., 3:].astype(np.float64) / 255.0
     rgb: UInt8[ndarray, "h w 3"] = (rgba[..., :3].astype(np.float64) * alpha + 255.0 * (1.0 - alpha)).astype(np.uint8)
-    buf = io.BytesIO()
-    Image.fromarray(rgb).save(buf, format="JPEG", quality=95)
-    return rr.EncodedImage(contents=buf.getvalue(), media_type="image/jpeg")
+    return rgb
 
 
 def main(config: LogSplatsWithCamerasConfig) -> None:
@@ -226,10 +232,10 @@ def main(config: LogSplatsWithCamerasConfig) -> None:
     for k, (camera, image_path) in enumerate(cameras):
         cam_path = f"world/cameras/{camera.name}"
         log_pinhole(camera, cam_log_path=Path(cam_path), image_plane_distance=config.image_plane_distance, static=True)
-        image: rr.EncodedImage = encoded_image(image_path)
-        rr.log(f"{cam_path}/pinhole/image", image, static=True)
+        rgb: UInt8[ndarray, "h w 3"] = load_rgb_on_white(image_path)
+        rr.log(f"{cam_path}/pinhole/image", rr.Image(rgb), static=True)
         rr.set_time("page", sequence=k // 4)
-        rr.log(f"browser/{k % 4}", image)
+        rr.log(f"browser/{k % 4}", rr.Image(rgb))
     rr.set_time("page", sequence=0)
 
     view3d = rrb.Spatial3DView(
@@ -242,14 +248,17 @@ def main(config: LogSplatsWithCamerasConfig) -> None:
             rrb.EyeControls3D(position=config.eye, look_target=config.look_target, eye_up=config.eye_up) if config.eye is not None else None
         ),
     )
-    browser = rrb.Grid(
-        *[rrb.Spatial2DView(origin=f"browser/{i}", name=f"slot {i}") for i in range(4)],
-        grid_columns=2,
-        name="image browser (scrub the page timeline)",
-    )
+    if config.browser == "tabs":
+        image_panel = rrb.Tabs(*[rrb.Spatial2DView(origin=f"world/cameras/{camera.name}/pinhole", name=camera.name) for camera, _ in cameras])
+    else:
+        image_panel = rrb.Grid(
+            *[rrb.Spatial2DView(origin=f"browser/{i}", name=f"slot {i}") for i in range(4)],
+            grid_columns=2,
+            name="image browser (scrub the page timeline)",
+        )
     rr.send_blueprint(
         rrb.Blueprint(
-            rrb.Horizontal(view3d, browser, column_shares=[5, 3]),
+            rrb.Horizontal(view3d, image_panel, column_shares=[5, 3]),
             rrb.BlueprintPanel(state="collapsed"),
             rrb.SelectionPanel(state="collapsed"),
             rrb.TimePanel(state="expanded"),
@@ -258,7 +267,8 @@ def main(config: LogSplatsWithCamerasConfig) -> None:
     rec: rr.RecordingStream | None = rr.get_global_data_recording()
     assert rec is not None
     rec.flush(timeout_sec=120.0)
-    print(f"logged {len(cameras)} cameras ({(len(cameras) + 3) // 4} browser pages) + {config.ply_path.name}")
+    panel_desc: str = f"{len(cameras)} tabs" if config.browser == "tabs" else f"{(len(cameras) + 3) // 4} pages of 4"
+    print(f"logged {len(cameras)} cameras ({panel_desc}) + {config.ply_path.name}")
 
 
 if __name__ == "__main__":
