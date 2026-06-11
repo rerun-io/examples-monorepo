@@ -37,7 +37,9 @@ use crate::gaussian_renderer::GaussianDrawData;
 use glam::{Affine3A, Quat, Vec2, Vec3};
 use re_view::{DataResultQuery as _, VisualizerInstructionQueryResults};
 use re_view_spatial::{SpatialViewState, TransformTreeContext};
-use re_viewer_context::external::re_chunk_store::{ChunkStoreDiff, ChunkStoreEvent};
+use re_viewer_context::external::re_chunk_store::{
+    ChunkDeletionReason, ChunkDirectLineageReport, ChunkStoreDiff, ChunkStoreEvent,
+};
 use re_viewer_context::external::re_entity_db::EntityDb;
 use re_viewer_context::{
     AppOptions, Cache, IdentifiedViewSystem, ViewContext, ViewContextCollection, ViewQuery,
@@ -183,14 +185,31 @@ impl Cache for CloudCache {
     }
 
     fn purge_memory(&mut self) {
+        // Standard rerun cache contract: drop everything not in use.  After a
+        // purge, the next frame rebuilds every visible entity's cloud in one
+        // go — a deliberate one-frame hitch in exchange for reclaimed memory.
         self.0.clear();
     }
 
     fn on_store_events(&mut self, events: &[&ChunkStoreEvent], _entity_db: &EntityDb) {
         for event in events {
+            // Only evict when the entity's DATA changed.  Storage reshuffles
+            // (compaction, virtual→physical swaps, split cleanup) preserve
+            // content — and if they move batch boundaries, the signature's
+            // row-id content hash forces a rebuild on next access anyway.
             let entity_path = match &event.diff {
-                ChunkStoreDiff::Addition(add) => add.chunk_before_processing.entity_path(),
-                ChunkStoreDiff::Deletion(del) => del.chunk.entity_path(),
+                ChunkStoreDiff::Addition(add) => {
+                    if matches!(add.direct_lineage, ChunkDirectLineageReport::CompactedFrom(_)) {
+                        continue;
+                    }
+                    add.chunk_before_processing.entity_path()
+                }
+                ChunkStoreDiff::Deletion(del) => {
+                    if !matches!(del.reason, ChunkDeletionReason::GarbageCollection) {
+                        continue;
+                    }
+                    del.chunk.entity_path()
+                }
                 _ => continue,
             };
             self.0.remove(&format!("gaussian_splats::{entity_path}"));
@@ -397,46 +416,57 @@ impl VisualizerSystem for GaussianSplatVisualizer {
             // signature changed (e.g. different splat count after re-logging);
             // steady-state frames reuse the copy cached in the store's
             // memoizers (state on `self` would not survive the frame).
-            let (cloud, cloud_generation) =
-                ctx.viewer_ctx
-                    .store_context
-                    .memoizer::<CloudCache, _>(|cache| {
-                        let needs_build = cache
-                            .0
-                            .get(&label)
-                            .is_none_or(|entry| entry.signature != signature);
-                        if needs_build {
-                            if std::env::var_os("GSPLAT_FPS_PROBE").is_some() {
-                                eprintln!(
-                                    "[fps-probe] REBUILDING {label} ({expected_splats} splats)"
-                                );
-                            }
-                            let cloud = Arc::new(build_render_cloud(
-                                centers.slice::<[f32; 3]>(),
-                                quaternions.slice::<[f32; 4]>(),
-                                scales.slice::<[f32; 3]>(),
-                                opacities.slice::<f32>(),
-                                colors.slice::<u32>(),
-                                transform,
-                                sh_coeffs_per_channel.and_then(|coeffs_per_channel| {
-                                    materialize_sh_coefficients(
-                                        &latest_at_results,
-                                        coeffs_per_channel,
-                                    )
-                                }),
-                            ));
-                            cache.0.insert(
-                                label.clone(),
-                                CachedCloud {
+            let store_ctx = ctx.viewer_ctx.store_context;
+            let cached: Option<(Arc<RenderGaussianCloud>, u64)> =
+                store_ctx.memoizer::<CloudCache, _>(|cache| {
+                    cache
+                        .0
+                        .get(&label)
+                        .filter(|entry| entry.signature == signature)
+                        .map(|entry| (entry.cloud.clone(), entry.generation))
+                });
+            let (cloud, cloud_generation) = if let Some(hit) = cached {
+                hit
+            } else {
+                if std::env::var_os("GSPLAT_FPS_PROBE").is_some() {
+                    eprintln!("[fps-probe] REBUILDING {label} ({expected_splats} splats)");
+                }
+                // Build OUTSIDE the cache lock — packing a million-splat cloud
+                // takes ~100 ms and must not block other cache users (memory
+                // panel, begin_frame).  If another view raced us to it, keep
+                // the winner's entry and drop our build.
+                let cloud = Arc::new(build_render_cloud(
+                    centers.slice::<[f32; 3]>(),
+                    quaternions.slice::<[f32; 4]>(),
+                    scales.slice::<[f32; 3]>(),
+                    opacities.slice::<f32>(),
+                    colors.slice::<u32>(),
+                    transform,
+                    sh_coeffs_per_channel.and_then(|coeffs_per_channel| {
+                        materialize_sh_coefficients(&latest_at_results, coeffs_per_channel)
+                    }),
+                ));
+                store_ctx.memoizer::<CloudCache, _>(|cache| {
+                    let entry = cache
+                        .0
+                        .entry(label.clone())
+                        .and_modify(|entry| {
+                            if entry.signature != signature {
+                                *entry = CachedCloud {
                                     signature: signature.clone(),
-                                    cloud,
+                                    cloud: cloud.clone(),
                                     generation: CLOUD_GENERATION.fetch_add(1, Ordering::Relaxed),
-                                },
-                            );
-                        }
-                        let entry = &cache.0[&label];
-                        (entry.cloud.clone(), entry.generation)
-                    });
+                                };
+                            }
+                        })
+                        .or_insert_with(|| CachedCloud {
+                            signature: signature.clone(),
+                            cloud: cloud.clone(),
+                            generation: CLOUD_GENERATION.fetch_add(1, Ordering::Relaxed),
+                        });
+                    (entry.cloud.clone(), entry.generation)
+                })
+            };
 
             // ── Step 4: Extract camera ────────────────────────────────
             // Prefer the interactive 3D camera from the view state.  Fall back

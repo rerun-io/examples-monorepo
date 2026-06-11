@@ -77,7 +77,9 @@ tokio = { version = "1.50", features = ["macros", "rt-multi-thread"], optional =
 # ── Patches mirrored from /home/pablo/0Dev/work/rerun-projects/reality/rerun/Cargo.toml ──
 # Branch form (not rev=) is mandatory: the forked egui_tiles/table/...
 # crates reference egui as git+branch, and cargo unifies git sources only
-# when the query matches.  Our Cargo.lock pins the concrete revisions.
+# when the query matches.  Our Cargo.lock pins the concrete revisions —
+# but a bare `cargo update` WILL jump these to the forks' branch HEADs.
+# Update individual crates with `cargo update -p <crate>` instead.
 [patch.crates-io]
 ecolor = { git = "https://github.com/lucasmerlin/egui", branch = "lucas/kittest-mcp-patch" }
 eframe = { git = "https://github.com/lucasmerlin/egui", branch = "lucas/kittest-mcp-patch" }

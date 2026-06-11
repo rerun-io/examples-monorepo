@@ -65,6 +65,10 @@ use crate::gsplat_core::{CameraApproximation, RenderGaussianCloud};
 
 const INTERSECTION_READBACK_SLOT_COUNT: usize = 2;
 
+/// Drop a cached entity's GPU resources after this many frames without use
+/// (~10 s at 60 FPS).  Generous on purpose: re-admission costs an upload.
+const EVICT_AFTER_FRAMES: u64 = 600;
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -168,6 +172,11 @@ struct CachedComputeResources {
     /// Cloud build generation the splat attribute buffers were uploaded
     /// from; a mismatch in `prepare_compute_batch` triggers a re-upload.
     cloud_generation: u64,
+    /// `re_renderer` frame index of the last frame that rendered this entity.
+    /// Entries idle past [`EVICT_AFTER_FRAMES`] are dropped so deleted or
+    /// hidden entities release their GPU buffers (the CPU-side `CloudCache`
+    /// makes re-admission cheap: upload-only, no rebuild).
+    last_used_frame: u64,
     /// (total_splats, intersection_capacity, tile_bounds) the scan/map
     /// uniforms were last written for — they're rewritten only on change.
     last_uniform_inputs: (usize, usize, glam::UVec2),
@@ -716,6 +725,7 @@ impl GaussianRenderer {
             sort_workgroup_count: sort_workgroup_count as u32,
             depth_sort_workgroup_count: depth_sort_workgroup_count as u32,
             cloud_generation,
+            last_used_frame: 0, // stamped by prepare_compute_batch right after creation
             // Sentinel: forces the first prepare_compute_batch to write the
             // scan/map uniforms.
             last_uniform_inputs: (usize::MAX, 0, glam::UVec2::ZERO),
@@ -1289,9 +1299,20 @@ mod compute {
                 }
             }
             let mut cache = self.batch_cache.lock().unwrap();
+
+            // Evict entities that haven't rendered for a while (deleted from
+            // the store, or filtered out of every view) so their GPU buffers
+            // are freed; a 1M-splat entity holds >1 GB of intersection and
+            // scratch buffers.
+            let frame_index = ctx.active_frame.frame_index;
+            cache.retain(|_, entry| {
+                frame_index.saturating_sub(entry.last_used_frame) < EVICT_AFTER_FRAMES
+            });
+
             let compute = cache
                 .entry(label.to_owned())
                 .or_insert_with(|| self.create_batch_resources(ctx, label, cloud, cloud_generation));
+            compute.last_used_frame = frame_index;
 
             // Step 1a: re-upload the splat attributes when the entity was
             // re-logged (the visualizer bumps the generation on every cloud
