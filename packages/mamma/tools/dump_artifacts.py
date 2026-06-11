@@ -105,6 +105,9 @@ class DumpConfig:
     """Engine resolution (masks/landmarks are dumped at this resolution)."""
     obj_id: int = 0
     """Person id to dump (golden artifacts are body_id 00)."""
+    proxy_dir: Path | None = None
+    """720p proxy video dir (tools/make_proxies.py). Decodes proxies instead of
+    4K source (forces hires_crops=False); the runtime lever for the presets."""
     mp_decode: bool = True
     """Multiprocess decode workers (disable at high engine resolutions)."""
     hires_crops: bool = True
@@ -137,6 +140,7 @@ def main(config: DumpConfig) -> int:
         collector=collector,
         use_mp_decode=config.mp_decode,
         hires_crops=hires_crops,
+        proxy_dir=config.proxy_dir,
     )
     stats = pipeline.run(chunk_size=config.chunk_size)
     if pipeline.fitting is not None:

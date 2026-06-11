@@ -257,6 +257,7 @@ def build_streaming_pipeline(
     collector: ResultCollector | None = None,
     use_mp_decode: bool = True,
     hires_crops: bool = True,
+    proxy_dir: Path | None = None,
 ) -> StreamingPipeline:
     """Assemble the standard decode->track->landmarks->fit->log pipeline.
 
@@ -265,11 +266,28 @@ def build_streaming_pipeline(
     ``tracker_config``; landmarks additionally need ``mammanet_weights``;
     fitting additionally needs ``fitter_config``. ``device`` is propagated
     into the stage configs here so callers never mutate them.
+
+    ``proxy_dir`` (from ``tools/make_proxies.py``) swaps the decode source to
+    pre-transcoded ``<proxy_dir>/<cam>.mp4`` videos already at ``resize_hw``,
+    sidestepping the 4K-NVDEC decode floor. It forces ``hires_crops=False``
+    (no native frame exists to crop from); calibration still scales from the
+    sequence's native intrinsics, so geometry is unchanged.
     """
+    import dataclasses
+
+    decode_sequence: MultiViewSequence = sequence
+    if proxy_dir is not None:
+        proxy_paths: list[Path] = [proxy_dir / f"{name}.mp4" for name in sequence.camera_names]
+        missing: list[Path] = [p for p in proxy_paths if not p.exists()]
+        if missing:
+            raise FileNotFoundError(f"missing proxies (run tools/make_proxies.py): {missing}")
+        decode_sequence = dataclasses.replace(sequence, video_paths=proxy_paths)
+        hires_crops = False
+
     scaled_cams: list[CameraCalibration] = sequence.scaled_cameras(resize_hw)
     # hires_crops: decode at native resolution; the pipeline downscales to
     # resize_hw per tick for tracking/logging and crops landmarks from native.
-    reader = TorchCodecMultiVideoReader(list(sequence.video_paths), device=device, resize_hw=None if hires_crops else resize_hw)
+    reader = TorchCodecMultiVideoReader(list(decode_sequence.video_paths), device=device, resize_hw=None if hires_crops else resize_hw)
     logger = StreamLogger(sequence, resize_hw=resize_hw)
 
     tracker: MultiViewTracker | None = None
@@ -287,7 +305,7 @@ def build_streaming_pipeline(
         fitting = FittingStage(scaled_cams, fitter_config)
 
     return StreamingPipeline(
-        sequence,
+        decode_sequence,  # proxy paths drive the reader/mp-decoder; logger keeps the native sequence
         reader,
         logger,
         tracker=tracker,

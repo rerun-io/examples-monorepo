@@ -43,6 +43,8 @@ class BenchmarkConfig:
     """Engine resolution."""
     hires_crops: bool = True
     """Decode native res; sample MammaNet crops from it."""
+    proxy_dir: Path | None = None
+    """720p proxy video dir (tools/make_proxies.py); the runtime lever."""
     trt_engine: Path | None = None
     """Optional MammaNet TensorRT engine plan."""
     gate_realtime_fraction: float = 0.5
@@ -71,6 +73,7 @@ def build_pipeline(config: BenchmarkConfig, sequence: MultiViewSequence) -> Stre
         mammanet_weights=config.mammanet_weights,
         trt_engine=config.trt_engine,
         hires_crops=hires_crops,
+        proxy_dir=config.proxy_dir,
     )
 
 
