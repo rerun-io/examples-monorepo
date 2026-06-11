@@ -283,12 +283,19 @@ class StreamLogger:
         triangulated: dict[int, tuple[torch.Tensor, torch.Tensor]],
         faces: ndarray | None,
     ) -> None:
-        """Log SMPL-X meshes + triangulated landmark clouds for one tick."""
+        """Log SMPL-X meshes + triangulated landmark clouds for one tick.
+
+        The triangulated cloud is for the current tick (``frame_idx``), but a
+        fixed-lag fitter emits a mesh for an EARLIER frame (``fit.frame_idx``).
+        Each is stamped at its own true frame so mesh and cloud coincide on the
+        timeline (otherwise the cloud visibly leads the lagged mesh in motion).
+        """
         set_tick_time(frame_idx, self.fps)
         for obj_id, (points3d, valid) in triangulated.items():
             cloud: ndarray = points3d[valid].cpu().numpy()
             rr.log(f"{WORLD_TAG}/triangulated/person_{obj_id}", rr.Points3D(positions=cloud, radii=0.008))
         for obj_id, fit in fits.items():
+            set_tick_time(fit.frame_idx, self.fps)  # stamp the mesh at the fit's true (lagged) frame
             color: tuple[int, int, int] = _ID_PALETTE[obj_id % len(_ID_PALETTE)]
             normals: ndarray | None = _vertex_normals(fit.vertices, faces) if faces is not None else None
             rr.log(
