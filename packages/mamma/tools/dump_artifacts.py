@@ -148,8 +148,15 @@ def main(config: DumpConfig) -> int:
     )
     stats = pipeline.run(chunk_size=config.chunk_size, timing_doc=True)
     if pipeline.fitting is not None:
+        faces = pipeline.fitting.faces
         for tail in pipeline.fitting.drain():
             collector.collect(-1, None, None, tail)
+            # Also log the drained fixed-lag tail meshes to the RRD so the mesh
+            # covers the final emit_lag frames (otherwise the cloud advances to
+            # the clip end while the mesh stays frozen on the last emitted frame).
+            if tail.fits:
+                frame: int = next(iter(tail.fits.values())).frame_idx
+                pipeline.logger.log_tick_fit(frame, tail.fits, {}, faces)
     # Per-stage timing TextDocument (matches the original relog's timing panel).
     pipeline.logger.log_timing_summary(
         dict(stats.profiler.totals), dict(stats.profiler.counts), stats.elapsed_s, stats.ticks, label=config.preset or ""

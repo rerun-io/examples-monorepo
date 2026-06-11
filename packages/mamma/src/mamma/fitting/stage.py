@@ -74,7 +74,15 @@ class FittingStage:
             floor_contact = torch.where(floor_contact < 0.25, torch.zeros_like(floor_contact), floor_contact)
 
             points3d, valid = triangulate_points(pts2d_all, self.k_per_cam, self.world_to_cam_per_cam, vis_all)
-            triangulated[obj_id] = (points3d, valid)
+            # Dense cloud for visualization: triangulate every marker seen by
+            # >= 2 cameras (sigma/log-variance-weighted, like the original DAG
+            # which writes all 512), not just the confident vis>0.5 ones. The
+            # FIT still anchors only to points3d/valid (strict) below, so fit
+            # quality is unchanged; this only enriches the logged cloud.
+            dense3d, dense_valid = triangulate_points(
+                pts2d_all, self.k_per_cam, self.world_to_cam_per_cam, vis_all, vis_thresh=-1.0
+            )
+            triangulated[obj_id] = (dense3d, dense_valid)
             # Contact prediction alone fires mid-jump (feet visually near the
             # grass) — gate the pull by the triangulated height: only landmarks
             # the geometry also places near the ground get pulled to it.
