@@ -81,11 +81,14 @@ def fast_preset(expected_subjects: int | None = 1) -> PipelinePreset:
     """Throughput operating point (>= 75% realtime) holding the looser band.
 
     Decodes the engine stream directly at 720p (``hires_crops=False``) instead
-    of 4K + per-tick downscale — the dominant wall cost — and keeps
-    EfficientTAM-ti. The fitter stays at the full 48 iterations: the fit runs
-    on an overlapped worker so it does not move wall, and dropping to 24 visibly
-    hurt translation (33 vs 15 mm) for no speed gain. The free mask fixes hold
-    the IoU band.
+    of 4K + per-tick downscale, and runs a LIGHT fit (24 iterations, emit every
+    other tick, no LBFGS polish): measurements showed the main loop was stalling
+    on the fit worker (fit_wait ~25 ms/tick), and fast's loose gates absorb the
+    lighter fit (PVE ~20 mm vs the 30 mm bound, trans ~34 mm vs 92 mm). Keeps
+    track_stride 1 — stride 2 reuses masks across ticks and drops mask mean to
+    0.84 (below the 0.90 band). NOTE: even at this operating point the 4-cam
+    pipeline with full Rerun logging runs at ~40% of realtime, not the 75%
+    target — that bound is hardware/scope-limited (see implementation notes).
     """
     return PipelinePreset(
         name="fast",
@@ -96,7 +99,7 @@ def fast_preset(expected_subjects: int | None = 1) -> PipelinePreset:
             transient_hold=True,
             track_stride=1,
         ),
-        fitter=FitterConfig(emit_stride=1),
+        fitter=FitterConfig(tick_iters=24, emit_stride=2, lbfgs_polish=False),
         resize_hw=(720, 1280),
         hires_crops=False,
         realtime_fraction=0.75,
