@@ -23,10 +23,27 @@ from simplecv.video_io import TorchCodecMultiVideoReader
 
 from mamma.datasets.mamma_npz import load_mamma_sequence
 from mamma.datasets.sequence import MultiViewSequence
+from mamma.engine.types import CameraTracks, TrackedObject
 from mamma.fitting.smplx_wrapper import build_smplx_neutral, smplx_forward_per_parts
 from mamma.fitting.window_fitter import FitResult
 from mamma.landmarks.estimator import CameraLandmarks, LandmarkResult
 from mamma.viz.stream_logger import StreamLogger
+
+
+def _load_mask(png: Path, resize_hw: tuple[int, int], device: str) -> TrackedObject | None:
+    """Load a 4K mask PNG, downscale to engine resolution, derive a box."""
+    from PIL import Image
+
+    if not png.exists():
+        return None
+    small = Image.open(png).resize((resize_hw[1], resize_hw[0]), Image.Resampling.BILINEAR)
+    mask_np: ndarray = np.asarray(small) >= 128
+    if not mask_np.any():
+        return None
+    ys, xs = np.where(mask_np)
+    bbox: Float32[ndarray, "4"] = np.array([xs.min(), ys.min(), xs.max(), ys.max()], dtype=np.float32)
+    mask_t: torch.Tensor = torch.from_numpy(mask_np).to(device)
+    return TrackedObject(obj_id=0, mask=mask_t, bbox_xyxy=bbox, score=1.0)
 
 
 @dataclass
@@ -43,6 +60,14 @@ class RelogConfig:
         "/home/pablo/0Dev/repos/mamma/.claude/worktrees/baseline-3a4bc75/output/ma_2d/baseline-rj2/outdoors/running_jumping"
     )
     """Original ma_2d output dir (per-camera landmark NPZs)."""
+    ma_masks_dir: Path = Path(
+        "/home/pablo/0Dev/repos/mamma/.claude/worktrees/baseline-3a4bc75/output/ma_masks/baseline-rj2/outdoors/running_jumping"
+    )
+    """Original ma_masks output dir (per-camera 4K mask PNGs); logged as
+    SegmentationImage + derived Boxes2D. The original scene.rrd omits both."""
+    max_frames: int | None = None
+    """Cap the relog to the first N frames (use ~10 to verify logging coverage
+    before committing to the full clip)."""
     body_id: int = 0
     """Person id in the original outputs."""
     smplx_model_dir: Path = Path("data/body_models")
@@ -65,7 +90,9 @@ def main(config: RelogConfig) -> int:
     tri_cloud: Float32[ndarray, "f n 3"] = params["triangulated_3d_pts"]
     floor_contact: Float32[ndarray, "f n"] = params["smplx_floor_contact"]
     n_frames: int = vertices.shape[0]
-    print(f"{sequence.name}: {n_frames} frames of original ma_3d output")
+    if config.max_frames is not None:
+        n_frames = min(n_frames, config.max_frames)
+    print(f"{sequence.name}: relogging {n_frames} frames of original output")
 
     # 2D landmarks per camera (source-resolution px -> engine px).
     scale: float = config.resize_hw[1] / sequence.cameras[0].width
@@ -107,6 +134,12 @@ def main(config: RelogConfig) -> int:
             f: int = start + local
             frames: list[UInt8[torch.Tensor, "3 h w"]] = [v[local] for v in videos]
             logger.log_tick_video(f, frames)
+            # Masks + derived boxes from the saved 4K PNGs (per frame, seg_stride=1).
+            tracks: list[CameraTracks] = []
+            for cam in sequence.camera_names:
+                obj = _load_mask(config.ma_masks_dir / cam / "masks" / f"mask_{f:04d}_01.png", config.resize_hw, config.device)
+                tracks.append({config.body_id: obj} if obj is not None else {})
+            logger.log_tick_tracks(f, tracks, seg_stride=1)
             landmarks: list[CameraLandmarks] = []
             for cam in sequence.camera_names:
                 lm: Float32[torch.Tensor, "n 3"] = torch.from_numpy(lm_by_cam[cam][f].copy()).float()
