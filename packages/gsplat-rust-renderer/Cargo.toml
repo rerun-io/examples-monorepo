@@ -51,19 +51,41 @@ serde_json = "1"
 wgpu = "=29.0.3"
 
 # ── Viewer-only deps (behind "viewer" feature flag) ───────────────────
+# Local rerun checkout (0.34.0-alpha.1+dev) instead of the published 0.33
+# crates.  The [patch.crates-io] section at the bottom mirrors that
+# workspace's egui-family patches — its code builds against those forks, and
+# cargo only honors patches declared at the *root* of the building project.
 egui_kittest = { version = "0.34.3", features = ["wgpu", "eframe"], optional = true }
-re_crash_handler = { version = "=0.33.0", optional = true }
-re_grpc_server = { version = "=0.33.0", optional = true }
-re_log_channel = { version = "=0.33.0", optional = true }
-re_log = { version = "=0.33.0", optional = true }
-re_log_types = { version = "=0.33.0", optional = true }
-re_query = { version = "=0.33.0", optional = true }
-re_renderer = { version = "=0.33.0", optional = true }
-re_sdk = { version = "=0.33.0", optional = true }
-re_sdk_types = { version = "=0.33.0", optional = true }
-re_view = { version = "=0.33.0", optional = true }
-re_view_spatial = { version = "=0.33.0", optional = true }
-re_viewer = { version = "=0.33.0", optional = true }
-re_viewer_context = { version = "=0.33.0", optional = true }
-rerun = { version = "=0.33.0", features = ["native_viewer"], optional = true }
+re_crash_handler = { path = "/home/pablo/0Dev/work/rerun-projects/reality/rerun/crates/utils/re_crash_handler", optional = true }
+re_grpc_server = { path = "/home/pablo/0Dev/work/rerun-projects/reality/rerun/crates/store/re_grpc_server", optional = true }
+re_log_channel = { path = "/home/pablo/0Dev/work/rerun-projects/reality/rerun/crates/store/re_log_channel", optional = true }
+re_log = { path = "/home/pablo/0Dev/work/rerun-projects/reality/rerun/crates/utils/re_log", optional = true }
+re_log_types = { path = "/home/pablo/0Dev/work/rerun-projects/reality/rerun/crates/store/re_log_types", optional = true }
+re_query = { path = "/home/pablo/0Dev/work/rerun-projects/reality/rerun/crates/store/re_query", optional = true }
+re_renderer = { path = "/home/pablo/0Dev/work/rerun-projects/reality/rerun/crates/viewer/re_renderer", optional = true }
+re_sdk = { path = "/home/pablo/0Dev/work/rerun-projects/reality/rerun/crates/top/re_sdk", optional = true }
+re_sdk_types = { path = "/home/pablo/0Dev/work/rerun-projects/reality/rerun/crates/store/re_sdk_types", optional = true }
+re_view = { path = "/home/pablo/0Dev/work/rerun-projects/reality/rerun/crates/viewer/re_view", optional = true }
+re_view_spatial = { path = "/home/pablo/0Dev/work/rerun-projects/reality/rerun/crates/viewer/re_view_spatial", optional = true }
+re_viewer = { path = "/home/pablo/0Dev/work/rerun-projects/reality/rerun/crates/viewer/re_viewer", optional = true }
+re_viewer_context = { path = "/home/pablo/0Dev/work/rerun-projects/reality/rerun/crates/viewer/re_viewer_context", optional = true }
+rerun = { path = "/home/pablo/0Dev/work/rerun-projects/reality/rerun/crates/top/rerun", features = ["native_viewer"], optional = true }
 tokio = { version = "1.50", features = ["macros", "rt-multi-thread"], optional = true }
+
+# ── Patches mirrored from /home/pablo/0Dev/work/rerun-projects/reality/rerun/Cargo.toml ──
+# Branch form (not rev=) is mandatory: the forked egui_tiles/table/...
+# crates reference egui as git+branch, and cargo unifies git sources only
+# when the query matches.  Our Cargo.lock pins the concrete revisions.
+[patch.crates-io]
+ecolor = { git = "https://github.com/lucasmerlin/egui", branch = "lucas/kittest-mcp-patch" }
+eframe = { git = "https://github.com/lucasmerlin/egui", branch = "lucas/kittest-mcp-patch" }
+egui = { git = "https://github.com/lucasmerlin/egui", branch = "lucas/kittest-mcp-patch" }
+egui_extras = { git = "https://github.com/lucasmerlin/egui", branch = "lucas/kittest-mcp-patch" }
+egui_kittest = { git = "https://github.com/lucasmerlin/egui", branch = "lucas/kittest-mcp-patch" }
+egui-wgpu = { git = "https://github.com/lucasmerlin/egui", branch = "lucas/kittest-mcp-patch" }
+emath = { git = "https://github.com/lucasmerlin/egui", branch = "lucas/kittest-mcp-patch" }
+egui_plot = { git = "https://github.com/lucasmerlin/egui_plot.git", branch = "lucas/update-egui-0.35" }
+egui_tiles = { git = "https://github.com/rerun-io/egui_tiles", branch = "main" }
+egui_table = { git = "https://github.com/rerun-io/egui_table", branch = "lucas/update-egui" }
+egui_dnd = { git = "https://github.com/lucasmerlin/hello_egui.git", branch = "malmal/main" }
+egui_commonmark = { git = "https://github.com/rerun-io/egui_commonmark.git", branch = "lucas/update-egui-0.35" }

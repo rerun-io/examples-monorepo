@@ -1352,6 +1352,8 @@ pytorch-cpu = ">=2.8.0"
 torchvision = "*"
 
 [feature.gsplat-rust-renderer.target.linux-64.dependencies]
+# libudev (devel) for gilrs (gamepad) in the local rerun checkout's re_viewer.
+libudev = "257.*"
 libxkbcommon = "*"
 wayland = "*"
 xorg-libx11 = "*"
@@ -1370,6 +1372,8 @@ simplecv = { path = "packages/simplecv", editable = true }
 
 [feature.gsplat-rust-renderer.activation.env]
 PACKAGE_DIR = "packages/gsplat-rust-renderer"
+# Make pixi's pkg-config files (libudev.pc) visible to cargo builds.
+PKG_CONFIG_PATH = "${CONDA_PREFIX}/lib/pkgconfig"
 
 # ── Download tasks ───────────────────────────────────────────────────────
 [feature.gsplat-rust-renderer.tasks._download-chair-ply]
