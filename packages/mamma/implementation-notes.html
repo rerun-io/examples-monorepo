@@ -65,32 +65,59 @@ tick, <b>fixed-lag emission</b> (4 frames = 133 ms), reprojection-dominant loss 
 visibility-gated observations), floor model (penetration + height-gated contact pull), graphed 300-iteration
 bootstrap, TensorRT MammaNet, multiprocess NVDEC decode.</p>
 
-<h2 id="presets">Two presets &mdash; quality &amp; fast <span class="meta">(2026-06-10, in progress)</span></h2>
-<p>The single shipped config is splitting into two named presets over the <i>same</i> resident streaming
-process (RAM-resident, TRT MammaNet, no disk writes). The quality preset's gate is no longer "how long did it
-take" but "does <i>every</i> logged artifact match the original DAG" — 2D keypoints, triangulated 3D
-keypoints, SMPL-X parameters, and segmentation masks, each within 2%. The fast preset keeps the 30&nbsp;mm
-vertex gate but must run at &#8805;75% of realtime while still holding SMPL-X parameters to 5% and masks to
-10%.</p>
+<h2 id="presets">Two presets &mdash; quality &amp; fast <span class="meta">(2026-06-11, fidelity gates PASS)</span></h2>
+<p>The single shipped config split into two named presets over the <i>same</i> resident streaming process
+(RAM-resident, TRT MammaNet, no disk writes). The quality preset's gate is no longer "how long did it take"
+but "does <i>every</i> logged artifact match the original DAG" — 2D keypoints, triangulated 3D keypoints,
+SMPL-X parameters, and segmentation masks. The fast preset keeps the 30&nbsp;mm vertex gate at &#8805;75% of
+realtime while holding looser artifact bands. A four-agent dig over the real running_jumping data
+(<code>tools/dump_artifacts.py</code> dumps every per-tick artifact once so analysis never re-pays GPU time)
+grounded the metric definitions and surfaced two places where the <i>literal</i> targets are physically
+unreachable — with defensible alternatives Pablo confirmed.</p>
+
+<h3>What "within X%" actually means (grounded, then confirmed)</h3>
+<p>The raw "%" targets needed concrete, numpy-computable definitions. The normalizer for 3D quantities is
+<b>H = 1.834 m</b>, the per-clip skeleton scale (median over frames of the golden 127-joint bounding-box
+diagonal); 2%H = 36.7&nbsp;mm. Two literal targets were proven impossible and re-encoded:</p>
+<ul>
+<li><b>SMPL-X parameters &mdash; gate the identifiable realizations, not raw rotations.</b> Raw per-joint pose
+geodesic cannot be held to 2%/5%: bone <i>twist</i> is unconstrained by multiview reprojection and the
+original's offline LBFGS lands in a different-but-equally-valid basin (body pose p95 = 8.6% of 180&deg;, yet
+the surface PVE is only 18.9&nbsp;mm). So pose is gated through <b>PVE</b> (its visible realization), betas
+through <b>shape-space vertex displacement</b> (raw &beta; L2 of 81% maps to ~6&nbsp;mm of actual surface),
+and translation in mm. Raw per-group geodesics are reported as diagnostics.</li>
+<li><b>Masks &mdash; IoU 0.98 is unreachable causally.</b> The golden masks come from a 4K hiera-LARGE model
+run <i>bidirectionally</i> (<code>propagate_reverse: true</code>); the original pipeline's own re-run
+nondeterminism floor was only 0.95. The gate became the causal-achievable band: mean IoU, p5, and a robust
+p1 tail (raw min over ~1,900 frame&times;camera pairs is hostage to a single fast-motion frame the offline
+pass smooths with future frames; the dig recommended p1).</li>
+</ul>
+
+<h3>Results &mdash; both presets clear their fidelity gates</h3>
 <table>
-<tr><th>Gate</th><th>quality</th><th>fast</th></tr>
-<tr><td>2D keypoints vs original ma_2d</td><td>&#8804; 2%</td><td>&mdash;</td></tr>
-<tr><td>Triangulated 3D vs original</td><td>&#8804; 2%</td><td>&mdash;</td></tr>
-<tr><td>SMPL-X parameters vs original</td><td>&#8804; 2%</td><td>&#8804; 5%</td></tr>
-<tr><td>Segmentation masks vs original</td><td>&#8804; 2%</td><td>&#8804; 10%</td></tr>
-<tr><td>Mesh vertices (PVE p95 + max)</td><td>(implied by the above)</td><td>&#8804; 30 mm</td></tr>
-<tr><td>Wall time (running_jumping, 15.9 s clip)</td><td>&#8804; 4&#215; clip = 63.6 s (&#8805;25% realtime)</td><td>&#8804; 1.33&#215; clip = 21.2 s (&#8805;75% realtime)</td></tr>
+<tr><th>Artifact (running_jumping, 477 frames &times; 4 cams)</th><th>quality gate / result</th><th>fast gate / result</th></tr>
+<tr><td>2D keypoints (p95 norm reproj err)</td><td>&#8804; 2% &middot; <b>0.70% PASS</b></td><td>&mdash;</td></tr>
+<tr><td>Triangulated 3D (p95, both-valid)</td><td>&#8804; 36.7 mm &middot; <b>28.0 mm PASS</b></td><td>&mdash;</td></tr>
+<tr><td>SMPL-X pose &#8594; PVE p95</td><td>&#8804; 27 mm &middot; <b>18.0 mm PASS</b></td><td>&#8804; 30 mm &middot; <b>18.3 mm PASS</b></td></tr>
+<tr><td>SMPL-X betas &#8594; shape disp</td><td>&#8804; 36.7 mm &middot; <b>15.3 mm PASS</b></td><td>&#8804; 91.7 mm &middot; <b>PASS</b></td></tr>
+<tr><td>SMPL-X trans p95</td><td>&#8804; 36.7 mm &middot; <b>14.6 mm PASS</b></td><td>&#8804; 91.7 mm &middot; <b>15.3 mm PASS</b></td></tr>
+<tr><td>Masks mean IoU</td><td>&#8805; 0.95 &middot; <b>0.972 PASS</b></td><td>&#8805; 0.90 &middot; <b>0.901 PASS</b></td></tr>
+<tr><td>Masks p5 / p1 IoU</td><td>p5 &#8805; 0.90 &middot; <b>0.946</b>; p1 &#8805; 0.80 &middot; <b>0.925 PASS</b></td><td>p1 &#8805; 0.70 &middot; <b>PASS</b></td></tr>
+<tr><td>Tracker (masks)</td><td>SAM2.1 hiera-small @1024 (256-cell grid)</td><td>EfficientTAM-ti @512</td></tr>
 </table>
-<p>The "%" thresholds need concrete metric definitions per artifact class (px error normalization for
-keypoints, geodesic distance for rotations, IoU for masks) — being pinned by a four-agent dig over the real
-data: a metrics-definition pass, a mask-gap audit vs the original's 4K reverse-propagated masks, a
-2D/3D/SMPL-X delta audit, and a runtime-budget pass on an idle GPU. A new
-<code>tools/dump_artifacts.py</code> runs the pipeline once and dumps every per-tick artifact (masks, 2D
-landmarks, triangulated clouds, SMPL-X params) to NPZs so the analysis never re-pays GPU time. One structural
-caveat found immediately: the original mask stage ran with <code>propagate_reverse: true</code> — its golden
-masks benefit from <i>bidirectional</i> SAM2 propagation that a causal tracker cannot replicate, so the mask
-metric must be read with that asymmetry in mind. Results and the final metric definitions land here as they
-arrive.</p>
+<p>The mask gate was the only correctness blocker, and it traced to two genuine tracker bugs the offline DAG
+never had: a 2-frame identity flip onto a traffic cone (min IoU 0.035) and slow head/shoulder drift over the
+clip. Two causal fixes closed it: a <b>transient-collapse hold</b> (when a mask's pixel area collapses &gt;55%
+in one tick — a distractor flip — hold the previous good mask and re-prompt) and <b>routine anchor
+re-prompts</b> (re-prompt confidently-matched live tracks every ~45 ticks, parity with the original's ~22
+anchors/camera). These also erased a tracker outage that had been poisoning the 2D/3D tails (kpt max 9.3%
+&#8594; 0.9%, tri max 154 &#8594; 38 mm). For the quality preset, EfficientTAM-ti's 128-cell decoder grid
+floors mask mean IoU near 0.93 (boundary fuzz), so it swaps in SAM2.1 hiera-small's 256-cell grid to reach
+0.972.</p>
+<p class="meta">Open: the runtime budgets (quality &#8804; 63.6 s, fast &#8804; 21.2 s) are being engineered
+toward separately &mdash; the fidelity gates above were the priority. Deviation flagged for review: the mask
+tail uses p1 (not raw min) because the single worst frame is a structurally causal jump-apex
+undersegmentation. Benchmark numbers land here next.</p>
 
 <h2>Why this was possible: the recording is the ground truth</h2>
 <p>A 295&#215; rewrite is easy to make fast and hard to keep <i>correct</i> — every optimization is a chance to
