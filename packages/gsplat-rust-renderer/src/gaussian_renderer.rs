@@ -894,6 +894,14 @@ impl GaussianRenderer {
                         drop(bytes);
                         slot.buffer.unmap();
 
+                        if std::env::var_os("GSPLAT_FPS_PROBE").is_some() {
+                            eprintln!(
+                                "[fps-probe] intersections {} / capacity {} (splat_capacity {})",
+                                total_intersections,
+                                compute.intersection_capacity,
+                                compute.splat_capacity
+                            );
+                        }
                         if total_intersections > compute.intersection_capacity {
                             // Transiently rendered with a truncated intersection
                             // list; the growth below fixes the next frame.
@@ -1252,6 +1260,34 @@ mod compute {
             cloud_generation: u64,
             camera: &CameraApproximation,
         ) -> GaussianBatch {
+            // [fps-probe] period between consecutive prepares == the viewer's
+            // effective frame time while the camera moves.  Enabled with
+            // GSPLAT_FPS_PROBE=1; mirrors the probe used to measure Brush.
+            if std::env::var_os("GSPLAT_FPS_PROBE").is_some() {
+                use std::time::Instant;
+                static PROBE: Mutex<Option<(Instant, f32, u32)>> = Mutex::new(None);
+                let mut probe = PROBE.lock().unwrap();
+                let now = Instant::now();
+                if let Some((last, ema_ms, n)) = probe.as_mut() {
+                    let dt_ms = now.duration_since(*last).as_secs_f32() * 1000.0;
+                    *last = now;
+                    if dt_ms < 2000.0 {
+                        *ema_ms = if *n == 0 { dt_ms } else { *ema_ms * 0.9 + dt_ms * 0.1 };
+                        *n += 1;
+                        if *n % 30 == 0 {
+                            eprintln!(
+                                "[fps-probe] prepare period EMA {:.2} ms ({:.1} FPS), n={} viewport={:?}",
+                                *ema_ms,
+                                1000.0 / *ema_ms,
+                                *n,
+                                camera.viewport_size_px
+                            );
+                        }
+                    }
+                } else {
+                    *probe = Some((now, 0.0, 0));
+                }
+            }
             let mut cache = self.batch_cache.lock().unwrap();
             let compute = cache
                 .entry(label.to_owned())

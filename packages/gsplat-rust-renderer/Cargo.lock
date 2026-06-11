@@ -3825,6 +3825,7 @@ dependencies = [
  "image",
  "ply-rs",
  "pollster",
+ "re_byte_size",
  "re_crash_handler",
  "re_grpc_server",
  "re_log",

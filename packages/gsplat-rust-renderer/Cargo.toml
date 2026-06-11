@@ -20,6 +20,7 @@ path = "src/render_cli.rs"
 default = ["viewer"]
 viewer = [
     "dep:egui_kittest",
+    "dep:re_byte_size",
     "dep:re_crash_handler",
     "dep:re_grpc_server",
     "dep:re_log_channel",
@@ -56,6 +57,7 @@ wgpu = "=29.0.3"
 # workspace's egui-family patches — its code builds against those forks, and
 # cargo only honors patches declared at the *root* of the building project.
 egui_kittest = { version = "0.34.3", features = ["wgpu", "eframe"], optional = true }
+re_byte_size = { path = "/home/pablo/0Dev/work/rerun-projects/reality/rerun/crates/utils/re_byte_size", optional = true }
 re_crash_handler = { path = "/home/pablo/0Dev/work/rerun-projects/reality/rerun/crates/utils/re_crash_handler", optional = true }
 re_grpc_server = { path = "/home/pablo/0Dev/work/rerun-projects/reality/rerun/crates/store/re_grpc_server", optional = true }
 re_log_channel = { path = "/home/pablo/0Dev/work/rerun-projects/reality/rerun/crates/store/re_log_channel", optional = true }
