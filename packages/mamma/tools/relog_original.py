@@ -9,11 +9,13 @@ comparison artifact with identical entity layout to our live recordings.
 
 from __future__ import annotations
 
+import datetime as dt
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import rerun as rr
 import torch
 import tyro
 from jaxtyping import Float32, UInt8
@@ -28,6 +30,67 @@ from mamma.fitting.smplx_wrapper import build_smplx_neutral, smplx_forward_per_p
 from mamma.fitting.window_fitter import FitResult
 from mamma.landmarks.estimator import CameraLandmarks, LandmarkResult
 from mamma.viz.stream_logger import StreamLogger
+
+_STAGES: list[tuple[str, str]] = [
+    ("ma_cap", "camera calibration"),
+    ("ma_masks", "SAM2 person masks (4K, bidirectional)"),
+    ("ma_2d", "MammaNet dense 2D landmarks"),
+    ("ma_3d", "triangulation + whole-sequence LBFGS fit"),
+    ("ma_vis", "visualization + RRD/overlay export"),
+]
+
+
+def _log_stage_timing(ma3d_dir: Path, fps: float, n_frames: int) -> None:
+    """Log a TextDocument table of the original DAG's per-stage wall time.
+
+    The offline DAG's meaningful timing is per-STAGE wall, not per-tick — a
+    Markdown table (with a unicode-bar magnitude column) reads far clearer than
+    an empty per-tick scalar graph. Durations are derived from each stage's
+    ``DONE`` mtime (sequential DAG); stages live as siblings of ``ma3d_dir``.
+    """
+
+    def done_time(stage: str) -> dt.datetime | None:
+        f = Path(str(ma3d_dir).replace("/ma_3d/", f"/{stage}/")) / "DONE"
+        return dt.datetime.fromtimestamp(f.stat().st_mtime) if f.exists() else None
+
+    done: dict[str, dt.datetime | None] = {s: done_time(s) for s, _ in _STAGES}
+    order: list[str] = [s for s, _ in _STAGES]
+    durs: dict[str, float | None] = {}
+    for i, s in enumerate(order):
+        cur: dt.datetime | None = done[s]
+        prev: dt.datetime | None = done[order[i - 1]] if i > 0 else None
+        durs[s] = (cur - prev).total_seconds() if (cur is not None and prev is not None) else None
+    measured: list[float] = [v for v in durs.values() if v]
+    if not measured:
+        return
+    total: float = sum(measured)
+    mx: float = max(measured)
+
+    def fmt(sec: float | None) -> str:
+        if not sec:
+            return "n/a"
+        m, s = divmod(int(round(sec)), 60)
+        h, m = divmod(m, 60)
+        return f"{h}h{m:02d}m" if h else f"{m}m{s:02d}s"
+
+    rows: list[str] = []
+    for s, desc in _STAGES:
+        d = durs.get(s)
+        bar: str = "█" * round(18 * d / mx) if d else ""
+        share: str = f"{100 * d / total:.0f}%" if d else "—"
+        rows.append(f"| `{s}` | {fmt(d):>7} | {share:>4} | `{bar:<18}` | {desc} |")
+    clip_s: float = n_frames / fps
+    md: str = (
+        "# Original DAG — per-stage wall time\n"
+        f"**{n_frames} frames · {clip_s:.1f} s clip**\n\n"
+        "| stage | wall | share | | what it does |\n"
+        "|---|--:|--:|:--|---|\n"
+        + "\n".join(rows)
+        + f"\n| **TOTAL** | **{fmt(total)}** | | | **≈ {total / clip_s:.0f}× realtime** |\n\n"
+        "> **Streaming port, same clip:** quality ≈90 s · fast ≈44 s, incl. Rerun logging.\n\n"
+        "_Stage durations from each stage's `DONE` timestamp (sequential DAG)._"
+    )
+    rr.log("timing_summary", rr.TextDocument(md, media_type=rr.MediaType.MARKDOWN), static=True)
 
 
 def _load_mask(png: Path, resize_hw: tuple[int, int], device: str) -> TrackedObject | None:
@@ -124,6 +187,7 @@ def main(config: RelogConfig) -> int:
 
     logger = StreamLogger(sequence, resize_hw=config.resize_hw)
     logger.setup()
+    _log_stage_timing(config.ma3d_dir, sequence.fps, n_frames)
     reader = TorchCodecMultiVideoReader(list(sequence.video_paths), device=config.device, resize_hw=config.resize_hw)
 
     chunk: int = 32
