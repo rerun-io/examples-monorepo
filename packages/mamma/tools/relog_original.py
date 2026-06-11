@@ -190,53 +190,96 @@ def main(config: RelogConfig) -> int:
     _log_stage_timing(config.ma3d_dir, sequence.fps, n_frames)
     reader = TorchCodecMultiVideoReader(list(sequence.video_paths), device=config.device, resize_hw=config.resize_hw)
 
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    # The relog is pure I/O — 92% of its wall is decoding 4K mask PNGs (64%)
+    # and video frames (28%), both trivially parallel across the 4 cameras.
+    # A thread pool gives real speedup: PIL/torchcodec release the GIL during
+    # decode. Masks load on CPU (they're only logged; _load_mask's old .to(cuda)
+    # was a pointless CPU->GPU->CPU round-trip since log_tick_tracks copies back).
+    timers: dict[str, float] = dict.fromkeys(["decode", "video", "mask", "tracks", "landmarks", "fit", "metrics"], 0.0)
     chunk: int = 32
-    for start in range(0, n_frames, chunk):
-        stop: int = min(start + chunk, n_frames)
-        videos: list[UInt8[torch.Tensor, "b 3 h w"]] = [r.get_frames_in_range(start, stop) for r in reader.video_readers]
-        for local in range(stop - start):
-            f: int = start + local
-            frames: list[UInt8[torch.Tensor, "3 h w"]] = [v[local] for v in videos]
-            logger.log_tick_video(f, frames)
-            # Masks + derived boxes from the saved 4K PNGs (per frame, seg_stride=1).
-            tracks: list[CameraTracks] = []
-            for cam in sequence.camera_names:
-                obj = _load_mask(config.ma_masks_dir / cam / "masks" / f"mask_{f:04d}_01.png", config.resize_hw, config.device)
-                tracks.append({config.body_id: obj} if obj is not None else {})
-            logger.log_tick_tracks(f, tracks, seg_stride=1)
-            landmarks: list[CameraLandmarks] = []
-            for cam in sequence.camera_names:
-                lm: Float32[torch.Tensor, "n 3"] = torch.from_numpy(lm_by_cam[cam][f].copy()).float()
-                lm[:, :2] *= scale
-                landmarks.append(
-                    {
-                        config.body_id: LandmarkResult(
-                            obj_id=config.body_id,
-                            joints2d=lm,
-                            visibility=torch.from_numpy(vis_by_cam[cam][f].copy()).float(),
-                            contact=torch.zeros(lm.shape[0]),
-                            floor_contact=torch.from_numpy(floor_contact[f].copy()).float(),
-                        )
-                    }
-                )
-            if f % 2 == 0:
-                logger.log_tick_landmarks(f, landmarks)
-            fit = FitResult(
-                frame_idx=f,
-                vertices=vertices[f],
-                joints=joints[f],
-                pose=pose[f],
-                betas=betas,
-                trans=trans[f],
-                rest_joints=rest_joints,
+    # `with` so the pool (non-daemon worker threads) is always shut down, even if
+    # the chunk loop raises (corrupt frame, torchcodec error, a failing log call).
+    with ThreadPoolExecutor(max_workers=max(8, len(sequence.camera_names))) as io_pool:
+        for start in range(0, n_frames, chunk):
+            stop: int = min(start + chunk, n_frames)
+            t = time.perf_counter()
+            videos: list[UInt8[torch.Tensor, "b 3 h w"]] = list(
+                io_pool.map(lambda r, s=start, e=stop: r.get_frames_in_range(s, e), reader.video_readers)
             )
-            cloud: Float32[torch.Tensor, "n 3"] = torch.from_numpy(tri_cloud[f].copy()).float()
-            valid: torch.Tensor = cloud.abs().sum(dim=-1) > 1e-6
-            logger.log_tick_fit(f, {config.body_id: fit}, {config.body_id: (cloud, valid)}, faces)
-            logger.log_tick_metrics(f, {}, {"floor_contacts": float((floor_contact[f] > 0.5).sum())})
-        print(f"\r{stop}/{n_frames}", end="", flush=True)
+            timers["decode"] += time.perf_counter() - t
+            # Preload every (frame, camera) mask for this chunk in parallel.
+            t = time.perf_counter()
+            mask_jobs: list[tuple[int, str]] = [(fr, cam) for fr in range(start, stop) for cam in sequence.camera_names]
+            masks_loaded: list[TrackedObject | None] = list(
+                io_pool.map(
+                    lambda job: _load_mask(config.ma_masks_dir / job[1] / "masks" / f"mask_{job[0]:04d}_01.png", config.resize_hw, "cpu"),
+                    mask_jobs,
+                )
+            )
+            mask_map: dict[tuple[int, str], TrackedObject | None] = dict(zip(mask_jobs, masks_loaded, strict=True))
+            timers["mask"] += time.perf_counter() - t
+            for local in range(stop - start):
+                f: int = start + local
+                frames: list[UInt8[torch.Tensor, "3 h w"]] = [v[local] for v in videos]
+                t = time.perf_counter()
+                logger.log_tick_video(f, frames)
+                timers["video"] += time.perf_counter() - t
+                # Masks + derived boxes from the saved 4K PNGs (per frame, seg_stride=1).
+                tracks: list[CameraTracks] = [
+                    {config.body_id: obj} if (obj := mask_map[(f, cam)]) is not None else {} for cam in sequence.camera_names
+                ]
+                t = time.perf_counter()
+                logger.log_tick_tracks(f, tracks, seg_stride=1)
+                timers["tracks"] += time.perf_counter() - t
+                landmarks: list[CameraLandmarks] = []
+                for cam in sequence.camera_names:
+                    lm: Float32[torch.Tensor, "n 3"] = torch.from_numpy(lm_by_cam[cam][f].copy()).float()
+                    lm[:, :2] *= scale
+                    landmarks.append(
+                        {
+                            config.body_id: LandmarkResult(
+                                obj_id=config.body_id,
+                                joints2d=lm,
+                                visibility=torch.from_numpy(vis_by_cam[cam][f].copy()).float(),
+                                contact=torch.zeros(lm.shape[0]),
+                                floor_contact=torch.from_numpy(floor_contact[f].copy()).float(),
+                            )
+                        }
+                    )
+                if f % 2 == 0:
+                    t = time.perf_counter()
+                    logger.log_tick_landmarks(f, landmarks)
+                    timers["landmarks"] += time.perf_counter() - t
+                fit = FitResult(
+                    frame_idx=f,
+                    vertices=vertices[f],
+                    joints=joints[f],
+                    pose=pose[f],
+                    betas=betas,
+                    trans=trans[f],
+                    rest_joints=rest_joints,
+                )
+                cloud: Float32[torch.Tensor, "n 3"] = torch.from_numpy(tri_cloud[f].copy()).float()
+                valid: torch.Tensor = cloud.abs().sum(dim=-1) > 1e-6
+                t = time.perf_counter()
+                logger.log_tick_fit(f, {config.body_id: fit}, {config.body_id: (cloud, valid)}, faces)
+                timers["fit"] += time.perf_counter() - t
+                t = time.perf_counter()
+                logger.log_tick_metrics(f, {}, {"floor_contacts": float((floor_contact[f] > 0.5).sum())})
+                timers["metrics"] += time.perf_counter() - t
+            print(f"\r{stop}/{n_frames}", end="", flush=True)
+    t = time.perf_counter()
     logger.flush()
+    flush_s: float = time.perf_counter() - t
     print(f"\nrelogged {n_frames} frames from {config.ma3d_dir}")
+    total: float = (sum(timers.values()) + flush_s) or 1.0  # avoid /0 on a 0-frame relog
+    print(f"[timing] {n_frames}f, per-stage wall (s) + flush:")
+    for k, v in sorted(timers.items(), key=lambda x: -x[1]):
+        print(f"  {k:10s} {v:7.1f}s  {100 * v / total:4.0f}%")
+    print(f"  {'flush':10s} {flush_s:7.1f}s  {100 * flush_s / total:4.0f}%")
     return 0
 
 
