@@ -11,7 +11,9 @@
 //!
 //! 2. **Builds or reuses** a [`RenderGaussianCloud`] — a packed, renderer-ready
 //!    representation of the Gaussian data.  Clouds are cached per entity path
-//!    and only rebuilt when the data or transform signature changes.
+//!    in the store's `Memoizers` ([`CloudCache`] — visualizer instances are
+//!    recreated every frame and cannot hold state) and only rebuilt when the
+//!    data or transform signature changes.
 //!
 //! 3. **Submits** the full cloud + camera to [`GaussianDrawData`] which
 //!    drives the GPU render pass.  Culling and depth sorting happen entirely
@@ -428,7 +430,7 @@ impl VisualizerSystem for GaussianSplatVisualizer {
             let (cloud, cloud_generation) = if let Some(hit) = cached {
                 hit
             } else {
-                if std::env::var_os("GSPLAT_FPS_PROBE").is_some() {
+                if crate::gaussian_renderer::fps_probe_enabled() {
                     eprintln!("[fps-probe] REBUILDING {label} ({expected_splats} splats)");
                 }
                 // Build OUTSIDE the cache lock — packing a million-splat cloud
@@ -446,24 +448,25 @@ impl VisualizerSystem for GaussianSplatVisualizer {
                         materialize_sh_coefficients(&latest_at_results, coeffs_per_channel)
                     }),
                 ));
+                // One fresh entry, built once; if a racing view already
+                // cached the same signature, ours is dropped (the unused
+                // generation bump is harmless — only equality matters).
+                let fresh = CachedCloud {
+                    signature,
+                    cloud,
+                    generation: CLOUD_GENERATION.fetch_add(1, Ordering::Relaxed),
+                };
                 store_ctx.memoizer::<CloudCache, _>(|cache| {
-                    let entry = cache
-                        .0
-                        .entry(label.clone())
-                        .and_modify(|entry| {
-                            if entry.signature != signature {
-                                *entry = CachedCloud {
-                                    signature: signature.clone(),
-                                    cloud: cloud.clone(),
-                                    generation: CLOUD_GENERATION.fetch_add(1, Ordering::Relaxed),
-                                };
+                    use std::collections::hash_map::Entry;
+                    let entry = match cache.0.entry(label.clone()) {
+                        Entry::Occupied(mut occupied) => {
+                            if occupied.get().signature != fresh.signature {
+                                occupied.insert(fresh);
                             }
-                        })
-                        .or_insert_with(|| CachedCloud {
-                            signature: signature.clone(),
-                            cloud: cloud.clone(),
-                            generation: CLOUD_GENERATION.fetch_add(1, Ordering::Relaxed),
-                        });
+                            occupied.into_mut()
+                        }
+                        Entry::Vacant(vacant) => vacant.insert(fresh),
+                    };
                     (entry.cloud.clone(), entry.generation)
                 })
             };

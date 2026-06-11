@@ -31,7 +31,9 @@
 //! GPU buffers are cached per-entity and grow as needed (never shrink).  This
 //! avoids re-creating buffers every frame for static scenes.  The intersection
 //! count is read back from the GPU (with a 2-frame delay) to right-size the
-//! tile intersection buffers for the next frame.
+//! tile intersection buffers for the next frame.  Entities idle for
+//! [`EVICT_AFTER_FRAMES`] frames are evicted so deleted or hidden entities
+//! release their GPU memory.
 //!
 //! # Per-frame flow
 //!
@@ -64,6 +66,13 @@ use crate::gsplat_core::gpu_types::{
 use crate::gsplat_core::{CameraApproximation, RenderGaussianCloud};
 
 const INTERSECTION_READBACK_SLOT_COUNT: usize = 2;
+
+/// Whether `GSPLAT_FPS_PROBE=1` diagnostics are enabled — read once, the
+/// probes sit on per-frame paths.
+pub(crate) fn fps_probe_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("GSPLAT_FPS_PROBE").is_some())
+}
 
 /// Drop a cached entity's GPU resources after this many frames without use
 /// (~10 s at 60 FPS).  Generous on purpose: re-admission costs an upload.
@@ -126,6 +135,8 @@ pub struct GaussianRenderer {
     pipelines: GpuComputePipelines,
     /// Radix-sort shift uniforms (`shift = pass * 4`) — globally constant.
     shift_ubs: Vec<wgpu::Buffer>,
+    /// Frame index of the last idle-entity eviction sweep (one sweep/frame).
+    last_evict_frame: std::sync::atomic::AtomicU64,
     batch_cache: Mutex<HashMap<String, CachedComputeResources>>,
 }
 
@@ -904,7 +915,7 @@ impl GaussianRenderer {
                         drop(bytes);
                         slot.buffer.unmap();
 
-                        if std::env::var_os("GSPLAT_FPS_PROBE").is_some() {
+                        if fps_probe_enabled() {
                             eprintln!(
                                 "[fps-probe] intersections {} / capacity {} (splat_capacity {})",
                                 total_intersections,
@@ -1168,6 +1179,7 @@ impl Renderer for GaussianRenderer {
             layouts,
             pipelines,
             shift_ubs,
+            last_evict_frame: std::sync::atomic::AtomicU64::new(u64::MAX),
             batch_cache: Mutex::new(HashMap::new()),
         }
     }
@@ -1273,8 +1285,9 @@ mod compute {
             // [fps-probe] period between consecutive prepares == the viewer's
             // effective frame time while the camera moves.  Enabled with
             // GSPLAT_FPS_PROBE=1; mirrors the probe used to measure Brush.
-            if std::env::var_os("GSPLAT_FPS_PROBE").is_some() {
+            if fps_probe_enabled() {
                 use std::time::Instant;
+                // (last call time, period EMA in ms, sample count)
                 static PROBE: Mutex<Option<(Instant, f32, u32)>> = Mutex::new(None);
                 let mut probe = PROBE.lock().unwrap();
                 let now = Instant::now();
@@ -1303,11 +1316,14 @@ mod compute {
             // Evict entities that haven't rendered for a while (deleted from
             // the store, or filtered out of every view) so their GPU buffers
             // are freed; a 1M-splat entity holds >1 GB of intersection and
-            // scratch buffers.
+            // scratch buffers.  Swept once per frame (prepare runs once per
+            // entity).
             let frame_index = ctx.active_frame.frame_index;
-            cache.retain(|_, entry| {
-                frame_index.saturating_sub(entry.last_used_frame) < EVICT_AFTER_FRAMES
-            });
+            if self.last_evict_frame.swap(frame_index, std::sync::atomic::Ordering::Relaxed) != frame_index {
+                cache.retain(|_, entry| {
+                    frame_index.saturating_sub(entry.last_used_frame) < EVICT_AFTER_FRAMES
+                });
+            }
 
             let compute = cache
                 .entry(label.to_owned())
