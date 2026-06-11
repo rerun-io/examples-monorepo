@@ -42,8 +42,6 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
-
 use re_renderer::external::smallvec::smallvec;
 use re_renderer::external::wgpu;
 use re_renderer::renderer::{DrawData, DrawDataDrawable, DrawError, DrawInstruction, Renderer};
@@ -133,22 +131,6 @@ pub struct GaussianDrawData {
     batches: Vec<GaussianBatch>,
 }
 
-/// Extra counters returned while preparing one renderer batch.
-pub struct BatchSubmission {
-    pub extra_draw_data: Option<re_renderer::QueueableDrawData>,
-}
-
-struct PreparedBatch {
-    // Internal return value from `prepare_*_batch`: the final batch plus a few counters that are
-    // useful while keeping the public surface tiny.
-    batch: Option<GaussianBatch>,
-    upload_ms: f32,
-    extra_draw_data: Option<re_renderer::QueueableDrawData>,
-    tile_intersections: usize,
-    intersection_capacity: usize,
-    intersection_capacity_saturated: bool,
-}
-
 #[derive(Clone)]
 struct GaussianBatch {
     payload: GaussianBatchPayload,
@@ -181,10 +163,63 @@ struct CachedComputeResources {
     block_capacity: usize,
     intersection_capacity: usize,
     tile_offset_capacity: usize,
-    latest_intersection_count: usize,
-    intersection_capacity_saturated: bool,
     sort_workgroup_count: u32,
     depth_sort_workgroup_count: u32,
+    /// Cloud build generation the splat attribute buffers were uploaded
+    /// from; a mismatch in `prepare_compute_batch` triggers a re-upload.
+    cloud_generation: u64,
+    /// (total_splats, intersection_capacity, tile_bounds) the scan/map
+    /// uniforms were last written for — they're rewritten only on change.
+    last_uniform_inputs: (usize, usize, glam::UVec2),
+}
+
+/// The five per-splat attribute buffers, uploaded from one cloud build.
+/// Replaced wholesale when the entity is re-logged (generation mismatch).
+struct SplatAttributeBuffers {
+    means: Arc<wgpu::Buffer>,
+    quats: Arc<wgpu::Buffer>,
+    scales_opacity: Arc<wgpu::Buffer>,
+    colors: Arc<wgpu::Buffer>,
+    sh_coeffs: Arc<wgpu::Buffer>,
+}
+
+fn create_splat_attribute_buffers(
+    device: &wgpu::Device,
+    label: &str,
+    cloud: &RenderGaussianCloud,
+) -> SplatAttributeBuffers {
+    SplatAttributeBuffers {
+        means: Arc::new(create_filled_buffer(
+            device,
+            &format!("{label}::means"),
+            wgpu::BufferUsages::STORAGE,
+            &pack_vec3s(cloud.means_world.iter().copied()),
+        )),
+        quats: Arc::new(create_filled_buffer(
+            device,
+            &format!("{label}::quats"),
+            wgpu::BufferUsages::STORAGE,
+            &pack_quats(cloud.quats.iter().copied()),
+        )),
+        scales_opacity: Arc::new(create_filled_buffer(
+            device,
+            &format!("{label}::scales_opacity"),
+            wgpu::BufferUsages::STORAGE,
+            &pack_scales_opacity(cloud),
+        )),
+        colors: Arc::new(create_filled_buffer(
+            device,
+            &format!("{label}::colors"),
+            wgpu::BufferUsages::STORAGE,
+            &pack_rgb(cloud.colors_dc.iter().copied()),
+        )),
+        sh_coeffs: Arc::new(create_filled_buffer(
+            device,
+            &format!("{label}::sh_coeffs"),
+            wgpu::BufferUsages::STORAGE,
+            &pack_sh_coefficients(cloud),
+        )),
+    }
 }
 
 // A few of these buffers are lifetime anchors referenced only through bind
@@ -195,11 +230,7 @@ struct ComputeBuffers {
     scan_uniform_buffer: Arc<wgpu::Buffer>,
     scan_l2_uniform_buffer: Arc<wgpu::Buffer>,
     map_uniform_buffer: Arc<wgpu::Buffer>,
-    means_buffer: Arc<wgpu::Buffer>,
-    quats_buffer: Arc<wgpu::Buffer>,
-    scales_opacity_buffer: Arc<wgpu::Buffer>,
-    colors_buffer: Arc<wgpu::Buffer>,
-    sh_coeffs_buffer: Arc<wgpu::Buffer>,
+    splat: SplatAttributeBuffers,
     // GPU cull + depth-sort buffers (project_forward outputs / sort ping-pong).
     num_visible_buffer: Arc<wgpu::Buffer>,
     global_from_compact_buffer: Arc<wgpu::Buffer>,
@@ -234,11 +265,11 @@ impl ComputeBuffers {
     /// wiring list handed to `gpu_types::create_pipeline_bind_groups`.
     fn pipeline_buffers(&self) -> PipelineBuffers<'_> {
         PipelineBuffers {
-            means: &self.means_buffer,
-            quats: &self.quats_buffer,
-            scales_opacity: &self.scales_opacity_buffer,
-            colors: &self.colors_buffer,
-            sh_coeffs: &self.sh_coeffs_buffer,
+            means: &self.splat.means,
+            quats: &self.splat.quats,
+            scales_opacity: &self.splat.scales_opacity,
+            colors: &self.splat.colors,
+            sh_coeffs: &self.splat.sh_coeffs,
             project_ub: &self.project_uniform_buffer,
             scan_ub: &self.scan_uniform_buffer,
             scan_l2_ub: &self.scan_l2_uniform_buffer,
@@ -305,39 +336,25 @@ impl GaussianDrawData {
         }
     }
 
+    /// Prepare and queue the GPU work for one splat entity.
+    ///
+    /// `cloud_generation` identifies the cloud build (the visualizer bumps it
+    /// whenever it rebuilds the cloud from re-logged data); the renderer
+    /// re-uploads the splat attributes when it changes.
     pub fn add_batch(
         &mut self,
         ctx: &re_renderer::RenderContext,
         label: &str,
         cloud: &Arc<RenderGaussianCloud>,
+        cloud_generation: u64,
         camera: &CameraApproximation,
-    ) -> BatchSubmission {
+    ) {
         let renderer = ctx.renderer::<GaussianRenderer>();
         if cloud.is_empty() {
-            return BatchSubmission {
-                extra_draw_data: None,
-            };
+            return;
         }
-
-        let submission = renderer.prepare_compute_batch(ctx, label, cloud, camera);
-        let PreparedBatch {
-            batch,
-            upload_ms,
-            extra_draw_data,
-            tile_intersections,
-            intersection_capacity,
-            intersection_capacity_saturated,
-        } = submission;
-        if let Some(batch) = batch {
-            self.batches.push(batch);
-        }
-        let _ = (
-            upload_ms,
-            tile_intersections,
-            intersection_capacity,
-            intersection_capacity_saturated,
-        );
-        BatchSubmission { extra_draw_data }
+        let batch = renderer.prepare_compute_batch(ctx, label, cloud, cloud_generation, camera);
+        self.batches.push(batch);
     }
 }
 
@@ -418,6 +435,7 @@ impl GaussianRenderer {
         ctx: &re_renderer::RenderContext,
         label: &str,
         cloud: &Arc<RenderGaussianCloud>,
+        cloud_generation: u64,
     ) -> CachedComputeResources {
         // These buffers live per entity so camera movement reuses GPU allocations instead of
         // rebuilding everything every frame.
@@ -450,36 +468,7 @@ impl GaussianRenderer {
             mapped_at_creation: false,
         }));
 
-        let means_buffer = Arc::new(create_filled_buffer(
-            &ctx.device,
-            &format!("{label}::means"),
-            wgpu::BufferUsages::STORAGE,
-            &pack_vec3s(cloud.means_world.iter().copied()),
-        ));
-        let quats_buffer = Arc::new(create_filled_buffer(
-            &ctx.device,
-            &format!("{label}::quats"),
-            wgpu::BufferUsages::STORAGE,
-            &pack_quats(cloud.quats.iter().copied()),
-        ));
-        let scales_opacity_buffer = Arc::new(create_filled_buffer(
-            &ctx.device,
-            &format!("{label}::scales_opacity"),
-            wgpu::BufferUsages::STORAGE,
-            &pack_scales_opacity(cloud),
-        ));
-        let colors_buffer = Arc::new(create_filled_buffer(
-            &ctx.device,
-            &format!("{label}::colors"),
-            wgpu::BufferUsages::STORAGE,
-            &pack_rgb(cloud.colors_dc.iter().copied()),
-        ));
-        let sh_coeffs_buffer = Arc::new(create_filled_buffer(
-            &ctx.device,
-            &format!("{label}::sh_coeffs"),
-            wgpu::BufferUsages::STORAGE,
-            &pack_sh_coefficients(cloud),
-        ));
+        let splat = create_splat_attribute_buffers(&ctx.device, label, cloud);
 
         // GPU cull + depth-sort buffers.  project_forward appends (gid, depth
         // bits) pairs; the radix argsort ping-pongs between primary and alt.
@@ -662,11 +651,7 @@ impl GaussianRenderer {
             scan_uniform_buffer,
             scan_l2_uniform_buffer,
             map_uniform_buffer,
-            means_buffer,
-            quats_buffer,
-            scales_opacity_buffer,
-            colors_buffer,
-            sh_coeffs_buffer,
+            splat,
             num_visible_buffer,
             global_from_compact_buffer,
             depth_keys_buffer,
@@ -728,10 +713,12 @@ impl GaussianRenderer {
             block_capacity,
             intersection_capacity,
             tile_offset_capacity,
-            latest_intersection_count: 0,
-            intersection_capacity_saturated: false,
             sort_workgroup_count: sort_workgroup_count as u32,
             depth_sort_workgroup_count: depth_sort_workgroup_count as u32,
+            cloud_generation,
+            // Sentinel: forces the first prepare_compute_batch to write the
+            // scan/map uniforms.
+            last_uniform_inputs: (usize::MAX, 0, glam::UVec2::ZERO),
         }
     }
 
@@ -907,11 +894,14 @@ impl GaussianRenderer {
                         drop(bytes);
                         slot.buffer.unmap();
 
-                        compute.latest_intersection_count = total_intersections;
-                        compute.intersection_capacity_saturated =
-                            total_intersections > compute.intersection_capacity;
-
                         if total_intersections > compute.intersection_capacity {
+                            // Transiently rendered with a truncated intersection
+                            // list; the growth below fixes the next frame.
+                            re_log::debug!(
+                                "tile intersection demand {total_intersections} exceeded \
+                                 capacity {} — growing",
+                                compute.intersection_capacity
+                            );
                             required_capacity = Some(
                                 required_capacity.map_or(total_intersections, |current: usize| {
                                     current.max(total_intersections)
@@ -1171,8 +1161,6 @@ impl Renderer for GaussianRenderer {
         pass: &mut wgpu::RenderPass<'_>,
         draw_instructions: &[DrawInstruction<'_, GaussianDrawData>],
     ) -> Result<(), DrawError> {
-        let draw_start = Instant::now();
-
         let tile_pipeline = render_pipelines.get(self.render_pipeline_tile)?;
         for instruction in draw_instructions {
             for drawable in instruction.drawables {
@@ -1191,8 +1179,6 @@ impl Renderer for GaussianRenderer {
                 pass.draw(0..3, 0..1);
             }
         }
-
-        let _ = draw_start;
 
         Ok(())
     }
@@ -1254,7 +1240,6 @@ mod compute {
     //! command encoding only.
 
     use std::sync::Arc;
-    use std::time::Instant;
 
     use super::*;
 
@@ -1264,54 +1249,73 @@ mod compute {
             ctx: &re_renderer::RenderContext,
             label: &str,
             cloud: &Arc<RenderGaussianCloud>,
+            cloud_generation: u64,
             camera: &CameraApproximation,
-        ) -> PreparedBatch {
-            let upload_start = Instant::now();
+        ) -> GaussianBatch {
             let mut cache = self.batch_cache.lock().unwrap();
             let compute = cache
                 .entry(label.to_owned())
-                .or_insert_with(|| self.create_batch_resources(ctx, label, cloud));
+                .or_insert_with(|| self.create_batch_resources(ctx, label, cloud, cloud_generation));
+
+            // Step 1a: re-upload the splat attributes when the entity was
+            // re-logged (the visualizer bumps the generation on every cloud
+            // rebuild).  The bind-group refresh happens below — either via
+            // grow_splat_capacity or explicitly.
+            let needs_upload = compute.cloud_generation != cloud_generation;
+            if needs_upload {
+                compute.cloud_generation = cloud_generation;
+                compute.buffers.splat = create_splat_attribute_buffers(&ctx.device, label, cloud);
+            }
+
             let pipelines = &self.pipelines;
             let total_splats = cloud.len().max(1);
 
-            // Step 1: make sure the persistent per-cloud buffers are large enough for this frame.
+            // Step 1b: make sure the persistent per-cloud buffers are large enough for this frame.
             if compute.splat_capacity < total_splats {
-                self.grow_splat_capacity(ctx, label, compute, total_splats);
+                self.grow_splat_capacity(ctx, label, compute, total_splats); // refreshes bind groups
+            } else if needs_upload {
+                self.refresh_compute_bind_groups(ctx, label, compute);
             }
             self.process_intersection_count_readbacks(ctx, label, compute);
             self.ensure_tile_raster_resources(ctx, label, compute, camera.viewport_size_px);
 
-            // Step 2: write this frame's uniforms (camera + counts).  This and
-            // command encoding below are the only per-frame CPU work.
+            // Step 2: write this frame's uniforms.  Only the camera uniform
+            // changes on steady-state frames; the scan/map uniforms depend on
+            // (total_splats, intersection_capacity, tile_bounds) and are
+            // rewritten only when one of those changed.
             let block_count = compaction_block_count(total_splats) as u32;
             let block2_count = compaction_block_count(block_count as usize) as u32;
             let tile_bounds = calc_tile_bounds(camera.viewport_size_px);
             let project_uniform = fill_project_uniform(camera, total_splats, cloud);
-            let scan_uniform = fill_scan_uniform(total_splats);
-            // Level-2 scan: scans the level-1 block sums (block_count entries).
-            let scan_l2_uniform = fill_scan_uniform(block_count as usize);
-            let map_uniform =
-                fill_map_uniform(total_splats, compute.intersection_capacity, tile_bounds);
             ctx.queue.write_buffer(
                 &compute.buffers.project_uniform_buffer,
                 0,
                 bytemuck::bytes_of(&project_uniform),
             );
-            ctx.queue.write_buffer(
-                &compute.buffers.scan_uniform_buffer,
-                0,
-                bytemuck::bytes_of(&scan_uniform),
-            );
-            ctx.queue.write_buffer(
-                &compute.buffers.scan_l2_uniform_buffer,
-                0,
-                bytemuck::bytes_of(&scan_l2_uniform),
-            );
-            ctx.queue.write_buffer(
-                &compute.buffers.map_uniform_buffer,
-                0,
-                bytemuck::bytes_of(&map_uniform),
-            );
+            let uniform_inputs = (total_splats, compute.intersection_capacity, tile_bounds);
+            if compute.last_uniform_inputs != uniform_inputs {
+                compute.last_uniform_inputs = uniform_inputs;
+                let scan_uniform = fill_scan_uniform(total_splats);
+                // Level-2 scan: scans the level-1 block sums (block_count entries).
+                let scan_l2_uniform = fill_scan_uniform(block_count as usize);
+                let map_uniform =
+                    fill_map_uniform(total_splats, compute.intersection_capacity, tile_bounds);
+                ctx.queue.write_buffer(
+                    &compute.buffers.scan_uniform_buffer,
+                    0,
+                    bytemuck::bytes_of(&scan_uniform),
+                );
+                ctx.queue.write_buffer(
+                    &compute.buffers.scan_l2_uniform_buffer,
+                    0,
+                    bytemuck::bytes_of(&scan_l2_uniform),
+                );
+                ctx.queue.write_buffer(
+                    &compute.buffers.map_uniform_buffer,
+                    0,
+                    bytemuck::bytes_of(&map_uniform),
+                );
+            }
 
             let (project_x, project_y) =
                 dispatch_grid_1d(total_splats as u32, PROJECT_WORKGROUP_SIZE);
@@ -1501,17 +1505,10 @@ mod compute {
                 compute_pass.dispatch_workgroups(raster_x, raster_y, 1);
             }
 
-            PreparedBatch {
-                batch: Some(GaussianBatch {
-                    payload: GaussianBatchPayload {
-                        composite_bind_group: compute.composite_bind_group.clone(),
-                    },
-                }),
-                upload_ms: upload_start.elapsed().as_secs_f32() * 1000.0,
-                extra_draw_data: None,
-                tile_intersections: compute.latest_intersection_count,
-                intersection_capacity: compute.intersection_capacity,
-                intersection_capacity_saturated: compute.intersection_capacity_saturated,
+            GaussianBatch {
+                payload: GaussianBatchPayload {
+                    composite_bind_group: compute.composite_bind_group.clone(),
+                },
             }
         }
     }

@@ -15,8 +15,7 @@
 //! | [`types`] | Data structures: `RenderGaussianCloud`, `CameraApproximation`, `RenderOutput`, etc. |
 //! | [`constants`] | Shared constants: `SH_C0`, `SIGMA_COVERAGE`, etc. |
 //! | [`projection`] | Quaternion helpers |
-//! | [`sh`] | Spherical harmonics evaluation (degrees 0–4) |
-//! | [`covariance`] | 2D covariance from 3D Gaussian + camera Jacobian |
+//! | [`sh`] | Spherical harmonics metadata (degree from coefficient count) |
 //! | [`camera`] | Camera constructors (look-at, NeRF transform, fallback) |
 //! | [`gpu_types`] | GPU buffer layout structs and helpers |
 //! | [`gpu_context`] | Headless wgpu device/queue initialization |
@@ -24,7 +23,6 @@
 
 pub mod camera;
 pub mod constants;
-pub mod covariance;
 pub mod gpu_context;
 pub mod gpu_renderer;
 pub mod gpu_types;
@@ -37,14 +35,10 @@ pub mod types;
 
 pub use camera::{camera_from_nerf_transform, fallback_camera, make_camera_approximation};
 pub use constants::*;
-pub use covariance::{
-    brush_bbox_extent_px, brush_camera_jacobian_rows, brush_covariance_in_pixels,
-    compensate_covariance_px, mat3_from_affine, regularize_covariance,
-};
 pub use gpu_context::GpuContext;
 pub use gpu_renderer::{GpuRenderResources, GpuRenderer};
 pub use projection::normalize_quat_or_identity;
-pub use sh::{evaluate_sh_rgb, sh_degree_from_coeffs};
+pub use sh::sh_degree_from_coeffs;
 pub use types::{
     CameraApproximation, RenderGaussianCloud, RenderOutput, RenderShCoefficients,
     approximate_bounds_from_points,

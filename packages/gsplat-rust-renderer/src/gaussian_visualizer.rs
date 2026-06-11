@@ -29,6 +29,8 @@
 //!   the Rerun viewer with the current view context and query.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash as _, Hasher as _};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::gaussian_renderer::GaussianDrawData;
@@ -171,12 +173,20 @@ pub struct GaussianSplatVisualizer {
 }
 
 /// A cached cloud together with the signature that was used to build it.
-/// When the signature changes (different splat count, SH shape, or transform),
-/// the cloud is rebuilt from the current query results.
+/// When the signature changes (different splat data, count, SH shape, or
+/// transform), the cloud is rebuilt from the current query results.
 struct CachedCloud {
     signature: CloudSignature,
     cloud: Arc<RenderGaussianCloud>,
+    /// Monotonically increasing build id, bumped on every rebuild.  The
+    /// renderer compares it against the generation its per-entity GPU buffers
+    /// were uploaded from and re-uploads the splat data on mismatch.
+    generation: u64,
 }
+
+/// Source of [`CachedCloud::generation`] values.  Global so a generation is
+/// never reused, even across visualizer instances or cache evictions.
+static CLOUD_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// Lightweight fingerprint of a cloud's configuration.  Two signatures are
 /// equal if and only if the cloud data can be reused without rebuilding.
@@ -189,6 +199,10 @@ struct CloudSignature {
     /// Bit-exact representation of the 3×4 entity transform.  Using raw bits
     /// avoids floating-point comparison issues.
     transform_bits: [u32; 12],
+    /// Hash of the store row-ids backing every component batch.  Re-logging
+    /// an entity writes new rows, so this changes exactly when the underlying
+    /// data does — including same-count, same-transform content changes.
+    content_hash: u64,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -243,7 +257,6 @@ impl VisualizerSystem for GaussianSplatVisualizer {
         // relates to the view's coordinate frame.
         let transforms = context_systems.get::<TransformTreeContext>(&output)?;
         let mut draw_data = GaussianDrawData::new(ctx.render_ctx());
-        let mut extra_draw_data = Vec::new();
         let mut active_labels = HashSet::new();
 
         // Iterate over every entity in the current view that has been assigned
@@ -305,11 +318,39 @@ impl VisualizerSystem for GaussianSplatVisualizer {
                 .unwrap_or(Affine3A::IDENTITY);
 
             // ── Step 3: Build or reuse the render cloud ───────────────
+            // Content identity: every component batch is indexed by the store
+            // row-id of the row that produced it, and `iter_required`
+            // preserves store row-ids.  Hashing the (time, row-id) indices is
+            // O(#batches) — the payload bytes are never touched.
+            let mut content_hasher = DefaultHasher::new();
+            for (index, _) in centers.slice::<[f32; 3]>() {
+                index.hash(&mut content_hasher);
+            }
+            for (index, _) in quaternions.slice::<[f32; 4]>() {
+                index.hash(&mut content_hasher);
+            }
+            for (index, _) in scales.slice::<[f32; 3]>() {
+                index.hash(&mut content_hasher);
+            }
+            for (index, _) in opacities.slice::<f32>() {
+                index.hash(&mut content_hasher);
+            }
+            for (index, _) in colors.slice::<u32>() {
+                index.hash(&mut content_hasher);
+            }
+            if let Ok(Some(sh_unit)) = latest_at_results.get_unit_chunk(
+                GaussianSplats3D::descriptor_sh_coefficients().component,
+                true, // preserve store row ids
+            ) {
+                sh_unit.row_id().hash(&mut content_hasher);
+            }
+
             let label = format!("gaussian_splats::{}", data_result.entity_path);
             let signature = CloudSignature {
                 expected_splats,
                 sh_coeffs_per_channel,
                 transform_bits: transform.to_cols_array().map(f32::to_bits),
+                content_hash: content_hasher.finish(),
             };
             active_labels.insert(label.clone());
 
@@ -331,15 +372,22 @@ impl VisualizerSystem for GaussianSplatVisualizer {
                         materialize_sh_coefficients(&latest_at_results, coeffs_per_channel)
                     }),
                 ));
-                clouds.insert(label.clone(), CachedCloud { signature, cloud });
+                clouds.insert(
+                    label.clone(),
+                    CachedCloud {
+                        signature,
+                        cloud,
+                        generation: CLOUD_GENERATION.fetch_add(1, Ordering::Relaxed),
+                    },
+                );
             }
 
             // ── Step 4: Extract camera ────────────────────────────────
-            let cloud = clouds
+            let cache_entry = clouds
                 .get(&label)
-                .expect("cloud cache entry inserted above")
-                .cloud
-                .clone();
+                .expect("cloud cache entry inserted above");
+            let cloud = cache_entry.cloud.clone();
+            let cloud_generation = cache_entry.generation;
             // Prefer the interactive 3D camera from the view state.  Fall back
             // to a synthetic camera positioned around the cloud's bounding box
             // (so the splats are visible even before the user orbits).
@@ -349,16 +397,12 @@ impl VisualizerSystem for GaussianSplatVisualizer {
             // ── Step 5: Submit to the GPU renderer ────────────────────
             // Culling and depth sorting happen on the GPU (Brush model);
             // the full cloud + camera is all the renderer needs.
-            let submission = draw_data.add_batch(ctx.render_ctx(), &label, &cloud, &camera);
-            if let Some(extra) = submission.extra_draw_data {
-                extra_draw_data.push(extra);
-            }
+            draw_data.add_batch(ctx.render_ctx(), &label, &cloud, cloud_generation, &camera);
         }
 
         // Evict cached clouds for entities that are no longer in the view.
         clouds.retain(|label, _| active_labels.contains(label));
         output.draw_data = vec![draw_data.into()];
-        output.draw_data.extend(extra_draw_data);
         Ok(output)
     }
 }

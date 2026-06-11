@@ -1179,6 +1179,74 @@ pub fn gid_sort_passes(total_splats: usize) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// The WGSL shaders are standalone compilation units, so each declares
+    /// its own copies of the workgroup-size constants.  This test ties them
+    /// to the Rust constants the dispatch math uses — change one side and
+    /// the test names the file to update.
+    #[test]
+    fn wgsl_constants_match_rust() {
+        let cases: [(&str, &str, String); 9] = [
+            (
+                "gaussian_project.wgsl",
+                include_str!("../../shader/gaussian_project.wgsl"),
+                format!("const PROJECT_WORKGROUP_SIZE: u32 = {PROJECT_WORKGROUP_SIZE}u;"),
+            ),
+            (
+                "gaussian_project.wgsl",
+                include_str!("../../shader/gaussian_project.wgsl"),
+                format!("const COMPACTION_WORKGROUP_SIZE: u32 = {COMPACTION_WORKGROUP_SIZE}u;"),
+            ),
+            (
+                "gaussian_project.wgsl",
+                include_str!("../../shader/gaussian_project.wgsl"),
+                format!("const TILE_WIDTH: u32 = {TILE_WIDTH}u;"),
+            ),
+            (
+                "gaussian_map_intersections.wgsl",
+                include_str!("../../shader/gaussian_map_intersections.wgsl"),
+                format!("const PROJECT_WORKGROUP_SIZE: u32 = {PROJECT_WORKGROUP_SIZE}u;"),
+            ),
+            (
+                "gaussian_map_intersections.wgsl",
+                include_str!("../../shader/gaussian_map_intersections.wgsl"),
+                format!("const COMPACTION_BLOCK_SIZE: u32 = {COMPACTION_BLOCK_SIZE}u;"),
+            ),
+            (
+                "gaussian_dynamic_sort.wgsl",
+                include_str!("../../shader/gaussian_dynamic_sort.wgsl"),
+                format!("const WG: u32 = {SORT_WORKGROUP_SIZE}u;"),
+            ),
+            (
+                "gaussian_dynamic_sort.wgsl",
+                include_str!("../../shader/gaussian_dynamic_sort.wgsl"),
+                format!("const BITS_PER_PASS: u32 = {SORT_BITS_PER_PASS}u;"),
+            ),
+            (
+                "gaussian_tile_offsets.wgsl",
+                include_str!("../../shader/gaussian_tile_offsets.wgsl"),
+                format!("const TILE_SIZE: u32 = {TILE_OFFSET_WORKGROUP_SIZE}u;"),
+            ),
+            (
+                "gaussian_tile_offsets.wgsl",
+                include_str!("../../shader/gaussian_tile_offsets.wgsl"),
+                format!("const CHECKS_PER_ITER: u32 = {TILE_OFFSET_CHECKS_PER_ITER}u;"),
+            ),
+        ];
+        for (file, source, expected) in cases {
+            assert!(
+                source.contains(&expected),
+                "{file} does not declare `{expected}` — keep the WGSL constants in sync with gpu_types.rs"
+            );
+        }
+        assert!(
+            include_str!("../../shader/gaussian_dynamic_sort.wgsl")
+                .contains(&format!("const ELEMENTS_PER_THREAD: u32 = {SORT_ELEMENTS_PER_THREAD}u;")),
+            "gaussian_dynamic_sort.wgsl ELEMENTS_PER_THREAD drifted from SORT_ELEMENTS_PER_THREAD"
+        );
+    }
+
     #[test]
     fn positive_f32_depth_bits_sort_ascending_as_u32() {
         // project_forward stores bitcast<u32>(camera_depth); positive floats

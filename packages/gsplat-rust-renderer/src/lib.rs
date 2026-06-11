@@ -13,7 +13,6 @@
 //! gsplat_core/              ← Core algorithm (no Rerun deps)
 //!   types, constants,       ← Data structures + constants
 //!   projection, sh,         ← Helpers + spherical harmonics
-//!   covariance,             ← 2D covariance from 3D Gaussian + camera Jacobian
 //!   camera,                 ← Camera constructors
 //!   gpu_types,              ← GPU buffer layouts + pipeline definitions
 //!   gpu_context,            ← Headless wgpu device/queue init

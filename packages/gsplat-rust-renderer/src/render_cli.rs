@@ -74,6 +74,13 @@ struct Args {
     num_frames: usize,
 }
 
+/// Composite onto `background` and save as an 8-bit RGB PNG.
+fn save_rgb8_png(output: &RenderOutput, background: [f32; 3], path: &PathBuf) -> anyhow::Result<()> {
+    let rgb8: Vec<u8> = output.to_rgb8(background);
+    image::save_buffer(path, &rgb8, output.width, output.height, image::ColorType::Rgb8)?;
+    Ok(())
+}
+
 fn parse_background(s: &str) -> anyhow::Result<[f32; 3]> {
     let parts: Vec<f32> = s
         .split(',')
@@ -159,14 +166,7 @@ fn main() -> anyhow::Result<()> {
         );
         // Optionally save the last frame — proves buffer reuse stays correct.
         if let (Some(output_path), Some(output)) = (&args.output, &last_output) {
-            let rgb8: Vec<u8> = output.to_rgb8(background);
-            image::save_buffer(
-                output_path,
-                &rgb8,
-                output.width,
-                output.height,
-                image::ColorType::Rgb8,
-            )?;
+            save_rgb8_png(output, background, output_path)?;
             eprintln!("Saved last benchmark frame to {:?}", output_path);
         }
     } else {
@@ -180,14 +180,7 @@ fn main() -> anyhow::Result<()> {
         let render_ms: f64 = start.elapsed().as_secs_f64() * 1000.0;
         eprintln!("Rendered in {render_ms:.1}ms");
 
-        let rgb8: Vec<u8> = output.to_rgb8(background);
-        image::save_buffer(
-            output_path,
-            &rgb8,
-            output.width,
-            output.height,
-            image::ColorType::Rgb8,
-        )?;
+        save_rgb8_png(&output, background, output_path)?;
         eprintln!("Saved to {:?}", output_path);
     }
 
