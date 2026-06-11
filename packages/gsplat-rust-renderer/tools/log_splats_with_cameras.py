@@ -58,10 +58,11 @@ class LogSplatsWithCamerasConfig:
     max_cameras: int = 0
     """Cap on the number of cameras logged (0 = all)."""
     browser: Literal["tabs", "pages"] = "tabs"
-    """Image panel style.  'tabs': one named tab per camera — every view is
-    individually inspectable, but each view in the blueprint costs ~0.2 ms of
-    CPU per frame whether or not its tab is showing, so hundreds of cameras
-    pull the frame rate down (200 ≈ 15-20 FPS).  'pages': four fixed views
+    """Image panel style.  'tabs': 2x2 grids of named camera views, four per
+    tab — every camera individually inspectable, but each view in the
+    blueprint costs ~0.2 ms of CPU per frame whether or not its tab is
+    showing, so hundreds of cameras pull the frame rate down (200 ≈ 15-20
+    FPS).  'pages': four fixed views
     paging through all images on the 'page' sequence timeline — stays at
     60 FPS at any camera count."""
     image_plane_distance: float = 0.1
@@ -249,7 +250,16 @@ def main(config: LogSplatsWithCamerasConfig) -> None:
         ),
     )
     if config.browser == "tabs":
-        image_panel = rrb.Tabs(*[rrb.Spatial2DView(origin=f"world/cameras/{camera.name}/pinhole", name=camera.name) for camera, _ in cameras])
+        image_panel = rrb.Tabs(
+            *[
+                rrb.Grid(
+                    *[rrb.Spatial2DView(origin=f"world/cameras/{camera.name}/pinhole", name=camera.name) for camera, _ in cameras[i : i + 4]],
+                    grid_columns=2,
+                    name=f"{cameras[i][0].name}–{cameras[min(i + 3, len(cameras) - 1)][0].name}",
+                )
+                for i in range(0, len(cameras), 4)
+            ]
+        )
     else:
         image_panel = rrb.Grid(
             *[rrb.Spatial2DView(origin=f"browser/{i}", name=f"slot {i}") for i in range(4)],
@@ -267,7 +277,7 @@ def main(config: LogSplatsWithCamerasConfig) -> None:
     rec: rr.RecordingStream | None = rr.get_global_data_recording()
     assert rec is not None
     rec.flush(timeout_sec=120.0)
-    panel_desc: str = f"{len(cameras)} tabs" if config.browser == "tabs" else f"{(len(cameras) + 3) // 4} pages of 4"
+    panel_desc: str = f"{(len(cameras) + 3) // 4} tabs of 4" if config.browser == "tabs" else f"{(len(cameras) + 3) // 4} pages of 4"
     print(f"logged {len(cameras)} cameras ({panel_desc}) + {config.ply_path.name}")
 
 
