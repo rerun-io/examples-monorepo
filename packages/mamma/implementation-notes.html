@@ -152,18 +152,15 @@ future frames. Open decision for Pablo: accept fast's full-fidelity operating po
 trade scope (fewer cameras / less logging / a looser mask band) to chase 75%.</p>
 
 <h3>Presets in action</h3>
-<p>End-to-end overlay: each frame shows the source footage with the tracked person mask (red) and the fitted
-SMPL-X joints reprojected into all four cameras (green) &mdash; the full run+jump sequence, the actual logged
-output, not a re-render.</p>
+<p>The full Rerun viewer playing the run+jump sequence end to end &mdash; 3D mesh, posed camera frustums,
+per-camera H.264 video with mask overlays, and the live metric plots. Captured at <b>realtime</b> (1&times;)
+by playing the WebViewer in GPU-accelerated Chrome (ANGLE/OpenGL on the NVIDIA GPU) and recording the page,
+so the camera video actually decodes and the 3D is hardware-rendered.</p>
 <div style="display:flex;gap:16px;flex-wrap:wrap">
-<figure style="margin:0;flex:1;min-width:320px"><video src="media/quality_overlay.mp4" controls loop muted playsinline style="width:100%;border-radius:8px"></video><figcaption class="meta">quality &mdash; SAM2.1-small masks, masks 0.972 / PVE 15.5 mm</figcaption></figure>
-<figure style="margin:0;flex:1;min-width:320px"><video src="media/fast_overlay.mp4" controls loop muted playsinline style="width:100%;border-radius:8px"></video><figcaption class="meta">fast &mdash; EfficientTAM-ti, lean fit, masks 0.901 / PVE 16.2 mm</figcaption></figure>
+<figure style="margin:0;flex:1;min-width:340px"><video src="media/quality_scene.mp4" controls loop muted playsinline style="width:100%;border-radius:8px"></video><figcaption class="meta"><b>quality</b> &mdash; SAM2.1-small masks &middot; masks 0.972 / PVE 15.5 mm</figcaption></figure>
+<figure style="margin:0;flex:1;min-width:340px"><video src="media/fast_scene.mp4" controls loop muted playsinline style="width:100%;border-radius:8px"></video><figcaption class="meta"><b>fast</b> &mdash; EfficientTAM-ti, lean fit &middot; masks 0.901 / PVE 16.2 mm</figcaption></figure>
 </div>
-<p class="meta">The full Rerun scene playing end to end (quality preset) &mdash; 3D mesh, posed camera frustums, per-camera
-masks, and the live metric plots, captured by scrubbing the WebViewer timeline frame-by-frame (the headless
-native viewer can't move the playhead, so this is browser-driven):</p>
-<figure style="margin:0 0 16px"><video src="media/quality_scene.mp4" controls loop muted playsinline style="width:100%;max-width:760px;border-radius:8px"></video><figcaption class="meta">quality preset, full viewer, run+jump sequence</figcaption></figure>
-<p class="meta">Single-frame stills of each preset's viewer:</p>
+<p class="meta">High-resolution stills of each preset's viewer:</p>
 <div style="display:flex;gap:16px;flex-wrap:wrap">
 <figure style="margin:0;flex:1;min-width:320px"><img src="media/quality-full.png" style="width:100%;border-radius:8px"><figcaption class="meta">quality preset viewer</figcaption></figure>
 <figure style="margin:0;flex:1;min-width:320px"><img src="media/fast-full.png" style="width:100%;border-radius:8px"><figcaption class="meta">fast preset viewer</figcaption></figure>
