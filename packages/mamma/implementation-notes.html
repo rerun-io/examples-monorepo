@@ -161,6 +161,16 @@ is the offline DAG replayed from its saved artifacts, quality and fast are the l
 <figure style="margin:0;flex:1;min-width:300px"><img src="media/quality_compare.png" style="width:100%;border-radius:8px"><figcaption class="meta"><b>quality</b> &mdash; SAM2.1-small &middot; masks 0.972 / PVE 15.5 mm &middot; 90 s</figcaption></figure>
 <figure style="margin:0;flex:1;min-width:300px"><img src="media/fast_compare.png" style="width:100%;border-radius:8px"><figcaption class="meta"><b>fast</b> &mdash; EfficientTAM-ti, lean fit &middot; masks 0.901 / PVE 16.2 mm &middot; 44 s</figcaption></figure>
 </div>
+<p class="meta">Getting the streaming recordings to read like the offline original took four
+viewer-fidelity fixes (all verified against the data): <b>(1)</b> stamp the emitted mesh at its true frame, not
+the current tick &mdash; the fixed-lag fitter emits <code>frame &minus; emit_lag</code>, so the cloud was
+leading the mesh by up to 114&nbsp;mm at the jump apex (now ~20&nbsp;mm, the intrinsic cloud-to-surface gap);
+<b>(2)</b> log a <b>dense</b> 512-marker triangulated cloud (&sigma;/log-variance-weighted, like the original)
+instead of the vis&gt;0.5-gated ~265 &mdash; the fit still anchors only to the confident points, so PVE is
+unchanged, and dense-vs-dense actually <i>improved</i> tri3d to 14&nbsp;mm; <b>(3)</b> log the fitter's
+fixed-lag <b>tail meshes</b> so the mesh covers the final frames (the cloud no longer outruns a frozen mesh at
+the clip end); <b>(4)</b> center the <b>ground plane</b> under the camera rig (the calibration origin sits at
+one camera, so a square at the world origin left the far camera overhanging empty floor).</p>
 
 <h3>Run it yourself</h3>
 <pre style="background:#0c0e13;border:1px solid #2a3142;border-radius:8px;padding:14px;overflow-x:auto;font-size:12px;line-height:1.5"><code>cd packages/mamma
