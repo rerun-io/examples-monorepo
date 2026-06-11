@@ -151,6 +151,59 @@ frame is a structurally causal jump-apex undersegmentation the offline bidirecti
 future frames. Open decision for Pablo: accept fast's full-fidelity operating point at ~40% of realtime, or
 trade scope (fewer cameras / less logging / a looser mask band) to chase 75%.</p>
 
+<h3>Presets in action</h3>
+<p>End-to-end overlay: each frame shows the source footage with the tracked person mask (red) and the fitted
+SMPL-X joints reprojected into all four cameras (green) &mdash; the full run+jump sequence, the actual logged
+output, not a re-render.</p>
+<div style="display:flex;gap:16px;flex-wrap:wrap">
+<figure style="margin:0;flex:1;min-width:320px"><video src="media/quality_overlay.mp4" controls loop muted playsinline style="width:100%;border-radius:8px"></video><figcaption class="meta">quality &mdash; SAM2.1-small masks, masks 0.972 / PVE 15.5 mm</figcaption></figure>
+<figure style="margin:0;flex:1;min-width:320px"><video src="media/fast_overlay.mp4" controls loop muted playsinline style="width:100%;border-radius:8px"></video><figcaption class="meta">fast &mdash; EfficientTAM-ti, lean fit, masks 0.901 / PVE 16.2 mm</figcaption></figure>
+</div>
+<p class="meta">The full Rerun scene playing end to end (quality preset) &mdash; 3D mesh, posed camera frustums, per-camera
+masks, and the live metric plots, captured by scrubbing the WebViewer timeline frame-by-frame (the headless
+native viewer can't move the playhead, so this is browser-driven):</p>
+<figure style="margin:0 0 16px"><video src="media/quality_scene.mp4" controls loop muted playsinline style="width:100%;max-width:760px;border-radius:8px"></video><figcaption class="meta">quality preset, full viewer, run+jump sequence</figcaption></figure>
+<p class="meta">Single-frame stills of each preset's viewer:</p>
+<div style="display:flex;gap:16px;flex-wrap:wrap">
+<figure style="margin:0;flex:1;min-width:320px"><img src="media/quality-full.png" style="width:100%;border-radius:8px"><figcaption class="meta">quality preset viewer</figcaption></figure>
+<figure style="margin:0;flex:1;min-width:320px"><img src="media/fast-full.png" style="width:100%;border-radius:8px"><figcaption class="meta">fast preset viewer</figcaption></figure>
+</div>
+
+<h3>Run it yourself</h3>
+<pre style="background:#0c0e13;border:1px solid #2a3142;border-radius:8px;padding:14px;overflow-x:auto;font-size:12px;line-height:1.5"><code>cd packages/mamma
+PLAN=.trt_cache/mammanet_b4_fp16_trt101339_sm120.plan
+SEQ=data/inputs/outdoors/running_jumping
+
+# Dump every per-tick artifact (masks/2D/3D/SMPL-X) + save an RRD, per preset
+pixi run -e mamma --frozen python tools/dump_artifacts.py --preset quality \
+    --trt-engine $PLAN --rr-config.save /tmp/quality.rrd --out-dir /tmp/run_quality
+pixi run -e mamma --frozen python tools/dump_artifacts.py --preset fast \
+    --trt-engine $PLAN --rr-config.save /tmp/fast.rrd --out-dir /tmp/run_fast
+
+# Grade each against the original DAG on all four artifact classes
+pixi run -e mamma-dev --frozen python tools/validate_artifacts.py --run-dir /tmp/run_quality --preset quality
+pixi run -e mamma-dev --frozen python tools/validate_artifacts.py --run-dir /tmp/run_fast     --preset fast
+
+# Show the difference between the presets in one table
+pixi run -e mamma-dev --frozen python tools/compare_presets.py \
+    --quality-dir /tmp/run_quality --fast-dir /tmp/run_fast
+
+# Clean runtime benchmark (wall vs realtime fraction) per preset
+pixi run -e mamma --frozen python tools/benchmark.py --rr-config.headless --preset quality --data-dir $SEQ --trt-engine $PLAN
+pixi run -e mamma --frozen python tools/benchmark.py --rr-config.headless --preset fast    --data-dir $SEQ --trt-engine $PLAN
+
+# Open either RRD in the viewer
+rerun /tmp/quality.rrd</code></pre>
+<p class="meta">Sample <code>compare_presets.py</code> output:</p>
+<pre style="background:#0c0e13;border:1px solid #2a3142;border-radius:8px;padding:14px;overflow-x:auto;font-size:12px;line-height:1.5"><code>  metric                         quality          fast
+  --------------------------------------------------
+  mask model                sam2.1-small       etam-ti
+  fit iters/tick                      48            24
+  mask mean IoU                    0.972         0.901
+  mesh PVE p95 (mm)                 15.5          16.2
+  trans p95 (mm)                    14.5          33.8
+  % of realtime                      18%           36%</code></pre>
+
 <h2>Why this was possible: the recording is the ground truth</h2>
 <p>A 295&#215; rewrite is easy to make fast and hard to keep <i>correct</i> — every optimization is a chance to
 silently break quality. Two Rerun capabilities turned that risk into routine checks:</p>
