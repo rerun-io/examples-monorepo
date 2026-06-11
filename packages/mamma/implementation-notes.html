@@ -114,10 +114,31 @@ anchors/camera). These also erased a tracker outage that had been poisoning the 
 &#8594; 0.9%, tri max 154 &#8594; 38 mm). For the quality preset, EfficientTAM-ti's 128-cell decoder grid
 floors mask mean IoU near 0.93 (boundary fuzz), so it swaps in SAM2.1 hiera-small's 256-cell grid to reach
 0.972.</p>
-<p class="meta">Open: the runtime budgets (quality &#8804; 63.6 s, fast &#8804; 21.2 s) are being engineered
-toward separately &mdash; the fidelity gates above were the priority. Deviation flagged for review: the mask
-tail uses p1 (not raw min) because the single worst frame is a structurally causal jump-apex
-undersegmentation. Benchmark numbers land here next.</p>
+<h3>Runtime &mdash; the budgets collide with the fidelity requirement</h3>
+<p>Clean idle-GPU benchmarks on running_jumping (478 frames &times; 4 cams, incl. Rerun logging):</p>
+<table>
+<tr><th>preset</th><th>wall</th><th>of realtime</th><th>target</th><th>dominant cost</th></tr>
+<tr><td>fast (full fidelity)</td><td>43.8 s</td><td>~36%</td><td>&#8805;75% (21.2 s)</td><td>tracker 59.6 ms/tick</td></tr>
+<tr><td>quality</td><td>90.0 s</td><td>~18%</td><td>&#8805;25% (63.6 s)</td><td>SAM2.1-small 116 ms/tick</td></tr>
+</table>
+<p>The runtime story turned out to be <b>compute-bound, not decode-bound</b>: the dig attributed ~23&nbsp;s of
+the wall to 4K NVDEC decode, but transcoding the source to 720p H.264 proxies gave <i>zero</i> wall
+improvement (56.4 vs 57.3&nbsp;s) and slightly hurt mask IoU (H.264 compression). The real bottleneck was the
+sliding-window fit stalling the main loop (fit_wait ~25&nbsp;ms/tick); lightening it for the fast preset
+(24 iterations, emit every other tick, no LBFGS polish &mdash; absorbed by fast's loose bands) dropped
+fit_wait to ~1&nbsp;ms and the wall to 43.8&nbsp;s.</p>
+<p>What remains is a hard floor: the per-tick tracker is ~60&nbsp;ms (EfficientTAM-ti batched over 4 cameras +
+the anchor re-prompts that hold mask mean at 0.90). That alone is ~28&nbsp;s &mdash; <b>above the 21.2&nbsp;s
+fast budget before any other stage</b>. The mask&#8805;0.90 gate requires the full-rate tracker
+(<code>track_stride 1</code>); halving it to <code>track_stride 2</code> only reaches ~50% of realtime and
+drops mask mean to 0.84 (fails the band). So on 4-camera 4K-derived input with full logging, the fast
+preset's &#8805;75%-of-realtime target and its masks-within-10% target are <b>mutually exclusive</b> &mdash;
+a genuine hardware/scope limit, not a tuning gap. (The historical 11.76&nbsp;s milestone was a leaner,
+pre-dynamic-campaign config on a calmer clip.)</p>
+<p class="meta">Deviation flagged for review: the mask tail uses p1 (not raw min) because the single worst
+frame is a structurally causal jump-apex undersegmentation the offline bidirectional golden smooths with
+future frames. Open decision for Pablo: accept fast's full-fidelity operating point at ~40% of realtime, or
+trade scope (fewer cameras / less logging / a looser mask band) to chase 75%.</p>
 
 <h2>Why this was possible: the recording is the ground truth</h2>
 <p>A 295&#215; rewrite is easy to make fast and hard to keep <i>correct</i> — every optimization is a chance to
