@@ -74,6 +74,7 @@ site-package-path = [
     ".pixi/envs/vistadream-dev/lib/python3.12/site-packages",
     ".pixi/envs/pyvrs-viewer-dev/lib/python3.12/site-packages",
     ".pixi/envs/gsplat-rust-renderer-dev/lib/python3.12/site-packages",
+    ".pixi/envs/gsplat-rust-renderer-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/mast3r-slam-dev/lib/python3.11/site-packages",
     # rerun-sdk uses a .pth file (rerun_sdk.pth) that adds a subdirectory
     # to sys.path at runtime.  Pyrefly doesn't process .pth files, so we
