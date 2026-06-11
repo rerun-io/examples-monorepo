@@ -317,7 +317,10 @@ class StreamLogger:
                     vertex_positions=fit.vertices,
                     triangle_indices=faces,
                     vertex_normals=normals,
-                    albedo_factor=[color[0] / 255.0, color[1] / 255.0, color[2] / 255.0, 1.0],
+                    # Slightly transparent (alpha 0.65) so the triangulated cloud
+                    # and SMPL-X joints underneath stay visible through the surface
+                    # — makes the mesh-vs-anchor agreement readable in the 3D view.
+                    albedo_factor=[color[0] / 255.0, color[1] / 255.0, color[2] / 255.0, 0.65],
                 ),
             )
             rr.log(

@@ -149,6 +149,15 @@ def main(config: DumpConfig) -> int:
     stats = pipeline.run(chunk_size=config.chunk_size, timing_doc=True)
     if pipeline.fitting is not None:
         faces = pipeline.fitting.faces
+        # Head backfill: the bootstrap solves the first window but push() only
+        # emits from window[-1-emit_lag] onward, so the first emit_lag-ish
+        # frames have a cloud but no mesh. Log + collect them so the mesh
+        # covers the clip from frame 0 (matches the original DAG, which fits
+        # every frame). Mirror of the tail drain below.
+        for head in pipeline.fitting.drain_head():
+            collector.collect(-1, None, None, head)
+            frame_head: int = next(iter(head.fits.values())).frame_idx
+            pipeline.logger.log_tick_fit(frame_head, head.fits, {}, faces)
         for tail in pipeline.fitting.drain():
             collector.collect(-1, None, None, tail)
             # Also log the drained fixed-lag tail meshes to the RRD so the mesh
@@ -167,6 +176,17 @@ def main(config: DumpConfig) -> int:
     print(stats.profiler.report())
 
     config.out_dir.mkdir(parents=True, exist_ok=True)
+    # Each artifact list is only appended when the subject is visible enough that
+    # tick (masks: all cameras; landmarks: all cameras; tri/fits: >=2 cameras +
+    # the fitter bootstrapped). On a clip too short to bootstrap, or one where the
+    # subject is never co-visible, these stay empty and the np.stack/fits[0] saves
+    # below would raise an opaque ValueError/IndexError after a full GPU run.
+    if not (collector.mask_hw and collector.lm_frames and collector.tri_frames and collector.fit_by_frame):
+        print(
+            f"incomplete capture — masks {len(collector.mask_frames)}f, landmarks {len(collector.lm_frames)}f, "
+            f"tri {len(collector.tri_frames)}f, fits {len(collector.fit_by_frame)}f; subject not visible long enough to dump. Skipping save."
+        )
+        return 1
     assert collector.mask_hw is not None, "no masks collected"
     masks_arr: ndarray = np.stack([np.stack(per_cam) for per_cam in collector.masks_packed])
     np.savez_compressed(

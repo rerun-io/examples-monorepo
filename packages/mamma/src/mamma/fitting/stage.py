@@ -103,6 +103,16 @@ class FittingStage:
                 metrics["floor_contacts"] = float((floor_contact > 0.25).sum().item())
         return TickFitOutput(fits=fits, triangulated=triangulated, metrics=metrics)
 
+    def drain_head(self) -> list[TickFitOutput]:
+        """Flush the bootstrap-window head frames of every fitter (frames solved
+        before the first causal emit point). Mirror of :meth:`drain` for the
+        clip head — one output per frame, oldest first."""
+        outputs: list[TickFitOutput] = []
+        for obj_id, fitter in self._fitters.items():
+            for result in fitter.drain_head():
+                outputs.append(TickFitOutput(fits={obj_id: result}, triangulated={}))
+        return outputs
+
     def drain(self) -> list[TickFitOutput]:
         """Flush fixed-lag tails of every fitter at end of stream (one output per frame)."""
         outputs: list[TickFitOutput] = []

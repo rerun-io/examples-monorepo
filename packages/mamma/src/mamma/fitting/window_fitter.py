@@ -213,6 +213,7 @@ class SlidingWindowFitter:
         self._graph: torch.cuda.CUDAGraph | None = None
         self._static: dict[str, torch.Tensor | list[torch.Tensor]] = {}
         self._last_emit: FitResult | None = None
+        self._head_fits: list[FitResult] = []
         self._valid_counts: list[float] = []
         self._rest_joints: Float32[ndarray, "55 3"] | None = None
 
@@ -295,6 +296,14 @@ class SlidingWindowFitter:
             else:
                 self._optimize(self.config.bootstrap_iters, optimize_betas=True)
             self._bootstrapped = True
+            # Head backfill: the bootstrap solves the WHOLE first window, but
+            # push() only emits window[-1-emit_lag]; the frames before that
+            # point (window[0 .. head_count-1]) slide off the front before the
+            # emit pointer reaches them, so they'd never be logged — the start
+            # of the clip would show a cloud with no mesh. Capture them now
+            # (mirror of drain() at the tail) for the consumer to flush.
+            head_count: int = max(0, len(self._window) - 1 - self.config.emit_lag)
+            self._head_fits = [self._emit(i) for i in range(head_count)]
         elif optimize:
             if self.config.use_cuda_graph:
                 self._optimize_graphed()
@@ -523,6 +532,15 @@ class SlidingWindowFitter:
                 f.global_orient = global_orient[i].detach()
                 f.body_pose = body_pose[i].detach()
                 f.trans = trans[i].detach()
+
+    def drain_head(self) -> list[FitResult]:
+        """Bootstrap-window frames that precede the first causal emit point
+        (oldest first). Captured once at bootstrap (see ``push``); never emitted
+        in the steady state because they leave the window before the emit
+        pointer reaches them. Mirror of :meth:`drain` for the clip head."""
+        head: list[FitResult] = self._head_fits
+        self._head_fits = []
+        return head
 
     def drain(self) -> list[FitResult]:
         """Emit the frames still inside the lag at end of stream (newest last)."""
