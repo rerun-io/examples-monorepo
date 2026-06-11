@@ -69,14 +69,15 @@ class TrackerConfig:
     suddenly (a single-tick drop well below the rolling-median area) — bridges
     1-2 tick identity flips onto distractors (e.g. a mask jumping onto a cone)
     that the empty-mask lost path cannot catch, and arms a re-prompt."""
-    transient_area_frac: float = 0.65
-    """Single-tick area as a fraction of the rolling-median healthy area below
-    which a non-empty mask is treated as a transient collapse and the previous
-    mask held (a >35% one-tick drop). Real motion changes projected area only
-    ~5%/tick even at the fastest jump apex (mask errors anti-correlate with
-    speed), so the 0.65..0.95 gap is pure safety margin; the threshold is set
-    to catch the single jump-apex undersegmentation glitch (f252 on
-    running_jumping, ~0.6x) that an offline bidirectional pass smooths over."""
+    transient_area_frac: float = 0.45
+    """Single-tick pixel area as a fraction of the rolling-median healthy area
+    below which a non-empty mask is treated as a CATASTROPHIC collapse and the
+    previous mask held. Tuned to catch identity flips onto small distractors
+    (a mask jumping onto a cone collapses to <0.3x area — the previous on-person
+    mask beats the garbage) WITHOUT firing on moderate fast-motion
+    undersegmentation (~0.57x, e.g. f252 jump apex): there the previous mask is
+    spatially stale and holding it would HURT (the person moved a body-width in
+    one tick), so the native undersegmented mask is kept."""
     memory_window_size: int = 7
     """Sliding window of non-conditional SAM2 memories kept per object."""
     track_stride: int = 1
@@ -258,17 +259,21 @@ class MultiViewTracker:
         cam_idx: int,
         obj_id: int,
         mask: Bool[torch.Tensor, "h w"],
-        stat_row: Float32[ndarray, "6"],
+        stat_row: Float32[ndarray, "7"],
     ) -> TrackedObject:
         """Finalize one object's track: bookkeeping + transient-collapse hold.
 
-        ``stat_row`` is ``[area_px, x_min, y_min, x_max, y_max, pred_iou]`` from
-        the GPU stats (already host-copied). Runs no CUDA sync. On a sudden
+        ``stat_row`` is ``[bbox_h_rows, x_min, y_min, x_max, y_max, pred_iou,
+        area_px]`` from the GPU stats (already host-copied). Runs no CUDA sync.
+        The collapse test uses the true pixel area (index 6), not the bbox row
+        extent (index 0) — an undersegmented mask keeps its vertical extent
+        while losing area, so only the pixel count catches it. On a sudden
         single-tick area collapse it returns the previous tick's mask/bbox and
         arms a re-prompt; otherwise it updates the rolling-area history and the
         lost-tick counter exactly as before.
         """
-        area: float = float(stat_row[0])
+        nonempty: bool = float(stat_row[0]) > 0.0
+        area_px: float = float(stat_row[6])
         score: float = float(stat_row[5])
         hist: list[float] = self._area_hist[cam_idx].setdefault(obj_id, [])
         median_area: float = float(np.median(hist)) if hist else 0.0
@@ -277,9 +282,9 @@ class MultiViewTracker:
         )
         collapsed: bool = (
             self.config.transient_hold
-            and area > 0.0
+            and nonempty
             and median_area > 0.0
-            and area < self.config.transient_area_frac * median_area
+            and area_px < self.config.transient_area_frac * median_area
             and self._held_ticks[cam_idx].get(obj_id, 0) < LOST_TICKS_BEFORE_REPROMPT
             and prev is not None
             and prev.bbox_xyxy is not None
@@ -293,10 +298,10 @@ class MultiViewTracker:
             return TrackedObject(obj_id=obj_id, mask=prev.mask, bbox_xyxy=prev.bbox_xyxy, score=score)
         self._held_ticks[cam_idx][obj_id] = 0
         bbox: Float32[ndarray, "4"] | None = None
-        if area > 0.0:
+        if nonempty:
             bbox = stat_row[1:5].astype(np.float32)
             self._lost_ticks[cam_idx][obj_id] = 0
-            hist.append(area)
+            hist.append(area_px)
             if len(hist) > 7:
                 hist.pop(0)
         else:
@@ -321,8 +326,9 @@ class MultiViewTracker:
             ],
             dim=1,
         ).float()
-        stats = torch.cat([stats, batched.ious[:, 0:1].float()], dim=1)
-        all_stats: Float32[ndarray, "c 6"] = stats.cpu().numpy()
+        area_px: torch.Tensor = masks.reshape(masks.shape[0], -1).sum(dim=1, keepdim=True).float()
+        stats = torch.cat([stats, batched.ious[:, 0:1].float(), area_px], dim=1)
+        all_stats: Float32[ndarray, "c 7"] = stats.cpu().numpy()
         for cam_idx in range(len(frames)):
             results.append({0: self._resolve_track(cam_idx, 0, masks[cam_idx], all_stats[cam_idx])})
         return results
@@ -401,12 +407,12 @@ class MultiViewTracker:
                         (h - 1) - rows.flip(0).argmax(),  # y_max
                     ]
                 ).float()
-                stats = torch.cat([stats, result.ious[0, 0:1].float()])
+                stats = torch.cat([stats, result.ious[0, 0:1].float(), mask.sum().reshape(1).float()])
                 entries.append((obj_id, mask))
                 stats_rows.append(stats)
             tracks: CameraTracks = {}
             if entries:
-                all_stats: Float32[ndarray, "k 6"] = torch.stack(stats_rows).cpu().numpy()
+                all_stats: Float32[ndarray, "k 7"] = torch.stack(stats_rows).cpu().numpy()
                 for (obj_id, mask), row in zip(entries, all_stats, strict=True):
                     tracks[obj_id] = self._resolve_track(cam_idx, obj_id, mask, row)
             results.append(tracks)
