@@ -1,5 +1,12 @@
 """SMPL-X model construction + per-part forward, mirroring the golden run setup
-(neutral body for all subjects, 16 betas, flat hand mean, no PCA, no v_template).
+(neutral body for all subjects, 16 betas, MANO-mean hands, no PCA, no v_template).
+
+The golden DAG builds its NEUTRAL model with ``flat_hand_mean=False``
+(``optimization/utils_smplx.py`` default ``flat_hand=False``; only the unused
+male/female models are ``True``). A zero hand pose therefore rests at the
+natural MANO mean, not splayed-flat — we never fit fingers, so this rest pose
+IS the hand output, and matching the golden's convention removes a systematic
+hand-region vertex error.
 """
 
 from __future__ import annotations
@@ -61,7 +68,7 @@ def build_smplx_neutral(model_folder: Path, device: str = "cuda"):
         gender="neutral",
         ext="npz",
         num_betas=NUM_BETAS,
-        flat_hand_mean=True,
+        flat_hand_mean=False,  # MANO-mean rest hands, matching the golden neutral model
         use_pca=False,
     ).to(device)
 
