@@ -28,13 +28,13 @@ from __future__ import annotations
 
 import shutil
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
 import torch
 import tyro
-from jaxtyping import Float32
+from jaxtyping import Float32, Float64
 from numpy import ndarray
 
 from mamma.calibration.keypoint_bundle_adjust import BundleAdjustConfig, BundleAdjustResult, bundle_adjust_cameras
@@ -85,6 +85,14 @@ class RefineConfig:
     """Drift penalty on fractional focal change from the VGGT/MoGe init."""
     n_iters: int = 40
     """LBFGS iteration budget."""
+    reground: bool = True
+    """Re-derive gravity + ground (z=0) from MammaNet floor-contact landmarks
+    triangulated with the BA-refined rig. More reliable than stage A's scene-cloud
+    RANSAC (the feet on the floor are a direct ground signal); guarded so it only
+    overrides when it finds enough contacts and yields plausible camera heights."""
+    floor_contact_thresh: float = 0.5
+    """Min mean (over cameras) floor-contact probability to treat a triangulated
+    landmark as a ground point."""
     device: str = "cuda"
     """Compute device."""
     seed: int = 0
@@ -126,6 +134,104 @@ def collect_correspondences(
     kps2d: Float32[ndarray, "c s 3"] = np.concatenate(xy_samples, axis=0).transpose(1, 0, 2)
     vis_all: Float32[ndarray, "c s"] = np.concatenate(vis_samples, axis=0).transpose(1, 0)
     return kps2d, vis_all
+
+
+def _rot_up_to_z(up: Float64[ndarray, "3"]) -> Float64[ndarray, "3 3"]:
+    """Rotation mapping unit vector ``up`` to +Z (Rodrigues; handles (anti)parallel)."""
+    up = up / (np.linalg.norm(up) + 1e-12)
+    z: Float64[ndarray, "3"] = np.array([0.0, 0.0, 1.0])
+    v: Float64[ndarray, "3"] = np.cross(up, z)
+    c: float = float(np.dot(up, z))
+    if c < -0.999999:
+        return np.diag([1.0, -1.0, -1.0])  # 180deg flip about X
+    k: Float64[ndarray, "3 3"] = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+    return np.eye(3) + k + (k @ k) * (1.0 / (1.0 + c))
+
+
+def reground_from_floor_contact(
+    landmarks_per_tick: list[list[CameraLandmarks] | None],
+    k_engine: Float32[torch.Tensor, "c 3 3"],
+    w2c_refined: Float32[torch.Tensor, "c 4 4"],
+    thresh: float,
+    device: str,
+) -> tuple[Float64[ndarray, "3 3"], Float64[ndarray, "3"]] | None:
+    """Fit gravity + ground from triangulated floor-contact landmarks (RANSAC).
+
+    Returns ``(R_grav, shift)`` mapping the BA world to a Z-up, ground-at-z=0 world
+    (``x_new = R_grav @ x_old + shift``), or ``None`` if there is no reliable floor
+    signal. The BA cameras are then re-expressed in that world.
+    """
+    n_cams: int = int(k_engine.shape[0])
+    pts: list[Float64[ndarray, "n 3"]] = []
+    for tick in landmarks_per_tick:
+        if tick is None:
+            continue
+        obj_ids: set[int] = set().union(*[set(cam.keys()) for cam in tick]) if tick else set()
+        for oid in sorted(obj_ids):
+            present: list[int] = [c for c in range(n_cams) if c < len(tick) and oid in tick[c]]
+            if len(present) < 2:
+                continue
+            j2d: list[Float32[torch.Tensor, "j 3"]] = []
+            vis: list[Float32[torch.Tensor, "j"]] = []
+            fc: list[Float32[torch.Tensor, "j"]] = []
+            for c in range(n_cams):
+                if oid in tick[c]:
+                    lr = tick[c][oid]
+                    j2d.append(lr.joints2d.to(device))
+                    vis.append(lr.visibility.to(device))
+                    fc.append(lr.floor_contact.to(device))
+                else:
+                    j2d.append(torch.zeros_like(tick[present[0]][oid].joints2d, device=device))
+                    vis.append(torch.zeros_like(tick[present[0]][oid].visibility, device=device))
+                    fc.append(torch.zeros_like(tick[present[0]][oid].floor_contact, device=device))
+            pts3d, valid = triangulate_points(
+                j2d, [k_engine[c] for c in range(n_cams)], [w2c_refined[c] for c in range(n_cams)], vis, vis_thresh=0.3
+            )
+            fc_mean: Float32[torch.Tensor, "j"] = torch.stack(fc, 0).mean(0)
+            keep = valid & (fc_mean > thresh)
+            if int(keep.sum()) > 0:
+                pts.append(pts3d[keep].detach().cpu().numpy().astype(np.float64))
+    if not pts:
+        return None
+    cloud: Float64[ndarray, "n 3"] = np.concatenate(pts, axis=0)
+    cloud = cloud[np.isfinite(cloud).all(1)]
+    if cloud.shape[0] < 50:
+        return None
+
+    # RANSAC plane fit (numpy): sample 3 points, score inliers within 5cm.
+    rng = np.random.default_rng(0)
+    best_inl: ndarray = np.array([], dtype=int)
+    for _ in range(400):
+        idx = rng.choice(cloud.shape[0], 3, replace=False)
+        p0, p1, p2 = cloud[idx]
+        nrm = np.cross(p1 - p0, p2 - p0)
+        ln = np.linalg.norm(nrm)
+        if ln < 1e-9:
+            continue
+        nrm = nrm / ln
+        dist = np.abs((cloud - p0) @ nrm)
+        inl = np.where(dist < 0.05)[0]
+        if inl.size > best_inl.size:
+            best_inl = inl
+    if best_inl.size < 50:
+        return None
+    # refit normal on inliers (smallest-eigvec of centered covariance).
+    inl_pts = cloud[best_inl]
+    centroid = inl_pts.mean(0)
+    _, _, Vt = np.linalg.svd(inl_pts - centroid)
+    normal: Float64[ndarray, "3"] = Vt[-1] / (np.linalg.norm(Vt[-1]) + 1e-12)
+    cam_centers: Float64[ndarray, "c 3"] = np.array(
+        [(-w2c_refined[c, :3, :3].T @ w2c_refined[c, :3, 3]).cpu().numpy() for c in range(n_cams)], dtype=np.float64
+    )
+    up: Float64[ndarray, "3"] = normal if float(np.dot(normal, cam_centers.mean(0) - centroid)) > 0 else -normal
+    r_grav: Float64[ndarray, "3 3"] = _rot_up_to_z(up)
+    shift: Float64[ndarray, "3"] = np.array([0.0, 0.0, -float((r_grav @ centroid)[2])])
+    cam_h: Float64[ndarray, "c"] = (r_grav @ cam_centers.T).T[:, 2] + shift[2]
+    if not (np.all(cam_h > 0.2) and np.all(cam_h < 5.0)):
+        print(f"  reground: implausible camera heights {np.round(cam_h, 2)} — keeping stage-A ground")
+        return None
+    print(f"  reground: {best_inl.size}/{cloud.shape[0]} floor inliers, cam heights (m)={np.round(cam_h, 2)}")
+    return r_grav, shift
 
 
 def main(config: RefineConfig) -> int:
@@ -231,6 +337,26 @@ def main(config: RefineConfig) -> int:
         f"{result.rmse_px_after:.2f}px over {len(result.loss_history)} LBFGS steps"
     )
     _report_camera_deltas(scaled, result, n_cams)
+
+    # --- Stage B.4b: re-derive gravity + ground from floor-contact landmarks. ---
+    # Stage A's scene-cloud RANSAC occasionally locks onto a non-floor plane (a
+    # mis-oriented rig that leaves the body floating/sideways). The triangulated
+    # floor-contact landmarks are a direct ground signal; re-orienting to them
+    # fixes those cases and is a no-op-or-better on the rest (guarded).
+    if config.reground:
+        grav = reground_from_floor_contact(
+            collector.landmarks, k_engine, result.world_to_cam_per_cam, config.floor_contact_thresh, config.device
+        )
+        if grav is not None:
+            r_grav, shift = grav
+            rg: Float32[torch.Tensor, "3 3"] = torch.tensor(r_grav, dtype=torch.float32, device=config.device)
+            sh: Float32[torch.Tensor, "3"] = torch.tensor(shift, dtype=torch.float32, device=config.device)
+            w2c_rg: Float32[torch.Tensor, "c 4 4"] = result.world_to_cam_per_cam.clone()
+            for c in range(n_cams):
+                r_cw_new: Float32[torch.Tensor, "3 3"] = result.world_to_cam_per_cam[c, :3, :3] @ rg.T
+                w2c_rg[c, :3, :3] = r_cw_new
+                w2c_rg[c, :3, 3] = result.world_to_cam_per_cam[c, :3, 3] - r_cw_new @ sh
+            result = replace(result, world_to_cam_per_cam=w2c_rg)
 
     # --- Stage B.5: write refined meta/ (native K + refined extrinsics). ---
     out_meta: Path = config.out_meta_dir if config.out_meta_dir is not None else (config.data_dir / "meta")
