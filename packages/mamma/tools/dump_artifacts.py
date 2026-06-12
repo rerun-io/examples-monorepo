@@ -119,6 +119,10 @@ class DumpConfig:
     """Frames decoded per camera per chunk."""
     device: str = "cuda"
     """Compute device."""
+    num_subjects: int = 1
+    """Expected number of subjects; passed to the preset's tracker for multi-person captures."""
+    max_frames: int | None = None
+    """Cap the run to the first N frames (preview); default = whole clip."""
 
 
 def main(config: DumpConfig) -> int:
@@ -128,9 +132,15 @@ def main(config: DumpConfig) -> int:
     resize_hw: tuple[int, int] = config.resize_hw
     hires_crops: bool = config.hires_crops
     if config.preset is not None:
-        preset = get_preset(config.preset)
+        preset = get_preset(config.preset, expected_subjects=config.num_subjects)
         tracker_cfg, fitter_cfg, resize_hw, hires_crops = preset.tracker, preset.fitter, preset.resize_hw, preset.hires_crops
         print(f"preset={config.preset}: tracker={tracker_cfg.sam2_config} redetect={tracker_cfg.redetect_interval} tick_iters={fitter_cfg.tick_iters}")
+    if config.num_subjects > 1 and fitter_cfg.use_cuda_graph:
+        # Each person gets its own SlidingWindowFitter; their bootstrap CUDA-graph
+        # captures (torch.cuda.graph) deadlock when multiple fitters capture on the
+        # shared fit worker. Fall back to eager fitting for multi-subject runs.
+        fitter_cfg.use_cuda_graph = False
+        print("multi-subject: CUDA-graph fit disabled (capture deadlocks with concurrent per-person fitters); using eager fitting.")
     collector = _DumpCollector(n_cams=len(sequence.camera_names), obj_id=config.obj_id)
     pipeline: StreamingPipeline = build_streaming_pipeline(
         sequence,
@@ -146,7 +156,7 @@ def main(config: DumpConfig) -> int:
         proxy_dir=config.proxy_dir,
         seg_stride=config.seg_stride,
     )
-    stats = pipeline.run(chunk_size=config.chunk_size, timing_doc=True)
+    stats = pipeline.run(chunk_size=config.chunk_size, max_frames=config.max_frames, timing_doc=True)
     if pipeline.fitting is not None:
         faces = pipeline.fitting.faces
         # Head backfill: the bootstrap solves the first window but push() only
