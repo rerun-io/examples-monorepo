@@ -123,6 +123,10 @@ class DumpConfig:
     """Expected number of subjects; passed to the preset's tracker for multi-person captures."""
     max_frames: int | None = None
     """Cap the run to the first N frames (preview); default = whole clip."""
+    redetect_interval: int | None = None
+    """Override the tracker's re-detection cadence (frames). Set very large to
+    effectively disable re-detection — useful for multi-subject captures, where
+    the SAM2 re-prompt path has known multi-object batching bugs."""
 
 
 def main(config: DumpConfig) -> int:
@@ -135,6 +139,9 @@ def main(config: DumpConfig) -> int:
         preset = get_preset(config.preset, expected_subjects=config.num_subjects)
         tracker_cfg, fitter_cfg, resize_hw, hires_crops = preset.tracker, preset.fitter, preset.resize_hw, preset.hires_crops
         print(f"preset={config.preset}: tracker={tracker_cfg.sam2_config} redetect={tracker_cfg.redetect_interval} tick_iters={fitter_cfg.tick_iters}")
+    if config.redetect_interval is not None:
+        tracker_cfg.redetect_interval = config.redetect_interval
+        print(f"redetect_interval overridden -> {config.redetect_interval}")
     if config.num_subjects > 1 and fitter_cfg.use_cuda_graph:
         # Each person gets its own SlidingWindowFitter; their bootstrap CUDA-graph
         # captures (torch.cuda.graph) deadlock when multiple fitters capture on the

@@ -55,8 +55,27 @@ class SAM2Result:
             obj_scores_logits=self.obj_score_logits.clone(),
         )
 
+    def select_best(self) -> SAM2Result:
+        """Reduce N mask hypotheses to the single best (max-IoU) one (N -> 1)."""
+        best = torch.argmax(self.ious, dim=1)  # (B,)
+        b = torch.arange(self.masks_logits.shape[0], device=self.device)
+        return SAM2Result(
+            masks_logits=self.masks_logits[b, best].unsqueeze(1),
+            ious=self.ious[b, best].unsqueeze(1),
+            obj_ptrs=self.obj_ptrs[b, best].unsqueeze(1),
+            obj_scores_logits=self.obj_score_logits[b, best].unsqueeze(1),
+        )
+
     @staticmethod
     def cat(results: list[SAM2Result]) -> SAM2Result:
+        # Objects re-prompted this frame can carry a different number of mask
+        # hypotheses (N) than propagated objects (the prompt path honours the
+        # caller's multimask_output, the memory path forces multimask) — they
+        # only collide in a multi-object batch (single-object tracks never hit
+        # this). A per-object batch can only concatenate with a common N, so if
+        # the N values differ, reduce every result to its best mask first.
+        if len({r.masks_logits.shape[1] for r in results}) > 1:
+            results = [r.select_best() for r in results]
         return SAM2Result(
             masks_logits=torch.cat([r.masks_logits for r in results], dim=0),
             ious=torch.cat([r.ious for r in results], dim=0),
