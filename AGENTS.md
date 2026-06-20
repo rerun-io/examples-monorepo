@@ -4,7 +4,7 @@ This file provides guidance to coding agents when working with code in this repo
 
 ## What This Is
 
-A **Pixi workspace monorepo** of computer vision projects. Each package lives in `packages/<name>/` with its own Python module, CLI tools, and tests. All Pixi configuration (deps, tasks, environments) lives in the root `pixi.toml` — per-package `pyproject.toml` files only have standard Python packaging metadata.
+A **Pixi workspace monorepo** of computer vision projects. Each package lives in `packages/<name>/` with its own Python module, CLI tools, and tests. All Pixi configuration (deps, tasks, environments) lives in the root `pixi.toml`; per-package `pyproject.toml` files hold standard Python packaging metadata plus per-package tooling config such as `[tool.ruff]` and `[tool.vulture]`.
 
 ## Environments
 

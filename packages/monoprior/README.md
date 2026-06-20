@@ -26,13 +26,13 @@ pixi run -e monoprior multiview-calibration    # Multi-view calibration
 pixi run -e monoprior video-depth              # Video depth estimation
 pixi run -e monoprior polycam-inference        # Polycam dataset inference
 pixi run -e monoprior promptda-polycam         # PromptDA depth completion
-pixi run -e monoprior compare-normals          # Compare surface normal models
+pixi run -e monoprior surface-normals          # Compare surface normal models
 ```
 
 ### Gradio web UIs
 ```bash
 pixi run -e monoprior depth-compare-app        # Depth comparison UI
-pixi run -e monoprior video-depth-app          # Video depth UI
+pixi run -e monoprior metric-depth-app         # Metric depth UI
 pixi run -e monoprior calibration-app          # Multi-view calibration UI
 ```
 

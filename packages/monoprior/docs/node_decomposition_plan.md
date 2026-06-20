@@ -42,7 +42,7 @@ Each node's API matches the **network's actual I/O contract**. Single-image netw
 
 The network **genuinely takes a list** — VGGT processes all views jointly to produce consistent multi-view geometry.
 
-An existing `VGGTInferenceConfig` already lives in `apis/multiview_inference.py` (line 436) with `keep_top_percent`, `preprocessing_mode`, `image_dir`, `videos_dir`, `rr_config`. There's also `MultiViewCalibratorConfig` in `apis/multiview_calibration.py` with overlapping fields. Rather than creating yet another config, refactor: extract the VGGT-specific fields into a standalone config that both inference APIs import.
+An existing `VGGTInferenceConfig` already lives in `apis/multiview_inference.py` (line 440) with `keep_top_percent`, `preprocessing_mode`, `image_dir`, `videos_dir`, `rr_config`. There's also `MultiViewCalibratorConfig` in `apis/multiview_calibration.py` with overlapping fields. Rather than creating yet another config, refactor: extract the VGGT-specific fields into a standalone config that both inference APIs import.
 
 ```python
 # Refactored from VGGTInferenceConfig — extract the network-specific fields

@@ -127,7 +127,7 @@ python = "3.12.*"
 ruff = "*"
 pytest = ">=8.0.0,<9"
 beartype = ">=0.22.9"
-pyrefly = ">=1.0.0"
+pyrefly = ">=1.1.0"
 hypothesis = "*"
 vulture = "*"
 
@@ -557,17 +557,12 @@ description = "Launch the EgoExo Forge Gradio viewer"
 [feature.egoexo-forge-demo.tasks.egoexo-forge-batch-convert]
 cmd = "python tools/batch_convert.py"
 cwd = "packages/egoexo-forge"
-description = "Convert supported ego/exo datasets into Rerun .rrd files"
+description = "Deprecated no-op: ego/exo → .rrd conversion moved to simplecv (simplecv.apis.batch_raw_to_rrd)"
 
 [feature.egoexo-forge-demo.tasks.egoexo-forge-catalog]
 cmd = "python tools/catalog.py"
 cwd = "packages/egoexo-forge"
 description = "Mount HF-hosted egoexo-forge RRDs (5 per source) as a Rerun catalog server"
-
-[feature.egoexo-forge-demo.tasks.egoexo-forge-sam3d-parquet-to-rrd]
-cmd = "python tools/sam3d_body_parquet_to_rrd.py"
-cwd = "packages/egoexo-forge"
-description = "Convert one facebook/sam-3d-body-dataset parquet shard into an Exo/Ego-schema Rerun .rrd file"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # mv-api
@@ -921,6 +916,12 @@ libcublas = "*"
 libcusolver = "*"
 libstdcxx-ng = ">=14.2"
 pyarrow = ">=20.0.0,<21"
+# robocap tracks with cuVSLAM (its own cu13 wheel) and never executes torch, but the
+# shared `simplecv` lib (from [feature.common]) imports torch at module load in
+# simplecv/video_io.py. robocap uses the cv2-based VideoReader, so CPU torch is enough
+# to satisfy the import — pytorch-gpu would conflict with robocap's cuda-version 13
+# (the shared `cuda` feature is cuda 12.9, linux-64 only) and robocap also targets aarch64.
+pytorch-cpu = ">=2.8.0"
 
 [feature.robocap.pypi-dependencies]
 robocap-slam = { path = "packages/robocap-slam", editable = true }
@@ -1202,6 +1203,14 @@ eigen = ">=3.4.0,<4"
 ffmpeg = ">=7.1.0"
 open3d = ">=0.19.0,<0.20"
 faiss = "*"
+# Pin MKL below 2026: mkl 2026.0.0 bumped its soname from libmkl_intel_lp64.so.2
+# to .so.3, but conda-forge's faiss 1.10.0 mkl builds (cpu_mkl_*_100,
+# cuda129_mkl_*_300, built 2026-03-19) link against .so.2 and have an unpinned
+# `mkl` run dep. Without this cap the solver pulls pytorch 2.10.0 build _304+
+# (which requires mkl >=2026) and mkl 2026, leaving faiss unable to find
+# libmkl_intel_lp64.so.2 → ImportError. Capping at <2026 keeps mkl 2025.3.x
+# (.so.2) and selects pytorch 2.10.0 build _303 (mkl >=2025.3,<2026).
+mkl = ">=2025.3.0,<2026"
 scikit-learn = "*"
 matplotlib = "*"
 trimesh = "*"

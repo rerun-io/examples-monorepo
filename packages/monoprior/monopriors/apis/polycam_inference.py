@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import rerun as rr
-from jaxtyping import Float32, UInt8, UInt16
+from jaxtyping import Float, Float32, UInt8, UInt16
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.data.polycam import PolycamData, PolycamDataset, load_polycam_data
 from simplecv.ops.tsdf_depth_fuser import Open3DFuser
@@ -102,7 +102,8 @@ def polycam_inference(config: PolycamConfig) -> None:
         rr.set_time("timestep", sequence=idx)
         rgb_hw3: UInt8[np.ndarray, "h w 3"] = polycam_data.rgb_hw3
         pinhole_params: PinholeParameters = polycam_data.pinhole_params
-        K_33_raw: Float32[np.ndarray, "3 3"] | None = pinhole_params.intrinsics.k_matrix
+        # simplecv's Intrinsics stores k_matrix as float64; cast to float32 for the predictor
+        K_33_raw: Float[np.ndarray, "3 3"] | None = pinhole_params.intrinsics.k_matrix
         if K_33_raw is None:
             raise ValueError("Polycam frame is missing camera intrinsics.")
         K_33: Float32[np.ndarray, "3 3"] = K_33_raw.astype(np.float32)

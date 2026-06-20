@@ -269,7 +269,8 @@ def mv_pred_to_pointcloud(
     # Gather intrinsics matrices so each depth map can be unprojected using its matching camera model
     K_list: list[Float32[ndarray, "3 3"]] = []
     for mv_pred in mv_pred_list:
-        K_33: Float32[ndarray, "3 3"] | None = mv_pred.pinhole_param.intrinsics.k_matrix
+        # simplecv's Intrinsics stores k_matrix as float64; cast to float32 for the pipeline
+        K_33: Float[ndarray, "3 3"] | None = mv_pred.pinhole_param.intrinsics.k_matrix
         if K_33 is None:
             raise ValueError("VGGT prediction must include camera intrinsics.")
         K_list.append(K_33.astype(np.float32))
@@ -444,12 +445,12 @@ class MultiViewCalibrator:
 
         # Build initial point cloud from VGGT depths
         pointcloud: Float32[ndarray, "num_points 3"] = mv_pred_to_pointcloud(mv_pred_list)
-        rgb_stack: UInt8[ndarray, "num_points 3"] = np.concatenate(
-            [rearrange(mv_pred.rgb_image, "h w c -> (h w) c") for mv_pred in mv_pred_list]
-        )
-        pc_conf_mask: Bool[ndarray, "num_points"] = np.concatenate(
-            [rearrange(depth_conf, "h w -> (h w)") for depth_conf in depth_confidences]
-        ).astype(bool)
+        rgb_stack: UInt8[ndarray, "num_points 3"] = np.concatenate([
+            rearrange(mv_pred.rgb_image, "h w c -> (h w) c") for mv_pred in mv_pred_list
+        ])
+        pc_conf_mask: Bool[ndarray, "num_points"] = np.concatenate([
+            rearrange(depth_conf, "h w -> (h w)") for depth_conf in depth_confidences
+        ]).astype(bool)
         filtered_points: Float32[ndarray, "filtered_points 3"] = pointcloud[pc_conf_mask]
         filtered_colors: UInt8[ndarray, "filtered_points 3"] = rgb_stack[pc_conf_mask]
         pcd: o3d.geometry.PointCloud = o3d.geometry.PointCloud()
@@ -465,10 +466,11 @@ class MultiViewCalibrator:
                 depth_conf: UInt8[ndarray, "H W"] = depth_confidences[idx]
                 filtered_depth_map: Float32[ndarray, "H W"] = np.where(depth_conf > 0, mv_pred.depth_map, 0)
 
-                # Run MoGe relative depth on this view
-                K_33: Float32[ndarray, "3 3"] | None = mv_pred.pinhole_param.intrinsics.k_matrix
-                if K_33 is None:
+                # Run MoGe relative depth on this view (moge expects float32; simplecv k_matrix is float64)
+                K_33_raw: Float[ndarray, "3 3"] | None = mv_pred.pinhole_param.intrinsics.k_matrix
+                if K_33_raw is None:
                     raise ValueError("MoGe depth refinement requires camera intrinsics.")
+                K_33: Float32[ndarray, "3 3"] = K_33_raw.astype(np.float32)
                 relative_pred: RelativeDepthPrediction = self.moge_predictor(rgb=mv_pred.rgb_image, K_33=K_33)
 
                 # Align MoGe depth to VGGT's coordinate frame using decomposed alignment node
@@ -498,14 +500,35 @@ class MultiViewCalibrator:
                 cam_log_path = self.parent_log_path / mv_pred.cam_name
                 pinhole_log_path = cam_log_path / "pinhole"
                 log_pinhole(mv_pred.pinhole_param, cam_log_path=cam_log_path, image_plane_distance=0.05, static=True)
+                # Log RAW images, NOT .compress(). The Rerun 0.33 native viewer
+                # locks up (needs a force-quit) when rendering encoded images.
+                # Root cause (traced through the Rerun source): `.compress()` turns
+                # the image into an `EncodedImage` (PIL JPEG, media_type image/jpeg).
+                # In 0.33 the viewer no longer uploads encoded images straight to a
+                # texture — `EncodedImageVisualizer` routes them through the VIDEO
+                # decode pipeline as `VideoCodec::ImageSequence` (re_view_spatial
+                # visualizers/video/encoded_image.rs -> execute_video_stream_like ->
+                # video_stream_cache + SyncImageDecoder + bounded re_quota_channel),
+                # and that pipeline deadlocks. Reliably reproduced (compressed = hang,
+                # raw = render, every trial) on BOTH Linux x86_64 and macOS arm64 with
+                # `rerun file.rrd --screenshot-to`. The deadlock needs multiple encoded
+                # images shown in a multi-view blueprint (a 3D view that includes them
+                # + per-camera 2D views — exactly create_final_view); a single image or
+                # a flat 2D grid does not reliably trigger it. Raw rr.Image and
+                # DepthImage (which skip the video pipeline) always render. Format-
+                # agnostic (PNG EncodedImage hangs too), not PIL-specific. Pre-0.32
+                # didn't route encoded images through the video pipeline, so this "did
+                # not used to happen". Only `--mv-calibrator-config.verbose` breaks
+                # because it is the calibrator's sole source of encoded images. Raw is
+                # larger on the wire but renders reliably.
                 rr.log(
                     f"{pinhole_log_path}/image",
-                    rr.Image(mv_pred.rgb_image, color_model=rr.ColorModel.RGB).compress(),
+                    rr.Image(mv_pred.rgb_image, color_model=rr.ColorModel.RGB),
                     static=True,
                 )
                 rr.log(
                     f"{pinhole_log_path}/confidence",
-                    rr.Image(depth_conf, color_model=rr.ColorModel.L).compress(),
+                    rr.Image(depth_conf, color_model=rr.ColorModel.L),
                     static=True,
                 )
                 rr.log(f"{pinhole_log_path}/filtered_depth", rr.DepthImage(filtered_depth_map, meter=1), static=True)

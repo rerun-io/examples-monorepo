@@ -8,7 +8,7 @@ This document explains the DPVO inference architecture: the patch-based visual o
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                         Caller (CLI or Gradio)                              │
 │                                                                             │
-│  CLI: inference_dpvo()                   Gradio: run_dpvo()                 │
+│  CLI: run_dpvo_pipeline()                Gradio: dpvo_streaming_fn()       │
 │  ┌───────────────────────────┐           ┌──────────────────────────────┐   │
 │  │ 1. Load config (yacs)     │           │ 1. Load model (module-level) │   │
 │  │ 2. Estimate calib (dust3r)│           │ 2. @rr.thread_local_stream   │   │
@@ -74,15 +74,15 @@ Input Video/Images
       clr:     uint8[M, 3]                     RGB at patch centers
     │
     ▼
-[Buffer Storage] (dpvo.py)
+[Buffer Storage] (patchgraph.py via self.pg; imap_/gmap_/fmap1_/fmap2_ on dpvo.py)
     Rolling buffers indexed by keyframe counter n:
-      tstamps_[n]              float64            timestamp
+      tstamps_[n]              int64              timestamp
       poses_[n, 7]             float32            SE3: [tx,ty,tz, qx,qy,qz,qw]
       patches_[n, M, 3, 3, 3]  float32            patch coords
       intrinsics_[n, 4]        float32            [fx,fy,cx,cy] / RES
       colors_[n, M, 3]         uint8              RGB
-      imap_[n%mem, M, DIM]     float16            descriptors
-      gmap_[n%mem, M, 128,3,3] float16            correlation templates
+      imap_[n%pmem, M, DIM]    float16            descriptors
+      gmap_[n%pmem, M, 128,3,3] float16           correlation templates
       fmap1_[1, n%mem, 128, H/4, W/4]   float16   pyramid level 1
       fmap2_[1, n%mem, 128, H/16,W/16]  float16   pyramid level 2
     │
@@ -130,8 +130,10 @@ Input Video/Images
     │
     ▼
 [Keyframe Management] (dpvo.py: keyframe())
-    Check motion between frames (i, i+4, i+6) via motionmag()
-    If motion < KEYFRAME_THRESH:
+    Bidirectional flow between frames n-keyframe_index-1 and n-keyframe_index+1
+    (candidate keyframe at n-keyframe_index; keyframe_index defaults to 4),
+    averaged over both directions via motionmag()
+    If mean motion < keyframe_thresh:
       - Store relative pose in delta dict for later interpolation
       - Remove all edges connecting to this frame
       - Shift buffers to keep contiguous indexing
@@ -209,23 +211,32 @@ The DPVO class operates in two phases controlled by `is_initialized: bool`:
 | DIM | 384 | Feature dimension |
 | P | 3 | Patch size (3×3) |
 | RES | 4 | Network stride |
-| mem | 32 | Rolling feature map buffer |
+| mem | 36 | Rolling feature-map buffer (fmap1_/fmap2_) |
+| pmem | 36 | Rolling patch-memory buffer (imap_/gmap_); overridden to cfg.max_edge_age when loop closure is enabled |
 
-### Buffers (DPVO class attributes)
-| Buffer | Shape | Dtype | Description |
-|--------|-------|-------|-------------|
-| `tstamps_` | `[N]` | float64 | Frame timestamps |
-| `poses_` | `[N, 7]` | float32 | SE3: [tx,ty,tz, qx,qy,qz,qw] |
-| `patches_` | `[N, M, 3, 3, 3]` | float32 | Patch coords (x, y, disparity) |
-| `intrinsics_` | `[N, 4]` | float32 | [fx,fy,cx,cy] / RES |
-| `points_` | `[N*M, 3]` | float32 | 3D point cloud |
-| `colors_` | `[N, M, 3]` | uint8 | RGB per patch |
-| `imap_` | `[mem, M, DIM]` | float16 | Descriptor features |
-| `gmap_` | `[mem, M, 128, 3, 3]` | float16 | Correlation templates |
-| `fmap1_` | `[1, mem, 128, H/4, W/4]` | float16 | Feature pyramid L1 |
-| `fmap2_` | `[1, mem, 128, H/16, W/16]` | float16 | Feature pyramid L2 |
+### Buffers
+
+The pose/patch/intrinsic/point/color buffers live on the `PatchGraph` instance
+(`self.pg`, defined in `patchgraph.py`). Only `imap_`/`gmap_`/`fmap1_`/`fmap2_`
+are direct `DPVO` (`dpvo.py`) attributes.
+
+| Buffer | Owner | Shape | Dtype | Description |
+|--------|-------|-------|-------|-------------|
+| `tstamps_` | PatchGraph | `[N]` | int64 | Frame timestamps |
+| `poses_` | PatchGraph | `[N, 7]` | float32 | SE3: [tx,ty,tz, qx,qy,qz,qw] |
+| `patches_` | PatchGraph | `[N, M, 3, 3, 3]` | float32 | Patch coords (x, y, disparity) |
+| `intrinsics_` | PatchGraph | `[N, 4]` | float32 | [fx,fy,cx,cy] / RES |
+| `points_` | PatchGraph | `[N*M, 3]` | float32 | 3D point cloud |
+| `colors_` | PatchGraph | `[N, M, 3]` | uint8 | RGB per patch |
+| `imap_` | DPVO | `[pmem, M, DIM]` | float16 | Descriptor features |
+| `gmap_` | DPVO | `[pmem, M, 128, 3, 3]` | float16 | Correlation templates |
+| `fmap1_` | DPVO | `[1, mem, 128, H/4, W/4]` | float16 | Feature pyramid L1 |
+| `fmap2_` | DPVO | `[1, mem, 128, H/16, W/16]` | float16 | Feature pyramid L2 |
 
 ### Edge Tracking
+
+The edge tensors below live on the `PatchGraph` instance (`self.pg`, `patchgraph.py`).
+
 | Tensor | Shape | Dtype | Description |
 |--------|-------|-------|-------------|
 | `ii` | `[E]` | int64 | Patch source frame |
@@ -281,7 +292,8 @@ VONet (net.py)
 
 | Module | Purpose |
 |--------|---------|
-| `dpvo.py` | Core SLAM class — buffers, state machine, keyframe management |
+| `dpvo.py` | Core SLAM class — state machine, keyframe management, feature buffers (imap_/gmap_/fmap1_/fmap2_) |
+| `patchgraph.py` | Patch/keyframe graph (`PatchGraph`) — pose/patch/intrinsic/color/point buffers, ii/jj/kk/net edges, delta interpolation dict |
 | `net.py` | VONet neural network (Patchifier + Update) |
 | `ba.py` | Bundle adjustment orchestration (calls fastba CUDA) |
 | `fastba/ba.py` | Schur complement solver (Python + CUDA via `_cuda_ba`) |
@@ -292,6 +304,10 @@ VONet (net.py)
 | `extractor.py` | BasicEncoder4 CNN backbone |
 | `stream.py` | Video/image frame reader (multiprocessing) |
 | `config.py` | YACS config defaults |
+| `utils.py` | Misc helpers (timers, image padding, etc.) |
+| `logger.py` | Logging utilities |
+| `plot_utils.py` | Trajectory/plot helpers |
+| `loop_closure/` | Loop-closure subpackage (long-term retrieval, optimization) |
 | `api/inference.py` | High-level inference pipeline + Rerun logging |
 | `gradio_ui/dpvo_ui.py` | Gradio web interface |
 | `data_readers/` | Dataset loaders (TartanAir, RGBD, generic) |

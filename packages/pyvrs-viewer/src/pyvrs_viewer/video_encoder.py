@@ -88,7 +88,8 @@ class VideoEncoder:
         self._frame_number: int = 0
         self._total_encode_sec: float = 0.0
         self._total_bytes: int = 0
-        self._neutral_uv: UInt8[np.ndarray, "h2 w2"] | None = None
+        self._neutral_uv_shape: tuple[int, int] | None = None
+        self._neutral_uv_bytes: bytes | None = None
 
     @property
     def encoder_name(self) -> str:
@@ -167,17 +168,21 @@ class VideoEncoder:
 
         # Construct YUV420P frame directly from planes
         frame: av.VideoFrame = av.VideoFrame(width=width, height=height, format="yuv420p")
+        # av's Buffer.update() takes bytes; the y/u/v planes carry fresh data each frame
+        # so a copy is unavoidable here.
         frame.planes[0].update(y_plane.tobytes())
         if u_plane is not None and v_plane is not None:
             frame.planes[1].update(u_plane.tobytes())
             frame.planes[2].update(v_plane.tobytes())
         else:
-            # Grayscale: fill U/V with 128 (neutral chroma), cached to avoid repeated allocation
-            if self._neutral_uv is None or self._neutral_uv.shape != (height // 2, width // 2):
-                self._neutral_uv = np.full((height // 2, width // 2), 128, dtype=np.uint8)
-            neutral_uv: UInt8[np.ndarray, "h2 w2"] = self._neutral_uv
-            frame.planes[1].update(neutral_uv.tobytes())
-            frame.planes[2].update(neutral_uv.tobytes())
+            # Grayscale: fill U/V with 128 (neutral chroma). The plane is constant, so cache the
+            # encoded bytes and reuse them across frames instead of reallocating + re-serializing.
+            uv_shape: tuple[int, int] = (height // 2, width // 2)
+            if self._neutral_uv_bytes is None or self._neutral_uv_shape != uv_shape:
+                self._neutral_uv_shape = uv_shape
+                self._neutral_uv_bytes = np.full(uv_shape, 128, dtype=np.uint8).tobytes()
+            frame.planes[1].update(self._neutral_uv_bytes)
+            frame.planes[2].update(self._neutral_uv_bytes)
 
         frame.pts = self._frame_number
         self._frame_number += 1

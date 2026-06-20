@@ -424,7 +424,8 @@ def mv_pred_to_pointcloud(
     ).astype(np.float32)
     K_list: list[Float32[ndarray, "3 3"]] = []
     for mv_pred in mv_pred_list:
-        K_33: Float32[ndarray, "3 3"] | None = mv_pred.pinhole_param.intrinsics.k_matrix
+        # simplecv's Intrinsics stores k_matrix as float64; cast to float32 for the pipeline
+        K_33: Float[ndarray, "3 3"] | None = mv_pred.pinhole_param.intrinsics.k_matrix
         if K_33 is None:
             raise ValueError("VGGT prediction must include camera intrinsics.")
         K_list.append(K_33.astype(np.float32))
@@ -570,10 +571,11 @@ def run_inference(config: VGGTInferenceConfig) -> None:
             image_plane_distance=0.1,
             static=True,
         )
-        K_33: Float32[ndarray, "3 3"] | None = mv_pred.pinhole_param.intrinsics.k_matrix
+        # simplecv's Intrinsics stores k_matrix as float64; cast to float32 for the stack
+        K_33: Float[ndarray, "3 3"] | None = mv_pred.pinhole_param.intrinsics.k_matrix
         if K_33 is None:
             raise ValueError("COLMAP export requires camera intrinsics.")
-        intri_stack_list.append(K_33)
+        intri_stack_list.append(K_33.astype(np.float32))
 
         rr.log(
             f"{pinhole_log_path}/image",

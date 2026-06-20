@@ -4,7 +4,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import rerun as rr
-from jaxtyping import Float32, UInt8, UInt16
+from jaxtyping import Float, UInt8, UInt16
 from numpy import ndarray
 from simplecv.camera_parameters import Intrinsics, rescale_intri
 from simplecv.data.polycam import (
@@ -117,7 +117,8 @@ def pda_polycam_inference(
         )
 
         # fuse the predicted depth and the ground truth depth
-        K_33: Float32[np.ndarray, "3 3"] | None = polycam_data.pinhole_params.intrinsics.k_matrix
+        # simplecv's Intrinsics stores k_matrix as float64; Open3DFuser.fuse_frames accepts Float
+        K_33: Float[np.ndarray, "3 3"] | None = polycam_data.pinhole_params.intrinsics.k_matrix
         if K_33 is None:
             raise ValueError("Polycam frame is missing camera intrinsics.")
         pred_fuser.fuse_frames(

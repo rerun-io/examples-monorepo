@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import open3d as o3d
-from jaxtyping import Float32, UInt8
+from jaxtyping import Float, Float32, UInt8
 from numpy import ndarray
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.ops.pc_utils import estimate_voxel_size
@@ -70,7 +70,8 @@ def run_fusion(
 
     K_list: list[Float32[ndarray, "3 3"]] = []
     for pinhole_param in pinhole_param_list:
-        K_33: Float32[ndarray, "3 3"] | None = pinhole_param.intrinsics.k_matrix
+        # simplecv's Intrinsics stores k_matrix as float64; cast to float32 for the pipeline
+        K_33: Float[ndarray, "3 3"] | None = pinhole_param.intrinsics.k_matrix
         if K_33 is None:
             raise ValueError("Pinhole intrinsics must include a calibration matrix for fusion.")
         K_list.append(K_33.astype(np.float32))

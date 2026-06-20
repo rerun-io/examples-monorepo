@@ -43,36 +43,6 @@ class PDAPolycamConfig:
     log_incremental_mesh: bool = True
 
 
-def _resize_uint8_hw3(image: UInt8[ndarray, "h w 3"], target_size: tuple[int, int]) -> UInt8[ndarray, "h2 w2 3"]:
-    """Resize an RGB uint8 image with an explicit dtype-preserving return type."""
-
-    resized = cv2.resize(image, target_size)
-    if resized is None:
-        raise ValueError("Failed to resize RGB image.")
-    resized_array: UInt8[ndarray, "h2 w2 3"] = np.asarray(resized, dtype=np.uint8)
-    return resized_array
-
-
-def _resize_uint8_hw(image: UInt8[ndarray, "h w"], target_size: tuple[int, int]) -> UInt8[ndarray, "h2 w2"]:
-    """Resize a single-channel uint8 image with an explicit dtype-preserving return type."""
-
-    resized = cv2.resize(image, target_size)
-    if resized is None:
-        raise ValueError("Failed to resize uint8 image.")
-    resized_array: UInt8[ndarray, "h2 w2"] = np.asarray(resized, dtype=np.uint8)
-    return resized_array
-
-
-def _resize_uint16_hw(image: UInt16[ndarray, "h w"], target_size: tuple[int, int]) -> UInt16[ndarray, "h2 w2"]:
-    """Resize a single-channel uint16 image with an explicit dtype-preserving return type."""
-
-    resized = cv2.resize(image, target_size)
-    if resized is None:
-        raise ValueError("Failed to resize uint16 image.")
-    resized_array: UInt16[ndarray, "h2 w2"] = np.asarray(resized, dtype=np.uint16)
-    return resized_array
-
-
 def log_polycam_data(
     parent_path: Path,
     polycam_data: PolycamData,
@@ -97,10 +67,10 @@ def log_polycam_data(
     target_height: int = rgb.shape[0] // rescale_factor
     target_width: int = rgb.shape[1] // rescale_factor
     target_size: tuple[int, int] = (target_width, target_height)
-    rgb_resized: UInt8[ndarray, "h2 w2 3"] = _resize_uint8_hw3(rgb, target_size)
-    depth_resized: UInt16[ndarray, "h2 w2"] = _resize_uint16_hw(depth, target_size)
-    confidence_resized: UInt8[ndarray, "h2 w2"] = _resize_uint8_hw(confidence, target_size)
-    depth_pred_resized: UInt16[ndarray, "h2 w2"] = _resize_uint16_hw(depth_pred, target_size)
+    rgb_resized: UInt8[ndarray, "h2 w2 3"] = np.asarray(cv2.resize(rgb, target_size), dtype=np.uint8)
+    depth_resized: UInt16[ndarray, "h2 w2"] = np.asarray(cv2.resize(depth, target_size), dtype=np.uint16)
+    confidence_resized: UInt8[ndarray, "h2 w2"] = np.asarray(cv2.resize(confidence, target_size), dtype=np.uint8)
+    depth_pred_resized: UInt16[ndarray, "h2 w2"] = np.asarray(cv2.resize(depth_pred, target_size), dtype=np.uint16)
 
     # Rerun's pinhole view expects intrinsics that match the logged resolution.
     rescaled_intrinsics: Intrinsics = rescale_intri(

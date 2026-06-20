@@ -35,6 +35,7 @@ from monopriors.apis.multiview_geometry import (
     MultiviewGeometryResult,
     run_multiview_geometry,
 )
+from monopriors.gradio_ui._vggt_common import parse_preprocessing_mode
 from monopriors.models.multiview.vggt_model import VGGTPredictor
 
 EXAMPLE_DATA_DIR: Final[Path] = Path(__file__).resolve().parents[2] / "data" / "examples" / "multiview"
@@ -115,16 +116,6 @@ _PREDICTOR: VGGTPredictor = VGGTPredictor(
 """Module-level VGGT singleton. Re-created only when preprocessing_mode changes."""
 
 
-def _parse_preprocessing_mode(preprocessing_mode: str) -> Literal["crop", "pad"]:
-    """Validate a Gradio string choice as a VGGT preprocessing mode."""
-
-    if preprocessing_mode == "crop":
-        return "crop"
-    if preprocessing_mode == "pad":
-        return "pad"
-    raise gr.Error("Preprocessing mode must be crop or pad.")
-
-
 def _sync_config(
     keep_top_percent: int | float,
     preprocessing_mode: str,
@@ -138,7 +129,7 @@ def _sync_config(
         verbose: Whether to log per-camera detail.
     """
     global _CONFIG, _PREDICTOR
-    preprocessing_mode_literal: Literal["crop", "pad"] = _parse_preprocessing_mode(preprocessing_mode)
+    preprocessing_mode_literal: Literal["crop", "pad"] = parse_preprocessing_mode(preprocessing_mode)
 
     needs_reinit: bool = preprocessing_mode_literal != _CONFIG.preprocessing_mode
 

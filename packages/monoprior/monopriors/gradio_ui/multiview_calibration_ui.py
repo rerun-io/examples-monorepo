@@ -30,6 +30,7 @@ from monopriors.apis.multiview_calibration import (
     load_rgb_images,
     run_calibration_pipeline,
 )
+from monopriors.gradio_ui._vggt_common import parse_preprocessing_mode
 
 EXAMPLE_DATA_DIR: Final[Path] = Path(__file__).resolve().parents[2] / "data" / "examples" / "multiview"
 """Path to bundled example image sets used by ``gr.Examples``."""
@@ -48,16 +49,6 @@ _MV_CALIBRATOR: MultiViewCalibrator = MultiViewCalibrator(
 )
 """Module-level calibrator singleton. Re-created only when model-affecting
 config fields are toggled ON (see ``_sync_config``)."""
-
-
-def _parse_preprocessing_mode(preprocessing_mode: str) -> Literal["crop", "pad"]:
-    """Validate a Gradio string choice as a VGGT preprocessing mode."""
-
-    if preprocessing_mode == "crop":
-        return "crop"
-    if preprocessing_mode == "pad":
-        return "pad"
-    raise gr.Error("Preprocessing mode must be crop or pad.")
 
 
 def _sync_config(
@@ -82,7 +73,7 @@ def _sync_config(
         preprocessing_mode: Image preprocessing strategy ("crop" or "pad").
     """
     global _MV_CONFIG, _MV_CALIBRATOR
-    preprocessing_mode_literal: Literal["crop", "pad"] = _parse_preprocessing_mode(preprocessing_mode)
+    preprocessing_mode_literal: Literal["crop", "pad"] = parse_preprocessing_mode(preprocessing_mode)
 
     needs_reinit: bool = False
     if segment_people and not _MV_CONFIG.segment_people:

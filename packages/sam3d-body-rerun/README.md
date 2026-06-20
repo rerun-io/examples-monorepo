@@ -33,13 +33,13 @@ Restart your shell so the new `pixi` binary is on `PATH`.
 
 This is Linux only with an NVIDIA GPU.
 
-The SAM3 and SAM3D Body checkpoints are gated on Hugging Face—request access for both [facebook/sam-3d-body-dinov3](https://huggingface.co/facebook/sam-3d-body-dinov3) and [facebook/sam3](https://huggingface.co/facebook/sam3), then authenticate either by setting `HF_TOKEN=<your token>` or running `huggingface-cli login` before the first download (see Meta's install notes).
+The SAM3 and SAM3D Body checkpoints are gated on Hugging Face—request access for both [facebook/sam-3d-body-dinov3](https://huggingface.co/facebook/sam-3d-body-dinov3) and [facebook/sam3](https://huggingface.co/facebook/sam3), then authenticate either by setting `HF_TOKEN=<your token>` or running `hf auth login` before the first download (see Meta's install notes).
 
 First run will download HF checkpoints for SAM3, SAM3D Body, and the relative-depth model.
 ```bash
 git clone https://github.com/rerun-io/sam3d-body-rerun.git
 cd sam3d-body-rerun
-pixi run app
+pixi run sam3d-app
 ```
 
 All commands can be listed with `pixi task list`.
@@ -47,20 +47,20 @@ All commands can be listed with `pixi task list`.
 ## Usage
 ### Gradio App
 ```bash
-pixi run app
+pixi run sam3d-app
 ```
-Opens the Gradio UI with an embedded streaming Rerun viewer. Try the bundled samples in `data/example-data` or upload your own RGB image; toggle “Log relative depth” to stream predicted depth.
+Opens the Gradio UI with an embedded streaming Rerun viewer. Try the bundled samples in `data/example-data` or upload your own RGB image; toggle “Log metric depth” to stream predicted depth.
 
 ### CLI
 From a dev shell (for tyro + dev deps):
 ```
-pixi run cli
+pixi run sam3d-cli
 ```
 
 OR
 
 ```bash
-pixi shell -e dev
+pixi shell -e sam3d-dev
 python tool/demo.py --help
 ```
 Run on a folder of images and configure Rerun output/recordings via the CLI flags.
@@ -68,7 +68,7 @@ Run on a folder of images and configure Rerun output/recordings via the CLI flag
 ### Promptable SAM3 sandbox
 If you just want SAM3 masks without 3D reconstruction:
 ```bash
-pixi run -e dev python tool/gradio_sam3.py
+pixi run -e sam3d-dev python tool/new_gradio_sam3.py
 ```
 
 ### Single Video Segmentation
@@ -76,17 +76,17 @@ Process individual videos with SAM3 text-prompted segmentation. Three modes avai
 
 **Batch Mode** (small videos <4GB, best quality):
 ```bash
-pixi run video-demo --video-path path/to/video.mp4 --prompt "person"
+pixi run sam3-video-batch --video-path path/to/video.mp4 --prompt "person"
 ```
 
 **Chunk Mode** (large videos, memory-efficient with overlapping chunks):
 ```bash
-pixi run video-chunk-demo --video-path path/to/video.mp4 --prompt "person"
+pixi run sam3-video-chunk --video-path path/to/video.mp4 --prompt "person"
 ```
 
 **Streaming Mode** (constant memory, frame-by-frame):
 ```bash
-pixi run video-stream-demo --video-path path/to/video.mp4 --prompt "person"
+pixi run sam3-video-stream --video-path path/to/video.mp4 --prompt "person"
 ```
 
 Use `--help` with any command to see all options.
@@ -94,7 +94,7 @@ Use `--help` with any command to see all options.
 ### Multiview Video Demo
 Process multiview HoCap video sequences with SAM3 segmentation and TSDF mesh fusion:
 ```bash
-pixi run mv-video-demo
+pixi run sam3d-mv-video-demo
 ```
 Downloads sample data (~1.7GB) on first run and processes 100 frames across 8 cameras, visualizing segmentation overlays and a fused 3D mesh in Rerun. Requires ~3GB VRAM.
 
@@ -107,10 +107,10 @@ Fuse per-view body predictions into a single globally-consistent 3D mesh using d
 
 ```bash
 # HoCap dataset
-pixi run -e dev python tool/demo_mv_body.py hocap --root-directory data/sample
+pixi run -e sam3d-dev python tool/demo_mv_body.py hocap --root-directory data/sample
 
 # RRD file (from ExoEgo pipeline)
-pixi run -e dev python tool/demo_mv_body.py rrd --rrd-path path/to/episode.rrd
+pixi run -e sam3d-dev python tool/demo_mv_body.py rrd --rrd-path path/to/episode.rrd
 ```
 
 **What it does:**
@@ -132,7 +132,7 @@ Thanks to the original projects that make this demo possible:
 
 - [facebook/sam-3d-body-dinov3](https://huggingface.co/facebook/sam-3d-body-dinov3) — SAM3D Body checkpoints and assets.
 - [facebook/sam3](https://huggingface.co/facebook/sam3) — promptable concept segmentation.
-- Relative depth/FOV from `MogeV1Predictor` in [monopriors](https://github.com/pablovela5620/monoprior).
+- Metric depth/FOV from `MoGeV2MetricPredictor` in [monopriors](https://github.com/pablovela5620/monoprior).
 - Built with [Rerun](https://rerun.io/), [Gradio](https://www.gradio.app/), and [Pixi](https://pixi.sh/latest/).
 
 Dual licensed under Apache 2.0 and MIT for the code in this repository; upstream models/assets retain their original licenses (see `LICENSE-APACHE` and `LICENSE-MIT` for this repo).

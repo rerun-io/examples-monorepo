@@ -110,7 +110,7 @@ pixi run --frozen -e gsplat-rust-renderer -- brush_app data/trained/chair.ply --
 ## Running Tests
 
 ```bash
-# Rust unit tests (13 tests: SH, camera, GPU types, etc.)
+# Rust unit tests (12 tests: SH, camera, GPU types, etc.)
 pixi run --frozen -e gsplat-rust-renderer rust-test
 
 # Python tests (13 tests: metrics, PLY loading, import)
