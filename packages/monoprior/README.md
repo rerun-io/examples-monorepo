@@ -10,7 +10,7 @@ Easily installable via [Pixi](https://pixi.sh/latest/).
 ```bash
 git clone https://github.com/pablovela5620/monoprior.git
 cd monoprior
-pixi run -e monoprior depth-compare-app
+pixi run -e monoprior monoprior-depth-compare-app
 ```
 
 ## Demo
@@ -20,20 +20,20 @@ Hosted Demos can be found on huggingface spaces
 
 ### CLI demos (auto-download example data from HuggingFace)
 ```bash
-pixi run -e monoprior relative-depth          # Single-image relative depth
-pixi run -e monoprior multiview-depth          # VGGT multi-view depth
-pixi run -e monoprior multiview-calibration    # Multi-view calibration
-pixi run -e monoprior video-depth              # Video depth estimation
-pixi run -e monoprior polycam-inference        # Polycam dataset inference
-pixi run -e monoprior promptda-polycam         # PromptDA depth completion
-pixi run -e monoprior surface-normals          # Compare surface normal models
+pixi run -e monoprior monoprior-relative-depth          # Single-image relative depth
+pixi run -e monoprior monoprior-multiview-depth          # VGGT multi-view depth
+pixi run -e monoprior monoprior-multiview-calibration    # Multi-view calibration
+pixi run -e monoprior monoprior-video-depth              # Video depth estimation
+pixi run -e monoprior monoprior-polycam-inference        # Polycam dataset inference
+pixi run -e monoprior monoprior-promptda-polycam         # PromptDA depth completion
+pixi run -e monoprior monoprior-surface-normals          # Compare surface normal models
 ```
 
 ### Gradio web UIs
 ```bash
-pixi run -e monoprior depth-compare-app        # Depth comparison UI
-pixi run -e monoprior metric-depth-app         # Metric depth UI
-pixi run -e monoprior calibration-app          # Multi-view calibration UI
+pixi run -e monoprior monoprior-depth-compare-app        # Depth comparison UI
+pixi run -e monoprior monoprior-metric-depth-app         # Metric depth UI
+pixi run -e monoprior monoprior-calibration-app          # Multi-view calibration UI
 ```
 
 To see all available tasks
@@ -47,7 +47,7 @@ pixi task list -e monoprior
 Use VGGT model for multi-view consistent depth estimation and camera pose recovery:
 
 ```bash
-pixi run -e monoprior multiview-depth
+pixi run -e monoprior monoprior-multiview-depth
 ```
 
 ## Removed Models

@@ -11,10 +11,10 @@ The table below is a curated subset; the workspace ships additional packages wit
 | [simplecv](packages/simplecv/) | `simplecv` | `simplecv-dev` | 3.12 | CUDA 12.9 | Shared computer vision utilities, datasets, Rerun logging, and geometry helpers |
 | [monoprior](packages/monoprior/) | `monoprior` | `monoprior-dev` | 3.12 | CUDA 12.9 | Monocular geometric priors (depth, normals) |
 | [prompt-da](packages/prompt-da/) | `prompt-da` | `prompt-da-dev` | 3.12 | CUDA 12.9 | Prompt Depth Anything — depth completion on Polycam data |
-| [wilor-nano](packages/wilor-nano/) | `wilor` | `wilor-dev` | 3.12 | CUDA 12.9 | Hand pose estimation |
-| [sam3d-body-rerun](packages/sam3d-body-rerun/) | `sam3d` | `sam3d-dev` | 3.12 | CUDA 12.9 | 3D body segmentation with SAM + Rerun |
-| [sam3-rerun](packages/sam3-rerun/) | `sam3-rerun` | `sam3-rerun-dev` | 3.12 | CUDA 12.9 | SAM3 video segmentation with Rerun |
-| [robocap-slam](packages/robocap-slam/) | `robocap` | `robocap-dev` | 3.12 | CUDA 13 | Multi-camera visual odometry & SLAM |
+| [wilor-nano](packages/wilor-nano/) | `wilor-nano` | `wilor-nano-dev` | 3.12 | CUDA 12.9 | Hand pose estimation |
+| [sam3d-body](packages/sam3d-body/) | `sam3d-body` | `sam3d-body-dev` | 3.12 | CUDA 12.9 | 3D body segmentation with SAM + Rerun |
+| [sam3](packages/sam3/) | `sam3` | `sam3-dev` | 3.12 | CUDA 12.9 | SAM3 video segmentation with Rerun |
+| [robocap-slam](packages/robocap-slam/) | `robocap-slam` | `robocap-slam-dev` | 3.12 | CUDA 13 | Multi-camera visual odometry & SLAM |
 | [pysfm](packages/pysfm/) | `pysfm` | `pysfm-dev` | 3.12 | CUDA 12.9 | COLMAP SfM reconstruction with Rerun + Gradio |
 | [vistadream](packages/vistadream/) | `vistadream` | `vistadream-dev` | 3.12 | CUDA 12.9 | Single-image 3D reconstruction via 3D Gaussians |
 | [gsplat-rust-renderer](packages/gsplat-rust-renderer/) | `gsplat-rust-renderer` | `gsplat-rust-renderer-dev` | 3.12 | CUDA 12.9 | Rust-based Gaussian splatting renderer |
@@ -45,7 +45,7 @@ hide_env_diff = true
 With direnv, just `cd` into a package and use tools directly:
 
 ```bash
-cd packages/robocap-slam/   # direnv activates robocap-dev
+cd packages/robocap-slam/   # direnv activates robocap-slam-dev
 python --version             # → 3.12.x
 ruff check .                 # just works
 pytest -q                    # just works
@@ -57,9 +57,9 @@ python --version             # → 3.12.x
 For tasks with `depends-on` chains (like auto-downloading data), use `pixi run` from the repo root:
 
 ```bash
-pixi run -e monoprior --frozen relative-depth   # downloads data, then runs demo
-pixi run -e robocap --frozen robocap-track-slam
-pixi run -e pysfm --frozen sfm-reconstruction-demo
+pixi run -e monoprior --frozen monoprior-relative-depth   # downloads data, then runs demo
+pixi run -e robocap-slam --frozen robocap-slam-track-slam
+pixi run -e pysfm --frozen pysfm-sfm-reconstruction-demo
 ```
 
 ### Override environment per directory
@@ -67,7 +67,7 @@ pixi run -e pysfm --frozen sfm-reconstruction-demo
 Each `.envrc` defaults to the `*-dev` environment. To use a different env (e.g., prod), create a `.envrc.local` (gitignored):
 ```bash
 # packages/robocap-slam/.envrc.local
-PIXI_ENV=robocap
+PIXI_ENV=robocap-slam
 ```
 
 ### CUDA driver troubleshooting
@@ -88,8 +88,8 @@ sudo apt install nvidia-driver-590-open && sudo reboot
 ## Listing tasks
 
 ```bash
-pixi task list -e robocap       # Demo/app tasks only
-pixi task list -e robocap-dev   # Demo/app tasks + lint, typecheck, tests
+pixi task list -e robocap-slam       # Demo/app tasks only
+pixi task list -e robocap-slam-dev   # Demo/app tasks + lint, typecheck, tests
 ```
 
 ## Architecture

@@ -23,9 +23,9 @@ Each scene provides:
 ### Download Commands
 
 ```bash
-pixi run --frozen -e gsplat-rust-renderer _download-nerf-chair
-pixi run --frozen -e gsplat-rust-renderer _download-nerf-hotdog
-pixi run --frozen -e gsplat-rust-renderer _download-trained-plys
+pixi run --frozen -e gsplat-rust-renderer _gsplat-rust-renderer-download-nerf-chair
+pixi run --frozen -e gsplat-rust-renderer _gsplat-rust-renderer-download-nerf-hotdog
+pixi run --frozen -e gsplat-rust-renderer _gsplat-rust-renderer-download-trained-plys
 ```
 
 ## Rendering
@@ -33,7 +33,7 @@ pixi run --frozen -e gsplat-rust-renderer _download-trained-plys
 ### Standalone GPU Render
 
 ```bash
-pixi run --frozen -e gsplat-rust-renderer render -- \
+pixi run --frozen -e gsplat-rust-renderer gsplat-rust-renderer-render -- \
   --ply data/trained/chair.ply \
   --camera data/nerf-synthetic/chair/transforms_test.json \
   --frame 0 \
@@ -47,7 +47,7 @@ Background `1,1,1` (white) matches the NeRF Synthetic convention where RGBA imag
 ### Benchmark FPS
 
 ```bash
-pixi run --frozen -e gsplat-rust-renderer render -- \
+pixi run --frozen -e gsplat-rust-renderer gsplat-rust-renderer-render -- \
   --ply data/trained/chair.ply \
   --camera data/nerf-synthetic/chair/transforms_test.json \
   --frame 0 \
@@ -97,7 +97,7 @@ pixi run --frozen -e gsplat-rust-renderer -- brush_app data/nerf-synthetic/chair
   --total-steps 30000 --export-every 30000 --export-path data/trained --export-name chair.ply
 
 # View in Brush
-pixi run --frozen -e gsplat-rust-renderer -- brush_app data/trained/chair.ply --with-viewer
+pixi run --frozen -e gsplat-rust-renderer -- brush_app data/trained/chair.ply --with-gsplat-rust-renderer-viewer
 ```
 
 ### Known Brush Conventions
@@ -111,14 +111,14 @@ pixi run --frozen -e gsplat-rust-renderer -- brush_app data/trained/chair.ply --
 
 ```bash
 # Rust unit tests (12 tests: SH, camera, GPU types, etc.)
-pixi run --frozen -e gsplat-rust-renderer rust-test
+pixi run --frozen -e gsplat-rust-renderer gsplat-rust-renderer-rust-test
 
 # Python tests (13 tests: metrics, PLY loading, import)
 pixi run --frozen -e gsplat-rust-renderer-dev tests
 
 # Lint
 pixi run --frozen -e gsplat-rust-renderer-dev lint
-pixi run --frozen -e gsplat-rust-renderer clippy
+pixi run --frozen -e gsplat-rust-renderer gsplat-rust-renderer-clippy
 ```
 
 ## Full Evaluation Script

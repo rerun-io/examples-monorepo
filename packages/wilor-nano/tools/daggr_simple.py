@@ -1,11 +1,11 @@
 """Daggr workflow for the minimal detection-to-keypoint Rerun demo.
 
 Run the two Gradio nodes first:
-- GRADIO_SERVER_PORT=7863 pixi run -e wilor-dev --frozen python packages/wilor-nano/tools/app_simple_detection.py
-- GRADIO_SERVER_PORT=7864 pixi run -e wilor-dev --frozen python packages/wilor-nano/tools/app_simple_keypoint.py
+- GRADIO_SERVER_PORT=7863 pixi run -e wilor-nano-dev --frozen python packages/wilor-nano/tools/app_simple_detection.py
+- GRADIO_SERVER_PORT=7864 pixi run -e wilor-nano-dev --frozen python packages/wilor-nano/tools/app_simple_keypoint.py
 
 Then launch this graph:
-- GRADIO_SERVER_PORT=7865 pixi run -e wilor-dev --frozen python packages/wilor-nano/tools/daggr_simple.py
+- GRADIO_SERVER_PORT=7865 pixi run -e wilor-nano-dev --frozen python packages/wilor-nano/tools/daggr_simple.py
 """
 
 import os

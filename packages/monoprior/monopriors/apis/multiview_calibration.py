@@ -13,7 +13,7 @@ from beartype.vale import Is
 from einops import rearrange
 from jaxtyping import Bool, Float, Float32, Int, UInt8
 from numpy import ndarray
-from sam3_rerun.api.predictor import SAM3Config, SAM3Predictor, SAM3Results
+from sam3.api.predictor import SAM3Config, SAM3Predictor, SAM3Results
 from simplecv.camera_orient_utils import auto_orient_and_center_poses
 from simplecv.camera_parameters import Extrinsics, PinholeParameters
 from simplecv.ops.conventions import CameraConventions, convert_pose

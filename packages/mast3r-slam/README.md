@@ -24,12 +24,12 @@ Run from the **monorepo root**:
 
 ### CLI (fast config, 224px)
 ```bash
-pixi run -e mast3r-slam --frozen example-fast
+pixi run -e mast3r-slam --frozen mast3r-slam-example-fast
 ```
 
 ### CLI (base config, 512px)
 ```bash
-pixi run -e mast3r-slam --frozen example-base
+pixi run -e mast3r-slam --frozen mast3r-slam-example-base
 ```
 
 ### Gradio App

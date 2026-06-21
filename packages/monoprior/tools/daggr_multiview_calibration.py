@@ -2,7 +2,7 @@
 
 This requires running each node app on a separate port:
 - VGGT Geometry:    pixi run -e monoprior vggt-geometry-app     (port 7870)
-- SAM3 Segmentation: pixi run -e sam3-rerun sam3-rerun-app      (port 7871)
+- SAM3 Segmentation: pixi run -e sam3 sam3-app      (port 7871)
 - Metric Depth:     pixi run -e monoprior metric-depth-app      (port 7872)
 - Depth Alignment:  pixi run -e monoprior depth-alignment-app   (port 7873)
 

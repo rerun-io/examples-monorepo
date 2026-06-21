@@ -300,7 +300,7 @@ natsort = ">=8.4.0,<9"
 
 [feature.monoprior.pypi-dependencies]
 monopriors = { path = "packages/monoprior", editable = true }
-sam3-rerun = { path = "packages/sam3-rerun", editable = true }
+sam3 = { path = "packages/sam3", editable = true }
 vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c" }
 moge = { git = "https://github.com/microsoft/MoGe.git" }
 
@@ -309,115 +309,115 @@ PACKAGE_DIR = "packages/monoprior"
 PYREFLY_TARGET = "monopriors/apis monopriors/data monopriors/gradio_ui monopriors/models monopriors/dc_utils.py monopriors/depth_utils.py monopriors/rr_logging_utils.py monopriors/scale_utils.py monopriors/__init__.py"
 
 # ── Download tasks (hidden, used as depends-on) ─────────────────────────
-[feature.monoprior.tasks._download-single-image]
+[feature.monoprior.tasks._monoprior-download-single-image]
 cmd = "test -d data/examples/single-image || hf download pablovela5620/monoprior-example --include 'single-image/*' --repo-type dataset --local-dir data/examples/"
 cwd = "packages/monoprior"
 
-[feature.monoprior.tasks._download-multiview]
+[feature.monoprior.tasks._monoprior-download-multiview]
 cmd = "test -d data/examples/multiview || hf download pablovela5620/monoprior-example --include 'multiview/*' --repo-type dataset --local-dir data/examples/"
 cwd = "packages/monoprior"
 
-[feature.monoprior.tasks._download-video]
+[feature.monoprior.tasks._monoprior-download-video]
 cmd = "test -d data/examples/video || hf download pablovela5620/monoprior-example --include 'video/*' --repo-type dataset --local-dir data/examples/"
 cwd = "packages/monoprior"
 
-[feature.monoprior.tasks._download-polycam]
+[feature.monoprior.tasks._monoprior-download-polycam]
 cmd = "test -d data/examples/polycam || hf download pablovela5620/monoprior-example --include 'polycam/*' --repo-type dataset --local-dir data/examples/"
 cwd = "packages/monoprior"
 
 # ── Demo tasks ───────────────────────────────────────────────────────────
-[feature.monoprior.tasks.relative-depth]
+[feature.monoprior.tasks.monoprior-relative-depth]
 cmd = "python tools/demos/relative_depth.py --image-path data/examples/single-image/room.jpg"
-depends-on = ["_download-single-image"]
+depends-on = ["_monoprior-download-single-image"]
 cwd = "packages/monoprior"
 description = "Run relative depth estimation on example image"
 
-[feature.monoprior.tasks.multiview-depth]
+[feature.monoprior.tasks.monoprior-multiview-depth]
 cmd = "python tools/demos/multiview_depth.py --image-dir data/examples/multiview/car_landscape_12"
-depends-on = ["_download-multiview"]
+depends-on = ["_monoprior-download-multiview"]
 cwd = "packages/monoprior"
 description = "Run VGGT multiview depth on example images"
 
-[feature.monoprior.tasks.multiview-calibration]
+[feature.monoprior.tasks.monoprior-multiview-calibration]
 cmd = "python tools/demos/multiview_calibration.py --image-dir data/examples/multiview/car_landscape_12"
-depends-on = ["_download-multiview"]
+depends-on = ["_monoprior-download-multiview"]
 cwd = "packages/monoprior"
 description = "Run multiview calibration on example images"
 
-[feature.monoprior.tasks.video-depth]
+[feature.monoprior.tasks.monoprior-video-depth]
 cmd = "python tools/demos/video_depth.py --video-path data/examples/video/davis_rollercoaster.mp4"
-depends-on = ["_download-video"]
+depends-on = ["_monoprior-download-video"]
 cwd = "packages/monoprior"
 description = "Run video depth estimation on example video"
 
-[feature.monoprior.tasks.polycam-inference]
+[feature.monoprior.tasks.monoprior-polycam-inference]
 cmd = "python tools/demos/polycam_inference.py --polycam-zip-path data/examples/polycam/example-room-scan-poly.zip"
-depends-on = ["_download-polycam"]
+depends-on = ["_monoprior-download-polycam"]
 cwd = "packages/monoprior"
 description = "Run monoprior inference on Polycam dataset"
 
-[feature.monoprior.tasks.promptda-polycam]
+[feature.monoprior.tasks.monoprior-promptda-polycam]
 cmd = "python tools/demos/promptda_polycam.py --polycam-zip-path data/examples/polycam/example-room-scan-poly.zip"
-depends-on = ["_download-polycam"]
+depends-on = ["_monoprior-download-polycam"]
 cwd = "packages/monoprior"
 description = "Run PromptDA depth completion on Polycam dataset"
 
-[feature.monoprior.tasks.metric-depth]
+[feature.monoprior.tasks.monoprior-metric-depth]
 cmd = "python tools/demos/metric_depth.py --image-path data/examples/single-image/room.jpg"
-depends-on = ["_download-single-image"]
+depends-on = ["_monoprior-download-single-image"]
 cwd = "packages/monoprior"
 description = "Run metric depth estimation on example image"
 
-[feature.monoprior.tasks.surface-normals]
+[feature.monoprior.tasks.monoprior-surface-normals]
 cmd = "python tools/demos/surface_normals.py --image-path data/examples/single-image/room.jpg"
-depends-on = ["_download-single-image"]
+depends-on = ["_monoprior-download-single-image"]
 cwd = "packages/monoprior"
 description = "Run surface normal estimation on example image"
 
 [feature.monoprior.tasks.monoprior]
 cmd = "python tools/demos/monoprior.py --image-path data/examples/single-image/room.jpg"
-depends-on = ["_download-single-image"]
+depends-on = ["_monoprior-download-single-image"]
 cwd = "packages/monoprior"
 description = "Run monoprior (metric depth + normals) on example image"
 
 # ── App tasks (Gradio UIs) ──────────────────────────────────────────────
-[feature.monoprior.tasks.depth-compare-app]
+[feature.monoprior.tasks.monoprior-depth-compare-app]
 cmd = "python tools/apps/depth_compare_app.py"
 cwd = "packages/monoprior"
 description = "Launch Gradio depth comparison UI"
 
-[feature.monoprior.tasks.calibration-app]
+[feature.monoprior.tasks.monoprior-calibration-app]
 cmd = "python tools/apps/calibration_app.py"
 cwd = "packages/monoprior"
 description = "Launch Gradio multiview calibration UI"
 
-[feature.monoprior.tasks.multiview-geometry-app]
+[feature.monoprior.tasks.monoprior-multiview-geometry-app]
 cmd = "python tools/apps/multiview_geometry_app.py"
 cwd = "packages/monoprior"
 description = "Launch Gradio multiview geometry UI"
 
-[feature.monoprior.tasks.metric-depth-app]
+[feature.monoprior.tasks.monoprior-metric-depth-app]
 cmd = "python tools/apps/metric_depth_app.py"
 cwd = "packages/monoprior"
 description = "Launch Gradio metric depth UI"
 
-[feature.monoprior.tasks.depth-alignment-app]
+[feature.monoprior.tasks.monoprior-depth-alignment-app]
 cmd = "python tools/apps/depth_alignment_app.py"
 cwd = "packages/monoprior"
 description = "Launch Gradio depth alignment UI"
 
 # ── Utility tasks ────────────────────────────────────────────────────────
-[feature.monoprior.tasks.build-wheel]
+[feature.monoprior.tasks.monoprior-build-wheel]
 cmd = "python -m pip install build && python -m build"
 cwd = "packages/monoprior"
 
-[feature.monoprior.tasks.upload-pypi]
+[feature.monoprior.tasks.monoprior-upload-pypi]
 cmd = "python -m pip install twine && twine check dist/*"
 cwd = "packages/monoprior"
 
-[feature.monoprior.tasks.upload-hf]
+[feature.monoprior.tasks.monoprior-upload-hf]
 cmd = "python tools/utils/upload_to_hf.py"
-depends-on = ["build-wheel"]
+depends-on = ["monoprior-build-wheel"]
 cwd = "packages/monoprior"
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -433,12 +433,12 @@ open3d = ">=0.19.0,<0.20"
 [feature.prompt-da.pypi-dependencies]
 rerun-prompt-da = { path = "packages/prompt-da", editable = true }
 monopriors = { path = "packages/monoprior", editable = true }
-sam3-rerun = { path = "packages/sam3-rerun", editable = true }
+sam3 = { path = "packages/sam3", editable = true }
 
 [feature.prompt-da.activation.env]
 PACKAGE_DIR = "packages/prompt-da"
 
-[feature.prompt-da-demo.tasks._download-polycam-example]
+[feature.prompt-da-demo.tasks._prompt-da-download-polycam-example]
 cmd = """
 test -e data/6G-room-example.zip || hf download pablovela5620/polycam-example-data 6G-room-example.zip --repo-type dataset --local-dir data/
 """
@@ -446,28 +446,28 @@ cwd = "packages/prompt-da"
 outputs = ["packages/prompt-da/data/6G-room-example.zip"]
 description = "Download the example Polycam zip from HuggingFace"
 
-[feature.prompt-da-demo.tasks.polycam-prompt_da]
+[feature.prompt-da-demo.tasks.prompt-da-polycam]
 cmd = "python tools/prompt_da_polycam.py --polycam-zip-path data/6G-room-example.zip"
-depends-on = ["_download-polycam-example"]
+depends-on = ["_prompt-da-download-polycam-example"]
 cwd = "packages/prompt-da"
 description = "Run PromptDA on the example Polycam dataset"
 
-[feature.prompt-da-demo.tasks.app]
+[feature.prompt-da-demo.tasks.prompt-da-app]
 cmd = "python tools/gradio_app.py"
-depends-on = ["_download-polycam-example"]
+depends-on = ["_prompt-da-download-polycam-example"]
 cwd = "packages/prompt-da"
 description = "Run the gradio app"
 
-[feature.prompt-da-demo.tasks.dev-app]
+[feature.prompt-da-demo.tasks.prompt-da-dev-app]
 cmd = "gradio tools/gradio_app.py"
-depends-on = ["_download-polycam-example"]
+depends-on = ["_prompt-da-download-polycam-example"]
 cwd = "packages/prompt-da"
 description = "Run the gradio app in dev mode"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # wilor-nano
 # ═══════════════════════════════════════════════════════════════════════════
-[feature.wilor.dependencies]
+[feature.wilor-nano.dependencies]
 python = "3.12.*"
 dill = ">=0.4.0,<0.5"
 trimesh = "*"
@@ -475,50 +475,50 @@ pyrender = "*"
 torchvision = ">=0.25,<0.26"
 torchcodec = ">=0.10.0,<0.11"
 
-[feature.wilor.pypi-dependencies]
+[feature.wilor-nano.pypi-dependencies]
 wilor_nano = { path = "packages/wilor-nano", editable = true }
 daggr = { path = "/home/pablo/0Dev/personal/daggr", editable = true }
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 onnx = ">=1.12.0,<1.18.0"
 onnxscript = "*"
 
-[feature.wilor.target.linux-64.pypi-dependencies]
+[feature.wilor-nano.target.linux-64.pypi-dependencies]
 # TensorRT engines are machine-local artifacts; keep ONNX portable and rebuild engines per target GPU.
 tensorrt-cu12 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
 cuda-python = "*"
 
-[feature.wilor.target.linux-aarch64.pypi-dependencies]
+[feature.wilor-nano.target.linux-aarch64.pypi-dependencies]
 onnxruntime-gpu = { version = ">=1.24.0.dev0,<2", index = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-13-nightly/pypi/simple/" }
 
-[feature.wilor.activation.env]
+[feature.wilor-nano.activation.env]
 PACKAGE_DIR = "packages/wilor-nano"
 
-[feature.wilor.tasks.image-example]
+[feature.wilor-nano.tasks.wilor-nano-image-example]
 cmd = "python tools/wilor_inference.py --image-path assets/img.png"
 cwd = "packages/wilor-nano"
 description = "Run WiLoR inference on example image"
 
-[feature.wilor.tasks.video-example]
+[feature.wilor-nano.tasks.wilor-nano-video-example]
 cmd = "python tools/wilor_inference.py --video-path assets/video.mp4"
 cwd = "packages/wilor-nano"
 description = "Run WiLoR inference on example video using the original PyTorch path"
 
-[feature.wilor.tasks.video-trt]
+[feature.wilor-nano.tasks.wilor-nano-video-trt]
 cmd = "python tools/wilor_inference_trt.py"
 cwd = "packages/wilor-nano"
 description = "Run WiLoR video inference with the accepted batched TensorRT detector and full-WiLor backend"
 
-[feature.wilor.tasks.export-onnx]
+[feature.wilor-nano.tasks.wilor-nano-export-onnx]
 cmd = "python tools/conversion/export_wilor_onnx.py"
 cwd = "packages/wilor-nano"
 description = "Export WiLoR ONNX graphs used to rebuild TensorRT engines"
 
-[feature.wilor.tasks.build-trt]
+[feature.wilor-nano.tasks.wilor-nano-build-trt]
 cmd = "python tools/conversion/build_wilor_tensorrt.py"
 cwd = "packages/wilor-nano"
 description = "Build machine-local WiLoR TensorRT engines from exported ONNX graphs"
 
-[feature.wilor.tasks.compare-reference]
+[feature.wilor-nano.tasks.wilor-nano-compare-reference]
 cmd = "python tools/compare_rrd_reference.py --reference-rrd tests/reference_data/wilor_video_30.rrd --candidate-rrd /tmp/wilor_candidate.rrd --index video_time --rtol 0.01 --atol 0.25"
 cwd = "packages/wilor-nano"
 description = "Compare a candidate WiLoR RRD against the checked-in reference RRD"
@@ -584,7 +584,7 @@ datasets = ">=4.0.0"
 [feature.mv-api.pypi-dependencies]
 mv-api = { path = "packages/mv-api", editable = true }
 monopriors = { path = "packages/monoprior", editable = true }
-sam3-rerun = { path = "packages/sam3-rerun", editable = true }
+sam3 = { path = "packages/sam3", editable = true }
 wilor_nano = { path = "packages/wilor-nano", editable = true }
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c" }
@@ -652,10 +652,10 @@ description = "Mount the full catalog and register existing prediction RRD layer
 # ═══════════════════════════════════════════════════════════════════════════
 # sam3d-body-rerun
 # ═══════════════════════════════════════════════════════════════════════════
-[feature.sam3d]
+[feature.sam3d-body]
 platforms = ["linux-64"]
 
-[feature.sam3d.dependencies]
+[feature.sam3d-body.dependencies]
 python = "3.12.*"
 tomlkit = "==0.12.0"
 audioop-lts = "*"
@@ -665,42 +665,42 @@ h5py = ">=3.11"
 torchcodec = "*"
 fsspec = ">=2025.3,<=2026.2.0"
 
-[feature.sam3d.pypi-dependencies]
-sam3d_body = { path = "packages/sam3d-body-rerun", editable = true }
+[feature.sam3d-body.pypi-dependencies]
+sam3d_body = { path = "packages/sam3d-body", editable = true }
 monopriors = { path = "packages/monoprior", editable = true }
-sam3-rerun = { path = "packages/sam3-rerun", editable = true }
+sam3 = { path = "packages/sam3", editable = true }
 moge = { git = "https://github.com/microsoft/MoGe.git" }
 timm = ">=0.9"
 natsort = ">=8.4"
 datasets = ">=2.20"
 kernels = ">=0.11.3"
 
-[feature.sam3d.activation.env]
-PACKAGE_DIR = "packages/sam3d-body-rerun"
+[feature.sam3d-body.activation.env]
+PACKAGE_DIR = "packages/sam3d-body"
 PYREFLY_TARGET = "src/sam3d_body/api src/sam3d_body/gradio_ui src/sam3d_body/ops src/sam3d_body/build_models.py src/sam3d_body/sam_3d_body_estimator.py src/sam3d_body/metadata src/sam3d_body/__init__.py"
 
-[feature.sam3d.tasks.sam3d-app]
+[feature.sam3d-body.tasks.sam3d-body-app]
 cmd = "python tool/gradio_sam3d_body.py"
-cwd = "packages/sam3d-body-rerun"
+cwd = "packages/sam3d-body"
 description = "Launch SAM3D Gradio app"
 
-[feature.sam3d.tasks.sam3d-cli]
+[feature.sam3d-body.tasks.sam3d-body-cli]
 cmd = "python tool/demo.py --image-folder data/example-data"
-cwd = "packages/sam3d-body-rerun"
+cwd = "packages/sam3d-body"
 description = "Run SAM3D CLI demo"
 
-[feature.sam3d.tasks.sam3d-download-hocap-sample]
+[feature.sam3d-body.tasks.sam3d-body-download-hocap-sample]
 cmd = """
 test -d data/sample || \
 (hf download pablovela5620/hocap-sample sample.zip --repo-type dataset --local-dir data && \
 unzip -o data/sample.zip -d data && \
 rm data/sample.zip)
 """
-cwd = "packages/sam3d-body-rerun"
-outputs = ["packages/sam3d-body-rerun/data/sample/"]
+cwd = "packages/sam3d-body"
+outputs = ["packages/sam3d-body/data/sample/"]
 description = "Download HoCap sample data from HuggingFace"
 
-[feature.sam3d.tasks.sam3d-mv-video-demo]
+[feature.sam3d-body.tasks.sam3d-body-mv-video-demo]
 cmd = """
 python tool/demo_mv_video.py \
     --max-frames 100 \
@@ -709,11 +709,11 @@ python tool/demo_mv_video.py \
     --subject-id 8 \
     --sequence-name 20231024_180733
 """
-cwd = "packages/sam3d-body-rerun"
-depends-on = ["sam3d-download-hocap-sample"]
+cwd = "packages/sam3d-body"
+depends-on = ["sam3d-body-download-hocap-sample"]
 description = "Run multiview video SAM3 segmentation demo with TSDF fusion"
 
-[feature.sam3d.tasks.sam3d-mv-body-demo]
+[feature.sam3d-body.tasks.sam3d-body-mv-body-demo]
 cmd = """
 python tool/demo_mv_body.py \
     --max-frames 50 \
@@ -722,49 +722,49 @@ python tool/demo_mv_body.py \
     --subject-id 8 \
     --sequence-name 20231024_180733
 """
-cwd = "packages/sam3d-body-rerun"
-depends-on = ["sam3d-download-hocap-sample"]
+cwd = "packages/sam3d-body"
+depends-on = ["sam3d-body-download-hocap-sample"]
 description = "Multiview 3D body mesh fitting with per-camera estimation"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # sam3-rerun
 # ═══════════════════════════════════════════════════════════════════════════
-[feature.sam3-rerun]
+[feature.sam3]
 platforms = ["linux-64"]
 
-[feature.sam3-rerun.dependencies]
+[feature.sam3.dependencies]
 python = "3.12.*"
 
-[feature.sam3-rerun.pypi-dependencies]
-sam3-rerun = { path = "packages/sam3-rerun", editable = true }
+[feature.sam3.pypi-dependencies]
+sam3 = { path = "packages/sam3", editable = true }
 spaces = ">=0.43.0"
 
-[feature.sam3-rerun.activation.env]
-PACKAGE_DIR = "packages/sam3-rerun"
+[feature.sam3.activation.env]
+PACKAGE_DIR = "packages/sam3"
 
-[feature.sam3-rerun.tasks.sam3-video-batch]
+[feature.sam3.tasks.sam3-video-batch]
 cmd = "python tools/demos/video_batch.py"
-cwd = "packages/sam3-rerun"
+cwd = "packages/sam3"
 description = "Batch video segmentation with SAM3"
 
-[feature.sam3-rerun.tasks.sam3-video-chunk]
+[feature.sam3.tasks.sam3-video-chunk]
 cmd = "python tools/demos/video_chunk.py"
-cwd = "packages/sam3-rerun"
+cwd = "packages/sam3"
 description = "Chunk-based video segmentation with SAM3 (memory-efficient)"
 
-[feature.sam3-rerun.tasks.sam3-video-stream]
+[feature.sam3.tasks.sam3-video-stream]
 cmd = "python tools/demos/video_stream.py"
-cwd = "packages/sam3-rerun"
+cwd = "packages/sam3"
 description = "Streaming video segmentation with SAM3 (constant memory)"
 
-[feature.sam3-rerun.tasks.sam3-rerun-app]
+[feature.sam3.tasks.sam3-app]
 cmd = "python tools/apps/sam3_rerun_app.py"
-cwd = "packages/sam3-rerun"
+cwd = "packages/sam3"
 description = "Launch SAM3 segmentation Gradio app with Rerun viewer"
 
-[feature.sam3-rerun.tasks.sam3-annotated-app]
+[feature.sam3.tasks.sam3-annotated-app]
 cmd = "python tools/apps/sam3_annotated_app.py"
-cwd = "packages/sam3-rerun"
+cwd = "packages/sam3"
 description = "Launch SAM3 segmentation Gradio app with annotated image"
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -880,27 +880,27 @@ cuda-python = "*"
 PACKAGE_DIR = "packages/sapiens-coco133-pose"
 SAPIENS_PRELOAD_MODELS = "0"
 
-[feature.sapiens-coco133-pose.tasks.iterable-video]
+[feature.sapiens-coco133-pose.tasks.sapiens-coco133-pose-iterable-video]
 cmd = "python tools/demos/iterable_video_pose.py"
 cwd = "packages/sapiens-coco133-pose"
 description = "Run non-batched RTMLib YOLOX + Sapiens COCO-133 video pose and write the golden RRD/artifact"
 
-[feature.sapiens-coco133-pose.tasks.video-trt]
+[feature.sapiens-coco133-pose.tasks.sapiens-coco133-pose-video-trt]
 cmd = "python tools/demos/batched_tensorrt_video_pose.py"
 cwd = "packages/sapiens-coco133-pose"
 description = "Run batched CUDA/TensorRT COCO-133 video pose"
 
-[feature.sapiens-coco133-pose.tasks.export-pose-onnx]
+[feature.sapiens-coco133-pose.tasks.sapiens-coco133-pose-export-pose-onnx]
 cmd = "python tools/conversion/export_sapiens_pose_onnx.py"
 cwd = "packages/sapiens-coco133-pose"
 description = "Export static-batch FP16 Sapiens2 pose ONNX"
 
-[feature.sapiens-coco133-pose.tasks.build-trt]
+[feature.sapiens-coco133-pose.tasks.sapiens-coco133-pose-build-trt]
 cmd = "python tools/conversion/build_tensorrt_engine.py"
 cwd = "packages/sapiens-coco133-pose"
 description = "Build a static-batch FP16 TensorRT engine from ONNX"
 
-[feature.sapiens-coco133-pose.tasks.benchmark]
+[feature.sapiens-coco133-pose.tasks.sapiens-coco133-pose-benchmark]
 cmd = "python tools/eval/benchmark.py"
 cwd = "packages/sapiens-coco133-pose"
 description = "Benchmark iterable golden path against batched TensorRT path"
@@ -908,7 +908,7 @@ description = "Benchmark iterable golden path against batched TensorRT path"
 # ═══════════════════════════════════════════════════════════════════════════
 # robocap-slam
 # ═══════════════════════════════════════════════════════════════════════════
-[feature.robocap.dependencies]
+[feature.robocap-slam.dependencies]
 python = "3.12.*"
 pyyaml = "*"
 cuda-version = "13.*"
@@ -923,45 +923,45 @@ pyarrow = ">=20.0.0,<21"
 # (the shared `cuda` feature is cuda 12.9, linux-64 only) and robocap also targets aarch64.
 pytorch-cpu = ">=2.8.0"
 
-[feature.robocap.pypi-dependencies]
+[feature.robocap-slam.pypi-dependencies]
 robocap-slam = { path = "packages/robocap-slam", editable = true }
 tyro = ">=0.9,<1"
 
-[feature.robocap.target.linux-64.pypi-dependencies]
+[feature.robocap-slam.target.linux-64.pypi-dependencies]
 cuvslam = { url = "https://github.com/nvidia-isaac/cuVSLAM/releases/download/v15.0.0/cuvslam-15.0.0%2Bcu13-cp312-abi3-manylinux_2_39_x86_64.whl" }
 
-[feature.robocap.target.linux-aarch64.pypi-dependencies]
+[feature.robocap-slam.target.linux-aarch64.pypi-dependencies]
 cuvslam = { url = "https://github.com/nvidia-isaac/cuVSLAM/releases/download/v15.0.0/cuvslam-15.0.0%2Bcu13-cp312-abi3-manylinux_2_39_aarch64.whl" }
 
-[feature.robocap.activation.env]
+[feature.robocap-slam.activation.env]
 PACKAGE_DIR = "packages/robocap-slam"
 LD_LIBRARY_PATH = "${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH}"
 
-[feature.robocap.tasks.robocap-download-example]
+[feature.robocap-slam.tasks.robocap-slam-download-example]
 cmd = """test -d data/robocap/f408193e6447b3b0_session_14 || hf download pablovela5620/robocap-example --repo-type dataset --local-dir data/robocap"""
 cwd = "packages/robocap-slam"
 outputs = ["packages/robocap-slam/data/robocap/f408193e6447b3b0_session_14"]
 description = "Download example Robocap dataset from HuggingFace"
 
-[feature.robocap.tasks.robocap-track]
+[feature.robocap-slam.tasks.robocap-slam-track]
 cmd = "python tools/track_odometry.py"
 cwd = "packages/robocap-slam"
-depends-on = ["robocap-download-example"]
+depends-on = ["robocap-slam-download-example"]
 description = "Run multicamera visual odometry on Robocap data"
 
-[feature.robocap.tasks.robocap-track-slam]
+[feature.robocap-slam.tasks.robocap-slam-track-slam]
 cmd = "python tools/track_slam.py"
 cwd = "packages/robocap-slam"
-depends-on = ["robocap-download-example"]
+depends-on = ["robocap-slam-download-example"]
 description = "Run multicamera visual SLAM on Robocap data"
 
-[feature.robocap.tasks.robocap-track-candidate]
+[feature.robocap-slam.tasks.robocap-slam-track-candidate]
 cmd = "python tools/track_odometry.py --rr-config.save /tmp/robocap_cuvslam_15_candidate.rrd --rr-config.headless --no-auto-orient --max-frames 30 --no-log-videos"
 cwd = "packages/robocap-slam"
-depends-on = ["robocap-download-example"]
+depends-on = ["robocap-slam-download-example"]
 description = "Run a bounded Robocap odometry smoke and save the migrated cuVSLAM candidate RRD"
 
-[feature.robocap.tasks.robocap-compare-reference]
+[feature.robocap-slam.tasks.robocap-slam-compare-reference]
 cmd = "python tools/compare_rrd_reference.py --reference-rrd /tmp/robocap_cuvslam_0_2_0_baseline.rrd --candidate-rrd /tmp/robocap_cuvslam_15_candidate.rrd --index video_time --max-rows 30 --rtol 0.01 --atol 0.25"
 cwd = "packages/robocap-slam"
 description = "Compare migrated Robocap pose output against the saved cuVSLAM 0.2.0 baseline"
@@ -984,7 +984,7 @@ pysfm = { path = "packages/pysfm", editable = true }
 PACKAGE_DIR = "packages/pysfm"
 
 # ── Download tasks ───────────────────────────────────────────────────────
-[feature.pysfm.tasks._download-sfm-example]
+[feature.pysfm.tasks._pysfm-download-sfm-example]
 cmd = """
 test -d data/examples/sfm_reconstruction/Fountain || \
 (mkdir -p data/examples/sfm_reconstruction && \
@@ -997,55 +997,55 @@ zipfile.ZipFile('/tmp/fountain.zip').extractall('data/examples/sfm_reconstructio
 cwd = "packages/pysfm"
 description = "Download Fountain example dataset for SfM"
 
-[feature.pysfm.tasks._download-unknown-rig]
+[feature.pysfm.tasks._pysfm-download-unknown-rig]
 cmd = "test -e data/examples/unknown-rig/cam1.mp4 || hf download pablovela5620/pycolmap-glomap-example --include 'unknown-rig/*.mp4' --repo-type dataset --local-dir data/examples/"
 cwd = "packages/pysfm"
 description = "Download unknown-rig example videos"
 
-[feature.pysfm.tasks._download-calibrated-rig]
+[feature.pysfm.tasks._pysfm-download-calibrated-rig]
 cmd = "test -e data/examples/calibrated-rig/video_dev1_session15_segment1_left-front.mp4 || hf download pablovela5620/pycolmap-glomap-example --include 'calibrated-rig/*.mp4' --repo-type dataset --local-dir data/examples/"
 cwd = "packages/pysfm"
 description = "Download calibrated-rig example videos"
 
 # ── Demo tasks ───────────────────────────────────────────────────────────
-[feature.pysfm.tasks.sfm-reconstruction-demo]
+[feature.pysfm.tasks.pysfm-sfm-reconstruction-demo]
 cmd = "python tools/demos/sfm_reconstruction.py --image-dir data/examples/sfm_reconstruction/Fountain/images --rr-config.save data/examples/sfm_reconstruction/fountain.rrd"
-depends-on = ["_download-sfm-example"]
+depends-on = ["_pysfm-download-sfm-example"]
 cwd = "packages/pysfm"
 description = "Run COLMAP SfM reconstruction on Fountain dataset with Rerun viewer"
 
 # ── App tasks ────────────────────────────────────────────────────────────
-[feature.pysfm.tasks.sfm-reconstruction-app]
+[feature.pysfm.tasks.pysfm-sfm-reconstruction-app]
 cmd = "python tools/nodes/sfm_reconstruction_app.py"
-depends-on = ["_download-sfm-example"]
+depends-on = ["_pysfm-download-sfm-example"]
 cwd = "packages/pysfm"
 description = "Launch COLMAP SfM Gradio app with Rerun viewer"
 
 [feature.pysfm.tasks.pysfm-vid-to-img-node]
 cmd = "python tools/nodes/video_to_image_node.py"
-depends-on = ["_download-unknown-rig"]
+depends-on = ["_pysfm-download-unknown-rig"]
 cwd = "packages/pysfm"
 description = "Launch Video-to-Image frame extraction Gradio app with Rerun viewer"
 
 [feature.pysfm.tasks.pysfm-vid-to-img-node-dev]
 cmd = "gradio tools/nodes/video_to_image_node.py --watch-dirs $PIXI_PROJECT_ROOT/packages/pysfm/pysfm"
-depends-on = ["_download-unknown-rig"]
+depends-on = ["_pysfm-download-unknown-rig"]
 cwd = "packages/pysfm"
 description = "Video-to-Image Gradio app with hot reload"
 
 [feature.pysfm.tasks.pysfm-vid-to-img-demo]
 cmd = "python tools/demos/video_to_image.py --video-path data/examples/unknown-rig/cam1.mp4 --output-dir /tmp/video_to_image_output --rr-config.save /tmp/video_to_image_output/video_to_image.rrd"
-depends-on = ["_download-unknown-rig"]
+depends-on = ["_pysfm-download-unknown-rig"]
 cwd = "packages/pysfm"
 description = "Run video-to-image frame extraction CLI demo (saves .rrd)"
 
 [feature.pysfm.tasks.pysfm-vid-recon-demo]
 cmd = "python tools/demos/pycolmap_vid_recon.py --config.video-path data/examples/unknown-rig/cam1.mp4"
-depends-on = ["_download-unknown-rig"]
+depends-on = ["_pysfm-download-unknown-rig"]
 cwd = "packages/pysfm"
 description = "Monocular video reconstruction demo with Rerun viewer"
 
-[feature.pysfm.tasks.brush-train-kitchen-5k]
+[feature.pysfm.tasks.pysfm-brush-train-kitchen-5k]
 cmd = """
 python tools/brush/train_colmap_brush.py \
   --images-dir /home/pablo/0Dev/data/colmap-data/multicam/images/6g-night-nov-29-2024/kitchen-nov-29-2024-train/0100 \
@@ -1087,7 +1087,7 @@ splat-transform = "*"
 [feature.vistadream.pypi-dependencies]
 vistadream = { path = "packages/vistadream", editable = true }
 monopriors = { path = "packages/monoprior", editable = true }
-sam3-rerun = { path = "packages/sam3-rerun", editable = true }
+sam3 = { path = "packages/sam3", editable = true }
 vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c" }
 moge = { git = "https://github.com/microsoft/MoGe.git" }
 gsplat = { git = "https://github.com/nerfstudio-project/gsplat.git", rev = "970dd84803ecf8570651f8e121e328bfef567fb9" }
@@ -1116,15 +1116,15 @@ PATH = "${CONDA_PREFIX}/nvvm/bin:${PATH}"
 # description = "Install the splat-transform npm tool"
 
 # ── Demo tasks ───────────────────────────────────────────────────────────
-[feature.vistadream.tasks.example]
+[feature.vistadream.tasks.vistadream-example]
 cmd = "python tools/run_single_img.py --image-path data/office/IMG_4029.jpg"
 # depends-on = ["_install-splat-transform"]
 cwd = "packages/vistadream"
 description = "Run VistaDream single image 3D reconstruction"
 
-[feature.vistadream.tasks.gradio-app]
+[feature.vistadream.tasks.vistadream-gradio-app]
 cmd = "python tools/gradio_app.py"
-depends-on = ["_install-splat-transform"]
+# depends-on = ["_install-splat-transform"]
 cwd = "packages/vistadream"
 description = "Launch VistaDream Gradio web interface"
 
@@ -1144,7 +1144,7 @@ PyTurboJPEG = "*"
 PACKAGE_DIR = "packages/pyvrs-viewer"
 
 # ── Download tasks ───────────────────────────────────────────────────────
-[feature.pyvrs-viewer-demo.tasks._download-hot3d-quest-vrs]
+[feature.pyvrs-viewer-demo.tasks._pyvrs-viewer-download-hot3d-quest-vrs]
 cmd = """
 test -f data/hot3d_quest.vrs || \
 curl -L -o data/hot3d_quest.vrs \
@@ -1153,7 +1153,7 @@ curl -L -o data/hot3d_quest.vrs \
 cwd = "packages/pyvrs-viewer"
 description = "Download Hot3D Quest VRS example (2 mono cameras)"
 
-[feature.pyvrs-viewer-demo.tasks._download-hot3d-aria-vrs]
+[feature.pyvrs-viewer-demo.tasks._pyvrs-viewer-download-hot3d-aria-vrs]
 cmd = """
 test -f data/hot3d_aria.vrs || \
 curl -L -o data/hot3d_aria.vrs \
@@ -1163,24 +1163,24 @@ cwd = "packages/pyvrs-viewer"
 description = "Download Hot3D Aria VRS example (4 cameras + IMU + sensors)"
 
 # ── Demo tasks ───────────────────────────────────────────────────────────
-[feature.pyvrs-viewer-demo.tasks.vrs-to-rrd]
+[feature.pyvrs-viewer-demo.tasks.pyvrs-viewer-vrs-to-rrd]
 cmd = "python tools/demos/vrs_to_rrd.py"
 cwd = "packages/pyvrs-viewer"
 description = "Convert any VRS file (pass --vrs-path and other args after --)"
 
-[feature.pyvrs-viewer-demo.tasks.vrs-to-rrd-quest]
+[feature.pyvrs-viewer-demo.tasks.pyvrs-viewer-vrs-to-rrd-quest]
 cmd = "python tools/demos/vrs_to_rrd.py --vrs-path data/hot3d_quest.vrs --rr-config.save data/hot3d_quest.rrd"
-depends-on = ["_download-hot3d-quest-vrs"]
+depends-on = ["_pyvrs-viewer-download-hot3d-quest-vrs"]
 cwd = "packages/pyvrs-viewer"
 description = "Convert Hot3D Quest VRS to .rrd (2 mono cameras)"
 
-[feature.pyvrs-viewer-demo.tasks.vrs-to-rrd-aria]
+[feature.pyvrs-viewer-demo.tasks.pyvrs-viewer-vrs-to-rrd-aria]
 cmd = "python tools/demos/vrs_to_rrd.py --vrs-path data/hot3d_aria.vrs --rr-config.save data/hot3d_aria.rrd"
-depends-on = ["_download-hot3d-aria-vrs"]
+depends-on = ["_pyvrs-viewer-download-hot3d-aria-vrs"]
 cwd = "packages/pyvrs-viewer"
 description = "Convert Hot3D Aria VRS to .rrd (cameras + IMU + sensors)"
 
-[feature.pyvrs-viewer-demo.tasks.benchmark]
+[feature.pyvrs-viewer-demo.tasks.pyvrs-viewer-benchmark]
 cmd = "python tools/bench/run_benchmark.py"
 cwd = "packages/pyvrs-viewer"
 description = "Benchmark 5 Quest + 5 Aria VRS files (requires download URL JSONs)"
@@ -1243,7 +1243,7 @@ PACKAGE_DIR = "packages/mast3r-slam"
 # See docs/customoplibrary-migration-plan.md for the full package hierarchy.
 
 # ── Build tasks (CUDA extensions compiled via setuptools, no pip) ────────
-[feature.mast3r-slam.tasks._build-cuda-kernels]
+[feature.mast3r-slam.tasks._mast3r-slam-build-cuda-kernels]
 cmd = "python setup.py build_ext --inplace"
 cwd = "packages/mast3r-slam"
 description = "Build mast3r-slam CUDA backend kernels"
@@ -1256,14 +1256,14 @@ inputs = [
 outputs = ["packages/mast3r-slam/mast3r_slam/_backends*.so"]
 
 # ── Mojo kernel build ──────────────────────────────────────────────────
-[feature.mast3r-slam.tasks._build-mojo-kernels]
+[feature.mast3r-slam.tasks._mast3r-slam-build-mojo-kernels]
 cmd = "cd packages/mast3r-slam && mojo build --emit shared-lib -o mast3r_slam_mojo_backends.so mast3r_slam/backend/mojo/mast3r_slam_mojo_backends.mojo"
 description = "Build mast3r-slam Mojo backend kernels"
 inputs = ["packages/mast3r-slam/mast3r_slam/backend/mojo/*.mojo"]
 outputs = ["packages/mast3r-slam/mast3r_slam_mojo_backends*.so"]
 
 # ── Download tasks (hidden, used as depends-on) ─────────────────────────
-[feature.mast3r-slam.tasks._download-checkpoints]
+[feature.mast3r-slam.tasks._mast3r-slam-download-checkpoints]
 cmd = """
 hf download pablovela5620/mast3r-slam \
     MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth \
@@ -1277,7 +1277,7 @@ outputs = [
     "packages/mast3r-slam/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth",
 ]
 
-[feature.mast3r-slam.tasks._download-example-data]
+[feature.mast3r-slam.tasks._mast3r-slam-download-example-data]
 cmd = "hf download pablovela5620/mast3r-slam-example-data normal-apt-tour.mp4 livingroom-tour.mp4 --repo-type dataset --local-dir data/"
 cwd = "packages/mast3r-slam"
 outputs = [
@@ -1287,48 +1287,48 @@ outputs = [
 description = "Download example video data"
 
 # ── Test baseline task ──────────────────────────────────────────────────
-[feature.mast3r-slam.tasks._generate-test-baseline]
+[feature.mast3r-slam.tasks._mast3r-slam-generate-test-baseline]
 cmd = """python tools/mast3r_slam_inference.py \
   --dataset data/normal-apt-tour.mp4 --img-size 224 \
   --config config/test.yaml --max-frames 30 --no-viz \
   --rr-config.save tests/fixtures/baseline_30frames.rrd"""
 depends-on = [
-    "_build-cuda-kernels",
-    "_build-mojo-kernels",
-    "_download-checkpoints",
-    "_download-example-data",
+    "_mast3r-slam-build-cuda-kernels",
+    "_mast3r-slam-build-mojo-kernels",
+    "_mast3r-slam-download-checkpoints",
+    "_mast3r-slam-download-example-data",
 ]
 cwd = "packages/mast3r-slam"
 description = "Generate baseline .rrd for regression tests (30 frames, deterministic)"
 outputs = ["packages/mast3r-slam/tests/fixtures/baseline_30frames.rrd"]
 
 # ── Demo tasks ───────────────────────────────────────────────────────────
-[feature.mast3r-slam.tasks.example-quick]
+[feature.mast3r-slam.tasks.mast3r-slam-example-quick]
 cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.mp4 --img-size 224 --config config/fast.yaml --max-frames 100"
 depends-on = [
-    "_build-mojo-kernels",
-    "_download-checkpoints",
-    "_download-example-data",
+    "_mast3r-slam-build-mojo-kernels",
+    "_mast3r-slam-download-checkpoints",
+    "_mast3r-slam-download-example-data",
 ]
 cwd = "packages/mast3r-slam"
 description = "Run MASt3R-SLAM on first 100 frames (fast config, ~2 min)"
 
-[feature.mast3r-slam.tasks.example-fast]
+[feature.mast3r-slam.tasks.mast3r-slam-example-fast]
 cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.mp4 --img-size 224 --config config/fast.yaml"
 depends-on = [
-    "_build-mojo-kernels",
-    "_download-checkpoints",
-    "_download-example-data",
+    "_mast3r-slam-build-mojo-kernels",
+    "_mast3r-slam-download-checkpoints",
+    "_mast3r-slam-download-example-data",
 ]
 cwd = "packages/mast3r-slam"
 description = "Run MASt3R-SLAM inference (fast config, 224px, full video)"
 
-[feature.mast3r-slam.tasks.example-base]
+[feature.mast3r-slam.tasks.mast3r-slam-example-base]
 cmd = "python tools/mast3r_slam_inference.py --dataset data/normal-apt-tour.mp4 --img-size 512 --config config/base.yaml"
 depends-on = [
-    "_build-mojo-kernels",
-    "_download-checkpoints",
-    "_download-example-data",
+    "_mast3r-slam-build-mojo-kernels",
+    "_mast3r-slam-download-checkpoints",
+    "_mast3r-slam-download-example-data",
 ]
 cwd = "packages/mast3r-slam"
 description = "Run MASt3R-SLAM inference (base config, 512px)"
@@ -1336,9 +1336,9 @@ description = "Run MASt3R-SLAM inference (base config, 512px)"
 [feature.mast3r-slam.tasks.mast3r-slam-app]
 cmd = "python tools/gradio-app.py"
 depends-on = [
-    "_build-mojo-kernels",
-    "_download-checkpoints",
-    "_download-example-data",
+    "_mast3r-slam-build-mojo-kernels",
+    "_mast3r-slam-download-checkpoints",
+    "_mast3r-slam-download-example-data",
 ]
 cwd = "packages/mast3r-slam"
 description = "Launch MASt3R-SLAM Gradio web UI"
@@ -1386,12 +1386,12 @@ simplecv = { path = "packages/simplecv", editable = true }
 PACKAGE_DIR = "packages/gsplat-rust-renderer"
 
 # ── Download tasks ───────────────────────────────────────────────────────
-[feature.gsplat-rust-renderer.tasks._download-chair-ply]
+[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-chair-ply]
 cmd = "test -e examples/chair.ply || hf download pablovela5620/splat-dataset chair.ply --repo-type dataset --local-dir examples/"
 cwd = "packages/gsplat-rust-renderer"
 description = "Download example chair PLY from HuggingFace"
 
-[feature.gsplat-rust-renderer.tasks._download-tandt]
+[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-tandt]
 cmd = """
 test -d data/tandt || \
 (mkdir -p data && \
@@ -1403,28 +1403,28 @@ cwd = "packages/gsplat-rust-renderer"
 outputs = ["packages/gsplat-rust-renderer/data/tandt/"]
 description = "Download Tanks & Temples + Deep Blending datasets from INRIA"
 
-[feature.gsplat-rust-renderer.tasks._download-nerf-lego]
+[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerf-lego]
 cmd = "test -d data/nerf-synthetic/lego || hf download pablovela5620/nerf-synthetic-mirror --include 'lego/*' --repo-type dataset --local-dir data/nerf-synthetic/"
 cwd = "packages/gsplat-rust-renderer"
 description = "Download NeRF Synthetic lego scene from HuggingFace"
 
-[feature.gsplat-rust-renderer.tasks._download-nerf-hotdog]
+[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerf-hotdog]
 cmd = "test -d data/nerf-synthetic/hotdog || hf download pablovela5620/nerf-synthetic-mirror --include 'hotdog/*' --repo-type dataset --local-dir data/nerf-synthetic/"
 cwd = "packages/gsplat-rust-renderer"
 description = "Download NeRF Synthetic hotdog scene from HuggingFace"
 
-[feature.gsplat-rust-renderer.tasks._download-nerf-drums]
+[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerf-drums]
 cmd = "test -d data/nerf-synthetic/drums || hf download pablovela5620/nerf-synthetic-mirror --include 'drums/*' --repo-type dataset --local-dir data/nerf-synthetic/"
 cwd = "packages/gsplat-rust-renderer"
 description = "Download NeRF Synthetic drums scene from HuggingFace"
 
-[feature.gsplat-rust-renderer.tasks._download-nerf-ship]
+[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerf-ship]
 cmd = "test -d data/nerf-synthetic/ship || hf download pablovela5620/nerf-synthetic-mirror --include 'ship/*' --repo-type dataset --local-dir data/nerf-synthetic/"
 cwd = "packages/gsplat-rust-renderer"
 description = "Download NeRF Synthetic ship scene from HuggingFace"
 
 # ── Brush training tasks ─────────────────────────────────────────────────
-[feature.gsplat-rust-renderer.tasks.brush-train-truck]
+[feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-brush-train-truck]
 cmd = """
 brush_app data/tandt/truck \
   --total-steps 30000 \
@@ -1432,11 +1432,11 @@ brush_app data/tandt/truck \
   --export-path data/trained \
   --export-name truck.ply
 """
-depends-on = ["_download-tandt"]
+depends-on = ["_gsplat-rust-renderer-download-tandt"]
 cwd = "packages/gsplat-rust-renderer"
 description = "Train Gaussian splats on truck scene (30K steps)"
 
-[feature.gsplat-rust-renderer.tasks.brush-train-train]
+[feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-brush-train-train]
 cmd = """
 brush_app data/tandt/train \
   --total-steps 30000 \
@@ -1444,11 +1444,11 @@ brush_app data/tandt/train \
   --export-path data/trained \
   --export-name train.ply
 """
-depends-on = ["_download-tandt"]
+depends-on = ["_gsplat-rust-renderer-download-tandt"]
 cwd = "packages/gsplat-rust-renderer"
 description = "Train Gaussian splats on train scene (30K steps)"
 
-[feature.gsplat-rust-renderer.tasks.brush-train-lego]
+[feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-brush-train-lego]
 cmd = """
 brush_app data/nerf-synthetic/lego \
   --total-steps 30000 \
@@ -1456,11 +1456,11 @@ brush_app data/nerf-synthetic/lego \
   --export-path data/trained \
   --export-name lego.ply
 """
-depends-on = ["_download-nerf-lego"]
+depends-on = ["_gsplat-rust-renderer-download-nerf-lego"]
 cwd = "packages/gsplat-rust-renderer"
 description = "Train Gaussian splats on NeRF Synthetic lego scene (30K steps)"
 
-[feature.gsplat-rust-renderer.tasks.brush-train-hotdog]
+[feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-brush-train-hotdog]
 cmd = """
 brush_app data/nerf-synthetic/hotdog \
   --total-steps 30000 \
@@ -1468,21 +1468,21 @@ brush_app data/nerf-synthetic/hotdog \
   --export-path data/trained \
   --export-name hotdog.ply
 """
-depends-on = ["_download-nerf-hotdog"]
+depends-on = ["_gsplat-rust-renderer-download-nerf-hotdog"]
 cwd = "packages/gsplat-rust-renderer"
 description = "Train Gaussian splats on NeRF Synthetic hotdog scene (30K steps)"
 
-[feature.gsplat-rust-renderer.tasks._download-nerf-chair]
+[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerf-chair]
 cmd = "test -d data/nerf-synthetic/chair || hf download pablovela5620/nerf-synthetic-mirror --include 'chair/*' --repo-type dataset --local-dir data/nerf-synthetic/"
 cwd = "packages/gsplat-rust-renderer"
 description = "Download NeRF Synthetic chair scene from HuggingFace"
 
-[feature.gsplat-rust-renderer.tasks._download-trained-plys]
+[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-trained-plys]
 cmd = "mkdir -p data/trained && (test -f data/trained/chair.ply || hf download pablovela5620/nerf-synthetic-mirror --include 'trained/chair.ply' --repo-type dataset --local-dir data/) && (test -f data/trained/hotdog.ply || hf download pablovela5620/nerf-synthetic-mirror --include 'trained/hotdog.ply' --repo-type dataset --local-dir data/)"
 cwd = "packages/gsplat-rust-renderer"
 description = "Download pre-trained Gaussian splat PLYs for chair and hotdog"
 
-[feature.gsplat-rust-renderer.tasks.brush-train-chair]
+[feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-brush-train-chair]
 cmd = """
 brush_app data/nerf-synthetic/chair \
   --total-steps 30000 \
@@ -1490,41 +1490,41 @@ brush_app data/nerf-synthetic/chair \
   --export-path data/trained \
   --export-name chair.ply
 """
-depends-on = ["_download-nerf-chair"]
+depends-on = ["_gsplat-rust-renderer-download-nerf-chair"]
 cwd = "packages/gsplat-rust-renderer"
 description = "Train Gaussian splats on NeRF Synthetic chair scene (30K steps)"
 
 # ── Standalone render CLI ────────────────────────────────────────────────
-[feature.gsplat-rust-renderer.tasks.render]
+[feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-render]
 cmd = "cargo run --release --no-default-features --bin gsplat-render --"
 cwd = "packages/gsplat-rust-renderer"
 description = "Render a PLY at a NeRF camera position to PNG (no Rerun needed)"
 
 # ── Rust tasks ───────────────────────────────────────────────────────────
-[feature.gsplat-rust-renderer.tasks.viewer]
+[feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-viewer]
 cmd = "cargo run --release --bin gsplat-rust-renderer"
 cwd = "packages/gsplat-rust-renderer"
 description = "Launch the Rerun viewer with Gaussian splat visualization"
 
-[feature.gsplat-rust-renderer.tasks.fmt]
+[feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-fmt]
 cmd = "cargo fmt --all"
 cwd = "packages/gsplat-rust-renderer"
 description = "Format Rust code"
 
-[feature.gsplat-rust-renderer.tasks.clippy]
+[feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-clippy]
 cmd = "cargo clippy --all-targets -- -D warnings"
 cwd = "packages/gsplat-rust-renderer"
 description = "Run clippy on Rust code"
 
-[feature.gsplat-rust-renderer.tasks.rust-test]
+[feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-rust-test]
 cmd = "cargo test"
 cwd = "packages/gsplat-rust-renderer"
 description = "Run Rust test suite"
 
 # ── Python demo tasks ────────────────────────────────────────────────────
-[feature.gsplat-rust-renderer.tasks.log-ply]
+[feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-log-ply]
 cmd = "python tools/log_gaussian_ply.py --rr-config.connect --rr-config.application-id gsplat-rust-renderer"
-depends-on = ["_download-chair-ply"]
+depends-on = ["_gsplat-rust-renderer-download-chair-ply"]
 cwd = "packages/gsplat-rust-renderer"
 description = "Load example PLY and log it to the running viewer"
 
@@ -1597,24 +1597,24 @@ outputs = [
     "packages/dpvo/dpvo/_cuda_ba*.so",
 ]
 
-[feature.dpvo.tasks._download-orb-vocab]
+[feature.dpvo.tasks._dpvo-download-orb-vocab]
 cmd = "bash -lc 'if [ ! -f ORBvoc.txt ]; then curl -L https://github.com/UZ-SLAMLab/ORB_SLAM3/raw/master/Vocabulary/ORBvoc.txt.tar.gz | tar xz; fi'"
 cwd = "packages/dpvo"
 outputs = ["packages/dpvo/ORBvoc.txt"]
 description = "Download ORB vocabulary for DBoW2 loop closure"
 
 # ── EuRoC evaluation tasks ───────────────────────────────────────────────
-[feature.dpvo.tasks._download-euroc]
+[feature.dpvo.tasks._dpvo-download-euroc]
 cmd = "python -c \"from dpvo.api.euroc import download_euroc; download_euroc()\""
 cwd = "packages/dpvo"
 description = "Download EuRoC MH_01-MH_05 sequences (~2GB each)"
 
-[feature.dpvo.tasks.eval-euroc]
+[feature.dpvo.tasks.dpvo-eval-euroc]
 cmd = "python tools/eval_euroc.py --modes vo slam --stride 2 --trials 1"
 depends-on = [
     "_build-dpvo-cuda-kernels",
     "_download-dpvo-model",
-    "_download-euroc",
+    "_dpvo-download-euroc",
 ]
 cwd = "packages/dpvo"
 description = "Evaluate DPV-SLAM on EuRoC MH sequences (VO + SLAM)"
@@ -1726,39 +1726,39 @@ prompt-da-dev = { features = [
     "prompt-da",
     "dev",
 ], solve-group = "prompt-da", no-default-feature = true }
-wilor = { features = [
+wilor-nano = { features = [
     "common",
     "cuda",
-    "wilor",
-], solve-group = "wilor", no-default-feature = true }
-wilor-dev = { features = [
+    "wilor-nano",
+], solve-group = "wilor-nano", no-default-feature = true }
+wilor-nano-dev = { features = [
     "common",
     "cuda",
-    "wilor",
+    "wilor-nano",
     "dev",
-], solve-group = "wilor", no-default-feature = true }
-sam3d = { features = [
+], solve-group = "wilor-nano", no-default-feature = true }
+sam3d-body = { features = [
     "common",
     "cuda",
-    "sam3d",
-], solve-group = "sam3d", no-default-feature = true }
-sam3d-dev = { features = [
+    "sam3d-body",
+], solve-group = "sam3d-body", no-default-feature = true }
+sam3d-body-dev = { features = [
     "common",
     "cuda",
-    "sam3d",
+    "sam3d-body",
     "dev",
-], solve-group = "sam3d", no-default-feature = true }
-sam3-rerun = { features = [
+], solve-group = "sam3d-body", no-default-feature = true }
+sam3 = { features = [
     "common",
     "cuda",
-    "sam3-rerun",
-], solve-group = "sam3-rerun", no-default-feature = true }
-sam3-rerun-dev = { features = [
+    "sam3",
+], solve-group = "sam3", no-default-feature = true }
+sam3-dev = { features = [
     "common",
     "cuda",
-    "sam3-rerun",
+    "sam3",
     "dev",
-], solve-group = "sam3-rerun", no-default-feature = true }
+], solve-group = "sam3", no-default-feature = true }
 sapiens2-pose = { features = [
     "common",
     "cuda",
@@ -1781,15 +1781,15 @@ sapiens-coco133-pose-dev = { features = [
     "sapiens-coco133-pose",
     "dev",
 ], solve-group = "sapiens-coco133-pose", no-default-feature = true }
-robocap = { features = [
+robocap-slam = { features = [
     "common",
-    "robocap",
-], solve-group = "robocap", no-default-feature = true }
-robocap-dev = { features = [
+    "robocap-slam",
+], solve-group = "robocap-slam", no-default-feature = true }
+robocap-slam-dev = { features = [
     "common",
-    "robocap",
+    "robocap-slam",
     "dev",
-], solve-group = "robocap", no-default-feature = true }
+], solve-group = "robocap-slam", no-default-feature = true }
 pysfm = { features = [
     "common",
     "cuda",

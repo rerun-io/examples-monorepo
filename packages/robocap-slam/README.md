@@ -32,7 +32,7 @@ This is Linux only with an NVIDIA GPU.
 ```bash
 git clone https://github.com/rerun-io/robocap-slam.git
 cd robocap-slam
-pixi run robocap-track
+pixi run robocap-slam-track
 ```
 
 On the first run, an example dataset (~100 MB) is automatically downloaded from [HuggingFace](https://huggingface.co/datasets/pablovela5620/robocap-example) into `data/robocap/`. Subsequent runs skip the download.
@@ -66,9 +66,9 @@ robocap-slam/
 ### Pixi tasks
 
 ```bash
-pixi run robocap-track           # Multicamera odometry on Robocap data
-pixi run robocap-track-slam      # Multicamera SLAM on Robocap data
-pixi run -e robocap-dev robocap-track    # With runtime type checking
+pixi run robocap-slam-track           # Multicamera odometry on Robocap data
+pixi run robocap-slam-track-slam      # Multicamera SLAM on Robocap data
+pixi run -e robocap-slam-dev robocap-slam-track    # With runtime type checking
 ```
 
 ### CLI flags (tyro)
