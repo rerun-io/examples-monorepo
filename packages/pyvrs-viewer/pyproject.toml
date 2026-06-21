@@ -31,3 +31,4 @@ paths = ["src/pyvrs_viewer", "tests", "tools"]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*", "*/thirdparty/*"]
 sort_by_size = true
 min_confidence = 60
+ignore_names = ["pix_fmt", "time_base", "max_b_frames", "gop_size", "options", "enabled", "encoder_name"]

@@ -138,7 +138,7 @@ class RetrievalDBOW:
     def __enter__(self) -> "RetrievalDBOW":
         return self
 
-    def __exit__(self, *exc: object) -> None:
+    def __exit__(self, *_exc: object) -> None:
         self.close()
 
     def close(self) -> None:

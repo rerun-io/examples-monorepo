@@ -12,38 +12,14 @@ between black-box and streamed runs.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import pycolmap
-from jaxtyping import Float32, UInt8
+from jaxtyping import Float32
 from numpy import ndarray
 
 logger: logging.Logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Per-image result dataclass
-# ---------------------------------------------------------------------------
-@dataclass
-class PerImageExtractionResult:
-    """Per-image feature extraction data for Rerun logging."""
-
-    image_id: int
-    """COLMAP database image_id."""
-    image_name: str
-    """Relative image path (e.g. ``'rig1/cam1/image0001.jpg'``)."""
-    image_rgb: UInt8[ndarray, "H W 3"]
-    """Original-resolution RGB image."""
-    keypoints_xy: Float32[ndarray, "N 2"]
-    """Extracted keypoint positions (x, y) in original image coordinates."""
-    num_keypoints: int
-    """Number of extracted keypoints."""
-    image_index: int
-    """0-based index in the extraction sequence."""
-    total_images: int
-    """Total number of images being processed."""
 
 
 # ---------------------------------------------------------------------------

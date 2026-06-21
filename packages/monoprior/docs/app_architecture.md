@@ -100,16 +100,25 @@ if __name__ == "__main__":
     demo.queue().launch(ssr_mode=False)
 ```
 
-**Daggr node** (not yet implemented for calibration, but the pattern from wilor-nano):
+**Daggr graph** (`tools/daggr_multiview_calibration.py`) -- the calibration pipeline is composed from four independent node apps rather than a single calibration endpoint. Each node runs on its own port (multiview geometry on 7870, SAM3 segmentation on 7871, metric depth on 7872, depth alignment on 7873):
 ```python
 from daggr import GradioNode, Graph
 
-calibration_node = GradioNode(
-    "http://localhost:7860",
-    api_name="/multiview_calibration_fn",
-    name="Multiview Calibration",
+# Node 1: Multiview Geometry -- oriented poses, depths, confidences
+multiview_node = GradioNode(
+    "http://localhost:7870",
+    api_name="/multiview_geometry_fn",
+    name="Multiview Geometry",
     inputs={"img_files": shared_images},
-    outputs={"rrd": Rerun(streaming=True), "status": gr.Textbox()},
+    outputs={"rrd": Rerun(streaming=True, visible=False), "status": gr.Textbox()},
+)
+
+# Plus sam3_node (7871, /sam3d_prediction_fn), metric_depth_node (7872,
+# /metric_depth_fn), and alignment_node (7873, /depth_alignment_fn)
+
+graph = Graph(
+    name="Multi-View Calibration Pipeline",
+    nodes=[multiview_node, sam3_node, metric_depth_node, alignment_node],
 )
 ```
 

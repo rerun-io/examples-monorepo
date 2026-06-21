@@ -33,4 +33,6 @@ ignore = [
 paths = ["src/vistadream", "tests", "tools"]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true
-min_confidence = 60
+# VistaDream exposes experimental Gaussian scene helpers and Tyro config fields
+# that Vulture reports at 60% despite being runtime/public surfaces.
+min_confidence = 80

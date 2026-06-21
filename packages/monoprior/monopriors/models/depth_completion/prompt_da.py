@@ -52,11 +52,12 @@ class PromptDAPredictor(BaseCompletionPredictor):
         original_height, original_width, _ = rgb_hw3.shape
 
         rgb_b3hw: Float32[Tensor, "1 3 h w"] = self.preprocess_rgb(rgb_hw3)
-        prompt_depth = self.preprocess_depths(prompt_depth)
+        prompt_depth_b11hw: Float32[Tensor, "1 1 192 256"] = self.preprocess_depths(prompt_depth)
 
-        rgb_b3hw, prompt_depth = rgb_b3hw.to(self.device), prompt_depth.to(self.device)
+        rgb_b3hw = rgb_b3hw.to(self.device)
+        prompt_depth_b11hw = prompt_depth_b11hw.to(self.device)
         depth_pred: Float32[Tensor, "1 1 h w"] = self.model.predict(
-            rgb_b3hw, prompt_depth
+            rgb_b3hw, prompt_depth_b11hw
         )
 
         # convert predicted depth to numpy array and UInt16 mm and resize to match the image size
@@ -101,10 +102,10 @@ class PromptDAPredictor(BaseCompletionPredictor):
             tar_w: int = ensure_multiple_of(x=w * scale)
             rgb_hw3 = cv2.resize(rgb_hw3, (tar_w, tar_h), interpolation=cv2.INTER_AREA)
 
-        rgb_b3hw: Float32[ndarray, "1 3 h w"] = rearrange(
+        rgb_b3hw_np: Float32[ndarray, "1 3 h w"] = rearrange(
             rgb_hw3, "h w c -> 1 c h w"
         ).astype(np.float32)
-        rgb_b3hw: Float32[Tensor, "1 3 h w"] = torch.from_numpy(rgb_b3hw) / 255.0
+        rgb_b3hw: Float32[Tensor, "1 3 h w"] = torch.from_numpy(rgb_b3hw_np) / 255.0
         return rgb_b3hw
 
     def preprocess_depths(
@@ -128,12 +129,12 @@ class PromptDAPredictor(BaseCompletionPredictor):
             - Adds batch and channel dimensions to the input array
         """
         # convert depth data to tensor
-        prompt_depth: Float32[ndarray, "192 256"] = prompt_depth.astype(np.float32)
-        prompt_depth: Float32[ndarray, "1 1 192 256"] = rearrange(
-            prompt_depth, "h w -> 1 1 h w"
+        prompt_depth_f32: Float32[ndarray, "192 256"] = prompt_depth.astype(np.float32)
+        prompt_depth_b11hw_np: Float32[ndarray, "1 1 192 256"] = rearrange(
+            prompt_depth_f32, "h w -> 1 1 h w"
         )
         # convert to meters from mm
-        prompt_depth: Float32[Tensor, "1 1 192 256"] = (
-            torch.from_numpy(prompt_depth) / 1000
+        prompt_depth_b11hw: Float32[Tensor, "1 1 192 256"] = (
+            torch.from_numpy(prompt_depth_b11hw_np) / 1000
         )
-        return prompt_depth
+        return prompt_depth_b11hw

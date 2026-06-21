@@ -44,7 +44,7 @@
       "path": "simplecv/apis/convert_to_ns.py",
       "code": -2,
       "name": "bad-assignment",
-      "description": "`Mat | ndarray[Any, dtype[floating | integer]] | None` is not assignable to `ndarray`",
+      "description": "`Mat | ndarray[Any, dtype[floating | integer]] | None` is not assignable to `ndarray`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check or changing the declared type to `ndarray | None`.",
       "concise_description": "`Mat | ndarray[Any, dtype[floating | integer]] | None` is not assignable to `ndarray`",
       "severity": "error"
     },
@@ -56,7 +56,7 @@
       "path": "simplecv/apis/convert_to_ns.py",
       "code": -2,
       "name": "bad-argument-type",
-      "description": "Argument `ndarray | None` is not assignable to parameter `K_33` with type `ndarray` in function `simplecv.ops.tsdf_depth_fuser.Open3DFuser.fuse_frames`",
+      "description": "Argument `ndarray | None` is not assignable to parameter `K_33` with type `ndarray` in function `simplecv.ops.tsdf_depth_fuser.Open3DFuser.fuse_frames`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
       "concise_description": "Argument `ndarray | None` is not assignable to parameter `K_33` with type `ndarray` in function `simplecv.ops.tsdf_depth_fuser.Open3DFuser.fuse_frames`",
       "severity": "error"
     },
@@ -284,7 +284,7 @@
       "path": "simplecv/apis/mano_optim_benchmark_multi.py",
       "code": -2,
       "name": "bad-argument-type",
-      "description": "Argument `ndarray | None` is not assignable to parameter `beta` with type `ndarray` in function `simplecv.ops.mano.optim_jax_multi.ManoOptimization.__init__`",
+      "description": "Argument `ndarray | None` is not assignable to parameter `beta` with type `ndarray` in function `simplecv.ops.mano.optim_jax_multi.ManoOptimization.__init__`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
       "concise_description": "Argument `ndarray | None` is not assignable to parameter `beta` with type `ndarray` in function `simplecv.ops.mano.optim_jax_multi.ManoOptimization.__init__`",
       "severity": "error"
     },
@@ -524,7 +524,7 @@
       "path": "simplecv/apis/mano_optim_benchmark_single.py",
       "code": -2,
       "name": "bad-argument-type",
-      "description": "Argument `ndarray | None` is not assignable to parameter `beta` with type `ndarray` in function `simplecv.ops.mano.optim_jax_multi.ManoOptimization.__init__`",
+      "description": "Argument `ndarray | None` is not assignable to parameter `beta` with type `ndarray` in function `simplecv.ops.mano.optim_jax_multi.ManoOptimization.__init__`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
       "concise_description": "Argument `ndarray | None` is not assignable to parameter `beta` with type `ndarray` in function `simplecv.ops.mano.optim_jax_multi.ManoOptimization.__init__`",
       "severity": "error"
     },
@@ -740,7 +740,7 @@
       "path": "simplecv/conversion_utils.py",
       "code": -2,
       "name": "bad-argument-type",
-      "description": "Argument `float | floating | None` is not assignable to parameter `fl_x` with type `float` in function `NerfstudioData.__init__`",
+      "description": "Argument `float | floating | None` is not assignable to parameter `fl_x` with type `float` in function `NerfstudioData.__init__`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
       "concise_description": "Argument `float | floating | None` is not assignable to parameter `fl_x` with type `float` in function `NerfstudioData.__init__`",
       "severity": "error"
     },
@@ -752,7 +752,7 @@
       "path": "simplecv/conversion_utils.py",
       "code": -2,
       "name": "bad-argument-type",
-      "description": "Argument `float | floating | None` is not assignable to parameter `fl_y` with type `float` in function `NerfstudioData.__init__`",
+      "description": "Argument `float | floating | None` is not assignable to parameter `fl_y` with type `float` in function `NerfstudioData.__init__`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
       "concise_description": "Argument `float | floating | None` is not assignable to parameter `fl_y` with type `float` in function `NerfstudioData.__init__`",
       "severity": "error"
     },
@@ -764,7 +764,7 @@
       "path": "simplecv/conversion_utils.py",
       "code": -2,
       "name": "bad-argument-type",
-      "description": "Argument `float | floating | None` is not assignable to parameter `cx` with type `float` in function `NerfstudioData.__init__`",
+      "description": "Argument `float | floating | None` is not assignable to parameter `cx` with type `float` in function `NerfstudioData.__init__`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
       "concise_description": "Argument `float | floating | None` is not assignable to parameter `cx` with type `float` in function `NerfstudioData.__init__`",
       "severity": "error"
     },
@@ -776,7 +776,7 @@
       "path": "simplecv/conversion_utils.py",
       "code": -2,
       "name": "bad-argument-type",
-      "description": "Argument `float | floating | None` is not assignable to parameter `cy` with type `float` in function `NerfstudioData.__init__`",
+      "description": "Argument `float | floating | None` is not assignable to parameter `cy` with type `float` in function `NerfstudioData.__init__`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
       "concise_description": "Argument `float | floating | None` is not assignable to parameter `cy` with type `float` in function `NerfstudioData.__init__`",
       "severity": "error"
     },
@@ -1153,39 +1153,15 @@
       "severity": "error"
     },
     {
-      "line": 92,
-      "column": 13,
-      "stop_line": 92,
-      "stop_column": 40,
-      "path": "simplecv/data/ego/rrd_ego.py",
-      "code": -2,
-      "name": "unsupported-operation",
-      "description": "Cannot set item in `None`\n  Object of class `NoneType` has no attribute `__setitem__`",
-      "concise_description": "Cannot set item in `None`",
-      "severity": "error"
-    },
-    {
-      "line": 252,
+      "line": 274,
       "column": 38,
-      "stop_line": 252,
+      "stop_line": 274,
       "stop_column": 81,
       "path": "simplecv/data/ego/rrd_ego.py",
       "code": -2,
       "name": "bad-assignment",
       "description": "`TorchCodecMultiVideoReader` is not assignable to attribute `ego_video_readers` with type `MultiVideoReader`",
       "concise_description": "`TorchCodecMultiVideoReader` is not assignable to attribute `ego_video_readers` with type `MultiVideoReader`",
-      "severity": "error"
-    },
-    {
-      "line": 252,
-      "column": 65,
-      "stop_line": 252,
-      "stop_column": 80,
-      "path": "simplecv/data/ego/rrd_ego.py",
-      "code": -2,
-      "name": "bad-argument-type",
-      "description": "Argument `list[bytes]` is not assignable to parameter `video_sources` with type `list[Path | bytes]` in function `simplecv.video_io.TorchCodecMultiVideoReader.__init__`",
-      "concise_description": "Argument `list[bytes]` is not assignable to parameter `video_sources` with type `list[Path | bytes]` in function `simplecv.video_io.TorchCodecMultiVideoReader.__init__`",
       "severity": "error"
     },
     {
@@ -1448,38 +1424,14 @@
       "path": "simplecv/data/exo/hocap_exo.py",
       "code": -2,
       "name": "bad-assignment",
-      "description": "`ndarray | None` is not assignable to `ndarray`",
+      "description": "`ndarray | None` is not assignable to `ndarray`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check or changing the declared type to `ndarray | None`.",
       "concise_description": "`ndarray | None` is not assignable to `ndarray`",
       "severity": "error"
     },
     {
-      "line": 67,
-      "column": 29,
-      "stop_line": 67,
-      "stop_column": 46,
-      "path": "simplecv/data/exo/rrd_exo.py",
-      "code": -2,
-      "name": "bad-argument-type",
-      "description": "Argument `list[PinholeParameters | None]` is not assignable to parameter `cam_params_list` with type `list[PinholeParameters]` in function `simplecv.data.exo.base_exo.ExoData.__init__`",
-      "concise_description": "Argument `list[PinholeParameters | None]` is not assignable to parameter `cam_params_list` with type `list[PinholeParameters]` in function `simplecv.data.exo.base_exo.ExoData.__init__`",
-      "severity": "error"
-    },
-    {
-      "line": 118,
-      "column": 17,
-      "stop_line": 118,
-      "stop_column": 54,
-      "path": "simplecv/data/exo/rrd_exo.py",
-      "code": -2,
-      "name": "unsupported-operation",
-      "description": "Cannot set item in `None`\n  Object of class `NoneType` has no attribute `__setitem__`",
-      "concise_description": "Cannot set item in `None`",
-      "severity": "error"
-    },
-    {
-      "line": 124,
+      "line": 129,
       "column": 38,
-      "stop_line": 124,
+      "stop_line": 129,
       "stop_column": 79,
       "path": "simplecv/data/exo/rrd_exo.py",
       "code": -2,
@@ -1489,9 +1441,9 @@
       "severity": "error"
     },
     {
-      "line": 160,
+      "line": 165,
       "column": 38,
-      "stop_line": 160,
+      "stop_line": 165,
       "stop_column": 79,
       "path": "simplecv/data/exo/rrd_exo.py",
       "code": -2,
@@ -1508,7 +1460,7 @@
       "path": "simplecv/data/exoego/aria_gen2_pilot.py",
       "code": -2,
       "name": "unsupported-operation",
-      "description": "`*` is not supported between `Categorical` and `signedinteger[_64Bit]`\n  No matching overload found for function `numpy.signedinteger.__rmul__` called with arguments: (Categorical)\n  Possible overloads:\n  (other: numpy.bool | int | signedinteger[_8Bit], /) -> signedinteger[_64Bit] [closest match]\n  (other: float, /) -> float64\n  (other: complex, /) -> complex128\n  (other: signedinteger, /) -> signedinteger\n  (other: integer, /) -> Any",
+      "description": "`*` is not supported between `Categorical` and `signedinteger[_64Bit]`\n  No matching overload found for function `numpy.signedinteger.__rmul__` called with arguments: (Categorical)\n  Possible overloads:\n    (other: numpy.bool | int | signedinteger[_8Bit], /) -> signedinteger[_64Bit] [closest match]\n    (other: float, /) -> float64\n    (other: complex, /) -> complex128\n    (other: signedinteger, /) -> signedinteger\n    (other: integer, /) -> Any\n  Argument `Categorical` is not assignable to parameter `other` with type `numpy.bool | int | signedinteger[_8Bit]` in function `numpy.signedinteger.__rmul__`",
       "concise_description": "`*` is not supported between `Categorical` and `signedinteger[_64Bit]`",
       "severity": "error"
     },
@@ -1520,7 +1472,7 @@
       "path": "simplecv/data/exoego/aria_gen2_pilot.py",
       "code": -2,
       "name": "unsupported-operation",
-      "description": "`*` is not supported between `ExtensionArray` and `signedinteger[_64Bit]`\n  No matching overload found for function `numpy.signedinteger.__rmul__` called with arguments: (ExtensionArray)\n  Possible overloads:\n  (other: numpy.bool | int | signedinteger[_8Bit], /) -> signedinteger[_64Bit] [closest match]\n  (other: float, /) -> float64\n  (other: complex, /) -> complex128\n  (other: signedinteger, /) -> signedinteger\n  (other: integer, /) -> Any",
+      "description": "`*` is not supported between `ExtensionArray` and `signedinteger[_64Bit]`\n  No matching overload found for function `numpy.signedinteger.__rmul__` called with arguments: (ExtensionArray)\n  Possible overloads:\n    (other: numpy.bool | int | signedinteger[_8Bit], /) -> signedinteger[_64Bit] [closest match]\n    (other: float, /) -> float64\n    (other: complex, /) -> complex128\n    (other: signedinteger, /) -> signedinteger\n    (other: integer, /) -> Any\n  Argument `ExtensionArray` is not assignable to parameter `other` with type `numpy.bool | int | signedinteger[_8Bit]` in function `numpy.signedinteger.__rmul__`",
       "concise_description": "`*` is not supported between `ExtensionArray` and `signedinteger[_64Bit]`",
       "severity": "error"
     },
@@ -1808,7 +1760,7 @@
       "path": "simplecv/data/polycam.py",
       "code": -2,
       "name": "bad-assignment",
-      "description": "`Mat | ndarray[Any, dtype[floating | integer]] | None` is not assignable to `ndarray`",
+      "description": "`Mat | ndarray[Any, dtype[floating | integer]] | None` is not assignable to `ndarray`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check or changing the declared type to `ndarray | None`.",
       "concise_description": "`Mat | ndarray[Any, dtype[floating | integer]] | None` is not assignable to `ndarray`",
       "severity": "error"
     },
@@ -1820,7 +1772,7 @@
       "path": "simplecv/data/polycam.py",
       "code": -2,
       "name": "bad-assignment",
-      "description": "`Mat | ndarray[Any, dtype[floating | integer]] | None` is not assignable to `ndarray`",
+      "description": "`Mat | ndarray[Any, dtype[floating | integer]] | None` is not assignable to `ndarray`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check or changing the declared type to `ndarray | None`.",
       "concise_description": "`Mat | ndarray[Any, dtype[floating | integer]] | None` is not assignable to `ndarray`",
       "severity": "error"
     },
@@ -1832,7 +1784,7 @@
       "path": "simplecv/data/polycam.py",
       "code": -2,
       "name": "bad-assignment",
-      "description": "`Mat | ndarray[Any, dtype[floating | integer]] | None` is not assignable to `ndarray`",
+      "description": "`Mat | ndarray[Any, dtype[floating | integer]] | None` is not assignable to `ndarray`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check or changing the declared type to `ndarray | None`.",
       "concise_description": "`Mat | ndarray[Any, dtype[floating | integer]] | None` is not assignable to `ndarray`",
       "severity": "error"
     },
@@ -1892,7 +1844,7 @@
       "path": "simplecv/ops/mano/mano_jax.py",
       "code": -2,
       "name": "no-matching-overload",
-      "description": "No matching overload found for function `huggingface_hub.file_download.hf_hub_download` called with arguments: (repo_id=Literal['pablovela5620/wilor-nano'], subfolder=Literal['pretrained_models/mano_clean'], filename=str, local_dir=Path, local_dir_use_symlinks=Literal[False])\n  Possible overloads:\n  (repo_id: str, filename: str, *, subfolder: str | None = None, repo_type: str | None = None, revision: str | None = None, library_name: str | None = None, library_version: str | None = None, cache_dir: Path | str | None = None, local_dir: Path | str | None = None, user_agent: dict[Unknown, Unknown] | str | None = None, force_download: bool = False, etag_timeout: float = 10, token: bool | str | None = None, local_files_only: bool = False, headers: dict[str, str] | None = None, endpoint: str | None = None, tqdm_class: type[tqdm_asyncio[Unknown]] | None = None, dry_run: Literal[False] = False) -> str [closest match]\n  (repo_id: str, filename: str, *, subfolder: str | None = None, repo_type: str | None = None, revision: str | None = None, library_name: str | None = None, library_version: str | None = None, cache_dir: Path | str | None = None, local_dir: Path | str | None = None, user_agent: dict[Unknown, Unknown] | str | None = None, force_download: bool = False, etag_timeout: float = 10, token: bool | str | None = None, local_files_only: bool = False, headers: dict[str, str] | None = None, endpoint: str | None = None, tqdm_class: type[tqdm_asyncio[Unknown]] | None = None, dry_run: Literal[True] = True) -> DryRunFileInfo\n  (repo_id: str, filename: str, *, subfolder: str | None = None, repo_type: str | None = None, revision: str | None = None, library_name: str | None = None, library_version: str | None = None, cache_dir: Path | str | None = None, local_dir: Path | str | None = None, user_agent: dict[Unknown, Unknown] | str | None = None, force_download: bool = False, etag_timeout: float = 10, token: bool | str | None = None, local_files_only: bool = False, headers: dict[str, str] | None = None, endpoint: str | None = None, tqdm_class: type[tqdm_asyncio[Unknown]] | None = None, dry_run: bool = False) -> DryRunFileInfo | str",
+      "description": "No matching overload found for function `huggingface_hub.file_download.hf_hub_download` called with arguments: (repo_id=Literal['pablovela5620/wilor-nano'], subfolder=Literal['pretrained_models/mano_clean'], filename=str, local_dir=Path, local_dir_use_symlinks=Literal[False])\n  Possible overloads:\n    (repo_id: str, filename: str, *, subfolder: str | None = None, repo_type: str | None = None, revision: str | None = None, library_name: str | None = None, library_version: str | None = None, cache_dir: Path | str | None = None, local_dir: Path | str | None = None, user_agent: dict[Unknown, Unknown] | str | None = None, force_download: bool = False, etag_timeout: float = 10, token: bool | str | None = None, local_files_only: bool = False, headers: dict[str, str] | None = None, endpoint: str | None = None, tqdm_class: type[tqdm_asyncio[Unknown]] | None = None, dry_run: Literal[False] = False) -> str [closest match]\n    (repo_id: str, filename: str, *, subfolder: str | None = None, repo_type: str | None = None, revision: str | None = None, library_name: str | None = None, library_version: str | None = None, cache_dir: Path | str | None = None, local_dir: Path | str | None = None, user_agent: dict[Unknown, Unknown] | str | None = None, force_download: bool = False, etag_timeout: float = 10, token: bool | str | None = None, local_files_only: bool = False, headers: dict[str, str] | None = None, endpoint: str | None = None, tqdm_class: type[tqdm_asyncio[Unknown]] | None = None, dry_run: Literal[True] = True) -> DryRunFileInfo\n    (repo_id: str, filename: str, *, subfolder: str | None = None, repo_type: str | None = None, revision: str | None = None, library_name: str | None = None, library_version: str | None = None, cache_dir: Path | str | None = None, local_dir: Path | str | None = None, user_agent: dict[Unknown, Unknown] | str | None = None, force_download: bool = False, etag_timeout: float = 10, token: bool | str | None = None, local_files_only: bool = False, headers: dict[str, str] | None = None, endpoint: str | None = None, tqdm_class: type[tqdm_asyncio[Unknown]] | None = None, dry_run: bool = False) -> DryRunFileInfo | str\n  Unexpected keyword argument `local_dir_use_symlinks` in function `huggingface_hub.file_download.hf_hub_download`",
       "concise_description": "No matching overload found for function `huggingface_hub.file_download.hf_hub_download` called with arguments: (repo_id=Literal['pablovela5620/wilor-nano'], subfolder=Literal['pretrained_models/mano_clean'], filename=str, local_dir=Path, local_dir_use_symlinks=Literal[False])",
       "severity": "error"
     },
@@ -1904,7 +1856,7 @@
       "path": "simplecv/ops/mano/mano_np.py",
       "code": -2,
       "name": "no-matching-overload",
-      "description": "No matching overload found for function `huggingface_hub.file_download.hf_hub_download` called with arguments: (repo_id=Literal['pablovela5620/wilor-nano'], subfolder=Literal['pretrained_models/mano_clean'], filename=str, local_dir=Path, local_dir_use_symlinks=Literal[False])\n  Possible overloads:\n  (repo_id: str, filename: str, *, subfolder: str | None = None, repo_type: str | None = None, revision: str | None = None, library_name: str | None = None, library_version: str | None = None, cache_dir: Path | str | None = None, local_dir: Path | str | None = None, user_agent: dict[Unknown, Unknown] | str | None = None, force_download: bool = False, etag_timeout: float = 10, token: bool | str | None = None, local_files_only: bool = False, headers: dict[str, str] | None = None, endpoint: str | None = None, tqdm_class: type[tqdm_asyncio[Unknown]] | None = None, dry_run: Literal[False] = False) -> str [closest match]\n  (repo_id: str, filename: str, *, subfolder: str | None = None, repo_type: str | None = None, revision: str | None = None, library_name: str | None = None, library_version: str | None = None, cache_dir: Path | str | None = None, local_dir: Path | str | None = None, user_agent: dict[Unknown, Unknown] | str | None = None, force_download: bool = False, etag_timeout: float = 10, token: bool | str | None = None, local_files_only: bool = False, headers: dict[str, str] | None = None, endpoint: str | None = None, tqdm_class: type[tqdm_asyncio[Unknown]] | None = None, dry_run: Literal[True] = True) -> DryRunFileInfo\n  (repo_id: str, filename: str, *, subfolder: str | None = None, repo_type: str | None = None, revision: str | None = None, library_name: str | None = None, library_version: str | None = None, cache_dir: Path | str | None = None, local_dir: Path | str | None = None, user_agent: dict[Unknown, Unknown] | str | None = None, force_download: bool = False, etag_timeout: float = 10, token: bool | str | None = None, local_files_only: bool = False, headers: dict[str, str] | None = None, endpoint: str | None = None, tqdm_class: type[tqdm_asyncio[Unknown]] | None = None, dry_run: bool = False) -> DryRunFileInfo | str",
+      "description": "No matching overload found for function `huggingface_hub.file_download.hf_hub_download` called with arguments: (repo_id=Literal['pablovela5620/wilor-nano'], subfolder=Literal['pretrained_models/mano_clean'], filename=str, local_dir=Path, local_dir_use_symlinks=Literal[False])\n  Possible overloads:\n    (repo_id: str, filename: str, *, subfolder: str | None = None, repo_type: str | None = None, revision: str | None = None, library_name: str | None = None, library_version: str | None = None, cache_dir: Path | str | None = None, local_dir: Path | str | None = None, user_agent: dict[Unknown, Unknown] | str | None = None, force_download: bool = False, etag_timeout: float = 10, token: bool | str | None = None, local_files_only: bool = False, headers: dict[str, str] | None = None, endpoint: str | None = None, tqdm_class: type[tqdm_asyncio[Unknown]] | None = None, dry_run: Literal[False] = False) -> str [closest match]\n    (repo_id: str, filename: str, *, subfolder: str | None = None, repo_type: str | None = None, revision: str | None = None, library_name: str | None = None, library_version: str | None = None, cache_dir: Path | str | None = None, local_dir: Path | str | None = None, user_agent: dict[Unknown, Unknown] | str | None = None, force_download: bool = False, etag_timeout: float = 10, token: bool | str | None = None, local_files_only: bool = False, headers: dict[str, str] | None = None, endpoint: str | None = None, tqdm_class: type[tqdm_asyncio[Unknown]] | None = None, dry_run: Literal[True] = True) -> DryRunFileInfo\n    (repo_id: str, filename: str, *, subfolder: str | None = None, repo_type: str | None = None, revision: str | None = None, library_name: str | None = None, library_version: str | None = None, cache_dir: Path | str | None = None, local_dir: Path | str | None = None, user_agent: dict[Unknown, Unknown] | str | None = None, force_download: bool = False, etag_timeout: float = 10, token: bool | str | None = None, local_files_only: bool = False, headers: dict[str, str] | None = None, endpoint: str | None = None, tqdm_class: type[tqdm_asyncio[Unknown]] | None = None, dry_run: bool = False) -> DryRunFileInfo | str\n  Unexpected keyword argument `local_dir_use_symlinks` in function `huggingface_hub.file_download.hf_hub_download`",
       "concise_description": "No matching overload found for function `huggingface_hub.file_download.hf_hub_download` called with arguments: (repo_id=Literal['pablovela5620/wilor-nano'], subfolder=Literal['pretrained_models/mano_clean'], filename=str, local_dir=Path, local_dir_use_symlinks=Literal[False])",
       "severity": "error"
     },
@@ -2036,7 +1988,7 @@
       "path": "simplecv/ops/mano/mano_torch.py",
       "code": -2,
       "name": "no-matching-overload",
-      "description": "No matching overload found for function `huggingface_hub.file_download.hf_hub_download` called with arguments: (repo_id=Literal['pablovela5620/wilor-nano'], subfolder=Literal['pretrained_models/mano_clean'], filename=str, local_dir=Path, local_dir_use_symlinks=Literal[False])\n  Possible overloads:\n  (repo_id: str, filename: str, *, subfolder: str | None = None, repo_type: str | None = None, revision: str | None = None, library_name: str | None = None, library_version: str | None = None, cache_dir: Path | str | None = None, local_dir: Path | str | None = None, user_agent: dict[Unknown, Unknown] | str | None = None, force_download: bool = False, etag_timeout: float = 10, token: bool | str | None = None, local_files_only: bool = False, headers: dict[str, str] | None = None, endpoint: str | None = None, tqdm_class: type[tqdm_asyncio[Unknown]] | None = None, dry_run: Literal[False] = False) -> str [closest match]\n  (repo_id: str, filename: str, *, subfolder: str | None = None, repo_type: str | None = None, revision: str | None = None, library_name: str | None = None, library_version: str | None = None, cache_dir: Path | str | None = None, local_dir: Path | str | None = None, user_agent: dict[Unknown, Unknown] | str | None = None, force_download: bool = False, etag_timeout: float = 10, token: bool | str | None = None, local_files_only: bool = False, headers: dict[str, str] | None = None, endpoint: str | None = None, tqdm_class: type[tqdm_asyncio[Unknown]] | None = None, dry_run: Literal[True] = True) -> DryRunFileInfo\n  (repo_id: str, filename: str, *, subfolder: str | None = None, repo_type: str | None = None, revision: str | None = None, library_name: str | None = None, library_version: str | None = None, cache_dir: Path | str | None = None, local_dir: Path | str | None = None, user_agent: dict[Unknown, Unknown] | str | None = None, force_download: bool = False, etag_timeout: float = 10, token: bool | str | None = None, local_files_only: bool = False, headers: dict[str, str] | None = None, endpoint: str | None = None, tqdm_class: type[tqdm_asyncio[Unknown]] | None = None, dry_run: bool = False) -> DryRunFileInfo | str",
+      "description": "No matching overload found for function `huggingface_hub.file_download.hf_hub_download` called with arguments: (repo_id=Literal['pablovela5620/wilor-nano'], subfolder=Literal['pretrained_models/mano_clean'], filename=str, local_dir=Path, local_dir_use_symlinks=Literal[False])\n  Possible overloads:\n    (repo_id: str, filename: str, *, subfolder: str | None = None, repo_type: str | None = None, revision: str | None = None, library_name: str | None = None, library_version: str | None = None, cache_dir: Path | str | None = None, local_dir: Path | str | None = None, user_agent: dict[Unknown, Unknown] | str | None = None, force_download: bool = False, etag_timeout: float = 10, token: bool | str | None = None, local_files_only: bool = False, headers: dict[str, str] | None = None, endpoint: str | None = None, tqdm_class: type[tqdm_asyncio[Unknown]] | None = None, dry_run: Literal[False] = False) -> str [closest match]\n    (repo_id: str, filename: str, *, subfolder: str | None = None, repo_type: str | None = None, revision: str | None = None, library_name: str | None = None, library_version: str | None = None, cache_dir: Path | str | None = None, local_dir: Path | str | None = None, user_agent: dict[Unknown, Unknown] | str | None = None, force_download: bool = False, etag_timeout: float = 10, token: bool | str | None = None, local_files_only: bool = False, headers: dict[str, str] | None = None, endpoint: str | None = None, tqdm_class: type[tqdm_asyncio[Unknown]] | None = None, dry_run: Literal[True] = True) -> DryRunFileInfo\n    (repo_id: str, filename: str, *, subfolder: str | None = None, repo_type: str | None = None, revision: str | None = None, library_name: str | None = None, library_version: str | None = None, cache_dir: Path | str | None = None, local_dir: Path | str | None = None, user_agent: dict[Unknown, Unknown] | str | None = None, force_download: bool = False, etag_timeout: float = 10, token: bool | str | None = None, local_files_only: bool = False, headers: dict[str, str] | None = None, endpoint: str | None = None, tqdm_class: type[tqdm_asyncio[Unknown]] | None = None, dry_run: bool = False) -> DryRunFileInfo | str\n  Unexpected keyword argument `local_dir_use_symlinks` in function `huggingface_hub.file_download.hf_hub_download`",
       "concise_description": "No matching overload found for function `huggingface_hub.file_download.hf_hub_download` called with arguments: (repo_id=Literal['pablovela5620/wilor-nano'], subfolder=Literal['pretrained_models/mano_clean'], filename=str, local_dir=Path, local_dir_use_symlinks=Literal[False])",
       "severity": "error"
     },
@@ -2264,7 +2216,7 @@
       "path": "simplecv/sensors/camera/fisheye62.py",
       "code": -2,
       "name": "no-matching-overload",
-      "description": "No matching overload found for function `numpy._core.shape_base.stack` called with arguments: (list[ndarray | None])\n  Possible overloads:\n  (arrays: Sequence[_ArrayLike], axis: SupportsIndex = 0, out: None = None, *, dtype: None = None, casting: _CastingKind = 'same_kind') -> ndarray[tuple[Any, ...], dtype[_ScalarT]] [closest match]\n  (arrays: Sequence[ArrayLike], axis: SupportsIndex = 0, out: None = None, *, dtype: _DTypeLike, casting: _CastingKind = 'same_kind') -> ndarray[tuple[Any, ...], dtype[_ScalarT]]\n  (arrays: Sequence[ArrayLike], axis: SupportsIndex = 0, out: None = None, *, dtype: _HasDType[dtype] | _HasNumPyDType[dtype] | dtype | list[Any] | str | _DTypeDict | tuple[Any, Any] | type[Any] | None = None, casting: _CastingKind = 'same_kind') -> ndarray\n  (arrays: Sequence[ArrayLike], axis: SupportsIndex, out: _ArrayT, *, dtype: _HasDType[dtype] | _HasNumPyDType[dtype] | dtype | list[Any] | str | _DTypeDict | tuple[Any, Any] | type[Any] | None = None, casting: _CastingKind = 'same_kind') -> _ArrayT\n  (arrays: Sequence[ArrayLike], axis: SupportsIndex = 0, *, out: _ArrayT, dtype: _HasDType[dtype] | _HasNumPyDType[dtype] | dtype | list[Any] | str | _DTypeDict | tuple[Any, Any] | type[Any] | None = None, casting: _CastingKind = 'same_kind') -> _ArrayT",
+      "description": "No matching overload found for function `numpy._core.shape_base.stack` called with arguments: (list[ndarray | None])\n  Possible overloads:\n    (arrays: Sequence[_ArrayLike], ..., *, ...) -> ndarray[tuple[Any, ...], dtype[_ScalarT]] [closest match]\n    (arrays: Sequence[ArrayLike], ..., *, ...) -> ndarray[tuple[Any, ...], dtype[_ScalarT]]\n    (arrays: Sequence[ArrayLike], ..., *, ...) -> ndarray\n    (arrays: Sequence[ArrayLike], ..., *, ...) -> _ArrayT\n    (arrays: Sequence[ArrayLike], ..., *, ...) -> _ArrayT\n  Argument `list[ndarray | None]` is not assignable to parameter `arrays` with type `Sequence[_ArrayLike]` in function `numpy._core.shape_base.stack`",
       "concise_description": "No matching overload found for function `numpy._core.shape_base.stack` called with arguments: (list[ndarray | None])",
       "severity": "error"
     },
@@ -2276,7 +2228,7 @@
       "path": "simplecv/sensors/camera/fisheye62.py",
       "code": -2,
       "name": "no-matching-overload",
-      "description": "No matching overload found for function `numpy._core.shape_base.stack` called with arguments: (list[ndarray | None], dtype=type[float])\n  Possible overloads:\n  (arrays: Sequence[_ArrayLike], axis: SupportsIndex = 0, out: None = None, *, dtype: None = None, casting: _CastingKind = 'same_kind') -> ndarray[tuple[Any, ...], dtype[_ScalarT]]\n  (arrays: Sequence[ArrayLike], axis: SupportsIndex = 0, out: None = None, *, dtype: _DTypeLike, casting: _CastingKind = 'same_kind') -> ndarray[tuple[Any, ...], dtype[_ScalarT]]\n  (arrays: Sequence[ArrayLike], axis: SupportsIndex = 0, out: None = None, *, dtype: _HasDType[dtype] | _HasNumPyDType[dtype] | dtype | list[Any] | str | _DTypeDict | tuple[Any, Any] | type[Any] | None = None, casting: _CastingKind = 'same_kind') -> ndarray [closest match]\n  (arrays: Sequence[ArrayLike], axis: SupportsIndex, out: _ArrayT, *, dtype: _HasDType[dtype] | _HasNumPyDType[dtype] | dtype | list[Any] | str | _DTypeDict | tuple[Any, Any] | type[Any] | None = None, casting: _CastingKind = 'same_kind') -> _ArrayT\n  (arrays: Sequence[ArrayLike], axis: SupportsIndex = 0, *, out: _ArrayT, dtype: _HasDType[dtype] | _HasNumPyDType[dtype] | dtype | list[Any] | str | _DTypeDict | tuple[Any, Any] | type[Any] | None = None, casting: _CastingKind = 'same_kind') -> _ArrayT",
+      "description": "No matching overload found for function `numpy._core.shape_base.stack` called with arguments: (list[ndarray | None], dtype=type[float])\n  Possible overloads:\n    (arrays: Sequence[_ArrayLike], ..., *, dtype: None = None, ...) -> ndarray[tuple[Any, ...], dtype[_ScalarT]]\n    (arrays: Sequence[ArrayLike], ..., *, dtype: _DTypeLike, ...) -> ndarray[tuple[Any, ...], dtype[_ScalarT]]\n    (arrays: Sequence[ArrayLike], ..., *, dtype: _HasDType[dtype] | _HasNumPyDType[dtype] | dtype | list[Any] | str | _DTypeDict | tuple[Any, Any] | type[Any] | None = None, ...) -> ndarray [closest match]\n    (arrays: Sequence[ArrayLike], ..., *, dtype: _HasDType[dtype] | _HasNumPyDType[dtype] | dtype | list[Any] | str | _DTypeDict | tuple[Any, Any] | type[Any] | None = None, ...) -> _ArrayT\n    (arrays: Sequence[ArrayLike], ..., *, ..., dtype: _HasDType[dtype] | _HasNumPyDType[dtype] | dtype | list[Any] | str | _DTypeDict | tuple[Any, Any] | type[Any] | None = None, ...) -> _ArrayT\n  Argument `list[ndarray | None]` is not assignable to parameter `arrays` with type `Sequence[ArrayLike]` in function `numpy._core.shape_base.stack`",
       "concise_description": "No matching overload found for function `numpy._core.shape_base.stack` called with arguments: (list[ndarray | None], dtype=type[float])",
       "severity": "error"
     },
@@ -2288,7 +2240,7 @@
       "path": "simplecv/umetrack_temp/cameras.py",
       "code": -2,
       "name": "bad-argument-type",
-      "description": "Argument `ndarray | None` is not assignable to parameter `K` with type `ndarray` in function `simplecv.camera_parameters.perspective_projection`",
+      "description": "Argument `ndarray | None` is not assignable to parameter `K` with type `ndarray` in function `simplecv.camera_parameters.perspective_projection`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
       "concise_description": "Argument `ndarray | None` is not assignable to parameter `K` with type `ndarray` in function `simplecv.camera_parameters.perspective_projection`",
       "severity": "error"
     },
@@ -2300,7 +2252,7 @@
       "path": "simplecv/umetrack_temp/cameras.py",
       "code": -2,
       "name": "bad-argument-type",
-      "description": "Argument `ndarray | None` is not assignable to parameter `K` with type `ndarray` in function `simplecv.camera_parameters.arctan_projection`",
+      "description": "Argument `ndarray | None` is not assignable to parameter `K` with type `ndarray` in function `simplecv.camera_parameters.arctan_projection`\n  The declared type does not allow `None`. Consider narrowing the value with an `is not None` check.",
       "concise_description": "Argument `ndarray | None` is not assignable to parameter `K` with type `ndarray` in function `simplecv.camera_parameters.arctan_projection`",
       "severity": "error"
     },
@@ -2312,8 +2264,176 @@
       "path": "simplecv/umetrack_temp/cameras.py",
       "code": -2,
       "name": "no-matching-overload",
-      "description": "No matching overload found for function `numpy.linalg._linalg.inv` called with arguments: (ndarray | None)\n  Possible overloads:\n  (a: _ArrayLikeInt_co) -> ndarray[tuple[Any, ...], dtype[float64]] [closest match]\n  (a: _ArrayLikeFloat_co) -> ndarray[tuple[Any, ...], dtype[floating]]\n  (a: _ArrayLikeComplex_co) -> ndarray[tuple[Any, ...], dtype[complexfloating]]",
+      "description": "No matching overload found for function `numpy.linalg._linalg.inv` called with arguments: (ndarray | None)\n  Possible overloads:\n    (a: _ArrayLikeInt_co) -> ndarray[tuple[Any, ...], dtype[float64]] [closest match]\n    (a: _ArrayLikeFloat_co) -> ndarray[tuple[Any, ...], dtype[floating]]\n    (a: _ArrayLikeComplex_co) -> ndarray[tuple[Any, ...], dtype[complexfloating]]\n  Argument `ndarray | None` is not assignable to parameter `a` with type `_NestedSequence[_SupportsArray[dtype[numpy.bool | integer]]] | _NestedSequence[int] | _SupportsArray[dtype[numpy.bool | integer]] | int` in function `numpy.linalg._linalg.inv`",
       "concise_description": "No matching overload found for function `numpy.linalg._linalg.inv` called with arguments: (ndarray | None)",
+      "severity": "error"
+    },
+    {
+      "line": 95,
+      "column": 27,
+      "stop_line": 95,
+      "stop_column": 47,
+      "path": "simplecv/umetrack_temp/generic_hand_model_torch.py",
+      "code": -2,
+      "name": "bad-argument-type",
+      "description": "Argument `ndarray` is not assignable to parameter `joint_rotation_axes` with type `Tensor` in function `HandModelTorch.__init__`",
+      "concise_description": "Argument `ndarray` is not assignable to parameter `joint_rotation_axes` with type `Tensor` in function `HandModelTorch.__init__`",
+      "severity": "error"
+    },
+    {
+      "line": 95,
+      "column": 27,
+      "stop_line": 95,
+      "stop_column": 47,
+      "path": "simplecv/umetrack_temp/generic_hand_model_torch.py",
+      "code": -2,
+      "name": "bad-argument-type",
+      "description": "Argument `ndarray` is not assignable to parameter `joint_rest_positions` with type `Tensor` in function `HandModelTorch.__init__`",
+      "concise_description": "Argument `ndarray` is not assignable to parameter `joint_rest_positions` with type `Tensor` in function `HandModelTorch.__init__`",
+      "severity": "error"
+    },
+    {
+      "line": 95,
+      "column": 27,
+      "stop_line": 95,
+      "stop_column": 47,
+      "path": "simplecv/umetrack_temp/generic_hand_model_torch.py",
+      "code": -2,
+      "name": "bad-argument-type",
+      "description": "Argument `ndarray` is not assignable to parameter `joint_frame_index` with type `Tensor` in function `HandModelTorch.__init__`",
+      "concise_description": "Argument `ndarray` is not assignable to parameter `joint_frame_index` with type `Tensor` in function `HandModelTorch.__init__`",
+      "severity": "error"
+    },
+    {
+      "line": 95,
+      "column": 27,
+      "stop_line": 95,
+      "stop_column": 47,
+      "path": "simplecv/umetrack_temp/generic_hand_model_torch.py",
+      "code": -2,
+      "name": "bad-argument-type",
+      "description": "Argument `ndarray` is not assignable to parameter `joint_parent` with type `Tensor` in function `HandModelTorch.__init__`",
+      "concise_description": "Argument `ndarray` is not assignable to parameter `joint_parent` with type `Tensor` in function `HandModelTorch.__init__`",
+      "severity": "error"
+    },
+    {
+      "line": 95,
+      "column": 27,
+      "stop_line": 95,
+      "stop_column": 47,
+      "path": "simplecv/umetrack_temp/generic_hand_model_torch.py",
+      "code": -2,
+      "name": "bad-argument-type",
+      "description": "Argument `ndarray` is not assignable to parameter `joint_first_child` with type `Tensor` in function `HandModelTorch.__init__`",
+      "concise_description": "Argument `ndarray` is not assignable to parameter `joint_first_child` with type `Tensor` in function `HandModelTorch.__init__`",
+      "severity": "error"
+    },
+    {
+      "line": 95,
+      "column": 27,
+      "stop_line": 95,
+      "stop_column": 47,
+      "path": "simplecv/umetrack_temp/generic_hand_model_torch.py",
+      "code": -2,
+      "name": "bad-argument-type",
+      "description": "Argument `ndarray` is not assignable to parameter `joint_next_sibling` with type `Tensor` in function `HandModelTorch.__init__`",
+      "concise_description": "Argument `ndarray` is not assignable to parameter `joint_next_sibling` with type `Tensor` in function `HandModelTorch.__init__`",
+      "severity": "error"
+    },
+    {
+      "line": 95,
+      "column": 27,
+      "stop_line": 95,
+      "stop_column": 47,
+      "path": "simplecv/umetrack_temp/generic_hand_model_torch.py",
+      "code": -2,
+      "name": "bad-argument-type",
+      "description": "Argument `ndarray` is not assignable to parameter `landmark_rest_positions` with type `Tensor` in function `HandModelTorch.__init__`",
+      "concise_description": "Argument `ndarray` is not assignable to parameter `landmark_rest_positions` with type `Tensor` in function `HandModelTorch.__init__`",
+      "severity": "error"
+    },
+    {
+      "line": 95,
+      "column": 27,
+      "stop_line": 95,
+      "stop_column": 47,
+      "path": "simplecv/umetrack_temp/generic_hand_model_torch.py",
+      "code": -2,
+      "name": "bad-argument-type",
+      "description": "Argument `ndarray` is not assignable to parameter `landmark_rest_bone_weights` with type `Tensor` in function `HandModelTorch.__init__`",
+      "concise_description": "Argument `ndarray` is not assignable to parameter `landmark_rest_bone_weights` with type `Tensor` in function `HandModelTorch.__init__`",
+      "severity": "error"
+    },
+    {
+      "line": 95,
+      "column": 27,
+      "stop_line": 95,
+      "stop_column": 47,
+      "path": "simplecv/umetrack_temp/generic_hand_model_torch.py",
+      "code": -2,
+      "name": "bad-argument-type",
+      "description": "Argument `ndarray` is not assignable to parameter `landmark_rest_bone_indices` with type `Tensor` in function `HandModelTorch.__init__`",
+      "concise_description": "Argument `ndarray` is not assignable to parameter `landmark_rest_bone_indices` with type `Tensor` in function `HandModelTorch.__init__`",
+      "severity": "error"
+    },
+    {
+      "line": 95,
+      "column": 27,
+      "stop_line": 95,
+      "stop_column": 47,
+      "path": "simplecv/umetrack_temp/generic_hand_model_torch.py",
+      "code": -2,
+      "name": "bad-argument-type",
+      "description": "Argument `ndarray` is not assignable to parameter `hand_scale` with type `Tensor` in function `HandModelTorch.__init__`",
+      "concise_description": "Argument `ndarray` is not assignable to parameter `hand_scale` with type `Tensor` in function `HandModelTorch.__init__`",
+      "severity": "error"
+    },
+    {
+      "line": 95,
+      "column": 27,
+      "stop_line": 95,
+      "stop_column": 47,
+      "path": "simplecv/umetrack_temp/generic_hand_model_torch.py",
+      "code": -2,
+      "name": "bad-argument-type",
+      "description": "Argument `ndarray` is not assignable to parameter `mesh_vertices` with type `Tensor` in function `HandModelTorch.__init__`",
+      "concise_description": "Argument `ndarray` is not assignable to parameter `mesh_vertices` with type `Tensor` in function `HandModelTorch.__init__`",
+      "severity": "error"
+    },
+    {
+      "line": 95,
+      "column": 27,
+      "stop_line": 95,
+      "stop_column": 47,
+      "path": "simplecv/umetrack_temp/generic_hand_model_torch.py",
+      "code": -2,
+      "name": "bad-argument-type",
+      "description": "Argument `ndarray` is not assignable to parameter `mesh_triangles` with type `Tensor` in function `HandModelTorch.__init__`",
+      "concise_description": "Argument `ndarray` is not assignable to parameter `mesh_triangles` with type `Tensor` in function `HandModelTorch.__init__`",
+      "severity": "error"
+    },
+    {
+      "line": 95,
+      "column": 27,
+      "stop_line": 95,
+      "stop_column": 47,
+      "path": "simplecv/umetrack_temp/generic_hand_model_torch.py",
+      "code": -2,
+      "name": "bad-argument-type",
+      "description": "Argument `ndarray` is not assignable to parameter `dense_bone_weights` with type `Tensor` in function `HandModelTorch.__init__`",
+      "concise_description": "Argument `ndarray` is not assignable to parameter `dense_bone_weights` with type `Tensor` in function `HandModelTorch.__init__`",
+      "severity": "error"
+    },
+    {
+      "line": 95,
+      "column": 27,
+      "stop_line": 95,
+      "stop_column": 47,
+      "path": "simplecv/umetrack_temp/generic_hand_model_torch.py",
+      "code": -2,
+      "name": "bad-argument-type",
+      "description": "Argument `ndarray` is not assignable to parameter `joint_limits` with type `Tensor` in function `HandModelTorch.__init__`",
+      "concise_description": "Argument `ndarray` is not assignable to parameter `joint_limits` with type `Tensor` in function `HandModelTorch.__init__`",
       "severity": "error"
     },
     {

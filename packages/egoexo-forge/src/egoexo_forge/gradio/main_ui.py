@@ -14,18 +14,20 @@ from huggingface_hub import HfApi
 
 API = HfApi()  # thin REST wrapper
 
-AVAILABLE_DATASETS = ["egoexo-forge-hocap", "egoexo-forge-egodex", "egoexo-forge-assembly101"]
+DatasetName = Literal["egoexo-forge-hocap", "egoexo-forge-egodex", "egoexo-forge-assembly101"]
+
+AVAILABLE_DATASETS: list[DatasetName] = ["egoexo-forge-hocap", "egoexo-forge-egodex", "egoexo-forge-assembly101"]
 
 
 def show_dataset(
-    repo_name: Literal["egoexo-forge-hocap", "egoexo-forge-egodex", "egoexo-forge-assembly101"], episode_index: str
-):
+    repo_name: DatasetName, episode_index: str
+) -> str:
     episode_index = f"{int(episode_index):05d}"
     url_str = f"https://huggingface.co/datasets/pablovela5620/{repo_name}/resolve/main/{episode_index}.rrd"
     return url_str
 
 
-def list_episodes(dataset: Literal["egoexo-forge-hocap"]) -> list[str]:
+def list_episodes(dataset: DatasetName) -> list[str]:
     """
     Return ["00000", "00001", ...] for the chosen task folder.
     """
@@ -36,8 +38,8 @@ def list_episodes(dataset: Literal["egoexo-forge-hocap"]) -> list[str]:
     return sorted({Path(f).stem for f in files if f.endswith(".rrd")})
 
 
-default_dataset = AVAILABLE_DATASETS[0]
-initial_eps = list_episodes(default_dataset)
+default_dataset: DatasetName = AVAILABLE_DATASETS[0]
+initial_eps: list[str] = list_episodes(default_dataset)
 
 
 title = """# EgoExo Forge: All the Data + Utilities Needed for Egocentric and Exocentric Human Data"""

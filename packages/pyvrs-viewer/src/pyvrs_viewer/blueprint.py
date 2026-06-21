@@ -27,13 +27,13 @@ def create_vrs_blueprint(
         A Rerun blueprint ready to send via rr.send_blueprint().
     """
     # Camera image views
-    camera_views: list[rrb.SpaceView] = [
+    camera_views: list[rrb.View] = [
         rrb.Spatial2DView(origin=entity, name=entity)
         for entity in camera_entities
     ]
 
     # Per-stream text metadata views (configuration + per-frame data)
-    text_views: list[rrb.SpaceView] = []
+    text_views: list[rrb.View] = []
     for entity in camera_entities:
         text_views.append(rrb.TextDocumentView(origin=f"{entity}/configuration", name=f"{entity}/config"))
         text_views.append(rrb.TextDocumentView(origin=f"{entity}/data", name=f"{entity}/metadata"))
@@ -41,13 +41,13 @@ def create_vrs_blueprint(
         text_views.append(rrb.TextDocumentView(origin=f"{entity}/configuration", name=f"{entity}/config"))
 
     # IMU time series views
-    imu_views: list[rrb.SpaceView] = []
+    imu_views: list[rrb.View] = []
     for entity in imu_entities:
         imu_views.append(rrb.TimeSeriesView(origin=f"{entity}/accelerometer", name=f"{entity}/accel"))
         imu_views.append(rrb.TimeSeriesView(origin=f"{entity}/gyroscope", name=f"{entity}/gyro"))
 
     # Build layout sections
-    sections: list[rrb.Container | rrb.SpaceView] = []
+    sections: list[rrb.Container | rrb.View] = []
     section_shares: list[int] = []
 
     if camera_views:
@@ -64,7 +64,7 @@ def create_vrs_blueprint(
         section_shares.append(1)
 
     if not sections:
-        return rrb.Blueprint(auto_space_views=True)
+        return rrb.Blueprint(auto_views=True)
 
     if len(sections) == 1:
         return rrb.Blueprint(sections[0], collapse_panels=True)

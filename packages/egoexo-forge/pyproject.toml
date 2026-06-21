@@ -29,4 +29,5 @@ ignore = ["E501", "F722", "F821", "UP037", "UP040"]
 paths = ["src/egoexo_forge", "tests", "tools"]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true
-min_confidence = 60
+# Ignore low-confidence public APIs and test hooks; keep high-confidence findings actionable.
+min_confidence = 80

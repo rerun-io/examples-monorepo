@@ -27,4 +27,6 @@ ignore = [
 paths = ["gsplat_rust_renderer", "tests", "tools"]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*", "*/.ruff_cache/*"]
 sort_by_size = true
-min_confidence = 60
+# CLI config fields and reusable metric helpers are runtime/public surfaces
+# that Vulture reports at 60%.
+min_confidence = 80

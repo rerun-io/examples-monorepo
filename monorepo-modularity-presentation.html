@@ -983,7 +983,7 @@
                 <tr data-kind="node pipeline" data-text="sam3-rerun sam3 segmentation video gradio cli">
                   <td><code>sam3-rerun</code></td>
                   <td>SAM3 segmentation with Rerun</td>
-                  <td><code>src/sam3_rerun/</code></td>
+                  <td><code>src/sam3/</code></td>
                   <td>Video CLIs and Gradio apps</td>
                   <td>Good candidate for a single-image segmentation node consumed by calibration and other apps.</td>
                 </tr>
@@ -2380,7 +2380,7 @@
               <p><code>facebook/sam3</code>, <code>Sam3Model</code>, <code>Sam3Processor</code>, <code>SAM3Predictor</code>, and <code>SAM3Results</code>.</p>
               <dl>
                 <dt>Current</dt>
-                <dd><code>sam3_rerun.api.predictor</code>.</dd>
+                <dd><code>sam3.api.predictor</code>.</dd>
                 <dt>Home</dt>
                 <dd>Keep as its own model package. Segmentation semantics and deps are separate from depth and pose.</dd>
                 <dt>Surface</dt>
@@ -2400,7 +2400,7 @@
                 <dt>Current</dt>
                 <dd>Duplicated across <code>video_batch</code>, <code>video_chunk</code>, and <code>video_stream</code>.</dd>
                 <dt>Home</dt>
-                <dd>Create a shared <code>sam3_rerun.api.video_predictor</code> node and leave strategy wrappers thin.</dd>
+                <dd>Create a shared <code>sam3.api.video_predictor</code> node and leave strategy wrappers thin.</dd>
                 <dt>Surface</dt>
                 <dd>Batch, chunk, and stream demos are apps or tools. They should not each reload/redefine model logic.</dd>
                 <dt>Tests</dt>
@@ -2855,7 +2855,7 @@ result = node.predict(image)</code></pre>
                     <li><strong>Borrow:</strong> builders for complete runnable pipelines when a demo needs model plus preprocessing plus postprocessing.</li>
                     <li><strong>Translate:</strong> Kornia-style preset constructors become package-local catalog entries here.</li>
                     <li><strong>Avoid:</strong> inconsistent constructor names, runtime factories, and ad hoc pretrained metadata.</li>
-                    <li><strong>Best fit here:</strong> <code>monopriors/depth</code>, <code>sam3_rerun</code>, <code>wilor_nano</code>, and <code>sapiens2_pose</code>.</li>
+                    <li><strong>Best fit here:</strong> <code>monopriors/depth</code>, <code>sam3</code>, <code>wilor_nano</code>, and <code>sapiens2_pose</code>.</li>
                   </ul>
                 </article>
 

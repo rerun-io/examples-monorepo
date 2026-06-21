@@ -25,7 +25,7 @@ Gauss-Newton solvers which have not been ported to Mojo.
 **Build command (current repo workflow):**
 ```bash
 cd packages/mast3r-slam
-pixi run -e mast3r-slam-dev _build-mojo-kernels
+pixi run -e mast3r-slam-dev _mast3r-slam-build-mojo-kernels
 ```
 
 **Equivalent direct Mojo invocation:**

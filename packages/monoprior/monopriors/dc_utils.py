@@ -18,11 +18,13 @@ def read_video_frames(
     original_fps = video_reader.fps
     original_height = video_reader.height
     original_width = video_reader.width
+    height: int = original_height
+    width: int = original_width
 
     if max_res > 0 and max(original_height, original_width) > max_res:
         scale: float = max_res / max(original_height, original_width)
-        height: int = round(original_height * scale)
-        width: int = round(original_width * scale)
+        height = round(original_height * scale)
+        width = round(original_width * scale)
 
     fps: int | float = original_fps if target_fps < 0 else target_fps
     stride: int = max(round(original_fps / fps), 1)

@@ -15,7 +15,7 @@ Python port of [rerun-io/cpp-example-vrs](https://github.com/rerun-io/cpp-exampl
 ## Quick Start
 
 ```bash
-pixi run -e pyvrs-viewer vrs-to-rrd-quest
+pixi run -e pyvrs-viewer pyvrs-viewer-vrs-to-rrd-quest
 ```
 
 On the first run, example VRS files are automatically downloaded from the [Hot3D dataset](https://www.projectaria.com/datasets/hot3d/). Subsequent runs skip the download.
@@ -25,24 +25,24 @@ On the first run, example VRS files are automatically downloaded from the [Hot3D
 ### Demo tasks (Hot3D example data)
 
 ```bash
-pixi run -e pyvrs-viewer vrs-to-rrd-quest    # Quest: 2 mono SLAM cameras (~2.7 GB download)
-pixi run -e pyvrs-viewer vrs-to-rrd-aria     # Aria: 3 cameras + 2 IMUs (~1.7 GB download)
+pixi run -e pyvrs-viewer pyvrs-viewer-vrs-to-rrd-quest    # Quest: 2 mono SLAM cameras (~2.7 GB download)
+pixi run -e pyvrs-viewer pyvrs-viewer-vrs-to-rrd-aria     # Aria: 3 cameras + 2 IMUs (~1.7 GB download)
 ```
 
 ### Custom VRS files (via task)
 
 ```bash
 # Save to .rrd (AV1 encoded)
-pixi run -e pyvrs-viewer vrs-to-rrd -- --vrs-path /path/to/file.vrs --rr-config.save output.rrd
+pixi run -e pyvrs-viewer pyvrs-viewer-vrs-to-rrd -- --vrs-path /path/to/file.vrs --rr-config.save output.rrd
 
 # View live in Rerun viewer
-pixi run -e pyvrs-viewer vrs-to-rrd -- --vrs-path /path/to/file.vrs
+pixi run -e pyvrs-viewer pyvrs-viewer-vrs-to-rrd -- --vrs-path /path/to/file.vrs
 
 # JPEG passthrough (no encoding, larger files)
-pixi run -e pyvrs-viewer vrs-to-rrd -- --vrs-path /path/to/file.vrs --no-encode-video
+pixi run -e pyvrs-viewer pyvrs-viewer-vrs-to-rrd -- --vrs-path /path/to/file.vrs --no-encode-video
 
 # H265 instead of AV1
-pixi run -e pyvrs-viewer vrs-to-rrd -- --vrs-path /path/to/file.vrs --video-codec H265
+pixi run -e pyvrs-viewer pyvrs-viewer-vrs-to-rrd -- --vrs-path /path/to/file.vrs --video-codec H265
 ```
 
 ### Custom VRS files (via python directly)
@@ -102,7 +102,7 @@ packages/pyvrs-viewer/tools/bench/
 ### 2. Run the benchmark
 
 ```bash
-pixi run -e pyvrs-viewer benchmark
+pixi run -e pyvrs-viewer pyvrs-viewer-benchmark
 ```
 
 This will:

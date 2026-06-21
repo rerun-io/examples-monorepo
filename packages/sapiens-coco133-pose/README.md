@@ -54,26 +54,26 @@ flowchart TD
 Typical video flows:
 
 ```bash
-pixi run -e sapiens-coco133-pose --frozen iterable-video \
+pixi run -e sapiens-coco133-pose --frozen sapiens-coco133-pose-iterable-video \
   --video-path /path/to/video.mp4
 
-pixi run -e sapiens-coco133-pose --frozen iterable-video \
+pixi run -e sapiens-coco133-pose --frozen sapiens-coco133-pose-iterable-video \
   --video-path /path/to/video.mp4 \
   --pose-backend rtmlib
 
-pixi run -e sapiens-coco133-pose --frozen video-trt \
+pixi run -e sapiens-coco133-pose --frozen sapiens-coco133-pose-video-trt \
   --video-path /path/to/video.mp4
 
-pixi run -e sapiens-coco133-pose --frozen video-trt \
+pixi run -e sapiens-coco133-pose --frozen sapiens-coco133-pose-video-trt \
   --video-path /path/to/video.mp4 \
   rtmlib
 
-pixi run -e sapiens-coco133-pose --frozen video-trt \
+pixi run -e sapiens-coco133-pose --frozen sapiens-coco133-pose-video-trt \
   --video-path /path/to/video.mp4 \
   --rr-config.save /tmp/sapiens_coco133/batched_tensorrt.rrd \
   --rr-config.headless
 
-pixi run -e sapiens-coco133-pose --frozen export-pose-onnx \
+pixi run -e sapiens-coco133-pose --frozen sapiens-coco133-pose-export-pose-onnx \
   --config.checkpoint-path /path/to/sapiens2_0.4b_pose.safetensors \
   --config.onnx-path /tmp/sapiens_coco133/sapiens2_0.4b_b8_fp16.onnx \
   --config.batch-size 8
@@ -82,7 +82,7 @@ pixi run -e sapiens-coco133-pose --frozen export-pose-onnx \
 Typical RTMLib RTMW TensorRT build and benchmark:
 
 ```bash
-pixi run -e sapiens-coco133-pose --frozen build-trt \
+pixi run -e sapiens-coco133-pose --frozen sapiens-coco133-pose-build-trt \
   --config.target rtmlib-pose \
   --config.onnx-path ~/.cache/rtmlib/hub/checkpoints/rtmw-dw-x-l_simcc-cocktail14_270e-256x192_20231122.onnx \
   --config.engine-path /tmp/sapiens_coco133/rtmw_256x192_b32_fp16.trt \
@@ -91,7 +91,7 @@ pixi run -e sapiens-coco133-pose --frozen build-trt \
   --config.input-shape 3 256 192 \
   --config.batch-size 32
 
-pixi run -e sapiens-coco133-pose --frozen benchmark \
+pixi run -e sapiens-coco133-pose --frozen sapiens-coco133-pose-benchmark \
   --config.video-path /path/to/video.mp4 \
   --config.detector.engine-path /tmp/sapiens_coco133/yolox_humanart_head_b8_fp16.trt \
   --config.output-dir /tmp/sapiens_coco133/rtmlib_benchmark \

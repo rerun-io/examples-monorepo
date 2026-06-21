@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 import torch
 from einops import parse_shape
+from jaxtyping import UInt8
 from torch import Tensor
 
 IMEXT = ".jpeg"
@@ -32,7 +33,7 @@ class ImageCache:
         self.write_result = self.writer_pool.apply_async(cv2.imwrite, [f"{self.tmpdir.name}/warmup{IMEXT}", BLANK, JPEG_QUALITY])
         self._wait()
 
-    def __call__(self, image: np.ndarray, n: int) -> None:
+    def __call__(self, image: UInt8[np.ndarray, "h w 3"], n: int) -> None:
         assert isinstance(image, np.ndarray)
         assert image.dtype == np.uint8
         assert parse_shape(image, "_ _ RGB") == dict(RGB=3)
@@ -49,14 +50,20 @@ class ImageCache:
         self.write_result = self.writer_pool.apply_async(cv2.imwrite, [filepath, img, JPEG_QUALITY])
 
     def load_frames(self, idxs: list[int], device: str | torch.device = "cuda") -> Tensor:
-        import kornia as K
-
         self._wait()
         assert np.all(self.stored_indices[idxs])
         frame_list = [f"{self.tmpdir.name}/{i:08d}{IMEXT}" for i in idxs]
         assert all(map(os.path.exists, frame_list))
-        image_list = [cv2.imread(f) for f in frame_list]
-        return K.utils.image_list_to_tensor(image_list).to(device=device)
+        image_list: list[UInt8[np.ndarray, "h w 3"]] = []
+        for frame_path in frame_list:
+            image: UInt8[np.ndarray, "h w 3"] | None = cv2.imread(frame_path)
+            if image is None:
+                raise FileNotFoundError(f"Failed to load cached image: {frame_path}")
+            image_list.append(image)
+
+        image_batch: UInt8[np.ndarray, "n h w 3"] = np.stack(image_list, axis=0)
+        frames: UInt8[Tensor, "n 3 h w"] = torch.from_numpy(image_batch).permute(0, 3, 1, 2).contiguous()
+        return frames.to(device=device)
 
     def keyframe(self, k: int) -> None:
         tmp = dict(self.image_buffer)
@@ -76,7 +83,7 @@ class ImageCache:
     def __enter__(self) -> "ImageCache":
         return self
 
-    def __exit__(self, *exc: object) -> None:
+    def __exit__(self, *_exc: object) -> None:
         self.close()
 
     def close(self) -> None:
