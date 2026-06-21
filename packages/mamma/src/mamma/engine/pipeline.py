@@ -105,12 +105,18 @@ class StreamingPipeline:
                 list(sequence.video_paths), resize_hw=(reader.height, reader.width)
             )
 
-    def run(self, chunk_size: int = 32, max_frames: int | None = None, start_frame: int = 0, timing_doc: bool = False) -> PipelineStats:
+    def run(self, chunk_size: int = 32, max_frames: int | None = None, start_frame: int | None = None, timing_doc: bool = False) -> PipelineStats:
         """Stream the sequence tick by tick; returns timing stats.
 
         Decode runs one chunk ahead on background threads (one per camera)
         so NVDEC overlaps with model compute; wall time approaches
         ``max(decode, compute)`` instead of their sum.
+
+        By default the run covers the sequence's calibrated window
+        ``[frame_start, frame_start + frame_count)`` so frames outside the
+        reference interval are never fit; an explicit ``start_frame`` /
+        ``max_frames`` (golden, profiling) overrides it. Either way the bound is
+        clamped to ``reader.frame_cnt`` so a short video can't overrun.
         """
         import time
         from concurrent.futures import Future, ThreadPoolExecutor
@@ -119,9 +125,15 @@ class StreamingPipeline:
         profiler: StageProfiler = StageProfiler()
         self.logger.setup(timing_doc=timing_doc)
 
+        if start_frame is None:
+            start_frame = self.sequence.frame_start
         start: float = time.perf_counter()
         frame_idx: int = start_frame
-        frame_count: int = self.reader.frame_cnt if max_frames is None else min(start_frame + max_frames, self.reader.frame_cnt)
+        if max_frames is None:
+            window_end: int = self.sequence.frame_start + self.sequence.frame_count
+            frame_count: int = min(window_end, self.reader.frame_cnt)
+        else:
+            frame_count = min(start_frame + max_frames, self.reader.frame_cnt)
         chunk_ranges: list[tuple[int, int]] = [
             (s, min(s + chunk_size, frame_count)) for s in range(start_frame, frame_count, chunk_size)
         ]

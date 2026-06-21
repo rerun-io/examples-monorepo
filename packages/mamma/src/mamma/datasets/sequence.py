@@ -25,7 +25,9 @@ class MultiViewSequence:
     fps: float
     """Frame rate shared by all cameras."""
     frame_count: int
-    """Number of synchronized frames available across all cameras."""
+    """Number of synchronized frames in the calibrated window (``frame_end - frame_start``)."""
+    frame_start: int = 0
+    """First decoder frame index of the calibrated window (0 for already-trimmed captures)."""
 
     def __post_init__(self) -> None:
         if len(self.cameras) != len(self.video_paths):

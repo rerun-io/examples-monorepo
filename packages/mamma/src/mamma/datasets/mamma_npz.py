@@ -55,4 +55,5 @@ def load_mamma_sequence(root: Path, camera_names: list[str] | None = None) -> Mu
         video_paths=video_paths,
         fps=global_info.fps,
         frame_count=frame_count,
+        frame_start=global_info.frame_start,
     )
