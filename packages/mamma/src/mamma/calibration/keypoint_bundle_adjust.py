@@ -125,7 +125,9 @@ class BundleAdjustConfig:
     optimize_translation: bool = True
     """Refine camera translations (all but the locked camera 0)."""
     n_iters: int = 40
-    """Max LBFGS iterations (early-stops on the loss plateau)."""
+    """Iteration budget: the outer loop runs ``max(2, n_iters // 20 + 1)`` LBFGS
+    ``.step()`` calls (each up to 20 inner iterations), early-stopping on the
+    loss plateau."""
     lr: float = 1.0
     """LBFGS learning rate (strong-Wolfe line search scales the step)."""
     huber_delta: float = 3.0
@@ -239,8 +241,10 @@ def bundle_adjust_cameras(
     kps2d: Float32[torch.Tensor, "c s 3"] = kps2d_per_cam.to(device, dtype)
     vis: Float32[torch.Tensor, "c s"] = vis_per_cam.to(device, dtype)
 
-    # Confidence weight per (cam, sample): visibility (clipped) * in-image * 1/sigma^2,
-    # mirroring mamma.fitting.losses.reprojection_loss exactly.
+    # Confidence weight per (cam, sample): visibility (clipped) * in-image. The
+    # sigma (log-variance -> pixel) term is applied separately as a residual
+    # normalizer (resid / sigma before the Huber, below), matching
+    # mamma.fitting.losses.reprojection_loss.
     in_img: Float32[torch.Tensor, "c s"] = (kps2d[..., :2].abs().sum(-1) > 0).float()
     sigma: Float32[torch.Tensor, "c s"] = (torch.exp(0.5 * kps2d[..., 2]) / 2.0 * config.img_size_px).clamp(*config.clamp_sigma)
     weight: Float32[torch.Tensor, "c s"] = torch.clip(vis, min=config.vis_clip) * in_img

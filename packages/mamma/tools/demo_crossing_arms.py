@@ -1,8 +1,10 @@
 """Streaming pipeline demo on a MAMMA-format capture (crossing_arms by default).
 
-M1: NVDEC 4K decode -> GPU resize to 720p -> NVENC H.264 -> per-camera Rerun
-VideoStreams + posed pinholes. M2: + causal person tracking (YOLO bootstrap,
-CLIP+epipolar identity, streaming SAM2 masks). Landmarks/fitting land in M3+.
+Full streaming pipeline by default: NVDEC 4K decode -> GPU resize to 720p ->
+causal person tracking (YOLO bootstrap, CLIP+epipolar identity, streaming SAM2
+masks) -> MammaNet dense 2D landmarks -> GPU triangulation -> sliding-window
+SMPL-X fitting -> per-camera Rerun VideoStreams + posed pinholes + meshes.
+(``--no-landmarks`` / ``--no-fitting`` drop the later stages.)
 """
 
 from __future__ import annotations

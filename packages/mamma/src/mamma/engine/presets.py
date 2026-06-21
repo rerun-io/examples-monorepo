@@ -6,14 +6,15 @@ fidelity against wall time. The numbers here are grounded in the 2026-06-10
 dig over running_jumping and the gate encodings Pablo confirmed:
 
   * ``quality`` — every logged artifact within the tight band of the original
-    DAG (kpt2d p95 <= 2%, tri3d p95 <= 2%H, SMPL-X PVE/trans/betas-disp within
-    2%H, masks mean IoU >= 0.95 / p5 >= 0.90 / min >= 0.80); wall <= 25% of
-    realtime is the secondary target. Uses the finer SAM2.1 hiera-small decoder
-    (the 128-cell EfficientTAM-ti grid floors mask mean IoU near 0.93) and
-    4K-sampled landmark crops.
+    DAG (kpt2d p95 <= 2%, tri3d p95 <= 2%H, SMPL-X PVE p95 <= 27 mm,
+    trans/betas-disp within 2%H, masks mean IoU >= 0.95 / p5 >= 0.90 /
+    p1 >= 0.80 / min >= 0.50 collapse floor); wall <= 25% of realtime is the
+    secondary target. Uses the finer SAM2.1 hiera-small decoder (the 128-cell
+    EfficientTAM-ti grid floors mask mean IoU near 0.93) and 4K-sampled
+    landmark crops.
   * ``fast`` — PVE p95/max <= 30 mm, SMPL-X within 5%H, masks mean IoU >= 0.90
-    / min >= 0.70, at >= 75% of realtime. Keeps EfficientTAM-ti, trades a
-    couple of fit iterations and the mask cadence for speed.
+    / p1 >= 0.70 / min >= 0.50, at >= 75% of realtime. Keeps EfficientTAM-ti,
+    trades a couple of fit iterations and the mask cadence for speed.
 
 Both presets enable the causal mask-quality fixes (transient-collapse hold +
 routine anchor re-prompts) since those correct genuine tracker failures

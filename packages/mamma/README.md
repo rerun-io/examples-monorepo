@@ -4,8 +4,8 @@ A causal streaming port of the MAMMA multiview body-capture pipeline: NVDEC
 decode → GPU resize → SAM2 person tracking → MammaNet dense landmarks → GPU
 triangulation → sliding-window SMPL-X fitting → Rerun, in one resident process
 with **no disk writes anywhere in the loop**. The original 5-subprocess offline
-DAG took 240 s for the 12.1 s / 4-camera reference clip; this runs it in
-~14.5 s at full per-frame mask quality (~12 s with `--tracker.track-stride 4`).
+DAG ran at ~12 s/frame (over an hour for this 4-camera clip); this runs the same
+clip in seconds at full per-frame mask quality.
 
 ## Quickstart
 
@@ -18,8 +18,8 @@ dependencies.
 # from the repo root
 pixi run -e mamma --frozen mamma-demo-crossing-arms      # full pipeline -> Rerun viewer
 pixi run -e mamma --frozen mamma-validate-golden         # 3D accuracy gate vs frozen original output
-pixi run -e mamma --frozen mamma-benchmark               # wall-time gate (15 s = >=80% realtime)
-pixi run -e mamma --frozen mamma-goal-check              # all five acceptance clauses
+pixi run -e mamma --frozen mamma-benchmark               # wall-time gate (wall <= 2x clip duration = >=50% realtime)
+pixi run -e mamma --frozen mamma-goal-check              # all six acceptance clauses
 ```
 
 Optional TensorRT engine for MammaNet (used automatically by goal-check when
@@ -29,8 +29,9 @@ present): `pixi run -e mamma --frozen python packages/mamma/tools/build_trt_engi
 
 | Clause | Criterion |
 |---|---|
-| golden | MPJPE/PVE vs the frozen original pipeline ≤ 30 mm on crossing_arms frames 60:90 (currently 23.3 / 21.4 mm) |
-| realtime | 363-frame 4-cam clip ≤ 15 s wall incl. Rerun logging (currently ~14.8 s) |
+| golden | MPJPE/PVE vs the frozen original pipeline ≤ 30 mm on crossing_arms frames 60:90 |
+| dynamic | running_jumping per-frame PVE p95 AND max ≤ 30 mm vs the original DAG over all frames |
+| realtime | both clips (crossing_arms + running_jumping): wall ≤ 2× clip duration (≥50% realtime) incl. Rerun logging |
 | datasets | HOCap + Assembly101 ingest end-to-end → validated RRDs |
 | no-writes | streaming loop creates no files (runtime check + static write-call audit) |
 | hygiene | ruff + pyrefly + pytest clean in `mamma-dev` |

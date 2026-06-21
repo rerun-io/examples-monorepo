@@ -55,7 +55,7 @@ class FitterConfig:
     """Adam iterations for the first-window solve (betas optimized here)."""
     tick_iters: int = 48
     """Adam iterations per optimize tick (betas frozen; graph replays are
-    ~1 ms/iter so 64 costs ~60 ms on the overlapped fit worker). Shipped
+    ~1 ms/iter so the default 48 costs ~48 ms on the overlapped fit worker). Shipped
     defaults pass BOTH golden gates: crossing_arms MPJPE/PVE <= 30 mm and
     running_jumping per-frame PVE p95/max <= 30 mm vs the original DAG."""
     learning_rate: float = 0.02
@@ -89,8 +89,9 @@ class FitterConfig:
     realtime budget."""
     use_cuda_graph: bool = True
     """Run both the bootstrap and the steady-state optimize through captured
-    CUDA graphs (steady ticks 92 -> 15.3 ms per 16-iter call; bootstrap
-    ~1.8 s -> ~0.4 s). False = eager Adam everywhere (debugging)."""
+    CUDA graphs (one captured iteration replayed per step; eager vs graph
+    measured ~92 -> 15.3 ms for a 16-replay call; bootstrap ~1.8 s -> ~0.4 s).
+    False = eager Adam everywhere (debugging)."""
     weight_reproj: float = 120.0
     """Reprojection loss weight. The original's refinement stages are
     reprojection-dominant (120-300) and drop the anchor term after stage 1;

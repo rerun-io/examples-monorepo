@@ -270,6 +270,12 @@ Pablo decision (2026-06-10): ship track_stride=1 and relax the gate to 15 s
 (≥80% of realtime). Shipped defaults: bootstrap_iters=300 (graphed),
 fit_stride=5, **track_stride=1**, emit_stride=2, TRT MammaNet, mp decode.
 Canonical sweep: golden 23.3 mm / 21.4 mm, wall 14.79 s ≤ 15 s, 5/5 PASS.
+
+> **Superseded by the later dynamic campaign:** the shipped gate was changed to
+> `wall ≤ 2× clip duration` (≥50% of realtime), and a sixth *dynamic-golden*
+> clause (running_jumping per-frame PVE p95/max ≤ 30 mm) was added to
+> `mamma-goal-check`. `tools/goal_check.py` is the source of truth for the
+> current six clauses and gates.
 The 11.8 s stride-4 operating point remains one flag away
 (`--tracker.track-stride 4`).
 

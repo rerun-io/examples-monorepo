@@ -128,9 +128,9 @@ class DumpConfig:
     max_frames: int | None = None
     """Cap the run to the first N frames (preview); default = whole clip."""
     redetect_interval: int | None = None
-    """Override the tracker's re-detection cadence (frames). Set very large to
-    effectively disable re-detection — useful for multi-subject captures, where
-    the SAM2 re-prompt path has known multi-object batching bugs."""
+    """Override the tracker's re-detection cadence (frames) for both the single-
+    and multi-subject paths. Set very large to effectively disable re-detection
+    — occasionally useful for pinning identity on hard captures or debugging."""
     force_engine_decode: bool = False
     """Force ``hires_crops=False`` even under a preset: decode every camera
     directly at ``resize_hw`` (engine resolution) instead of native + per-tick

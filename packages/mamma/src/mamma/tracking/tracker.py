@@ -1,9 +1,11 @@
 """Causal multiview person tracking: bootstrap once, then forward-only.
 
 Per the realtime handoff design: YOLO + CLIP + epipolar identity run only at
-bootstrap and on a sparse re-detect cadence; the dense per-tick work is the
-streaming SAM2 fork (``SAM2GenericVideoPredictor.forward`` one frame at a time)
-with a ``SAM2ForgetfulObjectMemoryBank`` per camera so memory stays bounded.
+bootstrap and on a sparse re-detect cadence; the dense per-tick work batches
+``encode_image`` across all cameras, then runs the cheap memory/decoder via a
+single B=n_cams ``batched_propagate`` (per-camera ``forward_embeddings`` on
+prompt/re-detect ticks), with a ``SAM2ForgetfulObjectMemoryBank`` per camera so
+memory stays bounded.
 
 One predictor (one set of weights) serves all cameras; per-camera state lives
 in ``SAM2GenericVideoPredictorState``.
