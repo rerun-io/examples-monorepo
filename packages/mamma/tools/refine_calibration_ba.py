@@ -38,7 +38,7 @@ from jaxtyping import Float32, Float64
 from numpy import ndarray
 
 from mamma.calibration.keypoint_bundle_adjust import BundleAdjustConfig, BundleAdjustResult, bundle_adjust_cameras
-from mamma.calibration.npz_contract import CameraCalibration
+from mamma.calibration.npz_contract import CameraCalibration, dump_camera_npz
 from mamma.datasets.mamma_npz import load_mamma_sequence
 from mamma.datasets.sequence import MultiViewSequence
 from mamma.engine.pipeline import ResultCollector, StreamingPipeline, build_streaming_pipeline
@@ -408,14 +408,7 @@ def _write_refined_meta(
             width=resize_hw[1], height=resize_hw[0],
         )
         native_cam: CameraCalibration = engine_cam.scaled_to(height=native_h, width=native_w)
-        np.savez(
-            out_meta / f"{cam.name}.npz",
-            cam_name=cam.name,
-            cam_int=native_cam.k_matrix,
-            cam_ext=native_cam.world_to_cam,
-            cam_img_w=int(native_w),
-            cam_img_h=int(native_h),
-        )
+        dump_camera_npz(native_cam, out_meta / f"{cam.name}.npz")
 
 
 if __name__ == "__main__":

@@ -80,6 +80,24 @@ def load_camera_npz(npz_path: Path) -> CameraCalibration:
     return CameraCalibration(name=name, k_matrix=k_matrix, world_to_cam=world_to_cam, width=width, height=height)
 
 
+def dump_camera_npz(cam: CameraCalibration, npz_path: Path) -> None:
+    """Write a :class:`CameraCalibration` to the ``ma_cap`` per-camera NPZ contract.
+
+    Inverse of :func:`load_camera_npz`: the field->key renames live here so call
+    sites don't hand-roll them. Translations are written as-is (meters);
+    ``load_camera_npz`` only mm->m normalizes when ``|t| > 200``, so a
+    meters-valued extrinsic round-trips unchanged.
+    """
+    np.savez(
+        npz_path,
+        cam_name=cam.name,
+        cam_int=cam.k_matrix,
+        cam_ext=cam.world_to_cam,
+        cam_img_w=cam.width,
+        cam_img_h=cam.height,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class GlobalCaptureInfo:
     """Sequence-level metadata from ``global.npz``."""
