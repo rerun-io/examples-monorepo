@@ -27,7 +27,16 @@ from jaxtyping import UInt8
 def _decode_worker(video_path: str, resize_hw: tuple[int, int], cmd_queue, out_queue) -> None:
     from simplecv.video_io import TorchCodecVideoReader
 
-    reader = TorchCodecVideoReader(Path(video_path), device="cuda", resize_hw=resize_hw)
+    try:
+        reader = TorchCodecVideoReader(Path(video_path), device="cuda", resize_hw=resize_hw)
+    except Exception as exc:
+        # Forward init failures (corrupt video, NVDEC/CUDA unavailable, OOM) to the
+        # parent with the full traceback so construction fails fast instead of the
+        # parent blocking forever on a "ready" that will never arrive.
+        import traceback
+
+        out_queue.put(("error", repr(exc), traceback.format_exc()))
+        return
     out_queue.put(("ready", None, None))
     while True:
         job = cmd_queue.get()
@@ -67,9 +76,25 @@ class MultiprocessDecoder:
         ]
         for proc in self._procs:
             proc.start()
-        for out_q in self._out_queues:  # wait for NVDEC open (construction time)
-            kind, _, _ = out_q.get()
-            assert kind == "ready"
+        import queue as queue_mod
+
+        # Wait for NVDEC open (construction time). Bounded like iter_chunks: the
+        # get() timeout is just a liveness-poll interval — a slow-but-alive worker
+        # keeps waiting; a worker that died (or reported "error") fails the build
+        # instead of hanging forever on a "ready" that never comes.
+        for proc, out_q in zip(self._procs, self._out_queues, strict=True):
+            while True:
+                try:
+                    kind, payload, tb = out_q.get(timeout=30)
+                    break
+                except queue_mod.Empty:
+                    if not proc.is_alive():
+                        self.close()
+                        raise RuntimeError("decode worker exited before signaling ready (see worker stderr)") from None
+            if kind == "error":
+                self.close()
+                raise RuntimeError(f"decode worker failed to initialize ({payload}):\n{tb}")
+            assert kind == "ready", f"unexpected startup message from decode worker: {kind!r}"
 
     def iter_chunks(self, start_frame: int, frame_count: int):
         """Yield ``(chunk_start, [per-camera UInt8 CUDA tensors])`` in order."""
