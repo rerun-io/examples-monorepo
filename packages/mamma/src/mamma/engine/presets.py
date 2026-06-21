@@ -58,6 +58,10 @@ def quality_preset(expected_subjects: int | None = 1) -> PipelinePreset:
     the boundary-cell size of EfficientTAM-ti's 128 grid) plus stronger
     semantics — the lever the dig identified for clearing mask mean IoU >= 0.95.
     A 45-tick anchor cadence + transient hold remove the drift/collapse tails.
+    The tracker re-anchors faster (``redetect_interval_multi``) automatically
+    WHENEVER it is tracking >1 subject at runtime — no need to know the subject
+    count up front (arbitrary video) — so contact-moment identity swaps are
+    corrected before triangulation mixes the people.
     """
     return PipelinePreset(
         name="quality",

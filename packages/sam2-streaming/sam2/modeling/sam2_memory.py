@@ -220,6 +220,21 @@ class SAM2ObjectMemoryBank(ObjectMemoryBank):
                 )
             )
 
+            # Cap the TOTAL object-pointer memories to max_ptr_memories. The
+            # conditional anchors above are kept indefinitely by the forgetful
+            # bank, so on long clips with periodic re-prompts they alone can
+            # exceed the encoder's max_obj_ptrs_in_encoder (the consumer asserts
+            # len(ptr_memories) <= that). Keep the temporally-closest pointers
+            # (most relevant to the current frame), preserving list order.
+            if max_ptr_memories != -1 and len(selected_obj_ptrs_memories) > max_ptr_memories:
+                keep_idx: set[int] = set(
+                    sorted(
+                        range(len(selected_obj_ptrs_memories)),
+                        key=lambda i: abs(selected_obj_ptrs_memories[i].frame_idx - current_frame_idx),
+                    )[:max_ptr_memories]
+                )
+                selected_obj_ptrs_memories = [m for i, m in enumerate(selected_obj_ptrs_memories) if i in keep_idx]
+
             ret[obj_id] = ObjectMemorySelection(
                 conditional_memories=selected_obj_conditional_memories,
                 non_conditional_memories=selected_obj_non_conditional_memories,

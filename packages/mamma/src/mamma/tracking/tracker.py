@@ -22,7 +22,7 @@ from numpy import ndarray
 
 from mamma.calibration.npz_contract import CameraCalibration
 from mamma.engine.types import CameraTracks, TrackedObject
-from mamma.tracking.detection import PersonDetections, PersonDetector
+from mamma.tracking.detection import PersonDetections, PersonDetector, bbox_iou_xyxy
 from mamma.tracking.identity import (
     ClipEncoder,
     FeatureBank,
@@ -38,6 +38,11 @@ BANK_UPDATE_MIN_SCORE: float = 0.35
 """Minimum CLIP score to append a re-detect crop to the feature bank."""
 LOST_TICKS_BEFORE_REPROMPT: int = 5
 """Consecutive empty-mask ticks before a camera is eligible for re-prompting."""
+ANCHOR_CONFLICT_IOU: float = 0.65
+"""Re-detect prompts for two different subjects whose boxes overlap by >= this
+are de-conflicted (suppress the lower-scoring one) — mirrors the original's
+``anchor_conflict_iou`` so SAM2 is never prompted with two near-identical boxes
+for two people during contact (prevents per-object memory poisoning)."""
 
 
 @dataclass(slots=True)
@@ -55,10 +60,16 @@ class TrackerConfig:
     expected_subjects: int | None = None
     """Number of people to track; ``None`` infers from bootstrap detections."""
     redetect_interval: int = 120
-    """Ticks between routine YOLO+CLIP re-detect passes (bank refresh). A
-    re-detect also fires immediately whenever any track has been lost for
-    ``LOST_TICKS_BEFORE_REPROMPT`` ticks, so this can stay slow (~1s/pass).
-    Presets lower this (~45) to anchor more often (mask-drift fix)."""
+    """Ticks between routine YOLO+CLIP re-detect passes (bank refresh) while
+    tracking a SINGLE subject. A re-detect also fires immediately whenever any
+    track has been lost for ``LOST_TICKS_BEFORE_REPROMPT`` ticks, so this can
+    stay slow (~1s/pass). Presets lower this (~45) to anchor more often."""
+    redetect_interval_multi: int = 15
+    """Routine re-detect cadence used AUTOMATICALLY whenever >1 subject is being
+    tracked at runtime (decided from the live track count, not a configured
+    count — so it works on arbitrary video). Matches the original's
+    ``min_anchor_frame_gap``: dense geometric (epipolar) re-anchoring corrects
+    contact-moment identity swaps before triangulation mixes the subjects."""
     reprompt_alive_on_routine: bool = True
     """On routine re-detect passes, re-prompt confidently-matched tracks even
     when they are not lost — anchor refresh, parity with the original DAG's
@@ -214,24 +225,61 @@ class MultiViewTracker:
         any_lost: bool = any(
             ticks >= LOST_TICKS_BEFORE_REPROMPT for cam in self._lost_ticks for ticks in cam.values()
         )
-        routine: bool = self.config.redetect_interval > 0 and frame_idx % self.config.redetect_interval == 0
+        # Adaptive cadence: re-anchor faster when tracking multiple subjects
+        # (decided from the LIVE track count, so unknown-count / arbitrary video
+        # auto-adapts — no configured subject count needed).
+        interval: int = self.config.redetect_interval_multi if len(self.bank.obj_ids) > 1 else self.config.redetect_interval
+        routine: bool = interval > 0 and frame_idx % interval == 0
         if any_lost or routine:
             prompts_per_cam = self._redetect(frames, reprompt_alive=routine and self.config.reprompt_alive_on_routine)
         tracks = self._forward_all(frame_idx, frames, prompts_per_cam)
         self._last_tracks = tracks
         return tracks
 
+    def _reference_points(self) -> tuple[int | None, dict[int, Float32[ndarray, "3"]]]:
+        """Pick a reference camera + each subject's epipolar reference point.
+
+        Mirrors the bootstrap's cross-camera geometric tie for the steady-state
+        re-detect: the reference point is each subject's CURRENT SAM2 mask
+        centroid in the camera where all subjects are most clearly co-visible
+        (largest min mask area). Single-subject (or no prior tracks) -> no tie.
+        """
+        obj_ids: list[int] = self.bank.obj_ids
+        if self._last_tracks is None or len(obj_ids) < 2:
+            return None, {}
+        best_idx: int | None = None
+        best_min_area: float = -1.0
+        for cam_idx, tracks in enumerate(self._last_tracks):
+            if not all(oid in tracks for oid in obj_ids):
+                continue
+            min_area: float = min(float(tracks[oid].mask.sum().item()) for oid in obj_ids)
+            if min_area > best_min_area:
+                best_min_area, best_idx = min_area, cam_idx
+        if best_idx is None or best_min_area <= 0.0:
+            return None, {}
+        ref_points: dict[int, Float32[ndarray, "3"]] = {}
+        for oid in obj_ids:
+            ys, xs = torch.nonzero(self._last_tracks[best_idx][oid].mask, as_tuple=True)
+            ref_points[oid] = np.array([float(xs.float().mean()), float(ys.float().mean()), 1.0], dtype=np.float32)
+        return best_idx, ref_points
+
     def _redetect(
         self, frames: list[UInt8[torch.Tensor, "3 h w"]], reprompt_alive: bool = False
     ) -> list[dict[int, Float32[ndarray, "4"]]]:
-        """Sparse YOLO+CLIP pass: refresh feature banks, re-prompt tracks.
+        """Sparse YOLO + CLIP + epipolar pass: refresh feature banks, re-prompt.
 
-        Always re-prompts lost tracks. When ``reprompt_alive`` (a routine
-        anchor pass), also re-prompts confidently-matched live tracks to reset
-        their SAM2 conditioning before drift accumulates.
+        Always re-prompts lost tracks. When ``reprompt_alive`` (a routine anchor
+        pass), also re-prompts confidently-matched live tracks. Identity is tied
+        across cameras geometrically (epipolar from the reference camera's mask
+        centroids, weight 0.65 > CLIP 0.35) — CLIP alone flips obj0<->obj1 in one
+        camera during contact since the two crops look near-identical, which our
+        earlier per-camera-independent CLIP-only re-detect could not catch.
         """
         prompts_per_cam: list[dict[int, Float32[ndarray, "4"]]] = [{} for _ in self.cameras]
         obj_ids: list[int] = self.bank.obj_ids
+        ref_idx: int | None
+        ref_points: dict[int, Float32[ndarray, "3"]]
+        ref_idx, ref_points = self._reference_points()
         for cam_idx, frame in enumerate(frames):
             lost: list[int] = [
                 obj_id for obj_id, ticks in self._lost_ticks[cam_idx].items() if ticks >= LOST_TICKS_BEFORE_REPROMPT
@@ -241,8 +289,35 @@ class MultiViewTracker:
                 continue
             det_feats: Float32[torch.Tensor, "m 512"] = self.encoder.encode(dets.crops)
             s_clip: Float32[ndarray, "k m"] = self.bank.similarity(det_feats)
-            matches: dict[int, int] = assign_hungarian(s_clip, min_score=BOOTSTRAP_MIN_SCORE)
+            combined: Float32[ndarray, "k m"] = s_clip.copy()
+            # Cross-camera geometric tie: score detections in this camera against
+            # each subject's epipolar line from the reference camera's centroid.
+            f_matrix: Float64[ndarray, "3 3"] | None = (
+                self._fundamental(ref_idx, cam_idx) if ref_idx is not None and cam_idx != ref_idx else None
+            )
+            if f_matrix is not None:
+                s_epi: Float32[ndarray, "k m"] = np.zeros_like(s_clip)
+                for row, obj_id in enumerate(obj_ids):
+                    ref_pt: Float32[ndarray, "3"] | None = ref_points.get(obj_id)
+                    if ref_pt is None:
+                        continue
+                    for col, center in enumerate(dets.centers_xy1):
+                        s_epi[row, col] = epipolar_score(f_matrix, ref_pt, center, self._sigma_px, self._max_dist_px)
+                combined = (0.35 * s_clip + 0.65 * s_epi).astype(np.float32)
+            matches: dict[int, int] = assign_hungarian(combined, min_score=BOOTSTRAP_MIN_SCORE)
+            # Conflict-IoU guard: never prompt two subjects onto overlapping boxes
+            # (drop the lower combined-score one; it coasts on prior SAM2 memory).
+            matched: list[tuple[int, int]] = list(matches.items())
+            dropped: set[int] = set()
+            for a in range(len(matched)):
+                for b in range(a + 1, len(matched)):
+                    ra, ca = matched[a]
+                    rb, cb = matched[b]
+                    if bbox_iou_xyxy(dets.boxes_xyxy[ca], dets.boxes_xyxy[cb]) >= ANCHOR_CONFLICT_IOU:
+                        dropped.add(ra if combined[ra, ca] < combined[rb, cb] else rb)
             for row, col in matches.items():
+                if row in dropped:
+                    continue
                 obj_id: int = obj_ids[row]
                 confident: bool = bool(s_clip[row, col] >= BANK_UPDATE_MIN_SCORE)
                 if confident:

@@ -56,14 +56,23 @@ class SAM2Result:
         )
 
     def select_best(self) -> SAM2Result:
-        """Reduce N mask hypotheses to the single best (max-IoU) one (N -> 1)."""
+        """Reduce N mask hypotheses to the single best (max-IoU) one (N -> 1).
+
+        Only ``masks_logits`` (B, N, H, W) and ``ious`` (B, N) carry the
+        hypothesis axis. ``obj_ptrs`` (B, C=256) and ``obj_score_logits`` (B, 1)
+        are per-object — one per batch element, NO hypothesis axis — so they
+        pass through unchanged. Indexing them by the hypothesis index ``best``
+        (the original bug) corrupts ``obj_ptrs`` to (B, 1) and reads
+        ``obj_score_logits`` out of bounds when best > 0, which is what crashed
+        multi-object re-prompt frames (mixed-hypothesis cat -> select_best).
+        """
         best = torch.argmax(self.ious, dim=1)  # (B,)
         b = torch.arange(self.masks_logits.shape[0], device=self.device)
         return SAM2Result(
             masks_logits=self.masks_logits[b, best].unsqueeze(1),
             ious=self.ious[b, best].unsqueeze(1),
-            obj_ptrs=self.obj_ptrs[b, best].unsqueeze(1),
-            obj_scores_logits=self.obj_score_logits[b, best].unsqueeze(1),
+            obj_ptrs=self.obj_ptrs,
+            obj_scores_logits=self.obj_score_logits,
         )
 
     @staticmethod

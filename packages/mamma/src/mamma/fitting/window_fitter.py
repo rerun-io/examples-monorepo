@@ -109,6 +109,12 @@ class FitterConfig:
     """Triangulated-anchor weight (saturating MSE). Anchors initialize and
     stabilize depth; the original uses them only in its first stage, so they
     stay subordinate to reprojection here."""
+    reproj_gate_px: float = 40.0
+    """Multi-view consistency gate (engine px): a camera whose confident
+    landmarks reproject with mean error above this is DROPPED from this subject's
+    triangulation + reprojection for the tick (a contact-moment mask swap tracks
+    the other person -> hundreds of px error). No-op when cameras agree, so
+    single-person fits are unchanged. Port of propagate_ids_via_reprojection."""
     weight_shape_prior: float = 1.0
     """Betas shrinkage weight."""
     weight_temp_trans: float = 10.0

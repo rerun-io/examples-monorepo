@@ -48,7 +48,8 @@ class _DumpCollector(ResultCollector):
         self.tri_frames: list[int] = []
         self.tri_points: list[ndarray] = []  # (512, 3) per tick
         self.tri_valid: list[ndarray] = []  # (512,) per tick
-        self.fit_by_frame: dict[int, FitResult] = {}
+        self.fit_by_frame: dict[int, FitResult] = {}  # obj_id == self.obj_id only (legacy)
+        self.fits_by_obj: dict[int, dict[int, FitResult]] = {}  # [obj_id][frame] -> all subjects
 
     def collect(
         self,
@@ -80,6 +81,9 @@ class _DumpCollector(ResultCollector):
             if self.obj_id in fit_output.fits:
                 fit: FitResult = fit_output.fits[self.obj_id]
                 self.fit_by_frame[fit.frame_idx] = fit
+            # Collect EVERY subject's fit (multi-person gate needs all of them).
+            for oid, ofit in fit_output.fits.items():
+                self.fits_by_obj.setdefault(oid, {})[ofit.frame_idx] = ofit
 
 
 @dataclass
@@ -127,6 +131,13 @@ class DumpConfig:
     """Override the tracker's re-detection cadence (frames). Set very large to
     effectively disable re-detection — useful for multi-subject captures, where
     the SAM2 re-prompt path has known multi-object batching bugs."""
+    force_engine_decode: bool = False
+    """Force ``hires_crops=False`` even under a preset: decode every camera
+    directly at ``resize_hw`` (engine resolution) instead of native + per-tick
+    downscale. Required for rigs whose cameras have MIXED native resolutions /
+    orientations (the hires path stacks native frames across cameras, which can
+    only stack a uniform size); the per-camera K is scaled independently so the
+    geometry stays correct."""
 
 
 def main(config: DumpConfig) -> int:
@@ -140,8 +151,15 @@ def main(config: DumpConfig) -> int:
         tracker_cfg, fitter_cfg, resize_hw, hires_crops = preset.tracker, preset.fitter, preset.resize_hw, preset.hires_crops
         print(f"preset={config.preset}: tracker={tracker_cfg.sam2_config} redetect={tracker_cfg.redetect_interval} tick_iters={fitter_cfg.tick_iters}")
     if config.redetect_interval is not None:
+        # Override BOTH cadences: the tracker uses redetect_interval_multi when >1
+        # subject is tracked, which is exactly the multi-subject case this override
+        # documents — setting only redetect_interval would silently no-op there.
         tracker_cfg.redetect_interval = config.redetect_interval
-        print(f"redetect_interval overridden -> {config.redetect_interval}")
+        tracker_cfg.redetect_interval_multi = config.redetect_interval
+        print(f"redetect_interval overridden -> {config.redetect_interval} (single + multi)")
+    if config.force_engine_decode:
+        hires_crops = False
+        print("force_engine_decode: hires_crops=False (decode at engine res; required for mixed-resolution rigs)")
     if config.num_subjects > 1 and fitter_cfg.use_cuda_graph:
         # Each person gets its own SlidingWindowFitter; their bootstrap CUDA-graph
         # captures (torch.cuda.graph) deadlock when multiple fitters capture on the
@@ -238,6 +256,24 @@ def main(config: DumpConfig) -> int:
         vertices=np.stack([fit.vertices for fit in fits]),  # (f, v, 3) meters
         rest_joints=fits[0].rest_joints,
     )
+    # Per-subject fits for the multi-person gate (smplx_fits_NN.npz). Single-person
+    # runs also write smplx_fits_00.npz (identical content to smplx_fits.npz).
+    for oid, by_frame in sorted(collector.fits_by_obj.items()):
+        ofr: list[int] = sorted(by_frame)
+        if not ofr:
+            continue
+        ofits: list[FitResult] = [by_frame[f] for f in ofr]
+        np.savez_compressed(
+            config.out_dir / f"smplx_fits_{oid:02d}.npz",
+            frame_indices=np.array(ofr, dtype=np.int64),
+            pose=np.stack([f.pose for f in ofits]),
+            betas=ofits[0].betas,
+            trans=np.stack([f.trans for f in ofits]),
+            joints=np.stack([f.joints for f in ofits]),
+            vertices=np.stack([f.vertices for f in ofits]),
+            rest_joints=ofits[0].rest_joints,
+        )
+    print(f"per-subject fits: {[f'{oid:02d}:{len(by_frame)}f' for oid, by_frame in sorted(collector.fits_by_obj.items())]}")
     timing: dict[str, object] = {
         "ticks": stats.ticks,
         "elapsed_s": stats.elapsed_s,

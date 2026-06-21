@@ -8,7 +8,7 @@ import torch
 from jaxtyping import Bool, Float32
 
 from mamma.calibration.npz_contract import CameraCalibration
-from mamma.fitting.triangulation import triangulate_points
+from mamma.fitting.triangulation import triangulate_gated, triangulate_points
 from mamma.fitting.window_fitter import FitResult, FitterConfig, SlidingWindowFitter
 from mamma.landmarks.estimator import CameraLandmarks
 
@@ -73,7 +73,14 @@ class FittingStage:
             floor_contact: Float32[torch.Tensor, "n"] = torch.stack(fc_all, dim=0).mean(dim=0)
             floor_contact = torch.where(floor_contact < 0.25, torch.zeros_like(floor_contact), floor_contact)
 
-            points3d, valid = triangulate_points(pts2d_all, self.k_per_cam, self.world_to_cam_per_cam, vis_all)
+            # Multi-view consistency gate: drop any camera whose mask swapped to
+            # the other person this tick (its landmarks reproject far from the
+            # 3D estimate) so it neither triangulates nor pulls the fit. Returns
+            # gated visibility used for BOTH the anchor and the fit reprojection.
+            vis_gated: list[Float32[torch.Tensor, "n"]]
+            vis_gated, points3d, valid = triangulate_gated(
+                pts2d_all, self.k_per_cam, self.world_to_cam_per_cam, vis_all, reproj_thresh_px=self.config.reproj_gate_px
+            )
             # Dense cloud for visualization: triangulate every marker seen by
             # >= 2 cameras (sigma/log-variance-weighted, like the original DAG
             # which writes all 512), not just the confident vis>0.5 ones. The
@@ -95,7 +102,7 @@ class FittingStage:
                 if self.faces is None:
                     self.faces = fitter.model.faces
             optimize: bool = self.config.fit_stride <= 1 or frame_idx % self.config.fit_stride == 0
-            result: FitResult | None = fitter.push(frame_idx, pts2d_all, vis_all, points3d, valid, floor_contact=floor_contact, optimize=optimize)
+            result: FitResult | None = fitter.push(frame_idx, pts2d_all, vis_gated, points3d, valid, floor_contact=floor_contact, optimize=optimize)
             if result is not None:
                 fits[obj_id] = result
             if obj_id == 0:

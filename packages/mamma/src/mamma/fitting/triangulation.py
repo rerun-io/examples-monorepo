@@ -76,3 +76,53 @@ def triangulate_points(
     ok: Bool[torch.Tensor, "n"] = valid.sum(dim=0) >= 2
     xw = xw.masked_fill(~ok.unsqueeze(-1), 0.0)
     return xw, ok
+
+
+def triangulate_gated(
+    pts2d_per_cam: list[Float32[torch.Tensor, "n 3"]],
+    k_per_cam: list[Float32[torch.Tensor, "3 3"]],
+    world_to_cam_per_cam: list[Float32[torch.Tensor, "4 4"]],
+    vis_per_cam: list[Float32[torch.Tensor, "n"]],
+    reproj_thresh_px: float = 40.0,
+    min_cams: int = 2,
+    vis_thresh: float = 0.5,
+) -> tuple[list[Float32[torch.Tensor, "n"]], Float32[torch.Tensor, "n 3"], Bool[torch.Tensor, "n"]]:
+    """Triangulate, then iteratively DROP the worst camera whose confident
+    landmarks reproject with mean error > ``reproj_thresh_px``, re-triangulating,
+    while > ``min_cams`` cameras survive.
+
+    Multi-view consistency gate (port of the original's
+    ``propagate_ids_via_reprojection``): when a per-camera SAM2 mask swaps to the
+    OTHER person during contact, that camera's landmarks reproject hundreds of px
+    from the (mostly-correct) 3D estimate, so a generous threshold isolates it
+    cleanly while leaving correctly-tracked cameras (a few px) untouched. The
+    returned gated visibility zeros dropped cameras so they neither triangulate
+    NOR pull the downstream fit's reprojection term. No-op when all cameras agree
+    (the common case, incl. single-person), so single-person fits are unchanged.
+    """
+    n_cams: int = len(pts2d_per_cam)
+    gated: list[Float32[torch.Tensor, "n"]] = [v.clone() for v in vis_per_cam]
+    proj: list[Float32[torch.Tensor, "3 4"]] = [k_per_cam[c] @ world_to_cam_per_cam[c][:3, :] for c in range(n_cams)]
+    active: list[int] = list(range(n_cams))
+    points3d: Float32[torch.Tensor, "n 3"]
+    valid: Bool[torch.Tensor, "n"]
+    points3d, valid = triangulate_points(pts2d_per_cam, k_per_cam, world_to_cam_per_cam, gated, vis_thresh=vis_thresh)
+    while len(active) > min_cams:
+        xh: Float32[torch.Tensor, "n 4"] = torch.cat([points3d, torch.ones_like(points3d[:, :1])], dim=-1)
+        worst_c: int = -1
+        worst_err: float = reproj_thresh_px
+        for c in active:
+            conf: Bool[torch.Tensor, "n"] = (gated[c] > vis_thresh) & valid
+            if int(conf.sum().item()) < 4:
+                continue
+            uvw: Float32[torch.Tensor, "n 3"] = xh @ proj[c].T
+            uv: Float32[torch.Tensor, "n 2"] = uvw[:, :2] / (uvw[:, 2:3].abs() + 1e-6)
+            merr: float = float((uv - pts2d_per_cam[c][:, :2]).norm(dim=-1)[conf].mean().item())
+            if merr > worst_err:
+                worst_err, worst_c = merr, c
+        if worst_c < 0:
+            break
+        active.remove(worst_c)
+        gated[worst_c] = torch.zeros_like(gated[worst_c])
+        points3d, valid = triangulate_points(pts2d_per_cam, k_per_cam, world_to_cam_per_cam, gated, vis_thresh=vis_thresh)
+    return gated, points3d, valid
