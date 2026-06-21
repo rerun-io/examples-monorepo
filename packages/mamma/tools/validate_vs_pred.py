@@ -144,11 +144,12 @@ def main(config: ValidateVsPredConfig) -> int:
             config.out_json.parent.mkdir(parents=True, exist_ok=True)
             config.out_json.write_text(json.dumps({"scene": config.run_dir.name, "pass": False, "error": f"only_{n_emitted}_of_{config.n_people}_subjects"}, indent=2))
         return 1
+    emitted: list[dict] = [s for s in our_subj if s is not None]  # all non-None (guarded above)
 
     # --- Identity matching: assign our subjects to pred subjects (min total PVE) -
     cost: Float[ndarray, "n n"] = np.full((config.n_people, config.n_people), 1e9)
     pve_cache: dict[tuple[int, int], dict[int, float]] = {}
-    for i, s in enumerate(our_subj):
+    for i, s in enumerate(emitted):
         for j in range(config.n_people):
             series = _pve_series(s["verts"], s["frames"], pred_subj[j], config.skip_first_frames)
             pve_cache[i, j] = series

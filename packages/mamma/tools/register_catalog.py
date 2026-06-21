@@ -95,9 +95,12 @@ def main(config: RegisterCatalogConfig) -> int:
         rr.send_recording_name(name)
         rr.send_property("category", rr.AnyValues(category=cat_))
         rr.send_property("num_people", rr.AnyValues(num_people=n_people))
-        for key in ("pve_p95_mm", "pve_p99_mm", "per_cam_realtime"):
-            if gate.get(key) is not None:
-                rr.send_property(key, rr.AnyValues(**{key: float(gate[key])}))
+        if gate.get("pve_p95_mm") is not None:
+            rr.send_property("pve_p95_mm", rr.AnyValues(pve_p95_mm=float(gate["pve_p95_mm"])))
+        if gate.get("pve_p99_mm") is not None:
+            rr.send_property("pve_p99_mm", rr.AnyValues(pve_p99_mm=float(gate["pve_p99_mm"])))
+        if gate.get("per_cam_realtime") is not None:
+            rr.send_property("per_cam_realtime", rr.AnyValues(per_cam_realtime=float(gate["per_cam_realtime"])))
         rr.send_property("passes", rr.AnyValues(passes=bool(gate.get("pass", False))))
         rr.send_property("accuracy_pass", rr.AnyValues(accuracy_pass=bool(gate.get("accuracy_pass", False))))
         props_path: Path = props_dir / f"{cat_}__{scene}_props.rrd"
