@@ -32,7 +32,7 @@ This is Linux only with an NVIDIA GPU.
 ```bash
 git clone https://github.com/rerun-io/robocap-slam.git
 cd robocap-slam
-pixi run track-robocap
+pixi run robocap-slam-track
 ```
 
 On the first run, an example dataset (~100 MB) is automatically downloaded from [HuggingFace](https://huggingface.co/datasets/pablovela5620/robocap-example) into `data/robocap/`. Subsequent runs skip the download.
@@ -66,21 +66,21 @@ robocap-slam/
 ### Pixi tasks
 
 ```bash
-pixi run track-robocap           # Multicamera odometry on Robocap data
-pixi run track-robocap-slam      # Multicamera SLAM on Robocap data
-pixi run -e dev track-robocap    # With runtime type checking
+pixi run robocap-slam-track           # Multicamera odometry on Robocap data
+pixi run robocap-slam-track-slam      # Multicamera SLAM on Robocap data
+pixi run -e robocap-slam-dev robocap-slam-track    # With runtime type checking
 ```
 
 ### CLI flags (tyro)
 
-The tools use [tyro](https://brentyi.github.io/tyro/) to generate CLI arguments from dataclass configs. The dataset name is a positional subcommand:
+The tools use [tyro](https://brentyi.github.io/tyro/) to generate CLI arguments from dataclass configs. With a single registered dataset there is no positional subcommand — the dataset's fields are exposed directly as flags. Once two or more datasets are registered, the dataset name becomes a positional subcommand (see [Adding a new dataset](#adding-a-new-dataset)):
 
 ```bash
 # Default robocap run (spawns Rerun viewer)
-python tools/track_odometry.py robocap
+python tools/track_odometry.py
 
 # Custom data path and session
-python tools/track_odometry.py robocap \
+python tools/track_odometry.py \
     --root-directory /path/to/robocap \
     --device-id abc123 \
     --session-id 5 \
@@ -88,16 +88,16 @@ python tools/track_odometry.py robocap \
     --pairs 0 2
 
 # Save to RRD file
-python tools/track_odometry.py robocap --rr-config.save output.rrd
+python tools/track_odometry.py --rr-config.save output.rrd
 
 # Connect to existing Rerun instance
-python tools/track_odometry.py robocap --rr-config.connect
+python tools/track_odometry.py --rr-config.connect
 
 # SLAM with synchronous mode
-python tools/track_slam.py robocap --slam-sync-mode
+python tools/track_slam.py --slam-sync-mode
 ```
 
-Run `python tools/track_odometry.py --help` or `python tools/track_odometry.py robocap --help` to see all flags.
+Run `python tools/track_odometry.py --help` to see all flags.
 
 ## Architecture
 

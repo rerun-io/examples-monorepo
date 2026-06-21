@@ -275,7 +275,7 @@ changed. Otherwise Pixi spends a long time re-solving before every launch.
 First kitchen-train run:
 
 ```bash
-pixi run --frozen -e pysfm brush-train-kitchen-5k
+pixi run --frozen -e pysfm pysfm-brush-train-kitchen-5k
 ```
 
 Equivalent direct helper command from `packages/pysfm/`:

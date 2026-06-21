@@ -10,6 +10,7 @@ When encode_video=True, uses a two-phase parallel pipeline:
 
 import logging
 import time
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -63,7 +64,7 @@ def _build_metadata(record: object) -> dict[str, object]:
     metadata: dict[str, object] = {}
     n_blocks: int = getattr(record, "n_metadata_blocks", 0)
     if n_blocks > 0:
-        blocks: object = record.metadata_blocks  # type: ignore[attr-defined]
+        blocks: Sequence[object] = getattr(record, "metadata_blocks", [])
         for j in range(n_blocks):
             block: object = blocks[j]
             if isinstance(block, dict):
@@ -121,7 +122,7 @@ def vrs_to_rerun(config: VrsToRerunConfig) -> None:
         flavor_counts[flavor_val] = flavor_counts.get(flavor_val, 0) + 1
 
     for stream_id in all_stream_ids:
-        info: dict[str, object] = reader.get_stream_info(stream_id)
+        info: dict[str, str] = reader.get_stream_info(stream_id)
         flavor: str = str(info.get("flavor", ""))
         entity_name: str = flavor if flavor and flavor_counts.get(flavor, 0) == 1 else stream_id
         recordable_type_id: int = _parse_recordable_type_id(stream_id)

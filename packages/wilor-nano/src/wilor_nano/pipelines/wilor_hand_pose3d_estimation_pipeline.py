@@ -233,17 +233,18 @@ class WiLorHandPose3dEstimationPipeline:
         if len(bboxes) == 0:
             return detect_rets
         for i in range(bboxes.shape[0]):
-            detect_rets.append({"hand_bbox": bboxes[i, :4].tolist(), "is_right": is_rights[i]})
+            is_right: int = int(is_rights[i])
+            detect_rets.append({"hand_bbox": bboxes[i, :4].tolist(), "is_right": is_right})
         rescale_factor = kwargs.get("rescale_factor", 2.5)
         center: Float[ndarray, "n 2"] = (bboxes[:, 2:4] + bboxes[:, 0:2]) / 2.0
         scale: Float[ndarray, "n 2"] = rescale_factor * (bboxes[:, 2:4] - bboxes[:, 0:2])
         img_patches_list: list[ndarray] = []
         img_size: Int[ndarray, "2"] = np.array([image.shape[1], image.shape[0]])
         for i in tqdm(range(bboxes.shape[0]), disable=not self.verbose):
-            bbox_size = scale[i].max()
+            bbox_size: float = float(scale[i].max())
             patch_width = patch_height = self.IMAGE_SIZE
-            right = is_rights[i]
-            flip = right == 0
+            right: int = int(is_rights[i])
+            flip: bool = right == 0
             box_center = center[i]
 
             cvimg = image.copy()
@@ -256,8 +257,8 @@ class WiLorHandPose3dEstimationPipeline:
 
             img_patch_cv, trans = utils.generate_image_patch_cv2(
                 cvimg,
-                box_center[0],
-                box_center[1],
+                float(box_center[0]),
+                float(box_center[1]),
                 bbox_size,
                 bbox_size,
                 patch_width,

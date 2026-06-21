@@ -10,9 +10,13 @@ LPIPS uses the standard VGG-based ``lpips`` package (requires PyTorch).
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import numpy as np
 from jaxtyping import Float32
+
+if TYPE_CHECKING:
+    import torch
 
 
 def load_image_rgb(path: Path) -> Float32[np.ndarray, "h w 3"]:
@@ -29,7 +33,7 @@ def load_image_rgb(path: Path) -> Float32[np.ndarray, "h w 3"]:
     """
     import cv2
 
-    raw: np.ndarray = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    raw: np.ndarray | None = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
     if raw is None:
         raise FileNotFoundError(f"Could not load image: {path}")
 
@@ -177,10 +181,17 @@ def ssim(
     return float(np.mean(ssim_map))
 
 
-_lpips_model: object | None = None
+@runtime_checkable
+class _LpipsModel(Protocol):
+    """Callable LPIPS model interface used by the lazy cache."""
+
+    def __call__(self, rendered: torch.Tensor, ground_truth: torch.Tensor) -> torch.Tensor: ...
 
 
-def _get_lpips_model() -> object:
+_lpips_model: _LpipsModel | None = None
+
+
+def _get_lpips_model() -> _LpipsModel:
     """Return a cached LPIPS VGG model instance.
 
     The model is loaded on first call and reused for subsequent calls.
@@ -214,7 +225,7 @@ def lpips(
     """
     import torch
 
-    model: object = _get_lpips_model()
+    model: _LpipsModel = _get_lpips_model()
 
     # lpips expects NCHW tensors in [-1, 1].
     rendered_t: torch.Tensor = torch.from_numpy(rendered).permute(2, 0, 1).unsqueeze(0) * 2.0 - 1.0

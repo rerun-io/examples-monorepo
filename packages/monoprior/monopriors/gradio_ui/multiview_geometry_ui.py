@@ -14,7 +14,7 @@ lazy re-initialisation of the predictor.
 import uuid
 from collections.abc import Generator
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 
 import gradio as gr
 import numpy as np
@@ -35,6 +35,7 @@ from monopriors.apis.multiview_geometry import (
     MultiviewGeometryResult,
     run_multiview_geometry,
 )
+from monopriors.gradio_ui._vggt_common import parse_preprocessing_mode
 from monopriors.models.multiview.vggt_model import VGGTPredictor
 
 EXAMPLE_DATA_DIR: Final[Path] = Path(__file__).resolve().parents[2] / "data" / "examples" / "multiview"
@@ -128,12 +129,13 @@ def _sync_config(
         verbose: Whether to log per-camera detail.
     """
     global _CONFIG, _PREDICTOR
+    preprocessing_mode_literal: Literal["crop", "pad"] = parse_preprocessing_mode(preprocessing_mode)
 
-    needs_reinit: bool = preprocessing_mode != _CONFIG.preprocessing_mode
+    needs_reinit: bool = preprocessing_mode_literal != _CONFIG.preprocessing_mode
 
     _CONFIG = MultiviewGeometryConfig(
         keep_top_percent=keep_top_percent,
-        preprocessing_mode=preprocessing_mode,
+        preprocessing_mode=preprocessing_mode_literal,
         device="cuda",
         verbose=verbose,
     )
@@ -144,7 +146,7 @@ def _sync_config(
             preprocessing_mode=_CONFIG.preprocessing_mode,
         )
     else:
-        _PREDICTOR.preprocessing_mode = preprocessing_mode
+        _PREDICTOR.preprocessing_mode = preprocessing_mode_literal
 
 
 def _get_recording(recording_id: uuid.UUID) -> rr.RecordingStream:

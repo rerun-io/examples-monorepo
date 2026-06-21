@@ -32,4 +32,5 @@ ignore = ["E501", "F722", "F821", "UP037", "UP040"]
 paths = ["src/sapiens_coco133_pose", "tests", "tools"]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true
-min_confidence = 60
+# Ignore low-confidence public result fields; keep high-confidence findings actionable.
+min_confidence = 80

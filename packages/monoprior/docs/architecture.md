@@ -67,7 +67,7 @@ Output: `CompletionDepthPrediction(depth_mm, confidence)`
 
 ### Composite models
 
-`monopriors/monoprior_models.py` combines depth + normals into a single call:
+`monopriors/models/monoprior/monoprior_models.py` combines depth + normals into a single call:
 
 ```
 MonoPriorModel (abstract)
@@ -126,20 +126,20 @@ Camera parameters use `simplecv.camera_parameters.PinholeParameters` which bundl
 
 ```
 monopriors/
-  __init__.py                     # beartype_this_package() activation
-  monoprior_models.py             # Composite model (depth + normals)
+  __init__.py                     # beartype_this_package() activation (dev only)
   depth_utils.py                  # depth<->disparity, depth->points, edge masks, intrinsics estimation
   scale_utils.py                  # scale-shift alignment (relative->metric)
-  camera_utils.py                 # torch-based pose utilities
-  camera_numpy_utils.py           # numpy PCA-based auto_orient_and_center_poses
   rr_logging_utils.py             # Rerun logging helpers for depth/normal predictions
   dc_utils.py                     # Frame reading and video I/O
 
-  metric_depth_models/            # Metric depth predictors + factory
-  relative_depth_models/          # Relative depth predictors + factory
-  surface_normal_models/          # Normal predictors + factory
-  multiview_models/               # VGGT multi-view geometry
-  depth_completion_models/        # PromptDA depth completion
+  models/                         # Model families + factories
+    metric_depth/                 # Metric depth predictors + factory
+    relative_depth/               # Relative depth predictors + factory
+    surface_normal/               # Normal predictors + factory
+    multiview/                    # VGGT multi-view geometry
+    depth_completion/             # PromptDA depth completion
+    monoprior/                    # Composite model (depth + normals)
+      monoprior_models.py         # MonoPriorModel / DsineAndUnidepth
 
   apis/                           # High-level inference pipelines (tyro configs)
     relative_depth_inference.py   # Single-image relative depth → rerun
@@ -179,15 +179,17 @@ Entry points are organized under `tools/` in three subdirectories. All are expos
 | `video_depth.py` | `video-depth` | Video Depth Anything temporal inference |
 | `polycam_inference.py` | `polycam-inference` | Process Polycam dataset with DsineAndUnidepth |
 | `promptda_polycam.py` | `promptda-polycam` | PromptDA depth completion on Polycam data |
-| `compare_normals.py` | `compare-normals` | Compare surface normal models |
+| `surface_normals.py` | `surface-normals` | Surface normal model inference |
 
 ### tools/apps/ — Gradio web UIs
 
 | Script | Pixi task | What it does |
 |---|---|---|
 | `depth_compare_app.py` | `depth-compare-app` | Depth comparison UI with Rerun viewer |
-| `video_depth_app.py` | `video-depth-app` | Video depth estimation UI |
 | `calibration_app.py` | `calibration-app` | Multi-view calibration UI |
+| `multiview_geometry_app.py` | `multiview-geometry-app` | Multi-view geometry UI |
+| `metric_depth_app.py` | `metric-depth-app` | Metric depth estimation UI |
+| `depth_alignment_app.py` | `depth-alignment-app` | Depth alignment UI |
 
 ### tools/utils/ — Packaging, conversion, deployment
 
@@ -254,9 +256,9 @@ Multi-view inference creates tabbed blueprints grouping cameras 4 per tab, with 
 |---|---|
 | `depth_utils` | `estimate_intrinsics`, `depth_to_points`, `multidepth_to_points`, `depth_edges_mask`, `depth_to_disparity`, `disparity_to_depth`, `clip_disparity` |
 | `scale_utils` | `compute_scale_and_shift` (least-squares alignment of relative depth to metric), `compute_scale`, `get_interpolate_frames` |
-| `camera_utils` | `rotation_matrix_between`, `focus_of_attention` (torch) |
-| `camera_numpy_utils` | `auto_orient_and_center_poses` (PCA-based orientation, numpy) |
+
+Pose orientation/centering is provided by `simplecv.camera_orient_utils.auto_orient_and_center_poses` (PCA-based, numpy), imported in `apis/multiview_inference.py`.
 
 ## Runtime type checking
 
-`__init__.py` unconditionally calls `beartype_this_package()`, enabling runtime shape/dtype enforcement on every jaxtyping-annotated function and dataclass in the package. This activates automatically when the package is imported.
+`__init__.py` calls `beartype_this_package()` only when `PIXI_DEV_MODE == "1"` (the dev environment), enabling runtime shape/dtype enforcement on every jaxtyping-annotated function and dataclass in the package. Outside dev mode it is not activated, so there is zero overhead.

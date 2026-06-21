@@ -23,11 +23,9 @@ from monopriors.rr_logging_utils import log_relative_pred
 
 try:
     import spaces  # type: ignore
-
-    IN_SPACES = True
 except ImportError:
+    spaces = None
     print("Not running on Zero")
-    IN_SPACES = False
 
 model_load_status: str = "Models loaded and ready to use!"
 if gr.NO_RELOAD:
@@ -39,13 +37,16 @@ def predict_depth(rgb_hw3: UInt8[np.ndarray, "h w 3"]) -> RelativeDepthPredictio
     return relative_pred
 
 
-if IN_SPACES:
+if spaces is not None:
     predict_depth = spaces.GPU(predict_depth)
+
+
+_LOAD_MODEL_PROGRESS = gr.Progress()
 
 
 def load_model(
     model: RELATIVE_PREDICTORS,
-    progress=gr.Progress(),
+    progress=_LOAD_MODEL_PROGRESS,
 ) -> str:
     print(model)
     global DEPTH_PREDICTOR
@@ -115,15 +116,14 @@ def relative_depth_from_img(
 
         # We eventually want to clean up the RRD file after it's sent to the viewer, so tracking
         # any pending files to be cleaned up when the state is deleted.
-        temp = tempfile.NamedTemporaryFile(prefix="depth_inf_", suffix=".rrd", delete=False)
-        pending_cleanup.append(temp.name)
-
-        rr.save(temp.name)
-        return temp.name
+        with tempfile.NamedTemporaryFile(prefix="depth_inf_", suffix=".rrd", delete=False) as temp:
+            pending_cleanup.append(temp.name)
+            rr.save(temp.name)
+            return temp.name
     except NameError as e:
-        raise gr.Error(f"Please wait Model is being loaded: {e}")
+        raise gr.Error(f"Please wait Model is being loaded: {e}") from e
     except Exception as e:
-        raise gr.Error(f"Error predicting depth: {e}")
+        raise gr.Error(f"Error predicting depth: {e}") from e
 
 
 def cleanup_rrds(pending_cleanup: list[str]) -> None:

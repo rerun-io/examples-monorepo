@@ -41,7 +41,9 @@ def surface_normal_from_img(config: NormalPredictorConfig) -> None:
     )
     rr.send_blueprint(blueprint=blueprint)
 
-    bgr_hw3: UInt8[np.ndarray, "h w 3"] = cv2.imread(str(config.image_path))
+    bgr_hw3: UInt8[np.ndarray, "h w 3"] | None = cv2.imread(str(config.image_path))
+    if bgr_hw3 is None:
+        raise FileNotFoundError(f"Failed to read image {config.image_path}")
     rgb_hw3: UInt8[np.ndarray, "h w 3"] = cv2.cvtColor(bgr_hw3, cv2.COLOR_BGR2RGB)
 
     predictor: BaseNormalPredictor = get_normal_predictor(config.predictor_name)(device="cuda")

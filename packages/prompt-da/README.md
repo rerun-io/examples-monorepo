@@ -30,7 +30,7 @@ Make sure you have the [Pixi](https://pixi.sh/latest/#installation) package mana
 ```bash
 git clone https://github.com/rerun-io/prompt-da.git
 cd prompt-da
-pixi run app
+pixi run prompt-da-app
 ```
 
 All commands can be listed using `pixi task list`
@@ -38,12 +38,12 @@ All commands can be listed using `pixi task list`
 ## Usage
 ### Gradio App
 ```
-pixi run app
+pixi run prompt-da-app
 ```
 ### CLI
 with pixi example task
 ```bash
-pixi run polycam-prompt_da
+pixi run prompt-da-polycam
 ```
 
 with python in pixi shell

@@ -221,16 +221,23 @@ Python and Rust agree on a custom `GaussianSplats3D` archetype:
 
 All metrics apply 8-bit roundtrip quantization to match Brush's eval convention.
 
-## Key Constants (`gsplat_core/constants.rs`)
+## Key Constants
+
+Algorithm constants live in `gsplat_core/constants.rs`:
 
 | Constant | Value | Purpose |
 |---|---|---|
 | `MAX_SPLATS_RENDERED` | 200,000 | Hard cap per frame |
-| `TILE_WIDTH` | 16 px | Tile size for compute raster |
 | `PARALLEL_SPLAT_THRESHOLD` | 16,384 | Switch to rayon parallel |
 | `SIGMA_COVERAGE` | 3.0 | Standard deviations for bbox |
 | `BRUSH_COVARIANCE_BLUR_PX` | 0.3 | Anti-aliasing blur (matches Brush) |
 | `SH_C0` | 0.28209 | Zeroth SH coefficient |
+
+GPU pipeline tuning constants live in `gsplat_core/gpu_types.rs`:
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `TILE_WIDTH` | 16 px | Tile size for compute raster (mirrored as a `const` in the WGSL shaders) |
 | `PROJECT_WORKGROUP_SIZE` | 128 | Threads per project dispatch |
 | `SORT_WORKGROUP_SIZE` | 256 | Threads per sort dispatch |
 | `SORT_BIN_COUNT` | 16 | Radix sort bins (4-bit) |

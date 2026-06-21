@@ -41,8 +41,6 @@ def main(data_dir: Path):
         # change coordinate system
         normal[..., 2] *= -1
 
-        world_T_cam_44 = np.array(frame.camtoworld)
-        K_44 = np.array(frame.intrinsics)
         rr.log(f"{pinhole_path}/image", rr.Image(rgb))
         rr.log(f"{pinhole_path}/depth", rr.DepthImage(depth))
         rr.log(f"{pinhole_path}/normal", rr.Image(normal))

@@ -170,6 +170,6 @@ Before exporting:
 - [ ] Emit COCO-133 keypoints (3D + confidences) in the world frame.
 - [ ] (Optional) Emit 2D projection stacks per camera.
 - [ ] Record `/world/metadata/schema_version = "exoego:v1"`.
-- [ ] Validate the recording using `pixi run -e dev view-exoego-data --rr-config.connect hocap` and ensure no ingestion warnings remain.
+- [ ] Validate the recording using `pixi run -e simplecv-dev --frozen simplecv-view-exoego-data --rr-config.connect hocap` and ensure no ingestion warnings remain.
 
 Following this schema keeps Hocap, RRD, and future datasets interoperable while leaving room for richer annotations. Any deviation should increment the schema version and update this document.

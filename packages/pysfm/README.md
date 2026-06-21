@@ -30,7 +30,7 @@ This is part of the [examples-monorepo](https://github.com/rerun-io/examples-mon
 ```bash
 git clone https://github.com/rerun-io/examples-monorepo.git
 cd examples-monorepo
-pixi run -e pysfm sfm-reconstruction-demo
+pixi run -e pysfm pysfm-sfm-reconstruction-demo
 ```
 
 On the first run, example datasets are automatically downloaded. Subsequent runs skip the download.
@@ -40,7 +40,7 @@ On the first run, example datasets are automatically downloaded. Subsequent runs
 ### CLI demos
 
 ```bash
-pixi run -e pysfm sfm-reconstruction-demo    # COLMAP SfM on Fountain dataset (saves .rrd)
+pixi run -e pysfm pysfm-sfm-reconstruction-demo    # COLMAP SfM on Fountain dataset (saves .rrd)
 pixi run -e pysfm pysfm-vid-recon-demo       # Monocular video reconstruction
 pixi run -e pysfm pysfm-vid-to-img-demo      # Video frame extraction (saves .rrd)
 ```
@@ -48,7 +48,7 @@ pixi run -e pysfm pysfm-vid-to-img-demo      # Video frame extraction (saves .rr
 ### Gradio web UIs
 
 ```bash
-pixi run -e pysfm sfm-reconstruction-app     # SfM reconstruction app with Rerun viewer
+pixi run -e pysfm pysfm-sfm-reconstruction-app     # SfM reconstruction app with Rerun viewer
 pixi run -e pysfm pysfm-vid-to-img-node      # Video-to-image extraction app
 pixi run -e pysfm pysfm-vid-to-img-node-dev  # Same, with Gradio hot reload
 ```

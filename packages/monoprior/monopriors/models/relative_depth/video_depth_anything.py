@@ -1,5 +1,5 @@
 import gc
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from timeit import default_timer as timer
 from typing import Literal
@@ -190,8 +190,9 @@ class VideoDepthAnythingPredictor(BaseVideoRelativePredictor):
         frame_height: int = rgb_frames.shape[1]
         frame_width: int = rgb_frames.shape[2]
 
-        if K_33 is None:
-            K_33: Float32[np.ndarray, "3 3"] = estimate_intrinsics(H=frame_height, W=frame_width)
+        K_33_f32: Float32[np.ndarray, "3 3"] = (
+            estimate_intrinsics(H=frame_height, W=frame_width) if K_33 is None else K_33.astype(np.float32)
+        )
 
         transform = Compose(
             [
@@ -267,9 +268,9 @@ class VideoDepthAnythingPredictor(BaseVideoRelativePredictor):
         relative_depth_list = [
             RelativeDepthPrediction(
                 disparity=disparity,
-                depth=disparity_to_depth(disparity, focal_length=int(K_33[0, 0])),
+                depth=disparity_to_depth(disparity, focal_length=int(K_33_f32[0, 0])),
                 confidence=np.ones_like(disparity),
-                K_33=K_33,
+                K_33=K_33_f32,
             )
             for disparity in aligned_depth_list
         ]
@@ -293,8 +294,9 @@ class VideoDepthAnythingPredictor(BaseVideoRelativePredictor):
         frame_height: int = rgb_frames.shape[1]
         frame_width: int = rgb_frames.shape[2]
 
-        if K_33 is None:
-            K_33 = estimate_intrinsics(H=frame_height, W=frame_width)
+        K_33_f32: Float32[np.ndarray, "3 3"] = (
+            estimate_intrinsics(H=frame_height, W=frame_width) if K_33 is None else K_33.astype(np.float32)
+        )
 
         # Adjust input size based on aspect ratio.
         ratio: float = max(frame_height, frame_width) / min(frame_height, frame_width)
@@ -361,9 +363,9 @@ class VideoDepthAnythingPredictor(BaseVideoRelativePredictor):
         relative_depth_list: list[RelativeDepthPrediction] = [
             RelativeDepthPrediction(
                 disparity=disparity,
-                depth=disparity_to_depth(disparity, focal_length=int(K_33[0, 0])),
+                depth=disparity_to_depth(disparity, focal_length=int(K_33_f32[0, 0])),
                 confidence=np.ones_like(disparity),
-                K_33=K_33,
+                K_33=K_33_f32,
             )
             for disparity in aligned_depth_list
         ]
@@ -375,7 +377,7 @@ class VideoDepthAnythingPredictor(BaseVideoRelativePredictor):
         self,
         frame_list: list[UInt8[np.ndarray, "H W 3"]],
         frame_id: int,
-        transform: object,
+        transform: Callable[[dict[str, np.ndarray]], dict[str, np.ndarray]],
         device: Literal["cpu", "cuda"],
         fp32: bool,
         pre_input: torch.Tensor | None,

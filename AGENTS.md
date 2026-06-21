@@ -4,7 +4,7 @@ This file provides guidance to coding agents when working with code in this repo
 
 ## What This Is
 
-A **Pixi workspace monorepo** of computer vision projects. Each package lives in `packages/<name>/` with its own Python module, CLI tools, and tests. All Pixi configuration (deps, tasks, environments) lives in the root `pixi.toml` — per-package `pyproject.toml` files only have standard Python packaging metadata.
+A **Pixi workspace monorepo** of computer vision projects. Each package lives in `packages/<name>/` with its own Python module, CLI tools, and tests. All Pixi configuration (deps, tasks, environments) lives in the root `pixi.toml`; per-package `pyproject.toml` files hold standard Python packaging metadata plus per-package tooling config such as `[tool.ruff]` and `[tool.vulture]`.
 
 ## Environments
 
@@ -19,8 +19,8 @@ pytest -q           # test
 pyrefly check .     # typecheck
 
 # From repo root (needed for tasks with depends-on chains):
-pixi run -e monoprior --frozen relative-depth   # runs download + demo
-pixi run -e robocap-dev --frozen tests
+pixi run -e monoprior --frozen monoprior-relative-depth   # runs download + demo
+pixi run -e robocap-slam-dev --frozen tests
 ```
 
 Prefer `pixi run --frozen` to skip re-solving deps. Only omit `--frozen` when you've modified dependencies.
@@ -75,7 +75,7 @@ expected across SimpleCV tools.
 - **`hf download` not `huggingface-cli`** — conda's huggingface_hub provides `hf`, not `huggingface-cli`
 - **gradio from PyPI, not conda** — conda's gradio package has missing transitive deps
 - **`moge` needs no-build-isolation** — it requires torch at build time (configured in `[pypi-options]`)
-- **sam3d-body-rerun uses `tool/` (singular)** not `tools/` for its CLI scripts
+- **sam3d-body uses `tool/` (singular)** not `tools/` for its CLI scripts
 - **Direnv fails after changing `pixi.toml`** — run `pixi install -e <name>-dev` to re-solve, then direnv picks up the updated lockfile
 - **Never use bare `except Exception` with beartype** — it silently swallows type violations. Always re-raise `BeartypeException`:
   ```python

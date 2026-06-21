@@ -14,7 +14,7 @@ lazy re-initialisation of the calibrator.
 import uuid
 from collections.abc import Generator
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 
 import gradio as gr
 import rerun as rr
@@ -30,6 +30,7 @@ from monopriors.apis.multiview_calibration import (
     load_rgb_images,
     run_calibration_pipeline,
 )
+from monopriors.gradio_ui._vggt_common import parse_preprocessing_mode
 
 EXAMPLE_DATA_DIR: Final[Path] = Path(__file__).resolve().parents[2] / "data" / "examples" / "multiview"
 """Path to bundled example image sets used by ``gr.Examples``."""
@@ -72,6 +73,7 @@ def _sync_config(
         preprocessing_mode: Image preprocessing strategy ("crop" or "pad").
     """
     global _MV_CONFIG, _MV_CALIBRATOR
+    preprocessing_mode_literal: Literal["crop", "pad"] = parse_preprocessing_mode(preprocessing_mode)
 
     needs_reinit: bool = False
     if segment_people and not _MV_CONFIG.segment_people:
@@ -83,7 +85,7 @@ def _sync_config(
         keep_top_percent=keep_top_percent,
         refine_depth_maps=refine_depth_maps,
         segment_people=segment_people,
-        preprocessing_mode=preprocessing_mode,
+        preprocessing_mode=preprocessing_mode_literal,
         device="cuda",
         verbose=True,
     )
@@ -94,7 +96,7 @@ def _sync_config(
     else:
         _MV_CONFIG = new_config
         _MV_CALIBRATOR.config = new_config
-        _MV_CALIBRATOR.vggt_predictor.preprocessing_mode = preprocessing_mode
+        _MV_CALIBRATOR.vggt_predictor.preprocessing_mode = preprocessing_mode_literal
 
 
 def get_recording(recording_id: uuid.UUID) -> rr.RecordingStream:

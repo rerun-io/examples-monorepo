@@ -3,9 +3,14 @@
 # @Email   : wenshaoguo1026@gmail.com
 # @Project : WiLoR-mini
 # @FileName: test_models.py
-import pdb
+import os
 import time
 from pathlib import Path
+
+import pytest
+
+PRETRAINED_MODELS_DIR = Path(__file__).parents[1] / "src" / "wilor_nano" / "pretrained_models"
+RUN_PROFILER_TESTS = os.environ.get("RUN_WILOR_PROFILER_TESTS") == "1"
 
 
 def test_wilor_model():
@@ -30,24 +35,23 @@ def test_wilor_model():
     for i in range(len(outputs)):
         hand_bboxs.append(outputs[i]["hand_bbox"])
         is_rights.append(outputs[i]["is_right"])
-    for _ in range(100):
+    is_rights_array = np.asarray(is_rights, dtype=np.int64)
+    for _ in range(1):
         t0 = time.time()
-        outputs = pipe.predict_with_bboxes(image, np.array(hand_bboxs), is_rights)
+        outputs = pipe.predict_with_bboxes(image, np.array(hand_bboxs), is_rights_array)
         print(time.time() - t0)
+    assert outputs
 
 
+@pytest.mark.skipif(not RUN_PROFILER_TESTS, reason="manual profiler test; set RUN_WILOR_PROFILER_TESTS=1 to run")
 def test_vit_profiler():
-    import os
-
     import torch
     import torch.profiler
 
     from wilor_nano.models.vit import vit
     # 创建模型和数据
-    wilor_pretrained_dir = "./wilor_mini/"
-    os.makedirs(wilor_pretrained_dir, exist_ok=True)
-    mano_mean_path = os.path.join(wilor_pretrained_dir, "pretrained_models", "mano_mean_params.npz")
-    mano_model_path = os.path.join(wilor_pretrained_dir, "pretrained_models", "MANO_RIGHT.pkl")
+    mano_mean_path = str(PRETRAINED_MODELS_DIR / "mano_mean_params.npz")
+    mano_model_path = str(PRETRAINED_MODELS_DIR / "mano_clean" / "MANO_RIGHT.pkl")
     model = vit(mano_mean_path=mano_mean_path, mano_model_path=mano_model_path)  # 假设你有一个名为 ViT 的模型
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     dtype = torch.float16
@@ -73,21 +77,17 @@ def test_vit_profiler():
             print(time.time() - t0)
     # 打印分析结果
     print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
-    pdb.set_trace()
 
 
+@pytest.mark.skipif(not RUN_PROFILER_TESTS, reason="manual profiler test; set RUN_WILOR_PROFILER_TESTS=1 to run")
 def test_wilor_profiler():
-    import os
-
     import torch
     import torch.profiler
 
     from wilor_nano.models.wilor import WiLor
     # 创建模型和数据
-    wilor_pretrained_dir = "./wilor_mini/"
-    os.makedirs(wilor_pretrained_dir, exist_ok=True)
-    mano_mean_path = os.path.join(wilor_pretrained_dir, "pretrained_models", "mano_mean_params.npz")
-    mano_model_path = os.path.join(wilor_pretrained_dir, "pretrained_models", "MANO_RIGHT.pkl")
+    mano_mean_path = str(PRETRAINED_MODELS_DIR / "mano_mean_params.npz")
+    mano_model_path = str(PRETRAINED_MODELS_DIR / "mano_clean" / "MANO_RIGHT.pkl")
     FOCAL_LENGTH = 5000
     IMAGE_SIZE = 256
     model = WiLor(
@@ -120,7 +120,6 @@ def test_wilor_profiler():
             print(time.time() - t0)
     # 打印分析结果
     print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
-    pdb.set_trace()
 
 
 if __name__ == '__main__':

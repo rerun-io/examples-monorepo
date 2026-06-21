@@ -23,7 +23,7 @@ pixi run -e dpvo --frozen dpvo-demo
 - This was not a cleanup preference. It was a compatibility decision required to move onto the newer PyTorch/CUDA stack needed by the prebuilt `lietorch` package and the current 5090-tested environment.
 - In practice: reintroducing `torch_scatter` means re-checking wheel availability and ABI compatibility against the exact `pytorch`/`libtorch`/CUDA combination in this repo. Do not assume a PyPI or PyG wheel will be compatible just because it exists for a nearby Torch/CUDA version.
 - That `torch_scatter` replacement is a narrow compatibility workaround for the current app/demo path and has not been broadly validated outside this workflow yet.
-- The package still builds its own CUDA extensions (`dpvo._cuda_corr` and `dpvo._cuda_ba`) locally through `pixi run post-install`.
+- The package still builds its own CUDA extensions (`dpvo._cuda_corr` and `dpvo._cuda_ba`) locally through the `_build-dpvo-cuda-kernels` task, which runs automatically as a `depends-on` step of `dpvo-demo`, `dpvo-app`, and `dpvo-eval-euroc`. You can also build them directly with `pixi run -e dpvo --frozen _build-dpvo-cuda-kernels`.
 - Example assets and checkpoints are now fetched through `hf download`, not `huggingface-cli`.
 - `pixi run dpvo-demo` has been validated on an RTX 5090 with the current lockfile.
 - Rerun and GUI flows require a valid display session. In headless shells, Rerun will fail unless `DISPLAY`/`XAUTHORITY` are set.

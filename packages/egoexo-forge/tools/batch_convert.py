@@ -1,12 +1,9 @@
-import tyro
+"""Deprecated entrypoint.
 
-from egoexo_forge.api.batch_ingest_rrd import BatchConvertConfig, batch_raw_to_rrd
+Ego/exo dataset -> Rerun ``.rrd`` batch conversion moved to simplecv
+(``simplecv.apis.batch_raw_to_rrd``). This stub remains only so the
+``egoexo-forge-batch-convert`` task does not error.
+"""
 
-# Example usage
 if __name__ == "__main__":
-    batch_raw_to_rrd(
-        tyro.cli(
-            BatchConvertConfig,
-            description="Visualize Ego Only dataset",
-        )
-    )
+    print("deprecated: ego/exo batch .rrd conversion moved to simplecv.apis.batch_raw_to_rrd")

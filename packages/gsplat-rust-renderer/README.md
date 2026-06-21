@@ -32,10 +32,10 @@ Two terminals — one for the viewer, one for logging data:
 
 ```bash
 # Terminal 1: Build and launch the viewer
-pixi run --frozen -e gsplat-rust-renderer viewer
+pixi run --frozen -e gsplat-rust-renderer gsplat-rust-renderer-viewer
 
 # Terminal 2: Download example chair PLY and log it to the viewer
-pixi run --frozen -e gsplat-rust-renderer log-ply
+pixi run --frozen -e gsplat-rust-renderer gsplat-rust-renderer-log-ply
 ```
 
 The first build compiles Rerun from source and takes a few minutes. Subsequent runs are instant.
