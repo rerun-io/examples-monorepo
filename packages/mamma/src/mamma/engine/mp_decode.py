@@ -17,6 +17,7 @@ an ``if __name__ == "__main__"`` guard, never from stdin/REPL.
 
 from __future__ import annotations
 
+import queue
 from pathlib import Path
 
 import torch
@@ -50,6 +51,21 @@ def _decode_worker(video_path: str, resize_hw: tuple[int, int], cmd_queue, out_q
         out_queue.put(("done", None, None))
 
 
+def _recv_or_die(out_queue, proc, timeout: float = 30.0):
+    """Block for one message from a decode worker; raise if it dies first.
+
+    The timeout is only a liveness-poll interval: a slow-but-alive worker keeps
+    waiting, while a worker that exited fails fast instead of hanging forever on
+    a message that will never arrive.
+    """
+    while True:
+        try:
+            return out_queue.get(timeout=timeout)
+        except queue.Empty:
+            if not proc.is_alive():
+                raise RuntimeError("decode worker died (see worker stderr)") from None
+
+
 class MultiprocessDecoder:
     """Persistent per-camera decode workers; chunk iterator per job."""
 
@@ -76,21 +92,15 @@ class MultiprocessDecoder:
         ]
         for proc in self._procs:
             proc.start()
-        import queue as queue_mod
 
-        # Wait for NVDEC open (construction time). Bounded like iter_chunks: the
-        # get() timeout is just a liveness-poll interval — a slow-but-alive worker
-        # keeps waiting; a worker that died (or reported "error") fails the build
-        # instead of hanging forever on a "ready" that never comes.
+        # Wait for NVDEC open (construction time). A worker that fails init (or
+        # dies) must fail the build, not hang it — clean up the others first.
         for proc, out_q in zip(self._procs, self._out_queues, strict=True):
-            while True:
-                try:
-                    kind, payload, tb = out_q.get(timeout=30)
-                    break
-                except queue_mod.Empty:
-                    if not proc.is_alive():
-                        self.close()
-                        raise RuntimeError("decode worker exited before signaling ready (see worker stderr)") from None
+            try:
+                kind, payload, tb = _recv_or_die(out_q, proc)
+            except RuntimeError:
+                self.close()
+                raise
             if kind == "error":
                 self.close()
                 raise RuntimeError(f"decode worker failed to initialize ({payload}):\n{tb}")
@@ -100,18 +110,9 @@ class MultiprocessDecoder:
         """Yield ``(chunk_start, [per-camera UInt8 CUDA tensors])`` in order."""
         for cmd_q in self._cmd_queues:
             cmd_q.put((start_frame, frame_count, self.chunk_size))
-        import queue as queue_mod
 
         while True:
-            items = []
-            for proc, out_q in zip(self._procs, self._out_queues, strict=True):
-                while True:
-                    try:
-                        items.append(out_q.get(timeout=30))
-                        break
-                    except queue_mod.Empty:
-                        if not proc.is_alive():
-                            raise RuntimeError("decode worker died (see worker stderr)") from None
+            items = [_recv_or_die(out_q, proc) for proc, out_q in zip(self._procs, self._out_queues, strict=True)]
             kinds = {item[0] for item in items}
             if kinds == {"done"}:
                 return
