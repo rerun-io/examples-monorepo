@@ -1763,6 +1763,26 @@ depends-on = ["_download-mamma-inputs", "_download-mamma-weights", "_download-ma
 cwd = "packages/mamma"
 description = "Aggregate goal verification: golden gate, 30fps benchmark, dataset RRDs, no-disk-writes, hygiene"
 
+# iPhone catalog pipeline (run in order): `sweep` generates per-scene quality.rrd +
+# gate.json; `serve` runs the in-memory Rerun catalog (own shell, keep running);
+# `register` registers the RRDs as the mamma_iphones dataset with names/properties
+# + default blueprint. Mirrors rerun-io/trossen-oss's preprocess/serve/register.
+[feature.mamma.tasks.mamma-iphones-sweep]
+cmd = "python tools/sweep_iphones_quality.py --subset all"
+depends-on = ["_download-mamma-weights"]
+cwd = "packages/mamma"
+description = "Step 1: run the quality preset on all 42 iPhone scenes -> quality.rrd + gate.json per scene (GPU)"
+
+[feature.mamma.tasks.mamma-iphones-serve]
+cmd = "rerun server --port 51234"
+cwd = "packages/mamma"
+description = "Step 2: start the local in-memory Rerun catalog on :51234 (run in its own shell; keep running to register/view)"
+
+[feature.mamma.tasks.mamma-iphones-register]
+cmd = "python tools/register_catalog.py"
+cwd = "packages/mamma"
+description = "Step 3: register the 42 RRDs into the mamma_iphones catalog (base+props layers, names/properties from gate.json, default blueprint); needs mamma-iphones-serve running"
+
 [environments]
 dev = { features = [
     "ide",
