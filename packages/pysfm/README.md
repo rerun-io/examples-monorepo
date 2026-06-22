@@ -9,7 +9,7 @@ COLMAP Structure-from-Motion reconstruction through [pycolmap](https://github.co
     <img src="https://img.shields.io/badge/Install%20with-Pixi-16A34A" alt="Pixi badge">
   </a>
   <a title="CUDA" href="https://developer.nvidia.com/cuda-toolkit" target="_blank" rel="noopener noreferrer">
-    <img src="https://img.shields.io/badge/CUDA-12.x-76b900" alt="CUDA badge">
+    <img src="https://img.shields.io/badge/CUDA-13.x-76b900" alt="CUDA badge">
   </a>
 </p>
 

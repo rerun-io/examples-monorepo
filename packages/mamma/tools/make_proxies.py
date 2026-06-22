@@ -1,7 +1,7 @@
 """Transcode a sequence's 4K source videos to 720p H.264 proxies, once.
 
 The streaming pipeline's wall time on a 4K-source clip is dominated by NVDEC
-decoding the full-resolution HEVC before resizing (torchcodec 0.10 has no
+decoding the full-resolution HEVC before resizing (torchcodec has no
 scaled-decode path); the dig measured a ~23 s irreducible decode floor on
 running_jumping. A 720p H.264 proxy decodes ~9x cheaper, so a one-time offline
 transcode lets the resident loop hit its realtime budget without touching

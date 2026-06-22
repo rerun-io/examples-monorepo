@@ -991,14 +991,36 @@ platforms = ["linux-64"]
 [feature.pysfm.dependencies]
 python = "3.12.*"
 tyro = ">=0.9.1,<0.10"
-# cuda13: use the conda CPU pycolmap build (cpu_py312). The cuda* builds pin
-# `cuda-version >=12.9,<13` + `cuda-cudart <13` (GPU SIFT/faiss), which conflicts
-# with the cuda13 stack; the cpu_* build drops every cuda pin and runs feature
-# extraction on CPU. It still requires `libfaiss * *_cuda` (>=1.9,<2) — satisfied
-# by the ai-demos `libfaiss 1.10.0 cuda130*_cuda` build. Qt5 (qt-main, from
-# colmap) and Qt6 (qt6-main, from the floated opencv) coexist, so no headless
-# opencv hack is needed. Unlike the PyPI wheel this links against the conda env's
-# own native libs, so it does not core-dump in feature extraction.
+# cuda13: pinned to the conda CPU pycolmap build (cpu_py312) — see THE ISSUE
+# and SOLUTIONS below.
+#
+# THE ISSUE — there is no CUDA-13 pycolmap on conda-forge yet. pycolmap's
+# `cuda*` builds pin `cuda-version >=12.9,<13` + `cuda-cudart <13` (for GPU SIFT
+# + GPU faiss), a hard conflict with this monorepo's cuda13 stack, so the
+# resolver can't use them. Two non-GPU routes were tried:
+#   - PyPI wheel `pycolmap==4.0.2` (cp312 manylinux): solves + imports, but
+#     CORE-DUMPS in feature extraction (its bundled native libs clash with the
+#     conda env's libs). Rejected.
+#   - conda `cpu_*` build (this pin): drops every cuda pin and runs feature
+#     extraction on CPU. It still wants `libfaiss * *_cuda` (>=1.9,<2), satisfied
+#     by the ai-demos `libfaiss 1.10.0 cuda130*_cuda` build; Qt5 (qt-main, from
+#     colmap) and Qt6 (qt6-main, from the floated opencv) coexist, so no headless
+#     opencv hack is needed. It links against the conda env's own libs, so it
+#     does NOT core-dump. All 7 pysfm tests pass. The only cost is GPU SIFT —
+#     feature extraction runs on CPU (slower, but functionally complete).
+#
+# SOLUTIONS to get the GPU build back (none needed for correctness — CPU works):
+#   1. Wait for the conda-forge cuda130 migration. It's a dependency cascade:
+#      libfaiss + ceres-solver must publish cuda130 builds (both still cuda129 on
+#      conda-forge today) -> colmap-feedstock cuda130 -> pycolmap-feedstock
+#      cuda130. The global `cuda130.yaml` migrator is live (gated on cuda129);
+#      both colmap + pycolmap feedstocks are maintained by Tobias-Fischer.
+#      Upstream COLMAP 4.0.4 is already cuda13-ready (arch=all; Blackwell
+#      PatchMatch fix PR #4213), so this is a feedstock-rebuild job, not a code
+#      change. When that lands, switch this back to `build = "cuda*"`.
+#   2. Build colmap + pycolmap cuda13 in the ai-demos channel ourselves (as we
+#      did for lietorch + libfaiss cuda130). Works, but colmap is a heavy C++
+#      build with a large GPU dep tree — only worth it if GPU SIFT is needed.
 pycolmap = { version = "4.0.*", build = "cpu*" }
 
 [feature.pysfm.pypi-dependencies]
