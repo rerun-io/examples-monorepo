@@ -153,23 +153,26 @@ engines rebuild; each package needs re-validation.
   reports whole-number `average_fps` as `int`).
 
 ### Per-env validation (`pixi run -e <pkg>-dev tests`)
-PASS (13): simplecv (132), mamma (11), dpvo (no tests; lietorch import ok),
-monoprior (1), sapiens2-pose (24), mast3r-slam (27), sam3 (1), sam3d-body (1),
-prompt-da (3), mv-api (55), egoexo-forge (1), sapiens-coco133-pose (31).
+PASS (15): simplecv (132), mamma (15 + golden gate PASS), dpvo (no tests;
+lietorch cuda13 import ok), monoprior (1), sapiens2-pose (24), mast3r-slam (27),
+sam3 (1), sam3d-body (1), prompt-da (3), mv-api (55), mv-api-catalog (55),
+egoexo-forge (1), sapiens-coco133-pose (31), **vistadream** (1; lint/typecheck/
+deadcode clean — recovered via the PyPI gsplat fix below).
 - **wilor-nano:** 24 pass, 1 fail — `test_pixi_tasks_keep_generic_wilor_entrypoints`
   reads a `[feature.wilor]` that doesn't exist (only `wilor-nano`). **Pre-existing
   on `main`** (fails there too); not a migration regression — stale since the
   `wilor`→`wilor-nano` rename.
-- **vistadream:** install fails building the `gsplat` git dep — it builds in an
-  isolated uv env that pulls a PyPI cu128 torch (`no-build-isolation` doesn't catch
-  the git dep), so `gsplat`'s `_check_cuda_version` sees nvcc 13.0 vs torch 12.8.
-  Worked pre-migration only because 12.9-vs-12.8 was a tolerated *minor* mismatch;
-  the cuda13 *major* bump trips it. Migration-exposed build-tooling issue.
-  **Attempted:** adding `pytorch → torch` to `conda-pypi-map.json` — did **not**
-  fix it (lock unchanged; gsplat still builds in an isolated uv env with PyPI
-  cu128 torch — `no-build-isolation` simply isn't applied to the git dep). Real
-  fix needs a pixi/uv change or restructuring gsplat to compile in a post-install
-  step like dpvo (`packages/dpvo/setup.py build_ext` against the conda torch).
+- **vistadream: FIXED.** Original failure: the `gsplat` *git* dep built in an
+  isolated uv env that pulled a PyPI cu128 torch (`no-build-isolation` is **not
+  applied to git deps**), so gsplat's `_check_cuda_version` saw nvcc 13.0 vs torch
+  12.8 (worked pre-migration only because 12.9-vs-12.8 was a tolerated *minor*
+  mismatch; the cuda13 *major* bump trips it). `conda-pypi-map pytorch→torch` did
+  not help (no-build-isolation still skipped the git dep). **Fix:** switch gsplat
+  from the git rev to the PyPI dep `gsplat ==1.5.3` — the pinned rev `970dd84`
+  *is* v1.5.3, and PyPI ships a `py3-none-any` wheel that installs without any
+  build and JIT-compiles its CUDA kernels at runtime against the conda cuda13
+  torch. vistadream-dev now installs + imports + tests pass + lint/typecheck/
+  deadcode clean on cuda13.
 - **pysfm:** still disabled (multiple compounding cuda13 conflicts; the libfaiss
   one is now solved, two remain):
   1. *libfaiss (SOLVED):* `pycolmap ==4.0.2` hard-requires `libfaiss * *_cuda`
@@ -182,13 +185,22 @@ prompt-da (3), mv-api (55), egoexo-forge (1), sapiens-coco133-pose (31).
      `typing-extensions >=4.13`, but `[feature.common]` caps it `<4.13` (shared by
      every env — not safe to relax for one).
 
-  **Attempted:** pinning `py-opencv` to a Qt5 build (to match pycolmap's Qt5)
-  fails too — the only Qt5 libopencv for py312 is 4.10.0, whose deps pin
-  `imath <3.2` which conflicts with the cuda13 stack's imath. Every path bottoms
-  out on **pycolmap 4.0.2 being a Qt5-era package** whose transitive deps
-  (Qt5, old imath, faiss `_cuda`) are incompatible with the modern cuda13/py312
-  ecosystem. conda-forge has no newer (Qt6) pycolmap (max is 4.0.4, same era), so
-  the real fix is upstream: a Qt6/modern-deps pycolmap, or a custom pycolmap build.
+  **Attempted (conda pycolmap):** pinning `py-opencv` to a Qt5 build (to match
+  pycolmap's Qt5) fails too — the only Qt5 libopencv for py312 is 4.10.0, whose
+  deps pin `imath <3.2` which conflicts with the cuda13 stack's imath. The conda
+  pycolmap 4.0.2 is a **Qt5-era package** whose transitive deps (Qt5, old imath,
+  faiss `_cuda`) are incompatible with the modern cuda13/py312 ecosystem.
+
+  **Attempted (PyPI pycolmap — closest path):** switching to the self-contained
+  PyPI wheel `pycolmap ==4.0.2` (cp312 manylinux) makes the env **solve + install
+  + `import pycolmap`** on cuda13 (it bundles COLMAP/faiss, sidestepping all the
+  conda Qt5/faiss/imath clashes; lint + deadcode clean, the blueprint test passes).
+  BUT it **core-dumps** in actual feature extraction
+  (`test_streamed_extraction_equivalence_synthetic`) — the wheel's bundled native
+  libs crash against the conda env. So pysfm stays disabled (the env's `pycolmap`
+  dep is left on the PyPI wheel as the closest-working direction). Real fix is
+  upstream: a cuda13/py312-compatible pycolmap (a conda Qt6 build, or a PyPI wheel
+  whose bundled libs don't crash in a conda env).
 
   **ai-demos faiss side effect (handled):** publishing the cuda13 `libfaiss` to
   ai-demos makes pixi's strict channel priority route *all* `libfaiss` through

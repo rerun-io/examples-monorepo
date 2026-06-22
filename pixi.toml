@@ -990,11 +990,16 @@ platforms = ["linux-64"]
 
 [feature.pysfm.dependencies]
 python = "3.12.*"
-pycolmap = "==4.0.2"
 tyro = ">=0.9.1,<0.10"
 
 [feature.pysfm.pypi-dependencies]
 pysfm = { path = "packages/pysfm", editable = true }
+# cuda13: use the self-contained PyPI pycolmap wheel instead of the conda build.
+# conda pycolmap 4.0.2 is a Qt5-era package whose transitive deps (qt-main Qt5,
+# old imath, faiss *_cuda) clash with the cuda13/py312 stack (Qt6 opencv, imath
+# 3.2, no cuda13 faiss). The manylinux wheel bundles COLMAP+faiss, sidestepping
+# all of it.
+pycolmap = "==4.0.2"
 
 [feature.pysfm.activation.env]
 PACKAGE_DIR = "packages/pysfm"
@@ -1106,7 +1111,12 @@ monopriors = { path = "packages/monoprior", editable = true }
 sam3 = { path = "packages/sam3", editable = true }
 vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c" }
 moge = { git = "https://github.com/microsoft/MoGe.git" }
-gsplat = { git = "https://github.com/nerfstudio-project/gsplat.git", rev = "970dd84803ecf8570651f8e121e328bfef567fb9" }
+# cuda13: PyPI gsplat (== the pinned git rev 970dd84, which IS v1.5.3) instead of
+# the git source. pixi's `no-build-isolation` applies to a named PyPI dep but not
+# a git dep, so the git build compiled in an isolated env against a PyPI cu128
+# torch (→ nvcc-13 vs torch-12.8 mismatch); the PyPI dep builds against the conda
+# cuda13 torch.
+gsplat = { version = "==1.5.3", index = "https://pypi.org/simple" }
 accelerate = "*"
 plyfile = "*"
 timm = "*"
@@ -1929,10 +1939,11 @@ robocap-slam-dev = { features = [
     "robocap-slam",
     "dev",
 ], solve-group = "robocap-slam", no-default-feature = true }
-# cuda13 migration: pysfm disabled — see docs/cuda13-migration.md §9. The libfaiss
-# blocker is fixed (cuda13 libfaiss in ai-demos), but pycolmap 4.0.2 also clashes
-# on Qt5(pycolmap)/Qt6(opencv) and tyro's typing-extensions >=4.13 vs the common
-# <4.13 cap. Re-enable once those are resolved (e.g. newer pycolmap).
+# cuda13 migration: pysfm disabled — see docs/cuda13-migration.md §9. With the
+# PyPI pycolmap wheel (above) the env now SOLVES + installs + imports on cuda13
+# (conda pycolmap can't — Qt5/imath/faiss clashes), but the wheel core-dumps in
+# feature extraction (bundled libs vs the conda env). Confirmed upstream blocker;
+# re-enable when a cuda13/py312-compatible pycolmap (conda or wheel) is available.
 # pysfm = { features = [
 #     "common",
 #     "cuda",
