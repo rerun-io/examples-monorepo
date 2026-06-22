@@ -164,9 +164,12 @@ prompt-da (3), mv-api (55), egoexo-forge (1), sapiens-coco133-pose (31).
   isolated uv env that pulls a PyPI cu128 torch (`no-build-isolation` doesn't catch
   the git dep), so `gsplat`'s `_check_cuda_version` sees nvcc 13.0 vs torch 12.8.
   Worked pre-migration only because 12.9-vs-12.8 was a tolerated *minor* mismatch;
-  the cuda13 *major* bump trips it. Migration-exposed build-tooling issue; fix is to
-  make uv build gsplat against the conda cuda13 torch (conda-pypi-map `pytorch→torch`,
-  globally risky) or build gsplat in a post-install step like dpvo.
+  the cuda13 *major* bump trips it. Migration-exposed build-tooling issue.
+  **Attempted:** adding `pytorch → torch` to `conda-pypi-map.json` — did **not**
+  fix it (lock unchanged; gsplat still builds in an isolated uv env with PyPI
+  cu128 torch — `no-build-isolation` simply isn't applied to the git dep). Real
+  fix needs a pixi/uv change or restructuring gsplat to compile in a post-install
+  step like dpvo (`packages/dpvo/setup.py build_ext` against the conda torch).
 - **pysfm:** still disabled (multiple compounding cuda13 conflicts; the libfaiss
   one is now solved, two remain):
   1. *libfaiss (SOLVED):* `pycolmap ==4.0.2` hard-requires `libfaiss * *_cuda`
@@ -177,8 +180,15 @@ prompt-da (3), mv-api (55), egoexo-forge (1), sapiens-coco133-pose (31).
      wants a Qt6 `libopencv`. A `headless` opencv sidesteps Qt but pulls in (3).
   3. *typing-extensions:* `tyro >=0.9.1` (recent builds) needs
      `typing-extensions >=4.13`, but `[feature.common]` caps it `<4.13` (shared by
-     every env — not safe to relax for one). Resolving pysfm cleanly likely needs
-     a newer pycolmap (Qt6-compatible) and/or decoupling its opencv/tyro pins.
+     every env — not safe to relax for one).
+
+  **Attempted:** pinning `py-opencv` to a Qt5 build (to match pycolmap's Qt5)
+  fails too — the only Qt5 libopencv for py312 is 4.10.0, whose deps pin
+  `imath <3.2` which conflicts with the cuda13 stack's imath. Every path bottoms
+  out on **pycolmap 4.0.2 being a Qt5-era package** whose transitive deps
+  (Qt5, old imath, faiss `_cuda`) are incompatible with the modern cuda13/py312
+  ecosystem. conda-forge has no newer (Qt6) pycolmap (max is 4.0.4, same era), so
+  the real fix is upstream: a Qt6/modern-deps pycolmap, or a custom pycolmap build.
 
   **ai-demos faiss side effect (handled):** publishing the cuda13 `libfaiss` to
   ai-demos makes pixi's strict channel priority route *all* `libfaiss` through
