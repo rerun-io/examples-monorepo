@@ -14,6 +14,16 @@
 torchcodec 0.13 includes the NVDEC-cache fix (PR #1232, landed 0.11) → the in-process
 multi-stream decode no longer thrashes → the `MultiprocessDecoder` hack can be deleted.
 
+**Current-state motivation (mamma realtime gate):** as of the PR #48 merge, the mamma
+`mamma-goal-check` **realtime** clause is RED purely from an env mismatch —
+`torchvision 0.26` resolved against the pinned `torch 2.10` (the env even warns
+"torchvision==0.26 is incompatible with torch==2.10"), which slows the SAM2
+image-encoder (`track`) stage to ~72 ms/call (~7 ticks/s vs the ~15 needed). This was
+A/B-proven identical on the pre-slim sam2 code, so it is NOT caused by the slim. The
+consistent torch-2.12 stack in this migration is expected to resolve it; the
+validation signal is re-running `packages/mamma/tools/benchmark.py --trt-engine <plan>`
+(or `mamma-goal-check`) after the migration and confirming realtime goes green.
+
 ## 1. Blast radius
 Flipping the shared `[feature.cuda]` from 12.9→13.0 cascades to **16 GPU packages**:
 dpvo, egoexo-forge, mamma, mast3r-slam, monoprior, mv-api, prompt-da, pysfm, sam3,
