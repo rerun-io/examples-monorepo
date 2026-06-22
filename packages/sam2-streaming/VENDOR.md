@@ -19,7 +19,7 @@
   `0691b7eea4514ef2216517f9902ed002f2a07653`, verified equivalence-preserving by a
   Hypothesis differential suite (record/replay vs the pre-slim code, ≥1000
   examples/seam, CPU seams bitwise-exact + a GPU end-to-end smoke under
-  `torch.allclose`); see `docs/sam2-streaming-slim-plan.md`.
+  `torch.allclose`).
   - Deleted whole files: `sam2_video_predictor.py`, `sam2_video_predictor_legacy.py`,
     `sam2_image_predictor.py`, `automatic_mask_generator.py`, `utils/amg.py`,
     `benchmark.py`.
@@ -31,12 +31,14 @@
   - Kept (load-bearing): all model config YAMLs, the `hiera` + `vitdet` backbones,
     the `_C` connected-components extension, and the `SAM2ObjectMemoryBank`
     default-factory import.
-  - Further YAGNI polish still possible (other dead in-`misc.py`/decoder branches);
-    tracked in `docs/sam2-streaming-slim-plan.md`.
+  - Further YAGNI polish still possible (other dead in-`misc.py`/decoder branches).
 - **Removed (repo-size only, no runtime impact)**: `demo/`, `notebooks/`,
   `sav_dataset/`, `assets/`, `training/`, `tools/`, `backend.Dockerfile`,
   `docker-compose.yaml` (~65 MB of web demo, example notebooks, and training
-  code not used by the `mamma` package).
+  code not used by the `mamma` package); the upstream FB docs (`README.md`,
+  `INSTALL.md`, `RELEASE_NOTES.md`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`) and
+  the dangling `configs/sam2.1_training/` finetune YAML (training code already
+  removed; never composed on the inference path).
 - **Install note**: `pyproject.toml` build-system requires `torch>=2.5.1` at
   build time → this package must be listed under `[pypi-options]
   no-build-isolation` in the root `pixi.toml`.
