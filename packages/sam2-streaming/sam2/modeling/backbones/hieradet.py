@@ -297,21 +297,3 @@ class Hiera(nn.Module):
                 outputs.append(feats)
 
         return outputs
-
-    def get_layer_id(self, layer_name):
-        # https://github.com/microsoft/unilm/blob/master/beit/optim_factory.py#L33
-        num_layers = self.get_num_layers()
-
-        if layer_name.find("rel_pos") != -1:
-            return num_layers + 1
-        elif layer_name.find("pos_embed") != -1:
-            return 0
-        elif layer_name.find("patch_embed") != -1:
-            return 0
-        elif layer_name.find("blocks") != -1:
-            return int(layer_name.split("blocks")[1].split(".")[1]) + 1
-        else:
-            return num_layers + 1
-
-    def get_num_layers(self) -> int:
-        return len(self.blocks)
