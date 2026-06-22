@@ -1747,15 +1747,21 @@ depends-on = ["_download-mamma-inputs", "_download-mamma-weights"]
 cwd = "packages/mamma"
 description = "Streaming pipeline on crossing_arms (4x 4K cams), live Rerun viewer"
 
+[feature.mamma.tasks._download-mamma-body-models]
+cmd = "test -e data/body_models/smplx || hf download pablovela5620/mamma-streaming-data --repo-type dataset --include 'body_models/**' --local-dir data/"
+cwd = "packages/mamma"
+outputs = ["packages/mamma/data/body_models/smplx"]
+description = "Download SMPL-X body models + downsampled verts (private HF repo)"
+
 [feature.mamma.tasks.mamma-demo-hocap]
 cmd = "python tools/demo_hocap.py"
-depends-on = ["_download-mamma-hocap-sample", "_download-mamma-weights"]
+depends-on = ["_download-mamma-hocap-sample", "_download-mamma-weights", "_download-mamma-body-models"]
 cwd = "packages/mamma"
 description = "Streaming pipeline on the HoCap sample (ingestion + visual check)"
 
 [feature.mamma.tasks.mamma-demo-assembly101]
 cmd = "python tools/demo_assembly101.py"
-depends-on = ["_download-mamma-assembly101-sample", "_download-mamma-weights"]
+depends-on = ["_download-mamma-assembly101-sample", "_download-mamma-weights", "_download-mamma-body-models"]
 cwd = "packages/mamma"
 description = "Streaming pipeline on the Assembly101 720p sample (ingestion + visual check)"
 

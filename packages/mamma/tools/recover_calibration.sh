@@ -12,6 +12,7 @@
 #   --run OUT     after recovery, run the quality pipeline and save OUT.rrd
 set -euo pipefail
 DIR="${1:?usage: recover_calibration.sh <videos_dir> [--force] [--run OUT.rrd]}"; shift
+DIR="$(cd "$DIR" && pwd)"  # absolute, so per-stage `cd` into package dirs doesn't re-root a relative path
 FORCE=0; RUN_RRD=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -24,6 +25,8 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"          # packages/mamma
 ROOT="$(cd "$HERE/../.." && pwd)"                  # worktree root
 MONO="$ROOT/packages/monoprior"
 TRT="$HERE/.trt_cache/mammanet_b4_fp16_trt101339_sm120.plan"
+TRT_ARG=()
+[ -f "$TRT" ] && TRT_ARG=(--trt-engine "$TRT")  # only pass a machine-local engine if it exists; else eager MammaNet
 
 if [ -d "$DIR/meta" ] && [ "$FORCE" -eq 0 ]; then
   echo "meta/ already present at $DIR — this is the calibrated path; nothing to recover."
@@ -34,13 +37,13 @@ else
       python tools/demos/calibrate_synced_videos.py --videos-dir "$DIR" $([ "$FORCE" -eq 1 ] && echo --force) )
   echo ">> stage B: confidence-weighted keypoint bundle adjustment (mamma env)"
   ( cd "$HERE" && pixi run -e mamma --frozen \
-      python tools/refine_calibration_ba.py --data-dir "$DIR" --trt-engine "$TRT" )
+      python tools/refine_calibration_ba.py --data-dir "$DIR" "${TRT_ARG[@]}" )
 fi
 
 if [ -n "$RUN_RRD" ]; then
   echo ">> running quality pipeline -> $RUN_RRD"
   ( cd "$HERE" && pixi run -e mamma --frozen \
       python tools/dump_artifacts.py --data-dir "$DIR" --preset quality \
-      --trt-engine "$TRT" --out-dir "$(dirname "$RUN_RRD")/dump" --rr-config.save "$RUN_RRD" --rr-config.headless )
+      "${TRT_ARG[@]}" --out-dir "$(dirname "$RUN_RRD")/dump" --rr-config.save "$RUN_RRD" --rr-config.headless )
 fi
 echo "done."

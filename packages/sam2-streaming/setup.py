@@ -23,9 +23,12 @@ AUTHOR = "Meta AI"
 AUTHOR_EMAIL = "segment-anything@meta.com"
 LICENSE = "Apache 2.0"
 
-# Read the contents of README file
-with open("README.md", "r", encoding="utf-8") as f:
-    LONG_DESCRIPTION = f.read()
+# Read the contents of README file if present (the vendored slim drops upstream docs)
+try:
+    with open("README.md", "r", encoding="utf-8") as f:
+        LONG_DESCRIPTION = f.read()
+except FileNotFoundError:
+    LONG_DESCRIPTION = DESCRIPTION
 
 # Required dependencies
 REQUIRED_PACKAGES = [
