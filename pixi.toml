@@ -1943,7 +1943,7 @@ robocap-slam-dev = { features = [
     "dev",
 ], solve-group = "robocap-slam", no-default-feature = true }
 # cuda13 migration: pysfm re-enabled on the conda CPU pycolmap build (see the
-# feature.pysfm.dependencies note + docs/cuda13-migration.md §9).
+# feature.pysfm.dependencies note above for why the cpu_* build is required).
 pysfm = { features = [
     "common",
     "cuda",
