@@ -77,8 +77,8 @@ def _load_checkpoint(model, ckpt_path):
         missing_keys, unexpected_keys = model.load_state_dict(sd)
         if missing_keys:
             logging.error(missing_keys)
-            raise RuntimeError()
+            raise RuntimeError(f"Missing keys while loading checkpoint {ckpt_path}: {missing_keys}")
         if unexpected_keys:
             logging.error(unexpected_keys)
-            raise RuntimeError()
-        logging.info("Loaded checkpoint sucessfully")
+            raise RuntimeError(f"Unexpected keys while loading checkpoint {ckpt_path}: {unexpected_keys}")
+        logging.info("Loaded checkpoint successfully")

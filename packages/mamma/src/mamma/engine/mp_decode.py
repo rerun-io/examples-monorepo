@@ -43,9 +43,9 @@ def _decode_worker(video_path: str, resize_hw: tuple[int, int], cmd_queue, out_q
         job = cmd_queue.get()
         if job is None:
             return
-        start_frame, frame_count, chunk_size = job
-        for chunk_start in range(start_frame, frame_count, chunk_size):
-            chunk_stop: int = min(chunk_start + chunk_size, frame_count)
+        start_frame, frame_end, chunk_size = job
+        for chunk_start in range(start_frame, frame_end, chunk_size):
+            chunk_stop: int = min(chunk_start + chunk_size, frame_end)
             chunk: UInt8[torch.Tensor, "b 3 h w"] = reader.get_frames_in_range(chunk_start, chunk_stop)
             out_queue.put(("chunk", chunk_start, chunk.to("cpu").pin_memory()))
         out_queue.put(("done", None, None))
@@ -106,10 +106,14 @@ class MultiprocessDecoder:
                 raise RuntimeError(f"decode worker failed to initialize ({payload}):\n{tb}")
             assert kind == "ready", f"unexpected startup message from decode worker: {kind!r}"
 
-    def iter_chunks(self, start_frame: int, frame_count: int):
-        """Yield ``(chunk_start, [per-camera UInt8 CUDA tensors])`` in order."""
+    def iter_chunks(self, start_frame: int, frame_end: int):
+        """Yield ``(chunk_start, [per-camera UInt8 CUDA tensors])`` in order.
+
+        ``frame_end`` is an exclusive end index (decode covers
+        ``range(start_frame, frame_end)``), not a frame count.
+        """
         for cmd_q in self._cmd_queues:
-            cmd_q.put((start_frame, frame_count, self.chunk_size))
+            cmd_q.put((start_frame, frame_end, self.chunk_size))
 
         while True:
             items = [_recv_or_die(out_q, proc) for proc, out_q in zip(self._procs, self._out_queues, strict=True)]

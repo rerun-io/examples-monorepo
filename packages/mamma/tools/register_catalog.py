@@ -91,7 +91,7 @@ def main(config: RegisterCatalogConfig) -> int:
 
         rid: str = ds.register([f"file://{p}"], layer_name="base", on_duplicate=replace).wait().segment_ids[0]
 
-        rr.init(config.application_id, recording_id=rid)
+        rr.init(config.application_id, recording_id=rid, strict=True)
         rr.send_recording_name(name)
         rr.send_property("category", rr.AnyValues(category=cat_))
         rr.send_property("num_people", rr.AnyValues(num_people=n_people))
