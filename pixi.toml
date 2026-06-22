@@ -14,7 +14,7 @@ preview = ["pixi-build"]
 
 # ─── pypi-options (workspace-level) ─────────────────────────────────────────
 [pypi-options]
-no-build-isolation = ["moge", "gsplat", "dpvo"]
+no-build-isolation = ["moge", "gsplat", "dpvo", "sam2"]
 
 [pypi-options.dependency-overrides]
 iopath = ">=0.1.10"
@@ -1686,6 +1686,123 @@ description = "Push edited layer files into the running catalog (append --datase
 # ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
+# mamma — streaming multiview body capture (causal MAMMA pipeline)
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.mamma]
+platforms = ["linux-64"]
+
+[feature.mamma.dependencies]
+python = "3.12.*"
+# Keep the torch everything was measured/gated on (fresh solves pick 2.11).
+pytorch-gpu = "2.10.*"
+onnx = "*"
+onnxscript = "*"
+einops = ">=0.8.0,<0.9"
+tyro = ">=0.9.1,<0.10"
+torchcodec = "*"
+pyyaml = "*"
+natsort = ">=8.4.0,<9"
+
+[feature.mamma.pypi-dependencies]
+mamma = { path = "packages/mamma", editable = true }
+# Vendored cjaverliat/sam2 fork (streaming predictor + forgetful memory bank +
+# EfficientTAM); distribution name is `sam2`, needs no-build-isolation (torch
+# at build time). See packages/sam2-streaming/VENDOR.md.
+sam2 = { path = "packages/sam2-streaming", editable = true }
+# TensorRT python API for the MammaNet engine (same pinned build as
+# sapiens2-pose; engines are machine-local, rebuilt per GPU).
+tensorrt-cu12 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
+
+[feature.mamma.activation.env]
+PACKAGE_DIR = "packages/mamma"
+
+[feature.mamma.tasks._download-mamma-inputs]
+cmd = "test -e data/inputs/indoors/crossing_arms/meta/global.npz || hf download pablovela5620/mamma-streaming-data --repo-type dataset --include 'inputs/**' 'golden/**' 'body_models/**' --local-dir data/"
+cwd = "packages/mamma"
+outputs = ["packages/mamma/data/inputs/indoors/crossing_arms/meta/global.npz"]
+description = "Download crossing_arms inputs + slim golden + body models (private HF repo)"
+
+[feature.mamma.tasks._download-mamma-weights]
+cmd = "test -e data/weights/ma_2d/mamma_mask_full_cvpr.safetensors || hf download pablovela5620/mamma-streaming-data --repo-type dataset --include 'weights/**' --local-dir data/"
+cwd = "packages/mamma"
+outputs = ["packages/mamma/data/weights/ma_2d/mamma_mask_full_cvpr.safetensors"]
+description = "Download MammaNet/YOLO/SAM2/EfficientTAM weights (private HF repo)"
+
+[feature.mamma.tasks._download-mamma-hocap-sample]
+cmd = "test -e data/hocap/sample || (mkdir -p data/hocap/ && hf download pablovela5620/hocap-sample sample.zip --repo-type dataset --local-dir data/hocap/ && python -m zipfile -e data/hocap/sample.zip data/hocap/)"
+cwd = "packages/mamma"
+outputs = ["packages/mamma/data/hocap/sample"]
+description = "Download and extract the HoCap sample dataset"
+
+[feature.mamma.tasks._download-mamma-assembly101-sample]
+cmd = "test -e data/assembly101-720-sample || hf download pablovela5620/Assembly101-Sample --repo-type dataset --include 'assembly101-720-sample/**' --local-dir data/"
+cwd = "packages/mamma"
+outputs = ["packages/mamma/data/assembly101-720-sample"]
+description = "Download the Assembly101 720p sample dataset"
+
+[feature.mamma.tasks.mamma-demo-crossing-arms]
+cmd = "python tools/demo_crossing_arms.py --tracker.expected-subjects 1"
+depends-on = ["_download-mamma-inputs", "_download-mamma-weights"]
+cwd = "packages/mamma"
+description = "Streaming pipeline on crossing_arms (4x 4K cams), live Rerun viewer"
+
+[feature.mamma.tasks._download-mamma-body-models]
+cmd = "test -e data/body_models/smplx || hf download pablovela5620/mamma-streaming-data --repo-type dataset --include 'body_models/**' --local-dir data/"
+cwd = "packages/mamma"
+outputs = ["packages/mamma/data/body_models/smplx"]
+description = "Download SMPL-X body models + downsampled verts (private HF repo)"
+
+[feature.mamma.tasks.mamma-demo-hocap]
+cmd = "python tools/demo_hocap.py"
+depends-on = ["_download-mamma-hocap-sample", "_download-mamma-weights", "_download-mamma-body-models"]
+cwd = "packages/mamma"
+description = "Streaming pipeline on the HoCap sample (ingestion + visual check)"
+
+[feature.mamma.tasks.mamma-demo-assembly101]
+cmd = "python tools/demo_assembly101.py"
+depends-on = ["_download-mamma-assembly101-sample", "_download-mamma-weights", "_download-mamma-body-models"]
+cwd = "packages/mamma"
+description = "Streaming pipeline on the Assembly101 720p sample (ingestion + visual check)"
+
+[feature.mamma.tasks.mamma-validate-golden]
+cmd = "python tools/validate_golden.py --rr-config.headless"
+depends-on = ["_download-mamma-inputs", "_download-mamma-weights"]
+cwd = "packages/mamma"
+description = "Run streaming pipeline on crossing_arms frames 60:90 and gate MPJPE/PVE vs golden ma_3d"
+
+[feature.mamma.tasks.mamma-benchmark]
+cmd = "python tools/benchmark.py"
+depends-on = ["_download-mamma-inputs", "_download-mamma-weights"]
+cwd = "packages/mamma"
+description = "Timed full-clip run: PASS if wall <= 2x clip duration (>=50% realtime) after warmup incl. Rerun logging"
+
+[feature.mamma.tasks.mamma-goal-check]
+cmd = "python tools/goal_check.py"
+depends-on = ["_download-mamma-inputs", "_download-mamma-weights", "_download-mamma-hocap-sample", "_download-mamma-assembly101-sample"]
+cwd = "packages/mamma"
+description = "Aggregate goal verification: golden gate, 30fps benchmark, dataset RRDs, no-disk-writes, hygiene"
+
+# iPhone catalog pipeline (run in order): `sweep` generates per-scene quality.rrd +
+# gate.json; `serve` runs the in-memory Rerun catalog (own shell, keep running);
+# `register` registers the RRDs as the mamma_iphones dataset with names/properties
+# + default blueprint. Mirrors rerun-io/trossen-oss's preprocess/serve/register.
+[feature.mamma.tasks.mamma-iphones-sweep]
+cmd = "python tools/sweep_iphones_quality.py --subset all"
+depends-on = ["_download-mamma-weights"]
+cwd = "packages/mamma"
+description = "Step 1: run the quality preset on all 42 iPhone scenes -> quality.rrd + gate.json per scene (GPU)"
+
+[feature.mamma.tasks.mamma-iphones-serve]
+cmd = "rerun server --port 51234"
+cwd = "packages/mamma"
+description = "Step 2: start the local in-memory Rerun catalog on :51234 (run in its own shell; keep running to register/view)"
+
+[feature.mamma.tasks.mamma-iphones-register]
+cmd = "python tools/register_catalog.py"
+cwd = "packages/mamma"
+description = "Step 3: register the 42 RRDs into the mamma_iphones catalog (base+props layers, names/properties from gate.json, default blueprint); needs mamma-iphones-serve running"
+
 [environments]
 dev = { features = [
     "ide",
@@ -1902,3 +2019,14 @@ slam-evals-dev = { features = [
     "slam-evals",
     "dev",
 ], solve-group = "slam-evals", no-default-feature = true }
+mamma = { features = [
+    "common",
+    "cuda",
+    "mamma",
+], solve-group = "mamma", no-default-feature = true }
+mamma-dev = { features = [
+    "common",
+    "cuda",
+    "mamma",
+    "dev",
+], solve-group = "mamma", no-default-feature = true }
