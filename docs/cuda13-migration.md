@@ -126,7 +126,7 @@ engines rebuild; each package needs re-validation.
   `cuda129`-labelled build string but pulls the real cuda130 `pytorch` — §0's
   "cuda130_mkl pytorch-gpu build" doesn't exist as such; the underlying `pytorch`
   does.
-- **`pixi lock` re-solves** for all 15 reachable GPU envs (every one except pysfm).
+- **`pixi lock` re-solves** for all 16 reachable GPU envs (pysfm now included — see below).
 - **torchcodec caps removed** (wilor-nano, sapiens-coco133); wilor-nano `torchvision`
   un-capped from `<0.26` (torch 2.12 needs 0.27).
 - **`tensorrt-cu12`→`tensorrt-cu13`** (4 sites). **Gotcha:** `tensorrt-cu13-libs`
@@ -173,34 +173,37 @@ deadcode clean — recovered via the PyPI gsplat fix below).
   build and JIT-compiles its CUDA kernels at runtime against the conda cuda13
   torch. vistadream-dev now installs + imports + tests pass + lint/typecheck/
   deadcode clean on cuda13.
-- **pysfm:** still disabled (multiple compounding cuda13 conflicts; the libfaiss
-  one is now solved, two remain):
-  1. *libfaiss (SOLVED):* `pycolmap ==4.0.2` hard-requires `libfaiss * *_cuda`
-     (>=1.9,<2) and no cuda13 faiss existed. Built **libfaiss 1.10.0 cuda13**
-     (`cuda130h*_cuda`, FAISS_ENABLE_GPU=ON) in ai-demos → pycolmap (cpu_py312)
-     resolves on cuda13. Verified by an isolated solve.
-  2. *Qt5/Qt6:* pycolmap pulls `qt-main` (Qt5) but the floated py-opencv 4.13
-     wants a Qt6 `libopencv`. A `headless` opencv sidesteps Qt but pulls in (3).
-  3. *typing-extensions:* `tyro >=0.9.1` (recent builds) needs
-     `typing-extensions >=4.13`, but `[feature.common]` caps it `<4.13` (shared by
-     every env — not safe to relax for one).
+- **pysfm: RESOLVED — re-enabled on the conda CPU pycolmap build.** The fix is
+  `pycolmap = { version = "4.0.*", build = "cpu*" }` (conda, not the PyPI wheel).
+  How each earlier conflict cleared:
+  1. *libfaiss (SOLVED):* `pycolmap` hard-requires `libfaiss * *_cuda` (>=1.9,<2)
+     and no cuda13 faiss existed. Built **libfaiss 1.10.0 cuda13**
+     (`cuda130h*_cuda`, FAISS_ENABLE_GPU=ON) in ai-demos. The CPU pycolmap build
+     resolves against it. (The `cpu_openblas` companion libfaiss is for
+     mast3r-slam — see below.)
+  2. *Qt5/Qt6 (NOT a conflict):* the resolver pulls **both** `qt-main` 5.15 (from
+     colmap/pycolmap) and `qt6-main` 6.11 (from the floated py-opencv 4.13) and
+     they coexist fine. No `headless` opencv hack needed — that route was a
+     dead end only because it dragged in (3).
+  3. *typing-extensions (moot for the cpu path):* the CPU pycolmap path resolves
+     with `[feature.common]`'s `typing-extensions <4.13` cap **intact** — `tyro`
+     just floats to 0.9.1 / `typing-extensions` 4.12.2. So the cap was never the
+     real blocker (it only bit the abandoned headless-opencv route). Left the cap
+     in place to avoid perturbing every common-using env's resolution.
 
-  **Attempted (conda pycolmap):** pinning `py-opencv` to a Qt5 build (to match
-  pycolmap's Qt5) fails too — the only Qt5 libopencv for py312 is 4.10.0, whose
-  deps pin `imath <3.2` which conflicts with the cuda13 stack's imath. The conda
-  pycolmap 4.0.2 is a **Qt5-era package** whose transitive deps (Qt5, old imath,
-  faiss `_cuda`) are incompatible with the modern cuda13/py312 ecosystem.
+  **Why the CUDA pycolmap build can't be used:** the `cuda129*` builds pin
+  `cuda-version >=12.9,<13` and `cuda-cudart <13` (GPU SIFT + GPU faiss), a hard
+  conflict with the cuda13 stack. The `cpu_*` build drops every cuda pin and runs
+  feature extraction on CPU — the only viable conda pycolmap on cuda13 (GPU SIFT
+  is unavailable; demos run SIFT on CPU, slower but functional).
 
-  **Attempted (PyPI pycolmap — closest path):** switching to the self-contained
-  PyPI wheel `pycolmap ==4.0.2` (cp312 manylinux) makes the env **solve + install
-  + `import pycolmap`** on cuda13 (it bundles COLMAP/faiss, sidestepping all the
-  conda Qt5/faiss/imath clashes; lint + deadcode clean, the blueprint test passes).
-  BUT it **core-dumps** in actual feature extraction
-  (`test_streamed_extraction_equivalence_synthetic`) — the wheel's bundled native
-  libs crash against the conda env. So pysfm stays disabled (the env's `pycolmap`
-  dep is left on the PyPI wheel as the closest-working direction). Real fix is
-  upstream: a cuda13/py312-compatible pycolmap (a conda Qt6 build, or a PyPI wheel
-  whose bundled libs don't crash in a conda env).
+  **Why this beats the PyPI wheel:** the earlier `pycolmap ==4.0.2` PyPI wheel
+  solved/imported but **core-dumped** in feature extraction
+  (`test_streamed_extraction_equivalence_synthetic`) — its bundled native libs
+  crashed against the conda env. The conda build links against the env's *own*
+  libs, so no clash. **All 7 pysfm tests pass** (incl. the formerly-crashing
+  synthetic test and the Fountain extraction test); ruff + pyrefly + vulture clean.
+  The lock change is contained to the pysfm solve-group (0 other envs perturbed).
 
   **ai-demos faiss side effect (handled):** publishing the cuda13 `libfaiss` to
   ai-demos makes pixi's strict channel priority route *all* `libfaiss` through

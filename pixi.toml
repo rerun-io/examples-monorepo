@@ -991,15 +991,18 @@ platforms = ["linux-64"]
 [feature.pysfm.dependencies]
 python = "3.12.*"
 tyro = ">=0.9.1,<0.10"
+# cuda13: use the conda CPU pycolmap build (cpu_py312). The cuda* builds pin
+# `cuda-version >=12.9,<13` + `cuda-cudart <13` (GPU SIFT/faiss), which conflicts
+# with the cuda13 stack; the cpu_* build drops every cuda pin and runs feature
+# extraction on CPU. It still requires `libfaiss * *_cuda` (>=1.9,<2) — satisfied
+# by the ai-demos `libfaiss 1.10.0 cuda130*_cuda` build. Qt5 (qt-main, from
+# colmap) and Qt6 (qt6-main, from the floated opencv) coexist, so no headless
+# opencv hack is needed. Unlike the PyPI wheel this links against the conda env's
+# own native libs, so it does not core-dump in feature extraction.
+pycolmap = { version = "4.0.*", build = "cpu*" }
 
 [feature.pysfm.pypi-dependencies]
 pysfm = { path = "packages/pysfm", editable = true }
-# cuda13: use the self-contained PyPI pycolmap wheel instead of the conda build.
-# conda pycolmap 4.0.2 is a Qt5-era package whose transitive deps (qt-main Qt5,
-# old imath, faiss *_cuda) clash with the cuda13/py312 stack (Qt6 opencv, imath
-# 3.2, no cuda13 faiss). The manylinux wheel bundles COLMAP+faiss, sidestepping
-# all of it.
-pycolmap = "==4.0.2"
 
 [feature.pysfm.activation.env]
 PACKAGE_DIR = "packages/pysfm"
@@ -1939,22 +1942,19 @@ robocap-slam-dev = { features = [
     "robocap-slam",
     "dev",
 ], solve-group = "robocap-slam", no-default-feature = true }
-# cuda13 migration: pysfm disabled — see docs/cuda13-migration.md §9. With the
-# PyPI pycolmap wheel (above) the env now SOLVES + installs + imports on cuda13
-# (conda pycolmap can't — Qt5/imath/faiss clashes), but the wheel core-dumps in
-# feature extraction (bundled libs vs the conda env). Confirmed upstream blocker;
-# re-enable when a cuda13/py312-compatible pycolmap (conda or wheel) is available.
-# pysfm = { features = [
-#     "common",
-#     "cuda",
-#     "pysfm",
-# ], solve-group = "pysfm", no-default-feature = true }
-# pysfm-dev = { features = [
-#     "common",
-#     "cuda",
-#     "pysfm",
-#     "dev",
-# ], solve-group = "pysfm", no-default-feature = true }
+# cuda13 migration: pysfm re-enabled on the conda CPU pycolmap build (see the
+# feature.pysfm.dependencies note + docs/cuda13-migration.md §9).
+pysfm = { features = [
+    "common",
+    "cuda",
+    "pysfm",
+], solve-group = "pysfm", no-default-feature = true }
+pysfm-dev = { features = [
+    "common",
+    "cuda",
+    "pysfm",
+    "dev",
+], solve-group = "pysfm", no-default-feature = true }
 vistadream = { features = [
     "common",
     "cuda",
