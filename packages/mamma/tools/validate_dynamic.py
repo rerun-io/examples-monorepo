@@ -69,9 +69,6 @@ class ValidateDynamicConfig:
     """PASS bound on the worst single frame's PVE vs the original DAG."""
     skip_first_frames: int = 8
     """Frames excluded from the gate at clip start (window fill: no fit exists yet)."""
-    mp_decode: bool = True
-    """Multiprocess decode workers. Disable at high resolutions — each worker
-    holds GPU-side chunks (~5 GB at 4K) and four of them exhaust VRAM."""
     hires_crops: bool = True
     """Decode native 4K and sample landmark crops from it (tracking/logging
     stay at resize_hw). Closes most of the crop-quality gap vs the original's
@@ -99,7 +96,6 @@ def main(config: ValidateDynamicConfig) -> int:
         mammanet_weights=config.mammanet_weights,
         trt_engine=config.trt_engine,
         collector=collector,
-        use_mp_decode=config.mp_decode,
         hires_crops=config.hires_crops,
     )
     stats = pipeline.run(chunk_size=config.chunk_size)

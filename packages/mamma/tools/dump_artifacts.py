@@ -115,8 +115,6 @@ class DumpConfig:
     seg_stride: int = 1
     """Log full-res masks every Nth tick in the saved RRD (1 = per-frame, so the
     mask tracks the person with no lag — for showcase recordings)."""
-    mp_decode: bool = True
-    """Multiprocess decode workers (disable at high engine resolutions)."""
     hires_crops: bool = True
     """Decode native res; sample landmark crops from it."""
     chunk_size: int = 32
@@ -176,7 +174,6 @@ def main(config: DumpConfig) -> int:
         mammanet_weights=config.mammanet_weights,
         trt_engine=config.trt_engine,
         collector=collector,
-        use_mp_decode=config.mp_decode,
         hires_crops=hires_crops,
         proxy_dir=config.proxy_dir,
         seg_stride=config.seg_stride,

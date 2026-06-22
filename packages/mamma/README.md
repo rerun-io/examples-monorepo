@@ -50,7 +50,7 @@ src/mamma/
   tracking/      YOLO bootstrap + CLIP/epipolar identity + streaming SAM2 fork
   landmarks/     MammaNet port (512 dense 2D landmarks) + TensorRT backend
   fitting/       GPU triangulation + CUDA-graphed sliding-window SMPL-X fitter
-  engine/        per-tick pipeline, multiprocess decode, profiler
+  engine/        per-tick streaming pipeline, in-process torchcodec decode, profiler
   viz/           Rerun stream logger (NVENC H.264 -> VideoStream) + blueprint
 tools/           tyro CLIs: demos, validate_golden, benchmark, goal_check, profiler
 implementation-notes.html   running decision log with viewer-validation evidence
@@ -58,16 +58,6 @@ implementation-notes.html   running decision log with viewer-validation evidence
 
 ## What's next
 
-- **Delete `engine/mp_decode.py` via the CUDA-13 migration.** torchcodec 0.10
-  caches a single NVDEC decoder instance per (codec, resolution), so four
-  identical in-process streams thrash with ~60 ms re-inits (~140 cam-fps
-  ceiling). `mp_decode` works around this with one persistent spawn worker per
-  camera (~400 cam-fps) at the cost of ~150 lines of subtle multiprocessing
-  (pinned-CPU transport, spawn re-import hazards, worker lifecycle). Upstream
-  PR #1232 fixes the cache in 0.11; conda-forge now ships torchcodec 0.13 (needs
-  torch 2.12) — the repo-root `docs/cuda13-migration.md` is the recipe to bump
-  the stack, switch `StreamingPipeline(use_mp_decode=False)`, and remove the
-  module plus its pipeline branch.
 - **True realtime at full quality:** ~2.4 s remain between stride-1 (14.5 s)
   and the 12.1 s clip. Highest-leverage tranche: a TensorRT engine for the
   EfficientTAM image encoder (same recipe as MammaNet — the encoder dominates

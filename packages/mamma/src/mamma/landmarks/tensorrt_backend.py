@@ -1,9 +1,9 @@
 """TensorRT backend for MammaNet (export -> engine -> CUDA-graph-wrapped runner).
 
-Follows the proven sapiens2-pose pattern in this monorepo: `tensorrt-cu12`
-python API (not torch-tensorrt, whose torch-2.10 wheels are cu13-only), static
-batch, FP16 builder flag, and one captured ``execute_async_v3`` launch replayed
-per call — which composes cleanly with the fitter's manual CUDA graph.
+Follows the proven sapiens2-pose pattern in this monorepo: the `tensorrt-cu13`
+python API (not torch-tensorrt), static batch, FP16 builder flag, and one
+captured ``execute_async_v3`` launch replayed per call — which composes cleanly
+with the fitter's manual CUDA graph.
 
 Engines are machine-local artifacts (sm-specific): built once into
 ``.trt_cache/`` by ``tools/build_trt_engine.py``, never committed.

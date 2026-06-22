@@ -8,16 +8,16 @@ The table below is a curated subset; the workspace ships additional packages wit
 
 | Package | Prod env | Dev env | Python | GPU | Description |
 |---|---|---|---|---|---|
-| [simplecv](packages/simplecv/) | `simplecv` | `simplecv-dev` | 3.12 | CUDA 12.9 | Shared computer vision utilities, datasets, Rerun logging, and geometry helpers |
-| [monoprior](packages/monoprior/) | `monoprior` | `monoprior-dev` | 3.12 | CUDA 12.9 | Monocular geometric priors (depth, normals) |
-| [prompt-da](packages/prompt-da/) | `prompt-da` | `prompt-da-dev` | 3.12 | CUDA 12.9 | Prompt Depth Anything — depth completion on Polycam data |
-| [wilor-nano](packages/wilor-nano/) | `wilor-nano` | `wilor-nano-dev` | 3.12 | CUDA 12.9 | Hand pose estimation |
-| [sam3d-body](packages/sam3d-body/) | `sam3d-body` | `sam3d-body-dev` | 3.12 | CUDA 12.9 | 3D body segmentation with SAM + Rerun |
-| [sam3](packages/sam3/) | `sam3` | `sam3-dev` | 3.12 | CUDA 12.9 | SAM3 video segmentation with Rerun |
+| [simplecv](packages/simplecv/) | `simplecv` | `simplecv-dev` | 3.12 | CUDA 13 | Shared computer vision utilities, datasets, Rerun logging, and geometry helpers |
+| [monoprior](packages/monoprior/) | `monoprior` | `monoprior-dev` | 3.12 | CUDA 13 | Monocular geometric priors (depth, normals) |
+| [prompt-da](packages/prompt-da/) | `prompt-da` | `prompt-da-dev` | 3.12 | CUDA 13 | Prompt Depth Anything — depth completion on Polycam data |
+| [wilor-nano](packages/wilor-nano/) | `wilor-nano` | `wilor-nano-dev` | 3.12 | CUDA 13 | Hand pose estimation |
+| [sam3d-body](packages/sam3d-body/) | `sam3d-body` | `sam3d-body-dev` | 3.12 | CUDA 13 | 3D body segmentation with SAM + Rerun |
+| [sam3](packages/sam3/) | `sam3` | `sam3-dev` | 3.12 | CUDA 13 | SAM3 video segmentation with Rerun |
 | [robocap-slam](packages/robocap-slam/) | `robocap-slam` | `robocap-slam-dev` | 3.12 | CUDA 13 | Multi-camera visual odometry & SLAM |
-| [pysfm](packages/pysfm/) | `pysfm` | `pysfm-dev` | 3.12 | CUDA 12.9 | COLMAP SfM reconstruction with Rerun + Gradio |
-| [vistadream](packages/vistadream/) | `vistadream` | `vistadream-dev` | 3.12 | CUDA 12.9 | Single-image 3D reconstruction via 3D Gaussians |
-| [gsplat-rust-renderer](packages/gsplat-rust-renderer/) | `gsplat-rust-renderer` | `gsplat-rust-renderer-dev` | 3.12 | CUDA 12.9 | Rust-based Gaussian splatting renderer |
+| [pysfm](packages/pysfm/) | `pysfm` | `pysfm-dev` | 3.12 | CUDA 13 | COLMAP SfM reconstruction with Rerun + Gradio |
+| [vistadream](packages/vistadream/) | `vistadream` | `vistadream-dev` | 3.12 | CUDA 13 | Single-image 3D reconstruction via 3D Gaussians |
+| [gsplat-rust-renderer](packages/gsplat-rust-renderer/) | `gsplat-rust-renderer` | `gsplat-rust-renderer-dev` | 3.12 | CUDA 13 | Rust-based Gaussian splatting renderer |
 | [pyvrs-viewer](packages/pyvrs-viewer/) | `pyvrs-viewer` | `pyvrs-viewer-dev` | 3.12 | None | VRS file viewer with Rerun |
 
 ## Quick start
@@ -72,15 +72,15 @@ PIXI_ENV=robocap-slam
 
 ### CUDA driver troubleshooting
 
-GPU environments require CUDA 12.9. If `pixi install` fails with `Virtual package '__cuda >=12.9' does not match`, your NVIDIA driver is too old.
+GPU environments require CUDA 13.0. If `pixi install` fails with `Virtual package '__cuda >=13.0' does not match`, your NVIDIA driver is too old.
 
 **Workaround** (no reboot):
 ```bash
-export CONDA_OVERRIDE_CUDA=12.9
+export CONDA_OVERRIDE_CUDA=13.0
 pixi install -a
 ```
 
-**Proper fix** — upgrade your NVIDIA driver to one that reports CUDA 12.9+ (check with `nvidia-smi`). On Ubuntu:
+**Proper fix** — upgrade your NVIDIA driver to one that reports CUDA 13.0+ (check with `nvidia-smi`). On Ubuntu:
 ```bash
 sudo apt install nvidia-driver-590-open && sudo reboot
 ```
@@ -105,7 +105,7 @@ The root `pixi.toml` is structured around **features** that compose into **envir
 [pypi-options]                  # Workspace-level: no-build-isolation, dependency-overrides
 
 [feature.common]                # Shared base deps (all envs get these)
-[feature.cuda]                  # CUDA 12.9 toolkit + PyTorch GPU
+[feature.cuda]                  # CUDA 13.0 toolkit + PyTorch GPU
 [feature.dev]                   # ruff, pytest, beartype, pyrefly, hypothesis + PIXI_DEV_MODE=1
 [feature.ide]                   # Standalone IDE/editor tooling (Python 3.12)
 
@@ -126,7 +126,7 @@ The root `pixi.toml` is structured around **features** that compose into **envir
 
 Each package has a **prod** and **dev** environment sharing the same **solve-group** (no extra resolution cost). `no-default-feature = true` means each env is fully defined by its features.
 
-Per-feature deps can **tighten** common's loose versions for their solve-group (e.g., vistadream tightens `pytorch-gpu >= 2.10.0` over common's `>= 2.8.0`). Features compose by intersection, so a per-package feature can only narrow a shared constraint, never relax it.
+Per-feature deps can **tighten** common's loose versions for their solve-group (a feature may pin a narrower range than common declares). Features compose by intersection, so a per-package feature can only narrow a shared constraint, never relax it.
 
 ### pypi-options (workspace-level)
 

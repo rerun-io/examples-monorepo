@@ -9,7 +9,7 @@ An unofficial playground for Meta's SAM3D Body (DINOv3) with promptable SAM3 mas
     <img src="https://img.shields.io/badge/Install%20with-Pixi-16A34A" alt="Pixi badge">
   </a>
   <a title="CUDA" href="https://developer.nvidia.com/cuda-toolkit" target="_blank" rel="noopener noreferrer">
-    <img src="https://img.shields.io/badge/CUDA-12.9%2B-76b900" alt="CUDA badge">
+    <img src="https://img.shields.io/badge/CUDA-13.0%2B-76b900" alt="CUDA badge">
   </a>
   <a title="GitHub" href="https://github.com/rerun-io/sam3d-body-rerun" target="_blank" rel="noopener noreferrer">
     <img src="https://img.shields.io/github/stars/rerun-io/sam3d-body-rerun?label=GitHub%20%E2%98%85&logo=github&color=C8C" alt="GitHub stars">

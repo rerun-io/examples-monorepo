@@ -67,7 +67,10 @@ class PatchEmbed(nn.Module):
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, tuple[int, int]]:
         x = self.proj(x)
-        hp, wp = x.shape[2], x.shape[3]
+        # int() coerces the patch-grid dims to Python ints: torch 2.12 returns
+        # 0-dim tensors from shape access under the ONNX-export trace, and the
+        # engine is fixed-shape (512x384) so constant dims are correct here.
+        hp, wp = int(x.shape[2]), int(x.shape[3])
         return x.flatten(2).transpose(1, 2), (hp, wp)
 
 

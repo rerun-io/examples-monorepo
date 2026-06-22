@@ -39,8 +39,12 @@ def required_torchcodec_int(value: int | None, name: str) -> int:
     return int(value)
 
 
-def required_torchcodec_float(value: float | None, name: str) -> float:
-    """Return a required TorchCodec metadata float."""
+def required_torchcodec_float(value: float | int | None, name: str) -> float:
+    """Return a required TorchCodec metadata float.
+
+    Accepts ``int`` too: torchcodec 0.14 reports whole-number metadata (e.g.
+    ``average_fps`` of 30) as ``int`` rather than ``float``; coerced below.
+    """
     if value is None:
         raise ValueError(f"TorchCodec metadata field {name} is missing")
     return float(value)
