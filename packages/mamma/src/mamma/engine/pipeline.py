@@ -78,7 +78,6 @@ class StreamingPipeline:
         landmarks: LandmarkEstimator | None = None,
         fitting: FittingStage | None = None,
         collector: ResultCollector | None = None,
-        use_mp_decode: bool = True,
         engine_hw: tuple[int, int] | None = None,
     ) -> None:
         self.sequence: MultiViewSequence = sequence
@@ -95,15 +94,6 @@ class StreamingPipeline:
         # self-occluded poses).
         self.engine_hw: tuple[int, int] | None = engine_hw
         self._hires_scale: float = 1.0 if engine_hw is None else reader.width / engine_hw[1]
-        self.mp_decoder = None
-        if use_mp_decode:
-            from mamma.engine.mp_decode import MultiprocessDecoder
-
-            # Persistent decode workers (~400 vs 140 cam-fps in-process on
-            # torchcodec 0.10); spawned here so run() never pays startup.
-            self.mp_decoder = MultiprocessDecoder(
-                list(sequence.video_paths), resize_hw=(reader.height, reader.width)
-            )
 
     def run(self, chunk_size: int = 32, max_frames: int | None = None, start_frame: int | None = None, timing_doc: bool = False) -> PipelineStats:
         """Stream the sequence tick by tick; returns timing stats.
@@ -149,9 +139,6 @@ class StreamingPipeline:
                 )
 
         def chunk_iter():
-            if self.mp_decoder is not None:
-                yield from self.mp_decoder.iter_chunks(start_frame, frame_count)
-                return
             prefetcher = ThreadPoolExecutor(max_workers=1)
             try:
                 pending_chunk: Future | None = prefetcher.submit(decode_chunk, chunk_ranges[0]) if chunk_ranges else None
@@ -238,24 +225,23 @@ class StreamingPipeline:
                 if pending_fit is not None:
                     pending_fit.result()
                 self.logger.flush()
-        except BaseException:
-            # Callers rarely close() on error paths — release the decode
-            # workers here so a failed run can't leak NVDEC/CUDA contexts.
-            self.close()
-            raise
         finally:
-            # wait=True: an in-flight fit finishes in ~ms; a non-daemon worker
-            # left running would otherwise block interpreter exit.
+            # The in-process prefetcher releases its own pool in chunk_iter's
+            # finally; here we only join the fit worker. wait=True: an in-flight
+            # fit finishes in ~ms; a non-daemon worker left running would
+            # otherwise block interpreter exit.
             fit_worker.shutdown(wait=True, cancel_futures=True)
 
         elapsed: float = time.perf_counter() - start
         return PipelineStats(ticks=frame_idx - start_frame, elapsed_s=elapsed, profiler=profiler)
 
     def close(self) -> None:
-        """Terminate persistent decode workers (call before discarding the pipeline)."""
-        if self.mp_decoder is not None:
-            self.mp_decoder.close()
-            self.mp_decoder = None
+        """No-op retained for API symmetry.
+
+        The in-process prefetcher owns its ``ThreadPoolExecutor`` and releases it
+        in ``chunk_iter``'s ``finally`` block, so the pipeline holds no persistent
+        decode resources to free. Kept so existing callers can still ``close()``.
+        """
 
 
 def build_streaming_pipeline(
@@ -267,7 +253,6 @@ def build_streaming_pipeline(
     mammanet_weights: Path | None = None,
     trt_engine: Path | None = None,
     collector: ResultCollector | None = None,
-    use_mp_decode: bool = True,
     hires_crops: bool = True,
     proxy_dir: Path | None = None,
     seg_stride: int = 5,
@@ -318,13 +303,12 @@ def build_streaming_pipeline(
         fitting = FittingStage(scaled_cams, fitter_config)
 
     return StreamingPipeline(
-        decode_sequence,  # proxy paths drive the reader/mp-decoder; logger keeps the native sequence
+        decode_sequence,  # proxy paths drive the reader; logger keeps the native sequence
         reader,
         logger,
         tracker=tracker,
         landmarks=landmarks,
         fitting=fitting,
         collector=collector,
-        use_mp_decode=use_mp_decode,
         engine_hw=resize_hw if hires_crops else None,
     )

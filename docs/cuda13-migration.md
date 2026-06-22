@@ -1,6 +1,8 @@
 # CUDA 13 / torch 2.12 / torchcodec 0.13 — monorepo migration plan
 
-**Status: PLAN ONLY — no dependency changes made.**
+**Status: EXECUTED on branch `cuda13-migration` (see "Execution results" at the
+bottom for what actually happened — including two of this plan's premises that
+the hardware disproved).** Original plan retained below for reference.
 
 ## 0. Validated target stack (all confirmed on conda-forge / NVIDIA PyPI)
 | component | spec | platforms |
@@ -110,3 +112,79 @@ engines rebuild; each package needs re-validation.
   remove the hack; re-validate the mamma sweep. Smallest set that exercises the full path.
 - **Phase 2:** remaining GPU packages, one at a time, each validated.
 - **Phase 3:** add `linux-aarch64` for DGX Spark.
+
+---
+
+## 9. Execution results (branch `cuda13-migration`, RTX 5090 / sm120)
+
+### What landed
+- **Shared stack flipped:** `[feature.cuda]` cuda 12.9→13.0, `cuda-version 13.0.*`,
+  `pytorch-gpu >=2.12,<2.13`. Resolves to `pytorch 2.12 cuda130_mkl`,
+  `torchvision 0.27.1 cuda130`, `torchcodec 0.14.0 cuda130` (the `*` float landed on
+  0.14, newer than the planned 0.13 — supersedes it, NVDEC fix included),
+  `triton 3.7 cuda130`. **NB:** the `pytorch-gpu` *metapackage* keeps a cosmetic
+  `cuda129`-labelled build string but pulls the real cuda130 `pytorch` — §0's
+  "cuda130_mkl pytorch-gpu build" doesn't exist as such; the underlying `pytorch`
+  does.
+- **`pixi lock` re-solves** for all 15 reachable GPU envs (every one except pysfm).
+- **torchcodec caps removed** (wilor-nano, sapiens-coco133); wilor-nano `torchvision`
+  un-capped from `<0.26` (torch 2.12 needs 0.27).
+- **`tensorrt-cu12`→`tensorrt-cu13`** (4 sites). **Gotcha:** `tensorrt-cu13-libs`
+  has stale metadata requiring `nvidia-cuda-runtime-cu13`, which NVIDIA deprecated
+  for cu13 (only broken 0.0.x sdist stubs exist; the real package is the unsuffixed
+  `nvidia-cuda-runtime`). conda provides the runtime, so each tensorrt feature pins
+  `nvidia-cuda-runtime-cu13 = "==0.0.0a0"` (NVIDIA's empty no-op placeholder wheel).
+- **mast3r-slam:** the `mkl <2026` cap can't coexist with torch 2.12 (needs mkl 2026
+  `.so.3`) and faiss `cpu_mkl` (`.so.2`). Routed this env's BLAS through OpenBLAS
+  (`libblas *openblas` + `faiss *openblas*` → cuda130_generic pytorch, nomkl) — GPU
+  kernels identical, only CPU BLAS differs.
+- **lietorch:** no cuda13 build existed (ai-demos only had cuda12.9). Rebuilt for
+  cuda13 in the `ai-demos` channel (recipe: added a 13.0 CUDA variant to
+  `conda_build_config`, stripped sm_60/61/70 gencode — CUDA 13 dropped
+  Maxwell/Pascal/Volta — and bumped CI `CONDA_OVERRIDE_CUDA`). Published as
+  `lietorch-1.0-hecd5ce2_1` (cuda-version >=13). Validated: `dpvo` + `mast3r-slam`
+  import `lietorch.SE3` on cuda13.
+- **mamma:** mp_decode hack removed (mp_decode.py + its test deleted; `use_mp_decode`
+  dropped from pipeline/tools). `vit.py PatchEmbed.forward` coerces patch-grid dims
+  to `int` (torch 2.12 returns 0-dim tensors from shape access under the ONNX trace).
+  **MammaNet TRT engine rebuilt on cu13** → `.trt_cache/mammanet_b4_fp16_trt101339_sm120.plan`
+  (joints2d diff vs eager max 0.009; TRT 3.6 ms/call).
+- **simplecv:** `required_torchcodec_float` widened to accept `int` (torchcodec 0.14
+  reports whole-number `average_fps` as `int`).
+
+### Per-env validation (`pixi run -e <pkg>-dev tests`)
+PASS (13): simplecv (132), mamma (11), dpvo (no tests; lietorch import ok),
+monoprior (1), sapiens2-pose (24), mast3r-slam (27), sam3 (1), sam3d-body (1),
+prompt-da (3), mv-api (55), egoexo-forge (1), sapiens-coco133-pose (31).
+- **wilor-nano:** 24 pass, 1 fail — `test_pixi_tasks_keep_generic_wilor_entrypoints`
+  reads a `[feature.wilor]` that doesn't exist (only `wilor-nano`). **Pre-existing
+  on `main`** (fails there too); not a migration regression — stale since the
+  `wilor`→`wilor-nano` rename.
+- **vistadream:** install fails building the `gsplat` git dep — it builds in an
+  isolated uv env that pulls a PyPI cu128 torch (`no-build-isolation` doesn't catch
+  the git dep), so `gsplat`'s `_check_cuda_version` sees nvcc 13.0 vs torch 12.8.
+  Worked pre-migration only because 12.9-vs-12.8 was a tolerated *minor* mismatch;
+  the cuda13 *major* bump trips it. Migration-exposed build-tooling issue; fix is to
+  make uv build gsplat against the conda cuda13 torch (conda-pypi-map `pytorch→torch`,
+  globally risky) or build gsplat in a post-install step like dpvo.
+- **pysfm:** cannot solve on cuda13 — `pycolmap ==4.0.2` hard-requires
+  `libfaiss * *_cuda` (>=1.9,<2), and that `_cuda`-suffix naming only exists for
+  faiss **1.9.0** (cuda11/12); conda-forge's 1.10+ uses `cudaXXX_mkl` naming and
+  there's no cuda13 faiss anywhere. Needs a **libfaiss 1.9.0 cuda13 rebuild** in
+  ai-demos (legacy `_cuda` build string, ABI-matching the conda-forge pycolmap).
+
+### Two plan premises the hardware disproved
+1. **The mamma realtime gate is NOT fixed by the migration.** §0 hypothesised the
+   torchvision/torch mismatch slowed the SAM2 `track` stage and that torch 2.12 would
+   resolve it. Empirically, on the consistent torch-2.12/cuda13 stack `track` is
+   **~87 ms/call → 7.7 ticks/s** (gate needs ≥15), essentially unchanged from the
+   pre-migration ~72 ms / ~7 ticks/s. SDPA flash/cudnn backends are enabled and fast
+   (0.1 ms) and the GPU sits at ~61 % util, so it is not an attention-backend issue —
+   the track stage is simply not sped up by the torch bump. Reaching realtime needs
+   separate perf work (track-stage profiling / `torch.compile` / overhead reduction),
+   out of this migration's scope.
+2. **In-process torchcodec decode is NOT ~400 cam-fps.** §3 justified deleting the
+   mp_decode hack on torchcodec 0.13+'s NVDEC-cache fix giving ~400 cam-fps in-process.
+   Measured on 4×4K HEVC→CUDA with torchcodec 0.14: **114 cam-fps** (worse than the
+   "~140 broken" baseline, far from ~400). Decode is not the realtime bottleneck here
+   (track is), but the removal's stated justification does not hold on this hardware.

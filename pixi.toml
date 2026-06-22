@@ -78,19 +78,19 @@ find-links = [{ url = "https://build.rerun.io/commit/5f732f2/wheels/" }]
 prerelease-mode = "allow"
 
 
-# ─── CUDA 12.9 feature (shared across all GPU envs) ─────────────────────────
+# ─── CUDA 13.0 feature (shared across all GPU envs) ─────────────────────────
 # Restrict to linux-64: the CUDA toolchain, pytorch-gpu, and GPU-only deps
 # like torchcodec don't have conda-forge builds for linux-aarch64.
 [feature.cuda]
 platforms = ["linux-64"]
 
 [feature.cuda.system-requirements]
-cuda = "12.9"
+cuda = "13.0"
 
 [feature.cuda.dependencies]
 # CUDA Build Tools
 cuda-compiler = "*"
-cuda-version = "12.9.*"
+cuda-version = "13.0.*"
 cuda-cudart-dev = "*"
 cuda-crt = "*"
 libcusparse-dev = "*"
@@ -111,8 +111,8 @@ libcurand-dev = "*"
 libcusolver-dev = "*"
 cusparselt = "*"
 libnvjitlink = "*"
-# PyTorch
-pytorch-gpu = ">=2.8.0"
+# PyTorch — forces the cuda130/2.12.1 build (explicit beats relying on cuda-version alone)
+pytorch-gpu = ">=2.12,<2.13"
 torchvision = "*"
 
 [feature.cuda.pypi-dependencies]
@@ -472,8 +472,9 @@ python = "3.12.*"
 dill = ">=0.4.0,<0.5"
 trimesh = "*"
 pyrender = "*"
-torchvision = ">=0.25,<0.26"
-torchcodec = ">=0.10.0,<0.11"
+# float with the shared cuda130/torch-2.12 stack (torch 2.12 pairs with torchvision 0.27)
+torchvision = "*"
+torchcodec = "*"
 
 [feature.wilor-nano.pypi-dependencies]
 wilor_nano = { path = "packages/wilor-nano", editable = true }
@@ -484,7 +485,12 @@ onnxscript = "*"
 
 [feature.wilor-nano.target.linux-64.pypi-dependencies]
 # TensorRT engines are machine-local artifacts; keep ONNX portable and rebuild engines per target GPU.
-tensorrt-cu12 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
+tensorrt-cu13 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
+# tensorrt-cu13-libs has stale metadata requiring `nvidia-cuda-runtime-cu13` (NVIDIA
+# deprecated it for cu13 in favor of unsuffixed `nvidia-cuda-runtime`). conda provides
+# the real CUDA 13 runtime, so satisfy it with NVIDIA's empty 0.0.0a0 placeholder wheel
+# (no-op; avoids building the broken 0.0.1 sdist stub).
+nvidia-cuda-runtime-cu13 = "==0.0.0a0"
 cuda-python = "*"
 
 [feature.wilor-nano.target.linux-aarch64.pypi-dependencies]
@@ -783,7 +789,12 @@ onnxscript = "*"
 
 [feature.sapiens2-pose.target.linux-64.pypi-dependencies]
 # TensorRT engines are machine-local artifacts; keep ONNX portable and rebuild engines per target GPU.
-tensorrt-cu12 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
+tensorrt-cu13 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
+# tensorrt-cu13-libs has stale metadata requiring `nvidia-cuda-runtime-cu13` (NVIDIA
+# deprecated it for cu13 in favor of unsuffixed `nvidia-cuda-runtime`). conda provides
+# the real CUDA 13 runtime, so satisfy it with NVIDIA's empty 0.0.0a0 placeholder wheel
+# (no-op; avoids building the broken 0.0.1 sdist stub).
+nvidia-cuda-runtime-cu13 = "==0.0.0a0"
 cuda-python = "*"
 
 [feature.sapiens2-pose.activation.env]
@@ -859,7 +870,7 @@ platforms = ["linux-64"]
 
 [feature.sapiens-coco133-pose.dependencies]
 python = "3.12.*"
-torchcodec = ">=0.10.0,<0.11"
+torchcodec = "*"
 tyro = ">=0.9.1,<0.10"
 
 [feature.sapiens-coco133-pose.pypi-dependencies]
@@ -873,7 +884,12 @@ onnxscript = "*"
 
 [feature.sapiens-coco133-pose.target.linux-64.pypi-dependencies]
 # TensorRT engines are machine-local artifacts; keep ONNX portable and rebuild engines per target GPU.
-tensorrt-cu12 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
+tensorrt-cu13 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
+# tensorrt-cu13-libs has stale metadata requiring `nvidia-cuda-runtime-cu13` (NVIDIA
+# deprecated it for cu13 in favor of unsuffixed `nvidia-cuda-runtime`). conda provides
+# the real CUDA 13 runtime, so satisfy it with NVIDIA's empty 0.0.0a0 placeholder wheel
+# (no-op; avoids building the broken 0.0.1 sdist stub).
+nvidia-cuda-runtime-cu13 = "==0.0.0a0"
 cuda-python = "*"
 
 [feature.sapiens-coco133-pose.activation.env]
@@ -919,8 +935,8 @@ pyarrow = ">=20.0.0,<21"
 # robocap tracks with cuVSLAM (its own cu13 wheel) and never executes torch, but the
 # shared `simplecv` lib (from [feature.common]) imports torch at module load in
 # simplecv/video_io.py. robocap uses the cv2-based VideoReader, so CPU torch is enough
-# to satisfy the import — pytorch-gpu would conflict with robocap's cuda-version 13
-# (the shared `cuda` feature is cuda 12.9, linux-64 only) and robocap also targets aarch64.
+# to satisfy the import — robocap stays on CPU torch because the shared `cuda`
+# feature (now cuda 13.0) is linux-64 only and robocap also targets aarch64.
 pytorch-cpu = ">=2.8.0"
 
 [feature.robocap-slam.pypi-dependencies]
@@ -1071,7 +1087,7 @@ platforms = ["linux-64"]
 
 [feature.vistadream.dependencies]
 python = "3.12.*"
-pytorch-gpu = ">=2.10.0"        # tightens shared cuda floor; needed by Flux/diffusers
+pytorch-gpu = ">=2.12,<2.13"    # match the shared cuda130/2.12 floor; needed by Flux/diffusers
 cmake = ">=4.0.3,<5"
 open3d = ">=0.19.0,<0.20"
 scikit-learn = ">=1.7.1,<2"
@@ -1202,15 +1218,15 @@ torchcodec = "*"
 eigen = ">=3.4.0,<4"
 ffmpeg = ">=7.1.0"
 open3d = ">=0.19.0,<0.20"
-faiss = "*"
-# Pin MKL below 2026: mkl 2026.0.0 bumped its soname from libmkl_intel_lp64.so.2
-# to .so.3, but conda-forge's faiss 1.10.0 mkl builds (cpu_mkl_*_100,
-# cuda129_mkl_*_300, built 2026-03-19) link against .so.2 and have an unpinned
-# `mkl` run dep. Without this cap the solver pulls pytorch 2.10.0 build _304+
-# (which requires mkl >=2026) and mkl 2026, leaving faiss unable to find
-# libmkl_intel_lp64.so.2 → ImportError. Capping at <2026 keeps mkl 2025.3.x
-# (.so.2) and selects pytorch 2.10.0 build _303 (mkl >=2025.3,<2026).
-mkl = ">=2025.3.0,<2026"
+# cuda13/torch-2.12 forces mkl 2026 (libmkl_intel_lp64.so.3), but conda-forge's
+# faiss 1.10.0 mkl builds still link .so.2 → ImportError under mkl 2026. There is
+# no cuda13 faiss mkl build. Fix: route this env's whole BLAS stack through
+# OpenBLAS — `libblas *openblas` selects pytorch's cuda130_generic build (GPU
+# kernels identical to the mkl build; only the CPU BLAS backend differs) and the
+# faiss cpu_openblas build, so mkl is dropped entirely (nomkl) and the soname
+# clash disappears.
+libblas = { version = "*", build = "*openblas" }
+faiss = { version = "*", build = "*openblas*" }
 scikit-learn = "*"
 matplotlib = "*"
 trimesh = "*"
@@ -1694,8 +1710,9 @@ platforms = ["linux-64"]
 
 [feature.mamma.dependencies]
 python = "3.12.*"
-# Keep the torch everything was measured/gated on (fresh solves pick 2.11).
-pytorch-gpu = "2.10.*"
+# cuda13 migration: align with the shared cuda130/torch-2.12 stack (fixes the
+# torchvision-0.26/torch-2.10 mismatch that pinned the realtime gate RED).
+pytorch-gpu = "2.12.*"
 onnx = "*"
 onnxscript = "*"
 einops = ">=0.8.0,<0.9"
@@ -1712,7 +1729,12 @@ mamma = { path = "packages/mamma", editable = true }
 sam2 = { path = "packages/sam2-streaming", editable = true }
 # TensorRT python API for the MammaNet engine (same pinned build as
 # sapiens2-pose; engines are machine-local, rebuilt per GPU).
-tensorrt-cu12 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
+tensorrt-cu13 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
+# tensorrt-cu13-libs has stale metadata requiring `nvidia-cuda-runtime-cu13` (NVIDIA
+# deprecated it for cu13 in favor of unsuffixed `nvidia-cuda-runtime`). conda provides
+# the real CUDA 13 runtime, so satisfy it with NVIDIA's empty 0.0.0a0 placeholder wheel
+# (no-op; avoids building the broken 0.0.1 sdist stub).
+nvidia-cuda-runtime-cu13 = "==0.0.0a0"
 
 [feature.mamma.activation.env]
 PACKAGE_DIR = "packages/mamma"
@@ -1907,17 +1929,20 @@ robocap-slam-dev = { features = [
     "robocap-slam",
     "dev",
 ], solve-group = "robocap-slam", no-default-feature = true }
-pysfm = { features = [
-    "common",
-    "cuda",
-    "pysfm",
-], solve-group = "pysfm", no-default-feature = true }
-pysfm-dev = { features = [
-    "common",
-    "cuda",
-    "pysfm",
-    "dev",
-], solve-group = "pysfm", no-default-feature = true }
+# TEMP (cuda13 migration): pysfm disabled while enumerating other blockers.
+# pycolmap ==4.0.2 requires libfaiss *_cuda (cuda118/cuda126 only; no cuda13
+# faiss exists on conda-forge) — needs cuda13 faiss + pycolmap rebuilds.
+# pysfm = { features = [
+#     "common",
+#     "cuda",
+#     "pysfm",
+# ], solve-group = "pysfm", no-default-feature = true }
+# pysfm-dev = { features = [
+#     "common",
+#     "cuda",
+#     "pysfm",
+#     "dev",
+# ], solve-group = "pysfm", no-default-feature = true }
 vistadream = { features = [
     "common",
     "cuda",
