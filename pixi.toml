@@ -1929,9 +1929,10 @@ robocap-slam-dev = { features = [
     "robocap-slam",
     "dev",
 ], solve-group = "robocap-slam", no-default-feature = true }
-# TEMP (cuda13 migration): pysfm disabled while enumerating other blockers.
-# pycolmap ==4.0.2 requires libfaiss *_cuda (cuda118/cuda126 only; no cuda13
-# faiss exists on conda-forge) — needs cuda13 faiss + pycolmap rebuilds.
+# cuda13 migration: pysfm disabled — see docs/cuda13-migration.md §9. The libfaiss
+# blocker is fixed (cuda13 libfaiss in ai-demos), but pycolmap 4.0.2 also clashes
+# on Qt5(pycolmap)/Qt6(opencv) and tyro's typing-extensions >=4.13 vs the common
+# <4.13 cap. Re-enable once those are resolved (e.g. newer pycolmap).
 # pysfm = { features = [
 #     "common",
 #     "cuda",

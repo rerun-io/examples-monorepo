@@ -167,11 +167,29 @@ prompt-da (3), mv-api (55), egoexo-forge (1), sapiens-coco133-pose (31).
   the cuda13 *major* bump trips it. Migration-exposed build-tooling issue; fix is to
   make uv build gsplat against the conda cuda13 torch (conda-pypi-map `pytorch→torch`,
   globally risky) or build gsplat in a post-install step like dpvo.
-- **pysfm:** cannot solve on cuda13 — `pycolmap ==4.0.2` hard-requires
-  `libfaiss * *_cuda` (>=1.9,<2), and that `_cuda`-suffix naming only exists for
-  faiss **1.9.0** (cuda11/12); conda-forge's 1.10+ uses `cudaXXX_mkl` naming and
-  there's no cuda13 faiss anywhere. Needs a **libfaiss 1.9.0 cuda13 rebuild** in
-  ai-demos (legacy `_cuda` build string, ABI-matching the conda-forge pycolmap).
+- **pysfm:** still disabled (multiple compounding cuda13 conflicts; the libfaiss
+  one is now solved, two remain):
+  1. *libfaiss (SOLVED):* `pycolmap ==4.0.2` hard-requires `libfaiss * *_cuda`
+     (>=1.9,<2) and no cuda13 faiss existed. Built **libfaiss 1.10.0 cuda13**
+     (`cuda130h*_cuda`, FAISS_ENABLE_GPU=ON) in ai-demos → pycolmap (cpu_py312)
+     resolves on cuda13. Verified by an isolated solve.
+  2. *Qt5/Qt6:* pycolmap pulls `qt-main` (Qt5) but the floated py-opencv 4.13
+     wants a Qt6 `libopencv`. A `headless` opencv sidesteps Qt but pulls in (3).
+  3. *typing-extensions:* `tyro >=0.9.1` (recent builds) needs
+     `typing-extensions >=4.13`, but `[feature.common]` caps it `<4.13` (shared by
+     every env — not safe to relax for one). Resolving pysfm cleanly likely needs
+     a newer pycolmap (Qt6-compatible) and/or decoupling its opencv/tyro pins.
+
+  **ai-demos faiss side effect (handled):** publishing the cuda13 `libfaiss` to
+  ai-demos makes pixi's strict channel priority route *all* `libfaiss` through
+  ai-demos, which would break **mast3r-slam** (it needs the `cpu_openblas`
+  libfaiss). pixi merges workspace channels ahead of per-feature ones, and
+  `channel-priority = "disabled"` is not honored for the pixi-build envs
+  (mast3r-slam/dpvo), so per-feature ordering can't fix it. Fix: ai-demos also
+  ships a **libfaiss 1.10.0 cpu_openblas** build, so both pysfm (cuda13) and
+  mast3r-slam (cpu_openblas) resolve from ai-demos under strict priority.
+  mast3r-slam re-validated on the cpu_openblas build: `faiss` import + search OK,
+  27 tests pass.
 
 ### Two plan premises the hardware disproved
 1. **The mamma realtime gate is NOT fixed by the migration.** §0 hypothesised the
