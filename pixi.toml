@@ -499,7 +499,12 @@ torchcodec = "*"
 
 [feature.wilor-nano.pypi-dependencies]
 wilor_nano = { path = "packages/wilor-nano", editable = true }
-daggr = { path = "/home/pablo/0Dev/personal/daggr", editable = true }
+# `daggr` (a personal Gradio-graph helper) was wired as an absolute local-path
+# editable dep at /home/pablo/0Dev/personal/daggr. That path does not exist off
+# the author's machine, so `pixi install -e wilor-nano` failed everywhere else.
+# Removed for reproducibility. The optional `tools/daggr_*.py` demos import
+# `from daggr import GradioNode, Graph`; to run them, install daggr yourself
+# (e.g. `daggr = { path = "/abs/path/to/daggr", editable = true }`).
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 onnx = ">=1.12.0,<1.18.0"
 onnxscript = "*"
