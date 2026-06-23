@@ -59,7 +59,7 @@ use crate::gsplat_core::gpu_types::{
     create_compute_bind_group_layouts, create_compute_pipelines, create_filled_buffer,
     create_pipeline_bind_groups, create_sized_buffer, dispatch_grid_1d,
     dispatch_grid_for_workgroups, fill_map_uniform, fill_project_uniform, fill_scan_uniform,
-    gid_sort_passes, intersection_capacity_for_instances, next_block_capacity, next_capacity,
+    gid_sort_passes, next_block_capacity, next_capacity,
     pack_quats, pack_rgb, pack_scales_opacity, pack_sh_coefficients, pack_vec3s,
     sort_reduce_workgroup_count, tile_count, tile_sort_passes,
 };
@@ -72,6 +72,23 @@ const INTERSECTION_READBACK_SLOT_COUNT: usize = 2;
 pub(crate) fn fps_probe_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("GSPLAT_FPS_PROBE").is_some())
+}
+
+/// Viewer's lean per-splat intersection-slot multiplier, vs the CLI renderer's
+/// worst-case `gsplat_core::INTERSECTION_CAPACITY_MULTIPLIER` (32).
+const VIEWER_INTERSECTION_CAPACITY_MULTIPLIER: usize = 4;
+
+/// Initial intersection capacity for the interactive viewer: a lean estimate
+/// instead of `gsplat_core`'s worst-case 32x.  The tile sort and its scan
+/// machinery dispatch over this capacity every frame, so a 32x overshoot costs
+/// real frame time (16.7M slots for a 740k-intersection scene).  Underestimates
+/// self-heal: the intersection-count readback grows the capacity on the next
+/// frame.  The one-shot CLI renderer keeps the conservative sizing — it has no
+/// grow-and-retry path.
+fn viewer_intersection_capacity(instance_capacity: usize) -> usize {
+    (instance_capacity.max(1) * VIEWER_INTERSECTION_CAPACITY_MULTIPLIER)
+        .next_power_of_two()
+        .max(16)
 }
 
 /// Drop a cached entity's GPU resources after this many frames without use
@@ -119,10 +136,14 @@ mod tests {
 
     #[test]
     fn intersection_capacity_scales_with_instance_capacity() {
-        assert_eq!(super::intersection_capacity_for_instances(0), 32);
-        assert_eq!(super::intersection_capacity_for_instances(1), 32);
-        assert_eq!(super::intersection_capacity_for_instances(32), 1_024);
-        assert_eq!(super::intersection_capacity_for_instances(513), 32_768);
+        use crate::gsplat_core::gpu_types::intersection_capacity_for_instances;
+        assert_eq!(intersection_capacity_for_instances(0), 32);
+        assert_eq!(intersection_capacity_for_instances(1), 32);
+        assert_eq!(intersection_capacity_for_instances(32), 1_024);
+        assert_eq!(intersection_capacity_for_instances(513), 32_768);
+        // The viewer's lean initial sizing trades the worst-case 32x for 4x
+        // (the readback growth path covers the difference at runtime).
+        assert_eq!(super::viewer_intersection_capacity(513), 4_096);
     }
 }
 
@@ -578,7 +599,7 @@ impl GaussianRenderer {
             std::mem::size_of::<u32>(),
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         ));
-        let intersection_capacity = intersection_capacity_for_instances(initial_capacity);
+        let intersection_capacity = viewer_intersection_capacity(initial_capacity);
         let tile_id_from_isect_buffer = Arc::new(create_sized_buffer(
             &ctx.device,
             &format!("{label}::tile_id_from_isect"),
@@ -1078,7 +1099,7 @@ impl GaussianRenderer {
                 wgpu::BufferUsages::STORAGE,
             ));
         }
-        let required_intersection_capacity = intersection_capacity_for_instances(splat_capacity);
+        let required_intersection_capacity = viewer_intersection_capacity(splat_capacity);
         self.ensure_intersection_capacity(ctx, label, compute, required_intersection_capacity);
         self.refresh_compute_bind_groups(ctx, label, compute);
     }
