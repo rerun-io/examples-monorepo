@@ -139,7 +139,11 @@ libnvjitlink = "*"
 pytorch-gpu = ">=2.12,<2.13"
 torchvision = "*"
 
-[feature.cuda.pypi-dependencies]
+# onnxruntime-gpu is scoped to linux-64: the ort-cuda-13-nightly feed only works
+# on x86 here (its aarch64 wheels are CUDA-13.1, which the Spark's 13.0 driver
+# can't JIT). aarch64 gets onnxruntime-gpu from the Jetson AI Lab sbsa/cu130
+# index instead — see [feature.wilor-nano.target.linux-aarch64.pypi-dependencies].
+[feature.cuda.target.linux-64.pypi-dependencies]
 onnxruntime-gpu = { version = ">=1.24.0.dev0,<2", index = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-13-nightly/pypi/simple/" }
 
 # ─── ide feature (standalone dev env for Zed/IDE tooling) ────────────────────
@@ -529,11 +533,14 @@ nvidia-cuda-runtime-cu13 = "==0.0.0a0"
 cuda-python = "*"
 
 [feature.wilor-nano.target.linux-aarch64.pypi-dependencies]
-# onnxruntime-gpu aarch64 wheels (manylinux_2_34) all post-date CUDA 13.1 and
-# ship PTX the Spark's CUDA-13.0 driver (580.x) can't JIT — the CUDA EP fails at
-# runtime with cudaErrorUnsupportedPtxVersion (verified on 1.26.0 + 1.27 nightly).
-# The CPU EP works; the CUDA EP needs a driver >= 13.1. torch GPU is unaffected.
-onnxruntime-gpu = { version = ">=1.24.0.dev0,<2", index = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-13-nightly/pypi/simple/" }
+# DGX Spark (GB10 / sm_121, CUDA 13.0 driver): the Jetson AI Lab sbsa/cu130 wheel
+# ships NATIVE sm_121 SASS and zero PTX (cuobjdump-verified), so no PTX JIT and it
+# loads directly on the 13.0 driver. The official ort-cuda-13-nightly aarch64
+# wheels are CUDA-13.1 (PTX ISA 9.1 -> cudaErrorUnsupportedPtxVersion on 13.0);
+# conda-forge's *_cuda130 build is real 13.0 but ships no sm_121 SASS. Source:
+# Jetson AI Lab (NVIDIA Jetson DevRel infra, build recipe in dusty-nv/jetson-
+# containers). cp312-only, ORT 1.24.0; sha256 pinned in the lockfile.
+onnxruntime-gpu = { version = "==1.24.0", index = "https://pypi.jetson-ai-lab.io/sbsa/cu130/+simple/" }
 
 [feature.wilor-nano.activation.env]
 PACKAGE_DIR = "packages/wilor-nano"
