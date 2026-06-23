@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, Literal
-from uuid import UUID
 
 import av
 import numpy as np
@@ -135,8 +134,10 @@ def get_safe_application_id() -> str:
 class RerunTyroConfig:
     application_id: str = field(default_factory=get_safe_application_id)
     """Name of the application"""
-    recording_id: str | UUID | None = None
-    """Recording ID"""
+    recording_id: str | None = None
+    """Recording ID; pin one (any stable string) so separate processes/restarts
+    land in the same recording instead of forking new ones (tyro cannot parse a
+    UUID union member, which made this field non-configurable from the CLI)."""
     connect: bool = False
     """Wether to connect to an existing rerun instance or not"""
     save: Path | None = None
