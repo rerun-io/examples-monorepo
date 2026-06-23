@@ -92,8 +92,25 @@ def test_non_reference_translation_converted_cm_to_m() -> None:
     rig = _ordered_rig()
 
     rgb_pose = rig.cameras[1].pinhole.extrinsics
-    assert rgb_pose.world_t_cam is not None
-    np.testing.assert_allclose(rgb_pose.world_t_cam, [0.075, -0.02, 0.0])
+    # DepthAI's getCameraExtrinsics(ref, socket) is cam_T_world (rig->cam), so the
+    # raw cm translation (scaled to m) is cam_t_world; the camera's pose in the rig
+    # (world_t_cam) is its inverse.
+    assert rgb_pose.cam_t_world is not None
+    np.testing.assert_allclose(rgb_pose.cam_t_world, [0.075, -0.02, 0.0])
+    np.testing.assert_allclose(rgb_pose.world_t_cam, [-0.075, 0.02, 0.0])
+
+
+def test_non_reference_camera_pose_is_inverse_of_depthai_transform() -> None:
+    """Regression: the depthai transform is cam_T_world (rig->cam), so the camera's
+    position in the rig is its INVERSE. The right camera (depthai -X translation)
+    must sit on the +X side; using the transform as world_T_cam inverts this, which
+    places the frustum on the wrong side and triangulates points behind the cameras.
+    """
+    rig = _ordered_rig()
+    right = rig.cameras[2].pinhole.extrinsics
+    # right_ext (depthai) translation was [-7.5, 0, 0] cm -> right camera sits at +X.
+    np.testing.assert_allclose(right.world_t_cam, [0.075, 0.0, 0.0], atol=1e-9)
+    np.testing.assert_allclose(right.cam_t_world, [-0.075, 0.0, 0.0], atol=1e-9)
 
 
 def test_requires_exactly_one_reference_camera() -> None:

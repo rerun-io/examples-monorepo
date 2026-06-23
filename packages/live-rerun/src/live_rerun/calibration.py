@@ -64,18 +64,23 @@ def _extrinsics_from_ref(ref_T_cam_cm: Float[ndarray, "4 4"] | None) -> Extrinsi
 
     The reference camera (``None``) is the rig origin (identity pose). For the
     others, DepthAI's ``getCameraExtrinsics(reference, socket)`` returns the 4x4
-    that maps a point from the reference frame into ``socket``'s frame. Because
-    the reference camera *is* the rig frame, that rotation/translation map
-    straight onto ``world_R_cam`` / ``world_t_cam`` (here "world" == rig frame),
-    i.e. ``rig_T_cam``.
+    that maps a point **from the reference frame into ``socket``'s frame** — that
+    is ``cam_T_world`` (world->camera, "world" == rig), the matrix used directly in
+    the projection ``K @ cam_T_world``. So it fills ``cam_R_world`` / ``cam_t_world``;
+    the camera's *pose in the rig* (``world_T_cam``) is its inverse.
+
+    This is the subtle bit: feeding the transform into ``world_R_cam`` /
+    ``world_t_cam`` instead **inverts every non-reference camera** — frusta land on
+    the wrong side and triangulated points fall *behind* the cameras (verified on
+    an OAK-D-W: the person triangulated to negative depth until this was fixed).
     """
     if ref_T_cam_cm is None:
-        return Extrinsics(world_R_cam=np.eye(3), world_t_cam=np.zeros(3))
+        return Extrinsics(cam_R_world=np.eye(3), cam_t_world=np.zeros(3))
 
     transform: Float[ndarray, "4 4"] = np.asarray(ref_T_cam_cm, dtype=float)
-    world_R_cam: Float[ndarray, "3 3"] = transform[:3, :3].copy()
-    world_t_cam: Float[ndarray, "3"] = transform[:3, 3].copy() * _CM_TO_M
-    return Extrinsics(world_R_cam=world_R_cam, world_t_cam=world_t_cam)
+    cam_R_world: Float[ndarray, "3 3"] = transform[:3, :3].copy()
+    cam_t_world: Float[ndarray, "3"] = transform[:3, 3].copy() * _CM_TO_M
+    return Extrinsics(cam_R_world=cam_R_world, cam_t_world=cam_t_world)
 
 
 def _distortion_from_coeffs(coeffs: list[float]) -> BrownConradyDistortion | None:
