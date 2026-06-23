@@ -22,16 +22,19 @@ import numpy as np
 
 from live_rerun.calibration import OakCameraCalib
 from live_rerun.rerun_video_logger import Codec
+from live_rerun.rig import SensorKind
 
-# label -> board socket. RGB is the rig reference frame (CAM_A). Ordered
-# left -> rgb -> right to match the physical layout; this order flows through to
-# the calibration list, video paths, and the side-by-side 2D views.
-_SOCKETS: dict[str, dai.CameraBoardSocket] = {
-    "left": dai.CameraBoardSocket.CAM_B,
-    "rgb": dai.CameraBoardSocket.CAM_A,
-    "right": dai.CameraBoardSocket.CAM_C,
-}
-_REFERENCE_LABEL: str = "rgb"
+# (label, board socket, image kind). Ordered reference-first: the LEFT mono
+# camera (CAM_B) is the rig reference frame (identity -> cam_00); rgb (CAM_A) and
+# right (CAM_C) follow. This order flows through to the calibration list, the
+# cam_<index> entity paths, the video paths, and the side-by-side 2D views.
+_SENSORS: tuple[tuple[str, dai.CameraBoardSocket, SensorKind], ...] = (
+    ("left", dai.CameraBoardSocket.CAM_B, "grayscale"),
+    ("rgb", dai.CameraBoardSocket.CAM_A, "rgb"),
+    ("right", dai.CameraBoardSocket.CAM_C, "grayscale"),
+)
+_REFERENCE_LABEL: str = "left"
+_SOCKETS: dict[str, dai.CameraBoardSocket] = {label: socket for label, socket, _ in _SENSORS}
 
 _PROFILES: dict[Codec, dai.VideoEncoderProperties.Profile] = {
     "h264": dai.VideoEncoderProperties.Profile.H264_MAIN,
@@ -129,11 +132,11 @@ def _read_calibration(device: dai.Device, encoded_size: dict[str, tuple[int, int
     calib: dai.CalibrationHandler = device.readCalibration()
     reference_socket: dai.CameraBoardSocket = _SOCKETS[_REFERENCE_LABEL]
     calibs: list[OakCameraCalib] = []
-    for label, socket in _SOCKETS.items():
+    for label, socket, kind in _SENSORS:
         width, height = encoded_size[label]
         k_matrix = np.asarray(calib.getCameraIntrinsics(socket, width, height), dtype=float)
         distortion = [float(c) for c in calib.getDistortionCoefficients(socket)]
-        # RGB (reference) has the identity pose; the others are relative to it.
+        # The reference camera (left) has the identity pose; the others are relative to it.
         ref_T_cam_cm = (
             None if label == _REFERENCE_LABEL else np.asarray(calib.getCameraExtrinsics(reference_socket, socket, False), dtype=float)
         )
@@ -144,6 +147,7 @@ def _read_calibration(device: dai.Device, encoded_size: dict[str, tuple[int, int
                 height=height,
                 k_matrix=k_matrix,
                 distortion=distortion,
+                kind=kind,
                 ref_T_cam_cm=ref_T_cam_cm,
             )
         )

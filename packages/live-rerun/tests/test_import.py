@@ -8,6 +8,7 @@ import importlib
 def test_modules_import() -> None:
     for name in (
         "live_rerun",
+        "live_rerun.rig",
         "live_rerun.calibration",
         "live_rerun.rerun_video_logger",
         "live_rerun.blueprint",

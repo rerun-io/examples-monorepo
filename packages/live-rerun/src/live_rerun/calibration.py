@@ -1,12 +1,19 @@
-"""Device-free conversion of an OAK/DepthAI calibration into simplecv pinholes.
+"""Device-free conversion of an OAK/DepthAI calibration into a generic rig.
 
 The DepthAI-touching extraction lives in :mod:`live_rerun.sources.depthai`; this
 module takes the already-extracted raw values (a 3x3 K matrix at the *encoded*
-resolution, the Brown-Conrady distortion coefficients, and the 4x4 transform from
-the reference camera, with translation in **centimetres** as DepthAI reports it)
-and builds :class:`simplecv.camera_parameters.PinholeParameters`. Keeping it pure
-makes the unit-prone bits (cm->m, K at encoded resolution, extrinsics direction)
-testable without a camera attached.
+resolution, the Brown-Conrady distortion coefficients, and the 4x4 transform
+relative to the **reference** camera, with translation in **centimetres** as
+DepthAI reports it) and builds the system-agnostic :class:`live_rerun.rig`
+descriptors (:class:`~live_rerun.rig.CameraSensor` /
+:class:`~live_rerun.rig.RigCalibration`) the core logger consumes. Keeping it
+pure makes the unit-prone bits (cm->m, K at encoded resolution, extrinsics
+direction, reference identity) testable without a camera attached.
+
+The reference sensor is the OAK's **left** mono camera (CAM_B): it gets the
+identity ``rig_T_cam`` pose (the rig origin), and ``rgb``/``right`` are expressed
+relative to it. SLAM is run around the left camera, so the rig moves rigidly
+with it.
 """
 
 from __future__ import annotations
@@ -23,6 +30,8 @@ from simplecv.camera_parameters import (
     PinholeParameters,
 )
 
+from live_rerun.rig import CameraSensor, RigCalibration, SensorKind, entity_id
+
 # DepthAI reports extrinsic translations in centimetres; simplecv / Rerun log in
 # metres. See getCameraExtrinsics docs and the calibration_reader example.
 _CM_TO_M: float = 0.01
@@ -35,9 +44,10 @@ class OakCameraCalib:
     ``k_matrix`` must already be scaled to ``(width, height)`` of the encoded
     stream (``getCameraIntrinsics(socket, width, height)`` does this). ``distortion``
     is the DepthAI coefficient list, whose order matches
-    :class:`~simplecv.camera_parameters.BrownConradyDistortion`. ``ref_T_cam_cm`` is
-    the 4x4 world->camera transform from the reference camera with translation in
-    centimetres, or ``None`` for the reference camera itself (identity pose).
+    :class:`~simplecv.camera_parameters.BrownConradyDistortion`. ``kind`` is the
+    image content (``"rgb"`` / ``"grayscale"``). ``ref_T_cam_cm`` is the 4x4
+    reference->camera transform with translation in centimetres, or ``None`` for
+    the reference camera itself (identity pose, the rig origin).
     """
 
     label: str
@@ -45,17 +55,19 @@ class OakCameraCalib:
     height: int
     k_matrix: Float[ndarray, "3 3"]
     distortion: list[float]
+    kind: SensorKind
     ref_T_cam_cm: Float[ndarray, "4 4"] | None = None
 
 
 def _extrinsics_from_ref(ref_T_cam_cm: Float[ndarray, "4 4"] | None) -> Extrinsics:
-    """Build world->camera extrinsics, converting the translation from cm to m.
+    """Build rig->camera extrinsics, converting the translation from cm to m.
 
-    The reference camera (``None``) is the world origin (identity pose). For the
+    The reference camera (``None``) is the rig origin (identity pose). For the
     others, DepthAI's ``getCameraExtrinsics(reference, socket)`` returns the 4x4
-    that maps a point from the reference frame into ``socket``'s frame, i.e. the
-    world->camera transform, so the rotation/translation map straight onto
-    ``world_R_cam`` / ``world_t_cam``.
+    that maps a point from the reference frame into ``socket``'s frame. Because
+    the reference camera *is* the rig frame, that rotation/translation map
+    straight onto ``world_R_cam`` / ``world_t_cam`` (here "world" == rig frame),
+    i.e. ``rig_T_cam``.
     """
     if ref_T_cam_cm is None:
         return Extrinsics(world_R_cam=np.eye(3), world_t_cam=np.zeros(3))
@@ -74,25 +86,37 @@ def _distortion_from_coeffs(coeffs: list[float]) -> BrownConradyDistortion | Non
     return BrownConradyDistortion(*values)
 
 
-def oak_calibration_to_pinholes(calibs: list[OakCameraCalib]) -> dict[str, PinholeParameters]:
-    """Convert extracted OAK calibrations into simplecv pinholes keyed by label.
+def oak_calibration_to_rig(calibs: list[OakCameraCalib]) -> RigCalibration:
+    """Convert extracted OAK calibrations into a generic :class:`RigCalibration`.
 
-    Intrinsics use the OpenCV ``RDF`` convention (DepthAI/OpenCV native). The K
-    matrix must already correspond to the encoded resolution so the projected
-    video fills the camera frustum.
+    ``calibs`` is ordered (reference first); each camera's list position becomes
+    its ``cam_<index>`` entity index. Intrinsics use the OpenCV ``RDF`` convention
+    (DepthAI/OpenCV native); the K matrix must already correspond to the encoded
+    resolution so the projected video fills the camera frustum. Exactly one
+    camera must be the reference (``ref_T_cam_cm is None``, the rig origin); it
+    defines ``reference_index``. A ``ValueError`` is raised otherwise, so a
+    malformed backend can't silently mislabel a non-identity camera as the origin.
     """
-    pinholes: dict[str, PinholeParameters] = {}
-    for calib in calibs:
+    reference_indices: list[int] = [index for index, calib in enumerate(calibs) if calib.ref_T_cam_cm is None]
+    if len(reference_indices) != 1:
+        raise ValueError(
+            f"a rig needs exactly one reference camera (the rig origin, with ref_T_cam_cm=None); "
+            f"got {len(reference_indices)} of {len(calibs)} cameras"
+        )
+    reference_index: int = reference_indices[0]
+    cameras: list[CameraSensor] = []
+    for index, calib in enumerate(calibs):
         intrinsics: Intrinsics = Intrinsics.from_k_matrix(
             camera_conventions="RDF",
             k_matrix=np.asarray(calib.k_matrix, dtype=float),
             height=calib.height,
             width=calib.width,
         )
-        pinholes[calib.label] = PinholeParameters(
-            name=f"oak_{calib.label}",
+        pinhole = PinholeParameters(
+            name=entity_id("cam", index),
             extrinsics=_extrinsics_from_ref(calib.ref_T_cam_cm),
             intrinsics=intrinsics,
             distortion=_distortion_from_coeffs(calib.distortion),
         )
-    return pinholes
+        cameras.append(CameraSensor(index=index, name=calib.label, kind=calib.kind, pinhole=pinhole))
+    return RigCalibration(cameras=cameras, reference_index=reference_index)

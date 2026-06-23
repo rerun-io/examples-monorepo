@@ -19,7 +19,7 @@ import rerun as rr
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from live_rerun.blueprint import create_blueprint
-from live_rerun.calibration import oak_calibration_to_pinholes
+from live_rerun.calibration import oak_calibration_to_rig
 from live_rerun.rerun_video_logger import RerunVideoLogger
 from live_rerun.sources.depthai import DepthAiConfig, OakSource
 
@@ -47,9 +47,9 @@ def main(config: OakLiveRerunConfig) -> None:
         print("device:", source.device.getDeviceInfo(), flush=True)
         print("usb_speed:", source.device.getUsbSpeed(), flush=True)
 
-        pinholes = oak_calibration_to_pinholes(source.calibrations)
-        logger = RerunVideoLogger(pinholes, config.source.codec, image_plane_distance=config.image_plane_distance)
-        rr.send_blueprint(create_blueprint(logger.video_paths), make_active=True)
+        rig = oak_calibration_to_rig(source.calibrations)
+        logger = RerunVideoLogger(rig, config.source.codec, image_plane_distance=config.image_plane_distance)
+        rr.send_blueprint(create_blueprint(logger.pinhole_paths), make_active=True)
         logger.log_static()
 
         deadline: float | None = None if config.seconds is None else time.monotonic() + config.seconds
