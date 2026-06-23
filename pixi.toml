@@ -94,13 +94,22 @@ prerelease-mode = "allow"
 
 
 # ─── CUDA 13.0 feature (shared across all GPU envs) ─────────────────────────
-# Restrict to linux-64: the CUDA toolchain, pytorch-gpu, and GPU-only deps
-# like torchcodec don't have conda-forge builds for linux-aarch64.
+# Both linux-64 and linux-aarch64 (DGX Spark / GB10): conda-forge now ships the
+# CUDA 13 toolchain + pytorch-gpu for aarch64. An env only actually gains the
+# aarch64 platform if its other features also allow it — the heavy x86-only
+# packages (dpvo, mast3r-slam, sam2, moge, …) pin their own feature to linux-64,
+# so they stay linux-64 and only wilor-nano picks up aarch64.
 [feature.cuda]
-platforms = ["linux-64"]
+platforms = ["linux-64", "linux-aarch64"]
 
 [feature.cuda.system-requirements]
 cuda = "13.0"
+# CUDA-13 aarch64 index wheels (e.g. onnxruntime-gpu) ship as manylinux_2_34, so
+# declare glibc 2.34 to make them resolvable. pixi system-requirements can't be
+# target-scoped, so this applies to both platforms — but it only *loosens*
+# package eligibility (every CUDA-13 host already has glibc >= 2.34), so the
+# existing linux-64 solutions stay valid and are not re-solved.
+libc = { family = "glibc", version = "2.34" }
 
 [feature.cuda.dependencies]
 # CUDA Build Tools
@@ -520,6 +529,10 @@ nvidia-cuda-runtime-cu13 = "==0.0.0a0"
 cuda-python = "*"
 
 [feature.wilor-nano.target.linux-aarch64.pypi-dependencies]
+# onnxruntime-gpu aarch64 wheels (manylinux_2_34) all post-date CUDA 13.1 and
+# ship PTX the Spark's CUDA-13.0 driver (580.x) can't JIT — the CUDA EP fails at
+# runtime with cudaErrorUnsupportedPtxVersion (verified on 1.26.0 + 1.27 nightly).
+# The CPU EP works; the CUDA EP needs a driver >= 13.1. torch GPU is unaffected.
 onnxruntime-gpu = { version = ">=1.24.0.dev0,<2", index = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-13-nightly/pypi/simple/" }
 
 [feature.wilor-nano.activation.env]
