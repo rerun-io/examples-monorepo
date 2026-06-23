@@ -188,8 +188,8 @@ def load_nerf_cameras(scene_dir: Path, split: Literal["train", "val", "test"]) -
 def load_rgb_composited(image_path: Path, background: float) -> UInt8[ndarray, "h w 3"]:
     """Load an image as raw RGB with alpha composited onto a constant background.
 
-    Raw ``rr.Image`` on purpose — ``rr.EncodedImage`` from the 0.33 SDK makes
-    the 0.34-alpha viewer re-decode every visible image every frame.
+    Raw ``rr.Image`` on purpose — ``rr.EncodedImage`` makes the viewer
+    re-decode every visible image every frame.
     """
     with Image.open(image_path) as img:
         rgba: UInt8[ndarray, "h w c"] = np.asarray(img.convert("RGBA"))
@@ -442,7 +442,7 @@ def log_static_scene(config: VisualizeBrushTrainingConfig) -> list[tuple[Pinhole
 def send_blueprint(config: VisualizeBrushTrainingConfig, eval_cameras: list[tuple[PinholeParameters, Path]]) -> None:
     # Spin mode = continuous full-rate repaint for FPS validation; the eval-image
     # and time-series side views cost ~20 ms/frame under continuous repaint in the
-    # 0.34-alpha viewer (measured), so the spinning layout is 3D-only and excludes
+    # viewer (measured), so the spinning layout is 3D-only and excludes
     # the camera frusta.  Everything stays logged either way — rerun without
     # --spin-speed (or switch blueprints) to inspect the panels.
     spinning: bool = config.spin_speed > 0.0

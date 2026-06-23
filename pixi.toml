@@ -1469,7 +1469,10 @@ pytorch-cpu = ">=2.8.0"
 torchvision = "*"
 
 [feature.gsplat-rust-renderer.target.linux-64.dependencies]
-# libudev (devel) for gilrs (gamepad) in the local rerun checkout's re_viewer.
+# libudev (devel): was needed by the old local-rerun-checkout viewer, whose
+# re_viewer pulled re_gamepad/gilrs (gilrs links libudev). The shipped build now
+# uses published Rerun 0.33, which does not pull gilrs — currently unused, kept
+# as a harmless leaf to avoid a workspace re-solve; drop when the lock is next regenerated.
 libudev = "257.*"
 libxkbcommon = "*"
 wayland = "*"

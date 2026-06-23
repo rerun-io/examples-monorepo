@@ -204,11 +204,10 @@ def load_rgb_on_white(image_path: Path) -> UInt8[ndarray, "h w 3"]:
     NeRF-synthetic images are RGBA over transparent; the splat renders use a
     white background).
 
-    Raw ``rr.Image`` on purpose: ``rr.EncodedImage`` from the 0.33 SDK makes
-    this 0.34-alpha viewer re-decode every visible JPEG every frame (decode
-    cache misses under the version skew) — 200 image planes pegged a core and
-    dropped frames to seconds.  Raw rows cost more memory but render at
-    60 FPS.
+    Raw ``rr.Image`` on purpose: ``rr.EncodedImage`` makes the viewer
+    re-decode every visible JPEG every frame (decode cache misses) — 200 image
+    planes pegged a core and dropped frames to seconds.  Raw rows cost more
+    memory but render at 60 FPS.
     """
     with Image.open(image_path) as img:
         rgba: UInt8[ndarray, "h w c"] = np.asarray(img.convert("RGBA"))

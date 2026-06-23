@@ -15,7 +15,7 @@
 //   tile_offsets[2] = {start: 5, end: 9}
 //   ...
 //
-// The raster shader (stage 6) then uses these ranges to iterate only over the
+// The raster shader (stage 8) then uses these ranges to iterate only over the
 // splats that actually overlap its tile — no wasted work.
 //
 // Each thread checks CHECKS_PER_ITER consecutive entries to amortize the
