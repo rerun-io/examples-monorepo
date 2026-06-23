@@ -143,6 +143,41 @@ Two-process design: a **Rust viewer** with a custom GPU pipeline and a **Python 
 
 For detailed internals (per-frame pipeline, GPU stages, component contract, buffer management, constants), see **[docs/architecture.md](docs/architecture.md)**.
 
+## MCP viewport control (debug-only)
+
+The shipped viewer builds against the **published Rerun `0.33` crates** from
+crates.io, so a clean checkout builds anywhere. The MCP viewport-control demo
+(driving the viewer's camera/blueprint over MCP) was developed against a local
+`0.34.0-alpha` Rerun checkout plus the [`lucasmerlin/egui`
+`kittest-mcp-patch`](https://github.com/lucasmerlin/egui) fork, which is **not**
+shipped because absolute path deps are not reproducible. To reproduce that setup
+locally, point the viewer crates at your checkout and mirror its egui patches —
+in `Cargo.toml`:
+
+```toml
+# Viewer crates → local rerun checkout (adjust the path to yours)
+re_viewer = { path = "/path/to/rerun/crates/viewer/re_viewer", optional = true }
+re_renderer = { path = "/path/to/rerun/crates/viewer/re_renderer", optional = true }
+# … same for re_sdk, re_grpc_server, re_log*, re_query, re_view*, rerun, etc.
+
+# Mirror the rerun workspace's egui-family patches. Branch form (not rev=) is
+# mandatory: the forked egui_tiles/table reference egui as git+branch, and cargo
+# only unifies git sources when the query matches. Cargo.lock pins the revisions,
+# but a bare `cargo update` jumps these to branch HEADs — use `cargo update -p`.
+[patch.crates-io]
+egui = { git = "https://github.com/lucasmerlin/egui", branch = "lucas/kittest-mcp-patch" }
+eframe = { git = "https://github.com/lucasmerlin/egui", branch = "lucas/kittest-mcp-patch" }
+# … ecolor, egui_extras, egui_kittest, egui-wgpu, emath on the same fork/branch,
+#    plus egui_plot/tiles/table/dnd/commonmark on their rerun-io update branches.
+```
+
+The forked `eframe` also moves present mode + frame latency into
+`WgpuConfiguration.surface: SurfaceConfig` (egui 0.35), so `native_options()` in
+`src/main.rs` needs the `SurfaceConfig::HIGH_THROUGHPUT` form instead of the
+0.33 `present_mode` / `on_surface_status` fields. Local rerun's `re_viewer` also
+pulls `re_gamepad`/`gilrs`, so add conda `libudev` (devel) and export
+`PKG_CONFIG_PATH=<pixi-env>/lib/pkgconfig` for cargo builds outside pixi.
+
 ## Acknowledgements
 
 - [3D Gaussian Splatting](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/) — Kerbl et al., SIGGRAPH 2023

@@ -496,15 +496,20 @@ fn full_limits_wgpu_setup() -> eframe::egui_wgpu::WgpuSetup {
 fn native_options() -> eframe::NativeOptions {
     let mut native_options = re_viewer::native::eframe_options(None);
     native_options.wgpu_options = eframe::egui_wgpu::WgpuConfiguration {
-        surface: eframe::egui_wgpu::SurfaceConfig {
-            // Let wgpu pick the frame latency (its default favors throughput).
-            desired_maximum_frame_latency: None,
-            ..eframe::egui_wgpu::SurfaceConfig::HIGH_THROUGHPUT // AutoVsync
-        },
+        present_mode: re_renderer::external::wgpu::PresentMode::AutoVsync,
+        desired_maximum_frame_latency: None,
+        on_surface_status: Arc::new(|status| {
+            // On non-Windows platforms, an "Outdated" surface just means the
+            // window was resized — recreate the surface and carry on.
+            if matches!(status, re_renderer::external::wgpu::CurrentSurfaceTexture::Outdated)
+                && !cfg!(target_os = "windows")
+            {
+                eframe::egui_wgpu::SurfaceErrorAction::RecreateSurface
+            } else {
+                eframe::egui_wgpu::SurfaceErrorAction::SkipFrame
+            }
+        }),
         wgpu_setup: full_limits_wgpu_setup(),
-        // The default on_surface_status reconfigures on Outdated and
-        // recreates on Lost — no custom handling needed since egui 0.35.
-        ..Default::default()
     };
     native_options
 }
