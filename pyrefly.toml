@@ -20,6 +20,7 @@ project-includes = [
     "packages/sapiens-coco133-pose/src/**/*",
     "packages/egoexo-forge/src/**/*",
     "packages/mamma/src/**/*",
+    "packages/live-rerun/src/**/*",
 ]
 project-excludes = [
     "**/node_modules",
@@ -64,6 +65,7 @@ search-path = [
     "packages/sapiens-coco133-pose/src",
     "packages/egoexo-forge/src",
     "packages/mamma/src",
+    "packages/live-rerun/src",
     # Vendored sam2 fork is installed editable; pyrefly can't follow the
     # __editable__ finder, so resolve `sam2.*` from the source tree directly.
     "packages/sam2-streaming",
@@ -104,6 +106,8 @@ site-package-path = [
     ".pixi/envs/egoexo-forge-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/mamma-dev/lib/python3.12/site-packages",
     ".pixi/envs/mamma-dev/lib/python3.12/site-packages/rerun_sdk",
+    ".pixi/envs/live-rerun-dev/lib/python3.12/site-packages",
+    ".pixi/envs/live-rerun-dev/lib/python3.12/site-packages/rerun_sdk",
 ]
 
 python-interpreter-path = ".pixi/envs/dev/bin/python"

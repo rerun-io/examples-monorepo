@@ -21,6 +21,14 @@ iopath = ">=0.1.10"
 fsspec = ">=2025.3,<=2026.2.0"
 
 # ─── common feature (shared loose base deps) ───────────────────────────────
+# osx-arm64 is added beyond the workspace platforms so packages that target
+# Apple Silicon (e.g. live-rerun) can compose `common`. This is additive: every
+# existing `common` env also pulls a linux-only feature (cuda / per-package),
+# so the environment platform intersection keeps them linux-only — only envs
+# whose every feature lists osx-arm64 actually solve for macOS.
+[feature.common]
+platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
+
 [feature.common.dependencies]
 av = "*"
 py-opencv = "*"
@@ -38,6 +46,13 @@ jupyterlab = "*"
 [feature.common.target.linux-aarch64.dependencies]
 xorg-libx11 = "*"
 xorg-xorgproto = "*"
+
+# simplecv (pulled in editable below) imports torch unconditionally at module
+# load in simplecv/video_io.py. On Linux torch is supplied by the co-composed
+# cuda/cpu feature; a common-only macOS env has no other provider. Scope CPU
+# torch to osx-arm64 so Linux envs (which use pytorch-gpu) are untouched.
+[feature.common.target.osx-arm64.dependencies]
+pytorch-cpu = "*"
 
 [feature.common.pypi-dependencies]
 rerun-sdk = "==0.33.0"
@@ -123,6 +138,12 @@ onnxruntime-gpu = { version = ">=1.24.0.dev0,<2", index = "https://aiinfra.pkgs.
 python = "3.12.*"
 
 # ─── dev feature (shared across all *-dev envs) ─────────────────────────────
+# osx-arm64 added so `<pkg>-dev` envs that target Apple Silicon get the dev
+# tooling there too. Additive/safe: existing *-dev envs also carry a linux-only
+# feature, so the intersection keeps them linux-only.
+[feature.dev]
+platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
+
 [feature.dev.dependencies]
 ruff = "*"
 pytest = ">=8.0.0,<9"
@@ -1237,6 +1258,37 @@ cwd = "packages/pyvrs-viewer"
 description = "Benchmark 5 Quest + 5 Aria VRS files (requires download URL JSONs)"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# live-rerun
+# Realtime, zero-transcode logging of a sensor's hardware-encoded H.264/H.265
+# stream straight into Rerun VideoStream. Backend #1 is DepthAI/OAK. Runs on
+# linux-64, linux-aarch64 and osx-arm64 (rerun-sdk + simplecv come from common).
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.live-rerun]
+platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
+
+[feature.live-rerun.dependencies]
+python = "3.12.*"
+tyro = ">=0.9.1,<0.10"
+
+[feature.live-rerun.pypi-dependencies]
+live-rerun = { path = "packages/live-rerun", editable = true }
+# DepthAI 2.x is required for this OAK unit (3.x fails to open it). PyPI-only;
+# cp312 wheels exist for macosx_11_0_arm64, manylinux_2_17_x86_64 and aarch64.
+depthai = "==2.27.0.0"
+
+[feature.live-rerun.activation.env]
+PACKAGE_DIR = "packages/live-rerun"
+PYREFLY_TARGET = "."
+# depthai is a compiled module with an incomplete stub (only the 1-arg
+# getOutputQueue overload); baseline the resulting false positives.
+PYREFLY_EXTRA_ARGS = "--baseline pyrefly-baseline.json"
+
+[feature.live-rerun-demo.tasks.live-rerun-oak]
+cmd = "python tools/apps/oak_live_rerun.py"
+cwd = "packages/live-rerun"
+description = "Stream an OAK camera's encoded H.265/H.264 to Rerun (pass --rr-config.save out.rrd for live+save)"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # mast3r-slam
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.mast3r-slam]
@@ -1998,6 +2050,16 @@ pyvrs-viewer-dev = { features = [
     "pyvrs-viewer",
     "dev",
 ], solve-group = "pyvrs-viewer", no-default-feature = true }
+live-rerun = { features = [
+    "common",
+    "live-rerun",
+    "live-rerun-demo",
+], solve-group = "live-rerun", no-default-feature = true }
+live-rerun-dev = { features = [
+    "common",
+    "live-rerun",
+    "dev",
+], solve-group = "live-rerun", no-default-feature = true }
 egoexo-forge = { features = [
     "common",
     "cuda",

@@ -8,7 +8,7 @@ A **Pixi workspace monorepo** of computer vision projects. Each package lives in
 
 ## Environments
 
-Each package has a prod env (`<name>`) and a dev env (`<name>-dev`, adds ruff, pytest, beartype, pyrefly). Direnv auto-activates the `*-dev` env when you `cd` into a package directory.
+Each package has a prod env (`<name>`) and a dev env (`<name>-dev`, adds ruff, pytest, beartype, pyrefly, hypothesis, vulture). The dev env exposes the tasks `lint`, `typecheck`, `deadcode`, and `tests` (e.g. `pixi run -e <name>-dev tests`). Direnv auto-activates the `*-dev` env when you `cd` into a package directory.
 
 ## Commands
 
@@ -23,7 +23,13 @@ pixi run -e monoprior --frozen monoprior-relative-depth   # runs download + demo
 pixi run -e robocap-slam-dev --frozen tests
 ```
 
-Prefer `pixi run --frozen` to skip re-solving deps. Only omit `--frozen` when you've modified dependencies.
+Prefer `pixi run --frozen` to skip re-solving deps. Only omit `--frozen` when you've modified dependencies. The dev tasks (`pixi run -e <name>-dev {lint,typecheck,deadcode,tests}`) are the canonical runners — `typecheck` applies the monorepo `pyrefly.toml` plus any per-package baseline, whereas a bare `pyrefly check .` skips the baseline and can surface known false-positives.
+
+## Platforms & lockfile
+
+The workspace targets **`linux-64` + `linux-aarch64`** only (`[workspace] platforms`). A package opts into **macOS** by declaring its own `platforms = ["osx-arm64", ...]` on its feature, which extends beyond the workspace list (see `mv-api-catalog-register-mac`, `live-rerun`). For a `common`-composing package to run on macOS, `common` and `dev` also list `osx-arm64`, with an osx-scoped `pytorch-cpu` (simplecv imports torch at module load).
+
+**Regenerate the lock on Linux.** Changing a *shared* feature (`common`/`dev`) or a build-from-source dep forces pixi to re-solve the *whole* workspace. Linux-only build-from-source envs — `wilor-nano`'s git `rtmlib` and the `no-build-isolation` deps (`moge`/`gsplat`/`dpvo`/`sam2`) — **cannot be cross-built `osx-arm64` → `linux-64`** ("no compatible Python interpreter"). So on macOS, only `pixi install`/`lock` a package's *own* deps; for anything touching shared features, regenerate `pixi.lock` on a Linux host, copy it back, then `pixi install -e <name> --frozen` on macOS.
 
 ## Architecture
 
@@ -35,15 +41,28 @@ if os.environ.get("PIXI_DEV_MODE") == "1":
     beartype_this_package()
 ```
 
+**`tools/` scripts must be thin shims** — `beartype_this_package()` only instruments
+code **inside** the package, so the Tyro `Config` dataclass and `main()` belong in the
+package (e.g. `<module>/apis/<name>.py`), and the `tools/` script just wires them up.
+Logic placed directly in a `tools/` script is **not** beartype-checked under dev.
+```python
+# tools/apps/<name>.py  — keep it to a few lines
+import tyro
+from <module>.apis.<name> import Config, main
+
+if __name__ == "__main__":
+    main(tyro.cli(Config))
+```
+
 **Package structure:**
 ```
 packages/<name>/
   pyproject.toml    # [project], [build-system], [tool.ruff]
   <module>/
     __init__.py     # Beartype activation
-    apis/           # High-level inference interfaces
+    apis/           # High-level interfaces + Tyro Config/main (beartype-instrumented)
     gradio_ui/      # Gradio components (if applicable)
-  tools/            # CLI scripts (demos/ and apps/ subdirs)
+  tools/            # THIN CLI shims over <module>/apis/ (demos/ and apps/ subdirs)
   tests/
 ```
 
@@ -56,7 +75,7 @@ arguments or hide a single call should usually be inlined at the call site.
 
 **Ruff** — line length 150, rules: E, F, UP, B, SIM, I. Ignored: E501, F722/F821 (jaxtyping), UP037/UP040, SIM901.
 
-**pyrefly** config is monorepo-wide in root `pyrefly.toml`. Do not add `[tool.pyrefly]` to per-package `pyproject.toml`.
+**pyrefly** config is monorepo-wide in root `pyrefly.toml`; do not add `[tool.pyrefly]` to per-package `pyproject.toml`. When you add a package, register it in `pyrefly.toml` in **three** places: `search-path` and `site-package-path` (omit these and imports of the new module resolve to `missing-import`), and `project-includes` (omit it and the package's files aren't typechecked at all). For unavoidable stub false-positives from compiled/untyped deps (e.g. `depthai`), add a per-package `pyrefly-baseline.json` and wire it via `PYREFLY_EXTRA_ARGS = "--baseline pyrefly-baseline.json"` in `[feature.<name>.activation.env]` (see `simplecv`, `live-rerun`).
 
 ## Rerun Tools
 
@@ -67,16 +86,18 @@ field such as `rr_config: RerunTyroConfig`, let its `__post_init__` configure
 spawn/connect/save/serve/headless behavior, and then use the normal global
 `rr.*` logging calls unless a test or library boundary specifically requires an
 explicit recording stream. This preserves the flexible viewer and save behavior
-expected across SimpleCV tools.
+expected across SimpleCV tools. For a realtime tool that needs the live viewer
+**and** a `.rrd` at once, set `rr_config.live` together with `--rr-config.save`:
+`RerunTyroConfig` then fans out to both via `set_sinks` (the `live`/`port` fields).
 
 ## Gotchas
 
 - **Never use pip** — all dependency management goes through Pixi
 - **`hf download` not `huggingface-cli`** — conda's huggingface_hub provides `hf`, not `huggingface-cli`
 - **gradio from PyPI, not conda** — conda's gradio package has missing transitive deps
-- **`moge` needs no-build-isolation** — it requires torch at build time (configured in `[pypi-options]`)
+- **`no-build-isolation` deps** (`moge`, `gsplat`, `dpvo`, `sam2`) build from source and need torch at build time (configured in `[pypi-options]`). They can't be cross-built from macOS — see **Platforms & lockfile**.
 - **sam3d-body uses `tool/` (singular)** not `tools/` for its CLI scripts
-- **Direnv fails after changing `pixi.toml`** — run `pixi install -e <name>-dev` to re-solve, then direnv picks up the updated lockfile
+- **Direnv fails after changing `pixi.toml`** — run `pixi install -e <name>-dev` to re-solve, then direnv picks up the updated lockfile. ⚠️ If you touched a *shared* feature (`common`/`dev`) this re-solves the whole workspace and **fails on macOS** — regenerate the lock on Linux (see **Platforms & lockfile**).
 - **Never use bare `except Exception` with beartype** — it silently swallows type violations. Always re-raise `BeartypeException`:
   ```python
   from beartype.roar import BeartypeException
@@ -88,6 +109,7 @@ expected across SimpleCV tools.
       print("failed")
   ```
 - **Use `0.0` not `0` for float annotations** — beartype strictly distinguishes `int` from `float`. `last_error: float = 0` will fail; use `last_error: float = 0.0`
+- **`vulture` (the `deadcode` task) flags framework-used names** — Tyro/dataclass config fields, `pytestmark`, `__exit__`'s `*exc`, etc. Add them to `[tool.vulture] ignore_names` in the package `pyproject.toml` rather than reworking the code.
 - **Pixi collapses multiline `cmd = """..."""` into a single line**, replacing newlines with spaces. If a task has separate commands on different lines (e.g. `export`, `echo`, `python`), they become arguments to the first command and never execute. The task appears to succeed (exit 0) but produces no output. Always use `&&`-chained single-line commands or `\` line continuations instead.
 - **Don't poll with `pgrep -f <pat>` when the polling command itself contains `<pat>`** — it matches its own shell and the `until ! pgrep ...` loop never exits (silently hangs forever). Prefer `run_in_background` on the real command (you're notified on its own exit), or wait on a file/sentinel.
 - **Always pass `--rr-config.headless` to Rerun CLIs in shells without `DISPLAY`** — the `RerunTyroConfig` default calls `rr.spawn()`; when the viewer fails to start (winit "neither WAYLAND_DISPLAY nor DISPLAY is set"), the recording stream's channel fills and every `rr.log()` blocks forever. The run wedges silently (zombie viewer child, zero CPU) instead of erroring out.
