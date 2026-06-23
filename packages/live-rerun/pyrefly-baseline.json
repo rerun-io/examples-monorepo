@@ -1,0 +1,28 @@
+{
+  "errors": [
+    {
+      "line": 168,
+      "column": 72,
+      "stop_line": 168,
+      "stop_column": 79,
+      "path": "src/live_rerun/sources/depthai.py",
+      "code": -2,
+      "name": "unexpected-keyword",
+      "description": "Unexpected keyword argument `maxSize` in function `depthai.Device.getOutputQueue`",
+      "concise_description": "Unexpected keyword argument `maxSize` in function `depthai.Device.getOutputQueue`",
+      "severity": "error"
+    },
+    {
+      "line": 168,
+      "column": 104,
+      "stop_line": 168,
+      "stop_column": 112,
+      "path": "src/live_rerun/sources/depthai.py",
+      "code": -2,
+      "name": "unexpected-keyword",
+      "description": "Unexpected keyword argument `blocking` in function `depthai.Device.getOutputQueue`",
+      "concise_description": "Unexpected keyword argument `blocking` in function `depthai.Device.getOutputQueue`",
+      "severity": "error"
+    }
+  ]
+}

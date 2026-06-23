@@ -62,28 +62,29 @@ class DSineNormalPredictor(BaseNormalPredictor):
         self, rgb: UInt8[np.ndarray, "h w 3"], K_33: Float[np.ndarray, "3 3"] | None
     ) -> SurfaceNormalPrediction:
         # preprocess the input image
-        rgb: Float[np.ndarray, "h w 3"] = rgb.astype(np.float32) / 255.0
-        rgb: Float[torch.Tensor, "1 c h w"] = torch.from_numpy(rearrange(rgb, "h w c -> 1 c h w")).to(self.device)
+        rgb_f32: Float[np.ndarray, "h w 3"] = rgb.astype(np.float32) / 255.0
+        rgb_bchw: Float[torch.Tensor, "1 c h w"] = torch.from_numpy(rearrange(rgb_f32, "h w c -> 1 c h w")).to(self.device)
 
-        _, _, h, w = rgb.shape
+        _, _, h, w = rgb_bchw.shape
 
         # zero-pad the input image so that both the width and height are multiples of 32
         left, right, top, bottom = pad_input(h, w)
-        rgb = F.pad(rgb, (left, right, top, bottom), mode="constant", value=0.0)
-        rgb = self.transform(rgb)
+        rgb_bchw = F.pad(rgb_bchw, (left, right, top, bottom), mode="constant", value=0.0)
+        rgb_bchw = self.transform(rgb_bchw)
 
         if K_33 is None:
-            K_33: Float[torch.Tensor, "3 3"] = get_intrins_from_fov(new_fov=60.0, H=h, W=w, device=self.device)
-            K_b33: Float[torch.Tensor, "b 3 3"] = rearrange(K_33, "r c -> 1 r c")
+            K_33_tensor: Float[torch.Tensor, "3 3"] = get_intrins_from_fov(new_fov=60.0, H=h, W=w, device=self.device)
+            K_b33: Float[torch.Tensor, "b 3 3"] = rearrange(K_33_tensor, "r c -> 1 r c")
         else:
-            K_b33 = torch.from_numpy(rearrange(K_33, "r c -> 1 r c")).to(self.device)
+            # copy=True: the in-place padding shift below must not write through to the caller's K_33
+            K_b33 = torch.from_numpy(rearrange(K_33, "r c -> 1 r c")).to(self.device, copy=True)
 
         # add padding to intrinsics
         K_b33[:, 0, 2] += left
         K_b33[:, 1, 2] += top
 
         with torch.no_grad():
-            normal_list: list[torch.Tensor] = self.model(rgb, intrins=K_b33)
+            normal_list: list[torch.Tensor] = self.model(rgb_bchw, intrins=K_b33)
             # last value in the list is the normal map
             normal_bchw: Float[torch.Tensor, "b 3 _ _"] | Float[torch.Tensor, "b 4 _ _"] = normal_list[-1]
             # undo padding

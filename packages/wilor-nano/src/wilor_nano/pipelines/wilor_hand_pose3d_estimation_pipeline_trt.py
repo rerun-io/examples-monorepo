@@ -68,7 +68,7 @@ class _FrameRecord:
     patch_end: int
 
 
-@dataclass(slots=True)
+@dataclass
 class WilorPipelineConfig:
     detector_engine_path: Path
     """Machine-local raw detector TensorRT engine."""
@@ -78,7 +78,7 @@ class WilorPipelineConfig:
     """Static batch size baked into the detector engine."""
     wilor_static_batch_size: int
     """Static batch size baked into the full WiLor engine."""
-    device: torch.device = torch.device("cuda")
+    device: torch.device
     """CUDA device used for TensorRT execution."""
     dtype: torch.dtype = torch.float16
     """Input dtype for full WiLor TensorRT execution."""

@@ -1,6 +1,6 @@
 import gc
 from pathlib import Path
-from typing import Literal, get_args
+from typing import Literal, get_args, overload
 
 import cv2
 import gradio as gr
@@ -30,14 +30,20 @@ from monopriors.rr_logging_utils import (
 
 try:
     import spaces  # type: ignore
-
-    IN_SPACES = True
 except ImportError:
+    spaces = None
     print("Not running on Zero")
-    IN_SPACES = False
 
 model_load_status: str = "Models loaded and ready to use!"
 DEVICE: Literal["cuda"] | Literal["cpu"] = "cuda" if torch.cuda.is_available() else "cpu"
+
+
+@overload
+def predict_depth(predictor, model_type: Literal["Relative"], rgb: UInt8[np.ndarray, "h w 3"]) -> RelativeDepthPrediction: ...
+
+
+@overload
+def predict_depth(predictor, model_type: Literal["Metric"], rgb: UInt8[np.ndarray, "h w 3"]) -> MetricDepthPrediction: ...
 
 
 def predict_depth(
@@ -56,10 +62,42 @@ def predict_depth(
         gc.collect()
         torch.cuda.empty_cache()
         return metric_pred
+    raise ValueError(f"Unsupported model type: {model_type}")
 
 
-if IN_SPACES:
+def _metric_predictor_name(model_name: RELATIVE_PREDICTORS | METRIC_PREDICTORS) -> METRIC_PREDICTORS:
+    """Validate and narrow a Gradio model choice to a metric predictor name."""
+
+    match model_name:
+        case "UniDepthMetricPredictor":
+            return "UniDepthMetricPredictor"
+        case "MoGeV2MetricPredictor":
+            return "MoGeV2MetricPredictor"
+        case _:
+            raise gr.Error(f"{model_name} is not a metric depth predictor.")
+
+
+def _relative_predictor_name(model_name: RELATIVE_PREDICTORS | METRIC_PREDICTORS) -> RELATIVE_PREDICTORS:
+    """Validate and narrow a Gradio model choice to a relative predictor name."""
+
+    match model_name:
+        case "DepthAnythingV1Predictor":
+            return "DepthAnythingV1Predictor"
+        case "DepthAnythingV2Predictor":
+            return "DepthAnythingV2Predictor"
+        case "UniDepthRelativePredictor":
+            return "UniDepthRelativePredictor"
+        case "MogeV1Predictor":
+            return "MogeV1Predictor"
+        case _:
+            raise gr.Error(f"{model_name} is not a relative depth predictor.")
+
+
+if spaces is not None:
     predict_depth = spaces.GPU(predict_depth)
+
+
+_ON_SUBMIT_PROGRESS = gr.Progress(track_tqdm=True)
 
 
 @rr.thread_local_stream("depth")
@@ -70,9 +108,11 @@ def on_submit(
     model_type: Literal["Metric", "Relative"],
     model_1_name: RELATIVE_PREDICTORS | METRIC_PREDICTORS,
     model_2_name: RELATIVE_PREDICTORS | METRIC_PREDICTORS,
-    progress=gr.Progress(track_tqdm=True),
+    progress=_ON_SUBMIT_PROGRESS,
 ) -> bytes:
     stream: rr.BinaryStream = rr.binary_stream()
+    if rgb is None:
+        raise gr.Error("Please provide an input image.")
     model_names = [model_1_name, model_2_name]
     blueprint = create_compare_depth_blueprint(model_names)
     rr.send_blueprint(blueprint)
@@ -93,8 +133,9 @@ def on_submit(
         # get the name of the model
         parent_log_path = Path(f"{model_name}")
         if model_type == "Metric":
-            predictor = get_metric_predictor(model_name)
-            metric_pred: MetricDepthPrediction = predict_depth(predictor, model_type, rgb)
+            metric_model_name: METRIC_PREDICTORS = _metric_predictor_name(model_name)
+            predictor = get_metric_predictor(metric_model_name)
+            metric_pred: MetricDepthPrediction = predict_depth(predictor, "Metric", rgb)
             log_metric_pred(
                 parent_log_path=parent_log_path,
                 metric_pred=metric_pred,
@@ -103,8 +144,9 @@ def on_submit(
                 depth_edge_threshold=depth_map_threshold,
             )
         elif model_type == "Relative":
-            predictor = get_relative_predictor(model_name)
-            relative_pred: RelativeDepthPrediction = predict_depth(predictor, model_type, rgb)
+            relative_model_name: RELATIVE_PREDICTORS = _relative_predictor_name(model_name)
+            predictor = get_relative_predictor(relative_model_name)
+            relative_pred: RelativeDepthPrediction = predict_depth(predictor, "Relative", rgb)
 
             log_relative_pred(
                 parent_log_path=parent_log_path,
@@ -114,7 +156,7 @@ def on_submit(
                 depth_edge_threshold=depth_map_threshold,
             )
 
-    return stream.read()
+    return stream.read() or b""
 
 
 with gr.Blocks() as relative_compare_block:

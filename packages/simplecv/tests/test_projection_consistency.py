@@ -74,6 +74,7 @@ def test_cam_projection_matches_matrix(case: tuple[np.ndarray, np.ndarray, np.nd
 
     assert uv_matrix.shape == uv_factored.shape == (xyz_world.shape[0], n_views, xyz_world.shape[1], 2)
 
-    mask = np.isfinite(uv_matrix)
+    stable_depth = np.abs(xyz_cam[..., 2:3]) > 1e-6
+    mask = np.isfinite(uv_matrix) & stable_depth
     assume(mask.any())
     np.testing.assert_allclose(uv_factored[mask], uv_matrix[mask], rtol=1e-6, atol=1e-6)

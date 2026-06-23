@@ -201,8 +201,10 @@ class FramePlayer:
         self, image_spec: dict[str, object], pixel_array: UInt8[ndarray, "n"]
     ) -> UInt8[np.ndarray, "h w"] | UInt8[np.ndarray, "h w 3"] | None:
         """Reshape a raw pixel array into an image using spec dimensions."""
-        width: int = int(image_spec.get("width", 0))
-        height: int = int(image_spec.get("height", 0))
+        width_raw: object = image_spec.get("width", 0)
+        height_raw: object = image_spec.get("height", 0)
+        width: int = int(width_raw) if isinstance(width_raw, (float, int, str)) else 0
+        height: int = int(height_raw) if isinstance(height_raw, (float, int, str)) else 0
         pixel_format: str = str(image_spec.get("pixel_format", ""))
 
         if width == 0 or height == 0:

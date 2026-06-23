@@ -42,7 +42,7 @@ Each node's API matches the **network's actual I/O contract**. Single-image netw
 
 The network **genuinely takes a list** — VGGT processes all views jointly to produce consistent multi-view geometry.
 
-An existing `VGGTInferenceConfig` already lives in `apis/multiview_inference.py` (line 436) with `keep_top_percent`, `preprocessing_mode`, `image_dir`, `videos_dir`, `rr_config`. There's also `MultiViewCalibratorConfig` in `apis/multiview_calibration.py` with overlapping fields. Rather than creating yet another config, refactor: extract the VGGT-specific fields into a standalone config that both inference APIs import.
+An existing `VGGTInferenceConfig` already lives in `apis/multiview_inference.py` (line 440) with `keep_top_percent`, `preprocessing_mode`, `image_dir`, `videos_dir`, `rr_config`. There's also `MultiViewCalibratorConfig` in `apis/multiview_calibration.py` with overlapping fields. Rather than creating yet another config, refactor: extract the VGGT-specific fields into a standalone config that both inference APIs import.
 
 ```python
 # Refactored from VGGTInferenceConfig — extract the network-specific fields
@@ -433,7 +433,7 @@ docs/
   daggr_proposal.md                             # Proposal for daggr team (graph.as_gradio + graph.invoke)
 ```
 
-In `packages/sam3-rerun/` (modify existing, no new files):
+In `packages/sam3/` (modify existing, no new files):
 ```
 sam3_rerun/gradio_ui/sam3_rerun_ui.py           # Update: add Config accordion, _sync_config, match node spec
 ```
@@ -449,7 +449,7 @@ sam3_rerun/gradio_ui/sam3_rerun_ui.py           # Update: add Config accordion, 
 
 - `VGGTPredictor`, `MultiviewPred`, `robust_filter_confidences` — `models/multiview/vggt_model.py`
 - `BaseMetricPredictor`, `MetricDepthPrediction`, `get_metric_predictor()`, `METRIC_PREDICTORS` — `models/metric_depth/`
-- `SAM3Predictor`, `SAM3Results` — `sam3_rerun/api/predictor.py`
+- `SAM3Predictor`, `SAM3Results` — `sam3/api/predictor.py`
 - `compute_scale_and_shift` — `scale_utils.py`
 - `depth_edges_mask`, `multidepth_to_points` — `depth_utils.py`
 - Blueprint helpers (`create_final_view`, etc.) — stay in `multiview_calibration.py`
@@ -565,8 +565,8 @@ With `graph.as_gradio()` + `graph.invoke()`, we define the pipeline ONCE, use it
 - `packages/monoprior/monopriors/apis/multiview_calibration.py` — source of logic to decompose
 - `packages/wilor-nano/src/wilor_nano/gradio_ui/hand_detection_ui.py` — reference for daggr-compatible `pred_fn`
 - `packages/wilor-nano/tools/daggr_wilor.py` — reference for daggr graph wiring
-- `packages/sam3-rerun/src/sam3_rerun/api/predictor.py` — SAM3 API to wrap
-- `packages/sam3-rerun/src/sam3_rerun/gradio_ui/sam3_rerun_ui.py` — SAM3 Gradio app pattern
+- `packages/sam3/src/sam3/api/predictor.py` — SAM3 API to wrap
+- `packages/sam3/src/sam3/gradio_ui/sam3_rerun_ui.py` — SAM3 Gradio app pattern
 - `packages/monoprior/monopriors/models/multiview/vggt_model.py` — VGGT types
 - `packages/monoprior/monopriors/models/metric_depth/moge_v2.py` — MoGe V2 metric predictor
 - `packages/monoprior/monopriors/models/metric_depth/base_metric_depth.py` — `MetricDepthPrediction` dataclass

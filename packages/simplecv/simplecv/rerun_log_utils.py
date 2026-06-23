@@ -146,6 +146,12 @@ class RerunTyroConfig:
     """Serve the rerun data"""
     headless: bool = False
     """Run rerun in headless mode"""
+    live: bool = False
+    """When combined with ``save``, stream to a spawned viewer AND write the .rrd
+    file simultaneously (via ``set_sinks``), instead of ``save`` being file-only.
+    Ignored when ``headless`` (no viewer), or when ``serve``/``connect`` is set."""
+    port: int = 9876
+    """Port for the spawned viewer's gRPC proxy (used by ``spawn`` and ``live`` + ``save``)."""
     executable_name: str = "rerun"
     """Executable name passed to ``rerun.spawn`` when launching the viewer."""
     executable_path: str | None = None
@@ -168,10 +174,26 @@ class RerunTyroConfig:
             # You can omit the argument to connect to the default address,
             # which is `127.0.0.1:9876`.
             rr.connect_grpc()
+        elif self.save is not None and self.live and not self.headless:
+            # Stream to a spawned viewer AND save to a .rrd at the same time by
+            # fanning out through explicit sinks. ``spawn``/``save`` each install a
+            # single sink that would replace the other, so we spawn the viewer
+            # process without auto-connecting and wire both sinks ourselves.
+            rr.spawn(
+                port=self.port,
+                connect=False,
+                executable_name=self.executable_name,
+                executable_path=self.executable_path,
+            )
+            rr.set_sinks(
+                rr.GrpcSink(f"rerun+http://127.0.0.1:{self.port}/proxy"),
+                rr.FileSink(str(self.save)),
+            )
         elif self.save is not None:
             rr.save(self.save)
         elif not self.headless:
             rr.spawn(
+                port=self.port,
                 executable_name=self.executable_name,
                 executable_path=self.executable_path,
             )

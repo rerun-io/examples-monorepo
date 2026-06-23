@@ -28,3 +28,17 @@ paths = ["pysfm", "tests", "tools"]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true
 min_confidence = 60
+ignore_names = [
+    "no_rig_model_dir",
+    "num_cameras",
+    "image_prefix",
+    "ref_sensor",
+    "minloglevel",
+    "type",
+    "gpu_index",
+    "quadratic_overlap",
+    "skip_image_pairs_in_same_frame",
+    "multiple_models",
+    "refine_sensor_from_rig",
+    "rr_config",
+]

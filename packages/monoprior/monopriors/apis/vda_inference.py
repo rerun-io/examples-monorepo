@@ -15,10 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-import numpy as np
 import rerun as rr
-from einops import rearrange
-from jaxtyping import Float32, UInt8
+from jaxtyping import UInt8
 from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
 
@@ -60,7 +58,7 @@ def vda_inference(config: VDAConfig) -> None:
         frame_idx = 0
         for result in video_depth_anything.infer_video_depth_iter(frames, K_33=None):
             match result:
-                case DepthChunkIntermediate(chunk_index=ci, raw_depth_list=raw_depth_list, progress=progress):
+                case DepthChunkIntermediate(chunk_index=_, raw_depth_list=raw_depth_list, progress=_):
                     # Intermediate result: update visualization with raw (unaligned) depth for this chunk.
                     for depth_pred in raw_depth_list:
                         rr.set_time("frame", sequence=frame_idx)
@@ -76,7 +74,7 @@ def vda_inference(config: VDAConfig) -> None:
                     # Example: iterate over the final aligned depth predictions and log them.
                     for i, depth_pred in enumerate(aligned_depth):
                         rr.set_time("frame", sequence=i)
-                        rr.log("depth", rr.DepthImage(depth_pred.depth, rr.components.Colormap.Turbo))
+                        rr.log("depth", rr.DepthImage(depth_pred.depth, colormap=rr.components.Colormap.Turbo))
                 case _:
                     # Fallback in case of an unexpected type.
                     print("Unexpected result type:", result)

@@ -5,22 +5,22 @@ Hand detection and 3D hand pose estimation with [WiLoR](https://github.com/rolpo
 - **Original project:** [rolpotamias/WiLoR](https://github.com/rolpotamias/WiLoR)
 - **Package:** `wilor-nano`
 - **Import path:** `wilor_nano`
-- **Pixi envs:** `wilor`, `wilor-dev`
+- **Pixi envs:** `wilor-nano`, `wilor-nano-dev`
 
 ## Run
 
 Run commands from the workspace root:
 
 ```bash
-pixi run -e wilor --frozen image-example
-pixi run -e wilor --frozen video-example
-pixi run -e wilor --frozen video-trt --video-path assets/video.mp4
+pixi run -e wilor-nano --frozen wilor-nano-image-example
+pixi run -e wilor-nano --frozen wilor-nano-video-example
+pixi run -e wilor-nano --frozen wilor-nano-video-trt --video-path assets/video.mp4
 ```
 
 Available WiLoR tasks:
 
 ```bash
-pixi task list -e wilor
+pixi task list -e wilor-nano
 ```
 
 Current task surface:
@@ -53,7 +53,7 @@ flowchart LR
 Use it when you want the baseline behavior or a simple reference path:
 
 ```bash
-pixi run -e wilor --frozen video-example --video-path /path/to/video.mp4
+pixi run -e wilor-nano --frozen wilor-nano-video-example --video-path /path/to/video.mp4
 ```
 
 ### Batched TensorRT Path
@@ -76,7 +76,7 @@ flowchart LR
 Use it for fast video processing:
 
 ```bash
-pixi run -e wilor --frozen video-trt --video-path /path/to/video.mp4
+pixi run -e wilor-nano --frozen wilor-nano-video-trt --video-path /path/to/video.mp4
 ```
 
 The default TensorRT engines are expected under:
@@ -93,25 +93,25 @@ TensorRT engines are machine-local artifacts. Keep ONNX as the portable artifact
 Export the full WiLoR and detector ONNX graphs:
 
 ```bash
-pixi run -e wilor --frozen export-onnx --artifact.target full_postcrop
-pixi run -e wilor --frozen export-onnx --artifact.target detector_raw
+pixi run -e wilor-nano --frozen wilor-nano-export-onnx --artifact.target full_postcrop
+pixi run -e wilor-nano --frozen wilor-nano-export-onnx --artifact.target detector_raw
 ```
 
 Build the machine-local TensorRT engines:
 
 ```bash
-pixi run -e wilor --frozen build-trt --artifact.target full_postcrop
-pixi run -e wilor --frozen build-trt --artifact.target detector_raw
+pixi run -e wilor-nano --frozen wilor-nano-build-trt --artifact.target full_postcrop
+pixi run -e wilor-nano --frozen wilor-nano-build-trt --artifact.target detector_raw
 ```
 
 For a small conversion smoke test that does not overwrite the production engine paths:
 
 ```bash
-pixi run -e wilor --frozen export-onnx --artifact.target full_postcrop --artifact.batch-size 1 --artifact.onnx-path pretrained_models/tensorrt/smoke/wilor_full_postcrop_static_b1.onnx
-pixi run -e wilor --frozen build-trt --artifact.target full_postcrop --artifact.batch-size 1 --artifact.onnx-path pretrained_models/tensorrt/smoke/wilor_full_postcrop_static_b1.onnx --engine-path pretrained_models/tensorrt/smoke/wilor_full_postcrop_static_b1_fp16.trt
+pixi run -e wilor-nano --frozen wilor-nano-export-onnx --artifact.target full_postcrop --artifact.batch-size 1 --artifact.onnx-path pretrained_models/tensorrt/smoke/wilor_full_postcrop_static_b1.onnx
+pixi run -e wilor-nano --frozen wilor-nano-build-trt --artifact.target full_postcrop --artifact.batch-size 1 --artifact.onnx-path pretrained_models/tensorrt/smoke/wilor_full_postcrop_static_b1.onnx --engine-path pretrained_models/tensorrt/smoke/wilor_full_postcrop_static_b1_fp16.trt
 
-pixi run -e wilor --frozen export-onnx --artifact.target detector_raw --artifact.batch-size 1 --artifact.onnx-path pretrained_models/tensorrt/smoke/detector_raw_static_b1_512x416.onnx
-pixi run -e wilor --frozen build-trt --artifact.target detector_raw --artifact.batch-size 1 --artifact.onnx-path pretrained_models/tensorrt/smoke/detector_raw_static_b1_512x416.onnx --engine-path pretrained_models/tensorrt/smoke/detector_raw_static_b1_512x416_tf32.trt
+pixi run -e wilor-nano --frozen wilor-nano-export-onnx --artifact.target detector_raw --artifact.batch-size 1 --artifact.onnx-path pretrained_models/tensorrt/smoke/detector_raw_static_b1_512x416.onnx
+pixi run -e wilor-nano --frozen wilor-nano-build-trt --artifact.target detector_raw --artifact.batch-size 1 --artifact.onnx-path pretrained_models/tensorrt/smoke/detector_raw_static_b1_512x416.onnx --engine-path pretrained_models/tensorrt/smoke/detector_raw_static_b1_512x416_tf32.trt
 ```
 
 ## RRD Comparison
@@ -119,8 +119,8 @@ pixi run -e wilor --frozen build-trt --artifact.target detector_raw --artifact.b
 Generate a 30-frame TensorRT candidate and compare it against the reference recording:
 
 ```bash
-pixi run -e wilor --frozen video-trt --max-frames 30 --rr-config.save /tmp/wilor_candidate.rrd --rr-config.headless
-pixi run -e wilor --frozen compare-reference
+pixi run -e wilor-nano --frozen wilor-nano-video-trt --max-frames 30 --rr-config.save /tmp/wilor_candidate.rrd --rr-config.headless
+pixi run -e wilor-nano --frozen wilor-nano-compare-reference
 ```
 
 The current TensorRT comparison tolerance is `rtol=0.01, atol=0.25` because CUDA video decode is not bit-exact with the OpenCV-generated reference.
@@ -130,9 +130,9 @@ The current TensorRT comparison tolerance is `rtol=0.01, atol=0.25` because CUDA
 Use the dev environment for tests, linting, type checking, and runtime beartype validation:
 
 ```bash
-pixi run -e wilor-dev --frozen pytest -q packages/wilor-nano/tests
-pixi run -e wilor-dev --frozen ruff check packages/wilor-nano
-pixi run -e wilor-dev --frozen pyrefly check packages/wilor-nano
+pixi run -e wilor-nano-dev --frozen pytest -q packages/wilor-nano/tests
+pixi run -e wilor-nano-dev --frozen ruff check packages/wilor-nano
+pixi run -e wilor-nano-dev --frozen pyrefly check packages/wilor-nano
 ```
 
 The package downloads required model weights on first use.

@@ -4,7 +4,6 @@ from pathlib import Path
 from timeit import default_timer as timer
 from typing import Literal
 
-import cv2
 import numpy as np
 import open3d as o3d
 import rerun as rr
@@ -12,6 +11,7 @@ import rerun.blueprint as rrb
 import torch
 from einops import rearrange
 from jaxtyping import Bool, Float, Float32, UInt8
+from monopriors.apis.multiview_calibration import load_rgb_images
 from monopriors.depth_utils import depth_edges_mask, multidepth_to_points
 from monopriors.models.multiview.vggt_model import MultiviewPred, VGGTPredictor, robust_filter_confidences
 from monopriors.models.relative_depth import (
@@ -31,7 +31,7 @@ from tqdm.auto import trange
 np.set_printoptions(suppress=True)
 
 SUPPORTED_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg")
-device = "cuda" if torch.cuda.is_available() else "cpu"
+device: Literal["cuda", "cpu"] = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def create_depth_views(parent_log_path: Path, camera_index: int) -> rrb.Tabs:
@@ -198,9 +198,8 @@ def write_colmap_images_txt(
     file_path: str,
     quaternions: np.ndarray,
     translations: np.ndarray,
-    image_points2D: list[list],  # empty list for now
     image_names: list[str],
-):
+) -> None:
     """Write camera poses and keypoints to COLMAP images.txt format."""
     with open(file_path, "w") as f:
         f.write("# Image list with two lines of data per image:\n")
@@ -221,7 +220,6 @@ def write_colmap_images_txt(
 
             f.write(f"{image_id} {qw} {qx} {qy} {qz} {tx} {ty} {tz} {camera_id} {os.path.basename(image_names[i])}\n")
 
-            # points_line = " ".join([f"{x} {y} {point3d_id + 1}" for x, y, point3d_id in image_points2D[i]])
             points_line = " ".join([""])  # Placeholder for now
             f.write(f"{points_line}\n")
 
@@ -427,9 +425,13 @@ def mv_pred_to_pointcloud(
     world_T_cam_b44: Float32[ndarray, "num_cams 4 4"] = np.stack(
         [mv_pred.pinhole_param.extrinsics.world_T_cam for mv_pred in mv_pred_list], axis=0
     ).astype(np.float32)
-    K_b33: Float32[ndarray, "b 3 3"] = np.stack(
-        [mv_pred.pinhole_param.intrinsics.k_matrix for mv_pred in mv_pred_list], axis=0
-    ).astype(np.float32)
+    K_list: list[Float32[ndarray, "3 3"]] = []
+    for mv_pred in mv_pred_list:
+        K_33: Float32[ndarray, "3 3"] | None = mv_pred.pinhole_param.intrinsics.k_matrix
+        if K_33 is None:
+            raise ValueError("VGGT prediction must include camera intrinsics.")
+        K_list.append(K_33.astype(np.float32))
+    K_b33: Float32[ndarray, "b 3 3"] = np.stack(K_list, axis=0).astype(np.float32)
     world_points: Float32[ndarray, "b h w 3"] = multidepth_to_points(
         depth_maps=depth_maps, world_T_cam_batch=world_T_cam_b44, K_b33=K_b33
     )
@@ -450,8 +452,7 @@ def run_inference(config: VGGTInferenceConfig) -> None:
         f"No images found in {config.image_dir} in supported formats {SUPPORTED_IMAGE_EXTENSIONS}"
     )
 
-    bgr_list: list[UInt8[ndarray, "H W 3"]] = [cv2.imread(str(image_path)) for image_path in image_paths]
-    rgb_list: list[UInt8[ndarray, "H W 3"]] = [cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB) for bgr in bgr_list]
+    rgb_list: list[UInt8[ndarray, "H W 3"]] = load_rgb_images(image_paths)
 
     # initialize rerun
     parent_log_path = Path("world")
@@ -539,7 +540,10 @@ def run_inference(config: VGGTInferenceConfig) -> None:
             image_plane_distance=0.1,
             static=True,
         )
-        intri_stack_list.append(mv_pred.pinhole_param.intrinsics.k_matrix)
+        K_33: Float32[ndarray, "3 3"] | None = mv_pred.pinhole_param.intrinsics.k_matrix
+        if K_33 is None:
+            raise ValueError("COLMAP export requires camera intrinsics.")
+        intri_stack_list.append(K_33)
 
         rr.log(
             f"{pinhole_log_path}/image",
@@ -605,12 +609,10 @@ def run_inference(config: VGGTInferenceConfig) -> None:
             image_height=mv_pred_list[0].pinhole_param.intrinsics.height,
         )
         quaternions, translations = extrinsic_to_colmap_format(mv_pred_list)
-        image_points2D_empty = [[] for _ in range(len(mv_pred_list))]  # Initialize with empty lists
         write_colmap_images_txt(
             file_path=str(config.output_dir / "images.txt"),
             quaternions=quaternions,
             translations=translations,
-            image_points2D=image_points2D_empty,
             image_names=[image_path.name for image_path in image_paths],
         )
 

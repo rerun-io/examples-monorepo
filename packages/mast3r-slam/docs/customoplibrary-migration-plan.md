@@ -212,7 +212,7 @@ def _bsample(...) capturing -> Float32:
 3. **Update global_opt.py** to use CustomOpLibrary for GN rays
 4. **Delete old bridge code**: python_interop.mojo, mast3r_slam_mojo_backends.mojo,
    matching.mojo, gn.mojo, gn_kernels.mojo
-5. **Remove `_build-mojo-kernels` pixi task** and all depends-on references
+5. **Remove `_mast3r-slam-build-mojo-kernels` pixi task** and all depends-on references
 6. **Update tests + benchmarks** to use CustomOpLibrary path
 
 ## Relevant Modular docs

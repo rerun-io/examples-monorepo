@@ -225,14 +225,24 @@ Python and Rust agree on a custom `GaussianSplats3D` archetype:
 
 All metrics apply 8-bit roundtrip quantization to match Brush's eval convention.
 
-## Key Constants (`gsplat_core/constants.rs`)
+## Key Constants
+
+Algorithm constants live in `gsplat_core/constants.rs`:
 
 | Constant | Value | Purpose |
 |---|---|---|
-| `TILE_WIDTH` | 16 px | Tile size for compute raster |
-| `SIGMA_COVERAGE` | 3.0 | Standard deviations for bbox |
+| `MIN_RADIUS_PX` | 0.35 px | Cull splats with sub-pixel projected radius |
+| `OPACITY_SCALE` | 1.0 | Global opacity multiplier (1.0 = no change) |
+| `SIGMA_COVERAGE` | 3.0 | Standard deviations for screen-space bbox (3σ ≈ 99.7%) |
+| `SH_C0` | 0.28209 | Zeroth SH coefficient — DC color conversion |
 | `BRUSH_COVARIANCE_BLUR_PX` | 0.3 | Anti-aliasing blur (matches Brush) |
-| `SH_C0` | 0.28209 | Zeroth SH coefficient |
+| `BRUSH_VISIBILITY_ALPHA_THRESHOLD` | 1/255 | Min alpha for a splat to be visible |
+
+GPU pipeline tuning constants live in `gsplat_core/gpu_types.rs`:
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `TILE_WIDTH` | 16 px | Tile size for compute raster (mirrored as a `const` in the WGSL shaders) |
 | `PROJECT_WORKGROUP_SIZE` | 128 | Threads per project dispatch |
 | `SORT_WORKGROUP_SIZE` | 256 | Threads per sort dispatch |
 | `SORT_BIN_COUNT` | 16 | Radix sort bins (4-bit) |

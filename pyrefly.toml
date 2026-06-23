@@ -5,8 +5,8 @@ project-includes = [
     "packages/simplecv/simplecv/**/*",
     "packages/prompt-da/src/**/*",
     "packages/wilor-nano/src/**/*",
-    "packages/sam3d-body-rerun/src/**/*",
-    "packages/sam3-rerun/src/**/*",
+    "packages/sam3d-body/src/**/*",
+    "packages/sam3/src/**/*",
     "packages/mv-api/src/**/*",
     "packages/robocap-slam/robocap_slam/**/*",
     "packages/pysfm/pysfm/**/*",
@@ -19,8 +19,20 @@ project-includes = [
     "packages/sapiens2-pose/src/**/*",
     "packages/sapiens-coco133-pose/src/**/*",
     "packages/egoexo-forge/src/**/*",
+    "packages/mamma/src/**/*",
+    "packages/live-rerun/src/**/*",
 ]
-project-excludes = ["**/node_modules", "**/__pycache__", "**/*venv/**/*"]
+project-excludes = [
+    "**/node_modules",
+    "**/__pycache__",
+    "**/*.ipynb",
+    "**/*venv/**/*",
+    "**/third_party/**/*",
+    "monopriors/third_party/**/*",
+    "packages/monoprior/monopriors/third_party/**/*",
+    "packages/sapiens2-pose/src/sapiens2_pose/assets/**/*",
+    "packages/sapiens2-pose/src/sapiens2_pose/sapiens_lite/**/*",
+]
 
 # Disable heuristics so pyrefly uses only our explicit search-path,
 # not per-file guesses (critical for monorepo with multiple source roots)
@@ -37,8 +49,8 @@ search-path = [
     "packages/simplecv",
     "packages/prompt-da/src",
     "packages/wilor-nano/src",
-    "packages/sam3d-body-rerun/src",
-    "packages/sam3-rerun/src",
+    "packages/sam3d-body/src",
+    "packages/sam3/src",
     "packages/mv-api/src",
     "packages/robocap-slam",
     "packages/pysfm",
@@ -52,6 +64,11 @@ search-path = [
     "packages/sapiens2-pose/src",
     "packages/sapiens-coco133-pose/src",
     "packages/egoexo-forge/src",
+    "packages/mamma/src",
+    "packages/live-rerun/src",
+    # Vendored sam2 fork is installed editable; pyrefly can't follow the
+    # __editable__ finder, so resolve `sam2.*` from the source tree directly.
+    "packages/sam2-streaming",
 ]
 
 # Third-party packages — all *-dev env site-packages so pyrefly can resolve
@@ -65,11 +82,11 @@ site-package-path = [
     ".pixi/envs/simplecv-dev/lib/python3.12/site-packages",
     ".pixi/envs/simplecv-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/prompt-da-dev/lib/python3.12/site-packages",
-    ".pixi/envs/wilor-dev/lib/python3.12/site-packages",
-    ".pixi/envs/sam3d-dev/lib/python3.12/site-packages",
-    ".pixi/envs/sam3-rerun-dev/lib/python3.12/site-packages",
+    ".pixi/envs/wilor-nano-dev/lib/python3.12/site-packages",
+    ".pixi/envs/sam3d-body-dev/lib/python3.12/site-packages",
+    ".pixi/envs/sam3-dev/lib/python3.12/site-packages",
     ".pixi/envs/mv-api-dev/lib/python3.12/site-packages",
-    ".pixi/envs/robocap-dev/lib/python3.12/site-packages",
+    ".pixi/envs/robocap-slam-dev/lib/python3.12/site-packages",
     ".pixi/envs/pysfm-dev/lib/python3.12/site-packages",
     ".pixi/envs/vistadream-dev/lib/python3.12/site-packages",
     ".pixi/envs/pyvrs-viewer-dev/lib/python3.12/site-packages",
@@ -88,6 +105,10 @@ site-package-path = [
     ".pixi/envs/sapiens-coco133-pose-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/egoexo-forge-dev/lib/python3.12/site-packages",
     ".pixi/envs/egoexo-forge-dev/lib/python3.12/site-packages/rerun_sdk",
+    ".pixi/envs/mamma-dev/lib/python3.12/site-packages",
+    ".pixi/envs/mamma-dev/lib/python3.12/site-packages/rerun_sdk",
+    ".pixi/envs/live-rerun-dev/lib/python3.12/site-packages",
+    ".pixi/envs/live-rerun-dev/lib/python3.12/site-packages/rerun_sdk",
 ]
 
 python-interpreter-path = ".pixi/envs/dev/bin/python"

@@ -192,8 +192,22 @@ This pipeline does something neither hloc nor vanilla COLMAP does: **multi-camer
 │  └──────┬──────────┘                                            │
 │         │                                                       │
 │  ┌──────▼──────────────────┐                                    │
+│  │ APPLY RIG CONFIG (early) │  pycolmap.apply_rig_config()        │
+│  │ (populate frame_id/      │  group cams into rig frames so the  │
+│  │  rig_id, no poses yet)   │  first match can expand_rig_images  │
+│  └──────┬──────────────────┘                                    │
+│         │                                                       │
+│  ┌──────▼──────────────────┐                                    │
 │  │ SEQUENTIAL MATCHING     │  pycolmap.match_sequential()        │
-│  │ (no rig awareness)      │  only temporal neighbors            │
+│  │ (rig-aware bootstrap)    │  expand_rig_images=True,            │
+│  │                         │  skip_image_pairs_in_same_frame=    │
+│  │                         │  False → cross-camera pairs included │
+│  └──────┬──────────────────┘                                    │
+│         │                                                       │
+│  ┌──────▼──────────────────┐                                    │
+│  │ CLEAR RIGS/FRAMES       │  db.clear_rigs(); db.clear_frames() │
+│  │ (before bootstrap mapper)│  mapper rejects rig info without    │
+│  │                         │  sensor_from_rig poses              │
 │  └──────┬──────────────────┘                                    │
 │         │                                                       │
 │  ┌──────▼──────────────────┐                                    │
@@ -204,8 +218,8 @@ This pipeline does something neither hloc nor vanilla COLMAP does: **multi-camer
 │         │ produces rough poses for all cameras                  │
 │         │                                                       │
 │  ┌──────▼──────────────────┐                                    │
-│  │ APPLY RIG CONFIG        │  pycolmap.apply_rig_config()        │
-│  │                         │  derives cam_from_rig transforms    │
+│  │ APPLY RIG CONFIG        │  pycolmap.apply_rig_config(rec)     │
+│  │ (re-apply w/ poses)      │  derives cam_from_rig transforms    │
 │  │                         │  from the bootstrap poses           │
 │  └──────┬──────────────────┘                                    │
 │         │                                                       │

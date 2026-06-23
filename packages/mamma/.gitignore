@@ -1,0 +1,4 @@
+.trt_cache/
+# Local walkthrough deliverable — served from /tmp, not part of the package source.
+implementation-notes.html
+media/

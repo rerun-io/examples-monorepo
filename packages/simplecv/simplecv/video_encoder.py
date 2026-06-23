@@ -29,11 +29,13 @@ from numpy import ndarray
 class VideoCodecChoice(Enum):
     """Supported video codec families."""
 
+    H264 = "h264"
     H265 = "h265"
     AV1 = "av1"
 
 
 _ENCODER_CANDIDATES: dict[VideoCodecChoice, list[str]] = {
+    VideoCodecChoice.H264: ["h264_nvenc", "libx264"],
     VideoCodecChoice.H265: ["hevc_nvenc", "libx265"],
     VideoCodecChoice.AV1: ["av1_nvenc", "libsvtav1"],
 }
@@ -51,6 +53,13 @@ def _encoder_options(name: str) -> dict[str, str]:
         return {"preset": "8", "crf": str(_CRF)}
     if name == "libx265":
         return {"preset": "fast", "x265-params": f"crf={_CRF}"}
+    if name == "h264_nvenc":
+        # Low-latency streaming profile (no B-frames is set via max_b_frames so
+        # packet decode order == presentation order, which Rerun VideoStream
+        # per-tick sample logging requires).
+        return {"preset": "p4", "tune": "ull", "rc": "vbr", "cq": "23"}
+    if name == "libx264":
+        return {"preset": "veryfast", "tune": "zerolatency", "crf": "23"}
     # NVENC hardware encoders: defaults give best size/quality tradeoff.
     return {}
 

@@ -135,21 +135,6 @@ pixi run -e simplecv --frozen python tools/exoego_tools/batch_process_s3.py \
 - Completed sequences are skipped on restart
 
 
-## T265 SLAM
-- **Env:** `t265` feature includes `librealsense==2.53.1` and `pyrealsense2==2.53.1.4623` (see `pyproject.toml`).
-- **Verify CLI:** `pixi run -e t265 which rs-enumerate-devices`.
-- **Enumerate:** `pixi run -e t265 rs-enumerate-devices`.
-- **If you see RS2_USB_STATUS_ACCESS:** install udev rules so user-space can access the device and upload firmware.
-  - `curl -fsSL https://raw.githubusercontent.com/IntelRealSense/librealsense/master/config/99-realsense-libusb.rules | sudo tee /etc/udev/rules.d/99-realsense-libusb.rules >/dev/null`
-  - `sudo udevadm control --reload-rules && sudo udevadm trigger`
-  - You should already be in `plugdev`; otherwise: `sudo usermod -aG plugdev $USER` then re-login.
-  - Replug the T265.
-- **Watch re-enumeration:** `watch -n 1 "lsusb | rg -i '(realsense|t265|8087:0b37|03e7:2150)'"` → expect flip from `03e7:2150` (Movidius boot) to `8087:0b37` (T265).
-- **Run logger:** `pixi run -e t265 python tools/t265_slam.py --timeout-ms 1000`.
-- **Pixi tasks:** `pixi run -e t265 t265-enum`, `pixi run -e t265 t265-probe`.
-
-
-
 ## Notation for Transformation Matrices
 
 __TL;DR:__ `world_T_cam == world_from_cam`  

@@ -4,6 +4,7 @@ import os
 import socket
 import uuid
 from pathlib import Path
+from typing import Any
 
 import cv2
 import gradio as gr
@@ -72,13 +73,13 @@ def _server_port() -> int:
     raise OSError("Cannot find empty localhost port in range 7860-8059.")
 
 
-_pose_model_cache: dict = {}
-_detector_cache: dict = {}
-_metainfo_cache = None
-_skeleton_cache = None
+_pose_model_cache: dict[str, Any] = {}
+_detector_cache: dict[str, Any] = {}
+_metainfo_cache: dict[str, Any] | None = None
+_skeleton_cache: dict[str, Any] | None = None
 
 
-def _get_metainfo():
+def _get_metainfo() -> dict[str, Any]:
     global _metainfo_cache
     if _metainfo_cache is None:
         meta_path = CONFIGS_DIR / "_base_" / "keypoints308.py"
@@ -86,7 +87,7 @@ def _get_metainfo():
     return _metainfo_cache
 
 
-def _get_sapiens_skeleton():
+def _get_sapiens_skeleton() -> dict[str, Any]:
     global _skeleton_cache
     if _skeleton_cache is None:
         meta = _get_metainfo()
@@ -106,7 +107,7 @@ def _get_sapiens_skeleton():
     return _skeleton_cache
 
 
-def _get_detector():
+def _get_detector() -> tuple[Any, Any]:
     if "model" not in _detector_cache:
         proc = DetrImageProcessor.from_pretrained(DETECTOR_MODEL_ID)
         model = DetrForObjectDetection.from_pretrained(DETECTOR_MODEL_ID).eval().to(DEVICE)
@@ -115,11 +116,11 @@ def _get_detector():
     return _detector_cache["proc"], _detector_cache["model"]
 
 
-def _get_pose_model(size: str):
+def _get_pose_model(size: str) -> Any:
     if size not in _pose_model_cache:
         spec = POSE_MODELS[size]
         ckpt = hf_hub_download(repo_id=spec["repo"], filename=spec["filename"])
-        model = init_pose_model(size, ckpt, device=DEVICE)
+        model: Any = init_pose_model(size, ckpt, device=DEVICE)
         model.pose_metainfo = _get_metainfo()
         _pose_model_cache[size] = model
     return _pose_model_cache[size]
