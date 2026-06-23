@@ -31,10 +31,33 @@ streams share one resolution; RGB 720p is the 1080p sensor ISP-downscaled by 2/3
 
 ## What it logs
 
-- Three encoded streams — RGB (`CAM_A`), left (`CAM_B`), right (`CAM_C`) — each as
-  a `VideoStream` under `world/oak/<cam>/pinhole/video`.
+A generic, system-agnostic **rig** schema (COLMAP-style), so a different
+multicam system maps onto the same layout and opens identically. Entity paths
+use `rig_*` / `cam_*` (no `oak`); the OAK specifics stay in `sources/`. The
+contract is documented in [`docs/rig_schema.md`](docs/rig_schema.md).
+
+```
+/world                       ViewCoordinates.RDF (static)
+  /rig_00                    schema metadata (static); no transform = implicit
+                             identity now — a SLAM pass logs world_T_rig here
+    /cam_00                  left  — reference sensor, identity, frustum tinted green
+      /pinhole/video         VideoStream (encoded H.265/H.264 samples)
+    /cam_01                  rgb
+    /cam_02                  right
+```
+
+(Entity ids are zero-padded to two digits — `cam_00`, `rig_00` — so they sort
+lexicographically; see [`docs/rig_schema.md`](docs/rig_schema.md).)
+
+- Three encoded streams — left (`CAM_B`) → `cam_00`, RGB (`CAM_A`) → `cam_01`,
+  right (`CAM_C`) → `cam_02` — each a `VideoStream` under `…/cam_<NN>/pinhole/video`.
+- The **left** camera is the rig **reference sensor** (identity pose, the rig
+  origin); rgb/right are expressed relative to it. SLAM is run around the left
+  camera, so the rig moves rigidly with it.
 - Camera **intrinsics + extrinsics** as static Rerun pinholes (the rig is assumed
   stationary), so the three cameras appear as frusta in a 3D view.
+- Per-sensor metadata as static `rr.AnyValues` (`name`, `kind`); a schema block
+  (`schema_version`, `reference`, `num_cameras`) on `/world/rig_00`.
 - A blueprint with the 3D rig above the three video panels.
 
 Keyframe flags come from the device (`EncodedFrame.getFrameType()`), so scrubbing
