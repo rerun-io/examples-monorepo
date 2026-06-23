@@ -5,8 +5,9 @@ name = "examples-monorepo"
 # Keep Pixi's conda/PyPI name mapping explicit and local so dependency
 # overrides remain deterministic when PyPI-only CUDA wheels are selected.
 conda-pypi-map = { conda-forge = "conda-pypi-map.json" }
-# Keep both workspace platforms so target-specific selectors below remain
-# valid. CUDA-only features restrict themselves to linux-64.
+# Keep both workspace platforms so target-specific selectors below remain valid.
+# The shared cuda feature spans both; heavier x86-only packages pin their own
+# feature to linux-64 (so those envs stay linux-64).
 platforms = ["linux-64", "linux-aarch64"]
 version = "0.1.0"
 requires-pixi = ">=0.40"
@@ -96,9 +97,10 @@ prerelease-mode = "allow"
 # ─── CUDA 13.0 feature (shared across all GPU envs) ─────────────────────────
 # Both linux-64 and linux-aarch64 (DGX Spark / GB10): conda-forge now ships the
 # CUDA 13 toolchain + pytorch-gpu for aarch64. An env only actually gains the
-# aarch64 platform if its other features also allow it — the heavy x86-only
-# packages (dpvo, mast3r-slam, sam2, moge, …) pin their own feature to linux-64,
-# so they stay linux-64 and only wilor-nano picks up aarch64.
+# aarch64 platform if its other features also allow it — features that don't pin
+# to linux-64 (e.g. wilor-nano, egoexo-forge) inherit aarch64, while the heavy
+# x86-only packages (dpvo, mast3r-slam, sam2, moge, …) pin their feature to
+# linux-64 and stay there.
 [feature.cuda]
 platforms = ["linux-64", "linux-aarch64"]
 

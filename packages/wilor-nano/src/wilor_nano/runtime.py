@@ -1,15 +1,7 @@
-import platform
-
 import torch
 
 
-def is_arm_machine() -> bool:
-    return platform.machine().lower() in {"aarch64", "arm64"}
-
-
 def get_torch_device() -> torch.device:
-    if is_arm_machine():
-        return torch.device("cpu")
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -18,9 +10,6 @@ def get_torch_dtype(device: torch.device) -> torch.dtype:
 
 
 def get_rtmpose_device() -> str:
-    if is_arm_machine():
-        return "cpu"
-
     try:
         import onnxruntime as ort
     except ImportError:
