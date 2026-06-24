@@ -106,12 +106,13 @@ platforms = ["linux-64", "linux-aarch64"]
 
 [feature.cuda.system-requirements]
 cuda = "13.0"
-# CUDA-13 aarch64 index wheels (e.g. onnxruntime-gpu) ship as manylinux_2_34, so
-# declare glibc 2.34 to make them resolvable. pixi system-requirements can't be
-# target-scoped, so this applies to both platforms — but it only *loosens*
-# package eligibility (every CUDA-13 host already has glibc >= 2.34), so the
-# existing linux-64 solutions stay valid and are not re-solved.
-libc = { family = "glibc", version = "2.34" }
+# CUDA-13 aarch64 index wheels ship as manylinux_2_3x: onnxruntime-gpu is _2_34,
+# the TensorRT aarch64 wheels (tensorrt-cu13-libs/bindings) are _2_35. Declare
+# glibc 2.35 so both resolve (the Spark runs 2.39). pixi system-requirements can't
+# be target-scoped, so this applies to both platforms — but it only *loosens*
+# package eligibility (every CUDA-13 host has glibc >= 2.35), so the existing
+# linux-64 solutions stay valid and are not re-solved.
+libc = { family = "glibc", version = "2.35" }
 
 [feature.cuda.dependencies]
 # CUDA Build Tools
@@ -157,6 +158,28 @@ onnxruntime-gpu = { version = ">=1.24.0.dev0,<2", index = "https://aiinfra.pkgs.
 
 [feature.cuda.target.linux-aarch64.pypi-dependencies]
 onnxruntime-gpu = { version = "==1.24.0", index = "https://pypi.jetson-ai-lab.io/sbsa/cu130/+simple/" }
+
+# TensorRT runtime — centralized here so every cuda env shares ONE source (no per-package
+# copies to keep in sync). tensorrt-cu13 ==10.13.3.9 from pypi.nvidia.com publishes wheels
+# for both linux-64 (manylinux_2_28) and linux-aarch64 (manylinux_2_35), cp310–cp313, so a
+# single UNSCOPED entry resolves on every cuda env (incl. the py3.11 ones, dpvo/mast3r-slam).
+# tensorrt-cu13-libs has stale metadata requiring `nvidia-cuda-runtime-cu13` (NVIDIA
+# deprecated it for cu13 in favor of unsuffixed `nvidia-cuda-runtime`); conda provides the
+# real CUDA 13 runtime, so satisfy it with NVIDIA's empty 0.0.0a0 placeholder (no-op).
+[feature.cuda.pypi-dependencies]
+tensorrt-cu13 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
+nvidia-cuda-runtime-cu13 = "==0.0.0a0"
+cuda-python = "*"
+
+# GPU runtime libs on LD_LIBRARY_PATH for every cuda env: $CONDA_PREFIX/lib first
+# (cuDNN/cuBLAS/cudart from conda — needed by ORT's CUDA & TRT providers), then the pip
+# TensorRT wheels' libnvinfer under site-packages/tensorrt_libs. Both py3.11 and py3.12
+# site-packages dirs are listed because cuda spans both python versions (e.g. dpvo and
+# mast3r-slam are 3.11); the loader silently skips whichever path doesn't exist. Setting
+# this key replaces pixi's default, so $CONDA_PREFIX/lib MUST be listed explicitly or
+# cuDNN won't resolve.
+[feature.cuda.activation.env]
+LD_LIBRARY_PATH = "$CONDA_PREFIX/lib:$CONDA_PREFIX/lib/python3.12/site-packages/tensorrt_libs:$CONDA_PREFIX/lib/python3.11/site-packages/tensorrt_libs:$LD_LIBRARY_PATH"
 
 # ─── ide feature (standalone dev env for Zed/IDE tooling) ────────────────────
 [feature.ide.dependencies]
@@ -518,8 +541,6 @@ python = "3.12.*"
 dill = ">=0.4.0,<0.5"
 trimesh = "*"
 pyrender = "*"
-# float with the shared cuda130/torch-2.12 stack (torch 2.12 pairs with torchvision 0.27)
-torchvision = "*"
 torchcodec = "*"
 
 [feature.wilor-nano.pypi-dependencies]
@@ -533,16 +554,6 @@ wilor_nano = { path = "packages/wilor-nano", editable = true }
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 onnx = ">=1.12.0,<1.18.0"
 onnxscript = "*"
-
-[feature.wilor-nano.target.linux-64.pypi-dependencies]
-# TensorRT engines are machine-local artifacts; keep ONNX portable and rebuild engines per target GPU.
-tensorrt-cu13 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
-# tensorrt-cu13-libs has stale metadata requiring `nvidia-cuda-runtime-cu13` (NVIDIA
-# deprecated it for cu13 in favor of unsuffixed `nvidia-cuda-runtime`). conda provides
-# the real CUDA 13 runtime, so satisfy it with NVIDIA's empty 0.0.0a0 placeholder wheel
-# (no-op; avoids building the broken 0.0.1 sdist stub).
-nvidia-cuda-runtime-cu13 = "==0.0.0a0"
-cuda-python = "*"
 
 [feature.wilor-nano.activation.env]
 PACKAGE_DIR = "packages/wilor-nano"
@@ -832,16 +843,6 @@ sapiens2-pose = { path = "packages/sapiens2-pose", editable = true }
 onnx = "*"
 onnxscript = "*"
 
-[feature.sapiens2-pose.target.linux-64.pypi-dependencies]
-# TensorRT engines are machine-local artifacts; keep ONNX portable and rebuild engines per target GPU.
-tensorrt-cu13 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
-# tensorrt-cu13-libs has stale metadata requiring `nvidia-cuda-runtime-cu13` (NVIDIA
-# deprecated it for cu13 in favor of unsuffixed `nvidia-cuda-runtime`). conda provides
-# the real CUDA 13 runtime, so satisfy it with NVIDIA's empty 0.0.0a0 placeholder wheel
-# (no-op; avoids building the broken 0.0.1 sdist stub).
-nvidia-cuda-runtime-cu13 = "==0.0.0a0"
-cuda-python = "*"
-
 [feature.sapiens2-pose.activation.env]
 PACKAGE_DIR = "packages/sapiens2-pose"
 PYREFLY_TARGET = "src/sapiens2_pose/api src/sapiens2_pose/gradio_ui.py src/sapiens2_pose/video_gradio_ui.py src/sapiens2_pose/__init__.py tools"
@@ -926,16 +927,6 @@ wilor_nano = { path = "packages/wilor-nano", editable = true }
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 onnx = "*"
 onnxscript = "*"
-
-[feature.sapiens-coco133-pose.target.linux-64.pypi-dependencies]
-# TensorRT engines are machine-local artifacts; keep ONNX portable and rebuild engines per target GPU.
-tensorrt-cu13 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
-# tensorrt-cu13-libs has stale metadata requiring `nvidia-cuda-runtime-cu13` (NVIDIA
-# deprecated it for cu13 in favor of unsuffixed `nvidia-cuda-runtime`). conda provides
-# the real CUDA 13 runtime, so satisfy it with NVIDIA's empty 0.0.0a0 placeholder wheel
-# (no-op; avoids building the broken 0.0.1 sdist stub).
-nvidia-cuda-runtime-cu13 = "==0.0.0a0"
-cuda-python = "*"
 
 [feature.sapiens-coco133-pose.activation.env]
 PACKAGE_DIR = "packages/sapiens-coco133-pose"
@@ -1162,7 +1153,6 @@ platforms = ["linux-64"]
 
 [feature.vistadream.dependencies]
 python = "3.12.*"
-pytorch-gpu = ">=2.12,<2.13"    # match the shared cuda130/2.12 floor; needed by Flux/diffusers
 cmake = ">=4.0.3,<5"
 open3d = ">=0.19.0,<0.20"
 scikit-learn = ">=1.7.1,<2"
@@ -1841,9 +1831,6 @@ platforms = ["linux-64"]
 
 [feature.mamma.dependencies]
 python = "3.12.*"
-# cuda13 migration: align with the shared cuda130/torch-2.12 stack (fixes the
-# torchvision-0.26/torch-2.10 mismatch that pinned the realtime gate RED).
-pytorch-gpu = "2.12.*"
 onnx = "*"
 onnxscript = "*"
 einops = ">=0.8.0,<0.9"
@@ -1858,14 +1845,6 @@ mamma = { path = "packages/mamma", editable = true }
 # EfficientTAM); distribution name is `sam2`, needs no-build-isolation (torch
 # at build time). See packages/sam2-streaming/VENDOR.md.
 sam2 = { path = "packages/sam2-streaming", editable = true }
-# TensorRT python API for the MammaNet engine (same pinned build as
-# sapiens2-pose; engines are machine-local, rebuilt per GPU).
-tensorrt-cu13 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
-# tensorrt-cu13-libs has stale metadata requiring `nvidia-cuda-runtime-cu13` (NVIDIA
-# deprecated it for cu13 in favor of unsuffixed `nvidia-cuda-runtime`). conda provides
-# the real CUDA 13 runtime, so satisfy it with NVIDIA's empty 0.0.0a0 placeholder wheel
-# (no-op; avoids building the broken 0.0.1 sdist stub).
-nvidia-cuda-runtime-cu13 = "==0.0.0a0"
 
 [feature.mamma.activation.env]
 PACKAGE_DIR = "packages/mamma"
