@@ -143,8 +143,9 @@ torchvision = "*"
 
 # onnxruntime-gpu is scoped to linux-64: the ort-cuda-13-nightly feed only works
 # on x86 here (its aarch64 wheels are CUDA-13.1, which the Spark's 13.0 driver
-# can't JIT). aarch64 gets onnxruntime-gpu from the Jetson AI Lab sbsa/cu130
-# index instead — see [feature.wilor-nano.target.linux-aarch64.pypi-dependencies].
+# can't JIT). On aarch64, envs that need onnxruntime-gpu pin the Jetson AI Lab
+# sbsa/cu130 wheel in their own target section instead (see wilor-nano and
+# egoexo-forge target.linux-aarch64).
 [feature.cuda.target.linux-64.pypi-dependencies]
 onnxruntime-gpu = { version = ">=1.24.0.dev0,<2", index = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-13-nightly/pypi/simple/" }
 
@@ -597,7 +598,10 @@ timm = "<1.0"
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 
 [feature.egoexo-forge.target.linux-aarch64.pypi-dependencies]
-onnxruntime-gpu = { version = ">=1.24.0.dev0,<2", index = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-13-nightly/pypi/simple/" }
+# DGX Spark: same as wilor-nano — the Jetson AI Lab sbsa/cu130 wheel (native
+# sm_121 SASS, no PTX) runs on the 13.0 driver, whereas the ort-cuda-13-nightly
+# aarch64 wheels are CUDA-13.1 and fail with cudaErrorUnsupportedPtxVersion.
+onnxruntime-gpu = { version = "==1.24.0", index = "https://pypi.jetson-ai-lab.io/sbsa/cu130/+simple/" }
 
 [feature.egoexo-forge.activation.env]
 PACKAGE_DIR = "packages/egoexo-forge"
