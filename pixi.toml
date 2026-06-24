@@ -142,9 +142,12 @@ libnvjitlink = "*"
 pytorch-gpu = ">=2.12,<2.13"
 torchvision = "*"
 
-# onnxruntime-gpu — same package, but the source differs per platform, so it is
-# split across two target sections (pixi can't vary `index` per platform in one):
-#  - linux-64 (x86): the official Microsoft ort-cuda-13-nightly feed.
+# onnxruntime-gpu — same package and SAME version (1.24.0) on both platforms, but
+# the source differs, so it is split across two target sections (pixi can't vary
+# `index` per platform in one):
+#  - linux-64 (x86): Microsoft's ort-cuda-13 feed, pinned to the 1.24.0 release
+#    (the feed carries it alongside nightlies). Pinned — not a floating `>=…,<2`
+#    floor — so x86 stays in lockstep with aarch64 instead of drifting to 1.27-dev.
 #  - linux-aarch64 (DGX Spark / GB10, CUDA 13.0 driver): the Jetson AI Lab
 #    sbsa/cu130 wheel — native sm_121 SASS, zero PTX (cuobjdump-verified), so it
 #    loads directly on the 13.0 driver. The nightly feed's aarch64 wheels are
@@ -154,7 +157,7 @@ torchvision = "*"
 # Both live here in the shared cuda feature so every cuda env gets the right wheel
 # per platform automatically — no per-feature copy to keep in sync.
 [feature.cuda.target.linux-64.pypi-dependencies]
-onnxruntime-gpu = { version = ">=1.24.0.dev0,<2", index = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-13-nightly/pypi/simple/" }
+onnxruntime-gpu = { version = "==1.24.0", index = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-13-nightly/pypi/simple/" }
 
 [feature.cuda.target.linux-aarch64.pypi-dependencies]
 onnxruntime-gpu = { version = "==1.24.0", index = "https://pypi.jetson-ai-lab.io/sbsa/cu130/+simple/" }
