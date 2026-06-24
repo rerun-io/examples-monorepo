@@ -141,13 +141,22 @@ libnvjitlink = "*"
 pytorch-gpu = ">=2.12,<2.13"
 torchvision = "*"
 
-# onnxruntime-gpu is scoped to linux-64: the ort-cuda-13-nightly feed only works
-# on x86 here (its aarch64 wheels are CUDA-13.1, which the Spark's 13.0 driver
-# can't JIT). On aarch64, envs that need onnxruntime-gpu pin the Jetson AI Lab
-# sbsa/cu130 wheel in their own target section instead (see wilor-nano and
-# egoexo-forge target.linux-aarch64).
+# onnxruntime-gpu — same package, but the source differs per platform, so it is
+# split across two target sections (pixi can't vary `index` per platform in one):
+#  - linux-64 (x86): the official Microsoft ort-cuda-13-nightly feed.
+#  - linux-aarch64 (DGX Spark / GB10, CUDA 13.0 driver): the Jetson AI Lab
+#    sbsa/cu130 wheel — native sm_121 SASS, zero PTX (cuobjdump-verified), so it
+#    loads directly on the 13.0 driver. The nightly feed's aarch64 wheels are
+#    CUDA-13.1 (PTX ISA 9.1 -> cudaErrorUnsupportedPtxVersion); conda-forge's
+#    *_cuda130 has no sm_121 SASS. cp312-only, ORT 1.24.0, sha256 pinned in the
+#    lock. Source: NVIDIA Jetson DevRel infra (recipe in dusty-nv/jetson-containers).
+# Both live here in the shared cuda feature so every cuda env gets the right wheel
+# per platform automatically — no per-feature copy to keep in sync.
 [feature.cuda.target.linux-64.pypi-dependencies]
 onnxruntime-gpu = { version = ">=1.24.0.dev0,<2", index = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-13-nightly/pypi/simple/" }
+
+[feature.cuda.target.linux-aarch64.pypi-dependencies]
+onnxruntime-gpu = { version = "==1.24.0", index = "https://pypi.jetson-ai-lab.io/sbsa/cu130/+simple/" }
 
 # ─── ide feature (standalone dev env for Zed/IDE tooling) ────────────────────
 [feature.ide.dependencies]
@@ -535,16 +544,6 @@ tensorrt-cu13 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
 nvidia-cuda-runtime-cu13 = "==0.0.0a0"
 cuda-python = "*"
 
-[feature.wilor-nano.target.linux-aarch64.pypi-dependencies]
-# DGX Spark (GB10 / sm_121, CUDA 13.0 driver): the Jetson AI Lab sbsa/cu130 wheel
-# ships NATIVE sm_121 SASS and zero PTX (cuobjdump-verified), so no PTX JIT and it
-# loads directly on the 13.0 driver. The official ort-cuda-13-nightly aarch64
-# wheels are CUDA-13.1 (PTX ISA 9.1 -> cudaErrorUnsupportedPtxVersion on 13.0);
-# conda-forge's *_cuda130 build is real 13.0 but ships no sm_121 SASS. Source:
-# Jetson AI Lab (NVIDIA Jetson DevRel infra, build recipe in dusty-nv/jetson-
-# containers). cp312-only, ORT 1.24.0; sha256 pinned in the lockfile.
-onnxruntime-gpu = { version = "==1.24.0", index = "https://pypi.jetson-ai-lab.io/sbsa/cu130/+simple/" }
-
 [feature.wilor-nano.activation.env]
 PACKAGE_DIR = "packages/wilor-nano"
 
@@ -596,12 +595,6 @@ datasets = ">=4.0.0"
 egoexo-forge = { path = "packages/egoexo-forge", editable = true }
 timm = "<1.0"
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
-
-[feature.egoexo-forge.target.linux-aarch64.pypi-dependencies]
-# DGX Spark: same as wilor-nano — the Jetson AI Lab sbsa/cu130 wheel (native
-# sm_121 SASS, no PTX) runs on the 13.0 driver, whereas the ort-cuda-13-nightly
-# aarch64 wheels are CUDA-13.1 and fail with cudaErrorUnsupportedPtxVersion.
-onnxruntime-gpu = { version = "==1.24.0", index = "https://pypi.jetson-ai-lab.io/sbsa/cu130/+simple/" }
 
 [feature.egoexo-forge.activation.env]
 PACKAGE_DIR = "packages/egoexo-forge"
