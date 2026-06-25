@@ -21,8 +21,6 @@ from PIL import Image
 from scipy.spatial.transform import Rotation
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 
-ColmapImagePolicy = Literal["full", "thumbnail"]
-
 
 def load_nerf_cameras(scene_dir: Path, split: Literal["train", "val", "test"]) -> list[tuple[PinholeParameters, Path]]:
     """Read NeRF-synthetic cameras of one split as (pinhole, image path) pairs.
@@ -85,6 +83,11 @@ def read_colmap_cameras_bin(path: Path) -> dict[int, dict]:
         3: ("RADIAL", 5),
         4: ("OPENCV", 8),
         5: ("OPENCV_FISHEYE", 8),
+        6: ("FULL_OPENCV", 12),
+        7: ("FOV", 5),
+        8: ("SIMPLE_RADIAL_FISHEYE", 4),
+        9: ("RADIAL_FISHEYE", 5),
+        10: ("THIN_PRISM_FISHEYE", 12),
     }
     cameras: dict[int, dict] = {}
     with open(path, "rb") as f:
@@ -125,12 +128,12 @@ def colmap_sparse_dir(scene_dir: Path) -> Path | None:
     return None
 
 
-def colmap_image_path(scene_dir: Path, name: str, image_policy: ColmapImagePolicy) -> Path:
-    """Resolve an image for a COLMAP view. ``"thumbnail"`` prefers a downscaled copy
-    (nerfstudio ships images_8/4/2) — small frusta/GT only need that; ``"full"``
-    prefers the original. Falls back across the downscale ladder either way."""
-    ladder: tuple[str, ...] = ("images_8", "images_4", "images_2", "images")
-    subdirs: tuple[str, ...] = ladder if image_policy == "thumbnail" else tuple(reversed(ladder))
+def colmap_image_path(scene_dir: Path, name: str, subdirs: tuple[str, ...]) -> Path:
+    """Resolve an image for a COLMAP view, trying ``subdirs`` in order — a
+    resolution-preference ladder over the nerfstudio downscales, e.g.
+    ``("images_8", "images_4", "images_2", "images")`` for a small frustum
+    thumbnail or ``("images_4", "images_2", "images")`` for a medium-res GT panel.
+    Falls back to the full-res ``images/`` copy when none of the laddered dirs exist."""
     for sub in subdirs:
         p: Path = scene_dir / sub / name
         if p.exists():
@@ -140,20 +143,25 @@ def colmap_image_path(scene_dir: Path, name: str, image_policy: ColmapImagePolic
 
 def _colmap_fx_fy_cx_cy(model: str, params: tuple[float, ...]) -> tuple[float, float, float, float]:
     """Pull (fx, fy, cx, cy) out of a COLMAP camera's params per its model layout.
-    Single-focal models (SIMPLE_*, RADIAL) store ``f, cx, cy, ...`` — NOT ``fx, fy, cx, cy``."""
-    if model in {"PINHOLE", "OPENCV", "OPENCV_FISHEYE"}:
-        return params[0], params[1], params[2], params[3]
-    if model in {"SIMPLE_PINHOLE", "SIMPLE_RADIAL", "RADIAL"}:
+    Single-focal models store ``f, cx, cy, ...`` (one focal) — NOT ``fx, fy, cx, cy``;
+    every other COLMAP model leads with ``fx, fy, cx, cy``."""
+    if model in {"SIMPLE_PINHOLE", "SIMPLE_RADIAL", "RADIAL", "SIMPLE_RADIAL_FISHEYE", "RADIAL_FISHEYE"}:
         f, cx, cy = params[0], params[1], params[2]
         return f, f, cx, cy
+    if model in {"PINHOLE", "OPENCV", "OPENCV_FISHEYE", "FULL_OPENCV", "FOV", "THIN_PRISM_FISHEYE"}:
+        return params[0], params[1], params[2], params[3]
     raise ValueError(f"unsupported COLMAP camera model: {model}")
 
 
-def load_colmap_cameras(scene_dir: Path, image_policy: ColmapImagePolicy = "full") -> list[tuple[PinholeParameters, Path]]:
+def load_colmap_cameras(
+    scene_dir: Path, image_subdirs: tuple[str, ...] = ("images", "images_2", "images_4", "images_8")
+) -> list[tuple[PinholeParameters, Path]]:
     """Read a COLMAP sparse model as (pinhole, image path) pairs, sorted by image
     name (the order brush registers them, so eval-split selection lines up). COLMAP
     poses are world-to-cam in RDF — used unmodified. Distortion is dropped for the
-    pinhole frustum. ``image_policy`` picks downscaled thumbnails vs full-res images.
+    pinhole frustum. ``image_subdirs`` is the resolution-preference ladder for the
+    returned image path (full-res first by default; pass a thumbnail-first ladder
+    for small frusta). Intrinsics are rescaled to whichever file is resolved.
     """
     sparse: Path | None = colmap_sparse_dir(scene_dir)
     if sparse is None:
@@ -164,7 +172,7 @@ def load_colmap_cameras(scene_dir: Path, image_policy: ColmapImagePolicy = "full
     for im in poses:
         calib = calibrations[im["camera_id"]]
         fx, fy, cx, cy = _colmap_fx_fy_cx_cy(calib["model"], calib["params"])
-        image_path: Path = colmap_image_path(scene_dir, im["name"], image_policy)
+        image_path: Path = colmap_image_path(scene_dir, im["name"], image_subdirs)
         with Image.open(image_path) as probe:
             width, height = probe.size
         sx: float = width / calib["width"]

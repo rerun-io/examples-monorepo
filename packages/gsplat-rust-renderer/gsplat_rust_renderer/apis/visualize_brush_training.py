@@ -56,7 +56,14 @@ from simplecv.camera_parameters import Intrinsics, PinholeParameters
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole
 
 from gsplat_rust_renderer.gaussians3d import Gaussians3D
-from gsplat_rust_renderer.scene_io import colmap_sparse_dir, load_colmap_cameras, load_nerf_cameras, load_rgb_composited, read_colmap_images_bin
+from gsplat_rust_renderer.scene_io import (
+    colmap_image_path,
+    colmap_sparse_dir,
+    load_colmap_cameras,
+    load_nerf_cameras,
+    load_rgb_composited,
+    read_colmap_images_bin,
+)
 
 EXPORT_RE: re.Pattern[str] = re.compile(r"export_(\d+)\.ply$")
 EVAL_LINE_RE: re.Pattern[str] = re.compile(r"Eval iter (\d+): PSNR ([0-9.]+|nan|inf), ssim ([0-9.]+|nan|inf)")
@@ -186,16 +193,6 @@ def awaiting_stable_size(path: Path, pending_sizes: dict[Path, int]) -> bool:
     return False
 
 
-def eval_image_path(scene_dir: Path, name: str) -> Path:
-    """A decent-resolution image for the eval GT panel (bigger than the frustum
-    thumbnail) — nerfstudio ships images_4/images_2 downscales of the originals."""
-    for sub in ("images_4", "images_2", "images"):
-        p: Path = scene_dir / sub / name
-        if p.exists():
-            return p
-    return scene_dir / "images" / name
-
-
 def log_camera_frustum(
     cam_path: str, camera: PinholeParameters, image_path: Path, config: VisualizeBrushTrainingConfig, conventions: Literal["RDF", "RUB"]
 ) -> None:
@@ -243,7 +240,7 @@ def log_static_scene(config: VisualizeBrushTrainingConfig) -> list[tuple[Pinhole
 
     if colmap_sparse_dir(config.scene_dir) is not None:
         conventions: Literal["RDF", "RUB"] = "RDF"
-        all_cameras: list[tuple[PinholeParameters, Path]] = load_colmap_cameras(config.scene_dir, image_policy="thumbnail")
+        all_cameras: list[tuple[PinholeParameters, Path]] = load_colmap_cameras(config.scene_dir, image_subdirs=("images_8", "images_4", "images_2", "images"))
         # COLMAP's world frame is arbitrarily oriented (its up is rarely +Z), so
         # the splats brush exports come out tilted under a +Z-up viewer.  Rotate
         # the whole world subtree (splats + cameras) so the camera-estimated up
@@ -253,7 +250,7 @@ def log_static_scene(config: VisualizeBrushTrainingConfig) -> list[tuple[Pinhole
         # brush holds out every eval_split_every-th sorted view for eval.
         eval_cameras: list[tuple[PinholeParameters, Path]] = (
             [
-                (camera, eval_image_path(config.scene_dir, thumb.name))
+                (camera, colmap_image_path(config.scene_dir, thumb.name, ("images_4", "images_2", "images")))
                 for i, (camera, thumb) in enumerate(all_cameras)
                 if config.eval_split_every > 0 and i % config.eval_split_every == 0
             ][: config.eval_views_logged]
@@ -486,7 +483,7 @@ def orient_brush_native(config: VisualizeBrushTrainingConfig) -> None:
     whole ``world`` subtree so up is +Z, then relabel ``world`` (and root) Z-up,
     overriding brush's Y-down.  Mirrors the standalone path's orientation fix."""
     if colmap_sparse_dir(config.scene_dir) is not None:
-        cameras: list[tuple[PinholeParameters, Path]] = load_colmap_cameras(config.scene_dir, image_policy="thumbnail")
+        cameras: list[tuple[PinholeParameters, Path]] = load_colmap_cameras(config.scene_dir, image_subdirs=("images_8", "images_4", "images_2", "images"))
         up: Float64[ndarray, "3"] = estimate_up(cameras)  # RDF image-up = -Y
     else:
         cameras = load_nerf_cameras(config.scene_dir, "train")

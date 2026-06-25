@@ -21,8 +21,10 @@ from rerun.experimental import ViewerClient
 
 from gsplat_rust_renderer.gaussians3d import Gaussians3D
 
-BINARY: str = str(Path(__file__).resolve().parents[1] / "target" / "release" / "gsplat-rust-renderer")
-"""The custom viewer binary built from this package (cargo build --release)."""
+BINARY: str = str(Path(__file__).resolve().parents[2] / "target" / "release" / "gsplat-rust-renderer")
+"""The custom viewer binary built from this package (cargo build --release). This
+file lives at ``<pkg>/gsplat_rust_renderer/apis/``, so the package root (where
+``target/`` sits) is ``parents[2]``."""
 OUT: Path = Path("/tmp/relog-check")
 ENTITY: str = "world/splats"
 
