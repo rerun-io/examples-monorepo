@@ -18,7 +18,10 @@ import numpy as np
 from jaxtyping import Float64, UInt8
 from numpy import ndarray
 from PIL import Image
+from scipy.spatial.transform import Rotation
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
+
+ColmapImagePolicy = Literal["full", "thumbnail"]
 
 
 def load_nerf_cameras(scene_dir: Path, split: Literal["train", "val", "test"]) -> list[tuple[PinholeParameters, Path]]:
@@ -66,8 +69,15 @@ def load_rgb_composited(image_path: Path, background: float) -> UInt8[ndarray, "
     return rgb
 
 
+def qvec_to_rotmat(q: tuple[float, float, float, float]) -> Float64[ndarray, "3 3"]:
+    """COLMAP quaternion (w, x, y, z) → 3x3 rotation matrix."""
+    w, x, y, z = q
+    xyzw: Float64[ndarray, "4"] = np.asarray([x, y, z, w], dtype=np.float64)  # COLMAP wxyz -> scipy xyzw
+    return np.asarray(Rotation.from_quat(xyzw).as_matrix(), dtype=np.float64)
+
+
 def read_colmap_cameras_bin(path: Path) -> dict[int, dict]:
-    """Parse a COLMAP ``cameras.bin`` into ``{camera_id: {width, height, params}}``."""
+    """Parse a COLMAP ``cameras.bin`` into ``{camera_id: {model, width, height, params}}``."""
     models: dict[int, tuple[str, int]] = {
         0: ("SIMPLE_PINHOLE", 3),
         1: ("PINHOLE", 4),
@@ -81,9 +91,9 @@ def read_colmap_cameras_bin(path: Path) -> dict[int, dict]:
         (n,) = struct.unpack("<Q", f.read(8))
         for _ in range(n):
             cam_id, model_id, w, h = struct.unpack("<iiQQ", f.read(24))
-            _name, n_params = models[model_id]
+            model_name, n_params = models[model_id]
             params = struct.unpack(f"<{n_params}d", f.read(8 * n_params))
-            cameras[cam_id] = {"width": w, "height": h, "params": params}
+            cameras[cam_id] = {"model": model_name, "width": w, "height": h, "params": params}
     return cameras
 
 
@@ -106,13 +116,65 @@ def read_colmap_images_bin(path: Path) -> list[dict]:
     return images
 
 
-def qvec_to_rotmat(q: tuple[float, float, float, float]) -> Float64[ndarray, "3 3"]:
-    """COLMAP quaternion (wxyz) → 3x3 rotation matrix."""
-    w, x, y, z = q
-    return np.array(
-        [
-            [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
-            [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
-            [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
-        ]
-    )
+def colmap_sparse_dir(scene_dir: Path) -> Path | None:
+    """Return the COLMAP ``sparse/0`` dir (nerfstudio nests it under ``colmap/``),
+    or None if this isn't a COLMAP capture."""
+    for candidate in (scene_dir / "colmap" / "sparse" / "0", scene_dir / "sparse" / "0"):
+        if (candidate / "cameras.bin").exists():
+            return candidate
+    return None
+
+
+def colmap_image_path(scene_dir: Path, name: str, image_policy: ColmapImagePolicy) -> Path:
+    """Resolve an image for a COLMAP view. ``"thumbnail"`` prefers a downscaled copy
+    (nerfstudio ships images_8/4/2) — small frusta/GT only need that; ``"full"``
+    prefers the original. Falls back across the downscale ladder either way."""
+    ladder: tuple[str, ...] = ("images_8", "images_4", "images_2", "images")
+    subdirs: tuple[str, ...] = ladder if image_policy == "thumbnail" else tuple(reversed(ladder))
+    for sub in subdirs:
+        p: Path = scene_dir / sub / name
+        if p.exists():
+            return p
+    return scene_dir / "images" / name
+
+
+def _colmap_fx_fy_cx_cy(model: str, params: tuple[float, ...]) -> tuple[float, float, float, float]:
+    """Pull (fx, fy, cx, cy) out of a COLMAP camera's params per its model layout.
+    Single-focal models (SIMPLE_*, RADIAL) store ``f, cx, cy, ...`` — NOT ``fx, fy, cx, cy``."""
+    if model in {"PINHOLE", "OPENCV", "OPENCV_FISHEYE"}:
+        return params[0], params[1], params[2], params[3]
+    if model in {"SIMPLE_PINHOLE", "SIMPLE_RADIAL", "RADIAL"}:
+        f, cx, cy = params[0], params[1], params[2]
+        return f, f, cx, cy
+    raise ValueError(f"unsupported COLMAP camera model: {model}")
+
+
+def load_colmap_cameras(scene_dir: Path, image_policy: ColmapImagePolicy = "full") -> list[tuple[PinholeParameters, Path]]:
+    """Read a COLMAP sparse model as (pinhole, image path) pairs, sorted by image
+    name (the order brush registers them, so eval-split selection lines up). COLMAP
+    poses are world-to-cam in RDF — used unmodified. Distortion is dropped for the
+    pinhole frustum. ``image_policy`` picks downscaled thumbnails vs full-res images.
+    """
+    sparse: Path | None = colmap_sparse_dir(scene_dir)
+    if sparse is None:
+        raise FileNotFoundError(f"{scene_dir}: no COLMAP sparse model found")
+    calibrations = read_colmap_cameras_bin(sparse / "cameras.bin")
+    poses = sorted(read_colmap_images_bin(sparse / "images.bin"), key=lambda im: im["name"])
+    cameras: list[tuple[PinholeParameters, Path]] = []
+    for im in poses:
+        calib = calibrations[im["camera_id"]]
+        fx, fy, cx, cy = _colmap_fx_fy_cx_cy(calib["model"], calib["params"])
+        image_path: Path = colmap_image_path(scene_dir, im["name"], image_policy)
+        with Image.open(image_path) as probe:
+            width, height = probe.size
+        sx: float = width / calib["width"]
+        sy: float = height / calib["height"]
+        camera = PinholeParameters(
+            name=Path(im["name"]).stem,
+            extrinsics=Extrinsics(cam_R_world=qvec_to_rotmat(im["qvec"]), cam_t_world=np.asarray(im["tvec"], dtype=np.float64)),
+            intrinsics=Intrinsics.from_focal_principal_point(
+                camera_conventions="RDF", fl_x=fx * sx, fl_y=fy * sy, cx=cx * sx, cy=cy * sy, height=height, width=width
+            ),
+        )
+        cameras.append((camera, image_path))
+    return cameras

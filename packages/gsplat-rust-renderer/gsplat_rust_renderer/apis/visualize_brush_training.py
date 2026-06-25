@@ -52,11 +52,11 @@ from jaxtyping import Float64, UInt8
 from numpy import ndarray
 from PIL import Image
 from simplecv.camera_orient_utils import rotation_matrix_between
-from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
+from simplecv.camera_parameters import Intrinsics, PinholeParameters
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole
 
 from gsplat_rust_renderer.gaussians3d import Gaussians3D
-from gsplat_rust_renderer.scene_io import load_nerf_cameras, load_rgb_composited, qvec_to_rotmat, read_colmap_cameras_bin, read_colmap_images_bin
+from gsplat_rust_renderer.scene_io import colmap_sparse_dir, load_colmap_cameras, load_nerf_cameras, load_rgb_composited, read_colmap_images_bin
 
 EXPORT_RE: re.Pattern[str] = re.compile(r"export_(\d+)\.ply$")
 EVAL_LINE_RE: re.Pattern[str] = re.compile(r"Eval iter (\d+): PSNR ([0-9.]+|nan|inf), ssim ([0-9.]+|nan|inf)")
@@ -153,54 +153,6 @@ class VisualizeBrushTrainingConfig:
     """Abort if no new artifact appears for this many seconds while following."""
 
 
-def colmap_sparse_dir(scene_dir: Path) -> Path | None:
-    """Return the COLMAP ``sparse/0`` dir under ``scene_dir`` (nerfstudio nests
-    it under ``colmap/``), or None if this isn't a COLMAP capture."""
-    for candidate in (scene_dir / "colmap" / "sparse" / "0", scene_dir / "sparse" / "0"):
-        if (candidate / "cameras.bin").exists():
-            return candidate
-    return None
-
-
-def thumbnail_image_path(scene_dir: Path, name: str) -> Path:
-    """Prefer a downscaled copy (nerfstudio ships images_8/4/2) over the full-res
-    original — frusta/GT only need small images and the originals can be 12MP."""
-    for sub in ("images_8", "images_4", "images_2", "images"):
-        p: Path = scene_dir / sub / name
-        if p.exists():
-            return p
-    return scene_dir / "images" / name
-
-
-def load_colmap_cameras(scene_dir: Path) -> list[tuple[PinholeParameters, Path]]:
-    """Read a COLMAP sparse model as (pinhole, thumbnail-image-path) pairs, sorted
-    by image name (the order brush registers them, so eval-split selection lines
-    up).  COLMAP poses are world-to-cam in RDF — used unmodified.  Distortion is
-    ignored for the frustum (pinhole approximation is fine for visualization)."""
-    sparse: Path | None = colmap_sparse_dir(scene_dir)
-    assert sparse is not None
-    calibrations = read_colmap_cameras_bin(sparse / "cameras.bin")
-    poses = sorted(read_colmap_images_bin(sparse / "images.bin"), key=lambda im: im["name"])
-    cameras: list[tuple[PinholeParameters, Path]] = []
-    for im in poses:
-        calib = calibrations[im["camera_id"]]
-        fx, fy, cx, cy = calib["params"][:4]
-        thumb: Path = thumbnail_image_path(scene_dir, im["name"])
-        with Image.open(thumb) as probe:
-            width, height = probe.size
-        sx: float = width / calib["width"]
-        sy: float = height / calib["height"]
-        camera = PinholeParameters(
-            name=Path(im["name"]).stem,
-            extrinsics=Extrinsics(cam_R_world=qvec_to_rotmat(im["qvec"]), cam_t_world=np.asarray(im["tvec"], dtype=np.float64)),
-            intrinsics=Intrinsics.from_focal_principal_point(
-                camera_conventions="RDF", fl_x=fx * sx, fl_y=fy * sy, cx=cx * sx, cy=cy * sy, height=height, width=width
-            ),
-        )
-        cameras.append((camera, thumb))
-    return cameras
-
-
 def estimate_up(cameras: list[tuple[PinholeParameters, Path]], cam_up_local: Float64[ndarray, "3"] | None = None) -> Float64[ndarray, "3"]:
     """Estimate world up from the cameras: each camera's image-up axis in world
     points roughly toward gravity-up, so the mean is a robust up estimate (the
@@ -291,7 +243,7 @@ def log_static_scene(config: VisualizeBrushTrainingConfig) -> list[tuple[Pinhole
 
     if colmap_sparse_dir(config.scene_dir) is not None:
         conventions: Literal["RDF", "RUB"] = "RDF"
-        all_cameras: list[tuple[PinholeParameters, Path]] = load_colmap_cameras(config.scene_dir)
+        all_cameras: list[tuple[PinholeParameters, Path]] = load_colmap_cameras(config.scene_dir, image_policy="thumbnail")
         # COLMAP's world frame is arbitrarily oriented (its up is rarely +Z), so
         # the splats brush exports come out tilted under a +Z-up viewer.  Rotate
         # the whole world subtree (splats + cameras) so the camera-estimated up
@@ -534,7 +486,7 @@ def orient_brush_native(config: VisualizeBrushTrainingConfig) -> None:
     whole ``world`` subtree so up is +Z, then relabel ``world`` (and root) Z-up,
     overriding brush's Y-down.  Mirrors the standalone path's orientation fix."""
     if colmap_sparse_dir(config.scene_dir) is not None:
-        cameras: list[tuple[PinholeParameters, Path]] = load_colmap_cameras(config.scene_dir)
+        cameras: list[tuple[PinholeParameters, Path]] = load_colmap_cameras(config.scene_dir, image_policy="thumbnail")
         up: Float64[ndarray, "3"] = estimate_up(cameras)  # RDF image-up = -Y
     else:
         cameras = load_nerf_cameras(config.scene_dir, "train")

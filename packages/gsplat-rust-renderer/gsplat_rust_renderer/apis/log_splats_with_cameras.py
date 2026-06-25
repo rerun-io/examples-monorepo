@@ -30,17 +30,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 from jaxtyping import UInt8
 from numpy import ndarray
-from PIL import Image
-from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
+from simplecv.camera_parameters import PinholeParameters
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole
 
 from gsplat_rust_renderer.gaussians3d import Gaussians3D
-from gsplat_rust_renderer.scene_io import load_nerf_cameras, load_rgb_composited, qvec_to_rotmat, read_colmap_cameras_bin, read_colmap_images_bin
+from gsplat_rust_renderer.scene_io import colmap_sparse_dir, load_colmap_cameras, load_nerf_cameras, load_rgb_composited
 
 
 @dataclass
@@ -73,49 +71,10 @@ class LogSplatsWithCamerasConfig:
     """Up vector for the initial eye pose (used only when --eye is given)."""
 
 
-def load_colmap_cameras(scene_dir: Path) -> list[tuple[PinholeParameters, Path]]:
-    """Read COLMAP sparse cameras as (pinhole, image path) pairs.
-
-    COLMAP poses are world-to-cam in RDF — exactly what simplecv's
-    ``Extrinsics(cam_R_world=..., cam_t_world=...)`` expects, no conversion.
-    Intrinsics are rescaled when the shipped images are smaller than the
-    calibrated resolution (T&T ships half-res images).
-    """
-    calibrations = read_colmap_cameras_bin(scene_dir / "sparse" / "0" / "cameras.bin")
-    poses = sorted(read_colmap_images_bin(scene_dir / "sparse" / "0" / "images.bin"), key=lambda im: im["name"])
-    cameras: list[tuple[PinholeParameters, Path]] = []
-    for im in poses:
-        calib = calibrations[im["camera_id"]]
-        fx, fy, cx, cy = calib["params"]
-        image_path: Path = scene_dir / "images" / im["name"]
-        with Image.open(image_path) as probe:
-            width, height = probe.size
-        sx: float = width / calib["width"]
-        sy: float = height / calib["height"]
-        camera = PinholeParameters(
-            name=Path(im["name"]).stem,
-            extrinsics=Extrinsics(
-                cam_R_world=qvec_to_rotmat(im["qvec"]),
-                cam_t_world=np.asarray(im["tvec"], dtype=np.float64),
-            ),
-            intrinsics=Intrinsics.from_focal_principal_point(
-                camera_conventions="RDF",
-                fl_x=fx * sx,
-                fl_y=fy * sy,
-                cx=cx * sx,
-                cy=cy * sy,
-                height=height,
-                width=width,
-            ),
-        )
-        cameras.append((camera, image_path))
-    return cameras
-
-
 def main(config: LogSplatsWithCamerasConfig) -> None:
     if (config.scene_dir / "transforms_test.json").exists():
         cameras: list[tuple[PinholeParameters, Path]] = load_nerf_cameras(config.scene_dir, "test")
-    elif (config.scene_dir / "sparse" / "0" / "cameras.bin").exists():
+    elif colmap_sparse_dir(config.scene_dir) is not None:
         cameras = load_colmap_cameras(config.scene_dir)
     else:
         raise FileNotFoundError(f"{config.scene_dir} is neither a NeRF-synthetic nor a COLMAP scene")
