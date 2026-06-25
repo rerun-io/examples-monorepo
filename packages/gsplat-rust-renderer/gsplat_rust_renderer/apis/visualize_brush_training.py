@@ -41,6 +41,7 @@ import dataclasses
 import json
 import re
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -193,6 +194,24 @@ def awaiting_stable_size(path: Path, pending_sizes: dict[Path, int]) -> bool:
     return False
 
 
+def ready_export_plys(
+    config: VisualizeBrushTrainingConfig, done_plys: dict[int, int], pending_sizes: dict[Path, int]
+) -> Iterator[tuple[int, Path]]:
+    """Yield ``(iteration, path)`` for each ``export_*.ply`` checkpoint brush has
+    written that hasn't been processed yet, sorted by iteration (skipping LOD
+    variants). In ``--follow`` mode, skip files whose size hasn't settled across
+    two scans (brush writes the PLY non-atomically)."""
+    candidates: list[tuple[int, Path]] = sorted(
+        (int(m.group(1)), p) for p in config.export_dir.glob("export_*.ply") if (m := EXPORT_RE.search(p.name)) and "lod" not in p.name
+    )
+    for iteration, ply_path in candidates:
+        if iteration in done_plys:
+            continue
+        if config.follow and awaiting_stable_size(ply_path, pending_sizes):
+            continue
+        yield iteration, ply_path
+
+
 def log_camera_frustum(
     cam_path: str, camera: PinholeParameters, image_path: Path, config: VisualizeBrushTrainingConfig, conventions: Literal["RDF", "RUB"]
 ) -> None:
@@ -247,14 +266,15 @@ def log_static_scene(config: VisualizeBrushTrainingConfig) -> list[tuple[Pinhole
         # is vertical.  The splats and cameras stay mutually consistent.
         r_up: Float64[ndarray, "3 3"] = rotation_matrix_between(estimate_up(all_cameras), np.array([0.0, 0.0, 1.0]))
         rr.log("world", rr.Transform3D(mat3x3=r_up.tolist()), static=True)
-        # brush holds out every eval_split_every-th sorted view for eval.
-        eval_cameras: list[tuple[PinholeParameters, Path]] = (
-            [
+        # brush holds out every eval_split_every-th sorted view for eval (0 disables).
+        if config.eval_split_every > 0:
+            eval_cameras: list[tuple[PinholeParameters, Path]] = [
                 (camera, colmap_image_path(config.scene_dir, thumb.name, ("images_4", "images_2", "images")))
                 for i, (camera, thumb) in enumerate(all_cameras)
-                if config.eval_split_every > 0 and i % config.eval_split_every == 0
+                if i % config.eval_split_every == 0
             ][: config.eval_views_logged]
-        )
+        else:
+            eval_cameras = []
     else:
         conventions = "RUB"
         all_cameras = load_nerf_cameras(config.scene_dir, "train")
@@ -511,14 +531,7 @@ def run_brush_native(config: VisualizeBrushTrainingConfig) -> None:
 
     while True:
         progressed: bool = False
-        candidates: list[tuple[int, Path]] = sorted(
-            (int(m.group(1)), p) for p in config.export_dir.glob("export_*.ply") if (m := EXPORT_RE.search(p.name)) and "lod" not in p.name
-        )
-        for iteration, ply_path in candidates:
-            if iteration in done_plys:
-                continue
-            if config.follow and awaiting_stable_size(ply_path, pending_sizes):
-                continue
+        for iteration, ply_path in ready_export_plys(config, done_plys, pending_sizes):
             is_final: bool = iteration >= config.total_iters
             if n_checkpoints_seen % config.snapshot_stride == 0 or is_final:
                 with_sh: bool = config.sh_mode == "all" or (config.sh_mode == "final" and is_final)
@@ -634,16 +647,7 @@ def main(config: VisualizeBrushTrainingConfig) -> None:
 
         # 3. Checkpoint PLYs: process once the size is stable across two scans
         #    (brush writes the file in one async call, but not atomically).
-        candidates: list[tuple[int, Path]] = sorted(
-            (int(m.group(1)), p) for p in config.export_dir.glob("export_*.ply") if (m := EXPORT_RE.search(p.name)) and "lod" not in p.name
-        )
-        for iteration, ply_path in candidates:
-            if iteration in done_plys:
-                continue
-            # Live mode only: wait for brush's non-atomic write to settle (a
-            # finished run's files are all complete).
-            if config.follow and awaiting_stable_size(ply_path, pending_sizes):
-                continue
+        for iteration, ply_path in ready_export_plys(config, done_plys, pending_sizes):
             is_final: bool = iteration >= config.total_iters
             if n_checkpoints_seen % config.snapshot_stride == 0 or is_final:
                 with_sh: bool = config.sh_mode == "all" or (config.sh_mode == "final" and is_final)
