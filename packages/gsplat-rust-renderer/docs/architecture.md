@@ -54,7 +54,7 @@ render_cli.rs ──► gsplat_core/gpu_renderer ──► gsplat_core/gpu_types
 ```
 
 Both rendering paths share:
-- **5 WGSL shaders** (`shader/*.wgsl`) — unchanged, no Rerun-specific code
+- **5 shared WGSL compute shaders** (`gaussian_project`, `gaussian_dynamic_sort`, `gaussian_map_intersections`, `gaussian_tile_offsets`, `gaussian_raster_tiles`) embedded in `gsplat_core` — no Rerun-specific code. A 6th, `gaussian_composite.wgsl`, is viewer-only (blits to the Rerun viewport) and is **not** part of the shared core
 - **12 bind group layouts** (`GpuBindGroupLayouts` in `gpu_types.rs`)
 - **13 compute pipelines** (`GpuComputePipelines` in `gpu_types.rs`)
 - **7 GPU buffer structs** (`ProjectUniformBuffer`, `ScanUniformBuffer`, etc.)
@@ -141,11 +141,14 @@ Stage 5:  MAP INTERSECTIONS    gaussian_map_intersections.wgsl :: map_main
           ▼
 Stage 6:  TILE SORT            gaussian_dynamic_sort.wgsl :: sort_count_main
           │                                               :: sort_reduce_main
-          │                                               :: sort_scan_main
-          │                                               :: sort_scan_compose_main
+          │                    gaussian_project.wgsl      :: scan_blocks_main
+          │                                               :: scan_block_sums_main
+          │                    gaussian_dynamic_sort.wgsl :: sort_scan_compose_main
           │                                               :: sort_scan_add_main
           │                                               :: sort_scatter_main
-          │  4-bit radix sort by tile_id
+          │  4-bit radix sort by tile_id; the prefix scan reuses
+          │  scan_blocks_main/scan_block_sums_main from
+          │  gaussian_project.wgsl (shared with Stage 4)
           │  Groups all splats for the same tile together
           │  Pass count: ceil(bits(tile_count) / 4)
           ▼
@@ -174,7 +177,7 @@ This is the **single source of truth** for all GPU pipeline definitions. Both th
 
 | Struct | Size | Purpose |
 |--------|------|---------|
-| `ProjectUniformBuffer` | 160 B | Camera + viewport + SH config |
+| `ProjectUniformBuffer` | 192 B | Camera + viewport + SH config |
 | `ScanUniformBuffer` | 16 B | Prefix sum params |
 | `SortUniformBuffer` | 16 B | Radix sort shift/pass |
 | `MapUniformBuffer` | 16 B | Tile mapping params |
@@ -246,6 +249,7 @@ GPU pipeline tuning constants live in `gsplat_core/gpu_types.rs`:
 | `PROJECT_WORKGROUP_SIZE` | 128 | Threads per project dispatch |
 | `SORT_WORKGROUP_SIZE` | 256 | Threads per sort dispatch |
 | `SORT_BIN_COUNT` | 16 | Radix sort bins (4-bit) |
+| `INTERSECTION_CAPACITY_MULTIPLIER` | 32 | Per-instance tile-intersection buffer capacity (reverted from a brief 4× experiment) |
 
 ## File Map
 
@@ -282,21 +286,13 @@ packages/gsplat-rust-renderer/
 │   ├── gaussians3d.py             # PLY loader + rr.AsComponents
 │   └── metrics.py                 # PSNR + SSIM + LPIPS
 ├── tools/
-│   ├── log_gaussian_ply.py        # CLI: load PLY → log to viewer
-│   └── calibration_scene.py       # CLI: generate/check cross-renderer calibration scene
+│   ├── log_gaussian_ply.py         # CLI: load PLY → log to viewer
+│   ├── log_splats_with_cameras.py  # CLI: splats + cameras + GT images (tabs/pages)
+│   ├── calibration_scene.py        # CLI: cross-renderer calibration scene
+│   ├── relog_check.py              # Re-log staleness check
+│   ├── visualize_brush_training.py # Overlay GPU splats on Brush training
+│   └── run_brush_native_demo.sh    # Brush comparison demo driver
 ├── tests/                         # Python tests
 └── docs/
-    ├── architecture.md            # This file
-    └── testing-plan.md            # Eval pipeline docs
+    └── architecture.md            # This file (the only doc; see the PR for perf/accuracy evidence)
 ```
-
-## Baseline Quality Metrics
-
-GPU renderer, chair + hotdog (Brush-trained 30K steps, 4 test views each):
-
-| Scene | PSNR (dB) | SSIM | LPIPS | Render time (RTX 5090) |
-|-------|-----------|------|-------|----------------------|
-| Chair (40K splats) | 29.05 | 0.9479 | 0.0612 | 7.4ms (135 FPS) |
-| Hotdog (19K splats) | 26.65 | 0.9387 | 0.1175 | 7.5ms |
-
-Reference: Brush MipNeRF-360 averages: ~29.7 PSNR, ~0.886 SSIM, ~0.196 LPIPS.
