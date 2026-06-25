@@ -40,7 +40,6 @@ Two modes:
 import dataclasses
 import json
 import re
-import struct
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,10 +51,12 @@ import rerun.blueprint as rrb
 from jaxtyping import Float64, UInt8
 from numpy import ndarray
 from PIL import Image
+from simplecv.camera_orient_utils import rotation_matrix_between
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole
 
 from gsplat_rust_renderer.gaussians3d import Gaussians3D
+from gsplat_rust_renderer.scene_io import load_nerf_cameras, load_rgb_composited, qvec_to_rotmat, read_colmap_cameras_bin, read_colmap_images_bin
 
 EXPORT_RE: re.Pattern[str] = re.compile(r"export_(\d+)\.ply$")
 EVAL_LINE_RE: re.Pattern[str] = re.compile(r"Eval iter (\d+): PSNR ([0-9.]+|nan|inf), ssim ([0-9.]+|nan|inf)")
@@ -152,103 +153,6 @@ class VisualizeBrushTrainingConfig:
     """Abort if no new artifact appears for this many seconds while following."""
 
 
-def load_nerf_cameras(scene_dir: Path, split: Literal["train", "val", "test"]) -> list[tuple[PinholeParameters, Path]]:
-    """Read NeRF-synthetic cameras of one split as (pinhole, image path) pairs.
-
-    The c2w matrices are OpenGL/RUB; simplecv carries the convention through
-    to the Pinhole's ``camera_xyz``, so they are used unmodified.
-    """
-    transforms = json.loads((scene_dir / f"transforms_{split}.json").read_text())
-    camera_angle_x: float = transforms["camera_angle_x"]
-    cameras: list[tuple[PinholeParameters, Path]] = []
-    for frame in transforms["frames"]:
-        image_path: Path = (scene_dir / frame["file_path"]).with_suffix(".png")
-        with Image.open(image_path) as probe:
-            width, height = probe.size
-        focal: float = 0.5 * width / np.tan(0.5 * camera_angle_x)
-        c2w: Float64[ndarray, "4 4"] = np.array(frame["transform_matrix"], dtype=np.float64)
-        camera = PinholeParameters(
-            name=image_path.stem,
-            extrinsics=Extrinsics(world_R_cam=c2w[:3, :3], world_t_cam=c2w[:3, 3]),
-            intrinsics=Intrinsics.from_focal_principal_point(
-                camera_conventions="RUB",
-                fl_x=focal,
-                fl_y=focal,
-                cx=width / 2.0,
-                cy=height / 2.0,
-                height=height,
-                width=width,
-            ),
-        )
-        cameras.append((camera, image_path))
-    return cameras
-
-
-def load_rgb_composited(image_path: Path, background: float) -> UInt8[ndarray, "h w 3"]:
-    """Load an image as raw RGB with alpha composited onto a constant background.
-
-    Raw ``rr.Image`` on purpose — ``rr.EncodedImage`` makes the viewer
-    re-decode every visible image every frame.
-    """
-    with Image.open(image_path) as img:
-        rgba: UInt8[ndarray, "h w c"] = np.asarray(img.convert("RGBA"))
-    alpha: Float64[ndarray, "h w 1"] = rgba[..., 3:].astype(np.float64) / 255.0
-    rgb: UInt8[ndarray, "h w 3"] = (rgba[..., :3].astype(np.float64) * alpha + background * (1.0 - alpha)).astype(np.uint8)
-    return rgb
-
-
-# ── Minimal COLMAP binary parsers (for real nerfstudio/COLMAP captures) ──────
-# Mirrors tools/log_splats_with_cameras.py; kept local to avoid a shared import
-# between two standalone CLI tools (both intentionally self-contained).  brush's
-# colmap loader reads the same sparse model, so the cameras we draw match the
-# poses brush trains on.
-
-
-def _read_colmap_cameras_bin(path: Path) -> dict[int, dict]:
-    models: dict[int, tuple[str, int]] = {
-        0: ("SIMPLE_PINHOLE", 3), 1: ("PINHOLE", 4), 2: ("SIMPLE_RADIAL", 4),
-        3: ("RADIAL", 5), 4: ("OPENCV", 8), 5: ("OPENCV_FISHEYE", 8),
-    }
-    cameras: dict[int, dict] = {}
-    with open(path, "rb") as f:
-        (n,) = struct.unpack("<Q", f.read(8))
-        for _ in range(n):
-            cam_id, model_id, w, h = struct.unpack("<iiQQ", f.read(24))
-            _name, n_params = models[model_id]
-            params = struct.unpack(f"<{n_params}d", f.read(8 * n_params))
-            cameras[cam_id] = {"width": w, "height": h, "params": params}
-    return cameras
-
-
-def _read_colmap_images_bin(path: Path) -> list[dict]:
-    images: list[dict] = []
-    with open(path, "rb") as f:
-        (n,) = struct.unpack("<Q", f.read(8))
-        for _ in range(n):
-            f.read(4)  # image id
-            qvec = struct.unpack("<4d", f.read(32))
-            tvec = struct.unpack("<3d", f.read(24))
-            cam_id = struct.unpack("<i", f.read(4))[0]
-            name = b""
-            while (c := f.read(1)) != b"\x00":
-                name += c
-            (n_pts,) = struct.unpack("<Q", f.read(8))
-            f.read(24 * n_pts)  # skip 2D points
-            images.append({"qvec": qvec, "tvec": tvec, "camera_id": cam_id, "name": name.decode()})
-    return images
-
-
-def _qvec_to_rotmat(q: tuple[float, float, float, float]) -> Float64[ndarray, "3 3"]:
-    w, x, y, z = q
-    return np.array(
-        [
-            [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
-            [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
-            [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
-        ]
-    )
-
-
 def colmap_sparse_dir(scene_dir: Path) -> Path | None:
     """Return the COLMAP ``sparse/0`` dir under ``scene_dir`` (nerfstudio nests
     it under ``colmap/``), or None if this isn't a COLMAP capture."""
@@ -275,8 +179,8 @@ def load_colmap_cameras(scene_dir: Path) -> list[tuple[PinholeParameters, Path]]
     ignored for the frustum (pinhole approximation is fine for visualization)."""
     sparse: Path | None = colmap_sparse_dir(scene_dir)
     assert sparse is not None
-    calibrations = _read_colmap_cameras_bin(sparse / "cameras.bin")
-    poses = sorted(_read_colmap_images_bin(sparse / "images.bin"), key=lambda im: im["name"])
+    calibrations = read_colmap_cameras_bin(sparse / "cameras.bin")
+    poses = sorted(read_colmap_images_bin(sparse / "images.bin"), key=lambda im: im["name"])
     cameras: list[tuple[PinholeParameters, Path]] = []
     for im in poses:
         calib = calibrations[im["camera_id"]]
@@ -288,7 +192,7 @@ def load_colmap_cameras(scene_dir: Path) -> list[tuple[PinholeParameters, Path]]
         sy: float = height / calib["height"]
         camera = PinholeParameters(
             name=Path(im["name"]).stem,
-            extrinsics=Extrinsics(cam_R_world=_qvec_to_rotmat(im["qvec"]), cam_t_world=np.asarray(im["tvec"], dtype=np.float64)),
+            extrinsics=Extrinsics(cam_R_world=qvec_to_rotmat(im["qvec"]), cam_t_world=np.asarray(im["tvec"], dtype=np.float64)),
             intrinsics=Intrinsics.from_focal_principal_point(
                 camera_conventions="RDF", fl_x=fx * sx, fl_y=fy * sy, cx=cx * sx, cy=cy * sy, height=height, width=width
             ),
@@ -308,19 +212,6 @@ def estimate_up(cameras: list[tuple[PinholeParameters, Path]], cam_up_local: Flo
     ups: Float64[ndarray, "n 3"] = np.array([cam.extrinsics.world_R_cam @ cam_up_local for cam, _ in cameras])
     up: Float64[ndarray, "3"] = ups.mean(axis=0)
     return up / np.linalg.norm(up)
-
-
-def up_to_z_rotation(up: Float64[ndarray, "3"]) -> Float64[ndarray, "3 3"]:
-    """Rotation R with ``R @ up == +Z`` (Rodrigues), so applying it to the world
-    makes the estimated up axis vertical (the viewer assumes +Z up)."""
-    z: Float64[ndarray, "3"] = np.array([0.0, 0.0, 1.0])
-    v: Float64[ndarray, "3"] = np.cross(up, z)
-    s: float = float(np.linalg.norm(v))
-    c: float = float(np.dot(up, z))
-    if s < 1e-8:
-        return np.eye(3) if c > 0 else np.diag([1.0, -1.0, -1.0])
-    vx: Float64[ndarray, "3 3"] = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
-    return np.eye(3) + vx + vx @ vx * ((1.0 - c) / (s * s))
 
 
 def set_iteration_time(config: VisualizeBrushTrainingConfig, iteration: int) -> None:
@@ -405,7 +296,7 @@ def log_static_scene(config: VisualizeBrushTrainingConfig) -> list[tuple[Pinhole
         # the splats brush exports come out tilted under a +Z-up viewer.  Rotate
         # the whole world subtree (splats + cameras) so the camera-estimated up
         # is vertical.  The splats and cameras stay mutually consistent.
-        r_up: Float64[ndarray, "3 3"] = up_to_z_rotation(estimate_up(all_cameras))
+        r_up: Float64[ndarray, "3 3"] = rotation_matrix_between(estimate_up(all_cameras), np.array([0.0, 0.0, 1.0]))
         rr.log("world", rr.Transform3D(mat3x3=r_up.tolist()), static=True)
         # brush holds out every eval_split_every-th sorted view for eval.
         eval_cameras: list[tuple[PinholeParameters, Path]] = (
@@ -538,12 +429,11 @@ def count_eval_views(config: VisualizeBrushTrainingConfig) -> int:
     full ``transforms_val``/``transforms_test`` set for NeRF-synthetic, or every
     ``eval_split_every``-th sorted view for a COLMAP capture with no val file.
     Reads only metadata (no image decodes), so it stays cheap for big sets."""
-    if colmap_sparse_dir(config.scene_dir) is not None:
+    sparse: Path | None = colmap_sparse_dir(config.scene_dir)
+    if sparse is not None:
         if config.eval_split_every <= 0:
             return 0
-        sparse: Path | None = colmap_sparse_dir(config.scene_dir)
-        assert sparse is not None
-        num_views: int = len(_read_colmap_images_bin(sparse / "images.bin"))
+        num_views: int = len(read_colmap_images_bin(sparse / "images.bin"))
         return sum(1 for i in range(num_views) if i % config.eval_split_every == 0)
     val_split: Literal["val", "test"] = "val" if (config.scene_dir / "transforms_val.json").exists() else "test"
     transforms: dict = json.loads((config.scene_dir / f"transforms_{val_split}.json").read_text())
@@ -649,7 +539,7 @@ def orient_brush_native(config: VisualizeBrushTrainingConfig) -> None:
     else:
         cameras = load_nerf_cameras(config.scene_dir, "train")
         up = estimate_up(cameras, np.array([0.0, 1.0, 0.0]))  # RUB image-up = +Y
-    r_up: Float64[ndarray, "3 3"] = up_to_z_rotation(up)
+    r_up: Float64[ndarray, "3 3"] = rotation_matrix_between(up, np.array([0.0, 0.0, 1.0]))
     rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
     rr.log("world", rr.Transform3D(mat3x3=r_up.tolist()), static=True)
     rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
