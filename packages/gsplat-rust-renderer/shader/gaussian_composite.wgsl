@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// gaussian_composite.wgsl — Stage 7: Final Composite
+// gaussian_composite.wgsl — Stage 9: Final Composite
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // Pipeline position: LAST stage — runs after tile rasterization.

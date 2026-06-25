@@ -5,11 +5,14 @@ name = "examples-monorepo"
 # Keep Pixi's conda/PyPI name mapping explicit and local so dependency
 # overrides remain deterministic when PyPI-only CUDA wheels are selected.
 conda-pypi-map = { conda-forge = "conda-pypi-map.json" }
-# Keep both workspace platforms so target-specific selectors below remain
-# valid. CUDA-only features restrict themselves to linux-64.
+# Keep both workspace platforms so target-specific selectors below remain valid.
+# The shared cuda feature spans both; heavier x86-only packages pin their own
+# feature to linux-64 (so those envs stay linux-64).
 platforms = ["linux-64", "linux-aarch64"]
 version = "0.1.0"
-requires-pixi = ">=0.40"
+# Dev machines run pixi 0.70.x. (0.71+ works as a tool, but adopting it needs a
+# rich-platforms migration — deferred — so don't expect a clean relock on 0.71 yet.)
+requires-pixi = ">=0.70"
 preview = ["pixi-build"]
 
 # ─── pypi-options (workspace-level) ─────────────────────────────────────────
@@ -94,13 +97,24 @@ prerelease-mode = "allow"
 
 
 # ─── CUDA 13.0 feature (shared across all GPU envs) ─────────────────────────
-# Restrict to linux-64: the CUDA toolchain, pytorch-gpu, and GPU-only deps
-# like torchcodec don't have conda-forge builds for linux-aarch64.
+# Both linux-64 and linux-aarch64 (DGX Spark / GB10): conda-forge now ships the
+# CUDA 13 toolchain + pytorch-gpu for aarch64. An env only actually gains the
+# aarch64 platform if its other features also allow it — features that don't pin
+# to linux-64 (e.g. wilor-nano, egoexo-forge) inherit aarch64, while the heavy
+# x86-only packages (dpvo, mast3r-slam, sam2, moge, …) pin their feature to
+# linux-64 and stay there.
 [feature.cuda]
-platforms = ["linux-64"]
+platforms = ["linux-64", "linux-aarch64"]
 
 [feature.cuda.system-requirements]
 cuda = "13.0"
+# CUDA-13 aarch64 index wheels ship as manylinux_2_3x: onnxruntime-gpu is _2_34,
+# the TensorRT aarch64 wheels (tensorrt-cu13-libs/bindings) are _2_35. Declare
+# glibc 2.35 so both resolve (the Spark runs 2.39). pixi system-requirements can't
+# be target-scoped, so this applies to both platforms — but it only *loosens*
+# package eligibility (every CUDA-13 host has glibc >= 2.35), so the existing
+# linux-64 solutions stay valid and are not re-solved.
+libc = { family = "glibc", version = "2.35" }
 
 [feature.cuda.dependencies]
 # CUDA Build Tools
@@ -130,8 +144,47 @@ libnvjitlink = "*"
 pytorch-gpu = ">=2.12,<2.13"
 torchvision = "*"
 
+# onnxruntime-gpu — same package and SAME version (1.24.0) on both platforms, but
+# the source differs, so it is split across two target sections (pixi can't vary
+# `index` per platform in one):
+#  - linux-64 (x86): Microsoft's ort-cuda-13 feed, pinned to the 1.24.0 release
+#    (the feed carries it alongside nightlies). Pinned — not a floating `>=…,<2`
+#    floor — so x86 stays in lockstep with aarch64 instead of drifting to 1.27-dev.
+#  - linux-aarch64 (DGX Spark / GB10, CUDA 13.0 driver): the Jetson AI Lab
+#    sbsa/cu130 wheel — native sm_121 SASS, zero PTX (cuobjdump-verified), so it
+#    loads directly on the 13.0 driver. The nightly feed's aarch64 wheels are
+#    CUDA-13.1 (PTX ISA 9.1 -> cudaErrorUnsupportedPtxVersion); conda-forge's
+#    *_cuda130 has no sm_121 SASS. cp312-only, ORT 1.24.0, sha256 pinned in the
+#    lock. Source: NVIDIA Jetson DevRel infra (recipe in dusty-nv/jetson-containers).
+# Both live here in the shared cuda feature so every cuda env gets the right wheel
+# per platform automatically — no per-feature copy to keep in sync.
+[feature.cuda.target.linux-64.pypi-dependencies]
+onnxruntime-gpu = { version = "==1.24.0", index = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-13-nightly/pypi/simple/" }
+
+[feature.cuda.target.linux-aarch64.pypi-dependencies]
+onnxruntime-gpu = { version = "==1.24.0", index = "https://pypi.jetson-ai-lab.io/sbsa/cu130/+simple/" }
+
+# TensorRT runtime — centralized here so every cuda env shares ONE source (no per-package
+# copies to keep in sync). tensorrt-cu13 ==10.13.3.9 from pypi.nvidia.com publishes wheels
+# for both linux-64 (manylinux_2_28) and linux-aarch64 (manylinux_2_35), cp310–cp313, so a
+# single UNSCOPED entry resolves on every cuda env (incl. the py3.11 ones, dpvo/mast3r-slam).
+# tensorrt-cu13-libs has stale metadata requiring `nvidia-cuda-runtime-cu13` (NVIDIA
+# deprecated it for cu13 in favor of unsuffixed `nvidia-cuda-runtime`); conda provides the
+# real CUDA 13 runtime, so satisfy it with NVIDIA's empty 0.0.0a0 placeholder (no-op).
 [feature.cuda.pypi-dependencies]
-onnxruntime-gpu = { version = ">=1.24.0.dev0,<2", index = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-13-nightly/pypi/simple/" }
+tensorrt-cu13 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
+nvidia-cuda-runtime-cu13 = "==0.0.0a0"
+cuda-python = "*"
+
+# GPU runtime libs on LD_LIBRARY_PATH for every cuda env: $CONDA_PREFIX/lib first
+# (cuDNN/cuBLAS/cudart from conda — needed by ORT's CUDA & TRT providers), then the pip
+# TensorRT wheels' libnvinfer under site-packages/tensorrt_libs. Both py3.11 and py3.12
+# site-packages dirs are listed because cuda spans both python versions (e.g. dpvo and
+# mast3r-slam are 3.11); the loader silently skips whichever path doesn't exist. Setting
+# this key replaces pixi's default, so $CONDA_PREFIX/lib MUST be listed explicitly or
+# cuDNN won't resolve.
+[feature.cuda.activation.env]
+LD_LIBRARY_PATH = "$CONDA_PREFIX/lib:$CONDA_PREFIX/lib/python3.12/site-packages/tensorrt_libs:$CONDA_PREFIX/lib/python3.11/site-packages/tensorrt_libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 # ─── ide feature (standalone dev env for Zed/IDE tooling) ────────────────────
 [feature.ide.dependencies]
@@ -493,29 +546,19 @@ python = "3.12.*"
 dill = ">=0.4.0,<0.5"
 trimesh = "*"
 pyrender = "*"
-# float with the shared cuda130/torch-2.12 stack (torch 2.12 pairs with torchvision 0.27)
-torchvision = "*"
 torchcodec = "*"
 
 [feature.wilor-nano.pypi-dependencies]
 wilor_nano = { path = "packages/wilor-nano", editable = true }
-daggr = { path = "/home/pablo/0Dev/personal/daggr", editable = true }
+# `daggr` (a personal Gradio-graph helper) was wired as an absolute local-path
+# editable dep at /home/pablo/0Dev/personal/daggr. That path does not exist off
+# the author's machine, so `pixi install -e wilor-nano` failed everywhere else.
+# Removed for reproducibility. The optional `tools/daggr_*.py` demos import
+# `from daggr import GradioNode, Graph`; to run them, install daggr yourself
+# (e.g. `daggr = { path = "/abs/path/to/daggr", editable = true }`).
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 onnx = ">=1.12.0,<1.18.0"
 onnxscript = "*"
-
-[feature.wilor-nano.target.linux-64.pypi-dependencies]
-# TensorRT engines are machine-local artifacts; keep ONNX portable and rebuild engines per target GPU.
-tensorrt-cu13 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
-# tensorrt-cu13-libs has stale metadata requiring `nvidia-cuda-runtime-cu13` (NVIDIA
-# deprecated it for cu13 in favor of unsuffixed `nvidia-cuda-runtime`). conda provides
-# the real CUDA 13 runtime, so satisfy it with NVIDIA's empty 0.0.0a0 placeholder wheel
-# (no-op; avoids building the broken 0.0.1 sdist stub).
-nvidia-cuda-runtime-cu13 = "==0.0.0a0"
-cuda-python = "*"
-
-[feature.wilor-nano.target.linux-aarch64.pypi-dependencies]
-onnxruntime-gpu = { version = ">=1.24.0.dev0,<2", index = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-13-nightly/pypi/simple/" }
 
 [feature.wilor-nano.activation.env]
 PACKAGE_DIR = "packages/wilor-nano"
@@ -568,9 +611,6 @@ datasets = ">=4.0.0"
 egoexo-forge = { path = "packages/egoexo-forge", editable = true }
 timm = "<1.0"
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
-
-[feature.egoexo-forge.target.linux-aarch64.pypi-dependencies]
-onnxruntime-gpu = { version = ">=1.24.0.dev0,<2", index = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-13-nightly/pypi/simple/" }
 
 [feature.egoexo-forge.activation.env]
 PACKAGE_DIR = "packages/egoexo-forge"
@@ -808,16 +848,6 @@ sapiens2-pose = { path = "packages/sapiens2-pose", editable = true }
 onnx = "*"
 onnxscript = "*"
 
-[feature.sapiens2-pose.target.linux-64.pypi-dependencies]
-# TensorRT engines are machine-local artifacts; keep ONNX portable and rebuild engines per target GPU.
-tensorrt-cu13 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
-# tensorrt-cu13-libs has stale metadata requiring `nvidia-cuda-runtime-cu13` (NVIDIA
-# deprecated it for cu13 in favor of unsuffixed `nvidia-cuda-runtime`). conda provides
-# the real CUDA 13 runtime, so satisfy it with NVIDIA's empty 0.0.0a0 placeholder wheel
-# (no-op; avoids building the broken 0.0.1 sdist stub).
-nvidia-cuda-runtime-cu13 = "==0.0.0a0"
-cuda-python = "*"
-
 [feature.sapiens2-pose.activation.env]
 PACKAGE_DIR = "packages/sapiens2-pose"
 PYREFLY_TARGET = "src/sapiens2_pose/api src/sapiens2_pose/gradio_ui.py src/sapiens2_pose/video_gradio_ui.py src/sapiens2_pose/__init__.py tools"
@@ -902,16 +932,6 @@ wilor_nano = { path = "packages/wilor-nano", editable = true }
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 onnx = "*"
 onnxscript = "*"
-
-[feature.sapiens-coco133-pose.target.linux-64.pypi-dependencies]
-# TensorRT engines are machine-local artifacts; keep ONNX portable and rebuild engines per target GPU.
-tensorrt-cu13 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
-# tensorrt-cu13-libs has stale metadata requiring `nvidia-cuda-runtime-cu13` (NVIDIA
-# deprecated it for cu13 in favor of unsuffixed `nvidia-cuda-runtime`). conda provides
-# the real CUDA 13 runtime, so satisfy it with NVIDIA's empty 0.0.0a0 placeholder wheel
-# (no-op; avoids building the broken 0.0.1 sdist stub).
-nvidia-cuda-runtime-cu13 = "==0.0.0a0"
-cuda-python = "*"
 
 [feature.sapiens-coco133-pose.activation.env]
 PACKAGE_DIR = "packages/sapiens-coco133-pose"
@@ -1138,7 +1158,6 @@ platforms = ["linux-64"]
 
 [feature.vistadream.dependencies]
 python = "3.12.*"
-pytorch-gpu = ">=2.12,<2.13"    # match the shared cuda130/2.12 floor; needed by Flux/diffusers
 cmake = ">=4.0.3,<5"
 open3d = ">=0.19.0,<0.20"
 scikit-learn = ">=1.7.1,<2"
@@ -1469,6 +1488,11 @@ pytorch-cpu = ">=2.8.0"
 torchvision = "*"
 
 [feature.gsplat-rust-renderer.target.linux-64.dependencies]
+# libudev (devel): was needed by the old local-rerun-checkout viewer, whose
+# re_viewer pulled re_gamepad/gilrs (gilrs links libudev). The shipped build now
+# uses published Rerun 0.33, which does not pull gilrs — currently unused, kept
+# as a harmless leaf to avoid a workspace re-solve; drop when the lock is next regenerated.
+libudev = "257.*"
 libxkbcommon = "*"
 wayland = "*"
 xorg-libx11 = "*"
@@ -1478,15 +1502,30 @@ xorg-libxinerama = "*"
 xorg-libxrandr = "*"
 brush = "==0.3.0"
 
+# Same viewer build deps for aarch64 (DGX Spark). brush is linux-64-only on
+# conda-forge and only needed for the benchmark comparisons, so it is
+# deliberately absent here.
+[feature.gsplat-rust-renderer.target.linux-aarch64.dependencies]
+libudev = "257.*"
+libxkbcommon = "*"
+wayland = "*"
+xorg-libx11 = "*"
+xorg-libxcursor = "*"
+xorg-libxi = "*"
+xorg-libxinerama = "*"
+xorg-libxrandr = "*"
+
 [feature.gsplat-rust-renderer.pypi-dependencies]
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
 lpips = ">=0.1.4,<1"
 plyfile = ">=1.1,<2"
-rerun-sdk = "==0.32.2"
+rerun-sdk = "==0.33.0"
 simplecv = { path = "packages/simplecv", editable = true }
 
 [feature.gsplat-rust-renderer.activation.env]
 PACKAGE_DIR = "packages/gsplat-rust-renderer"
+# Make pixi's pkg-config files (libudev.pc) visible to cargo builds.
+PKG_CONFIG_PATH = "${CONDA_PREFIX}/lib/pkgconfig"
 
 # ── Download tasks ───────────────────────────────────────────────────────
 [feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-chair-ply]
@@ -1797,9 +1836,6 @@ platforms = ["linux-64"]
 
 [feature.mamma.dependencies]
 python = "3.12.*"
-# cuda13 migration: align with the shared cuda130/torch-2.12 stack (fixes the
-# torchvision-0.26/torch-2.10 mismatch that pinned the realtime gate RED).
-pytorch-gpu = "2.12.*"
 onnx = "*"
 onnxscript = "*"
 einops = ">=0.8.0,<0.9"
@@ -1814,14 +1850,6 @@ mamma = { path = "packages/mamma", editable = true }
 # EfficientTAM); distribution name is `sam2`, needs no-build-isolation (torch
 # at build time). See packages/sam2-streaming/VENDOR.md.
 sam2 = { path = "packages/sam2-streaming", editable = true }
-# TensorRT python API for the MammaNet engine (same pinned build as
-# sapiens2-pose; engines are machine-local, rebuilt per GPU).
-tensorrt-cu13 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
-# tensorrt-cu13-libs has stale metadata requiring `nvidia-cuda-runtime-cu13` (NVIDIA
-# deprecated it for cu13 in favor of unsuffixed `nvidia-cuda-runtime`). conda provides
-# the real CUDA 13 runtime, so satisfy it with NVIDIA's empty 0.0.0a0 placeholder wheel
-# (no-op; avoids building the broken 0.0.1 sdist stub).
-nvidia-cuda-runtime-cu13 = "==0.0.0a0"
 
 [feature.mamma.activation.env]
 PACKAGE_DIR = "packages/mamma"

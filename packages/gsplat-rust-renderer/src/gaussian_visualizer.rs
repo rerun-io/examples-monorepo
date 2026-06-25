@@ -11,17 +11,13 @@
 //!
 //! 2. **Builds or reuses** a [`RenderGaussianCloud`] — a packed, renderer-ready
 //!    representation of the Gaussian data.  Clouds are cached per entity path
-//!    and only rebuilt when the data or transform signature changes.
+//!    in the store's `Memoizers` ([`CloudCache`] — visualizer instances are
+//!    recreated every frame and cannot hold state) and only rebuilt when the
+//!    data or transform signature changes.
 //!
-//! 3. **Culls** splats that are behind the camera or outside the frustum using
-//!    a fast approximate test on the CPU.  This is intentionally conservative;
-//!    the GPU shader does the exact projection later.
-//!
-//! 4. **Sorts** the surviving candidates back-to-front by camera depth.  Alpha
-//!    blending requires this ordering for correct compositing.
-//!
-//! 5. **Submits** the sorted candidate list to [`GaussianDrawData`] which
-//!    drives the actual GPU render pass.
+//! 3. **Submits** the full cloud + camera to [`GaussianDrawData`] which
+//!    drives the GPU render pass.  Culling and depth sorting happen entirely
+//!    on the GPU (Brush model) — there is no CPU pre-pass.
 //!
 //! # Rerun Extension Points
 //!
@@ -34,15 +30,21 @@
 //! - [`VisualizerSystem`] — the `execute()` method is called once per frame by
 //!   the Rerun viewer with the current view context and query.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash as _, Hasher as _};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::gaussian_renderer::GaussianDrawData;
 use glam::{Affine3A, Quat, Vec2, Vec3};
 use re_view::{DataResultQuery as _, VisualizerInstructionQueryResults};
 use re_view_spatial::{SpatialViewState, TransformTreeContext};
+use re_viewer_context::external::re_chunk_store::{
+    ChunkDeletionReason, ChunkDirectLineageReport, ChunkStoreDiff, ChunkStoreEvent,
+};
+use re_viewer_context::external::re_entity_db::EntityDb;
 use re_viewer_context::{
-    AppOptions, IdentifiedViewSystem, ViewContext, ViewContextCollection, ViewQuery,
+    AppOptions, Cache, IdentifiedViewSystem, ViewContext, ViewContextCollection, ViewQuery,
     ViewSystemExecutionError, ViewSystemIdentifier, VisualizerExecutionOutput, VisualizerQueryInfo,
     VisualizerSystem,
 };
@@ -51,7 +53,7 @@ use rerun::{Archetype as _, Component as _};
 // ── Imports from gsplat_core (the Rerun-free algorithm module) ───────────
 use crate::gsplat_core::{
     CameraApproximation, RenderGaussianCloud, RenderShCoefficients, approximate_bounds_from_points,
-    fallback_camera, normalize_quat_or_identity, rebuild_visible_indices, sh_degree_from_coeffs,
+    fallback_camera, normalize_quat_or_identity, sh_degree_from_coeffs,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -162,23 +164,95 @@ impl GaussianSplats3D {
 // Visualizer state and cache
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// The visualizer that Rerun instantiates once and calls `execute()` on every
-/// frame.  It maintains a cache of [`RenderGaussianCloud`]s keyed by entity
-/// path so that unchanged data isn't rebuilt every frame.
+/// The visualizer that Rerun instantiates **fresh every frame** and calls
+/// `execute()` on.  It is stateless: the cloud cache lives in the store's
+/// [`re_viewer_context::Memoizers`] (see [`CloudCache`]) — state on this
+/// struct would silently be thrown away after each frame.
 #[derive(Default)]
-pub struct GaussianSplatVisualizer {
-    /// One cached render cloud per entity path.  The key is
-    /// `"gaussian_splats::{entity_path}"`.
-    clouds: HashMap<String, CachedCloud>,
+pub struct GaussianSplatVisualizer;
+
+/// Persistent per-store cache of packed render clouds, keyed by
+/// `"gaussian_splats::{entity_path}"`.
+///
+/// Lives in the store's `Memoizers` so it survives across frames (visualizer
+/// system instances do not).  Entries are dropped when the store reports
+/// chunk changes for their entity (re-log, GC) and on memory pressure; the
+/// [`CloudSignature`] check on access catches everything else.
+#[derive(Default)]
+pub struct CloudCache(HashMap<String, CachedCloud>);
+
+impl Cache for CloudCache {
+    fn name(&self) -> &'static str {
+        "GaussianCloudCache"
+    }
+
+    fn purge_memory(&mut self) {
+        // Standard rerun cache contract: drop everything not in use.  After a
+        // purge, the next frame rebuilds every visible entity's cloud in one
+        // go — a deliberate one-frame hitch in exchange for reclaimed memory.
+        self.0.clear();
+    }
+
+    fn on_store_events(&mut self, events: &[&ChunkStoreEvent], _entity_db: &EntityDb) {
+        for event in events {
+            // Only evict when the entity's DATA changed.  Storage reshuffles
+            // (compaction, virtual→physical swaps, split cleanup) preserve
+            // content — and if they move batch boundaries, the signature's
+            // row-id content hash forces a rebuild on next access anyway.
+            let entity_path = match &event.diff {
+                ChunkStoreDiff::Addition(add) => {
+                    if matches!(add.direct_lineage, ChunkDirectLineageReport::CompactedFrom(_)) {
+                        continue;
+                    }
+                    add.chunk_before_processing.entity_path()
+                }
+                ChunkStoreDiff::Deletion(del) => {
+                    if !matches!(del.reason, ChunkDeletionReason::GarbageCollection) {
+                        continue;
+                    }
+                    del.chunk.entity_path()
+                }
+                _ => continue,
+            };
+            self.0.remove(&format!("gaussian_splats::{entity_path}"));
+        }
+    }
+}
+
+impl re_byte_size::MemUsageTreeCapture for CloudCache {
+    fn capture_mem_usage_tree(&self) -> re_byte_size::MemUsageTree {
+        let bytes: u64 = self
+            .0
+            .values()
+            .map(|entry| {
+                let cloud = &entry.cloud;
+                let per_splat = (3 + 4 + 3 + 1 + 3) * std::mem::size_of::<f32>();
+                let sh = cloud
+                    .sh_coeffs
+                    .as_ref()
+                    .map_or(0, |sh| sh.coefficients.len() * std::mem::size_of::<f32>());
+                (cloud.len() * per_splat + sh) as u64
+            })
+            .sum();
+        re_byte_size::MemUsageTree::Bytes(bytes)
+    }
 }
 
 /// A cached cloud together with the signature that was used to build it.
-/// When the signature changes (different splat count, SH shape, or transform),
-/// the cloud is rebuilt from the current query results.
+/// When the signature changes (different splat data, count, SH shape, or
+/// transform), the cloud is rebuilt from the current query results.
 struct CachedCloud {
     signature: CloudSignature,
     cloud: Arc<RenderGaussianCloud>,
+    /// Monotonically increasing build id, bumped on every rebuild.  The
+    /// renderer compares it against the generation its per-entity GPU buffers
+    /// were uploaded from and re-uploads the splat data on mismatch.
+    generation: u64,
 }
+
+/// Source of [`CachedCloud::generation`] values.  Global so a generation is
+/// never reused, even across visualizer instances or cache evictions.
+static CLOUD_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// Lightweight fingerprint of a cloud's configuration.  Two signatures are
 /// equal if and only if the cloud data can be reused without rebuilding.
@@ -191,6 +265,10 @@ struct CloudSignature {
     /// Bit-exact representation of the 3×4 entity transform.  Using raw bits
     /// avoids floating-point comparison issues.
     transform_bits: [u32; 12],
+    /// Hash of the store row-ids backing every component batch.  Re-logging
+    /// an entity writes new rows, so this changes exactly when the underlying
+    /// data does — including same-count, same-transform content changes.
+    content_hash: u64,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -229,11 +307,10 @@ impl VisualizerSystem for GaussianSplatVisualizer {
     /// 2. Compute a cache signature (splat count + SH shape + transform)
     /// 3. Build or reuse the `RenderGaussianCloud`
     /// 4. Extract the current camera from the 3D view state
-    /// 5. Cull splats outside the frustum (approximate, on CPU)
-    /// 6. Sort survivors back-to-front by depth
-    /// 7. Submit to `GaussianDrawData` for GPU rendering
+    /// 5. Submit to `GaussianDrawData` for GPU rendering (the GPU culls and
+    ///    depth-sorts — no CPU pre-pass)
     fn execute(
-        &mut self,
+        &self,
         ctx: &ViewContext<'_>,
         query: &ViewQuery<'_>,
         context_systems: &ViewContextCollection,
@@ -243,8 +320,6 @@ impl VisualizerSystem for GaussianSplatVisualizer {
         // relates to the view's coordinate frame.
         let transforms = context_systems.get::<TransformTreeContext>(&output)?;
         let mut draw_data = GaussianDrawData::new(ctx.render_ctx());
-        let mut extra_draw_data = Vec::new();
-        let mut active_labels = HashSet::new();
 
         // Iterate over every entity in the current view that has been assigned
         // to this visualizer (via blueprint override or automatic matching).
@@ -280,9 +355,11 @@ impl VisualizerSystem for GaussianSplatVisualizer {
                     &latest_at_query,
                     Some(instruction),
                 );
-            let sh_coefficients = extract_sh_coefficients(&latest_at_results, expected_splats)
-                .map_err(|err| {
-                    ViewSystemExecutionError::DrawDataCreationError(Box::new(std::io::Error::new(
+            // Validate the SH tensor every frame (cheap, no copy); the payload
+            // itself is only copied below when the cloud is (re)built.
+            let sh_coeffs_per_channel =
+                sh_meta(&latest_at_results, expected_splats).map_err(|err| {
+                    ViewSystemExecutionError::DrawDataCreationError(Arc::new(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         err,
                     )))
@@ -303,78 +380,111 @@ impl VisualizerSystem for GaussianSplatVisualizer {
                 .unwrap_or(Affine3A::IDENTITY);
 
             // ── Step 3: Build or reuse the render cloud ───────────────
+            // Content identity: every component batch is indexed by the store
+            // row-id of the row that produced it, and `iter_required`
+            // preserves store row-ids.  Hashing the (time, row-id) indices is
+            // O(#batches) — the payload bytes are never touched.
+            let mut content_hasher = DefaultHasher::new();
+            for (index, _) in centers.slice::<[f32; 3]>() {
+                index.hash(&mut content_hasher);
+            }
+            for (index, _) in quaternions.slice::<[f32; 4]>() {
+                index.hash(&mut content_hasher);
+            }
+            for (index, _) in scales.slice::<[f32; 3]>() {
+                index.hash(&mut content_hasher);
+            }
+            for (index, _) in opacities.slice::<f32>() {
+                index.hash(&mut content_hasher);
+            }
+            for (index, _) in colors.slice::<u32>() {
+                index.hash(&mut content_hasher);
+            }
+            if let Ok(Some(sh_unit)) = latest_at_results.get_unit_chunk(
+                GaussianSplats3D::descriptor_sh_coefficients().component,
+                true, // preserve store row ids
+            ) {
+                sh_unit.row_id().hash(&mut content_hasher);
+            }
+
             let label = format!("gaussian_splats::{}", data_result.entity_path);
             let signature = CloudSignature {
                 expected_splats,
-                sh_coeffs_per_channel: sh_coefficients.as_ref().map(|sh| sh.coeffs_per_channel),
+                sh_coeffs_per_channel,
                 transform_bits: transform.to_cols_array().map(f32::to_bits),
+                content_hash: content_hasher.finish(),
             };
-            active_labels.insert(label.clone());
-
-            // `or_insert_with` only builds the cloud if this is the first time
-            // we've seen this entity path.
-            let cache_entry = self
-                .clouds
-                .entry(label.clone())
-                .or_insert_with(|| CachedCloud {
-                    signature: signature.clone(),
-                    cloud: Arc::new(build_render_cloud(
-                        centers.slice::<[f32; 3]>(),
-                        quaternions.slice::<[f32; 4]>(),
-                        scales.slice::<[f32; 3]>(),
-                        opacities.slice::<f32>(),
-                        colors.slice::<u32>(),
-                        transform,
-                        sh_coefficients.clone(),
-                    )),
+            // Build the cloud only when this entity path is new or its
+            // signature changed (e.g. different splat count after re-logging);
+            // steady-state frames reuse the copy cached in the store's
+            // memoizers (state on `self` would not survive the frame).
+            let store_ctx = ctx.viewer_ctx.store_context;
+            let cached: Option<(Arc<RenderGaussianCloud>, u64)> =
+                store_ctx.memoizer::<CloudCache, _>(|cache| {
+                    cache
+                        .0
+                        .get(&label)
+                        .filter(|entry| entry.signature == signature)
+                        .map(|entry| (entry.cloud.clone(), entry.generation))
                 });
-
-            // If the signature changed (e.g. different splat count after
-            // re-logging), rebuild the cloud from the new data.
-            if cache_entry.signature != signature {
-                cache_entry.signature = signature;
-                cache_entry.cloud = Arc::new(build_render_cloud(
+            let (cloud, cloud_generation) = if let Some(hit) = cached {
+                hit
+            } else {
+                if crate::gaussian_renderer::fps_probe_enabled() {
+                    eprintln!("[fps-probe] REBUILDING {label} ({expected_splats} splats)");
+                }
+                // Build OUTSIDE the cache lock — packing a million-splat cloud
+                // takes ~100 ms and must not block other cache users (memory
+                // panel, begin_frame).  If another view raced us to it, keep
+                // the winner's entry and drop our build.
+                let cloud = Arc::new(build_render_cloud(
                     centers.slice::<[f32; 3]>(),
                     quaternions.slice::<[f32; 4]>(),
                     scales.slice::<[f32; 3]>(),
                     opacities.slice::<f32>(),
                     colors.slice::<u32>(),
                     transform,
-                    sh_coefficients,
+                    sh_coeffs_per_channel.and_then(|coeffs_per_channel| {
+                        materialize_sh_coefficients(&latest_at_results, coeffs_per_channel)
+                    }),
                 ));
-            }
+                // One fresh entry, built once; if a racing view already
+                // cached the same signature, ours is dropped (the unused
+                // generation bump is harmless — only equality matters).
+                let fresh = CachedCloud {
+                    signature,
+                    cloud,
+                    generation: CLOUD_GENERATION.fetch_add(1, Ordering::Relaxed),
+                };
+                store_ctx.memoizer::<CloudCache, _>(|cache| {
+                    use std::collections::hash_map::Entry;
+                    let entry = match cache.0.entry(label.clone()) {
+                        Entry::Occupied(mut occupied) => {
+                            if occupied.get().signature != fresh.signature {
+                                occupied.insert(fresh);
+                            }
+                            occupied.into_mut()
+                        }
+                        Entry::Vacant(vacant) => vacant.insert(fresh),
+                    };
+                    (entry.cloud.clone(), entry.generation)
+                })
+            };
 
             // ── Step 4: Extract camera ────────────────────────────────
-            let cloud = cache_entry.cloud.clone();
             // Prefer the interactive 3D camera from the view state.  Fall back
             // to a synthetic camera positioned around the cloud's bounding box
             // (so the splats are visible even before the user orbits).
             let camera =
                 camera_from_view(ctx, query).unwrap_or_else(|| fallback_camera(cloud.bounds_world));
 
-            // ── Step 5 & 6: Cull and sort ─────────────────────────────
-            let mut visible = Vec::new();
-            rebuild_visible_indices(&mut visible, &cloud, &camera);
-            let farthest_depth = visible.first().map_or(0.0, |visible| visible.camera_depth);
-
-            // ── Step 7: Submit to the GPU renderer ────────────────────
-            let submission = draw_data.add_batch(
-                ctx.render_ctx(),
-                &label,
-                &cloud,
-                &camera,
-                &visible,
-                farthest_depth,
-            );
-            if let Some(extra) = submission.extra_draw_data {
-                extra_draw_data.push(extra);
-            }
+            // ── Step 5: Submit to the GPU renderer ────────────────────
+            // Culling and depth sorting happen on the GPU (Brush model);
+            // the full cloud + camera is all the renderer needs.
+            draw_data.add_batch(ctx.render_ctx(), &label, &cloud, cloud_generation, &camera);
         }
 
-        // Evict cached clouds for entities that are no longer in the view.
-        self.clouds.retain(|label, _| active_labels.contains(label));
         output.draw_data = vec![draw_data.into()];
-        output.draw_data.extend(extra_draw_data);
         Ok(output)
     }
 }
@@ -490,15 +600,21 @@ where
 // SH coefficient extraction (Rerun-specific)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Extract spherical harmonic coefficients from the data store.
+/// Validate the SH tensor and return its coefficient count per channel
+/// **without copying the coefficient data**.
 ///
 /// The SH tensor is expected to have shape `[N, coeffs_per_channel, 3]` where
 /// `N` matches the number of splats and `coeffs_per_channel` is one of
 /// `{1, 4, 9, 16, 25}` (corresponding to SH degrees 0–4).
-fn extract_sh_coefficients(
+///
+/// This runs every frame (so shape/dtype errors surface immediately, not only
+/// on cache misses); the actual payload copy is deferred to
+/// [`materialize_sh_coefficients`], which only runs when the cloud is
+/// (re)built.
+fn sh_meta(
     latest_at_results: &re_view::BlueprintResolvedLatestAtResults<'_>,
     expected_splats: usize,
-) -> Result<Option<RenderShCoefficients>, String> {
+) -> Result<Option<usize>, String> {
     let Some(tensor) = latest_at_results.get_mono::<re_sdk_types::components::TensorData>(
         GaussianSplats3D::descriptor_sh_coefficients().component,
     ) else {
@@ -534,8 +650,8 @@ fn extract_sh_coefficients(
         ));
     }
 
-    let coefficients: Arc<[f32]> = match &tensor.buffer {
-        re_sdk_types::datatypes::TensorBuffer::F32(values) => Arc::from(values.as_ref()),
+    let values_len = match &tensor.buffer {
+        re_sdk_types::datatypes::TensorBuffer::F32(values) => values.len(),
         other => {
             return Err(format!(
                 "invalid SH tensor dtype {:?}: expected Float32",
@@ -548,18 +664,32 @@ fn extract_sh_coefficients(
         .checked_mul(coeffs_per_channel)
         .and_then(|value| value.checked_mul(3))
         .ok_or_else(|| "SH tensor size overflow".to_owned())?;
-    if coefficients.len() != expected_len {
+    if values_len != expected_len {
         return Err(format!(
             "invalid SH tensor payload: expected {} floats, got {}",
-            expected_len,
-            coefficients.len()
+            expected_len, values_len
         ));
     }
 
-    Ok(Some(RenderShCoefficients {
+    Ok(Some(coeffs_per_channel))
+}
+
+/// Copy the SH tensor payload (already validated by [`sh_meta`]) into a packed
+/// [`RenderShCoefficients`].  Only called when the cloud is (re)built.
+fn materialize_sh_coefficients(
+    latest_at_results: &re_view::BlueprintResolvedLatestAtResults<'_>,
+    coeffs_per_channel: usize,
+) -> Option<RenderShCoefficients> {
+    let tensor = latest_at_results.get_mono::<re_sdk_types::components::TensorData>(
+        GaussianSplats3D::descriptor_sh_coefficients().component,
+    )?;
+    let re_sdk_types::datatypes::TensorBuffer::F32(values) = &tensor.buffer else {
+        return None;
+    };
+    Some(RenderShCoefficients {
         coeffs_per_channel,
-        coefficients,
-    }))
+        coefficients: Arc::from(values.as_ref()),
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

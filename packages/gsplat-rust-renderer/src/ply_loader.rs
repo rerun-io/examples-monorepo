@@ -158,6 +158,17 @@ pub fn load_ply(path: &Path) -> anyhow::Result<RenderGaussianCloud> {
             .unwrap_or(raw_coeffs_per_channel);
 
         let mut flat = vec![0.0_f32; n * coeffs_per_channel * 3];
+        // Higher-order SH field names (f_rest_* is channel-major in PLY) —
+        // built once, not per vertex.
+        let rest_fields: Vec<[String; 3]> = (0..extra_coeffs_per_channel)
+            .map(|c| {
+                [
+                    format!("f_rest_{}", c),
+                    format!("f_rest_{}", extra_coeffs_per_channel + c),
+                    format!("f_rest_{}", extra_coeffs_per_channel * 2 + c),
+                ]
+            })
+            .collect();
         for (i, vertex) in vertices.iter().enumerate() {
             let base = i * coeffs_per_channel * 3;
             // DC coefficient.
@@ -166,15 +177,11 @@ pub fn load_ply(path: &Path) -> anyhow::Result<RenderGaussianCloud> {
                 flat[base + 1] = get_f32(vertex, "f_dc_1").unwrap_or(0.0);
                 flat[base + 2] = get_f32(vertex, "f_dc_2").unwrap_or(0.0);
             }
-            // Higher-order SH: f_rest_* is channel-major in PLY.
-            for c in 0..extra_coeffs_per_channel {
-                let r_field = format!("f_rest_{}", c);
-                let g_field = format!("f_rest_{}", extra_coeffs_per_channel + c);
-                let b_field = format!("f_rest_{}", extra_coeffs_per_channel * 2 + c);
+            for (c, [r_field, g_field, b_field]) in rest_fields.iter().enumerate() {
                 let offset = base + (c + 1) * 3;
-                flat[offset] = get_f32(vertex, &r_field).unwrap_or(0.0);
-                flat[offset + 1] = get_f32(vertex, &g_field).unwrap_or(0.0);
-                flat[offset + 2] = get_f32(vertex, &b_field).unwrap_or(0.0);
+                flat[offset] = get_f32(vertex, r_field).unwrap_or(0.0);
+                flat[offset + 1] = get_f32(vertex, g_field).unwrap_or(0.0);
+                flat[offset + 2] = get_f32(vertex, b_field).unwrap_or(0.0);
             }
         }
 

@@ -13,11 +13,10 @@
 //! gsplat_core/              ← Core algorithm (no Rerun deps)
 //!   types, constants,       ← Data structures + constants
 //!   projection, sh,         ← Helpers + spherical harmonics
-//!   covariance, culling,    ← 2D covariance + visibility culling
 //!   camera,                 ← Camera constructors
 //!   gpu_types,              ← GPU buffer layouts + pipeline definitions
 //!   gpu_context,            ← Headless wgpu device/queue init
-//!   gpu_renderer,           ← 7-stage GPU compute pipeline
+//!   gpu_renderer,           ← GPU-only compute pipeline (cull + sort on GPU)
 //!
 //! ply_loader                ← Rust PLY parser
 //! nerf_camera               ← NeRF transforms JSON parser

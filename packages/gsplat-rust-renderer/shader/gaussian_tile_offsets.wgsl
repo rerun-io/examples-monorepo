@@ -1,8 +1,8 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// gaussian_tile_offsets.wgsl — Stage 5: Tile Range Extraction
+// gaussian_tile_offsets.wgsl — Stage 7: Tile Range Extraction
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// Pipeline position: Runs after the radix sort (stage 4).
+// Pipeline position: Runs after the tile radix sort (stage 6).
 //
 // Purpose: After sorting, all intersections for the same tile are contiguous in
 // the sorted array.  This shader finds the [start, end) range for each tile by
@@ -15,7 +15,7 @@
 //   tile_offsets[2] = {start: 5, end: 9}
 //   ...
 //
-// The raster shader (stage 6) then uses these ranges to iterate only over the
+// The raster shader (stage 8) then uses these ranges to iterate only over the
 // splats that actually overlap its tile — no wasted work.
 //
 // Each thread checks CHECKS_PER_ITER consecutive entries to amortize the

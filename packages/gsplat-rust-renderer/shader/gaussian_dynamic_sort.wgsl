@@ -1,19 +1,21 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// gaussian_dynamic_sort.wgsl — Stage 4: Radix Sort by Tile ID
+// gaussian_dynamic_sort.wgsl — Stages 2 + 6: Radix Argsort (depth) / Sort (tile ID)
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// Pipeline position: Runs after intersection mapping (stage 3).
-//
-// Purpose: Sort all (tile_id, splat_id) pairs by tile_id so that all splats
-// for the same tile are contiguous in memory.  This enables the raster stage
-// to process one tile at a time without random-access lookups.
+// Pipeline position: Used twice per frame.  Stage 2: argsort the compacted
+// (gid, depth-bits) pairs after project_forward (preceded by the gid
+// canonicalization pre-sort).  Stage 6: after intersection mapping (stage 5),
+// sort all (tile_id, splat_id) pairs by tile_id so that all splats for the
+// same tile are contiguous in memory — this enables the raster stage to
+// process one tile at a time without random-access lookups.
 //
 // Algorithm: Multi-pass 4-bit radix sort (16 bins per pass).  For a 32-bit
 // tile ID, this takes up to 8 passes.  Each pass consists of:
 //
 //   1. sort_count_main:         Per-workgroup histogram of 4-bit digit values
 //   2. sort_reduce_main:        Reduce histograms across workgroups
-//   3. sort_scan_main:          Exclusive prefix scan of the reduced counts
+//   3. scan_blocks_main + scan_block_sums_main (gaussian_project.wgsl):
+//                               Exclusive prefix scan of the reduced counts
 //   4. sort_scan_compose_main:  Compose block-local and global scan offsets
 //   5. sort_scan_add_main:      Add reduced offsets back to per-workgroup counts
 //   6. sort_scatter_main:       Scatter keys+values to their sorted positions
@@ -146,66 +148,10 @@ fn sort_reduce_main(
     }
 }
 
-@group(0) @binding(1) var<storage, read_write> scan_reduced: array<u32>;
-
-var<workgroup> scan_sums: array<u32, WG>;
-var<workgroup> scan_lds: array<array<u32, WG>, ELEMENTS_PER_THREAD>;
-
 @group(0) @binding(8) var<storage, read> compose_local_offsets: array<u32>;
 @group(0) @binding(9) var<storage, read> compose_block_offsets: array<u32>;
 @group(0) @binding(10) var<storage, read_write> compose_out: array<u32>;
 @group(0) @binding(11) var<uniform> compose_uniforms: ScanUniformBuffer;
-
-@compute
-@workgroup_size(WG, 1, 1)
-fn sort_scan_main(@builtin(local_invocation_id) local_id: vec3<u32>) {
-    let total = num_keys();
-    let num_wgs = div_ceil(total, BLOCK_SIZE);
-    let num_reduce_wgs = BIN_COUNT * div_ceil(num_wgs, BLOCK_SIZE);
-
-    for (var i = 0u; i < ELEMENTS_PER_THREAD; i++) {
-        let data_index = i * WG + local_id.x;
-        let col = (i * WG + local_id.x) / ELEMENTS_PER_THREAD;
-        let row = (i * WG + local_id.x) % ELEMENTS_PER_THREAD;
-        scan_lds[row][col] = select(0u, scan_reduced[data_index], data_index < num_reduce_wgs);
-    }
-    workgroupBarrier();
-
-    var sum = 0u;
-    for (var i = 0u; i < ELEMENTS_PER_THREAD; i++) {
-        let tmp = scan_lds[i][local_id.x];
-        scan_lds[i][local_id.x] = sum;
-        sum += tmp;
-    }
-    scan_sums[local_id.x] = sum;
-    for (var i = 0u; i < 8u; i++) {
-        workgroupBarrier();
-        if local_id.x >= (1u << i) {
-            sum += scan_sums[local_id.x - (1u << i)];
-        }
-        workgroupBarrier();
-        scan_sums[local_id.x] = sum;
-    }
-    workgroupBarrier();
-
-    sum = 0u;
-    if local_id.x > 0u {
-        sum = scan_sums[local_id.x - 1u];
-    }
-    for (var i = 0u; i < ELEMENTS_PER_THREAD; i++) {
-        scan_lds[i][local_id.x] += sum;
-    }
-    workgroupBarrier();
-
-    for (var i = 0u; i < ELEMENTS_PER_THREAD; i++) {
-        let data_index = i * WG + local_id.x;
-        let col = (i * WG + local_id.x) / ELEMENTS_PER_THREAD;
-        let row = (i * WG + local_id.x) % ELEMENTS_PER_THREAD;
-        if data_index < num_reduce_wgs {
-            scan_reduced[data_index] = scan_lds[row][col];
-        }
-    }
-}
 
 @compute
 @workgroup_size(WG, 1, 1)

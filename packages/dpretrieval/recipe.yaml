@@ -27,7 +27,7 @@ requirements:
   host:
     - python 3.11.*
     - pybind11
-    - libopencv
+    - libopencv <5  # OpenCV 5 dropped/moved features2d; DBoW2's find_package needs the v4 layout
   run:
     - python 3.11.*
-    - libopencv
+    - libopencv <5  # OpenCV 5 dropped/moved features2d; DBoW2's find_package needs the v4 layout

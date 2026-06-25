@@ -5,7 +5,6 @@
 //! mirror the WGSL storage/uniform layouts used by the compute shaders.
 
 use std::borrow::Cow;
-use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
@@ -23,7 +22,8 @@ pub const INTERSECTION_CAPACITY_MULTIPLIER: usize = 32;
 pub const SORT_WORKGROUP_SIZE: u32 = 256;
 pub const SORT_ELEMENTS_PER_THREAD: u32 = 1;
 pub const SORT_BLOCK_SIZE: u32 = SORT_WORKGROUP_SIZE * SORT_ELEMENTS_PER_THREAD;
-pub const SORT_BIN_COUNT: u32 = 16;
+pub const SORT_BITS_PER_PASS: u32 = 4;
+pub const SORT_BIN_COUNT: u32 = 1 << SORT_BITS_PER_PASS;
 pub const TILE_WIDTH: u32 = 16;
 pub const TILE_OFFSET_WORKGROUP_SIZE: u32 = 256;
 pub const TILE_OFFSET_CHECKS_PER_ITER: u32 = 8;
@@ -41,6 +41,10 @@ pub struct ProjectUniformBuffer {
     pub camera_world_position: [f32; 4],
     pub viewport_and_near: [f32; 4],
     pub sigma_and_counts: [u32; 4],
+    /// NOT free padding — carries bit-packed values: `_pad[0][0]` = has-SH
+    /// flag, `_pad[0][1]` = `OPACITY_SCALE` f32 bits.  Read as
+    /// `project_uniforms.pad.x` / `.pad.y` in `gaussian_project.wgsl`;
+    /// written by [`fill_project_uniform`].
     pub _pad: [[u32; 4]; 1],
 }
 
@@ -49,6 +53,7 @@ pub struct ProjectUniformBuffer {
 pub struct ScanUniformBuffer {
     pub total_selected: u32,
     pub block_count: u32,
+    /// Pads the uniform to 16 bytes (WGSL uniform-buffer alignment).
     pub _pad: [u32; 2],
 }
 
@@ -57,6 +62,7 @@ pub struct ScanUniformBuffer {
 pub struct SortUniformBuffer {
     pub shift: u32,
     pub total_keys_unused: u32,
+    /// Pads the uniform to 16 bytes (WGSL uniform-buffer alignment).
     pub _pad: [u32; 2],
 }
 
@@ -80,6 +86,8 @@ pub struct RasterUniformBuffer {
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct TileProjectedSplat {
     pub xy_px: [f32; 2],
+    /// Aligns the next `vec4` member to 16 bytes (WGSL storage layout — see
+    /// the layout test in `gaussian_renderer.rs`).
     pub _pad0: [f32; 2],
     pub conic_xyy_opacity: [f32; 4],
     pub color_rgba: [f32; 4],
@@ -188,7 +196,7 @@ pub fn uniform_layout_entry(binding: u32, size_bytes: usize) -> wgpu::BindGroupL
     }
 }
 
-pub fn storage_buffer_entry(binding: u32, buffer: &Arc<wgpu::Buffer>) -> wgpu::BindGroupEntry<'_> {
+pub fn storage_buffer_entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
     wgpu::BindGroupEntry {
         binding,
         resource: buffer.as_entire_binding(),
@@ -253,6 +261,24 @@ pub fn intersection_capacity_for_instances(instance_capacity: usize) -> usize {
 
 pub fn compaction_block_count(required: usize) -> usize {
     required.max(1).div_ceil(COMPACTION_BLOCK_SIZE as usize)
+}
+
+/// Number of count/scatter workgroups for a radix sort over `num_elements`
+/// key slots (one thread per slot).
+pub fn sort_workgroup_count_for(num_elements: usize) -> u32 {
+    (num_elements as u32).div_ceil(SORT_BLOCK_SIZE).max(1)
+}
+
+/// Number of `sort_reduce` workgroups for a radix sort with `sort_wg_count`
+/// count/scatter workgroups: one reduction slot per bin per reduce block.
+pub fn sort_reduce_workgroup_count(sort_wg_count: u32) -> u32 {
+    (sort_wg_count.div_ceil(SORT_BLOCK_SIZE) * SORT_BIN_COUNT).max(1)
+}
+
+/// Number of radix-sort passes needed to cover all tile-id bits for `n_tiles`
+/// tiles.  May be odd — the caller copies back from the alt buffers then.
+pub fn tile_sort_passes(n_tiles: usize) -> u32 {
+    ((u32::BITS - (n_tiles.max(1) as u32).leading_zeros()).max(1)).div_ceil(SORT_BITS_PER_PASS)
 }
 
 pub fn next_block_capacity(required: usize) -> usize {
@@ -336,19 +362,19 @@ pub fn create_raster_texture(
 // Shared bind group layouts + compute pipelines
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// All bind group layouts for the 7-stage Gaussian splat compute pipeline.
+/// All bind group layouts for the GPU-only Gaussian splat compute pipeline.
 ///
 /// These layouts are shared between the Rerun viewer path and the
 /// standalone GPU renderer — both bind buffers with the same WGSL
 /// shader bindings.
 pub struct GpuBindGroupLayouts {
-    pub project: wgpu::BindGroupLayout,
+    pub project_forward: wgpu::BindGroupLayout,
+    pub project_visible: wgpu::BindGroupLayout,
     pub scan: wgpu::BindGroupLayout,
     pub scan_block_sums: wgpu::BindGroupLayout,
     pub map: wgpu::BindGroupLayout,
     pub sort_count: wgpu::BindGroupLayout,
     pub sort_reduce: wgpu::BindGroupLayout,
-    pub sort_scan: wgpu::BindGroupLayout,
     pub sort_scan_compose: wgpu::BindGroupLayout,
     pub sort_scan_add: wgpu::BindGroupLayout,
     pub sort_scatter: wgpu::BindGroupLayout,
@@ -358,20 +384,31 @@ pub struct GpuBindGroupLayouts {
 
 /// Create all 12 bind group layouts for the compute pipeline.
 pub fn create_compute_bind_group_layouts(device: &wgpu::Device) -> GpuBindGroupLayouts {
-    let project = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("project_bgl"),
+    let project_forward = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("project_forward_bgl"),
         entries: &[
-            storage_layout_entry(0, true),  // means_world
-            storage_layout_entry(1, true),  // quats_xyzw
-            storage_layout_entry(2, true),  // scales_opacity
-            storage_layout_entry(3, true),  // colors_dc
-            storage_layout_entry(4, true),  // sh_coefficients
-            storage_layout_entry(5, true),  // sorted_indices
-            storage_layout_entry(6, false), // project_output_instances
-            storage_layout_entry(7, false), // visibility_flags
+            storage_layout_entry(0, true), // means_world
+            storage_layout_entry(1, true), // quats_xyzw
+            storage_layout_entry(2, true), // scales_opacity
+            uniform_layout_entry(8, std::mem::size_of::<ProjectUniformBuffer>()),
+            storage_layout_entry(12, false), // forward_global_from_compact
+            storage_layout_entry(13, false), // forward_depth_keys
+            storage_layout_entry(14, false), // forward_num_visible (atomic)
+        ],
+    });
+    let project_visible = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("project_visible_bgl"),
+        entries: &[
+            storage_layout_entry(0, true), // means_world
+            storage_layout_entry(1, true), // quats_xyzw
+            storage_layout_entry(2, true), // scales_opacity
+            storage_layout_entry(3, true), // colors_dc
+            storage_layout_entry(4, true), // sh_coefficients
+            storage_layout_entry(5, true), // global_from_compact (depth-sorted)
             uniform_layout_entry(8, std::mem::size_of::<ProjectUniformBuffer>()),
             storage_layout_entry(9, false),  // projected_tile_splats
             storage_layout_entry(10, false), // projected_tile_hit_counts
+            storage_layout_entry(11, true),  // num_visible_in
         ],
     });
     let scan = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -420,14 +457,6 @@ pub fn create_compute_bind_group_layouts(device: &wgpu::Device) -> GpuBindGroupL
             uniform_layout_entry(0, std::mem::size_of::<SortUniformBuffer>()),
             storage_layout_entry(1, true),  // counts
             storage_layout_entry(2, false), // reduced
-            storage_layout_entry(6, true),  // num_intersections
-        ],
-    });
-    let sort_scan = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("sort_scan_bgl"),
-        entries: &[
-            uniform_layout_entry(0, std::mem::size_of::<SortUniformBuffer>()),
-            storage_layout_entry(1, false), // reduced
             storage_layout_entry(6, true),  // num_intersections
         ],
     });
@@ -490,13 +519,13 @@ pub fn create_compute_bind_group_layouts(device: &wgpu::Device) -> GpuBindGroupL
     });
 
     GpuBindGroupLayouts {
-        project,
+        project_forward,
+        project_visible,
         scan,
         scan_block_sums,
         map,
         sort_count,
         sort_reduce,
-        sort_scan,
         sort_scan_compose,
         sort_scan_add,
         sort_scatter,
@@ -505,19 +534,16 @@ pub fn create_compute_bind_group_layouts(device: &wgpu::Device) -> GpuBindGroupL
     }
 }
 
-/// All compute pipelines for the 7-stage Gaussian splat pipeline.
-// Some pipelines are retained as lifetime anchors even when not directly
-// referenced in every dispatch path.
-#[allow(dead_code)]
+/// All compute pipelines for the GPU-only Gaussian splat pipeline.
 pub struct GpuComputePipelines {
-    pub project: wgpu::ComputePipeline,
+    pub project_forward: wgpu::ComputePipeline,
+    pub project_visible: wgpu::ComputePipeline,
     pub scan_blocks: wgpu::ComputePipeline,
     pub scan_block_sums: wgpu::ComputePipeline,
     pub map_intersections: wgpu::ComputePipeline,
     pub clamp_intersection_count: wgpu::ComputePipeline,
     pub sort_count: wgpu::ComputePipeline,
     pub sort_reduce: wgpu::ComputePipeline,
-    pub sort_scan: wgpu::ComputePipeline,
     pub sort_scan_compose: wgpu::ComputePipeline,
     pub sort_scan_add: wgpu::ComputePipeline,
     pub sort_scatter: wgpu::ComputePipeline,
@@ -557,12 +583,19 @@ pub fn create_compute_pipelines(
     );
 
     GpuComputePipelines {
-        project: create_compute_pipeline(
+        project_forward: create_compute_pipeline(
             device,
-            "project",
+            "project_forward",
             &project_shader,
-            "project_main",
-            &[&layouts.project],
+            "project_forward_main",
+            &[&layouts.project_forward],
+        ),
+        project_visible: create_compute_pipeline(
+            device,
+            "project_visible",
+            &project_shader,
+            "project_visible_main",
+            &[&layouts.project_visible],
         ),
         scan_blocks: create_compute_pipeline(
             device,
@@ -606,13 +639,6 @@ pub fn create_compute_pipelines(
             "sort_reduce_main",
             &[&layouts.sort_reduce],
         ),
-        sort_scan: create_compute_pipeline(
-            device,
-            "sort_scan",
-            &sort_shader,
-            "sort_scan_main",
-            &[&layouts.sort_scan],
-        ),
         sort_scan_compose: create_compute_pipeline(
             device,
             "sort_scan_compose",
@@ -652,13 +678,435 @@ pub fn create_compute_pipelines(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Shared pipeline bind groups
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Borrowed references to every buffer (and the raster texture view) the
+/// non-sort pipeline stages bind.  Single source of truth for the WGSL
+/// binding wiring, shared by the viewer and the standalone renderer.
+pub struct PipelineBuffers<'a> {
+    pub means: &'a wgpu::Buffer,
+    pub quats: &'a wgpu::Buffer,
+    pub scales_opacity: &'a wgpu::Buffer,
+    pub colors: &'a wgpu::Buffer,
+    pub sh_coeffs: &'a wgpu::Buffer,
+    pub project_ub: &'a wgpu::Buffer,
+    pub scan_ub: &'a wgpu::Buffer,
+    pub scan_l2_ub: &'a wgpu::Buffer,
+    pub map_ub: &'a wgpu::Buffer,
+    pub raster_ub: &'a wgpu::Buffer,
+    pub num_visible: &'a wgpu::Buffer,
+    pub global_from_compact: &'a wgpu::Buffer,
+    pub depth_keys: &'a wgpu::Buffer,
+    pub projected: &'a wgpu::Buffer,
+    pub tile_hit_counts: &'a wgpu::Buffer,
+    pub tile_hit_offsets: &'a wgpu::Buffer,
+    pub tile_hit_block_offsets: &'a wgpu::Buffer,
+    pub block_local_offsets: &'a wgpu::Buffer,
+    pub block2_offsets: &'a wgpu::Buffer,
+    pub tile_isect_count: &'a wgpu::Buffer,
+    pub num_isect: &'a wgpu::Buffer,
+    pub tile_id_from_isect: &'a wgpu::Buffer,
+    pub compact_gid_from_isect: &'a wgpu::Buffer,
+    pub tile_offsets: &'a wgpu::Buffer,
+    pub raster_view: &'a wgpu::TextureView,
+}
+
+/// Bind groups for the non-sort pipeline stages, in dispatch order.
+pub struct PipelineBindGroups {
+    pub project_forward: wgpu::BindGroup,
+    pub project_visible: wgpu::BindGroup,
+    pub scan: wgpu::BindGroup,
+    pub scan_l2: wgpu::BindGroup,
+    pub scan_block_sums: wgpu::BindGroup,
+    pub scan_compose: wgpu::BindGroup,
+    pub map: wgpu::BindGroup,
+    pub tile_offsets: wgpu::BindGroup,
+    pub rasterize: wgpu::BindGroup,
+}
+
+/// Create the bind groups for every non-sort pipeline stage.
+pub fn create_pipeline_bind_groups(
+    device: &wgpu::Device,
+    layouts: &GpuBindGroupLayouts,
+    b: &PipelineBuffers<'_>,
+) -> PipelineBindGroups {
+    PipelineBindGroups {
+        project_forward: device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("project_forward_bg"),
+            layout: &layouts.project_forward,
+            entries: &[
+                storage_buffer_entry(0, b.means),
+                storage_buffer_entry(1, b.quats),
+                storage_buffer_entry(2, b.scales_opacity),
+                storage_buffer_entry(8, b.project_ub),
+                storage_buffer_entry(12, b.global_from_compact),
+                storage_buffer_entry(13, b.depth_keys),
+                storage_buffer_entry(14, b.num_visible),
+            ],
+        }),
+        project_visible: device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("project_visible_bg"),
+            layout: &layouts.project_visible,
+            entries: &[
+                storage_buffer_entry(0, b.means),
+                storage_buffer_entry(1, b.quats),
+                storage_buffer_entry(2, b.scales_opacity),
+                storage_buffer_entry(3, b.colors),
+                storage_buffer_entry(4, b.sh_coeffs),
+                storage_buffer_entry(5, b.global_from_compact),
+                storage_buffer_entry(8, b.project_ub),
+                storage_buffer_entry(9, b.projected),
+                storage_buffer_entry(10, b.tile_hit_counts),
+                storage_buffer_entry(11, b.num_visible),
+            ],
+        }),
+        scan: device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scan_bg"),
+            layout: &layouts.scan,
+            entries: &[
+                storage_buffer_entry(16, b.tile_hit_counts), // scan input: per-splat tile hit counts
+                storage_buffer_entry(17, b.tile_hit_offsets), // scan output: prefix-sum offsets
+                storage_buffer_entry(18, b.tile_hit_block_offsets),
+                storage_buffer_entry(19, b.scan_ub),
+            ],
+        }),
+        // Level 2: scan the level-1 block sums so clouds larger than
+        // 512 blocks * 512 elements = 262,144 splats scan correctly.
+        scan_l2: device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scan_l2_bg"),
+            layout: &layouts.scan,
+            entries: &[
+                storage_buffer_entry(16, b.tile_hit_block_offsets),
+                storage_buffer_entry(17, b.block_local_offsets),
+                storage_buffer_entry(18, b.block2_offsets),
+                storage_buffer_entry(19, b.scan_l2_ub),
+            ],
+        }),
+        scan_block_sums: device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scan_block_sums_bg"),
+            layout: &layouts.scan_block_sums,
+            entries: &[
+                storage_buffer_entry(24, b.block2_offsets),
+                storage_buffer_entry(25, b.tile_isect_count), // total intersection count
+                storage_buffer_entry(26, b.scan_l2_ub),
+            ],
+        }),
+        // Compose the two scan levels back into flat per-block offsets.
+        scan_compose: device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scan_compose_bg"),
+            layout: &layouts.sort_scan_compose,
+            entries: &[
+                storage_buffer_entry(8, b.block_local_offsets),
+                storage_buffer_entry(9, b.block2_offsets),
+                storage_buffer_entry(10, b.tile_hit_block_offsets),
+                storage_buffer_entry(11, b.scan_l2_ub),
+            ],
+        }),
+        map: device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("map_bg"),
+            layout: &layouts.map,
+            entries: &[
+                storage_buffer_entry(0, b.projected),
+                storage_buffer_entry(1, b.tile_hit_offsets),
+                storage_buffer_entry(2, b.tile_hit_counts),
+                storage_buffer_entry(3, b.tile_hit_block_offsets),
+                storage_buffer_entry(4, b.tile_id_from_isect),
+                storage_buffer_entry(5, b.compact_gid_from_isect),
+                storage_buffer_entry(6, b.map_ub),
+                storage_buffer_entry(7, b.tile_isect_count),
+                storage_buffer_entry(8, b.num_isect),
+            ],
+        }),
+        tile_offsets: device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("tile_offsets_bg"),
+            layout: &layouts.tile_offsets,
+            entries: &[
+                storage_buffer_entry(0, b.tile_id_from_isect),
+                storage_buffer_entry(1, b.tile_offsets),
+                storage_buffer_entry(2, b.num_isect),
+            ],
+        }),
+        rasterize: device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("rasterize_bg"),
+            layout: &layouts.rasterize,
+            entries: &[
+                storage_buffer_entry(0, b.compact_gid_from_isect),
+                storage_buffer_entry(1, b.tile_offsets),
+                storage_buffer_entry(2, b.projected),
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(b.raster_view),
+                },
+                storage_buffer_entry(4, b.raster_ub),
+            ],
+        }),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GPU radix argsort (count-buffer driven, brush v0.3.0 pattern)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Maximum number of 4-bit radix passes over 32-bit keys.
+pub const MAX_SORT_PASSES: u32 = 32 / SORT_BITS_PER_PASS;
+
+/// Create the [`MAX_SORT_PASSES`] shift uniform buffers (`shift = pass * 4`).
+/// Globally constant — create once per renderer and share across all sorts.
+pub fn create_sort_shift_uniforms(device: &wgpu::Device) -> Vec<wgpu::Buffer> {
+    (0..MAX_SORT_PASSES)
+        .map(|pass_index| {
+            create_filled_buffer(
+                device,
+                "sort_shift_ub",
+                wgpu::BufferUsages::UNIFORM,
+                bytemuck::bytes_of(&SortUniformBuffer {
+                    shift: pass_index * SORT_BITS_PER_PASS,
+                    total_keys_unused: 0,
+                    _pad: [0; 2],
+                }),
+            )
+        })
+        .collect()
+}
+
+/// Buffers for one GPU radix argsort over `(key, value)` pairs.
+///
+/// The number of keys is read on the GPU from `num_keys[0]` — dispatches are
+/// capacity-sized and early-exit, so no CPU readback or indirect dispatch is
+/// needed.  Used three times per frame: gid canonicalization + depth argsort
+/// (keys = f32 depth bits, values = global gids) and tile-id sort (keys =
+/// tile ids, values = compact gids).
+pub struct RadixSortBuffers<'a> {
+    pub keys_primary: &'a wgpu::Buffer,
+    pub vals_primary: &'a wgpu::Buffer,
+    pub keys_alt: &'a wgpu::Buffer,
+    pub vals_alt: &'a wgpu::Buffer,
+    /// GPU buffer whose first u32 is the number of keys to sort.
+    pub num_keys: &'a wgpu::Buffer,
+}
+
+/// Scratch buffers for the radix sort.  The sorts in a frame run
+/// sequentially in one encoder, so a single set (sized for the largest sort)
+/// serves all of them.
+pub struct RadixSortScratch<'a> {
+    pub counts: &'a wgpu::Buffer,
+    pub reduced: &'a wgpu::Buffer,
+    pub scan_offsets: &'a wgpu::Buffer,
+    pub scan_block_offsets: &'a wgpu::Buffer,
+    pub scan_totals: &'a wgpu::Buffer,
+}
+
+/// Bind groups that depend on the radix pass index — the 4-bit shift uniform
+/// and the src/dst buffer parity (even passes read primary, odd read alt).
+struct RadixSortPassBindGroups {
+    count_bg: wgpu::BindGroup,
+    reduce_bg: wgpu::BindGroup,
+    scan_add_bg: wgpu::BindGroup,
+    scatter_bg: wgpu::BindGroup,
+}
+
+/// Prebuilt bind groups and dispatch grids for one radix argsort instance.
+///
+/// With an even pass count the sorted data lands back in the primary buffers;
+/// for an odd count the caller must copy back from the alt buffers
+/// (check [`RadixSort::num_passes`]).
+pub struct RadixSort {
+    passes: Vec<RadixSortPassBindGroups>,
+    scan_blocks_bg: wgpu::BindGroup,
+    scan_block_sums_bg: wgpu::BindGroup,
+    compose_bg: wgpu::BindGroup,
+    /// Grid for the count + scatter kernels (one thread per key slot).
+    count_grid: (u32, u32),
+    /// Grid for the reduce + scan_add kernels.
+    reduce_grid: (u32, u32),
+    scan_blocks_grid: (u32, u32),
+    compose_grid: (u32, u32),
+}
+
+/// Build the per-pass bind groups for `num_passes` 4-bit radix sort passes.
+///
+/// `shift_ubs` comes from [`create_sort_shift_uniforms`].
+pub fn build_radix_sort(
+    device: &wgpu::Device,
+    layouts: &GpuBindGroupLayouts,
+    shift_ubs: &[wgpu::Buffer],
+    buffers: &RadixSortBuffers<'_>,
+    scratch: &RadixSortScratch<'_>,
+    sort_wg_count: u32,
+    num_passes: u32,
+) -> RadixSort {
+    let sort_reduce_wg_count: u32 = sort_reduce_workgroup_count(sort_wg_count.max(1));
+    let reduced_total: u32 = sort_reduce_wg_count;
+    let reduced_block_count: u32 = compaction_block_count(reduced_total as usize) as u32;
+    let scan_sort_uniform: ScanUniformBuffer = fill_scan_uniform(reduced_total as usize);
+    let scan_sort_ub: wgpu::Buffer = create_filled_buffer(
+        device,
+        "scan_sort_ub",
+        wgpu::BufferUsages::UNIFORM,
+        bytemuck::bytes_of(&scan_sort_uniform),
+    );
+
+    let passes: Vec<RadixSortPassBindGroups> = (0..num_passes)
+        .map(|pass_index| {
+            let sort_ub: &wgpu::Buffer = &shift_ubs[pass_index as usize];
+            let use_primary: bool = pass_index % 2 == 0;
+            let (src_keys, src_vals, dst_keys, dst_vals) = if use_primary {
+                (
+                    buffers.keys_primary,
+                    buffers.vals_primary,
+                    buffers.keys_alt,
+                    buffers.vals_alt,
+                )
+            } else {
+                (
+                    buffers.keys_alt,
+                    buffers.vals_alt,
+                    buffers.keys_primary,
+                    buffers.vals_primary,
+                )
+            };
+
+            RadixSortPassBindGroups {
+                count_bg: device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("sort_count_bg"),
+                    layout: &layouts.sort_count,
+                    entries: &[
+                        storage_buffer_entry(0, sort_ub),
+                        storage_buffer_entry(1, src_keys),
+                        storage_buffer_entry(2, scratch.counts),
+                        storage_buffer_entry(6, buffers.num_keys),
+                    ],
+                }),
+                reduce_bg: device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("sort_reduce_bg"),
+                    layout: &layouts.sort_reduce,
+                    entries: &[
+                        storage_buffer_entry(0, sort_ub),
+                        storage_buffer_entry(1, scratch.counts),
+                        storage_buffer_entry(2, scratch.reduced),
+                        storage_buffer_entry(6, buffers.num_keys),
+                    ],
+                }),
+                scan_add_bg: device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("sort_scan_add_bg"),
+                    layout: &layouts.sort_scan_add,
+                    entries: &[
+                        storage_buffer_entry(0, sort_ub),
+                        storage_buffer_entry(1, scratch.reduced),
+                        storage_buffer_entry(2, scratch.counts),
+                        storage_buffer_entry(6, buffers.num_keys),
+                    ],
+                }),
+                scatter_bg: device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("sort_scatter_bg"),
+                    layout: &layouts.sort_scatter,
+                    entries: &[
+                        storage_buffer_entry(0, sort_ub),
+                        storage_buffer_entry(1, src_keys),
+                        storage_buffer_entry(2, src_vals),
+                        storage_buffer_entry(3, scratch.counts),
+                        storage_buffer_entry(4, dst_keys),
+                        storage_buffer_entry(5, dst_vals),
+                        storage_buffer_entry(6, buffers.num_keys),
+                    ],
+                }),
+            }
+        })
+        .collect();
+
+    RadixSort {
+        passes,
+        scan_blocks_bg: device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sort_scan_blocks_bg"),
+            layout: &layouts.scan,
+            entries: &[
+                storage_buffer_entry(16, scratch.reduced),
+                storage_buffer_entry(17, scratch.scan_offsets),
+                storage_buffer_entry(18, scratch.scan_block_offsets),
+                storage_buffer_entry(19, &scan_sort_ub),
+            ],
+        }),
+        scan_block_sums_bg: device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sort_scan_block_sums_bg"),
+            layout: &layouts.scan_block_sums,
+            entries: &[
+                storage_buffer_entry(24, scratch.scan_block_offsets),
+                storage_buffer_entry(25, scratch.scan_totals),
+                storage_buffer_entry(26, &scan_sort_ub),
+            ],
+        }),
+        compose_bg: device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sort_scan_compose_bg"),
+            layout: &layouts.sort_scan_compose,
+            entries: &[
+                storage_buffer_entry(8, scratch.scan_offsets),
+                storage_buffer_entry(9, scratch.scan_block_offsets),
+                storage_buffer_entry(10, scratch.reduced),
+                storage_buffer_entry(11, &scan_sort_ub),
+            ],
+        }),
+        count_grid: dispatch_grid_for_workgroups(sort_wg_count.max(1)),
+        reduce_grid: dispatch_grid_for_workgroups(sort_reduce_wg_count),
+        scan_blocks_grid: dispatch_grid_1d(reduced_block_count, 1),
+        compose_grid: dispatch_grid_1d(reduced_total, SORT_WORKGROUP_SIZE),
+    }
+}
+
+impl RadixSort {
+    /// Total radix passes; odd means the result is in the alt buffers and the
+    /// caller must copy back to primary.
+    pub fn num_passes(&self) -> u32 {
+        self.passes.len() as u32
+    }
+
+    /// Encode all radix passes into the given compute pass.  Dispatch order is
+    /// identical to encoding each pass separately — WebGPU guarantees
+    /// dispatch-order visibility within a compute pass.
+    pub fn encode(&self, pass: &mut wgpu::ComputePass<'_>, pipelines: &GpuComputePipelines) {
+        for pass_bgs in &self.passes {
+            pass.set_pipeline(&pipelines.sort_count);
+            pass.set_bind_group(0, &pass_bgs.count_bg, &[]);
+            pass.dispatch_workgroups(self.count_grid.0, self.count_grid.1, 1);
+
+            pass.set_pipeline(&pipelines.sort_reduce);
+            pass.set_bind_group(0, &pass_bgs.reduce_bg, &[]);
+            pass.dispatch_workgroups(self.reduce_grid.0, self.reduce_grid.1, 1);
+
+            pass.set_pipeline(&pipelines.scan_blocks);
+            pass.set_bind_group(0, &self.scan_blocks_bg, &[]);
+            pass.dispatch_workgroups(self.scan_blocks_grid.0, self.scan_blocks_grid.1, 1);
+
+            pass.set_pipeline(&pipelines.scan_block_sums);
+            pass.set_bind_group(0, &self.scan_block_sums_bg, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+
+            pass.set_pipeline(&pipelines.sort_scan_compose);
+            pass.set_bind_group(0, &self.compose_bg, &[]);
+            pass.dispatch_workgroups(self.compose_grid.0, self.compose_grid.1, 1);
+
+            pass.set_pipeline(&pipelines.sort_scan_add);
+            pass.set_bind_group(0, &pass_bgs.scan_add_bg, &[]);
+            pass.dispatch_workgroups(self.reduce_grid.0, self.reduce_grid.1, 1);
+
+            pass.set_pipeline(&pipelines.sort_scatter);
+            pass.set_bind_group(0, &pass_bgs.scatter_bg, &[]);
+            pass.dispatch_workgroups(self.count_grid.0, self.count_grid.1, 1);
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Uniform buffer fill helpers
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Fill the project uniform buffer from camera and cloud parameters.
+///
+/// `total_splats` is the full cloud size — the GPU project_forward pass culls
+/// the whole cloud itself (no CPU pre-pass).
 pub fn fill_project_uniform(
     camera: &super::types::CameraApproximation,
-    selected_limit: usize,
+    total_splats: usize,
     cloud: &super::types::RenderGaussianCloud,
 ) -> ProjectUniformBuffer {
     let coeffs_per_channel: u32 = cloud
@@ -678,38 +1126,160 @@ pub fn fill_project_uniform(
         ],
         sigma_and_counts: [
             super::constants::SIGMA_COVERAGE.to_bits(),
-            selected_limit as u32,
+            total_splats.min(u32::MAX as usize) as u32,
             coeffs_per_channel,
             sh_degree,
         ],
         _pad: [[
             u32::from(cloud.sh_coeffs.is_some()),
             super::constants::OPACITY_SCALE.to_bits(),
-            super::constants::MAX_SPLATS_RENDERED.min(u32::MAX as usize) as u32,
+            0,
             0,
         ]],
     }
 }
 
-/// Fill the scan uniform buffer.
-pub fn fill_scan_uniform(selected_limit: usize) -> ScanUniformBuffer {
+/// Fill the scan uniform buffer for a scan over `total_elements` entries.
+pub fn fill_scan_uniform(total_elements: usize) -> ScanUniformBuffer {
     ScanUniformBuffer {
-        total_selected: selected_limit as u32,
-        block_count: compaction_block_count(selected_limit) as u32,
+        total_selected: total_elements as u32,
+        block_count: compaction_block_count(total_elements) as u32,
         _pad: [0; 2],
     }
 }
 
 /// Fill the map uniform buffer.
 pub fn fill_map_uniform(
-    selected_limit: usize,
+    total_splats: usize,
     intersection_capacity: usize,
     tile_bounds: glam::UVec2,
 ) -> MapUniformBuffer {
     MapUniformBuffer {
-        total_selected: selected_limit as u32,
+        total_selected: total_splats.min(u32::MAX as usize) as u32,
         intersection_capacity: intersection_capacity.min(u32::MAX as usize) as u32,
         tile_bounds_x: tile_bounds.x,
         tile_bounds_y: tile_bounds.y,
+    }
+}
+
+/// Number of radix-sort passes for the GPU depth argsort: 32-bit keys at
+/// 4 bits per pass.  Even, so sorted results land back in the primary buffers
+/// without a copy-back.
+pub const DEPTH_SORT_PASSES: u32 = 32 / SORT_BITS_PER_PASS;
+
+/// Number of radix-sort passes to canonicalize the compacted gid order before
+/// the depth sort.
+///
+/// project_forward compacts visible splats with `atomicAdd`, so the compact
+/// order is nondeterministic (brush has the same race).  Distinct splats can
+/// share identical f32 depth bits, and the stable depth sort preserves input
+/// order for equal keys — so without canonicalization the blend order of
+/// depth-tied splats (and thus the rendered image) varies run to run.
+/// Sorting the (gid, depth) pairs by gid first makes depth ties resolve in
+/// ascending-gid order, deterministically.  Rounded up to an even pass count
+/// so results land back in the primary buffers.
+pub fn gid_sort_passes(total_splats: usize) -> u32 {
+    let max_gid: u32 = total_splats.saturating_sub(1).max(1).min(u32::MAX as usize) as u32;
+    let bits: u32 = u32::BITS - max_gid.leading_zeros();
+    let passes: u32 = bits.div_ceil(SORT_BITS_PER_PASS);
+    passes + (passes % 2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The WGSL shaders are standalone compilation units, so each declares
+    /// its own copies of the workgroup-size constants.  This test ties them
+    /// to the Rust constants the dispatch math uses — change one side and
+    /// the test names the file to update.
+    #[test]
+    fn wgsl_constants_match_rust() {
+        let cases: [(&str, &str, String); 9] = [
+            (
+                "gaussian_project.wgsl",
+                include_str!("../../shader/gaussian_project.wgsl"),
+                format!("const PROJECT_WORKGROUP_SIZE: u32 = {PROJECT_WORKGROUP_SIZE}u;"),
+            ),
+            (
+                "gaussian_project.wgsl",
+                include_str!("../../shader/gaussian_project.wgsl"),
+                format!("const COMPACTION_WORKGROUP_SIZE: u32 = {COMPACTION_WORKGROUP_SIZE}u;"),
+            ),
+            (
+                "gaussian_project.wgsl",
+                include_str!("../../shader/gaussian_project.wgsl"),
+                format!("const TILE_WIDTH: u32 = {TILE_WIDTH}u;"),
+            ),
+            (
+                "gaussian_map_intersections.wgsl",
+                include_str!("../../shader/gaussian_map_intersections.wgsl"),
+                format!("const PROJECT_WORKGROUP_SIZE: u32 = {PROJECT_WORKGROUP_SIZE}u;"),
+            ),
+            (
+                "gaussian_map_intersections.wgsl",
+                include_str!("../../shader/gaussian_map_intersections.wgsl"),
+                format!("const COMPACTION_BLOCK_SIZE: u32 = {COMPACTION_BLOCK_SIZE}u;"),
+            ),
+            (
+                "gaussian_dynamic_sort.wgsl",
+                include_str!("../../shader/gaussian_dynamic_sort.wgsl"),
+                format!("const WG: u32 = {SORT_WORKGROUP_SIZE}u;"),
+            ),
+            (
+                "gaussian_dynamic_sort.wgsl",
+                include_str!("../../shader/gaussian_dynamic_sort.wgsl"),
+                format!("const BITS_PER_PASS: u32 = {SORT_BITS_PER_PASS}u;"),
+            ),
+            (
+                "gaussian_tile_offsets.wgsl",
+                include_str!("../../shader/gaussian_tile_offsets.wgsl"),
+                format!("const TILE_SIZE: u32 = {TILE_OFFSET_WORKGROUP_SIZE}u;"),
+            ),
+            (
+                "gaussian_tile_offsets.wgsl",
+                include_str!("../../shader/gaussian_tile_offsets.wgsl"),
+                format!("const CHECKS_PER_ITER: u32 = {TILE_OFFSET_CHECKS_PER_ITER}u;"),
+            ),
+        ];
+        for (file, source, expected) in cases {
+            assert!(
+                source.contains(&expected),
+                "{file} does not declare `{expected}` — keep the WGSL constants in sync with gpu_types.rs"
+            );
+        }
+        assert!(
+            include_str!("../../shader/gaussian_dynamic_sort.wgsl")
+                .contains(&format!("const ELEMENTS_PER_THREAD: u32 = {SORT_ELEMENTS_PER_THREAD}u;")),
+            "gaussian_dynamic_sort.wgsl ELEMENTS_PER_THREAD drifted from SORT_ELEMENTS_PER_THREAD"
+        );
+    }
+
+    #[test]
+    fn positive_f32_depth_bits_sort_ascending_as_u32() {
+        // project_forward stores bitcast<u32>(camera_depth); positive floats
+        // compare identically as unsigned ints, so the radix argsort yields
+        // front-to-back order directly.
+        let near: u32 = 2.0_f32.to_bits();
+        let mid: u32 = 10.5_f32.to_bits();
+        let far: u32 = 1.0e6_f32.to_bits();
+        assert!(near < mid);
+        assert!(mid < far);
+    }
+
+    #[test]
+    fn depth_sort_pass_count_is_even() {
+        assert_eq!(super::DEPTH_SORT_PASSES % 2, 0);
+        assert_eq!(super::DEPTH_SORT_PASSES * 4, 32);
+    }
+
+    #[test]
+    fn gid_sort_passes_cover_all_gid_bits_and_are_even() {
+        for total in [1usize, 2, 17, 256, 40_000, 262_145, 2_000_000] {
+            let passes = super::gid_sort_passes(total);
+            assert_eq!(passes % 2, 0, "total={total}");
+            let max_gid = total.saturating_sub(1) as u64;
+            assert!(u64::from(passes) * 4 >= 64 - u64::from(max_gid.max(1).leading_zeros()));
+        }
     }
 }
