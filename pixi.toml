@@ -10,7 +10,9 @@ conda-pypi-map = { conda-forge = "conda-pypi-map.json" }
 # feature to linux-64 (so those envs stay linux-64).
 platforms = ["linux-64", "linux-aarch64"]
 version = "0.1.0"
-requires-pixi = ">=0.40"
+# Dev machines run pixi 0.70.x. (0.71+ works as a tool, but adopting it needs a
+# rich-platforms migration — deferred — so don't expect a clean relock on 0.71 yet.)
+requires-pixi = ">=0.70"
 preview = ["pixi-build"]
 
 # ─── pypi-options (workspace-level) ─────────────────────────────────────────
