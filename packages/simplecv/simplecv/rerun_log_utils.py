@@ -139,7 +139,7 @@ class RerunTyroConfig:
     land in the same recording instead of forking new ones (tyro cannot parse a
     UUID union member, which made this field non-configurable from the CLI)."""
     connect: bool = False
-    """Wether to connect to an existing rerun instance or not"""
+    """Whether to connect to an existing rerun instance or not"""
     save: Path | None = None
     """Path to save the rerun data, this will make it so no data is visualized but saved"""
     serve: bool = False

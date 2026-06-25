@@ -184,7 +184,7 @@ cuda-python = "*"
 # this key replaces pixi's default, so $CONDA_PREFIX/lib MUST be listed explicitly or
 # cuDNN won't resolve.
 [feature.cuda.activation.env]
-LD_LIBRARY_PATH = "$CONDA_PREFIX/lib:$CONDA_PREFIX/lib/python3.12/site-packages/tensorrt_libs:$CONDA_PREFIX/lib/python3.11/site-packages/tensorrt_libs:$LD_LIBRARY_PATH"
+LD_LIBRARY_PATH = "$CONDA_PREFIX/lib:$CONDA_PREFIX/lib/python3.12/site-packages/tensorrt_libs:$CONDA_PREFIX/lib/python3.11/site-packages/tensorrt_libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 # ─── ide feature (standalone dev env for Zed/IDE tooling) ────────────────────
 [feature.ide.dependencies]

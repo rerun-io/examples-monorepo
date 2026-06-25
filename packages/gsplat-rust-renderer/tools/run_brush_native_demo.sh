@@ -25,7 +25,7 @@ EVAL_EVERY="${EVAL_EVERY:-500}"
 # COLMAP captures (no transforms_val) need an eval split: brush holds out every
 # Nth view and the sidecar must match it so the eval-tab count lines up. 0 = off.
 EVAL_SPLIT_EVERY="${EVAL_SPLIT_EVERY:-0}"
-BRUSH_CLI="${BRUSH_CLI:-/home/pablo/0Dev/work/brush/target/release/brush-cli}"
+BRUSH_CLI="${BRUSH_CLI:-brush-cli}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # package root
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"                    # monorepo root (pixi.toml)
