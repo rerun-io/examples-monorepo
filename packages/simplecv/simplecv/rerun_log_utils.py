@@ -152,6 +152,11 @@ class RerunTyroConfig:
     Ignored when ``headless`` (no viewer), or when ``serve``/``connect`` is set."""
     port: int = 9876
     """Port for the spawned viewer's gRPC proxy (used by ``spawn`` and ``live`` + ``save``)."""
+    server_memory_limit: str = "4GB"
+    """Memory budget for the spawned viewer's gRPC proxy buffer. The SDK default
+    (~1 GiB) silently drops the oldest messages on long multi-camera recordings
+    (e.g. a 46-min EPFL session), so the viewer shows truncated history. Accepts a
+    size (``"4GB"``) or a percentage of RAM (``"25%"``)."""
     executable_name: str = "rerun"
     """Executable name passed to ``rerun.spawn`` when launching the viewer."""
     executable_path: str | None = None
@@ -167,7 +172,7 @@ class RerunTyroConfig:
         self.rec_stream: rr.RecordingStream = rr.get_global_data_recording()  # type: ignore[assignment]
 
         if self.serve:
-            rr.serve_grpc()
+            rr.serve_grpc(server_memory_limit=self.server_memory_limit)
             rr.serve_web_viewer(open_browser=not self.headless)
         elif self.connect:
             # Send logging data to separate `rerun` process.
@@ -182,6 +187,7 @@ class RerunTyroConfig:
             rr.spawn(
                 port=self.port,
                 connect=False,
+                server_memory_limit=self.server_memory_limit,
                 executable_name=self.executable_name,
                 executable_path=self.executable_path,
             )
@@ -194,6 +200,7 @@ class RerunTyroConfig:
         elif not self.headless:
             rr.spawn(
                 port=self.port,
+                server_memory_limit=self.server_memory_limit,
                 executable_name=self.executable_name,
                 executable_path=self.executable_path,
             )
