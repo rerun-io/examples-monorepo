@@ -403,12 +403,16 @@ def test_epfl_smart_kitchen_hololens_pose_loader_carries_previous_pose_for_empty
         writer.writerow({"world2holo": json.dumps(last_pose)})
 
     with pytest.warns(UserWarning, match="missing 1 HoloLens world2holo"):
-        poses = load_hololens_world_to_camera_poses(cfg)
+        holo_poses = load_hololens_world_to_camera_poses(cfg)
 
+    poses = holo_poses.cam_T_world_list
     assert len(poses) == 3
     np.testing.assert_allclose(poses[0], np.array(first_pose, dtype=np.float32))
+    # The dropout frame still holds a carried-forward placeholder (so the list stays
+    # frame-aligned), but valid_mask flags it so the viewer never renders that stale pose.
     np.testing.assert_allclose(poses[1], np.array(first_pose, dtype=np.float32))
     np.testing.assert_allclose(poses[2], np.array(last_pose, dtype=np.float32))
+    np.testing.assert_array_equal(holo_poses.valid_mask, np.array([True, False, True]))
 
 
 def test_epfl_smart_kitchen_hololens_pose_loader_warns_when_leading_rows_use_first_valid_pose(
@@ -435,11 +439,13 @@ def test_epfl_smart_kitchen_hololens_pose_loader_warns_when_leading_rows_use_fir
         writer.writerow({"world2holo": json.dumps(first_valid_pose)})
 
     with pytest.warns(UserWarning, match="first valid pose for leading gaps"):
-        poses = load_hololens_world_to_camera_poses(cfg)
+        holo_poses = load_hololens_world_to_camera_poses(cfg)
 
+    poses = holo_poses.cam_T_world_list
     assert len(poses) == 2
     np.testing.assert_allclose(poses[0], np.array(first_valid_pose, dtype=np.float32))
     np.testing.assert_allclose(poses[1], np.array(first_valid_pose, dtype=np.float32))
+    np.testing.assert_array_equal(holo_poses.valid_mask, np.array([False, True]))
 
 
 def test_epfl_smart_kitchen_sequence_loads_coco133_labels_and_mano_stack(tmp_path: Path) -> None:
@@ -542,6 +548,40 @@ def test_epfl_smart_kitchen_ego_sequence_warns_when_reusing_final_pose(tmp_path:
 
     with pytest.warns(UserWarning, match="reusing the final pose"):
         ego_sequence[2]
+
+
+def test_epfl_smart_kitchen_ego_cams_use_nan_extrinsics_on_tracking_dropouts(tmp_path: Path) -> None:
+    _write_minimal_public_release(tmp_path)
+    holo_path: Path = tmp_path / "Public_release_videos" / "train" / "YH2002" / "2023_12_04_10_15_23" / "meta_data" / "holo_data_wpose.csv"
+    identity_pose: list[list[float]] = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+    with holo_path.open("w", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=["world2holo"])
+        writer.writeheader()
+        writer.writerow({"world2holo": json.dumps(identity_pose)})
+        writer.writerow({"world2holo": "[]"})  # HoloLens tracking lost this frame
+        writer.writerow({"world2holo": json.dumps(identity_pose)})
+    from simplecv.data.ego.epfl_smart_kitchen_ego import EpflSmartKitchenEgoSequence
+
+    cfg = EpflSmartKitchenConfig(
+        root_directory=tmp_path,
+        split="train",
+        participant_id="YH2002",
+        session_name="2023_12_04_10_15_23",
+    )
+
+    with pytest.warns(UserWarning, match="missing 1 HoloLens world2holo"):
+        ego_sequence = EpflSmartKitchenEgoSequence(cfg)
+
+    cams = ego_sequence.ego_cam_dict["hololens"]
+    assert len(cams) == 3
+    # Live frames keep finite extrinsics; the dropout frame is NaN so Rerun renders no
+    # ego frustum and the keypoint projection comes out NaN (no 2D dots) instead of
+    # freezing on the carried-forward pose. The video is logged untouched elsewhere.
+    assert np.isfinite(cams[0].extrinsics.cam_t_world).all()
+    assert np.isnan(cams[1].extrinsics.cam_t_world).all()
+    assert np.isnan(cams[1].extrinsics.world_t_cam).all()
+    assert np.isnan(cams[1].extrinsics.cam_T_world[:3]).all()
+    assert np.isfinite(cams[2].extrinsics.cam_t_world).all()
 
 
 def test_epfl_smart_kitchen_visualized_rrd_contains_video_labels_and_mano(tmp_path: Path) -> None:

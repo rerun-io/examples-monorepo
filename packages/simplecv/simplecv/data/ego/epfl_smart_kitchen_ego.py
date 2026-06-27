@@ -4,7 +4,8 @@ import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from jaxtyping import Float32
+import numpy as np
+from jaxtyping import Bool, Float32
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
 
@@ -12,6 +13,7 @@ from simplecv.camera_parameters import BrownConradyDistortion, Extrinsics, Intri
 from simplecv.data.ego.base_ego import BaseEgoSequence, CameraParam, CamNameType, EgoData
 from simplecv.data.exoego.epfl_smart_kitchen import (
     EPFL_EGO_CAMERA_NAME,
+    HoloLensPoses,
     _camera_size,
     _distortion_from_entry,
     _matrix3,
@@ -52,13 +54,31 @@ class EpflSmartKitchenEgoSequence(BaseEgoSequence[EpflSmartKitchenConfig]):
             height=height,
         )
         distortion: BrownConradyDistortion | None = _distortion_from_entry(EPFL_EGO_CAMERA_NAME, entry)
-        cam_T_world_list: list[Float32[ndarray, "4 4"]] = load_hololens_world_to_camera_poses(self.config)
+        holo_poses: HoloLensPoses = load_hololens_world_to_camera_poses(self.config)
+        cam_T_world_list: list[Float32[ndarray, "4 4"]] = holo_poses.cam_T_world_list
+        pose_valid_mask: Bool[ndarray, "n_frames"] = holo_poses.valid_mask
+        # Where the HoloLens lost tracking (blank world2holo) the loader carried the last
+        # good pose forward as a placeholder. Rendering that stale pose is exactly the bug:
+        # it freezes the ego frustum and paints 2D keypoints through a dead camera. Hand
+        # those frames NaN extrinsics instead -- Rerun draws no frustum for a NaN transform,
+        # and the keypoint projection comes out NaN (so no 2D dots), while the black
+        # "tracking died here" video is left untouched. Genuine poses are unchanged, so
+        # clean sessions (and every non-EPFL dataset) render byte-for-byte as before.
+        nan_cam_R_world: Float32[ndarray, "3 3"] = np.full((3, 3), np.nan, dtype=np.float32)
+        nan_cam_t_world: Float32[ndarray, "3"] = np.full(3, np.nan, dtype=np.float32)
         camera_list: list[CameraParam] = []
-        for cam_T_world in cam_T_world_list:
-            extrinsics: Extrinsics = Extrinsics(
-                cam_R_world=cam_T_world[:3, :3],
-                cam_t_world=cam_T_world[:3, 3],
-            )
+        for frame_idx, cam_T_world in enumerate(cam_T_world_list):
+            extrinsics: Extrinsics
+            if bool(pose_valid_mask[frame_idx]):
+                extrinsics = Extrinsics(
+                    cam_R_world=cam_T_world[:3, :3],
+                    cam_t_world=cam_T_world[:3, 3],
+                )
+            else:
+                extrinsics = Extrinsics(
+                    cam_R_world=nan_cam_R_world.copy(),
+                    cam_t_world=nan_cam_t_world.copy(),
+                )
             camera_params: PinholeParameters = PinholeParameters(
                 name=EPFL_EGO_CAMERA_NAME,
                 intrinsics=intrinsics,
