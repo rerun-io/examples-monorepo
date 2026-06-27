@@ -442,7 +442,11 @@ class MANOLayerTorch(Module):
     """Wrapper layer for manopth ManoLayer."""
 
     def __init__(
-        self, side: Literal["left", "right"], betas: Float32[np.ndarray, "10"], mano_root_dir: Path | None = None
+        self,
+        side: Literal["left", "right"],
+        betas: Float32[np.ndarray, "10"],
+        mano_root_dir: Path | None = None,
+        use_pca: bool = True,
     ) -> None:
         """
         Constructor for MANOLayer.
@@ -453,6 +457,10 @@ class MANOLayerTorch(Module):
             mano_root_dir (Path): Path to the MANO root directory. If None, the corresponding
                 MANO pkl (e.g., MANO_RIGHT.pkl) is downloaded to the repository's `data/` folder
                 from `pablovela5620/wilor-nano` on the Hugging Face Hub and used from there.
+            use_pca (bool): Whether the final 45 pose coefficients are MANO PCA
+                coefficients (True) or raw axis-angle joint rotations (False, e.g.
+                EPFL Smart Kitchen). Mirrors ``MANOLayerNP`` so both backends accept
+                the same inputs.
         """
         super().__init__()
         # If no MANO root provided, download the required MANO pkl into repo-root/data
@@ -499,7 +507,7 @@ class MANOLayerTorch(Module):
             side=side,
             mano_root=mano_root_dir,
             ncomps=45,
-            use_pca=True,
+            use_pca=use_pca,
         )
 
         # Register buffer for betas (prescanned for particular subject hand)
@@ -509,6 +517,9 @@ class MANOLayerTorch(Module):
         # Register buffer for faces
         f: Int64[Tensor, "num_faces=1538 3"] = self._mano_layer.th_faces
         self.register_buffer("f", f)
+        # Host-numpy copy of the static faces for mesh logging (parity with ``MANOLayerNP.f``).
+        # Computed once here from the CPU tensor (before any ``.to(device)``).
+        self._faces_np: Int64[ndarray, "num_faces=1538 3"] = f.cpu().numpy()
 
         # Register buffer for root translation
         shapedirs: Float32[Tensor, "n_verts=778 3 10"] = self._mano_layer.th_shapedirs
@@ -568,6 +579,11 @@ class MANOLayerTorch(Module):
     def side(self) -> Literal["left", "right"]:
         """Return the side of the hand."""
         return self._side
+
+    @property
+    def faces(self) -> Int64[ndarray, "n_faces=1538 3"]:
+        """Mesh triangle indices as host numpy (parity with ``MANOLayerNP.f``)."""
+        return self._faces_np
 
     @property
     def num_verts(self) -> int:

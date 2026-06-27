@@ -123,6 +123,53 @@ def _flatten_confidences(confidences: Float[ndarray, "..."]) -> Float[ndarray, "
     return conf_array.astype(np.float32, copy=False)
 
 
+def _segment_nanmean(values: Float[ndarray, "n"], lengths: Int[ndarray, "m"]) -> Float[ndarray, "m"]:
+    """Per-segment NaN-aware mean over a flat array partitioned by ``lengths``.
+
+    Empty segments and all-NaN segments yield NaN, matching ``np.nanmean`` on the
+    valid entries. A fast vectorized path handles equal-length segments (the
+    common keypoint-per-frame case); a ``reduceat`` path covers ragged and
+    zero-length segments without a Python loop.
+
+    Args:
+        values (Float[np.ndarray, "n"]): Flat confidence values across all segments.
+        lengths (Int[np.ndarray, "m"]): Contiguous segment lengths summing to ``n``.
+
+    Returns:
+        Float[np.ndarray, "m"]: Per-segment NaN-aware means (float32).
+    """
+    m: int = int(lengths.shape[0])
+    averages: Float[ndarray, "m"] = np.full(m, np.nan, dtype=np.float32)
+    if m == 0:
+        return averages
+    finite_mask: ndarray = ~np.isnan(values)
+    # Accumulate in float64 so the per-segment mean is deterministic and does not
+    # depend on float32 reduction order (this is only an auxiliary display scalar).
+    filled: Float[ndarray, "n"] = np.where(finite_mask, values, np.float64(0.0)).astype(np.float64)
+
+    uniform_len: int = int(lengths[0])
+    if uniform_len > 0 and bool(np.all(lengths == uniform_len)):
+        # Fast path: equal-length segments → reshape and reduce along axis 1.
+        seg_counts: Int[ndarray, "m"] = finite_mask.reshape(m, uniform_len).sum(axis=1)
+        seg_sums: Float[ndarray, "m"] = filled.reshape(m, uniform_len).sum(axis=1)
+        nonzero: ndarray = seg_counts > 0
+        averages[nonzero] = (seg_sums[nonzero] / seg_counts[nonzero]).astype(np.float32)
+        return averages
+
+    # General path: contiguous segments of arbitrary (possibly zero) length.
+    offsets: Int[ndarray, "m_plus_one"] = np.concatenate(
+        (np.array([0], dtype=np.int64), np.cumsum(lengths, dtype=np.int64))
+    )
+    nonempty: ndarray = lengths > 0
+    if not bool(np.any(nonempty)):
+        return averages
+    safe_starts: Int[ndarray, "k"] = offsets[:-1][nonempty]
+    seg_sums = np.add.reduceat(filled, safe_starts)
+    seg_counts = np.add.reduceat(finite_mask.astype(np.int64), safe_starts)
+    averages[nonempty] = np.where(seg_counts > 0, seg_sums / np.maximum(seg_counts, 1), np.nan).astype(np.float32)
+    return averages
+
+
 class _ConfidenceAwareColumnList(rr.ComponentColumnList):
     """Extend a column list with confidence and per-frame averages for send_columns.
 
@@ -169,17 +216,7 @@ class _ConfidenceAwareColumnList(rr.ComponentColumnList):
                 raise ValueError("Provided average confidences must match number of partitions.")
             averages = self._provided_average.astype(np.float32, copy=False)
         else:
-            offsets: Int[ndarray, "m_plus_one"] = np.concatenate(
-                (np.array([0], dtype=np.int64), np.cumsum(lengths_arr, dtype=np.int64))
-            )
-            averages = np.empty(lengths_arr.shape[0], dtype=np.float32)
-            for idx, (start, end) in enumerate(zip(offsets[:-1], offsets[1:], strict=False)):
-                if end <= start:
-                    averages[idx] = np.nan
-                    continue
-                segment: Float[ndarray, "k"] = self._raw_confidences[start:end]
-                valid = segment[~np.isnan(segment)]
-                averages[idx] = float(np.nanmean(valid)) if valid.size > 0 else np.nan
+            averages = _segment_nanmean(self._raw_confidences, lengths_arr)
 
         avg_column = rr.ComponentColumn(
             self._average_descriptor,
