@@ -11,7 +11,7 @@ from typing import Literal, cast
 
 import cv2
 import numpy as np
-from jaxtyping import Float32, Int
+from jaxtyping import Bool, Float32, Int
 from natsort import natsorted
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
@@ -219,7 +219,25 @@ def _pinhole_from_entry(
     )
 
 
-def load_hololens_world_to_camera_poses(cfg: EpflSmartKitchenConfig) -> list[ndarray]:
+@dataclass(frozen=True)
+class HoloLensPoses:
+    """Per-frame HoloLens world-to-camera transforms plus a tracking-validity mask.
+
+    A ``@dataclass`` rather than ``NamedTuple`` on purpose: a ``NamedTuple`` with a
+    ``list[Float32[ndarray, "4 4"]]`` field trips beartype's forward-ref resolution
+    under ``from __future__ import annotations``.
+    """
+
+    cam_T_world_list: list[Float32[ndarray, "4 4"]]
+    """World-to-camera transforms, one per video frame. Frames where the HoloLens
+    lost tracking hold a carried-forward placeholder so the list stays frame-aligned;
+    that placeholder is never rendered (the viewer keys off ``valid_mask``)."""
+    valid_mask: Bool[ndarray, "n_frames"]
+    """``True`` where the HoloLens reported a genuine pose; ``False`` where the
+    ``world2holo`` cell was blank (``[]``) because tracking dropped out."""
+
+
+def load_hololens_world_to_camera_poses(cfg: EpflSmartKitchenConfig) -> HoloLensPoses:
     """Load per-frame HoloLens world-to-camera transforms from ``holo_data_wpose.csv``."""
     path: Path = holo_pose_path(cfg)
     if not path.exists():
@@ -255,7 +273,11 @@ def load_hololens_world_to_camera_poses(cfg: EpflSmartKitchenConfig) -> list[nda
             stacklevel=2,
         )
 
-    transforms: list[ndarray] = []
+    valid_mask: Bool[ndarray, "n_frames"] = np.array(
+        [transform is not None for transform in transforms_raw],
+        dtype=bool,
+    )
+    transforms: list[Float32[ndarray, "4 4"]] = []
     last_valid: Float32[ndarray, "4 4"] | None = None
     for transform in transforms_raw:
         if transform is None:
@@ -264,7 +286,7 @@ def load_hololens_world_to_camera_poses(cfg: EpflSmartKitchenConfig) -> list[nda
         else:
             transforms.append(transform)
             last_valid = transform
-    return transforms
+    return HoloLensPoses(cam_T_world_list=transforms, valid_mask=valid_mask)
 
 
 def load_rgb_timestamps_ns(cfg: EpflSmartKitchenConfig) -> Int[ndarray, "n_frames"]:
