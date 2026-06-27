@@ -355,9 +355,12 @@ def log_mano_batch(
             with torch.no_grad():
                 verts_torch: Float32[torch.Tensor, "n_frames n_verts=778 3"]
                 joints_torch: Float32[torch.Tensor, "n_frames n_joints=21 3"]
+                # Slice to the logged frame count before the forward: when the MANO
+                # stream is longer than the label timeline we'd otherwise transfer and
+                # run MANO on frames we immediately discard (also lowers peak GPU mem).
                 verts_torch, joints_torch = mano_layer(
-                    torch.from_numpy(np.ascontiguousarray(poses)).float().to(mano_device),
-                    torch.from_numpy(np.ascontiguousarray(translations)).float().to(mano_device),
+                    torch.from_numpy(np.ascontiguousarray(poses[:n_frames_mano_total])).float().to(mano_device),
+                    torch.from_numpy(np.ascontiguousarray(translations[:n_frames_mano_total])).float().to(mano_device),
                 )
             verts: Float32[ndarray, "n_frames n_verts=778 3"] = verts_torch.cpu().numpy()
             xyz_mano: Float32[ndarray, "n_frames n_joints=21 3"] = joints_torch.cpu().numpy()
