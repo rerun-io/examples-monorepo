@@ -19,7 +19,7 @@ from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
 from simplecv.configs.exoego_dataset_configs import AnnotatedExoEgoDatasetUnion
 from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack
-from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, EnvironmentMesh, ExoEgoLabels, ExoEgoSample
+from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, EnvironmentMesh, ExoEgoLabels, ExoEgoSample, RigLayout
 from simplecv.data.skeleton.coco_133 import (
     COCO_133_ID2NAME,
     COCO_133_IDS,
@@ -28,16 +28,15 @@ from simplecv.data.skeleton.coco_133 import (
     RIGHT_HAND_IDX,
 )
 from simplecv.rerun_custom_types import (
-    PinholeWithDistortion,
     Points2DWithConfidence,
     Points3DWithConfidence,
     confidence_scores_to_rgb,
 )
 from simplecv.rerun_log_utils import (
     RerunTyroConfig,
-    log_pinhole,
     log_video,
 )
+from simplecv.rerun_rig_logger import log_rig_pose_stream, log_rig_static
 from simplecv.sensors.camera.brown_conrady import (
     project_brown_conrady_diagonal,
     project_brown_conrady_grid,
@@ -139,10 +138,14 @@ def log_environment_mesh(exoego_sequence: BaseExoEgoSequence, parent_log_path: P
 
 def log_depths(
     exoego_sequence: BaseExoEgoSequence,
-    parent_log_path: Path,
+    exo_cam_paths: dict[str, Path],
     timeline: str,
 ) -> None:
-    """Log depth maps via column API using uint16 buffers (millimetres)."""
+    """Log depth maps via column API using uint16 buffers (millimetres).
+
+    ``exo_cam_paths`` maps each exo stream name to its ``/world/rig_NN/cam_MM`` node
+    (from :meth:`BaseExoEgoSequence.build_rig_layout`).
+    """
 
     for idx in tqdm(range(len(exoego_sequence))):
         sample: ExoEgoSample = exoego_sequence[idx]
@@ -153,7 +156,7 @@ def log_depths(
         for idx, exo_cam_param in enumerate(exo_cam_params_list):
             if exo_cam_param is None:
                 continue
-            cam_log_path: Path = parent_log_path / "exo" / exo_cam_param.name
+            cam_log_path: Path = exo_cam_paths[exo_cam_param.name]
             pinhole_log_path: Path = cam_log_path / "pinhole"
             depth_log_path: Path = pinhole_log_path / "depth"
 
@@ -168,8 +171,14 @@ def create_container(
     exo_video_log_paths: list[Path] | None = None,
     max_exo_videos_to_log: Literal[4, 8] = 8,
     skip_camera_names: frozenset[str] = frozenset(),
+    video_path_to_name: dict[Path, str] | None = None,
 ) -> rrb.ContainerLike:
     """Create a Rerun container for visualizing ego- and exo-centric streams.
+
+    Under the rig layout a video path is ``/world/rig_NN/cam_MM/pinhole/video``. The
+    2D-panel titles are set to ``rig_NN/cam_MM`` so they match the 3D entity tree.
+    ``video_path_to_name`` maps each video path to its human stream name and drives
+    the skip list (the human name is also queryable as ``name`` metadata per camera).
 
     Args:
         ego_video_log_paths (list[Path] | None): Optional set of ego video entity
@@ -178,23 +187,32 @@ def create_container(
             roots; each path becomes a tabbed 2D view beneath the spatial view.
         max_exo_videos_to_log (Literal[4, 8]): Maximum number of exo video panels
             to materialize when ``exo_video_log_paths`` is provided.
+        skip_camera_names: Human camera names to exclude from panels and the 3D view.
+        video_path_to_name: Map of each video path to its human stream name.
 
     Returns:
         rrb.Blueprint: Assembled layout containing the configured views.
     """
+    name_by_video_path: dict[Path, str] = video_path_to_name or {}
 
-    def _should_include(path: Path) -> bool:
-        """Check if camera should be included based on skip list."""
-        # Path structure: /world/{ego|exo}/{cam_name}/pinhole/video
-        # path.parent = pinhole, path.parent.parent = cam_name
-        cam_name: str = path.parent.parent.name
-        return cam_name not in skip_camera_names
+    def _human_name(video_path: Path) -> str:
+        # The human stream name (e.g. ``hololens``); drives the skip list and is
+        # logged as queryable ``name`` metadata on each cam node by log_rig_static.
+        return name_by_video_path.get(video_path, video_path.parent.parent.name)
 
-    # Build exclusion patterns for 3D view (exclude both ego and exo paths for skipped cameras)
-    exclusion_patterns: list[str] = []
-    for cam_name in skip_camera_names:
-        exclusion_patterns.append(f"- /world/ego/{cam_name}/**")
-        exclusion_patterns.append(f"- /world/exo/{cam_name}/**")
+    def _rig_cam_label(video_path: Path) -> str:
+        # ``rig_NN/cam_MM`` — the panel title matches the 3D entity tree. video_path
+        # is /world/rig_NN/cam_MM/pinhole/video, so its grandparent is the cam node.
+        cam_node: Path = video_path.parent.parent
+        return f"{cam_node.parent.name}/{cam_node.name}"
+
+    def _should_include(video_path: Path) -> bool:
+        return _human_name(video_path) not in skip_camera_names
+
+    # Exclude the whole cam node (/world/rig_NN/cam_MM/**) of each skipped camera
+    # from the 3D view. The cam node is the video path's grandparent (…/cam_MM).
+    all_video_paths: list[Path] = [*(ego_video_log_paths or []), *(exo_video_log_paths or [])]
+    exclusion_patterns: list[str] = [f"- {video_path.parent.parent}/**" for video_path in all_video_paths if not _should_include(video_path)]
 
     # Include everything except excluded cameras
     contents_filter: str | list[str] = ["+ /**"] + exclusion_patterns if exclusion_patterns else "/**"
@@ -212,7 +230,7 @@ def create_container(
         ego_view = rrb.Vertical(
             contents=[
                 rrb.Tabs(
-                    rrb.Spatial2DView(origin=f"{video_log_path.parent}"),
+                    rrb.Spatial2DView(origin=f"{video_log_path.parent}", name=_rig_cam_label(video_log_path)),
                 )
                 for video_log_path in ego_video_log_paths
             ]
@@ -228,7 +246,7 @@ def create_container(
         exo_view = rrb.Horizontal(
             contents=[
                 rrb.Tabs(
-                    rrb.Spatial2DView(origin=f"{video_log_path.parent}"),
+                    rrb.Spatial2DView(origin=f"{video_log_path.parent}", name=_rig_cam_label(video_log_path)),
                 )
                 for video_log_path in exo_video_log_paths[:max_exo_videos_to_log]
             ]
@@ -462,6 +480,8 @@ def log_exoego_batch(
     parent_log_path: Path,
     timeline: str,
     shortest_timestamp: Int[ndarray, "n_frames"],
+    exo_cam_paths: dict[str, Path],
+    ego_cam_paths: dict[str, Path],
     log_ego: bool = True,
     log_exo: bool = True,
     log_mano: bool = False,
@@ -579,7 +599,7 @@ def log_exoego_batch(
             else:
                 raise NotImplementedError(f"Exo camera parameters of type '{type(exo_cam_param_list[0])}' are not supported.")
             for exo_cam_idx, exo_cam in enumerate(exo_cam_param_list):
-                exo_cam_path: Path = parent_log_path / "exo" / exo_cam.name
+                exo_cam_path: Path = exo_cam_paths[exo_cam.name]
                 exo_pinhole_path: Path = exo_cam_path / "pinhole"
                 uv_exo: Float[ndarray, "n_frames 133 2"] = uv_raw_stack[:, exo_cam_idx, :, :].copy()
                 n_frames_cam: int = len(uv_exo)
@@ -640,7 +660,7 @@ def log_exoego_batch(
                 )
                 continue
             # We assume that all cameras have the intrinsics
-            cam_log_path: Path = parent_log_path / "ego" / cam_name
+            cam_log_path: Path = ego_cam_paths[cam_name]
             pinhole_log_path: Path = cam_log_path / "pinhole"
 
             # Align coordinate, confidence, and camera-parameter buffers when their lengths differ.
@@ -785,20 +805,27 @@ def _video_stream_timestamps_for_logging(
 def setup_scene(
     exoego_sequence: BaseExoEgoSequence,
     *,
+    rig_layout: RigLayout,
     parent_log_path: Path,
     timeline: str,
     log_ego: bool,
     log_exo: bool,
     recording: rr.RecordingStream | None = None,
 ) -> SceneSetupResult:
-    """Log static assets, videos, and transforms; derive the shared timeline.
+    """Ingest ego/exo videos into the rig layout and drive moving-rig poses.
+
+    Camera pinholes and static ``rig_T_cam`` transforms are logged separately by
+    :func:`simplecv.rerun_rig_logger.log_rig_static`; this function only ingests the
+    per-frame ``VideoStream`` samples (each placed at its camera's
+    ``…/pinhole/video`` per ``rig_layout``) and, after ego ingest, logs every moving
+    ego rig's ``world_T_rig(t)`` clipped to the frames the demuxer actually accepted.
 
     Args:
-        exoego_sequence (BaseExoEgoSequence): Combined ego/exo dataset ready for
-            visualization.
-        parent_log_path (Path): Root entity under which all scene elements are
-            recorded.
+        exoego_sequence (BaseExoEgoSequence): Combined ego/exo dataset.
+        rig_layout (RigLayout): Canonical rig/camera entity-path assignment.
+        parent_log_path (Path): World root entity (``world``).
         timeline (str): Logical timeline label for video frame timestamps.
+        log_ego / log_exo (bool): Side toggles (must match ``build_rig_layout``).
 
     Returns:
         SceneSetupResult: Bundle with optional video log paths and the
@@ -817,25 +844,10 @@ def setup_scene(
         assert len(exo_video_files) == len(exo_video_names), (
             f"Mismatched exo video assets ({len(exo_video_files)}) and names ({len(exo_video_names)})."
         )
-        # Build name→cam dict using video names as keys (handles None cam params for uncalibrated cameras)
-        exo_cam_by_name: dict[str, PinholeParameters | None] = dict(zip(exo_sequence.exo_video_names, exo_sequence.exo_cam_list, strict=True))
         exo_video_log_path_list: list[Path] = []
-        logged_exo_cameras: set[str] = set()
         for stream_name, video_file in zip(exo_video_names, exo_video_files, strict=True):
-            cam_log_path: Path = parent_log_path / "exo" / stream_name
-            exo_cam: PinholeParameters | None = exo_cam_by_name.get(stream_name)
-            if exo_cam is not None and stream_name not in logged_exo_cameras:
-                log_pinhole(
-                    camera=exo_cam,
-                    cam_log_path=cam_log_path,
-                    image_plane_distance=exo_sequence.image_plane_distance,
-                    static=True,
-                    recording=recording,
-                    include_distortion=True,
-                )
-                logged_exo_cameras.add(stream_name)
-
-            video_log_path: Path = cam_log_path / "pinhole" / "video"
+            # Pinhole + rig_T_cam already logged by log_rig_static; just the video here.
+            video_log_path: Path = rig_layout.exo_cam_paths[stream_name] / "pinhole" / "video"
             exo_video_log_path_list.append(video_log_path)
             # Use blob if available, otherwise use file path
             video_source: bytes | Path = exo_video_blobs[stream_name] if exo_video_blobs and stream_name in exo_video_blobs else video_file
@@ -857,54 +869,8 @@ def setup_scene(
             f"Mismatched ego video assets ({len(ego_video_files)}) and names ({len(ego_video_names)})."
         )
         ego_video_log_path_list: list[Path] = []
-
-        def _log_ego_cameras(shortest_ego_timestamp: Int[ndarray, "n_frames"]) -> None:
-            ego_cam_dict: dict[str, list[PinholeParameters | Fisheye62Parameters]] = cast(
-                dict[str, list[PinholeParameters | Fisheye62Parameters]], ego_sequence.ego_cam_dict
-            )
-            for cam_name, ego_cam_param_list in ego_cam_dict.items():
-                if not ego_cam_param_list:
-                    continue
-                n_frames_cam: int = min(len(ego_cam_param_list), len(shortest_ego_timestamp))
-                if n_frames_cam <= 0:
-                    continue
-                trimmed_cam_params: list[PinholeParameters | Fisheye62Parameters] = ego_cam_param_list[:n_frames_cam]
-                # We assume that all cameras share intrinsics across frames
-                first_cam: PinholeParameters | Fisheye62Parameters = trimmed_cam_params[0]
-                cam_log_path: Path = parent_log_path / "ego" / str(cam_name)
-                pinhole_log_path: Path = cam_log_path / "pinhole"
-                rr.log(
-                    f"{pinhole_log_path}",
-                    PinholeWithDistortion.from_camera(
-                        first_cam,
-                        image_plane_distance=ego_sequence.image_plane_distance,
-                        include_distortion=True,
-                    ),
-                    static=True,
-                    recording=recording,
-                )
-                batch_world_t_cam: Float[ndarray, "n_frames 3"] = np.array(
-                    [ego_cam_param.extrinsics.world_t_cam for ego_cam_param in trimmed_cam_params]
-                )
-                batch_world_R_cam: Float[ndarray, "n_frames 3 3"] = np.array(
-                    [ego_cam_param.extrinsics.world_R_cam for ego_cam_param in trimmed_cam_params]
-                )
-                # camera extrinsics, there's no from_parent=True so need to send as world_x_cam
-                rr.send_columns(
-                    f"{cam_log_path}",
-                    indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_ego_timestamp[0 : len(batch_world_t_cam)])],
-                    columns=[
-                        *rr.Transform3D.columns(
-                            translation=rearrange(batch_world_t_cam, "f d -> (f) d"),
-                            mat3x3=rearrange(batch_world_R_cam, "f r c -> (f) r c"),
-                        ),
-                    ],
-                    recording=recording,
-                )
-
         for stream_name, video_file in zip(ego_video_names, ego_video_files, strict=True):
-            cam_log_path: Path = parent_log_path / "ego" / stream_name
-            ego_video_log_path: Path = cam_log_path / "pinhole" / "video"
+            ego_video_log_path: Path = rig_layout.ego_cam_paths[stream_name] / "pinhole" / "video"
             ego_video_log_path_list.append(ego_video_log_path)
             # Use blob if available, otherwise use file path
             video_source: bytes | Path = ego_video_blobs[stream_name] if ego_video_blobs and stream_name in ego_video_blobs else video_file
@@ -915,10 +881,16 @@ def setup_scene(
             ego_timestamp_list.append(ego_timestamps_ns)
         ego_video_log_paths = ego_video_log_path_list
 
-        # Camera trajectories are logged after video ingestion so their time
-        # range is clipped to the frames the demuxer actually accepted.
+        # Moving-rig trajectories are logged after video ingestion so their time
+        # range is clipped to the frames the demuxer accepted. Pose frame index i
+        # maps to the shortest ego stream's timestamp[i]; NaN poses (tracking
+        # dropouts) hide the whole rig — and all its child frusta — for those frames.
         if ego_timestamp_list:
-            _log_ego_cameras(_choose_shortest_timeline_by_duration(ego_timestamp_list))
+            shortest_ego_timestamp: Int[ndarray, "n_frames"] = _choose_shortest_timeline_by_duration(ego_timestamp_list)
+            for rig in rig_layout.rigs:
+                if rig.pose_stream is None:
+                    continue
+                log_rig_pose_stream(rig, timestamps_ns=shortest_ego_timestamp, world_path=str(parent_log_path), timeline=timeline, recording=recording)
 
     shortest_timestamp: Int[ndarray, "n_frames"] = _choose_shortest_timeline_by_duration(exo_timestamp_list + ego_timestamp_list)
 
@@ -947,6 +919,19 @@ def visualize_exo_ego(exoego_sequence: BaseExoEgoSequence, config: VisualizeConf
     parent_log_path = Path("world")
     timeline: str = "video_time"
 
+    # Single source of truth: assign every camera to a COLMAP-style rig (one rig
+    # per physical device), then log the static rig skeletons (metadata, rig_T_cam,
+    # pinholes, reference tint) up front. The moving ego rig's world_T_rig(t) is
+    # logged later in setup_scene, once video ingest pins down the timeline.
+    # Depth lives under the exo cam nodes, so the exo rigs must be in the layout
+    # whenever depth is logged — even if exo video itself is disabled (otherwise
+    # log_depths would index an empty exo_cam_paths and KeyError).
+    rig_layout: RigLayout = exoego_sequence.build_rig_layout(
+        world_path=parent_log_path, log_exo=config.log_exo or config.log_depths, log_ego=config.log_ego
+    )
+    for rig in rig_layout.rigs:
+        log_rig_static(rig, world_path=str(parent_log_path))
+
     if config.log_labels:
         video_timestamp_list: list[Int[ndarray, "n_frames"]] = _video_stream_timestamps_for_logging(
             exoego_sequence,
@@ -959,6 +944,8 @@ def visualize_exo_ego(exoego_sequence: BaseExoEgoSequence, config: VisualizeConf
             parent_log_path=parent_log_path,
             timeline=timeline,
             shortest_timestamp=label_fallback_timestamp,
+            exo_cam_paths=rig_layout.exo_cam_paths,
+            ego_cam_paths=rig_layout.ego_cam_paths,
             log_ego=config.log_ego,
             log_exo=config.log_exo,
             log_mano=config.log_mano,
@@ -967,6 +954,7 @@ def visualize_exo_ego(exoego_sequence: BaseExoEgoSequence, config: VisualizeConf
 
     scene_setup_result: SceneSetupResult = setup_scene(
         exoego_sequence,
+        rig_layout=rig_layout,
         parent_log_path=parent_log_path,
         timeline=timeline,
         log_ego=config.log_ego,
@@ -980,17 +968,23 @@ def visualize_exo_ego(exoego_sequence: BaseExoEgoSequence, config: VisualizeConf
     if config.log_depths:
         log_depths(
             exoego_sequence=exoego_sequence,
-            parent_log_path=parent_log_path,
+            exo_cam_paths=rig_layout.exo_cam_paths,
             timeline=timeline,
         )
 
     skip_set: frozenset[str] = (
         frozenset(name.strip() for name in config.skip_camera_names.split(",") if name.strip()) if config.skip_camera_names else frozenset()
     )
+    # Map each video entity path back to its human stream name for skip-list
+    # filtering and readable 2D-panel titles (the path tail is now an opaque cam_MM).
+    video_path_to_name: dict[Path, str] = {
+        cam_path / "pinhole" / "video": name for name, cam_path in {**rig_layout.exo_cam_paths, **rig_layout.ego_cam_paths}.items()
+    }
     container: rrb.ContainerLike = create_container(
         exo_video_log_paths=log_paths.exo_video_log_paths,
         ego_video_log_paths=log_paths.ego_video_log_paths,
         skip_camera_names=skip_set,
+        video_path_to_name=video_path_to_name,
     )
     blueprint = rrb.Blueprint(
         rrb.Horizontal(

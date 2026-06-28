@@ -27,6 +27,7 @@ from rerun.recording_stream import RecordingStream
 from tqdm import tqdm
 
 from simplecv.apis.view_exoego import create_container
+from simplecv.rig import entity_id
 
 APPLICATION_ID: str = "exoego-forge"
 """Rerun application id used by converted ExoEgo Forge recordings."""
@@ -151,6 +152,27 @@ class CatalogServer(Protocol):
         ...
 
 
+def _catalog_cam_node(camera_names: dict[str, tuple[str, ...]], kind: str, camera_name: str) -> Path:
+    """Map a catalog camera (by ``kind`` + name) to its ``exoego:v2`` cam entity node.
+
+    Mirrors ``BaseExoEgoSequence.build_rig_layout``'s deterministic indexing for the
+    rigid case (every current dataset): each exo camera is its own world-anchored rig
+    ``rig_<i>/cam_00``; the worn ego device is one moving rig ``rig_<num_exo>`` with
+    one camera per ego stream ``cam_<j>``.
+
+    This holds only while ``camera_names`` lists the exo/ego streams in the same order
+    the builder enumerates them and every ego stream is calibrated. A future
+    non-rigidly-factorable ego device would fall back to per-camera ego rigs
+    (``rig_<num_exo + j>/cam_00``), which this static mapping cannot represent; no
+    catalog dataset hits that today.
+    """
+    exo_names: tuple[str, ...] = camera_names.get("exo", ())
+    ego_names: tuple[str, ...] = camera_names.get("ego", ())
+    if kind == "exo":
+        return Path("world") / entity_id("rig", exo_names.index(camera_name)) / entity_id("cam", 0)
+    return Path("world") / entity_id("rig", len(exo_names)) / entity_id("cam", ego_names.index(camera_name))
+
+
 def build_exoego_catalog_blueprint(dataset_name: str) -> rrb.Blueprint:
     """Build the default catalog blueprint for one ExoEgo Forge dataset.
 
@@ -161,18 +183,22 @@ def build_exoego_catalog_blueprint(dataset_name: str) -> rrb.Blueprint:
         Rerun blueprint used as the default view when opening a dataset segment.
     """
     camera_names: dict[str, tuple[str, ...]] = CATALOG_CAMERA_NAMES.get(dataset_name, {"ego": (), "exo": ()})
-    # Reuse the same layout helper as direct RRD viewing, so catalog segment
-    # blueprints track future view_exoego layout fixes.
-    ego_video_log_paths: list[Path] = [
-        Path("world") / "ego" / camera_name / "pinhole" / "video" for camera_name in camera_names["ego"]
-    ]
-    exo_video_log_paths: list[Path] = [
-        Path("world") / "exo" / camera_name / "pinhole" / "video" for camera_name in camera_names["exo"]
-    ]
+    # Recordings now follow the exoego:v2 rig layout (/world/rig_NN/cam_MM); map each
+    # known camera to its cam node and feed the human names through so 2D panels carry
+    # the skip list + readable rig/cam titles (matching direct view_exoego viewing).
+    ego_video_log_paths: list[Path] = []
+    exo_video_log_paths: list[Path] = []
+    video_path_to_name: dict[Path, str] = {}
+    for kind, video_log_paths in (("ego", ego_video_log_paths), ("exo", exo_video_log_paths)):
+        for name in camera_names[kind]:
+            video_path: Path = _catalog_cam_node(camera_names, kind, name) / "pinhole" / "video"
+            video_log_paths.append(video_path)
+            video_path_to_name[video_path] = name
     container: rrb.ContainerLike = create_container(
         ego_video_log_paths=ego_video_log_paths,
         exo_video_log_paths=exo_video_log_paths,
         skip_camera_names=frozenset(),
+        video_path_to_name=video_path_to_name,
     )
     return rrb.Blueprint(container, collapse_panels=True)
 
@@ -668,7 +694,7 @@ def build_table_card_blueprint(dataset_name: str, *, timeline: str = "video_time
     video_exclusion_queries: list[str] = []
     for kind in ("ego", "exo"):
         for camera_name in camera_names[kind]:
-            video_entity_path: str = f"/world/{kind}/{camera_name}/pinhole/video"
+            video_entity_path: str = f"/{_catalog_cam_node(camera_names, kind, camera_name)}/pinhole/video"
             video_exclusion_queries.append(f"- {video_entity_path}")
             video_exclusion_queries.append(f"- {video_entity_path}/**")
 
@@ -686,7 +712,7 @@ def build_table_card_blueprint(dataset_name: str, *, timeline: str = "video_time
         # recognition of the sequence.
         preview_video_kind: str = preview_camera[0]
         preview_video_camera: str = preview_camera[1]
-        video_origin: str = f"/world/{preview_video_kind}/{preview_video_camera}/pinhole"
+        video_origin: str = f"/{_catalog_cam_node(camera_names, preview_video_kind, preview_video_camera)}/pinhole"
         video_preview_view: rrb.Spatial2DView = rrb.Spatial2DView(
             origin=video_origin,
             name=f"{preview_video_kind} {preview_video_camera}",

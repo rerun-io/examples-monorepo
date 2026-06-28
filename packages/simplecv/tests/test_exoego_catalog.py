@@ -45,6 +45,7 @@ from simplecv.data.exoego.hocap import HocapConfig, HocapSequence
 from simplecv.data.exoego.hot3d import Hot3dConfig, Hot3dSequence
 from simplecv.data.exoego.sequence_identity import SequenceIdentity
 from simplecv.data.exoego.umetrack import UmeTrackConfig, UmeTrackSequence
+from simplecv.rig import entity_id
 
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[1]
 MONOREPO_ROOT: Path = PROJECT_ROOT.parents[1]
@@ -665,10 +666,16 @@ def test_video_exclusion_queries_remove_hocap_videos_from_3d_view() -> None:
     root_contents: list[Any] = list(blueprint.root_container.contents)
     scene_view = root_contents[0]
     camera_names: dict[str, tuple[str, ...]] = CATALOG_CAMERA_NAMES["hocap"]
+    # exoego:v2 rig layout: exo cam i -> rig_i/cam_00, ego cam j -> rig_<num_exo>/cam_j.
+    exo_names: tuple[str, ...] = camera_names["exo"]
     expected_contents: list[str] = ["+ /**"]
     for kind in ("ego", "exo"):
         for camera_name in camera_names[kind]:
-            video_entity_path: str = f"/world/{kind}/{camera_name}/pinhole/video"
+            if kind == "exo":
+                node: str = f"/world/{entity_id('rig', exo_names.index(camera_name))}/{entity_id('cam', 0)}"
+            else:
+                node = f"/world/{entity_id('rig', len(exo_names))}/{entity_id('cam', camera_names['ego'].index(camera_name))}"
+            video_entity_path: str = f"{node}/pinhole/video"
             expected_contents.append(f"- {video_entity_path}")
             expected_contents.append(f"- {video_entity_path}/**")
 

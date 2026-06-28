@@ -126,11 +126,15 @@ def main(cfg: ManoOptimBenchConfig):
         shortest_timestamp[: cfg.max_frames] if cfg.max_frames is not None else shortest_timestamp
     )
 
+    # This benchmark logs exo cameras in its own flat layout (parent_log_path / name),
+    # so the 2D projections must target the same cam nodes (not the rig layout).
     log_exoego_batch(
         exoego_sequence,
         parent_log_path=parent_log_path,
         timeline=timeline,
         shortest_timestamp=shortest_timestamp,
+        exo_cam_paths={exo_cam.name: parent_log_path / exo_cam.name for exo_cam in exo_sequence.exo_cam_list},
+        ego_cam_paths={},
         log_ego=False,
         log_exo=True,
         log_mano=False,
