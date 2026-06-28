@@ -1,3 +1,15 @@
+"""DEPRECATED v1 reader for flat ``/world/{exo,ego}/{name}`` exoego ``.rrd`` files.
+
+The exoego writer now emits the COLMAP-style **``exoego:v2``** rig layout
+(``/world/rig_NN/cam_MM``; see :mod:`simplecv.rerun_rig_logger` and
+``packages/simplecv/docs/exoego_schema.md``). This reader still parses the old
+flat layout, so it correctly reads **pre-existing v1 ``.rrd``** but **cannot read
+v2 writer output**. A v2 reader is a pending follow-up (a full reader refactor);
+until it lands, do not re-ingest freshly generated ``.rrd`` through this path.
+``RRDSequence`` emits a :class:`DeprecationWarning` on construction.
+"""
+
+import warnings
 from collections.abc import Generator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,6 +44,13 @@ class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
     _recording: rre.LazyStore | None = None
 
     def __init__(self, cfg: RRDExoEgoConfig) -> None:
+        warnings.warn(
+            "RRDSequence reads the DEPRECATED flat exoego v1 layout (/world/{exo,ego}/{name}). "
+            "The writer now emits the exoego:v2 rig layout (/world/rig_NN/cam_MM); this reader "
+            "cannot parse v2 output. A v2 reader refactor is pending — see rrd_exoego module docs.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         # Load once and share with ego/exo/labels.
         self._recording = rre.RrdReader(cfg.rrd_path).store()
         self._query_session = RRDQuerySession(cfg.rrd_path)

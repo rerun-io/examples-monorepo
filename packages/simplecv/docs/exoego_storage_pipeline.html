@@ -737,7 +737,8 @@
           <article class="panel">
             <div class="panel-head"><h3>Why this is not canonical yet</h3></div>
             <div class="panel-body">
-              <p><code>docs/exoego_schema.md</code> expects schema/profile metadata such as <code>/world/metadata/schema_version</code> and <code>/world/metadata/annotation_level</code>. The current viewing/logging path logs core videos, cameras, COCO-133 keypoints, optional MANO, optional environment mesh, and optional depth, but it does not make every profile and modality decision explicit.</p>
+              <p><strong>Superseded note:</strong> this page predates the <code>exoego:v2</code> rig migration; <code>docs/exoego_schema.md</code> is the live schema authority. The schema-metadata and depth specifics below have been corrected to the current rig layout.</p>
+              <p><code>docs/exoego_schema.md</code> defines per-rig metadata as static <code>rr.AnyValues</code> on each <code>/world/rig_NN</code> node (<code>schema_version</code>, <code>reference</code>, <code>num_cameras</code>) — not a flat <code>/world/metadata/*</code> entity. The current viewing/logging path logs core videos, cameras, COCO-133 keypoints, optional MANO, optional environment mesh, and optional depth, but it does not yet emit a broader profile/annotation manifest.</p>
               <p>The important distinction is that RRD should become the canonical working format. It should not become the only ground truth until the manifest can say exactly what was included, excluded, or intentionally deferred.</p>
             </div>
           </article>
@@ -800,14 +801,14 @@
             <tbody>
               <tr>
                 <td>Schema metadata</td>
-                <td>Core entity paths are logged, but profile metadata is not consistently emitted.</td>
-                <td>Log <code>/world/metadata/schema_version = "exoego:v1"</code> and <code>/world/metadata/annotation_level</code> for every RRD.</td>
+                <td>Per-rig <code>schema_version</code> / <code>reference</code> / <code>num_cameras</code> are logged (<code>exoego:v2</code>); a broader profile / annotation manifest is not yet emitted.</td>
+                <td>Add an explicit per-RRD profile / <code>annotation_level</code> manifest capturing included, excluded, and deferred modalities.</td>
                 <td>Blocking</td>
               </tr>
               <tr>
                 <td>HOCap depth</td>
                 <td>Depth files exist locally and the base sequence can sample depths. RRD logging defaults depth off and currently logs exo depth only.</td>
-                <td>Promote ego and exo depth to <code>/world/{ego|exo}/{cam}/pinhole/depth</code> with meter units and validation.</td>
+                <td>Promote ego and exo depth to <code>/world/rig_NN/cam_MM/pinhole/depth</code> with meter units and validation.</td>
                 <td>Blocking for HOCap canonical RRDs</td>
               </tr>
               <tr>

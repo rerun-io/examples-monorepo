@@ -21,7 +21,7 @@ from simplecv.apis.view_exoego import create_container, setup_scene
 from simplecv.camera_parameters import Fisheye62Parameters, KannalaBrandtDistortion, PinholeParameters
 from simplecv.configs.exoego_dataset_configs import AnnotatedExoEgoDatasetUnion
 from simplecv.data.ego.base_ego import BaseEgoSequence
-from simplecv.data.exoego.base_exoego import BaseExoEgoSequence
+from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, RigLayout
 from simplecv.data.skeleton.coco133_layers import (
     COCO133_LAYER_COLORS,
     COCO133_LAYER_LABELS,
@@ -44,6 +44,7 @@ from simplecv.rerun_custom_types import (
     confidence_scores_to_rgb,
 )
 from simplecv.rerun_log_utils import RerunTyroConfig
+from simplecv.rerun_rig_logger import log_rig_static
 from simplecv.video_io import MultiVideoReader
 
 device: str = "cuda" if torch.cuda.is_available() else "cpu"
@@ -226,7 +227,7 @@ def run_wilor_ego_tracking(
 
     # Timeline and path setup
     timeline: str = "video_time"
-    parent_log_path: Path = Path("/world")
+    parent_log_path: Path = Path("world")
 
     # Log world coordinate system (required for proper 3D view)
     rr.log("/", exoego_sequence.world_coordinate_system, static=True)
@@ -234,9 +235,17 @@ def run_wilor_ego_tracking(
     # RerunTyroConfig auto-initializes via __post_init__
     set_annotation_context()
 
+    # Assign ego cameras to a COLMAP-style rig and log the static skeletons; the
+    # ego_cam_paths map keeps the hand overlays on the same cam nodes as the video.
+    rig_layout: RigLayout = exoego_sequence.build_rig_layout(world_path=parent_log_path, log_exo=False, log_ego=True)
+    for rig in rig_layout.rigs:
+        log_rig_static(rig, world_path=str(parent_log_path))
+    ego_cam_paths: dict[str, Path] = rig_layout.ego_cam_paths
+
     # Use setup_scene from view_exoego for proper camera/video logging
     scene_result = setup_scene(
         exoego_sequence,
+        rig_layout=rig_layout,
         parent_log_path=parent_log_path,
         timeline=timeline,
         log_ego=True,
@@ -289,7 +298,7 @@ def run_wilor_ego_tracking(
             bgr_frame: UInt8[ndarray, "H W 3"] = bgr_list[cam_idx]
             rgb_frame: UInt8[ndarray, "H W 3"] = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
 
-            cam_log_path: Path = parent_log_path / "ego" / cam_name
+            cam_log_path: Path = ego_cam_paths[cam_name]
             pinhole_log_path: Path = cam_log_path / "pinhole"
 
             uvc_coco: Float32[ndarray, "133 3"] = np.full((133, 3), np.nan, dtype=np.float32)

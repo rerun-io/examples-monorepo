@@ -12,7 +12,7 @@ from jaxtyping import Bool, Float, Float32, Int, UInt8
 from numpy import ndarray
 from tqdm import tqdm
 
-from simplecv.apis.view_exoego import LogPaths, SceneSetupResult, log_exoego_batch, setup_scene
+from simplecv.apis.view_exoego import LogPaths, SceneSetupResult, _choose_shortest_timeline_by_duration, log_exoego_batch
 from simplecv.camera_parameters import BrownConradyDistortion, Extrinsics, Fisheye62Parameters, PinholeParameters
 from simplecv.configs.exoego_dataset_configs import AnnotatedExoEgoDatasetUnion
 from simplecv.data.ego.base_ego import BaseEgoSequence
@@ -33,8 +33,9 @@ from simplecv.data.skeleton.coco_133 import (
     RIGHT_HAND_IDX,
 )
 from simplecv.ops.triangulate import batch_triangulate
-from simplecv.rerun_custom_types import Points2DWithConfidence, Points3DWithConfidence, confidence_scores_to_rgb
-from simplecv.rerun_log_utils import RerunTyroConfig
+from simplecv.rerun_custom_types import PinholeWithDistortion, Points2DWithConfidence, Points3DWithConfidence, confidence_scores_to_rgb
+from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
+from simplecv.rig import rebuild_camera_with_extrinsics
 from simplecv.sensors.camera.brown_conrady import (
     project_brown_conrady_diagonal,
     project_brown_conrady_grid,
@@ -61,26 +62,8 @@ class OakQuestAlignmentConfig:
 
 def _clone_with_extrinsics(camera: CameraParam, world_T_cam: Float[ndarray, "4 4"]) -> CameraParam:
     """Return a fresh camera parameter object sharing intrinsics but new extrinsics."""
-
     new_extrinsics = Extrinsics(world_R_cam=world_T_cam[:3, :3], world_t_cam=world_T_cam[:3, 3])
-
-    if isinstance(camera, PinholeParameters):
-        return PinholeParameters(
-            name=camera.name,
-            intrinsics=camera.intrinsics,
-            extrinsics=new_extrinsics,
-            distortion=camera.distortion,
-        )
-
-    if isinstance(camera, Fisheye62Parameters):
-        return Fisheye62Parameters(
-            name=camera.name,
-            intrinsics=camera.intrinsics,
-            extrinsics=new_extrinsics,
-            distortion=camera.distortion,
-        )
-
-    raise TypeError(f"Unsupported camera type for cloning: {type(camera)}")
+    return cast(CameraParam, rebuild_camera_with_extrinsics(camera, new_extrinsics))
 
 
 @dataclass(slots=True)
@@ -820,6 +803,88 @@ def main(config: RRDPipelineConfig) -> None:
     run_full_exoego_pipeline(config=config, recording=None)
 
 
+def _log_flat_scene(
+    exoego_sequence: BaseExoEgoSequence,
+    *,
+    parent_log_path: Path,
+    timeline: str,
+    recording: rr.RecordingStream | None,
+) -> SceneSetupResult:
+    """Flat-layout (pre-rig) video logging for the OAK<->Quest calibration tool.
+
+    This tool aligns *two* physical devices (an OAK rig to a Quest rig) and re-logs
+    per-camera world poses post-alignment (see :func:`relog_ego_cams`), which does
+    not fit the single-device COLMAP rig model the exoego catalog writer uses. It
+    therefore keeps the original flat ``/world/{exo,ego}/{name}`` layout, decoupled
+    from :func:`simplecv.apis.view_exoego.setup_scene`. Exo cameras get pinhole +
+    video; ego cameras get pinhole + video + their (unaligned) per-frame pose, so a
+    frustum is present even if Umeyama alignment fails — ``relog_ego_cams`` later
+    overwrites the ego pose with the aligned one when alignment succeeds.
+    """
+    ego_sequence: BaseEgoSequence | None = exoego_sequence.ego_sequence
+    exo_sequence = exoego_sequence.exo_sequence
+
+    exo_ts_list: list[Int[ndarray, "n_frames"]] = []
+    exo_video_log_paths: list[Path] | None = None
+    if exo_sequence is not None:
+        exo_video_blobs: dict[str, bytes] | None = getattr(exo_sequence, "_video_blobs", None)
+        exo_paths: list[Path] = []
+        for name, cam, video_file in zip(exo_sequence.exo_video_names, exo_sequence.exo_cam_list, exo_sequence.exo_video_paths, strict=True):
+            cam_path: Path = parent_log_path / "exo" / name
+            if cam is not None:
+                log_pinhole(camera=cam, cam_log_path=cam_path, image_plane_distance=exo_sequence.image_plane_distance, static=True, recording=recording)
+            video_log_path: Path = cam_path / "pinhole" / "video"
+            exo_paths.append(video_log_path)
+            video_source: bytes | Path = exo_video_blobs[name] if exo_video_blobs and name in exo_video_blobs else video_file
+            exo_ts_list.append(log_video(video_source, video_log_path, timeline=timeline, recording=recording))
+        exo_video_log_paths = exo_paths
+
+    ego_ts_list: list[Int[ndarray, "n_frames"]] = []
+    ego_video_log_paths: list[Path] | None = None
+    if ego_sequence is not None:
+        ego_video_blobs: dict[str, bytes] | None = getattr(ego_sequence, "_video_blobs", None)
+        ego_paths: list[Path] = []
+        for name, video_file in zip(ego_sequence.ego_video_names, ego_sequence.ego_video_paths, strict=True):
+            video_log_path = parent_log_path / "ego" / name / "pinhole" / "video"
+            ego_paths.append(video_log_path)
+            video_source = ego_video_blobs[name] if ego_video_blobs and name in ego_video_blobs else video_file
+            ego_ts_list.append(log_video(video_source, video_log_path, timeline=timeline, recording=recording))
+        ego_video_log_paths = ego_paths
+
+        # Log each ego camera's pinhole + (unaligned) per-frame world_T_cam up front,
+        # as the old setup_scene did unconditionally. relog_ego_cams overwrites these
+        # with the aligned poses on Umeyama success; logging them here keeps the ego
+        # frusta visible when alignment fails.
+        if ego_ts_list:
+            shortest_ego: Int[ndarray, "n_frames"] = _choose_shortest_timeline_by_duration(ego_ts_list)
+            for cam_name, cam_param_list in ego_sequence.ego_cam_dict.items():
+                n_frames_cam: int = min(len(cam_param_list), len(shortest_ego))
+                if n_frames_cam <= 0:
+                    continue
+                trimmed: list[PinholeParameters | Fisheye62Parameters] = cam_param_list[:n_frames_cam]
+                cam_log_path: Path = parent_log_path / "ego" / str(cam_name)
+                rr.log(
+                    f"{cam_log_path}/pinhole",
+                    PinholeWithDistortion.from_camera(trimmed[0], image_plane_distance=ego_sequence.image_plane_distance, include_distortion=True),
+                    static=True,
+                    recording=recording,
+                )
+                world_t_cam: Float[ndarray, "n_frames 3"] = np.array([c.extrinsics.world_t_cam for c in trimmed])
+                world_R_cam: Float[ndarray, "n_frames 3 3"] = np.array([c.extrinsics.world_R_cam for c in trimmed])
+                rr.send_columns(
+                    f"{cam_log_path}",
+                    indexes=[rr.TimeColumn(timeline, duration=1e-9 * shortest_ego[:n_frames_cam])],
+                    columns=[*rr.Transform3D.columns(translation=world_t_cam, mat3x3=world_R_cam)],
+                    recording=recording,
+                )
+
+    shortest_timestamp: Int[ndarray, "n_frames"] = _choose_shortest_timeline_by_duration(exo_ts_list + ego_ts_list)
+    return SceneSetupResult(
+        log_paths=LogPaths(exo_video_log_paths=exo_video_log_paths, ego_video_log_paths=ego_video_log_paths),
+        shortest_timestamp=shortest_timestamp,
+    )
+
+
 def run_full_exoego_pipeline(config: RRDPipelineConfig, recording: rr.RecordingStream | None = None) -> None:
     """Execute the Exo/Ego pipeline; split from main so UI backends can supply explicit Rerun recordings."""
     parent_log_path = Path("world")
@@ -839,12 +904,10 @@ def run_full_exoego_pipeline(config: RRDPipelineConfig, recording: rr.RecordingS
     parent_log_path = Path("world")
     timeline: str = "video_time"
 
-    scene_setup_result: SceneSetupResult = setup_scene(
+    scene_setup_result: SceneSetupResult = _log_flat_scene(
         exoego_sequence,
         parent_log_path=parent_log_path,
         timeline=timeline,
-        log_ego=True,
-        log_exo=True,
         recording=recording,
     )
     log_paths: LogPaths = scene_setup_result.log_paths
@@ -870,11 +933,21 @@ def run_full_exoego_pipeline(config: RRDPipelineConfig, recording: rr.RecordingS
     )
     rr.send_blueprint(blueprint, recording=recording)
     # log the ground truth from exoego
+    # Flat-layout cam paths matching _log_flat_scene / relog_ego_cams (this tool
+    # keeps /world/{exo,ego}/{name}, not the rig layout — see _log_flat_scene).
+    exo_cam_paths: dict[str, Path] = (
+        {name: parent_log_path / "exo" / name for name in exoego_sequence.exo_sequence.exo_video_names}
+        if exoego_sequence.exo_sequence is not None
+        else {}
+    )
+    ego_cam_paths: dict[str, Path] = {name: parent_log_path / "ego" / name for name in ego_sequence.ego_video_names}
     log_exoego_batch(
         exoego_sequence=exoego_sequence,
         parent_log_path=parent_log_path,
         timeline=timeline,
         shortest_timestamp=shortest_timestamp,
+        exo_cam_paths=exo_cam_paths,
+        ego_cam_paths=ego_cam_paths,
     )
 
     if shortest_timestamp.size == 0:

@@ -624,21 +624,30 @@ def test_epfl_smart_kitchen_visualized_rrd_contains_video_labels_and_mano(tmp_pa
         assert "/world/gt/mano/right/mesh:Mesh3D:vertex_normals" not in column_names
         assert "/world/gt/mano/left/mesh:Mesh3D:vertex_normals" not in column_names
         assert "/world/gt/mano/coco133_xyz:Points3D:positions" in column_names
-        assert "/world/ego/hololens/pinhole/video:VideoStream:codec" in column_names
-        assert "/world/exo/output0/pinhole/video:VideoStream:codec" in column_names
+        # exoego:v2 rig layout: one exo camera (output0) -> rig_00; the worn ego
+        # device (hololens) -> rig_01 (rig index = number of exo cameras).
+        assert "/world/rig_01/cam_00/pinhole/video:VideoStream:codec" in column_names
+        assert "/world/rig_00/cam_00/pinhole/video:VideoStream:codec" in column_names
+        # The flat v1 layout must be fully gone (clean break).
+        assert not any(name.startswith(("/world/ego/", "/world/exo/")) for name in column_names)
+        # The moving ego rig carries world_T_rig on its rig node; the static exo
+        # rig does not (implicit identity). Both rigs carry schema metadata.
+        assert "/world/rig_01:Transform3D:translation" in column_names
+        assert "/world/rig_00:Transform3D:translation" not in column_names
+        assert "/world/rig_01:schema_version" in column_names and "/world/rig_00:schema_version" in column_names
 
         ego_plane_table = query_session.read_arrow(
             contents="/**",
-            selectors=["/world/ego/hololens/pinhole:Pinhole:image_plane_distance"],
+            selectors=["/world/rig_01/cam_00/pinhole:Pinhole:image_plane_distance"],
             index=None,
         )
         exo_plane_table = query_session.read_arrow(
             contents="/**",
-            selectors=["/world/exo/output0/pinhole:Pinhole:image_plane_distance"],
+            selectors=["/world/rig_00/cam_00/pinhole:Pinhole:image_plane_distance"],
             index=None,
         )
-        ego_plane = first_valid_value(ego_plane_table["/world/ego/hololens/pinhole:Pinhole:image_plane_distance"])
-        exo_plane = first_valid_value(exo_plane_table["/world/exo/output0/pinhole:Pinhole:image_plane_distance"])
+        ego_plane = first_valid_value(ego_plane_table["/world/rig_01/cam_00/pinhole:Pinhole:image_plane_distance"])
+        exo_plane = first_valid_value(exo_plane_table["/world/rig_00/cam_00/pinhole:Pinhole:image_plane_distance"])
         assert float(ego_plane[0]) == pytest.approx(0.1)
         assert float(exo_plane[0]) == pytest.approx(0.25)
     finally:
