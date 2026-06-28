@@ -70,6 +70,7 @@ world_T_cam  = world_T_rig @ rig_T_cam           # composes along the entity tre
       /pinhole/video, /pinhole/coco133_uv
     /cam_01                     fixed rig_T_cam offset (multi-camera ego devices)
       /pinhole/video, /pinhole/coco133_uv
+    /imu_00                     reserved peer sensor (IMU — see §8; not emitted yet)
   /gt                           ground-truth annotations (UNCHANGED from v1, see §5)
 ```
 
@@ -142,5 +143,36 @@ from the normalized `exo_cam_list` / `exo_video_names` and `ego_cam_dict` /
 - [ ] Verify: `rerun rrd print <file>.rrd` shows `/world/rig_NN/cam_MM`, a
       temporal `world_T_rig` on the ego rig, and `schema_version=exoego:v2`; no
       `/world/{exo,ego}/*` remain.
+
+## 8. Reserved / planned sensors: IMU *(not emitted yet)*
+
+The rig model treats **every sensor as a peer child of the rig**, so a non-camera
+sensor slots in alongside the cameras without nesting under one. The next one to add
+is the **IMU**: ego devices like **Project Aria** (RGB + SLAM cameras *and* IMUs) and
+the **RoboCap** capture rigs carry inertial data, and `SensorKind` in
+`simplecv/rig.py` already reserves `"imu"` for exactly this.
+
+**Planned layout** (mirrors `slam-evals`' `-vi` inertial modalities — **reserved; the
+current writer does not emit it**):
+
+```
+/world/rig_NN/imu_MM        Transform3D = rig_T_imu (static) + AnyValues{name, kind="imu"}
+  /gyro                     Scalars (3-component, rad/s)  — angular velocity, video_time
+  /accel                    Scalars (3-component, m/s²)   — linear acceleration, video_time
+```
+
+- The IMU is a **peer of the cameras** (`/world/rig_NN/imu_MM`), **not** nested under
+  a camera, carrying its own static `rig_T_imu` offset in the rig frame — exactly the
+  `slam-evals` convention (its `imu_0` sits beside `cam_0`). `imu_MM` is zero-padded
+  via `entity_id("imu", j)` (`INDEX_WIDTH=2`) and peer-indexed independently of the
+  cameras.
+- A rig may carry **several** IMUs (`imu_00`, `imu_01`, …) — e.g. Aria's two IMUs —
+  just as it carries several cameras.
+- On a **moving** ego rig the IMU rides the rig's `world_T_rig(t)` like every other
+  sensor; its `gyro`/`accel` samples are logged on the shared `video_time` timeline,
+  as `slam-evals` does.
+- Adding IMUs is **mechanical** — a new peer entity plus the already-reserved `"imu"`
+  kind, no new vocabulary. Per the rule below, the first writer that actually emits
+  IMU data should bump the schema version and update this section.
 
 Any change to the layout should increment the schema version and update this doc.
