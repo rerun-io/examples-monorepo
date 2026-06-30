@@ -29,8 +29,12 @@ preserve its default behavior unless there is a demonstrated blocker.
 
 For catalog/server changes:
 
-- Do not replace the existing `tools/catalog.py` / `exoego_forge_catalog.py` flow
-  with a parallel implementation.
+- The 2-tier flow is canonical: serve = the `rerun server` CLI (`simplecv-catalog-serve`), register =
+  `tools/catalog_register.py` / `register_main` (`CatalogClient` → `create_dataset` →
+  `register(layer_name="base", on_duplicate=REPLACE)` → `register_blueprint`). The older single-tier
+  `mount_catalog` + RRD index-table builders are no longer a SimpleCV CLI but stay importable in
+  `exoego_forge_catalog.py` because mv-api's prediction-catalog flow still uses them (a coordinated
+  mv-api migration is deferred).
 - Assembly101-style nested RRD registration must continue to work through
   recursive discovery and explicit RRD file lists.
 - Transport-specific workarounds must be opt-in and covered by tests proving the
@@ -44,11 +48,7 @@ For catalog/server changes:
 
 ## Pre-release Rerun
 
-Prefer the public `rerun-sdk` release. Use the monorepo `rerun-prerelease`
-feature only for a confirmed Rerun bug that is fixed upstream but not yet
-released.
-
-When updating it, pin `find-links` to the matching `rerun-io/reality` wheel
-commit, match the wheel version string, and leave the upstream issue/PR in a
-comment. Keep it opt-in; do not make prerelease Rerun the default. Once the fix
-ships publicly, move back to the public release pin.
+Prefer the public `rerun-sdk` release. The catalog runs on the `simplecv-catalog` env, which uses
+the shared `rerun-prerelease` lane, currently pinned to `rerun-io/reality#2496` (`deeb4e6` /
+`0.34.0a1+dev`, fast OSS-catalog register). See the root `AGENTS.md` "Testing Rerun builds" for how
+to pin/repin that lane. Keep prerelease opt-in; move back to a public release once the fix ships.

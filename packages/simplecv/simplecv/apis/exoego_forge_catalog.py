@@ -1,7 +1,12 @@
-"""Utilities for serving ExoEgo Forge RRD files through a Rerun catalog.
+"""Utilities for registering ExoEgo Forge RRD files into a Rerun catalog.
 
-The public ``main`` entrypoint mounts converted ExoEgo Forge recordings as
-catalog datasets and creates one on-demand table per source dataset.
+The canonical flow is **two-tier**: a separate ``rerun server`` (tier 1) plus the
+re-runnable client step ``RegisterConfig`` / ``register_main`` (tier 2) that attaches
+converted recordings as catalog datasets with a default per-segment blueprint.
+
+``mount_catalog`` and the RRD index-table builders are the older single-tier path; they
+are no longer exposed as a SimpleCV CLI but remain importable because mv-api's
+prediction-catalog flow still uses them (a coordinated mv-api migration is deferred).
 """
 
 from __future__ import annotations
@@ -11,13 +16,11 @@ import base64
 import os
 import subprocess
 import tempfile
-import threading
-import time
 import weakref
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 import pyarrow as pa
 import rerun as rr
@@ -39,8 +42,6 @@ TABLE_CARD_PREVIEW_START_SECONDS: float = 0.0
 """Start of the absolute ``video_time`` loop used by table-card previews."""
 TABLE_CARD_PREVIEW_END_SECONDS: float = 10.0
 """End of the absolute ``video_time`` loop used by table-card previews."""
-CATALOG_SHUTDOWN_TIMEOUT_SECONDS: float = 5.0
-"""Maximum graceful shutdown wait after Ctrl-C before forcing process exit."""
 DEFAULT_CATALOG_RRD_CACHE_DIR: Path = Path("~/.cache/simplecv/exoego-forge-catalog-optimized")
 """Default persistent cache root for catalog-compatible optimized RRD copies."""
 
@@ -173,25 +174,43 @@ def _catalog_cam_node(camera_names: dict[str, tuple[str, ...]], kind: str, camer
     return Path("world") / entity_id("rig", len(exo_names)) / entity_id("cam", ego_names.index(camera_name))
 
 
-def build_exoego_catalog_blueprint(dataset_name: str) -> rrb.Blueprint:
+def _blueprint_cam_node(
+    camera_names: dict[str, tuple[str, ...]], kind: str, camera_name: str, *, layout: Literal["flat", "rig"]
+) -> Path:
+    """Return a catalog camera's video-parent entity node for the recording layout.
+
+    ``rig`` (``exoego:v2``) maps to ``/world/rig_NN/cam_MM`` via ``_catalog_cam_node``;
+    ``flat`` (legacy v1) is simply ``/world/<kind>/<camera_name>``.
+    """
+    if layout == "rig":
+        return _catalog_cam_node(camera_names, kind, camera_name)
+    return Path("world") / kind / camera_name
+
+
+def build_exoego_catalog_blueprint(dataset_name: str, *, layout: Literal["flat", "rig"] = "rig") -> rrb.Blueprint:
     """Build the default catalog blueprint for one ExoEgo Forge dataset.
 
     Args:
         dataset_name: Dataset key used to select known ego and exo camera names.
+        layout: Entity layout of the recordings the blueprint targets. ``"rig"``
+            (``exoego:v2``, cameras at ``/world/rig_NN/cam_MM``) for migrated
+            recordings; ``"flat"`` (legacy v1 catalog, ``/world/{exo,ego}/<name>``).
+            The video entity paths must match the recording or 2D panels render blank.
 
     Returns:
         Rerun blueprint used as the default view when opening a dataset segment.
     """
     camera_names: dict[str, tuple[str, ...]] = CATALOG_CAMERA_NAMES.get(dataset_name, {"ego": (), "exo": ()})
-    # Recordings now follow the exoego:v2 rig layout (/world/rig_NN/cam_MM); map each
-    # known camera to its cam node and feed the human names through so 2D panels carry
-    # the skip list + readable rig/cam titles (matching direct view_exoego viewing).
+    # Map each known camera to its video entity node for the recording's layout, and
+    # feed the human names through so 2D panels carry the skip list + readable titles
+    # (matching direct view_exoego viewing).
     ego_video_log_paths: list[Path] = []
     exo_video_log_paths: list[Path] = []
     video_path_to_name: dict[Path, str] = {}
     for kind, video_log_paths in (("ego", ego_video_log_paths), ("exo", exo_video_log_paths)):
         for name in camera_names[kind]:
-            video_path: Path = _catalog_cam_node(camera_names, kind, name) / "pinhole" / "video"
+            cam_node: Path = _blueprint_cam_node(camera_names, kind, name, layout=layout)
+            video_path: Path = cam_node / "pinhole" / "video"
             video_log_paths.append(video_path)
             video_path_to_name[video_path] = name
     container: rrb.ContainerLike = create_container(
@@ -209,19 +228,21 @@ def _register_default_dataset_blueprint(
     *,
     dataset_name: str,
     application_id: str = APPLICATION_ID,
+    layout: Literal["flat", "rig"] = "rig",
 ) -> Path:
     """Save and register the full per-segment default blueprint for one dataset.
 
     Args:
-        server: Rerun server that owns the dataset and temporary blueprint lifetime.
+        server: Rerun server (or client) whose lifetime bounds the temp blueprint file.
         dataset_entry: Catalog dataset entry returned by the Rerun server client.
         dataset_name: Dataset key used to build the dataset-specific blueprint.
         application_id: Rerun application id used when serializing the blueprint.
+        layout: Entity layout (``flat``/``rig``) of the recordings the blueprint targets.
 
     Returns:
         Path to the temporary ``.rbl`` blueprint file registered with the dataset.
     """
-    blueprint: rrb.Blueprint = build_exoego_catalog_blueprint(dataset_name)
+    blueprint: rrb.Blueprint = build_exoego_catalog_blueprint(dataset_name, layout=layout)
     tmp_dir = tempfile.TemporaryDirectory(prefix=f"{dataset_name}-")
     # Keep the temporary blueprint file alive for as long as the server object is alive.
     weakref.finalize(server, tmp_dir.cleanup)
@@ -438,34 +459,6 @@ def mount_catalog(
         )
 
     return server
-
-
-@dataclass
-class CatalogConfig:
-    """Config for the general ExoEgo Forge catalog index server."""
-
-    rrd_root: Path = Path("data/exoego-forge-catalog")
-    """Directory containing ``<dataset>/**/*.rrd`` files."""
-    datasets: tuple[str, ...] = DEFAULT_CATALOG_DATASETS
-    """Dataset directories to mount. Empty tuple scans all first-level directories."""
-    port: int = 9988
-    """gRPC port for the catalog server."""
-    application_id: str = APPLICATION_ID
-    """Application id used to save default dataset blueprints. Must match converted RRDs."""
-    optimize_for_catalog: bool = True
-    """Register optimized cache copies to avoid lossy Rerun catalog segment imports."""
-    catalog_rrd_cache_dir: Path = DEFAULT_CATALOG_RRD_CACHE_DIR
-    """Persistent cache directory for catalog-compatible optimized RRD copies."""
-    optimize_datasets: tuple[str, ...] = DEFAULT_CATALOG_OPTIMIZE_DATASETS
-    """Dataset names whose RRDs should be optimized before catalog registration.
-
-    Removing a dataset here can make its catalog table/segment schema incomplete
-    even when the underlying raw RRD opens correctly in the viewer.
-    """
-    open_browser: bool = False
-    """Also host a web viewer and open it."""
-    web_port: int = 9091
-    """Web viewer port. Only used when ``open_browser`` is true."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -861,121 +854,75 @@ def create_rrd_index_table(
     return table
 
 
-def _shutdown_catalog_server(server: CatalogServer, *, timeout_seconds: float = CATALOG_SHUTDOWN_TIMEOUT_SECONDS) -> bool:
-    """Shutdown a Rerun server without letting native teardown block forever.
+@dataclass
+class RegisterConfig:
+    """Config for tier 2: register ExoEgo Forge RRD roots into a running catalog."""
+
+    rrd_root: Path = Path("data/exoego-forge-catalog")
+    """Directory containing ``<dataset>/**/*.rrd`` files to register."""
+    catalog_url: str = "rerun+http://127.0.0.1:9988"
+    """URL of the running catalog server (the ``simplecv-catalog-serve`` task / ``rerun server``)."""
+    datasets: tuple[str, ...] = DEFAULT_CATALOG_DATASETS
+    """Dataset directories to register. Empty tuple scans all first-level directories."""
+    layout: Literal["flat", "rig"] = "rig"
+    """Entity layout of the recordings under ``rrd_root``, used to build each dataset's
+    default blueprint. ``rig`` for exoego:v2 roots; ``flat`` for the legacy v1 root."""
+    suffix: str = ""
+    """Entry-name suffix. The rig root must register as ``-rig`` so its recording_ids do
+    not collide with the v1 root registered under the same dataset names."""
+    application_id: str = APPLICATION_ID
+    """Application id used to save default dataset blueprints. Must match converted RRDs."""
+    recreate: bool = True
+    """Delete and recreate each dataset entry before registering. Pass ``--no-recreate`` to
+    re-register onto existing entries (REPLACE per segment layer)."""
+
+
+def register_main(config: RegisterConfig) -> None:
+    """Register local ExoEgo Forge RRD roots into a running catalog (tier 2).
+
+    Mirrors the cloud ingestion flow: one catalog dataset per source, every RRD attached
+    under ``layer_name="base"``, plus a default blueprint. Idempotent (REPLACE), so the
+    v1 and rig roots register into one live catalog without a restart. Registers the raw
+    RRDs directly: the upstream footer-first store-id enumeration (rerun-io/reality#2496)
+    makes register fast without a ``rerun rrd optimize`` rewrite.
 
     Args:
-        server: Running Rerun catalog server.
-        timeout_seconds: Maximum time to wait for graceful shutdown.
-
-    Returns:
-        True when shutdown completed before the timeout, false otherwise.
-
-    Raises:
-        RuntimeError: If the shutdown thread returns an exception.
+        config: Registration configuration.
     """
-    shutdown_errors: list[BaseException] = []
+    from rerun.catalog import CatalogClient, OnDuplicateSegmentLayer
 
-    def shutdown() -> None:
-        try:
-            server.shutdown()
-        except BaseException as exc:  # noqa: BLE001 - relay shutdown failures from the worker thread.
-            shutdown_errors.append(exc)
-
-    shutdown_thread: threading.Thread = threading.Thread(
-        target=shutdown,
-        name="rerun-catalog-shutdown",
-        daemon=True,
-    )
-    shutdown_thread.start()
-    try:
-        shutdown_thread.join(timeout=timeout_seconds)
-    except KeyboardInterrupt:
-        return False
-    if shutdown_thread.is_alive():
-        return False
-    if shutdown_errors:
-        raise RuntimeError("Rerun catalog server shutdown failed.") from shutdown_errors[0]
-    return True
-
-
-def main(config: CatalogConfig) -> None:
-    """Host a Rerun catalog for converted ExoEgo Forge RRD files.
-
-    Args:
-        config: Runtime configuration for the catalog server.
-    """
     rrd_root: Path = config.rrd_root.expanduser().resolve()
-    paths_by_dataset: dict[str, list[Path]] = discover_rrd_paths(rrd_root, datasets=config.datasets)
-    dataset_names: list[str] = sorted(paths_by_dataset)
+    uris_by_dataset: dict[str, list[str]] = discover_rrd_uris(rrd_root, datasets=config.datasets)
 
-    server: CatalogServer | None = None
-    client: Any | None = None
-    try:
-        server = mount_catalog(
-            rrd_root,
-            datasets=config.datasets,
-            port=config.port,
-            application_id=config.application_id,
-            optimize_for_catalog=config.optimize_for_catalog,
-            catalog_rrd_cache_dir=config.catalog_rrd_cache_dir,
-            optimize_datasets=config.optimize_datasets,
+    client: Any = CatalogClient(config.catalog_url)
+    existing_names: set[str] = set(client.dataset_names())
+    total_files: int = sum(len(uris) for uris in uris_by_dataset.values())
+    print(
+        f"Registering {total_files} RRDs from {rrd_root} into {config.catalog_url} "
+        f"(layout={config.layout}, suffix={config.suffix or '<none>'}).",
+        flush=True,
+    )
+
+    for dataset_name in sorted(uris_by_dataset):
+        uris: list[str] = uris_by_dataset[dataset_name]
+        entry_name: str = f"{dataset_name}{config.suffix}"
+        if config.recreate and entry_name in existing_names:
+            client.get_dataset(entry_name).delete()
+        dataset_entry: Any = client.create_dataset(entry_name, exist_ok=True)
+        print(f"  {entry_name}: registering {len(uris)} RRD(s)...", flush=True)
+        registration_handle: Any = dataset_entry.register(
+            uris, layer_name="base", on_duplicate=OnDuplicateSegmentLayer.REPLACE
         )
-        client = server.client()
-        table_urls_by_name: dict[str, str] = {}
-        catalog_url: str = server.url()
-        for dataset_name in dataset_names:
-            dataset_dir: Path = rrd_root / dataset_name
-            dataset_entry = client.get_dataset(dataset_name)
-            rows: list[RRDIndexRow] = build_rrd_index_rows_from_dataset(
-                dataset_entry,
-                dataset_dir=dataset_dir,
-                dataset_name=dataset_name,
-            )
-            table_name: str = table_name_for_dataset(dataset_name)
-            total_size_bytes: int = sum(row.size_bytes for row in rows)
-            print(f"Creating {table_name} ({len(rows)} RRDs, {total_size_bytes:,} bytes).", flush=True)
-            table = create_rrd_index_table(
-                client,
-                dataset_name=dataset_name,
-                table_name=table_name,
-                rows=rows,
-            )
-            table_urls_by_name[table_name] = f"{catalog_url}/entry/{table.id}"
+        registration_handle.wait()
 
-        print()
-        print("-" * 72)
-        print(f"  Catalog URL:  {catalog_url}")
-        print()
-        print("  Tables:")
-        for table_name, table_url in table_urls_by_name.items():
-            print(f"    {table_name}: {table_url}")
-        print()
-        print("  In the Rerun viewer: + -> Open Data Source -> paste the URL")
-        print("  Open a table with:")
-        print("    pixi run rerun <table-url>")
-        print()
-        print("  Enable: Settings > Experimental > Table cards and blueprints")
-        print("-" * 72, flush=True)
+        # Install the per-dataset default blueprint. register_blueprint uploads the .rbl
+        # synchronously, so a with-scoped temp dir (removed at the end of each iteration) is
+        # all this one-shot client step needs — unlike the single-tier
+        # _register_default_dataset_blueprint, whose weakref ties the file to a long-lived server.
+        blueprint: rrb.Blueprint = build_exoego_catalog_blueprint(dataset_name, layout=config.layout)
+        with tempfile.TemporaryDirectory(prefix=f"{entry_name}-") as tmp_name:
+            blueprint_path: Path = Path(tmp_name) / f"{entry_name}.rbl"
+            blueprint.save(config.application_id, path=str(blueprint_path))
+            dataset_entry.register_blueprint(blueprint_path.resolve().as_uri(), set_default=True)
 
-        if config.open_browser:
-            rr.serve_web_viewer(web_port=config.web_port, open_browser=True, connect_to=catalog_url)
-            print(f"\nWeb viewer hosted at http://127.0.0.1:{config.web_port}")
-
-        print("\nServer is up. Ctrl-C to stop.", flush=True)
-        try:
-            while True:
-                time.sleep(3600)
-        except KeyboardInterrupt:
-            print("shutting down", flush=True)
-    finally:
-        client = None
-        if server is not None:
-            shutdown_completed: bool = _shutdown_catalog_server(server)
-            if not shutdown_completed:
-                print(
-                    f"Rerun catalog server did not shut down within {CATALOG_SHUTDOWN_TIMEOUT_SECONDS:.1f}s; "
-                    "forcing process exit.",
-                    flush=True,
-                )
-                os._exit(130)
+    print("\nRegistration complete.", flush=True)

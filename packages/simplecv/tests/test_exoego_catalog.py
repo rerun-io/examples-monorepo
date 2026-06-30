@@ -3,25 +3,20 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
 import pytest
-import tomllib
 
 import simplecv.apis.exoego_forge_catalog as catalog_module
 from simplecv.apis.exoego_forge_catalog import (
     CATALOG_CAMERA_NAMES,
     DEFAULT_CATALOG_DATASETS,
-    DEFAULT_CATALOG_OPTIMIZE_DATASETS,
-    DEFAULT_CATALOG_RRD_CACHE_DIR,
     MARKER_FLAG_COLUMN,
     TABLE_BLUEPRINT_METADATA_KEY,
     TABLE_CARD_PREVIEW_END_SECONDS,
     TABLE_CARD_PREVIEW_START_SECONDS,
-    CatalogConfig,
     RRDIndexRow,
     _optimize_rrd_for_catalog,
     _register_default_dataset_blueprint,
@@ -190,49 +185,6 @@ def test_discover_rrd_paths_raises_when_no_requested_dataset_has_rrds(tmp_path: 
         discover_rrd_paths(tmp_path, datasets=("aria-gen2", "hocap"))
 
 
-def test_catalog_config_defaults_to_general_catalog_index() -> None:
-    config: CatalogConfig = CatalogConfig()
-
-    assert [field.name for field in fields(CatalogConfig)] == [
-        "rrd_root",
-        "datasets",
-        "port",
-        "application_id",
-        "optimize_for_catalog",
-        "catalog_rrd_cache_dir",
-        "optimize_datasets",
-        "open_browser",
-        "web_port",
-    ]
-    assert config.rrd_root == Path("data/exoego-forge-catalog")
-    assert config.datasets == DEFAULT_CATALOG_DATASETS
-    assert config.datasets == (
-        "aria-gen2",
-        "assembly101",
-        "epfl-smart-kitchen",
-        "hocap",
-        "hot3d-aria",
-        "hot3d-quest3",
-        "umetrack",
-        "ego-dex",
-    )
-    assert config.optimize_for_catalog is True
-    assert config.optimize_datasets == DEFAULT_CATALOG_OPTIMIZE_DATASETS
-    assert set(config.optimize_datasets) == set(config.datasets)
-    assert config.catalog_rrd_cache_dir == DEFAULT_CATALOG_RRD_CACHE_DIR
-
-
-def test_pixi_catalog_task_skips_preoptimization_for_interactive_startup() -> None:
-    pixi_text: str = (MONOREPO_ROOT / "pixi.toml").read_text()
-    pixi_data: dict[str, Any] = tomllib.loads(pixi_text)
-    catalog_task: dict[str, Any] = pixi_data["feature"]["simplecv"]["tasks"]["simplecv-catalog"]
-    catalog_cmd: str = catalog_task["cmd"]
-
-    assert "[feature.simplecv.tasks.simplecv-catalog]" in pixi_text
-    assert catalog_cmd == "python tools/catalog.py --rrd-root /mnt/8tb/data/exoego-forge-catalog --no-optimize-for-catalog"
-    assert "pre-optimizes missing RRD cache copies before Rerun registration" in pixi_text
-
-
 @pytest.mark.parametrize(
     ("dataset_name", "table_name"),
     [
@@ -388,76 +340,6 @@ def test_mount_catalog_python_server_preserves_recursive_file_list(
             first_rrd.resolve(),
         ]
     }
-
-
-def test_catalog_main_shutdowns_server_directly_on_keyboard_interrupt(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    rrd_root: Path = tmp_path / "rrds"
-    source_rrd: Path = rrd_root / "assembly101" / "all" / "seq_01.rrd"
-    source_rrd.parent.mkdir(parents=True, exist_ok=True)
-    source_rrd.write_bytes(b"not a real rrd")
-    shutdown_calls: list[str] = []
-
-    class _FakeTable:
-        id: str = "table_id"
-
-    class _FakeClient:
-        def get_dataset(self, dataset_name: str) -> _FakeBlueprintDatasetEntry:
-            assert dataset_name == "assembly101"
-            return _FakeBlueprintDatasetEntry()
-
-    class _FakeServer:
-        def url(self) -> str:
-            return "rerun+http://127.0.0.1:9988"
-
-        def client(self) -> _FakeClient:
-            return _FakeClient()
-
-        def shutdown(self) -> None:
-            shutdown_calls.append("shutdown")
-
-        def __enter__(self) -> _FakeServer:
-            raise AssertionError("catalog main should not rely on Rerun Server.__enter__")
-
-        def __exit__(
-            self,
-            _exc_type: type[BaseException] | None,
-            _exc_value: BaseException | None,
-            _traceback: Any | None,
-        ) -> None:
-            raise AssertionError("catalog main should not rely on Rerun Server.__exit__")
-
-    fake_server = _FakeServer()
-
-    monkeypatch.setattr(catalog_module, "mount_catalog", lambda *_args, **_kwargs: fake_server)
-    monkeypatch.setattr(
-        catalog_module,
-        "build_rrd_index_rows_from_dataset",
-        lambda *_args, **_kwargs: [
-            RRDIndexRow(
-                id=0,
-                dataset="assembly101",
-                sequence_key="all/seq_01",
-                recording_uri="rerun+http://127.0.0.1:9988/dataset/assembly101?segment_id=assembly101__all__seq_01",
-                path=str(source_rrd),
-                size_bytes=source_rrd.stat().st_size,
-            )
-        ],
-    )
-    monkeypatch.setattr(catalog_module, "create_rrd_index_table", lambda *_args, **_kwargs: _FakeTable())
-    monkeypatch.setattr(catalog_module.time, "sleep", lambda _seconds: (_ for _ in ()).throw(KeyboardInterrupt))
-
-    catalog_module.main(
-        CatalogConfig(
-            rrd_root=rrd_root,
-            datasets=("assembly101",),
-            optimize_for_catalog=False,
-        )
-    )
-
-    assert shutdown_calls == ["shutdown"]
 
 
 def test_register_default_dataset_blueprint_registers_full_segment_blueprint() -> None:
