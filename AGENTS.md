@@ -92,12 +92,13 @@ expected across SimpleCV tools. For a realtime tool that needs the live viewer
 
 ## Testing Rerun builds
 
-To test an **unreleased** Rerun build (a fix that's merged or still on a PR branch upstream), use
-the shared `rerun-prerelease` feature — it pins `find-links` at a `build.rerun.io/commit/<sha>/wheels/`
-wheel and is composed into `no-default-feature` envs beside `catalog-common` (e.g. `simplecv-catalog`,
-`mv-api-catalog`). It's currently pinned to **`rerun-io/reality#2496`** (`deeb4e6` / `0.34.0a1+dev`,
-fast OSS-catalog register). Repin/verify steps, the platform/version caveats, and the
-build-from-branch fallback are in [`docs/rerun_build_testing.md`](docs/rerun_build_testing.md).
+To test an **unreleased** Rerun build, use the shared `rerun-prerelease` feature: point its
+`find-links` at the `build.rerun.io/commit/<sha>/wheels/` wheel (CI builds one per commit, including
+PR branches — `curl` the index first to confirm your platform; PR commits are usually linux-x86_64
+only) and match `rerun-sdk == <ver>` to the wheel filename. It composes into `no-default-feature`
+envs beside `catalog-common` (e.g. `simplecv-catalog`, `mv-api-catalog`). Currently pinned to
+**`rerun-io/reality#2496`** (`deeb4e6` / `0.34.0a1+dev`, fast OSS-catalog register); re-lock on
+linux-64 (pixi 0.70.x) and move back to a public release once the fix ships.
 
 ## Gotchas
 

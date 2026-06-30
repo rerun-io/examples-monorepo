@@ -85,8 +85,8 @@ xorg-xorgproto = "*"
 simplecv = { path = "packages/simplecv", editable = true }
 
 # rerun-io/reality#2496 — footer-first store-id enumeration (fast OSS-catalog register).
-# x86_64-only commit wheel; move back to a public release once the fix ships. See
-# docs/rerun_build_testing.md for how this prerelease lane is pinned/tested.
+# x86_64-only commit wheel; move back to a public release once the fix ships. See the root
+# AGENTS.md "Testing Rerun builds" for how this prerelease lane is pinned/tested.
 [feature.rerun-prerelease.pypi-dependencies]
 rerun-sdk = { version = "==0.34.0a1+dev", extras = [
     "datafusion",

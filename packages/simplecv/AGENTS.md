@@ -50,6 +50,5 @@ For catalog/server changes:
 
 Prefer the public `rerun-sdk` release. The catalog runs on the `simplecv-catalog` env, which uses
 the shared `rerun-prerelease` lane, currently pinned to `rerun-io/reality#2496` (`deeb4e6` /
-`0.34.0a1+dev`, fast OSS-catalog register). How to pin/repin/test that lane — and the
-build-from-branch fallback — lives in the monorepo `docs/rerun_build_testing.md` (single source of
-truth). Keep prerelease opt-in; move back to a public release once the fix ships.
+`0.34.0a1+dev`, fast OSS-catalog register). See the root `AGENTS.md` "Testing Rerun builds" for how
+to pin/repin that lane. Keep prerelease opt-in; move back to a public release once the fix ships.
