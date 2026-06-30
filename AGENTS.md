@@ -90,6 +90,15 @@ expected across SimpleCV tools. For a realtime tool that needs the live viewer
 **and** a `.rrd` at once, set `rr_config.live` together with `--rr-config.save`:
 `RerunTyroConfig` then fans out to both via `set_sinks` (the `live`/`port` fields).
 
+## Testing Rerun builds
+
+To test an **unreleased** Rerun build (a fix that's merged or still on a PR branch upstream), use
+the shared `rerun-prerelease` feature — it pins `find-links` at a `build.rerun.io/commit/<sha>/wheels/`
+wheel and is composed into `no-default-feature` envs beside `catalog-common` (e.g. `simplecv-catalog`,
+`mv-api-catalog`). It's currently pinned to **`rerun-io/reality#2496`** (`deeb4e6` / `0.34.0a1+dev`,
+fast OSS-catalog register). Repin/verify steps, the platform/version caveats, and the
+build-from-branch fallback are in [`docs/rerun_build_testing.md`](docs/rerun_build_testing.md).
+
 ## Gotchas
 
 - **Never use pip** — all dependency management goes through Pixi

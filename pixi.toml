@@ -84,15 +84,18 @@ xorg-xorgproto = "*"
 [feature.catalog-common.pypi-dependencies]
 simplecv = { path = "packages/simplecv", editable = true }
 
+# rerun-io/reality#2496 — footer-first store-id enumeration (fast OSS-catalog register).
+# x86_64-only commit wheel; move back to a public release once the fix ships. See
+# docs/rerun_build_testing.md for how this prerelease lane is pinned/tested.
 [feature.rerun-prerelease.pypi-dependencies]
-rerun-sdk = { version = "==0.33.0a1+dev", extras = [
+rerun-sdk = { version = "==0.34.0a1+dev", extras = [
     "datafusion",
     "dataloader",
 ] }
 
 [feature.rerun-prerelease.pypi-options]
 index-url = "https://pypi.org/simple"
-find-links = [{ url = "https://build.rerun.io/commit/5f732f2/wheels/" }]
+find-links = [{ url = "https://build.rerun.io/commit/deeb4e6/wheels/" }]
 prerelease-mode = "allow"
 
 
@@ -308,12 +311,27 @@ cmd = "python tools/preprocess_epfl_smart_kitchen.py"
 cwd = "packages/simplecv"
 description = "Build an AV1-transcoded EPFL-Smart-Kitchen mirror for SimpleCV"
 
-[feature.simplecv.tasks.simplecv-catalog]
-# Keep the default task fast for interactive browsing. Without
-# --no-optimize-for-catalog, SimpleCV pre-optimizes missing RRD cache copies before Rerun registration/ingestion.
-cmd = "python tools/catalog.py --rrd-root /mnt/8tb/data/exoego-forge-catalog --no-optimize-for-catalog"
+[feature.simplecv.tasks.simplecv-catalog-serve]
+# Tier 1: just the `rerun server` CLI (an empty in-memory catalog), like hiw-500's serve.
+# The high `ulimit -n` is needed because the long-lived server holds one open file handle
+# per registered recording (the full 6332-file catalog otherwise hits "Too many open files").
+cmd = "bash -c 'ulimit -n 524288 && rerun server --port 9988'"
+description = "Serve an empty ExoEgo Forge catalog on :9988 (2-tier; leave running)"
+
+[feature.simplecv.tasks.simplecv-catalog-register]
+# Tier 2: register the v1 root into the running catalog. v1 uses the flat
+# /world/{exo,ego}/<name> layout, so its default blueprint must too (--layout flat).
+cmd = "python tools/catalog_register.py --rrd-root /mnt/8tb/data/exoego-forge-catalog --layout flat"
 cwd = "packages/simplecv"
-description = "Host the ExoEgo Forge RRD catalog index"
+description = "Register the v1 (flat) root into the running catalog"
+
+[feature.simplecv.tasks.simplecv-catalog-register-rig]
+# The `-rig` suffix is mandatory: v1 and rig RRDs share recording_ids and would collide under
+# the same entry name. Use `--suffix=-rig` (equals form): a value starting with `-` is
+# otherwise parsed as another flag. The rig root keeps the default rig layout.
+cmd = "python tools/catalog_register.py --rrd-root /mnt/8tb/data/exoego-forge-catalog-rig --suffix=-rig"
+cwd = "packages/simplecv"
+description = "Register the rig (exoego:v2) root as -rig entries into the running catalog"
 
 [feature.simplecv.tasks._download-simplecv-example-polycam-data]
 cmd = "test -e data/example-room-scan-poly.zip || hf download pablovela5620/polycam-example-data example-room-scan-poly.zip --repo-type dataset --local-dir data/"
@@ -1957,6 +1975,22 @@ simplecv-dev = { features = [
     "simplecv",
     "dev",
 ], solve-group = "simplecv", no-default-feature = true }
+# 2-tier ExoEgo Forge catalog: like `simplecv` but on the prerelease Rerun lane (rerun-prerelease,
+# pinned to reality#2496) instead of `common`'s released rerun-sdk==0.33.0. Uses `catalog-common`
+# (the rerun-pin-free mirror) so the prerelease wheel wins. linux-64 only (matches the x86_64 wheel).
+simplecv-catalog = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "simplecv",
+], solve-group = "simplecv-catalog", no-default-feature = true }
+simplecv-catalog-dev = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "simplecv",
+    "dev",
+], solve-group = "simplecv-catalog", no-default-feature = true }
 monoprior = { features = [
     "common",
     "cuda",

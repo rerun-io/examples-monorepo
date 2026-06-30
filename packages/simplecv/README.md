@@ -19,19 +19,20 @@ pixi task list -e simplecv
 ```
 
 ### Rerun Environment
-The default Pixi environment uses the released `rerun-sdk[datafusion]>=0.32`, so normal Rerun commands and catalog tasks should run without `-e rerun-prerelease`.
+The default Pixi environment uses the released `rerun-sdk[datafusion]`, so normal Rerun commands run without a prerelease lane.
 
-The monorepo `rerun-prerelease` feature is kept as a spare lane for testing future prerelease wheels, but avoid using it unless a specific unreleased Rerun feature is required.
+The catalog runs on the `simplecv-catalog` env, which uses the shared `rerun-prerelease` feature — currently pinned to [`rerun-io/reality#2496`](https://github.com/rerun-io/reality/pull/2496) (`deeb4e6` / `0.34.0a1+dev`, fast OSS-catalog register). See the monorepo [`docs/rerun_build_testing.md`](../../docs/rerun_build_testing.md) for how that lane is pinned and tested.
 
-#### Full ExoEgo Forge catalog
-The full local ExoEgo Forge catalog is the current exception: use the prerelease Rerun SDK and raise the open-file limit before launching it. Without the higher limit, Rerun can fail with `Too many open files` while loading the 6332 RRDs.
+#### Full ExoEgo Forge catalog (2-tier serve + register)
+Serve an empty catalog, then register the RRD roots into it. With #2496 the **raw** RRDs register fast — no `rerun rrd optimize` pre-pass.
 
 ```bash
-ulimit -n 524288
-pixi run -e mv-api-catalog --frozen simplecv-catalog -- \
-    --rrd-root /mnt/8tb/data/exoego-forge-catalog \
-    --no-optimize-for-catalog \
-    --port 9988
+# Tier 1 — serve (leave running; the task sets `ulimit -n 524288` for the 6332-RRD catalog):
+pixi run -e simplecv-catalog --frozen simplecv-catalog-serve
+
+# Tier 2 — register, in another shell:
+pixi run -e simplecv-catalog --frozen simplecv-catalog-register        # v1 root (flat layout)
+pixi run -e simplecv-catalog --frozen simplecv-catalog-register-rig    # rig root (exoego:v2), -rig entries
 ```
 
 Expected local catalog URL:
@@ -39,8 +40,6 @@ Expected local catalog URL:
 ```text
 rerun+http://127.0.0.1:9988
 ```
-
-Recent timing on `pablo-dl-server`: after the EPFL Smart Kitchen no-normal reingest, the full catalog reached `Server is up` in about 2m12s with `ulimit -n 524288`.
 
 When reingesting EPFL Smart Kitchen for this catalog, write to the shared `/mnt/8tb` catalog root, not a repo-relative `data/` directory:
 
