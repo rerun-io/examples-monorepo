@@ -12272,7 +12272,7 @@ environments:
     indexes:
     - https://pypi.org/simple
     find-links:
-    - url: https://build.rerun.io/commit/deeb4e6/wheels/
+    - url: https://build.rerun.io/commit/73ce701/wheels/
     options:
       pypi-prerelease-mode: allow
     packages:
@@ -12774,13 +12774,11 @@ environments:
       - pypi: git+https://github.com/pablovela5620/rtmlib.git?rev=98bca2193c39b349034b280803b54c9ee58f7c68#98bca2193c39b349034b280803b54c9ee58f7c68
       - pypi: git+https://github.com/pablovela5620/vggt.git?rev=5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c#5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c
       - pypi: https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/22685817-9e91-4967-bafe-94c9843c26a9/pypi/download/onnxruntime-gpu/1.24/onnxruntime_gpu-1.24.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
-      - pypi: https://build.rerun.io/commit/deeb4e6/wheels/rerun_sdk-0.34.0a1+dev-cp310-abi3-manylinux_2_28_x86_64.whl
-      - pypi: https://files.pythonhosted.org/packages/08/4d/094819d251f2248999cb722125fd4e44ee79b753fe535338cbf442fbf45d/polars-1.42.0-py3-none-any.whl
+      - pypi: https://build.rerun.io/commit/73ce701/wheels/rerun_sdk-0.34.0a1+dev-cp310-abi3-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/0c/29/0348de65b8cc732daa3e33e67806420b2ae89bdce2b04af740289c5c6c8c/loguru-0.7.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/0e/a4/82b7a2fe5d8a67a59ed831b24d59a3d46ea7d207b66e1602d376541d94a6/orjson-3.11.9-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/0e/a9/5441a28af447c0ffe193f1f42dfebe2a518ab3e160e9e0d164e8901edead/ultralytics_thop-2.0.20-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/10/a1/510b0a7fadc6f43a6ce50152e69dbd86415240835868bb0bd9b5b88b1e06/aioitertools-0.13.0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/11/c8/26f2e4aae92f11522a96043892ba39a90eac610d5242523aa863212bc1c7/cuda_pathfinder-1.5.5-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/12/60/17ed502ab8258e36b6caf478974994f15691c73e3c46abf82a2ec63e9eda/omnidata_tools-0.0.23-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/14/2f/967ba146e6d58cf6a652da73885f52fc68001525b4197effc174321d70b4/jmespath-1.1.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/14/2f/c9c617f8556e3b6e8c24880d91b8e7a7b242f32b85cf23602b029d705c05/nvidia_cuda_runtime_cu13-0.0.0a0-py2.py3-none-any.whl
@@ -12798,8 +12796,8 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/38/31/7ff3f7768eded7535c621abc2fecb9d181a34ea4cae3afe682feb796f242/cuda_python-13.3.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/39/2a/6d2e9047d1fb243dbaa364b01e0297534b9ed7fd27dba1c9f361519cf69b/cuda_bindings-13.3.1-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/42/c0/3237566ea6e3a542f3c0669a253d62fe75f27b84b3d7bd4fb3b5ee89d73c/diffusers-0.38.0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/46/5c/ca14606a42628b04d82ac6ae5742ed24048bd43fbf48ae87fc4f4b9e759d/polars_runtime_32-1.42.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/55/bd/dd56edc2680df7658c7bdeeb58270ab35dfcdc0e2670899ce9771604b436/roma-1.5.6-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/5d/10/ffb85fa380bc9c9000dc35f40f44954dde49023018501c54faab94b3a39e/polars_runtime_32-1.42.1-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/5d/a4/9d1ea10ebc9e028a289a72fec84da170689549a8102c8aacfcad26bc5035/s3fs-2026.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5f/b3/7e6e9fcf4fe7e1b69a49fe6cc5a44e8224bab6283c5233c97e132f14908e/wrapt-2.2.2-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/62/a7/5d3fc0b3da684a9984438e8ba00d8d5528013ba32836894bb18875590d5b/trimesh-5.0.0rc1-py3-none-any.whl
@@ -12823,10 +12821,12 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b5/11/87d6d29fb5d237229d67973a6c9e06e048f01cf4994dee194ab0ea841814/tomlkit-0.14.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b5/70/5d8df3b09e25bce090399cf48e452d25c935ab72dad19406c77f4e828045/psutil-7.2.2-cp36-abi3-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/bd/1f/73c53fcbfb0b5a78f91176df41945ca466e71e9d9d836e5c522abda39ee7/pydantic-2.11.10-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/be/6a/edd939cc6fa04b6415aaa9bf19720fc74ead81234b3d38542e0005816d4d/polars-1.42.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bf/4b/afc1fef8a43bafb139f57f73bbd70df82807af5934321e8112ae50668827/botocore-1.43.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/c1/ea/53f2148663b321f21b5a606bd5f191517cf40b7072c0497d3c92c4a13b1e/executing-2.2.1-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/c3/a2/c7f6ebf546f8f644edf0f999aa98ece106986a77a7b922316bf6414ff825/torchmetrics-1.9.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d2/39/e7eaf1799466a4aef85b6a4fe7bd175ad2b1c6345066aa33f1f58d4b18d0/asttokens-3.0.1-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/d2/53/8fc9b0cdc5b7f62746e6a01b85b6461e5ae27f871010a5fcf8fa6950766d/cuda_pathfinder-1.5.6-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d7/96/bcb5141eae24474d80b8157b0c3055d25fa75f9804d4abb4a514695bbba9/moderngl-5.12.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/dc/95/1ec57df6c52152fb4c776da5fbb2896f19af52de3776899d91e7140e7654/aria2p-0.12.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/dc/9b/47798a6c91d8bdb567fe2698fe81e0c6b7cb7ef4d13da4114b41d239f65d/typing_inspection-0.4.2-py3-none-any.whl
@@ -12855,7 +12855,7 @@ environments:
     indexes:
     - https://pypi.org/simple
     find-links:
-    - url: https://build.rerun.io/commit/deeb4e6/wheels/
+    - url: https://build.rerun.io/commit/73ce701/wheels/
     options:
       pypi-prerelease-mode: allow
     packages:
@@ -13366,13 +13366,11 @@ environments:
       - pypi: git+https://github.com/pablovela5620/rtmlib.git?rev=98bca2193c39b349034b280803b54c9ee58f7c68#98bca2193c39b349034b280803b54c9ee58f7c68
       - pypi: git+https://github.com/pablovela5620/vggt.git?rev=5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c#5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c
       - pypi: https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/22685817-9e91-4967-bafe-94c9843c26a9/pypi/download/onnxruntime-gpu/1.24/onnxruntime_gpu-1.24.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
-      - pypi: https://build.rerun.io/commit/deeb4e6/wheels/rerun_sdk-0.34.0a1+dev-cp310-abi3-manylinux_2_28_x86_64.whl
-      - pypi: https://files.pythonhosted.org/packages/08/4d/094819d251f2248999cb722125fd4e44ee79b753fe535338cbf442fbf45d/polars-1.42.0-py3-none-any.whl
+      - pypi: https://build.rerun.io/commit/73ce701/wheels/rerun_sdk-0.34.0a1+dev-cp310-abi3-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/0c/29/0348de65b8cc732daa3e33e67806420b2ae89bdce2b04af740289c5c6c8c/loguru-0.7.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/0e/a4/82b7a2fe5d8a67a59ed831b24d59a3d46ea7d207b66e1602d376541d94a6/orjson-3.11.9-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/0e/a9/5441a28af447c0ffe193f1f42dfebe2a518ab3e160e9e0d164e8901edead/ultralytics_thop-2.0.20-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/10/a1/510b0a7fadc6f43a6ce50152e69dbd86415240835868bb0bd9b5b88b1e06/aioitertools-0.13.0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/11/c8/26f2e4aae92f11522a96043892ba39a90eac610d5242523aa863212bc1c7/cuda_pathfinder-1.5.5-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/12/60/17ed502ab8258e36b6caf478974994f15691c73e3c46abf82a2ec63e9eda/omnidata_tools-0.0.23-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/14/2f/967ba146e6d58cf6a652da73885f52fc68001525b4197effc174321d70b4/jmespath-1.1.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/14/2f/c9c617f8556e3b6e8c24880d91b8e7a7b242f32b85cf23602b029d705c05/nvidia_cuda_runtime_cu13-0.0.0a0-py2.py3-none-any.whl
@@ -13391,9 +13389,9 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/38/31/7ff3f7768eded7535c621abc2fecb9d181a34ea4cae3afe682feb796f242/cuda_python-13.3.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/39/2a/6d2e9047d1fb243dbaa364b01e0297534b9ed7fd27dba1c9f361519cf69b/cuda_bindings-13.3.1-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/42/c0/3237566ea6e3a542f3c0669a253d62fe75f27b84b3d7bd4fb3b5ee89d73c/diffusers-0.38.0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/46/5c/ca14606a42628b04d82ac6ae5742ed24048bd43fbf48ae87fc4f4b9e759d/polars_runtime_32-1.42.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/53/e8/61d95bfd49d1609fb8e8c5e06f4a094183411988a6f448873f5de6602499/types_tqdm-4.68.0.20260608-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/55/bd/dd56edc2680df7658c7bdeeb58270ab35dfcdc0e2670899ce9771604b436/roma-1.5.6-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/5d/10/ffb85fa380bc9c9000dc35f40f44954dde49023018501c54faab94b3a39e/polars_runtime_32-1.42.1-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/5d/a4/9d1ea10ebc9e028a289a72fec84da170689549a8102c8aacfcad26bc5035/s3fs-2026.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5f/b3/7e6e9fcf4fe7e1b69a49fe6cc5a44e8224bab6283c5233c97e132f14908e/wrapt-2.2.2-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/62/a7/5d3fc0b3da684a9984438e8ba00d8d5528013ba32836894bb18875590d5b/trimesh-5.0.0rc1-py3-none-any.whl
@@ -13417,10 +13415,12 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b5/11/87d6d29fb5d237229d67973a6c9e06e048f01cf4994dee194ab0ea841814/tomlkit-0.14.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b5/70/5d8df3b09e25bce090399cf48e452d25c935ab72dad19406c77f4e828045/psutil-7.2.2-cp36-abi3-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/bd/1f/73c53fcbfb0b5a78f91176df41945ca466e71e9d9d836e5c522abda39ee7/pydantic-2.11.10-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/be/6a/edd939cc6fa04b6415aaa9bf19720fc74ead81234b3d38542e0005816d4d/polars-1.42.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bf/4b/afc1fef8a43bafb139f57f73bbd70df82807af5934321e8112ae50668827/botocore-1.43.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/c1/ea/53f2148663b321f21b5a606bd5f191517cf40b7072c0497d3c92c4a13b1e/executing-2.2.1-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/c3/a2/c7f6ebf546f8f644edf0f999aa98ece106986a77a7b922316bf6414ff825/torchmetrics-1.9.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d2/39/e7eaf1799466a4aef85b6a4fe7bd175ad2b1c6345066aa33f1f58d4b18d0/asttokens-3.0.1-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/d2/53/8fc9b0cdc5b7f62746e6a01b85b6461e5ae27f871010a5fcf8fa6950766d/cuda_pathfinder-1.5.6-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d7/96/bcb5141eae24474d80b8157b0c3055d25fa75f9804d4abb4a514695bbba9/moderngl-5.12.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/dc/95/1ec57df6c52152fb4c776da5fbb2896f19af52de3776899d91e7140e7654/aria2p-0.12.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/dc/9b/47798a6c91d8bdb567fe2698fe81e0c6b7cb7ef4d13da4114b41d239f65d/typing_inspection-0.4.2-py3-none-any.whl
@@ -25585,7 +25585,7 @@ environments:
     indexes:
     - https://pypi.org/simple
     find-links:
-    - url: https://build.rerun.io/commit/deeb4e6/wheels/
+    - url: https://build.rerun.io/commit/73ce701/wheels/
     options:
       pypi-prerelease-mode: allow
     packages:
@@ -26081,11 +26081,9 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
       - pypi: git+https://github.com/pablovela5620/rtmlib.git?rev=98bca2193c39b349034b280803b54c9ee58f7c68#98bca2193c39b349034b280803b54c9ee58f7c68
       - pypi: https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/22685817-9e91-4967-bafe-94c9843c26a9/pypi/download/onnxruntime-gpu/1.24/onnxruntime_gpu-1.24.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
-      - pypi: https://build.rerun.io/commit/deeb4e6/wheels/rerun_sdk-0.34.0a1+dev-cp310-abi3-manylinux_2_28_x86_64.whl
-      - pypi: https://files.pythonhosted.org/packages/08/4d/094819d251f2248999cb722125fd4e44ee79b753fe535338cbf442fbf45d/polars-1.42.0-py3-none-any.whl
+      - pypi: https://build.rerun.io/commit/73ce701/wheels/rerun_sdk-0.34.0a1+dev-cp310-abi3-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/0e/a9/5441a28af447c0ffe193f1f42dfebe2a518ab3e160e9e0d164e8901edead/ultralytics_thop-2.0.20-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/10/a1/510b0a7fadc6f43a6ce50152e69dbd86415240835868bb0bd9b5b88b1e06/aioitertools-0.13.0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/11/c8/26f2e4aae92f11522a96043892ba39a90eac610d5242523aa863212bc1c7/cuda_pathfinder-1.5.5-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/14/2f/967ba146e6d58cf6a652da73885f52fc68001525b4197effc174321d70b4/jmespath-1.1.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/14/2f/c9c617f8556e3b6e8c24880d91b8e7a7b242f32b85cf23602b029d705c05/nvidia_cuda_runtime_cu13-0.0.0a0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/16/99/f5376b53e095d8fd4572cb05e75d7549a5a0b0861fbb01831fd94958d803/ultralytics-8.4.52-py3-none-any.whl
@@ -26098,9 +26096,9 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/3a/cb/28ce52eb94390dda42599c98ea0204d74799e4d8047a0eb559b6fd648056/ml_dtypes-0.5.4-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/3f/fe/6070676e56545d4fe940869b721f869b427d9006412537fdbc2209374493/lovely_jax-0.1.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/45/d8/55e0901103c93d57bab3b932294c216f0cbd49054187ce29f8f13808d530/jaxopt-0.8.5-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/46/5c/ca14606a42628b04d82ac6ae5742ed24048bd43fbf48ae87fc4f4b9e759d/polars_runtime_32-1.42.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/49/fa/391e437a34e55095173dca5f24070d89cbc233ff85bf1c29c93248c6588d/imageio-2.37.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/55/bd/dd56edc2680df7658c7bdeeb58270ab35dfcdc0e2670899ce9771604b436/roma-1.5.6-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/5d/10/ffb85fa380bc9c9000dc35f40f44954dde49023018501c54faab94b3a39e/polars_runtime_32-1.42.1-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/5d/a4/9d1ea10ebc9e028a289a72fec84da170689549a8102c8aacfcad26bc5035/s3fs-2026.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5f/b3/7e6e9fcf4fe7e1b69a49fe6cc5a44e8224bab6283c5233c97e132f14908e/wrapt-2.2.2-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/68/99/2018622d268f6017ddfa5ee71f070bad5d07590374793166baa102849d17/timm-0.9.16-py3-none-any.whl
@@ -26114,7 +26112,9 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b1/29/c028a0731e202035f0e2e0bfbf1a3e46ad6c628cbb17f6f1cc9eea5d9ff1/pathlib_abc-0.5.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b5/70/5d8df3b09e25bce090399cf48e452d25c935ab72dad19406c77f4e828045/psutil-7.2.2-cp36-abi3-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/ba/e8/71c2555431edb5dd115cf86a7b599aa7e1be26728d89ae59aa11251d299c/jaxlib-0.6.2-cp312-cp312-manylinux2014_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/be/6a/edd939cc6fa04b6415aaa9bf19720fc74ead81234b3d38542e0005816d4d/polars-1.42.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bf/4b/afc1fef8a43bafb139f57f73bbd70df82807af5934321e8112ae50668827/botocore-1.43.0-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/d2/53/8fc9b0cdc5b7f62746e6a01b85b6461e5ae27f871010a5fcf8fa6950766d/cuda_pathfinder-1.5.6-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/dd/1a/5d9a402b39ec892d856bbdd9db502ff73ce28cdf4aff72eb1ce1d6843506/universal_pathlib-0.3.10-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/e4/be/5b3cfe508bfab6761414ff944e3366eb13be4fd71efcd69450f89ba39f43/protobuf-7.35.1-cp310-abi3-manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/e6/e9/087a8062dcc1c63fcb8d2292d48a1195ef8b29e5c7b178c8fd371942d063/tensorrt_cu13_bindings-10.13.3.9-cp312-none-manylinux_2_28_x86_64.whl
@@ -26133,7 +26133,7 @@ environments:
     indexes:
     - https://pypi.org/simple
     find-links:
-    - url: https://build.rerun.io/commit/deeb4e6/wheels/
+    - url: https://build.rerun.io/commit/73ce701/wheels/
     options:
       pypi-prerelease-mode: allow
     packages:
@@ -26638,11 +26638,9 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
       - pypi: git+https://github.com/pablovela5620/rtmlib.git?rev=98bca2193c39b349034b280803b54c9ee58f7c68#98bca2193c39b349034b280803b54c9ee58f7c68
       - pypi: https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/22685817-9e91-4967-bafe-94c9843c26a9/pypi/download/onnxruntime-gpu/1.24/onnxruntime_gpu-1.24.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
-      - pypi: https://build.rerun.io/commit/deeb4e6/wheels/rerun_sdk-0.34.0a1+dev-cp310-abi3-manylinux_2_28_x86_64.whl
-      - pypi: https://files.pythonhosted.org/packages/08/4d/094819d251f2248999cb722125fd4e44ee79b753fe535338cbf442fbf45d/polars-1.42.0-py3-none-any.whl
+      - pypi: https://build.rerun.io/commit/73ce701/wheels/rerun_sdk-0.34.0a1+dev-cp310-abi3-manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/0e/a9/5441a28af447c0ffe193f1f42dfebe2a518ab3e160e9e0d164e8901edead/ultralytics_thop-2.0.20-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/10/a1/510b0a7fadc6f43a6ce50152e69dbd86415240835868bb0bd9b5b88b1e06/aioitertools-0.13.0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/11/c8/26f2e4aae92f11522a96043892ba39a90eac610d5242523aa863212bc1c7/cuda_pathfinder-1.5.5-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/14/2f/967ba146e6d58cf6a652da73885f52fc68001525b4197effc174321d70b4/jmespath-1.1.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/14/2f/c9c617f8556e3b6e8c24880d91b8e7a7b242f32b85cf23602b029d705c05/nvidia_cuda_runtime_cu13-0.0.0a0-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/16/99/f5376b53e095d8fd4572cb05e75d7549a5a0b0861fbb01831fd94958d803/ultralytics-8.4.52-py3-none-any.whl
@@ -26656,10 +26654,10 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/3a/cb/28ce52eb94390dda42599c98ea0204d74799e4d8047a0eb559b6fd648056/ml_dtypes-0.5.4-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/3f/fe/6070676e56545d4fe940869b721f869b427d9006412537fdbc2209374493/lovely_jax-0.1.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/45/d8/55e0901103c93d57bab3b932294c216f0cbd49054187ce29f8f13808d530/jaxopt-0.8.5-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/46/5c/ca14606a42628b04d82ac6ae5742ed24048bd43fbf48ae87fc4f4b9e759d/polars_runtime_32-1.42.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/49/fa/391e437a34e55095173dca5f24070d89cbc233ff85bf1c29c93248c6588d/imageio-2.37.3-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/53/e8/61d95bfd49d1609fb8e8c5e06f4a094183411988a6f448873f5de6602499/types_tqdm-4.68.0.20260608-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/55/bd/dd56edc2680df7658c7bdeeb58270ab35dfcdc0e2670899ce9771604b436/roma-1.5.6-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/5d/10/ffb85fa380bc9c9000dc35f40f44954dde49023018501c54faab94b3a39e/polars_runtime_32-1.42.1-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/5d/a4/9d1ea10ebc9e028a289a72fec84da170689549a8102c8aacfcad26bc5035/s3fs-2026.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5f/b3/7e6e9fcf4fe7e1b69a49fe6cc5a44e8224bab6283c5233c97e132f14908e/wrapt-2.2.2-cp312-cp312-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/68/99/2018622d268f6017ddfa5ee71f070bad5d07590374793166baa102849d17/timm-0.9.16-py3-none-any.whl
@@ -26673,7 +26671,9 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b1/29/c028a0731e202035f0e2e0bfbf1a3e46ad6c628cbb17f6f1cc9eea5d9ff1/pathlib_abc-0.5.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b5/70/5d8df3b09e25bce090399cf48e452d25c935ab72dad19406c77f4e828045/psutil-7.2.2-cp36-abi3-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/ba/e8/71c2555431edb5dd115cf86a7b599aa7e1be26728d89ae59aa11251d299c/jaxlib-0.6.2-cp312-cp312-manylinux2014_x86_64.whl
+      - pypi: https://files.pythonhosted.org/packages/be/6a/edd939cc6fa04b6415aaa9bf19720fc74ead81234b3d38542e0005816d4d/polars-1.42.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bf/4b/afc1fef8a43bafb139f57f73bbd70df82807af5934321e8112ae50668827/botocore-1.43.0-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/d2/53/8fc9b0cdc5b7f62746e6a01b85b6461e5ae27f871010a5fcf8fa6950766d/cuda_pathfinder-1.5.6-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/dd/1a/5d9a402b39ec892d856bbdd9db502ff73ce28cdf4aff72eb1ce1d6843506/universal_pathlib-0.3.10-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/e4/be/5b3cfe508bfab6761414ff944e3366eb13be4fd71efcd69450f89ba39f43/protobuf-7.35.1-cp310-abi3-manylinux2014_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/e6/e9/087a8062dcc1c63fcb8d2292d48a1195ef8b29e5c7b178c8fd371942d063/tensorrt_cu13_bindings-10.13.3.9-cp312-none-manylinux_2_28_x86_64.whl
@@ -59419,10 +59419,10 @@ packages:
   - pandas>=2 ; extra == 'all'
   - rerun-notebook==0.33.0a1+dev ; extra == 'all'
   requires_python: '>=3.10'
-- pypi: https://build.rerun.io/commit/deeb4e6/wheels/rerun_sdk-0.34.0a1+dev-cp310-abi3-manylinux_2_28_x86_64.whl
+- pypi: https://build.rerun.io/commit/73ce701/wheels/rerun_sdk-0.34.0a1+dev-cp310-abi3-manylinux_2_28_x86_64.whl
   name: rerun-sdk
   version: 0.34.0a1+dev
-  index: https://build.rerun.io/commit/deeb4e6/wheels/
+  index: https://build.rerun.io/commit/73ce701/wheels/
   requires_dist:
   - attrs>=23.1.0
   - numpy>=2
@@ -59673,43 +59673,6 @@ packages:
   - openctm ; extra == 'deprecated'
   - trimesh[deprecated,easy,recommend,test,test-more] ; extra == 'all'
   requires_python: '>=3.8'
-- pypi: https://files.pythonhosted.org/packages/08/4d/094819d251f2248999cb722125fd4e44ee79b753fe535338cbf442fbf45d/polars-1.42.0-py3-none-any.whl
-  name: polars
-  version: 1.42.0
-  sha256: ab10cac3f2d28a6e22e22bcac69c0e51fb33cd25aee1f45105782d4fe55a3e6a
-  requires_dist:
-  - polars-runtime-32==1.42.0
-  - polars-runtime-64==1.42.0 ; extra == 'rt64'
-  - polars-runtime-compat==1.42.0 ; extra == 'rtcompat'
-  - polars-cloud>=0.4.0 ; extra == 'polars-cloud'
-  - numpy>=1.16.0 ; extra == 'numpy'
-  - pandas ; extra == 'pandas'
-  - polars[pyarrow] ; extra == 'pandas'
-  - pyarrow>=7.0.0 ; extra == 'pyarrow'
-  - pydantic ; extra == 'pydantic'
-  - fastexcel>=0.9 ; extra == 'calamine'
-  - openpyxl>=3.0.0 ; extra == 'openpyxl'
-  - xlsx2csv>=0.8.0 ; extra == 'xlsx2csv'
-  - xlsxwriter ; extra == 'xlsxwriter'
-  - polars[calamine,openpyxl,xlsx2csv,xlsxwriter] ; extra == 'excel'
-  - adbc-driver-manager[dbapi] ; extra == 'adbc'
-  - adbc-driver-sqlite[dbapi] ; extra == 'adbc'
-  - connectorx>=0.3.2 ; extra == 'connectorx'
-  - sqlalchemy ; extra == 'sqlalchemy'
-  - polars[pandas] ; extra == 'sqlalchemy'
-  - polars[adbc,connectorx,sqlalchemy] ; extra == 'database'
-  - fsspec ; extra == 'fsspec'
-  - deltalake>=1.0.0,!=1.5.* ; extra == 'deltalake'
-  - pyiceberg>=0.7.1 ; extra == 'iceberg'
-  - gevent ; extra == 'async'
-  - cloudpickle ; extra == 'cloudpickle'
-  - matplotlib ; extra == 'graph'
-  - altair>=5.4.0 ; extra == 'plot'
-  - great-tables>=0.8.0 ; extra == 'style'
-  - tzdata ; sys_platform == 'win32' and extra == 'timezone'
-  - cudf-polars-cu12 ; extra == 'gpu'
-  - polars[async,cloudpickle,database,deltalake,excel,fsspec,graph,iceberg,numpy,pandas,plot,pyarrow,pydantic,style,timezone] ; extra == 'all'
-  requires_python: '>=3.10'
 - pypi: https://files.pythonhosted.org/packages/08/ef/b3c6b9b5be2f82416d73fe2ed2e96e2793cd80e7510bd6a17ca79cdd88ec/fonttools-4.63.0-cp312-cp312-macosx_10_13_universal2.whl
   name: fonttools
   version: 4.63.0
@@ -61097,11 +61060,6 @@ packages:
   - jaxlib>=0.1.69
   - numpy>=1.18.4
   - scipy>=1.0.0
-- pypi: https://files.pythonhosted.org/packages/46/5c/ca14606a42628b04d82ac6ae5742ed24048bd43fbf48ae87fc4f4b9e759d/polars_runtime_32-1.42.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
-  name: polars-runtime-32
-  version: 1.42.0
-  sha256: 1a3c43d4a76360bf912f8772b5ac1c23d5a8efef71408c63bba1bb0b4897a8ea
-  requires_python: '>=3.10'
 - pypi: https://files.pythonhosted.org/packages/46/aa/ad48cc40d15c6c12d64d06768db96bde01e8f72dbfbbcebf391bcc1682fb/pykdtree-1.4.3-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
   name: pykdtree
   version: 1.4.3
@@ -61421,6 +61379,11 @@ packages:
   - pyquaternion
   - pywinpty==2.0.2 ; python_full_version == '3.6.*' and sys_platform == 'win32'
   requires_python: '>=3.8'
+- pypi: https://files.pythonhosted.org/packages/5d/10/ffb85fa380bc9c9000dc35f40f44954dde49023018501c54faab94b3a39e/polars_runtime_32-1.42.1-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+  name: polars-runtime-32
+  version: 1.42.1
+  sha256: d059e8e53cc114ff82f9bd791fd341dc53534a2c745e6f6aa37594c3a93f01fe
+  requires_python: '>=3.10'
 - pypi: https://files.pythonhosted.org/packages/5d/a4/9d1ea10ebc9e028a289a72fec84da170689549a8102c8aacfcad26bc5035/s3fs-2026.4.0-py3-none-any.whl
   name: s3fs
   version: 2026.4.0
@@ -63576,6 +63539,43 @@ packages:
   - email-validator>=2.0.0 ; extra == 'email'
   - tzdata ; python_full_version >= '3.9' and sys_platform == 'win32' and extra == 'timezone'
   requires_python: '>=3.9'
+- pypi: https://files.pythonhosted.org/packages/be/6a/edd939cc6fa04b6415aaa9bf19720fc74ead81234b3d38542e0005816d4d/polars-1.42.1-py3-none-any.whl
+  name: polars
+  version: 1.42.1
+  sha256: 3c0c65cdfa21a621650c4bdcbbccf93964d052fd766c3e70e84a55d961c259fd
+  requires_dist:
+  - polars-runtime-32==1.42.1
+  - polars-runtime-64==1.42.1 ; extra == 'rt64'
+  - polars-runtime-compat==1.42.1 ; extra == 'rtcompat'
+  - polars-cloud>=0.4.0 ; extra == 'polars-cloud'
+  - numpy>=1.16.0 ; extra == 'numpy'
+  - pandas ; extra == 'pandas'
+  - polars[pyarrow] ; extra == 'pandas'
+  - pyarrow>=7.0.0 ; extra == 'pyarrow'
+  - pydantic ; extra == 'pydantic'
+  - fastexcel>=0.9 ; extra == 'calamine'
+  - openpyxl>=3.0.0 ; extra == 'openpyxl'
+  - xlsx2csv>=0.8.0 ; extra == 'xlsx2csv'
+  - xlsxwriter ; extra == 'xlsxwriter'
+  - polars[calamine,openpyxl,xlsx2csv,xlsxwriter] ; extra == 'excel'
+  - adbc-driver-manager[dbapi] ; extra == 'adbc'
+  - adbc-driver-sqlite[dbapi] ; extra == 'adbc'
+  - connectorx>=0.3.2 ; extra == 'connectorx'
+  - sqlalchemy ; extra == 'sqlalchemy'
+  - polars[pandas] ; extra == 'sqlalchemy'
+  - polars[adbc,connectorx,sqlalchemy] ; extra == 'database'
+  - fsspec ; extra == 'fsspec'
+  - deltalake>=1.0.0,!=1.5.* ; extra == 'deltalake'
+  - pyiceberg>=0.7.1 ; extra == 'iceberg'
+  - gevent ; extra == 'async'
+  - cloudpickle ; extra == 'cloudpickle'
+  - matplotlib ; extra == 'graph'
+  - altair>=5.4.0 ; extra == 'plot'
+  - great-tables>=0.8.0 ; extra == 'style'
+  - tzdata ; sys_platform == 'win32' and extra == 'timezone'
+  - cudf-polars-cu12 ; extra == 'gpu'
+  - polars[async,cloudpickle,database,deltalake,excel,fsspec,graph,iceberg,numpy,pandas,plot,pyarrow,pydantic,style,timezone] ; extra == 'all'
+  requires_python: '>=3.10'
 - pypi: https://files.pythonhosted.org/packages/bf/4b/afc1fef8a43bafb139f57f73bbd70df82807af5934321e8112ae50668827/botocore-1.43.0-py3-none-any.whl
   name: botocore
   version: 1.43.0
@@ -63985,6 +63985,11 @@ packages:
   - pytest-cov ; extra == 'test'
   - pytest-xdist ; extra == 'test'
   requires_python: '>=3.8'
+- pypi: https://files.pythonhosted.org/packages/d2/53/8fc9b0cdc5b7f62746e6a01b85b6461e5ae27f871010a5fcf8fa6950766d/cuda_pathfinder-1.5.6-py3-none-any.whl
+  name: cuda-pathfinder
+  version: 1.5.6
+  sha256: 7e4c07c117b78ba1fb35dac4c444d21f3677b1b1ff56175c53a8e3025c5b43c0
+  requires_python: '>=3.10'
 - pypi: https://files.pythonhosted.org/packages/d2/fd/6668e5aec43ab844de6fc74927e155a3b37bf40d7c3790e49fc0406b6578/httpx_sse-0.4.3-py3-none-any.whl
   name: httpx-sse
   version: 0.4.3

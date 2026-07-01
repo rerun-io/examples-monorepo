@@ -1,36 +1,17 @@
 from __future__ import annotations
 
 import json
-import os
-import subprocess
 from pathlib import Path
 from typing import Any
 
-import pyarrow as pa
 import pytest
 
-import simplecv.apis.exoego_forge_catalog as catalog_module
 from simplecv.apis.exoego_forge_catalog import (
     CATALOG_CAMERA_NAMES,
     DEFAULT_CATALOG_DATASETS,
-    MARKER_FLAG_COLUMN,
-    TABLE_BLUEPRINT_METADATA_KEY,
-    TABLE_CARD_PREVIEW_END_SECONDS,
-    TABLE_CARD_PREVIEW_START_SECONDS,
-    RRDIndexRow,
-    _optimize_rrd_for_catalog,
-    _register_default_dataset_blueprint,
-    _table_preview_camera,
     build_exoego_catalog_blueprint,
-    build_rrd_index_rows_from_dataset,
-    build_rrd_index_rows_from_paths,
-    build_rrd_index_table_blueprint,
-    build_rrd_index_table_schema,
-    build_table_card_blueprint,
     discover_rrd_paths,
     discover_rrd_uris,
-    mount_catalog,
-    table_name_for_dataset,
 )
 from simplecv.data.exoego.aria_gen2_pilot import AriaGen2PilotConfig, AriaGen2PilotSequence
 from simplecv.data.exoego.assembly101 import Assembly101Config, Assembly101Sequence
@@ -40,7 +21,6 @@ from simplecv.data.exoego.hocap import HocapConfig, HocapSequence
 from simplecv.data.exoego.hot3d import Hot3dConfig, Hot3dSequence
 from simplecv.data.exoego.sequence_identity import SequenceIdentity
 from simplecv.data.exoego.umetrack import UmeTrackConfig, UmeTrackSequence
-from simplecv.rig import entity_id
 
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[1]
 MONOREPO_ROOT: Path = PROJECT_ROOT.parents[1]
@@ -185,23 +165,6 @@ def test_discover_rrd_paths_raises_when_no_requested_dataset_has_rrds(tmp_path: 
         discover_rrd_paths(tmp_path, datasets=("aria-gen2", "hocap"))
 
 
-@pytest.mark.parametrize(
-    ("dataset_name", "table_name"),
-    [
-        ("aria-gen2", "aria_gen2_table"),
-        ("assembly101", "assembly101_table"),
-        ("epfl-smart-kitchen", "epfl_smart_kitchen_table"),
-        ("hocap", "hocap_table"),
-        ("hot3d-aria", "hot3d_aria_table"),
-        ("hot3d-quest3", "hot3d_quest3_table"),
-        ("umetrack", "umetrack_table"),
-        ("ego-dex", "ego_dex_table"),
-    ],
-)
-def test_table_name_for_dataset(dataset_name: str, table_name: str) -> None:
-    assert table_name_for_dataset(dataset_name) == table_name
-
-
 def test_hot3d_has_hand_labels_respects_no_gt_metadata(tmp_path: Path) -> None:
     seq_dir: Path = tmp_path / "P0016_0ca96b7b"
     seq_dir.mkdir()
@@ -231,301 +194,6 @@ def test_hot3d_has_hand_labels_accepts_nonempty_gt_files(tmp_path: Path) -> None
     assert Hot3dSequence._has_hand_labels(seq_dir) is True
 
 
-class _FakeSegmentTable:
-    def __init__(self, table: pa.Table) -> None:
-        self._table: pa.Table = table
-
-    def collect(self) -> list[pa.RecordBatch]:
-        return self._table.to_batches()
-
-
-class _FakeDatasetEntry:
-    def __init__(self, table: pa.Table) -> None:
-        self._table: pa.Table = table
-
-    def segment_table(self) -> _FakeSegmentTable:
-        return _FakeSegmentTable(self._table)
-
-    def segment_url(self, recording_id: str) -> str:
-        return f"rerun+http://127.0.0.1:9988/dataset/fake?segment_id={recording_id}"
-
-
-class _FakeBlueprintDatasetEntry:
-    def __init__(self) -> None:
-        self.registered_blueprints: list[tuple[str, bool]] = []
-
-    def register_blueprint(self, blueprint_uri: str, *, set_default: bool) -> None:
-        self.registered_blueprints.append((blueprint_uri, set_default))
-
-
-class _FakeServer:
-    pass
-
-
-def test_build_rrd_index_rows_from_paths(tmp_path: Path) -> None:
-    first_rrd: Path = tmp_path / "assembly101" / "all" / "seq_01.rrd"
-    second_rrd: Path = tmp_path / "assembly101" / "all" / "nested" / "seq_02.rrd"
-    for path in (first_rrd, second_rrd):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"not a real rrd")
-
-    rows: list[RRDIndexRow] = build_rrd_index_rows_from_paths(tmp_path, dataset_name="assembly101")
-
-    assert [row.id for row in rows] == [0, 1]
-    assert [row.dataset for row in rows] == ["assembly101", "assembly101"]
-    assert [row.sequence_key for row in rows] == ["all/nested/seq_02", "all/seq_01"]
-    assert rows[0].recording_uri == str(second_rrd.resolve())
-    assert rows[1].path == str(first_rrd.resolve())
-    assert [row.size_bytes for row in rows] == [len(b"not a real rrd"), len(b"not a real rrd")]
-
-
-def test_mount_catalog_python_server_preserves_recursive_file_list(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    rrd_root: Path = tmp_path / "rrds"
-    first_rrd: Path = rrd_root / "assembly101" / "all" / "seq_01.rrd"
-    second_rrd: Path = rrd_root / "assembly101" / "all" / "nested" / "seq_02.rrd"
-    for path in (first_rrd, second_rrd):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"not a real rrd")
-    captured_datasets: dict[str, list[Path]] = {}
-
-    class _FakeClient:
-        def get_dataset(self, dataset_name: str) -> _FakeBlueprintDatasetEntry:
-            assert dataset_name == "assembly101"
-            return _FakeBlueprintDatasetEntry()
-
-    class _FakeRerunServer:
-        def __init__(self, *, datasets: dict[str, list[Path]], port: int | None) -> None:
-            assert port is None
-            captured_datasets.update(datasets)
-
-        def url(self) -> str:
-            return "rerun+http://127.0.0.1:9999"
-
-        def client(self) -> _FakeClient:
-            return _FakeClient()
-
-        def is_running(self) -> bool:
-            return False
-
-        def shutdown(self) -> None:
-            pass
-
-        def __enter__(self) -> _FakeRerunServer:
-            return self
-
-        def __exit__(
-            self,
-            _exc_type: type[BaseException] | None,
-            _exc_value: BaseException | None,
-            _traceback: Any | None,
-        ) -> None:
-            pass
-
-    monkeypatch.setattr(catalog_module.rr.server, "Server", _FakeRerunServer)
-    monkeypatch.setattr(catalog_module, "_register_default_dataset_blueprint", lambda *_args, **_kwargs: Path("noop.rbl"))
-
-    mount_catalog(
-        rrd_root,
-        datasets=("assembly101",),
-        optimize_for_catalog=False,
-        show_progress=False,
-    )
-
-    assert captured_datasets == {
-        "assembly101": [
-            second_rrd.resolve(),
-            first_rrd.resolve(),
-        ]
-    }
-
-
-def test_register_default_dataset_blueprint_registers_full_segment_blueprint() -> None:
-    dataset_entry = _FakeBlueprintDatasetEntry()
-    server = _FakeServer()
-
-    blueprint_path: Path = _register_default_dataset_blueprint(
-        server,  # type: ignore[arg-type]
-        dataset_entry,
-        dataset_name="assembly101",
-    )
-
-    assert blueprint_path.is_file()
-    assert dataset_entry.registered_blueprints == [(blueprint_path.resolve().as_uri(), True)]
-
-
-def test_optimize_rrd_for_catalog_reuses_fresh_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    rrd_root: Path = tmp_path / "rrds"
-    source_path: Path = rrd_root / "hocap" / "subject_1" / "recording.rrd"
-    cache_root: Path = tmp_path / "cache"
-    optimized_path: Path = cache_root / "hocap" / "subject_1" / "recording.rrd"
-    source_path.parent.mkdir(parents=True)
-    optimized_path.parent.mkdir(parents=True)
-    source_path.write_bytes(b"raw")
-    optimized_path.write_bytes(b"optimized")
-    source_mtime_ns: int = source_path.stat().st_mtime_ns
-    fresh_mtime_ns: int = source_mtime_ns + 1_000_000_000
-    os.utime(optimized_path, ns=(fresh_mtime_ns, fresh_mtime_ns))
-
-    def fail_run(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
-        raise AssertionError("fresh cache should avoid rerun rrd optimize")
-
-    monkeypatch.setattr(subprocess, "run", fail_run)
-
-    result: Path = _optimize_rrd_for_catalog(source_path, rrd_root=rrd_root, cache_root=cache_root)
-
-    assert result == optimized_path.resolve()
-    assert result.read_bytes() == b"optimized"
-
-
-def test_optimize_rrd_for_catalog_writes_tmp_then_renames(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    rrd_root: Path = tmp_path / "rrds"
-    source_path: Path = rrd_root / "hocap" / "subject_1" / "recording.rrd"
-    cache_root: Path = tmp_path / "cache"
-    source_path.parent.mkdir(parents=True)
-    source_path.write_bytes(b"raw")
-    run_calls: list[list[str]] = []
-
-    def fake_run(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
-        run_calls.append(args)
-        tmp_output_path: Path = Path(args[-1])
-        tmp_output_path.write_bytes(b"optimized")
-        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    result: Path = _optimize_rrd_for_catalog(source_path, rrd_root=rrd_root, cache_root=cache_root)
-    expected_path: Path = cache_root / "hocap" / "subject_1" / "recording.rrd"
-    expected_tmp_path: Path = expected_path.with_suffix(".rrd.tmp")
-
-    assert result == expected_path.resolve()
-    assert result.read_bytes() == b"optimized"
-    assert not expected_tmp_path.exists()
-    assert run_calls == [
-        ["rerun", "rrd", "optimize", str(source_path.resolve()), "-o", str(expected_tmp_path.resolve())],
-    ]
-
-
-def test_optimize_rrd_for_catalog_reports_subprocess_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    rrd_root: Path = tmp_path / "rrds"
-    source_path: Path = rrd_root / "hocap" / "subject_1" / "recording.rrd"
-    cache_root: Path = tmp_path / "cache"
-    source_path.parent.mkdir(parents=True)
-    source_path.write_bytes(b"raw")
-
-    def fake_run(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(args=args, returncode=2, stdout="", stderr="bad optimize")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    with pytest.raises(RuntimeError, match="bad optimize"):
-        _optimize_rrd_for_catalog(source_path, rrd_root=rrd_root, cache_root=cache_root)
-
-
-def test_optimize_rrd_for_catalog_rejects_paths_outside_root(tmp_path: Path) -> None:
-    rrd_root: Path = tmp_path / "rrds"
-    source_path: Path = tmp_path / "external" / "recording.rrd"
-    cache_root: Path = tmp_path / "cache"
-    source_path.parent.mkdir(parents=True)
-    source_path.write_bytes(b"raw")
-
-    with pytest.raises(ValueError, match="not under RRD root"):
-        _optimize_rrd_for_catalog(source_path, rrd_root=rrd_root, cache_root=cache_root)
-
-
-def test_build_rrd_index_rows_from_registered_dataset_segments(tmp_path: Path) -> None:
-    first_rrd: Path = tmp_path / "assembly101" / "all" / "seq_01.rrd"
-    second_rrd: Path = tmp_path / "assembly101" / "all" / "nested" / "seq_02.rrd"
-    for path in (first_rrd, second_rrd):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"not a real rrd")
-
-    segment_table: pa.Table = pa.table(
-        {
-            "rerun_segment_id": [
-                "assembly101__all__seq_01",
-                "assembly101__all__nested__seq_02",
-            ],
-            "property:info:sequence_key": [
-                ["all/seq_01"],
-                ["all/nested/seq_02"],
-            ],
-        }
-    )
-    rows: list[RRDIndexRow] = build_rrd_index_rows_from_dataset(
-        _FakeDatasetEntry(segment_table),
-        dataset_dir=tmp_path / "assembly101",
-        dataset_name="assembly101",
-    )
-
-    assert [row.id for row in rows] == [0, 1]
-    assert [row.dataset for row in rows] == ["assembly101", "assembly101"]
-    assert [row.sequence_key for row in rows] == ["all/nested/seq_02", "all/seq_01"]
-    assert rows[0].recording_uri.endswith("segment_id=assembly101__all__nested__seq_02")
-    assert rows[1].path == str(first_rrd.resolve())
-    assert [row.size_bytes for row in rows] == [len(b"not a real rrd"), len(b"not a real rrd")]
-
-
-def test_registered_dataset_rows_preserve_metadata_sequence_key(tmp_path: Path) -> None:
-    rrd_path: Path = tmp_path / "hocap" / "subject_8" / "20231024_180733.rrd"
-    rrd_path.parent.mkdir(parents=True, exist_ok=True)
-    rrd_path.write_bytes(b"not a real rrd")
-
-    segment_table: pa.Table = pa.table(
-        {
-            "rerun_segment_id": ["hocap__fallback__recording_id"],
-            "property:info:sequence_key": [["subject_8/20231024_180733"]],
-        }
-    )
-    rows: list[RRDIndexRow] = build_rrd_index_rows_from_dataset(
-        _FakeDatasetEntry(segment_table),
-        dataset_dir=tmp_path / "hocap",
-        dataset_name="hocap",
-    )
-
-    assert rows[0].sequence_key == "subject_8/20231024_180733"
-    assert rows[0].path == str(rrd_path.resolve())
-    assert rows[0].size_bytes == len(b"not a real rrd")
-
-
-def test_rrd_index_table_schema_includes_dataset_and_table_blueprint() -> None:
-    schema: pa.Schema = build_rrd_index_table_schema("base64:test-blueprint")
-
-    assert schema.names == ["id", "dataset", "sequence_key", "recording_uri", "path", "size_bytes", MARKER_FLAG_COLUMN]
-    assert schema.metadata == {TABLE_BLUEPRINT_METADATA_KEY: b"base64:test-blueprint"}
-
-
-def test_assembly101_table_preview_camera_preserves_reference_artifact_camera() -> None:
-    preview_camera: tuple[str, str] | None = _table_preview_camera(
-        "assembly101",
-        {"ego": ("e1", "e2", "e3", "e4"), "exo": ("C10095",)},
-    )
-
-    assert preview_camera == ("ego", "e3")
-
-
-def test_table_preview_camera_falls_back_when_override_camera_is_missing() -> None:
-    preview_camera: tuple[str, str] | None = _table_preview_camera(
-        "assembly101",
-        {"ego": ("e1", "e2"), "exo": ("C10095",)},
-    )
-
-    assert preview_camera == ("ego", "e1")
-
-
-def test_table_preview_window_constants_cover_first_ten_seconds() -> None:
-    assert TABLE_CARD_PREVIEW_START_SECONDS == 0.0
-    assert TABLE_CARD_PREVIEW_END_SECONDS == 10.0
-
-
 def test_epfl_smart_kitchen_catalog_uses_hololens_and_all_nine_exo_cameras() -> None:
     camera_names: dict[str, tuple[str, ...]] = CATALOG_CAMERA_NAMES["epfl-smart-kitchen"]
 
@@ -541,54 +209,6 @@ def test_epfl_smart_kitchen_catalog_uses_hololens_and_all_nine_exo_cameras() -> 
         "Boutput2",
         "Boutput3",
     )
-
-
-def test_video_exclusion_queries_remove_hocap_videos_from_3d_view() -> None:
-    blueprint = build_table_card_blueprint("hocap", timeline="video_time")
-    root_contents: list[Any] = list(blueprint.root_container.contents)
-    scene_view = root_contents[0]
-    camera_names: dict[str, tuple[str, ...]] = CATALOG_CAMERA_NAMES["hocap"]
-    # exoego:v2 rig layout: exo cam i -> rig_i/cam_00, ego cam j -> rig_<num_exo>/cam_j.
-    exo_names: tuple[str, ...] = camera_names["exo"]
-    expected_contents: list[str] = ["+ /**"]
-    for kind in ("ego", "exo"):
-        for camera_name in camera_names[kind]:
-            if kind == "exo":
-                node: str = f"/world/{entity_id('rig', exo_names.index(camera_name))}/{entity_id('cam', 0)}"
-            else:
-                node = f"/world/{entity_id('rig', len(exo_names))}/{entity_id('cam', camera_names['ego'].index(camera_name))}"
-            video_entity_path: str = f"{node}/pinhole/video"
-            expected_contents.append(f"- {video_entity_path}")
-            expected_contents.append(f"- {video_entity_path}/**")
-
-    assert len(scene_view.contents) == 1 + 2 * (len(camera_names["ego"]) + len(camera_names["exo"]))
-    assert scene_view.contents == expected_contents
-
-
-def test_table_card_blueprint_builds() -> None:
-    blueprint = build_table_card_blueprint("assembly101", timeline="video_time")
-
-    assert blueprint is not None
-
-
-def test_table_card_blueprints_play_uniform_selection_without_3d_range_override() -> None:
-    for dataset_name in DEFAULT_CATALOG_DATASETS:
-        blueprint = build_table_card_blueprint(dataset_name, timeline="video_time")
-        time_panel = blueprint.time_panel
-        root_contents: list[Any] = list(blueprint.root_container.contents)
-        scene_view = root_contents[0]
-        time_selection = time_panel.time_selection
-        assert time_selection is not None
-
-        assert time_panel.timeline == "video_time"
-        assert time_panel.play_state == "playing"
-        assert time_panel.loop_mode == "selection"
-        assert time_selection.min.value == 0
-        assert time_selection.max.value == 10_000_000_000
-        assert scene_view.visualizer_overrides == {}
-
-        encoded_blueprint: str = build_rrd_index_table_blueprint(dataset_name)
-        assert encoded_blueprint.startswith("base64:")
 
 
 def test_catalog_blueprints_exist_for_default_datasets() -> None:

@@ -18,8 +18,20 @@ pixi run -e mv-api mv-api-full-app --rr-config.save artifacts/node-validation/ho
 
 ## Catalog Notes
 
-For the lean macOS catalog registration and query examples, do not use the
-catalog optimization flags. The optimized cache path is confusing for this
-workflow and can make quick iteration look like it is hung while it prepares
-the full Assembly101 set. Prefer mounting/registering the existing local RRDs
-directly.
+The catalog tools (`mv-api-catalog-prediction-layer` and the macOS
+`mv-api-catalog-register`) connect to an **already-running** Rerun catalog via
+`CatalogClient` — they no longer mount the catalog in-process. Before running
+either, start the base catalog with the simplecv tasks:
+
+```bash
+pixi run simplecv-catalog-serve       # tier 1: serve the catalog (rerun server)
+pixi run simplecv-catalog-register    # tier 2: register the base ExoEgo Forge recordings
+```
+
+Both tools default to `--catalog-url rerun+http://127.0.0.1:9988`. Prediction
+layers are attached with `on_duplicate=REPLACE`, so re-running is idempotent.
+
+The prediction dataloader samples each exo stream at its **native frame rate** via the
+stock `RerunIterableDataset` + `FixedRateSampling` — sub-native decimation is avoided
+because it triggers a graded AV1 decode failure. See
+[`docs/catalog_dataloader.md`](docs/catalog_dataloader.md).

@@ -2,8 +2,7 @@ import importlib.util
 import sys
 import tomllib
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 import pytest
 import tyro
@@ -35,8 +34,7 @@ def test_registration_defaults_to_full_catalog_and_discovers_prediction_rrds(tmp
 
     discovered_paths: list[Path] = module.discover_prediction_rrd_paths(config)
 
-    assert config.datasets == ()
-    assert config.optimize_for_catalog is False
+    assert config.catalog_url == "rerun+http://127.0.0.1:9988"
     assert discovered_paths == [first_rrd.resolve(), second_rrd.resolve()]
 
 
@@ -51,40 +49,27 @@ def test_cli_parser_uses_tyro_instead_of_argparse() -> None:
 
 def test_tyro_config_keeps_expected_minimal_cli_flags(tmp_path: Path) -> None:
     module: Any = _load_script_module()
-    rrd_root: Path = tmp_path / "catalog"
     prediction_root: Path = tmp_path / "predictions"
     prediction_rrd: Path = prediction_root / "assembly101" / "seq.rrd"
 
     config: Any = tyro.cli(
         module.CatalogRegistrationConfig,
         args=[
-            "--rrd-root",
-            str(rrd_root),
+            "--catalog-url",
+            "rerun+http://127.0.0.1:7777",
             "--prediction-root",
             str(prediction_root),
             "--prediction-rrd",
             str(prediction_rrd),
-            "--dataset",
-            "assembly101",
-            "hocap",
             "--prediction-dataset",
             "assembly101",
-            "--optimize-dataset",
-            "assembly101",
-            "hocap",
-            "--no-progress",
-            "--exit-after-register",
         ],
     )
 
-    assert config.rrd_root == rrd_root
+    assert config.catalog_url == "rerun+http://127.0.0.1:7777"
     assert config.prediction_root == prediction_root
     assert config.prediction_rrds == (prediction_rrd,)
-    assert config.datasets == ("assembly101", "hocap")
     assert config.prediction_dataset_name == "assembly101"
-    assert config.optimize_datasets == ("assembly101", "hocap")
-    assert config.show_progress is False
-    assert config.exit_after_register is True
 
 
 def test_pixi_mac_registration_env_is_mac_only_and_lean() -> None:
@@ -113,18 +98,17 @@ def test_pixi_mac_registration_env_is_mac_only_and_lean() -> None:
     assert "mv-api" not in environment["features"]
 
 
-def test_mount_catalog_with_predictions_uses_simplecv_blueprints_review_tables_and_registers_prediction_rrds(
+def test_register_predictions_into_catalog_connects_and_registers_prediction_rrds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from rerun.catalog import OnDuplicateSegmentLayer
+
     module: Any = _load_script_module()
-    rrd_root: Path = tmp_path / "catalog"
     prediction_root: Path = tmp_path / "predictions"
     prediction_rrd: Path = prediction_root / "assembly101" / "all" / "seq_a" / "mvapi_coco133_upper_body_v1_full_red.rrd"
     prediction_rrd.parent.mkdir(parents=True, exist_ok=True)
     prediction_rrd.write_bytes(b"rrd")
-    captured_mount_kwargs: dict[str, Any] = {}
-    captured_review_table_kwargs: dict[str, Any] = {}
 
     class _FakeRegistrationHandle:
         def __init__(self) -> None:
@@ -145,81 +129,38 @@ def test_mount_catalog_with_predictions_uses_simplecv_blueprints_review_tables_a
     class _FakeClient:
         def __init__(self) -> None:
             self.datasets: dict[str, _FakeDatasetEntry] = {"assembly101": _FakeDatasetEntry()}
+            self.requested_datasets: list[str] = []
 
         def get_dataset(self, dataset_name: str) -> _FakeDatasetEntry:
+            self.requested_datasets.append(dataset_name)
             return self.datasets[dataset_name]
 
-    class _FakeServer:
-        def __init__(self) -> None:
-            self.client_value: _FakeClient = _FakeClient()
+    created_urls: list[str] = []
+    fake_client: _FakeClient = _FakeClient()
 
-        def client(self) -> _FakeClient:
-            return self.client_value
+    def fake_catalog_client(url: str) -> _FakeClient:
+        created_urls.append(url)
+        return fake_client
 
-        def url(self) -> str:
-            return "rerun+http://127.0.0.1:9991"
-
-    def _fake_mount_catalog(*args: Any, **kwargs: Any) -> _FakeServer:
-        captured_mount_kwargs["args"] = args
-        captured_mount_kwargs["kwargs"] = kwargs
-        return _FakeServer()
-
-    def _fake_discover_rrd_paths(path: Path, **kwargs: Any) -> dict[str, list[Path]]:
-        captured_review_table_kwargs["discover"] = {"path": path, **kwargs}
-        return {"assembly101": [rrd_root / "assembly101" / "all" / "seq_a.rrd"]}
-
-    def _fake_build_rrd_index_rows_from_dataset(*args: Any, **kwargs: Any) -> list[Any]:
-        captured_review_table_kwargs["build_rows"] = {"args": args, "kwargs": kwargs}
-        return [SimpleNamespace(size_bytes=123)]
-
-    def _fake_table_name_for_dataset(dataset_name: str) -> str:
-        return f"{dataset_name}_table"
-
-    def _fake_create_rrd_index_table(*args: Any, **kwargs: Any) -> Any:
-        captured_review_table_kwargs["create_table"] = {"args": args, "kwargs": kwargs}
-        return SimpleNamespace(id="assembly101-table-id")
-
-    simplecv_module: ModuleType = ModuleType("simplecv")
-    simplecv_apis_module: ModuleType = ModuleType("simplecv.apis")
-    catalog_module: ModuleType = ModuleType("simplecv.apis.exoego_forge_catalog")
-    cast(Any, catalog_module).mount_catalog = _fake_mount_catalog
-    cast(Any, catalog_module).discover_rrd_paths = _fake_discover_rrd_paths
-    cast(Any, catalog_module).build_rrd_index_rows_from_dataset = _fake_build_rrd_index_rows_from_dataset
-    cast(Any, catalog_module).table_name_for_dataset = _fake_table_name_for_dataset
-    cast(Any, catalog_module).create_rrd_index_table = _fake_create_rrd_index_table
-    monkeypatch.setitem(sys.modules, "simplecv", simplecv_module)
-    monkeypatch.setitem(sys.modules, "simplecv.apis", simplecv_apis_module)
-    monkeypatch.setitem(sys.modules, "simplecv.apis.exoego_forge_catalog", catalog_module)
+    monkeypatch.setattr("rerun.catalog.CatalogClient", fake_catalog_client)
     config: Any = module.CatalogRegistrationConfig(
-        rrd_root=rrd_root,
+        catalog_url="rerun+http://127.0.0.1:7777",
         prediction_root=prediction_root,
         prediction_rrds=(prediction_rrd,),
-        port=9991,
-        optimize_datasets=("assembly101",),
     )
 
-    result: Any = module.mount_catalog_with_predictions(config)
+    result: Any = module.register_predictions_into_catalog(config)
 
-    dataset_entry: _FakeDatasetEntry = result.server.client().datasets["assembly101"]
-    assert captured_mount_kwargs["args"] == (rrd_root.resolve(),)
-    assert captured_mount_kwargs["kwargs"]["datasets"] == ()
-    assert captured_mount_kwargs["kwargs"]["port"] == 9991
-    assert captured_mount_kwargs["kwargs"]["optimize_for_catalog"] is False
-    assert captured_mount_kwargs["kwargs"]["optimize_datasets"] == ("assembly101",)
-    assert captured_review_table_kwargs["discover"] == {"path": rrd_root.resolve(), "datasets": ()}
-    assert captured_review_table_kwargs["build_rows"]["kwargs"] == {
-        "dataset_dir": rrd_root.resolve() / "assembly101",
-        "dataset_name": "assembly101",
-    }
-    assert captured_review_table_kwargs["create_table"]["kwargs"]["dataset_name"] == "assembly101"
-    assert captured_review_table_kwargs["create_table"]["kwargs"]["table_name"] == "assembly101_table"
-    assert len(captured_review_table_kwargs["create_table"]["kwargs"]["rows"]) == 1
+    assert created_urls == ["rerun+http://127.0.0.1:7777"]
+    assert fake_client.requested_datasets == ["assembly101"]
+    dataset_entry: _FakeDatasetEntry = fake_client.datasets["assembly101"]
     assert dataset_entry.register_calls == [
-        ([prediction_rrd.resolve().as_uri()], {"layer_name": "mvapi_coco133_upper_body_v1_full_red"})
+        (
+            [prediction_rrd.resolve().as_uri()],
+            {"layer_name": "mvapi_coco133_upper_body_v1_full_red", "on_duplicate": OnDuplicateSegmentLayer.REPLACE},
+        )
     ]
     assert dataset_entry.registration_handle.wait_called is True
-    assert result.catalog_url == "rerun+http://127.0.0.1:9991"
-    assert result.registered_review_tables[0].table_name == "assembly101_table"
-    assert result.registered_review_tables[0].table_url == "rerun+http://127.0.0.1:9991/entry/assembly101-table-id"
-    assert result.registered_review_tables[0].row_count == 1
+    assert result.catalog_url == "rerun+http://127.0.0.1:7777"
     assert result.registered_predictions[0].dataset_name == "assembly101"
+    assert result.registered_predictions[0].layer_name == "mvapi_coco133_upper_body_v1_full_red"
