@@ -258,6 +258,7 @@ datasets = ">=4.0.0"
 jax = ">=0.6.0,<0.7"
 jaxopt = ">=0.8.5,<0.9"
 lovely-jax = "*"
+smplx = ">=0.1.28"
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 wilor-nano = { path = "packages/wilor-nano", editable = true }
 timm = "<1.0"
@@ -310,6 +311,16 @@ description = "Convert Aria Gen2 Pilot VRS files to AV1 MP4 for SimpleCV"
 cmd = "python tools/preprocess_epfl_smart_kitchen.py"
 cwd = "packages/simplecv"
 description = "Build an AV1-transcoded EPFL-Smart-Kitchen mirror for SimpleCV"
+
+[feature.simplecv.tasks.simplecv-download-mamma]
+cmd = "python tools/download_mamma.py"
+cwd = "packages/simplecv"
+description = "Download one MAMMA sequence per subset (register at mamma.is.tue.mpg.de; set MAMMA_USERNAME/MAMMA_PASSWORD)"
+
+[feature.simplecv.tasks.simplecv-preprocess-mamma]
+cmd = "python tools/preprocess_mamma.py"
+cwd = "packages/simplecv"
+description = "Re-encode downloaded MAMMA yuv444 videos to AV1 yuv420 (videos_av1 mirror)"
 
 [feature.simplecv.tasks.simplecv-catalog-serve]
 # Tier 1: just the `rerun server` CLI (an empty in-memory catalog), like hiw-500's serve.

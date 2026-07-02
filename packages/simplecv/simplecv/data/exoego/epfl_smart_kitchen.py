@@ -20,7 +20,7 @@ from serde import field as serde_field
 
 from simplecv.camera_parameters import BrownConradyDistortion, Extrinsics, Intrinsics, PinholeParameters
 from simplecv.data.ego.base_ego import BaseEgoSequence
-from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack
+from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack, SmplxStack
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels, ExoEgoSample
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
 from simplecv.data.exoego.sequence_identity import SequenceIdentity
@@ -237,6 +237,12 @@ class HoloLensPoses:
     ``world2holo`` cell was blank (``[]``) because tracking dropped out."""
 
 
+# TODO(epfl-ego-drift): some segments have valid-looking world2holo poses whose camera
+# center drifts far from the body (e.g. train/YH2040/2023_09_12_09_50_41 around 60-70s:
+# ego cam ends up 0.3-1.3m from the SMPL head keypoint vs ~0.1m normally, on interspersed
+# frames with no tracking dropouts). Cause not yet investigated. To debug: plot per-frame
+# distance between the ego camera center and the head keypoint, and inspect the raw
+# world2holo rows at the flagged frames.
 def load_hololens_world_to_camera_poses(cfg: EpflSmartKitchenConfig) -> HoloLensPoses:
     """Load per-frame HoloLens world-to-camera transforms from ``holo_data_wpose.csv``."""
     path: Path = holo_pose_path(cfg)
@@ -392,6 +398,26 @@ class EpflBodyPoseRow:
     """Optional per-body-keypoint confidence values."""
     l2_dist: float | None = serde_field(default=None, deserializer=_deserialize_optional_float)
     """Optional EPFL body reprojection/error filter value."""
+    poses: Float32[ndarray, "pose_coeffs"] | None = serde_field(
+        default=None,
+        deserializer=_deserialize_optional_float32_array,
+    )
+    """Optional SMPL 72-vector axis-angle pose with a zeroed root placeholder."""
+    Rh: Float32[ndarray, "3"] | Float32[ndarray, "3 3"] | None = serde_field(
+        default=None,
+        deserializer=_deserialize_optional_float32_array,
+    )
+    """Optional SMPL root orientation as axis-angle or a rotation matrix."""
+    Th: Float32[ndarray, "3"] | None = serde_field(
+        default=None,
+        deserializer=_deserialize_optional_float32_array,
+    )
+    """Optional SMPL translation in world coordinates, expressed in meters."""
+    shapes: Float32[ndarray, "betas=10"] | None = serde_field(
+        default=None,
+        deserializer=_deserialize_optional_float32_array,
+    )
+    """Optional SMPL shape coefficients."""
 
 
 @serde(type_check=coerce)
@@ -683,6 +709,54 @@ def _load_mano_stack(hand_rows: list[EpflHandPoseRow]) -> ManoStack:
     return ManoStack(betas=betas, so3=so3, trans=trans, use_pca=False)
 
 
+def _load_smpl_stack(body_rows: list[EpflBodyPoseRow]) -> SmplxStack | None:
+    """Build the per-sequence plain-SMPL ``SmplxStack`` from ``pose3d_smpl.csv`` rows.
+
+    EPFL releases EasyMocap-style SMPL fits alongside the regressed keypoints:
+    ``poses`` (72 axis-angle with zeroed root placeholder), ``Rh`` (root
+    axis-angle), ``Th`` (world translation, meters, origin-pivot), ``shapes``
+    (10 betas). Returns ``None`` when the parameter columns are absent (older
+    slices or synthetic fixtures). Translations keep the EasyMocap origin-pivot
+    convention (``transl_pivot="origin"``); the logging layer converts to the
+    smplx root-joint pivot. The release does not state the SMPL gender, so
+    neutral is assumed.
+    """
+    num_frames: int = len(body_rows)
+    shapes_rows: list[Float32[ndarray, "betas=10"]] = []
+    poses: Float32[ndarray, "num_frames n_people=1 72"] = np.zeros((num_frames, 1, 72), dtype=np.float32)
+    trans: Float32[ndarray, "num_frames n_people=1 3"] = np.zeros((num_frames, 1, 3), dtype=np.float32)
+    for frame_idx, row in enumerate(body_rows):
+        # Use the row fields directly instead of union-annotated locals: under the
+        # beartype import hook a `X | None` hint on an in-loop annotated assignment
+        # is re-evaluated (and its checker re-compiled) every iteration, which takes
+        # hours on a ~100k-row session. The fields are already typed on
+        # ``EpflBodyPoseRow`` and checked at row construction.
+        if row.poses is None or row.Rh is None or row.Th is None or row.shapes is None:
+            return None
+        shapes_rows.append(_vector_from_array(row.shapes, expected_len=10, field_name="shapes").astype(np.float32, copy=False))
+        pose: Float32[ndarray, "72"] = _vector_from_array(row.poses, expected_len=72, field_name="poses").astype(np.float32, copy=True)
+        pose[:3] = _root_axis_angle(row.Rh, field_name="Rh")
+        poses[frame_idx, 0] = pose
+        trans[frame_idx, 0] = _vector_from_array(row.Th, expected_len=3, field_name="Th")
+
+    shapes_stack: Float32[ndarray, "num_frames betas=10"] = np.stack(shapes_rows)
+    shapes_delta: float = float(np.nanmax(np.abs(shapes_stack - shapes_stack[0])))
+    if shapes_delta > 1e-2:
+        warnings.warn(
+            f"EPFL SMPL shape parameters drift over time (max={shapes_delta:.6f}); using first-frame values.",
+            stacklevel=2,
+        )
+
+    return SmplxStack(
+        betas=shapes_stack[0][np.newaxis, :],
+        poses=poses,
+        trans=trans,
+        model_type="smpl",
+        gender="neutral",
+        transl_pivot="origin",
+    )
+
+
 class EpflSmartKitchenSequence(BaseExoEgoSequence[EpflSmartKitchenConfig]):
     """EPFL-Smart-Kitchen ExoEgo dataset adapter."""
 
@@ -822,7 +896,8 @@ class EpflSmartKitchenSequence(BaseExoEgoSequence[EpflSmartKitchenConfig]):
         xyzc_stack[:, RIGHT_HAND_IDX, 3] = hand_conf[:, 21:]
 
         mano_stack: ManoStack = _load_mano_stack(hand_rows)
-        return ExoEgoLabels(xyzc_stack=xyzc_stack, timestamps_ns=label_timestamps_ns, mano_stack=mano_stack)
+        smplx_stack: SmplxStack | None = _load_smpl_stack(body_rows)
+        return ExoEgoLabels(xyzc_stack=xyzc_stack, timestamps_ns=label_timestamps_ns, mano_stack=mano_stack, smplx_stack=smplx_stack)
 
     @classmethod
     def iter_episode_sequences(cls, cfg: EpflSmartKitchenConfig) -> Generator["EpflSmartKitchenSequence", None, None]:
