@@ -348,12 +348,13 @@ class MammaSequence(BaseExoEgoSequence[MammaConfig]):
         return stream_ts
 
     def load_labels(self) -> ExoEgoLabels | None:
-        """Build SMPL-X body labels from ``pred/params_XX.npz`` or the eval GT.
+        """Build SMPL-X body labels from the eval GT or ``pred/params_XX.npz``.
 
-        Markerless subsets ship MAMMA-estimated SMPL-X params per person in
-        ``pred/params_XX.npz``; eval subsets instead carry MoSh GT (with a
-        subject ``v_template``) in ``gt/global.npz``. Both become a
-        ``SmplxStack`` (see the two ``_smplx_stack_from_*`` builders).
+        Eval subsets carry MoSh GT (with a subject ``v_template``) in
+        ``gt/global.npz``; markerless subsets ship MAMMA-estimated SMPL-X params
+        per person in ``pred/params_XX.npz``. Both become a ``SmplxStack`` (see
+        the two ``_smplx_stack_from_*`` builders), and the GT wins when both are
+        present — the labels are logged as ground truth.
 
         MAMMA ships no COCO-133 keypoints directly, so they are derived from the
         SMPL-X forward's regressed joints (person 0 — ``ExoEgoLabels.xyzc_stack``
@@ -362,12 +363,11 @@ class MammaSequence(BaseExoEgoSequence[MammaConfig]):
         the NaN placeholder (robocap-style) and the viewer skips keypoints.
         """
         sequence_dir: Path = sequence_dir_for_config(self.config)
-        params_paths: list[Path] = natsorted((sequence_dir / "pred").glob("params_*.npz"))
-        smplx_stack: SmplxStack | None = (
-            _smplx_stack_from_pred_params(params_paths)
-            if params_paths
-            else _smplx_stack_from_eval_gt(sequence_dir / "gt" / "global.npz")
-        )
+        smplx_stack: SmplxStack | None = _smplx_stack_from_eval_gt(sequence_dir / "gt" / "global.npz")
+        if smplx_stack is None:
+            params_paths: list[Path] = natsorted((sequence_dir / "pred").glob("params_*.npz"))
+            if params_paths:
+                smplx_stack = _smplx_stack_from_pred_params(params_paths)
         if smplx_stack is None:
             return None
 

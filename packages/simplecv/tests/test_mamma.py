@@ -227,6 +227,20 @@ def test_mamma_load_labels_from_eval_gt_warns_on_mixed_genders(tmp_path: Path) -
     assert labels.xyzc_stack.shape == (3, 133, 4)
 
 
+def test_mamma_load_labels_prefers_eval_gt_over_pred(tmp_path: Path) -> None:
+    sequence_dir: Path = _write_synthetic_sequence(tmp_path)
+    _write_params_npz(sequence_dir / "pred" / "params_00.npz", num_frames=3, seed=0)
+    _write_eval_gt_npz(sequence_dir / "gt" / "global.npz", genders=("male",))
+
+    sequence: MammaSequence = MammaSequence(MammaConfig(root_directory=tmp_path, sequence_name=SEQUENCE_NAME))
+    labels = sequence.exoego_labels
+    assert labels is not None
+    assert labels.smplx_stack is not None
+    # The MoSh GT (subject v_template, 300 betas) must win over the pred fits.
+    assert labels.smplx_stack.v_template is not None
+    assert labels.smplx_stack.betas.shape == (1, 300)
+
+
 def test_mamma_pred_params_warn_on_mixed_genders(tmp_path: Path) -> None:
     sequence_dir: Path = _write_synthetic_sequence(tmp_path)
     _write_params_npz(sequence_dir / "pred" / "params_00.npz", num_frames=3, seed=0, gender="neutral")
