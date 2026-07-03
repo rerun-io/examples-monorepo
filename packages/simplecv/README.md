@@ -95,7 +95,8 @@ pixi run -e simplecv --frozen python tools/view_exoego.py mamma --sequence-name 
 
 MAMMA ships 4:4:4-chroma H.264/H.265 videos, which NVDEC and the Rerun viewer cannot decode
 on the fast path; `simplecv-preprocess-mamma` builds the AV1 `yuv420p` mirror the loader
-prefers automatically. Use `--crf` (default 30) and `--encoder {av1_nvenc,libsvtav1}` to tune it.
+prefers automatically. Use `--cq` (constant-quality target, default 30; maps to NVENC `-cq` /
+SVT-AV1 `-crf`) and `--encoder {av1_nvenc,libsvtav1}` to tune it.
 
 ### Ingest Exo/Ego Recordings
 Ingest synchronized exo/ego captures into Rerun (spawns the viewer unless told otherwise).
