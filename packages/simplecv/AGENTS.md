@@ -32,9 +32,8 @@ For catalog/server changes:
 - The 2-tier flow is canonical: serve = the `rerun server` CLI (`simplecv-catalog-serve`), register =
   `tools/catalog_register.py` / `register_main` (`CatalogClient` → `create_dataset` →
   `register(layer_name="base", on_duplicate=REPLACE)` → `register_blueprint`). The older single-tier
-  `mount_catalog` + RRD index-table builders are no longer a SimpleCV CLI but stay importable in
-  `exoego_forge_catalog.py` because mv-api's prediction-catalog flow still uses them (a coordinated
-  mv-api migration is deferred).
+  `mount_catalog` + RRD index-table builders have been removed; consumers (including mv-api's
+  prediction-catalog flow) connect to a running catalog with `CatalogClient` and register layers.
 - Assembly101-style nested RRD registration must continue to work through
   recursive discovery and explicit RRD file lists.
 - Transport-specific workarounds must be opt-in and covered by tests proving the

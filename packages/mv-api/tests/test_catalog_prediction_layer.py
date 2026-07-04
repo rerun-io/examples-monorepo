@@ -1,9 +1,8 @@
 import subprocess
-import sys
 import tomllib
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
-from typing import Any, cast
+from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
 import pyarrow as pa
@@ -12,30 +11,26 @@ import pytest
 from mv_api.api.catalog_prediction_layer import (
     CatalogPredictionLayerConfig,
     CatalogSegment,
-    CatalogTimeRange,
     ExoCameraStream,
     PredictionRecordingInfo,
     ViewerScreenshotTarget,
     _log_prediction_frame,
-    _open_catalog,
-    align_time_range_to_sample_grid,
-    build_duration_video_time_sample_index,
     build_native_viewer_screenshot_command,
     build_prediction_recording_info,
     build_prediction_rrd_path,
     build_viewer_screenshot_targets,
     capture_native_viewer_screenshots,
     catalog_segments_from_dataset,
+    detect_uniform_native_fps,
     discover_exo_camera_streams,
     index_value_to_time_ns,
-    intersect_time_ranges,
+    native_fps_from_packet_ns,
     none_decoded_exo_stream_names,
     prediction_visualization_colors,
     register_prediction_layer,
     rgb_chw_to_bgr_hwc,
     save_exo_viewer_blueprint,
     select_catalog_segment,
-    select_video_time_target_values,
     validate_exo_camera_calibration,
     write_viewer_validation_notes,
 )
@@ -90,6 +85,39 @@ class _LayerDatasetEntry:
     def register(self, recording_uri: list[str], **kwargs: Any) -> _RegistrationHandle:
         self.calls.append((recording_uri, kwargs))
         return self.registration_handle
+
+
+class _PacketReader:
+    def __init__(self, table: pa.Table) -> None:
+        self._table: pa.Table = table
+
+    def select(self, *_columns: str) -> "_PacketReader":
+        return self
+
+    def limit(self, _count: int) -> "_PacketReader":
+        return self
+
+    def to_arrow_table(self) -> pa.Table:
+        return self._table
+
+
+class _EntityView:
+    def __init__(self, table: pa.Table) -> None:
+        self._table: pa.Table = table
+
+    def reader(self, index: str) -> _PacketReader:
+        return _PacketReader(self._table)
+
+
+class _NativeFpsDatasetEntry:
+    def __init__(self, packet_ns_by_entity: dict[str, list[int]]) -> None:
+        self._by_entity: dict[str, list[int]] = packet_ns_by_entity
+
+    def filter_segments(self, _recording_id: str) -> "_NativeFpsDatasetEntry":
+        return self
+
+    def filter_contents(self, entity_path: str) -> _EntityView:
+        return _EntityView(pa.table({"video_time": pa.array(self._by_entity[entity_path], type=pa.int64())}))
 
 
 def test_select_catalog_segment_defaults_to_first_sorted_assembly101_row() -> None:
@@ -159,7 +187,9 @@ def test_build_prediction_recording_info_uses_source_segment_recording_id() -> N
     assert recording_info.recording_id == "assembly101__all__a-sequence"
 
 
-def test_register_prediction_layer_fails_on_duplicates_by_default() -> None:
+def test_register_prediction_layer_replaces_duplicate_layers() -> None:
+    from rerun.catalog import OnDuplicateSegmentLayer
+
     dataset_entry: _LayerDatasetEntry = _LayerDatasetEntry()
 
     handle: _RegistrationHandle = register_prediction_layer(
@@ -172,34 +202,49 @@ def test_register_prediction_layer_fails_on_duplicates_by_default() -> None:
     assert len(dataset_entry.calls) == 1
     recording_uri, kwargs = dataset_entry.calls[0]
     assert recording_uri == [Path("/tmp/prediction.rrd").resolve().as_uri()]
-    assert kwargs == {"layer_name": "mvapi_coco133_upper_body_v1"}
+    assert kwargs == {
+        "layer_name": "mvapi_coco133_upper_body_v1",
+        "on_duplicate": OnDuplicateSegmentLayer.REPLACE,
+    }
 
 
-def test_intersect_time_ranges_uses_common_exo_overlap() -> None:
-    time_range: CatalogTimeRange = intersect_time_ranges(
-        [
-            CatalogTimeRange(start_ns=0, end_ns=100),
-            CatalogTimeRange(start_ns=20, end_ns=80),
-            CatalogTimeRange(start_ns=10, end_ns=90),
-        ]
+def test_native_fps_from_packet_ns_detects_uniform_rate() -> None:
+    step_ns: int = 1_000_000_000 // 60
+    packet_ns: np.ndarray = np.arange(0, 20 * step_ns, step_ns, dtype=np.int64)
+
+    assert round(native_fps_from_packet_ns(packet_ns)) == 60
+
+
+def test_native_fps_from_packet_ns_rejects_single_packet() -> None:
+    with pytest.raises(ValueError, match="Need >=2"):
+        native_fps_from_packet_ns(np.array([0], dtype=np.int64))
+
+
+def test_native_fps_from_packet_ns_rejects_irregular_spacing() -> None:
+    packet_ns: np.ndarray = np.array([0, 10, 20, 30, 200], dtype=np.int64)
+
+    with pytest.raises(ValueError, match="too irregular"):
+        native_fps_from_packet_ns(packet_ns)
+
+
+def _exo_stream(name: str) -> ExoCameraStream:
+    entity: str = f"/world/exo/{name}/pinhole/video"
+    return ExoCameraStream(
+        name=name,
+        video_entity=entity,
+        field_path=f"{entity}:VideoStream:sample",
+        pinhole_entity=f"/world/exo/{name}/pinhole",
+        transform_entity=f"/world/exo/{name}",
     )
 
-    assert time_range == CatalogTimeRange(start_ns=20, end_ns=80)
+
+def _packet_ns_at_fps(fps: float, count: int = 30) -> list[int]:
+    step_ns: int = int(1_000_000_000 / fps)
+    return [i * step_ns for i in range(count)]
 
 
-def test_align_time_range_to_sample_grid_uses_first_valid_grid_point() -> None:
-    aligned_range: CatalogTimeRange = align_time_range_to_sample_grid(
-        segment_start_ns=0,
-        segment_end_ns=99,
-        ns_per_sample=10,
-        time_range=CatalogTimeRange(start_ns=25, end_ns=64),
-    )
-
-    assert aligned_range == CatalogTimeRange(start_ns=30, end_ns=60)
-
-
-def test_duration_video_time_sample_index_uses_int_nanosecond_grid_for_dataloader() -> None:
-    segment: CatalogSegment = CatalogSegment(
+def _native_fps_segment() -> CatalogSegment:
+    return CatalogSegment(
         dataset="assembly101",
         sequence_key="all/a-sequence",
         recording_id="assembly101__all__a-sequence",
@@ -207,91 +252,25 @@ def test_duration_video_time_sample_index_uses_int_nanosecond_grid_for_dataloade
         path=Path("/catalog/assembly101/all/a-sequence.rrd"),
     )
 
-    sample_index = build_duration_video_time_sample_index(
-        segment=segment,
-        segment_time_range=CatalogTimeRange(start_ns=0, end_ns=99),
-        time_range=CatalogTimeRange(start_ns=25, end_ns=64),
-        sample_rate_hz=100_000_000.0,
+
+def test_detect_uniform_native_fps_returns_shared_exo_rate() -> None:
+    streams: list[ExoCameraStream] = [_exo_stream("C10095"), _exo_stream("C10115")]
+    entry: _NativeFpsDatasetEntry = _NativeFpsDatasetEntry({stream.video_entity: _packet_ns_at_fps(60.0) for stream in streams})
+
+    assert round(detect_uniform_native_fps(dataset_entry=entry, segment=_native_fps_segment(), streams=streams)) == 60
+
+
+def test_detect_uniform_native_fps_rejects_mixed_rate_exo_streams() -> None:
+    streams: list[ExoCameraStream] = [_exo_stream("C10095"), _exo_stream("C10115")]
+    entry: _NativeFpsDatasetEntry = _NativeFpsDatasetEntry(
+        {
+            streams[0].video_entity: _packet_ns_at_fps(60.0),
+            streams[1].video_entity: _packet_ns_at_fps(30.0),
+        }
     )
 
-    segment_metadata, index_value = sample_index.global_to_local(2)
-
-    assert sample_index.is_timestamp is False
-    assert sample_index.ns_per_sample == 10
-    assert sample_index.total_samples == 4
-    assert segment_metadata.segment_id == "assembly101__all__a-sequence"
-    assert index_value == np.timedelta64(50, "ns")
-    assert sorted(sample_index.indices_in_range(30, 60)) == [30, 40, 50, 60]
-
-    context_sample_index = build_duration_video_time_sample_index(
-        segment=segment,
-        segment_time_range=CatalogTimeRange(start_ns=0, end_ns=99),
-        time_range=CatalogTimeRange(start_ns=25, end_ns=64),
-        sample_rate_hz=100_000_000.0,
-        context_index_values=np.array([0, 25, 50, 75], dtype=np.int64),
-    )
-    assert sorted(context_sample_index.indices_in_range(30, 60)) == [50]
-
-    bootstrap_sample_index = build_duration_video_time_sample_index(
-        segment=segment,
-        segment_time_range=CatalogTimeRange(start_ns=0, end_ns=99),
-        time_range=CatalogTimeRange(start_ns=0, end_ns=64),
-        sample_rate_hz=100_000_000.0,
-        bootstrap_window_ns=25,
-    )
-    _bootstrap_segment, bootstrap_index_value = bootstrap_sample_index.global_to_local(0)
-    assert bootstrap_index_value == np.timedelta64(30, "ns")
-
-
-def test_duration_video_time_sample_index_can_use_exact_video_packet_targets() -> None:
-    segment: CatalogSegment = CatalogSegment(
-        dataset="assembly101",
-        sequence_key="all/a-sequence",
-        recording_id="assembly101__all__a-sequence",
-        recording_uri="rerun+http://127.0.0.1:9988/recording/a",
-        path=Path("/catalog/assembly101/all/a-sequence.rrd"),
-    )
-    candidate_values: np.ndarray = np.array([0, 17, 33, 50, 67, 83], dtype=np.int64)
-    target_values: np.ndarray = select_video_time_target_values(
-        candidate_values=candidate_values,
-        segment_time_range=CatalogTimeRange(start_ns=0, end_ns=83),
-        time_range=CatalogTimeRange(start_ns=0, end_ns=83),
-        sample_rate_hz=100_000_000.0,
-        bootstrap_window_ns=25,
-    )
-
-    np.testing.assert_array_equal(target_values, np.array([33, 50, 67, 83], dtype=np.int64))
-    assert set(target_values.tolist()).issubset(set(candidate_values.tolist()))
-
-    sample_index = build_duration_video_time_sample_index(
-        segment=segment,
-        segment_time_range=CatalogTimeRange(start_ns=0, end_ns=83),
-        time_range=CatalogTimeRange(start_ns=0, end_ns=83),
-        sample_rate_hz=100_000_000.0,
-        bootstrap_window_ns=25,
-        context_index_values=candidate_values,
-        target_index_values=target_values,
-    )
-
-    assert sample_index.total_samples == 4
-    _first_segment, first_index_value = sample_index.global_to_local(0)
-    _last_segment, last_index_value = sample_index.global_to_local(3)
-    assert first_index_value == np.timedelta64(33, "ns")
-    assert last_index_value == np.timedelta64(83, "ns")
-    assert sorted(sample_index.indices_in_range(30, 55)) == [33, 50]
-
-
-def test_video_time_target_selection_can_start_at_first_keyframe_packet() -> None:
-    candidate_values: np.ndarray = np.array([0, 17, 33, 50, 67, 83], dtype=np.int64)
-    target_values: np.ndarray = select_video_time_target_values(
-        candidate_values=candidate_values,
-        segment_time_range=CatalogTimeRange(start_ns=0, end_ns=83),
-        time_range=CatalogTimeRange(start_ns=0, end_ns=83),
-        sample_rate_hz=100_000_000.0,
-        bootstrap_window_ns=0,
-    )
-
-    np.testing.assert_array_equal(target_values, np.array([0, 17, 33, 50, 67, 83], dtype=np.int64))
+    with pytest.raises(ValueError, match="do not share one native fps"):
+        detect_uniform_native_fps(dataset_entry=entry, segment=_native_fps_segment(), streams=streams)
 
 
 def test_discover_exo_camera_streams_uses_sorted_video_stream_fields() -> None:
@@ -472,84 +451,16 @@ def test_catalog_prediction_layer_config_defaults_match_spec() -> None:
     config: CatalogPredictionLayerConfig = CatalogPredictionLayerConfig()
 
     assert config.rrd_root == Path("/mnt/8tb/data/exoego-forge-catalog")
-    assert config.catalog_port == 9988
-    assert config.catalog_optimize_for_catalog is True
-    assert config.catalog_optimize_datasets == ("assembly101",)
+    assert config.catalog_url == "rerun+http://127.0.0.1:9988"
     assert config.assembly101_row_id == 120
     assert config.max_frames == 10
     assert config.video_codec == "av1"
     assert config.keyframe_interval == 300
+    assert config.native_fps_override is None
     assert config.output_root == Path("artifacts/catalog_layers")
     assert config.layer_name == "mvapi_coco133_upper_body_v1"
     assert config.register_layer is True
     assert config.capture_native_viewer_screenshots is True
-
-
-def test_open_catalog_mounts_full_catalog_but_only_preoptimizes_target_dataset(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    calls: dict[str, Any] = {}
-    client: object = object()
-
-    class _Server:
-        def client(self) -> object:
-            return client
-
-        def url(self) -> str:
-            return "rerun+http://127.0.0.1:1234"
-
-    def mount_catalog(
-        rrd_root: Path,
-        *,
-        datasets: tuple[str, ...],
-        port: int,
-        application_id: str,
-        show_progress: bool,
-        optimize_for_catalog: bool,
-        optimize_datasets: tuple[str, ...],
-    ) -> _Server:
-        calls.update(
-            {
-                "rrd_root": rrd_root,
-                "datasets": datasets,
-                "port": port,
-                "application_id": application_id,
-                "show_progress": show_progress,
-                "optimize_for_catalog": optimize_for_catalog,
-                "optimize_datasets": optimize_datasets,
-            }
-        )
-        return _Server()
-
-    simplecv_module: ModuleType = ModuleType("simplecv")
-    apis_module: ModuleType = ModuleType("simplecv.apis")
-    catalog_module: ModuleType = ModuleType("simplecv.apis.exoego_forge_catalog")
-    cast(Any, catalog_module).mount_catalog = mount_catalog
-    cast(Any, simplecv_module).apis = apis_module
-    cast(Any, apis_module).exoego_forge_catalog = catalog_module
-    monkeypatch.setitem(sys.modules, "simplecv", simplecv_module)
-    monkeypatch.setitem(sys.modules, "simplecv.apis", apis_module)
-    monkeypatch.setitem(sys.modules, "simplecv.apis.exoego_forge_catalog", catalog_module)
-    config: CatalogPredictionLayerConfig = CatalogPredictionLayerConfig(
-        rrd_root=tmp_path,
-        catalog_port=1234,
-        dataset_name="assembly101",
-        application_id="catalog-app",
-    )
-
-    opened_client: Any
-    server: Any
-    catalog_url: str
-    opened_client, server, catalog_url = _open_catalog(config)
-
-    assert opened_client is client
-    assert isinstance(server, _Server)
-    assert catalog_url == "rerun+http://127.0.0.1:1234"
-    assert calls["rrd_root"] == tmp_path.resolve()
-    assert calls["datasets"] == ()
-    assert calls["optimize_for_catalog"] is True
-    assert calls["optimize_datasets"] == ("assembly101",)
 
 
 def test_pixi_catalog_environment_and_task_are_wired_for_dataloader_lane() -> None:

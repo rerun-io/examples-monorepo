@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from time import perf_counter, strftime
@@ -22,6 +21,9 @@ CATALOG_TIMELINE: str = "video_time"
 PREDICTION_2D_ENTITY_TEMPLATE: str = "/world/exo/{camera_name}/pinhole/pred/mvapi/coco133_uv"
 PREDICTION_3D_ENTITY: str = "/world/pred/mvapi/coco133_xyz"
 PREDICTION_VISUALIZATION_RGB: tuple[int, int, int] = (255, 0, 0)
+_NATIVE_FPS_SAMPLE_LIMIT: int = 2048
+"""Max ``video_time`` packets read per exo stream to detect native fps. The median inter-packet
+gap is stable on any uniform prefix, so bounding the read keeps detection O(1) in clip length."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,101 +73,6 @@ class ViewerScreenshotTarget:
 
 
 @dataclass(frozen=True, slots=True)
-class CatalogTimeRange:
-    """Inclusive nanosecond time range in the catalog inference timeline."""
-
-    start_ns: int
-    """Inclusive start timestamp in nanoseconds."""
-    end_ns: int
-    """Inclusive end timestamp in nanoseconds."""
-
-
-@dataclass(frozen=True, slots=True)
-class DurationTimelineSampleIndex:
-    """Rerun ``SampleIndex``-compatible grid for duration timelines."""
-
-    _segments: list[Any]
-    """Per-segment metadata objects with ``segment_id`` and sample bounds."""
-    _ns_per_sample: int
-    """Nanoseconds between samples on the duration grid."""
-    _context_index_values: Int[ndarray, "context"] | None = None
-    """Actual duration nanosecond values to include when fetching decoder context."""
-    _target_index_values: Int[ndarray, "samples"] | None = None
-    """Actual duration nanosecond values to use as dataloader target samples."""
-
-    @property
-    def segments(self) -> list[Any]:
-        """Per-segment metadata list."""
-        return self._segments
-
-    @property
-    def is_timestamp(self) -> bool:
-        """Duration timelines should be queried as int64 nanoseconds, not datetimes."""
-        return False
-
-    @property
-    def ns_per_sample(self) -> int:
-        """Nanoseconds between fixed-rate samples."""
-        return self._ns_per_sample
-
-    @property
-    def total_samples(self) -> int:
-        """Total number of samples across all segments."""
-        if self._target_index_values is not None:
-            return int(self._target_index_values.shape[0])
-        return int(sum(segment.num_samples for segment in self._segments))
-
-    def global_to_local(self, idx: int) -> tuple[Any, np.timedelta64]:
-        """Map a global sample offset to ``(segment_metadata, video_time_ns)``."""
-        total_samples: int = self.total_samples
-        if idx < 0 or idx >= total_samples:
-            raise IndexError(f"Index {idx} out of range [0, {total_samples})")
-
-        offset: int = int(idx)
-        for segment in self._segments:
-            segment_samples: int = int(segment.num_samples)
-            if offset < segment_samples:
-                return segment, self.resolve_local_index(segment, offset)
-            offset -= segment_samples
-        raise IndexError(f"Index {idx} out of range [0, {total_samples})")
-
-    def resolve_local_index(self, segment: Any, pos: int) -> np.timedelta64:
-        """Convert a segment-local sample offset to duration nanoseconds."""
-        if self._target_index_values is not None:
-            return np.timedelta64(int(self._target_index_values[pos]), "ns")
-        video_time_ns: int = int(segment.index_start) + int(pos) * self._ns_per_sample
-        return np.timedelta64(video_time_ns, "ns")
-
-    def indices_in_range(self, lo: int, hi: int) -> Iterable[int]:
-        """Enumerate duration nanosecond values in ``[lo, hi]`` on the sample grid."""
-        if hi < lo:
-            return ()
-        if self._context_index_values is not None:
-            in_range: Bool[ndarray, "context"] = np.logical_and(self._context_index_values >= lo, self._context_index_values <= hi)
-            return (int(value) for value in self._context_index_values[in_range])
-        if self._target_index_values is not None:
-            in_range: Bool[ndarray, "samples"] = np.logical_and(self._target_index_values >= lo, self._target_index_values <= hi)
-            return (int(value) for value in self._target_index_values[in_range])
-        step: int = self._ns_per_sample
-        n_steps: int = (hi - lo) // step
-        return (hi - offset * step for offset in range(n_steps + 1))
-
-
-@dataclass(frozen=True, slots=True)
-class DurationTimelineSegment:
-    """Per-segment duration timeline metadata for the local sample index."""
-
-    segment_id: str
-    """Catalog recording id for the selected segment."""
-    index_start: int
-    """Inclusive first duration nanosecond sample."""
-    index_end: int
-    """Inclusive last duration nanosecond sample."""
-    num_samples: int
-    """Number of fixed-rate samples in this segment."""
-
-
-@dataclass(frozen=True, slots=True)
 class PredictionRecordingInfo:
     """Rerun recording identity for the generated prediction layer."""
 
@@ -181,14 +88,9 @@ class CatalogPredictionLayerConfig:
 
     rrd_root: Path = Path("/mnt/8tb/data/exoego-forge-catalog")
     """Root directory containing the full ExoEgo Forge RRD catalog."""
-    catalog_url: str | None = None
-    """Optional existing Rerun catalog URL to connect to instead of mounting locally."""
-    catalog_port: int = 9988
-    """Local Rerun catalog server port used when mounting ``rrd_root``."""
-    catalog_optimize_for_catalog: bool = True
-    """Whether to mount optimized RRD cache copies for catalog-compatible schema loading."""
-    catalog_optimize_datasets: tuple[str, ...] = (CATALOG_DATASET_NAME,)
-    """Datasets to pre-optimize while still mounting every first-level catalog dataset."""
+    catalog_url: str = "rerun+http://127.0.0.1:9988"
+    """URL of the running Rerun catalog server to connect to. Start it with the
+    ``simplecv-catalog-serve`` task and register the v1 catalog with ``simplecv-catalog-register``."""
     dataset_name: str = CATALOG_DATASET_NAME
     """Catalog dataset name to process. v1 is expected to remain ``assembly101``."""
     assembly101_row_id: int = 120
@@ -197,8 +99,10 @@ class CatalogPredictionLayerConfig:
     """Optional exact Assembly101 sequence key override."""
     max_frames: int | None = 10
     """Maximum number of frames to process; ``None`` means full selected segment."""
-    sample_rate_hz: float = 30.0
-    """Fixed-rate sampling frequency for the Rerun dataloader over ``video_time``."""
+    native_fps_override: float | None = None
+    """Sampling rate (Hz) for the Rerun dataloader over ``video_time``. ``None`` auto-detects each
+    segment's native exo frame rate from packet spacing. The dataloader always samples at (or above)
+    the native rate: sub-native decimation triggers a graded, order-dependent AV1 decode failure."""
     fetch_size: int = 64
     """Number of samples fetched per Rerun catalog query."""
     video_codec: str = "av1"
@@ -654,7 +558,7 @@ def register_prediction_layer(
     rrd_path: Path,
     layer_name: str,
 ) -> Any:
-    """Register the generated prediction RRD as a fail-on-duplicate catalog layer.
+    """Register the generated prediction RRD as a catalog layer, replacing any existing layer.
 
     Args:
         dataset_entry: Rerun catalog dataset entry.
@@ -664,71 +568,13 @@ def register_prediction_layer(
     Returns:
         Registration handle after ``wait`` has completed.
     """
-    registration_handle: Any = dataset_entry.register([rrd_path.resolve().as_uri()], layer_name=layer_name)
+    from rerun.catalog import OnDuplicateSegmentLayer
+
+    registration_handle: Any = dataset_entry.register(
+        [rrd_path.resolve().as_uri()], layer_name=layer_name, on_duplicate=OnDuplicateSegmentLayer.REPLACE
+    )
     registration_handle.wait()
     return registration_handle
-
-
-def intersect_time_ranges(time_ranges: list[CatalogTimeRange]) -> CatalogTimeRange:
-    """Intersect exo video time ranges to find the common inference interval.
-
-    Args:
-        time_ranges: Per-video inclusive time ranges.
-
-    Returns:
-        Common inclusive range shared by every selected exo video.
-
-    Raises:
-        ValueError: If no ranges are supplied or the ranges do not overlap.
-    """
-    if not time_ranges:
-        raise ValueError("At least one exo video time range is required.")
-
-    start_ns: int = max(time_range.start_ns for time_range in time_ranges)
-    end_ns: int = min(time_range.end_ns for time_range in time_ranges)
-    if start_ns > end_ns:
-        raise ValueError(f"Selected exo videos do not overlap in {CATALOG_TIMELINE!r}: {time_ranges}")
-    return CatalogTimeRange(start_ns=start_ns, end_ns=end_ns)
-
-
-def align_time_range_to_sample_grid(
-    *,
-    segment_start_ns: int,
-    segment_end_ns: int,
-    ns_per_sample: int,
-    time_range: CatalogTimeRange,
-) -> CatalogTimeRange:
-    """Align an inclusive time range to a Rerun dataloader fixed-rate sample grid.
-
-    Args:
-        segment_start_ns: SampleIndex segment start timestamp.
-        segment_end_ns: SampleIndex segment end timestamp.
-        ns_per_sample: Fixed-rate sampling period.
-        time_range: Desired inclusive time range.
-
-    Returns:
-        Inclusive aligned range on the dataloader sample grid.
-
-    Raises:
-        ValueError: If the range has no grid sample.
-    """
-    if ns_per_sample <= 0:
-        raise ValueError(f"ns_per_sample must be positive, got {ns_per_sample}.")
-
-    lower_ns: int = max(int(segment_start_ns), int(time_range.start_ns))
-    upper_ns: int = min(int(segment_end_ns), int(time_range.end_ns))
-    if lower_ns > upper_ns:
-        raise ValueError(f"Time range {time_range} does not overlap dataloader segment range.")
-
-    start_offset_ns: int = lower_ns - int(segment_start_ns)
-    start_steps: int = (start_offset_ns + ns_per_sample - 1) // ns_per_sample
-    end_steps: int = (upper_ns - int(segment_start_ns)) // ns_per_sample
-    if end_steps < start_steps:
-        raise ValueError(f"Time range {time_range} contains no dataloader sample grid point.")
-
-    aligned_start_ns: int = int(segment_start_ns) + start_steps * ns_per_sample
-    aligned_end_ns: int = int(segment_start_ns) + end_steps * ns_per_sample
-    return CatalogTimeRange(start_ns=aligned_start_ns, end_ns=aligned_end_ns)
 
 
 def save_exo_viewer_blueprint(
@@ -824,114 +670,6 @@ def capture_native_viewer_screenshots(
             completed_process.check_returncode()
 
 
-def sample_rate_hz_to_ns(sample_rate_hz: float) -> int:
-    """Convert a positive sample rate to an integer nanosecond period."""
-    if sample_rate_hz <= 0.0:
-        raise ValueError(f"sample_rate_hz must be positive, got {sample_rate_hz}.")
-    return int(round(1_000_000_000.0 / sample_rate_hz))
-
-
-def build_duration_video_time_sample_index(
-    *,
-    segment: CatalogSegment,
-    segment_time_range: CatalogTimeRange,
-    time_range: CatalogTimeRange,
-    sample_rate_hz: float,
-    bootstrap_window_ns: int = 0,
-    context_index_values: Int[ndarray, "context"] | None = None,
-    target_index_values: Int[ndarray, "samples"] | None = None,
-) -> DurationTimelineSampleIndex:
-    """Build a duration-timeline sample index for Rerun's iterable dataloader.
-
-    Rerun's prerelease dataloader can query duration timelines with int64
-    nanosecond values, but its public fixed-rate builder currently only handles
-    timestamp timelines. This adapter keeps the Rerun fetch/decode path while
-    representing ``video_time`` samples as duration nanoseconds.
-    """
-    ns_per_sample: int = sample_rate_hz_to_ns(sample_rate_hz)
-    decode_ready_range: CatalogTimeRange = CatalogTimeRange(
-        start_ns=max(time_range.start_ns, segment_time_range.start_ns + bootstrap_window_ns),
-        end_ns=time_range.end_ns,
-    )
-    if target_index_values is not None:
-        target_values: Int[ndarray, "samples"] = np.asarray(target_index_values, dtype=np.int64)
-        in_range: Bool[ndarray, "samples"] = np.logical_and(
-            target_values >= decode_ready_range.start_ns,
-            target_values <= decode_ready_range.end_ns,
-        )
-        target_values = target_values[in_range]
-        if target_values.size == 0:
-            raise ValueError(
-                f"Time range {time_range} contains no exact video packet target samples after bootstrap window "
-                f"{bootstrap_window_ns} ns."
-            )
-        segment_metadata: DurationTimelineSegment = DurationTimelineSegment(
-            segment_id=segment.recording_id,
-            index_start=int(target_values[0]),
-            index_end=int(target_values[-1]),
-            num_samples=int(target_values.shape[0]),
-        )
-        return DurationTimelineSampleIndex([segment_metadata], ns_per_sample, context_index_values, target_values)
-
-    aligned_range: CatalogTimeRange = align_time_range_to_sample_grid(
-        segment_start_ns=segment_time_range.start_ns,
-        segment_end_ns=segment_time_range.end_ns,
-        ns_per_sample=ns_per_sample,
-        time_range=decode_ready_range,
-    )
-    num_samples: int = ((aligned_range.end_ns - aligned_range.start_ns) // ns_per_sample) + 1
-    segment_metadata: DurationTimelineSegment = DurationTimelineSegment(
-        segment_id=segment.recording_id,
-        index_start=aligned_range.start_ns,
-        index_end=aligned_range.end_ns,
-        num_samples=num_samples,
-    )
-    return DurationTimelineSampleIndex([segment_metadata], ns_per_sample, context_index_values)
-
-
-def select_video_time_target_values(
-    *,
-    candidate_values: Int[ndarray, "candidates"],
-    segment_time_range: CatalogTimeRange,
-    time_range: CatalogTimeRange,
-    sample_rate_hz: float,
-    bootstrap_window_ns: int = 0,
-) -> Int[ndarray, "samples"]:
-    """Select exact video packet timestamps at approximately ``sample_rate_hz``.
-
-    Rerun's AV1 decoder expects compressed packet context, not synthetic
-    ``fill_latest_at`` rows. Sampling from exact shared ``VideoStream`` packet
-    timestamps keeps the dataloader target values decodable while preserving the
-    requested fixed-rate stride as closely as the packet grid allows.
-    """
-    ns_per_sample: int = sample_rate_hz_to_ns(sample_rate_hz)
-    lower_ns: int = max(int(time_range.start_ns), int(segment_time_range.start_ns) + int(bootstrap_window_ns))
-    upper_ns: int = min(int(time_range.end_ns), int(segment_time_range.end_ns))
-    if lower_ns > upper_ns:
-        raise ValueError(f"Time range {time_range} does not overlap decoder-ready segment range.")
-
-    sorted_values: Int[ndarray, "candidates"] = np.unique(np.asarray(candidate_values, dtype=np.int64))
-    in_range: Bool[ndarray, "candidates"] = np.logical_and(sorted_values >= lower_ns, sorted_values <= upper_ns)
-    valid_values: Int[ndarray, "valid"] = sorted_values[in_range]
-    if valid_values.size == 0:
-        raise ValueError(f"No exact video packet timestamps are available in range [{lower_ns}, {upper_ns}].")
-
-    selected_values: list[int] = []
-    next_target_ns: int = lower_ns
-    while next_target_ns <= upper_ns:
-        next_index: int = int(np.searchsorted(valid_values, next_target_ns, side="left"))
-        if next_index >= int(valid_values.shape[0]):
-            break
-        selected_value: int = int(valid_values[next_index])
-        if not selected_values or selected_values[-1] != selected_value:
-            selected_values.append(selected_value)
-        next_target_ns = selected_value + ns_per_sample
-
-    if not selected_values:
-        raise ValueError(f"No exact video packet timestamps could be selected in range [{lower_ns}, {upper_ns}].")
-    return np.asarray(selected_values, dtype=np.int64)
-
-
 def _first_valid_value(column: pa.ChunkedArray | pa.Array, *, allow_none: bool = False, component_name: str) -> Any:
     values: list[Any] = column.combine_chunks().to_pylist() if isinstance(column, pa.ChunkedArray) else column.to_pylist()
     for value in values:
@@ -957,180 +695,108 @@ def _arrow_time_column_to_ns(column: pa.ChunkedArray | pa.Array) -> Int[ndarray,
     return np.asarray(values, dtype=np.int64)
 
 
-def _catalog_entity_time_range(
+def _catalog_entity_packet_ns(
     *,
     segment_view: Any,
     entity_path: str,
     timeline: str,
-) -> CatalogTimeRange:
+) -> Int[ndarray, "time"]:
+    """Read one entity's sorted unique video-packet timestamps (ns) on ``timeline``.
+
+    Args:
+        segment_view: Catalog view already filtered to the selected segment.
+        entity_path: Rerun entity path of the video stream.
+        timeline: Catalog duration timeline to read.
+
+    Returns:
+        Sorted unique packet timestamps (ns), read from up to ``_NATIVE_FPS_SAMPLE_LIMIT`` packets.
+
+    Raises:
+        ValueError: If the entity has no samples on ``timeline``.
+    """
     entity_view: Any = segment_view.filter_contents(entity_path)
-    table: pa.Table = entity_view.reader(index=timeline).select(timeline).to_arrow_table()
+    table: pa.Table = entity_view.reader(index=timeline).select(timeline).limit(_NATIVE_FPS_SAMPLE_LIMIT).to_arrow_table()
     if table.num_rows == 0:
         raise ValueError(f"No {timeline!r} samples were found for {entity_path}.")
-    timeline_ns: Int[ndarray, "time"] = _arrow_time_column_to_ns(table.column(timeline))
-    return CatalogTimeRange(
-        start_ns=int(np.min(timeline_ns)),
-        end_ns=int(np.max(timeline_ns)),
-    )
+    return np.unique(_arrow_time_column_to_ns(table.column(timeline)))
 
 
-def catalog_exo_video_time_range(
+def native_fps_from_packet_ns(packet_ns: Int[ndarray, "time"]) -> float:
+    """Detect a video stream's native frame rate (Hz) from its packet timestamps.
+
+    The Rerun dataloader must sample at or above the native rate: sub-native ``FixedRateSampling``
+    hands the AV1 decoder a sparse, reference-incomplete packet run and fails with a graded,
+    order-dependent ``InvalidDataError``. To avoid silently under-sampling, the rate is derived
+    from the median inter-packet gap and only trusted when the spacing is near-uniform.
+
+    Args:
+        packet_ns: Sorted unique packet timestamps in nanoseconds on a duration timeline.
+
+    Returns:
+        The native frame rate in Hz (``1e9 / median inter-packet gap``).
+
+    Raises:
+        ValueError: If fewer than two packets are given, the packets are not strictly increasing,
+            or the spacing is too irregular to trust (``max_gap / median_gap >= 1.5``).
+    """
+    if packet_ns.shape[0] < 2:
+        raise ValueError(f"Need >=2 video_time packets to detect native fps, got {packet_ns.shape[0]}.")
+    gaps_ns: Int[ndarray, "gap"] = np.diff(packet_ns)
+    if np.any(gaps_ns <= 0):
+        raise ValueError("video_time packets must be strictly increasing to detect native fps.")
+    median_gap_ns: float = float(np.median(gaps_ns))
+    max_gap_ns: float = float(np.max(gaps_ns))
+    if max_gap_ns / median_gap_ns >= 1.5:
+        raise ValueError(
+            f"video_time packet spacing is too irregular to detect a native fps "
+            f"(max_gap={max_gap_ns:.0f} ns vs median={median_gap_ns:.0f} ns); "
+            "pass native_fps_override to sample at a known rate."
+        )
+    return 1_000_000_000.0 / median_gap_ns
+
+
+def detect_uniform_native_fps(
     *,
     dataset_entry: Any,
     segment: CatalogSegment,
     streams: list[ExoCameraStream],
     timeline: str = CATALOG_TIMELINE,
-) -> CatalogTimeRange:
-    """Find the common exo VideoStream sample time range for the selected segment.
+) -> float:
+    """Detect the single native frame rate shared by every selected exo stream.
+
+    One ``FixedRateSampling`` grid drives all camera fields at a shared timestamp, so it only keeps
+    the cameras in multiview lock-step when they share a native rate. A mixed-rate rig would make
+    the decoder's ``fill_latest_at`` silently duplicate the slower camera's frames as fresh
+    instants and corrupt triangulation with no error, so mismatched rates are rejected outright.
 
     Args:
         dataset_entry: Rerun catalog dataset entry.
         segment: Selected catalog segment.
         streams: Selected exo camera streams.
-        timeline: Catalog timeline used for inference.
+        timeline: Catalog duration timeline used for inference.
 
     Returns:
-        Common inclusive nanosecond range shared by every exo VideoStream.
+        The native frame rate in Hz shared by every exo stream.
+
+    Raises:
+        ValueError: If the exo streams do not all share one native frame rate.
     """
     segment_view: Any = dataset_entry.filter_segments(segment.recording_id)
-    time_ranges: list[CatalogTimeRange] = [
-        _catalog_entity_time_range(
-            segment_view=segment_view,
-            entity_path=stream.video_entity,
-            timeline=timeline,
-        )
-        for stream in streams
-    ]
-    return intersect_time_ranges(time_ranges)
-
-
-def catalog_exo_video_time_values(
-    *,
-    dataset_entry: Any,
-    segment: CatalogSegment,
-    streams: list[ExoCameraStream],
-    timeline: str = CATALOG_TIMELINE,
-) -> Int[ndarray, "time"]:
-    """Load actual exo video sample timestamps for decoder context queries."""
-    segment_view: Any = dataset_entry.filter_segments(segment.recording_id)
-    values_by_stream: list[Int[ndarray, "stream_time"]] = []
+    per_stream_fps: dict[str, float] = {}
     for stream in streams:
-        entity_view: Any = segment_view.filter_contents(stream.video_entity)
-        table: pa.Table = entity_view.reader(index=timeline).select(timeline).to_arrow_table()
-        if table.num_rows == 0:
-            raise ValueError(f"No {timeline!r} samples were found for {stream.video_entity}.")
-        values_by_stream.append(_arrow_time_column_to_ns(table.column(timeline)))
-
-    concatenated_values: Int[ndarray, "all_time"] = np.concatenate(values_by_stream).astype(np.int64)
-    return np.unique(concatenated_values).astype(np.int64)
-
-
-def catalog_common_exo_video_time_values(
-    *,
-    dataset_entry: Any,
-    segment: CatalogSegment,
-    streams: list[ExoCameraStream],
-    timeline: str = CATALOG_TIMELINE,
-) -> Int[ndarray, "time"]:
-    """Load exact ``video_time`` values shared by every selected exo stream."""
-    segment_view: Any = dataset_entry.filter_segments(segment.recording_id)
-    common_values: Int[ndarray, "time"] | None = None
-    for stream in streams:
-        entity_view: Any = segment_view.filter_contents(stream.video_entity)
-        table: pa.Table = entity_view.reader(index=timeline).select(timeline).to_arrow_table()
-        if table.num_rows == 0:
-            raise ValueError(f"No {timeline!r} samples were found for {stream.video_entity}.")
-        stream_values: Int[ndarray, "stream_time"] = np.unique(_arrow_time_column_to_ns(table.column(timeline))).astype(np.int64)
-        common_values = (
-            stream_values
-            if common_values is None
-            else np.intersect1d(common_values, stream_values, assume_unique=True).astype(np.int64)
+        packet_ns: Int[ndarray, "time"] = _catalog_entity_packet_ns(
+            segment_view=segment_view, entity_path=stream.video_entity, timeline=timeline
         )
+        per_stream_fps[stream.name] = native_fps_from_packet_ns(packet_ns)
 
-    if common_values is None or common_values.size == 0:
-        raise ValueError("Selected exo VideoStream samples do not share any exact video_time values.")
-    return common_values
-
-
-def _index_range_columns(ranges_table: pa.Table, timeline: str) -> tuple[str, str]:
-    """Find start/end range columns for a Rerun catalog timeline."""
-    start_columns: list[str] = [
-        name for name in ranges_table.column_names if timeline in name and name.lower().endswith(("start", "min"))
-    ]
-    end_columns: list[str] = [
-        name for name in ranges_table.column_names if timeline in name and name.lower().endswith(("end", "max"))
-    ]
-    if len(start_columns) != 1 or len(end_columns) != 1:
+    reference_fps: float = next(iter(per_stream_fps.values()))
+    mismatched: dict[str, float] = {name: fps for name, fps in per_stream_fps.items() if abs(fps - reference_fps) / reference_fps > 0.02}
+    if mismatched:
         raise ValueError(
-            f"Expected one start and one end range column for {timeline!r}, "
-            f"got start={start_columns}, end={end_columns}."
+            f"Selected exo streams do not share one native fps (reference {reference_fps:.3f} Hz); a single "
+            f"sample grid would silently duplicate slower-camera frames. Per-stream fps: {per_stream_fps}."
         )
-    return start_columns[0], end_columns[0]
-
-
-def catalog_segment_time_range(
-    *,
-    dataset_entry: Any,
-    segment: CatalogSegment,
-    timeline: str = CATALOG_TIMELINE,
-) -> CatalogTimeRange:
-    """Read the selected segment's full catalog index range for ``timeline``."""
-    segment_view: Any = dataset_entry.filter_segments([segment.recording_id])
-    ranges_table: pa.Table = segment_view.get_index_ranges().to_arrow_table()
-    if ranges_table.num_rows == 0:
-        raise ValueError(f"No index ranges were found for selected segment {segment.recording_id!r}.")
-
-    start_column: str
-    end_column: str
-    start_column, end_column = _index_range_columns(ranges_table, timeline)
-    start_values: Int[ndarray, "segments"] = _arrow_time_column_to_ns(ranges_table.column(start_column))
-    end_values: Int[ndarray, "segments"] = _arrow_time_column_to_ns(ranges_table.column(end_column))
-    return CatalogTimeRange(start_ns=int(np.min(start_values)), end_ns=int(np.max(end_values)))
-
-
-def constrain_rerun_dataset_to_time_range(
-    *,
-    rerun_dataset: Any,
-    segment: CatalogSegment,
-    time_range: CatalogTimeRange,
-) -> None:
-    """Restrict a Rerun iterable dataset to the common exo video sample range.
-
-    Rerun 0.32's public dataloader API builds its ``SampleIndex`` from the
-    segment range. The catalog-native MVAPI contract needs the overlapping exo
-    video range, so v1 narrows the public ``sample_index`` before constructing
-    the PyTorch ``DataLoader``.
-    """
-    from rerun.experimental.dataloader import SampleIndex, SegmentMetadata
-
-    sample_index: Any = rerun_dataset.sample_index
-    segment_metadata: Any | None = None
-    for candidate in sample_index.segments:
-        if candidate.segment_id == segment.recording_id:
-            segment_metadata = candidate
-            break
-    if segment_metadata is None:
-        raise ValueError(f"Dataloader sample index does not contain selected segment {segment.recording_id!r}.")
-
-    ns_per_sample: int = int(sample_index.ns_per_sample if sample_index.ns_per_sample is not None else 1)
-    aligned_range: CatalogTimeRange = align_time_range_to_sample_grid(
-        segment_start_ns=int(segment_metadata.index_start),
-        segment_end_ns=int(segment_metadata.index_end),
-        ns_per_sample=ns_per_sample,
-        time_range=time_range,
-    )
-    num_samples: int = ((aligned_range.end_ns - aligned_range.start_ns) // ns_per_sample) + 1
-    narrowed_segment: SegmentMetadata = SegmentMetadata(
-        segment_id=segment.recording_id,
-        index_start=aligned_range.start_ns,
-        index_end=aligned_range.end_ns,
-        num_samples=num_samples,
-    )
-    rerun_dataset._sample_index = SampleIndex(  # noqa: SLF001 - Rerun 0.32 has no public narrowed-index constructor.
-        [narrowed_segment],
-        ns_per_sample=sample_index.ns_per_sample,
-        is_timestamp=sample_index.is_timestamp,
-    )
+    return reference_fps
 
 
 def _read_first_catalog_component(
@@ -1314,72 +980,58 @@ def build_rerun_iterable_dataset(
     segment: CatalogSegment,
     streams: list[ExoCameraStream],
     config: CatalogPredictionLayerConfig,
-    time_range: CatalogTimeRange,
 ) -> Any:
-    """Create the Rerun PyTorch iterable dataset for one catalog segment."""
-    import torch.utils.data
+    """Create the Rerun PyTorch iterable dataset sampled at the exo streams' native fps.
+
+    Samples ``video_time`` at the exo cameras' shared native frame rate with the public
+    ``RerunIterableDataset`` + ``FixedRateSampling``. Sampling every packet (``rate_hz`` == native
+    fps) hands the AV1 decoder the full contiguous keyframe-through-inter-frame run, so frames
+    decode reliably with no exact-packet targeting, no ``Field.window``, and no private-attribute
+    injection. Decimated (sub-native) sampling is deliberately avoided: it triggers a graded,
+    order-dependent decoder ``InvalidDataError`` on these AV1 streams.
+
+    Args:
+        dataset_entry: Rerun catalog dataset entry.
+        segment: Selected catalog segment.
+        streams: Discovered exo camera streams (must share one native fps).
+        config: Runtime configuration.
+
+    Returns:
+        A stock ``RerunIterableDataset`` sampling ``video_time`` at the detected native fps.
+    """
     from rerun.experimental.dataloader import (
         DataSource,
         Field,
+        FixedRateSampling,
         RerunIterableDataset,
         VideoFrameDecoder,
     )
-    from rerun.experimental.dataloader._utils import _warn_if_fork_unsafe, _WorkerConnection
 
-    keyframe_window_ns: int = int(config.keyframe_interval / config.sample_rate_hz * 1_000_000_000.0)
+    native_fps: float = (
+        config.native_fps_override
+        if config.native_fps_override is not None
+        else detect_uniform_native_fps(dataset_entry=dataset_entry, segment=segment, streams=streams)
+    )
     fields: dict[str, Any] = {
         stream.name: Field(
             path=stream.field_path,
             decode=VideoFrameDecoder(
                 codec=config.video_codec,
                 keyframe_interval=config.keyframe_interval,
-                fps_estimate=config.sample_rate_hz,
+                fps_estimate=native_fps,
             ),
-            window=(-keyframe_window_ns, 0),
         )
         for stream in streams
     }
     source: Any = DataSource(dataset=dataset_entry, segments=[segment.recording_id])
-    segment_time_range: CatalogTimeRange = catalog_segment_time_range(dataset_entry=dataset_entry, segment=segment)
-    exact_video_time_values: Int[ndarray, "time"] = catalog_common_exo_video_time_values(
-        dataset_entry=dataset_entry,
-        segment=segment,
-        streams=streams,
-    )
-    target_video_time_values: Int[ndarray, "samples"] = select_video_time_target_values(
-        candidate_values=exact_video_time_values,
-        segment_time_range=segment_time_range,
-        time_range=time_range,
-        sample_rate_hz=config.sample_rate_hz,
-        # The first packet is a keyframe; keep early targets and let the field
-        # window provide prior packets only when a target actually needs them.
-        bootstrap_window_ns=0,
-    )
-    sample_index: DurationTimelineSampleIndex = build_duration_video_time_sample_index(
-        segment=segment,
-        segment_time_range=segment_time_range,
-        time_range=time_range,
-        sample_rate_hz=config.sample_rate_hz,
-        bootstrap_window_ns=0,
-        context_index_values=exact_video_time_values,
-        target_index_values=target_video_time_values,
-    )
-    _warn_if_fork_unsafe(stacklevel=3)
-
-    rerun_dataset: Any = RerunIterableDataset.__new__(RerunIterableDataset)
-    torch.utils.data.IterableDataset.__init__(rerun_dataset)
-    rerun_dataset._fields = fields  # noqa: SLF001 - Rerun duration timelines need a custom sample index in 0.33.0a1.
-    rerun_dataset._index = CATALOG_TIMELINE  # noqa: SLF001
-    rerun_dataset._fetch_size = config.fetch_size  # noqa: SLF001
-    rerun_dataset._shuffle = False  # noqa: SLF001
-    rerun_dataset._epoch = 0  # noqa: SLF001
-    rerun_dataset._sample_index = sample_index  # noqa: SLF001
-    rerun_dataset._connection = _WorkerConnection(  # noqa: SLF001
-        catalog_url=source.dataset.catalog.url,
-        dataset_name=source.dataset.name,
+    return RerunIterableDataset(
+        source,
+        index=CATALOG_TIMELINE,
         fields=fields,
+        timeline_sampling=FixedRateSampling(rate_hz=native_fps),
+        fetch_size=config.fetch_size,
+        shuffle=False,
     )
-    return rerun_dataset
 
 
 def build_torch_loader(rerun_dataset: Any) -> Any:
@@ -1538,18 +1190,11 @@ def _run_mvapi_inference(
     if len(streams) != len(pinholes):
         raise ValueError(f"Discovered {len(streams)} streams but loaded {len(pinholes)} pinhole calibrations.")
 
-    exo_time_range: CatalogTimeRange = catalog_exo_video_time_range(
-        dataset_entry=dataset_entry,
-        segment=segment,
-        streams=streams,
-        timeline=CATALOG_TIMELINE,
-    )
     rerun_dataset: Any = build_rerun_iterable_dataset(
         dataset_entry=dataset_entry,
         segment=segment,
         streams=streams,
         config=config,
-        time_range=exo_time_range,
     )
     data_loader: Any = build_torch_loader(rerun_dataset)
     total_samples: int = int(len(rerun_dataset))
@@ -1641,27 +1286,6 @@ def _run_mvapi_inference(
         flush()
 
 
-def _open_catalog(config: CatalogPredictionLayerConfig) -> tuple[Any, Any | None, str]:
-    if config.catalog_url is not None:
-        import rerun as rr
-
-        client: Any = rr.catalog.CatalogClient(config.catalog_url)
-        return client, None, config.catalog_url
-
-    from simplecv.apis.exoego_forge_catalog import mount_catalog
-
-    server: Any = mount_catalog(
-        config.rrd_root.expanduser().resolve(),
-        datasets=(),
-        port=config.catalog_port,
-        application_id=config.application_id,
-        show_progress=True,
-        optimize_for_catalog=config.catalog_optimize_for_catalog,
-        optimize_datasets=config.catalog_optimize_datasets,
-    )
-    return server.client(), server, str(server.url())
-
-
 def capture_open_viewer_screenshots(
     *,
     targets: list[ViewerScreenshotTarget],
@@ -1678,7 +1302,9 @@ def capture_open_viewer_screenshots(
 
 def run_catalog_prediction_layer(config: CatalogPredictionLayerConfig) -> CatalogPredictionLayerResult:
     """Run the catalog-native MVAPI prediction-layer pipeline."""
-    client, _server, catalog_url = _open_catalog(config)
+    from rerun.catalog import CatalogClient
+
+    client: Any = CatalogClient(config.catalog_url)
     dataset_entry: Any = client.get_dataset(config.dataset_name)
     rows: list[CatalogSegment] = catalog_segments_from_dataset(
         dataset_entry,
@@ -1735,7 +1361,7 @@ def run_catalog_prediction_layer(config: CatalogPredictionLayerConfig) -> Catalo
     notes_path: Path = write_viewer_validation_notes(
         run_dir=validation_run_dir,
         command=screenshot_command,
-        catalog_url=catalog_url,
+        catalog_url=config.catalog_url,
         segment=segment,
         rrd_path=rrd_path,
         layer_name=config.layer_name,

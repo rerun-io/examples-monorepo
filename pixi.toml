@@ -84,9 +84,9 @@ xorg-xorgproto = "*"
 [feature.catalog-common.pypi-dependencies]
 simplecv = { path = "packages/simplecv", editable = true }
 
-# rerun-io/reality#2496 — footer-first store-id enumeration (fast OSS-catalog register).
-# x86_64-only commit wheel; move back to a public release once the fix ships. See the root
-# AGENTS.md "Testing Rerun builds" for how this prerelease lane is pinned/tested.
+# rerun-io/reality 73ce701 (main, #2073) — FixedRateSampler duration-timeline support; also
+# carries #2496's footer-first store-id enumeration (fast OSS-catalog register). Move back to a
+# public release once these ship. See the root AGENTS.md "Testing Rerun builds".
 [feature.rerun-prerelease.pypi-dependencies]
 rerun-sdk = { version = "==0.34.0a1+dev", extras = [
     "datafusion",
@@ -95,7 +95,7 @@ rerun-sdk = { version = "==0.34.0a1+dev", extras = [
 
 [feature.rerun-prerelease.pypi-options]
 index-url = "https://pypi.org/simple"
-find-links = [{ url = "https://build.rerun.io/commit/deeb4e6/wheels/" }]
+find-links = [{ url = "https://build.rerun.io/commit/73ce701/wheels/" }]
 prerelease-mode = "allow"
 
 
@@ -709,7 +709,7 @@ PACKAGE_DIR = "packages/mv-api"
 [feature.mv-api-catalog.tasks.mv-api-catalog-prediction-layer]
 cmd = "python tools/apps/catalog_prediction_layer.py"
 cwd = "packages/mv-api"
-description = "Generate and register the catalog-native MVAPI COCO133 prediction layer"
+description = "Generate and register the catalog-native MVAPI COCO133 prediction layer (needs a running catalog: simplecv-catalog-serve + simplecv-catalog-register)"
 
 [feature.mv-api-catalog.tasks.mv-api-catalog-tests]
 cmd = "python -m pytest -q tests/test_catalog_prediction_layer.py"
@@ -743,7 +743,7 @@ PACKAGE_DIR = "packages/mv-api"
 [feature.mv-api-catalog-register-mac.tasks.mv-api-catalog-register]
 cmd = "python tools/apps/register_catalog_with_predictions.py"
 cwd = "packages/mv-api"
-description = "Mount the full catalog and register existing prediction RRD layers on macOS"
+description = "Register existing prediction RRD layers into a running catalog on macOS (needs a running catalog: simplecv-catalog-serve + simplecv-catalog-register)"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # sam3d-body-rerun
@@ -1987,7 +1987,7 @@ simplecv-dev = { features = [
     "dev",
 ], solve-group = "simplecv", no-default-feature = true }
 # 2-tier ExoEgo Forge catalog: like `simplecv` but on the prerelease Rerun lane (rerun-prerelease,
-# pinned to reality#2496) instead of `common`'s released rerun-sdk==0.33.0. Uses `catalog-common`
+# pinned to reality#2073) instead of `common`'s released rerun-sdk==0.33.0. Uses `catalog-common`
 # (the rerun-pin-free mirror) so the prerelease wheel wins. linux-64 only (matches the x86_64 wheel).
 simplecv-catalog = { features = [
     "catalog-common",
