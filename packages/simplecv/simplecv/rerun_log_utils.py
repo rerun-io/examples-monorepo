@@ -151,7 +151,7 @@ class RerunTyroConfig:
     file simultaneously (via ``set_sinks``), instead of ``save`` being file-only.
     Ignored when ``headless`` (no viewer), or when ``serve``/``connect`` is set."""
     port: int = 9876
-    """Port for the spawned viewer's gRPC proxy (used by ``spawn`` and ``live`` + ``save``)."""
+    """Port of the viewer's gRPC proxy (used by ``spawn``, ``live`` + ``save``, and ``connect``)."""
     server_memory_limit: str = "4GB"
     """Memory budget for the spawned viewer's gRPC proxy buffer. The SDK default
     (~1 GiB) silently drops the oldest messages on long multi-camera recordings
@@ -175,10 +175,9 @@ class RerunTyroConfig:
             rr.serve_grpc(server_memory_limit=self.server_memory_limit)
             rr.serve_web_viewer(open_browser=not self.headless)
         elif self.connect:
-            # Send logging data to separate `rerun` process.
-            # You can omit the argument to connect to the default address,
-            # which is `127.0.0.1:9876`.
-            rr.connect_grpc()
+            # Send logging data to a separate, already-running `rerun` process
+            # (honors ``port`` so multiple viewers can coexist on one machine).
+            rr.connect_grpc(f"rerun+http://127.0.0.1:{self.port}/proxy")
         elif self.save is not None and self.live and not self.headless:
             # Stream to a spawned viewer AND save to a .rrd at the same time by
             # fanning out through explicit sinks. ``spawn``/``save`` each install a

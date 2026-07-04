@@ -348,17 +348,17 @@ def project_brown_conrady_grid(
     if not filter_invalid:
         return uv_stack
 
-    # 4. Filter out-of-bounds points (if needed)
-    # check that all cameras have same image size for now, could be extended later
-    h: int = pinholes_per_view[0].intrinsics.height
-    w: int = pinholes_per_view[0].intrinsics.width
-    assert all((pinhole.intrinsics.height == h and pinhole.intrinsics.width == w) for pinhole in pinholes_per_view), (
-        "All pinhole cameras must have the same image size for batched Brown–Conrady projection."
-    )
-    uv_filtered: Float[ndarray, "n_frames n_views n_points 2"] = filter_out_of_bounds(
-        uv_batch=uv_stack, xyz_cam_batch=xyz_stack_cam, h=h, w=w
-    )
-    return uv_filtered
+    # 4. Filter out-of-bounds points per view — image sizes may differ across a
+    # rig (e.g. MAMMA eval mixes landscape and portrait-mounted cameras). The
+    # filter NaN-masks in place, and basic view slices write through to uv_stack.
+    for view_idx, pinhole in enumerate(pinholes_per_view):
+        filter_out_of_bounds(
+            uv_batch=uv_stack[:, view_idx : view_idx + 1],
+            xyz_cam_batch=xyz_stack_cam[:, view_idx : view_idx + 1],
+            h=pinhole.intrinsics.height,
+            w=pinhole.intrinsics.width,
+        )
+    return uv_stack
 
 
 def project_brown_conrady_diagonal(

@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Generator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Generic, TypeVar
+from typing import Generic, Literal, TypeVar
 
 from jaxtyping import Float32
 from numpy import ndarray
@@ -43,6 +43,37 @@ class ManoStack:
         if b.ndim == 1:
             return b
         return b[hand_idx]
+
+
+@dataclass
+class SmplxStack:
+    """Per-sequence SMPL/SMPL-X body parameters for one or more people.
+
+    Poses are axis-angle full-pose vectors per frame/person: 165-dim for SMPL-X
+    (global 0:3, body 3:66, jaw 66:69, eyes 69:75, left hand 75:120, right hand
+    120:165) or 72-dim for plain SMPL (global 0:3, body 3:72). Translations are
+    world-space meters.
+    """
+
+    betas: Float32[ndarray, "n_people n_betas"]
+    """Per-person shape coefficients (SMPL-X commonly 16, SMPL 10)."""
+    poses: Float32[ndarray, "n_frames n_people n_pose"]
+    """Axis-angle full pose per frame and person (165 SMPL-X / 72 SMPL)."""
+    trans: Float32[ndarray, "n_frames n_people 3"]
+    """World translation per frame and person, meters."""
+    model_type: Literal["smplx", "smpl"] = "smplx"
+    """Body model family the parameters were fit with."""
+    flat_hand_mean: bool = False
+    """SMPL-X hand rest convention: False = zero hand pose rests at the MANO mean."""
+    gender: str = "neutral"
+    """Body model gender the parameters were fit with."""
+    transl_pivot: Literal["root_joint", "origin"] = "root_joint"
+    """Rotation pivot convention for ``trans``: ``root_joint`` = native smplx
+    (``x = R @ (v - j0) + j0 + t``), ``origin`` = EasyMocap-style
+    (``x = R @ v + Th``, e.g. EPFL Smart Kitchen), converted at logging time."""
+    v_template: Float32[ndarray, "n_people n_verts 3"] | None = None
+    """Optional per-person subject rest mesh replacing the model's mean template
+    (MoSh ``mosh_v_template`` GT, e.g. MAMMA eval); ``betas`` are zero when set."""
 
 
 @dataclass

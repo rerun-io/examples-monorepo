@@ -779,3 +779,29 @@ def test_epfl_smart_kitchen_label_load_fails_on_timestamp_count_mismatch(tmp_pat
 
     with pytest.raises(ValueError, match="label frame count must match RGB timestamp count"):
         EpflSmartKitchenSequence(cfg)
+
+
+def test_epfl_load_smpl_stack_from_rows() -> None:
+    raw_row: dict[str, str] = {
+        "kp3ds": json.dumps([[0.0, 0.0, 0.0]] * 17),
+        "poses": json.dumps([0.0] * 72),
+        "Rh": json.dumps([0.1, 0.2, 0.3]),
+        "Th": json.dumps([1.0, 2.0, 3.0]),
+        "shapes": json.dumps([0.5] * 10),
+    }
+    rows = epfl_module._parse_body_pose_rows([raw_row, raw_row], path=Path("pose3d_smpl.csv"))
+    stack = epfl_module._load_smpl_stack(rows)
+    assert stack is not None
+    assert stack.model_type == "smpl"
+    assert stack.transl_pivot == "origin"
+    assert stack.betas.shape == (1, 10)
+    assert stack.poses.shape == (2, 1, 72)
+    assert stack.trans.shape == (2, 1, 3)
+    np.testing.assert_allclose(stack.poses[0, 0, :3], [0.1, 0.2, 0.3], atol=1e-6)
+    np.testing.assert_allclose(stack.trans[0, 0], [1.0, 2.0, 3.0], atol=1e-6)
+
+
+def test_epfl_load_smpl_stack_returns_none_without_param_columns() -> None:
+    raw_row: dict[str, str] = {"kp3ds": json.dumps([[0.0, 0.0, 0.0]] * 17)}
+    rows = epfl_module._parse_body_pose_rows([raw_row], path=Path("pose3d_smpl.csv"))
+    assert epfl_module._load_smpl_stack(rows) is None

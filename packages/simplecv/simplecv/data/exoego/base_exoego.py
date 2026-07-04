@@ -15,7 +15,7 @@ from typing_extensions import Self
 
 from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, PinholeParameters
 from simplecv.data.ego.base_ego import BaseEgoSequence
-from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack
+from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack, SmplxStack
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
 from simplecv.data.exoego.sequence_identity import SequenceIdentity
 from simplecv.image_types import BGRList
@@ -61,11 +61,19 @@ class ExoEgoLabels:
         behaviour but risking drift when label and video frame rates differ.
     mano_stack:
         Optional MANO parameters associated with the same frames.
+    smplx_stack:
+        Optional SMPL/SMPL-X body parameters associated with the same frames.
     """
 
+    # TODO(multi-person-keypoints): xyzc_stack holds ONE skeleton, so multi-person
+    # datasets (MAMMA dance/multi-people) only get keypoints for person 0 — extra
+    # people get SMPL-X meshes only (SmplxStack has an n_people axis; ManoStack and
+    # this field do not). Lifting it means a people axis here, per-person entity
+    # paths in view_exoego's 3D/2D keypoint logging, and updating rrd_exoego.load_labels.
     xyzc_stack: Float[ndarray, "num_frames 133 4"]
     timestamps_ns: Int[ndarray, "num_frames"] | None = None
     mano_stack: ManoStack | None = None
+    smplx_stack: SmplxStack | None = None
 
 
 @dataclass
@@ -506,6 +514,7 @@ class BaseExoEgoSequence(Generic[ConfigT], ABC):  # noqa: UP046
             xyzc_stack=xyzc_stack_frame[np.newaxis, ...],
             timestamps_ns=labels.timestamps_ns,
             mano_stack=labels.mano_stack,
+            smplx_stack=labels.smplx_stack,
         )
 
     @abstractmethod

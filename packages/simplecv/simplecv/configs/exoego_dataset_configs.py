@@ -12,6 +12,7 @@ from simplecv.data.exoego.ego_dex import EgoDexConfig
 from simplecv.data.exoego.epfl_smart_kitchen import EpflSmartKitchenConfig
 from simplecv.data.exoego.hocap import HocapConfig
 from simplecv.data.exoego.hot3d import Hot3dConfig
+from simplecv.data.exoego.mamma import MammaConfig
 from simplecv.data.exoego.robocap import RobocapConfig
 from simplecv.data.exoego.rrd_exoego import RRDExoEgoConfig
 from simplecv.data.exoego.umetrack import UmeTrackConfig
@@ -25,6 +26,7 @@ dataset_defaults = {
     "hocap": HocapConfig(),
     "ego-dex": EgoDexConfig(),
     "hot3d": Hot3dConfig(),
+    "mamma": MammaConfig(),
     "robocap": RobocapConfig(),
     "rrd": RRDExoEgoConfig(),
     "umetrack": UmeTrackConfig(),
