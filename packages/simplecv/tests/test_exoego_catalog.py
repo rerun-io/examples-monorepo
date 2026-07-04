@@ -19,6 +19,7 @@ from simplecv.data.exoego.ego_dex import EgoDexConfig, EgoDexSequence
 from simplecv.data.exoego.epfl_smart_kitchen import EpflSmartKitchenConfig, EpflSmartKitchenSequence
 from simplecv.data.exoego.hocap import HocapConfig, HocapSequence
 from simplecv.data.exoego.hot3d import Hot3dConfig, Hot3dSequence
+from simplecv.data.exoego.mamma import MammaConfig, MammaSequence
 from simplecv.data.exoego.sequence_identity import SequenceIdentity
 from simplecv.data.exoego.umetrack import UmeTrackConfig, UmeTrackSequence
 
@@ -81,6 +82,14 @@ def test_sequence_identity_rejects_recording_id_separator(
             "hot3d-quest3",
             "P0001_10a27bf7",
             "hot3d-quest3__P0001_10a27bf7",
+        ),
+        (
+            MammaSequence.sequence_identity_for_config(
+                MammaConfig(sequence_name="mamma_markerless_iphones/indoors/crossing_arms")
+            ),
+            "mamma",
+            "mamma_markerless_iphones/indoors/crossing_arms",
+            "mamma__mamma_markerless_iphones__indoors__crossing_arms",
         ),
         (
             UmeTrackSequence.sequence_identity_for_config(

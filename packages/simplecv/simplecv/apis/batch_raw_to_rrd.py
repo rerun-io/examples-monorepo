@@ -41,6 +41,8 @@ class BatchConvertConfig:
     """Enable derived MANO mesh/keypoint logging during conversion."""
     log_mano_vertex_normals: bool = False
     """Compute and log dynamic MANO mesh vertex normals during conversion."""
+    log_smplx: bool = True
+    """Enable derived SMPL/SMPL-X body mesh logging during conversion."""
 
 
 def main(config: BatchConvertConfig):
@@ -85,6 +87,7 @@ def main(config: BatchConvertConfig):
                 log_labels=config.log_labels,
                 log_mano=config.log_mano,
                 log_mano_vertex_normals=config.log_mano_vertex_normals,
+                log_smplx=config.log_smplx,
             )
             rec: rr.RecordingStream = current_cfg.rr_config.rec_stream
             rr.send_recording_name(identity.sequence_key, recording=rec)

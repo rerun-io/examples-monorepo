@@ -18,7 +18,7 @@ from tqdm import tqdm
 from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
 from simplecv.configs.exoego_dataset_configs import AnnotatedExoEgoDatasetUnion
 from simplecv.data.ego.base_ego import BaseEgoSequence
-from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack
+from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack, SmplxStack
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, EnvironmentMesh, ExoEgoLabels, ExoEgoSample, RigLayout
 from simplecv.data.skeleton.coco_133 import (
     COCO_133_ID2NAME,
@@ -71,6 +71,9 @@ class VisualizeConfig:
 
     log_mano_vertex_normals: bool = False
     """Compute and log dynamic MANO mesh vertex normals. Disabled by default for faster RRD ingest."""
+
+    log_smplx: bool = True
+    """Enable streaming of SMPL/SMPL-X body meshes derived from the dataset."""
 
     log_labels: bool = True
     """Control whether 2D/3D keypoint annotations are logged alongside videos."""
@@ -475,6 +478,115 @@ def log_mano_batch(
             )
 
 
+# Translucent per-person mesh tints, cycled when a sequence has more people.
+SMPLX_PERSON_COLORS: tuple[tuple[int, int, int, int], ...] = (
+    (66, 135, 245, 120),
+    (245, 130, 48, 120),
+    (60, 180, 75, 120),
+    (240, 50, 230, 120),
+    (255, 225, 25, 120),
+    (70, 240, 240, 120),
+)
+
+
+def log_smplx_batch(
+    exoego_sequence: BaseExoEgoSequence,
+    smplx_parent_log_path: Path,
+    timeline: str,
+    timestamps_ns: Int[ndarray, "n_frames"],
+    log_smplx: bool,
+) -> None:
+    """Stream SMPL/SMPL-X body meshes to Rerun, one entity per person.
+
+    Args:
+        exoego_sequence (BaseExoEgoSequence): Sequence whose ``exoego_labels``
+            may carry a ``SmplxStack`` of body parameters.
+        smplx_parent_log_path (Path): Root Rerun entity under which the per-person
+            meshes are organized (``<root>/smplx/person_NN/mesh``).
+        timeline (str): Logical timeline label shared across logged modalities.
+        timestamps_ns (Int[np.ndarray, "n_frames"]): Nanosecond timestamps aligned
+            with the SMPL-X parameter stream.
+        log_smplx (bool): Gate controlling whether any SMPL-X data is emitted.
+
+    Returns:
+        None: Data is emitted via ``rr.log`` and ``rr.send_columns`` side effects.
+    """
+    exoego_labels: ExoEgoLabels | None = exoego_sequence.exoego_labels
+    if exoego_labels is None:
+        return
+    smplx_stack: SmplxStack | None = exoego_labels.smplx_stack
+    if smplx_stack is None or not log_smplx:
+        return
+
+    from scipy.spatial.transform import Rotation
+
+    from simplecv.ops.smplx.smplx_torch import SMPLX_FORWARD_CHUNK_FRAMES, SmplxForwardResult, SmplxLayerTorch
+
+    smplx_root_path: Path = smplx_parent_log_path / "smplx"
+    smplx_device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    n_frames_total: int = min(smplx_stack.poses.shape[0], len(timestamps_ns))
+    if n_frames_total == 0:
+        return
+    n_people: int = smplx_stack.poses.shape[1]
+    for person_idx in range(n_people):
+        try:
+            smplx_layer: SmplxLayerTorch = (
+                SmplxLayerTorch(
+                    betas=smplx_stack.betas[person_idx],
+                    model_type=smplx_stack.model_type,
+                    gender=smplx_stack.gender,
+                    flat_hand_mean=smplx_stack.flat_hand_mean,
+                    v_template=smplx_stack.v_template[person_idx] if smplx_stack.v_template is not None else None,
+                )
+                .to(smplx_device)
+                .eval()
+            )
+        # Missing/unloadable body model: pip smplx raises RuntimeError for a bad
+        # model dir, ImportError/ModuleNotFoundError when a stock chumpy-bearing
+        # SMPL pkl is dropped in. Either way, warn and skip rather than crash.
+        except (RuntimeError, ImportError) as exc:
+            warnings.warn(f"Skipping SMPL-X mesh logging (body model unavailable): {exc}", stacklevel=2)
+            return
+        poses_person: Float32[ndarray, "n_frames n_pose"] = np.ascontiguousarray(smplx_stack.poses[0:n_frames_total, person_idx])
+        trans_person: Float32[ndarray, "n_frames 3"] = np.ascontiguousarray(smplx_stack.trans[0:n_frames_total, person_idx])
+        if smplx_stack.transl_pivot == "origin":
+            # EasyMocap-style params rotate the posed mesh about the origin
+            # (x = R @ v + Th) while smplx pivots at the root joint, so shift
+            # the translation by (R - I) @ j0 (cf. the EPFL MANO conversion).
+            root_joint: Float32[ndarray, "3"] = smplx_layer.rest_root_joint()
+            rotations: Float32[ndarray, "n_frames 3 3"] = Rotation.from_rotvec(poses_person[:, 0:3]).as_matrix().astype(np.float32)
+            trans_person = trans_person + (rotations - np.eye(3, dtype=np.float32)) @ root_joint
+
+        mesh_entity_path: Path = smplx_root_path / f"person_{person_idx:02d}" / "mesh"
+        faces_np: Int[ndarray, "n_faces 3"] = smplx_layer.faces.astype(np.int32)
+        rr.log(
+            f"{mesh_entity_path}",
+            rr.Mesh3D.from_fields(
+                triangle_indices=faces_np,
+                albedo_factor=SMPLX_PERSON_COLORS[person_idx % len(SMPLX_PERSON_COLORS)],
+            ),
+            static=True,
+        )
+        # Forward + send in bounded frame chunks: vertices cost ~126 KB/frame
+        # (SMPL-X), so materializing a whole sequence before sending would need
+        # ~12 GB host RAM per person on a ~100k-frame EPFL session.
+        for chunk_start in range(0, n_frames_total, SMPLX_FORWARD_CHUNK_FRAMES):
+            chunk_end: int = min(chunk_start + SMPLX_FORWARD_CHUNK_FRAMES, n_frames_total)
+            smplx_forward: SmplxForwardResult = smplx_layer.forward_batched(
+                poses_person[chunk_start:chunk_end], trans_person[chunk_start:chunk_end]
+            )
+            verts: Float32[ndarray, "chunk_frames n_verts 3"] = smplx_forward.vertices
+            vertex_positions_flat: Float32[ndarray, "chunk_total 3"] = rearrange(
+                verts,
+                "n v d -> (n v) d",
+            )
+            rr.send_columns(
+                f"{mesh_entity_path}",
+                indexes=[rr.TimeColumn(timeline, duration=1e-9 * timestamps_ns[chunk_start:chunk_end])],
+                columns=[*rr.Mesh3D.columns(vertex_positions=vertex_positions_flat).partition(lengths=[verts.shape[1]] * (chunk_end - chunk_start))],
+            )
+
+
 def log_exoego_batch(
     exoego_sequence: BaseExoEgoSequence,
     parent_log_path: Path,
@@ -486,6 +598,7 @@ def log_exoego_batch(
     log_exo: bool = True,
     log_mano: bool = False,
     log_mano_vertex_normals: bool = False,
+    log_smplx: bool = False,
 ) -> None:
     """Bulk-log 3D labels plus their ego/exo projections using columnar APIs.
 
@@ -503,6 +616,7 @@ def log_exoego_batch(
         log_mano (bool): Enable logging of MANO-derived meshes and keypoints.
         log_mano_vertex_normals (bool): Compute and log dynamic MANO mesh
             vertex normals when MANO mesh logging is enabled.
+        log_smplx (bool): Enable logging of SMPL/SMPL-X body meshes.
 
     Returns:
         None: Data is emitted via ``rr.log`` and ``rr.send_columns`` side
@@ -579,6 +693,17 @@ def log_exoego_batch(
             timestamps_ns=label_timestamps_trim,
             log_mano=log_mano,
             log_mano_vertex_normals=log_mano_vertex_normals,
+        )
+
+        ##############################
+        # batch send all SMPL-X data #
+        ##############################
+        log_smplx_batch(
+            exoego_sequence=exoego_sequence,
+            smplx_parent_log_path=gt_root_path,
+            timeline=timeline,
+            timestamps_ns=label_timestamps_trim,
+            log_smplx=log_smplx,
         )
 
     ###########################
@@ -950,6 +1075,7 @@ def visualize_exo_ego(exoego_sequence: BaseExoEgoSequence, config: VisualizeConf
             log_exo=config.log_exo,
             log_mano=config.log_mano,
             log_mano_vertex_normals=config.log_mano_vertex_normals,
+            log_smplx=config.log_smplx,
         )
 
     scene_setup_result: SceneSetupResult = setup_scene(

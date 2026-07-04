@@ -69,6 +69,35 @@ If you have a Polycam zip file or extracted directory:
 pixi run -e simplecv --frozen python tools/view_polycam.py --polycam-zip-path $PATH-TO-POLYCAM-ZIP
 ```
 
+### MAMMA dataset (exo-only multi-view)
+
+[MAMMA](https://mamma.is.tue.mpg.de/) is a markerless multi-person mocap dataset. It is
+brought in as an **exo-only** ExoEgo dataset (a rig of static IOI/iPhone cameras, no ego
+device), with per-camera calibration in NPZ (`cam_int` K, `cam_ext` world→cam) and
+per-person SMPL-X fits under `pred/params_XX.npz`.
+
+Downloads are license-gated — register at <https://mamma.is.tue.mpg.de/register.php>, then:
+
+```bash
+export MAMMA_USERNAME='your_email'
+export MAMMA_PASSWORD='your_password'
+
+# One sequence per subset (dance, multi-people, iphone, eval, syn) into packages/simplecv/data/mamma/:
+pixi run -e simplecv --frozen simplecv-download-mamma
+
+# Re-encode the shipped yuv444 videos to AV1 yuv420 (videos_av1/ mirror) for the NVDEC/rerun hot path:
+pixi run -e simplecv --frozen simplecv-preprocess-mamma
+
+# View one sequence (defaults to the iPhone crossing_arms scene; SMPL-X meshes logged under /world/gt/smplx):
+pixi run -e simplecv --frozen simplecv-view-exoego-data mamma
+pixi run -e simplecv --frozen python tools/view_exoego.py mamma --sequence-name mamma_eval_singles/230929_WhiteRabbit_CatchBall_50048_1
+```
+
+MAMMA ships 4:4:4-chroma H.264/H.265 videos, which NVDEC and the Rerun viewer cannot decode
+on the fast path; `simplecv-preprocess-mamma` builds the AV1 `yuv420p` mirror the loader
+prefers automatically. Use `--cq` (constant-quality target, default 30; maps to NVENC `-cq` /
+SVT-AV1 `-crf`) and `--encoder {av1_nvenc,libsvtav1}` to tune it.
+
 ### Ingest Exo/Ego Recordings
 Ingest synchronized exo/ego captures into Rerun (spawns the viewer unless told otherwise).
 ```bash
