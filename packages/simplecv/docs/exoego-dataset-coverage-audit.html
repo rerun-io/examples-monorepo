@@ -1,0 +1,819 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SimpleCV ExoEgo Dataset Coverage Audit</title>
+<style>
+  :root {
+    --bg: oklch(18% .012 250);
+    --surface: oklch(22% .014 250);
+    --panel: oklch(25% .016 250);
+    --line: oklch(32% .015 250);
+    --line-strong: oklch(42% .02 250);
+    --text: oklch(90% .01 250);
+    --text-dim: oklch(72% .015 250);
+    --text-faint: oklch(58% .015 250);
+    --accent: oklch(72% .14 245);
+    --accent-soft: oklch(35% .07 245);
+    --ok: oklch(72% .13 155);
+    --ok-bg: oklch(30% .05 155);
+    --warn: oklch(78% .13 85);
+    --warn-bg: oklch(32% .05 85);
+    --bad: oklch(70% .16 20);
+    --bad-bg: oklch(30% .06 20);
+    --na: oklch(45% .01 250);
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: var(--sans); font-size: 15.5px; line-height: 1.55;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { font-family: var(--mono); font-size: .86em; background: var(--panel); padding: 1px 5px; border-radius: 4px; border: 1px solid var(--line); white-space: nowrap; }
+  pre { background: oklch(15% .01 250); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; overflow-x: auto; font-family: var(--mono); font-size: 12.5px; line-height: 1.5; }
+  pre code { background: none; border: none; padding: 0; white-space: pre; }
+
+  header.page {
+    padding: 34px clamp(18px, 4vw, 48px) 26px;
+    border-bottom: 1px solid var(--line);
+  }
+  header.page h1 { margin: 0 0 6px; font-size: 25px; letter-spacing: 0; text-wrap: balance; }
+  header.page p.sub { margin: 0; color: var(--text-dim); max-width: 72ch; }
+  header.page .meta { margin-top: 10px; color: var(--text-faint); font-size: 12.5px; font-family: var(--mono); }
+
+  nav.toc {
+    position: sticky; top: 0; z-index: 10;
+    display: flex; flex-wrap: wrap; gap: 4px 14px;
+    padding: 10px clamp(18px, 4vw, 48px);
+    background: color-mix(in oklch, var(--bg) 88%, transparent);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--line);
+    font-size: 13px;
+  }
+  nav.toc a { color: var(--text-dim); padding: 3px 6px; border-radius: 5px; }
+  nav.toc a:hover { color: var(--text); background: var(--panel); text-decoration: none; }
+  nav.toc a.hot { color: var(--accent); }
+
+  main { padding: 0 clamp(18px, 4vw, 48px) 80px; max-width: 1280px; margin: 0 auto; }
+  header.page h1, header.page p.sub, header.page .meta { max-width: 1184px; margin-left: auto; margin-right: auto; }
+  nav.toc { justify-content: center; }
+  section { margin-top: 46px; }
+  h2 { font-size: 20px; margin: 0 0 4px; text-wrap: balance; }
+  h2 + p.lead { margin: 0 0 18px; color: var(--text-dim); max-width: 80ch; }
+  h3 { font-size: 16px; margin: 26px 0 8px; }
+
+  /* TLDR */
+  .tldr {
+    margin-top: 28px;
+    border: 1px solid var(--line-strong); border-radius: 10px;
+    background: var(--surface); padding: 18px 22px;
+  }
+  .tldr h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .07em; color: var(--accent); margin-bottom: 10px; }
+  .tldr ul { margin: 0; padding-left: 20px; }
+  .tldr li { margin: 6px 0; max-width: 95ch; }
+  .tldr strong { color: var(--text); }
+
+  /* matrix */
+  .matrix-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+  table.matrix { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  table.matrix th, table.matrix td { padding: 7px 9px; border-bottom: 1px solid var(--line); text-align: center; white-space: nowrap; }
+  table.matrix thead th {
+    position: sticky; top: 0; background: var(--panel); z-index: 2;
+    font-family: var(--mono); font-weight: 600; font-size: 11px; letter-spacing: .02em; color: var(--text-dim);
+  }
+  table.matrix tbody th {
+    text-align: left; font-weight: 600; background: var(--surface); font-size: 13px;
+  }
+  table.matrix tbody th a { color: var(--text); }
+  table.matrix tbody th .vp { display: block; font-family: var(--mono); font-weight: 400; font-size: 10.5px; color: var(--text-faint); }
+  td.c { font-family: var(--mono); font-weight: 700; font-size: 12px; }
+  td.log  { color: var(--ok);  background: color-mix(in oklch, var(--ok-bg) 45%, transparent); }
+  td.part { color: var(--warn); background: color-mix(in oklch, var(--warn-bg) 45%, transparent); }
+  td.miss { color: var(--bad); background: color-mix(in oklch, var(--bad-bg) 45%, transparent); }
+  td.na   { color: var(--na); }
+  .legend { display: flex; flex-wrap: wrap; gap: 10px 22px; margin: 12px 2px 0; font-size: 12.5px; color: var(--text-dim); }
+  .legend span b { font-family: var(--mono); margin-right: 6px; }
+  .legend .k-log b { color: var(--ok); } .legend .k-part b { color: var(--warn); }
+  .legend .k-miss b { color: var(--bad); } .legend .k-na b { color: var(--na); }
+
+  /* dataset cards */
+  article.ds {
+    border: 1px solid var(--line); border-radius: 10px; background: var(--surface);
+    margin-top: 26px; overflow: hidden;
+  }
+  article.ds > header {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 12px;
+    padding: 14px 20px 12px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  article.ds > header h3 { margin: 0; font-size: 17px; }
+  .chip {
+    font-family: var(--mono); font-size: 10.5px; font-weight: 600; letter-spacing: .04em;
+    border: 1px solid var(--line-strong); border-radius: 999px; padding: 2px 9px; color: var(--text-dim);
+  }
+  .chip.vp { color: var(--accent); border-color: var(--accent-soft); }
+  article.ds > header .src { margin-left: auto; font-size: 12.5px; color: var(--text-faint); }
+  .ds-body { padding: 16px 20px 20px; }
+  .ds-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px 28px; }
+  @media (max-width: 900px) { .ds-grid { grid-template-columns: 1fr; } }
+  .ds-body h4 {
+    margin: 0 0 7px; font-size: 11.5px; text-transform: uppercase; letter-spacing: .07em;
+    color: var(--text-faint); font-weight: 700;
+  }
+  .ds-body ul { margin: 0; padding-left: 18px; }
+  .ds-body li { margin: 3.5px 0; font-size: 13.5px; }
+  .ds-body li.dim { color: var(--text-dim); }
+  .srcline { font-size: 13px; color: var(--text-dim); margin: 0 0 14px; max-width: 100ch; }
+
+  table.gaps { border-collapse: collapse; width: 100%; font-size: 13px; margin-top: 8px; }
+  table.gaps th, table.gaps td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  table.gaps th { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-faint); }
+  table.gaps td:first-child { font-weight: 600; white-space: nowrap; }
+  .eff { font-family: var(--mono); font-size: 10.5px; font-weight: 700; border-radius: 4px; padding: 1px 6px; }
+  .eff.S { color: var(--ok); background: var(--ok-bg); }
+  .eff.M { color: var(--warn); background: var(--warn-bg); }
+  .eff.L { color: var(--bad); background: var(--bad-bg); }
+
+  details { border: 1px solid var(--line); border-radius: 8px; margin-top: 10px; background: var(--panel); }
+  details summary { cursor: pointer; padding: 9px 14px; font-size: 13px; color: var(--text-dim); user-select: none; }
+  details summary:hover { color: var(--text); }
+  details[open] summary { border-bottom: 1px solid var(--line); }
+  details .inner { padding: 10px 16px 14px; }
+
+  /* schema trees */
+  .tree-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 980px) { .tree-cols { grid-template-columns: 1fr; } }
+  .tree-cols figcaption { font-size: 12px; color: var(--text-faint); margin: 6px 2px 0; }
+  .add { color: var(--ok); }
+  .cmt { color: var(--text-faint); }
+
+  /* priorities */
+  ol.prio { padding-left: 0; margin: 14px 0 0; list-style: none; counter-reset: p; }
+  ol.prio > li {
+    counter-increment: p; position: relative;
+    border: 1px solid var(--line); border-radius: 10px; background: var(--surface);
+    padding: 13px 18px 13px 56px; margin-top: 10px;
+  }
+  ol.prio > li::before {
+    content: counter(p); position: absolute; left: 16px; top: 13px;
+    font-family: var(--mono); font-weight: 700; font-size: 15px; color: var(--accent);
+  }
+  ol.prio b { display: block; }
+  ol.prio p { margin: 4px 0 0; color: var(--text-dim); font-size: 13.5px; max-width: 105ch; }
+
+  @media print {
+    :root { --bg:#fff; --surface:#fff; --panel:#f4f4f0; --line:#ccc; --line-strong:#999;
+            --text:#111; --text-dim:#333; --text-faint:#666; --accent:#1436c9;
+            --ok:#0a6b46; --ok-bg:#e2f3ea; --warn:#8a5a00; --warn-bg:#f7eed7; --bad:#a01f30; --bad-bg:#f9e3e6; --na:#999; }
+    nav.toc { display: none; }
+    article.ds, .matrix-wrap { break-inside: avoid; }
+    body { font-size: 12px; }
+  }
+</style>
+</head>
+<body>
+
+<header class="page">
+  <h1>SimpleCV ExoEgo dataset coverage audit</h1>
+  <p class="sub">For each dataset registered in the ExoEgo framework: where the data truly comes from, every label the original release ships, what the SimpleCV loader parses, what actually reaches Rerun — and how to close the gaps.</p>
+  <div class="meta">packages/simplecv · schema exoego:v2 · sources: loader code, pixi.toml download tasks, official project pages/papers, simplecv.datasets catalog page · 2026-07-05</div>
+</header>
+
+<nav class="toc" aria-label="Sections">
+  <a href="#matrix" class="hot">Coverage matrix</a>
+  <a href="#hocap">HOCap</a>
+  <a href="#hot3d">HOT3D</a>
+  <a href="#aria-gen2">Aria Gen2</a>
+  <a href="#epfl">EPFL Kitchen</a>
+  <a href="#mamma">MAMMA</a>
+  <a href="#assembly101">Assembly101</a>
+  <a href="#egodex">EgoDex</a>
+  <a href="#umetrack">UmeTrack</a>
+  <a href="#ego100k">Ego-100K</a>
+  <a href="#robocap">Robocap</a>
+  <a href="#schema" class="hot">Schema fixes</a>
+  <a href="#priorities" class="hot">Priorities</a>
+</nav>
+
+<main>
+
+<div class="tldr">
+  <h2>TL;DR — the five systemic gaps</h2>
+  <ul>
+    <li><strong>Object / item poses are the biggest hole.</strong> HOCap ships per-frame 6DoF poses for 64 textured object meshes <em>inside the NPZ files we already download and open</em>; HOT3D ships mocap-grade 6DoF poses for 33 UV-textured GLB objects; Aria Gen2 ships 293 3D bounding boxes with 6DoF scene-object poses. The schema has no <code>/world/gt/objects</code> vocabulary, so all of it is dropped.</li>
+    <li><strong>Segmentation masks are never logged.</strong> HOCap (SAM2 masks in the same NPZs), MAMMA eval (per-person SAM PNG tars), and Aria Gen2 (COCO-RLE hand/object interaction masks) all ship them; no entity path exists.</li>
+    <li><strong>Eye gaze is downloaded and thrown away.</strong> HOT3D's <code>mps_eye_gaze</code> is in the download list but never parsed; EPFL's gaze is sitting in <code>holo_data_wpose.csv</code> we already open; Aria Gen2 gaze (with vergence depth + pupil + blink) is in the VRS we already have.</li>
+    <li><strong>Depth support exists in the framework but is mostly unwired.</strong> Only HOCap logs depth. EPFL ships Kinect depth MP4s (<code>videos_depth/</code>) that the loader ignores; Aria Gen2's FoundationStereo depth is skipped at download time.</li>
+    <li><strong>Action / language labels have no home.</strong> Assembly101 (1M fine + 100K coarse segments + mistake labels), EPFL (60K verb–noun segments), EgoDex (per-episode LLM task descriptions), Aria Gen2 (diarized transcripts) — none of it reaches the recording.</li>
+  </ul>
+</div>
+
+<section id="matrix">
+  <h2>Coverage matrix</h2>
+  <p class="lead">Rows are the ten registered ExoEgo datasets; columns are modalities. Green = logged to Rerun today. Amber = the bytes are on disk (downloaded, or even parsed) but never logged. Red = the original dataset ships it and we ignore it entirely. Grey = the dataset doesn't have it.</p>
+  <div class="matrix-wrap">
+  <table class="matrix">
+    <thead>
+      <tr>
+        <th>dataset</th><th>exo video</th><th>ego video</th><th>cams+rig</th><th>3D kpts</th><th>2D kpts</th>
+        <th>MANO</th><th>SMPL(-X)</th><th>depth</th><th>objects</th><th>segmentation</th>
+        <th>eye gaze</th><th>point cloud</th><th>IMU</th><th>actions/lang</th><th>audio</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><th><a href="#hocap">HOCap</a><span class="vp">ego+exo · HoloLens + 8×D455 + Kinect</span></th>
+        <td class="c log">●</td><td class="c log">●</td><td class="c log">●</td><td class="c log">●</td><td class="c log">●*</td>
+        <td class="c log">●</td><td class="c na">—</td><td class="c log">●</td><td class="c part">◐</td><td class="c part">◐</td>
+        <td class="c na">—</td><td class="c na">—</td><td class="c na">—</td><td class="c na">—</td><td class="c na">—</td></tr>
+      <tr><th><a href="#hot3d">HOT3D</a><span class="vp">ego · Aria / Quest 3</span></th>
+        <td class="c na">—</td><td class="c log">●</td><td class="c log">●</td><td class="c log">●</td><td class="c log">●*</td>
+        <td class="c log">●</td><td class="c na">—</td><td class="c na">—</td><td class="c miss">✗</td><td class="c na">—</td>
+        <td class="c part">◐</td><td class="c miss">✗</td><td class="c miss">✗</td><td class="c na">—</td><td class="c na">—</td></tr>
+      <tr><th><a href="#aria-gen2">Aria Gen2 Pilot</a><span class="vp">ego · Gen2 glasses, 4 wearers</span></th>
+        <td class="c na">—</td><td class="c log">●</td><td class="c log">●</td><td class="c log">●</td><td class="c log">●*</td>
+        <td class="c na">—</td><td class="c na">—</td><td class="c miss">✗</td><td class="c miss">✗</td><td class="c miss">✗</td>
+        <td class="c miss">✗</td><td class="c miss">✗</td><td class="c miss">✗</td><td class="c miss">✗</td><td class="c miss">✗</td></tr>
+      <tr><th><a href="#epfl">EPFL Smart Kitchen</a><span class="vp">ego+exo · HoloLens + 9×Kinect</span></th>
+        <td class="c log">●</td><td class="c log">●</td><td class="c log">●</td><td class="c log">●</td><td class="c log">●*</td>
+        <td class="c log">●</td><td class="c log">●</td><td class="c part">◐</td><td class="c na">—</td><td class="c na">—</td>
+        <td class="c part">◐</td><td class="c na">—</td><td class="c miss">✗</td><td class="c miss">✗</td><td class="c na">—</td></tr>
+      <tr><th><a href="#mamma">MAMMA</a><span class="vp">exo · 32-cam IOI / 4 iPhones</span></th>
+        <td class="c log">●</td><td class="c na">—</td><td class="c log">●</td><td class="c part">◐</td><td class="c log">●*</td>
+        <td class="c na">—</td><td class="c log">●</td><td class="c na">—</td><td class="c na">—</td><td class="c miss">✗</td>
+        <td class="c na">—</td><td class="c na">—</td><td class="c na">—</td><td class="c na">—</td><td class="c na">—</td></tr>
+      <tr><th><a href="#assembly101">Assembly101</a><span class="vp">ego+exo · 4 HMC + 8 RGB</span></th>
+        <td class="c log">●</td><td class="c log">●</td><td class="c log">●</td><td class="c log">●</td><td class="c log">●*</td>
+        <td class="c na">—</td><td class="c na">—</td><td class="c na">—</td><td class="c na">—</td><td class="c na">—</td>
+        <td class="c na">—</td><td class="c na">—</td><td class="c na">—</td><td class="c miss">✗</td><td class="c na">—</td></tr>
+      <tr><th><a href="#egodex">EgoDex</a><span class="vp">ego · Apple Vision Pro</span></th>
+        <td class="c na">—</td><td class="c log">●</td><td class="c log">●</td><td class="c log">●</td><td class="c log">●*</td>
+        <td class="c na">—</td><td class="c na">—</td><td class="c na">—</td><td class="c na">—</td><td class="c na">—</td>
+        <td class="c na">—</td><td class="c na">—</td><td class="c na">—</td><td class="c miss">✗</td><td class="c na">—</td></tr>
+      <tr><th><a href="#umetrack">UmeTrack</a><span class="vp">ego · 4 mono fisheye</span></th>
+        <td class="c na">—</td><td class="c log">●</td><td class="c log">●</td><td class="c log">●</td><td class="c log">●*</td>
+        <td class="c na">—</td><td class="c na">—</td><td class="c na">—</td><td class="c na">—</td><td class="c na">—</td>
+        <td class="c na">—</td><td class="c na">—</td><td class="c na">—</td><td class="c miss">✗</td><td class="c na">—</td></tr>
+      <tr><th><a href="#ego100k">Egocentric-100K</a><span class="vp">ego · 1 fisheye, factory</span></th>
+        <td class="c na">—</td><td class="c log">●</td><td class="c log">●</td><td class="c na">—</td><td class="c na">—</td>
+        <td class="c na">—</td><td class="c na">—</td><td class="c na">—</td><td class="c na">—</td><td class="c na">—</td>
+        <td class="c na">—</td><td class="c na">—</td><td class="c na">—</td><td class="c na">—</td><td class="c na">—</td></tr>
+      <tr><th><a href="#robocap">Robocap</a><span class="vp">ego · 6 fisheye rig</span></th>
+        <td class="c na">—</td><td class="c log">●</td><td class="c log">●</td><td class="c na">—</td><td class="c na">—</td>
+        <td class="c na">—</td><td class="c na">—</td><td class="c na">—</td><td class="c na">—</td><td class="c na">—</td>
+        <td class="c na">—</td><td class="c na">—</td><td class="c miss">✗</td><td class="c na">—</td><td class="c na">—</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="legend">
+    <span class="k-log"><b>●</b> logged to Rerun</span>
+    <span class="k-part"><b>◐</b> on disk / parsed, not logged</span>
+    <span class="k-miss"><b>✗</b> shipped upstream, ignored</span>
+    <span class="k-na"><b>—</b> not shipped by dataset</span>
+    <span><b style="color:var(--text-faint)">●*</b> 2D keypoints are our own reprojection of the 3D labels, not the dataset's native 2D annotations</span>
+  </div>
+</section>
+
+<!-- ============ HOCAP ============ -->
+<section>
+<article class="ds" id="hocap">
+  <header>
+    <h3>HOCap</h3>
+    <span class="chip vp">EGO+EXO</span><span class="chip">CC BY 4.0</span><span class="chip">2024</span>
+    <span class="src">UT Dallas IRVL + NVIDIA · <a href="https://irvlutd.github.io/HOCap/">project</a> · <a href="https://arxiv.org/abs/2406.06843">arXiv 2406.06843</a></span>
+  </header>
+  <div class="ds-body">
+    <p class="srcline"><b>True source:</b> official release is a Box portal (~123 GB, 64 sequences / 656K RGB-D frames, 9 subjects, 64 objects). SimpleCV downloads the sample subset from HF <code>pablovela5620/hocap-sample</code> (pixi task <code>_download-simplecv-hocap-sample</code>). Rig: HoloLens 2 ego + 8× RealSense D455 RGB-D + 1× Azure Kinect.</p>
+    <div class="ds-grid">
+      <div>
+        <h4>Original ships</h4>
+        <ul>
+          <li>Multi-view RGB-D (8 exo + Kinect + HoloLens PV)</li>
+          <li>MANO: per-subject betas + <code>poses_m.npy</code> (θ∈R⁵¹)</li>
+          <li>21-joint hand keypoints, 2D per view <em>and</em> 3D world</li>
+          <li><b>Object 6DoF poses</b> per frame (<code>obj_poses</code> in per-frame NPZ)</li>
+          <li><b>64 textured object meshes</b> (reconstructed, marching cubes)</li>
+          <li><b>SAM2 segmentation masks</b> (<code>seg_mask</code>, 480×640)</li>
+          <li>Vicalib calibration + refined HoloLens poses (<code>poses_pv.npy</code>)</li>
+        </ul>
+      </div>
+      <div>
+        <h4>SimpleCV logs today</h4>
+        <ul>
+          <li>Exo + ego video streams, full rig with calibration</li>
+          <li>Depth for both ego and exo (<code>DepthImage</code>, uint16 mm)</li>
+          <li>COCO-133 3D keypoints (from <code>hand_joints_3d</code>) + reprojected 2D</li>
+          <li>MANO meshes both hands (betas from YAML, 51-dim poses split 48+3)</li>
+          <li class="dim">Loader: <code>simplecv/data/exoego/hocap.py:134-221</code></li>
+        </ul>
+      </div>
+    </div>
+    <h4 style="margin-top:18px">Gaps &amp; fixes</h4>
+    <table class="gaps">
+      <thead><tr><th>Missing</th><th>Where it lives</th><th>How to fix</th><th>Effort</th></tr></thead>
+      <tbody>
+        <tr><td>Object 6DoF poses</td><td><code>obj_poses [n_objs,4,4]</code>, <code>obj_class_inds</code>, <code>obj_class_names</code> in the same per-frame NPZs the loader already opens for hand joints</td><td>Read the three keys in <code>load_labels()</code>, add an <code>ObjectStack</code> to <code>ExoEgoLabels</code>, log <code>Transform3D</code> per frame under <code>/world/gt/objects/&lt;name&gt;</code>. Quickest win in the whole audit.</td><td><span class="eff S">S</span></td></tr>
+        <tr><td>Object meshes</td><td>Textured meshes on the HOCap Box portal (not in the HF sample)</td><td>Mirror the models directory into the HF sample repo; log static <code>Asset3D</code>/<code>Mesh3D</code> under each object entity, driven by the pose stream.</td><td><span class="eff M">M</span></td></tr>
+        <tr><td>Segmentation masks</td><td><code>seg_mask [480,640]</code> in the same NPZs</td><td>Log <code>SegmentationImage</code> under <code>/world/rig_NN/cam_MM/pinhole/segmentation</code> once the schema seam exists (see <a href="#schema">schema fixes</a>).</td><td><span class="eff M">M</span></td></tr>
+        <tr><td>Native 2D hand keypoints</td><td><code>hand_joints_2d</code> in NPZ (read by <code>hocap_exo.py:189</code>, dropped before exoego)</td><td>Low value — we already reproject 3D→2D with the calibrated rig. Skip unless validating calibration.</td><td><span class="eff S">S</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+</article>
+
+<!-- ============ HOT3D ============ -->
+<article class="ds" id="hot3d">
+  <header>
+    <h3>HOT3D</h3>
+    <span class="chip vp">EGO</span><span class="chip">research license</span><span class="chip">2024</span>
+    <span class="src">Meta · <a href="https://facebookresearch.github.io/hot3d/">toolkit</a> · <a href="https://arxiv.org/abs/2406.09598">arXiv 2406.09598</a> · <a href="https://www.projectaria.com/datasets/hot3D/">download</a></span>
+  </header>
+  <div class="ds-body">
+    <p class="srcline"><b>True source:</b> projectaria.com CDN via per-account <code>Hot3DAria_download_urls.json</code> (pixi task <code>simplecv-download-hot3d</code>). 833 min / ~3.7M images, 19 subjects, 33 objects; Aria (RGB + 2 SLAM + 2 eye cams + 2 IMU + baro/mag) and Quest 3 (2 mono) headsets. GT from optical mocap (19 markers/hand, ~10/object).</p>
+    <div class="ds-grid">
+      <div>
+        <h4>Original ships</h4>
+        <ul>
+          <li>VRS sensor streams (RGB, SLAM, eye cams, IMU×2, baro, magnetometer)</li>
+          <li>Hand GT in <b>two formats</b>: UmeTrack (wrist 6DoF + 22 joint angles) and MANO (15 PCA + betas)</li>
+          <li><b>Object 6DoF poses per frame</b> (mocap, mm-accurate)</li>
+          <li><b>33 object meshes</b> — high-res scans with PBR materials, UV-textured GLB ("HOT3D Assets")</li>
+          <li>MPS eye gaze (2 rays anchored at the eyes)</li>
+          <li>MPS semi-dense scene point clouds</li>
+          <li>Device 6DoF trajectory + time-varying online calibration</li>
+          <li>7 quality/visibility mask CSVs (exposure, visibility, QA)</li>
+        </ul>
+      </div>
+      <div>
+        <h4>SimpleCV logs today</h4>
+        <ul>
+          <li>Preprocessed AV1 videos (Aria: RGB + 2 SLAM; Quest: 2 SLAM) on a moving rig</li>
+          <li>Fisheye62 calibration, closed-loop / headset trajectory</li>
+          <li>COCO-133 from UmeTrack FK (confidence-gated) + reprojected 2D</li>
+          <li>MANO meshes (15 PCA zero-padded to 45)</li>
+          <li class="dim">Loader: <code>simplecv/data/exoego/hot3d.py:146-398</code>; download list includes <code>ground_truth</code> and <code>mps_eye_gaze</code></li>
+        </ul>
+      </div>
+    </div>
+    <h4 style="margin-top:18px">Gaps &amp; fixes</h4>
+    <table class="gaps">
+      <thead><tr><th>Missing</th><th>Where it lives</th><th>How to fix</th><th>Effort</th></tr></thead>
+      <tbody>
+        <tr><td>Object poses + meshes</td><td>Object pose trajectories are inside the <code>ground_truth</code> component we already download (the <code>have_hand_object_pose_gt</code> flag is checked, then object data is never read); meshes are the separately downloadable HOT3D Assets GLBs</td><td>Parse the object pose trajectory alongside the hand JSONLs, add HOT3D Assets to the download config, log <code>Asset3D</code> (GLB directly) + per-frame <code>Transform3D</code> under <code>/world/gt/objects/&lt;bop_id&gt;</code>. This is HOT3D's headline label — "HOT" means hand <em>and object</em> tracking.</td><td><span class="eff M">M</span></td></tr>
+        <tr><td>Eye gaze</td><td><code>mps_eye_gaze/</code> — <b>already in the download list</b> (<code>download_hot3d.py:27-35</code>), never opened</td><td>Parse MPS gaze CSV, log <code>Arrows3D</code> (or gaze-ray entity) under the ego rig, e.g. <code>/world/rig_E/gaze</code>.</td><td><span class="eff S">S</span></td></tr>
+        <tr><td>Scene point cloud</td><td><code>mps_slam_points</code> — skipped at download (large)</td><td>Optional download flag; subsample + log static <code>Points3D</code> at <code>/world/points</code>. Great spatial context for ego-only scenes.</td><td><span class="eff M">M</span></td></tr>
+        <tr><td>IMU</td><td>In the VRS we already fetch</td><td>Schema already reserves <code>/world/rig_NN/imu_MM</code> — emit <code>gyro</code>/<code>accel</code> scalars. Mechanical.</td><td><span class="eff M">M</span></td></tr>
+        <tr><td>Eye camera streams</td><td>VRS streams <code>211-*</code>, not in <code>ARIA_STREAM_IDS</code> (<code>preprocess_hot3d.py:40-41</code>)</td><td>Add to preprocess stream list if useful; low priority.</td><td><span class="eff S">S</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+</article>
+
+<!-- ============ ARIA GEN2 ============ -->
+<article class="ds" id="aria-gen2">
+  <header>
+    <h3>Aria Gen2 Pilot</h3>
+    <span class="chip vp">EGO</span><span class="chip">CC BY-NC 4.0</span><span class="chip">2026</span>
+    <span class="src">Meta · <a href="https://www.projectaria.com/datasets/gen2pilot/">project</a> · <a href="https://arxiv.org/abs/2510.16134">arXiv 2510.16134</a></span>
+  </header>
+  <div class="ds-body">
+    <p class="srcline"><b>True source:</b> explorer.projectaria.com CDN via <code>AriaGen2PilotDataset_download_urls.json</code>. 12 sequences × ~5 min, <b>4 participants wearing Gen2 simultaneously</b> (multi-device sequences share one world frame), 5 scenarios. This is by far the most modality-rich dataset in the registry — and the one where we ignore the most.</p>
+    <div class="ds-grid">
+      <div>
+        <h4>Original ships</h4>
+        <ul>
+          <li>VRS: RGB 12MP + 4 SLAM cams + 2 eye cams, 2 IMU (800 Hz), mag, baro, GNSS, Wi-Fi/BT, ALS, <b>8-ch audio</b>, <b>PPG</b></li>
+          <li>On-device: VIO @800 Hz, eye gaze (vergence depth, pupil, blink), hand tracking @30 Hz with <b>palm/wrist normals</b></li>
+          <li>MPS: open/closed-loop trajectories, <b>semi-dense point clouds</b>, online calibration</li>
+          <li><b>Depth</b>: FoundationStereo 16-bit PNGs + rectified pinhole params</li>
+          <li><b>Scene objects</b>: 2D + 3D bounding boxes, 6DoF poses, 293 instances with category/motion-type/symmetry</li>
+          <li><b>Hand-object interaction masks</b>: COCO-RLE (left hand / right hand / object)</li>
+          <li><b>Diarization</b>: speaker-attributed ASR transcripts (1,644 utterances)</li>
+          <li><b>Heart rate</b> CSV from PPG</li>
+        </ul>
+      </div>
+      <div>
+        <h4>SimpleCV logs today</h4>
+        <ul>
+          <li>5 camera streams (RGB + 4 SLAM), H.265→AV1, moving rig from closed-loop trajectory</li>
+          <li>Fisheye62 calibration from online calibration JSONL</li>
+          <li>COCO-133 hands from MPS hand-tracking CSV (downsampled 30→10 fps to RGB timeline, TODO in code)</li>
+          <li class="dim">Download deliberately skips: <code>mps_slam_points</code>, <code>depth</code>, <code>scene</code>, <code>heart_rate</code>, <code>diarization</code>, <code>hand_object_interaction</code> (<code>download_aria_gen2_pilot.py:76-83</code>)</li>
+        </ul>
+      </div>
+    </div>
+    <h4 style="margin-top:18px">Gaps &amp; fixes</h4>
+    <table class="gaps">
+      <thead><tr><th>Missing</th><th>Where it lives</th><th>How to fix</th><th>Effort</th></tr></thead>
+      <tbody>
+        <tr><td>Eye gaze</td><td>On-device <code>eyegaze</code> stream in the VRS we already download</td><td>Read via projectaria-tools during preprocess, cache to <code>_simplecv/</code>, log gaze ray + vergence point under the ego rig.</td><td><span class="eff M">M</span></td></tr>
+        <tr><td>Depth</td><td><code>depth/</code> component (~2 GB, skipped)</td><td>Opt-in download; framework already logs <code>DepthImage</code> — wire PNGs onto the rectified pinhole entity.</td><td><span class="eff M">M</span></td></tr>
+        <tr><td>Scene 3D boxes / object poses</td><td><code>scene/</code> CSVs (skipped)</td><td>Log <code>Boxes3D</code> + <code>Transform3D</code> under <code>/world/gt/objects</code>. Pairs with the object-vocabulary schema fix.</td><td><span class="eff M">M</span></td></tr>
+        <tr><td>HOI segmentation masks</td><td><code>hand_object_interaction/</code> COCO-RLE JSON (skipped)</td><td>Decode RLE → <code>SegmentationImage</code> under the RGB cam. Needs the segmentation schema seam.</td><td><span class="eff M">M</span></td></tr>
+        <tr><td>Point cloud</td><td><code>mps_slam_points</code> (~3.4 GB, skipped)</td><td>Opt-in; static <code>Points3D</code> at <code>/world/points</code>.</td><td><span class="eff S">S</span></td></tr>
+        <tr><td>Diarization + heart rate</td><td><code>diarization/</code>, <code>heart_rate/</code> CSVs (skipped)</td><td>Transcripts → text events on the timeline; BPM → <code>Scalars</code>. Cheap and demo-friendly.</td><td><span class="eff S">S</span></td></tr>
+        <tr><td>IMU, audio, hand tracking @30fps</td><td>In the VRS</td><td>IMU → reserved <code>imu_MM</code> paths; audio needs new vocabulary; keep hand labels on their native 30 Hz timeline instead of snapping to 10 fps RGB (existing TODO at <code>aria_gen2_pilot.py:184</code>).</td><td><span class="eff L">L</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+</article>
+
+<!-- ============ EPFL ============ -->
+<article class="ds" id="epfl">
+  <header>
+    <h3>EPFL Smart Kitchen-30</h3>
+    <span class="chip vp">EGO+EXO</span><span class="chip">CC BY-NC 4.0</span><span class="chip">2025</span>
+    <span class="src">EPFL Mathis lab · <a href="https://arxiv.org/abs/2506.01608">arXiv 2506.01608</a> · <a href="https://zenodo.org/records/15535461">zenodo videos</a> / <a href="https://zenodo.org/records/15551913">poses</a></span>
+  </header>
+  <div class="ds-body">
+    <p class="srcline"><b>True source:</b> Zenodo (<code>Public_release_videos.zip</code> 192.7 GB + <code>Public_release_pose.zip</code> 12.7 GB), AV1-transcoded locally by <code>preprocess_epfl_smart_kitchen.py</code>. 16 subjects / 29.7 h / 4 recipes. Rig: HoloLens 2 ego + 9× Azure Kinect RGB-D exo + 8 object-mounted IMUs.</p>
+    <div class="ds-grid">
+      <div>
+        <h4>Original ships</h4>
+        <ul>
+          <li>9 exo RGB MP4s + HoloLens ego MP4</li>
+          <li><b>Per-camera depth MP4s</b> (<code>videos_depth/</code>) + depth timestamps</li>
+          <li><code>camera_matrix.json</code>: K, distortion, world2cam per camera</li>
+          <li><code>holo_data_wpose.csv</code>: head pose + <b>eye gaze</b> (origin/direction/confidence) + <b>raw HoloLens 26-kpt hands</b></li>
+          <li>SMPL fits (17 kpts + params) and MANO fits (42 kpts + params)</li>
+          <li><b>60,189 verb–noun action segments</b> (33 verbs × 79 nouns) + 4,828 coarse activities</li>
+          <li>8 object-mounted IMU CSVs (fridge/cupboards/knife/spatula; not video-synced)</li>
+          <li>LEMONADE VQA benchmark (36.5K QA pairs)</li>
+        </ul>
+      </div>
+      <div>
+        <h4>SimpleCV logs today</h4>
+        <ul>
+          <li>Ego + 9 exo videos, full rig, HoloLens dropout handling (frustum-freeze fix)</li>
+          <li>COCO-133 (17 body + 2×21 hands, confidence/l2-filtered) + reprojected 2D</li>
+          <li>MANO both hands (with wrist-pivot translation correction)</li>
+          <li>SMPL body via <code>SmplxStack(model_type="smpl")</code></li>
+          <li class="dim">Loader: <code>simplecv/data/exoego/epfl_smart_kitchen.py</code> — the richest loader in the registry</li>
+        </ul>
+      </div>
+    </div>
+    <h4 style="margin-top:18px">Gaps &amp; fixes</h4>
+    <table class="gaps">
+      <thead><tr><th>Missing</th><th>Where it lives</th><th>How to fix</th><th>Effort</th></tr></thead>
+      <tbody>
+        <tr><td>Kinect depth</td><td><code>videos_depth/&lt;cam&gt;.mp4</code> — on disk next to videos we read</td><td>Framework already samples depth (<code>_sample_exo_depths</code>) and logs <code>DepthImage</code> — decode the depth MP4s and populate <code>exo_depth_list</code>. HOCap proves the whole path works.</td><td><span class="eff S">S</span></td></tr>
+        <tr><td>Eye gaze</td><td>Columns of <code>holo_data_wpose.csv</code> — a file the loader <b>already opens</b> for head poses</td><td>Parse origin+direction+confidence, log a gaze ray under the HoloLens rig.</td><td><span class="eff S">S</span></td></tr>
+        <tr><td>Action segments</td><td><code>annotations/action_annotations.xlsx</code> + <code>activity_annotations.json</code></td><td>Log verb–noun segments as timeline-ranged text/AnyValues under <code>/world/gt/actions</code>. Needs the actions schema seam.</td><td><span class="eff M">M</span></td></tr>
+        <tr><td>Object IMUs</td><td><code>IMUs/</code> accelerometer CSVs</td><td>Low priority (README: not synchronized with video). Revisit if IMU vocabulary lands.</td><td><span class="eff L">L</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+</article>
+
+<!-- ============ MAMMA ============ -->
+<article class="ds" id="mamma">
+  <header>
+    <h3>MAMMA</h3>
+    <span class="chip vp">EXO</span><span class="chip">MPI research license</span><span class="chip">2026</span>
+    <span class="src">MPI-IS · <a href="https://mamma.is.tue.mpg.de/">project</a> · <a href="https://arxiv.org/abs/2506.13040">arXiv 2506.13040</a> · <a href="https://github.com/cuevhv/mamma">code</a></span>
+  </header>
+  <div class="ds-body">
+    <p class="srcline"><b>True source:</b> credentialed MPI download server (<code>download.is.tue.mpg.de</code>, needs <code>MAMMA_USERNAME/PASSWORD</code>), fetched by <code>download_mamma.py</code>, AV1-transcoded locally. Families: dance (123 seqs, 2p), multi-people (34 seqs, 3–6p), iPhone (42 seqs), eval (52 seqs w/ MoSh++ GT), MammaSyn synthetic. Rig: 32-cam IOI + 54 Vicon (GT only) or 4 iPhones.</p>
+    <div class="ds-grid">
+      <div>
+        <h4>Original ships</h4>
+        <ul>
+          <li>Multiview H.264/H.265 videos (several quality tiers) + calib NPZs per camera</li>
+          <li>Per-person SMPL-X params (<code>pred/params_XX.npz</code>: 165-dim poses, 16 betas, trans)</li>
+          <li>Eval GT: MoSh++ <code>gt/global.npz</code> incl. per-subject <b>v_template</b> (10475 verts)</li>
+          <li><b>Per-person SAM segmentation masks</b> (eval, <code>masks/&lt;cam&gt;_masks.tar</code>, ~20 GB)</li>
+          <li><b>37 held-out Vicon markers</b> (<code>markers/*_m37.npy</code>, eval_extra)</li>
+          <li>MammaSyn: synthetic RGB + masks + depth + dense 2D landmark GT (512 SMPL-X verts)</li>
+        </ul>
+      </div>
+      <div>
+        <h4>SimpleCV logs today</h4>
+        <ul>
+          <li>All exo videos + calibrated pinhole rig (mm→m auto-normalization, K rescaling)</li>
+          <li>SMPL-X meshes for <b>all</b> people (per-person colors; eval uses v_template)</li>
+          <li>COCO-133 keypoints derived from SMPL-X forward — <b>person 0 only</b></li>
+          <li class="dim">Loader: <code>simplecv/data/exoego/mamma.py:147-381</code></li>
+        </ul>
+      </div>
+    </div>
+    <h4 style="margin-top:18px">Gaps &amp; fixes</h4>
+    <table class="gaps">
+      <thead><tr><th>Missing</th><th>Where it lives</th><th>How to fix</th><th>Effort</th></tr></thead>
+      <tbody>
+        <tr><td>Multi-person keypoints</td><td>Derivable for every person from the SMPL-X params we already load — blocked by <code>ExoEgoLabels.xyzc_stack</code> being single-skeleton (TODO at <code>base_exoego.py:68-72</code>)</td><td>Add a people axis (or per-person stacks) to <code>ExoEgoLabels</code>, log under <code>/world/gt/person_NN/coco133_xyz</code>. The dance (2p) and multi-people (3–6p) subsets currently show floating meshes with keypoints for one dancer.</td><td><span class="eff M">M</span></td></tr>
+        <tr><td>SAM masks (eval)</td><td><code>masks/&lt;cam&gt;_masks.tar</code>, not downloaded</td><td>Opt-in download; <code>SegmentationImage</code> per exo camera. Needs segmentation schema seam.</td><td><span class="eff M">M</span></td></tr>
+        <tr><td>Vicon m37 markers</td><td><code>markers/vicon_m37.npy</code> (eval_extra)</td><td>Log as <code>Points3D</code> under <code>/world/gt/markers</code> — direct visual check of MoSh GT quality.</td><td><span class="eff S">S</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+</article>
+
+<!-- ============ ASSEMBLY101 ============ -->
+<article class="ds" id="assembly101">
+  <header>
+    <h3>Assembly101</h3>
+    <span class="chip vp">EGO+EXO</span><span class="chip">CC BY-NC 4.0 (gated)</span><span class="chip">2022</span>
+    <span class="src">NUS / Meta · <a href="https://assembly-101.github.io/">project</a> · <a href="https://arxiv.org/abs/2203.14712">arXiv 2203.14712</a> · <a href="https://huggingface.co/datasets/cvml-nus/assembly101">HF (gated)</a></span>
+  </header>
+  <div class="ds-body">
+    <p class="srcline"><b>True source:</b> gated HuggingFace <code>cvml-nus/assembly101</code> (formerly Google Drive request form); assumed pre-downloaded to local disk (no pixi task). 4,321 videos / 513 h / 53 participants assembling 101 toy vehicles. Rig: 4 monochrome HMC ego cams + 8 static RGB exo cams. Intrinsics come from the AssemblyHands toolkit.</p>
+    <div class="ds-grid">
+      <div>
+        <h4>Original ships</h4>
+        <ul>
+          <li>12-view synchronized video</li>
+          <li>3D hand poses: 18M poses, 21 kpts/hand @60 fps, world mm (JSON)</li>
+          <li>2D hand poses per view + hand-object crop boxes</li>
+          <li><b>Coarse action segments</b>: 100K+, 202 classes (11 verbs × 69 objects)</li>
+          <li><b>Fine-grained segments</b>: ~1M, 1,380 classes (24 verbs × 90 objects)</li>
+          <li><b>Mistake labels</b> per coarse segment (correct/mistake/correction) + skill levels</li>
+          <li>Camera calibration for all 12 views</li>
+          <li>Offshoot: <b>AssemblyHands</b> — corrected 3D hand GT (4.2 mm error, 85% better than the original ego-tracker labels)</li>
+        </ul>
+      </div>
+      <div>
+        <h4>SimpleCV logs today</h4>
+        <ul>
+          <li>4 ego (Fisheye62) + 8 exo (pinhole) videos, static extrinsics</li>
+          <li>COCO-133 from 21×2 hand landmarks (mm→m) + reprojected 2D</li>
+          <li class="dim">Loader: <code>simplecv/data/exoego/assembly101.py</code>; 2D-keypoint schema classes exist but are commented out (<code>assembly101_exo.py:92-105</code>)</li>
+        </ul>
+      </div>
+    </div>
+    <h4 style="margin-top:18px">Gaps &amp; fixes</h4>
+    <table class="gaps">
+      <thead><tr><th>Missing</th><th>Where it lives</th><th>How to fix</th><th>Effort</th></tr></thead>
+      <tbody>
+        <tr><td>Action + mistake labels</td><td>Coarse/fine CSVs on the gated HF repo — the dataset's <em>defining</em> annotation (it's an action-understanding benchmark first, a hand dataset second)</td><td>Log timeline-ranged segments under <code>/world/gt/actions</code> (fine + coarse as separate entities; mistake flag as a component). Needs the actions schema seam.</td><td><span class="eff M">M</span></td></tr>
+        <tr><td>Better hand GT</td><td>AssemblyHands re-annotations (CC BY-NC)</td><td>Optional alternate label source in the config — the shipped 18M poses are known-noisy ego-tracker output.</td><td><span class="eff L">L</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+</article>
+
+<!-- ============ EGODEX ============ -->
+<article class="ds" id="egodex">
+  <header>
+    <h3>EgoDex</h3>
+    <span class="chip vp">EGO</span><span class="chip">CC BY-NC-ND</span><span class="chip">2025</span>
+    <span class="src">Apple · <a href="https://github.com/apple/ml-egodex">github</a> · <a href="https://arxiv.org/abs/2505.11709">arXiv 2505.11709</a></span>
+  </header>
+  <div class="ds-body">
+    <p class="srcline"><b>True source:</b> direct Apple CDN zips (<code>ml-site.cdn-apple.com/datasets/egodex/…</code>, no signup). 829 h / ~338K episodes / 194 tabletop tasks, Apple Vision Pro passthrough @1080p30 + ARKit. Loaded from local disk per episode (<code>&lt;split&gt;/&lt;task&gt;/&lt;i&gt;.mp4 + .hdf5</code>).</p>
+    <div class="ds-grid">
+      <div>
+        <h4>Original ships</h4>
+        <ul>
+          <li>RGB MP4 + HDF5 per episode</li>
+          <li><b>69 SE(3) transform streams</b>: camera + 68 body/hand joints, full 6DoF each (not just positions)</li>
+          <li>Per-joint confidences</li>
+          <li>Camera intrinsics (constant: fx=fy=736.63)</li>
+          <li><b>LLM task descriptions</b> in HDF5 attrs (<code>llm_description</code>, <code>llm_description2</code> for reversible tasks)</li>
+        </ul>
+      </div>
+      <div>
+        <h4>SimpleCV logs today</h4>
+        <ul>
+          <li>Re-encoded ego video, pinhole cam with per-frame ARKit extrinsics</li>
+          <li>COCO-133 from AVP-68 joint <em>positions</em> (orientations dropped) + confidences</li>
+          <li class="dim">Loader: <code>simplecv/data/exoego/ego_dex.py</code>; intrinsics hardcoded (HDF5 <code>camera</code> group commented out as unreliable)</li>
+        </ul>
+      </div>
+    </div>
+    <h4 style="margin-top:18px">Gaps &amp; fixes</h4>
+    <table class="gaps">
+      <thead><tr><th>Missing</th><th>Where it lives</th><th>How to fix</th><th>Effort</th></tr></thead>
+      <tbody>
+        <tr><td>Task language</td><td><code>llm_description</code>/<code>llm_description2</code> HDF5 attrs of the file we already open</td><td>Log once as static recording property / <code>AnyValues</code> on <code>/world/gt/task</code>. Two lines of loader code once the vocabulary exists.</td><td><span class="eff S">S</span></td></tr>
+        <tr><td>Joint orientations</td><td>The 4×4s we already read (we keep only <code>[:, :3, 3]</code>)</td><td>Only worth it for manipulation research; could log wrist/fingertip <code>Transform3D</code> axes. Skip by default.</td><td><span class="eff L">L</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+</article>
+
+<!-- ============ UMETRACK ============ -->
+<article class="ds" id="umetrack">
+  <header>
+    <h3>UmeTrack</h3>
+    <span class="chip vp">EGO</span><span class="chip">CC BY-NC 4.0</span><span class="chip">2022</span>
+    <span class="src">Meta Reality Labs · <a href="https://github.com/facebookresearch/UmeTrack">github (archived)</a> · <a href="https://arxiv.org/abs/2211.00099">arXiv 2211.00099</a></span>
+  </header>
+  <div class="ds-body">
+    <p class="srcline"><b>True source:</b> <code>facebookresearch/UmeTrack_data</code> git repo (<code>raw_data/</code>: MP4 + JSON per recording). 1,397 real + 1,397 synthetic sequences, 53 users, GT from 36-camera mocap. Rig: 4 wide-FOV mono fisheye headset cameras with per-frame device pose.</p>
+    <div class="ds-grid">
+      <div>
+        <h4>Original ships</h4>
+        <ul>
+          <li>4-view mono fisheye MP4 + JSON (calibration, hand model, labels)</li>
+          <li>Hand pose: per-user skeleton + 22 joint angles + wrist 6DoF (FK → keypoints)</li>
+          <li>Per-user hand mesh/scale (known-skeleton protocol)</li>
+          <li><b>38,003 pinch labels</b> across 192 pinch sequences</li>
+          <li>Real/synthetic, separate-hand/hand-hand, known/unknown-skeleton splits</li>
+        </ul>
+      </div>
+      <div>
+        <h4>SimpleCV logs today</h4>
+        <ul>
+          <li>4 fisheye streams with per-frame camera-to-world</li>
+          <li>COCO-133 from UmeTrack FK (mm→m), confidence-gated</li>
+          <li class="dim">Loader: <code>simplecv/data/exoego/umetrack.py:104-175</code>. No MANO exists for this dataset.</li>
+        </ul>
+      </div>
+    </div>
+    <h4 style="margin-top:18px">Gaps &amp; fixes</h4>
+    <table class="gaps">
+      <thead><tr><th>Missing</th><th>Where it lives</th><th>How to fix</th><th>Effort</th></tr></thead>
+      <tbody>
+        <tr><td>Pinch labels</td><td>Label files in UmeTrack_data (192 sequences)</td><td>Timeline-ranged events under <code>/world/gt/actions</code> once that seam exists. Niche value.</td><td><span class="eff M">M</span></td></tr>
+        <tr><td>Per-user hand mesh</td><td>Hand model in the recording JSON we already deserialize</td><td>Could log a skinned hand mesh like MANO; the UmeTrack FK code already runs. Nice-to-have.</td><td><span class="eff M">M</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+</article>
+
+<!-- ============ EGO100K ============ -->
+<article class="ds" id="ego100k">
+  <header>
+    <h3>Egocentric-100K</h3>
+    <span class="chip vp">EGO</span><span class="chip">Apache 2.0 (gated form)</span><span class="chip">2025</span>
+    <span class="src">Build AI · <a href="https://huggingface.co/datasets/builddotai/Egocentric-100K">HF</a></span>
+  </header>
+  <div class="ds-body">
+    <p class="srcline"><b>True source:</b> HF WebDataset streaming (<code>factoryNNN/workerNNN/*.tar</code>). 100,405 hours / 2M clips / ~14K factory workers, single head-mounted fisheye at 456×256 (the older Egocentric-10K ships 1080p). <b>Deliberately raw</b>: no paper, and nothing beyond pixels + intrinsics.</p>
+    <div class="ds-grid">
+      <div>
+        <h4>Original ships</h4>
+        <ul>
+          <li>H.265 video, 456×256 @30 fps</li>
+          <li>Per-worker <code>intrinsics.json</code> (fisheye k1–k4)</li>
+          <li>9-field per-video metadata JSON (ids, duration, codec)</li>
+          <li class="dim">No poses, depth, IMU, gaze, audio, or labels of any kind</li>
+        </ul>
+      </div>
+      <div>
+        <h4>SimpleCV logs today</h4>
+        <ul>
+          <li>First clip of one worker, streamed to a temp MP4; fisheye cam at identity pose</li>
+          <li>NaN COCO-133 placeholder labels (viewer compatibility)</li>
+          <li class="dim">Loader: <code>simplecv/data/exoego/ego100k.py</code></li>
+        </ul>
+      </div>
+    </div>
+    <h4 style="margin-top:18px">Gaps &amp; fixes</h4>
+    <table class="gaps">
+      <thead><tr><th>Missing</th><th>Where it lives</th><th>How to fix</th><th>Effort</th></tr></thead>
+      <tbody>
+        <tr><td>Nothing upstream to add</td><td>—</td><td>Coverage is complete relative to what the dataset ships. Any labels here would be <em>derived</em> (WiLoR hands, VIO) → belongs under the reserved <code>/world/pred</code> namespace, not GT. Worth logging factory/worker ids as recording properties.</td><td><span class="eff S">S</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+</article>
+
+<!-- ============ ROBOCAP ============ -->
+<article class="ds" id="robocap">
+  <header>
+    <h3>Robocap</h3>
+    <span class="chip vp">EGO</span><span class="chip">private preview</span><span class="chip">2026</span>
+    <span class="src">FrodoBots · HF <code>pablovela5620/robocap-example</code></span>
+  </header>
+  <div class="ds-body">
+    <p class="srcline"><b>True source:</b> internal example on HF. 6-camera rigid fisheye rig (left/right front, left/right eye, left, right) with Kalibr <code>camchain-imucam</code> YAML calibration (Kannala-Brandt, <code>T_cam_imu</code>). Raw sensor recording — no labels exist upstream.</p>
+    <div class="ds-grid">
+      <div>
+        <h4>Original ships</h4>
+        <ul>
+          <li>6 synchronized fisheye videos</li>
+          <li>Kalibr calibration incl. camera↔IMU extrinsics</li>
+          <li>IMU stream (present in captures, unparsed)</li>
+        </ul>
+      </div>
+      <div>
+        <h4>SimpleCV logs today</h4>
+        <ul>
+          <li>6 videos + Fisheye62 calibration, collapsed to one rig — but <b>static</b> (no trajectory)</li>
+          <li>NaN COCO-133 placeholders</li>
+          <li class="dim">Loader: <code>simplecv/data/exoego/robocap.py</code></li>
+        </ul>
+      </div>
+    </div>
+    <h4 style="margin-top:18px">Gaps &amp; fixes</h4>
+    <table class="gaps">
+      <thead><tr><th>Missing</th><th>Where it lives</th><th>How to fix</th><th>Effort</th></tr></thead>
+      <tbody>
+        <tr><td>IMU</td><td>In the capture; extrinsics already parsed from Kalibr YAML</td><td>Natural first consumer of the reserved <code>/world/rig_NN/imu_MM</code> paths.</td><td><span class="eff M">M</span></td></tr>
+        <tr><td>Ego trajectory</td><td>Doesn't exist — needs VIO/SLAM (PyCuVSLAM etc., per roadmap notes)</td><td>Derived output → log under <code>/world/pred</code>, keeping GT/pred separation honest.</td><td><span class="eff L">L</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+</article>
+</section>
+
+<!-- ============ SCHEMA ============ -->
+<section id="schema">
+  <h2>Schema fixes — what <code>exoego:v2</code> needs to grow</h2>
+  <p class="lead">The framework (<code>base_exoego.py</code>, <code>rerun_rig_logger.py</code>, <code>docs/exoego_schema.md</code>) handles cameras, video, depth, COCO-133, MANO, SMPL-X, and environment meshes well. Everything in the red/amber columns above is blocked on missing <em>vocabulary</em> — there is no entity path or label container for objects, segmentation, gaze, actions, or multi-person keypoints. Proposed additions in green:</p>
+
+  <div class="tree-cols">
+    <figure style="margin:0">
+      <pre><code>/                          <span class="cmt">ViewCoordinates (static)</span>
+/world
+  /rig_00 … /rig_(E-1)     <span class="cmt">exo rigs (static)</span>
+    /cam_MM
+      /pinhole/video       <span class="cmt">VideoStream</span>
+      /pinhole/coco133_uv  <span class="cmt">Points2DWithConfidence</span>
+      /pinhole/depth       <span class="cmt">DepthImage (uint16 mm)</span>
+  /rig_E                   <span class="cmt">ego rig (moving)</span>
+    /cam_00 … /cam_NN
+    /imu_00, /imu_01       <span class="cmt">reserved, never emitted</span>
+  /gt
+    /coco133_xyz           <span class="cmt">Points3D + confidence (1 person!)</span>
+    /mano/{right,left}/mesh
+    /smplx/person_NN/mesh
+    /env_mesh
+  /pred                    <span class="cmt">reserved, never emitted</span></code></pre>
+      <figcaption>Current exoego:v2 (docs/exoego_schema.md)</figcaption>
+    </figure>
+    <figure style="margin:0">
+      <pre><code>/world
+  /rig_NN/cam_MM
+    /pinhole/…
+    <span class="add">/pinhole/segmentation    SegmentationImage / RLE masks</span>
+                             <span class="cmt add">HOCap, MAMMA eval, A2PD HOI</span>
+  /rig_E                     <span class="cmt">ego rig</span>
+    <span class="add">/gaze                    gaze ray (+ vergence point)</span>
+                             <span class="cmt add">HOT3D, EPFL, A2PD</span>
+    <span class="add">/imu_MM                  emit gyro/accel Scalars</span>
+                             <span class="cmt add">HOT3D, A2PD, Robocap</span>
+  <span class="add">/points                    static Points3D scene cloud</span>
+                             <span class="cmt add">HOT3D, A2PD semi-dense MPS</span>
+  /gt
+    <span class="add">/person_NN/coco133_xyz   multi-person keypoints</span>
+                             <span class="cmt add">MAMMA (2–6 people); TODO base_exoego.py:68</span>
+    <span class="add">/objects/&lt;name&gt;          Asset3D/Mesh3D + Transform3D(t)</span>
+                             <span class="cmt add">HOCap (64), HOT3D (33), A2PD boxes</span>
+    <span class="add">/actions                 timeline-ranged verb–noun / task text</span>
+                             <span class="cmt add">Assembly101, EPFL, EgoDex lang, A2PD ASR</span>
+    <span class="add">/markers                 Points3D mocap markers</span>
+                             <span class="cmt add">MAMMA m37 eval</span></code></pre>
+      <figcaption>Proposed extensions (additions in green)</figcaption>
+    </figure>
+  </div>
+
+  <h3>Label-container changes (Python side)</h3>
+  <ul>
+    <li><b><code>ObjectStack</code></b> on <code>ExoEgoLabels</code>: <code>names: list[str]</code>, <code>world_T_obj: Float32[ndarray, "n_frames n_objs 4 4"]</code>, optional mesh paths / <code>Asset3D</code> blobs, optional per-frame validity. Mirrors how <code>ManoStack</code>/<code>SmplxStack</code> already work — one stack per label family, batch-logged columnar.</li>
+    <li><b>People axis</b> for <code>xyzc_stack</code> (<code>"n_frames n_people 133 4"</code>) or a <code>list[…]</code> per person — the TODO already written at <code>base_exoego.py:68-72</code>. MAMMA is the forcing function.</li>
+    <li><b><code>GazeStack</code></b>: origin + direction (+ optional vergence depth, pupil, blink), timestamps on its own timeline.</li>
+    <li><b><code>ActionSegments</code></b>: <code>starts_ns, ends_ns, verb, noun, text, flags</code> — logged as ranged rows so the viewer timeline shows segment bands.</li>
+    <li><b>Depth for EPFL needs no schema work at all</b> — populate the existing <code>exo_depth_list</code> from <code>videos_depth/</code>.</li>
+  </ul>
+
+  <details>
+    <summary>Documentation debt (exoego_schema.md + the simplecv.datasets catalog page)</summary>
+    <div class="inner">
+      <ul>
+        <li><code>docs/exoego_schema.md</code> documents cameras/video/keypoints/MANO/SMPL-X/IMU-reserved, but has <b>no sections for objects, segmentation, gaze, point clouds, or actions</b> — add them as the vocabulary lands, with the same validation-rule rigor as the rig sections.</li>
+        <li>The tailnet catalog page (<code>simplecv-datasets/</code>, built from commit <code>4c3757a</code>, 2026-06-25) still describes the <b>deprecated v1 flat layout</b> (<code>/world/ego</code>, <code>/world/exo</code>) in its schema panel, and lists MAMMA as a "research candidate" although it landed as a registered exoego dataset in PR #61. Its HOCap entry also claims <code>object_pose</code> is a logged modality — aspirational, not true yet.</li>
+        <li>The v1 <code>RRDSequence</code> reader can't read v2 rig-layout output; worth a deprecation note wherever v1 register tasks are documented.</li>
+      </ul>
+    </div>
+  </details>
+</section>
+
+<!-- ============ PRIORITIES ============ -->
+<section id="priorities">
+  <h2>Suggested order of attack</h2>
+  <p class="lead">Ranked by user-visible value per unit of work. Items 1–3 need zero new downloads — the bytes are already on disk.</p>
+  <ol class="prio">
+    <li><b>HOCap object poses <span class="eff S">S</span></b>
+      <p>Read <code>obj_poses</code>/<code>obj_class_names</code> from the NPZs the loader already opens, add <code>ObjectStack</code>, log transforms under <code>/world/gt/objects</code>. Even boxes-without-meshes immediately shows what the hands are interacting with. Follow up with the mesh mirror.</p></li>
+    <li><b>EPFL depth <span class="eff S">S</span></b>
+      <p>Wire <code>videos_depth/</code> into the existing <code>exo_depth_list</code>/<code>DepthImage</code> path. Pure plumbing; HOCap is the working template.</p></li>
+    <li><b>EPFL + HOT3D eye gaze <span class="eff S">S</span></b>
+      <p>EPFL gaze is in a CSV we already parse; HOT3D gaze is in a directory we already download. One small <code>GazeStack</code> + a ray entity under the ego rig covers both, and generalizes to Aria Gen2.</p></li>
+    <li><b>HOT3D objects + assets <span class="eff M">M</span></b>
+      <p>Parse the object pose GT already in the download, add HOT3D Assets (33 UV-textured GLBs) to the fetch list, log <code>Asset3D</code> + pose streams. This turns HOT3D from a hand demo into the hand-<em>and-object</em> dataset it actually is.</p></li>
+    <li><b>Multi-person keypoints <span class="eff M">M</span></b>
+      <p>Lift the single-skeleton limit on <code>ExoEgoLabels</code> (existing TODO). MAMMA dance/multi-people is the test case; the SMPL-X forward pass for all people already runs.</p></li>
+    <li><b>Segmentation seam <span class="eff M">M</span></b>
+      <p>One schema addition (<code>…/pinhole/segmentation</code>) unlocks HOCap SAM2 masks, MAMMA eval SAM masks, and Aria Gen2 HOI masks.</p></li>
+    <li><b>Actions/language seam <span class="eff M">M</span></b>
+      <p><code>/world/gt/actions</code> ranged segments + a static task-description property. Unlocks Assembly101's defining labels, EPFL's 60K verb–noun segments, EgoDex's LLM descriptions, and A2PD transcripts.</p></li>
+    <li><b>Aria Gen2 skipped components <span class="eff L">L</span></b>
+      <p>Flip on the skipped downloads one at a time (points → depth → scene boxes → HOI masks → diarization/heart-rate) as each schema seam above lands. A2PD then becomes the showcase recording for the full schema.</p></li>
+    <li><b>IMU emission <span class="eff M">M</span></b>
+      <p>The paths are reserved; emit gyro/accel for Robocap (calibration already parsed) and Aria/HOT3D VRS streams.</p></li>
+  </ol>
+</section>
+
+<footer style="margin-top:60px; padding-top:16px; border-top:1px solid var(--line); color:var(--text-faint); font-size:12.5px;">
+  Compiled from: simplecv loader source (worktree <code>admiring-tiger</code>), root <code>pixi.toml</code> download tasks, <code>docs/exoego_schema.md</code>, the tailnet <code>simplecv.datasets</code> catalog page, and official dataset pages/papers (links inline). Effort chips: S ≈ a loader-only change, M ≈ loader + schema/vocabulary work, L ≈ new pipeline or large downloads.
+</footer>
+
+</main>
+</body>
+</html>
