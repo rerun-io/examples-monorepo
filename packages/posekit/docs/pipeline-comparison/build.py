@@ -1,161 +1,104 @@
 #!/usr/bin/env python3
-"""Build pipeline-comparison.html from the workflow result JSON + cropped figures.
+"""Build ``pipeline-comparison.html`` from the survey JSON and cropped paper figures.
 
-v2 layout: visual-first — universal DAG as the TL;DR, chip matrix, headline
-commonalities, tight paper cards with posekit rebuild one-liners, prose collapsed.
+Inputs (all relative to this directory):
+
+- ``json/result.json`` — the original multi-agent survey output: paper records, the
+  taxonomy (canonical stages, stage x paper matrix, commonalities/divergences), and
+  the inventory/proposal markdown appendices.
+- ``json/new-paper*.json`` — papers added after the original workflow. Each carries
+  its own ``matrix_cells`` and ``rebuild`` fields (see README for the add-a-paper protocol).
+- ``figures/<paper_id>.png`` — cropped pipeline figure per paper, embedded as base64.
+
+Output: ``pipeline-comparison.html`` next to this script — fully self-contained except
+the ``marked`` CDN script that renders the two markdown appendices client-side.
+
+Requires Graphviz ``dot`` on PATH. Run as ``python build.py``.
 """
+
 import base64
 import html
 import json
 import re
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-ROOT = Path(__file__).resolve().parent
+JsonDict = dict[str, Any]
+"""A decoded JSON object (paper record, taxonomy entry, DAG node/edge, ...)."""
 
-ROLE_STYLE = {
-    "detect":         ("#1f4230", "#4da884"),
-    "track":          ("#173f42", "#4fa8ae"),
-    "segment":        ("#173f42", "#4fa8ae"),
-    "identity":       ("#3a2a4d", "#a583d1"),
-    "crop/rewarp":    ("#2e3440", "#8a94a8"),
-    "pose2d":         ("#1e3a5c", "#6ba3e8"),
-    "dense-landmarks":("#1e3a5c", "#6ba3e8"),
-    "lift3d":         ("#312a55", "#8f7fe8"),
-    "triangulate":    ("#312a55", "#8f7fe8"),
-    "calibrate":      ("#4d3a14", "#d1a94f"),
-    "fit-model":      ("#4d2d14", "#e8914f"),
-    "optimize":       ("#4d2d14", "#e8914f"),
-    "render-verify":  ("#4d1f2e", "#e86a8f"),
-    "temporal":       ("#3d3d29", "#b8b86a"),
-    "other":          ("#26292f", "#6a7180"),
+ROOT: Path = Path(__file__).resolve().parent
+"""Directory holding this script, the JSON inputs, the figures, and the output."""
+
+ROLE_STYLE: dict[str, tuple[str, str]] = {
+    "detect": ("#1f4230", "#4da884"),
+    "track": ("#173f42", "#4fa8ae"),
+    "segment": ("#173f42", "#4fa8ae"),
+    "identity": ("#3a2a4d", "#a583d1"),
+    "crop/rewarp": ("#2e3440", "#8a94a8"),
+    "pose2d": ("#1e3a5c", "#6ba3e8"),
+    "dense-landmarks": ("#1e3a5c", "#6ba3e8"),
+    "lift3d": ("#312a55", "#8f7fe8"),
+    "triangulate": ("#312a55", "#8f7fe8"),
+    "calibrate": ("#4d3a14", "#d1a94f"),
+    "fit-model": ("#4d2d14", "#e8914f"),
+    "optimize": ("#4d2d14", "#e8914f"),
+    "render-verify": ("#4d1f2e", "#e86a8f"),
+    "temporal": ("#3d3d29", "#b8b86a"),
+    "other": ("#26292f", "#6a7180"),
 }
-LEGEND_ROLES = [
-    ("detect", "detect"), ("track", "track / segment"), ("identity", "identity"),
-    ("crop/rewarp", "crop / rewarp"), ("pose2d", "2D estimation"),
-    ("triangulate", "lift / triangulate"), ("calibrate", "calibrate"),
-    ("fit-model", "fit / optimize"), ("render-verify", "render-verify"),
-    ("temporal", "temporal"), ("other", "data / io"),
+"""``(fill, border)`` hex colors per pipeline role — the one color code used by every diagram."""
+
+LEGEND_ROLES: list[tuple[str, str]] = [
+    ("detect", "detect"),
+    ("track", "track / segment"),
+    ("identity", "identity"),
+    ("crop/rewarp", "crop / rewarp"),
+    ("pose2d", "2D estimation"),
+    ("triangulate", "lift / triangulate"),
+    ("calibrate", "calibrate"),
+    ("fit-model", "fit / optimize"),
+    ("render-verify", "render-verify"),
+    ("temporal", "temporal"),
+    ("other", "data / io"),
 ]
+"""``(ROLE_STYLE key, display label)`` legend entries, collapsing synonym roles into one swatch."""
 
+PAPER_ORDER: list[str] = [
+    "megatrack",
+    "umetrack",
+    "kineo",
+    "epfl-smart-kitchen",
+    "assemblyhands",
+    "assemblyx",
+    "mamma",
+    "egoexo-hands",
+    "show3d",
+    "hocap",
+    "lookma",
+]
+"""Curated card/matrix order; papers missing from this list sort to the end."""
 
-def dlbl(s: str, n: int = 16) -> str:
-    s = (s or "").replace("\\", "").replace('"', r'\"')
-    words, out, line = s.split(), [], ""
-    for w in words:
-        if len(line) + len(w) + 1 > n and line:
-            out.append(line); line = w
-        else:
-            line = (line + " " + w).strip()
-    if line:
-        out.append(line)
-    return r"\n".join(out)
+COUNT_WORDS: dict[int, str] = {9: "nine", 10: "ten", 11: "eleven", 12: "twelve", 13: "thirteen"}
+"""Spelled-out paper counts for the prose headings; unknown counts fall back to digits."""
 
-
-def _feedback_edges(nodes, edges):
-    """Back edges via DFS (edge into a node on the current stack = feedback loop).
-    List-order heuristics misclassify dependency edges like calib->lift."""
-    adj = {}
-    for e in edges:
-        adj.setdefault(e["from"], []).append(e["to"])
-    ids = [n["id"] for n in nodes]
-    color = dict.fromkeys(ids, 0)  # 0 white, 1 gray, 2 black
-    back = set()
-
-    def dfs(u):
-        color[u] = 1
-        for v in adj.get(u, []):
-            if v not in color:
-                continue
-            if color[v] == 1:
-                back.add((u, v))
-            elif color[v] == 0:
-                dfs(v)
-        color[u] = 2
-
-    for nid in ids:
-        if color[nid] == 0:
-            dfs(nid)
-    return back
-
-
-def dag_svg(nodes, edges, prefix):
-    def sid(x):
-        return re.sub(r"\W", "_", x)
-
-    L = ['digraph G { rankdir=LR; bgcolor="transparent"; ranksep=0.35; nodesep=0.3;']
-    L.append('node [shape=box style="rounded,filled" fontname="Helvetica,Arial,sans-serif" '
-             'fontsize=11 fontcolor="#eceef2" penwidth=1.2 margin="0.14,0.09"];')
-    L.append('edge [fontname="Helvetica,Arial,sans-serif" fontsize=9 fontcolor="#9aa3b5" '
-             'color="#5f6a80" arrowsize=0.7 penwidth=1.1];')
-    ids = {n["id"] for n in nodes}
-    back = _feedback_edges(nodes, edges)
-    for n in nodes:
-        fill, border = ROLE_STYLE.get(n.get("role", "other"), ROLE_STYLE["other"])
-        L.append(f'"{sid(n["id"])}" [label="{dlbl(n["label"])}" fillcolor="{fill}" color="{border}"];')
-    for e in edges:
-        if e["from"] not in ids or e["to"] not in ids:
-            continue
-        fb = (e["from"], e["to"]) in back
-        style = (' style=dashed constraint=false color="#8a8a5a" fontcolor="#b0b070"' if fb else "")
-        L.append(f'"{sid(e["from"])}" -> "{sid(e["to"])}" [label="{dlbl(e.get("label", ""), 20)}"{style}];')
-    L.append("}")
-    svg = subprocess.run(["dot", "-Tsvg"], input="\n".join(L).encode(),
-                         capture_output=True, check=True).stdout.decode()
-    svg = svg[svg.index("<svg"):]
-    m = re.search(r'viewBox="0(?:\.00)? 0(?:\.00)? ([0-9.]+) ([0-9.]+)"', svg)
-    natural_w = float(m.group(1)) * 1.333 if m else 0.0
-    # keep intrinsic width/height — the natural-size toggle relies on them
-    svg = re.sub(r"<svg ", '<svg class="dag" ', svg, count=1)
-    svg = svg.replace('id="', f'id="{sid(prefix)}-')
-    return svg, natural_w
-
-
-def dag_block(nodes, edges, prefix) -> str:
-    svg, _ = dag_svg(nodes, edges, prefix)
-    return f'<div class="dag-wrap" title="Click to view fullscreen">{svg}</div>'
-
-
-def legend_html() -> str:
-    sw = "".join(
-        f'<span class="lg"><i style="background:{ROLE_STYLE[r][0]};border-color:{ROLE_STYLE[r][1]}"></i>{label}</span>'
-        for r, label in LEGEND_ROLES)
-    return f'<div class="legend">{sw}<span class="lg"><i class="dash"></i>feedback edge</span></div>'
-
-
-data = json.load(open(ROOT / "json/result.json"))
-papers = data["papers"]
-tax = data["taxonomy"]
-
-# papers added after the original 9-paper workflow (carry their own matrix_cells + rebuild)
-for extra_path in sorted((ROOT / "json").glob("new-paper*.json")):
-    extra = json.loads(extra_path.read_text())
-    if extra["id"] not in {p["id"] for p in papers}:
-        papers.append(extra)
-
-
-def trim_preamble(md: str) -> str:
-    i = md.find("# ")
-    return md[i:] if i > 0 else md
-
-
-inventory_md = trim_preamble(data["inventory"])
-proposal_md = trim_preamble(data["proposal"])
-
-PAPER_ORDER = ["megatrack", "umetrack", "kineo", "epfl-smart-kitchen", "assemblyhands",
-               "assemblyx", "mamma", "egoexo-hands", "show3d", "hocap", "lookma"]
-papers.sort(key=lambda p: PAPER_ORDER.index(p["id"]) if p["id"] in PAPER_ORDER else len(PAPER_ORDER))
-N_WORD = {9: "nine", 10: "ten", 11: "eleven", 12: "twelve", 13: "thirteen"}
-n_papers = len(papers)
-n_word = N_WORD.get(n_papers, str(n_papers))
-
-SHORT = {
-    "megatrack": "MEgATrack", "umetrack": "UmeTrack", "kineo": "Kineo",
-    "epfl-smart-kitchen": "EPFL Smart Kitchen", "assemblyhands": "AssemblyHands",
-    "assemblyx": "AssemblyHands-X", "mamma": "MAMMA", "egoexo-hands": "EgoExo-Hands",
-    "hocap": "HO-Cap", "lookma": "Look Ma, No Markers", "show3d": "SHOW3D",
+SHORT_NAMES: dict[str, str] = {
+    "megatrack": "MEgATrack",
+    "umetrack": "UmeTrack",
+    "kineo": "Kineo",
+    "epfl-smart-kitchen": "EPFL Smart Kitchen",
+    "assemblyhands": "AssemblyHands",
+    "assemblyx": "AssemblyHands-X",
+    "mamma": "MAMMA",
+    "egoexo-hands": "EgoExo-Hands",
+    "hocap": "HO-Cap",
+    "lookma": "Look Ma, No Markers",
+    "show3d": "SHOW3D",
 }
-LINKS = {
+"""Display name per paper id; papers absent here fall back to the record's ``name`` field."""
+
+PAPER_LINKS: dict[str, list[tuple[str, str]]] = {
     "megatrack": [("paper", "https://research.facebook.com/file/977630383019036/MEgATrack-Monochrome-Egocentric-Articulated-Hand-Tracking-for-Virtual-Reality.pdf")],
     "umetrack": [("arXiv 2211.00099", "https://arxiv.org/abs/2211.00099"), ("code", "https://github.com/facebookresearch/UmeTrack")],
     "kineo": [("arXiv 2510.24464", "https://arxiv.org/abs/2510.24464"), ("code", "https://github.com/liris-xr/kineo")],
@@ -168,18 +111,22 @@ LINKS = {
     "lookma": [("arXiv 2410.11520", "https://arxiv.org/abs/2410.11520"), ("SIGGRAPH Asia 2024 · Microsoft", "")],
     "show3d": [("arXiv 2603.28760", "https://arxiv.org/abs/2603.28760"), ("follow-up to EgoExo-Hands ↑", "#egoexo-hands")],
 }
-FIG_NOTE = {
+"""``(label, url)`` header links per paper; an empty url renders as plain text."""
+
+FIGURE_NOTES: dict[str, str] = {
     "mamma": "No end-to-end pipeline figure exists in the paper; shown is Fig. 4 (MammaNet, the dense-landmark node). The full pipeline is the DAG below.",
 }
-KIND_LABEL = {
+"""Caveats rendered under a paper's figure when the figure is not the full pipeline."""
+
+KIND_LABELS: dict[str, str] = {
     "realtime-tracking": "realtime tracking",
     "offline-annotation": "offline annotation",
     "offline-capture": "offline capture",
     "hybrid": "hybrid",
 }
+"""Display label per paper ``kind``; unknown kinds render verbatim."""
 
-# posekit rebuild one-liners, condensed from proposal §3
-REBUILD = {
+POSEKIT_REBUILDS: dict[str, str] = {
     "megatrack": 'PersonDetector(DetNet) → ops.crops[square+pad, R-mirror, +kpt channel] → TopDownPose2d(KeyNet: 2D + 1D rel-dist heatmaps) → glue[4-view reproj energy] → glue[fit: 26-DOF template LM + per-user scale φ] ⟳ glue[pose extrapolation → boxes + KeyNet input]',
     "umetrack": '(ROI from loop) → ops.crops[fisheye→virtual-pinhole ✦] → TopDownFeatureEncoder2d(ResNet) ✦ → glue[FTL + learnable multi-view fusion] → glue[Regressor-U scale] → glue[Regressor-K + SVD root + FK/LBS] ⟳ glue[RNN state + tracked pose → ROI]',
     "kineo": 'PersonDetector-via-pose-adapter (identity assumed; SAM2 re-ID only as optional multi-person pre-pass) → ops.crops[undistort images+kpts ✦] → TopDownPose2d(NLF / RTMPose / DWPose — swappable) → glue[weighted DLT] → glue[calibrate: essential graph → MST → 3-pass BA → metric scale] ⟳ glue[audio sync]',
@@ -190,9 +137,9 @@ REBUILD = {
     "egoexo-hands": 'PersonDetector-via-TopDownPose2d-adapter(Sapiens-308) → ops.crops[fisheye→virtual-pinhole 256² ✦] → TopDownPose2d(Sapiens-42 ∥ InterNet — dual) → glue[RANSAC triangulation] → glue[calibrate: per-user LBS template] → glue[fit: IK] → glue[verify: overlay]',
     "hocap": 'VideoSegmenter(SAM2) + [external FoundationPose object branch] → TopDownPose2d(MediaPipe — no conf) → glue[triangulate-all-pairs, conf manufactured from reproj error, spline gap-fill] → glue[fit: MANO, then joint hand-object SDF] → glue[verify: render-to-views] ⟳ glue[object reproj → next-frame init]',
 }
+"""Pipeline-as-posekit one-liners condensed from proposal §3, overriding a paper's own ``rebuild``."""
 
-# headline compressions of taxonomy.commonalities / .divergences (full text in collapsibles)
-COMMON_HEADLINES = [
+COMMON_HEADLINES: list[tuple[str, str]] = [
     ("One boundary datatype", "(x, y, confidence) per (view, frame, instance) in a named skeleton + a camera model — shared by all; only HO-Cap's MediaPipe lacks the confidence channel."),
     ("Confidence-weighted everything", "gating, triangulation, BA and robust fits all consume it; HO-Cap, whose 2D net supplies none, selects triangulation candidates by reprojection error instead."),
     ("Crops are the currency", "the 2D net always sees a canonicalized instance-centered view; 5/11 need fisheye→virtual-pinhole rewarp."),
@@ -202,7 +149,9 @@ COMMON_HEADLINES = [
     ("The localizer is an interface", "satisfied by a box net, a segmenter, a pose-net-as-detector, or the tracking loop itself."),
     ("Geometry glue never generalizes", "every paper hand-rolls its own triangulation / association / BA / fitting — the networks are the reusable part."),
 ]
-DIVERGE_HEADLINES = [
+"""``(headline, elaboration)`` compressions of ``taxonomy.commonalities`` (full text stays in a collapsible)."""
+
+DIVERGE_HEADLINES: list[tuple[str, str]] = [
     ("Learned vs classical 3D fusion", "UmeTrack and MVExoNet learn the lift from features; the rest use DLT/RANSAC; MEgATrack skips lift entirely (fit-only)."),
     ("Sparse joints vs dense landmarks", "MAMMA's 512 surface points with per-point uncertainty vs everyone else's 21/42/COCO skeletons — changes the fit contract."),
     ("Masks: inputs vs targets vs absent", "MAMMA/HO-Cap feed masks into the model; AssemblyX uses them only as a silhouette loss; the rest use none."),
@@ -214,49 +163,37 @@ DIVERGE_HEADLINES = [
     ("Multi-modal vs pure RGB", "EPFL/HO-Cap/EgoExo-Hands fuse depth, ego streams or mocap; the others are RGB (+ masks) only."),
     ("Hand-object coupling", "only HO-Cap jointly optimizes hand + object 6DoF with an interpenetration SDF."),
 ]
+"""``(headline, elaboration)`` compressions of ``taxonomy.divergences`` (full text stays in a collapsible)."""
 
-STAGE_ROLE = {
-    "capture": "other", "detect": "detect", "identity": "identity", "crop": "crop/rewarp",
-    "pose2d": "pose2d", "lift3d": "triangulate", "calibrate": "calibrate",
-    "fit": "fit-model", "verify": "render-verify", "feedback": "temporal",
+STAGE_ROLE: dict[str, str] = {
+    "capture": "other",
+    "detect": "detect",
+    "identity": "identity",
+    "crop": "crop/rewarp",
+    "pose2d": "pose2d",
+    "lift3d": "triangulate",
+    "calibrate": "calibrate",
+    "fit": "fit-model",
+    "verify": "render-verify",
+    "feedback": "temporal",
 }
-STAGE_SHORT = {
-    "capture": "capture", "detect": "detect / segment", "identity": "identity",
-    "crop": "crop / rewarp", "pose2d": "2D estimation", "lift3d": "lift / triangulate",
-    "calibrate": "calibrate", "fit": "parametric fit", "verify": "verify", "feedback": "temporal",
+"""``ROLE_STYLE`` key per canonical stage id — colors the matrix column underlines."""
+
+STAGE_SHORT: dict[str, str] = {
+    "capture": "capture",
+    "detect": "detect / segment",
+    "identity": "identity",
+    "crop": "crop / rewarp",
+    "pose2d": "2D estimation",
+    "lift3d": "lift / triangulate",
+    "calibrate": "calibrate",
+    "fit": "parametric fit",
+    "verify": "verify",
+    "feedback": "temporal",
 }
+"""Compact matrix column header per canonical stage id."""
 
-
-def b64img(pid: str) -> str:
-    p = ROOT / "figures" / f"{pid}.png"
-    return "data:image/png;base64," + base64.b64encode(p.read_bytes()).decode()
-
-
-def esc(s: str) -> str:
-    return html.escape(s or "", quote=True)
-
-
-_ABBREV = ["Fig.", "Figs.", "Sec.", "Eq.", "et al.", "e.g.", "i.e.", "vs.", "approx."]
-
-
-def sentences(s: str, n: int) -> str:
-    s = s or ""
-    for a in _ABBREV:
-        s = s.replace(a, a.replace(".", "\x00"))
-    parts = re.split(r"(?<=[.!?]) +", s)
-    return " ".join(parts[:n]).replace("\x00", ".")
-
-
-def caption_short(s: str) -> str:
-    s = re.sub(r"^\s*Fig(?:ure)?\.?\s*\d+[.:]?\s*", "", s or "")
-    out = sentences(s, 1)
-    if len(out) < 30:  # degenerate lead like "Hand-tracking pipeline." — include the next sentence
-        out = sentences(s, 2)
-    return out
-
-
-# ---------- universal DAG ----------
-UNIVERSAL_NODES = [
+UNIVERSAL_NODES: list[dict[str, str]] = [
     {"id": "capture", "label": "capture / calibration", "role": "other"},
     {"id": "detect", "label": "detect / segment / localize", "role": "detect"},
     {"id": "identity", "label": "cross-view + temporal identity", "role": "identity"},
@@ -267,7 +204,9 @@ UNIVERSAL_NODES = [
     {"id": "fit", "label": "parametric fit (MANO / SMPL-X / template)", "role": "fit-model"},
     {"id": "verify", "label": "render-back verify", "role": "render-verify"},
 ]
-UNIVERSAL_EDGES = [
+"""Nodes of the hero "every pipeline is this DAG" diagram."""
+
+UNIVERSAL_EDGES: list[dict[str, str]] = [
     {"from": "capture", "to": "detect", "label": "synced views + camera model"},
     {"from": "detect", "to": "identity", "label": "boxes / masks (+track ids)"},
     {"from": "identity", "to": "crop", "label": "per-instance ROI"},
@@ -281,109 +220,399 @@ UNIVERSAL_EDGES = [
     {"from": "fit", "to": "detect", "label": "pose t-1 extrapolation (realtime)"},
     {"from": "fit", "to": "pose2d", "label": "kpt-feature augmentation"},
 ]
+"""Edges of the hero DAG; the fit→detect / fit→pose2d / verify→fit edges render as feedback."""
 
-# ---------- paper cards ----------
-cards = []
-for i, p in enumerate(papers, 1):
-    pid = p["id"]
-    links = " · ".join(
-        f'<a href="{esc(u)}">{esc(t)}</a>' if u else f"<span>{esc(t)}</span>"
-        for t, u in LINKS.get(pid, [])
+ABBREVIATIONS: list[str] = ["Fig.", "Figs.", "Sec.", "Eq.", "et al.", "e.g.", "i.e.", "vs.", "approx."]
+"""Dot-terminated tokens that must not end a sentence when splitting prose."""
+
+
+@dataclass(slots=True)
+class SurveyData:
+    """Everything the page renders, loaded and normalized from the JSON inputs."""
+
+    papers: list[JsonDict]
+    """All paper records (original survey + ``new-paper*.json`` additions), in ``PAPER_ORDER``."""
+    taxonomy: JsonDict
+    """Canonical stages, the stage x paper matrix, and the commonality/divergence analyses."""
+    inventory_md: str
+    """posekit inventory markdown appendix (workflow preamble trimmed)."""
+    proposal_md: str
+    """Abstraction proposal markdown appendix (workflow preamble trimmed)."""
+
+
+def load_survey() -> SurveyData:
+    """Load ``result.json``, merge ``new-paper*.json`` additions, and order the papers.
+
+    Returns:
+        The normalized survey data, papers sorted by ``PAPER_ORDER``.
+    """
+    data: JsonDict = json.loads((ROOT / "json/result.json").read_text())
+    papers: list[JsonDict] = data["papers"]
+    known_ids: set[str] = {paper["id"] for paper in papers}
+    for extra_path in sorted((ROOT / "json").glob("new-paper*.json")):
+        extra: JsonDict = json.loads(extra_path.read_text())
+        if extra["id"] not in known_ids:
+            papers.append(extra)
+            known_ids.add(extra["id"])
+    papers.sort(key=lambda paper: PAPER_ORDER.index(paper["id"]) if paper["id"] in PAPER_ORDER else len(PAPER_ORDER))
+    return SurveyData(
+        papers=papers,
+        taxonomy=data["taxonomy"],
+        inventory_md=trim_preamble(data["inventory"]),
+        proposal_md=trim_preamble(data["proposal"]),
     )
-    nodes_rows = "".join(
-        f'<tr><td>{esc(n["label"])}</td><td class="mono">{esc(n["role"])}</td>'
-        f'<td>{esc(n.get("models", ""))}</td><td class="dim">{esc(n.get("desc", ""))}</td></tr>'
-        for n in p["nodes"]
+
+
+def trim_preamble(markdown: str) -> str:
+    """Drop workflow chatter before the first markdown H1.
+
+    Args:
+        markdown: A markdown document that may start with non-document preamble.
+
+    Returns:
+        The document from its first ``# `` heading on (unchanged if none is found past index 0).
+    """
+    heading_index: int = markdown.find("# ")
+    return markdown[heading_index:] if heading_index > 0 else markdown
+
+
+def esc(text: str) -> str:
+    """HTML-escape ``text`` (None-safe), quoting for attribute contexts too.
+
+    Args:
+        text: Raw text; ``None``/empty becomes the empty string.
+
+    Returns:
+        The escaped text.
+    """
+    return html.escape(text or "", quote=True)
+
+
+def figure_data_uri(paper_id: str) -> str:
+    """Embed the paper's cropped pipeline figure as a base64 data URI.
+
+    Args:
+        paper_id: Paper id naming ``figures/<paper_id>.png``.
+
+    Returns:
+        A ``data:image/png;base64,...`` URI.
+    """
+    figure_path: Path = ROOT / "figures" / f"{paper_id}.png"
+    return "data:image/png;base64," + base64.b64encode(figure_path.read_bytes()).decode()
+
+
+def first_sentences(text: str, count: int) -> str:
+    """Return the first ``count`` sentences of ``text``.
+
+    Dots inside known abbreviations (``ABBREVIATIONS``) are masked so ``Fig. 4``
+    does not terminate a sentence.
+
+    Args:
+        text: Prose to split; ``None``/empty becomes the empty string.
+        count: Number of leading sentences to keep.
+
+    Returns:
+        The leading sentences, re-joined with single spaces.
+    """
+    masked: str = text or ""
+    for abbreviation in ABBREVIATIONS:
+        masked = masked.replace(abbreviation, abbreviation.replace(".", "\x00"))
+    parts: list[str] = re.split(r"(?<=[.!?]) +", masked)
+    return " ".join(parts[:count]).replace("\x00", ".")
+
+
+def shorten_caption(caption: str) -> str:
+    """Compress a figure caption to its lead sentence for display under the figure.
+
+    Drops a leading ``Fig. N.`` prefix. Degenerate one-liners like
+    "Hand-tracking pipeline." (under 30 chars) get a second sentence.
+
+    Args:
+        caption: The full caption as extracted from the paper.
+
+    Returns:
+        The shortened caption.
+    """
+    stripped: str = re.sub(r"^\s*Fig(?:ure)?\.?\s*\d+[.:]?\s*", "", caption or "")
+    short: str = first_sentences(stripped, 1)
+    if len(short) < 30:
+        short = first_sentences(stripped, 2)
+    return short
+
+
+def wrap_graphviz_label(text: str, max_chars: int = 16) -> str:
+    """Escape and greedy word-wrap a label for Graphviz.
+
+    Args:
+        text: Raw label; backslashes are dropped and double quotes escaped.
+        max_chars: Soft line-length limit for the greedy wrap.
+
+    Returns:
+        The label with Graphviz ``\\n`` line separators.
+    """
+    escaped: str = (text or "").replace("\\", "").replace('"', r"\"")
+    lines: list[str] = []
+    current_line: str = ""
+    for word in escaped.split():
+        if len(current_line) + len(word) + 1 > max_chars and current_line:
+            lines.append(current_line)
+            current_line = word
+        else:
+            current_line = (current_line + " " + word).strip()
+    if current_line:
+        lines.append(current_line)
+    return r"\n".join(lines)
+
+
+def find_feedback_edges(nodes: list[JsonDict], edges: list[JsonDict]) -> set[tuple[str, str]]:
+    """Find cycle-closing edges via DFS back-edge detection.
+
+    An edge into a node that is on the current DFS stack closes a cycle. List-order
+    heuristics misclassify plain dependency edges like calibrate→lift, hence DFS.
+
+    Args:
+        nodes: DAG nodes; only ``id`` is read.
+        edges: DAG edges with ``from``/``to`` node ids.
+
+    Returns:
+        The ``(from_id, to_id)`` pairs that close a cycle.
+    """
+    adjacency: dict[str, list[str]] = {}
+    for edge in edges:
+        adjacency.setdefault(edge["from"], []).append(edge["to"])
+    node_ids: list[str] = [node["id"] for node in nodes]
+    visit_state: dict[str, int] = dict.fromkeys(node_ids, 0)  # 0 = unvisited, 1 = on the DFS stack, 2 = done
+    feedback: set[tuple[str, str]] = set()
+
+    def visit(node_id: str) -> None:
+        visit_state[node_id] = 1
+        for successor in adjacency.get(node_id, []):
+            if successor not in visit_state:
+                continue
+            if visit_state[successor] == 1:
+                feedback.add((node_id, successor))
+            elif visit_state[successor] == 0:
+                visit(successor)
+        visit_state[node_id] = 2
+
+    for node_id in node_ids:
+        if visit_state[node_id] == 0:
+            visit(node_id)
+    return feedback
+
+
+def render_dag_svg(nodes: list[JsonDict], edges: list[JsonDict], id_prefix: str) -> str:
+    """Render a pipeline DAG to inline SVG with Graphviz ``dot``.
+
+    Args:
+        nodes: Nodes with ``id``, ``label``, and optional ``role`` (colored via ``ROLE_STYLE``).
+        edges: Edges with ``from``/``to`` and optional ``label``; edges referencing unknown
+            nodes are skipped, feedback edges render dashed and unconstrained.
+        id_prefix: Namespace prepended to every SVG element id so multiple DAGs coexist on one page.
+
+    Returns:
+        The ``<svg>`` markup with a ``dag`` class added. Intrinsic width/height attributes
+        are kept — the fullscreen natural-size toggle relies on them.
+    """
+
+    def dot_id(raw: str) -> str:
+        return re.sub(r"\W", "_", raw)
+
+    dot_lines: list[str] = [
+        'digraph G { rankdir=LR; bgcolor="transparent"; ranksep=0.35; nodesep=0.3;',
+        'node [shape=box style="rounded,filled" fontname="Helvetica,Arial,sans-serif" fontsize=11 fontcolor="#eceef2" penwidth=1.2 margin="0.14,0.09"];',
+        'edge [fontname="Helvetica,Arial,sans-serif" fontsize=9 fontcolor="#9aa3b5" color="#5f6a80" arrowsize=0.7 penwidth=1.1];',
+    ]
+    node_ids: set[str] = {node["id"] for node in nodes}
+    feedback: set[tuple[str, str]] = find_feedback_edges(nodes, edges)
+    for node in nodes:
+        style: tuple[str, str] = ROLE_STYLE.get(node.get("role", "other"), ROLE_STYLE["other"])
+        dot_lines.append(f'"{dot_id(node["id"])}" [label="{wrap_graphviz_label(node["label"])}" fillcolor="{style[0]}" color="{style[1]}"];')
+    for edge in edges:
+        if edge["from"] not in node_ids or edge["to"] not in node_ids:
+            continue
+        is_feedback: bool = (edge["from"], edge["to"]) in feedback
+        edge_attrs: str = ' style=dashed constraint=false color="#8a8a5a" fontcolor="#b0b070"' if is_feedback else ""
+        dot_lines.append(f'"{dot_id(edge["from"])}" -> "{dot_id(edge["to"])}" [label="{wrap_graphviz_label(edge.get("label", ""), 20)}"{edge_attrs}];')
+    dot_lines.append("}")
+    dot_result: subprocess.CompletedProcess[bytes] = subprocess.run(
+        ["dot", "-Tsvg"], input="\n".join(dot_lines).encode(), capture_output=True, check=True
     )
-    fignote = FIG_NOTE.get(pid, "")
-    fignote_html = f'<p class="fignote">{esc(fignote)}</p>' if fignote else ""
-    traits_top = p["traits"][:5]
-    traits_rest = p["traits"][5:]
-    traits_rest_html = (
-        f'<h4>All traits</h4><div class="traits">{"".join(f"<span class=\"chip trait\">{esc(t)}</span>" for t in p["traits"])}</div>'
-        if traits_rest else "")
-    cards.append(f"""
-<article class="paper" id="{pid}">
+    svg: str = dot_result.stdout.decode()
+    svg = svg[svg.index("<svg") :]
+    svg = re.sub(r"<svg ", '<svg class="dag" ', svg, count=1)
+    svg = svg.replace('id="', f'id="{dot_id(id_prefix)}-')
+    return svg
+
+
+def render_dag(nodes: list[JsonDict], edges: list[JsonDict], id_prefix: str) -> str:
+    """Wrap a rendered DAG SVG in the clickable fullscreen-lightbox container.
+
+    Args:
+        nodes: See :func:`render_dag_svg`.
+        edges: See :func:`render_dag_svg`.
+        id_prefix: See :func:`render_dag_svg`.
+
+    Returns:
+        The ``<div class="dag-wrap">`` markup.
+    """
+    svg: str = render_dag_svg(nodes, edges, id_prefix)
+    return f'<div class="dag-wrap" title="Click to view fullscreen">{svg}</div>'
+
+
+def render_legend() -> str:
+    """Render the role color legend shared by every diagram on the page.
+
+    Returns:
+        The ``<div class="legend">`` markup, one swatch per ``LEGEND_ROLES`` entry
+        plus the dashed feedback-edge sample.
+    """
+    swatches: str = "".join(
+        f'<span class="lg"><i style="background:{ROLE_STYLE[role][0]};border-color:{ROLE_STYLE[role][1]}"></i>{label}</span>'
+        for role, label in LEGEND_ROLES
+    )
+    return f'<div class="legend">{swatches}<span class="lg"><i class="dash"></i>feedback edge</span></div>'
+
+
+def render_paper_card(index: int, paper: JsonDict) -> str:
+    """Render one paper card: header, summary, figure, DAG, posekit rebuild, details.
+
+    Args:
+        index: 1-based position shown in the card header.
+        paper: The paper record (nodes/edges, summary, traits, figure caption, ...).
+
+    Returns:
+        The ``<article class="paper">`` markup.
+    """
+    paper_id: str = paper["id"]
+    display_name: str = SHORT_NAMES.get(paper_id, paper["name"].split(":")[0])
+    links: str = " · ".join(
+        f'<a href="{esc(url)}">{esc(label)}</a>' if url else f"<span>{esc(label)}</span>" for label, url in PAPER_LINKS.get(paper_id, [])
+    )
+    node_rows: str = "".join(
+        f'<tr><td>{esc(node["label"])}</td><td class="mono">{esc(node["role"])}</td>'
+        f'<td>{esc(node.get("models", ""))}</td><td class="dim">{esc(node.get("desc", ""))}</td></tr>'
+        for node in paper["nodes"]
+    )
+    figure_note: str = FIGURE_NOTES.get(paper_id, "")
+    figure_note_html: str = f'<p class="fignote">{esc(figure_note)}</p>' if figure_note else ""
+    top_traits: list[str] = paper["traits"][:5]
+    hidden_traits: list[str] = paper["traits"][5:]
+    top_trait_chips: str = "".join(f'<span class="chip trait">{esc(trait)}</span>' for trait in top_traits)
+    more_traits_chip: str = f'<span class="chip trait more">+{len(hidden_traits)} more in details</span>' if hidden_traits else ""
+    all_trait_chips: str = "".join(f'<span class="chip trait">{esc(trait)}</span>' for trait in paper["traits"])
+    all_traits_html: str = f'<h4>All traits</h4><div class="traits">{all_trait_chips}</div>' if hidden_traits else ""
+    return f"""
+<article class="paper" id="{paper_id}">
   <header>
-    <h3><span class="num">{i}</span> {esc(SHORT.get(pid, p["name"].split(":")[0]))}</h3>
-    <span class="chip kind">{esc(KIND_LABEL.get(p["kind"], p["kind"]))}</span>
-    <span class="chip">{esc(str(p["year"]))}</span>
+    <h3><span class="num">{index}</span> {esc(display_name)}</h3>
+    <span class="chip kind">{esc(KIND_LABELS.get(paper["kind"], paper["kind"]))}</span>
+    <span class="chip">{esc(str(paper["year"]))}</span>
     <span class="links">{links}</span>
   </header>
   <div class="body">
-    <p class="summary">{esc(sentences(p["summary"], 2))}</p>
-    <p class="kvline"><b>in</b> {esc(p["rig"])} <b class="sep">out</b> {esc(p["outputs"])}</p>
+    <p class="summary">{esc(first_sentences(paper["summary"], 2))}</p>
+    <p class="kvline"><b>in</b> {esc(paper["rig"])} <b class="sep">out</b> {esc(paper["outputs"])}</p>
     <div class="figwrap">
-      <img src="{b64img(pid)}" alt="{esc(SHORT.get(pid, p["name"].split(":")[0]))} pipeline figure" loading="lazy" title="{esc(p["figure_caption"])}">
-      <p class="figcap">{esc(caption_short(p["figure_caption"]))}</p>
-      {fignote_html}
+      <img src="{figure_data_uri(paper_id)}" alt="{esc(display_name)} pipeline figure" loading="lazy" title="{esc(paper["figure_caption"])}">
+      <p class="figcap">{esc(shorten_caption(paper["figure_caption"]))}</p>
+      {figure_note_html}
     </div>
     <div class="dagrow">
-      {dag_block(p["nodes"], p["edges"], pid)}
+      {render_dag(paper["nodes"], paper["edges"], paper_id)}
     </div>
-    <p class="rebuild"><b>as posekit</b> {esc(REBUILD.get(pid) or p.get("rebuild", ""))}</p>
-    <div class="traits">{"".join(f'<span class="chip trait">{esc(t)}</span>' for t in traits_top)}{f'<span class="chip trait more">+{len(traits_rest)} more in details</span>' if traits_rest else ""}</div>
+    <p class="rebuild"><b>as posekit</b> {esc(POSEKIT_REBUILDS.get(paper_id) or paper.get("rebuild", ""))}</p>
+    <div class="traits">{top_trait_chips}{more_traits_chip}</div>
     <details>
-      <summary>Details — node table ({len(p["nodes"])} nodes), full caption, posekit mapping</summary>
+      <summary>Details — node table ({len(paper["nodes"])} nodes), full caption, posekit mapping</summary>
       <div class="inner">
-        <p class="kv"><b>Figure caption</b> {esc(p["figure_caption"])}</p>
-        <p class="kv"><b>posekit mapping</b> {esc(p.get("posekit_notes", ""))}</p>
-        {traits_rest_html}
+        <p class="kv"><b>Figure caption</b> {esc(paper["figure_caption"])}</p>
+        <p class="kv"><b>posekit mapping</b> {esc(paper.get("posekit_notes", ""))}</p>
+        {all_traits_html}
         <table class="nodes">
           <thead><tr><th>node</th><th>role</th><th>models / methods</th><th>what it does</th></tr></thead>
-          <tbody>{nodes_rows}</tbody>
+          <tbody>{node_rows}</tbody>
         </table>
       </div>
     </details>
   </div>
-</article>""")
+</article>"""
 
-# ---------- matrix ----------
-stages = tax["canonical_stages"]
-mat_by_paper = {r["paper_id"]: {c["stage_id"]: c for c in r["cells"]} for r in tax["matrix"]}
-for p in papers:  # post-workflow papers carry their own row
-    if p["id"] not in mat_by_paper and "matrix_cells" in p:
-        mat_by_paper[p["id"]] = {c["stage_id"]: c for c in p["matrix_cells"]}
-head = "".join(
-    f'<th title="{esc(s["desc"][:300])}" style="border-bottom: 2px solid {ROLE_STYLE[STAGE_ROLE.get(s["id"], "other")][1]}">'
-    f'{esc(STAGE_SHORT.get(s["id"], s["name"]))}</th>'
-    for s in stages
-)
-rows = []
-for p in papers:
-    cells = mat_by_paper.get(p["id"], {})
-    tds = []
-    for s in stages:
-        c = cells.get(s["id"], {})
-        fill = c.get("fill", "—")
-        note = c.get("note", "")
-        absent = fill.strip() in ("—", "-", "")
-        tip = esc((fill + (" — " + note if note else "")).strip())
-        tds.append(f'<td class="{"absent" if absent else ""}" title="{tip}"><span class="clamp">{esc(fill)}</span></td>')
-    rows.append(f'<tr><th><a href="#{p["id"]}">{esc(SHORT.get(p["id"], p["name"].split(":")[0]))}</a></th>{"".join(tds)}</tr>')
 
-matrix_html = f"""
+def render_matrix(papers: list[JsonDict], taxonomy: JsonDict) -> str:
+    """Render the stage x paper matrix with role-colored column underlines.
+
+    Rows come from ``taxonomy.matrix``; papers added after the original workflow
+    carry their own ``matrix_cells`` instead.
+
+    Args:
+        papers: All paper records, already in display order.
+        taxonomy: The survey taxonomy with ``canonical_stages`` and ``matrix``.
+
+    Returns:
+        The scrollable ``<div class="matrix-wrap">`` markup.
+    """
+    stages: list[JsonDict] = taxonomy["canonical_stages"]
+    cells_by_paper: dict[str, dict[str, JsonDict]] = {
+        row["paper_id"]: {cell["stage_id"]: cell for cell in row["cells"]} for row in taxonomy["matrix"]
+    }
+    for paper in papers:
+        if paper["id"] not in cells_by_paper and "matrix_cells" in paper:
+            cells_by_paper[paper["id"]] = {cell["stage_id"]: cell for cell in paper["matrix_cells"]}
+    header_cells: str = "".join(
+        f'<th title="{esc(stage["desc"][:300])}" style="border-bottom: 2px solid {ROLE_STYLE[STAGE_ROLE.get(stage["id"], "other")][1]}">'
+        f'{esc(STAGE_SHORT.get(stage["id"], stage["name"]))}</th>'
+        for stage in stages
+    )
+    body_rows: list[str] = []
+    for paper in papers:
+        paper_cells: dict[str, JsonDict] = cells_by_paper.get(paper["id"], {})
+        cell_tds: list[str] = []
+        for stage in stages:
+            cell: JsonDict = paper_cells.get(stage["id"], {})
+            fill: str = cell.get("fill", "—")
+            note: str = cell.get("note", "")
+            is_absent: bool = fill.strip() in ("—", "-", "")
+            tooltip: str = esc((fill + (" — " + note if note else "")).strip())
+            cell_tds.append(f'<td class="{"absent" if is_absent else ""}" title="{tooltip}"><span class="clamp">{esc(fill)}</span></td>')
+        display_name: str = SHORT_NAMES.get(paper["id"], paper["name"].split(":")[0])
+        body_rows.append(f'<tr><th><a href="#{paper["id"]}">{esc(display_name)}</a></th>{"".join(cell_tds)}</tr>')
+    return f"""
 <div class="matrix-wrap">
 <table class="matrix">
-<thead><tr><th>paper</th>{head}</tr></thead>
-<tbody>{"".join(rows)}</tbody>
+<thead><tr><th>paper</th>{header_cells}</tr></thead>
+<tbody>{"".join(body_rows)}</tbody>
 </table>
 </div>
 """
 
-common_full = "".join(f"<li>{esc(c)}</li>" for c in tax["commonalities"])
-diverge_full = "".join(f"<li>{esc(d)}</li>" for d in tax["divergences"])
-common_hl = "".join(f"<li><b>{esc(h)}</b> — {esc(t)}</li>" for h, t in COMMON_HEADLINES)
-diverge_hl = "".join(f"<li><b>{esc(h)}</b> — {esc(t)}</li>" for h, t in DIVERGE_HEADLINES)
 
-toc_papers = "".join(f'<a href="#{p["id"]}">{esc(SHORT.get(p["id"], p["name"].split(":")[0]))}</a>' for p in papers)
+def render_page(survey: SurveyData) -> str:
+    """Assemble the full self-contained HTML page.
 
-page = f"""<!doctype html>
+    Args:
+        survey: The loaded survey data.
+
+    Returns:
+        The complete HTML document.
+    """
+    paper_count: int = len(survey.papers)
+    paper_count_word: str = COUNT_WORDS.get(paper_count, str(paper_count))
+    cards_html: str = "".join(render_paper_card(index, paper) for index, paper in enumerate(survey.papers, 1))
+    matrix_html: str = render_matrix(survey.papers, survey.taxonomy)
+    common_full: str = "".join(f"<li>{esc(item)}</li>" for item in survey.taxonomy["commonalities"])
+    diverge_full: str = "".join(f"<li>{esc(item)}</li>" for item in survey.taxonomy["divergences"])
+    common_headlines: str = "".join(f"<li><b>{esc(headline)}</b> — {esc(detail)}</li>" for headline, detail in COMMON_HEADLINES)
+    diverge_headlines: str = "".join(f"<li><b>{esc(headline)}</b> — {esc(detail)}</li>" for headline, detail in DIVERGE_HEADLINES)
+    toc_papers: str = "".join(
+        f'<a href="#{paper["id"]}">{esc(SHORT_NAMES.get(paper["id"], paper["name"].split(":")[0]))}</a>' for paper in survey.papers
+    )
+    return f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Keypoint Pipeline Comparison — {n_papers} papers vs posekit</title>
+<title>Keypoint Pipeline Comparison — {paper_count} papers vs posekit</title>
 <style>
   :root {{
     --bg: oklch(18% .012 250); --surface: oklch(22% .014 250); --panel: oklch(25% .016 250);
@@ -560,7 +789,7 @@ page = f"""<!doctype html>
 <body>
 
 <header class="page">
-  <h1>Keypoint pipeline comparison — {n_papers} papers, one abstraction</h1>
+  <h1>Keypoint pipeline comparison — {paper_count} papers, one abstraction</h1>
   <p class="sub">MEgATrack · UmeTrack · Kineo · EPFL Smart Kitchen · AssemblyHands · AssemblyHands-X · MAMMA · EgoExo-Hands · HO-Cap · Look Ma, No Markers — decomposed into DAGs, compared stage by stage, and rebuilt as posekit roles.</p>
 </header>
 
@@ -575,10 +804,10 @@ page = f"""<!doctype html>
 <main>
 
 <section class="hero" id="universal">
-  <h2>All {n_word} pipelines are the same DAG</h2>
+  <h2>All {paper_count_word} pipelines are the same DAG</h2>
   <p class="claim">frames → detect / segment / localize → crop / rewarp → 2D keypoints + confidence → associate / lift → parametric fit. Solid = the common backbone; dashed = optional stages and feedback edges. The colors below are used in every diagram on this page.</p>
-  {legend_html()}
-  {dag_block(UNIVERSAL_NODES, UNIVERSAL_EDGES, "universal")}
+  {render_legend()}
+  {render_dag(UNIVERSAL_NODES, UNIVERSAL_EDGES, "universal")}
   <div class="takeaways">
     <div><b>One boundary datatype</b> (x, y, confidence) per (view, frame, instance) in a named skeleton, plus a camera model — posekit's <code>Keypoints2d</code> already is this. All but HO-Cap carry per-keypoint confidence end-to-end; its MediaPipe lacks the channel and falls back to reprojection-error selection.</div>
     <div><b>Networks vs glue</b> The swappable networks are detect / segment / 2D-estimate. Triangulation, association, calibration and fitting are hand-rolled per paper — consumer glue, confirmed in every paper surveyed.</div>
@@ -597,21 +826,21 @@ page = f"""<!doctype html>
   <div class="split">
     <div>
       <h4>Commonalities</h4>
-      <ul class="hl">{common_hl}</ul>
+      <ul class="hl">{common_headlines}</ul>
       <details><summary>Full analysis</summary><div class="inner"><ul>{common_full}</ul></div></details>
     </div>
     <div>
       <h4>Divergences</h4>
-      <ul class="hl">{diverge_hl}</ul>
+      <ul class="hl">{diverge_headlines}</ul>
       <details><summary>Full analysis</summary><div class="inner"><ul>{diverge_full}</ul></div></details>
     </div>
   </div>
 </section>
 
 <section id="papers">
-  <h2>The {n_word} pipelines</h2>
+  <h2>The {paper_count_word} pipelines</h2>
   <p class="lead">Each card: the paper's own figure, our extracted DAG (click any diagram to view it fullscreen; click again for 100%), and the pipeline rewritten as posekit roles — <code>Role(model)</code> = posekit-owned, <code>glue[…]</code> = consumer, ✦ = capability posekit doesn't have yet, ⟳ = feedback loop.</p>
-  {"".join(cards)}
+  {cards_html}
 </section>
 
 <section id="abstraction">
@@ -646,8 +875,8 @@ page = f"""<!doctype html>
 
 <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
 <script>
-  const INVENTORY_MD = {json.dumps(inventory_md)};
-  const PROPOSAL_MD = {json.dumps(proposal_md)};
+  const INVENTORY_MD = {json.dumps(survey.inventory_md)};
+  const PROPOSAL_MD = {json.dumps(survey.proposal_md)};
   if (window.marked) {{
     document.getElementById("inventory-md").innerHTML = marked.parse(INVENTORY_MD);
     document.getElementById("proposal-md").innerHTML = marked.parse(PROPOSAL_MD);
@@ -684,6 +913,15 @@ page = f"""<!doctype html>
 </html>
 """
 
-out = ROOT / "pipeline-comparison.html"
-out.write_text(page)
-print(f"{out} : {len(page)/1e6:.1f} MB")
+
+def main() -> None:
+    """Load the survey inputs, render the page, and write ``pipeline-comparison.html``."""
+    survey: SurveyData = load_survey()
+    page: str = render_page(survey)
+    output_path: Path = ROOT / "pipeline-comparison.html"
+    output_path.write_text(page)
+    print(f"{output_path} : {len(page) / 1e6:.1f} MB")
+
+
+if __name__ == "__main__":
+    main()
