@@ -1,0 +1,157 @@
+{
+  "id": "show3d",
+  "name": "SHOW3D: Capturing Scenes of 3D Hands and Objects in the Wild",
+  "year": "2026",
+  "venue": "arXiv 2603.28760v1 (Meta Reality Labs + Yale)",
+  "summary": "SHOW3D is a large-scale in-the-wild hand-object interaction dataset (30 subjects, 4.3M frames, 21 objects, indoor+outdoor) captured with a mobile backpack multi-camera rig, annotated fully automatically by a marker-less ego-exo optimization pipeline. It is the direct production follow-up to EgoExo-Hands (arXiv 2510.02601): it reuses the same 10-camera ego/exo fisheye rig + Quest 3 + MoCap-registered moving reference frame and the same Sapiens+InterNet -> RANSAC-triangulation -> personalized-LBS-IK hand branch, but scales the capture up and adds a full CAD-based 6DoF object-pose branch (CNOS -> FoundPose -> GoTrack with multi-view gPnP and a temporal refiner loop), a Bayesian per-frame hand-confidence score for annotation filtering, plus segmentation masks, hand-object contact, and LLM-generated text captions. All annotations are projected back into the ego cameras to train egocentric vision models.",
+  "rig": "Mobile ~8kg backpack half-dome rig: 8 exocentric monochrome fisheye cameras (1024x1280, 152 deg HFOV / 116 deg VFOV) rigidly mounted, plus 2 egocentric front-facing monochrome fisheye cameras on a freely-worn Meta Quest 3 headset (10 image cameras total). 5 on-rig MoCap cameras track a lightweight marker-tree (rigid body) atop the headset (HOT3D-style, no AR tags) to register the untethered headset into a shared 3D reference frame that MOVES WITH the participant. All ten image cameras + MoCap hardware-synchronized at 60Hz and precisely calibrated; data streamed to a workstation on a mobile cart guided by an operator for full mobility.",
+  "outputs": "Per-frame ground truth: 42 triangulated 3D hand keypoints (21 per hand, both hands) with fitted personalized LBS hand meshes (UmeTrack/HOT3D-compatible), plus a Bayesian hand-confidence score; 6DoF object poses with texture-mapped 3D CAD models (HOT3D object subset) and a GoTrack refiner confidence used for filtering; 2D segmentation masks; hand-object contact annotations; and multiple LLM-augmented natural-language captions per clip. All 3D annotations are reprojected into the ego (Quest 3) camera views. Dataset totals 4.3M frames, 30 subjects, 21 objects, in-the-wild indoor+outdoor.",
+  "kind": "offline-annotation",
+  "nodes": [
+    {
+      "id": "rig",
+      "label": "Mobile ego/exo fisheye rig + MoCap",
+      "role": "calibrate",
+      "models": "8 exo + 2 ego (Quest 3) monochrome fisheye cams @60Hz + 5 MoCap cams tracking a headset marker-tree (HOT3D-style)",
+      "desc": "Backpack half-dome rig with 8 exocentric fisheye cameras and a freely-worn Quest 3 supplying 2 egocentric fisheye views. 5 MoCap cameras track a marker-tree rigid body on the headset to register the untethered headset into a shared reference frame that moves with the participant. All ten image cameras + MoCap are hardware-synced at 60Hz and precisely calibrated into that shared moving frame; calibration/extrinsics are treated as given by the rig, not solved from keypoints."
+    },
+    {
+      "id": "frames",
+      "label": "Multi-view fisheye frames",
+      "role": "other",
+      "models": "",
+      "desc": "Synchronized per-view monochrome fisheye images from all ten cameras (8 exo + 2 ego). Fisheye distortion makes direct triangulation non-trivial, motivating the downstream perspective-crop step."
+    },
+    {
+      "id": "sapiens",
+      "label": "Sapiens body/hand 2D keypoints",
+      "role": "pose2d",
+      "models": "Sapiens (finetuned on proprietary human-keypoint datasets + synthetic data); 21 keypoints per hand from a full-body pose model, run on every view",
+      "desc": "Sapiens human pose estimation is applied to each of the ten camera views to detect body keypoints including 21 keypoints per hand. Serves as the full-frame localizer/detector for hands (there is no separate box detector for hands) and provides the initial 2D hand keypoint set used both to locate the crop region and as one triangulation input."
+    },
+    {
+      "id": "crop",
+      "label": "Fisheye -> virtual-pinhole perspective crop",
+      "role": "crop/rewarp",
+      "models": "UmeTrack-style perspective cropping around detected hand keypoints; keypoints warped into the virtual pinhole camera",
+      "desc": "To avoid triangulating under fisheye distortion, a perspective crop is taken around each hand's detected keypoint region within every view, producing a virtual pinhole camera; the Sapiens keypoint detections are warped into that pinhole camera. Egocentric-camera hand crops are deliberately included as they view hands from angles distinct from the exo cameras."
+    },
+    {
+      "id": "internet",
+      "label": "InterNet hand 2D keypoints",
+      "role": "pose2d",
+      "models": "InterNet dedicated hand pose estimator, finetuned on additional studio + synthetic datasets; run on the perspective crops",
+      "desc": "A dedicated hand pose model (InterNet) runs on the virtual-pinhole crops to produce a second set of 2D hand keypoints. Rationale: estimating hand keypoints on tight crops is easier / higher-accuracy than the full-frame Sapiens pass, which lacks feature resolution for small hands. Its keypoints are fused with Sapiens' during triangulation."
+    },
+    {
+      "id": "triangulate",
+      "label": "RANSAC multi-view triangulation",
+      "role": "triangulate",
+      "models": "RANSAC-based robust triangulation over BOTH Sapiens and InterNet 2D keypoint sets across the (virtual-pinhole) views into the shared rig frame",
+      "desc": "Fuses the two 2D hand keypoint sets (Sapiens + InterNet) by RANSAC-based multi-view triangulation into the 3D space defined by the (moving) capture rig, producing robust 3D hand keypoints. Including ego-camera crops improves coverage."
+    },
+    {
+      "id": "ikfit",
+      "label": "Personalized LBS hand-mesh IK fit",
+      "role": "fit-model",
+      "models": "Personalized linear-blend-skinning hand model (per-subject, derived from a high-resolution hand scan; UmeTrack/HOT3D-compatible) fit to 3D keypoints via Inverse Kinematics",
+      "desc": "A per-subject personalized LBS hand model (built from a high-res hand scan for fine-grained tasks such as contact) is fit to the triangulated 3D keypoints via IK to yield a temporally smooth sequence of hand poses and meshes."
+    },
+    {
+      "id": "handconf",
+      "label": "Bayesian hand-confidence estimation",
+      "role": "other",
+      "models": "Bayesian formulation with two terms: keypoint-detection/triangulation error + Inverse-Kinematics residual error",
+      "desc": "Estimates a per-frame hand confidence from a Bayesian combination of (1) keypoint detection and triangulation error and (2) the IK residual. Used to score/filter the generated hand annotations."
+    },
+    {
+      "id": "cnos",
+      "label": "CNOS 2D object detection",
+      "role": "detect",
+      "models": "CNOS (DINOv2-feature, CAD-based, no object-specific training); run on all views, highest-confidence detection per view",
+      "desc": "CAD-based 2D object detector run on all available views; the highest-confidence detection in each view is taken as the target object (at most one instance of each object class assumed present). First stage of the object branch; executed only on the first frame or when the previous-frame pose confidence is below threshold."
+    },
+    {
+      "id": "foundpose",
+      "label": "FoundPose multi-view coarse 6DoF",
+      "role": "fit-model",
+      "models": "FoundPose (DINOv2 features), multi-view extension replacing standard PnP with multi-view gPnP from PoseLib",
+      "desc": "Coarse 6DoF object-pose estimation extended to consume calibrated multi-view input (standard PnP replaced by multi-view gPnP from PoseLib, per the HOT3D multi-view FoundPose extension). Second stage; executed only on the first frame or when previous confidence drops below threshold. No object-specific training (DINOv2 features generalize across camera/image types)."
+    },
+    {
+      "id": "gotrack",
+      "label": "GoTrack 6DoF pose refiner",
+      "role": "track",
+      "models": "GoTrack refiner (DINOv2 features), multi-view; multi-view input makes final confidence scores more reliable for filtering",
+      "desc": "Refines the 6DoF object pose. In steady state (previous-frame confidence sufficiently high) only this refiner runs, initialized from the previous pose, giving efficiency and robustness under gradually increasing occlusion. Multi-view input also yields more reliable confidence scores used to filter object-pose annotations. This is the temporal object-tracking loop."
+    },
+    {
+      "id": "text",
+      "label": "LLM instruction-to-text captions",
+      "role": "other",
+      "models": "LLM-based augmentation pipeline over goal-oriented capture instructions (GigaHands-inspired)",
+      "desc": "Each session follows a structured goal-oriented protocol (e.g. 'spraying with a bottle'); an LLM augmentation pipeline generates multiple semantically diverse paraphrases per interaction, yielding paired natural-language captions for language-conditioned / multimodal training. Parallel semantic branch, independent of the 3D geometry."
+    },
+    {
+      "id": "reproject",
+      "label": "Project 3D annotations to ego views",
+      "role": "render-verify",
+      "models": "reprojection of fitted hand meshes + object CAD poses into the ego (Quest 3) camera views; also yields 2D masks (SAM-style) + contact annotations",
+      "desc": "Final 3D ground-truth (hand meshes + 6DoF object poses) is reprojected into the egocentric cameras to produce 2D overlays, 2D segmentation masks, and hand-object contact annotations, and to train egocentric vision models. Reprojection is the consistency/visualization + downstream-training gate rather than a separate optimization objective."
+    }
+  ],
+  "edges": [
+    {"from": "rig", "to": "frames", "label": "synced 10-view fisheye frames + calibration (moving rig frame)"},
+    {"from": "frames", "to": "sapiens", "label": "per-view fisheye images"},
+    {"from": "sapiens", "to": "crop", "label": "21 hand kpts/view -> hand region for perspective crop"},
+    {"from": "crop", "to": "internet", "label": "virtual-pinhole hand crops (incl. ego views)"},
+    {"from": "sapiens", "to": "triangulate", "label": "Sapiens 2D hand kpts (warped to pinhole)"},
+    {"from": "internet", "to": "triangulate", "label": "InterNet 2D hand kpts"},
+    {"from": "rig", "to": "triangulate", "label": "calibrated intrinsics/extrinsics"},
+    {"from": "triangulate", "to": "ikfit", "label": "robust 42 3D hand keypoints"},
+    {"from": "ikfit", "to": "handconf", "label": "IK residual + fitted mesh"},
+    {"from": "triangulate", "to": "handconf", "label": "keypoint/triangulation error"},
+    {"from": "ikfit", "to": "reproject", "label": "personalized hand meshes"},
+    {"from": "frames", "to": "cnos", "label": "per-view images (first frame / low-conf)"},
+    {"from": "cnos", "to": "foundpose", "label": "highest-conf 2D detection per view"},
+    {"from": "rig", "to": "foundpose", "label": "calibrated multi-view (gPnP)"},
+    {"from": "foundpose", "to": "gotrack", "label": "coarse 6DoF pose init"},
+    {"from": "gotrack", "to": "reproject", "label": "refined 6DoF object pose + confidence"},
+    {"from": "gotrack", "to": "gotrack", "label": "temporal: prev pose as init if conf high (refiner-only), else re-run CNOS+FoundPose"},
+    {"from": "frames", "to": "text", "label": "capture-session instructions"},
+    {"from": "text", "to": "reproject", "label": "LLM paraphrase captions (paired to clip)"}
+  ],
+  "mermaid": "flowchart LR\n  rig[\"Mobile ego/exo fisheye rig + MoCap (10 cams @60Hz)\"]\n  frames[\"Multi-view fisheye frames\"]\n  subgraph hands[\"Hand branch (ego-exo fusion)\"]\n    sapiens[\"Sapiens body/hand 2D kpts\"]\n    crop[\"Fisheye -> virtual-pinhole crop (UmeTrack)\"]\n    internet[\"InterNet hand 2D kpts (on crops)\"]\n    triangulate[\"RANSAC multi-view triangulation (both sets)\"]\n    ikfit[\"Personalized LBS hand-mesh IK fit\"]\n    handconf[\"Bayesian hand-confidence\"]\n  end\n  subgraph objs[\"Object branch (CAD, DINOv2, no obj training)\"]\n    cnos[\"CNOS 2D object detection\"]\n    foundpose[\"FoundPose multi-view coarse 6DoF (gPnP)\"]\n    gotrack[\"GoTrack 6DoF refiner\"]\n  end\n  text[\"LLM instruction->text captions\"]\n  reproject[\"Project 3D annotations to ego views (masks + contact)\"]\n  rig -->|\"synced frames + calib\"| frames\n  frames -->|\"per-view images\"| sapiens\n  sapiens -->|\"hand kpts -> crop region\"| crop\n  crop -->|\"pinhole hand crops\"| internet\n  sapiens -->|\"Sapiens 2D kpts\"| triangulate\n  internet -->|\"InterNet 2D kpts\"| triangulate\n  rig -->|\"calibrated extr/intr\"| triangulate\n  triangulate -->|\"42 3D kpts\"| ikfit\n  triangulate -->|\"tri error\"| handconf\n  ikfit -->|\"IK residual\"| handconf\n  ikfit -->|\"personalized meshes\"| reproject\n  frames -->|\"first frame / low-conf\"| cnos\n  cnos -->|\"highest-conf det/view\"| foundpose\n  rig -->|\"multi-view gPnP\"| foundpose\n  foundpose -->|\"coarse 6DoF\"| gotrack\n  gotrack -->|\"refined 6DoF + conf\"| reproject\n  gotrack -.->|\"prev pose as init if conf high; else re-run CNOS+FoundPose\"| gotrack\n  frames -->|\"instructions\"| text\n  text -->|\"captions\"| reproject",
+  "figure_path": "/tmp/pipeline-comparison/figures/show3d.png",
+  "figure_caption": "Figure 3. Our ego-exo pipeline for 3D hand and object pose annotation. (a) Multi-view fisheye images from our ego and exo cameras. (b) We detect 3D hand keypoints by fusing predictions from Sapiens and InterNet, and fit a personalized hand mesh via Inverse Kinematics (2D Keypoints from Sapiens + InterNet -> 3D Triangulation + Mesh Fitting). (c) CAD-based 3D object pose estimation using CNOS, FoundPose, and GoTrack (Detections from CNOS -> 6DoF pose from FoundPose + GoTrack). (d) The resulting 3D ground-truth annotations are projected back into the ego cameras, and can be used to train egocentric vision models.",
+  "traits": [
+    "direct production follow-up to EgoExo-Hands (same 10-cam ego/exo backpack rig + Quest 3 + MoCap moving-frame registration)",
+    "reuses the EgoExo-Hands hand branch verbatim: Sapiens + InterNet -> fisheye->pinhole crop -> RANSAC triangulation -> personalized LBS IK",
+    "NEW vs EgoExo-Hands: full CAD-based 6DoF object-pose branch (CNOS -> FoundPose -> GoTrack)",
+    "NEW: Bayesian hand-confidence (keypoint/triangulation error + IK residual) for annotation filtering",
+    "NEW: segmentation masks + hand-object contact annotations + LLM text captions",
+    "in-the-wild capture (indoor + outdoor), not studio; reference frame moves with the participant",
+    "two 2D hand keypoint sources fused in one triangulation (full-frame Sapiens + crop-level InterNet)",
+    "fisheye distortion handled by perspective crop to virtual pinhole before triangulation",
+    "object branch is object-agnostic (DINOv2 features, no per-object training) - just needs a CAD model",
+    "temporal object-tracking loop: FoundPose/CNOS only on first frame or low-conf, else GoTrack refiner-only from prev pose",
+    "multi-view gPnP (PoseLib) replaces single-view PnP inside FoundPose/GoTrack; multi-view also improves confidence reliability",
+    "offline annotation pipeline for dataset generation (not a realtime tracker)",
+    "confidence is load-bearing in both branches (Bayesian hand conf + GoTrack multi-view conf) for filtering GT",
+    "quantitatively validates BOTH hand (sub-cm MPJPE vs studio/manual GT) and object (sub-cm P50 vs MoCap) annotation accuracy"
+  ],
+  "posekit_notes": "The hand branch is a textbook posekit composition and identical to EgoExo-Hands: Sapiens is a full-frame dense-skeleton net acting as PersonDetector+TopDownPose2d (the pose-net-as-detector adapter from design.md sec 2, since there is no separate hand box detector); crop is ops.crops but with a fisheye->virtual-pinhole rewarp (UmeTrack-style) that posekit's cv2-affine crop math does not cover natively (marked as a capability gap); InterNet is a second TopDownPose2d run on the crops. There is NO IdentityEncoder / cross-view association: hands are fixed L/R and single-subject. Triangulation (RANSAC over the fused Sapiens+InterNet 2D sets) and the personalized-LBS IK fit are consumer glue (triangulate + fit-model), as is the Bayesian hand-confidence. The object branch (CNOS detect -> FoundPose fit -> GoTrack track) is entirely outside posekit's human-keypoint scope: CNOS is a promptable/CAD object detector (not PersonDetector), FoundPose/GoTrack are 6DoF object-pose fit/track glue built on DINOv2 with multi-view gPnP; the temporal first-frame-vs-refiner loop is consumer feedback glue. The LLM text-caption branch and the reproject-to-ego (masks following SAM [31], contact following [35]) are non-posekit consumer stages. So posekit owns exactly the two 2D hand keypoint estimators and the crop; everything else - fisheye rewarp, RANSAC triangulation, IK, the whole object pipeline, text, reprojection - is consumer glue or out of scope.",
+  "matrix_cells": [
+    {"stage_id": "capture", "fill": "10 synced monochrome fisheye cams @60Hz (8 exo backpack half-dome + 2 ego Quest 3), calibrated into a shared reference frame that MOVES WITH the participant; 5 MoCap cams track a headset marker-tree to register the untethered headset (HOT3D-style)", "note": "calibration given by rig; reference frame is non-inertial (moves with subject)"},
+    {"stage_id": "detect", "fill": "hands: Sapiens full-frame pose net doubles as the hand localizer (no separate hand box detector); objects: CNOS CAD-based 2D detector on all views, highest-confidence detection per view (<=1 instance per class)", "note": "pose-net-as-detector for hands; CNOS is an object (not person) detector"},
+    {"stage_id": "identity", "fill": "— (single-subject; hands fixed by L/R; objects <=1 instance per class assumed) - no cross-view/temporal association network", "note": "—"},
+    {"stage_id": "crop", "fill": "hands: perspective crop of the detected hand region into a virtual pinhole camera (UmeTrack-style), warping the fisheye keypoints; ego-camera crops deliberately included for angle diversity", "note": "fisheye->pinhole rewarp is beyond posekit's cv2-affine crop math"},
+    {"stage_id": "pose2d", "fill": "TWO fused 2D hand keypoint sources: Sapiens (21 kpts/hand, full-frame, finetuned) + InterNet (dedicated hand net on the pinhole crops, finetuned on studio+synthetic); crop-level detection is higher-accuracy than full-frame", "note": "two TopDownPose2d estimators fused downstream, not one"},
+    {"stage_id": "lift3d", "fill": "RANSAC-based multi-view triangulation fusing BOTH Sapiens and InterNet 2D keypoint sets into the moving rig frame -> robust 42 3D hand keypoints", "note": "explicit triangulation (unlike MEgATrack/lookma where 3D is implicit in fit)"},
+    {"stage_id": "calibrate", "fill": "— (extrinsics/intrinsics given by the precisely calibrated rig; per-subject hand geometry comes from a high-res hand scan, not solved online); objects use multi-view gPnP (PoseLib) instead of single-view PnP inside FoundPose/GoTrack", "note": "no calibrate-from-keypoints; personalization from scan not fit"},
+    {"stage_id": "fit", "fill": "hands: personalized LBS hand model fit to 3D keypoints via Inverse Kinematics (temporally smooth); objects: FoundPose coarse 6DoF (multi-view gPnP) then GoTrack refiner over 3D CAD models", "note": "two separate model fits (LBS-IK for hands, CAD 6DoF for objects)"},
+    {"stage_id": "verify", "fill": "reproject 3D annotations (hand meshes + object CAD poses) into ego views -> 2D overlays/masks/contact; hand annotations scored by a Bayesian confidence (keypoint/triangulation error + IK residual), object annotations filtered by GoTrack multi-view confidence", "note": "reprojection + confidence-based filtering as the GT quality gate (not a render-back optimization loss)"},
+    {"stage_id": "feedback", "fill": "object branch temporal loop: CNOS+FoundPose run only on the first frame or when previous-frame confidence < threshold; otherwise GoTrack refiner-only, initialized from the previous pose (efficiency + robustness under growing occlusion). No temporal loop in the hand branch (per-frame triangulate+IK)", "note": "object-pose temporal refiner loop; hand branch is feed-forward per frame"}
+  ],
+  "rebuild": "HANDS: PersonDetector/TopDownPose2d(Sapiens full-frame, pose-net-as-detector) → ops.crops[✦fisheye→virtual-pinhole perspective rewarp, incl. ego views] → TopDownPose2d(InterNet on crops) → glue[triangulate: ✦RANSAC multi-view fusing BOTH Sapiens+InterNet 2D sets → 42 3D kpts] → glue[fit: personalized-LBS hand mesh via IK] → glue[verify: ✦Bayesian hand-confidence = kpt/triangulation error + IK residual]. OBJECTS (✦ entirely outside posekit's human scope): glue[detect: CNOS CAD 2D det, highest-conf/view] → glue[fit: FoundPose coarse 6DoF, ✦multi-view gPnP/PoseLib] → glue[track: GoTrack refiner] ⟳ glue[first-frame/low-conf → re-run CNOS+FoundPose; else refiner-only from prev pose]. ⊕ glue[✦LLM instruction→text captions] ⊕ glue[reproject 3D→ego views: 2D masks (SAM) + contact]. (Direct follow-up to EgoExo-Hands: the hand branch is identical; SHOW3D adds the whole CAD object branch, Bayesian hand confidence, masks/contact, and text. posekit owns only the two hand 2D estimators + the crop; ✦ marks capabilities posekit lacks: fisheye rewarp, RANSAC triangulation, IK, and the entire object/text/reprojection stack.)"
+}

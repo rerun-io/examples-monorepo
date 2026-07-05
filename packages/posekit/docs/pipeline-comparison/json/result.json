@@ -1,0 +1,2138 @@
+{
+ "papers": [
+  {
+   "id": "megatrack",
+   "name": "MEgATrack: Monochrome Egocentric Articulated Hand-Tracking for Virtual Reality",
+   "year": "2020",
+   "venue": "SIGGRAPH / ACM Transactions on Graphics (TOG), Vol. 39, No. 4, Article 87",
+   "summary": "MEgATrack is a real-time egocentric hand-tracking system for VR headsets that ingests 4 synchronized monochrome VGA fisheye cameras and outputs 26-DOF articulated 3D poses and rigged meshes for both hands. Per image it produces per-hand bounding boxes (via a lightweight SSD-style DetNet, or by extrapolating the previous two tracked poses), crops and feeds them to KeyNet which predicts 21 2D-location heatmaps plus 1D relative-distance heatmaps, then fits a template hand model across all views by minimizing a 2D + distance + temporal energy with Levenberg-Marquardt. Extrapolated poses feed back to seed both the detector boxes and the KeyNet keypoint-augmentation channel, giving temporally smooth, low-jitter tracking at 60Hz on PC / 30Hz on mobile.",
+   "rig": "4 synchronized global-shutter monochrome VGA (640x480) fisheye cameras (150deg W x 120deg H x 175deg diag FOV) rigidly mounted on a VR headset; lower-center region seen by 2+ cameras (stereo), side regions monocular",
+   "outputs": "Per-hand 26-DOF articulated 3D hand pose theta (6-DOF global R,t + 4 rotational DOF per finger), 21 3D keypoints per hand, per-user global hand scale phi, and a linear-blend-skinned rigged hand mesh; also a per-hand DetNet confidence scalar",
+   "kind": "realtime-tracking",
+   "nodes": [
+    {
+     "id": "cams",
+     "label": "4 mono VGA fisheye cameras",
+     "role": "other",
+     "desc": "Synchronized global-shutter 640x480 monochrome fisheye images from headset-mounted rig",
+     "models": "equidistance fisheye projection (Kannala-Brandt)"
+    },
+    {
+     "id": "detnet",
+     "label": "DetNet hand detection",
+     "role": "detect",
+     "desc": "SSD-inspired lightweight CNN regressing 2D hand center + scalar radius + presence confidence per hand (left/right); boxes are squares inscribing circles, kept when conf>0.5; at runtime run round-robin on one camera",
+     "models": "DetNet (SSD/YOLO-style single-shot regressor), MSE loc loss + BCE conf loss (lambda=100)"
+    },
+    {
+     "id": "detbytrack",
+     "label": "Detection-by-tracking box extrapolation",
+     "role": "track",
+     "desc": "When a hand is tracked, extrapolate pose theta_hat_t = 2*theta_{t-1} - theta_{t-2}, project 21 keypoints into each camera, take min enclosing circle as the box; avoids running DetNet every frame and yields temporally smooth boxes",
+     "models": "constant-position pose extrapolation + keypoint reprojection + min-enclosing-circle"
+    },
+    {
+     "id": "crop",
+     "label": "Crop + keypoint-feature augmentation",
+     "role": "crop/rewarp",
+     "desc": "Crop square bbox (enlarged 20%), for right hand mirror along x; augment KeyNet input with projected extrapolated 21 keypoints (2D coord in [0,1] + 1D relative distance), zeros if untracked",
+     "models": "per-view crop, mirror trick"
+    },
+    {
+     "id": "keynet",
+     "label": "KeyNet 2D + 1D heatmaps",
+     "role": "pose2d",
+     "desc": "CNN taking a 96x96 crop plus a 63-dim extrapolated-keypoint vector; outputs 21x18x18 2D Gaussian location heatmaps and 21x18 1D relative-distance heatmaps, promoting spatial + temporal consistency",
+     "models": "KeyNet (heatmap regressor, Tompson-style Gaussian targets), MSE on 2D+1D heatmaps (alpha=0.05)"
+    },
+    {
+     "id": "kpts",
+     "label": "21 keypoints + relative distance",
+     "role": "other",
+     "desc": "Per-view 2D image keypoints p_hat_{i,j} and 1D relative distance d_rel = (d_i - mean_d)/phi; distance chosen over depth to remove fisheye crop ambiguity",
+     "models": "argmax/soft-argmax over heatmaps"
+    },
+    {
+     "id": "fit",
+     "label": "Model-based pose fit min E(theta)",
+     "role": "fit-model",
+     "desc": "Fit 26-DOF template hand by minimizing E_2D (reprojection) + w1*E_dist (relative distance) + w2*E_temporal (||theta - theta_{t-1}||^2); aggregates all 4 views; LM solver initialized from previous frame or neutral pose",
+     "models": "template hand model (kinematic skeleton S + LBS mesh M), Levenberg-Marquardt, w1=0.04 w2=20"
+    },
+    {
+     "id": "scale",
+     "label": "Hand scale calibration (phi)",
+     "role": "calibrate",
+     "desc": "Resolves size/distance ambiguity by jointly optimizing pose + shared global scale phi over multiple frames where a hand is in the stereo region; block-diagonal Jacobian gives O(n) LM step; ~5s per new user",
+     "models": "multi-frame LM, shared scale parameter phi"
+    },
+    {
+     "id": "outpose",
+     "label": "3D hand pose + rigged mesh",
+     "role": "other",
+     "desc": "Final per-hand articulated pose, 3D keypoints, and LBS-rigged mesh sent to the VR renderer",
+     "models": "linear blend skinning"
+    }
+   ],
+   "edges": [
+    {
+     "from": "cams",
+     "to": "detnet",
+     "label": "4 mono VGA images"
+    },
+    {
+     "from": "detnet",
+     "to": "crop",
+     "label": "per-hand boxes + conf>0.5"
+    },
+    {
+     "from": "detbytrack",
+     "to": "crop",
+     "label": "reprojected boxes"
+    },
+    {
+     "from": "crop",
+     "to": "keynet",
+     "label": "crop + kpt-feature channel"
+    },
+    {
+     "from": "keynet",
+     "to": "kpts",
+     "label": "2D + 1D heatmaps x21"
+    },
+    {
+     "from": "kpts",
+     "to": "fit",
+     "label": "per-view 2D kpts + rel-distance"
+    },
+    {
+     "from": "kpts",
+     "to": "scale",
+     "label": "stereo-region 2D kpts"
+    },
+    {
+     "from": "scale",
+     "to": "fit",
+     "label": "global scale phi"
+    },
+    {
+     "from": "fit",
+     "to": "outpose",
+     "label": "26-DOF theta"
+    },
+    {
+     "from": "outpose",
+     "to": "detbytrack",
+     "label": "pose t-1, t-2 (extrapolate boxes)"
+    },
+    {
+     "from": "outpose",
+     "to": "crop",
+     "label": "projected kpts (KeyNet augmentation)"
+    },
+    {
+     "from": "outpose",
+     "to": "fit",
+     "label": "theta_{t-1} (temporal prior)"
+    }
+   ],
+   "mermaid": "flowchart LR\n  cams[\"4 mono VGA fisheye cameras\"]\n  subgraph perview[\"Per-view (x4 cameras)\"]\n    detnet[\"DetNet hand detection\"]\n    detbytrack[\"Detection-by-tracking box extrapolation\"]\n    crop[\"Crop + keypoint-feature augmentation\"]\n    keynet[\"KeyNet 2D + 1D heatmaps\"]\n    kpts[\"21 keypoints + relative distance\"]\n  end\n  subgraph global[\"Global multi-view fit\"]\n    scale[\"Hand scale calibration phi\"]\n    fit[\"Model-based pose fit min E(theta)\"]\n    outpose[\"3D hand pose + rigged mesh\"]\n  end\n  cams -->|\"4 mono VGA images\"| detnet\n  detnet -->|\"per-hand boxes + conf>0.5\"| crop\n  detbytrack -->|\"reprojected boxes\"| crop\n  crop -->|\"crop + kpt-feature channel\"| keynet\n  keynet -->|\"2D + 1D heatmaps x21\"| kpts\n  kpts -->|\"per-view 2D kpts + rel-distance\"| fit\n  kpts -->|\"stereo-region 2D kpts\"| scale\n  scale -->|\"global scale phi\"| fit\n  fit -->|\"26-DOF theta\"| outpose\n  outpose -.->|\"pose t-1, t-2 extrapolate boxes\"| detbytrack\n  outpose -.->|\"projected kpts KeyNet augmentation\"| crop\n  outpose -.->|\"theta t-1 temporal prior\"| fit",
+   "figure_path": "/tmp/pipeline-comparison/figures/megatrack.png",
+   "figure_caption": "Fig. 2. Hand-tracking pipeline. The system takes 4 monochrome VGA (640x480) camera inputs, computes a per-hand per-image bounding box using either DetNet or by extrapolating the previous frames' hand pose (detection-by-tracking), crops each image and feeds it to KeyNet (augmented with projected extrapolated keypoints), which predicts a 2D location heatmap and 1D relative-distance heatmap for each of 21 keypoints; the keypoints are used to fit a template hand model per hand (min E(theta)), and the previous two frames' output is used to predict the next-frame pose that improves both the bounding boxes and keypoint estimation.",
+   "traits": [
+    "temporal feedback loop (extrapolated pose seeds detection boxes and KeyNet input)",
+    "detection-by-tracking (constant-position pose extrapolation replaces per-frame detector)",
+    "swappable 2D pose stage (DetNet + KeyNet heatmaps)",
+    "confidence output from detector (per-hand presence scalar, threshold 0.5)",
+    "multi-view triangulation via model fit (reprojection energy across 4 cameras)",
+    "template hand model fit with LM optimizer",
+    "temporal regularization term in energy (constant-position, not velocity)",
+    "per-user shape/scale calibration (shared global scale phi solved in stereo region)",
+    "1D relative-distance heatmap instead of relative-depth to handle fisheye ambiguity",
+    "fisheye equidistance projection",
+    "round-robin detector scheduling for mobile compute budget",
+    "crop/rewarp with 20% padding + left/right mirror trick"
+   ],
+   "posekit_notes": "DetNet maps to posekit 'detect' (single-shot box regressor with confidence). Detection-by-tracking is consumer glue (temporal box propagation) with no direct posekit role - closest is 'track'/'temporal'. KeyNet maps to posekit 'pose2d' (2D heatmap keypoint estimator), but its extra 1D relative-distance head is non-standard and the extrapolated-keypoint input channel is consumer glue. The min E(theta) stage maps to 'fit-model' + 'triangulate'/'optimize' (LM fit of a template skeleton against multi-view reprojection). Hand scale calibration maps to 'calibrate' (per-user shape). The temporal prior (theta_{t-1}) and pose extrapolation are 'temporal' glue. Final LBS mesh + rigged output is consumer rendering glue beyond posekit's keypoint scope."
+  },
+  {
+   "id": "umetrack",
+   "name": "UmeTrack: Unified multi-view end-to-end hand tracking for VR",
+   "year": "2022",
+   "venue": "SIGGRAPH Asia 2022 Conference Papers",
+   "summary": "UmeTrack is a single end-to-end differentiable network that tracks hands from VR-headset egocentric wide-FOV cameras and directly regresses the articulated skeleton pose (20 joint angles plus a 6DoF wrist/root transform) in world space, rather than root-relative 3D keypoints. Per-hand perspective crops from one or more views are encoded, lifted to a shared reference-camera 3D frame via FTL, fused across views (learnable feature-space triangulation), temporally smoothed by a recurrent module, concatenated with a skeleton-encoder feature, and decoded by a regressor whose predicted root sample points are turned into a 6DoF root pose via SVD; forward kinematics then combines joint angles + root + skeleton to output absolute 3D hand pose. For unknown users, Regressor-U additionally calibrates hand scale from multi-view data.",
+   "rig": "Single- or multi-view egocentric wide-FOV fisheye monochrome (or RGB) cameras mounted on a VR headset (dataset uses 4 VGA monochrome cameras; a hand appears in 1 or 2 views); per-hand perspective crops with known virtual-camera intrinsics/extrinsics, ROI provided per frame",
+   "outputs": "Per-frame articulated hand pose: 20 joint angles theta and wrist/root 6DoF transform T_H in world coordinates (known-skeleton output {theta, T_H}); unknown-user path (Regressor-U) additionally outputs calibrated hand scale/skeleton H-hat ({theta, T_H, H}). Forward kinematics + linear blend skinning produce the absolute 3D keypoints/hand mesh.",
+   "kind": "realtime-tracking",
+   "nodes": [
+    {
+     "id": "crop",
+     "label": "Perspective cropping",
+     "role": "crop/rewarp",
+     "desc": "Given a hand ROI, creates a virtual perspective camera at the original camera location with z-axis pointing at the ROI center; warps the fisheye image to a distortion-corrected crop with known virtual intrinsics K_i and extrinsics T_i,1. At train time intrinsics are set so all GT keypoints project inside the crop; at inference intrinsics are estimated from the previously tracked pose.",
+     "models": "virtual perspective camera + image warping (Remelli 2020 / Yu 2021)"
+    },
+    {
+     "id": "encoder",
+     "label": "CNN encoder (shared)",
+     "role": "pose2d",
+     "desc": "Fully-convolutional (ResNet-based, 96x96 monochrome input) encoder applied per view with shared weights, producing image-space latent features z_i^I without camera geometry.",
+     "models": "fully-convolutional ResNet encoder, weight-shared across views"
+    },
+    {
+     "id": "ftl",
+     "label": "FTL 3D lift",
+     "role": "lift3d",
+     "desc": "Feature Transform Layer: z_i^3d = FTL(z_i^I | T_i,1 * K_i^-1). Unprojects image features with virtual intrinsics K_i^-1 and transforms from virtual camera i into the reference-camera (camera 1) 3D frame via T_i,1, yielding camera-geometry-aware features all in the same 3D space.",
+     "models": "FTL (Worrall 2017 / Remelli 2020)"
+    },
+    {
+     "id": "mvf",
+     "label": "Multi-view fusion",
+     "role": "triangulate",
+     "desc": "Concatenates per-view z_i^3d and fuses them (1x1-conv residual blocks) into a single z^3d of identical shape, performing learnable feature-space triangulation; bypassed (z^3d = z_1^3d) for single-view input. Key to hand-scale prediction.",
+     "models": "MVF fusion module (learnable triangulation, Iskakov 2019; 1x1 conv residual blocks)"
+    },
+    {
+     "id": "tem",
+     "label": "Temporal module (RNN)",
+     "role": "temporal",
+     "desc": "Recurrent network with hidden state h_TEM that fuses z^3d with temporal context to produce z^TEM = TEM(z^3d, h_TEM); provides temporal consistency and robustness under severe occlusion.",
+     "models": "recurrent neural network (1x1 conv + ReLU; hidden state carried across frames)"
+    },
+    {
+     "id": "skelenc",
+     "label": "Skeleton encoder",
+     "role": "identity",
+     "desc": "Featurizes a known hand skeleton H (20 joints x 6D rest joint positions + rotation axes = 120-D vector) into feature maps z^H = SE(H), injecting per-user hand geometry prior.",
+     "models": "skeleton encoder SE (linear + reshape)"
+    },
+    {
+     "id": "concat",
+     "label": "Concat",
+     "role": "other",
+     "desc": "Concatenates temporal features z^TEM with skeleton features z^H into z^R carrying 3D, temporal and skeleton information: z^R = concat(z^TEM, z^H).",
+     "models": "feature concatenation"
+    },
+    {
+     "id": "regressor",
+     "label": "Regressor-K / Regressor-U",
+     "role": "fit-model",
+     "desc": "Takes z^R and predicts 20 joint angles theta-hat and root sample points v-hat (21-D = 7 points x 3) in reference-camera space. Regressor-U (unknown skeleton, requires multi-view z^TEM) additionally predicts a 1-D hand scale to build calibrated skeleton H-hat; the model dynamically selects the regressor at inference by skeleton availability.",
+     "models": "Regressor-K (known skeleton), Regressor-U (unknown skeleton, scale calib); residual blocks x2 + pool"
+    },
+    {
+     "id": "svd",
+     "label": "SVD root fit",
+     "role": "optimize",
+     "desc": "Aligns 7 pre-defined local root sample points v_H to the predicted points v-hat via SVD (least-squares rigid motion) to decode the wrist/root 6DoF transform T_H,1 in reference-camera space, then maps to world using reference-camera extrinsics.",
+     "models": "SVD rigid alignment (Sorkine-Hornung & Rabinovich 2016)"
+    },
+    {
+     "id": "fk",
+     "label": "Forward kinematics",
+     "role": "fit-model",
+     "desc": "Combines joint angles theta, decoded 6DoF root pose T_H and skeleton H via forward kinematics (+ linear blend skinning) to output absolute 3D hand pose (keypoints/mesh) for VR rendering and interaction.",
+     "models": "forward kinematics on hand skeleton + LBS"
+    },
+    {
+     "id": "out",
+     "label": "VR hand pose",
+     "role": "other",
+     "desc": "Final absolute 3D hand pose (world-space keypoints/mesh) consumed by VR rendering and interaction (e.g. pinch detection).",
+     "models": "output"
+    }
+   ],
+   "edges": [
+    {
+     "from": "crop",
+     "to": "encoder",
+     "label": "per-view crops I_i + virtual cam"
+    },
+    {
+     "from": "encoder",
+     "to": "ftl",
+     "label": "image features z_i^I"
+    },
+    {
+     "from": "ftl",
+     "to": "mvf",
+     "label": "3D feats z_i^3d (multi-view)"
+    },
+    {
+     "from": "ftl",
+     "to": "tem",
+     "label": "z^3d (single-view path)"
+    },
+    {
+     "from": "mvf",
+     "to": "tem",
+     "label": "fused z^3d"
+    },
+    {
+     "from": "tem",
+     "to": "concat",
+     "label": "temporal feats z^TEM"
+    },
+    {
+     "from": "skelenc",
+     "to": "concat",
+     "label": "skeleton feats z^H"
+    },
+    {
+     "from": "concat",
+     "to": "regressor",
+     "label": "z^R (3D+temporal+skeleton)"
+    },
+    {
+     "from": "regressor",
+     "to": "svd",
+     "label": "root sample points v-hat"
+    },
+    {
+     "from": "regressor",
+     "to": "fk",
+     "label": "joint angles theta-hat (+ scale H-hat)"
+    },
+    {
+     "from": "svd",
+     "to": "fk",
+     "label": "root 6DoF T_H"
+    },
+    {
+     "from": "fk",
+     "to": "crop",
+     "label": "tracked pose t-1 -> ROI/intrinsics"
+    },
+    {
+     "from": "tem",
+     "to": "tem",
+     "label": "hidden state h_TEM (pose t-1)"
+    },
+    {
+     "from": "fk",
+     "to": "out",
+     "label": "absolute 3D hand pose"
+    }
+   ],
+   "mermaid": "flowchart LR\n  subgraph perview[\"Per-view 3D feature extractor\"]\n    crop[\"Perspective cropping\"]\n    encoder[\"CNN encoder shared weights\"]\n    ftl[\"FTL 3D lift\"]\n    mvf[\"Multi-view fusion\"]\n  end\n  subgraph global[\"Pose regression\"]\n    tem[\"Temporal module RNN\"]\n    skelenc[\"Skeleton encoder\"]\n    concat[\"Concat\"]\n    regressor[\"Regressor-K / Regressor-U\"]\n    svd[\"SVD root fit\"]\n    fk[\"Forward kinematics\"]\n  end\n  crop -->|\"per-view crops I_i + virtual cam\"| encoder\n  encoder -->|\"image feats z_i^I\"| ftl\n  ftl -->|\"3D feats z_i^3d multi-view\"| mvf\n  ftl -.->|\"z^3d single-view path\"| tem\n  mvf -->|\"fused z^3d\"| tem\n  tem -->|\"temporal feats z^TEM\"| concat\n  skelenc -->|\"skeleton feats z^H\"| concat\n  concat -->|\"z^R\"| regressor\n  regressor -->|\"root sample points v-hat\"| svd\n  regressor -->|\"joint angles theta + scale H\"| fk\n  svd -->|\"root 6DoF T_H\"| fk\n  tem -.->|\"hidden state h_TEM t-1\"| tem\n  fk -.->|\"tracked pose t-1 -> ROI/K\"| crop\n  fk -->|\"absolute 3D hand pose\"| out[\"VR hand pose\"]",
+   "figure_path": "/tmp/pipeline-comparison/figures/umetrack.png",
+   "figure_caption": "Fig. 2 (UmeTrack): End-to-end architecture for the known-hand-skeleton case. Left \"3D feature extractor\" runs per view: perspective crops I_1 (and optional I_2) go through a weight-shared CNN encoder, an FTL layer that lifts image features to the shared reference-camera 3D frame, and a multi-view fusion module producing z^3d. Right \"Pose regression\": a recurrent temporal module (self-loop) yields z^TEM, concatenated with skeleton-encoder features z^H into z^R; Regressor-K predicts joint angles and root sample points, an SVD block decodes the 6DoF root pose, and forward kinematics combines angles + root + skeleton into the final hand pose. Legend distinguishes multi-view vs single-view dataflow, input/output data, trainable vs non-trainable modules, and feature maps.",
+   "traits": [
+    "temporal feedback loop (recurrent hidden state h_TEM across frames)",
+    "previous-pose feedback drives ROI selection and virtual-camera intrinsics at inference",
+    "learnable feature-space triangulation via FTL + multi-view fusion",
+    "view-count-agnostic: single-view and multi-view share one network (MVF bypassed for n=1)",
+    "directly regresses articulated skeleton (joint angles + 6DoF root), not root-relative keypoints",
+    "absolute world-space 3D root pose enabling acceleration/temporal loss",
+    "per-user template model: skeleton encoder injects known hand geometry (120-D skeleton feature)",
+    "online hand-scale self-calibration for unknown users (Regressor-U, multi-view only)",
+    "SVD rigid alignment decodes 6DoF root from 7 predicted sample points",
+    "forward-kinematics + LBS to produce final absolute pose",
+    "fisheye perspective-crop rewarp with known virtual-camera geometry",
+    "swappable known/unknown-skeleton regressor selected dynamically at inference"
+   ],
+   "posekit_notes": "Roles that map to posekit-style stages: crop/rewarp (perspective cropping with virtual camera), pose2d (per-view CNN encoder producing image features), lift3d (FTL), triangulate (multi-view fusion / learnable feature-space triangulation), temporal (RNN temporal module), identity/template (skeleton encoder = per-user hand template), fit-model (Regressor + forward kinematics = skeleton fitting/decode), optimize (SVD root-pose decode via least-squares rigid motion). Consumer glue specific to UmeTrack: the feedback edge from forward-kinematics back to perspective cropping (uses tracked pose t-1 to set ROI and estimate virtual intrinsics) and the dynamic Regressor-K vs Regressor-U switch based on whether a hand skeleton is provided. No explicit detector/segment stage is shown in Fig. 2 (ROI is assumed / fed by the tracking loop). The 'pose2d' role is a loose fit: the encoder emits latent feature maps, not explicit 2D keypoints."
+  },
+  {
+   "id": "kineo",
+   "name": "Kineo: Calibration-Free Metric Motion Capture From Sparse RGB Cameras",
+   "year": "2025",
+   "venue": "arXiv preprint (2510.24464); Javerliat et al. (LIRIS)",
+   "summary": "Kineo is a fully automatic, calibration-free and synchronization-free pipeline for markerless multi-view motion capture from sparse consumer RGB cameras. It audio-syncs the streams, feeds 2D keypoints from a swappable off-the-shelf detector into a graph-based auto-calibration (essential-matrix edges, loop-closure relative scales, MST initialization, three-pass bundle adjustment that also fits Brown-Conrady distortion), then weighted-DLT triangulates the skeleton and estimates scene pointmaps, and finally recovers metric scale via an SMPL body prior or the MoGe monocular metric-depth estimator. Every geometric stage is driven by the 2D detector confidences, and each triangulated 3D keypoint gets a pairwise-reprojection consensus confidence score.",
+   "rig": "Sparse set of N uncalibrated, unsynchronized, battery-powered consumer RGB cameras (static cameras, moving subject), each with an audio track; no markers, no hardware sync, no manual calibration. Cross-view subject re-identification is assumed given (Sec. 8 implementation details).",
+   "outputs": "Metric-scale scene: 3D keypoints (COCO-19 / COCO-133 / Human3.6M skeletons or full parametric SMPL body) with per-point pairwise-reprojection confidence, dense scene pointmaps, and complete camera parameters (extrinsics, intrinsics/focal, Brown-Conrady distortion coefficients).",
+   "kind": "offline-capture",
+   "nodes": [
+    {
+     "id": "inputs",
+     "label": "Unsynced uncalibrated RGB views (View 1..N + audio)",
+     "role": "other",
+     "desc": "Sparse consumer cameras, static rig, moving subject; each has an audio track. Cross-view subject re-ID assumed given.",
+     "models": "hardware-accelerated GPU video decode (on-GPU frames)"
+    },
+    {
+     "id": "sync",
+     "label": "Audio Temporal Sync (Sec.4)",
+     "role": "temporal",
+     "desc": "Estimates per-camera temporal lag by MFCC cross-correlation against a reference camera, aligning detections on a shared global timeline; derives subframe-accuracy conditions from hop length and inter-mic distances.",
+     "models": "MFCC + cross-correlation"
+    },
+    {
+     "id": "pose2d",
+     "label": "2D Keypoint Detection (swappable)",
+     "role": "pose2d",
+     "desc": "Off-the-shelf 2D keypoint detector run per synchronized view, producing 2D keypoints x_{i,k} with per-keypoint confidence w_{i,k} in [0,1]. Detector is replaceable without changing the architecture; extended MMPose for GPU-resident batched inference.",
+     "models": "NLF (primary), RTMPose, DWPose"
+    },
+    {
+     "id": "sample",
+     "label": "Confidence-Aware Spatio-Temporal Keypoint Sampling (Sec.5.2.1)",
+     "role": "other",
+     "desc": "Scores each correspondence by geometric mean of detector confidences w_ij,k=sqrt(w_i,k*w_j,k); keeps only w>tau, then randomly selects M correspondences to implicitly promote temporal diversity and geometric coverage. Fixed compute cost for scalability.",
+     "models": "confidence thresholding + random subsampling"
+    },
+    {
+     "id": "sfm",
+     "label": "Pairwise SfM / Essential-Matrix Graph (Sec.5.1-5.3)",
+     "role": "calibrate",
+     "desc": "Builds a camera graph: nodes=cameras, edges=pairwise essential matrix E_ij (rotation R_ij + translation direction t_ij) via 5-point + RANSAC on sampled correspondences. Intrinsics initialized from MoGe (later reused for pointmaps). Edge weight = average Sampson distance over inliers (calibration reliability).",
+     "models": "five-point algorithm + RANSAC; MoGe intrinsics init; Sampson distance"
+    },
+    {
+     "id": "scales",
+     "label": "Loop-Closure Relative Scales (Sec.5.4)",
+     "role": "optimize",
+     "desc": "Recovers per-edge relative scales lambda_ij from triplet loop-closure constraints WA*lambda=0, weighted by loop score (geo-mean of edge reliabilities). Solved as regularized weighted nonlinear least-squares with a ||lambda-1|| term via L-BFGS in log-space.",
+     "models": "weighted homogeneous LS + L-BFGS"
+    },
+    {
+     "id": "mst",
+     "label": "MST Absolute Extrinsics (Sec.5.5)",
+     "role": "calibrate",
+     "desc": "Kruskal MST over the camera graph (edge weights = calibration reliability); composes relative [R|t]_ij with lambda_ij along the optimal path from origin camera C0 to each camera to get globally consistent absolute extrinsics with minimal error accumulation.",
+     "models": "Kruskal minimum spanning tree"
+    },
+    {
+     "id": "ba",
+     "label": "3-Pass Bundle Adjustment (Sec.5.6)",
+     "role": "optimize",
+     "desc": "Refines cameras on a confident 2-view-visible keypoint subset: pass1 extrinsics+3D points, pass2 +focal lengths, pass3 +Brown-Conrady distortion. Minimizes confidence-weighted Huber reprojection loss (weights = 2D detector confidence).",
+     "models": "iterative BA, Huber loss, Brown-Conrady distortion model"
+    },
+    {
+     "id": "undistort",
+     "label": "Undistort (images + 2D keypoints)",
+     "role": "crop/rewarp",
+     "desc": "Applies the estimated Brown-Conrady distortion coefficients to undistort images (for pointmaps) and 2D keypoints (before triangulation).",
+     "models": "Brown-Conrady undistortion"
+    },
+    {
+     "id": "triang",
+     "label": "Weighted-DLT Triangulation + Confidence (Sec.6.2-6.3)",
+     "role": "triangulate",
+     "desc": "Lifts undistorted 2D keypoints to 3D across all N views via confidence-weighted DLT (weight = 2D confidence w_i,m). Assigns each 3D point a pairwise-reprojection consensus score s_m from focal-normalized reprojection residuals mapped through exp(-lambda*residual) and averaged over view pairs.",
+     "models": "weighted Direct Linear Transform (DLT)"
+    },
+    {
+     "id": "pointmaps",
+     "label": "Scene Pointmaps (Sec.6.1)",
+     "role": "other",
+     "desc": "Dense scene geometry from undistorted images: MoGe (per-view metric pointmap merged via extrinsics, given estimated focal) or VGGT (multi-view, aligned to Kineo cameras via similarity transform).",
+     "models": "MoGe, VGGT"
+    },
+    {
+     "id": "metric",
+     "label": "Metric-Scale Recovery (Sec.7)",
+     "role": "fit-model",
+     "desc": "Recovers global scale alpha: (a) SMPL body prior - optimize scale alpha + shape beta to match bone lengths of the arbitrary-unit skeleton (pose ignored, no LBS), confidence-weighted Huber; or (b) subject-agnostic route using the MoGe monocular metric-depth estimator (scale = metric/arbitrary joint-depth ratio). Fitting SMPL uses NLF surface keypoints + NLF SMPLFitter.",
+     "models": "SMPL (M(beta), regressor J), NLF SMPLFitter; MoGe monocular metric depth"
+    },
+    {
+     "id": "outputs",
+     "label": "Metric-scale scene (3D keypoints+conf, pointmaps, cameras)",
+     "role": "other",
+     "desc": "Final metric outputs: 3D skeletons or SMPL body with per-point confidence, dense pointmaps, and full camera intrinsics/extrinsics/distortion; alpha rescales skeletons, pointmaps and cameras.",
+     "models": ""
+    }
+   ],
+   "edges": [
+    {
+     "from": "inputs",
+     "to": "sync",
+     "label": "raw videos + audio tracks"
+    },
+    {
+     "from": "sync",
+     "to": "pose2d",
+     "label": "synchronized views (shared timeline)"
+    },
+    {
+     "from": "pose2d",
+     "to": "sample",
+     "label": "2D kpts + per-kpt conf w_i,k"
+    },
+    {
+     "from": "sample",
+     "to": "sfm",
+     "label": "high-conf correspondence subset"
+    },
+    {
+     "from": "sfm",
+     "to": "scales",
+     "label": "E_ij (R_ij, t_ij) + Sampson edge weights"
+    },
+    {
+     "from": "scales",
+     "to": "mst",
+     "label": "relative scales lambda_ij"
+    },
+    {
+     "from": "mst",
+     "to": "ba",
+     "label": "absolute extrinsics init"
+    },
+    {
+     "from": "pose2d",
+     "to": "ba",
+     "label": "2-view-visible kpts + conf"
+    },
+    {
+     "from": "ba",
+     "to": "undistort",
+     "label": "intrinsics + distortion coeffs"
+    },
+    {
+     "from": "ba",
+     "to": "triang",
+     "label": "refined extrinsics/intrinsics"
+    },
+    {
+     "from": "pose2d",
+     "to": "undistort",
+     "label": "2D keypoints"
+    },
+    {
+     "from": "undistort",
+     "to": "triang",
+     "label": "undistorted 2D kpts + conf"
+    },
+    {
+     "from": "undistort",
+     "to": "pointmaps",
+     "label": "undistorted images + focal"
+    },
+    {
+     "from": "triang",
+     "to": "metric",
+     "label": "arbitrary-scale 3D skeleton + conf"
+    },
+    {
+     "from": "pointmaps",
+     "to": "metric",
+     "label": "arbitrary-scale pointmaps"
+    },
+    {
+     "from": "metric",
+     "to": "outputs",
+     "label": "global scale alpha (metric)"
+    }
+   ],
+   "mermaid": "flowchart LR\n  inputs[\"Unsynced uncalibrated RGB views (View 1..N + audio)\"]\n  subgraph sync_stage[\"Temporal alignment\"]\n    sync[\"Audio Temporal Sync (MFCC x-corr, Sec.4)\"]\n  end\n  subgraph perview[\"Per-view 2D\"]\n    pose2d[\"2D Keypoint Detection (NLF / RTMPose / DWPose)\"]\n  end\n  subgraph calib[\"Automatic Camera Calibration (Sec.5)\"]\n    sample[\"Confidence-Aware Spatio-Temporal Sampling\"]\n    sfm[\"Pairwise SfM Essential-Matrix Graph (5pt+RANSAC, MoGe intrinsics)\"]\n    scales[\"Loop-Closure Relative Scales (weighted LS + L-BFGS)\"]\n    mst[\"MST Absolute Extrinsics (Kruskal)\"]\n    ba[\"3-Pass Bundle Adjustment (+focal +Brown-Conrady, Huber)\"]\n  end\n  subgraph global3d[\"Global 3D + scale\"]\n    undistort[\"Undistort images + 2D kpts\"]\n    triang[\"Weighted-DLT Triangulation + Consensus Confidence\"]\n    pointmaps[\"Scene Pointmaps (MoGe / VGGT)\"]\n    metric[\"Metric-Scale Recovery (SMPL prior / MoGe mono depth)\"]\n  end\n  outputs[\"Metric-scale scene: 3D kpts+conf, pointmaps, cameras\"]\n\n  inputs -->|\"raw videos + audio\"| sync\n  sync -->|\"synchronized views\"| pose2d\n  pose2d -->|\"2D kpts + conf\"| sample\n  sample -->|\"high-conf correspondences\"| sfm\n  sfm -->|\"E_ij + Sampson weights\"| scales\n  scales -->|\"relative scales lambda\"| mst\n  mst -->|\"absolute extrinsics init\"| ba\n  pose2d -->|\"2-view kpts + conf\"| ba\n  ba -->|\"intrinsics + distortion\"| undistort\n  ba -->|\"refined cameras\"| triang\n  pose2d -->|\"2D kpts\"| undistort\n  undistort -->|\"undistorted 2D kpts + conf\"| triang\n  undistort -->|\"undistorted images + focal\"| pointmaps\n  triang -->|\"arb-scale 3D skeleton + conf\"| metric\n  pointmaps -->|\"arb-scale pointmaps\"| metric\n  metric -->|\"global scale alpha\"| outputs",
+   "figure_path": "/tmp/pipeline-comparison/figures/kineo.png",
+   "figure_caption": "Figure 1: Overview of the Kineo pipeline for markerless motion capture from uncalibrated and unsynchronized multi-camera videos. Raw videos are first audio-synchronized to a shared timeline; a swappable 2D keypoint detector produces per-view keypoints with confidence; automatic camera calibration builds an essential-matrix graph (confidence-aware sampling, SfM, MST) and refines cameras + Brown-Conrady distortion via three-pass bundle adjustment; images/keypoints are undistorted, then weighted-DLT triangulation and MoGe/VGGT pointmaps yield an arbitrary-scale scene with per-point confidence; finally metric-scale recovery (SMPL body prior or MoGe monocular metric depth) produces the metric-scale scene.",
+   "traits": [
+    "confidence-weighted triangulation (weighted DLT by 2D detector confidence)",
+    "confidence-driven correspondence sampling for calibration",
+    "swappable / off-the-shelf 2D pose backbone (NLF, RTMPose, DWPose)",
+    "calibration-free auto-calibration via keypoint-driven SfM",
+    "graph + MST global camera-pose optimization",
+    "loop-closure relative-scale solving",
+    "distortion coefficients jointly estimated in bundle adjustment (Brown-Conrady)",
+    "3-pass staged bundle adjustment (extrinsics -> +focal -> +distortion)",
+    "Huber-robust reprojection loss weighted by detection confidence",
+    "audio-based temporal synchronization (no hardware sync)",
+    "per-3D-point reprojection-consensus confidence output",
+    "reuses the same 2D keypoints for both calibration and final skeleton",
+    "dual metric-scale recovery: SMPL body prior vs MoGe monocular metric depth",
+    "outputs both skeletons (COCO/H36M) and parametric SMPL body",
+    "GPU-decode + on-GPU batched keypoint inference for scalability",
+    "assumes cross-view re-ID given (not solved internally)",
+    "no temporal feedback loop (single-shot offline batch calibration)"
+   ],
+   "posekit_notes": "Maps cleanly onto posekit roles: 2D Keypoint Detection = posekit pose2d runtime (the detector is explicitly swappable - NLF/RTMPose/DWPose - matching posekit's runtime abstraction). Triangulation = a lift3d/triangulate role (weighted DLT), and the pairwise-reprojection confidence is a posekit-style per-keypoint confidence carried through. Camera calibration (SfM essential-matrix graph, loop-closure scales, MST, bundle adjustment with Brown-Conrady) is consumer glue outside posekit's keypoint scope - it is a classical geometric calibrate/optimize block. Scene pointmaps (MoGe/VGGT) and metric-scale recovery (SMPL fit via NLF SMPLFitter, or MoGe monocular metric depth) are fit-model / other consumer stages. Audio temporal sync and GPU decode are pre-processing glue with no posekit equivalent."
+  },
+  {
+   "id": "epfl-smart-kitchen",
+   "name": "EPFL-Smart-Kitchen-30: Automatic 3D Body/Hand Motion Estimation (annotation pipeline)",
+   "year": "2025",
+   "venue": "arXiv (2506.01608)",
+   "summary": "An offline annotation pipeline that turns a synchronized multi-view (9 static RGB-D Kinect cameras) plus egocentric (HoloLens 2) capture of cooking behavior into ground-truth 3D full-body + hand motion. It runs four stages: per-view RTMPose 2D keypoint estimation, Kinect-SDK identity tracking (3D merge + reproject-to-select) to disambiguate the subject across views, confidence-based SVD triangulation to lift 3D keypoints, and EasyMocap multi-view SMPL/MANO mesh fitting that also fuses HoloLens 2 egocentric hand poses. The output is per-frame SMPL body and MANO hand parameters, with a discard-frame verification step against the lifted pose.",
+   "rig": "9 static Azure Kinect RGB-D cameras (30 FPS) at strategic points in the kitchen (ceiling, wall corners, near sink) providing multi-view RGB + depth, plus one head-mounted HoloLens 2 egocentric device (RGB + depth + hand tracking + eye gaze), and wireless IMUs (100 FPS). Calibrated with an A0-size checkerboard; poses expressed in a global world coordinate system.",
+   "outputs": "Per-frame 3D full-body pose as fitted SMPL parameters (pose, shape, global transform) and 3D hand pose as fitted MANO parameters; equivalently reprojected/triangulated 3D keypoints in the COCO joint layout. Low-confidence joints (score < 0.1) are excluded from fitting and fitting-artifact frames are dropped.",
+   "kind": "offline-annotation",
+   "nodes": [
+    {
+     "id": "multiview_rgb",
+     "label": "Multi-view RGBD video (9 Kinect cams)",
+     "role": "other",
+     "desc": "Synchronized 30 FPS exocentric RGB-D video from the calibrated static camera rig; per-view input to 2D pose and to Kinect body tracking.",
+     "models": "Azure Kinect"
+    },
+    {
+     "id": "kinect_depth",
+     "label": "Kinect depth + body tracking",
+     "role": "identity",
+     "desc": "Kinect Body Tracking SDK estimates per-view 3D body pose and a tracking identity from the depth images; used to fix the subject identity when experimentalists enter the scene.",
+     "models": "Azure Kinect Body Tracking SDK"
+    },
+    {
+     "id": "hololens",
+     "label": "HoloLens 2 egocentric hand estimator",
+     "role": "other",
+     "desc": "Egocentric depth-based hand tracking toolkit giving relative 3D hand poses with contact cues that RGB views lack.",
+     "models": "HoloLens 2 hand tracking toolkit"
+    },
+    {
+     "id": "rtmpose2d",
+     "label": "RTMPose 2D keypoint estimation",
+     "role": "pose2d",
+     "desc": "Per-view 2D body keypoints via RTMPose-x (8 datasets); whole-body RTMW-x (14 datasets) recovers hand keypoints using body semantic context. Emits keypoints + per-joint confidence.",
+     "models": "RTMPose-x, RTMW-x (in DeepLabCut v3)"
+    },
+    {
+     "id": "identity_track",
+     "label": "Identity tracking / tracklet indexing",
+     "role": "identity",
+     "desc": "Transforms Kinect per-view 3D poses to the world frame and merges them, selects the dominant identity as the subject, then reprojects that 3D pose into each view to select the correct RTMPose 2D pose (merged 3D not used as final output because it is jittery).",
+     "models": "Kinect 3D merge + world transform + reprojection"
+    },
+    {
+     "id": "triangulate",
+     "label": "Confidence-based 3D keypoint lifting",
+     "role": "triangulate",
+     "desc": "Groups the identity-selected 2D poses across all views and lifts to 3D via SVD weighted by per-view confidence scores; joints below confidence 0.1 are excluded from fitting.",
+     "models": "Confidence-weighted SVD triangulation"
+    },
+    {
+     "id": "smpl_fit",
+     "label": "SMPL body mesh fitting",
+     "role": "fit-model",
+     "desc": "EasyMocap multi-view fit of SMPL (COCO-adapted joint regressor) to lifted 3D + RTMPose 2D, minimizing 3D joint, 2D reprojection, temporal smoothing, and regularization losses over pose/shape/global transform.",
+     "models": "EasyMocap, SMPL"
+    },
+    {
+     "id": "mano_fit",
+     "label": "MANO hand mesh fitting",
+     "role": "fit-model",
+     "desc": "EasyMocap fit of MANO hands using the lifted/2D hand keypoints plus an extra 3D joint loss from the HoloLens 2 relative hand poses.",
+     "models": "EasyMocap, MANO"
+    },
+    {
+     "id": "loss_opt",
+     "label": "Multi-term optimization losses",
+     "role": "optimize",
+     "desc": "3D joint loss, 2D reprojection loss, temporal smoothing loss, and regularization loss jointly minimized over SMPL/MANO parameters (plus the extra HoloLens hand 3D joint loss for MANO).",
+     "models": "gradient optimization (EasyMocap)"
+    },
+    {
+     "id": "verify_discard",
+     "label": "Fit vs lifted-pose verification",
+     "role": "render-verify",
+     "desc": "Frames where the fitted pose deviates strongly (Euclidean distance) from the triangulated lifted pose are discarded as fitting artifacts.",
+     "models": "distance threshold gate"
+    },
+    {
+     "id": "outputs",
+     "label": "3D SMPL body + MANO hand poses",
+     "role": "other",
+     "desc": "Final per-frame ground-truth body and hand meshes/keypoints used as dataset annotations.",
+     "models": "SMPL + MANO"
+    }
+   ],
+   "edges": [
+    {
+     "from": "multiview_rgb",
+     "to": "rtmpose2d",
+     "label": "per-view RGB frames"
+    },
+    {
+     "from": "multiview_rgb",
+     "to": "kinect_depth",
+     "label": "per-view depth images"
+    },
+    {
+     "from": "rtmpose2d",
+     "to": "identity_track",
+     "label": "2D body+hand kpts + conf"
+    },
+    {
+     "from": "kinect_depth",
+     "to": "identity_track",
+     "label": "per-view 3D pose + track id"
+    },
+    {
+     "from": "identity_track",
+     "to": "triangulate",
+     "label": "identity-selected 2D poses (all views)"
+    },
+    {
+     "from": "rtmpose2d",
+     "to": "triangulate",
+     "label": "2D kpts + conf"
+    },
+    {
+     "from": "triangulate",
+     "to": "smpl_fit",
+     "label": "lifted 3D kpts (conf-thresholded)"
+    },
+    {
+     "from": "triangulate",
+     "to": "mano_fit",
+     "label": "lifted 3D hand kpts"
+    },
+    {
+     "from": "rtmpose2d",
+     "to": "smpl_fit",
+     "label": "2D kpts (reprojection target)"
+    },
+    {
+     "from": "hololens",
+     "to": "mano_fit",
+     "label": "egocentric relative 3D hand poses"
+    },
+    {
+     "from": "smpl_fit",
+     "to": "loss_opt",
+     "label": "SMPL params + residuals"
+    },
+    {
+     "from": "mano_fit",
+     "to": "loss_opt",
+     "label": "MANO params + residuals"
+    },
+    {
+     "from": "loss_opt",
+     "to": "verify_discard",
+     "label": "fitted pose"
+    },
+    {
+     "from": "triangulate",
+     "to": "verify_discard",
+     "label": "lifted pose (reference)"
+    },
+    {
+     "from": "verify_discard",
+     "to": "outputs",
+     "label": "accepted SMPL+MANO frames"
+    }
+   ],
+   "mermaid": "flowchart LR\n  subgraph perview[\"Per-view (each of 9 cams)\"]\n    multiview_rgb[\"Multi-view RGBD video\"]\n    rtmpose2d[\"RTMPose 2D keypoints (body + whole-body hands)\"]\n    kinect_depth[\"Kinect depth + body-tracking SDK\"]\n  end\n  subgraph global[\"Global / multi-view\"]\n    identity_track[\"Identity tracking + tracklet indexing\"]\n    triangulate[\"Confidence-based SVD 3D lifting\"]\n    hololens[\"HoloLens 2 egocentric hand poses\"]\n    smpl_fit[\"SMPL body mesh fitting (EasyMocap)\"]\n    mano_fit[\"MANO hand mesh fitting (EasyMocap)\"]\n    loss_opt[\"Losses: 3D joint + 2D reproj + temporal + reg\"]\n    verify_discard[\"Fit vs lifted-pose discard gate\"]\n    outputs[\"3D SMPL body + MANO hand poses\"]\n  end\n  multiview_rgb -->|\"per-view RGB\"| rtmpose2d\n  multiview_rgb -->|\"per-view depth\"| kinect_depth\n  rtmpose2d -->|\"2D kpts + conf\"| identity_track\n  kinect_depth -->|\"3D pose + track id\"| identity_track\n  identity_track -->|\"identity-selected 2D poses\"| triangulate\n  rtmpose2d -->|\"2D kpts + conf\"| triangulate\n  triangulate -->|\"lifted 3D kpts (conf-thresholded)\"| smpl_fit\n  triangulate -->|\"lifted 3D hand kpts\"| mano_fit\n  rtmpose2d -->|\"2D reprojection target\"| smpl_fit\n  hololens -->|\"relative 3D hand joints\"| mano_fit\n  smpl_fit -->|\"SMPL params\"| loss_opt\n  mano_fit -->|\"MANO params\"| loss_opt\n  loss_opt -->|\"fitted pose\"| verify_discard\n  triangulate -.->|\"lifted pose reference\"| verify_discard\n  verify_discard -->|\"accepted frames\"| outputs",
+   "figure_path": "/tmp/pipeline-comparison/figures/epfl-smart-kitchen.png",
+   "figure_caption": "Figure B.1: Body/Hand motion estimation pipeline. Multi-view RGBD video feeds RTMPose 2D keypoints and Kinect pose tracking; per-view Kinect 3D poses are merged and reprojected (tracklet indexing) to select the subject's 2D poses, then confidence-based SVD lifts 3D keypoints, and EasyMocap fits SMPL (body) and MANO (hands, aided by the HoloLens 2 egocentric hand estimator) under 3D joint, 2D reprojection, temporal-smoothing, and regularization losses.",
+   "traits": [
+    "confidence-weighted triangulation",
+    "confidence-thresholded joints dropped before fitting (< 0.1)",
+    "swappable 2D pose (RTMPose-x body / whole-body RTMW-x hands)",
+    "multi-modal fusion: RGB + depth + egocentric",
+    "depth-based identity tracking to disambiguate subject from experimentalists",
+    "reproject-3D-to-select-2D identity assignment",
+    "EasyMocap-style multi-view SMPL/MANO fit",
+    "temporal smoothing loss in fit",
+    "consistency verify: discard frames where fit deviates from lifted pose",
+    "egocentric HoloLens hand prior as extra 3D joint loss for MANO",
+    "offline ground-truth annotation (not realtime)",
+    "COCO-adapted SMPL joint regressor"
+   ],
+   "posekit_notes": "Maps cleanly onto posekit roles: rtmpose2d = pose2d runtime (RTMPose-x / RTMW-x, directly swappable posekit detectors); triangulate = a confidence-weighted multi-view triangulate role (SVD + per-joint confidence threshold 0.1); smpl_fit/mano_fit = fit-model roles wrapping EasyMocap SMPL and MANO fitters. Consumer glue outside posekit: the Kinect Body Tracking SDK identity_track stage (depth-based 3D merge + world transform + reproject-to-select), the HoloLens 2 egocentric hand-pose ingest, A0-checkerboard camera calibration, and the fit-vs-lifted discard gate. The loss_opt terms (3D joint / 2D reproj / temporal / reg + HoloLens hand joint) are internal to the EasyMocap fitter rather than separate posekit stages."
+  },
+  {
+   "id": "assemblyhands",
+   "name": "AssemblyHands",
+   "year": "2023",
+   "venue": "CVPR 2023",
+   "summary": "AssemblyHands builds a large-scale egocentric 3D hand-pose dataset by automatically annotating multi-view exocentric RGB frames with a volumetric fusion network (MVExoNet) trained from a small set of manually-triangulated labels. MVExoNet encodes each exocentric view with EfficientNet, unprojects the 2D features into a shared 3D feature volume via softmax-weighted fusion, refines it with a V2V-PoseNet 3D CNN, and reads out 3D joints via soft-argmax, using an inference-time iterative-refinement loop that re-crops and re-roots inputs from the previous round's prediction. The resulting 3D annotations are projected into the monochrome egocentric views to train a single-view egocentric estimator (SVEgoNet), which is then evaluated via a verb/action-classification task.",
+   "rig": "8 static exocentric RGB cameras + 4 monochrome fisheye egocentric cameras on a synchronized headset (Assembly101 rig); annotation method also generalized to a 12-camera Desktop Activities rig",
+   "outputs": "3D coordinates of 21 hand joints per hand (both hands) in world space as auto-annotations, plus wrist-relative 3D 21-joint poses per hand from the egocentric SVEgoNet model",
+   "kind": "offline-annotation",
+   "nodes": [
+    {
+     "id": "exo",
+     "label": "Multi-view exocentric RGB (8 cams)",
+     "role": "other",
+     "desc": "Synchronized exocentric RGB frames from the Assembly101 static rig, sampled at 30 Hz for auto-annotation; lens distortion removed to simplify triangulation.",
+     "models": "Assembly101 rig"
+    },
+    {
+     "id": "bodydet",
+     "label": "Per-view 2D body keypoint detector",
+     "role": "detect",
+     "desc": "Full-image body keypoint detector (shoulder/elbow/wrist) run on each exocentric view.",
+     "models": "MS COCO-trained 2D body keypoint detector"
+    },
+    {
+     "id": "bodytri",
+     "label": "Triangulate 3D body keypoints",
+     "role": "triangulate",
+     "desc": "2D + Triangulation over views to get geometrically consistent 3D body joints (shoulder/elbow/wrist).",
+     "models": "2D + Triangulation"
+    },
+    {
+     "id": "handbox",
+     "label": "Virtual hand-center to per-view hand boxes",
+     "role": "crop/rewarp",
+     "desc": "Extend 1/3 forearm length past the wrist to a 3D virtual hand-center keypoint, project into each view for geometrically consistent square hand bounding boxes; hand identity fixed by body skeleton, not image.",
+     "models": "forearm-extension heuristic (OpenPose-style)"
+    },
+    {
+     "id": "enc",
+     "label": "Per-view EfficientNet 2D feature encoder",
+     "role": "pose2d",
+     "desc": "Encodes each cropped exocentric view into compact 2D feature maps (to save GPU memory) before volumetric fusion.",
+     "models": "EfficientNet"
+    },
+    {
+     "id": "proj",
+     "label": "Unproject + softmax-weighted fuse to 3D volume",
+     "role": "triangulate",
+     "desc": "Unprojects per-view 2D features into a shared 300mm 3D feature volume (centered on the third-MCP root) via a learnable softmax-based weighted average (learnable triangulation).",
+     "models": "learnable triangulation / softmax-weighted fusion"
+    },
+    {
+     "id": "v2v",
+     "label": "V2V-PoseNet 3D CNN to heatmaps",
+     "role": "lift3d",
+     "desc": "Encoder-decoder 3D convolutions refine the volumetric features and output 3D joint heatmaps.",
+     "models": "V2V-PoseNet"
+    },
+    {
+     "id": "argmax3d",
+     "label": "Soft-argmax 3D hand joints (MVExoNet)",
+     "role": "lift3d",
+     "desc": "Soft-argmax on the 3D heatmaps yields 21x3 hand 3D joint coordinates; the output re-initializes crops and volume root for the next refinement round.",
+     "models": "soft-argmax"
+    },
+    {
+     "id": "egoproc",
+     "label": "Egocentric fisheye undistort + reproject crop",
+     "role": "crop/rewarp",
+     "desc": "Remove fisheye lens distortion (to pinhole), project the annotated 3D joints into each ego view, and crop per left/right hand.",
+     "models": "pinhole undistortion"
+    },
+    {
+     "id": "svego",
+     "label": "SVEgoNet single-view egocentric estimator",
+     "role": "fit-model",
+     "desc": "ResNet-50 backbone predicting 2.5D heatmaps (x-y + wrist-relative z) plus a hand-identity classification branch; readout gives wrist-relative 3D joints, later merged into a two-hand prediction.",
+     "models": "ResNet-50, 2.5D heatmaps + hand-identity head"
+    },
+    {
+     "id": "action",
+     "label": "Action / verb classification eval",
+     "role": "other",
+     "desc": "Downstream evaluation of pose quality via verb/action recognition on predicted hand-pose sequences.",
+     "models": "pose-based action recognizer"
+    }
+   ],
+   "edges": [
+    {
+     "from": "exo",
+     "to": "bodydet",
+     "label": "per-view RGB (undistorted)"
+    },
+    {
+     "from": "bodydet",
+     "to": "bodytri",
+     "label": "2D body kpts"
+    },
+    {
+     "from": "bodytri",
+     "to": "handbox",
+     "label": "3D body joints"
+    },
+    {
+     "from": "handbox",
+     "to": "enc",
+     "label": "per-view hand crops + boxes"
+    },
+    {
+     "from": "handbox",
+     "to": "proj",
+     "label": "volume root (hand center)"
+    },
+    {
+     "from": "enc",
+     "to": "proj",
+     "label": "2D feature maps"
+    },
+    {
+     "from": "proj",
+     "to": "v2v",
+     "label": "3D feature volume"
+    },
+    {
+     "from": "v2v",
+     "to": "argmax3d",
+     "label": "3D heatmaps"
+    },
+    {
+     "from": "argmax3d",
+     "to": "handbox",
+     "label": "refined crops+root (round t-1)"
+    },
+    {
+     "from": "argmax3d",
+     "to": "egoproc",
+     "label": "3D hand joints (auto labels)"
+    },
+    {
+     "from": "egoproc",
+     "to": "svego",
+     "label": "undistorted ego hand crops + labels"
+    },
+    {
+     "from": "svego",
+     "to": "action",
+     "label": "wrist-relative 3D joints"
+    }
+   ],
+   "mermaid": "flowchart LR\n  subgraph exo_stage[\"Exocentric auto-annotation (MVExoNet)\"]\n    exo[\"Multi-view exocentric RGB 8 cams\"]\n    bodydet[\"Per-view 2D body keypoint detector\"]\n    bodytri[\"Triangulate 3D body keypoints\"]\n    handbox[\"Virtual hand-center to per-view hand boxes\"]\n    enc[\"Per-view EfficientNet 2D feature encoder\"]\n    proj[\"Unproject + softmax-weighted fuse to 3D volume\"]\n    v2v[\"V2V-PoseNet 3D CNN to heatmaps\"]\n    argmax3d[\"Soft-argmax 3D hand joints\"]\n  end\n  subgraph ego_stage[\"Egocentric distillation + eval\"]\n    egoproc[\"Ego fisheye undistort + reproject crop\"]\n    svego[\"SVEgoNet single-view estimator\"]\n    action[\"Action / verb classification eval\"]\n  end\n  exo -->|\"per-view RGB\"| bodydet\n  bodydet -->|\"2D body kpts\"| bodytri\n  bodytri -->|\"3D body joints\"| handbox\n  handbox -->|\"per-view hand crops + boxes\"| enc\n  handbox -->|\"volume root\"| proj\n  enc -->|\"2D feature maps\"| proj\n  proj -->|\"3D feature volume\"| v2v\n  v2v -->|\"3D heatmaps\"| argmax3d\n  argmax3d -.->|\"refined crops+root round t-1\"| handbox\n  argmax3d -->|\"3D hand joints auto labels\"| egoproc\n  egoproc -->|\"undistorted ego crops + labels\"| svego\n  svego -->|\"wrist-relative 3D joints\"| action",
+   "figure_path": "/tmp/pipeline-comparison/figures/assemblyhands.png",
+   "figure_caption": "Fig. 2 (cropped): three-step AssemblyHands pipeline \u2014 Step 1 automatic 3D hand-pose annotation from multi-view exocentric images with iterative refinement (MVExoNet), Step 2 single-view egocentric 3D hand pose estimation (SVEgoNet) trained on the auto-annotations, and Step 3 evaluation by action/verb classification.",
+   "traits": [
+    "temporal feedback loop (inference-time iterative refinement re-crops + re-roots from previous round, MVExoNet frozen)",
+    "multi-view feature-volume lifting (softmax-weighted unprojection into shared 3D volume)",
+    "learnable triangulation vs classical 2D+triangulation baseline",
+    "body-keypoint-derived hand boxes for cross-view geometric consistency",
+    "exo-to-ego distillation (auto-annotate exo, train ego single-view model)",
+    "fisheye rewarp / undistortion of egocentric views (fisheye to pinhole)",
+    "swappable 2D encoder (EfficientNet) + 3D CNN (V2V-PoseNet)",
+    "hand-identity classification branch to disambiguate left/right",
+    "auto-annotation scales labels 21x over manual (30 Hz vs 1 Hz sampling)",
+    "downstream task (verb/action recognition) as annotation-quality proxy"
+   ],
+   "posekit_notes": "detect + triangulate (body keypoint detector -> 2D+Triangulation) map to posekit detect/triangulate roles; enc (EfficientNet per-view 2D features) is a pose2d-style per-view stage; proj (softmax-weighted unprojection / learnable triangulation) is triangulate and v2v (V2V-PoseNet volume refine) + argmax3d (soft-argmax on 3D heatmaps) are lift3d; handbox is crop/rewarp glue; egoproc (fisheye undistort + reproject) is crop/rewarp consumer glue; svego is a fit-model egocentric estimator; the iterative-refinement feedback edge and verb/action-classification eval are consumer glue outside posekit's per-frame pose roles."
+  },
+  {
+   "id": "assemblyx",
+   "name": "AssemblyHands-X (AssemblyX): Modeling 3D Hand-Body Coordination for Understanding Bimanual Human Activities",
+   "year": "2025",
+   "venue": "arXiv preprint (arXiv:2509.23888), Sep 2025",
+   "summary": "AssemblyHands-X builds a markerless 3D hand-body benchmark by annotating synchronized multi-view Assembly101 videos. Its offline annotation pipeline runs two parallel per-region branches (body and hands): each does 2D keypoint detection then confidence-weighted multi-view triangulation, the 3D joints are merged into a unified upper-body+hands skeleton, and finally SMPL-X parameters are fit per frame by minimizing a 3D-joint loss plus a differentiable silhouette loss against SAM human masks. The output is per-frame 3D hand-body keypoints and SMPL-X mesh parameters used downstream for action recognition.",
+   "rig": "Synchronized multi-view static RGB videos from Assembly101 (8 exocentric camera views; the annotation uses all 8 per Table 2, action-recognition experiments use View 3)",
+   "outputs": "Per-frame unified 3D upper-body + two-hand keypoints, plus fitted SMPL-X whole-body parameters (shape beta, pose theta / mesh); these feed pose-based action recognition",
+   "kind": "offline-annotation",
+   "nodes": [
+    {
+     "id": "input",
+     "label": "Multi-view videos (Assembly101, 8 views)",
+     "role": "other",
+     "desc": "Synchronized exocentric RGB frames; input to the annotation pipeline",
+     "models": "Assembly101 [Sener+ CVPR'22]"
+    },
+    {
+     "id": "crop",
+     "label": "Crop body & hand regions",
+     "role": "crop/rewarp",
+     "desc": "Separately crop body and hand regions per view so each branch is triangulated independently",
+     "models": "region cropping"
+    },
+    {
+     "id": "body2d",
+     "label": "Body 2D keypoint detection",
+     "role": "pose2d",
+     "desc": "Per-view whole-body 2D keypoints (xc,yc) with confidence wc; then median-filtered over frames, confidences modulated by distance to crop edges (suppress overconfident boundary joints) and thresholded at tau=0.15",
+     "models": "DWPose two-stage distillation [Yang+ ICCVW'23]"
+    },
+    {
+     "id": "body_tri",
+     "label": "Body confidence-weighted triangulation",
+     "role": "triangulate",
+     "desc": "Confidence-weighted linear (DLT) triangulation solving (w' o A)X=0 across C views; body-specific pipeline handling truncation",
+     "models": "Learnable-triangulation DLT [Iskakov+ ICCV'19], Hartley-Zisserman"
+    },
+    {
+     "id": "hand2d3d",
+     "label": "Hand 2D detect + triangulation",
+     "role": "pose2d",
+     "desc": "Precise multi-view hand pose pipeline producing 2D then 3D hand keypoints from cropped hand regions (treated as a black-box sub-pipeline)",
+     "models": "AssemblyHands triangulation [Ohkawa+ CVPR'23]"
+    },
+    {
+     "id": "merge",
+     "label": "Merge 3D body + hand joints",
+     "role": "other",
+     "desc": "Combine triangulated 3D body joints with precise 3D hand joints into a unified upper-body+hands skeleton",
+     "models": "joint concatenation"
+    },
+    {
+     "id": "sam",
+     "label": "Human mask from SAM",
+     "role": "segment",
+     "desc": "Per-view human segmentation masks extracted from the multi-view images, used as the silhouette target for fitting",
+     "models": "SAM [Kirillov+ ICCV'23]"
+    },
+    {
+     "id": "fit",
+     "label": "SMPL-X fitting",
+     "role": "fit-model",
+     "desc": "Optimize SMPL-X shape beta and pose theta per frame minimizing L = lambda_joint*L_joint + lambda_mask*L_mask + lambda_beta*||beta||^2 + lambda_theta*||theta||^2",
+     "models": "SMPL-X [Pavlakos+ CVPR'19]"
+    },
+    {
+     "id": "render",
+     "label": "SMPL-X projection vs mask (silhouette loss)",
+     "role": "render-verify",
+     "desc": "Differentiably render/project the SMPL-X mesh and measure discrepancy against the SAM human mask; this L_mask term is minimized to align mesh silhouette with observed silhouette",
+     "models": "Soft Rasterizer differentiable renderer [Liu+ ICCV'19]"
+    },
+    {
+     "id": "out",
+     "label": "3D hand-body keypoints + SMPL-X annotation",
+     "role": "other",
+     "desc": "Final unified 3D keypoints and fitted SMPL-X parameters per frame",
+     "models": ""
+    }
+   ],
+   "edges": [
+    {
+     "from": "input",
+     "to": "crop",
+     "label": "multi-view frames"
+    },
+    {
+     "from": "crop",
+     "to": "body2d",
+     "label": "cropped body views"
+    },
+    {
+     "from": "crop",
+     "to": "hand2d3d",
+     "label": "cropped hand views"
+    },
+    {
+     "from": "crop",
+     "to": "sam",
+     "label": "full-frame views"
+    },
+    {
+     "from": "body2d",
+     "to": "body_tri",
+     "label": "2D body kpts + adj. conf w'"
+    },
+    {
+     "from": "body_tri",
+     "to": "merge",
+     "label": "3D body keypoints"
+    },
+    {
+     "from": "hand2d3d",
+     "to": "merge",
+     "label": "3D hand keypoints"
+    },
+    {
+     "from": "merge",
+     "to": "fit",
+     "label": "unified 3D hand-body kpts (L_joint target)"
+    },
+    {
+     "from": "sam",
+     "to": "render",
+     "label": "human silhouette mask"
+    },
+    {
+     "from": "fit",
+     "to": "render",
+     "label": "SMPL-X mesh projection"
+    },
+    {
+     "from": "render",
+     "to": "fit",
+     "label": "mask discrepancy L_mask"
+    },
+    {
+     "from": "fit",
+     "to": "out",
+     "label": "SMPL-X params (beta,theta)"
+    },
+    {
+     "from": "merge",
+     "to": "out",
+     "label": "3D keypoints"
+    }
+   ],
+   "mermaid": "flowchart LR\n  input[\"Multi-view videos (Assembly101, 8 views)\"] --> crop[\"Crop body & hand regions\"]\n  subgraph perview[\"Per-region 2D + triangulation\"]\n    crop -->|\"cropped body views\"| body2d[\"Body 2D keypoint detect (DWPose)\"]\n    crop -->|\"cropped hand views\"| hand[\"Hand detect + triangulation (AssemblyHands)\"]\n    body2d -->|\"2D body kpts + adj conf w'\"| btri[\"Body conf-weighted triangulation (DLT)\"]\n  end\n  subgraph global[\"Global fusion + model fitting\"]\n    btri -->|\"3D body keypoints\"| merge[\"Merge 3D body + hand joints\"]\n    hand -->|\"3D hand keypoints\"| merge\n    merge -->|\"unified 3D kpts (L_joint target)\"| fit[\"SMPL-X fitting\"]\n    crop -->|\"full-frame views\"| sam[\"Human mask from SAM\"]\n    sam -->|\"silhouette mask\"| render[\"SMPL-X projection vs mask (Soft Rasterizer)\"]\n    fit -->|\"mesh projection\"| render\n    render -.->|\"mask discrepancy L_mask\"| fit\n  end\n  fit -->|\"SMPL-X params beta,theta\"| out[\"3D hand-body keypoints + SMPL-X annotation\"]\n  merge -->|\"3D keypoints\"| out",
+   "figure_path": "/tmp/pipeline-comparison/figures/assemblyx.png",
+   "figure_caption": "Figure 2: AssemblyHands-X dataset annotation pipeline. Body and hand regions are cropped and triangulated independently (top row: DWPose 2D keypoints -> confidence-weighted triangulation -> 3D body keypoints; bottom row: AssemblyHands hand triangulation -> 3D hand keypoints), merged into unified 3D hand-body keypoints, then used to fit SMPL-X with a differentiable silhouette loss that minimizes the discrepancy between the projected SMPL-X mesh and SAM human masks.",
+   "traits": [
+    "confidence-weighted triangulation",
+    "edge-distance confidence modulation (boundary-joint downweighting)",
+    "temporal median filtering of 2D keypoints",
+    "two parallel per-region branches (body vs hands) then merge",
+    "precise-hand + separate-body triangulation fusion",
+    "render-back verification (differentiable silhouette loss vs SAM mask)",
+    "masks are optimization targets not model inputs",
+    "SMPL-X mesh fitting from 3D joints + silhouette",
+    "offline multi-view annotation (no realtime, no tracking)",
+    "swappable 2D pose backbone (DWPose)",
+    "parametric whole-body model output (SMPL-X)"
+   ],
+   "posekit_notes": "Maps cleanly to posekit roles: pose2d = DWPose whole-body 2D detection (with confidence post-processing as consumer glue), triangulate = confidence-weighted DLT (Iskakov/Hartley-Zisserman) as a posekit triangulation role, segment = SAM masks, fit-model = SMPL-X fitting, render-verify = Soft Rasterizer silhouette loss. The hand branch (AssemblyHands [Ohkawa+ CVPR'23]) is itself a full pose2d+triangulate sub-pipeline treated here as a black box. Consumer glue: the crop step, edge-distance confidence modulation, tau=0.15 thresholding, temporal median filtering, and the merge of hand+body 3D joints into a unified skeleton. No tracking/identity/lift3d/temporal-prior roles are used (static multi-view triangulation, no monocular lifting, no temporal feedback beyond median filtering)."
+  },
+  {
+   "id": "mamma",
+   "name": "MAMMA: Markerless Accurate Multi-person Motion Acquisition",
+   "year": "2025",
+   "venue": "arXiv 2506.13040 (MPI-IS / CMU)",
+   "summary": "MAMMA is an offline markerless multi-view motion-capture pipeline that recovers per-frame SMPL-X bodies for one or two closely-interacting people from synchronized calibrated RGB videos. Each view is segmented and tracked with SAM2, a novel transformer dense-landmark network (MammaNet) predicts N=512 surface landmarks with per-landmark uncertainty, visibility and contact conditioned on the mask, and a robust multi-stage LBFGS optimizer fits SMPL-X to the confidence-weighted, cross-view-matched landmarks. It aims to match commercial marker-based (Vicon) accuracy without manual cleanup.",
+   "rig": "Synchronized calibrated multi-view RGB camera system (16 or 32 views); calibration assumed given",
+   "outputs": "Per-frame SMPL-X neutral-body parameters Phi={beta(16 shape),theta(pose),t(translation)} for each of 1-2 people; intermediate dense 2D surface landmarks (mu), uncertainty (sigma), visibility (p), person-person contact (pc) and floor contact (fl)",
+   "kind": "offline-capture",
+   "nodes": [
+    {
+     "id": "video",
+     "label": "Multi-view synced RGB video",
+     "role": "other",
+     "desc": "16 or 32 calibrated camera views, 30 FPS; calibration Q_c assumed known",
+     "models": ""
+    },
+    {
+     "id": "sam2",
+     "label": "SAM2 mask + track",
+     "role": "segment",
+     "desc": "Per-person segmentation masks propagated through the sequence for tracking; initialized via Grounding LLM, a bbox detector, or manual clicks on one frame",
+     "models": "SAM2, Grounding LLM / bbox detector"
+    },
+    {
+     "id": "mammanet",
+     "label": "MammaNet dense landmark net",
+     "role": "dense-landmarks",
+     "desc": "ViT-Base image encoder + CNN mask encoder summed element-wise; Transformer decoder with N=512 learnable per-landmark queries; MLP heads output mu (xy), sigma (uncertainty), p (visibility), pc (person-person contact), fl (floor contact)",
+     "models": "ViT-Base + mask CNN + Transformer decoder (learnable landmark queries), MLP heads"
+    },
+    {
+     "id": "affinity",
+     "label": "Epipolar geometric affinity",
+     "role": "identity",
+     "desc": "Pairwise symmetric epipolar distance D_g between visible landmarks of every detection across view pairs; affinity A_g=exp(-D_g/lambda), zeroed if too few visible or above threshold",
+     "models": "symmetric epipolar distance, fundamental matrix"
+    },
+    {
+     "id": "match",
+     "label": "Hungarian + cycle-consistent graph",
+     "role": "identity",
+     "desc": "Hungarian assignment on cost 1-A per view pair; high-affinity matches linked into a cycle-consistent correspondence graph whose connected components are the same person across views",
+     "models": "Hungarian assignment, cycle-consistency"
+    },
+    {
+     "id": "init",
+     "label": "Ray-intersection init",
+     "role": "triangulate",
+     "desc": "Initialize each SMPL-X body at the 3D point minimizing distance between rays from camera centers; no pose/shape regression init",
+     "models": "multi-ray closest-point"
+    },
+    {
+     "id": "fit",
+     "label": "Multi-stage SMPL-X LBFGS fit",
+     "role": "fit-model",
+     "desc": "Stages: (1) solve global R,t via reprojection; (2) optimize pose+shape+trans with E_ldmks (Geman-McClure robust, weighted by visibility p and uncertainty sigma) + E_shape prior; (3) re-weight uncertainties from reprojection error and add E_temp accel penalty; (4) contact E_cont (SDF repulsion + attraction using averaged multi-view contact probs)",
+     "models": "LBFGS, SMPL-X, Geman-McClure robustifier, CUDA SDF"
+    },
+    {
+     "id": "out",
+     "label": "Per-frame SMPL-X bodies",
+     "role": "other",
+     "desc": "SMPL-X params for each person at each frame",
+     "models": "SMPL-X"
+    }
+   ],
+   "edges": [
+    {
+     "from": "video",
+     "to": "sam2",
+     "label": "RGB frames per view"
+    },
+    {
+     "from": "video",
+     "to": "mammanet",
+     "label": "RGB crops"
+    },
+    {
+     "from": "sam2",
+     "to": "mammanet",
+     "label": "per-person masks (conditioning)"
+    },
+    {
+     "from": "sam2",
+     "to": "mammanet",
+     "label": "track id (per view/person)"
+    },
+    {
+     "from": "mammanet",
+     "to": "affinity",
+     "label": "visible 2D landmarks"
+    },
+    {
+     "from": "affinity",
+     "to": "match",
+     "label": "pairwise affinity matrix"
+    },
+    {
+     "from": "match",
+     "to": "init",
+     "label": "cross-view person correspondence"
+    },
+    {
+     "from": "mammanet",
+     "to": "init",
+     "label": "2D landmarks mu"
+    },
+    {
+     "from": "init",
+     "to": "fit",
+     "label": "initial 3D body positions"
+    },
+    {
+     "from": "mammanet",
+     "to": "fit",
+     "label": "mu + sigma + p + pc + fl (per landmark)"
+    },
+    {
+     "from": "fit",
+     "to": "fit",
+     "label": "reprojection-error re-weighted sigma (t)"
+    },
+    {
+     "from": "sam2",
+     "to": "sam2",
+     "label": "mask propagation (t-1 -> t)"
+    },
+    {
+     "from": "fit",
+     "to": "out",
+     "label": "SMPL-X params"
+    }
+   ],
+   "mermaid": "flowchart LR\n  video[\"Multi-view synced RGB video\"]\n  subgraph perview[\"Per-view (each camera)\"]\n    sam2[\"SAM2 mask + track\"]\n    mammanet[\"MammaNet dense landmark net\"]\n  end\n  subgraph global[\"Global (cross-view)\"]\n    affinity[\"Epipolar geometric affinity\"]\n    match[\"Hungarian + cycle-consistent graph\"]\n    init[\"Ray-intersection init\"]\n    fit[\"Multi-stage SMPL-X LBFGS fit\"]\n  end\n  out[\"Per-frame SMPL-X bodies\"]\n  video -->|\"RGB frames\"| sam2\n  video -->|\"RGB crops\"| mammanet\n  sam2 -->|\"per-person masks\"| mammanet\n  sam2 -->|\"track id\"| mammanet\n  mammanet -->|\"visible 2D kpts\"| affinity\n  affinity -->|\"affinity matrix\"| match\n  match -->|\"person correspondence\"| init\n  mammanet -->|\"2D kpts mu\"| init\n  init -->|\"initial 3D bodies\"| fit\n  mammanet -->|\"mu+sigma+p+pc+fl\"| fit\n  fit -->|\"SMPL-X params\"| out\n  sam2 -.->|\"mask propagation t-1\"| sam2\n  fit -.->|\"reproj-error re-weighted sigma\"| fit",
+   "figure_path": "/tmp/pipeline-comparison/figures/mamma.png",
+   "figure_caption": "Figure 4 (MammaNet). The dense-landmark network: an image and its SAM2 mask are encoded by a ViT and a CNN, summed element-wise, and fed with N=512 learnable landmark queries into a Transformer decoder and MLP heads that predict per-landmark location mu, uncertainty sigma, visibility p, person-person contact pc and floor contact fl. (This is the paper's core architecture figure; the paper has no single all-in-one system diagram, so this best represents the per-view estimation stage that feeds the downstream correspondence + SMPL-X fitting.)",
+   "traits": [
+    "dense surface landmarks (512) instead of sparse joints",
+    "masks are model inputs (mask-conditioned via element-wise feature sum)",
+    "per-landmark uncertainty + visibility predicted",
+    "confidence-weighted robust reprojection fitting (Geman-McClure, visibility*uncertainty)",
+    "reprojection-error feedback re-weights uncertainty mid-optimization",
+    "learnable per-keypoint queries in transformer decoder",
+    "epipolar-affinity + Hungarian + cycle-consistent multi-view identity",
+    "SAM2 mask propagation for temporal tracking",
+    "contact-aware fitting (SDF repulsion/attraction, multi-view-averaged contact probs)",
+    "ray-intersection init, no regression-based pose/shape init",
+    "swappable 2D dense-landmark backbone (vs CameraHMR / Look-Ma)",
+    "two-stage detect-markers-then-fit-body",
+    "offline multi-view SMPL-X capture (Vicon replacement)"
+   ],
+   "posekit_notes": "segment (SAM2) and dense-landmarks (MammaNet) are per-view roles; identity maps to the epipolar-affinity + Hungarian + cycle-consistent-graph correspondence; triangulate maps to the ray-intersection initialization; fit-model maps to the multi-stage LBFGS SMPL-X optimizer (with temporal + contact energies). The uncertainty re-weighting and SAM2 propagation are consumer glue / feedback that has no direct posekit role. There is no separate lift3d or explicit render-verify stage."
+  },
+  {
+   "id": "egoexo-hands",
+   "name": "Ego-Exo 3D Hand Tracking in the Wild with a Mobile Multi-Camera Rig",
+   "year": "2025",
+   "venue": "arXiv preprint (2510.02601v1), Meta Reality Labs extended abstract",
+   "summary": "A multi-stage offline annotation pipeline that produces accurate 3D hand-pose ground truth from a mobile backpack rig of 8 exocentric fisheye cameras plus 2 egocentric Meta Quest 3 fisheye cameras (10 views total), all hardware-synchronized and MoCap-calibrated into a shared moving reference frame. Per view it runs a Sapiens body keypoint detector to get 42 hand keypoints (21 per hand) and localize hands, then perspective-crops each hand into a virtual pinhole 256x256 image (with histogram equalization) and runs the InterNet hand-specific detector for a second independent set of 2D keypoints. Confidence-filtered 2D detections (threshold 0.3) from both models across all 10 views are RANSAC-triangulated into 42 3D keypoints, to which a personalized LBS hand mesh is fit via inverse kinematics and projected back to the 2D views for the final overlay.",
+   "rig": "10 monochrome fisheye cameras (8 exocentric on a ~8kg backpack half-dome rig at 1024x1280, 60Hz, 152 deg HFOV / 116 deg VFOV; 2 egocentric front-facing on a Meta Quest 3 headset), hardware-synchronized; 5 OptiTrack PrimeX 13W MoCap cameras track a marker-tree rigid body on the headset (HOT3D-style, no AR tags) to register the freely-moving headset into a shared 3D reference frame that moves with the participant",
+   "outputs": "42 triangulated 3D hand keypoints per frame (21 per hand, left+right) plus personalized LBS hand meshes fit via IK; meshes reprojected as 2D overlays. Dataset: EgoExo-Hands (~30k annotated frames, 3 subjects, indoor+outdoor); sub-cm median MPJPE (6.28-7.90mm) vs a 30-camera dome gold standard. Future: 6DoF object pose, segmentation, contact, text.",
+   "kind": "offline-annotation",
+   "nodes": [
+    {
+     "id": "rig",
+     "label": "10-cam ego/exo fisheye rig + MoCap",
+     "role": "calibrate",
+     "desc": "8 exo fisheye + 2 Quest 3 ego fisheye, hardware-synced; 5 OptiTrack PrimeX 13W MoCap cameras track a headset marker tree to register the moving headset into the shared reference frame (which moves with the participant), giving calibrated intrinsics/extrinsics for all 10 views",
+     "models": "OptiTrack PrimeX 13W MoCap, HOT3D-style marker-tree rigid-body tracking, hardware sync + shared-frame calibration"
+    },
+    {
+     "id": "frames",
+     "label": "Per-view fisheye frames",
+     "role": "other",
+     "desc": "Synchronized monochrome fisheye images from all 10 views, one set per timestamp",
+     "models": ""
+    },
+    {
+     "id": "sapiens",
+     "label": "Sapiens body keypoints",
+     "role": "pose2d",
+     "desc": "Per-frame per-view foundation body-keypoint detector predicting 308 keypoints incl. 42 dedicated hand keypoints (21 per hand); also localizes hands (centroid of 21 kpts) for cropping. Emits per-keypoint confidence",
+     "models": "Sapiens (finetuned on proprietary + Shutterstock-curated + synthetic human keypoint data)"
+    },
+    {
+     "id": "crop",
+     "label": "Perspective crop to virtual pinhole 256x256",
+     "role": "crop/rewarp",
+     "desc": "For each hand, compute centroid + bounding circle over the 21 Sapiens keypoints; build a virtual pinhole camera co-located with the physical fisheye and set intrinsics so the bounding circle projects into a 256x256 perspective image; then apply histogram equalization before InterNet inference",
+     "models": "UmeTrack-style perspective cropping [9], histogram equalization [6]"
+    },
+    {
+     "id": "internet",
+     "label": "InterNet hand keypoints",
+     "role": "pose2d",
+     "desc": "Dedicated 2D hand-pose model run on each perspective hand crop, producing a second independent set of 42 keypoints per view with per-keypoint confidence",
+     "models": "InterNet (InterHand2.6M) [15], trained on dome + curated public + synthetic hands"
+    },
+    {
+     "id": "filter",
+     "label": "Confidence filter (thr 0.3)",
+     "role": "other",
+     "desc": "Combines Sapiens + InterNet detections = 20 sets of 42 keypoints per frame across 10 views; discards any 2D keypoint with confidence < 0.3",
+     "models": "confidence-threshold gating"
+    },
+    {
+     "id": "triangulate",
+     "label": "RANSAC multi-view triangulation",
+     "role": "triangulate",
+     "desc": "Standard RANSAC-based multi-view triangulation over confidence-filtered 2D detections from all views/both models to produce 42 3D hand keypoints per frame",
+     "models": "RANSAC-based triangulation"
+    },
+    {
+     "id": "ikfit",
+     "label": "Personalized LBS mesh IK fit",
+     "role": "fit-model",
+     "desc": "Fit a personalized linear blend skinning hand model (derived from a high-resolution hand scan) to the triangulated 3D keypoints via inverse kinematics; produces GT meshes suitable for fine-grained tasks like contact analysis",
+     "models": "UmeTrack/HOT3D-compatible personalized LBS hand model, inverse kinematics"
+    },
+    {
+     "id": "reproj",
+     "label": "Reproject mesh to 2D views",
+     "role": "render-verify",
+     "desc": "Fitted personalized meshes are projected back into the 2D camera views as the final overlay output (Figure 2e)",
+     "models": "camera reprojection"
+    }
+   ],
+   "edges": [
+    {
+     "from": "rig",
+     "to": "frames",
+     "label": "synced fisheye frames + calibration"
+    },
+    {
+     "from": "frames",
+     "to": "sapiens",
+     "label": "per-view images"
+    },
+    {
+     "from": "sapiens",
+     "to": "crop",
+     "label": "21 hand kpts -> centroid/bounding circle"
+    },
+    {
+     "from": "crop",
+     "to": "internet",
+     "label": "256x256 pinhole crops (hist-eq)"
+    },
+    {
+     "from": "sapiens",
+     "to": "filter",
+     "label": "2D kpts + conf"
+    },
+    {
+     "from": "internet",
+     "to": "filter",
+     "label": "2D kpts + conf"
+    },
+    {
+     "from": "filter",
+     "to": "triangulate",
+     "label": "filtered 2D dets (conf>=0.3)"
+    },
+    {
+     "from": "rig",
+     "to": "triangulate",
+     "label": "calibrated extrinsics/intrinsics"
+    },
+    {
+     "from": "triangulate",
+     "to": "ikfit",
+     "label": "42 3D keypoints"
+    },
+    {
+     "from": "ikfit",
+     "to": "reproj",
+     "label": "personalized mesh"
+    }
+   ],
+   "mermaid": "flowchart LR\n  rig[\"10-cam ego/exo fisheye rig + OptiTrack MoCap calibration\"]\n  frames[\"Per-view synced fisheye frames\"]\n  subgraph perview[\"Per-view 2D detection\"]\n    sapiens[\"Sapiens body keypoints (42 hand kpts)\"]\n    crop[\"Perspective crop -> virtual pinhole 256x256 + hist-eq\"]\n    internet[\"InterNet hand keypoints\"]\n  end\n  subgraph global[\"Global 3D fusion\"]\n    filter[\"Confidence filter thr 0.3\"]\n    triangulate[\"RANSAC multi-view triangulation\"]\n    ikfit[\"Personalized LBS mesh IK fit\"]\n    reproj[\"Reproject mesh to 2D views\"]\n  end\n  rig -->|\"synced frames + calibration\"| frames\n  frames -->|\"per-view images\"| sapiens\n  sapiens -->|\"21 kpts -> centroid/circle\"| crop\n  crop -->|\"256x256 pinhole crops\"| internet\n  sapiens -->|\"2D kpts + conf\"| filter\n  internet -->|\"2D kpts + conf\"| filter\n  rig -->|\"calibrated cameras\"| triangulate\n  filter -->|\"filtered 2D dets\"| triangulate\n  triangulate -->|\"42 3D keypoints\"| ikfit\n  ikfit -->|\"personalized mesh\"| reproj",
+   "figure_path": "/tmp/pipeline-comparison/figures/egoexo-hands.png",
+   "figure_caption": "Figure 2. Overview of the multi-stage pipeline for accurate 3D hand pose annotation. (a) Multi-view fisheye images from the 10 ego/exo cameras. (b) Sapiens body keypoint detector predicts 2D hand keypoints per frame and localizes hands for cropping. (c) InterNet hand-specific detector on perspective crops for additional 2D hand keypoints. (d) Per-hand 3D triangulation using Sapiens and InterNet keypoints across all views via robust multi-view geometry. (e) Personalized meshes are fitted to triangulated 3D keypoints and projected back to 2D views.",
+   "traits": [
+    "dual redundant 2D detectors (Sapiens body-kpt + InterNet hand-specific) both feeding one triangulation",
+    "body keypoint detector doubles as hand detector/localizer (centroid crop)",
+    "fisheye rewarp to virtual pinhole crops co-located with physical camera",
+    "swappable 2D pose (two independent models fused)",
+    "confidence-thresholded 2D detections (thr 0.3) gate triangulation",
+    "RANSAC robust multi-view triangulation",
+    "per-user personalized LBS hand template from high-res scan",
+    "IK model fitting to triangulated 3D keypoints",
+    "reprojection of fitted mesh back to 2D views as terminal overlay (no feedback loop)",
+    "ego+exo multi-camera fusion into a moving (participant-attached) shared reference frame",
+    "MoCap marker-tree headset registration (no AR tags)",
+    "histogram equalization preprocessing for lighting robustness",
+    "gold-standard 30-cam dome validation (sub-cm median MPJPE)"
+   ],
+   "posekit_notes": "Maps cleanly to posekit roles: sapiens and internet are two pose2d producers (the body detector also acting as detect/identity for hands via centroid cropping); crop is a crop/rewarp stage (fisheye->virtual-pinhole warp); filter is confidence gating glue; triangulate is the canonical triangulate role (RANSAC multi-view); ikfit is fit-model (personalized LBS + IK, like a MANO/UmeTrack fitter); reproj is render-verify (mesh reprojected to 2D as the final overlay). rig is calibrate (MoCap-based extrinsics into a moving frame). The dual-detector fan-in and the fisheye virtual-pinhole crop are the main consumer-glue pieces around otherwise standard posekit stages. This is strictly per-frame offline annotation: there is NO temporal/tracking role and NO feedback loop -- the paper describes reprojection only as a final 2D overlay (Figure 2e), not as a verification loop that modifies earlier stages, so the previously-claimed reproj->sapiens feedback edge was removed as an invention."
+  },
+  {
+   "id": "hocap",
+   "name": "HO-Cap: A Capture System and Dataset for 3D Reconstruction and Pose Tracking of Hand-Object Interaction",
+   "year": "2024",
+   "venue": "arXiv (2406.06843v4, 2025)",
+   "summary": "HO-Cap is a semi-automatic offline annotation pipeline that turns synchronized multi-view RGB-D videos of hand-object interaction into 3D shape and 6-DoF pose annotations for hands (MANO) and objects. Per frame it runs two parallel branches \u2014 object masks (SAM2) + FoundationPose 6D tracking with cross-view RANSAC consistency and SDF refinement, and MediaPipe 2D hand joints triangulated with RANSAC into MANO fits \u2014 then a joint hand-object SDF optimization resolves interpenetration, followed by render-back to all camera views for verification and 2D annotation export.",
+   "rig": "8 statically-mounted, extrinsically-calibrated Intel RealSense D455 RGB-D cameras positioned above a table (world frame near table center), plus one higher-resolution Microsoft Azure Kinect (also above the table, used primarily for per-object 3D reconstruction) and a Microsoft HoloLens headset for egocentric capture. Calibrated with Vicalib. For per-object reconstruction the object is manually moved in front of the Azure Kinect and a textured mesh is built offline with BundleSDF (LoFTR matching + marching cubes).",
+   "outputs": "Per-frame 6-DoF object poses T=(R,t) in SE(3) in the world frame for each object; MANO hand pose params theta (R^51) and pre-calibrated shape beta (R^10) for 1-2 hands; reconstructed 64 textured 3D object meshes; 3D hand/object meshes projected back to each camera view as 2D image annotations; refined HoloLens poses.",
+   "kind": "offline-annotation",
+   "nodes": [
+    {
+     "id": "input",
+     "label": "Multiview RGB-D frame @ t",
+     "role": "other",
+     "desc": "8 calibrated RealSense D455 RGB-D cameras (world frame near table center) plus one Azure Kinect and a HoloLens; depth+color per view at time step t",
+     "models": "Intel RealSense D455 x8, Azure Kinect, HoloLens"
+    },
+    {
+     "id": "objseg",
+     "label": "Object segmentation (SAM2)",
+     "role": "segment",
+     "desc": "SAM2 prompted with manually selected points in the first frame, tracks per-object masks through the sequence across views",
+     "models": "SAM2"
+    },
+    {
+     "id": "fpose",
+     "label": "FoundationPose per-view 6D tracking",
+     "role": "track",
+     "desc": "Per-camera 6D object pose tracking from masks; single-camera model, occlusion-prone, fed the previous world pose reprojected into its view",
+     "models": "FoundationPose"
+    },
+    {
+     "id": "objinit",
+     "label": "Cross-view pose consistency + RANSAC",
+     "role": "triangulate",
+     "desc": "Transforms per-view tracked poses into world frame; if pairwise-distance spread is high, poses deemed noisy and previous frame reused; else RANSAC (optionally seeded with T_{t-1}) rejects outliers to a single coherent initial pose",
+     "models": "RANSAC"
+    },
+    {
+     "id": "objopt",
+     "label": "SDF object pose optimization",
+     "role": "optimize",
+     "desc": "Refines T_t on the 8-camera fused segmented point cloud: min L_sdf + lambda1 L_smooth(T_t,T_{t-1}); SDF loss aligns fused points to mesh, smoothness on quaternion+translation",
+     "models": "SDF fitting, marching-cubes mesh"
+    },
+    {
+     "id": "handdet",
+     "label": "MediaPipe 2D hand joints + filtering",
+     "role": "pose2d",
+     "desc": "MediaPipe detects 21 2D hand landmarks per view; no confidence scores, so occluded/wrong joints must be filtered downstream",
+     "models": "MediaPipe Hands"
+    },
+    {
+     "id": "handtri",
+     "label": "Triangulation + RANSAC 3D keypoints",
+     "role": "triangulate",
+     "desc": "Per joint, triangulate all valid view-pairs into candidate 3D points, score by reprojection loss L_proj, keep lowest-error candidate; gaps filled by linear then cubic-spline interpolation for temporal smoothness",
+     "models": "RANSAC, DLT triangulation, cubic-spline interp"
+    },
+    {
+     "id": "handopt",
+     "label": "MANO hand pose optimization",
+     "role": "fit-model",
+     "desc": "Fits MANO theta per hand: min L_keypoint(theta) + lambda2 L_reg; keypoint loss matches MANO joints J_i(theta) to triangulated 3D keypoints; beta pre-calibrated per subject",
+     "models": "MANO"
+    },
+    {
+     "id": "jointopt",
+     "label": "Joint hand-object SDF optimization",
+     "role": "optimize",
+     "desc": "Jointly refines all object poses and MANO hand poses using object+hand SDFs on fused segmented point clouds plus regularization and temporal smoothness; reduces hand-object mesh interpenetration. Hand masks/points from SAM2 prompted by keypoint bbox+2D joints, isolated via point-to-mesh threshold",
+     "models": "SDF fitting, SAM2 (hand masks)"
+    },
+    {
+     "id": "final",
+     "label": "Final hand-object pose (world frame)",
+     "role": "other",
+     "desc": "Coherent per-frame object 6D poses and MANO hand params in world frame",
+     "models": ""
+    },
+    {
+     "id": "render",
+     "label": "Render to camera views",
+     "role": "render-verify",
+     "desc": "Projects the refined 3D hand+object shapes into every camera view to verify alignment and export 2D image annotations",
+     "models": "mesh rasterization"
+    }
+   ],
+   "edges": [
+    {
+     "from": "input",
+     "to": "objseg",
+     "label": "RGB per view"
+    },
+    {
+     "from": "input",
+     "to": "handdet",
+     "label": "RGB per view"
+    },
+    {
+     "from": "input",
+     "to": "objopt",
+     "label": "depth -> fused point cloud"
+    },
+    {
+     "from": "input",
+     "to": "jointopt",
+     "label": "depth -> fused point cloud"
+    },
+    {
+     "from": "objseg",
+     "to": "fpose",
+     "label": "object masks"
+    },
+    {
+     "from": "fpose",
+     "to": "objinit",
+     "label": "per-view 6D poses"
+    },
+    {
+     "from": "objinit",
+     "to": "objopt",
+     "label": "initial object pose T_t"
+    },
+    {
+     "from": "objinit",
+     "to": "fpose",
+     "label": "reproject world pose to view t+1"
+    },
+    {
+     "from": "objopt",
+     "to": "jointopt",
+     "label": "refined object pose"
+    },
+    {
+     "from": "handdet",
+     "to": "handtri",
+     "label": "2D kpts (21, no conf)"
+    },
+    {
+     "from": "handtri",
+     "to": "handopt",
+     "label": "3D keypoints (RANSAC-filtered)"
+    },
+    {
+     "from": "handopt",
+     "to": "jointopt",
+     "label": "MANO theta init"
+    },
+    {
+     "from": "handtri",
+     "to": "jointopt",
+     "label": "2D kpts+bbox -> SAM2 hand mask"
+    },
+    {
+     "from": "jointopt",
+     "to": "final",
+     "label": "refined hand+object poses"
+    },
+    {
+     "from": "final",
+     "to": "render",
+     "label": "3D meshes"
+    },
+    {
+     "from": "objopt",
+     "to": "objinit",
+     "label": "T_{t-1} prior"
+    }
+   ],
+   "mermaid": "flowchart LR\n  input[\"Multiview RGB-D frame @ t\"]\n  subgraph object[\"Object branch\"]\n    objseg[\"Object segmentation (SAM2)\"]\n    fpose[\"FoundationPose per-view 6D tracking\"]\n    objinit[\"Cross-view consistency + RANSAC\"]\n    objopt[\"SDF object pose optimization\"]\n  end\n  subgraph hand[\"Hand branch\"]\n    handdet[\"MediaPipe 2D hand joints + filtering\"]\n    handtri[\"Triangulation + RANSAC 3D keypoints\"]\n    handopt[\"MANO hand pose optimization\"]\n  end\n  jointopt[\"Joint hand-object SDF optimization\"]\n  final[\"Final hand-object pose (world frame)\"]\n  render[\"Render to camera views\"]\n\n  input -->|\"RGB per view\"| objseg\n  input -->|\"RGB per view\"| handdet\n  input -->|\"depth -> fused cloud\"| objopt\n  input -->|\"depth -> fused cloud\"| jointopt\n  objseg -->|\"object masks\"| fpose\n  fpose -->|\"per-view 6D poses\"| objinit\n  objinit -->|\"initial pose T_t\"| objopt\n  objinit -.->|\"reproject pose to view t+1\"| fpose\n  objopt -.->|\"pose t-1 prior\"| objinit\n  objopt -->|\"refined object pose\"| jointopt\n  handdet -->|\"2D kpts (21, no conf)\"| handtri\n  handtri -->|\"3D keypoints\"| handopt\n  handopt -->|\"MANO theta init\"| jointopt\n  handtri -->|\"2D kpts+bbox -> SAM2 hand mask\"| jointopt\n  jointopt -->|\"refined poses\"| final\n  final -->|\"3D meshes\"| render",
+   "figure_path": "/tmp/pipeline-comparison/figures/hocap.png",
+   "figure_caption": "Figure 4: HO-Cap pipeline for obtaining poses of hands and objects from multi-view RGB-D videos. From the multiview RGB-D frame at time t, an object branch (SAM2 masks -> FoundationPose per-view 6D tracking -> object pose optimization) and a hand branch (MediaPipe 2D joints & filtering -> triangulation & RANSAC -> hand pose optimization) feed a joint hand-object pose estimation, yielding the final pose in the world frame that is rendered back to all camera views.",
+   "traits": [
+    "temporal feedback loop (optimized world pose reprojected as next-frame FoundationPose init)",
+    "previous-frame pose prior seeds RANSAC / gates noisy frames",
+    "confidence-weighted triangulation via reprojection-error selection (MediaPipe lacks confidences)",
+    "cross-view pose consistency with RANSAC outlier rejection",
+    "render-back verification to all camera views for 2D annotation",
+    "joint hand-object SDF optimization resolves interpenetration",
+    "masks are model inputs (SAM2 masks drive both point clouds and FoundationPose)",
+    "swappable 2D pose front-end (MediaPipe)",
+    "per-user MANO template (beta pre-calibrated per subject)",
+    "SDF-based pose refinement on fused multi-cam point cloud",
+    "temporal smoothing via linear + cubic-spline interpolation of missing joints",
+    "separate offline object 3D reconstruction (BundleSDF + LoFTR + marching cubes) supplies mesh models"
+   ],
+   "posekit_notes": "objseg=segment (SAM2), fpose=track (FoundationPose per-view 6D), objinit=triangulate/cross-view consistency (RANSAC), objopt & jointopt=optimize (SDF), handdet=pose2d (MediaPipe 21 joints), handtri=triangulate (multi-view DLT + RANSAC + interpolation), handopt=fit-model (MANO), render=render-verify. The object 6D tracking + SDF refine and the joint hand-object SDF stage are consumer glue with no direct posekit role; the MediaPipe->triangulate->MANO-fit hand branch maps cleanly onto posekit pose2d/triangulate/fit-model roles with a swappable 2D front-end."
+  }
+ ],
+ "inventory": "I have everything needed. Producing the structured inventory.\n\n---\n\n# posekit inventory + pipeline-stage mapping\n\nAll paths under `/home/pablo/.paseo/worktrees/26sr02x6/cowardly-blobfish/packages/`. posekit source root is `posekit/src/posekit/`.\n\n## 1. IMPLEMENTED ROLES\n\nRoles (ABCs) are all defined in `posekit/src/posekit/models/base.py`. All consume the canonical batch `frames_rgb: UInt8[Tensor, \"b h w 3\"]` (GPU uint8 RGB NHWC) and return GPU-resident predictions.\n\n| Role | Defined | Signature | Concrete impls TODAY (file) | Runtimes | Status |\n|---|---|---|---|---|---|\n| `PersonDetector` | `base.py:29` | `__call__(frames_rgb) -> BoxDetections` (`:33`) | `YoloxDetector` (`models/yolox.py:51`, cfg `:34`); `RtDetrDetector` (`models/rtdetr.py:59`, cfg `:38`) | YOLOX: onnx / tensorrt (`create_runtime_from_onnx`, NMS stripped at load \u2192 GPU torchvision NMS). RT-DETRv2: **torch only** (`TorchRuntime`, HF `PekingU/rtdetr_v2_r50vd` weights) | Phase 1/3 done |\n| `TopDownPose2d` | `base.py:45` (has `skeleton: KeypointSkeleton` attr `:48`) | `__call__(frames_rgb, detections) -> Keypoints2d` (`:52`) | `RtmPose2d` (`models/rtmpose.py:59`, cfg `:44`) COCO-17/COCO-133; `SapiensPose2d` (`models/sapiens.py:65`, cfg `:50`) 308\u2192133; `VitPose2d` (`models/vitpose.py:66`, cfg `:45`) COCO-17 | RTMPose: onnx / tensorrt. Sapiens: torch / onnx / tensorrt (fp32 dynamo export \u2192 **bf16 TRT only**, fp16 overflows). ViTPose: **torch only** | Phase 1/3 done |\n| `InstancePose2d` | `base.py:65` (attr `skeleton` `:75`) | `__call__(frames_rgb) -> tuple[BoxDetections, Keypoints2d]` (`:79`) | **NONE** (adapter contract only) | \u2014 | Phase 4 planned (RTMO first) |\n| `PromptableSegmenter` | `base.py:113` | `__call__(frames_rgb, prompts: SegmentationPrompts) -> BoxDetections` (`:117`) | `Sam3Segmenter` (`models/sam3_segmenter.py:40`, cfg `:23`) | torch (HF `facebook/sam3`, `Sam3Model`+`Sam3Processor`). **Text-prompt only**; box/point rejected (SAM2 image mode deferred) | Phase 2 done |\n| `VideoSegmenter` | `base.py:131` | `step(frames_rgb, prompts?) -> BoxDetections` (`:140`) + `reset()` (`:155`) | `Sam2VideoSegmenter` (`models/sam2_video.py:50`, cfg `:35`) | torch, via **sam2-streaming fork** `SAM2GenericVideoPredictor` (EfficientTAM-ti@512); one causal memory state per batch slot. TRT deferred | Phase 2 done |\n| `IdentityEncoder` | `base.py:160` (attr `embed_dim` `:163`) | `__call__(frames_rgb, detections) -> Float32[Tensor,\"n embed_dim\"]` (`:167`) | `ClipIdentity` (`models/clip_identity.py:58`, cfg `:41`) | torch (CLIP ViT-B/32 vision tower) | Phase 2 done |\n| `TopDownDenseLandmarks2d` | `base.py:181` (attr `num_landmarks` `:190`) | `__call__(frames_rgb, detections w/ masks) -> DenseLandmarks2d` (`:194`, raises if `masks is None`) | **Lives in mamma, not posekit**: `MammaNetLandmarks` (`mamma/src/mamma/landmarks/posekit_role.py:43`, cfg `:29`) | torch (fp16 autocast); mamma also has a TRT-CUDA-graph runner (`mamma/landmarks/tensorrt_backend.py`) | Phase 3 done (adapter in mamma, bitwise-equal to `LandmarkEstimator`) |\n\nComposite (not a role): `Pose2dPipeline` (`base.py:211`) wires a `PersonDetector` + `TopDownPose2d` into the \"frames \u2192 posed instances\" slot.\n\nPrompt payload: `SegmentationPrompts` dataclass (`base.py:92`) \u2014 `frame_indices` (req), optional `boxes_xyxy`/`points_xy`/`track_ids`/`text`.\n\n**Roles named in base.py docstring but with NO ABC and NO impl:** `TopDownKeypoints3d`, `TopDownPose3d`, `SurfacePose3d`, `HumanPartSegmenter`, `HumanSurfaceNormals`, `HumanPointmap`, `HumanMatting` \u2014 see GAPS.\n\n## 2. BOUNDARY DATATYPES\n\nDefined in `posekit/src/posekit/predictions.py` (all `@dataclass(frozen=True, slots=True)`, torch tensors GPU-resident; `*_numpy` helpers only at viz/serialize boundaries):\n\n- **`BoxDetections`** (`predictions.py:37`): `xyxy` Float32[n,4] (`:47`), `scores` Float32[n] (`:49`), `frame_indices` Int64[n] (`:51`); **optional** `masks` Bool[n,h,w] (`:53`), `track_ids` Int64[n] (`:55`). One type unifies detector/tracker/segmenter output. Props: `num_detections` (`:58`), `boxes_for_frame(frame_idx)` (`:63`).\n- **`Keypoints2d`** (`predictions.py:75`): `xy` Float32[n,k,2], `scores` Float32[n,k] (**mandatory** confidence), `frame_indices` Int64[n], `skeleton: KeypointSkeleton`; **optional** `uncertainty` Float32[n,k] (log-variance, MammaNet/RF-DETR style; `:87`). Helpers `xy_numpy`/`scores_numpy`.\n- **`DenseLandmarks2d`** (`predictions.py:108`): `xy` Float32[n,p,2], `log_variance`, `visibility` (post-sigmoid `[0,1]`, doubles as confidence), `contact`, `floor_contact`, `frame_indices`. No skeleton (anonymous surface points).\n- **`Keypoints3d`** (`predictions.py:136`): `xy` Float32[n,k,2], `z_root_relative` Float32[n,k], `scores`, `frame_indices`, `skeleton`; `root_indices` tuple (default `()`), **optional** `xyz_camera` Float32[n,k,3] (OpenCV/RDF). **Type exists but no producing role/model yet** (RTMW3D planned).\n- `validate_frames_rgb` (`predictions.py:21`) \u2014 shared canonical-layout guard.\n\n**Skeletons** (`posekit/src/posekit/skeletons.py`): `KeypointSkeleton` (`:14`, name/keypoint_names/links). Registry `SKELETONS` (`:52`) contains only `COCO_17` (`:38`), `COCO_133` (`:31`), `HAND_21` (`:45`). Names/links sourced from `simplecv.data.skeleton.{coco_133,mediapipe}`. **No** halpe-26, h36m-17, body-25, sapiens-308-native, mamma-512, or format-projection tables yet (design \u00a75 growth items).\n\n**Zoo** (`posekit/src/posekit/zoo.py`): `ZooModel` registry `ZOO` (`:54`) with role/paradigm/source/location/input_size/skeleton/status. Implemented entries: `yolox-m/x-humanart`, `rtdetr-v2-r50`, `rtmpose-m/x-coco17`, `rtmw-x-coco133`, `vitpose-base-coco17`, `sapiens2-pose-coco133`. Planned: `rtmdet-nano-hand`, `rtmpose-m-hand21`, `rtmo-l-coco17`, `rtmw3d-l-coco133`. Presets `PRESETS` (`:136`): `body`, `body-performance`, `wholebody`, `body-nmsfree`, `wholebody-fullframe`; lookup `preset()` (`:165`).\n\n**Runtimes** (orthogonal to roles, `posekit/src/posekit/runtimes/`): `TensorRuntime` protocol (`base.py:42`), `TorchRuntime`, `OnnxCudaRuntime` (IOBinding GPU-resident), `TensorRtRuntime` (`use_cuda_graph` capture/replay). Backend configs `TorchBackendConfig`/`OnnxBackendConfig`/`TensorRtBackendConfig` in `runtimes/__init__.py:45-82`; `create_runtime_from_onnx` (`:98`) is the ONNX\u2192ORT/TRT fork.\n\n**posekit.ops** (shared GPU pre/post): `ops/crops.py` (`CropSpec`, `CropBatch`, `bbox_xyxy_to_center_scale`, `crop_frames`, `crop_coords_to_image`), `ops/decode.py` (`decode_udp_heatmaps`, `decode_classic_heatmaps`, `decode_simcc`), `ops/letterbox.py` (`letterbox_frames`), `ops/yolox.py`.\n\n## 3. GEOMETRY GLUE posekit does NOT own (design \u00a73 explicit non-goals)\n\nTriangulation, association, temporal filtering/extrapolation, auto-calibration/BA, SMPL-X fitting, metric scale \u2014 all in consumers/simplecv:\n\n- **Triangulation (DLT):** `simplecv/simplecv/ops/triangulate.py` \u2014 `batch_triangulate` (`:174`), `projectN3` (`:11`), `proj_3d_vectorized` (`:38`), fisheye/Kannala-Brandt variants (`:66`,`:135`). mv-api imports these (`mv-api/.../multiview_pose_estimator.py:15`).\n- **Gated weighted triangulation (mamma):** `mamma/src/mamma/fitting/triangulation.py` \u2014 `triangulate_points` (`:15`), `triangulate_gated` (`:81`).\n- **Cross-view association / identity:** `mamma/src/mamma/tracking/identity.py` \u2014 `ClipEncoder` (`:31`, its own CLIP, NOT posekit's `ClipIdentity`), `FeatureBank` (`:59`), `fundamental_matrix` (`:103`), `epipolar_score` (`:134`), `resolve_epipolar_px` (`:153`), `assign_hungarian` (`:161`). Orchestrated in `mamma/tracking/tracker.py` `MultiViewTracker` (`:107`).\n- **Bundle adjustment / auto-calibration:** `mamma/src/mamma/calibration/keypoint_bundle_adjust.py` \u2014 `bundle_adjust_cameras` (`:201`), `so3_exp` (`:47`), `project_points` (`:73`), `BundleAdjustConfig` (`:112`).\n- **SMPL-X fitting:** `mamma/src/mamma/fitting/window_fitter.py` \u2014 `SlidingWindowFitter` (`:193`, CUDA-graph capture `:335`, LBFGS polish `:427`), `mamma/fitting/losses.py`, `mamma/fitting/sampled_smplx.py`, `mamma/fitting/smplx_wrapper.py`.\n- **Temporal extrapolation:** `mv-api/.../multiview_pose_estimator.py` \u2014 `MultiviewBodyTracker.extrapolate_3d_keypoints` (`:412`), `MVHistory` (`:72`).\n- **Optional hand refinement:** WiLoR in `mv-api/.../multiview_pose_estimator.py:_refine_hand_keypoints_with_wilor` (`:354`) via `wilor_nano.hand_keypoints`.\n\n## 4. GAPS\n\n**Roles named in design.md as future phases, no ABC/impl yet:**\n- `TopDownKeypoints3d` (design \u00a73 3D roles / \u00a77 Phase 4) \u2014 `Keypoints3d` container *exists* (`predictions.py:136`) but no role ABC and no RTMW3D model. Zoo entry `rtmw3d-l-coco133` is `status=\"planned\"`.\n- `TopDownPose3d` (parametric: WiLoR/SAM3D-Body/HaMeR) \u2014 Phase 4; no `ParametricPose3d` type, no role. (WiLoR currently only reachable ad-hoc via mv-api, not as a posekit role.)\n- `SurfacePose3d` (NLF) \u2014 Phase 4, unspecified.\n- Sapiens2 human-dense suite Phase 3.5 \u2014 `HumanPartSegmenter`, `HumanSurfaceNormals`, `HumanPointmap`, `HumanMatting`: no ABCs, no models (license review gate).\n- `InstancePose2d` role ABC **exists** (`base.py:65`) but has **zero implementations** \u2014 RTMO (zoo `rtmo-l-coco17` planned, needs GPU NMS port), RF-DETR unbuilt.\n- `PromptableSegmenter` box/point path (SAM2 image mode) unimplemented \u2014 only SAM3 text prompting exists.\n\n**Boundary-type growth items not yet done (design \u00a75):**\n- Skeleton registry missing halpe-26, h36m-17, body-25, sapiens-308-native, mamma-512, and all format-to-format projection tables (coco133\u2192coco17, sapiens308\u2192coco133, halpe26\u2194coco17).\n- `Keypoints2d.uncertainty` field exists but no shipping producer populates it (MammaNet uses `DenseLandmarks2d.log_variance` instead; RF-DETR unbuilt).\n- Camera-model-aware cropping (fisheye\u2192virtual-pinhole in `ops.crops`) not present.\n\n**Consumers hand-roll with no posekit home / not yet swapped to posekit roles:**\n- **mamma identity**: `mamma/tracking/identity.py` `ClipEncoder` is a *separate* CLIP encoder, not posekit's `ClipIdentity` (`IdentityEncoder`) \u2014 duplicate, CPU-float32 output vs posekit's GPU. mamma's `MultiViewTracker` does not use posekit `VideoSegmenter`/`IdentityEncoder`/`PersonDetector` yet (design \u00a76 mamma plan still outstanding); only its dense-landmark net is behind a posekit role (`landmarks/posekit_role.py`).\n- **mamma detection**: `mamma/tracking/detection.py` has its own `PersonDetector`/`PersonDetections` classes (`:54`,`:19`) unrelated to posekit's `PersonDetector` \u2014 name collision, hand-rolled.\n- **mv-api**: `MultiviewBodyTracker` (`multiview_pose_estimator.py:119`) already injects posekit `PersonDetector`/`TopDownPose2d` (constructor `:120`) and uses `BoxDetections`/`Keypoints2d` \u2014 the design \u00a76 mv-api swap is done. WiLoR hand refinement (`:354`) has no posekit `TopDownPose3d` home yet.\n- Epipolar scoring / fundamental-matrix / Hungarian association (`mamma/tracking/identity.py`) and gated DLT \u2014 deliberately consumer-side per design \u00a73, but the small pure-tensor `Keypoints2d` helpers design \u00a73 says *could* live in `posekit.ops` (edge-margin confidence modulation, per-view temporal median) are **not** present in `posekit.ops` today.",
+ "taxonomy": {
+  "canonical_stages": [
+   {
+    "id": "capture",
+    "name": "Capture / calibration",
+    "desc": "The synchronized multi-view (and/or ego+exo) image source plus the camera model. Covers the physical rig, hardware or audio sync, and intrinsics/extrinsics \u2014 whether assumed-given (MAMMA, EPFL, AssemblyX, HO-Cap), MoCap-registered into a moving frame (EgoExo-Hands), or solved downstream from the keypoints themselves (Kineo's calibration-free auto-calibration is deferred to the association/calibrate stage). Optional for single-headset realtime rigs where geometry is fixed by construction (MEgATrack/UmeTrack).",
+    "boundary_type": "Synchronized per-(view,frame) images + CameraModel (intrinsics/extrinsics, possibly unknown)"
+   },
+   {
+    "id": "detect",
+    "name": "Detect / segment / localize instance",
+    "desc": "First localization of the instance(s): a box detector (MEgATrack DetNet, AssemblyHands body-keypoint detector), a promptable/video segmenter producing masks (MAMMA SAM2, AssemblyX SAM, HO-Cap SAM2), a full-frame dense-skeleton net that doubles as the localizer (EgoExo-Hands Sapiens, Kineo/EPFL/AssemblyX's whole-body 2D detectors), or nothing at all when an ROI is supplied by the tracking loop (UmeTrack). Produces the region/mask that conditions the 2D estimator. Masks are first-class here for MAMMA/AssemblyX/HO-Cap (model inputs or fitting targets), not just visualization.",
+    "boundary_type": "BoxDetections (boxes + optional masks + optional track_ids) or per-instance ROI"
+   },
+   {
+    "id": "identity",
+    "name": "Cross-view / temporal identity association",
+    "desc": "Assigns a consistent instance id across views and/or across frames so downstream triangulation and fitting operate on the right person/hand. Realized as epipolar-affinity + Hungarian + cycle-consistent graph (MAMMA), Kinect-depth 3D-merge + reproject-to-select (EPFL), body-skeleton-fixed hand identity (AssemblyHands), left/right hand-identity head (AssemblyHands SVEgoNet). Absent / assumed-given for single-instance or externally-re-ID'd pipelines (Kineo assumes re-ID given; MEgATrack/UmeTrack fix hands by rig side; AssemblyX/EgoExo-Hands/HO-Cap are single/fixed-instance).",
+    "boundary_type": "instance_id per (view, frame) detection; cross-view correspondence graph"
+   },
+   {
+    "id": "crop",
+    "name": "Crop / rewarp to canonical view",
+    "desc": "Warps each localized instance into the canonical input space of the 2D estimator: square box crop with padding + left/right mirror (MEgATrack), fisheye->virtual-pinhole perspective crop (UmeTrack, EgoExo-Hands, AssemblyHands ego), body/hand region crop (AssemblyX), undistortion of images + 2D keypoints (Kineo). Also the site of extra input channels (MEgATrack's projected-keypoint augmentation) and preprocessing (EgoExo-Hands histogram equalization). This is the universal currency between localization and 2D estimation.",
+    "boundary_type": "per-instance canonical crop + virtual CameraModel (K, extrinsics to reference)"
+   },
+   {
+    "id": "pose2d",
+    "name": "2D keypoint / dense-landmark / feature estimation",
+    "desc": "The swappable per-view estimator: a top-down 2D keypoint net (MEgATrack KeyNet heatmaps, Kineo NLF/RTMPose/DWPose, EPFL RTMPose-x/RTMW-x, AssemblyX DWPose, EgoExo-Hands Sapiens+InterNet, HO-Cap MediaPipe), a dense-landmark net with uncertainty/visibility/contact (MAMMA MammaNet 512 pts), or a latent image feature encoder that never emits explicit keypoints (UmeTrack CNN encoder, AssemblyHands EfficientNet). Confidence is emitted here and is load-bearing everywhere downstream (except MediaPipe, which lacks it, forcing HO-Cap to recover it via reprojection error).",
+    "boundary_type": "Keypoints2d = per-(view,frame,instance) (x, y, confidence) in a named skeleton (+ optional uncertainty/visibility/dense-landmark features)"
+   },
+   {
+    "id": "lift3d",
+    "name": "Triangulate / lift to 3D",
+    "desc": "Fuses per-view 2D estimates into 3D. Classical multi-view: confidence-weighted DLT/SVD (Kineo, EPFL, AssemblyX, HO-Cap), RANSAC triangulation (EgoExo-Hands, HO-Cap), ray-intersection init (MAMMA), 2D+triangulation of body then virtual-hand-box projection (AssemblyHands). Learnable feature-space triangulation: FTL 3D-lift + multi-view fusion (UmeTrack), softmax-weighted unprojection into a 3D feature volume + V2V-PoseNet + soft-argmax (AssemblyHands MVExoNet). For single-headset model-fit systems (MEgATrack) 3D is recovered implicitly inside the model fit rather than as an explicit triangulation stage.",
+    "boundary_type": "3D keypoints / feature volume (world or reference-camera frame) + optional per-point consensus confidence"
+   },
+   {
+    "id": "calibrate",
+    "name": "Auto-calibration / scale / user-shape resolution",
+    "desc": "Resolves geometric or metric unknowns using the keypoint stream itself. Kineo's calibration-free block (essential-matrix graph, loop-closure relative scales, MST extrinsics, 3-pass bundle adjustment fitting Brown-Conrady distortion) plus metric-scale recovery (SMPL prior / MoGe mono-depth) is the extreme case. Per-user hand-scale/shape calibration: MEgATrack's shared global scale phi solved in the stereo region, UmeTrack's Regressor-U scale head, HO-Cap/EgoExo-Hands per-subject MANO/LBS template. Absent when calibration is fully given and no scale is solved (AssemblyHands, AssemblyX, EPFL, MAMMA).",
+    "boundary_type": "refined CameraModel (extrinsics/intrinsics/distortion) and/or metric scale \u03b1 / per-user template H"
+   },
+   {
+    "id": "fit",
+    "name": "Parametric / kinematic model fit",
+    "desc": "Fits a parametric or kinematic body/hand model to the 3D (and reprojected 2D) evidence: template hand LM fit (MEgATrack min E(theta)), forward-kinematics + SVD root decode (UmeTrack Regressor+FK), SMPL/MANO EasyMocap fit (EPFL), SMPL-X fit with silhouette loss (AssemblyX), multi-stage LBFGS SMPL-X with uncertainty/contact energies (MAMMA), MANO + joint hand-object SDF (HO-Cap), personalized LBS IK (EgoExo-Hands), SMPL bone-length metric fit (Kineo). AssemblyHands' SVEgoNet is a learned regressor standing in for this stage on the ego branch.",
+    "boundary_type": "model parameters (SMPL/SMPL-X beta,theta,trans; MANO theta; hand 26-DOF theta; 6-DoF object pose) + posed mesh/joints"
+   },
+   {
+    "id": "verify",
+    "name": "Render-back verify / consistency gate",
+    "desc": "Projects the fitted model back to the image/2D-keypoint domain to check and either export overlays, gate frames, or drive the fit loss. Differentiable silhouette loss vs SAM mask (AssemblyX render->L_mask->fit loop), render-to-all-views 2D annotation export (HO-Cap), fit-vs-lifted-pose discard gate (EPFL), mesh reprojected as terminal 2D overlay (EgoExo-Hands). Absent for the realtime trackers and for MAMMA (which folds consistency into reprojection re-weighting inside the fit rather than a separate render stage).",
+    "boundary_type": "reprojected mesh/keypoints; accept/reject gate or silhouette-discrepancy loss"
+   },
+   {
+    "id": "feedback",
+    "name": "Temporal feedback / smoothing",
+    "desc": "Carries state across frames. Realtime trackers close a loop: extrapolated pose t-1,t-2 seeds detection boxes and KeyNet keypoint-augmentation (MEgATrack), recurrent hidden state + tracked-pose-drives-ROI/intrinsics (UmeTrack), optimized world pose reprojected as next-frame FoundationPose init + T_{t-1} prior (HO-Cap). Offline pipelines instead apply feed-forward temporal terms: SAM2 mask propagation + reprojection-error re-weighting (MAMMA), audio sync + spline interpolation (Kineo/HO-Cap gap fill), temporal-smoothing loss (EPFL), median filtering of 2D (AssemblyX), inference-time iterative re-crop/re-root (AssemblyHands, feed-forward not temporal). Absent for AssemblyX (median-filter only) / EgoExo-Hands (strictly per-frame).",
+    "boundary_type": "pose_{t-1}/hidden state/propagated mask fed back to detect/crop/fit, or temporal energy in the fit"
+   }
+  ],
+  "matrix": [
+   {
+    "paper_id": "megatrack",
+    "cells": [
+     {
+      "stage_id": "capture",
+      "fill": "4 synced global-shutter mono VGA fisheye cams on VR headset; Kannala-Brandt equidistance model; geometry fixed by rig",
+      "note": "no explicit calibrate-from-data; extrinsics fixed"
+     },
+     {
+      "stage_id": "detect",
+      "fill": "DetNet SSD-style box regressor (center + radius + presence conf>0.5), round-robin one camera at a time",
+      "note": "swappable posekit 'detect' role"
+     },
+     {
+      "stage_id": "identity",
+      "fill": "hand L/R identity fixed by rig side + tracked pose; no cross-view association network",
+      "note": "single-user, hands disambiguated by side"
+     },
+     {
+      "stage_id": "crop",
+      "fill": "square bbox +20% pad, right-hand x-mirror, KeyNet input augmented with projected extrapolated 21 kpts (2D+1D rel-dist)",
+      "note": "extra input channel is consumer glue"
+     },
+     {
+      "stage_id": "pose2d",
+      "fill": "KeyNet: 96x96 crop -> 21 2D Gaussian location heatmaps + 21 1D relative-distance heatmaps",
+      "note": "1D rel-distance head is non-standard (fisheye ambiguity)"
+     },
+     {
+      "stage_id": "lift3d",
+      "fill": "\u2014 (no explicit triangulation; 3D recovered inside model fit via multi-view reprojection energy)",
+      "note": "3D is implicit in fit E_2D over 4 views"
+     },
+     {
+      "stage_id": "calibrate",
+      "fill": "per-user global hand scale phi jointly optimized over stereo-region frames (~5s/user, block-diagonal LM)",
+      "note": "posekit 'calibrate' = per-user shape"
+     },
+     {
+      "stage_id": "fit",
+      "fill": "26-DOF template hand LM fit: min E_2D + w1*E_dist + w2*E_temporal, aggregated over 4 views -> pose + LBS mesh",
+      "note": "fit-model + triangulate fused"
+     },
+     {
+      "stage_id": "verify",
+      "fill": "\u2014",
+      "note": "no render-back stage"
+     },
+     {
+      "stage_id": "feedback",
+      "fill": "constant-position pose extrapolation theta_hat=2*theta_{t-1}-theta_{t-2} seeds detection boxes + KeyNet augmentation; theta_{t-1} temporal energy term",
+      "note": "closed realtime loop"
+     }
+    ]
+   },
+   {
+    "paper_id": "umetrack",
+    "cells": [
+     {
+      "stage_id": "capture",
+      "fill": "single/multi wide-FOV fisheye mono cams on VR headset (dataset 4 VGA); virtual-camera intrinsics/extrinsics known per crop",
+      "note": "view-count agnostic"
+     },
+     {
+      "stage_id": "detect",
+      "fill": "\u2014 (ROI supplied by the tracking loop / assumed given; no detector in Fig.2)",
+      "note": "localization comes from feedback"
+     },
+     {
+      "stage_id": "identity",
+      "fill": "hand fixed by rig; single-instance, no cross-view association",
+      "note": "\u2014"
+     },
+     {
+      "stage_id": "crop",
+      "fill": "perspective crop: virtual pinhole camera at physical cam pointing at ROI center; warps fisheye to distortion-corrected 96x96 crop with known K_i, T_i,1",
+      "note": "canonical rewarp"
+     },
+     {
+      "stage_id": "pose2d",
+      "fill": "weight-shared fully-conv ResNet encoder -> per-view latent image features z_i^I (no explicit 2D keypoints)",
+      "note": "loose fit: emits features not keypoints"
+     },
+     {
+      "stage_id": "lift3d",
+      "fill": "FTL lifts features into reference-camera 3D frame; multi-view fusion (1x1-conv residual, learnable triangulation) -> z^3d; bypassed for single view",
+      "note": "learnable feature-space triangulation"
+     },
+     {
+      "stage_id": "calibrate",
+      "fill": "Regressor-U predicts 1-D hand scale to build calibrated skeleton H-hat for unknown users (multi-view only)",
+      "note": "online self-calibration"
+     },
+     {
+      "stage_id": "fit",
+      "fill": "Regressor-K/U -> 20 joint angles + 7 root sample points; SVD rigid alignment decodes 6DoF root T_H; forward kinematics + LBS -> absolute 3D pose",
+      "note": "skeleton encoder injects per-user template"
+     },
+     {
+      "stage_id": "verify",
+      "fill": "\u2014",
+      "note": "\u2014"
+     },
+     {
+      "stage_id": "feedback",
+      "fill": "recurrent temporal module hidden state h_TEM across frames; tracked pose t-1 sets ROI + estimates virtual-camera intrinsics",
+      "note": "closed realtime loop"
+     }
+    ]
+   },
+   {
+    "paper_id": "kineo",
+    "cells": [
+     {
+      "stage_id": "capture",
+      "fill": "sparse N uncalibrated UNSYNCED consumer RGB cams + audio; static cams / moving subject; GPU video decode",
+      "note": "everything unknown at input"
+     },
+     {
+      "stage_id": "detect",
+      "fill": "\u2014 (swappable 2D detector doubles as localizer; full-frame, no separate box detector)",
+      "note": "detection folded into pose2d"
+     },
+     {
+      "stage_id": "identity",
+      "fill": "cross-view subject re-ID assumed given (Sec.8); not solved internally",
+      "note": "explicit non-goal"
+     },
+     {
+      "stage_id": "crop",
+      "fill": "undistort images + 2D keypoints with estimated Brown-Conrady coeffs before triangulation/pointmaps",
+      "note": "rewarp via solved distortion"
+     },
+     {
+      "stage_id": "pose2d",
+      "fill": "swappable off-the-shelf detector NLF (primary)/RTMPose/DWPose -> 2D kpts + per-kpt conf w in [0,1]; GPU-batched MMPose fork",
+      "note": "canonical swappable pose2d"
+     },
+     {
+      "stage_id": "lift3d",
+      "fill": "confidence-weighted DLT triangulation across N views + per-point pairwise-reprojection consensus score; plus MoGe/VGGT dense pointmaps",
+      "note": "confidence carried to output"
+     },
+     {
+      "stage_id": "calibrate",
+      "fill": "FULL calibration-free block: essential-matrix graph (5pt+RANSAC, MoGe intrinsics init) -> loop-closure relative scales (L-BFGS) -> MST extrinsics -> 3-pass BA (+focal +Brown-Conrady, Huber conf-weighted); metric via SMPL prior or MoGe mono-depth",
+      "note": "the defining stage of this paper"
+     },
+     {
+      "stage_id": "fit",
+      "fill": "SMPL body prior fit (bone-length match, NLF SMPLFitter, pose ignored) for metric scale; else subject-agnostic MoGe depth ratio",
+      "note": "fit used only for scale, dual route"
+     },
+     {
+      "stage_id": "verify",
+      "fill": "\u2014",
+      "note": "reprojection is consumed as BA/consensus weight, not a separate render-verify"
+     },
+     {
+      "stage_id": "feedback",
+      "fill": "audio MFCC cross-correlation temporal sync to shared timeline (feed-forward); no temporal feedback loop (single-shot offline batch)",
+      "note": "sync only, no loop"
+     }
+    ]
+   },
+   {
+    "paper_id": "epfl-smart-kitchen",
+    "cells": [
+     {
+      "stage_id": "capture",
+      "fill": "9 static Azure Kinect RGB-D + 1 HoloLens 2 ego + IMUs, synced; A0-checkerboard calib into global world frame",
+      "note": "calibration given"
+     },
+     {
+      "stage_id": "detect",
+      "fill": "\u2014 (full-frame RTMPose; localization via reprojected Kinect 3D pose, no box detector stage)",
+      "note": "detection folded into identity/pose2d"
+     },
+     {
+      "stage_id": "identity",
+      "fill": "Kinect Body Tracking SDK 3D pose + track id; merge per-view 3D to world, pick dominant subject, reproject to each view to select correct RTMPose 2D pose",
+      "note": "depth-based identity to reject experimentalists"
+     },
+     {
+      "stage_id": "crop",
+      "fill": "\u2014 (per-view full-frame 2D; no explicit crop/rewarp stage described)",
+      "note": "\u2014"
+     },
+     {
+      "stage_id": "pose2d",
+      "fill": "RTMPose-x (body) + whole-body RTMW-x (hands) per view -> 2D kpts + per-joint conf",
+      "note": "swappable posekit detectors"
+     },
+     {
+      "stage_id": "lift3d",
+      "fill": "confidence-weighted SVD triangulation of identity-selected 2D across all views; joints with conf<0.1 dropped",
+      "note": "conf threshold gates fit input"
+     },
+     {
+      "stage_id": "calibrate",
+      "fill": "per-subject SMPL/MANO shape from fit; camera calib given (A0 checkerboard); no auto-calibration or scale solve",
+      "note": "shape only, geometry given"
+     },
+     {
+      "stage_id": "fit",
+      "fill": "EasyMocap multi-view SMPL (COCO-adapted regressor) + MANO fit; losses = 3D joint + 2D reproj + temporal smooth + reg (+ HoloLens ego hand 3D joint loss for MANO)",
+      "note": "ego hand prior fused into MANO"
+     },
+     {
+      "stage_id": "verify",
+      "fill": "fit-vs-lifted-pose discard gate: frames where fitted pose deviates (Euclidean) from triangulated lifted pose are dropped as artifacts",
+      "note": "consistency gate, not render"
+     },
+     {
+      "stage_id": "feedback",
+      "fill": "temporal-smoothing loss inside EasyMocap fit; feed-forward, no cross-frame loop",
+      "note": "smoothing term only"
+     }
+    ]
+   },
+   {
+    "paper_id": "assemblyhands",
+    "cells": [
+     {
+      "stage_id": "capture",
+      "fill": "8 static exo RGB + 4 mono fisheye ego (Assembly101 rig), synced; lens distortion removed to simplify triangulation",
+      "note": "also generalized to 12-cam desktop rig"
+     },
+     {
+      "stage_id": "detect",
+      "fill": "MS-COCO 2D body-keypoint detector per exo view (shoulder/elbow/wrist) -> body triangulated -> virtual hand-center projected to per-view square hand boxes",
+      "note": "body detector + forearm-extension heuristic localizes hands"
+     },
+     {
+      "stage_id": "identity",
+      "fill": "hand identity fixed by body skeleton (not image); SVEgoNet has a L/R hand-identity classification head on ego branch",
+      "note": "geometry-fixed hand id"
+     },
+     {
+      "stage_id": "crop",
+      "fill": "exo: per-view hand crops from projected virtual boxes. ego: fisheye undistort to pinhole + reproject annotated 3D joints -> per-hand crops",
+      "note": "two crop sites (exo + ego distill)"
+     },
+     {
+      "stage_id": "pose2d",
+      "fill": "MVExoNet EfficientNet per-view 2D feature encoder (compact feature maps, not explicit keypoints)",
+      "note": "encoder feeds volume, not sparse kpts"
+     },
+     {
+      "stage_id": "lift3d",
+      "fill": "softmax-weighted unprojection of per-view features into shared 300mm 3D volume (learnable triangulation) -> V2V-PoseNet 3D CNN -> soft-argmax 21x3 joints; vs classical 2D+triangulation baseline",
+      "note": "feature-volume lift"
+     },
+     {
+      "stage_id": "calibrate",
+      "fill": "\u2014 (calibration given; no per-user scale/shape solve)",
+      "note": "\u2014"
+     },
+     {
+      "stage_id": "fit",
+      "fill": "SVEgoNet ResNet-50 single-view ego estimator (2.5D heatmaps: xy + wrist-relative z + hand-id head) -> wrist-relative 3D joints (exo-to-ego distillation, learned stand-in for a fitter)",
+      "note": "learned regressor not parametric fit"
+     },
+     {
+      "stage_id": "verify",
+      "fill": "\u2014 (downstream verb/action classification is an annotation-quality proxy, not render-back)",
+      "note": "no reprojection verify"
+     },
+     {
+      "stage_id": "feedback",
+      "fill": "inference-time iterative refinement: MVExoNet output re-crops + re-roots the volume for the next round (MVExoNet frozen); feed-forward, not temporal",
+      "note": "iterative refine, not cross-frame"
+     }
+    ]
+   },
+   {
+    "paper_id": "assemblyx",
+    "cells": [
+     {
+      "stage_id": "capture",
+      "fill": "synced multi-view static RGB (Assembly101, 8 views for annotation); calibration given",
+      "note": "\u2014"
+     },
+     {
+      "stage_id": "detect",
+      "fill": "SAM human masks per view (silhouette target for fitting, not a localizer); region cropping localizes body vs hands",
+      "note": "masks are optimization targets, not model inputs"
+     },
+     {
+      "stage_id": "identity",
+      "fill": "\u2014 (single-subject static multi-view; no tracking/identity role)",
+      "note": "\u2014"
+     },
+     {
+      "stage_id": "crop",
+      "fill": "separately crop body and hand regions per view so each branch triangulates independently",
+      "note": "region crop is consumer glue"
+     },
+     {
+      "stage_id": "pose2d",
+      "fill": "body: DWPose whole-body 2D + conf, median-filtered, edge-distance conf modulation, tau=0.15 threshold. hand: AssemblyHands sub-pipeline (black-box 2D+3D)",
+      "note": "two parallel per-region branches"
+     },
+     {
+      "stage_id": "lift3d",
+      "fill": "body: confidence-weighted DLT (Iskakov/Hartley-Zisserman) handling truncation. hand: AssemblyHands triangulation. Then merge 3D body + hand into unified upper-body+hands skeleton",
+      "note": "precise-hand + separate-body fusion"
+     },
+     {
+      "stage_id": "calibrate",
+      "fill": "\u2014 (calibration given; no scale/shape auto-solve)",
+      "note": "\u2014"
+     },
+     {
+      "stage_id": "fit",
+      "fill": "SMPL-X per-frame fit: min lambda_joint*L_joint + lambda_mask*L_mask + lambda_beta||beta||^2 + lambda_theta||theta||^2",
+      "note": "3D joints + silhouette drive fit"
+     },
+     {
+      "stage_id": "verify",
+      "fill": "differentiable Soft-Rasterizer render of SMPL-X mesh vs SAM mask -> L_mask fed back into the fit optimization",
+      "note": "render-verify IS a fit loss term (closed within fit)"
+     },
+     {
+      "stage_id": "feedback",
+      "fill": "temporal median filtering of 2D keypoints; no cross-frame pose loop",
+      "note": "median filter only"
+     }
+    ]
+   },
+   {
+    "paper_id": "mamma",
+    "cells": [
+     {
+      "stage_id": "capture",
+      "fill": "16 or 32 synced calibrated RGB views, 30 FPS; calibration Q_c assumed known",
+      "note": "\u2014"
+     },
+     {
+      "stage_id": "detect",
+      "fill": "SAM2 per-person masks (model INPUTS, mask-conditioned), initialized via Grounding LLM / bbox detector / manual clicks; propagated for tracking",
+      "note": "masks are first-class model inputs"
+     },
+     {
+      "stage_id": "identity",
+      "fill": "epipolar geometric affinity A_g=exp(-D_g/lambda) between visible landmarks across view pairs -> Hungarian assignment -> cycle-consistent correspondence graph -> same person across views",
+      "note": "full cross-view identity for 1-2 people"
+     },
+     {
+      "stage_id": "crop",
+      "fill": "RGB crops (+ SAM2 mask conditioning via element-wise ViT+CNN feature sum)",
+      "note": "mask channel into estimator"
+     },
+     {
+      "stage_id": "pose2d",
+      "fill": "MammaNet: ViT-Base + mask-CNN + Transformer decoder w/ 512 learnable landmark queries -> mu (xy), sigma (uncertainty), p (visibility), pc/fl (contact) per landmark",
+      "note": "dense landmarks not sparse joints; per-point uncertainty"
+     },
+     {
+      "stage_id": "lift3d",
+      "fill": "ray-intersection init: 3D point minimizing distance between camera-center rays (no regression init)",
+      "note": "triangulation used only for fit init"
+     },
+     {
+      "stage_id": "calibrate",
+      "fill": "\u2014 (calibration given; neutral SMPL-X, no per-user scale calib stage)",
+      "note": "\u2014"
+     },
+     {
+      "stage_id": "fit",
+      "fill": "multi-stage LBFGS SMPL-X: (1) global R,t via reproj; (2) pose+shape+trans w/ E_ldmks (Geman-McClure, weighted by p*sigma) + E_shape; (3) reproj-error re-weight sigma + E_temp accel; (4) contact E_cont (SDF repulsion/attraction, multi-view-avg contact probs)",
+      "note": "uncertainty + contact + temporal energies inside fit"
+     },
+     {
+      "stage_id": "verify",
+      "fill": "\u2014 (no separate render stage; reprojection error folded into fit re-weighting)",
+      "note": "consistency internalized in fit"
+     },
+     {
+      "stage_id": "feedback",
+      "fill": "SAM2 mask propagation t-1->t (tracking); reprojection-error re-weights uncertainty sigma mid-optimization; E_temp acceleration penalty",
+      "note": "feed-forward temporal, no realtime loop"
+     }
+    ]
+   },
+   {
+    "paper_id": "egoexo-hands",
+    "cells": [
+     {
+      "stage_id": "capture",
+      "fill": "10 mono fisheye cams (8 exo backpack half-dome + 2 Quest3 ego), hardware-synced; 5 OptiTrack MoCap cams track headset marker-tree -> register moving headset into a participant-attached shared frame",
+      "note": "MoCap-registered moving reference frame"
+     },
+     {
+      "stage_id": "detect",
+      "fill": "Sapiens body-keypoint detector doubles as hand localizer: 42 hand kpts -> centroid + bounding circle localizes each hand for cropping",
+      "note": "pose net acts as detector (design-doc adapter case)"
+     },
+     {
+      "stage_id": "identity",
+      "fill": "hand L/R fixed by rig geometry; single-subject; no cross-view association network",
+      "note": "\u2014"
+     },
+     {
+      "stage_id": "crop",
+      "fill": "fisheye -> virtual pinhole 256x256 perspective crop co-located with physical cam (UmeTrack-style) + histogram equalization",
+      "note": "canonical fisheye rewarp"
+     },
+     {
+      "stage_id": "pose2d",
+      "fill": "DUAL redundant detectors: Sapiens (42 hand kpts, full-frame) + InterNet (42 kpts on pinhole crops); both emit per-kpt confidence",
+      "note": "two independent models fused into one triangulation"
+     },
+     {
+      "stage_id": "lift3d",
+      "fill": "RANSAC multi-view triangulation over conf-filtered 2D dets (20 sets of 42 kpts across 10 views) -> 42 3D hand keypoints",
+      "note": "confidence-thresholded (0.3) before lift"
+     },
+     {
+      "stage_id": "calibrate",
+      "fill": "per-user personalized LBS hand template from high-res hand scan (a per-subject shape/model prior); camera calib from MoCap",
+      "note": "template = per-user calibrate"
+     },
+     {
+      "stage_id": "fit",
+      "fill": "personalized LBS hand model fit to 42 triangulated 3D keypoints via inverse kinematics -> GT meshes",
+      "note": "IK fit"
+     },
+     {
+      "stage_id": "verify",
+      "fill": "fitted mesh projected back to 2D views as terminal overlay (Fig.2e); NO feedback edge (strictly per-frame)",
+      "note": "render-back is output-only, no loop"
+     },
+     {
+      "stage_id": "feedback",
+      "fill": "\u2014 (strictly per-frame offline annotation; no temporal/tracking, no feedback loop)",
+      "note": "none"
+     }
+    ]
+   },
+   {
+    "paper_id": "hocap",
+    "cells": [
+     {
+      "stage_id": "capture",
+      "fill": "8 static RealSense D455 RGB-D + 1 Azure Kinect + HoloLens ego; Vicalib calibration, world frame near table center; per-object mesh built offline via BundleSDF (LoFTR + marching cubes)",
+      "note": "separate offline object 3D recon supplies meshes"
+     },
+     {
+      "stage_id": "detect",
+      "fill": "object branch: SAM2 masks (prompted by first-frame clicks, tracked across views, drive point clouds + FoundationPose). hand branch: SAM2 hand masks from keypoint bbox+2D joints",
+      "note": "masks are model inputs"
+     },
+     {
+      "stage_id": "identity",
+      "fill": "object: mask-per-object tracked by SAM2. hand: 1-2 hands; cross-view handled via triangulation consistency, not a separate identity net",
+      "note": "SAM2 tracking provides per-object id"
+     },
+     {
+      "stage_id": "crop",
+      "fill": "\u2014 (full-frame RGB to MediaPipe / SAM2; no explicit crop-rewarp stage)",
+      "note": "\u2014"
+     },
+     {
+      "stage_id": "pose2d",
+      "fill": "hand: MediaPipe Hands -> 21 2D landmarks per view, NO confidence scores (must be filtered downstream). object: no keypoints (6D pose branch instead)",
+      "note": "no-confidence 2D forces reprojection-based selection"
+     },
+     {
+      "stage_id": "lift3d",
+      "fill": "hand: per-joint triangulate all valid view-pairs, score by reproj loss L_proj, keep lowest-error candidate, gap-fill linear+cubic-spline. object: cross-view pose consistency + RANSAC -> single initial pose T_t",
+      "note": "reprojection-error selection substitutes for confidence weight"
+     },
+     {
+      "stage_id": "calibrate",
+      "fill": "per-subject MANO shape beta pre-calibrated; camera calib given (Vicalib); no auto-calibration/scale solve",
+      "note": "shape given per subject"
+     },
+     {
+      "stage_id": "fit",
+      "fill": "MANO fit min L_keypoint(theta) + lambda2*L_reg; object SDF pose opt min L_sdf + lambda1*L_smooth; then JOINT hand-object SDF optimization resolving interpenetration on fused point cloud",
+      "note": "joint SDF fit couples hand + object"
+     },
+     {
+      "stage_id": "verify",
+      "fill": "render refined 3D hand+object meshes to every camera view to verify alignment + export 2D image annotations",
+      "note": "render-back = terminal verify + 2D export"
+     },
+     {
+      "stage_id": "feedback",
+      "fill": "optimized world object pose reprojected as next-frame FoundationPose init; T_{t-1} prior seeds RANSAC / gates noisy frames; linear+cubic-spline temporal interpolation of missing hand joints",
+      "note": "closed temporal loop on object branch"
+     }
+    ]
+   }
+  ],
+  "commonalities": [
+   "The universal boundary datatype is per-(view,frame,instance) keypoints as (x, y, confidence) in a named skeleton convention plus a camera model. Every pipeline (except HO-Cap's confidence-less MediaPipe, which then re-derives an equivalent weight from reprojection error) carries a scalar confidence per keypoint, and it is load-bearing at every downstream stage.",
+   "Confidence-weighted everything: triangulation weights (Kineo weighted-DLT, EPFL/AssemblyX confidence-weighted SVD/DLT, MAMMA visibility*uncertainty), detection gating (MEgATrack conf>0.5), joint dropping (EPFL conf<0.1, EgoExo-Hands thr 0.3, AssemblyX tau=0.15), calibration weights (Kineo Huber-weighted BA + Sampson edge weights), and robust fit weights (MAMMA Geman-McClure). Where confidence is missing it is manufactured (HO-Cap reprojection-error selection).",
+   "Crops / rewarps are the universal currency between localization and 2D estimation: square+pad box crops (MEgATrack), fisheye->virtual-pinhole perspective crops (UmeTrack, EgoExo-Hands, AssemblyHands ego), body/hand region crops (AssemblyX), and undistortion of images+keypoints (Kineo). The 2D estimator always sees a canonicalized instance-centered view, not the raw frame.",
+   "The 2D estimator is a swappable slot: MEgATrack KeyNet, Kineo (NLF/RTMPose/DWPose explicitly swappable), EPFL (RTMPose-x/RTMW-x), AssemblyX (DWPose), EgoExo-Hands (Sapiens+InterNet), HO-Cap (MediaPipe). Matches the design doc's 'frames->posed instances' swap point; detector/tracker/pose are independently mix-and-matchable.",
+   "The tail is always fuse-then-fit: some 3D fusion (classical or learnable triangulation) followed by fitting a parametric/kinematic model (SMPL/SMPL-X/MANO/template-hand/LBS). 7 of 9 emit a parametric model fit; the model injects a per-user shape/skeleton prior in most (MEgATrack phi, UmeTrack skeleton encoder, EPFL/HO-Cap per-subject beta, EgoExo-Hands personalized LBS).",
+   "Temporal information is used by nearly all: realtime trackers close an explicit feedback loop (MEgATrack pose extrapolation -> boxes+KeyNet; UmeTrack RNN + ROI; HO-Cap reprojected pose -> next-frame init), while offline pipelines apply feed-forward temporal terms (MAMMA accel + mask propagation; EPFL/AssemblyX smoothing/median; Kineo audio sync; HO-Cap spline gap-fill). Only EgoExo-Hands is strictly per-frame.",
+   "The detector/localizer role is interface-not-implementation: it is variously a box detector (MEgATrack DetNet), a segmenter (MAMMA/AssemblyX/HO-Cap SAM/SAM2), a body-keypoint net that localizes hands via centroid (AssemblyHands, EgoExo-Hands Sapiens), or the tracking loop supplying the ROI (UmeTrack) \u2014 exactly the design doc's claim that PersonDetector must be satisfiable by pose-net adapters and segmenters alike.",
+   "Triangulation, cross-view association, calibration/BA, and model fitting are treated as consumer 'geometry glue' rather than the network \u2014 the swappable networks are detect/segment/2D-estimate, and each paper hand-rolls a different geometric tail (weighted DLT vs RANSAC vs ray-intersection vs learnable feature-volume vs SDF)."
+  ],
+  "divergences": [
+   "End-to-end learned fusion vs modular geometric tail: UmeTrack (FTL + learnable multi-view fusion + regressor + FK, one differentiable net) and AssemblyHands MVExoNet (softmax feature-volume + V2V + soft-argmax) LEARN the 3D lift, whereas Kineo/EPFL/AssemblyX/EgoExo-Hands/HO-Cap/MAMMA use classical geometry (weighted DLT, RANSAC, ray-intersection) with explicit optimizers. MEgATrack skips explicit triangulation entirely, recovering 3D only inside the model-fit energy.",
+   "Sparse joints vs dense surface landmarks: MAMMA predicts 512 dense surface landmarks with per-point uncertainty/visibility/contact from a transformer with learnable queries; everyone else predicts sparse skeletons (21/42 hand joints, COCO/whole-body body joints). This changes the fit contract (surface-point robust fit vs joint-matching fit).",
+   "Masks-as-inputs vs masks-as-targets vs no-masks: MAMMA and HO-Cap feed SAM/SAM2 masks INTO the estimator/point-cloud (first-class model inputs); AssemblyX uses SAM masks only as a silhouette optimization TARGET (render-back loss); the rest use no segmentation at all (box crops or full-frame).",
+   "Calibration-free vs calibration-given: Kineo is the sole fully calibration-free + sync-free pipeline (audio sync + keypoint-driven essential-matrix graph + MST + 3-pass BA solving extrinsics/intrinsics/distortion + metric scale). Every other pipeline assumes calibration given (checkerboard, Vicalib, MoCap marker-tree, or fixed VR rig).",
+   "Realtime closed-loop tracking vs offline batch annotation: MEgATrack/UmeTrack are realtime (30-60Hz) with pose-extrapolation feedback driving detection; the rest are offline annotation/capture pipelines. This splits the temporal role into 'feedback loop that changes earlier stages' (MEgATrack, UmeTrack, HO-Cap object branch) vs 'feed-forward smoothing/interpolation term' (MAMMA, EPFL, AssemblyX, Kineo).",
+   "Cross-view identity solved vs assumed: MAMMA solves it internally (epipolar affinity + Hungarian + cycle-consistency), EPFL uses depth-based Kinect identity + reproject-to-select, HO-Cap uses SAM2 per-object tracking, whereas Kineo explicitly assumes re-ID given and the VR/hand pipelines fix identity by rig geometry (L/R hand by side). Multi-person is only genuinely handled by MAMMA (1-2 interacting) and, per-object, HO-Cap.",
+   "Regress-the-model vs fit-the-model: UmeTrack directly regresses articulated skeleton params (joint angles + 6DoF root via SVD) and AssemblyHands SVEgoNet regresses ego 3D joints, replacing an optimizer with a learned network; the rest run explicit iterative optimizers (LM, LBFGS, EasyMocap gradient, IK, SDF).",
+   "Metric scale recovery is a real fork only for Kineo (SMPL bone-length prior vs MoGe monocular metric depth) and a per-user scale for the VR trackers (MEgATrack phi, UmeTrack Regressor-U); calibrated multi-view pipelines get metric scale for free from known extrinsics.",
+   "Multi-modal fusion vs pure RGB: EPFL (RGB + Kinect depth + HoloLens ego hand + IMU), HO-Cap (RGB-D + depth point clouds + HoloLens), and EgoExo-Hands (ego + exo + MoCap) fuse extra modalities; Kineo/AssemblyX/AssemblyHands/MAMMA are pure RGB (MAMMA + the VR trackers add only masks/mono-fisheye).",
+   "Hand-object joint modeling: only HO-Cap couples a separate 6-DoF object-pose branch (SAM2 + FoundationPose + SDF) with the hand branch via a joint hand-object SDF optimization resolving interpenetration; all others model only bodies and/or hands."
+  ],
+  "universal_mermaid": "flowchart LR\n  capture[\"Capture + calibration (multi-view / ego+exo frames + camera model)\"]\n  detect[\"Detect / segment / localize (boxes / masks / pose-as-detector)\"]\n  identity[\"Cross-view + temporal identity (assoc)\"]\n  crop[\"Crop / rewarp to canonical view\"]\n  pose2d[\"2D keypoint / dense-landmark estimation (x,y,conf + named skeleton)\"]\n  lift3d[\"Triangulate / lift to 3D (weighted DLT / RANSAC / learnable fusion)\"]\n  calibrate[\"Auto-calibration / scale / user-shape\"]\n  fit[\"Parametric / kinematic model fit (SMPL-X / MANO / template)\"]\n  verify[\"Render-back verify / consistency gate\"]\n  capture --> detect\n  detect -.-> identity\n  identity -.-> crop\n  detect --> crop\n  crop --> pose2d\n  pose2d --> lift3d\n  lift3d -.-> calibrate\n  calibrate -.-> fit\n  lift3d --> fit\n  fit -.-> verify\n  verify -.->|\"gate / silhouette loss\"| fit\n  fit -.->|\"temporal feedback: pose t-1 -> detect / crop / init\"| detect\n  pose2d -.->|\"keypoint-driven auto-calibration\"| calibrate\n  calibrate -.->|\"refined cameras / distortion\"| lift3d"
+ },
+ "proposal": "I have everything I need. The design.md was based on a 5-paper subset (mv-api, mamma, Kineo, AssemblyHands-X, EgoExo-Hands); the survey covers 9 papers including 4 the design never saw (MEgATrack, UmeTrack, AssemblyX, HO-Cap). I'll write the proposal.\n\n# posekit abstraction proposal \u2014 grounded in a 9-paper pipeline survey\n\n## 1. VERDICT\n\n**The survey confirms design.md's core thesis and its role taxonomy holds up \u2014 with four concrete amendments, all in the \"geometry tail,\" none touching the network-role set.**\n\ndesign.md's central claims are all independently reproduced by the 9-paper survey:\n\n- **\"Every pipeline is `frames \u2192 detect \u2192 (track/segment) \u2192 2D keypoints \u2192 [associate/triangulate] \u2192 [3D/fit]`\"** \u2014 the survey's `universal_mermaid` is this exact chain plus the feedback edges design.md's realtime discussion already anticipated. Confirmed.\n- **\"The universal boundary datatype is per-`(view,frame,instance)` `(x, y, confidence)` in a named skeleton + camera model, and confidence is load-bearing everywhere\"** \u2014 this is the survey's #1 commonality verbatim, and its strongest finding (HO-Cap's confidence-less MediaPipe *manufactures* an equivalent weight from reprojection error, proving confidence is structurally required). Confirmed and strengthened.\n- **\"The 2D estimator is a swappable slot; detector/tracker/pose are independently mix-and-matchable\"** \u2014 survey commonality #4, across all 9. Confirmed.\n- **\"`PersonDetector` must be an interface satisfiable by box detectors, segmenters, and pose-net adapters alike\"** \u2014 survey commonality #7 enumerates exactly these four localizer shapes (box net / segmenter / pose-as-detector / ROI-from-loop). Confirmed.\n- **\"Triangulation, association, calibration/BA, fitting, scale are consumer geometry glue, not networks\"** \u2014 survey commonality #8 / divergence on classical-vs-learned tail. Mostly confirmed (see amendment 4).\n- **The four inference paradigms (top-down / bottom-up / one-stage / query-based)** \u2014 the four newly-surveyed papers add no fifth paradigm. MEgATrack KeyNet and EgoExo-Hands are top-down; UmeTrack/AssemblyHands feature-encoders are top-down-style latent nets. Confirmed.\n\n**Amendments needed** (the 4 new papers stress the design where the original 5 did not):\n\n1. **The `crop` / rewarp stage must be promoted to a first-class, camera-model-aware node \u2014 not a \"later\" bullet.** design.md \u00a75 lists \"camera-model-aware cropping (later)\" as a low-priority upgrade. The survey makes it a *load-bearing universal*: it is the survey's commonality #3 (\"crops are the universal currency between localization and 2D estimation\"), and **4 of 9 papers require fisheye\u2192virtual-pinhole rewarp** (UmeTrack, EgoExo-Hands, AssemblyHands-ego) or distortion-aware undistort-with-keypoints (Kineo). The current `ops.crops` (square box + pad only) cannot express these. This is an amendment because the design treats crop as ad-hoc consumer glue folded into `TopDownPose2d`, whereas the survey shows it is a distinct, reusable, camera-aware transform that also emits a *virtual CameraModel* the 3D stage consumes.\n\n2. **A latent/feature-encoder variant of the 2D role is missing.** design.md's `TopDownPose2d` and `TopDownDenseLandmarks2d` both emit explicit points. But **UmeTrack (CNN encoder \u2192 latent `z_i^I`) and AssemblyHands MVExoNet (EfficientNet feature maps)** never emit keypoints \u2014 they emit per-view image features that feed a *learnable* 3D fusion. This is not covered by any current role. It is an amendment (add `TopDownFeatureEncoder2d` as a sibling role, or explicitly declare it out-of-scope as an end-to-end-net exception \u2014 see Risks \u00a75).\n\n3. **The `identity` (cross-view/temporal association) stage needs an explicit home decision.** design.md mentions `IdentityEncoder` (CLIP embeddings) and says epipolar/Hungarian association \"stays in consumers,\" but never names association as a pipeline stage. The survey elevates it to a canonical stage present in 4 papers with genuinely different realizations (MAMMA epipolar+Hungarian+cycle-consistency, EPFL depth-3D-merge+reproject-select, AssemblyHands body-fixed hand-id, plus the L/R-by-rig degenerate case). The role split is right (`IdentityEncoder` = network, association = glue) but design.md should say so explicitly and note that `BoxDetections.track_ids` is the boundary that carries the *result*.\n\n4. **`verify` (render-back / consistency gate) is a real recurring stage the design omits entirely.** 4 of 9 papers have it (AssemblyX differentiable silhouette\u2192L_mask, HO-Cap render-to-all-views + 2D export, EPFL fit-vs-lifted discard gate, EgoExo-Hands terminal overlay). It is pure consumer glue (no posekit network), but the design should acknowledge it as a named consumer stage so the boundary types (`DenseLandmarks2d`/`Keypoints2d`/masks) are known to flow *backwards* into it.\n\n**Net:** the network-role set posekit *owns* is correct and complete for 7 of 9 papers. The amendments are about (a) promoting `crop` to camera-aware first-class, (b) admitting the feature-encoder exception, and (c)/(d) naming two consumer stages the design under-specified.\n\n---\n\n## 2. THE ABSTRACTION\n\nThree layers. **(a)** networks posekit owns as swappable roles; **(b)** geometry glue that stays in consumers/simplecv; **(c)** the boundary datatypes flowing between them. Every canonical stage maps to exactly one row.\n\n### (a) Network roles posekit OWNS (the swap points)\n\nAll consume `frames_rgb: UInt8[Tensor, \"b h w 3\"]` (GPU, NHWC RGB) and return GPU-resident predictions. Runtimes (torch/onnx/tensorrt) are orthogonal.\n\n| Role | Signature | Boundary out | Status / impl | Canonical stage |\n|---|---|---|---|---|\n| `PersonDetector` | `(frames_rgb) -> BoxDetections` | `BoxDetections` | \u2705 YOLOX, RT-DETRv2 | `detect` |\n| `PromptableSegmenter` | `(frames_rgb, SegmentationPrompts) -> BoxDetections` (w/ masks) | `BoxDetections`+masks | \u2705 SAM3 (text); box/point path GAP | `detect` (mask branch) |\n| `VideoSegmenter` | `step(frames_rgb, prompts?) -> BoxDetections`; `reset()` | `BoxDetections`+masks+track_ids | \u2705 SAM2-streaming fork | `detect`+`identity`(tracking)+`feedback`(mask-propagation) |\n| `IdentityEncoder` | `(frames_rgb, detections) -> Float32[n, embed_dim]` | embedding tensor | \u2705 CLIP ViT-B/32 | `identity` (the *network* part only) |\n| `TopDownPose2d` | `(frames_rgb, detections) -> Keypoints2d` | `Keypoints2d` | \u2705 RTMPose/RTMW, Sapiens2, ViTPose | `pose2d` |\n| `InstancePose2d` | `(frames_rgb) -> (BoxDetections, Keypoints2d)` | both, one pass | ABC only, **0 impls** (RTMO/RF-DETR) | `detect`+`pose2d` fused |\n| `TopDownDenseLandmarks2d` | `(frames_rgb, detections w/ masks) -> DenseLandmarks2d` | `DenseLandmarks2d` | \u2705 MammaNet (lives in mamma) | `pose2d` (dense variant) |\n| `TopDownFeatureEncoder2d` **(NEW, amendment 2)** | `(frames_rgb, detections) -> Float32[n, c, h', w']` | latent feature maps | GAP \u2014 UmeTrack/AssemblyHands need it | `pose2d` (latent variant) |\n| `TopDownKeypoints3d` **(Phase 4)** | `(frames_rgb, detections) -> Keypoints3d` | `Keypoints3d` | container \u2705, role GAP (RTMW3D) | `pose2d`\u2192`lift3d` (single-view 3D) |\n| `TopDownPose3d` (parametric, **Phase 4**) | `(frames_rgb, detections) -> ParametricPose3d` | new `ParametricPose3d` | GAP (WiLoR/SAM3D-Body/HaMeR) | `fit` (single-view regressed) |\n| `SurfacePose3d` **(Phase 4)** | `(frames_rgb) -> surface kpts + uncertainty` | surface variant | GAP (NLF) | `pose2d`/`lift3d` (surface) |\n| `HumanPartSegmenter` / `HumanSurfaceNormals` / `HumanPointmap` / `HumanMatting` **(Phase 3.5)** | `(frames_rgb) -> per-pixel map` | dense maps | GAP (Sapiens2, license-gated) | (dense human priors; feed `fit`/`verify`) |\n\n**Camera-aware crop is a posekit-owned *transform* (not a network role) \u2014 amendment 1:**\n\n| Op family | Signature | Boundary out | Stage |\n|---|---|---|---|\n| `ops.crops` (existing box crop) | `(frames_rgb, boxes) -> CropBatch` | `CropBatch` + `CropSpec` | `crop` |\n| `ops.crops` fisheye\u2192virtual-pinhole (**NEW**) | `(frames_rgb, boxes, CameraModel) -> CropBatch + virtual CameraModel` | crop **+ virtual K/extrinsics** | `crop` (UmeTrack/EgoExo/AssemblyHands-ego) |\n\n### (b) Geometry glue that STAYS in consumers / simplecv (explicit non-goals)\n\nEach paper hand-rolls a different variant; posekit provides only small pure-tensor helpers on `Keypoints2d`.\n\n| Glue | Home today | Canonical stage |\n|---|---|---|\n| Cross-view association (epipolar affinity, fundamental matrix, Hungarian, cycle-consistency) | `mamma/tracking/identity.py` | `identity` |\n| Triangulation \u2014 weighted DLT / SVD | `simplecv/ops/triangulate.py` (mv-api, EPFL, AssemblyX, Kineo) | `lift3d` |\n| Triangulation \u2014 gated/weighted | `mamma/fitting/triangulation.py` | `lift3d` |\n| Triangulation \u2014 RANSAC / ray-intersection init | consumer (EgoExo-Hands, HO-Cap, MAMMA init) | `lift3d` |\n| Auto-calibration / BA (essential-graph, MST, Brown-Conrady) | `mamma/calibration/keypoint_bundle_adjust.py`; Kineo consumer | `calibrate` |\n| Metric scale (SMPL bone-length / MoGe depth) | consumer (Kineo) | `calibrate` |\n| Per-user shape/scale template (\u03c6, Regressor-U, per-subject \u03b2/LBS) | consumer (fit-coupled) | `calibrate` |\n| SMPL-X / MANO / template fitting (LBFGS, LM, EasyMocap, IK, SDF) | `mamma/fitting/window_fitter.py`; EPFL/AssemblyX/HO-Cap consumers | `fit` |\n| Render-back verify / silhouette loss / discard gate (**amendment 4**) | consumer (AssemblyX, HO-Cap, EPFL) | `verify` |\n| Temporal extrapolation / feedback loop / spline gap-fill | `mv-api/...multiview_pose_estimator.py` (`extrapolate_3d_keypoints`, `MVHistory`); consumers | `feedback` |\n| Small shared helpers (edge-margin conf modulation, per-view temporal median) \u2014 **could** live in `posekit.ops`, not yet present | GAP (design \u00a73 allows) | `pose2d` post |\n\n### (c) The universal boundary datatype (the center of gravity)\n\n`posekit/predictions.py`, all `@dataclass(frozen=True, slots=True)`, GPU-resident torch tensors:\n\n- **`BoxDetections`** \u2014 `xyxy`, `scores`, `frame_indices` + optional `masks`, `track_ids`. The single unifying type for detector / tracker / segmenter output. **This is how `detect`, `identity`(result), and `feedback`(propagated masks) all communicate.**\n- **`Keypoints2d`** \u2014 `xy`, mandatory `scores` (confidence), `frame_indices`, `skeleton: KeypointSkeleton` + optional `uncertainty`. **The one datatype the whole survey rotates around.** The `pose2d` boundary and the input to `lift3d`/`calibrate`/`verify`.\n- **`DenseLandmarks2d`** \u2014 `xy`, `log_variance`, `visibility`, `contact`, `floor_contact` (anonymous surface points). The `pose2d` boundary for MammaNet-style dense nets.\n- **`Keypoints3d`** \u2014 `xy`, `z_root_relative`, `scores`, `skeleton`, `root_indices` + optional `xyz_camera`. The `lift3d`/single-view-3D boundary (container exists, producer GAP).\n- **`ParametricPose3d`** (NEW, Phase 4) \u2014 model params (SMPL-X \u03b2/\u03b8/trans; MANO \u03b8; 26-DOF hand \u03b8) + joints3d + verts + weak-persp cam. The `fit` boundary when a *network* regresses the fit (UmeTrack, AssemblyHands-SVEgoNet, WiLoR).\n- **`CameraModel`** (simplecv) \u2014 travels *beside* every boundary type from `capture` onward; the `crop` stage forks it into a *virtual* pinhole camera.\n- **`SegmentationPrompts`** \u2014 prompt payload into segmenters.\n- **`KeypointSkeleton` + `SKELETONS` registry** \u2014 the named-convention half of the boundary. GAPs: halpe-26, h36m-17, body-25, sapiens-308, mamma-512, and all format-projection tables.\n\n### Canonical-stage \u2192 layer map (complete)\n\n| Canonical stage | Realized by |\n|---|---|\n| `capture` | **consumer** (simplecv `CameraModel` + video IO); posekit assumes given |\n| `detect` | **(a)** `PersonDetector` / `PromptableSegmenter` / `VideoSegmenter` / `InstancePose2d` |\n| `identity` | **(a)** `IdentityEncoder` (network) + **(b)** association glue; result in `BoxDetections.track_ids` |\n| `crop` | **(a)** `ops.crops` box + **NEW** camera-aware fisheye\u2192pinhole transform |\n| `pose2d` | **(a)** `TopDownPose2d` / `TopDownDenseLandmarks2d` / **NEW** `TopDownFeatureEncoder2d` / `InstancePose2d`(kpt half) |\n| `lift3d` | **(b)** triangulation glue **OR (a)** `TopDownKeypoints3d`(single-view) / learnable fusion (see Risk \u00a75) |\n| `calibrate` | **(b)** BA/scale/shape glue (posekit provides only `Keypoints2d` streams) |\n| `fit` | **(b)** optimizer glue **OR (a)** `TopDownPose3d`(regressed) |\n| `verify` | **(b)** consumer render/gate (consumes posekit boundary types backwards) |\n| `feedback` | **(b)** consumer temporal loop **+** `VideoSegmenter.step` state (mask propagation is the one posekit-owned feedback piece) |\n\n---\n\n## 3. PER-PAPER REBUILD\n\nNotation: `Role(model)` = posekit-owned; `glue[...]` = consumer; `[external]` = out-of-posekit net; `\u27f3` = feedback edge.\n\n1. **MEgATrack** = `PersonDetector(DetNet)` \u2192 `ops.crops[square+pad, R-mirror, +projected-kpt channel]` \u2192 `TopDownPose2d(KeyNet: 2D heatmaps + 1D rel-dist head)` \u2192 glue[no explicit lift; 4-view reproj energy] \u2192 glue[fit: 26-DOF template LM, E_2D+E_dist+E_temporal; per-user scale \u03c6 in calibrate] \u27f3 glue[pose extrapolation \u03b8\u0302=2\u03b8_{t-1}\u2212\u03b8_{t-2} \u2192 detection boxes + KeyNet augmentation]. *(1D rel-dist head is a KeyNet-specific output \u2014 needs a custom prediction field; feedback loop is pure consumer.)*\n\n2. **UmeTrack** = *(no detector; ROI from loop)* \u2192 `ops.crops[fisheye\u2192virtual-pinhole, NEW]` \u2192 **`TopDownFeatureEncoder2d(ResNet)`** *(NEW role \u2014 emits latent z_i^I, not keypoints)* \u2192 **learnable lift** glue/`[external]`[FTL + 1\u00d71-conv multi-view fusion] \u2192 glue[calibrate: Regressor-U hand-scale] \u2192 glue[fit: Regressor-K + SVD root + FK+LBS] \u27f3 glue[RNN hidden state + tracked-pose\u2192ROI/intrinsics]. **\u2190 the hardest fit for the abstraction; see Risk \u00a75.**\n\n3. **Kineo** = `PersonDetector`-via-pose-adapter *(full-frame, no box net)* / `VideoSegmenter(SAM2)`[re-ID glue, assumed given] \u2192 `ops.crops[undistort images+keypoints via solved Brown-Conrady, NEW]` \u2192 `TopDownPose2d(NLF / RTMPose / DWPose \u2014 explicitly swappable)` \u2192 glue[weighted-DLT + consensus] \u2192 **glue[calibrate: FULL calibration-free block \u2014 essential-graph\u2192MST\u21923-pass BA\u2192metric scale]** \u27f3 glue[audio-MFCC sync, feed-forward only]. *(The one paper whose center of mass is `calibrate` \u2014 all consumer glue; posekit contributes only the swappable `TopDownPose2d` + camera-aware undistort.)*\n\n4. **EPFL-Smart-Kitchen** = `PersonDetector`-via-pose-adapter *(full-frame RTMPose)* + glue[identity: Kinect-depth 3D-merge \u2192 reproject-to-select] \u2192 `TopDownPose2d(RTMPose-x body + RTMW-x hands)` \u2192 glue[weighted-SVD triangulation, conf<0.1 dropped] \u2192 glue[fit: EasyMocap SMPL+MANO, 3D+2D-reproj+temporal-smooth+ego-hand loss] \u2192 **glue[verify: fit-vs-lifted-pose discard gate]** \u27f3 glue[temporal-smoothing loss, feed-forward]. *(multi-modal: Kinect depth + HoloLens ego + IMU are consumer fusion inputs, not posekit roles.)*\n\n5. **AssemblyHands** = `PersonDetector(COCO body-kpt net)` + glue[body-triangulate \u2192 project virtual hand-box] \u2192 `ops.crops[exo box + ego fisheye\u2192pinhole, NEW]` \u2192 **`TopDownFeatureEncoder2d(EfficientNet)`** *(NEW \u2014 MVExoNet feature maps)* \u2192 **learnable lift** glue[softmax feature-volume unproject \u2192 V2V-PoseNet \u2192 soft-argmax] \u2192 glue[fit: SVEgoNet ResNet-50 regresses ego 2.5D + L/R-id head \u2014 a `TopDownPose3d`-shaped *learned* stand-in] \u27f3 glue[inference-time iterative re-crop/re-root, feed-forward]. *(second learnable-fusion paper; same Risk \u00a75 as UmeTrack.)*\n\n6. **AssemblyX** = `PromptableSegmenter(SAM)` *(masks as fit TARGET, not input)* \u2192 `ops.crops[body/hand region]` \u2192 `TopDownPose2d(DWPose whole-body)` + glue[median filter, edge-dist conf modulation, \u03c4=0.15] \u2016 `[external AssemblyHands sub-pipeline]` for hands \u2192 glue[weighted-DLT body + AssemblyHands hand \u2192 merge] \u2192 glue[fit: SMPL-X, L_joint+L_mask+\u03b2/\u03b8 reg] \u2192 **glue[verify: differentiable Soft-Rasterizer render vs SAM mask \u2192 L_mask *inside* the fit loop]**. *(the median-filter + edge-margin conf helpers are exactly the design \u00a73 `posekit.ops` candidates \u2014 should be added.)*\n\n7. **MAMMA** = `VideoSegmenter(SAM2)` *(masks as first-class model INPUTS)* + `IdentityEncoder(CLIP)` + glue[epipolar affinity \u2192 Hungarian \u2192 cycle-consistency graph] \u2192 `ops.crops[RGB + mask conditioning]` \u2192 `TopDownDenseLandmarks2d(MammaNet 512-pt: \u03bc/\u03c3/visibility/contact)` \u2192 glue[ray-intersection init] \u2192 glue[calibration given] \u2192 glue[fit: multi-stage LBFGS SMPL-X, E_ldmks(GM, p\u00b7\u03c3)+E_shape+reproj-reweight+E_temp+E_contact] \u27f3 glue[SAM2 mask propagation + reproj-error re-weight, feed-forward]. **\u2190 the design's flagship consumer; every posekit role it needs already exists (only mamma's own CLIP/detector need swapping to posekit's \u2014 see GAPS).**\n\n8. **EgoExo-Hands** = `PersonDetector`-via-`TopDownPose2d`-adapter(Sapiens-308) *(pose net doubles as hand localizer via centroid+circle)* \u2192 `ops.crops[fisheye\u2192virtual-pinhole 256\u00b2 + histogram-eq, NEW]` \u2192 `TopDownPose2d(Sapiens-42 full-frame \u2016 InterNet on crops \u2014 dual redundant)` \u2192 glue[RANSAC triangulation, conf>0.3] \u2192 glue[calibrate: per-user LBS template from hand scan] \u2192 glue[fit: IK to 42 3D kpts] \u2192 glue[verify: mesh\u21922D overlay, output-only, no \u27f3]. *(the design's headline \"pose-net-as-detector adapter\" case; strictly per-frame, no feedback.)*\n\n9. **HO-Cap** = `VideoSegmenter(SAM2)` *(hand masks + object masks, model inputs)* + `[external FoundationPose]`(object 6-DoF branch) \u2192 *(no crop; full-frame)* \u2192 `TopDownPose2d(MediaPipe \u2014 NO confidence)` \u2192 glue[per-joint triangulate-all-pairs, select-by-reproj-error (manufactures confidence), spline gap-fill] \u2192 glue[calibrate: per-subject MANO \u03b2 given] \u2192 glue[fit: MANO L_kpt+reg, then JOINT hand-object SDF] \u2192 **glue[verify: render meshes to all views + export 2D annotations]** \u27f3 glue[object-pose reproj \u2192 next-frame FoundationPose init, closed loop]. *(proves confidence is structurally required \u2014 MediaPipe's lack of it forces reprojection-error recovery; the object branch is fully `[external]` glue.)*\n\n---\n\n## 4. GAPS RANKED (by #papers that need it)\n\n1. **Camera-model-aware crop (fisheye\u2192virtual-pinhole + undistort-keypoints)** \u2014 **needed by 4/9** (UmeTrack, EgoExo-Hands, AssemblyHands-ego, Kineo). Currently `ops.crops` does box+pad only; the design defers this to \"later.\" **Next steps:** add an analytic-grid variant to `posekit/ops/crops.py` that takes a `CameraModel` (simplecv `Fisheye62Parameters`/Kannala-Brandt already exist), builds a virtual pinhole `K` at the physical camera pointing at the ROI center, samples the distorted source, and **returns the virtual `CameraModel` alongside `CropBatch`** so `lift3d` gets correct rays. Add a keypoint-undistort helper for the Kineo case. Promote from \u00a75 \"later\" to a Phase 3.x item.\n\n2. **Skeleton registry + format-projection tables** \u2014 **needed by ~6/9** (any paper mixing body+hand or COCO variants: EPFL coco133\u2194coco17, AssemblyX whole-body, EgoExo/AssemblyHands 42-hand, MAMMA 512-dense, halpe-26 for BodyWithFeet). Registry today has only COCO-17/133 + HAND-21. **Next steps:** add `HALPE_26`, `H36M_17`, `BODY_25`, `SAPIENS_308`, `MAMMA_512` (anonymous, generated names) to `SKELETONS`; add projection tables (coco133\u2192coco17, sapiens308\u2192coco133, halpe26\u2194coco17) as pure index-remap registry data with a `project(kpts, target)` helper. Pure data + one function \u2014 cheap, high-leverage.\n\n3. **`TopDownFeatureEncoder2d` role (latent, no explicit keypoints)** \u2014 **needed by 2/9** (UmeTrack, AssemblyHands MVExoNet). No current role emits feature maps. **Next steps:** decide first whether posekit *owns* the latent-fusion class of models or declares them an end-to-end exception (Risk \u00a75). If owned: add ABC `(frames_rgb, detections) -> Float32[n,c,h',w']`, and accept that the *fusion* half stays consumer glue (learnable triangulation is not a network posekit ships). Lower priority \u2014 both are single-headset research nets, not the mv-api/mamma production path.\n\n4. **`InstancePose2d` implementations** \u2014 role ABC exists, **0 impls**; **directly needed by 0/9** surveyed papers (all 9 use detector\u2218pose or pose-as-detector), but it is the throughput slot the design commits to and the natural home for future RTMO/RF-DETR consumers. **Next steps:** port RTMO from the rtmlib ONNX zoo with a GPU-NMS post-step (design Phase 4). Ranked low by *survey* demand, but keep as planned.\n\n5. **`ParametricPose3d` type + `TopDownPose3d` role** \u2014 **needed by 1/9 as a posekit role** (WiLoR is already reachable ad-hoc in mv-api hand refinement; SVEgoNet/UmeTrack regress params but as end-to-end nets). **Next steps:** add the `ParametricPose3d` dataclass (align param stacking with simplecv `ManoStack`/`SmplxStack`), wrap the existing WiLoR TRT runner as the first `TopDownPose3d` impl, giving mv-api's hand-refinement a real posekit home.\n\n6. **`posekit.ops` shared confidence helpers** \u2014 **needed by 2/9 explicitly** (AssemblyX edge-margin conf modulation + per-view temporal median; MAMMA/EPFL reuse the median idea). Design \u00a73 already sanctions these. **Next steps:** add `edge_margin_confidence(Keypoints2d, image_size)` and `temporal_median(Keypoints2d)` as pure composable functions \u2014 trivial, removes consumer duplication.\n\n7. **`Keypoints2d.uncertainty` producer** \u2014 field exists, **no shipping populator**; RF-DETR would populate it, dense nets use `DenseLandmarks2d.log_variance` instead. **Next steps:** lands with RF-DETR (Phase 4); no action until then.\n\n8. **Consumer-side swaps not yet done** (not a posekit *code* gap but the design's adoption goal): **mamma still hand-rolls its own `PersonDetector`/`PersonDetections` (`mamma/tracking/detection.py`) and a separate `ClipEncoder` (`mamma/tracking/identity.py`)** instead of posekit's `PersonDetector`/`ClipIdentity` \u2014 the design \u00a76 mamma swap is outstanding. **Next steps:** inject posekit `detector`+`VideoSegmenter`+`IdentityEncoder` into `MultiViewTracker.__init__`; delete the duplicate CLIP/detector. (mv-api swap is already done.)\n\n---\n\n## 5. RISKS \u2014 where the abstraction could be wrong\n\n1. **Learnable multi-view fusion breaks the clean network/glue split (highest risk).** The abstraction's load-bearing assumption is \"networks = detect/segment/pose2d; the geometry tail (lift3d/fit) = consumer glue.\" **UmeTrack and AssemblyHands MVExoNet violate this**: their 3D lift is *inside a differentiable network* (FTL + learnable triangulation; softmax feature-volume + V2V-PoseNet). There is no clean `pose2d \u2192 Keypoints2d \u2192 glue[triangulate]` boundary \u2014 the boundary type between their `pose2d` and `lift3d` is an opaque feature tensor, not `Keypoints2d`. If posekit tries to own these as `TopDownFeatureEncoder2d + learnable-fusion`, the \"fusion\" is a *network* that the design says should be glue \u2014 contradiction. **Mitigation:** treat end-to-end learned-fusion multi-view nets as a declared exception (they enter posekit as a single opaque role or stay fully external), and keep the `Keypoints2d`-centered abstraction for the 7/9 modular pipelines it fits. Do not force them through the boundary type.\n\n2. **Query-based single-stage models cannot consume external boxes (design already flags; survey doesn't add one, but the risk stands).** RF-DETR/ED-Pose condition keypoints on internal query embeddings, so `InstancePose2d` genuinely *cannot* be decomposed into `PersonDetector \u2218 TopDownPose2d`. If a consumer assumes it can always inject its own detector, that assumption fails for this whole model class. **Mitigation:** the design's asymmetric-adapter rule (`InstancePose2d \u2192 PersonDetector` trivial, reverse impossible) is correct \u2014 enforce it in the type system, never expose a `boxes=` argument on `InstancePose2d`.\n\n3. **Masks-as-input vs masks-as-target vs no-masks is a three-way fork the single `BoxDetections.masks` field hides.** MAMMA/HO-Cap feed masks *into* the estimator (`TopDownDenseLandmarks2d` requires them, raising if `None`); AssemblyX uses masks only as a *fit target* (never reaches the estimator); the rest use none. A naive consumer wiring a `PromptableSegmenter` before a `TopDownPose2d` might assume masks always flow forward into pose \u2014 but for AssemblyX they flow *backward* into `verify`. **Mitigation:** the role signatures already encode this (only `TopDownDenseLandmarks2d` takes masked detections; `verify` is consumer-side) \u2014 but document that masks have three distinct dataflow roles so the boundary type isn't over-interpreted.\n\n4. **Confidence-less estimators (MediaPipe / HO-Cap) violate the \"scores mandatory\" invariant.** `Keypoints2d.scores` is mandatory, but MediaPipe emits none \u2014 HO-Cap manufactures a per-joint weight from reprojection error *after* triangulation. A posekit MediaPipe adapter would have to synthesize placeholder scores (all-1.0), which is a lie the downstream weighted-DLT would trust. **Mitigation:** either forbid confidence-less models as `TopDownPose2d` impls, or add an explicit `scores_are_synthetic: bool` marker so consumers know to recover real weights downstream. Do not silently fill 1.0.\n\n5. **The `crop` stage emitting a virtual `CameraModel` couples posekit to simplecv's camera model more tightly than the design's \"posekit is network-only\" stance implies.** Camera-aware crop *must* return corrected intrinsics/extrinsics for `lift3d` to be correct, which means `posekit.ops.crops` now depends on and produces `CameraModel` \u2014 a geometry object the design otherwise keeps in simplecv. **Mitigation:** accept the dependency (simplecv is already a posekit dep and owns `Fisheye62Parameters`); keep the *triangulation* that consumes the virtual camera in the consumer, so posekit produces the corrected camera but never fuses with it. The line stays \"posekit warps and re-parameterizes cameras; consumers triangulate with them.\"\n\n**Files referenced:** design at `/home/pablo/.paseo/worktrees/26sr02x6/cowardly-blobfish/packages/posekit/docs/design.md`; roles `/home/pablo/.paseo/worktrees/26sr02x6/cowardly-blobfish/packages/posekit/src/posekit/models/base.py`; boundary types `.../src/posekit/predictions.py`; skeletons `.../src/posekit/skeletons.py`; crop ops `.../src/posekit/ops/crops.py`; consumer glue in `simplecv/simplecv/ops/triangulate.py`, `mamma/src/mamma/{tracking,fitting,calibration}/`, and `mv-api/.../multiview_pose_estimator.py`."
+}
