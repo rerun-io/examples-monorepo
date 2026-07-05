@@ -672,6 +672,7 @@ h5py = ">=3.13.0,<4"
 natsort = ">=8.4.0,<9"
 open3d = ">=0.19.0,<0.20"
 scikit-image = ">=0.24.0,<0.25"
+torchcodec = "*"
 tyro = ">=0.9.1,<0.10"
 
 [feature.mv-api.target.linux-64.dependencies]
@@ -680,6 +681,8 @@ datasets = ">=4.0.0"
 [feature.mv-api.pypi-dependencies]
 mv-api = { path = "packages/mv-api", editable = true }
 monopriors = { path = "packages/monoprior", editable = true }
+posekit = { path = "packages/posekit", editable = true }
+onnx = "*"
 sam3 = { path = "packages/sam3", editable = true }
 wilor_nano = { path = "packages/wilor-nano", editable = true }
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
@@ -1906,6 +1909,7 @@ natsort = ">=8.4.0,<9"
 
 [feature.mamma.pypi-dependencies]
 mamma = { path = "packages/mamma", editable = true }
+posekit = { path = "packages/posekit", editable = true }
 # Vendored cjaverliat/sam2 fork (streaming predictor + forgetful memory bank +
 # EfficientTAM); distribution name is `sam2`, needs no-build-isolation (torch
 # at build time). See packages/sam2-streaming/VENDOR.md.

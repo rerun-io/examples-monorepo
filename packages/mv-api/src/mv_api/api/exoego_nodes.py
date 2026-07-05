@@ -8,6 +8,7 @@ from numpy import ndarray
 from simplecv.apis.view_exoego import SceneSetupResult, setup_scene
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence
 from simplecv.data.exoego.exoego_config import BaseExoEgoDatasetConfig
+from simplecv.rerun_rig_logger import log_rig_static
 
 from mv_api.api import full_exoego_pipeline
 from mv_api.api.full_exoego_pipeline import RRDPipelineConfig
@@ -39,6 +40,10 @@ class ScenePreparationResult:
     """Timeline name used for frame-aligned exo/ego logs."""
     shortest_timestamp: Int[ndarray, "n_frames"]
     """Common timestamp sequence produced by scene setup."""
+    exo_cam_paths: dict[str, Path]
+    """Rig-layout camera node path per exo stream name (exoego:v2 layout)."""
+    ego_cam_paths: dict[str, Path]
+    """Rig-layout camera node path per ego stream name (exoego:v2 layout)."""
 
 
 class ScenePreparationNode:
@@ -65,8 +70,17 @@ class ScenePreparationNode:
         rr.log("/", exoego_sequence.world_coordinate_system, static=True, recording=recording)
         full_exoego_pipeline.set_annotation_context(recording=recording)
 
+        # COLMAP-style rig layout (exoego:v2): assign cameras to rig nodes and
+        # log the static skeletons before ingesting the per-frame videos.
+        rig_layout = exoego_sequence.build_rig_layout(
+            world_path=self.parent_log_path, log_exo=self.config.log_exo, log_ego=self.config.log_ego
+        )
+        for rig in rig_layout.rigs:
+            log_rig_static(rig, world_path=str(self.parent_log_path), recording=recording)
+
         scene_setup_result: SceneSetupResult = setup_scene(
             exoego_sequence,
+            rig_layout=rig_layout,
             parent_log_path=self.parent_log_path,
             timeline=self.timeline,
             log_ego=self.config.log_ego,
@@ -81,6 +95,8 @@ class ScenePreparationNode:
             parent_log_path=self.parent_log_path,
             timeline=self.timeline,
             shortest_timestamp=scene_setup_result.shortest_timestamp,
+            exo_cam_paths=dict(rig_layout.exo_cam_paths),
+            ego_cam_paths=dict(rig_layout.ego_cam_paths),
         )
 
 
@@ -127,6 +143,8 @@ class ModelBackedPipelineNode:
             scene_setup_result=scene.scene_setup_result,
             parent_log_path=self.parent_log_path,
             timeline=self.timeline,
+            exo_cam_paths=scene.exo_cam_paths,
+            ego_cam_paths=scene.ego_cam_paths,
             recording=recording,
         )
         return ModelBackedPipelineResult(processed_timestamps=scene.shortest_timestamp)
