@@ -155,5 +155,5 @@ repomix-output.xml
 /data/
 /pretrained_models/
 /typings/
-yolo*
+/yolo*
 artifacts/*

@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>posekit — design.md implementation notes</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #161a22; --panel2: #1d2330; --text: #d7dce4;
+    --muted: #8b93a3; --accent: #5cc8ff; --ok: #4ade80; --warn: #fbbf24;
+    --bad: #f87171; --border: #2a3245;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2rem clamp(1rem, 5vw, 4rem); background: var(--bg);
+    color: var(--text); font: 15px/1.55 -apple-system, "Segoe UI", Roboto, sans-serif;
+    max-width: 1100px; margin-inline: auto;
+  }
+  h1 { font-size: 1.6rem; border-bottom: 1px solid var(--border); padding-bottom: .5rem; }
+  h2 { font-size: 1.25rem; margin-top: 2.2rem; color: var(--accent); }
+  h3 { font-size: 1.05rem; margin-top: 1.6rem; }
+  code, pre { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: .86em; }
+  code { background: var(--panel2); padding: .1em .35em; border-radius: 4px; }
+  pre { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: .9rem 1.1rem; overflow-x: auto; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .92em; }
+  th, td { border: 1px solid var(--border); padding: .45rem .7rem; text-align: left; vertical-align: top; }
+  th { background: var(--panel2); }
+  .status { display: inline-block; padding: .05rem .55rem; border-radius: 999px; font-size: .78em; font-weight: 600; }
+  .done { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); border: 1px solid var(--ok); }
+  .wip { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); border: 1px solid var(--warn); }
+  .todo { background: var(--panel2); color: var(--muted); border: 1px solid var(--border); }
+  .dev { background: color-mix(in srgb, var(--bad) 15%, transparent); color: var(--bad); border: 1px solid var(--bad); }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 1rem 1.3rem; margin: 1rem 0; }
+  .muted { color: var(--muted); }
+  img.shot { max-width: 100%; border: 1px solid var(--border); border-radius: 8px; margin: .5rem 0; }
+  ul { padding-left: 1.3rem; }
+  .log time { color: var(--muted); font-size: .85em; margin-right: .5rem; }
+</style>
+</head>
+<body>
+
+<h1>posekit — implementing <code>docs/design.md</code> (v3)</h1>
+<p class="muted">Living notes for the implementation of the role taxonomy beyond Phase 1.
+Branch <code>keypoint-network-abstraction</code>. Started 2026-07-05.
+Each milestone is validated visually in the Rerun viewer; screenshots and reports live under
+<code>/tmp/rerun-viewer-validation/</code> (validation artifacts, not committed).</p>
+
+<h2 id="status">Phase status</h2>
+<table>
+  <tr><th>Phase</th><th>Scope (design.md §7)</th><th>Status</th></tr>
+  <tr><td>1</td><td>Runtimes (torch/onnx/trt) · YOLOX · RTMPose/RTMW · Sapiens2-pose · crops/decode ops · skeletons</td><td><span class="status done">done</span> <span class="muted">(pre-existing, parity-validated)</span></td></tr>
+  <tr><td>2</td><td>Masks + tracking: prediction-type upgrades, <code>PromptableSegmenter</code> (SAM3), <code>VideoSegmenter</code> (sam2-streaming), <code>IdentityEncoder</code> (CLIP)</td><td><span class="status done">done</span> <span class="muted">(validated: CLIP cos ≥ 0.985, SAM3 IoU ≥ 0.997, SAM2 track IoU ≥ 0.97, viewer PASS)</span></td></tr>
+  <tr><td>3</td><td>Adoption + detector depth: RT-DETRv2, ViTPose adapter, typed zoo registry, mv-api swap, MammaNet dense landmarks</td><td><span class="status done">done</span> <span class="muted">(rtmlib Hand solution stays a planned zoo entry)</span></td></tr>
+  <tr><td>3.5</td><td>Sapiens2 human-dense suite (seg/normals/pointmap/matting)</td><td><span class="status todo">pending — license review gate</span></td></tr>
+  <tr><td>4</td><td>3D + single-stage (RTMW3D, WiLoR/SAM3D-Body, RTMO)</td><td><span class="status todo">pending</span></td></tr>
+</table>
+
+<h2 id="log">Progress log</h2>
+<div class="card log" id="log-entries">
+  <p><time>2026-07-05</time> Notes file created. Integration survey done: sam2-streaming
+  (<code>SAM2GenericVideoPredictor</code>, EfficientTAM-ti@512, forgetful memory bank, batched steady-state),
+  sam3 (<code>Sam3Model</code>/<code>Sam3Processor</code> via transformers≥5, text-prompt image mode),
+  mamma (open_clip ViT-B/32 laion2b re-ID [n,512]; MammaNet 384×512 crop + mask channel, cv2-align,
+  xy+logvar+vis+contact heads, TRT static-batch-4 + CUDA graph),
+  mv-api (2 ctor + 2 call swap sites in <code>multiview_pose_estimator.py</code>, per-view BGR numpy, no batching).</p>
+
+  <p><time>2026-07-05</time> <strong>Phase 2a/2b</strong> — prediction types upgraded
+  (<code>BoxDetections.masks/.track_ids</code>, <code>Keypoints2d.uncertainty</code>, new
+  <code>DenseLandmarks2d</code> + sparse <code>Keypoints3d</code>) and all role ABCs added to
+  <code>models/base.py</code>: <code>InstancePose2d</code>, <code>SegmentationPrompts</code>,
+  <code>PromptableSegmenter</code>, <code>VideoSegmenter</code> (stateful <code>step/reset</code>),
+  <code>IdentityEncoder</code>, <code>TopDownDenseLandmarks2d</code>. Lint + typecheck green.</p>
+
+  <p><time>2026-07-05</time> <strong>Phase 2c — CLIP identity</strong> (<code>models/clip_identity.py</code>).
+  Uses the exact laion2b ViT-B/32 weights mamma uses, but loaded from HF transformers
+  (<code>CLIPVisionModelWithProjection</code>, dogfooding the transformers-as-weights-source decision)
+  and preprocessed fully on GPU (center-square crop = resize-shortest-side + center-crop semantics,
+  via the shared <code>grid_sample</code> crop path). <em>Validated:</em> cosine vs the PIL/processor
+  reference ≥ 0.985 per detection on real video crops; cross-frame self-similarity 0.90.</p>
+
+  <p><time>2026-07-05</time> <strong>Phase 2d — SAM3 segmenter</strong> (<code>models/sam3_segmenter.py</code>).
+  <code>facebook/sam3</code> weights; GPU preprocessing replaces the CPU processor (SAM3's image prep is a
+  plain bilinear 1008² resize + 0.5/0.5 normalize); text prompt broadcast over the frame batch (the HF
+  processor itself can't do that). <em>Validated:</em> box maxdiff ≤ 0.15 px, mask IoU ≥ 0.997 vs the
+  reference processor path.</p>
+
+  <p><time>2026-07-05</time> <strong>Phase 2e — sam2-streaming video segmenter</strong>
+  (<code>models/sam2_video.py</code>). Wraps our forward-only <code>SAM2GenericVideoPredictor</code> fork
+  (EfficientTAM-ti@512, forgetful memory bank, checkpoint auto-fetched from HF) behind the stateful
+  <code>VideoSegmenter</code> role: one memory state per batch slot, box/point prompts with explicit
+  <code>track_ids</code>, boxes derived from masks. <em>Validated:</em> 30-frame propagation from one
+  box prompt, consecutive-frame mask IoU ≥ 0.97, <code>reset()</code> + re-prompt works.
+  <code>sam2</code> added to <code>feature.posekit</code> (posekit solve-group only).</p>
+
+  <p><time>2026-07-05</time> <strong>Phase 2 demo</strong> (<code>posekit-video-track</code> task,
+  <code>apis/video_track.py</code>): YOLOX bootstrap → SAM2 mask tracking → RTMW pose on the tracker's
+  boxes → CLIP identity cosine vs bootstrap embedding — mamma's pipeline shape purely through posekit
+  roles, ~38 fps streaming end-to-end on the 329-frame test clip. Validated in the Rerun viewer (below).</p>
+
+  <p><time>2026-07-05</time> <strong>Phase 3a — RT-DETRv2 detector</strong> (<code>models/rtdetr.py</code>).
+  Query-based, NMS-free; person class id read from <code>config.id2label</code>; GPU 640² resize + 1/255
+  (RT-DETR uses no mean/std normalization). Registered as the second entry of the tyro
+  <code>DetectorConfig</code> union (<code>yolox | rtdetr</code>). <em>Validated:</em> boxes ≤ 0.31 px vs the
+  HF processor reference; person-box IoU 0.76–0.91 vs YOLOX on the same frames.</p>
+
+  <p><time>2026-07-05</time> <strong>Phase 3b — ViTPose adapter</strong> (<code>models/vitpose.py</code>).
+  The reference transformers-as-source pose path. Key finding: HF's ViTPose pipeline is <em>UDP end to
+  end</em> (unbiased warp crops + DARK-UDP decode) — the first classic-decode attempt sat at 8.4 px mean
+  error; switching to posekit's <code>"udp"</code> crop align + existing <code>decode_udp_heatmaps</code>
+  brought it to <strong>0.75 px mean</strong> (scores ≤ 0.002). A GPU
+  <code>decode_classic_heatmaps</code> (mmpose <code>post_process='default'</code>) was added to
+  <code>ops/decode.py</code> along the way — it's the decoder the <em>rtmlib ViTPose ONNX</em> zoo entries
+  will need. Third entry of the <code>Pose2dConfig</code> union.</p>
+
+  <p><time>2026-07-05</time> <strong>Phase 3c — typed zoo + presets</strong> (<code>posekit/zoo.py</code>).
+  rtmlib's curation as data: <code>ZooModel</code> records role, paradigm (§2 taxonomy), source, URL/model-id,
+  input size, skeleton, and implemented/planned status; <code>PRESETS</code> replaces rtmlib solutions
+  (<code>body</code>, <code>body-performance</code>, <code>wholebody</code>, <code>body-nmsfree</code>,
+  <code>wholebody-fullframe</code>). Registry-consistency tests added (<code>tests/test_zoo.py</code>).</p>
+
+  <p><time>2026-07-05</time> <strong>Phase 3d — mv-api swap</strong>. <code>MultiviewBodyTracker</code> now
+  builds posekit models from its <code>mode</code> presets and accepts <code>detector=</code>/<code>pose=</code>
+  role overrides; the per-view rtmlib loop became one batched GPU detector call + one pose call per
+  frame-shape group (predictions stay on GPU until the numpy uvc boundary at triangulation).
+  <em>Validated:</em> 0.27–0.57 px mean vs the exact rtmlib calls the old code made (scores ≤ 0.003);
+  all 54 mv-api tests pass; mv-api typecheck went from 30 pre-existing errors to 1 (that one pre-exists
+  on HEAD, unrelated <code>exoego_nodes.py</code> / simplecv signature drift). rtmlib remains in the env
+  only for wilor-nano's hand-confidence path.</p>
+
+  <p><time>2026-07-05</time> <strong>Phase 3e — MammaNet as <code>TopDownDenseLandmarks2d</code></strong>
+  (<code>packages/mamma/src/mamma/landmarks/posekit_role.py</code> — the adapter lives in mamma, which now
+  depends on posekit, per design §6). Mask-conditioned 384×512 crops via mamma's own GPU crop ops; returns
+  <code>DenseLandmarks2d</code> (xy + log-variance + visibility + contact + floor-contact).
+  <em>Validated: bitwise-identical (0.0000 px / 0.00000 on every head)</em> to
+  <code>LandmarkEstimator.estimate</code> on a real SAM2-masked detection.</p>
+
+  <p><time>2026-07-05</time> <strong>mv-api throughput benchmark</strong> (4 synthetic 720×930 views/tick,
+  detect-every-tick + RTMW-x pose + DLT triangulation, 30 timed ticks):
+  old rtmlib per-view loop <strong>10.0 ticks/s</strong> →
+  posekit tracker as integrated (still cv2-decode/numpy boundary) <strong>22.3</strong> (2.2×) →
+  torchcodec CUDA decode + batched posekit ONNX <strong>43.2</strong> (4.3×) →
+  torchcodec CUDA + TensorRT (yolox b4 + rtmw b8 fp16) <strong>119.4 ticks/s</strong> (11.9×,
+  478 aggregate frames/s ≈ 4× realtime per camera at 30 fps).
+  Configs 3–4 bypass the numpy frame boundary — the measured case for moving mv-api's decode to
+  torchcodec CUDA. Real mv-api runs faster in absolute terms (tracking extrapolation skips the
+  detector most ticks); the ratios are the comparable part. Script: <code>/tmp/posekit-probe/bench_mvapi.py</code>.</p>
+
+  <p><time>2026-07-05</time> <strong>Full mv-api pipeline run</strong> (<code>mv-api-full-app</code>, HoCap
+  sample, 150 frames): scene setup → VGGT+MoGe calibration pre-pass → posekit-swapped tracker →
+  weighted DLT triangulation → Rerun, <strong>~15.5 ticks/s</strong> in the tracking loop
+  (production config, extrapolation on). RRD: <code>/tmp/posekit-probe/full_exoego_posekit.rrd</code>.
+  Required fixing a <em>pre-existing</em> HEAD bug unrelated to the swap: <code>exoego_nodes.py</code>
+  was never migrated to simplecv's exoego:v2 rig layout (<code>setup_scene</code> now requires
+  <code>rig_layout</code>) — the full app has been unrunnable since simplecv #58; fixed with the
+  canonical <code>build_rig_layout</code> + <code>log_rig_static</code> pattern. This also cleared the
+  one remaining mv-api pyrefly error.</p>
+
+  <p><time>2026-07-05</time> <strong>mv-api exoego:v2 migration completed</strong> (user spotted
+  "2D visualizers require a pinhole ancestor" on the prediction layers). Root causes, all
+  pre-existing rig-migration fallout on HEAD: (1) GT/pred/hand-bbox overlays were logged to the
+  legacy flat <code>/world/{exo,ego}/&lt;name&gt;/pinhole</code> paths while cameras moved to
+  <code>/world/rig_NN/cam_00</code> — fixed by threading <code>rig_layout.{exo,ego}_cam_paths</code>
+  from scene prep through <code>run_model_backed_pipeline</code> and the tracker's verbose layers
+  (name-first, view-index-fallback resolution); (2) <code>_dataset_exo/ego_pinhole_params</code>
+  parsed camera names out of the video log paths (<code>parent.parent.name</code>), which under the
+  rig layout is always <code>cam_00</code> — so <code>camera_source="auto"</code> silently fell back
+  to estimated cameras; fixed by resolving stream names positionally from the sequence. Result: all
+  8 exo GT overlays + ego projected/hand layers land on their own rig cam panes (verified visually,
+  keypoints on the person in every pane), dataset cameras are selected again, and the 150-frame loop
+  dropped from 60&nbsp;s to 30&nbsp;s. mv-api tests 54 passed, lint/typecheck clean.
+  RRD: <code>/tmp/posekit-probe/full_exoego_posekit_v4.rrd</code>.</p>
+
+  <p><time>2026-07-05</time> <strong>mv-api GPU decode migration (mamma-style)</strong>. The tracker
+  gained a GPU-native input (<code>frames_rgb</code> uint8 NHWC tensor, exactly one of
+  <code>bgr_list</code>/<code>frames_rgb</code>; WiLoR materializes BGR lazily), and the pipeline now
+  builds a <code>TorchCodecMultiVideoReader(device="cuda")</code> over the exo videos
+  (<code>RRDPipelineConfig.gpu_decode</code>, default on, graceful CPU fallback) — frames go NVDEC →
+  tracker → posekit models without touching the host. <code>MultiviewBodyTrackerConfig.backend</code>
+  also accepts <code>"tensorrt"</code> now (static-batch engines, per design §6). Full-app numbers
+  (HoCap, 150 frames, 8 exo + 1 ego): exo tracking loop <strong>14.3 → 35.0 ticks/s</strong> with NVDEC
+  (model stage 16.7 → 10.1 s, wall 23.9 → 16.9 s); with <code>--tracker-config.backend tensorrt</code>
+  the loop hits <strong>59.4 ticks/s</strong> (~2× realtime per camera at 8×30 fps), though ~13 s of
+  engine deserialization makes TRT a net win only on longer sequences. Output verified identical
+  (keypoints on the person in all 8 rig panes). All mv-api checks green.</p>
+
+  <p><time>2026-07-05</time> <strong>TRT + NVDEC made the defaults</strong> (user call: no silent
+  fallbacks). <code>MultiviewBodyTrackerConfig.backend</code> defaults to <code>"tensorrt"</code>;
+  the <code>gpu_decode</code> flag is gone — the pipeline unconditionally builds
+  <code>TorchCodecMultiVideoReader(device="cuda")</code> over real video files and FAILS LOUDLY if
+  NVDEC can't (only file-less test doubles keep their own readers). The numpy <code>bgr_list</code>
+  tracker input remains as an <em>input format</em> (catalog layer and unit tests feed numpy frames,
+  not video files), not a runtime fallback. Out-of-the-box full app: loop 50–59 ticks/s, wall 29 s
+  for 150 frames (~13 s is TRT engine deserialization — flip to
+  <code>--tracker-config.backend onnxruntime</code> for quick short-clip runs: 17 s wall).</p>
+
+  <p><time>2026-07-05</time> <strong>Tensor-only tracker API + review cycle</strong>.
+  <code>bgr_list</code> removed entirely — <code>MultiviewBodyTracker</code> consumes only
+  <code>frames_rgb</code> uint8 NHWC tensors (the catalog layer's RGB-CHW dataloader samples now feed it
+  with a stack+permute instead of a numpy/BGR detour; <code>rgb_chw_to_bgr_hwc</code> deleted).
+  Then a <code>simplify-code</code> pass (3 parallel reviewers, ~18 findings applied: shared
+  <code>run_chunked</code>/<code>empty()</code> helpers owning the clone-before-buffer-reuse contract,
+  <code>batched_nms</code>, flips moved off full-res frames, mv-api presets sourced from
+  <code>posekit.zoo</code>, per-frame rig-path resolution hoisted to one pre-resolved list, dead code
+  deleted) — all parity numbers re-verified identical. A Codex <em>adversarial review</em> then flagged
+  three real issues, all fixed: (1) ONNX runtime cross-stream ordering (session pinned to the
+  construction-time CUDA stream; now <code>wait_stream</code>s both directions vs the caller's stream,
+  with a race-hardened regression test using <code>torch.cuda._sleep</code>); (2) mixed-resolution exo
+  rigs now fail loudly at reader construction instead of a cryptic <code>torch.stack</code> error deep
+  in the loop; (3) COCO-17 tracker modes are rejected at the mv-api pipeline boundaries (which assume
+  COCO-133 masks/hand indices), plus a single-point <code>filter_body_idxes</code> bounds check in the
+  tracker. Full matrix green: posekit 18 tests, mv-api 53, lint/typecheck/deadcode clean everywhere.</p>
+
+  <p><time>2026-07-05</time> <strong>Paseo review round</strong> (5 comments, all applied).
+  (1) Validation screenshots removed from the repo (<code>docs/media/</code> deleted; the HTML now
+  points at the uncommitted <code>/tmp/rerun-viewer-validation/</code> artifacts).
+  (2)–(4) Frame gathering moved into simplecv as a proper reader API:
+  <code>MultiVideoReader.get_frames_at()</code> / <code>TorchCodecMultiVideoReader.get_frames_at()</code>
+  take per-camera frame indices and return RGB CHW tensors (camera-parallel NVDEC on torchcodec),
+  so mv-api's decode step is now ONE reader-agnostic call + an einops
+  <code>rearrange("views c h w -&gt; views h w c")</code> — the CPU/GPU if/else is gone entirely
+  (test doubles satisfy the same interface). Catalog layer uses the same einops view.
+  (5) <strong>TensorRT engines are dynamic-batch now</strong>: profile min=1 / opt=8 / max=32
+  (<code>TensorRtBackendConfig.max_batch_size/opt_batch_size</code> replace
+  <code>static_batch_size</code>), the runtime executes at the caller's TRUE batch via
+  <code>set_input_shape</code> (no zero-padding work), keeps one CUDA graph per batch size, and
+  static-batch ONNX exports (Sapiens dynamo) still yield static engines automatically. mv-api's
+  <code>tensorrt_static_batch</code> knob is gone — any rig size ≤ 32 just works. Runtime parity +
+  CUDA-graph tests now run against a dynamic engine at two batch sizes.
+  <em>Measured cost of dynamic:</em> RTMW-x fp16 at batch 8 = 1.66 ms dynamic vs 1.70 ms static —
+  effectively free, confirming the review's call. Two gotchas surfaced and fixed along the way:
+  the stripped YOLOX mmdeploy graph is <em>static batch-1</em> (so the detector was always
+  chunked batch-1 on TRT — an ONNX-surgery follow-up if detector throughput ever matters), and
+  torchcodec NVDEC decoder creation from worker threads fails with
+  <code>CUDA_ERROR_INVALID_CONTEXT</code> unless the thread binds the CUDA context first —
+  <code>_bind_cuda_context</code> added to both threaded paths in simplecv's
+  <code>TorchCodecMultiVideoReader</code> (the pre-existing <code>iter_chunks</code> had the same
+  latent bug).</p>
+
+  <p><time>2026-07-05</time> <strong>Phase 3 wrap</strong>: full check matrix green — posekit-dev
+  lint/typecheck/deadcode/tests (16 passed), mv-api-dev tests (54 passed) + lint + deadcode, mamma-dev
+  lint/typecheck/deadcode. CLI composition proven: <code>posekit-video-pose ... rtdetr vitpose</code>
+  ran 329 frames through the two transformers-sourced models via the tyro unions.</p>
+</div>
+
+<h2 id="validation">Rerun viewer validation</h2>
+<p class="muted">Populated per milestone via the <code>rerun-viewer-validation</code> workflow.</p>
+<div id="validation-entries">
+  <div class="card">
+    <h3>Phase 2 — detect / track / pose / re-ID demo <span class="status done">PASS</span></h3>
+    <p>RRD: <code>/tmp/posekit-probe/video_track.rrd</code> (5.25 MB, 329 frames). Native headless viewer
+    shows the decoded video with the instance mask hugging the person, the track bbox, and the
+    <code>identity/track_0</code> cosine plot (0.8–1.0 across the clip). WebViewer playhead screenshots at
+    frames 0 / 164 / 328 confirm the mask follows the person's pose changes over time
+    (exact positions verified via <code>set_playing(false)</code> + <code>set_current_time</code>).</p>
+    <p class="muted">Screenshots (not committed): <code>/tmp/rerun-viewer-validation/posekit-phase2/screenshots/</code>
+    (<code>native-full.png</code>, <code>web-frame-{0,164,328}.png</code>).</p>
+    <p class="muted">Full report + notes: <code>/tmp/rerun-viewer-validation/posekit-phase2/</code>.
+    Caveat: the headless <em>web</em> capture leaves the H.264 video pane on its loading indicator
+    (native renders it fine) — a viewer-side decode quirk, not an RRD defect.</p>
+  </div>
+  <div class="card">
+    <h3>Phase 3 — RT-DETRv2 + ViTPose via CLI unions <span class="status done">PASS</span></h3>
+    <p>RRD: <code>/tmp/posekit-probe/video_pose_rtdetr_vitpose.rrd</code> — the existing
+    <code>posekit-video-pose</code> demo with both new transformers-sourced models selected purely by
+    tyro subcommands (<code>rtdetr vitpose</code>). 329/329 frames with one person instance; native
+    viewer shows the RT-DETRv2 box and labeled COCO-17 ViTPose keypoints on the subject.</p>
+    <p class="muted">Screenshot (not committed): <code>/tmp/rerun-viewer-validation/posekit-phase2/screenshots/phase3-rtdetr-vitpose.png</code>.</p>
+  </div>
+</div>
+
+<h2 id="deviations">Deviations</h2>
+<p class="muted">Edge cases that forced a deviation from design.md; conservative option taken, logged here.</p>
+<ul id="deviation-entries">
+  <li><strong>SAM3 prompts are text-only.</strong> The design table lists boxes/points/text for
+  <code>PromptableSegmenter</code>; SAM3's single-image API is concept-prompted, so box/point prompts
+  raise <code>ValueError</code> with a clear message. Conservative option: keep the
+  <code>SegmentationPrompts</code> type general and defer box/point support to the planned SAM2
+  image-mode implementation rather than bolt visual prompting onto SAM3's tracker head.</li>
+  <li><strong>mv-api "lightweight" preset remapped.</strong> posekit carries no rtmpose-s checkpoint, so
+  <code>lightweight</code> now pairs yolox-tiny with rtmpose-m (documented at
+  <code>MODE_PRESETS</code>). Every mv-api caller in the repo uses the default <code>wholebody</code>,
+  which is weight-for-weight identical to before.</li>
+  <li><strong>SAM2 image-encoder TRT deferred.</strong> Phase 2's "TRT for the SAM2 image encoder"
+  is not included: the EfficientTAM-ti torch path already sustains ~38 fps in the composed demo, and
+  carving the encoder out of the stateful predictor is an invasive change best done against a measured
+  multi-camera bottleneck (Kineo's case). Logged as follow-up, not silently dropped.</li>
+  <li><strong>IdentityEncoder signature.</strong> Design says "crops → embeddings"; implemented as
+  <code>(frames, detections) → embeddings</code> so the crop stays on GPU inside the role (the crops-array
+  version would force callers back through numpy). Same information, stricter residency.</li>
+  <li><strong>mv-api frame boundary</strong> <span class="status done">resolved</span> — the exoego
+  pipeline now decodes exo videos with torchcodec on CUDA and feeds the tracker NHWC tensors directly
+  (<code>gpu_decode=True</code> default); the BGR numpy path remains as the fallback for CPU-only hosts
+  and non-torchcodec readers.</li>
+  <li><strong>rtmlib Hand solution left as planned zoo entries.</strong> The RTMDet-nano hand detector's
+  mmdeploy graph has a different topology than YOLOX; the NMS-strip surgery is untested there, so the
+  entries are registered with <code>status="planned"</code> instead of shipping an unvalidated path.</li>
+</ul>
+
+</body>
+</html>
