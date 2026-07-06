@@ -58,9 +58,9 @@ xorg-xorgproto = "*"
 pytorch-cpu = "*"
 
 [feature.common.pypi-dependencies]
-rerun-sdk = "==0.33.0"
+rerun-sdk = "==0.34.0"
 gradio = "==6.13.0"
-gradio-rerun = "==0.33.0"
+gradio-rerun = "==0.34.0"
 simplecv = { path = "packages/simplecv", editable = true }
 
 # ─── catalog common feature (Rerun catalog prerelease lane) ────────────────
@@ -84,18 +84,17 @@ xorg-xorgproto = "*"
 [feature.catalog-common.pypi-dependencies]
 simplecv = { path = "packages/simplecv", editable = true }
 
-# rerun-io/reality 73ce701 (main, #2073) — FixedRateSampler duration-timeline support; also
-# carries #2496's footer-first store-id enumeration (fast OSS-catalog register). Move back to a
-# public release once these ship. See the root AGENTS.md "Testing Rerun builds".
+# Catalog lane: `common`'s rerun-sdk plus the datafusion/dataloader extras. To test an
+# unreleased build, point find-links at build.rerun.io — see the root AGENTS.md
+# "Testing Rerun builds".
 [feature.rerun-prerelease.pypi-dependencies]
-rerun-sdk = { version = "==0.34.0a1+dev", extras = [
+rerun-sdk = { version = "==0.34.0", extras = [
     "datafusion",
     "dataloader",
 ] }
 
 [feature.rerun-prerelease.pypi-options]
 index-url = "https://pypi.org/simple"
-find-links = [{ url = "https://build.rerun.io/commit/73ce701/wheels/" }]
 prerelease-mode = "allow"
 
 
@@ -730,11 +729,10 @@ scipy = "*"
 [feature.mv-api-catalog-register-mac.pypi-dependencies]
 tyro = ">=0.9.1,<0.10"
 simplecv = { path = "packages/simplecv", editable = true }
-rerun-sdk = { version = "==0.33.0a1+dev", extras = ["datafusion"] }
+rerun-sdk = { version = "==0.34.0", extras = ["datafusion"] }
 
 [feature.mv-api-catalog-register-mac.pypi-options]
 index-url = "https://pypi.org/simple"
-find-links = [{ url = "https://build.rerun.io/commit/5f732f2/wheels/" }]
 prerelease-mode = "allow"
 
 [feature.mv-api-catalog-register-mac.activation.env]
@@ -1548,7 +1546,7 @@ xorg-libxrandr = "*"
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
 lpips = ">=0.1.4,<1"
 plyfile = ">=1.1,<2"
-rerun-sdk = "==0.33.0"
+rerun-sdk = "==0.34.0"
 simplecv = { path = "packages/simplecv", editable = true }
 
 [feature.gsplat-rust-renderer.activation.env]
@@ -1986,9 +1984,9 @@ simplecv-dev = { features = [
     "simplecv",
     "dev",
 ], solve-group = "simplecv", no-default-feature = true }
-# 2-tier ExoEgo Forge catalog: like `simplecv` but on the prerelease Rerun lane (rerun-prerelease,
-# pinned to reality#2073) instead of `common`'s released rerun-sdk==0.33.0. Uses `catalog-common`
-# (the rerun-pin-free mirror) so the prerelease wheel wins. linux-64 only (matches the x86_64 wheel).
+# 2-tier ExoEgo Forge catalog: like `simplecv` but on the catalog Rerun lane (rerun-prerelease,
+# rerun-sdk==0.34.0 with the datafusion/dataloader extras). Uses `catalog-common`
+# (the rerun-pin-free mirror) so the lane's pin wins.
 simplecv-catalog = { features = [
     "catalog-common",
     "rerun-prerelease",
