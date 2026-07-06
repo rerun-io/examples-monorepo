@@ -58,10 +58,9 @@ xorg-xorgproto = "*"
 pytorch-cpu = "*"
 
 [feature.common.pypi-dependencies]
-rerun-sdk = "==0.34.0rc4"
+rerun-sdk = "==0.34.0"
 gradio = "==6.13.0"
-# gradio-rerun lives in `gradio-rerun-033` (it hard-pins rerun-sdk==0.33.0) —
-# see that feature below.
+gradio-rerun = "==0.34.0"
 simplecv = { path = "packages/simplecv", editable = true }
 
 # ─── catalog common feature (Rerun catalog prerelease lane) ────────────────
@@ -85,12 +84,11 @@ xorg-xorgproto = "*"
 [feature.catalog-common.pypi-dependencies]
 simplecv = { path = "packages/simplecv", editable = true }
 
-# Catalog lane: `common`'s rerun-sdk plus the datafusion/dataloader extras. Now on the public
-# 0.34.0rc4 prerelease (which ships reality#2073 FixedRateSampler + #2496 fast register); to test
-# an unreleased build again, point find-links back at build.rerun.io — see the root AGENTS.md
+# Catalog lane: `common`'s rerun-sdk plus the datafusion/dataloader extras. To test an
+# unreleased build, point find-links at build.rerun.io — see the root AGENTS.md
 # "Testing Rerun builds".
 [feature.rerun-prerelease.pypi-dependencies]
-rerun-sdk = { version = "==0.34.0rc4", extras = [
+rerun-sdk = { version = "==0.34.0", extras = [
     "datafusion",
     "dataloader",
 ] }
@@ -98,19 +96,6 @@ rerun-sdk = { version = "==0.34.0rc4", extras = [
 [feature.rerun-prerelease.pypi-options]
 index-url = "https://pypi.org/simple"
 prerelease-mode = "allow"
-
-# ─── gradio-rerun legacy lane (rerun-sdk 0.33) ──────────────────────────────
-# gradio-rerun's latest release (0.33.0) hard-pins rerun-sdk==0.33.0, which is
-# unsolvable next to `common`'s rerun-sdk==0.34.0rc4. The gradio-rerun UI
-# packages (monoprior, wilor-nano, egoexo-forge, prompt-da, sam3, sam3d-body,
-# sapiens2-pose, vistadream) therefore compose `catalog-common` (the
-# rerun-pin-free mirror of `common`) plus this feature instead of `common`.
-# Delete this feature and move those envs back to `common` once gradio-rerun
-# ships a 0.34-compatible release.
-[feature.gradio-rerun-033.pypi-dependencies]
-rerun-sdk = "==0.33.0"
-gradio = "==6.13.0"
-gradio-rerun = "==0.33.0"
 
 
 # ─── CUDA 13.0 feature (shared across all GPU envs) ─────────────────────────
@@ -744,7 +729,7 @@ scipy = "*"
 [feature.mv-api-catalog-register-mac.pypi-dependencies]
 tyro = ">=0.9.1,<0.10"
 simplecv = { path = "packages/simplecv", editable = true }
-rerun-sdk = { version = "==0.34.0rc4", extras = ["datafusion"] }
+rerun-sdk = { version = "==0.34.0", extras = ["datafusion"] }
 
 [feature.mv-api-catalog-register-mac.pypi-options]
 index-url = "https://pypi.org/simple"
@@ -1561,7 +1546,7 @@ xorg-libxrandr = "*"
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
 lpips = ">=0.1.4,<1"
 plyfile = ">=1.1,<2"
-rerun-sdk = "==0.34.0rc4"
+rerun-sdk = "==0.34.0"
 simplecv = { path = "packages/simplecv", editable = true }
 
 [feature.gsplat-rust-renderer.activation.env]
@@ -2000,7 +1985,7 @@ simplecv-dev = { features = [
     "dev",
 ], solve-group = "simplecv", no-default-feature = true }
 # 2-tier ExoEgo Forge catalog: like `simplecv` but on the catalog Rerun lane (rerun-prerelease,
-# rerun-sdk==0.34.0rc4 with the datafusion/dataloader extras). Uses `catalog-common`
+# rerun-sdk==0.34.0 with the datafusion/dataloader extras). Uses `catalog-common`
 # (the rerun-pin-free mirror) so the lane's pin wins.
 simplecv-catalog = { features = [
     "catalog-common",
@@ -2015,84 +2000,69 @@ simplecv-catalog-dev = { features = [
     "simplecv",
     "dev",
 ], solve-group = "simplecv-catalog", no-default-feature = true }
-# The gradio-rerun UI packages (monoprior, wilor-nano, egoexo-forge, prompt-da,
-# sam3, sam3d-body, sapiens2-pose, vistadream) compose catalog-common +
-# gradio-rerun-033 instead of common — see the gradio-rerun-033 feature note.
 monoprior = { features = [
-    "catalog-common",
-    "gradio-rerun-033",
+    "common",
     "cuda",
     "monoprior",
 ], solve-group = "monoprior", no-default-feature = true }
 monoprior-dev = { features = [
-    "catalog-common",
-    "gradio-rerun-033",
+    "common",
     "cuda",
     "monoprior",
     "dev",
 ], solve-group = "monoprior", no-default-feature = true }
 prompt-da = { features = [
-    "catalog-common",
-    "gradio-rerun-033",
+    "common",
     "cuda",
     "prompt-da",
     "prompt-da-demo",
 ], solve-group = "prompt-da", no-default-feature = true }
 prompt-da-dev = { features = [
-    "catalog-common",
-    "gradio-rerun-033",
+    "common",
     "cuda",
     "prompt-da",
     "dev",
 ], solve-group = "prompt-da", no-default-feature = true }
 wilor-nano = { features = [
-    "catalog-common",
-    "gradio-rerun-033",
+    "common",
     "cuda",
     "wilor-nano",
 ], solve-group = "wilor-nano", no-default-feature = true }
 wilor-nano-dev = { features = [
-    "catalog-common",
-    "gradio-rerun-033",
+    "common",
     "cuda",
     "wilor-nano",
     "dev",
 ], solve-group = "wilor-nano", no-default-feature = true }
 sam3d-body = { features = [
-    "catalog-common",
-    "gradio-rerun-033",
+    "common",
     "cuda",
     "sam3d-body",
 ], solve-group = "sam3d-body", no-default-feature = true }
 sam3d-body-dev = { features = [
-    "catalog-common",
-    "gradio-rerun-033",
+    "common",
     "cuda",
     "sam3d-body",
     "dev",
 ], solve-group = "sam3d-body", no-default-feature = true }
 sam3 = { features = [
-    "catalog-common",
-    "gradio-rerun-033",
+    "common",
     "cuda",
     "sam3",
 ], solve-group = "sam3", no-default-feature = true }
 sam3-dev = { features = [
-    "catalog-common",
-    "gradio-rerun-033",
+    "common",
     "cuda",
     "sam3",
     "dev",
 ], solve-group = "sam3", no-default-feature = true }
 sapiens2-pose = { features = [
-    "catalog-common",
-    "gradio-rerun-033",
+    "common",
     "cuda",
     "sapiens2-pose",
 ], solve-group = "sapiens2-pose", no-default-feature = true }
 sapiens2-pose-dev = { features = [
-    "catalog-common",
-    "gradio-rerun-033",
+    "common",
     "cuda",
     "sapiens2-pose",
     "dev",
@@ -2131,14 +2101,12 @@ pysfm-dev = { features = [
     "dev",
 ], solve-group = "pysfm", no-default-feature = true }
 vistadream = { features = [
-    "catalog-common",
-    "gradio-rerun-033",
+    "common",
     "cuda",
     "vistadream",
 ], solve-group = "vistadream", no-default-feature = true }
 vistadream-dev = { features = [
-    "catalog-common",
-    "gradio-rerun-033",
+    "common",
     "cuda",
     "vistadream",
     "dev",
@@ -2164,15 +2132,13 @@ live-rerun-dev = { features = [
     "dev",
 ], solve-group = "live-rerun", no-default-feature = true }
 egoexo-forge = { features = [
-    "catalog-common",
-    "gradio-rerun-033",
+    "common",
     "cuda",
     "egoexo-forge",
     "egoexo-forge-demo",
 ], solve-group = "egoexo-forge", no-default-feature = true }
 egoexo-forge-dev = { features = [
-    "catalog-common",
-    "gradio-rerun-033",
+    "common",
     "cuda",
     "egoexo-forge",
     "dev",
