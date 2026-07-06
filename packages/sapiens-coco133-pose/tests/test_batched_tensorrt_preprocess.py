@@ -6,7 +6,7 @@ from typing import Any
 
 import numpy as np
 import rerun as rr
-import rerun_bindings as rb
+import rerun.experimental as rrx
 import torch
 import tyro
 from sapiens2_pose.api.coco133_gpu import (
@@ -307,10 +307,11 @@ def test_run_batched_video_rrd_contains_keypoint_confidence_components(monkeypat
     )
 
     assert summary.output_path == rrd_path
-    recordings: list[Any] = list(rb.load_archive(str(rrd_path)).all_recordings())
+    reader = rrx.RrdReader(str(rrd_path))
+    recordings: list[Any] = list(reader.recordings())
     keypoint_rows: list[dict[str, list[Any]]] = [
         chunk.to_record_batch().to_pydict()
-        for chunk in recordings[0].chunks()
+        for chunk in reader.stream(store=recordings[0]).to_chunks()
         if str(chunk.entity_path) == "/video/person_0/keypoints"
     ]
     assert keypoint_rows

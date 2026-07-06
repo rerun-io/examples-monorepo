@@ -92,12 +92,18 @@ expected across SimpleCV tools. For a realtime tool that needs the live viewer
 
 ## Testing Rerun builds
 
-To test an **unreleased** Rerun build, use the shared `rerun-prerelease` feature: point its
-`find-links` at the `build.rerun.io/commit/<sha>/wheels/` wheel (CI builds one per commit, including
-PR branches — `curl` the index first to confirm your platform; PR commits are usually linux-x86_64
-only) and match `rerun-sdk == <ver>` to the wheel filename. It composes into `no-default-feature`
-envs beside `catalog-common` (e.g. `simplecv-catalog`, `mv-api-catalog`). Currently pinned to
-**`rerun-io/reality#2496`** (`deeb4e6` / `0.34.0a1+dev`, fast OSS-catalog register); re-lock on
+The whole workspace runs **`rerun-sdk == 0.34.0rc4`** from PyPI: `common` carries the plain pin,
+and the shared `rerun-prerelease` feature carries the same pin plus the `datafusion`/`dataloader`
+extras for the catalog lanes (it composes into `no-default-feature` envs beside `catalog-common`,
+e.g. `simplecv-catalog`, `mv-api-catalog`). Exception: the gradio-rerun UI packages (monoprior,
+wilor-nano, egoexo-forge, prompt-da, sam3, sam3d-body, sapiens2-pose, vistadream) stay on
+`rerun-sdk == 0.33.0` via the `gradio-rerun-033` feature until gradio-rerun ships a 0.34
+release — so **an `.rrd` written by a 0.34 env will not load in those UIs' 0.33 web viewer**.
+
+To test an **unreleased** Rerun build, add a `find-links` at
+`build.rerun.io/commit/<sha>/wheels/` to `[feature.rerun-prerelease.pypi-options]` (CI builds one
+per commit, including PR branches — `curl` the index first to confirm your platform; PR commits
+are usually linux-x86_64 only) and match `rerun-sdk == <ver>` to the wheel filename. Re-lock on
 linux-64 (pixi 0.70.x) and move back to a public release once the fix ships.
 
 ## Gotchas
