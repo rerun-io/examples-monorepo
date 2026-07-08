@@ -1,0 +1,133 @@
+{
+  "id": "lookma",
+  "name": "Look Ma, no markers: holistic performance capture without the hassle",
+  "year": "2024",
+  "venue": "arXiv 2410.11520 / SIGGRAPH Asia 2024 (Microsoft)",
+  "summary": "A hybrid holistic performance-capture pipeline that reconstructs the whole human (body, face, hands, eyes, tongue) as the parametric SOMA model from single- or multi-view RGB, with no markers, calibration, or specialist hardware. Three region-specific DNNs (body/face/hand), trained purely on synthetic data, regress probabilistic dense 2D landmarks plus pose and shape initialization; a multi-stage L-BFGS optimizer then fits SOMA by minimizing uncertainty-weighted landmark reprojection error under a set of priors. The DNN feed-forward path can run standalone in real time for previsualization, while optimization delivers accurate world-space results.",
+  "rig": "Arbitrary RGB camera setup: single view or uncalibrated/calibrated multi-view images or video; no markers, no specialist hardware, calibration optional (camera extrinsics/focal length solved via PnP on the template head + face landmarks when not provided)",
+  "outputs": "Per-frame SOMA holistic-model parameters Phi={beta(body shape),gamma(face shape),zeta,psi(expression),theta(pose)} plus camera params Q (extrinsics/focal); posed SOMA mesh + joints for body, face, hands including eyes and tongue; intermediate probabilistic dense 2D landmarks L={mu,sigma} (1428 body + 141 per hand + 744 face) and regressed pose/shape initialization",
+  "kind": "hybrid",
+  "nodes": [
+    {
+      "id": "input",
+      "label": "RGB image(s) / video",
+      "role": "other",
+      "models": "",
+      "desc": "Single- or multi-view RGB frames from an arbitrary camera rig; calibration not required. In the uncalibrated multi-view case camera extrinsics are estimated later via PnP; single-view focal length is optionally refined during fitting. Optical center assumed at image center and no distortion unless provided."
+    },
+    {
+      "id": "detect",
+      "label": "Sliding-window body detector",
+      "role": "detect",
+      "models": "lightweight ResNet18 DNN predicting 36 full-body landmarks",
+      "desc": "Detection and tracking via a sliding-window approach (Wood et al. 2022): a lightweight ResNet18 net predicts 36 body landmarks per window; the highest-confidence window above threshold gives the candidate ROI, refined by extra passes to a tighter bounding box. In video the previous frame's dense-landmark bbox is reused as the ROI; re-detection is triggered only when median landmark confidence drops too low."
+    },
+    {
+      "id": "crop",
+      "label": "ROI + sub-ROI extraction",
+      "role": "crop/rewarp",
+      "models": "bounding-box crops from detector / initial landmarks",
+      "desc": "The full-body ROI is cropped closely for the body DNN. Face and hand sub-ROIs are extracted as bounding boxes around subsets of the predicted dense body landmarks, cropped closely per region to overcome limited resolution when the whole body fills one ROI. Right-hand crop uses x-mirroring to reuse the single left-hand DNN."
+    },
+    {
+      "id": "bodydnn",
+      "label": "Body DNN (dense landmarks + pose + shape)",
+      "role": "dense-landmarks",
+      "models": "HRNet backbone (ImageNet-pretrained) + 3 MLP heads (landmark/pose/shape); trained on SynthBody",
+      "desc": "Regresses 1428 probabilistic dense body landmarks L_i={mu_i,sigma_i} (circular Gaussian: 2D location + uncertainty), body pose xi in R^{23x6} (6D rotations, excluding pelvis/hands), and the first 10 SOMA shape components. Provides both landmarks and a strong learned pose/shape initialization for the optimizer."
+    },
+    {
+      "id": "facednn",
+      "label": "Face DNN (dense landmarks)",
+      "role": "dense-landmarks",
+      "models": "HRNet + landmark head only (pose/shape heads omitted); trained on SynthFace",
+      "desc": "Regresses 744 probabilistic dense face landmarks (including 16 limbus points per eye, 12 teeth, 9 tongue). Pose and shape heads omitted since facial shape/expression variation is small enough for the optimizer to resolve directly."
+    },
+    {
+      "id": "handdnn",
+      "label": "Hand DNN (dense landmarks + pose)",
+      "role": "dense-landmarks",
+      "models": "HRNet + landmark and pose heads (shape head omitted); single left-hand net, trained on SynthHand",
+      "desc": "Regresses 141 probabilistic dense hand landmarks and 15 hand-joint pose (excluding wrist). A single left-hand DNN handles both hands: for the right hand the input image and predicted landmarks are x-mirrored and the pose is mirrored about the y-axis."
+    },
+    {
+      "id": "combine",
+      "label": "Combine landmarks + init",
+      "role": "other",
+      "models": "landmark aggregation; best-view (lowest mean sigma) selection for pose/shape init",
+      "desc": "Aggregates body, face and hand landmarks and their predicted uncertainties into the full landmark set L, together with the DNN pose/shape prediction used as optimizer initialization. In multi-view, pose and shape are regressed from the view with the lowest mean landmark sigma."
+    },
+    {
+      "id": "pnp",
+      "label": "PnP global init / camera calibration",
+      "role": "calibrate",
+      "models": "PnP (Fischler & Bolles) on template 3D head mesh + 2D face landmarks",
+      "desc": "Initializes global position and orientation via PnP. In uncalibrated multi-view scenarios, camera positions/orientations are estimated by PnP using the template 3D head mesh and per-view 2D face landmarks (head used over full body for pose/expression-invariance). Feeds initial parameters Phi and camera Q into the fitting optimizer."
+    },
+    {
+      "id": "fit",
+      "label": "Multi-stage L-BFGS SOMA fit",
+      "role": "fit-model",
+      "models": "L-BFGS optimizer over SOMA; energy E(Phi,Q;L)=E_ldmks+E_shape+E_exp+E_pose+E_temp+E_intsct+E_cam; Real-NVP normalizing-flow neural pose prior",
+      "desc": "Three-stage fit: (1) finalize PnP init by optimizing only translation/rotation; (2) optimize pose, expression and shape; (3) optionally refine camera extrinsics (multi-view) or focal length (single-view). Data term E_ldmks is the reprojection error of posed-mesh landmarks weighted by 1/(2 sigma^2) so confident/visible landmarks dominate. Regularizers: E_shape (body+face shape GMM priors), E_exp (L1 sparsity + quartic barrier), E_pose (Real-NVP normalizing-flow neural pose prior for body and hands), E_temp (L2 frame-to-frame vertex distance), E_intsct (eye/teeth/tongue-vs-face intersection), E_cam (L2 camera-drift-from-init). Optional extra priors (subject height, gender-restricted shape)."
+    },
+    {
+      "id": "output",
+      "label": "SOMA parameters Phi* + mesh",
+      "role": "other",
+      "models": "",
+      "desc": "Optimized SOMA parameters Phi* and posed world-space mesh/joints for body, face and hands (with eyes and tongue). The feed-forward DNN path alone (skipping optimization) provides a real-time previsualization solution."
+    }
+  ],
+  "edges": [
+    {"from": "input", "to": "detect", "label": "RGB frame(s)"},
+    {"from": "detect", "to": "crop", "label": "full-body ROI (36-landmark bbox)"},
+    {"from": "crop", "to": "bodydnn", "label": "body ROI crop"},
+    {"from": "crop", "to": "facednn", "label": "face sub-ROI crop"},
+    {"from": "crop", "to": "handdnn", "label": "hand sub-ROI crops (R x-mirrored)"},
+    {"from": "bodydnn", "to": "crop", "label": "initial body landmarks -> face/hand sub-ROIs"},
+    {"from": "bodydnn", "to": "combine", "label": "body landmarks Lb (mu,sigma) + pose/shape Phi_b"},
+    {"from": "facednn", "to": "combine", "label": "face landmarks Lf (mu,sigma)"},
+    {"from": "handdnn", "to": "combine", "label": "hand landmarks Lh (mu,sigma) + pose Phi_h"},
+    {"from": "combine", "to": "pnp", "label": "combined landmarks L + init Phi"},
+    {"from": "pnp", "to": "fit", "label": "initial params Phi + camera Q (PnP)"},
+    {"from": "combine", "to": "fit", "label": "probabilistic landmarks L (mu,sigma) = fit targets"},
+    {"from": "fit", "to": "output", "label": "optimized SOMA params Phi* + mesh"},
+    {"from": "combine", "to": "output", "label": "DNN-only pose/shape (real-time previz, skip fit)"},
+    {"from": "fit", "to": "fit", "label": "E_temp: L2 frame-to-frame vertex distance (temporal)"},
+    {"from": "detect", "to": "detect", "label": "prev-frame dense-landmark bbox as ROI; re-detect if median conf low"}
+  ],
+  "mermaid": "flowchart LR\n  input[\"RGB image(s) / video\"]\n  detect[\"Sliding-window body detector (ResNet18, 36 kpts)\"]\n  crop[\"ROI + face/hand sub-ROI crops\"]\n  subgraph dnns[\"Region DNNs (HRNet, SynthData)\"]\n    bodydnn[\"Body DNN: 1428 landmarks + pose + shape\"]\n    facednn[\"Face DNN: 744 landmarks\"]\n    handdnn[\"Hand DNN: 141 landmarks + pose\"]\n  end\n  combine[\"Combine landmarks + init\"]\n  pnp[\"PnP global init / camera calib\"]\n  fit[\"Multi-stage L-BFGS SOMA fit\"]\n  output[\"SOMA params Phi* + mesh\"]\n  input -->|\"RGB frames\"| detect\n  detect -->|\"full-body ROI\"| crop\n  crop -->|\"body crop\"| bodydnn\n  crop -->|\"face sub-ROI\"| facednn\n  crop -->|\"hand sub-ROIs (R mirror)\"| handdnn\n  bodydnn -.->|\"init landmarks -> sub-ROIs\"| crop\n  bodydnn -->|\"Lb,Phi_b\"| combine\n  facednn -->|\"Lf\"| combine\n  handdnn -->|\"Lh,Phi_h\"| combine\n  combine -->|\"L + init Phi\"| pnp\n  pnp -->|\"init Phi + camera Q\"| fit\n  combine -->|\"probabilistic landmarks L\"| fit\n  fit -->|\"Phi* + mesh\"| output\n  combine -.->|\"DNN-only real-time previz\"| output\n  fit -.->|\"E_temp vertex smoothness\"| fit\n  detect -.->|\"prev-frame bbox as ROI / re-detect on low conf\"| detect",
+  "figure_path": "/tmp/pipeline-comparison/figures/lookma.png",
+  "figure_caption": "Fig. 8. Overview of our method architecture. From an input image we regress landmarks and initial model parameters, we refine these for the face and hands and minimize reprojection error to obtain the output parameters. (Input ROI -> Body DNN -> Lb,Phi_b and initial dense landmarks; face and hand sub-ROIs -> Face DNN (Lf) and Hand DNN (Lh,Phi_h); Combine -> PnP init -> Initial Parameters Phi; the optimizer minimizes reprojection energy E(Phi,Q;L) over Refined Landmarks L to produce Optimized Parameters Phi*.)",
+  "traits": [
+    "hybrid feed-forward DNN + optimization (real-time previz OR accurate fit)",
+    "dense probabilistic landmarks (1428 body + 744 face + 141/hand) instead of sparse joints",
+    "per-landmark uncertainty (circular Gaussian sigma) predicted by the net",
+    "confidence-weighted (1/2sigma^2) reprojection fitting - occluded/uncertain landmarks down-weighted",
+    "best-view selection by lowest mean sigma for pose/shape init",
+    "trained exclusively on synthetic data (SynthBody / SynthFace / SynthHand), zero benchmark training data",
+    "region-specific DNNs (body/face/hand) sharing one HRNet+MLP-heads architecture",
+    "single left-hand net reused for right hand via x-mirroring",
+    "calibration-free: PnP camera estimation from template head + face landmarks",
+    "DNN also regresses pose/shape as optimizer initialization (not just landmarks)",
+    "Real-NVP normalizing-flow neural pose prior for body and hands",
+    "temporal feedback via prev-frame bbox reuse + E_temp vertex smoothness",
+    "holistic whole-human capture incl. eyes and tongue (SOMA model)",
+    "supports single- or multi-view with the same DNNs"
+  ],
+  "posekit_notes": "detect maps to PersonDetector (the ResNet18 36-landmark sliding-window body detector; a pose-net-as-detector adapter). The three region DNNs are the swappable estimator slot: they map to TopDownDenseLandmarks2d (probabilistic dense landmarks mu+sigma with pose/shape auxiliary heads, HRNet backbone) rather than sparse TopDownPose2d - closest sibling to MammaNet, minus mask conditioning. crop maps to ops.crops (close body ROI + face/hand sub-ROIs derived from initial landmarks, right-hand x-mirror). PnP camera/global init and the multi-stage L-BFGS SOMA fit are consumer glue (calibrate + fit) with no posekit role - fitting uses the confidence-weighted reprojection energy + normalizing-flow pose prior. The prev-frame-bbox ROI reuse / low-confidence re-detection loop and E_temp are consumer feedback glue. No explicit triangulate/lift3d stage (3D recovered inside the fit) and no separate render-verify stage.",
+  "matrix_cells": [
+    {"stage_id": "capture", "fill": "arbitrary single- or multi-view RGB image(s)/video; NO calibration or markers required; optical center at image center, no distortion assumed unless given", "note": "calibration solved downstream via PnP when absent"},
+    {"stage_id": "detect", "fill": "lightweight ResNet18 DNN predicting 36 body landmarks, sliding-window (highest-confidence window), refined to a tight bbox; single-instance whole-body", "note": "pose-net-as-detector; PersonDetector role"},
+    {"stage_id": "identity", "fill": "— (single-subject; no cross-view/temporal instance association)", "note": "—"},
+    {"stage_id": "crop", "fill": "close full-body ROI -> Body DNN; face/hand sub-ROIs cropped from subsets of initial dense body landmarks; right-hand x-mirror to reuse the single left-hand net", "note": "sub-ROIs derived from body landmarks (feedback into crop)"},
+    {"stage_id": "pose2d", "fill": "3 region DNNs (HRNet + MLP heads): Body 1428 + Face 744 + Hand 141 dense probabilistic landmarks L_i={mu,sigma} (circular Gaussian); Body/Hand also emit 6D-rotation pose, Body emits 10 shape comps", "note": "dense landmarks + uncertainty, not sparse joints; also regresses init pose/shape"},
+    {"stage_id": "lift3d", "fill": "— (no explicit triangulation; 3D recovered implicitly inside the SOMA model fit via multi-view reprojection energy)", "note": "3D implicit in fit"},
+    {"stage_id": "calibrate", "fill": "uncalibrated multi-view: per-view camera extrinsics via PnP on template 3D head mesh + 2D face landmarks; single-view: focal length refined in fit stage 3; optional subject-height/gender scale priors", "note": "calibration-free via PnP; geometric not per-user shape"},
+    {"stage_id": "fit", "fill": "multi-stage L-BFGS SOMA fit: (1) trans/rot only; (2) pose+expr+shape; (3) refine extrinsics/focal. Data term E_ldmks = 1/(2sigma^2)-weighted reprojection; regularizers E_shape(GMM)+E_exp+E_pose(Real-NVP flow prior)+E_temp+E_intsct+E_cam", "note": "uncertainty-weighted; normalizing-flow pose prior; holistic body+face+hands"},
+    {"stage_id": "verify", "fill": "— (no separate render-back gate; reprojection consistency is the fitting objective itself)", "note": "—"},
+    {"stage_id": "feedback", "fill": "video: previous-frame dense-landmark bbox reused as candidate ROI (skips sliding-window), re-detect only if median landmark confidence too low; E_temp L2 frame-to-frame vertex smoothness in the fit", "note": "temporal ROI reuse loop + temporal energy; feed-forward, no realtime pose-extrapolation loop"}
+  ],
+  "rebuild": "PersonDetector(ResNet18 36-kpt sliding-window) → ops.crops[close body ROI + face/hand sub-ROIs from initial landmarks, R x-mirror] → TopDownDenseLandmarks2d(Body/Face/Hand HRNet: 1428/744/141 pts, mu+sigma + pose/shape heads) → glue[no explicit lift; 3D implicit in fit] → glue[calibrate: ✦PnP camera extrinsics/focal from template head + face landmarks] → glue[fit: ✦multi-stage L-BFGS SOMA, 1/2sigma^2-weighted reprojection E_ldmks + ✦Real-NVP normalizing-flow pose prior + E_shape/E_exp/E_temp/E_intsct/E_cam] ⇳ glue[prev-frame bbox→ROI, re-detect on low median conf + E_temp vertex smoothness] ⊕ glue[DNN-only feed-forward = ✦real-time previz, skip fit]. (Dense-landmark net matches MammaNet's TopDownDenseLandmarks2d minus mask conditioning; everything downstream of the estimator — PnP calib, SOMA fit, flow prior, temporal ROI loop — is consumer glue posekit does not own ✦.)"
+}
