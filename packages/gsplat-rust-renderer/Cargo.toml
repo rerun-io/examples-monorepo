@@ -52,25 +52,23 @@ serde_json = "1"
 wgpu = "=29.0.3"
 
 # ── Viewer-only deps (behind "viewer" feature flag) ───────────────────
-# Published Rerun 0.33 crates from crates.io — reproducible from a clean
-# checkout on any machine.  The MCP viewport-control demo was developed
-# against a local 0.34.0-alpha rerun checkout + egui MCP-patch fork (path
-# deps + a [patch.crates-io] block); that setup is intentionally NOT shipped.
-# See README → "MCP viewport control (debug-only)" to reproduce it locally.
-egui_kittest = { version = "0.34.3", features = ["wgpu", "eframe"], optional = true }
-re_byte_size = { version = "=0.33.0", optional = true }
-re_crash_handler = { version = "=0.33.0", optional = true }
-re_grpc_server = { version = "=0.33.0", optional = true }
-re_log_channel = { version = "=0.33.0", optional = true }
-re_log = { version = "=0.33.0", optional = true }
-re_log_types = { version = "=0.33.0", optional = true }
-re_query = { version = "=0.33.0", optional = true }
-re_renderer = { version = "=0.33.0", optional = true }
-re_sdk = { version = "=0.33.0", optional = true }
-re_sdk_types = { version = "=0.33.0", optional = true }
-re_view = { version = "=0.33.0", optional = true }
-re_view_spatial = { version = "=0.33.0", optional = true }
-re_viewer = { version = "=0.33.0", optional = true }
-re_viewer_context = { version = "=0.33.0", optional = true }
-rerun = { version = "=0.33.0", features = ["native_viewer"], optional = true }
+# Published Rerun 0.34.1 crates from crates.io — reproducible from a clean
+# checkout on any machine.  Rerun 0.34.x uses egui/eframe 0.35, so the headless
+# kittest harness must stay on the same egui family as re_viewer.
+egui_kittest = { version = "0.35.0", features = ["wgpu", "eframe"], optional = true }
+re_byte_size = { version = "=0.34.1", optional = true }
+re_crash_handler = { version = "=0.34.1", optional = true }
+re_grpc_server = { version = "=0.34.1", optional = true }
+re_log_channel = { version = "=0.34.1", optional = true }
+re_log = { version = "=0.34.1", optional = true }
+re_log_types = { version = "=0.34.1", optional = true }
+re_query = { version = "=0.34.1", optional = true }
+re_renderer = { version = "=0.34.1", optional = true }
+re_sdk = { version = "=0.34.1", optional = true }
+re_sdk_types = { version = "=0.34.1", optional = true }
+re_view = { version = "=0.34.1", optional = true }
+re_view_spatial = { version = "=0.34.1", optional = true }
+re_viewer = { version = "=0.34.1", optional = true }
+re_viewer_context = { version = "=0.34.1", optional = true }
+rerun = { version = "=0.34.1", features = ["native_viewer"], optional = true }
 tokio = { version = "1.50", features = ["macros", "rt-multi-thread"], optional = true }

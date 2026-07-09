@@ -73,10 +73,9 @@ async fn main() -> anyhow::Result<()> {
     // messages.  `grpc_rx` is a channel receiver that feeds those messages
     // into the viewer's data store.
     //
-    // Since Rerun 0.33, `spawn_with_recv` also returns a `MessageProxyHandle`.
-    // Keep it bound for the whole `main` scope (both the windowed and the
-    // headless run loops block until shutdown) so the server-side message
-    // proxy stays alive.
+    // Keep the returned server handle bound for the whole `main` scope (both
+    // the windowed and headless run loops block until shutdown) so the
+    // server-side message proxy stays alive.
     let grpc_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, cli.port));
     re_log::info!(
         "Listening for Rerun logs on rerun+http://127.0.0.1:{}/proxy",
@@ -176,7 +175,7 @@ fn create_app(
 // Headless mode
 // ═══════════════════════════════════════════════════════════════════════════════
 //
-// Vendored from Rerun 0.33's `re_viewer/src/headless.rs`, with one key change:
+// Vendored from Rerun's `re_viewer/src/headless.rs`, with one key change:
 // the harness uses OUR full-limits wgpu device (see `full_limits_wgpu_setup`)
 // instead of `re_viewer`'s crate-private `wgpu_options()`.  Rerun's headless
 // device requests downlevel-defaults limits with **zero compute limits**, which
@@ -496,8 +495,10 @@ fn full_limits_wgpu_setup() -> eframe::egui_wgpu::WgpuSetup {
 fn native_options() -> eframe::NativeOptions {
     let mut native_options = re_viewer::native::eframe_options(None);
     native_options.wgpu_options = eframe::egui_wgpu::WgpuConfiguration {
-        present_mode: re_renderer::external::wgpu::PresentMode::AutoVsync,
-        desired_maximum_frame_latency: None,
+        surface: eframe::egui_wgpu::SurfaceConfig {
+            present_mode: re_renderer::external::wgpu::PresentMode::AutoVsync,
+            desired_maximum_frame_latency: None,
+        },
         on_surface_status: Arc::new(|status| {
             // On non-Windows platforms, an "Outdated" surface just means the
             // window was resized — recreate the surface and carry on.

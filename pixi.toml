@@ -58,9 +58,9 @@ xorg-xorgproto = "*"
 pytorch-cpu = "*"
 
 [feature.common.pypi-dependencies]
-rerun-sdk = "==0.34.0"
+rerun-sdk = "==0.34.1"
 gradio = "==6.13.0"
-gradio-rerun = "==0.34.0"
+gradio-rerun = "==0.34.1"
 simplecv = { path = "packages/simplecv", editable = true }
 
 # ─── catalog common feature (Rerun catalog prerelease lane) ────────────────
@@ -88,7 +88,7 @@ simplecv = { path = "packages/simplecv", editable = true }
 # unreleased build, point find-links at build.rerun.io — see the root AGENTS.md
 # "Testing Rerun builds".
 [feature.rerun-prerelease.pypi-dependencies]
-rerun-sdk = { version = "==0.34.0", extras = [
+rerun-sdk = { version = "==0.34.1", extras = [
     "datafusion",
     "dataloader",
 ] }
@@ -729,7 +729,7 @@ scipy = "*"
 [feature.mv-api-catalog-register-mac.pypi-dependencies]
 tyro = ">=0.9.1,<0.10"
 simplecv = { path = "packages/simplecv", editable = true }
-rerun-sdk = { version = "==0.34.0", extras = ["datafusion"] }
+rerun-sdk = { version = "==0.34.1", extras = ["datafusion"] }
 
 [feature.mv-api-catalog-register-mac.pypi-options]
 index-url = "https://pypi.org/simple"
@@ -1495,6 +1495,13 @@ description = "Launch MASt3R-SLAM Gradio web UI"
 # ═══════════════════════════════════════════════════════════════════════════
 # gsplat-rust-renderer
 # ═══════════════════════════════════════════════════════════════════════════
+# osx-arm64 extends beyond the workspace platforms (see `common` for the
+# pattern): the env solves/installs on macOS for the viewer + PLY-loading
+# flows. brush training on macOS is future work — the ai-demos `brush`
+# conda package below is linux-64-only.
+[feature.gsplat-rust-renderer]
+platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
+
 [feature.gsplat-rust-renderer.dependencies]
 python = "3.12.*"
 rust = "1.93.*"
@@ -1546,7 +1553,7 @@ xorg-libxrandr = "*"
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
 lpips = ">=0.1.4,<1"
 plyfile = ">=1.1,<2"
-rerun-sdk = "==0.34.0"
+rerun-sdk = "==0.34.1"
 simplecv = { path = "packages/simplecv", editable = true }
 
 [feature.gsplat-rust-renderer.activation.env]
@@ -1985,7 +1992,7 @@ simplecv-dev = { features = [
     "dev",
 ], solve-group = "simplecv", no-default-feature = true }
 # 2-tier ExoEgo Forge catalog: like `simplecv` but on the catalog Rerun lane (rerun-prerelease,
-# rerun-sdk==0.34.0 with the datafusion/dataloader extras). Uses `catalog-common`
+# rerun-sdk==0.34.1 with the datafusion/dataloader extras). Uses `catalog-common`
 # (the rerun-pin-free mirror) so the lane's pin wins.
 simplecv-catalog = { features = [
     "catalog-common",
