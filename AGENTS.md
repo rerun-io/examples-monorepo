@@ -92,7 +92,14 @@ expected across SimpleCV tools. For a realtime tool that needs the live viewer
 
 ## Testing Rerun builds
 
-The whole workspace runs **`rerun-sdk == 0.34.0`** (and `gradio-rerun == 0.34.0`) from PyPI:
+**One Rerun version repo-wide — Rust follows Python.** The PyPI `rerun-sdk` pin
+is the source of truth; the Rust `re_*` crates
+(`packages/gsplat-rust-renderer/Cargo.toml`) must match it exactly, or the
+viewer silently loses protocol/tooling parity (e.g. no viewer-control MCP
+before 0.34). To bump: Python first (rerun-sdk + gradio-rerun together), then
+the Rust pins (matching that release's egui family), then re-lock pixi and cargo.
+
+The whole workspace runs **`rerun-sdk == 0.34.1`** (and `gradio-rerun == 0.34.1`) from PyPI:
 `common` carries the plain pin, and the shared `rerun-prerelease` feature carries the same pin
 plus the `datafusion`/`dataloader` extras for the catalog lanes (it composes into
 `no-default-feature` envs beside `catalog-common`, e.g. `simplecv-catalog`, `mv-api-catalog`).
