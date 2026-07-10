@@ -31,6 +31,7 @@ import dataclasses
 import json
 import re
 import shutil
+import sys
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -40,6 +41,7 @@ from typing import Literal, TypeAlias
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
+from beartype.roar import BeartypeException
 from jaxtyping import Float64, UInt8
 from numpy import ndarray
 from PIL import Image
@@ -69,6 +71,7 @@ BRUSH_METRIC_PATHS: dict[BrushMetricName, str] = {
     "ssim": "ssim/eval",
     "num_splats": "splats/num_splats",
 }
+ARTIFACT_RETRY_LIMIT: int = 5
 
 
 @dataclass(slots=True, frozen=True)
@@ -389,6 +392,16 @@ def eval_dir_is_stable(eval_dir: Path, *, expected_files: int, pending_signature
     return signature[0] >= expected_files and signature[1] > 0 and previous == signature
 
 
+def find_eval_render(eval_dir: Path, camera_name: str) -> Path | None:
+    """Find Brush's one exact source-stem PNG, including nested export layouts."""
+    expected_name: str = f"{camera_name}.png"
+    matches: list[Path] = sorted(path for path in eval_dir.rglob(expected_name) if path.is_file() and path.name == expected_name)
+    if len(matches) != 1:
+        print(f"warning: {eval_dir}: expected exactly one {expected_name}, found {len(matches)}; retrying later", file=sys.stderr)
+        return None
+    return matches[0]
+
+
 def ready_export_plys(
     config: VisualizeBrushTrainingConfig, done_plys: dict[int, int], pending_sizes: dict[Path, int]
 ) -> Iterator[tuple[int, Path]]:
@@ -632,6 +645,39 @@ def log_checkpoint(ply_path: Path, with_sh: bool) -> int:
     return num_splats
 
 
+def try_log_checkpoint(ply_path: Path, with_sh: bool, retry_counts: dict[Path, int]) -> tuple[int | None, bool]:
+    """Log a checkpoint, returning ``(count, exhausted)`` for retryable parse failures."""
+    try:
+        return log_checkpoint(ply_path, with_sh), False
+    except BeartypeException:
+        raise
+    except Exception as error:
+        attempts: int = retry_counts.get(ply_path, 0) + 1
+        retry_counts[ply_path] = attempts
+        exhausted: bool = attempts >= ARTIFACT_RETRY_LIMIT
+        disposition: str = "skipping permanently" if exhausted else "retrying later"
+        print(f"warning: failed to parse {ply_path} (attempt {attempts}/{ARTIFACT_RETRY_LIMIT}): {error}; {disposition}", file=sys.stderr)
+        return None, exhausted
+
+
+def try_log_eval_render(
+    render_path: Path, *, view_index: int, config: VisualizeBrushTrainingConfig, retry_counts: dict[Path, int]
+) -> tuple[bool, bool]:
+    """Log an eval PNG, returning ``(logged, exhausted)`` for decode failures."""
+    try:
+        log_eval_render(render_path, view_index=view_index, config=config)
+        return True, False
+    except BeartypeException:
+        raise
+    except Exception as error:
+        attempts: int = retry_counts.get(render_path, 0) + 1
+        retry_counts[render_path] = attempts
+        exhausted: bool = attempts >= ARTIFACT_RETRY_LIMIT
+        disposition: str = "skipping permanently" if exhausted else "retrying later"
+        print(f"warning: failed to decode {render_path} (attempt {attempts}/{ARTIFACT_RETRY_LIMIT}): {error}; {disposition}", file=sys.stderr)
+        return False, exhausted
+
+
 # ── Brush-join mode ──────────────────────────────────────────────────────────
 # Overlay GPU splats on brush's own recording and replicate brush's blueprint.
 
@@ -769,6 +815,7 @@ def run_brush_native(config: VisualizeBrushTrainingConfig) -> None:
 
     done_plys: dict[int, int] = {}  # iteration -> splat count
     pending_sizes: dict[Path, int] = {}  # candidate files awaiting a stable size
+    checkpoint_retries: dict[Path, int] = {}
     n_checkpoints_seen: int = 0  # for snapshot_stride
     blueprint_sent: bool = False
     last_progress: float = time.monotonic()
@@ -786,7 +833,11 @@ def run_brush_native(config: VisualizeBrushTrainingConfig) -> None:
             ):
                 with_sh: bool = config.sh_mode == "all" or (config.sh_mode == "final" and is_final)
                 rr.set_time("iterations", sequence=iteration)
-                num_splats: int = log_checkpoint(ply_path, with_sh)
+                num_splats, exhausted = try_log_checkpoint(ply_path, with_sh, checkpoint_retries)
+                if num_splats is None:
+                    if exhausted:
+                        done_plys[iteration] = 0
+                    continue
                 done_plys[iteration] = num_splats
                 # Send our blueprint only after the first real snapshot exists.  By
                 # now brush has long since sent its own default blueprint, so this
@@ -845,8 +896,11 @@ def main(config: VisualizeBrushTrainingConfig) -> None:
     done_plys: dict[int, int] = {}  # iteration -> splat count
     pending_sizes: dict[Path, int] = {}  # candidate files awaiting a stable size
     pending_eval_signatures: dict[Path, tuple[int, int]] = {}
+    checkpoint_retries: dict[Path, int] = {}
+    eval_retries: dict[Path, int] = {}
     done_eval_imgs: set[Path] = set()
     done_eval_dirs: set[int] = set()  # eval dirs whose tracked renders are all logged
+    failed_eval_dirs: set[int] = set()  # retained dirs containing a permanently skipped render
     logged_metrics: set[tuple[BrushMetricName, int]] = set()
     brush_log_parser: BrushLogParser = BrushLogParser()
     n_checkpoints_seen: int = 0  # for snapshot_stride
@@ -875,23 +929,28 @@ def main(config: VisualizeBrushTrainingConfig) -> None:
             pending_here: bool = False
             for view_index, (camera, _) in enumerate(eval_cameras):
                 # Brush names eval renders from the source image stem plus .png
-                # (for example r_98.png or frame_00001.png). Match the camera
-                # name plus an optional original extension before the final PNG.
-                matches: list[Path] = sorted(eval_dir.rglob(f"{camera.name}.*png*"))
-                if not matches:
+                # (for example r_98.png or frame_00001.png). Require that exact
+                # filename even when Brush nests it below the iteration directory.
+                render_path: Path | None = find_eval_render(eval_dir, camera.name)
+                if render_path is None:
                     pending_here = True
                     continue
-                render_path: Path = matches[0]
                 if render_path in done_eval_imgs:
                     continue
                 set_iteration_time(config, iteration)
-                log_eval_render(render_path, view_index=view_index, config=config)
-                done_eval_imgs.add(render_path)
-                progressed = True
+                logged, exhausted = try_log_eval_render(render_path, view_index=view_index, config=config, retry_counts=eval_retries)
+                if logged:
+                    done_eval_imgs.add(render_path)
+                    progressed = True
+                elif exhausted:
+                    done_eval_imgs.add(render_path)
+                    failed_eval_dirs.add(iteration)
+                else:
+                    pending_here = True
             if not pending_here:
                 done_eval_dirs.add(iteration)
                 pending_eval_signatures.pop(eval_dir, None)
-                if config.delete_processed_eval_dirs:
+                if config.delete_processed_eval_dirs and iteration not in failed_eval_dirs:
                     shutil.rmtree(eval_dir)
 
         # 2. Brush stdout: PSNR/SSIM eval lines + refine splat counts.  Read only
@@ -918,7 +977,11 @@ def main(config: VisualizeBrushTrainingConfig) -> None:
             ):
                 with_sh: bool = config.sh_mode == "all" or (config.sh_mode == "final" and is_final)
                 set_iteration_time(config, iteration)
-                num_splats: int = log_checkpoint(ply_path, with_sh)
+                num_splats, exhausted = try_log_checkpoint(ply_path, with_sh, checkpoint_retries)
+                if num_splats is None:
+                    if exhausted:
+                        done_plys[iteration] = 0
+                    continue
                 rr.log("splats/num_splats", rr.Scalars(float(num_splats)))
                 done_plys[iteration] = num_splats
                 print(f"iter {iteration:>6}: logged {num_splats} splats ({ply_path.name}, sh={'on' if with_sh else 'off'})")

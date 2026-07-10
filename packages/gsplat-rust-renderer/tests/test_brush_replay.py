@@ -174,6 +174,21 @@ def test_eval_directory_waits_for_every_brush_render_to_settle(tmp_path: Path) -
     assert brush_replay.eval_dir_is_stable(eval_dir, expected_files=2, pending_signatures=signatures) is False
 
 
+def test_eval_render_lookup_requires_one_exact_nested_filename(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Suffix variants and duplicate exact names remain pending instead of being guessed."""
+    eval_dir: Path = tmp_path / "eval_500"
+    (eval_dir / "nested").mkdir(parents=True)
+    (eval_dir / "r_98.png.tmp.png").touch()
+    assert brush_replay.find_eval_render(eval_dir, "r_98") is None
+    assert "expected exactly one" in capsys.readouterr().err
+
+    (eval_dir / "r_98.png").touch()
+    assert brush_replay.find_eval_render(eval_dir, "r_98") == eval_dir / "r_98.png"
+    (eval_dir / "nested" / "r_98.png").touch()
+    assert brush_replay.find_eval_render(eval_dir, "r_98") is None
+    assert "found 2" in capsys.readouterr().err
+
+
 def test_ready_exports_drains_a_large_stable_backlog_in_iteration_order(tmp_path: Path) -> None:
     """A completed dense trainer backlog settles once, then drains in one ordered scan."""
     config: VisualizeBrushTrainingConfig = VisualizeBrushTrainingConfig(
@@ -190,6 +205,43 @@ def test_ready_exports_drains_a_large_stable_backlog_in_iteration_order(tmp_path
 
     assert first_scan == []
     assert [iteration for iteration, _ in second_scan] == list(range(1, 1001))
+
+
+def test_truncated_checkpoint_retries_then_deletes_after_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stable-size but incomplete PLY remains until a later parse succeeds."""
+    ply_path: Path = tmp_path / "export_50.ply"
+    ply_path.write_bytes(b"truncated")
+    attempts: int = 0
+
+    def parse_then_succeed(_path: Path, _with_sh: bool) -> int:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ValueError("truncated PLY")
+        return 42
+
+    monkeypatch.setattr(brush_replay, "log_checkpoint", parse_then_succeed)
+    retries: dict[Path, int] = {}
+    assert brush_replay.try_log_checkpoint(ply_path, False, retries) == (None, False)
+    assert ply_path.exists()
+    assert brush_replay.try_log_checkpoint(ply_path, False, retries) == (42, False)
+    remove_processed_export(ply_path, delete_processed=True, is_final=False)
+    assert not ply_path.exists()
+
+
+def test_corrupt_checkpoint_is_skipped_after_retry_cap_and_retained(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A permanently malformed PLY cannot abort replay and is never deleted."""
+    ply_path: Path = tmp_path / "export_50.ply"
+    ply_path.write_bytes(b"corrupt")
+    monkeypatch.setattr(brush_replay, "log_checkpoint", lambda *_args: (_ for _ in ()).throw(ValueError("corrupt PLY")))
+    retries: dict[Path, int] = {}
+
+    outcomes: list[tuple[int | None, bool]] = [
+        brush_replay.try_log_checkpoint(ply_path, False, retries) for _ in range(brush_replay.ARTIFACT_RETRY_LIMIT)
+    ]
+
+    assert outcomes[-1] == (None, True)
+    assert ply_path.exists()
 
 
 def test_retention_keeps_first_every_thousand_and_final_snapshot() -> None:

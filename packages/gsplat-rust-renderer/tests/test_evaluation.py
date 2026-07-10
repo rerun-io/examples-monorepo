@@ -10,7 +10,7 @@ import pytest
 from jaxtyping import UInt8
 from PIL import Image
 
-from gsplat_rust_renderer.apis.evaluate_nerfbaselines import Config, selected_scenes
+from gsplat_rust_renderer.apis.evaluate_nerfbaselines import Config, quality_guard_failures, selected_scenes
 from gsplat_rust_renderer.evaluation import (
     evaluate_checkpoint_predictions,
     evaluate_prediction_directory,
@@ -142,6 +142,29 @@ def test_evaluation_cli_selects_one_or_all_blender_scenes() -> None:
     """The harness defaults to all eight scenes and supports a focused scene."""
     assert selected_scenes(Config()) == BLENDER_SCENES
     assert selected_scenes(Config(scene="mic")) == ("mic",)
+
+
+def test_quality_guard_accepts_cross_backend_deltas_within_thresholds() -> None:
+    """Expected Metal-vs-published drift passes the configured quality guard."""
+    report = pytest.importorskip("gsplat_rust_renderer.evaluation").CheckpointEvaluation(
+        scene="lego", image_count=200, measured_psnr=32.05, published_psnr=32.0, psnr_delta=0.05,
+        measured_ssim=0.95002, published_ssim=0.95, ssim_delta=0.00002,
+    )
+
+    assert quality_guard_failures([report], Config()) == []
+
+
+def test_quality_guard_reports_every_threshold_breach() -> None:
+    """A scene exceeding either absolute delta makes the quality guard fail."""
+    report = pytest.importorskip("gsplat_rust_renderer.evaluation").CheckpointEvaluation(
+        scene="lego", image_count=200, measured_psnr=31.7, published_psnr=32.0, psnr_delta=-0.3,
+        measured_ssim=0.951, published_ssim=0.95, ssim_delta=0.001,
+    )
+
+    assert quality_guard_failures([report], Config()) == [
+        "lego: PSNR delta -0.30000000 exceeds 0.15000000",
+        "lego: SSIM delta +0.001000000 exceeds 0.000500000",
+    ]
 
 
 def test_lego_checkpoint_predictions_match_published_full_split() -> None:

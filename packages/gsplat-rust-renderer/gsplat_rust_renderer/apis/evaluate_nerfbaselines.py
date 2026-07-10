@@ -35,6 +35,10 @@ class Config:
     """Render width matching the Blender benchmark images."""
     height: int = 800
     """Render height matching the Blender benchmark images."""
+    max_psnr_delta: float = 0.15
+    """Maximum absolute PSNR drift; allows headroom above the measured 0.0503 dB Metal delta."""
+    max_ssim_delta: float = 0.0005
+    """Maximum absolute SSIM drift; allows headroom above the measured 0.0000258 Metal delta."""
 
 
 def selected_scenes(config: Config) -> tuple[str, ...]:
@@ -49,6 +53,17 @@ def selected_scenes(config: Config) -> tuple[str, ...]:
     if config.scene == "all":
         return BLENDER_SCENES
     return (config.scene,)
+
+
+def quality_guard_failures(reports: list[CheckpointEvaluation], config: Config) -> list[str]:
+    """Describe scene metrics whose absolute published-result delta is too large."""
+    failures: list[str] = []
+    for report in reports:
+        if abs(report.psnr_delta) > config.max_psnr_delta:
+            failures.append(f"{report.scene}: PSNR delta {report.psnr_delta:+.8f} exceeds {config.max_psnr_delta:.8f}")
+        if abs(report.ssim_delta) > config.max_ssim_delta:
+            failures.append(f"{report.scene}: SSIM delta {report.ssim_delta:+.9f} exceeds {config.max_ssim_delta:.9f}")
+    return failures
 
 
 def main(config: Config) -> None:
@@ -87,3 +102,8 @@ def main(config: Config) -> None:
     report_data = [dataclasses.asdict(report) for report in reports]
     config.report.write_text(json.dumps(report_data, indent=2) + "\n")
     print(f"Wrote {config.report}")
+    failures: list[str] = quality_guard_failures(reports, config)
+    if failures:
+        for failure in failures:
+            print(f"QUALITY GUARD FAILED: {failure}")
+        raise SystemExit(1)

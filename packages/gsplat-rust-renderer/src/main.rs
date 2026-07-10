@@ -335,7 +335,7 @@ fn handle_pending_screenshots(harness: &mut egui_kittest::Harness<'_, re_viewer:
 
 /// Minimal command-line options.  We only need `--port`, `--headless`,
 /// `--window-size`, `--hide-welcome-screen` and `--version`; everything else
-/// (memory limits, etc.) is silently ignored so the binary can be used as a
+/// is warned about and ignored so the binary can be used as a
 /// drop-in replacement for `rerun`.
 #[derive(Clone, Debug)]
 struct Cli {
@@ -357,7 +357,8 @@ fn parse_cli() -> anyhow::Result<Cli> {
     parse_cli_from(std::env::args_os().skip(1))
 }
 
-fn parse_cli_from(mut args: impl Iterator<Item = OsString>) -> anyhow::Result<Cli> {
+fn parse_cli_from(args: impl Iterator<Item = OsString>) -> anyhow::Result<Cli> {
+    let mut args = args.peekable();
     let mut cli = Cli {
         port: GRPC_PORT,
         print_version: false,
@@ -432,8 +433,29 @@ fn parse_cli_from(mut args: impl Iterator<Item = OsString>) -> anyhow::Result<Cl
             continue;
         }
 
+        if arg.to_str().is_some_and(|arg| arg.starts_with("--")) {
+            eprintln!(
+                "warning: unrecognized viewer flag '{}'; ignoring it",
+                arg.to_string_lossy()
+            );
+            if args
+                .peek()
+                .is_some_and(|value| !value.to_string_lossy().starts_with('-'))
+            {
+                let _ = args.next();
+            }
+            continue;
+        }
+
         let path = PathBuf::from(&arg);
         if path.extension().is_some_and(|extension| extension == "rrd") {
+            if let Some(existing) = &cli.rrd_path {
+                anyhow::bail!(
+                    "multiple positional .rrd paths are not supported: '{}' and '{}'",
+                    existing.display(),
+                    path.display()
+                );
+            }
             cli.rrd_path = Some(path);
         }
     }
@@ -569,5 +591,41 @@ mod cli_tests {
         .unwrap();
 
         assert_eq!(cli.rrd_path, Some(std::path::PathBuf::from("training.rrd")));
+    }
+
+    #[test]
+    fn multiple_positional_rrds_are_rejected() {
+        let error =
+            parse_cli_from([OsString::from("one.rrd"), OsString::from("two.rrd")].into_iter())
+                .unwrap_err();
+        assert!(error.to_string().contains("multiple positional .rrd"));
+    }
+
+    #[test]
+    fn unknown_flag_value_is_not_misparsed_as_recording() {
+        let cli = parse_cli_from(
+            [
+                OsString::from("--future-output"),
+                OsString::from("value.rrd"),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        assert_eq!(cli.rrd_path, None);
+    }
+
+    #[test]
+    fn unknown_flag_warns_and_known_arguments_still_parse() {
+        let cli = parse_cli_from(
+            [
+                OsString::from("--future-switch"),
+                OsString::from("--headless"),
+                OsString::from("training.rrd"),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        assert!(cli.headless);
+        assert_eq!(cli.rrd_path, Some(PathBuf::from("training.rrd")));
     }
 }
