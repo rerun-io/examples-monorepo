@@ -61,7 +61,7 @@ List them with `pixi task list -e gsplat-rust-renderer`. The public tasks (all p
 | `gsplat-rust-renderer-evaluate-checkpoints` | Recompute PSNR/SSIM over all eight bundled 200-image checkpoint prediction splits and compare with each `results.json`. |
 | `gsplat-rust-renderer-evaluate` | Render all eight 200-image splits with one persistent standalone process per scene, then write `data/evaluation/metrics.json`. |
 | `gsplat-rust-renderer-brush-train-lego-mac` | Install checksummed Brush v0.3.0 locally and run the raw Lego Metal trainer, exporting PLY every 50 iterations. This train-only task retains every PLY. |
-| `gsplat-rust-renderer-brush-replay-lego` | Train Lego while saving a disk-bounded Rerun 0.34.1 replay with at most 31 snapshots and only the final PLY retained. |
+| `gsplat-rust-renderer-brush-replay-lego` | Build the pinned pure-CLI metrics variant of Brush, then train Lego while saving a disk-bounded rich Rerun 0.34.1 replay with cameras, metrics, at most 31 splat snapshots, and only the final PLY retained. |
 | `gsplat-rust-renderer-brush-train-{chair,hotdog,lego,train,truck}` | Train splats on a scene with `brush_app` for 30K steps and export a PLY to `data/trained/`. Each depends on its dataset-download task. |
 | `gsplat-rust-renderer-fmt` / `-clippy` / `-rust-test` | `cargo fmt --all` / `cargo clippy --all-targets -- -D warnings` / `cargo test`. |
 
@@ -78,15 +78,17 @@ pixi run -e gsplat-rust-renderer-dev --frozen gsplat-rust-renderer-evaluate
 
 ## Brush training replay on macOS
 
-Brush v0.3.0 has no osx-arm64 conda package in the configured channels, but upstream publishes an official Apple Silicon archive. `_gsplat-rust-renderer-install-brush-mac` downloads it into this package (never globally) and verifies SHA-256 `65b2631398c839be3c1d4d7160fe2326389dec87830aac0710985e6690a1048c`. The release corresponds to commit `3edecbb2fe79d3e2c87eeab85b15e0b1dd10d486`.
+Brush v0.3.0 has no osx-arm64 conda package in the configured channels. The raw-trainer task uses upstream's official Apple Silicon archive: `_gsplat-rust-renderer-install-brush-mac` downloads it into this package (never globally) and verifies SHA-256 `65b2631398c839be3c1d4d7160fe2326389dec87830aac0710985e6690a1048c`. The release corresponds to commit `3edecbb2fe79d3e2c87eeab85b15e0b1dd10d486`.
 
-Brush is used only as a trainer: neither `--with-viewer` nor `--rerun-enabled` is passed, so its embedded Rerun 0.24 never creates a recording. It exports a PLY every 50 iterations. Our separate logger, running with this workspace's Rerun 0.34.1, writes `world/splats` on the plural `iterations` timeline and saves a collapsed-panel, white-background blueprint with a spinning orbital eye.
+Brush v0.3.0's pure CLI emits eval PSNR/SSIM and refine counts, but its `TrainStep` arm discards loss. The replay task therefore builds the exact same pinned revision locally with `cargo --release --locked` and applies [`patches/brush-v0.3.0-cli-loss.patch`](patches/brush-v0.3.0-cli-loss.patch). That one-file patch only prints the already-computed loss at Brush's 50-step statistics cadence; it does not change training. Source and Cargo target trees are deleted after the project-local binary is copied, avoiding a persistent ~2.3 GB build tree.
+
+Brush is still used only as a trainer: neither `--with-viewer` nor `--rerun-enabled` is passed, so its embedded Rerun 0.24 never creates a recording. It exports a PLY every 50 iterations and evaluates every 1,000. Our separate logger, running with this workspace's Rerun 0.34.1, writes `world/splats` plus loss/eval/splat-count scalars on the plural `iterations` timeline. It also logs all 100 Lego training cameras as static `rr.Pinhole` + `rr.Transform3D` frusta under `world/cameras/train_###`, with 160-pixel, JPEG-quality-80 GT image planes. The collapsed-panel blueprint keeps a 0.2-rad/s spinning 3D view dominant and shows one GT image plus the metric curves in a side column.
 
 ```bash
 pixi run -e gsplat-rust-renderer-dev --frozen gsplat-rust-renderer-brush-replay-lego
 ```
 
-This task starts Brush and the 0.34.1 logger concurrently. Retention is deliberately independent of export frequency: keep iteration 50, exact 1,000-step boundaries, and the final iteration; retain full geometry in every saved snapshot, but higher-order SH only in the final snapshot. A 30k run therefore has at most 31 RRD snapshots. Conservatively assuming one million splats at every snapshot, aligned geometry/color payloads, final float16 SH, and 15% RRD framing overhead gives 1.82 GB; Lego's 325k cap is estimated below 600 MB. After each stable PLY has been logged or intentionally skipped, the logger deletes that intermediate; only the final PLY remains beside `training.rrd`. This prevents 600 uncompressed 50-step exports from accumulating on disk.
+This task starts Brush and the 0.34.1 logger concurrently. Retention is deliberately independent of export frequency: keep iteration 50, exact 1,000-step boundaries, and the final iteration; retain full geometry in every saved snapshot, but higher-order SH only in the final snapshot. A 30k run therefore has at most 31 RRD snapshots. Conservatively assuming one million splats at every snapshot, aligned geometry/color payloads, final float16 SH, and 15% RRD framing overhead gives 1.82 GB; Lego's 325k cap is estimated below 600 MB. The measured 30k Lego replay is 48,646,512 bytes (46.4 MiB), only 764,816 bytes (0.729 MiB) larger than the earlier splat-only full run after adding all 100 JPEG cameras and four metric series, and just 2.43% of the 2 GB cap. After each stable PLY has been logged or intentionally skipped, the logger deletes that intermediate; only the final PLY remains beside `training.rrd`. This prevents 600 uncompressed 50-step exports from accumulating on disk. A trainer-done sentinel makes the logger wait until final stdout is flushed, preventing the final metrics from racing the last PLY.
 
 ## Logging your own PLY from Python
 

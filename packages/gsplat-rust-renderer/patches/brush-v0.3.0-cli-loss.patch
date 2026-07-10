@@ -1,0 +1,29 @@
+diff --git a/crates/brush-process/src/train_stream.rs b/crates/brush-process/src/train_stream.rs
+index 3e94dce..502cf42 100644
+--- a/crates/brush-process/src/train_stream.rs
++++ b/crates/brush-process/src/train_stream.rs
+@@ -18,7 +18,12 @@ use brush_train::{
+     train::SplatTrainer,
+ };
+ use brush_vfs::BrushVfs;
+-use burn::{backend::Autodiff, module::AutodiffModule, prelude::Backend};
++use burn::{
++    backend::Autodiff,
++    module::AutodiffModule,
++    prelude::Backend,
++    tensor::ElementConversion,
++};
+ use burn_cubecl::cubecl::Runtime;
+ use burn_wgpu::{WgpuDevice, WgpuRuntime};
+ use rand::SeedableRng;
+@@ -181,3 +186,10 @@ pub(crate) async fn train_stream(
++        if iter.is_multiple_of(process_args.rerun_config.rerun_log_train_stats_every)
++            || is_last_step
++        {
++            let loss = stats.loss.clone().into_scalar_async().await.elem::<f64>();
++            log::info!("Train iter {iter}: loss {loss}");
++        }
++
+         if let Some(stats) = refine {
+             emitter
+                 .emit(ProcessMessage::RefineStep {

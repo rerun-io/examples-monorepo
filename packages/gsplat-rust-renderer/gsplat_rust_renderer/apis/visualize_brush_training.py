@@ -1,27 +1,32 @@
 """Replay Brush PLY training snapshots with this package's Rerun 0.34.1 SDK.
 
-The default ``replay_only`` mode intentionally treats Brush as a pure trainer:
-Brush's viewer and embedded, version-incompatible Rerun SDK stay disabled.
+The default rich replay intentionally treats Brush as a pure trainer: Brush's
+viewer and embedded, version-incompatible Rerun SDK stay disabled.
 Brush exports ``export_<iteration>.ply`` every 50 steps; this logger retains the
 first export, exact 1,000-step boundaries, and the final export on the plural
-``iterations`` timeline. Full geometry is kept for every retained snapshot and
-higher-order SH only for the final one. At 30k steps this is at most 31
-snapshots; the conservative one-million-splat estimate is 1.82 GB.
+``iterations`` timeline. It also logs every train camera with a JPEG GT
+thumbnail and parses loss, eval PSNR/SSIM, and splat counts from pure-trainer
+stdout. Full geometry is kept for every retained snapshot and higher-order SH
+only for the final one. At 30k steps this is at most 31 snapshots; the
+conservative one-million-splat estimate is 1.82 GB before the small static
+camera-image payload.
 
 For disk-bounded live runs, ``--delete-processed-plys`` removes each export
 after it has either been logged or intentionally skipped. The final PLY is
 always preserved. This keeps at most Brush's currently-written export plus the
 final checkpoint on disk outside the compressed RRD.
 
-The saved blueprint is a collapsed-panel, white-background Spatial3D view with
-the package's Gaussians3D visualizer and a continuously spinning orbital eye.
+The saved blueprint keeps the white-background, continuously spinning
+Spatial3D view dominant while showing the training-camera ring, one GT image,
+and loss/quality/splat-count curves in a narrow side column. All panels are
+collapsed.
 Use ``--rr-config.save <path>.rrd --rr-config.headless --no-follow`` to replay a
 finished run without starting a viewer.
 
-The older stdout/eval-panel standalone mode remains available with
-``--no-replay-only``. ``brush_native`` is legacy compatibility only and must not
-be used for the 0.34.1 training artifact because it joins Brush's embedded Rerun
-recording.
+The default is the rich pure-trainer replay; ``--replay-only`` opts into the
+older compact splat-only artifact. ``brush_native`` is legacy compatibility
+only and must not be used for the 0.34.1 training artifact because it joins
+Brush's embedded Rerun recording.
 """
 
 import dataclasses
@@ -31,7 +36,7 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypeAlias
 
 import numpy as np
 import rerun as rr
@@ -57,6 +62,69 @@ from gsplat_rust_renderer.scene_io import (
 EXPORT_RE: re.Pattern[str] = re.compile(r"export_(\d+)\.ply$")
 EVAL_LINE_RE: re.Pattern[str] = re.compile(r"Eval iter (\d+): PSNR ([0-9.]+|nan|inf), ssim ([0-9.]+|nan|inf)")
 REFINE_LINE_RE: re.Pattern[str] = re.compile(r"Refine iter (\d+), (\d+) splats\.")
+TRAIN_LINE_RE: re.Pattern[str] = re.compile(r"Train iter (\d+): loss ([0-9.eE+\-]+|nan|inf|-inf)")
+BrushMetricName: TypeAlias = Literal["loss", "psnr", "ssim", "num_splats"]
+
+
+@dataclass(slots=True, frozen=True)
+class BrushMetric:
+    """One scalar emitted by Brush's pure-trainer CLI."""
+
+    iteration: int
+    """Training iteration associated with the sample."""
+    name: BrushMetricName
+    """Metric series name."""
+    value: float
+    """Scalar value parsed from the CLI line."""
+
+
+@dataclass(slots=True)
+class BrushLogParser:
+    """Incrementally parse complete Brush CLI lines without losing split writes."""
+
+    pending: str = ""
+    """Incomplete trailing line retained for the next log-file read."""
+
+    def feed(self, text: str, *, final: bool = False) -> list[BrushMetric]:
+        """Parse newly appended text into metric samples.
+
+        Args:
+            text: Newly appended Brush stdout text.
+            final: Parse an unterminated trailing line when the trainer has exited.
+
+        Returns:
+            Samples in the same order as their source log lines.
+        """
+        lines: list[str] = (self.pending + text).splitlines(keepends=True)
+        self.pending = ""
+        if not final and lines and not lines[-1].endswith(("\n", "\r")):
+            self.pending = lines.pop()
+
+        samples: list[BrushMetric] = []
+        for line in lines:
+            if match := TRAIN_LINE_RE.search(line):
+                samples.append(BrushMetric(iteration=int(match.group(1)), name="loss", value=float(match.group(2))))
+            elif match := REFINE_LINE_RE.search(line):
+                samples.append(BrushMetric(iteration=int(match.group(1)), name="num_splats", value=float(match.group(2))))
+            elif match := EVAL_LINE_RE.search(line):
+                iteration: int = int(match.group(1))
+                samples.extend(
+                    [
+                        BrushMetric(iteration=iteration, name="psnr", value=float(match.group(2))),
+                        BrushMetric(iteration=iteration, name="ssim", value=float(match.group(3))),
+                    ]
+                )
+        return samples
+
+
+@dataclass(slots=True)
+class LoggedScene:
+    """Static dataset entities needed by the training replay blueprint."""
+
+    train_camera_paths: list[str]
+    """Entity paths of all logged training-camera frusta."""
+    eval_cameras: list[tuple[PinholeParameters, Path]]
+    """Evaluation cameras whose optional Brush renders may be replayed."""
 
 
 def estimate_replay_size_bytes(*, max_splats: int, snapshot_count: int, final_has_sh: bool) -> int:
@@ -152,16 +220,15 @@ class VisualizeBrushTrainingConfig:
     the Scene view renders our splats instead of the built-in Points3D.  Launch
     brush WITHOUT --rerun-log-splats-every so ``world/splat/points`` stays empty.
 
-    When False, the legacy standalone path runs: own recording, stdout-parsed
-    psnr/ssim/splat-count plots, frusta with GT thumbnails — useful for replaying
-    a finished run with no live brush process to join."""
-    replay_only: bool = True
+    When False, the required standalone path runs: its own 0.34.1 recording,
+    stdout-parsed loss/PSNR/SSIM/splat-count plots, and frusta with JPEG GT
+    thumbnails."""
+    replay_only: bool = False
     """Log only retained PLY snapshots with this process's Rerun 0.34.1 SDK.
 
-    This is the required default: Brush runs with its viewer and Rerun logging
-    disabled, and the resulting RRD contains a compact spinning-eye blueprint
-    plus self-contained Gaussians3D snapshots. Set false only for the legacy
-    stdout/eval-image replay path."""
+    Brush always runs with its viewer and Rerun logging disabled. The richer
+    default additionally logs training cameras, GT images, and parsed CLI
+    metrics; set this true only for a compact splat-only replay."""
     scene_dir: Path = scene_data_dir(DEFAULT_SCENE)
     """Scene dir.  NeRF-synthetic (transforms_train.json + transforms_val.json)
     or a real COLMAP/nerfstudio capture (auto-detected via colmap/sparse/0)."""
@@ -172,7 +239,12 @@ class VisualizeBrushTrainingConfig:
     export_dir: Path = Path("/tmp/brush-runs/lego")
     """brush-cli --export-path dir being watched for export_*.ply and eval_*/."""
     brush_log: Path | None = None
-    """brush-cli stdout capture; parsed for PSNR/SSIM and refine splat counts."""
+    """brush-cli stdout capture; parsed for loss, PSNR/SSIM, and splat counts."""
+    trainer_done_file: Path | None = None
+    """Optional status sentinel written after Brush has flushed its final stdout.
+
+    When set, replay waits for this file as well as the final PLY so the last
+    loss and evaluation samples cannot race the export watcher."""
     total_iters: int = 30000
     """brush --total-train-iters; the checkpoint at this iter ends the watch."""
     poll_interval: float = 2.0
@@ -215,6 +287,8 @@ class VisualizeBrushTrainingConfig:
     """Longest edge of the GT images textured onto the 3D frustum planes.
     100 full-res 800px planes overwhelm the GB10 at 2.5K viewport; thumbnails
     keep the look at a fraction of the texture cost. 0 = full resolution."""
+    image_jpeg_quality: int = 80
+    """JPEG quality for timeless GT thumbnails attached to camera frusta."""
     follow: bool = True
     """Keep polling until the total_iters checkpoint lands; False = log what
     exists now and exit (works on a finished run)."""
@@ -245,6 +319,26 @@ def set_iteration_time(config: VisualizeBrushTrainingConfig, iteration: int) -> 
     """Stamp subsequent logs with both the true iteration and the dense step index."""
     rr.set_time("iterations", sequence=iteration)
     rr.set_time("step", sequence=round(iteration / config.step_stride))
+
+
+def log_brush_metrics(
+    config: VisualizeBrushTrainingConfig,
+    samples: list[BrushMetric],
+    logged_metrics: set[tuple[BrushMetricName, int]],
+) -> bool:
+    """Log newly parsed Brush scalars once on the shared iteration timeline."""
+    progressed: bool = False
+    for sample in samples:
+        metric_key: tuple[BrushMetricName, int] = (sample.name, sample.iteration)
+        if metric_key in logged_metrics:
+            continue
+        logged_metrics.add(metric_key)
+        set_iteration_time(config, sample.iteration)
+        rr.log(f"plots/{sample.name}", rr.Scalars(sample.value))
+        progressed = True
+        if sample.name in ("loss", "psnr", "ssim"):
+            print(f"iter {sample.iteration:>6}: {sample.name}={sample.value:.6g}")
+    return progressed
 
 
 def awaiting_stable_size(path: Path, pending_sizes: dict[Path, int]) -> bool:
@@ -312,15 +406,16 @@ def log_camera_frustum(
         plane_rgb = rgb
         plane_camera = camera
     log_pinhole(plane_camera, cam_log_path=Path(cam_path), image_plane_distance=config.image_plane_distance, static=True)
-    rr.log(f"{cam_path}/pinhole/image", rr.Image(plane_rgb), static=True)
+    rr.log(f"{cam_path}/pinhole/image", rr.Image(plane_rgb).compress(jpeg_quality=config.image_jpeg_quality), static=True)
 
 
-def log_static_scene(config: VisualizeBrushTrainingConfig) -> list[tuple[PinholeParameters, Path]]:
+def log_static_scene(config: VisualizeBrushTrainingConfig) -> LoggedScene:
     """Log coordinates, dataset-camera frusta with GT thumbnail planes, and the
     static GT halves of the eval comparison rows.
 
     Handles both NeRF-synthetic scenes and real COLMAP/nerfstudio captures
-    (auto-detected); returns the eval cameras whose renders will be tracked.
+    (auto-detected); returns paths for the blueprint and eval cameras whose
+    optional renders will be tracked.
     """
     rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
 
@@ -350,32 +445,32 @@ def log_static_scene(config: VisualizeBrushTrainingConfig) -> list[tuple[Pinhole
 
     if config.max_cameras > 0:
         all_cameras = all_cameras[: config.max_cameras]
-    for camera, image_path in all_cameras:
-        log_camera_frustum(f"world/cameras/{camera.name}", camera, image_path, config, conventions)
+    train_camera_paths: list[str] = []
+    for index, (camera, image_path) in enumerate(all_cameras):
+        cam_path: str = f"world/cameras/train_{index:03d}"
+        log_camera_frustum(cam_path, camera, image_path, config, conventions)
+        train_camera_paths.append(cam_path)
 
     for camera, image_path in eval_cameras:
         # Brush eval renders composite on black; match it for the GT half.
         gt: UInt8[ndarray, "h w 3"] = load_rgb_composited(image_path, background=0.0)
         rr.log(f"eval/{camera.name}/gt", rr.Image(gt), static=True)
 
-    # Named series so the plot legends read psnr/ssim/num_splats.
+    # Named series so the plot legends read loss/psnr/ssim/num_splats.
+    rr.log("plots/loss", rr.SeriesLines(names="training loss"), static=True)
     rr.log("plots/psnr", rr.SeriesLines(names="psnr (brush eval)"), static=True)
     rr.log("plots/ssim", rr.SeriesLines(names="ssim (brush eval)"), static=True)
     rr.log("plots/num_splats", rr.SeriesLines(names="splat count"), static=True)
-    return eval_cameras
+    return LoggedScene(train_camera_paths=train_camera_paths, eval_cameras=eval_cameras)
 
 
-def send_blueprint(config: VisualizeBrushTrainingConfig, eval_cameras: list[tuple[PinholeParameters, Path]]) -> None:
-    # Spin mode = continuous full-rate repaint for FPS validation; the eval-image
-    # and time-series side views cost ~20 ms/frame under continuous repaint in the
-    # viewer (measured), so the spinning layout is 3D-only and excludes
-    # the camera frusta.  Everything stays logged either way — rerun without
-    # --spin-speed (or switch blueprints) to inspect the panels.
+def send_blueprint(config: VisualizeBrushTrainingConfig, train_camera_paths: list[str]) -> None:
+    """Send the compact rich replay layout with a dominant spinning 3D view."""
     spinning: bool = config.spin_speed > 0.0
     view3d = rrb.Spatial3DView(
         origin="/",
-        name="splats live (spin)" if spinning else "splats + train cameras",
-        contents=["+ $origin/**", "- /eval/**", "- /plots/**"] + (["- world/cameras/**"] if spinning else []),
+        name="splats + training cameras",
+        contents=["+ $origin/**", "- /eval/**", "- /plots/**"],
         overrides={SPLATS_ENTITY: rrb.Visualizer(SPLATS_VISUALIZER)},
         background=rrb.Background(color=(255, 255, 255), kind=rrb.BackgroundKind.SolidColor),
         line_grid=False,
@@ -391,7 +486,7 @@ def send_blueprint(config: VisualizeBrushTrainingConfig, eval_cameras: list[tupl
             else None
         ),
     )
-    if spinning:
+    if config.replay_only or not train_camera_paths:
         rr.send_blueprint(
             rrb.Blueprint(
                 view3d,
@@ -402,35 +497,19 @@ def send_blueprint(config: VisualizeBrushTrainingConfig, eval_cameras: list[tupl
         )
         return
 
-    # Layout follows brush's send_default_blueprint: a Vertical split with the
-    # 3D scene + per-view (Ground truth | Render) eval pairs on top, and the
-    # metric time-series in a graph row below.  Two intentional deviations from
-    # brush: we keep the 3D scene prominent (brush gives it 1/4 width — ours is a
-    # real GPU splat render, not coarse ellipsoids), and we surface only the
-    # series we parse from brush's stdout (psnr/ssim/splat count).
-    eval_panel = rrb.Grid(
-        *[
-            rrb.Horizontal(
-                rrb.Spatial2DView(origin=f"eval/{camera.name}/gt", name="Ground truth"),
-                rrb.Spatial2DView(origin=f"eval/{camera.name}/render", name="Render"),
-                name=camera.name,
-            )
-            for camera, _ in eval_cameras
-        ],
-        grid_columns=1,
-        name="Eval views",
-    )
-    main_row = rrb.Horizontal(view3d, eval_panel, column_shares=[2, 1])
-    graphs = rrb.Horizontal(
-        rrb.TimeSeriesView(origin="plots", contents=["+ plots/psnr", "+ plots/ssim"], name="Quality"),
-        rrb.TimeSeriesView(origin="plots", contents=["+ plots/num_splats"], name="Splats"),
+    side_column = rrb.Vertical(
+        rrb.Spatial2DView(origin=f"{train_camera_paths[0]}/pinhole/image", name="Training GT"),
+        rrb.TimeSeriesView(origin="plots/loss", name="Loss"),
+        rrb.TimeSeriesView(origin="plots", contents=["+ plots/psnr", "+ plots/ssim"], name="Eval quality"),
+        rrb.TimeSeriesView(origin="plots/num_splats", name="Splat count"),
+        row_shares=[2, 1, 1, 1],
     )
     rr.send_blueprint(
         rrb.Blueprint(
-            rrb.Vertical(main_row, graphs, row_shares=[3, 2]),
+            rrb.Horizontal(view3d, side_column, column_shares=[3, 1]),
             rrb.BlueprintPanel(state="collapsed"),
             rrb.SelectionPanel(state="collapsed"),
-            rrb.TimePanel(state="expanded"),
+            rrb.TimePanel(state="collapsed"),
             auto_layout=False,
             auto_views=False,
         )
@@ -649,21 +728,26 @@ def main(config: VisualizeBrushTrainingConfig) -> None:
     if config.replay_only:
         rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
         eval_cameras: list[tuple[PinholeParameters, Path]] = []
-        send_blueprint(config, eval_cameras)
+        send_blueprint(config, [])
         print(
             "pure PLY replay: Brush Rerun disabled; retaining first export, "
             f"every {config.step_stride * config.snapshot_stride} iterations, and final from {config.export_dir}"
         )
     else:
-        eval_cameras = log_static_scene(config)
-        send_blueprint(config, eval_cameras)
-        print(f"static scene logged: train cameras + {len(eval_cameras)} eval views tracked from {config.export_dir}")
+        logged_scene: LoggedScene = log_static_scene(config)
+        eval_cameras = logged_scene.eval_cameras
+        send_blueprint(config, logged_scene.train_camera_paths)
+        print(
+            f"static scene logged: {len(logged_scene.train_camera_paths)} train cameras + "
+            f"{len(eval_cameras)} eval views tracked from {config.export_dir}"
+        )
 
     done_plys: dict[int, int] = {}  # iteration -> splat count
     pending_sizes: dict[Path, int] = {}  # candidate files awaiting a stable size
     done_eval_imgs: set[Path] = set()
     done_eval_dirs: set[int] = set()  # eval dirs whose tracked renders are all logged
-    done_eval_iters: set[int] = set()  # brush prints each eval line twice under RUST_LOG=info
+    logged_metrics: set[tuple[BrushMetricName, int]] = set()
+    brush_log_parser: BrushLogParser = BrushLogParser()
     n_checkpoints_seen: int = 0  # for snapshot_stride
     log_offset: int = 0
     last_progress: float = time.monotonic()
@@ -715,18 +799,7 @@ def main(config: VisualizeBrushTrainingConfig) -> None:
                 chunk: bytes = log_file.read()
             log_offset += len(chunk)
             new_text: str = chunk.decode(errors="replace")
-            for m in EVAL_LINE_RE.finditer(new_text):
-                if int(m.group(1)) in done_eval_iters:
-                    continue
-                done_eval_iters.add(int(m.group(1)))
-                set_iteration_time(config, int(m.group(1)))
-                rr.log("plots/psnr", rr.Scalars(float(m.group(2))))
-                rr.log("plots/ssim", rr.Scalars(float(m.group(3))))
-                progressed = True
-                print(f"iter {int(m.group(1)):>6}: psnr={m.group(2)} ssim={m.group(3)}")
-            for m in REFINE_LINE_RE.finditer(new_text):
-                set_iteration_time(config, int(m.group(1)))
-                rr.log("plots/num_splats", rr.Scalars(float(m.group(2))))
+            progressed = log_brush_metrics(config, brush_log_parser.feed(new_text), logged_metrics) or progressed
 
         # 3. Checkpoint PLYs: process once the size is stable across two scans
         #    (brush writes the file in one async call, but not atomically).
@@ -754,13 +827,16 @@ def main(config: VisualizeBrushTrainingConfig) -> None:
         if progressed:
             last_progress = time.monotonic()
 
-        finished: bool = any(it >= config.total_iters for it in done_plys)
+        final_ply_seen: bool = any(it >= config.total_iters for it in done_plys)
+        trainer_finished: bool = config.trainer_done_file is None or config.trainer_done_file.exists()
+        finished: bool = final_ply_seen and trainer_finished
         if finished or not config.follow:
             break
         if time.monotonic() - last_progress > config.stall_timeout:
             raise RuntimeError(f"no new brush artifacts in {config.export_dir} for {config.stall_timeout:.0f}s — is brush-cli still running?")
         time.sleep(config.poll_interval)
 
+    log_brush_metrics(config, brush_log_parser.feed("", final=True), logged_metrics)
     rec: rr.RecordingStream | None = rr.get_global_data_recording()
     assert rec is not None
     rec.flush(timeout_sec=120.0)

@@ -1689,6 +1689,12 @@ cwd = "packages/gsplat-rust-renderer"
 outputs = ["packages/gsplat-rust-renderer/data/tools/brush-v0.3.0/brush_app"]
 description = "Install the checksummed official Brush v0.3.0 Apple Silicon binary project-locally"
 
+[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-build-brush-metrics-mac]
+cmd = "test -x data/tools/brush-v0.3.0-metrics/brush_app || (rm -rf data/tools/brush-v0.3.0-metrics-src data/tools/brush-v0.3.0-metrics-target && git clone --depth 1 --branch v0.3.0 https://github.com/ArthurBrussee/brush.git data/tools/brush-v0.3.0-metrics-src && git -C data/tools/brush-v0.3.0-metrics-src rev-parse HEAD | grep -qx 3edecbb2fe79d3e2c87eeab85b15e0b1dd10d486 && git -C data/tools/brush-v0.3.0-metrics-src apply ../../../patches/brush-v0.3.0-cli-loss.patch && CARGO_TARGET_DIR=data/tools/brush-v0.3.0-metrics-target cargo build --release --locked --manifest-path data/tools/brush-v0.3.0-metrics-src/Cargo.toml --package brush-app --bin brush_app && mkdir -p data/tools/brush-v0.3.0-metrics && cp data/tools/brush-v0.3.0-metrics-target/release/brush_app data/tools/brush-v0.3.0-metrics/brush_app && rm -rf data/tools/brush-v0.3.0-metrics-src data/tools/brush-v0.3.0-metrics-target)"
+cwd = "packages/gsplat-rust-renderer"
+outputs = ["packages/gsplat-rust-renderer/data/tools/brush-v0.3.0-metrics/brush_app"]
+description = "Build pinned Brush v0.3.0 locally with pure-CLI loss output (macOS Metal; embedded Rerun remains disabled)"
+
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-brush-train-lego-mac]
 cmd = "data/tools/brush-v0.3.0/brush_app data/nerfbaselines/data/lego --total-steps 30000 --export-every 50 --export-path data/brush-runs/lego"
 depends-on = ["_gsplat-rust-renderer-install-brush-mac", "_gsplat-rust-renderer-download-nerfbaselines-data-lego"]
@@ -1696,10 +1702,10 @@ cwd = "packages/gsplat-rust-renderer"
 description = "Train Lego with Brush as a pure trainer and export PLY every 50 iterations (macOS Metal)"
 
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-brush-replay-lego]
-cmd = "zsh -c 'rm -rf data/brush-runs/lego && mkdir -p data/brush-runs/lego || exit 1; data/tools/brush-v0.3.0/brush_app data/nerfbaselines/data/lego --total-steps 30000 --export-every 50 --export-path data/brush-runs/lego > data/brush-runs/lego/brush.log 2>&1 & trainer_pid=$!; trap \"kill $trainer_pid 2>/dev/null || true\" EXIT; python tools/visualize_brush_training.py --rr-config.application-id brush-training-replay --rr-config.save data/brush-runs/lego/training.rrd --rr-config.headless --scene-dir data/nerfbaselines/data/lego --export-dir data/brush-runs/lego --brush-log data/brush-runs/lego/brush.log --total-iters 30000 --step-stride 50 --snapshot-stride 20 --sh-mode final --spin-speed 0.2 --delete-processed-plys; replay_status=$?; if test $replay_status -ne 0; then kill $trainer_pid 2>/dev/null || true; wait $trainer_pid 2>/dev/null || true; exit $replay_status; fi; wait $trainer_pid; trainer_status=$?; test $trainer_status -eq 0'"
-depends-on = ["_gsplat-rust-renderer-install-brush-mac", "_gsplat-rust-renderer-download-nerfbaselines-data-lego"]
+cmd = "zsh -c 'rm -rf data/brush-runs/lego && mkdir -p data/brush-runs/lego || exit 1; (RUST_LOG=brush_cli=info,brush_process::train_stream=info data/tools/brush-v0.3.0-metrics/brush_app data/nerfbaselines/data/lego --total-steps 30000 --export-every 50 --export-path data/brush-runs/lego --eval-every 1000 > data/brush-runs/lego/brush.log 2>&1; trainer_status=$?; echo $trainer_status > data/brush-runs/lego/trainer.exit; exit $trainer_status) & trainer_pid=$!; trap \"kill $trainer_pid 2>/dev/null || true\" EXIT; python tools/visualize_brush_training.py --rr-config.application-id brush-training-replay --rr-config.save data/brush-runs/lego/training.rrd --rr-config.headless --scene-dir data/nerfbaselines/data/lego --export-dir data/brush-runs/lego --brush-log data/brush-runs/lego/brush.log --trainer-done-file data/brush-runs/lego/trainer.exit --total-iters 30000 --step-stride 50 --snapshot-stride 20 --sh-mode final --spin-speed 0.2 --eval-views-logged 0 --delete-processed-plys; replay_status=$?; if test $replay_status -ne 0; then kill $trainer_pid 2>/dev/null || true; wait $trainer_pid 2>/dev/null || true; exit $replay_status; fi; wait $trainer_pid; trainer_status=$?; test $trainer_status -eq 0 && grep -qx 0 data/brush-runs/lego/trainer.exit'"
+depends-on = ["_gsplat-rust-renderer-build-brush-metrics-mac", "_gsplat-rust-renderer-download-nerfbaselines-data-lego"]
 cwd = "packages/gsplat-rust-renderer"
-description = "Train Lego while Rerun 0.34.1 live-replays 31 retained snapshots and deletes processed intermediate PLYs"
+description = "Train Lego while Rerun 0.34.1 replays cameras, metrics, and 31 retained snapshots with bounded disk use"
 
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-brush-train-truck]
 cmd = """

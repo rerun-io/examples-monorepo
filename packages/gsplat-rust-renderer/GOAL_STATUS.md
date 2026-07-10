@@ -1,6 +1,6 @@
 # gsplat-rust-renderer Goal Status
 
-Last updated: 2026-07-10T02:07:30-07:00
+Last updated: 2026-07-10T07:45:15-07:00
 
 ## Success criteria
 
@@ -9,6 +9,17 @@ Last updated: 2026-07-10T02:07:30-07:00
 - [x] **Brush:** a pixi-managed osx-arm64 Brush trainer exports PLY snapshots, and this package replays retained snapshots on an `iterations` timeline with rerun-sdk 0.34.1 into an RRD no larger than about 2 GB.
 - [x] All required Rust, Python, and GPU regression gates are green.
 - [x] Pixel and numeric evidence is published on `/tmp/fleet-artifacts/gsplat-goals.html`.
+
+## Session 4 refinements
+
+- [x] Audit Brush v0.3.0 CLI and pinned source: pure-trainer stdout provides eval PSNR/SSIM and refine splat counts, but discards train loss.
+- [x] Add a minimal pinned-source patch that emits the already-computed loss every 50 iterations without enabling Brush's embedded Rerun; build it project-locally through Pixi with `cargo --locked` and delete the 2.3 GB build tree afterward.
+- [x] TDD incremental metric parsing, static JPEG camera images, the rich replay default, and final-log synchronization.
+- [x] Pass a real 100-step Metal smoke: 100 training cameras, four metric series, two splat snapshots, a 6.4 MiB RRD, and full-frame saved-RRD pixel validation.
+- [x] Complete a fresh 30,000-step Lego run and replace the Brush RRD/screenshots/progression video with rich evidence.
+- [x] Regenerate all eight pretrained orbit videos at 0.2 rad/s with measured wall-clock playback pacing and inspect sampled frames.
+- [x] Run the complete gate set and update final evidence.
+- [x] Commit locally without pushing.
 
 ## Current evidence
 
@@ -78,6 +89,10 @@ The standalone PSNR delta is at most 0.0503 dB and SSIM delta at most 2.58e-5. D
 
 ### Brush
 
+Session-4 rework is complete. The default pure-trainer replay logs every training camera as a static frustum under `world/cameras/train_###`, attaches a 160-pixel JPEG-quality-80 GT plane, and gives the dominant spinning 3D view a side column containing one GT image plus loss, eval PSNR/SSIM, and splat-count time series. Brush's exact v0.3.0 source revision `3edecbb2...d486` is built with a one-file patch that only emits the already-computed loss every 50 steps; `--rerun-enabled` remains absent. A clean Pixi task build succeeded and removed its 2.3 GB source/target intermediates.
+
+The fresh 30,000-step Metal run completed in 968 seconds. Its final model has 42,027 splats; the log contains 600 loss samples, 30 eval PSNR/SSIM samples, and 149 refine-count events. The rich RRD contains all 100 cameras and JPEG GT images, 31 retained splat snapshots, and all four metric series. It is 48,646,512 bytes (46.4 MiB), only 764,816 bytes (0.729 MiB) larger than the prior 47,881,696-byte splat-only full run and 2.43% of the 2 GB limit. The run directory retains only the RRD, final PLY, trainer log, and successful completion sentinel; no eval PNG directory or intermediate PLYs remain.
+
 The official Brush v0.3.0 Apple Silicon binary is installed project-locally by a Pixi task after SHA-256 verification (`65b263...a1048c`; upstream commit `3edecbb2...d486`). The trainer task omits both opt-in `--with-viewer` and `--rerun-enabled`, exports PLY every 50 iterations, and never uses Brush's embedded Rerun 0.24 recording.
 
 The default replay path uses this workspace's rerun-sdk 0.34.1, logs the first export + exact 1,000-step boundaries + final (31 snapshots maximum), retains higher-order SH only in the final snapshot, uses the plural `iterations` timeline, and saves a collapsed-panel spinning-eye blueprint. The conservative one-million-splat estimate is 1.82 GB; Lego's 325k cap is below 600 MB.
@@ -86,9 +101,11 @@ A GPU-free smoke replay of two 325k-splat checkpoints produced `/tmp/brush-repla
 
 The replay now runs concurrently with the pure trainer and deletes each stable intermediate PLY only after it has been logged or intentionally skipped; the final PLY is preserved. A real 100-step Metal smoke first proved this behavior (`export_50.ply` removed, `export_100.ply` kept) and produced a structurally valid 1.3 MiB RRD.
 
-The full Pixi-managed Lego Metal run then completed all 30,000 steps. Brush produced 600 exports at 50-step intervals; the logger retained iteration 50, each exact 1,000-step boundary, and 30,000 for 31 full-geometry `world/splats` chunks. Final-only SH is present, the final cloud has 43,804 splats, and `rerun rrd stats` reports both `iterations` and `step` timelines, one recording plus one blueprint, and 45.6 MiB compressed. The run directory is only 56 MiB: `training.rrd` (47,881,696 bytes), final `export_30000.ply` (10,339,294 bytes), and an empty trainer log. The RRD is also copied to `/tmp/fleet-artifacts/gsplat-goals/brush-training.rrd` for evidence access.
+The full Pixi-managed Lego Metal run produced 600 exports at 50-step intervals; the logger retained iteration 50, each exact 1,000-step boundary, and 30,000 for 31 full-geometry `world/splats` chunks. Final-only SH is present. `rerun rrd stats` confirms both `iterations` and `step` timelines, one recording plus one blueprint, all 100 camera pinholes/images, and the metric series. The RRD is copied to `/tmp/fleet-artifacts/gsplat-goals/brush-training.rrd` for evidence access.
 
-Pixel validation used the required headless custom viewer and 0.34.1 `viewer-mcp` timeline sweep. The 90-frame, 1280x720 progression MP4 spans iterations 50–30,000; first/mid/final full-frame screenshots confirm the saved spinning-eye blueprint and geometry progression. All eight pretrained scenes also have 90-frame collapsed-panel spin-orbit videos on the evidence page. Temporary PNG frame dumps and per-scene RRDs were deleted after encoding.
+Pixel validation used the required headless custom viewer and 0.34.1 `viewer-mcp` timeline sweep. The fresh 90-frame, 1280x720 progression MP4 spans iterations 50–30,000; first/mid/final full-frame screenshots visibly confirm the camera ring, JPEG GT plane, splats, and populated metric curves. The saved-RRD ViewerClient path was independently proven by the rich smoke; the large RRD's full-frame capture timed out, so final progression evidence uses the skill's bounded timeline-sweep fallback.
+
+All eight pretrained scene clips were regenerated at the real 0.2-rad/s blueprint spin. Each 90-frame video was re-encoded from the captured frame dump at `90 / measured_capture_seconds`, making encoded duration equal wall-clock capture duration: 24.45–34.76 seconds, with scene-specific rates of 2.589–3.681 fps. `ffprobe` confirms 90 frames and exact measured duration for every clip. Start/middle/end contact sheets were visually inspected for all eight scenes; no blank or stale sequences were accepted. Pacing metadata is preserved as `/tmp/fleet-artifacts/gsplat-goals/orbit-pacing.json`.
 
 ### Assets
 
@@ -96,7 +113,7 @@ Data and pretrained checkpoint archives are downloaded and extracted for all eig
 
 ### Gates
 
-The complete final pre-commit gate set is green as of 2026-07-10 02:03 PDT: Rust fmt, Clippy with warnings denied, 12 Rust tests, Ruff, Pyrefly, Vulture, all 29 Python tests, and the Metal `tools/relog_check.py` GPU regression. The re-log check captured full-frame headless screenshots and observed the expected red → green → blue replacement sequence.
+The complete session-4 pre-commit gate set is green as of 2026-07-10 07:45 PDT: Rust fmt, Clippy with warnings denied, 12 Rust tests, Ruff, Pyrefly with zero errors, Vulture, all 32 Python tests, and the Metal `tools/relog_check.py` GPU regression. The re-log check captured full-frame headless screenshots and observed the expected red → green → blue replacement sequence.
 
 ## Constraints and decisions
 
@@ -109,6 +126,4 @@ The complete final pre-commit gate set is green as of 2026-07-10 02:03 PDT: Rust
 
 ## Next action
 
-The CPU-verifiable implementation is checkpointed in local commits `4acb55a` (full-split quality guard) and `82a05a2` (bounded Brush replay), with Pixi orchestration and this status included in the following workflow commit.
-
-All three criteria are complete. The final implementation milestones are committed locally as `908cc4f` (moving-camera renderer throughput) and `1bd36ba` (bounded Brush training replay and RRD loading), with no push. Hand off the evidence URL and local commits to the orchestrator.
+All original criteria and both session-4 refinements are complete with fresh numeric and pixel evidence. Hand off the refreshed evidence URL and local commit to the orchestrator; do not push from this machine.
