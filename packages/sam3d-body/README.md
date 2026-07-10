@@ -39,22 +39,22 @@ First run will download HF checkpoints for SAM3, SAM3D Body, and the relative-de
 ```bash
 git clone https://github.com/rerun-io/sam3d-body-rerun.git
 cd sam3d-body-rerun
-pixi run sam3d-body-app
+pixi run -e sam3d-body --frozen sam3d-body-app
 ```
 
-All commands can be listed with `pixi task list`.
+All commands can be listed with `pixi task list -e sam3d-body`.
 
 ## Usage
 ### Gradio App
 ```bash
-pixi run sam3d-body-app
+pixi run -e sam3d-body --frozen sam3d-body-app
 ```
-Opens the Gradio UI with an embedded streaming Rerun viewer. Try the bundled samples in `data/example-data` or upload your own RGB image; toggle “Log metric depth” to stream predicted depth.
+Opens the Gradio UI with an embedded streaming Rerun viewer. Upload an RGB image and toggle “Log metric depth” to stream predicted depth.
 
 ### CLI
 From a dev shell (for tyro + dev deps):
 ```
-pixi run sam3d-body-cli
+pixi run -e sam3d-body --frozen sam3d-body-cli --image-path /path/to/image.jpg
 ```
 
 OR
@@ -63,7 +63,7 @@ OR
 pixi shell -e sam3d-body-dev
 python tool/demo.py --help
 ```
-Run on a folder of images and configure Rerun output/recordings via the CLI flags.
+Pass `--image-path` or override the task's `--image-folder` to select input, and configure Rerun output/recordings via the CLI flags.
 
 ### Promptable SAM3 sandbox
 If you just want SAM3 masks without 3D reconstruction:
@@ -76,17 +76,17 @@ Process individual videos with SAM3 text-prompted segmentation. Three modes avai
 
 **Batch Mode** (small videos <4GB, best quality):
 ```bash
-pixi run sam3-video-batch --video-path path/to/video.mp4 --prompt "person"
+pixi run -e sam3 --frozen sam3-video-batch --video-path path/to/video.mp4 --prompt "person"
 ```
 
 **Chunk Mode** (large videos, memory-efficient with overlapping chunks):
 ```bash
-pixi run sam3-video-chunk --video-path path/to/video.mp4 --prompt "person"
+pixi run -e sam3 --frozen sam3-video-chunk --video-path path/to/video.mp4 --prompt "person"
 ```
 
 **Streaming Mode** (constant memory, frame-by-frame):
 ```bash
-pixi run sam3-video-stream --video-path path/to/video.mp4 --prompt "person"
+pixi run -e sam3 --frozen sam3-video-stream --video-path path/to/video.mp4 --prompt "person"
 ```
 
 Use `--help` with any command to see all options.
@@ -94,7 +94,7 @@ Use `--help` with any command to see all options.
 ### Multiview Video Demo
 Process multiview HoCap video sequences with SAM3 segmentation and TSDF mesh fusion:
 ```bash
-pixi run sam3d-body-mv-video-demo
+pixi run -e sam3d-body --frozen sam3d-body-mv-video-demo
 ```
 Downloads sample data (~1.7GB) on first run and processes 100 frames across 8 cameras, visualizing segmentation overlays and a fused 3D mesh in Rerun. Requires ~3GB VRAM.
 

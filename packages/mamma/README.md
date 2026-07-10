@@ -38,8 +38,7 @@ present): `pixi run -e mamma --frozen python packages/mamma/tools/build_trt_engi
 
 Defaults trade the last 2.5 s for mask quality: `track_stride=1` keeps masks
 pixel-identical to the original tracker (stride 4 reaches 11.8 s but
-transiently collapses masks to the head during fast motion — evidence in
-`implementation-notes.html`).
+transiently collapses masks to the head during fast motion).
 
 ## Layout
 
@@ -53,7 +52,6 @@ src/mamma/
   engine/        per-tick streaming pipeline, in-process torchcodec decode, profiler
   viz/           Rerun stream logger (NVENC H.264 -> VideoStream) + blueprint
 tools/           tyro CLIs: demos, validate_golden, benchmark, goal_check, profiler
-implementation-notes.html   running decision log with viewer-validation evidence
 ```
 
 ## What's next

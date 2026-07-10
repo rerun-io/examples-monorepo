@@ -17,11 +17,11 @@ Standalone SAM3 segmentation package with Rerun visualization. Provides text-con
 pixi install -e sam3
 
 # Run demos
-pixi run sam3-video-batch --video-path path/to/video.mp4
-pixi run sam3-video-chunk --video-path path/to/video.mp4
-pixi run sam3-video-stream --video-path path/to/video.mp4
+pixi run -e sam3 --frozen sam3-video-batch --video-path path/to/video.mp4
+pixi run -e sam3 --frozen sam3-video-chunk --video-path path/to/video.mp4
+pixi run -e sam3 --frozen sam3-video-stream --video-path path/to/video.mp4
 
 # Launch Gradio apps
-pixi run sam3-app
-pixi run sam3-annotated-app
+pixi run -e sam3 --frozen sam3-app
+pixi run -e sam3 --frozen sam3-annotated-app
 ```

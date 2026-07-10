@@ -21,11 +21,6 @@ pixi install -e slam-evals
 `/home/pablo/0Dev/work/VSLAM-LAB-Benchmark` (override with `--benchmark-root`
 on `tools/ingest.py` if it lives elsewhere).
 
-> The `pixi -q` flag below silences pixi's workspace-level warnings about
-> `linux-64` target selectors on features (`wilor`, `gsplat-rust-renderer`)
-> while the workspace is pinned to `linux-aarch64`. Drop `-q` if you want to
-> see those warnings.
-
 ## End-to-end workflow
 
 ```bash

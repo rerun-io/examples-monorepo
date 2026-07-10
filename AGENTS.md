@@ -4,11 +4,11 @@ This file provides guidance to coding agents when working with code in this repo
 
 ## What This Is
 
-A **Pixi workspace monorepo** of computer vision projects. Each package lives in `packages/<name>/` with its own Python module, CLI tools, and tests. All Pixi configuration (deps, tasks, environments) lives in the root `pixi.toml`; per-package `pyproject.toml` files hold standard Python packaging metadata plus per-package tooling config such as `[tool.ruff]` and `[tool.vulture]`.
+A **Pixi workspace monorepo** of computer vision projects. Runnable Python projects live in `packages/<name>/` with their modules, CLI tools, and tests; the directory also contains build-only dependencies, vendored code, and documentation artifacts. Root-managed dependencies, tasks, and environments live in `pixi.toml`. Runnable packages keep standard Python packaging metadata and package-specific tooling config such as `[tool.ruff]` and `[tool.vulture]` in `pyproject.toml`; Pixi-build packages such as `asmk`, `dpretrieval`, and `mast3r` have their own build manifests.
 
 ## Environments
 
-Each package has a prod env (`<name>`) and a dev env (`<name>-dev`, adds ruff, pytest, beartype, pyrefly, hypothesis, vulture). The dev env exposes the tasks `lint`, `typecheck`, `deadcode`, and `tests` (e.g. `pixi run -e <name>-dev tests`). Direnv auto-activates the `*-dev` env when you `cd` into a package directory.
+Each root-managed runnable package has a prod env (`<name>`) and a dev env (`<name>-dev`, adds ruff, pytest, beartype, pyrefly, hypothesis, vulture). The dev env exposes the tasks `lint`, `typecheck`, `deadcode`, and `tests` (e.g. `pixi run -e <name>-dev tests`). In package directories that contain a `.envrc`, direnv auto-activates the `*-dev` env when you enter the directory.
 
 ## Commands
 
@@ -33,7 +33,7 @@ The workspace targets **`linux-64` + `linux-aarch64`** only (`[workspace] platfo
 
 ## Architecture
 
-**Beartype** is activated conditionally via `PIXI_DEV_MODE` in each package's `__init__.py`:
+**Beartype** is activated conditionally via `PIXI_DEV_MODE` in each runnable Python package's `__init__.py`:
 ```python
 import os
 if os.environ.get("PIXI_DEV_MODE") == "1":
@@ -54,7 +54,7 @@ if __name__ == "__main__":
     main(tyro.cli(Config))
 ```
 
-**Package structure:**
+**Typical runnable package structure:**
 ```
 packages/<name>/
   pyproject.toml    # [project], [build-system], [tool.ruff]
