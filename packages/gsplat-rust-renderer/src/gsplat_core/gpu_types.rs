@@ -149,7 +149,11 @@ pub fn create_compute_pipeline(
     entry_point: &str,
     bind_group_layouts: &[&wgpu::BindGroupLayout],
 ) -> wgpu::ComputePipeline {
-    let bind_group_layouts = bind_group_layouts.iter().copied().map(Some).collect::<Vec<_>>();
+    let bind_group_layouts = bind_group_layouts
+        .iter()
+        .copied()
+        .map(Some)
+        .collect::<Vec<_>>();
     let pipeline_layout: wgpu::PipelineLayout =
         device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some(&format!("{label}::layout")),
@@ -1249,8 +1253,9 @@ mod tests {
             );
         }
         assert!(
-            include_str!("../../shader/gaussian_dynamic_sort.wgsl")
-                .contains(&format!("const ELEMENTS_PER_THREAD: u32 = {SORT_ELEMENTS_PER_THREAD}u;")),
+            include_str!("../../shader/gaussian_dynamic_sort.wgsl").contains(&format!(
+                "const ELEMENTS_PER_THREAD: u32 = {SORT_ELEMENTS_PER_THREAD}u;"
+            )),
             "gaussian_dynamic_sort.wgsl ELEMENTS_PER_THREAD drifted from SORT_ELEMENTS_PER_THREAD"
         );
     }

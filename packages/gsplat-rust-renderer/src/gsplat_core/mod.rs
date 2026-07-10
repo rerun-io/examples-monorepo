@@ -33,7 +33,7 @@ pub mod types;
 // ── Convenience re-exports ───────────────────────────────────────────────
 // These are the most commonly used items across the codebase.
 
-pub use camera::{camera_from_nerf_transform, fallback_camera, make_camera_approximation};
+pub use camera::{camera_from_nerf_transform, make_camera_approximation};
 pub use constants::*;
 pub use gpu_context::GpuContext;
 pub use gpu_renderer::{GpuRenderResources, GpuRenderer};

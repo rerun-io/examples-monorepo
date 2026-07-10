@@ -1562,10 +1562,32 @@ PACKAGE_DIR = "packages/gsplat-rust-renderer"
 PKG_CONFIG_PATH = "${CONDA_PREFIX}/lib/pkgconfig"
 
 # ── Download tasks ───────────────────────────────────────────────────────
-[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-chair-ply]
-cmd = "test -e examples/chair.ply || hf download pablovela5620/splat-dataset chair.ply --repo-type dataset --local-dir examples/"
+# nerfbaselines test data (replaces the old pablovela5620 HF mirrors):
+#   - datasets:  nerfbaselines/nerfbaselines-data, file blender/<scene>.zip
+#     (nerf-synthetic <scene>/transforms_*.json + <scene>/{train,test,val}/*.png)
+#   - pretrained: nerfbaselines/nerfbaselines (model), 3dgs-mcmc/blender/<scene>.zip
+#     (INRIA-layout checkpoint/point_cloud/iteration_30000/point_cloud.ply + renders)
+# hf download fetches the zip; extraction is stdlib zipfile via the package's
+# nerfbaselines.extract_zip helper (idempotence-guarded so re-runs are no-ops).
+[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerfbaselines-data-lego]
+cmd = "python -m gsplat_rust_renderer.nerfbaselines data lego"
 cwd = "packages/gsplat-rust-renderer"
-description = "Download example chair PLY from HuggingFace"
+description = "Download + extract the nerfbaselines lego dataset (nerf-synthetic layout)"
+
+[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerfbaselines-data-hotdog]
+cmd = "python -m gsplat_rust_renderer.nerfbaselines data hotdog"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download + extract the nerfbaselines hotdog dataset (nerf-synthetic layout)"
+
+[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerfbaselines-data-chair]
+cmd = "python -m gsplat_rust_renderer.nerfbaselines data chair"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download + extract the nerfbaselines chair dataset (nerf-synthetic layout)"
+
+[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerfbaselines-pretrained-lego]
+cmd = "python -m gsplat_rust_renderer.nerfbaselines pretrained lego"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download + extract the nerfbaselines pretrained lego 3dgs-mcmc model (INRIA-layout PLY)"
 
 [feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-tandt]
 cmd = """
@@ -1578,26 +1600,6 @@ rm data/tandt_db.zip)
 cwd = "packages/gsplat-rust-renderer"
 outputs = ["packages/gsplat-rust-renderer/data/tandt/"]
 description = "Download Tanks & Temples + Deep Blending datasets from INRIA"
-
-[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerf-lego]
-cmd = "test -d data/nerf-synthetic/lego || hf download pablovela5620/nerf-synthetic-mirror --include 'lego/*' --repo-type dataset --local-dir data/nerf-synthetic/"
-cwd = "packages/gsplat-rust-renderer"
-description = "Download NeRF Synthetic lego scene from HuggingFace"
-
-[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerf-hotdog]
-cmd = "test -d data/nerf-synthetic/hotdog || hf download pablovela5620/nerf-synthetic-mirror --include 'hotdog/*' --repo-type dataset --local-dir data/nerf-synthetic/"
-cwd = "packages/gsplat-rust-renderer"
-description = "Download NeRF Synthetic hotdog scene from HuggingFace"
-
-[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerf-drums]
-cmd = "test -d data/nerf-synthetic/drums || hf download pablovela5620/nerf-synthetic-mirror --include 'drums/*' --repo-type dataset --local-dir data/nerf-synthetic/"
-cwd = "packages/gsplat-rust-renderer"
-description = "Download NeRF Synthetic drums scene from HuggingFace"
-
-[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerf-ship]
-cmd = "test -d data/nerf-synthetic/ship || hf download pablovela5620/nerf-synthetic-mirror --include 'ship/*' --repo-type dataset --local-dir data/nerf-synthetic/"
-cwd = "packages/gsplat-rust-renderer"
-description = "Download NeRF Synthetic ship scene from HuggingFace"
 
 # ── Brush training tasks ─────────────────────────────────────────────────
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-brush-train-truck]
@@ -1626,49 +1628,39 @@ description = "Train Gaussian splats on train scene (30K steps)"
 
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-brush-train-lego]
 cmd = """
-brush_app data/nerf-synthetic/lego \
+brush_app data/nerfbaselines/data/lego \
   --total-steps 30000 \
   --export-every 30000 \
   --export-path data/trained \
   --export-name lego.ply
 """
-depends-on = ["_gsplat-rust-renderer-download-nerf-lego"]
+depends-on = ["_gsplat-rust-renderer-download-nerfbaselines-data-lego"]
 cwd = "packages/gsplat-rust-renderer"
-description = "Train Gaussian splats on NeRF Synthetic lego scene (30K steps)"
+description = "Train Gaussian splats on nerfbaselines lego scene (30K steps)"
 
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-brush-train-hotdog]
 cmd = """
-brush_app data/nerf-synthetic/hotdog \
+brush_app data/nerfbaselines/data/hotdog \
   --total-steps 30000 \
   --export-every 30000 \
   --export-path data/trained \
   --export-name hotdog.ply
 """
-depends-on = ["_gsplat-rust-renderer-download-nerf-hotdog"]
+depends-on = ["_gsplat-rust-renderer-download-nerfbaselines-data-hotdog"]
 cwd = "packages/gsplat-rust-renderer"
-description = "Train Gaussian splats on NeRF Synthetic hotdog scene (30K steps)"
-
-[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerf-chair]
-cmd = "test -d data/nerf-synthetic/chair || hf download pablovela5620/nerf-synthetic-mirror --include 'chair/*' --repo-type dataset --local-dir data/nerf-synthetic/"
-cwd = "packages/gsplat-rust-renderer"
-description = "Download NeRF Synthetic chair scene from HuggingFace"
-
-[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-trained-plys]
-cmd = "mkdir -p data/trained && (test -f data/trained/chair.ply || hf download pablovela5620/nerf-synthetic-mirror --include 'trained/chair.ply' --repo-type dataset --local-dir data/) && (test -f data/trained/hotdog.ply || hf download pablovela5620/nerf-synthetic-mirror --include 'trained/hotdog.ply' --repo-type dataset --local-dir data/)"
-cwd = "packages/gsplat-rust-renderer"
-description = "Download pre-trained Gaussian splat PLYs for chair and hotdog"
+description = "Train Gaussian splats on nerfbaselines hotdog scene (30K steps)"
 
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-brush-train-chair]
 cmd = """
-brush_app data/nerf-synthetic/chair \
+brush_app data/nerfbaselines/data/chair \
   --total-steps 30000 \
   --export-every 30000 \
   --export-path data/trained \
   --export-name chair.ply
 """
-depends-on = ["_gsplat-rust-renderer-download-nerf-chair"]
+depends-on = ["_gsplat-rust-renderer-download-nerfbaselines-data-chair"]
 cwd = "packages/gsplat-rust-renderer"
-description = "Train Gaussian splats on NeRF Synthetic chair scene (30K steps)"
+description = "Train Gaussian splats on nerfbaselines chair scene (30K steps)"
 
 # ── Standalone render CLI ────────────────────────────────────────────────
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-render]
@@ -1700,9 +1692,15 @@ description = "Run Rust test suite"
 # ── Python demo tasks ────────────────────────────────────────────────────
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-log-ply]
 cmd = "python tools/log_gaussian_ply.py --rr-config.connect --rr-config.application-id gsplat-rust-renderer"
-depends-on = ["_gsplat-rust-renderer-download-chair-ply"]
+depends-on = ["_gsplat-rust-renderer-download-nerfbaselines-pretrained-lego"]
 cwd = "packages/gsplat-rust-renderer"
-description = "Load example PLY and log it to the running viewer"
+description = "Load the pretrained lego PLY and log it to the running viewer"
+
+[feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-log-scene]
+cmd = "python tools/log_splats_with_cameras.py --rr-config.connect --rr-config.application-id gsplat-rust-renderer"
+depends-on = ["_gsplat-rust-renderer-download-nerfbaselines-pretrained-lego", "_gsplat-rust-renderer-download-nerfbaselines-data-lego"]
+cwd = "packages/gsplat-rust-renderer"
+description = "Log the pretrained lego splat + dataset cameras to the running viewer"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # dpvo

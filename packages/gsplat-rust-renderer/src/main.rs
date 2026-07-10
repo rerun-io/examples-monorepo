@@ -9,12 +9,12 @@
 //!    log messages.  Any Python process that calls `rr.connect_grpc()` will send
 //!    component data here.
 //!
-//! 2. **Registers a custom `GaussianSplats3D` visualizer** on the built-in
-//!    `Spatial3DView`.  When the data store contains entities with the right
-//!    component contract (centers, quaternions, scales, opacities, colors, and
-//!    optionally SH coefficients), the custom visualizer takes over rendering
-//!    using a GPU-accelerated Gaussian splatting pipeline instead of the stock
-//!    point-cloud renderer.
+//! 2. **Registers a custom `Gaussians3D` visualizer** on the built-in
+//!    `Spatial3DView`.  When the data store contains entities matching the
+//!    upstream `Gaussians3D` contract (`centers`, and optionally `scales`,
+//!    `quaternions`, `colors`, `sh_coefficients`, `show_spherical_harmonics`),
+//!    the custom visualizer takes over rendering using a GPU-accelerated
+//!    Gaussian splatting pipeline instead of the stock point-cloud renderer.
 //!
 //! Everything else (UI, blueprint, timeline, selection, etc.) is inherited from
 //! the stock Rerun viewer unchanged.
@@ -157,7 +157,7 @@ fn create_app(
 
     // ── Register the custom Gaussian splat visualizer ─────────────────
     // `extend_view_class` adds our visualizer to the existing
-    // Spatial3DView.  Any entity that matches the GaussianSplats3D
+    // Spatial3DView.  Any entity that matches the Gaussians3D
     // archetype will be rendered by our custom GPU pipeline instead
     // of the stock point-cloud renderer.
     viewer.extend_view_class(
@@ -469,9 +469,9 @@ fn full_limits_wgpu_setup() -> eframe::egui_wgpu::WgpuSetup {
             // Request all features the adapter supports, except
             // MAPPABLE_PRIMARY_BUFFERS which isn't needed and can
             // cause issues on some drivers.
-            required_features: adapter.features().difference(
-                re_renderer::external::wgpu::Features::MAPPABLE_PRIMARY_BUFFERS,
-            ),
+            required_features: adapter
+                .features()
+                .difference(re_renderer::external::wgpu::Features::MAPPABLE_PRIMARY_BUFFERS),
             // Use the adapter's full limits so our compute shaders
             // aren't restricted by the default (very conservative)
             // wgpu limits.
@@ -502,8 +502,10 @@ fn native_options() -> eframe::NativeOptions {
         on_surface_status: Arc::new(|status| {
             // On non-Windows platforms, an "Outdated" surface just means the
             // window was resized — recreate the surface and carry on.
-            if matches!(status, re_renderer::external::wgpu::CurrentSurfaceTexture::Outdated)
-                && !cfg!(target_os = "windows")
+            if matches!(
+                status,
+                re_renderer::external::wgpu::CurrentSurfaceTexture::Outdated
+            ) && !cfg!(target_os = "windows")
             {
                 eframe::egui_wgpu::SurfaceErrorAction::RecreateSurface
             } else {

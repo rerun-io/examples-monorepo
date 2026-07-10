@@ -3925,6 +3925,7 @@ dependencies = [
  "clap",
  "egui_kittest",
  "glam",
+ "half",
  "image",
  "ply-rs",
  "pollster",

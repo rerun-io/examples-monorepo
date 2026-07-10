@@ -207,16 +207,21 @@ Capacity: `next_capacity()`, `intersection_capacity_for_instances()`, `compactio
 
 ## Component Contract (Python ↔ Rust)
 
-Python and Rust agree on a custom `GaussianSplats3D` archetype:
+Python and Rust agree on the upstream `rerun.archetypes.Gaussians3D` schema
+(logged as custom components on released rerun-sdk; the Rust visualizer is named
+`Gaussians3D`). Descriptor `component` strings are `Gaussians3D:<field>`:
 
-| Component | Rerun Type | Shape | Description |
+| Component | `component_type` | Arrow datatype | Description |
 |---|---|---|---|
-| `centers` | `Translation3D` | `[N, 3]` | World-space Gaussian positions |
-| `quaternions` | `RotationQuat` | `[N, 4]` | Rotation quaternions (xyzw) |
-| `scales` | `Scale3D` | `[N, 3]` | Per-axis scale factors |
-| `opacities` | `Opacity` | `[N]` | Per-splat opacity [0, 1] |
-| `colors` | `Color` | `[N]` | Base RGB from SH DC coefficient |
-| `sh_coefficients` | `TensorData` | `[N, C, 3]` | Optional higher-order SH (degree 0-4) |
+| `centers` | `Position3D` | `FixedSizeList<Float32,3>` | World-space Gaussian positions (required) |
+| `scales` | `Scale3D` | `FixedSizeList<Float32,3>` | Per-axis scale factors |
+| `quaternions` | `RotationQuat` | `FixedSizeList<Float32,4>` | Rotation quaternions (xyzw) |
+| `colors` | `Color` | `UInt32` (0xRRGGBBAA) | RGB from SH DC term, opacity in alpha |
+| `sh_coefficients` | `SphericalHarmonics3` | `FixedSizeList<Float16,45>` | Optional SH degrees 1-3, coefficient-major |
+| `show_spherical_harmonics` | `ShowSphericalHarmonics` | `Bool` (single) | Optional; evaluate higher-order SH |
+
+Every FixedSizeList child field is named `item` and non-nullable (the Rust
+deserializer checks datatype equality including these).
 
 ## Python Metrics (`gsplat_rust_renderer/metrics.py`)
 

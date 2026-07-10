@@ -36,13 +36,17 @@ Two terminals — one for the viewer, one for logging data. Run from the repo ro
 # Terminal 1: build and launch the Rust viewer (gRPC listener on 127.0.0.1:9876)
 pixi run --frozen -e gsplat-rust-renderer gsplat-rust-renderer-viewer
 
-# Terminal 2: download the example chair PLY (~36 MB, from HuggingFace) and log it
+# Terminal 2: download the pretrained lego PLY (nerfbaselines) and log it
 pixi run --frozen -e gsplat-rust-renderer gsplat-rust-renderer-log-ply
 ```
 
-The `log-ply` task downloads `chair.ply` from
-[pablovela5620/splat-dataset](https://huggingface.co/datasets/pablovela5620/splat-dataset)
-on first run, then logs it to the running viewer.
+The `log-ply` task downloads the pretrained `lego` 3dgs-mcmc model from
+[nerfbaselines/nerfbaselines](https://huggingface.co/nerfbaselines/nerfbaselines)
+(`3dgs-mcmc/blender/lego.zip`) on first run, extracts its INRIA-layout
+`point_cloud.ply`, and logs it to the running viewer under `/world/splats` at
+`frame=0`. `gsplat-rust-renderer-log-scene` additionally logs the dataset
+cameras (from [nerfbaselines/nerfbaselines-data](https://huggingface.co/datasets/nerfbaselines/nerfbaselines-data))
+as Pinhole frustums with their GT images.
 
 ### Available Pixi tasks
 
@@ -51,7 +55,8 @@ List them with `pixi task list -e gsplat-rust-renderer`. The public tasks (all p
 | Task | Description |
 |------|-------------|
 | `gsplat-rust-renderer-viewer` | Launch the Rust viewer (`cargo run --release --bin gsplat-rust-renderer`). |
-| `gsplat-rust-renderer-log-ply` | Download the example PLY and log it to the running viewer. |
+| `gsplat-rust-renderer-log-ply` | Download the pretrained lego PLY and log it to the running viewer. |
+| `gsplat-rust-renderer-log-scene` | Download the pretrained lego PLY + dataset and log the splat alongside its cameras. |
 | `gsplat-rust-renderer-render` | Render a PLY at a NeRF camera pose to PNG with the standalone `gsplat-render` binary — no Rerun (`--no-default-features`). |
 | `gsplat-rust-renderer-brush-train-{chair,hotdog,lego,train,truck}` | Train splats on a scene with `brush_app` for 30K steps and export a PLY to `data/trained/`. Each depends on its dataset-download task. |
 | `gsplat-rust-renderer-fmt` / `-clippy` / `-rust-test` | `cargo fmt --all` / `cargo clippy --all-targets -- -D warnings` / `cargo test`. |
@@ -65,7 +70,7 @@ Dev-env tasks live under the monorepo-wide Python tooling; from a `gsplat-rust-r
 ```bash
 tools/run_brush_native_demo.sh DATA_DIR [TOTAL_ITERS] [EXPORT_DIR]
 # e.g.
-tools/run_brush_native_demo.sh data/nerf-synthetic/lego 30000
+tools/run_brush_native_demo.sh data/nerfbaselines/data/lego 30000
 ```
 
 `TOTAL_ITERS` defaults to `30000`; `EXPORT_DIR` defaults to `/tmp/brush-runs/<scene>`.
@@ -78,7 +83,7 @@ How it works:
    ```
    The script warns if nothing is listening on `127.0.0.1:9876`.
 2. The script picks a fixed, shared recording id and launches `brush-cli` (path set via `BRUSH_CLI`, default `/home/pablo/0Dev/work/brush/target/release/brush-cli`) with `--rerun-enabled`. brush trains, logs its full dashboard, and sends its blueprint, pinned to that recording id via `BRUSH_RERUN_RECORDING_ID`.
-3. Once brush starts training, the sidecar `tools/visualize_brush_training.py --brush-native` joins the **same** recording id and does the two things brush can't: it overlays a `GaussianSplats3D` snapshot at `world/splats` per exported `export_NNNNN.ply` (on brush's `iterations` timeline) and re-sends brush's blueprint with a visualizer override pinning `world/splats` to the custom `GaussianSplats3D` visualizer.
+3. Once brush starts training, the sidecar `tools/visualize_brush_training.py --brush-native` joins the **same** recording id and does the two things brush can't: it overlays a `Gaussians3D` snapshot at `world/splats` per exported `export_NNNNN.ply` (on brush's `iterations` timeline) and re-sends brush's blueprint with a visualizer override pinning `world/splats` to the custom `Gaussians3D` visualizer.
 
 Result: brush's exact training dashboard, but with sharp GPU splats in the Scene view instead of fuzzy ellipsoids. Optional env knobs: `EXPORT_EVERY` (200), `EVAL_EVERY` (500), `EVAL_SPLIT_EVERY` (0 = off).
 
@@ -148,6 +153,8 @@ gsplat-rust-renderer/
 ├── gsplat_rust_renderer/               # Python package
 │   ├── __init__.py                     # Beartype activation (dev env only)
 │   ├── gaussians3d.py                  # Gaussians3D dataclass + PLY parser (rr.AsComponents)
+│   ├── nerfbaselines.py                # nerfbaselines data layout + zip extraction
+│   ├── scene_io.py                     # NeRF-synthetic / COLMAP camera loaders
 │   └── metrics.py                      # LPIPS / PSNR / SSIM helpers
 ├── tools/
 │   ├── log_gaussian_ply.py             # CLI: load a PLY → log to viewer (tyro + RerunTyroConfig)
@@ -158,7 +165,7 @@ gsplat-rust-renderer/
 │   └── relog_check.py                  # Re-log / round-trip sanity check
 ├── tests/                              # test_gaussians3d.py, test_metrics.py, test_import.py
 ├── docs/architecture.md                # Per-frame pipeline, GPU stages, component contract
-└── examples/                           # Example PLY downloaded here at runtime
+└── data/nerfbaselines/                 # Datasets + pretrained PLYs downloaded here at runtime
 ```
 
 ## Architecture

@@ -117,9 +117,11 @@ pub fn load_ply(path: &Path) -> anyhow::Result<RenderGaussianCloud> {
         let s2 = get_f32(vertex, "scale_2").unwrap_or(0.0).exp();
         scales.push(Vec3::new(s0.max(1e-6), s1.max(1e-6), s2.max(1e-6)));
 
-        // Opacity: sigmoid activation.
-        let raw_opacity = get_f32(vertex, "opacity").unwrap_or(0.0);
-        opacities.push(sigmoid(raw_opacity).clamp(0.0, 1.0));
+        // Opacity: sigmoid activation; a PLY without an `opacity` property is
+        // fully opaque (matches `Gaussians3D.from_ply` on the Python side —
+        // the old `sigmoid(0) = 0.5` default was an accident of `unwrap_or`).
+        let opacity = get_f32(vertex, "opacity").map_or(1.0, |raw| sigmoid(raw).clamp(0.0, 1.0));
+        opacities.push(opacity);
 
         // Colors: prefer SH DC, fallback to vertex colors.
         if has_sh_dc {

@@ -9,11 +9,11 @@ overlays the real thing.
 Two modes:
 
 1. ``--brush-native`` (the good one).  Join brush's *own* recording and do
-   exactly two things brush can't: overlay a ``GaussianSplats3D`` snapshot at
+   exactly two things brush can't: overlay a ``Gaussians3D`` snapshot at
    ``world/splats`` per ``export_NNNNN.ply`` (on brush's ``iterations``
    timeline), and re-send brush's ``send_default_blueprint`` replica with one
    change — a visualizer override pinning ``world/splats`` to the custom
-   GaussianSplats3D visualizer (otherwise the built-in Points3D wins the
+   Gaussians3D visualizer (otherwise the built-in Points3D wins the
    entity, since splat centers are ``Position3D``-typed).  Result: brush's exact
    blueprint with GPU splats in the Scene view.  Brush owns everything else.
 
@@ -56,7 +56,8 @@ from simplecv.camera_orient_utils import rotation_matrix_between
 from simplecv.camera_parameters import Intrinsics, PinholeParameters
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole
 
-from gsplat_rust_renderer.gaussians3d import Gaussians3D
+from gsplat_rust_renderer.gaussians3d import SPLATS_ENTITY, SPLATS_VISUALIZER, Gaussians3D
+from gsplat_rust_renderer.nerfbaselines import DEFAULT_SCENE, scene_data_dir
 from gsplat_rust_renderer.scene_io import (
     colmap_image_path,
     colmap_sparse_dir,
@@ -92,16 +93,16 @@ class VisualizeBrushTrainingConfig:
     splats (its rerun SDK only knows coarse Ellipsoids3D).  In this mode the
     sidecar joins brush's recording (share the recording id via
     BRUSH_RERUN_RECORDING_ID) and does exactly two things: overlay a
-    GaussianSplats3D snapshot at ``world/splats`` per exported PLY (on brush's
+    Gaussians3D snapshot at ``world/splats`` per exported PLY (on brush's
     ``iterations`` timeline), and re-send brush's send_default_blueprint with one
-    change — a visualizer override pinning ``world/splats`` to GaussianSplats3D so
+    change — a visualizer override pinning ``world/splats`` to Gaussians3D so
     the Scene view renders our splats instead of the built-in Points3D.  Launch
     brush WITHOUT --rerun-log-splats-every so ``world/splat/points`` stays empty.
 
     When False, the legacy standalone path runs: own recording, stdout-parsed
     psnr/ssim/splat-count plots, frusta with GT thumbnails — useful for replaying
     a finished run with no live brush process to join."""
-    scene_dir: Path = Path("data/nerf-synthetic/lego")
+    scene_dir: Path = scene_data_dir(DEFAULT_SCENE)
     """Scene dir.  NeRF-synthetic (transforms_train.json + transforms_val.json)
     or a real COLMAP/nerfstudio capture (auto-detected via colmap/sparse/0)."""
     eval_split_every: int = 0
@@ -309,7 +310,7 @@ def send_blueprint(config: VisualizeBrushTrainingConfig, eval_cameras: list[tupl
         origin="/",
         name="splats live (spin)" if spinning else "splats + train cameras",
         contents=["+ $origin/**", "- /eval/**", "- /plots/**"] + (["- world/cameras/**"] if spinning else []),
-        overrides={"world/splats": rrb.Visualizer("GaussianSplats3D")},
+        overrides={SPLATS_ENTITY: rrb.Visualizer(SPLATS_VISUALIZER)},
         background=rrb.Background(color=(255, 255, 255), kind=rrb.BackgroundKind.SolidColor),
         line_grid=False,
         eye_controls=(
@@ -382,9 +383,9 @@ def log_checkpoint(ply_path: Path, with_sh: bool) -> int:
     """
     splats: Gaussians3D = Gaussians3D.from_ply(ply_path)
     if not with_sh and splats.sh_coefficients is not None:
-        splats = dataclasses.replace(splats, sh_coefficients=None)
+        splats = dataclasses.replace(splats, sh_coefficients=None, show_spherical_harmonics=None)
     num_splats: int = splats.centers.shape[0]
-    rr.log("world/splats", splats)
+    rr.log(SPLATS_ENTITY, splats)
     return num_splats
 
 
@@ -409,10 +410,10 @@ def count_eval_views(config: VisualizeBrushTrainingConfig) -> int:
     return len(transforms["frames"])
 
 
-def brush_blueprint(num_eval_views: int, splat_entity: str = "world/splats") -> rrb.Blueprint:
+def brush_blueprint(num_eval_views: int, splat_entity: str = SPLATS_ENTITY) -> rrb.Blueprint:
     """Python replica of brush's ``VisualizeTools::send_default_blueprint`` with a
     single change: a visualizer override pinning ``splat_entity`` to the custom
-    GaussianSplats3D visualizer (brush's coarse Ellipsoids3D path is unused — we
+    Gaussians3D visualizer (brush's coarse Ellipsoids3D path is unused — we
     overlay real GPU splats).  Everything else — the Vertical(main_row, graphs)
     split, the Quality/Splats/Refine/Memory/Other graph tabs, the per-view
     (Ground truth | Render) eval cells grouped 4-per-tab — matches brush exactly
@@ -424,7 +425,7 @@ def brush_blueprint(num_eval_views: int, splat_entity: str = "world/splats") -> 
         name="Scene",
         origin="world",
         contents=["world/**"],
-        overrides={splat_entity: rrb.Visualizer("GaussianSplats3D")},
+        overrides={splat_entity: rrb.Visualizer(SPLATS_VISUALIZER)},
     )
 
     # Each eval view = a Horizontal[Ground truth, Render] cell; groups of up to 4

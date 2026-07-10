@@ -20,6 +20,7 @@ path = "src/render_cli.rs"
 default = ["viewer"]
 viewer = [
     "dep:egui_kittest",
+    "dep:half",
     "dep:re_byte_size",
     "dep:re_crash_handler",
     "dep:re_grpc_server",
@@ -41,7 +42,9 @@ viewer = [
 [dependencies]
 # ── Always-on deps (core algorithm + CLI) ─────────────────────────────
 anyhow = "1.0"
-bytemuck = { version = "1.23", features = ["derive"] }
+# `min_const_generics` supplies `Pod for [T; N]` at arbitrary N — needed to
+# slice the `SphericalHarmonics3` wire component as `[half::f16; 45]`.
+bytemuck = { version = "1.23", features = ["derive", "min_const_generics"] }
 clap = { version = "4", features = ["derive"] }
 glam = "0.30"
 image = "0.25"
@@ -56,6 +59,9 @@ wgpu = "=29.0.3"
 # checkout on any machine.  Rerun 0.34.x uses egui/eframe 0.35, so the headless
 # kittest harness must stay on the same egui family as re_viewer.
 egui_kittest = { version = "0.35.0", features = ["wgpu", "eframe"], optional = true }
+# `half::f16` decode for the `SphericalHarmonics3` wire component (viewer only).
+# `bytemuck` feature makes `f16: Pod` so `[f16; 45]` slices out of Arrow.
+half = { version = "2.7", features = ["bytemuck"], optional = true }
 re_byte_size = { version = "=0.34.1", optional = true }
 re_crash_handler = { version = "=0.34.1", optional = true }
 re_grpc_server = { version = "=0.34.1", optional = true }

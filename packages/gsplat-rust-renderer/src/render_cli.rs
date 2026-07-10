@@ -76,9 +76,19 @@ struct Args {
 }
 
 /// Composite onto `background` and save as an 8-bit RGB PNG.
-fn save_rgb8_png(output: &RenderOutput, background: [f32; 3], path: &PathBuf) -> anyhow::Result<()> {
+fn save_rgb8_png(
+    output: &RenderOutput,
+    background: [f32; 3],
+    path: &PathBuf,
+) -> anyhow::Result<()> {
     let rgb8: Vec<u8> = output.to_rgb8(background);
-    image::save_buffer(path, &rgb8, output.width, output.height, image::ColorType::Rgb8)?;
+    image::save_buffer(
+        path,
+        &rgb8,
+        output.width,
+        output.height,
+        image::ColorType::Rgb8,
+    )?;
     Ok(())
 }
 
