@@ -1584,10 +1584,91 @@ cmd = "python -m gsplat_rust_renderer.nerfbaselines data chair"
 cwd = "packages/gsplat-rust-renderer"
 description = "Download + extract the nerfbaselines chair dataset (nerf-synthetic layout)"
 
+[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerfbaselines-data-drums]
+cmd = "python -m gsplat_rust_renderer.nerfbaselines data drums"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download + extract the nerfbaselines drums dataset (nerf-synthetic layout)"
+
+[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerfbaselines-data-ficus]
+cmd = "python -m gsplat_rust_renderer.nerfbaselines data ficus"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download + extract the nerfbaselines ficus dataset (nerf-synthetic layout)"
+
+[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerfbaselines-data-materials]
+cmd = "python -m gsplat_rust_renderer.nerfbaselines data materials"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download + extract the nerfbaselines materials dataset (nerf-synthetic layout)"
+
+[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerfbaselines-data-mic]
+cmd = "python -m gsplat_rust_renderer.nerfbaselines data mic"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download + extract the nerfbaselines mic dataset (nerf-synthetic layout)"
+
+[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerfbaselines-data-ship]
+cmd = "python -m gsplat_rust_renderer.nerfbaselines data ship"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download + extract the nerfbaselines ship dataset (nerf-synthetic layout)"
+
 [feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerfbaselines-pretrained-lego]
 cmd = "python -m gsplat_rust_renderer.nerfbaselines pretrained lego"
 cwd = "packages/gsplat-rust-renderer"
 description = "Download + extract the nerfbaselines pretrained lego 3dgs-mcmc model (INRIA-layout PLY)"
+
+[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerfbaselines-pretrained-hotdog]
+cmd = "python -m gsplat_rust_renderer.nerfbaselines pretrained hotdog"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download + extract the nerfbaselines pretrained hotdog 3dgs-mcmc model (INRIA-layout PLY)"
+
+[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerfbaselines-pretrained-chair]
+cmd = "python -m gsplat_rust_renderer.nerfbaselines pretrained chair"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download + extract the nerfbaselines pretrained chair 3dgs-mcmc model (INRIA-layout PLY)"
+
+[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerfbaselines-pretrained-drums]
+cmd = "python -m gsplat_rust_renderer.nerfbaselines pretrained drums"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download + extract the nerfbaselines pretrained drums 3dgs-mcmc model (INRIA-layout PLY)"
+
+[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerfbaselines-pretrained-ficus]
+cmd = "python -m gsplat_rust_renderer.nerfbaselines pretrained ficus"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download + extract the nerfbaselines pretrained ficus 3dgs-mcmc model (INRIA-layout PLY)"
+
+[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerfbaselines-pretrained-materials]
+cmd = "python -m gsplat_rust_renderer.nerfbaselines pretrained materials"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download + extract the nerfbaselines pretrained materials 3dgs-mcmc model (INRIA-layout PLY)"
+
+[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerfbaselines-pretrained-mic]
+cmd = "python -m gsplat_rust_renderer.nerfbaselines pretrained mic"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download + extract the nerfbaselines pretrained mic 3dgs-mcmc model (INRIA-layout PLY)"
+
+[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerfbaselines-pretrained-ship]
+cmd = "python -m gsplat_rust_renderer.nerfbaselines pretrained ship"
+cwd = "packages/gsplat-rust-renderer"
+description = "Download + extract the nerfbaselines pretrained ship 3dgs-mcmc model (INRIA-layout PLY)"
+
+[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerfbaselines-all]
+depends-on = [
+    "_gsplat-rust-renderer-download-nerfbaselines-data-lego",
+    "_gsplat-rust-renderer-download-nerfbaselines-data-hotdog",
+    "_gsplat-rust-renderer-download-nerfbaselines-data-chair",
+    "_gsplat-rust-renderer-download-nerfbaselines-data-drums",
+    "_gsplat-rust-renderer-download-nerfbaselines-data-ficus",
+    "_gsplat-rust-renderer-download-nerfbaselines-data-materials",
+    "_gsplat-rust-renderer-download-nerfbaselines-data-mic",
+    "_gsplat-rust-renderer-download-nerfbaselines-data-ship",
+    "_gsplat-rust-renderer-download-nerfbaselines-pretrained-lego",
+    "_gsplat-rust-renderer-download-nerfbaselines-pretrained-hotdog",
+    "_gsplat-rust-renderer-download-nerfbaselines-pretrained-chair",
+    "_gsplat-rust-renderer-download-nerfbaselines-pretrained-drums",
+    "_gsplat-rust-renderer-download-nerfbaselines-pretrained-ficus",
+    "_gsplat-rust-renderer-download-nerfbaselines-pretrained-materials",
+    "_gsplat-rust-renderer-download-nerfbaselines-pretrained-mic",
+    "_gsplat-rust-renderer-download-nerfbaselines-pretrained-ship",
+]
+description = "Download + extract all eight nerfbaselines Blender datasets and pretrained checkpoints"
 
 [feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-tandt]
 cmd = """
@@ -1602,6 +1683,24 @@ outputs = ["packages/gsplat-rust-renderer/data/tandt/"]
 description = "Download Tanks & Temples + Deep Blending datasets from INRIA"
 
 # ── Brush training tasks ─────────────────────────────────────────────────
+[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-install-brush-mac]
+cmd = "test -x data/tools/brush-v0.3.0/brush_app || (mkdir -p data/tools/brush-v0.3.0 && curl -fL https://github.com/ArthurBrussee/brush/releases/download/v0.3.0/brush-app-aarch64-apple-darwin.tar.xz -o data/tools/brush-v0.3.0.tar.xz && echo '65b2631398c839be3c1d4d7160fe2326389dec87830aac0710985e6690a1048c  data/tools/brush-v0.3.0.tar.xz' | shasum -a 256 -c - && tar -xJf data/tools/brush-v0.3.0.tar.xz --strip-components=1 -C data/tools/brush-v0.3.0 && rm data/tools/brush-v0.3.0.tar.xz)"
+cwd = "packages/gsplat-rust-renderer"
+outputs = ["packages/gsplat-rust-renderer/data/tools/brush-v0.3.0/brush_app"]
+description = "Install the checksummed official Brush v0.3.0 Apple Silicon binary project-locally"
+
+[feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-brush-train-lego-mac]
+cmd = "data/tools/brush-v0.3.0/brush_app data/nerfbaselines/data/lego --total-steps 30000 --export-every 50 --export-path data/brush-runs/lego"
+depends-on = ["_gsplat-rust-renderer-install-brush-mac", "_gsplat-rust-renderer-download-nerfbaselines-data-lego"]
+cwd = "packages/gsplat-rust-renderer"
+description = "Train Lego with Brush as a pure trainer and export PLY every 50 iterations (macOS Metal)"
+
+[feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-brush-replay-lego]
+cmd = "python tools/visualize_brush_training.py --rr-config.application-id brush-training-replay --rr-config.save data/brush-runs/lego/training.rrd --rr-config.headless --scene-dir data/nerfbaselines/data/lego --export-dir data/brush-runs/lego --total-iters 30000 --step-stride 50 --snapshot-stride 20 --sh-mode final --spin-speed 0.2 --no-follow"
+depends-on = ["gsplat-rust-renderer-brush-train-lego-mac"]
+cwd = "packages/gsplat-rust-renderer"
+description = "Replay 31 retained PLY snapshots on iterations with Rerun 0.34.1 (first, every 1K, final SH)"
+
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-brush-train-truck]
 cmd = """
 brush_app data/tandt/truck \
@@ -1667,6 +1766,23 @@ description = "Train Gaussian splats on nerfbaselines chair scene (30K steps)"
 cmd = "cargo run --release --no-default-features --bin gsplat-render --"
 cwd = "packages/gsplat-rust-renderer"
 description = "Render a PLY at a NeRF camera position to PNG (no Rerun needed)"
+
+[feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-build-render]
+cmd = "cargo build --release --no-default-features --bin gsplat-render"
+cwd = "packages/gsplat-rust-renderer"
+description = "Build the standalone no-Rerun renderer"
+
+[feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-evaluate-checkpoints]
+cmd = "python tools/evaluate_nerfbaselines.py --checkpoint-only"
+depends-on = ["_gsplat-rust-renderer-download-nerfbaselines-all"]
+cwd = "packages/gsplat-rust-renderer"
+description = "Validate all bundled 200-image checkpoint predictions against published metrics"
+
+[feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-evaluate]
+cmd = "python tools/evaluate_nerfbaselines.py"
+depends-on = ["_gsplat-rust-renderer-download-nerfbaselines-all", "_gsplat-rust-renderer-build-render"]
+cwd = "packages/gsplat-rust-renderer"
+description = "Render and evaluate all eight 200-image Blender test splits with the standalone binary"
 
 # ── Rust tasks ───────────────────────────────────────────────────────────
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-viewer]

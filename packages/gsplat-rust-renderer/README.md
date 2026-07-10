@@ -1,10 +1,10 @@
 # gsplat-rust-renderer
 
-GPU-accelerated [Gaussian Splatting](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/) viewer built as a custom [Rerun](https://rerun.io) visualizer. A Rust binary extends the stock Rerun viewer with a tile-based GPU compute renderer (wgpu/WGSL/Vulkan), while a Python module parses PLY files and logs Rerun component batches to the viewer over gRPC. The CLIs use **tyro**, and **Pixi** provides one-command setup.
+GPU-accelerated [Gaussian Splatting](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/) viewer built as a custom [Rerun](https://rerun.io) visualizer. A Rust binary extends the stock Rerun viewer with a tile-based GPU compute renderer (wgpu/WGSL/Metal or Vulkan), while a Python module parses PLY files and logs Rerun component batches to the viewer over gRPC. The CLIs use **tyro**, and **Pixi** provides one-command setup.
 
 <p align="center">
   <a title="Rerun" href="https://rerun.io" target="_blank" rel="noopener noreferrer">
-    <img src="https://img.shields.io/badge/Rerun-0.33-0b82f9" alt="Rerun badge">
+    <img src="https://img.shields.io/badge/Rerun-0.34.1-0b82f9" alt="Rerun badge">
   </a>
   <a title="Pixi" href="https://pixi.sh/latest/" target="_blank" rel="noopener noreferrer">
     <img src="https://img.shields.io/badge/Install%20with-Pixi-16A34A" alt="Pixi badge">
@@ -24,9 +24,9 @@ curl -fsSL https://pixi.sh/install.sh | sh
 
 Restart your shell so the new `pixi` binary is on `PATH`.
 
-Linux only. A Vulkan-capable GPU is required; **no CUDA is needed** (rendering runs on wgpu/Vulkan).
+An Apple Silicon Metal GPU or Linux Vulkan GPU is required; **no CUDA is needed**.
 
-The viewer builds against the **published Rerun `=0.33.0` crates** from crates.io, so a clean checkout builds anywhere. The first build compiles those crates from source and takes a few minutes; subsequent runs are instant. Pixi also pins the `rerun-sdk==0.33.0` Python wheel and the system libraries the viewer links against (`libudev`, X11/Wayland), so no manual `PKG_CONFIG_PATH` setup is needed inside a Pixi shell.
+The viewer builds against the **published Rerun `=0.34.1` crates** from crates.io. Pixi pins the matching `rerun-sdk==0.34.1` Python wheel; the wire contract, Rust crates, Python SDK, and viewer must remain on that exact version.
 
 ## Quick Start
 
@@ -58,34 +58,36 @@ List them with `pixi task list -e gsplat-rust-renderer`. The public tasks (all p
 | `gsplat-rust-renderer-log-ply` | Download the pretrained lego PLY and log it to the running viewer. |
 | `gsplat-rust-renderer-log-scene` | Download the pretrained lego PLY + dataset and log the splat alongside its cameras. |
 | `gsplat-rust-renderer-render` | Render a PLY at a NeRF camera pose to PNG with the standalone `gsplat-render` binary — no Rerun (`--no-default-features`). |
+| `gsplat-rust-renderer-evaluate-checkpoints` | Recompute PSNR/SSIM over all eight bundled 200-image checkpoint prediction splits and compare with each `results.json`. |
+| `gsplat-rust-renderer-evaluate` | Render all eight 200-image splits with one persistent standalone process per scene, then write `data/evaluation/metrics.json`. |
+| `gsplat-rust-renderer-brush-train-lego-mac` | Install checksummed Brush v0.3.0 locally and train Lego as a pure Metal trainer, exporting PLY every 50 iterations. |
+| `gsplat-rust-renderer-brush-replay-lego` | Save a Rerun 0.34.1 training replay with a bounded 31-snapshot retention schedule. |
 | `gsplat-rust-renderer-brush-train-{chair,hotdog,lego,train,truck}` | Train splats on a scene with `brush_app` for 30K steps and export a PLY to `data/trained/`. Each depends on its dataset-download task. |
 | `gsplat-rust-renderer-fmt` / `-clippy` / `-rust-test` | `cargo fmt --all` / `cargo clippy --all-targets -- -D warnings` / `cargo test`. |
 
 Dev-env tasks live under the monorepo-wide Python tooling; from a `gsplat-rust-renderer-dev` shell use `ruff check .`, `pyrefly check .`, and `pytest -q` directly.
 
-## Training with live splats
+## Full-split quality guard
 
-`tools/run_brush_native_demo.sh` trains a scene with [brush](https://github.com/ArthurBrussee/brush) and streams **real GPU splats** into brush's own rich training blueprint (loss/lr/psnr/ssim/splat-count/memory time-series and eval-view tabs).
+The standalone renderer can render one frame with `--output`, or every frame in a NeRF transforms file with `--output-dir`. Full-split mode initializes Metal/Vulkan, uploads the PLY, and allocates renderer scratch buffers once, then reuses them across all 200 cameras. The Python harness first validates its metric implementation against each checkpoint's own `predictions/color` and `predictions/gt-color`, then applies the same strict relative-path pairing and per-image PSNR/SSIM averaging to standalone output.
 
 ```bash
-tools/run_brush_native_demo.sh DATA_DIR [TOTAL_ITERS] [EXPORT_DIR]
-# e.g.
-tools/run_brush_native_demo.sh data/nerfbaselines/data/lego 30000
+pixi run -e gsplat-rust-renderer-dev --frozen gsplat-rust-renderer-evaluate-checkpoints
+pixi run -e gsplat-rust-renderer-dev --frozen gsplat-rust-renderer-evaluate
 ```
 
-`TOTAL_ITERS` defaults to `30000`; `EXPORT_DIR` defaults to `/tmp/brush-runs/<scene>`.
+## Brush training replay on macOS
 
-How it works:
+Brush v0.3.0 has no osx-arm64 conda package in the configured channels, but upstream publishes an official Apple Silicon archive. `_gsplat-rust-renderer-install-brush-mac` downloads it into this package (never globally) and verifies SHA-256 `65b2631398c839be3c1d4d7160fe2326389dec87830aac0710985e6690a1048c`. The release corresponds to commit `3edecbb2fe79d3e2c87eeab85b15e0b1dd10d486`.
 
-1. **Start the viewer headless first** so it owns the gRPC store on `:9876`:
-   ```bash
-   packages/gsplat-rust-renderer/target/release/gsplat-rust-renderer --headless &
-   ```
-   The script warns if nothing is listening on `127.0.0.1:9876`.
-2. The script picks a fixed, shared recording id and launches `brush-cli` (path set via `BRUSH_CLI`, default `/home/pablo/0Dev/work/brush/target/release/brush-cli`) with `--rerun-enabled`. brush trains, logs its full dashboard, and sends its blueprint, pinned to that recording id via `BRUSH_RERUN_RECORDING_ID`.
-3. Once brush starts training, the sidecar `tools/visualize_brush_training.py --brush-native` joins the **same** recording id and does the two things brush can't: it overlays a `Gaussians3D` snapshot at `world/splats` per exported `export_NNNNN.ply` (on brush's `iterations` timeline) and re-sends brush's blueprint with a visualizer override pinning `world/splats` to the custom `Gaussians3D` visualizer.
+Brush is used only as a trainer: neither `--with-viewer` nor `--rerun-enabled` is passed, so its embedded Rerun 0.24 never creates a recording. It exports a PLY every 50 iterations. Our separate logger, running with this workspace's Rerun 0.34.1, writes `world/splats` on the plural `iterations` timeline and saves a collapsed-panel, white-background blueprint with a spinning orbital eye.
 
-Result: brush's exact training dashboard, but with sharp GPU splats in the Scene view instead of fuzzy ellipsoids. Optional env knobs: `EXPORT_EVERY` (200), `EVAL_EVERY` (500), `EVAL_SPLIT_EVERY` (0 = off).
+```bash
+pixi run -e gsplat-rust-renderer-dev --frozen gsplat-rust-renderer-brush-train-lego-mac
+pixi run -e gsplat-rust-renderer-dev --frozen gsplat-rust-renderer-brush-replay-lego
+```
+
+Retention is deliberately independent of export frequency: keep iteration 50, exact 1,000-step boundaries, and the final iteration; retain full geometry in every saved snapshot, but higher-order SH only in the final snapshot. A 30k run therefore has at most 31 RRD snapshots. Conservatively assuming one million splats at every snapshot, aligned geometry/color payloads, final float16 SH, and 15% RRD framing overhead gives 1.82 GB; Lego's 325k cap is estimated below 600 MB. The raw 50-step PLY exports remain available for forensic inspection but are not all copied into the RRD.
 
 ## Logging your own PLY from Python
 
