@@ -9,12 +9,12 @@
 //!    log messages.  Any Python process that calls `rr.connect_grpc()` will send
 //!    component data here.
 //!
-//! 2. **Registers a custom `GaussianSplats3D` visualizer** on the built-in
-//!    `Spatial3DView`.  When the data store contains entities with the right
-//!    component contract (centers, quaternions, scales, opacities, colors, and
-//!    optionally SH coefficients), the custom visualizer takes over rendering
-//!    using a GPU-accelerated Gaussian splatting pipeline instead of the stock
-//!    point-cloud renderer.
+//! 2. **Registers a custom `Gaussians3D` visualizer** on the built-in
+//!    `Spatial3DView`.  When the data store contains entities matching the
+//!    upstream `Gaussians3D` contract (`centers`, and optionally `scales`,
+//!    `quaternions`, `colors`, `sh_coefficients`, `show_spherical_harmonics`),
+//!    the custom visualizer takes over rendering using a GPU-accelerated
+//!    Gaussian splatting pipeline instead of the stock point-cloud renderer.
 //!
 //! Everything else (UI, blueprint, timeline, selection, etc.) is inherited from
 //! the stock Rerun viewer unchanged.
@@ -39,6 +39,7 @@ use re_viewer::external::{eframe, egui};
 use std::ffi::OsString;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::num::ParseIntError;
+use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -60,7 +61,7 @@ const DEFAULT_HEADLESS_SIZE: egui::Vec2 = egui::vec2(1600.0, 900.0);
 async fn main() -> anyhow::Result<()> {
     let cli = parse_cli()?;
     if cli.print_version {
-        println!("rerun-gs-viewer {}", env!("CARGO_PKG_VERSION"));
+        println!("rerun {}", re_viewer::build_info().version);
         return Ok(());
     }
 
@@ -86,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
         re_grpc_server::ServerOptions::default(),
         re_grpc_server::shutdown::never(),
     );
+    let rrd_path = cli.rrd_path;
 
     // ── Create the viewer application ─────────────────────────────────────
     // `MainThreadToken` is a safety marker that proves we're on the main
@@ -105,7 +107,14 @@ async fn main() -> anyhow::Result<()> {
     // (including `ViewerClient.save_screenshot`) work the same way.
     if cli.headless {
         return run_headless(cli.window_size, move |cc| {
-            create_app(cc, main_thread_token, app_env, startup_options, grpc_rx)
+            create_app(
+                cc,
+                main_thread_token,
+                app_env,
+                startup_options,
+                grpc_rx,
+                rrd_path,
+            )
         });
     }
 
@@ -117,7 +126,14 @@ async fn main() -> anyhow::Result<()> {
         "Rerun Viewer",
         native_options(),
         Box::new(move |cc| {
-            let viewer = create_app(cc, main_thread_token, app_env, startup_options, grpc_rx)?;
+            let viewer = create_app(
+                cc,
+                main_thread_token,
+                app_env,
+                startup_options,
+                grpc_rx,
+                rrd_path,
+            )?;
             Ok(Box::new(viewer))
         }),
     )
@@ -135,6 +151,7 @@ fn create_app(
     app_env: re_viewer::AppEnvironment,
     startup_options: re_viewer::StartupOptions,
     grpc_rx: re_log_channel::LogReceiver,
+    rrd_path: Option<PathBuf>,
 ) -> anyhow::Result<re_viewer::App> {
     // Let Rerun set up its custom wgpu renderer (re_renderer) and
     // egui integration before we create the App.
@@ -151,13 +168,9 @@ fn create_app(
             .expect("tokio runtime should exist"),
     );
 
-    // Wire up the gRPC channel so incoming log messages appear in
-    // the viewer's data store automatically.
-    viewer.add_log_receiver(grpc_rx);
-
     // ── Register the custom Gaussian splat visualizer ─────────────────
     // `extend_view_class` adds our visualizer to the existing
-    // Spatial3DView.  Any entity that matches the GaussianSplats3D
+    // Spatial3DView.  Any entity that matches the Gaussians3D
     // archetype will be rendered by our custom GPU pipeline instead
     // of the stock point-cloud renderer.
     viewer.extend_view_class(
@@ -167,6 +180,16 @@ fn create_app(
             Ok(())
         },
     )?;
+
+    // Wire up live logs and positional files only after the custom visualizer
+    // is registered, so the first activated blueprint can resolve Gaussians3D.
+    viewer.add_log_receiver(grpc_rx);
+    if let Some(rrd_path) = rrd_path {
+        // Rerun's normal file-opening route both ingests the stores and selects
+        // the recording. Feeding decoded messages through add_log_receiver left
+        // the app on the catalog page with no active recording.
+        viewer.open_url_or_file(&rrd_path.to_string_lossy());
+    }
 
     Ok(viewer)
 }
@@ -312,9 +335,9 @@ fn handle_pending_screenshots(harness: &mut egui_kittest::Harness<'_, re_viewer:
 
 /// Minimal command-line options.  We only need `--port`, `--headless`,
 /// `--window-size`, `--hide-welcome-screen` and `--version`; everything else
-/// (memory limits, etc.) is silently ignored so the binary can be used as a
+/// is warned about and ignored so the binary can be used as a
 /// drop-in replacement for `rerun`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Cli {
     /// TCP port for the gRPC server.
     port: u16,
@@ -326,17 +349,24 @@ struct Cli {
     window_size: Option<egui::Vec2>,
     /// Hide the welcome screen (passed by `rr.spawn` / `ViewerClient.spawn`).
     hide_welcome_screen: bool,
+    /// Optional recording loaded into the custom viewer at startup.
+    rrd_path: Option<PathBuf>,
 }
 
 fn parse_cli() -> anyhow::Result<Cli> {
+    parse_cli_from(std::env::args_os().skip(1))
+}
+
+fn parse_cli_from(args: impl Iterator<Item = OsString>) -> anyhow::Result<Cli> {
+    let mut args = args.peekable();
     let mut cli = Cli {
         port: GRPC_PORT,
         print_version: false,
         headless: false,
         window_size: None,
         hide_welcome_screen: false,
+        rrd_path: None,
     };
-    let mut args = std::env::args_os().skip(1);
 
     while let Some(arg) = args.next() {
         if arg == "--version" || arg == "-V" {
@@ -401,6 +431,32 @@ fn parse_cli() -> anyhow::Result<Cli> {
             arg.starts_with("--memory-limit=") || arg.starts_with("--server-memory-limit=")
         }) {
             continue;
+        }
+
+        if arg.to_str().is_some_and(|arg| arg.starts_with("--")) {
+            eprintln!(
+                "warning: unrecognized viewer flag '{}'; ignoring it",
+                arg.to_string_lossy()
+            );
+            if args
+                .peek()
+                .is_some_and(|value| !value.to_string_lossy().starts_with('-'))
+            {
+                let _ = args.next();
+            }
+            continue;
+        }
+
+        let path = PathBuf::from(&arg);
+        if path.extension().is_some_and(|extension| extension == "rrd") {
+            if let Some(existing) = &cli.rrd_path {
+                anyhow::bail!(
+                    "multiple positional .rrd paths are not supported: '{}' and '{}'",
+                    existing.display(),
+                    path.display()
+                );
+            }
+            cli.rrd_path = Some(path);
         }
     }
 
@@ -469,9 +525,9 @@ fn full_limits_wgpu_setup() -> eframe::egui_wgpu::WgpuSetup {
             // Request all features the adapter supports, except
             // MAPPABLE_PRIMARY_BUFFERS which isn't needed and can
             // cause issues on some drivers.
-            required_features: adapter.features().difference(
-                re_renderer::external::wgpu::Features::MAPPABLE_PRIMARY_BUFFERS,
-            ),
+            required_features: adapter
+                .features()
+                .difference(re_renderer::external::wgpu::Features::MAPPABLE_PRIMARY_BUFFERS),
             // Use the adapter's full limits so our compute shaders
             // aren't restricted by the default (very conservative)
             // wgpu limits.
@@ -502,8 +558,10 @@ fn native_options() -> eframe::NativeOptions {
         on_surface_status: Arc::new(|status| {
             // On non-Windows platforms, an "Outdated" surface just means the
             // window was resized — recreate the surface and carry on.
-            if matches!(status, re_renderer::external::wgpu::CurrentSurfaceTexture::Outdated)
-                && !cfg!(target_os = "windows")
+            if matches!(
+                status,
+                re_renderer::external::wgpu::CurrentSurfaceTexture::Outdated
+            ) && !cfg!(target_os = "windows")
             {
                 eframe::egui_wgpu::SurfaceErrorAction::RecreateSurface
             } else {
@@ -513,4 +571,61 @@ fn native_options() -> eframe::NativeOptions {
         wgpu_setup: full_limits_wgpu_setup(),
     };
     native_options
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn positional_rrd_is_kept_for_startup_loading() {
+        let cli = parse_cli_from(
+            [
+                OsString::from("--headless"),
+                OsString::from("--port"),
+                OsString::from("4321"),
+                OsString::from("training.rrd"),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+
+        assert_eq!(cli.rrd_path, Some(std::path::PathBuf::from("training.rrd")));
+    }
+
+    #[test]
+    fn multiple_positional_rrds_are_rejected() {
+        let error =
+            parse_cli_from([OsString::from("one.rrd"), OsString::from("two.rrd")].into_iter())
+                .unwrap_err();
+        assert!(error.to_string().contains("multiple positional .rrd"));
+    }
+
+    #[test]
+    fn unknown_flag_value_is_not_misparsed_as_recording() {
+        let cli = parse_cli_from(
+            [
+                OsString::from("--future-output"),
+                OsString::from("value.rrd"),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        assert_eq!(cli.rrd_path, None);
+    }
+
+    #[test]
+    fn unknown_flag_warns_and_known_arguments_still_parse() {
+        let cli = parse_cli_from(
+            [
+                OsString::from("--future-switch"),
+                OsString::from("--headless"),
+                OsString::from("training.rrd"),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        assert!(cli.headless);
+        assert_eq!(cli.rrd_path, Some(PathBuf::from("training.rrd")));
+    }
 }

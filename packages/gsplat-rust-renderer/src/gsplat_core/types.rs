@@ -37,7 +37,6 @@ pub struct RenderGaussianCloud {
     /// Optional higher-order SH coefficients for view-dependent color.
     pub sh_coeffs: Option<RenderShCoefficients>,
     /// Axis-aligned bounding box of all splat centers in world space.
-    /// Used by the initial camera when the user hasn't interacted yet.
     pub bounds_world: Option<(Vec3, Vec3)>,
 }
 

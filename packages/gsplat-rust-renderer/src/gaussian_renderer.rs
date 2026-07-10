@@ -42,26 +42,24 @@
 //! 3. Dispatch the GPU-only compute pipeline
 //! 4. Composite raster texture into Rerun's viewport via fullscreen blit
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
 use re_renderer::external::smallvec::smallvec;
 use re_renderer::external::wgpu;
 use re_renderer::renderer::{DrawData, DrawDataDrawable, DrawError, DrawInstruction, Renderer};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use self::gpu_types as gpu_data;
 use crate::gsplat_core::gpu_types::{
     DEPTH_SORT_PASSES, GpuBindGroupLayouts, GpuComputePipelines, PROJECT_WORKGROUP_SIZE,
     PipelineBindGroups, PipelineBuffers, RadixSort, RadixSortBuffers, RadixSortScratch,
-    SORT_BIN_COUNT,
-    SORT_WORKGROUP_SIZE, TILE_OFFSET_CHECKS_PER_ITER, TILE_OFFSET_WORKGROUP_SIZE, TILE_WIDTH,
-    build_radix_sort, calc_raster_extent, calc_tile_bounds, compaction_block_count,
-    create_sort_shift_uniforms, sort_workgroup_count_for,
+    SORT_BIN_COUNT, SORT_WORKGROUP_SIZE, TILE_OFFSET_CHECKS_PER_ITER, TILE_OFFSET_WORKGROUP_SIZE,
+    TILE_WIDTH, build_radix_sort, calc_raster_extent, calc_tile_bounds, compaction_block_count,
     create_compute_bind_group_layouts, create_compute_pipelines, create_filled_buffer,
-    create_pipeline_bind_groups, create_sized_buffer, dispatch_grid_1d,
+    create_pipeline_bind_groups, create_sized_buffer, create_sort_shift_uniforms, dispatch_grid_1d,
     dispatch_grid_for_workgroups, fill_map_uniform, fill_project_uniform, fill_scan_uniform,
     gid_sort_passes, intersection_capacity_for_instances, next_block_capacity, next_capacity,
     pack_quats, pack_rgb, pack_scales_opacity, pack_sh_coefficients, pack_vec3s,
-    sort_reduce_workgroup_count, tile_count, tile_sort_passes,
+    sort_reduce_workgroup_count, sort_workgroup_count_for, tile_count, tile_sort_passes,
 };
 use crate::gsplat_core::{CameraApproximation, RenderGaussianCloud};
 
@@ -411,6 +409,7 @@ impl GaussianRenderer {
                 keys_alt: &buffers.global_from_compact_alt_buffer,
                 vals_alt: &buffers.depth_keys_alt_buffer,
                 num_keys: &buffers.num_visible_buffer,
+                indirect_dispatch_buffer: None,
             },
             &scratch,
             depth_sort_workgroup_count,
@@ -426,6 +425,7 @@ impl GaussianRenderer {
                 keys_alt: &buffers.depth_keys_alt_buffer,
                 vals_alt: &buffers.global_from_compact_alt_buffer,
                 num_keys: &buffers.num_visible_buffer,
+                indirect_dispatch_buffer: None,
             },
             &scratch,
             depth_sort_workgroup_count,
@@ -442,6 +442,7 @@ impl GaussianRenderer {
                 keys_alt: &buffers.sort_keys_buffer,
                 vals_alt: &buffers.sorted_indices_alt_buffer,
                 num_keys: &buffers.num_intersections_buffer,
+                indirect_dispatch_buffer: Some(buffers.num_intersections_buffer.clone()),
             },
             &scratch,
             sort_workgroup_count,
@@ -575,8 +576,10 @@ impl GaussianRenderer {
         let num_intersections_buffer = Arc::new(create_sized_buffer(
             &ctx.device,
             &format!("{label}::num_intersections"),
-            std::mem::size_of::<u32>(),
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            4 * std::mem::size_of::<u32>(),
+            wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::INDIRECT,
         ));
         let intersection_capacity = intersection_capacity_for_instances(initial_capacity);
         let tile_id_from_isect_buffer = Arc::new(create_sized_buffer(
@@ -618,7 +621,8 @@ impl GaussianRenderer {
             sort_workgroup_count * SORT_BIN_COUNT as usize * std::mem::size_of::<u32>(),
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         ));
-        let sort_reduce_wg_count = sort_reduce_workgroup_count(sort_workgroup_count as u32) as usize;
+        let sort_reduce_wg_count =
+            sort_reduce_workgroup_count(sort_workgroup_count as u32) as usize;
         let sort_reduced_buffer = Arc::new(create_sized_buffer(
             &ctx.device,
             &format!("{label}::sort_reduced"),
@@ -849,7 +853,8 @@ impl GaussianRenderer {
         ));
         compute.sort_workgroup_count = sort_workgroup_count_for(compute.intersection_capacity);
         let sort_workgroup_count = compute.sort_workgroup_count as usize;
-        let sort_reduce_wg_count = sort_reduce_workgroup_count(compute.sort_workgroup_count) as usize;
+        let sort_reduce_wg_count =
+            sort_reduce_workgroup_count(compute.sort_workgroup_count) as usize;
         compute.buffers.sort_counts_buffer = Arc::new(create_sized_buffer(
             &ctx.device,
             &format!("{label}::sort_counts"),
@@ -1295,7 +1300,11 @@ mod compute {
                     let dt_ms = now.duration_since(*last).as_secs_f32() * 1000.0;
                     *last = now;
                     if dt_ms < 2000.0 {
-                        *ema_ms = if *n == 0 { dt_ms } else { *ema_ms * 0.9 + dt_ms * 0.1 };
+                        *ema_ms = if *n == 0 {
+                            dt_ms
+                        } else {
+                            *ema_ms * 0.9 + dt_ms * 0.1
+                        };
                         *n += 1;
                         if *n % 30 == 0 {
                             eprintln!(
@@ -1319,15 +1328,19 @@ mod compute {
             // scratch buffers.  Swept once per frame (prepare runs once per
             // entity).
             let frame_index = ctx.active_frame.frame_index;
-            if self.last_evict_frame.swap(frame_index, std::sync::atomic::Ordering::Relaxed) != frame_index {
+            if self
+                .last_evict_frame
+                .swap(frame_index, std::sync::atomic::Ordering::Relaxed)
+                != frame_index
+            {
                 cache.retain(|_, entry| {
                     frame_index.saturating_sub(entry.last_used_frame) < EVICT_AFTER_FRAMES
                 });
             }
 
-            let compute = cache
-                .entry(label.to_owned())
-                .or_insert_with(|| self.create_batch_resources(ctx, label, cloud, cloud_generation));
+            let compute = cache.entry(label.to_owned()).or_insert_with(|| {
+                self.create_batch_resources(ctx, label, cloud, cloud_generation)
+            });
             compute.last_used_frame = frame_index;
 
             // Step 1a: re-upload the splat attributes when the entity was
@@ -1462,19 +1475,11 @@ mod compute {
                 compute_pass.dispatch_workgroups(scan_l2_x, scan_l2_y, 1);
 
                 compute_pass.set_pipeline(&pipelines.scan_block_sums);
-                compute_pass.set_bind_group(
-                    0,
-                    &compute.bind_groups.scan_block_sums,
-                    &[],
-                );
+                compute_pass.set_bind_group(0, &compute.bind_groups.scan_block_sums, &[]);
                 compute_pass.dispatch_workgroups(1, 1, 1);
 
                 compute_pass.set_pipeline(&pipelines.sort_scan_compose);
-                compute_pass.set_bind_group(
-                    0,
-                    &compute.bind_groups.scan_compose,
-                    &[],
-                );
+                compute_pass.set_bind_group(0, &compute.bind_groups.scan_compose, &[]);
                 compute_pass.dispatch_workgroups(compose_x, compose_y, 1);
 
                 compute_pass.set_pipeline(&pipelines.map_intersections);

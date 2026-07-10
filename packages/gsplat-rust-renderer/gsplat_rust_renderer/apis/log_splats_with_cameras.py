@@ -1,135 +1,145 @@
-"""Log a trained splat PLY together with its dataset cameras and GT images.
+"""Log a trained splat PLY together with its NeRF-synthetic dataset cameras.
 
-Demonstrates the custom ``GaussianSplats3D`` visualizer coexisting with stock
-rerun archetypes: every dataset camera becomes an ``rr.Pinhole`` frustum with
-its GT photo on the image plane, and the photos are also browsable in a paged
-2x2 grid driven by a ``page`` sequence timeline (scrub or play to flip
-through them — hidden tab views are NOT free in rerun, ~0.2 ms/frame each,
-so tabs of hundreds of views would tank the frame rate).
+Clean ``log-scene`` flow: at ``frame=0`` on the ``"frame"`` timeline it logs the
+splat under ``/world/splats`` (bound to the ``"Gaussians3D"`` visualizer) plus
+one camera per view under ``/world/cameras/<split>_<NNNN>`` — a ``Transform3D``
++ ``rr.Pinhole`` frustum with the composited GT image on the image plane, so
+clicking a frustum shows its photo. The blueprint pairs a 3D view with a Tabs
+section holding one Grid per split (train/test), each showing an evenly-spaced,
+capped subset of camera image views.
 
-Supports both dataset layouts:
-
-- NeRF-synthetic: ``<scene_dir>/transforms_test.json`` + ``test/r_*.png``
-  (OpenGL/RUB c2w matrices, used unmodified via simplecv's RUB conventions);
-- COLMAP: ``<scene_dir>/sparse/0/{cameras,images}.bin`` + ``images/``
-  (world-to-cam RDF poses, used unmodified; intrinsics rescaled when the
-  shipped images are smaller than the calibrated resolution).
-
-Examples:
-    # Into the live desktop viewer (port 9876):
+Example (into the live desktop viewer):
     python tools/log_splats_with_cameras.py --rr-config.connect \\
-        --scene-dir data/nerf-synthetic/ship --ply-path data/trained/ship.ply
-
-    # COLMAP scene, custom framing:
-    python tools/log_splats_with_cameras.py --rr-config.connect \\
-        --scene-dir data/tandt/train --ply-path /tmp/train.ply \\
-        --eye 2.84 -4.09 -6.12 --look-target 0.43 -0.07 0.31 --eye-up 0 -1 0
+        --rr-config.application-id gsplat-rust-renderer --scene lego
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-from jaxtyping import UInt8
+from jaxtyping import Int, UInt8
 from numpy import ndarray
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole
 
-from gsplat_rust_renderer.gaussians3d import Gaussians3D
-from gsplat_rust_renderer.scene_io import colmap_sparse_dir, load_colmap_cameras, load_nerf_cameras, load_rgb_composited
+from gsplat_rust_renderer.gaussians3d import SPLATS_ENTITY, SPLATS_VISUALIZER, Gaussians3D
+from gsplat_rust_renderer.nerfbaselines import DEFAULT_SCENE, scene_data_dir, scene_ply_path
+from gsplat_rust_renderer.scene_io import load_nerf_cameras, load_rgb_composited
+
+SPLITS: tuple[Literal["train", "test"], ...] = ("train", "test")
 
 
 @dataclass
-class LogSplatsWithCamerasConfig:
-    """Log splats + dataset cameras + GT images to a rerun viewer."""
+class LogSceneConfig:
+    """Log splats + NeRF-synthetic dataset cameras + GT images to a rerun viewer."""
 
     rr_config: RerunTyroConfig
     """Viewer wiring (spawn/connect/save/serve) — use --rr-config.connect for a running viewer."""
-    scene_dir: Path = Path("data/nerf-synthetic/ship")
-    """Dataset directory: NeRF-synthetic (transforms_test.json) or COLMAP (sparse/0)."""
-    ply_path: Path = Path("data/trained/ship.ply")
-    """Trained 3DGS PLY to render through the GaussianSplats3D visualizer."""
-    max_cameras: int = 0
-    """Cap on the number of cameras logged (0 = all)."""
-    browser: Literal["tabs", "pages"] = "tabs"
-    """Image panel style.  'tabs': 2x2 grids of named camera views, four per
-    tab — every camera individually inspectable, but each view in the
-    blueprint costs ~0.2 ms of CPU per frame whether or not its tab is
-    showing, so hundreds of cameras pull the frame rate down (200 ≈ 15-20
-    FPS).  'pages': four fixed views
-    paging through all images on the 'page' sequence timeline — stays at
-    60 FPS at any camera count."""
-    image_plane_distance: float = 0.1
+    scene: str = DEFAULT_SCENE
+    """nerfbaselines scene; resolves --scene-dir and --ply-path defaults when they are omitted."""
+    scene_dir: Path | None = None
+    """NeRF-synthetic scene dir (transforms_{train,test}.json); defaults to the --scene data dir."""
+    ply_path: Path | None = None
+    """Trained 3DGS PLY; defaults to the pretrained --scene PLY."""
+    image_plane_distance: float = 0.2
     """Frustum image-plane distance in world units."""
-    eye: tuple[float, float, float] | None = None
-    """Initial 3D eye position; omit to let the viewer auto-frame the scene."""
-    look_target: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    """Initial look-at target (used only when --eye is given)."""
-    eye_up: tuple[float, float, float] = (0.0, 0.0, 1.0)
-    """Up vector for the initial eye pose (used only when --eye is given)."""
+    max_image_views: int = 8
+    """Cap on camera image views shown per split in the blueprint grids (all cameras are still logged)."""
 
 
-def main(config: LogSplatsWithCamerasConfig) -> None:
-    if (config.scene_dir / "transforms_test.json").exists():
-        cameras: list[tuple[PinholeParameters, Path]] = load_nerf_cameras(config.scene_dir, "test")
-    elif colmap_sparse_dir(config.scene_dir) is not None:
-        cameras = load_colmap_cameras(config.scene_dir)
-    else:
-        raise FileNotFoundError(f"{config.scene_dir} is neither a NeRF-synthetic nor a COLMAP scene")
-    if config.max_cameras > 0:
-        cameras = cameras[: config.max_cameras]
+def _even_subset(count: int, cap: int) -> Int[ndarray, "k"]:
+    """Return up to *cap* evenly-spaced indices into ``range(count)``."""
+    if count <= 0 or cap <= 0:
+        return np.empty(0, dtype=np.int64)
+    if count <= cap:
+        return np.arange(count, dtype=np.int64)
+    return np.unique(np.linspace(0, count - 1, cap).round().astype(np.int64))
 
-    rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
-    rr.log("world/splats", Gaussians3D.from_ply(config.ply_path), static=True)
 
-    for k, (camera, image_path) in enumerate(cameras):
-        cam_path = f"world/cameras/{camera.name}"
-        log_pinhole(camera, cam_log_path=Path(cam_path), image_plane_distance=config.image_plane_distance, static=True)
-        rgb: UInt8[ndarray, "h w 3"] = load_rgb_composited(image_path, 255.0)
-        rr.log(f"{cam_path}/pinhole/image", rr.Image(rgb), static=True)
-        rr.set_time("page", sequence=k // 4)
-        rr.log(f"browser/{k % 4}", rr.Image(rgb))
-    rr.set_time("page", sequence=0)
+def log_split_cameras(scene_dir: Path, split: Literal["train", "test"], image_plane_distance: float) -> list[str]:
+    """Log every camera of one split as a Pinhole frustum with its GT image plane.
+
+    Args:
+        scene_dir: NeRF-synthetic scene directory.
+        split: Dataset split to load.
+        image_plane_distance: Frustum image-plane distance in world units.
+
+    Returns:
+        The ``/world/cameras/<split>_<NNNN>`` entity path of each logged camera.
+    """
+    cameras: list[tuple[PinholeParameters, Path]] = load_nerf_cameras(scene_dir, split)
+    cam_paths: list[str] = []
+    for index, (camera, image_path) in enumerate(cameras):
+        cam_path: str = f"/world/cameras/{split}_{index:04d}"
+        log_pinhole(camera, cam_log_path=Path(cam_path), image_plane_distance=image_plane_distance)
+        rgb: UInt8[ndarray, "h w 3"] = load_rgb_composited(image_path, background=255.0)
+        rr.log(f"{cam_path}/pinhole/image", rr.Image(rgb))
+        cam_paths.append(cam_path)
+    return cam_paths
+
+
+def scene_blueprint(split_cam_paths: dict[str, list[str]], max_image_views: int) -> rrb.Blueprint:
+    """Build the 3D-view + per-split image-grid blueprint.
+
+    Args:
+        split_cam_paths: Mapping of split name to its logged camera entity paths.
+        max_image_views: Cap on image views shown per split.
+
+    Returns:
+        A ``Horizontal(3D view, Tabs(Grid per split))`` blueprint.
+    """
+    grids: list[rrb.Grid] = []
+    for split, cam_paths in split_cam_paths.items():
+        subset: Int[ndarray, "k"] = _even_subset(len(cam_paths), max_image_views)
+        grids.append(
+            rrb.Grid(
+                *[rrb.Spatial2DView(origin=f"{cam_paths[i]}/pinhole", name=Path(cam_paths[i]).name) for i in subset],
+                grid_columns=2,
+                name=f"{split} ({len(subset)}/{len(cam_paths)})",
+            )
+        )
 
     view3d = rrb.Spatial3DView(
         origin="/",
         name="splats + dataset cameras",
-        overrides={"world/splats": rrb.Visualizer("GaussianSplats3D")},
+        overrides={SPLATS_ENTITY: rrb.Visualizer(SPLATS_VISUALIZER)},
         background=rrb.Background(color=(255, 255, 255), kind=rrb.BackgroundKind.SolidColor),
-        line_grid=False,
-        eye_controls=(
-            rrb.EyeControls3D(position=config.eye, look_target=config.look_target, eye_up=config.eye_up) if config.eye is not None else None
-        ),
     )
-    if config.browser == "tabs":
-        image_panel = rrb.Tabs(
-            *[
-                rrb.Grid(
-                    *[rrb.Spatial2DView(origin=f"world/cameras/{camera.name}/pinhole", name=camera.name) for camera, _ in cameras[i : i + 4]],
-                    grid_columns=2,
-                    name=f"{cameras[i][0].name}–{cameras[min(i + 3, len(cameras) - 1)][0].name}",
-                )
-                for i in range(0, len(cameras), 4)
-            ]
-        )
-    else:
-        image_panel = rrb.Grid(
-            *[rrb.Spatial2DView(origin=f"browser/{i}", name=f"slot {i}") for i in range(4)],
-            grid_columns=2,
-            name="image browser (scrub the page timeline)",
-        )
-    rr.send_blueprint(
-        rrb.Blueprint(
-            rrb.Horizontal(view3d, image_panel, column_shares=[5, 3]),
-            rrb.BlueprintPanel(state="collapsed"),
-            rrb.SelectionPanel(state="collapsed"),
-            rrb.TimePanel(state="expanded"),
-        )
+    return rrb.Blueprint(
+        rrb.Horizontal(view3d, rrb.Tabs(*grids, name="Camera views"), column_shares=[5, 3]),
+        rrb.BlueprintPanel(state="collapsed"),
+        rrb.SelectionPanel(state="collapsed"),
+        rrb.TimePanel(state="collapsed"),
     )
+
+
+def main(config: LogSceneConfig) -> None:
+    """Log the splat + dataset cameras at frame 0 and send the scene blueprint.
+
+    Args:
+        config: CLI configuration parsed by tyro.
+    """
+    scene_dir: Path = config.scene_dir if config.scene_dir is not None else scene_data_dir(config.scene)
+    ply_path: Path = config.ply_path if config.ply_path is not None else scene_ply_path(config.scene)
+
+    rr.set_time("frame", sequence=0)
+    rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
+    rr.log(SPLATS_ENTITY, Gaussians3D.from_ply(ply_path))
+
+    split_cam_paths: dict[str, list[str]] = {}
+    for split in SPLITS:
+        if (scene_dir / f"transforms_{split}.json").exists():
+            split_cam_paths[split] = log_split_cameras(scene_dir, split, config.image_plane_distance)
+
+    rr.send_blueprint(scene_blueprint(split_cam_paths, config.max_image_views))
+
     rec: rr.RecordingStream | None = rr.get_global_data_recording()
     assert rec is not None
     rec.flush(timeout_sec=120.0)
-    panel_desc: str = f"{(len(cameras) + 3) // 4} tabs of 4" if config.browser == "tabs" else f"{(len(cameras) + 3) // 4} pages of 4"
-    print(f"logged {len(cameras)} cameras ({panel_desc}) + {config.ply_path.name}")
+    total: int = sum(len(paths) for paths in split_cam_paths.values())
+    print(f"logged {ply_path.name} + {total} cameras across {list(split_cam_paths)} at frame=0")

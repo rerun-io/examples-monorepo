@@ -172,5 +172,15 @@ fn clamp_count_main() {
     // `intersection_count_words[1]` is the total number of tile intersections accumulated by the
     // scan stage. Clamp it to the buffers we actually allocated so later sort/raster passes never
     // consume unwritten entries on dense scenes.
-    num_intersections[0] = min(intersection_count_words[1], map_uniforms.intersection_capacity);
+    let live_count = min(intersection_count_words[1], map_uniforms.intersection_capacity);
+    num_intersections[0] = live_count;
+
+    // The viewer's tile radix sort consumes these as indirect dispatch args
+    // at byte offset 4. The standalone renderer keeps its direct dispatches,
+    // but shares this buffer layout so both paths run the exact same shader.
+    let total_workgroups = max((live_count + 255u) / 256u, 1u);
+    let dispatch_x = min(total_workgroups, 65535u);
+    num_intersections[1] = dispatch_x;
+    num_intersections[2] = (total_workgroups + dispatch_x - 1u) / dispatch_x;
+    num_intersections[3] = 1u;
 }

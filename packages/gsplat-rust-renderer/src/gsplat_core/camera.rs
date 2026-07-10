@@ -1,28 +1,11 @@
 //! Camera construction utilities.
 //!
 //! Provides constructors for [`CameraApproximation`] from different sources:
-//! look-at parameters, NeRF transform matrices, or fallback bounds.
+//! look-at parameters or NeRF transform matrices.
 
 use glam::{Affine3A, Mat4, Vec2, Vec3};
 
 use super::types::CameraApproximation;
-
-/// Construct a synthetic camera that frames the cloud's bounding box.
-/// Used before the user has interacted with the 3D camera.
-pub fn fallback_camera(bounds: Option<(Vec3, Vec3)>) -> CameraApproximation {
-    let (center, extent) = bounds
-        .map(|(min, max)| (0.5 * (min + max), max - min))
-        .unwrap_or((Vec3::ZERO, Vec3::ONE));
-    let distance = extent.length().max(1.0) * 1.5;
-    make_camera_approximation(
-        center + Vec3::new(distance, distance * 0.5, distance),
-        center,
-        Vec3::Y,
-        55.0_f32.to_radians(),
-        Vec2::new(1600.0, 900.0),
-        0.01,
-    )
-}
 
 /// Helper to build a [`CameraApproximation`] from look-at parameters.
 pub fn make_camera_approximation(
@@ -87,14 +70,6 @@ pub fn camera_from_nerf_transform(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn fallback_camera_has_finite_fields() {
-        let cam = fallback_camera(Some((Vec3::ZERO, Vec3::ONE)));
-        assert!(cam.world_position.is_finite());
-        assert!(cam.viewport_size_px.x > 0.0);
-        assert!(cam.near_plane > 0.0);
-    }
 
     #[test]
     fn nerf_identity_camera_looks_down_neg_z() {
