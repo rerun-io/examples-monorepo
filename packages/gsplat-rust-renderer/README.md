@@ -3,6 +3,18 @@
 `gsplat-rust-renderer` adds a tile-based, GPU compute Gaussian-splat visualizer to the [Rerun](https://rerun.io) desktop viewer. Python logs the upstream `Gaussians3D` component contract; Rust renders it with wgpu on Metal or Vulkan. The same GPU core also powers a standalone PNG renderer, so no CUDA is required.
 
 <p align="center">
+  <a title="Rerun" href="https://rerun.io" target="_blank" rel="noopener noreferrer">
+    <img src="https://img.shields.io/badge/Rerun-0.34.1-0b82f9" alt="Rerun badge">
+  </a>
+  <a title="Pixi" href="https://pixi.sh/latest/" target="_blank" rel="noopener noreferrer">
+    <img src="https://img.shields.io/badge/Install%20with-Pixi-16A34A" alt="Pixi badge">
+  </a>
+  <a title="Rust" href="https://www.rust-lang.org/" target="_blank" rel="noopener noreferrer">
+    <img src="https://img.shields.io/badge/Rust-1.93-dea584" alt="Rust badge">
+  </a>
+</p>
+
+<p align="center">
   <img src="docs/media/dense-training-dashboard.gif" width="600" alt="Custom viewer sweeping a dense 7,000-iteration Brush training recording: GPU splats converge in the 3D scene while four eval render pairs and loss/PSNR/SSIM/splat-count curves fill in">
 </p>
 
