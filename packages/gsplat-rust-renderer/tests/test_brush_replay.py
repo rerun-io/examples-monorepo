@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import rerun as rr
+from PIL import Image
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from simplecv.rerun_log_utils import RerunTyroConfig
 
@@ -14,6 +15,7 @@ from gsplat_rust_renderer.apis.visualize_brush_training import (
     BrushMetric,
     VisualizeBrushTrainingConfig,
     estimate_replay_size_bytes,
+    log_brush_metrics,
     log_camera_frustum,
     remove_processed_export,
     set_iteration_time,
@@ -51,6 +53,29 @@ def test_brush_log_parser_waits_for_a_complete_appended_line() -> None:
     assert second_samples == [BrushMetric(iteration=10, name="loss", value=0.0625)]
 
 
+def test_brush_metrics_use_brush_entity_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pure-trainer scalars populate the same paths as Brush's own recording."""
+    config: VisualizeBrushTrainingConfig = VisualizeBrushTrainingConfig(
+        rr_config=RerunTyroConfig(application_id="brush-metric-paths", headless=True)
+    )
+    paths: list[str] = []
+    monkeypatch.setattr(rr, "set_time", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(rr, "log", lambda path, _archetype: paths.append(path))
+
+    log_brush_metrics(
+        config,
+        [
+            BrushMetric(iteration=50, name="loss", value=0.1),
+            BrushMetric(iteration=500, name="psnr", value=20.0),
+            BrushMetric(iteration=500, name="ssim", value=0.8),
+            BrushMetric(iteration=100, name="num_splats", value=1000.0),
+        ],
+        set(),
+    )
+
+    assert paths == ["loss/total", "psnr/eval", "ssim/eval", "splats/num_splats"]
+
+
 def test_camera_frustum_attaches_a_static_jpeg_thumbnail(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every timeless training frustum carries a bounded encoded GT image."""
     config: VisualizeBrushTrainingConfig = VisualizeBrushTrainingConfig(
@@ -85,28 +110,82 @@ def test_camera_frustum_attaches_a_static_jpeg_thumbnail(monkeypatch: pytest.Mon
     assert static is True
 
 
+def test_eval_render_is_jpeg_logged_on_brush_view_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Brush-native eval PNG becomes a bounded render beside its GT view."""
+    render_path: Path = tmp_path / "r_0.png"
+    Image.fromarray(np.full((24, 32, 3), 64, dtype=np.uint8)).save(render_path)
+    config: VisualizeBrushTrainingConfig = VisualizeBrushTrainingConfig(
+        rr_config=RerunTyroConfig(application_id="brush-eval-render", headless=True),
+        image_jpeg_quality=80,
+    )
+    log_calls: list[tuple[str, object]] = []
+    monkeypatch.setattr(rr, "log", lambda path, archetype: log_calls.append((path, archetype)))
+
+    brush_replay.log_eval_render(render_path, view_index=0, config=config)
+
+    assert len(log_calls) == 1
+    path, archetype = log_calls[0]
+    assert path == "eval/view_0/render"
+    assert isinstance(archetype, rr.EncodedImage)
+
+
+def test_eval_ground_truth_is_static_jpeg_on_brush_view_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The eval GT is timeless and shares Brush's render-vs-GT hierarchy."""
+    config: VisualizeBrushTrainingConfig = VisualizeBrushTrainingConfig(
+        rr_config=RerunTyroConfig(application_id="brush-eval-gt", headless=True),
+        image_jpeg_quality=80,
+    )
+    log_calls: list[tuple[str, object, bool]] = []
+    monkeypatch.setattr(brush_replay, "load_rgb_composited", lambda *_args, **_kwargs: np.full((24, 32, 3), 128, dtype=np.uint8))
+    monkeypatch.setattr(rr, "log", lambda path, archetype, *, static=False: log_calls.append((path, archetype, static)))
+
+    brush_replay.log_eval_ground_truth(Path("r_0.png"), view_index=0, config=config)
+
+    assert len(log_calls) == 1
+    path, archetype, static = log_calls[0]
+    assert path == "eval/view_0/ground_truth"
+    assert isinstance(archetype, rr.EncodedImage)
+    assert static is True
+
+
+def test_eval_directory_waits_for_every_brush_render_to_settle(tmp_path: Path) -> None:
+    """Live cleanup waits for Brush to finish the complete eval split."""
+    eval_dir: Path = tmp_path / "eval_500"
+    eval_dir.mkdir()
+    (eval_dir / "r_0.png").write_bytes(b"first")
+    signatures: dict[Path, tuple[int, int]] = {}
+
+    assert brush_replay.eval_dir_is_stable(eval_dir, expected_files=2, pending_signatures=signatures) is False
+    (eval_dir / "r_1.png").write_bytes(b"second")
+    assert brush_replay.eval_dir_is_stable(eval_dir, expected_files=2, pending_signatures=signatures) is False
+    assert brush_replay.eval_dir_is_stable(eval_dir, expected_files=2, pending_signatures=signatures) is True
+
+    (eval_dir / "r_1.png").write_bytes(b"second-and-growing")
+    assert brush_replay.eval_dir_is_stable(eval_dir, expected_files=2, pending_signatures=signatures) is False
+
+
 def test_retention_keeps_first_every_thousand_and_final_snapshot() -> None:
-    """50-step exports become a bounded 31-snapshot 30k replay."""
-    export_iterations: tuple[int, ...] = tuple(range(50, 30001, 50))
+    """The default 50-step exports become a bounded eight-snapshot 7k replay."""
+    export_iterations: tuple[int, ...] = tuple(range(50, 7001, 50))
     retained_iterations: tuple[int, ...] = tuple(
         iteration
         for index, iteration in enumerate(export_iterations)
         if should_retain_snapshot(
             iteration=iteration,
             is_first=index == 0,
-            is_final=iteration == 30000,
+            is_final=iteration == 7000,
             export_every=50,
             snapshot_stride=20,
         )
     )
 
-    assert retained_iterations == (50, *range(1000, 30001, 1000))
-    assert len(retained_iterations) == 31
+    assert retained_iterations == (50, *range(1000, 7001, 1000))
+    assert len(retained_iterations) == 8
 
 
 def test_retention_budget_stays_below_two_gb_at_one_million_splats() -> None:
     """The documented worst-case replay schedule remains under the RRD cap."""
-    estimated_bytes: int = estimate_replay_size_bytes(max_splats=1_000_000, snapshot_count=31, final_has_sh=True)
+    estimated_bytes: int = estimate_replay_size_bytes(max_splats=1_000_000, snapshot_count=8, final_has_sh=True)
 
     assert estimated_bytes <= 2_000_000_000
 
@@ -133,6 +212,8 @@ def test_config_defaults_to_rich_pure_trainer_replay() -> None:
     assert config.replay_only is False
     assert config.brush_native is False
     assert config.spin_speed > 0.0
+    assert config.total_iters == 7000
+    assert config.eval_views_logged == 1
     assert config.step_stride == 50
     assert config.snapshot_stride == 20
 
@@ -140,7 +221,7 @@ def test_config_defaults_to_rich_pure_trainer_replay() -> None:
 def test_live_replay_deletes_processed_intermediates_but_keeps_final(tmp_path: Path) -> None:
     """Disk-bounded live replay removes each consumed PLY except the final export."""
     intermediate: Path = tmp_path / "export_50.ply"
-    final: Path = tmp_path / "export_30000.ply"
+    final: Path = tmp_path / "export_7000.ply"
     intermediate.touch()
     final.touch()
 
