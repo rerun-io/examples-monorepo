@@ -15,10 +15,9 @@ after it has either been logged or intentionally skipped. The final PLY is
 always preserved. This keeps at most Brush's currently-written export plus the
 final checkpoint on disk outside the compressed RRD.
 
-The saved blueprint keeps the white-background, continuously spinning
-Spatial3D view dominant while showing the training-camera ring, Brush-native
-render-vs-GT eval images, and loss/PSNR/SSIM/splat-count curves. All panels are
-collapsed.
+The saved blueprint keeps the dark-gradient, continuously spinning Spatial3D
+view dominant while showing the training-camera ring, Brush-native render-vs-GT
+eval images, and loss/PSNR/SSIM/splat-count curves. All panels are collapsed.
 Use ``--rr-config.save <path>.rrd --rr-config.headless --no-follow`` to replay a
 finished run without starting a viewer.
 
@@ -257,7 +256,7 @@ class VisualizeBrushTrainingConfig:
     """brush --total-train-iters; the checkpoint at this iter ends the watch."""
     poll_interval: float = 2.0
     """Seconds between export-dir scans."""
-    eval_views_logged: int = 1
+    eval_views_logged: int = 4
     """Number of val views logged as render-vs-GT image pairs each eval."""
     sh_mode: Literal["final", "all", "none"] = "final"
     """Which snapshots keep SH coefficients: 'final' = only the last checkpoint
@@ -297,6 +296,10 @@ class VisualizeBrushTrainingConfig:
     keep the look at a fraction of the texture cost. 0 = full resolution."""
     image_jpeg_quality: int = 80
     """JPEG quality for timeless GT thumbnails attached to camera frusta."""
+    video_layout: bool = False
+    """Bake a flat screen-recording layout: no tabs, a stacked column with every
+    logged eval GT|Render pair, four graphs along the bottom, and the spinning
+    scene dominant."""
     follow: bool = True
     """Keep polling until the total_iters checkpoint lands; False = log what
     exists now and exit (works on a finished run)."""
@@ -413,7 +416,7 @@ def log_camera_frustum(
     resolution so the photo fills the whole plane (not just its top-left corner)
     while the frustum FOV stays identical to the full-res camera.
     """
-    rgb: UInt8[ndarray, "h w 3"] = load_rgb_composited(image_path, background=255.0)
+    rgb: UInt8[ndarray, "h w 3"] = load_rgb_composited(image_path, background=0.0)
     if config.plane_thumb_px > 0:
         h, w = rgb.shape[:2]
         scale: float = config.plane_thumb_px / max(h, w)
@@ -525,15 +528,15 @@ def log_static_scene(config: VisualizeBrushTrainingConfig) -> LoggedScene:
     return LoggedScene(train_camera_paths=train_camera_paths, eval_cameras=eval_cameras, eval_view_count=len(all_eval_cameras))
 
 
-def send_blueprint(config: VisualizeBrushTrainingConfig, train_camera_paths: list[str]) -> None:
-    """Send a Brush-faithful layout with a dominant spinning 3D view."""
+def standalone_blueprint(config: VisualizeBrushTrainingConfig, train_camera_paths: list[str]) -> rrb.Blueprint:
+    """Build the rich pure-trainer layout around the series actually logged."""
     spinning: bool = config.spin_speed > 0.0
     view3d = rrb.Spatial3DView(
         origin="/",
         name="Scene",
         contents=["+ /world/**"],
         overrides={SPLATS_ENTITY: rrb.Visualizer(SPLATS_VISUALIZER)},
-        background=rrb.Background(color=(255, 255, 255), kind=rrb.BackgroundKind.SolidColor),
+        background=rrb.Background(kind=rrb.BackgroundKind.GradientDark),
         line_grid=False,
         eye_controls=(
             rrb.EyeControls3D(
@@ -548,33 +551,34 @@ def send_blueprint(config: VisualizeBrushTrainingConfig, train_camera_paths: lis
         ),
     )
     if config.replay_only or not train_camera_paths:
-        rr.send_blueprint(
-            rrb.Blueprint(
-                view3d,
-                rrb.BlueprintPanel(state="collapsed"),
-                rrb.SelectionPanel(state="collapsed"),
-                rrb.TimePanel(state="collapsed"),
-            )
+        return rrb.Blueprint(
+            view3d,
+            rrb.BlueprintPanel(state="collapsed"),
+            rrb.SelectionPanel(state="collapsed"),
+            rrb.TimePanel(state="collapsed"),
         )
-        return
 
-    eval_pair = rrb.Horizontal(
-        rrb.Spatial2DView(origin="eval/view_0/ground_truth", name="Ground truth", contents=["$origin/**"]),
-        rrb.Spatial2DView(origin="eval/view_0/render", name="Render", contents=["$origin/**"]),
-        name="Eval view 0",
-    )
-    graphs = rrb.Horizontal(
-        rrb.TimeSeriesView(origin="loss", contents=["loss/**"], name="Loss"),
-        rrb.TimeSeriesView(origin="psnr", contents=["psnr/eval"], name="PSNR"),
-        rrb.TimeSeriesView(origin="ssim", contents=["ssim/eval"], name="SSIM"),
-        rrb.TimeSeriesView(origin="splats", contents=["splats/**"], name="Splats"),
-    )
-    rr.send_blueprint(
-        rrb.Blueprint(
+    eval_pairs: list[rrb.Horizontal] = [
+        rrb.Horizontal(
+            rrb.Spatial2DView(origin=f"eval/view_{index}/ground_truth", name="Ground truth", contents=["$origin/**"]),
+            rrb.Spatial2DView(origin=f"eval/view_{index}/render", name="Render", contents=["$origin/**"]),
+            name=f"Eval view {index}",
+        )
+        for index in range(config.eval_views_logged)
+    ]
+    if config.video_layout:
+        eval_views = rrb.Grid(*eval_pairs, grid_columns=1, name="Eval views")
+        graphs = rrb.Horizontal(
+            rrb.TimeSeriesView(origin="loss", contents=["loss/**"], name="Loss"),
+            rrb.TimeSeriesView(origin="psnr", contents=["psnr/eval"], name="PSNR"),
+            rrb.TimeSeriesView(origin="ssim", contents=["ssim/eval"], name="SSIM"),
+            rrb.TimeSeriesView(origin="splats", contents=["splats/**"], name="Splats"),
+        )
+        return rrb.Blueprint(
             rrb.Vertical(
-                rrb.Horizontal(view3d, eval_pair, column_shares=[3, 2]),
+                rrb.Horizontal(view3d, eval_views, column_shares=[3.0, 2.0]),
                 graphs,
-                row_shares=[3, 1],
+                row_shares=[4.0, 1.0],
             ),
             rrb.BlueprintPanel(state="collapsed"),
             rrb.SelectionPanel(state="collapsed"),
@@ -582,7 +586,32 @@ def send_blueprint(config: VisualizeBrushTrainingConfig, train_camera_paths: lis
             auto_layout=False,
             auto_views=False,
         )
+
+    eval_views = rrb.Grid(*eval_pairs, grid_columns=2, name="Eval views")
+    quality_tabs = rrb.Tabs(
+        rrb.TimeSeriesView(origin="loss", contents=["loss/**"], name="Loss"),
+        rrb.TimeSeriesView(origin="psnr", contents=["psnr/eval"], name="PSNR"),
+        rrb.TimeSeriesView(origin="ssim", contents=["ssim/eval"], name="SSIM"),
+        name="Quality",
     )
+    splats_view = rrb.TimeSeriesView(origin="splats", contents=["splats/**"], name="Splats")
+    return rrb.Blueprint(
+        rrb.Vertical(
+            rrb.Horizontal(eval_views, view3d, column_shares=[2.0, 3.0]),
+            rrb.Horizontal(quality_tabs, splats_view),
+            row_shares=[4.0, 1.0],
+        ),
+        rrb.BlueprintPanel(state="collapsed"),
+        rrb.SelectionPanel(state="collapsed"),
+        rrb.TimePanel(state="collapsed"),
+        auto_layout=False,
+        auto_views=False,
+    )
+
+
+def send_blueprint(config: VisualizeBrushTrainingConfig, train_camera_paths: list[str]) -> None:
+    """Send a tabbed rich layout with a dominant spinning 3D view."""
+    rr.send_blueprint(standalone_blueprint(config, train_camera_paths))
 
 
 def log_checkpoint(ply_path: Path, with_sh: bool) -> int:

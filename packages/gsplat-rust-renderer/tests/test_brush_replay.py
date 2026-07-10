@@ -5,6 +5,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 import rerun as rr
+from jaxtyping import UInt8
+from numpy import ndarray
 from PIL import Image
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from simplecv.rerun_log_utils import RerunTyroConfig
@@ -17,6 +19,7 @@ from gsplat_rust_renderer.apis.visualize_brush_training import (
     estimate_replay_size_bytes,
     log_brush_metrics,
     log_camera_frustum,
+    ready_export_plys,
     remove_processed_export,
     set_iteration_time,
     should_retain_snapshot,
@@ -77,7 +80,7 @@ def test_brush_metrics_use_brush_entity_paths(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_camera_frustum_attaches_a_static_jpeg_thumbnail(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every timeless training frustum carries a bounded encoded GT image."""
+    """Every timeless training frustum carries a black-composited bounded GT image."""
     config: VisualizeBrushTrainingConfig = VisualizeBrushTrainingConfig(
         rr_config=RerunTyroConfig(application_id="brush-camera-test", headless=True),
         plane_thumb_px=160,
@@ -97,7 +100,13 @@ def test_camera_frustum_attaches_a_static_jpeg_thumbnail(monkeypatch: pytest.Mon
         ),
     )
     log_calls: list[tuple[str, object, bool]] = []
-    monkeypatch.setattr(brush_replay, "load_rgb_composited", lambda *_args, **_kwargs: np.full((240, 320, 3), 127, dtype=np.uint8))
+    composite_backgrounds: list[float] = []
+
+    def load_composited(_path: Path, *, background: float) -> UInt8[ndarray, "h w 3"]:
+        composite_backgrounds.append(background)
+        return np.full((240, 320, 3), 127, dtype=np.uint8)
+
+    monkeypatch.setattr(brush_replay, "load_rgb_composited", load_composited)
     monkeypatch.setattr(brush_replay, "log_pinhole", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(rr, "log", lambda path, archetype, *, static=False: log_calls.append((path, archetype, static)))
 
@@ -108,6 +117,7 @@ def test_camera_frustum_attaches_a_static_jpeg_thumbnail(monkeypatch: pytest.Mon
     assert path == "world/cameras/train_000/pinhole/image"
     assert isinstance(archetype, rr.EncodedImage)
     assert static is True
+    assert composite_backgrounds == [0.0]
 
 
 def test_eval_render_is_jpeg_logged_on_brush_view_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -164,6 +174,24 @@ def test_eval_directory_waits_for_every_brush_render_to_settle(tmp_path: Path) -
     assert brush_replay.eval_dir_is_stable(eval_dir, expected_files=2, pending_signatures=signatures) is False
 
 
+def test_ready_exports_drains_a_large_stable_backlog_in_iteration_order(tmp_path: Path) -> None:
+    """A completed dense trainer backlog settles once, then drains in one ordered scan."""
+    config: VisualizeBrushTrainingConfig = VisualizeBrushTrainingConfig(
+        rr_config=RerunTyroConfig(application_id="brush-export-backlog", headless=True),
+        export_dir=tmp_path,
+        follow=True,
+    )
+    for iteration in range(1, 1001):
+        (tmp_path / f"export_{iteration}.ply").write_bytes(b"stable")
+    pending_sizes: dict[Path, int] = {}
+
+    first_scan: list[tuple[int, Path]] = list(ready_export_plys(config, {}, pending_sizes))
+    second_scan: list[tuple[int, Path]] = list(ready_export_plys(config, {}, pending_sizes))
+
+    assert first_scan == []
+    assert [iteration for iteration, _ in second_scan] == list(range(1, 1001))
+
+
 def test_retention_keeps_first_every_thousand_and_final_snapshot() -> None:
     """The default 50-step exports become a bounded eight-snapshot 7k replay."""
     export_iterations: tuple[int, ...] = tuple(range(50, 7001, 50))
@@ -213,9 +241,88 @@ def test_config_defaults_to_rich_pure_trainer_replay() -> None:
     assert config.brush_native is False
     assert config.spin_speed > 0.0
     assert config.total_iters == 7000
-    assert config.eval_views_logged == 1
+    assert config.eval_views_logged == 4
     assert config.step_stride == 50
     assert config.snapshot_stride == 20
+
+
+def test_standalone_blueprint_lays_out_every_eval_pair_and_logged_metric() -> None:
+    """The rich replay exposes four comparisons and only populated graphs."""
+    config: VisualizeBrushTrainingConfig = VisualizeBrushTrainingConfig(
+        rr_config=RerunTyroConfig(application_id="brush-blueprint-test", headless=True)
+    )
+
+    blueprint = brush_replay.standalone_blueprint(config, train_camera_paths=["world/cameras/train_000"])
+
+    pending: list[object] = [blueprint.root_container]
+    view_origins: set[str] = set()
+    names: set[str] = set()
+    while pending:
+        item: object = pending.pop()
+        attributes: dict[str, object] = vars(item)
+        origin: object | None = attributes.get("origin")
+        name: object | None = attributes.get("name")
+        if isinstance(origin, str):
+            view_origins.add(origin)
+        if isinstance(name, str):
+            names.add(name)
+        contents: object = attributes.get("contents", ())
+        if isinstance(contents, tuple):
+            pending.extend(contents)
+
+    assert view_origins >= {
+        *(f"eval/view_{index}/ground_truth" for index in range(4)),
+        *(f"eval/view_{index}/render" for index in range(4)),
+        "loss",
+        "psnr",
+        "ssim",
+        "splats",
+    }
+    assert names >= {"Scene", "Eval views", "Quality", "Loss", "PSNR", "SSIM", "Splats"}
+
+
+def test_video_blueprint_is_flat_dark_and_shows_all_four_eval_pairs() -> None:
+    """Video recordings bake a chrome-free flat layout showing all four logged views."""
+    config: VisualizeBrushTrainingConfig = VisualizeBrushTrainingConfig(
+        rr_config=RerunTyroConfig(application_id="brush-video-blueprint-test", headless=True),
+        video_layout=True,
+    )
+
+    blueprint = brush_replay.standalone_blueprint(config, train_camera_paths=["world/cameras/train_000"])
+
+    pending: list[object] = [blueprint.root_container]
+    view_origins: set[str] = set()
+    container_types: set[str] = set()
+    background_kinds: list[int] = []
+    while pending:
+        item: object = pending.pop()
+        container_types.add(type(item).__name__)
+        attributes: dict[str, object] = vars(item)
+        origin: object | None = attributes.get("origin")
+        if isinstance(origin, str):
+            view_origins.add(origin)
+        properties: object = attributes.get("properties")
+        if isinstance(properties, dict) and "Background" in properties:
+            background_kinds.extend(properties["Background"].kind.as_arrow_array().to_pylist())
+        contents: object = attributes.get("contents", ())
+        if isinstance(contents, tuple):
+            pending.extend(contents)
+
+    eval_origins: set[str] = {origin for origin in view_origins if origin.startswith("eval/view_")}
+    assert config.eval_views_logged == 4
+    assert eval_origins == {
+        "eval/view_0/ground_truth",
+        "eval/view_0/render",
+        "eval/view_1/ground_truth",
+        "eval/view_1/render",
+        "eval/view_2/ground_truth",
+        "eval/view_2/render",
+        "eval/view_3/ground_truth",
+        "eval/view_3/render",
+    }
+    assert view_origins >= {"loss", "psnr", "ssim", "splats"}
+    assert "Tabs" not in container_types
+    assert background_kinds == [1]
 
 
 def test_live_replay_deletes_processed_intermediates_but_keeps_final(tmp_path: Path) -> None:

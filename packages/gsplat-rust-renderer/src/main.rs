@@ -39,7 +39,7 @@ use re_viewer::external::{eframe, egui};
 use std::ffi::OsString;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::num::ParseIntError;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -61,7 +61,7 @@ const DEFAULT_HEADLESS_SIZE: egui::Vec2 = egui::vec2(1600.0, 900.0);
 async fn main() -> anyhow::Result<()> {
     let cli = parse_cli()?;
     if cli.print_version {
-        println!("rerun-gs-viewer {}", env!("CARGO_PKG_VERSION"));
+        println!("rerun {}", re_viewer::build_info().version);
         return Ok(());
     }
 
@@ -87,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
         re_grpc_server::ServerOptions::default(),
         re_grpc_server::shutdown::never(),
     );
-    let rrd_rx = cli.rrd_path.as_deref().map(rrd_log_receiver).transpose()?;
+    let rrd_path = cli.rrd_path;
 
     // ── Create the viewer application ─────────────────────────────────────
     // `MainThreadToken` is a safety marker that proves we're on the main
@@ -113,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
                 app_env,
                 startup_options,
                 grpc_rx,
-                rrd_rx,
+                rrd_path,
             )
         });
     }
@@ -132,7 +132,7 @@ async fn main() -> anyhow::Result<()> {
                 app_env,
                 startup_options,
                 grpc_rx,
-                rrd_rx,
+                rrd_path,
             )?;
             Ok(Box::new(viewer))
         }),
@@ -151,7 +151,7 @@ fn create_app(
     app_env: re_viewer::AppEnvironment,
     startup_options: re_viewer::StartupOptions,
     grpc_rx: re_log_channel::LogReceiver,
-    rrd_rx: Option<re_log_channel::LogReceiver>,
+    rrd_path: Option<PathBuf>,
 ) -> anyhow::Result<re_viewer::App> {
     // Let Rerun set up its custom wgpu renderer (re_renderer) and
     // egui integration before we create the App.
@@ -168,13 +168,6 @@ fn create_app(
             .expect("tokio runtime should exist"),
     );
 
-    // Wire up the gRPC channel so incoming log messages appear in
-    // the viewer's data store automatically.
-    viewer.add_log_receiver(grpc_rx);
-    if let Some(rrd_rx) = rrd_rx {
-        viewer.add_log_receiver(rrd_rx);
-    }
-
     // ── Register the custom Gaussian splat visualizer ─────────────────
     // `extend_view_class` adds our visualizer to the existing
     // Spatial3DView.  Any entity that matches the Gaussians3D
@@ -187,6 +180,16 @@ fn create_app(
             Ok(())
         },
     )?;
+
+    // Wire up live logs and positional files only after the custom visualizer
+    // is registered, so the first activated blueprint can resolve Gaussians3D.
+    viewer.add_log_receiver(grpc_rx);
+    if let Some(rrd_path) = rrd_path {
+        // Rerun's normal file-opening route both ingests the stores and selects
+        // the recording. Feeding decoded messages through add_log_receiver left
+        // the app on the catalog page with no active recording.
+        viewer.open_url_or_file(&rrd_path.to_string_lossy());
+    }
 
     Ok(viewer)
 }
@@ -436,36 +439,6 @@ fn parse_cli_from(mut args: impl Iterator<Item = OsString>) -> anyhow::Result<Cl
     }
 
     Ok(cli)
-}
-
-fn rrd_log_receiver(path: &Path) -> anyhow::Result<re_log_channel::LogReceiver> {
-    let file = std::fs::File::open(path)
-        .map_err(|err| anyhow::anyhow!("failed to open startup RRD {}: {err}", path.display()))?;
-    let source = re_log_channel::LogSource::File {
-        path: path.to_owned(),
-        follow: false,
-    };
-    let (tx, rx) = re_log_channel::log_channel(source);
-    let path = path.to_owned();
-    std::thread::Builder::new()
-        .name("startup-rrd-loader".to_owned())
-        .spawn(move || {
-            let reader = std::io::BufReader::new(file);
-            for decoded in re_log_encoding::Decoder::<re_log_types::LogMsg>::decode_lazy(reader) {
-                match decoded {
-                    Ok(log_msg) => {
-                        if tx.send(log_msg.into()).is_err() {
-                            return;
-                        }
-                    }
-                    Err(err) => {
-                        re_log::error!("Failed to decode startup RRD {}: {err}", path.display());
-                        return;
-                    }
-                }
-            }
-        })?;
-    Ok(rx)
 }
 
 fn parse_port(value: &OsString) -> anyhow::Result<u16> {
