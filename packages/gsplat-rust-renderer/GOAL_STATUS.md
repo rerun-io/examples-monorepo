@@ -1,14 +1,14 @@
 # gsplat-rust-renderer Goal Status
 
-Last updated: 2026-07-10T01:06:10-07:00
+Last updated: 2026-07-10T02:03:35-07:00
 
 ## Success criteria
 
 - [x] **FPS:** at least 30 FPS with a continuously moving `EyeControls3D` camera at 1920x1080, verified with `GSPLAT_FPS_PROBE=1` on lego, hotdog, chair, drums, ficus, materials, mic, and ship.
 - [x] **Quality:** standalone `gsplat-render` output matches each checkpoint's published full-200-image PSNR/SSIM. Checkpoint prediction renders must first validate the evaluator.
-- [ ] **Brush:** a pixi-managed osx-arm64 Brush trainer exports PLY snapshots, and this package replays retained snapshots on an `iterations` timeline with rerun-sdk 0.34.1 into an RRD no larger than about 2 GB.
+- [x] **Brush:** a pixi-managed osx-arm64 Brush trainer exports PLY snapshots, and this package replays retained snapshots on an `iterations` timeline with rerun-sdk 0.34.1 into an RRD no larger than about 2 GB.
 - [x] All required Rust, Python, and GPU regression gates are green.
-- [ ] Pixel and numeric evidence is published on `/tmp/fleet-artifacts/gsplat-goals.html`.
+- [x] Pixel and numeric evidence is published on `/tmp/fleet-artifacts/gsplat-goals.html`.
 
 ## Current evidence
 
@@ -82,7 +82,13 @@ The official Brush v0.3.0 Apple Silicon binary is installed project-locally by a
 
 The default replay path uses this workspace's rerun-sdk 0.34.1, logs the first export + exact 1,000-step boundaries + final (31 snapshots maximum), retains higher-order SH only in the final snapshot, uses the plural `iterations` timeline, and saves a collapsed-panel spinning-eye blueprint. The conservative one-million-splat estimate is 1.82 GB; Lego's 325k cap is below 600 MB.
 
-A GPU-free smoke replay of two 325k-splat checkpoints produced `/tmp/brush-replay-smoke.rrd`: 55.4 MiB compressed, one recording + one blueprint, `iterations` and `step` timelines, two full-geometry `world/splats` chunks, final-only SH, and serialized `EyeControls3D:spin_speed`. Actual Brush training and the progression video remain to be run with the now-available Metal access.
+A GPU-free smoke replay of two 325k-splat checkpoints produced `/tmp/brush-replay-smoke.rrd`: 55.4 MiB compressed, one recording + one blueprint, `iterations` and `step` timelines, two full-geometry `world/splats` chunks, final-only SH, and serialized `EyeControls3D:spin_speed`.
+
+The replay now runs concurrently with the pure trainer and deletes each stable intermediate PLY only after it has been logged or intentionally skipped; the final PLY is preserved. A real 100-step Metal smoke first proved this behavior (`export_50.ply` removed, `export_100.ply` kept) and produced a structurally valid 1.3 MiB RRD.
+
+The full Pixi-managed Lego Metal run then completed all 30,000 steps. Brush produced 600 exports at 50-step intervals; the logger retained iteration 50, each exact 1,000-step boundary, and 30,000 for 31 full-geometry `world/splats` chunks. Final-only SH is present, the final cloud has 43,804 splats, and `rerun rrd stats` reports both `iterations` and `step` timelines, one recording plus one blueprint, and 45.6 MiB compressed. The run directory is only 56 MiB: `training.rrd` (47,881,696 bytes), final `export_30000.ply` (10,339,294 bytes), and an empty trainer log. The RRD is also copied to `/tmp/fleet-artifacts/gsplat-goals/brush-training.rrd` for evidence access.
+
+Pixel validation used the required headless custom viewer and 0.34.1 `viewer-mcp` timeline sweep. The 90-frame, 1280x720 progression MP4 spans iterations 50–30,000; first/mid/final full-frame screenshots confirm the saved spinning-eye blueprint and geometry progression. All eight pretrained scenes also have 90-frame collapsed-panel spin-orbit videos on the evidence page. Temporary PNG frame dumps and per-scene RRDs were deleted after encoding.
 
 ### Assets
 
@@ -90,7 +96,7 @@ Data and pretrained checkpoint archives are downloaded and extracted for all eig
 
 ### Gates
 
-The complete post-performance pre-commit gate set is green as of 2026-07-10 01:05 PDT: Rust fmt, Clippy with warnings denied, 11 Rust tests, Ruff, Pyrefly, Vulture, all 28 Python tests, and the Metal `tools/relog_check.py` GPU regression. The re-log check captured full-frame headless screenshots and observed the expected red → green → blue replacement sequence.
+The complete final pre-commit gate set is green as of 2026-07-10 02:03 PDT: Rust fmt, Clippy with warnings denied, 12 Rust tests, Ruff, Pyrefly, Vulture, all 29 Python tests, and the Metal `tools/relog_check.py` GPU regression. The re-log check captured full-frame headless screenshots and observed the expected red → green → blue replacement sequence.
 
 ## Constraints and decisions
 
@@ -105,4 +111,4 @@ The complete post-performance pre-commit gate set is green as of 2026-07-10 01:0
 
 The CPU-verifiable implementation is checkpointed in local commits `4acb55a` (full-split quality guard) and `82a05a2` (bounded Brush replay), with Pixi orchestration and this status included in the following workflow commit.
 
-Run the complete post-performance gate set and commit the renderer milestone, then complete real Brush training/replay and the required per-scene/training pixel videos.
+Commit the Brush/media milestone locally without pushing, verify a clean worktree, and hand off the completed evidence URL.

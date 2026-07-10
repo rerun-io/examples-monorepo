@@ -39,6 +39,7 @@ use re_viewer::external::{eframe, egui};
 use std::ffi::OsString;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::num::ParseIntError;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -86,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
         re_grpc_server::ServerOptions::default(),
         re_grpc_server::shutdown::never(),
     );
+    let rrd_rx = cli.rrd_path.as_deref().map(rrd_log_receiver).transpose()?;
 
     // ── Create the viewer application ─────────────────────────────────────
     // `MainThreadToken` is a safety marker that proves we're on the main
@@ -105,7 +107,14 @@ async fn main() -> anyhow::Result<()> {
     // (including `ViewerClient.save_screenshot`) work the same way.
     if cli.headless {
         return run_headless(cli.window_size, move |cc| {
-            create_app(cc, main_thread_token, app_env, startup_options, grpc_rx)
+            create_app(
+                cc,
+                main_thread_token,
+                app_env,
+                startup_options,
+                grpc_rx,
+                rrd_rx,
+            )
         });
     }
 
@@ -117,7 +126,14 @@ async fn main() -> anyhow::Result<()> {
         "Rerun Viewer",
         native_options(),
         Box::new(move |cc| {
-            let viewer = create_app(cc, main_thread_token, app_env, startup_options, grpc_rx)?;
+            let viewer = create_app(
+                cc,
+                main_thread_token,
+                app_env,
+                startup_options,
+                grpc_rx,
+                rrd_rx,
+            )?;
             Ok(Box::new(viewer))
         }),
     )
@@ -135,6 +151,7 @@ fn create_app(
     app_env: re_viewer::AppEnvironment,
     startup_options: re_viewer::StartupOptions,
     grpc_rx: re_log_channel::LogReceiver,
+    rrd_rx: Option<re_log_channel::LogReceiver>,
 ) -> anyhow::Result<re_viewer::App> {
     // Let Rerun set up its custom wgpu renderer (re_renderer) and
     // egui integration before we create the App.
@@ -154,6 +171,9 @@ fn create_app(
     // Wire up the gRPC channel so incoming log messages appear in
     // the viewer's data store automatically.
     viewer.add_log_receiver(grpc_rx);
+    if let Some(rrd_rx) = rrd_rx {
+        viewer.add_log_receiver(rrd_rx);
+    }
 
     // ── Register the custom Gaussian splat visualizer ─────────────────
     // `extend_view_class` adds our visualizer to the existing
@@ -314,7 +334,7 @@ fn handle_pending_screenshots(harness: &mut egui_kittest::Harness<'_, re_viewer:
 /// `--window-size`, `--hide-welcome-screen` and `--version`; everything else
 /// (memory limits, etc.) is silently ignored so the binary can be used as a
 /// drop-in replacement for `rerun`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Cli {
     /// TCP port for the gRPC server.
     port: u16,
@@ -326,17 +346,23 @@ struct Cli {
     window_size: Option<egui::Vec2>,
     /// Hide the welcome screen (passed by `rr.spawn` / `ViewerClient.spawn`).
     hide_welcome_screen: bool,
+    /// Optional recording loaded into the custom viewer at startup.
+    rrd_path: Option<PathBuf>,
 }
 
 fn parse_cli() -> anyhow::Result<Cli> {
+    parse_cli_from(std::env::args_os().skip(1))
+}
+
+fn parse_cli_from(mut args: impl Iterator<Item = OsString>) -> anyhow::Result<Cli> {
     let mut cli = Cli {
         port: GRPC_PORT,
         print_version: false,
         headless: false,
         window_size: None,
         hide_welcome_screen: false,
+        rrd_path: None,
     };
-    let mut args = std::env::args_os().skip(1);
 
     while let Some(arg) = args.next() {
         if arg == "--version" || arg == "-V" {
@@ -402,9 +428,44 @@ fn parse_cli() -> anyhow::Result<Cli> {
         }) {
             continue;
         }
+
+        let path = PathBuf::from(&arg);
+        if path.extension().is_some_and(|extension| extension == "rrd") {
+            cli.rrd_path = Some(path);
+        }
     }
 
     Ok(cli)
+}
+
+fn rrd_log_receiver(path: &Path) -> anyhow::Result<re_log_channel::LogReceiver> {
+    let file = std::fs::File::open(path)
+        .map_err(|err| anyhow::anyhow!("failed to open startup RRD {}: {err}", path.display()))?;
+    let source = re_log_channel::LogSource::File {
+        path: path.to_owned(),
+        follow: false,
+    };
+    let (tx, rx) = re_log_channel::log_channel(source);
+    let path = path.to_owned();
+    std::thread::Builder::new()
+        .name("startup-rrd-loader".to_owned())
+        .spawn(move || {
+            let reader = std::io::BufReader::new(file);
+            for decoded in re_log_encoding::Decoder::<re_log_types::LogMsg>::decode_lazy(reader) {
+                match decoded {
+                    Ok(log_msg) => {
+                        if tx.send(log_msg.into()).is_err() {
+                            return;
+                        }
+                    }
+                    Err(err) => {
+                        re_log::error!("Failed to decode startup RRD {}: {err}", path.display());
+                        return;
+                    }
+                }
+            }
+        })?;
+    Ok(rx)
 }
 
 fn parse_port(value: &OsString) -> anyhow::Result<u16> {
@@ -515,4 +576,25 @@ fn native_options() -> eframe::NativeOptions {
         wgpu_setup: full_limits_wgpu_setup(),
     };
     native_options
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn positional_rrd_is_kept_for_startup_loading() {
+        let cli = parse_cli_from(
+            [
+                OsString::from("--headless"),
+                OsString::from("--port"),
+                OsString::from("4321"),
+                OsString::from("training.rrd"),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+
+        assert_eq!(cli.rrd_path, Some(std::path::PathBuf::from("training.rrd")));
+    }
 }

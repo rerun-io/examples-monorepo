@@ -1,5 +1,7 @@
 """Behavior tests for pure Brush PLY snapshot replay."""
 
+from pathlib import Path
+
 import pytest
 import rerun as rr
 from simplecv.rerun_log_utils import RerunTyroConfig
@@ -7,6 +9,7 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 from gsplat_rust_renderer.apis.visualize_brush_training import (
     VisualizeBrushTrainingConfig,
     estimate_replay_size_bytes,
+    remove_processed_export,
     set_iteration_time,
     should_retain_snapshot,
 )
@@ -62,3 +65,16 @@ def test_config_defaults_to_pure_spinning_replay() -> None:
     assert config.spin_speed > 0.0
     assert config.step_stride == 50
     assert config.snapshot_stride == 20
+
+
+def test_live_replay_deletes_processed_intermediates_but_keeps_final(tmp_path: Path) -> None:
+    """Disk-bounded live replay removes each consumed PLY except the final export."""
+    intermediate: Path = tmp_path / "export_50.ply"
+    final: Path = tmp_path / "export_30000.ply"
+    intermediate.touch()
+    final.touch()
+
+    assert remove_processed_export(intermediate, delete_processed=True, is_final=False) is True
+    assert remove_processed_export(final, delete_processed=True, is_final=True) is False
+    assert not intermediate.exists()
+    assert final.exists()

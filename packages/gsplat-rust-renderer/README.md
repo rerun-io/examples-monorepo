@@ -60,8 +60,8 @@ List them with `pixi task list -e gsplat-rust-renderer`. The public tasks (all p
 | `gsplat-rust-renderer-render` | Render a PLY at a NeRF camera pose to PNG with the standalone `gsplat-render` binary — no Rerun (`--no-default-features`). |
 | `gsplat-rust-renderer-evaluate-checkpoints` | Recompute PSNR/SSIM over all eight bundled 200-image checkpoint prediction splits and compare with each `results.json`. |
 | `gsplat-rust-renderer-evaluate` | Render all eight 200-image splits with one persistent standalone process per scene, then write `data/evaluation/metrics.json`. |
-| `gsplat-rust-renderer-brush-train-lego-mac` | Install checksummed Brush v0.3.0 locally and train Lego as a pure Metal trainer, exporting PLY every 50 iterations. |
-| `gsplat-rust-renderer-brush-replay-lego` | Save a Rerun 0.34.1 training replay with a bounded 31-snapshot retention schedule. |
+| `gsplat-rust-renderer-brush-train-lego-mac` | Install checksummed Brush v0.3.0 locally and run the raw Lego Metal trainer, exporting PLY every 50 iterations. This train-only task retains every PLY. |
+| `gsplat-rust-renderer-brush-replay-lego` | Train Lego while saving a disk-bounded Rerun 0.34.1 replay with at most 31 snapshots and only the final PLY retained. |
 | `gsplat-rust-renderer-brush-train-{chair,hotdog,lego,train,truck}` | Train splats on a scene with `brush_app` for 30K steps and export a PLY to `data/trained/`. Each depends on its dataset-download task. |
 | `gsplat-rust-renderer-fmt` / `-clippy` / `-rust-test` | `cargo fmt --all` / `cargo clippy --all-targets -- -D warnings` / `cargo test`. |
 
@@ -83,11 +83,10 @@ Brush v0.3.0 has no osx-arm64 conda package in the configured channels, but upst
 Brush is used only as a trainer: neither `--with-viewer` nor `--rerun-enabled` is passed, so its embedded Rerun 0.24 never creates a recording. It exports a PLY every 50 iterations. Our separate logger, running with this workspace's Rerun 0.34.1, writes `world/splats` on the plural `iterations` timeline and saves a collapsed-panel, white-background blueprint with a spinning orbital eye.
 
 ```bash
-pixi run -e gsplat-rust-renderer-dev --frozen gsplat-rust-renderer-brush-train-lego-mac
 pixi run -e gsplat-rust-renderer-dev --frozen gsplat-rust-renderer-brush-replay-lego
 ```
 
-Retention is deliberately independent of export frequency: keep iteration 50, exact 1,000-step boundaries, and the final iteration; retain full geometry in every saved snapshot, but higher-order SH only in the final snapshot. A 30k run therefore has at most 31 RRD snapshots. Conservatively assuming one million splats at every snapshot, aligned geometry/color payloads, final float16 SH, and 15% RRD framing overhead gives 1.82 GB; Lego's 325k cap is estimated below 600 MB. The raw 50-step PLY exports remain available for forensic inspection but are not all copied into the RRD.
+This task starts Brush and the 0.34.1 logger concurrently. Retention is deliberately independent of export frequency: keep iteration 50, exact 1,000-step boundaries, and the final iteration; retain full geometry in every saved snapshot, but higher-order SH only in the final snapshot. A 30k run therefore has at most 31 RRD snapshots. Conservatively assuming one million splats at every snapshot, aligned geometry/color payloads, final float16 SH, and 15% RRD framing overhead gives 1.82 GB; Lego's 325k cap is estimated below 600 MB. After each stable PLY has been logged or intentionally skipped, the logger deletes that intermediate; only the final PLY remains beside `training.rrd`. This prevents 600 uncompressed 50-step exports from accumulating on disk.
 
 ## Logging your own PLY from Python
 

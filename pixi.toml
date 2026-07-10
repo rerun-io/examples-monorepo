@@ -1696,10 +1696,10 @@ cwd = "packages/gsplat-rust-renderer"
 description = "Train Lego with Brush as a pure trainer and export PLY every 50 iterations (macOS Metal)"
 
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-brush-replay-lego]
-cmd = "python tools/visualize_brush_training.py --rr-config.application-id brush-training-replay --rr-config.save data/brush-runs/lego/training.rrd --rr-config.headless --scene-dir data/nerfbaselines/data/lego --export-dir data/brush-runs/lego --total-iters 30000 --step-stride 50 --snapshot-stride 20 --sh-mode final --spin-speed 0.2 --no-follow"
-depends-on = ["gsplat-rust-renderer-brush-train-lego-mac"]
+cmd = "zsh -c 'rm -rf data/brush-runs/lego && mkdir -p data/brush-runs/lego || exit 1; data/tools/brush-v0.3.0/brush_app data/nerfbaselines/data/lego --total-steps 30000 --export-every 50 --export-path data/brush-runs/lego > data/brush-runs/lego/brush.log 2>&1 & trainer_pid=$!; trap \"kill $trainer_pid 2>/dev/null || true\" EXIT; python tools/visualize_brush_training.py --rr-config.application-id brush-training-replay --rr-config.save data/brush-runs/lego/training.rrd --rr-config.headless --scene-dir data/nerfbaselines/data/lego --export-dir data/brush-runs/lego --brush-log data/brush-runs/lego/brush.log --total-iters 30000 --step-stride 50 --snapshot-stride 20 --sh-mode final --spin-speed 0.2 --delete-processed-plys; replay_status=$?; if test $replay_status -ne 0; then kill $trainer_pid 2>/dev/null || true; wait $trainer_pid 2>/dev/null || true; exit $replay_status; fi; wait $trainer_pid; trainer_status=$?; test $trainer_status -eq 0'"
+depends-on = ["_gsplat-rust-renderer-install-brush-mac", "_gsplat-rust-renderer-download-nerfbaselines-data-lego"]
 cwd = "packages/gsplat-rust-renderer"
-description = "Replay 31 retained PLY snapshots on iterations with Rerun 0.34.1 (first, every 1K, final SH)"
+description = "Train Lego while Rerun 0.34.1 live-replays 31 retained snapshots and deletes processed intermediate PLYs"
 
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-brush-train-truck]
 cmd = """

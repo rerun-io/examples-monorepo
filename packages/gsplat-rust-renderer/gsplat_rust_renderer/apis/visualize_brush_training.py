@@ -8,6 +8,11 @@ first export, exact 1,000-step boundaries, and the final export on the plural
 higher-order SH only for the final one. At 30k steps this is at most 31
 snapshots; the conservative one-million-splat estimate is 1.82 GB.
 
+For disk-bounded live runs, ``--delete-processed-plys`` removes each export
+after it has either been logged or intentionally skipped. The final PLY is
+always preserved. This keeps at most Brush's currently-written export plus the
+final checkpoint on disk outside the compressed RRD.
+
 The saved blueprint is a collapsed-panel, white-background Spatial3D view with
 the package's Gaussians3D visualizer and a continuously spinning orbital eye.
 Use ``--rr-config.save <path>.rrd --rr-config.headless --no-follow`` to replay a
@@ -103,6 +108,23 @@ def should_retain_snapshot(
     return is_first or is_final or iteration % retention_interval == 0
 
 
+def remove_processed_export(ply_path: Path, *, delete_processed: bool, is_final: bool) -> bool:
+    """Delete a consumed intermediate Brush export when live cleanup is enabled.
+
+    Args:
+        ply_path: Stable PLY that has already been logged or skipped.
+        delete_processed: Whether the live run requested disk-bounded cleanup.
+        is_final: Whether this is the configured final training export.
+
+    Returns:
+        Whether the file was deleted.
+    """
+    if not delete_processed or is_final:
+        return False
+    ply_path.unlink()
+    return True
+
+
 @dataclass
 class VisualizeBrushTrainingConfig:
     """Tail a brush-cli export dir and log the training run to the custom viewer."""
@@ -196,6 +218,12 @@ class VisualizeBrushTrainingConfig:
     follow: bool = True
     """Keep polling until the total_iters checkpoint lands; False = log what
     exists now and exit (works on a finished run)."""
+    delete_processed_plys: bool = False
+    """Delete each stable intermediate PLY after processing it during replay.
+
+    The final PLY is always kept. Enable this for live 50-iteration exports so
+    the uncompressed checkpoints cannot fill the disk; leave it disabled when
+    replaying an archival export directory."""
     stall_timeout: float = 1800.0
     """Abort if no new artifact appears for this many seconds while following."""
 
@@ -593,6 +621,7 @@ def run_brush_native(config: VisualizeBrushTrainingConfig) -> None:
                 print(f"iter {iteration:>6}: logged {num_splats} splats ({ply_path.name}, sh={'on' if with_sh else 'off'})")
             else:
                 done_plys[iteration] = 0  # processed but skipped by snapshot_stride
+            remove_processed_export(ply_path, delete_processed=config.delete_processed_plys, is_final=is_final)
             n_checkpoints_seen += 1
             progressed = True
 
@@ -718,6 +747,7 @@ def main(config: VisualizeBrushTrainingConfig) -> None:
                 print(f"iter {iteration:>6}: logged {num_splats} splats ({ply_path.name}, sh={'on' if with_sh else 'off'})")
             else:
                 done_plys[iteration] = 0  # processed but skipped by snapshot_stride
+            remove_processed_export(ply_path, delete_processed=config.delete_processed_plys, is_final=is_final)
             n_checkpoints_seen += 1
             progressed = True
 
