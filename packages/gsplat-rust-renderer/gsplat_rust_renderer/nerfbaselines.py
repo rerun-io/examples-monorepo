@@ -31,6 +31,8 @@ DATA_REPO: str = "nerfbaselines/nerfbaselines-data"
 """HuggingFace dataset repo holding the nerf-synthetic scene captures."""
 DEFAULT_SCENE: str = "lego"
 """Default blender scene used by the demos."""
+BLENDER_SCENES: tuple[str, ...] = ("lego", "hotdog", "chair", "drums", "ficus", "materials", "mic", "ship")
+"""All scenes in the NeRF Synthetic Blender benchmark."""
 
 # Module lives at <package>/gsplat_rust_renderer/nerfbaselines.py, so parents[1]
 # is the package root where the pixi tasks (cwd = packages/gsplat-rust-renderer)

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import numpy as np
-from jaxtyping import Float32
+from jaxtyping import Float32, Float64, UInt8
 
 if TYPE_CHECKING:
     import torch
@@ -47,7 +47,9 @@ def load_image_rgb(path: Path) -> Float32[np.ndarray, "h w 3"]:
         rgb: Float32[np.ndarray, "h w 3"] = raw[:, :, :3].astype(np.float32) / 255.0
         # OpenCV loads BGR, convert to RGB
         rgb = rgb[:, :, ::-1].copy()
-        img: Float32[np.ndarray, "h w 3"] = rgb * alpha + (1.0 - alpha)
+        composited_rgb: Float32[np.ndarray, "h w 3"] = rgb * alpha + (1.0 - alpha)
+        composited_u8: UInt8[np.ndarray, "h w 3"] = np.clip(composited_rgb * 255.0, 0.0, 255.0).astype(np.uint8)
+        img: Float32[np.ndarray, "h w 3"] = composited_u8.astype(np.float32) / 255.0
     else:
         # BGR → RGB
         img = raw[:, :, ::-1].astype(np.float32) / 255.0
@@ -78,7 +80,7 @@ def psnr(
     return float(10.0 * np.log10(1.0 / mse))
 
 
-def _gaussian_kernel_1d(size: int, sigma: float) -> Float32[np.ndarray, "k"]:
+def _gaussian_kernel_1d(size: int, sigma: float) -> Float64[np.ndarray, "k"]:
     """Create a 1D Gaussian kernel.
 
     Args:
@@ -88,8 +90,8 @@ def _gaussian_kernel_1d(size: int, sigma: float) -> Float32[np.ndarray, "k"]:
     Returns:
         Normalized 1D Gaussian kernel.
     """
-    coords: Float32[np.ndarray, "k"] = np.arange(size, dtype=np.float32) - size // 2
-    kernel: Float32[np.ndarray, "k"] = np.exp(-0.5 * (coords / sigma) ** 2)
+    coords: Float64[np.ndarray, "k"] = np.arange(size, dtype=np.float64) - size // 2
+    kernel: Float64[np.ndarray, "k"] = np.exp(-0.5 * (coords / sigma) ** 2)
     return kernel / kernel.sum()
 
 
@@ -97,7 +99,7 @@ def _gaussian_blur(
     img: Float32[np.ndarray, "h w c"],
     window_size: int = 11,
     sigma: float = 1.5,
-) -> Float32[np.ndarray, "h w c"]:
+) -> Float64[np.ndarray, "h_out w_out c"]:
     """Apply separable Gaussian blur to an image.
 
     Uses 1D convolutions for efficiency (matching Brush's SSIM implementation).
@@ -108,25 +110,20 @@ def _gaussian_blur(
         sigma: Standard deviation of the Gaussian.
 
     Returns:
-        Blurred image with same shape.
+        Valid-window blurred image with each spatial axis reduced by
+        ``window_size - 1`` pixels, matching dm-pix/nerfbaselines.
     """
-    kernel: Float32[np.ndarray, "k"] = _gaussian_kernel_1d(window_size, sigma)
-    pad: int = window_size // 2
-
-    # Pad with reflect to avoid border artifacts
-    padded: Float32[np.ndarray, "h2 w2 c"] = np.pad(
-        img, ((pad, pad), (pad, pad), (0, 0)), mode="reflect"
-    )
-
+    kernel: Float64[np.ndarray, "k"] = _gaussian_kernel_1d(window_size, sigma)
+    img_f64: Float64[np.ndarray, "h w c"] = img.astype(np.float64)
     # Separable convolution: horizontal then vertical
-    h, w, c = padded.shape
+    h, w, c = img_f64.shape
     # Horizontal pass
-    horiz: Float32[np.ndarray, "h w2 c"] = np.zeros((h, w - 2 * pad, c), dtype=np.float32)
+    horiz: Float64[np.ndarray, "h w_out c"] = np.zeros((h, w - window_size + 1, c), dtype=np.float64)
     for i in range(window_size):
-        horiz += padded[:, i : i + horiz.shape[1], :] * kernel[i]
+        horiz += img_f64[:, i : i + horiz.shape[1], :] * kernel[i]
 
     # Vertical pass
-    result: Float32[np.ndarray, "h w c"] = np.zeros((h - 2 * pad, horiz.shape[1], c), dtype=np.float32)
+    result: Float64[np.ndarray, "h_out w_out c"] = np.zeros((h - window_size + 1, horiz.shape[1], c), dtype=np.float64)
     for i in range(window_size):
         result += horiz[i : i + result.shape[0], :, :] * kernel[i]
 
@@ -163,21 +160,26 @@ def ssim(
     c1: float = (k1 * data_range) ** 2
     c2: float = (k2 * data_range) ** 2
 
-    mu_x: Float32[np.ndarray, "h w 3"] = _gaussian_blur(rendered, window_size, sigma)
-    mu_y: Float32[np.ndarray, "h w 3"] = _gaussian_blur(ground_truth, window_size, sigma)
+    mu_x: Float64[np.ndarray, "h w 3"] = _gaussian_blur(rendered, window_size, sigma)
+    mu_y: Float64[np.ndarray, "h w 3"] = _gaussian_blur(ground_truth, window_size, sigma)
 
-    mu_x_sq: Float32[np.ndarray, "h w 3"] = mu_x ** 2
-    mu_y_sq: Float32[np.ndarray, "h w 3"] = mu_y ** 2
-    mu_xy: Float32[np.ndarray, "h w 3"] = mu_x * mu_y
+    mu_x_sq: Float64[np.ndarray, "h w 3"] = mu_x ** 2
+    mu_y_sq: Float64[np.ndarray, "h w 3"] = mu_y ** 2
+    mu_xy: Float64[np.ndarray, "h w 3"] = mu_x * mu_y
 
-    sigma_x_sq: Float32[np.ndarray, "h w 3"] = _gaussian_blur(rendered ** 2, window_size, sigma) - mu_x_sq
-    sigma_y_sq: Float32[np.ndarray, "h w 3"] = _gaussian_blur(ground_truth ** 2, window_size, sigma) - mu_y_sq
-    sigma_xy: Float32[np.ndarray, "h w 3"] = _gaussian_blur(rendered * ground_truth, window_size, sigma) - mu_xy
+    sigma_x_sq: Float64[np.ndarray, "h w 3"] = _gaussian_blur(rendered ** 2, window_size, sigma) - mu_x_sq
+    sigma_y_sq: Float64[np.ndarray, "h w 3"] = _gaussian_blur(ground_truth ** 2, window_size, sigma) - mu_y_sq
+    sigma_xy: Float64[np.ndarray, "h w 3"] = _gaussian_blur(rendered * ground_truth, window_size, sigma) - mu_xy
 
-    numerator: Float32[np.ndarray, "h w 3"] = (2.0 * mu_xy + c1) * (2.0 * sigma_xy + c2)
-    denominator: Float32[np.ndarray, "h w 3"] = (mu_x_sq + mu_y_sq + c1) * (sigma_x_sq + sigma_y_sq + c2)
+    epsilon: float = float(np.finfo(np.float32).eps ** 2)
+    sigma_x_sq = np.maximum(epsilon, sigma_x_sq)
+    sigma_y_sq = np.maximum(epsilon, sigma_y_sq)
+    sigma_xy = np.sign(sigma_xy) * np.minimum(np.sqrt(sigma_x_sq * sigma_y_sq), np.abs(sigma_xy))
 
-    ssim_map: Float32[np.ndarray, "h w 3"] = numerator / denominator
+    numerator: Float64[np.ndarray, "h w 3"] = (2.0 * mu_xy + c1) * (2.0 * sigma_xy + c2)
+    denominator: Float64[np.ndarray, "h w 3"] = (mu_x_sq + mu_y_sq + c1) * (sigma_x_sq + sigma_y_sq + c2)
+
+    ssim_map: Float64[np.ndarray, "h w 3"] = numerator / denominator
     return float(np.mean(ssim_map))
 
 
