@@ -294,7 +294,7 @@ impl GpuRenderResources {
         let num_isect_buf: wgpu::Buffer = create_sized_buffer(
             device,
             "num_isect",
-            su32,
+            4 * su32,
             storage_usage | wgpu::BufferUsages::COPY_DST,
         );
         let tile_id_from_isect_buf: wgpu::Buffer = create_sized_buffer(
@@ -400,6 +400,7 @@ impl GpuRenderResources {
                 keys_alt: &global_from_compact_alt_buf,
                 vals_alt: &depth_keys_alt_buf,
                 num_keys: &num_visible_buf,
+                indirect_dispatch_buffer: None,
             },
             &scratch,
             depth_sort_wg_count,
@@ -415,6 +416,7 @@ impl GpuRenderResources {
                 keys_alt: &depth_keys_alt_buf,
                 vals_alt: &global_from_compact_alt_buf,
                 num_keys: &num_visible_buf,
+                indirect_dispatch_buffer: None,
             },
             &scratch,
             depth_sort_wg_count,
@@ -430,6 +432,7 @@ impl GpuRenderResources {
                 keys_alt: &sort_keys_buf,
                 vals_alt: &sorted_indices_alt_buf,
                 num_keys: &num_isect_buf,
+                indirect_dispatch_buffer: None,
             },
             &scratch,
             tile_sort_wg_count,

@@ -409,6 +409,7 @@ impl GaussianRenderer {
                 keys_alt: &buffers.global_from_compact_alt_buffer,
                 vals_alt: &buffers.depth_keys_alt_buffer,
                 num_keys: &buffers.num_visible_buffer,
+                indirect_dispatch_buffer: None,
             },
             &scratch,
             depth_sort_workgroup_count,
@@ -424,6 +425,7 @@ impl GaussianRenderer {
                 keys_alt: &buffers.depth_keys_alt_buffer,
                 vals_alt: &buffers.global_from_compact_alt_buffer,
                 num_keys: &buffers.num_visible_buffer,
+                indirect_dispatch_buffer: None,
             },
             &scratch,
             depth_sort_workgroup_count,
@@ -440,6 +442,7 @@ impl GaussianRenderer {
                 keys_alt: &buffers.sort_keys_buffer,
                 vals_alt: &buffers.sorted_indices_alt_buffer,
                 num_keys: &buffers.num_intersections_buffer,
+                indirect_dispatch_buffer: Some(buffers.num_intersections_buffer.clone()),
             },
             &scratch,
             sort_workgroup_count,
@@ -573,8 +576,10 @@ impl GaussianRenderer {
         let num_intersections_buffer = Arc::new(create_sized_buffer(
             &ctx.device,
             &format!("{label}::num_intersections"),
-            std::mem::size_of::<u32>(),
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            4 * std::mem::size_of::<u32>(),
+            wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::INDIRECT,
         ));
         let intersection_capacity = intersection_capacity_for_instances(initial_capacity);
         let tile_id_from_isect_buffer = Arc::new(create_sized_buffer(

@@ -24,6 +24,8 @@ pub const SORT_ELEMENTS_PER_THREAD: u32 = 1;
 pub const SORT_BLOCK_SIZE: u32 = SORT_WORKGROUP_SIZE * SORT_ELEMENTS_PER_THREAD;
 pub const SORT_BITS_PER_PASS: u32 = 4;
 pub const SORT_BIN_COUNT: u32 = 1 << SORT_BITS_PER_PASS;
+/// Byte offset of the `[x, y, z]` dispatch tuple stored after a sort's live-count word.
+pub const SORT_DISPATCH_ARGS_OFFSET: u64 = std::mem::size_of::<u32>() as u64;
 pub const TILE_WIDTH: u32 = 16;
 pub const TILE_OFFSET_WORKGROUP_SIZE: u32 = 256;
 pub const TILE_OFFSET_CHECKS_PER_ITER: u32 = 8;
@@ -888,6 +890,9 @@ pub struct RadixSortBuffers<'a> {
     pub vals_alt: &'a wgpu::Buffer,
     /// GPU buffer whose first u32 is the number of keys to sort.
     pub num_keys: &'a wgpu::Buffer,
+    /// Optional `[num_keys, dispatch_x, dispatch_y, dispatch_z]` buffer.
+    /// When present, count/scatter launch only enough workgroups for live keys.
+    pub indirect_dispatch_buffer: Option<std::sync::Arc<wgpu::Buffer>>,
 }
 
 /// Scratch buffers for the radix sort.  The sorts in a frame run
@@ -922,6 +927,8 @@ pub struct RadixSort {
     compose_bg: wgpu::BindGroup,
     /// Grid for the count + scatter kernels (one thread per key slot).
     count_grid: (u32, u32),
+    /// GPU-authored count/scatter workgroup dimensions, when available.
+    indirect_dispatch_buffer: Option<std::sync::Arc<wgpu::Buffer>>,
     /// Grid for the reduce + scan_add kernels.
     reduce_grid: (u32, u32),
     scan_blocks_grid: (u32, u32),
@@ -1051,6 +1058,7 @@ pub fn build_radix_sort(
             ],
         }),
         count_grid: dispatch_grid_for_workgroups(sort_wg_count.max(1)),
+        indirect_dispatch_buffer: buffers.indirect_dispatch_buffer.clone(),
         reduce_grid: dispatch_grid_for_workgroups(sort_reduce_wg_count),
         scan_blocks_grid: dispatch_grid_1d(reduced_block_count, 1),
         compose_grid: dispatch_grid_1d(reduced_total, SORT_WORKGROUP_SIZE),
@@ -1071,7 +1079,11 @@ impl RadixSort {
         for pass_bgs in &self.passes {
             pass.set_pipeline(&pipelines.sort_count);
             pass.set_bind_group(0, &pass_bgs.count_bg, &[]);
-            pass.dispatch_workgroups(self.count_grid.0, self.count_grid.1, 1);
+            if let Some(dispatch_buffer) = &self.indirect_dispatch_buffer {
+                pass.dispatch_workgroups_indirect(dispatch_buffer, SORT_DISPATCH_ARGS_OFFSET);
+            } else {
+                pass.dispatch_workgroups(self.count_grid.0, self.count_grid.1, 1);
+            }
 
             pass.set_pipeline(&pipelines.sort_reduce);
             pass.set_bind_group(0, &pass_bgs.reduce_bg, &[]);
@@ -1095,7 +1107,11 @@ impl RadixSort {
 
             pass.set_pipeline(&pipelines.sort_scatter);
             pass.set_bind_group(0, &pass_bgs.scatter_bg, &[]);
-            pass.dispatch_workgroups(self.count_grid.0, self.count_grid.1, 1);
+            if let Some(dispatch_buffer) = &self.indirect_dispatch_buffer {
+                pass.dispatch_workgroups_indirect(dispatch_buffer, SORT_DISPATCH_ARGS_OFFSET);
+            } else {
+                pass.dispatch_workgroups(self.count_grid.0, self.count_grid.1, 1);
+            }
         }
     }
 }

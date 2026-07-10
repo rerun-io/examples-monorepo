@@ -723,4 +723,3 @@ fn scan_block_sums_main(@builtin(local_invocation_index) local_index: u32) {
         scan_totals_out[3] = 0u;
     }
 }
-

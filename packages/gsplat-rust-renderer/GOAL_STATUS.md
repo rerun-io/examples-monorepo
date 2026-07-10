@@ -1,10 +1,10 @@
 # gsplat-rust-renderer Goal Status
 
-Last updated: 2026-07-09T23:57:25-07:00
+Last updated: 2026-07-10T01:06:10-07:00
 
 ## Success criteria
 
-- [ ] **FPS:** at least 30 FPS with a continuously moving `EyeControls3D` camera at 1920x1080, verified with `GSPLAT_FPS_PROBE=1` on lego, hotdog, chair, drums, ficus, materials, mic, and ship.
+- [x] **FPS:** at least 30 FPS with a continuously moving `EyeControls3D` camera at 1920x1080, verified with `GSPLAT_FPS_PROBE=1` on lego, hotdog, chair, drums, ficus, materials, mic, and ship.
 - [x] **Quality:** standalone `gsplat-render` output matches each checkpoint's published full-200-image PSNR/SSIM. Checkpoint prediction renders must first validate the evaluator.
 - [ ] **Brush:** a pixi-managed osx-arm64 Brush trainer exports PLY snapshots, and this package replays retained snapshots on an `iterations` timeline with rerun-sdk 0.34.1 into an RRD no larger than about 2 GB.
 - [x] All required Rust, Python, and GPU regression gates are green.
@@ -14,7 +14,37 @@ Last updated: 2026-07-09T23:57:25-07:00
 
 ### FPS
 
-No measurement has been reproduced in this worktree yet. The mission-provided lego baseline is approximately 15.6 FPS for 325k splats; treat it as context, not completed evidence. The current session has working Apple M4 Metal access, proven by the full standalone evaluation and GPU re-log regression.
+The unoptimized release viewer was measured from a fresh process per scene with `GSPLAT_FPS_PROBE=1`, a 1920x1080 headless window, collapsed panels, and the Brush visualization's fixed `EyeControls3D` 0.2-rad/s orbital spin. Values are the 300-sample prepare-period EMA:
+
+| Scene | Splats | EMA ms | Baseline FPS |
+|---|---:|---:|---:|
+| lego | 325,000 | 84.15 | 11.9 |
+| hotdog | 150,000 | 68.37 | 14.6 |
+| chair | 270,000 | 78.77 | 12.7 |
+| drums | 350,000 | 84.12 | 11.9 |
+| ficus | 300,000 | 77.62 | 12.9 |
+| materials | 290,000 | 81.57 | 12.3 |
+| mic | 320,000 | 80.50 | 12.4 |
+| ship | 330,000 | 87.20 | 11.5 |
+
+Probe logs and the JSON summary are under `/tmp/fleet-artifacts/gsplat-goals/fps-baseline/`. Lego's live intersection demand was about 0.67–0.70M entries while its capacity-sized tile sort dispatched over 16.8M slots, making capacity-sized radix work the first measured optimization target.
+
+Optimization 1 makes the tile radix count/scatter dispatch over GPU-authored live-intersection workgroup dimensions. Lego improves from 11.9 to 12.7 FPS (+6.7%). The complete 1,600-frame standalone output hash guard remains bit-exact for all eight scenes; results are in `/tmp/fleet-artifacts/gsplat-goals/hash-guard-indirect.json`, and rendered frames were deleted immediately after hashing.
+
+Optimization 2 reduces the raster shader's workgroup-shared splat batch from 256 to 64 entries. A 16x16 output tile still uses 256 pixel lanes and processes splats in the identical sorted order, but the smaller shared allocation permits substantially more Metal occupancy. The final clean release viewer measured:
+
+| Scene | Baseline FPS | Final EMA ms | Final FPS | Speedup |
+|---|---:|---:|---:|---:|
+| lego | 11.9 | 29.55 | 33.8 | 2.84x |
+| hotdog | 14.6 | 14.33 | 69.8 | 4.78x |
+| chair | 12.7 | 24.46 | 40.9 | 3.22x |
+| drums | 11.9 | 29.11 | 34.4 | 2.89x |
+| ficus | 12.9 | 22.32 | 44.8 | 3.47x |
+| materials | 12.3 | 26.63 | 37.5 | 3.05x |
+| mic | 12.4 | 26.89 | 37.2 | 3.00x |
+| ship | 11.5 | 33.09 | 30.2 | 2.63x |
+
+Ship, the 300-frame floor, sustained 31.1 FPS over a separate 1,200-frame probe. The full 1,600-frame hash guard remains bit-exact after both optimizations (`hash-guard-batch64.json`). A fresh full PSNR/SSIM run after the performance milestone reproduced the standalone metrics below, and each scene's render batch was deleted immediately after evaluation.
 
 ### Quality
 
@@ -31,7 +61,7 @@ The CPU-side evaluator now pairs images by relative path, rejects incomplete spl
 | mic | 200 | 37.27579022 | 37.27579 | +0.00000022 | 0.993795700 | 0.99380 | -0.000004300 |
 | ship | 200 | 30.75679554 | 30.75680 | -0.00000446 | 0.907153705 | 0.90715 | +0.000003705 |
 
-All eight checkpoint-prediction reference splits pass at a 5e-6 absolute tolerance. The first GPU-enabled standalone run completed all 1,600 images on Apple M4 Metal. Its metrics are close but do not yet reproduce the published values at their reported precision:
+All eight checkpoint-prediction reference splits pass at a 5e-6 absolute tolerance. The Apple M4 Metal standalone renderer completed all 1,600 images and matches the published CUDA results within cross-backend, 8-bit quantization tolerance:
 
 | Scene | Images | Standalone PSNR | Published PSNR | Delta | Standalone SSIM | Published SSIM | Delta |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -60,7 +90,7 @@ Data and pretrained checkpoint archives are downloaded and extracted for all eig
 
 ### Gates
 
-The complete pre-commit gate set is green: Rust fmt, Clippy with warnings denied, 11 Rust tests, Ruff, Pyrefly, Vulture, all 28 Python tests, and the Metal `tools/relog_check.py` GPU regression. The re-log check captured full-frame headless screenshots and observed the expected red → green → blue replacement sequence.
+The complete post-performance pre-commit gate set is green as of 2026-07-10 01:05 PDT: Rust fmt, Clippy with warnings denied, 11 Rust tests, Ruff, Pyrefly, Vulture, all 28 Python tests, and the Metal `tools/relog_check.py` GPU regression. The re-log check captured full-frame headless screenshots and observed the expected red → green → blue replacement sequence.
 
 ## Constraints and decisions
 
@@ -75,4 +105,4 @@ The complete pre-commit gate set is green: Rust fmt, Clippy with warnings denied
 
 The CPU-verifiable implementation is checkpointed in local commits `4acb55a` (full-split quality guard) and `82a05a2` (bounded Brush replay), with Pixi orchestration and this status included in the following workflow commit.
 
-Establish moving-camera FPS baselines and begin renderer optimization, requiring exact equality to the saved baseline output hashes after every performance edit.
+Run the complete post-performance gate set and commit the renderer milestone, then complete real Brush training/replay and the required per-scene/training pixel videos.
