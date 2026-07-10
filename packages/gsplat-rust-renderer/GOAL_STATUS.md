@@ -1,6 +1,6 @@
 # gsplat-rust-renderer Goal Status
 
-Last updated: 2026-07-10T02:03:35-07:00
+Last updated: 2026-07-10T02:07:30-07:00
 
 ## Success criteria
 
@@ -111,4 +111,4 @@ The complete final pre-commit gate set is green as of 2026-07-10 02:03 PDT: Rust
 
 The CPU-verifiable implementation is checkpointed in local commits `4acb55a` (full-split quality guard) and `82a05a2` (bounded Brush replay), with Pixi orchestration and this status included in the following workflow commit.
 
-Commit the Brush/media milestone locally without pushing, verify a clean worktree, and hand off the completed evidence URL.
+All three criteria are complete. The final implementation milestones are committed locally as `908cc4f` (moving-camera renderer throughput) and `1bd36ba` (bounded Brush training replay and RRD loading), with no push. Hand off the evidence URL and local commits to the orchestrator.
