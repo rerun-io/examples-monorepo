@@ -16,6 +16,7 @@ project-includes = [
     "packages/mast3r-slam/mast3r_slam/**/*",
     "packages/dpvo/dpvo/**/*",
     "packages/slam-evals/slam_evals/**/*",
+    "packages/arkitscenes-download/arkitscenes_download/**/*",
     "packages/sapiens2-pose/src/**/*",
     "packages/sapiens-coco133-pose/src/**/*",
     "packages/egoexo-forge/src/**/*",
@@ -40,11 +41,14 @@ disable-search-path-heuristics = true
 
 # Enable Pyrefly's experimental tensor-shape inference for torch.Tensor and
 # jaxtyping annotations. Shape-aware torch stubs are provided in search-path.
-tensor-shapes = true
+# TODO: investigate — the tensor_shapes fixtures send pyrefly 1.1.x into an
+# infinite solver loop on any numpy-using file (see README "Known issues").
+# Disabled until fixed; re-enable BOTH lines together.
+# tensor-shapes = true
 
 # Source roots — where first-party imports are resolved from
 search-path = [
-    "typings/pyrefly/tensor_shapes/fixtures",
+    # "typings/pyrefly/tensor_shapes/fixtures",  # TODO: hangs pyrefly, see README
     "packages/monoprior",
     "packages/simplecv",
     "packages/prompt-da/src",
@@ -60,6 +64,7 @@ search-path = [
     "packages/mast3r-slam",
     "packages/dpvo",
     "packages/slam-evals",
+    "packages/arkitscenes-download",
     "packages/sapiens2-pose",
     "packages/sapiens2-pose/src",
     "packages/sapiens-coco133-pose/src",
@@ -81,6 +86,7 @@ site-package-path = [
     ".pixi/envs/monoprior-dev/lib/python3.12/site-packages",
     ".pixi/envs/simplecv-dev/lib/python3.12/site-packages",
     ".pixi/envs/simplecv-dev/lib/python3.12/site-packages/rerun_sdk",
+    ".pixi/envs/arkitscenes-download-dev/lib/python3.12/site-packages",
     ".pixi/envs/prompt-da-dev/lib/python3.12/site-packages",
     ".pixi/envs/wilor-nano-dev/lib/python3.12/site-packages",
     ".pixi/envs/sam3d-body-dev/lib/python3.12/site-packages",

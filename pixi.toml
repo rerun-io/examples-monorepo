@@ -2112,7 +2112,73 @@ cmd = "python tools/register_catalog.py"
 cwd = "packages/mamma"
 description = "Step 3: register the 42 RRDs into the mamma_iphones catalog (base+props layers, names/properties from gate.json, default blueprint); needs mamma-iphones-serve running"
 
+
+# ─── arkitscenes-download (ARKitScenes → layered Rerun recordings) ──────────
+# Rides the catalog lane (catalog-common + rerun-prerelease) for the
+# datafusion/dataloader extras that registration needs. linux-64 only: the
+# video transcode prefers av1_nvenc (NVENC) with a libsvtav1 CPU fallback.
+[feature.arkitscenes-download]
+platforms = ["linux-64"]
+
+[feature.arkitscenes-download.dependencies]
+python = "3.12.*"
+ffmpeg = ">=8.1"
+imagecodecs = ">=2024.9.22"
+trimesh = "*"
+pillow = "*"
+curl = "*"
+
+[feature.arkitscenes-download.pypi-dependencies]
+arkitscenes-download = { path = "packages/arkitscenes-download", editable = true }
+tyro = ">=0.9,<1"
+
+[feature.arkitscenes-download.activation.env]
+PACKAGE_DIR = "packages/arkitscenes-download"
+
+[feature.arkitscenes-download.tasks.arkitscenes-download-sample]
+cmd = "python -m arkitscenes_download --download-dir data --num-random 5 --seed 42 --no-include-point-clouds --assets mov annotation mesh lowres_wide.traj confidence lowres_depth lowres_wide_intrinsics ultrawide_intrinsics highres_depth"
+cwd = "packages/arkitscenes-download"
+description = "Download a 5-sequence ARKitScenes sample (mov + depth + calibration, no point clouds)"
+
+[feature.arkitscenes-download.tasks.arkitscenes-download-ingest]
+cmd = "python -m arkitscenes_download.ingest.batch --workers 2"
+cwd = "packages/arkitscenes-download"
+depends-on = ["arkitscenes-download-sample"]
+description = "Ingest every downloaded sequence into layered .rrd files under data/rrd/"
+
+[feature.arkitscenes-download.tasks.arkitscenes-download-pipeline]
+cmd = "python -m arkitscenes_download.pipeline --chunk-size 5 --destination data/published"
+cwd = "packages/arkitscenes-download"
+description = "Resumable download→ingest→verify→publish pipeline (local destination; see --help for ssh targets)"
+
+[feature.arkitscenes-download.tasks.arkitscenes-download-serve]
+cmd = "rerun server --port 51235"
+cwd = "packages/arkitscenes-download"
+description = "Serve a Rerun catalog for registered ARKitScenes recordings"
+
+[feature.arkitscenes-download.tasks.arkitscenes-download-register]
+cmd = "python -m arkitscenes_download.ingest.catalog --rrd-dir data/rrd"
+cwd = "packages/arkitscenes-download"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Register ingested layer .rrds into the catalog on :51235"
+
+[feature.arkitscenes-download.tasks.arkitscenes-download-view]
+cmd = "rerun rerun+http://127.0.0.1:51235"
+cwd = "packages/arkitscenes-download"
+description = "Open the native Rerun viewer on the local catalog"
+
 [environments]
+arkitscenes-download = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "arkitscenes-download",
+], solve-group = "arkitscenes-download", no-default-feature = true }
+arkitscenes-download-dev = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "arkitscenes-download",
+    "dev",
+], solve-group = "arkitscenes-download", no-default-feature = true }
 dev = { features = [
     "ide",
     "dev",
