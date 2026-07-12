@@ -85,6 +85,17 @@ pixi install -a
 sudo apt install nvidia-driver-590-open && sudo reboot
 ```
 
+### Known issues
+
+- **TODO: investigate the `typings/pyrefly/tensor_shapes/fixtures` stubs.** With that
+  directory on pyrefly's `search-path`, `pixi run typecheck` sends pyrefly (1.1.0 and
+  1.1.1) into an infinite solver loop on any file that *uses* numpy values — even
+  `np.zeros(3)` — across all packages. `tensor-shapes = false` alone does not help;
+  only removing the search-path entry does. Both are commented out in `pyrefly.toml`
+  until the fixtures are fixed (shape-aware `torch.Tensor`/jaxtyping inference is
+  disabled meanwhile). Repro: add the line back and run
+  `pyrefly check -c pyrefly.toml` on any numpy-using file.
+
 ## Listing tasks
 
 ```bash

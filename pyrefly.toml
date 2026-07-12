@@ -41,11 +41,14 @@ disable-search-path-heuristics = true
 
 # Enable Pyrefly's experimental tensor-shape inference for torch.Tensor and
 # jaxtyping annotations. Shape-aware torch stubs are provided in search-path.
-tensor-shapes = true
+# TODO: investigate — the tensor_shapes fixtures send pyrefly 1.1.x into an
+# infinite solver loop on any numpy-using file (see README "Known issues").
+# Disabled until fixed; re-enable BOTH lines together.
+# tensor-shapes = true
 
 # Source roots — where first-party imports are resolved from
 search-path = [
-    "typings/pyrefly/tensor_shapes/fixtures",
+    # "typings/pyrefly/tensor_shapes/fixtures",  # TODO: hangs pyrefly, see README
     "packages/monoprior",
     "packages/simplecv",
     "packages/prompt-da/src",
