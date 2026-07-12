@@ -19,8 +19,8 @@ def make_blueprint() -> rrb.Blueprint:
                     rrb.Tabs(
                         rrb.Spatial2DView(name="depth ARKit", origin=PINHOLE_WIDE_LOWRES, contents=["$origin/depth"]),
                         rrb.Spatial2DView(name="depth GT (laser)", origin=PINHOLE_WIDE, contents=["$origin/depth_gt"]),
-                        rrb.Spatial2DView(name="confidence", origin=PINHOLE_WIDE_LOWRES, contents=["$origin/confidence"]),
-                    )
+                    ),
+                    rrb.Spatial2DView(name="confidence", origin=PINHOLE_WIDE_LOWRES, contents=["$origin/confidence"]),
                 ),
             ),
             rrb.Horizontal(
