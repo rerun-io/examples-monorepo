@@ -246,7 +246,12 @@ def _log_confidence(recording: rr.RecordingStream, paths: list[Path], quarter_tu
 
     def make_columns(values: list[object]) -> rr.ComponentColumnList:
         labels: list[np.ndarray] = [value for value in values if isinstance(value, np.ndarray)]
-        return rr.SegmentationImage.columns(buffer=labels)
+        # Raw buffers carry no shape: without an explicit ImageFormat column the
+        # viewer cannot interpret the pixels and the view renders empty.
+        formats: list[rr.datatypes.ImageFormat] = [
+            rr.datatypes.ImageFormat(width=label.shape[1], height=label.shape[0], channel_datatype="U8") for label in labels
+        ]
+        return rr.SegmentationImage.columns(buffer=labels, format=formats)
 
     _log_baked_columns(recording, path, paths, quarter_turns, pool, description, _decode_confidence_asset, make_columns)
 
