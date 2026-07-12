@@ -108,6 +108,7 @@ packages/sam3/data/
 packages/sapiens2-pose/data/
 packages/robocap-slam/data/
 packages/egoexo-forge/data/
+packages/arkitscenes-download/data/
 packages/pysfm/data/
 packages/gsplat-rust-renderer/data/
 packages/dpvo/data/
