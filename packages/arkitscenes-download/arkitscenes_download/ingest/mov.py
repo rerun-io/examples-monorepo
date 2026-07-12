@@ -132,6 +132,11 @@ def iter_video_samples(video: VideoSamples, batch_size: int = VIDEO_BATCH_SIZE):
             raise ValueError(f"prepared track declared {expected_sample_count} frames but demuxed {sample_count} samples")
 
 
+def track_packet_times(path: Path, stream_index: int) -> Float64[np.ndarray, "n"]:
+    """Sorted presentation times in seconds for one source video track."""
+    return np.asarray([float(timestamp) for timestamp in _packet_pts(path, stream_index)], dtype=np.float64)
+
+
 def _packet_pts(path: Path, stream_index: int = 0) -> list[Fraction]:
     """Read the sorted presentation timestamps for all nonempty video packets."""
     timestamps: list[Fraction] = []
@@ -204,10 +209,12 @@ def _restore_source_pts(encoded_path: Path, source_pts: list[Fraction], output_p
             raise ValueError(f"transcode frame count changed: {len(source_pts)} -> {packet_index}")
 
 
-def _transcode_av1(path: Path, stream_index: int, quarter_turns: int = 0) -> tuple[Path, str, str, str]:
-    """Transcode one video track to calibrated AV1 settings."""
+def _transcode_av1(path: Path, stream_index: int, quarter_turns: int = 0, drop_leading: int = 0) -> tuple[Path, str, str, str]:
+    """Transcode one video track to calibrated AV1 settings, dropping leading frames."""
     TRANSCODE_DIR.mkdir(parents=True, exist_ok=True)
-    source_pts: list[Fraction] = _packet_pts(path, stream_index)
+    source_pts: list[Fraction] = _packet_pts(path, stream_index)[drop_leading:]
+    if not source_pts:
+        raise ValueError(f"dropping {drop_leading} leading frames leaves track {stream_index} empty")
     encoders: list[tuple[str, list[str]]] = [
         ("av1_nvenc", ["-c:v", "av1_nvenc", "-preset", "p7", "-rc", "vbr", "-cq", "30"]),
         ("svt_av1", ["-c:v", "libsvtav1", "-preset", "6", "-crf", "32"]),
@@ -222,9 +229,12 @@ def _transcode_av1(path: Path, stream_index: int, quarter_turns: int = 0) -> tup
         2: "hflip,vflip,setpts=PTS-STARTPTS",
         3: "transpose=1,setpts=PTS-STARTPTS",
     }
+    # Trimming happens post-decode in presentation order, so the encoder opens
+    # the kept range with a fresh keyframe and every retained frame decodes.
+    trim: str = f"select='gte(n\\,{drop_leading})'," if drop_leading else ""
     for encoder_name, encoder in encoders:
         settings: str = " ".join(encoder)
-        identity: str = f"{stat.st_size}:{stat.st_mtime_ns}:{stream_index}:{quarter_turns % 4}:{settings}"
+        identity: str = f"{stat.st_size}:{stat.st_mtime_ns}:{stream_index}:{quarter_turns % 4}:{drop_leading}:{settings}"
         fingerprint: str = hashlib.sha256(identity.encode()).hexdigest()[:16]
         output_path: Path = TRANSCODE_DIR / f"{path.stem}_track_{stream_index}_rot{quarter_turns % 4}_{fingerprint}.mp4"
         if output_path.exists():
@@ -250,7 +260,7 @@ def _transcode_av1(path: Path, stream_index: int, quarter_turns: int = 0) -> tup
             f"0:{stream_index}",
             "-an",
             "-vf",
-            filters[quarter_turns % 4],
+            trim + filters[quarter_turns % 4],
             *encoder,
             "-fps_mode",
             "passthrough",
@@ -274,9 +284,11 @@ def _transcode_av1(path: Path, stream_index: int, quarter_turns: int = 0) -> tup
     raise RuntimeError("both AV1 transcoders failed:\n" + "\n".join(errors))
 
 
-def prepare_video_track(path: Path, stream_index: int, quarter_turns: int = 0, keep_transcode_cache: bool = False) -> VideoSamples:
+def prepare_video_track(
+    path: Path, stream_index: int, quarter_turns: int = 0, keep_transcode_cache: bool = False, drop_leading: int = 0
+) -> VideoSamples:
     """Prepare one track by always transcoding it to AV1."""
     started: float = time.perf_counter()
-    transcode_path, encoder, settings, version = _transcode_av1(path, stream_index, quarter_turns)
+    transcode_path, encoder, settings, version = _transcode_av1(path, stream_index, quarter_turns, drop_leading)
     elapsed: float = time.perf_counter() - started
     return VideoSamples(transcode_path, not keep_transcode_cache, encoder, settings, version, elapsed)

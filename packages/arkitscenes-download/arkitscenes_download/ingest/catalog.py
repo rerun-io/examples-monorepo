@@ -61,9 +61,12 @@ def register_sequences(config: Config) -> DatasetEntry:
                 on_duplicate=OnDuplicateSegmentLayer.REPLACE,
             ).wait()
 
-    blueprint_path: Path = config.rrd_dir / f"{config.dataset_name}.rbl"
-    make_blueprint().save("arkitscenes", blueprint_path)
-    dataset.register_blueprint(blueprint_path.resolve().as_uri(), set_default=True)
+    # Most ARKitScenes captures are handheld portrait scans, so the portrait
+    # layout is the dataset default; landscape stays selectable in the viewer.
+    for orientation, is_portrait in (("landscape", False), ("portrait", True)):
+        blueprint_path: Path = config.rrd_dir / f"{config.dataset_name}-{orientation}.rbl"
+        make_blueprint(is_portrait).save(f"arkitscenes-{orientation}", blueprint_path)
+        dataset.register_blueprint(blueprint_path.resolve().as_uri(), set_default=is_portrait)
     return dataset
 
 
