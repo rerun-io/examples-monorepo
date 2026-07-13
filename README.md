@@ -19,6 +19,7 @@ The table below is a curated subset; the workspace ships additional packages wit
 | [vistadream](packages/vistadream/) | `vistadream` | `vistadream-dev` | 3.12 | CUDA 13 | Single-image 3D reconstruction via 3D Gaussians |
 | [gsplat-rust-renderer](packages/gsplat-rust-renderer/) | `gsplat-rust-renderer` | `gsplat-rust-renderer-dev` | 3.12 | CUDA 13 | Rust-based Gaussian splatting renderer |
 | [pyvrs-viewer](packages/pyvrs-viewer/) | `pyvrs-viewer` | `pyvrs-viewer-dev` | 3.12 | None | VRS file viewer with Rerun |
+| [arkitscenes-download](packages/arkitscenes-download/) | `arkitscenes-download` | `arkitscenes-download-dev` | 3.12 | None (NVENC if present) | ARKitScenes downloader → layered Rerun recordings; try `pixi run -e arkitscenes-download arkitscenes-download-sample` for a 5-sequence demo |
 
 ## Quick start
 
