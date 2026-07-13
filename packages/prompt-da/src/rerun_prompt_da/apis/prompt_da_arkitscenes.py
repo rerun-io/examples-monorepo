@@ -5,6 +5,7 @@ local Rerun catalog, completes depth frame-by-frame, fuses a final TSDF mesh,
 and writes a replaceable ``promptda`` layer back to the dataset.
 """
 
+import multiprocessing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -14,13 +15,12 @@ import cv2
 import numpy as np
 import pyarrow as pa
 import rerun as rr
+import torch
 from arkitscenes_download.ingest.blueprint import make_blueprint
 from arkitscenes_download.ingest.depth import encode_depth_png
 from arkitscenes_download.ingest.paths import CONFIDENCE, DEPTH, DEPTH_PROMPTDA, PINHOLE_WIDE, PROMPTDA_MESH, RIG, VIDEO_WIDE
 from beartype.roar import BeartypeException
-from jaxtyping import Float, UInt8, UInt16
-from monopriors.models.depth_completion.base_completion_depth import CompletionDepthPrediction
-from monopriors.models.depth_completion.prompt_da import PromptDAPredictor
+from jaxtyping import Float, Float32, UInt8, UInt16
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
 from rerun.experimental.dataloader import (
@@ -34,7 +34,12 @@ from rerun.experimental.dataloader import (
 )
 from scipy.spatial.transform import Rotation
 from simplecv.ops.tsdf_depth_fuser import Open3DFuser
+from torch import Tensor
+from torch.utils.data import DataLoader
 from tqdm import tqdm
+
+from rerun_prompt_da.apis.prompt_da_trt_polycam import network_image_hw
+from rerun_prompt_da.trt_predictor import PromptDATrtPredictor
 
 ARKITSCENES_DATASET = "arkitscenes"
 PROMPTDA_LAYER = "promptda"
@@ -58,6 +63,10 @@ class PDAArkitScenesConfig:
     """Inference rate selected by client-side stride over the native stream."""
     max_image_size: int = 1008
     """Largest image dimension accepted by the PromptDA predictor."""
+    batch_size: int = 8
+    """Frames per TensorRT batch (the engine profile's max/opt batch)."""
+    num_workers: int = 4
+    """Spawned DataLoader worker processes fetching/decoding batches in parallel."""
     max_depth_range_meter: float = 4.0
     """Maximum predicted depth retained for TSDF fusion, in metres."""
     depth_fusion_resolution: float = 0.04
@@ -77,9 +86,7 @@ class SegmentResult:
     inferred_frames: int
     """Number of frames sent through PromptDA."""
     skipped_decodes: int
-    """Number of selected frames skipped because a decoded field was absent."""
-    decode_failures: int
-    """Number of skipped frames caused by recoverable AV1 decoder errors."""
+    """Frames skipped because a field was absent (includes recovered AV1 decoder errors)."""
 
 
 class ResilientVideoFrameDecoder(VideoFrameDecoder):
@@ -183,6 +190,32 @@ def segments_to_process(rows: list[dict], video_id: str | None, process_all: boo
     ]
 
 
+def _list_collate(batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep a fetched chunk as a plain list of sample dicts (no tensor stacking)."""
+    return batch
+
+
+def _batched_loader(rerun_dataset: RerunMapDataset, chunks: list[list[int]], num_workers: int) -> DataLoader:
+    """Build a DataLoader that fetches whole chunks, in order, on worker processes.
+
+    The batch fetch (server query + per-sample GOP decode back to the previous
+    keyframe) is the pipeline's slowest stage and is GIL-bound in-process, so
+    spawn-based worker processes are the only way to parallelize it. The
+    Rerun dataloader requires the ``spawn`` start method (forked workers
+    deadlock on their first catalog call).
+    """
+    if num_workers == 0:
+        return DataLoader(rerun_dataset, batch_sampler=chunks, collate_fn=_list_collate)
+    return DataLoader(
+        rerun_dataset,
+        batch_sampler=chunks,
+        collate_fn=_list_collate,
+        num_workers=num_workers,
+        multiprocessing_context=multiprocessing.get_context("spawn"),
+        prefetch_factor=2,
+    )
+
+
 def connect_catalog(catalog_url: str) -> CatalogClient:
     """Connect to the local ARKitScenes catalog or terminate with setup guidance."""
     try:
@@ -198,8 +231,9 @@ def connect_catalog(catalog_url: str) -> CatalogClient:
 def process_segment(
     dataset_entry: DatasetEntry,
     segment_id: str,
+    portrait: bool,
     config: PDAArkitScenesConfig,
-    predictor: PromptDAPredictor,
+    predictor: PromptDATrtPredictor,
 ) -> SegmentResult:
     """Infer and fuse one catalog segment into a PromptDA RRD."""
     source: DataSource = DataSource(dataset=dataset_entry, segments=[segment_id])
@@ -236,69 +270,81 @@ def process_segment(
     )
     inferred_frames: int = 0
     skipped_decodes: int = 0
-    for sample_idx in tqdm(range(0, rerun_dataset.sample_index.total_samples, stride), desc=f"PromptDA {segment_id}"):
-        sample: dict[str, Any] = rerun_dataset[sample_idx]
-        if any(sample.get(field_name) is None for field_name in fields):
-            skipped_decodes += 1
+    strided_indices: list[int] = list(range(0, rerun_dataset.sample_index.total_samples, stride))
+    chunks: list[list[int]] = [strided_indices[i : i + config.batch_size] for i in range(0, len(strided_indices), config.batch_size)]
+    loader: DataLoader = _batched_loader(rerun_dataset, chunks, config.num_workers)
+    for chunk, samples in tqdm(zip(chunks, loader, strict=True), total=len(chunks), desc=f"PromptDA {segment_id}", unit="batch"):
+        valid: list[tuple[int, dict[str, Any]]] = [
+            (sample_idx, sample)
+            for sample_idx, sample in zip(chunk, samples, strict=True)
+            if all(sample.get(field_name) is not None for field_name in fields)
+        ]
+        skipped_decodes += len(chunk) - len(valid)
+        if not valid:
             continue
-        rgb_chw: Any = sample["video"]
-        depth_1hw: Any = sample["depth"]
-        confidence_flat: Any = sample["conf"]
-        translation_tensor: Any = sample["pose_t"]
-        quaternion_tensor: Any = sample["pose_q"]
-        k_tensor: Any = sample["k"]
-        rgb_hw3: UInt8[ndarray, "h w 3"] = np.asarray(rgb_chw.cpu().numpy().transpose(1, 2, 0), dtype=np.uint8)
-        prompt_depth_hw: UInt16[ndarray, "h2 w2"] = np.asarray(depth_1hw.cpu().numpy().squeeze(0), dtype=np.uint16)
-        confidence_hw: UInt8[ndarray, "h2 w2"] = np.asarray(confidence_flat.cpu().numpy().reshape(192, 256), dtype=np.uint8)
-        translation: Float[ndarray, "3"] = np.asarray(translation_tensor.cpu().numpy())
-        quaternion_xyzw: Float[ndarray, "4"] = np.asarray(quaternion_tensor.cpu().numpy())
-        k_flat: Float[ndarray, "9"] = np.asarray(k_tensor.cpu().numpy())
-        prediction: CompletionDepthPrediction = predictor(rgb=rgb_hw3, prompt_depth=prompt_depth_hw)
-        predicted_depth_hw: UInt16[ndarray, "h w"] = prediction.depth_mm
-        index_result: tuple[Any, Any] = rerun_dataset.sample_index.global_to_local(sample_idx)
-        timestamp: Any = index_result[1]
-        timestamp_seconds: float = float(timestamp / np.timedelta64(1, "s"))
-        rr.set_time("video_time", duration=timestamp_seconds, recording=recording)
-        rr.log(
-            DEPTH_PROMPTDA,
-            rr.EncodedDepthImage(blob=encode_depth_png(predicted_depth_hw), media_type="image/png", meter=1000.0),
-            recording=recording,
+        rgb_bhw3: UInt8[Tensor, "b h w 3"] = torch.stack([sample["video"].permute(1, 2, 0) for _, sample in valid])
+        prompt_bhw: Float32[Tensor, "b 192 256"] = torch.from_numpy(
+            np.stack([sample["depth"].numpy().squeeze(0) for _, sample in valid]).astype(np.float32) / 1000.0
         )
-        filtered_depth_hw: UInt16[ndarray, "h w"] = filter_depth_for_fusion(
-            predicted_depth_hw,
-            confidence_hw,
-            config.max_depth_range_meter,
-        )
-        world_t_cam_44: Float[ndarray, "4 4"] = world_t_cam_from_pose(translation, quaternion_xyzw)
-        cam_t_world_44: Float[ndarray, "4 4"] = np.linalg.inv(world_t_cam_44)
-        fuser.fuse_frames(
-            depth_hw=filtered_depth_hw,
-            K_33=k_matrix_from_flat(k_flat),
-            cam_T_world_44=cam_t_world_44,
-            rgb_hw3=rgb_hw3,
-        )
-        inferred_frames += 1
+        depth_bhw: Float32[Tensor, "b h w"] = predictor(rgb_bhw3, prompt_bhw)
+        depth_mm_bhw: UInt16[ndarray, "b h w"] = (depth_bhw.cpu().numpy() * 1000.0).astype(np.uint16)
+        for row, (sample_idx, sample) in enumerate(valid):
+            predicted_depth_hw: UInt16[ndarray, "h w"] = depth_mm_bhw[row]
+            confidence_hw: UInt8[ndarray, "h2 w2"] = np.asarray(sample["conf"].numpy().reshape(192, 256), dtype=np.uint8)
+            timestamp: Any = rerun_dataset.sample_index.global_to_local(sample_idx)[1]
+            timestamp_seconds: float = float(timestamp / np.timedelta64(1, "s"))
+            rr.set_time("video_time", duration=timestamp_seconds, recording=recording)
+            rr.log(
+                DEPTH_PROMPTDA,
+                rr.EncodedDepthImage(blob=encode_depth_png(predicted_depth_hw), media_type="image/png", meter=1000.0),
+                recording=recording,
+            )
+            filtered_depth_hw: UInt16[ndarray, "h w"] = filter_depth_for_fusion(
+                predicted_depth_hw,
+                confidence_hw,
+                config.max_depth_range_meter,
+            )
+            world_t_cam_44: Float[ndarray, "4 4"] = world_t_cam_from_pose(
+                np.asarray(sample["pose_t"].numpy()), np.asarray(sample["pose_q"].numpy())
+            )
+            fuser.fuse_frames(
+                depth_hw=filtered_depth_hw,
+                K_33=k_matrix_from_flat(np.asarray(sample["k"].numpy())),
+                cam_T_world_44=np.linalg.inv(world_t_cam_44),
+                rgb_hw3=np.asarray(rgb_bhw3[row].numpy()),
+            )
+            inferred_frames += 1
 
     mesh: Any = fuser.get_mesh()
     mesh.compute_vertex_normals()
+    vertices: Float[ndarray, "n 3"] = np.asarray(mesh.vertices)
     rr.log(
         PROMPTDA_MESH,
         rr.Mesh3D(
-            vertex_positions=np.asarray(mesh.vertices),
+            vertex_positions=vertices,
             triangle_indices=np.asarray(mesh.triangles),
             vertex_normals=np.asarray(mesh.vertex_normals),
             vertex_colors=np.asarray(mesh.vertex_colors),
+            # Same see-through treatment as the GT mesh: cull back-facing walls
+            # so the 3D view looks into the room from outside.
+            face_rendering=rr.components.MeshFaceRendering.Front,
         ),
         static=True,
         recording=recording,
     )
+    # Embed the PromptDA layout in this layer, framed on the fused mesh (the
+    # same per-sequence treatment the base layer gives the GT mesh). Sent at
+    # the end of the stream so it wins blueprint activation when the segment's
+    # layers load together in the viewer.
+    if len(vertices) > 0:
+        mesh_center_xyz: Float[ndarray, "3"] = vertices.mean(axis=0)
+        bounding_radius_m: float = float(np.linalg.norm(vertices - mesh_center_xyz, axis=1).max())
+        rr.send_blueprint(
+            make_blueprint(portrait=portrait, framing=(mesh_center_xyz, bounding_radius_m), include_promptda=True),
+            recording=recording,
+        )
     recording.flush()
-    return SegmentResult(
-        rrd_path=rrd_path,
-        inferred_frames=inferred_frames,
-        skipped_decodes=skipped_decodes,
-        decode_failures=len(video_decoder.decode_failures),
-    )
+    return SegmentResult(rrd_path=rrd_path, inferred_frames=inferred_frames, skipped_decodes=skipped_decodes)
 
 
 def run_prompt_da_arkitscenes(config: PDAArkitScenesConfig) -> None:
@@ -315,10 +361,17 @@ def run_prompt_da_arkitscenes(config: PDAArkitScenesConfig) -> None:
     if not segment_ids:
         print("nothing to process: every segment already has the promptda layer")
         return
-    predictor: PromptDAPredictor = PromptDAPredictor(device="cuda", model_type="large", max_size=config.max_image_size)
+    # ARKitScenes wide video is always 1920x1440; the engine wants a static,
+    # 14-aligned network resolution shared across segments.
+    predictor: PromptDATrtPredictor = PromptDATrtPredictor(
+        model_type="large",
+        image_hw=network_image_hw((1440, 1920), config.max_image_size),
+        batch_size=config.batch_size,
+    )
+    portrait_by_id: dict[str, bool] = {str(row["rerun_segment_id"]): bool(row.get("property:portrait:value")) for row in rows}
     results: list[SegmentResult] = []
     for segment_id in segment_ids:
-        result: SegmentResult = process_segment(dataset_entry, segment_id, config, predictor)
+        result: SegmentResult = process_segment(dataset_entry, segment_id, portrait_by_id[segment_id], config, predictor)
         results.append(result)
         if config.register:
             dataset_entry.register(
@@ -336,7 +389,7 @@ def run_prompt_da_arkitscenes(config: PDAArkitScenesConfig) -> None:
 
     print(f"segments processed: {len(results)}")
     print(f"frames inferred: {sum(r.inferred_frames for r in results)}")
-    print(f"skipped decodes: {sum(r.skipped_decodes for r in results)} (decoder failures: {sum(r.decode_failures for r in results)})")
+    print(f"skipped decodes: {sum(r.skipped_decodes for r in results)}")
     for result in results:
         print(f"rrd: {result.rrd_path}")
 
