@@ -16,7 +16,7 @@ import numpy as np
 import pyarrow as pa
 import rerun as rr
 import torch
-from arkitscenes_download.ingest.blueprint import make_blueprint
+from arkitscenes_download.ingest.blueprint import DEPTH_RANGE_MM, make_blueprint
 from arkitscenes_download.ingest.depth import encode_depth_png
 from arkitscenes_download.ingest.paths import CONFIDENCE, DEPTH, DEPTH_PROMPTDA, PINHOLE_WIDE, PROMPTDA_MESH, RIG, VIDEO_WIDE
 from beartype.roar import BeartypeException
@@ -297,7 +297,7 @@ def process_segment(
             rr.set_time("video_time", duration=timestamp_seconds, recording=recording)
             rr.log(
                 DEPTH_PROMPTDA,
-                rr.EncodedDepthImage(blob=encode_depth_png(predicted_depth_hw), media_type="image/png", meter=1000.0),
+                rr.EncodedDepthImage(blob=encode_depth_png(predicted_depth_hw), media_type="image/png", meter=1000.0, depth_range=DEPTH_RANGE_MM),
                 recording=recording,
             )
             filtered_depth_hw: UInt16[ndarray, "h w"] = filter_depth_for_fusion(

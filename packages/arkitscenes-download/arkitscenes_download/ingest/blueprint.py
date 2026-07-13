@@ -8,7 +8,28 @@ import rerun.blueprint as rrb
 from jaxtyping import Float64
 from simplecv.rerun_log_utils import orbit_eye_position
 
-from arkitscenes_download.ingest.paths import DEPTH_GT, GT_MESH, IMU_ACCEL, IMU_GYRO, PINHOLE_ULTRAWIDE, PINHOLE_WIDE, PINHOLE_WIDE_LOWRES, WORLD
+from arkitscenes_download.ingest.paths import (
+    DEPTH,
+    DEPTH_GT,
+    DEPTH_PROMPTDA,
+    GT_MESH,
+    IMU_ACCEL,
+    IMU_GYRO,
+    PINHOLE_ULTRAWIDE,
+    PINHOLE_WIDE,
+    PINHOLE_WIDE_LOWRES,
+    WORLD,
+)
+
+DEPTH_RANGE_MM: tuple[float, float] = (0.0, 4000.0)
+"""Colormap range for the depth views, in native mm units.
+
+Without it the viewer guesses the range from the PNG bit depth (0-65535 for
+uint16), squashing real indoor depths into the bottom of the colormap — a
+near-flat dark purple. Sampled data: lowres ARKit depth is mostly <=4 m
+(rarely up to ~5 m), GT laser depth <=3.5 m; pixels beyond clamp to the
+colormap max, which stays readable.
+"""
 
 FIT_DISTANCE_FACTOR: float = 2.2
 """Eye distance per bounding-sphere radius that keeps the whole mesh in frame (tuned visually)."""
@@ -61,13 +82,18 @@ def make_blueprint(portrait: bool = False, framing: MeshFraming | None = None, i
     """
     world_view = rrb.Spatial3DView(name="world", origin=f"/{WORLD}", eye_controls=_eye_controls(framing))
     world_area: rrb.Spatial3DView | rrb.Tabs = world_view
+    depth_range = rr.EncodedDepthImage.from_fields(depth_range=DEPTH_RANGE_MM)
     depth_tabs = [
-        rrb.Spatial2DView(name="depth ARKit", origin=PINHOLE_WIDE_LOWRES, contents=["$origin/depth"]),
-        rrb.Spatial2DView(name="depth GT (laser)", origin=PINHOLE_WIDE, contents=["$origin/depth_gt"]),
+        rrb.Spatial2DView(name="depth ARKit", origin=PINHOLE_WIDE_LOWRES, contents=["$origin/depth"], overrides={f"/{DEPTH}": depth_range}),
+        rrb.Spatial2DView(name="depth GT (laser)", origin=PINHOLE_WIDE, contents=["$origin/depth_gt"], overrides={f"/{DEPTH_GT}": depth_range}),
     ]
     active_depth_tab: int = 0
     if include_promptda:
-        depth_tabs.append(rrb.Spatial2DView(name="depth PromptDA", origin=PINHOLE_WIDE, contents=["$origin/depth_promptda"]))
+        depth_tabs.append(
+            rrb.Spatial2DView(
+                name="depth PromptDA", origin=PINHOLE_WIDE, contents=["$origin/depth_promptda"], overrides={f"/{DEPTH_PROMPTDA}": depth_range}
+            )
+        )
         active_depth_tab = len(depth_tabs) - 1
         world_area = rrb.Tabs(
             world_view,

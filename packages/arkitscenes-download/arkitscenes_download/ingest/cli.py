@@ -25,7 +25,7 @@ from rich.progress import Progress, TaskID
 from scipy.spatial.transform import Rotation
 from simplecv.rerun_custom_types import CameraDistortion as RerunCameraDistortion
 
-from arkitscenes_download.ingest.blueprint import make_blueprint
+from arkitscenes_download.ingest.blueprint import DEPTH_RANGE_MM, make_blueprint
 from arkitscenes_download.ingest.clock import CLOCK_ACCEPTANCE_FRACTION, ClockAlignment, path_timestamps, recover_clock_from_packets
 from arkitscenes_download.ingest.depth import encode_depth_png, sorted_timestamped_paths
 from arkitscenes_download.ingest.gt import GroundTruthSummary, log_ground_truth
@@ -254,7 +254,9 @@ def _log_depth(recording: rr.RecordingStream, path: str, paths: list[Path], quar
 
     def make_columns(values: list[object]) -> rr.ComponentColumnList:
         blobs: list[bytes] = [value for value in values if isinstance(value, bytes)]
-        return rr.EncodedDepthImage.columns(blob=blobs, media_type=["image/png"] * len(blobs), meter=[1000.0] * len(blobs))
+        return rr.EncodedDepthImage.columns(
+            blob=blobs, media_type=["image/png"] * len(blobs), meter=[1000.0] * len(blobs), depth_range=[DEPTH_RANGE_MM] * len(blobs)
+        )
 
     _log_baked_columns(recording, path, paths, quarter_turns, pool, description, _encode_depth_asset, make_columns, epoch)
 

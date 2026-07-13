@@ -6,7 +6,7 @@ import rerun.blueprint as rrb
 from rerun.blueprint.api import Container, View
 
 from arkitscenes_download.ingest.blueprint import make_blueprint
-from arkitscenes_download.ingest.paths import DEPTH_GT, GT_MESH, PINHOLE_WIDE_LOWRES
+from arkitscenes_download.ingest.paths import DEPTH, DEPTH_GT, DEPTH_PROMPTDA, GT_MESH, PINHOLE_WIDE_LOWRES
 
 
 def iter_views(node: rrb.Blueprint | Container | View) -> list[View]:
@@ -49,6 +49,14 @@ def test_promptda_blueprint_adds_depth_tab_and_world_tab() -> None:
 
     depth_view = find_view(blueprint, "depth PromptDA")
     assert cast(list[str], depth_view.contents) == ["$origin/depth_promptda"]
+
+
+def test_depth_views_override_colormap_range() -> None:
+    """Encoded uint16 depth defaults to a 0-65535 colormap range in the viewer; the views must pin a sane one."""
+    blueprint = make_blueprint(include_promptda=True)
+    for view_name, entity_path in (("depth ARKit", DEPTH), ("depth GT (laser)", DEPTH_GT), ("depth PromptDA", DEPTH_PROMPTDA)):
+        overrides = find_view(blueprint, view_name).visualizer_overrides
+        assert overrides is not None and f"/{entity_path}" in overrides, f"{view_name} is missing its depth_range override"
 
 
 def test_promptda_world_tab_hides_gt_mesh_and_other_depths() -> None:
