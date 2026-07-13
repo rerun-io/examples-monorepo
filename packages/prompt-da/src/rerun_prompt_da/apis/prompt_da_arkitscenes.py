@@ -69,8 +69,9 @@ class PDAArkitScenesConfig:
     """Spawned DataLoader worker processes fetching/decoding batches in parallel."""
     max_depth_range_meter: float = 4.0
     """Maximum predicted depth retained for TSDF fusion, in metres."""
-    depth_fusion_resolution: float = 0.04
-    """TSDF voxel resolution in metres."""
+    depth_fusion_resolution: float = 0.015
+    """TSDF voxel resolution in metres (matches the GT mesh's ~1.5cm edge length;
+    fusion is decode-bound so finer voxels are effectively free in wall time)."""
     register: bool = True
     """Register each completed RRD as a replacement PromptDA layer."""
     update_blueprint: bool = True
