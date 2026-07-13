@@ -4,11 +4,14 @@ import subprocess
 import sys
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
 import tyro
-from tqdm import tqdm
+from rich.console import Console
+from rich.progress import Progress, TaskID
+from rich.table import Table
 
 from arkitscenes_download.ingest.layers import LAYER_NAMES
 
@@ -56,9 +59,7 @@ class Config:
     keep_transcode_cache: bool = False
     """Keep prepared MP4 tracks after each ingest."""
     skip_existing: bool = False
-    """Skip sequence identifiers whose output RRD already exists."""
-    progress_position: int = 0
-    """Terminal row used by the batch tqdm progress bar."""
+    """Skip sequence identifiers only when all seven layer RRDs exist."""
 
 
 def discover_video_ids(data_dir: Path) -> list[str]:
@@ -115,32 +116,38 @@ def _run_sequence(video_id: str, config: Config) -> SequenceResult:
     return SequenceResult(video_id, wall_seconds, completed.returncode == 0, completed.stdout)
 
 
-def _print_prefixed_output(result: SequenceResult) -> None:
+def _print_prefixed_output(result: SequenceResult, progress: Progress) -> None:
     """Print captured subprocess output with its sequence identifier."""
     for line in result.output.splitlines():
-        tqdm.write(f"[{result.video_id}] {line}")
+        progress.console.print(f"[{result.video_id}] {line}", markup=False)
 
 
-def _print_summary(results: list[SequenceResult], summary: BatchSummary) -> None:
+def _print_summary(results: list[SequenceResult], summary: BatchSummary, console: Console) -> None:
     """Print the per-sequence and aggregate batch summary."""
-    print("\nvideo_id  wall_seconds  status")
+    table: Table = Table(title="Ingest summary")
+    table.add_column("video_id")
+    table.add_column("wall seconds", justify="right")
+    table.add_column("status")
     for result in sorted(results, key=lambda item: item.video_id):
         status: str = "ok" if result.ok else "FAILED"
-        print(f"{result.video_id:<9} {result.wall_seconds:>12.2f}  {status}")
-    print(f"Total wall time: {summary.total_wall_seconds:.2f}s")
-    print(f"Sum of sequence walls: {summary.sum_sequence_wall_seconds:.2f}s")
-    print(f"Effective speedup: {summary.effective_speedup:.2f}x")
+        table.add_row(result.video_id, f"{result.wall_seconds:.2f}", status)
+    console.print(table)
+    console.print(f"Total wall time: {summary.total_wall_seconds:.2f}s")
+    console.print(f"Sum of sequence walls: {summary.sum_sequence_wall_seconds:.2f}s")
+    console.print(f"Effective speedup: {summary.effective_speedup:.2f}x")
 
 
-def run_batch(config: Config) -> BatchSummary:
+def run_batch(config: Config, progress: Progress | None = None) -> BatchSummary:
     """Run selected sequences concurrently, reporting every completed job."""
     if config.workers < 1:
         raise ValueError("workers must be at least 1")
+    owns_progress: bool = progress is None
+    active_progress: Progress = Progress(console=Console(markup=False)) if progress is None else progress
     selected_video_ids: list[str] = discover_video_ids(config.data_dir) if config.video_ids is None else list(dict.fromkeys(config.video_ids))
     video_ids: list[str] = []
     for video_id in selected_video_ids:
         if config.skip_existing and has_all_layers(config.output, video_id):
-            tqdm.write(f"[{video_id}] skipped: output already exists")
+            active_progress.console.print(f"[{video_id}] skipped: output already exists", markup=False)
         else:
             video_ids.append(video_id)
 
@@ -148,23 +155,24 @@ def run_batch(config: Config) -> BatchSummary:
     # 32 cores on this box; that is accepted, and workers remains the throttle.
     started: float = time.perf_counter()
     results: list[SequenceResult] = []
-    with ThreadPoolExecutor(max_workers=config.workers) as pool:
+    progress_context = active_progress if owns_progress else nullcontext(active_progress)
+    with progress_context, ThreadPoolExecutor(max_workers=config.workers) as pool:
         futures: dict[Future[SequenceResult], str] = {pool.submit(_run_sequence, video_id, config): video_id for video_id in video_ids}
         ok_count: int = 0
         failed_count: int = 0
-        with tqdm(total=len(futures), position=config.progress_position, desc="ingest", unit="sequence", dynamic_ncols=True) as progress:
-            progress.set_postfix(ok=ok_count, failed=failed_count)
-            for future in as_completed(futures):
-                result: SequenceResult = future.result()
-                results.append(result)
-                ok_count += int(result.ok)
-                failed_count += int(not result.ok)
-                _print_prefixed_output(result)
-                progress.update()
-                progress.set_postfix(ok=ok_count, failed=failed_count)
+        task_id: TaskID = active_progress.add_task("ingest (ok=0 failed=0)", total=len(futures))
+        for future in as_completed(futures):
+            result: SequenceResult = future.result()
+            results.append(result)
+            ok_count += int(result.ok)
+            failed_count += int(not result.ok)
+            _print_prefixed_output(result, active_progress)
+            active_progress.advance(task_id)
+            active_progress.update(task_id, description=f"ingest (ok={ok_count} failed={failed_count})")
+        active_progress.remove_task(task_id)
     total_wall_seconds: float = time.perf_counter() - started
     summary: BatchSummary = summarize(results, total_wall_seconds)
-    _print_summary(results, summary)
+    _print_summary(results, summary, active_progress.console)
     return summary
 
 

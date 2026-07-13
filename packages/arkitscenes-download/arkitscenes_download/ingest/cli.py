@@ -18,16 +18,18 @@ from pathlib import Path
 
 import numpy as np
 import rerun as rr
+import rerun.blueprint as rrb
 import tyro
 from PIL import Image
+from rich.console import Console
+from rich.progress import Progress, TaskID
 from scipy.spatial.transform import Rotation
 from simplecv.rerun_custom_types import CameraDistortion as RerunCameraDistortion
-from tqdm import tqdm
 
 from arkitscenes_download.ingest.blueprint import make_blueprint
 from arkitscenes_download.ingest.clock import CLOCK_ACCEPTANCE_FRACTION, ClockAlignment, path_timestamps, recover_clock_from_packets
 from arkitscenes_download.ingest.depth import encode_depth_png, sorted_timestamped_paths
-from arkitscenes_download.ingest.gt import log_ground_truth
+from arkitscenes_download.ingest.gt import GroundTruthSummary, log_ground_truth
 from arkitscenes_download.ingest.imu import ImuSamples, decode_imu
 from arkitscenes_download.ingest.layers import LAYERS, LAYERS_BY_NAME, Layer
 from arkitscenes_download.ingest.metadata import (
@@ -88,18 +90,19 @@ from arkitscenes_download.ingest.rig import (
 
 TIMELINE: str = "video_time"
 BATCH_SIZE: int = 1000
+CONSOLE: Console = Console(markup=False)
 
 
 @contextmanager
-def atomic_recording(output_path: Path, recording_id: str, *, send_properties: bool, embed_blueprint: bool = False, portrait: bool = False):
+def atomic_recording(output_path: Path, recording_id: str, *, send_properties: bool, default_blueprint: rrb.Blueprint | None = None):
     """Yield a recording that is finalized before atomically replacing its target."""
     descriptor, temp_name = tempfile.mkstemp(dir=output_path.parent, suffix=".rrd.tmp")
     os.close(descriptor)
     temp_path: Path = Path(temp_name)
     try:
         with rr.RecordingStream(application_id="arkitscenes", recording_id=recording_id, send_properties=send_properties) as recording:
-            if embed_blueprint:
-                recording.save(temp_path, default_blueprint=make_blueprint(portrait))
+            if default_blueprint is not None:
+                recording.save(temp_path, default_blueprint=default_blueprint)
             else:
                 recording.save(temp_path)
             yield recording
@@ -137,7 +140,7 @@ class Config:
     data_dir: Path = Path("data")
     """Dataset root containing raw/Training."""
     output: Path = Path("data/rrd")
-    """Directory in which to write the RRD."""
+    """Root for seven independently published ``<video_id>/<layer>.rrd`` files."""
     spawn: bool = False
     """Spawn a viewer after saving (disabled for headless use)."""
     keep_transcode_cache: bool = False
@@ -182,7 +185,8 @@ def _log_video(recording: rr.RecordingStream, path: str, video: VideoSamples, cl
     recording.log(path, rr.AnyValues(encoder=video.encoder, encoder_settings=video.settings, ffmpeg_version=video.ffmpeg_version), static=True)
     first_batch: bool = True
     try:
-        with tqdm(desc=description, unit="frame", leave=False) as progress:
+        with Progress(console=CONSOLE, transient=True) as progress:
+            task_id: TaskID = progress.add_task(description, total=None)
             for samples in iter_video_samples(video):
                 aligned: np.ndarray = samples.timestamps + clock_offset
                 if first_batch:
@@ -193,7 +197,7 @@ def _log_video(recording: rr.RecordingStream, path: str, video: VideoSamples, cl
                     raise ValueError("clock-aligned VideoStream timestamps are not strictly increasing")
                 _send_columns(recording, path, samples.timestamps, rr.VideoStream.columns(sample=samples.payloads, is_keyframe=samples.is_keyframes), epoch)  # pyrefly: ignore  # bad-argument-type
                 timestamp_batches.append(samples.timestamps)
-                progress.update(len(samples.timestamps))
+                progress.advance(task_id, len(samples.timestamps))
     finally:
         if video.delete_after_use:
             video.path.unlink(missing_ok=True)
@@ -239,13 +243,14 @@ def _log_baked_columns(
     if not kept_paths:
         return
     timestamps: np.ndarray = _clamped_to_epoch(all_timestamps[all_timestamps >= epoch], epoch)
-    with tqdm(total=len(kept_paths), desc=description, unit="frame", leave=False) as progress:
+    with Progress(console=CONSOLE, transient=True) as progress:
+        task_id: TaskID = progress.add_task(description, total=len(kept_paths))
         for start in range(0, len(kept_paths), BATCH_SIZE):
             batch_paths: list[Path] = kept_paths[start : start + BATCH_SIZE]
             items: list[tuple[Path, int]] = [(asset, quarter_turns) for asset in batch_paths]
             values: list[object] = list(pool.map(worker, items))
             _send_columns(recording, path, timestamps[start : start + len(batch_paths)], make_columns(values), epoch)
-            progress.update(len(batch_paths))
+            progress.advance(task_id, len(batch_paths))
 
 
 def _log_depth(recording: rr.RecordingStream, path: str, paths: list[Path], quarter_turns: int, pool: ThreadPoolExecutor, description: str, epoch: float) -> None:
@@ -346,7 +351,7 @@ def _log_imu(recording: rr.RecordingStream, imu: ImuSamples, epoch: float) -> No
 
 
 def ingest_sequence(config: Config) -> Path:
-    """Convert one raw sequence (either split) into an RRD and return its path."""
+    """Write seven layer RRDs for one raw sequence and return its output directory."""
     ingest_started: float = time.perf_counter()
     candidates: list[Path] = [config.data_dir / "raw" / split / config.video_id for split in ("Training", "Validation")]
     sequence_dir: Path = next((candidate for candidate in candidates if candidate.is_dir()), candidates[0])
@@ -359,7 +364,7 @@ def ingest_sequence(config: Config) -> Path:
     if alignment.within_two_ms_fraction < CLOCK_ACCEPTANCE_FRACTION:
         raise ValueError(f"clock validation failed: only {alignment.within_two_ms_fraction:.3%} within 2 ms")
 
-    print(
+    CONSOLE.print(
         f"Clock: wide={alignment.offset_seconds:.9f}s ultra={alignment.ultrawide_offset_seconds:.9f}s "
         f"dispersion={alignment.dispersion_seconds * 1e3:.3f}ms drift={alignment.drift_seconds_per_second * 1e6:.3f}us/s "
         f"agreement={alignment.ultrawide_agreement_seconds * 1e3:.3f}ms depth_max={alignment.max_depth_residual_seconds * 1e3:.3f}ms"
@@ -377,7 +382,7 @@ def ingest_sequence(config: Config) -> Path:
     quarter_turns: int = measured_orientation_quarter_turns(unbaked_sky_angles)
     orientation_is_ambiguous, circular_spread, boundary_distance = orientation_ambiguity(unbaked_sky_angles)
     warning: str = " WARNING: AMBIGUOUS ORIENTATION" if orientation_is_ambiguous else ""
-    print(
+    CONSOLE.print(
         f"Orientation: label={sky_direction}, source=measured_gravity, quarter_turns={quarter_turns}, "
         f"spread={np.rad2deg(circular_spread):.2f}deg boundary_distance={np.rad2deg(boundary_distance):.2f}deg{warning}"
     )
@@ -395,7 +400,7 @@ def ingest_sequence(config: Config) -> Path:
     pose_source: str = pose_selection.source
     device_fit: DeviceFrameFit = fit_original_camera_from_device(trajectory_sparse_unbaked, imu.accel_timestamps, imu.accel_ms2)
     rig_from_device: Rotation = Rotation.from_euler("z", quarter_turns * np.pi / 2.0) * Rotation.from_quat(device_fit.quaternion_xyzw)
-    print(f"IMU frame: original_cam_from_device={device_fit.quaternion_xyzw.tolist()} residual={np.rad2deg(device_fit.rms_residual_rad):.3f}deg")
+    CONSOLE.print(f"IMU frame: original_cam_from_device={device_fit.quaternion_xyzw.tolist()} residual={np.rad2deg(device_fit.rms_residual_rad):.3f}deg")
     sequence_output: Path = config.output / config.video_id
     sequence_output.mkdir(parents=True, exist_ok=True)
     properties: dict[str, object] = {
@@ -441,18 +446,16 @@ def ingest_sequence(config: Config) -> Path:
             "portrait": portrait,
         }
     )
-    print(f"Timeline: epoch={epoch:.6f}s dropped_leading=(wide={wide_drop}, ultrawide={ultrawide_drop}) portrait={portrait}")
+    CONSOLE.print(f"Timeline: epoch={epoch:.6f}s dropped_leading=(wide={wide_drop}, ultrawide={ultrawide_drop}) portrait={portrait}")
 
     wide_video: VideoSamples = prepare_video_track(mov_path, 0, quarter_turns, config.keep_transcode_cache, drop_leading=wide_drop)
-    print(f"Transcode {config.video_id} wide: {wide_video.transcode_seconds:.2f}s ({wide_video.encoder})")
+    CONSOLE.print(f"Transcode {config.video_id} wide: {wide_video.transcode_seconds:.2f}s ({wide_video.encoder})")
     ultrawide_video: VideoSamples = prepare_video_track(mov_path, 2, quarter_turns, config.keep_transcode_cache, drop_leading=ultrawide_drop)
-    print(f"Transcode {config.video_id} ultrawide: {ultrawide_video.transcode_seconds:.2f}s ({ultrawide_video.encoder})")
+    CONSOLE.print(f"Transcode {config.video_id} ultrawide: {ultrawide_video.transcode_seconds:.2f}s ({ultrawide_video.encoder})")
 
     wide_path: Path = sequence_output / "video_wide.rrd"
     wide_layer: Layer = LAYERS_BY_NAME["video_wide"]
-    with atomic_recording(
-        wide_path, config.video_id, send_properties=wide_layer.send_properties, embed_blueprint=wide_layer.embed_blueprint
-    ) as recording:
+    with atomic_recording(wide_path, config.video_id, send_properties=wide_layer.send_properties) as recording:
         wide_video_timestamps: np.ndarray = _log_video(
             recording,
             VIDEO_WIDE,
@@ -464,12 +467,7 @@ def ingest_sequence(config: Config) -> Path:
 
     ultrawide_path: Path = sequence_output / "video_ultrawide.rrd"
     ultrawide_layer: Layer = LAYERS_BY_NAME["video_ultrawide"]
-    with atomic_recording(
-        ultrawide_path,
-        config.video_id,
-        send_properties=ultrawide_layer.send_properties,
-        embed_blueprint=ultrawide_layer.embed_blueprint,
-    ) as recording:
+    with atomic_recording(ultrawide_path, config.video_id, send_properties=ultrawide_layer.send_properties) as recording:
         ultrawide_video_timestamps: np.ndarray = _log_video(
             recording,
             VIDEO_ULTRAWIDE,
@@ -491,25 +489,20 @@ def ingest_sequence(config: Config) -> Path:
             "n_frames_after_pose_span": after,
         }
     )
-    print(
+    CONSOLE.print(
         f"Pose coverage: source={pose_source} span={pose_trajectory_unbaked.timestamps[0]:.6f}..{pose_trajectory_unbaked.timestamps[-1]:.6f} before={before} after={after}"
     )
 
     distortions: list[CameraDistortion] = decode_camera_distortions_from_packets(metadata_packets[10])
     for distortion in distortions:
-        print(
+        CONSOLE.print(
             f"Distortion {distortion.camera_name}: model=brown_conrady coefficients={distortion.coefficients.tolist()} "
             f"inverse={distortion.inverse_coefficients.tolist()} center={distortion.center_xy.tolist()} "
             f"reference={distortion.reference_dimensions_wh.tolist()} temporal_samples={distortion.temporal_sample_count}"
         )
     calibration_path: Path = sequence_output / "calibration.rrd"
     calibration_layer: Layer = LAYERS_BY_NAME["calibration"]
-    with atomic_recording(
-        calibration_path,
-        config.video_id,
-        send_properties=calibration_layer.send_properties,
-        embed_blueprint=calibration_layer.embed_blueprint,
-    ) as recording:
+    with atomic_recording(calibration_path, config.video_id, send_properties=calibration_layer.send_properties) as recording:
         _log_intrinsics(recording, PINHOLE_WIDE, wide_intrinsics, wide_resolution, epoch)
         _log_intrinsics(recording, PINHOLE_WIDE_LOWRES, lowres_intrinsics, lowres_resolution, epoch)
         _log_intrinsics(recording, PINHOLE_ULTRAWIDE, ultrawide_intrinsics, ultrawide_resolution, epoch)
@@ -524,12 +517,7 @@ def ingest_sequence(config: Config) -> Path:
     depth_started: float = time.perf_counter()
     depth_path: Path = sequence_output / "depth.rrd"
     with (
-        atomic_recording(
-            depth_path,
-            config.video_id,
-            send_properties=LAYERS_BY_NAME["depth"].send_properties,
-            embed_blueprint=LAYERS_BY_NAME["depth"].embed_blueprint,
-        ) as recording,
+        atomic_recording(depth_path, config.video_id, send_properties=LAYERS_BY_NAME["depth"].send_properties) as recording,
         ThreadPoolExecutor(max_workers=8) as pool,
     ):
         _log_depth(
@@ -552,28 +540,30 @@ def ingest_sequence(config: Config) -> Path:
         )
         _log_confidence(recording, confidence, quarter_turns, pool, f"{config.video_id} confidence", epoch)
     depth_seconds: float = time.perf_counter() - depth_started
-    print(f"Depth {config.video_id}: {depth_seconds:.1f}s ({len(highres_depth)} gt + {len(lowres_depth)} arkit + {len(confidence)} conf)")
+    CONSOLE.print(f"Depth {config.video_id}: {depth_seconds:.1f}s ({len(highres_depth)} gt + {len(lowres_depth)} arkit + {len(confidence)} conf)")
 
     imu_path: Path = sequence_output / "imu.rrd"
     imu_layer: Layer = LAYERS_BY_NAME["imu"]
-    with atomic_recording(
-        imu_path, config.video_id, send_properties=imu_layer.send_properties, embed_blueprint=imu_layer.embed_blueprint
-    ) as recording:
+    with atomic_recording(imu_path, config.video_id, send_properties=imu_layer.send_properties) as recording:
         _log_imu(recording, imu, epoch)
 
     gt_path: Path = sequence_output / "gt.rrd"
     gt_layer: Layer = LAYERS_BY_NAME["gt"]
-    with atomic_recording(gt_path, config.video_id, send_properties=gt_layer.send_properties, embed_blueprint=gt_layer.embed_blueprint) as recording:
-        box_count: int = log_ground_truth(sequence_dir, config.video_id, recording)
+    with atomic_recording(gt_path, config.video_id, send_properties=gt_layer.send_properties) as recording:
+        gt_summary: GroundTruthSummary = log_ground_truth(sequence_dir, config.video_id, recording)
 
     base_path: Path = sequence_output / "base.rrd"
     base_layer: Layer = LAYERS_BY_NAME["base"]
+    framed_blueprint: rrb.Blueprint | None = (
+        make_blueprint(portrait, mesh_center_xyz=gt_summary.mesh_center_xyz, bounding_radius_m=gt_summary.bounding_radius_m)
+        if base_layer.embed_blueprint
+        else None
+    )
     with atomic_recording(
         base_path,
         config.video_id,
         send_properties=base_layer.send_properties,
-        embed_blueprint=base_layer.embed_blueprint,
-        portrait=portrait,
+        default_blueprint=framed_blueprint,
     ) as recording:
         for name, value in properties.items():
             recording.send_property(name, rr.AnyValues(value=str(value)))
@@ -582,11 +572,11 @@ def ingest_sequence(config: Config) -> Path:
     verify_rrd(layer_paths)
     verification: str = f"{len(layer_paths)}/{len(LAYERS)} layers verified"
     ingest_seconds: float = time.perf_counter() - ingest_started
-    print(
+    CONSOLE.print(
         f"Saved {sequence_output}: videos={len(wide_video_timestamps)}/{len(ultrawide_video_timestamps)}, depth={len(lowres_depth)}, "
-        f"IMU={len(imu.accel_timestamps)}/{len(imu.gyro_timestamps)}, boxes={box_count}, verify={verification}"
+        f"IMU={len(imu.accel_timestamps)}/{len(imu.gyro_timestamps)}, boxes={gt_summary.box_count}, verify={verification}"
     )
-    print(f"Ingest {config.video_id} total: {ingest_seconds:.2f}s")
+    CONSOLE.print(f"Ingest {config.video_id} total: {ingest_seconds:.2f}s")
     if config.spawn:
         rr.spawn()
     return sequence_output

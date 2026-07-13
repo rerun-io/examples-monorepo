@@ -2127,6 +2127,7 @@ imagecodecs = ">=2024.9.22"
 trimesh = "*"
 pillow = "*"
 curl = "*"
+rich = "*"
 
 [feature.arkitscenes-download.pypi-dependencies]
 arkitscenes-download = { path = "packages/arkitscenes-download", editable = true }

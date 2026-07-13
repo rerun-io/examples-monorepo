@@ -5,8 +5,8 @@ authors = [{name = "Pablo Vela", email = "pablovela5620@gmail.com"}]
 requires-python = ">=3.12"
 dependencies = [
     # common/catalog-common: numpy, scipy, jaxtyping, rerun-sdk, av, opencv,
-    #                        tqdm, pyserde, huggingface_hub, hf-transfer
-    # feature deps (conda): ffmpeg (av1_nvenc/libsvtav1), imagecodecs, trimesh, pillow, curl
+    #                        pyserde, huggingface_hub, hf-transfer
+    # feature deps (conda): ffmpeg (av1_nvenc/libsvtav1), imagecodecs, trimesh, pillow, curl, rich
     "tyro",
 ]
 

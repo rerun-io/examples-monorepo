@@ -10,28 +10,28 @@ All diagrams are Mermaid; they render on GitHub and in Obsidian.
 
 ```mermaid
 flowchart LR
-    subgraph DL["1 · DOWNLOAD  (pixi run download)"]
+    subgraph DL["1 · DOWNLOAD  (arkitscenes-download-sample task or downloader module)"]
         CDN["Apple CDN<br>docs-assets.developer.apple.com<br>/ml-research/datasets/arkitscenes/v1"]
         META["raw/metadata.csv<br>5,071 sequences<br>visit_id · fold · sky_direction*"]
         ASSETS["per-sequence raw assets<br>mov · traj · depth PNGs · intrinsics<br>annotation json · mesh ply"]
-        LASER["per-visit laser scans<br>(downloaded, not ingested:<br>no published FARO→ARKit alignment)"]
+        LASER["optional per-visit laser scans<br>(sample/pipeline disable them;<br>never ingested: no published FARO→ARKit alignment)"]
         CDN --> META
         CDN -->|"curl -C - --retry, .part → rename<br>zips: extract to staging dir → atomic rename"| ASSETS
         CDN --> LASER
     end
 
-    subgraph ING["2 · INGEST  (pixi run ingest --video-id N)"]
+    subgraph ING["2 · INGEST  (python -m arkitscenes_download.ingest --video-id N)"]
         MOV["MOV demux<br>13 streams"]
         PIPE["per-sequence DAG<br>(see §3)"]
-        RRD["data/rrd/&lt;id&gt;.rrd<br>tempfile → os.replace → rrd verify"]
+        RRD["data/rrd/&lt;id&gt;/&lt;layer&gt;.rrd<br>7 layers · each tempfile → os.replace<br>all verified together"]
         MOV --> PIPE --> RRD
     end
 
     subgraph SRV["3 · REGISTER + SERVE"]
-        SERVER["rerun server :51235<br>in-memory OSS catalog<br>(pixi run serve)"]
-        REG["catalog.py  (pixi run register)<br>idempotent segment registration<br>blueprint = dataset default"]
+        SERVER["rerun server :51235<br>in-memory OSS catalog<br>(arkitscenes-download-serve task)"]
+        REG["catalog.py  (arkitscenes-download-register task)<br>7 layers stacked per segment<br>generic blueprints = dataset defaults"]
         VIEW["viewers<br>headed desktop · headless+MCP<br>dataframe / SQL queries"]
-        RRD2["arkitscenes dataset<br>1 segment per video_id<br>properties = queryable columns"]
+        RRD2["arkitscenes dataset<br>1 layered segment per video_id<br>embedded sequence blueprint wins on open<br>properties = queryable columns"]
         REG --> SERVER --> RRD2 --> VIEW
     end
 
@@ -136,7 +136,7 @@ flowchart TB
         D4["boxes: half_sizes + labels;<br>InstancePoses3D(translations=centroid,<br>mat3x3=normalizedAxes.T)<br>2D overlay = NATIVE viewer reprojection"]
     end
 
-    PUB["atomic publish (cli.py)<br>tempfile.mkstemp(dir=output) → RecordingStream ctx<br>(blocking finalize) → os.replace → rerun rrd verify"]
+    PUB["atomic layer publish (cli.py)<br>for each of 7 layers: tempfile.mkstemp(dir=output)<br>→ RecordingStream ctx → blocking finalize → os.replace<br>then rerun rrd verify all layers together"]
 
     IMOV --> CLOCK & MDEC & IMU & VID
     ITRAJ --> ORIENT
@@ -155,7 +155,7 @@ flowchart TB
     POSE --> RIGTREE
     V6 --> RIGTREE
     D1 & D2 & D3 & D4 --> RIGTREE
-    RIGTREE["rig entity tree + blueprint<br>(§4) — everything on ONE timeline:<br>video_time = ARKit uptime seconds"]
+    RIGTREE["entity data split across 7 layers (base, calibration,<br>video_wide, video_ultrawide, depth, imu, gt)<br>base embeds GT-mesh-framed blueprint (§4)<br>ONE timeline: video_time = ARKit uptime seconds"]
     RIGTREE --> PUB
 ```
 
@@ -190,6 +190,8 @@ Recording properties (queryable as catalog columns): `video_id`, `visit_id`, `sp
 
 **Timeline**: a single `video_time` duration timeline whose values are ARKit device-uptime seconds — scrubber positions match raw asset filenames exactly. Each camera's samples are placed with its own independently recovered clock offset.
 
+**Blueprints**: the base layer embeds a per-sequence default blueprint. Its `EyeControls3D` orbits the GT mesh center, using `mesh_bounding_geometry` and `orbit_eye_position` to frame the mesh at `2.2 × 1.25 ×` its bounding radius. Generic portrait and landscape blueprints remain catalog dataset defaults, but the embedded blueprint takes precedence when a segment opens.
+
 ---
 
 ## 5. Publication & catalog lifecycle
@@ -197,23 +199,25 @@ Recording properties (queryable as catalog columns): `video_id`, `visit_id`, `sp
 ```mermaid
 sequenceDiagram
     participant CLI as ingest CLI
-    participant TMP as tempfile (same dir)
-    participant FS as data/rrd/
+    participant TMP as layer tempfile (same dir)
+    participant FS as data/rrd/<id>/
     participant CAT as catalog.py
     participant SRV as rerun server :51235
     participant V as viewers
 
-    CLI->>TMP: mkstemp(suffix=.rrd.tmp) · RecordingStream sink
-    CLI->>TMP: stream chunks while logging (bounded batches)
-    CLI->>TMP: context exit = blocking finalize
-    alt success
-        CLI->>FS: os.replace(tmp, <id>.rrd)  — atomic
-        CLI->>FS: rerun rrd verify
-    else any failure
-        CLI->>TMP: unlink — previous good .rrd untouched
+    loop base, calibration, video_wide, video_ultrawide, depth, imu, gt
+        CLI->>TMP: mkstemp(suffix=.rrd.tmp) · RecordingStream sink
+        CLI->>TMP: stream layer chunks (bounded batches)
+        CLI->>TMP: context exit = blocking finalize
+        alt success
+            CLI->>FS: os.replace(tmp, <layer>.rrd) — atomic
+        else any failure
+            CLI->>TMP: unlink — previous good layer untouched
+        end
     end
-    CAT->>SRV: register data/rrd/*.rrd (idempotent,<br>REPLACE per segment, --recreate opt-in)
-    CAT->>SRV: register blueprint .rbl as dataset default<br>(only after all segments succeed)
+    CLI->>FS: rerun rrd verify all 7 layer files together
+    CAT->>SRV: register each layer with shared recording id<br>(idempotent REPLACE per segment layer, --recreate opt-in)
+    CAT->>SRV: register generic portrait/landscape .rbl defaults<br>(base's embedded sequence blueprint wins on open)
     V->>SRV: rerun+http://127.0.0.1:51235<br>segment table → open → stream VideoStream samples
 ```
 
@@ -243,5 +247,5 @@ sequenceDiagram
 
 - All RGB in the `.rrd` is a single-generation near-lossless AV1 transcode (NVENC CQ30, SSIM ≈0.984); the original `.mov` on disk stays the master. Encoder provenance is recorded; bit-exact determinism is not promised.
 - Portrait/landscape mix across sequences is correct (aspect follows device grip).
-- Laser point clouds are downloaded but not ingested (no published FARO→ARKit alignment).
-- Batch-runner concurrency/backpressure for the eventual ~5,000-sequence run is future work; per-sequence memory is bounded.
+- Laser point clouds are optionally downloadable but excluded from the sample task and full pipeline; they are never ingested (no published FARO→ARKit alignment).
+- The batch runner executes sequence subprocesses concurrently. The full pipeline overlaps downloading, ingestion, and shipping with shared Rich progress; per-sequence memory remains bounded.
