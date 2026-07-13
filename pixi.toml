@@ -536,6 +536,9 @@ open3d = ">=0.19.0,<0.20"
 rerun-prompt-da = { path = "packages/prompt-da", editable = true }
 monopriors = { path = "packages/monoprior", editable = true }
 sam3 = { path = "packages/sam3", editable = true }
+# torch's legacy ONNX exporter needs the onnx package to serialize the proto
+# (TensorRT itself comes from the shared cuda feature).
+onnx = "*"
 
 [feature.prompt-da.activation.env]
 PACKAGE_DIR = "packages/prompt-da"
@@ -553,6 +556,12 @@ cmd = "python tools/prompt_da_polycam.py --polycam-zip-path data/6G-room-example
 depends-on = ["_prompt-da-download-polycam-example"]
 cwd = "packages/prompt-da"
 description = "Run PromptDA on the example Polycam dataset"
+
+[feature.prompt-da-demo.tasks.prompt-da-trt-polycam]
+cmd = "python tools/prompt_da_trt_polycam.py --polycam-zip-path data/6G-room-example.zip"
+depends-on = ["_prompt-da-download-polycam-example"]
+cwd = "packages/prompt-da"
+description = "Run batched TensorRT PromptDA on the example Polycam dataset"
 
 [feature.prompt-da-demo.tasks.prompt-da-app]
 cmd = "python tools/gradio_app.py"

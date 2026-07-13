@@ -106,9 +106,10 @@ class PromptDA(nn.Module):
         return self.forward(image, prompt_depth)
 
     def normalize(self, prompt_depth: torch.Tensor):
-        B, C, H, W = prompt_depth.shape
-        min_val = torch.quantile(prompt_depth.reshape(B, -1), 0.0, dim=1, keepdim=True)[:, :, None, None]
-        max_val = torch.quantile(prompt_depth.reshape(B, -1), 1.0, dim=1, keepdim=True)[:, :, None, None]
+        # amin/amax match the original quantile(0.0/1.0) exactly while staying
+        # exportable: aten::quantile has no ONNX lowering, min/max reductions do.
+        min_val = prompt_depth.amin(dim=(1, 2, 3), keepdim=True)
+        max_val = prompt_depth.amax(dim=(1, 2, 3), keepdim=True)
         prompt_depth = (prompt_depth - min_val) / (max_val - min_val)
         return prompt_depth, min_val, max_val
 

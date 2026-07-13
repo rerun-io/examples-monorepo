@@ -89,6 +89,7 @@ site-package-path = [
     ".pixi/envs/arkitscenes-download-dev/lib/python3.12/site-packages",
     ".pixi/envs/arkitscenes-download-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/prompt-da-dev/lib/python3.12/site-packages",
+    ".pixi/envs/prompt-da-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/wilor-nano-dev/lib/python3.12/site-packages",
     ".pixi/envs/sam3d-body-dev/lib/python3.12/site-packages",
     ".pixi/envs/sam3-dev/lib/python3.12/site-packages",
