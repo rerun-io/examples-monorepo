@@ -13,7 +13,7 @@ from typing import Any, Literal
 import av
 import numpy as np
 import rerun as rr
-from jaxtyping import Int
+from jaxtyping import Float64, Int
 from numpy import ndarray
 from pyarrow import ChunkedArray, LargeListArray, ListArray
 
@@ -664,3 +664,27 @@ def mux_h264_to_mp4(times: ChunkedArray, samples: ChunkedArray, output_path: str
 
     input_container.close()
     output_container.close()
+
+
+def mesh_bounding_geometry(vertices: Float64[ndarray, "n 3"]) -> tuple[Float64[ndarray, "3"], float]:
+    """Return the AABB center and the radius of the vertex bounding sphere around it."""
+    center: Float64[ndarray, "3"] = (vertices.min(axis=0) + vertices.max(axis=0)) / 2.0
+    radius: float = float(np.linalg.norm(vertices - center, axis=1).max())
+    return center, radius
+
+
+def orbit_eye_position(
+    look_target_xyz: Float64[ndarray, "3"],
+    bounding_radius_m: float,
+    distance_factor: float,
+    direction_xyz: tuple[float, float, float] = (1.0, 1.0, 1.0),
+) -> Float64[ndarray, "3"]:
+    """Place a 3D-view eye along ``direction_xyz`` at ``distance_factor x bounding_radius_m`` from the target.
+
+    Pairs with ``rrb.archetypes.EyeControls3D``: use the returned position together
+    with ``look_target=look_target_xyz`` so the whole bounding sphere stays in frame
+    (a ``distance_factor`` around 2.2 tightly fits a default-FOV view).
+    """
+    direction: Float64[ndarray, "3"] = np.asarray(direction_xyz, dtype=np.float64)
+    unit: Float64[ndarray, "3"] = direction / np.linalg.norm(direction)
+    return look_target_xyz + distance_factor * bounding_radius_m * unit

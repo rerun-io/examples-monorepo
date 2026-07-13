@@ -2,8 +2,10 @@
 
 Adapted from the official Apple downloader
 (https://github.com/apple/ARKitScenes/blob/main/download_data.py) and the
-Rerun example port, using only the Python standard library at runtime (CSV via
-`csv`, extraction via `zipfile`, transfers shelled out to `curl`).
+Rerun example port. Kept deliberately light at import time (CSV via `csv`,
+extraction via `zipfile`, transfers shelled out to `curl`, rich for output,
+and only import-cheap simplecv modules) because the pipeline spawns this
+once per sequence — keep numpy/torch-weight imports out of this path.
 """
 
 from __future__ import annotations
@@ -12,9 +14,15 @@ import csv
 import shutil
 import subprocess
 import zipfile
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, TypeAlias
+
+from rich.console import Console
+
+CONSOLE: Final[Console] = Console(markup=False)
 
 ARKITSCENES_URL: Final = "https://docs-assets.developer.apple.com/ml-research/datasets/arkitscenes/v1"
 """Base URL for all v1 ARKitScenes assets."""
@@ -119,6 +127,24 @@ class VideoMetadata:
     """Whether the sequence is part of the 3D object detection subset."""
 
 
+@dataclass(slots=True, frozen=True)
+class PlannedDownload:
+    """One pending raw asset download."""
+
+    video_id: str
+    """Sequence identifier owning the asset."""
+    asset: RawAsset
+    """Requested raw asset kind."""
+    filename: str
+    """Remote and local asset filename."""
+    url: str
+    """Fully-qualified asset URL."""
+    dst_path: Path
+    """Local destination path."""
+    is_zip: bool
+    """Whether the downloaded file must be extracted."""
+
+
 def _parse_bool(value: str) -> bool:
     """Parse a CSV truthiness cell (``True``/``False``/``1``/``0``) into a bool."""
     return value.strip().lower() in {"true", "1", "1.0", "yes"}
@@ -138,30 +164,61 @@ def _parse_visit_id(visit_id: str) -> int | None:
     return int(as_float)
 
 
-def human_bytes(num_bytes: int) -> str:
-    """Format a byte count as a human-readable IEC string (e.g. ``1.4 GiB``)."""
-    size: float = float(num_bytes)
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if size < 1024.0 or unit == "TiB":
-            return f"{size:.1f} {unit}"
-        size /= 1024.0
-    return f"{size:.1f} TiB"
+def parse_content_length(head_output: str) -> int | None:
+    """Parse the last Content-Length header from curl output."""
+    last_value: str | None = None
+    for line in head_output.splitlines():
+        name: str
+        separator: str
+        value: str
+        name, separator, value = line.partition(":")
+        if separator and name.strip().lower() == "content-length":
+            last_value = value.strip()
+    if last_value is None:
+        return None
+    try:
+        return int(last_value)
+    except ValueError:
+        return None
 
 
-def download_file(url: str, dst_path: Path) -> bool:
+def head_content_length(url: str) -> int | None:
+    """Fetch an asset's HTTP content length."""
+    result: subprocess.CompletedProcess[str] = subprocess.run(
+        ["curl", "-sIL", "--fail", "--max-time", "30", url],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return parse_content_length(result.stdout) if result.returncode == 0 else None
+
+
+def prefetch_sizes(plans: list[PlannedDownload], workers: int = 16) -> dict[str, int]:
+    """Fetch content lengths concurrently for planned downloads; URLs with unknown size are absent."""
+    urls: list[str] = list(dict.fromkeys(plan.url for plan in plans))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        sizes: list[int | None] = list(pool.map(head_content_length, urls))
+    return {url: size for url, size in zip(urls, sizes, strict=True) if size is not None}
+
+
+def download_file(url: str, dst_path: Path, on_bytes: Callable[[int], None] | None = None) -> int | None:
     """Download ``url`` to ``dst_path`` with curl (resumable, retrying).
 
     Args:
         url: Fully-qualified source URL.
         dst_path: Destination file path; parent directories are created.
+        on_bytes: Callback periodically receiving the resumable ``.part`` size
+            while curl is polled with ``Popen.wait(timeout=0.25)``.
 
     Returns:
-        True on success (or if the file already exists); False if the asset is
-        unavailable (HTTP 4xx) or the transfer failed after retries.
+        The downloaded size in bytes on success (or the on-disk size if the
+        file already exists); None if the asset is unavailable (HTTP 4xx) or
+        the transfer failed after retries. Test ``is None``, not truthiness —
+        a zero-byte file is a success.
     """
     dst_path.parent.mkdir(parents=True, exist_ok=True)
     if dst_path.exists():
-        return True
+        return dst_path.stat().st_size
 
     part_path: Path = dst_path.parent / (dst_path.name + ".part")
     command: list[str] = [
@@ -180,16 +237,34 @@ def download_file(url: str, dst_path: Path) -> bool:
         str(part_path),
         url,
     ]
-    result: subprocess.CompletedProcess[bytes] = subprocess.run(command, check=False)
-    if result.returncode == 0:
+    def part_bytes() -> int:
+        """Return the current transfer size; the .part file may not exist yet (or just got renamed)."""
+        try:
+            return part_path.stat().st_size
+        except FileNotFoundError:
+            return 0
+
+    process: subprocess.Popen[bytes] = subprocess.Popen(command)
+    while True:
+        try:
+            # wait() returns the instant curl exits; sleeping instead would add
+            # up to 0.25 s of dead time per asset (hours across a full split).
+            process.wait(timeout=0.25)
+            break
+        except subprocess.TimeoutExpired:
+            if on_bytes is not None:
+                on_bytes(part_bytes())
+    returncode: int = process.returncode
+    if returncode == 0:
+        size: int = part_bytes()
         part_path.rename(dst_path)
-        return True
-    if result.returncode == 22:  # curl --fail: server returned HTTP >= 400
+        return size
+    if returncode == 22:  # curl --fail: server returned HTTP >= 400
         part_path.unlink(missing_ok=True)
-        print(f"    unavailable (HTTP error): {url}")
-        return False
-    print(f"    transfer failed (curl exit {result.returncode}; keeping .part for resume): {url}")
-    return False
+        CONSOLE.print(f"    unavailable (HTTP error): {url}")
+        return None
+    CONSOLE.print(f"    transfer failed (curl exit {returncode}; keeping .part for resume): {url}")
+    return None
 
 
 def extract_zip(zip_path: Path, video_dir: Path, folder_name: str) -> None:
@@ -240,6 +315,24 @@ def asset_to_filename(video_id: str, asset: RawAsset, metadata: VideoMetadata) -
     raise ValueError(f"Unknown raw asset: {asset!r}")
 
 
+def plan_video_downloads(metadata: VideoMetadata, assets: tuple[RawAsset, ...], download_dir: Path) -> list[PlannedDownload]:
+    """Plan the still-pending applicable assets for one sequence."""
+    video_dir: Path = download_dir / "raw" / metadata.fold / metadata.video_id
+    url_prefix: str = f"{ARKITSCENES_URL}/raw/{metadata.fold}/{metadata.video_id}"
+    plans: list[PlannedDownload] = []
+    for asset in dict.fromkeys(assets):
+        filename: str | None = asset_to_filename(metadata.video_id, asset, metadata)
+        if filename is None:
+            continue
+        is_zip: bool = filename.endswith(".zip")
+        dst_path: Path = video_dir / filename
+        extracted_path: Path = video_dir / filename.removesuffix(".zip")
+        if (is_zip and extracted_path.is_dir()) or (not is_zip and dst_path.exists()):
+            continue
+        plans.append(PlannedDownload(metadata.video_id, asset, filename, f"{url_prefix}/{filename}", dst_path, is_zip))
+    return plans
+
+
 def load_metadata(download_dir: Path) -> dict[str, VideoMetadata]:
     """Download (if needed) and parse the raw dataset ``metadata.csv``.
 
@@ -250,7 +343,7 @@ def load_metadata(download_dir: Path) -> dict[str, VideoMetadata]:
         Mapping from ``video_id`` to its parsed :class:`VideoMetadata`.
     """
     csv_path: Path = download_dir / "raw" / "metadata.csv"
-    if not download_file(f"{ARKITSCENES_URL}/raw/metadata.csv", csv_path):
+    if download_file(f"{ARKITSCENES_URL}/raw/metadata.csv", csv_path) is None:
         raise RuntimeError("Failed to download raw metadata.csv")
 
     metadata: dict[str, VideoMetadata] = {}
@@ -273,7 +366,7 @@ def _point_cloud_ids_for_visit(visit_id: int, download_dir: Path) -> list[str]:
     """Return the laser-scan point-cloud ids belonging to ``visit_id``."""
     mapping_path: Path = download_dir / POINT_CLOUDS_FOLDER / "laser_scanner_point_clouds_mapping.csv"
     mapping_url: str = f"{ARKITSCENES_URL}/raw/{POINT_CLOUDS_FOLDER}/laser_scanner_point_clouds_mapping.csv"
-    if not mapping_path.exists() and not download_file(mapping_url, mapping_path):
+    if not mapping_path.exists() and download_file(mapping_url, mapping_path) is None:
         return []
 
     point_cloud_ids: list[str] = []
@@ -288,7 +381,7 @@ def download_point_clouds(metadata: VideoMetadata, download_dir: Path) -> None:
     """Download the Faro laser-scan point clouds for a sequence's venue."""
     visit_id: int | None = _parse_visit_id(metadata.visit_id)
     if visit_id is None:
-        print(f"    skipping point clouds for {metadata.video_id}: bad visit id {metadata.visit_id!r}")
+        CONSOLE.log(f"    skipping point clouds for {metadata.video_id}: bad visit id {metadata.visit_id!r}")
         return
 
     point_cloud_ids: list[str] = _point_cloud_ids_for_visit(visit_id, download_dir)
@@ -302,47 +395,45 @@ def download_point_clouds(metadata: VideoMetadata, download_dir: Path) -> None:
 
 def download_video(
     metadata: VideoMetadata,
-    assets: tuple[RawAsset, ...],
+    plans: list[PlannedDownload],
     download_dir: Path,
     keep_zip: bool,
     include_point_clouds: bool,
+    on_bytes: Callable[[int], None] | None = None,
+    on_asset_complete: Callable[[PlannedDownload, int], None] | None = None,
 ) -> None:
-    """Download all requested ``assets`` for a single sequence.
+    """Download an already-filtered list of pending assets for one sequence.
 
     Assets already present on disk (extracted folder for zips, file for the
     rest) are skipped, so the call is idempotent and resumable.
 
     Args:
         metadata: Parsed metadata row for the sequence.
-        assets: Ordered asset kinds to fetch (see ``ALL_ASSETS``).
-        download_dir: Dataset root (writes to ``raw/<fold>/<video_id>/``).
+        plans: Pending assets produced by :func:`plan_video_downloads`.
+        download_dir: Dataset root used for point-cloud downloads.
         keep_zip: Keep the downloaded ``.zip`` after extraction when True.
         include_point_clouds: Also fetch laser-scan point clouds when available.
+        on_bytes: Callback receiving the in-flight asset's current ``.part`` size.
+        on_asset_complete: Callback receiving each completed plan and its downloaded byte size.
     """
     video_dir: Path = download_dir / "raw" / metadata.fold / metadata.video_id
-    url_prefix: str = f"{ARKITSCENES_URL}/raw/{metadata.fold}/{metadata.video_id}"
-
-    for asset in assets:
-        filename: str | None = asset_to_filename(metadata.video_id, asset, metadata)
-        if filename is None:
+    for plan in plans:
+        # Plans snapshot disk state at planning time; re-check just before the
+        # transfer so an asset landed since then (or planned twice) is skipped
+        # instead of re-downloaded and re-extracted onto the existing directory.
+        extracted_dir: Path = video_dir / plan.filename.removesuffix(".zip")
+        if (plan.is_zip and extracted_dir.is_dir()) or (not plan.is_zip and plan.dst_path.exists()):
             continue
-
-        is_zip: bool = filename.endswith(".zip")
-        if is_zip and (video_dir / filename[: -len(".zip")]).is_dir():
-            continue  # already extracted
-
-        dst_path: Path = video_dir / filename
-        if not is_zip and dst_path.exists():
+        size: int | None = download_file(plan.url, plan.dst_path, on_bytes)
+        if size is None:
             continue
-
-        print(f"    {asset} -> {filename}")
-        if not download_file(f"{url_prefix}/{filename}", dst_path):
-            continue
-        if is_zip:
-            extract_zip(dst_path, video_dir, filename[: -len(".zip")])
+        if plan.is_zip:
+            extract_zip(plan.dst_path, video_dir, plan.filename.removesuffix(".zip"))
             if not keep_zip:
-                dst_path.unlink(missing_ok=True)
+                plan.dst_path.unlink(missing_ok=True)
+        if on_asset_complete is not None:
+            on_asset_complete(plan, size)
 
     if include_point_clouds and metadata.has_laser_scanner_point_clouds:
-        print("    laser_scanner_point_clouds")
+        CONSOLE.log(f"[{metadata.video_id}] laser_scanner_point_clouds")
         download_point_clouds(metadata, download_dir)
