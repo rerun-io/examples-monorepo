@@ -21,6 +21,9 @@ IMU_ATTITUDE: str = f"{IMU}/motion/attitude"
 GT: str = f"{WORLD}/gt"
 GT_MESH: str = f"{GT}/mesh"
 GT_BOXES: str = f"{GT}/boxes"
+# PromptDA layer (written by the prompt-da package, not by ingest).
+DEPTH_PROMPTDA: str = f"{PINHOLE_WIDE}/depth_promptda"
+PROMPTDA_MESH: str = f"{WORLD}/promptda/mesh"
 
 
 def gt_box(label: str) -> str:
