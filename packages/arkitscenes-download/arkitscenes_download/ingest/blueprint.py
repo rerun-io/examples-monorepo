@@ -1,5 +1,7 @@
 """Default viewer layout for an ingested sequence."""
 
+from typing import TypeAlias
+
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
@@ -16,10 +18,15 @@ SPIN_SPEED: float = 0.25
 """Slow orbit around the look target."""
 
 
-def _eye_controls(mesh_center_xyz: Float64[np.ndarray, "3"] | None, bounding_radius_m: float | None) -> rrb.archetypes.EyeControls3D:
+MeshFraming: TypeAlias = tuple[Float64[np.ndarray, "3"], float]
+"""GT-mesh framing geometry: (world-frame AABB center, bounding-sphere radius in metres)."""
+
+
+def _eye_controls(framing: MeshFraming | None) -> rrb.archetypes.EyeControls3D:
     """Frame the GT mesh when its geometry is known; otherwise keep the viewer's default framing."""
-    if mesh_center_xyz is None or bounding_radius_m is None:
+    if framing is None:
         return rrb.archetypes.EyeControls3D(spin_speed=SPIN_SPEED)
+    mesh_center_xyz, bounding_radius_m = framing
     return rrb.archetypes.EyeControls3D(
         kind=rrb.components.Eye3DKind.Orbital,
         position=orbit_eye_position(mesh_center_xyz, bounding_radius_m, FIT_DISTANCE_FACTOR * EXTRA_ZOOM_OUT),
@@ -38,16 +45,12 @@ def _imu_axis() -> rrb.archetypes.TimeAxis:
     return rrb.archetypes.TimeAxis(view_range=window)
 
 
-def make_blueprint(
-    portrait: bool = False,
-    mesh_center_xyz: Float64[np.ndarray, "3"] | None = None,
-    bounding_radius_m: float | None = None,
-) -> rrb.Blueprint:
+def make_blueprint(portrait: bool = False, framing: MeshFraming | None = None) -> rrb.Blueprint:
     """Build the multi-camera, depth, and IMU layout.
 
     The layout is identical for both orientations; only the column widths
     change. Portrait camera views are tall and narrow, so the 3D world view
-    takes a wider share of the row. When the GT mesh geometry is provided
+    takes a wider share of the row. When the GT mesh framing is provided
     (per-sequence embedded blueprints), the 3D eye orbits the mesh center
     with the whole mesh in frame; dataset-default blueprints omit it.
     """
@@ -55,7 +58,7 @@ def make_blueprint(
     return rrb.Blueprint(
         rrb.Vertical(
             rrb.Horizontal(
-                rrb.Spatial3DView(name="world", origin=f"/{WORLD}", eye_controls=_eye_controls(mesh_center_xyz, bounding_radius_m)),
+                rrb.Spatial3DView(name="world", origin=f"/{WORLD}", eye_controls=_eye_controls(framing)),
                 rrb.Vertical(
                     rrb.Spatial2DView(name="wide", origin=PINHOLE_WIDE, contents=["$origin/video", f"/{WORLD}/gt/boxes/**"]),
                     rrb.Spatial2DView(name="ultrawide", origin=PINHOLE_ULTRAWIDE, contents=["$origin/video", f"/{WORLD}/gt/boxes/**"]),

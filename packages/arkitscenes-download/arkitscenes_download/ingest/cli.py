@@ -100,10 +100,7 @@ def atomic_recording(output_path: Path, recording_id: str, *, send_properties: b
     temp_path: Path = Path(temp_name)
     try:
         with rr.RecordingStream(application_id="arkitscenes", recording_id=recording_id, send_properties=send_properties) as recording:
-            if default_blueprint is not None:
-                recording.save(temp_path, default_blueprint=default_blueprint)
-            else:
-                recording.save(temp_path)
+            recording.save(temp_path, default_blueprint=default_blueprint)
             yield recording
         os.replace(temp_path, output_path)
     except BaseException:
@@ -553,16 +550,11 @@ def ingest_sequence(config: Config) -> Path:
 
     base_path: Path = sequence_output / "base.rrd"
     base_layer: Layer = LAYERS_BY_NAME["base"]
-    framed_blueprint: rrb.Blueprint | None = (
-        make_blueprint(portrait, mesh_center_xyz=gt_summary.mesh_center_xyz, bounding_radius_m=gt_summary.bounding_radius_m)
-        if base_layer.embed_blueprint
-        else None
-    )
     with atomic_recording(
         base_path,
         config.video_id,
         send_properties=base_layer.send_properties,
-        default_blueprint=framed_blueprint,
+        default_blueprint=make_blueprint(portrait, framing=(gt_summary.mesh_center_xyz, gt_summary.bounding_radius_m)),
     ) as recording:
         for name, value in properties.items():
             recording.send_property(name, rr.AnyValues(value=str(value)))

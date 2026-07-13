@@ -42,7 +42,10 @@ ASSETS: tuple[str, ...] = (
     "ultrawide_intrinsics",
     "highres_depth",
 )
+# Package root is parents[1] from arkitscenes_download/pipeline.py. Fail at
+# import time rather than as thousands of per-sequence subprocess failures.
 DOWNLOAD_TOOL: Path = Path(__file__).resolve().parents[1] / "tools" / "apps" / "download.py"
+assert DOWNLOAD_TOOL.is_file(), f"download tool shim missing: {DOWNLOAD_TOOL}"
 FAILED_RAW_LIMIT_BYTES: int = 50 * 1024**3
 SSH_DESTINATION_PATTERN: re.Pattern[str] = re.compile(r"^(?P<host>[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*):(?P<path>/.*)$")
 VIDEO_ID_PATTERN: re.Pattern[str] = re.compile(r"^[0-9]+$")

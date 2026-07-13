@@ -50,7 +50,7 @@ class MakeBlueprintTest(unittest.TestCase):
     def test_generic_and_framed_blueprints_build(self) -> None:
         """Both the dataset-default and the per-sequence framed layout construct."""
         self.assertIsInstance(make_blueprint(portrait=True), rrb.Blueprint)
-        framed: rrb.Blueprint = make_blueprint(portrait=False, mesh_center_xyz=np.array([1.0, 2.0, 3.0]), bounding_radius_m=2.5)
+        framed: rrb.Blueprint = make_blueprint(portrait=False, framing=(np.array([1.0, 2.0, 3.0]), 2.5))
         self.assertIsInstance(framed, rrb.Blueprint)
 
 

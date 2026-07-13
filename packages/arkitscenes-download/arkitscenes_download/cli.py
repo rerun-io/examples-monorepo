@@ -15,6 +15,7 @@ from simplecv.print_utils import format_bytes
 
 from arkitscenes_download.download_dataset import (
     ALL_ASSETS,
+    CONSOLE,
     PlannedDownload,
     VideoMetadata,
     download_video,
@@ -67,7 +68,9 @@ def _select_video_ids(config: Config, metadata: dict[str, VideoMetadata]) -> lis
 
 def main(config: Config) -> None:
     """Download the selected ARKitScenes sequences."""
-    console: Console = Console(markup=False)
+    # Share download_dataset's console: its failure prints would otherwise
+    # bypass this function's Live region and garble the bars.
+    console: Console = CONSOLE
 
     console.print(f"Loading raw metadata into {config.download_dir} ...")
     metadata: dict[str, VideoMetadata] = load_metadata(config.download_dir)
@@ -80,18 +83,17 @@ def main(config: Config) -> None:
     plans: list[PlannedDownload] = [plan for video_id in video_ids for plan in plans_by_video[video_id]]
     if config.prefetch:
         with console.status("Checking remote asset sizes..."):
-            sizes: dict[str, int | None] = prefetch_sizes(plans)
+            sizes: dict[str, int] = prefetch_sizes(plans)
     else:
-        sizes = dict.fromkeys((plan.url for plan in plans), None)
-    known_total: int = sum(size for size in sizes.values() if size is not None)
-    unknown_sizes: int = sum(size is None for size in sizes.values())
+        sizes = {}
+    known_total: int = sum(sizes.values())
+    unknown_sizes: int = sum(plan.url not in sizes for plan in plans)
     unknown_note: str = f" + {unknown_sizes} unknown-size assets" if unknown_sizes else ""
     console.print(f"Plan: {len(video_ids)} sequences, {len(plans)} assets, {format_bytes(known_total)} to fetch{unknown_note}")
     console.print(f"Point clouds: {config.include_point_clouds} | keep zips: {config.keep_zip}")
 
     start: float = time.monotonic()
     bytes_done: int = 0
-    current_asset_bytes: int = 0
     # Two Progress renderables in one Live so each task row gets fitting columns
     # (bytes/speed for the transfer, plain counts for sequences).
     progress: Progress = Progress(
@@ -108,33 +110,26 @@ def main(config: Config) -> None:
         TimeRemainingColumn(),
         console=console,
     )
+    bytes_task: TaskID = progress.add_task("download bytes", total=known_total)
+    sequences_task: TaskID = sequences_progress.add_task(f"0/{len(video_ids)} sequences, {len(video_ids)} remaining", total=len(video_ids))
 
-    def on_bytes(plan: PlannedDownload, current: int) -> None:
-        """Reflect the current part-file size in overall progress."""
-        nonlocal current_asset_bytes
-        current_asset_bytes = current
+    def on_bytes(current: int) -> None:
+        """Reflect the in-flight asset's current part-file size in overall progress."""
         progress.update(bytes_task, completed=bytes_done + current)
 
-    def on_asset_complete(plan: PlannedDownload) -> None:
+    def on_asset_complete(plan: PlannedDownload, actual_bytes: int) -> None:
         """Commit one completed asset's bytes to overall progress."""
-        nonlocal bytes_done, known_total, current_asset_bytes
-        actual_bytes: int = current_asset_bytes
-        current_asset_bytes = 0
-        expected_bytes: int | None = sizes[plan.url]
+        nonlocal bytes_done, known_total
+        expected_bytes: int | None = sizes.get(plan.url)
         if expected_bytes is None:
             known_total += actual_bytes
             progress.update(bytes_task, total=known_total)
-            committed_bytes: int = actual_bytes
-        else:
-            committed_bytes = expected_bytes
-        bytes_done += committed_bytes
+        bytes_done += actual_bytes if expected_bytes is None else expected_bytes
         progress.update(bytes_task, completed=bytes_done)
         if not console.is_terminal:
             console.print(f"asset complete: {plan.video_id} {plan.asset} ({format_bytes(actual_bytes)})")
 
     with Live(Group(progress, sequences_progress), console=console, refresh_per_second=10.0):
-        bytes_task: TaskID = progress.add_task("download bytes", total=known_total)
-        sequences_task: TaskID = sequences_progress.add_task(f"0/{len(video_ids)} sequences, {len(video_ids)} remaining", total=len(video_ids))
         for index, video_id in enumerate(video_ids, start=1):
             meta: VideoMetadata = metadata[video_id]
             download_video(

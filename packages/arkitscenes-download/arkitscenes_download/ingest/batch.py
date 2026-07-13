@@ -4,7 +4,6 @@ import subprocess
 import sys
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,7 +13,10 @@ from rich.table import Table
 
 from arkitscenes_download.ingest.layers import LAYER_NAMES
 
+# Package root is parents[2] from arkitscenes_download/ingest/batch.py. Fail at
+# import time rather than as thousands of per-sequence subprocess failures.
 INGEST_TOOL: Path = Path(__file__).resolve().parents[2] / "tools" / "apps" / "ingest_sequence.py"
+assert INGEST_TOOL.is_file(), f"ingest tool shim missing: {INGEST_TOOL}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,17 +139,18 @@ def _print_summary(results: list[SequenceResult], summary: BatchSummary, console
     console.print(f"Effective speedup: {summary.effective_speedup:.2f}x")
 
 
-def run_batch(config: Config, progress: Progress | None = None) -> BatchSummary:
-    """Run selected sequences concurrently, reporting every completed job."""
+def run_batch(config: Config, progress: Progress) -> BatchSummary:
+    """Run selected sequences concurrently, reporting every completed job.
+
+    The caller owns the live progress region (rich Live regions cannot nest).
+    """
     if config.workers < 1:
         raise ValueError("workers must be at least 1")
-    owns_progress: bool = progress is None
-    active_progress: Progress = Progress(console=Console(markup=False)) if progress is None else progress
     selected_video_ids: list[str] = discover_video_ids(config.data_dir) if config.video_ids is None else list(dict.fromkeys(config.video_ids))
     video_ids: list[str] = []
     for video_id in selected_video_ids:
         if config.skip_existing and has_all_layers(config.output, video_id):
-            active_progress.console.print(f"[{video_id}] skipped: output already exists", markup=False)
+            progress.console.print(f"[{video_id}] skipped: output already exists", markup=False)
         else:
             video_ids.append(video_id)
 
@@ -155,28 +158,28 @@ def run_batch(config: Config, progress: Progress | None = None) -> BatchSummary:
     # 32 cores on this box; that is accepted, and workers remains the throttle.
     started: float = time.perf_counter()
     results: list[SequenceResult] = []
-    progress_context = active_progress if owns_progress else nullcontext(active_progress)
-    with progress_context, ThreadPoolExecutor(max_workers=config.workers) as pool:
+    with ThreadPoolExecutor(max_workers=config.workers) as pool:
         futures: dict[Future[SequenceResult], str] = {pool.submit(_run_sequence, video_id, config): video_id for video_id in video_ids}
         ok_count: int = 0
         failed_count: int = 0
-        task_id: TaskID = active_progress.add_task("ingest (ok=0 failed=0)", total=len(futures))
+        task_id: TaskID = progress.add_task("ingest (ok=0 failed=0)", total=len(futures))
         for future in as_completed(futures):
             result: SequenceResult = future.result()
             results.append(result)
             ok_count += int(result.ok)
             failed_count += int(not result.ok)
-            _print_prefixed_output(result, active_progress)
-            active_progress.advance(task_id)
-            active_progress.update(task_id, description=f"ingest (ok={ok_count} failed={failed_count})")
-        active_progress.remove_task(task_id)
+            _print_prefixed_output(result, progress)
+            progress.advance(task_id)
+            progress.update(task_id, description=f"ingest (ok={ok_count} failed={failed_count})")
+        progress.remove_task(task_id)
     total_wall_seconds: float = time.perf_counter() - started
     summary: BatchSummary = summarize(results, total_wall_seconds)
-    _print_summary(results, summary, active_progress.console)
+    _print_summary(results, summary, progress.console)
     return summary
 
 
 def main(config: Config) -> None:
     """Run a batch and exit unsuccessfully if any job failed."""
-    summary: BatchSummary = run_batch(config)
+    with Progress(console=Console(markup=False)) as progress:
+        summary: BatchSummary = run_batch(config, progress)
     raise SystemExit(1 if summary.failed_video_ids else 0)

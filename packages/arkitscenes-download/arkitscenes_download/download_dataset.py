@@ -193,15 +193,15 @@ def head_content_length(url: str) -> int | None:
     return parse_content_length(result.stdout) if result.returncode == 0 else None
 
 
-def prefetch_sizes(plans: list[PlannedDownload], workers: int = 16) -> dict[str, int | None]:
-    """Fetch content lengths concurrently for planned downloads."""
+def prefetch_sizes(plans: list[PlannedDownload], workers: int = 16) -> dict[str, int]:
+    """Fetch content lengths concurrently for planned downloads; URLs with unknown size are absent."""
     urls: list[str] = list(dict.fromkeys(plan.url for plan in plans))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         sizes: list[int | None] = list(pool.map(head_content_length, urls))
-    return dict(zip(urls, sizes, strict=True))
+    return {url: size for url, size in zip(urls, sizes, strict=True) if size is not None}
 
 
-def download_file(url: str, dst_path: Path, on_bytes: Callable[[int], None] | None = None) -> bool:
+def download_file(url: str, dst_path: Path, on_bytes: Callable[[int], None] | None = None) -> int | None:
     """Download ``url`` to ``dst_path`` with curl (resumable, retrying).
 
     Args:
@@ -211,12 +211,14 @@ def download_file(url: str, dst_path: Path, on_bytes: Callable[[int], None] | No
             while curl is polled with ``Popen.wait(timeout=0.25)``.
 
     Returns:
-        True on success (or if the file already exists); False if the asset is
-        unavailable (HTTP 4xx) or the transfer failed after retries.
+        The downloaded size in bytes on success (or the on-disk size if the
+        file already exists); None if the asset is unavailable (HTTP 4xx) or
+        the transfer failed after retries. Test ``is None``, not truthiness —
+        a zero-byte file is a success.
     """
     dst_path.parent.mkdir(parents=True, exist_ok=True)
     if dst_path.exists():
-        return True
+        return dst_path.stat().st_size
 
     part_path: Path = dst_path.parent / (dst_path.name + ".part")
     command: list[str] = [
@@ -253,17 +255,16 @@ def download_file(url: str, dst_path: Path, on_bytes: Callable[[int], None] | No
             if on_bytes is not None:
                 on_bytes(part_bytes())
     returncode: int = process.returncode
-    if on_bytes is not None:
-        on_bytes(part_bytes())
     if returncode == 0:
+        size: int = part_bytes()
         part_path.rename(dst_path)
-        return True
+        return size
     if returncode == 22:  # curl --fail: server returned HTTP >= 400
         part_path.unlink(missing_ok=True)
         CONSOLE.print(f"    unavailable (HTTP error): {url}")
-        return False
+        return None
     CONSOLE.print(f"    transfer failed (curl exit {returncode}; keeping .part for resume): {url}")
-    return False
+    return None
 
 
 def extract_zip(zip_path: Path, video_dir: Path, folder_name: str) -> None:
@@ -342,7 +343,7 @@ def load_metadata(download_dir: Path) -> dict[str, VideoMetadata]:
         Mapping from ``video_id`` to its parsed :class:`VideoMetadata`.
     """
     csv_path: Path = download_dir / "raw" / "metadata.csv"
-    if not download_file(f"{ARKITSCENES_URL}/raw/metadata.csv", csv_path):
+    if download_file(f"{ARKITSCENES_URL}/raw/metadata.csv", csv_path) is None:
         raise RuntimeError("Failed to download raw metadata.csv")
 
     metadata: dict[str, VideoMetadata] = {}
@@ -365,7 +366,7 @@ def _point_cloud_ids_for_visit(visit_id: int, download_dir: Path) -> list[str]:
     """Return the laser-scan point-cloud ids belonging to ``visit_id``."""
     mapping_path: Path = download_dir / POINT_CLOUDS_FOLDER / "laser_scanner_point_clouds_mapping.csv"
     mapping_url: str = f"{ARKITSCENES_URL}/raw/{POINT_CLOUDS_FOLDER}/laser_scanner_point_clouds_mapping.csv"
-    if not mapping_path.exists() and not download_file(mapping_url, mapping_path):
+    if not mapping_path.exists() and download_file(mapping_url, mapping_path) is None:
         return []
 
     point_cloud_ids: list[str] = []
@@ -398,8 +399,8 @@ def download_video(
     download_dir: Path,
     keep_zip: bool,
     include_point_clouds: bool,
-    on_bytes: Callable[[PlannedDownload, int], None] | None = None,
-    on_asset_complete: Callable[[PlannedDownload], None] | None = None,
+    on_bytes: Callable[[int], None] | None = None,
+    on_asset_complete: Callable[[PlannedDownload, int], None] | None = None,
 ) -> None:
     """Download an already-filtered list of pending assets for one sequence.
 
@@ -412,8 +413,8 @@ def download_video(
         download_dir: Dataset root used for point-cloud downloads.
         keep_zip: Keep the downloaded ``.zip`` after extraction when True.
         include_point_clouds: Also fetch laser-scan point clouds when available.
-        on_bytes: Callback receiving a plan and its current ``.part`` size.
-        on_asset_complete: Callback receiving each successfully completed plan.
+        on_bytes: Callback receiving the in-flight asset's current ``.part`` size.
+        on_asset_complete: Callback receiving each completed plan and its downloaded byte size.
     """
     video_dir: Path = download_dir / "raw" / metadata.fold / metadata.video_id
     for plan in plans:
@@ -423,15 +424,15 @@ def download_video(
         extracted_dir: Path = video_dir / plan.filename.removesuffix(".zip")
         if (plan.is_zip and extracted_dir.is_dir()) or (not plan.is_zip and plan.dst_path.exists()):
             continue
-        callback: Callable[[int], None] | None = None if on_bytes is None else lambda current, item=plan: on_bytes(item, current)
-        if not download_file(plan.url, plan.dst_path, callback):
+        size: int | None = download_file(plan.url, plan.dst_path, on_bytes)
+        if size is None:
             continue
         if plan.is_zip:
             extract_zip(plan.dst_path, video_dir, plan.filename.removesuffix(".zip"))
             if not keep_zip:
                 plan.dst_path.unlink(missing_ok=True)
         if on_asset_complete is not None:
-            on_asset_complete(plan)
+            on_asset_complete(plan, size)
 
     if include_point_clouds and metadata.has_laser_scanner_point_clouds:
         CONSOLE.log(f"[{metadata.video_id}] laser_scanner_point_clouds")
