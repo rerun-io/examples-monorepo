@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-import tyro
 from rich.console import Console, Group
 from rich.live import Live
 from rich.progress import BarColumn, DownloadColumn, Progress, TaskID, TextColumn, TimeRemainingColumn, TransferSpeedColumn
@@ -66,9 +65,8 @@ def _select_video_ids(config: Config, metadata: dict[str, VideoMetadata]) -> lis
     return random.Random(config.seed).sample(pool, count)
 
 
-def main() -> None:
-    """Parse CLI args and download the selected ARKitScenes sequences."""
-    config: Config = tyro.cli(Config)
+def main(config: Config) -> None:
+    """Download the selected ARKitScenes sequences."""
     console: Console = Console(markup=False)
 
     console.print(f"Loading raw metadata into {config.download_dir} ...")
@@ -159,7 +157,3 @@ def main() -> None:
     total_bytes: int = directory_size(config.download_dir)
     console.print(f"Finished {len(video_ids)} sequence(s) in {elapsed / 60:.1f} min")
     console.print(f"Total on disk under {config.download_dir}: {format_bytes(total_bytes)}")
-
-
-if __name__ == "__main__":
-    main()

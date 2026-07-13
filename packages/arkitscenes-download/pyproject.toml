@@ -31,7 +31,7 @@ ignore = [
 ]
 
 [tool.vulture]
-paths = ["arkitscenes_download", "tests"]
+paths = ["arkitscenes_download", "tests", "tools"]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*"]
 sort_by_size = true
 min_confidence = 60

@@ -2137,18 +2137,18 @@ tyro = ">=0.9,<1"
 PACKAGE_DIR = "packages/arkitscenes-download"
 
 [feature.arkitscenes-download.tasks.arkitscenes-download-sample]
-cmd = "python -m arkitscenes_download --download-dir data --num-random 5 --seed 42 --no-include-point-clouds --assets mov annotation mesh lowres_wide.traj confidence lowres_depth lowres_wide_intrinsics ultrawide_intrinsics highres_depth"
+cmd = "python tools/apps/download.py --download-dir data --num-random 5 --seed 42 --no-include-point-clouds --assets mov annotation mesh lowres_wide.traj confidence lowres_depth lowres_wide_intrinsics ultrawide_intrinsics highres_depth"
 cwd = "packages/arkitscenes-download"
 description = "Download a 5-sequence ARKitScenes sample (mov + depth + calibration, no point clouds)"
 
 [feature.arkitscenes-download.tasks.arkitscenes-download-ingest]
-cmd = "python -m arkitscenes_download.ingest.batch --workers 2"
+cmd = "python tools/apps/ingest_batch.py --workers 2"
 cwd = "packages/arkitscenes-download"
 depends-on = ["arkitscenes-download-sample"]
 description = "Ingest every downloaded sequence into layered .rrd files under data/rrd/"
 
 [feature.arkitscenes-download.tasks.arkitscenes-download-pipeline]
-cmd = "python -m arkitscenes_download.pipeline --chunk-size 5 --destination data/published"
+cmd = "python tools/apps/pipeline.py --chunk-size 5 --destination data/published"
 cwd = "packages/arkitscenes-download"
 description = "Resumable download→ingest→verify→publish pipeline (local destination; see --help for ssh targets)"
 
@@ -2158,7 +2158,7 @@ cwd = "packages/arkitscenes-download"
 description = "Serve a Rerun catalog for registered ARKitScenes recordings"
 
 [feature.arkitscenes-download.tasks.arkitscenes-download-register]
-cmd = "python -m arkitscenes_download.ingest.catalog --rrd-dir data/rrd"
+cmd = "python tools/apps/register_catalog.py --rrd-dir data/rrd"
 cwd = "packages/arkitscenes-download"
 env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
 description = "Register ingested layer .rrds into the catalog on :51235"

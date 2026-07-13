@@ -8,12 +8,13 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
-import tyro
 from rich.console import Console
 from rich.progress import Progress, TaskID
 from rich.table import Table
 
 from arkitscenes_download.ingest.layers import LAYER_NAMES
+
+INGEST_TOOL: Path = Path(__file__).resolve().parents[2] / "tools" / "apps" / "ingest_sequence.py"
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,8 +90,7 @@ def _run_sequence(video_id: str, config: Config) -> SequenceResult:
     """Run one single-sequence CLI subprocess and capture its combined output."""
     command: list[str] = [
         sys.executable,
-        "-m",
-        "arkitscenes_download.ingest",
+        str(INGEST_TOOL),
         "--video-id",
         video_id,
         "--data-dir",
@@ -176,11 +176,7 @@ def run_batch(config: Config, progress: Progress | None = None) -> BatchSummary:
     return summary
 
 
-def main() -> None:
-    """Parse batch CLI arguments and exit unsuccessfully if any job failed."""
-    summary: BatchSummary = run_batch(tyro.cli(Config))
+def main(config: Config) -> None:
+    """Run a batch and exit unsuccessfully if any job failed."""
+    summary: BatchSummary = run_batch(config)
     raise SystemExit(1 if summary.failed_video_ids else 0)
-
-
-if __name__ == "__main__":
-    main()

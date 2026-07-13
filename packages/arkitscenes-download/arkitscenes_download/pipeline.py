@@ -21,7 +21,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, TypeAlias
 
-import tyro
 from rich.console import Console
 from rich.progress import Progress, TaskID
 from simplecv.print_utils import format_bytes
@@ -43,6 +42,7 @@ ASSETS: tuple[str, ...] = (
     "ultrawide_intrinsics",
     "highres_depth",
 )
+DOWNLOAD_TOOL: Path = Path(__file__).resolve().parents[1] / "tools" / "apps" / "download.py"
 FAILED_RAW_LIMIT_BYTES: int = 50 * 1024**3
 SSH_DESTINATION_PATTERN: re.Pattern[str] = re.compile(r"^(?P<host>[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*):(?P<path>/.*)$")
 VIDEO_ID_PATTERN: re.Pattern[str] = re.compile(r"^[0-9]+$")
@@ -373,8 +373,7 @@ def _download_chunk(config: Config, chunk: list[str], splits: dict[str, str], ex
         wait_for_disk_space(config.data_dir, config.min_free_gb * 1024**3, write=progress.console.print)
         command: list[str] = [
             sys.executable,
-            "-m",
-            "arkitscenes_download",
+            str(DOWNLOAD_TOOL),
             "--download-dir",
             str(config.data_dir),
             "--video-ids",
@@ -602,13 +601,9 @@ def run_pipeline(config: Config) -> None:
                 ship_future.result()
 
 
-def main() -> None:
-    """Parse CLI configuration and run the pipeline."""
+def main(config: Config) -> None:
+    """Run the pipeline, handling interactive interruption cleanly."""
     try:
-        run_pipeline(tyro.cli(Config))
+        run_pipeline(config)
     except KeyboardInterrupt:
         CONSOLE.print("pipeline interrupted cleanly; persistent state is ready to resume")
-
-
-if __name__ == "__main__":
-    main()

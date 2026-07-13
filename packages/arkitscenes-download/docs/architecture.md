@@ -20,7 +20,7 @@ flowchart LR
         CDN --> LASER
     end
 
-    subgraph ING["2 · INGEST  (python -m arkitscenes_download.ingest --video-id N)"]
+    subgraph ING["2 · INGEST  (python tools/apps/ingest_sequence.py --video-id N)"]
         MOV["MOV demux<br>13 streams"]
         PIPE["per-sequence DAG<br>(see §3)"]
         RRD["data/rrd/&lt;id&gt;/&lt;layer&gt;.rrd<br>7 layers · each tempfile → os.replace<br>all verified together"]

@@ -19,7 +19,6 @@ from pathlib import Path
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-import tyro
 from PIL import Image
 from rich.console import Console
 from rich.progress import Progress, TaskID
@@ -580,8 +579,3 @@ def ingest_sequence(config: Config) -> Path:
     if config.spawn:
         rr.spawn()
     return sequence_output
-
-
-def main() -> None:
-    """Parse CLI arguments and ingest one sequence."""
-    ingest_sequence(tyro.cli(Config))
