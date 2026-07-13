@@ -68,7 +68,7 @@ cleans staging, resumably (kill it anywhere; rerun continues from
 pixi run -e arkitscenes-download arkitscenes-download-pipeline
 
 # or to a remote destination over ssh (transport + sha256 verification per scheme)
-python -m arkitscenes_download.pipeline --destination user@host:/srv/arkitscenes/rrd --read-mount /mnt/arkitscenes/rrd
+python tools/apps/pipeline.py --destination user@host:/srv/arkitscenes/rrd --read-mount /mnt/arkitscenes/rrd
 ```
 
 Failures record to `failed.txt` and never block; `--retry-failed` re-queues them

@@ -1,22 +1,23 @@
 """Register ingested ARKitScenes RRDs into a local Rerun catalog.
 
 The local catalog is the in-memory ``rerun server`` (start it with
-``pixi run serve``). Each sequence RRD is one segment whose id is its
-``recording_id`` (the ARKitScenes video id); the shared layout is registered
-as the dataset's default blueprint.
+``pixi run serve``). Each sequence is one segment assembled from seven layer
+RRDs sharing its ``recording_id`` (the ARKitScenes video id); generic portrait
+and landscape layouts are registered as dataset blueprints.
 """
 
 from dataclasses import dataclass
 from pathlib import Path
 
-import tyro
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
+from rich.console import Console
 
 from arkitscenes_download.ingest.blueprint import make_blueprint
 from arkitscenes_download.ingest.layers import LAYER_NAMES
 
 DEFAULT_CATALOG_URL: str = "rerun+http://127.0.0.1:51235"
 """gRPC URL of a locally-running ``rerun server`` catalog."""
+CONSOLE: Console = Console(markup=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,15 +71,10 @@ def register_sequences(config: Config) -> DatasetEntry:
     return dataset
 
 
-def main() -> None:
-    """CLI entry point: register all ingested sequences."""
-    config: Config = tyro.cli(Config)
+def main(config: Config) -> None:
+    """Register all ingested sequences."""
     dataset: DatasetEntry = register_sequences(config)
     segment_ids: list[str] = [str(segment) for segment in dataset.segment_ids()]
-    print(f"dataset '{config.dataset_name}' at {config.catalog_url}: {len(segment_ids)} segments")
+    CONSOLE.print(f"dataset '{config.dataset_name}' at {config.catalog_url}: {len(segment_ids)} segments")
     for segment_id in segment_ids:
-        print(f"  {segment_id}")
-
-
-if __name__ == "__main__":
-    main()
+        CONSOLE.print(f"  {segment_id}")

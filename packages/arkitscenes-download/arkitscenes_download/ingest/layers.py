@@ -11,18 +11,17 @@ class Layer:
     """Layer file stem and catalog layer name."""
     send_properties: bool
     """Whether recording properties belong in this layer."""
-    embed_blueprint: bool
-    """Whether the default blueprint belongs in this layer."""
 
 
+# The base layer also embeds the per-sequence default blueprint (see ingest.cli).
 LAYERS: tuple[Layer, ...] = (
-    Layer("base", True, True),
-    Layer("calibration", False, False),
-    Layer("video_wide", False, False),
-    Layer("video_ultrawide", False, False),
-    Layer("depth", False, False),
-    Layer("imu", False, False),
-    Layer("gt", False, False),
+    Layer("base", True),
+    Layer("calibration", False),
+    Layer("video_wide", False),
+    Layer("video_ultrawide", False),
+    Layer("depth", False),
+    Layer("imu", False),
+    Layer("gt", False),
 )
 LAYER_NAMES: tuple[str, ...] = tuple(layer.name for layer in LAYERS)
 LAYERS_BY_NAME: dict[str, Layer] = {layer.name: layer for layer in LAYERS}

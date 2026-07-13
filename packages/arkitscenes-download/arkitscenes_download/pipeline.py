@@ -21,10 +21,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, TypeAlias
 
-import tyro
-from tqdm import tqdm
+from rich.console import Console
+from rich.progress import Progress, TaskID
+from simplecv.print_utils import format_bytes
 
-from arkitscenes_download.download_dataset import human_bytes
 from arkitscenes_download.fs import directory_size
 from arkitscenes_download.ingest.batch import BatchSummary, run_batch
 from arkitscenes_download.ingest.batch import Config as BatchConfig
@@ -42,9 +42,14 @@ ASSETS: tuple[str, ...] = (
     "ultrawide_intrinsics",
     "highres_depth",
 )
+# Package root is parents[1] from arkitscenes_download/pipeline.py. Fail at
+# import time rather than as thousands of per-sequence subprocess failures.
+DOWNLOAD_TOOL: Path = Path(__file__).resolve().parents[1] / "tools" / "apps" / "download.py"
+assert DOWNLOAD_TOOL.is_file(), f"download tool shim missing: {DOWNLOAD_TOOL}"
 FAILED_RAW_LIMIT_BYTES: int = 50 * 1024**3
 SSH_DESTINATION_PATTERN: re.Pattern[str] = re.compile(r"^(?P<host>[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*):(?P<path>/.*)$")
 VIDEO_ID_PATTERN: re.Pattern[str] = re.compile(r"^[0-9]+$")
+CONSOLE: Console = Console(markup=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,7 +177,7 @@ class Destination:
                 archive.stdout.close()
             archive_status: int = archive.wait()
         if ship.returncode != 0 or archive_status != 0:
-            tqdm.write(f"tar-ssh ship failed for {source.name}: {ship.stderr.strip()[-200:]}")
+            CONSOLE.print(f"tar-ssh ship failed for {source.name}: {ship.stderr.strip()[-200:]}")
             return False
         if self.read_mount is not None:
             landed = self.read_mount / source.name
@@ -275,7 +280,7 @@ def wait_for_disk_space(
     min_free_bytes: int,
     disk_usage: Callable[[Path], DiskUsage] = shutil.disk_usage,
     sleep: Callable[[float], None] = time.sleep,
-    write: Callable[[str], None] = tqdm.write,
+    write: Callable[[str], None] = CONSOLE.print,
 ) -> None:
     """Wait until staging has at least the configured free byte count."""
     notified: bool = False
@@ -309,7 +314,7 @@ def ship_verify_and_cleanup(
 ) -> bool:
     """Publish, verify, persist completion, and remove local staging."""
     if not destination.ship_and_verify(local_rrd, runner):
-        tqdm.write(f"sha256 verification failed for {local_rrd.name}")
+        CONSOLE.print(f"sha256 verification failed for {local_rrd.name}")
         return False
     if before_cleanup is not None:
         before_cleanup()
@@ -358,44 +363,46 @@ def _failed_raw_size(data_dir: Path, splits: dict[str, str], failed_ids: set[str
     return sum(directory_size(data_dir / "raw" / splits[video_id] / video_id) for video_id in failed_ids if video_id in splits)
 
 
-def _download_chunk(config: Config, chunk: list[str], splits: dict[str, str], existing_failed: set[str]) -> DownloadResult:
+def _download_chunk(config: Config, chunk: list[str], splits: dict[str, str], existing_failed: set[str], progress: Progress) -> DownloadResult:
     """Download a chunk sequentially with retry, disk guard, and safety stop."""
     successful_ids: list[str] = []
     failures: dict[str, str] = {}
     failed_raw_bytes: int = _failed_raw_size(config.data_dir, splits, existing_failed)
-    with tqdm(total=len(chunk), position=1, desc="download", unit="sequence", dynamic_ncols=True, leave=False) as progress:
-        for video_id in chunk:
-            if failed_raw_bytes > FAILED_RAW_LIMIT_BYTES:
-                return DownloadResult(successful_ids, failures, True)
-            wait_for_disk_space(config.data_dir, config.min_free_gb * 1024**3)
-            command: list[str] = [
-                sys.executable,
-                "-m",
-                "arkitscenes_download",
-                "--download-dir",
-                str(config.data_dir),
-                "--video-ids",
-                video_id,
-                "--assets",
-                *ASSETS,
-                "--no-include-point-clouds",
-            ]
-            error: str = "download failed"
-            for attempt in range(2):
-                completed: subprocess.CompletedProcess[str] = subprocess.run(
-                    command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False
-                )
-                if completed.returncode == 0:
-                    successful_ids.append(video_id)
-                    break
-                error = f"download exit {completed.returncode}: {completed.stdout.strip()[-1000:]}"
-                if attempt == 0:
-                    tqdm.write(f"[{video_id}] download failed; retrying once")
-            else:
-                failures[video_id] = error
-                if video_id in splits:
-                    failed_raw_bytes += directory_size(config.data_dir / "raw" / splits[video_id] / video_id)
-            progress.update()
+    task_id: TaskID = progress.add_task("download", total=len(chunk))
+    for video_id in chunk:
+        if failed_raw_bytes > FAILED_RAW_LIMIT_BYTES:
+            progress.remove_task(task_id)
+            return DownloadResult(successful_ids, failures, True)
+        wait_for_disk_space(config.data_dir, config.min_free_gb * 1024**3, write=progress.console.print)
+        command: list[str] = [
+            sys.executable,
+            str(DOWNLOAD_TOOL),
+            "--download-dir",
+            str(config.data_dir),
+            "--video-ids",
+            video_id,
+            "--assets",
+            *ASSETS,
+            "--no-include-point-clouds",
+            # The pipeline invokes this once per sequence and captures stdout,
+            # so per-invocation size prefetching is pure extra CDN round-trips.
+            "--no-prefetch",
+        ]
+        error: str = "download failed"
+        for attempt in range(2):
+            completed: subprocess.CompletedProcess[str] = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False)
+            if completed.returncode == 0:
+                successful_ids.append(video_id)
+                break
+            error = f"download exit {completed.returncode}: {completed.stdout.strip()[-1000:]}"
+            if attempt == 0:
+                progress.console.print(f"[{video_id}] download failed; retrying once")
+        else:
+            failures[video_id] = error
+            if video_id in splits:
+                failed_raw_bytes += directory_size(config.data_dir / "raw" / splits[video_id] / video_id)
+        progress.advance(task_id)
+    progress.remove_task(task_id)
     return DownloadResult(successful_ids, failures, False)
 
 
@@ -419,15 +426,15 @@ def _format_duration(seconds: float | None) -> str:
 
 def _print_status(status: StatusSummary) -> None:
     """Print the human-readable status report."""
-    print(f"done: {status.done}")
-    print(f"failed: {status.failed}")
-    print(f"remaining: {status.remaining}")
+    CONSOLE.print(f"done: {status.done}")
+    CONSOLE.print(f"failed: {status.failed}")
+    CONSOLE.print(f"remaining: {status.remaining}")
     for video_id, reason in sorted(status.failed_reasons.items()):
-        print(f"  {video_id}: {reason}")
-    size: str = "unknown (no read mount)" if status.destination_bytes is None else human_bytes(status.destination_bytes)
-    print(f"destination size: {size}")
-    print(f"rolling throughput: {status.sequences_per_hour:.2f} sequences/hour")
-    print(f"rolling ETA: {_format_duration(status.eta_seconds)}")
+        CONSOLE.print(f"  {video_id}: {reason}")
+    size: str = "unknown (no read mount)" if status.destination_bytes is None else format_bytes(status.destination_bytes)
+    CONSOLE.print(f"destination size: {size}")
+    CONSOLE.print(f"rolling throughput: {status.sequences_per_hour:.2f} sequences/hour")
+    CONSOLE.print(f"rolling ETA: {_format_duration(status.eta_seconds)}")
 
 
 def _ship_and_register_chunk(
@@ -436,7 +443,8 @@ def _ship_and_register_chunk(
     successful_ingests: list[str],
     splits: dict[str, str],
     state_lock: LockType,
-    overall: tqdm,
+    progress: Progress,
+    overall_task: TaskID,
     done_ids: set[str],
     failed_reasons: dict[str, str],
     prior_failures: int,
@@ -448,22 +456,23 @@ def _ship_and_register_chunk(
     """Publish one ingested chunk, register it, and record progress."""
     shipped_ids: list[str] = []
     published_bytes: int = 0
-    with tqdm(total=len(successful_ingests), position=3, desc="ship+verify", unit="sequence", dynamic_ncols=True, leave=False) as stage:
-        for video_id in successful_ingests:
-            local_rrd: Path = config.data_dir / "rrd" / video_id
-            local_raw: Path = config.data_dir / "raw" / splits[video_id] / video_id
-            sequence_bytes: int = directory_size(local_rrd)
+    stage_task: TaskID = progress.add_task("ship+verify", total=len(successful_ingests))
+    for video_id in successful_ingests:
+        local_rrd: Path = config.data_dir / "rrd" / video_id
+        local_raw: Path = config.data_dir / "raw" / splits[video_id] / video_id
+        sequence_bytes: int = directory_size(local_rrd)
 
-            def mark_done(completed_video_id: str = video_id) -> None:
-                """Persist completion before local staging is removed."""
-                _append_line(config.state_dir / "done.txt", completed_video_id, state_lock)
+        def mark_done(completed_video_id: str = video_id) -> None:
+            """Persist completion before local staging is removed."""
+            _append_line(config.state_dir / "done.txt", completed_video_id, state_lock)
 
-            if ship_verify_and_cleanup(local_rrd, local_raw, destination, before_cleanup=mark_done):
-                shipped_ids.append(video_id)
-                published_bytes += sequence_bytes
-                done_ids.add(video_id)
-                overall.update()
-            stage.update()
+        if ship_verify_and_cleanup(local_rrd, local_raw, destination, before_cleanup=mark_done):
+            shipped_ids.append(video_id)
+            published_bytes += sequence_bytes
+            done_ids.add(video_id)
+            progress.advance(overall_task)
+        progress.advance(stage_task)
+    progress.remove_task(stage_task)
     if shipped_ids and config.register:
         registration_root: Path | None = destination.registration_root
         if registration_root is None:
@@ -473,11 +482,11 @@ def _ship_and_register_chunk(
             try:
                 register_sequences(CatalogConfig(rrd_dir=registration_root, catalog_url=config.catalog_url, video_ids=shipped_ids))
             except (OSError, RuntimeError) as error:
-                tqdm.write(f"catalog registration failed; recording unregistered IDs: {error}")
+                progress.console.print(f"catalog registration failed; recording unregistered IDs: {error}")
                 for video_id in shipped_ids:
                     _append_line(config.state_dir / "unregistered.txt", video_id, state_lock)
         else:
-            tqdm.write(f"Rerun catalog at {config.catalog_url} is unreachable; shipped IDs recorded as unregistered")
+            progress.console.print(f"Rerun catalog at {config.catalog_url} is unreachable; shipped IDs recorded as unregistered")
             for video_id in shipped_ids:
                 _append_line(config.state_dir / "unregistered.txt", video_id, state_lock)
     chunk_wall: float = time.perf_counter() - chunk_started
@@ -491,8 +500,8 @@ def _ship_and_register_chunk(
         f"\tpublished_bytes={published_bytes}\teta_seconds={eta if eta is not None else 'unknown'}"
     )
     _append_line(config.state_dir / "progress.log", record, state_lock)
-    overall.set_postfix(ok=len(done_ids), failed=len(failed_reasons), chunk=f"{chunk_index + 1}/{chunk_count}")
-    tqdm.write(record)
+    progress.update(overall_task, description=f"sequences (ok={len(done_ids)} failed={len(failed_reasons)} chunk={chunk_index + 1}/{chunk_count})")
+    progress.console.print(record)
 
 
 def run_pipeline(config: Config) -> None:
@@ -506,27 +515,24 @@ def run_pipeline(config: Config) -> None:
         return
     done_count, failed_count, remaining_count, _ = compute_state_counts(metadata_path, config.state_dir)
     if config.register and destination.registration_root is None:
-        tqdm.write("destination has no read mount; shipped IDs will be recorded as unregistered")
+        CONSOLE.print("destination has no read mount; shipped IDs will be recorded as unregistered")
     done_ids: set[str] = _read_id_lines(config.state_dir / "done.txt")
     failed_reasons: dict[str, str] = _read_failed(config.state_dir / "failed.txt")
     if config.retry_failed and failed_reasons:
         requeued: set[str] = requeue_failed(config.state_dir)
-        tqdm.write(f"retry-failed: re-queued {len(requeued)} previously failed sequences")
+        CONSOLE.print(f"retry-failed: re-queued {len(requeued)} previously failed sequences")
         failed_reasons = {}
     chunks: list[list[str]] = build_manifest(metadata_path, done_ids, set(failed_reasons), config.chunk_size, config.max_chunks, config.video_ids)
     splits: dict[str, str] = _metadata_splits(metadata_path)
     total_population: int = done_count + failed_count + remaining_count
     state_lock: LockType = threading.Lock()
     stop_requested: bool = False
-    with tqdm(
-        total=total_population,
-        initial=done_count + failed_count,
-        position=0,
-        desc="sequences",
-        unit="sequence",
-        dynamic_ncols=True,
-    ) as overall:
-        overall.set_postfix(ok=done_count, failed=failed_count, chunk=f"0/{len(chunks)}")
+    with Progress(console=CONSOLE) as progress:
+        overall_task: TaskID = progress.add_task(
+            f"sequences (ok={done_count} failed={failed_count} chunk=0/{len(chunks)})",
+            total=total_population,
+            completed=done_count + failed_count,
+        )
         if not chunks:
             return
         with (
@@ -534,25 +540,25 @@ def run_pipeline(config: Config) -> None:
             ThreadPoolExecutor(max_workers=1, thread_name_prefix="ship") as ship_pool,
         ):
             ship_future: Future[None] | None = None
-            download_future: Future[DownloadResult] = download_pool.submit(_download_chunk, config, chunks[0], splits, set(failed_reasons))
+            download_future: Future[DownloadResult] = download_pool.submit(_download_chunk, config, chunks[0], splits, set(failed_reasons), progress)
             for chunk_index, _chunk in enumerate(chunks):
                 chunk_started: float = time.perf_counter()
                 try:
                     download_result: DownloadResult = download_future.result()
                 except KeyboardInterrupt:
-                    tqdm.write("interrupt requested; waiting for the in-flight download sequence")
+                    progress.console.print("interrupt requested; waiting for the in-flight download sequence")
                     stop_requested = True
                     download_result = download_future.result()
                 for video_id, reason in download_result.failures.items():
                     _append_line(config.state_dir / "failed.txt", f"{video_id}\t{reason}", state_lock)
                     failed_reasons[video_id] = reason
-                    overall.update()
+                    progress.advance(overall_task)
                 if download_result.safety_stop:
-                    tqdm.write(f"failed raw staging exceeds {human_bytes(FAILED_RAW_LIMIT_BYTES)}; stopping before new downloads")
+                    progress.console.print(f"failed raw staging exceeds {format_bytes(FAILED_RAW_LIMIT_BYTES)}; stopping before new downloads")
                     stop_requested = True
                 next_future: Future[DownloadResult] | None = None
                 if not stop_requested and chunk_index + 1 < len(chunks):
-                    next_future = download_pool.submit(_download_chunk, config, chunks[chunk_index + 1], splits, set(failed_reasons))
+                    next_future = download_pool.submit(_download_chunk, config, chunks[chunk_index + 1], splits, set(failed_reasons), progress)
                 ingest_ids: list[str] = download_result.successful_ids
                 summary: BatchSummary = run_batch(
                     BatchConfig(
@@ -561,15 +567,15 @@ def run_pipeline(config: Config) -> None:
                         data_dir=config.data_dir,
                         output=config.data_dir / "rrd",
                         skip_existing=True,
-                        progress_position=2,
-                    )
+                    ),
+                    progress=progress,
                 )
                 ingest_failures: set[str] = set(summary.failed_video_ids)
                 for video_id in ingest_failures:
                     reason: str = "ingest failed"
                     _append_line(config.state_dir / "failed.txt", f"{video_id}\t{reason}", state_lock)
                     failed_reasons[video_id] = reason
-                    overall.update()
+                    progress.advance(overall_task)
                 successful_ingests: list[str] = [video_id for video_id in ingest_ids if video_id not in ingest_failures]
                 if ship_future is not None:
                     ship_future.result()
@@ -580,7 +586,8 @@ def run_pipeline(config: Config) -> None:
                     successful_ingests,
                     splits,
                     state_lock,
-                    overall,
+                    progress,
+                    overall_task,
                     done_ids,
                     failed_reasons,
                     len(download_result.failures) + len(ingest_failures),
@@ -597,13 +604,9 @@ def run_pipeline(config: Config) -> None:
                 ship_future.result()
 
 
-def main() -> None:
-    """Parse CLI configuration and run the pipeline."""
+def main(config: Config) -> None:
+    """Run the pipeline, handling interactive interruption cleanly."""
     try:
-        run_pipeline(tyro.cli(Config))
+        run_pipeline(config)
     except KeyboardInterrupt:
-        tqdm.write("pipeline interrupted cleanly; persistent state is ready to resume")
-
-
-if __name__ == "__main__":
-    main()
+        CONSOLE.print("pipeline interrupted cleanly; persistent state is ready to resume")

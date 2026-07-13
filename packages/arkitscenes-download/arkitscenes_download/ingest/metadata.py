@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 from jaxtyping import Float64
+from rich.console import Console
 from scipy.spatial.transform import Rotation
 
 from arkitscenes_download.ingest.mov import MetadataPacket, demux_metadata
@@ -14,6 +15,7 @@ from arkitscenes_download.ingest.rig import Trajectory, resample_trajectory
 
 POSE_FIT_MAX_ROTATION_RAD: float = float(np.deg2rad(3.0))
 POSE_FIT_MAX_TRANSLATION_M: float = 0.1
+CONSOLE: Console = Console(markup=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,7 +220,7 @@ def select_pose_source(mov_path: Path, fallback: Trajectory, packets: list[Metad
             decode_wide_image_trajectory(mov_path, fallback) if packets is None else decode_wide_image_trajectory_from_packets(packets, fallback)
         )
     except (ValueError, KeyError) as pose_error:
-        print(f"Pose fallback: stream-4 decode failed ({pose_error}); using 10Hz trajectory")
+        CONSOLE.print(f"Pose fallback: stream-4 decode failed ({pose_error}); using 10Hz trajectory")
         return PoseSelection(fallback, "lowres_traj_slerp", float("nan"), float("nan"))
     if image_poses.rotation_rms_rad <= POSE_FIT_MAX_ROTATION_RAD and image_poses.translation_rms_m <= POSE_FIT_MAX_TRANSLATION_M:
         return PoseSelection(
@@ -227,7 +229,7 @@ def select_pose_source(mov_path: Path, fallback: Trajectory, packets: list[Metad
             image_poses.rotation_rms_rad,
             image_poses.translation_rms_m,
         )
-    print(
+    CONSOLE.print(
         f"Pose fallback: stream-4 fit {np.rad2deg(image_poses.rotation_rms_rad):.2f}deg / "
         f"{image_poses.translation_rms_m:.3f}m exceeds gate; using 10Hz trajectory"
     )
