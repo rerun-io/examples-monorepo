@@ -46,11 +46,11 @@ def preprocess_batch(
         float32 CUDA tensors: RGB ``[B,3,nh,nw]`` in [0,1] resized to
         ``image_hw``, and prompt depth ``[B,1,192,256]`` in meters.
     """
-    rgb_b3hw: Float32[Tensor, "b 3 h w"] = rearrange(rgb_bhw3.to("cuda", non_blocking=True), "b h w c -> b c h w").float() / 255.0
+    rgb_b3hw: Float32[Tensor, "b 3 h w"] = rearrange(rgb_bhw3.to("cuda", non_blocking=True), "b h w c -> b c h w").float() / 255.0  # pyrefly: ignore  # bad-argument-type — einops stub false positive
     if tuple(rgb_b3hw.shape[-2:]) != image_hw:
         # antialias=True approximates the cv2 INTER_AREA downscale the torch demo uses.
         rgb_b3hw = F.interpolate(rgb_b3hw, size=image_hw, mode="bilinear", antialias=True)
-    prompt_b1hw: Float32[Tensor, "b 1 192 256"] = rearrange(prompt_depth_bhw.to("cuda", non_blocking=True), "b h w -> b 1 h w")
+    prompt_b1hw: Float32[Tensor, "b 1 192 256"] = rearrange(prompt_depth_bhw.to("cuda", non_blocking=True), "b h w -> b 1 h w")  # pyrefly: ignore  # bad-argument-type — einops stub false positive
     return rgb_b3hw, prompt_b1hw
 
 
@@ -73,7 +73,7 @@ def postprocess_depth(
         depth_b1hw = F.interpolate(depth_b1hw, size=out_hw, mode="bilinear", align_corners=False)
     else:
         depth_b1hw = depth_b1hw.clone()
-    return rearrange(depth_b1hw, "b 1 h w -> b h w")
+    return rearrange(depth_b1hw, "b 1 h w -> b h w")  # pyrefly: ignore  # bad-argument-type — einops stub false positive
 
 
 class PromptDATrtRuntime:
