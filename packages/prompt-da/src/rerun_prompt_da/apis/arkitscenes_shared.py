@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 import open3d as o3d
 import rerun as rr
+from arkitscenes_download.ingest.depth import ArkitDepthConfidence
 from beartype.roar import BeartypeException
 from einops import rearrange
 from jaxtyping import Float, Float32, UInt8, UInt16
@@ -19,7 +20,6 @@ from rerun_prompt_da.trt_predictor import PromptDATrtPredictor, postprocess_dept
 
 ARKITSCENES_DATASET = "arkitscenes"
 NATIVE_FPS = 60.0
-ARKIT_CONFIDENCE_MEDIUM = 1
 
 
 def stride_for(native_fps: float, target_fps: float) -> int:
@@ -64,7 +64,7 @@ def filter_depth_for_fusion(
         cv2.resize(confidence, (depth_mm.shape[1], depth_mm.shape[0]), interpolation=cv2.INTER_NEAREST), dtype=np.uint8
     )
     filtered_depth_mm: UInt16[ndarray, "h w"] = depth_mm.copy()
-    filtered_depth_mm[confidence_hw < ARKIT_CONFIDENCE_MEDIUM] = 0
+    filtered_depth_mm[confidence_hw < ArkitDepthConfidence.MEDIUM] = 0
     filtered_depth_mm[depth_mm > max_depth_meter * 1000.0] = 0
     return filtered_depth_mm
 

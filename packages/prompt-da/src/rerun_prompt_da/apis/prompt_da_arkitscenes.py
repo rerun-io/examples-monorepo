@@ -168,44 +168,12 @@ def rotate_landscape_to_portrait(array_hw: ndarray, quarter_turns: int) -> ndarr
     return np.ascontiguousarray(np.rot90(array_hw, quarter_turns))
 
 
-def k_matrix_from_flat(k_flat: Float[ndarray, "9"]) -> Float[ndarray, "3 3"]:
-    """Decode a flattened column-major camera intrinsic matrix.
-
-    Args:
-        k_flat: Nine floating-point matrix elements in column-major order.
-
-    Returns:
-        Floating-point ``3x3`` image-from-camera matrix.
-    """
-    return np.asarray(k_flat).reshape(3, 3, order="F")
-
-
 def _list_collate(batch: list[dict[str, Tensor | None]]) -> list[dict[str, Tensor | None]]:
-    """Keep a fetched chunk as a plain list of sample dicts (no tensor stacking)."""
-    return batch
+    """Identity collate: DataLoader's default would stack per-field tensors and crash on ``None`` (skipped-decode) samples.
 
-
-def _batched_loader(rerun_dataset: RerunMapDataset, chunks: list[list[int]], num_workers: int) -> DataLoader:
-    """Build a DataLoader that fetches whole chunks, in order, on worker processes.
-
-    With released rerun-sdk 0.34.1, the batch fetch (server query + per-sample
-    GOP decode back to the previous keyframe; TODO RR-4751) is the pipeline's
-    slowest stage and is GIL-bound in-process, so spawn-based worker processes
-    are the only way to parallelize it. Incremental decoding exists upstream
-    in RR-5167 / PR #2683 but is not in this release. The Rerun dataloader
-    requires the ``spawn`` start method (forked workers deadlock on their first
-    catalog call).
+    A module-level function rather than a lambda so spawn workers can pickle it.
     """
-    if num_workers == 0:
-        return DataLoader(rerun_dataset, batch_sampler=chunks, collate_fn=_list_collate)
-    return DataLoader(
-        rerun_dataset,
-        batch_sampler=chunks,
-        collate_fn=_list_collate,
-        num_workers=num_workers,
-        multiprocessing_context=multiprocessing.get_context("spawn"),
-        prefetch_factor=2,
-    )
+    return batch
 
 
 def process_segment(
@@ -249,7 +217,25 @@ def process_segment(
     skipped_decodes: int = 0
     strided_indices: list[int] = list(range(0, rerun_dataset.sample_index.total_samples, stride))
     chunks: list[list[int]] = [strided_indices[i : i + config.batch_size] for i in range(0, len(strided_indices), config.batch_size)]
-    loader: DataLoader = _batched_loader(rerun_dataset, chunks, config.num_workers)
+    # Fetch whole chunks, in order, on spawn-based worker processes: in released
+    # rerun-sdk 0.34.1 the batch fetch (server query + per-sample GOP decode back
+    # to the previous keyframe; TODO RR-4751) is the pipeline's slowest stage and
+    # GIL-bound in-process, so worker processes are the only way to parallelize
+    # it (incremental decoding lands upstream in RR-5167 / PR #2683). The Rerun
+    # dataloader requires ``spawn`` (forked workers deadlock on their first
+    # catalog call), and torch rejects the worker kwargs when num_workers == 0.
+    loader: DataLoader = (
+        DataLoader(rerun_dataset, batch_sampler=chunks, collate_fn=_list_collate)
+        if config.num_workers == 0
+        else DataLoader(
+            rerun_dataset,
+            batch_sampler=chunks,
+            collate_fn=_list_collate,
+            num_workers=config.num_workers,
+            multiprocessing_context=multiprocessing.get_context("spawn"),
+            prefetch_factor=2,
+        )
+    )
     for chunk, samples in tqdm(zip(chunks, loader, strict=True), total=len(chunks), desc=f"PromptDA {segment_id}", unit="batch"):
         valid: list[tuple[int, dict[str, Tensor]]] = [
             (sample_idx, sample)
@@ -308,7 +294,8 @@ def process_segment(
             rgb_fusion_hw3: UInt8[ndarray, "fh fw 3"] = np.asarray(
                 cv2.resize(rgb_hw3, (fusion_depth_hw.shape[1], fusion_depth_hw.shape[0]), interpolation=cv2.INTER_AREA), dtype=np.uint8
             )
-            stored_k_33: Float[ndarray, "3 3"] = k_matrix_from_flat(np.asarray(sample["k"].numpy()))
+            # Rerun stores Pinhole image_from_camera flattened column-major.
+            stored_k_33: Float[ndarray, "3 3"] = np.asarray(sample["k"].numpy()).reshape(3, 3, order="F")
             stored_intrinsics: Intrinsics = Intrinsics.from_k_matrix(
                 camera_conventions="RDF",
                 k_matrix=stored_k_33,

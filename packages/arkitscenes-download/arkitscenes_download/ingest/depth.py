@@ -2,12 +2,21 @@
 
 import struct
 import zlib
+from enum import IntEnum
 from pathlib import Path
 
 import imagecodecs
 import numpy as np
 
 from arkitscenes_download.ingest.clock import timestamp_from_path
+
+
+class ArkitDepthConfidence(IntEnum):
+    """ARKit per-pixel depth confidence, stored as uint8 in the raw confidence PNGs."""
+
+    LOW = 0
+    MEDIUM = 1
+    HIGH = 2
 
 
 def _png_chunk(tag: bytes, data: bytes) -> bytes:

@@ -14,7 +14,6 @@ from rerun_prompt_da.apis.arkitscenes_shared import (  # noqa: E402
     world_t_cam_from_pose,
 )
 from rerun_prompt_da.apis.prompt_da_arkitscenes import (  # noqa: E402
-    k_matrix_from_flat,
     orientation_quarter_turns_from_segment_row,
     portrait_from_segment_row,
     rotate_landscape_to_portrait,
@@ -54,12 +53,6 @@ def test_stride_for_uses_nearest_native_frame_interval() -> None:
     assert stride_for(60.0, 60.0) == 1
     assert stride_for(60.0, 7.0) == 9
     assert stride_for(60.0, 120.0) == 1
-
-
-def test_k_matrix_from_flat_decodes_column_major_intrinsics() -> None:
-    """Restore Rerun's flattened column-major camera matrix."""
-    flat = np.array([1600.0, 0.0, 0.0, 0.0, 1590.0, 0.0, 950.0, 710.0, 1.0])
-    assert_array_equal(k_matrix_from_flat(flat), np.array([[1600.0, 0.0, 950.0], [0.0, 1590.0, 710.0], [0.0, 0.0, 1.0]]))
 
 
 @pytest.mark.parametrize(

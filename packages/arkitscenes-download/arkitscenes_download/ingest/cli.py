@@ -34,7 +34,7 @@ from arkitscenes_download.ingest.clock import (
     recover_clock_from_packets,
     shared_epoch,
 )
-from arkitscenes_download.ingest.depth import encode_depth_png, sorted_timestamped_paths
+from arkitscenes_download.ingest.depth import ArkitDepthConfidence, encode_depth_png, sorted_timestamped_paths
 from arkitscenes_download.ingest.gt import GroundTruthSummary, log_ground_truth
 from arkitscenes_download.ingest.imu import ImuSamples, decode_imu
 from arkitscenes_download.ingest.layers import LAYERS, LAYERS_BY_NAME, Layer
@@ -258,9 +258,9 @@ def _log_confidence(recording: rr.RecordingStream, paths: list[Path], quarter_tu
         path,
         rr.AnnotationContext(
             [
-                rr.AnnotationInfo(id=0, label="low", color=(255, 0, 0)),
-                rr.AnnotationInfo(id=1, label="medium", color=(255, 255, 0)),
-                rr.AnnotationInfo(id=2, label="high", color=(0, 255, 0)),
+                rr.AnnotationInfo(id=ArkitDepthConfidence.LOW, label="low", color=(255, 0, 0)),
+                rr.AnnotationInfo(id=ArkitDepthConfidence.MEDIUM, label="medium", color=(255, 255, 0)),
+                rr.AnnotationInfo(id=ArkitDepthConfidence.HIGH, label="high", color=(0, 255, 0)),
             ]
         ),
         static=True,
