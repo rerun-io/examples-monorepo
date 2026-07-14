@@ -1,51 +1,26 @@
-"""Behavioral tests for raw-disk ARKitScenes PromptDA inference."""
+"""Behavioral tests for raw-disk ARKitScenes PromptDA inference.
+
+Helpers shared with the catalog-dataloader tool are covered by
+``test_prompt_da_arkitscenes.py``; timeline helpers live in
+``arkitscenes-download``'s ``test_ingest_clock.py``.
+"""
 
 from pathlib import Path
 
-import imagecodecs
 import numpy as np
 import pytest
-from jaxtyping import UInt16
-from numpy import ndarray
-from numpy.testing import assert_allclose, assert_array_equal
-from scipy.spatial.transform import Rotation
+from numpy.testing import assert_array_equal
 
 pytest.importorskip("pyarrow", reason="ARKitScenes catalog deps live in the prompt-da-catalog envs")
 pytest.importorskip("torchcodec", reason="raw video decode deps live in the prompt-da-catalog envs")
 pytest.importorskip("arkitscenes_download", reason="ARKitScenes ingest deps live in the prompt-da-catalog envs")
 
+from rerun_prompt_da.apis.arkitscenes_shared import segments_to_process  # noqa: E402
 from rerun_prompt_da.apis.prompt_da_arkitscenes_raw import (  # noqa: E402
-    encode_depth_png_fast,
-    filter_depth_for_fusion,
     nearest_timestamped_path,
-    retained_video_times,
+    raw_sequence_dir,
     rotate_depth_for_catalog,
-    segments_to_process,
-    stride_for,
-    world_t_cam_from_pose,
 )
-
-
-def test_fast_depth_png_round_trips_uint16_depth_bit_exact() -> None:
-    """Preserve every uint16 value for random and spatially smooth depth."""
-    rng: np.random.Generator = np.random.default_rng(42)
-    random_depth_hw: UInt16[ndarray, "random_h random_w"] = rng.integers(
-        0, np.iinfo(np.uint16).max + 1, size=(73, 91), dtype=np.uint16
-    )
-    y_h1: UInt16[ndarray, "smooth_h 1"] = np.arange(80, dtype=np.uint16)[:, None]
-    x_1w: UInt16[ndarray, "1 smooth_w"] = np.arange(120, dtype=np.uint16)[None, :]
-    smooth_depth_hw: UInt16[ndarray, "smooth_h smooth_w"] = np.asarray(750 + 3 * y_h1 + 2 * x_1w, dtype=np.uint16)
-
-    for depth_hw in (random_depth_hw, smooth_depth_hw):
-        decoded_hw: UInt16[ndarray, "h w"] = imagecodecs.png_decode(encode_depth_png_fast(depth_hw))
-        assert decoded_hw.dtype == np.uint16
-        assert_array_equal(decoded_hw, depth_hw)
-
-
-def test_stride_for_uses_nearest_native_frame_interval() -> None:
-    """Choose the closest whole-frame stride without dropping below one."""
-    assert stride_for(60.0, 10.0) == 6
-    assert stride_for(60.0, 120.0) == 1
 
 
 def test_nearest_timestamped_path_enforces_pairing_tolerance() -> None:
@@ -54,36 +29,7 @@ def test_nearest_timestamped_path_enforces_pairing_tolerance() -> None:
     assert nearest_timestamped_path(paths, 1.0119, tolerance_s=0.002) == paths[1]
     assert nearest_timestamped_path(paths, 1.0121, tolerance_s=0.002) is None
     assert nearest_timestamped_path(paths, 1.016, tolerance_s=None) == paths[2]
-
-
-def test_retained_video_times_snap_only_the_first_near_epoch_sample() -> None:
-    """Match ingest's first-sample snap while preserving later source times."""
-    assert retained_video_times(np.array([9.9, 10.1, 10.2]), epoch=10.0, wide_drop=1).tolist() == [0.0, pytest.approx(0.2)]
-    assert retained_video_times(np.array([10.3, 10.4]), epoch=10.0, wide_drop=0).tolist() == [pytest.approx(0.3), pytest.approx(0.4)]
-
-
-def test_filter_depth_for_fusion_masks_confidence_and_far_depth() -> None:
-    """Zero low-confidence and over-range values while retaining the threshold."""
-    depth = np.array([[1000, 4000], [4001, 3000]], dtype=np.uint16)
-    confidence = np.array([[0, 1], [2, 1]], dtype=np.uint8)
-    assert_array_equal(filter_depth_for_fusion(depth, confidence, 4.0), np.array([[0, 4000], [0, 3000]], dtype=np.uint16))
-
-
-def test_world_t_cam_from_pose_round_trips_pose_components() -> None:
-    """Preserve xyzw rotation and translation in the homogeneous transform."""
-    translation = np.array([1.0, -2.0, 3.0])
-    quaternion = Rotation.from_euler("xyz", [0.1, -0.2, 0.3]).as_quat()
-    world_t_cam = world_t_cam_from_pose(translation, quaternion)
-    assert_allclose(world_t_cam[:3, 3], translation)
-    assert_allclose(Rotation.from_matrix(world_t_cam[:3, :3]).as_quat(), quaternion)
-    assert_allclose(world_t_cam @ np.linalg.inv(world_t_cam), np.eye(4), atol=1e-12)
-
-
-@pytest.mark.parametrize(("video_id", "process_all"), [(None, False), ("one", True)])
-def test_segments_to_process_requires_exactly_one_mode(tmp_path: Path, video_id: str | None, process_all: bool) -> None:
-    """Reject missing and ambiguous segment selection modes."""
-    with pytest.raises(SystemExit, match="exactly one"):
-        segments_to_process([], video_id, process_all, tmp_path)
+    assert nearest_timestamped_path([], 1.0, tolerance_s=None) is None
 
 
 def test_process_all_skips_existing_layer_and_missing_raw_data(tmp_path: Path) -> None:
@@ -94,7 +40,11 @@ def test_process_all_skips_existing_layer_and_missing_raw_data(tmp_path: Path) -
         {"rerun_segment_id": "ready", "rerun_layer_names": ["base"]},
         {"rerun_segment_id": "missing", "rerun_layer_names": ["base"]},
     ]
-    assert segments_to_process(rows, None, True, tmp_path) == ["ready"]
+
+    def raw_data_available(segment_id: str) -> bool:
+        return raw_sequence_dir(tmp_path, segment_id) is not None
+
+    assert segments_to_process(rows, None, True, "promptda_raw", raw_data_available) == ["ready"]
 
 
 def test_catalog_depth_rotation_reverses_unbaking() -> None:

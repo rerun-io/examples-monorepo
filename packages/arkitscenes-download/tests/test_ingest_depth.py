@@ -14,12 +14,14 @@ class DepthPngEncodingTest(unittest.TestCase):
     """Check that encoded depth pixels survive independent PNG decoders."""
 
     def assert_roundtrips(self, depth_hw: np.ndarray) -> None:
-        """Assert bit-exact decoding through PIL and imagecodecs."""
-        encoded: bytes = encode_depth_png(depth_hw)
-        pil_depth_hw: np.ndarray = np.asarray(Image.open(io.BytesIO(encoded)))
-        imagecodecs_depth_hw: np.ndarray = imagecodecs.png_decode(encoded)
-        np.testing.assert_array_equal(pil_depth_hw, depth_hw)
-        np.testing.assert_array_equal(imagecodecs_depth_hw, depth_hw)
+        """Assert bit-exact decoding through PIL and imagecodecs at both deflate levels."""
+        for level in (1, 4):
+            with self.subTest(level=level):
+                encoded: bytes = encode_depth_png(depth_hw, level=level)
+                pil_depth_hw: np.ndarray = np.asarray(Image.open(io.BytesIO(encoded)))
+                imagecodecs_depth_hw: np.ndarray = imagecodecs.png_decode(encoded)
+                np.testing.assert_array_equal(pil_depth_hw, depth_hw)
+                np.testing.assert_array_equal(imagecodecs_depth_hw, depth_hw)
 
     def test_random_uint16_depth_roundtrips(self) -> None:
         """A random 192x256 uint16 depth image roundtrips bit-exactly."""

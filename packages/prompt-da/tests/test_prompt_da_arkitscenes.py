@@ -7,16 +7,18 @@ from numpy.testing import assert_allclose, assert_array_equal
 pytest.importorskip("pyarrow", reason="ARKitScenes catalog deps live in the prompt-da-catalog envs")
 pytest.importorskip("arkitscenes_download", reason="ARKitScenes catalog deps live in the prompt-da-catalog envs")
 
-from rerun_prompt_da.apis.prompt_da_arkitscenes import (  # noqa: E402
+from rerun_prompt_da.apis.arkitscenes_shared import (  # noqa: E402
     filter_depth_for_fusion,
+    segments_to_process,
+    stride_for,
+    world_t_cam_from_pose,
+)
+from rerun_prompt_da.apis.prompt_da_arkitscenes import (  # noqa: E402
     k_matrix_from_flat,
     orientation_quarter_turns_from_segment_row,
     portrait_from_segment_row,
     rotate_landscape_to_portrait,
     rotate_portrait_to_landscape,
-    segments_to_process,
-    stride_for,
-    world_t_cam_from_pose,
 )
 
 
@@ -93,27 +95,27 @@ def test_filter_depth_for_fusion_masks_low_confidence_and_far_depth() -> None:
 def test_segments_to_process_selects_explicit_segment_for_replacement() -> None:
     """Allow explicitly selected segments even when PromptDA already exists."""
     rows = [{"rerun_segment_id": "one", "rerun_layer_names": ["base", "promptda"]}, {"rerun_segment_id": "two", "rerun_layer_names": ["base"]}]
-    assert segments_to_process(rows, "one", False) == ["one"]
+    assert segments_to_process(rows, "one", False, "promptda") == ["one"]
 
 
 def test_segments_to_process_rejects_unknown_explicit_segment() -> None:
     """Show available ids when an explicit segment does not exist."""
     rows = [{"rerun_segment_id": "one", "rerun_layer_names": ["base"]}, {"rerun_segment_id": "two", "rerun_layer_names": ["base"]}]
     with pytest.raises(SystemExit, match="one.*two"):
-        segments_to_process(rows, "missing", False)
+        segments_to_process(rows, "missing", False, "promptda")
 
 
 def test_segments_to_process_all_skips_existing_promptda_layers() -> None:
     """Process only segments that do not already carry the target layer."""
     rows = [{"rerun_segment_id": "one", "rerun_layer_names": ["base", "promptda"]}, {"rerun_segment_id": "two", "rerun_layer_names": ["base"]}]
-    assert segments_to_process(rows, None, True) == ["two"]
+    assert segments_to_process(rows, None, True, "promptda") == ["two"]
 
 
 @pytest.mark.parametrize(("video_id", "process_all"), [(None, False), ("one", True)])
 def test_segments_to_process_requires_exactly_one_selection_mode(video_id: str | None, process_all: bool) -> None:
     """Reject missing and ambiguous segment selection modes."""
     with pytest.raises(SystemExit, match="exactly one"):
-        segments_to_process([], video_id, process_all)
+        segments_to_process([], video_id, process_all, "promptda")
 
 
 def test_resilient_decoder_turns_decode_errors_into_skippable_none() -> None:
@@ -121,6 +123,7 @@ def test_resilient_decoder_turns_decode_errors_into_skippable_none() -> None:
     from unittest.mock import patch
 
     import av
+    import pyarrow as pa
     from rerun.experimental.dataloader import VideoFrameDecoder
 
     from rerun_prompt_da.apis.prompt_da_arkitscenes import ResilientVideoFrameDecoder
@@ -128,7 +131,7 @@ def test_resilient_decoder_turns_decode_errors_into_skippable_none() -> None:
     decoder = ResilientVideoFrameDecoder(codec="av1", keyframe_interval=300, fps_estimate=60.0)
     error = av.error.InvalidDataError(1094995529, "Invalid data found when processing input")
     with patch.object(VideoFrameDecoder, "decode", side_effect=error):
-        assert decoder.decode(object(), 0, "segment") is None
+        assert decoder.decode(pa.chunked_array([pa.array([b"packet"])]), 0, "segment") is None
     # Retain the observed failure for diagnostics. The dav1d_flush deadlock specifically needs an
     # errored, un-drained context finalized at interpreter shutdown; prompt del + gc is safe.
     assert decoder.decode_failures == [error]

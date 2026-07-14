@@ -6,22 +6,21 @@ depth in the original landscape camera frame, and writes a ``promptda_raw``
 layer back to the ARKitScenes catalog.
 """
 
-import struct
 import time
-import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import cv2
-import imagecodecs
 import numpy as np
+import open3d as o3d
 import pyarrow as pa
 import rerun as rr
 import torch
 from arkitscenes_download.ingest.blueprint import DEPTH_RANGE_MM
 from arkitscenes_download.ingest.catalog import DEFAULT_CATALOG_URL
-from arkitscenes_download.ingest.clock import path_timestamps, recover_clock_from_packets, timestamp_from_path
+from arkitscenes_download.ingest.clock import clamped_to_epoch, nearest_index, path_timestamps, recover_clock_from_packets, shared_epoch
+from arkitscenes_download.ingest.depth import encode_depth_png, sorted_timestamped_paths
 from arkitscenes_download.ingest.metadata import PoseSelection, select_pose_source
 from arkitscenes_download.ingest.mov import MetadataPacket, demux_metadata_streams, track_packet_times
 from arkitscenes_download.ingest.paths import PINHOLE_WIDE
@@ -37,57 +36,35 @@ from arkitscenes_download.ingest.rig import (
     scale_intrinsics,
     sky_angles,
 )
-from beartype.roar import BeartypeException
-from einops import rearrange
 from jaxtyping import Float, Float32, Float64, UInt8, UInt16
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer, RegistrationHandle
-from scipy.spatial.transform import Rotation
 from simplecv.camera_parameters import Intrinsics, rescale_intri
 from simplecv.ops.tsdf_depth_fuser import Open3DFuser
 from torch import Tensor
 from torchcodec.decoders import VideoDecoder
 from tqdm import tqdm
 
+from rerun_prompt_da.apis.arkitscenes_shared import (
+    ARKITSCENES_DATASET,
+    NATIVE_FPS,
+    connect_catalog,
+    filter_depth_for_fusion,
+    log_fused_mesh,
+    run_promptda_batch,
+    segments_to_process,
+    stride_for,
+    world_t_cam_from_pose,
+)
 from rerun_prompt_da.apis.prompt_da_trt_polycam import network_image_hw
-from rerun_prompt_da.trt_predictor import PromptDATrtPredictor, postprocess_depth, preprocess_batch
+from rerun_prompt_da.trt_predictor import PromptDATrtPredictor
 
-ARKITSCENES_DATASET = "arkitscenes"
 PROMPTDA_RAW_LAYER = "promptda_raw"
-NATIVE_FPS = 60.0
-ARKIT_CONFIDENCE_MEDIUM = 1
 PAIRING_TOLERANCE_S = 0.002
 WIDE_HEIGHT = 1440
 WIDE_WIDTH = 1920
 DEPTH_PROMPTDA_RAW = f"{PINHOLE_WIDE}/depth_promptda_raw"
 PROMPTDA_RAW_MESH = "world/promptda_raw/mesh"
-
-
-def _png_chunk(tag: bytes, data: bytes) -> bytes:
-    """Build one length-prefixed, checksummed PNG chunk."""
-    return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
-
-
-def encode_depth_png_fast(depth_hw: UInt16[ndarray, "h w"]) -> bytes:
-    """Encode uint16 depth losslessly as a 16-bit grayscale PNG.
-
-    Up-filtered libdeflate level 1 measured 11.5 ms and 596 KiB per representative
-    ARKitScenes frame, versus 22.2 ms and 531 KiB at the previous level 4.
-
-    Args:
-        depth_hw: Depth in millimetres with shape ``(H, W)`` and dtype uint16.
-
-    Returns:
-        A standard PNG blob that decodes bit-exact to ``depth_hw``.
-    """
-    raw_hw2: UInt8[ndarray, "h two_w"] = np.ascontiguousarray(depth_hw).astype(">u2").view(np.uint8).reshape(depth_hw.shape[0], -1)
-    filtered_hw2: UInt8[ndarray, "h filtered_w"] = np.empty((raw_hw2.shape[0], raw_hw2.shape[1] + 1), dtype=np.uint8)
-    filtered_hw2[:, 0] = 2
-    filtered_hw2[0, 1:] = raw_hw2[0]
-    filtered_hw2[1:, 1:] = raw_hw2[1:] - raw_hw2[:-1]
-    idat: bytes = imagecodecs.deflate_encode(filtered_hw2.tobytes(), level=1, raw=False)  # pyrefly: ignore  # bad-assignment
-    ihdr: bytes = struct.pack(">IIBBBBB", depth_hw.shape[1], depth_hw.shape[0], 16, 0, 0, 0, 0)
-    return b"\x89PNG\r\n\x1a\n" + _png_chunk(b"IHDR", ihdr) + _png_chunk(b"IDAT", idat) + _png_chunk(b"IEND", b"")
 
 
 @dataclass
@@ -148,13 +125,6 @@ class RawSegmentResult:
     """Total segment wall time."""
 
 
-def stride_for(native_fps: float, target_fps: float) -> int:
-    """Return the closest positive whole-frame stride for a target rate."""
-    if target_fps <= 0.0:
-        raise ValueError("target_fps must be greater than zero")
-    return max(1, round(native_fps / target_fps))
-
-
 def nearest_timestamped_path(
     paths: list[Path], timestamp: float, tolerance_s: float | None, timestamps: Float64[ndarray, "n"] | None = None
 ) -> Path | None:
@@ -174,31 +144,10 @@ def nearest_timestamped_path(
         return None
     if timestamps is None:
         timestamps = path_timestamps(paths)
-    insertion: int = int(np.searchsorted(timestamps, timestamp))
-    candidate_indices: list[int] = [index for index in (insertion - 1, insertion) if 0 <= index < len(paths)]
-    nearest_index: int = min(candidate_indices, key=lambda index: abs(float(timestamps[index]) - timestamp))
-    if tolerance_s is not None and abs(float(timestamps[nearest_index]) - timestamp) > tolerance_s:
+    nearest: int = nearest_index(timestamps, timestamp)
+    if tolerance_s is not None and abs(float(timestamps[nearest]) - timestamp) > tolerance_s:
         return None
-    return paths[nearest_index]
-
-
-def retained_video_times(
-    wide_source_times: Float64[ndarray, "n"], epoch: float, wide_drop: int
-) -> Float64[ndarray, "m"]:
-    """Compute retained catalog video times with ingest's first-sample snap.
-
-    Args:
-        wide_source_times: Presentation-ordered raw frame uptimes with shape ``(N,)``.
-        epoch: Shared first-wide-and-ultrawide uptime epoch.
-        wide_drop: Count of wide frames preceding the epoch.
-
-    Returns:
-        Catalog-relative retained frame times with shape ``(M,)``.
-    """
-    video_times: Float64[ndarray, "m"] = np.asarray(wide_source_times[wide_drop:] - epoch, dtype=np.float64)
-    if len(video_times) > 0 and video_times[0] < 0.25:
-        video_times[0] = 0.0
-    return video_times
+    return paths[nearest]
 
 
 def rotate_depth_for_catalog(depth_hw: UInt16[ndarray, "h w"], quarter_turns: int) -> UInt16[ndarray, "h2 w2"]:
@@ -214,89 +163,9 @@ def rotate_depth_for_catalog(depth_hw: UInt16[ndarray, "h w"], quarter_turns: in
     return np.ascontiguousarray(np.rot90(depth_hw, quarter_turns))
 
 
-def world_t_cam_from_pose(
-    translation: Float[ndarray, "3"], quaternion_xyzw: Float[ndarray, "4"]
-) -> Float[ndarray, "4 4"]:
-    """Build a camera-to-world transform from an unbaked ARKit pose.
-
-    Args:
-        translation: World-space camera translation with shape ``(3,)``.
-        quaternion_xyzw: Camera rotation as an xyzw quaternion with shape ``(4,)``.
-
-    Returns:
-        Homogeneous ``world_T_cam`` transform with shape ``(4, 4)``.
-    """
-    world_t_cam_44: Float[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
-    world_t_cam_44[:3, :3] = Rotation.from_quat(quaternion_xyzw).as_matrix()
-    world_t_cam_44[:3, 3] = translation
-    return world_t_cam_44
-
-
-def filter_depth_for_fusion(
-    depth_mm: UInt16[ndarray, "h w"], confidence: UInt8[ndarray, "h2 w2"], max_depth_meter: float
-) -> UInt16[ndarray, "h w"]:
-    """Mask low-confidence and over-range predictions before fusion.
-
-    Args:
-        depth_mm: Predicted uint16 depth in millimetres with shape ``(H, W)``.
-        confidence: Raw uint8 confidence values with shape ``(H2, W2)``.
-        max_depth_meter: Furthest depth retained for fusion, in metres.
-
-    Returns:
-        Filtered uint16 depth with the same shape as ``depth_mm``.
-    """
-    confidence_hw: UInt8[ndarray, "h w"] = np.asarray(
-        cv2.resize(confidence, (depth_mm.shape[1], depth_mm.shape[0]), interpolation=cv2.INTER_NEAREST), dtype=np.uint8
-    )
-    filtered_depth_mm: UInt16[ndarray, "h w"] = depth_mm.copy()
-    filtered_depth_mm[confidence_hw < ARKIT_CONFIDENCE_MEDIUM] = 0
-    filtered_depth_mm[depth_mm > max_depth_meter * 1000.0] = 0
-    return filtered_depth_mm
-
-
 def raw_sequence_dir(raw_dir: Path, video_id: str) -> Path | None:
     """Locate a raw sequence by scanning both dataset folds."""
     return next((candidate for fold in ("Training", "Validation") if (candidate := raw_dir / fold / video_id).is_dir()), None)
-
-
-def segments_to_process(rows: list[dict[str, Any]], video_id: str | None, process_all: bool, raw_dir: Path) -> list[str]:
-    """Select catalog segments according to mode, layer state, and local data."""
-    if (video_id is None) == (not process_all):
-        raise SystemExit("give exactly one of --video-id or --process-all")
-    available_ids: list[str] = [str(row["rerun_segment_id"]) for row in rows]
-    if video_id is not None:
-        if video_id not in available_ids:
-            raise SystemExit(f"video id {video_id!r} is absent; available ids: {', '.join(available_ids)}")
-        return [video_id]
-    selected: list[str] = []
-    for row in rows:
-        segment_id: str = str(row["rerun_segment_id"])
-        if PROMPTDA_RAW_LAYER in (row.get("rerun_layer_names") or []):
-            continue
-        if raw_sequence_dir(raw_dir, segment_id) is None:
-            print(f"skipping {segment_id}: raw data not found under {raw_dir}")
-            continue
-        selected.append(segment_id)
-    return selected
-
-
-def connect_catalog(catalog_url: str, dataset_name: str) -> CatalogClient:
-    """Connect to the local ARKitScenes catalog or terminate with guidance."""
-    try:
-        client: CatalogClient = CatalogClient(catalog_url)
-        dataset_names: list[str] = client.dataset_names()
-    except BeartypeException:
-        raise
-    except Exception as error:
-        raise SystemExit(f"catalog not reachable at {catalog_url} — start it with `pixi run arkitscenes-download-serve`") from error
-    if dataset_name not in dataset_names:
-        raise SystemExit(f"dataset {dataset_name!r} is absent — create it with `pixi run arkitscenes-download-register`")
-    return client
-
-
-def _sorted_timestamped_paths(directory: Path, suffix: str) -> list[Path]:
-    """Return timestamp-named files in numeric uptime order."""
-    return sorted(directory.glob(f"*{suffix}"), key=timestamp_from_path)
 
 
 def _read_raw_png(path: Path, dtype: type[np.uint8] | type[np.uint16]) -> ndarray:
@@ -307,15 +176,6 @@ def _read_raw_png(path: Path, dtype: type[np.uint8] | type[np.uint16]) -> ndarra
     if image_hw.dtype != dtype:
         raise ValueError(f"expected {dtype.__name__} PNG at {path}, got {image_hw.dtype}")
     return image_hw
-
-
-def _nearest_timestamp_index(timestamps: Float64[ndarray, "n"], timestamp: float) -> int:
-    """Return the index nearest a timestamp in a sorted array."""
-    insertion: int = int(np.searchsorted(timestamps, timestamp))
-    candidates: list[int] = [index for index in (insertion - 1, insertion) if 0 <= index < len(timestamps)]
-    if not candidates:
-        raise ValueError("cannot select from an empty timestamp sequence")
-    return min(candidates, key=lambda index: abs(float(timestamps[index]) - timestamp))
 
 
 def _print_timing(result: RawSegmentResult) -> None:
@@ -351,9 +211,9 @@ def process_segment_raw(
     if sequence_dir is None:
         raise FileNotFoundError(f"raw sequence {segment_id!r} not found under {config.raw_dir}")
     mov_path: Path = sequence_dir / f"{segment_id}.mov"
-    lowres_depth_paths: list[Path] = _sorted_timestamped_paths(sequence_dir / "lowres_depth", ".png")
-    confidence_paths: list[Path] = _sorted_timestamped_paths(sequence_dir / "confidence", ".png")
-    pincam_paths: list[Path] = _sorted_timestamped_paths(sequence_dir / "lowres_wide_intrinsics", ".pincam")
+    lowres_depth_paths: list[Path] = sorted_timestamped_paths(sequence_dir / "lowres_depth")
+    confidence_paths: list[Path] = sorted_timestamped_paths(sequence_dir / "confidence")
+    pincam_paths: list[Path] = sorted_timestamped_paths(sequence_dir / "lowres_wide_intrinsics", ".pincam")
     if not lowres_depth_paths or not confidence_paths or not pincam_paths:
         raise FileNotFoundError(f"raw sequence {segment_id!r} is missing depth, confidence, or wide intrinsics")
     metadata_packets: dict[int, list[MetadataPacket]] = demux_metadata_streams(mov_path, (1, 3, 4))
@@ -364,15 +224,14 @@ def process_segment_raw(
     ultrawide_source_times: Float64[ndarray, "m"] = np.asarray(
         track_packet_times(mov_path, 2) + alignment.ultrawide_offset_seconds, dtype=np.float64
     )
-    epoch: float = max(float(wide_source_times[0]), float(ultrawide_source_times[0]))
-    wide_drop: int = int(np.count_nonzero(wide_source_times < epoch))
+    epoch, wide_drop, _ = shared_epoch(wide_source_times, ultrawide_source_times)
     retained_indices: list[int] = list(range(wide_drop, len(wide_source_times)))
-    video_times: Float64[ndarray, "r"] = retained_video_times(wide_source_times, epoch, wide_drop)
+    retained_uptimes: Float64[ndarray, "r"] = wide_source_times[wide_drop:]
+    video_times: Float64[ndarray, "r"] = clamped_to_epoch(retained_uptimes, epoch) - epoch
     lowres_intrinsics: TimedIntrinsics = load_intrinsics(pincam_paths)
     trajectory_at_intrinsics: Trajectory = resample_trajectory(trajectory_sparse, lowres_intrinsics.timestamps)
     quarter_turns: int = measured_orientation_quarter_turns(sky_angles(trajectory_at_intrinsics.quaternion_xyzw))
     wide_intrinsics: TimedIntrinsics = scale_intrinsics(lowres_intrinsics, 7.5)
-    retained_uptimes: Float64[ndarray, "r"] = wide_source_times[wide_drop:]
     retained_poses: Trajectory = resample_trajectory(pose_selection.trajectory, retained_uptimes)
     prepare_s: float = time.perf_counter() - prepare_started
 
@@ -440,15 +299,9 @@ def process_segment_raw(
         rgb_bhw3: UInt8[Tensor, "b 1440 1920 3"] = torch.stack([decoded_bhw3[row] for row in valid_rows])
         prompt_bhw: Float32[Tensor, "b 192 256"] = torch.from_numpy(np.stack(depth_arrays).astype(np.float32) / 1000.0)
         inference_started: float = time.perf_counter()
-        image_b3hw: Float32[Tensor, "b 3 nh nw"]
-        prompt_b1hw: Float32[Tensor, "b 1 192 256"]
-        image_b3hw, prompt_b1hw = preprocess_batch(rgb_bhw3, prompt_bhw, predictor.image_hw)
-        depth_model_b1hw: Float32[Tensor, "b 1 nh nw"] = predictor.runtime(image_b3hw, prompt_b1hw)
-        depth_bhw: Float32[Tensor, "b 1440 1920"] = postprocess_depth(depth_model_b1hw, (WIDE_HEIGHT, WIDE_WIDTH))
-        depth_mm_bhw: UInt16[ndarray, "b 1440 1920"] = (depth_bhw.cpu().numpy() * 1000.0).astype(np.uint16)
-        depth_model_mm_bhw: UInt16[ndarray, "b nh nw"] = (
-            rearrange(depth_model_b1hw, "b 1 h w -> b h w").cpu().numpy() * 1000.0
-        ).astype(np.uint16)
+        depth_mm_bhw: UInt16[ndarray, "b 1440 1920"]
+        depth_model_mm_bhw: UInt16[ndarray, "b nh nw"]
+        depth_mm_bhw, depth_model_mm_bhw = run_promptda_batch(predictor, rgb_bhw3, prompt_bhw, (WIDE_HEIGHT, WIDE_WIDTH))
         inference_s += time.perf_counter() - inference_started
 
         for valid_index, (row, depth_confidence_hw) in enumerate(zip(valid_rows, confidence_arrays, strict=True)):
@@ -465,7 +318,7 @@ def process_segment_raw(
             rgb_fusion_hw3: UInt8[ndarray, "fh fw 3"] = np.asarray(
                 cv2.resize(rgb_hw3, (fusion_depth_hw.shape[1], fusion_depth_hw.shape[0]), interpolation=cv2.INTER_AREA), dtype=np.uint8
             )
-            intrinsics_index: int = _nearest_timestamp_index(wide_intrinsics.timestamps, uptime)
+            intrinsics_index: int = nearest_index(wide_intrinsics.timestamps, uptime)
             k_33: Float64[ndarray, "3 3"] = wide_intrinsics.matrices[intrinsics_index]
             full_intrinsics: Intrinsics = Intrinsics.from_k_matrix(
                 camera_conventions="RDF", k_matrix=k_33, height=WIDE_HEIGHT, width=WIDE_WIDTH
@@ -493,7 +346,8 @@ def process_segment_raw(
             rr.log(
                 DEPTH_PROMPTDA_RAW,
                 rr.EncodedDepthImage(
-                    blob=encode_depth_png_fast(depth_baked_hw),
+                    # Deflate level 1 trades ~12% blob size for half the encode wall time.
+                    blob=encode_depth_png(depth_baked_hw, level=1),
                     media_type="image/png",
                     meter=1000.0,
                     # TODO(rerun#upstream): drop depth_range once the viewer auto-ranges encoded depth (see DEPTH_RANGE_MM in ingest/blueprint.py).
@@ -507,22 +361,11 @@ def process_segment_raw(
     if inferred_frames == 0:
         raise RuntimeError(f"segment {segment_id!r} produced zero inferred frames")
     fusion_started = time.perf_counter()
-    mesh: Any = fuser.get_mesh()
+    mesh: o3d.geometry.TriangleMesh = fuser.get_mesh()
     mesh.compute_vertex_normals()
     fusion_s += time.perf_counter() - fusion_started
     log_started = time.perf_counter()
-    rr.log(
-        PROMPTDA_RAW_MESH,
-        rr.Mesh3D(
-            vertex_positions=np.asarray(mesh.vertices),
-            triangle_indices=np.asarray(mesh.triangles),
-            vertex_normals=np.asarray(mesh.vertex_normals),
-            vertex_colors=np.asarray(mesh.vertex_colors),
-            face_rendering=rr.components.MeshFaceRendering.Front,
-        ),
-        static=True,
-        recording=recording,
-    )
+    log_fused_mesh(recording, PROMPTDA_RAW_MESH, mesh)
     recording.flush()
     log_s += time.perf_counter() - log_started
 
@@ -559,7 +402,14 @@ def main(config: PDAArkitScenesRawConfig) -> None:
     dataset_entry: DatasetEntry = client.get_dataset(ARKITSCENES_DATASET)
     segment_table: pa.Table = pa.Table.from_batches(dataset_entry.segment_table().collect())
     rows: list[dict[str, Any]] = segment_table.to_pylist()
-    segment_ids: list[str] = segments_to_process(rows, config.video_id, config.process_all, config.raw_dir)
+
+    def raw_data_available(segment_id: str) -> bool:
+        if raw_sequence_dir(config.raw_dir, segment_id) is None:
+            print(f"skipping {segment_id}: raw data not found under {config.raw_dir}")
+            return False
+        return True
+
+    segment_ids: list[str] = segments_to_process(rows, config.video_id, config.process_all, PROMPTDA_RAW_LAYER, raw_data_available)
     if not segment_ids:
         print("nothing to process: no unfinished catalog segments have local raw data")
         return
