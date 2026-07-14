@@ -12,8 +12,12 @@ version of this code (and this doc) argued the opposite.
 ## Why native rate
 
 Reliable AV1 decode from the catalog needs the decoder to see a **contiguous packet
-run** from a keyframe forward. Sampling `video_time` at the stream's native fps requests
-every packet in order, so the decoder always gets that contiguous run and decodes cleanly.
+run** from a keyframe forward. The dataloader assembles each decode window with
+`fill_latest_at` over the fixed-rate grid. When two stored packets land in one grid slot,
+one is silently dropped; any window that crosses the missing reference packet then fails
+deterministically until the next keyframe, or can return silently wrong pixels (RR-5087).
+Sub-native grids make those collisions pervasive. On these uniformly spaced streams,
+sampling at native fps gave each packet its own slot in the measured runs.
 
 Measured live on the `73ce701` build (reality main, incl. #2073), stock
 `RerunIterableDataset` + `FixedRateSampling`, no bespoke code:
@@ -21,17 +25,20 @@ Measured live on the `73ce701` build (reality main, incl. #2073), stock
 | sampling | decode result |
 | --- | --- |
 | **native fps** (this code) | **OK — 26/26 stream-checks, 12/12 frames each, 0 skips** |
-| native ÷ 2 (2:1 decimation) | assembly101 OK *warm* but THROW *cold*; hot3d/aria `InvalidDataError` |
+| native ÷ 2 (2:1 decimation) | assembly101 returned frames *warm* (pixels not validated) but THREW *cold*; hot3d/aria `InvalidDataError` |
 | native ÷ 3 (3:1 decimation) | `InvalidDataError` everywhere |
 
 Native rate decoded every stream across assembly101 / hot3d-quest3 / aria-gen2. Live
 verify on the actual mv-api path: all 8 assembly101 exo cams (C10095…C10404, uniform
 60 fps) decode 20/20 through one `FixedRateSampling(rate_hz=60)` grid.
 
-**Decimation is graded and flaky.** The same assembly101 stream at 30 Hz decoded in a
-warm process but threw `InvalidDataError` in a cold one — an order/cache-dependent state
-in the decoder. Sub-native sampling is also *non-monotonic*: 54 Hz (0.9×) throws while
-45 Hz, 30 Hz and every oversample (1.5–3×) decode. So the safe invariant is
+**Decimation drops packets; it is not dav1d flakiness.** A 30 Hz grid over a 60 fps
+stream discards roughly half of every GOP before decode. The earlier warm run that
+returned frames while a cold run threw `InvalidDataError` did not establish a
+cache/order-dependent decoder state: for a fixed packet set and sampling grid, windows
+crossing a dropped reference fail deterministically, while some frame structures can
+instead yield silently wrong pixels. The observed rate sensitivity reflects which
+packets collide in grid slots. For these uniform streams, keep
 **`rate_hz >= native_fps`**; never decimate AV1 here.
 
 ## What reality #2073 changed (and didn't)
@@ -42,10 +49,10 @@ crashed when fixed-rate-sampling a duration timeline (`int(Timedelta)` /
 makes stock `FixedRateSampling` over `video_time` viable at all — and we are pinned to a
 build that includes it (`73ce701`, which also carries #2496's fast catalog register).
 
-#2073 did **not** touch the **decoder**. Sub-native decimated AV1 still throws (table
-above); that residual decoder bug is filed upstream at
-`rerun-io/rerun-av1-duration-decode-repro` (`ISSUE.md`). Native-rate sampling sidesteps it
-entirely, so no upstream fix is needed for this pipeline.
+#2073 did **not** touch decode-window assembly. Sub-native decimated AV1 still loses
+packets before decode (table above); the upstream bug is RR-5087. Native-rate sampling
+sidesteps the collisions on the uniform streams measured here, but timestamp jitter or
+another fps/grid mismatch can trigger the same bug.
 
 ## Native-fps detection
 
@@ -54,12 +61,11 @@ entirely, so no upstream fix is needed for this pipeline.
 - reads each exo stream's `video_time` packet timestamps and derives its rate from the
   **median** inter-packet gap (`native_fps_from_packet_ns`);
 - **rejects irregular spacing** (`max_gap / median_gap >= 1.5`) so a dropped-frame artifact
-  can't under-estimate the rate into the sub-native throw zone;
+  can't under-estimate the rate into a packet-dropping sub-native grid;
 - **hard-asserts every exo stream shares one native fps**. A single `FixedRateSampling`
   grid drives all camera fields at one shared timestamp, which keeps the cameras in
-  multiview lock-step. If the cameras had *different* native rates, `fill_latest_at` would
-  silently duplicate the slower camera's frames as fresh instants and corrupt
-  triangulation with no error — so mismatched rates raise instead.
+  multiview lock-step. Cameras with *different* native rates need explicit temporal
+  alignment semantics rather than this one-rate grid, so mismatched rates raise instead.
 
 assembly101's exo cams are uniform 60 fps, so one grid aligns them all. A future
 mixed-fps exo rig would need its own shared-grid design; the assertion fails loudly rather

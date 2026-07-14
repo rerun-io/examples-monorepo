@@ -243,11 +243,13 @@ def _list_collate(batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _batched_loader(rerun_dataset: RerunMapDataset, chunks: list[list[int]], num_workers: int) -> DataLoader:
     """Build a DataLoader that fetches whole chunks, in order, on worker processes.
 
-    The batch fetch (server query + per-sample GOP decode back to the previous
-    keyframe) is the pipeline's slowest stage and is GIL-bound in-process, so
-    spawn-based worker processes are the only way to parallelize it. The
-    Rerun dataloader requires the ``spawn`` start method (forked workers
-    deadlock on their first catalog call).
+    With released rerun-sdk 0.34.1, the batch fetch (server query + per-sample
+    GOP decode back to the previous keyframe; TODO RR-4751) is the pipeline's
+    slowest stage and is GIL-bound in-process, so spawn-based worker processes
+    are the only way to parallelize it. Incremental decoding exists upstream
+    in RR-5167 / PR #2683 but is not in this release. The Rerun dataloader
+    requires the ``spawn`` start method (forked workers deadlock on their first
+    catalog call).
     """
     if num_workers == 0:
         return DataLoader(rerun_dataset, batch_sampler=chunks, collate_fn=_list_collate)
@@ -294,9 +296,10 @@ def process_segment(
         "pose_q": Field(f"/{RIG}:Transform3D:quaternion", decode=NumericDecoder()),
         "k": Field(f"/{PINHOLE_WIDE}:Pinhole:image_from_camera", decode=NumericDecoder()),
     }
-    # A map dataset fetches only the strided samples. The iterable dataset
-    # would decode every sample on the 60 fps grid (each decode replays the
-    # whole GOP window), i.e. `stride`× the work for frames we throw away.
+    # A map dataset fetches only the strided samples. In released rerun-sdk
+    # 0.34.1, the iterable dataset would decode every sample on the 60 fps grid
+    # (each decode replays the whole GOP window; TODO RR-4751), i.e. `stride`×
+    # the work for frames we throw away. RR-5167 / PR #2683 fixes this upstream.
     rerun_dataset: RerunMapDataset = RerunMapDataset(
         source,
         index="video_time",

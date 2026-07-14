@@ -129,5 +129,6 @@ def test_resilient_decoder_turns_decode_errors_into_skippable_none() -> None:
     error = av.error.InvalidDataError(1094995529, "Invalid data found when processing input")
     with patch.object(VideoFrameDecoder, "decode", side_effect=error):
         assert decoder.decode(object(), 0, "segment") is None
-    # The poisoned context must stay pinned (releasing it can deadlock dav1d teardown).
+    # Retain the observed failure for diagnostics. The dav1d_flush deadlock specifically needs an
+    # errored, un-drained context finalized at interpreter shutdown; prompt del + gc is safe.
     assert decoder.decode_failures == [error]
