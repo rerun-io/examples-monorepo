@@ -61,10 +61,9 @@ pytorch-cpu = "*"
 torchvision = "*"
 
 [feature.common.pypi-dependencies]
-# datafusion/dataloader extras make catalog queries and the PyTorch dataloader
-# ambient in every common env (they add ~100MB datafusion; torch is satisfied by
-# the co-composed conda pytorch except in the torch-less `dev` env).
-rerun-sdk = { version = "==0.34.1", extras = ["datafusion", "dataloader"] }
+# Keep catalog queries ambient without pulling the PyTorch dataloader stack
+# into common environments that otherwise have no torch dependency.
+rerun-sdk = { version = "==0.34.1", extras = ["datafusion"] }
 gradio = "==6.13.0"
 gradio-rerun = "==0.34.1"
 simplecv = { path = "packages/simplecv", editable = true }
@@ -583,8 +582,8 @@ description = "Run the gradio app in dev mode"
 
 # prompt-da-catalog: PromptDA over a registered ARKitScenes catalog dataset.
 # Composes the prompt-da model stack with the arkitscenes-download package
-# (entity paths, blueprint, depth PNG encoder) and the dataloader extras that
-# `common` now carries. linux-64 only (cuda + prompt-da are).
+# (entity paths, blueprint, depth PNG encoder) and the Rerun dataloader extra.
+# linux-64 only (cuda + prompt-da are).
 [feature.prompt-da-catalog]
 platforms = ["linux-64"]
 
@@ -600,6 +599,7 @@ ffmpeg = { version = ">=8.1", build-number = ">=902" }
 
 [feature.prompt-da-catalog.pypi-dependencies]
 arkitscenes-download = { path = "packages/arkitscenes-download", editable = true }
+rerun-sdk = { version = "==0.34.1", extras = ["datafusion", "dataloader"] }
 
 [feature.prompt-da-catalog.tasks.prompt-da-arkitscenes]
 cmd = "python tools/prompt_da_arkitscenes.py"

@@ -18,6 +18,7 @@ from arkitscenes_download.ingest.paths import (
     PINHOLE_ULTRAWIDE,
     PINHOLE_WIDE,
     PINHOLE_WIDE_LOWRES,
+    PROMPTDA_MESH,
     WORLD,
 )
 
@@ -89,6 +90,12 @@ def make_blueprint(portrait: bool = False, framing: MeshFraming | None = None, i
     ]
     active_depth_tab: int = 0
     if include_promptda:
+        world_view = rrb.Spatial3DView(
+            name="world",
+            origin=f"/{WORLD}",
+            contents=["$origin/**", f"- /{PROMPTDA_MESH}/**", f"- /{DEPTH_PROMPTDA}/**"],
+            eye_controls=_eye_controls(framing),
+        )
         depth_tabs.append(
             rrb.Spatial2DView(
                 name="depth PromptDA", origin=PINHOLE_WIDE, contents=["$origin/depth_promptda"], overrides={f"/{DEPTH_PROMPTDA}": depth_range}

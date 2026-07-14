@@ -4,13 +4,46 @@ import numpy as np
 import pytest
 from numpy.testing import assert_allclose, assert_array_equal
 
-from rerun_prompt_da.apis.prompt_da_arkitscenes import (
+pytest.importorskip("pyarrow", reason="ARKitScenes catalog deps live in the prompt-da-catalog envs")
+pytest.importorskip("arkitscenes_download", reason="ARKitScenes catalog deps live in the prompt-da-catalog envs")
+
+from rerun_prompt_da.apis.prompt_da_arkitscenes import (  # noqa: E402
     filter_depth_for_fusion,
     k_matrix_from_flat,
+    orientation_quarter_turns_from_segment_row,
+    portrait_from_segment_row,
+    rotate_landscape_to_portrait,
+    rotate_portrait_to_landscape,
     segments_to_process,
     stride_for,
     world_t_cam_from_pose,
 )
+
+
+def test_portrait_property_parses_catalog_list_value() -> None:
+    """Interpret the first catalog property value instead of list truthiness."""
+    assert portrait_from_segment_row({"property:portrait:value": ["True"]}) is True
+    assert portrait_from_segment_row({"property:portrait:value": ["False"]}) is False
+
+
+def test_portrait_property_is_required() -> None:
+    """Reject segments whose required orientation metadata is absent."""
+    with pytest.raises(KeyError, match="portrait"):
+        portrait_from_segment_row({})
+
+
+def test_orientation_quarter_turns_parses_catalog_list_value() -> None:
+    """Preserve ingest's stored rotation direction for portrait inference."""
+    assert orientation_quarter_turns_from_segment_row({"property:orientation_quarter_turns_ccw:value": ["3"]}) == 3
+
+
+def test_portrait_rotation_round_trip_preserves_asymmetric_layout() -> None:
+    """Undo ingest's CCW portrait bake for inference and restore it afterward."""
+    portrait = np.array([[10, 11], [20, 21], [30, 31]], dtype=np.uint16)
+    landscape = rotate_portrait_to_landscape(portrait, 1)
+    assert_array_equal(landscape, np.array([[30, 20, 10], [31, 21, 11]], dtype=np.uint16))
+    assert_array_equal(rotate_landscape_to_portrait(landscape, 1), portrait)
+    assert_array_equal(rotate_landscape_to_portrait(rotate_portrait_to_landscape(portrait, 3), 3), portrait)
 
 
 def test_stride_for_uses_nearest_native_frame_interval() -> None:

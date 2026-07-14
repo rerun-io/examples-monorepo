@@ -17,12 +17,14 @@ import pyarrow as pa
 import rerun as rr
 import torch
 from arkitscenes_download.ingest.blueprint import DEPTH_RANGE_MM, make_blueprint
+from arkitscenes_download.ingest.catalog import DEFAULT_CATALOG_URL
 from arkitscenes_download.ingest.depth import encode_depth_png
 from arkitscenes_download.ingest.paths import CONFIDENCE, DEPTH, DEPTH_PROMPTDA, PINHOLE_WIDE, PROMPTDA_MESH, RIG, VIDEO_WIDE
 from beartype.roar import BeartypeException
+from einops import rearrange
 from jaxtyping import Float, Float32, UInt8, UInt16
 from numpy import ndarray
-from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
+from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer, RegistrationHandle
 from rerun.experimental.dataloader import (
     DataSource,
     Field,
@@ -33,13 +35,15 @@ from rerun.experimental.dataloader import (
     VideoFrameDecoder,
 )
 from scipy.spatial.transform import Rotation
+from simplecv.camera_parameters import Intrinsics, rescale_intri
 from simplecv.ops.tsdf_depth_fuser import Open3DFuser
+from simplecv.rerun_log_utils import mesh_bounding_geometry
 from torch import Tensor
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from rerun_prompt_da.apis.prompt_da_trt_polycam import network_image_hw
-from rerun_prompt_da.trt_predictor import PromptDATrtPredictor
+from rerun_prompt_da.trt_predictor import PromptDATrtPredictor, postprocess_depth, preprocess_batch
 
 ARKITSCENES_DATASET = "arkitscenes"
 PROMPTDA_LAYER = "promptda"
@@ -55,7 +59,7 @@ class PDAArkitScenesConfig:
     """One catalog segment to process and replace, when present."""
     process_all: bool = False
     """Process every segment that does not yet have a PromptDA layer."""
-    catalog_url: str = "rerun+http://127.0.0.1:51235"
+    catalog_url: str = DEFAULT_CATALOG_URL
     """URL of the local Rerun catalog server."""
     output_dir: Path = Path("data/promptda")
     """Root for generated per-segment PromptDA RRD files."""
@@ -121,6 +125,42 @@ def stride_for(native_fps: float, target_fps: float) -> int:
     if target_fps <= 0.0:
         raise ValueError("target_fps must be greater than zero")
     return max(1, round(native_fps / target_fps))
+
+
+def portrait_from_segment_row(row: dict[str, Any]) -> bool:
+    """Parse the required catalog portrait property from one segment row."""
+    property_name: str = "property:portrait:value"
+    if property_name not in row or row[property_name] is None:
+        raise KeyError(f"segment {row.get('rerun_segment_id', '<unknown>')!r} is missing the portrait property")
+    value: Any = row[property_name]
+    if isinstance(value, (list, np.ndarray)):
+        if len(value) == 0:
+            raise ValueError(f"segment {row.get('rerun_segment_id', '<unknown>')!r} has an empty portrait property")
+        value = value[0]
+    return str(value) == "True"
+
+
+def orientation_quarter_turns_from_segment_row(row: dict[str, Any]) -> int:
+    """Parse the ingest rotation needed to undo a stored portrait segment."""
+    property_name: str = "property:orientation_quarter_turns_ccw:value"
+    if property_name not in row or row[property_name] is None:
+        raise KeyError(f"segment {row.get('rerun_segment_id', '<unknown>')!r} is missing the orientation quarter-turn property")
+    value: Any = row[property_name]
+    if isinstance(value, (list, np.ndarray)):
+        if len(value) == 0:
+            raise ValueError(f"segment {row.get('rerun_segment_id', '<unknown>')!r} has an empty orientation quarter-turn property")
+        value = value[0]
+    return int(value) % 4
+
+
+def rotate_portrait_to_landscape(array_hw: ndarray, quarter_turns: int) -> ndarray:
+    """Undo ingest's counter-clockwise portrait bake before inference."""
+    return np.ascontiguousarray(np.rot90(array_hw, -quarter_turns))
+
+
+def rotate_landscape_to_portrait(array_hw: ndarray, quarter_turns: int) -> ndarray:
+    """Restore ingest's counter-clockwise portrait bake after inference."""
+    return np.ascontiguousarray(np.rot90(array_hw, quarter_turns))
 
 
 def k_matrix_from_flat(k_flat: Float[ndarray, "9"]) -> Float[ndarray, "3 3"]:
@@ -217,15 +257,17 @@ def _batched_loader(rerun_dataset: RerunMapDataset, chunks: list[list[int]], num
     )
 
 
-def connect_catalog(catalog_url: str) -> CatalogClient:
+def connect_catalog(catalog_url: str, dataset_name: str) -> CatalogClient:
     """Connect to the local ARKitScenes catalog or terminate with setup guidance."""
     try:
         client: CatalogClient = CatalogClient(catalog_url)
-        client.dataset_names()
+        dataset_names: list[str] = client.dataset_names()
     except BeartypeException:
         raise
     except Exception as error:
         raise SystemExit(f"catalog not reachable at {catalog_url} — start it with `pixi run arkitscenes-download-serve`") from error
+    if dataset_name not in dataset_names:
+        raise SystemExit(f"dataset {dataset_name!r} is absent — create it with `pixi run arkitscenes-download-register`")
     return client
 
 
@@ -233,6 +275,7 @@ def process_segment(
     dataset_entry: DatasetEntry,
     segment_id: str,
     portrait: bool,
+    orientation_quarter_turns: int,
     config: PDAArkitScenesConfig,
     predictor: PromptDATrtPredictor,
 ) -> SegmentResult:
@@ -259,12 +302,7 @@ def process_segment(
     stride: int = stride_for(NATIVE_FPS, config.target_fps)
     rrd_path: Path = config.output_dir / segment_id / "promptda.rrd"
     rrd_path.parent.mkdir(parents=True, exist_ok=True)
-    recording: rr.RecordingStream = rr.RecordingStream(
-        application_id=ARKITSCENES_DATASET,
-        recording_id=segment_id,
-        send_properties=False,
-    )
-    recording.save(rrd_path)
+    recording: rr.RecordingStream | None = None
     fuser: Open3DFuser = Open3DFuser(
         fusion_resolution=config.depth_fusion_resolution,
         max_fusion_depth=config.max_depth_range_meter,
@@ -283,15 +321,44 @@ def process_segment(
         skipped_decodes += len(chunk) - len(valid)
         if not valid:
             continue
-        rgb_bhw3: UInt8[Tensor, "b h w 3"] = torch.stack([sample["video"].permute(1, 2, 0) for _, sample in valid])
-        prompt_bhw: Float32[Tensor, "b 192 256"] = torch.from_numpy(
-            np.stack([sample["depth"].numpy().squeeze(0) for _, sample in valid]).astype(np.float32) / 1000.0
-        )
-        depth_bhw: Float32[Tensor, "b h w"] = predictor(rgb_bhw3, prompt_bhw)
+        rgb_arrays: list[UInt8[ndarray, "h w 3"]] = [np.asarray(sample["video"].permute(1, 2, 0).numpy(), dtype=np.uint8) for _, sample in valid]
+        prompt_arrays: list[ndarray] = [sample["depth"].numpy().squeeze(0) for _, sample in valid]
+        confidence_shape_hw: tuple[int, int] = (256, 192) if portrait else (192, 256)
+        confidence_arrays: list[UInt8[ndarray, "h w"]] = [
+            np.asarray(sample["conf"].numpy().reshape(confidence_shape_hw), dtype=np.uint8) for _, sample in valid
+        ]
+        if portrait:
+            rgb_arrays = [rotate_portrait_to_landscape(rgb_hw3, orientation_quarter_turns) for rgb_hw3 in rgb_arrays]
+            prompt_arrays = [rotate_portrait_to_landscape(prompt_hw, orientation_quarter_turns) for prompt_hw in prompt_arrays]
+            confidence_arrays = [rotate_portrait_to_landscape(confidence_hw, orientation_quarter_turns) for confidence_hw in confidence_arrays]
+        rgb_bhw3: UInt8[Tensor, "b h w 3"] = torch.from_numpy(np.stack(rgb_arrays))
+        prompt_bhw: Float32[Tensor, "b 192 256"] = torch.from_numpy(np.stack(prompt_arrays).astype(np.float32) / 1000.0)
+        image_b3hw: Float32[Tensor, "b 3 nh nw"]
+        prompt_b1hw: Float32[Tensor, "b 1 192 256"]
+        image_b3hw, prompt_b1hw = preprocess_batch(rgb_bhw3, prompt_bhw, predictor.image_hw)
+        depth_model_b1hw: Float32[Tensor, "b 1 nh nw"] = predictor.runtime(image_b3hw, prompt_b1hw)
+        depth_bhw: Float32[Tensor, "b h w"] = postprocess_depth(depth_model_b1hw, (rgb_bhw3.shape[1], rgb_bhw3.shape[2]))
         depth_mm_bhw: UInt16[ndarray, "b h w"] = (depth_bhw.cpu().numpy() * 1000.0).astype(np.uint16)
+        depth_model_mm_bhw: UInt16[ndarray, "b nh nw"] = (rearrange(depth_model_b1hw, "b 1 h w -> b h w").cpu().numpy() * 1000.0).astype(
+            np.uint16
+        )
+        if recording is None:
+            recording = rr.RecordingStream(
+                application_id=ARKITSCENES_DATASET,
+                recording_id=segment_id,
+                send_properties=False,
+            )
+            recording.save(rrd_path)
         for row, (sample_idx, sample) in enumerate(valid):
             predicted_depth_hw: UInt16[ndarray, "h w"] = depth_mm_bhw[row]
-            confidence_hw: UInt8[ndarray, "h2 w2"] = np.asarray(sample["conf"].numpy().reshape(192, 256), dtype=np.uint8)
+            fusion_depth_hw: UInt16[ndarray, "fh fw"] = depth_model_mm_bhw[row]
+            confidence_hw: UInt8[ndarray, "h2 w2"] = confidence_arrays[row]
+            rgb_hw3: UInt8[ndarray, "h w 3"] = np.asarray(rgb_bhw3[row].numpy(), dtype=np.uint8)
+            if portrait:
+                predicted_depth_hw = rotate_landscape_to_portrait(predicted_depth_hw, orientation_quarter_turns)
+                fusion_depth_hw = rotate_landscape_to_portrait(fusion_depth_hw, orientation_quarter_turns)
+                confidence_hw = rotate_landscape_to_portrait(confidence_hw, orientation_quarter_turns)
+                rgb_hw3 = rotate_landscape_to_portrait(rgb_hw3, orientation_quarter_turns)
             timestamp: Any = rerun_dataset.sample_index.global_to_local(sample_idx)[1]
             timestamp_seconds: float = float(timestamp / np.timedelta64(1, "s"))
             rr.set_time("video_time", duration=timestamp_seconds, recording=recording)
@@ -301,21 +368,39 @@ def process_segment(
                 recording=recording,
             )
             filtered_depth_hw: UInt16[ndarray, "h w"] = filter_depth_for_fusion(
-                predicted_depth_hw,
+                fusion_depth_hw,
                 confidence_hw,
                 config.max_depth_range_meter,
             )
+            rgb_fusion_hw3: UInt8[ndarray, "fh fw 3"] = np.asarray(
+                cv2.resize(rgb_hw3, (fusion_depth_hw.shape[1], fusion_depth_hw.shape[0]), interpolation=cv2.INTER_AREA), dtype=np.uint8
+            )
+            stored_k_33: Float[ndarray, "3 3"] = k_matrix_from_flat(np.asarray(sample["k"].numpy()))
+            stored_intrinsics: Intrinsics = Intrinsics.from_k_matrix(
+                camera_conventions="RDF",
+                k_matrix=stored_k_33,
+                height=rgb_hw3.shape[0],
+                width=rgb_hw3.shape[1],
+            )
+            fusion_intrinsics: Intrinsics = rescale_intri(
+                stored_intrinsics,
+                target_height=fusion_depth_hw.shape[0],
+                target_width=fusion_depth_hw.shape[1],
+            )
+            assert fusion_intrinsics.k_matrix is not None
             world_t_cam_44: Float[ndarray, "4 4"] = world_t_cam_from_pose(
                 np.asarray(sample["pose_t"].numpy()), np.asarray(sample["pose_q"].numpy())
             )
             fuser.fuse_frames(
                 depth_hw=filtered_depth_hw,
-                K_33=k_matrix_from_flat(np.asarray(sample["k"].numpy())),
+                K_33=fusion_intrinsics.k_matrix,
                 cam_T_world_44=np.linalg.inv(world_t_cam_44),
-                rgb_hw3=np.asarray(rgb_bhw3[row].numpy()),
+                rgb_hw3=rgb_fusion_hw3,
             )
             inferred_frames += 1
 
+    if inferred_frames == 0 or recording is None:
+        raise RuntimeError(f"segment {segment_id!r} produced zero inferred frames")
     mesh: Any = fuser.get_mesh()
     mesh.compute_vertex_normals()
     vertices: Float[ndarray, "n 3"] = np.asarray(mesh.vertices)
@@ -338,23 +423,18 @@ def process_segment(
     # the end of the stream so it wins blueprint activation when the segment's
     # layers load together in the viewer.
     if len(vertices) > 0:
-        mesh_center_xyz: Float[ndarray, "3"] = vertices.mean(axis=0)
-        bounding_radius_m: float = float(np.linalg.norm(vertices - mesh_center_xyz, axis=1).max())
+        mesh_geometry: tuple[Float[ndarray, "3"], float] = mesh_bounding_geometry(vertices)
         rr.send_blueprint(
-            make_blueprint(portrait=portrait, framing=(mesh_center_xyz, bounding_radius_m), include_promptda=True),
+            make_blueprint(portrait=portrait, framing=mesh_geometry, include_promptda=True),
             recording=recording,
         )
     recording.flush()
     return SegmentResult(rrd_path=rrd_path, inferred_frames=inferred_frames, skipped_decodes=skipped_decodes)
 
 
-def run_prompt_da_arkitscenes(config: PDAArkitScenesConfig) -> None:
+def main(config: PDAArkitScenesConfig) -> None:
     """Run PromptDA for selected segments and optionally update the catalog."""
-    if (config.video_id is None) == (not config.process_all):
-        raise SystemExit("give exactly one of --video-id or --process-all")
-    client: CatalogClient = connect_catalog(config.catalog_url)
-    if ARKITSCENES_DATASET not in client.dataset_names():
-        raise SystemExit(f"dataset {ARKITSCENES_DATASET!r} is absent — create it with `pixi run arkitscenes-download-register`")
+    client: CatalogClient = connect_catalog(config.catalog_url, ARKITSCENES_DATASET)
     dataset_entry: DatasetEntry = client.get_dataset(ARKITSCENES_DATASET)
     segment_table: pa.Table = pa.Table.from_batches(dataset_entry.segment_table().collect())
     rows: list[dict] = segment_table.to_pylist()
@@ -369,19 +449,44 @@ def run_prompt_da_arkitscenes(config: PDAArkitScenesConfig) -> None:
         image_hw=network_image_hw((1440, 1920), config.max_image_size),
         batch_size=config.batch_size,
     )
-    portrait_by_id: dict[str, bool] = {str(row["rerun_segment_id"]): bool(row.get("property:portrait:value")) for row in rows}
+    portrait_by_id: dict[str, bool] = {str(row["rerun_segment_id"]): portrait_from_segment_row(row) for row in rows}
+    orientation_quarter_turns_by_id: dict[str, int] = {
+        str(row["rerun_segment_id"]): orientation_quarter_turns_from_segment_row(row) for row in rows
+    }
     results: list[SegmentResult] = []
+    registration_handles: list[RegistrationHandle] = []
     for segment_id in segment_ids:
-        result: SegmentResult = process_segment(dataset_entry, segment_id, portrait_by_id[segment_id], config, predictor)
+        result: SegmentResult = process_segment(
+            dataset_entry,
+            segment_id,
+            portrait_by_id[segment_id],
+            orientation_quarter_turns_by_id[segment_id],
+            config,
+            predictor,
+        )
         results.append(result)
         if config.register:
-            dataset_entry.register(
-                [result.rrd_path.resolve().as_uri()],
-                layer_name=PROMPTDA_LAYER,
-                on_duplicate=OnDuplicateSegmentLayer.REPLACE,
-            ).wait()
+            registration_handles.append(
+                dataset_entry.register(
+                    [result.rrd_path.resolve().as_uri()],
+                    layer_name=PROMPTDA_LAYER,
+                    on_duplicate=OnDuplicateSegmentLayer.REPLACE,
+                )
+            )
+    for registration_handle in registration_handles:
+        registration_handle.wait()
 
     if config.register and config.update_blueprint:
+        # blueprints() returns opaque rec_* ids with no name column, so stale entries from
+        # previous runs cannot be matched by name. The dataset's blueprints are wholly owned
+        # by ingest and this tool (always the same portrait/landscape pair), so drop them all
+        # and register a fresh pair to keep the viewer's blueprint picker clean.
+        stale_blueprints: list[str] = dataset_entry.blueprints()
+        if stale_blueprints:
+            blueprint_dataset: DatasetEntry | None = dataset_entry.blueprint_dataset()
+            if blueprint_dataset is None:
+                raise RuntimeError(f"dataset reports blueprints {stale_blueprints!r} but has no blueprint dataset")
+            blueprint_dataset.unregister(segments_to_drop=stale_blueprints, layers_to_drop=[])
         for orientation, is_portrait in (("landscape", False), ("portrait", True)):
             blueprint_path: Path = config.output_dir / f"{ARKITSCENES_DATASET}-{orientation}.rbl"
             blueprint_path.parent.mkdir(parents=True, exist_ok=True)
@@ -393,8 +498,3 @@ def run_prompt_da_arkitscenes(config: PDAArkitScenesConfig) -> None:
     print(f"skipped decodes: {sum(r.skipped_decodes for r in results)}")
     for result in results:
         print(f"rrd: {result.rrd_path}")
-
-
-def main(config: PDAArkitScenesConfig) -> None:
-    """Run the ARKitScenes PromptDA command-line workflow."""
-    run_prompt_da_arkitscenes(config)

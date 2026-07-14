@@ -6,7 +6,7 @@ import rerun.blueprint as rrb
 from rerun.blueprint.api import Container, View
 
 from arkitscenes_download.ingest.blueprint import make_blueprint
-from arkitscenes_download.ingest.paths import DEPTH, DEPTH_GT, DEPTH_PROMPTDA, GT_MESH, PINHOLE_WIDE_LOWRES
+from arkitscenes_download.ingest.paths import DEPTH, DEPTH_GT, DEPTH_PROMPTDA, GT_MESH, PINHOLE_WIDE_LOWRES, PROMPTDA_MESH
 
 
 def iter_views(node: rrb.Blueprint | Container | View) -> list[View]:
@@ -68,3 +68,11 @@ def test_promptda_world_tab_hides_gt_mesh_and_other_depths() -> None:
     assert f"- /{PINHOLE_WIDE_LOWRES}/**" in contents
     # Everything else under /world stays visible (boxes, frustum, promptda mesh).
     assert "$origin/**" in contents
+
+
+def test_stock_world_tab_hides_promptda_geometry_when_comparison_is_enabled() -> None:
+    """Keep PromptDA geometry exclusive to its dedicated world tab."""
+    blueprint = make_blueprint(include_promptda=True)
+    contents = cast(list[str], find_view(blueprint, "world").contents)
+    assert f"- /{PROMPTDA_MESH}/**" in contents
+    assert f"- /{DEPTH_PROMPTDA}/**" in contents
