@@ -2,8 +2,11 @@
 
 from pathlib import Path
 
+import imagecodecs
 import numpy as np
 import pytest
+from jaxtyping import UInt16
+from numpy import ndarray
 from numpy.testing import assert_allclose, assert_array_equal
 from scipy.spatial.transform import Rotation
 
@@ -12,6 +15,7 @@ pytest.importorskip("torchcodec", reason="raw video decode deps live in the prom
 pytest.importorskip("arkitscenes_download", reason="ARKitScenes ingest deps live in the prompt-da-catalog envs")
 
 from rerun_prompt_da.apis.prompt_da_arkitscenes_raw import (  # noqa: E402
+    encode_depth_png_fast,
     filter_depth_for_fusion,
     nearest_timestamped_path,
     retained_video_times,
@@ -20,6 +24,22 @@ from rerun_prompt_da.apis.prompt_da_arkitscenes_raw import (  # noqa: E402
     stride_for,
     world_t_cam_from_pose,
 )
+
+
+def test_fast_depth_png_round_trips_uint16_depth_bit_exact() -> None:
+    """Preserve every uint16 value for random and spatially smooth depth."""
+    rng: np.random.Generator = np.random.default_rng(42)
+    random_depth_hw: UInt16[ndarray, "random_h random_w"] = rng.integers(
+        0, np.iinfo(np.uint16).max + 1, size=(73, 91), dtype=np.uint16
+    )
+    y_h1: UInt16[ndarray, "smooth_h 1"] = np.arange(80, dtype=np.uint16)[:, None]
+    x_1w: UInt16[ndarray, "1 smooth_w"] = np.arange(120, dtype=np.uint16)[None, :]
+    smooth_depth_hw: UInt16[ndarray, "smooth_h smooth_w"] = np.asarray(750 + 3 * y_h1 + 2 * x_1w, dtype=np.uint16)
+
+    for depth_hw in (random_depth_hw, smooth_depth_hw):
+        decoded_hw: UInt16[ndarray, "h w"] = imagecodecs.png_decode(encode_depth_png_fast(depth_hw))
+        assert decoded_hw.dtype == np.uint16
+        assert_array_equal(decoded_hw, depth_hw)
 
 
 def test_stride_for_uses_nearest_native_frame_interval() -> None:

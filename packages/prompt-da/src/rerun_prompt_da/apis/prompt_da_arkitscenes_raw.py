@@ -6,12 +6,15 @@ depth in the original landscape camera frame, and writes a ``promptda_raw``
 layer back to the ARKitScenes catalog.
 """
 
+import struct
 import time
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import cv2
+import imagecodecs
 import numpy as np
 import pyarrow as pa
 import rerun as rr
@@ -19,7 +22,6 @@ import torch
 from arkitscenes_download.ingest.blueprint import DEPTH_RANGE_MM
 from arkitscenes_download.ingest.catalog import DEFAULT_CATALOG_URL
 from arkitscenes_download.ingest.clock import path_timestamps, recover_clock_from_packets, timestamp_from_path
-from arkitscenes_download.ingest.depth import encode_depth_png
 from arkitscenes_download.ingest.metadata import PoseSelection, select_pose_source
 from arkitscenes_download.ingest.mov import MetadataPacket, demux_metadata_streams, track_packet_times
 from arkitscenes_download.ingest.paths import PINHOLE_WIDE
@@ -59,6 +61,33 @@ WIDE_HEIGHT = 1440
 WIDE_WIDTH = 1920
 DEPTH_PROMPTDA_RAW = f"{PINHOLE_WIDE}/depth_promptda_raw"
 PROMPTDA_RAW_MESH = "world/promptda_raw/mesh"
+
+
+def _png_chunk(tag: bytes, data: bytes) -> bytes:
+    """Build one length-prefixed, checksummed PNG chunk."""
+    return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
+
+
+def encode_depth_png_fast(depth_hw: UInt16[ndarray, "h w"]) -> bytes:
+    """Encode uint16 depth losslessly as a 16-bit grayscale PNG.
+
+    Up-filtered libdeflate level 1 measured 11.5 ms and 596 KiB per representative
+    ARKitScenes frame, versus 22.2 ms and 531 KiB at the previous level 4.
+
+    Args:
+        depth_hw: Depth in millimetres with shape ``(H, W)`` and dtype uint16.
+
+    Returns:
+        A standard PNG blob that decodes bit-exact to ``depth_hw``.
+    """
+    raw_hw2: UInt8[ndarray, "h two_w"] = np.ascontiguousarray(depth_hw).astype(">u2").view(np.uint8).reshape(depth_hw.shape[0], -1)
+    filtered_hw2: UInt8[ndarray, "h filtered_w"] = np.empty((raw_hw2.shape[0], raw_hw2.shape[1] + 1), dtype=np.uint8)
+    filtered_hw2[:, 0] = 2
+    filtered_hw2[0, 1:] = raw_hw2[0]
+    filtered_hw2[1:, 1:] = raw_hw2[1:] - raw_hw2[:-1]
+    idat: bytes = imagecodecs.deflate_encode(filtered_hw2.tobytes(), level=1, raw=False)  # pyrefly: ignore  # bad-assignment
+    ihdr: bytes = struct.pack(">IIBBBBB", depth_hw.shape[1], depth_hw.shape[0], 16, 0, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + _png_chunk(b"IHDR", ihdr) + _png_chunk(b"IDAT", idat) + _png_chunk(b"IEND", b"")
 
 
 @dataclass
@@ -457,7 +486,7 @@ def process_segment_raw(
             rr.log(
                 DEPTH_PROMPTDA_RAW,
                 rr.EncodedDepthImage(
-                    blob=encode_depth_png(depth_baked_hw),
+                    blob=encode_depth_png_fast(depth_baked_hw),
                     media_type="image/png",
                     meter=1000.0,
                     depth_range=DEPTH_RANGE_MM,
