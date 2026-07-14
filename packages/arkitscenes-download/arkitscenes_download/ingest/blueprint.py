@@ -25,7 +25,8 @@ from arkitscenes_download.ingest.paths import (
 # TODO(rerun#upstream): remove once the viewer auto-ranges encoded depth from the
 # decoded values instead of the PNG bit depth (broken in 0.34.1, no issue filed yet).
 # Delete this constant, the per-view overrides below, and the `depth_range=` kwargs
-# at the EncodedDepthImage logging sites (ingest/cli.py, prompt_da_arkitscenes.py).
+# at every EncodedDepthImage logging site — each is marked with a TODO pointing here
+# (ingest/cli.py, prompt_da_arkitscenes.py, prompt_da_arkitscenes_raw.py).
 DEPTH_RANGE_MM: tuple[float, float] = (0.0, 4000.0)
 """Colormap range for the depth views, in native mm units.
 

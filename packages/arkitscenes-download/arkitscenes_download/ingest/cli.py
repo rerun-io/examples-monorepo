@@ -254,6 +254,7 @@ def _log_depth(recording: rr.RecordingStream, path: str, paths: list[Path], quar
 
     def make_columns(values: list[object]) -> rr.ComponentColumnList:
         blobs: list[bytes] = [value for value in values if isinstance(value, bytes)]
+        # TODO(rerun#upstream): drop depth_range once the viewer auto-ranges encoded depth (see DEPTH_RANGE_MM in ingest/blueprint.py).
         return rr.EncodedDepthImage.columns(
             blob=blobs, media_type=["image/png"] * len(blobs), meter=[1000.0] * len(blobs), depth_range=[DEPTH_RANGE_MM] * len(blobs)
         )

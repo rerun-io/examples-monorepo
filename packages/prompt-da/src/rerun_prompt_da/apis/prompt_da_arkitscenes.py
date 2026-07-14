@@ -371,6 +371,7 @@ def process_segment(
             rr.set_time("video_time", duration=timestamp_seconds, recording=recording)
             rr.log(
                 DEPTH_PROMPTDA,
+                # TODO(rerun#upstream): drop depth_range once the viewer auto-ranges encoded depth (see DEPTH_RANGE_MM in ingest/blueprint.py).
                 rr.EncodedDepthImage(blob=encode_depth_png(predicted_depth_hw), media_type="image/png", meter=1000.0, depth_range=DEPTH_RANGE_MM),
                 recording=recording,
             )

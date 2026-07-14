@@ -496,6 +496,7 @@ def process_segment_raw(
                     blob=encode_depth_png_fast(depth_baked_hw),
                     media_type="image/png",
                     meter=1000.0,
+                    # TODO(rerun#upstream): drop depth_range once the viewer auto-ranges encoded depth (see DEPTH_RANGE_MM in ingest/blueprint.py).
                     depth_range=DEPTH_RANGE_MM,
                 ),
                 recording=recording,
