@@ -97,14 +97,18 @@ class SegmentResult:
 class ResilientVideoFrameDecoder(VideoFrameDecoder):
     """A ``VideoFrameDecoder`` that survives per-sample AV1 decode failures.
 
-    dav1d occasionally rejects a decode window outright (upstream,
-    order-dependent — see the mv-api catalog dataloader docs). Each sample is
-    decoded with a fresh codec context, so the failure is recoverable at
-    sample granularity: map it onto the decoder's existing ``None``-frame
-    skip path instead of killing the whole iteration. The caught exceptions
-    are kept alive on purpose — releasing a failed decode's traceback frees
-    the poisoned codec context, whose dav1d teardown can deadlock the
-    process in ``dav1d_flush``.
+    The dataloader assembles decode windows with ``fill_latest_at`` over a
+    fixed-rate sampling grid, which silently drops a stored packet whenever
+    timestamp jitter puts two packets in one grid slot (upstream, RR-5087).
+    Every window spanning the dropped reference frame then fails
+    deterministically with ``InvalidDataError`` until the next keyframe —
+    on this dataset, a ~0.5 s dead zone per segment. Each sample is decoded
+    with a fresh codec context, so the failure is recoverable at sample
+    granularity: map it onto the decoder's existing ``None``-frame skip path
+    instead of killing the whole iteration. The caught exceptions are kept
+    alive on purpose — releasing a failed decode's traceback frees the
+    errored codec context un-drained, whose teardown at interpreter shutdown
+    can deadlock the process in ``dav1d_flush``.
     """
 
     def __init__(self, *, keyframe_interval: int = 30, fps_estimate: float = 30.0, codec: str = "h264") -> None:
