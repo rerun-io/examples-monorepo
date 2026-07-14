@@ -155,20 +155,25 @@ def stride_for(native_fps: float, target_fps: float) -> int:
     return max(1, round(native_fps / target_fps))
 
 
-def nearest_timestamped_path(paths: list[Path], timestamp: float, tolerance_s: float | None) -> Path | None:
+def nearest_timestamped_path(
+    paths: list[Path], timestamp: float, tolerance_s: float | None, timestamps: Float64[ndarray, "n"] | None = None
+) -> Path | None:
     """Find the path nearest an uptime timestamp.
 
     Args:
         paths: Timestamp-sorted paths whose final stem component is seconds.
         timestamp: Query ARKit uptime in seconds.
         tolerance_s: Maximum accepted absolute difference, or None for no gate.
+        timestamps: Precomputed ``path_timestamps(paths)``; parsing thousands of
+            filename stems per query costs ~14% of segment wall time otherwise.
 
     Returns:
         Closest path, or None when there are no paths or the tolerance fails.
     """
     if not paths:
         return None
-    timestamps: Float64[ndarray, "n"] = path_timestamps(paths)
+    if timestamps is None:
+        timestamps = path_timestamps(paths)
     insertion: int = int(np.searchsorted(timestamps, timestamp))
     candidate_indices: list[int] = [index for index in (insertion - 1, insertion) if 0 <= index < len(paths)]
     nearest_index: int = min(candidate_indices, key=lambda index: abs(float(timestamps[index]) - timestamp))
@@ -404,6 +409,8 @@ def process_segment_raw(
     log_s: float = 0.0
     inferred_frames: int = 0
     skipped_frames: int = 0
+    lowres_depth_times: Float64[ndarray, "d"] = path_timestamps(lowres_depth_paths)
+    confidence_times: Float64[ndarray, "c"] = path_timestamps(confidence_paths)
 
     for chunk in tqdm(chunks, desc=f"PromptDA raw {segment_id}", unit="batch"):
         decode_started: float = time.perf_counter()
@@ -415,8 +422,8 @@ def process_segment_raw(
         confidence_arrays: list[UInt8[ndarray, "192 256"]] = []
         for row, frame_index in enumerate(chunk):
             uptime: float = float(wide_source_times[frame_index])
-            depth_path: Path | None = nearest_timestamped_path(lowres_depth_paths, uptime, PAIRING_TOLERANCE_S)
-            confidence_path: Path | None = nearest_timestamped_path(confidence_paths, uptime, PAIRING_TOLERANCE_S)
+            depth_path: Path | None = nearest_timestamped_path(lowres_depth_paths, uptime, PAIRING_TOLERANCE_S, timestamps=lowres_depth_times)
+            confidence_path: Path | None = nearest_timestamped_path(confidence_paths, uptime, PAIRING_TOLERANCE_S, timestamps=confidence_times)
             if depth_path is None or confidence_path is None:
                 skipped_frames += 1
                 continue
