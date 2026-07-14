@@ -593,6 +593,8 @@ imagecodecs = ">=2024.9.22"
 trimesh = "*"
 pillow = "*"
 av = ">=18"
+# The raw-data variant decodes the ARKitScenes wide .mov directly.
+torchcodec = "*"
 # ffmpeg builds <902 link libjxl 0.11 without a run-export pin, so they
 # dlopen-fail beside the env's libjxl 0.12. Build 902+ links 0.12.
 ffmpeg = { version = ">=8.1", build-number = ">=902" }
@@ -606,6 +608,12 @@ cmd = "python tools/prompt_da_arkitscenes.py"
 cwd = "packages/prompt-da"
 env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
 description = "Run PromptDA over registered ARKitScenes segments and register the promptda layer (needs arkitscenes-download-serve running)"
+
+[feature.prompt-da-catalog.tasks.prompt-da-arkitscenes-raw]
+cmd = "python tools/prompt_da_arkitscenes_raw.py"
+cwd = "packages/prompt-da"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Run PromptDA over raw ARKitScenes data (torchcodec .mov decode) and register the promptda_raw layer (needs arkitscenes-download-serve running)"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # wilor-nano
