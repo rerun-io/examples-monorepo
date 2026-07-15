@@ -8,7 +8,34 @@ import rerun.blueprint as rrb
 from jaxtyping import Float64
 from simplecv.rerun_log_utils import orbit_eye_position
 
-from arkitscenes_download.ingest.paths import IMU_ACCEL, IMU_GYRO, PINHOLE_ULTRAWIDE, PINHOLE_WIDE, PINHOLE_WIDE_LOWRES, WORLD
+from arkitscenes_download.ingest.paths import (
+    DEPTH,
+    DEPTH_GT,
+    DEPTH_PROMPTDA,
+    GT_MESH,
+    IMU_ACCEL,
+    IMU_GYRO,
+    PINHOLE_ULTRAWIDE,
+    PINHOLE_WIDE,
+    PINHOLE_WIDE_LOWRES,
+    PROMPTDA_MESH,
+    WORLD,
+)
+
+# TODO(rerun#upstream): remove once the viewer auto-ranges encoded depth from the
+# decoded values instead of the PNG bit depth (broken in 0.34.1, no issue filed yet).
+# Delete this constant, the per-view overrides below, and the `depth_range=` kwargs
+# at every EncodedDepthImage logging site — each is marked with a TODO pointing here
+# (ingest/cli.py, prompt_da_arkitscenes.py, prompt_da_arkitscenes_raw.py).
+DEPTH_RANGE_MM: tuple[float, float] = (0.0, 4000.0)
+"""Colormap range for the depth views, in native mm units.
+
+Without it the viewer guesses the range from the PNG bit depth (0-65535 for
+uint16), squashing real indoor depths into the bottom of the colormap — a
+near-flat dark purple. Sampled data: lowres ARKit depth is mostly <=4 m
+(rarely up to ~5 m), GT laser depth <=3.5 m; pixels beyond clamp to the
+colormap max, which stays readable.
+"""
 
 FIT_DISTANCE_FACTOR: float = 2.2
 """Eye distance per bounding-sphere radius that keeps the whole mesh in frame (tuned visually)."""
@@ -45,7 +72,7 @@ def _imu_axis() -> rrb.archetypes.TimeAxis:
     return rrb.archetypes.TimeAxis(view_range=window)
 
 
-def make_blueprint(portrait: bool = False, framing: MeshFraming | None = None) -> rrb.Blueprint:
+def make_blueprint(portrait: bool = False, framing: MeshFraming | None = None, include_promptda: bool = False) -> rrb.Blueprint:
     """Build the multi-camera, depth, and IMU layout.
 
     The layout is identical for both orientations; only the column widths
@@ -53,21 +80,54 @@ def make_blueprint(portrait: bool = False, framing: MeshFraming | None = None) -
     takes a wider share of the row. When the GT mesh framing is provided
     (per-sequence embedded blueprints), the 3D eye orbits the mesh center
     with the whole mesh in frame; dataset-default blueprints omit it.
+
+    With ``include_promptda`` the depth tabs gain an active "depth PromptDA"
+    tab and the 3D area becomes tabs: the stock "world" plus a
+    "world PromptDA" that swaps the ARKit GT mesh (and the other depth
+    backprojections) for the PromptDA depth + TSDF-fused mesh.
     """
+    world_view = rrb.Spatial3DView(name="world", origin=f"/{WORLD}", eye_controls=_eye_controls(framing))
+    world_area: rrb.Spatial3DView | rrb.Tabs = world_view
+    depth_range = rr.EncodedDepthImage.from_fields(depth_range=DEPTH_RANGE_MM)
+    depth_tabs = [
+        rrb.Spatial2DView(name="depth ARKit", origin=PINHOLE_WIDE_LOWRES, contents=["$origin/depth"], overrides={f"/{DEPTH}": depth_range}),
+        rrb.Spatial2DView(name="depth GT (laser)", origin=PINHOLE_WIDE, contents=["$origin/depth_gt"], overrides={f"/{DEPTH_GT}": depth_range}),
+    ]
+    active_depth_tab: int = 0
+    if include_promptda:
+        world_view = rrb.Spatial3DView(
+            name="world",
+            origin=f"/{WORLD}",
+            contents=["$origin/**", f"- /{PROMPTDA_MESH}/**", f"- /{DEPTH_PROMPTDA}/**"],
+            eye_controls=_eye_controls(framing),
+        )
+        depth_tabs.append(
+            rrb.Spatial2DView(
+                name="depth PromptDA", origin=PINHOLE_WIDE, contents=["$origin/depth_promptda"], overrides={f"/{DEPTH_PROMPTDA}": depth_range}
+            )
+        )
+        active_depth_tab = len(depth_tabs) - 1
+        world_area = rrb.Tabs(
+            world_view,
+            rrb.Spatial3DView(
+                name="world PromptDA",
+                origin=f"/{WORLD}",
+                contents=["$origin/**", f"- /{GT_MESH}/**", f"- /{DEPTH_GT}/**", f"- /{PINHOLE_WIDE_LOWRES}/**"],
+                eye_controls=_eye_controls(framing),
+            ),
+            active_tab=0,
+        )
     column_shares: list[float] = [2.6, 1.0, 1.0] if portrait else [2.0, 1.0, 1.0]
     return rrb.Blueprint(
         rrb.Vertical(
             rrb.Horizontal(
-                rrb.Spatial3DView(name="world", origin=f"/{WORLD}", eye_controls=_eye_controls(framing)),
+                world_area,
                 rrb.Vertical(
                     rrb.Spatial2DView(name="wide", origin=PINHOLE_WIDE, contents=["$origin/video", f"/{WORLD}/gt/boxes/**"]),
                     rrb.Spatial2DView(name="ultrawide", origin=PINHOLE_ULTRAWIDE, contents=["$origin/video", f"/{WORLD}/gt/boxes/**"]),
                 ),
                 rrb.Vertical(
-                    rrb.Tabs(
-                        rrb.Spatial2DView(name="depth ARKit", origin=PINHOLE_WIDE_LOWRES, contents=["$origin/depth"]),
-                        rrb.Spatial2DView(name="depth GT (laser)", origin=PINHOLE_WIDE, contents=["$origin/depth_gt"]),
-                    ),
+                    rrb.Tabs(*depth_tabs, active_tab=active_depth_tab),
                     rrb.Spatial2DView(name="confidence", origin=PINHOLE_WIDE_LOWRES, contents=["$origin/confidence"]),
                 ),
                 column_shares=column_shares,

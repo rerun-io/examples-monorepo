@@ -56,9 +56,14 @@ xorg-xorgproto = "*"
 # torch to osx-arm64 so Linux envs (which use pytorch-gpu) are untouched.
 [feature.common.target.osx-arm64.dependencies]
 pytorch-cpu = "*"
+# rerun-sdk's dataloader extra requires torchvision; PyPI has no torchvision
+# wheel matching the conda-pinned torch on macos-13, so conda provides it.
+torchvision = "*"
 
 [feature.common.pypi-dependencies]
-rerun-sdk = "==0.34.1"
+# Keep catalog queries ambient without pulling the PyTorch dataloader stack
+# into common environments that otherwise have no torch dependency.
+rerun-sdk = { version = "==0.34.1", extras = ["datafusion"] }
 gradio = "==6.13.0"
 gradio-rerun = "==0.34.1"
 simplecv = { path = "packages/simplecv", editable = true }
@@ -574,6 +579,41 @@ cmd = "gradio tools/gradio_app.py"
 depends-on = ["_prompt-da-download-polycam-example"]
 cwd = "packages/prompt-da"
 description = "Run the gradio app in dev mode"
+
+# prompt-da-catalog: PromptDA over a registered ARKitScenes catalog dataset.
+# Composes the prompt-da model stack with the arkitscenes-download package
+# (entity paths, blueprint, depth PNG encoder) and the Rerun dataloader extra.
+# linux-64 only (cuda + prompt-da are).
+[feature.prompt-da-catalog]
+platforms = ["linux-64"]
+
+[feature.prompt-da-catalog.dependencies]
+imagecodecs = ">=2024.9.22"
+# arkitscenes_download.ingest imports these at package load.
+trimesh = "*"
+pillow = "*"
+av = ">=18"
+# The raw-data variant decodes the ARKitScenes wide .mov directly.
+torchcodec = "*"
+# ffmpeg builds <902 link libjxl 0.11 without a run-export pin, so they
+# dlopen-fail beside the env's libjxl 0.12. Build 902+ links 0.12.
+ffmpeg = { version = ">=8.1", build-number = ">=902" }
+
+[feature.prompt-da-catalog.pypi-dependencies]
+arkitscenes-download = { path = "packages/arkitscenes-download", editable = true }
+rerun-sdk = { version = "==0.34.1", extras = ["datafusion", "dataloader"] }
+
+[feature.prompt-da-catalog.tasks.prompt-da-arkitscenes]
+cmd = "python tools/prompt_da_arkitscenes.py"
+cwd = "packages/prompt-da"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Run PromptDA over registered ARKitScenes segments and register the promptda layer (needs arkitscenes-download-serve running)"
+
+[feature.prompt-da-catalog.tasks.prompt-da-arkitscenes-raw]
+cmd = "python tools/prompt_da_arkitscenes_raw.py"
+cwd = "packages/prompt-da"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Run PromptDA over raw ARKitScenes data (torchcodec .mov decode) and register the promptda_raw layer (needs arkitscenes-download-serve running)"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # wilor-nano
@@ -2242,6 +2282,19 @@ prompt-da-dev = { features = [
     "common",
     "cuda",
     "prompt-da",
+    "dev",
+], solve-group = "prompt-da", no-default-feature = true }
+prompt-da-catalog = { features = [
+    "common",
+    "cuda",
+    "prompt-da",
+    "prompt-da-catalog",
+], solve-group = "prompt-da", no-default-feature = true }
+prompt-da-catalog-dev = { features = [
+    "common",
+    "cuda",
+    "prompt-da",
+    "prompt-da-catalog",
     "dev",
 ], solve-group = "prompt-da", no-default-feature = true }
 wilor-nano = { features = [

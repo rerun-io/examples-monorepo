@@ -36,4 +36,5 @@ exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*"]
 sort_by_size = true
 min_confidence = 60
 # is_in_threedod: metadata.csv row field, parsed for schema completeness
-ignore_names = ["is_in_threedod"]
+# DEPTH_PROMPTDA / PROMPTDA_MESH: entity paths consumed by packages/prompt-da
+ignore_names = ["is_in_threedod", "DEPTH_PROMPTDA", "PROMPTDA_MESH"]

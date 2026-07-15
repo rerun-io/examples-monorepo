@@ -35,6 +35,49 @@ MAX_DRIFT_SECONDS_PER_SECOND: float = 5e-6
 MAX_ULTRAWIDE_AGREEMENT_SECONDS: float = 0.002
 MAX_DATASET_CAMERA_PHASE_SECONDS: float = 0.11
 CLOCK_ACCEPTANCE_FRACTION: float = 0.99
+MAX_FIRST_SAMPLE_CLAMP_SECONDS: float = 0.25
+
+
+def shared_epoch(
+    wide_source_times: Float64[np.ndarray, "n"], ultrawide_source_times: Float64[np.ndarray, "m"]
+) -> tuple[float, int, int]:
+    """Locate the first instant BOTH cameras have a frame.
+
+    Every consumer of a sequence (ingest and the raw PromptDA tool) must agree
+    on this epoch, or their layers drift apart on the shared timeline.
+
+    Returns:
+        The epoch in uptime seconds, plus the count of pre-epoch leading frames
+        to drop from the wide and ultrawide streams respectively.
+    """
+    epoch: float = max(float(wide_source_times[0]), float(ultrawide_source_times[0]))
+    wide_drop: int = int(np.count_nonzero(wide_source_times < epoch))
+    ultrawide_drop: int = int(np.count_nonzero(ultrawide_source_times < epoch))
+    return epoch, wide_drop, ultrawide_drop
+
+
+def clamped_to_epoch(timestamps: Float64[np.ndarray, "n"], epoch: float) -> Float64[np.ndarray, "n"]:
+    """Snap a stream's first post-epoch sample onto the epoch itself.
+
+    Different sensors tick at different phases, so the first sample of a
+    stream lands up to one sample period after t=0; snapping it back makes
+    every view populated at the very start of the timeline. Streams starting
+    genuinely late are left honest.
+    """
+    if len(timestamps) == 0 or timestamps[0] - epoch >= MAX_FIRST_SAMPLE_CLAMP_SECONDS:
+        return timestamps
+    clamped: Float64[np.ndarray, "n"] = timestamps.copy()
+    clamped[0] = epoch
+    return clamped
+
+
+def nearest_index(timestamps: Float64[np.ndarray, "n"], timestamp: float) -> int:
+    """Return the index of the sorted timestamp nearest to a query timestamp."""
+    if len(timestamps) == 0:
+        raise ValueError("cannot select from an empty timestamp sequence")
+    insertion: int = int(np.searchsorted(timestamps, timestamp))
+    candidates: list[int] = [index for index in (insertion - 1, insertion) if 0 <= index < len(timestamps)]
+    return min(candidates, key=lambda index: abs(float(timestamps[index]) - timestamp))
 
 
 def timestamp_from_path(path: Path) -> float:

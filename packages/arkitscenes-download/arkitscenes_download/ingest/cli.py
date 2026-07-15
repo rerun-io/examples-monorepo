@@ -25,9 +25,16 @@ from rich.progress import Progress, TaskID
 from scipy.spatial.transform import Rotation
 from simplecv.rerun_custom_types import CameraDistortion as RerunCameraDistortion
 
-from arkitscenes_download.ingest.blueprint import make_blueprint
-from arkitscenes_download.ingest.clock import CLOCK_ACCEPTANCE_FRACTION, ClockAlignment, path_timestamps, recover_clock_from_packets
-from arkitscenes_download.ingest.depth import encode_depth_png, sorted_timestamped_paths
+from arkitscenes_download.ingest.blueprint import DEPTH_RANGE_MM, make_blueprint
+from arkitscenes_download.ingest.clock import (
+    CLOCK_ACCEPTANCE_FRACTION,
+    ClockAlignment,
+    clamped_to_epoch,
+    path_timestamps,
+    recover_clock_from_packets,
+    shared_epoch,
+)
+from arkitscenes_download.ingest.depth import ArkitDepthConfidence, encode_depth_png, sorted_timestamped_paths
 from arkitscenes_download.ingest.gt import GroundTruthSummary, log_ground_truth
 from arkitscenes_download.ingest.imu import ImuSamples, decode_imu
 from arkitscenes_download.ingest.layers import LAYERS, LAYERS_BY_NAME, Layer
@@ -148,28 +155,10 @@ def _send_columns(recording: rr.RecordingStream, path: str, timestamps: np.ndarr
     rr.send_columns(path, indexes=[rr.TimeColumn(TIMELINE, duration=timestamps - epoch)], columns=columns, recording=recording)
 
 
-MAX_FIRST_SAMPLE_CLAMP_SECONDS: float = 0.25
-
-
-def _clamped_to_epoch(timestamps: np.ndarray, epoch: float) -> np.ndarray:
-    """Snap a stream's first post-epoch sample onto the epoch itself.
-
-    Different sensors tick at different phases, so the first sample of a
-    stream lands up to one sample period after t=0; snapping it back makes
-    every view populated at the very start of the timeline. Streams starting
-    genuinely late are left honest.
-    """
-    if len(timestamps) == 0 or timestamps[0] - epoch >= MAX_FIRST_SAMPLE_CLAMP_SECONDS:
-        return timestamps
-    clamped: np.ndarray = timestamps.copy()
-    clamped[0] = epoch
-    return clamped
-
-
 def _log_intrinsics(recording: rr.RecordingStream, path: str, intrinsics: Intrinsics, resolution: tuple[int, int], epoch: float) -> None:
     """Log timestamped camera calibration from the epoch onward."""
     keep: np.ndarray = intrinsics.timestamps >= epoch
-    timestamps: np.ndarray = _clamped_to_epoch(intrinsics.timestamps[keep], epoch)
+    timestamps: np.ndarray = clamped_to_epoch(intrinsics.timestamps[keep], epoch)
     resolutions: list[tuple[int, int]] = [resolution] * len(timestamps)
     _send_columns(recording, path, timestamps, rr.Pinhole.columns(image_from_camera=intrinsics.matrices[keep], resolution=resolutions), epoch)
 
@@ -186,7 +175,7 @@ def _log_video(recording: rr.RecordingStream, path: str, video: VideoSamples, cl
             for samples in iter_video_samples(video):
                 aligned: np.ndarray = samples.timestamps + clock_offset
                 if first_batch:
-                    aligned = _clamped_to_epoch(aligned, epoch)
+                    aligned = clamped_to_epoch(aligned, epoch)
                     first_batch = False
                 samples = VideoPacketSamples(aligned, samples.payloads, samples.is_keyframes)
                 if len(samples.timestamps) > 1 and not np.all(np.diff(samples.timestamps) > 0.0):
@@ -238,7 +227,7 @@ def _log_baked_columns(
     kept_paths: list[Path] = [asset for asset, timestamp in zip(paths, all_timestamps, strict=True) if timestamp >= epoch]
     if not kept_paths:
         return
-    timestamps: np.ndarray = _clamped_to_epoch(all_timestamps[all_timestamps >= epoch], epoch)
+    timestamps: np.ndarray = clamped_to_epoch(all_timestamps[all_timestamps >= epoch], epoch)
     with Progress(console=CONSOLE, transient=True) as progress:
         task_id: TaskID = progress.add_task(description, total=len(kept_paths))
         for start in range(0, len(kept_paths), BATCH_SIZE):
@@ -254,7 +243,10 @@ def _log_depth(recording: rr.RecordingStream, path: str, paths: list[Path], quar
 
     def make_columns(values: list[object]) -> rr.ComponentColumnList:
         blobs: list[bytes] = [value for value in values if isinstance(value, bytes)]
-        return rr.EncodedDepthImage.columns(blob=blobs, media_type=["image/png"] * len(blobs), meter=[1000.0] * len(blobs))
+        # TODO(rerun#upstream): drop depth_range once the viewer auto-ranges encoded depth (see DEPTH_RANGE_MM in ingest/blueprint.py).
+        return rr.EncodedDepthImage.columns(
+            blob=blobs, media_type=["image/png"] * len(blobs), meter=[1000.0] * len(blobs), depth_range=[DEPTH_RANGE_MM] * len(blobs)
+        )
 
     _log_baked_columns(recording, path, paths, quarter_turns, pool, description, _encode_depth_asset, make_columns, epoch)
 
@@ -266,9 +258,9 @@ def _log_confidence(recording: rr.RecordingStream, paths: list[Path], quarter_tu
         path,
         rr.AnnotationContext(
             [
-                rr.AnnotationInfo(id=0, label="low", color=(255, 0, 0)),
-                rr.AnnotationInfo(id=1, label="medium", color=(255, 255, 0)),
-                rr.AnnotationInfo(id=2, label="high", color=(0, 255, 0)),
+                rr.AnnotationInfo(id=ArkitDepthConfidence.LOW, label="low", color=(255, 0, 0)),
+                rr.AnnotationInfo(id=ArkitDepthConfidence.MEDIUM, label="medium", color=(255, 255, 0)),
+                rr.AnnotationInfo(id=ArkitDepthConfidence.HIGH, label="high", color=(0, 255, 0)),
             ]
         ),
         static=True,
@@ -429,9 +421,7 @@ def ingest_sequence(config: Config) -> Path:
     # its pre-epoch samples so nothing precedes the first visible frame.
     wide_source_times: np.ndarray = track_packet_times(mov_path, 0) + alignment.offset_seconds
     ultrawide_source_times: np.ndarray = track_packet_times(mov_path, 2) + alignment.ultrawide_offset_seconds
-    epoch: float = max(float(wide_source_times[0]), float(ultrawide_source_times[0]))
-    wide_drop: int = int(np.count_nonzero(wide_source_times < epoch))
-    ultrawide_drop: int = int(np.count_nonzero(ultrawide_source_times < epoch))
+    epoch, wide_drop, ultrawide_drop = shared_epoch(wide_source_times, ultrawide_source_times)
     portrait: bool = wide_resolution[0] < wide_resolution[1]
     properties.update(
         {
