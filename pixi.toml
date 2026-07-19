@@ -443,7 +443,7 @@ description = "Run relative depth estimation on example image"
 cmd = "python tools/demos/multiview_depth.py --image-dir data/examples/multiview/car_landscape_12"
 depends-on = ["_monoprior-download-multiview"]
 cwd = "packages/monoprior"
-description = "Run VGGT multiview depth on example images"
+description = "Run VGGT or G3T multiview depth on example images"
 
 [feature.monoprior.tasks.monoprior-multiview-calibration]
 cmd = "python tools/demos/multiview_calibration.py --image-dir data/examples/multiview/car_landscape_12"

@@ -1,7 +1,6 @@
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from timeit import default_timer as timer
 from typing import Any, Literal, TypedDict
 
 import cv2
@@ -11,15 +10,9 @@ from einops import rearrange
 from jaxtyping import Bool, Float32, UInt8
 from numpy import ndarray
 from PIL import Image
-from serde import field as serde_field
-from serde import from_dict, serde
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters, rescale_intri
 from torch import Tensor
 from torchvision import transforms as TF
-from vggt.models.vggt import VGGT
-from vggt.utils.pose_enc import pose_encoding_to_extri_intri
-
-from monopriors.depth_utils import multidepth_to_points
 
 
 @contextmanager
@@ -45,34 +38,32 @@ class PreprocessingMetadata(TypedDict):
     new_size: tuple[int, int]  # (width, height) after resizing
 
 
-@serde(deny_unknown_fields=True)
-class VGGTPredictions:
-    pose_enc: UInt8[ndarray, "*batch num_cams 9"]
-    depth: Float32[ndarray, "*batch num_cams H W 1"]
-    depth_conf: Float32[ndarray, "*batch num_cams H W"]
-    world_points: Float32[ndarray, "*batch num_cams H W 3"]
-    world_points_conf: Float32[ndarray, "*batch num_cams H W"]
-    images: Float32[ndarray, "*batch num_cams 3 H W"]
-    intrinsic: Float32[ndarray, "*batch num_cams 3 3"]
-    cam_T_world_b34: Float32[ndarray, "*batch num_cams 3 4"] = serde_field(rename="extrinsic")
+@dataclass(slots=True)
+class MultiviewModelPredictions:
+    """Minimal model outputs consumed by Monopriors post-processing."""
 
-    def remove_batch_dim_if_one(self) -> "VGGTPredictions":
+    depth: Float32[ndarray, "*batch num_cams H W 1"]
+    """Per-camera depth maps."""
+    depth_conf: Float32[ndarray, "*batch num_cams H W"]
+    """Per-pixel depth confidence."""
+    intrinsic: Float32[ndarray, "*batch num_cams 3 3"]
+    """Per-camera pinhole intrinsics."""
+    cam_T_world_b34: Float32[ndarray, "*batch num_cams 3 4"]
+    """World-to-camera extrinsics."""
+
+    def remove_batch_dim_if_one(self) -> "MultiviewModelPredictions":
         """
         Removes the batch dimension from all arrays if batch size is 1.
 
         Returns:
-            VGGTPredictions: A new instance with batch dimension removed if batch=1
+            A new instance with the singleton batch dimension removed.
         """
-        if self.pose_enc.shape[0] != 1:
+        if self.depth.shape[0] != 1:
             return self
 
-        result = VGGTPredictions(
-            pose_enc=self.pose_enc.squeeze(0),
+        result = MultiviewModelPredictions(
             depth=self.depth.squeeze(0),
             depth_conf=self.depth_conf.squeeze(0),
-            world_points=self.world_points.squeeze(0),
-            world_points_conf=self.world_points_conf.squeeze(0),
-            images=self.images.squeeze(0),
             cam_T_world_b34=self.cam_T_world_b34.squeeze(0),
             intrinsic=self.intrinsic.squeeze(0),
         )
@@ -352,7 +343,7 @@ class MultiviewPred:
 
 
 def generate_multiview_pred(
-    pred_class: VGGTPredictions,
+    pred_class: MultiviewModelPredictions,
     img_tensors: Float32[Tensor, "num_img 3 resized_h resized_w"],
     rgb_list: list[UInt8[ndarray, "original_h original_w 3"]],
     metadata_list: list[PreprocessingMetadata] | None = None,
@@ -360,19 +351,7 @@ def generate_multiview_pred(
     pred_class = pred_class.remove_batch_dim_if_one()
     assert len(pred_class.cam_T_world_b34.shape) == 3, "Currently batch size of 1 is only supported"
 
-    # Generate world points from depth map, this is usually more accurate than the world points from pose encoding
     depth_maps: Float32[ndarray, "num_cams resized_h resized_w 1"] = pred_class.depth
-    # Convert batch of (3x4) cam_T_world matrices to homogeneous (4x4)
-    cam_T_world_b34: Float32[ndarray, "num_cams 3 4"] = pred_class.cam_T_world_b34.astype(np.float32)
-    num_cams = cam_T_world_b34.shape[0]
-    # Create bottom homogeneous row [0,0,0,1] for each camera
-    bottom_row: Float32[ndarray, "num_cams 1 4"] = np.tile(np.array([[0, 0, 0, 1]], dtype=np.float32), (num_cams, 1, 1))
-    # multidepth_to_points requires world_T_cam not cam_T_world
-    cam_T_world_b44: Float32[ndarray, "num_cams 4 4"] = np.concatenate([cam_T_world_b34, bottom_row], axis=1)
-    world_T_cam_b44: Float32[ndarray, "num_cams 4 4"] = np.linalg.inv(cam_T_world_b44)
-    world_points: Float32[ndarray, "b h w 3"] = multidepth_to_points(
-        depth_maps=depth_maps, world_T_cam_batch=world_T_cam_b44, K_b33=pred_class.intrinsic
-    )
 
     # Get colors from original images and reshape them to match points
     processed_imgs: Float32[ndarray, "num_cams 3 resized_h resized_w"] = img_tensors.numpy(force=True)
@@ -385,14 +364,12 @@ def generate_multiview_pred(
     # Process each image's data first - remove padding if metadata is available
     if metadata_list:
         unpadded_depth_maps = []
-        unpadded_world_points = []
         unpadded_processed_imgs = []
         unpadded_depth_confs = []
 
         for i in range(len(processed_imgs)):
             # Remove padding from depths, world points, processed images, and confidence maps
             unpadded_depth_maps.append(remove_padding_from_prediction(depth_maps[i], metadata_list[i]))
-            unpadded_world_points.append(remove_padding_from_prediction(world_points[i], metadata_list[i]))
             unpadded_processed_imgs.append(remove_padding_from_prediction(processed_imgs[i], metadata_list[i]))
             unpadded_depth_confs.append(remove_padding_from_prediction(pred_class.depth_conf[i], metadata_list[i]))
 
@@ -407,7 +384,6 @@ def generate_multiview_pred(
 
         # Replace the padded data with unpadded versions
         depth_maps = np.array(unpadded_depth_maps)
-        world_points = np.array(unpadded_world_points)
         processed_imgs = np.array(unpadded_processed_imgs)
         depth_confs: Float32[ndarray, "num_cams _ _"] = np.array(unpadded_depth_confs)
     else:
@@ -481,75 +457,3 @@ def generate_multiview_pred(
         )
 
     return mv_pred_list
-
-
-class VGGTPredictor:
-    def __init__(
-        self,
-        device: Literal["cpu", "cuda"],
-        preprocessing_mode: Literal["crop", "pad"] = "crop",
-        local_files_only: bool = False,
-    ) -> None:
-        self.device = device
-        self.preprocessing_mode: Literal["crop", "pad"] = preprocessing_mode
-        load_start: float = timer()
-        print("Loading model...")
-        self.model: VGGT | None = VGGT.from_pretrained("facebook/VGGT-1B", local_files_only=local_files_only).to(
-            self.device
-        )
-        print("Model loaded in", timer() - load_start, "seconds")
-        self.dtype: torch.dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
-
-    def __call__(self, rgb_list: list[UInt8[ndarray, "H W 3"]]) -> list[MultiviewPred]:
-        preprocess_results: PreprocessResults = preprocess_images(rgb_list, mode=self.preprocessing_mode)
-        img_tensors: Float32[torch.Tensor, "N 3 H W"] = preprocess_results.images.to(self.device)
-
-        # Run inference
-        print("Running inference...")
-        with torch.no_grad(), amp_autocast(device_type=self.device, dtype=self.dtype):
-            # run model and convert to dataclass for type validaton + easy access
-            if self.model is not None:
-                predictions: dict = self.model(img_tensors)
-            else:
-                raise RuntimeError("Model is not loaded. Please reload the model before inference.")
-
-        # Convert pose encoding to extrinsic and intrinsic matrices
-        print("Converting pose encoding to extrinsic and intrinsic matrices...")
-        extrinsic, intrinsic = pose_encoding_to_extri_intri(predictions["pose_enc"], img_tensors.shape[-2:])
-        predictions["extrinsic"] = extrinsic
-        predictions["intrinsic"] = intrinsic
-
-        # Tensor -> Numpy conversion
-        for key in predictions:
-            if isinstance(predictions[key], torch.Tensor):
-                predictions[key] = predictions[key].numpy(force=True)
-
-        # Convert from dict to dataclass and performs runtime type validation for easy access
-        pred_class: VGGTPredictions = from_dict(VGGTPredictions, predictions)
-
-        calibration_data: list[MultiviewPred] = generate_multiview_pred(
-            pred_class,
-            img_tensors=img_tensors,
-            rgb_list=rgb_list,
-            metadata_list=preprocess_results.metadata if self.preprocessing_mode == "pad" else None,
-        )
-        return calibration_data
-
-
-def unload_vggt_model(vggt_predictor: VGGTPredictor) -> None:
-    """
-    Unload the VGGT model from memory by moving it to CPU and deleting references.
-    This helps free GPU memory more effectively.
-
-    Args:
-        vggt_predictor: The VGGTPredictor instance containing the model to unload
-    """
-    # Move model to CPU first (helps with GPU memory cleanup)
-    if hasattr(vggt_predictor, "model") and vggt_predictor.model is not None:
-        vggt_predictor.model.cpu()
-        # Remove reference to model
-        vggt_predictor.model = None
-        # Clear GPU cache
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        print("VGGT model unloaded from memory")

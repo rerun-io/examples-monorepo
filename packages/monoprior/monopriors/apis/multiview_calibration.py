@@ -1,7 +1,7 @@
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from timeit import default_timer as timer
-from typing import Annotated, Literal
+from typing import Annotated
 
 import cv2
 import numpy as np
@@ -14,16 +14,19 @@ from einops import rearrange
 from jaxtyping import Bool, Float, Float32, Int, UInt8
 from numpy import ndarray
 from sam3.api.predictor import SAM3Config, SAM3Predictor, SAM3Results
-from simplecv.camera_orient_utils import auto_orient_and_center_poses
-from simplecv.camera_parameters import Extrinsics, PinholeParameters
-from simplecv.ops.conventions import CameraConventions, convert_pose
+from simplecv.camera_parameters import PinholeParameters
 from simplecv.ops.pc_utils import estimate_voxel_size
 from simplecv.ops.tsdf_depth_fuser import Open3DScaleInvariantFuser
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
 from simplecv.video_io import MultiVideoReader
 
 from monopriors.depth_utils import multidepth_to_points
-from monopriors.models.multiview.vggt_model import MultiviewPred, VGGTPredictor
+from monopriors.models.multiview.multiview_predictor import (
+    CenterMethod,
+    MultiviewPredictor,
+    MultiviewPredictorConfig,
+)
+from monopriors.models.multiview.vggt_model import MultiviewPred
 from monopriors.models.relative_depth import (
     RelativeDepthPrediction,
     get_relative_predictor,
@@ -191,49 +194,6 @@ def create_final_view(parent_log_path: Path, num_images: int, show_videos: bool 
     return final_view
 
 
-def orient_mv_pred_list(
-    mv_pred_list: list[MultiviewPred],
-    method: Literal["pca", "up", "vertical", "none"] = "up",
-    center_method: Literal["poses", "focus", "none"] = "none",
-) -> list[MultiviewPred]:
-    extri_list: list[Extrinsics] = [mv_pred.pinhole_param.extrinsics for mv_pred in mv_pred_list]
-
-    world_T_cam_batch: Float[ndarray, "*num_poses 4 4"] = np.stack([extri.world_T_cam for extri in extri_list])
-    assert len(set(mv_pred.pinhole_param.intrinsics.camera_conventions for mv_pred in mv_pred_list)) == 1
-    if mv_pred_list[0].pinhole_param.intrinsics.camera_conventions == "RDF":
-        world_T_cam_gl: Float[ndarray, "*num_poses 4 4"] = convert_pose(
-            world_T_cam_batch, CameraConventions.CV, CameraConventions.GL
-        )
-    else:
-        world_T_cam_gl = world_T_cam_batch
-
-    # NumPy-only orientation (returns (N,3,4))
-    oriented_world_T_cam_3x4_np, _ = auto_orient_and_center_poses(
-        world_T_cam_gl.astype(np.float64), method=method, center_method=center_method
-    )
-
-    N: int = oriented_world_T_cam_3x4_np.shape[0]
-    bottom_row: Float[ndarray, "N 1 4"] = np.broadcast_to(np.array([[0.0, 0.0, 0.0, 1.0]]), (N, 1, 4))
-    oriented_world_T_cam_4x4_np: Float32[ndarray, "N 4 4"] = np.concatenate(
-        [oriented_world_T_cam_3x4_np, bottom_row], axis=1
-    ).astype(np.float32)
-    oriented_world_T_cam_cv: Float[ndarray, "N 4 4"] = convert_pose(
-        oriented_world_T_cam_4x4_np, CameraConventions.GL, CameraConventions.CV
-    )
-    # put back into mv pred list using replace
-    oriented_mv_pred_list: list[MultiviewPred] = []
-    for idx, mv_pred in enumerate(mv_pred_list):
-        oriented_extri: Extrinsics = Extrinsics(
-            world_R_cam=oriented_world_T_cam_cv[idx, :3, :3],
-            world_t_cam=oriented_world_T_cam_cv[idx, :3, 3],
-        )
-        oriented_mv_pred_list.append(
-            replace(mv_pred, pinhole_param=replace(mv_pred.pinhole_param, extrinsics=oriented_extri))
-        )
-
-    return oriented_mv_pred_list
-
-
 def mv_pred_to_pointcloud(
     mv_pred_list: list[MultiviewPred], depth_list: list[Float32[ndarray, "H W"]] | None = None
 ) -> Float32[ndarray, "num_points 3"]:
@@ -272,7 +232,7 @@ def mv_pred_to_pointcloud(
         # simplecv's Intrinsics stores k_matrix as float64; cast to float32 for the pipeline
         K_33: Float[ndarray, "3 3"] | None = mv_pred.pinhole_param.intrinsics.k_matrix
         if K_33 is None:
-            raise ValueError("VGGT prediction must include camera intrinsics.")
+            raise ValueError("Multi-view prediction must include camera intrinsics.")
         K_list.append(K_33.astype(np.float32))
     K_b33: Float32[ndarray, "b 3 3"] = np.stack(K_list, axis=0).astype(np.float32)
 
@@ -336,23 +296,21 @@ class MVCalibResults:
     pcd: o3d.geometry.PointCloud
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class MultiViewCalibratorConfig:
     """Configuration toggles for multi-view calibration pre- and post-processing."""
 
+    predictor_config: MultiviewPredictorConfig = field(default_factory=MultiviewPredictorConfig)
+    """Construction settings for the selected multi-view backend."""
     keep_top_percent: KeepTopPercent = 30.0
-    """Fraction of high-confidence pixels retained after VGGT filtering.
-    Value must be in [1, 100] and controls how aggressively low-confidence pixels
-    are discarded. The calibrator keeps (100 - keep_top_percent)% of pixels;
-    e.g. 75 → keep top 25%, 30 → keep top 70%."""
+    """Percentage of high-confidence pixels retained after multi-view filtering.
+    Value must be in [1, 100]; e.g. 30 keeps the top 30%."""
     refine_depth_maps: bool = True
-    """Run MoGe depth refinement on VGGT predictions before unprojection."""
+    """Run MoGe depth refinement on multi-view depth predictions before unprojection."""
     segment_people: bool = True
     """Enable SAM3 text-conditioned foreground removal for dynamic human actors."""
-    preprocessing_mode: Literal["crop", "pad"] = "pad"
-    """Mode for image preprocessing: 'crop' preserves aspect ratio, 'pad' adds white padding"""
-    device: Literal["cuda", "cpu"] = "cuda"
-    """Execution backend used when instantiating torch-based components."""
+    center_method: CenterMethod = "none"
+    """How to center backend-canonicalized camera poses."""
     verbose: bool = False
     """Emit detailed logging and per-stage timing when True."""
 
@@ -360,26 +318,35 @@ class MultiViewCalibratorConfig:
 class MultiViewCalibrator:
     """Orchestrates multi-view calibration by fusing depth, segmentation, and refinement models.
 
-    The calibrator runs VGGT to infer geometry per view, filters dynamic actors via
+    The calibrator runs the selected multi-view backend to infer geometry, filters dynamic actors via
     SAM3 text-conditioned segmentation, and optionally refines the predicted depths with the
     Moge relative depth model before generating a consolidated Open3D point cloud.
     """
 
-    def __init__(self, parent_log_path: Path, config: MultiViewCalibratorConfig) -> None:
+    def __init__(
+        self,
+        parent_log_path: Path,
+        config: MultiViewCalibratorConfig,
+        *,
+        multiview_predictor: MultiviewPredictor | None = None,
+        seg_predictor: SAM3Predictor | None = None,
+        moge_predictor: BaseRelativePredictor | None = None,
+    ) -> None:
         """Instantiate the detector, segmenter, and depth estimators needed for calibration."""
         self.config = config
-        self.device = config.device
+        self.device = config.predictor_config.device
         self.parent_log_path = parent_log_path
-        if self.config.segment_people:
-            self.seg_predictor: SAM3Predictor = SAM3Predictor(SAM3Config(device=self.device))
-
-        self.vggt_predictor: VGGTPredictor = VGGTPredictor(
-            device=self.device,
-            preprocessing_mode=self.config.preprocessing_mode,
+        if multiview_predictor is not None and multiview_predictor.config != config.predictor_config:
+            raise ValueError("Injected multi-view predictor does not match predictor_config.")
+        self.multiview_predictor: MultiviewPredictor = multiview_predictor or MultiviewPredictor(
+            config.predictor_config
         )
-
-        if self.config.refine_depth_maps:
-            self.moge_predictor: BaseRelativePredictor = get_relative_predictor("MogeV1Predictor")(device="cuda")
+        self.seg_predictor: SAM3Predictor | None = seg_predictor
+        if self.config.segment_people and self.seg_predictor is None:
+            self.seg_predictor = SAM3Predictor(SAM3Config(device=self.device))
+        self.moge_predictor: BaseRelativePredictor | None = moge_predictor
+        if self.config.refine_depth_maps and self.moge_predictor is None:
+            self.moge_predictor = get_relative_predictor("MogeV1Predictor")(device=self.device)
 
     def __call__(
         self,
@@ -391,7 +358,7 @@ class MultiViewCalibrator:
         Delegates to decomposed node APIs:
         1. ``run_multiview_geometry`` — multi-view prediction + orientation + confidence filtering
         2. ``segment_people`` — per-view SAM3 segmentation (looped)
-        3. ``run_depth_alignment`` — per-view MoGe depth → aligned to VGGT frame (looped)
+        3. ``run_depth_alignment`` — per-view MoGe depth → aligned to the multi-view frame (looped)
         4. Point cloud + TSDF fusion
 
         Args:
@@ -410,14 +377,13 @@ class MultiViewCalibrator:
 
         # 1. Multiview geometry: predict + orient + confidence filter
         mv_geo_config: MultiviewGeometryConfig = MultiviewGeometryConfig(
-            preprocessing_mode=self.config.preprocessing_mode,
             keep_top_percent=self.config.keep_top_percent,
-            device=self.config.device,
+            center_method=self.config.center_method,
             verbose=self.config.verbose,
         )
         mv_geo_result: MultiviewGeometryResult = run_multiview_geometry(
             rgb_list=rgb_list,
-            vggt_predictor=self.vggt_predictor,
+            multiview_predictor=self.multiview_predictor,
             config=mv_geo_config,
         )
         mv_pred_list: list[MultiviewPred] = mv_geo_result.mv_pred_list
@@ -425,6 +391,8 @@ class MultiViewCalibrator:
 
         # 2. SAM3 segmentation: per-view person masks
         if self.config.segment_people:
+            if self.seg_predictor is None:
+                raise RuntimeError("Person segmentation was enabled without a SAM3 predictor.")
             segmask_list: list[Bool[np.ndarray, "H W"] | None] = []
             for rgb in rgb_list:
                 people_masks: Bool[ndarray, "H W"] | None = segment_people(
@@ -443,7 +411,7 @@ class MultiViewCalibrator:
                 updated_confidences.append(depth_conf)
         depth_confidences = updated_confidences
 
-        # Build initial point cloud from VGGT depths
+        # Build the initial point cloud from multi-view depths
         pointcloud: Float32[ndarray, "num_points 3"] = mv_pred_to_pointcloud(mv_pred_list)
         rgb_stack: UInt8[ndarray, "num_points 3"] = np.concatenate([
             rearrange(mv_pred.rgb_image, "h w c -> (h w) c") for mv_pred in mv_pred_list
@@ -460,6 +428,8 @@ class MultiViewCalibrator:
         # 3. Optional depth refinement: MoGe + depth alignment per view
         refined_depths_list: list[Float32[ndarray, "H W"]] = []
         if self.config.refine_depth_maps:
+            if self.moge_predictor is None:
+                raise RuntimeError("Depth refinement was enabled without a MoGe predictor.")
             alignment_config: DepthAlignmentConfig = DepthAlignmentConfig(edge_threshold=0.01, scale_only=False)
 
             for idx, mv_pred in enumerate(mv_pred_list):
@@ -473,7 +443,7 @@ class MultiViewCalibrator:
                 K_33: Float32[ndarray, "3 3"] = K_33_raw.astype(np.float32)
                 relative_pred: RelativeDepthPrediction = self.moge_predictor(rgb=mv_pred.rgb_image, K_33=K_33)
 
-                # Align MoGe depth to VGGT's coordinate frame using decomposed alignment node
+                # Align MoGe depth to the multi-view coordinate frame using the decomposed alignment node
                 alignment_result: DepthAlignmentResult = run_depth_alignment(
                     reference_depth=filtered_depth_map,
                     target_depth=relative_pred.depth,
@@ -556,7 +526,7 @@ class MultiViewCalibrator:
 
 @dataclass
 class MVInferenceConfig:
-    """Runtime options for VGGT-based multi-view inference and calibration."""
+    """Runtime options for multi-view inference and calibration."""
 
     rr_config: RerunTyroConfig
     """Rerun logging configuration."""

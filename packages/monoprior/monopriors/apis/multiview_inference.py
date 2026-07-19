@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from timeit import default_timer as timer
 from typing import Literal
@@ -14,16 +14,19 @@ from einops import rearrange
 from jaxtyping import Bool, Float, Float32, UInt8
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
-from simplecv.camera_orient_utils import auto_orient_and_center_poses
 from simplecv.camera_parameters import Extrinsics
-from simplecv.ops.conventions import CameraConventions, convert_pose
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
 from simplecv.video_io import MultiVideoReader
 from tqdm.auto import trange
 
 from monopriors.apis.multiview_calibration import load_rgb_images
 from monopriors.depth_utils import depth_edges_mask, multidepth_to_points
-from monopriors.models.multiview.vggt_model import MultiviewPred, VGGTPredictor, robust_filter_confidences
+from monopriors.models.multiview.multiview_predictor import (
+    CenterMethod,
+    MultiviewPredictor,
+    MultiviewPredictorConfig,
+)
+from monopriors.models.multiview.vggt_model import MultiviewPred, robust_filter_confidences
 from monopriors.models.relative_depth import (
     RelativeDepthPrediction,
     get_relative_predictor,
@@ -265,7 +268,7 @@ def extrinsic_to_colmap_format(mv_pred_list: list[MultiviewPred]) -> tuple[np.nd
 
     for mv_pred in mv_pred_list:
         extrinsic: Extrinsics = mv_pred.pinhole_param.extrinsics
-        # VGGT's extrinsic is camera-to-world (R|t) format
+        # The common prediction contract exposes camera-to-world (R|t).
         R = extrinsic.cam_R_world
         t = extrinsic.cam_t_world
 
@@ -279,49 +282,6 @@ def extrinsic_to_colmap_format(mv_pred_list: list[MultiviewPred]) -> tuple[np.nd
         translations.append(t)
 
     return np.array(quaternions), np.array(translations)
-
-
-def orient_mv_pred_list(
-    mv_pred_list: list[MultiviewPred],
-    method: Literal["pca", "up", "vertical", "none"] = "up",
-    center_method: Literal["poses", "focus", "none"] = "poses",
-) -> list[MultiviewPred]:
-    extri_list: list[Extrinsics] = [mv_pred.pinhole_param.extrinsics for mv_pred in mv_pred_list]
-
-    world_T_cam_batch: Float[ndarray, "*num_poses 4 4"] = np.stack([extri.world_T_cam for extri in extri_list])
-    assert len(set(mv_pred.pinhole_param.intrinsics.camera_conventions for mv_pred in mv_pred_list)) == 1
-    if mv_pred_list[0].pinhole_param.intrinsics.camera_conventions == "RDF":
-        world_T_cam_gl: Float[ndarray, "*num_poses 4 4"] = convert_pose(
-            world_T_cam_batch, CameraConventions.CV, CameraConventions.GL
-        )
-    else:
-        world_T_cam_gl = world_T_cam_batch
-
-    # NumPy-only orientation (returns (N,3,4))
-    oriented_world_T_cam_3x4_np, _ = auto_orient_and_center_poses(
-        world_T_cam_gl.astype(np.float64), method=method, center_method=center_method
-    )
-
-    N: int = oriented_world_T_cam_3x4_np.shape[0]
-    bottom_row: Float[ndarray, "N 1 4"] = np.broadcast_to(np.array([[0.0, 0.0, 0.0, 1.0]]), (N, 1, 4))
-    oriented_world_T_cam_4x4_np: Float32[ndarray, "N 4 4"] = np.concatenate(
-        [oriented_world_T_cam_3x4_np, bottom_row], axis=1
-    ).astype(np.float32)
-    oriented_world_T_cam_cv: Float[ndarray, "N 4 4"] = convert_pose(
-        oriented_world_T_cam_4x4_np, CameraConventions.GL, CameraConventions.CV
-    )
-    # put back into mv pred list using replace
-    oriented_mv_pred_list: list[MultiviewPred] = []
-    for idx, mv_pred in enumerate(mv_pred_list):
-        oriented_extri: Extrinsics = Extrinsics(
-            world_R_cam=oriented_world_T_cam_cv[idx, :3, :3],
-            world_t_cam=oriented_world_T_cam_cv[idx, :3, 3],
-        )
-        oriented_mv_pred_list.append(
-            replace(mv_pred, pinhole_param=replace(mv_pred.pinhole_param, extrinsics=oriented_extri))
-        )
-
-    return oriented_mv_pred_list
 
 
 def estimate_voxel_size(
@@ -427,7 +387,7 @@ def mv_pred_to_pointcloud(
         # simplecv's Intrinsics stores k_matrix as float64; cast to float32 for the pipeline
         K_33: Float[ndarray, "3 3"] | None = mv_pred.pinhole_param.intrinsics.k_matrix
         if K_33 is None:
-            raise ValueError("VGGT prediction must include camera intrinsics.")
+            raise ValueError("Multi-view prediction must include camera intrinsics.")
         K_list.append(K_33.astype(np.float32))
     K_b33: Float32[ndarray, "b 3 3"] = np.stack(K_list, axis=0).astype(np.float32)
     world_points: Float32[ndarray, "b h w 3"] = multidepth_to_points(
@@ -438,8 +398,14 @@ def mv_pred_to_pointcloud(
 
 
 @dataclass
-class VGGTInferenceConfig:
+class MultiviewInferenceConfig:
     rr_config: RerunTyroConfig
+    predictor_config: MultiviewPredictorConfig = field(
+        default_factory=lambda: MultiviewPredictorConfig(device=device, preprocessing_mode="crop")
+    )
+    """Model construction configuration."""
+    center_method: CenterMethod = "poses"
+    """How to center backend-canonicalized poses."""
     image_dir: Path | None = None
     videos_dir: Path | None = None
     timestep: int = 1
@@ -448,13 +414,11 @@ class VGGTInferenceConfig:
     """keep_top_percent: Percentage in [0,100]. Interpreted as the fraction to discard;
         the top (100 - keep_top_percent)% of pixel scores are kept.
         E.g. 75 -> keep top 25%; 30 -> keep top 70%."""
-    preprocessing_mode: Literal["crop", "pad"] = "crop"
-    """Mode for image preprocessing: 'crop' preserves aspect ratio, 'pad' adds white padding"""
     output_dir: Path | None = None
     """Output directory for colmap version. If None, results are not saved."""
 
 
-def run_inference(config: VGGTInferenceConfig) -> None:
+def run_inference(config: MultiviewInferenceConfig) -> None:
     parent_log_path = Path("world")
 
     if config.image_dir is None and config.videos_dir is None:
@@ -491,13 +455,11 @@ def run_inference(config: VGGTInferenceConfig) -> None:
     rr.send_blueprint(blueprint=blueprint)
     rr.log(f"{parent_log_path}", rr.ViewCoordinates.RFU, static=True)
 
-    vggt_predictor = VGGTPredictor(
-        device=device,
-        preprocessing_mode=config.preprocessing_mode,
+    multiview_predictor = MultiviewPredictor(config.predictor_config)
+    mv_pred_list: list[MultiviewPred] = multiview_predictor(
+        rgb_list=rgb_list,
+        center_method=config.center_method,
     )
-    mv_pred_list: list[MultiviewPred] = vggt_predictor(rgb_list=rgb_list)
-
-    mv_pred_list = orient_mv_pred_list(mv_pred_list)
     pointcloud: Float32[ndarray, "num_points 3"] = mv_pred_to_pointcloud(mv_pred_list)
     rgb_stack: UInt8[ndarray, "num_points 3"] = np.concatenate(
         [rearrange(mv_pred.rgb_image, "h w c -> (h w) c") for mv_pred in mv_pred_list]

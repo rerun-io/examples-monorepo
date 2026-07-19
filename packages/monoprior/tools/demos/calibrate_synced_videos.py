@@ -41,7 +41,7 @@ from monopriors.apis.multiview_geometry import (
     run_multiview_geometry,
 )
 from monopriors.models.metric_depth.moge_v2 import MoGeV2MetricPredictor
-from monopriors.models.multiview.vggt_model import VGGTPredictor
+from monopriors.models.multiview.multiview_predictor import MultiviewPredictor, MultiviewPredictorConfig
 
 _VIDEO_EXTS: tuple[str, ...] = (".mp4", ".mov", ".MP4", ".MOV")
 _VIDEO_SUBDIRS: tuple[str, ...] = ("videos_light", "videos", "videos_crf24")
@@ -118,9 +118,13 @@ def main(config: CalibConfig) -> int:
     print(f"loaded synced frame {config.ts_idx}: {len(rgb_list)} views @ {rgb_list[0].shape[1]}x{rgb_list[0].shape[0]}, fps={fps}, frames={frame_count}")
 
     # 1. VGGT rig (up-to-scale).
-    vggt: VGGTPredictor = VGGTPredictor(device=config.device, preprocessing_mode=config.preprocessing_mode)
+    multiview_predictor: MultiviewPredictor = MultiviewPredictor(
+        MultiviewPredictorConfig(device=config.device, preprocessing_mode=config.preprocessing_mode)
+    )
     geo: MultiviewGeometryResult = run_multiview_geometry(
-        rgb_list=rgb_list, vggt_predictor=vggt, config=MultiviewGeometryConfig(preprocessing_mode=config.preprocessing_mode)
+        rgb_list=rgb_list,
+        multiview_predictor=multiview_predictor,
+        config=MultiviewGeometryConfig(),
     )
     mv = geo.mv_pred_list
     k_per: list[Float64[ndarray, "3 3"]] = [np.asarray(p.pinhole_param.intrinsics.k_matrix, dtype=np.float64) for p in mv]
