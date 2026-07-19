@@ -28,7 +28,6 @@ from mv_api.api.catalog_prediction_layer import (
     none_decoded_exo_stream_names,
     prediction_visualization_colors,
     register_prediction_layer,
-    rgb_chw_to_bgr_hwc,
     save_exo_viewer_blueprint,
     select_catalog_segment,
     validate_exo_camera_calibration,
@@ -346,28 +345,6 @@ def test_validate_exo_camera_calibration_fails_when_transform_is_missing() -> No
 
     with pytest.raises(ValueError, match="C10095.*Transform3D:translation"):
         validate_exo_camera_calibration(schema, streams)
-
-
-def test_rgb_chw_to_bgr_hwc_converts_channel_order_and_layout() -> None:
-    rgb_chw: np.ndarray = np.array(
-        [
-            [[1, 2], [3, 4]],
-            [[10, 20], [30, 40]],
-            [[100, 110], [120, 130]],
-        ],
-        dtype=np.uint8,
-    )
-
-    bgr_hwc = rgb_chw_to_bgr_hwc(rgb_chw)
-
-    expected_bgr_hwc: np.ndarray = np.array(
-        [
-            [[100, 10, 1], [110, 20, 2]],
-            [[120, 30, 3], [130, 40, 4]],
-        ],
-        dtype=np.uint8,
-    )
-    np.testing.assert_array_equal(bgr_hwc, expected_bgr_hwc)
 
 
 def test_build_prediction_rrd_path_uses_dataset_sequence_and_layer_name() -> None:

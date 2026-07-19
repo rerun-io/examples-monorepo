@@ -10,6 +10,7 @@ import rerun as rr
 import rerun.blueprint as rrb
 import torch
 import tyro
+from einops import rearrange
 from jaxtyping import Bool, Float, Float32, Int, UInt8
 from monopriors.apis.multiview_calibration import MultiViewCalibrator, MultiViewCalibratorConfig, MVCalibResults
 from numpy import ndarray
@@ -231,15 +232,20 @@ def _dataset_exo_pinhole_params(
     exo_cam_by_name: dict[str, PinholeParameters] = {}
     try:
         exo_cam_list: list[PinholeParameters | None] = exo_sequence.exo_cam_list
+        exo_video_names: list[str] = list(exo_sequence.exo_video_names)
     except AttributeError:
         return None
     for camera in exo_cam_list:
         if isinstance(camera, PinholeParameters):
             exo_cam_by_name[camera.name] = camera
 
+    # The rig layout renames camera entity nodes to cam_<MM>, so stream names
+    # can no longer be parsed from the log paths; the log-path order matches
+    # the stream order, so resolve names positionally.
+    if len(exo_video_names) != len(exo_video_log_paths):
+        return None
     ordered_cameras: list[PinholeParameters] = []
-    for video_log_path in exo_video_log_paths:
-        camera_name: str = video_log_path.parent.parent.name
+    for camera_name in exo_video_names:
         camera: PinholeParameters | None = exo_cam_by_name.get(camera_name)
         if camera is None:
             return None
@@ -255,11 +261,13 @@ def _dataset_ego_pinhole_param_lists(
     """Return dataset-provided ego pinhole trajectories ordered like the logged ego videos, if available."""
     try:
         ego_cam_dict: dict[Any, list[Any]] = cast(dict[Any, list[Any]], ego_sequence.ego_cam_dict)
+        ego_video_names: list[str] = list(ego_sequence.ego_video_names)
     except AttributeError:
         return None
+    if len(ego_video_names) != len(ego_video_log_paths):
+        return None
     ordered_camera_lists: list[list[PinholeParameters]] = []
-    for video_log_path in ego_video_log_paths:
-        camera_name: str = video_log_path.parent.parent.name
+    for camera_name in ego_video_names:
         camera_list_raw: list[Any] | None = ego_cam_dict.get(camera_name)
         if not camera_list_raw:
             return None
@@ -428,6 +436,35 @@ def _extract_wilor_uv(wilor_pred: FinalWilorPred | KeypointResults) -> Float32[n
     return pred_uv
 
 
+def _cam_pinhole_log_path(cam_paths: dict[str, Path] | None, name: str, view_idx: int, *, parent_log_path: Path, side: str) -> Path:
+    """Resolve a camera's pinhole entity path from the rig layout.
+
+    Estimated (calibrator-named) cameras don't share the dataset stream names
+    the rig map is keyed by, but they DO share the stream order, so the lookup
+    is by name first and by view index second. Falls back to the legacy flat
+    ``<world>/<side>/<name>`` layout when no rig map is available, so pre-rig
+    recordings keep working.
+
+    Args:
+        cam_paths: Rig-layout camera node path per stream name (insertion
+            order matches the stream/view order), or ``None``.
+        name: Camera/stream name.
+        view_idx: Camera index in stream order.
+        parent_log_path: World root entity path.
+        side: Legacy side segment (``"exo"`` or ``"ego"``).
+
+    Returns:
+        Entity path of the camera's pinhole node.
+    """
+    if cam_paths is not None:
+        if name in cam_paths:
+            return cam_paths[name] / "pinhole"
+        ordered_paths: list[Path] = list(cam_paths.values())
+        if 0 <= view_idx < len(ordered_paths):
+            return ordered_paths[view_idx] / "pinhole"
+    return parent_log_path / side / name / "pinhole"
+
+
 def predict_kpts3d_from_calibrated_videos(
     *,
     exo_video_readers: MultiVideoReader | TorchCodecMultiVideoReader,
@@ -437,6 +474,7 @@ def predict_kpts3d_from_calibrated_videos(
     shortest_timestamp: Int[ndarray, "num_frames"],
     parent_log_path: Path,
     timeline: str,
+    exo_pinhole_log_paths: list[Path] | None = None,
     max_frames: int | None = None,
     recording: rr.RecordingStream | None = None,
 ) -> list[Float32[ndarray, "n_kpts 4"]]:
@@ -467,15 +505,16 @@ def predict_kpts3d_from_calibrated_videos(
             timestamp_to_frame_index(time_ns=timestamp_ns, frame_timestamps_ns=frame_timestamps)
             for frame_timestamps in exo_frame_timestamps_list
         ]
-        bgr_list: list[UInt8[ndarray, "H W 3"]] = [
-            _read_bgr_frame(reader=video_reader, frame_idx=frame_idx, stream_name=f"exo/{frame_idx}")
-            for video_reader, frame_idx in zip(exo_video_readers.video_readers, frame_indices, strict=True)
-        ]
-
+        # One reader-agnostic call: RGB CHW tensors per view (camera-parallel
+        # NVDEC on torchcodec readers), stacked and viewed NHWC for the tracker.
+        frames_rgb: UInt8[torch.Tensor, "n_views h w 3"] = rearrange(
+            torch.stack(exo_video_readers.get_frames_at(frame_indices)), "views c h w -> views h w c"
+        )
         mv_output = pose_tracker(
-            bgr_list=bgr_list,
+            frames_rgb=frames_rgb,
             pinhole_list=exo_cam_list,
             pred_state=mv_output,
+            pinhole_log_paths=exo_pinhole_log_paths,
             recording=recording,
         )
         xyzc_frame: Float32[ndarray, "n_kpts 4"] = (
@@ -535,7 +574,7 @@ def predict_kpts3d_from_calibrated_videos(
             P=projection_matrices,
         )
         uv_exo: Float32[ndarray, "n_views n_kpts 2"] = uv_exo_stack[0].astype(np.float32, copy=False)
-        for uv_view, exo_cam in zip(uv_exo, exo_cam_list, strict=True):
+        for exo_view_idx, (uv_view, exo_cam) in enumerate(zip(uv_exo, exo_cam_list, strict=True)):
             uv: Float32[ndarray, "n_kpts 2"] = uv_view.astype(np.float32, copy=True)
             confidences_view: Float32[ndarray, "n_kpts"] = vis_scores_3d.astype(np.float32, copy=True)
             masked_points: MaskedPoints2D = _mask_points_outside_intrinsics(
@@ -545,7 +584,11 @@ def predict_kpts3d_from_calibrated_videos(
             )
             uv = masked_points.uv
             confidences_view = masked_points.confidences
-            pinhole_log_path: Path = parent_log_path / "exo" / exo_cam.name / "pinhole"
+            pinhole_log_path: Path = (
+                exo_pinhole_log_paths[exo_view_idx]
+                if exo_pinhole_log_paths is not None
+                else parent_log_path / "exo" / exo_cam.name / "pinhole"
+            )
             confidence_rgb_view_stack: UInt8[ndarray, "1 n_kpts 3"] = confidence_scores_to_rgb(
                 confidences_view[np.newaxis, :, np.newaxis]
             )
@@ -575,6 +618,8 @@ def run_model_backed_pipeline(
     scene_setup_result: SceneSetupResult,
     parent_log_path: Path,
     timeline: str,
+    exo_cam_paths: dict[str, Path] | None = None,
+    ego_cam_paths: dict[str, Path] | None = None,
     recording: rr.RecordingStream | None,
 ) -> None:
     """Run the model-backed calibration and prediction section."""
@@ -606,6 +651,19 @@ def run_model_backed_pipeline(
     ego_sequence: BaseEgoSequence = cast(BaseEgoSequence, ego_sequence_obj)
     exo_mv_reader: MultiVideoReader | TorchCodecMultiVideoReader = exo_sequence.exo_video_readers
     ego_mv_reader: MultiVideoReader | TorchCodecMultiVideoReader = ego_sequence.ego_video_readers
+    if not isinstance(exo_mv_reader, TorchCodecMultiVideoReader):
+        # NVDEC decode is THE exo path — a failure here should be loud, not a
+        # silent 2.4x CPU-decode regression. Only readers without real video
+        # files (test doubles, in-memory sources) keep their own decode.
+        exo_video_paths: list[Path] = list(getattr(exo_mv_reader, "video_paths", []))
+        if exo_video_paths and all(path.exists() for path in exo_video_paths):
+            exo_mv_reader = TorchCodecMultiVideoReader(list(exo_video_paths), device="cuda")
+    exo_resolutions: set[tuple[int, int]] = {(int(reader.height), int(reader.width)) for reader in exo_mv_reader.video_readers}
+    if len(exo_resolutions) > 1:
+        raise ValueError(
+            f"Exo camera streams have mixed resolutions {sorted(exo_resolutions)}; the GPU-batched tracker "
+            "stacks all views into one tensor. Transcode/resize the streams to a shared resolution first."
+        )
 
     ego_camera_names: list[str] = [path.parent.parent.name for path in ego_video_log_paths]
     ego_rgb_indices: list[int] = [
@@ -785,6 +843,18 @@ def run_model_backed_pipeline(
     pose_exo_pinhole_param_list: list[PinholeParameters] = camera_selection.exo_pinhole_param_list
     pose_ego_pinhole_param_lists: list[list[PinholeParameters]] = camera_selection.ego_pinhole_param_lists
 
+    # Resolve every camera's pinhole entity path ONCE (rig-layout name match,
+    # view-index fallback for estimated-camera names, legacy flat layout last);
+    # downstream loggers just index these lists.
+    exo_pinhole_log_paths: list[Path] = [
+        _cam_pinhole_log_path(exo_cam_paths, camera.name, view_idx, parent_log_path=parent_log_path, side="exo")
+        for view_idx, camera in enumerate(pose_exo_pinhole_param_list)
+    ]
+    ego_pinhole_log_paths: list[Path] = [
+        _cam_pinhole_log_path(ego_cam_paths, camera_list[0].name, view_idx, parent_log_path=parent_log_path, side="ego")
+        for view_idx, camera_list in enumerate(pose_ego_pinhole_param_lists)
+    ]
+
     upper_body_filter_idx: Int[ndarray, "upper_body"] = np.array([5, 6, 7, 8, 9, 10], dtype=np.int64)
     wb_upper_body_filter_idx: Int[ndarray, "upper_body_plus"] = np.concatenate(
         [upper_body_filter_idx, FACE_IDX, LEFT_HAND_IDX, RIGHT_HAND_IDX]
@@ -794,6 +864,12 @@ def run_model_backed_pipeline(
         config.tracker_config,
         filter_body_idxes=wb_upper_body_filter_idx,
     )
+    if pose_tracker.num_keypoints != len(COCO_133_IDS):
+        raise ValueError(
+            f"This pipeline's masking/hand-refinement/logging assumes COCO-133 keypoints; tracker mode "
+            f"{config.tracker_config.mode!r} yields {pose_tracker.num_keypoints}. Use mode='wholebody' "
+            "(or inject a COCO-133 pose model)."
+        )
     xyzc_list: list[Float32[ndarray, "n_kpts 4"]] = predict_kpts3d_from_calibrated_videos(
         exo_video_readers=exo_mv_reader,
         exo_cam_list=pose_exo_pinhole_param_list,
@@ -802,6 +878,7 @@ def run_model_backed_pipeline(
         shortest_timestamp=shortest_timestamp,
         parent_log_path=parent_log_path,
         timeline=timeline,
+        exo_pinhole_log_paths=exo_pinhole_log_paths,
         max_frames=config.max_frames,
         recording=recording,
     )
@@ -856,7 +933,7 @@ def run_model_backed_pipeline(
             uv_ego: Float32[ndarray, "n_views n_kpts 2"] = uv_ego_stack[0].astype(np.float32, copy=False)
 
             for view_idx, (uv_view, ego_cam) in enumerate(zip(uv_ego, ego_pose_pinhole_param_list, strict=True)):
-                pinhole_log_path: Path = parent_log_path / "ego" / ego_cam.name / "pinhole"
+                pinhole_log_path: Path = ego_pinhole_log_paths[view_idx]
                 uv: Float32[ndarray, "n_kpts 2"] = uv_view.astype(np.float32, copy=True)
                 projection_matrix: Float32[ndarray, "3 4"] = ego_cam.projection_matrix.astype(np.float32, copy=False)
                 homog_cam: Float32[ndarray, "n_kpts 3"] = np.einsum("ij,nj->ni", projection_matrix, xyz_hom)
