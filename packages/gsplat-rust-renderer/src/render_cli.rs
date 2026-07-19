@@ -20,7 +20,7 @@
 //!   --background 1,1,1
 //! ```
 
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
 use clap::Parser;
@@ -51,8 +51,17 @@ struct Args {
 
     /// Output PNG path (required unless --benchmark; with --benchmark,
     /// optionally saves the last benchmark frame).
-    #[arg(long, required_unless_present = "benchmark")]
+    #[arg(
+        long,
+        required_unless_present_any = ["benchmark", "output_dir"],
+        conflicts_with = "output_dir"
+    )]
     output: Option<PathBuf>,
+
+    /// Render every camera in the transforms JSON into this directory. Output
+    /// paths preserve each frame's relative file path and use a PNG extension.
+    #[arg(long, conflicts_with = "benchmark")]
+    output_dir: Option<PathBuf>,
 
     /// Image width in pixels.
     #[arg(long, default_value_t = 800)]
@@ -76,9 +85,19 @@ struct Args {
 }
 
 /// Composite onto `background` and save as an 8-bit RGB PNG.
-fn save_rgb8_png(output: &RenderOutput, background: [f32; 3], path: &PathBuf) -> anyhow::Result<()> {
+fn save_rgb8_png(
+    output: &RenderOutput,
+    background: [f32; 3],
+    path: &PathBuf,
+) -> anyhow::Result<()> {
     let rgb8: Vec<u8> = output.to_rgb8(background);
-    image::save_buffer(path, &rgb8, output.width, output.height, image::ColorType::Rgb8)?;
+    image::save_buffer(
+        path,
+        &rgb8,
+        output.width,
+        output.height,
+        image::ColorType::Rgb8,
+    )?;
     Ok(())
 }
 
@@ -106,7 +125,19 @@ fn main() -> anyhow::Result<()> {
         load_start.elapsed().as_secs_f64() * 1000.0
     );
 
-    let camera = nerf_camera::load_camera(&args.camera, args.frame, args.width, args.height)?;
+    let all_frames = args
+        .output_dir
+        .as_ref()
+        .map(|_| nerf_camera::load_cameras(&args.camera, args.width, args.height))
+        .transpose()?;
+    let camera = if let Some(frames) = &all_frames {
+        frames
+            .first()
+            .map(|frame| frame.camera.clone())
+            .ok_or_else(|| anyhow::anyhow!("Camera file contains no frames"))?
+    } else {
+        nerf_camera::load_camera(&args.camera, args.frame, args.width, args.height)?
+    };
     eprintln!(
         "Camera: frame {}, {}x{}, position {:?}",
         args.frame, args.width, args.height, camera.world_position
@@ -136,7 +167,39 @@ fn main() -> anyhow::Result<()> {
         resources_start.elapsed().as_secs_f64() * 1000.0
     );
 
-    if args.benchmark {
+    if let (Some(output_dir), Some(frames)) = (&args.output_dir, &all_frames) {
+        std::fs::create_dir_all(output_dir)?;
+        let render_start = Instant::now();
+        for (index, frame) in frames.iter().enumerate() {
+            let relative_path = Path::new(&frame.file_path);
+            if relative_path.components().any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            }) {
+                anyhow::bail!(
+                    "Frame {index} has unsafe non-relative file path {:?}",
+                    frame.file_path
+                );
+            }
+            let output_path = output_dir.join(relative_path).with_extension("png");
+            if let Some(parent) = output_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let output = resources.render(&ctx, &renderer, &frame.camera);
+            save_rgb8_png(&output, background, &output_path)?;
+            if (index + 1) % 25 == 0 || index + 1 == frames.len() {
+                eprintln!("Rendered {}/{} test frames", index + 1, frames.len());
+            }
+        }
+        eprintln!(
+            "Saved {} frames under {:?} in {:.1}s",
+            frames.len(),
+            output_dir,
+            render_start.elapsed().as_secs_f64()
+        );
+    } else if args.benchmark {
         // Warmup frame (pipeline compilation happens here).
         eprintln!("Warming up (compiling GPU pipelines)...");
         let warmup_start: Instant = Instant::now();
@@ -186,4 +249,26 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_frames_cli_accepts_output_directory_without_single_output() {
+        let args = Args::try_parse_from([
+            "gsplat-render",
+            "--ply",
+            "scene.ply",
+            "--camera",
+            "transforms_test.json",
+            "--output-dir",
+            "renders",
+        ])
+        .expect("all-frame CLI should accept an output directory");
+
+        assert_eq!(args.output_dir, Some(PathBuf::from("renders")));
+        assert!(args.output.is_none());
+    }
 }

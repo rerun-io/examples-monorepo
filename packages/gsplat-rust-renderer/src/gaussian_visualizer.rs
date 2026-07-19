@@ -5,9 +5,9 @@
 //! This module sits between Rerun's data store and the GPU renderer
 //! ([`crate::gaussian_renderer`]).  Each frame it:
 //!
-//! 1. **Queries** the data store for any entity that matches the
-//!    `GaussianSplats3D` archetype (centers, quaternions, scales, opacities,
-//!    colors, and optionally spherical-harmonic coefficients).
+//! 1. **Queries** the data store for any entity that matches the upstream
+//!    `Gaussians3D` archetype (centers, and optionally scales, quaternions,
+//!    colors, spherical-harmonic coefficients, and a show-SH toggle).
 //!
 //! 2. **Builds or reuses** a [`RenderGaussianCloud`] — a packed, renderer-ready
 //!    representation of the Gaussian data.  Clouds are cached per entity path
@@ -19,13 +19,36 @@
 //!    drives the GPU render pass.  Culling and depth sorting happen entirely
 //!    on the GPU (Brush model) — there is no CPU pre-pass.
 //!
+//! # Wire contract (upstream `Gaussians3D`)
+//!
+//! The component descriptors below match the in-development upstream
+//! `rerun.archetypes.Gaussians3D` archetype byte-for-byte, so the same Python
+//! logger (`gsplat_rust_renderer.gaussians3d.Gaussians3D`) feeds both this
+//! renderer and a future native viewer.  Only `centers` is required:
+//!
+//! | Component | Rerun type | Arrow layout | Absent default |
+//! |-----------|-----------|--------------|----------------|
+//! | `Gaussians3D:centers` | `Position3D` | `FixedSizeList<f32, 3>` | (required) |
+//! | `Gaussians3D:scales` | `Scale3D` | `FixedSizeList<f32, 3>` | `0.01` per axis |
+//! | `Gaussians3D:quaternions` | `RotationQuat` | `FixedSizeList<f32, 4>` xyzw | identity |
+//! | `Gaussians3D:colors` | `Color` | `u32` `0xRRGGBBAA` | white, opacity 1 |
+//! | `Gaussians3D:sh_coefficients` | `SphericalHarmonics3` | `FixedSizeList<f16, 45>` | none (DC only) |
+//! | `Gaussians3D:show_spherical_harmonics` | `ShowSphericalHarmonics` | `bool` (mono) | true |
+//!
+//! Opacity lives in the color alpha (`alpha / 255`).  The base color RGB is the
+//! SH degree-0 (DC) term already folded to unorm via `SH_C0 * f_dc + 0.5`;
+//! `sh_coefficients` carries **only** degrees 1–3 as 45 `f16` values in
+//! coefficient-major layout `[c1.rgb, c2.rgb, …, c15.rgb]` (value index
+//! `3 * coeff + channel`).  See [`build_render_cloud`] for how this maps onto
+//! the GPU pipeline's DC-at-coeff-0 layout.
+//!
 //! # Rerun Extension Points
 //!
 //! The two traits that make this a Rerun visualizer are:
 //!
 //! - [`IdentifiedViewSystem`] — provides the string identifier
-//!   `"GaussianSplats3D"` that the blueprint uses to bind an entity to this
-//!   visualizer (e.g. `overrides={entity: rrb.Visualizer("GaussianSplats3D")}`).
+//!   `"Gaussians3D"` that the blueprint uses to bind an entity to this
+//!   visualizer (e.g. `overrides={entity: rrb.Visualizer("Gaussians3D")}`).
 //!
 //! - [`VisualizerSystem`] — the `execute()` method is called once per frame by
 //!   the Rerun viewer with the current view context and query.
@@ -33,10 +56,11 @@
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use crate::gaussian_renderer::GaussianDrawData;
 use glam::{Affine3A, Quat, Vec2, Vec3};
+use half::f16;
 use re_view::{DataResultQuery as _, VisualizerInstructionQueryResults};
 use re_view_spatial::{SpatialViewState, TransformTreeContext};
 use re_viewer_context::external::re_chunk_store::{
@@ -48,115 +72,146 @@ use re_viewer_context::{
     ViewSystemExecutionError, ViewSystemIdentifier, VisualizerExecutionOutput, VisualizerQueryInfo,
     VisualizerSystem,
 };
-use rerun::{Archetype as _, Component as _};
+use rerun::{Archetype as _, Component as _, ComponentType};
 
 // ── Imports from gsplat_core (the Rerun-free algorithm module) ───────────
+use crate::gsplat_core::constants::SH_C0;
 use crate::gsplat_core::{
     CameraApproximation, RenderGaussianCloud, RenderShCoefficients, approximate_bounds_from_points,
-    fallback_camera, normalize_quat_or_identity, sh_degree_from_coeffs,
+    normalize_quat_or_identity,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Archetype definition
 // ═══════════════════════════════════════════════════════════════════════════════
 //
-// The `GaussianSplats3D` archetype defines the **component contract** between
-// the Python logger and this Rust visualizer.  Both sides must agree on the
-// archetype name and component descriptors.  The Python side
+// The `Gaussians3D` archetype defines the **component contract** between the
+// Python logger and this Rust visualizer.  Both sides must agree on the
+// archetype name and component descriptors (archetype + component identifier +
+// component type).  The Python side
 // (`gsplat_rust_renderer.gaussians3d.Gaussians3D`) implements `rr.AsComponents`
 // and produces the exact same descriptors.
+
+/// Fully-qualified upstream archetype name shared with the Python logger.
+const ARCHETYPE: &str = "rerun.archetypes.Gaussians3D";
+
+/// Number of `f16` values in the wire `sh_coefficients` block: 15 rest
+/// coefficients (SH degrees 1–3) × 3 channels.  The DC term is NOT here.
+const SH_REST_VALUES: usize = 45;
+
+/// Coefficients-per-channel the GPU pipeline is fed: 1 DC + 15 rest = degree 3.
+/// The wire always carries all 45 degree-1..3 values (zero-padded for models
+/// trained at a lower degree), so we always reconstruct a full degree-3 block.
+const PIPELINE_COEFFS_PER_CHANNEL: usize = 16;
 
 /// Marker type implementing the Rerun `Archetype` trait.  This tells the
 /// viewer which components an entity needs in order to be rendered by our
 /// custom visualizer.
-struct GaussianSplats3D;
+struct Gaussians3D;
 
-impl rerun::Archetype for GaussianSplats3D {
+impl rerun::Archetype for Gaussians3D {
     fn name() -> rerun::ArchetypeName {
-        "GaussianSplats3D".into()
+        ARCHETYPE.into()
     }
 
     fn display_name() -> &'static str {
-        "Gaussian Splats 3D"
+        "Gaussians 3D"
     }
 
-    /// The five components that every Gaussian splat entity must provide.
+    /// Only `centers` is required; everything else has a sensible default.
     fn required_components() -> std::borrow::Cow<'static, [rerun::ComponentDescriptor]> {
+        vec![Self::descriptor_centers()].into()
+    }
+
+    /// Scales, rotations, colors, SH coefficients, and the show-SH toggle are
+    /// all optional — see the module-level table for absent-value semantics.
+    fn optional_components() -> std::borrow::Cow<'static, [rerun::ComponentDescriptor]> {
         vec![
-            Self::descriptor_centers(),
-            Self::descriptor_quaternions(),
             Self::descriptor_scales(),
-            Self::descriptor_opacities(),
+            Self::descriptor_quaternions(),
             Self::descriptor_colors(),
+            Self::descriptor_sh_coefficients(),
+            Self::descriptor_show_spherical_harmonics(),
         ]
         .into()
-    }
-
-    /// Spherical harmonic coefficients are optional — when absent, only the
-    /// DC color is used (no view-dependent effects).
-    fn optional_components() -> std::borrow::Cow<'static, [rerun::ComponentDescriptor]> {
-        vec![Self::descriptor_sh_coefficients()].into()
     }
 }
 
 /// Component descriptor builders.  Each descriptor specifies the archetype
-/// name, a unique component name within that archetype, and the underlying
-/// Rerun component type that carries the actual data.
-impl GaussianSplats3D {
-    /// World-space Gaussian center positions — `[N, 3]` float32.
+/// name, a unique component identifier within that archetype (what we query
+/// by), and the underlying Rerun component type that carries the actual data.
+impl Gaussians3D {
+    /// World-space Gaussian center positions — `FixedSizeList<f32, 3>`.
     fn descriptor_centers() -> rerun::ComponentDescriptor {
-        rerun::ComponentDescriptor {
-            archetype: Some("GaussianSplats3D".into()),
-            component: "GaussianSplats3D:centers".into(),
-            component_type: Some(rerun::components::Translation3D::name()),
-        }
+        static DESCRIPTOR: LazyLock<rerun::ComponentDescriptor> =
+            LazyLock::new(|| rerun::ComponentDescriptor {
+                archetype: Some(ARCHETYPE.into()),
+                component: "Gaussians3D:centers".into(),
+                component_type: Some(rerun::components::Position3D::name()),
+            });
+        (*DESCRIPTOR).clone()
     }
 
-    /// Per-splat rotation quaternions in `[x, y, z, w]` order — `[N, 4]` float32.
-    fn descriptor_quaternions() -> rerun::ComponentDescriptor {
-        rerun::ComponentDescriptor {
-            archetype: Some("GaussianSplats3D".into()),
-            component: "GaussianSplats3D:quaternions".into(),
-            component_type: Some(rerun::components::RotationQuat::name()),
-        }
-    }
-
-    /// Per-axis scale factors (already exponentiated) — `[N, 3]` float32.
+    /// Per-axis scale factors (already exponentiated) — `FixedSizeList<f32, 3>`.
     fn descriptor_scales() -> rerun::ComponentDescriptor {
-        rerun::ComponentDescriptor {
-            archetype: Some("GaussianSplats3D".into()),
-            component: "GaussianSplats3D:scales".into(),
-            component_type: Some(rerun::components::Scale3D::name()),
-        }
+        static DESCRIPTOR: LazyLock<rerun::ComponentDescriptor> =
+            LazyLock::new(|| rerun::ComponentDescriptor {
+                archetype: Some(ARCHETYPE.into()),
+                component: "Gaussians3D:scales".into(),
+                component_type: Some(rerun::components::Scale3D::name()),
+            });
+        (*DESCRIPTOR).clone()
     }
 
-    /// Per-splat opacity in `[0, 1]` — `[N]` float32.
-    fn descriptor_opacities() -> rerun::ComponentDescriptor {
-        rerun::ComponentDescriptor {
-            archetype: Some("GaussianSplats3D".into()),
-            component: "GaussianSplats3D:opacities".into(),
-            component_type: Some(rerun::components::Opacity::name()),
-        }
+    /// Per-splat rotation quaternions in `[x, y, z, w]` order — `FixedSizeList<f32, 4>`.
+    fn descriptor_quaternions() -> rerun::ComponentDescriptor {
+        static DESCRIPTOR: LazyLock<rerun::ComponentDescriptor> =
+            LazyLock::new(|| rerun::ComponentDescriptor {
+                archetype: Some(ARCHETYPE.into()),
+                component: "Gaussians3D:quaternions".into(),
+                component_type: Some(rerun::components::RotationQuat::name()),
+            });
+        (*DESCRIPTOR).clone()
     }
 
-    /// Base RGB color derived from the zeroth SH coefficient — `[N]` packed RGBA32.
+    /// Per-splat packed `0xRRGGBBAA` color; RGB is the unorm DC color, alpha the
+    /// opacity — `u32`.
     fn descriptor_colors() -> rerun::ComponentDescriptor {
-        rerun::ComponentDescriptor {
-            archetype: Some("GaussianSplats3D".into()),
-            component: "GaussianSplats3D:colors".into(),
-            component_type: Some(rerun::components::Color::name()),
-        }
+        static DESCRIPTOR: LazyLock<rerun::ComponentDescriptor> =
+            LazyLock::new(|| rerun::ComponentDescriptor {
+                archetype: Some(ARCHETYPE.into()),
+                component: "Gaussians3D:colors".into(),
+                component_type: Some(rerun::components::Color::name()),
+            });
+        (*DESCRIPTOR).clone()
     }
 
-    /// Optional higher-order SH coefficients — `[N, C, 3]` float32 tensor.
-    /// `C` is the number of coefficients per channel (1, 4, 9, 16, or 25 for
-    /// SH degrees 0–4).
+    /// Optional degree-1..3 SH coefficients — `FixedSizeList<f16, 45>`,
+    /// coefficient-major, DC term excluded.  The `SphericalHarmonics3` /
+    /// `ShowSphericalHarmonics` component types are not yet in the released
+    /// `rerun` crate, so we name them by string to match the wire.
     fn descriptor_sh_coefficients() -> rerun::ComponentDescriptor {
-        rerun::ComponentDescriptor {
-            archetype: Some("GaussianSplats3D".into()),
-            component: "GaussianSplats3D:sh_coefficients".into(),
-            component_type: Some(rerun::components::TensorData::name()),
-        }
+        static DESCRIPTOR: LazyLock<rerun::ComponentDescriptor> =
+            LazyLock::new(|| rerun::ComponentDescriptor {
+                archetype: Some(ARCHETYPE.into()),
+                component: "Gaussians3D:sh_coefficients".into(),
+                component_type: Some(ComponentType::from("rerun.components.SphericalHarmonics3")),
+            });
+        (*DESCRIPTOR).clone()
+    }
+
+    /// Optional single `bool` toggle — when `false`, `sh_coefficients` is
+    /// ignored and only the base color is rendered.
+    fn descriptor_show_spherical_harmonics() -> rerun::ComponentDescriptor {
+        static DESCRIPTOR: LazyLock<rerun::ComponentDescriptor> =
+            LazyLock::new(|| rerun::ComponentDescriptor {
+                archetype: Some(ARCHETYPE.into()),
+                component: "Gaussians3D:show_spherical_harmonics".into(),
+                component_type: Some(ComponentType::from(
+                    "rerun.components.ShowSphericalHarmonics",
+                )),
+            });
+        (*DESCRIPTOR).clone()
     }
 }
 
@@ -201,7 +256,10 @@ impl Cache for CloudCache {
             // row-id content hash forces a rebuild on next access anyway.
             let entity_path = match &event.diff {
                 ChunkStoreDiff::Addition(add) => {
-                    if matches!(add.direct_lineage, ChunkDirectLineageReport::CompactedFrom(_)) {
+                    if matches!(
+                        add.direct_lineage,
+                        ChunkDirectLineageReport::CompactedFrom(_)
+                    ) {
                         continue;
                     }
                     add.chunk_before_processing.entity_path()
@@ -254,14 +312,17 @@ struct CachedCloud {
 /// never reused, even across visualizer instances or cache evictions.
 static CLOUD_GENERATION: AtomicU64 = AtomicU64::new(0);
 
+/// Debug-logs the "no camera yet, skipping this frame" case exactly once.
+/// The condition is normal (it only happens on the first frame or two before
+/// the view has computed its eye), so logging it every frame would be noise.
+static CAMERA_MISSING_LOG_ONCE: std::sync::Once = std::sync::Once::new();
+
 /// Lightweight fingerprint of a cloud's configuration.  Two signatures are
 /// equal if and only if the cloud data can be reused without rebuilding.
 #[derive(Clone, PartialEq, Eq)]
 struct CloudSignature {
     /// Total number of Gaussian splats.
     expected_splats: usize,
-    /// Number of SH coefficients per color channel, or `None` if no SH data.
-    sh_coeffs_per_channel: Option<usize>,
     /// Bit-exact representation of the 3×4 entity transform.  Using raw bits
     /// avoids floating-point comparison issues.
     transform_bits: [u32; 12],
@@ -277,7 +338,7 @@ struct CloudSignature {
 
 impl IdentifiedViewSystem for GaussianSplatVisualizer {
     fn identifier() -> ViewSystemIdentifier {
-        "GaussianSplats3D".into()
+        "Gaussians3D".into()
     }
 }
 
@@ -285,15 +346,15 @@ impl VisualizerSystem for GaussianSplatVisualizer {
     /// Tell Rerun which archetype this visualizer handles.
     fn visualizer_query_info(&self, _app_options: &AppOptions) -> VisualizerQueryInfo {
         let queried_components = [
-            GaussianSplats3D::descriptor_centers(),
-            GaussianSplats3D::descriptor_quaternions(),
-            GaussianSplats3D::descriptor_scales(),
-            GaussianSplats3D::descriptor_opacities(),
-            GaussianSplats3D::descriptor_colors(),
-            GaussianSplats3D::descriptor_sh_coefficients(),
+            Gaussians3D::descriptor_centers(),
+            Gaussians3D::descriptor_scales(),
+            Gaussians3D::descriptor_quaternions(),
+            Gaussians3D::descriptor_colors(),
+            Gaussians3D::descriptor_sh_coefficients(),
+            Gaussians3D::descriptor_show_spherical_harmonics(),
         ];
-        VisualizerQueryInfo::single_required_component::<rerun::components::Translation3D>(
-            &GaussianSplats3D::descriptor_centers(),
+        VisualizerQueryInfo::single_required_component::<rerun::components::Position3D>(
+            &Gaussians3D::descriptor_centers(),
             &queried_components,
         )
     }
@@ -302,9 +363,9 @@ impl VisualizerSystem for GaussianSplatVisualizer {
     ///
     /// # Per-frame flow
     ///
-    /// For each entity that matches the `GaussianSplats3D` archetype:
-    /// 1. Query the five required components + optional SH tensor
-    /// 2. Compute a cache signature (splat count + SH shape + transform)
+    /// For each entity that matches the `Gaussians3D` archetype:
+    /// 1. Query `centers` (required) + the optional scales/quats/colors/SH/toggle
+    /// 2. Compute a cache signature (splat count + SH presence + transform)
     /// 3. Build or reuse the `RenderGaussianCloud`
     /// 4. Extract the current camera from the 3D view state
     /// 5. Submit to `GaussianDrawData` for GPU rendering (the GPU culls and
@@ -316,6 +377,31 @@ impl VisualizerSystem for GaussianSplatVisualizer {
         context_systems: &ViewContextCollection,
     ) -> Result<VisualizerExecutionOutput, ViewSystemExecutionError> {
         let mut output = VisualizerExecutionOutput::default();
+
+        // ── Camera (view-global, resolved once) ───────────────────────
+        // Use the eye committed to the spatial view state — the same eye the
+        // view's `ViewBuilder` renders every other primitive with.  We never
+        // invent a camera: on the very first frame(s), before the view's UI
+        // pass has run `eye_state.update`, there is no eye yet.  Skip the
+        // whole view for this frame and request a *delayed* repaint — the
+        // next frame has a real eye and renders from the correct camera.
+        // (This is what removed the old "tiny/misplaced splats that snap into
+        // place" artifact, which came from a synthetic bounding-box fallback
+        // camera fully decoupled from the real view.)  The delay bounds a
+        // *persistently* camera-less view (unpublished viewport, unexpected
+        // view state) to ~10 repaints/s instead of a max-FPS busy-loop.
+        let Some(camera) = camera_from_view(ctx, query) else {
+            CAMERA_MISSING_LOG_ONCE.call_once(|| {
+                re_log::debug!(
+                    "Gaussian splat view has no 3D camera yet (view eye not initialized); \
+                     skipping splat rendering this frame and requesting a delayed repaint."
+                );
+            });
+            ctx.egui_ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
+            return Ok(output);
+        };
+
         // The transform tree tells us how each entity's coordinate frame
         // relates to the view's coordinate frame.
         let transforms = context_systems.get::<TransformTreeContext>(&output)?;
@@ -326,44 +412,34 @@ impl VisualizerSystem for GaussianSplatVisualizer {
         for (data_result, instruction) in query.iter_visualizer_instruction_for(Self::identifier())
         {
             // ── Step 1: Query components from the data store ──────────
-            let results = data_result.query_archetype_with_history::<GaussianSplats3D>(
-                ctx,
-                query,
-                instruction,
-            );
+            let results =
+                data_result.query_archetype_with_history::<Gaussians3D>(ctx, query, instruction);
             let results = VisualizerInstructionQueryResults::new(instruction, &results, &output);
 
-            let centers = results.iter_required(GaussianSplats3D::descriptor_centers().component);
+            let centers = results.iter_required(Gaussians3D::descriptor_centers().component);
             if centers.is_empty() {
                 continue;
             }
 
+            // Everything except `centers` is optional; absent components fall
+            // back to per-splat defaults inside `build_render_cloud`.
+            let scales = results.iter_optional(Gaussians3D::descriptor_scales().component);
             let quaternions =
-                results.iter_required(GaussianSplats3D::descriptor_quaternions().component);
-            let scales = results.iter_required(GaussianSplats3D::descriptor_scales().component);
-            let opacities =
-                results.iter_required(GaussianSplats3D::descriptor_opacities().component);
-            let colors = results.iter_required(GaussianSplats3D::descriptor_colors().component);
+                results.iter_optional(Gaussians3D::descriptor_quaternions().component);
+            let colors = results.iter_optional(Gaussians3D::descriptor_colors().component);
+            let sh = results.iter_optional(Gaussians3D::descriptor_sh_coefficients().component);
+            let show_sh =
+                results.iter_optional(Gaussians3D::descriptor_show_spherical_harmonics().component);
             let expected_splats = count_splats_in_results(centers.slice::<[f32; 3]>());
 
-            // SH coefficients are fetched separately as a single tensor (not
-            // per-row like the other components).
-            let latest_at_query = query.latest_at_query();
-            let latest_at_results = data_result
-                .latest_at_with_blueprint_resolved_data::<GaussianSplats3D>(
-                    ctx,
-                    &latest_at_query,
-                    Some(instruction),
-                );
-            // Validate the SH tensor every frame (cheap, no copy); the payload
-            // itself is only copied below when the cloud is (re)built.
-            let sh_coeffs_per_channel =
-                sh_meta(&latest_at_results, expected_splats).map_err(|err| {
-                    ViewSystemExecutionError::DrawDataCreationError(Arc::new(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        err,
-                    )))
-                })?;
+            // `show_spherical_harmonics` is a mono `bool`: absent → true, so SH
+            // is used whenever `sh_coefficients` is present unless explicitly
+            // toggled off.  Read the latest row's first value.
+            let show_sh_value: Option<bool> = show_sh
+                .slice::<bool>()
+                .last()
+                .and_then(|(_index, buffer)| (!buffer.is_empty()).then(|| buffer.value(0)));
+            let build_sh = !sh.is_empty() && show_sh_value != Some(false);
 
             // ── Step 2: Resolve entity transform ──────────────────────
             let transform = transforms
@@ -373,44 +449,27 @@ impl VisualizerSystem for GaussianSplatVisualizer {
                     transform_info
                         .single_transform_required_for_entity(
                             &data_result.entity_path,
-                            GaussianSplats3D::name(),
+                            Gaussians3D::name(),
                         )
                         .as_affine3a()
                 })
                 .unwrap_or(Affine3A::IDENTITY);
 
             // ── Step 3: Build or reuse the render cloud ───────────────
-            // Content identity: every component batch is indexed by the store
-            // row-id of the row that produced it, and `iter_required`
-            // preserves store row-ids.  Hashing the (time, row-id) indices is
-            // O(#batches) — the payload bytes are never touched.
+            // Content identity: Rerun's own query-result hash covers the
+            // resolved row-ids of EVERY component — store results, blueprint
+            // overrides, and view defaults — so it changes whenever any
+            // component (required or optional) resolves to different data,
+            // including timeline scrubs of individually-logged components.
+            // Only genuinely external state is folded in on top: the resolved
+            // SH toggle and the entity transform.
             let mut content_hasher = DefaultHasher::new();
-            for (index, _) in centers.slice::<[f32; 3]>() {
-                index.hash(&mut content_hasher);
-            }
-            for (index, _) in quaternions.slice::<[f32; 4]>() {
-                index.hash(&mut content_hasher);
-            }
-            for (index, _) in scales.slice::<[f32; 3]>() {
-                index.hash(&mut content_hasher);
-            }
-            for (index, _) in opacities.slice::<f32>() {
-                index.hash(&mut content_hasher);
-            }
-            for (index, _) in colors.slice::<u32>() {
-                index.hash(&mut content_hasher);
-            }
-            if let Ok(Some(sh_unit)) = latest_at_results.get_unit_chunk(
-                GaussianSplats3D::descriptor_sh_coefficients().component,
-                true, // preserve store row ids
-            ) {
-                sh_unit.row_id().hash(&mut content_hasher);
-            }
+            results.query_result_hash().hash(&mut content_hasher);
+            build_sh.hash(&mut content_hasher);
 
             let label = format!("gaussian_splats::{}", data_result.entity_path);
             let signature = CloudSignature {
                 expected_splats,
-                sh_coeffs_per_channel,
                 transform_bits: transform.to_cols_array().map(f32::to_bits),
                 content_hash: content_hasher.finish(),
             };
@@ -419,8 +478,8 @@ impl VisualizerSystem for GaussianSplatVisualizer {
             // steady-state frames reuse the copy cached in the store's
             // memoizers (state on `self` would not survive the frame).
             let store_ctx = ctx.viewer_ctx.store_context;
-            let cached: Option<(Arc<RenderGaussianCloud>, u64)> =
-                store_ctx.memoizer::<CloudCache, _>(|cache| {
+            let cached: Option<(Arc<RenderGaussianCloud>, u64)> = store_ctx
+                .memoizer::<CloudCache, _>(|cache| {
                     cache
                         .0
                         .get(&label)
@@ -438,15 +497,14 @@ impl VisualizerSystem for GaussianSplatVisualizer {
                 // panel, begin_frame).  If another view raced us to it, keep
                 // the winner's entry and drop our build.
                 let cloud = Arc::new(build_render_cloud(
+                    expected_splats,
                     centers.slice::<[f32; 3]>(),
-                    quaternions.slice::<[f32; 4]>(),
                     scales.slice::<[f32; 3]>(),
-                    opacities.slice::<f32>(),
+                    quaternions.slice::<[f32; 4]>(),
                     colors.slice::<u32>(),
+                    sh.slice::<[f16; SH_REST_VALUES]>(),
                     transform,
-                    sh_coeffs_per_channel.and_then(|coeffs_per_channel| {
-                        materialize_sh_coefficients(&latest_at_results, coeffs_per_channel)
-                    }),
+                    build_sh,
                 ));
                 // One fresh entry, built once; if a racing view already
                 // cached the same signature, ours is dropped (the unused
@@ -471,14 +529,7 @@ impl VisualizerSystem for GaussianSplatVisualizer {
                 })
             };
 
-            // ── Step 4: Extract camera ────────────────────────────────
-            // Prefer the interactive 3D camera from the view state.  Fall back
-            // to a synthetic camera positioned around the cloud's bounding box
-            // (so the splats are visible even before the user orbits).
-            let camera =
-                camera_from_view(ctx, query).unwrap_or_else(|| fallback_camera(cloud.bounds_world));
-
-            // ── Step 5: Submit to the GPU renderer ────────────────────
+            // ── Step 4: Submit to the GPU renderer ────────────────────
             // Culling and depth sorting happen on the GPU (Brush model);
             // the full cloud + camera is all the renderer needs.
             draw_data.add_batch(ctx.render_ctx(), &label, &cloud, cloud_generation, &camera);
@@ -493,56 +544,78 @@ impl VisualizerSystem for GaussianSplatVisualizer {
 // Cloud construction (Rerun-specific)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Convert Rerun query results into a packed [`RenderGaussianCloud`].
+/// Default per-axis scale when the wire omits `scales` (upstream default).
+const DEFAULT_SCALE: f32 = 0.01;
+
+/// Default packed color when the wire omits `colors`: opaque white
+/// (`0xRRGGBBAA` = `0xFFFFFFFF`).
+const DEFAULT_COLOR: u32 = 0xFFFF_FFFF;
+
+/// Convert the upstream `Gaussians3D` wire components into a packed
+/// [`RenderGaussianCloud`].
 ///
 /// This is the only place that knows about Rerun's query result format.  The
-/// renderer only sees the flat arrays in `RenderGaussianCloud`.
+/// renderer only sees the flat arrays in `RenderGaussianCloud`.  The entity
+/// `transform` is baked into the positions so the GPU shaders don't need a
+/// per-entity transform matrix.
 ///
-/// The entity `transform` is baked into the positions here so the GPU shaders
-/// don't need to carry a per-entity transform matrix.
+/// # Wire → GPU SH mapping
+///
+/// The GPU pipeline (`gaussian_project.wgsl` + `RenderShCoefficients`) expects
+/// coefficient-major SH with the **DC term at coefficient 0** and the shader
+/// reconstructing color as `SH_C0 * dc + 0.5 + Σ basis·rest`.  The wire instead
+/// folds DC into the unorm `colors` RGB and ships only the 15 rest coefficients
+/// (degrees 1–3) as 45 `f16` in coefficient-major order (value index
+/// `3*coeff + channel`).  So when `build_sh` is set we emit, per splat, a
+/// [`PIPELINE_COEFFS_PER_CHANNEL`]-coefficient block:
+///
+/// * coeff 0 (indices `base+0..3`) = reconstructed DC `f_dc = (rgb_unorm − 0.5) / SH_C0`
+/// * coeffs 1..=15 (indices `base+3..48`) = the 45 wire values copied verbatim
+///   (`base + 3 + (3*coeff + channel)`), since both layouts are coefficient-major.
+///
+/// The wire is always 45 values (degree 3), zero-padded for lower-degree
+/// models, so we always feed the pipeline a full degree-3 block — the extra
+/// SH ALU for an all-zero band is negligible.
 #[allow(clippy::too_many_arguments)]
-fn build_render_cloud<'a, Idx, ICenters, IQuaternions, IScales, IOpacities, IColors>(
+fn build_render_cloud<'a, Idx, ICenters, IScales, IQuaternions, IColors, ISh>(
+    expected_splats: usize,
     centers: ICenters,
-    quaternions: IQuaternions,
     scales: IScales,
-    opacities: IOpacities,
+    quaternions: IQuaternions,
     colors: IColors,
+    sh_rest: ISh,
     transform: Affine3A,
-    sh_coefficients: Option<RenderShCoefficients>,
+    build_sh: bool,
 ) -> RenderGaussianCloud
 where
     Idx: Ord,
     ICenters: IntoIterator<Item = (Idx, &'a [[f32; 3]])>,
-    IQuaternions: IntoIterator<Item = (Idx, &'a [[f32; 4]])>,
     IScales: IntoIterator<Item = (Idx, &'a [[f32; 3]])>,
-    IOpacities: IntoIterator<Item = (Idx, &'a [f32])>,
+    IQuaternions: IntoIterator<Item = (Idx, &'a [[f32; 4]])>,
     IColors: IntoIterator<Item = (Idx, &'a [u32])>,
+    ISh: IntoIterator<Item = (Idx, &'a [[f16; SH_REST_VALUES]])>,
 {
-    let mut means_world = Vec::new();
-    let mut quats_world = Vec::new();
-    let mut scales_world = Vec::new();
-    let mut opacities_world = Vec::new();
-    let mut colors_world = Vec::new();
+    // Pre-size everything: at 325k+ splats, growing `sh_flat` (48 floats per
+    // splat) through doubling means ~20 multi-MB realloc+memcpy rounds.
+    let mut means_world = Vec::with_capacity(expected_splats);
+    let mut quats_world = Vec::with_capacity(expected_splats);
+    let mut scales_world = Vec::with_capacity(expected_splats);
+    let mut opacities_world = Vec::with_capacity(expected_splats);
+    let mut colors_world = Vec::with_capacity(expected_splats);
+    // Coefficient-major flat SH, `PIPELINE_COEFFS_PER_CHANNEL * 3` per splat.
+    let mut sh_flat: Vec<f32> = Vec::with_capacity(if build_sh {
+        expected_splats * PIPELINE_COEFFS_PER_CHANNEL * 3
+    } else {
+        0
+    });
 
-    // `range_zip_1x4` iterates the five component arrays in lockstep, yielding
-    // one row at a time.  Missing optional components get a default empty slice.
-    for (_index, centers, quats, scales, opacities, colors) in
-        re_query::range_zip_1x4(centers, quaternions, scales, opacities, colors)
+    // `range_zip_1x4` iterates `centers` (required) alongside the four optional
+    // arrays in lockstep, yielding one row at a time; absent components arrive
+    // as `None`.
+    for (_index, centers, scales, quats, colors, sh_rest) in
+        re_query::range_zip_1x4(centers, scales, quaternions, colors, sh_rest)
     {
-        let quats = quats.unwrap_or_default();
-        let scales = scales.unwrap_or_default();
-        let opacities = opacities.unwrap_or_default();
-        let colors = colors.unwrap_or_default();
-
-        // Use the minimum length across all components to avoid out-of-bounds.
-        let count = centers
-            .len()
-            .min(quats.len())
-            .min(scales.len())
-            .min(opacities.len())
-            .min(colors.len());
-
-        for row_index in 0..count {
+        for (row_index, center) in centers.iter().enumerate() {
             // Only positions are transformed here — quaternions and scales stay
             // in entity-local space.  This is intentional and matches Brush:
             // the GPU projection shader builds the 3D covariance from the
@@ -550,23 +623,57 @@ where
             // the Jacobian-based 2D projection.  Applying the entity transform
             // to the covariance would require decomposing rotation and non-uniform
             // scale from the affine, which is fragile for arbitrary transforms.
-            means_world.push(transform.transform_point3(Vec3::from_array(centers[row_index])));
-            quats_world.push(normalize_quat_or_identity(Quat::from_xyzw(
-                quats[row_index][0],
-                quats[row_index][1],
-                quats[row_index][2],
-                quats[row_index][3],
-            )));
-            // Clamp scales to a small positive minimum to avoid degenerate
-            // (zero-volume) Gaussians.  1e-6 matches the Python side, the GPU
-            // shader, and Brush.
-            scales_world.push(Vec3::from_array(scales[row_index]).max(Vec3::splat(1e-6)));
-            opacities_world.push(opacities[row_index].clamp(0.0, 1.0));
-            colors_world.push(rerun_color_to_rgb(colors[row_index]));
+            means_world.push(transform.transform_point3(Vec3::from_array(*center)));
+
+            // Quaternion: identity when absent (upstream default).
+            let quat = quats
+                .and_then(|quats| quats.get(row_index).or_else(|| quats.last()))
+                .map(|quat| Quat::from_xyzw(quat[0], quat[1], quat[2], quat[3]))
+                .unwrap_or(Quat::IDENTITY);
+            quats_world.push(normalize_quat_or_identity(quat));
+
+            // Scale: 0.01 per axis when absent.  Clamp to a small positive
+            // minimum to avoid degenerate (zero-volume) Gaussians — 1e-6
+            // matches the Python side, the GPU shader, and Brush.
+            let scale = scales
+                .and_then(|scales| scales.get(row_index).or_else(|| scales.last()))
+                .map(|scale| Vec3::from_array(*scale))
+                .unwrap_or(Vec3::splat(DEFAULT_SCALE));
+            scales_world.push(scale.max(Vec3::splat(1e-6)));
+
+            // Color: opaque white when absent.  Alpha carries opacity; RGB is
+            // the unorm base (DC-folded) color the shader uses when SH is off.
+            let color = colors
+                .and_then(|colors| colors.get(row_index).or_else(|| colors.last()))
+                .copied()
+                .unwrap_or(DEFAULT_COLOR);
+            let [r, g, b, a] = re_sdk_types::datatypes::Rgba32::from_u32(color).to_array();
+            let rgb = [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0];
+            opacities_world.push(a as f32 / 255.0);
+            colors_world.push(rgb);
+
+            if build_sh {
+                // Coeff 0 = DC reconstructed from the unorm base color.
+                sh_flat.push((rgb[0] - 0.5) / SH_C0);
+                sh_flat.push((rgb[1] - 0.5) / SH_C0);
+                sh_flat.push((rgb[2] - 0.5) / SH_C0);
+                // Coeffs 1..=15 = the 45 rest values (zeros if this splat has
+                // none, keeping every splat's block a fixed 48 floats so the
+                // GPU `splat_index * coeffs_per_channel` indexing stays valid).
+                match sh_rest.and_then(|sh_rest| sh_rest.get(row_index).or_else(|| sh_rest.last()))
+                {
+                    Some(rest) => sh_flat.extend(rest.iter().map(|value| value.to_f32())),
+                    None => sh_flat.extend(std::iter::repeat_n(0.0_f32, SH_REST_VALUES)),
+                }
+            }
         }
     }
 
     let bounds_world = approximate_bounds_from_points(&means_world);
+    let sh_coeffs = build_sh.then(|| RenderShCoefficients {
+        coeffs_per_channel: PIPELINE_COEFFS_PER_CHANNEL,
+        coefficients: Arc::from(sh_flat),
+    });
 
     RenderGaussianCloud {
         means_world: Arc::from(means_world),
@@ -574,15 +681,9 @@ where
         scales: Arc::from(scales_world),
         opacities: Arc::from(opacities_world),
         colors_dc: Arc::from(colors_world),
-        sh_coeffs: sh_coefficients,
+        sh_coeffs,
         bounds_world,
     }
-}
-
-/// Unpack a Rerun RGBA32 color (packed as a `u32`) into `[r, g, b]` in `[0, 1]`.
-fn rerun_color_to_rgb(color: u32) -> [f32; 3] {
-    let [r, g, b, _a] = re_sdk_types::datatypes::Rgba32::from_u32(color).to_array();
-    [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0]
 }
 
 /// Count the total number of splats across all component batches.
@@ -594,102 +695,6 @@ where
         .into_iter()
         .map(|(_index, positions)| positions.len())
         .sum()
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// SH coefficient extraction (Rerun-specific)
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/// Validate the SH tensor and return its coefficient count per channel
-/// **without copying the coefficient data**.
-///
-/// The SH tensor is expected to have shape `[N, coeffs_per_channel, 3]` where
-/// `N` matches the number of splats and `coeffs_per_channel` is one of
-/// `{1, 4, 9, 16, 25}` (corresponding to SH degrees 0–4).
-///
-/// This runs every frame (so shape/dtype errors surface immediately, not only
-/// on cache misses); the actual payload copy is deferred to
-/// [`materialize_sh_coefficients`], which only runs when the cloud is
-/// (re)built.
-fn sh_meta(
-    latest_at_results: &re_view::BlueprintResolvedLatestAtResults<'_>,
-    expected_splats: usize,
-) -> Result<Option<usize>, String> {
-    let Some(tensor) = latest_at_results.get_mono::<re_sdk_types::components::TensorData>(
-        GaussianSplats3D::descriptor_sh_coefficients().component,
-    ) else {
-        return Ok(None);
-    };
-
-    let shape = tensor.shape();
-    if shape.len() != 3 || shape[2] != 3 {
-        return Err(format!(
-            "invalid SH tensor shape {:?}: expected [num_splats, coeffs_per_channel, 3]",
-            shape
-        ));
-    }
-
-    let tensor_splats = usize::try_from(shape[0])
-        .map_err(|_| format!("SH tensor splat count {} does not fit into usize", shape[0]))?;
-    if tensor_splats != expected_splats {
-        return Err(format!(
-            "invalid SH tensor shape {:?}: expected {} splats, got {}",
-            shape, expected_splats, tensor_splats
-        ));
-    }
-
-    let coeffs_per_channel = usize::try_from(shape[1]).map_err(|_| {
-        format!(
-            "SH tensor coefficient count {} does not fit into usize",
-            shape[1]
-        )
-    })?;
-    if sh_degree_from_coeffs(coeffs_per_channel).is_none() {
-        return Err(format!(
-            "unsupported SH tensor coefficient count {coeffs_per_channel}"
-        ));
-    }
-
-    let values_len = match &tensor.buffer {
-        re_sdk_types::datatypes::TensorBuffer::F32(values) => values.len(),
-        other => {
-            return Err(format!(
-                "invalid SH tensor dtype {:?}: expected Float32",
-                other.dtype()
-            ));
-        }
-    };
-
-    let expected_len = expected_splats
-        .checked_mul(coeffs_per_channel)
-        .and_then(|value| value.checked_mul(3))
-        .ok_or_else(|| "SH tensor size overflow".to_owned())?;
-    if values_len != expected_len {
-        return Err(format!(
-            "invalid SH tensor payload: expected {} floats, got {}",
-            expected_len, values_len
-        ));
-    }
-
-    Ok(Some(coeffs_per_channel))
-}
-
-/// Copy the SH tensor payload (already validated by [`sh_meta`]) into a packed
-/// [`RenderShCoefficients`].  Only called when the cloud is (re)built.
-fn materialize_sh_coefficients(
-    latest_at_results: &re_view::BlueprintResolvedLatestAtResults<'_>,
-    coeffs_per_channel: usize,
-) -> Option<RenderShCoefficients> {
-    let tensor = latest_at_results.get_mono::<re_sdk_types::components::TensorData>(
-        GaussianSplats3D::descriptor_sh_coefficients().component,
-    )?;
-    let re_sdk_types::datatypes::TensorBuffer::F32(values) = &tensor.buffer else {
-        return None;
-    };
-    Some(RenderShCoefficients {
-        coeffs_per_channel,
-        coefficients: Arc::from(values.as_ref()),
-    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

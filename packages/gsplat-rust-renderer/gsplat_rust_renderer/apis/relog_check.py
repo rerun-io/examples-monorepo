@@ -10,6 +10,7 @@ batch_cache attribute buffers) served stale data after a re-log.
 
 from __future__ import annotations
 
+import tempfile
 import time
 from pathlib import Path
 
@@ -19,14 +20,12 @@ import rerun.blueprint as rrb
 from PIL import Image
 from rerun.experimental import ViewerClient
 
-from gsplat_rust_renderer.gaussians3d import Gaussians3D
+from gsplat_rust_renderer.gaussians3d import SPLATS_ENTITY, SPLATS_VISUALIZER, Gaussians3D
 
 BINARY: str = str(Path(__file__).resolve().parents[2] / "target" / "release" / "gsplat-rust-renderer")
 """The custom viewer binary built from this package (cargo build --release). This
 file lives at ``<pkg>/gsplat_rust_renderer/apis/``, so the package root (where
 ``target/`` sits) is ``parents[2]``."""
-OUT: Path = Path("/tmp/relog-check")
-ENTITY: str = "world/splats"
 
 
 def make_cloud(n_side: int, rgb: tuple[float, float, float], spread: float) -> Gaussians3D:
@@ -37,22 +36,31 @@ def make_cloud(n_side: int, rgb: tuple[float, float, float], spread: float) -> G
     n = centers.shape[0]
     quaternions = np.tile(np.array([0, 0, 0, 1], np.float32), (n, 1))
     scales = np.full((n, 3), 0.18, np.float32)
-    opacities = np.full((n,), 0.95, np.float32)
-    colors = np.tile(np.array(rgb, np.float32), (n, 1))
-    return Gaussians3D(
-        centers=centers, quaternions_xyzw=quaternions, scales=scales,
-        opacities=opacities, colors_dc=colors,
-    )
+    # opacity lives in the color alpha channel now (0.95 -> 242/255).
+    rgba = np.array([*(round(c * 255.0) for c in rgb), 242], np.uint8)
+    colors_rgba = np.tile(rgba, (n, 1))
+    return Gaussians3D(centers=centers, quaternions_xyzw=quaternions, scales=scales, colors_rgba=colors_rgba)
 
 
-def screenshot(viewer: ViewerClient, rec, view_id: str, path: Path) -> np.ndarray:
+def screenshot(viewer: ViewerClient, rec, path: Path) -> np.ndarray:
+    # Full-frame capture (panels are collapsed, so the single view fills the
+    # frame): per-view `view_id` captures can hang without a diagnostic on
+    # 0.34 when the view can't be resolved to a rendered frame.
     rec.flush(timeout_sec=15.0)
     time.sleep(2.5)  # ingest + render settle
-    viewer.save_screenshot(str(path), view_id=view_id)
-    deadline = time.time() + 10.0
-    while time.time() < deadline and (not path.exists() or path.stat().st_size == 0):
-        time.sleep(0.25)
-    img = np.asarray(Image.open(path).convert("RGB"), dtype=np.float32) / 255.0
+    viewer.save_screenshot(str(path))
+    # The write is async on the viewer side; a fixed settle then tolerant
+    # retries has proven far more reliable than tight stat-polling here.
+    img = None
+    for _ in range(10):
+        time.sleep(2.0)
+        try:
+            img = np.asarray(Image.open(path).convert("RGB"), dtype=np.float32) / 255.0
+            break
+        except (FileNotFoundError, OSError):
+            continue
+    if img is None:
+        raise RuntimeError(f"screenshot {path} never completed")
     h, w = img.shape[:2]
     crop = img[h // 4 : 3 * h // 4, w // 4 : 3 * w // 4]
     return crop.reshape(-1, 3).mean(axis=0)
@@ -63,9 +71,21 @@ def dominant(mean_rgb: np.ndarray) -> str:
 
 
 def main() -> int:
-    OUT.mkdir(parents=True, exist_ok=True)
+    # Fresh directory per run: reusing fixed paths lets an async
+    # save_screenshot race read a stale PNG from a PREVIOUS run and falsely
+    # pass the gate (flagged by adversarial review).
+    out = Path(tempfile.mkdtemp(prefix="relog-check-"))
+    print(f"screenshots -> {out}")
+    # Detached: an attached (child-process) viewer shares its lifetime and
+    # output pipes with this process, which has proven racy around re-log +
+    # screenshot (truncated PNGs when the SDK's background write thread
+    # aborts). Detach and kill explicitly in `finally` instead.
     viewer = ViewerClient.spawn(
-        headless=True, port=9931, executable_path=BINARY, hide_welcome_screen=True
+        headless=True,
+        port=9951,
+        executable_path=BINARY,
+        hide_welcome_screen=True,
+        detach_process=True,
     )
     failures: list[str] = []
     try:
@@ -75,12 +95,12 @@ def main() -> int:
         assert rec is not None
 
         rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
-        rr.log(ENTITY, make_cloud(8, (1.0, 0.05, 0.05), 1.2), static=True)
+        rr.log(SPLATS_ENTITY, make_cloud(8, (1.0, 0.05, 0.05), 1.2), static=True)
 
         view = rrb.Spatial3DView(
             origin="/",
             name="relog",
-            overrides={ENTITY: rrb.Visualizer("GaussianSplats3D")},
+            overrides={SPLATS_ENTITY: rrb.Visualizer(SPLATS_VISUALIZER)},
             background=rrb.Background(color=(0, 0, 0), kind=rrb.BackgroundKind.SolidColor),
             line_grid=False,
             eye_controls=rrb.EyeControls3D(
@@ -88,16 +108,14 @@ def main() -> int:
             ),
         )
         rr.send_blueprint(rrb.Blueprint(view, collapse_panels=True))
-        view_id = str(view.id)
-
-        m1 = screenshot(viewer, rec, view_id, OUT / "s1_red.png")
+        m1 = screenshot(viewer, rec, out / "s1_red.png")
         print(f"S1 (red, 64 splats):   mean RGB {np.round(m1, 3)} -> {dominant(m1)}")
         if dominant(m1) != "r" or m1[0] < 0.05:
             failures.append(f"S1 should render the initial RED cloud, got mean {m1}")
 
         # (a) Re-log: SAME count, different color (green) and shifted positions.
-        rr.log(ENTITY, make_cloud(8, (0.05, 1.0, 0.05), 1.2), static=True)
-        m2 = screenshot(viewer, rec, view_id, OUT / "s2_green.png")
+        rr.log(SPLATS_ENTITY, make_cloud(8, (0.05, 1.0, 0.05), 1.2), static=True)
+        m2 = screenshot(viewer, rec, out / "s2_green.png")
         print(f"S2 (re-log same count): mean RGB {np.round(m2, 3)} -> {dominant(m2)}")
         if dominant(m2) != "g":
             failures.append(
@@ -105,8 +123,8 @@ def main() -> int:
             )
 
         # (b) Re-log: DIFFERENT count (4x splats), blue, wider spread.
-        rr.log(ENTITY, make_cloud(16, (0.05, 0.05, 1.0), 1.8), static=True)
-        m3 = screenshot(viewer, rec, view_id, OUT / "s3_blue.png")
+        rr.log(SPLATS_ENTITY, make_cloud(16, (0.05, 0.05, 1.0), 1.8), static=True)
+        m3 = screenshot(viewer, rec, out / "s3_blue.png")
         print(f"S3 (re-log 4x count):   mean RGB {np.round(m3, 3)} -> {dominant(m3)}")
         if dominant(m3) != "b":
             failures.append(

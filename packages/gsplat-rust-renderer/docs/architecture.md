@@ -1,298 +1,130 @@
 # Architecture
 
-Detailed internals of the gsplat-rust-renderer for developers who want to understand or modify the code. For usage, see the [README](../README.md).
+This page describes the current renderer and recording paths. For copy-paste usage, start with the [README](../README.md).
 
-## Design Principles
+## System shape
 
-1. **`gsplat_core` is the single source of truth** — all algorithm code, GPU types, pipeline definitions, and math live in the Rerun-free `gsplat_core/` module
-2. **GPU-only rendering, no CPU fallback** — follows the [Brush](https://github.com/ArthurBrussee/brush) approach
-3. **Two rendering paths, shared pipeline** — the Rerun viewer and the standalone CLI both use the same WGSL shaders, bind group layouts, compute pipelines, and GPU buffer types
-4. **Clean dependency boundary** — `gsplat_core/` depends only on `glam`, `wgpu`, `bytemuck`; the viewer adds `re_*` crates behind a feature flag
-
-## High-Level Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         gsplat_core/ (Rerun-free)                          │
-│                                                                             │
-│  types.rs          Data structures: RenderGaussianCloud, CameraApproximation│
-│  constants.rs      SH_C0, SIGMA_COVERAGE, BRUSH_COVARIANCE_BLUR_PX, etc.   │
-│  projection.rs     Quaternion helpers                                      │
-│  sh.rs             SH metadata (degree from coefficient count)            │
-│  camera.rs         Camera constructors (look-at, NeRF transform, fallback) │
-│  gpu_types.rs      GPU buffer structs, bind group layouts, compute         │
-│                    pipelines, helpers — SINGLE SOURCE OF TRUTH              │
-│  gpu_context.rs    Headless wgpu device/queue initialization               │
-│  gpu_renderer.rs   Standalone GPU-only compute pipeline + readback         │
-│                                                                             │
-├─────────────────────────────────────────────────────────────────────────────┤
-│  ply_loader.rs     Rust PLY parser (mirrors Python Gaussians3D.from_ply)   │
-│  nerf_camera.rs    NeRF transforms_*.json camera loader                    │
-└─────────────────────────────────────────────────────────────────────────────┘
-          │                                    │
-          ▼                                    ▼
-┌──────────────────────┐        ┌──────────────────────────────┐
-│  gsplat-render CLI   │        │  gsplat-rust-renderer viewer │
-│  (render_cli.rs)     │        │  (main.rs)                   │
-│                      │        │                              │
-│  No Rerun deps       │        │  gaussian_visualizer.rs      │
-│  Raw wgpu            │        │  gaussian_renderer.rs        │
-│  Headless rendering  │        │  re_renderer integration     │
-│  PNG output          │        │  Rerun viewport composite    │
-└──────────────────────┘        └──────────────────────────────┘
+```text
+Python PLY / Brush sidecar
+          │  Rerun 0.34.1 Gaussians3D components over gRPC or RRD
+          ▼
+┌──────────────────────────────┐       ┌──────────────────────────┐
+│ custom Rerun viewer          │       │ standalone gsplat-render │
+│ gaussian_visualizer.rs       │       │ render_cli.rs            │
+│ gaussian_renderer.rs         │       │ raw wgpu + PNG readback  │
+└──────────────┬───────────────┘       └────────────┬─────────────┘
+               └───────────────┬────────────────────┘
+                               ▼
+                     gsplat_core + shared WGSL
 ```
 
-## Module Dependency Graph
+`gsplat_core` is Rerun-free. Both front ends share its cloud/camera types, bind-group layouts, compute pipelines, buffer helpers, constants, and five compute shaders. The viewer adds a sixth shader to composite the raster texture into Rerun's viewport.
 
-```
-render_cli.rs ──► gsplat_core/gpu_renderer ──► gsplat_core/gpu_types ◄── gaussian_renderer.rs
-                  gsplat_core/gpu_context       gsplat_core/constants
-                  gsplat_core/types             gsplat_core/sh
-                  ply_loader                    gsplat_core/projection
-                  nerf_camera
-                                                gsplat_core/camera
-```
+The custom viewer registers its visualizer before attaching live receivers or opening a positional `.rrd`. This matters at startup: the first activated blueprint can resolve `Gaussians3D` immediately, and positional recordings open through Rerun's normal file route rather than landing on the catalog page.
 
-Both rendering paths share:
-- **5 shared WGSL compute shaders** (`gaussian_project`, `gaussian_dynamic_sort`, `gaussian_map_intersections`, `gaussian_tile_offsets`, `gaussian_raster_tiles`) embedded in `gsplat_core` — no Rerun-specific code. A 6th, `gaussian_composite.wgsl`, is viewer-only (blits to the Rerun viewport) and is **not** part of the shared core
-- **12 bind group layouts** (`GpuBindGroupLayouts` in `gpu_types.rs`)
-- **13 compute pipelines** (`GpuComputePipelines` in `gpu_types.rs`)
-- **7 GPU buffer structs** (`ProjectUniformBuffer`, `ScanUniformBuffer`, etc.)
-- **All helper functions** (buffer creation, data packing, dispatch sizing)
+## Upstream `Gaussians3D` wire contract
 
-## Two Rendering Paths
+Released Rerun `0.34.1` does not yet expose a generated Python archetype here, so Python emits custom component batches that exactly match the upstream schema. Rust queries the same field-qualified descriptors.
 
-### Path A: Standalone CLI (`gsplat-render`)
-
-```
-PLY file + NeRF JSON ──► ply_loader + nerf_camera
-                              │
-                              ▼
-                    RenderGaussianCloud + CameraApproximation
-                              │
-                              ▼
-                    gpu_render() in gpu_renderer.rs
-                      ├─ Upload to GPU buffers
-                      ├─ GPU-only compute pipeline (cull + sort on GPU)
-                      ├─ Readback raster texture
-                      └─► RenderOutput → PNG
-```
-
-Built with `--no-default-features` (zero `re_*` crates). Uses raw `wgpu` via `GpuContext`.
-
-### Path B: Rerun Viewer (`gsplat-rust-renderer`)
-
-```
-Python rr.log() ──gRPC──► Rerun Data Store
-                              │
-                              ▼
-                    GaussianSplatVisualizer::execute()
-                      ├─ Query archetype components
-                      ├─ Build or reuse RenderGaussianCloud (cached per entity)
-                      ├─ Extract camera from view state
-                      └─► GaussianDrawData::add_batch()  (full cloud — GPU culls + sorts)
-                              │
-                              ▼
-                    gaussian_renderer.rs prepare_compute_batch()
-                      ├─ Reuse/grow cached GPU buffers, write uniforms
-                      ├─ GPU-only compute pipeline (same shaders!)
-                      ├─ Composite to Rerun viewport
-                      └─► Rerun draw phase
-```
-
-Built with default features (all `re_*` crates). Uses `re_renderer::RenderContext` for wgpu access.
-
-## GPU Compute Pipeline (9 Stages)
-
-Both paths execute the same GPU-only pipeline (the standalone path skips the final composite). There is no CPU pre-pass — the GPU is handed the full cloud each frame and culls and depth-sorts it itself. The shaders are the single source of truth — defined once in `shader/`, loaded via `include_str!()`.
-
-```
-Upload full splat cloud + uniforms to GPU (no CPU cull/sort)
-          │
-          ▼
-Stage 1:  CULL + COMPACT       gaussian_project.wgsl :: project_forward_main
-          │  Full-cloud GPU cull (near plane, opacity, finite
-          │  projection, on-screen bbox)
-          │  Survivors append (global_gid, depth bits) via
-          │  atomicAdd(num_visible) — no visibility flags, no
-          │  separate compaction pass
-          ▼
-Stage 2:  DEPTH ARGSORT        gaussian_dynamic_sort.wgsl :: sort_*_main
-          │  Gid canonicalization sort first (atomicAdd compaction is
-          │  racy; ties must resolve deterministically), then radix
-          │  argsort ascending by f32 depth bits → front-to-back order
-          ▼
-Stage 3:  PROJECT              gaussian_project.wgsl :: project_visible_main
-          │  Build 3D covariance (R·diag(s²)·Rᵀ)
-          │  Project to 2D via camera Jacobian
-          │  Evaluate SH for view-dependent color
-          │  Compute tile bounding box + hit count
-          ▼
-Stage 4:  SCAN                 gaussian_project.wgsl :: scan_blocks_main
-          │                                          :: scan_block_sums_main
-          │  3-level prefix sum over per-splat tile hit counts
-          │  (supports clouds beyond 262,144 splats)
-          ▼
-Stage 5:  MAP INTERSECTIONS    gaussian_map_intersections.wgsl :: map_main
-          │                                                    :: clamp_count_main
-          │  Scatter (tile_id, compact_gid) pairs
-          │  One entry per overlapped tile per splat
-          │  Clamp total to intersection capacity
-          ▼
-Stage 6:  TILE SORT            gaussian_dynamic_sort.wgsl :: sort_count_main
-          │                                               :: sort_reduce_main
-          │                    gaussian_project.wgsl      :: scan_blocks_main
-          │                                               :: scan_block_sums_main
-          │                    gaussian_dynamic_sort.wgsl :: sort_scan_compose_main
-          │                                               :: sort_scan_add_main
-          │                                               :: sort_scatter_main
-          │  4-bit radix sort by tile_id; the prefix scan reuses
-          │  scan_blocks_main/scan_block_sums_main from
-          │  gaussian_project.wgsl (shared with Stage 4)
-          │  Groups all splats for the same tile together
-          │  Pass count: ceil(bits(tile_count) / 4)
-          ▼
-Stage 7:  TILE OFFSETS         gaussian_tile_offsets.wgsl :: main
-          │  Find [start, end) range per tile
-          │  in the sorted intersection list
-          ▼
-Stage 8:  RASTERIZE            gaussian_raster_tiles.wgsl :: main
-          │  One workgroup (256 threads) per 16×16 tile
-          │  Load splats in batches into shared memory
-          │  Per-pixel Gaussian evaluation + alpha blend
-          │  Early termination when transmittance < 1e-4
-          ▼
-Stage 9:  COMPOSITE (viewer only)  gaussian_composite.wgsl
-          │  Fullscreen triangle blit to Rerun viewport
-          │  (Standalone path skips this — reads back texture directly)
-          ▼
-Output:   Raster texture (Rgba8Unorm) → PNG (CLI) or viewport (viewer)
-```
-
-## Shared GPU Types (`gsplat_core/gpu_types.rs`)
-
-This is the **single source of truth** for all GPU pipeline definitions. Both the standalone renderer and the Rerun viewer import from here.
-
-### Structs
-
-| Struct | Size | Purpose |
-|--------|------|---------|
-| `ProjectUniformBuffer` | 192 B | Camera + viewport + SH config |
-| `ScanUniformBuffer` | 16 B | Prefix sum params |
-| `SortUniformBuffer` | 16 B | Radix sort shift/pass |
-| `MapUniformBuffer` | 16 B | Tile mapping params |
-| `RasterUniformBuffer` | 16 B | Tile bounds + image size |
-| `TileProjectedSplat` | 64 B | Per-splat projected data |
-| `DrawIndirectArgs` | 16 B | Indirect draw/count buffer |
-
-### Shared Resources
-
-| Resource | Function |
-|----------|----------|
-| `GpuBindGroupLayouts` | 12 bind group layouts for all pipeline stages |
-| `GpuComputePipelines` | 13 compute pipelines from 5 WGSL shaders |
-| `create_compute_bind_group_layouts()` | Creates all layouts from a `wgpu::Device` |
-| `create_compute_pipelines()` | Creates all pipelines given layouts |
-| `create_raster_texture()` | Shared texture creation with `extra_usage` param |
-| `fill_project_uniform()` | Fills camera/SH uniforms |
-| `fill_scan_uniform()` | Fills prefix sum uniforms |
-| `fill_map_uniform()` | Fills tile mapping uniforms |
-
-### Helper Functions
-
-Buffer creation: `create_filled_buffer()`, `create_sized_buffer()`
-Data packing: `pack_vec3s()`, `pack_quats()`, `pack_scales_opacity()`, `pack_rgb()`, `pack_sh_coefficients()`
-Dispatch sizing: `dispatch_grid_1d()`, `dispatch_grid_for_workgroups()`, `calc_tile_bounds()`, `tile_count()`, `calc_raster_extent()`
-Capacity: `next_capacity()`, `intersection_capacity_for_instances()`, `compaction_block_count()`, `next_block_capacity()`
-
-## Component Contract (Python ↔ Rust)
-
-Python and Rust agree on a custom `GaussianSplats3D` archetype:
-
-| Component | Rerun Type | Shape | Description |
+| Descriptor | Component type | Arrow value | Default |
 |---|---|---|---|
-| `centers` | `Translation3D` | `[N, 3]` | World-space Gaussian positions |
-| `quaternions` | `RotationQuat` | `[N, 4]` | Rotation quaternions (xyzw) |
-| `scales` | `Scale3D` | `[N, 3]` | Per-axis scale factors |
-| `opacities` | `Opacity` | `[N]` | Per-splat opacity [0, 1] |
-| `colors` | `Color` | `[N]` | Base RGB from SH DC coefficient |
-| `sh_coefficients` | `TensorData` | `[N, C, 3]` | Optional higher-order SH (degree 0-4) |
+| `Gaussians3D:centers` | `Position3D` | `FixedSizeList<Float32, 3>` | required |
+| `Gaussians3D:scales` | `Scale3D` | `FixedSizeList<Float32, 3>` | `0.01` per axis |
+| `Gaussians3D:quaternions` | `RotationQuat` | `FixedSizeList<Float32, 4>` (`xyzw`) | identity |
+| `Gaussians3D:colors` | `Color` | `UInt32` (`0xRRGGBBAA`) | opaque white |
+| `Gaussians3D:sh_coefficients` | `SphericalHarmonics3` | `FixedSizeList<Float16, 45>` | absent / DC only |
+| `Gaussians3D:show_spherical_harmonics` | `ShowSphericalHarmonics` | scalar `Bool` | `true` |
 
-## Python Metrics (`gsplat_rust_renderer/metrics.py`)
+Fixed-size-list children are named `item` and non-nullable. Color stores the PLY's SH DC term as RGB plus sigmoid opacity; the optional 45 float16 values contain degrees 1–3 in coefficient-major order.
 
-| Metric | Implementation | Range | Direction |
-|--------|---------------|-------|-----------|
-| PSNR | NumPy MSE → dB | 0-100 dB | Higher = better |
-| SSIM | Gaussian-windowed (11×11, σ=1.5) | 0-1 | Higher = better |
-| LPIPS | VGG-based via PyTorch `lpips` package | 0-1 | Lower = better |
+## Viewer frame lifecycle
 
-All metrics apply 8-bit roundtrip quantization to match Brush's eval convention.
+For every matching entity and frame, `GaussianSplatVisualizer::execute`:
 
-## Key Constants
+1. Resolves the real eye committed by the `Spatial3DView`.
+2. Skips the first camera-less frame and requests a repaint after 100 ms. It does not invent a fallback camera, avoiding the old tiny/misplaced splats that snapped into place after startup.
+3. Queries required centers plus every optional component and the entity transform.
+4. Hashes Rerun's resolved query rows, the SH toggle, splat count, and transform.
+5. Reuses or rebuilds a store memoized `RenderGaussianCloud`, assigning every rebuild a globally unique generation.
+6. Submits the full cloud, generation, and camera to the GPU renderer.
 
-Algorithm constants live in `gsplat_core/constants.rs`:
+The renderer keeps per-entity GPU buffers across camera motion. A generation change reuploads attributes; capacity grows geometrically; entities unused for 600 frames are evicted. On a steady frame the CPU mainly updates the camera uniform and encodes commands.
 
-| Constant | Value | Purpose |
+## GPU compute pipeline
+
+The GPU receives the full cloud; there is no CPU cull or depth sort.
+
+| Stage | Shader / operation | Result |
 |---|---|---|
-| `MIN_RADIUS_PX` | 0.35 px | Cull splats with sub-pixel projected radius |
-| `OPACITY_SCALE` | 1.0 | Global opacity multiplier (1.0 = no change) |
-| `SIGMA_COVERAGE` | 3.0 | Standard deviations for screen-space bbox (3σ ≈ 99.7%) |
-| `SH_C0` | 0.28209 | Zeroth SH coefficient — DC color conversion |
-| `BRUSH_COVARIANCE_BLUR_PX` | 0.3 | Anti-aliasing blur (matches Brush) |
-| `BRUSH_VISIBILITY_ALPHA_THRESHOLD` | 1/255 | Min alpha for a splat to be visible |
+| 1. Cull + compact | `gaussian_project::project_forward_main` | Visible `(global_gid, depth_bits)` pairs via `atomicAdd(num_visible)` |
+| 2. Depth argsort | `gaussian_dynamic_sort` | GID canonicalization, then front-to-back radix sort |
+| 3. Project | `gaussian_project::project_visible_main` | 2D covariance, SH color, tile bounds, hit counts |
+| 4. Scan | `gaussian_project::scan_*` | Three-level prefix sum of tile-hit counts |
+| 5. Map | `gaussian_map_intersections::map_main` | One `(tile_id, compact_gid)` per covered tile |
+| 6. Clamp + dispatch | `clamp_count_main` | Exact live intersection count and indirect sort dispatch arguments |
+| 7. Tile sort | `gaussian_dynamic_sort` | Tile-contiguous intersections; count/scatter dispatch only over the live count |
+| 8. Tile offsets | `gaussian_tile_offsets` | `[start, end)` range per tile |
+| 9. Raster + composite | `gaussian_raster_tiles`, then viewer composite | Premultiplied raster texture, then a fullscreen triangle |
 
-GPU pipeline tuning constants live in `gsplat_core/gpu_types.rs`:
+Rasterization uses one 256-thread workgroup per 16×16 tile, Morton-order pixel assignment, and **64-entry shared-memory splat batches**. Pixels blend front-to-back and stop below transmittance `1e-4`; a cooperative counter stops the whole workgroup once all pixels finish.
 
-| Constant | Value | Purpose |
-|---|---|---|
-| `TILE_WIDTH` | 16 px | Tile size for compute raster (mirrored as a `const` in the WGSL shaders) |
-| `PROJECT_WORKGROUP_SIZE` | 128 | Threads per project dispatch |
-| `SORT_WORKGROUP_SIZE` | 256 | Threads per sort dispatch |
-| `SORT_BIN_COUNT` | 16 | Radix sort bins (4-bit) |
-| `INTERSECTION_CAPACITY_MULTIPLIER` | 32 | Per-instance tile-intersection buffer capacity (reverted from a brief 4× experiment) |
+The clamp stage stores `DrawIndirectArgs` beside the live count. Viewer tile-radix `sort_count` and `sort_scatter` consume those arguments with `dispatch_workgroups_indirect`, avoiding capacity-sized work on sparse frames. The standalone renderer shares the buffer layout and shader but keeps direct dispatches.
 
-## File Map
+## Shared GPU resources
 
-```
+`gsplat_core/gpu_types.rs` owns 12 bind-group layouts and 13 compute pipelines. Important constants are:
+
+| Constant | Value | Meaning |
+|---|---:|---|
+| `TILE_WIDTH` | 16 px | Raster tile width and height |
+| `PROJECT_WORKGROUP_SIZE` | 128 | Projection threads per workgroup |
+| `SORT_WORKGROUP_SIZE` | 256 | Radix-sort threads per workgroup |
+| `SORT_BITS_PER_PASS` | 4 | 16 radix bins per pass |
+| `INTERSECTION_CAPACITY_MULTIPLIER` | 32 | Initial per-splat intersection capacity |
+| `MIN_RADIUS_PX` | 0.35 px | Sub-pixel culling threshold |
+| `SIGMA_COVERAGE` | 3.0 | Screen-space bounding radius |
+| `BRUSH_COVARIANCE_BLUR_PX` | 0.3 | Brush-matching antialias blur |
+
+`TileProjectedSplat` is 64 bytes. The intersection counter/readback uses a small ring so later frames can grow dense-scene buffers without synchronously stalling the render path.
+
+## Training recordings
+
+The pure-trainer path keeps Brush's embedded Rerun disabled and uses this package's Rerun `0.34.1` sidecar. It logs:
+
+- the true `iterations` timeline plus a dense `step` timeline;
+- all 100 training-camera frusta with 160-pixel JPEG ground-truth planes;
+- `loss/total`, `psnr/eval`, `ssim/eval`, and `splats/num_splats`;
+- four `eval/view_{0..3}/{ground_truth,render}` pairs;
+- `world/splats` snapshots with complete geometry and optional higher-order SH.
+
+Both rich blueprints use `GradientDark`, collapsed panels, a 0.2 rad/s orbital eye, and explicit `Gaussians3D` overrides. The normal layout uses a 2×2 eval grid plus Quality tabs and a Splats plot. `--video-layout` removes tabs: all four eval pairs are stacked beside the scene, with four graphs in one bottom row.
+
+![Start, midpoint, and end of the dense run's first eval view](media/training-progression.png)
+
+The ordinary 7K replay exports every 50 steps, evaluates every 500, and retains eight splat snapshots: 50, 1,000-step boundaries, and 7,000. The dense video task exports and logs every iteration, evaluates every 25 steps, keeps intermediate snapshots DC-only, preserves SH on the final snapshot, and deletes processed PLY/eval batches. Its measured RRD has 7,000 splat timeline points and four tracked eval views.
+
+## Evaluation path
+
+`gsplat-render` loads one PLY and `transforms_test.json`, creates Metal/Vulkan resources once, then reuses them for all cameras. The Python harness pairs outputs by strict relative path and averages per-image PSNR/SSIM after the same 8-bit roundtrip used for checkpoint validation. The checkpoint-only gate first proves the metric implementation against each downloaded prediction/ground-truth split.
+
+## File map
+
+```text
 packages/gsplat-rust-renderer/
-├── Cargo.toml                     # Lib + 2 binaries, feature-gated deps
 ├── src/
-│   ├── lib.rs                     # Shared library root
-│   ├── render_cli.rs              # gsplat-render binary (no Rerun)
-│   ├── main.rs                    # gsplat-rust-renderer binary (Rerun viewer)
-│   ├── gaussian_visualizer.rs     # Rerun VisualizerSystem (imports from gsplat_core)
-│   ├── gaussian_renderer.rs       # Rerun Renderer trait (imports from gsplat_core)
-│   ├── ply_loader.rs              # Rust PLY parser
-│   ├── nerf_camera.rs             # NeRF transforms JSON parser
-│   └── gsplat_core/               # ★ Core algorithm — zero Rerun deps ★
-│       ├── mod.rs                 # Public API + re-exports
-│       ├── types.rs               # Data structures + RenderOutput
-│       ├── constants.rs           # Shared constants
-│       ├── projection.rs          # Quaternion helpers
-│       ├── sh.rs                  # SH metadata (degree from coeff count)
-│       ├── camera.rs              # Camera constructors
-│       ├── gpu_types.rs           # ★ GPU single source of truth ★
-│       ├── gpu_context.rs         # Headless wgpu init
-│       └── gpu_renderer.rs        # Standalone GPU compute pipeline
-├── shader/                        # WGSL compute shaders (shared)
-│   ├── gaussian_project.wgsl      # Stages 1, 3, 4: cull, project, scan
-│   ├── gaussian_map_intersections.wgsl  # Stage 5: tile assignment
-│   ├── gaussian_dynamic_sort.wgsl      # Stages 2 + 6: depth / tile radix sort
-│   ├── gaussian_tile_offsets.wgsl      # Stage 7: tile ranges
-│   ├── gaussian_raster_tiles.wgsl      # Stage 8: per-pixel rasterize
-│   └── gaussian_composite.wgsl         # Stage 9: viewport blit (viewer only)
-├── gsplat_rust_renderer/          # Python module
-│   ├── __init__.py                # Beartype activation
-│   ├── gaussians3d.py             # PLY loader + rr.AsComponents
-│   └── metrics.py                 # PSNR + SSIM + LPIPS
-├── tools/
-│   ├── log_gaussian_ply.py         # CLI: load PLY → log to viewer
-│   ├── log_splats_with_cameras.py  # CLI: splats + cameras + GT images (tabs/pages)
-│   ├── calibration_scene.py        # CLI: cross-renderer calibration scene
-│   ├── relog_check.py              # Re-log staleness check
-│   ├── visualize_brush_training.py # Overlay GPU splats on Brush training
-│   └── run_brush_native_demo.sh    # Brush comparison demo driver
-├── tests/                         # Python tests
-└── docs/
-    └── architecture.md            # This file (the only doc; see the PR for perf/accuracy evidence)
+│   ├── main.rs                       custom viewer, headless loop, positional RRD loading
+│   ├── gaussian_visualizer.rs        Rerun query, camera lifecycle, CPU cloud cache
+│   ├── gaussian_renderer.rs          viewer GPU cache, compute encoding, composite
+│   ├── render_cli.rs                 standalone CLI
+│   ├── ply_loader.rs                 Rust INRIA PLY parser
+│   ├── nerf_camera.rs                NeRF transform parser
+│   └── gsplat_core/                  Rerun-free shared renderer
+├── shader/                           six WGSL shaders
+├── gsplat_rust_renderer/
+│   ├── gaussians3d.py                PLY parser and wire batches
+│   ├── evaluation.py                 full-split render/eval harness
+│   └── apis/                         typed CLI implementations
+├── tools/                            thin Tyro entrypoints
+├── tests/                            Python tests
+└── docs/media/                       real checkpoint and dense-run media
 ```

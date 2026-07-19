@@ -100,9 +100,10 @@ before 0.34). To bump: Python first (rerun-sdk + gradio-rerun together), then
 the Rust pins (matching that release's egui family), then re-lock pixi and cargo.
 
 The whole workspace runs **`rerun-sdk == 0.34.1`** (and `gradio-rerun == 0.34.1`) from PyPI:
-`common` carries the plain pin, and the shared `rerun-prerelease` feature carries the same pin
-plus the `datafusion`/`dataloader` extras for the catalog lanes (it composes into
-`no-default-feature` envs beside `catalog-common`, e.g. `simplecv-catalog`, `mv-api-catalog`).
+`common` carries the pin with the `datafusion` extra. The `dataloader` extra stays scoped to
+catalog-side features: `rerun-prerelease` for the shared catalog lanes (composed into
+`no-default-feature` envs beside `catalog-common`, e.g. `simplecv-catalog`, `mv-api-catalog`)
+and `prompt-da-catalog` for ARKitScenes PromptDA inference.
 gradio-rerun releases pin an exact `rerun-sdk==<ver>`, so bump both together.
 
 To test an **unreleased** Rerun build, add a `find-links` at

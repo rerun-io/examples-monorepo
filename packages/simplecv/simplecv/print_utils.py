@@ -1,8 +1,7 @@
+# This module must stay importable without heavy deps: stdlib-light CLIs
+# (e.g. the arkitscenes downloader subprocess) import format_bytes at startup.
 from collections.abc import Callable
 from typing import Any
-
-import numpy as np
-from lovely_numpy import lo
 
 
 def format_bytes(num_bytes: int) -> str:
@@ -15,10 +14,13 @@ def format_bytes(num_bytes: int) -> str:
     return f"{value:.1f} PiB"
 
 
-def debug_numpy(tensor: np.ndarray | Any) -> Callable:
+def debug_numpy(tensor: Any) -> Callable:
     """
     Convert a tensor to a numpy array if it is not already one.
     """
+    import numpy as np
+    from lovely_numpy import lo
+
     if isinstance(tensor, np.ndarray):
         return lo(tensor)
     tensor = tensor.clone().detach().cpu().numpy()

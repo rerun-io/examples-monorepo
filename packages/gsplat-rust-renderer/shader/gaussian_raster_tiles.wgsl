@@ -47,12 +47,11 @@ struct RasterUniformBuffer {
 
 const TILE_WIDTH: u32 = 16u;
 const TILE_SIZE: u32 = TILE_WIDTH * TILE_WIDTH;
+const BATCH_SIZE: u32 = 64u;
 const MIN_ALPHA: f32 = 1.0f / 255.0f;
 
 var<workgroup> range_uniform: vec2u;
-var<workgroup> local_batch: array<ProjectedTileSplat, TILE_SIZE>;
-// Cooperative early-exit bookkeeping (brush #394): zero-initialized at
-// workgroup launch per the WGSL spec.
+var<workgroup> local_batch: array<ProjectedTileSplat, BATCH_SIZE>;
 var<workgroup> num_done: atomic<u32>;
 var<workgroup> num_done_uniform: u32;
 
@@ -108,26 +107,25 @@ fn main(
     }
     workgroupBarrier();
     let range = range_uniform;
+    let cooperative_exit = range.y - range.x > BATCH_SIZE;
     let pixel_coord = vec2f(tile_pixel) + 0.5f;
     var transmittance = 1.0f;
     var color_out = vec3f(0.0);
     var done = !inside;
-    if done {
+    if cooperative_exit && done {
         atomicAdd(&num_done, 1u);
     }
 
-    for (var batch_start = range.x; batch_start < range.y; batch_start += TILE_SIZE) {
-        // Cooperative early-exit: when every pixel in the tile has saturated,
-        // the whole workgroup stops fetching batches.  workgroupUniformLoad's
-        // internal barriers double as the sync between the previous
-        // iteration's local_batch reads and this iteration's overwrites.
-        if local_index == 0u {
-            num_done_uniform = atomicLoad(&num_done);
+    for (var batch_start = range.x; batch_start < range.y; batch_start += BATCH_SIZE) {
+        if cooperative_exit {
+            if local_index == 0u {
+                num_done_uniform = atomicLoad(&num_done);
+            }
+            if workgroupUniformLoad(&num_done_uniform) == TILE_SIZE {
+                break;
+            }
         }
-        if workgroupUniformLoad(&num_done_uniform) == TILE_SIZE {
-            break;
-        }
-        let remaining = min(TILE_SIZE, range.y - batch_start);
+        let remaining = min(BATCH_SIZE, range.y - batch_start);
         if local_index < remaining {
             // Load one batch of splats for the current tile into shared memory.
             let load_isect_id = batch_start + local_index;
@@ -155,7 +153,7 @@ fn main(
                 }
             }
         }
-        if !was_done && done {
+        if cooperative_exit && !was_done && done {
             atomicAdd(&num_done, 1u);
         }
     }

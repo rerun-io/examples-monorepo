@@ -1,0 +1,31 @@
+"""Canonical entity paths for the ARKitScenes rig schema."""
+
+WORLD: str = "world"
+RIG: str = f"{WORLD}/rig_00"
+CAM_WIDE: str = f"{RIG}/cam_00"
+CAM_ULTRAWIDE: str = f"{RIG}/cam_01"
+PINHOLE_WIDE: str = f"{CAM_WIDE}/pinhole"
+PINHOLE_WIDE_LOWRES: str = f"{CAM_WIDE}/pinhole_lowres"
+PINHOLE_ULTRAWIDE: str = f"{CAM_ULTRAWIDE}/pinhole"
+VIDEO_WIDE: str = f"{PINHOLE_WIDE}/video"
+VIDEO_ULTRAWIDE: str = f"{PINHOLE_ULTRAWIDE}/video"
+DEPTH_GT: str = f"{PINHOLE_WIDE}/depth_gt"
+DEPTH: str = f"{PINHOLE_WIDE_LOWRES}/depth"
+CONFIDENCE: str = f"{PINHOLE_WIDE_LOWRES}/confidence"
+SKY_ANGLE_WIDE: str = f"{PINHOLE_WIDE}/sky_angle_rad"
+SKY_ANGLE_ULTRAWIDE: str = f"{PINHOLE_ULTRAWIDE}/sky_angle_rad"
+IMU: str = f"{RIG}/imu_00"
+IMU_ACCEL: str = f"{IMU}/accel"
+IMU_GYRO: str = f"{IMU}/gyro"
+IMU_ATTITUDE: str = f"{IMU}/motion/attitude"
+GT: str = f"{WORLD}/gt"
+GT_MESH: str = f"{GT}/mesh"
+GT_BOXES: str = f"{GT}/boxes"
+# PromptDA layer (written by the prompt-da package, not by ingest).
+DEPTH_PROMPTDA: str = f"{PINHOLE_WIDE}/depth_promptda"
+PROMPTDA_MESH: str = f"{WORLD}/promptda/mesh"
+
+
+def gt_box(label: str) -> str:
+    """Return the entity path for one ground-truth box."""
+    return f"{GT_BOXES}/{label}"

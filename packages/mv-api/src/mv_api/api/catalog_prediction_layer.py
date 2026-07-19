@@ -102,7 +102,8 @@ class CatalogPredictionLayerConfig:
     native_fps_override: float | None = None
     """Sampling rate (Hz) for the Rerun dataloader over ``video_time``. ``None`` auto-detects each
     segment's native exo frame rate from packet spacing. The dataloader always samples at (or above)
-    the native rate: sub-native decimation triggers a graded, order-dependent AV1 decode failure."""
+    the native rate: a sub-native grid drops reference packets before AV1 decode (RR-5087), which can
+    cause deterministic ``InvalidDataError`` windows or silently wrong pixels."""
     fetch_size: int = 64
     """Number of samples fetched per Rerun catalog query."""
     video_codec: str = "av1"
@@ -725,9 +726,11 @@ def native_fps_from_packet_ns(packet_ns: Int[ndarray, "time"]) -> float:
     """Detect a video stream's native frame rate (Hz) from its packet timestamps.
 
     The Rerun dataloader must sample at or above the native rate: sub-native ``FixedRateSampling``
-    hands the AV1 decoder a sparse, reference-incomplete packet run and fails with a graded,
-    order-dependent ``InvalidDataError``. To avoid silently under-sampling, the rate is derived
-    from the median inter-packet gap and only trusted when the spacing is near-uniform.
+    makes multiple stored packets collide in grid slots, and ``fill_latest_at`` silently drops one
+    packet from each collision (RR-5087). Decode windows crossing a dropped reference then fail
+    deterministically with ``InvalidDataError`` until the next keyframe, or can return silently
+    wrong pixels. To avoid silently under-sampling, the rate is derived from the median inter-packet
+    gap and only trusted when the spacing is near-uniform.
 
     Args:
         packet_ns: Sorted unique packet timestamps in nanoseconds on a duration timeline.
@@ -765,9 +768,9 @@ def detect_uniform_native_fps(
     """Detect the single native frame rate shared by every selected exo stream.
 
     One ``FixedRateSampling`` grid drives all camera fields at a shared timestamp, so it only keeps
-    the cameras in multiview lock-step when they share a native rate. A mixed-rate rig would make
-    the decoder's ``fill_latest_at`` silently duplicate the slower camera's frames as fresh
-    instants and corrupt triangulation with no error, so mismatched rates are rejected outright.
+    the cameras in multiview lock-step when they share a native rate. A mixed-rate rig needs explicit
+    temporal alignment semantics rather than this one-rate grid, so mismatched rates are rejected
+    outright.
 
     Args:
         dataset_entry: Rerun catalog dataset entry.
@@ -794,7 +797,7 @@ def detect_uniform_native_fps(
     if mismatched:
         raise ValueError(
             f"Selected exo streams do not share one native fps (reference {reference_fps:.3f} Hz); a single "
-            f"sample grid would silently duplicate slower-camera frames. Per-stream fps: {per_stream_fps}."
+            f"sample grid cannot align them without explicit mixed-rate semantics. Per-stream fps: {per_stream_fps}."
         )
     return reference_fps
 
@@ -985,10 +988,11 @@ def build_rerun_iterable_dataset(
 
     Samples ``video_time`` at the exo cameras' shared native frame rate with the public
     ``RerunIterableDataset`` + ``FixedRateSampling``. Sampling every packet (``rate_hz`` == native
-    fps) hands the AV1 decoder the full contiguous keyframe-through-inter-frame run, so frames
-    decode reliably with no exact-packet targeting, no ``Field.window``, and no private-attribute
-    injection. Decimated (sub-native) sampling is deliberately avoided: it triggers a graded,
-    order-dependent decoder ``InvalidDataError`` on these AV1 streams.
+    fps) gave each packet its own grid slot on these uniformly spaced streams, so frames decode
+    reliably with no exact-packet targeting, no ``Field.window``, and no private-attribute
+    injection. Decimated (sub-native) sampling is deliberately avoided: grid-slot collisions drop
+    reference packets before decode (RR-5087), causing deterministic ``InvalidDataError`` windows
+    or silently wrong pixels.
 
     Args:
         dataset_entry: Rerun catalog dataset entry.

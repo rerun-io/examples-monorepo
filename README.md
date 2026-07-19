@@ -55,6 +55,7 @@ Set `PIXI_ENV` in a gitignored `.envrc.local` to override a directory's default.
 
 | Package | What it contains |
 | --- | --- |
+| [arkitscenes-download](packages/arkitscenes-download/) | ARKitScenes downloader and ingest pipeline that emits layered Rerun recordings. |
 | [asmk](packages/asmk/) | Pixi-build recipe for the ASMK image-retrieval dependency used by MASt3R-SLAM. |
 | [dpretrieval](packages/dpretrieval/) | Pixi-build recipe for a DBoW2/pybind11 image-retrieval extension used by DPVO. |
 | [dpvo](packages/dpvo/) | Deep Patch Visual Odometry with Rerun and Gradio integrations. |

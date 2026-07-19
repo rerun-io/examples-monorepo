@@ -33,5 +33,6 @@ layers are attached with `on_duplicate=REPLACE`, so re-running is idempotent.
 
 The prediction dataloader samples each exo stream at its **native frame rate** via the
 stock `RerunIterableDataset` + `FixedRateSampling` — sub-native decimation is avoided
-because it triggers a graded AV1 decode failure. See
+because the sampling grid drops reference packets and can make AV1 decode fail or return
+wrong pixels (RR-5087). See
 [`docs/catalog_dataloader.md`](docs/catalog_dataloader.md).
