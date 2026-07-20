@@ -7,6 +7,7 @@ import numpy as np
 import open3d as o3d
 import pytest
 import rerun as rr
+import torch
 from jaxtyping import Float32, Int, UInt8
 from monopriors.apis.multiview_calibration import MultiViewCalibrator, MVCalibResults
 from numpy import ndarray
@@ -15,7 +16,7 @@ from simplecv.apis.view_exoego import LogPaths, SceneSetupResult
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from simplecv.data.ego.base_ego import BaseEgoSequence, CameraParam, EgoData
 from simplecv.data.exo.base_exo import BaseExoSequence, ExoData
-from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels, ExoEgoSample
+from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels, ExoEgoSample, RigLayout
 from simplecv.data.exoego.hocap import HocapConfig
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.video_io import MultiVideoReader, VideoReader
@@ -28,7 +29,17 @@ from mv_api.multiview_pose_estimator import MultiviewBodyTracker, MultiviewBodyT
 
 class FakeExoEgoSequence(BaseExoEgoSequence[HocapConfig]):
     def __init__(self) -> None:
-        pass
+        # Skip the base timeline machinery but provide the side sequences the
+        # real build_rig_layout reads (both None -> empty rig layout).
+        self.ego_sequence = None
+        self.exo_sequence = None
+
+    def build_rig_layout(self, *, world_path: Path = Path("world"), log_exo: bool = True, log_ego: bool = True) -> RigLayout:
+        # The fakes don't model the camera lists the real layout walks; an
+        # empty layout keeps rig logging a no-op and exercises the pipeline's
+        # legacy flat-path fallback the assertions below encode.
+        del world_path, log_exo, log_ego
+        return RigLayout(rigs=[], exo_cam_paths={}, ego_cam_paths={})
 
     @property
     def world_coordinate_system(self) -> ViewCoordinates:
@@ -77,6 +88,10 @@ class FakeVideoReader(VideoReader):
             return [np.zeros((32, 32, 3), dtype=np.uint8) for _ in range(*index.indices(self._frame_cnt))]
         return np.zeros((32, 32, 3), dtype=np.uint8)
 
+    def get_frame(self, frame_id: int) -> UInt8[ndarray, "h w 3"]:
+        del frame_id
+        return np.zeros((32, 32, 3), dtype=np.uint8)
+
 
 class FakeMultiVideoReader(MultiVideoReader):
     def __init__(self) -> None:
@@ -93,6 +108,8 @@ class FakeMultiVideoReader(MultiVideoReader):
 class FakeExoSequence(BaseExoSequence[HocapConfig]):
     def __init__(self) -> None:
         self.exo_video_readers: MultiVideoReader = FakeMultiVideoReader()
+        self._video_path_list: list[Path] = []
+        self._exo_cam_list: list[PinholeParameters | None] = []
 
     def __getitem__(self, idx: int) -> ExoData:
         del idx
@@ -112,6 +129,7 @@ class FakeExoSequence(BaseExoSequence[HocapConfig]):
 class FakeEgoSequence(BaseEgoSequence[HocapConfig]):
     def __init__(self) -> None:
         self.ego_video_readers: MultiVideoReader = FakeMultiVideoReader()
+        self._ego_video_name_list: list[str] = []
 
     def __getitem__(self, idx: int) -> EgoData:
         del idx
@@ -144,7 +162,12 @@ class FakeModelBackedSequence(FakeExoEgoSequence):
 class FakeDatasetCameraExoSequence(FakeExoSequence):
     def __init__(self) -> None:
         super().__init__()
-        self._exo_cam_list: list[PinholeParameters | None] = [_fake_pinhole("cam0")]
+        self._exo_cam_list = [_fake_pinhole("cam0")]
+        self._video_path_list = [Path("cam0.mp4")]
+
+    @property
+    def exo_video_names(self) -> list[str]:
+        return ["cam0"]
 
 
 class FakeDatasetCameraEgoSequence(FakeEgoSequence):
@@ -153,6 +176,7 @@ class FakeDatasetCameraEgoSequence(FakeEgoSequence):
         self._dataset_ego_cam_dict: dict[str, list[CameraParam]] = {
             "hololens_kv5h72": [_fake_pinhole("hololens_kv5h72")]
         }
+        self._ego_video_name_list = ["hololens_kv5h72"]
 
     @property
     def ego_cam_dict(self) -> dict[str, list[CameraParam]]:
@@ -207,12 +231,13 @@ class FakeBodyTracker(MultiviewBodyTracker):
     def __call__(
         self,
         *,
-        bgr_list: list[UInt8[ndarray, "H W 3"]],
+        frames_rgb: UInt8[torch.Tensor, "n_views h w 3"],
         pinhole_list: list[PinholeParameters],
         pred_state: MVHistory,
+        pinhole_log_paths: list[Path] | None = None,
         recording: rr.RecordingStream | None = None,
     ) -> MVHistory:
-        del bgr_list, pinhole_list, recording
+        del frames_rgb, pinhole_list, pinhole_log_paths, recording
         xyzc: Float32[ndarray, "133 4"] = np.full((133, 4), np.nan, dtype=np.float32)
         xyzc[:, 0:3] = np.array([0.0, 0.0, 2.0], dtype=np.float32)
         xyzc[:, 3] = 1.0
@@ -242,13 +267,14 @@ def test_pipeline_writes_rrd_with_expected_scene_paths(
     def fake_setup_scene(
         exoego_sequence: FakeExoEgoSequence,
         *,
+        rig_layout: object,
         parent_log_path: Path,
         timeline: str,
         log_ego: bool,
         log_exo: bool,
         recording: rr.RecordingStream | None = None,
     ) -> SceneSetupResult:
-        del exoego_sequence, log_ego, log_exo
+        del exoego_sequence, rig_layout, log_ego, log_exo
         rr.set_time(timeline, sequence=0, recording=recording)
         rr.log(str(parent_log_path / "exo" / "cam0" / "pinhole" / "video"), rr.TextDocument("exo"), recording=recording)
         rr.log(str(parent_log_path / "ego" / "rgb" / "pinhole" / "video"), rr.TextDocument("ego"), recording=recording)
@@ -268,9 +294,11 @@ def test_pipeline_writes_rrd_with_expected_scene_paths(
         scene_setup_result: SceneSetupResult,
         parent_log_path: Path,
         timeline: str,
+        exo_cam_paths: dict[str, Path] | None = None,
+        ego_cam_paths: dict[str, Path] | None = None,
         recording: rr.RecordingStream | None = None,
     ) -> None:
-        del config, exoego_sequence, scene_setup_result, timeline
+        del config, exoego_sequence, scene_setup_result, timeline, exo_cam_paths, ego_cam_paths
         points3d: Float32[ndarray, "1 3"] = np.array([[0.0, 0.0, 0.0]], dtype=np.float32)
         points2d: Float32[ndarray, "1 2"] = np.array([[12.0, 24.0]], dtype=np.float32)
         rr.log(str(parent_log_path / "gt" / "coco133_xyz"), rr.Points3D(points3d), recording=recording)
@@ -330,13 +358,14 @@ def test_model_backed_hook_logs_calibrated_predictions_with_fake_models(
     def fake_setup_scene(
         exoego_sequence: FakeModelBackedSequence,
         *,
+        rig_layout: object,
         parent_log_path: Path,
         timeline: str,
         log_ego: bool,
         log_exo: bool,
         recording: rr.RecordingStream | None = None,
     ) -> SceneSetupResult:
-        del exoego_sequence, log_ego, log_exo
+        del exoego_sequence, rig_layout, log_ego, log_exo
         rr.set_time(timeline, duration=np.timedelta64(0, "ns"), recording=recording)
         rr.log(str(parent_log_path / "exo" / "cam0" / "pinhole" / "video"), rr.TextDocument("exo"), recording=recording)
         rr.log(
@@ -405,13 +434,14 @@ def test_dataset_camera_sources_skip_estimated_environment_logging(
     def fake_setup_scene(
         exoego_sequence: FakeDatasetCameraModelBackedSequence,
         *,
+        rig_layout: object,
         parent_log_path: Path,
         timeline: str,
         log_ego: bool,
         log_exo: bool,
         recording: rr.RecordingStream | None = None,
     ) -> SceneSetupResult:
-        del exoego_sequence, log_ego, log_exo
+        del exoego_sequence, rig_layout, log_ego, log_exo
         rr.set_time(timeline, duration=np.timedelta64(0, "ns"), recording=recording)
         rr.log(str(parent_log_path / "exo" / "cam0" / "pinhole" / "video"), rr.TextDocument("exo"), recording=recording)
         rr.log(

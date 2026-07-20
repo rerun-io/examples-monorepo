@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from collections import OrderedDict
-from collections.abc import Generator
+from collections.abc import Generator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from itertools import repeat
 from pathlib import Path
@@ -340,6 +340,32 @@ class MultiVideoReader:
             if frame is not None:
                 bgr_list.append(frame)
         return bgr_list
+
+    def get_frames_at(self, frame_indices: Sequence[int]) -> list[UInt8[torch.Tensor, "3 h w"]]:
+        """Decode one RGB ``CHW`` tensor per video at per-video frame indices.
+
+        Same contract as :meth:`TorchCodecMultiVideoReader.get_frames_at` so
+        consumers stay reader-agnostic; cv2 frames are converted BGR HWC numpy
+        -> RGB CHW torch on CPU.
+
+        Args:
+            frame_indices: One frame index per video, in camera order.
+
+        Returns:
+            One uint8 RGB ``CHW`` tensor per video.
+
+        Raises:
+            ValueError: If the index count mismatches the videos or a frame is missing.
+        """
+        if len(frame_indices) != len(self.video_readers):
+            raise ValueError(f"Expected {len(self.video_readers)} frame indices, got {len(frame_indices)}.")
+        frames: list[UInt8[torch.Tensor, "3 h w"]] = []
+        for reader, frame_idx in zip(self.video_readers, frame_indices, strict=True):
+            bgr: ImageBGR | None = reader.get_frame(int(frame_idx))
+            if bgr is None:
+                raise ValueError(f"Missing frame {int(frame_idx)} in video reader.")
+            frames.append(rearrange(torch.from_numpy(np.ascontiguousarray(bgr[..., ::-1])), "h w c -> c h w"))
+        return frames
 
 
 class TorchCodecVideoReader:
@@ -698,12 +724,51 @@ class TorchCodecMultiVideoReader:
         rgb_list: list[UInt8[torch.Tensor, "3 h w"]] = [reader.get_frame(idx) for reader in self._video_readers]
         return rgb_list
 
+    def get_frames_at(self, frame_indices: Sequence[int]) -> list[UInt8[torch.Tensor, "3 h w"]]:
+        """Decode one RGB ``CHW`` tensor per video at per-video frame indices.
+
+        Unlike ``reader[idx]`` this supports per-camera indices (timestamp
+        alignment across drifting streams) and decodes camera-parallel across
+        the worker pool.
+
+        Args:
+            frame_indices: One frame index per video, in camera order.
+
+        Returns:
+            One uint8 RGB ``CHW`` tensor per video, on the reader's device.
+
+        Raises:
+            ValueError: If the index count mismatches the videos.
+        """
+        if len(frame_indices) != len(self._video_readers):
+            raise ValueError(f"Expected {len(self._video_readers)} frame indices, got {len(frame_indices)}.")
+
+        def _decode_one(reader: TorchCodecVideoReader, frame_idx: int) -> UInt8[torch.Tensor, "3 h w"]:
+            self._bind_cuda_context(reader.device)
+            return reader.get_frame(frame_idx)
+
+        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+            return list(executor.map(_decode_one, self._video_readers, [int(idx) for idx in frame_indices]))
+
+    @staticmethod
+    def _bind_cuda_context(device: str) -> None:
+        """Bind the CUDA primary context to the calling worker thread.
+
+        NVDEC decoder creation (torchcodec's CUDA interface) fails with
+        ``CUDA_ERROR_INVALID_CONTEXT`` when the first decode of a reader runs
+        on a thread that has never touched CUDA.
+        """
+        parsed: torch.device = torch.device(device)
+        if parsed.type == "cuda":
+            torch.cuda.set_device(parsed.index if parsed.index is not None else 0)
+
     @staticmethod
     def _decode_range(
         reader: TorchCodecVideoReader,
         start: int,
         stop: int,
     ) -> UInt8[torch.Tensor, "b 3 h w"]:
+        TorchCodecMultiVideoReader._bind_cuda_context(reader.device)
         video: UInt8[torch.Tensor, "b 3 h w"] = reader.get_frames_in_range(start, stop)
         return video
 

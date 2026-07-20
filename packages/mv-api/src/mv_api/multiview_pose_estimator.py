@@ -1,17 +1,22 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Literal
 
 import numpy as np
 import rerun as rr
-from einops import rearrange
+import torch
 from jaxtyping import Bool, Float, Float32, Float64, Int, UInt8
 from numpy import ndarray
-from rtmlib import YOLOX, RTMPose
+from posekit.models import PersonDetector, RtmPoseConfig, TopDownPose2d, YoloxDetectorConfig
+from posekit.predictions import BoxDetections, Keypoints2d
+from posekit.runtimes import TensorRtBackendConfig
+from posekit.zoo import PRESETS, PosePreset
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.data.skeleton.coco133_layers import COCO133_PREDICTION_LAYER_TO_PATH, Coco133AnnotationLayer
 from simplecv.data.skeleton.coco_133 import COCO_133_IDS, LEFT_HAND_IDX, RIGHT_HAND_IDX
 from simplecv.ops.triangulate import batch_triangulate, projectN3
 from simplecv.rerun_custom_types import Points2DWithConfidence, confidence_scores_to_rgb
+from torch import Tensor
 from wilor_nano.hand_keypoints import (
     FinalWilorPred,
     HandKeypointDetectorConfig,
@@ -79,44 +84,17 @@ class MVHistory:
     """Per-view 2D projections from temporally extrapolated 3D keypoints."""
 
 
-@dataclass(frozen=True, slots=True)
-class ModelAssets:
-    """ONNX detector and pose model assets."""
-
-    det: str
-    """Download URL or local path to the YOLOX ONNX model."""
-    det_input_size: tuple[int, int]
-    """Input width-height pair expected by YOLOX."""
-    pose: str
-    """Download URL or local path to the RTMPose ONNX model."""
-    pose_input_size: tuple[int, int]
-    """Input width-height pair expected by RTMPose."""
-
-
-MODE: dict[str, ModelAssets] = {
-    "performance": ModelAssets(
-        det="https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_x_8xb8-300e_humanart-a39d44ed.zip",
-        det_input_size=(640, 640),
-        pose="https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmpose-x_simcc-body7_pt-body7_700e-384x288-71d7b7e9_20230629.zip",
-        pose_input_size=(288, 384),
-    ),
-    "lightweight": ModelAssets(
-        det="https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_tiny_8xb8-300e_humanart-6f3252f9.zip",
-        det_input_size=(416, 416),
-        pose="https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmpose-s_simcc-body7_pt-body7_420e-256x192-acd4a1ef_20230504.zip",
-        pose_input_size=(192, 256),
-    ),
-    "balanced": ModelAssets(
-        det="https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_m_8xb8-300e_humanart-c2c7a14a.zip",
-        det_input_size=(640, 640),
-        pose="https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmpose-m_simcc-body7_pt-body7_420e-256x192-e48f03d0_20230504.zip",
-        pose_input_size=(192, 256),
-    ),
-    "wholebody": ModelAssets(
-        det="https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_m_8xb8-300e_humanart-c2c7a14a.zip",
-        det_input_size=(640, 640),
-        pose="https://download.openmmlab.com/mmpose/v1/projects/rtmw/onnx_sdk/rtmw-dw-x-l_simcc-cocktail14_270e-256x192_20231122.zip",
-        pose_input_size=(192, 256),
+# mv-api mode -> posekit zoo preset (same OpenMMLab weights rtmlib served,
+# maintained in ONE place: posekit.zoo). "lightweight" is a local pairing —
+# yolox-tiny with the balanced rtmpose-m net (posekit carries no rtmpose-s).
+MODE_PRESETS: dict[str, PosePreset] = {
+    "performance": PRESETS["body-performance"],
+    "balanced": PRESETS["body"],
+    "wholebody": PRESETS["wholebody"],
+    "lightweight": PosePreset(
+        YoloxDetectorConfig(variant="yolox-tiny-humanart"),
+        RtmPoseConfig(variant="rtmpose-m-coco17"),
+        "Smallest detector with the balanced pose net.",
     ),
 }
 
@@ -127,10 +105,14 @@ class MultiviewBodyTrackerConfig:
 
     mode: Literal["lightweight", "balanced", "performance", "wholebody"] = "wholebody"
     """Preset selecting detector and pose assets tuned for latency versus accuracy."""
-    backend: Literal["onnxruntime"] = "onnxruntime"
-    """Inference backend used to execute ONNX models."""
+    backend: Literal["onnxruntime", "tensorrt"] = "tensorrt"
+    """Inference backend for the posekit models. tensorrt (default) loads cached dynamic-batch
+    engines (~13s deserialize per process; first run on a new GPU builds them, taking minutes);
+    onnxruntime skips that fixed cost — better for quick short-clip experiments."""
     device: Literal["cpu", "cuda"] = "cuda"
-    """Hardware accelerator requested by the ONNX runtime backend."""
+    """Device the frame tensors are staged on before the models. The posekit
+    models themselves are CUDA-resident; ``cpu`` only makes sense with injected
+    CPU-capable test doubles."""
     keypoint_threshold: float = 0.7
     """Minimum 2D keypoint confidence required for a detection to be kept."""
     cams_for_detection_idx: list[int] | None = None
@@ -148,28 +130,45 @@ class MultiviewBodyTracker:
         self,
         config: MultiviewBodyTrackerConfig,
         filter_body_idxes: Int[ndarray, "idx"] | None = None,
+        *,
+        detector: PersonDetector | None = None,
+        pose: TopDownPose2d | None = None,
     ) -> None:
-        """Create detector and pose models for single-person multiview tracking."""
+        """Create detector and pose models for single-person multiview tracking.
+
+        Args:
+            config: Runtime options; ``config.mode`` picks the default posekit
+                detector/pose pairing (same OpenMMLab weights rtmlib served).
+            filter_body_idxes: Optional keypoint subset kept in the outputs.
+            detector: Override detector implementing the posekit role; any
+                :class:`posekit.models.PersonDetector` slots in (RT-DETRv2,
+                a tracker adapter, ...).
+            pose: Override top-down pose estimator; any
+                :class:`posekit.models.TopDownPose2d` slots in (ViTPose,
+                Sapiens2, a TensorRT-backed RTMW, ...).
+        """
         self.config: MultiviewBodyTrackerConfig = config
-        self.num_keypoints: int = 133
+        preset: PosePreset = MODE_PRESETS[config.mode]
+        det_config = preset.detector
+        pose_config = preset.pose
+        # All mv-api mode presets pair the ONNX-artifact models, whose configs
+        # carry the swappable onnx/tensorrt backend field.
+        assert isinstance(det_config, YoloxDetectorConfig) and isinstance(pose_config, RtmPoseConfig)
+        if config.backend == "tensorrt":
+            trt_backend = TensorRtBackendConfig()
+            det_config = replace(det_config, backend=trt_backend)
+            pose_config = replace(pose_config, backend=trt_backend)
+        self.det_model: PersonDetector = detector if detector is not None else det_config.setup()
+        self.pose_model: TopDownPose2d = pose if pose is not None else pose_config.setup()
+        self.num_keypoints: int = self.pose_model.skeleton.num_keypoints
         self.filter_body_idxes: Int[ndarray, "idx"] = (
             filter_body_idxes if filter_body_idxes is not None else np.arange(self.num_keypoints, dtype=np.intp)
         )
-
-        assets: ModelAssets = MODE[config.mode]
-        self.det_model = YOLOX(
-            assets.det,
-            model_input_size=assets.det_input_size,
-            backend=config.backend,
-            device=config.device,
-        )
-        self.pose_model = RTMPose(
-            assets.pose,
-            model_input_size=assets.pose_input_size,
-            to_openpose=False,
-            backend=config.backend,
-            device=config.device,
-        )
+        if self.filter_body_idxes.size and int(self.filter_body_idxes.max()) >= self.num_keypoints:
+            raise ValueError(
+                f"filter_body_idxes max index {int(self.filter_body_idxes.max())} exceeds the "
+                f"{self.pose_model.skeleton.name} skeleton's {self.num_keypoints} keypoints."
+            )
         self.hand_keypoint_engine: WilorHandKeypointDetector | None = None
         if self.config.use_wilor:
             self.hand_keypoint_engine = WilorHandKeypointDetector(HandKeypointDetectorConfig(verbose=False))
@@ -177,25 +176,45 @@ class MultiviewBodyTracker:
     def __call__(
         self,
         *,
-        bgr_list: list[UInt8[ndarray, "H W 3"]],
+        frames_rgb: UInt8[Tensor, "n_total_views H W 3"],
         pinhole_list: list[PinholeParameters],
         pred_state: MVHistory,
+        pinhole_log_paths: list[Path] | None = None,
         recording: rr.RecordingStream | None = None,
     ) -> MVHistory:
-        """Estimate and triangulate one COCO-133 person across camera views."""
+        """Estimate and triangulate one COCO-133 person across camera views.
+
+        Args:
+            frames_rgb: One uint8 RGB NHWC tensor holding every camera view
+                (torchcodec CUDA decode path) — frames never touch the host on
+                the way to the models.
+            pinhole_list: Calibrated camera per view, aligned with the frames.
+            pred_state: Temporal tracking state, updated in place.
+            pinhole_log_paths: Pre-resolved pinhole entity path per view
+                (rig layout) for the verbose 2D layers, aligned with
+                ``pinhole_list``; ``None`` falls back to the legacy
+                ``/world/exo/<name>`` layout.
+            recording: Optional explicit Rerun recording stream.
+        """
+        num_total_views: int = int(frames_rgb.shape[0])
         selected_view_indices: list[int] = (
             [idx for idx in self.config.cams_for_detection_idx]
             if self.config.cams_for_detection_idx is not None
-            else list(range(len(bgr_list)))
+            else list(range(num_total_views))
         )
         if not selected_view_indices:
             raise ValueError("At least one camera must be selected for multiview body tracking.")
         for selected_view_idx in selected_view_indices:
-            if selected_view_idx < 0 or selected_view_idx >= len(bgr_list) or selected_view_idx >= len(pinhole_list):
+            if selected_view_idx < 0 or selected_view_idx >= num_total_views or selected_view_idx >= len(pinhole_list):
                 msg: str = f"Selected camera index {selected_view_idx} is outside the available view range."
                 raise IndexError(msg)
 
-        selected_bgr_list: list[UInt8[ndarray, "H W 3"]] = [bgr_list[idx] for idx in selected_view_indices]
+        device: torch.device = torch.device(self.config.device)
+        selected_frames_rgb: UInt8[Tensor, "n_views H W 3"] = (
+            frames_rgb.to(device)
+            if self.config.cams_for_detection_idx is None
+            else frames_rgb[torch.tensor(selected_view_indices, dtype=torch.long, device=frames_rgb.device)].to(device)
+        )
         selected_pinhole_list: list[PinholeParameters] = [pinhole_list[idx] for idx in selected_view_indices]
         pall: Float32[ndarray, "n_views 3 4"] = np.array(
             [pinhole.projection_matrix for pinhole in selected_pinhole_list], dtype=np.float32
@@ -215,38 +234,57 @@ class MultiviewBodyTracker:
             uv_min: Float[ndarray, "n_views 2"] = np.nanmin(uvc_extrap[:, :, 0:2], axis=1)
             bboxes_extrap = np.concatenate([uv_min, uv_max], axis=1).astype(np.float32)
 
-        uvc_list: list[Float32[ndarray, "n_kpts 3"]] = []
-        for selected_idx, (original_view_idx, bgr, pinhole) in enumerate(
-            zip(selected_view_indices, selected_bgr_list, selected_pinhole_list, strict=True)
-        ):
-            if xyzc_extrap is not None and bboxes_extrap is not None:
-                bboxes: Float32[ndarray, "n_dets 4"] = rearrange(bboxes_extrap[selected_idx], "b -> 1 b")
-            else:
-                det_output: np.ndarray | tuple[np.ndarray, ...] = self.det_model(bgr)
-                det_bboxes_np: np.ndarray = det_output[0] if isinstance(det_output, tuple) else det_output
-                bboxes = np.asarray(det_bboxes_np, dtype=np.float32)
+        # One detector call and one pose call over all selected views, on the
+        # GPU-resident uint8 RGB tensor (the posekit contract).
+        num_selected: int = len(selected_view_indices)
+        uvc_by_selected: dict[int, Float32[ndarray, "n_kpts 3"]] = {}
+        if bboxes_extrap is not None:
+            detections: BoxDetections = BoxDetections(
+                xyxy=torch.from_numpy(bboxes_extrap).to(device=device, dtype=torch.float32),
+                scores=torch.ones((num_selected,), dtype=torch.float32, device=device),
+                frame_indices=torch.arange(num_selected, dtype=torch.long, device=device),
+            )
+        else:
+            all_detections: BoxDetections = self.det_model(selected_frames_rgb)
+            # Pick the best-scoring detection per view on the host: two small
+            # transfers instead of a GPU sync per view.
+            det_views: list[int] = all_detections.frame_indices.cpu().tolist()
+            det_scores: list[float] = all_detections.scores.cpu().tolist()
+            best_by_view: dict[int, int] = {}
+            for row, (view, score) in enumerate(zip(det_views, det_scores, strict=True)):
+                if view not in best_by_view or score > det_scores[best_by_view[view]]:
+                    best_by_view[view] = row
+            rows: Tensor = torch.tensor([best_by_view[view] for view in sorted(best_by_view)], dtype=torch.long, device=device)
+            detections = BoxDetections(
+                xyxy=all_detections.xyxy[rows], scores=all_detections.scores[rows], frame_indices=all_detections.frame_indices[rows]
+            )
+        keypoints2d: Keypoints2d = self.pose_model(selected_frames_rgb, detections)
+        xy: Float32[ndarray, "n_dets n_kpts 2"] = keypoints2d.xy_numpy()
+        kpt_scores: Float32[ndarray, "n_dets n_kpts"] = keypoints2d.scores_numpy()
+        for row, local_idx in enumerate(detections.frame_indices.cpu().tolist()):
+            uvc_by_selected[local_idx] = np.concatenate([xy[row], kpt_scores[row][:, None]], axis=1).astype(np.float32)
 
-            if bboxes.shape[0] == 0:
+        uvc_list: list[Float32[ndarray, "n_kpts 3"]] = []
+        for selected_idx, (original_view_idx, pinhole) in enumerate(zip(selected_view_indices, selected_pinhole_list, strict=True)):
+            view_uvc: Float32[ndarray, "n_kpts 3"] | None = uvc_by_selected.get(selected_idx)
+            if view_uvc is None:
                 uvc_list.append(np.zeros((self.num_keypoints, 3), dtype=np.float32))
                 continue
-
-            selected_bboxes: Float32[ndarray, "1 4"] = bboxes[0:1]
-            bbox_list: list[list[float]] = selected_bboxes.astype(np.float32).tolist()
-            pose_output: tuple[Float64[ndarray, "n_dets n_kpts=133 2"], Float32[ndarray, "n_dets n_kpts=133"]] = (
-                self.pose_model(bgr, bboxes=bbox_list)
-            )
-            keypoints: Float32[ndarray, "n_dets n_kpts=133 2"] = pose_output[0].astype(np.float32)
-            scores: Float32[ndarray, "n_dets n_kpts=133"] = pose_output[1]
-            filtered_keypoints, filtered_scores = self.filter_kpt_outputs(keypoints, scores)
+            filtered_keypoints: Float32[ndarray, "n_kpts 2"] = view_uvc[:, 0:2]
+            filtered_scores: Float32[ndarray, "n_kpts"] = view_uvc[:, 2]
 
             if self.config.use_wilor:
+                # WiLoR is a numpy/CPU engine; materialize the BGR view lazily
+                # so the GPU frames only pay this when hands are refined.
+                view_bgr: UInt8[ndarray, "H W 3"] = np.ascontiguousarray(selected_frames_rgb[selected_idx].cpu().numpy()[..., ::-1])
                 filtered_keypoints = self._refine_hand_keypoints_with_wilor(
-                    bgr=bgr,
+                    bgr=view_bgr,
                     keypoints=filtered_keypoints,
                     confidences=filtered_scores,
                 )
 
             if self.config.verbose:
+                view_pinhole_path: Path | None = pinhole_log_paths[original_view_idx] if pinhole_log_paths is not None else None
                 self._log_uvc_layer(
                     view_idx=original_view_idx,
                     pinhole=pinhole,
@@ -254,6 +292,7 @@ class MultiviewBodyTracker:
                     confidences=filtered_scores,
                     layer=Coco133AnnotationLayer.RAW_2D,
                     mask_below_threshold=True,
+                    pinhole_log_path=view_pinhole_path,
                     recording=recording,
                 )
                 if tracked_confidences is not None and pred_state.uvc_extrap is not None:
@@ -265,6 +304,7 @@ class MultiviewBodyTracker:
                         confidences=tracked_confidences,
                         layer=Coco133AnnotationLayer.TRACKED_2D,
                         mask_below_threshold=False,
+                        pinhole_log_path=view_pinhole_path,
                         recording=recording,
                     )
 
@@ -291,10 +331,12 @@ class MultiviewBodyTracker:
         confidences: Float32[ndarray, "n_kpts"],
         layer: Coco133AnnotationLayer,
         mask_below_threshold: bool,
+        pinhole_log_path: Path | None,
         recording: rr.RecordingStream | None,
     ) -> None:
         """Log a COCO-133 2D layer for a single view."""
         view_name: str = pinhole.name if pinhole.name else f"view_{view_idx}"
+        pinhole_path: str = str(pinhole_log_path) if pinhole_log_path is not None else f"/world/exo/{view_name}/pinhole"
         if mask_below_threshold:
             visibility_mask: Bool[ndarray, "n_kpts"] = confidences >= float(self.config.keypoint_threshold)
             filtered_keypoints: Float32[ndarray, "n_kpts 2"] = np.where(visibility_mask[:, None], keypoints, np.nan)
@@ -313,7 +355,7 @@ class MultiviewBodyTracker:
         )[0]
         layer_segment: str = COCO133_PREDICTION_LAYER_TO_PATH[layer]
         rr.log(
-            f"/world/exo/{view_name}/pinhole/pred/coco133_uv/{layer_segment}",
+            f"{pinhole_path}/pred/coco133_uv/{layer_segment}",
             Points2DWithConfidence(
                 positions=filtered_keypoints,
                 confidences=filtered_confidences,
@@ -391,13 +433,3 @@ class MultiviewBodyTracker:
         """Linearly extrapolate keypoints from the previous two frames."""
         xyzc_extrap: Float32[ndarray, "n_kpts 4"] = 2 * xyzc_t - xyzc_t1
         return xyzc_extrap
-
-    def filter_kpt_outputs(
-        self,
-        keypoints: Float32[ndarray, "n_dets n_kpts 2"],
-        scores: Float32[ndarray, "n_dets n_kpts"],
-    ) -> tuple[Float32[ndarray, "n_kpts 2"], Float32[ndarray, "n_kpts"]]:
-        """Select the detection with the highest maximum keypoint score."""
-        max_scores: Float32[ndarray, "n_dets"] = scores.max(axis=1)
-        max_idx: int = int(max_scores.argmax())
-        return keypoints[max_idx], scores[max_idx]
