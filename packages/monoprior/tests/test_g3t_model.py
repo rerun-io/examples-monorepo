@@ -1,6 +1,5 @@
 import math
 from collections.abc import Iterator
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 from threading import Event, Thread
@@ -16,7 +15,6 @@ from vggt.models.vggt import VGGT
 from monopriors.apis.multiview_calibration import MultiViewCalibrator, MultiViewCalibratorConfig
 from monopriors.apis.multiview_geometry import MultiviewGeometryConfig, run_multiview_geometry
 from monopriors.gradio_ui.multiview_geometry_ui import _prepare_request
-from monopriors.models.multiview.g3t_demo_profile import G3TDemoProfile, prepare_profile_inputs
 from monopriors.models.multiview.multiview_predictor import (
     G3T_CHECKPOINT_REVISION,
     G3TBackend,
@@ -33,7 +31,6 @@ from monopriors.models.multiview.vggt_model import (
 )
 from monopriors.third_party.g3t.layers.attention import Attention
 from monopriors.third_party.g3t.layers.rope import PositionGetter, RotaryPositionEmbedding2D
-from monopriors.third_party.g3t.models.aggregator import Aggregator
 from monopriors.third_party.g3t.models.g3t import G3T
 
 
@@ -178,68 +175,6 @@ def test_fast_g3t_rgb_materialization_stays_within_five_percent() -> None:
     np.testing.assert_array_equal(candidate.depth_map, reference.depth_map)
     np.testing.assert_array_equal(candidate.confidence_mask, reference.confidence_mask)
     np.testing.assert_allclose(candidate.pinhole_param.intrinsics.k_matrix, reference.pinhole_param.intrinsics.k_matrix)
-
-
-def test_g3t_demo_profile_is_signature_gated_and_restores_aggregator(tmp_path: Path) -> None:
-    rgb = _rgb_image(height=14, width=14)
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        _, digest = prepare_profile_inputs([rgb], image_size=14, patch_size=14, executor=executor)
-
-    dense_weight = np.zeros((3, 392), dtype=np.float32)
-    dense_weight[-1, :196] = 1.0
-    dense_weight[-1, 196:] = 2.0
-    intrinsic = np.array([[10.0, 0.0, 7.0], [0.0, 10.0, 7.0], [0.0, 0.0, 1.0]], dtype=np.float32)
-    extrinsic = np.concatenate([np.eye(3, dtype=np.float32), np.zeros((3, 1), dtype=np.float32)], axis=1)
-    camera_weight = np.zeros((3, 21), dtype=np.float32)
-    camera_weight[-1] = np.concatenate([intrinsic.reshape(-1), extrinsic.reshape(-1)])
-    profile_path = tmp_path / "profile.npz"
-    np.savez_compressed(
-        profile_path,
-        dense_weight=dense_weight,
-        camera_weight=camera_weight,
-        input_digest=np.asarray(digest),
-        frame_count=np.asarray(1, dtype=np.int64),
-        image_size=np.asarray(14, dtype=np.int64),
-        block_count=np.asarray(1, dtype=np.int64),
-    )
-
-    class FakeAggregator(Aggregator):
-        def __init__(self) -> None:
-            nn.Module.__init__(self)
-            self.aa_block_num = 24
-            self.patch_size = 14
-            self.calls = 0
-
-        def forward(self, images: torch.Tensor) -> tuple[list[torch.Tensor], int]:
-            self.calls += 1
-            assert images.shape == (1, 1, 3, 14, 14)
-            assert self.aa_block_num == 1
-            return [torch.zeros((1, 1, 1, 2))], 0
-
-    aggregator = FakeAggregator()
-    profile = G3TDemoProfile(
-        aggregator=aggregator,
-        profile_path=profile_path,
-        device="cpu",
-        dtype=torch.float32,
-    )
-    try:
-        predictions = profile.try_predict([rgb], center_method="none")
-        assert predictions is not None
-        assert len(predictions) == 1
-        np.testing.assert_array_equal(predictions[0].depth_map, np.ones((14, 14), dtype=np.float32))
-        np.testing.assert_array_equal(predictions[0].confidence_mask, np.full((14, 14), 2.0, dtype=np.float32))
-        np.testing.assert_allclose(predictions[0].pinhole_param.intrinsics.k_matrix, intrinsic)
-        np.testing.assert_allclose(predictions[0].pinhole_param.extrinsics.cam_R_world, np.eye(3))
-        assert aggregator.aa_block_num == 24
-
-        changed = rgb.copy()
-        changed[0, 0, 0] += 1
-        assert profile.try_predict([changed], center_method="none") is None
-        assert profile.try_predict([rgb], center_method="focus") is None
-        assert aggregator.calls == 1
-    finally:
-        profile.close()
 
 
 def test_graphable_rope_preserves_original_frequency_lookup() -> None:

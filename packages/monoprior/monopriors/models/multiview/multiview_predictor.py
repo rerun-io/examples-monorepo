@@ -6,7 +6,6 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
 from threading import Lock
 from timeit import default_timer as timer
 from typing import Literal, TypeAlias, cast
@@ -21,7 +20,6 @@ from torch import Tensor
 from vggt.models.vggt import VGGT
 from vggt.utils.pose_enc import pose_encoding_to_extri_intri as decode_vggt_camera_head
 
-from monopriors.models.multiview.g3t_demo_profile import G3TDemoProfile
 from monopriors.models.multiview.vggt_model import (
     MultiviewModelPredictions,
     MultiviewPred,
@@ -56,8 +54,6 @@ class MultiviewPredictorConfig:
     """Require checkpoints to be present in the local Hugging Face cache."""
     g3t_compile: bool = True
     """Compile G3T on CUDA for lower warm inference latency; ignored by VGGT and CPU runs."""
-    g3t_demo_profile: bool = True
-    """Use the signature-gated fast profile for the bundled G3T calibration demo."""
 
 
 @dataclass(slots=True)
@@ -225,20 +221,6 @@ class G3TBackend(MultiviewBackend):
         ).to(config.device)
         self.model.eval()
         self.model.point_head = None
-        profile_path = Path(__file__).parent / "profiles" / "g3t-car-landscape-12.npz"
-        self._demo_profile = (
-            G3TDemoProfile(
-                aggregator=self.model.aggregator,
-                profile_path=profile_path,
-                device=config.device,
-                dtype=self.dtype,
-            )
-            if config.g3t_demo_profile
-            and config.device == "cuda"
-            and config.preprocessing_mode == "pad"
-            and profile_path.is_file()
-            else None
-        )
         self._compiled_model: Callable[[Tensor], dict[str, Tensor]] | None = None
         self._warmed_input_shapes: set[tuple[int, int, int]] = set()
         if config.g3t_compile and config.device == "cuda":
@@ -314,21 +296,7 @@ class G3TBackend(MultiviewBackend):
             cam_T_world_b34=canonical_cam_T_world_b34,
         )
 
-    def try_predict_demo(
-        self,
-        rgb_list: list[UInt8[ndarray, "H W 3"]],
-        *,
-        center_method: CenterMethod,
-    ) -> list[MultiviewPred] | None:
-        """Use the bundled demo profile when enabled and the input signature matches."""
-        if self._demo_profile is None:
-            return None
-        return self._demo_profile.try_predict(rgb_list, center_method=center_method)
-
     def close(self) -> None:
-        if self._demo_profile is not None:
-            self._demo_profile.close()
-            self._demo_profile = None
         self.model.cpu()
 
 
@@ -355,11 +323,6 @@ class MultiviewPredictor:
         *,
         center_method: CenterMethod = "none",
     ) -> list[MultiviewPred]:
-        if isinstance(self.backend, G3TBackend):
-            with self._inference_lock:
-                demo_predictions = self.backend.try_predict_demo(rgb_list, center_method=center_method)
-            if demo_predictions is not None:
-                return demo_predictions
         preprocess_results: PreprocessResults = preprocess_images(rgb_list, mode=self.config.preprocessing_mode)
         images: Float32[Tensor, "num_cams 3 H W"] = preprocess_results.images.to(self.config.device)
         print("Running inference...")
