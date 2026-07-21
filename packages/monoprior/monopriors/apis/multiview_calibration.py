@@ -391,8 +391,8 @@ class MultiViewCalibrationPostprocessor:
                 rr.log(f"{pinhole_log_path}/filtered_depth", rr.DepthImage(filtered_depth_map, meter=1), static=True)
                 rr.log(f"{pinhole_log_path}/depth", rr.DepthImage(mv_pred.depth_map, meter=1), static=True)
 
-        # The viewer consumes roughly 150k points. Raw and refined depths share
-        # the same confidence/person filtering and point budget.
+        # Keep the cloud density responsive to the confidence control while
+        # preserving the 150k viewer ceiling. Raw and refined depths share this path.
         pointcloud_depths: list[Float32[ndarray, "H W"]] | None = (
             refined_depths_list if self.config.refine_depth_maps else None
         )
@@ -402,7 +402,7 @@ class MultiViewCalibrationPostprocessor:
             mv_pred_list,
             depth_confidences,
             depth_list=pointcloud_depths,
-            target_points=150_000,
+            target_points=self.config.geometry_config.point_cloud_budget,
         )
         filtered_points: Float32[ndarray, "sampled_points 3"] = filtered_output[0]
         filtered_colors: UInt8[ndarray, "sampled_points 3"] = filtered_output[1]

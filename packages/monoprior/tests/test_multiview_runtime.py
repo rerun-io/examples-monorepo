@@ -321,3 +321,48 @@ def test_calibration_pipeline_uses_the_supplied_predictor() -> None:
     assert predictor.calls == 1
     assert len(result.pinhole_param_list) == 1
     assert np.asarray(result.pcd.points).shape == (4, 3)
+
+
+def test_confidence_percentage_changes_bounded_calibration_point_count() -> None:
+    height: int = 400
+    width: int = 500
+    prediction: MultiviewPred = _prediction()
+    prediction.rgb_image = np.zeros((height, width, 3), dtype=np.uint8)
+    prediction.depth_map = np.ones((height, width), dtype=np.float32)
+    prediction.confidence_mask = np.arange(height * width, dtype=np.float32).reshape(height, width)
+    prediction.pinhole_param.intrinsics.width = width
+    prediction.pinhole_param.intrinsics.height = height
+
+    class FakePredictor(MultiviewPredictor):
+        def __init__(self) -> None:
+            self.config = MultiviewPredictorConfig(device="cpu")
+
+        def __call__(
+            self,
+            rgb_list: list[np.ndarray],
+            *,
+            preprocessing_mode: str = "pad",
+            center_method: str = "none",
+        ) -> list[MultiviewPred]:
+            return [prediction]
+
+    predictor = FakePredictor()
+    rgb_list: list[np.ndarray] = [prediction.rgb_image]
+
+    def point_count(keep_top_percent: float) -> int:
+        config = MultiViewCalibratorConfig(
+            predictor_config=predictor.config,
+            geometry_config=MultiviewGeometryConfig(keep_top_percent=keep_top_percent),
+            refine_depth_maps=False,
+            segment_people=False,
+        )
+        result = run_multiview_calibration(
+            rgb_list=rgb_list,
+            multiview_predictor=predictor,
+            config=config,
+            parent_log_path=Path("world"),
+        )
+        return len(result.pcd.points)
+
+    assert point_count(80.0) == 120_000
+    assert point_count(100.0) == 150_000

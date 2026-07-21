@@ -14,7 +14,7 @@ Also provides a CLI entry point (``main``) for standalone usage with tyro.
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Final
 
 import numpy as np
 from beartype.vale import Is
@@ -32,6 +32,7 @@ from monopriors.models.multiview.multiview_predictor import (
 )
 
 KeepTopPercent = Annotated[int | float, Is[lambda percent: 1 <= percent <= 100]]
+MAX_POINT_CLOUD_POINTS: Final[int] = 150_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,13 +41,19 @@ class MultiviewGeometryConfig:
 
     keep_top_percent: KeepTopPercent = 30.0
     """Percentage of high-confidence pixels retained after filtering.
-    Value in [1, 100]; e.g. 30 keeps the top 30%."""
+    Value in [1, 100]; e.g. 30 keeps the top 30% and uses up to 30% of the
+    bounded point-cloud budget."""
     preprocessing_mode: ImagePreprocessingMode = "pad"
     """Image preprocessing strategy for this inference run."""
     center_method: CenterMethod = "none"
     """How to center canonicalized camera poses after backend inference."""
     verbose: bool = False
     """Emit per-camera detail logging when True."""
+
+    @property
+    def point_cloud_budget(self) -> int:
+        """Maximum point count after confidence filtering."""
+        return max(1, round(MAX_POINT_CLOUD_POINTS * float(self.keep_top_percent) / 100.0))
 
 
 @dataclass
@@ -168,7 +175,7 @@ def main(config: MultiviewGeometryCLIConfig) -> None:
     pointcloud, point_colors = mv_pred_to_filtered_pointcloud(
         result.mv_pred_list,
         result.depth_confidences,
-        target_points=150_000,
+        target_points=config.geometry_config.point_cloud_budget,
     )
     rr.log(
         f"{PARENT_LOG_PATH}/point_cloud",

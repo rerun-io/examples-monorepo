@@ -188,7 +188,8 @@ def multiview_calibration_fn(
             parent_log_path=PARENT_LOG_PATH,
             timeline=TIMELINE,
         )
-    yield stream.read(), "Calibration complete"
+    point_count: int = len(calibration_result.pcd.points)
+    yield stream.read(), f"Calibration complete · {point_count:,} points"
 
 
 def _switch_to_outputs():
@@ -249,7 +250,7 @@ def main() -> gr.Blocks:
                                 value=DEFAULT_CALIBRATOR_CONFIG.predictor_config.model_name,
                             )
                             keep_top_percent_slider = gr.Slider(
-                                label="Keep Top Percent (confidence filtering)",
+                                label="Keep Top Percent (confidence and point density)",
                                 minimum=1.0,
                                 maximum=100.0,
                                 step=1.0,

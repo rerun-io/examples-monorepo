@@ -306,7 +306,7 @@ def main() -> gr.Blocks:
                                 value=DEFAULT_PREDICTOR_CONFIG.model_name,
                             )
                             keep_top_percent_slider = gr.Slider(
-                                label="Keep Top Percent (confidence filtering)",
+                                label="Keep Top Percent (confidence and point density)",
                                 minimum=1.0,
                                 maximum=100.0,
                                 step=1.0,
