@@ -107,6 +107,24 @@ def test_filtered_pointcloud_unprojects_only_budgeted_confident_pixels() -> None
     np.testing.assert_array_equal(colors, prediction.rgb_image.reshape(-1, 3)[selected_pixel_ids])
 
 
+def test_filtered_pointcloud_applies_confidence_to_refined_depths() -> None:
+    prediction = _prediction()
+    prediction.rgb_image = np.arange(12, dtype=np.uint8).reshape(2, 2, 3)
+    confidence_mask = np.array([[255, 0], [0, 255]], dtype=np.uint8)
+    refined_depth = np.array([[2.0, 3.0], [4.0, 5.0]], dtype=np.float32)
+
+    points, colors = mv_pred_to_filtered_pointcloud(
+        [prediction],
+        [confidence_mask],
+        depth_list=[refined_depth],
+        target_points=10,
+    )
+
+    dense_refined_points = mv_pred_to_pointcloud([prediction], depth_list=[refined_depth])
+    np.testing.assert_allclose(points, dense_refined_points[[0, 3]], rtol=0.0, atol=0.0)
+    np.testing.assert_array_equal(colors, prediction.rgb_image.reshape(-1, 3)[[0, 3]])
+
+
 @settings(max_examples=75, deadline=None)
 @given(
     data=st.data(),

@@ -243,6 +243,7 @@ def mv_pred_to_filtered_pointcloud(
     mv_pred_list: list[MultiviewPred],
     confidence_masks: list[UInt8[ndarray, "H W"]],
     *,
+    depth_list: list[Float32[ndarray, "H W"]] | None = None,
     target_points: int = 150_000,
 ) -> tuple[Float32[ndarray, "sampled_points 3"], UInt8[ndarray, "sampled_points 3"]]:
     """Unproject a spatially uniform subset of confident pixels.
@@ -250,6 +251,7 @@ def mv_pred_to_filtered_pointcloud(
     Args:
         mv_pred_list: Per-view depth, RGB, and calibrated camera predictions.
         confidence_masks: Per-view binary masks whose nonzero pixels are eligible.
+        depth_list: Optional per-view depths to use instead of the prediction depths.
         target_points: Maximum number of points returned across all views.
 
     Returns:
@@ -260,6 +262,11 @@ def mv_pred_to_filtered_pointcloud(
         raise ValueError("target_points must be positive.")
     if len(mv_pred_list) != len(confidence_masks):
         raise ValueError("Predictions and confidence masks must have the same length.")
+    depths: list[Float32[ndarray, "H W"]] = (
+        depth_list if depth_list is not None else [prediction.depth_map for prediction in mv_pred_list]
+    )
+    if len(mv_pred_list) != len(depths):
+        raise ValueError("Predictions and depth maps must have the same length.")
 
     valid_pixel_counts: list[int] = [int(np.count_nonzero(mask)) for mask in confidence_masks]
     valid_pixel_count: int = sum(valid_pixel_counts)
@@ -273,13 +280,13 @@ def mv_pred_to_filtered_pointcloud(
     sampled_colors: list[UInt8[ndarray, "points 3"]] = []
     rank_offset = 0
 
-    for prediction, confidence_mask, camera_valid_count in zip(
+    for prediction, depth_map, confidence_mask, camera_valid_count in zip(
         mv_pred_list,
+        depths,
         confidence_masks,
         valid_pixel_counts,
         strict=True,
     ):
-        depth_map: Float32[ndarray, "H W"] = prediction.depth_map
         if confidence_mask.shape != depth_map.shape:
             raise ValueError("Each confidence mask must match its prediction's depth shape.")
 
@@ -482,17 +489,6 @@ class MultiViewCalibrator:
                 updated_confidences.append(depth_conf)
         depth_confidences = updated_confidences
 
-        # The viewer consumes roughly 150k points. Sample confident pixels before
-        # unprojection instead of materializing and filtering millions of dense points.
-        filtered_points, filtered_colors = mv_pred_to_filtered_pointcloud(
-            mv_pred_list,
-            depth_confidences,
-            target_points=150_000,
-        )
-        pcd: o3d.geometry.PointCloud = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(filtered_points)
-        pcd.colors = o3d.utility.Vector3dVector(filtered_colors / 255.0)
-
         # 3. Optional depth refinement: MoGe + depth alignment per view
         refined_depths_list: list[Float32[ndarray, "H W"]] = []
         if self.config.refine_depth_maps:
@@ -572,15 +568,24 @@ class MultiViewCalibrator:
                 rr.log(f"{pinhole_log_path}/filtered_depth", rr.DepthImage(filtered_depth_map, meter=1), static=True)
                 rr.log(f"{pinhole_log_path}/depth", rr.DepthImage(mv_pred.depth_map, meter=1), static=True)
 
-        # If refinement was done, rebuild point cloud from refined depths
-        if self.config.refine_depth_maps:
-            moge_points: Float32[ndarray, "num_points 3"] = mv_pred_to_pointcloud(
-                mv_pred_list, depth_list=refined_depths_list
-            )
-            rgb_stack = np.concatenate([rearrange(mv_pred.rgb_image, "h w c -> (h w) c") for mv_pred in mv_pred_list])
-            pcd = o3d.geometry.PointCloud()
-            pcd.points = o3d.utility.Vector3dVector(moge_points.reshape(-1, 3))
-            pcd.colors = o3d.utility.Vector3dVector(rgb_stack / 255.0)
+        # The viewer consumes roughly 150k points. Raw and refined depths share
+        # the same confidence/person filtering and point budget.
+        pointcloud_depths: list[Float32[ndarray, "H W"]] | None = (
+            refined_depths_list if self.config.refine_depth_maps else None
+        )
+        filtered_output: tuple[
+            Float32[ndarray, "sampled_points 3"], UInt8[ndarray, "sampled_points 3"]
+        ] = mv_pred_to_filtered_pointcloud(
+            mv_pred_list,
+            depth_confidences,
+            depth_list=pointcloud_depths,
+            target_points=150_000,
+        )
+        filtered_points: Float32[ndarray, "sampled_points 3"] = filtered_output[0]
+        filtered_colors: UInt8[ndarray, "sampled_points 3"] = filtered_output[1]
+        pcd: o3d.geometry.PointCloud = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(filtered_points)
+        pcd.colors = o3d.utility.Vector3dVector(filtered_colors / 255.0)
 
         mv_calib_results: MVCalibResults = MVCalibResults(
             pinhole_param_list=[mv_pred.pinhole_param for mv_pred in mv_pred_list],
