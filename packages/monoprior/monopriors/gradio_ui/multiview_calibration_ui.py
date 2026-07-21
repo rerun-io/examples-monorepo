@@ -53,8 +53,10 @@ EXAMPLE_DATA_DIR: Final[Path] = Path(__file__).resolve().parents[2] / "data" / "
 gr.set_static_paths([str(EXAMPLE_DATA_DIR)])
 
 DEFAULT_CALIBRATOR_CONFIG: Final[MultiViewCalibratorConfig] = MultiViewCalibratorConfig(
-    predictor_config=MultiviewPredictorConfig(device="cuda"),
+    predictor_config=MultiviewPredictorConfig(model_name="g3t", device="cuda"),
     geometry_config=MultiviewGeometryConfig(verbose=True),
+    refine_depth_maps=False,
+    segment_people=False,
 )
 
 

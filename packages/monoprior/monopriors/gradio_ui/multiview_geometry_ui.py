@@ -112,7 +112,7 @@ def create_multiview_blueprint(parent_log_path: Path, num_images: int) -> rrb.Co
 
 gr.set_static_paths([str(EXAMPLE_DATA_DIR)])
 
-DEFAULT_PREDICTOR_CONFIG: Final[MultiviewPredictorConfig] = MultiviewPredictorConfig(device="cuda")
+DEFAULT_PREDICTOR_CONFIG: Final[MultiviewPredictorConfig] = MultiviewPredictorConfig(model_name="g3t", device="cuda")
 DEFAULT_GEOMETRY_CONFIG: Final[MultiviewGeometryConfig] = MultiviewGeometryConfig(verbose=True)
 
 

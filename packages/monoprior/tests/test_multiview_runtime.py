@@ -12,8 +12,13 @@ from monopriors.apis.multiview_calibration import (
     run_multiview_calibration,
 )
 from monopriors.apis.multiview_geometry import MultiviewGeometryConfig, run_multiview_geometry
-from monopriors.gradio_ui.multiview_calibration_ui import _prepare_request as _prepare_calibration_request
-from monopriors.gradio_ui.multiview_geometry_ui import _prepare_request
+from monopriors.gradio_ui.multiview_calibration_ui import (
+    DEFAULT_CALIBRATOR_CONFIG,
+)
+from monopriors.gradio_ui.multiview_calibration_ui import (
+    _prepare_request as _prepare_calibration_request,
+)
+from monopriors.gradio_ui.multiview_geometry_ui import DEFAULT_PREDICTOR_CONFIG, _prepare_request
 from monopriors.models.multiview.multiview_model import MultiviewPred
 from monopriors.models.multiview.multiview_predictor import (
     MultiviewPredictor,
@@ -46,6 +51,13 @@ def _prediction() -> MultiviewPred:
         confidence_mask=np.ones((2, 2), dtype=np.float32),
         pinhole_param=pinhole,
     )
+
+
+def test_gradio_apps_default_to_pure_g3t() -> None:
+    assert DEFAULT_CALIBRATOR_CONFIG.predictor_config.model_name == "g3t"
+    assert DEFAULT_CALIBRATOR_CONFIG.refine_depth_maps is False
+    assert DEFAULT_CALIBRATOR_CONFIG.segment_people is False
+    assert DEFAULT_PREDICTOR_CONFIG.model_name == "g3t"
 
 
 def test_geometry_has_one_config_source_and_forwards_center_method() -> None:
