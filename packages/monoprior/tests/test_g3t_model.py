@@ -68,6 +68,22 @@ def _prediction() -> MultiviewPred:
     )
 
 
+def test_dense_pointcloud_supports_different_view_shapes() -> None:
+    first = _prediction()
+    second = _prediction()
+    second.cam_name = "camera_1"
+    second.rgb_image = np.zeros((2, 3, 3), dtype=np.uint8)
+    second.depth_map = np.arange(1, 7, dtype=np.float32).reshape(2, 3)
+    second.confidence_mask = np.ones((2, 3), dtype=np.float32)
+    second.pinhole_param.intrinsics.width = 3
+
+    expected = np.concatenate([mv_pred_to_pointcloud([first]), mv_pred_to_pointcloud([second])])
+    actual = mv_pred_to_pointcloud([first, second])
+
+    assert actual.shape == (10, 3)
+    np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
+
+
 def test_filtered_pointcloud_unprojects_only_budgeted_confident_pixels() -> None:
     prediction = _prediction()
     prediction.rgb_image = np.arange(48, dtype=np.uint8).reshape(4, 4, 3)
@@ -297,6 +313,37 @@ def test_preprocess_images_parallel_path_preserves_per_image_results() -> None:
     assert batch.metadata == [result.metadata[0] for result in individual]
 
 
+def test_multiview_materialization_supports_mixed_aspect_ratios() -> None:
+    images = [_rgb_image(height=28, width=42), _rgb_image(height=42, width=28)]
+    preprocessed = preprocess_images(images, mode="pad")
+    predictions = MultiviewModelPredictions(
+        depth=np.ones((1, 2, 518, 518, 1), dtype=np.float32),
+        depth_conf=np.ones((1, 2, 518, 518), dtype=np.float32),
+        intrinsic=np.repeat(
+            np.array([[[[259.0, 0.0, 259.0], [0.0, 259.0, 259.0], [0.0, 0.0, 1.0]]]], dtype=np.float32),
+            2,
+            axis=1,
+        ),
+        cam_T_world_b34=np.repeat(
+            np.array(
+                [[[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]]]],
+                dtype=np.float32,
+            ),
+            2,
+            axis=1,
+        ),
+    )
+
+    materialized = generate_multiview_pred(
+        predictions,
+        img_tensors=preprocessed.images,
+        rgb_list=images,
+        metadata_list=preprocessed.metadata,
+    )
+
+    assert [prediction.depth_map.shape for prediction in materialized] == [(28, 42), (42, 28)]
+
+
 def test_fast_g3t_rgb_materialization_stays_within_five_percent() -> None:
     rgb = _rgb_image(height=48, width=64)
     preprocessed = preprocess_images([rgb], mode="pad")
@@ -358,9 +405,9 @@ def test_graphable_rope_preserves_original_frequency_lookup() -> None:
     torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
 
 
-def test_g3t_compilation_can_be_disabled() -> None:
-    assert MultiviewPredictorConfig(model_name="g3t").g3t_compile is True
-    assert MultiviewPredictorConfig(model_name="g3t", g3t_compile=False).g3t_compile is False
+def test_g3t_uses_stable_eager_inference_by_default() -> None:
+    assert MultiviewPredictorConfig(model_name="g3t").g3t_compile is False
+    assert MultiviewPredictorConfig(model_name="g3t", g3t_compile=True).g3t_compile is True
 
 
 def test_g3t_compile_warms_frame_and_global_position_caches() -> None:

@@ -342,27 +342,27 @@ def generate_multiview_pred(
     pred_class = pred_class.remove_batch_dim_if_one()
     assert len(pred_class.cam_T_world_b34.shape) == 3, "Currently batch size of 1 is only supported"
 
-    depth_maps: Float32[ndarray, "num_cams resized_h resized_w 1"] = pred_class.depth
+    depth_map_batch: Float32[ndarray, "num_cams resized_h resized_w 1"] = pred_class.depth
 
     # Get colors from original images and reshape them to match points
-    processed_imgs: Float32[ndarray, "num_cams 3 resized_h resized_w"] = img_tensors.numpy(force=True)
+    processed_img_batch: Float32[ndarray, "num_cams 3 resized_h resized_w"] = img_tensors.numpy(force=True)
     # Rearrange to match point shape expectation
-    processed_imgs: Float32[ndarray, "num_cams resized_h resized_w 3"] = rearrange(
-        processed_imgs,
+    processed_img_batch: Float32[ndarray, "num_cams resized_h resized_w 3"] = rearrange(
+        processed_img_batch,
         "num_cams C resized_h resized_w -> num_cams resized_h resized_w C",
     )
 
     # Process each image's data first - remove padding if metadata is available
     if metadata_list:
-        unpadded_depth_maps = []
-        unpadded_processed_imgs = []
-        unpadded_depth_confs = []
+        depth_maps: list[Float32[ndarray, "H W 1"]] = []
+        processed_imgs: list[Float32[ndarray, "H W 3"]] = []
+        depth_confs: list[Float32[ndarray, "H W"]] = []
 
-        for i in range(len(processed_imgs)):
+        for i in range(len(processed_img_batch)):
             # Remove padding from depths, world points, processed images, and confidence maps
-            unpadded_depth_maps.append(remove_padding_from_prediction(depth_maps[i], metadata_list[i]))
-            unpadded_processed_imgs.append(remove_padding_from_prediction(processed_imgs[i], metadata_list[i]))
-            unpadded_depth_confs.append(remove_padding_from_prediction(pred_class.depth_conf[i], metadata_list[i]))
+            depth_maps.append(remove_padding_from_prediction(depth_map_batch[i], metadata_list[i]))
+            processed_imgs.append(remove_padding_from_prediction(processed_img_batch[i], metadata_list[i]))
+            depth_confs.append(remove_padding_from_prediction(pred_class.depth_conf[i], metadata_list[i]))
 
             # Also need to update camera intrinsics to account for removed padding
             if metadata_list[i]["mode"] == "pad":
@@ -373,12 +373,10 @@ def generate_multiview_pred(
                 pred_class.intrinsic[i, 0, 2] -= pad_left
                 pred_class.intrinsic[i, 1, 2] -= pad_top
 
-        # Replace the padded data with unpadded versions
-        depth_maps = np.array(unpadded_depth_maps)
-        processed_imgs = np.array(unpadded_processed_imgs)
-        depth_confs: Float32[ndarray, "num_cams _ _"] = np.array(unpadded_depth_confs)
     else:
-        depth_confs: Float32[ndarray, "num_cams _ _"] = pred_class.depth_conf
+        depth_maps = list(depth_map_batch)
+        processed_imgs = list(processed_img_batch)
+        depth_confs = list(pred_class.depth_conf)
 
     num_cams = len(rgb_list)
     if not all(

@@ -211,39 +211,32 @@ def mv_pred_to_pointcloud(
         np.ndarray: A flattened array of shape (num_points, 3) holding 3D points expressed in the
         world reference frame.
     """
-    # Select depth source: either the provided overrides or the depths stored on each prediction
-    if depth_list is None:
-        depth_maps: Float32[ndarray, "b h w 1"] = np.stack(
-            [rearrange(mv_pred.depth_map, "h w -> h w 1") for mv_pred in mv_pred_list], axis=0
-        ).astype(np.float32)
-    else:
-        depth_maps: Float32[ndarray, "b h w 1"] = np.stack(
-            [rearrange(depth, "h w -> h w 1") for depth in depth_list], axis=0
-        ).astype(np.float32)
+    depths = depth_list if depth_list is not None else [prediction.depth_map for prediction in mv_pred_list]
+    if len(depths) != len(mv_pred_list):
+        raise ValueError("Predictions and depth maps must have the same length.")
 
-    # Collect camera extrinsics (world_T_cam) for each view; multidepth_to_points expects this convention
-    world_T_cam_b44: Float32[ndarray, "num_cams 4 4"] = np.stack(
-        [mv_pred.pinhole_param.extrinsics.world_T_cam for mv_pred in mv_pred_list], axis=0
-    ).astype(np.float32)
-
-    # Gather intrinsics matrices so each depth map can be unprojected using its matching camera model
-    K_list: list[Float32[ndarray, "3 3"]] = []
-    for mv_pred in mv_pred_list:
-        # simplecv's Intrinsics stores k_matrix as float64; cast to float32 for the pipeline
-        K_33: Float[ndarray, "3 3"] | None = mv_pred.pinhole_param.intrinsics.k_matrix
+    # Unproject one view at a time because padding removal and depth refinement can
+    # restore each upload to a different spatial resolution.
+    pointclouds: list[Float32[ndarray, "points 3"]] = []
+    for prediction, depth in zip(mv_pred_list, depths, strict=True):
+        K_33: Float[ndarray, "3 3"] | None = prediction.pinhole_param.intrinsics.k_matrix
         if K_33 is None:
             raise ValueError("Multi-view prediction must include camera intrinsics.")
-        K_list.append(K_33.astype(np.float32))
-    K_b33: Float32[ndarray, "b 3 3"] = np.stack(K_list, axis=0).astype(np.float32)
+        depth_1hw1: Float32[ndarray, "1 H W 1"] = rearrange(depth, "h w -> 1 h w 1").astype(np.float32)
+        world_T_cam_144: Float32[ndarray, "1 4 4"] = rearrange(
+            prediction.pinhole_param.extrinsics.world_T_cam.astype(np.float32), "h w -> 1 h w"
+        )
+        K_133: Float32[ndarray, "1 3 3"] = rearrange(K_33.astype(np.float32), "h w -> 1 h w")
+        points: Float32[ndarray, "points 3"] = multidepth_to_points(
+            depth_maps=depth_1hw1,
+            world_T_cam_batch=world_T_cam_144,
+            K_b33=K_133,
+        ).reshape(-1, 3)
+        pointclouds.append(points)
 
-    # Lift each pixel into 3D world space, yielding one point per depth value
-    world_points: Float32[ndarray, "b h w 3"] = multidepth_to_points(
-        depth_maps=depth_maps, world_T_cam_batch=world_T_cam_b44, K_b33=K_b33
-    )
-
-    # Collapse the batch and image dimensions to obtain a flat point cloud
-    pointcloud: Float32[ndarray, "num_points 3"] = world_points.reshape(-1, 3)
-    return pointcloud
+    if not pointclouds:
+        return np.empty((0, 3), dtype=np.float32)
+    return np.concatenate(pointclouds)
 
 
 def mv_pred_to_filtered_pointcloud(

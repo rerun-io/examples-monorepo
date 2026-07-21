@@ -52,8 +52,8 @@ class MultiviewPredictorConfig:
     """Image preprocessing strategy."""
     local_files_only: bool = False
     """Require checkpoints to be present in the local Hugging Face cache."""
-    g3t_compile: bool = True
-    """Compile G3T on CUDA for lower warm inference latency; ignored by VGGT and CPU runs."""
+    g3t_compile: bool = False
+    """Compile G3T for fixed-shape CUDA workloads; ignored by VGGT and CPU runs."""
 
 
 @dataclass(slots=True)
