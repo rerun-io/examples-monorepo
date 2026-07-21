@@ -44,15 +44,15 @@ Predict per-pixel surface normal direction. Defined in `monopriors/models/surfac
 Base class: `BaseNormalPredictor`
 Output: `SurfaceNormalPrediction(normal_hw3, confidence_hw1)`
 
-### Multi-view geometry (VGGT)
+### Multi-view geometry (VGGT / G3T)
 
-Recovers camera poses and dense depth from unposed image collections. Defined in `monopriors/models/multiview/vggt_model.py`.
+Recovers camera poses and dense depth from unposed image collections. The common data model lives in `monopriors/models/multiview/multiview_model.py`; backend loading and pose conventions live in `multiview_predictor.py`.
 
 | Predictor class | Model | Source |
 |---|---|---|
-| `VGGTPredictor` | VGGT | [facebookresearch/vggt](https://github.com/facebookresearch/vggt) |
+| `MultiviewPredictor` | VGGT or gravity-aligned G3T | Selected by `MultiviewPredictorConfig.model_name` |
 
-Output: `VGGTPredictions` (pyserde dataclass) containing per-camera depth, confidence, intrinsics, extrinsics (`cam_T_world`), and world-space points.
+Output: one `MultiviewPred` per camera containing RGB, depth, confidence, and calibrated intrinsics/extrinsics. Point clouds are materialized separately from these predictions.
 
 ### Depth completion
 
@@ -111,13 +111,11 @@ SurfaceNormalPrediction
   normal_hw3      : Float[ndarray, "h w 3"]
   confidence_hw1  : Float[ndarray, "h w 1"]
 
-VGGTPredictions  (@serde dataclass)
-  pose_enc         : UInt8[ndarray, "*batch num_cams 9"]
-  depth            : Float32[ndarray, "*batch num_cams H W 1"]
-  depth_conf       : Float32[ndarray, "*batch num_cams H W"]
-  world_points     : Float32[ndarray, "*batch num_cams H W 3"]
-  intrinsic        : Float32[ndarray, "*batch num_cams 3 3"]
-  cam_T_world_b34  : Float32[ndarray, "*batch num_cams 3 4"]
+MultiviewPred
+  rgb_image       : UInt8[ndarray, "H W 3"]
+  depth_map       : Float32[ndarray, "H W"]
+  confidence_mask : Float32[ndarray, "H W"]
+  pinhole_param   : PinholeParameters
 ```
 
 Camera parameters use `simplecv.camera_parameters.PinholeParameters` which bundles `Intrinsics` (K matrix + resolution) and `Extrinsics` (both `cam_T_world` and `world_T_cam` directions).
@@ -136,7 +134,7 @@ monopriors/
     metric_depth/                 # Metric depth predictors + factory
     relative_depth/               # Relative depth predictors + factory
     surface_normal/               # Normal predictors + factory
-    multiview/                    # VGGT multi-view geometry
+    multiview/                    # VGGT/G3T multi-view geometry
     depth_completion/             # PromptDA depth completion
     monoprior/                    # Composite model (depth + normals)
       monoprior_models.py         # MonoPriorModel / DsineAndUnidepth
@@ -214,16 +212,16 @@ RGB image (h, w, 3)
   → log to Rerun (pinhole + image + depth + points)
 ```
 
-### Multi-view (VGGT)
+### Multi-view (VGGT / G3T)
 
 ```
 Image set [N images]
   → preprocess (crop/pad to 518px width, divisible by 14)
-  → VGGT model → VGGTPredictions
+  → selected backend → backend-neutral tensor predictions
       ├── pose_encoding_to_extri_intri → camera poses
       ├── depth maps per view
       └── confidence masks
-  → auto_orient_and_center_poses (PCA)
+  → normalize the backend's world convention to +Z up
   → multidepth_to_points → combined point cloud
   → [optional] MoGe refinement via scale-shift alignment
   → voxel downsampling (binary search for target count)

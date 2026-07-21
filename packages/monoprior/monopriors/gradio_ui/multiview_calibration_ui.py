@@ -24,15 +24,24 @@ from numpy import ndarray
 from monopriors.apis.multiview_calibration import (
     PARENT_LOG_PATH,
     TIMELINE,
-    MultiViewCalibrator,
     MultiViewCalibratorConfig,
+    MVCalibResults,
     load_rgb_images,
-    run_calibration_pipeline,
+    log_calibration_results,
+    run_multiview_calibration,
 )
-from monopriors.gradio_ui._calibration_runtime import AUXILIARY_MODEL_CACHE, CalibrationAuxiliaryModels
+from monopriors.apis.multiview_geometry import MultiviewGeometryConfig
+from monopriors.gradio_ui._calibration_runtime import (
+    AUXILIARY_MODEL_CACHE,
+    CalibrationAuxiliaryModels,
+)
 from monopriors.gradio_ui._multiview_common import parse_multiview_model, parse_preprocessing_mode
 from monopriors.gradio_ui._multiview_runtime import PREDICTOR_CACHE
-from monopriors.models.multiview.multiview_predictor import MultiviewPredictorConfig
+from monopriors.models.multiview.multiview_predictor import (
+    IMAGE_PREPROCESSING_MODES,
+    MULTIVIEW_MODEL_NAMES,
+    MultiviewPredictorConfig,
+)
 
 EXAMPLE_DATA_DIR: Final[Path] = Path(__file__).resolve().parents[2] / "data" / "examples" / "multiview"
 """Path to bundled example image sets used by ``gr.Examples``."""
@@ -40,8 +49,8 @@ EXAMPLE_DATA_DIR: Final[Path] = Path(__file__).resolve().parents[2] / "data" / "
 gr.set_static_paths([str(EXAMPLE_DATA_DIR)])
 
 DEFAULT_CALIBRATOR_CONFIG: Final[MultiViewCalibratorConfig] = MultiViewCalibratorConfig(
-    predictor_config=MultiviewPredictorConfig(device="cuda", preprocessing_mode="pad"),
-    verbose=True,
+    predictor_config=MultiviewPredictorConfig(device="cuda"),
+    geometry_config=MultiviewGeometryConfig(verbose=True),
 )
 
 
@@ -66,8 +75,8 @@ def _prepare_request(
     Args:
         img_files: Uploaded image paths.
         model_name: Multi-view model backend (``vggt`` or ``g3t``).
-        keep_top_percent: Confidence filtering threshold (1-100).
-            Higher values discard more low-confidence pixels.
+        keep_top_percent: Percentage of highest-confidence pixels retained (1-100).
+            Higher values retain more pixels.
         refine_depth_maps: Whether to run MoGe depth refinement.
         segment_people: Whether to run SAM3 person segmentation.
         preprocessing_mode: Image preprocessing strategy ("crop" or "pad").
@@ -79,12 +88,14 @@ def _prepare_request(
             predictor_config=MultiviewPredictorConfig(
                 model_name=parse_multiview_model(model_name),
                 device="cuda",
-                preprocessing_mode=preprocessing_mode_literal,
             ),
-            keep_top_percent=keep_top_percent,
+            geometry_config=MultiviewGeometryConfig(
+                keep_top_percent=keep_top_percent,
+                preprocessing_mode=preprocessing_mode_literal,
+                verbose=True,
+            ),
             refine_depth_maps=refine_depth_maps,
             segment_people=segment_people,
-            verbose=True,
         ),
     )
 
@@ -139,8 +150,8 @@ def multiview_calibration_fn(
 ) -> Generator[tuple[bytes | None, str], None, None]:
     """Gradio streaming callback that runs the calibration pipeline.
 
-    Delegates to ``run_calibration_pipeline`` inside a ``with recording:``
-    context so all Rerun logging targets the UI's binary stream.
+    Runs the shared calibration function inside the predictor-cache lease and a
+    ``with recording:`` context so model ownership and Rerun routing stay scoped.
 
     Args:
         recording_id: Session-scoped recording identifier.
@@ -152,22 +163,24 @@ def multiview_calibration_fn(
     recording: rr.RecordingStream = get_recording(recording_id)
     stream: rr.BinaryStream = recording.binary_stream()
 
-    with recording, PREDICTOR_CACHE.acquire(request.config.predictor_config) as multiview_predictor:
-        auxiliary_models: CalibrationAuxiliaryModels = AUXILIARY_MODEL_CACHE.get(
-            device=request.config.predictor_config.device,
-            segment_people=request.config.segment_people,
-            refine_depth_maps=request.config.refine_depth_maps,
-        )
-        calibrator: MultiViewCalibrator = MultiViewCalibrator(
-            parent_log_path=PARENT_LOG_PATH,
-            config=request.config,
-            multiview_predictor=multiview_predictor,
-            seg_predictor=auxiliary_models.seg_predictor,
-            moge_predictor=auxiliary_models.moge_predictor,
-        )
-        run_calibration_pipeline(
+    with recording:
+        with PREDICTOR_CACHE.acquire(request.config.predictor_config) as predictor:
+            auxiliary_models: CalibrationAuxiliaryModels = AUXILIARY_MODEL_CACHE.get(
+                device=request.config.predictor_config.device,
+                segment_people=request.config.segment_people,
+                refine_depth_maps=request.config.refine_depth_maps,
+            )
+            calibration_result: MVCalibResults = run_multiview_calibration(
+                rgb_list=request.rgb_list,
+                multiview_predictor=predictor,
+                config=request.config,
+                parent_log_path=PARENT_LOG_PATH,
+                seg_predictor=auxiliary_models.seg_predictor,
+                moge_predictor=auxiliary_models.moge_predictor,
+            )
+        log_calibration_results(
             rgb_list=request.rgb_list,
-            mv_calibrator=calibrator,
+            output=calibration_result,
             parent_log_path=PARENT_LOG_PATH,
             timeline=TIMELINE,
         )
@@ -228,7 +241,7 @@ def main() -> gr.Blocks:
                         with gr.Accordion("Config", open=False):
                             model_dropdown = gr.Dropdown(
                                 label="Multi-view Model",
-                                choices=["vggt", "g3t"],
+                                choices=MULTIVIEW_MODEL_NAMES,
                                 value=DEFAULT_CALIBRATOR_CONFIG.predictor_config.model_name,
                             )
                             keep_top_percent_slider = gr.Slider(
@@ -236,7 +249,7 @@ def main() -> gr.Blocks:
                                 minimum=1.0,
                                 maximum=100.0,
                                 step=1.0,
-                                value=DEFAULT_CALIBRATOR_CONFIG.keep_top_percent,
+                                value=DEFAULT_CALIBRATOR_CONFIG.geometry_config.keep_top_percent,
                             )
                             refine_depth_checkbox = gr.Checkbox(
                                 label="Refine Depth Maps (MoGe)",
@@ -248,8 +261,8 @@ def main() -> gr.Blocks:
                             )
                             preprocessing_radio = gr.Radio(
                                 label="Preprocessing Mode",
-                                choices=["crop", "pad"],
-                                value=DEFAULT_CALIBRATOR_CONFIG.predictor_config.preprocessing_mode,
+                                choices=IMAGE_PREPROCESSING_MODES,
+                                value=DEFAULT_CALIBRATOR_CONFIG.geometry_config.preprocessing_mode,
                             )
 
                     with gr.TabItem("Outputs", id="outputs"):

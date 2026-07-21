@@ -15,18 +15,23 @@ from jaxtyping import Bool, Float, Float32, UInt8
 from numpy import ndarray
 from scipy.spatial.transform import Rotation
 from simplecv.camera_parameters import Extrinsics
+from simplecv.ops.pc_utils import estimate_voxel_size
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
 from simplecv.video_io import MultiVideoReader
-from tqdm.auto import trange
 
 from monopriors.apis.multiview_calibration import load_rgb_images
-from monopriors.depth_utils import depth_edges_mask, multidepth_to_points
+from monopriors.apis.multiview_geometry import (
+    MultiviewGeometryConfig,
+    MultiviewGeometryResult,
+    run_multiview_geometry,
+)
+from monopriors.depth_utils import depth_edges_mask
+from monopriors.models.multiview.multiview_model import MultiviewPred
+from monopriors.models.multiview.multiview_pointcloud import mv_pred_to_pointcloud
 from monopriors.models.multiview.multiview_predictor import (
-    CenterMethod,
     MultiviewPredictor,
     MultiviewPredictorConfig,
 )
-from monopriors.models.multiview.vggt_model import MultiviewPred, robust_filter_confidences
 from monopriors.models.relative_depth import (
     RelativeDepthPrediction,
     get_relative_predictor,
@@ -284,136 +289,30 @@ def extrinsic_to_colmap_format(mv_pred_list: list[MultiviewPred]) -> tuple[np.nd
     return np.array(quaternions), np.array(translations)
 
 
-def estimate_voxel_size(
-    points: Float32[ndarray, "N 3"],
-    target_points: int = 100_000,
-    tolerance: float = 0.25,
-    max_iterations: int = 10,
-    min_voxel_ratio: float = 0.0001,
-    max_voxel_ratio: float = 0.5,
-) -> float:
-    """
-    Use binary search to find optimal voxel size for target point count.
-
-    Args:
-        points: Input point cloud points
-        target_points: Desired number of points after downsampling
-        tolerance: Acceptable relative error (0.25 = within 25% of target)
-        max_iterations: Maximum binary search iterations
-        min_voxel_ratio: Minimum voxel size as ratio of scene diagonal
-        max_voxel_ratio: Maximum voxel size as ratio of scene diagonal
-
-    Returns:
-        Voxel size that results in point count within tolerance of target_points
-    """
-    if len(points) == 0:
-        return 0.01  # Default fallback
-
-    # Calculate scene bounds for voxel size limits
-    min_bounds: Float32[ndarray, "3"] = np.min(points, axis=0)
-    max_bounds: Float32[ndarray, "3"] = np.max(points, axis=0)
-    scene_diagonal: float = float(np.linalg.norm(max_bounds - min_bounds))
-
-    # Set search bounds
-    min_voxel_size: float = scene_diagonal * min_voxel_ratio
-    max_voxel_size: float = scene_diagonal * max_voxel_ratio
-
-    # Create Open3D point cloud once for reuse
-    pcd_temp: o3d.geometry.PointCloud = o3d.geometry.PointCloud()
-    pcd_temp.points = o3d.utility.Vector3dVector(points)
-
-    # Binary search for optimal voxel size
-    low: float = min_voxel_size
-    high: float = max_voxel_size
-    best_voxel_size: float = (low + high) / 2
-
-    t = trange(max_iterations, desc="Estimating voxel size")
-    for _ in t:
-        current_voxel_size: float = (low + high) / 2
-
-        # Test this voxel size
-        pcd_test: o3d.geometry.PointCloud = pcd_temp.voxel_down_sample(current_voxel_size)
-        current_points: int = len(pcd_test.points)
-
-        # Calculate relative error
-        error: float = abs(current_points - target_points) / target_points
-
-        # update progress bar postfix
-        t.set_postfix(
-            {
-                "voxel_size": f"{current_voxel_size:.6f}",
-                "points": current_points,
-                "error": f"{error:.3f}",
-            }
-        )
-
-        # Check if we're within tolerance
-        if error <= tolerance:
-            best_voxel_size = current_voxel_size
-            t.write(f"  - ✓ Found optimal voxel size: {best_voxel_size:.6f}")
-            break
-
-        # Update search bounds
-        if current_points > target_points:
-            # Too many points, need larger voxel size
-            low = current_voxel_size
-        else:
-            # Too few points, need smaller voxel size
-            high = current_voxel_size
-
-        best_voxel_size = current_voxel_size
-
-    return float(best_voxel_size)
-
-
-def mv_pred_to_pointcloud(
-    mv_pred_list: list[MultiviewPred], depth_list: list[Float32[ndarray, "H W"]] | None = None
-) -> Float32[ndarray, "num_points 3"]:
-    if depth_list is None:
-        depth_maps: Float32[ndarray, "b h w 1"] = np.stack(
-            [rearrange(mv_pred.depth_map, "h w -> h w 1") for mv_pred in mv_pred_list], axis=0
-        ).astype(np.float32)
-    else:
-        depth_maps: Float32[ndarray, "b h w 1"] = np.stack(
-            [rearrange(depth, "h w -> h w 1") for depth in depth_list], axis=0
-        ).astype(np.float32)
-
-    # multidepth_to_points requires world_T_cam not cam_T_world
-    world_T_cam_b44: Float32[ndarray, "num_cams 4 4"] = np.stack(
-        [mv_pred.pinhole_param.extrinsics.world_T_cam for mv_pred in mv_pred_list], axis=0
-    ).astype(np.float32)
-    K_list: list[Float32[ndarray, "3 3"]] = []
-    for mv_pred in mv_pred_list:
-        # simplecv's Intrinsics stores k_matrix as float64; cast to float32 for the pipeline
-        K_33: Float[ndarray, "3 3"] | None = mv_pred.pinhole_param.intrinsics.k_matrix
-        if K_33 is None:
-            raise ValueError("Multi-view prediction must include camera intrinsics.")
-        K_list.append(K_33.astype(np.float32))
-    K_b33: Float32[ndarray, "b 3 3"] = np.stack(K_list, axis=0).astype(np.float32)
-    world_points: Float32[ndarray, "b h w 3"] = multidepth_to_points(
-        depth_maps=depth_maps, world_T_cam_batch=world_T_cam_b44, K_b33=K_b33
-    )
-    pointcloud: Float32[ndarray, "num_points 3"] = world_points.reshape(-1, 3)
-    return pointcloud
-
-
 @dataclass
 class MultiviewInferenceConfig:
+    """Standalone multi-view depth, visualization, and COLMAP export settings."""
+
     rr_config: RerunTyroConfig
+    """Rerun logging configuration."""
     predictor_config: MultiviewPredictorConfig = field(
-        default_factory=lambda: MultiviewPredictorConfig(device=device, preprocessing_mode="crop")
+        default_factory=lambda: MultiviewPredictorConfig(device=device)
     )
     """Model construction configuration."""
-    center_method: CenterMethod = "poses"
-    """How to center backend-canonicalized poses."""
+    geometry_config: MultiviewGeometryConfig = field(
+        default_factory=lambda: MultiviewGeometryConfig(
+            keep_top_percent=50.0,
+            preprocessing_mode="crop",
+            center_method="poses",
+        )
+    )
+    """Canonical preprocessing, centering, and confidence-filtering settings."""
     image_dir: Path | None = None
-    videos_dir: Path | None = None
-    timestep: int = 1
     """Directory containing input images."""
-    keep_top_percent: int | float = 50.0
-    """keep_top_percent: Percentage in [0,100]. Interpreted as the fraction to discard;
-        the top (100 - keep_top_percent)% of pixel scores are kept.
-        E.g. 75 -> keep top 25%; 30 -> keep top 70%."""
+    videos_dir: Path | None = None
+    """Directory containing synchronized input videos."""
+    timestep: int = 1
+    """Video frame index to process."""
     output_dir: Path | None = None
     """Output directory for colmap version. If None, results are not saved."""
 
@@ -455,21 +354,19 @@ def run_inference(config: MultiviewInferenceConfig) -> None:
     rr.send_blueprint(blueprint=blueprint)
     rr.log(f"{parent_log_path}", rr.ViewCoordinates.RFU, static=True)
 
-    multiview_predictor = MultiviewPredictor(config.predictor_config)
-    mv_pred_list: list[MultiviewPred] = multiview_predictor(
+    multiview_predictor: MultiviewPredictor = MultiviewPredictor(config.predictor_config)
+    geometry_result: MultiviewGeometryResult = run_multiview_geometry(
         rgb_list=rgb_list,
-        center_method=config.center_method,
+        multiview_predictor=multiview_predictor,
+        config=config.geometry_config,
     )
+    mv_pred_list: list[MultiviewPred] = geometry_result.mv_pred_list
+    depth_confidences: list[UInt8[ndarray, "H W"]] = geometry_result.depth_confidences
     pointcloud: Float32[ndarray, "num_points 3"] = mv_pred_to_pointcloud(mv_pred_list)
     rgb_stack: UInt8[ndarray, "num_points 3"] = np.concatenate(
         [rearrange(mv_pred.rgb_image, "h w c -> (h w) c") for mv_pred in mv_pred_list]
     )
 
-    # create depth confidence values using robust filtering for top keep percentile
-    depth_confidences: list[UInt8[ndarray, "H W"]] = [
-        robust_filter_confidences(mv_pred.confidence_mask, keep_top_percent=config.keep_top_percent)
-        for mv_pred in mv_pred_list
-    ]
     pc_conf_mask: Bool[ndarray, "num_points"] = np.concatenate(
         [rearrange(depth_conf, "h w -> (h w)") for depth_conf in depth_confidences]
     ).astype(bool)

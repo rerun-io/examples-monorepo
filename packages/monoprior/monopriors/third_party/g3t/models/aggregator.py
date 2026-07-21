@@ -4,19 +4,12 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
-import logging
 import torch
 import torch.nn as nn
-# import torch.nn.functional as F
-from typing import Tuple, List
-from torch.utils.checkpoint import checkpoint
 
-from monopriors.third_party.g3t.layers import PatchEmbed
 from monopriors.third_party.g3t.layers.block import Block
-from monopriors.third_party.g3t.layers.rope import RotaryPositionEmbedding2D, PositionGetter
-from monopriors.third_party.g3t.layers.vision_transformer import vit_small, vit_base, vit_large, vit_giant2
-
-logger = logging.getLogger(__name__)
+from monopriors.third_party.g3t.layers.rope import PositionGetter, RotaryPositionEmbedding2D
+from monopriors.third_party.g3t.layers.vision_transformer import vit_large
 
 _RESNET_MEAN = [0.485, 0.456, 0.406]
 _RESNET_STD = [0.229, 0.224, 0.225]
@@ -62,8 +55,7 @@ class Aggregator(nn.Module):
         qkv_bias=True,
         proj_bias=True,
         ffn_bias=True,
-        patch_embed="dinov2_vitl14_reg",
-        aa_order=["frame", "global"],
+        aa_order=("frame", "global"),
         aa_block_size=1,
         qk_norm=True,
         rope_freq=100,
@@ -71,7 +63,15 @@ class Aggregator(nn.Module):
     ):
         super().__init__()
 
-        self.__build_patch_embed__(patch_embed, img_size, patch_size, num_register_tokens, embed_dim=embed_dim)
+        self.patch_embed = vit_large(
+            img_size=img_size,
+            patch_size=patch_size,
+            num_register_tokens=num_register_tokens,
+            interpolate_antialias=True,
+            interpolate_offset=0.0,
+            init_values=1.0,
+        )
+        self.patch_embed.mask_token.requires_grad_(False)
 
         # Initialize rotary position embedding if frequency > 0
         self.rope = RotaryPositionEmbedding2D(frequency=rope_freq) if rope_freq > 0 else None
@@ -138,50 +138,34 @@ class Aggregator(nn.Module):
         for name, value in (("_resnet_mean", _RESNET_MEAN), ("_resnet_std", _RESNET_STD)):
             self.register_buffer(name, torch.FloatTensor(value).view(1, 1, 3, 1, 1), persistent=False)
 
-        self.use_reentrant = False  # hardcoded to False
-
-    def __build_patch_embed__(
+    def warm_shape_caches(
         self,
-        patch_embed,
-        img_size,
-        patch_size,
-        num_register_tokens,
-        interpolate_antialias=True,
-        interpolate_offset=0.0,
-        block_chunks=0,
-        init_values=1.0,
-        embed_dim=1024,
-    ):
-        """
-        Build the patch embed layer. If 'conv', we use a
-        simple PatchEmbed conv layer. Otherwise, we use a vision transformer.
-        """
+        *,
+        num_cams: int,
+        height: int,
+        width: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> None:
+        """Populate shape-dependent position and RoPE caches before graph capture."""
+        patch_height = height // self.patch_size
+        patch_width = width // self.patch_size
+        if self.position_getter is not None:
+            self.position_getter(num_cams, patch_height, patch_width, device=device)
+        if self.rope is None:
+            return
 
-        if "conv" in patch_embed:
-            self.patch_embed = PatchEmbed(img_size=img_size, patch_size=patch_size, in_chans=3, embed_dim=embed_dim)
-        else:
-            vit_models = {
-                "dinov2_vitl14_reg": vit_large,
-                "dinov2_vitb14_reg": vit_base,
-                "dinov2_vits14_reg": vit_small,
-                "dinov2_vitg2_reg": vit_giant2,
-            }
-
-            self.patch_embed = vit_models[patch_embed](
-                img_size=img_size,
-                patch_size=patch_size,
-                num_register_tokens=num_register_tokens,
-                interpolate_antialias=interpolate_antialias,
-                interpolate_offset=interpolate_offset,
-                block_chunks=block_chunks,
-                init_values=init_values,
+        rope_feature_dim = self.frame_blocks[0].attn.head_dim // 2
+        frame_token_count = patch_height * patch_width + self.patch_start_idx
+        for token_count in (frame_token_count, num_cams * frame_token_count):
+            self.rope._compute_frequency_components(
+                rope_feature_dim,
+                token_count,
+                device,
+                dtype,
             )
 
-            # Disable gradient updates for mask token
-            if hasattr(self.patch_embed, "mask_token"):
-                self.patch_embed.mask_token.requires_grad_(False)
-
-    def forward(self, images: torch.Tensor) -> Tuple[List[torch.Tensor], int]:
+    def forward(self, images: torch.Tensor) -> tuple[list[torch.Tensor], int]:
         """
         Args:
             images (torch.Tensor): Input images with shape [B, S, 3, H, W], in range [0, 1].
@@ -272,10 +256,7 @@ class Aggregator(nn.Module):
 
         # by default, self.aa_block_size=1, which processes one block at a time
         for _ in range(self.aa_block_size):
-            if self.training:
-                tokens = checkpoint(self.frame_blocks[frame_idx], tokens, pos, use_reentrant=self.use_reentrant)
-            else:
-                tokens = self.frame_blocks[frame_idx](tokens, pos=pos)
+            tokens = self.frame_blocks[frame_idx](tokens, pos=pos)
             frame_idx += 1
             intermediates.append(tokens.view(B, S, P, C))
 
@@ -295,10 +276,7 @@ class Aggregator(nn.Module):
 
         # by default, self.aa_block_size=1, which processes one block at a time
         for _ in range(self.aa_block_size):
-            if self.training:
-                tokens = checkpoint(self.global_blocks[global_idx], tokens, pos, use_reentrant=self.use_reentrant)
-            else:
-                tokens = self.global_blocks[global_idx](tokens, pos=pos)
+            tokens = self.global_blocks[global_idx](tokens, pos=pos)
             global_idx += 1
             intermediates.append(tokens.view(B, S, P, C))
 

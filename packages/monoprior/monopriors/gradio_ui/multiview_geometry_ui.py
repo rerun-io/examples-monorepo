@@ -37,7 +37,11 @@ from monopriors.apis.multiview_geometry import (
 )
 from monopriors.gradio_ui._multiview_common import parse_multiview_model, parse_preprocessing_mode
 from monopriors.gradio_ui._multiview_runtime import PREDICTOR_CACHE
-from monopriors.models.multiview.multiview_predictor import MultiviewPredictorConfig
+from monopriors.models.multiview.multiview_predictor import (
+    IMAGE_PREPROCESSING_MODES,
+    MULTIVIEW_MODEL_NAMES,
+    MultiviewPredictorConfig,
+)
 
 EXAMPLE_DATA_DIR: Final[Path] = Path(__file__).resolve().parents[2] / "data" / "examples" / "multiview"
 """Path to bundled example image sets."""
@@ -104,9 +108,7 @@ def create_multiview_blueprint(parent_log_path: Path, num_images: int) -> rrb.Co
 
 gr.set_static_paths([str(EXAMPLE_DATA_DIR)])
 
-DEFAULT_PREDICTOR_CONFIG: Final[MultiviewPredictorConfig] = MultiviewPredictorConfig(
-    device="cuda", preprocessing_mode="pad"
-)
+DEFAULT_PREDICTOR_CONFIG: Final[MultiviewPredictorConfig] = MultiviewPredictorConfig(device="cuda")
 DEFAULT_GEOMETRY_CONFIG: Final[MultiviewGeometryConfig] = MultiviewGeometryConfig(verbose=True)
 
 
@@ -131,7 +133,8 @@ def _prepare_request(
     Args:
         img_files: Uploaded image paths.
         model_name: Multi-view model backend (``vggt`` or ``g3t``).
-        keep_top_percent: Confidence filtering threshold (1-100).
+        keep_top_percent: Percentage of highest-confidence pixels retained (1-100).
+            Higher values retain more pixels.
         preprocessing_mode: Image preprocessing strategy ('crop' or 'pad').
         verbose: Whether to log per-camera detail.
     """
@@ -141,10 +144,10 @@ def _prepare_request(
         predictor_config=MultiviewPredictorConfig(
             model_name=parse_multiview_model(model_name),
             device="cuda",
-            preprocessing_mode=preprocessing_mode_literal,
         ),
         geometry_config=MultiviewGeometryConfig(
             keep_top_percent=keep_top_percent,
+            preprocessing_mode=preprocessing_mode_literal,
             verbose=verbose,
         ),
     )
@@ -295,7 +298,7 @@ def main() -> gr.Blocks:
                         with gr.Accordion("Config", open=False):
                             model_dropdown = gr.Dropdown(
                                 label="Model",
-                                choices=["vggt", "g3t"],
+                                choices=MULTIVIEW_MODEL_NAMES,
                                 value=DEFAULT_PREDICTOR_CONFIG.model_name,
                             )
                             keep_top_percent_slider = gr.Slider(
@@ -307,8 +310,8 @@ def main() -> gr.Blocks:
                             )
                             preprocessing_radio = gr.Radio(
                                 label="Preprocessing Mode",
-                                choices=["crop", "pad"],
-                                value=DEFAULT_PREDICTOR_CONFIG.preprocessing_mode,
+                                choices=IMAGE_PREPROCESSING_MODES,
+                                value=DEFAULT_GEOMETRY_CONFIG.preprocessing_mode,
                             )
                             verbose_checkbox = gr.Checkbox(
                                 label="Verbose (per-camera detail logging)",

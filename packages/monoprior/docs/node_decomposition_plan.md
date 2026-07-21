@@ -2,7 +2,7 @@
 
 ## Context
 
-The `MultiViewCalibrator` in `multiview_calibration.py` is monolithic — it bundles VGGT (geometry), SAM3 (segmentation), and MoGe (depth refinement) into a single class. The goal is to decompose it into self-contained nodes that each have their own CLI + Gradio app, following the pattern established by wilor-nano. These nodes can then be composed via daggr into a unified workflow, while the existing monolithic Gradio UI continues to work for the live Rerun streaming experience.
+The original `MultiViewCalibrator` bundled VGGT geometry, SAM3 segmentation, and MoGe depth refinement into one stateful class. The implementation now exposes a caller-owned `run_multiview_calibration()` function and a standalone `run_multiview_geometry()` node. The remaining goal is to expose every post-processing stage as a self-contained CLI and Gradio node following the wilor-nano pattern.
 
 ### Two types of apps
 - **Self-contained nodes**: One model, clear input/output contract, daggr-composable (VGGT, SAM3, MoGe, Scale Alignment)
@@ -18,7 +18,7 @@ The `MultiViewCalibrator` in `multiview_calibration.py` is monolithic — it bun
 
 ### Decisions
 - SAM3 multi-view node lives in **sam3-rerun** package (alongside existing single-image apps)
-- Monolithic `MultiViewCalibrator` **kept as thin orchestrator** (delegates to decomposed APIs)
+- Calibration composition is a function with an explicit predictor argument; model ownership stays with the CLI or cache lease
 - Scale alignment is its **own node** — reusable across any depth estimation method pair
 - All node I/O uses **typed dataclasses** (with jaxtyping annotations), not `.npz` files. Serialization for daggr is handled at the Gradio `pred_fn` boundary via `pyserde`.
 
@@ -68,7 +68,7 @@ class VGGTGeometryResult:
 Then `VGGTInferenceConfig` and `MultiViewCalibratorConfig` can compose this config rather than duplicating the fields.
 
 - **Input**: `list[UInt8[ndarray, "H W 3"]]`
-- **Contains**: `VGGTPredictor` + `orient_mv_pred_list()` + `robust_filter_confidences()`
+- **Contains**: `MultiviewPredictor` + backend-owned pose normalization + `robust_filter_confidences()`
 - **Port**: 7870
 
 ### Node 2: SAM3 Segmentation (GPU, in `sam3-rerun` package)
@@ -440,14 +440,15 @@ sam3_rerun/gradio_ui/sam3_rerun_ui.py           # Update: add Config accordion, 
 
 ## Files to Modify
 
-- `multiview_calibration.py` — `MultiViewCalibrator.__call__()` becomes thin orchestrator importing from new api modules. Helper functions (`orient_mv_pred_list`, `segment_people`, `mv_pred_to_pointcloud`) move to their respective api modules.
+- `multiview_calibration.py` — `run_multiview_calibration()` composes geometry and post-processing without retaining model ownership.
 - `multiview_calibration_ui.py` — unchanged (calls refactored calibrator in-process)
 - `multiview_inference.py` — import `orient_mv_pred_list` from `vggt_geometry` (currently duplicated)
 - `pixi.toml` — add tasks for new apps/demos
 
 ## Code Reuse (no changes)
 
-- `VGGTPredictor`, `MultiviewPred`, `robust_filter_confidences` — `models/multiview/vggt_model.py`
+- `MultiviewPredictor` — `models/multiview/multiview_predictor.py`
+- `MultiviewPred`, `robust_filter_confidences` — `models/multiview/multiview_model.py`
 - `BaseMetricPredictor`, `MetricDepthPrediction`, `get_metric_predictor()`, `METRIC_PREDICTORS` — `models/metric_depth/`
 - `SAM3Predictor`, `SAM3Results` — `sam3/api/predictor.py`
 - `compute_scale_and_shift` — `scale_utils.py`
@@ -493,8 +494,8 @@ sam3_rerun/gradio_ui/sam3_rerun_ui.py           # Update: add Config accordion, 
 3. Pixi tasks
 4. **Verify**: full daggr graph end-to-end
 
-### Phase 6: Refactor monolithic calibrator
-1. `MultiViewCalibrator.__call__()` delegates to decomposed APIs in-process:
+### Phase 6: Refactor calibration composition
+1. `run_multiview_calibration()` delegates to decomposed APIs in-process:
    - `run_vggt_geometry(rgb_list)` → geometry
    - loop: `metric_predictor(rgb)` per view → metric depths (via `get_metric_predictor()` factory)
    - loop: `segment_people(rgb)` per view → masks
@@ -567,7 +568,8 @@ With `graph.as_gradio()` + `graph.invoke()`, we define the pipeline ONCE, use it
 - `packages/wilor-nano/tools/daggr_wilor.py` — reference for daggr graph wiring
 - `packages/sam3/src/sam3/api/predictor.py` — SAM3 API to wrap
 - `packages/sam3/src/sam3/gradio_ui/sam3_rerun_ui.py` — SAM3 Gradio app pattern
-- `packages/monoprior/monopriors/models/multiview/vggt_model.py` — VGGT types
+- `packages/monoprior/monopriors/models/multiview/multiview_model.py` — backend-neutral types
+- `packages/monoprior/monopriors/models/multiview/multiview_predictor.py` — VGGT/G3T adapters
 - `packages/monoprior/monopriors/models/metric_depth/moge_v2.py` — MoGe V2 metric predictor
 - `packages/monoprior/monopriors/models/metric_depth/base_metric_depth.py` — `MetricDepthPrediction` dataclass
 - `packages/monoprior/monopriors/scale_utils.py` — `compute_scale_and_shift()`

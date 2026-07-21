@@ -22,12 +22,14 @@ from jaxtyping import Float32, UInt8
 from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
 
+from monopriors.models.multiview.multiview_model import MultiviewPred, robust_filter_confidences
+from monopriors.models.multiview.multiview_pointcloud import mv_pred_to_filtered_pointcloud
 from monopriors.models.multiview.multiview_predictor import (
     CenterMethod,
+    ImagePreprocessingMode,
     MultiviewPredictor,
     MultiviewPredictorConfig,
 )
-from monopriors.models.multiview.vggt_model import MultiviewPred, robust_filter_confidences
 
 KeepTopPercent = Annotated[int | float, Is[lambda percent: 1 <= percent <= 100]]
 
@@ -39,6 +41,8 @@ class MultiviewGeometryConfig:
     keep_top_percent: KeepTopPercent = 30.0
     """Percentage of high-confidence pixels retained after filtering.
     Value in [1, 100]; e.g. 30 keeps the top 30%."""
+    preprocessing_mode: ImagePreprocessingMode = "pad"
+    """Image preprocessing strategy for this inference run."""
     center_method: CenterMethod = "none"
     """How to center canonicalized camera poses after backend inference."""
     verbose: bool = False
@@ -74,7 +78,11 @@ def run_multiview_geometry(
     Returns:
         MultiviewGeometryResult with oriented predictions and confidence masks.
     """
-    mv_pred_list: list[MultiviewPred] = multiview_predictor(rgb_list, center_method=config.center_method)
+    mv_pred_list: list[MultiviewPred] = multiview_predictor(
+        rgb_list,
+        preprocessing_mode=config.preprocessing_mode,
+        center_method=config.center_method,
+    )
 
     depth_confidences: list[UInt8[ndarray, "H W"]] = [
         robust_filter_confidences(mv_pred.confidence_mask, keep_top_percent=config.keep_top_percent)
@@ -111,7 +119,6 @@ def main(config: MultiviewGeometryCLIConfig) -> None:
         PARENT_LOG_PATH,
         SUPPORTED_IMAGE_EXTENSIONS,
         load_rgb_images,
-        mv_pred_to_filtered_pointcloud,
     )
 
     # Load images

@@ -2,10 +2,11 @@ import math
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from threading import Event, Thread
 from types import SimpleNamespace
 
+import cv2
 import numpy as np
+import open3d as o3d
 import pytest
 import torch
 from hypothesis import given, settings
@@ -14,31 +15,32 @@ from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from torch import nn
 from vggt.models.vggt import VGGT
 
+import monopriors.apis.multiview_calibration as multiview_calibration
 from monopriors.apis.multiview_calibration import (
-    MultiViewCalibrator,
-    MultiViewCalibratorConfig,
-    mv_pred_to_filtered_pointcloud,
-    mv_pred_to_pointcloud,
+    MVCalibResults,
+    log_calibration_results,
 )
-from monopriors.apis.multiview_geometry import MultiviewGeometryConfig, run_multiview_geometry
-from monopriors.gradio_ui.multiview_geometry_ui import _prepare_request
-from monopriors.models.multiview.multiview_predictor import (
-    G3T_CHECKPOINT_REVISION,
-    G3TBackend,
-    MultiviewPredictor,
-    MultiviewPredictorCache,
-    MultiviewPredictorConfig,
-    decode_g3t_camera_heads,
-)
-from monopriors.models.multiview.vggt_model import (
+from monopriors.models.multiview.multiview_model import (
     MultiviewModelPredictions,
     MultiviewPred,
     filter_confidences,
     generate_multiview_pred,
     preprocess_images,
+    remove_padding_from_prediction,
+)
+from monopriors.models.multiview.multiview_pointcloud import (
+    mv_pred_to_filtered_pointcloud,
+    mv_pred_to_pointcloud,
+)
+from monopriors.models.multiview.multiview_predictor import (
+    G3T_CHECKPOINT_REVISION,
+    MultiviewPredictor,
+    MultiviewPredictorConfig,
+    decode_g3t_camera_heads,
 )
 from monopriors.third_party.g3t.layers.attention import Attention
 from monopriors.third_party.g3t.layers.rope import PositionGetter, RotaryPositionEmbedding2D
+from monopriors.third_party.g3t.models.aggregator import Aggregator
 from monopriors.third_party.g3t.models.g3t import G3T
 
 
@@ -123,6 +125,35 @@ def test_filtered_pointcloud_applies_confidence_to_refined_depths() -> None:
     dense_refined_points = mv_pred_to_pointcloud([prediction], depth_list=[refined_depth])
     np.testing.assert_allclose(points, dense_refined_points[[0, 3]], rtol=0.0, atol=0.0)
     np.testing.assert_array_equal(colors, prediction.rgb_image.reshape(-1, 3)[[0, 3]])
+
+
+def test_calibration_logging_does_not_filter_the_bounded_pointcloud_twice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pointcloud = o3d.geometry.PointCloud()
+    pointcloud.points = o3d.utility.Vector3dVector(np.asarray([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]))
+    pointcloud.colors = o3d.utility.Vector3dVector(np.asarray([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]))
+    result = MVCalibResults(depth_list=[], pinhole_param_list=[], pcd=pointcloud)
+
+    monkeypatch.setattr(multiview_calibration.rr, "send_blueprint", lambda **_kwargs: None)
+    monkeypatch.setattr(multiview_calibration.rr, "log", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(multiview_calibration.rr, "set_time", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        multiview_calibration,
+        "estimate_voxel_size",
+        lambda *_args, **_kwargs: pytest.fail("point cloud was filtered a second time"),
+        raising=False,
+    )
+
+    output = log_calibration_results(
+        rgb_list=[np.zeros((2, 2, 3), dtype=np.uint8)],
+        output=result,
+        parent_log_path=Path("world"),
+        timeline="frame",
+    )
+
+    np.testing.assert_array_equal(np.asarray(output.pcd.points), np.asarray(pointcloud.points))
+    np.testing.assert_array_equal(np.asarray(output.pcd.colors), np.asarray(pointcloud.colors))
 
 
 @settings(max_examples=75, deadline=None)
@@ -259,10 +290,13 @@ def _rgb_image(height: int = 28, width: int = 42) -> np.ndarray:
 class FakeG3T(G3T):
     def __init__(self) -> None:
         nn.Module.__init__(self)
-        self.point_head: nn.Module | None = nn.Identity()
+
+    def to(self, *args: object, **kwargs: object) -> "FakeG3T":
+        assert not hasattr(self, "point_head")
+        return super().to(*args, **kwargs)
 
     def forward(self, images: torch.Tensor) -> dict[str, torch.Tensor]:
-        assert self.point_head is None
+        assert not hasattr(self, "point_head")
         batch: int = 1
         num_cams: int = images.shape[0]
         height: int = images.shape[-2]
@@ -307,10 +341,10 @@ def test_g3t_predictor_pins_checkpoint_skips_point_head_and_preserves_gravity(
         fail_if_auto_orient_is_called,
     )
     predictor = MultiviewPredictor(
-        MultiviewPredictorConfig(model_name="g3t", device="cpu", preprocessing_mode="pad", local_files_only=True)
+        MultiviewPredictorConfig(model_name="g3t", device="cpu", local_files_only=True)
     )
 
-    predictions = predictor([_rgb_image()], center_method="none")
+    predictions = predictor([_rgb_image()], preprocessing_mode="pad", center_method="none")
 
     assert len(predictions) == 1
     assert predictions[0].depth_map.shape == (28, 42)
@@ -362,7 +396,32 @@ def test_multiview_materialization_supports_mixed_aspect_ratios() -> None:
     assert [prediction.depth_map.shape for prediction in materialized] == [(28, 42), (42, 28)]
 
 
-def test_fast_g3t_rgb_materialization_stays_within_five_percent() -> None:
+@pytest.mark.parametrize("pixel_value", [0, 127, 255])
+def test_common_rgb_materialization_preserves_constant_images(pixel_value: int) -> None:
+    rgb = np.full((42, 42, 3), pixel_value, dtype=np.uint8)
+    preprocessed = preprocess_images([rgb], mode="pad")
+    resized_height, resized_width = preprocessed.images.shape[-2:]
+    predictions = MultiviewModelPredictions(
+        depth=np.ones((1, 1, resized_height, resized_width, 1), dtype=np.float32),
+        depth_conf=np.ones((1, 1, resized_height, resized_width), dtype=np.float32),
+        intrinsic=np.array([[[[259.0, 0.0, 259.0], [0.0, 259.0, 259.0], [0.0, 0.0, 1.0]]]], dtype=np.float32),
+        cam_T_world_b34=np.array(
+            [[[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]]]],
+            dtype=np.float32,
+        ),
+    )
+
+    materialized = generate_multiview_pred(
+        predictions,
+        img_tensors=preprocessed.images,
+        rgb_list=[rgb],
+        metadata_list=preprocessed.metadata,
+    )
+
+    np.testing.assert_array_equal(materialized[0].rgb_image, rgb)
+
+
+def test_common_rgb_materialization_stays_within_five_percent_of_float_resize() -> None:
     rgb = _rgb_image(height=48, width=64)
     preprocessed = preprocess_images([rgb], mode="pad")
 
@@ -377,25 +436,20 @@ def test_fast_g3t_rgb_materialization_stays_within_five_percent() -> None:
             ),
         )
 
-    reference = generate_multiview_pred(
-        model_predictions(),
-        img_tensors=preprocessed.images,
-        rgb_list=[rgb],
-        metadata_list=preprocessed.metadata,
-        fast_rgb=False,
-    )[0]
     candidate = generate_multiview_pred(
         model_predictions(),
         img_tensors=preprocessed.images,
         rgb_list=[rgb],
         metadata_list=preprocessed.metadata,
-        fast_rgb=True,
     )[0]
 
-    assert float(np.mean(np.abs(reference.rgb_image.astype(np.int16) - candidate.rgb_image.astype(np.int16)) <= 13)) >= 0.95
-    np.testing.assert_array_equal(candidate.depth_map, reference.depth_map)
-    np.testing.assert_array_equal(candidate.confidence_mask, reference.confidence_mask)
-    np.testing.assert_allclose(candidate.pinhole_param.intrinsics.k_matrix, reference.pinhole_param.intrinsics.k_matrix)
+    processed_rgb = preprocessed.images[0].permute(1, 2, 0).numpy(force=True)
+    processed_rgb = remove_padding_from_prediction(processed_rgb, preprocessed.metadata[0])
+    resized_rgb = cv2.resize(processed_rgb, (rgb.shape[1], rgb.shape[0]), interpolation=cv2.INTER_LINEAR)
+    normalized_rgb = (resized_rgb - resized_rgb.min()) / (resized_rgb.max() - resized_rgb.min())
+    reference_rgb = (normalized_rgb * 255).clip(0, 255).astype(np.uint8)
+
+    assert float(np.mean(np.abs(reference_rgb.astype(np.int16) - candidate.rgb_image.astype(np.int16)) <= 13)) >= 0.95
 
 
 def test_graphable_rope_preserves_original_frequency_lookup() -> None:
@@ -439,12 +493,14 @@ def test_g3t_compile_warms_frame_and_global_position_caches() -> None:
         rope=rope,
         frame_blocks=[SimpleNamespace(attn=attention)],
     )
-    backend = object.__new__(G3TBackend)
-    backend.model = SimpleNamespace(aggregator=aggregator)
-    backend.dtype = torch.bfloat16
-    backend._warmed_input_shapes = set()
-
-    backend._warm_position_caches(torch.zeros((2, 3, 28, 42)))
+    Aggregator.warm_shape_caches(
+        aggregator,
+        num_cams=2,
+        height=28,
+        width=42,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
 
     assert (2, 3) in position_getter.position_cache
     assert (32, 11, torch.device("cpu"), torch.float32) in rope.frequency_cache
@@ -495,7 +551,6 @@ def test_g3t_keeps_camera_heads_fp32_but_allows_mixed_precision_depth(
     model.add_module("local_camera_head", FakeCameraHead())
     model.add_module("global_camera_head", FakeCameraHead())
     model.add_module("depth_head", FakeDepthHead())
-    model.point_head = None
     monkeypatch.setattr(torch.amp, "autocast", record_disabled_autocast)
 
     predictions = model(torch.zeros((1, 3, 2, 2)))
@@ -567,141 +622,28 @@ def test_vggt_backend_preserves_existing_up_estimation_and_common_contract(monke
         record_orientation,
     )
     predictor = MultiviewPredictor(
-        MultiviewPredictorConfig(model_name="vggt", device="cpu", preprocessing_mode="pad", local_files_only=True)
+        MultiviewPredictorConfig(model_name="vggt", device="cpu", local_files_only=True)
     )
 
-    predictions = predictor([_rgb_image()], center_method="focus")
+    predictions = predictor([_rgb_image()], preprocessing_mode="pad", center_method="focus")
 
     assert len(predictions) == 1
     assert orientation_calls == [("up", "focus")]
 
 
-def test_geometry_has_one_config_source_and_forwards_center_method() -> None:
-    class FakePredictor(MultiviewPredictor):
-        def __init__(self) -> None:
-            self.config = MultiviewPredictorConfig(device="cpu")
-            self.center_method = ""
+def test_g3t_checkpoint_loading_only_allows_removed_point_head_weights() -> None:
+    model: G3T = G3T.__new__(G3T)
+    nn.Module.__init__(model)
+    model.register_parameter("kept", nn.Parameter(torch.zeros(1)))
 
-        def __call__(self, rgb_list: list[np.ndarray], *, center_method: str = "none") -> list[MultiviewPred]:
-            self.center_method = center_method
-            return [_prediction()]
-
-    predictor = FakePredictor()
-    config = MultiviewGeometryConfig(keep_top_percent=100.0, center_method="focus")
-
-    result = run_multiview_geometry(
-        rgb_list=[np.zeros((2, 2, 3), dtype=np.uint8)],
-        multiview_predictor=predictor,
-        config=config,
+    incompatible = model.load_state_dict(
+        {"kept": torch.ones(1), "point_head.obsolete": torch.zeros(1)},
+        strict=False,
     )
 
-    assert predictor.center_method == "focus"
-    assert len(result.mv_pred_list) == 1
-    assert not hasattr(config, "model_name")
-    assert not hasattr(config, "device")
-
-
-def test_predictor_cache_reuses_exact_config_and_closes_before_replacement() -> None:
-    events: list[tuple[str, MultiviewPredictorConfig]] = []
-
-    class FakePredictor(MultiviewPredictor):
-        def __init__(self, config: MultiviewPredictorConfig) -> None:
-            self.config = config
-            events.append(("create", config))
-
-        def close(self) -> None:
-            events.append(("close", self.config))
-
-    cache = MultiviewPredictorCache(factory=FakePredictor)
-    vggt_config = MultiviewPredictorConfig(model_name="vggt", device="cpu")
-    g3t_config = MultiviewPredictorConfig(model_name="g3t", device="cpu")
-
-    with cache.acquire(vggt_config) as first:
-        pass
-    with cache.acquire(vggt_config) as reused:
-        assert reused is first
-    with cache.acquire(g3t_config):
-        pass
-
-    assert events == [("create", vggt_config), ("close", vggt_config), ("create", g3t_config)]
-
-
-def test_predictor_cache_cannot_replace_a_backend_while_a_run_uses_it() -> None:
-    class FakePredictor(MultiviewPredictor):
-        def __init__(self, config: MultiviewPredictorConfig) -> None:
-            self.config = config
-
-        def close(self) -> None:
-            pass
-
-    cache = MultiviewPredictorCache(factory=FakePredictor)
-    vggt_config = MultiviewPredictorConfig(model_name="vggt", device="cpu")
-    g3t_config = MultiviewPredictorConfig(model_name="g3t", device="cpu")
-    first_acquired = Event()
-    release_first = Event()
-    second_acquired = Event()
-
-    def use_first() -> None:
-        with cache.acquire(vggt_config):
-            first_acquired.set()
-            assert release_first.wait(timeout=2.0)
-
-    def use_second() -> None:
-        assert first_acquired.wait(timeout=2.0)
-        with cache.acquire(g3t_config):
-            second_acquired.set()
-
-    first_thread = Thread(target=use_first)
-    second_thread = Thread(target=use_second)
-    first_thread.start()
-    second_thread.start()
-    assert first_acquired.wait(timeout=2.0)
-    assert not second_acquired.wait(timeout=0.1)
-    release_first.set()
-    first_thread.join(timeout=2.0)
-    second_thread.join(timeout=2.0)
-    assert second_acquired.is_set()
-
-
-def test_gradio_request_captures_backend_and_operation_config_together(monkeypatch: pytest.MonkeyPatch) -> None:
-    rgb_list = [np.zeros((2, 2, 3), dtype=np.uint8)]
-    monkeypatch.setattr(
-        "monopriors.gradio_ui.multiview_geometry_ui._parse_and_load_images",
-        lambda _files: rgb_list,
-    )
-
-    request = _prepare_request(
-        ["unused.jpg"],
-        model_name="g3t",
-        keep_top_percent=42.0,
-        preprocessing_mode="crop",
-        verbose=False,
-    )
-
-    assert request.rgb_list is rgb_list
-    assert request.predictor_config == MultiviewPredictorConfig(
-        model_name="g3t",
-        device="cuda",
-        preprocessing_mode="crop",
-    )
-    assert request.geometry_config == MultiviewGeometryConfig(keep_top_percent=42.0, verbose=False)
-
-
-def test_calibrator_rejects_predictor_from_a_different_config() -> None:
-    class FakePredictor(MultiviewPredictor):
-        def __init__(self, config: MultiviewPredictorConfig) -> None:
-            self.config = config
-
-    vggt_config = MultiviewPredictorConfig(model_name="vggt", device="cpu")
-    g3t_config = MultiviewPredictorConfig(model_name="g3t", device="cpu")
-
-    with pytest.raises(ValueError, match="does not match"):
-        MultiViewCalibrator(
-            parent_log_path=Path("world"),
-            config=MultiViewCalibratorConfig(
-                predictor_config=g3t_config,
-                refine_depth_maps=False,
-                segment_people=False,
-            ),
-            multiview_predictor=FakePredictor(vggt_config),
-        )
+    assert incompatible.missing_keys == []
+    assert incompatible.unexpected_keys == ["point_head.obsolete"]
+    with pytest.raises(RuntimeError, match="missing=.*kept"):
+        model.load_state_dict({"point_head.obsolete": torch.zeros(1)}, strict=False)
+    with pytest.raises(RuntimeError, match="unexpected=.*other"):
+        model.load_state_dict({"kept": torch.ones(1), "other": torch.zeros(1)}, strict=False)

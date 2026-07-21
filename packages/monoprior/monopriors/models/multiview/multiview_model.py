@@ -336,8 +336,6 @@ def generate_multiview_pred(
     img_tensors: Float32[Tensor, "num_img 3 resized_h resized_w"],
     rgb_list: list[UInt8[ndarray, "original_h original_w 3"]],
     metadata_list: list[PreprocessingMetadata] | None = None,
-    *,
-    fast_rgb: bool = False,
 ) -> list[MultiviewPred]:
     pred_class = pred_class.remove_batch_dim_if_one()
     assert len(pred_class.cam_T_world_b34.shape) == 3, "Currently batch size of 1 is only supported"
@@ -407,22 +405,19 @@ def generate_multiview_pred(
         pinhole_param = PinholeParameters(name=cam_name, intrinsics=intri_param, extrinsics=extri)
 
         depth_map = depth_map.squeeze()
-        if fast_rgb:
-            normalized = (processed_img - processed_img.min()) / (processed_img.max() - processed_img.min())
-            lowres_rgb: UInt8[ndarray, "resized_h resized_w 3"] = (normalized * 255).clip(0, 255).astype(np.uint8)
-            rgb_image: UInt8[ndarray, "orig_h orig_w 3"] = cv2.resize(
-                lowres_rgb,
-                (original_img.shape[1], original_img.shape[0]),
-                interpolation=cv2.INTER_LINEAR,
-            )
-        else:
-            processed_img = cv2.resize(
-                processed_img,
-                (original_img.shape[1], original_img.shape[0]),
-                interpolation=cv2.INTER_LINEAR,
-            )
-            normalized = (processed_img - processed_img.min()) / (processed_img.max() - processed_img.min())
-            rgb_image = (normalized * 255).clip(0, 255).astype(np.uint8)
+        processed_min: float = float(processed_img.min())
+        processed_range: float = float(processed_img.max()) - processed_min
+        normalized: Float32[ndarray, "resized_h resized_w 3"] = (
+            (processed_img - processed_min) / processed_range
+            if processed_range > 0.0
+            else np.clip(processed_img, 0.0, 1.0)
+        )
+        lowres_rgb: UInt8[ndarray, "resized_h resized_w 3"] = (normalized * 255).clip(0, 255).astype(np.uint8)
+        rgb_image: UInt8[ndarray, "orig_h orig_w 3"] = cv2.resize(
+            lowres_rgb,
+            (original_img.shape[1], original_img.shape[0]),
+            interpolation=cv2.INTER_LINEAR,
+        )
 
         # Use INTER_NEAREST for the confidence mask to preserve binary values
         conf_mask: Float32[ndarray, "orig_h orig_w"] = cv2.resize(

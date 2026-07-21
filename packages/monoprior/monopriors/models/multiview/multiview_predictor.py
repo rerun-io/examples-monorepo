@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from threading import Lock
 from timeit import default_timer as timer
-from typing import Literal, TypeAlias, cast
+from typing import Literal, TypeAlias, TypeGuard, get_args
 
 import numpy as np
 import torch
@@ -20,7 +20,7 @@ from torch import Tensor
 from vggt.models.vggt import VGGT
 from vggt.utils.pose_enc import pose_encoding_to_extri_intri as decode_vggt_camera_head
 
-from monopriors.models.multiview.vggt_model import (
+from monopriors.models.multiview.multiview_model import (
     MultiviewModelPredictions,
     MultiviewPred,
     PreprocessResults,
@@ -28,59 +28,129 @@ from monopriors.models.multiview.vggt_model import (
     generate_multiview_pred,
     preprocess_images,
 )
-from monopriors.third_party.g3t.layers.attention import Attention
 from monopriors.third_party.g3t.models.g3t import G3T
 from monopriors.third_party.g3t.utils.pose_enc import pose_encoding_to_extri_intri as decode_g3t_pose_encoding
 
 MultiviewModelName: TypeAlias = Literal["vggt", "g3t"]
 CenterMethod: TypeAlias = Literal["poses", "focus", "none"]
+ImagePreprocessingMode: TypeAlias = Literal["crop", "pad"]
 BackendFactory: TypeAlias = Callable[["MultiviewPredictorConfig"], "MultiviewBackend"]
+
+MULTIVIEW_MODEL_NAMES: tuple[str, ...] = get_args(MultiviewModelName)
+IMAGE_PREPROCESSING_MODES: tuple[str, ...] = get_args(ImagePreprocessingMode)
 
 G3T_REPO_ID: str = "thatbrguy/g3t"
 G3T_CHECKPOINT_REVISION: str = "c55e91a04f1cbbad67359072536351201fd19e8b"
 
 
+def is_multiview_model_name(value: str) -> TypeGuard[MultiviewModelName]:
+    """Return whether a string names a supported multi-view backend."""
+    return value in MULTIVIEW_MODEL_NAMES
+
+
+def is_image_preprocessing_mode(value: str) -> TypeGuard[ImagePreprocessingMode]:
+    """Return whether a string names a supported preprocessing mode."""
+    return value in IMAGE_PREPROCESSING_MODES
+
+
 @dataclass(frozen=True, slots=True)
 class MultiviewPredictorConfig:
-    """Construction settings that uniquely identify a predictor instance."""
+    """Construction settings requested for a predictor instance."""
 
     model_name: MultiviewModelName = "vggt"
     """Model backend: standard VGGT or gravity-aligned G3T."""
     device: Literal["cuda", "cpu"] = "cuda"
     """Torch execution device."""
-    preprocessing_mode: Literal["crop", "pad"] = "pad"
-    """Image preprocessing strategy."""
     local_files_only: bool = False
     """Require checkpoints to be present in the local Hugging Face cache."""
     g3t_compile: bool = False
     """Compile G3T for fixed-shape CUDA workloads; ignored by VGGT and CPU runs."""
 
+    @property
+    def cache_key(self) -> "MultiviewPredictorKey":
+        """Return the settings that change the resident predictor."""
+        return MultiviewPredictorKey(
+            model_name=self.model_name,
+            device=self.device,
+            g3t_compile=self.model_name == "g3t" and self.device == "cuda" and self.g3t_compile,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class MultiviewPredictorKey:
+    """Canonical runtime identity for a cached predictor."""
+
+    model_name: MultiviewModelName
+    device: Literal["cuda", "cpu"]
+    g3t_compile: bool
+
 
 @dataclass(slots=True)
-class MultiviewTensorPredictions:
-    """Backend-neutral tensors needed by Monopriors."""
+class DecodedBackendOutput:
+    """Raw model output and decoded camera tensors from one backend."""
+
+    raw_predictions: dict[str, Tensor]
+    """Backend output containing the shared depth and confidence fields."""
+    cam_T_world_b34: Float32[Tensor, "batch num_cams 3 4"]
+    """Decoded RDF world-to-camera extrinsics."""
+    intrinsic_b33: Float32[Tensor, "batch num_cams 3 3"]
+    """Decoded per-camera pinhole intrinsics."""
+
+
+@dataclass(slots=True)
+class MultiviewBackendPredictions:
+    """Backend-neutral predictions at the Torch-to-NumPy boundary."""
 
     depth: Float32[Tensor, "batch num_cams H W 1"]
     """Per-camera depth maps."""
     depth_conf: Float32[Tensor, "batch num_cams H W"]
     """Per-pixel depth confidence."""
-    intrinsic: Float32[Tensor, "batch num_cams 3 3"]
+    intrinsic: Float32[ndarray, "batch num_cams 3 3"]
     """Per-camera pinhole intrinsics."""
-    cam_T_world_b34: Float32[Tensor, "batch num_cams 3 4"]
+    cam_T_world_b34: Float32[ndarray, "batch num_cams 3 4"]
     """World-to-camera extrinsics in Monopriors' canonical +Z-up frame."""
 
 
 class MultiviewBackend(ABC):
     """Model adapter that owns checkpoint loading, decoding, and world convention."""
 
-    @abstractmethod
     def predict(
         self,
         images: Float32[Tensor, "num_cams 3 H W"],
         *,
         center_method: CenterMethod,
-    ) -> MultiviewTensorPredictions:
-        """Predict the minimal common tensor contract in Monopriors' +Z-up world frame."""
+    ) -> MultiviewBackendPredictions:
+        """Predict the common depth and camera contract in the canonical +Z-up frame."""
+        decoded: DecodedBackendOutput = self._run_and_decode(images)
+        world_T_cam_gl: Float[ndarray, "num_cams 4 4"] = _world_poses_from_camera_extrinsics(
+            decoded.cam_T_world_b34
+        )
+        canonical_world_T_cam_b34: Float[ndarray, "num_cams 3 4"] = self._canonicalize_world_poses(
+            world_T_cam_gl,
+            center_method=center_method,
+        )
+        return MultiviewBackendPredictions(
+            depth=decoded.raw_predictions["depth"],
+            depth_conf=decoded.raw_predictions["depth_conf"],
+            intrinsic=decoded.intrinsic_b33.numpy(force=True).astype(np.float32),
+            cam_T_world_b34=_camera_extrinsics_from_world_poses(canonical_world_T_cam_b34),
+        )
+
+    @abstractmethod
+    def _run_and_decode(
+        self,
+        images: Float32[Tensor, "num_cams 3 H W"],
+    ) -> DecodedBackendOutput:
+        """Run a backend and decode its native camera heads."""
+
+    @abstractmethod
+    def _canonicalize_world_poses(
+        self,
+        world_T_cam_gl: Float[ndarray, "num_cams 4 4"],
+        *,
+        center_method: CenterMethod,
+    ) -> Float[ndarray, "num_cams 3 4"]:
+        """Apply the backend's world-orientation policy."""
 
     @abstractmethod
     def close(self) -> None:
@@ -120,6 +190,13 @@ def decode_g3t_camera_heads(
     return cam_T_world_b44[..., :3, :], intrinsic_b33
 
 
+def _inference_dtype(device: Literal["cuda", "cpu"]) -> torch.dtype:
+    """Select the shared mixed-precision dtype for a model device."""
+    if device == "cuda" and torch.cuda.get_device_capability()[0] >= 8:
+        return torch.bfloat16
+    return torch.float16
+
+
 def _world_poses_from_camera_extrinsics(
     cam_T_world_b34: Float32[Tensor, "batch num_cams 3 4"],
 ) -> Float[ndarray, "num_cams 4 4"]:
@@ -141,8 +218,8 @@ def _world_poses_from_camera_extrinsics(
 
 def _camera_extrinsics_from_world_poses(
     world_T_cam_gl_b34: Float[ndarray, "num_cams 3 4"],
-) -> Float32[Tensor, "batch num_cams 3 4"]:
-    """Convert RUB camera-to-world poses back to a tensor batch of RDF world-to-camera extrinsics."""
+) -> Float32[ndarray, "batch num_cams 3 4"]:
+    """Convert RUB camera-to-world poses to an RDF world-to-camera NumPy batch."""
     num_cams: int = world_T_cam_gl_b34.shape[0]
     bottom_row: Float[ndarray, "num_cams 1 4"] = np.broadcast_to(
         np.array([[[0.0, 0.0, 0.0, 1.0]]]),
@@ -155,7 +232,7 @@ def _camera_extrinsics_from_world_poses(
         world_T_cam_gl_b44, CameraConventions.GL, CameraConventions.CV
     )
     cam_T_world_b44: Float32[ndarray, "num_cams 4 4"] = np.linalg.inv(world_T_cam_cv_b44).astype(np.float32)
-    return torch.from_numpy(cam_T_world_b44[None, :, :3, :])
+    return cam_T_world_b44[None, :, :3, :]
 
 
 class VGGTBackend(MultiviewBackend):
@@ -163,22 +240,16 @@ class VGGTBackend(MultiviewBackend):
 
     def __init__(self, config: MultiviewPredictorConfig) -> None:
         self.device: Literal["cuda", "cpu"] = config.device
-        self.dtype: torch.dtype = (
-            torch.bfloat16
-            if config.device == "cuda" and torch.cuda.get_device_capability()[0] >= 8
-            else torch.float16
-        )
+        self.dtype: torch.dtype = _inference_dtype(config.device)
         self.model: VGGT = VGGT.from_pretrained(
             "facebook/VGGT-1B", local_files_only=config.local_files_only
         ).to(config.device)
         self.model.eval()
 
-    def predict(
+    def _run_and_decode(
         self,
         images: Float32[Tensor, "num_cams 3 H W"],
-        *,
-        center_method: CenterMethod,
-    ) -> MultiviewTensorPredictions:
+    ) -> DecodedBackendOutput:
         with torch.no_grad(), amp_autocast(device_type=self.device, dtype=self.dtype):
             raw_predictions: dict[str, Tensor] = self.model(images)
         image_size_hw: tuple[int, int] = (images.shape[-2], images.shape[-1])
@@ -186,19 +257,23 @@ class VGGTBackend(MultiviewBackend):
         cam_T_world_b34: Float32[Tensor, "batch num_cams 3 4"] = decoded[0]
         intrinsic_b33: Float32[Tensor, "batch num_cams 3 3"] | None = decoded[1]
         assert intrinsic_b33 is not None
-        world_T_cam_gl: Float[ndarray, "num_cams 4 4"] = _world_poses_from_camera_extrinsics(cam_T_world_b34)
+        return DecodedBackendOutput(
+            raw_predictions=raw_predictions,
+            cam_T_world_b34=cam_T_world_b34,
+            intrinsic_b33=intrinsic_b33,
+        )
+
+    def _canonicalize_world_poses(
+        self,
+        world_T_cam_gl: Float[ndarray, "num_cams 4 4"],
+        *,
+        center_method: CenterMethod,
+    ) -> Float[ndarray, "num_cams 3 4"]:
+        """Estimate VGGT's up direction from its camera poses."""
         oriented_world_T_cam_b34, _ = auto_orient_and_center_poses(
             world_T_cam_gl.astype(np.float64), method="up", center_method=center_method
         )
-        canonical_cam_T_world_b34: Float32[Tensor, "batch num_cams 3 4"] = _camera_extrinsics_from_world_poses(
-            oriented_world_T_cam_b34
-        ).to(device=cam_T_world_b34.device)
-        return MultiviewTensorPredictions(
-            depth=raw_predictions["depth"],
-            depth_conf=raw_predictions["depth_conf"],
-            intrinsic=intrinsic_b33,
-            cam_T_world_b34=canonical_cam_T_world_b34,
-        )
+        return oriented_world_T_cam_b34
 
     def close(self) -> None:
         self.model.cpu()
@@ -209,18 +284,13 @@ class G3TBackend(MultiviewBackend):
 
     def __init__(self, config: MultiviewPredictorConfig) -> None:
         self.device: Literal["cuda", "cpu"] = config.device
-        self.dtype: torch.dtype = (
-            torch.bfloat16
-            if config.device == "cuda" and torch.cuda.get_device_capability()[0] >= 8
-            else torch.float16
-        )
+        self.dtype: torch.dtype = _inference_dtype(config.device)
         self.model: G3T = G3T.from_pretrained(
             G3T_REPO_ID,
             revision=G3T_CHECKPOINT_REVISION,
             local_files_only=config.local_files_only,
         ).to(config.device)
         self.model.eval()
-        self.model.point_head = None
         self._compiled_model: Callable[[Tensor], dict[str, Tensor]] | None = None
         self._warmed_input_shapes: set[tuple[int, int, int]] = set()
         if config.g3t_compile and config.device == "cuda":
@@ -233,31 +303,19 @@ class G3TBackend(MultiviewBackend):
         input_shape = (num_cams, height, width)
         if input_shape in self._warmed_input_shapes:
             return
-        aggregator = self.model.aggregator
-        patch_height = height // aggregator.patch_size
-        patch_width = width // aggregator.patch_size
-        position_getter = aggregator.position_getter
-        if position_getter is not None:
-            position_getter(num_cams, patch_height, patch_width, device=images.device)
-        if aggregator.rope is not None:
-            attention = cast(Attention, aggregator.frame_blocks[0].attn)
-            rope_feature_dim = attention.head_dim // 2
-            frame_token_count = patch_height * patch_width + aggregator.patch_start_idx
-            for token_count in (frame_token_count, num_cams * frame_token_count):
-                aggregator.rope._compute_frequency_components(
-                    rope_feature_dim,
-                    token_count,
-                    images.device,
-                    images.dtype,
-                )
+        self.model.aggregator.warm_shape_caches(
+            num_cams=num_cams,
+            height=height,
+            width=width,
+            device=images.device,
+            dtype=images.dtype,
+        )
         self._warmed_input_shapes.add(input_shape)
 
-    def predict(
+    def _run_and_decode(
         self,
         images: Float32[Tensor, "num_cams 3 H W"],
-        *,
-        center_method: CenterMethod,
-    ) -> MultiviewTensorPredictions:
+    ) -> DecodedBackendOutput:
         inference_model: Callable[[Tensor], dict[str, Tensor]] = self.model
         if self._compiled_model is not None:
             self._warm_position_caches(images)
@@ -273,7 +331,19 @@ class G3TBackend(MultiviewBackend):
         )
         cam_T_world_b34: Float32[Tensor, "batch num_cams 3 4"] = decoded[0]
         intrinsic_b33: Float32[Tensor, "batch num_cams 3 3"] = decoded[1]
-        world_T_cam_gl: Float[ndarray, "num_cams 4 4"] = _world_poses_from_camera_extrinsics(cam_T_world_b34)
+        return DecodedBackendOutput(
+            raw_predictions=raw_predictions,
+            cam_T_world_b34=cam_T_world_b34,
+            intrinsic_b33=intrinsic_b33,
+        )
+
+    def _canonicalize_world_poses(
+        self,
+        world_T_cam_gl: Float[ndarray, "num_cams 4 4"],
+        *,
+        center_method: CenterMethod,
+    ) -> Float[ndarray, "num_cams 3 4"]:
+        """Preserve G3T's gravity direction while applying optional centering."""
         if center_method == "none":
             centered_world_T_cam_b34: Float[ndarray, "num_cams 3 4"] = world_T_cam_gl[:, :3, :].astype(np.float64)
         else:
@@ -286,15 +356,7 @@ class G3TBackend(MultiviewBackend):
         canonical_world_T_cam_b34: Float[ndarray, "num_cams 3 4"] = (
             gravity_rotation_33 @ centered_world_T_cam_b34
         )
-        canonical_cam_T_world_b34: Float32[Tensor, "batch num_cams 3 4"] = _camera_extrinsics_from_world_poses(
-            canonical_world_T_cam_b34
-        ).to(device=cam_T_world_b34.device)
-        return MultiviewTensorPredictions(
-            depth=raw_predictions["depth"],
-            depth_conf=raw_predictions["depth_conf"],
-            intrinsic=intrinsic_b33,
-            cam_T_world_b34=canonical_cam_T_world_b34,
-        )
+        return canonical_world_T_cam_b34
 
     def close(self) -> None:
         self.model.cpu()
@@ -314,35 +376,33 @@ class MultiviewPredictor:
         load_start: float = timer()
         print(f"Loading {config.model_name.upper()} model...")
         self.backend: MultiviewBackend = BACKEND_FACTORIES[config.model_name](config)
-        self._inference_lock: LockType = Lock()
         print("Model loaded in", timer() - load_start, "seconds")
 
     def __call__(
         self,
         rgb_list: list[UInt8[ndarray, "H W 3"]],
         *,
+        preprocessing_mode: ImagePreprocessingMode = "pad",
         center_method: CenterMethod = "none",
     ) -> list[MultiviewPred]:
-        preprocess_results: PreprocessResults = preprocess_images(rgb_list, mode=self.config.preprocessing_mode)
+        preprocess_results: PreprocessResults = preprocess_images(rgb_list, mode=preprocessing_mode)
         images: Float32[Tensor, "num_cams 3 H W"] = preprocess_results.images.to(self.config.device)
         print("Running inference...")
-        with self._inference_lock:
-            tensor_predictions: MultiviewTensorPredictions = self.backend.predict(
-                images,
-                center_method=center_method,
-            )
+        backend_predictions: MultiviewBackendPredictions = self.backend.predict(
+            images,
+            center_method=center_method,
+        )
         predictions: MultiviewModelPredictions = MultiviewModelPredictions(
-            depth=tensor_predictions.depth.numpy(force=True),
-            depth_conf=tensor_predictions.depth_conf.numpy(force=True),
-            intrinsic=tensor_predictions.intrinsic.numpy(force=True),
-            cam_T_world_b34=tensor_predictions.cam_T_world_b34.numpy(force=True),
+            depth=backend_predictions.depth.numpy(force=True),
+            depth_conf=backend_predictions.depth_conf.numpy(force=True),
+            intrinsic=backend_predictions.intrinsic,
+            cam_T_world_b34=backend_predictions.cam_T_world_b34,
         )
         return generate_multiview_pred(
             predictions,
             img_tensors=images,
             rgb_list=rgb_list,
-            metadata_list=preprocess_results.metadata if self.config.preprocessing_mode == "pad" else None,
-            fast_rgb=self.config.model_name == "g3t",
+            metadata_list=preprocess_results.metadata if preprocessing_mode == "pad" else None,
         )
 
     def close(self) -> None:
@@ -356,23 +416,24 @@ class MultiviewPredictorCache:
     def __init__(self, factory: Callable[[MultiviewPredictorConfig], MultiviewPredictor] = MultiviewPredictor) -> None:
         self._factory: Callable[[MultiviewPredictorConfig], MultiviewPredictor] = factory
         self._lock: LockType = Lock()
-        self._config: MultiviewPredictorConfig | None = None
+        self._key: MultiviewPredictorKey | None = None
         self._predictor: MultiviewPredictor | None = None
 
     @contextmanager
     def acquire(self, config: MultiviewPredictorConfig) -> Generator[MultiviewPredictor, None, None]:
         """Yield the exact requested predictor while preventing concurrent replacement."""
         with self._lock:
-            if self._config != config:
+            requested_key: MultiviewPredictorKey = config.cache_key
+            if self._key != requested_key:
                 if self._predictor is not None:
                     self._predictor.close()
                 self._predictor = None
-                self._config = None
+                self._key = None
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 self._predictor = self._factory(config)
-                self._config = config
+                self._key = requested_key
             if self._predictor is None:
                 raise RuntimeError("Predictor cache failed to construct a predictor.")
             yield self._predictor
