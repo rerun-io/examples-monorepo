@@ -260,10 +260,13 @@ def filter_confidences(confidence: Float32[ndarray, "H W"], keep_top_percent: in
         Binary mask as UInt8 array with values 0 (filtered out) or 255 (kept)
 
     Notes:
-        - Uses percentile-based thresholding: pixels >= (100 - keep_top_percent) percentile
+        - Selects the order statistic equivalent to pixels >= the linear
+          (100 - keep_top_percent) percentile without sorting the full array
         - Also filters out very low confidence values (< 1e-5) regardless of percentile
     """
-    conf_threshold: float = float(np.percentile(confidence, 100.0 - keep_top_percent))
+    percentile: float = 100.0 - float(keep_top_percent)
+    rank: int = int(np.ceil((percentile / 100.0) * (confidence.size - 1)))
+    conf_threshold: float = float(np.partition(confidence, rank, axis=None)[rank])
     mask: Bool[ndarray, "H W"] = (confidence >= conf_threshold) & (confidence > 1e-5)
     mask: UInt8[ndarray, "H W"] = (mask * 255).astype(np.uint8)
     return mask

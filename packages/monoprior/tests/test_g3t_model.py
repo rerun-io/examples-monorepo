@@ -33,6 +33,7 @@ from monopriors.models.multiview.multiview_predictor import (
 from monopriors.models.multiview.vggt_model import (
     MultiviewModelPredictions,
     MultiviewPred,
+    filter_confidences,
     generate_multiview_pred,
     preprocess_images,
 )
@@ -183,6 +184,36 @@ def test_filtered_pointcloud_is_exact_confident_subset_of_dense_unprojection(
     assert np.all(confidence_mask.reshape(-1)[selected_pixel_ids] != 0)
     np.testing.assert_array_equal(colors, rgb_image.reshape(-1, 3)[selected_pixel_ids])
     np.testing.assert_allclose(points, dense_points[selected_pixel_ids], rtol=1.0e-5, atol=1.0e-5)
+
+
+@settings(max_examples=75, deadline=None)
+@given(
+    data=st.data(),
+    height=st.integers(min_value=1, max_value=20),
+    width=st.integers(min_value=1, max_value=20),
+    keep_top_percent=st.integers(min_value=1, max_value=100),
+)
+def test_confidence_filter_matches_linear_percentile_mask(
+    data: st.DataObject,
+    height: int,
+    width: int,
+    keep_top_percent: int,
+) -> None:
+    values = data.draw(
+        st.lists(
+            st.integers(min_value=0, max_value=20),
+            min_size=height * width,
+            max_size=height * width,
+        ),
+        label="confidence_values",
+    )
+    confidence = np.asarray(values, dtype=np.float32).reshape(height, width)
+    threshold = np.percentile(confidence, 100.0 - keep_top_percent)
+    expected = (((confidence >= threshold) & (confidence > 1.0e-5)) * 255).astype(np.uint8)
+
+    actual = filter_confidences(confidence, keep_top_percent)
+
+    np.testing.assert_array_equal(actual, expected)
 
 
 def _rgb_image(height: int = 28, width: int = 42) -> np.ndarray:
