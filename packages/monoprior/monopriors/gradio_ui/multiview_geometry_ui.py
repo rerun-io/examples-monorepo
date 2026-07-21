@@ -1,18 +1,18 @@
 """Gradio UI for multi-view geometry prediction.
 
 Provides an interactive web interface for running a multi-view geometry
-predictor (currently VGGT) on multiple images to produce oriented camera
+predictor (VGGT or G3T) on multiple images to produce oriented camera
 poses, depth maps, and confidence masks. The left panel holds image inputs,
 a run button, and a config accordion; the right panel streams results into
 an embedded Rerun viewer.
 
-The model is loaded once at module import and reused across runs.
-Config changes that affect the model (``preprocessing_mode``) trigger
-lazy re-initialisation of the predictor.
+Each run captures an immutable request configuration. A shared lifecycle cache reuses the
+exact requested predictor and serializes replacement so only one multi-GB model is resident.
 """
 
 import uuid
 from collections.abc import Generator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
 
@@ -35,14 +35,24 @@ from monopriors.apis.multiview_geometry import (
     MultiviewGeometryResult,
     run_multiview_geometry,
 )
-from monopriors.gradio_ui._vggt_common import parse_preprocessing_mode
-from monopriors.models.multiview.vggt_model import VGGTPredictor
+from monopriors.gradio_ui._multiview_common import (
+    discover_multiview_examples,
+    parse_multiview_model,
+    parse_preprocessing_mode,
+)
+from monopriors.gradio_ui._multiview_runtime import PREDICTOR_CACHE
+from monopriors.models.multiview.multiview_predictor import (
+    IMAGE_PREPROCESSING_MODES,
+    MULTIVIEW_MODEL_NAMES,
+    MultiviewPredictorConfig,
+)
 
 EXAMPLE_DATA_DIR: Final[Path] = Path(__file__).resolve().parents[2] / "data" / "examples" / "multiview"
+"""Path to bundled example image sets."""
 
 
 def create_multiview_blueprint(parent_log_path: Path, num_images: int) -> rrb.ContainerLike:
-    """Create a Rerun blueprint for VGGT geometry (no MoGe depth tab).
+    """Create a Rerun blueprint for multi-view geometry (no MoGe depth tab).
 
     3D view on the left showing oriented cameras + point cloud.
     Per-camera tabs on the right with Depth, Filtered Depth, and Confidence.
@@ -99,54 +109,52 @@ def create_multiview_blueprint(parent_log_path: Path, num_images: int) -> rrb.Co
     )
     view_2d: rrb.Tabs = rrb.Tabs(contents=tabs, name="Depths Tab")
     return rrb.Horizontal(contents=[view_3d, view_2d], column_shares=[3, 2])
-"""Path to bundled example image sets."""
 
 gr.set_static_paths([str(EXAMPLE_DATA_DIR)])
 
-_CONFIG: MultiviewGeometryConfig = MultiviewGeometryConfig(
-    device="cuda",
-    verbose=True,
-)
-"""Module-level config, kept in sync with UI widgets."""
-
-_PREDICTOR: VGGTPredictor = VGGTPredictor(
-    device=_CONFIG.device,
-    preprocessing_mode=_CONFIG.preprocessing_mode,
-)
-"""Module-level VGGT singleton. Re-created only when preprocessing_mode changes."""
+DEFAULT_PREDICTOR_CONFIG: Final[MultiviewPredictorConfig] = MultiviewPredictorConfig(model_name="g3t", device="cuda")
+DEFAULT_GEOMETRY_CONFIG: Final[MultiviewGeometryConfig] = MultiviewGeometryConfig(verbose=True)
 
 
-def _sync_config(
+@dataclass(frozen=True, slots=True)
+class MultiviewGeometryRequest:
+    """All inputs captured atomically when a user starts one geometry run."""
+
+    rgb_list: list[UInt8[ndarray, "H W 3"]]
+    predictor_config: MultiviewPredictorConfig
+    geometry_config: MultiviewGeometryConfig
+
+
+def _prepare_request(
+    img_files: str | list[str],
+    model_name: str,
     keep_top_percent: int | float,
     preprocessing_mode: str,
     verbose: bool,
-) -> None:
-    """Sync UI widget values into the module-level config and predictor singleton.
+) -> MultiviewGeometryRequest:
+    """Capture uploaded images and widget values into one immutable run request.
 
     Args:
-        keep_top_percent: Confidence filtering threshold (1-100).
+        img_files: Uploaded image paths.
+        model_name: Multi-view model backend (``vggt`` or ``g3t``).
+        keep_top_percent: Percentage of highest-confidence pixels retained (1-100).
+            Higher values retain more pixels.
         preprocessing_mode: Image preprocessing strategy ('crop' or 'pad').
         verbose: Whether to log per-camera detail.
     """
-    global _CONFIG, _PREDICTOR
     preprocessing_mode_literal: Literal["crop", "pad"] = parse_preprocessing_mode(preprocessing_mode)
-
-    needs_reinit: bool = preprocessing_mode_literal != _CONFIG.preprocessing_mode
-
-    _CONFIG = MultiviewGeometryConfig(
-        keep_top_percent=keep_top_percent,
-        preprocessing_mode=preprocessing_mode_literal,
-        device="cuda",
-        verbose=verbose,
+    return MultiviewGeometryRequest(
+        rgb_list=_parse_and_load_images(img_files),
+        predictor_config=MultiviewPredictorConfig(
+            model_name=parse_multiview_model(model_name),
+            device="cuda",
+        ),
+        geometry_config=MultiviewGeometryConfig(
+            keep_top_percent=keep_top_percent,
+            preprocessing_mode=preprocessing_mode_literal,
+            verbose=verbose,
+        ),
     )
-
-    if needs_reinit:
-        _PREDICTOR = VGGTPredictor(
-            device=_CONFIG.device,
-            preprocessing_mode=_CONFIG.preprocessing_mode,
-        )
-    else:
-        _PREDICTOR.preprocessing_mode = preprocessing_mode_literal
 
 
 def _get_recording(recording_id: uuid.UUID) -> rr.RecordingStream:
@@ -182,13 +190,13 @@ def _parse_and_load_images(
 
 def multiview_geometry_fn(
     recording_id: uuid.UUID,
-    rgb_list: list[UInt8[ndarray, "H W 3"]],
+    request: MultiviewGeometryRequest,
 ) -> Generator[tuple[bytes | None, str], None, None]:
-    """Gradio streaming callback that runs VGGT geometry prediction.
+    """Gradio streaming callback that runs multi-view geometry prediction.
 
     Args:
         recording_id: Session-scoped recording identifier.
-        rgb_list: Pre-loaded RGB images.
+        request: Images and exact model/operation configuration for this run.
 
     Yields:
         Tuple of (Rerun binary stream bytes, status message string).
@@ -197,21 +205,22 @@ def multiview_geometry_fn(
     stream: rr.BinaryStream = recording.binary_stream()
 
     with recording:
-        # Setup blueprint (VGGT-specific: no MoGe depth tab)
+        # Set up the geometry-only blueprint (no MoGe depth tab).
         final_view: rrb.ContainerLike = create_multiview_blueprint(
-            parent_log_path=PARENT_LOG_PATH, num_images=len(rgb_list)
+            parent_log_path=PARENT_LOG_PATH, num_images=len(request.rgb_list)
         )
         blueprint: rrb.Blueprint = rrb.Blueprint(final_view, collapse_panels=True)
         rr.send_blueprint(blueprint=blueprint)
         rr.log(f"{PARENT_LOG_PATH}", rr.ViewCoordinates.RFU, static=True)
         rr.set_time(TIMELINE, duration=0)
 
-        # Run VGGT geometry
-        result: MultiviewGeometryResult = run_multiview_geometry(
-            rgb_list=rgb_list,
-            vggt_predictor=_PREDICTOR,
-            config=_CONFIG,
-        )
+        # Run the exact backend captured in this request.
+        with PREDICTOR_CACHE.acquire(request.predictor_config) as multiview_predictor:
+            result: MultiviewGeometryResult = run_multiview_geometry(
+                rgb_list=request.rgb_list,
+                multiview_predictor=multiview_predictor,
+                config=request.geometry_config,
+            )
 
         # Log per-camera results: pinhole + filtered depth (auto-unprojected to 3D by Rerun)
         for mv_pred, depth_conf in zip(result.mv_pred_list, result.depth_confidences, strict=True):
@@ -227,7 +236,7 @@ def multiview_geometry_fn(
             filtered_depth_map: Float32[ndarray, "H W"] = np.where(depth_conf > 0, mv_pred.depth_map, 0)
             rr.log(f"{pinhole_log_path}/filtered_depth", rr.DepthImage(filtered_depth_map, meter=1), static=True)
 
-            if _CONFIG.verbose:
+            if request.geometry_config.verbose:
                 rr.log(
                     f"{pinhole_log_path}/image",
                     rr.Image(mv_pred.rgb_image, color_model=rr.ColorModel.RGB).compress(),
@@ -254,7 +263,7 @@ def _switch_to_inputs():
 
 
 def main() -> gr.Blocks:
-    """Build and return the VGGT geometry Gradio app.
+    """Build and return the multi-view geometry Gradio app.
 
     Layout:
         - **Left column** (scale=1): Tabs with Inputs (file upload, run
@@ -276,7 +285,7 @@ def main() -> gr.Blocks:
 
     with gr.Blocks() as demo:
         recording_id = gr.State(uuid.uuid4())
-        rgb_list_state = gr.State([])
+        request_state = gr.State()
 
         with gr.Row():
             with gr.Column(scale=1):
@@ -288,42 +297,40 @@ def main() -> gr.Blocks:
                             file_count="multiple",
                             file_types=[".png", ".jpg", ".jpeg"],
                         )
-                        run_btn = gr.Button("Run VGGT Geometry")
+                        run_btn = gr.Button("Run Multi-view Geometry")
 
                         with gr.Accordion("Config", open=False):
+                            model_dropdown = gr.Dropdown(
+                                label="Model",
+                                choices=MULTIVIEW_MODEL_NAMES,
+                                value=DEFAULT_PREDICTOR_CONFIG.model_name,
+                            )
                             keep_top_percent_slider = gr.Slider(
-                                label="Keep Top Percent (confidence filtering)",
+                                label="Keep Top Percent (confidence and point density)",
                                 minimum=1.0,
                                 maximum=100.0,
                                 step=1.0,
-                                value=_CONFIG.keep_top_percent,
+                                value=DEFAULT_GEOMETRY_CONFIG.keep_top_percent,
                             )
                             preprocessing_radio = gr.Radio(
                                 label="Preprocessing Mode",
-                                choices=["crop", "pad"],
-                                value=_CONFIG.preprocessing_mode,
+                                choices=IMAGE_PREPROCESSING_MODES,
+                                value=DEFAULT_GEOMETRY_CONFIG.preprocessing_mode,
                             )
                             verbose_checkbox = gr.Checkbox(
                                 label="Verbose (per-camera detail logging)",
-                                value=_CONFIG.verbose,
+                                value=DEFAULT_GEOMETRY_CONFIG.verbose,
                             )
 
                     with gr.TabItem("Outputs", id="outputs"):
                         status_text = gr.Textbox(label="Status", interactive=False)
 
-                car_example_images: list[str] = sorted(
-                    str(p) for p in (EXAMPLE_DATA_DIR / "car_landscape_12").glob("*.jpg")
-                )
-                rp_capture_images: list[str] = sorted(
-                    str(p) for p in (EXAMPLE_DATA_DIR / "rp_capture_6").glob("*.jpg")
-                )
+                example_scenes: list[tuple[str, list[str]]] = discover_multiview_examples(EXAMPLE_DATA_DIR)
                 gr.Examples(
-                    examples=[
-                        [car_example_images],
-                        [rp_capture_images],
-                    ],
+                    examples=[[image_paths] for _, image_paths in example_scenes],
                     inputs=[input_imgs],
                     cache_examples=False,
+                    example_labels=[label for label, _ in example_scenes],
                 )
 
             with gr.Column(scale=5):
@@ -343,20 +350,19 @@ def main() -> gr.Blocks:
             inputs=None,
             outputs=[recording_id],
             api_visibility="private",
-        ).then(  # Sync the predictor singleton with the current UI config widgets
-            _sync_config,
+        ).then(  # Atomically capture files and all widget values for this run
+            _prepare_request,
             inputs=[
+                input_imgs,
+                model_dropdown,
                 keep_top_percent_slider,
                 preprocessing_radio,
                 verbose_checkbox,
             ],
-        ).then(  # Parse Gradio file uploads into RGB arrays
-            _parse_and_load_images,
-            inputs=[input_imgs],
-            outputs=[rgb_list_state],
-        ).then(  # Run VGGT geometry and stream results to the Rerun viewer
+            outputs=[request_state],
+        ).then(  # Run multi-view geometry and stream results to the Rerun viewer
             multiview_geometry_fn,
-            inputs=[recording_id, rgb_list_state],
+            inputs=[recording_id, request_state],
             outputs=[rr_viewer, status_text],
         )
 

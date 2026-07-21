@@ -421,8 +421,16 @@ cmd = "test -d data/examples/single-image || hf download pablovela5620/monoprior
 cwd = "packages/monoprior"
 
 [feature.monoprior.tasks._monoprior-download-multiview]
-cmd = "test -d data/examples/multiview || hf download pablovela5620/monoprior-example --include 'multiview/*' --repo-type dataset --local-dir data/examples/"
+cmd = "test -f data/examples/multiview/car_landscape_12/IMG_2944.jpg || hf download pablovela5620/monoprior-example --include 'multiview/*' --repo-type dataset --local-dir data/examples/"
 cwd = "packages/monoprior"
+
+[feature.monoprior.tasks._monoprior-download-g3t-examples]
+cmd = "test -f data/examples/multiview/bench/005.png && test -f data/examples/multiview/stairs/004.png && test -f data/examples/multiview/tree/006.png || (mkdir -p data/examples/multiview && curl -fsSL --retry 3 https://codeload.github.com/g3t-paper/g3t/tar.gz/193ce19574b73f0778a475ee54aadeb848e86b88 -o data/examples/g3t-examples.tar.gz && tar -xzf data/examples/g3t-examples.tar.gz --strip-components=3 -C data/examples/multiview g3t-193ce19574b73f0778a475ee54aadeb848e86b88/examples/g3t && rm -f data/examples/g3t-examples.tar.gz)"
+cwd = "packages/monoprior"
+
+[feature.monoprior.tasks.monoprior-download-multiview-examples]
+depends-on = ["_monoprior-download-multiview", "_monoprior-download-g3t-examples"]
+description = "Download the Monopriors and official G3T multiview examples"
 
 [feature.monoprior.tasks._monoprior-download-video]
 cmd = "test -d data/examples/video || hf download pablovela5620/monoprior-example --include 'video/*' --repo-type dataset --local-dir data/examples/"
@@ -443,7 +451,7 @@ description = "Run relative depth estimation on example image"
 cmd = "python tools/demos/multiview_depth.py --image-dir data/examples/multiview/car_landscape_12"
 depends-on = ["_monoprior-download-multiview"]
 cwd = "packages/monoprior"
-description = "Run VGGT multiview depth on example images"
+description = "Run VGGT or G3T multiview depth on example images"
 
 [feature.monoprior.tasks.monoprior-multiview-calibration]
 cmd = "python tools/demos/multiview_calibration.py --image-dir data/examples/multiview/car_landscape_12"
@@ -495,11 +503,13 @@ description = "Launch Gradio depth comparison UI"
 
 [feature.monoprior.tasks.monoprior-calibration-app]
 cmd = "python tools/apps/calibration_app.py"
+depends-on = ["monoprior-download-multiview-examples"]
 cwd = "packages/monoprior"
 description = "Launch Gradio multiview calibration UI"
 
 [feature.monoprior.tasks.monoprior-multiview-geometry-app]
 cmd = "python tools/apps/multiview_geometry_app.py"
+depends-on = ["monoprior-download-multiview-examples"]
 cwd = "packages/monoprior"
 description = "Launch Gradio multiview geometry UI"
 

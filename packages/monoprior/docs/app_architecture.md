@@ -33,25 +33,27 @@ The computational core. Has no knowledge of Gradio, file dialogs, or widget valu
 
 **What lives here:**
 - `MultiViewCalibratorConfig` -- dataclass with all pipeline parameters, compatible with tyro for CLI parsing
-- `MultiViewCalibrator` -- orchestrator class that loads and runs models (VGGT, SAM3, MoGe)
-- `run_calibration_pipeline()` -- the shared pipeline function: sets up Rerun blueprint, runs calibration, logs results, fuses TSDF mesh
+- `run_multiview_calibration()` -- shared geometry and post-processing function using a caller-owned predictor
+- `log_calibration_results()` -- Rerun blueprint, final output logging, and TSDF fusion
 - `MVCalibResults` -- return dataclass (depth maps, pinhole parameters, point cloud)
 - `load_rgb_images()` -- shared I/O utility for loading image files as RGB arrays
 - Rerun blueprint builders (`create_final_view`, `create_tabbed_camera_view`, etc.)
 
 **Design choices:**
-- `run_calibration_pipeline()` calls `rr.log()` using the thread-local recording, so the caller controls where data goes (global recording for CLI, `with recording:` context for Gradio streaming)
+- The predictor is an explicit `run_multiview_calibration()` argument. The CLI owns a private predictor; Gradio owns a predictor-cache lease. The function never retains either one.
+- `log_calibration_results()` calls `rr.log()` using the thread-local recording, so the caller controls where data goes (global recording for CLI, `with recording:` context for Gradio streaming)
 - The pipeline takes `list[UInt8[ndarray, "H W 3"]]` -- already-loaded RGB arrays, not file paths. This keeps I/O concerns out of the pipeline
-- `MultiViewCalibrator.__call__()` is a pure function: RGB in, results out. Rerun logging only happens when `config.verbose=True` (per-camera detail) and always in `run_calibration_pipeline` (final outputs)
+- Geometry settings are composed through `MultiviewGeometryConfig`, which is shared by the calibration, geometry, and standalone inference paths.
 
 ### Layer 2: Gradio UI (`gradio_ui/multiview_calibration_ui.py`)
 
-Translates between Gradio widgets and the API layer. Manages model singletons and streaming.
+Translates between Gradio widgets and the API layer. Manages model caches and streaming.
 
 **What lives here:**
-- `_MV_CALIBRATOR` -- module-level singleton, loaded once at import, reused across runs
-- `_sync_config()` -- reads widget values, updates config, conditionally re-inits models only when toggling features ON that require new model weights
-- `_parse_and_load_images()` -- converts `gr.File` paths to `list[RGB]` via the shared `load_rgb_images()`
+- `MultiviewCalibrationRequest` -- immutable snapshot of uploaded images and every widget value for one run
+- `PREDICTOR_CACHE` -- atomic, single-resident VGGT/G3T predictor cache keyed by effective runtime configuration
+- `AUXILIARY_MODEL_CACHE` -- lazy per-device SAM3 and MoGe cache
+- `_prepare_request()` -- validates widget values and converts `gr.File` paths to the pipeline's `list[RGB]` contract
 - `multiview_calibration_fn()` -- streaming callback that creates a `BinaryStream`, runs the pipeline inside a recording context, and yields bytes to the Rerun viewer
 - `main()` -- builds and returns the `gr.Blocks` layout
 
@@ -62,21 +64,13 @@ run_btn.click(
 ).then(
     lambda: uuid.uuid4(),    # Session: fresh recording ID
 ).then(
-    _sync_config,            # Config: sync widgets -> calibrator singleton
-).then(
-    _parse_and_load_images,  # I/O: Gradio file paths -> RGB arrays (via gr.State)
+    _prepare_request,        # Atomically capture files + widget configuration
 ).then(
     multiview_calibration_fn # Pipeline: run calibration, stream to Rerun viewer
 )
 ```
 
-Each step has a single responsibility. If the config sync fails, images are never loaded. If image loading fails, the pipeline never runs. The chain is readable top-to-bottom.
-
-**Why `_sync_config` exists:**
-Loading VGGT + SAM3 + MoGe takes ~7 seconds. The UI can't reload them on every run. Instead, models are loaded once at import, and `_sync_config` patches the config in-place for runtime-only fields (`keep_top_percent`, `preprocessing_mode`). Only when a user enables a previously-disabled feature (toggling `segment_people` or `refine_depth_maps` from OFF to ON) does it re-create the calibrator, because that feature's model was never loaded.
-
-**Why `_parse_and_load_images` is a separate step:**
-The pipeline's input contract is `list[RGB]`. Gradio's `gr.File` returns file paths. Keeping the translation in its own `.then()` step means `multiview_calibration_fn` never touches file paths -- it receives pre-loaded arrays from `gr.State`, matching exactly what the API layer expects.
+Each run receives one immutable request, so concurrent sessions cannot observe a backend or operation configuration selected by another session. Loading remains lazy: repeated runs reuse the matching predictor, while backend replacement closes the old multi-GB model before constructing the new one.
 
 ### Layer 3: Entry points (`tools/`)
 
@@ -127,21 +121,27 @@ graph = Graph(
 The Gradio Rerun viewer (`gradio-rerun`) accepts `bytes` -- raw RRD data chunks. The streaming pattern:
 
 ```python
-def multiview_calibration_fn(recording_id, rgb_list):
+def multiview_calibration_fn(recording_id, request):
     # 1. Create a recording stream bound to this session
     recording = rr.RecordingStream(application_id="app", recording_id=recording_id)
     stream = recording.binary_stream()
 
-    # 2. Run the pipeline inside the recording context
-    #    All rr.log() calls in run_calibration_pipeline go to this stream
+    # 2. Run inside the recording context and predictor-cache lease
     with recording:
-        run_calibration_pipeline(rgb_list=rgb_list, mv_calibrator=_MV_CALIBRATOR, ...)
+        with PREDICTOR_CACHE.acquire(request.config.predictor_config) as predictor:
+            output = run_multiview_calibration(
+                rgb_list=request.rgb_list,
+                multiview_predictor=predictor,
+                config=request.config,
+                ...,
+            )
+        log_calibration_results(rgb_list=request.rgb_list, output=output, ...)
 
     # 3. Yield the accumulated bytes to the Gradio Rerun viewer
     yield stream.read(), "Calibration complete"
 ```
 
-Key: `run_calibration_pipeline` doesn't know about streaming. It just calls `rr.log()`. The `with recording:` context in the UI layer redirects those calls to the binary stream. This is why the same pipeline function works for both CLI (global recording → viewer/file) and Gradio (scoped recording → binary stream → viewer component).
+Key: the API doesn't know about streaming. Its `rr.log()` calls target the active recording. The `with recording:` context in the UI redirects them to the binary stream, while the CLI uses its globally configured viewer/file sink.
 
 ## Daggr composition: wilor-nano as reference
 
@@ -181,7 +181,7 @@ graph = Graph(name="WiLor Pipeline", nodes=[detection_node, keypoint_node])
 |---|---|---|
 | **When to use** | Models are tightly coupled (VGGT feeds SAM3 feeds MoGe) | Stages are independently useful |
 | **Model loading** | Single process, shared GPU memory | Separate processes, isolated memory |
-| **Config management** | `_sync_config` manages one calibrator | Each node has its own config |
+| **Config management** | Immutable per-run request + keyed model cache | Each node has its own config |
 | **Latency** | Single process, no serialization overhead | JSON serialization between nodes |
 | **Reusability** | Pipeline is one unit | Each node is independently deployable |
 
@@ -198,26 +198,22 @@ class SceneReconstructionConfig:
     use_normals: bool = True
     device: Literal["cuda", "cpu"] = "cuda"
 
-class SceneReconstructor:
-    """Model orchestrator. Loads models once, reused across calls."""
-    def __init__(self, config): ...
-    def __call__(self, *, rgb_list) -> SceneResults: ...
-
-def run_reconstruction_pipeline(
-    *, rgb_list, reconstructor, parent_log_path, timeline
+def run_scene_reconstruction(
+    *, rgb_list, predictor, config
 ) -> SceneResults:
-    """Shared pipeline: blueprint + reconstruct + log. Uses thread-local rr recording."""
+    """Shared computation with explicit, caller-owned model dependencies."""
     ...
 ```
 
 ### 2. Gradio UI (`gradio_ui/scene_reconstruction_ui.py`)
 ```python
-_CONFIG = SceneReconstructionConfig(device="cuda", verbose=True)
-_RECONSTRUCTOR = SceneReconstructor(config=_CONFIG)
+@dataclass(frozen=True, slots=True)
+class SceneReconstructionRequest:
+    rgb_list: list[np.ndarray]
+    config: SceneReconstructionConfig
 
-def _sync_config(resolution, use_normals): ...
-def _parse_and_load_images(img_files): ...
-def reconstruction_fn(recording_id, rgb_list): ...
+def _prepare_request(img_files, resolution, use_normals): ...
+def reconstruction_fn(recording_id, request): ...
 def main() -> gr.Blocks: ...
 ```
 
@@ -240,8 +236,8 @@ node = GradioNode("http://localhost:7860", api_name="/reconstruction_fn", ...)
 
 2. **Rerun logging uses thread-local recordings.** The pipeline calls `rr.log()` without knowing the destination. The caller (`with recording:` or global) controls routing.
 
-3. **Model singletons live in the UI module.** Loaded once at import, patched by `_sync_config`. The API layer creates fresh instances (CLI use case where startup cost is paid once).
+3. **Model ownership is explicit.** The CLI owns a private model; the UI owns a keyed cache. Per-run requests are immutable, and computation functions never retain leased models.
 
-4. **Each `.then()` step has one job.** Tab switching, session management, config sync, image parsing, and pipeline execution are separate steps. Failures don't cascade past their boundary.
+4. **Each `.then()` step has one job.** Tab switching, session management, atomic request capture, and pipeline execution are separate steps. Failures don't cascade past their boundary.
 
 5. **Gradio apps are also daggr nodes.** If your callback has a named API endpoint and typed inputs/outputs, daggr can compose it into a graph. Design the Gradio app to work standalone first, then wire it into a graph.

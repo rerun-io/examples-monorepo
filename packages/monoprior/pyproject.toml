@@ -19,6 +19,12 @@ dependencies = [
 [tool.setuptools.packages.find]
 include = ["monopriors*", "tools*"]
 
+[tool.setuptools.package-data]
+monopriors = [
+    "third_party/g3t/LICENSE.txt",
+    "third_party/g3t/README.md",
+]
+
 [tool.ruff]
 line-length = 150
 exclude = ["monopriors/third_party", "notebooks"]
