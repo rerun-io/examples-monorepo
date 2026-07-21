@@ -46,7 +46,8 @@ def cached_engine_path(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Pa
     """Return the machine-local cache path for an engine built from this ONNX file.
 
     The name encodes everything that invalidates an engine: ONNX content hash,
-    batch, precision, TensorRT version, and GPU compute capability.
+    batch, precision, workspace, optimization level, TensorRT version, and GPU
+    compute capability.
 
     Args:
         onnx_path: ONNX interchange file the engine is built from.
@@ -63,6 +64,7 @@ def cached_engine_path(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Pa
     onnx_hash: str = _onnx_content_hash(onnx_path)[:12]
     name: str = (
         f"{onnx_path.stem}_b1-{config.opt_batch_size}-{config.max_batch_size}_{config.precision}"
+        f"_w{config.workspace_gib:g}o{config.builder_optimization_level}"
         f"_trt{trt.__version__}_sm{capability[0]}{capability[1]}_{onnx_hash}.engine"
     )
     return cache_dir / name
@@ -124,7 +126,10 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig) -> 
     if serialized is None:
         raise RuntimeError(f"TensorRT engine build failed for {onnx_path}.")
     engine_path.parent.mkdir(parents=True, exist_ok=True)
-    engine_path.write_bytes(bytes(serialized))
+    # Publish atomically: ensure_engine trusts the cache path by existence, so a
+    # killed build must never leave a truncated engine there.
+    tmp_path: Path = engine_path.with_name(f"{engine_path.name}.tmp-{os.getpid()}")
+    tmp_path.write_bytes(bytes(serialized))
     manifest: dict[str, Any] = {
         "onnx_path": str(onnx_path),
         "onnx_sha256": _onnx_content_hash(onnx_path),
@@ -141,6 +146,7 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig) -> 
         "cuda_compute_capability": list(torch.cuda.get_device_capability()),
     }
     engine_path.with_suffix(engine_path.suffix + ".json").write_text(json.dumps(manifest, indent=2) + "\n")
+    os.replace(tmp_path, engine_path)
 
 
 def ensure_engine(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Path = DEFAULT_TRT_CACHE_DIR) -> Path:

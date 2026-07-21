@@ -678,6 +678,7 @@ class TorchCodecMultiVideoReader:
         self._width: int = self._video_readers[0].width
         self._fps: float = self._video_readers[0].fps
         self._frame_cnt: int = min(len(reader) for reader in self._video_readers)
+        self._frames_at_executor: ThreadPoolExecutor | None = None
 
     @property
     def video_paths(self) -> list[Path]:
@@ -747,8 +748,18 @@ class TorchCodecMultiVideoReader:
             self._bind_cuda_context(reader.device)
             return reader.get_frame(frame_idx)
 
-        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
-            return list(executor.map(_decode_one, self._video_readers, [int(idx) for idx in frame_indices]))
+        if self._frames_at_executor is None:
+            # One pool for the reader's lifetime: multiview pipelines call this
+            # once per synchronized timestep, so per-call pool setup/teardown
+            # lands in the hot loop.
+            self._frames_at_executor = ThreadPoolExecutor(max_workers=self.num_workers)
+        return list(self._frames_at_executor.map(_decode_one, self._video_readers, [int(idx) for idx in frame_indices]))
+
+    def close(self) -> None:
+        """Shut down the persistent per-camera decode pool, if one was created."""
+        if self._frames_at_executor is not None:
+            self._frames_at_executor.shutdown(wait=False)
+            self._frames_at_executor = None
 
     @staticmethod
     def _bind_cuda_context(device: str) -> None:

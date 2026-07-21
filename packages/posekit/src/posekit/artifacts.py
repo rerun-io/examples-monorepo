@@ -7,10 +7,11 @@ convention for RTMPose/RTMW/YOLOX) or from a torch export done by a model family
 """
 
 import os
-import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Any
+
+from simplecv.apis.download_utils import download_file
 
 DEFAULT_ONNX_CACHE_DIR: Path = Path(os.environ.get("POSEKIT_ONNX_CACHE", "~/.cache/posekit/onnx")).expanduser()
 """Portable ONNX artifact cache; override with the ``POSEKIT_ONNX_CACHE`` env var."""
@@ -38,7 +39,7 @@ def fetch_openmmlab_onnx(zip_url: str, *, cache_dir: Path = DEFAULT_ONNX_CACHE_D
     if not zip_path.exists():
         print(f"[posekit] downloading ONNX artifact: {zip_url}")
         tmp_path: Path = zip_path.with_suffix(".zip.part")
-        urllib.request.urlretrieve(zip_url, tmp_path)  # noqa: S310
+        download_file(zip_url, tmp_path)
         tmp_path.rename(zip_path)
     with zipfile.ZipFile(zip_path) as archive:
         onnx_members: list[str] = [name for name in archive.namelist() if name.endswith(".onnx")]

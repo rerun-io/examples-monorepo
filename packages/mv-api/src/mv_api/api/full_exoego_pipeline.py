@@ -656,7 +656,9 @@ def run_model_backed_pipeline(
         # silent 2.4x CPU-decode regression. Only readers without real video
         # files (test doubles, in-memory sources) keep their own decode.
         exo_video_paths: list[Path] = list(getattr(exo_mv_reader, "video_paths", []))
-        if exo_video_paths and all(path.exists() for path in exo_video_paths):
+        if exo_video_paths:
+            # No exists() pre-check: a missing file must raise here, not silently
+            # keep the CPU reader.
             exo_mv_reader = TorchCodecMultiVideoReader(list(exo_video_paths), device="cuda")
     exo_resolutions: set[tuple[int, int]] = {(int(reader.height), int(reader.width)) for reader in exo_mv_reader.video_readers}
     if len(exo_resolutions) > 1:

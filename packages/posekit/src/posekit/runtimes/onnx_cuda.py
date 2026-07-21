@@ -12,6 +12,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from beartype.roar import BeartypeException
 from torch import Tensor
 
 from posekit.runtimes.base import RuntimeSpec, TensorSpec, validate_runtime_inputs
@@ -70,6 +71,8 @@ class OnnxCudaRuntime:
                 str(onnx_path), sess_options=session_options, providers=[("CUDAExecutionProvider", provider_options)]
             )
             self._stream_ordered: bool = True
+        except BeartypeException:
+            raise
         except Exception as error:
             # Perf-relevant mode switch: every call will host-sync the caller's
             # stream instead of being stream-ordered — say so, don't hide it.
