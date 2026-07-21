@@ -35,7 +35,11 @@ from monopriors.apis.multiview_geometry import (
     MultiviewGeometryResult,
     run_multiview_geometry,
 )
-from monopriors.gradio_ui._multiview_common import parse_multiview_model, parse_preprocessing_mode
+from monopriors.gradio_ui._multiview_common import (
+    discover_multiview_examples,
+    parse_multiview_model,
+    parse_preprocessing_mode,
+)
 from monopriors.gradio_ui._multiview_runtime import PREDICTOR_CACHE
 from monopriors.models.multiview.multiview_predictor import (
     IMAGE_PREPROCESSING_MODES,
@@ -321,19 +325,12 @@ def main() -> gr.Blocks:
                     with gr.TabItem("Outputs", id="outputs"):
                         status_text = gr.Textbox(label="Status", interactive=False)
 
-                car_example_images: list[str] = sorted(
-                    str(p) for p in (EXAMPLE_DATA_DIR / "car_landscape_12").glob("*.jpg")
-                )
-                rp_capture_images: list[str] = sorted(
-                    str(p) for p in (EXAMPLE_DATA_DIR / "rp_capture_6").glob("*.jpg")
-                )
+                example_scenes: list[tuple[str, list[str]]] = discover_multiview_examples(EXAMPLE_DATA_DIR)
                 gr.Examples(
-                    examples=[
-                        [car_example_images],
-                        [rp_capture_images],
-                    ],
+                    examples=[[image_paths] for _, image_paths in example_scenes],
                     inputs=[input_imgs],
                     cache_examples=False,
+                    example_labels=[label for label, _ in example_scenes],
                 )
 
             with gr.Column(scale=5):
