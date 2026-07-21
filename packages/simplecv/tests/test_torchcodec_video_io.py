@@ -13,6 +13,7 @@ import torch
 from jaxtyping import UInt8
 
 from simplecv.video_io import (
+    MultiVideoReader,
     TorchCodecMultiVideoReader,
     TorchCodecVideoReader,
     VideoReader,
@@ -390,6 +391,86 @@ class TestTorchCodecMultiVideoReader:
         assert len(reader) > 0
         frame_list: list = reader[0]
         assert len(frame_list) == 3
+
+
+class TestGetFramesAt:
+    """Tests for the reader-agnostic per-video frame index API."""
+
+    def test_per_video_indices_decode_in_camera_order(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Each video decodes its own index; results come back in camera order."""
+        import sys
+        import types
+
+        class _Metadata:
+            width: int = 4
+            height: int = 2
+            num_frames: int = 5
+            average_fps: float = 60.0
+
+        class _FrameBatch:
+            def __init__(self, data: torch.Tensor) -> None:
+                self.data: torch.Tensor = data
+
+        class _FakeVideoDecoder:
+            def __init__(self, source: str | Path, **_kwargs: object) -> None:
+                self.source: str | Path = source
+                self.metadata: _Metadata = _Metadata()
+
+            def get_frame_at(self, frame_id: int) -> _FrameBatch:
+                frame: torch.Tensor = torch.full((3, self.metadata.height, self.metadata.width), frame_id, dtype=torch.uint8)
+                return _FrameBatch(frame)
+
+        fake_decoders_module = types.SimpleNamespace(VideoDecoder=_FakeVideoDecoder)
+        monkeypatch.setitem(sys.modules, "torchcodec.decoders", fake_decoders_module)
+
+        reader: TorchCodecMultiVideoReader = TorchCodecMultiVideoReader(
+            [Path("cam0.mp4"), Path("cam1.mp4"), Path("cam2.mp4")],
+            device="cpu",
+            num_workers=2,
+        )
+        frames: list[UInt8[torch.Tensor, "3 h w"]] = reader.get_frames_at([1, 3, 0])
+
+        assert [int(frame[0, 0, 0].item()) for frame in frames] == [1, 3, 0]
+        assert all(frame.shape == (3, 2, 4) for frame in frames)
+
+    def test_index_count_mismatch_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A wrong number of per-video indices is a loud error, not a partial decode."""
+        import sys
+        import types
+
+        class _Metadata:
+            width: int = 4
+            height: int = 2
+            num_frames: int = 5
+            average_fps: float = 60.0
+
+        class _FakeVideoDecoder:
+            def __init__(self, source: str | Path, **_kwargs: object) -> None:
+                self.source: str | Path = source
+                self.metadata: _Metadata = _Metadata()
+
+        fake_decoders_module = types.SimpleNamespace(VideoDecoder=_FakeVideoDecoder)
+        monkeypatch.setitem(sys.modules, "torchcodec.decoders", fake_decoders_module)
+
+        reader: TorchCodecMultiVideoReader = TorchCodecMultiVideoReader(
+            [Path("cam0.mp4"), Path("cam1.mp4")],
+            device="cpu",
+            num_workers=1,
+        )
+        with pytest.raises(ValueError, match="Expected 2 frame indices"):
+            reader.get_frames_at([0])
+
+    def test_cv2_reader_matches_torchcodec_contract(self, multi_video_paths: list[Path]) -> None:
+        """The cv2 MultiVideoReader satisfies the same contract: RGB CHW uint8 tensors."""
+        reader: MultiVideoReader = MultiVideoReader(multi_video_paths)
+        frames: list[UInt8[torch.Tensor, "3 h w"]] = reader.get_frames_at([0] * len(multi_video_paths))
+
+        bgr_list = reader[0]
+        assert len(frames) == len(multi_video_paths)
+        for frame, bgr in zip(frames, bgr_list, strict=True):
+            assert frame.dtype == torch.uint8
+            expected_rgb_chw: UInt8[torch.Tensor, "3 h w"] = torch.from_numpy(bgr[..., ::-1].transpose(2, 0, 1).copy())
+            assert torch.equal(frame, expected_rgb_chw)
 
 
 class TestTorchCodecMultiVideoReaderChunks:

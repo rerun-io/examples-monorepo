@@ -730,6 +730,7 @@ h5py = ">=3.13.0,<4"
 natsort = ">=8.4.0,<9"
 open3d = ">=0.19.0,<0.20"
 scikit-image = ">=0.24.0,<0.25"
+torchcodec = "*"
 tyro = ">=0.9.1,<0.10"
 
 [feature.mv-api.target.linux-64.dependencies]
@@ -738,6 +739,8 @@ datasets = ">=4.0.0"
 [feature.mv-api.pypi-dependencies]
 mv-api = { path = "packages/mv-api", editable = true }
 monopriors = { path = "packages/monoprior", editable = true }
+posekit = { path = "packages/posekit", editable = true }
+onnx = "*"
 sam3 = { path = "packages/sam3", editable = true }
 wilor_nano = { path = "packages/wilor-nano", editable = true }
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
@@ -1047,6 +1050,37 @@ description = "Build a static-batch FP16 TensorRT engine from ONNX"
 cmd = "python tools/eval/benchmark.py"
 cwd = "packages/sapiens-coco133-pose"
 description = "Benchmark iterable golden path against batched TensorRT path"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# posekit
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.posekit]
+platforms = ["linux-64"]
+
+[feature.posekit.dependencies]
+python = "3.12.*"
+torchcodec = "*"
+tyro = ">=0.9.1,<0.10"
+
+[feature.posekit.pypi-dependencies]
+posekit = { path = "packages/posekit", editable = true }
+sapiens2-pose = { path = "packages/sapiens2-pose", editable = true }
+sam2 = { path = "packages/sam2-streaming", editable = true }
+onnx = "*"
+onnxscript = "*"
+
+[feature.posekit.activation.env]
+PACKAGE_DIR = "packages/posekit"
+
+[feature.posekit.tasks.posekit-video-pose]
+cmd = "python tools/demos/video_pose.py"
+cwd = "packages/posekit"
+description = "Run the GPU video 2D pose demo (detector + top-down pose over torch/onnx/tensorrt backends)"
+
+[feature.posekit.tasks.posekit-video-track]
+cmd = "python tools/demos/video_track.py"
+cwd = "packages/posekit"
+description = "Run the streaming detect/track/pose/re-ID demo (YOLOX + SAM2-streaming + RTMPose + CLIP)"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # robocap-slam
@@ -2077,6 +2111,7 @@ natsort = ">=8.4.0,<9"
 
 [feature.mamma.pypi-dependencies]
 mamma = { path = "packages/mamma", editable = true }
+posekit = { path = "packages/posekit", editable = true }
 # Vendored cjaverliat/sam2 fork (streaming predictor + forgetful memory bank +
 # EfficientTAM); distribution name is `sam2`, needs no-build-isolation (torch
 # at build time). See packages/sam2-streaming/VENDOR.md.
@@ -2362,6 +2397,17 @@ sapiens-coco133-pose-dev = { features = [
     "sapiens-coco133-pose",
     "dev",
 ], solve-group = "sapiens-coco133-pose", no-default-feature = true }
+posekit = { features = [
+    "common",
+    "cuda",
+    "posekit",
+], solve-group = "posekit", no-default-feature = true }
+posekit-dev = { features = [
+    "common",
+    "cuda",
+    "posekit",
+    "dev",
+], solve-group = "posekit", no-default-feature = true }
 robocap-slam = { features = [
     "common",
     "robocap-slam",

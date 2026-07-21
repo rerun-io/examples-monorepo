@@ -2,9 +2,13 @@ from typing import Any, cast
 
 import numpy as np
 import pytest
+import torch
 from jaxtyping import Float32, Float64, UInt8
 from numpy import ndarray
+from posekit.predictions import BoxDetections, Keypoints2d
+from posekit.skeletons import COCO_133
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
+from torch import Tensor
 
 from mv_api import multiview_pose_estimator as estimator_module
 from mv_api.multiview_pose_estimator import MultiviewBodyTracker, MultiviewBodyTrackerConfig, MVHistory
@@ -50,26 +54,26 @@ def _fake_pinhole(name: str) -> PinholeParameters:
 
 
 class _FailingDetector:
-    def __call__(self, bgr: UInt8[ndarray, "h w 3"]) -> ndarray:
-        del bgr
+    def __call__(self, frames_rgb: UInt8[Tensor, "b h w 3"]) -> BoxDetections:
+        del frames_rgb
         raise AssertionError("tracking should provide the selected-view bbox without running detection")
 
 
 class _RecordingPoseModel:
     def __init__(self) -> None:
         self.seen_pixel_values: list[int] = []
+        self.skeleton = COCO_133
 
-    def __call__(
-        self,
-        bgr: UInt8[ndarray, "h w 3"],
-        *,
-        bboxes: list[list[float]],
-    ) -> tuple[Float64[ndarray, "1 133 2"], Float32[ndarray, "1 133"]]:
-        assert bboxes
-        self.seen_pixel_values.append(int(bgr[0, 0, 0]))
-        keypoints: Float64[ndarray, "1 133 2"] = np.zeros((1, 133, 2), dtype=np.float64)
-        scores: Float32[ndarray, "1 133"] = np.ones((1, 133), dtype=np.float32)
-        return keypoints, scores
+    def __call__(self, frames_rgb: UInt8[Tensor, "b h w 3"], detections: BoxDetections) -> Keypoints2d:
+        assert detections.num_detections > 0
+        self.seen_pixel_values.append(int(frames_rgb[0, 0, 0, 0]))
+        num_instances: int = detections.num_detections
+        return Keypoints2d(
+            xy=torch.zeros((num_instances, 133, 2), dtype=torch.float32),
+            scores=torch.ones((num_instances, 133), dtype=torch.float32),
+            frame_indices=detections.frame_indices,
+            skeleton=COCO_133,
+        )
 
 
 def test_multiview_tracker_filters_images_and_pinholes_for_selected_detection_cameras(
@@ -87,7 +91,7 @@ def test_multiview_tracker_filters_images_and_pinholes_for_selected_detection_ca
 
     monkeypatch.setattr(estimator_module, "batch_triangulate", fake_batch_triangulate)
     tracker: MultiviewBodyTracker = object.__new__(MultiviewBodyTracker)
-    tracker.config = MultiviewBodyTrackerConfig(cams_for_detection_idx=[1], perform_tracking=True)
+    tracker.config = MultiviewBodyTrackerConfig(cams_for_detection_idx=[1], perform_tracking=True, device="cpu")
     tracker.num_keypoints = 133
     tracker.filter_body_idxes = np.arange(133, dtype=np.intp)
     tracker.det_model = cast(Any, _FailingDetector())
@@ -99,14 +103,16 @@ def test_multiview_tracker_filters_images_and_pinholes_for_selected_detection_ca
     xyzc_t[:, 2] = 2.0
     xyzc_t[:, 3] = 1.0
     pred_state: MVHistory = MVHistory(xyzc_t=xyzc_t, xyzc_t1=xyzc_t.copy())
-    bgr_list: list[UInt8[ndarray, "32 32 3"]] = [
-        np.full((32, 32, 3), 10, dtype=np.uint8),
-        np.full((32, 32, 3), 20, dtype=np.uint8),
-    ]
+    frames_rgb: UInt8[Tensor, "2 32 32 3"] = torch.stack(
+        [
+            torch.full((32, 32, 3), 10, dtype=torch.uint8),
+            torch.full((32, 32, 3), 20, dtype=torch.uint8),
+        ]
+    )
     pinhole_list: list[PinholeParameters] = [_fake_pinhole("cam0"), _fake_pinhole("cam1")]
 
     output_state: MVHistory = tracker(
-        bgr_list=bgr_list,
+        frames_rgb=frames_rgb,
         pinhole_list=pinhole_list,
         pred_state=pred_state,
     )

@@ -12,9 +12,12 @@ from typing import Any, Literal
 
 import numpy as np
 import pyarrow as pa
+import torch
+from einops import rearrange
 from jaxtyping import Bool, Float32, Float64, Int, UInt8
 from numpy import ndarray
 from simplecv.camera_parameters import PinholeParameters
+from simplecv.data.skeleton.coco_133 import COCO_133_IDS
 
 CATALOG_DATASET_NAME: str = "assembly101"
 CATALOG_TIMELINE: str = "video_time"
@@ -384,38 +387,6 @@ def validate_exo_camera_calibration(schema: Any, streams: list[ExoCameraStream])
 
     if missing_fields:
         raise ValueError(f"Selected exo cameras are missing calibration components: {missing_fields}")
-
-
-def rgb_chw_to_bgr_hwc(rgb_chw: Any) -> UInt8[ndarray, "h w 3"]:
-    """Convert a dataloader RGB CHW image to MVAPI's BGR HWC NumPy contract.
-
-    Args:
-        rgb_chw: Torch-like or NumPy-like RGB image with shape ``3 h w``.
-
-    Returns:
-        BGR image with shape ``h w 3`` and dtype ``uint8``.
-
-    Raises:
-        ValueError: If the input does not have shape ``3 h w``.
-    """
-    image_obj: Any = rgb_chw
-    detach: Any = getattr(image_obj, "detach", None)
-    if callable(detach):
-        image_obj = detach()
-    cpu: Any = getattr(image_obj, "cpu", None)
-    if callable(cpu):
-        image_obj = cpu()
-    numpy_method: Any = getattr(image_obj, "numpy", None)
-    if callable(numpy_method):
-        image_obj = numpy_method()
-
-    rgb_array: UInt8[ndarray, "3 h w"] = np.asarray(image_obj, dtype=np.uint8)
-    if rgb_array.ndim != 3 or rgb_array.shape[0] != 3:
-        raise ValueError(f"Expected RGB CHW image with shape (3, h, w), got {rgb_array.shape}.")
-
-    rgb_hwc: UInt8[ndarray, "h w 3"] = np.moveaxis(rgb_array, 0, -1)
-    bgr_hwc: UInt8[ndarray, "h w 3"] = rgb_hwc[..., ::-1].astype(np.uint8, copy=False)
-    return bgr_hwc
 
 
 def build_prediction_rrd_path(
@@ -1151,7 +1122,6 @@ def _log_prediction_static_metadata(
 ) -> None:
     import rerun as rr
     from simplecv.data.skeleton.coco133_layers import Coco133AnnotationLayer
-    from simplecv.data.skeleton.coco_133 import COCO_133_IDS
     from simplecv.rerun_custom_types import Points2DWithConfidence, Points3DWithConfidence
 
     rr.log(
@@ -1222,6 +1192,11 @@ def _run_mvapi_inference(
         tracker_config,
         filter_body_idxes=upper_body_filter_idx,
     )
+    if pose_tracker.num_keypoints != len(COCO_133_IDS):
+        raise ValueError(
+            f"The catalog prediction layer logs COCO-133 overlays; tracker mode {config.tracker_mode!r} "
+            f"yields {pose_tracker.num_keypoints} keypoints. Use tracker_mode='wholebody'."
+        )
     mv_state: MVHistory = MVHistory()
 
     rrd_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1247,13 +1222,16 @@ def _run_mvapi_inference(
 
         _segment_meta, index_value = rerun_dataset.sample_index.global_to_local(sample_idx)
         timestamp_ns: int = index_value_to_time_ns(index_value)
-        bgr_list: list[UInt8[ndarray, "H W 3"]] = []
-        for stream in streams:
-            rgb_chw: Any = sample[stream.name]
-            bgr_list.append(rgb_chw_to_bgr_hwc(rgb_chw))
+        # Dataloader samples are RGB CHW uint8 tensors already — upload once,
+        # then view as NHWC for the tracker (a wrong dtype fails loudly in the
+        # tracker's frame validation rather than being silently cast here).
+        frames_rgb: UInt8[torch.Tensor, "n_views h w 3"] = rearrange(
+            torch.stack([torch.as_tensor(sample[stream.name]) for stream in streams]).to(config.tracker_device, non_blocking=True),
+            "views c h w -> views h w c",
+        )
 
         mv_state = pose_tracker(
-            bgr_list=bgr_list,
+            frames_rgb=frames_rgb,
             pinhole_list=pinholes,
             pred_state=mv_state,
             recording=recording,

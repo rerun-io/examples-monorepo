@@ -11,6 +11,7 @@ The table below is a curated subset; the workspace ships additional packages wit
 | [simplecv](packages/simplecv/) | `simplecv` | `simplecv-dev` | 3.12 | CUDA 13 | Shared computer vision utilities, datasets, Rerun logging, and geometry helpers |
 | [monoprior](packages/monoprior/) | `monoprior` | `monoprior-dev` | 3.12 | CUDA 13 | Monocular geometric priors (depth, normals) |
 | [prompt-da](packages/prompt-da/) | `prompt-da` | `prompt-da-dev` | 3.12 | CUDA 13 | Prompt Depth Anything — depth completion on Polycam data |
+| [posekit](packages/posekit/) | `posekit` | `posekit-dev` | 3.12 | CUDA 13 | One model API for human perception networks (detect, pose, segment, re-ID) over torch/onnx/tensorrt |
 | [wilor-nano](packages/wilor-nano/) | `wilor-nano` | `wilor-nano-dev` | 3.12 | CUDA 13 | Hand pose estimation |
 | [sam3d-body](packages/sam3d-body/) | `sam3d-body` | `sam3d-body-dev` | 3.12 | CUDA 13 | 3D body segmentation with SAM + Rerun |
 | [sam3](packages/sam3/) | `sam3` | `sam3-dev` | 3.12 | CUDA 13 | SAM3 video segmentation with Rerun |
