@@ -94,14 +94,12 @@ def strip_detector_nms(onnx_path: Path) -> Path:
     producers: dict[str, Any] = {output: node for node in model.graph.node for output in node.output}
     needed: set[int] = set()
     frontier: list[str] = [boxes_name, scores_name]
-    kept_nodes: list[Any] = []
     while frontier:
         name: str = frontier.pop()
         node: Any = producers.get(name)
         if node is None or id(node) in needed:
             continue
         needed.add(id(node))
-        kept_nodes.append(node)
         frontier.extend(node.input)
     kept_order: list[Any] = [node for node in model.graph.node if id(node) in needed]
     del model.graph.node[:]

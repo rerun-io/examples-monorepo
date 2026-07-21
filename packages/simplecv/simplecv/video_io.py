@@ -761,6 +761,12 @@ class TorchCodecMultiVideoReader:
             self._frames_at_executor.shutdown(wait=False)
             self._frames_at_executor = None
 
+    def __del__(self) -> None:
+        # Best-effort: don't leak decode threads when a caller never close()s.
+        # getattr guards a partially-constructed reader (failed __init__).
+        if getattr(self, "_frames_at_executor", None) is not None:
+            self.close()
+
     @staticmethod
     def _bind_cuda_context(device: str) -> None:
         """Bind the CUDA primary context to the calling worker thread.
