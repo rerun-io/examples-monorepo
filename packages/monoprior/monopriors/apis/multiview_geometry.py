@@ -103,18 +103,15 @@ class MultiviewGeometryCLIConfig:
 
 def main(config: MultiviewGeometryCLIConfig) -> None:
     """CLI entry point for multi-view geometry prediction with Rerun visualization."""
-    import open3d as o3d
     import rerun as rr
     import rerun.blueprint as rrb
-    from einops import rearrange
-    from simplecv.ops.pc_utils import estimate_voxel_size
     from simplecv.rerun_log_utils import log_pinhole
 
     from monopriors.apis.multiview_calibration import (
         PARENT_LOG_PATH,
         SUPPORTED_IMAGE_EXTENSIONS,
         load_rgb_images,
-        mv_pred_to_pointcloud,
+        mv_pred_to_filtered_pointcloud,
     )
 
     # Load images
@@ -161,17 +158,13 @@ def main(config: MultiviewGeometryCLIConfig) -> None:
         rr.log(f"{pinhole_log_path}/depth", rr.DepthImage(mv_pred.depth_map, meter=1), static=True)
 
     # Log point cloud
-    pointcloud: Float32[ndarray, "num_points 3"] = mv_pred_to_pointcloud(result.mv_pred_list)
-    rgb_stack: UInt8[ndarray, "num_points 3"] = np.concatenate(
-        [rearrange(mv_pred.rgb_image, "h w c -> (h w) c") for mv_pred in result.mv_pred_list]
+    pointcloud, point_colors = mv_pred_to_filtered_pointcloud(
+        result.mv_pred_list,
+        result.depth_confidences,
+        target_points=150_000,
     )
-    voxel_size: float = estimate_voxel_size(pointcloud.astype(np.float32), target_points=150_000)
-    pcd: o3d.geometry.PointCloud = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(pointcloud)
-    pcd.colors = o3d.utility.Vector3dVector(rgb_stack / 255.0)
-    pcd_ds: o3d.geometry.PointCloud = pcd.voxel_down_sample(voxel_size)
     rr.log(
         f"{PARENT_LOG_PATH}/point_cloud",
-        rr.Points3D(np.asarray(pcd_ds.points, dtype=np.float32), colors=np.asarray(pcd_ds.colors, dtype=np.float32)),
+        rr.Points3D(pointcloud, colors=point_colors),
         static=True,
     )

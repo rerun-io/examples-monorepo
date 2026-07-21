@@ -8,11 +8,18 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from torch import nn
 from vggt.models.vggt import VGGT
 
-from monopriors.apis.multiview_calibration import MultiViewCalibrator, MultiViewCalibratorConfig
+from monopriors.apis.multiview_calibration import (
+    MultiViewCalibrator,
+    MultiViewCalibratorConfig,
+    mv_pred_to_filtered_pointcloud,
+    mv_pred_to_pointcloud,
+)
 from monopriors.apis.multiview_geometry import MultiviewGeometryConfig, run_multiview_geometry
 from monopriors.gradio_ui.multiview_geometry_ui import _prepare_request
 from monopriors.models.multiview.multiview_predictor import (
@@ -58,6 +65,124 @@ def _prediction() -> MultiviewPred:
         confidence_mask=np.ones((2, 2), dtype=np.float32),
         pinhole_param=pinhole,
     )
+
+
+def test_filtered_pointcloud_unprojects_only_budgeted_confident_pixels() -> None:
+    prediction = _prediction()
+    prediction.rgb_image = np.arange(48, dtype=np.uint8).reshape(4, 4, 3)
+    prediction.depth_map = np.arange(1, 17, dtype=np.float32).reshape(4, 4)
+    prediction.confidence_mask = np.ones((4, 4), dtype=np.float32)
+    prediction.pinhole_param.intrinsics.width = 4
+    prediction.pinhole_param.intrinsics.height = 4
+    confidence_masks = [np.full((4, 4), 255, dtype=np.uint8)]
+
+    points, colors = mv_pred_to_filtered_pointcloud(
+        [prediction],
+        confidence_masks,
+        target_points=4,
+    )
+
+    selected_pixel_ids = colors[:, 0] // 3
+    dense_points = mv_pred_to_pointcloud([prediction])
+    assert len(points) == 4
+    assert len(np.unique(selected_pixel_ids)) == 4
+    np.testing.assert_allclose(points, dense_points[selected_pixel_ids], rtol=1.0e-6, atol=1.0e-6)
+    np.testing.assert_array_equal(colors, prediction.rgb_image.reshape(-1, 3)[selected_pixel_ids])
+
+
+@settings(max_examples=75, deadline=None)
+@given(
+    data=st.data(),
+    height=st.integers(min_value=3, max_value=12),
+    width=st.integers(min_value=3, max_value=12),
+    focal_length=st.floats(min_value=1.0, max_value=100.0, allow_nan=False, allow_infinity=False),
+    principal_x=st.floats(min_value=-5.0, max_value=15.0, allow_nan=False, allow_infinity=False),
+    principal_y=st.floats(min_value=-5.0, max_value=15.0, allow_nan=False, allow_infinity=False),
+    rotation=st.floats(min_value=-math.pi, max_value=math.pi, allow_nan=False, allow_infinity=False),
+    translation=st.tuples(
+        st.floats(min_value=-10.0, max_value=10.0, allow_nan=False, allow_infinity=False),
+        st.floats(min_value=-10.0, max_value=10.0, allow_nan=False, allow_infinity=False),
+        st.floats(min_value=-10.0, max_value=10.0, allow_nan=False, allow_infinity=False),
+    ),
+)
+def test_filtered_pointcloud_is_exact_confident_subset_of_dense_unprojection(
+    data: st.DataObject,
+    height: int,
+    width: int,
+    focal_length: float,
+    principal_x: float,
+    principal_y: float,
+    rotation: float,
+    translation: tuple[float, float, float],
+) -> None:
+    pixel_count = height * width
+    depth_map = np.asarray(
+        data.draw(
+            st.lists(
+                st.floats(min_value=0.1, max_value=100.0, allow_nan=False, allow_infinity=False),
+                min_size=pixel_count,
+                max_size=pixel_count,
+            ),
+            label="depth_map",
+        ),
+        dtype=np.float32,
+    ).reshape(height, width)
+    confident_pixel_ids = data.draw(
+        st.sets(st.integers(min_value=0, max_value=pixel_count - 1), min_size=4, max_size=pixel_count),
+        label="confident_pixel_ids",
+    )
+    target_points = data.draw(
+        st.integers(min_value=1, max_value=max(1, len(confident_pixel_ids) // 4)),
+        label="target_points",
+    )
+    confidence_mask = np.zeros(pixel_count, dtype=np.uint8)
+    confidence_mask[list(confident_pixel_ids)] = 255
+    confidence_mask = confidence_mask.reshape(height, width)
+
+    pixel_ids = np.arange(pixel_count, dtype=np.uint8)
+    rgb_image = np.stack((pixel_ids, 255 - pixel_ids, np.full(pixel_count, 173, dtype=np.uint8)), axis=1).reshape(height, width, 3)
+    cos_rotation = math.cos(rotation)
+    sin_rotation = math.sin(rotation)
+    cam_R_world = np.asarray(
+        [[cos_rotation, -sin_rotation, 0.0], [sin_rotation, cos_rotation, 0.0], [0.0, 0.0, 1.0]],
+        dtype=np.float32,
+    )
+    prediction = MultiviewPred(
+        cam_name="camera_0",
+        rgb_image=rgb_image,
+        depth_map=depth_map,
+        confidence_mask=confidence_mask.astype(np.float32),
+        pinhole_param=PinholeParameters(
+            name="camera_0",
+            intrinsics=Intrinsics(
+                camera_conventions="RDF",
+                fl_x=focal_length,
+                fl_y=focal_length,
+                cx=principal_x,
+                cy=principal_y,
+                width=width,
+                height=height,
+            ),
+            extrinsics=Extrinsics(
+                cam_R_world=cam_R_world,
+                cam_t_world=np.asarray(translation, dtype=np.float32),
+            ),
+        ),
+    )
+
+    points, colors = mv_pred_to_filtered_pointcloud(
+        [prediction],
+        [confidence_mask],
+        target_points=target_points,
+    )
+
+    selected_pixel_ids = colors[:, 0].astype(np.int64)
+    dense_points = mv_pred_to_pointcloud([prediction])
+    assert len(points) == min(target_points, np.count_nonzero(confidence_mask))
+    assert len(np.unique(selected_pixel_ids)) == len(selected_pixel_ids)
+    assert np.all(confidence_mask.reshape(-1)[selected_pixel_ids] != 0)
+    np.testing.assert_array_equal(colors, rgb_image.reshape(-1, 3)[selected_pixel_ids])
+    np.testing.assert_allclose(points, dense_points[selected_pixel_ids], rtol=1.0e-5, atol=1.0e-5)
 
 
 def _rgb_image(height: int = 28, width: int = 42) -> np.ndarray:

@@ -407,15 +407,13 @@ def generate_multiview_pred(
 
         depth_map = depth_map.squeeze()
         if fast_rgb:
-            rgb_min: int = int(original_img.min())
-            rgb_max: int = int(original_img.max())
-            if rgb_min == 0 and rgb_max == 255:
-                normalized_rgb: UInt8[ndarray, "orig_h orig_w 3"] = original_img
-            else:
-                normalized_rgb = (
-                    (original_img.astype(np.float32) - rgb_min) * (255.0 / max(rgb_max - rgb_min, 1))
-                ).clip(0, 255).astype(np.uint8)
-            rgb_image: UInt8[ndarray, "orig_h orig_w 3"] = cv2.GaussianBlur(normalized_rgb, (3, 3), 0.0)
+            normalized = (processed_img - processed_img.min()) / (processed_img.max() - processed_img.min())
+            lowres_rgb: UInt8[ndarray, "resized_h resized_w 3"] = (normalized * 255).clip(0, 255).astype(np.uint8)
+            rgb_image: UInt8[ndarray, "orig_h orig_w 3"] = cv2.resize(
+                lowres_rgb,
+                (original_img.shape[1], original_img.shape[0]),
+                interpolation=cv2.INTER_LINEAR,
+            )
         else:
             processed_img = cv2.resize(
                 processed_img,

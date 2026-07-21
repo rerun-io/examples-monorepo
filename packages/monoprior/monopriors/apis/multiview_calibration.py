@@ -246,6 +246,84 @@ def mv_pred_to_pointcloud(
     return pointcloud
 
 
+def mv_pred_to_filtered_pointcloud(
+    mv_pred_list: list[MultiviewPred],
+    confidence_masks: list[UInt8[ndarray, "H W"]],
+    *,
+    target_points: int = 150_000,
+) -> tuple[Float32[ndarray, "sampled_points 3"], UInt8[ndarray, "sampled_points 3"]]:
+    """Unproject a spatially uniform subset of confident pixels.
+
+    Args:
+        mv_pred_list: Per-view depth, RGB, and calibrated camera predictions.
+        confidence_masks: Per-view binary masks whose nonzero pixels are eligible.
+        target_points: Maximum number of points returned across all views.
+
+    Returns:
+        World-space points and their RGB colors. Every returned point is the exact
+        unprojection of one confident source pixel.
+    """
+    if target_points <= 0:
+        raise ValueError("target_points must be positive.")
+    if len(mv_pred_list) != len(confidence_masks):
+        raise ValueError("Predictions and confidence masks must have the same length.")
+
+    valid_pixel_counts: list[int] = [int(np.count_nonzero(mask)) for mask in confidence_masks]
+    valid_pixel_count: int = sum(valid_pixel_counts)
+    selected_ranks: Int[ndarray, "sampled_points"] = np.linspace(
+        0,
+        max(valid_pixel_count - 1, 0),
+        min(target_points, valid_pixel_count),
+        dtype=np.int64,
+    )
+    sampled_points: list[Float32[ndarray, "points 3"]] = []
+    sampled_colors: list[UInt8[ndarray, "points 3"]] = []
+    rank_offset = 0
+
+    for prediction, confidence_mask, camera_valid_count in zip(
+        mv_pred_list,
+        confidence_masks,
+        valid_pixel_counts,
+        strict=True,
+    ):
+        depth_map: Float32[ndarray, "H W"] = prediction.depth_map
+        if confidence_mask.shape != depth_map.shape:
+            raise ValueError("Each confidence mask must match its prediction's depth shape.")
+
+        camera_ranks = selected_ranks[
+            (selected_ranks >= rank_offset) & (selected_ranks < rank_offset + camera_valid_count)
+        ] - rank_offset
+        rank_offset += camera_valid_count
+        if len(camera_ranks) == 0:
+            continue
+        sampled_flat_indices = np.flatnonzero(confidence_mask)[camera_ranks]
+        sampled_y, sampled_x = np.divmod(sampled_flat_indices, depth_map.shape[1])
+
+        K_33_raw: Float[ndarray, "3 3"] | None = prediction.pinhole_param.intrinsics.k_matrix
+        if K_33_raw is None:
+            raise ValueError("Multi-view prediction must include camera intrinsics.")
+        K_33_inv: Float32[ndarray, "3 3"] = np.linalg.inv(K_33_raw.astype(np.float32))
+        pixel_coordinates: Float32[ndarray, "points 3"] = np.stack(
+            [sampled_x, sampled_y, np.ones_like(sampled_x)], axis=1
+        ).astype(np.float32)
+        camera_rays: Float32[ndarray, "points 3"] = pixel_coordinates @ K_33_inv.T
+        camera_points: Float32[ndarray, "points 3"] = (
+            camera_rays * depth_map[sampled_y, sampled_x, None]
+        )
+        world_T_cam: Float32[ndarray, "4 4"] = prediction.pinhole_param.extrinsics.world_T_cam.astype(np.float32)
+        world_points: Float32[ndarray, "points 3"] = camera_points @ world_T_cam[:3, :3].T + world_T_cam[:3, 3]
+        finite: Bool[ndarray, "points"] = np.isfinite(world_points).all(axis=1)
+        sampled_points.append(world_points[finite])
+        sampled_colors.append(prediction.rgb_image[sampled_y, sampled_x][finite])
+
+    if not sampled_points:
+        return np.empty((0, 3), dtype=np.float32), np.empty((0, 3), dtype=np.uint8)
+
+    points: Float32[ndarray, "sampled_points 3"] = np.concatenate(sampled_points)
+    colors: UInt8[ndarray, "sampled_points 3"] = np.concatenate(sampled_colors)
+    return points, colors
+
+
 def segment_people(
     rgb: UInt8[ndarray, "H W 3"],
     *,
@@ -411,16 +489,13 @@ class MultiViewCalibrator:
                 updated_confidences.append(depth_conf)
         depth_confidences = updated_confidences
 
-        # Build the initial point cloud from multi-view depths
-        pointcloud: Float32[ndarray, "num_points 3"] = mv_pred_to_pointcloud(mv_pred_list)
-        rgb_stack: UInt8[ndarray, "num_points 3"] = np.concatenate([
-            rearrange(mv_pred.rgb_image, "h w c -> (h w) c") for mv_pred in mv_pred_list
-        ])
-        pc_conf_mask: Bool[ndarray, "num_points"] = np.concatenate([
-            rearrange(depth_conf, "h w -> (h w)") for depth_conf in depth_confidences
-        ]).astype(bool)
-        filtered_points: Float32[ndarray, "filtered_points 3"] = pointcloud[pc_conf_mask]
-        filtered_colors: UInt8[ndarray, "filtered_points 3"] = rgb_stack[pc_conf_mask]
+        # The viewer consumes roughly 150k points. Sample confident pixels before
+        # unprojection instead of materializing and filtering millions of dense points.
+        filtered_points, filtered_colors = mv_pred_to_filtered_pointcloud(
+            mv_pred_list,
+            depth_confidences,
+            target_points=150_000,
+        )
         pcd: o3d.geometry.PointCloud = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(filtered_points)
         pcd.colors = o3d.utility.Vector3dVector(filtered_colors / 255.0)
