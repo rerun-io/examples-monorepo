@@ -194,6 +194,12 @@ cuda-python = "*"
 LD_LIBRARY_PATH = "$CONDA_PREFIX/lib:$CONDA_PREFIX/lib/python3.12/site-packages/tensorrt_libs:$CONDA_PREFIX/lib/python3.11/site-packages/tensorrt_libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 # ─── ide feature (standalone dev env for Zed/IDE tooling) ────────────────────
+# Explicit platforms: a feature that omits `platforms` defaults to every
+# platform ANY feature references (pixi >= 0.71), so composing with `common`
+# would demand an osx-arm64 solve. See AGENTS.md "Platforms & lockfile".
+[feature.ide]
+platforms = ["linux-64", "linux-aarch64"]
+
 [feature.ide.dependencies]
 python = "3.12.*"
 
@@ -1085,6 +1091,12 @@ description = "Run the streaming detect/track/pose/re-ID demo (YOLOX + SAM2-stre
 # ═══════════════════════════════════════════════════════════════════════════
 # robocap-slam
 # ═══════════════════════════════════════════════════════════════════════════
+# Explicit platforms: CUDA-only deps (libcublas) can never solve on osx-arm64;
+# without this list the feature inherits osx-arm64 from `common` (pixi >= 0.71)
+# and every lock write in the workspace aborts on the unsolvable demand.
+[feature.robocap-slam]
+platforms = ["linux-64", "linux-aarch64"]
+
 [feature.robocap-slam.dependencies]
 python = "3.12.*"
 pyyaml = "*"
@@ -1342,6 +1354,11 @@ description = "Launch VistaDream Gradio web interface"
 # ═══════════════════════════════════════════════════════════════════════════
 # pyvrs-viewer
 # ═══════════════════════════════════════════════════════════════════════════
+# Explicit platforms: keeps the env's demand matching the lock (linux-only);
+# see the robocap-slam note above.
+[feature.pyvrs-viewer]
+platforms = ["linux-64", "linux-aarch64"]
+
 [feature.pyvrs-viewer.dependencies]
 python = "3.12.*"
 tyro = ">=0.9.1,<0.10"
