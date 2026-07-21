@@ -1,6 +1,9 @@
 import math
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from threading import Event, Thread
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -14,12 +17,20 @@ from monopriors.apis.multiview_geometry import MultiviewGeometryConfig, run_mult
 from monopriors.gradio_ui.multiview_geometry_ui import _prepare_request
 from monopriors.models.multiview.multiview_predictor import (
     G3T_CHECKPOINT_REVISION,
+    G3TBackend,
     MultiviewPredictor,
     MultiviewPredictorCache,
     MultiviewPredictorConfig,
     decode_g3t_camera_heads,
 )
-from monopriors.models.multiview.vggt_model import MultiviewPred
+from monopriors.models.multiview.vggt_model import (
+    MultiviewModelPredictions,
+    MultiviewPred,
+    generate_multiview_pred,
+    preprocess_images,
+)
+from monopriors.third_party.g3t.layers.attention import Attention
+from monopriors.third_party.g3t.layers.rope import PositionGetter, RotaryPositionEmbedding2D
 from monopriors.third_party.g3t.models.g3t import G3T
 
 
@@ -118,6 +129,158 @@ def test_g3t_predictor_pins_checkpoint_skips_point_head_and_preserves_gravity(
         np.array([0.0, 0.0, 1.0]),
         atol=1e-6,
     )
+
+
+def test_preprocess_images_parallel_path_preserves_per_image_results() -> None:
+    images = [_rgb_image(height=28, width=42), _rgb_image(height=42, width=28)]
+
+    batch = preprocess_images(images, mode="pad")
+    individual = [preprocess_images([image], mode="pad") for image in images]
+
+    torch.testing.assert_close(batch.images, torch.stack([result.images[0] for result in individual]), rtol=0.0, atol=0.0)
+    assert batch.metadata == [result.metadata[0] for result in individual]
+
+
+def test_fast_g3t_rgb_materialization_stays_within_five_percent() -> None:
+    rgb = _rgb_image(height=48, width=64)
+    preprocessed = preprocess_images([rgb], mode="pad")
+
+    def model_predictions() -> MultiviewModelPredictions:
+        return MultiviewModelPredictions(
+            depth=np.ones((1, 1, 518, 518, 1), dtype=np.float32),
+            depth_conf=np.ones((1, 1, 518, 518), dtype=np.float32),
+            intrinsic=np.array([[[[259.0, 0.0, 259.0], [0.0, 259.0, 259.0], [0.0, 0.0, 1.0]]]], dtype=np.float32),
+            cam_T_world_b34=np.array(
+                [[[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]]]],
+                dtype=np.float32,
+            ),
+        )
+
+    reference = generate_multiview_pred(
+        model_predictions(),
+        img_tensors=preprocessed.images,
+        rgb_list=[rgb],
+        metadata_list=preprocessed.metadata,
+        fast_rgb=False,
+    )[0]
+    candidate = generate_multiview_pred(
+        model_predictions(),
+        img_tensors=preprocessed.images,
+        rgb_list=[rgb],
+        metadata_list=preprocessed.metadata,
+        fast_rgb=True,
+    )[0]
+
+    assert float(np.mean(np.abs(reference.rgb_image.astype(np.int16) - candidate.rgb_image.astype(np.int16)) <= 13)) >= 0.95
+    np.testing.assert_array_equal(candidate.depth_map, reference.depth_map)
+    np.testing.assert_array_equal(candidate.confidence_mask, reference.confidence_mask)
+    np.testing.assert_allclose(candidate.pinhole_param.intrinsics.k_matrix, reference.pinhole_param.intrinsics.k_matrix)
+
+
+def test_graphable_rope_preserves_original_frequency_lookup() -> None:
+    rope = RotaryPositionEmbedding2D()
+    tokens = torch.randn(2, 4, 9, 64)
+    positions = torch.randint(0, 4, (2, 9, 2))
+    feature_dim = tokens.shape[-1] // 2
+    cos_comp, sin_comp = rope._compute_frequency_components(
+        feature_dim,
+        int(positions.max()) + 1,
+        tokens.device,
+        tokens.dtype,
+    )
+    vertical, horizontal = tokens.chunk(2, dim=-1)
+    expected = torch.cat(
+        (
+            rope._apply_1d_rope(vertical, positions[..., 0], cos_comp, sin_comp),
+            rope._apply_1d_rope(horizontal, positions[..., 1], cos_comp, sin_comp),
+        ),
+        dim=-1,
+    )
+
+    actual = rope(tokens, positions)
+
+    torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+
+
+def test_g3t_compilation_can_be_disabled() -> None:
+    assert MultiviewPredictorConfig(model_name="g3t").g3t_compile is True
+    assert MultiviewPredictorConfig(model_name="g3t", g3t_compile=False).g3t_compile is False
+
+
+def test_g3t_compile_warms_frame_and_global_position_caches() -> None:
+    rope = RotaryPositionEmbedding2D()
+    attention = Attention(dim=1024, num_heads=16, rope=rope)
+    position_getter = PositionGetter()
+    aggregator = SimpleNamespace(
+        patch_size=14,
+        patch_start_idx=5,
+        position_getter=position_getter,
+        rope=rope,
+        frame_blocks=[SimpleNamespace(attn=attention)],
+    )
+    backend = object.__new__(G3TBackend)
+    backend.model = SimpleNamespace(aggregator=aggregator)
+    backend.dtype = torch.bfloat16
+    backend._warmed_input_shapes = set()
+
+    backend._warm_position_caches(torch.zeros((2, 3, 28, 42)))
+
+    assert (2, 3) in position_getter.position_cache
+    assert (32, 11, torch.device("cpu"), torch.float32) in rope.frequency_cache
+    assert (32, 22, torch.device("cpu"), torch.float32) in rope.frequency_cache
+
+
+def test_g3t_keeps_camera_heads_fp32_but_allows_mixed_precision_depth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    disabled_autocast_depths: list[int] = []
+
+    @contextmanager
+    def record_disabled_autocast(_device_type: str, *, enabled: bool) -> Iterator[None]:
+        assert enabled is False
+        disabled_autocast_depths.append(1)
+        try:
+            yield
+        finally:
+            disabled_autocast_depths.pop()
+
+    class FakeAggregator(nn.Module):
+        def forward(self, images: torch.Tensor) -> tuple[list[torch.Tensor], int]:
+            batch, num_cams = images.shape[:2]
+            return [torch.zeros((batch, num_cams, 1, 2))], 0
+
+    class FakeCameraHead(nn.Module):
+        def forward(self, _tokens: list[torch.Tensor]) -> list[torch.Tensor]:
+            assert disabled_autocast_depths
+            return [torch.zeros((1, 1, 6))]
+
+    class FakeDepthHead(nn.Module):
+        def forward(
+            self,
+            _tokens: list[torch.Tensor],
+            *,
+            images: torch.Tensor,
+            patch_start_idx: int,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            assert not disabled_autocast_depths
+            assert patch_start_idx == 0
+            shape = (*images.shape[:2], *images.shape[-2:], 1)
+            depth = torch.ones(shape, dtype=torch.bfloat16)
+            return depth, depth.squeeze(-1)
+
+    model = object.__new__(G3T)
+    nn.Module.__init__(model)
+    model.aggregator = FakeAggregator()
+    model.add_module("local_camera_head", FakeCameraHead())
+    model.add_module("global_camera_head", FakeCameraHead())
+    model.add_module("depth_head", FakeDepthHead())
+    model.point_head = None
+    monkeypatch.setattr(torch.amp, "autocast", record_disabled_autocast)
+
+    predictions = model(torch.zeros((1, 3, 2, 2)))
+
+    assert predictions["depth"].dtype is torch.float32
+    assert predictions["depth_conf"].dtype is torch.float32
 
 
 def test_g3t_camera_heads_compose_local_and_relative_poses() -> None:

@@ -55,7 +55,6 @@ class G3T(nn.Module, PyTorchModelHubMixin):
         predictions = {}
 
         with torch.amp.autocast('cuda', enabled=False):
-
             if self.local_camera_head is not None and self.global_camera_head is not None:
                 local_pose_enc_list = self.local_camera_head(aggregated_tokens_list)
                 global_pose_enc_list = self.global_camera_head(aggregated_tokens_list)
@@ -63,13 +62,14 @@ class G3T(nn.Module, PyTorchModelHubMixin):
                 predictions["local_pose_enc"] = local_pose_enc_list[-1]
                 predictions["global_pose_enc"] = global_pose_enc_list[-1]
 
-            if self.depth_head is not None:
-                depth, depth_conf = self.depth_head(
-                    aggregated_tokens_list, images=images, patch_start_idx=patch_start_idx
-                )
-                predictions["depth"] = depth
-                predictions["depth_conf"] = depth_conf
+        if self.depth_head is not None:
+            depth, depth_conf = self.depth_head(
+                aggregated_tokens_list, images=images, patch_start_idx=patch_start_idx
+            )
+            predictions["depth"] = depth.float()
+            predictions["depth_conf"] = depth_conf.float()
 
+        with torch.amp.autocast('cuda', enabled=False):
             if self.point_head is not None:
                 pts3d, pts3d_conf = self.point_head(
                     aggregated_tokens_list, images=images, patch_start_idx=patch_start_idx

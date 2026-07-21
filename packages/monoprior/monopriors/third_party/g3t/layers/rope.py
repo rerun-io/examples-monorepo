@@ -174,7 +174,10 @@ class RotaryPositionEmbedding2D(nn.Module):
         feature_dim = tokens.size(-1) // 2
 
         # Get frequency components
-        max_position = int(positions.max()) + 1
+        # The token count is an inexpensive upper bound for both spatial coordinates.
+        # Unlike ``positions.max().item()``, it stays inside the tensor graph so the
+        # model can be compiled without a scalar extraction and graph break.
+        max_position = positions.shape[-2]
         cos_comp, sin_comp = self._compute_frequency_components(feature_dim, max_position, tokens.device, tokens.dtype)
 
         # Split features for vertical and horizontal processing

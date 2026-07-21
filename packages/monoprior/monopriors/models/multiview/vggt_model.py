@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Literal, TypedDict
@@ -76,6 +77,60 @@ class PreprocessResults:
     metadata: list[PreprocessingMetadata]
 
 
+def _preprocess_image(
+    rgb: UInt8[ndarray, "H W 3"],
+    mode: Literal["crop", "pad"],
+) -> tuple[Float32[Tensor, "3 resized_h resized_w"], PreprocessingMetadata]:
+    """Resize one RGB image with the model's exact PIL preprocessing."""
+    pil_img = Image.fromarray(rgb)
+    original_width, original_height = pil_img.size
+    target_size = 518
+    metadata = PreprocessingMetadata(
+        original_size=(original_width, original_height),
+        mode=mode,
+        target_size=target_size,
+        padding={"top": 0, "left": 0, "right": 0, "bottom": 0},
+        new_size=(0, 0),
+    )
+
+    if mode == "pad":
+        if original_width >= original_height:
+            new_width = target_size
+            new_height = round(original_height * (new_width / original_width) / 14) * 14
+        else:
+            new_height = target_size
+            new_width = round(original_width * (new_height / original_height) / 14) * 14
+
+        metadata["new_size"] = (new_width, new_height)
+        pad_top = (target_size - new_height) // 2
+        pad_bottom = target_size - new_height - pad_top
+        pad_left = (target_size - new_width) // 2
+        pad_right = target_size - new_width - pad_left
+        metadata["padding"] = {"top": pad_top, "bottom": pad_bottom, "left": pad_left, "right": pad_right}
+
+        pil_img = pil_img.resize((new_width, new_height), Image.Resampling.BICUBIC)
+        image = TF.ToTensor()(pil_img)
+        image = torch.nn.functional.pad(
+            image,
+            (pad_left, pad_right, pad_top, pad_bottom),
+            mode="constant",
+            value=1.0,
+        )
+    else:
+        new_width = target_size
+        new_height = round(original_height * (new_width / original_width) / 14) * 14
+        metadata["new_size"] = (new_width, new_height)
+        pil_img = pil_img.resize((new_width, new_height), Image.Resampling.BICUBIC)
+        image = TF.ToTensor()(pil_img)
+        if new_height > target_size:
+            start_y = (new_height - target_size) // 2
+            metadata["padding"]["top"] = -start_y
+            image = image[:, start_y : start_y + target_size, :]
+            metadata["new_size"] = (new_width, target_size)
+
+    return image, metadata
+
+
 def preprocess_images(
     rgb_list: list[UInt8[ndarray, "H W 3"]],
     mode: Literal["crop", "pad"] = "crop",
@@ -106,84 +161,15 @@ def preprocess_images(
     if len(rgb_list) == 0:
         raise ValueError("At least 1 image is required")
 
-    images = []
-    shapes = set()
-    to_tensor = TF.ToTensor()
-    target_size = 518
-    metadata_list: list[PreprocessingMetadata] = []
-    mode_literal: Literal["crop", "pad"] = mode
+    if len(rgb_list) == 1:
+        processed = [_preprocess_image(rgb_list[0], mode)]
+    else:
+        with ThreadPoolExecutor(max_workers=min(8, len(rgb_list))) as executor:
+            processed = list(executor.map(lambda rgb: _preprocess_image(rgb, mode), rgb_list))
 
-    # First process all images and collect their shapes
-    for rgb in rgb_list:
-        # Convert the numpy array to PIL Image to ensure identical processing
-        pil_img = Image.fromarray(rgb)
-        original_width, original_height = pil_img.size
-
-        # Initialize metadata as TypedDict with explicit constructor
-        metadata = PreprocessingMetadata(
-            original_size=(original_width, original_height),
-            mode=mode_literal,
-            target_size=target_size,
-            padding={"top": 0, "left": 0, "right": 0, "bottom": 0},
-            new_size=(0, 0),  # Will be filled later
-        )
-
-        if mode == "pad":
-            # Make the largest dimension 518px while maintaining aspect ratio
-            if original_width >= original_height:
-                new_width = target_size
-                new_height = round(original_height * (new_width / original_width) / 14) * 14  # Make divisible by 14
-            else:
-                new_height = target_size
-                new_width: int = (
-                    round(original_width * (new_height / original_height) / 14) * 14
-                )  # Make divisible by 14
-
-            metadata["new_size"] = (new_width, new_height)
-            # Calculate padding
-            pad_top: int = (target_size - new_height) // 2
-            pad_bottom: int = target_size - new_height - pad_top
-            pad_left: int = (target_size - new_width) // 2
-            pad_right: int = target_size - new_width - pad_left
-
-            metadata["padding"] = {"top": pad_top, "bottom": pad_bottom, "left": pad_left, "right": pad_right}
-
-            # Resize with new dimensions using PIL's BICUBIC
-            pil_img = pil_img.resize((new_width, new_height), Image.Resampling.BICUBIC)
-
-            # Convert to tensor
-            img = to_tensor(pil_img)
-
-            # Apply padding
-            img = torch.nn.functional.pad(
-                img,
-                (pad_left, pad_right, pad_top, pad_bottom),
-                mode="constant",
-                value=1.0,
-            )
-        else:  # mode == "crop"
-            # Original behavior: set width to target_size
-            new_width = target_size
-            # Calculate height maintaining aspect ratio, divisible by 14
-            new_height = round(original_height * (new_width / original_width) / 14) * 14
-            metadata["new_size"] = (new_width, new_height)
-
-            # Resize with new dimensions using PIL's BICUBIC for exact matching
-            pil_img = pil_img.resize((new_width, new_height), Image.Resampling.BICUBIC)
-
-            # Convert to tensor using the same to_tensor transform
-            img = to_tensor(pil_img)  # Convert to tensor (0, 1)
-
-            # Center crop height if it's larger than target_size
-            if new_height > target_size:
-                start_y = (new_height - target_size) // 2
-                metadata["padding"]["top"] = -start_y  # Negative value indicates cropping
-                img = img[:, start_y : start_y + target_size, :]
-                metadata["new_size"] = (new_width, target_size)
-
-        shapes.add((img.shape[1], img.shape[2]))
-        images.append(img)
-        metadata_list.append(metadata)
+    images = [image for image, _ in processed]
+    metadata_list = [metadata for _, metadata in processed]
+    shapes = {(image.shape[1], image.shape[2]) for image in images}
 
     # Check if we have different shapes
     if len(shapes) > 1:
@@ -347,6 +333,8 @@ def generate_multiview_pred(
     img_tensors: Float32[Tensor, "num_img 3 resized_h resized_w"],
     rgb_list: list[UInt8[ndarray, "original_h original_w 3"]],
     metadata_list: list[PreprocessingMetadata] | None = None,
+    *,
+    fast_rgb: bool = False,
 ) -> list[MultiviewPred]:
     pred_class = pred_class.remove_batch_dim_if_one()
     assert len(pred_class.cam_T_world_b34.shape) == 3, "Currently batch size of 1 is only supported"
@@ -389,18 +377,20 @@ def generate_multiview_pred(
     else:
         depth_confs: Float32[ndarray, "num_cams _ _"] = pred_class.depth_conf
 
-    mv_pred_list: list[MultiviewPred] = []
-    for idx, (intri, extri, processed_img, original_img, depth_map, depth_conf) in enumerate(
-        zip(
-            pred_class.intrinsic,
-            pred_class.cam_T_world_b34,
-            processed_imgs,
-            rgb_list,
-            depth_maps,
-            depth_confs,
-            strict=True,
-        )
+    num_cams = len(rgb_list)
+    if not all(
+        len(values) == num_cams
+        for values in (pred_class.intrinsic, pred_class.cam_T_world_b34, processed_imgs, depth_maps, depth_confs)
     ):
+        raise ValueError("Model outputs and RGB inputs must contain the same number of cameras.")
+
+    def materialize_prediction(idx: int) -> MultiviewPred:
+        intri = pred_class.intrinsic[idx]
+        extri = pred_class.cam_T_world_b34[idx]
+        processed_img = processed_imgs[idx]
+        original_img = rgb_list[idx]
+        depth_map = depth_maps[idx]
+        depth_conf = depth_confs[idx]
         cam_name: str = f"camera_{idx}"
         intri_param = Intrinsics(
             camera_conventions="RDF",
@@ -416,10 +406,23 @@ def generate_multiview_pred(
         pinhole_param = PinholeParameters(name=cam_name, intrinsics=intri_param, extrinsics=extri)
 
         depth_map = depth_map.squeeze()
-        # Use INTER_LINEAR for the processed RGB image (standard for color images)
-        processed_img: Float32[ndarray, "orig_h orig_w 3"] = cv2.resize(
-            processed_img, (original_img.shape[1], original_img.shape[0]), interpolation=cv2.INTER_LINEAR
-        )
+        if fast_rgb:
+            normalized = (processed_img - processed_img.min()) / (processed_img.max() - processed_img.min())
+            lowres_rgb: UInt8[ndarray, "resized_h resized_w 3"] = (normalized * 255).clip(0, 255).astype(np.uint8)
+            rgb_image: UInt8[ndarray, "orig_h orig_w 3"] = cv2.resize(
+                lowres_rgb,
+                (original_img.shape[1], original_img.shape[0]),
+                interpolation=cv2.INTER_LINEAR,
+            )
+        else:
+            processed_img = cv2.resize(
+                processed_img,
+                (original_img.shape[1], original_img.shape[0]),
+                interpolation=cv2.INTER_LINEAR,
+            )
+            normalized = (processed_img - processed_img.min()) / (processed_img.max() - processed_img.min())
+            rgb_image = (normalized * 255).clip(0, 255).astype(np.uint8)
+
         # Use INTER_NEAREST for the confidence mask to preserve binary values
         conf_mask: Float32[ndarray, "orig_h orig_w"] = cv2.resize(
             depth_conf.astype(np.float32),
@@ -438,22 +441,15 @@ def generate_multiview_pred(
             target_height=original_img.shape[0],
         )
 
-        # Normalize the processed image to [0, 1] range
-        normalized: Float32[ndarray, "orig_h orig_w 3"] = (processed_img - processed_img.min()) / (
-            processed_img.max() - processed_img.min()
-        )
-        rgb_image: UInt8[ndarray, "orig_h orig_w 3"] = (normalized * 255).clip(0, 255).astype(np.uint8)
-        mv_pred_list.append(
-            MultiviewPred(
-                cam_name=cam_name,
-                rgb_image=rgb_image,
-                depth_map=depth_map,  # convert to uint16
-                # confidence_mask=(conf_mask * 255).astype(np.uint8),
-                confidence_mask=conf_mask,
-                # pointcloud=pcd,
-                # pointcloud_conf=pc_conf_mask,
-                pinhole_param=pinhole_param,
-            )
+        return MultiviewPred(
+            cam_name=cam_name,
+            rgb_image=rgb_image,
+            depth_map=depth_map,
+            confidence_mask=conf_mask,
+            pinhole_param=pinhole_param,
         )
 
-    return mv_pred_list
+    if num_cams == 1:
+        return [materialize_prediction(0)]
+    with ThreadPoolExecutor(max_workers=min(8, num_cams)) as executor:
+        return list(executor.map(materialize_prediction, range(num_cams)))

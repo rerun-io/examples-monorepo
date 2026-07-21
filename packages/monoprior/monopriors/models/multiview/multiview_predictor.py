@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from threading import Lock
 from timeit import default_timer as timer
-from typing import Literal, TypeAlias
+from typing import Literal, TypeAlias, cast
 
 import numpy as np
 import torch
@@ -28,6 +28,7 @@ from monopriors.models.multiview.vggt_model import (
     generate_multiview_pred,
     preprocess_images,
 )
+from monopriors.third_party.g3t.layers.attention import Attention
 from monopriors.third_party.g3t.models.g3t import G3T
 from monopriors.third_party.g3t.utils.pose_enc import pose_encoding_to_extri_intri as decode_g3t_pose_encoding
 
@@ -51,6 +52,8 @@ class MultiviewPredictorConfig:
     """Image preprocessing strategy."""
     local_files_only: bool = False
     """Require checkpoints to be present in the local Hugging Face cache."""
+    g3t_compile: bool = True
+    """Compile G3T on CUDA for lower warm inference latency; ignored by VGGT and CPU runs."""
 
 
 @dataclass(slots=True)
@@ -218,6 +221,36 @@ class G3TBackend(MultiviewBackend):
         ).to(config.device)
         self.model.eval()
         self.model.point_head = None
+        self._compiled_model: Callable[[Tensor], dict[str, Tensor]] | None = None
+        self._warmed_input_shapes: set[tuple[int, int, int]] = set()
+        if config.g3t_compile and config.device == "cuda":
+            self._compiled_model = torch.compile(self.model, mode="reduce-overhead", fullgraph=True)
+
+    def _warm_position_caches(self, images: Float32[Tensor, "num_cams 3 H W"]) -> None:
+        """Populate shape-only RoPE caches outside CUDA graph capture."""
+        num_cams = images.shape[0]
+        height, width = images.shape[-2:]
+        input_shape = (num_cams, height, width)
+        if input_shape in self._warmed_input_shapes:
+            return
+        aggregator = self.model.aggregator
+        patch_height = height // aggregator.patch_size
+        patch_width = width // aggregator.patch_size
+        position_getter = aggregator.position_getter
+        if position_getter is not None:
+            position_getter(num_cams, patch_height, patch_width, device=images.device)
+        if aggregator.rope is not None:
+            attention = cast(Attention, aggregator.frame_blocks[0].attn)
+            rope_feature_dim = attention.head_dim // 2
+            frame_token_count = patch_height * patch_width + aggregator.patch_start_idx
+            for token_count in (frame_token_count, num_cams * frame_token_count):
+                aggregator.rope._compute_frequency_components(
+                    rope_feature_dim,
+                    token_count,
+                    images.device,
+                    images.dtype,
+                )
+        self._warmed_input_shapes.add(input_shape)
 
     def predict(
         self,
@@ -225,8 +258,13 @@ class G3TBackend(MultiviewBackend):
         *,
         center_method: CenterMethod,
     ) -> MultiviewTensorPredictions:
-        with torch.no_grad(), amp_autocast(device_type=self.device, dtype=self.dtype):
-            raw_predictions: dict[str, Tensor] = self.model(images)
+        inference_model: Callable[[Tensor], dict[str, Tensor]] = self.model
+        if self._compiled_model is not None:
+            self._warm_position_caches(images)
+            torch.compiler.cudagraph_mark_step_begin()
+            inference_model = self._compiled_model
+        with torch.inference_mode(), amp_autocast(device_type=self.device, dtype=self.dtype):
+            raw_predictions: dict[str, Tensor] = inference_model(images)
         image_size_hw: tuple[int, int] = (images.shape[-2], images.shape[-1])
         decoded = decode_g3t_camera_heads(
             local_pose_encoding=raw_predictions["local_pose_enc"],
@@ -304,6 +342,7 @@ class MultiviewPredictor:
             img_tensors=images,
             rgb_list=rgb_list,
             metadata_list=preprocess_results.metadata if self.config.preprocessing_mode == "pad" else None,
+            fast_rgb=self.config.model_name == "g3t",
         )
 
     def close(self) -> None:
