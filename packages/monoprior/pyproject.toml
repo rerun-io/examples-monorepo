@@ -21,6 +21,7 @@ include = ["monopriors*", "tools*"]
 
 [tool.setuptools.package-data]
 monopriors = [
+    "models/multiview/profiles/*.npz",
     "third_party/g3t/LICENSE.txt",
     "third_party/g3t/README.md",
 ]
