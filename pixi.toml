@@ -29,7 +29,6 @@ preview = ["pixi-build"]
 
 # ─── pypi-options (workspace-level) ─────────────────────────────────────────
 [pypi-options]
-no-build-isolation = ["moge", "gsplat", "dpvo", "sam2"]
 
 [pypi-options.dependency-overrides]
 iopath = ">=0.1.10"
@@ -277,13 +276,13 @@ hdf5 = "*"
 h5py = ">=3.12.1,<4"
 dill = ">=0.3.8,<0.4.1"
 datasets = ">=4.0.0"
+rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68", package = { build = { backend = { name = "pixi-build-python", version = "*" } }, host-dependencies = { setuptools = "*" }, run-dependencies = { numpy = "*", onnxruntime = "*", py-opencv = "*", tqdm = "*" } } }
 
 [feature.simplecv.pypi-dependencies]
 jax = ">=0.6.0,<0.7"
 jaxopt = ">=0.8.5,<0.9"
 lovely-jax = "*"
 smplx = ">=0.1.28"
-rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 wilor-nano = { path = "packages/wilor-nano", editable = true }
 timm = "<1.0"
 vrs = ">=1.1.0"
@@ -424,12 +423,16 @@ easydict = ">=1.13,<2"
 imageio = ">=2.37.0,<3"
 imageio-ffmpeg = ">=0.6.0,<0.7"
 natsort = ">=8.4.0,<9"
+# Deliberately omit Gradio from MoGe (common supplies the working PyPI pin) and
+# omit utils3d/pipeline from its run deps (they are inline siblings below).
+moge = { git = "https://github.com/microsoft/MoGe.git", rev = "925b8ed835a7a9cdb7578ba15c658a0afc969030", package = { build = { backend = { name = "pixi-build-python", version = "*" } }, host-dependencies = { setuptools = "*" }, run-dependencies = { pytorch-gpu = "*", torchvision = "*", py-opencv = "*", scipy = "*", matplotlib-base = "*", trimesh = "*", pillow = "*", huggingface_hub = "*", numpy = "*", click = "*" } } }
+utils3d = { git = "https://github.com/EasternJournalist/utils3d.git", rev = "3fab839f0be9931dac7c8488eb0e1600c236e183", package = { build = { backend = { name = "pixi-build-python", version = "*" } }, host-dependencies = { setuptools = "*" }, run-dependencies = { moderngl = "*", numpy = "*", scipy = "*", matplotlib-base = "*" } } }
+pipeline = { git = "https://github.com/EasternJournalist/pipeline.git", rev = "866f059d2a05cde05e4a52211ec5051fd5f276d6", package = { build = { backend = { name = "pixi-build-python", version = "*" } }, host-dependencies = { setuptools = "*" }, run-dependencies = {} } }
 
 [feature.monoprior.pypi-dependencies]
 monopriors = { path = "packages/monoprior", editable = true }
 sam3 = { path = "packages/sam3", editable = true }
 vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c" }
-moge = { git = "https://github.com/microsoft/MoGe.git" }
 
 [feature.monoprior.activation.env]
 PACKAGE_DIR = "packages/monoprior"
@@ -666,6 +669,7 @@ dill = ">=0.4.0,<0.5"
 trimesh = "*"
 pyrender = "*"
 torchcodec = "*"
+rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68", package = { build = { backend = { name = "pixi-build-python", version = "*" } }, host-dependencies = { setuptools = "*" }, run-dependencies = { numpy = "*", onnxruntime = "*", py-opencv = "*", tqdm = "*" } } }
 
 [feature.wilor-nano.pypi-dependencies]
 wilor_nano = { path = "packages/wilor-nano", editable = true }
@@ -675,7 +679,6 @@ wilor_nano = { path = "packages/wilor-nano", editable = true }
 # Removed for reproducibility. The optional `tools/daggr_*.py` demos import
 # `from daggr import GradioNode, Graph`; to run them, install daggr yourself
 # (e.g. `daggr = { path = "/abs/path/to/daggr", editable = true }`).
-rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 onnx = ">=1.12.0,<1.18.0"
 onnxscript = "*"
 
@@ -728,6 +731,7 @@ tyro = ">=0.9.1,<0.10"
 open3d = ">=0.19.0,<0.20"
 h5py = ">=3.13.0,<4"
 natsort = ">=8.4.0,<9"
+rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68", package = { build = { backend = { name = "pixi-build-python", version = "*" } }, host-dependencies = { setuptools = "*" }, run-dependencies = { numpy = "*", onnxruntime = "*", py-opencv = "*", tqdm = "*" } } }
 
 [feature.egoexo-forge.target.linux-64.dependencies]
 datasets = ">=4.0.0"
@@ -735,7 +739,6 @@ datasets = ">=4.0.0"
 [feature.egoexo-forge.pypi-dependencies]
 egoexo-forge = { path = "packages/egoexo-forge", editable = true }
 timm = "<1.0"
-rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 
 [feature.egoexo-forge.activation.env]
 PACKAGE_DIR = "packages/egoexo-forge"
@@ -776,6 +779,12 @@ open3d = ">=0.19.0,<0.20"
 scikit-image = ">=0.24.0,<0.25"
 torchcodec = "*"
 tyro = ">=0.9.1,<0.10"
+rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68", package = { build = { backend = { name = "pixi-build-python", version = "*" } }, host-dependencies = { setuptools = "*" }, run-dependencies = { numpy = "*", onnxruntime = "*", py-opencv = "*", tqdm = "*" } } }
+# Deliberately omit Gradio from MoGe (common supplies the working PyPI pin) and
+# omit utils3d/pipeline from its run deps (they are inline siblings below).
+moge = { git = "https://github.com/microsoft/MoGe.git", rev = "925b8ed835a7a9cdb7578ba15c658a0afc969030", package = { build = { backend = { name = "pixi-build-python", version = "*" } }, host-dependencies = { setuptools = "*" }, run-dependencies = { pytorch-gpu = "*", torchvision = "*", py-opencv = "*", scipy = "*", matplotlib-base = "*", trimesh = "*", pillow = "*", huggingface_hub = "*", numpy = "*", click = "*" } } }
+utils3d = { git = "https://github.com/EasternJournalist/utils3d.git", rev = "3fab839f0be9931dac7c8488eb0e1600c236e183", package = { build = { backend = { name = "pixi-build-python", version = "*" } }, host-dependencies = { setuptools = "*" }, run-dependencies = { moderngl = "*", numpy = "*", scipy = "*", matplotlib-base = "*" } } }
+pipeline = { git = "https://github.com/EasternJournalist/pipeline.git", rev = "866f059d2a05cde05e4a52211ec5051fd5f276d6", package = { build = { backend = { name = "pixi-build-python", version = "*" } }, host-dependencies = { setuptools = "*" }, run-dependencies = {} } }
 
 [feature.mv-api.target.linux-64.dependencies]
 datasets = ">=4.0.0"
@@ -787,9 +796,7 @@ posekit = { path = "packages/posekit", editable = true }
 onnx = "*"
 sam3 = { path = "packages/sam3", editable = true }
 wilor_nano = { path = "packages/wilor-nano", editable = true }
-rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c" }
-moge = { git = "https://github.com/microsoft/MoGe.git" }
 
 [feature.mv-api.activation.env]
 PACKAGE_DIR = "packages/mv-api"
@@ -864,12 +871,16 @@ open3d = ">=0.19.0,<0.20"
 h5py = ">=3.11"
 torchcodec = "*"
 fsspec = ">=2025.3,<=2026.2.0"
+# Deliberately omit Gradio from MoGe (common supplies the working PyPI pin) and
+# omit utils3d/pipeline from its run deps (they are inline siblings below).
+moge = { git = "https://github.com/microsoft/MoGe.git", rev = "925b8ed835a7a9cdb7578ba15c658a0afc969030", package = { build = { backend = { name = "pixi-build-python", version = "*" } }, host-dependencies = { setuptools = "*" }, run-dependencies = { pytorch-gpu = "*", torchvision = "*", py-opencv = "*", scipy = "*", matplotlib-base = "*", trimesh = "*", pillow = "*", huggingface_hub = "*", numpy = "*", click = "*" } } }
+utils3d = { git = "https://github.com/EasternJournalist/utils3d.git", rev = "3fab839f0be9931dac7c8488eb0e1600c236e183", package = { build = { backend = { name = "pixi-build-python", version = "*" } }, host-dependencies = { setuptools = "*" }, run-dependencies = { moderngl = "*", numpy = "*", scipy = "*", matplotlib-base = "*" } } }
+pipeline = { git = "https://github.com/EasternJournalist/pipeline.git", rev = "866f059d2a05cde05e4a52211ec5051fd5f276d6", package = { build = { backend = { name = "pixi-build-python", version = "*" } }, host-dependencies = { setuptools = "*" }, run-dependencies = {} } }
 
 [feature.sam3d-body.pypi-dependencies]
 sam3d_body = { path = "packages/sam3d-body", editable = true }
 monopriors = { path = "packages/monoprior", editable = true }
 sam3 = { path = "packages/sam3", editable = true }
-moge = { git = "https://github.com/microsoft/MoGe.git" }
 timm = ">=0.9"
 natsort = ">=8.4"
 datasets = ">=2.20"
@@ -1056,13 +1067,13 @@ platforms = ["linux-64"]
 python = "3.12.*"
 torchcodec = "*"
 tyro = ">=0.9.1,<0.10"
+rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68", package = { build = { backend = { name = "pixi-build-python", version = "*" } }, host-dependencies = { setuptools = "*" }, run-dependencies = { numpy = "*", onnxruntime = "*", py-opencv = "*", tqdm = "*" } } }
 
 [feature.sapiens-coco133-pose.pypi-dependencies]
 sapiens-coco133-pose = { path = "packages/sapiens-coco133-pose", editable = true }
 sapiens2-pose = { path = "packages/sapiens2-pose", editable = true }
 mv-api = { path = "packages/mv-api", editable = true }
 wilor_nano = { path = "packages/wilor-nano", editable = true }
-rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 onnx = "*"
 onnxscript = "*"
 
@@ -1337,6 +1348,13 @@ icecream = ">=2.1.3,<2.2"
 einops = ">=0.8.0,<0.9"
 imageio = ">=2.37.0,<3"
 imageio-ffmpeg = ">=0.6.0,<0.7"
+# Deliberately omit Gradio from MoGe (common supplies the working PyPI pin) and
+# omit utils3d/pipeline from its run deps (they are inline siblings below).
+moge = { git = "https://github.com/microsoft/MoGe.git", rev = "925b8ed835a7a9cdb7578ba15c658a0afc969030", package = { build = { backend = { name = "pixi-build-python", version = "*" } }, host-dependencies = { setuptools = "*" }, run-dependencies = { pytorch-gpu = "*", torchvision = "*", py-opencv = "*", scipy = "*", matplotlib-base = "*", trimesh = "*", pillow = "*", huggingface_hub = "*", numpy = "*", click = "*" } } }
+utils3d = { git = "https://github.com/EasternJournalist/utils3d.git", rev = "3fab839f0be9931dac7c8488eb0e1600c236e183", package = { build = { backend = { name = "pixi-build-python", version = "*" } }, host-dependencies = { setuptools = "*" }, run-dependencies = { moderngl = "*", numpy = "*", scipy = "*", matplotlib-base = "*" } } }
+pipeline = { git = "https://github.com/EasternJournalist/pipeline.git", rev = "866f059d2a05cde05e4a52211ec5051fd5f276d6", package = { build = { backend = { name = "pixi-build-python", version = "*" } }, host-dependencies = { setuptools = "*" }, run-dependencies = {} } }
+# ai-demos prebuilt for CUDA 13, Python 3.12, and Torch 2.12 (SM 8.6 + 12.0 + PTX); no runtime JIT.
+gsplat = "==1.5.3"
 [feature.vistadream.target.linux-64.dependencies]
 splat-transform = "*"
 
@@ -1345,13 +1363,6 @@ vistadream = { path = "packages/vistadream", editable = true }
 monopriors = { path = "packages/monoprior", editable = true }
 sam3 = { path = "packages/sam3", editable = true }
 vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c" }
-moge = { git = "https://github.com/microsoft/MoGe.git" }
-# cuda13: PyPI gsplat (== the pinned git rev 970dd84, which IS v1.5.3) instead of
-# the git source. pixi's `no-build-isolation` applies to a named PyPI dep but not
-# a git dep, so the git build compiled in an isolated env against a PyPI cu128
-# torch (→ nvcc-13 vs torch-12.8 mismatch); the PyPI dep builds against the conda
-# cuda13 torch.
-gsplat = { version = "==1.5.3", index = "https://pypi.org/simple" }
 accelerate = "*"
 plyfile = "*"
 timm = "*"
@@ -1364,7 +1375,6 @@ omegaconf = "*"
 [feature.vistadream.activation.env]
 PACKAGE_DIR = "packages/vistadream"
 PYREFLY_TARGET = "src/vistadream/api src/vistadream/gradio src/vistadream/resize_utils.py src/vistadream/__init__.py tools"
-TORCH_CUDA_ARCH_LIST = "7.5 8.6 8.9 12.0 12.1"
 CUDA_HOME = "${CONDA_PREFIX}/targets/x86_64-linux"
 CPATH = "${CONDA_PREFIX}/targets/x86_64-linux/include:${CPATH}"
 PATH = "${CONDA_PREFIX}/nvvm/bin:${PATH}"
@@ -2179,8 +2189,8 @@ natsort = ">=8.4.0,<9"
 mamma = { path = "packages/mamma", editable = true }
 posekit = { path = "packages/posekit", editable = true }
 # Vendored cjaverliat/sam2 fork (streaming predictor + forgetful memory bank +
-# EfficientTAM); distribution name is `sam2`, needs no-build-isolation (torch
-# at build time). See packages/sam2-streaming/VENDOR.md.
+# EfficientTAM); distribution name is `sam2`. Static metadata avoids executing
+# setup.py during lock-time resolution. See packages/sam2-streaming/VENDOR.md.
 sam2 = { path = "packages/sam2-streaming", editable = true }
 
 [feature.mamma.activation.env]

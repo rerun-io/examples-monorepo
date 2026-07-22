@@ -31,7 +31,7 @@ The workspace `platforms` list defines the full platform vocabulary: the plain `
 
 **Every linux-only feature MUST declare `platforms = ["linux-64", "linux-aarch64"]` explicitly.** Since pixi 0.71 (PR prefix-dev/pixi#6178), a feature that omits `platforms` defaults to the entire workspace list — including `osx-arm64` and the named CUDA platforms. An env's platforms are the intersection of its features' lists, so one omitting feature can demand unintended macOS or CUDA solves; if that demand is unsolvable (CUDA deps like `libcublas`), **every `pixi install -e <any-env>`/`pixi lock` in the whole workspace aborts** on the next lock write. Solvable missing demands get silently solved and added to the lock instead. When adding a feature, copy the `platforms` line from an existing linux-only feature (e.g. `mv-api`).
 
-**Regenerate the lock on Linux.** Changing a *shared* feature (`common`/`dev`) or a build-from-source dep forces pixi to re-solve the *whole* workspace. Linux-only build-from-source envs — `wilor-nano`'s git `rtmlib` and the `no-build-isolation` deps (`moge`/`gsplat`/`dpvo`/`sam2`) — **cannot be cross-built `osx-arm64` → `linux-64`** ("no compatible Python interpreter"). So on macOS, only `pixi install`/`lock` a package's *own* deps; for anything touching shared features, regenerate `pixi.lock` on a Linux host, copy it back, then `pixi install -e <name> --frozen` on macOS.
+**Whole-workspace lock generation.** The former source-built PyPI dependencies no longer need package Python during resolution: `moge`, `utils3d`, `pipeline`, and `rtmlib` are inline conda packages; `gsplat` is prebuilt; and the workspace `sam2` and `dpvo` packages have static metadata (`dpvo` builds its CUDA kernels through an explicit task). Pixi reads only `pyproject.toml` metadata for inline and workspace source packages at lock time. Whole-workspace locks should now also solve from macOS (validation pending).
 
 ## Architecture
 
@@ -119,9 +119,9 @@ linux-64 (pixi 0.70.x) and move back to a public release once the fix ships.
 - **Never use pip** — all dependency management goes through Pixi
 - **`hf download` not `huggingface-cli`** — conda's huggingface_hub provides `hf`, not `huggingface-cli`
 - **gradio from PyPI, not conda** — conda's gradio package has missing transitive deps
-- **`no-build-isolation` deps** (`moge`, `gsplat`, `dpvo`, `sam2`) build from source and need torch at build time (configured in `[pypi-options]`). They can't be cross-built from macOS — see **Platforms & lockfile**.
+- **Former `no-build-isolation` deps** — `moge`, `utils3d`, `pipeline`, and `rtmlib` are inline conda packages; `gsplat` comes prebuilt from `ai-demos`; `sam2` exposes static metadata with its broken CUDA extension disabled by default; and `dpvo` exposes static metadata and builds CUDA only through its explicit task. Inline and workspace source packages resolve without executing package Python.
 - **sam3d-body uses `tool/` (singular)** not `tools/` for its CLI scripts
-- **Direnv fails after changing `pixi.toml`** — run `pixi install -e <name>-dev` to re-solve, then direnv picks up the updated lockfile. ⚠️ If you touched a *shared* feature (`common`/`dev`) this re-solves the whole workspace and **fails on macOS** — regenerate the lock on Linux (see **Platforms & lockfile**).
+- **Direnv fails after changing `pixi.toml`** — run `pixi install -e <name>-dev` to re-solve, then direnv picks up the updated lockfile. A shared-feature change re-solves the whole workspace; macOS support is expected after the source-dependency migration but still needs validation (see **Platforms & lockfile**).
 - **Never use bare `except Exception` with beartype** — it silently swallows type violations. Always re-raise `BeartypeException`:
   ```python
   from beartype.roar import BeartypeException

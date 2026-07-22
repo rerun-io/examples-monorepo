@@ -6,7 +6,6 @@ dependencies = [
     # cuda: pytorch-gpu, torchvision
     "sapiens2-pose",
     "mv-api",
-    "rtmlib",
     "tyro>=0.9.1",
 ]
 description = "RTMLib YOLOX human detection plus Sapiens2 COCO-133 pose estimation with iterable and batched TensorRT video paths"
