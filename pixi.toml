@@ -276,7 +276,9 @@ hdf5 = "*"
 h5py = ">=3.12.1,<4"
 dill = ">=0.3.8,<0.4.1"
 datasets = ">=4.0.0"
-rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68", package = { build = { backend = { name = "pixi-build-python", version = "*" } }, host-dependencies = { setuptools = "*" }, run-dependencies = { numpy = "*", onnxruntime = "*", py-opencv = "*", tqdm = "*" } } }
+# onnxruntime deliberately omitted from rtmlib's run deps: consumer envs supply
+# PyPI onnxruntime-gpu (cuda feature); a conda onnxruntime would conflict with it.
+rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68", package = { build = { backend = { name = "pixi-build-python", version = "*" } }, host-dependencies = { setuptools = "*" }, run-dependencies = { numpy = "*", py-opencv = "*", tqdm = "*" } } }
 
 [feature.simplecv.pypi-dependencies]
 jax = ">=0.6.0,<0.7"
@@ -669,7 +671,9 @@ dill = ">=0.4.0,<0.5"
 trimesh = "*"
 pyrender = "*"
 torchcodec = "*"
-rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68", package = { build = { backend = { name = "pixi-build-python", version = "*" } }, host-dependencies = { setuptools = "*" }, run-dependencies = { numpy = "*", onnxruntime = "*", py-opencv = "*", tqdm = "*" } } }
+# onnxruntime deliberately omitted from rtmlib's run deps: consumer envs supply
+# PyPI onnxruntime-gpu (cuda feature); a conda onnxruntime would conflict with it.
+rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68", package = { build = { backend = { name = "pixi-build-python", version = "*" } }, host-dependencies = { setuptools = "*" }, run-dependencies = { numpy = "*", py-opencv = "*", tqdm = "*" } } }
 
 [feature.wilor-nano.pypi-dependencies]
 wilor_nano = { path = "packages/wilor-nano", editable = true }
@@ -731,7 +735,9 @@ tyro = ">=0.9.1,<0.10"
 open3d = ">=0.19.0,<0.20"
 h5py = ">=3.13.0,<4"
 natsort = ">=8.4.0,<9"
-rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68", package = { build = { backend = { name = "pixi-build-python", version = "*" } }, host-dependencies = { setuptools = "*" }, run-dependencies = { numpy = "*", onnxruntime = "*", py-opencv = "*", tqdm = "*" } } }
+# onnxruntime deliberately omitted from rtmlib's run deps: consumer envs supply
+# PyPI onnxruntime-gpu (cuda feature); a conda onnxruntime would conflict with it.
+rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68", package = { build = { backend = { name = "pixi-build-python", version = "*" } }, host-dependencies = { setuptools = "*" }, run-dependencies = { numpy = "*", py-opencv = "*", tqdm = "*" } } }
 
 [feature.egoexo-forge.target.linux-64.dependencies]
 datasets = ">=4.0.0"
@@ -779,7 +785,9 @@ open3d = ">=0.19.0,<0.20"
 scikit-image = ">=0.24.0,<0.25"
 torchcodec = "*"
 tyro = ">=0.9.1,<0.10"
-rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68", package = { build = { backend = { name = "pixi-build-python", version = "*" } }, host-dependencies = { setuptools = "*" }, run-dependencies = { numpy = "*", onnxruntime = "*", py-opencv = "*", tqdm = "*" } } }
+# onnxruntime deliberately omitted from rtmlib's run deps: consumer envs supply
+# PyPI onnxruntime-gpu (cuda feature); a conda onnxruntime would conflict with it.
+rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68", package = { build = { backend = { name = "pixi-build-python", version = "*" } }, host-dependencies = { setuptools = "*" }, run-dependencies = { numpy = "*", py-opencv = "*", tqdm = "*" } } }
 # Deliberately omit Gradio from MoGe (common supplies the working PyPI pin) and
 # omit utils3d/pipeline from its run deps (they are inline siblings below).
 moge = { git = "https://github.com/microsoft/MoGe.git", rev = "925b8ed835a7a9cdb7578ba15c658a0afc969030", package = { build = { backend = { name = "pixi-build-python", version = "*" } }, host-dependencies = { setuptools = "*" }, run-dependencies = { pytorch-gpu = "*", torchvision = "*", py-opencv = "*", scipy = "*", matplotlib-base = "*", trimesh = "*", pillow = "*", huggingface_hub = "*", numpy = "*", click = "*" } } }
@@ -1067,7 +1075,9 @@ platforms = ["linux-64"]
 python = "3.12.*"
 torchcodec = "*"
 tyro = ">=0.9.1,<0.10"
-rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68", package = { build = { backend = { name = "pixi-build-python", version = "*" } }, host-dependencies = { setuptools = "*" }, run-dependencies = { numpy = "*", onnxruntime = "*", py-opencv = "*", tqdm = "*" } } }
+# onnxruntime deliberately omitted from rtmlib's run deps: consumer envs supply
+# PyPI onnxruntime-gpu (cuda feature); a conda onnxruntime would conflict with it.
+rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68", package = { build = { backend = { name = "pixi-build-python", version = "*" } }, host-dependencies = { setuptools = "*" }, run-dependencies = { numpy = "*", py-opencv = "*", tqdm = "*" } } }
 
 [feature.sapiens-coco133-pose.pypi-dependencies]
 sapiens-coco133-pose = { path = "packages/sapiens-coco133-pose", editable = true }
