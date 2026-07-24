@@ -1,7 +1,7 @@
 """Register ingested ARKitScenes RRDs into a local Rerun catalog.
 
 The local catalog is the in-memory ``rerun server`` (start it with
-``pixi run serve``). Each sequence is one segment assembled from seven layer
+``pixi run arkitscenes-download-serve``). Each sequence is one segment assembled from seven layer
 RRDs sharing its ``recording_id`` (the ARKitScenes video id); generic portrait
 and landscape layouts are registered as dataset blueprints.
 

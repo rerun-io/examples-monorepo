@@ -1,9 +1,10 @@
 """Convert ARKitScenes sequences to layered RRDs on Modal and upload them to HuggingFace.
 
 Worker = download ONE sequence from Apple's CDN → run the package's own download/ingest
-tools inside the image's pixi env (same lockfile as the local run) → upload the seven
-verified layer RRDs to the HF dataset repo → die. Idempotency is destination-existence
-(does ``rrd/<id>/gt.rrd`` exist on HF), so there is no shared state anywhere — kill and
+tools inside the image's pixi env (same lockfile as the local run) → land the seven
+verified layer RRDs on the staging volume, layer-first → die. One ``drain_to_hf``
+process batch-uploads staging to the HF repo. Idempotency is destination-existence
+(is ``gt/<id>.rrd`` staged or on HF), so there is no shared state anywhere — kill and
 relaunch freely.
 
 Entrypoints (run from ``packages/arkitscenes-download``):
@@ -171,7 +172,7 @@ def _convert_and_upload(video_id: str, prefix: str, overwrite: bool) -> dict:
     max_containers=MAX_CONTAINERS,
     volumes={STAGING_MOUNT: staging_volume},
 )
-def convert_gpu(video_id: str, prefix: str = "rrd", overwrite: bool = False) -> dict:
+def convert_gpu(video_id: str, prefix: str = "", overwrite: bool = False) -> dict:
     """L4 worker: `av1_nvenc` wins the encoder probe."""
     return _convert_and_upload(video_id, prefix, overwrite)
 
@@ -184,7 +185,7 @@ def convert_gpu(video_id: str, prefix: str = "rrd", overwrite: bool = False) -> 
     max_containers=MAX_CONTAINERS,
     volumes={STAGING_MOUNT: staging_volume},
 )
-def convert_cpu(video_id: str, prefix: str = "rrd", overwrite: bool = False) -> dict:
+def convert_cpu(video_id: str, prefix: str = "", overwrite: bool = False) -> dict:
     """CPU worker: nvenc probe fails, `libsvtav1` fallback engages."""
     return _convert_and_upload(video_id, prefix, overwrite)
 

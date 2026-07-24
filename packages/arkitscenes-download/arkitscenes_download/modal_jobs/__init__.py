@@ -19,7 +19,7 @@ from pathlib import Path
 import modal
 
 HF_REPO_ID: str = os.getenv("ARKITSCENES_HF_REPO", "pablovela5620/arkitscenes-rrd")
-"""Destination dataset repo. RRDs only: ``rrd/<video_id>/<layer>.rrd``."""
+"""Destination dataset repo, layer-first: ``<layer>/<video_id>.rrd``."""
 
 ENV_BIN = "/workspace/.pixi/envs/arkitscenes-download/bin"
 """The pixi env's binaries inside the container (python, ffmpeg, rerun, curl)."""
@@ -74,6 +74,6 @@ hf_credentials = modal.Secret.from_dict({"HF_TOKEN": _local_hf_token()} if modal
 
 # Staging volume between the GPU converters and the single HF uploader: HF throttles
 # per-repo commits hard (429s at even 8 concurrent per-sequence commits), so workers
-# never talk to HF — they drop results here and one drain process batch-uploads.
+# never upload to HF — they drop results here and one drain process batch-uploads.
 staging_volume = modal.Volume.from_name("arkitscenes-rrd-staging", create_if_missing=True)
 STAGING_MOUNT = "/staging"

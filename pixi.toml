@@ -2268,7 +2268,9 @@ cwd = "packages/arkitscenes-download"
 description = "Resumable download→ingest→verify→publish pipeline (local destination; see --help for ssh targets)"
 
 [feature.arkitscenes-download.tasks.arkitscenes-download-serve]
-cmd = "rerun server --port 51235"
+# The in-memory server holds an open handle per registered file; the full corpus is
+# 35k files, so the default 1024 ulimit would EMFILE mid-registration.
+cmd = "bash -c 'ulimit -n 65536 && rerun server --port 51235'"
 cwd = "packages/arkitscenes-download"
 description = "Serve a Rerun catalog for registered ARKitScenes recordings"
 
