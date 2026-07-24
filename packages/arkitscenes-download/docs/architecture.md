@@ -4,6 +4,8 @@ End-to-end architecture of this repo's pipeline: **download** raw ARKitScenes se
 
 All diagrams are Mermaid; they render on GitHub and in Obsidian.
 
+For running this at **corpus scale** (Modal fan-out, HF/S3 destinations, rate-limit lessons, registration at 5k segments), see [full-run-runbook.md](full-run-runbook.md).
+
 ---
 
 ## 1. Bird's-eye view
