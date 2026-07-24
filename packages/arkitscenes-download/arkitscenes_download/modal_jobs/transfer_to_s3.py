@@ -30,6 +30,8 @@ import modal
 from arkitscenes_download.modal_jobs import hf_credentials
 
 HF_REPO_ID = "pablovela5620/arkitscenes-rrd"
+# Mirrors ingest.layers.LAYER_NAMES — deliberately not imported: this module runs in
+# a container interpreter that can't import the ingest package (rerun/rich-heavy).
 KNOWN_LAYERS = ("base", "calibration", "depth", "gt", "imu", "video_ultrawide", "video_wide")
 
 AWS_ROLE_ARN = "arn:aws:iam::069742552781:role/modal-oidc-role"

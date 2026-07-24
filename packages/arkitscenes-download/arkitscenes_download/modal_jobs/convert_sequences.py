@@ -54,8 +54,10 @@ ASSETS: tuple[str, ...] = (
 # benchmark differences are attributable to the compute, not the data.
 BENCH_IDS: tuple[str, ...] = ("40753679", "40753686", "40776203", "40776204", "40777060")
 
-# Workers no longer touch HF (staging-volume architecture), so concurrency is bounded
-# only by GPU budget: 32 workers ≈ 2.5 h for the full corpus at ~70 s/sequence.
+# Workers never UPLOAD to HF (staging-volume architecture) — the skip check below
+# still makes one HF metadata call per unstaged sequence, which stays far under the
+# resolve-bucket limits. Concurrency is bounded only by GPU budget:
+# 32 workers ≈ 2.5 h for the full corpus at ~70 s/sequence.
 MAX_CONTAINERS = 32
 
 
@@ -86,7 +88,6 @@ def _convert_and_upload(video_id: str, prefix: str, overwrite: bool) -> dict:
     Returns timing/size metrics.
     """
     import shutil
-    import subprocess
     import tempfile
     import time
     from pathlib import Path
@@ -107,13 +108,7 @@ def _convert_and_upload(video_id: str, prefix: str, overwrite: bool) -> dict:
             print(f"skip (on HF): {dest}")
             return {"video_id": video_id, "skipped": True}
 
-    nvenc_probe = subprocess.run(
-        [f"{ENV_BIN}/ffmpeg", "-hide_banner", "-f", "lavfi", "-i", "testsrc=duration=0.2:size=256x256:rate=30",
-         "-c:v", "av1_nvenc", "-f", "null", "-"],
-        capture_output=True,
-        text=True,
-    )
-    metrics: dict = {"video_id": video_id, "skipped": False, "nvenc_functional": nvenc_probe.returncode == 0}
+    metrics: dict = {"video_id": video_id, "skipped": False}
 
     with tempfile.TemporaryDirectory() as tmp:
         data_dir = Path(tmp) / "data"
@@ -227,6 +222,8 @@ def drain_to_hf(idle_exit_passes: int = 6) -> None:
             repo_id=HF_REPO_ID,
             repo_type="dataset",
             folder_path=STAGING_MOUNT,
+            # Mirrors ingest.layers.LAYER_NAMES — deliberately not imported: the slim
+            # container interpreter can't import the ingest package (rerun/rich-heavy).
             allow_patterns=["base/**", "calibration/**", "depth/**", "gt/**", "imu/**", "video_ultrawide/**", "video_wide/**", "bench/**"],
             print_report=False,
         )
@@ -244,7 +241,7 @@ def _summarize(label: str, results: list[dict]) -> None:
         print(f"{label}: no completed conversions")
         return
     total_gb = sum(r["rrd_bytes"] for r in done) / 1024**3
-    print(f"\n== {label} ({len(done)} sequences, nvenc_functional={done[0]['nvenc_functional']})")
+    print(f"\n== {label} ({len(done)} sequences)")
     print(f"{'video_id':>10} {'download_s':>11} {'ingest_s':>9} {'upload_s':>9} {'total_s':>8} {'rrd_MB':>7}")
     for r in done:
         print(

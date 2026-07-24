@@ -19,6 +19,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from beartype.roar import BeartypeException
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
 from rich.console import Console
 
@@ -28,10 +29,14 @@ from arkitscenes_download.ingest.layers import LAYER_NAMES
 DEFAULT_CATALOG_URL: str = "rerun+http://127.0.0.1:51235"
 """gRPC URL of a locally-running ``rerun server`` catalog."""
 CONSOLE: Console = Console(markup=False)
+LAYER_COLUMN: str = "rerun_layer_names"
+"""Segment-table column listing each segment's registered layers."""
 POLL_INTERVAL_S: float = 30.0
 """Segment-table poll cadence while the server grinds through a dropped call."""
 STALL_LIMIT: int = 6
 """Consecutive no-progress polls before a dropped registration counts as failed."""
+POLL_DEADLINE_S: float = 2 * 3600.0
+"""Hard ceiling on polling a dropped registration — turns a dead server into an error."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,35 +58,30 @@ class Config:
 def layer_files(config: Config) -> dict[str, list[Path]]:
     """Map each layer to its RRD paths, auto-detecting layer-major vs legacy layout."""
     layer_major: bool = (config.rrd_dir / LAYER_NAMES[0]).is_dir()
+
+    def rrd_path(layer: str, video_id: str) -> Path:
+        return config.rrd_dir / layer / f"{video_id}.rrd" if layer_major else config.rrd_dir / video_id / f"{layer}.rrd"
+
     if config.video_ids is None:
-        if layer_major:
-            return {layer: sorted((config.rrd_dir / layer).glob("*.rrd")) for layer in LAYER_NAMES}
-        return {layer: sorted(config.rrd_dir.glob(f"*/{layer}.rrd")) for layer in LAYER_NAMES}
-    return {
-        layer: [
-            path
-            for video_id in config.video_ids
-            if (path := (config.rrd_dir / layer / f"{video_id}.rrd") if layer_major else (config.rrd_dir / video_id / f"{layer}.rrd")).is_file()
-        ]
-        for layer in LAYER_NAMES
-    }
+        pattern: str = "{layer}/*.rrd" if layer_major else "*/{layer}.rrd"
+        return {layer: sorted(config.rrd_dir.glob(pattern.format(layer=layer))) for layer in LAYER_NAMES}
+    return {layer: [path for video_id in config.video_ids if (path := rrd_path(layer, video_id)).is_file()] for layer in LAYER_NAMES}
 
 
 def registered_layer_count(dataset: DatasetEntry, layer_name: str) -> int:
     """Count segments that already carry ``layer_name``."""
     table = dataset.segment_table().df.to_pandas()
-    layer_column: str = next(column for column in table.columns if "layer" in column.lower())
-    return sum(1 for layers in table[layer_column] if layer_name in layers)
+    return sum(1 for layers in table[LAYER_COLUMN] if layer_name in layers)
 
 
-def register_layer(client: CatalogClient, config: Config, layer_name: str, paths: list[Path]) -> None:
+def register_layer(config: Config, layer_name: str, paths: list[Path]) -> None:
     """Register one layer's files, riding out client-side connection drops.
 
     The server keeps processing (and eventually commits) after the client's
     gRPC call drops, so on error we poll the segment table until the layer
     reaches ``len(paths)`` registered segments or stops making progress.
     """
-    dataset: DatasetEntry = client.get_dataset(config.dataset_name)
+    dataset: DatasetEntry = CatalogClient(config.catalog_url).get_dataset(config.dataset_name)
     expected: int = len(paths)
     if registered_layer_count(dataset, layer_name) >= expected:
         CONSOLE.print(f"{layer_name}: already complete")
@@ -93,14 +93,21 @@ def register_layer(client: CatalogClient, config: Config, layer_name: str, paths
             layer_name=layer_name,
             on_duplicate=OnDuplicateSegmentLayer.SKIP,
         ).wait()
+    except BeartypeException:
+        raise
     except Exception as error:  # noqa: BLE001 — dropped call; poll server-side progress instead of resubmitting
         CONSOLE.print(f"{layer_name}: client call dropped ({str(error)[:70]}) — polling server-side progress")
+        deadline: float = time.perf_counter() + POLL_DEADLINE_S
         last_count, stalls = -1, 0
         while True:
             time.sleep(POLL_INTERVAL_S)
+            if time.perf_counter() > deadline:
+                raise RuntimeError(f"{layer_name} still incomplete after {POLL_DEADLINE_S / 3600:.0f}h of polling — server dead?") from error
             try:
                 dataset = CatalogClient(config.catalog_url).get_dataset(config.dataset_name)
                 count: int = registered_layer_count(dataset, layer_name)
+            except BeartypeException:
+                raise
             except Exception:  # noqa: BLE001 — server refuses connections while grinding
                 continue
             if count >= expected:
@@ -125,7 +132,7 @@ def register_sequences(config: Config) -> DatasetEntry:
 
     for layer_name, paths in layer_paths.items():
         if paths:
-            register_layer(client, config, layer_name, paths)
+            register_layer(config, layer_name, paths)
 
     # Most ARKitScenes captures are handheld portrait scans, so the portrait
     # layout is the dataset default; landscape stays selectable in the viewer.
@@ -141,8 +148,7 @@ def main(config: Config) -> None:
     """Register all ingested sequences and verify per-segment layer completeness."""
     dataset: DatasetEntry = register_sequences(config)
     table = dataset.segment_table().df.to_pandas()
-    layer_column: str = next(column for column in table.columns if "layer" in column.lower())
-    complete: int = sum(1 for layers in table[layer_column] if len(layers) == len(LAYER_NAMES))
+    complete: int = sum(1 for layers in table[LAYER_COLUMN] if len(layers) == len(LAYER_NAMES))
     CONSOLE.print(f"dataset '{config.dataset_name}' at {config.catalog_url}: {len(table)} segments, {complete} with all {len(LAYER_NAMES)} layers")
     if complete != len(table):
         raise RuntimeError(f"incomplete registration: only {complete}/{len(table)} segments carry all {len(LAYER_NAMES)} layers")
