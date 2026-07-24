@@ -2243,9 +2243,13 @@ rich = "*"
 [feature.arkitscenes-download.pypi-dependencies]
 arkitscenes-download = { path = "packages/arkitscenes-download", editable = true }
 tyro = ">=0.9,<1"
+modal = ">=1.0"
 
 [feature.arkitscenes-download.activation.env]
 PACKAGE_DIR = "packages/arkitscenes-download"
+# Modal's decorated-function stubs (ParamSpec) and the container-only boto3
+# import are unavoidable false positives; baseline them.
+PYREFLY_EXTRA_ARGS = "--baseline pyrefly-baseline.json"
 
 [feature.arkitscenes-download.tasks.arkitscenes-download-sample]
 cmd = "python tools/apps/download.py --download-dir data --num-random 5 --seed 42 --no-include-point-clouds --assets mov annotation mesh lowres_wide.traj confidence lowres_depth lowres_wide_intrinsics ultrawide_intrinsics highres_depth"
