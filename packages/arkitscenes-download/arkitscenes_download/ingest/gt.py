@@ -85,13 +85,17 @@ def log_ground_truth(sequence_dir: Path, video_id: str, recording: rr.RecordingS
         ),
         static=True,
     )
-    for box in boxes:
-        entity_path: str = gt_box(f"box-{box.uid}-{box.label}")
+    for slot, box in enumerate(boxes):
+        # Slot-indexed paths, NOT per-object uids: entity paths become dataset schema
+        # columns in the catalog, and globally-unique names make registration cost
+        # grow ~cubically with file count. The uid rides along as an extra component.
+        entity_path: str = gt_box(f"box_{slot:02d}")
         recording.log(
             entity_path,
             rr.Boxes3D(half_sizes=box.half_sizes_xyz, labels=box.label, colors=stable_label_color(box.label)),
             static=True,
         )
+        recording.log(entity_path, rr.AnyValues(uid=box.uid), static=True)
         # normalizedAxes rows are the box axes in world coordinates: world = axes.T @ local + center
         # (Apple's compute_box_3d applies np.transpose(rotmat)); InstancePoses3D applies mat3x3 untransposed.
         # Center goes in InstancePoses3D translations, NOT Boxes3D centers: instance poses compose
