@@ -167,14 +167,16 @@ any file failed schema deserialization; rebuilt fresh, ~1 min).
 - **Rule going forward: never mint unbounded unique entity paths.** Identity belongs in
   component values, not path names.
 - Repro + issue text: `rerun-io/rerun-schema-width-register-repro`.
-- Registration API lessons: `register()` is async — poll the returned handle, don't
-  kill a busy server; a dropped client gRPC call does NOT stop the server (poll the
-  segment table instead of resubmitting — resubmitting is NOT cheap: even with SKIP,
-  the duplicate check runs *after* the per-file work, ~300 ms/file at 5k entries);
-  REPLACE additionally invalidates the server's schema cache → O(all-sources)
-  recompute per file; use SKIP + `iter_results` (the 0.34.1 SDK chokes on
-  all-skipped REPLACE); one 5,015-URI register call made the OSS server
-  unresponsive — batch ~250/call, or use layer-first + `register_prefix`.
+- Registration API lessons (all encoded in `ingest/catalog.py`):
+  - `register()` is async; a dropped client gRPC call does NOT stop the server —
+    poll the segment table for completion instead of resubmitting. Resubmits are
+    near full price: the SKIP duplicate check runs *after* the per-file work
+    (~300 ms/file at 5k entries).
+  - Never bulk-REPLACE: each overwrite drops the server's schema cache → O(all-sources)
+    recompute per file. Measured 12× slower than SKIP at just 400 files, growing with N.
+  - Giant calls make the server refuse new connections while it grinds; expect the
+    client call to drop and poll through it (catalog.py), or use layer-first
+    `register_prefix`.
 - **Verify layer completeness, never segment counts.** "5,015 segments" once hid
   4,500 base-only segments. The only real check: N segments AND N with all 7 layers.
 
@@ -267,7 +269,8 @@ Re-ingest (schema v2, new codec) or a new corpus:
    the (public, layer-first) HF repo.
 4. `hf download` → NAS (8 workers; chmod the metadata cache before any restart).
 5. `transfer_to_s3.py` if the internal stack needs it (16 workers, Modal OIDC creds).
-6. Register: 7 × `register_prefix` (cloud) or batched ~250-URI calls (OSS `:51235`).
+6. Register: 7 × `register_prefix` (cloud), or OSS: `pixi run arkitscenes-download-serve`
+   + `tools/apps/register_catalog.py --rrd-dir <layer-first root>` (resumable, self-verifying).
 
 Adding an inference layer (e.g. PromptDA) is strictly easier: input is the existing
 RRDs (no CDN, no NVENC requirement), output is one new `<layer>/` directory — but it
