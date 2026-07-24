@@ -5,7 +5,7 @@ Two shared Modal artifacts:
 - **the container image** (`arkitscenes_image`) — the monorepo's own pixi env, installed
   from the workspace ``pixi.toml`` + ``pixi.lock`` with ``--frozen``: byte-identical deps
   to the local run, including the conda-forge ffmpeg (av1_nvenc + libsvtav1). Workers
-  subprocess into that env's python exactly like ``pipeline.py`` does locally; Modal's
+  subprocess into that env's python via the same ``tools/apps/`` shims used locally; Modal's
   primary interpreter only orchestrates and uploads.
 - **the secret** (`hf_credentials`) — the caller's own HuggingFace token shipped as an
   ephemeral per-run secret; nothing is stored on Modal.

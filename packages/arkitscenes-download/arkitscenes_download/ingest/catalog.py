@@ -136,7 +136,8 @@ def register_sequences(config: Config) -> DatasetEntry:
 
     # Most ARKitScenes captures are handheld portrait scans, so the portrait
     # layout is the dataset default; landscape stays selectable in the viewer.
-    blueprint_dir: Path = config.rrd_dir / "blueprints" if (config.rrd_dir / "blueprints").is_dir() else config.rrd_dir
+    blueprint_dir: Path = config.rrd_dir / "blueprints"
+    blueprint_dir.mkdir(parents=True, exist_ok=True)
     for orientation, is_portrait in (("landscape", False), ("portrait", True)):
         blueprint_path: Path = blueprint_dir / f"{config.dataset_name}-{orientation}.rbl"
         make_blueprint(is_portrait).save(f"arkitscenes-{orientation}", blueprint_path)

@@ -16,7 +16,7 @@ flowchart LR
         CDN["Apple CDN<br>docs-assets.developer.apple.com<br>/ml-research/datasets/arkitscenes/v1"]
         META["raw/metadata.csv<br>5,071 sequences<br>visit_id · fold · sky_direction*"]
         ASSETS["per-sequence raw assets<br>mov · traj · depth PNGs · intrinsics<br>annotation json · mesh ply"]
-        LASER["optional per-visit laser scans<br>(sample/pipeline disable them;<br>never ingested: no published FARO→ARKit alignment)"]
+        LASER["optional per-visit laser scans<br>(sample task and Modal workers disable them;<br>never ingested: no published FARO→ARKit alignment)"]
         CDN --> META
         CDN -->|"curl -C - --retry, .part → rename<br>zips: extract to staging dir → atomic rename"| ASSETS
         CDN --> LASER
@@ -251,4 +251,4 @@ sequenceDiagram
 - All RGB in the `.rrd` is a single-generation near-lossless AV1 transcode (NVENC CQ30, SSIM ≈0.984); the original `.mov` on disk stays the master. Encoder provenance is recorded; bit-exact determinism is not promised.
 - Portrait/landscape mix across sequences is correct (aspect follows device grip).
 - Laser point clouds are optionally downloadable but excluded from the sample task and full pipeline; they are never ingested (no published FARO→ARKit alignment).
-- The batch runner executes sequence subprocesses concurrently. The full pipeline overlaps downloading, ingestion, and shipping with shared Rich progress; per-sequence memory remains bounded.
+- The batch runner executes sequence subprocesses concurrently with bounded per-sequence memory; corpus-scale orchestration lives in `modal_jobs/`, not locally.

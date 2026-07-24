@@ -38,7 +38,7 @@ app = modal.App("arkitscenes-rrd-convert", image=arkitscenes_image)
 
 HOUR = 60 * 60
 
-# Mirrors pipeline.ASSETS (the local-NAS orchestrator, deliberately untouched here).
+# The raw assets one full ingest needs (same list as the arkitscenes-download-sample task).
 ASSETS: tuple[str, ...] = (
     "mov",
     "annotation",
@@ -51,7 +51,7 @@ ASSETS: tuple[str, ...] = (
     "highres_depth",
 )
 
-# Sequences validated end-to-end by the local pipeline — known-good inputs, so
+# Sequences validated end-to-end by the local reference run — known-good inputs, so
 # benchmark differences are attributable to the compute, not the data.
 BENCH_IDS: tuple[str, ...] = ("40753679", "40753686", "40776203", "40776204", "40777060")
 

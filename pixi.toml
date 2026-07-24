@@ -2262,11 +2262,6 @@ cwd = "packages/arkitscenes-download"
 depends-on = ["arkitscenes-download-sample"]
 description = "Ingest every downloaded sequence into layered .rrd files under data/rrd/"
 
-[feature.arkitscenes-download.tasks.arkitscenes-download-pipeline]
-cmd = "python tools/apps/pipeline.py --chunk-size 5 --destination data/published"
-cwd = "packages/arkitscenes-download"
-description = "Resumable download→ingest→verify→publish pipeline (local destination; see --help for ssh targets)"
-
 [feature.arkitscenes-download.tasks.arkitscenes-download-serve]
 # The in-memory server holds an open handle per registered file; the full corpus is
 # 35k files, so the default 1024 ulimit would EMFILE mid-registration.

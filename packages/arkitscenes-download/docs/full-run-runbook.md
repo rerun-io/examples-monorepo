@@ -11,7 +11,7 @@ covers the per-sequence pipeline itself; this doc covers **running it at corpus 
   `<layer>/<video_id>.rrd` + `blueprints/`, ~1.9 TB.
 - **S3:** `rerun-datasets-scratch-…-us-east-1-an/arkitscenes.2026.07.22/` and the
   curated bucket copy (us-west-2), byte-verified against HF.
-- **NAS (servable working set):** `/mnt/nas/datasets/arkitscenes/arkitscenes.2026.07.22/`
+- **Local working set (this deployment):** `/mnt/nas/datasets/arkitscenes/arkitscenes.2026.07.22/`
   (single canonical dir, 7 layers + blueprints, fixed gt).
 - **Catalogs:** local OSS server on `:51235` (5,015 segments × 7 layers) and the
   internal cloud stack (`arkitscenes`, registered via `register_prefix` per layer).
@@ -25,8 +25,8 @@ covers the per-sequence pipeline itself; this doc covers **running it at corpus 
 
 ### Step 0 — Local reference run first
 
-Launched the existing local pipeline (`tools/apps/pipeline.py`, dedicated worktree,
-tmux, staging on NVMe → ship to NAS with sha256 verify). It shipped 298 sequences
+Launched the then-existing local orchestrator (since deleted — the local flow is now
+the three quickstart tools, and corpus scale is Modal-only). It shipped 298 sequences
 before being retired, at ~37 MB/s off Apple's CDN → **~70 h projected**.
 
 **Why it mattered anyway:** it became the reference implementation. The Modal
@@ -102,15 +102,15 @@ pixi run --frozen -e arkitscenes-download modal run --detach \
   --encoder gpu --confirm
 ```
 
-### Step 5 — NAS sync (HF → NFS)
+### Step 5 — Destination sync (HF → network storage)
 
-`hf download` into the NAS over NFSv3, then atomic dir swap. Measured facts:
+`hf download` onto NFSv3-mounted storage, then atomic dir swap. Measured facts:
 
-- Bottleneck is the **NAS HDD write path under parallel scattered writes** (~44 MB/s at
+- Bottleneck is the **destination's spinning-disk write path under parallel scattered writes** (~44 MB/s at
   8 workers), not the internet (≥58 MB/s single-stream headroom measured concurrently).
 - `--max-workers 3` made it **worse** (29 MB/s) — keep 8.
 - **uid-squash trap:** hf's resume metadata
-  (`.cache/huggingface/download/**/*.metadata`) lands mode-0000 through the NAS
+  (`.cache/huggingface/download/**/*.metadata`) lands mode-0000 through NFS
   uid-squash. Before ANY sync restart:
   `find <dir>/.cache/huggingface/download -name '*.metadata' -exec chmod 644 {} +`
   or the restart re-downloads everything. Same trap for `write_rrd` over NFS
@@ -162,7 +162,7 @@ any file failed schema deserialization; rebuilt fresh, ~1 min).
   Validated: same chunks with 44 shared paths = **136× faster**.
 - **Fix:** slot paths (`box_00..box_NN`) + uid preserved as `rr.AnyValues(uid=…)` on
   the same entity. Converter patched (46 tests pass); all 5,015 gt files rewritten and
-  propagated to NAS/HF/S3, byte-verified. Broken gt = 1 h+ + corruption; fixed gt =
+  propagated to all copies (local/HF/S3), byte-verified. Broken gt = 1 h+ + corruption; fixed gt =
   **11 s**.
 - **Rule going forward: never mint unbounded unique entity paths.** Identity belongs in
   component values, not path names.
@@ -249,7 +249,7 @@ zero-transfer, by hash); dataset repos are **not** S3-reachable at the protocol 
 - In-worker nvenc smoke-probe unreliable — trust the RRD `encoder` property.
 - NFS uid-squash lands files mode-0000 (`hf download` metadata AND `write_rrd` output)
   — chmod before reuse.
-- NAS HDDs collapse under parallel scattered writes; fewer workers is not automatically
+- Spinning-disk destinations collapse under parallel scattered writes; fewer workers is not automatically
   better (3 was worse than 8 — measure, don't guess).
 - Dual HF identity: personal token is the machine default (pipelines read
   `hf auth token`); work-account ops are scoped per-command via
@@ -267,7 +267,7 @@ Re-ingest (schema v2, new codec) or a new corpus:
 2. Benchmark both hardware legs on those 5 via `::benchmark`; read $/seq off the table.
 3. `full_run --encoder gpu --confirm` → converters into the staging volume, drain into
    the (public, layer-first) HF repo.
-4. `hf download` → NAS (8 workers; chmod the metadata cache before any restart).
+4. `hf download` → local storage (8 workers; over NFS, chmod the metadata cache before any restart).
 5. `transfer_to_s3.py` if the internal stack needs it (16 workers, Modal OIDC creds).
 6. Register: 7 × `register_prefix` (cloud), or OSS: `pixi run arkitscenes-download-serve`
    + `tools/apps/register_catalog.py --rrd-dir <layer-first root>` (resumable, self-verifying).
