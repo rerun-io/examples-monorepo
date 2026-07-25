@@ -19,6 +19,7 @@ from arkitscenes_download.ingest.paths import (
     PINHOLE_WIDE,
     PINHOLE_WIDE_LOWRES,
     PROMPTDA_MESH,
+    TIMELINE,
     WORLD,
 )
 
@@ -70,6 +71,20 @@ def _imu_axis() -> rrb.archetypes.TimeAxis:
         end=rrb.TimeRangeBoundary.cursor_relative(seconds=5.0),
     )
     return rrb.archetypes.TimeAxis(view_range=window)
+
+
+def make_table_blueprint() -> rrb.Blueprint:
+    """3D-only preview layout for the dataset's segment table (experimental table cards).
+
+    Registered with ``DatasetEntry.register_blueprint(uri, segment_table=True)``; the
+    viewer renders each segment-table row through this view when "Table cards and
+    blueprints" is enabled under Settings > Experimental. Kept to a single 3D view:
+    previews load segments on demand, so the lighter the layout the better.
+    """
+    return rrb.Blueprint(
+        rrb.Spatial3DView(name="world", origin=f"/{WORLD}", eye_controls=_eye_controls(None)),
+        rrb.TimePanel(timeline=TIMELINE),
+    )
 
 
 def make_blueprint(portrait: bool = False, framing: MeshFraming | None = None, include_promptda: bool = False) -> rrb.Blueprint:

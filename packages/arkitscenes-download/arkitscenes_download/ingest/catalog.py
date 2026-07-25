@@ -23,7 +23,7 @@ from beartype.roar import BeartypeException
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
 from rich.console import Console
 
-from arkitscenes_download.ingest.blueprint import make_blueprint
+from arkitscenes_download.ingest.blueprint import make_blueprint, make_table_blueprint
 from arkitscenes_download.ingest.layers import LAYER_NAMES
 
 DEFAULT_CATALOG_URL: str = "rerun+http://127.0.0.1:51235"
@@ -142,6 +142,11 @@ def register_sequences(config: Config) -> DatasetEntry:
         blueprint_path: Path = blueprint_dir / f"{config.dataset_name}-{orientation}.rbl"
         make_blueprint(is_portrait).save(f"arkitscenes-{orientation}", blueprint_path)
         dataset.register_blueprint(blueprint_path.resolve().as_uri(), set_default=is_portrait)
+    # Segment-table blueprint: 3D preview cards in the dataset review (experimental,
+    # needs "Table cards and blueprints" enabled in the viewer's settings).
+    table_blueprint_path: Path = blueprint_dir / f"{config.dataset_name}-table.rbl"
+    make_table_blueprint().save(f"{config.dataset_name}-table", table_blueprint_path)
+    dataset.register_blueprint(table_blueprint_path.resolve().as_uri(), segment_table=True)
     return dataset
 
 

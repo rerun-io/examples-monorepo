@@ -71,6 +71,7 @@ from arkitscenes_download.ingest.paths import (
     RIG,
     SKY_ANGLE_ULTRAWIDE,
     SKY_ANGLE_WIDE,
+    TIMELINE,
     VIDEO_ULTRAWIDE,
     VIDEO_WIDE,
     WORLD,
@@ -94,7 +95,6 @@ from arkitscenes_download.ingest.rig import (
     sky_angles,
 )
 
-TIMELINE: str = "video_time"
 BATCH_SIZE: int = 1000
 CONSOLE: Console = Console(markup=False)
 
