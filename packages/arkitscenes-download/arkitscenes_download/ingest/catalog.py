@@ -141,6 +141,7 @@ def register_sequences(config: Config) -> DatasetEntry:
     for orientation, is_portrait in (("landscape", False), ("portrait", True)):
         blueprint_path: Path = blueprint_dir / f"{config.dataset_name}-{orientation}.rbl"
         make_blueprint(is_portrait).save(f"arkitscenes-{orientation}", blueprint_path)
+        blueprint_path.chmod(0o644)  # uid-squashing NFS mounts can land fresh writes as mode 0000
         dataset.register_blueprint(blueprint_path.resolve().as_uri(), set_default=is_portrait)
     # Segment-table blueprint: 3D preview cards in the dataset review (experimental,
     # needs "Table cards and blueprints" enabled in the viewer's settings). A failure
@@ -148,6 +149,7 @@ def register_sequences(config: Config) -> DatasetEntry:
     # would also skip main()'s completeness verification.
     table_blueprint_path: Path = blueprint_dir / f"{config.dataset_name}-table.rbl"
     make_table_blueprint().save("arkitscenes-table", table_blueprint_path)
+    table_blueprint_path.chmod(0o644)  # uid-squashing NFS mounts can land fresh writes as mode 0000
     try:
         dataset.register_blueprint(table_blueprint_path.resolve().as_uri(), segment_table=True)
     except BeartypeException:
