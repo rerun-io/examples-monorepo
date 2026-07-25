@@ -5,8 +5,18 @@ from typing import cast
 import rerun.blueprint as rrb
 from rerun.blueprint.api import Container, View
 
-from arkitscenes_download.ingest.blueprint import make_blueprint
-from arkitscenes_download.ingest.paths import DEPTH, DEPTH_GT, DEPTH_PROMPTDA, GT_MESH, PINHOLE_WIDE_LOWRES, PROMPTDA_MESH
+from arkitscenes_download.ingest.blueprint import make_blueprint, make_table_blueprint
+from arkitscenes_download.ingest.paths import (
+    CONFIDENCE,
+    DEPTH,
+    DEPTH_GT,
+    DEPTH_PROMPTDA,
+    GT_MESH,
+    PINHOLE_WIDE_LOWRES,
+    PROMPTDA_MESH,
+    VIDEO_ULTRAWIDE,
+    VIDEO_WIDE,
+)
 
 
 def iter_views(node: rrb.Blueprint | Container | View) -> list[View]:
@@ -76,3 +86,12 @@ def test_stock_world_tab_hides_promptda_geometry_when_comparison_is_enabled() ->
     contents = cast(list[str], find_view(blueprint, "world").contents)
     assert f"- /{PROMPTDA_MESH}/**" in contents
     assert f"- /{DEPTH_PROMPTDA}/**" in contents
+
+
+def test_table_blueprint_hides_video_depth_and_confidence() -> None:
+    """The segment-table preview cards must not pay AV1 decode or depth/confidence uploads."""
+    contents = cast(list[str], find_view(make_table_blueprint(), "world").contents)
+    for excluded in (VIDEO_WIDE, VIDEO_ULTRAWIDE, DEPTH_GT, DEPTH, CONFIDENCE):
+        assert f"- /{excluded}/**" in contents
+    # Mesh, boxes, and frusta stay: everything else under /world remains included.
+    assert "$origin/**" in contents

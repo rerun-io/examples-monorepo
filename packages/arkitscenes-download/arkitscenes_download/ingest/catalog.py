@@ -143,10 +143,17 @@ def register_sequences(config: Config) -> DatasetEntry:
         make_blueprint(is_portrait).save(f"arkitscenes-{orientation}", blueprint_path)
         dataset.register_blueprint(blueprint_path.resolve().as_uri(), set_default=is_portrait)
     # Segment-table blueprint: 3D preview cards in the dataset review (experimental,
-    # needs "Table cards and blueprints" enabled in the viewer's settings).
+    # needs "Table cards and blueprints" enabled in the viewer's settings). A failure
+    # here must not abort the run: the layers are already registered, and aborting
+    # would also skip main()'s completeness verification.
     table_blueprint_path: Path = blueprint_dir / f"{config.dataset_name}-table.rbl"
-    make_table_blueprint().save(f"{config.dataset_name}-table", table_blueprint_path)
-    dataset.register_blueprint(table_blueprint_path.resolve().as_uri(), segment_table=True)
+    make_table_blueprint().save("arkitscenes-table", table_blueprint_path)
+    try:
+        dataset.register_blueprint(table_blueprint_path.resolve().as_uri(), segment_table=True)
+    except BeartypeException:
+        raise
+    except Exception as error:  # noqa: BLE001
+        CONSOLE.print(f"segment-table blueprint (experimental) failed: {str(error)[:70]} — skipping")
     return dataset
 
 
