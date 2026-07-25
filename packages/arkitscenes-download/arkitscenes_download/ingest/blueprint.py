@@ -9,6 +9,7 @@ from jaxtyping import Float64
 from simplecv.rerun_log_utils import orbit_eye_position
 
 from arkitscenes_download.ingest.paths import (
+    CONFIDENCE,
     DEPTH,
     DEPTH_GT,
     DEPTH_PROMPTDA,
@@ -19,6 +20,9 @@ from arkitscenes_download.ingest.paths import (
     PINHOLE_WIDE,
     PINHOLE_WIDE_LOWRES,
     PROMPTDA_MESH,
+    TIMELINE,
+    VIDEO_ULTRAWIDE,
+    VIDEO_WIDE,
     WORLD,
 )
 
@@ -70,6 +74,35 @@ def _imu_axis() -> rrb.archetypes.TimeAxis:
         end=rrb.TimeRangeBoundary.cursor_relative(seconds=5.0),
     )
     return rrb.archetypes.TimeAxis(view_range=window)
+
+
+def make_table_blueprint() -> rrb.Blueprint:
+    """3D-only preview layout for the dataset's segment table (experimental table cards).
+
+    Registered with ``DatasetEntry.register_blueprint(uri, segment_table=True)``; the
+    viewer renders each segment-table row through this view when "Table cards and
+    blueprints" is enabled under Settings > Experimental. Kept to a single 3D view
+    showing only mesh, boxes, and camera frusta: with ~15 cards visible, the AV1
+    streams and per-frame depth/confidence image uploads dominated the frame
+    (profiled: dav1d decode saturated ~12 cores, ~7 FPS; excluding them restores
+    interactive rates while the preview looks nearly identical).
+    """
+    return rrb.Blueprint(
+        rrb.Spatial3DView(
+            name="world",
+            origin=f"/{WORLD}",
+            contents=[
+                "$origin/**",
+                f"- /{VIDEO_WIDE}/**",
+                f"- /{VIDEO_ULTRAWIDE}/**",
+                f"- /{DEPTH_GT}/**",
+                f"- /{DEPTH}/**",
+                f"- /{CONFIDENCE}/**",
+            ],
+            eye_controls=_eye_controls(None),
+        ),
+        rrb.TimePanel(timeline=TIMELINE),
+    )
 
 
 def make_blueprint(portrait: bool = False, framing: MeshFraming | None = None, include_promptda: bool = False) -> rrb.Blueprint:

@@ -1,0 +1,28 @@
+{
+  "errors": [
+    {
+      "line": 305,
+      "column": 22,
+      "stop_line": 305,
+      "stop_column": 24,
+      "path": "arkitscenes_download/modal_jobs/convert_sequences.py",
+      "code": -2,
+      "name": "invalid-param-spec",
+      "description": "Unexpected ParamSpec type: `ParamSpec[P]`",
+      "concise_description": "Unexpected ParamSpec type: `ParamSpec[P]`",
+      "severity": "error"
+    },
+    {
+      "line": 58,
+      "column": 12,
+      "stop_line": 58,
+      "stop_column": 17,
+      "path": "arkitscenes_download/modal_jobs/transfer_to_s3.py",
+      "code": -2,
+      "name": "missing-import",
+      "description": "Cannot find module `boto3`",
+      "concise_description": "Cannot find module `boto3`",
+      "severity": "error"
+    }
+  ]
+}

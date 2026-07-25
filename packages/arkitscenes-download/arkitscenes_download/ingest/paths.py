@@ -1,5 +1,6 @@
-"""Canonical entity paths for the ARKitScenes rig schema."""
+"""Canonical entity paths and timeline name for the ARKitScenes rig schema."""
 
+TIMELINE: str = "video_time"
 WORLD: str = "world"
 RIG: str = f"{WORLD}/rig_00"
 CAM_WIDE: str = f"{RIG}/cam_00"

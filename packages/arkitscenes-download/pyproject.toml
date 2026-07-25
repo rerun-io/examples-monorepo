@@ -35,6 +35,7 @@ paths = ["arkitscenes_download", "tests", "tools"]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*"]
 sort_by_size = true
 min_confidence = 60
+# benchmark/full_run/convert: Modal CLI entrypoints, invoked via `modal run ...::name`
 # is_in_threedod: metadata.csv row field, parsed for schema completeness
 # DEPTH_PROMPTDA / PROMPTDA_MESH: entity paths consumed by packages/prompt-da
-ignore_names = ["is_in_threedod", "DEPTH_PROMPTDA", "PROMPTDA_MESH"]
+ignore_names = ["is_in_threedod", "DEPTH_PROMPTDA", "PROMPTDA_MESH", "benchmark", "full_run", "convert"]
