@@ -22,6 +22,7 @@ from pathlib import Path
 from beartype.roar import BeartypeException
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
 from rich.console import Console
+from rich.progress import Progress
 
 from arkitscenes_download.ingest.blueprint import make_blueprint, make_table_blueprint
 from arkitscenes_download.ingest.layers import LAYER_NAMES
@@ -68,9 +69,10 @@ def layer_files(config: Config) -> dict[str, list[Path]]:
     return {layer: [path for video_id in config.video_ids if (path := rrd_path(layer, video_id)).is_file()] for layer in LAYER_NAMES}
 
 
-def registered_layer_count(dataset: DatasetEntry, layer_name: str) -> int:
-    """Count segments that already carry ``layer_name``."""
+def registered_layer_count(dataset: DatasetEntry, layer_name: str, video_ids: set[str]) -> int:
+    """Count segments among ``video_ids`` that already carry ``layer_name``."""
     table = dataset.segment_table().df.to_pandas()
+    table = table[table["rerun_segment_id"].isin(video_ids)]
     return sum(1 for layers in table[LAYER_COLUMN] if layer_name in layers)
 
 
@@ -83,7 +85,9 @@ def register_layer(config: Config, layer_name: str, paths: list[Path]) -> None:
     """
     dataset: DatasetEntry = CatalogClient(config.catalog_url).get_dataset(config.dataset_name)
     expected: int = len(paths)
-    if registered_layer_count(dataset, layer_name) >= expected:
+    # Segment id per file: layer-major names files <video_id>.rrd; legacy nests <video_id>/<layer>.rrd.
+    video_ids: set[str] = {path.parent.name if path.stem == layer_name else path.stem for path in paths}
+    if registered_layer_count(dataset, layer_name, video_ids) >= expected:
         CONSOLE.print(f"{layer_name}: already complete")
         return
     started: float = time.perf_counter()
@@ -99,23 +103,27 @@ def register_layer(config: Config, layer_name: str, paths: list[Path]) -> None:
         CONSOLE.print(f"{layer_name}: client call dropped ({str(error)[:70]}) — polling server-side progress")
         deadline: float = time.perf_counter() + POLL_DEADLINE_S
         last_count, stalls = -1, 0
-        while True:
-            time.sleep(POLL_INTERVAL_S)
-            if time.perf_counter() > deadline:
-                raise RuntimeError(f"{layer_name} still incomplete after {POLL_DEADLINE_S / 3600:.0f}h of polling — server dead?") from error
-            try:
-                dataset = CatalogClient(config.catalog_url).get_dataset(config.dataset_name)
-                count: int = registered_layer_count(dataset, layer_name)
-            except BeartypeException:
-                raise
-            except Exception:  # noqa: BLE001 — server refuses connections while grinding
-                continue
-            if count >= expected:
-                break
-            stalls = stalls + 1 if count == last_count else 0
-            last_count = count
-            if stalls >= STALL_LIMIT:
-                raise RuntimeError(f"{layer_name} stalled at {count}/{expected} registered segments") from error
+        with Progress(console=CONSOLE) as poll_progress:
+            poll_task = poll_progress.add_task(f"{layer_name}: server registering", total=expected)
+            while True:
+                time.sleep(POLL_INTERVAL_S)
+                if time.perf_counter() > deadline:
+                    raise RuntimeError(f"{layer_name} still incomplete after {POLL_DEADLINE_S / 3600:.0f}h of polling — server dead?") from error
+                try:
+                    dataset = CatalogClient(config.catalog_url).get_dataset(config.dataset_name)
+                    count: int = registered_layer_count(dataset, layer_name, video_ids)
+                except BeartypeException:
+                    raise
+                except Exception:  # noqa: BLE001 — server refuses connections while grinding
+                    poll_progress.update(poll_task, description=f"{layer_name}: server busy (still grinding)")
+                    continue
+                poll_progress.update(poll_task, completed=count, description=f"{layer_name}: server registering")
+                if count >= expected:
+                    break
+                stalls = stalls + 1 if count == last_count else 0
+                last_count = count
+                if stalls >= STALL_LIMIT:
+                    raise RuntimeError(f"{layer_name} stalled at {count}/{expected} registered segments") from error
     CONSOLE.print(f"{layer_name}: {expected} files in {time.perf_counter() - started:.1f}s")
 
 
