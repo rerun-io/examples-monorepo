@@ -21,8 +21,9 @@ from pathlib import Path
 
 from beartype.roar import BeartypeException
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
-from rich.console import Console
-from rich.progress import Progress
+from rich.console import Console, Group
+from rich.live import Live
+from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TaskID, TextColumn, TimeElapsedColumn
 
 from arkitscenes_download.ingest.blueprint import make_blueprint, make_table_blueprint
 from arkitscenes_download.ingest.layers import LAYER_NAMES
@@ -76,7 +77,7 @@ def registered_layer_count(dataset: DatasetEntry, layer_name: str, video_ids: se
     return sum(1 for layers in table[LAYER_COLUMN] if layer_name in layers)
 
 
-def register_layer(config: Config, layer_name: str, paths: list[Path]) -> None:
+def register_layer(config: Config, layer_name: str, paths: list[Path], progress: Progress, task_id: TaskID) -> None:
     """Register one layer's files, riding out client-side connection drops.
 
     The server keeps processing (and eventually commits) after the client's
@@ -100,30 +101,30 @@ def register_layer(config: Config, layer_name: str, paths: list[Path]) -> None:
     except BeartypeException:
         raise
     except Exception as error:  # noqa: BLE001 — dropped call; poll server-side progress instead of resubmitting
-        CONSOLE.print(f"{layer_name}: client call dropped ({str(error)[:70]}) — polling server-side progress")
+        if not isinstance(error, ConnectionError) and "(Connection)" not in str(error):
+            raise
+        progress.update(task_id, description=f"{layer_name} · {expected} files · connection dropped; polling server")
         deadline: float = time.perf_counter() + POLL_DEADLINE_S
         last_count, stalls = -1, 0
-        with Progress(console=CONSOLE) as poll_progress:
-            poll_task = poll_progress.add_task(f"{layer_name}: server registering", total=expected)
-            while True:
-                time.sleep(POLL_INTERVAL_S)
-                if time.perf_counter() > deadline:
-                    raise RuntimeError(f"{layer_name} still incomplete after {POLL_DEADLINE_S / 3600:.0f}h of polling — server dead?") from error
-                try:
-                    dataset = CatalogClient(config.catalog_url).get_dataset(config.dataset_name)
-                    count: int = registered_layer_count(dataset, layer_name, video_ids)
-                except BeartypeException:
-                    raise
-                except Exception:  # noqa: BLE001 — server refuses connections while grinding
-                    poll_progress.update(poll_task, description=f"{layer_name}: server busy (still grinding)")
-                    continue
-                poll_progress.update(poll_task, completed=count, description=f"{layer_name}: server registering")
-                if count >= expected:
-                    break
-                stalls = stalls + 1 if count == last_count else 0
-                last_count = count
-                if stalls >= STALL_LIMIT:
-                    raise RuntimeError(f"{layer_name} stalled at {count}/{expected} registered segments") from error
+        while True:
+            time.sleep(POLL_INTERVAL_S)
+            if time.perf_counter() > deadline:
+                raise RuntimeError(f"{layer_name} still incomplete after {POLL_DEADLINE_S / 3600:.0f}h of polling — server dead?") from error
+            try:
+                dataset = CatalogClient(config.catalog_url).get_dataset(config.dataset_name)
+                count: int = registered_layer_count(dataset, layer_name, video_ids)
+            except BeartypeException:
+                raise
+            except Exception:  # noqa: BLE001 — server refuses connections while grinding
+                progress.update(task_id, description=f"{layer_name} · {expected} files · server busy")
+                continue
+            progress.update(task_id, description=f"{layer_name} · {count}/{expected} registered")
+            if count >= expected:
+                break
+            stalls = stalls + 1 if count == last_count else 0
+            last_count = count
+            if stalls >= STALL_LIMIT:
+                raise RuntimeError(f"{layer_name} stalled at {count}/{expected} registered segments") from error
     CONSOLE.print(f"{layer_name}: {expected} files in {time.perf_counter() - started:.1f}s")
 
 
@@ -138,9 +139,16 @@ def register_sequences(config: Config) -> DatasetEntry:
         client.get_dataset(config.dataset_name).delete()
     dataset: DatasetEntry = client.create_dataset(config.dataset_name, exist_ok=True)
 
-    for layer_name, paths in layer_paths.items():
-        if paths:
-            register_layer(config, layer_name, paths)
+    active_layers: list[tuple[str, list[Path]]] = [(layer_name, paths) for layer_name, paths in layer_paths.items() if paths]
+    overall_progress: Progress = Progress(TextColumn("layers"), BarColumn(), MofNCompleteColumn(), TimeElapsedColumn(), console=CONSOLE)
+    current_progress: Progress = Progress(SpinnerColumn(), TextColumn("{task.description}"), TimeElapsedColumn(), console=CONSOLE)
+    overall_task: TaskID = overall_progress.add_task("layers", total=len(active_layers))
+    with Live(Group(overall_progress, current_progress), console=CONSOLE, refresh_per_second=10.0):
+        for layer_name, paths in active_layers:
+            current_task: TaskID = current_progress.add_task(f"{layer_name} · {len(paths)} files · submitting", total=None)
+            register_layer(config, layer_name, paths, current_progress, current_task)
+            current_progress.remove_task(current_task)
+            overall_progress.advance(overall_task)
 
     # Most ARKitScenes captures are handheld portrait scans, so the portrait
     # layout is the dataset default; landscape stays selectable in the viewer.

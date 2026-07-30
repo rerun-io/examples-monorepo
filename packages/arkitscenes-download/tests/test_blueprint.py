@@ -48,6 +48,15 @@ def test_default_blueprint_has_no_promptda_views() -> None:
     assert "world" in names
 
 
+def test_stock_world_hides_gt_depth_but_depth_view_keeps_it() -> None:
+    """Avoid the GT depth backprojection in 3D without hiding its dedicated 2D view."""
+    for include_promptda in (False, True):
+        blueprint = make_blueprint(include_promptda=include_promptda)
+        world_contents = cast(list[str], find_view(blueprint, "world").contents)
+        assert f"- /{DEPTH_GT}/**" in world_contents
+        assert cast(list[str], find_view(blueprint, "depth GT (laser)").contents) == ["$origin/depth_gt"]
+
+
 def test_promptda_blueprint_adds_depth_tab_and_world_tab() -> None:
     blueprint = make_blueprint(portrait=True, include_promptda=True)
     names = view_names(blueprint)

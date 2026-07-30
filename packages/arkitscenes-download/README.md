@@ -24,6 +24,20 @@ pixi run -e arkitscenes-download arkitscenes-download-view
 Ingestion wants an NVIDIA GPU (`av1_nvenc` transcodes the video track); without
 one it falls back to CPU SVT-AV1, just slower.
 
+### Registering multiple datasets
+
+The OSS Rerun server keeps one file descriptor open for every registered `.rrd`
+so it can load chunks on demand. A 5,015-segment ARKitScenes dataset with seven
+layers therefore uses 35,105 descriptors; two such datasets need 70,210. With a
+65,536 descriptor limit, the second registration fails during `gt` only because
+`gt` is the seventh layer—not because that layer is faulty.
+
+The `arkitscenes-download-serve` task raises the server limit to 524,288. Restart
+an already-running server with that task before registering multiple datasets;
+the limit is inherited when the server starts. This is a capacity workaround
+for the current Rerun server, which does not yet cap open files with an
+open-on-demand or LRU policy.
+
 ## What one sequence becomes
 
 Seven small `.rrd` files sharing one `recording_id`, so the catalog stacks them

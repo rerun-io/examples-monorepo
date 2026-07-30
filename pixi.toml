@@ -2263,9 +2263,9 @@ depends-on = ["arkitscenes-download-sample"]
 description = "Ingest every downloaded sequence into layered .rrd files under data/rrd/"
 
 [feature.arkitscenes-download.tasks.arkitscenes-download-serve]
-# The in-memory server holds an open handle per registered file; the full corpus is
-# 35k files, so the default 1024 ulimit would EMFILE mid-registration.
-cmd = "bash -c 'ulimit -n 65536 && rerun server --port 51235'"
+# Rerun keeps one handle open per registered RRD. One full corpus has
+# 5015 segments * 7 layers = 35105 RRDs, so 65536 cannot hold two corpora.
+cmd = "bash -c 'ulimit -n 524288 && exec rerun server --port 51235'"
 cwd = "packages/arkitscenes-download"
 description = "Serve a Rerun catalog for registered ARKitScenes recordings"
 
