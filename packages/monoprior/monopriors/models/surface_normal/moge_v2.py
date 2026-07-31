@@ -49,7 +49,7 @@ class MoGeV2NormalPredictor(BaseNormalPredictor):
             rgb / 255, dtype=torch.float32, device=self.device
         ).permute(2, 0, 1)
 
-        output: dict[str, Tensor] = self.model.infer(input_image)
+        output: dict[str, Tensor] = self.model.infer(input_image, force_projection=False)
         # v2 normal checkpoint output includes "normal" (H,W,3) and "mask" (H,W)
 
         normal_hw3: Float[np.ndarray, "h w 3"] = output["normal"].numpy(force=True)

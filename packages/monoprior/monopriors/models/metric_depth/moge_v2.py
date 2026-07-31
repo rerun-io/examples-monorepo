@@ -55,7 +55,7 @@ class MoGeV2MetricPredictor(BaseMetricPredictor):
             rgb / 255, dtype=torch.float32, device=self.device
         ).permute(2, 0, 1)
 
-        output: dict[str, Tensor] = self.model.infer(input_image)
+        output: dict[str, Tensor] = self.model.infer(input_image, force_projection=False)
         # v2 output keys: "points" (H,W,3), "depth" (H,W), "mask" (H,W),
         # "intrinsics" (3,3), and optionally "normal" (H,W,3).
         # Depth is metric-scale. Intrinsics are normalized.

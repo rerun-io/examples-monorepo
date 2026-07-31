@@ -25,7 +25,7 @@ from torchvision.transforms import Compose
 from tqdm import tqdm
 
 from monopriors.scale_utils import compute_scale_and_shift, get_interpolate_frames
-from monopriors.third_party.depth_anything_v2.dinov2 import DINOv2
+from monopriors.third_party.dinov2 import DINOv2
 from monopriors.third_party.depth_anything_v2.util.transform import NormalizeImage, PrepareForNet, Resize
 
 from .dpt_temporal import DPTHeadTemporal

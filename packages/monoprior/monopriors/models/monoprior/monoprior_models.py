@@ -120,7 +120,7 @@ class MoGeV2MonoPrior(MonoPriorModel):
             rgb / 255, dtype=torch.float32, device=self.device
         ).permute(2, 0, 1)
 
-        output: dict[str, Tensor] = self.model.infer(input_image)
+        output: dict[str, Tensor] = self.model.infer(input_image, force_projection=False)
 
         # Build intrinsics from normalized values
         normalized_k: Float[np.ndarray, "3 3"] = output["intrinsics"].numpy(force=True)

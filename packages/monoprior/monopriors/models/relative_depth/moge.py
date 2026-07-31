@@ -36,7 +36,7 @@ class MogeV1Predictor(BaseRelativePredictor):
             rgb / 255, dtype=torch.float32, device=self.device
         ).permute(2, 0, 1)
 
-        output: dict[str, Tensor] = self.model.infer(input_image)
+        output: dict[str, Tensor] = self.model.infer(input_image, force_projection=False)
         # v1 output keys: "points" (H,W,3), "depth" (H,W), "mask" (H,W), "intrinsics" (3,3)
         # All values are scale-invariant. Intrinsics are normalized.
 

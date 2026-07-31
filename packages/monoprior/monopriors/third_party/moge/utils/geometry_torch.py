@@ -2,7 +2,6 @@ from typing import *
 
 import torch
 import torch.nn.functional as F
-from monopriors.third_party import utils3d
 
 from .geometry_numpy import solve_optimal_focal_shift, solve_optimal_shift
 
@@ -21,18 +20,6 @@ def normalized_view_plane_uv(width: int, height: int, aspect_ratio: float = None
     uv = torch.stack([u, v], dim=-1)
     return uv
 
-
-def gaussian_blur_2d(input: torch.Tensor, kernel_size: int, sigma: float) -> torch.Tensor:
-    kernel = torch.exp(-(torch.arange(-kernel_size // 2 + 1, kernel_size // 2 + 1, dtype=input.dtype, device=input.device) ** 2) / (2 * sigma ** 2))
-    kernel = kernel / kernel.sum()
-    kernel = (kernel[:, None] * kernel[None, :]).reshape(1, 1, kernel_size, kernel_size)
-    input = F.pad(input, (kernel_size // 2, kernel_size // 2, kernel_size // 2, kernel_size // 2), mode='replicate')
-    input = F.conv2d(input, kernel, groups=input.shape[1])
-    return input
-
-
-def angle_diff_vec3(v1: torch.Tensor, v2: torch.Tensor, eps: float = 1e-12):
-    return torch.atan2(torch.cross(v1, v2, dim=-1).norm(dim=-1) + eps, (v1 * v2).sum(dim=-1))
 
 def recover_focal_shift(points: torch.Tensor, mask: torch.Tensor = None, focal: torch.Tensor = None, downsample_size: Tuple[int, int] = (64, 64)):
     """
@@ -92,18 +79,63 @@ def recover_focal_shift(points: torch.Tensor, mask: torch.Tensor = None, focal: 
     return optim_focal, optim_shift
 
 
-def dilate_with_mask(input: torch.Tensor, mask: torch.BoolTensor, filter: Literal['min', 'max', 'mean', 'median'] = 'mean', iterations: int = 1) -> torch.Tensor:
-    kernel = torch.tensor([[False, True, False], [True, True, True], [False, True, False]], device=input.device, dtype=torch.bool)
-    for _ in range(iterations):
-        input_window = utils3d.pt.sliding_window(F.pad(input, (1, 1, 1, 1), mode='constant', value=0), window_size=3, stride=1, dim=(-2, -1))
-        mask_window = kernel & utils3d.pt.sliding_window(F.pad(mask, (1, 1, 1, 1), mode='constant', value=False), window_size=3, stride=1, dim=(-2, -1))    
-        if filter =='min':
-            input = torch.where(mask, input, torch.where(mask_window, input_window, torch.inf).min(dim=(-2, -1)).values)
-        elif filter =='max':
-            input = torch.where(mask, input, torch.where(mask_window, input_window, -torch.inf).max(dim=(-2, -1)).values)
-        elif filter == 'mean':
-            input = torch.where(mask, input, torch.where(mask_window, input_window, torch.nan).nanmean(dim=(-2, -1)))
-        elif filter =='median':
-            input = torch.where(mask, input, torch.where(mask_window, input_window, torch.nan).flatten(-2).nanmedian(dim=-1).values)
-        mask = mask_window.any(dim=(-2, -1))
-    return input, mask
+def intrinsics_from_focal_center(
+    fx: torch.Tensor,
+    fy: torch.Tensor,
+    cx: torch.Tensor,
+    cy: torch.Tensor,
+) -> torch.Tensor:
+    """Build OpenCV intrinsics from broadcast-compatible tensor inputs."""
+    fx, fy, cx, cy = torch.broadcast_tensors(fx, fy, cx, cy)
+    zeros, ones = torch.zeros_like(fx), torch.ones_like(fx)
+    return torch.stack(
+        [
+            fx,
+            zeros,
+            cx,
+            zeros,
+            fy,
+            cy,
+            zeros,
+            zeros,
+            ones,
+        ],
+        dim=-1,
+    ).unflatten(-1, (3, 3))
+
+
+def _uv_map(height: int, width: int, *, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+    u = torch.linspace(0.5 / width, 1.0 - 0.5 / width, width, dtype=dtype, device=device)
+    v = torch.linspace(0.5 / height, 1.0 - 0.5 / height, height, dtype=dtype, device=device)
+    u, v = torch.meshgrid(u, v, indexing="xy")
+    return torch.stack([u, v], dim=2)
+
+
+def _unproject_cv(uv: torch.Tensor, depth: torch.Tensor, intrinsics: torch.Tensor) -> torch.Tensor:
+    intrinsics = torch.cat(
+        [
+            torch.cat(
+                [
+                    intrinsics,
+                    torch.zeros((*intrinsics.shape[:-2], 3, 1), dtype=intrinsics.dtype, device=intrinsics.device),
+                ],
+                dim=-1,
+            ),
+            torch.tensor([[0, 0, 0, 1]], dtype=intrinsics.dtype, device=intrinsics.device).expand(*intrinsics.shape[:-2], 1, 4),
+        ],
+        dim=-2,
+    )
+    transform = intrinsics
+    points = torch.cat([uv, torch.ones((*uv.shape[:-1], 1), dtype=uv.dtype, device=uv.device)], dim=-1) * depth[..., None]
+    points = torch.cat([points, torch.ones((*points.shape[:-1], 1), dtype=uv.dtype, device=uv.device)], dim=-1)
+    points = points @ torch.linalg.inv(transform).mT
+    points = points[..., :3]
+    return points
+
+
+def depth_map_to_point_map(depth: torch.Tensor, intrinsics: torch.Tensor) -> torch.Tensor:
+    """Unproject a normalized-intrinsics depth map into camera-space points."""
+    height, width = depth.shape[-2:]
+    uv = _uv_map(height, width, dtype=depth.dtype, device=depth.device)
+    points = _unproject_cv(uv, depth, intrinsics=intrinsics[..., None, :, :])
+    return points

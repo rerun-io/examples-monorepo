@@ -1,18 +1,23 @@
 from typing import *
-from numbers import Number
-import importlib
 import itertools
 import functools
-import sys
 
 import torch
 from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .dinov2.models.vision_transformer import DinoVisionTransformer
-from .utils import wrap_dinov2_attention_with_sdpa, wrap_module_with_gradient_checkpointing, unwrap_module_with_gradient_checkpointing
+from monopriors.third_party.dinov2 import dinov2_vitb14, dinov2_vitl14, dinov2_vits14
+from monopriors.third_party.dinov2.vision_transformer import DinoVisionTransformer
+
 from ..utils.geometry_torch import normalized_view_plane_uv
+
+
+DINOV2_FACTORIES = {
+    "dinov2_vits14": dinov2_vits14,
+    "dinov2_vitb14": dinov2_vitb14,
+    "dinov2_vitl14": dinov2_vitl14,
+}
 
 
 class ResidualConvBlock(nn.Module):  
@@ -81,9 +86,7 @@ class DINOv2Encoder(nn.Module):
         self.intermediate_layers = intermediate_layers
 
         # Load the backbone
-        self.hub_loader = getattr(importlib.import_module(".dinov2.hub.backbones", __package__), backbone)
-        self.backbone_name = backbone
-        self.backbone = self.hub_loader(pretrained=False)
+        self.backbone = DINOV2_FACTORIES[backbone](pretrained=False)
 
         self.dim_features = self.backbone.blocks[0].attn.qkv.in_features
         self.num_features = intermediate_layers if isinstance(intermediate_layers, int) else len(intermediate_layers)
@@ -104,18 +107,6 @@ class DINOv2Encoder(nn.Module):
     def onnx_compatible_mode(self, value: bool):
         self._onnx_compatible_mode = value
         self.backbone.onnx_compatible_mode = value
-
-    def init_weights(self):
-        pretrained_backbone_state_dict = self.hub_loader(pretrained=True).state_dict()
-        self.backbone.load_state_dict(pretrained_backbone_state_dict)
-
-    def enable_gradient_checkpointing(self):
-        for i in range(len(self.backbone.blocks)):
-            wrap_module_with_gradient_checkpointing(self.backbone.blocks[i])
-
-    def enable_pytorch_native_sdpa(self):
-        for i in range(len(self.backbone.blocks)):
-            wrap_dinov2_attention_with_sdpa(self.backbone.blocks[i].attn)
 
     def forward(self, image: torch.Tensor, token_rows: Union[int, torch.LongTensor], token_cols: Union[int, torch.LongTensor], return_class_token: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
         image_14 = F.interpolate(image, (token_rows * 14, token_cols * 14), mode="bilinear", align_corners=False, antialias=not self.onnx_compatible_mode)
@@ -140,21 +131,12 @@ class Resampler(nn.Sequential):
     def __init__(self, 
         in_channels: int, 
         out_channels: int, 
-        type_: Literal['pixel_shuffle', 'nearest', 'bilinear', 'conv_transpose', 'pixel_unshuffle', 'avg_pool', 'max_pool'],
+        type_: Literal['bilinear', 'conv_transpose'],
         scale_factor: int = 2, 
     ):
-        if type_ == 'pixel_shuffle':
+        if type_ == 'bilinear':
             nn.Sequential.__init__(self,
-                nn.Conv2d(in_channels, out_channels * (scale_factor ** 2), kernel_size=3, stride=1, padding=1, padding_mode='replicate'),
-                nn.PixelShuffle(scale_factor),
-                nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, padding_mode='replicate')
-            )
-            for i in range(1, scale_factor ** 2):
-                self[0].weight.data[i::scale_factor ** 2] = self[0].weight.data[0::scale_factor ** 2]
-                self[0].bias.data[i::scale_factor ** 2] = self[0].bias.data[0::scale_factor ** 2]
-        elif type_ in ['nearest', 'bilinear']:
-            nn.Sequential.__init__(self,
-                nn.Upsample(scale_factor=scale_factor, mode=type_, align_corners=False if type_ == 'bilinear' else None),
+                nn.Upsample(scale_factor=scale_factor, mode=type_, align_corners=False),
                 nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1, padding_mode='replicate')
             )
         elif type_ == 'conv_transpose':
@@ -163,21 +145,6 @@ class Resampler(nn.Sequential):
                 nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, padding_mode='replicate')
             )
             self[0].weight.data[:] = self[0].weight.data[:, :, :1, :1]
-        elif type_ == 'pixel_unshuffle':
-            nn.Sequential.__init__(self,
-                nn.PixelUnshuffle(scale_factor),
-                nn.Conv2d(in_channels * (scale_factor ** 2), out_channels, kernel_size=3, stride=1, padding=1, padding_mode='replicate')
-            )
-        elif type_ == 'avg_pool': 
-            nn.Sequential.__init__(self,
-                nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1, padding_mode='replicate'),
-                nn.AvgPool2d(kernel_size=scale_factor, stride=scale_factor),
-            )
-        elif type_ == 'max_pool':
-            nn.Sequential.__init__(self,
-                nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1, padding_mode='replicate'),
-                nn.MaxPool2d(kernel_size=scale_factor, stride=scale_factor),
-            )
         else:
             raise ValueError(f'Unsupported resampler type: {type_}')
 
@@ -197,7 +164,7 @@ class ConvStack(nn.Module):
         dim_in: List[Optional[int]],
         dim_res_blocks: List[int],
         dim_out: List[Optional[int]],
-        resamplers: Union[Literal['pixel_shuffle', 'nearest', 'bilinear', 'conv_transpose', 'pixel_unshuffle', 'avg_pool', 'max_pool'], List],
+        resamplers: Union[Literal['bilinear', 'conv_transpose'], List],
         dim_times_res_block_hidden: int = 1,
         num_res_blocks: int = 1,
         res_block_in_norm: Literal['layer_norm', 'group_norm' , 'instance_norm', 'none'] = 'layer_norm',
@@ -231,13 +198,6 @@ class ConvStack(nn.Module):
             nn.Conv2d(dim_res_block_, dim_out_, kernel_size=1, stride=1, padding=0) if dim_out_ is not None else nn.Identity() 
                 for dim_out_, dim_res_block_ in zip(dim_out if isinstance(dim_out, Sequence) else itertools.repeat(dim_out), dim_res_blocks)
         ])
-
-    def enable_gradient_checkpointing(self):
-        for i in range(len(self.resamplers)):
-            self.resamplers[i] = wrap_module_with_gradient_checkpointing(self.resamplers[i])
-        for i in range(len(self.res_blocks)):
-            for j in range(len(self.res_blocks[i])):
-                self.res_blocks[i][j] = wrap_module_with_gradient_checkpointing(self.res_blocks[i][j])
 
     def forward(self, in_features: List[torch.Tensor]):
         out_features = []

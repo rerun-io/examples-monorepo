@@ -1,21 +1,14 @@
 from typing import *
 from numbers import Number
-from functools import partial
 from pathlib import Path
 import warnings
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.utils
-import torch.utils.checkpoint
-import torch.amp
-import torch.version
-from monopriors.third_party import utils3d
 from huggingface_hub import hf_hub_download
 
-from ..utils.geometry_torch import normalized_view_plane_uv, recover_focal_shift, angle_diff_vec3
-from .utils import wrap_dinov2_attention_with_sdpa, wrap_module_with_gradient_checkpointing, unwrap_module_with_gradient_checkpointing
+from ..utils.geometry_torch import depth_map_to_point_map, intrinsics_from_focal_center, normalized_view_plane_uv, recover_focal_shift
 from .modules import DINOv2Encoder, MLP, ConvStack
 
     
@@ -35,7 +28,7 @@ class MoGeModel(nn.Module):
         normal_head: Dict[str, Any] = None,
         scale_head: Dict[str, Any] = None,
         remap_output: Literal['linear', 'sinh', 'exp', 'sinh_exp'] = 'linear',
-        num_tokens_range: List[int] = [1200, 3600],
+        num_tokens_range: Tuple[int, int] = (1200, 3600),
         **deprecated_kwargs
     ):
         super(MoGeModel, self).__init__()
@@ -43,7 +36,7 @@ class MoGeModel(nn.Module):
             warnings.warn(f"The following deprecated/invalid arguments are ignored: {deprecated_kwargs}")
 
         self.remap_output = remap_output
-        self.num_tokens_range = num_tokens_range
+        self.num_tokens_range = tuple(num_tokens_range)
         
         self.encoder = DINOv2Encoder(**encoder) 
         self.neck = ConvStack(**neck)
@@ -106,19 +99,6 @@ class MoGeModel(nn.Module):
         
         return model
     
-    def init_weights(self):
-        self.encoder.init_weights()
-
-    def enable_gradient_checkpointing(self):
-        self.encoder.enable_gradient_checkpointing()
-        self.neck.enable_gradient_checkpointing()
-        for head in ['points_head', 'normal_head', 'mask_head']:
-            if hasattr(self, head):
-                getattr(self, head).enable_gradient_checkpointing()
-
-    def enable_pytorch_native_sdpa(self):
-        self.encoder.enable_pytorch_native_sdpa()
-
     def _remap_points(self, points: torch.Tensor) -> torch.Tensor:
         if self.remap_output == 'linear':
             pass
@@ -263,7 +243,7 @@ class MoGeModel(nn.Module):
                         focal = focal[None].expand(points.shape[0])
                     _, shift = recover_focal_shift(points, mask_binary, focal=focal)
                 fx, fy = focal / 2 * (1 + aspect_ratio ** 2) ** 0.5 / aspect_ratio, focal / 2 * (1 + aspect_ratio ** 2) ** 0.5 
-                intrinsics = utils3d.pt.intrinsics_from_focal_center(fx, fy, torch.tensor(0.5, device=points.device, dtype=points.dtype), torch.tensor(0.5, device=points.device, dtype=points.dtype))
+                intrinsics = intrinsics_from_focal_center(fx, fy, torch.tensor(0.5, device=points.device, dtype=points.dtype), torch.tensor(0.5, device=points.device, dtype=points.dtype))
                 points[..., 2] += shift[..., None, None]
                 if mask_binary is not None:
                     mask_binary &= points[..., 2] > 0        # in case depth is contains negative values (which should never happen in practice)
@@ -273,7 +253,7 @@ class MoGeModel(nn.Module):
 
             # If projection constraint is forced, recompute the point map using the actual depth map & intrinsics
             if force_projection and depth is not None:
-                points = utils3d.pt.depth_map_to_point_map(depth, intrinsics=intrinsics)
+                points = depth_map_to_point_map(depth, intrinsics=intrinsics)
 
             # Apply metric scale
             if metric_scale is not None:

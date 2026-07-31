@@ -1,24 +1,23 @@
 from typing import *
 from numbers import Number
-from functools import partial
 from pathlib import Path
-import importlib
 import warnings
-import json
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.utils
-import torch.utils.checkpoint
-import torch.version
-from monopriors.third_party import utils3d
 from huggingface_hub import hf_hub_download
 
+from monopriors.third_party.dinov2 import dinov2_vitb14, dinov2_vitl14, dinov2_vits14
 
-from ..utils.geometry_torch import normalized_view_plane_uv, recover_focal_shift, gaussian_blur_2d, dilate_with_mask
-from .utils import wrap_dinov2_attention_with_sdpa, wrap_module_with_gradient_checkpointing, unwrap_module_with_gradient_checkpointing
-from ..utils.tools import timeit
+from ..utils.geometry_torch import depth_map_to_point_map, intrinsics_from_focal_center, normalized_view_plane_uv, recover_focal_shift
+
+
+DINOV2_FACTORIES = {
+    "dinov2_vits14": dinov2_vits14,
+    "dinov2_vitb14": dinov2_vitb14,
+    "dinov2_vitl14": dinov2_vitl14,
+}
 
 
 class ResidualConvBlock(nn.Module):  
@@ -65,7 +64,7 @@ class Head(nn.Module):
         dim_in: int, 
         dim_out: List[int], 
         dim_proj: int = 512,
-        dim_upsample: List[int] = [256, 128, 128],
+        dim_upsample: Tuple[int, ...] = (256, 128, 128),
         dim_times_res_block_hidden: int = 1,
         num_res_blocks: int = 1,
         res_block_norm: Literal['group_norm', 'layer_norm'] = 'group_norm',
@@ -74,6 +73,7 @@ class Head(nn.Module):
         last_conv_size: int = 1
     ):
         super().__init__()
+        dim_upsample = tuple(dim_upsample)
         
         self.projects = nn.ModuleList([
             nn.Conv2d(in_channels=dim_in, out_channels=dim_proj, kernel_size=1, stride=1, padding=0,) for _ in range(num_features)
@@ -83,7 +83,7 @@ class Head(nn.Module):
             nn.Sequential(
                 self._make_upsampler(in_ch + 2, out_ch),
                 *(ResidualConvBlock(out_ch, out_ch, dim_times_res_block_hidden * out_ch, activation="relu", norm=res_block_norm) for _ in range(num_res_blocks))
-            ) for in_ch, out_ch in zip([dim_proj] + dim_upsample[:-1], dim_upsample)
+            ) for in_ch, out_ch in zip((dim_proj,) + dim_upsample[:-1], dim_upsample)
         ])
 
         self.output_block = nn.ModuleList([
@@ -126,7 +126,7 @@ class Head(nn.Module):
             uv = uv.permute(2, 0, 1).unsqueeze(0).expand(x.shape[0], -1, -1, -1)
             x = torch.cat([x, uv], dim=1)
             for layer in block:
-                x = torch.utils.checkpoint.checkpoint(layer, x, use_reentrant=False)
+                x = layer(x)
         
         # (patch_h * 8, patch_w * 8) -> (img_h, img_w)
         x = F.interpolate(x, (img_h, img_w), mode="bilinear", align_corners=False)
@@ -134,10 +134,7 @@ class Head(nn.Module):
         uv = uv.permute(2, 0, 1).unsqueeze(0).expand(x.shape[0], -1, -1, -1)
         x = torch.cat([x, uv], dim=1)
 
-        if isinstance(self.output_block, nn.ModuleList):
-            output = [torch.utils.checkpoint.checkpoint(block, x, use_reentrant=False) for block in self.output_block]
-        else:
-            output = torch.utils.checkpoint.checkpoint(self.output_block, x, use_reentrant=False)
+        output = [block(x) for block in self.output_block]
         
         return output
 
@@ -150,12 +147,12 @@ class MoGeModel(nn.Module):
         encoder: str = 'dinov2_vitb14', 
         intermediate_layers: Union[int, List[int]] = 4,
         dim_proj: int = 512,
-        dim_upsample: List[int] = [256, 128, 128],
+        dim_upsample: Tuple[int, ...] = (256, 128, 128),
         dim_times_res_block_hidden: int = 1,
         num_res_blocks: int = 1,
         remap_output: Literal[False, True, 'linear', 'sinh', 'exp', 'sinh_exp'] = 'linear',
         res_block_norm: Literal['group_norm', 'layer_norm'] = 'group_norm',
-        num_tokens_range: Tuple[Number, Number] = [1200, 2500],
+        num_tokens_range: Tuple[Number, Number] = (1200, 2500),
         last_res_blocks: int = 0,
         last_conv_channels: int = 32,
         last_conv_size: int = 1,
@@ -174,13 +171,10 @@ class MoGeModel(nn.Module):
         self.encoder = encoder
         self.remap_output = remap_output
         self.intermediate_layers = intermediate_layers
-        self.num_tokens_range = num_tokens_range
+        self.num_tokens_range = tuple(num_tokens_range)
         self.mask_threshold = mask_threshold
         
-        # NOTE: We have copied the DINOv2 code in torchhub to this repository.
-        # Minimal modifications have been made: removing irrelevant code, unnecessary warnings and fixing importing issues.
-        hub_loader = getattr(importlib.import_module(".dinov2.hub.backbones", __package__), encoder)
-        self.backbone = hub_loader(pretrained=False)
+        self.backbone = DINOV2_FACTORIES[encoder](pretrained=False)
         dim_feature = self.backbone.blocks[0].attn.qkv.in_features
         
         self.head = Head(
@@ -241,15 +235,6 @@ class MoGeModel(nn.Module):
         model.load_state_dict(checkpoint['model'])
         return model
 
-    def init_weights(self):
-        "Load the backbone with pretrained dinov2 weights from torch hub"
-        state_dict = torch.hub.load('facebookresearch/dinov2', self.encoder, pretrained=True).state_dict()
-        self.backbone.load_state_dict(state_dict)
-    
-    def enable_gradient_checkpointing(self):
-        for i in range(len(self.backbone.blocks)):
-            self.backbone.blocks[i] = wrap_module_with_gradient_checkpointing(self.backbone.blocks[i])
-    
     def _remap_points(self, points: torch.Tensor) -> torch.Tensor:
         if self.remap_output == 'linear':
             pass
@@ -365,12 +350,12 @@ class MoGeModel(nn.Module):
                 _, shift = recover_focal_shift(points, mask_binary, focal=focal)
             fx = focal / 2 * (1 + aspect_ratio ** 2) ** 0.5 / aspect_ratio
             fy = focal / 2 * (1 + aspect_ratio ** 2) ** 0.5 
-            intrinsics = utils3d.pt.intrinsics_from_focal_center(fx, fy, torch.tensor(0.5, device=points.device, dtype=points.dtype), torch.tensor(0.5, device=points.device, dtype=points.dtype))
+            intrinsics = intrinsics_from_focal_center(fx, fy, torch.tensor(0.5, device=points.device, dtype=points.dtype), torch.tensor(0.5, device=points.device, dtype=points.dtype))
             depth = points[..., 2] + shift[..., None, None]
             
             # If projection constraint is forced, recompute the point map using the actual depth map
             if force_projection:
-                points = utils3d.pt.depth_map_to_point_map(depth, intrinsics=intrinsics)
+                points = depth_map_to_point_map(depth, intrinsics=intrinsics)
             else:
                 points = points + torch.stack([torch.zeros_like(shift), torch.zeros_like(shift), shift], dim=-1)[..., None, None, :]
 
