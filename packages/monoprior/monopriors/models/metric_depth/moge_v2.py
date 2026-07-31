@@ -3,20 +3,21 @@ from typing import Literal
 
 import numpy as np
 import torch
+from einops import rearrange
 from jaxtyping import Float, UInt8
-from torch import Tensor
 
+from monopriors.third_party.moge.model._inference import InferenceOutput
 from monopriors.third_party.moge.model.v2 import MoGeModel
 
 from .base_metric_depth import BaseMetricPredictor, MetricDepthPrediction
 
-MOGE_V2_CHECKPOINTS: dict[tuple[str, bool], str] = {
-    ("vitl", False): "Ruicheng/moge-2-vitl",
-    ("vitl", True): "Ruicheng/moge-2-vitl-normal",
-    ("vitb", True): "Ruicheng/moge-2-vitb-normal",
-    ("vits", True): "Ruicheng/moge-2-vits-normal",
+MOGE_V2_CHECKPOINTS: dict[tuple[str, bool], tuple[str, str]] = {
+    ("vitl", False): ("Ruicheng/moge-2-vitl", "39c4d5e957afe587e04eec59dc2bcc3be5ecd968"),
+    ("vitl", True): ("Ruicheng/moge-2-vitl-normal", "b135031bae30b5ac2ae141a0e68717795ce38340"),
+    ("vitb", True): ("Ruicheng/moge-2-vitb-normal", "54ad3a693e61907ea4633d13dec6ee682fa09419"),
+    ("vits", True): ("Ruicheng/moge-2-vits-normal", "679230677b4d282c6f304189a93e98e14f085902"),
 }
-"""Mapping of (encoder, with_normals) to HuggingFace checkpoint name."""
+"""Mapping of (encoder, with_normals) to Hugging Face repository and revision."""
 
 
 class MoGeV2MetricPredictor(BaseMetricPredictor):
@@ -31,15 +32,23 @@ class MoGeV2MetricPredictor(BaseMetricPredictor):
         device: Literal["cpu", "cuda"],
         encoder: Literal["vits", "vitb", "vitl"] = "vitl",
     ) -> None:
+        """Load a pinned MoGe v2 metric checkpoint.
+
+        Args:
+            device: Torch device used for inference.
+            encoder: DINOv2 encoder size.
+        """
         super().__init__()
         # Prefer depth-only checkpoint; fall back to depth+normals
-        checkpoint: str = MOGE_V2_CHECKPOINTS.get(
+        checkpoint: tuple[str, str] = MOGE_V2_CHECKPOINTS.get(
             (encoder, False),
             MOGE_V2_CHECKPOINTS[(encoder, True)],
         )
-        print(f"Loading MoGe v2 metric model ({checkpoint})...")
+        repo_id: str = checkpoint[0]
+        revision: str = checkpoint[1]
+        print(f"Loading MoGe v2 metric model ({repo_id})...")
         start: float = timer()
-        self.model = MoGeModel.from_pretrained(checkpoint).to(device)
+        self.model: MoGeModel = MoGeModel.from_pretrained(repo_id, revision=revision).to(device)
         print(f"MoGe v2 metric model loaded. Time: {timer() - start:.2f}s")
         self.device: Literal["cpu", "cuda"] = device
 
@@ -48,14 +57,29 @@ class MoGeV2MetricPredictor(BaseMetricPredictor):
         rgb: UInt8[np.ndarray, "h w 3"],
         K_33: Float[np.ndarray, "3 3"] | None = None,
     ) -> MetricDepthPrediction:
+        """Predict metric depth from an RGB image.
+
+        Args:
+            rgb: uint8 RGB image shaped ``h w 3``.
+            K_33: Optional float camera intrinsics shaped ``3 3``; MoGe v2 estimates its own intrinsics.
+
+        Returns:
+            Metric depth, confidence, and estimated intrinsics.
+        """
         h: int
         w: int
         h, w, _ = rgb.shape
-        input_image: Float[torch.Tensor, "3 h w"] = torch.tensor(
-            rgb / 255, dtype=torch.float32, device=self.device
-        ).permute(2, 0, 1)
+        input_image: Float[torch.Tensor, "3 h w"] = rearrange(torch.from_numpy(rgb), "h w c -> c h w").to(
+            device=self.device,
+            dtype=torch.float32,
+        )
+        input_image.div_(255.0)
 
-        output: dict[str, Tensor] = self.model.infer(input_image, force_projection=False)
+        output: InferenceOutput = self.model.infer(
+            input_image,
+            force_projection=False,
+            output_heads=("points", "mask", "scale"),
+        )
         # v2 output keys: "points" (H,W,3), "depth" (H,W), "mask" (H,W),
         # "intrinsics" (3,3), and optionally "normal" (H,W,3).
         # Depth is metric-scale. Intrinsics are normalized.
@@ -67,7 +91,8 @@ class MoGeV2MetricPredictor(BaseMetricPredictor):
         cy: float = float(normalized_k[1, 2] * h)
 
         intrinsics: Float[np.ndarray, "3 3"] = np.array(
-            [[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32
+            [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]],
+            dtype=np.float32,
         )
         depth_meters: Float[np.ndarray, "h w"] = output["depth"].numpy(force=True)
         confidence: Float[np.ndarray, "h w"] = output["mask"].numpy(force=True).astype(np.float32)
