@@ -4,8 +4,9 @@ from typing import Literal
 import numpy as np
 import torch
 from jaxtyping import Float, UInt8
-from monopriors.third_party.moge.model.v2 import MoGeModel
 from torch import Tensor
+
+from monopriors.third_party.moge.model.v2 import MoGeModel
 
 from .base_normal_model import BaseNormalPredictor, SurfaceNormalPrediction
 

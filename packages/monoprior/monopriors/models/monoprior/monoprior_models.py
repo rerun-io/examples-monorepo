@@ -7,7 +7,6 @@ import numpy as np
 import torch
 from einops import rearrange
 from jaxtyping import Float, UInt8
-from monopriors.third_party.moge.model.v2 import MoGeModel
 from torch import Tensor
 
 from monopriors.models.metric_depth import MetricDepthPrediction, get_metric_predictor
@@ -16,6 +15,7 @@ from monopriors.models.surface_normal import (
     SurfaceNormalPrediction,
     get_normal_predictor,
 )
+from monopriors.third_party.moge.model.v2 import MoGeModel
 
 
 @dataclass

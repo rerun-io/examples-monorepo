@@ -4,10 +4,10 @@ from typing import Literal
 import numpy as np
 import torch
 from jaxtyping import Float, UInt8
-from monopriors.third_party.moge.model.v1 import MoGeModel
 from torch import Tensor
 
 from monopriors.depth_utils import depth_to_disparity
+from monopriors.third_party.moge.model.v1 import MoGeModel
 
 from .base_relative_depth import BaseRelativePredictor, RelativeDepthPrediction
 
