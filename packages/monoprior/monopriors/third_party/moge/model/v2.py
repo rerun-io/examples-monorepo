@@ -10,7 +10,6 @@ from torch import Tensor, nn
 
 from monopriors.third_party.moge.model._inference import (
     CameraRecovery,
-    FieldOfView,
     InferenceInput,
     InferenceOutput,
     MaskedGeometry,
@@ -549,7 +548,6 @@ class MoGeModel(nn.Module):
         resolution_level: int = 9,
         force_projection: bool = True,
         apply_mask: bool = True,
-        fov_x: FieldOfView = None,
         use_fp16: bool = True,
         output_heads: Collection[OutputHead] | None = None,
     ) -> InferenceOutput:
@@ -561,7 +559,6 @@ class MoGeModel(nn.Module):
             resolution_level: Detail level from 0 through 9 used when ``num_tokens`` is absent.
             force_projection: Whether to reproject depth into a pinhole-consistent point map.
             apply_mask: Whether to mask invalid geometry and normals.
-            fov_x: Optional horizontal field of view in degrees, scalar or batch-shaped.
             use_fp16: Whether to use float16 mixed precision for the network forward pass.
             output_heads: Optional network heads to compute. ``None`` preserves the full default output.
 
@@ -590,8 +587,6 @@ class MoGeModel(nn.Module):
         normal_bhw3 = normal_bhw3.float() if normal_bhw3 is not None else None
         mask_bhw = mask_bhw.float() if mask_bhw is not None else None
         metric_scale_b = metric_scale_b.float() if metric_scale_b is not None else None
-        if isinstance(fov_x, Tensor):
-            fov_x = fov_x.float()
         with torch.autocast(device_type=self.device.type, dtype=torch.float32):
             mask_binary_bhw: Bool[Tensor, "b h w"] | None = mask_bhw > 0.5 if mask_bhw is not None else None
             intrinsics_b33: Float[Tensor, "b 3 3"] | None
@@ -601,8 +596,7 @@ class MoGeModel(nn.Module):
                 camera: CameraRecovery = recover_shift_and_intrinsics(
                     points_bhw3,
                     mask_binary_bhw,
-                    fov_x=fov_x,
-                    aspect_ratio=inference_input.aspect_ratio,
+                        aspect_ratio=inference_input.aspect_ratio,
                 )
                 intrinsics_b33 = camera.intrinsics_b33
                 points_bhw3[..., 2] += camera.shift_b[..., None, None]

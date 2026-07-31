@@ -13,7 +13,6 @@ from monopriors.third_party.dinov2 import dinov2_vitl14
 from monopriors.third_party.dinov2.vision_transformer import DinoVisionTransformer
 from monopriors.third_party.moge.model._inference import (
     CameraRecovery,
-    FieldOfView,
     InferenceInput,
     InferenceOutput,
     MaskedGeometry,
@@ -487,7 +486,6 @@ class MoGeModel(nn.Module):
     def infer(
         self,
         image: Float[Tensor, "3 h w"] | Float[Tensor, "b 3 h w"],
-        fov_x: FieldOfView = None,
         resolution_level: int = 9,
         num_tokens: int | None = None,
         apply_mask: bool = True,
@@ -498,7 +496,6 @@ class MoGeModel(nn.Module):
 
         Args:
             image: Float RGB image tensor shaped ``3 h w`` or ``b 3 h w``.
-            fov_x: Optional horizontal field of view in degrees, scalar or batch-shaped.
             resolution_level: Detail level from 0 through 9 used when ``num_tokens`` is absent.
             num_tokens: Explicit DINOv2 token count, or ``None`` to derive it.
             apply_mask: Whether invalid point and depth values become infinity.
@@ -523,14 +520,11 @@ class MoGeModel(nn.Module):
         with torch.autocast(device_type=self.device.type, dtype=torch.float32):
             points_bhw3 = points_bhw3.float()
             mask_bhw = mask_bhw.float()
-            if isinstance(fov_x, Tensor):
-                fov_x = fov_x.float()
 
             mask_binary_bhw: Bool[Tensor, "b h w"] = mask_bhw > self.mask_threshold
             camera: CameraRecovery = recover_shift_and_intrinsics(
                 points_bhw3,
                 mask_binary_bhw,
-                fov_x=fov_x,
                 aspect_ratio=inference_input.aspect_ratio,
             )
             depth_bhw: Float[Tensor, "b h w"] = points_bhw3[..., 2] + camera.shift_b[..., None, None]
