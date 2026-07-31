@@ -101,7 +101,7 @@ viewer silently loses protocol/tooling parity (e.g. no viewer-control MCP
 before 0.34). To bump: Python first (rerun-sdk + gradio-rerun together), then
 the Rust pins (matching that release's egui family), then re-lock pixi and cargo.
 
-The whole workspace runs **`rerun-sdk == 0.34.1`** (and `gradio-rerun == 0.34.1`) from PyPI:
+The whole workspace runs **`rerun-sdk == 0.35.0`** (and `gradio-rerun == 0.35.0`) from PyPI:
 `common` carries the pin with the `datafusion` extra. The `dataloader` extra stays scoped to
 catalog-side features: `rerun-prerelease` for the shared catalog lanes (composed into
 `no-default-feature` envs beside `catalog-common`, e.g. `simplecv-catalog`, `mv-api-catalog`)
