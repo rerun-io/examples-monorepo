@@ -85,9 +85,12 @@ class DepthAnythingV1Predictor(BaseRelativePredictor[torch.nn.Module]):
         return relative_prediction
 
     def set_model_device(self, device: Literal["cpu", "cuda"] = "cuda") -> None:
-        # uses pipeline instead of model so not implemented
+        # Rebuilds the pipeline; drop both old references first so the previous
+        # model's weights are released before the new one loads.
+        del self.pipe, self.model
         self.pipe = pipeline(
             task="depth-estimation",
             model="LiheYoung/depth-anything-small-hf",
             device=device,
         )
+        self.model = self.pipe.model
