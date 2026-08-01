@@ -47,6 +47,8 @@ class DepthAnythingV1Predictor(BaseRelativePredictor[torch.nn.Module]):
             model="LiheYoung/depth-anything-small-hf",
             device=device,
         )
+        # The base contract exposes the underlying module (the pipeline itself is not device-movable).
+        self.model: torch.nn.Module = self.pipe.model
         print(f"DepthAnythingV1 model loaded. Time: {timer() - start:.2f}s")
 
     def __call__(
