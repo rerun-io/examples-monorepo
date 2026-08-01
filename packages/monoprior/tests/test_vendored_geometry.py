@@ -1,8 +1,16 @@
+import math
+
 import torch
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from monopriors.third_party.moge.utils.geometry_torch import depth_map_to_point_map, intrinsics_from_focal_center
+from monopriors.third_party.moge.model._inference import recover_shift_and_intrinsics
+from monopriors.third_party.moge.utils.geometry_torch import (
+    depth_map_to_point_map,
+    intrinsics_from_focal_center,
+    normalized_view_plane_uv,
+    recover_focal_shift,
+)
 
 
 @settings(max_examples=25, deadline=None)
@@ -109,3 +117,48 @@ def test_depth_map_to_point_map_round_trips_normalized_pixel_centers(
     expected_uv_hw2: torch.Tensor = torch.stack((expected_u_grid, expected_v_grid), dim=-1)
 
     torch.testing.assert_close(projected_hw3[..., :2], expected_uv_hw2, rtol=0.0, atol=1.0e-5)
+
+
+def test_recover_focal_shift_round_trips_synthetic_camera() -> None:
+    """Both solver branches recover a known focal and Z shift from a synthetic affine point map."""
+    torch.manual_seed(3)
+    height: int = 24
+    width: int = 32
+    true_focal: float = 1.3
+    true_shift: float = 0.4
+    uv_hw2: torch.Tensor = normalized_view_plane_uv(width, height, dtype=torch.float32)
+    z_hw: torch.Tensor = 1.0 + torch.rand(height, width, dtype=torch.float32)
+    xy_hw2: torch.Tensor = uv_hw2 * (z_hw[..., None] + true_shift) / true_focal
+    points_bhw3: torch.Tensor = torch.cat([xy_hw2, z_hw[..., None]], dim=-1)[None]
+
+    solved_focal: torch.Tensor
+    solved_shift: torch.Tensor
+    solved_focal, solved_shift = recover_focal_shift(points_bhw3)
+    assert abs(float(solved_focal) - true_focal) < 1e-2
+    assert abs(float(solved_shift) - true_shift) < 1e-2
+
+    fixed_focal: torch.Tensor
+    fixed_shift: torch.Tensor
+    fixed_focal, fixed_shift = recover_focal_shift(points_bhw3, focal=torch.tensor([true_focal]))
+    assert float(fixed_focal) == float(torch.tensor(true_focal, dtype=torch.float32))
+    assert abs(float(fixed_shift) - true_shift) < 1e-2
+
+
+def test_recover_shift_and_intrinsics_accepts_known_fov() -> None:
+    """The known-FoV branch converts degrees to the diagonal-normalized focal and recovers shift."""
+    torch.manual_seed(4)
+    height: int = 24
+    width: int = 32
+    aspect_ratio: float = width / height
+    true_focal: float = 1.3
+    true_shift: float = 0.4
+    fov_x_degrees: float = math.degrees(2.0 * math.atan(aspect_ratio / (1.0 + aspect_ratio**2) ** 0.5 / true_focal))
+    uv_hw2: torch.Tensor = normalized_view_plane_uv(width, height, dtype=torch.float32)
+    z_hw: torch.Tensor = 1.0 + torch.rand(height, width, dtype=torch.float32)
+    xy_hw2: torch.Tensor = uv_hw2 * (z_hw[..., None] + true_shift) / true_focal
+    points_bhw3: torch.Tensor = torch.cat([xy_hw2, z_hw[..., None]], dim=-1)[None]
+
+    camera = recover_shift_and_intrinsics(points_bhw3, None, fov_x=fov_x_degrees, aspect_ratio=aspect_ratio)
+    expected_fx: float = true_focal / 2.0 * (1.0 + aspect_ratio**2) ** 0.5 / aspect_ratio
+    assert abs(float(camera.intrinsics_b33[0, 0, 0]) - expected_fx) < 1e-4
+    assert abs(float(camera.shift_b[0]) - true_shift) < 1e-2

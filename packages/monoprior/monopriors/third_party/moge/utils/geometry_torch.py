@@ -1,4 +1,3 @@
-from functools import partial
 from typing import cast
 
 import numpy as np
@@ -9,39 +8,40 @@ from scipy.optimize import OptimizeResult, least_squares
 from torch import Tensor
 
 
-def _solve_optimal_focal_shift(
+def _solve_focal_shift(
     uv: Float[np.ndarray, "... 2"],
     xyz: Float[np.ndarray, "... 3"],
-) -> tuple[Float[np.ndarray, ""], np.floating[np.generic]]:
-    """Solve ``min |focal * xy / (z + shift) - uv|`` for shift and focal.
+    focal: float | None = None,
+) -> tuple[float, float]:
+    """Solve ``min |focal * xy / (z + shift) - uv|`` for shift, and for focal when unknown.
 
     Args:
         uv: Float view-plane coordinates shaped ``... 2``.
         xyz: Float affine point coordinates shaped ``... 3``.
+        focal: Known focal relative to half the image diagonal, or ``None`` to solve for it.
 
     Returns:
-        Optimal 0-D float32 shift array and floating-point focal value.
+        Optimal shift and focal as floats.
     """
     uv_n2: Float[np.ndarray, "n 2"] = uv.reshape(-1, 2)
     xy_n2: Float[np.ndarray, "n 2"] = xyz[..., :2].reshape(-1, 2)
     z_n: Float[np.ndarray, "n"] = xyz[..., 2].reshape(-1)
 
-    def residual(
-        uv_values_n2: Float[np.ndarray, "n 2"],
-        xy_values_n2: Float[np.ndarray, "n 2"],
-        z_values_n: Float[np.ndarray, "n"],
-        shift_1: Float[np.ndarray, "1"],
-    ) -> Float[np.ndarray, "errors"]:
-        xy_projected_n2: Float[np.ndarray, "n 2"] = xy_values_n2 / (z_values_n + shift_1)[:, None]
-        focal: np.floating[np.generic] = (xy_projected_n2 * uv_values_n2).sum() / np.square(xy_projected_n2).sum()
-        error: Float[np.ndarray, "errors"] = (focal * xy_projected_n2 - uv_values_n2).ravel()
+    def closed_form_focal(xy_projected_n2: Float[np.ndarray, "n 2"]) -> np.floating[np.generic]:
+        return (xy_projected_n2 * uv_n2).sum() / np.square(xy_projected_n2).sum()
+
+    def residual(shift_1: Float[np.ndarray, "1"]) -> Float[np.ndarray, "errors"]:
+        xy_projected_n2: Float[np.ndarray, "n 2"] = xy_n2 / (z_n + shift_1)[:, None]
+        current_focal: float | np.floating[np.generic] = closed_form_focal(xy_projected_n2) if focal is None else focal
+        error: Float[np.ndarray, "errors"] = (current_focal * xy_projected_n2 - uv_n2).ravel()
         return error
 
-    solution: OptimizeResult = least_squares(partial(residual, uv_n2, xy_n2, z_n), x0=0.0, ftol=1e-3, method="lm")
+    solution: OptimizeResult = least_squares(residual, x0=0.0, ftol=1e-3, method="lm")
     optimal_shift: Float[np.ndarray, ""] = solution.x.squeeze().astype(np.float32)
-    xy_projected_n2: Float[np.ndarray, "n 2"] = xy_n2 / (z_n + optimal_shift)[:, None]
-    optimal_focal: np.floating[np.generic] = (xy_projected_n2 * uv_n2).sum() / np.square(xy_projected_n2).sum()
-    return optimal_shift, optimal_focal
+    optimal_focal: float | np.floating[np.generic] = (
+        closed_form_focal(xy_n2 / (z_n + optimal_shift)[:, None]) if focal is None else focal
+    )
+    return float(optimal_shift), float(optimal_focal)
 
 
 def normalized_view_plane_uv(
@@ -90,6 +90,7 @@ def normalized_view_plane_uv(
 def recover_focal_shift(
     points: Float[Tensor, "*batch h w 3"],
     mask: Bool[Tensor, "*batch h w"] | None = None,
+    focal: Float[Tensor, "*batch"] | None = None,
     downsample_size: tuple[int, int] = (64, 64),
 ) -> tuple[Float[Tensor, "*batch"], Float[Tensor, "*batch"]]:
     """Recover focal length and Z shift from an affine point map.
@@ -99,6 +100,7 @@ def recover_focal_shift(
     Args:
         points: Float point tensor shaped ``*batch h w 3``.
         mask: Optional bool validity tensor shaped ``*batch h w``.
+        focal: Optional known float focal tensor shaped ``*batch`` relative to half the image diagonal.
         downsample_size: ``(height, width)`` used by the CPU least-squares solve.
 
     Returns:
@@ -109,6 +111,7 @@ def recover_focal_shift(
     width: int = points.shape[-2]
     points_bhw3: Float[Tensor, "batch h w 3"] = points.reshape(-1, *original_shape[-3:])
     mask_bhw: Bool[Tensor, "batch h w"] | None = None if mask is None else mask.reshape(-1, *original_shape[-3:-1])
+    focal_b: Float[Tensor, "batch"] | None = focal.reshape(-1) if focal is not None else None
     uv_hw2: Float[Tensor, "h w 2"] = normalized_view_plane_uv(width, height, dtype=points.dtype, device=points.device)
 
     points_lr_bhw3: Float[Tensor, "batch sample_h sample_w 3"] = F.interpolate(
@@ -125,6 +128,7 @@ def recover_focal_shift(
 
     uv_lr_np: Float[np.ndarray, "sample_h sample_w 2"] = uv_lr_hw2.cpu().numpy()
     points_lr_np: Float[np.ndarray, "batch sample_h sample_w 3"] = points_lr_bhw3.detach().cpu().numpy()
+    focal_np: Float[np.ndarray, "batch"] | None = focal_b.cpu().numpy() if focal_b is not None else None
     mask_lr_np: Bool[np.ndarray, "batch sample_h sample_w"] | None = mask_lr_bhw.cpu().numpy() if mask_lr_bhw is not None else None
     optimal_shifts: list[float] = []
     optimal_focals: list[float] = []
@@ -137,21 +141,23 @@ def recover_focal_shift(
             optimal_focals.append(1.0)
             optimal_shifts.append(0.0)
             continue
-        optimal_shift_i: Float[np.ndarray, ""]
-        optimal_focal_i: np.floating[np.generic]
-        optimal_shift_i, optimal_focal_i = _solve_optimal_focal_shift(uv_lr_i_np, points_lr_i_np)
-        optimal_focals.append(float(optimal_focal_i))
-        optimal_shifts.append(float(optimal_shift_i))
+        focal_i: float | None = None if focal_np is None else float(focal_np[batch_index])
+        optimal_shift_i: float
+        optimal_focal_i: float
+        optimal_shift_i, optimal_focal_i = _solve_focal_shift(uv_lr_i_np, points_lr_i_np, focal_i)
+        optimal_focals.append(optimal_focal_i)
+        optimal_shifts.append(optimal_shift_i)
     optimal_shift: Float[Tensor, "*batch"] = torch.tensor(
         optimal_shifts,
         device=points.device,
         dtype=points.dtype,
     ).reshape(original_shape[:-3])
-    optimal_focal: Float[Tensor, "*batch"] = torch.tensor(
-        optimal_focals,
-        device=points.device,
-        dtype=points.dtype,
-    ).reshape(original_shape[:-3])
+
+    optimal_focal: Float[Tensor, "*batch"]
+    if focal_b is None:
+        optimal_focal = torch.tensor(optimal_focals, device=points.device, dtype=points.dtype).reshape(original_shape[:-3])
+    else:
+        optimal_focal = focal_b.reshape(original_shape[:-3])
 
     return optimal_focal, optimal_shift
 

@@ -10,6 +10,7 @@ from torch import Tensor, nn
 
 from monopriors.third_party.moge.model._inference import (
     CameraRecovery,
+    FieldOfView,
     InferenceInput,
     InferenceOutput,
     MaskedGeometry,
@@ -548,6 +549,7 @@ class MoGeModel(nn.Module):
         resolution_level: int = 9,
         force_projection: bool = True,
         apply_mask: bool = True,
+        fov_x: FieldOfView = None,
         use_fp16: bool = True,
         output_heads: Collection[OutputHead] | None = None,
     ) -> InferenceOutput:
@@ -559,6 +561,7 @@ class MoGeModel(nn.Module):
             resolution_level: Detail level from 0 through 9 used when ``num_tokens`` is absent.
             force_projection: Whether to reproject depth into a pinhole-consistent point map.
             apply_mask: Whether to mask invalid geometry and normals.
+            fov_x: Optional horizontal field of view in degrees, scalar or batch-shaped.
             use_fp16: Whether to use float16 mixed precision for the network forward pass.
             output_heads: Optional network heads to compute. ``None`` preserves the full default output.
 
@@ -596,7 +599,8 @@ class MoGeModel(nn.Module):
                 camera: CameraRecovery = recover_shift_and_intrinsics(
                     points_bhw3,
                     mask_binary_bhw,
-                        aspect_ratio=inference_input.aspect_ratio,
+                    fov_x=fov_x,
+                    aspect_ratio=inference_input.aspect_ratio,
                 )
                 intrinsics_b33 = camera.intrinsics_b33
                 points_bhw3[..., 2] += camera.shift_b[..., None, None]

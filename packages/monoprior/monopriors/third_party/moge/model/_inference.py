@@ -12,6 +12,7 @@ from monopriors.third_party.moge.utils.geometry_torch import intrinsics_from_foc
 
 TensorValue: TypeAlias = Float[Tensor, "*shape"] | Bool[Tensor, "*shape"]
 InferenceOutput: TypeAlias = dict[str, TensorValue]
+FieldOfView: TypeAlias = Number | Float[Tensor, ""] | Float[Tensor, "b"] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +125,7 @@ def recover_shift_and_intrinsics(
     points_bhw3: Float[Tensor, "b h w 3"],
     mask_bhw: Bool[Tensor, "b h w"] | None,
     *,
+    fov_x: FieldOfView,
     aspect_ratio: float,
 ) -> CameraRecovery:
     """Recover the point-map Z shift and normalized camera intrinsics.
@@ -131,14 +133,27 @@ def recover_shift_and_intrinsics(
     Args:
         points_bhw3: Affine point map as a float tensor shaped ``b h w 3``.
         mask_bhw: Optional validity mask as a bool tensor shaped ``b h w``.
+        fov_x: Optional horizontal field of view in degrees, scalar or batch-shaped.
         aspect_ratio: Image width divided by height.
 
     Returns:
         Recovered per-image shift and normalized intrinsics.
     """
+    if isinstance(fov_x, Tensor):
+        fov_x = fov_x.float()
     focal_b: Float[Tensor, "b"]
     shift_b: Float[Tensor, "b"]
-    focal_b, shift_b = recover_focal_shift(points_bhw3, mask_bhw)
+    if fov_x is None:
+        focal_b, shift_b = recover_focal_shift(points_bhw3, mask_bhw)
+    else:
+        focal_b = (
+            aspect_ratio
+            / (1 + aspect_ratio**2) ** 0.5
+            / torch.tan(torch.deg2rad(torch.as_tensor(fov_x, device=points_bhw3.device, dtype=points_bhw3.dtype) / 2))
+        )
+        if focal_b.ndim == 0:
+            focal_b = focal_b[None].expand(points_bhw3.shape[0])
+        _, shift_b = recover_focal_shift(points_bhw3, mask_bhw, focal=focal_b)
     fx_b: Float[Tensor, "b"] = focal_b / 2 * (1 + aspect_ratio**2) ** 0.5 / aspect_ratio
     fy_b: Float[Tensor, "b"] = focal_b / 2 * (1 + aspect_ratio**2) ** 0.5
     center_x: Float[Tensor, ""] = torch.tensor(0.5, device=points_bhw3.device, dtype=points_bhw3.dtype)
