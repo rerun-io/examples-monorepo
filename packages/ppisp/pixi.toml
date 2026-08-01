@@ -1,0 +1,6 @@
+[package]
+name = "ppisp"
+version = "1.2.1"
+
+[package.build]
+backend = { name = "pixi-build-rattler-build", version = "*" }

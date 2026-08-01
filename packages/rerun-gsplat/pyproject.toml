@@ -1,0 +1,42 @@
+[project]
+name = "rerun-gsplat"
+version = "0.1.0"
+authors = [{name = "Pablo Vela", email = "pablovela5620@gmail.com"}]
+requires-python = ">=3.12"
+dependencies = [
+    # cuda feature (conda): pytorch-gpu, torchvision, cuda toolchain
+    # feature deps (conda): numpy, jaxtyping, av, opencv, trimesh, pillow,
+    #                       imagecodecs, torchmetrics
+    # feature deps (pypi): rerun-sdk[datafusion,dataloader]==0.36 prerelease,
+    #                      gsplat, plyfile
+    "tyro",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["rerun_gsplat"]
+
+[tool.ruff]
+line-length = 150
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+ignore = [
+    "E501",   # Line too long
+    "F722",   # jaxtyping forward annotation false positive
+    "F821",   # jaxtyping forward annotation false positive
+    "UP037",  # Remove quotes false positive with jaxtyping
+    "UP040",  # Beartype requires TypeAlias, not PEP 695 type
+]
+
+[tool.vulture]
+paths = ["rerun_gsplat", "tests", "tools"]
+exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*"]
+sort_by_size = true
+min_confidence = 60
+# rr_config: RerunTyroConfig field consumed by tyro/__post_init__ side effects
+# rr_config: tyro-consumed config field; pytestmark: read by pytest from the module namespace.
+ignore_names = ["rr_config", "pytestmark"]

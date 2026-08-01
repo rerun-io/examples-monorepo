@@ -632,6 +632,69 @@ env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
 description = "Run PromptDA over raw ARKitScenes data (torchcodec .mov decode) and register the promptda_raw layer (needs arkitscenes-download-serve running)"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# rerun-gsplat
+# ═══════════════════════════════════════════════════════════════════════════
+# gsplat 3DGS training fed by the Rerun PyTorch dataloader over the registered
+# ARKitScenes catalog, logging the 0.36 GaussianSplats3D archetype live.
+# Does NOT compose `common` (which pins rerun-sdk 0.35.0) and does NOT compose
+# `cuda`: gsplat comes prebuilt from conda-forge (py312/cuda13/pytorch-2.12
+# build exists), so no nvcc/source-build — and skipping `cuda` keeps
+# tensorrt/onnxruntime out, whose per-dep indexes clash with this feature's
+# find-links during resolution. linux-64 only for now (aarch64 deferred).
+[feature.rerun-gsplat]
+platforms = ["linux-64"]
+
+[feature.rerun-gsplat.system-requirements]
+cuda = "13.0"
+
+[feature.rerun-gsplat.dependencies]
+python = "3.12.*"
+# cuda13 torch, same pins as the shared `cuda` feature (see there).
+pytorch-gpu = ">=2.12,<2.13"
+torchvision = "*"
+cuda-version = "13.0.*"
+gsplat = "==1.5.3"
+numpy = "*"
+jaxtyping = "<0.3"
+typing_extensions = ">=4.1.0,<4.13.0"
+av = ">=18"
+py-opencv = "*"
+tyro = ">=0.9.1,<0.10"
+pyserde = ">=0.31.2,<0.32"
+# arkitscenes_download.ingest imports these at package load.
+trimesh = "*"
+pillow = "*"
+imagecodecs = ">=2024.9.22"
+scipy = "*"
+rich = "*"
+# SSIM term of the photometric loss.
+torchmetrics = "*"
+# Photometric compensation (nv-tlabs PPISP): pixi-build workspace package —
+# recipe-only dir building the upstream tag from git (see packages/ppisp/).
+ppisp = { path = "packages/ppisp" }
+
+[feature.rerun-gsplat.pypi-dependencies]
+rerun-gsplat = { path = "packages/rerun-gsplat", editable = true }
+arkitscenes-download = { path = "packages/arkitscenes-download", editable = true }
+simplecv = { path = "packages/simplecv", editable = true }
+rerun-sdk = { version = "==0.36.0a1+dev", extras = ["datafusion", "dataloader"] }
+
+[feature.rerun-gsplat.pypi-options]
+# Unreleased Rerun: per-commit wheels are keyed by the PRIVATE rerun-io/reality
+# sha (public rerun-io/rerun mirror shas 404 since CI moved, ~2026-03).
+# 3485a1f = "Spherical harmonics for gaussian splats" (mirror 4f50053,
+# 2026-07-30). Replace with the public 0.36 release when it ships.
+# Feature-level pypi-options REPLACE the default index (that's what broke the
+# first solves: tensorrt/datafusion "not found"), so restate index-url — same
+# pattern as `rerun-prerelease`.
+find-links = [{ url = "https://build.rerun.io/commit/3485a1f/wheels/" }]
+index-url = "https://pypi.org/simple"
+prerelease-mode = "allow"
+
+[feature.rerun-gsplat.activation.env]
+PACKAGE_DIR = "packages/rerun-gsplat"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # wilor-nano
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.wilor-nano.dependencies]
@@ -2535,6 +2598,13 @@ mast3r-slam-dev = { features = [
     "dev",
 ], solve-group = "mast3r-slam", no-default-feature = true }
 # mast3r-slam-mojo-build env removed — mojo compiler available in mast3r-slam directly
+rerun-gsplat = { features = [
+    "rerun-gsplat",
+], solve-group = "rerun-gsplat", no-default-feature = true }
+rerun-gsplat-dev = { features = [
+    "rerun-gsplat",
+    "dev",
+], solve-group = "rerun-gsplat", no-default-feature = true }
 gsplat-rust-renderer = { features = [
     "gsplat-rust-renderer",
 ], solve-group = "gsplat-rust-renderer", no-default-feature = true }

@@ -1,0 +1,47 @@
+# rattler-build recipe for nv-tlabs PPISP: learned photometric compensation for
+# radiance-field training (per-frame exposure + color homography, per-camera
+# vignetting + CRF), applied to the rendered image before the photometric loss.
+# A torch CUDA extension with no PyPI release, so it builds from the upstream
+# tag here (same pattern as the former lietorch package).
+package:
+  name: ppisp
+  version: "1.2.1"
+
+source:
+  git: https://github.com/nv-tlabs/ppisp.git
+  rev: df33809f7b3b20ac06de088dfc871b144b8fb54d # tag v1.2.1
+
+build:
+  number: 0
+  skip:
+    - not linux-64
+  script:
+    # setup.py compiles only for TORCH_CUDA_ARCH_LIST > detected GPU > a
+    # fallback list that OMITS Blackwell (sm_120) — so detect explicitly and
+    # allow an override, like lietorch did.
+    - export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d ' ')}"
+    - python -m pip install . --no-deps --no-build-isolation -vv
+
+requirements:
+  build:
+    # cuda-compiler pins nvcc AND a compatible host GCC together. Hand-picked
+    # compilers here failed twice: bare compiler('cxx') resolves GCC 16 (above
+    # CUDA 13's supported max) and cuda-nvcc in host drags in an unpinned GCC
+    # 15.3 libstdc++ whose type_traits nvcc cannot parse.
+    - cuda-compiler
+    - cuda-version 13.0.*
+  host:
+    - python 3.12.*
+    - pip
+    - setuptools
+    - wheel
+    - pytorch-gpu >=2.12,<2.13
+    - cuda-version 13.0.*
+    - cuda-cudart-dev
+    - cuda-crt
+  run:
+    - python 3.12.*
+    - pytorch-gpu >=2.12,<2.13
+    - numpy
+    # ppisp/report.py imports matplotlib at module load.
+    - matplotlib-base
