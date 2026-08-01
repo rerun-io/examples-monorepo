@@ -73,9 +73,9 @@ torchvision = "*"
 [feature.common.pypi-dependencies]
 # Keep catalog queries ambient without pulling the PyTorch dataloader stack
 # into common environments that otherwise have no torch dependency.
-rerun-sdk = { version = "==0.34.1", extras = ["datafusion"] }
+rerun-sdk = { version = "==0.35.0", extras = ["datafusion"] }
 gradio = "==6.13.0"
-gradio-rerun = "==0.34.1"
+gradio-rerun = "==0.35.0"
 simplecv = { path = "packages/simplecv", editable = true }
 
 # ─── catalog common feature (Rerun catalog prerelease lane) ────────────────
@@ -115,7 +115,7 @@ simplecv = { path = "packages/simplecv", editable = true }
 platforms = ["linux-64", "linux-aarch64"]
 
 [feature.rerun-prerelease.pypi-dependencies]
-rerun-sdk = { version = "==0.34.1", extras = [
+rerun-sdk = { version = "==0.35.0", extras = [
     "datafusion",
     "dataloader",
 ] }
@@ -635,7 +635,7 @@ ffmpeg = { version = ">=8.1", build-number = ">=902" }
 
 [feature.prompt-da-catalog.pypi-dependencies]
 arkitscenes-download = { path = "packages/arkitscenes-download", editable = true }
-rerun-sdk = { version = "==0.34.1", extras = ["datafusion", "dataloader"] }
+rerun-sdk = { version = "==0.35.0", extras = ["datafusion", "dataloader"] }
 
 [feature.prompt-da-catalog.tasks.prompt-da-arkitscenes]
 cmd = "python tools/prompt_da_arkitscenes.py"
@@ -832,7 +832,7 @@ scipy = "*"
 [feature.mv-api-catalog-register-mac.pypi-dependencies]
 tyro = ">=0.9.1,<0.10"
 simplecv = { path = "packages/simplecv", editable = true }
-rerun-sdk = { version = "==0.34.1", extras = ["datafusion"] }
+rerun-sdk = { version = "==0.35.0", extras = ["datafusion"] }
 
 [feature.mv-api-catalog-register-mac.pypi-options]
 index-url = "https://pypi.org/simple"
@@ -1653,7 +1653,8 @@ platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 
 [feature.gsplat-rust-renderer.dependencies]
 python = "3.12.*"
-rust = "1.93.*"
+# rerun 0.35 crates require rustc >= 1.95
+rust = "1.97.*"
 clang = "*"
 cmake = "*"
 pkg-config = "*"
@@ -1671,10 +1672,8 @@ pytorch-cpu = ">=2.8.0"
 torchvision = "*"
 
 [feature.gsplat-rust-renderer.target.linux-64.dependencies]
-# libudev (devel): was needed by the old local-rerun-checkout viewer, whose
-# re_viewer pulled re_gamepad/gilrs (gilrs links libudev). The shipped build now
-# uses published Rerun 0.33, which does not pull gilrs — currently unused, kept
-# as a harmless leaf to avoid a workspace re-solve; drop when the lock is next regenerated.
+# libudev (devel): re_viewer pulls re_gamepad/gilrs, and gilrs links libudev
+# via pkg-config at build time.
 libudev = "257.*"
 libxkbcommon = "*"
 wayland = "*"
@@ -1702,7 +1701,7 @@ xorg-libxrandr = "*"
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
 lpips = ">=0.1.4,<1"
 plyfile = ">=1.1,<2"
-rerun-sdk = "==0.34.1"
+rerun-sdk = "==0.35.0"
 simplecv = { path = "packages/simplecv", editable = true }
 
 [feature.gsplat-rust-renderer.activation.env]
@@ -1854,7 +1853,7 @@ description = "Train Lego with Brush as a pure trainer and export PLY every 50 i
 cmd = "zsh -c 'rm -rf data/brush-runs/lego && mkdir -p data/brush-runs/lego || exit 1; (RUST_LOG=brush_cli=info,brush_process::train_stream=info data/tools/brush-v0.3.0-metrics/brush_app data/nerfbaselines/data/lego --total-steps 7000 --export-every 50 --export-path data/brush-runs/lego --eval-every 500 --eval-save-to-disk > data/brush-runs/lego/brush.log 2>&1; trainer_status=$?; echo $trainer_status > data/brush-runs/lego/trainer.exit; exit $trainer_status) & trainer_pid=$!; trap \"kill $trainer_pid 2>/dev/null || true\" EXIT; python tools/visualize_brush_training.py --rr-config.application-id brush-training-replay --rr-config.save data/brush-runs/lego/training.rrd --rr-config.headless --scene-dir data/nerfbaselines/data/lego --export-dir data/brush-runs/lego --brush-log data/brush-runs/lego/brush.log --trainer-done-file data/brush-runs/lego/trainer.exit --total-iters 7000 --step-stride 50 --snapshot-stride 20 --sh-mode final --spin-speed 0.2 --eval-views-logged 4 --delete-processed-plys --delete-processed-eval-dirs; replay_status=$?; if test $replay_status -ne 0; then kill $trainer_pid 2>/dev/null || true; wait $trainer_pid 2>/dev/null || true; exit $replay_status; fi; wait $trainer_pid; trainer_status=$?; test $trainer_status -eq 0 && grep -qx 0 data/brush-runs/lego/trainer.exit'"
 depends-on = ["_gsplat-rust-renderer-build-brush-metrics-mac", "_gsplat-rust-renderer-download-nerfbaselines-data-lego"]
 cwd = "packages/gsplat-rust-renderer"
-description = "Train Lego for 7k steps while Rerun 0.34.1 replays Brush eval pairs, metrics, cameras, and eight retained snapshots"
+description = "Train Lego for 7k steps while Rerun 0.35.0 replays Brush eval pairs, metrics, cameras, and eight retained snapshots"
 
 [feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-build-viewer]
 cmd = "cargo build --release --bin gsplat-rust-renderer"
@@ -2157,6 +2156,8 @@ platforms = ["linux-64"]
 
 [feature.mamma.dependencies]
 python = "3.12.*"
+# The MAMMA MPI download server only talks to wget (rejects python TLS clients).
+wget = "*"
 onnx = "*"
 onnxscript = "*"
 einops = ">=0.8.0,<0.9"
@@ -2199,6 +2200,10 @@ cmd = "test -e data/assembly101-720-sample || hf download pablovela5620/Assembly
 cwd = "packages/mamma"
 outputs = ["packages/mamma/data/assembly101-720-sample"]
 description = "Download the Assembly101 720p sample dataset"
+
+[feature.mamma.tasks.mamma-download-dataset]
+cmd = "python tools/download_dataset.py"
+cwd = "packages/mamma"
 
 [feature.mamma.tasks.mamma-demo-crossing-arms]
 cmd = "python tools/demo_crossing_arms.py --tracker.expected-subjects 1"
@@ -2264,9 +2269,9 @@ description = "Step 3: register the 42 RRDs into the mamma_iphones catalog (base
 
 
 # ─── arkitscenes-download (ARKitScenes → layered Rerun recordings) ──────────
-# Rides the catalog lane (catalog-common + rerun-prerelease) for the
-# datafusion/dataloader extras that registration needs. linux-64 only: the
-# video transcode prefers av1_nvenc (NVENC) with a libsvtav1 CPU fallback.
+# Composes `common`: registration only needs the datafusion extra, which
+# common's rerun-sdk carries. linux-64 only: the video transcode prefers
+# av1_nvenc (NVENC) with a libsvtav1 CPU fallback.
 [feature.arkitscenes-download]
 platforms = ["linux-64"]
 
@@ -2282,9 +2287,13 @@ rich = "*"
 [feature.arkitscenes-download.pypi-dependencies]
 arkitscenes-download = { path = "packages/arkitscenes-download", editable = true }
 tyro = ">=0.9,<1"
+modal = ">=1.0"
 
 [feature.arkitscenes-download.activation.env]
 PACKAGE_DIR = "packages/arkitscenes-download"
+# Modal's decorated-function stubs (ParamSpec) and the container-only boto3
+# import are unavoidable false positives; baseline them.
+PYREFLY_EXTRA_ARGS = "--baseline pyrefly-baseline.json"
 
 [feature.arkitscenes-download.tasks.arkitscenes-download-sample]
 cmd = "python tools/apps/download.py --download-dir data --num-random 5 --seed 42 --no-include-point-clouds --assets mov annotation mesh lowres_wide.traj confidence lowres_depth lowres_wide_intrinsics ultrawide_intrinsics highres_depth"
@@ -2297,13 +2306,10 @@ cwd = "packages/arkitscenes-download"
 depends-on = ["arkitscenes-download-sample"]
 description = "Ingest every downloaded sequence into layered .rrd files under data/rrd/"
 
-[feature.arkitscenes-download.tasks.arkitscenes-download-pipeline]
-cmd = "python tools/apps/pipeline.py --chunk-size 5 --destination data/published"
-cwd = "packages/arkitscenes-download"
-description = "Resumable download→ingest→verify→publish pipeline (local destination; see --help for ssh targets)"
-
 [feature.arkitscenes-download.tasks.arkitscenes-download-serve]
-cmd = "rerun server --port 51235"
+# Rerun keeps one handle open per registered RRD. One full corpus has
+# 5015 segments * 7 layers = 35105 RRDs, so 65536 cannot hold two corpora.
+cmd = "bash -c 'ulimit -n 524288 && exec rerun server --port 51235'"
 cwd = "packages/arkitscenes-download"
 description = "Serve a Rerun catalog for registered ARKitScenes recordings"
 
@@ -2320,13 +2326,11 @@ description = "Open the native Rerun viewer on the local catalog"
 
 [environments]
 arkitscenes-download = { features = [
-    "catalog-common",
-    "rerun-prerelease",
+    "common",
     "arkitscenes-download",
 ], solve-group = "arkitscenes-download", no-default-feature = true }
 arkitscenes-download-dev = { features = [
-    "catalog-common",
-    "rerun-prerelease",
+    "common",
     "arkitscenes-download",
     "dev",
 ], solve-group = "arkitscenes-download", no-default-feature = true }
@@ -2347,7 +2351,7 @@ simplecv-dev = { features = [
     "dev",
 ], solve-group = "simplecv", no-default-feature = true }
 # 2-tier ExoEgo Forge catalog: like `simplecv` but on the catalog Rerun lane (rerun-prerelease,
-# rerun-sdk==0.34.1 with the datafusion/dataloader extras). Uses `catalog-common`
+# rerun-sdk==0.35.0 with the datafusion/dataloader extras). Uses `catalog-common`
 # (the rerun-pin-free mirror) so the lane's pin wins.
 simplecv-catalog = { features = [
     "catalog-common",

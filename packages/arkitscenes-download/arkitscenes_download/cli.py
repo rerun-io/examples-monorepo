@@ -47,7 +47,7 @@ class Config:
     keep_zip: bool = False
     """Keep the downloaded ``.zip`` archives after extraction."""
     prefetch: bool = True
-    """HEAD-request asset sizes up front for an accurate overall byte total. Disable when a wrapper (e.g. the pipeline) calls this once per sequence — the extra round-trips buy nothing there."""
+    """HEAD-request asset sizes up front for an accurate overall byte total. Disable when a wrapper (e.g. the Modal worker) calls this once per sequence — the extra round-trips buy nothing there."""
 
 
 def _select_video_ids(config: Config, metadata: dict[str, VideoMetadata]) -> list[str]:

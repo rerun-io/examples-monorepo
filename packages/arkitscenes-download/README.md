@@ -24,6 +24,20 @@ pixi run -e arkitscenes-download arkitscenes-download-view
 Ingestion wants an NVIDIA GPU (`av1_nvenc` transcodes the video track); without
 one it falls back to CPU SVT-AV1, just slower.
 
+### Registering multiple datasets
+
+The OSS Rerun server keeps one file descriptor open for every registered `.rrd`
+so it can load chunks on demand. A 5,015-segment ARKitScenes dataset with seven
+layers therefore uses 35,105 descriptors; two such datasets need 70,210. With a
+65,536 descriptor limit, the second registration fails during `gt` only because
+`gt` is the seventh layer—not because that layer is faulty.
+
+The `arkitscenes-download-serve` task raises the server limit to 524,288. Restart
+an already-running server with that task before registering multiple datasets;
+the limit is inherited when the server starts. This is a capacity workaround
+for the current Rerun server, which does not yet cap open files with an
+open-on-demand or LRU policy.
+
 ## What one sequence becomes
 
 Seven small `.rrd` files sharing one `recording_id`, so the catalog stacks them
@@ -57,23 +71,33 @@ the published assets drop, decoded here via NSKeyedArchiver parsing:
 Orientation is *measured* from gravity (the metadata `sky_direction` label is
 wrong for ~60% of sequences) and baked into pixels, intrinsics, and poses.
 
-## Scaling up
+## Specific sequences
 
-The chunked pipeline downloads → ingests → verifies → ships → registers →
-cleans staging, resumably (kill it anywhere; rerun continues from
-`data/pipeline-state/`):
+The quickstart downloads a random sample; for explicit sequences pass
+`--video-ids` to the download tool (the other steps are unchanged — ingest
+skips already-converted sequences):
 
 ```bash
-# everything, published to a local directory
-pixi run -e arkitscenes-download arkitscenes-download-pipeline
-
-# or to a remote destination over ssh (transport + sha256 verification per scheme)
-python tools/apps/pipeline.py --destination user@host:/srv/arkitscenes/rrd --read-mount /mnt/arkitscenes/rrd
+python tools/apps/download.py --download-dir data --video-ids 40776203 40776204 \
+  --no-include-point-clouds --assets mov annotation mesh lowres_wide.traj \
+  confidence lowres_depth lowres_wide_intrinsics ultrawide_intrinsics highres_depth
+python tools/apps/ingest_batch.py --workers 2
+python tools/apps/register_catalog.py --rrd-dir data/rrd
 ```
 
-Failures record to `failed.txt` and never block; `--retry-failed` re-queues them
-after transient outages. Full design and measured performance history:
-[`docs/architecture.md`](docs/architecture.md).
+## Scaling up
+
+The full corpus (5,047 sequences) is a Modal job, not a local one — 32 GPU
+workers into a staging volume, one batch uploader to HuggingFace (see
+`arkitscenes_download/modal_jobs/` and
+[`docs/full-run-runbook.md`](docs/full-run-runbook.md)):
+
+```bash
+pixi run -e arkitscenes-download modal run --detach \
+  -m arkitscenes_download.modal_jobs.convert_sequences::full_run --encoder gpu --confirm
+```
+
+Full per-sequence design: [`docs/architecture.md`](docs/architecture.md).
 
 ## Dataset notes
 

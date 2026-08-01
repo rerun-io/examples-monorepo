@@ -92,6 +92,14 @@ expected across SimpleCV tools. For a realtime tool that needs the live viewer
 **and** a `.rrd` at once, set `rr_config.live` together with `--rr-config.save`:
 `RerunTyroConfig` then fans out to both via `set_sinks` (the `live`/`port` fields).
 
+### OSS catalog file-descriptor limits
+
+Rerun 0.34.1 keeps one descriptor open per registered `.rrd`. One ARKitScenes
+dataset uses 5,015 × 7 = 35,105, so two exceed 65,536 during the second `gt`
+layer. `arkitscenes-download-serve` uses `ulimit -n 524288`; restart the server
+to inherit it. This is a capacity workaround—the upstream fix is open-on-demand
+files or an LRU descriptor pool.
+
 ## Testing Rerun builds
 
 **One Rerun version repo-wide — Rust follows Python.** The PyPI `rerun-sdk` pin
@@ -101,7 +109,7 @@ viewer silently loses protocol/tooling parity (e.g. no viewer-control MCP
 before 0.34). To bump: Python first (rerun-sdk + gradio-rerun together), then
 the Rust pins (matching that release's egui family), then re-lock pixi and cargo.
 
-The whole workspace runs **`rerun-sdk == 0.34.1`** (and `gradio-rerun == 0.34.1`) from PyPI:
+The whole workspace runs **`rerun-sdk == 0.35.0`** (and `gradio-rerun == 0.35.0`) from PyPI:
 `common` carries the pin with the `datafusion` extra. The `dataloader` extra stays scoped to
 catalog-side features: `rerun-prerelease` for the shared catalog lanes (composed into
 `no-default-feature` envs beside `catalog-common`, e.g. `simplecv-catalog`, `mv-api-catalog`)

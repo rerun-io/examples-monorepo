@@ -4,7 +4,7 @@ Adapted from the official Apple downloader
 (https://github.com/apple/ARKitScenes/blob/main/download_data.py) and the
 Rerun example port. Kept deliberately light at import time (CSV via `csv`,
 extraction via `zipfile`, transfers shelled out to `curl`, rich for output,
-and only import-cheap simplecv modules) because the pipeline spawns this
+and only import-cheap simplecv modules) because batch wrappers spawn this
 once per sequence — keep numpy/torch-weight imports out of this path.
 """
 

@@ -4,6 +4,8 @@ End-to-end architecture of this repo's pipeline: **download** raw ARKitScenes se
 
 All diagrams are Mermaid; they render on GitHub and in Obsidian.
 
+For running this at **corpus scale** (Modal fan-out, HF/S3 destinations, rate-limit lessons, registration at 5k segments), see [full-run-runbook.md](full-run-runbook.md).
+
 ---
 
 ## 1. Bird's-eye view
@@ -14,7 +16,7 @@ flowchart LR
         CDN["Apple CDN<br>docs-assets.developer.apple.com<br>/ml-research/datasets/arkitscenes/v1"]
         META["raw/metadata.csv<br>5,071 sequences<br>visit_id · fold · sky_direction*"]
         ASSETS["per-sequence raw assets<br>mov · traj · depth PNGs · intrinsics<br>annotation json · mesh ply"]
-        LASER["optional per-visit laser scans<br>(sample/pipeline disable them;<br>never ingested: no published FARO→ARKit alignment)"]
+        LASER["optional per-visit laser scans<br>(sample task and Modal workers disable them;<br>never ingested: no published FARO→ARKit alignment)"]
         CDN --> META
         CDN -->|"curl -C - --retry, .part → rename<br>zips: extract to staging dir → atomic rename"| ASSETS
         CDN --> LASER
@@ -168,7 +170,7 @@ flowchart TD
     ROOT["/ world<br>ViewCoordinates RIGHT_HAND_Z_UP"]
     ROOT --> GT["world/gt"]
     GT --> MESH["gt/mesh — Mesh3D (Front-face)"]
-    GT --> BOXES["gt/boxes/box-&lt;uid&gt;-&lt;label&gt;<br>Boxes3D + InstancePoses3D<br>(translations + mat3x3 together!)"]
+    GT --> BOXES["gt/boxes/box_&lt;slot&gt;  (shared slot paths;<br>Apple's uid is an AnyValues component)<br>Boxes3D + InstancePoses3D<br>(translations + mat3x3 together!)"]
     ROOT --> RIG["world/rig_00 — the iPad<br>world_T_rig(t) @ 60 Hz (stream-4 poses)<br>AnyValues: schema_version, reference, num_cameras"]
     RIG --> CAM0["rig_00/cam_00 — wide (reference)<br>identity rig_T_cam"]
     CAM0 --> PIN0["cam_00/pinhole<br>Pinhole columns (baked K, 60 Hz)"]
@@ -216,7 +218,7 @@ sequenceDiagram
         end
     end
     CLI->>FS: rerun rrd verify all 7 layer files together
-    CAT->>SRV: register each layer with shared recording id<br>(idempotent REPLACE per segment layer, --recreate opt-in)
+    CAT->>SRV: register each layer with shared recording id<br>(idempotent SKIP per segment layer, --recreate opt-in)
     CAT->>SRV: register generic portrait/landscape .rbl defaults<br>(base's embedded sequence blueprint wins on open)
     V->>SRV: rerun+http://127.0.0.1:51235<br>segment table → open → stream VideoStream samples
 ```
@@ -236,16 +238,17 @@ sequenceDiagram
 | IMU units | Accel arrives in g; gyro arrives in **deg/s** (verified ratio 57.48 vs attitude derivative). | `imu.py` |
 | Video | Logged as AV1 (`av1_nvenc -cq 30`, quality-matched to source-grade HEVC at SSIM 0.984): decoded natively by dav1d, no pts/dts split so bidirectional prediction is free, packets logged raw. ~23s wide-track encode on an RTX 5090. | `mov.py` |
 
-### Known rerun 0.34.1 bugs found by this project (repros in /tmp/arkit_spike/)
+### Known rerun 0.34.1 bugs found by this project
 
 1. `VideoStream` cannot decode B-frame HEVC (documented TODO #10090) — "Error constructing the frame RPS".
 2. Large B-frame HEVC `AssetVideo` inside a full recording deadlocks the viewer's ffmpeg feeder (spinner forever, zero errors).
 3. `Boxes3D(centers=…)` + separate `InstancePoses3D(mat3x3=…)` rotates boxes about the entity origin instead of in place (the upstream `arkit_scenes` example has this bug, plus the missing `normalizedAxes` transpose).
 4. `Spatial2DView` box reprojection artifacts were entirely downstream of (3) — retracted after the composition fix.
+5. OSS-server registration cost grows ~cubically with distinct entity-path count (per-file cumulative schema merge) — see [full-run-runbook.md](full-run-runbook.md) §8 and the `rerun-schema-width-register-repro` repo.
 
 ### Accepted tradeoffs
 
 - All RGB in the `.rrd` is a single-generation near-lossless AV1 transcode (NVENC CQ30, SSIM ≈0.984); the original `.mov` on disk stays the master. Encoder provenance is recorded; bit-exact determinism is not promised.
 - Portrait/landscape mix across sequences is correct (aspect follows device grip).
 - Laser point clouds are optionally downloadable but excluded from the sample task and full pipeline; they are never ingested (no published FARO→ARKit alignment).
-- The batch runner executes sequence subprocesses concurrently. The full pipeline overlaps downloading, ingestion, and shipping with shared Rich progress; per-sequence memory remains bounded.
+- The batch runner executes sequence subprocesses concurrently with bounded per-sequence memory; corpus-scale orchestration lives in `modal_jobs/`, not locally.
