@@ -14,7 +14,7 @@ from .base_relative_depth import BaseRelativePredictor, RelativeDepthPrediction
 
 
 class DepthDict(TypedDict):
-    predicted_depth: Float32[torch.Tensor, "1 h w"]
+    predicted_depth: Float32[torch.Tensor, "h w"]
     depth: Image.Image
 
 
@@ -29,7 +29,7 @@ def _parse_depth_pipeline_output(output: object) -> DepthDict:
         raise TypeError("DepthAnything pipeline output missing tensor 'predicted_depth'.")
     if not isinstance(depth_raw, Image.Image):
         raise TypeError("DepthAnything pipeline output missing PIL 'depth'.")
-    predicted_depth: Float32[torch.Tensor, "1 h w"] = predicted_depth_raw
+    predicted_depth: Float32[torch.Tensor, "h w"] = predicted_depth_raw
     depth: Image.Image = depth_raw
     return {"predicted_depth": predicted_depth, "depth": depth}
 
@@ -62,7 +62,7 @@ class DepthAnythingV1Predictor(BaseRelativePredictor[torch.nn.Module]):
         # depth is actually disparity here, interpolate to the original size
         disparity_bchw: Float32[torch.Tensor, "1 1 h w"] = (
             torch.nn.functional.interpolate(
-                rearrange(depth_dict["predicted_depth"], "1 h w -> 1 1 h w"),
+                rearrange(depth_dict["predicted_depth"], "h w -> 1 1 h w"),
                 (h, w),
                 mode="bilinear",
             )
@@ -85,12 +85,7 @@ class DepthAnythingV1Predictor(BaseRelativePredictor[torch.nn.Module]):
         return relative_prediction
 
     def set_model_device(self, device: Literal["cpu", "cuda"] = "cuda") -> None:
-        # Rebuilds the pipeline; drop both old references first so the previous
-        # model's weights are released before the new one loads.
-        del self.pipe, self.model
-        self.pipe = pipeline(
-            task="depth-estimation",
-            model="LiheYoung/depth-anything-small-hf",
-            device=device,
-        )
-        self.model = self.pipe.model
+        # Move the one existing model in place — never rebuild the pipeline,
+        # so no stale copy of the weights can outlive a device switch.
+        self.model.to(device)
+        self.pipe.device = torch.device(device)
