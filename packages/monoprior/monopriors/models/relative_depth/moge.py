@@ -16,7 +16,7 @@ MOGE_V1_CHECKPOINT_ID: str = "Ruicheng/moge-vitl"
 MOGE_V1_CHECKPOINT_REVISION: str = "979e84da9415762c30e6c0cf8dc0962896c793df"
 
 
-class MogeV1Predictor(BaseRelativePredictor):
+class MogeV1Predictor(BaseRelativePredictor[MoGeModel]):
     """MoGe v1 predictor producing scale-invariant (relative) depth."""
 
     def __init__(

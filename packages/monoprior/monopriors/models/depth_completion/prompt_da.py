@@ -27,7 +27,7 @@ NAME_TO_HFNAME: dict[str, str] = {
 }
 
 
-class PromptDAPredictor(BaseCompletionPredictor):
+class PromptDAPredictor(BaseCompletionPredictor[PromptDA]):
     def __init__(
         self,
         device: Literal["cpu", "cuda", "mps"],

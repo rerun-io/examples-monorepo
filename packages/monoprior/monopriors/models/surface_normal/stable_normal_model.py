@@ -1,24 +1,44 @@
-from typing import Any, Literal
+from typing import Literal, Protocol, cast, runtime_checkable
 
 import numpy as np
 import torch
 from jaxtyping import Float, UInt8
 from PIL import Image
 
+from monopriors.models._protocols import DeviceMovable
 from monopriors.models.surface_normal.base_normal_model import (
     BaseNormalPredictor,
     SurfaceNormalPrediction,
 )
 
 
-class StableNormalPredictor(BaseNormalPredictor):
+@runtime_checkable
+class StableNormalModel(DeviceMovable, Protocol):
+    """Hub-loaded StableNormal surface used by the predictor."""
+
+    def __call__(self, image: Image.Image) -> Image.Image:
+        """Predict a surface-normal image.
+
+        Args:
+            image: Input RGB image.
+
+        Returns:
+            Predicted surface-normal image.
+        """
+        ...
+
+
+class StableNormalPredictor(BaseNormalPredictor[StableNormalModel]):
     def __init__(
         self,
         device: Literal["cpu", "cuda"],
         model_type: Literal["StableNormal", "StableNormal_turbo"] = "StableNormal",
     ):
         self.device = device
-        self.model: Any = torch.hub.load("Stable-X/StableNormal", model_type, trust_repo=True, device=device)
+        self.model: StableNormalModel = cast(
+            StableNormalModel,
+            torch.hub.load("Stable-X/StableNormal", model_type, trust_repo=True, device=device),
+        )
 
     def __call__(
         self, rgb: UInt8[np.ndarray, "h w 3"], K_33: Float[np.ndarray, "3 3"] | None

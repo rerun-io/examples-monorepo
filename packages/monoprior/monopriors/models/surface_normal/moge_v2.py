@@ -20,7 +20,7 @@ MOGE_V2_NORMAL_CHECKPOINTS: dict[str, tuple[str, str]] = {
 """Mapping of encoder to Hugging Face repository and revision (all include normals)."""
 
 
-class MoGeV2NormalPredictor(BaseNormalPredictor):
+class MoGeV2NormalPredictor(BaseNormalPredictor[MoGeModel]):
     """MoGe v2 predictor producing surface normals.
 
     Requires a ``-normal`` checkpoint variant.

@@ -2,7 +2,7 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Literal, TypedDict
+from typing import Literal, TypedDict
 
 import cv2
 import numpy as np
@@ -21,7 +21,7 @@ def amp_autocast(device_type: Literal["cpu", "cuda"], dtype: torch.dtype) -> Ite
     """Context manager that wraps torch.amp.autocast with explicit enter/exit."""
 
     if device_type == "cuda":
-        autocast_cm: Any = torch.amp.autocast(device_type=device_type, dtype=dtype)
+        autocast_cm: torch.amp.autocast = torch.amp.autocast(device_type=device_type, dtype=dtype)
         autocast_cm.__enter__()
         try:
             yield None

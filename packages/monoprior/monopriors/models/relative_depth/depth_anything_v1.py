@@ -34,7 +34,7 @@ def _parse_depth_pipeline_output(output: object) -> DepthDict:
     return {"predicted_depth": predicted_depth, "depth": depth}
 
 
-class DepthAnythingV1Predictor(BaseRelativePredictor):
+class DepthAnythingV1Predictor(BaseRelativePredictor[torch.nn.Module]):
     def __init__(
         self,
         device: Literal["cpu", "cuda"],

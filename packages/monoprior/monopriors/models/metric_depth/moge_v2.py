@@ -20,7 +20,7 @@ MOGE_V2_CHECKPOINTS: dict[tuple[str, bool], tuple[str, str]] = {
 """Mapping of (encoder, with_normals) to Hugging Face repository and revision."""
 
 
-class MoGeV2MetricPredictor(BaseMetricPredictor):
+class MoGeV2MetricPredictor(BaseMetricPredictor[MoGeModel]):
     """MoGe v2 predictor producing metric-scale depth.
 
     Uses the depth-only checkpoint when available, otherwise falls back

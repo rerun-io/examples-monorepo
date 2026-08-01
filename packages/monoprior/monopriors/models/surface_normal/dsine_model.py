@@ -17,7 +17,7 @@ from monopriors.third_party.dsine.dsine_kappa import DSINE_v02_kappa
 from monopriors.third_party.dsine.utils.utils import get_intrins_from_fov, pad_input
 
 
-class DSineNormalPredictor(BaseNormalPredictor):
+class DSineNormalPredictor(BaseNormalPredictor[DSINE | DSINE_v02_kappa]):
     def __init__(
         self,
         device: Literal["cpu", "cuda"],

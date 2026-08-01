@@ -156,7 +156,7 @@ def align_depths(
     return depth_list_aligned
 
 
-class VideoDepthAnythingPredictor(BaseVideoRelativePredictor):
+class VideoDepthAnythingPredictor(BaseVideoRelativePredictor[VideoDepthAnything]):
     def __init__(
         self,
         device: Literal["cpu", "cuda"],
