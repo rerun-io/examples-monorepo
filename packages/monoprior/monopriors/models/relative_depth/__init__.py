@@ -4,7 +4,7 @@ from typing import Literal, get_args
 from .base_relative_depth import BaseRelativePredictor, RelativeDepthPrediction
 from .depth_anything_v1 import DepthAnythingV1Predictor
 from .depth_anything_v2 import DepthAnythingV2Predictor
-from .moge import MogeV1Predictor
+from .moge_v1 import MoGeV1Predictor
 from .unidepth import UniDepthRelativePredictor
 
 # Define predictor names as a list of strings
@@ -12,7 +12,7 @@ RELATIVE_PREDICTORS = Literal[
     "DepthAnythingV1Predictor",
     "DepthAnythingV2Predictor",
     "UniDepthRelativePredictor",
-    "MogeV1Predictor",
+    "MoGeV1Predictor",
 ]
 
 # Use the list to generate the __all__ list
@@ -31,7 +31,7 @@ def get_relative_predictor(
             return DepthAnythingV2Predictor
         case "DepthAnythingV1Predictor":
             return DepthAnythingV1Predictor
-        case "MogeV1Predictor":
-            return MogeV1Predictor
+        case "MoGeV1Predictor":
+            return MoGeV1Predictor
         case _:
             raise ValueError(f"Unknown predictor type: {predictor_type}")

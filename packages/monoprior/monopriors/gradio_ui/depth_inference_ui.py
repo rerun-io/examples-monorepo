@@ -29,7 +29,7 @@ except ImportError:
 
 model_load_status: str = "Models loaded and ready to use!"
 if gr.NO_RELOAD:
-    DEPTH_PREDICTOR: BaseRelativePredictor = get_relative_predictor("MogeV1Predictor")(device="cuda")
+    DEPTH_PREDICTOR: BaseRelativePredictor = get_relative_predictor("MoGeV1Predictor")(device="cuda")
 
 
 def predict_depth(rgb_hw3: UInt8[np.ndarray, "h w 3"]) -> RelativeDepthPrediction:
@@ -158,7 +158,7 @@ with gr.Blocks() as depth_inference_block:
                 model_dropdown = gr.Dropdown(
                     choices=list(get_args(RELATIVE_PREDICTORS)),
                     label="Model",
-                    value="MogeV1Predictor",
+                    value="MoGeV1Predictor",
                     interactive=True,
                 )
             with gr.Row():

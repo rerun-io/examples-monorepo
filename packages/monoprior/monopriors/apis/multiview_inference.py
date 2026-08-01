@@ -396,7 +396,7 @@ def run_inference(config: MultiviewInferenceConfig) -> None:
         static=True,
     )
 
-    predictor: BaseRelativePredictor = get_relative_predictor("MogeV1Predictor")(device="cuda")
+    predictor: BaseRelativePredictor = get_relative_predictor("MoGeV1Predictor")(device="cuda")
     intri_stack_list: list[Float32[ndarray, "3 3"]] = []
     moge_list: list[Float32[ndarray, "H W"]] = []
     mv_pred: MultiviewPred

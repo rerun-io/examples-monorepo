@@ -45,7 +45,7 @@ class CalibrationAuxiliaryCache:
             moge_predictor: BaseRelativePredictor | None = None
             if refine_depth_maps:
                 if device not in self._depth_predictors:
-                    self._depth_predictors[device] = get_relative_predictor("MogeV1Predictor")(device=device)
+                    self._depth_predictors[device] = get_relative_predictor("MoGeV1Predictor")(device=device)
                 moge_predictor = self._depth_predictors[device]
 
             return CalibrationAuxiliaryModels(

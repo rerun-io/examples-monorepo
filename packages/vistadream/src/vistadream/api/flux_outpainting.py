@@ -96,7 +96,7 @@ def main(config: FluxOutpaintingConfig) -> None:
     outpainted_image: Image.Image = flux_inpainter(rgb_hw3=np.array(input_image), mask=np.array(mask))
     rr.log(f"{pinhole_path}/image", rr.Image(outpainted_image, color_model=rr.ColorModel.RGB))
     rgb_hw3 = np.array(outpainted_image.convert("RGB"))
-    predictor: BaseRelativePredictor = get_relative_predictor("MogeV1Predictor")(device="cuda")
+    predictor: BaseRelativePredictor = get_relative_predictor("MoGeV1Predictor")(device="cuda")
     relative_pred: RelativeDepthPrediction = predictor.__call__(rgb=rgb_hw3, K_33=None)
 
     intri = Intrinsics(
