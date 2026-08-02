@@ -5,14 +5,26 @@ name = "examples-monorepo"
 # Keep Pixi's conda/PyPI name mapping explicit and local so dependency
 # overrides remain deterministic when PyPI-only CUDA wheels are selected.
 conda-pypi-map = { conda-forge = "conda-pypi-map.json" }
-# Keep both workspace platforms so target-specific selectors below remain valid.
-# The shared cuda feature spans both; heavier x86-only packages pin their own
-# feature to linux-64 (so those envs stay linux-64).
-platforms = ["linux-64", "linux-aarch64"]
+# Plain subdirs are the CPU/mac lanes. The two named entries carry the CUDA-13
+# virtual packages per platform (pixi >= 0.71 syntax, replaces the deprecated
+# [feature.cuda.system-requirements]); features opt in by referencing the name.
+# osx-arm64 is listed so common's osx target selector is valid — linux-only
+# features pin their own `platforms`, so nothing new solves for macOS.
+platforms = [
+    "linux-64",
+    "linux-aarch64",
+    "osx-arm64",
+    # CUDA-13 aarch64 index wheels ship as manylinux_2_3x (onnxruntime-gpu _2_34,
+    # tensorrt-cu13-libs/bindings _2_35). Declaring glibc 2.35 lets both resolve
+    # (the Spark runs 2.39); virtual packages only *loosen* package eligibility —
+    # every CUDA-13 host has glibc >= 2.35.
+    { name = "linux-64-cuda13", platform = "linux-64", cuda = "13.0", glibc = "2.35" },
+    { name = "linux-aarch64-cuda13", platform = "linux-aarch64", cuda = "13.0", glibc = "2.35" },
+]
 version = "0.1.0"
-# Dev machines run pixi 0.70.x. (0.71+ works as a tool, but adopting it needs a
-# rich-platforms migration — deferred — so don't expect a clean relock on 0.71 yet.)
-requires-pixi = ">=0.70"
+# Named workspace platforms are pixi >= 0.71 syntax (0.70 fails to parse them);
+# the whole fleet runs pixi 0.73.0 (since 2026-07-21), so require that floor.
+requires-pixi = ">=0.73"
 preview = ["pixi-build"]
 
 # ─── pypi-options (workspace-level) ─────────────────────────────────────────
@@ -24,11 +36,10 @@ iopath = ">=0.1.10"
 fsspec = ">=2025.3,<=2026.2.0"
 
 # ─── common feature (shared loose base deps) ───────────────────────────────
-# osx-arm64 is added beyond the workspace platforms so packages that target
-# Apple Silicon (e.g. live-rerun) can compose `common`. This is additive: every
-# existing `common` env also pulls a linux-only feature (cuda / per-package),
-# so the environment platform intersection keeps them linux-only — only envs
-# whose every feature lists osx-arm64 actually solve for macOS.
+# osx-arm64 is in the workspace platform vocabulary so packages that target
+# Apple Silicon (e.g. live-rerun) can compose `common`. An environment only
+# solves for macOS when every one of its features lists osx-arm64; existing
+# `common` envs also pull a linux-only feature and therefore stay on Linux.
 [feature.common]
 platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 
@@ -69,6 +80,12 @@ gradio-rerun = "==0.35.0"
 simplecv = { path = "packages/simplecv", editable = true }
 
 # ─── catalog common feature (Rerun catalog prerelease lane) ────────────────
+# Explicit platforms: a feature that omits `platforms` defaults to every
+# workspace platform (pixi >= 0.71), including macOS and named CUDA platforms.
+# See AGENTS.md "Platforms & lockfile".
+[feature.catalog-common]
+platforms = ["linux-64", "linux-aarch64"]
+
 [feature.catalog-common.dependencies]
 av = "*"
 py-opencv = "*"
@@ -92,6 +109,12 @@ simplecv = { path = "packages/simplecv", editable = true }
 # Catalog lane: `common`'s rerun-sdk plus the datafusion/dataloader extras. To test an
 # unreleased build, point find-links at build.rerun.io — see the root AGENTS.md
 # "Testing Rerun builds".
+# Explicit platforms: a feature that omits `platforms` defaults to every
+# workspace platform (pixi >= 0.71), including macOS and named CUDA platforms.
+# See AGENTS.md "Platforms & lockfile".
+[feature.rerun-prerelease]
+platforms = ["linux-64", "linux-aarch64"]
+
 [feature.rerun-prerelease.pypi-dependencies]
 rerun-sdk = { version = "==0.35.0", extras = [
     "datafusion",
@@ -111,17 +134,8 @@ prerelease-mode = "allow"
 # x86-only packages (dpvo, mast3r-slam, sam2, moge, …) pin their feature to
 # linux-64 and stay there.
 [feature.cuda]
-platforms = ["linux-64", "linux-aarch64"]
-
-[feature.cuda.system-requirements]
-cuda = "13.0"
-# CUDA-13 aarch64 index wheels ship as manylinux_2_3x: onnxruntime-gpu is _2_34,
-# the TensorRT aarch64 wheels (tensorrt-cu13-libs/bindings) are _2_35. Declare
-# glibc 2.35 so both resolve (the Spark runs 2.39). pixi system-requirements can't
-# be target-scoped, so this applies to both platforms — but it only *loosens*
-# package eligibility (every CUDA-13 host has glibc >= 2.35), so the existing
-# linux-64 solutions stay valid and are not re-solved.
-libc = { family = "glibc", version = "2.35" }
+# CUDA virtual packages come from the named workspace platforms above.
+platforms = ["linux-64-cuda13", "linux-aarch64-cuda13"]
 
 [feature.cuda.dependencies]
 # CUDA Build Tools
@@ -564,6 +578,12 @@ onnx = "*"
 [feature.prompt-da.activation.env]
 PACKAGE_DIR = "packages/prompt-da"
 
+# Explicit platforms: a feature that omits `platforms` defaults to every
+# workspace platform (pixi >= 0.71), including macOS and named CUDA platforms.
+# See AGENTS.md "Platforms & lockfile".
+[feature.prompt-da-demo]
+platforms = ["linux-64", "linux-aarch64"]
+
 [feature.prompt-da-demo.tasks._prompt-da-download-polycam-example]
 cmd = """
 test -e data/6G-room-example.zip || hf download pablovela5620/polycam-example-data 6G-room-example.zip --repo-type dataset --local-dir data/
@@ -634,6 +654,12 @@ description = "Run PromptDA over raw ARKitScenes data (torchcodec .mov decode) a
 # ═══════════════════════════════════════════════════════════════════════════
 # wilor-nano
 # ═══════════════════════════════════════════════════════════════════════════
+# Explicit platforms: a feature that omits `platforms` defaults to every
+# workspace platform (pixi >= 0.71), including macOS and named CUDA platforms.
+# See AGENTS.md "Platforms & lockfile".
+[feature.wilor-nano]
+platforms = ["linux-64", "linux-aarch64"]
+
 [feature.wilor-nano.dependencies]
 python = "3.12.*"
 dill = ">=0.4.0,<0.5"
@@ -689,6 +715,12 @@ description = "Compare a candidate WiLoR RRD against the checked-in reference RR
 # ═══════════════════════════════════════════════════════════════════════════
 # egoexo-forge
 # ═══════════════════════════════════════════════════════════════════════════
+# Explicit platforms: a feature that omits `platforms` defaults to every
+# workspace platform (pixi >= 0.71), including macOS and named CUDA platforms.
+# See AGENTS.md "Platforms & lockfile".
+[feature.egoexo-forge]
+platforms = ["linux-64", "linux-aarch64"]
+
 [feature.egoexo-forge.dependencies]
 python = "3.12.*"
 icecream = ">=2.1.3,<3"
@@ -708,6 +740,12 @@ rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193
 [feature.egoexo-forge.activation.env]
 PACKAGE_DIR = "packages/egoexo-forge"
 PYREFLY_TARGET = "src/egoexo_forge tools"
+
+# Explicit platforms: a feature that omits `platforms` defaults to every
+# workspace platform (pixi >= 0.71), including macOS and named CUDA platforms.
+# See AGENTS.md "Platforms & lockfile".
+[feature.egoexo-forge-demo]
+platforms = ["linux-64", "linux-aarch64"]
 
 [feature.egoexo-forge-demo.tasks.egoexo-forge-app]
 cmd = "python tools/app.py"
@@ -1372,6 +1410,12 @@ PyTurboJPEG = "*"
 PACKAGE_DIR = "packages/pyvrs-viewer"
 
 # ── Download tasks ───────────────────────────────────────────────────────
+# Explicit platforms: a feature that omits `platforms` defaults to every
+# workspace platform (pixi >= 0.71), including macOS and named CUDA platforms.
+# See AGENTS.md "Platforms & lockfile".
+[feature.pyvrs-viewer-demo]
+platforms = ["linux-64", "linux-aarch64"]
+
 [feature.pyvrs-viewer-demo.tasks._pyvrs-viewer-download-hot3d-quest-vrs]
 cmd = """
 test -f data/hot3d_quest.vrs || \
@@ -1438,6 +1482,11 @@ PYREFLY_TARGET = "."
 # depthai is a compiled module with an incomplete stub (only the 1-arg
 # getOutputQueue overload); baseline the resulting false positives.
 PYREFLY_EXTRA_ARGS = "--baseline pyrefly-baseline.json"
+
+# Keep the demo tasks available on every CPU/mac lane supported by live-rerun;
+# exclude only the named CUDA platforms, which this feature does not need.
+[feature.live-rerun-demo]
+platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 
 [feature.live-rerun-demo.tasks.live-rerun-oak]
 cmd = "python tools/apps/oak_live_rerun.py"
