@@ -124,7 +124,6 @@ def _log_results(
             rrb.Horizontal(
                 rrb.Spatial3DView(
                     origin=f"{PARENT_LOG_PATH}",
-                    contents=["+ $origin/**", f"- {PARENT_LOG_PATH}/camera/pinhole/depth"],
                 ),
                 rrb.Vertical(
                     rrb.Spatial2DView(origin=f"{PARENT_LOG_PATH}/camera/pinhole/image"),

@@ -20,7 +20,7 @@ from monopriors.rr_logging_utils import log_relative_pred
 class PredictorConfig:
     rr_config: RerunTyroConfig
     image_path: Path = Path("data/examples/single-image/room.jpg")
-    predictor_name: RELATIVE_PREDICTORS = "MogeV1Predictor"
+    predictor_name: RELATIVE_PREDICTORS = "MoGeV1Predictor"
     depth_edge_threshold: float = 0.1
 
 

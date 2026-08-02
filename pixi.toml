@@ -29,7 +29,6 @@ preview = ["pixi-build"]
 
 # ─── pypi-options (workspace-level) ─────────────────────────────────────────
 [pypi-options]
-no-build-isolation = ["moge", "gsplat", "dpvo", "sam2"]
 
 [pypi-options.dependency-overrides]
 iopath = ">=0.1.10"
@@ -429,7 +428,6 @@ natsort = ">=8.4.0,<9"
 monopriors = { path = "packages/monoprior", editable = true }
 sam3 = { path = "packages/sam3", editable = true }
 vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c" }
-moge = { git = "https://github.com/microsoft/MoGe.git" }
 
 [feature.monoprior.activation.env]
 PACKAGE_DIR = "packages/monoprior"
@@ -789,7 +787,6 @@ sam3 = { path = "packages/sam3", editable = true }
 wilor_nano = { path = "packages/wilor-nano", editable = true }
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c" }
-moge = { git = "https://github.com/microsoft/MoGe.git" }
 
 [feature.mv-api.activation.env]
 PACKAGE_DIR = "packages/mv-api"
@@ -869,7 +866,6 @@ fsspec = ">=2025.3,<=2026.2.0"
 sam3d_body = { path = "packages/sam3d-body", editable = true }
 monopriors = { path = "packages/monoprior", editable = true }
 sam3 = { path = "packages/sam3", editable = true }
-moge = { git = "https://github.com/microsoft/MoGe.git" }
 timm = ">=0.9"
 natsort = ">=8.4"
 datasets = ">=2.20"
@@ -1337,6 +1333,8 @@ icecream = ">=2.1.3,<2.2"
 einops = ">=0.8.0,<0.9"
 imageio = ">=2.37.0,<3"
 imageio-ffmpeg = ">=0.6.0,<0.7"
+# ai-demos prebuilt for CUDA 13, Python 3.12, and Torch 2.12 (SM 8.6 + 12.0 + PTX); no runtime JIT.
+gsplat = "==1.5.3"
 [feature.vistadream.target.linux-64.dependencies]
 splat-transform = "*"
 
@@ -1345,13 +1343,6 @@ vistadream = { path = "packages/vistadream", editable = true }
 monopriors = { path = "packages/monoprior", editable = true }
 sam3 = { path = "packages/sam3", editable = true }
 vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c" }
-moge = { git = "https://github.com/microsoft/MoGe.git" }
-# cuda13: PyPI gsplat (== the pinned git rev 970dd84, which IS v1.5.3) instead of
-# the git source. pixi's `no-build-isolation` applies to a named PyPI dep but not
-# a git dep, so the git build compiled in an isolated env against a PyPI cu128
-# torch (→ nvcc-13 vs torch-12.8 mismatch); the PyPI dep builds against the conda
-# cuda13 torch.
-gsplat = { version = "==1.5.3", index = "https://pypi.org/simple" }
 accelerate = "*"
 plyfile = "*"
 timm = "*"
@@ -1364,7 +1355,6 @@ omegaconf = "*"
 [feature.vistadream.activation.env]
 PACKAGE_DIR = "packages/vistadream"
 PYREFLY_TARGET = "src/vistadream/api src/vistadream/gradio src/vistadream/resize_utils.py src/vistadream/__init__.py tools"
-TORCH_CUDA_ARCH_LIST = "7.5 8.6 8.9 12.0 12.1"
 CUDA_HOME = "${CONDA_PREFIX}/targets/x86_64-linux"
 CPATH = "${CONDA_PREFIX}/targets/x86_64-linux/include:${CPATH}"
 PATH = "${CONDA_PREFIX}/nvvm/bin:${PATH}"
@@ -2180,8 +2170,8 @@ natsort = ">=8.4.0,<9"
 mamma = { path = "packages/mamma", editable = true }
 posekit = { path = "packages/posekit", editable = true }
 # Vendored cjaverliat/sam2 fork (streaming predictor + forgetful memory bank +
-# EfficientTAM); distribution name is `sam2`, needs no-build-isolation (torch
-# at build time). See packages/sam2-streaming/VENDOR.md.
+# EfficientTAM); distribution name is `sam2`. Static metadata avoids executing
+# setup.py during lock-time resolution. See packages/sam2-streaming/VENDOR.md.
 sam2 = { path = "packages/sam2-streaming", editable = true }
 
 [feature.mamma.activation.env]

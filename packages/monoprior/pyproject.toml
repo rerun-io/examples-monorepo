@@ -27,7 +27,14 @@ monopriors = [
 
 [tool.ruff]
 line-length = 150
-exclude = ["monopriors/third_party", "notebooks"]
+exclude = [
+    "monopriors/third_party/depth_anything_v2",
+    "monopriors/third_party/dsine",
+    "monopriors/third_party/g3t",
+    "monopriors/third_party/promptda",
+    "monopriors/third_party/video_depth_anything",
+    "notebooks",
+]
 
 [tool.ruff.lint]
 select = [
@@ -54,7 +61,18 @@ ignore = [
 
 [tool.vulture]
 paths = ["monopriors", "tests", "tools"]
-exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*", "*/third_party/*"]
+exclude = [
+    "*/.pixi/*",
+    "*/__pycache__/*",
+    "*/build/*",
+    "*/dist/*",
+    "*/node_modules/*",
+    "*/third_party/depth_anything_v2/*",
+    "*/third_party/dsine/*",
+    "*/third_party/g3t/*",
+    "*/third_party/promptda/*",
+    "*/third_party/video_depth_anything/*",
+]
 sort_by_size = true
 min_confidence = 60
 ignore_names = [
@@ -70,6 +88,7 @@ ignore_names = [
     "foreground_mask",
     "has_mono_prior",
     "local_path",
+    "mask_token",
     "near",
     "new_size",
     "orientation_override",

@@ -1,18 +1,54 @@
 from timeit import default_timer as timer
-from typing import Any, Literal
+from typing import Literal, Protocol, Self, TypedDict, cast, runtime_checkable
 
 import numpy as np
 import torch
 from einops import rearrange
 from jaxtyping import Float, UInt8
 
+from monopriors.models._protocols import DeviceMovable
 from monopriors.models.metric_depth.base_metric_depth import (
     BaseMetricPredictor,
     MetricDepthPrediction,
 )
 
 
-class UniDepthMetricPredictor(BaseMetricPredictor):
+class UniDepthPredictions(TypedDict):
+    """Tensor outputs returned by UniDepth inference."""
+
+    depth: Float[torch.Tensor, "b 1 h w"]
+    intrinsics: Float[torch.Tensor, "b 3 3"]
+    confidence: Float[torch.Tensor, "b 1 h w"]
+
+
+@runtime_checkable
+class UniDepthModel(DeviceMovable, Protocol):
+    """Hub-loaded UniDepth surface used by the metric predictor."""
+
+    resolution_level: int
+
+    def eval(self) -> Self:
+        """Set evaluation mode and return the model."""
+        ...
+
+    def infer(
+        self,
+        rgb_chw: UInt8[torch.Tensor, "3 h w"],
+        K_33: Float[torch.Tensor, "3 3"] | None = None,
+    ) -> UniDepthPredictions:
+        """Infer depth, intrinsics, and confidence from one RGB image.
+
+        Args:
+            rgb_chw: RGB image tensor shaped ``3 h w``.
+            K_33: Optional camera intrinsics shaped ``3 3``.
+
+        Returns:
+            Batched depth, intrinsics, and confidence tensors.
+        """
+        ...
+
+
+class UniDepthMetricPredictor(BaseMetricPredictor[UniDepthModel]):
     def __init__(
         self,
         device: Literal["cpu", "cuda"],
@@ -22,14 +58,18 @@ class UniDepthMetricPredictor(BaseMetricPredictor):
         super().__init__()
         print("Loading UniDepth model...")
         start = timer()
-        loaded_model: Any = torch.hub.load(
-            "lpiccinelli-eth/UniDepth",
-            "UniDepth",
-            version=version,
-            backbone=backbone,
-            pretrained=True,
-            trust_repo=True,
-            force_reload=True,
+        loaded_model: UniDepthModel
+        loaded_model = cast(
+            UniDepthModel,
+            torch.hub.load(
+                "lpiccinelli-eth/UniDepth",
+                "UniDepth",
+                version=version,
+                backbone=backbone,
+                pretrained=True,
+                trust_repo=True,
+                force_reload=True,
+            ),
         )
         self.model = loaded_model.to(device).eval()
         self.model.resolution_level = 0

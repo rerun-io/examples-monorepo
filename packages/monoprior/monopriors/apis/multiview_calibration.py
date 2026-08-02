@@ -275,7 +275,7 @@ class MultiViewCalibrationPostprocessor:
             self.seg_predictor = SAM3Predictor(SAM3Config(device=self.device))
         self.moge_predictor: BaseRelativePredictor | None = moge_predictor
         if self.config.refine_depth_maps and self.moge_predictor is None:
-            self.moge_predictor = get_relative_predictor("MogeV1Predictor")(device=self.device)
+            self.moge_predictor = get_relative_predictor("MoGeV1Predictor")(device=self.device)
 
     def __call__(
         self,

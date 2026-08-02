@@ -1,9 +1,13 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Generic, Literal, TypeVar
 
 import numpy as np
 from jaxtyping import Float, UInt8, UInt16
+
+from monopriors.models._protocols import DeviceMovable
+
+ModelT = TypeVar("ModelT", bound=DeviceMovable)
 
 
 @dataclass
@@ -18,8 +22,8 @@ class CompletionDepthPrediction:
     # confidence values
 
 
-class BaseCompletionPredictor(ABC):
-    model: Any
+class BaseCompletionPredictor(ABC, Generic[ModelT]):
+    model: ModelT
 
     @abstractmethod
     def __call__(self, rgb: UInt8[np.ndarray, "h w 3"]) -> CompletionDepthPrediction:

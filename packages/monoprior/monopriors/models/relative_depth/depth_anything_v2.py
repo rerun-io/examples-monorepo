@@ -42,7 +42,7 @@ encoder2name: dict[str, str] = {
 }
 
 
-class DepthAnythingV2Predictor(BaseRelativePredictor):
+class DepthAnythingV2Predictor(BaseRelativePredictor[DepthAnythingV2]):
     def __init__(
         self,
         device: Literal["cpu", "cuda"],

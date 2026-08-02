@@ -23,7 +23,7 @@ Predict depth/disparity without absolute scale. Defined in `monopriors/models/re
 |---|---|---|
 | `DepthAnythingV1Predictor` | Depth Anything V1 | [LiheYoung/Depth-Anything](https://github.com/LiheYoung/Depth-Anything) |
 | `DepthAnythingV2Predictor` | Depth Anything V2 | [DepthAnything/Depth-Anything-V2](https://github.com/DepthAnything/Depth-Anything-V2) |
-| `MogeV1Predictor` | MoGe V1 | [microsoft/MoGe](https://github.com/microsoft/MoGe) |
+| `MoGeV1Predictor` | MoGe V1 | [microsoft/MoGe](https://github.com/microsoft/MoGe) |
 | `UniDepthRelativePredictor` | UniDepth (relative mode) | [lpiccinelli-eth/UniDepth](https://github.com/lpiccinelli-eth/UniDepth) |
 
 There is also a `BaseVideoRelativePredictor` for temporal video depth (`VideoDepthAnythingPredictor`), which takes `UInt8[ndarray, "T H W 3"]` frame sequences and returns per-frame predictions with temporal consistency.

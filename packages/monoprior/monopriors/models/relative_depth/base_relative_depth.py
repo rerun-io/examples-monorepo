@@ -1,9 +1,13 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Generic, Literal, TypeVar
 
 import numpy as np
 from jaxtyping import Float32, UInt8
+
+from monopriors.models._protocols import DeviceMovable
+
+ModelT = TypeVar("ModelT", bound=DeviceMovable)
 
 
 @dataclass
@@ -18,8 +22,8 @@ class RelativeDepthPrediction:
     # intrinsics
 
 
-class BaseRelativePredictor(ABC):
-    model: Any
+class BaseRelativePredictor(ABC, Generic[ModelT]):
+    model: ModelT
 
     @abstractmethod
     def __call__(
@@ -31,8 +35,8 @@ class BaseRelativePredictor(ABC):
         self.model.to(device)
 
 
-class BaseVideoRelativePredictor(ABC):
-    model: Any
+class BaseVideoRelativePredictor(ABC, Generic[ModelT]):
+    model: ModelT
 
     @abstractmethod
     def __call__(

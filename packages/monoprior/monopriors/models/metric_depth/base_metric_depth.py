@@ -1,9 +1,13 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Generic, Literal, TypeVar
 
 import numpy as np
 from jaxtyping import Float, UInt8
+
+from monopriors.models._protocols import DeviceMovable
+
+ModelT = TypeVar("ModelT", bound=DeviceMovable)
 
 
 @dataclass
@@ -16,8 +20,8 @@ class MetricDepthPrediction:
     # intrinsics
 
 
-class BaseMetricPredictor(ABC):
-    model: Any
+class BaseMetricPredictor(ABC, Generic[ModelT]):
+    model: ModelT
 
     @abstractmethod
     def __call__(self, rgb: UInt8[np.ndarray, "h w 3"], K_33: Float[np.ndarray, "3 3"] | None) -> MetricDepthPrediction:

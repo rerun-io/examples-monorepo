@@ -150,7 +150,7 @@ class SingleImagePipeline:
         self.scene: Gaussian_Scene = Gaussian_Scene()
         if self.config.stage in ["outpaint", "coarse", "fine"]:
             self.flux_inpainter: FluxInpainting = FluxInpainting(FluxInpaintingConfig())
-        self.predictor: BaseRelativePredictor = get_relative_predictor("MogeV1Predictor")(device="cuda")
+        self.predictor: BaseRelativePredictor = get_relative_predictor("MoGeV1Predictor")(device="cuda")
         self.smooth_connector: Smooth_Connect_Tool = Smooth_Connect_Tool()
         # Initialize rerun with the provided configuration
         self.shared_intrinsics: Intrinsics | None = None

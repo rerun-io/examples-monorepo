@@ -14,7 +14,7 @@ from monopriors.models.surface_normal.base_normal_model import (
 )
 
 
-class OmniNormalPredictor(BaseNormalPredictor):
+class OmniNormalPredictor(BaseNormalPredictor[DPTDepthModel]):
     def __init__(self, device: Literal["cpu", "cuda"], omnidata_pretrained_weights_path: Path) -> None:
         self.device = device
         self.model = self._load_model(omnidata_pretrained_weights_path)

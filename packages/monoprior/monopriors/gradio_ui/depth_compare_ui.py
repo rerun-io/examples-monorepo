@@ -87,8 +87,8 @@ def _relative_predictor_name(model_name: RELATIVE_PREDICTORS | METRIC_PREDICTORS
             return "DepthAnythingV2Predictor"
         case "UniDepthRelativePredictor":
             return "UniDepthRelativePredictor"
-        case "MogeV1Predictor":
-            return "MogeV1Predictor"
+        case "MoGeV1Predictor":
+            return "MoGeV1Predictor"
         case _:
             raise gr.Error(f"{model_name} is not a relative depth predictor.")
 
@@ -189,7 +189,7 @@ with gr.Blocks() as relative_compare_block:
                 model_2_dropdown = gr.Dropdown(
                     choices=list(get_args(RELATIVE_PREDICTORS)),
                     label="Model2",
-                    value="MogeV1Predictor",
+                    value="MoGeV1Predictor",
                 )
             with gr.Row():
                 model_type = gr.Radio(

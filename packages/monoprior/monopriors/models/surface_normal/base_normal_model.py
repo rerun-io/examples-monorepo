@@ -1,9 +1,13 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Generic, Literal, TypeVar
 
 import numpy as np
 from jaxtyping import Float, UInt8
+
+from monopriors.models._protocols import DeviceMovable
+
+ModelT = TypeVar("ModelT", bound=DeviceMovable)
 
 
 @dataclass
@@ -14,8 +18,8 @@ class SurfaceNormalPrediction:
     # confidence values
 
 
-class BaseNormalPredictor(ABC):
-    model: Any
+class BaseNormalPredictor(ABC, Generic[ModelT]):
+    model: ModelT
 
     @abstractmethod
     def __call__(
