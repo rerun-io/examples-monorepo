@@ -963,8 +963,6 @@ def setup_scene(
     exo_video_log_paths: list[Path] | None = None
     if exo_sequence is not None and log_exo:
         exo_video_names: list[str] = exo_sequence.exo_video_names
-        # Get video blobs if available (RRD sequences), otherwise use paths
-        exo_video_blobs: dict[str, bytes] | None = getattr(exo_sequence, "_video_blobs", None)
         exo_video_files: list[Path] = exo_sequence.exo_video_paths
         assert len(exo_video_files) == len(exo_video_names), (
             f"Mismatched exo video assets ({len(exo_video_files)}) and names ({len(exo_video_names)})."
@@ -974,12 +972,10 @@ def setup_scene(
             # Pinhole + rig_T_cam already logged by log_rig_static; just the video here.
             video_log_path: Path = rig_layout.exo_cam_paths[stream_name] / "pinhole" / "video"
             exo_video_log_path_list.append(video_log_path)
-            # Use blob if available, otherwise use file path
-            video_source: bytes | Path = exo_video_blobs[stream_name] if exo_video_blobs and stream_name in exo_video_blobs else video_file
-            if isinstance(video_source, Path):
-                assert video_source.suffix == ".mp4", f"Video file {video_source} is not an mp4."
-            # Log video asset which is referred to by frame references.
-            exo_timestamps_ns: Int[ndarray, "n_frames"] = log_video(video_source, video_log_path, timeline=timeline, recording=recording)
+            assert video_file.suffix == ".mp4", f"Video file {video_file} is not an mp4."
+            exo_timestamps_ns: Int[ndarray, "n_frames"] = log_video(
+                video_file, video_log_path, timeline=timeline, recording=recording
+            )
             exo_timestamp_list.append(exo_timestamps_ns)
         exo_video_log_paths = exo_video_log_path_list
 
@@ -987,8 +983,6 @@ def setup_scene(
     ego_video_log_paths: list[Path] | None = None
     if ego_sequence is not None and log_ego:
         ego_video_names: list[str] = ego_sequence.ego_video_names
-        # Get video blobs if available (RRD sequences), otherwise use paths
-        ego_video_blobs: dict[str, bytes] | None = getattr(ego_sequence, "_video_blobs", None)
         ego_video_files: list[Path] = ego_sequence.ego_video_paths
         assert len(ego_video_files) == len(ego_video_names), (
             f"Mismatched ego video assets ({len(ego_video_files)}) and names ({len(ego_video_names)})."
@@ -997,12 +991,10 @@ def setup_scene(
         for stream_name, video_file in zip(ego_video_names, ego_video_files, strict=True):
             ego_video_log_path: Path = rig_layout.ego_cam_paths[stream_name] / "pinhole" / "video"
             ego_video_log_path_list.append(ego_video_log_path)
-            # Use blob if available, otherwise use file path
-            video_source: bytes | Path = ego_video_blobs[stream_name] if ego_video_blobs and stream_name in ego_video_blobs else video_file
-            if isinstance(video_source, Path):
-                assert video_source.suffix == ".mp4", f"Video file {video_source} is not an mp4."
-            # Log video asset which is referred to by frame references.
-            ego_timestamps_ns: Int[ndarray, "n_frames"] = log_video(video_source, ego_video_log_path, timeline=timeline, recording=recording)
+            assert video_file.suffix == ".mp4", f"Video file {video_file} is not an mp4."
+            ego_timestamps_ns: Int[ndarray, "n_frames"] = log_video(
+                video_file, ego_video_log_path, timeline=timeline, recording=recording
+            )
             ego_timestamp_list.append(ego_timestamps_ns)
         ego_video_log_paths = ego_video_log_path_list
 

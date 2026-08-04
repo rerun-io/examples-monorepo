@@ -9,7 +9,8 @@ import pytest
 import rerun as rr
 import torch
 from jaxtyping import Float32, Int, UInt8
-from monopriors.apis.multiview_calibration import MultiViewCalibrator, MVCalibResults
+from monopriors.apis.multiview_calibration import MultiViewCalibratorConfig, MVCalibResults
+from monopriors.models.multiview.multiview_predictor import MultiviewPredictorConfig
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
 from simplecv.apis.view_exoego import LogPaths, SceneSetupResult
@@ -206,16 +207,23 @@ def _fake_pinhole(name: str) -> PinholeParameters:
     return PinholeParameters(name=name, intrinsics=intrinsics, extrinsics=extrinsics)
 
 
-class FakeMultiViewCalibrator(MultiViewCalibrator):
-    def __init__(self, *args: object, **kwargs: object) -> None:
-        del args, kwargs
+class FakeMultiviewPredictor:
+    def __init__(self, config: MultiviewPredictorConfig) -> None:
+        del config
 
-    def __call__(self, *, rgb_list: list[UInt8[ndarray, "H W 3"]]) -> MVCalibResults:
-        del rgb_list
-        pcd: o3d.geometry.PointCloud = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(np.array([[0.0, 0.0, 2.0], [0.1, 0.0, 2.0]], dtype=np.float32))
-        pcd.colors = o3d.utility.Vector3dVector(np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32))
-        return MVCalibResults(depth_list=[], pinhole_param_list=[_fake_pinhole("cam0"), _fake_pinhole("rgb")], pcd=pcd)
+
+def fake_run_multiview_calibration(
+    *,
+    rgb_list: list[UInt8[ndarray, "H W 3"]],
+    multiview_predictor: object,
+    config: MultiViewCalibratorConfig,
+    parent_log_path: Path,
+) -> MVCalibResults:
+    del rgb_list, multiview_predictor, config, parent_log_path
+    pcd: o3d.geometry.PointCloud = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(np.array([[0.0, 0.0, 2.0], [0.1, 0.0, 2.0]], dtype=np.float32))
+    pcd.colors = o3d.utility.Vector3dVector(np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32))
+    return MVCalibResults(depth_list=[], pinhole_param_list=[_fake_pinhole("cam0"), _fake_pinhole("rgb")], pcd=pcd)
 
 
 class FakeBodyTracker(MultiviewBodyTracker):
@@ -384,7 +392,8 @@ def test_model_backed_hook_logs_calibrated_predictions_with_fake_models(
 
     monkeypatch.setattr(HocapConfig, "setup", fake_setup)
     monkeypatch.setattr(exoego_nodes, "setup_scene", fake_setup_scene)
-    monkeypatch.setattr(full_exoego_pipeline, "MultiViewCalibrator", FakeMultiViewCalibrator)
+    monkeypatch.setattr(full_exoego_pipeline, "MultiviewPredictor", FakeMultiviewPredictor)
+    monkeypatch.setattr(full_exoego_pipeline, "run_multiview_calibration", fake_run_multiview_calibration)
     monkeypatch.setattr(full_exoego_pipeline, "MultiviewBodyTracker", FakeBodyTracker)
     monkeypatch.setattr(full_exoego_pipeline, "WilorHandKeypointDetector", FakeHandKeypointDetector)
     def fake_estimate_voxel_size(points: Float32[ndarray, "num_points 3"], target_points: int) -> float:
@@ -458,14 +467,20 @@ def test_dataset_camera_sources_skip_estimated_environment_logging(
             shortest_timestamp=timestamps,
         )
 
-    class FailingMultiViewCalibrator(FakeMultiViewCalibrator):
-        def __call__(self, *, rgb_list: list[UInt8[ndarray, "H W 3"]]) -> MVCalibResults:
-            del rgb_list
-            raise AssertionError("GT camera mode should not estimate cameras")
+    def fail_run_multiview_calibration(
+        *,
+        rgb_list: list[UInt8[ndarray, "H W 3"]],
+        multiview_predictor: object,
+        config: MultiViewCalibratorConfig,
+        parent_log_path: Path,
+    ) -> MVCalibResults:
+        del rgb_list, multiview_predictor, config, parent_log_path
+        raise AssertionError("GT camera mode should not estimate cameras")
 
     monkeypatch.setattr(HocapConfig, "setup", fake_setup)
     monkeypatch.setattr(exoego_nodes, "setup_scene", fake_setup_scene)
-    monkeypatch.setattr(full_exoego_pipeline, "MultiViewCalibrator", FailingMultiViewCalibrator)
+    monkeypatch.setattr(full_exoego_pipeline, "MultiviewPredictor", FakeMultiviewPredictor)
+    monkeypatch.setattr(full_exoego_pipeline, "run_multiview_calibration", fail_run_multiview_calibration)
     monkeypatch.setattr(full_exoego_pipeline, "MultiviewBodyTracker", FakeBodyTracker)
     monkeypatch.setattr(full_exoego_pipeline, "WilorHandKeypointDetector", FakeHandKeypointDetector)
 

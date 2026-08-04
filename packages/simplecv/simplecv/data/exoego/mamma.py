@@ -31,6 +31,7 @@ from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
 
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
+from simplecv.configs.dataset_paths import MAMMA_AV1_1080_ROOT
 from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.exo.base_exo import BaseExoSequence, SmplxStack
 from simplecv.data.exoego.base_exoego import BaseExoEgoSequence, ExoEgoLabels, ExoEgoSample
@@ -53,7 +54,7 @@ class MammaConfig(BaseExoEgoDatasetConfig):
 
     _target: type = field(default_factory=lambda: MammaSequence)
     """Target sequence class to instantiate."""
-    root_directory: Path = Path("data/mamma")
+    root_directory: Path = MAMMA_AV1_1080_ROOT
     """Root directory containing ``<subset>/<sequence>/{meta|gt,videos*}`` trees."""
     sequence_name: str = "mamma_markerless_iphones/indoors/crossing_arms"
     """Sequence directory relative to ``root_directory`` (slash-separated)."""

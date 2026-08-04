@@ -12,7 +12,8 @@ import torch
 import tyro
 from einops import rearrange
 from jaxtyping import Bool, Float, Float32, Int, UInt8
-from monopriors.apis.multiview_calibration import MultiViewCalibrator, MultiViewCalibratorConfig, MVCalibResults
+from monopriors.apis.multiview_calibration import MultiViewCalibratorConfig, MVCalibResults, run_multiview_calibration
+from monopriors.models.multiview.multiview_predictor import MultiviewPredictor
 from numpy import ndarray
 from simplecv.apis.view_exoego import LogPaths, SceneSetupResult, create_container
 from simplecv.camera_parameters import Intrinsics, PinholeParameters
@@ -744,8 +745,13 @@ def run_model_backed_pipeline(
         )
         input_log_paths: list[Path] = [*exo_video_log_paths, *ego_rgb_video_log_paths]
 
-        mv_calibrator: MultiViewCalibrator = MultiViewCalibrator(parent_log_path=parent_log_path, config=config.calib_config)
-        mv_calib_results: MVCalibResults = mv_calibrator(rgb_list=rgb_list)
+        multiview_predictor: MultiviewPredictor = MultiviewPredictor(config.calib_config.predictor_config)
+        mv_calib_results: MVCalibResults = run_multiview_calibration(
+            rgb_list=rgb_list,
+            multiview_predictor=multiview_predictor,
+            config=config.calib_config,
+            parent_log_path=parent_log_path,
+        )
 
         pinhole_param_list: list[PinholeParameters] = mv_calib_results.pinhole_param_list
         exo_pinhole_param_list: list[PinholeParameters] = pinhole_param_list[: len(rgb_list_exo)]

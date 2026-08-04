@@ -21,6 +21,7 @@ from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
 from tqdm import tqdm
 
+from simplecv.configs.dataset_paths import HOT3D_ROOT
 from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.ego.hot3d_ego import Hot3dEgoSequence
 from simplecv.data.exo.base_exo import BaseExoSequence, ManoStack
@@ -42,7 +43,7 @@ class Hot3dConfig(BaseExoEgoDatasetConfig):
     """Configuration for HOT3D sequences (Aria and Quest 3)."""
 
     _target: type = field(default_factory=lambda: Hot3dSequence)
-    base_directory: Path = Path("/mnt/8tb/data/hot3d")
+    base_directory: Path = HOT3D_ROOT
     """Base directory containing ``aria/`` and ``quest3/`` subdirectories."""
     headset: Literal["aria", "quest3"] = "aria"
     """Headset type. Determines subdirectory, camera streams, and trajectory source."""

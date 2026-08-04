@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Literal
 
 from simplecv.apis.preprocess_epfl_smart_kitchen import VideoProbe, probe_video
+from simplecv.configs.dataset_paths import MAMMA_SOURCE_ROOT
 from simplecv.data.exoego.mamma import VIDEO_DIR_PREFERENCE, discover_sequence_names
 
 
@@ -25,7 +26,7 @@ from simplecv.data.exoego.mamma import VIDEO_DIR_PREFERENCE, discover_sequence_n
 class PreprocessConfig:
     """Configuration for the MAMMA AV1 yuv420 re-encode."""
 
-    root_directory: Path = Path("data/mamma")
+    root_directory: Path = MAMMA_SOURCE_ROOT
     """Root containing downloaded MAMMA sequences (see download_mamma)."""
     target_dir_name: str = "videos_av1"
     """Per-sequence output dir for the AV1 yuv420 mirror."""

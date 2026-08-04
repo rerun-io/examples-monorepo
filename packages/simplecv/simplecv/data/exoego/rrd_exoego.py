@@ -39,6 +39,14 @@ class RRDExoEgoConfig(BaseExoEgoDatasetConfig):
     load_labels: bool = True
     # Required: .rrd file produced by tools/t265_slam.py
 
+    def setup(self, **kwargs: object) -> None:
+        """Reject obsolete RRD ingestion before opening the recording."""
+        del kwargs
+        raise RuntimeError(
+            "RRD dataset setup is disabled: re-ingesting video from legacy RRD recordings is obsolete. "
+            "Use the original filesystem MP4 dataset instead."
+        )
+
 
 class RRDSequence(BaseExoEgoSequence[RRDExoEgoConfig]):
     _recording: rre.LazyStore | None = None

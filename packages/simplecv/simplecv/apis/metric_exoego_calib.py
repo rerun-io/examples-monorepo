@@ -827,7 +827,6 @@ def _log_flat_scene(
     exo_ts_list: list[Int[ndarray, "n_frames"]] = []
     exo_video_log_paths: list[Path] | None = None
     if exo_sequence is not None:
-        exo_video_blobs: dict[str, bytes] | None = getattr(exo_sequence, "_video_blobs", None)
         exo_paths: list[Path] = []
         for name, cam, video_file in zip(exo_sequence.exo_video_names, exo_sequence.exo_cam_list, exo_sequence.exo_video_paths, strict=True):
             cam_path: Path = parent_log_path / "exo" / name
@@ -835,20 +834,17 @@ def _log_flat_scene(
                 log_pinhole(camera=cam, cam_log_path=cam_path, image_plane_distance=exo_sequence.image_plane_distance, static=True, recording=recording)
             video_log_path: Path = cam_path / "pinhole" / "video"
             exo_paths.append(video_log_path)
-            video_source: bytes | Path = exo_video_blobs[name] if exo_video_blobs and name in exo_video_blobs else video_file
-            exo_ts_list.append(log_video(video_source, video_log_path, timeline=timeline, recording=recording))
+            exo_ts_list.append(log_video(video_file, video_log_path, timeline=timeline, recording=recording))
         exo_video_log_paths = exo_paths
 
     ego_ts_list: list[Int[ndarray, "n_frames"]] = []
     ego_video_log_paths: list[Path] | None = None
     if ego_sequence is not None:
-        ego_video_blobs: dict[str, bytes] | None = getattr(ego_sequence, "_video_blobs", None)
         ego_paths: list[Path] = []
         for name, video_file in zip(ego_sequence.ego_video_names, ego_sequence.ego_video_paths, strict=True):
             video_log_path = parent_log_path / "ego" / name / "pinhole" / "video"
             ego_paths.append(video_log_path)
-            video_source = ego_video_blobs[name] if ego_video_blobs and name in ego_video_blobs else video_file
-            ego_ts_list.append(log_video(video_source, video_log_path, timeline=timeline, recording=recording))
+            ego_ts_list.append(log_video(video_file, video_log_path, timeline=timeline, recording=recording))
         ego_video_log_paths = ego_paths
 
         # Log each ego camera's pinhole + (unaligned) per-frame world_T_cam up front,

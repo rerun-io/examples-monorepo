@@ -4,11 +4,10 @@ import json
 import os
 import shutil
 import sys
-import warnings
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import av
 import numpy as np
@@ -250,226 +249,52 @@ def log_pinhole(
     )
 
 
-VideoLogMethod = Literal["video_stream", "asset_video"]
-
-
-# Keyed on libavcodec AVCodecID (not name) so decoder aliases like
-# ``libdav1d`` / ``libaom-av1`` resolve transparently — ``codec.id`` is stable.
-_CODEC_ID_MAP: dict[int, rr.VideoCodec] = {
-    27: rr.VideoCodec.H264,  # AV_CODEC_ID_H264
-    173: rr.VideoCodec.H265,  # AV_CODEC_ID_HEVC
-    225: rr.VideoCodec.AV1,  # AV_CODEC_ID_AV1
-    167: rr.VideoCodec.VP9,  # AV_CODEC_ID_VP9
-    139: rr.VideoCodec.VP8,  # AV_CODEC_ID_VP8
-}
-
-# H.264/H.265 packets from MP4 (avcC/hvcC) need Annex B framing for ``rr.VideoStream``.
-_BSF_FOR_CODEC_ID: dict[int, str] = {
-    27: "h264_mp4toannexb",
-    173: "hevc_mp4toannexb",
-}
-
-# Aria Gen2 RGB's AV1 SPS ends after 11 semantic bytes + a trailing-bits byte.
-# Rerun 0.32's GOP detector (scuffle-av1) parses the SPS without seeking to
-# the declared OBU size, so it reads that trailing byte as the next OBU
-# header and never finds the keyframe — keyframes get classified as non-sync
-# and the viewer renders black. Replace only that exact 12-byte SPS with a
-# decoder-equivalent that flips initial_display_delay_present_flag and
-# clears initial_display_delay_present_for_this_op; the extra syntax bit
-# consumes the trailing-bits byte without changing what dav1d decodes.
-_ARIA_GEN2_RGB_AV1_SEQUENCE_HEADER_OBU: bytes = bytes.fromhex("0a0c00000062ea7ffbf804330080")
-_ARIA_GEN2_RGB_AV1_RERUN_SEQUENCE_HEADER_OBU: bytes = bytes.fromhex("0a0c02000061753ffdfc02198040")
-
-
-def _normalize_av1_sample_for_rerun(sample: bytes) -> bytes:
-    """Rewrite the aria-gen2 RGB SPS to one rerun's GOP detector can parse."""
-    if sample.startswith(_ARIA_GEN2_RGB_AV1_SEQUENCE_HEADER_OBU):
-        return _ARIA_GEN2_RGB_AV1_RERUN_SEQUENCE_HEADER_OBU + sample[len(_ARIA_GEN2_RGB_AV1_SEQUENCE_HEADER_OBU) :]
-    return sample
-
-
 def log_video(
-    video_source: Path | bytes,
+    video_source: Path,
     video_log_path: Path,
     timeline: str = "video_time",
     *,
-    method: VideoLogMethod = "video_stream",
     recording: rr.RecordingStream | None = None,
 ) -> Int[ndarray, "num_frames"]:
     """
     Logs a video and its frame timestamps.
 
     Args:
-        video_source: Path to video file or raw video bytes.
+        video_source: Path to an MP4 file.
         video_log_path: The entity path where the video log will be saved.
         timeline: Timeline name for frame timestamps.
-        method: ``"video_stream"`` (default) demuxes encoded codec samples into
-            ``rr.VideoStream``. ``"asset_video"`` embeds the whole MP4 blob via
-            ``rr.AssetVideo`` + ``rr.VideoFrameReference``; callers must request
-            it explicitly.
         recording: Optional specific recording stream to log to.
 
     Returns:
         Frame timestamps in nanoseconds, sorted ascending.
 
     Raises:
-        ValueError: When ``method`` is invalid, or when ``method="video_stream"``
-            and the source codec is not supported by ``rr.VideoStream``.
+        RuntimeError: When Rerun cannot ingest or transcode the MP4.
     """
-    if method == "asset_video":
-        return _log_asset_video(video_source, video_log_path, timeline, recording=recording)
-    if method != "video_stream":
-        raise ValueError(f"Unsupported video logging method: {method!r}.")
-    return _log_video_stream(video_source, video_log_path, timeline, recording=recording)
-
-
-def _log_asset_video(
-    video_source: Path | bytes,
-    video_log_path: Path,
-    timeline: str,
-    *,
-    recording: rr.RecordingStream | None,
-) -> Int[ndarray, "num_frames"]:
-    """Embed the MP4 as an ``rr.AssetVideo`` and emit ``VideoFrameReference`` rows."""
-    video_asset = (
-        rr.AssetVideo(contents=video_source) if isinstance(video_source, bytes) else rr.AssetVideo(path=video_source)
-    )
-
-    rr.log(str(video_log_path), video_asset, static=True, recording=recording)
-
     try:
-        frame_timestamps_ns: Int[ndarray, "num_frames"] = video_asset.read_frame_timestamps_nanos()
+        frame_timestamps_ns: Int[ndarray, "num_frames"] = rr.AssetVideo(
+            path=video_source
+        ).read_frame_timestamps_nanos()
     except RuntimeError as exc:
-        warnings.warn(
-            f"Rerun could not read AssetVideo frame timestamps ({exc}); falling back to PyAV demux timestamps.",
-            stacklevel=2,
-        )
-        frame_timestamps_ns = _read_frame_timestamps_nanos_pyav(video_source)
+        raise RuntimeError(f"Failed to read frame timestamps from {video_source}: {exc}") from exc
 
-    rr.send_columns(
-        f"{video_log_path}",
-        indexes=[rr.TimeColumn(timeline, duration=1e-9 * frame_timestamps_ns)],
-        columns=rr.VideoFrameReference.columns_nanos(frame_timestamps_ns),
-        recording=recording,
+    target_recording: rr.RecordingStream | None = (
+        recording if recording is not None else rr.get_global_data_recording()
     )
-    return frame_timestamps_ns
-
-
-def _read_frame_timestamps_nanos_pyav(video_source: Path | bytes) -> Int[ndarray, "num_frames"]:
-    """Read display timestamps by demuxing with PyAV when Rerun cannot inspect a codec."""
-    source_handle: io.BytesIO | str = io.BytesIO(video_source) if isinstance(video_source, bytes) else str(video_source)
-    container: av.container.InputContainer = av.open(source_handle, mode="r")
-    timestamps_ns: list[int] = []
+    if target_recording is None:
+        raise RuntimeError("No active Rerun recording. Call rr.init() or pass recording= before logging video.")
     try:
-        in_stream: av.video.stream.VideoStream = container.streams.video[0]
-        time_base: Fraction | None = in_stream.time_base
-        if time_base is None:
-            raise ValueError("Input video stream has no time_base; cannot derive frame timestamps.")
-        ns_scale: Fraction = Fraction(1_000_000_000, 1)
-        for packet in container.demux(in_stream):
-            if packet.pts is None:
-                continue
-            timestamps_ns.append(round(packet.pts * time_base * ns_scale))
-    finally:
-        container.close()
-    if not timestamps_ns:
-        raise RuntimeError("PyAV could not derive any frame timestamps from the video stream.")
-    return np.sort(np.asarray(timestamps_ns, dtype=np.int64))
-
-
-def _log_video_stream(
-    video_source: Path | bytes,
-    video_log_path: Path,
-    timeline: str,
-    *,
-    recording: rr.RecordingStream | None,
-) -> Int[ndarray, "num_frames"]:
-    """Demux MP4 samples into ``rr.VideoStream`` without pixel decode or re-encode.
-
-    H.264/H.265 length-prefix framing is converted to Annex B; AV1 OBUs are
-    logged as-is except for the aria-gen2 RGB SPS rewrite in
-    :func:`_normalize_av1_sample_for_rerun`. VideoStream currently has no
-    separate DTS field, so B-frame streams use DTS as the rerun sample timeline
-    to preserve decode order. Returns PTS (display order) for caller alignment.
-    """
-    source_handle: io.BytesIO | str = io.BytesIO(video_source) if isinstance(video_source, bytes) else str(video_source)
-    container: av.container.InputContainer = av.open(source_handle, mode="r")
-
-    pts_ns_list: list[int] = []
-    dts_ns_list: list[int] = []
-    samples: list[bytes] = []
-    is_keyframes: list[bool] = []
-    try:
-        in_stream: av.video.stream.VideoStream = container.streams.video[0]
-        codec_id: int = in_stream.codec_context.codec.id
-        codec_name: str = in_stream.codec_context.name
-        codec: rr.VideoCodec | None = _CODEC_ID_MAP.get(codec_id)
-        if codec is None:
-            raise ValueError(
-                f"Codec {codec_name!r} (id={codec_id}) is not supported by rr.VideoStream. "
-                f"Pass method='asset_video', or transcode the source to H.264/H.265/AV1 "
-                f"(see simplecv.video_encoder.VideoEncoder for an NVENC-accelerated path)."
-            )
-
-        bsf_name: str | None = _BSF_FOR_CODEC_ID.get(codec_id)
-        bsf: av.BitStreamFilterContext | None = (
-            av.BitStreamFilterContext(bsf_name, in_stream) if bsf_name is not None else None
+        reader = rr.experimental.Mp4Reader(
+            video_source,
+            mode="stream",
+            entity_path=str(video_log_path),
+            timeline_name=timeline,
+            transcode=rr.experimental.Mp4TranscodeOptions(try_gpu=True),
         )
+        target_recording.send_chunks(reader.stream())
+    except RuntimeError as exc:
+        raise RuntimeError(f"Mp4Reader failed for {video_source}: {exc}") from exc
 
-        rr.log(
-            str(video_log_path),
-            rr.VideoStream(codec=codec),
-            static=True,
-            recording=recording,
-        )
-
-        # The bsf preserves both pts and dts but may drop time_base; the
-        # input stream's time_base is the source of truth for both.
-        in_time_base: Fraction | None = in_stream.time_base
-        if in_time_base is None:
-            raise ValueError("Input video stream has no time_base; cannot derive sample timestamps.")
-        time_base: Fraction = in_time_base
-        ns_scale: Fraction = Fraction(1_000_000_000, 1)
-        # First DTS may be negative (B-frame leading-frame convention);
-        # normalize so the rerun timeline starts at 0.
-        first_dts: int | None = None
-        for raw_packet in container.demux(in_stream):
-            if raw_packet.pts is None or raw_packet.dts is None:
-                continue
-            filtered_packets: list[av.Packet] = bsf.filter(raw_packet) if bsf is not None else [raw_packet]
-            for packet in filtered_packets:
-                if packet.pts is None or packet.dts is None:
-                    continue
-                sample: bytes = bytes(packet)
-                if codec_id == 225:  # AV_CODEC_ID_AV1
-                    sample = _normalize_av1_sample_for_rerun(sample)
-                if first_dts is None:
-                    first_dts = packet.dts
-                # Round-to-nearest matches rerun's AssetVideo computation;
-                # plain int() would truncate and drift by 1 ns per frame.
-                pts_ns_list.append(round(packet.pts * time_base * ns_scale))
-                dts_ns_list.append(round((packet.dts - first_dts) * time_base * ns_scale))
-                samples.append(sample)
-                is_keyframes.append(packet.is_keyframe)
-    finally:
-        container.close()
-
-    # Batched columnar logging — one rerun API call instead of per-packet.
-    # Indexing by DTS keeps samples in decode order so the H.264 decoder
-    # can reconstruct B/P frames; ``mux_h264_to_mp4`` reads them back in
-    # the same order.
-    dts_ns_array: ndarray = np.asarray(dts_ns_list, dtype=np.int64)
-    rr.send_columns(
-        str(video_log_path),
-        indexes=[rr.TimeColumn(timeline, duration=1e-9 * dts_ns_array)],
-        columns=rr.VideoStream.columns(
-            sample=samples,
-            is_keyframe=is_keyframes,
-        ),
-        recording=recording,
-    )
-
-    frame_timestamps_ns: Int[ndarray, "num_frames"] = np.sort(np.asarray(pts_ns_list, dtype=np.int64))
     return frame_timestamps_ns
 
 

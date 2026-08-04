@@ -17,7 +17,7 @@ def test_node_app_cli_help_exposes_raw_hocap_and_max_frames() -> None:
     assert "hocap" in result.stdout
     assert "synced-videos" in result.stdout
     assert "--max-frames" in result.stdout
-    assert "--calib-config.device" in result.stdout
+    assert "--calib-config.predictor-config.device" in result.stdout
     assert "--tracker-config.device" in result.stdout
     assert "--calib-ts-nano" in result.stdout
 

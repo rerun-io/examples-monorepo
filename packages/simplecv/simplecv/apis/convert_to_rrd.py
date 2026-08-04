@@ -12,6 +12,7 @@ from numpy import ndarray
 from tqdm import tqdm
 
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
+from simplecv.configs.dataset_paths import EGO_DEX_ROOT
 from simplecv.data.skeleton.avp_fullbody import AVP_ID2NAME, AVP_IDS, AVP_LINKS
 from simplecv.ops.triangulate import projectN3
 from simplecv.rerun_custom_types import Points2DWithConfidence, Points3DWithConfidence, confidence_scores_to_rgb
@@ -22,8 +23,8 @@ from simplecv.video_utils import reencode_video_optimal
 @dataclass
 class ConvertEgoConfig:
     dataset: Literal["ego-dex"] = "ego-dex"
-    root_directory: Path = Path("/home/pablo/0Dev/data/ego-dex/test/")
-    save_directory: Path = Path("/home/pablo/0Dev/data/ego-dex/test-rrd/")
+    root_directory: Path = EGO_DEX_ROOT / "test"
+    save_directory: Path = EGO_DEX_ROOT / "test-rrd"
     sequence_name: str | Literal["all"] = "wipe_screen"
     send_as_batch: bool = True
 

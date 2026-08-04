@@ -21,6 +21,7 @@ from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
 from tqdm import tqdm
 
+from simplecv.configs.dataset_paths import ARIA_GEN2_PILOT_ROOT
 from simplecv.data.ego.aria_gen2_pilot_ego import AriaGen2PilotEgoSequence
 from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.exo.base_exo import BaseExoSequence
@@ -36,7 +37,7 @@ class AriaGen2PilotConfig(BaseExoEgoDatasetConfig):
     """Configuration for Aria Gen2 Pilot sequences."""
 
     _target: type = field(default_factory=lambda: AriaGen2PilotSequence)
-    base_directory: Path = Path("/mnt/8tb/data/aria-gen2-pilot")
+    base_directory: Path = ARIA_GEN2_PILOT_ROOT
     """Base directory containing sequence subdirectories."""
     sequence_name: str = "cook_0"
     """Sequence folder name (e.g. 'walk_1', 'cook_0', 'eat_0')."""

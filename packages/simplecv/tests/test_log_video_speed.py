@@ -1,9 +1,4 @@
-"""Catch accidental re-introduction of the decode+re-encode pipeline.
-
-A previous re-encode implementation took ~9.8 s on the hololens clip;
-the bit-preserving demux+bsf path runs in ~20 ms. Assert a 100 ms
-absolute ceiling — generous against jitter, will fail loud on regression.
-"""
+"""Performance regression guard for ``log_video`` using Rerun ``Mp4Reader``."""
 
 from __future__ import annotations
 
@@ -16,7 +11,7 @@ import rerun as rr
 from simplecv.rerun_log_utils import log_video
 
 _HOCAP_BASE = Path("data/hocap/sample")
-_MAX_STREAM_TIME_S: float = 0.1
+_MAX_MP4_READER_TIME_S: float = 1.5
 _TRIALS: int = 5
 
 
@@ -35,13 +30,13 @@ def _time_log(mp4: Path, tmp_path: Path, trial: int) -> float:
     )
     rec.save(str(rrd_path))
     t0: float = time.perf_counter()
-    log_video(mp4, Path("/v"), method="video_stream", recording=rec)
+    log_video(mp4, Path("/v"), recording=rec)
     del rec  # finalize before timing stops
     return time.perf_counter() - t0
 
 
-def test_log_video_stream_ingestion_under_budget(tmp_path: Path) -> None:
-    """VideoStream ingestion ≤ 100 ms on the hololens (1280×720, ~1085 frames) MP4."""
+def test_log_video_mp4_reader_ingestion_under_budget(tmp_path: Path) -> None:
+    """Mp4Reader ingestion stays below its measured regression ceiling."""
     mp4: Path | None = _find_hololens_mp4()
     if mp4 is None:
         pytest.skip("hocap sample not downloaded (run pixi _download-hocap-sample)")
@@ -51,13 +46,12 @@ def test_log_video_stream_ingestion_under_budget(tmp_path: Path) -> None:
     stream_times: list[float] = [_time_log(mp4, tmp_path, t) for t in range(_TRIALS)]
     stream_median: float = sorted(stream_times)[_TRIALS // 2]
     print(
-        f"VideoStream median: {stream_median * 1000:.1f} ms (trials: "
+        f"Mp4Reader median: {stream_median * 1000:.1f} ms (trials: "
         f"{[f'{x * 1000:.0f}ms' for x in stream_times]}, budget: "
-        f"{_MAX_STREAM_TIME_S * 1000:.0f} ms)"
+        f"{_MAX_MP4_READER_TIME_S * 1000:.0f} ms)"
     )
 
-    assert stream_median <= _MAX_STREAM_TIME_S, (
-        f"VideoStream median {stream_median * 1000:.1f} ms exceeds "
-        f"{_MAX_STREAM_TIME_S * 1000:.0f} ms budget — the decode+re-encode pipeline "
-        f"may have been accidentally re-introduced."
+    assert stream_median <= _MAX_MP4_READER_TIME_S, (
+        f"Mp4Reader median {stream_median * 1000:.1f} ms exceeds "
+        f"{_MAX_MP4_READER_TIME_S * 1000:.0f} ms budget."
     )

@@ -13,6 +13,7 @@ from serde.json import from_json
 from tqdm import tqdm
 
 from simplecv.apis.view_umetrack_data import UmeTrackAnnotation
+from simplecv.configs.dataset_paths import UMETRACK_SPLIT_ROOT
 from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.ego.umetrack_ego import UmeTrackEgoSequence
 from simplecv.data.exo.base_exo import BaseExoSequence
@@ -26,7 +27,7 @@ from simplecv.umetrack_temp.generic_hand_model_numpy import HandModelNumpy, Sing
 @dataclass
 class UmeTrackConfig(BaseExoEgoDatasetConfig):
     _target: type = field(default_factory=lambda: UmeTrackSequence)
-    root_directory: Path = Path("/mnt/8tb/data/umetrack-split")
+    root_directory: Path = UMETRACK_SPLIT_ROOT
     data_type: Literal["synthetic", "real"] = "real"
     split: Literal["training", "testing"] = "training"
     hand_interaction: Literal["separate_hand", "hand_hand"] = "separate_hand"

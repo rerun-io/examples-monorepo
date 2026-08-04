@@ -24,6 +24,8 @@ from typing import Literal
 import requests
 from tqdm import tqdm
 
+from simplecv.configs.dataset_paths import MAMMA_SOURCE_ROOT
+
 BASE_URL: str = "https://download.is.tue.mpg.de/download.php?domain=mamma&resume=1"
 REGISTER_URL: str = "https://mamma.is.tue.mpg.de/register.php"
 
@@ -86,7 +88,7 @@ DEFAULT_SUBSET_SPECS: dict[str, SubsetSpec] = {
 class DownloadConfig:
     """Configuration for the single-sequence-per-subset MAMMA download."""
 
-    output_dir: Path = Path("data/mamma")
+    output_dir: Path = MAMMA_SOURCE_ROOT
     """Local root; files land at ``<output_dir>/<subset>/<sequence>/...``."""
     subsets: tuple[MammaSubset, ...] = ("dance", "multi-people", "iphone", "eval", "syn")
     """Subsets to fetch (one default sequence each)."""

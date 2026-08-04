@@ -5,8 +5,8 @@ types for each sequence.
 
 Usage:
     pixi run download-aria-gen2-pilot \
-        --urls-json /mnt/8tb/data/aria-gen2-pilot/AriaGen2PilotDataset_download_urls.json \
-        --output-dir /mnt/8tb/data/aria-gen2-pilot \
+        --urls-json /mnt/nas/datasets/aria-gen2-pilot/AriaGen2PilotDataset_download_urls.json \
+        --output-dir /mnt/nas/datasets/aria-gen2-pilot \
         --max-sequences 2
 """
 
@@ -21,6 +21,7 @@ from serde.json import from_json
 from tqdm import tqdm
 
 from simplecv.apis.download_utils import download_file, extract_zip, verify_sha1
+from simplecv.configs.dataset_paths import ARIA_GEN2_PILOT_ROOT
 
 # ── URL JSON schema (pyserde) ─────────────────────────────────────────── #
 
@@ -108,9 +109,9 @@ VRS_CANONICAL_NAME: str = "video.vrs"
 class DownloadConfig:
     """Configuration for Aria Gen2 Pilot download."""
 
-    urls_json: Path = Path("/mnt/8tb/data/aria-gen2-pilot/AriaGen2PilotDataset_download_urls.json")
+    urls_json: Path = ARIA_GEN2_PILOT_ROOT / "AriaGen2PilotDataset_download_urls.json"
     """Path to the AriaGen2PilotDataset_download_urls.json file."""
-    output_dir: Path = Path("/mnt/8tb/data/aria-gen2-pilot")
+    output_dir: Path = ARIA_GEN2_PILOT_ROOT
     """Output directory for downloaded sequences."""
     max_sequences: int | None = None
     """Maximum number of sequences to download (None = all)."""

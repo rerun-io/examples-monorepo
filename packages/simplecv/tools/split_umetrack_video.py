@@ -7,8 +7,8 @@ copy of the JSON.
 
 Usage (dry run by default, processes first candidate only):
     python tools/split_umetrack_video.py \
-        --input-root /mnt/8tb/data/umetrack-data/raw_data \
-        --output-root /mnt/8tb/data/umetrack-split
+        --input-root /path/to/umetrack-data/raw_data \
+        --output-root /mnt/nas/datasets/umetrack-split
 
 Execute full batch:
     python tools/split_umetrack_video.py \

@@ -12,6 +12,7 @@ from natsort import natsorted
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
 
+from simplecv.configs.dataset_paths import EGO_DEX_ROOT
 from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.ego.ego_dex import EgoDexSequence as EgoSequence
 from simplecv.data.exo.base_exo import BaseExoSequence
@@ -24,10 +25,18 @@ from simplecv.data.skeleton.avp_fullbody import AVP_ID2NAME, avp_to_coco_hands
 @dataclass
 class EgoDexConfig(BaseExoEgoDatasetConfig):
     _target: type = field(default_factory=lambda: EgoDexSequence)
-    root_directory: Path = Path("/home/pablo/0Dev/data/ego-dex")
+    root_directory: Path = EGO_DEX_ROOT
     split: Literal["train", "val", "test"] = "test"
     sequence_name: str = "add_remove_lid"
     episode: int = 0
+
+    def setup(self, **kwargs: object) -> None:
+        """Reject EgoDex before loading metadata or unsupported videos."""
+        del kwargs
+        raise RuntimeError(
+            "EgoDex dataset setup is disabled: its MPEG-4 Part 2 videos are not supported by "
+            "Rerun Mp4Reader stream mode. Convert the dataset to a supported, B-frame-free codec first."
+        )
 
 
 class EgoDexSequence(BaseExoEgoSequence[EgoDexConfig]):

@@ -10,6 +10,7 @@ from jaxtyping import Float32, Int
 from numpy import ndarray
 from rerun.components.view_coordinates import ViewCoordinates
 
+from simplecv.configs.dataset_paths import ROBOCAP_ROOT
 from simplecv.data.ego.base_ego import BaseEgoSequence
 from simplecv.data.ego.robocap_ego import RobocapEgoSequence
 from simplecv.data.exo.base_exo import BaseExoSequence
@@ -27,7 +28,7 @@ class RobocapConfig(BaseExoEgoDatasetConfig):
 
     _target: type = field(default_factory=lambda: RobocapSequence)
     """Target sequence class to instantiate."""
-    root_directory: Path = Path("/mnt/8tb/data/robocap")
+    root_directory: Path = ROBOCAP_ROOT
     """Root directory containing robocap data."""
     device_id: str = "f408193e6447b3b0"
     """Device identifier (used in folder names)."""

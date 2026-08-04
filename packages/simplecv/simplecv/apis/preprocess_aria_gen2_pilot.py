@@ -6,8 +6,8 @@ which neither Rerun nor NVDEC can decode, so we transcode to yuv420p AV1
 via ffmpeg + NVENC (~4s per 10k-frame SLAM stream, ~8s for RGB).
 
 Usage:
-    pixi run preprocess-aria-gen2-pilot --root /mnt/8tb/data/aria-gen2-pilot
-    pixi run preprocess-aria-gen2-pilot --root /mnt/8tb/data/aria-gen2-pilot --sequence walk_1
+    pixi run preprocess-aria-gen2-pilot --root /mnt/nas/datasets/aria-gen2-pilot
+    pixi run preprocess-aria-gen2-pilot --root /mnt/nas/datasets/aria-gen2-pilot --sequence walk_1
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from pathlib import Path
 import pyvrs
 from tqdm import tqdm
 
+from simplecv.configs.dataset_paths import ARIA_GEN2_PILOT_ROOT
 from simplecv.data.hot3d_utils import (
     AriaSequenceCalibration,
     parse_online_calibration_first,
@@ -57,7 +58,7 @@ VRS_FILENAME: str = "video.vrs"
 class PreprocessConfig:
     """Configuration for Aria Gen2 Pilot VRS preprocessing."""
 
-    root: Path = Path("/mnt/8tb/data/aria-gen2-pilot")
+    root: Path = ARIA_GEN2_PILOT_ROOT
     """Root directory containing sequence folders."""
     sequence: str = ""
     """Process a single sequence (empty = all sequences with video.vrs)."""

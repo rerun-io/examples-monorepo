@@ -5,8 +5,8 @@ projectaria.com and fetches selected data types for each sequence.
 
 Usage:
     pixi run download-hot3d \\
-        --urls-json /mnt/8tb/data/hot3d/Hot3DAria_download_urls.json \\
-        --output-dir /mnt/8tb/data/hot3d/aria \\
+        --urls-json /mnt/nas/datasets/hot3d/Hot3DAria_download_urls.json \\
+        --output-dir /mnt/nas/datasets/hot3d/aria \\
         --max-sequences 20
 """
 
@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from simplecv.apis.download_utils import download_file, extract_zip, verify_sha1
+from simplecv.configs.dataset_paths import HOT3D_ROOT
 
 # Re-export for backwards compatibility
 __all__ = ["download_file", "extract_zip", "verify_sha1"]
@@ -59,7 +60,7 @@ class DownloadConfig:
 
     urls_json: Path
     """Path to the Hot3DAria_download_urls.json file."""
-    output_dir: Path = Path("/mnt/8tb/data/hot3d/aria")
+    output_dir: Path = HOT3D_ROOT / "aria"
     """Output directory for downloaded sequences."""
     max_sequences: int | None = 20
     """Maximum number of sequences to download (None = all)."""

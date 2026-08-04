@@ -5,8 +5,8 @@ re-encodes to AV1 MP4 using PyAV, and extracts calibration from the
 MPS online_calibration.jsonl.
 
 Usage:
-    pixi run preprocess-hot3d --root /mnt/8tb/data/hot3d/aria
-    pixi run preprocess-hot3d --root /mnt/8tb/data/hot3d/aria --sequence P0003_c701bd11
+    pixi run preprocess-hot3d --root /mnt/nas/datasets/hot3d/aria
+    pixi run preprocess-hot3d --root /mnt/nas/datasets/hot3d/aria --sequence P0003_c701bd11
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ import pyvrs
 from tqdm import tqdm
 from turbojpeg import TurboJPEG
 
+from simplecv.configs.dataset_paths import HOT3D_ROOT
 from simplecv.data.hot3d_utils import (
     ARIA_STREAM_ID_TO_LABEL,
     QUEST_STREAM_ID_TO_LABEL,
@@ -62,7 +63,7 @@ def _default_streams_for_headset(headset: str) -> list[str]:
 class PreprocessConfig:
     """Configuration for HOT3D VRS preprocessing."""
 
-    root: Path = Path("/mnt/8tb/data/hot3d/aria")
+    root: Path = HOT3D_ROOT / "aria"
     """Root directory containing sequence folders."""
     sequence: str = ""
     """Process a single sequence (empty = all sequences with recording.vrs)."""
