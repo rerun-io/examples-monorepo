@@ -13,9 +13,9 @@ implementation, split in two layers:
   (persistent buffers via `set_tensor_address`, `execute_async_v3`,
   static-batch zero-padding, optional CUDA-graph capture/replay).
 - **hub** — artifact identity and machine-local caching:
-  `TrtBuildConfig` / `build_engine` / `ensure_engine` plus generic ONNX graph
-  surgery in `trtkit.onnx_graph` (`strip_detector_nms`,
-  `onnx_static_batch_size`).
+  `TrtBuildConfig` / `build_engine` / `ensure_engine` plus generic ONNX
+  introspection in `trtkit.onnx_graph` (`onnx_static_batch_size`).
+  Model-family graph surgery (e.g. detector NMS stripping) stays model-side.
 
 ONNX files are the portable artifacts. Engines are **machine-locked**
 (TensorRT version + GPU compute capability), never committed, and rebuilt from

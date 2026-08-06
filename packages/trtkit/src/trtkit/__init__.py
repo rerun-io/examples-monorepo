@@ -36,7 +36,7 @@ from trtkit.backends import (
 )
 from trtkit.base import RuntimeSpec, TensorRuntime, TensorSpec, run_chunked, validate_runtime_inputs
 from trtkit.onnx_cuda import OnnxCudaRuntime
-from trtkit.onnx_graph import onnx_static_batch_size, strip_detector_nms
+from trtkit.onnx_graph import onnx_static_batch_size
 from trtkit.tensorrt_runtime import TensorRtRuntime
 from trtkit.torch_runtime import TorchRuntime
 from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR, TrtBuildConfig, TrtPrecision, build_engine, cached_engine_path, ensure_engine
@@ -62,6 +62,5 @@ __all__ = (
     "ensure_engine",
     "onnx_static_batch_size",
     "run_chunked",
-    "strip_detector_nms",
     "validate_runtime_inputs",
 )
