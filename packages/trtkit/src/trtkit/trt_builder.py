@@ -3,6 +3,11 @@
 Engines are never committed or downloaded: they are sm-/version-specific
 artifacts built once from a model's ONNX interchange file into a local cache
 directory, with a JSON manifest recording how each engine was produced.
+
+When TensorRT miscompiles a graph whose fusion spans an input-derived
+reduction all the way to an output (garbage/NaN at every precision), mark the
+reduction results as extra ONNX outputs to force materialization and split
+the fusion — see prompt-da's ``export_promptda_onnx`` for a worked example.
 """
 
 import hashlib
@@ -30,13 +35,14 @@ class TrtBuildConfig:
     allow_tf32: bool = True
     """Allow TF32 math for fp32-typed layers (TensorRT's default). Disable when
     a model needs strict fp32 numerics."""
-    workspace_gib: float = 8.0
-    """Workspace memory pool limit handed to the builder."""
+    workspace_gib: float = 24.0
+    """Workspace memory pool limit handed to the builder — a cap on tactic
+    memory, not an upfront allocation."""
     builder_optimization_level: int = 3
     """TensorRT builder optimization level (0-5)."""
 
 
-def cached_engine_path(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Path = DEFAULT_TRT_CACHE_DIR) -> Path:
+def cached_engine_path(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Path = DEFAULT_TRT_CACHE_DIR, onnx_sha256: str | None = None) -> Path:
     """Return the machine-local cache path for an engine built from this ONNX file.
 
     The name encodes everything that invalidates an engine: ONNX content hash,
@@ -49,6 +55,8 @@ def cached_engine_path(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Pa
         onnx_path: ONNX interchange file the engine is built from.
         config: Build configuration contributing to the cache key.
         cache_dir: Engine cache root.
+        onnx_sha256: Precomputed :func:`onnx_content_hash` digest, to avoid
+            re-hashing large files; computed here when omitted.
 
     Returns:
         Deterministic engine path inside ``cache_dir``.
@@ -57,7 +65,7 @@ def cached_engine_path(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Pa
         raise ValueError(f"opt_batch_size must be within [1, max_batch_size], got opt={config.opt_batch_size} max={config.max_batch_size}.")
     import tensorrt as trt
     capability: tuple[int, int] = torch.cuda.get_device_capability()
-    onnx_hash: str = _onnx_content_hash(onnx_path)[:12]
+    onnx_hash: str = (onnx_sha256 or onnx_content_hash(onnx_path))[:12]
     precision_key: str = "strong" if config.allow_tf32 else "strong-notf32"
     name: str = (
         f"{onnx_path.stem}_b1-{config.opt_batch_size}-{config.max_batch_size}_{precision_key}"
@@ -67,7 +75,7 @@ def cached_engine_path(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Pa
     return cache_dir / name
 
 
-def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig) -> None:
+def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, onnx_sha256: str | None = None) -> None:
     """Build a TensorRT engine from ONNX and write it plus a manifest.
 
     Args:
@@ -75,7 +83,9 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig) -> 
             a dynamic profile spans ``1..config.max_batch_size`` (opt at
             ``config.opt_batch_size``) so callers run true batch sizes.
         engine_path: Output engine path (a ``.json`` manifest is written beside it).
-        config: Precision/batch/workspace build options.
+        config: Batch/TF32/workspace build options.
+        onnx_sha256: Precomputed :func:`onnx_content_hash` digest for the
+            manifest; computed here when omitted.
 
     Raises:
         RuntimeError: If ONNX parsing or engine serialization fails.
@@ -127,7 +137,7 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig) -> 
     tmp_path.write_bytes(bytes(serialized))
     manifest: dict[str, Any] = {
         "onnx_path": str(onnx_path),
-        "onnx_sha256": _onnx_content_hash(onnx_path),
+        "onnx_sha256": onnx_sha256 or onnx_content_hash(onnx_path),
         "engine_path": str(engine_path),
         "portable_engine": False,
         "rebuild_from_onnx_on_target_machine": True,
@@ -150,20 +160,21 @@ def ensure_engine(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Path = 
 
     Args:
         onnx_path: ONNX interchange file the engine is built from.
-        config: Precision/batch/workspace build options.
+        config: Batch/TF32/workspace build options.
         cache_dir: Engine cache root.
 
     Returns:
         Path to a ready-to-load engine matching this machine and config.
     """
-    engine_path: Path = cached_engine_path(onnx_path, config, cache_dir=cache_dir)
+    onnx_sha256: str = onnx_content_hash(onnx_path)
+    engine_path: Path = cached_engine_path(onnx_path, config, cache_dir=cache_dir, onnx_sha256=onnx_sha256)
     if not engine_path.exists():
         print(f"[trtkit] building TensorRT engine (one-time, may take minutes): {engine_path.name}")
-        build_engine(onnx_path, engine_path, config)
+        build_engine(onnx_path, engine_path, config, onnx_sha256=onnx_sha256)
     return engine_path
 
 
-def _onnx_content_hash(onnx_path: Path) -> str:
+def onnx_content_hash(onnx_path: Path) -> str:
     """Hex SHA-256 of an ONNX model, covering its external weight file if present.
 
     Args:

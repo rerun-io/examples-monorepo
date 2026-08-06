@@ -15,6 +15,7 @@ Requires the ``sapiens2-pose`` package (model definition + checkpoints);
 imports are lazy so the rest of posekit works without it.
 """
 
+import os
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -92,15 +93,9 @@ class SapiensPose2d(TopDownPose2d):
             )
         else:
             backend: Any = config.backend
-            # Precision is no longer a builder knob (TRT 11 builds are strongly
-            # typed): the export bakes bf16 compute into the graph — the fastest
-            # strict-accuracy precision from the sapiens2-pose 0.4B sweep (fp16
-            # Sapiens ViT graphs overflow, ~70 px error).
-            # The dynamo export bakes a fixed batch, so both accelerated
-            # backends run a static graph sized at the TRT opt batch.
+            # Static graph sized at the TRT opt batch; TRT gets the bf16-typed
+            # graph, ORT the fp32 graph — rationale in _ensure_sapiens_onnx.
             static_batch: int = backend.opt_batch_size if isinstance(backend, TensorRtBackendConfig) else backend.max_batch_size
-            # TRT gets the bf16-typed graph (strongly-typed builds take dtype
-            # from the graph); ORT keeps the fp32 graph it has always run.
             bf16: bool = isinstance(backend, TensorRtBackendConfig)
             self.runtime = create_runtime_from_onnx(_ensure_sapiens_onnx(config.model_size, static_batch, bf16=bf16), backend)
         self.crop_spec: CropSpec = CropSpec(
@@ -153,12 +148,14 @@ def _ensure_sapiens_onnx(model_size: SapiensModelSize, static_batch: int, *, bf1
     Args:
         model_size: Sapiens2 checkpoint size.
         static_batch: Batch size baked into the exported graph.
+        bf16: Export a bf16-autocast graph for strongly-typed TRT builds;
+            ``False`` keeps the plain fp32 graph ONNX Runtime runs.
 
     Returns:
         Path to the cached ONNX export.
     """
     from sapiens2_pose.api.runtime import get_pose_model
-    from sapiens2_pose.api.tensorrt_pose import make_sapiens_pose_onnx_exportable
+    from sapiens2_pose.api.tensorrt_pose import Bf16AutocastExportWrapper, make_sapiens_pose_onnx_exportable
     from sapiens2_pose.sapiens_lite.pose import MODEL_SPECS
 
     # bf16=True bakes bf16 autocast into the graph with fp32 I/O for TRT 11's
@@ -174,26 +171,18 @@ def _ensure_sapiens_onnx(model_size: SapiensModelSize, static_batch: int, *, bf1
     print(f"[posekit] exporting Sapiens2 {model_size} pose to ONNX (one-time): {onnx_path.name}")
     spec: Any = MODEL_SPECS[model_size]
     model: Any = make_sapiens_pose_onnx_exportable(get_pose_model(model_size, "cuda")).eval()
-
-    class _AutocastWrapper(torch.nn.Module):
-        def __init__(self, inner: torch.nn.Module) -> None:
-            super().__init__()
-            self.inner = inner
-
-        def forward(self, inputs: Tensor) -> Tensor:
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                heatmaps = self.inner(inputs)
-            return heatmaps.float()
-
-    export_model: Any = _AutocastWrapper(model).eval() if bf16 else model
+    export_model: Any = Bf16AutocastExportWrapper(model).eval() if bf16 else model
     dummy: Tensor = torch.zeros((static_batch, 3, int(spec.image_size[0]), int(spec.image_size[1])), dtype=torch.float32, device="cuda")
+    # pid-unique temp + atomic rename so a killed multi-minute export can never
+    # publish a truncated file that later runs silently reuse.
+    tmp_path: Path = onnx_path.with_name(f"{onnx_path.name}.part{os.getpid()}")
     with torch.no_grad():
         # The dynamo exporter is required: the TorchScript tracer fails on the
         # Sapiens head ("instance_norm for unknown channel size").
         torch.onnx.export(
             export_model,
             (dummy,),
-            str(onnx_path),
+            str(tmp_path),
             export_params=True,
             opset_version=23 if bf16 else 17,
             do_constant_folding=True,
@@ -201,6 +190,7 @@ def _ensure_sapiens_onnx(model_size: SapiensModelSize, static_batch: int, *, bf1
             output_names=["heatmaps"],
             dynamo=True,
         )
+    tmp_path.rename(onnx_path)
     return onnx_path
 
 

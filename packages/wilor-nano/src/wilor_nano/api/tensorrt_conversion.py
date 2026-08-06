@@ -1,6 +1,5 @@
 """ONNX export and TensorRT build helpers for WiLoR deployment artifacts."""
 
-import hashlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -22,7 +21,7 @@ from wilor_nano.api.tensorrt_runtime import (
 from wilor_nano.runtime import get_torch_device
 
 WiLorOnnxTarget = Literal["full_postcrop", "detector_raw"]
-TensorRtPrecision = Literal["fp32", "fp16", "bf16"]
+TensorRtPrecision = Literal["fp32", "fp16"]
 ExportFn = Callable[..., object]
 FullWilorExportOutput = tuple[
     Float[Tensor, "batch 1 3"],
@@ -49,8 +48,12 @@ class _TargetSpec(NamedTuple):
     opset_version: int
     onnx_path: Path
     engine_path: Path
-    precision: TensorRtPrecision
     allow_tf32: bool
+
+    @property
+    def precision(self) -> TensorRtPrecision:
+        """Manifest label for the engine's compute dtype (from the typed graph)."""
+        return "fp16" if self.dtype == "float16" else "fp32"
 
 
 _TARGETS: dict[WiLorOnnxTarget, _TargetSpec] = {
@@ -63,7 +66,6 @@ _TARGETS: dict[WiLorOnnxTarget, _TargetSpec] = {
         17,
         DEFAULT_FULL_WILOR_ONNX_PATH,
         DEFAULT_FULL_WILOR_ENGINE_PATH,
-        "fp16",
         False,
     ),
     "detector_raw": _TargetSpec(
@@ -75,7 +77,6 @@ _TARGETS: dict[WiLorOnnxTarget, _TargetSpec] = {
         18,
         DEFAULT_DETECTOR_ONNX_PATH,
         DEFAULT_DETECTOR_ENGINE_PATH,
-        "fp32",
         True,
     ),
 }
@@ -123,6 +124,8 @@ class TensorRtBuildConfig:
 
     def to_manifest(self, *, tensorrt_version: str, cuda_device_name: str) -> dict[str, object]:
         """Return reproducibility metadata for the non-portable TensorRT engine."""
+        from trtkit import onnx_content_hash
+
         artifact: WiLorTensorRtArtifactConfig = self.artifact
         spec: _TargetSpec = _TARGETS[artifact.target]
         batch_size: int = _batch_size(artifact)
@@ -132,7 +135,7 @@ class TensorRtBuildConfig:
             "precision": spec.precision,
             "allow_tf32": spec.allow_tf32 if self.allow_tf32 is None else self.allow_tf32,
             "onnx_path": str(onnx_path),
-            "onnx_sha256": _sha256_file(onnx_path),
+            "onnx_sha256": onnx_content_hash(onnx_path),
             "engine_path": str(self.engine_path or spec.engine_path),
             "portable_engine": False,
             "rebuild_from_onnx_on_target_machine": True,
@@ -270,9 +273,3 @@ def _batch_size(artifact: WiLorTensorRtArtifactConfig) -> int:
     return batch_size
 
 
-def _sha256_file(path: Path) -> str:
-    digest: Any = hashlib.sha256()
-    with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()

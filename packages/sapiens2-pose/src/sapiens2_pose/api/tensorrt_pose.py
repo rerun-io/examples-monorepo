@@ -50,6 +50,26 @@ ModelLoader = Callable[[str, str | Path, str], torch.nn.Module]
 ExportFn = Callable[..., object]
 
 
+class Bf16AutocastExportWrapper(torch.nn.Module):
+    """fp32 I/O boundary, bf16 autocast compute, for strongly-typed TRT builds.
+
+    TensorRT 11 builds are strongly typed, so the graph's dtypes are the
+    engine's: this bakes bf16 compute (the retained strict-accuracy precision
+    from the 0.4B sweep — fp16-typed Sapiens graphs overflow, ~70 px error)
+    into the export while the I/O contract stays fp32. Shared by this module's
+    exporter and posekit's ``_ensure_sapiens_onnx``.
+    """
+
+    def __init__(self, inner: torch.nn.Module) -> None:
+        super().__init__()
+        self.inner = inner
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            heatmaps = self.inner(inputs)
+        return heatmaps.float()
+
+
 class ExportableRMSNorm(torch.nn.Module):
     """RMSNorm implementation composed from ONNX-exportable tensor operations."""
 
@@ -280,29 +300,12 @@ def export_sapiens_pose_onnx(
     input_shape: tuple[int, int, int, int] = (1, 3, spec.image_size[0], spec.image_size[1])
     output_shape: tuple[int, int, int, int] = (1, spec.num_keypoints, spec.heatmap_size[1], spec.heatmap_size[0])
 
+    if resolved_device == "cuda" and config.opset_version < 22:
+        raise ValueError(f"bf16-autocast Sapiens exports need opset >= 22 (bf16 Conv); older opsets produce invalid ONNX that TRT parsers accept but miscompile. Got {config.opset_version}.")
     model: torch.nn.Module = model_loader(config.model_size, config.checkpoint_path, resolved_device)
     model = make_sapiens_pose_onnx_exportable(model)
     model.eval()
-
-    class _AutocastWrapper(torch.nn.Module):
-        """fp32 I/O boundary, bf16 autocast compute.
-
-        TensorRT 11 builds are strongly typed, so the graph's dtypes are the
-        engine's: this bakes the bf16 compute (the retained strict-accuracy
-        precision — fp16-typed Sapiens graphs overflow) into the export while
-        the I/O contract stays fp32.
-        """
-
-        def __init__(self, inner: torch.nn.Module) -> None:
-            super().__init__()
-            self.inner = inner
-
-        def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                heatmaps = self.inner(inputs)
-            return heatmaps.float()
-
-    wrapper: torch.nn.Module = _AutocastWrapper(model).eval() if resolved_device == "cuda" else model
+    wrapper: torch.nn.Module = Bf16AutocastExportWrapper(model).eval() if resolved_device == "cuda" else model
     dummy_inputs: torch.Tensor = torch.zeros(input_shape, dtype=torch.float32, device=resolved_device)
 
     config.onnx_path.parent.mkdir(parents=True, exist_ok=True)

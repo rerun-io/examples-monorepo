@@ -93,9 +93,7 @@ class PromptDATrtPredictor:
         from trtkit.tensorrt_runtime import TensorRtRuntime
 
         onnx_path: Path = export_promptda_onnx(model_type=model_type, image_hw=image_hw, cache_dir=cache_dir)
-        # 24 GiB workspace: the PromptDA graph's remaining large fusions need
-        # more tactic memory than trtkit's 8 GiB default on TensorRT 11.
-        config = TrtBuildConfig(max_batch_size=batch_size, opt_batch_size=batch_size, workspace_gib=24.0)
+        config = TrtBuildConfig(max_batch_size=batch_size, opt_batch_size=batch_size)
         engine_path: Path = ensure_engine(onnx_path, config, cache_dir=cache_dir / "trt")
         self.runtime = TensorRtRuntime(engine_path)
         self.image_hw: tuple[int, int] = image_hw

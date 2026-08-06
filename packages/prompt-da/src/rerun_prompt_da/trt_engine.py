@@ -142,8 +142,23 @@ def export_promptda_onnx(
             dynamo=True,
         )
     tmp_path.rename(onnx_path)
-    del model
+    # The wrapper holds the ~GB of weights via .inner — drop both references so
+    # empty_cache() actually frees them before the engine build claims memory.
+    del wrapper, model
     torch.cuda.empty_cache()
+    # Older export recipes (opset/version bumps) are never reused once this
+    # file exists — reclaim the multi-GB they'd otherwise leak. ``.part`` temps
+    # are only swept when old enough that their exporter is certainly dead, so
+    # a live concurrent export's in-flight write is never yanked away.
+    import time
+
+    stale_prefix: str = f"promptda-{model_type}_{height}x{width}_op"
+    for stale in onnx_dir.iterdir():
+        if stale == onnx_path or not stale.name.startswith(stale_prefix):
+            continue
+        if ".part" in stale.name and time.time() - stale.stat().st_mtime < 3600.0:
+            continue
+        stale.unlink(missing_ok=True)
     return onnx_path
 
 

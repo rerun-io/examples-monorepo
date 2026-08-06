@@ -1,6 +1,5 @@
 """ONNX export and TensorRT build helpers for Sapiens COCO-133 deployment."""
 
-import hashlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -10,13 +9,14 @@ from typing import Any, Literal, NamedTuple
 import torch
 from jaxtyping import Float
 from torch import Tensor
+from trtkit import onnx_content_hash
 
 from sapiens2_pose.api.runtime import DEFAULT_MODEL_SIZE, DeviceChoice, ModelSize, resolve_device
 from sapiens2_pose.api.tensorrt_pose import make_sapiens_pose_onnx_exportable
 from sapiens2_pose.sapiens_lite.pose import MODEL_SPECS, init_pose_model
 
 TensorRtTarget = Literal["detector", "pose", "rtmlib-pose"]
-TensorRtPrecision = Literal["fp16"]
+TensorRtPrecision = Literal["fp16", "fp32"]
 ModelLoader = Callable[[str, str | Path, str], torch.nn.Module]
 ExportFn = Callable[..., object]
 
@@ -92,12 +92,15 @@ class TensorRtEngineBuildConfig:
 
     @property
     def precision(self) -> TensorRtPrecision:
-        """TensorRT precision preset.
+        """Compute dtype of the engine, derived from the target's graph dtype.
 
         Returns:
-            The fixed FP16 precision string.
+            ``"fp16"`` for the fp16-typed sapiens export; ``"fp32"`` for the
+            fp32-typed zoo graphs (detector, rtmlib-pose). Strongly-typed
+            builds take the dtype from the graph, so this is a manifest label,
+            not a builder knob.
         """
-        return "fp16"
+        return "fp16" if self.target == "pose" else "fp32"
 
     def validate(self) -> None:
         """Validate TensorRT build settings.
@@ -119,7 +122,7 @@ class TensorRtEngineBuildConfig:
             JSON-serializable manifest content.
         """
         self.validate()
-        return {"target": self.target, "precision": self.precision, "onnx_path": str(self.onnx_path), "onnx_sha256": _sha256_file(self.onnx_path), "engine_path": str(self.engine_path), "portable_engine": False, "rebuild_from_onnx_on_target_machine": True, "batch_profile_preset": f"static-b{self.batch_size}", "batch_profile": {"min": self.batch_size, "optimal": self.batch_size, "max": self.batch_size}, "workspace_gib": self.workspace_gib, "builder_optimization_level": self.builder_optimization_level, "runtime_recommendation": "static_batch_padding", "tensorrt_version": tensorrt_version, "cuda_device_name": cuda_device_name, "model_io": {"input_name": self.input_name, "input_shape": [self.batch_size, *self.input_shape], "output_names": list(self.output_names)}}
+        return {"target": self.target, "precision": self.precision, "onnx_path": str(self.onnx_path), "onnx_sha256": onnx_content_hash(self.onnx_path), "engine_path": str(self.engine_path), "portable_engine": False, "rebuild_from_onnx_on_target_machine": True, "batch_profile_preset": f"static-b{self.batch_size}", "batch_profile": {"min": self.batch_size, "optimal": self.batch_size, "max": self.batch_size}, "workspace_gib": self.workspace_gib, "builder_optimization_level": self.builder_optimization_level, "runtime_recommendation": "static_batch_padding", "tensorrt_version": tensorrt_version, "cuda_device_name": cuda_device_name, "model_io": {"input_name": self.input_name, "input_shape": [self.batch_size, *self.input_shape], "output_names": list(self.output_names)}}
 
 
 class TensorRtEngineBuildSummary(NamedTuple):
@@ -178,39 +181,28 @@ def build_tensorrt_engine(config: TensorRtEngineBuildConfig) -> TensorRtEngineBu
         RuntimeError: If TensorRT cannot parse the ONNX graph or returns no serialized engine.
     """
     config.validate()
+    from trtkit import TrtBuildConfig as TrtKitBuildConfig
+    from trtkit import build_engine as trtkit_build_engine
+
     trt = _import_tensorrt()
-    logger = trt.Logger(trt.Logger.INFO)
-    builder = trt.Builder(logger)
-    # TensorRT 11 removed weak typing: networks are strongly typed and compute
-    # dtypes come from the ONNX graph (the sapiens export is fp16-typed; zoo
-    # rtmlib/detector graphs are fp32-typed and build as fp32 engines).
-    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
-    parser = trt.OnnxParser(network, logger)
-    if not bool(parser.parse_from_file(str(config.onnx_path))):
-        raise RuntimeError("TensorRT failed to parse ONNX graph:\n" + "\n".join(str(parser.get_error(idx)) for idx in range(parser.num_errors)))
-    builder_config = builder.create_builder_config()
-    builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, int(config.workspace_gib * 1024**3))
-    builder_config.builder_optimization_level = config.builder_optimization_level
-    builder_config.clear_flag(trt.BuilderFlag.TF32)
-    profile = builder.create_optimization_profile()
-    profile.set_shape(str(network.get_input(0).name), (config.batch_size, *config.input_shape), (config.batch_size, *config.input_shape), (config.batch_size, *config.input_shape))
-    builder_config.add_optimization_profile(profile)
-    serialized_engine = builder.build_serialized_network(network, builder_config)
-    if serialized_engine is None:
-        raise RuntimeError("TensorRT returned no serialized engine.")
-    config.engine_path.parent.mkdir(parents=True, exist_ok=True)
-    config.engine_path.write_bytes(bytes(serialized_engine))
+    # trtkit builds strongly typed (compute dtype from the graph: the sapiens
+    # export is fp16-typed; zoo rtmlib/detector graphs are fp32-typed) and
+    # reads the static profile from the graph's baked batch dimension.
+    trtkit_build_engine(
+        config.onnx_path,
+        config.engine_path,
+        TrtKitBuildConfig(
+            max_batch_size=config.batch_size,
+            opt_batch_size=config.batch_size,
+            allow_tf32=False,
+            workspace_gib=config.workspace_gib,
+            builder_optimization_level=config.builder_optimization_level,
+        ),
+    )
+    # Replace trtkit's generic manifest with the coco133 deploy manifest.
     manifest_path = config.engine_path.with_suffix(config.engine_path.suffix + ".json")
     manifest_path.write_text(json.dumps(config.to_manifest(tensorrt_version=str(trt.__version__), cuda_device_name=torch.cuda.get_device_name(0) if torch.cuda.is_available() else "unknown"), indent=2, sort_keys=True) + "\n")
     return TensorRtEngineBuildSummary(config.engine_path, manifest_path, config.target, config.precision, config.batch_size)
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return str(digest.hexdigest())
 
 
 def _import_tensorrt() -> Any:
