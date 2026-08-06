@@ -227,7 +227,7 @@ def pose_retr_py(
         RuntimeLayout[DX_LT].row_major(Index(num_vars, POSE_DIM)),
     )
     var ctx_ptr = get_cached_context_ptr()
-    ctx_ptr[].enqueue_function[pose_retr_kernel, pose_retr_kernel](
+    ctx_ptr[].enqueue_function[pose_retr_kernel](
         poses_lt,
         dx_lt,
         num_fix,
@@ -315,7 +315,7 @@ def gauss_newton_rays_step_py(args_obj: PythonObject) raises -> PythonObject:
         torch_float32_ptr(gs_partial), RuntimeLayout[GS_LT].row_major(Index(2, num_partials, POSE_DIM)))
 
     var ctx_ptr = get_cached_context_ptr()
-    ctx_ptr[].enqueue_function[gauss_newton_rays_step_kernel, gauss_newton_rays_step_kernel](
+    ctx_ptr[].enqueue_function[gauss_newton_rays_step_kernel](
         twc_lt, xs_lt, cs_lt, ii_lt, jj_lt, idx_lt, valid_lt, q_lt, hs_lt, gs_lt,
         num_points, num_edges, blocks_per_edge, sigma_ray, sigma_dist, c_thresh, q_thresh,
         grid_dim=num_partials,

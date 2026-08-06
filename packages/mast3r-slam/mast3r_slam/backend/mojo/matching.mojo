@@ -134,7 +134,7 @@ def iter_proj_kernel(
     starting from an initial pixel, repeatedly adjust the pixel so the sampled
     ray in image i aligns with the target 3D direction coming from image j.
     """
-    var n: UInt = block_idx.x * block_dim.x + thread_idx.x
+    var n: UInt = UInt(block_idx.x * block_dim.x + thread_idx.x)
     var b: Int = Int(block_idx.y)
 
     if n >= UInt(num_pts):
@@ -244,7 +244,7 @@ def refine_matches_kernel_f16(
     Reads float16 descriptors via raw pointer (for SIMD-8 loads),
     accumulates dot products in float32 for precision.
     """
-    var n: UInt = block_idx.x * block_dim.x + thread_idx.x
+    var n: UInt = UInt(block_idx.x * block_dim.x + thread_idx.x)
     var b: Int = Int(block_idx.y)
 
     if n >= UInt(num_pts):
@@ -322,7 +322,7 @@ def refine_matches_kernel_f16_cached[
     half precision). Caches each thread's query descriptor in shared memory,
     compile-time-unrolls the inner dot product.
     """
-    var n: UInt = block_idx.x * block_dim.x + thread_idx.x
+    var n: UInt = UInt(block_idx.x * block_dim.x + thread_idx.x)
     var b: Int = Int(block_idx.y)
 
     if n >= UInt(num_pts):
@@ -468,7 +468,7 @@ def iter_proj_py(
     var ctx_ptr = get_cached_context_ptr()
     var block_size: Int = choose_iter_proj_block(num_pts)
     var num_blocks_x: Int = ceildiv(num_pts, block_size)
-    ctx_ptr[].enqueue_function[iter_proj_kernel, iter_proj_kernel](
+    ctx_ptr[].enqueue_function[iter_proj_kernel](
         rays_lt,
         pts_lt,
         pinit_lt,
@@ -557,7 +557,7 @@ def refine_matches_py(
     # inner dot product and we only read each query descriptor once.
     if radius == 2 and dilation_max == 2 and block_size == 8 and fdim == 16:
         comptime kernel = refine_matches_kernel_f16_cached[16, 8]
-        ctx_ptr[].enqueue_function[kernel, kernel](
+        ctx_ptr[].enqueue_function[kernel](
             d11_uptr,
             d21_uptr,
             p1_lt,
@@ -568,7 +568,7 @@ def refine_matches_py(
         )
     elif radius == 2 and dilation_max == 2 and block_size == 16 and fdim == 128:
         comptime kernel = refine_matches_kernel_f16_cached[128, 16]
-        ctx_ptr[].enqueue_function[kernel, kernel](
+        ctx_ptr[].enqueue_function[kernel](
             d11_uptr,
             d21_uptr,
             p1_lt,
@@ -578,7 +578,7 @@ def refine_matches_py(
             block_dim=block_size,
         )
     else:
-        ctx_ptr[].enqueue_function[refine_matches_kernel_f16, refine_matches_kernel_f16](
+        ctx_ptr[].enqueue_function[refine_matches_kernel_f16](
             d11_uptr,
             d21_uptr,
             p1_lt,
