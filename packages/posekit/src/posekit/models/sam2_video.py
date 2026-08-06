@@ -7,8 +7,10 @@ slot (camera/stream), box or point prompts to start tracks, and per-step
 detections with GPU masks and stable ``track_ids``.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 import torch
 from jaxtyping import Bool, Float, UInt8
@@ -16,9 +18,6 @@ from torch import Tensor
 
 from posekit.models.base import SegmentationPrompts, VideoSegmenter
 from posekit.predictions import BoxDetections, validate_frames_rgb
-
-if TYPE_CHECKING:
-    from sam2.sam2_generic_video_predictor import SAM2GenericVideoPredictorState
 
 Sam2Variant = Literal["efficienttam-ti-512"]
 
@@ -58,6 +57,7 @@ class Sam2VideoSegmenter(VideoSegmenter):
         """
         from huggingface_hub import hf_hub_download
         from sam2.build_sam import build_sam2_generic_video_predictor
+        from sam2.sam2_generic_video_predictor import SAM2GenericVideoPredictorState
 
         self.config: Sam2VideoSegmenterConfig = config
         checkpoint_path: str = hf_hub_download(
