@@ -175,7 +175,7 @@ score += (v32 * other_v32).reduce_add()
 
 ### Cross-stream synchronization (REQUIRED)
 ```mojo
-ctx_ptr[].enqueue_function[kernel, kernel](args, grid_dim=..., block_dim=...)
+ctx_ptr[].enqueue_function[kernel](args, grid_dim=..., block_dim=...)
 # MUST sync — Mojo uses a different CUDA stream than PyTorch
 Python.import_module("torch").cuda.synchronize()
 ```

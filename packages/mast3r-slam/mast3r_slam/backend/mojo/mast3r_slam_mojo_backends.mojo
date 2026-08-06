@@ -42,7 +42,7 @@ from python_interop import install_cached_context
 
 
 @export
-def PyInit_mast3r_slam_mojo_backends() -> PythonObject:
+def PyInit_mast3r_slam_mojo_backends() abi("C") -> PythonObject:
     """CPython module initialiser — called once at `import` time.
 
     Builds the module, registers all Python-callable functions, and creates
