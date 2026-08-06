@@ -12,9 +12,10 @@ from pathlib import Path
 
 import torch
 import tyro
+from trtkit.tensorrt_runtime import TensorRtRuntime
 
 from mamma.landmarks.mammanet import load_mammanet
-from mamma.landmarks.tensorrt_backend import ENGINE_BATCH, MammaNetTrtRunner, build_engine, export_mammanet_onnx
+from mamma.landmarks.tensorrt_backend import ENGINE_BATCH, build_engine, export_mammanet_onnx
 
 
 @dataclass
@@ -49,13 +50,13 @@ def main(config: BuildConfig) -> None:
     print(f"built in {time.perf_counter() - t0:.0f}s -> {engine_path}")
 
     # Numerics check vs eager fp16.
-    runner = MammaNetTrtRunner(engine_path)
+    runner = TensorRtRuntime(engine_path, use_cuda_graph=True)
     torch.manual_seed(0)
     x = torch.randn(ENGINE_BATCH, 3, 512, 384, device="cuda")
     masks = (torch.rand(ENGINE_BATCH, 1, 512, 384, device="cuda") > 0.5).float()
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
         ref = model(x, masks)
-    out = runner(x, masks)
+    out = runner({"crops": x, "masks": masks})
     ref_joints = ref["joints2d"]
     assert ref_joints is not None
     diff = (out["joints2d"] - ref_joints.float()).abs()
@@ -63,11 +64,11 @@ def main(config: BuildConfig) -> None:
 
     # Latency.
     for _ in range(10):
-        runner(x, masks)
+        runner({"crops": x, "masks": masks})
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     for _ in range(50):
-        runner(x, masks)
+        runner({"crops": x, "masks": masks})
     torch.cuda.synchronize()
     print(f"TRT latency: {(time.perf_counter() - t0) / 50 * 1000:.2f} ms per {ENGINE_BATCH}-crop call (eager fp16 was ~15.8)")
 

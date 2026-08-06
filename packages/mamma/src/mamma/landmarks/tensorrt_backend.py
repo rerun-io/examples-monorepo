@@ -1,4 +1,8 @@
-"""TensorRT backend for MammaNet (export -> engine -> CUDA-graph-wrapped runner).
+"""TensorRT backend for MammaNet (ONNX export + trtkit engine build).
+
+Inference runs directly on :class:`trtkit.TensorRtRuntime` with
+``use_cuda_graph=True`` (inputs ``crops``/``masks``, outputs ``joints2d``/
+``visibility``/``contact``/``floor_contact`` — see ``export_mammanet_onnx``).
 
 Follows the proven sapiens2-pose pattern in this monorepo: the `tensorrt-cu13`
 python API (not torch-tensorrt), static batch, FP16 builder flag, and one
@@ -14,7 +18,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import torch
-from jaxtyping import Float32
 
 from mamma.landmarks.config import DEFAULT_MAMMANET_CONFIG, MammaNetConfig
 from mamma.landmarks.mammanet import MammaNet
@@ -67,23 +70,3 @@ def build_engine(onnx_path: Path, engine_path: Path) -> None:
         engine_path,
         TrtBuildConfig(max_batch_size=ENGINE_BATCH, opt_batch_size=ENGINE_BATCH, precision="fp16", allow_tf32=False),
     )
-
-
-class MammaNetTrtRunner:
-    """Static-batch TRT inference with a captured launch (torch-tensor I/O).
-
-    Thin wrapper over :class:`trtkit.TensorRtRuntime` with CUDA-graph replay.
-    """
-
-    def __init__(self, engine_path: Path) -> None:
-        from trtkit import TensorRtRuntime
-
-        self._runtime = TensorRtRuntime(engine_path, use_cuda_graph=True)
-
-    def __call__(
-        self,
-        crops: Float32[torch.Tensor, "k 3 ch cw"],
-        masks: Float32[torch.Tensor, "k 1 ch cw"],
-    ) -> dict[str, torch.Tensor]:
-        """Run up to ENGINE_BATCH crops; rows beyond ``k`` are padding."""
-        return self._runtime({"crops": crops, "masks": masks})

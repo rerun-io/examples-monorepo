@@ -135,7 +135,7 @@ def run_promptda_batch(
     image_b3hw: Float32[Tensor, "b 3 nh nw"]
     prompt_b1hw: Float32[Tensor, "b 1 192 256"]
     image_b3hw, prompt_b1hw = preprocess_batch(rgb_bhw3, prompt_bhw, predictor.image_hw)
-    depth_model_b1hw: Float32[Tensor, "b 1 nh nw"] = predictor.runtime(image_b3hw, prompt_b1hw)
+    depth_model_b1hw: Float32[Tensor, "b 1 nh nw"] = predictor.runtime({"image": image_b3hw, "prompt_depth": prompt_b1hw})["depth"]
     depth_bhw: Float32[Tensor, "b oh ow"] = postprocess_depth(depth_model_b1hw, output_hw)
     depth_mm_bhw: UInt16[ndarray, "b oh ow"] = (depth_bhw.cpu().numpy() * 1000.0).astype(np.uint16)
     depth_model_mm_bhw: UInt16[ndarray, "b nh nw"] = (

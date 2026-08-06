@@ -1,18 +1,17 @@
-"""TensorRT runners used by the optimized WiLor video path (trtkit-backed).
+"""Tensor-name contract for the WiLoR TensorRT engines (trtkit-backed).
 
 The engine mechanics — persistent buffers, static-batch zero-padding, stream
-ordering — live in the shared :class:`trtkit.TensorRtRuntime`; these wrappers
-keep WiLoR's typed call signatures and tensor-name constants.
+ordering — live in :class:`trtkit.TensorRtRuntime`; this module owns WiLoR's
+binding names and its typed output contract.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TypedDict, cast
 
-import torch
 from jaxtyping import Float
 from torch import Tensor
+from trtkit.base import TensorRuntime
 
 FULL_WILOR_INPUT_NAME: str = "img_patches"
 FULL_WILOR_OUTPUT_NAMES: tuple[str, ...] = ("global_orient", "hand_pose", "betas", "pred_cam", "pred_keypoints_3d", "pred_vertices")
@@ -33,57 +32,15 @@ class WiLorOutput(TypedDict):
     pred_vertices: Float[Tensor, "batch 778 3"]
 
 
-class TensorRtFullWilorRunner:
-    """Callable wrapper for the static-batch full WiLor TensorRT engine."""
+def run_full_wilor(runtime: TensorRuntime, crops: Float[Tensor, "batch 256 256 3"]) -> WiLorOutput:
+    """Run one CUDA float16 NHWC crop batch through the full-WiLoR engine contract.
 
-    def __init__(self, engine_path: Path) -> None:
-        """Create a full-WiLor TensorRT runner for the given static engine."""
-        from trtkit import TensorRtRuntime
+    Args:
+        runtime: trtkit runtime loaded from a full-WiLoR engine.
+        crops: CUDA float16 crops as ``Float[Tensor, "batch 256 256 3"]``.
 
-        self._runtime = TensorRtRuntime(engine_path)
-
-    def __call__(self, inputs: Float[Tensor, "batch 256 256 3"]) -> WiLorOutput:
-        """Run full-WiLor inference on NHWC crop tensors.
-
-        Args:
-            inputs: CUDA float16 crops as ``Float[Tensor, "batch 256 256 3"]``.
-
-        Returns:
-            A ``WiLorOutput`` dictionary sliced back to the original unpadded
-            batch size (views into reused buffers — clone to keep past the next call).
-
-        Raises:
-            ValueError: If ``inputs`` is not a CUDA float16 tensor.
-        """
-        if inputs.device.type != "cuda" or inputs.dtype != torch.float16:
-            raise ValueError("Full WiLor TensorRT expects CUDA float16 NHWC inputs.")
-        outputs: dict[str, Tensor] = self._runtime({FULL_WILOR_INPUT_NAME: inputs})
-        return cast(WiLorOutput, {name: outputs[name] for name in FULL_WILOR_OUTPUT_NAMES})
-
-
-class TensorRtRawDetectorRunner:
-    """Callable wrapper for the static-batch raw YOLO detector TensorRT engine."""
-
-    def __init__(self, engine_path: Path) -> None:
-        """Create a raw detector TensorRT runner for the given static engine."""
-        from trtkit import TensorRtRuntime
-
-        self._runtime = TensorRtRuntime(engine_path)
-
-    def __call__(self, inputs: Float[Tensor, "batch 3 512 416"]) -> Tensor:
-        """Run raw detector inference on NCHW detector tensors.
-
-        Args:
-            inputs: CUDA float32 detector input as
-                ``Float[Tensor, "batch 3 512 416"]``.
-
-        Returns:
-            Raw detector output tensor sliced back to the original unpadded batch
-            size (a view into a reused buffer — clone to keep past the next call).
-
-        Raises:
-            ValueError: If ``inputs`` is not a CUDA float32 tensor.
-        """
-        if inputs.device.type != "cuda" or inputs.dtype != torch.float32:
-            raise ValueError("Raw detector TensorRT expects CUDA float32 NCHW inputs.")
-        return self._runtime({DETECTOR_INPUT_NAME: inputs})[DETECTOR_OUTPUT_NAME]
+    Returns:
+        Typed outputs sliced to the submitted batch — views into runtime-owned
+        buffers that the next call overwrites; clone anything that must survive.
+    """
+    return cast(WiLorOutput, runtime({FULL_WILOR_INPUT_NAME: crops}))

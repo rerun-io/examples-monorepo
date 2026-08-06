@@ -73,54 +73,6 @@ def postprocess_depth(
     return rearrange(depth_b1hw, "b 1 h w -> b h w")  # pyrefly: ignore  # bad-argument-type — einops stub false positive
 
 
-class PromptDATrtRuntime:
-    """A PromptDA engine behind :class:`trtkit.TensorRtRuntime`.
-
-    Keeps the model-shaped call signature (image + prompt depth in, depth out)
-    over the shared runtime: persistent buffers, true-batch execution on the
-    dynamic engine, stream-safe launches. The returned depth is a view into the
-    reused output buffer sliced to the submitted batch — clone it if it must
-    survive the next call.
-    """
-
-    def __init__(self, engine_path: Path) -> None:
-        """Deserialize a machine-local engine and bind persistent I/O buffers.
-
-        Args:
-            engine_path: Engine built by :func:`rerun_prompt_da.trt_engine.ensure_engine`.
-
-        Raises:
-            RuntimeError: If CUDA is unavailable or the engine fails to load.
-        """
-        from trtkit import TensorRtRuntime
-
-        self._runtime = TensorRtRuntime(engine_path)
-        self.max_batch_size: int = self._runtime.spec.max_batch_size
-        image_shape: tuple[int, ...] = {spec.name: spec for spec in self._runtime.spec.inputs}["image"].shape
-        self.image_hw: tuple[int, int] = (image_shape[1], image_shape[2])
-
-    def __call__(
-        self,
-        image_b3hw: Float32[Tensor, "b 3 h w"],
-        prompt_depth_b1hw: Float32[Tensor, "b 1 192 256"],
-    ) -> Float32[Tensor, "b 1 h w"]:
-        """Run one batch at its true size through the dynamic engine.
-
-        Args:
-            image_b3hw: float32 CUDA RGB batch in [0,1] at the engine resolution.
-            prompt_depth_b1hw: float32 CUDA prompt depth in meters.
-
-        Returns:
-            float32 CUDA metric depth, a view into the reused output buffer
-            sliced to the submitted batch size.
-
-        Raises:
-            ValueError: If the batch exceeds the engine's profile max.
-            RuntimeError: If TensorRT reports a failed launch.
-        """
-        return self._runtime({"image": image_b3hw, "prompt_depth": prompt_depth_b1hw})["depth"]
-
-
 class PromptDATrtPredictor:
     """Batched PromptDA depth completion on a cached dynamic-batch TensorRT engine."""
 
@@ -141,10 +93,12 @@ class PromptDATrtPredictor:
             precision: TensorRT builder precision.
             cache_dir: Cache root for ONNX and engine artifacts.
         """
+        from trtkit.tensorrt_runtime import TensorRtRuntime
+
         onnx_path: Path = export_promptda_onnx(model_type=model_type, image_hw=image_hw, cache_dir=cache_dir)
         config = TrtBuildConfig(max_batch_size=batch_size, opt_batch_size=batch_size, precision=precision)
         engine_path: Path = ensure_engine(onnx_path, config, cache_dir=cache_dir / "trt")
-        self.runtime = PromptDATrtRuntime(engine_path)
+        self.runtime = TensorRtRuntime(engine_path)
         self.image_hw: tuple[int, int] = image_hw
 
     def __call__(
@@ -166,7 +120,7 @@ class PromptDATrtPredictor:
         image_b3hw: Float32[Tensor, "b 3 nh nw"]
         prompt_b1hw: Float32[Tensor, "b 1 192 256"]
         image_b3hw, prompt_b1hw = preprocess_batch(rgb_bhw3, prompt_depth_bhw, self.image_hw)
-        depth_b1hw: Float32[Tensor, "b 1 nh nw"] = self.runtime(image_b3hw, prompt_b1hw)
+        depth_b1hw: Float32[Tensor, "b 1 nh nw"] = self.runtime({"image": image_b3hw, "prompt_depth": prompt_b1hw})["depth"]
         return postprocess_depth(depth_b1hw, in_hw)
 
 
