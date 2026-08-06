@@ -20,6 +20,7 @@ See Also:
 
 from __future__ import annotations
 
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -506,12 +507,21 @@ def main(cfg: Sam3MVBodyDemoConfig) -> None:
                 if exo_video_blobs and stream_name in exo_video_blobs
                 else video_file
             )
-            # Skip if file path doesn't exist (shouldn't happen with blobs)
-            if isinstance(video_source, Path) and not video_source.exists():
-                continue
+            # log_video (rr.AssetVideo / Mp4Reader) accepts only file paths —
+            # spill RRD blobs to a temp file first.
+            if isinstance(video_source, bytes):
+                with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as blob_file:
+                    blob_file.write(video_source)
+                video_path: Path = Path(blob_file.name)
+            else:
+                if not video_source.exists():
+                    continue
+                video_path = video_source
             timestamps_ns: Int[ndarray, "n_frames"] = log_video(
-                video_source, video_log_path, timeline=timeline
+                video_path, video_log_path, timeline=timeline
             )
+            if isinstance(video_source, bytes):
+                video_path.unlink()
             video_timestamps[stream_name] = timestamps_ns
 
     total_frames: int = len(sequence)

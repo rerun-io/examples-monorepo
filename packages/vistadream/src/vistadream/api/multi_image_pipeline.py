@@ -13,7 +13,8 @@ from einops import rearrange
 from jaxtyping import Bool, Float, Float32, UInt8
 from monopriors.apis.multiview_calibration import load_rgb_images
 from monopriors.depth_utils import depth_edges_mask, multidepth_to_points
-from monopriors.models.multiview.vggt_model import MultiviewPred, VGGTPredictor, robust_filter_confidences
+from monopriors.models.multiview.multiview_model import MultiviewPred, robust_filter_confidences
+from monopriors.models.multiview.multiview_predictor import MultiviewPredictor, MultiviewPredictorConfig
 from monopriors.models.relative_depth import (
     RelativeDepthPrediction,
     get_relative_predictor,
@@ -460,11 +461,8 @@ def run_inference(config: VGGTInferenceConfig) -> None:
     rr.send_blueprint(blueprint=blueprint)
     rr.log(f"{parent_log_path}", rr.ViewCoordinates.RFU, static=True)
 
-    vggt_predictor = VGGTPredictor(
-        device=device,
-        preprocessing_mode=config.preprocessing_mode,
-    )
-    mv_pred_list: list[MultiviewPred] = vggt_predictor(rgb_list=rgb_list)
+    vggt_predictor = MultiviewPredictor(MultiviewPredictorConfig(model_name="vggt", device=device))
+    mv_pred_list: list[MultiviewPred] = vggt_predictor(rgb_list, preprocessing_mode=config.preprocessing_mode)
 
     mv_pred_list = orient_mv_pred_list(mv_pred_list)
     pointcloud: Float32[ndarray, "num_points 3"] = mv_pred_to_pointcloud(mv_pred_list)

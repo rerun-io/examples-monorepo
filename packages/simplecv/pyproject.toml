@@ -68,3 +68,5 @@ exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modu
 sort_by_size = true
 # SimpleCV exposes many public APIs and schema fields that Vulture reports at 60%.
 min_confidence = 80
+# Monkeypatched rr.send_columns lambdas must keep the API's keyword parameter names.
+ignore_names = ["indexes"]
