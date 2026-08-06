@@ -13,12 +13,15 @@ import torch.nn.functional as F
 from jaxtyping import Bool, Float, Int, UInt8
 from numpy import ndarray
 from torch import Tensor
+from trtkit.base import TensorRuntime
+from trtkit.tensorrt_runtime import TensorRtRuntime
 
 from wilor_nano.api.tensorrt_runtime import (
+    DETECTOR_INPUT_NAME,
+    DETECTOR_OUTPUT_NAME,
     FULL_WILOR_OUTPUT_NAMES,
-    TensorRtFullWilorRunner,
-    TensorRtRawDetectorRunner,
     WiLorOutput,
+    run_full_wilor,
 )
 from wilor_nano.torch_image_patch import generate_rgb_image_patches_torch
 from wilor_nano.utils import utils
@@ -98,17 +101,17 @@ class WiLorHandPose3dEstimationPipeline:
         self,
         config: WilorPipelineConfig,
         *,
-        detector_runner_factory: Callable[..., TensorRtRawDetectorRunner] = TensorRtRawDetectorRunner,
-        wilor_runner_factory: Callable[..., TensorRtFullWilorRunner] = TensorRtFullWilorRunner,
+        detector_runner_factory: Callable[[Path], TensorRuntime] = TensorRtRuntime,
+        wilor_runner_factory: Callable[[Path], TensorRuntime] = TensorRtRuntime,
     ) -> None:
-        """Create the TensorRT detector and full-WiLor runners.
+        """Create the TensorRT detector and full-WiLor runtimes.
 
         Args:
             config: TensorRT engine paths, static batch sizes, CUDA device, and
                 model constants for the optimized video path.
-            detector_runner_factory: Factory used to create the raw detector
-                runner. Tests pass fakes here to avoid loading TensorRT engines.
-            wilor_runner_factory: Factory used to create the full WiLor runner.
+            detector_runner_factory: Factory used to create the detector
+                runtime. Tests pass fakes here to avoid loading TensorRT engines.
+            wilor_runner_factory: Factory used to create the full WiLor runtime.
                 Tests pass fakes here to avoid loading TensorRT engines.
 
         Raises:
@@ -122,12 +125,8 @@ class WiLorHandPose3dEstimationPipeline:
         self.dtype: torch.dtype = config.dtype
         self.focal_length: float = config.focal_length
         self.detector_max_det: int = config.detector_max_det
-        self.detector = detector_runner_factory(
-            config.detector_engine_path, static_batch_size=config.detector_static_batch_size, device="cuda"
-        )
-        self.wilor = wilor_runner_factory(
-            config.wilor_engine_path, static_batch_size=config.wilor_static_batch_size, device="cuda"
-        )
+        self.detector = detector_runner_factory(config.detector_engine_path)
+        self.wilor = wilor_runner_factory(config.wilor_engine_path)
 
     @torch.no_grad()
     def predict_batch_rgb_tensor(
@@ -174,7 +173,7 @@ class WiLorHandPose3dEstimationPipeline:
         detections: list[DetectionExtraction] = []
         for start in range(0, int(frames_rgb.shape[0]), detector_batch_size):
             frame_chunk: RgbFrames = frames_rgb[start : start + detector_batch_size]
-            raw_predictions: Tensor = self.detector(self._preprocess_detector(frame_chunk))
+            raw_predictions: Tensor = self.detector({DETECTOR_INPUT_NAME: self._preprocess_detector(frame_chunk)})[DETECTOR_OUTPUT_NAME]
             detections.extend(self._postprocess_detector(raw_predictions, image_hw, hand_conf=hand_conf))
 
         records: list[_FrameRecord]
@@ -350,7 +349,7 @@ class WiLorHandPose3dEstimationPipeline:
         """
         chunks: dict[str, list[ndarray]] = {name: [] for name in FULL_WILOR_OUTPUT_NAMES}
         for start in range(0, int(patches.shape[0]), wilor_batch_size):
-            raw: WiLorOutput = self.wilor(patches[start : start + wilor_batch_size])
+            raw: WiLorOutput = run_full_wilor(self.wilor, patches[start : start + wilor_batch_size])
             raw_dict: dict[str, Tensor] = cast(dict[str, Tensor], raw)
             for name in FULL_WILOR_OUTPUT_NAMES:
                 chunks[name].append(raw_dict[name].cpu().float().numpy())

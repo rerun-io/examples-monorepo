@@ -2,8 +2,9 @@
 
 ONNX files are the portable interchange for the accelerated backends: the ONNX
 Runtime backend loads them directly and the TensorRT backend builds machine-local
-engines from them. Artifacts come either from OpenMMLab deploy zips (the rtmlib
-convention for RTMPose/RTMW/YOLOX) or from a torch export done by a model family.
+engines from them. posekit's artifacts come from OpenMMLab deploy zips (the
+rtmlib convention for RTMPose/RTMW/YOLOX) or from a torch export done by a model
+family, and get their baked-in NMS stripped here before the backends see them.
 """
 
 import os
@@ -12,6 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from simplecv.apis.download_utils import download_file
+
+__all__ = ("DEFAULT_ONNX_CACHE_DIR", "fetch_openmmlab_onnx", "strip_detector_nms")
 
 DEFAULT_ONNX_CACHE_DIR: Path = Path(os.environ.get("POSEKIT_ONNX_CACHE", "~/.cache/posekit/onnx")).expanduser()
 """Portable ONNX artifact cache; override with the ``POSEKIT_ONNX_CACHE`` env var."""
@@ -58,9 +61,9 @@ def strip_detector_nms(onnx_path: Path) -> Path:
     graph, which forces batch-1 data-dependent output shapes, blocks static
     TensorRT engines, and can exceed TensorRT's TopK limit (K <= 3840). posekit
     instead ends the graph at the full decoded per-anchor boxes/scores (before
-    the TopK selection cluster) and runs thresholding + torchvision NMS on GPU,
-    so ONNX Runtime and TensorRT share one static-shape artifact and one
-    postprocess.
+    the TopK selection cluster) and leaves thresholding + torchvision NMS to the
+    caller on GPU, so ONNX Runtime and TensorRT share one static-shape artifact
+    and one postprocess.
 
     Args:
         onnx_path: Detector ONNX containing a ``NonMaxSuppression`` node.
@@ -140,26 +143,3 @@ def _bypass_topk_selection(name: str, node_producers: dict[str, Any]) -> str:
                 return str(node.input[0])
             indices_node = node_producers.get(str(indices_node.input[0])) if len(indices_node.input) > 0 else None
     return name
-
-
-def onnx_static_batch_size(onnx_path: Path) -> int | None:
-    """Read the static batch size baked into an ONNX graph's inputs, if any.
-
-    Args:
-        onnx_path: ONNX model file.
-
-    Returns:
-        The fixed leading dimension shared by the graph inputs, or ``None`` when
-        the batch dimension is symbolic/dynamic.
-    """
-    import onnx
-
-    model: Any = onnx.load(str(onnx_path), load_external_data=False)
-    initializers: set[str] = {init.name for init in model.graph.initializer}
-    for graph_input in model.graph.input:
-        if graph_input.name in initializers:
-            continue
-        dims: Any = graph_input.type.tensor_type.shape.dim
-        if len(dims) > 0 and dims[0].HasField("dim_value"):
-            return int(dims[0].dim_value)
-    return None

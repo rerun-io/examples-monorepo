@@ -1,11 +1,10 @@
-"""TensorRT backend for the posekit runtime contract.
+"""TensorRT backend for the trtkit runtime contract.
 
 Unifies the TensorRT runners previously copied between ``wilor-nano``,
-``sapiens2-pose``/``sapiens-coco133-pose``, and ``mamma``: persistent
-torch-tensor I/O bound via ``set_tensor_address`` (no host copies),
-``execute_async_v3`` on a dedicated stream synchronized with torch's current
-stream, and optional CUDA-graph capture/replay for launch-overhead-critical
-loops (the mamma pattern). Dynamic-batch engines (posekit's default build)
+``sapiens2-pose``/``sapiens-coco133-pose``, ``prompt-da``, and ``mamma``:
+persistent torch-tensor I/O bound via ``set_tensor_address`` (no host copies),
+``execute_async_v3``, and optional CUDA-graph capture/replay for
+launch-overhead-critical loops (the mamma pattern). Dynamic-batch engines
 execute at the caller's true batch size; static-batch engines (fixed-batch
 ONNX exports) zero-pad up to their baked batch.
 """
@@ -16,32 +15,34 @@ from typing import Any
 import torch
 from torch import Tensor
 
-from posekit.runtimes.base import RuntimeSpec, TensorSpec, validate_runtime_inputs
+from trtkit.base import RuntimeSpec, TensorSpec, validate_runtime_inputs
 
 
 class TensorRtRuntime:
-    """TensorRT engine implementing the posekit runtime contract."""
+    """TensorRT engine implementing the trtkit runtime contract."""
 
     def __init__(self, engine_path: Path, *, use_cuda_graph: bool = False) -> None:
         """Deserialize a machine-local engine and bind persistent I/O buffers.
 
         Args:
             engine_path: Path to a TensorRT engine built for this machine/GPU
-                (see :mod:`posekit.runtimes.trt_builder`).
+                (see :mod:`trtkit.trt_builder`).
             use_cuda_graph: Capture ``execute_async_v3`` launches into CUDA
                 graphs (one per distinct batch size on dynamic engines) and
                 replay them afterwards. Worth it for small/latency-bound
                 engines called in tight loops.
 
         Raises:
-            RuntimeError: If CUDA or the TensorRT bindings are unavailable, or
-                the engine cannot be deserialized.
+            RuntimeError: If CUDA is unavailable or the engine cannot be
+                deserialized.
             ValueError: If the engine has dynamic non-batch dims or its inputs
                 disagree on batch size.
         """
         if not torch.cuda.is_available():
             raise RuntimeError("TensorRT execution requires CUDA.")
-        trt: Any = _import_tensorrt()
+        import tensorrt
+
+        trt: Any = tensorrt  # the compiled bindings have incomplete stubs
         engine: Any = trt.Runtime(trt.Logger(trt.Logger.WARNING)).deserialize_cuda_engine(engine_path.expanduser().read_bytes())
         context: Any = None if engine is None else engine.create_execution_context()
         if engine is None or context is None:
@@ -58,7 +59,7 @@ class TensorRtRuntime:
             name: str = str(engine.get_tensor_name(idx))
             shape: tuple[int, ...] = tuple(int(dim) for dim in engine.get_tensor_shape(name))
             if any(dim < 0 for dim in shape[1:]):
-                raise ValueError(f"Engine tensor {name!r} has dynamic non-batch dims {shape}; posekit requires static per-sample shapes.")
+                raise ValueError(f"Engine tensor {name!r} has dynamic non-batch dims {shape}; trtkit requires static per-sample shapes.")
             spec = TensorSpec(name=name, shape=shape[1:], dtype=_torch_dtype(engine.get_tensor_dtype(name), trt))
             if engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT:
                 input_specs.append(spec)
@@ -133,7 +134,7 @@ class TensorRtRuntime:
         return {name: tensor[:batch_size] for name, tensor in self._output_buffers.items()}
 
     def _execute(self) -> None:
-        """Launch the engine on the runner stream, synchronized with torch's stream.
+        """Launch the engine on the private stream, fenced against torch's current stream.
 
         Raises:
             RuntimeError: If TensorRT reports a failed ``execute_async_v3`` call.
@@ -197,19 +198,3 @@ def _torch_dtype(dtype: Any, trt: Any) -> torch.dtype:
     if dtype == trt.int32:
         return torch.int32
     raise TypeError(f"Unsupported TensorRT tensor dtype: {dtype}")
-
-
-def _import_tensorrt() -> Any:
-    """Import TensorRT lazily so non-TRT code paths can import this module.
-
-    Returns:
-        Imported TensorRT Python module.
-
-    Raises:
-        RuntimeError: If TensorRT bindings are not installed in the active Pixi environment.
-    """
-    try:
-        import tensorrt as trt
-    except ImportError as exc:
-        raise RuntimeError("TensorRT Python bindings are not installed in this Pixi environment.") from exc
-    return trt

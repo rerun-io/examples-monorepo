@@ -18,9 +18,7 @@ from posekit.models.base import TopDownPose2d
 from posekit.ops.crops import IMAGENET_MEAN_255, IMAGENET_STD_255, CropBatch, CropSpec, crop_coords_to_image, crop_frames
 from posekit.ops.decode import decode_udp_heatmaps
 from posekit.predictions import BoxDetections, Keypoints2d
-from posekit.runtimes import TensorRuntime
-from posekit.runtimes.base import TensorSpec, run_chunked
-from posekit.runtimes.torch_runtime import TorchRuntime
+from posekit.runtimes import TensorRuntime, TensorSpec, TorchRuntime, run_chunked
 from posekit.skeletons import COCO_17
 
 

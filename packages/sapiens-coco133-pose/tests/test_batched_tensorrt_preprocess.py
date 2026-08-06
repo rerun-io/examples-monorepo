@@ -128,19 +128,6 @@ def test_postprocess_yolox_outputs_torch_accepts_decoded_head_boxes_and_scores()
     torch.testing.assert_close(frame_boxes[0], torch.tensor([[20.0, 40.0, 100.0, 160.0]], dtype=torch.float32))
 
 
-def test_batched_video_config_drops_default_label_output_for_decoded_head(tmp_path: Path) -> None:
-    config = BatchedTensorRtVideoConfig(
-        rr_config=_headless_rr_config(),
-        video_path=tmp_path / "input.mp4",
-        detector=TensorRtDetectorConfig(engine_path=tmp_path / "detector.trt"),
-        pose=SapiensTensorRtPoseConfig(engine_path=tmp_path / "pose.trt"),
-    )
-
-    assert config.detector.extra_output_names == ()
-    assert config.to_pipeline_config().detector.extra_output_names == ()
-    assert config.show_progress is True
-
-
 def test_batched_video_config_defaults_to_minimal_sapiens_trt_preset(tmp_path: Path) -> None:
     config = BatchedTensorRtVideoConfig(rr_config=_headless_rr_config(), video_path=tmp_path / "input.mp4")
 
@@ -152,7 +139,6 @@ def test_batched_video_config_defaults_to_minimal_sapiens_trt_preset(tmp_path: P
     assert config.pose.static_batch_size == 8
     assert config.detector.output_name == "1436"
     assert config.detector.score_output_name == "1438"
-    assert config.detector.extra_output_names == ()
     assert isinstance(config.pose, SapiensTensorRtPoseConfig)
     assert config.pose.input_name == "inputs"
     assert config.pose.output_name == "heatmaps"

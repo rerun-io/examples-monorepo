@@ -19,8 +19,13 @@ from posekit.models.base import PersonDetector
 from posekit.ops.letterbox import letterbox_frames
 from posekit.ops.yolox import decode_yolox_head_outputs
 from posekit.predictions import BoxDetections
-from posekit.runtimes import OnnxBackendConfig, OnnxOrTrtBackendConfig, TensorRuntime, create_runtime_from_onnx
-from posekit.runtimes.base import run_chunked
+from posekit.runtimes import (
+    OnnxBackendConfig,
+    OnnxOrTrtBackendConfig,
+    TensorRuntime,
+    create_runtime_from_onnx,
+    run_chunked,
+)
 
 YoloxVariant = Literal["yolox-tiny-humanart", "yolox-m-humanart", "yolox-x-humanart"]
 

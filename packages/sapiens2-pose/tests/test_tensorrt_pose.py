@@ -11,8 +11,6 @@ from sapiens2_pose.api.tensorrt_pose import (
     ExportableRMSNorm,
     SapiensPoseOnnxExportConfig,
     TensorRtBuildConfig,
-    _make_network_creation_flags,
-    _set_precision_flags,
     estimate_sapiens_pose_tensorrt,
     estimate_sapiens_pose_with_heatmap_runner,
     export_sapiens_pose_onnx,
@@ -103,44 +101,6 @@ def test_tensorrt_build_config_writes_bf16_static_batch_manifest(tmp_path: Path)
         "std": [58.395, 57.12, 57.375],
     }
     assert manifest["decode"] == {"codec": "UDPHeatmap", "input_size": [768, 1024], "heatmap_size": [192, 256], "sigma": 6.0}
-
-
-def test_make_network_creation_flags_uses_explicit_batch_only() -> None:
-    class FakeNetworkDefinitionCreationFlag:
-        EXPLICIT_BATCH: int = 0
-
-    class FakeTrt:
-        NetworkDefinitionCreationFlag: type[FakeNetworkDefinitionCreationFlag] = FakeNetworkDefinitionCreationFlag
-
-    assert _make_network_creation_flags(FakeTrt) == 1
-
-
-def test_set_precision_flags_enables_only_bf16_and_disables_tf32() -> None:
-    class FakeBuilderFlag:
-        TF32: str = "tf32"
-        BF16: str = "bf16"
-
-    class FakeTrt:
-        __version__: str = "10.13.3.9"
-        BuilderFlag: type[FakeBuilderFlag] = FakeBuilderFlag
-
-    class FakeBuilderConfig:
-        def __init__(self) -> None:
-            self.flags: list[str] = []
-            self.cleared_flags: list[str] = []
-
-        def set_flag(self, flag: str) -> None:
-            self.flags.append(flag)
-
-        def clear_flag(self, flag: str) -> None:
-            self.cleared_flags.append(flag)
-
-    builder_config: FakeBuilderConfig = FakeBuilderConfig()
-
-    _set_precision_flags(builder_config, FakeTrt)
-
-    assert builder_config.cleared_flags == [FakeBuilderFlag.TF32]
-    assert builder_config.flags == [FakeBuilderFlag.BF16]
 
 
 def test_make_sapiens_pose_onnx_exportable_replaces_rmsnorm_with_equivalent_math() -> None:

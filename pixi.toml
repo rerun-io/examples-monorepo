@@ -2,28 +2,22 @@
 authors = ["pablo vela <pablovela5620@gmail.com>"]
 channels = ["https://prefix.dev/ai-demos", "https://prefix.dev/conda-forge"]
 name = "examples-monorepo"
-# Keep Pixi's conda/PyPI name mapping explicit and local so dependency
-# overrides remain deterministic when PyPI-only CUDA wheels are selected.
+# Explicit local conda/PyPI name mapping keeps overrides deterministic.
 conda-pypi-map = { conda-forge = "conda-pypi-map.json" }
-# Plain subdirs are the CPU/mac lanes. The two named entries carry the CUDA-13
-# virtual packages per platform (pixi >= 0.71 syntax, replaces the deprecated
-# [feature.cuda.system-requirements]); features opt in by referencing the name.
-# osx-arm64 is listed so common's osx target selector is valid — linux-only
-# features pin their own `platforms`, so nothing new solves for macOS.
+# Plain subdirs are the CPU/mac lanes; the named entries carry the CUDA-13
+# virtual packages. Features opt in by listing a name — see AGENTS.md
+# "Platforms & lockfile".
 platforms = [
     "linux-64",
     "linux-aarch64",
     "osx-arm64",
-    # CUDA-13 aarch64 index wheels ship as manylinux_2_3x (onnxruntime-gpu _2_34,
-    # tensorrt-cu13-libs/bindings _2_35). Declaring glibc 2.35 lets both resolve
-    # (the Spark runs 2.39); virtual packages only *loosen* package eligibility —
-    # every CUDA-13 host has glibc >= 2.35.
+    # glibc 2.35 lets the manylinux_2_35 tensorrt-cu13 wheels resolve; every
+    # CUDA-13 host has glibc >= 2.35.
     { name = "linux-64-cuda13", platform = "linux-64", cuda = "13.0", glibc = "2.35" },
     { name = "linux-aarch64-cuda13", platform = "linux-aarch64", cuda = "13.0", glibc = "2.35" },
 ]
 version = "0.1.0"
-# Named workspace platforms are pixi >= 0.71 syntax (0.70 fails to parse them);
-# the whole fleet runs pixi 0.73.0 (since 2026-07-21), so require that floor.
+# Named workspace platforms need pixi >= 0.71; the fleet runs 0.73.
 requires-pixi = ">=0.73"
 preview = ["pixi-build"]
 
@@ -35,10 +29,8 @@ iopath = ">=0.1.10"
 fsspec = ">=2025.3,<=2026.2.0"
 
 # ─── common feature (shared loose base deps) ───────────────────────────────
-# osx-arm64 is in the workspace platform vocabulary so packages that target
-# Apple Silicon (e.g. live-rerun) can compose `common`. An environment only
-# solves for macOS when every one of its features lists osx-arm64; existing
-# `common` envs also pull a linux-only feature and therefore stay on Linux.
+# osx-arm64 lets mac-targeting packages compose `common`; an env solves for
+# macOS only when EVERY feature lists osx-arm64, so linux envs are unaffected.
 [feature.common]
 platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 
@@ -60,28 +52,22 @@ jupyterlab = "*"
 xorg-libx11 = "*"
 xorg-xorgproto = "*"
 
-# simplecv (pulled in editable below) imports torch unconditionally at module
-# load in simplecv/video_io.py. On Linux torch is supplied by the co-composed
-# cuda/cpu feature; a common-only macOS env has no other provider. Scope CPU
-# torch to osx-arm64 so Linux envs (which use pytorch-gpu) are untouched.
+# simplecv imports torch at module load; a common-only macOS env has no other
+# torch provider, so scope CPU torch to osx-arm64 (Linux keeps pytorch-gpu).
 [feature.common.target.osx-arm64.dependencies]
 pytorch-cpu = "*"
-# rerun-sdk's dataloader extra requires torchvision; PyPI has no torchvision
-# wheel matching the conda-pinned torch on macos-13, so conda provides it.
+# rerun-sdk's dataloader extra needs torchvision; conda provides the matching build.
 torchvision = "*"
 
 [feature.common.pypi-dependencies]
-# Keep catalog queries ambient without pulling the PyTorch dataloader stack
-# into common environments that otherwise have no torch dependency.
+# datafusion only — the dataloader extra would drag torch into common envs.
 rerun-sdk = { version = "==0.35.0", extras = ["datafusion"] }
 gradio = "==6.13.0"
 gradio-rerun = "==0.35.0"
 simplecv = { path = "packages/simplecv", editable = true }
 
 # ─── catalog common feature (Rerun catalog prerelease lane) ────────────────
-# Explicit platforms: a feature that omits `platforms` defaults to every
-# workspace platform (pixi >= 0.71), including macOS and named CUDA platforms.
-# See AGENTS.md "Platforms & lockfile".
+# Explicit platforms required — see AGENTS.md "Platforms & lockfile".
 [feature.catalog-common]
 platforms = ["linux-64", "linux-aarch64"]
 
@@ -105,12 +91,9 @@ xorg-xorgproto = "*"
 [feature.catalog-common.pypi-dependencies]
 simplecv = { path = "packages/simplecv", editable = true }
 
-# Catalog lane: `common`'s rerun-sdk plus the datafusion/dataloader extras. To test an
-# unreleased build, point find-links at build.rerun.io — see the root AGENTS.md
-# "Testing Rerun builds".
-# Explicit platforms: a feature that omits `platforms` defaults to every
-# workspace platform (pixi >= 0.71), including macOS and named CUDA platforms.
-# See AGENTS.md "Platforms & lockfile".
+# Catalog lane: common's rerun-sdk + the dataloader extra; for unreleased
+# builds see AGENTS.md "Testing Rerun builds".
+# Explicit platforms required — see AGENTS.md "Platforms & lockfile".
 [feature.rerun-prerelease]
 platforms = ["linux-64", "linux-aarch64"]
 
@@ -126,12 +109,8 @@ prerelease-mode = "allow"
 
 
 # ─── CUDA 13.0 feature (shared across all GPU envs) ─────────────────────────
-# Both linux-64 and linux-aarch64 (DGX Spark / GB10): conda-forge now ships the
-# CUDA 13 toolchain + pytorch-gpu for aarch64. An env only actually gains the
-# aarch64 platform if its other features also allow it — features that don't pin
-# to linux-64 (e.g. wilor-nano, egoexo-forge) inherit aarch64, while the heavy
-# x86-only packages (dpvo, mast3r-slam, sam2, moge, …) pin their feature to
-# linux-64 and stay there.
+# linux-64 + linux-aarch64 (DGX Spark). An env gains aarch64 only if its other
+# features also allow it; x86-only features pin platforms = ["linux-64"].
 [feature.cuda]
 # CUDA virtual packages come from the named workspace platforms above.
 platforms = ["linux-64-cuda13", "linux-aarch64-cuda13"]
@@ -163,53 +142,33 @@ libnvjitlink = "*"
 # PyTorch — forces the cuda130/2.12.1 build (explicit beats relying on cuda-version alone)
 pytorch-gpu = ">=2.12,<2.13"
 torchvision = "*"
+# onnxruntime — conda-forge *_cuda130 builds cover linux-64 AND linux-aarch64,
+# replacing the old two-index pypi onnxruntime-gpu split. Build glob required:
+# CPU builds carry no cuda-version constraint. No sm_121 SASS — the GB10 Spark
+# JITs the bundled compute_120 PTX (validated on-device 2026-08-05).
+# MIGRATION GOTCHA: envs installed before this switch keep stale files from the
+# pypi wheel (its onnxruntime_pybind11_state.cpython-*.so shadows conda's plain
+# .so → CUDA-EP segfault at session creation). Recreate such envs:
+# rm -rf .pixi/envs/<env> && pixi install --frozen -e <env>.
+onnxruntime = { version = ">=1.26.0,<2", build = "*cuda130*" }
 
-# onnxruntime-gpu — same package and SAME version (1.24.0) on both platforms, but
-# the source differs, so it is split across two target sections (pixi can't vary
-# `index` per platform in one):
-#  - linux-64 (x86): Microsoft's ort-cuda-13 feed, pinned to the 1.24.0 release
-#    (the feed carries it alongside nightlies). Pinned — not a floating `>=…,<2`
-#    floor — so x86 stays in lockstep with aarch64 instead of drifting to 1.27-dev.
-#  - linux-aarch64 (DGX Spark / GB10, CUDA 13.0 driver): the Jetson AI Lab
-#    sbsa/cu130 wheel — native sm_121 SASS, zero PTX (cuobjdump-verified), so it
-#    loads directly on the 13.0 driver. The nightly feed's aarch64 wheels are
-#    CUDA-13.1 (PTX ISA 9.1 -> cudaErrorUnsupportedPtxVersion); conda-forge's
-#    *_cuda130 has no sm_121 SASS. cp312-only, ORT 1.24.0, sha256 pinned in the
-#    lock. Source: NVIDIA Jetson DevRel infra (recipe in dusty-nv/jetson-containers).
-# Both live here in the shared cuda feature so every cuda env gets the right wheel
-# per platform automatically — no per-feature copy to keep in sync.
-[feature.cuda.target.linux-64.pypi-dependencies]
-onnxruntime-gpu = { version = "==1.24.0", index = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-13-nightly/pypi/simple/" }
-
-[feature.cuda.target.linux-aarch64.pypi-dependencies]
-onnxruntime-gpu = { version = "==1.24.0", index = "https://pypi.jetson-ai-lab.io/sbsa/cu130/+simple/" }
-
-# TensorRT runtime — centralized here so every cuda env shares ONE source (no per-package
-# copies to keep in sync). tensorrt-cu13 ==10.13.3.9 from pypi.nvidia.com publishes wheels
-# for both linux-64 (manylinux_2_28) and linux-aarch64 (manylinux_2_35), cp310–cp313, so a
-# single UNSCOPED entry resolves on every cuda env (incl. the py3.11 ones, dpvo/mast3r-slam).
-# tensorrt-cu13-libs has stale metadata requiring `nvidia-cuda-runtime-cu13` (NVIDIA
-# deprecated it for cu13 in favor of unsuffixed `nvidia-cuda-runtime`); conda provides the
-# real CUDA 13 runtime, so satisfy it with NVIDIA's empty 0.0.0a0 placeholder (no-op).
+# TensorRT — one shared source for every cuda env (pypi.nvidia.com ships both
+# platforms, cp310–cp313). tensorrt-cu13-libs' stale metadata demands
+# nvidia-cuda-runtime-cu13; NVIDIA's empty 0.0.0a0 placeholder satisfies it
+# (conda supplies the real CUDA runtime).
 [feature.cuda.pypi-dependencies]
 tensorrt-cu13 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
 nvidia-cuda-runtime-cu13 = "==0.0.0a0"
 cuda-python = "*"
 
-# GPU runtime libs on LD_LIBRARY_PATH for every cuda env: $CONDA_PREFIX/lib first
-# (cuDNN/cuBLAS/cudart from conda — needed by ORT's CUDA & TRT providers), then the pip
-# TensorRT wheels' libnvinfer under site-packages/tensorrt_libs. Both py3.11 and py3.12
-# site-packages dirs are listed because cuda spans both python versions (e.g. dpvo and
-# mast3r-slam are 3.11); the loader silently skips whichever path doesn't exist. Setting
-# this key replaces pixi's default, so $CONDA_PREFIX/lib MUST be listed explicitly or
-# cuDNN won't resolve.
+# $CONDA_PREFIX/lib MUST come first (this key replaces pixi's default; ORT needs
+# conda's cuDNN/cuBLAS), then the pip TRT wheels' libnvinfer. Both python dirs
+# are listed because cuda envs span 3.11 and 3.12; missing paths are skipped.
 [feature.cuda.activation.env]
 LD_LIBRARY_PATH = "$CONDA_PREFIX/lib:$CONDA_PREFIX/lib/python3.12/site-packages/tensorrt_libs:$CONDA_PREFIX/lib/python3.11/site-packages/tensorrt_libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 # ─── ide feature (standalone dev env for Zed/IDE tooling) ────────────────────
-# Explicit platforms: a feature that omits `platforms` defaults to every
-# platform ANY feature references (pixi >= 0.71), so composing with `common`
-# would demand an osx-arm64 solve. See AGENTS.md "Platforms & lockfile".
+# Explicit platforms required — see AGENTS.md "Platforms & lockfile".
 [feature.ide]
 platforms = ["linux-64", "linux-aarch64"]
 
@@ -217,9 +176,8 @@ platforms = ["linux-64", "linux-aarch64"]
 python = "3.12.*"
 
 # ─── dev feature (shared across all *-dev envs) ─────────────────────────────
-# osx-arm64 added so `<pkg>-dev` envs that target Apple Silicon get the dev
-# tooling there too. Additive/safe: existing *-dev envs also carry a linux-only
-# feature, so the intersection keeps them linux-only.
+# osx-arm64 so mac-targeting *-dev envs get the tooling; linux-only envs stay
+# linux-only via platform intersection.
 [feature.dev]
 platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 
@@ -284,6 +242,7 @@ lovely-jax = "*"
 smplx = ">=0.1.28"
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 wilor-nano = { path = "packages/wilor-nano", editable = true }
+trtkit = { path = "packages/trtkit", editable = true }
 timm = "<1.0"
 vrs = ">=1.1.0"
 PyTurboJPEG = ">=1.7.0"
@@ -346,23 +305,20 @@ cwd = "packages/simplecv"
 description = "Re-encode downloaded MAMMA yuv444 videos to AV1 yuv420 (videos_av1 mirror)"
 
 [feature.simplecv.tasks.simplecv-catalog-serve]
-# Tier 1: just the `rerun server` CLI (an empty in-memory catalog), like hiw-500's serve.
-# The high `ulimit -n` is needed because the long-lived server holds one open file handle
-# per registered recording (the full 6332-file catalog otherwise hits "Too many open files").
+# Tier 1: empty in-memory catalog. High ulimit: the server holds one open fd
+# per registered recording (6332 files overflow the default).
 cmd = "bash -c 'ulimit -n 524288 && rerun server --port 9988'"
 description = "Serve an empty ExoEgo Forge catalog on :9988 (2-tier; leave running)"
 
 [feature.simplecv.tasks.simplecv-catalog-register]
-# Tier 2: register the v1 root into the running catalog. v1 uses the flat
-# /world/{exo,ego}/<name> layout, so its default blueprint must too (--layout flat).
+# Tier 2: register the v1 root (flat /world/{exo,ego}/<name> layout → --layout flat).
 cmd = "python tools/catalog_register.py --rrd-root /mnt/8tb/data/exoego-forge-catalog --layout flat"
 cwd = "packages/simplecv"
 description = "Register the v1 (flat) root into the running catalog"
 
 [feature.simplecv.tasks.simplecv-catalog-register-rig]
-# The `-rig` suffix is mandatory: v1 and rig RRDs share recording_ids and would collide under
-# the same entry name. Use `--suffix=-rig` (equals form): a value starting with `-` is
-# otherwise parsed as another flag. The rig root keeps the default rig layout.
+# `--suffix=-rig` (equals form — a bare `-rig` parses as a flag) avoids
+# recording_id collisions with the v1 entries.
 cmd = "python tools/catalog_register.py --rrd-root /mnt/8tb/data/exoego-forge-catalog-rig --suffix=-rig"
 cwd = "packages/simplecv"
 description = "Register the rig (exoego:v2) root as -rig entries into the running catalog"
@@ -569,16 +525,14 @@ open3d = ">=0.19.0,<0.20"
 rerun-prompt-da = { path = "packages/prompt-da", editable = true }
 monopriors = { path = "packages/monoprior", editable = true }
 sam3 = { path = "packages/sam3", editable = true }
-# torch's legacy ONNX exporter needs the onnx package to serialize the proto
-# (TensorRT itself comes from the shared cuda feature).
+trtkit = { path = "packages/trtkit", editable = true }
+# onnx: needed by torch's legacy ONNX exporter (TRT comes from the cuda feature).
 onnx = "*"
 
 [feature.prompt-da.activation.env]
 PACKAGE_DIR = "packages/prompt-da"
 
-# Explicit platforms: a feature that omits `platforms` defaults to every
-# workspace platform (pixi >= 0.71), including macOS and named CUDA platforms.
-# See AGENTS.md "Platforms & lockfile".
+# Explicit platforms required — see AGENTS.md "Platforms & lockfile".
 [feature.prompt-da-demo]
 platforms = ["linux-64", "linux-aarch64"]
 
@@ -614,10 +568,8 @@ depends-on = ["_prompt-da-download-polycam-example"]
 cwd = "packages/prompt-da"
 description = "Run the gradio app in dev mode"
 
-# prompt-da-catalog: PromptDA over a registered ARKitScenes catalog dataset.
-# Composes the prompt-da model stack with the arkitscenes-download package
-# (entity paths, blueprint, depth PNG encoder) and the Rerun dataloader extra.
-# linux-64 only (cuda + prompt-da are).
+# prompt-da-catalog: PromptDA over a registered ARKitScenes catalog dataset
+# (prompt-da stack + arkitscenes-download + the Rerun dataloader extra).
 [feature.prompt-da-catalog]
 platforms = ["linux-64"]
 
@@ -629,8 +581,7 @@ pillow = "*"
 av = ">=18"
 # The raw-data variant decodes the ARKitScenes wide .mov directly.
 torchcodec = "*"
-# ffmpeg builds <902 link libjxl 0.11 without a run-export pin, so they
-# dlopen-fail beside the env's libjxl 0.12. Build 902+ links 0.12.
+# ffmpeg <902 links libjxl 0.11 and dlopen-fails beside the env's 0.12.
 ffmpeg = { version = ">=8.1", build-number = ">=902" }
 
 [feature.prompt-da-catalog.pypi-dependencies]
@@ -652,9 +603,7 @@ description = "Run PromptDA over raw ARKitScenes data (torchcodec .mov decode) a
 # ═══════════════════════════════════════════════════════════════════════════
 # wilor-nano
 # ═══════════════════════════════════════════════════════════════════════════
-# Explicit platforms: a feature that omits `platforms` defaults to every
-# workspace platform (pixi >= 0.71), including macOS and named CUDA platforms.
-# See AGENTS.md "Platforms & lockfile".
+# Explicit platforms required — see AGENTS.md "Platforms & lockfile".
 [feature.wilor-nano]
 platforms = ["linux-64", "linux-aarch64"]
 
@@ -667,12 +616,9 @@ torchcodec = "*"
 
 [feature.wilor-nano.pypi-dependencies]
 wilor_nano = { path = "packages/wilor-nano", editable = true }
-# `daggr` (a personal Gradio-graph helper) was wired as an absolute local-path
-# editable dep at /home/pablo/0Dev/personal/daggr. That path does not exist off
-# the author's machine, so `pixi install -e wilor-nano` failed everywhere else.
-# Removed for reproducibility. The optional `tools/daggr_*.py` demos import
-# `from daggr import GradioNode, Graph`; to run them, install daggr yourself
-# (e.g. `daggr = { path = "/abs/path/to/daggr", editable = true }`).
+trtkit = { path = "packages/trtkit", editable = true }
+# daggr (a personal absolute-path editable dep) was removed for reproducibility;
+# the optional tools/daggr_*.py demos need it installed manually.
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 onnx = ">=1.12.0,<1.18.0"
 onnxscript = "*"
@@ -713,9 +659,7 @@ description = "Compare a candidate WiLoR RRD against the checked-in reference RR
 # ═══════════════════════════════════════════════════════════════════════════
 # egoexo-forge
 # ═══════════════════════════════════════════════════════════════════════════
-# Explicit platforms: a feature that omits `platforms` defaults to every
-# workspace platform (pixi >= 0.71), including macOS and named CUDA platforms.
-# See AGENTS.md "Platforms & lockfile".
+# Explicit platforms required — see AGENTS.md "Platforms & lockfile".
 [feature.egoexo-forge]
 platforms = ["linux-64", "linux-aarch64"]
 
@@ -739,9 +683,7 @@ rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193
 PACKAGE_DIR = "packages/egoexo-forge"
 PYREFLY_TARGET = "src/egoexo_forge tools"
 
-# Explicit platforms: a feature that omits `platforms` defaults to every
-# workspace platform (pixi >= 0.71), including macOS and named CUDA platforms.
-# See AGENTS.md "Platforms & lockfile".
+# Explicit platforms required — see AGENTS.md "Platforms & lockfile".
 [feature.egoexo-forge-demo]
 platforms = ["linux-64", "linux-aarch64"]
 
@@ -782,6 +724,7 @@ datasets = ">=4.0.0"
 mv-api = { path = "packages/mv-api", editable = true }
 monopriors = { path = "packages/monoprior", editable = true }
 posekit = { path = "packages/posekit", editable = true }
+trtkit = { path = "packages/trtkit", editable = true }
 onnx = "*"
 sam3 = { path = "packages/sam3", editable = true }
 wilor_nano = { path = "packages/wilor-nano", editable = true }
@@ -974,6 +917,7 @@ python = "3.12.*"
 
 [feature.sapiens2-pose.pypi-dependencies]
 sapiens2-pose = { path = "packages/sapiens2-pose", editable = true }
+trtkit = { path = "packages/trtkit", editable = true }
 onnx = "*"
 onnxscript = "*"
 
@@ -1055,6 +999,7 @@ tyro = ">=0.9.1,<0.10"
 
 [feature.sapiens-coco133-pose.pypi-dependencies]
 sapiens-coco133-pose = { path = "packages/sapiens-coco133-pose", editable = true }
+trtkit = { path = "packages/trtkit", editable = true }
 sapiens2-pose = { path = "packages/sapiens2-pose", editable = true }
 mv-api = { path = "packages/mv-api", editable = true }
 wilor_nano = { path = "packages/wilor-nano", editable = true }
@@ -1092,6 +1037,23 @@ cwd = "packages/sapiens-coco133-pose"
 description = "Benchmark iterable golden path against batched TensorRT path"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# trtkit — shared PyTorch → ONNX → TensorRT runtimes + engine hub
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.trtkit]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.trtkit.dependencies]
+python = "3.12.*"
+tyro = ">=0.9.1,<0.10"
+
+[feature.trtkit.pypi-dependencies]
+trtkit = { path = "packages/trtkit", editable = true }
+onnx = "*"
+
+[feature.trtkit.activation.env]
+PACKAGE_DIR = "packages/trtkit"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # posekit
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.posekit]
@@ -1104,6 +1066,7 @@ tyro = ">=0.9.1,<0.10"
 
 [feature.posekit.pypi-dependencies]
 posekit = { path = "packages/posekit", editable = true }
+trtkit = { path = "packages/trtkit", editable = true }
 sapiens2-pose = { path = "packages/sapiens2-pose", editable = true }
 sam2 = { path = "packages/sam2-streaming", editable = true }
 onnx = "*"
@@ -1125,9 +1088,8 @@ description = "Run the streaming detect/track/pose/re-ID demo (YOLOX + SAM2-stre
 # ═══════════════════════════════════════════════════════════════════════════
 # robocap-slam
 # ═══════════════════════════════════════════════════════════════════════════
-# Explicit platforms: CUDA-only deps (libcublas) can never solve on osx-arm64;
-# without this list the feature inherits osx-arm64 from `common` (pixi >= 0.71)
-# and every lock write in the workspace aborts on the unsolvable demand.
+# Explicit platforms: libcublas can never solve on osx-arm64; omitting the list
+# would abort every workspace lock write (see AGENTS.md "Platforms & lockfile").
 [feature.robocap-slam]
 platforms = ["linux-64", "linux-aarch64"]
 
@@ -1139,11 +1101,8 @@ libcublas = "*"
 libcusolver = "*"
 libstdcxx-ng = ">=14.2"
 pyarrow = ">=20.0.0,<21"
-# robocap tracks with cuVSLAM (its own cu13 wheel) and never executes torch, but the
-# shared `simplecv` lib (from [feature.common]) imports torch at module load in
-# simplecv/video_io.py. robocap uses the cv2-based VideoReader, so CPU torch is enough
-# to satisfy the import — robocap stays on CPU torch because the shared `cuda`
-# feature (now cuda 13.0) is linux-64 only and robocap also targets aarch64.
+# CPU torch only satisfies simplecv's module-load import; cuVSLAM brings its
+# own cu13 wheel and never executes torch.
 pytorch-cpu = ">=2.8.0"
 
 [feature.robocap-slam.pypi-dependencies]
@@ -1198,36 +1157,12 @@ platforms = ["linux-64"]
 [feature.pysfm.dependencies]
 python = "3.12.*"
 tyro = ">=0.9.1,<0.10"
-# cuda13: pinned to the conda CPU pycolmap build (cpu_py312) — see THE ISSUE
-# and SOLUTIONS below.
-#
-# THE ISSUE — there is no CUDA-13 pycolmap on conda-forge yet. pycolmap's
-# `cuda*` builds pin `cuda-version >=12.9,<13` + `cuda-cudart <13` (for GPU SIFT
-# + GPU faiss), a hard conflict with this monorepo's cuda13 stack, so the
-# resolver can't use them. Two non-GPU routes were tried:
-#   - PyPI wheel `pycolmap==4.0.2` (cp312 manylinux): solves + imports, but
-#     CORE-DUMPS in feature extraction (its bundled native libs clash with the
-#     conda env's libs). Rejected.
-#   - conda `cpu_*` build (this pin): drops every cuda pin and runs feature
-#     extraction on CPU. It still wants `libfaiss * *_cuda` (>=1.9,<2), satisfied
-#     by the ai-demos `libfaiss 1.10.0 cuda130*_cuda` build; Qt5 (qt-main, from
-#     colmap) and Qt6 (qt6-main, from the floated opencv) coexist, so no headless
-#     opencv hack is needed. It links against the conda env's own libs, so it
-#     does NOT core-dump. All 7 pysfm tests pass. The only cost is GPU SIFT —
-#     feature extraction runs on CPU (slower, but functionally complete).
-#
-# SOLUTIONS to get the GPU build back (none needed for correctness — CPU works):
-#   1. Wait for the conda-forge cuda130 migration. It's a dependency cascade:
-#      libfaiss + ceres-solver must publish cuda130 builds (both still cuda129 on
-#      conda-forge today) -> colmap-feedstock cuda130 -> pycolmap-feedstock
-#      cuda130. The global `cuda130.yaml` migrator is live (gated on cuda129);
-#      both colmap + pycolmap feedstocks are maintained by Tobias-Fischer.
-#      Upstream COLMAP 4.0.4 is already cuda13-ready (arch=all; Blackwell
-#      PatchMatch fix PR #4213), so this is a feedstock-rebuild job, not a code
-#      change. When that lands, switch this back to `build = "cuda*"`.
-#   2. Build colmap + pycolmap cuda13 in the ai-demos channel ourselves (as we
-#      did for lietorch + libfaiss cuda130). Works, but colmap is a heavy C++
-#      build with a large GPU dep tree — only worth it if GPU SIFT is needed.
+# No CUDA-13 pycolmap on conda-forge yet: its cuda* builds pin cuda-version <13
+# (hard conflict), and the PyPI wheel core-dumps in feature extraction. The
+# conda cpu_* build links the env's own libs and passes all tests — the only
+# cost is GPU SIFT. Switch back to build = "cuda*" once the conda-forge cuda130
+# migration reaches colmap/pycolmap (or build them in ai-demos if GPU SIFT is
+# needed sooner).
 pycolmap = { version = "4.0.*", build = "cpu*" }
 
 [feature.pysfm.pypi-dependencies]
@@ -1359,31 +1294,21 @@ CUDA_HOME = "${CONDA_PREFIX}/targets/x86_64-linux"
 CPATH = "${CONDA_PREFIX}/targets/x86_64-linux/include:${CPATH}"
 PATH = "${CONDA_PREFIX}/nvvm/bin:${PATH}"
 
-# [feature.vistadream.tasks._install-splat-transform]
-# cmd = """
-# test -e $CONDA_PREFIX/bin/splat-transform || npm install -g @playcanvas/splat-transform
-# """
-# cwd = "packages/vistadream"
-# description = "Install the splat-transform npm tool"
-
 # ── Demo tasks ───────────────────────────────────────────────────────────
 [feature.vistadream.tasks.vistadream-example]
 cmd = "python tools/run_single_img.py --image-path data/office/IMG_4029.jpg"
-# depends-on = ["_install-splat-transform"]
 cwd = "packages/vistadream"
 description = "Run VistaDream single image 3D reconstruction"
 
 [feature.vistadream.tasks.vistadream-gradio-app]
 cmd = "python tools/gradio_app.py"
-# depends-on = ["_install-splat-transform"]
 cwd = "packages/vistadream"
 description = "Launch VistaDream Gradio web interface"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # pyvrs-viewer
 # ═══════════════════════════════════════════════════════════════════════════
-# Explicit platforms: keeps the env's demand matching the lock (linux-only);
-# see the robocap-slam note above.
+# Explicit platforms required — see AGENTS.md "Platforms & lockfile".
 [feature.pyvrs-viewer]
 platforms = ["linux-64", "linux-aarch64"]
 
@@ -1400,9 +1325,7 @@ PyTurboJPEG = "*"
 PACKAGE_DIR = "packages/pyvrs-viewer"
 
 # ── Download tasks ───────────────────────────────────────────────────────
-# Explicit platforms: a feature that omits `platforms` defaults to every
-# workspace platform (pixi >= 0.71), including macOS and named CUDA platforms.
-# See AGENTS.md "Platforms & lockfile".
+# Explicit platforms required — see AGENTS.md "Platforms & lockfile".
 [feature.pyvrs-viewer-demo]
 platforms = ["linux-64", "linux-aarch64"]
 
@@ -1448,10 +1371,8 @@ cwd = "packages/pyvrs-viewer"
 description = "Benchmark 5 Quest + 5 Aria VRS files (requires download URL JSONs)"
 
 # ═══════════════════════════════════════════════════════════════════════════
-# live-rerun
-# Realtime, zero-transcode logging of a sensor's hardware-encoded H.264/H.265
-# stream straight into Rerun VideoStream. Backend #1 is DepthAI/OAK. Runs on
-# linux-64, linux-aarch64 and osx-arm64 (rerun-sdk + simplecv come from common).
+# live-rerun — zero-transcode logging of hardware-encoded H.264/H.265 into
+# Rerun VideoStream (backend #1: DepthAI/OAK)
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.live-rerun]
 platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
@@ -1462,19 +1383,15 @@ tyro = ">=0.9.1,<0.10"
 
 [feature.live-rerun.pypi-dependencies]
 live-rerun = { path = "packages/live-rerun", editable = true }
-# DepthAI 2.x is required for this OAK unit (3.x fails to open it). PyPI-only;
-# cp312 wheels exist for macosx_11_0_arm64, manylinux_2_17_x86_64 and aarch64.
+# DepthAI 2.x required — 3.x fails to open this OAK unit. PyPI-only.
 depthai = "==2.27.0.0"
 
 [feature.live-rerun.activation.env]
 PACKAGE_DIR = "packages/live-rerun"
 PYREFLY_TARGET = "."
-# depthai is a compiled module with an incomplete stub (only the 1-arg
-# getOutputQueue overload); baseline the resulting false positives.
+# depthai's incomplete compiled-module stubs are baselined.
 PYREFLY_EXTRA_ARGS = "--baseline pyrefly-baseline.json"
 
-# Keep the demo tasks available on every CPU/mac lane supported by live-rerun;
-# exclude only the named CUDA platforms, which this feature does not need.
 [feature.live-rerun-demo]
 platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 
@@ -1500,13 +1417,9 @@ torchcodec = "*"
 eigen = ">=3.4.0,<4"
 ffmpeg = ">=7.1.0"
 open3d = ">=0.19.0,<0.20"
-# cuda13/torch-2.12 forces mkl 2026 (libmkl_intel_lp64.so.3), but conda-forge's
-# faiss 1.10.0 mkl builds still link .so.2 → ImportError under mkl 2026. There is
-# no cuda13 faiss mkl build. Fix: route this env's whole BLAS stack through
-# OpenBLAS — `libblas *openblas` selects pytorch's cuda130_generic build (GPU
-# kernels identical to the mkl build; only the CPU BLAS backend differs) and the
-# faiss cpu_openblas build, so mkl is dropped entirely (nomkl) and the soname
-# clash disappears.
+# mkl 2026 (forced by cuda13/torch-2.12) breaks faiss's mkl builds (.so.2 vs
+# .so.3 soname clash). Routing BLAS through OpenBLAS drops mkl entirely; GPU
+# kernels are identical, only the CPU BLAS backend differs.
 libblas = { version = "*", build = "*openblas" }
 faiss = { version = "*", build = "*openblas*" }
 scikit-learn = "*"
@@ -1520,9 +1433,6 @@ mast3r = { path = "packages/mast3r" }
 asmk = { path = "packages/asmk" }
 
 [feature.mast3r-slam.pypi-dependencies]
-# mast3r-slam is the only pypi editable install remaining.
-# lietorch is a prebuilt package from ai-demos channel.
-# mast3r and asmk are pixi-build workspace packages.
 mast3r-slam = { path = "packages/mast3r-slam", editable = true }
 einops = ">=0.8.0"
 evo = "*"
@@ -1534,11 +1444,8 @@ pyaml = "*"
 [feature.mast3r-slam.activation.env]
 PACKAGE_DIR = "packages/mast3r-slam"
 
-# NOTE: mast3r-slam-mojo-build env removed. The mojo compiler is available
-# directly in the mast3r-slam feature (mojo = "*" + max-nightly channel).
-# Installing mojo separately (not via the modular metapackage) avoids pulling
-# in max-pipelines → uvicorn → starlette==1.0 which conflicts with gradio.
-# See docs/customoplibrary-migration-plan.md for the full package hierarchy.
+# mojo comes directly from the max-nightly channel, not the modular
+# metapackage (whose starlette pin conflicts with gradio).
 
 # ── Build tasks (CUDA extensions compiled via setuptools, no pip) ────────
 [feature.mast3r-slam.tasks._mast3r-slam-build-cuda-kernels]
@@ -1644,10 +1551,8 @@ description = "Launch MASt3R-SLAM Gradio web UI"
 # ═══════════════════════════════════════════════════════════════════════════
 # gsplat-rust-renderer
 # ═══════════════════════════════════════════════════════════════════════════
-# osx-arm64 extends beyond the workspace platforms (see `common` for the
-# pattern): the env solves/installs on macOS for the viewer + PLY-loading
-# flows. brush training on macOS is future work — the ai-demos `brush`
-# conda package below is linux-64-only.
+# osx-arm64 included for the viewer + PLY-loading flows; the `brush` conda
+# package is linux-64-only.
 [feature.gsplat-rust-renderer]
 platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 
@@ -1672,8 +1577,7 @@ pytorch-cpu = ">=2.8.0"
 torchvision = "*"
 
 [feature.gsplat-rust-renderer.target.linux-64.dependencies]
-# libudev (devel): re_viewer pulls re_gamepad/gilrs, and gilrs links libudev
-# via pkg-config at build time.
+# gilrs (via re_viewer) links libudev through pkg-config at build time.
 libudev = "257.*"
 libxkbcommon = "*"
 wayland = "*"
@@ -1684,9 +1588,7 @@ xorg-libxinerama = "*"
 xorg-libxrandr = "*"
 brush = "==0.3.0"
 
-# Same viewer build deps for aarch64 (DGX Spark). brush is linux-64-only on
-# conda-forge and only needed for the benchmark comparisons, so it is
-# deliberately absent here.
+# Same viewer build deps for aarch64; brush (linux-64-only) deliberately absent.
 [feature.gsplat-rust-renderer.target.linux-aarch64.dependencies]
 libudev = "257.*"
 libxkbcommon = "*"
@@ -1710,13 +1612,9 @@ PACKAGE_DIR = "packages/gsplat-rust-renderer"
 PKG_CONFIG_PATH = "${CONDA_PREFIX}/lib/pkgconfig"
 
 # ── Download tasks ───────────────────────────────────────────────────────
-# nerfbaselines test data (replaces the old pablovela5620 HF mirrors):
-#   - datasets:  nerfbaselines/nerfbaselines-data, file blender/<scene>.zip
-#     (nerf-synthetic <scene>/transforms_*.json + <scene>/{train,test,val}/*.png)
-#   - pretrained: nerfbaselines/nerfbaselines (model), 3dgs-mcmc/blender/<scene>.zip
-#     (INRIA-layout checkpoint/point_cloud/iteration_30000/point_cloud.ply + renders)
-# hf download fetches the zip; extraction is stdlib zipfile via the package's
-# nerfbaselines.extract_zip helper (idempotence-guarded so re-runs are no-ops).
+# nerfbaselines HF data: datasets from nerfbaselines/nerfbaselines-data
+# (blender/<scene>.zip), pretrained from nerfbaselines/nerfbaselines
+# (3dgs-mcmc/blender/<scene>.zip, INRIA layout). Extraction is idempotent.
 [feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-download-nerfbaselines-data-lego]
 cmd = "python -m gsplat_rust_renderer.nerfbaselines data lego"
 cwd = "packages/gsplat-rust-renderer"
@@ -2105,13 +2003,8 @@ cwd = "packages/dpvo"
 description = "Launch DPVO Gradio web UI"
 
 # ─── slam-evals feature (VSLAM-LAB benchmark → Rerun catalog ingester) ──────
-# Ingestion depends only on rerun-sdk, av, numpy, pyyaml, pyarrow — all
-# cross-platform. Platform is pinned to linux-aarch64 for now because the
-# current dev host is aarch64 and pixi's uv build-dispatch can't initialise
-# for linux-64 cross-builds from this host (see sibling CUDA features for
-# the same pattern). Flip to ["linux-64", "linux-aarch64"] once a linux-64
-# host is available to regenerate the linux-64 lockfile entries. The
-# PyCuVSLAM baseline will come later as a separate CUDA-only feature.
+# linux-aarch64 only for now (locked from the aarch64 dev host); flip to
+# ["linux-64", "linux-aarch64"] once a linux-64 host regenerates the lock.
 [feature.slam-evals]
 platforms = ["linux-aarch64"]
 
@@ -2146,9 +2039,6 @@ cwd = "packages/slam-evals"
 description = "Push edited layer files into the running catalog (append --datasets / --layers / --only filters; defaults to all)"
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Environments
-# ═══════════════════════════════════════════════════════════════════════════
-# ═══════════════════════════════════════════════════════════════════════════
 # mamma — streaming multiview body capture (causal MAMMA pipeline)
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.mamma]
@@ -2169,9 +2059,8 @@ natsort = ">=8.4.0,<9"
 [feature.mamma.pypi-dependencies]
 mamma = { path = "packages/mamma", editable = true }
 posekit = { path = "packages/posekit", editable = true }
-# Vendored cjaverliat/sam2 fork (streaming predictor + forgetful memory bank +
-# EfficientTAM); distribution name is `sam2`. Static metadata avoids executing
-# setup.py during lock-time resolution. See packages/sam2-streaming/VENDOR.md.
+trtkit = { path = "packages/trtkit", editable = true }
+# Vendored sam2 fork with static metadata — see packages/sam2-streaming/VENDOR.md.
 sam2 = { path = "packages/sam2-streaming", editable = true }
 
 [feature.mamma.activation.env]
@@ -2247,10 +2136,7 @@ depends-on = ["_download-mamma-inputs", "_download-mamma-weights", "_download-ma
 cwd = "packages/mamma"
 description = "Aggregate goal verification: golden gate, 30fps benchmark, dataset RRDs, no-disk-writes, hygiene"
 
-# iPhone catalog pipeline (run in order): `sweep` generates per-scene quality.rrd +
-# gate.json; `serve` runs the in-memory Rerun catalog (own shell, keep running);
-# `register` registers the RRDs as the mamma_iphones dataset with names/properties
-# + default blueprint. Mirrors rerun-io/trossen-oss's preprocess/serve/register.
+# iPhone catalog pipeline, in order: sweep → serve (own shell, keep running) → register.
 [feature.mamma.tasks.mamma-iphones-sweep]
 cmd = "python tools/sweep_iphones_quality.py --subset all"
 depends-on = ["_download-mamma-weights"]
@@ -2269,9 +2155,7 @@ description = "Step 3: register the 42 RRDs into the mamma_iphones catalog (base
 
 
 # ─── arkitscenes-download (ARKitScenes → layered Rerun recordings) ──────────
-# Composes `common`: registration only needs the datafusion extra, which
-# common's rerun-sdk carries. linux-64 only: the video transcode prefers
-# av1_nvenc (NVENC) with a libsvtav1 CPU fallback.
+# linux-64 only: the video transcode prefers av1_nvenc with a libsvtav1 CPU fallback.
 [feature.arkitscenes-download]
 platforms = ["linux-64"]
 
@@ -2324,6 +2208,9 @@ cmd = "rerun rerun+http://127.0.0.1:51235"
 cwd = "packages/arkitscenes-download"
 description = "Open the native Rerun viewer on the local catalog"
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Environments
+# ═══════════════════════════════════════════════════════════════════════════
 [environments]
 arkitscenes-download = { features = [
     "common",
@@ -2350,9 +2237,7 @@ simplecv-dev = { features = [
     "simplecv",
     "dev",
 ], solve-group = "simplecv", no-default-feature = true }
-# 2-tier ExoEgo Forge catalog: like `simplecv` but on the catalog Rerun lane (rerun-prerelease,
-# rerun-sdk==0.35.0 with the datafusion/dataloader extras). Uses `catalog-common`
-# (the rerun-pin-free mirror) so the lane's pin wins.
+# Catalog-lane envs use catalog-common (rerun-pin-free) so rerun-prerelease's pin wins.
 simplecv-catalog = { features = [
     "catalog-common",
     "rerun-prerelease",
@@ -2457,6 +2342,17 @@ sapiens-coco133-pose-dev = { features = [
     "sapiens-coco133-pose",
     "dev",
 ], solve-group = "sapiens-coco133-pose", no-default-feature = true }
+trtkit = { features = [
+    "common",
+    "cuda",
+    "trtkit",
+], solve-group = "trtkit", no-default-feature = true }
+trtkit-dev = { features = [
+    "common",
+    "cuda",
+    "trtkit",
+    "dev",
+], solve-group = "trtkit", no-default-feature = true }
 posekit = { features = [
     "common",
     "cuda",
@@ -2477,8 +2373,7 @@ robocap-slam-dev = { features = [
     "robocap-slam",
     "dev",
 ], solve-group = "robocap-slam", no-default-feature = true }
-# cuda13 migration: pysfm re-enabled on the conda CPU pycolmap build (see the
-# feature.pysfm.dependencies note above for why the cpu_* build is required).
+# pysfm runs on the conda CPU pycolmap build — see the feature.pysfm note.
 pysfm = { features = [
     "common",
     "cuda",
@@ -2573,7 +2468,6 @@ mast3r-slam-dev = { features = [
     "mast3r-slam",
     "dev",
 ], solve-group = "mast3r-slam", no-default-feature = true }
-# mast3r-slam-mojo-build env removed — mojo compiler available in mast3r-slam directly
 gsplat-rust-renderer = { features = [
     "gsplat-rust-renderer",
 ], solve-group = "gsplat-rust-renderer", no-default-feature = true }

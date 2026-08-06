@@ -1,9 +1,8 @@
-"""TensorRT engine building and machine-local caching for posekit models.
+"""TensorRT engine building and machine-local caching (the hub layer).
 
 Engines are never committed or downloaded: they are sm-/version-specific
 artifacts built once from a model's ONNX interchange file into a local cache
-directory (the mamma ``.trt_cache`` convention), with a JSON manifest recording
-how each engine was produced (the wilor-nano/sapiens convention).
+directory, with a JSON manifest recording how each engine was produced.
 """
 
 import hashlib
@@ -21,8 +20,8 @@ graph itself (e.g. fp16 matmuls with fp32 layernorm islands from a dynamo
 export), instead of letting TensorRT down-convert everything. Use it when a
 weakly-typed fp16 build overflows (large ViTs like Sapiens)."""
 
-DEFAULT_TRT_CACHE_DIR: Path = Path(os.environ.get("POSEKIT_TRT_CACHE", "~/.cache/posekit/trt")).expanduser()
-"""Machine-local engine cache; override with the ``POSEKIT_TRT_CACHE`` env var."""
+DEFAULT_TRT_CACHE_DIR: Path = Path(os.environ.get("TRTKIT_TRT_CACHE", "~/.cache/trtkit/trt")).expanduser()
+"""Machine-local engine cache; override with the ``TRTKIT_TRT_CACHE`` env var."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +35,9 @@ class TrtBuildConfig:
     """Batch size TensorRT tunes kernels for (dynamic profile optimum)."""
     precision: TrtPrecision = "fp16"
     """Builder precision flag. ``fp32`` leaves the builder defaults untouched."""
+    allow_tf32: bool = True
+    """Allow TF32 math for fp32 layers (TensorRT's default). Disable when a
+    model needs strict fp32 numerics (e.g. wilor's full-pose engine)."""
     workspace_gib: float = 8.0
     """Workspace memory pool limit handed to the builder."""
     builder_optimization_level: int = 3
@@ -46,8 +48,8 @@ def cached_engine_path(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Pa
     """Return the machine-local cache path for an engine built from this ONNX file.
 
     The name encodes everything that invalidates an engine: ONNX content hash,
-    batch, precision, workspace, optimization level, TensorRT version, and GPU
-    compute capability.
+    batch, precision (including a disabled-TF32 marker), workspace, optimization
+    level, TensorRT version, and GPU compute capability.
 
     Args:
         onnx_path: ONNX interchange file the engine is built from.
@@ -59,11 +61,12 @@ def cached_engine_path(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Pa
     """
     if not 1 <= config.opt_batch_size <= config.max_batch_size:
         raise ValueError(f"opt_batch_size must be within [1, max_batch_size], got opt={config.opt_batch_size} max={config.max_batch_size}.")
-    trt: Any = _import_tensorrt()
+    import tensorrt as trt
     capability: tuple[int, int] = torch.cuda.get_device_capability()
     onnx_hash: str = _onnx_content_hash(onnx_path)[:12]
+    precision_key: str = config.precision if config.allow_tf32 else f"{config.precision}-notf32"
     name: str = (
-        f"{onnx_path.stem}_b1-{config.opt_batch_size}-{config.max_batch_size}_{config.precision}"
+        f"{onnx_path.stem}_b1-{config.opt_batch_size}-{config.max_batch_size}_{precision_key}"
         f"_w{config.workspace_gib:g}o{config.builder_optimization_level}"
         f"_trt{trt.__version__}_sm{capability[0]}{capability[1]}_{onnx_hash}.engine"
     )
@@ -83,7 +86,9 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig) -> 
     Raises:
         RuntimeError: If ONNX parsing or engine serialization fails.
     """
-    trt: Any = _import_tensorrt()
+    import tensorrt
+
+    trt: Any = tensorrt  # the compiled bindings have incomplete stubs
     logger: Any = trt.Logger(trt.Logger.WARNING)
     builder: Any = trt.Builder(logger)
     network_flags: int = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
@@ -105,13 +110,15 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig) -> 
         builder_config.set_flag(trt.BuilderFlag.BF16)
     # "strong" and "fp32" set no precision flags; strongly-typed networks
     # forbid them and take dtypes from the graph.
+    if not config.allow_tf32 and config.precision != "strong" and hasattr(trt.BuilderFlag, "TF32"):
+        builder_config.clear_flag(trt.BuilderFlag.TF32)
     profile: Any = builder.create_optimization_profile()
     has_dynamic_batch: bool = False
     for idx in range(int(network.num_inputs)):
         tensor: Any = network.get_input(idx)
         shape: tuple[int, ...] = tuple(int(dim) for dim in tensor.shape)
         if any(dim < 0 for dim in shape[1:]):
-            raise RuntimeError(f"ONNX input {tensor.name!r} has dynamic non-batch dims {shape}; posekit requires static per-sample shapes.")
+            raise RuntimeError(f"ONNX input {tensor.name!r} has dynamic non-batch dims {shape}; trtkit requires static per-sample shapes.")
         if shape[0] < 0:
             has_dynamic_batch = True
             per_sample: tuple[int, ...] = shape[1:]
@@ -139,6 +146,7 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig) -> 
         "max_batch_size": config.max_batch_size,
         "opt_batch_size": config.opt_batch_size,
         "precision": config.precision,
+        "allow_tf32": config.allow_tf32,
         "workspace_gib": config.workspace_gib,
         "builder_optimization_level": config.builder_optimization_level,
         "tensorrt_version": str(trt.__version__),
@@ -162,7 +170,7 @@ def ensure_engine(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Path = 
     """
     engine_path: Path = cached_engine_path(onnx_path, config, cache_dir=cache_dir)
     if not engine_path.exists():
-        print(f"[posekit] building TensorRT engine (one-time, may take minutes): {engine_path.name}")
+        print(f"[trtkit] building TensorRT engine (one-time, may take minutes): {engine_path.name}")
         build_engine(onnx_path, engine_path, config)
     return engine_path
 
@@ -185,19 +193,3 @@ def _onnx_content_hash(onnx_path: Path) -> str:
             for chunk in iter(lambda: stream.read(1 << 20), b""):
                 digest.update(chunk)
     return digest.hexdigest()
-
-
-def _import_tensorrt() -> Any:
-    """Import TensorRT lazily so non-TRT code paths can import this module.
-
-    Returns:
-        Imported TensorRT Python module.
-
-    Raises:
-        RuntimeError: If TensorRT bindings are not installed in the active Pixi environment.
-    """
-    try:
-        import tensorrt as trt
-    except ImportError as exc:
-        raise RuntimeError("TensorRT Python bindings are not installed in this Pixi environment.") from exc
-    return trt

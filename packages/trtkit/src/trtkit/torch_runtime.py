@@ -1,15 +1,15 @@
-"""Eager PyTorch backend for the posekit runtime contract."""
+"""Eager PyTorch backend for the trtkit runtime contract."""
 
 from collections.abc import Sequence
 
 import torch
 from torch import Tensor
 
-from posekit.runtimes.base import RuntimeSpec, TensorSpec, validate_runtime_inputs
+from trtkit.base import RuntimeSpec, TensorSpec, validate_runtime_inputs
 
 
 class TorchRuntime:
-    """Wraps an ``nn.Module`` as a :class:`posekit.runtimes.base.TensorRuntime`.
+    """Wraps an ``nn.Module`` as a :class:`trtkit.base.TensorRuntime`.
 
     The module is called positionally in ``input_specs`` order and its (tuple of)
     outputs are mapped to ``output_specs`` names, so the same model class can

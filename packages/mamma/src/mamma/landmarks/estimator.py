@@ -52,11 +52,11 @@ class LandmarkEstimator:
         self.model: MammaNet = load_mammanet(weights_path, device=device, config=config)
         self.runner = None
         if engine_path is not None:
-            from mamma.landmarks.tensorrt_backend import MammaNetTrtRunner
+            from trtkit.tensorrt_runtime import TensorRtRuntime
 
             # FP16 TRT engine: 3.88ms vs 15.8ms eager per 4-crop call; joints
             # p99 diff 0.008 normalized units vs eager fp16 (gate re-verified).
-            self.runner = MammaNetTrtRunner(engine_path, config=config)
+            self.runner = TensorRtRuntime(engine_path, use_cuda_graph=True)
         if compile_model:
             import torch._dynamo
 
@@ -117,7 +117,7 @@ class LandmarkEstimator:
         img_crops, _ = gpu_crop_batch(frames_batch, centers * s, sizes * s, None, self.config)
         mask_crops = gpu_mask_crop_batch(masks_batch, centers, sizes, self.config)
         if self.runner is not None and img_crops.shape[0] <= 4:
-            out: dict[str, torch.Tensor | None] = dict(self.runner(img_crops, mask_crops))
+            out: dict[str, torch.Tensor | None] = dict(self.runner({"crops": img_crops, "masks": mask_crops}))
         else:
             with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16, enabled="cuda" in self.device):
                 out = self.model(img_crops, mask_crops)
