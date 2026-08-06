@@ -15,7 +15,6 @@ Requires the ``sapiens2-pose`` package (model definition + checkpoints);
 imports are lazy so the rest of posekit works without it.
 """
 
-import os
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -155,8 +154,9 @@ def _ensure_sapiens_onnx(model_size: SapiensModelSize, static_batch: int, *, bf1
         Path to the cached ONNX export.
     """
     from sapiens2_pose.api.runtime import get_pose_model
-    from sapiens2_pose.api.tensorrt_pose import Bf16AutocastExportWrapper, make_sapiens_pose_onnx_exportable
+    from sapiens2_pose.api.tensorrt_pose import make_sapiens_pose_onnx_exportable
     from sapiens2_pose.sapiens_lite.pose import MODEL_SPECS
+    from trtkit import export_onnx
 
     # bf16=True bakes bf16 autocast into the graph with fp32 I/O for TRT 11's
     # strongly-typed builds (graph dtype = engine dtype; bf16 is the fastest
@@ -171,26 +171,15 @@ def _ensure_sapiens_onnx(model_size: SapiensModelSize, static_batch: int, *, bf1
     print(f"[posekit] exporting Sapiens2 {model_size} pose to ONNX (one-time): {onnx_path.name}")
     spec: Any = MODEL_SPECS[model_size]
     model: Any = make_sapiens_pose_onnx_exportable(get_pose_model(model_size, "cuda")).eval()
-    export_model: Any = Bf16AutocastExportWrapper(model).eval() if bf16 else model
     dummy: Tensor = torch.zeros((static_batch, 3, int(spec.image_size[0]), int(spec.image_size[1])), dtype=torch.float32, device="cuda")
-    # pid-unique temp + atomic rename so a killed multi-minute export can never
-    # publish a truncated file that later runs silently reuse.
-    tmp_path: Path = onnx_path.with_name(f"{onnx_path.name}.part{os.getpid()}")
-    with torch.no_grad():
-        # The dynamo exporter is required: the TorchScript tracer fails on the
-        # Sapiens head ("instance_norm for unknown channel size").
-        torch.onnx.export(
-            export_model,
-            (dummy,),
-            str(tmp_path),
-            export_params=True,
-            opset_version=23 if bf16 else 17,
-            do_constant_folding=True,
-            input_names=["inputs"],
-            output_names=["heatmaps"],
-            dynamo=True,
-        )
-    tmp_path.rename(onnx_path)
+    export_onnx(
+        model,
+        (dummy,),
+        onnx_path,
+        input_names=["inputs"],
+        output_names=["heatmaps"],
+        compute_dtype=torch.bfloat16 if bf16 else None,
+    )
     return onnx_path
 
 

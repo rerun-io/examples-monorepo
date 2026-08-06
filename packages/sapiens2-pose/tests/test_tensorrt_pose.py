@@ -60,7 +60,9 @@ def test_export_sapiens_pose_onnx_uses_static_batch_one_graph(tmp_path: Path) ->
     assert export_summary.onnx_path == onnx_path
     assert export_summary.input_shape == (1, 3, 1024, 768)
     assert export_summary.output_shape == (1, 308, 256, 192)
-    assert calls[0]["path"] == onnx_path
+    assert calls[0]["path"].parent == onnx_path.parent
+    assert calls[0]["path"].name.startswith(onnx_path.name + ".part")
+    assert onnx_path.exists()
     assert calls[0]["dummy_inputs"].shape == (1, 3, 1024, 768)
     assert calls[0]["input_names"] == ["inputs"]
     assert calls[0]["output_names"] == ["heatmaps"]

@@ -21,8 +21,6 @@ class ExportOnnxCli:
     """Optional explicit checkpoint path; when omitted the checkpoint is downloaded from Hugging Face."""
     model_size: ModelSize = "0.4B"
     """Sapiens2 pose model size to export."""
-    opset_version: int = 23
-    """ONNX opset version passed to `torch.onnx.export` (>= 22 for the bf16 graph)."""
     device: DeviceChoice = "cuda"
     """Device used while tracing."""
 
@@ -35,7 +33,6 @@ def main(args: ExportOnnxCli) -> None:
             checkpoint_path=checkpoint_path,
             onnx_path=args.onnx_path,
             model_size=args.model_size,
-            opset_version=args.opset_version,
             device=args.device,
         )
     )

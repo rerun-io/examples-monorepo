@@ -27,40 +27,31 @@ ENGINE_BATCH: int = 4
 """Static batch baked into the engine (cameras x persons rounded up)."""
 
 
-class _ExportWrapper(torch.nn.Module):
-    """Flat-output wrapper with fp32 I/O and fp16 autocast compute.
-
-    TensorRT 11 builds are strongly typed: the graph's dtypes are the engine's
-    dtypes. Tracing under autocast bakes fp16 casts around the matmul-heavy ops
-    (fp32 islands stay where autocast keeps them) while the I/O contract and
-    MammaNet's Float32 jaxtyping hints stay fp32 — the same mixed numerics the
-    old weakly-typed FP16 builder flag produced, and the same recipe the eager
-    fp16 path uses at inference.
-    """
+class _FlattenOutputs(torch.nn.Module):
+    """Adapter shaping MammaNet's dict output into the flat ONNX output tuple."""
 
     def __init__(self, model: MammaNet) -> None:
         super().__init__()
         self.model = model
 
     def forward(self, x: torch.Tensor, masks: torch.Tensor):
-        with torch.autocast("cuda", dtype=torch.float16):
-            out = self.model(x, masks)
-        return out["joints2d"].float(), out["visibility"].float(), out["contact"].float(), out["floor_contact"].float()
+        out = self.model(x, masks)
+        return out["joints2d"], out["visibility"], out["contact"], out["floor_contact"]
 
 
 def export_mammanet_onnx(model: MammaNet, onnx_path: Path, config: MammaNetConfig = DEFAULT_MAMMANET_CONFIG) -> None:
-    """Export MammaNet to a static-batch, fp16-compute ONNX graph (dynamo exporter)."""
-    onnx_path.parent.mkdir(parents=True, exist_ok=True)
-    wrapper = _ExportWrapper(model).eval().cuda()
+    """Export MammaNet to a static-batch, fp16-compute ONNX graph via trtkit."""
+    from trtkit import export_onnx
+
     x = torch.randn(ENGINE_BATCH, 3, config.crop_height, config.crop_width, device="cuda")
     masks = torch.rand(ENGINE_BATCH, 1, config.crop_height, config.crop_width, device="cuda")
-    torch.onnx.export(
-        wrapper,
+    export_onnx(
+        _FlattenOutputs(model).eval().cuda(),
         (x, masks),
-        str(onnx_path),
+        onnx_path,
         input_names=["crops", "masks"],
         output_names=["joints2d", "visibility", "contact", "floor_contact"],
-        dynamo=True,
+        compute_dtype=torch.float16,
     )
 
 

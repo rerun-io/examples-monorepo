@@ -50,26 +50,6 @@ ModelLoader = Callable[[str, str | Path, str], torch.nn.Module]
 ExportFn = Callable[..., object]
 
 
-class Bf16AutocastExportWrapper(torch.nn.Module):
-    """fp32 I/O boundary, bf16 autocast compute, for strongly-typed TRT builds.
-
-    TensorRT 11 builds are strongly typed, so the graph's dtypes are the
-    engine's: this bakes bf16 compute (the retained strict-accuracy precision
-    from the 0.4B sweep — fp16-typed Sapiens graphs overflow, ~70 px error)
-    into the export while the I/O contract stays fp32. Shared by this module's
-    exporter and posekit's ``_ensure_sapiens_onnx``.
-    """
-
-    def __init__(self, inner: torch.nn.Module) -> None:
-        super().__init__()
-        self.inner = inner
-
-    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            heatmaps = self.inner(inputs)
-        return heatmaps.float()
-
-
 class ExportableRMSNorm(torch.nn.Module):
     """RMSNorm implementation composed from ONNX-exportable tensor operations."""
 
@@ -129,10 +109,6 @@ class SapiensPoseOnnxExportConfig:
     """Path where the exported ONNX graph should be written."""
     model_size: ModelSize = "0.4B"
     """Sapiens2 pose model size to export."""
-    opset_version: int = 23
-    """ONNX opset version passed to `torch.onnx.export`. Must be >= 22: the
-    bf16-autocast graph needs opset-22 bf16 Conv support (older opsets produce
-    invalid ONNX that TRT parsers accept but miscompile)."""
     device: DeviceChoice = "cuda"
     """Device used while tracing; CUDA is preferred for the real 0.4B export."""
 
@@ -151,8 +127,6 @@ class SapiensPoseOnnxExportSummary:
     """NCHW input tensor shape used for export."""
     output_shape: tuple[int, int, int, int]
     """NCHW heatmap output tensor shape expected from the graph."""
-    opset_version: int
-    """ONNX opset version used for export."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,27 +274,24 @@ def export_sapiens_pose_onnx(
     input_shape: tuple[int, int, int, int] = (1, 3, spec.image_size[0], spec.image_size[1])
     output_shape: tuple[int, int, int, int] = (1, spec.num_keypoints, spec.heatmap_size[1], spec.heatmap_size[0])
 
-    if resolved_device == "cuda" and config.opset_version < 22:
-        raise ValueError(f"bf16-autocast Sapiens exports need opset >= 22 (bf16 Conv); older opsets produce invalid ONNX that TRT parsers accept but miscompile. Got {config.opset_version}.")
+    from trtkit import export_onnx
+
     model: torch.nn.Module = model_loader(config.model_size, config.checkpoint_path, resolved_device)
     model = make_sapiens_pose_onnx_exportable(model)
     model.eval()
-    wrapper: torch.nn.Module = Bf16AutocastExportWrapper(model).eval() if resolved_device == "cuda" else model
     dummy_inputs: torch.Tensor = torch.zeros(input_shape, dtype=torch.float32, device=resolved_device)
-
-    config.onnx_path.parent.mkdir(parents=True, exist_ok=True)
-    with torch.no_grad():
-        export_fn(
-            wrapper,
-            (dummy_inputs,),
-            config.onnx_path,
-            export_params=True,
-            opset_version=config.opset_version,
-            do_constant_folding=True,
-            input_names=["inputs"],
-            output_names=["heatmaps"],
-            dynamo=True,
-        )
+    # bf16 is the retained strict-accuracy precision from the 0.4B sweep
+    # (fp16-typed Sapiens graphs overflow, ~70 px error); trtkit owns the
+    # autocast wrapping, opset policy, and atomic publish.
+    export_onnx(
+        model,
+        (dummy_inputs,),
+        config.onnx_path,
+        input_names=["inputs"],
+        output_names=["heatmaps"],
+        compute_dtype=torch.bfloat16 if resolved_device == "cuda" else None,
+        export_fn=export_fn,
+    )
 
     return SapiensPoseOnnxExportSummary(
         checkpoint_path=config.checkpoint_path,
@@ -328,7 +299,6 @@ def export_sapiens_pose_onnx(
         model_size=config.model_size,
         input_shape=input_shape,
         output_shape=output_shape,
-        opset_version=config.opset_version,
     )
 
 
