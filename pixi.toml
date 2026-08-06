@@ -2003,10 +2003,8 @@ cwd = "packages/dpvo"
 description = "Launch DPVO Gradio web UI"
 
 # ─── slam-evals feature (VSLAM-LAB benchmark → Rerun catalog ingester) ──────
-# linux-aarch64 only for now (locked from the aarch64 dev host); flip to
-# ["linux-64", "linux-aarch64"] once a linux-64 host regenerates the lock.
 [feature.slam-evals]
-platforms = ["linux-aarch64"]
+platforms = ["linux-64", "linux-aarch64"]
 
 [feature.slam-evals.dependencies]
 python = "3.10.*"
