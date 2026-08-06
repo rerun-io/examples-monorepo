@@ -24,8 +24,8 @@ The catalog tools (`mv-api-catalog-prediction-layer` and the macOS
 either, start the base catalog with the simplecv tasks:
 
 ```bash
-pixi run simplecv-catalog-serve       # tier 1: serve the catalog (rerun server)
-pixi run simplecv-catalog-register    # tier 2: register the base ExoEgo Forge recordings
+pixi run -e simplecv-catalog --frozen simplecv-catalog-serve       # tier 1: serve the catalog (rerun server)
+pixi run -e simplecv-catalog --frozen simplecv-catalog-register    # tier 2: register the base ExoEgo Forge recordings
 ```
 
 Both tools default to `--catalog-url rerun+http://127.0.0.1:9988`. Prediction

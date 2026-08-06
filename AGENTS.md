@@ -4,11 +4,11 @@ This file provides guidance to coding agents when working with code in this repo
 
 ## What This Is
 
-A **Pixi workspace monorepo** of computer vision projects. Each package lives in `packages/<name>/` with its own Python module, CLI tools, and tests. All Pixi configuration (deps, tasks, environments) lives in the root `pixi.toml`; per-package `pyproject.toml` files hold standard Python packaging metadata plus per-package tooling config such as `[tool.ruff]` and `[tool.vulture]`.
+A **Pixi workspace monorepo** of computer vision projects. Runnable Python projects live in `packages/<name>/` with their modules, CLI tools, and tests; the directory also contains build-only dependencies and vendored code. Root-managed dependencies, tasks, and environments live in `pixi.toml`. Runnable packages keep standard Python packaging metadata and package-specific tooling config such as `[tool.ruff]` and `[tool.vulture]` in `pyproject.toml`; Pixi-build packages such as `asmk`, `dpretrieval`, and `mast3r` have their own build manifests.
 
 ## Environments
 
-Each package has a prod env (`<name>`) and a dev env (`<name>-dev`, adds ruff, pytest, beartype, pyrefly, hypothesis, vulture). The dev env exposes the tasks `lint`, `typecheck`, `deadcode`, and `tests` (e.g. `pixi run -e <name>-dev tests`). Direnv auto-activates the `*-dev` env when you `cd` into a package directory.
+Each root-managed runnable package has a prod env (`<name>`) and a dev env (`<name>-dev`, adds ruff, pytest, beartype, pyrefly, hypothesis, vulture). The dev env exposes the tasks `lint`, `typecheck`, `deadcode`, and `tests` (e.g. `pixi run -e <name>-dev tests`). In package directories that contain a `.envrc`, direnv auto-activates the `*-dev` env when you enter the directory.
 
 ## Commands
 
@@ -35,7 +35,7 @@ The workspace `platforms` list defines the full platform vocabulary: the plain `
 
 ## Architecture
 
-**Beartype** is activated conditionally via `PIXI_DEV_MODE` in each package's `__init__.py`:
+**Beartype** is activated conditionally via `PIXI_DEV_MODE` in each runnable Python package's `__init__.py`:
 ```python
 import os
 if os.environ.get("PIXI_DEV_MODE") == "1":
@@ -56,7 +56,7 @@ if __name__ == "__main__":
     main(tyro.cli(Config))
 ```
 
-**Package structure:**
+**Typical runnable package structure:**
 ```
 packages/<name>/
   pyproject.toml    # [project], [build-system], [tool.ruff]
@@ -67,6 +67,15 @@ packages/<name>/
   tools/            # THIN CLI shims over <module>/apis/ (demos/ and apps/ subdirs)
   tests/
 ```
+
+## Adding a new package
+
+1. Create `packages/<name>/` with `pyproject.toml`, the source module, `tools/`, and `tests/` (structure above).
+2. Add `[feature.<name>]` in the root `pixi.toml`: conda deps, pypi deps (editable install), `activation.env` with `PACKAGE_DIR = "packages/<name>"`, and tasks with `cwd = "packages/<name>"`. Declare `platforms` explicitly (see **Platforms & lockfile**).
+3. Add `<name>` and `<name>-dev` entries in `[environments]`, both with `solve-group = "<name>"` and `no-default-feature = true`; `<name>-dev` adds the `dev` feature.
+4. Copy a package `.envrc` (defaults `PIXI_ENV` to `<name>-dev`) and add `packages/<name>/data/` to `.gitignore`.
+5. Register the package in `pyrefly.toml` in three places (see **Code Style**).
+6. Run `pixi install -e <name>-dev` to verify the solve.
 
 ## Code Style
 
@@ -142,6 +151,7 @@ linux-64 (pixi 0.70.x) and move back to a public release once the fix ships.
   ```
 - **Use `0.0` not `0` for float annotations** — beartype strictly distinguishes `int` from `float`. `last_error: float = 0` will fail; use `last_error: float = 0.0`
 - **`vulture` (the `deadcode` task) flags framework-used names** — Tyro/dataclass config fields, `pytestmark`, `__exit__`'s `*exc`, etc. Add them to `[tool.vulture] ignore_names` in the package `pyproject.toml` rather than reworking the code.
+- **pyrefly tensor-shapes fixtures hang the solver** — with `typings/pyrefly/tensor_shapes/fixtures` on pyrefly's `search-path`, pyrefly 1.1.x enters an infinite solver loop on any file that uses numpy values — even `np.zeros(3)`. `tensor-shapes = false` alone does not help; only removing the search-path entry does. Both lines stay commented out in `pyrefly.toml` (shape-aware `torch.Tensor`/jaxtyping inference is disabled meanwhile); re-enable both together once the fixtures are fixed.
 - **Pixi collapses multiline `cmd = """..."""` into a single line**, replacing newlines with spaces. If a task has separate commands on different lines (e.g. `export`, `echo`, `python`), they become arguments to the first command and never execute. The task appears to succeed (exit 0) but produces no output. Always use `&&`-chained single-line commands or `\` line continuations instead.
 - **Don't poll with `pgrep -f <pat>` when the polling command itself contains `<pat>`** — it matches its own shell and the `until ! pgrep ...` loop never exits (silently hangs forever). Prefer `run_in_background` on the real command (you're notified on its own exit), or wait on a file/sentinel.
 - **Always pass `--rr-config.headless` to Rerun CLIs in shells without `DISPLAY`** — the `RerunTyroConfig` default calls `rr.spawn()`; when the viewer fails to start (winit "neither WAYLAND_DISPLAY nor DISPLAY is set"), the recording stream's channel fills and every `rr.log()` blocks forever. The run wedges silently (zombie viewer child, zero CPU) instead of erroring out.

@@ -1,200 +1,114 @@
-# Examples Monorepo
+# Computer Vision Examples Monorepo
 
-A pixi workspace containing multiple computer vision example projects, each with its own isolated environment and dependencies.
+A Pixi workspace of computer vision applications, reusable libraries, and
+source-built dependencies. Runnable projects live under `packages/` and compose
+shared features with package-specific dependencies in the root `pixi.toml`.
+Most runnable packages have a production environment (`<name>`) and a
+development environment (`<name>-dev`) with the same dependency solve.
 
-## Packages
-
-The table below is a curated subset; the workspace ships additional packages with their own environments (e.g. `egoexo-forge`, `mv-api`, `sapiens2-pose`, `sapiens-coco133-pose`, `dpvo`, `mast3r-slam`, `slam-evals`). Run `pixi info` to see the full list of environments.
-
-| Package | Prod env | Dev env | Python | GPU | Description |
-|---|---|---|---|---|---|
-| [simplecv](packages/simplecv/) | `simplecv` | `simplecv-dev` | 3.12 | CUDA 13 | Shared computer vision utilities, datasets, Rerun logging, and geometry helpers |
-| [monoprior](packages/monoprior/) | `monoprior` | `monoprior-dev` | 3.12 | CUDA 13 | Monocular geometric priors (depth, normals) |
-| [prompt-da](packages/prompt-da/) | `prompt-da` | `prompt-da-dev` | 3.12 | CUDA 13 | Prompt Depth Anything — depth completion on Polycam data |
-| [posekit](packages/posekit/) | `posekit` | `posekit-dev` | 3.12 | CUDA 13 | One model API for human perception networks (detect, pose, segment, re-ID) over torch/onnx/tensorrt |
-| [wilor-nano](packages/wilor-nano/) | `wilor-nano` | `wilor-nano-dev` | 3.12 | CUDA 13 | Hand pose estimation |
-| [sam3d-body](packages/sam3d-body/) | `sam3d-body` | `sam3d-body-dev` | 3.12 | CUDA 13 | 3D body segmentation with SAM + Rerun |
-| [sam3](packages/sam3/) | `sam3` | `sam3-dev` | 3.12 | CUDA 13 | SAM3 video segmentation with Rerun |
-| [robocap-slam](packages/robocap-slam/) | `robocap-slam` | `robocap-slam-dev` | 3.12 | CUDA 13 | Multi-camera visual odometry & SLAM |
-| [pysfm](packages/pysfm/) | `pysfm` | `pysfm-dev` | 3.12 | CUDA 13 | COLMAP SfM reconstruction with Rerun + Gradio |
-| [vistadream](packages/vistadream/) | `vistadream` | `vistadream-dev` | 3.12 | CUDA 13 | Single-image 3D reconstruction via 3D Gaussians |
-| [gsplat-rust-renderer](packages/gsplat-rust-renderer/) | `gsplat-rust-renderer` | `gsplat-rust-renderer-dev` | 3.12 | CUDA 13 | Rust-based Gaussian splatting renderer |
-| [pyvrs-viewer](packages/pyvrs-viewer/) | `pyvrs-viewer` | `pyvrs-viewer-dev` | 3.12 | None | VRS file viewer with Rerun |
-| [arkitscenes-download](packages/arkitscenes-download/) | `arkitscenes-download` | `arkitscenes-download-dev` | 3.12 | None (NVENC if present) | ARKitScenes downloader → layered Rerun recordings; try `pixi run -e arkitscenes-download arkitscenes-download-sample` for a 5-sequence demo |
+The workspace platforms are `linux-64`, `linux-aarch64`, and `osx-arm64`, plus
+the named `linux-64-cuda13` and `linux-aarch64-cuda13` platforms that carry the
+CUDA 13.0 virtual packages for GPU environments. Each feature opts into its
+platforms explicitly, so most GPU packages are Linux-only; check the package
+README and its feature in `pixi.toml` before installing on macOS. See the
+"Platforms & lockfile" section of [AGENTS.md](AGENTS.md) for the full rules.
 
 ## Quick start
 
-### Direnv setup (recommended, one-time)
+1. Install [Pixi](https://pixi.prefix.dev/latest/installation/), then restart
+   your shell:
 
-[direnv](https://direnv.net/) auto-activates the correct pixi environment when you `cd` into a package directory. No more `-e` and `--frozen` flags.
-
-```bash
-pixi global install direnv                      # install direnv
-echo 'eval "$(direnv hook bash)"' >> ~/.bashrc  # or: echo 'eval "$(direnv hook zsh)"' >> ~/.zshrc
-source ~/.bashrc                                # restart shell or source your rc file
-direnv allow                                    # approve root .envrc
-for d in packages/*/; do (cd "$d" && direnv allow); done  # approve all packages
-```
-
-To reduce output noise, create `~/.config/direnv/direnv.toml`:
-```toml
-[global]
-hide_env_diff = true
-```
-
-### Development workflow
-
-With direnv, just `cd` into a package and use tools directly:
-
-```bash
-cd packages/robocap-slam/   # direnv activates robocap-slam-dev
-python --version             # → 3.12.x
-ruff check .                 # just works
-pytest -q                    # just works
-
-cd ../../packages/pysfm/     # direnv switches to pysfm-dev
-python --version             # → 3.12.x
-```
-
-For tasks with `depends-on` chains (like auto-downloading data), use `pixi run` from the repo root:
-
-```bash
-pixi run -e monoprior --frozen monoprior-relative-depth   # downloads data, then runs demo
-pixi run -e robocap-slam --frozen robocap-slam-track-slam
-pixi run -e pysfm --frozen pysfm-sfm-reconstruction-demo
-```
-
-### Override environment per directory
-
-Each `.envrc` defaults to the `*-dev` environment. To use a different env (e.g., prod), create a `.envrc.local` (gitignored):
-```bash
-# packages/robocap-slam/.envrc.local
-PIXI_ENV=robocap-slam
-```
-
-### CUDA driver troubleshooting
-
-GPU environments require CUDA 13.0. If `pixi install` fails with `Virtual package '__cuda >=13.0' does not match`, your NVIDIA driver is too old.
-
-**Workaround** (no reboot):
-```bash
-export CONDA_OVERRIDE_CUDA=13.0
-pixi install -a
-```
-
-**Proper fix** — upgrade your NVIDIA driver to one that reports CUDA 13.0+ (check with `nvidia-smi`). On Ubuntu:
-```bash
-sudo apt install nvidia-driver-590-open && sudo reboot
-```
-
-### Known issues
-
-- **TODO: investigate the `typings/pyrefly/tensor_shapes/fixtures` stubs.** With that
-  directory on pyrefly's `search-path`, `pixi run typecheck` sends pyrefly (1.1.0 and
-  1.1.1) into an infinite solver loop on any file that *uses* numpy values — even
-  `np.zeros(3)` — across all packages. `tensor-shapes = false` alone does not help;
-  only removing the search-path entry does. Both are commented out in `pyrefly.toml`
-  until the fixtures are fixed (shape-aware `torch.Tensor`/jaxtyping inference is
-  disabled meanwhile). Repro: add the line back and run
-  `pyrefly check -c pyrefly.toml` on any numpy-using file.
-
-## Listing tasks
-
-```bash
-pixi task list -e robocap-slam       # Demo/app tasks only
-pixi task list -e robocap-slam-dev   # Demo/app tasks + lint, typecheck, tests
-```
-
-## Architecture
-
-### How pixi.toml is organized
-
-All pixi configuration lives in the root `pixi.toml`. Per-package `pyproject.toml` files only contain standard Python packaging metadata (`[project]`, `[build-system]`, `[tool.ruff]`, etc.) — no `[tool.pixi.*]` sections.
-
-The root `pixi.toml` is structured around **features** that compose into **environments**:
-
-```
-[workspace]                     # Channels, platforms, pixi version
-[pypi-options]                  # Workspace-level: no-build-isolation, dependency-overrides
-
-[feature.common]                # Shared base deps (all envs get these)
-[feature.cuda]                  # CUDA 13.0 toolkit + PyTorch GPU
-[feature.dev]                   # ruff, pytest, beartype, pyrefly, hypothesis + PIXI_DEV_MODE=1
-[feature.ide]                   # Standalone IDE/editor tooling (Python 3.12)
-
-[feature.simplecv]              # Shared CV utilities and SimpleCV tasks
-[feature.monoprior]             # Package-specific: conda deps, pypi deps, tasks, PACKAGE_DIR
-[feature.prompt-da]             #   "
-[feature.wilor]                 #   "
-[feature.sam3d]                 #   "
-[feature.sam3-rerun]            #   "
-[feature.robocap]               #   "
-[feature.pysfm]                 #   "
-[feature.vistadream]            #   "
-[feature.gsplat-rust-renderer]  #   "
-[feature.pyvrs-viewer]          #   "
-
-[environments]                  # Compose features into named environments (prod + dev per package)
-```
-
-Each package has a **prod** and **dev** environment sharing the same **solve-group** (no extra resolution cost). `no-default-feature = true` means each env is fully defined by its features.
-
-Per-feature deps can **tighten** common's loose versions for their solve-group (a feature may pin a narrower range than common declares). Features compose by intersection, so a per-package feature can only narrow a shared constraint, never relax it.
-
-### pypi-options (workspace-level)
-
-```toml
-[pypi-options]
-no-build-isolation = ["moge", "gsplat", "dpvo"]   # These need access to torch at build time
-
-[pypi-options.dependency-overrides]
-iopath = ">=0.1.10"      # Override transitive iopath pins
-fsspec = ">=2025.3,<=2026.2.0"       # Override transitive pins
-```
-
-## Project structure
-
-```
-pixi.toml                         # Workspace manifest (features, envs, tasks, deps)
-pyrefly.toml                      # Root pyrefly config (single source of truth for IDE + tasks)
-.envrc                            # Root direnv config (activates dev environment)
-packages/
-  <name>/
-    .envrc                        # Direnv config (activates <name>-dev environment)
-    pyproject.toml                # [project] + build backend + [tool.ruff]
-    <module>/                     # Python package
-    tools/                        # CLI scripts (demos/, apps/)
-    tests/
-```
-
-Note: `sam3d-body-rerun` uses `tool/` (singular) not `tools/`.
-
-`pyrefly` is configured only at the repo root — do not add `[tool.pyrefly]` to per-package `pyproject.toml` files.
-
-## Adding a new package
-
-1. Create `packages/<name>/` with `pyproject.toml`, source module, `tools/`, `tests/`
-2. Add a feature in root `pixi.toml`:
-   - `[feature.<name>.dependencies]` — Python pin + package-specific conda deps
-   - `[feature.<name>.pypi-dependencies]` — editable install + git deps
-   - `[feature.<name>.activation.env]` — set `PACKAGE_DIR = "packages/<name>"`
-   - `[feature.<name>.tasks.*]` — demo/app tasks with `cwd = "packages/<name>"`
-3. Add two environments in `[environments]`:
-   - `<name> = { features = ["common", "cuda", "<name>"], solve-group = "<name>", no-default-feature = true }`
-   - `<name>-dev = { features = ["common", "cuda", "<name>", "dev"], solve-group = "<name>", no-default-feature = true }`
-4. Create `packages/<name>/.envrc`:
    ```bash
-   watch_file ../../pixi.lock
-   PIXI_ENV="${PIXI_ENV:-<name>-dev}"
-   source_env_if_exists .envrc.local
-   eval "$(pixi shell-hook -e "$PIXI_ENV" --manifest-path ../.. --frozen)"
+   curl -fsSL https://pixi.sh/install.sh | sh
    ```
-5. Add `packages/<name>/data/` to `.gitignore`
-6. Run `pixi install -e <name>-dev` to verify
 
-## Gotchas
+2. Clone the workspace and install one development environment:
 
-- **Never use pip** — all dependency management goes through Pixi
-- **`hf download` not `huggingface-cli`** — conda's huggingface_hub provides `hf`, not `huggingface-cli`
-- **gradio from PyPI, not conda** — conda's gradio package has missing transitive deps
-- **`moge`/`gsplat`/`dpvo` need no-build-isolation** — they require torch at build time (configured in `[pypi-options]`)
+   ```bash
+   git clone https://github.com/rerun-io/examples-monorepo.git
+   cd examples-monorepo
+   pixi install -e monoprior-dev --frozen
+   ```
+
+3. Run that package's demo task from the repository root:
+
+   ```bash
+   pixi run -e monoprior-dev --frozen monoprior-relative-depth
+   ```
+
+Choose another package from the map below, then use its README or
+`pixi task list -e <name>` to find its demo task. Tasks with download
+dependencies fetch their example assets on first run.
+
+### Optional: direnv
+
+The root `.envrc` activates `dev`. Package directories that contain their own
+`.envrc` default to `<name>-dev`, so after installing
+[direnv](https://direnv.net/) you can opt in per directory:
+
+```bash
+cd packages/monoprior
+direnv allow
+pytest -q
+```
+
+Set `PIXI_ENV` in a gitignored `.envrc.local` to override a directory's default.
+
+## Package map
+
+| Package | What it contains |
+| --- | --- |
+| [arkitscenes-download](packages/arkitscenes-download/) | ARKitScenes downloader and ingest pipeline that emits layered Rerun recordings. Try `pixi run -e arkitscenes-download arkitscenes-download-sample` for a 5-sequence demo. |
+| [asmk](packages/asmk/) | Pixi-build recipe for the ASMK image-retrieval dependency used by MASt3R-SLAM. |
+| [dpretrieval](packages/dpretrieval/) | Pixi-build recipe for a DBoW2/pybind11 image-retrieval extension used by DPVO. |
+| [dpvo](packages/dpvo/) | Deep Patch Visual Odometry with Rerun and Gradio integrations. |
+| [egoexo-forge](packages/egoexo-forge/) | Rerun and Gradio tools for egocentric and exocentric human datasets. |
+| [gsplat-rust-renderer](packages/gsplat-rust-renderer/) | GPU Gaussian-splat viewer implemented as a custom Rerun visualizer. See its [README](packages/gsplat-rust-renderer/README.md). |
+| [live-rerun](packages/live-rerun/) | Zero-transcode live H.264/H.265 sensor streaming into Rerun. |
+| [mamma](packages/mamma/) | Streaming multiview body capture from decode through SMPL-X fitting and Rerun logging. |
+| [mast3r](packages/mast3r/) | Pixi-build recipe bundling MASt3R, DUSt3R, and CroCo. |
+| [mast3r-slam](packages/mast3r-slam/) | Dense visual SLAM built on MASt3R reconstruction priors. |
+| [monoprior](packages/monoprior/) | Monocular relative depth, metric depth, surface-normal, and calibration tools. |
+| [mv-api](packages/mv-api/) | Full egocentric/exocentric multiview processing for raw HOCap datasets. |
+| [posekit](packages/posekit/) | One model API for human perception networks (detect, pose, segment, re-ID) over torch/onnx/tensorrt backends. |
+| [prompt-da](packages/prompt-da/) | Prompt Depth Anything depth completion for Polycam captures. |
+| [pysfm](packages/pysfm/) | COLMAP/pycolmap structure-from-motion with Rerun visualization. |
+| [pyvrs-viewer](packages/pyvrs-viewer/) | VRS-to-Rerun conversion with compressed video and sensor streams. |
+| [robocap-slam](packages/robocap-slam/) | Multicamera visual odometry and SLAM using NVIDIA cuVSLAM. |
+| [sam2-streaming](packages/sam2-streaming/) | Vendored, inference-only SAM2 fork with frame streaming and bounded-memory banks. |
+| [sam3](packages/sam3/) | Text-conditioned SAM3 image and video segmentation with Rerun. |
+| [sam3d-body](packages/sam3d-body/) | Promptable SAM3D Body reconstruction and visualization playground. |
+| [sapiens-coco133-pose](packages/sapiens-coco133-pose/) | COCO-133 human pose pipelines using Sapiens2 or RTMLib backends. |
+| [sapiens2-pose](packages/sapiens2-pose/) | Top-down 308-keypoint human pose estimation with Rerun. |
+| [simplecv](packages/simplecv/) | Shared Python utilities for datasets, geometry, video, and Rerun logging. |
+| [slam-evals](packages/slam-evals/) | VSLAM benchmark ingestion and browsing through a Rerun catalog. |
+| [vistadream](packages/vistadream/) | Single-image 3D reconstruction and Gaussian-scene tooling. |
+| [wilor-nano](packages/wilor-nano/) | Hand detection and 3D hand-pose estimation with Rerun logging. |
+
+Build-only and vendored packages do not necessarily have standalone root
+environments or demo tasks; their role is described in the second column.
+
+## Conventions
+
+- Root-managed runnable packages generally use `<name>` for production and
+  `<name>-dev` for development. The `[environments]` table in `pixi.toml` is
+  the source of truth.
+- Development environments expose the canonical `lint`, `typecheck`,
+  `deadcode`, and `tests` tasks:
+
+  ```bash
+  pixi run -e robocap-slam-dev --frozen lint
+  pixi run -e robocap-slam-dev --frozen typecheck
+  pixi run -e robocap-slam-dev --frozen deadcode
+  pixi run -e robocap-slam-dev --frozen tests
+  ```
+
+- Prefer `pixi run --frozen` and `pixi install --frozen` while dependencies are
+  unchanged. Omit `--frozen` only when intentionally updating the solve and
+  lockfile.
+- List the tasks available in an environment with
+  `pixi task list -e <name>` or `pixi task list -e <name>-dev`.
+
+For agent and contributor documentation — architecture, platform rules, adding
+a new package, Rerun version policy, and known issues — see
+[AGENTS.md](AGENTS.md).
