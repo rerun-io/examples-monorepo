@@ -62,7 +62,13 @@ class OnnxCudaRuntime:
         if "CUDAExecutionProvider" not in ort.get_available_providers():
             raise RuntimeError("onnxruntime CUDAExecutionProvider is unavailable; install onnxruntime-gpu.")
         self._device: torch.device = torch.device("cuda", device_id)
-        self._torch_stream: torch.cuda.Stream = torch.cuda.current_stream(self._device)
+        # Dedicated session stream, NEVER torch's current stream: the default
+        # stream's raw handle is 0, which ORT parses as "no user stream" and
+        # silently runs on its own non-blocking internal stream — unfenced
+        # against torch, so inputs race (intermittent garbage inferences). A
+        # torch-owned side stream has a real handle ORT honors, and __call__
+        # fences it against the caller's stream on both sides of the run.
+        self._torch_stream: torch.cuda.Stream = torch.cuda.Stream(device=self._device)
         provider_options: dict[str, Any] = {"device_id": device_id, "user_compute_stream": str(int(self._torch_stream.cuda_stream))}
         session_options: Any = ort.SessionOptions()
         session_options.log_severity_level = 3
