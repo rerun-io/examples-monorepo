@@ -23,6 +23,48 @@ from sapiens2_pose.api.runtime import (
 from sapiens_coco133_pose.api.artifact import Coco133PoseFrame, write_video_pose_rrd
 
 TrackerMode = Literal["lightweight", "balanced", "performance", "wholebody"]
+
+
+@dataclass(frozen=True, slots=True)
+class _RtmlibAssets:
+    """RTMLib ONNX deploy-zip URLs and input sizes for one detector+pose preset."""
+
+    det: str
+    """Download URL for the YOLOX detector ONNX deploy zip."""
+    det_input_size: tuple[int, int]
+    """Input width-height pair expected by the detector."""
+    pose: str
+    """Download URL for the RTMPose ONNX deploy zip."""
+    pose_input_size: tuple[int, int]
+    """Input width-height pair expected by RTMPose."""
+
+
+RTMLIB_ASSETS: dict[TrackerMode, _RtmlibAssets] = {
+    "performance": _RtmlibAssets(
+        det="https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_x_8xb8-300e_humanart-a39d44ed.zip",
+        det_input_size=(640, 640),
+        pose="https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmpose-x_simcc-body7_pt-body7_700e-384x288-71d7b7e9_20230629.zip",
+        pose_input_size=(288, 384),
+    ),
+    "lightweight": _RtmlibAssets(
+        det="https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_tiny_8xb8-300e_humanart-6f3252f9.zip",
+        det_input_size=(416, 416),
+        pose="https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmpose-s_simcc-body7_pt-body7_420e-256x192-acd4a1ef_20230504.zip",
+        pose_input_size=(192, 256),
+    ),
+    "balanced": _RtmlibAssets(
+        det="https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_m_8xb8-300e_humanart-c2c7a14a.zip",
+        det_input_size=(640, 640),
+        pose="https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/rtmpose-m_simcc-body7_pt-body7_420e-256x192-e48f03d0_20230504.zip",
+        pose_input_size=(192, 256),
+    ),
+    "wholebody": _RtmlibAssets(
+        det="https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/yolox_m_8xb8-300e_humanart-c2c7a14a.zip",
+        det_input_size=(640, 640),
+        pose="https://download.openmmlab.com/mmpose/v1/projects/rtmw/onnx_sdk/rtmw-dw-x-l_simcc-cocktail14_270e-256x192_20231122.zip",
+        pose_input_size=(192, 256),
+    ),
+}
 PoseBackend = Literal["sapiens", "rtmlib"]
 RtmlibBackend = Literal["onnxruntime", "opencv"]
 RtmlibDevice = Literal["cpu", "cuda"]
@@ -141,10 +183,9 @@ class RtmlibYoloxPersonDetector:
         Args:
             config: RTMLib detector backend, device, preset, and thresholds.
         """
-        from mv_api.multiview_pose_estimator import MODE
         from rtmlib import YOLOX
 
-        assets = MODE[config.mode]
+        assets = RTMLIB_ASSETS[config.mode]
         self._model = YOLOX(
             assets.det,
             model_input_size=assets.det_input_size,
@@ -181,10 +222,9 @@ class RtmlibCoco133PoseEstimator:
         Args:
             config: RTMLib pose backend, device, and preset.
         """
-        from mv_api.multiview_pose_estimator import MODE
         from rtmlib import RTMPose
 
-        assets = MODE[config.mode]
+        assets = RTMLIB_ASSETS[config.mode]
         self._model = RTMPose(
             assets.pose,
             model_input_size=assets.pose_input_size,
