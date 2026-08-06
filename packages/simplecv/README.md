@@ -19,12 +19,17 @@ pixi task list -e simplecv
 ```
 
 ### Rerun Environment
-The default Pixi environment uses the released `rerun-sdk[datafusion]`, so normal Rerun commands run without a prerelease lane.
+The standard `simplecv` environment uses the released `rerun-sdk` pinned in the
+root `pixi.toml` with the `datafusion` extra requested by `simplecv`.
 
-The catalog runs on the `simplecv-catalog` env, which uses the shared `rerun-prerelease` feature — currently pinned to [`rerun-io/reality#2496`](https://github.com/rerun-io/reality/pull/2496) (`deeb4e6` / `0.34.0a1+dev`, fast OSS-catalog register). See the root `AGENTS.md` "Testing Rerun builds" for how to repin the lane.
+The catalog runs on the `simplecv-catalog` environment, which explicitly adds
+the `datafusion` and `dataloader` extras through the shared `rerun-prerelease`
+feature. It currently uses the same release as the rest of the workspace. See
+the root `AGENTS.md` "Testing Rerun builds" section for how to test an
+unreleased build.
 
 #### Full ExoEgo Forge catalog (2-tier serve + register)
-Serve an empty catalog, then register the RRD roots into it. With #2496 the **raw** RRDs register fast — no `rerun rrd optimize` pre-pass.
+Serve an empty catalog, then register the raw RRD roots into it; no `rerun rrd optimize` pre-pass is required.
 
 ```bash
 # Tier 1 — serve (leave running; the task sets `ulimit -n 524288` for the 6332-RRD catalog):

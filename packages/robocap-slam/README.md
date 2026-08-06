@@ -32,18 +32,18 @@ This is Linux only with an NVIDIA GPU.
 ```bash
 git clone https://github.com/rerun-io/robocap-slam.git
 cd robocap-slam
-pixi run robocap-slam-track
+pixi run -e robocap-slam --frozen robocap-slam-track
 ```
 
 On the first run, an example dataset (~100 MB) is automatically downloaded from [HuggingFace](https://huggingface.co/datasets/pablovela5620/robocap-example) into `data/robocap/`. Subsequent runs skip the download.
 
-All commands can be listed with `pixi task list`.
+All commands can be listed with `pixi task list -e robocap-slam`.
 
 ## Project structure
 
 ```
 robocap-slam/
-├── pyproject.toml                          # Package metadata, pixi deps and tasks
+├── pyproject.toml                          # Package metadata and tooling config
 ├── robocap_slam/                           # Main package (editable install)
 │   ├── __init__.py                         # beartype activation (dev env only)
 │   ├── apis/
@@ -66,9 +66,9 @@ robocap-slam/
 ### Pixi tasks
 
 ```bash
-pixi run robocap-slam-track           # Multicamera odometry on Robocap data
-pixi run robocap-slam-track-slam      # Multicamera SLAM on Robocap data
-pixi run -e robocap-slam-dev robocap-slam-track    # With runtime type checking
+pixi run -e robocap-slam --frozen robocap-slam-track           # Multicamera odometry on Robocap data
+pixi run -e robocap-slam --frozen robocap-slam-track-slam      # Multicamera SLAM on Robocap data
+pixi run -e robocap-slam-dev --frozen robocap-slam-track       # With runtime type checking
 ```
 
 ### CLI flags (tyro)

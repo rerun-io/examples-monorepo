@@ -49,7 +49,7 @@ pixi run -e mast3r-slam --frozen python tools/mast3r_slam_inference.py \
 The first run will:
 1. Install **lietorch** (CUDA extension, ~5 min)
 2. Install **mast3r** thirdparty + asmk C extension
-3. Build **mast3r-slam CUDA kernels** (~3 min)
+3. Build **mast3r-slam Mojo kernels**
 4. Download model **checkpoints** (~1 GB)
 5. Download **example data** (video file)
 

@@ -25,12 +25,12 @@ pixi task list -e wilor-nano
 
 Current task surface:
 
-- `image-example`: original PyTorch image path.
-- `video-example`: original PyTorch video path, one frame at a time.
-- `video-trt`: optimized batched TensorRT video path.
-- `export-onnx`: export portable ONNX graphs.
-- `build-trt`: build machine-local TensorRT engines from ONNX.
-- `compare-reference`: compare `/tmp/wilor_candidate.rrd` against the checked-in 30-frame reference RRD.
+- `wilor-nano-image-example`: original PyTorch image path.
+- `wilor-nano-video-example`: original PyTorch video path, one frame at a time.
+- `wilor-nano-video-trt`: optimized batched TensorRT video path.
+- `wilor-nano-export-onnx`: export portable ONNX graphs.
+- `wilor-nano-build-trt`: build machine-local TensorRT engines from ONNX.
+- `wilor-nano-compare-reference`: compare `/tmp/wilor_candidate.rrd` against the checked-in 30-frame reference RRD.
 
 ## Pipelines
 
