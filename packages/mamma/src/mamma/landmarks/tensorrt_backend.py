@@ -4,10 +4,11 @@ Inference runs directly on :class:`trtkit.TensorRtRuntime` with
 ``use_cuda_graph=True`` (inputs ``crops``/``masks``, outputs ``joints2d``/
 ``visibility``/``contact``/``floor_contact`` — see ``export_mammanet_onnx``).
 
-Follows the proven sapiens2-pose pattern in this monorepo: the `tensorrt-cu13`
-python API (not torch-tensorrt), static batch, FP16 builder flag, and one
-captured ``execute_async_v3`` launch replayed per call — which composes cleanly
-with the fitter's manual CUDA graph.
+Follows the shared trtkit pattern: the `tensorrt-cu13` python API (not
+torch-tensorrt), static batch, a strongly-typed engine whose fp16 compute is
+baked into the ONNX graph (fp32 I/O boundary casts in the export wrapper), and
+one captured ``execute_async_v3`` launch replayed per call — which composes
+cleanly with the fitter's manual CUDA graph.
 
 Engines are machine-local artifacts (sm-specific): built once into
 ``.trt_cache/`` by ``tools/build_trt_engine.py``, never committed.
@@ -27,24 +28,28 @@ ENGINE_BATCH: int = 4
 
 
 class _ExportWrapper(torch.nn.Module):
-    """Tuple-returning wrapper (ONNX needs flat outputs, not a dict)."""
+    """Flat-output wrapper with fp32 I/O and fp16 autocast compute.
+
+    TensorRT 11 builds are strongly typed: the graph's dtypes are the engine's
+    dtypes. Tracing under autocast bakes fp16 casts around the matmul-heavy ops
+    (fp32 islands stay where autocast keeps them) while the I/O contract and
+    MammaNet's Float32 jaxtyping hints stay fp32 — the same mixed numerics the
+    old weakly-typed FP16 builder flag produced, and the same recipe the eager
+    fp16 path uses at inference.
+    """
 
     def __init__(self, model: MammaNet) -> None:
         super().__init__()
         self.model = model
 
     def forward(self, x: torch.Tensor, masks: torch.Tensor):
-        out = self.model(x, masks)
-        return out["joints2d"], out["visibility"], out["contact"], out["floor_contact"]
+        with torch.autocast("cuda", dtype=torch.float16):
+            out = self.model(x, masks)
+        return out["joints2d"].float(), out["visibility"].float(), out["contact"].float(), out["floor_contact"].float()
 
 
 def export_mammanet_onnx(model: MammaNet, onnx_path: Path, config: MammaNetConfig = DEFAULT_MAMMANET_CONFIG) -> None:
-    """Export MammaNet to a static-batch ONNX graph.
-
-    The dynamo exporter's output failed TRT 10.13's parser ("Failed to import
-    initializer"), so this uses the legacy TorchScript exporter at opset 17 —
-    the same combination sapiens2-pose ships.
-    """
+    """Export MammaNet to a static-batch, fp16-compute ONNX graph (dynamo exporter)."""
     onnx_path.parent.mkdir(parents=True, exist_ok=True)
     wrapper = _ExportWrapper(model).eval().cuda()
     x = torch.randn(ENGINE_BATCH, 3, config.crop_height, config.crop_width, device="cuda")
@@ -55,18 +60,13 @@ def export_mammanet_onnx(model: MammaNet, onnx_path: Path, config: MammaNetConfi
         str(onnx_path),
         input_names=["crops", "masks"],
         output_names=["joints2d", "visibility", "contact", "floor_contact"],
-        opset_version=17,
-        dynamo=False,
+        dynamo=True,
     )
 
 
 def build_engine(onnx_path: Path, engine_path: Path) -> None:
-    """Build the static-batch FP16 (TF32 off) MammaNet engine via trtkit."""
+    """Build the static-batch strongly-typed MammaNet engine via trtkit."""
     from trtkit import TrtBuildConfig
     from trtkit import build_engine as trtkit_build_engine
 
-    trtkit_build_engine(
-        onnx_path,
-        engine_path,
-        TrtBuildConfig(max_batch_size=ENGINE_BATCH, opt_batch_size=ENGINE_BATCH, precision="fp16", allow_tf32=False),
-    )
+    trtkit_build_engine(onnx_path, engine_path, TrtBuildConfig(max_batch_size=ENGINE_BATCH, opt_batch_size=ENGINE_BATCH))

@@ -109,12 +109,12 @@ class SapiensPoseOnnxExportConfig:
     """Path where the exported ONNX graph should be written."""
     model_size: ModelSize = "0.4B"
     """Sapiens2 pose model size to export."""
-    opset_version: int = 17
-    """ONNX opset version passed to `torch.onnx.export`."""
+    opset_version: int = 23
+    """ONNX opset version passed to `torch.onnx.export`. Must be >= 22: the
+    bf16-autocast graph needs opset-22 bf16 Conv support (older opsets produce
+    invalid ONNX that TRT parsers accept but miscompile)."""
     device: DeviceChoice = "cuda"
     """Device used while tracing; CUDA is preferred for the real 0.4B export."""
-    dynamo: bool = False
-    """Whether to use PyTorch's dynamo ONNX exporter."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,8 +133,6 @@ class SapiensPoseOnnxExportSummary:
     """NCHW heatmap output tensor shape expected from the graph."""
     opset_version: int
     """ONNX opset version used for export."""
-    dynamo: bool
-    """Whether PyTorch's dynamo ONNX exporter was used."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,12 +283,32 @@ def export_sapiens_pose_onnx(
     model: torch.nn.Module = model_loader(config.model_size, config.checkpoint_path, resolved_device)
     model = make_sapiens_pose_onnx_exportable(model)
     model.eval()
+
+    class _AutocastWrapper(torch.nn.Module):
+        """fp32 I/O boundary, bf16 autocast compute.
+
+        TensorRT 11 builds are strongly typed, so the graph's dtypes are the
+        engine's: this bakes the bf16 compute (the retained strict-accuracy
+        precision — fp16-typed Sapiens graphs overflow) into the export while
+        the I/O contract stays fp32.
+        """
+
+        def __init__(self, inner: torch.nn.Module) -> None:
+            super().__init__()
+            self.inner = inner
+
+        def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                heatmaps = self.inner(inputs)
+            return heatmaps.float()
+
+    wrapper: torch.nn.Module = _AutocastWrapper(model).eval() if resolved_device == "cuda" else model
     dummy_inputs: torch.Tensor = torch.zeros(input_shape, dtype=torch.float32, device=resolved_device)
 
     config.onnx_path.parent.mkdir(parents=True, exist_ok=True)
     with torch.no_grad():
         export_fn(
-            model,
+            wrapper,
             (dummy_inputs,),
             config.onnx_path,
             export_params=True,
@@ -298,7 +316,7 @@ def export_sapiens_pose_onnx(
             do_constant_folding=True,
             input_names=["inputs"],
             output_names=["heatmaps"],
-            dynamo=config.dynamo,
+            dynamo=True,
         )
 
     return SapiensPoseOnnxExportSummary(
@@ -308,7 +326,6 @@ def export_sapiens_pose_onnx(
         input_shape=input_shape,
         output_shape=output_shape,
         opset_version=config.opset_version,
-        dynamo=config.dynamo,
     )
 
 
@@ -381,7 +398,6 @@ def build_tensorrt_engine(config: TensorRtBuildConfig) -> TensorRtBuildSummary:
         TrtKitBuildConfig(
             max_batch_size=1,
             opt_batch_size=1,
-            precision="bf16",
             allow_tf32=False,
             workspace_gib=config.workspace_gib,
             builder_optimization_level=config.builder_optimization_level,

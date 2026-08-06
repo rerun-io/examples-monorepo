@@ -21,12 +21,10 @@ class ExportOnnxCli:
     """Optional explicit checkpoint path; when omitted the checkpoint is downloaded from Hugging Face."""
     model_size: ModelSize = "0.4B"
     """Sapiens2 pose model size to export."""
-    opset_version: int = 17
-    """ONNX opset version passed to `torch.onnx.export`."""
+    opset_version: int = 23
+    """ONNX opset version passed to `torch.onnx.export` (>= 22 for the bf16 graph)."""
     device: DeviceChoice = "cuda"
     """Device used while tracing."""
-    dynamo: bool = False
-    """Whether to use PyTorch's dynamo ONNX exporter."""
 
 
 def main(args: ExportOnnxCli) -> None:
@@ -39,7 +37,6 @@ def main(args: ExportOnnxCli) -> None:
             model_size=args.model_size,
             opset_version=args.opset_version,
             device=args.device,
-            dynamo=args.dynamo,
         )
     )
     print(

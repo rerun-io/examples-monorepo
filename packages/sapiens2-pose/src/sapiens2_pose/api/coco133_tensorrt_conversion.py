@@ -37,8 +37,6 @@ class SapiensCoco133PoseOnnxExportConfig:
     """Device used while exporting the ONNX graph."""
     opset_version: int = 17
     """ONNX opset version passed to ``torch.onnx.export``."""
-    dynamo: bool = True
-    """Whether to use the torch.export-based ONNX exporter."""
 
     @property
     def dtype(self) -> torch.dtype:
@@ -67,8 +65,6 @@ class SapiensCoco133PoseOnnxExportSummary(NamedTuple):
     """Exported output tensor shape."""
     opset_version: int
     """ONNX opset version."""
-    dynamo: bool
-    """Whether the torch.export-based ONNX exporter was used."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,8 +161,8 @@ def export_sapiens_coco133_pose_onnx(config: SapiensCoco133PoseOnnxExportConfig,
     dummy_inputs: Float[Tensor, "batch 3 1024 768"] = torch.zeros(input_shape, dtype=config.dtype, device=device)
     config.onnx_path.parent.mkdir(parents=True, exist_ok=True)
     with torch.no_grad():
-        export_fn(model, (dummy_inputs,), config.onnx_path, export_params=True, opset_version=config.opset_version, do_constant_folding=True, input_names=["inputs"], output_names=["heatmaps"], dynamic_axes=None, dynamo=config.dynamo)
-    return SapiensCoco133PoseOnnxExportSummary(config.checkpoint_path, config.onnx_path, config.model_size, config.batch_size, input_shape, output_shape, config.opset_version, config.dynamo)
+        export_fn(model, (dummy_inputs,), config.onnx_path, export_params=True, opset_version=config.opset_version, do_constant_folding=True, input_names=["inputs"], output_names=["heatmaps"], dynamic_axes=None, dynamo=True)
+    return SapiensCoco133PoseOnnxExportSummary(config.checkpoint_path, config.onnx_path, config.model_size, config.batch_size, input_shape, output_shape, config.opset_version)
 
 
 def build_tensorrt_engine(config: TensorRtEngineBuildConfig) -> TensorRtEngineBuildSummary:
@@ -185,21 +181,17 @@ def build_tensorrt_engine(config: TensorRtEngineBuildConfig) -> TensorRtEngineBu
     trt = _import_tensorrt()
     logger = trt.Logger(trt.Logger.INFO)
     builder = trt.Builder(logger)
-    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+    # TensorRT 11 removed weak typing: networks are strongly typed and compute
+    # dtypes come from the ONNX graph (the sapiens export is fp16-typed; zoo
+    # rtmlib/detector graphs are fp32-typed and build as fp32 engines).
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     parser = trt.OnnxParser(network, logger)
     if not bool(parser.parse_from_file(str(config.onnx_path))):
         raise RuntimeError("TensorRT failed to parse ONNX graph:\n" + "\n".join(str(parser.get_error(idx)) for idx in range(parser.num_errors)))
-    if config.target in ("pose", "rtmlib-pose"):
-        network.get_input(0).dtype = trt.float16
-        for output_idx in range(int(network.num_outputs)):
-            network.get_output(output_idx).dtype = trt.float16
     builder_config = builder.create_builder_config()
     builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, int(config.workspace_gib * 1024**3))
-    if hasattr(builder_config, "builder_optimization_level"):
-        builder_config.builder_optimization_level = config.builder_optimization_level
-    if hasattr(trt.BuilderFlag, "TF32"):
-        builder_config.clear_flag(trt.BuilderFlag.TF32)
-    builder_config.set_flag(trt.BuilderFlag.FP16)
+    builder_config.builder_optimization_level = config.builder_optimization_level
+    builder_config.clear_flag(trt.BuilderFlag.TF32)
     profile = builder.create_optimization_profile()
     profile.set_shape(str(network.get_input(0).name), (config.batch_size, *config.input_shape), (config.batch_size, *config.input_shape), (config.batch_size, *config.input_shape))
     builder_config.add_optimization_profile(profile)

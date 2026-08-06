@@ -95,7 +95,7 @@ def test_three_backend_parity(tmp_path: Path) -> None:
     # TRT runs the dynamic-batch export: profile 1..STATIC_BATCH, true-batch execution.
     dynamic_onnx: Path = _export_tiny_onnx(module, tmp_path, dynamic_batch=True)
     engine_path: Path = ensure_engine(
-        dynamic_onnx, TrtBuildConfig(max_batch_size=STATIC_BATCH, opt_batch_size=2, precision="fp32"), cache_dir=tmp_path / "trt"
+        dynamic_onnx, TrtBuildConfig(max_batch_size=STATIC_BATCH, opt_batch_size=2, allow_tf32=False), cache_dir=tmp_path / "trt"
     )
     trt_runtime = TensorRtRuntime(engine_path)
     assert onnx_runtime.spec.max_batch_size == STATIC_BATCH
@@ -120,7 +120,7 @@ def test_tensorrt_cuda_graph_replay(tmp_path: Path) -> None:
     module = TinyNet().cuda().eval()
     onnx_path: Path = _export_tiny_onnx(module, tmp_path, dynamic_batch=True)
     engine_path: Path = ensure_engine(
-        onnx_path, TrtBuildConfig(max_batch_size=STATIC_BATCH, opt_batch_size=2, precision="fp32"), cache_dir=tmp_path / "trt"
+        onnx_path, TrtBuildConfig(max_batch_size=STATIC_BATCH, opt_batch_size=2), cache_dir=tmp_path / "trt"
     )
     graph_runtime = TensorRtRuntime(engine_path, use_cuda_graph=True)
     plain_runtime = TensorRtRuntime(engine_path)

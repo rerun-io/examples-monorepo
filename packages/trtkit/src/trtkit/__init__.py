@@ -39,7 +39,7 @@ from trtkit.onnx_cuda import OnnxCudaRuntime
 from trtkit.onnx_graph import onnx_static_batch_size
 from trtkit.tensorrt_runtime import TensorRtRuntime
 from trtkit.torch_runtime import TorchRuntime
-from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR, TrtBuildConfig, TrtPrecision, build_engine, cached_engine_path, ensure_engine
+from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR, TrtBuildConfig, build_engine, cached_engine_path, ensure_engine
 
 __all__ = (
     "BackendConfig",
@@ -55,7 +55,6 @@ __all__ = (
     "TorchBackendConfig",
     "TorchRuntime",
     "TrtBuildConfig",
-    "TrtPrecision",
     "build_engine",
     "cached_engine_path",
     "create_runtime_from_onnx",

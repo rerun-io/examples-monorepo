@@ -10,15 +10,9 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import torch
-
-TrtPrecision = Literal["fp32", "fp16", "bf16", "strong"]
-"""``strong`` builds a strongly-typed network: compute dtypes come from the ONNX
-graph itself (e.g. fp16 matmuls with fp32 layernorm islands from a dynamo
-export), instead of letting TensorRT down-convert everything. Use it when a
-weakly-typed fp16 build overflows (large ViTs like Sapiens)."""
 
 DEFAULT_TRT_CACHE_DIR: Path = Path(os.environ.get("TRTKIT_TRT_CACHE", "~/.cache/trtkit/trt")).expanduser()
 """Machine-local engine cache; override with the ``TRTKIT_TRT_CACHE`` env var."""
@@ -33,11 +27,9 @@ class TrtBuildConfig:
     ONNX graphs must match this value and yield a static engine."""
     opt_batch_size: int = 8
     """Batch size TensorRT tunes kernels for (dynamic profile optimum)."""
-    precision: TrtPrecision = "fp16"
-    """Builder precision flag. ``fp32`` leaves the builder defaults untouched."""
     allow_tf32: bool = True
-    """Allow TF32 math for fp32 layers (TensorRT's default). Disable when a
-    model needs strict fp32 numerics (e.g. wilor's full-pose engine)."""
+    """Allow TF32 math for fp32-typed layers (TensorRT's default). Disable when
+    a model needs strict fp32 numerics."""
     workspace_gib: float = 8.0
     """Workspace memory pool limit handed to the builder."""
     builder_optimization_level: int = 3
@@ -48,8 +40,10 @@ def cached_engine_path(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Pa
     """Return the machine-local cache path for an engine built from this ONNX file.
 
     The name encodes everything that invalidates an engine: ONNX content hash,
-    batch, precision (including a disabled-TF32 marker), workspace, optimization
-    level, TensorRT version, and GPU compute capability.
+    batch, a disabled-TF32 marker, workspace, optimization level, TensorRT
+    version, and GPU compute capability. Compute dtype is not a knob: every
+    build is strongly typed, so precision lives in the ONNX graph (and thus in
+    the content hash).
 
     Args:
         onnx_path: ONNX interchange file the engine is built from.
@@ -64,7 +58,7 @@ def cached_engine_path(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Pa
     import tensorrt as trt
     capability: tuple[int, int] = torch.cuda.get_device_capability()
     onnx_hash: str = _onnx_content_hash(onnx_path)[:12]
-    precision_key: str = config.precision if config.allow_tf32 else f"{config.precision}-notf32"
+    precision_key: str = "strong" if config.allow_tf32 else "strong-notf32"
     name: str = (
         f"{onnx_path.stem}_b1-{config.opt_batch_size}-{config.max_batch_size}_{precision_key}"
         f"_w{config.workspace_gib:g}o{config.builder_optimization_level}"
@@ -91,9 +85,9 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig) -> 
     trt: Any = tensorrt  # the compiled bindings have incomplete stubs
     logger: Any = trt.Logger(trt.Logger.WARNING)
     builder: Any = trt.Builder(logger)
-    network_flags: int = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-    if config.precision == "strong":
-        network_flags |= 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
+    # TensorRT 11 removed weak typing (and the EXPLICIT_BATCH flag with it):
+    # every network is strongly typed and compute dtypes come from the graph.
+    network_flags: int = 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
     network: Any = builder.create_network(network_flags)
     parser: Any = trt.OnnxParser(network, logger)
     # parse_from_file (not parse(bytes)) so ONNX external weight data resolves
@@ -104,13 +98,7 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig) -> 
     builder_config: Any = builder.create_builder_config()
     builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, int(config.workspace_gib * (1 << 30)))
     builder_config.builder_optimization_level = int(config.builder_optimization_level)
-    if config.precision == "fp16":
-        builder_config.set_flag(trt.BuilderFlag.FP16)
-    elif config.precision == "bf16" and hasattr(trt.BuilderFlag, "BF16"):
-        builder_config.set_flag(trt.BuilderFlag.BF16)
-    # "strong" and "fp32" set no precision flags; strongly-typed networks
-    # forbid them and take dtypes from the graph.
-    if not config.allow_tf32 and config.precision != "strong" and hasattr(trt.BuilderFlag, "TF32"):
+    if not config.allow_tf32:
         builder_config.clear_flag(trt.BuilderFlag.TF32)
     profile: Any = builder.create_optimization_profile()
     has_dynamic_batch: bool = False
@@ -145,7 +133,7 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig) -> 
         "rebuild_from_onnx_on_target_machine": True,
         "max_batch_size": config.max_batch_size,
         "opt_batch_size": config.opt_batch_size,
-        "precision": config.precision,
+        "strongly_typed": True,
         "allow_tf32": config.allow_tf32,
         "workspace_gib": config.workspace_gib,
         "builder_optimization_level": config.builder_optimization_level,

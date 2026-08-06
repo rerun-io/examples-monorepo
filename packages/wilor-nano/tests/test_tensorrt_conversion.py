@@ -97,7 +97,6 @@ def test_tensorrt_build_manifest_marks_engine_machine_local(tmp_path: Path) -> N
     config = TensorRtBuildConfig(
         artifact=WiLorTensorRtArtifactConfig(target="full_postcrop", onnx_path=onnx_path, batch_size=224),
         engine_path=tmp_path / "model.trt",
-        precision="fp16",
         allow_tf32=False,
     )
 

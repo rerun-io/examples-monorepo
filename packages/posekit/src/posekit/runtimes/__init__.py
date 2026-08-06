@@ -23,7 +23,7 @@ from trtkit import (
     run_chunked,
     validate_runtime_inputs,
 )
-from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR, TrtBuildConfig, TrtPrecision, ensure_engine
+from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR, TrtBuildConfig, ensure_engine
 
 __all__ = (
     "BackendConfig",
@@ -39,7 +39,6 @@ __all__ = (
     "TorchBackendConfig",
     "TorchRuntime",
     "TrtBuildConfig",
-    "TrtPrecision",
     "create_runtime_from_onnx",
     "ensure_engine",
     "run_chunked",

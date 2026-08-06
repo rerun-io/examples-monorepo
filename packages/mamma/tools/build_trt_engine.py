@@ -42,9 +42,9 @@ def main(config: BuildConfig) -> None:
         return
     model = load_mammanet(config.mammanet_weights, device="cuda")
     onnx_path: Path = config.cache_dir / "mammanet.onnx"
-    print("exporting ONNX (legacy exporter, opset 17)...")
+    print("exporting ONNX (dynamo exporter, fp16-typed graph)...")
     export_mammanet_onnx(model, onnx_path)
-    print(f"building FP16 engine ({engine_path.name})...")
+    print(f"building strongly-typed engine ({engine_path.name})...")
     t0: float = time.perf_counter()
     build_engine(onnx_path, engine_path)
     print(f"built in {time.perf_counter() - t0:.0f}s -> {engine_path}")

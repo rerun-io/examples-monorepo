@@ -29,7 +29,6 @@ from torch import Tensor
 from tqdm import tqdm
 
 from rerun_prompt_da.apis.prompt_da_polycam import _log_mesh, create_blueprint, filter_depth, log_polycam_data
-from rerun_prompt_da.trt_engine import TrtPrecision
 from rerun_prompt_da.trt_predictor import PromptDATrtPredictor
 
 
@@ -43,8 +42,6 @@ class PDATrtPolycamConfig:
     """Rerun viewer/save/connect behavior."""
     batch_size: int = 8
     """Frames per TensorRT batch (engine profile optimum and max)."""
-    precision: TrtPrecision = "fp16"
-    """TensorRT builder precision for the engine."""
     max_image_size: int = 1008
     """Longest network image side; the actual size is 14-aligned from the capture resolution."""
     max_depth_range_meter: float = 4.0
@@ -96,7 +93,6 @@ def pda_trt_polycam_inference(config: PDATrtPolycamConfig) -> None:
         model_type="large",
         image_hw=image_hw,
         batch_size=config.batch_size,
-        precision=config.precision,
     )
 
     n_frames: int = 0

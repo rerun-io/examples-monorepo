@@ -157,9 +157,12 @@ onnxruntime = { version = ">=1.26.0,<2", build = "*cuda130*" }
 # nvidia-cuda-runtime-cu13; NVIDIA's empty 0.0.0a0 placeholder satisfies it
 # (conda supplies the real CUDA runtime).
 [feature.cuda.pypi-dependencies]
-tensorrt-cu13 = { version = "==10.13.3.9", index = "https://pypi.nvidia.com" }
+tensorrt-cu13 = { version = "==11.2.1.2", index = "https://pypi.nvidia.com" }
 nvidia-cuda-runtime-cu13 = "==0.0.0a0"
 cuda-python = "*"
+# The dynamo exporter — the only torch.onnx.export path now that TRT 11 made
+# strongly-typed networks mandatory — imports onnxscript at export time.
+onnxscript = "*"
 
 # $CONDA_PREFIX/lib MUST come first (this key replaces pixi's default; ORT needs
 # conda's cuDNN/cuBLAS), then the pip TRT wheels' libnvinfer. Both python dirs
