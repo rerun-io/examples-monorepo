@@ -17,9 +17,10 @@ from posekit.runtimes import (
     TensorRtRuntime,
     TensorSpec,
     TorchRuntime,
+    TrtBuildConfig,
+    ensure_engine,
     validate_runtime_inputs,
 )
-from posekit.runtimes.trt_builder import TrtBuildConfig, ensure_engine
 
 cuda_only = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 

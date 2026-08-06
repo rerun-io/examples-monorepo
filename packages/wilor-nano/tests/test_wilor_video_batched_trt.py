@@ -48,26 +48,25 @@ def test_pixi_tasks_keep_generic_wilor_entrypoints() -> None:
     pixi_toml: dict[str, object] = tomllib.loads((repo_root / "pixi.toml").read_text())
     feature_section = pixi_toml["feature"]
     assert isinstance(feature_section, dict)
-    wilor_section = feature_section["wilor"]
+    wilor_section = feature_section["wilor-nano"]
     assert isinstance(wilor_section, dict)
     tasks = wilor_section["tasks"]
     assert isinstance(tasks, dict)
 
     assert set(tasks) == {
-        "image-example",
-        "video-example",
-        "video-trt",
-        "export-onnx",
-        "build-trt",
-        "compare-reference",
+        "wilor-nano-image-example",
+        "wilor-nano-video-example",
+        "wilor-nano-video-trt",
+        "wilor-nano-export-onnx",
+        "wilor-nano-build-trt",
+        "wilor-nano-compare-reference",
     }
-    assert all(not task_name.startswith("wilor-") for task_name in tasks)
-    assert tasks["image-example"]["cmd"] == "python tools/wilor_inference.py --image-path assets/img.png"
-    assert tasks["video-example"]["cmd"] == "python tools/wilor_inference.py --video-path assets/video.mp4"
-    assert tasks["video-trt"]["cmd"] == "python tools/wilor_inference_trt.py"
-    assert tasks["export-onnx"]["cmd"] == "python tools/conversion/export_wilor_onnx.py"
-    assert tasks["build-trt"]["cmd"] == "python tools/conversion/build_wilor_tensorrt.py"
-    assert tasks["compare-reference"]["cmd"] == "python tools/compare_rrd_reference.py --reference-rrd tests/reference_data/wilor_video_30.rrd --candidate-rrd /tmp/wilor_candidate.rrd --index video_time --rtol 0.01 --atol 0.25"
+    assert tasks["wilor-nano-image-example"]["cmd"] == "python tools/wilor_inference.py --image-path assets/img.png"
+    assert tasks["wilor-nano-video-example"]["cmd"] == "python tools/wilor_inference.py --video-path assets/video.mp4"
+    assert tasks["wilor-nano-video-trt"]["cmd"] == "python tools/wilor_inference_trt.py"
+    assert tasks["wilor-nano-export-onnx"]["cmd"] == "python tools/conversion/export_wilor_onnx.py"
+    assert tasks["wilor-nano-build-trt"]["cmd"] == "python tools/conversion/build_wilor_tensorrt.py"
+    assert tasks["wilor-nano-compare-reference"]["cmd"] == "python tools/compare_rrd_reference.py --reference-rrd tests/reference_data/wilor_video_30.rrd --candidate-rrd /tmp/wilor_candidate.rrd --index video_time --rtol 0.01 --atol 0.25"
 
 
 def test_original_wilor_inference_config_stays_minimal() -> None:

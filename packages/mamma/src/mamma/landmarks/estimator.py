@@ -56,7 +56,7 @@ class LandmarkEstimator:
 
             # FP16 TRT engine: 3.88ms vs 15.8ms eager per 4-crop call; joints
             # p99 diff 0.008 normalized units vs eager fp16 (gate re-verified).
-            self.runner = MammaNetTrtRunner(engine_path, config=config)
+            self.runner = MammaNetTrtRunner(engine_path)
         if compile_model:
             import torch._dynamo
 

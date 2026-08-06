@@ -37,8 +37,8 @@ from posekit.runtimes import (
     TorchBackendConfig,
     TorchRuntime,
     create_runtime_from_onnx,
+    run_chunked,
 )
-from posekit.runtimes.base import run_chunked
 from posekit.skeletons import COCO_133
 
 SapiensModelSize = Literal["0.4B", "0.8B", "1B"]

@@ -18,9 +18,7 @@ from torch import Tensor
 from posekit.models.base import PersonDetector
 from posekit.ops.crops import _float32_vector
 from posekit.predictions import BoxDetections, validate_frames_rgb
-from posekit.runtimes import TensorRuntime
-from posekit.runtimes.base import TensorSpec, run_chunked
-from posekit.runtimes.torch_runtime import TorchRuntime
+from posekit.runtimes import TensorRuntime, TensorSpec, TorchRuntime, run_chunked
 
 
 class _RtDetrHeads(torch.nn.Module):

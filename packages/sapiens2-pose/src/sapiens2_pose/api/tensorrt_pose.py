@@ -370,37 +370,28 @@ def estimate_sapiens_pose_with_heatmap_runner(
 
 
 def build_tensorrt_engine(config: TensorRtBuildConfig) -> TensorRtBuildSummary:
-    """Build the retained BF16 static batch-1 TensorRT engine from ONNX and write a manifest."""
-    trt: Any = _import_tensorrt()
+    """Build the retained BF16 static batch-1 TensorRT engine via trtkit and write a manifest."""
     config.validate()
-    logger: Any = trt.Logger(trt.Logger.INFO)
-    builder: Any = trt.Builder(logger)
-    network_flags: int = _make_network_creation_flags(trt)
-    network: Any = builder.create_network(network_flags)
-    parser: Any = trt.OnnxParser(network, logger)
-    if not bool(parser.parse_from_file(str(config.onnx_path))):
-        errors: list[str] = [str(parser.get_error(idx)) for idx in range(parser.num_errors)]
-        raise RuntimeError("TensorRT failed to parse ONNX graph:\n" + "\n".join(errors))
+    from trtkit import TrtBuildConfig as TrtKitBuildConfig
+    from trtkit import build_engine as trtkit_build_engine
 
-    builder_config: Any = builder.create_builder_config()
-    workspace_bytes: int = int(config.workspace_gib * 1024**3)
-    builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_bytes)
-    if config.builder_optimization_level != 3:
-        builder_config.builder_optimization_level = config.builder_optimization_level
-    _set_precision_flags(builder_config, trt)
-    _add_static_b1_optimization_profile(builder, network, builder_config, config)
-
-    serialized_engine: Any = builder.build_serialized_network(network, builder_config)
-    if serialized_engine is None:
-        raise RuntimeError("TensorRT returned no serialized engine.")
-
-    config.engine_path.parent.mkdir(parents=True, exist_ok=True)
-    config.engine_path.write_bytes(bytes(serialized_engine))
-    manifest_path: Path = config.engine_path.with_suffix(config.engine_path.suffix + ".json")
-    cuda_device_name: str = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "unknown"
-    manifest: dict[str, object] = config.to_manifest(
-        tensorrt_version=str(trt.__version__), cuda_device_name=cuda_device_name
+    trtkit_build_engine(
+        config.onnx_path,
+        config.engine_path,
+        TrtKitBuildConfig(
+            max_batch_size=1,
+            opt_batch_size=1,
+            precision="bf16",
+            allow_tf32=False,
+            workspace_gib=config.workspace_gib,
+            builder_optimization_level=config.builder_optimization_level,
+        ),
     )
+    import tensorrt
+
+    # Replace trtkit's generic manifest with the Sapiens deploy manifest.
+    manifest_path: Path = config.engine_path.with_suffix(config.engine_path.suffix + ".json")
+    manifest: dict[str, object] = config.to_manifest(tensorrt_version=tensorrt.__version__, cuda_device_name=torch.cuda.get_device_name())
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 
     return TensorRtBuildSummary(
@@ -412,7 +403,10 @@ def build_tensorrt_engine(config: TensorRtBuildConfig) -> TensorRtBuildSummary:
 
 
 class TensorRtPoseHeatmapRunner:
-    """TensorRT backend for static batch-1 Sapiens2 pose heatmap inference."""
+    """TensorRT backend for static batch-1 Sapiens2 pose heatmap inference.
+
+    Thin wrapper over :class:`trtkit.TensorRtRuntime` with CUDA-graph replay.
+    """
 
     def __init__(
         self,
@@ -424,96 +418,19 @@ class TensorRtPoseHeatmapRunner:
         resolved_device: str = resolve_device(device)
         if resolved_device != "cuda":
             raise ValueError("TensorRT pose inference requires device='cuda'.")
-        trt: Any = _import_tensorrt()
-        logger: Any = trt.Logger(trt.Logger.WARNING)
-        runtime: Any = trt.Runtime(logger)
-        engine_bytes: bytes = engine_path.read_bytes()
-        engine: Any = runtime.deserialize_cuda_engine(engine_bytes)
-        if engine is None:
-            raise RuntimeError(f"Could not deserialize TensorRT engine: {engine_path}")
-        context: Any = engine.create_execution_context()
-        if context is None:
-            raise RuntimeError(f"Could not create TensorRT execution context: {engine_path}")
+        from trtkit import TensorRtRuntime
 
-        self._trt: Any = trt
-        self._runtime: Any = runtime
-        self._engine: Any = engine
-        self._context: Any = context
-        self._input_name: str = self._find_tensor_name(input_mode=True)
-        self._output_name: str = self._find_tensor_name(input_mode=False)
-        self._cuda_graph: Any | None = None
-        self._cuda_graph_input: torch.Tensor | None = None
-        self._cuda_graph_output: torch.Tensor | None = None
-        self._cuda_graph_shape: tuple[int, ...] | None = None
+        self._runtime = TensorRtRuntime(engine_path, use_cuda_graph=True)
+        if self._runtime.spec.max_batch_size != 1:
+            raise ValueError(f"The retained TensorRT engine expects batch size 1, got {self._runtime.spec.max_batch_size}.")
+        self._input_name: str = self._runtime.spec.inputs[0].name
+        self._output_name: str = self._runtime.spec.outputs[0].name
 
     def __call__(self, inputs: torch.Tensor) -> torch.Tensor:
         """Run TensorRT heatmap inference for one normalized static batch-1 input."""
-        input_batch_size: int = int(inputs.shape[0])
-        if input_batch_size != 1:
-            raise ValueError(f"The retained TensorRT engine expects batch size 1, got {input_batch_size}.")
-        return self._call_cuda_graph(inputs)
-
-    def _call_cuda_graph(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Replay a captured static-shape TensorRT launch."""
         if inputs.device.type != "cuda":
             inputs = inputs.to("cuda")
-        inputs = inputs.contiguous()
-        input_shape: tuple[int, ...] = tuple(int(dim) for dim in inputs.shape)
-        if self._cuda_graph is None or self._cuda_graph_shape != input_shape:
-            self._capture_cuda_graph(inputs)
-
-        static_input: torch.Tensor | None = self._cuda_graph_input
-        static_output: torch.Tensor | None = self._cuda_graph_output
-        cuda_graph: Any | None = self._cuda_graph
-        if static_input is None or static_output is None or cuda_graph is None:
-            raise RuntimeError("CUDA Graph replay was requested before graph capture completed.")
-
-        static_input.copy_(inputs)
-        cuda_graph.replay()
-        return static_output
-
-    def _capture_cuda_graph(self, example_inputs: torch.Tensor) -> None:
-        """Capture one TensorRT engine launch for the current static input shape."""
-        input_shape: tuple[int, ...] = tuple(int(dim) for dim in example_inputs.shape)
-        self._context.set_input_shape(self._input_name, input_shape)
-        output_shape: tuple[int, ...] = tuple(int(dim) for dim in self._context.get_tensor_shape(self._output_name))
-        output_dtype: torch.dtype = _torch_dtype_from_trt(self._engine.get_tensor_dtype(self._output_name), self._trt)
-        static_input: torch.Tensor = example_inputs.detach().clone().contiguous()
-        static_output: torch.Tensor = torch.empty(output_shape, dtype=output_dtype, device=example_inputs.device)
-
-        self._context.set_tensor_address(self._input_name, int(static_input.data_ptr()))
-        self._context.set_tensor_address(self._output_name, int(static_output.data_ptr()))
-
-        warmup_stream: torch.cuda.Stream = torch.cuda.Stream(device=example_inputs.device)
-        current_stream: torch.cuda.Stream = torch.cuda.current_stream(example_inputs.device)
-        warmup_stream.wait_stream(current_stream)
-        with torch.cuda.stream(warmup_stream):
-            warmup_ok: bool = bool(self._context.execute_async_v3(stream_handle=int(warmup_stream.cuda_stream)))
-        if not warmup_ok:
-            raise RuntimeError("TensorRT execute_async_v3 failed during CUDA Graph warmup.")
-        current_stream.wait_stream(warmup_stream)
-        torch.cuda.synchronize(example_inputs.device)
-
-        cuda_graph: Any = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(cuda_graph):
-            capture_stream: torch.cuda.Stream = torch.cuda.current_stream(example_inputs.device)
-            capture_ok: bool = bool(self._context.execute_async_v3(stream_handle=int(capture_stream.cuda_stream)))
-        if not capture_ok:
-            raise RuntimeError("TensorRT execute_async_v3 failed during CUDA Graph capture.")
-
-        self._cuda_graph = cuda_graph
-        self._cuda_graph_input = static_input
-        self._cuda_graph_output = static_output
-        self._cuda_graph_shape = input_shape
-
-    def _find_tensor_name(self, *, input_mode: bool) -> str:
-        mode: Any = self._trt.TensorIOMode.INPUT if input_mode else self._trt.TensorIOMode.OUTPUT
-        for idx in range(int(self._engine.num_io_tensors)):
-            tensor_name: str = str(self._engine.get_tensor_name(idx))
-            if self._engine.get_tensor_mode(tensor_name) == mode:
-                return tensor_name
-        kind: str = "input" if input_mode else "output"
-        raise RuntimeError(f"TensorRT engine has no {kind} tensor.")
+        return self._runtime({self._input_name: inputs})[self._output_name]
 
 
 def estimate_sapiens_pose_tensorrt(
@@ -580,54 +497,6 @@ def run_tensorrt_image_pose(config: TensorRtImagePoseConfig) -> ImagePoseSummary
         )
 
     return run_image_pose(image_config, estimate_pose_fn=estimate_pose_fn)
-
-
-def _add_static_b1_optimization_profile(
-    builder: Any, network: Any, builder_config: Any, config: TensorRtBuildConfig
-) -> None:
-    spec: Any = MODEL_SPECS[config.model_size]
-    profile: Any = builder.create_optimization_profile()
-    input_tensor: Any = network.get_input(0)
-    input_name: str = str(input_tensor.name)
-    shape: tuple[int, int, int, int] = (1, 3, spec.image_size[0], spec.image_size[1])
-    profile.set_shape(input_name, shape, shape, shape)
-    builder_config.add_optimization_profile(profile)
-
-
-def _make_network_creation_flags(trt: Any) -> int:
-    """Return TensorRT network creation flags for explicit-batch mode."""
-    network_flags: int = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-    return network_flags
-
-
-def _set_precision_flags(builder_config: Any, trt: Any) -> None:
-    """Configure TensorRT for the retained BF16 build."""
-    if hasattr(trt.BuilderFlag, "TF32"):
-        builder_config.clear_flag(trt.BuilderFlag.TF32)
-    if not hasattr(trt.BuilderFlag, "BF16"):
-        raise RuntimeError(f"TensorRT {trt.__version__} does not expose BuilderFlag.BF16.")
-    builder_config.set_flag(trt.BuilderFlag.BF16)
-
-
-def _torch_dtype_from_trt(trt_dtype: Any, trt: Any) -> torch.dtype:
-    if trt_dtype == trt.float32:
-        return torch.float32
-    if trt_dtype == trt.float16:
-        return torch.float16
-    if hasattr(trt, "bfloat16") and trt_dtype == trt.bfloat16:
-        return torch.bfloat16
-    raise TypeError(f"Unsupported TensorRT output dtype: {trt_dtype}")
-
-
-def _import_tensorrt() -> Any:
-    try:
-        import tensorrt as trt
-    except ImportError as exc:
-        raise RuntimeError(
-            "TensorRT Python bindings are not installed in this Pixi environment. "
-            "Install the sapiens2-pose TensorRT dependencies with `pixi install -e sapiens2-pose-dev`."
-        ) from exc
-    return trt
 
 
 def _sha256_file(path: Path) -> str:

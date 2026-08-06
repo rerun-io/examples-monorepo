@@ -17,9 +17,7 @@ from torch import Tensor
 from posekit.models.base import IdentityEncoder
 from posekit.ops.crops import CropBatch, CropSpec, crop_frames
 from posekit.predictions import BoxDetections
-from posekit.runtimes import TensorRuntime
-from posekit.runtimes.base import TensorSpec, run_chunked
-from posekit.runtimes.torch_runtime import TorchRuntime
+from posekit.runtimes import TensorRuntime, TensorSpec, TorchRuntime, run_chunked
 
 # OpenAI-CLIP normalization constants scaled to the 0-255 crops posekit produces.
 CLIP_MEAN: tuple[float, float, float] = (0.48145466 * 255.0, 0.4578275 * 255.0, 0.40821073 * 255.0)

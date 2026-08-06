@@ -40,7 +40,12 @@ class RuntimeSpec:
 
 @runtime_checkable
 class TensorRuntime(Protocol):
-    """Batched CUDA-tensor function backing one neural network."""
+    """Batched CUDA-tensor function backing one neural network.
+
+    Output-lifetime contract: accelerated backends return views into
+    runtime-owned buffers that the NEXT call overwrites — clone anything that
+    must survive (:func:`run_chunked` does this for you).
+    """
 
     @property
     def spec(self) -> RuntimeSpec:
@@ -56,7 +61,7 @@ class TensorRuntime(Protocol):
 
         Returns:
             CUDA tensors keyed by ``spec.outputs`` names, sliced to the submitted
-            batch size.
+            batch size. May be views into reused buffers — see the class docstring.
         """
         ...
 

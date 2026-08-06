@@ -43,7 +43,6 @@ DEFAULT_RTMLIB_POSE_ENGINE_PATH = DEFAULT_TRT_DIR / "rtmw_256x192_b32_fp16.trt"
 DETECTOR_DEFAULT_BATCH_SIZE = 8
 POSE_DEFAULT_BATCH_SIZE = 8
 RTMLIB_POSE_DEFAULT_BATCH_SIZE = 32
-YOLOX_DEFAULT_MAX_DETECTIONS = 1024
 DETECTOR_INPUT_SIZE = (640, 640)
 DETECTOR_DEFAULT_SCORE_THR = 0.7
 DETECTOR_DEFAULT_NMS_THR = 0.45
@@ -133,11 +132,6 @@ class TensorRtDetectorConfig:
         return DETECTOR_INPUT_SIZE
 
     @property
-    def max_detections(self) -> int:
-        """Maximum decoded detections kept by the detector runner."""
-        return YOLOX_DEFAULT_MAX_DETECTIONS
-
-    @property
     def input_name(self) -> str:
         """Fixed detector input binding name for the exported engine."""
         return DETECTOR_INPUT_NAME
@@ -151,11 +145,6 @@ class TensorRtDetectorConfig:
     def score_output_name(self) -> str:
         """Fixed decoded-score output binding name for the exported engine."""
         return DETECTOR_SCORE_OUTPUT_NAME
-
-    @property
-    def extra_output_names(self) -> tuple[str, ...]:
-        """Extra detector outputs requested from TensorRT."""
-        return ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -440,10 +429,6 @@ class BatchedTensorRtCoco133Pipeline:
             input_name=detector_config.input_name,
             output_name=detector_config.output_name,
             score_output_name=detector_config.score_output_name,
-            extra_output_names=detector_config.extra_output_names,
-            max_detections=detector_config.max_detections,
-            model_input_size=detector_config.input_size,
-            static_batch_size=detector_config.static_batch_size,
         )
         pose_factory: Callable[..., PoseRunner]
         if isinstance(config.pose, RtmlibTensorRtPoseConfig):
@@ -454,8 +439,6 @@ class BatchedTensorRtCoco133Pipeline:
                 input_name=pose_config.input_name,
                 simcc_x_output_name=pose_config.simcc_x_output_name,
                 simcc_y_output_name=pose_config.simcc_y_output_name,
-                model_input_size=pose_config.input_size,
-                static_batch_size=pose_config.static_batch_size,
             )
         else:
             sapiens_pose_config: SapiensTensorRtPoseConfig = config.pose
@@ -464,7 +447,6 @@ class BatchedTensorRtCoco133Pipeline:
                 sapiens_pose_config.engine_path,
                 input_name=sapiens_pose_config.input_name,
                 output_name=sapiens_pose_config.output_name,
-                static_batch_size=sapiens_pose_config.static_batch_size,
             )
 
     @torch.no_grad()

@@ -15,7 +15,7 @@ import torch
 from beartype.roar import BeartypeException
 from torch import Tensor
 
-from posekit.runtimes.base import RuntimeSpec, TensorSpec, validate_runtime_inputs
+from trtkit.base import RuntimeSpec, TensorSpec, validate_runtime_inputs
 
 _ORT_TO_TORCH_DTYPE: dict[str, torch.dtype] = {
     "tensor(float)": torch.float32,
@@ -39,7 +39,7 @@ _TORCH_TO_NUMPY_DTYPE: dict[torch.dtype, type] = {
 
 
 class OnnxCudaRuntime:
-    """GPU-resident ONNX Runtime session implementing the posekit runtime contract."""
+    """GPU-resident ONNX Runtime session implementing the trtkit runtime contract."""
 
     def __init__(self, onnx_path: Path, *, device_id: int = 0, max_batch_size: int = 32) -> None:
         """Load an ONNX graph into a CUDA execution-provider session.
@@ -76,7 +76,7 @@ class OnnxCudaRuntime:
         except Exception as error:
             # Perf-relevant mode switch: every call will host-sync the caller's
             # stream instead of being stream-ordered — say so, don't hide it.
-            print(f"[posekit] ORT user_compute_stream unavailable ({error}); falling back to a host-synchronized session.")
+            print(f"[trtkit] ORT user_compute_stream unavailable ({error}); falling back to a host-synchronized session.")
             self._session = ort.InferenceSession(
                 str(onnx_path), sess_options=session_options, providers=[("CUDAExecutionProvider", {"device_id": device_id})]
             )
@@ -233,7 +233,7 @@ class OnnxCudaRuntime:
 
 
 def _tensor_spec_from_node(node: Any) -> tuple[TensorSpec, int | None]:
-    """Convert an ORT graph node into a posekit tensor spec.
+    """Convert an ORT graph node into a trtkit tensor spec.
 
     Args:
         node: ``onnxruntime.NodeArg`` from ``get_inputs()``/``get_outputs()``.
@@ -249,7 +249,7 @@ def _tensor_spec_from_node(node: Any) -> tuple[TensorSpec, int | None]:
     per_sample: list[int] = []
     for dim in dims[1:]:
         if not isinstance(dim, int):
-            raise ValueError(f"Graph tensor {node.name!r} has symbolic non-batch dim {dim!r}; posekit requires static per-sample shapes.")
+            raise ValueError(f"Graph tensor {node.name!r} has symbolic non-batch dim {dim!r}; trtkit requires static per-sample shapes.")
         per_sample.append(int(dim))
     dtype: torch.dtype | None = _ORT_TO_TORCH_DTYPE.get(str(node.type))
     if dtype is None:

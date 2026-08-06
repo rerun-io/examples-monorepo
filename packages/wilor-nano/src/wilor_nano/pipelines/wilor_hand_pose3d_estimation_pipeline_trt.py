@@ -122,12 +122,8 @@ class WiLorHandPose3dEstimationPipeline:
         self.dtype: torch.dtype = config.dtype
         self.focal_length: float = config.focal_length
         self.detector_max_det: int = config.detector_max_det
-        self.detector = detector_runner_factory(
-            config.detector_engine_path, static_batch_size=config.detector_static_batch_size, device="cuda"
-        )
-        self.wilor = wilor_runner_factory(
-            config.wilor_engine_path, static_batch_size=config.wilor_static_batch_size, device="cuda"
-        )
+        self.detector = detector_runner_factory(config.detector_engine_path)
+        self.wilor = wilor_runner_factory(config.wilor_engine_path)
 
     @torch.no_grad()
     def predict_batch_rgb_tensor(

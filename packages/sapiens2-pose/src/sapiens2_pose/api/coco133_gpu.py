@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import torch
@@ -20,9 +19,7 @@ from sapiens2_pose.sapiens_lite.pose import MODEL_SPECS
 
 TORCH_UINT8 = torch.__dict__["uint8"]
 YoloxRawOutput = Float[Tensor, "batch anchors fields"]
-POSE_INPUT_SHAPE = (3, 1024, 768)
 RTMLIB_POSE_INPUT_SIZE = (192, 256)
-YOLOX_DEFAULT_MAX_DETECTIONS = 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,7 +282,7 @@ def _eye2_torch(device: torch.device) -> Float[Tensor, "1 1 2 2"]:
 class TensorRtYoloxDetectorRunner:
     """Callable wrapper for a static-batch RTMLib YOLOX TensorRT engine."""
 
-    def __init__(self, engine_path: Path, *, input_name: str, output_name: str, score_output_name: str | None = None, extra_output_names: tuple[str, ...] = (), max_detections: int = YOLOX_DEFAULT_MAX_DETECTIONS, model_input_size: tuple[int, int], static_batch_size: int) -> None:
+    def __init__(self, engine_path: Path, *, input_name: str, output_name: str, score_output_name: str | None = None) -> None:
         """Initialize a static-batch YOLOX TensorRT runner.
 
         Args:
@@ -293,15 +290,11 @@ class TensorRtYoloxDetectorRunner:
             input_name: TensorRT input tensor name.
             output_name: TensorRT decoded-box or raw-output tensor name.
             score_output_name: Optional decoded-score tensor name.
-            extra_output_names: Additional output tensor names to bind.
-            max_detections: Maximum decoded detections expected from the engine. Kept for API symmetry.
-            model_input_size: Detector input size as ``(height, width)``.
-            static_batch_size: Static batch size baked into the engine.
         """
-        from wilor_nano.api.tensorrt_runtime import _StaticTensorRtRunner
+        from trtkit import TensorRtRuntime
 
-        del max_detections
-        self._runner = _StaticTensorRtRunner(engine_path, input_name=input_name, output_names=(output_name, *(() if score_output_name is None else (score_output_name,)), *extra_output_names), static_input_shape=(3, int(model_input_size[0]), int(model_input_size[1])), static_batch_size=static_batch_size)
+        self._runtime = TensorRtRuntime(engine_path)
+        self._input_name: str = input_name
         self._output_name, self._score_output_name = output_name, score_output_name
 
     def __call__(self, inputs: Float[Tensor, "batch 3 det_h det_w"]) -> YoloxDetectorOutput:
@@ -318,30 +311,28 @@ class TensorRtYoloxDetectorRunner:
         """
         if inputs.device.type != "cuda" or inputs.dtype != torch.float32:
             raise ValueError("YOLOX TensorRT expects CUDA float32 NCHW inputs.")
-        batch_size, outputs = self._runner.run(inputs)
-        return DecodedYoloxHeadOutput(outputs[self._output_name][:batch_size], outputs[self._score_output_name][:batch_size]) if self._score_output_name is not None else outputs[self._output_name][:batch_size]
+        outputs: dict[str, Tensor] = self._runtime({self._input_name: inputs})
+        return DecodedYoloxHeadOutput(outputs[self._output_name], outputs[self._score_output_name]) if self._score_output_name is not None else outputs[self._output_name]
 
 
 class TensorRtPoseRunner:
     """Callable wrapper for a static-batch pose TensorRT engine."""
 
-    def __init__(self, engine_path: Path, *, input_name: str, output_names: tuple[str, ...], static_input_shape: tuple[int, int, int], static_batch_size: int, convert_input_dtype: bool) -> None:
+    def __init__(self, engine_path: Path, *, input_name: str, output_names: tuple[str, ...], convert_input_dtype: bool) -> None:
         """Initialize a static-batch pose TensorRT runner.
 
         Args:
             engine_path: Path to the TensorRT pose engine.
             input_name: TensorRT input tensor name.
             output_names: TensorRT output tensor names.
-            static_input_shape: Static input shape without batch as ``(channels, height, width)``.
-            static_batch_size: Static batch size baked into the engine.
             convert_input_dtype: Whether to cast incoming tensors to the engine input dtype.
         """
-        from wilor_nano.api.tensorrt_runtime import _StaticTensorRtRunner
+        from trtkit import TensorRtRuntime
 
-        self._runner = _StaticTensorRtRunner(engine_path, input_name=input_name, output_names=output_names, static_input_shape=static_input_shape, static_batch_size=static_batch_size)
+        self._runtime = TensorRtRuntime(engine_path)
+        self._input_name: str = input_name
         self._output_names, self._convert_input_dtype = output_names, convert_input_dtype
-        input_dtype: Any = self._runner._engine.get_tensor_dtype(self._runner._input_name)
-        self._input_dtype: torch.dtype = torch.float16 if input_dtype == self._runner._trt.DataType.HALF else torch.float32
+        self._input_dtype: torch.dtype = {spec.name: spec for spec in self._runtime.spec.inputs}[input_name].dtype
 
     def __call__(self, inputs: Float[Tensor, "batch 3 h w"]) -> tuple[Tensor, ...]:
         """Run pose TensorRT inference.
@@ -361,26 +352,25 @@ class TensorRtPoseRunner:
             inputs = inputs.to(dtype=self._input_dtype)
         elif inputs.dtype != self._input_dtype:
             raise ValueError(f"Pose TensorRT expects {self._input_dtype} inputs.")
-        batch_size, outputs = self._runner.run(inputs)
-        return tuple(outputs[name][:batch_size] for name in self._output_names)
+        outputs: dict[str, Tensor] = self._runtime({self._input_name: inputs})
+        return tuple(outputs[name] for name in self._output_names)
 
 
-def TensorRtSapiensPoseRunner(engine_path: Path, *, input_name: str, output_name: str, static_batch_size: int) -> TensorRtPoseRunner:
+def TensorRtSapiensPoseRunner(engine_path: Path, *, input_name: str, output_name: str) -> TensorRtPoseRunner:
     """Create a Sapiens heatmap TensorRT runner.
 
     Args:
         engine_path: Path to the Sapiens TensorRT engine.
         input_name: TensorRT input tensor name.
         output_name: TensorRT heatmap output tensor name.
-        static_batch_size: Static batch size baked into the engine.
 
     Returns:
         Configured static-batch pose runner.
     """
-    return TensorRtPoseRunner(engine_path, input_name=input_name, output_names=(output_name,), static_input_shape=POSE_INPUT_SHAPE, static_batch_size=static_batch_size, convert_input_dtype=False)
+    return TensorRtPoseRunner(engine_path, input_name=input_name, output_names=(output_name,), convert_input_dtype=False)
 
 
-def TensorRtRtmlibPoseRunner(engine_path: Path, *, input_name: str, simcc_x_output_name: str, simcc_y_output_name: str, model_input_size: tuple[int, int], static_batch_size: int) -> TensorRtPoseRunner:
+def TensorRtRtmlibPoseRunner(engine_path: Path, *, input_name: str, simcc_x_output_name: str, simcc_y_output_name: str) -> TensorRtPoseRunner:
     """Create an RTMLib RTMW SimCC TensorRT runner.
 
     Args:
@@ -388,13 +378,11 @@ def TensorRtRtmlibPoseRunner(engine_path: Path, *, input_name: str, simcc_x_outp
         input_name: TensorRT input tensor name.
         simcc_x_output_name: TensorRT SimCC-x output tensor name.
         simcc_y_output_name: TensorRT SimCC-y output tensor name.
-        model_input_size: RTMW pose input size as ``(width, height)``.
-        static_batch_size: Static batch size baked into the engine.
 
     Returns:
         Configured static-batch pose runner.
     """
-    return TensorRtPoseRunner(engine_path, input_name=input_name, output_names=(simcc_x_output_name, simcc_y_output_name), static_input_shape=(3, int(model_input_size[1]), int(model_input_size[0])), static_batch_size=static_batch_size, convert_input_dtype=True)
+    return TensorRtPoseRunner(engine_path, input_name=input_name, output_names=(simcc_x_output_name, simcc_y_output_name), convert_input_dtype=True)
 
 
 def postprocess_yolox_outputs_torch(outputs: YoloxDetectorOutput, *, resize_ratios: Float[Tensor, "batch"], model_input_size: tuple[int, int], score_thr: float = 0.3, nms_thr: float = 0.45) -> list[Float[Tensor, "n 4"]]:
