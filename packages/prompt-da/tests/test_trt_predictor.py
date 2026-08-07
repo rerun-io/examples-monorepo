@@ -43,11 +43,11 @@ def test_cached_engine_path_rejects_bad_batch_range() -> None:
 def test_cached_engine_path_is_deterministic_and_cache_keyed() -> None:
     """The engine name encodes batch range, precision, TRT version, and SM."""
 
-    config = TrtBuildConfig(max_batch_size=8, opt_batch_size=8, precision="fp16")
+    config = TrtBuildConfig(max_batch_size=8, opt_batch_size=8)
     first: Path = cached_engine_path(Path("promptda-large_756x1008_op17.onnx"), config)
     second: Path = cached_engine_path(Path("promptda-large_756x1008_op17.onnx"), config)
     assert first == second
-    assert "_b1-8-8_fp16_" in first.name
+    assert "_b1-8-8_strong_" in first.name
     other: Path = cached_engine_path(Path("promptda-large_756x1008_op17.onnx"), TrtBuildConfig(max_batch_size=4, opt_batch_size=4))
     assert other != first
 
@@ -82,7 +82,7 @@ def test_trt_matches_torch_on_synthetic_frames() -> None:
     rgb_bhw3 = torch.randint(0, 256, (8, 768, 1024, 3), dtype=torch.uint8, generator=torch.Generator().manual_seed(0))
     prompt_bhw = torch.rand((8, 192, 256), dtype=torch.float32, generator=torch.Generator().manual_seed(1)) * 3.0 + 0.5
 
-    trt_predictor = PromptDATrtPredictor(batch_size=8, precision="fp16")
+    trt_predictor = PromptDATrtPredictor(batch_size=8)
     torch_predictor = PromptDATorchPredictor()
     depth_trt = trt_predictor(rgb_bhw3.cuda(), prompt_bhw.cuda())
     depth_torch = torch_predictor(rgb_bhw3.cuda(), prompt_bhw.cuda())
@@ -123,7 +123,7 @@ def test_trt_matches_original_numpy_pipeline() -> None:
     prompt_base = torch.rand((2, 1, 12, 16), generator=generator) * 3.0 + 0.5
     prompt_m = F.interpolate(prompt_base, size=(192, 256), mode="bilinear", align_corners=False)[:, 0]
 
-    trt_predictor = PromptDATrtPredictor(batch_size=8, precision="fp16")
+    trt_predictor = PromptDATrtPredictor(batch_size=8)
     depth_trt_mm = (trt_predictor(rgb_bhw3.cuda(), prompt_m.cuda()) * 1000.0).cpu().numpy()
     torch.cuda.synchronize()
 

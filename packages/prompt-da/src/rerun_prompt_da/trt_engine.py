@@ -14,16 +14,14 @@ from pathlib import Path
 from typing import Literal, TypeAlias
 
 import torch
-from trtkit import TrtBuildConfig, TrtPrecision, cached_engine_path, ensure_engine
+from trtkit import TrtBuildConfig, cached_engine_path, ensure_engine
 
 __all__ = (
     "DEFAULT_CACHE_DIR",
     "ModelType",
     "ONNX_EXPORT_VERSION",
-    "ONNX_OPSET",
     "PROMPT_DEPTH_HW",
     "TrtBuildConfig",
-    "TrtPrecision",
     "cached_engine_path",
     "ensure_engine",
     "export_promptda_onnx",
@@ -37,12 +35,15 @@ DEFAULT_CACHE_DIR: Path = Path(os.environ.get("PROMPTDA_TRT_CACHE", "~/.cache/pr
 PROMPT_DEPTH_HW: tuple[int, int] = (192, 256)
 """ARKit LiDAR prompt-depth resolution PromptDA was trained on."""
 
-ONNX_OPSET: int = 17
-"""Legacy-exporter opset; TRT 10.13's parser chokes on dynamo exports (see mamma)."""
-
-ONNX_EXPORT_VERSION: int = 1
+ONNX_EXPORT_VERSION: int = 6
 """Bump whenever the export recipe or the vendored PromptDA implementation changes,
-so cached ONNX graphs from older code are not silently reused."""
+so cached ONNX graphs from older code are not silently reused.
+v6: trtkit's shared export recipe (dynamo, fp16 autocast compute with fp32
+I/O, atomic publish), plus ``min_val``/``max_val`` fusion-breaker outputs — TensorRT 11.2's Myelin miscompiles the fusion that spans the prompt's
+amin/amax reductions from the graph input to the final denormalize (garbage or
+NaN depth in every precision); materializing the two scalars as engine outputs
+splits that fusion and restores exact parity (0.7 mm median, ~52 FPS on sm_120,
+equal to the TRT 10.13 weak-fp16 engine)."""
 
 
 def export_promptda_onnx(
@@ -54,8 +55,12 @@ def export_promptda_onnx(
 
     The graph takes ``image`` (float32 ``[B,3,H,W]``, RGB in [0,1]) and
     ``prompt_depth`` (float32 ``[B,1,192,256]``, meters) and returns ``depth``
-    (float32 ``[B,1,H,W]``, meters). Only the batch axis is dynamic; H and W
-    must be multiples of the DINOv2 patch size (14).
+    (float32 ``[B,1,H,W]``, meters) plus tiny ``min_val``/``max_val`` outputs
+    that exist only to break a miscompiling TensorRT fusion (see
+    ``ONNX_EXPORT_VERSION``); consumers read ``depth`` and ignore the rest.
+    Compute inside is fp16 (autocast traced into the graph — TensorRT 11 builds
+    are strongly typed, so the graph's dtypes are the engine's). Only the batch
+    axis is dynamic; H and W must be multiples of the DINOv2 patch size (14).
 
     Args:
         model_type: PromptDA checkpoint variant (monopriors ``NAME_TO_HFNAME`` key).
@@ -79,39 +84,66 @@ def export_promptda_onnx(
     ckpt_path = Path(hf_hub_download(repo_id=NAME_TO_HFNAME[model_type], repo_type="model", filename="model.ckpt"))
     ckpt_rev: str = _checkpoint_revision(ckpt_path)
     onnx_dir: Path = cache_dir / "onnx"
-    onnx_path: Path = onnx_dir / f"promptda-{model_type}_{height}x{width}_op{ONNX_OPSET}_v{ONNX_EXPORT_VERSION}_{ckpt_rev}.onnx"
+    onnx_path: Path = onnx_dir / f"promptda-{model_type}_{height}x{width}_v{ONNX_EXPORT_VERSION}_{ckpt_rev}.onnx"
     if onnx_path.exists():
         return onnx_path
 
     print(f"[prompt-da] exporting ONNX (one-time, may take a minute): {onnx_path.name}")
     model = PromptDA.from_pretrained(str(ckpt_path)).to("cuda").eval()
+
+    class _FusionBreakerOutputs(torch.nn.Module):
+        """Adapter adding the ``min_val``/``max_val`` fusion-breaker outputs.
+
+        The re-computed ``amin``/``amax`` dedupe against the identical
+        reductions inside ``PromptDA.normalize``, so marking them as outputs
+        forces TensorRT to materialize the two scalars instead of fusing the
+        input-side normalize with the output-side denormalize across the whole
+        network — the fusion TRT 11.2 miscompiles (see ``ONNX_EXPORT_VERSION``).
+        """
+
+        def __init__(self, inner: torch.nn.Module) -> None:
+            super().__init__()
+            self.inner = inner
+
+        def forward(self, image: torch.Tensor, prompt_depth: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            depth = self.inner(image, prompt_depth)
+            min_val = prompt_depth.amin(dim=(1, 2, 3), keepdim=True)
+            max_val = prompt_depth.amax(dim=(1, 2, 3), keepdim=True)
+            return depth, min_val, max_val
+
+    wrapper = _FusionBreakerOutputs(model).eval()
+
+    from trtkit import export_onnx
+
     # Trace at batch 2 so no op accidentally specializes on batch 1.
     dummy_image: torch.Tensor = torch.zeros((2, 3, height, width), dtype=torch.float32, device="cuda")
     dummy_prompt: torch.Tensor = torch.rand((2, 1, *PROMPT_DEPTH_HW), dtype=torch.float32, device="cuda") + 0.5
-    onnx_dir.mkdir(parents=True, exist_ok=True)
-    # pid-unique temp + atomic rename: concurrent exporters may duplicate work
-    # but can never clobber each other's in-flight writes or publish a
-    # truncated file.
-    tmp_path: Path = onnx_path.with_name(f"{onnx_path.name}.part{os.getpid()}")
-    with torch.inference_mode():
-        torch.onnx.export(
-            model,
-            (dummy_image, dummy_prompt),
-            str(tmp_path),
-            input_names=["image", "prompt_depth"],
-            output_names=["depth"],
-            opset_version=ONNX_OPSET,
-            do_constant_folding=True,
-            dynamic_axes={
-                "image": {0: "batch"},
-                "prompt_depth": {0: "batch"},
-                "depth": {0: "batch"},
-            },
-            dynamo=False,
-        )
-    tmp_path.rename(onnx_path)
-    del model
+    export_onnx(
+        wrapper,
+        (dummy_image, dummy_prompt),
+        onnx_path,
+        input_names=["image", "prompt_depth"],
+        output_names=["depth", "min_val", "max_val"],
+        compute_dtype=torch.float16,
+        dynamic_batch_max=64,
+    )
+    # The wrapper holds the ~GB of weights via .inner — drop both references so
+    # empty_cache() actually frees them before the engine build claims memory.
+    del wrapper, model
     torch.cuda.empty_cache()
+    # Older export recipes (opset/version bumps) are never reused once this
+    # file exists — reclaim the multi-GB they'd otherwise leak. ``.part`` temps
+    # are only swept when old enough that their exporter is certainly dead, so
+    # a live concurrent export's in-flight write is never yanked away.
+    import time
+
+    stale_prefix: str = f"promptda-{model_type}_{height}x{width}_"
+    for stale in onnx_dir.iterdir():
+        if stale == onnx_path or not stale.name.startswith(stale_prefix):
+            continue
+        if ".part" in stale.name and time.time() - stale.stat().st_mtime < 3600.0:
+            continue
+        stale.unlink(missing_ok=True)
     return onnx_path
 
 

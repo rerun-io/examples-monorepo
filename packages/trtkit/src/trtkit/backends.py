@@ -18,7 +18,7 @@ import tyro
 from trtkit.base import TensorRuntime
 from trtkit.onnx_cuda import OnnxCudaRuntime
 from trtkit.tensorrt_runtime import TensorRtRuntime
-from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR, TrtBuildConfig, TrtPrecision, ensure_engine
+from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR, TrtBuildConfig, ensure_engine
 
 AutocastName = Literal["fp32", "fp16", "bf16"]
 _AUTOCAST_DTYPES: dict[AutocastName, torch.dtype | None] = {"fp32": None, "fp16": torch.float16, "bf16": torch.bfloat16}
@@ -57,8 +57,6 @@ class TensorRtBackendConfig:
     """Largest batch the engine accepts (dynamic profile max); static-batch ONNX graphs use their baked batch."""
     opt_batch_size: int = 8
     """Batch size TensorRT tunes kernels for (dynamic profile optimum)."""
-    precision: TrtPrecision = "fp16"
-    """Engine builder precision."""
     use_cuda_graph: bool = False
     """Capture and replay CUDA graphs around the engine launch (one per batch size)."""
     cache_dir: Path = field(default_factory=lambda: DEFAULT_TRT_CACHE_DIR)
@@ -98,7 +96,6 @@ def create_runtime_from_onnx(onnx_path: Path, backend: "OnnxBackendConfig | Tens
     build_config = TrtBuildConfig(
         max_batch_size=static_batch if static_batch is not None else backend.max_batch_size,
         opt_batch_size=static_batch if static_batch is not None else backend.opt_batch_size,
-        precision=backend.precision,
     )
     engine_path: Path = ensure_engine(onnx_path, build_config, cache_dir=backend.cache_dir)
     return TensorRtRuntime(engine_path, use_cuda_graph=backend.use_cuda_graph)

@@ -1,4 +1,4 @@
-"""Build the machine-local MammaNet TensorRT engine (ONNX export + FP16 build).
+"""Build the machine-local MammaNet TensorRT engine (ONNX export + strongly-typed build).
 
 Engines are sm-specific cache artifacts under ``.trt_cache/`` (gitignored);
 demos/benchmark load them via ``LandmarkEstimator(backend="tensorrt")``.
@@ -42,20 +42,25 @@ def main(config: BuildConfig) -> None:
         return
     model = load_mammanet(config.mammanet_weights, device="cuda")
     onnx_path: Path = config.cache_dir / "mammanet.onnx"
-    print("exporting ONNX (legacy exporter, opset 17)...")
+    print("exporting ONNX (dynamo exporter, fp16-typed graph)...")
     export_mammanet_onnx(model, onnx_path)
-    print(f"building FP16 engine ({engine_path.name})...")
-    t0: float = time.perf_counter()
-    build_engine(onnx_path, engine_path)
-    print(f"built in {time.perf_counter() - t0:.0f}s -> {engine_path}")
 
-    # Numerics check vs eager fp16.
-    runner = TensorRtRuntime(engine_path, use_cuda_graph=True)
+    # Compute the eager-fp16 parity reference BEFORE the engine build and free
+    # the model so its VRAM doesn't compete with the builder's workspace.
     torch.manual_seed(0)
     x = torch.randn(ENGINE_BATCH, 3, 512, 384, device="cuda")
     masks = (torch.rand(ENGINE_BATCH, 1, 512, 384, device="cuda") > 0.5).float()
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
         ref = model(x, masks)
+    del model
+    torch.cuda.empty_cache()
+
+    print(f"building strongly-typed engine ({engine_path.name})...")
+    t0: float = time.perf_counter()
+    build_engine(onnx_path, engine_path)
+    print(f"built in {time.perf_counter() - t0:.0f}s -> {engine_path}")
+
+    runner = TensorRtRuntime(engine_path, use_cuda_graph=True)
     out = runner({"crops": x, "masks": masks})
     ref_joints = ref["joints2d"]
     assert ref_joints is not None

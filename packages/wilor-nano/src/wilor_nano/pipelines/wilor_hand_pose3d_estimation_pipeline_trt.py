@@ -215,7 +215,9 @@ class WiLorHandPose3dEstimationPipeline:
             mode="bilinear",
             align_corners=False,
         )
-        return F.pad(resized, (left, right, top, bottom), value=114.0 / 255.0).contiguous()
+        # Bilinear kernels can overshoot 0..1 by an ULP on some platforms
+        # (observed on GB10/aarch64); the detector contract is a closed [0, 1].
+        return F.pad(resized.clamp_(0.0, 1.0), (left, right, top, bottom), value=114.0 / 255.0).contiguous()
 
     def _postprocess_detector(
         self,

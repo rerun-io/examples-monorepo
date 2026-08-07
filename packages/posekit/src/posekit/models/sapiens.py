@@ -15,7 +15,7 @@ Requires the ``sapiens2-pose`` package (model definition + checkpoints);
 imports are lazy so the rest of posekit works without it.
 """
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -92,17 +92,11 @@ class SapiensPose2d(TopDownPose2d):
             )
         else:
             backend: Any = config.backend
-            if isinstance(backend, TensorRtBackendConfig) and backend.precision == "fp16":
-                # fp16 Sapiens ViT engines overflow (validated: ~70 px error weakly
-                # typed, still broken strongly typed). The sapiens2-pose 0.4B
-                # precision sweep settled on BF16 as the fastest strict-accuracy
-                # precision — rewrite the default silently-broken config.
-                print("[posekit] Sapiens TensorRT with precision='fp16' overflows; using precision='bf16' instead.")
-                backend = replace(backend, precision="bf16")
-            # The dynamo export bakes a fixed batch, so both accelerated
-            # backends run a static graph sized at the TRT opt batch.
+            # Static graph sized at the TRT opt batch; TRT gets the bf16-typed
+            # graph, ORT the fp32 graph — rationale in _ensure_sapiens_onnx.
             static_batch: int = backend.opt_batch_size if isinstance(backend, TensorRtBackendConfig) else backend.max_batch_size
-            self.runtime = create_runtime_from_onnx(_ensure_sapiens_onnx(config.model_size, static_batch), backend)
+            bf16: bool = isinstance(backend, TensorRtBackendConfig)
+            self.runtime = create_runtime_from_onnx(_ensure_sapiens_onnx(config.model_size, static_batch, bf16=bf16), backend)
         self.crop_spec: CropSpec = CropSpec(
             input_size=self._input_size, padding=config.padding, align="udp", bgr=False, mean_rgb=IMAGENET_MEAN_255, std_rgb=IMAGENET_STD_255
         )
@@ -147,12 +141,14 @@ class SapiensPose2d(TopDownPose2d):
         return Keypoints2d(xy_coco, scores_coco, detections.frame_indices, self.skeleton)
 
 
-def _ensure_sapiens_onnx(model_size: SapiensModelSize, static_batch: int) -> Path:
+def _ensure_sapiens_onnx(model_size: SapiensModelSize, static_batch: int, *, bf16: bool) -> Path:
     """Export the Sapiens2 pose module to a cached static-batch ONNX file.
 
     Args:
         model_size: Sapiens2 checkpoint size.
         static_batch: Batch size baked into the exported graph.
+        bf16: Export a bf16-autocast graph for strongly-typed TRT builds;
+            ``False`` keeps the plain fp32 graph ONNX Runtime runs.
 
     Returns:
         Path to the cached ONNX export.
@@ -160,11 +156,15 @@ def _ensure_sapiens_onnx(model_size: SapiensModelSize, static_batch: int) -> Pat
     from sapiens2_pose.api.runtime import get_pose_model
     from sapiens2_pose.api.tensorrt_pose import make_sapiens_pose_onnx_exportable
     from sapiens2_pose.sapiens_lite.pose import MODEL_SPECS
+    from trtkit import export_onnx
 
-    # fp32 export on purpose: an fp16-typed graph is numerically fine on ONNX
-    # Runtime but overflows in every TensorRT precision mode (fused ViT kernels).
-    # The fp32 interchange runs accurately on ORT and builds accurate BF16 engines.
-    onnx_path: Path = DEFAULT_ONNX_CACHE_DIR / f"sapiens2_{model_size.lower()}_pose_b{static_batch}_fp32.onnx"
+    # bf16=True bakes bf16 autocast into the graph with fp32 I/O for TRT 11's
+    # strongly-typed builds (graph dtype = engine dtype; bf16 is the fastest
+    # strict-accuracy precision from the sapiens2-pose sweep — fp16 Sapiens ViT
+    # graphs overflow; opset >= 22 required for bf16 Conv). bf16=False keeps the
+    # plain fp32 graph ONNX Runtime has always run (ORT lacks bf16 Conv kernels).
+    dtype_key: str = "bf16" if bf16 else "fp32"
+    onnx_path: Path = DEFAULT_ONNX_CACHE_DIR / f"sapiens2_{model_size.lower()}_pose_b{static_batch}_{dtype_key}.onnx"
     if onnx_path.exists():
         return onnx_path
     onnx_path.parent.mkdir(parents=True, exist_ok=True)
@@ -172,20 +172,14 @@ def _ensure_sapiens_onnx(model_size: SapiensModelSize, static_batch: int) -> Pat
     spec: Any = MODEL_SPECS[model_size]
     model: Any = make_sapiens_pose_onnx_exportable(get_pose_model(model_size, "cuda")).eval()
     dummy: Tensor = torch.zeros((static_batch, 3, int(spec.image_size[0]), int(spec.image_size[1])), dtype=torch.float32, device="cuda")
-    with torch.no_grad():
-        # The dynamo exporter is required: the TorchScript tracer fails on the
-        # Sapiens head ("instance_norm for unknown channel size").
-        torch.onnx.export(
-            model,
-            (dummy,),
-            str(onnx_path),
-            export_params=True,
-            opset_version=17,
-            do_constant_folding=True,
-            input_names=["inputs"],
-            output_names=["heatmaps"],
-            dynamo=True,
-        )
+    export_onnx(
+        model,
+        (dummy,),
+        onnx_path,
+        input_names=["inputs"],
+        output_names=["heatmaps"],
+        compute_dtype=torch.bfloat16 if bf16 else None,
+    )
     return onnx_path
 
 

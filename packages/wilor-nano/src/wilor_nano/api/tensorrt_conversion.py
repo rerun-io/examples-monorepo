@@ -1,6 +1,5 @@
 """ONNX export and TensorRT build helpers for WiLoR deployment artifacts."""
 
-import hashlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -22,7 +21,7 @@ from wilor_nano.api.tensorrt_runtime import (
 from wilor_nano.runtime import get_torch_device
 
 WiLorOnnxTarget = Literal["full_postcrop", "detector_raw"]
-TensorRtPrecision = Literal["fp32", "fp16", "bf16"]
+TensorRtPrecision = Literal["fp32", "fp16"]
 ExportFn = Callable[..., object]
 FullWilorExportOutput = tuple[
     Float[Tensor, "batch 1 3"],
@@ -49,8 +48,12 @@ class _TargetSpec(NamedTuple):
     opset_version: int
     onnx_path: Path
     engine_path: Path
-    precision: TensorRtPrecision
     allow_tf32: bool
+
+    @property
+    def precision(self) -> TensorRtPrecision:
+        """Manifest label for the engine's compute dtype (from the typed graph)."""
+        return "fp16" if self.dtype == "float16" else "fp32"
 
 
 _TARGETS: dict[WiLorOnnxTarget, _TargetSpec] = {
@@ -63,7 +66,6 @@ _TARGETS: dict[WiLorOnnxTarget, _TargetSpec] = {
         17,
         DEFAULT_FULL_WILOR_ONNX_PATH,
         DEFAULT_FULL_WILOR_ENGINE_PATH,
-        "fp16",
         False,
     ),
     "detector_raw": _TargetSpec(
@@ -75,7 +77,6 @@ _TARGETS: dict[WiLorOnnxTarget, _TargetSpec] = {
         18,
         DEFAULT_DETECTOR_ONNX_PATH,
         DEFAULT_DETECTOR_ENGINE_PATH,
-        "fp32",
         True,
     ),
 }
@@ -98,7 +99,6 @@ class WiLorOnnxExportConfig:
     device: str = "cuda"
     dtype: Literal["float16", "float32"] | None = None
     opset_version: int | None = None
-    dynamo: bool = False
 
 
 class WiLorOnnxExportSummary(NamedTuple):
@@ -110,7 +110,6 @@ class WiLorOnnxExportSummary(NamedTuple):
     input_shape: tuple[int, ...]
     output_names: tuple[str, ...]
     opset_version: int
-    dynamo: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,23 +118,24 @@ class TensorRtBuildConfig:
 
     artifact: WiLorTensorRtArtifactConfig = field(default_factory=WiLorTensorRtArtifactConfig)
     engine_path: Path | None = None
-    precision: TensorRtPrecision | None = None
     allow_tf32: bool | None = None
     workspace_gib: float = 24.0
     builder_optimization_level: int = 3
 
     def to_manifest(self, *, tensorrt_version: str, cuda_device_name: str) -> dict[str, object]:
         """Return reproducibility metadata for the non-portable TensorRT engine."""
+        from trtkit import onnx_content_hash
+
         artifact: WiLorTensorRtArtifactConfig = self.artifact
         spec: _TargetSpec = _TARGETS[artifact.target]
         batch_size: int = _batch_size(artifact)
         onnx_path: Path = artifact.onnx_path or spec.onnx_path
         return {
             "target": artifact.target,
-            "precision": self.precision or spec.precision,
+            "precision": spec.precision,
             "allow_tf32": spec.allow_tf32 if self.allow_tf32 is None else self.allow_tf32,
             "onnx_path": str(onnx_path),
-            "onnx_sha256": _sha256_file(onnx_path),
+            "onnx_sha256": onnx_content_hash(onnx_path),
             "engine_path": str(self.engine_path or spec.engine_path),
             "portable_engine": False,
             "rebuild_from_onnx_on_target_machine": True,
@@ -213,7 +213,7 @@ def export_wilor_onnx(
             input_names=[spec.input_name],
             output_names=list(spec.output_names),
             dynamic_axes=None,
-            dynamo=config.dynamo,
+            dynamo=True,
         )
     return WiLorOnnxExportSummary(
         artifact.target,
@@ -222,7 +222,6 @@ def export_wilor_onnx(
         input_shape,
         spec.output_names,
         config.opset_version or spec.opset_version,
-        config.dynamo,
     )
 
 
@@ -240,7 +239,6 @@ def build_wilor_tensorrt_engine(config: TensorRtBuildConfig) -> TensorRtBuildSum
     batch_size: int = _batch_size(artifact)
     onnx_path: Path = artifact.onnx_path or spec.onnx_path
     engine_path: Path = config.engine_path or spec.engine_path
-    precision: TensorRtPrecision = config.precision or spec.precision
     allow_tf32: bool = spec.allow_tf32 if config.allow_tf32 is None else config.allow_tf32
     trtkit_build_engine(
         onnx_path,
@@ -248,7 +246,6 @@ def build_wilor_tensorrt_engine(config: TensorRtBuildConfig) -> TensorRtBuildSum
         TrtKitBuildConfig(
             max_batch_size=batch_size,
             opt_batch_size=batch_size,
-            precision=precision,
             allow_tf32=allow_tf32,
             workspace_gib=config.workspace_gib,
             builder_optimization_level=config.builder_optimization_level,
@@ -266,7 +263,7 @@ def build_wilor_tensorrt_engine(config: TensorRtBuildConfig) -> TensorRtBuildSum
         )
         + "\n"
     )
-    return TensorRtBuildSummary(engine_path, manifest_path, artifact.target, precision, batch_size)
+    return TensorRtBuildSummary(engine_path, manifest_path, artifact.target, spec.precision, batch_size)
 
 
 def _batch_size(artifact: WiLorTensorRtArtifactConfig) -> int:
@@ -276,9 +273,3 @@ def _batch_size(artifact: WiLorTensorRtArtifactConfig) -> int:
     return batch_size
 
 
-def _sha256_file(path: Path) -> str:
-    digest: Any = hashlib.sha256()
-    with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()

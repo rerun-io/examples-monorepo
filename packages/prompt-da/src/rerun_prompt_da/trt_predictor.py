@@ -21,7 +21,6 @@ from rerun_prompt_da.trt_engine import (
     DEFAULT_CACHE_DIR,
     ModelType,
     TrtBuildConfig,
-    TrtPrecision,
     ensure_engine,
     export_promptda_onnx,
 )
@@ -81,7 +80,6 @@ class PromptDATrtPredictor:
         model_type: ModelType = "large",
         image_hw: tuple[int, int] = (756, 1008),
         batch_size: int = 8,
-        precision: TrtPrecision = "fp16",
         cache_dir: Path = DEFAULT_CACHE_DIR,
     ) -> None:
         """Export ONNX and build/load the machine-local engine on first use.
@@ -90,13 +88,12 @@ class PromptDATrtPredictor:
             model_type: PromptDA checkpoint variant.
             image_hw: Static network (height, width), multiples of 14.
             batch_size: Engine profile max and optimum batch.
-            precision: TensorRT builder precision.
             cache_dir: Cache root for ONNX and engine artifacts.
         """
         from trtkit.tensorrt_runtime import TensorRtRuntime
 
         onnx_path: Path = export_promptda_onnx(model_type=model_type, image_hw=image_hw, cache_dir=cache_dir)
-        config = TrtBuildConfig(max_batch_size=batch_size, opt_batch_size=batch_size, precision=precision)
+        config = TrtBuildConfig(max_batch_size=batch_size, opt_batch_size=batch_size)
         engine_path: Path = ensure_engine(onnx_path, config, cache_dir=cache_dir / "trt")
         self.runtime = TensorRtRuntime(engine_path)
         self.image_hw: tuple[int, int] = image_hw
