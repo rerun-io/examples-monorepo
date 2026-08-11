@@ -80,13 +80,20 @@ class TensorRtRuntime:
         self._input_buffers: dict[str, Tensor] = {
             spec.name: torch.zeros((max_batch, *spec.shape), dtype=spec.dtype, device=self._device) for spec in self._spec.inputs
         }
+        self._active_batch: int = -1
+        self._set_active_batch(max_batch)
+        # Output buffers size from the context's concrete max-batch shapes, not
+        # (max_batch, *per_sample): an extra materialized intermediate (see
+        # TrtBuildConfig.extra_output_patterns) may scale its leading dim by more
+        # than the batch (e.g. batch*views), and undersized buffers corrupt memory.
         self._output_buffers: dict[str, Tensor] = {
-            spec.name: torch.empty((max_batch, *spec.shape), dtype=spec.dtype, device=self._device) for spec in self._spec.outputs
+            spec.name: torch.empty(
+                tuple(int(dim) for dim in self._context.get_tensor_shape(spec.name)), dtype=spec.dtype, device=self._device
+            )
+            for spec in self._spec.outputs
         }
         for name, tensor in {**self._input_buffers, **self._output_buffers}.items():
             self._context.set_tensor_address(name, int(tensor.data_ptr()))
-        self._active_batch: int = -1
-        self._set_active_batch(max_batch)
         self._stream: torch.cuda.Stream = torch.cuda.Stream(device=self._device)
         self._use_cuda_graph: bool = use_cuda_graph
         self._graphs: dict[int, torch.cuda.CUDAGraph] = {}
@@ -131,7 +138,12 @@ class TensorRtRuntime:
             self._graphs[graph_key].replay()
         else:
             self._execute()
-        return {name: tensor[:batch_size] for name, tensor in self._output_buffers.items()}
+        # Slice each output to the rows the context actually produced at this batch
+        # (materialized intermediates may scale their leading dim beyond the batch).
+        return {
+            name: tensor[: int(self._context.get_tensor_shape(name)[0])]
+            for name, tensor in self._output_buffers.items()
+        }
 
     def _execute(self) -> None:
         """Launch the engine on the private stream, fenced against torch's current stream.
