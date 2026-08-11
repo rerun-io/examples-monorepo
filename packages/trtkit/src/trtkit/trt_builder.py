@@ -13,6 +13,7 @@ the fusion — see prompt-da's ``export_promptda_onnx`` for a worked example.
 import hashlib
 import json
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -166,6 +167,14 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
             self._stack: list[str] = []
             self._target: str = ""
             self._bar: tqdm = tqdm(total=1, desc="TensorRT build", leave=False, disable=None, dynamic_ncols=True)
+            # Heavy o3 graph nodes can take tens of seconds per step; tick the
+            # display so elapsed/ETA keep moving instead of looking hung.
+            self._done: threading.Event = threading.Event()
+            threading.Thread(target=self._tick, daemon=True).start()
+
+        def _tick(self) -> None:
+            while not self._done.wait(1.0):
+                self._bar.refresh()
 
         def phase_start(self, phase_name: str, parent_phase: str | None, num_steps: int) -> None:
             self._totals[phase_name] = num_steps
@@ -187,16 +196,21 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
             if self._stack:
                 self._retarget()
             else:
+                self._done.set()
                 self._bar.close()
 
         def _retarget(self) -> None:
             # Track the deepest phase with real steps; micro-phases (total <= 1) would park the bar at 0%.
-            self._target = next((name for name in reversed(self._stack) if self._totals[name] > 1), self._stack[-1])
+            target: str = next((name for name in reversed(self._stack) if self._totals[name] > 1), self._stack[-1])
             root: str = self._stack[0]
-            label: str = self._target if self._target == root else f"{root} {self._steps[root]}/{self._totals[root]} · {self._target}"
+            label: str = target if target == root else f"{root} {self._steps[root]}/{self._totals[root]} · {target}"
             self._bar.set_description(label, refresh=False)
-            self._bar.reset(total=max(self._totals[self._target], 1))
-            self._bar.update(self._steps[self._target])
+            # Reset only when the bar moves to a different (or restarted) phase;
+            # resetting on every micro-phase start/finish would zero the timer.
+            if target != self._target or self._bar.total != max(self._totals[target], 1) or self._steps[target] < self._bar.n:
+                self._target = target
+                self._bar.reset(total=max(self._totals[target], 1))
+                self._bar.update(self._steps[target])
 
     monitor: Any = BuildProgress()
     builder_config.progress_monitor = monitor
