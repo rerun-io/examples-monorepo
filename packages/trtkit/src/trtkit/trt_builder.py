@@ -14,6 +14,8 @@ import hashlib
 import json
 import os
 import threading
+import time
+from _thread import LockType
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -152,27 +154,68 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
     if has_dynamic_batch:
         builder_config.add_optimization_profile(profile)
 
+    duration_prior: float | None = None
+    prior_mtime: float = float("-inf")
+    for manifest_path in engine_path.parent.glob("*.engine.json"):
+        try:
+            prior_manifest: Any = json.loads(manifest_path.read_text())
+            manifest_mtime: float = manifest_path.stat().st_mtime
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(prior_manifest, dict):
+            continue
+        prior_onnx_path: Any = prior_manifest.get("onnx_path")
+        prior_build_seconds: Any = prior_manifest.get("build_seconds")
+        if (
+            isinstance(prior_onnx_path, str)
+            and Path(prior_onnx_path).stem == onnx_path.stem
+            # Same optimization level only: an o0 duration is no estimate for an o3 build.
+            and prior_manifest.get("builder_optimization_level") == config.builder_optimization_level
+            and isinstance(prior_build_seconds, (int, float))
+            and not isinstance(prior_build_seconds, bool)
+            and prior_build_seconds > 0.0
+            and manifest_mtime > prior_mtime
+        ):
+            duration_prior = float(prior_build_seconds)
+            prior_mtime = manifest_mtime
+
     class BuildProgress(trt.IProgressMonitor):
-        """Drive a single tqdm bar tracking the innermost active builder phase.
+        """Drive one elapsed-time bar with TensorRT's current phase as context.
 
         TensorRT churns short-lived nested phases, which breaks tqdm's stacked
-        ``position=`` bars (their cursor bookkeeping drifts and the display
-        freezes at the initial render). One bar reset per phase always renders.
-        TensorRT may invoke the callbacks from multiple builder threads, so one
-        lock guards the phase state; :meth:`close` owns bar/ticker shutdown and
-        runs in the build's ``finally`` so failed builds don't leak the ticker.
+        ``position=`` bars. At optimization level 3 its step callbacks also stall
+        for almost the whole build, so they are context rather than a false
+        fraction-complete signal. A prior build duration makes elapsed time an
+        estimate; without one, the bar stays indeterminate. TensorRT may invoke
+        callbacks from multiple builder threads, so one lock guards all state.
         """
 
-        def __init__(self) -> None:
+        def __init__(self, estimated_seconds: float | None) -> None:
             super().__init__()
-            self._lock: threading.Lock = threading.Lock()
+            self._lock: LockType = threading.Lock()
             self._totals: dict[str, int] = {}
             self._steps: dict[str, int] = {}
             self._stack: list[str] = []
-            self._target: str = ""
-            self._bar: tqdm = tqdm(total=1, desc="TensorRT build", leave=False, disable=None, dynamic_ncols=True)
-            # Heavy o3 graph nodes can take tens of seconds per step; tick the
-            # display so elapsed/ETA keep moving instead of looking hung.
+            self._phase_info: str = "starting"
+            self._estimated_seconds: float | None = estimated_seconds
+            self._started: float = time.perf_counter()
+            if estimated_seconds is not None:
+                estimate_label: str = f"{estimated_seconds / 60.0:.0f}m" if estimated_seconds >= 60.0 else f"{estimated_seconds:.0f}s"
+                description: str = f"TensorRT build (~{estimate_label} est)"
+                bar_format: str = "{desc}: {percentage:3.0f}%|{bar}| {n:.0f}/{total:.0f}s{postfix}"
+            else:
+                description = "TensorRT build"
+                bar_format = "{desc}: {n:.0f}s [{elapsed}{postfix}]"
+            self._bar: tqdm = tqdm(
+                total=estimated_seconds,
+                desc=description,
+                unit="s",
+                leave=False,
+                disable=None,
+                dynamic_ncols=True,
+                bar_format=bar_format,
+            )
+            self._bar.set_postfix_str(self._phase_info, refresh=False)
             self._done: threading.Event = threading.Event()
             self._ticker: threading.Thread = threading.Thread(target=self._tick, daemon=True)
             self._ticker.start()
@@ -180,6 +223,9 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
         def _tick(self) -> None:
             while not self._done.wait(1.0):
                 with self._lock:
+                    elapsed: float = time.perf_counter() - self._started
+                    self._bar.n = min(elapsed, self._estimated_seconds) if self._estimated_seconds is not None else int(elapsed)
+                    self._set_postfix(elapsed)
                     self._bar.refresh()
 
         def close(self) -> None:
@@ -200,8 +246,7 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
         def step_complete(self, phase_name: str, step: int) -> bool:
             with self._lock:
                 self._steps[phase_name] = step + 1  # step is the zero-based index of the completed step
-                if phase_name == self._target:
-                    self._bar.update(step + 1 - self._bar.n)
+                self._retarget()
             return True
 
         def phase_finish(self, phase_name: str) -> None:
@@ -212,26 +257,30 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
                 self._steps.pop(phase_name, None)
                 if self._stack:
                     self._retarget()
+                else:
+                    self._phase_info = "finalizing"
+                    self._set_postfix(time.perf_counter() - self._started)
 
         def _retarget(self) -> None:
-            # Track the deepest phase with real steps; micro-phases (total <= 1) would park the bar at 0%.
+            # Show the deepest phase with real steps; micro-phases obscure more useful parent context.
             target: str = next((name for name in reversed(self._stack) if self._totals[name] > 1), self._stack[-1])
-            root: str = self._stack[0]
-            label: str = target if target == root else f"{root} {self._steps[root]}/{self._totals[root]} · {target}"
-            self._bar.set_description(label, refresh=False)
-            # Reset only when the bar moves to a different (or restarted) phase;
-            # resetting on every micro-phase start/finish would zero the timer.
-            if target != self._target or self._bar.total != max(self._totals[target], 1) or self._steps[target] < self._bar.n:
-                self._target = target
-                self._bar.reset(total=max(self._totals[target], 1))
-                self._bar.update(self._steps[target])
+            self._phase_info = f"{target} {self._steps[target]}/{self._totals[target]}"
+            self._set_postfix(time.perf_counter() - self._started)
 
-    monitor: Any = BuildProgress()
+        def _set_postfix(self, elapsed: float) -> None:
+            postfix: str = self._phase_info
+            if self._estimated_seconds is not None and elapsed > self._estimated_seconds:
+                postfix += f" · overrun {tqdm.format_interval(elapsed)} / est {tqdm.format_interval(self._estimated_seconds)}"
+            self._bar.set_postfix_str(postfix, refresh=False)
+
+    monitor: Any = BuildProgress(duration_prior)
     builder_config.progress_monitor = monitor
+    build_started: float = time.perf_counter()
     try:
         serialized: Any = builder.build_serialized_network(network, builder_config)
     finally:
         monitor.close()
+    build_seconds: float = time.perf_counter() - build_started
     if serialized is None:
         raise RuntimeError(f"TensorRT engine build failed for {onnx_path}.")
     engine_path.parent.mkdir(parents=True, exist_ok=True)
@@ -251,6 +300,7 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
         "allow_tf32": config.allow_tf32,
         "workspace_gib": config.workspace_gib,
         "builder_optimization_level": config.builder_optimization_level,
+        "build_seconds": build_seconds,
         "tensorrt_version": str(trt.__version__),
         "cuda_device_name": torch.cuda.get_device_name(),
         "cuda_compute_capability": list(torch.cuda.get_device_capability()),
