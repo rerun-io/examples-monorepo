@@ -21,7 +21,8 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from tqdm import tqdm
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, TaskID, TextColumn, TimeElapsedColumn
 
 DEFAULT_TRT_CACHE_DIR: Path = Path(os.environ.get("TRTKIT_TRT_CACHE", "~/.cache/trtkit/trt")).expanduser()
 """Machine-local engine cache; override with the ``TRTKIT_TRT_CACHE`` env var."""
@@ -180,73 +181,54 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
             prior_mtime = manifest_mtime
 
     class BuildProgress(trt.IProgressMonitor):
-        """Drive one elapsed-time bar with TensorRT's current phase as context.
+        """Spinner + elapsed clock + current builder phase — deliberately not a bar.
 
-        TensorRT churns short-lived nested phases, which breaks tqdm's stacked
-        ``position=`` bars. At optimization level 3 its step callbacks also stall
-        for almost the whole build, so they are context rather than a false
-        fraction-complete signal. A prior build duration makes elapsed time an
-        estimate; without one, the bar stays indeterminate. TensorRT may invoke
-        callbacks from multiple builder threads, so one lock guards all state.
+        A measured o3 build emits no progress callbacks for 99% of its duration
+        (steps burst at start and end), and TensorRT's log stream is equally
+        silent during the expensive tactic timing, so there is no data to drive
+        a fraction-complete display. A prior ``build_seconds`` from an earlier
+        manifest (same ONNX, same optimization level) appears as a static
+        "typically ~2m" hint; the phase callbacks feed the trailing context
+        text. TensorRT may invoke callbacks from multiple builder threads, so
+        one lock guards the phase state; rich's own refresh thread animates the
+        spinner and the clock.
         """
 
-        def __init__(self, estimated_seconds: float | None) -> None:
+        def __init__(self, typical_seconds: float | None) -> None:
             super().__init__()
             self._lock: LockType = threading.Lock()
             self._totals: dict[str, int] = {}
             self._steps: dict[str, int] = {}
             self._stack: list[str] = []
-            self._phase_info: str = "starting"
-            self._estimated_seconds: float | None = estimated_seconds
-            self._started: float = time.perf_counter()
-            if estimated_seconds is not None:
-                estimate_label: str = f"{estimated_seconds / 60.0:.0f}m" if estimated_seconds >= 60.0 else f"{estimated_seconds:.0f}s"
-                description: str = f"TensorRT build (~{estimate_label} est)"
-                bar_format: str = "{desc}: {percentage:3.0f}%|{bar}| {n:.0f}/{total:.0f}s{postfix}"
-            else:
-                description = "TensorRT build"
-                bar_format = "{desc}: {n:.0f}s [{elapsed}{postfix}]"
-            self._bar: tqdm = tqdm(
-                total=estimated_seconds,
-                desc=description,
-                unit="s",
-                leave=False,
-                disable=None,
-                dynamic_ncols=True,
-                bar_format=bar_format,
+            hint: str = ""
+            if typical_seconds is not None:
+                hint_label: str = f"~{typical_seconds / 60.0:.0f}m" if typical_seconds >= 60.0 else f"~{typical_seconds:.0f}s"
+                hint = f" (typically {hint_label} on this machine)"
+            self._progress: Progress = Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                TimeElapsedColumn(),
+                TextColumn("[dim]{task.fields[phase]}[/dim]"),
+                transient=True,
+                disable=not Console().is_terminal,
             )
-            self._bar.set_postfix_str(self._phase_info, refresh=False)
-            self._done: threading.Event = threading.Event()
-            self._ticker: threading.Thread = threading.Thread(target=self._tick, daemon=True)
-            self._ticker.start()
-
-        def _tick(self) -> None:
-            while not self._done.wait(1.0):
-                with self._lock:
-                    elapsed: float = time.perf_counter() - self._started
-                    self._bar.n = min(elapsed, self._estimated_seconds) if self._estimated_seconds is not None else int(elapsed)
-                    self._set_postfix(elapsed)
-                    self._bar.refresh()
+            self._task: TaskID = self._progress.add_task(f"TensorRT build{hint}", total=None, phase="starting")
+            self._progress.start()
 
         def close(self) -> None:
-            if self._done.is_set():
-                return
-            self._done.set()
-            self._ticker.join(timeout=2.0)
-            with self._lock:
-                self._bar.close()
+            self._progress.stop()
 
         def phase_start(self, phase_name: str, parent_phase: str | None, num_steps: int) -> None:
             with self._lock:
                 self._totals[phase_name] = num_steps
                 self._steps[phase_name] = 0
                 self._stack.append(phase_name)
-                self._retarget()
+                self._show_phase()
 
         def step_complete(self, phase_name: str, step: int) -> bool:
             with self._lock:
                 self._steps[phase_name] = step + 1  # step is the zero-based index of the completed step
-                self._retarget()
+                self._show_phase()
             return True
 
         def phase_finish(self, phase_name: str) -> None:
@@ -256,22 +238,14 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
                 self._totals.pop(phase_name, None)
                 self._steps.pop(phase_name, None)
                 if self._stack:
-                    self._retarget()
+                    self._show_phase()
                 else:
-                    self._phase_info = "finalizing"
-                    self._set_postfix(time.perf_counter() - self._started)
+                    self._progress.update(self._task, phase="finalizing")
 
-        def _retarget(self) -> None:
+        def _show_phase(self) -> None:
             # Show the deepest phase with real steps; micro-phases obscure more useful parent context.
             target: str = next((name for name in reversed(self._stack) if self._totals[name] > 1), self._stack[-1])
-            self._phase_info = f"{target} {self._steps[target]}/{self._totals[target]}"
-            self._set_postfix(time.perf_counter() - self._started)
-
-        def _set_postfix(self, elapsed: float) -> None:
-            postfix: str = self._phase_info
-            if self._estimated_seconds is not None and elapsed > self._estimated_seconds:
-                postfix += f" · overrun {tqdm.format_interval(elapsed)} / est {tqdm.format_interval(self._estimated_seconds)}"
-            self._bar.set_postfix_str(postfix, refresh=False)
+            self._progress.update(self._task, phase=f"{target} {self._steps[target]}/{self._totals[target]}")
 
     monitor: Any = BuildProgress(duration_prior)
     builder_config.progress_monitor = monitor
