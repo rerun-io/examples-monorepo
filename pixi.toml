@@ -1058,6 +1058,7 @@ platforms = ["linux-64", "linux-aarch64"]
 [feature.trtkit.dependencies]
 python = "3.12.*"
 tyro = ">=0.9.1,<0.10"
+tqdm = "*"
 
 [feature.trtkit.pypi-dependencies]
 trtkit = { path = "packages/trtkit", editable = true }

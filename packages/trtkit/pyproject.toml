@@ -4,6 +4,7 @@ dependencies = [
     # common: numpy, jaxtyping
     # cuda: pytorch-gpu, onnxruntime, tensorrt-cu13
     "tyro>=0.9.1",
+    "tqdm",
 ]
 description = "One PyTorch -> ONNX -> TensorRT home: backend-neutral tensor runtimes (torch / ONNX Runtime CUDA / TensorRT) plus machine-local engine building, caching, and ONNX graph surgery"
 name = "trtkit"
@@ -29,4 +30,5 @@ paths = ["src/trtkit", "tests"]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true
 min_confidence = 80
-ignore_names = ["side_effect"]
+# parent_phase: fixed positional signature of TensorRT's IProgressMonitor callback.
+ignore_names = ["parent_phase", "side_effect"]

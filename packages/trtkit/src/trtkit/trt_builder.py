@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from tqdm import tqdm
 
 DEFAULT_TRT_CACHE_DIR: Path = Path(os.environ.get("TRTKIT_TRT_CACHE", "~/.cache/trtkit/trt")).expanduser()
 """Machine-local engine cache; override with the ``TRTKIT_TRT_CACHE`` env var."""
@@ -149,6 +150,56 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
             )
     if has_dynamic_batch:
         builder_config.add_optimization_profile(profile)
+
+    class BuildProgress(trt.IProgressMonitor):
+        """Drive a single tqdm bar tracking the innermost active builder phase.
+
+        TensorRT churns short-lived nested phases, which breaks tqdm's stacked
+        ``position=`` bars (their cursor bookkeeping drifts and the display
+        freezes at the initial render). One bar reset per phase always renders.
+        """
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._totals: dict[str, int] = {}
+            self._steps: dict[str, int] = {}
+            self._stack: list[str] = []
+            self._target: str = ""
+            self._bar: tqdm = tqdm(total=1, desc="TensorRT build", leave=False, disable=None, dynamic_ncols=True)
+
+        def phase_start(self, phase_name: str, parent_phase: str | None, num_steps: int) -> None:
+            self._totals[phase_name] = num_steps
+            self._steps[phase_name] = 0
+            self._stack.append(phase_name)
+            self._retarget()
+
+        def step_complete(self, phase_name: str, step: int) -> bool:
+            self._steps[phase_name] = step
+            if phase_name == self._target:
+                self._bar.update(step - self._bar.n)
+            return True
+
+        def phase_finish(self, phase_name: str) -> None:
+            if phase_name in self._stack:
+                self._stack.remove(phase_name)
+            self._totals.pop(phase_name, None)
+            self._steps.pop(phase_name, None)
+            if self._stack:
+                self._retarget()
+            else:
+                self._bar.close()
+
+        def _retarget(self) -> None:
+            # Track the deepest phase with real steps; micro-phases (total <= 1) would park the bar at 0%.
+            self._target = next((name for name in reversed(self._stack) if self._totals[name] > 1), self._stack[-1])
+            root: str = self._stack[0]
+            label: str = self._target if self._target == root else f"{root} {self._steps[root]}/{self._totals[root]} · {self._target}"
+            self._bar.set_description(label, refresh=False)
+            self._bar.reset(total=max(self._totals[self._target], 1))
+            self._bar.update(self._steps[self._target])
+
+    monitor: Any = BuildProgress()
+    builder_config.progress_monitor = monitor
     serialized: Any = builder.build_serialized_network(network, builder_config)
     if serialized is None:
         raise RuntimeError(f"TensorRT engine build failed for {onnx_path}.")
