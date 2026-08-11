@@ -158,10 +158,14 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
         TensorRT churns short-lived nested phases, which breaks tqdm's stacked
         ``position=`` bars (their cursor bookkeeping drifts and the display
         freezes at the initial render). One bar reset per phase always renders.
+        TensorRT may invoke the callbacks from multiple builder threads, so one
+        lock guards the phase state; :meth:`close` owns bar/ticker shutdown and
+        runs in the build's ``finally`` so failed builds don't leak the ticker.
         """
 
         def __init__(self) -> None:
             super().__init__()
+            self._lock: threading.Lock = threading.Lock()
             self._totals: dict[str, int] = {}
             self._steps: dict[str, int] = {}
             self._stack: list[str] = []
@@ -170,34 +174,44 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
             # Heavy o3 graph nodes can take tens of seconds per step; tick the
             # display so elapsed/ETA keep moving instead of looking hung.
             self._done: threading.Event = threading.Event()
-            threading.Thread(target=self._tick, daemon=True).start()
+            self._ticker: threading.Thread = threading.Thread(target=self._tick, daemon=True)
+            self._ticker.start()
 
         def _tick(self) -> None:
             while not self._done.wait(1.0):
-                self._bar.refresh()
+                with self._lock:
+                    self._bar.refresh()
+
+        def close(self) -> None:
+            if self._done.is_set():
+                return
+            self._done.set()
+            self._ticker.join(timeout=2.0)
+            with self._lock:
+                self._bar.close()
 
         def phase_start(self, phase_name: str, parent_phase: str | None, num_steps: int) -> None:
-            self._totals[phase_name] = num_steps
-            self._steps[phase_name] = 0
-            self._stack.append(phase_name)
-            self._retarget()
+            with self._lock:
+                self._totals[phase_name] = num_steps
+                self._steps[phase_name] = 0
+                self._stack.append(phase_name)
+                self._retarget()
 
         def step_complete(self, phase_name: str, step: int) -> bool:
-            self._steps[phase_name] = step
-            if phase_name == self._target:
-                self._bar.update(step - self._bar.n)
+            with self._lock:
+                self._steps[phase_name] = step + 1  # step is the zero-based index of the completed step
+                if phase_name == self._target:
+                    self._bar.update(step + 1 - self._bar.n)
             return True
 
         def phase_finish(self, phase_name: str) -> None:
-            if phase_name in self._stack:
-                self._stack.remove(phase_name)
-            self._totals.pop(phase_name, None)
-            self._steps.pop(phase_name, None)
-            if self._stack:
-                self._retarget()
-            else:
-                self._done.set()
-                self._bar.close()
+            with self._lock:
+                if phase_name in self._stack:
+                    self._stack.remove(phase_name)
+                self._totals.pop(phase_name, None)
+                self._steps.pop(phase_name, None)
+                if self._stack:
+                    self._retarget()
 
         def _retarget(self) -> None:
             # Track the deepest phase with real steps; micro-phases (total <= 1) would park the bar at 0%.
@@ -214,7 +228,10 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
 
     monitor: Any = BuildProgress()
     builder_config.progress_monitor = monitor
-    serialized: Any = builder.build_serialized_network(network, builder_config)
+    try:
+        serialized: Any = builder.build_serialized_network(network, builder_config)
+    finally:
+        monitor.close()
     if serialized is None:
         raise RuntimeError(f"TensorRT engine build failed for {onnx_path}.")
     engine_path.parent.mkdir(parents=True, exist_ok=True)
