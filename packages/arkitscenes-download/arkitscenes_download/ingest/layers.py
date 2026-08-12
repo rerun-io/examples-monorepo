@@ -25,7 +25,9 @@ LAYERS: tuple[Layer, ...] = (
     Layer("gt_boxes", False),
 )
 LAYER_NAMES: tuple[str, ...] = tuple(layer.name for layer in LAYERS)
-OPTIONAL_LAYER_NAMES: tuple[str, str] = ("gt_poses", "gt_depth")
+GT_POSES_LAYER: str = "gt_poses"
+GT_DEPTH_LAYER: str = "gt_depth"
+OPTIONAL_LAYER_NAMES: tuple[str, str] = (GT_POSES_LAYER, GT_DEPTH_LAYER)
 """Laser-GT layers produced by the CA-1M tool, present only on covered captures; absence = no GT."""
 ALL_LAYER_NAMES: tuple[str, ...] = LAYER_NAMES + OPTIONAL_LAYER_NAMES
 LAYERS_BY_NAME: dict[str, Layer] = {layer.name: layer for layer in LAYERS}

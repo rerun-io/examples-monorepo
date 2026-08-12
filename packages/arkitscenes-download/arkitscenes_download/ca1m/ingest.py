@@ -1,7 +1,6 @@
 """Ingest Apple's CA-1M laser ground truth as stackable ARKitScenes layers."""
 
 import json
-import subprocess
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
@@ -17,10 +16,11 @@ from scipy.spatial.transform import Rotation
 
 from arkitscenes_download.ca1m.alignment import ClockDiagnostics, RigidAlignment, diagnose_clock, rigid_umeyama
 from arkitscenes_download.ca1m.archive import Ca1mFrame, parse_archive
-from arkitscenes_download.download_dataset import head_content_length
+from arkitscenes_download.download_dataset import download_file
 from arkitscenes_download.ingest.blueprint import DEPTH_RANGE_MM
-from arkitscenes_download.ingest.cli import atomic_recording
+from arkitscenes_download.ingest.layers import GT_DEPTH_LAYER, GT_POSES_LAYER
 from arkitscenes_download.ingest.paths import CAM_WIDE, GT, GT_DEPTH, GT_PINHOLE_WIDE, GT_RIG, RIG, TIMELINE
+from arkitscenes_download.ingest.recording import atomic_recording
 
 DEFAULT_DATASET_ROOT: Path = Path("/mnt/nas/datasets/arkitscenes/arkitscenes.2026.07.22")
 DEFAULT_SCRATCH: Path = Path("/var/tmp/ca1m-scratch")
@@ -142,30 +142,14 @@ class CaptureFailure:
     """Wall time before the failure in seconds."""
 
 
-def _download(url: str, output_path: Path) -> None:
-    """Download one file with curl resume support."""
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    completed: subprocess.CompletedProcess[str] = subprocess.run(
-        ["curl", "--fail", "--location", "--continue-at", "-", "--output", str(output_path), url],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if completed.returncode != 0:
-        detail: str = completed.stderr.strip() or completed.stdout.strip()
-        raise RuntimeError(f"curl failed for {url}: {detail}")
-
-
 def _manifest_paths(config: Config) -> dict[str, Path]:
     """Fetch each pinned manifest once into scratch."""
     manifest_root: Path = config.scratch / "manifests"
     manifest_root.mkdir(parents=True, exist_ok=True)
     paths: dict[str, Path] = {split: manifest_root / f"{split}.txt" for split in MANIFEST_URLS}
     for split, path in paths.items():
-        if not path.is_file():
-            partial_path: Path = path.with_suffix(".txt.part")
-            _download(MANIFEST_URLS[split], partial_path)
-            partial_path.replace(path)
+        if download_file(MANIFEST_URLS[split], path) is None:
+            raise RuntimeError(f"failed to download the CA-1M {split} manifest from {MANIFEST_URLS[split]}")
     return paths
 
 
@@ -337,16 +321,10 @@ def ingest_capture(spec: CaptureSpec, config: Config) -> CaptureResult:
     """Download/cache, align, and atomically write both layers for one capture."""
     started: float = time.perf_counter()
     tar_path: Path = config.scratch / f"ca1m-{spec.split}-{spec.video_id}.tar"
-    # A cached tar counts only when its size matches the CDN: an interrupted
-    # first pass leaves a partial at the final path, and blindly trusting it
-    # poisons every later parse. Size mismatch (or unknown remote size) re-invokes
-    # curl, whose --continue-at resumes the partial. No cached file needs no HEAD.
-    tar_complete: bool = False
-    if tar_path.is_file():
-        expected_bytes: int | None = head_content_length(spec.url)
-        tar_complete = expected_bytes is not None and tar_path.stat().st_size == expected_bytes
-    if not tar_complete:
-        _download(spec.url, tar_path)
+    # download_file is atomic (.part + rename), resumable, and retrying, so a
+    # tar at the final path is complete by construction and reused as-is.
+    if download_file(spec.url, tar_path) is None:
+        raise RuntimeError(f"failed to download the CA-1M tar from {spec.url}")
 
     epoch_seconds: float = read_capture_epoch(config.dataset_root / "base" / f"{spec.video_id}.rrd")
     calibration: CalibrationTrajectory = read_calibration_trajectory(config.dataset_root / "calibration" / f"{spec.video_id}.rrd")
@@ -385,8 +363,8 @@ def ingest_capture(spec: CaptureSpec, config: Config) -> CaptureResult:
         max_interior_gap_s=float(np.diff(video_times_s).max()) if len(video_times_s) > 1 else 0.0,
     )
 
-    poses_dir: Path = config.output / "gt_poses"
-    depth_dir: Path = config.output / "gt_depth"
+    poses_dir: Path = config.output / GT_POSES_LAYER
+    depth_dir: Path = config.output / GT_DEPTH_LAYER
     poses_dir.mkdir(parents=True, exist_ok=True)
     depth_dir.mkdir(parents=True, exist_ok=True)
     _write_pose_layer(poses_dir / f"{spec.video_id}.rrd", spec.video_id, video_times_s, faro_from_rig_n44, alignment, diagnostics, num_pairs, coverage)
@@ -430,8 +408,8 @@ def run(config: Config) -> list[str]:
     selected_specs: list[CaptureSpec] = load_capture_specs(config)
     specs: list[CaptureSpec] = []
     for spec in selected_specs:
-        poses_path: Path = config.output / "gt_poses" / f"{spec.video_id}.rrd"
-        depth_path: Path = config.output / "gt_depth" / f"{spec.video_id}.rrd"
+        poses_path: Path = config.output / GT_POSES_LAYER / f"{spec.video_id}.rrd"
+        depth_path: Path = config.output / GT_DEPTH_LAYER / f"{spec.video_id}.rrd"
         if not config.force and poses_path.is_file() and depth_path.is_file():
             print(f"id={spec.video_id} skipped=both_outputs_exist")
         else:
