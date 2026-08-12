@@ -13,11 +13,14 @@ the fusion — see prompt-da's ``export_promptda_onnx`` for a worked example.
 import hashlib
 import json
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import torch
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 DEFAULT_TRT_CACHE_DIR: Path = Path(os.environ.get("TRTKIT_TRT_CACHE", "~/.cache/trtkit/trt")).expanduser()
 """Machine-local engine cache; override with the ``TRTKIT_TRT_CACHE`` env var."""
@@ -149,7 +152,21 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
             )
     if has_dynamic_batch:
         builder_config.add_optimization_profile(profile)
-    serialized: Any = builder.build_serialized_network(network, builder_config)
+
+    # Not a progress bar on purpose: TensorRT emits progress callbacks for only
+    # ~1% of an o3 build (measured), so any fraction-complete display is fiction.
+    spinner: Progress = Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        TimeElapsedColumn(),
+        transient=True,
+        disable=not Console().is_terminal,
+    )
+    build_started: float = time.perf_counter()
+    with spinner:
+        spinner.add_task("TensorRT build (one-time, can take a few minutes)", total=None)
+        serialized: Any = builder.build_serialized_network(network, builder_config)
+    build_seconds: float = time.perf_counter() - build_started
     if serialized is None:
         raise RuntimeError(f"TensorRT engine build failed for {onnx_path}.")
     engine_path.parent.mkdir(parents=True, exist_ok=True)
@@ -169,6 +186,7 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
         "allow_tf32": config.allow_tf32,
         "workspace_gib": config.workspace_gib,
         "builder_optimization_level": config.builder_optimization_level,
+        "build_seconds": build_seconds,
         "tensorrt_version": str(trt.__version__),
         "cuda_device_name": torch.cuda.get_device_name(),
         "cuda_compute_capability": list(torch.cuda.get_device_capability()),

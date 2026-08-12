@@ -4,6 +4,7 @@ dependencies = [
     # common: numpy, jaxtyping
     # cuda: pytorch-gpu, onnxruntime, tensorrt-cu13
     "tyro>=0.9.1",
+    "rich",
 ]
 description = "One PyTorch -> ONNX -> TensorRT home: backend-neutral tensor runtimes (torch / ONNX Runtime CUDA / TensorRT) plus machine-local engine building, caching, and ONNX graph surgery"
 name = "trtkit"

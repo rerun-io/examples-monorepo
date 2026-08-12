@@ -50,10 +50,12 @@ def main(config: Config) -> None:
         config: Catalog, model, backend, and Rerun options.
     """
     started: float = time.perf_counter()
+
     client: CatalogClient = CatalogClient(config.data.catalog_url)
     dataset: DatasetEntry = client.get_dataset(name=config.data.dataset_name)
     segment_ids: list[str] = list(config.data.segments) or dataset.segment_ids()
     engine: DepthEngine = DepthEngine(config.model_path, config.backend)
+
     rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
     device: torch_device = torch_device("cuda")
     total_frames: int = 0
