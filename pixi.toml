@@ -98,13 +98,14 @@ simplecv = { path = "packages/simplecv", editable = true }
 platforms = ["linux-64", "linux-aarch64"]
 
 [feature.rerun-prerelease.pypi-dependencies]
-rerun-sdk = { version = "==0.35.0", extras = [
+rerun-sdk = { version = "==0.36.0a1+dev", extras = [
     "datafusion",
     "dataloader",
 ] }
 
 [feature.rerun-prerelease.pypi-options]
 index-url = "https://pypi.org/simple"
+find-links = [{ url = "https://build.rerun.io/commit/4265652/wheels/" }]
 prerelease-mode = "allow"
 
 
@@ -341,13 +342,19 @@ description = "Download an example EasyMocap dataset from Hugging Face"
 [feature.simplecv.tasks._download-simplecv-hocap-sample]
 cmd = "test -e data/hocap/sample.zip && test -e data/hocap/sample || (mkdir -p data/hocap/ && hf download pablovela5620/hocap-sample sample.zip --repo-type dataset --local-dir data/hocap/ && python -m zipfile -e data/hocap/sample.zip data/hocap/)"
 cwd = "packages/simplecv"
-outputs = ["packages/simplecv/data/hocap/sample.zip", "packages/simplecv/data/hocap/sample"]
+outputs = [
+    "packages/simplecv/data/hocap/sample.zip",
+    "packages/simplecv/data/hocap/sample",
+]
 description = "Download and extract an example HoCap dataset from Hugging Face"
 
 [feature.simplecv.tasks._download-simplecv-epfl-smart-kitchen-sample]
 cmd = "test -e data/epfl-smart-kitchen/sample.zip && test -e data/epfl-smart-kitchen/sample || (mkdir -p data/epfl-smart-kitchen/ && hf download pablovela5620/epfl-smart-kitchen-sample sample.zip --repo-type dataset --local-dir data/epfl-smart-kitchen/ && python -m zipfile -e data/epfl-smart-kitchen/sample.zip data/epfl-smart-kitchen/)"
 cwd = "packages/simplecv"
-outputs = ["packages/simplecv/data/epfl-smart-kitchen/sample.zip", "packages/simplecv/data/epfl-smart-kitchen/sample"]
+outputs = [
+    "packages/simplecv/data/epfl-smart-kitchen/sample.zip",
+    "packages/simplecv/data/epfl-smart-kitchen/sample",
+]
 description = "Download and extract an example EPFL-Smart-Kitchen dataset from Hugging Face"
 
 [feature.simplecv.tasks._download-simplecv-assembly101-sample]
@@ -406,7 +413,10 @@ cmd = "test -f data/examples/multiview/bench/005.png && test -f data/examples/mu
 cwd = "packages/monoprior"
 
 [feature.monoprior.tasks.monoprior-download-multiview-examples]
-depends-on = ["_monoprior-download-multiview", "_monoprior-download-g3t-examples"]
+depends-on = [
+    "_monoprior-download-multiview",
+    "_monoprior-download-g3t-examples",
+]
 description = "Download the Monopriors and official G3T multiview examples"
 
 [feature.monoprior.tasks._monoprior-download-video]
@@ -1741,18 +1751,26 @@ description = "Install the checksummed official Brush v0.3.0 Apple Silicon binar
 [feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-build-brush-metrics-mac]
 cmd = "test -x data/tools/brush-v0.3.0-metrics/brush_app || (rm -rf data/tools/brush-v0.3.0-metrics-src data/tools/brush-v0.3.0-metrics-target && git clone --depth 1 --branch v0.3.0 https://github.com/ArthurBrussee/brush.git data/tools/brush-v0.3.0-metrics-src && git -C data/tools/brush-v0.3.0-metrics-src rev-parse HEAD | grep -qx 3edecbb2fe79d3e2c87eeab85b15e0b1dd10d486 && git -C data/tools/brush-v0.3.0-metrics-src apply ../../../patches/brush-v0.3.0-cli-loss.patch && CARGO_TARGET_DIR=data/tools/brush-v0.3.0-metrics-target cargo build --release --locked --manifest-path data/tools/brush-v0.3.0-metrics-src/Cargo.toml --package brush-app --bin brush_app && mkdir -p data/tools/brush-v0.3.0-metrics && cp data/tools/brush-v0.3.0-metrics-target/release/brush_app data/tools/brush-v0.3.0-metrics/brush_app && rm -rf data/tools/brush-v0.3.0-metrics-src data/tools/brush-v0.3.0-metrics-target)"
 cwd = "packages/gsplat-rust-renderer"
-outputs = ["packages/gsplat-rust-renderer/data/tools/brush-v0.3.0-metrics/brush_app"]
+outputs = [
+    "packages/gsplat-rust-renderer/data/tools/brush-v0.3.0-metrics/brush_app",
+]
 description = "Build pinned Brush v0.3.0 locally with pure-CLI loss output (macOS Metal; embedded Rerun remains disabled)"
 
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-brush-train-lego-mac]
 cmd = "data/tools/brush-v0.3.0/brush_app data/nerfbaselines/data/lego --total-steps 7000 --export-every 50 --export-path data/brush-runs/lego"
-depends-on = ["_gsplat-rust-renderer-install-brush-mac", "_gsplat-rust-renderer-download-nerfbaselines-data-lego"]
+depends-on = [
+    "_gsplat-rust-renderer-install-brush-mac",
+    "_gsplat-rust-renderer-download-nerfbaselines-data-lego",
+]
 cwd = "packages/gsplat-rust-renderer"
 description = "Train Lego with Brush as a pure trainer and export PLY every 50 iterations (macOS Metal)"
 
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-brush-replay-lego]
 cmd = "zsh -c 'rm -rf data/brush-runs/lego && mkdir -p data/brush-runs/lego || exit 1; (RUST_LOG=brush_cli=info,brush_process::train_stream=info data/tools/brush-v0.3.0-metrics/brush_app data/nerfbaselines/data/lego --total-steps 7000 --export-every 50 --export-path data/brush-runs/lego --eval-every 500 --eval-save-to-disk > data/brush-runs/lego/brush.log 2>&1; trainer_status=$?; echo $trainer_status > data/brush-runs/lego/trainer.exit; exit $trainer_status) & trainer_pid=$!; trap \"kill $trainer_pid 2>/dev/null || true\" EXIT; python tools/visualize_brush_training.py --rr-config.application-id brush-training-replay --rr-config.save data/brush-runs/lego/training.rrd --rr-config.headless --scene-dir data/nerfbaselines/data/lego --export-dir data/brush-runs/lego --brush-log data/brush-runs/lego/brush.log --trainer-done-file data/brush-runs/lego/trainer.exit --total-iters 7000 --step-stride 50 --snapshot-stride 20 --sh-mode final --spin-speed 0.2 --eval-views-logged 4 --delete-processed-plys --delete-processed-eval-dirs; replay_status=$?; if test $replay_status -ne 0; then kill $trainer_pid 2>/dev/null || true; wait $trainer_pid 2>/dev/null || true; exit $replay_status; fi; wait $trainer_pid; trainer_status=$?; test $trainer_status -eq 0 && grep -qx 0 data/brush-runs/lego/trainer.exit'"
-depends-on = ["_gsplat-rust-renderer-build-brush-metrics-mac", "_gsplat-rust-renderer-download-nerfbaselines-data-lego"]
+depends-on = [
+    "_gsplat-rust-renderer-build-brush-metrics-mac",
+    "_gsplat-rust-renderer-download-nerfbaselines-data-lego",
+]
 cwd = "packages/gsplat-rust-renderer"
 description = "Train Lego for 7k steps while Rerun 0.35.0 replays Brush eval pairs, metrics, cameras, and eight retained snapshots"
 
@@ -1764,13 +1782,20 @@ description = "Build the custom Rerun viewer with the Gaussians3D visualizer"
 
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-brush-replay-lego-live]
 cmd = "zsh -c 'rm -rf data/brush-runs/lego-live && mkdir -p data/brush-runs/lego-live || exit 1; (RUST_LOG=brush_cli=info,brush_process::train_stream=info data/tools/brush-v0.3.0-metrics/brush_app data/nerfbaselines/data/lego --total-steps 7000 --export-every 50 --export-path data/brush-runs/lego-live --eval-every 500 --eval-save-to-disk > data/brush-runs/lego-live/brush.log 2>&1; trainer_status=$?; echo $trainer_status > data/brush-runs/lego-live/trainer.exit; exit $trainer_status) & trainer_pid=$!; trap \"kill $trainer_pid 2>/dev/null || true\" EXIT; python tools/visualize_brush_training.py --rr-config.application-id brush-training-live --rr-config.live --rr-config.save data/brush-runs/lego-live/training.rrd --rr-config.executable-path \"$PWD/target/release/gsplat-rust-renderer\" --scene-dir data/nerfbaselines/data/lego --export-dir data/brush-runs/lego-live --brush-log data/brush-runs/lego-live/brush.log --trainer-done-file data/brush-runs/lego-live/trainer.exit --total-iters 7000 --step-stride 50 --snapshot-stride 20 --sh-mode final --spin-speed 0.2 --eval-views-logged 4 --delete-processed-plys --delete-processed-eval-dirs; replay_status=$?; if test $replay_status -ne 0; then kill $trainer_pid 2>/dev/null || true; wait $trainer_pid 2>/dev/null || true; exit $replay_status; fi; wait $trainer_pid; trainer_status=$?; test $trainer_status -eq 0 && grep -qx 0 data/brush-runs/lego-live/trainer.exit'"
-depends-on = ["_gsplat-rust-renderer-build-brush-metrics-mac", "_gsplat-rust-renderer-build-viewer", "_gsplat-rust-renderer-download-nerfbaselines-data-lego"]
+depends-on = [
+    "_gsplat-rust-renderer-build-brush-metrics-mac",
+    "_gsplat-rust-renderer-build-viewer",
+    "_gsplat-rust-renderer-download-nerfbaselines-data-lego",
+]
 cwd = "packages/gsplat-rust-renderer"
 description = "Train Lego while the custom headed viewer renders live Gaussians3D splats and saves the RRD"
 
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-brush-video-rrd-lego]
 cmd = "zsh -c 'rm -rf data/brush-runs/lego-dense && mkdir -p data/brush-runs/lego-dense || exit 1; (RUST_LOG=brush_cli=info,brush_process::train_stream=info data/tools/brush-v0.3.0-metrics/brush_app data/nerfbaselines/data/lego --total-steps 7000 --export-every 1 --export-path data/brush-runs/lego-dense --eval-every 25 --eval-save-to-disk > data/brush-runs/lego-dense/brush.log 2>&1; trainer_status=$?; echo $trainer_status > data/brush-runs/lego-dense/trainer.exit; exit $trainer_status) & trainer_pid=$!; trap \"kill $trainer_pid 2>/dev/null || true\" EXIT; python tools/visualize_brush_training.py --rr-config.application-id brush-training-video --rr-config.headless --rr-config.save data/brush-runs/lego-dense/training.rrd --scene-dir data/nerfbaselines/data/lego --export-dir data/brush-runs/lego-dense --brush-log data/brush-runs/lego-dense/brush.log --trainer-done-file data/brush-runs/lego-dense/trainer.exit --total-iters 7000 --step-stride 1 --snapshot-stride 1 --sh-mode final --eval-views-logged 4 --delete-processed-plys --delete-processed-eval-dirs --spin-speed 0.2 --video-layout; replay_status=$?; if test $replay_status -ne 0; then kill $trainer_pid 2>/dev/null || true; wait $trainer_pid 2>/dev/null || true; exit $replay_status; fi; wait $trainer_pid; trainer_status=$?; test $trainer_status -eq 0 && grep -qx 0 data/brush-runs/lego-dense/trainer.exit'"
-depends-on = ["_gsplat-rust-renderer-build-brush-metrics-mac", "_gsplat-rust-renderer-download-nerfbaselines-data-lego"]
+depends-on = [
+    "_gsplat-rust-renderer-build-brush-metrics-mac",
+    "_gsplat-rust-renderer-download-nerfbaselines-data-lego",
+]
 cwd = "packages/gsplat-rust-renderer"
 description = "Train a dense 7k Lego run and save a flat dark video-layout RRD with one DC-only intermediate snapshot per iteration"
 
@@ -1853,7 +1878,10 @@ description = "Validate all bundled 200-image checkpoint predictions against pub
 
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-evaluate]
 cmd = "python tools/evaluate_nerfbaselines.py"
-depends-on = ["_gsplat-rust-renderer-download-nerfbaselines-all", "_gsplat-rust-renderer-build-render"]
+depends-on = [
+    "_gsplat-rust-renderer-download-nerfbaselines-all",
+    "_gsplat-rust-renderer-build-render",
+]
 cwd = "packages/gsplat-rust-renderer"
 description = "Render and evaluate all eight 200-image Blender test splits with the standalone binary"
 
@@ -1887,7 +1915,10 @@ description = "Load the pretrained lego PLY and log it to the running viewer"
 
 [feature.gsplat-rust-renderer.tasks.gsplat-rust-renderer-log-scene]
 cmd = "python tools/log_splats_with_cameras.py --rr-config.connect --rr-config.application-id gsplat-rust-renderer"
-depends-on = ["_gsplat-rust-renderer-download-nerfbaselines-pretrained-lego", "_gsplat-rust-renderer-download-nerfbaselines-data-lego"]
+depends-on = [
+    "_gsplat-rust-renderer-download-nerfbaselines-pretrained-lego",
+    "_gsplat-rust-renderer-download-nerfbaselines-data-lego",
+]
 cwd = "packages/gsplat-rust-renderer"
 description = "Log the pretrained lego splat + dataset cameras to the running viewer"
 
@@ -2109,13 +2140,21 @@ description = "Download SMPL-X body models + downsampled verts (private HF repo)
 
 [feature.mamma.tasks.mamma-demo-hocap]
 cmd = "python tools/demo_hocap.py"
-depends-on = ["_download-mamma-hocap-sample", "_download-mamma-weights", "_download-mamma-body-models"]
+depends-on = [
+    "_download-mamma-hocap-sample",
+    "_download-mamma-weights",
+    "_download-mamma-body-models",
+]
 cwd = "packages/mamma"
 description = "Streaming pipeline on the HoCap sample (ingestion + visual check)"
 
 [feature.mamma.tasks.mamma-demo-assembly101]
 cmd = "python tools/demo_assembly101.py"
-depends-on = ["_download-mamma-assembly101-sample", "_download-mamma-weights", "_download-mamma-body-models"]
+depends-on = [
+    "_download-mamma-assembly101-sample",
+    "_download-mamma-weights",
+    "_download-mamma-body-models",
+]
 cwd = "packages/mamma"
 description = "Streaming pipeline on the Assembly101 720p sample (ingestion + visual check)"
 
@@ -2133,7 +2172,12 @@ description = "Timed full-clip run: PASS if wall <= 2x clip duration (>=50% real
 
 [feature.mamma.tasks.mamma-goal-check]
 cmd = "python tools/goal_check.py"
-depends-on = ["_download-mamma-inputs", "_download-mamma-weights", "_download-mamma-hocap-sample", "_download-mamma-assembly101-sample"]
+depends-on = [
+    "_download-mamma-inputs",
+    "_download-mamma-weights",
+    "_download-mamma-hocap-sample",
+    "_download-mamma-assembly101-sample",
+]
 cwd = "packages/mamma"
 description = "Aggregate goal verification: golden gate, 30fps benchmark, dataset RRDs, no-disk-writes, hygiene"
 
@@ -2153,6 +2197,44 @@ description = "Step 2: start the local in-memory Rerun catalog on :51234 (run in
 cmd = "python tools/register_catalog.py"
 cwd = "packages/mamma"
 description = "Step 3: register the 42 RRDs into the mamma_iphones catalog (base+props layers, names/properties from gate.json, default blueprint); needs mamma-iphones-serve running"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# mvs — multiview stereo depth + live meshing
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.mvs]
+platforms = ["linux-64-cuda13", "linux-aarch64-cuda13"]
+
+[feature.mvs.dependencies]
+python = "3.12.*"
+einops = ">=0.8,<0.9"
+kornia = ">=0.8,<0.9"
+timm = ">=1.0,<2"
+tyro = "*"
+# NVDEC decode of catalog AV1 samples (cuda130 builds exist; torch pin comes from `cuda`).
+torchcodec = ">=0.14,<0.15"
+
+[feature.mvs.pypi-dependencies]
+mvs = { path = "packages/mvs", editable = true }
+trtkit = { path = "packages/trtkit", editable = true }
+
+[feature.mvs.activation.env]
+PACKAGE_DIR = "packages/mvs"
+
+[feature.mvs.tasks.mvs-live-mesh]
+cmd = "python tools/apps/live_mesh.py"
+cwd = "packages/mvs"
+description = "Stream catalog AV1 segments through NVDEC and log the frames to Rerun"
+
+[feature.mvs.tasks.mvs-download-depth-model]
+cmd = "hf download pablovela5620/mvs-depth depth_model_dot.onnx --local-dir data/models"
+cwd = "packages/mvs"
+description = "Download the ONNX multiview depth model"
+
+[feature.mvs.tasks.mvs-catalog-depth]
+cmd = "python tools/demos/catalog_depth.py"
+cwd = "packages/mvs"
+depends-on = ["mvs-download-depth-model"]
+description = "Predict metric depth for catalog segments and log it to Rerun"
 
 
 # ─── arkitscenes-download (ARKitScenes → layered Rerun recordings) ──────────
@@ -2507,3 +2589,16 @@ mamma-dev = { features = [
     "mamma",
     "dev",
 ], solve-group = "mamma", no-default-feature = true }
+mvs = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "mvs",
+], solve-group = "mvs", no-default-feature = true }
+mvs-dev = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "mvs",
+    "dev",
+], solve-group = "mvs", no-default-feature = true }

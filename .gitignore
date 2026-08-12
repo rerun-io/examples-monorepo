@@ -99,6 +99,7 @@ cython_debug/
 # Package top-level data directories (downloaded assets, not Python package data/)
 packages/monoprior/data/
 packages/simplecv/data/
+packages/mvs/data/
 # License-gated SMPL-X body model (lazily downloaded; the MANO pkls next to it stay tracked)
 packages/simplecv/simplecv/data/body_models/
 packages/prompt-da/data/
