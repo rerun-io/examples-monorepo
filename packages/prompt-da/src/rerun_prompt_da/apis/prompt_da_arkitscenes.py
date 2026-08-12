@@ -133,21 +133,23 @@ class ResilientVideoFrameDecoder(VideoFrameDecoder):
 
 
 def portrait_from_segment_row(row: dict[str, Any]) -> bool:
-    """Parse the required catalog portrait property from one segment row."""
-    property_name: str = "property:portrait:value"
+    """Parse the required catalog orientation property from one segment row."""
+    property_name: str = "property:capture:orientation"
     if property_name not in row or row[property_name] is None:
-        raise KeyError(f"segment {row.get('rerun_segment_id', '<unknown>')!r} is missing the portrait property")
+        raise KeyError(f"segment {row.get('rerun_segment_id', '<unknown>')!r} is missing the orientation property")
     value: Any = row[property_name]
     if isinstance(value, (list, np.ndarray)):
         if len(value) == 0:
-            raise ValueError(f"segment {row.get('rerun_segment_id', '<unknown>')!r} has an empty portrait property")
+            raise ValueError(f"segment {row.get('rerun_segment_id', '<unknown>')!r} has an empty orientation property")
         value = value[0]
-    return str(value) == "True"
+    if value not in ("portrait", "landscape"):
+        raise ValueError(f"segment {row.get('rerun_segment_id', '<unknown>')!r} has an invalid orientation property: {value!r}")
+    return value == "portrait"
 
 
 def orientation_quarter_turns_from_segment_row(row: dict[str, Any]) -> int:
     """Parse the ingest rotation needed to undo a stored portrait segment."""
-    property_name: str = "property:orientation_quarter_turns_ccw:value"
+    property_name: str = "property:capture:orientation_quarter_turns_ccw"
     if property_name not in row or row[property_name] is None:
         raise KeyError(f"segment {row.get('rerun_segment_id', '<unknown>')!r} is missing the orientation quarter-turn property")
     value: Any = row[property_name]

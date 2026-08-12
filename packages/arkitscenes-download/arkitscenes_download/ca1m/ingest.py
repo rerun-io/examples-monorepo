@@ -28,9 +28,7 @@ MANIFEST_URLS: dict[str, str] = {
     "train": "https://raw.githubusercontent.com/apple/ml-cubifyanything/main/data/train.txt",
     "val": "https://raw.githubusercontent.com/apple/ml-cubifyanything/main/data/val.txt",
 }
-SOURCE_URL: str = "https://github.com/apple/ml-cubifyanything"
 PROVENANCE: str = "ca1m-v1"
-LICENSE: str = "CC-BY-NC-ND-4.0 (internal use only)"
 DEGENERATE_EXTENT2_M: float = 0.05
 """Second principal trajectory extent below which the Umeyama roll is weakly observable."""
 
@@ -186,15 +184,15 @@ def read_capture_epoch(base_rrd: Path) -> float:
     """Read the ARKit uptime at ``video_time == 0`` from a base-layer RRD."""
     reader: RrdReader = RrdReader(base_rrd)
     for chunk in reader.stream():
-        if str(chunk.entity_path).rsplit("/", 1)[-1] != "uptime_epoch_seconds":
+        if str(chunk.entity_path).rsplit("/", 1)[-1] != "capture":
             continue
         batch: Any = chunk.to_record_batch()
-        if "value" not in batch.schema.names:
+        if "uptime_epoch_seconds" not in batch.schema.names:
             continue
-        values: list[Any] = batch.column("value").to_pylist()
-        if values and values[0]:
+        values: list[Any] = batch.column("uptime_epoch_seconds").to_pylist()
+        if values and values[0] is not None and len(values[0]):
             return float(values[0][0])
-    raise ValueError(f"base layer {base_rrd} is missing the uptime_epoch_seconds property")
+    raise ValueError(f"base layer {base_rrd} is missing the capture:uptime_epoch_seconds property")
 
 
 def _component_array(batch: Any, name: str, width: int) -> Float64[np.ndarray, "n width"]:
@@ -252,33 +250,25 @@ def _write_pose_layer(
     video_times_s: Float64[np.ndarray, "n"],
     faro_from_rig_n44: Float64[np.ndarray, "n 4 4"],
     alignment: RigidAlignment,
-    diagnostics: ClockDiagnostics,
-    num_pairs: int,
     coverage: GtCoverage,
 ) -> None:
-    """Write aligned GT poses plus per-capture GT metadata as recording properties.
+    """Write aligned GT poses plus the typed ``gt`` recording-property group.
 
-    Metadata goes into recording properties (``property:gt_*`` segment-table
-    columns, like base's ``uptime_epoch_seconds``) rather than entity data, so
-    provenance and quality are sortable in the catalog without an entity reader.
-    Values are stringified to match base's property convention.
+    Provenance, alignment quality, and coverage become ``property:gt:<field>``
+    segment-table columns so segments are sortable and filterable in the
+    catalog without an entity reader. Deeper diagnostics stay in the audit log.
     """
-    gt_properties: dict[str, object] = {
-        "gt_provenance": PROVENANCE,
-        "gt_license": LICENSE,
-        "gt_source": SOURCE_URL,
-        "gt_umeyama_rms_m": alignment.rms_m,
-        "gt_umeyama_extent2_m": alignment.source_extent2_m,
-        "gt_umeyama_pairs": num_pairs,
-        "gt_clock_median_delta_ms": diagnostics.median_delta_s * 1000.0,
-        "gt_clock_max_delta_ms": diagnostics.max_delta_s * 1000.0,
-        "gt_start_s": coverage.gt_start_s,
-        "gt_end_s": coverage.gt_end_s,
-        "gt_max_interior_gap_s": coverage.max_interior_gap_s,
-    }
     with atomic_recording(output_path, video_id, send_properties=False) as recording:
-        for name, value in gt_properties.items():
-            recording.send_property(name, rr.AnyValues(value=str(value)))
+        recording.send_property(
+            "gt",
+            rr.AnyValues(
+                provenance=PROVENANCE,
+                umeyama_rms_m=float(alignment.rms_m),
+                start_s=float(coverage.gt_start_s),
+                end_s=float(coverage.gt_end_s),
+                max_interior_gap_s=float(coverage.max_interior_gap_s),
+            ),
+        )
         recording.log(GT, rr.Transform3D(translation=alignment.translation_xyz, mat3x3=alignment.rotation_33), static=True)
         rr.send_columns(
             GT_RIG,
@@ -367,7 +357,7 @@ def ingest_capture(spec: CaptureSpec, config: Config) -> CaptureResult:
     depth_dir: Path = config.output / GT_DEPTH_LAYER
     poses_dir.mkdir(parents=True, exist_ok=True)
     depth_dir.mkdir(parents=True, exist_ok=True)
-    _write_pose_layer(poses_dir / f"{spec.video_id}.rrd", spec.video_id, video_times_s, faro_from_rig_n44, alignment, diagnostics, num_pairs, coverage)
+    _write_pose_layer(poses_dir / f"{spec.video_id}.rrd", spec.video_id, video_times_s, faro_from_rig_n44, alignment, coverage)
     _write_depth_layer(depth_dir / f"{spec.video_id}.rrd", spec.video_id, video_times_s, frames)
     if not config.keep_tars:
         tar_path.unlink()
