@@ -61,6 +61,9 @@ class TensorRtBackendConfig:
     """Capture and replay CUDA graphs around the engine launch (one per batch size)."""
     cache_dir: Path = field(default_factory=lambda: DEFAULT_TRT_CACHE_DIR)
     """Machine-local engine cache directory."""
+    extra_output_patterns: tuple[str, ...] = ()
+    """Tensor-name substrings to materialize as extra engine outputs (defeats
+    miscompiled fusions; see :class:`trtkit.trt_builder.TrtBuildConfig`)."""
 
 
 if TYPE_CHECKING:
@@ -96,6 +99,7 @@ def create_runtime_from_onnx(onnx_path: Path, backend: "OnnxBackendConfig | Tens
     build_config = TrtBuildConfig(
         max_batch_size=static_batch if static_batch is not None else backend.max_batch_size,
         opt_batch_size=static_batch if static_batch is not None else backend.opt_batch_size,
+        extra_output_patterns=backend.extra_output_patterns,
     )
     engine_path: Path = ensure_engine(onnx_path, build_config, cache_dir=backend.cache_dir)
     return TensorRtRuntime(engine_path, use_cuda_graph=backend.use_cuda_graph)

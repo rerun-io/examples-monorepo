@@ -40,6 +40,12 @@ class TrtBuildConfig:
     memory, not an upfront allocation."""
     builder_optimization_level: int = 3
     """TensorRT builder optimization level (0-5)."""
+    extra_output_patterns: tuple[str, ...] = ()
+    """Mark every intermediate tensor whose name contains one of these substrings as
+    an additional engine output. Materializing a tensor bars TensorRT from fusing it
+    with its consumers — the escape hatch for miscompiled fusions (e.g. plane-sweep
+    cost-volume GridSample). Each pattern must match at least one tensor. Part of
+    the engine cache key."""
 
 
 def cached_engine_path(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Path = DEFAULT_TRT_CACHE_DIR, onnx_sha256: str | None = None) -> Path:
@@ -67,9 +73,14 @@ def cached_engine_path(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Pa
     capability: tuple[int, int] = torch.cuda.get_device_capability()
     onnx_hash: str = (onnx_sha256 or onnx_content_hash(onnx_path))[:12]
     precision_key: str = "strong" if config.allow_tf32 else "strong-notf32"
+    extra_outputs_key: str = (
+        f"_x{hashlib.sha256('|'.join(config.extra_output_patterns).encode()).hexdigest()[:8]}"
+        if config.extra_output_patterns
+        else ""
+    )
     name: str = (
         f"{onnx_path.stem}_b1-{config.opt_batch_size}-{config.max_batch_size}_{precision_key}"
-        f"_w{config.workspace_gib:g}o{config.builder_optimization_level}"
+        f"_w{config.workspace_gib:g}o{config.builder_optimization_level}{extra_outputs_key}"
         f"_trt{trt.__version__}_sm{capability[0]}{capability[1]}_{onnx_hash}.engine"
     )
     return cache_dir / name
@@ -105,6 +116,17 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
     if not parser.parse_from_file(str(onnx_path.expanduser())):
         errors: str = "\n".join(str(parser.get_error(i)) for i in range(parser.num_errors))
         raise RuntimeError(f"ONNX parse failed for {onnx_path}:\n{errors}")
+    for pattern in config.extra_output_patterns:
+        matched: bool = False
+        for layer_index in range(int(network.num_layers)):
+            layer: Any = network.get_layer(layer_index)
+            for output_index in range(int(layer.num_outputs)):
+                candidate: Any = layer.get_output(output_index)
+                if pattern in candidate.name and not candidate.is_network_output:
+                    network.mark_output(candidate)
+                    matched = True
+        if not matched:
+            raise RuntimeError(f"extra_output_patterns entry {pattern!r} matched no network tensor in {onnx_path}.")
     builder_config: Any = builder.create_builder_config()
     builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, int(config.workspace_gib * (1 << 30)))
     builder_config.builder_optimization_level = int(config.builder_optimization_level)
