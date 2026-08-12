@@ -6,12 +6,12 @@ from pathlib import Path
 
 from arkitscenes_download.download_dataset import (
     ALL_ASSETS,
-    DEFAULT_ASSETS,
     VideoMetadata,
     download_video,
     parse_content_length,
     plan_video_downloads,
 )
+from arkitscenes_download.schema import DEFAULT_ASSETS
 
 
 class DownloadDatasetTest(unittest.TestCase):

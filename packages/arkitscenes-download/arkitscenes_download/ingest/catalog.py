@@ -27,7 +27,7 @@ from rich.live import Live
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TaskID, TextColumn, TimeElapsedColumn
 
 from arkitscenes_download.ingest.blueprint import make_blueprint, make_table_blueprint
-from arkitscenes_download.ingest.layers import ALL_LAYER_NAMES, LAYER_NAMES, OPTIONAL_LAYER_NAMES
+from arkitscenes_download.schema import ALL_LAYER_NAMES, OPTIONAL_LAYER_NAMES, REQUIRED_LAYER_NAMES
 
 DEFAULT_CATALOG_URL: str = "rerun+http://127.0.0.1:51235"
 """gRPC URL of a locally-running ``rerun server`` catalog."""
@@ -60,7 +60,7 @@ class Config:
 
 def layer_files(config: Config) -> dict[str, list[Path]]:
     """Map each layer to its RRD paths, auto-detecting layer-major vs legacy layout."""
-    layer_major: bool = (config.rrd_dir / LAYER_NAMES[0]).is_dir()
+    layer_major: bool = (config.rrd_dir / REQUIRED_LAYER_NAMES[0]).is_dir()
 
     def rrd_path(layer: str, video_id: str) -> Path:
         return config.rrd_dir / layer / f"{video_id}.rrd" if layer_major else config.rrd_dir / video_id / f"{layer}.rrd"
@@ -180,11 +180,11 @@ def main(config: Config) -> None:
     """Register all ingested sequences and verify per-segment layer completeness."""
     dataset: DatasetEntry = register_sequences(config)
     table = dataset.segment_table().df.to_pandas()
-    required_layers: set[str] = set(LAYER_NAMES)
+    required_layers: set[str] = set(REQUIRED_LAYER_NAMES)
     optional_layers: set[str] = set(OPTIONAL_LAYER_NAMES)
     segment_layers: list[set[str]] = [set(layers) for layers in table[LAYER_COLUMN]]
     complete: int = sum(1 for layers in segment_layers if required_layers <= layers)
     gt_covered: int = sum(1 for layers in segment_layers if optional_layers <= layers)
     CONSOLE.print(f"dataset '{config.dataset_name}' at {config.catalog_url}: {len(table)} segments, {complete} complete, {gt_covered} gt-covered")
     if complete != len(table):
-        raise RuntimeError(f"incomplete registration: only {complete}/{len(table)} segments carry all {len(LAYER_NAMES)} required layers")
+        raise RuntimeError(f"incomplete registration: only {complete}/{len(table)} segments carry all {len(REQUIRED_LAYER_NAMES)} required layers")

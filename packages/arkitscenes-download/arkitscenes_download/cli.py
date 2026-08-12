@@ -15,7 +15,6 @@ from simplecv.print_utils import format_bytes
 
 from arkitscenes_download.download_dataset import (
     CONSOLE,
-    DEFAULT_ASSETS,
     PlannedDownload,
     VideoMetadata,
     download_video,
@@ -24,6 +23,7 @@ from arkitscenes_download.download_dataset import (
     prefetch_sizes,
 )
 from arkitscenes_download.fs import directory_size
+from arkitscenes_download.schema import DEFAULT_ASSETS
 
 
 @dataclass

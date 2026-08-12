@@ -33,7 +33,6 @@ from arkitscenes_download.ingest.clock import (
 from arkitscenes_download.ingest.depth import ArkitDepthConfidence, encode_depth_png, sorted_timestamped_paths
 from arkitscenes_download.ingest.gt import ArkitMeshSummary, log_arkit_mesh, log_gt_boxes
 from arkitscenes_download.ingest.imu import ImuSamples, decode_imu
-from arkitscenes_download.ingest.layers import LAYERS, LAYERS_BY_NAME, Layer
 from arkitscenes_download.ingest.metadata import (
     CameraDistortion,
     CameraExtrinsics,
@@ -90,6 +89,7 @@ from arkitscenes_download.ingest.rig import (
     scale_intrinsics,
     sky_angles,
 )
+from arkitscenes_download.schema import REQUIRED_LAYER_NAMES
 
 BATCH_SIZE: int = 1000
 CONSOLE: Console = Console(markup=False)
@@ -420,8 +420,7 @@ def ingest_sequence(config: Config) -> Path:
     CONSOLE.print(f"Transcode {config.video_id} ultrawide: {ultrawide_video.transcode_seconds:.2f}s ({ultrawide_video.encoder})")
 
     wide_path: Path = sequence_output / "video_wide.rrd"
-    wide_layer: Layer = LAYERS_BY_NAME["video_wide"]
-    with atomic_recording(wide_path, config.video_id, send_properties=wide_layer.send_properties) as recording:
+    with atomic_recording(wide_path, config.video_id, send_properties=False) as recording:
         wide_video_timestamps: np.ndarray = _log_video(
             recording,
             VIDEO_WIDE,
@@ -432,8 +431,7 @@ def ingest_sequence(config: Config) -> Path:
         )
 
     ultrawide_path: Path = sequence_output / "video_ultrawide.rrd"
-    ultrawide_layer: Layer = LAYERS_BY_NAME["video_ultrawide"]
-    with atomic_recording(ultrawide_path, config.video_id, send_properties=ultrawide_layer.send_properties) as recording:
+    with atomic_recording(ultrawide_path, config.video_id, send_properties=False) as recording:
         ultrawide_video_timestamps: np.ndarray = _log_video(
             recording,
             VIDEO_ULTRAWIDE,
@@ -467,8 +465,7 @@ def ingest_sequence(config: Config) -> Path:
             f"reference={distortion.reference_dimensions_wh.tolist()} temporal_samples={distortion.temporal_sample_count}"
         )
     calibration_path: Path = sequence_output / "calibration.rrd"
-    calibration_layer: Layer = LAYERS_BY_NAME["calibration"]
-    with atomic_recording(calibration_path, config.video_id, send_properties=calibration_layer.send_properties) as recording:
+    with atomic_recording(calibration_path, config.video_id, send_properties=False) as recording:
         _log_intrinsics(recording, PINHOLE_WIDE, wide_intrinsics, wide_resolution, epoch)
         _log_intrinsics(recording, PINHOLE_WIDE_LOWRES, lowres_intrinsics, lowres_resolution, epoch)
         _log_intrinsics(recording, PINHOLE_ULTRAWIDE, ultrawide_intrinsics, ultrawide_resolution, epoch)
@@ -482,7 +479,7 @@ def ingest_sequence(config: Config) -> Path:
     depth_started: float = time.perf_counter()
     depth_path: Path = sequence_output / "arkit_depth.rrd"
     with (
-        atomic_recording(depth_path, config.video_id, send_properties=LAYERS_BY_NAME["arkit_depth"].send_properties) as recording,
+        atomic_recording(depth_path, config.video_id, send_properties=False) as recording,
         ThreadPoolExecutor(max_workers=8) as pool,
     ):
         _log_depth(
@@ -499,34 +496,31 @@ def ingest_sequence(config: Config) -> Path:
     CONSOLE.print(f"Depth {config.video_id}: {depth_seconds:.1f}s ({len(lowres_depth)} arkit + {len(confidence)} conf)")
 
     imu_path: Path = sequence_output / "imu.rrd"
-    imu_layer: Layer = LAYERS_BY_NAME["imu"]
-    with atomic_recording(imu_path, config.video_id, send_properties=imu_layer.send_properties) as recording:
+    with atomic_recording(imu_path, config.video_id, send_properties=False) as recording:
         _log_imu(recording, imu, epoch)
 
     arkit_mesh_path: Path = sequence_output / "arkit_mesh.rrd"
-    arkit_mesh_layer: Layer = LAYERS_BY_NAME["arkit_mesh"]
-    with atomic_recording(arkit_mesh_path, config.video_id, send_properties=arkit_mesh_layer.send_properties) as recording:
+    with atomic_recording(arkit_mesh_path, config.video_id, send_properties=False) as recording:
         mesh_summary: ArkitMeshSummary = log_arkit_mesh(sequence_dir, config.video_id, recording)
 
     gt_boxes_path: Path = sequence_output / "gt_boxes.rrd"
-    gt_boxes_layer: Layer = LAYERS_BY_NAME["gt_boxes"]
-    with atomic_recording(gt_boxes_path, config.video_id, send_properties=gt_boxes_layer.send_properties) as recording:
+    with atomic_recording(gt_boxes_path, config.video_id, send_properties=False) as recording:
         box_count: int = log_gt_boxes(sequence_dir, config.video_id, recording)
 
     base_path: Path = sequence_output / "base.rrd"
-    base_layer: Layer = LAYERS_BY_NAME["base"]
+    # base is the one layer that carries recording properties (and the embedded blueprint).
     with atomic_recording(
         base_path,
         config.video_id,
-        send_properties=base_layer.send_properties,
+        send_properties=True,
         default_blueprint=make_blueprint(portrait, framing=(mesh_summary.mesh_center_xyz, mesh_summary.bounding_radius_m)),
     ) as recording:
         for name, value in properties.items():
             recording.send_property(name, rr.AnyValues(value=str(value)))
         _log_rig_grammar(recording)
-    layer_paths: list[Path] = [sequence_output / f"{layer.name}.rrd" for layer in LAYERS]
+    layer_paths: list[Path] = [sequence_output / f"{name}.rrd" for name in REQUIRED_LAYER_NAMES]
     verify_rrd(layer_paths)
-    verification: str = f"{len(layer_paths)}/{len(LAYERS)} layers verified"
+    verification: str = f"{len(layer_paths)}/{len(REQUIRED_LAYER_NAMES)} layers verified"
     ingest_seconds: float = time.perf_counter() - ingest_started
     CONSOLE.print(
         f"Saved {sequence_output}: videos={len(wide_video_timestamps)}/{len(ultrawide_video_timestamps)}, depth={len(lowres_depth)}, "

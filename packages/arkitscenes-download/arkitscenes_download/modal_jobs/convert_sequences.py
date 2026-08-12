@@ -33,23 +33,12 @@ from arkitscenes_download.modal_jobs import (
     hf_credentials,
     staging_volume,
 )
+from arkitscenes_download.schema import DEFAULT_ASSETS, REQUIRED_LAYER_NAMES
 
 app = modal.App("arkitscenes-rrd-convert", image=arkitscenes_image)
 
 HOUR = 60 * 60
 
-# Mirrors download_dataset.DEFAULT_ASSETS — deliberately not imported: the slim
-# container interpreter can't import the ingest package (rerun/rich-heavy).
-ASSETS: tuple[str, ...] = (
-    "mov",
-    "annotation",
-    "mesh",
-    "lowres_wide.traj",
-    "confidence",
-    "lowres_depth",
-    "lowres_wide_intrinsics",
-    "ultrawide_intrinsics",
-)
 
 # Sequences validated end-to-end by the local reference run — known-good inputs, so
 # benchmark differences are attributable to the compute, not the data.
@@ -117,7 +106,7 @@ def _convert_and_upload(video_id: str, prefix: str, overwrite: bool) -> dict:
         t0 = time.perf_counter()
         _run_tool(
             "download.py",
-            ["--download-dir", str(data_dir), "--video-ids", video_id, "--assets", *ASSETS, "--no-include-point-clouds"],
+            ["--download-dir", str(data_dir), "--video-ids", video_id, "--assets", *DEFAULT_ASSETS, "--no-include-point-clouds"],
         )
         raw_dirs = list((data_dir / "raw").glob(f"*/{video_id}"))
         metrics["raw_bytes"] = sum(p.stat().st_size for d in raw_dirs for p in d.rglob("*") if p.is_file())
@@ -223,19 +212,7 @@ def drain_to_hf(idle_exit_passes: int = 6) -> None:
             repo_id=HF_REPO_ID,
             repo_type="dataset",
             folder_path=STAGING_MOUNT,
-            # Mirrors ingest.layers.LAYER_NAMES — deliberately not imported: the slim
-            # container interpreter can't import the ingest package (rerun/rich-heavy).
-            allow_patterns=[
-                "base/**",
-                "calibration/**",
-                "video_wide/**",
-                "video_ultrawide/**",
-                "arkit_depth/**",
-                "imu/**",
-                "arkit_mesh/**",
-                "gt_boxes/**",
-                "bench/**",
-            ],
+            allow_patterns=[*(f"{name}/**" for name in REQUIRED_LAYER_NAMES), "bench/**"],
             print_report=False,
         )
         staging_volume.commit()  # persist upload_large_folder's resume cache
