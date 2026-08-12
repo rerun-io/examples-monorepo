@@ -153,11 +153,8 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
     if has_dynamic_batch:
         builder_config.add_optimization_profile(profile)
 
-    # A measured o3 build emits IProgressMonitor callbacks for only ~1% of its
-    # duration (steps burst at start and end) and TensorRT's log stream is just
-    # as silent during tactic timing, so there is no data for a real progress
-    # bar — a spinner with an elapsed clock is the honest display. rich's own
-    # refresh thread animates it while this thread blocks inside the build.
+    # Not a progress bar on purpose: TensorRT emits progress callbacks for only
+    # ~1% of an o3 build (measured), so any fraction-complete display is fiction.
     spinner: Progress = Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
