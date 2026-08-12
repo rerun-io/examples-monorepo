@@ -12,8 +12,8 @@ covers the per-sequence pipeline itself; this doc covers **running it at corpus 
 - **S3:** `rerun-datasets-scratch-…-us-east-1-an/arkitscenes.2026.07.22/` and the
   curated bucket copy (us-west-2), byte-verified against HF.
 - **Local working set (this deployment):** `/mnt/nas/datasets/arkitscenes/arkitscenes.2026.07.22/`
-  (single canonical dir, 7 layers + blueprints, fixed gt).
-- **Catalogs:** local OSS server on `:51235` (5,015 segments × 7 layers) and the
+  (single canonical dir, 8 required layers + blueprints, fixed GT boxes).
+- **Catalogs:** local OSS server on `:51235` (5,015 segments × 8 required layers) and the
   internal cloud stack (`arkitscenes`, registered via `register_prefix` per layer).
 - Missing 32 = 24 upstream-incomplete (no annotation) + 8 integrity-gate rejects.
 - Modal spend: **~$265** total, ~5 h wall-clock — vs ~3 days projected for the
@@ -140,8 +140,8 @@ Original layout was sequence-first (`rrd/<video_id>/<layer>.rrd`). Migrated ever
 to **layer-first**: `<layer>/<video_id>.rrd` + `blueprints/` (S3 adds a dated dataset
 prefix: `arkitscenes.<date>/<layer>/<video_id>.rrd`).
 
-- Why: hub registration becomes **one `register_prefix` call per layer** (7 calls)
-  instead of 35k per-file ops; selective per-layer downloads; layer evolution =
+- Why: hub registration becomes **one `register_prefix` call per required layer** (8 calls)
+  instead of ~40k per-file ops; selective per-layer downloads; layer evolution =
   directory ops.
 - How (HF side): **30,090 server-side `CommitOperationCopy` ops** — zero bytes moved
   (xet copy-by-hash), 31 commits @1,000 ops pinned to a source revision, zero 429s —
@@ -150,19 +150,19 @@ prefix: `arkitscenes.<date>/<layer>/<video_id>.rrd`).
 - Same content-addressing is why **"Duplicate this dataset" is instant and survives
   deletion of the original** — a duplicate holds its own references to the same chunks.
 
-### Step 8 — The gt registration bug (and 132× fix)
+### Step 8 — The GT-box registration bug (and 132× fix)
 
-Registering the catalog, 6 layers took 1.5–3 min each; **gt took >60 min** (killed) and
+Registering the catalog, the other required layers took 1.5–3 min each; **gt_boxes took >60 min** (killed) and
 on the cloud stack **corrupted the dataset server-side** (every later registration of
 any file failed schema deserialization; rebuilt fresh, ~1 min).
 
-- **Root cause:** `ingest/gt.py` logged each box at `/world/gt/boxes/box-<uid>-<label>`
+- **Root cause:** the pre-v2 logger put each box on a path containing its uid and label
   → ~30k globally-unique entity paths corpus-wide. The OSS server re-merges the
   cumulative Arrow schema once per recording with linear-scan field lookups → ~cubic.
   Validated: same chunks with 44 shared paths = **136× faster**.
 - **Fix:** slot paths (`box_00..box_NN`) + uid preserved as `rr.AnyValues(uid=…)` on
-  the same entity. Converter patched (46 tests pass); all 5,015 gt files rewritten and
-  propagated to all copies (local/HF/S3), byte-verified. Broken gt = 1 h+ + corruption; fixed gt =
+  the same entity. Converter patched (46 tests pass); all 5,015 `gt_boxes` files rewritten and
+  propagated to all copies (local/HF/S3), byte-verified. Broken boxes = 1 h+ + corruption; fixed boxes =
   **11 s**.
 - **Rule going forward: never mint unbounded unique entity paths.** Identity belongs in
   component values, not path names.
@@ -178,7 +178,7 @@ any file failed schema deserialization; rebuilt fresh, ~1 min).
     client call to drop and poll through it (catalog.py), or use layer-first
     `register_prefix`.
 - **Verify layer completeness, never segment counts.** "5,015 segments" once hid
-  4,500 base-only segments. The only real check: N segments AND N with all 7 layers.
+  4,500 base-only segments. The only real check: N segments AND N with all 8 required layers.
 
 ---
 
@@ -269,10 +269,25 @@ Re-ingest (schema v2, new codec) or a new corpus:
    the (public, layer-first) HF repo.
 4. `hf download` → local storage (8 workers; over NFS, chmod the metadata cache before any restart).
 5. `transfer_to_s3.py` if the internal stack needs it (16 workers, Modal OIDC creds).
-6. Register: 7 × `register_prefix` (cloud), or OSS: `pixi run arkitscenes-download-serve`
+6. Register: 8 × `register_prefix` (cloud), or OSS: `pixi run arkitscenes-download-serve`
    + `tools/apps/register_catalog.py --rrd-dir <layer-first root>` (resumable, self-verifying).
 
 Adding an inference layer (e.g. PromptDA) is strictly easier: input is the existing
 RRDs (no CDN, no NVENC requirement), output is one new `<layer>/` directory — but it
 has **no upload throttle to hide compute behind**, so this is the workload where the
 50-GPU cap can actually bind.
+
+## 2026-08 schema-v2 taxonomy migration (one-shot, done)
+
+The existing 2026-07-22 corpus was migrated in place to the v2 taxonomy
+(`depth`→`arkit_depth` minus the sparse laser `depth_gt`; `gt`→`arkit_mesh` +
+`gt_boxes`) by a one-shot script — deliberately NOT a maintained CLI, since the
+patched ingest now emits v2 natively on any fresh run. Script (chunk-level
+passthrough via `RrdReader`/`send_chunks`, per-capture resumable, atomic
+temp+rename, chmod 644): `/tmp/arkitscenes-gt-migration/migrate_taxonomy.py` on
+pablo-dl-server at run time; its content is reproduced in the PR description.
+The v2 per-sequence blueprint rides in `arkit_mesh.rrd` because each `base.rrd`
+still embeds a v1 blueprint referencing the old mesh path. CA-1M laser-GT layers
+(`gt_poses`/`gt_depth`) were produced alongside by
+`arkitscenes-download-ca1m` (see README "Laser ground truth"). Audit trails:
+`migration_log.jsonl` + `ca1m_ingest_log.jsonl` in the dataset root.

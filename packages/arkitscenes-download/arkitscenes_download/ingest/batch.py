@@ -62,7 +62,7 @@ class Config:
     keep_transcode_cache: bool = False
     """Keep prepared MP4 tracks after each ingest."""
     skip_existing: bool = False
-    """Skip sequence identifiers only when all seven layer RRDs exist."""
+    """Skip sequence identifiers only when all eight required layer RRDs exist."""
 
 
 def discover_video_ids(data_dir: Path) -> list[str]:

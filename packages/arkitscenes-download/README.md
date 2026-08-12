@@ -2,9 +2,11 @@
 
 Download [ARKitScenes](https://github.com/apple/ARKitScenes) (Apple, 5,071 indoor
 iPhone/iPad captures) and ingest it into **layered Rerun recordings**: full-rate
-60 fps video, true per-frame camera poses, raw IMU, depth (ARKit + laser GT),
-lens distortion, and 3D ground-truth boxes — most of which never appears in the
+60 fps video, true per-frame camera poses, raw IMU, ARKit depth,
+lens distortion, ARKit mesh, and 3D ground-truth boxes — most of which never appears in the
 dataset's published PNG/traj assets because it lives inside the `.mov` files.
+The catalog also recognizes optional CA-1M laser-GT pose and depth layers when a
+separate CA-1M tool has produced them.
 
 ## Quickstart
 
@@ -27,10 +29,10 @@ one it falls back to CPU SVT-AV1, just slower.
 ### Registering multiple datasets
 
 The OSS Rerun server keeps one file descriptor open for every registered `.rrd`
-so it can load chunks on demand. A 5,015-segment ARKitScenes dataset with seven
-layers therefore uses 35,105 descriptors; two such datasets need 70,210. With a
-65,536 descriptor limit, the second registration fails during `gt` only because
-`gt` is the seventh layer—not because that layer is faulty.
+so it can load chunks on demand. A 5,015-segment ARKitScenes dataset with eight
+required layers therefore uses 40,120 descriptors; two such datasets need 80,240.
+With a 65,536 descriptor limit, the second registration fails during a later layer
+because the combined file count exceeds the limit—not because that layer is faulty.
 
 The `arkitscenes-download-serve` task raises the server limit to 524,288. Restart
 an already-running server with that task before registering multiple datasets;
@@ -40,7 +42,7 @@ open-on-demand or LRU policy.
 
 ## What one sequence becomes
 
-Seven small `.rrd` files sharing one `recording_id`, so the catalog stacks them
+Eight small required `.rrd` files sharing one `recording_id`, so the catalog stacks them
 into a single recording — and any one aspect can be regenerated and re-registered
 without touching the rest (no re-transcode to fix box math):
 
@@ -49,9 +51,14 @@ without touching the rest (no re-transcode to fix box math):
 | `base` | recording properties (clock offsets, orientation, pose provenance, …) — queryable segment-table columns |
 | `calibration` | 60 Hz `world_T_rig`, per-camera pinholes, **lens distortion** (8-coefficient polynomials via simplecv components), stereo extrinsics |
 | `video_wide` / `video_ultrawide` | AV1 `VideoStream` at native resolution and framerate |
-| `depth` | ARKit depth + laser GT depth + confidence |
+| `arkit_depth` | low-resolution ARKit depth + confidence |
 | `imu` | 100 Hz accelerometer / gyroscope / fused attitude |
-| `gt` | annotated mesh + oriented 3D bounding boxes |
+| `arkit_mesh` | reconstructed ARKit mesh |
+| `gt_boxes` | oriented 3D ground-truth boxes |
+
+Covered captures may also carry `gt_poses` and `gt_depth`, both produced by the
+separate CA-1M tool. Neither is required for ingest completeness; absence means no
+laser GT is available for that capture.
 
 ## Where the good data hides
 
@@ -80,7 +87,7 @@ skips already-converted sequences):
 ```bash
 python tools/apps/download.py --download-dir data --video-ids 40776203 40776204 \
   --no-include-point-clouds --assets mov annotation mesh lowres_wide.traj \
-  confidence lowres_depth lowres_wide_intrinsics ultrawide_intrinsics highres_depth
+  confidence lowres_depth lowres_wide_intrinsics ultrawide_intrinsics
 python tools/apps/ingest_batch.py --workers 2
 python tools/apps/register_catalog.py --rrd-dir data/rrd
 ```
@@ -101,10 +108,11 @@ Full per-sequence design: [`docs/architecture.md`](docs/architecture.md).
 
 ## Dataset notes
 
-Sizes are real: the full raw subset this pipeline needs is ~6.5 TB downloaded
-(movs + depth + calibration; PNG image folders and laser point clouds are
-deliberately excluded — the PNGs are downsampled derivatives of the movs), and
-the resulting rrds total ~2 TB. The 5-sequence sample keeps that to a few GB.
+The default raw subset contains movs, low-resolution depth and confidence,
+calibration, annotation, and mesh assets. High-resolution upsampling assets, RGB
+PNG derivatives, and laser point clouds are deliberately excluded. The downloader
+can still fetch any of them when explicitly requested. The 5-sequence sample stays
+to a few GB.
 Data comes from Apple's CDN under the
 [ARKitScenes license](https://github.com/apple/ARKitScenes/blob/main/LICENSE);
 24 sequences ship without mesh/annotation/trajectory and are skipped or

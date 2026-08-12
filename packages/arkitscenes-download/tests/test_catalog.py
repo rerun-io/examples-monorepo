@@ -1,6 +1,7 @@
 """Behavior check for catalog registration progress."""
 
 import io
+import tempfile
 import unittest
 from pathlib import Path
 from typing import cast
@@ -38,8 +39,8 @@ class CatalogProgressTest(unittest.TestCase):
             progress,
             self.assertRaisesRegex(RuntimeError, "Too many open files"),
         ):
-            task_id: TaskID = progress.add_task("gt", total=None)
-            register_layer(Config(), "gt", [Path("/tmp/rrd/gt/100.rrd")], progress, task_id)
+            task_id: TaskID = progress.add_task("gt_boxes", total=None)
+            register_layer(Config(), "gt_boxes", [Path("/tmp/rrd/gt_boxes/100.rrd")], progress, task_id)
 
         sleep_mock.assert_not_called()
 
@@ -73,6 +74,63 @@ class CatalogProgressTest(unittest.TestCase):
         self.assertIn("base · 1/1 registered", rendered)
         self.assertIn("base: 1 files in 200.3s", rendered)
         self.assertNotIn("%", rendered)
+
+    def test_completeness_requires_ingest_layers_and_reports_optional_gt_coverage(self) -> None:
+        """Optional CA-1M layers count as coverage without making uncovered segments incomplete."""
+        required_layers: list[str] = [
+            "base",
+            "calibration",
+            "video_wide",
+            "video_ultrawide",
+            "arkit_depth",
+            "imu",
+            "arkit_mesh",
+            "gt_boxes",
+        ]
+        dataset_mock: MagicMock = MagicMock(spec=DatasetEntry)
+        dataset_mock.segment_table.return_value.df.to_pandas.return_value = pd.DataFrame(
+            {
+                "rerun_segment_id": ["100", "200"],
+                "rerun_layer_names": [required_layers, [*required_layers, "gt_poses", "gt_depth"]],
+            }
+        )
+        dataset: DatasetEntry = cast(DatasetEntry, dataset_mock)
+        output: io.StringIO = io.StringIO()
+        console: Console = Console(file=output, force_terminal=False, color_system=None, width=120)
+
+        with patch.object(catalog, "register_sequences", return_value=dataset), patch.object(catalog, "CONSOLE", console):
+            catalog.main(Config())
+
+        self.assertIn("2 segments, 2 complete, 1 gt-covered", output.getvalue())
+
+    def test_layer_discovery_includes_present_optional_gt_layers(self) -> None:
+        """Layer-major discovery returns optional CA-1M files without requiring them."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            rrd_dir: Path = Path(temporary_directory)
+            for layer_name in ("base", "gt_depth"):
+                layer_dir: Path = rrd_dir / layer_name
+                layer_dir.mkdir()
+                (layer_dir / "100.rrd").touch()
+
+            files_by_layer: dict[str, list[Path]] = catalog.layer_files(Config(rrd_dir=rrd_dir))
+
+        self.assertEqual(
+            tuple(files_by_layer),
+            (
+                "base",
+                "calibration",
+                "video_wide",
+                "video_ultrawide",
+                "arkit_depth",
+                "imu",
+                "arkit_mesh",
+                "gt_boxes",
+                "gt_poses",
+                "gt_depth",
+            ),
+        )
+        self.assertEqual([path.name for path in files_by_layer["gt_depth"]], ["100.rrd"])
+        self.assertEqual(files_by_layer["gt_poses"], [])
 
 
 if __name__ == "__main__":

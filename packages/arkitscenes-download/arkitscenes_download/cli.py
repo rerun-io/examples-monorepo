@@ -14,8 +14,8 @@ from rich.progress import BarColumn, DownloadColumn, Progress, TaskID, TextColum
 from simplecv.print_utils import format_bytes
 
 from arkitscenes_download.download_dataset import (
-    ALL_ASSETS,
     CONSOLE,
+    DEFAULT_ASSETS,
     PlannedDownload,
     VideoMetadata,
     download_video,
@@ -40,8 +40,8 @@ class Config:
     """Restrict the random sample to a single fold, or draw from both."""
     video_ids: tuple[str, ...] = ()
     """Explicit sequence ids to download; overrides random sampling when non-empty."""
-    assets: tuple[str, ...] = ALL_ASSETS
-    """Which raw assets to fetch. Defaults to everything (see ``ALL_ASSETS``)."""
+    assets: tuple[str, ...] = DEFAULT_ASSETS
+    """Which raw assets to fetch. Defaults to the inputs required by ingest."""
     include_point_clouds: bool = True
     """Also download Faro laser-scan point clouds when available."""
     keep_zip: bool = False

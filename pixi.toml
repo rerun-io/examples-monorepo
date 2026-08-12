@@ -2264,7 +2264,7 @@ PACKAGE_DIR = "packages/arkitscenes-download"
 PYREFLY_EXTRA_ARGS = "--baseline pyrefly-baseline.json"
 
 [feature.arkitscenes-download.tasks.arkitscenes-download-sample]
-cmd = "python tools/apps/download.py --download-dir data --num-random 5 --seed 42 --no-include-point-clouds --assets mov annotation mesh lowres_wide.traj confidence lowres_depth lowres_wide_intrinsics ultrawide_intrinsics highres_depth"
+cmd = "python tools/apps/download.py --download-dir data --num-random 5 --seed 42 --no-include-point-clouds"
 cwd = "packages/arkitscenes-download"
 description = "Download a 5-sequence ARKitScenes sample (mov + depth + calibration, no point clouds)"
 
@@ -2276,7 +2276,7 @@ description = "Ingest every downloaded sequence into layered .rrd files under da
 
 [feature.arkitscenes-download.tasks.arkitscenes-download-serve]
 # Rerun keeps one handle open per registered RRD. One full corpus has
-# 5015 segments * 7 layers = 35105 RRDs, so 65536 cannot hold two corpora.
+# 5015 segments * 8 layers = 40120 RRDs, so 65536 cannot hold two corpora.
 cmd = "bash -c 'ulimit -n 524288 && exec rerun server --port 51235'"
 cwd = "packages/arkitscenes-download"
 description = "Serve a Rerun catalog for registered ARKitScenes recordings"

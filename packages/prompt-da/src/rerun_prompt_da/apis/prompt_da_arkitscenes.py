@@ -80,7 +80,7 @@ class PDAArkitScenesConfig:
     max_depth_range_meter: float = 4.0
     """Maximum predicted depth retained for TSDF fusion, in metres."""
     depth_fusion_resolution: float = 0.015
-    """TSDF voxel resolution in metres (matches the GT mesh's ~1.5cm edge length;
+    """TSDF voxel resolution in metres (matches the ARKit mesh's ~1.5cm edge length;
     fusion is decode-bound so finer voxels are effectively free in wall time)."""
     register: bool = True
     """Register each completed RRD as a replacement PromptDA layer."""
@@ -326,7 +326,7 @@ def process_segment(
     vertices: Float[ndarray, "n 3"] = np.asarray(mesh.vertices)
     log_fused_mesh(recording, PROMPTDA_MESH, mesh)
     # Embed the PromptDA layout in this layer, framed on the fused mesh (the
-    # same per-sequence treatment the base layer gives the GT mesh). Sent at
+    # same per-sequence treatment the base layer gives the ARKit mesh). Sent at
     # the end of the stream so it wins blueprint activation when the segment's
     # layers load together in the viewer.
     if len(vertices) > 0:

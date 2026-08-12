@@ -4,7 +4,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from arkitscenes_download.download_dataset import VideoMetadata, download_video, parse_content_length, plan_video_downloads
+from arkitscenes_download.download_dataset import (
+    ALL_ASSETS,
+    DEFAULT_ASSETS,
+    VideoMetadata,
+    download_video,
+    parse_content_length,
+    plan_video_downloads,
+)
 
 
 class DownloadDatasetTest(unittest.TestCase):
@@ -26,6 +33,24 @@ class DownloadDatasetTest(unittest.TestCase):
             self.assertEqual(plans[0].dst_path, video_dir / "confidence.zip")
             self.assertTrue(plans[0].is_zip)
             self.assertTrue(plans[0].url.endswith("/raw/Training/123/confidence.zip"))
+
+    def test_default_assets_match_ingest_without_removing_explicit_highres_support(self) -> None:
+        """Default downloads contain every ingest input while high-res depth remains explicitly requestable."""
+        self.assertEqual(
+            DEFAULT_ASSETS,
+            (
+                "mov",
+                "annotation",
+                "mesh",
+                "lowres_wide.traj",
+                "confidence",
+                "lowres_depth",
+                "lowres_wide_intrinsics",
+                "ultrawide_intrinsics",
+            ),
+        )
+        self.assertNotIn("highres_depth", DEFAULT_ASSETS)
+        self.assertIn("highres_depth", ALL_ASSETS)
 
     def test_plan_video_downloads_deduplicates_repeated_assets(self) -> None:
         """A ZIP asset requested twice is planned exactly once."""

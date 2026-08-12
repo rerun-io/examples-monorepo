@@ -12,7 +12,7 @@ import trimesh
 from jaxtyping import Float64
 from simplecv.rerun_log_utils import mesh_bounding_geometry
 
-from arkitscenes_download.ingest.paths import GT_MESH, gt_box
+from arkitscenes_download.ingest.paths import ARKIT_MESH, GT_BOXES, gt_box
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,11 +32,9 @@ class GroundTruthBox:
 
 
 @dataclass(frozen=True, slots=True)
-class GroundTruthSummary:
-    """Box count and mesh framing geometry from the ground-truth layer."""
+class ArkitMeshSummary:
+    """Framing geometry from the ARKit mesh layer."""
 
-    box_count: int
-    """Number of annotated oriented boxes."""
     mesh_center_xyz: Float64[np.ndarray, "3"]
     """World-frame center of the mesh's axis-aligned bounds."""
     bounding_radius_m: float
@@ -67,16 +65,17 @@ def load_ground_truth_boxes(sequence_dir: Path, video_id: str) -> list[GroundTru
     return boxes
 
 
-def log_ground_truth(sequence_dir: Path, video_id: str, recording: rr.RecordingStream) -> GroundTruthSummary:
-    """Log the reconstructed mesh and each annotated oriented box."""
-    boxes: list[GroundTruthBox] = load_ground_truth_boxes(sequence_dir, video_id)
+def log_arkit_mesh(sequence_dir: Path, video_id: str, recording: rr.RecordingStream) -> ArkitMeshSummary:
+    """Log the reconstructed ARKit mesh and return its framing geometry."""
     loaded = trimesh.load(sequence_dir / f"{video_id}_3dod_mesh.ply", process=False)
     if not isinstance(loaded, trimesh.Trimesh):
         raise ValueError(f"expected a single triangle mesh in {video_id}_3dod_mesh.ply, got {type(loaded).__name__}")
     vertices: Float64[np.ndarray, "n 3"] = np.asarray(loaded.vertices, dtype=np.float64)
+    mesh_center_xyz: Float64[np.ndarray, "3"]
+    bounding_radius_m: float
     mesh_center_xyz, bounding_radius_m = mesh_bounding_geometry(vertices)
     recording.log(
-        GT_MESH,
+        ARKIT_MESH,
         rr.Mesh3D(
             vertex_positions=vertices,
             vertex_colors=np.asarray(loaded.visual.vertex_colors),  # pyrefly: ignore  # missing-attribute
@@ -85,6 +84,19 @@ def log_ground_truth(sequence_dir: Path, video_id: str, recording: rr.RecordingS
         ),
         static=True,
     )
+    return ArkitMeshSummary(mesh_center_xyz=mesh_center_xyz, bounding_radius_m=bounding_radius_m)
+
+
+def log_gt_boxes(sequence_dir: Path, video_id: str, recording: rr.RecordingStream) -> int:
+    """Log each annotated oriented box and return the box count."""
+    boxes: list[GroundTruthBox] = load_ground_truth_boxes(sequence_dir, video_id)
+    if not boxes:
+        # Some captures legitimately have no 3DOD annotations. A chunkless RRD
+        # fails `rrd verify` and registers as NO layer at all, so an explicit
+        # marker keeps the required-eight-layer contract and makes "no boxes"
+        # queryable (the one-shot migration used the same marker).
+        recording.log(GT_BOXES, rr.AnyValues(box_count=0), static=True)
+        return 0
     for slot, box in enumerate(boxes):
         # Slot-indexed paths, NOT per-object uids: entity paths become dataset schema
         # columns in the catalog, and globally-unique names make registration cost
@@ -102,4 +114,4 @@ def log_ground_truth(sequence_dir: Path, video_id: str, recording: rr.RecordingS
         # scale->rotate->translate, whereas Boxes3D centers + separate rotation rotates the center
         # around the entity origin (misplacing rotated boxes).
         recording.log(entity_path, rr.InstancePoses3D(translations=box.center_xyz, mat3x3=box.axes_33.T), static=True)
-    return GroundTruthSummary(box_count=len(boxes), mesh_center_xyz=mesh_center_xyz, bounding_radius_m=bounding_radius_m)
+    return len(boxes)

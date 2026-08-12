@@ -35,7 +35,7 @@ from arkitscenes_download.ingest.clock import (
     shared_epoch,
 )
 from arkitscenes_download.ingest.depth import ArkitDepthConfidence, encode_depth_png, sorted_timestamped_paths
-from arkitscenes_download.ingest.gt import GroundTruthSummary, log_ground_truth
+from arkitscenes_download.ingest.gt import ArkitMeshSummary, log_arkit_mesh, log_gt_boxes
 from arkitscenes_download.ingest.imu import ImuSamples, decode_imu
 from arkitscenes_download.ingest.layers import LAYERS, LAYERS_BY_NAME, Layer
 from arkitscenes_download.ingest.metadata import (
@@ -60,7 +60,6 @@ from arkitscenes_download.ingest.paths import (
     CAM_WIDE,
     CONFIDENCE,
     DEPTH,
-    DEPTH_GT,
     IMU,
     IMU_ACCEL,
     IMU_ATTITUDE,
@@ -109,6 +108,7 @@ def atomic_recording(output_path: Path, recording_id: str, *, send_properties: b
         with rr.RecordingStream(application_id="arkitscenes", recording_id=recording_id, send_properties=send_properties) as recording:
             recording.save(temp_path, default_blueprint=default_blueprint)
             yield recording
+        temp_path.chmod(0o644)  # mkstemp temps are 0600; NFS mounts and the catalog server need world-readable files
         os.replace(temp_path, output_path)
     except BaseException:
         temp_path.unlink(missing_ok=True)
@@ -143,7 +143,7 @@ class Config:
     data_dir: Path = Path("data")
     """Dataset root containing raw/Training."""
     output: Path = Path("data/rrd")
-    """Root for seven independently published ``<video_id>/<layer>.rrd`` files."""
+    """Root for eight independently published ``<video_id>/<layer>.rrd`` files."""
     spawn: bool = False
     """Spawn a viewer after saving (disabled for headless use)."""
     keep_transcode_cache: bool = False
@@ -281,7 +281,7 @@ def _log_confidence(recording: rr.RecordingStream, paths: list[Path], quarter_tu
 def _log_rig_grammar(recording: rr.RecordingStream) -> None:
     """Log the static entity grammar exclusively in the base layer."""
     recording.log(WORLD, rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
-    recording.log(RIG, rr.AnyValues(schema_version="arkitscenes:v1", reference="cam_00", num_cameras=2), static=True)
+    recording.log(RIG, rr.AnyValues(schema_version="arkitscenes:v2", reference="cam_00", num_cameras=2), static=True)
     recording.log(CAM_WIDE, rr.AnyValues(name="wide", kind="rgb"), static=True)
     recording.log(CAM_ULTRAWIDE, rr.AnyValues(name="ultrawide", kind="rgb", extrinsics_source="mebx"), static=True)
     recording.log(IMU, rr.AnyValues(name="imu", kind="imu"), static=True)
@@ -339,7 +339,7 @@ def _log_imu(recording: rr.RecordingStream, imu: ImuSamples, epoch: float) -> No
 
 
 def ingest_sequence(config: Config) -> Path:
-    """Write seven layer RRDs for one raw sequence and return its output directory."""
+    """Write eight layer RRDs for one raw sequence and return its output directory."""
     ingest_started: float = time.perf_counter()
     candidates: list[Path] = [config.data_dir / "raw" / split / config.video_id for split in ("Training", "Validation")]
     sequence_dir: Path = next((candidate for candidate in candidates if candidate.is_dir()), candidates[0])
@@ -400,7 +400,7 @@ def ingest_sequence(config: Config) -> Path:
         "orientation_ambiguous": orientation_is_ambiguous,
         "orientation_circular_spread_rad": circular_spread,
         "split": metadata["fold"],
-        "schema_version": "arkitscenes:v1",
+        "schema_version": "arkitscenes:v2",
         "clock_offset_seconds": alignment.offset_seconds,
         "clock_offset_dispersion_seconds": alignment.dispersion_seconds,
         "clock_drift_seconds_per_second": alignment.drift_seconds_per_second,
@@ -498,23 +498,13 @@ def ingest_sequence(config: Config) -> Path:
         _log_sky_angles(recording, SKY_ANGLE_ULTRAWIDE, ultrawide_video_timestamps, ultrawide_sky_angles, epoch)
         _log_distortions(recording, distortions, quarter_turns)
 
-    highres_depth: list[Path] = sorted_timestamped_paths(sequence_dir / "highres_depth")
     confidence: list[Path] = sorted_timestamped_paths(sequence_dir / "confidence")
     depth_started: float = time.perf_counter()
-    depth_path: Path = sequence_output / "depth.rrd"
+    depth_path: Path = sequence_output / "arkit_depth.rrd"
     with (
-        atomic_recording(depth_path, config.video_id, send_properties=LAYERS_BY_NAME["depth"].send_properties) as recording,
+        atomic_recording(depth_path, config.video_id, send_properties=LAYERS_BY_NAME["arkit_depth"].send_properties) as recording,
         ThreadPoolExecutor(max_workers=8) as pool,
     ):
-        _log_depth(
-            recording,
-            DEPTH_GT,
-            highres_depth,
-            quarter_turns,
-            pool,
-            f"{config.video_id} depth-gt",
-            epoch,
-        )
         _log_depth(
             recording,
             DEPTH,
@@ -526,17 +516,22 @@ def ingest_sequence(config: Config) -> Path:
         )
         _log_confidence(recording, confidence, quarter_turns, pool, f"{config.video_id} confidence", epoch)
     depth_seconds: float = time.perf_counter() - depth_started
-    CONSOLE.print(f"Depth {config.video_id}: {depth_seconds:.1f}s ({len(highres_depth)} gt + {len(lowres_depth)} arkit + {len(confidence)} conf)")
+    CONSOLE.print(f"Depth {config.video_id}: {depth_seconds:.1f}s ({len(lowres_depth)} arkit + {len(confidence)} conf)")
 
     imu_path: Path = sequence_output / "imu.rrd"
     imu_layer: Layer = LAYERS_BY_NAME["imu"]
     with atomic_recording(imu_path, config.video_id, send_properties=imu_layer.send_properties) as recording:
         _log_imu(recording, imu, epoch)
 
-    gt_path: Path = sequence_output / "gt.rrd"
-    gt_layer: Layer = LAYERS_BY_NAME["gt"]
-    with atomic_recording(gt_path, config.video_id, send_properties=gt_layer.send_properties) as recording:
-        gt_summary: GroundTruthSummary = log_ground_truth(sequence_dir, config.video_id, recording)
+    arkit_mesh_path: Path = sequence_output / "arkit_mesh.rrd"
+    arkit_mesh_layer: Layer = LAYERS_BY_NAME["arkit_mesh"]
+    with atomic_recording(arkit_mesh_path, config.video_id, send_properties=arkit_mesh_layer.send_properties) as recording:
+        mesh_summary: ArkitMeshSummary = log_arkit_mesh(sequence_dir, config.video_id, recording)
+
+    gt_boxes_path: Path = sequence_output / "gt_boxes.rrd"
+    gt_boxes_layer: Layer = LAYERS_BY_NAME["gt_boxes"]
+    with atomic_recording(gt_boxes_path, config.video_id, send_properties=gt_boxes_layer.send_properties) as recording:
+        box_count: int = log_gt_boxes(sequence_dir, config.video_id, recording)
 
     base_path: Path = sequence_output / "base.rrd"
     base_layer: Layer = LAYERS_BY_NAME["base"]
@@ -544,7 +539,7 @@ def ingest_sequence(config: Config) -> Path:
         base_path,
         config.video_id,
         send_properties=base_layer.send_properties,
-        default_blueprint=make_blueprint(portrait, framing=(gt_summary.mesh_center_xyz, gt_summary.bounding_radius_m)),
+        default_blueprint=make_blueprint(portrait, framing=(mesh_summary.mesh_center_xyz, mesh_summary.bounding_radius_m)),
     ) as recording:
         for name, value in properties.items():
             recording.send_property(name, rr.AnyValues(value=str(value)))
@@ -555,7 +550,7 @@ def ingest_sequence(config: Config) -> Path:
     ingest_seconds: float = time.perf_counter() - ingest_started
     CONSOLE.print(
         f"Saved {sequence_output}: videos={len(wide_video_timestamps)}/{len(ultrawide_video_timestamps)}, depth={len(lowres_depth)}, "
-        f"IMU={len(imu.accel_timestamps)}/{len(imu.gyro_timestamps)}, boxes={gt_summary.box_count}, verify={verification}"
+        f"IMU={len(imu.accel_timestamps)}/{len(imu.gyro_timestamps)}, boxes={box_count}, verify={verification}"
     )
     CONSOLE.print(f"Ingest {config.video_id} total: {ingest_seconds:.2f}s")
     if config.spawn:

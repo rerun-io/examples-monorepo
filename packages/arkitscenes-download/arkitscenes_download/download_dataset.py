@@ -32,6 +32,18 @@ POINT_CLOUDS_FOLDER: Final = "laser_scanner_point_clouds"
 RawAsset: TypeAlias = str
 """One asset kind of the raw dataset (see ``ALL_ASSETS`` for the full set)."""
 
+DEFAULT_ASSETS: Final[tuple[str, ...]] = (
+    "mov",
+    "annotation",
+    "mesh",
+    "lowres_wide.traj",
+    "confidence",
+    "lowres_depth",
+    "lowres_wide_intrinsics",
+    "ultrawide_intrinsics",
+)
+"""Raw assets required by the layered ARKitScenes ingest."""
+
 # The 11 per-frame / per-sequence assets that ship as zip archives. Each extracts
 # into a folder of the same name (minus ``.zip``) under the video directory.
 ZIP_ASSETS: Final[frozenset[str]] = frozenset(
