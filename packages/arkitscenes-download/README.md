@@ -60,6 +60,65 @@ Covered captures may also carry `gt_poses` and `gt_depth`, both produced by the
 separate CA-1M tool. Neither is required for ingest completeness; absence means no
 laser GT is available for that capture.
 
+## Laser ground truth (CA-1M) and provenance
+
+The layer names state *what* the data is; recording properties state *where it
+came from*. What is actually ground truth:
+
+| layer | provenance | ground truth? |
+|---|---|---|
+| `arkit_depth` | on-device ARKit depth + confidence | no — device estimate |
+| `arkit_mesh` | reconstructed from device depth | no — device estimate |
+| `gt_boxes` | human-annotated 3DOD boxes (on the ARKit mesh) | labels yes, geometry approximate |
+| `gt_poses` | per-frame camera poses registered to the FARO laser scan | **yes** |
+| `gt_depth` | 512×384 depth rendered from the FARO scan, per-frame `K` | **yes** |
+
+`gt_poses`/`gt_depth` currently come from Apple's
+[CA-1M release](https://github.com/apple/ml-cubifyanything) via:
+
+```bash
+# --output is required (the layer-major dataset root the new dirs land beside)
+pixi run -e arkitscenes-download arkitscenes-download-ca1m --output /path/to/dataset-root
+```
+
+Facts that shape consumption:
+
+- **Coverage is partial by construction.** CA-1M covers ~61% of the original
+  captures (only those whose laser registration succeeded), and within a capture
+  the GT frames can start late, end early, or have interior holes (e.g.
+  `42898570` has no GT for its first 16.4 s). Per-capture coverage and quality
+  ship as `property:gt_*` segment-table columns (`gt_start_s`, `gt_end_s`,
+  `gt_max_interior_gap_s`, `gt_umeyama_rms_m`, …). A capture without the `gt_*`
+  layers has no laser GT — that absence is the intended marker.
+- **GT is ~10 Hz** (the hi-res frame grid) on the shared `video_time` timeline;
+  the 60 Hz device streams simply coexist with it.
+- **Frames are already upright** in CA-1M; the tool applies no rotation.
+- **Coordinate frames:** CA-1M poses live in the FARO venue frame. A per-capture
+  rigid Umeyama fit (residual in `gt_umeyama_rms_m`) connects them to the ARKit
+  `/world` via a static transform at `/world/gt`.
+- **License:** CA-1M data is **CC BY-NC-ND 4.0** — internal research use only;
+  do **not** publicly redistribute RRDs derived from it. The original
+  ARKitScenes-derived layers keep the far more permissive
+  [ARKitScenes license](https://github.com/apple/ARKitScenes/blob/main/LICENSE).
+
+### TODO
+
+- **FARO-based regeneration of `gt_poses`/`gt_depth`** (unblocks public
+  redistribution): the released FARO scans registered scanner-to-scanner only;
+  the camera→FARO transform was never published
+  ([ARKitScenes#41](https://github.com/apple/ARKitScenes/issues/41)), so this
+  means reimplementing Apple's registration pipeline (synthetic laser views,
+  feature matching, PnP/RANSAC, photometric refinement). Same layer names,
+  different `gt_provenance`.
+- **Better mesh:** TSDF-fuse the laser `gt_depth` into a true GT mesh
+  (`arkit_mesh` is a device product).
+- **Mesh in the `world GT` tab** once wanted (excluded for now).
+- **RGB under the GT camera:** blocked on
+  [rerun#10422](https://github.com/rerun-io/rerun/issues/10422)
+  (`VideoFrameReference` cannot reference a `VideoStream`); until then the
+  `world GT` view includes the wide-camera frustum for RGB context. Duplicating
+  pixels instead would cost ~545 GB.
+
 ## Where the good data hides
 
 The `.mov` is the master, not just video. Its `mebx` metadata streams carry what
