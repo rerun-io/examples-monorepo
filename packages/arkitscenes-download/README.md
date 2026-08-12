@@ -96,6 +96,11 @@ Facts that shape consumption:
 - **Coordinate frames:** CA-1M poses live in the FARO venue frame. A per-capture
   rigid Umeyama fit (residual in `property:gt:umeyama_rms_m`) connects them to
   the ARKit `/world` via a static transform at `/world/gt`.
+- **GT-clean sub-dataset:** `pixi run -e arkitscenes-download arkitscenes-download-gt-subdataset`
+  derives `arkitscenes-v2-gt-clean` — only captures with laser GT whose largest
+  interior gap is ≤ 1 s (2,036 of 5,015) — by re-registering the same RRD storage
+  (no copying, ~1 s). The in-memory catalog drops it on server restart; re-run
+  after re-registering the source dataset.
 - **License:** CA-1M data is **CC BY-NC-ND 4.0** — internal research use only;
   do **not** publicly redistribute RRDs derived from it. The original
   ARKitScenes-derived layers keep the far more permissive
