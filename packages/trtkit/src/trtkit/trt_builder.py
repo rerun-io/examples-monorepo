@@ -155,55 +155,24 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
     if has_dynamic_batch:
         builder_config.add_optimization_profile(profile)
 
-    duration_prior: float | None = None
-    prior_mtime: float = float("-inf")
-    for manifest_path in engine_path.parent.glob("*.engine.json"):
-        try:
-            prior_manifest: Any = json.loads(manifest_path.read_text())
-            manifest_mtime: float = manifest_path.stat().st_mtime
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            continue
-        if not isinstance(prior_manifest, dict):
-            continue
-        prior_onnx_path: Any = prior_manifest.get("onnx_path")
-        prior_build_seconds: Any = prior_manifest.get("build_seconds")
-        if (
-            isinstance(prior_onnx_path, str)
-            and Path(prior_onnx_path).stem == onnx_path.stem
-            # Same optimization level only: an o0 duration is no estimate for an o3 build.
-            and prior_manifest.get("builder_optimization_level") == config.builder_optimization_level
-            and isinstance(prior_build_seconds, (int, float))
-            and not isinstance(prior_build_seconds, bool)
-            and prior_build_seconds > 0.0
-            and manifest_mtime > prior_mtime
-        ):
-            duration_prior = float(prior_build_seconds)
-            prior_mtime = manifest_mtime
-
     class BuildProgress(trt.IProgressMonitor):
         """Spinner + elapsed clock + current builder phase — deliberately not a bar.
 
         A measured o3 build emits no progress callbacks for 99% of its duration
         (steps burst at start and end), and TensorRT's log stream is equally
         silent during the expensive tactic timing, so there is no data to drive
-        a fraction-complete display. A prior ``build_seconds`` from an earlier
-        manifest (same ONNX, same optimization level) appears as a static
-        "typically ~2m" hint; the phase callbacks feed the trailing context
-        text. TensorRT may invoke callbacks from multiple builder threads, so
-        one lock guards the phase state; rich's own refresh thread animates the
-        spinner and the clock.
+        a fraction-complete display or an honest time estimate. The phase
+        callbacks feed the trailing context text. TensorRT may invoke callbacks
+        from multiple builder threads, so one lock guards the phase state;
+        rich's own refresh thread animates the spinner and the clock.
         """
 
-        def __init__(self, typical_seconds: float | None) -> None:
+        def __init__(self) -> None:
             super().__init__()
             self._lock: LockType = threading.Lock()
             self._totals: dict[str, int] = {}
             self._steps: dict[str, int] = {}
             self._stack: list[str] = []
-            hint: str = ""
-            if typical_seconds is not None:
-                hint_label: str = f"~{typical_seconds / 60.0:.0f}m" if typical_seconds >= 60.0 else f"~{typical_seconds:.0f}s"
-                hint = f" (typically {hint_label} on this machine)"
             self._progress: Progress = Progress(
                 SpinnerColumn(),
                 TextColumn("[progress.description]{task.description}"),
@@ -212,7 +181,7 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
                 transient=True,
                 disable=not Console().is_terminal,
             )
-            self._task: TaskID = self._progress.add_task(f"TensorRT build{hint}", total=None, phase="starting")
+            self._task: TaskID = self._progress.add_task("TensorRT build (one-time, can take a few minutes)", total=None, phase="starting")
             self._progress.start()
 
         def close(self) -> None:
@@ -247,7 +216,7 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
             target: str = next((name for name in reversed(self._stack) if self._totals[name] > 1), self._stack[-1])
             self._progress.update(self._task, phase=f"{target} {self._steps[target]}/{self._totals[target]}")
 
-    monitor: Any = BuildProgress(duration_prior)
+    monitor: Any = BuildProgress()
     builder_config.progress_monitor = monitor
     build_started: float = time.perf_counter()
     try:
