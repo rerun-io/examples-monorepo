@@ -13,16 +13,14 @@ the fusion — see prompt-da's ``export_promptda_onnx`` for a worked example.
 import hashlib
 import json
 import os
-import threading
 import time
-from _thread import LockType
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import torch
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TaskID, TextColumn, TimeElapsedColumn
+from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 DEFAULT_TRT_CACHE_DIR: Path = Path(os.environ.get("TRTKIT_TRT_CACHE", "~/.cache/trtkit/trt")).expanduser()
 """Machine-local engine cache; override with the ``TRTKIT_TRT_CACHE`` env var."""
@@ -155,74 +153,22 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
     if has_dynamic_batch:
         builder_config.add_optimization_profile(profile)
 
-    class BuildProgress(trt.IProgressMonitor):
-        """Spinner + elapsed clock + current builder phase — deliberately not a bar.
-
-        A measured o3 build emits no progress callbacks for 99% of its duration
-        (steps burst at start and end), and TensorRT's log stream is equally
-        silent during the expensive tactic timing, so there is no data to drive
-        a fraction-complete display or an honest time estimate. The phase
-        callbacks feed the trailing context text. TensorRT may invoke callbacks
-        from multiple builder threads, so one lock guards the phase state;
-        rich's own refresh thread animates the spinner and the clock.
-        """
-
-        def __init__(self) -> None:
-            super().__init__()
-            self._lock: LockType = threading.Lock()
-            self._totals: dict[str, int] = {}
-            self._steps: dict[str, int] = {}
-            self._stack: list[str] = []
-            self._progress: Progress = Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                TimeElapsedColumn(),
-                TextColumn("[dim]{task.fields[phase]}[/dim]"),
-                transient=True,
-                disable=not Console().is_terminal,
-            )
-            self._task: TaskID = self._progress.add_task("TensorRT build (one-time, can take a few minutes)", total=None, phase="starting")
-            self._progress.start()
-
-        def close(self) -> None:
-            self._progress.stop()
-
-        def phase_start(self, phase_name: str, parent_phase: str | None, num_steps: int) -> None:
-            with self._lock:
-                self._totals[phase_name] = num_steps
-                self._steps[phase_name] = 0
-                self._stack.append(phase_name)
-                self._show_phase()
-
-        def step_complete(self, phase_name: str, step: int) -> bool:
-            with self._lock:
-                self._steps[phase_name] = step + 1  # step is the zero-based index of the completed step
-                self._show_phase()
-            return True
-
-        def phase_finish(self, phase_name: str) -> None:
-            with self._lock:
-                if phase_name in self._stack:
-                    self._stack.remove(phase_name)
-                self._totals.pop(phase_name, None)
-                self._steps.pop(phase_name, None)
-                if self._stack:
-                    self._show_phase()
-                else:
-                    self._progress.update(self._task, phase="finalizing")
-
-        def _show_phase(self) -> None:
-            # Show the deepest phase with real steps; micro-phases obscure more useful parent context.
-            target: str = next((name for name in reversed(self._stack) if self._totals[name] > 1), self._stack[-1])
-            self._progress.update(self._task, phase=f"{target} {self._steps[target]}/{self._totals[target]}")
-
-    monitor: Any = BuildProgress()
-    builder_config.progress_monitor = monitor
+    # A measured o3 build emits IProgressMonitor callbacks for only ~1% of its
+    # duration (steps burst at start and end) and TensorRT's log stream is just
+    # as silent during tactic timing, so there is no data for a real progress
+    # bar — a spinner with an elapsed clock is the honest display. rich's own
+    # refresh thread animates it while this thread blocks inside the build.
+    spinner: Progress = Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        TimeElapsedColumn(),
+        transient=True,
+        disable=not Console().is_terminal,
+    )
     build_started: float = time.perf_counter()
-    try:
+    with spinner:
+        spinner.add_task("TensorRT build (one-time, can take a few minutes)", total=None)
         serialized: Any = builder.build_serialized_network(network, builder_config)
-    finally:
-        monitor.close()
     build_seconds: float = time.perf_counter() - build_started
     if serialized is None:
         raise RuntimeError(f"TensorRT engine build failed for {onnx_path}.")

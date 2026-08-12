@@ -30,5 +30,4 @@ paths = ["src/trtkit", "tests"]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true
 min_confidence = 80
-# parent_phase: fixed positional signature of TensorRT's IProgressMonitor callback.
-ignore_names = ["parent_phase", "side_effect"]
+ignore_names = ["side_effect"]
