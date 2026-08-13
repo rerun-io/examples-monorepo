@@ -11,7 +11,7 @@ from rich.console import Console
 from rich.progress import Progress, TaskID
 from rich.table import Table
 
-from arkitscenes_download.ingest.layers import LAYER_NAMES
+from arkitscenes_download.schema import REQUIRED_LAYER_NAMES
 
 # Package root is parents[2] from arkitscenes_download/ingest/batch.py. Fail at
 # import time rather than as thousands of per-sequence subprocess failures.
@@ -77,7 +77,7 @@ def discover_video_ids(data_dir: Path) -> list[str]:
 
 def has_all_layers(output: Path, video_id: str) -> bool:
     """Whether all required layer files have been published for a sequence."""
-    return all((output / video_id / f"{layer_name}.rrd").is_file() for layer_name in LAYER_NAMES)
+    return all((output / video_id / f"{layer_name}.rrd").is_file() for layer_name in REQUIRED_LAYER_NAMES)
 
 
 def summarize(results: list[SequenceResult], total_wall_seconds: float) -> BatchSummary:

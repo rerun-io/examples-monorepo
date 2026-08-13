@@ -28,11 +28,9 @@ from typing import Any
 import modal
 
 from arkitscenes_download.modal_jobs import hf_credentials
+from arkitscenes_download.schema import REQUIRED_LAYER_NAMES
 
 HF_REPO_ID = "pablovela5620/arkitscenes-rrd"
-# Mirrors ingest.layers.LAYER_NAMES — deliberately not imported: this module runs in
-# a container interpreter that can't import the ingest package (rerun/rich-heavy).
-KNOWN_LAYERS = ("base", "calibration", "video_wide", "video_ultrawide", "arkit_depth", "imu", "arkit_mesh", "gt_boxes")
 
 AWS_ROLE_ARN = "arn:aws:iam::069742552781:role/modal-oidc-role"
 BUCKET = "rerun-datasets-scratch-446437544659-us-east-1-an"
@@ -118,7 +116,7 @@ def transfer_sequence(video_id: str, filenames: list[str], overwrite: bool = Fal
     with tempfile.TemporaryDirectory() as tmp:
         for filename in filenames:
             layer = filename.split("/")[0]
-            assert layer in KNOWN_LAYERS, f"unexpected HF path shape: {filename}"
+            assert layer in REQUIRED_LAYER_NAMES, f"unexpected HF path shape: {filename}"
             dest_key = f"{DATASET_PREFIX}/{layer}/{video_id}.rrd"
             if not overwrite and _s3_exists(s3, dest_key):
                 skipped.append(layer)
@@ -156,7 +154,7 @@ def _discover(limit: int, layer: str | None = None) -> dict[str, list[str]]:
     sequences: dict[str, list[str]] = {}
     for f in files:
         parts = f.split("/")
-        if len(parts) == 2 and parts[0] in KNOWN_LAYERS and f.endswith(".rrd"):
+        if len(parts) == 2 and parts[0] in REQUIRED_LAYER_NAMES and f.endswith(".rrd"):
             if layer is not None and parts[0] != layer:
                 continue
             sequences.setdefault(Path(f).stem, []).append(f)

@@ -18,9 +18,9 @@ from arkitscenes_download.ca1m.alignment import ClockDiagnostics, RigidAlignment
 from arkitscenes_download.ca1m.archive import Ca1mFrame, parse_archive
 from arkitscenes_download.download_dataset import download_file
 from arkitscenes_download.ingest.blueprint import DEPTH_RANGE_MM
-from arkitscenes_download.ingest.layers import GT_DEPTH_LAYER, GT_POSES_LAYER
 from arkitscenes_download.ingest.paths import CAM_WIDE, GT, GT_DEPTH, GT_PINHOLE_WIDE, GT_RIG, RIG, TIMELINE
 from arkitscenes_download.ingest.recording import atomic_recording
+from arkitscenes_download.schema import GT_DEPTH_LAYER, GT_POSES_LAYER
 
 DEFAULT_DATASET_ROOT: Path = Path("/mnt/nas/datasets/arkitscenes/arkitscenes.2026.07.22")
 DEFAULT_SCRATCH: Path = Path("/var/tmp/ca1m-scratch")
