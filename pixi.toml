@@ -2279,6 +2279,11 @@ cmd = "python tools/apps/ca1m_ingest.py"
 cwd = "packages/arkitscenes-download"
 description = "Ingest CA-1M laser GT into stackable gt_poses and gt_depth layer RRDs"
 
+[feature.arkitscenes-download.tasks.arkitscenes-download-gt-subdataset]
+cmd = "python tools/apps/make_gt_subdataset.py"
+cwd = "packages/arkitscenes-download"
+description = "Create the GT-clean sub-dataset (laser GT present, bounded interior gaps) on the local catalog"
+
 [feature.arkitscenes-download.tasks.arkitscenes-download-serve]
 # Rerun keeps one handle open per registered RRD. One full corpus has
 # 5015 segments * 8 layers = 40120 RRDs, so 65536 cannot hold two corpora.

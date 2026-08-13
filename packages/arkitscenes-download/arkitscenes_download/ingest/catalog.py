@@ -129,6 +129,33 @@ def register_layer(config: Config, layer_name: str, paths: list[Path], progress:
     CONSOLE.print(f"{layer_name}: {expected} files in {time.perf_counter() - started:.1f}s")
 
 
+def register_default_blueprints(dataset: DatasetEntry, dataset_name: str, blueprint_dir: Path) -> None:
+    """Register generic portrait/landscape view defaults and the segment-table blueprint.
+
+    Most ARKitScenes captures are handheld portrait scans, so the portrait layout
+    is the dataset default; landscape stays selectable in the viewer. The
+    segment-table blueprint provides 3D preview cards in the dataset review
+    (experimental, needs "Table cards and blueprints" enabled in the viewer's
+    settings); its failure must not abort registration — the layers are already
+    registered by the time this runs.
+    """
+    blueprint_dir.mkdir(parents=True, exist_ok=True)
+    for orientation, is_portrait in (("landscape", False), ("portrait", True)):
+        blueprint_path: Path = blueprint_dir / f"{dataset_name}-{orientation}.rbl"
+        make_blueprint(is_portrait).save("arkitscenes", blueprint_path)
+        blueprint_path.chmod(0o644)  # uid-squashing NFS mounts can land fresh writes as mode 0000
+        dataset.register_blueprint(blueprint_path.resolve().as_uri(), set_default=is_portrait)
+    table_blueprint_path: Path = blueprint_dir / f"{dataset_name}-table.rbl"
+    make_table_blueprint().save("arkitscenes", table_blueprint_path)
+    table_blueprint_path.chmod(0o644)  # uid-squashing NFS mounts can land fresh writes as mode 0000
+    try:
+        dataset.register_blueprint(table_blueprint_path.resolve().as_uri(), segment_table=True)
+    except BeartypeException:
+        raise
+    except Exception as error:  # noqa: BLE001
+        CONSOLE.print(f"segment-table blueprint (experimental) failed: {str(error)[:70]} — skipping")
+
+
 def register_sequences(config: Config) -> DatasetEntry:
     """Create (or resume) the dataset and register every RRD in ``rrd_dir``."""
     layer_paths: dict[str, list[Path]] = layer_files(config)
@@ -151,28 +178,7 @@ def register_sequences(config: Config) -> DatasetEntry:
             current_progress.remove_task(current_task)
             overall_progress.advance(overall_task)
 
-    # Most ARKitScenes captures are handheld portrait scans, so the portrait
-    # layout is the dataset default; landscape stays selectable in the viewer.
-    blueprint_dir: Path = config.rrd_dir / "blueprints"
-    blueprint_dir.mkdir(parents=True, exist_ok=True)
-    for orientation, is_portrait in (("landscape", False), ("portrait", True)):
-        blueprint_path: Path = blueprint_dir / f"{config.dataset_name}-{orientation}.rbl"
-        make_blueprint(is_portrait).save("arkitscenes", blueprint_path)
-        blueprint_path.chmod(0o644)  # uid-squashing NFS mounts can land fresh writes as mode 0000
-        dataset.register_blueprint(blueprint_path.resolve().as_uri(), set_default=is_portrait)
-    # Segment-table blueprint: 3D preview cards in the dataset review (experimental,
-    # needs "Table cards and blueprints" enabled in the viewer's settings). A failure
-    # here must not abort the run: the layers are already registered, and aborting
-    # would also skip main()'s completeness verification.
-    table_blueprint_path: Path = blueprint_dir / f"{config.dataset_name}-table.rbl"
-    make_table_blueprint().save("arkitscenes", table_blueprint_path)
-    table_blueprint_path.chmod(0o644)  # uid-squashing NFS mounts can land fresh writes as mode 0000
-    try:
-        dataset.register_blueprint(table_blueprint_path.resolve().as_uri(), segment_table=True)
-    except BeartypeException:
-        raise
-    except Exception as error:  # noqa: BLE001
-        CONSOLE.print(f"segment-table blueprint (experimental) failed: {str(error)[:70]} — skipping")
+    register_default_blueprints(dataset, config.dataset_name, config.rrd_dir / "blueprints")
     return dataset
 
 

@@ -12,6 +12,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import rerun as rr
@@ -480,7 +481,7 @@ def ingest_sequence(config: Config) -> Path:
         # diagnostics stay in the console log, not the table.
         # Some metadata rows carry visit_id='NA': omit the field (null segment-table
         # cell) rather than invent a sentinel venue id.
-        visit_id_field: dict[str, int] = {} if metadata["visit_id"] == "NA" else {"visit_id": int(metadata["visit_id"])}
+        visit_id_field: dict[str, Any] = {} if metadata["visit_id"] == "NA" else {"visit_id": int(metadata["visit_id"])}
         recording.send_property(
             "capture",
             rr.AnyValues(
