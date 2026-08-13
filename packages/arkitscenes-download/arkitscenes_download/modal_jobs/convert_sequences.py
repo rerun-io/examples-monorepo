@@ -1,10 +1,10 @@
 """Convert ARKitScenes sequences to layered RRDs on Modal and upload them to HuggingFace.
 
 Worker = download ONE sequence from Apple's CDN → run the package's own download/ingest
-tools inside the image's pixi env (same lockfile as the local run) → land the seven
+tools inside the image's pixi env (same lockfile as the local run) → land the eight
 verified layer RRDs on the staging volume, layer-first → die. One ``drain_to_hf``
 process batch-uploads staging to the HF repo. Idempotency is destination-existence
-(is ``gt/<id>.rrd`` staged or on HF), so there is no shared state anywhere — kill and
+(is ``gt_boxes/<id>.rrd`` staged or on HF), so there is no shared state anywhere — kill and
 relaunch freely.
 
 Entrypoints (run from ``packages/arkitscenes-download``):
@@ -38,7 +38,8 @@ app = modal.App("arkitscenes-rrd-convert", image=arkitscenes_image)
 
 HOUR = 60 * 60
 
-# The raw assets one full ingest needs (same list as the arkitscenes-download-sample task).
+# Mirrors download_dataset.DEFAULT_ASSETS — deliberately not imported: the slim
+# container interpreter can't import the ingest package (rerun/rich-heavy).
 ASSETS: tuple[str, ...] = (
     "mov",
     "annotation",
@@ -48,7 +49,6 @@ ASSETS: tuple[str, ...] = (
     "lowres_depth",
     "lowres_wide_intrinsics",
     "ultrawide_intrinsics",
-    "highres_depth",
 )
 
 # Sequences validated end-to-end by the local reference run — known-good inputs, so
@@ -100,12 +100,12 @@ def _convert_and_upload(video_id: str, prefix: str, overwrite: bool) -> dict:
     # the old sequence-subdir shape — they're scratch and never registered.
     layer_first = not prefix
     dest = video_id if layer_first else f"{prefix}/{video_id}"
-    gt_relpath = f"gt/{video_id}.rrd" if layer_first else f"{dest}/gt.rrd"
+    completion_relpath: str = f"gt_boxes/{video_id}.rrd" if layer_first else f"{dest}/gt_boxes.rrd"
     if not overwrite:
-        if (Path(STAGING_MOUNT) / gt_relpath).exists():
+        if (Path(STAGING_MOUNT) / completion_relpath).exists():
             print(f"skip (staged): {dest}")
             return {"video_id": video_id, "skipped": True}
-        if HfApi().file_exists(HF_REPO_ID, gt_relpath, repo_type="dataset"):
+        if HfApi().file_exists(HF_REPO_ID, completion_relpath, repo_type="dataset"):
             print(f"skip (on HF): {dest}")
             return {"video_id": video_id, "skipped": True}
 
@@ -130,16 +130,16 @@ def _convert_and_upload(video_id: str, prefix: str, overwrite: bool) -> dict:
         )
         out_dir = data_dir / "rrd" / video_id
         layer_files = sorted(out_dir.glob("*.rrd"))
-        if len(layer_files) != 7:
-            raise RuntimeError(f"{video_id}: expected 7 layers, got {[f.name for f in layer_files]}")
+        if len(layer_files) != 8:
+            raise RuntimeError(f"{video_id}: expected 8 layers, got {[f.name for f in layer_files]}")
         metrics["rrd_bytes"] = sum(f.stat().st_size for f in layer_files)
         metrics["ingest_s"] = time.perf_counter() - t1
 
         t2 = time.perf_counter()
         if layer_first:
-            # Per-file tmp+rename, gt LAST: the skip probe keys on gt, so a partially
+            # Per-file tmp+rename, gt_boxes LAST: the skip probe keys on gt_boxes, so a partially
             # landed sequence never looks complete.
-            ordered = sorted(layer_files, key=lambda f: f.stem == "gt")
+            ordered = sorted(layer_files, key=lambda f: f.stem == "gt_boxes")
             for f in ordered:
                 dest_file = Path(STAGING_MOUNT) / f.stem / f"{video_id}.rrd"
                 dest_file.parent.mkdir(parents=True, exist_ok=True)
@@ -215,7 +215,7 @@ def drain_to_hf(idle_exit_passes: int = 6) -> None:
     idle = 0
     while idle < idle_exit_passes:
         staging_volume.reload()
-        before = sum(1 for _ in Path(STAGING_MOUNT).glob("gt/*.rrd"))
+        before = sum(1 for _ in Path(STAGING_MOUNT).glob("gt_boxes/*.rrd"))
         if before == 0:
             time.sleep(60)
             continue
@@ -225,12 +225,22 @@ def drain_to_hf(idle_exit_passes: int = 6) -> None:
             folder_path=STAGING_MOUNT,
             # Mirrors ingest.layers.LAYER_NAMES — deliberately not imported: the slim
             # container interpreter can't import the ingest package (rerun/rich-heavy).
-            allow_patterns=["base/**", "calibration/**", "depth/**", "gt/**", "imu/**", "video_ultrawide/**", "video_wide/**", "bench/**"],
+            allow_patterns=[
+                "base/**",
+                "calibration/**",
+                "video_wide/**",
+                "video_ultrawide/**",
+                "arkit_depth/**",
+                "imu/**",
+                "arkit_mesh/**",
+                "gt_boxes/**",
+                "bench/**",
+            ],
             print_report=False,
         )
         staging_volume.commit()  # persist upload_large_folder's resume cache
         staging_volume.reload()
-        after = sum(1 for _ in Path(STAGING_MOUNT).glob("gt/*.rrd"))
+        after = sum(1 for _ in Path(STAGING_MOUNT).glob("gt_boxes/*.rrd"))
         idle = idle + 1 if after == before else 0
         print(f"drain pass done: {after} sequences in staging, idle_passes={idle}")
         time.sleep(120)

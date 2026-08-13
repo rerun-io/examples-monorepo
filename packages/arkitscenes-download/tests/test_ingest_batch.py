@@ -38,17 +38,26 @@ class IngestBatchTest(unittest.TestCase):
         self.assertEqual(summary.effective_speedup, 3.0)
         self.assertEqual(summary.failed_video_ids, ["200"])
 
-    def test_complete_sequence_requires_all_seven_layers(self) -> None:
+    def test_complete_sequence_requires_all_eight_layers(self) -> None:
         """Skip-existing accepts only a sequence directory with the complete layer set."""
         with tempfile.TemporaryDirectory() as temporary_directory:
             sequence_dir: Path = Path(temporary_directory) / "100"
             sequence_dir.mkdir()
-            layer_names: tuple[str, ...] = ("base", "calibration", "video_wide", "video_ultrawide", "depth", "imu", "gt")
+            layer_names: tuple[str, ...] = (
+                "base",
+                "calibration",
+                "video_wide",
+                "video_ultrawide",
+                "arkit_depth",
+                "imu",
+                "arkit_mesh",
+                "gt_boxes",
+            )
             for layer_name in layer_names:
                 (sequence_dir / f"{layer_name}.rrd").touch()
 
             self.assertTrue(has_all_layers(Path(temporary_directory), "100"))
-            (sequence_dir / "gt.rrd").unlink()
+            (sequence_dir / "gt_boxes.rrd").unlink()
             self.assertFalse(has_all_layers(Path(temporary_directory), "100"))
 
 

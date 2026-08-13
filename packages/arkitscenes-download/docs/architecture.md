@@ -25,13 +25,13 @@ flowchart LR
     subgraph ING["2 · INGEST  (python tools/apps/ingest_sequence.py --video-id N)"]
         MOV["MOV demux<br>13 streams"]
         PIPE["per-sequence DAG<br>(see §3)"]
-        RRD["data/rrd/&lt;id&gt;/&lt;layer&gt;.rrd<br>7 layers · each tempfile → os.replace<br>all verified together"]
+        RRD["data/rrd/&lt;id&gt;/&lt;layer&gt;.rrd<br>8 required layers · each tempfile → os.replace<br>all verified together"]
         MOV --> PIPE --> RRD
     end
 
     subgraph SRV["3 · REGISTER + SERVE"]
         SERVER["rerun server :51235<br>in-memory OSS catalog<br>(arkitscenes-download-serve task)"]
-        REG["catalog.py  (arkitscenes-download-register task)<br>7 layers stacked per segment<br>generic blueprints = dataset defaults"]
+        REG["catalog.py  (arkitscenes-download-register task)<br>8 required layers + optional CA-1M GT<br>generic blueprints = dataset defaults"]
         VIEW["viewers<br>headed desktop · headless+MCP<br>dataframe / SQL queries"]
         RRD2["arkitscenes dataset<br>1 layered segment per video_id<br>embedded sequence blueprint wins on open<br>properties = queryable columns"]
         REG --> SERVER --> RRD2 --> VIEW
@@ -81,7 +81,6 @@ flowchart TB
         IMOV[".mov"]
         ITRAJ["lowres_wide.traj<br>10 Hz, rows = world→camera<br>(axis-angle Rodrigues + t)"]
         IDEPTH["lowres_depth/*.png<br>256×192 u16 mm @ 60 fps"]
-        IHDEPTH["highres_depth/*.png<br>1920×1440, ~10 fps filtered<br>(absent for non-upsampling seqs)"]
         ICONF["confidence/*.png<br>u8 ∈ {0,1,2}"]
         IPINCAM["lowres_wide_intrinsics/*.pincam<br>w h fx fy cx cy @ 60 fps"]
         IUPIN["ultrawide_intrinsics/*.pincam"]
@@ -131,14 +130,14 @@ flowchart TB
         P1 --> P2 --> P3
     end
 
-    subgraph DGT["depth / confidence / ground truth"]
-        D1["depth: PNG passthrough (k=0)<br>or rot90 re-encode; EncodedDepthImage<br>meter=1000, 1000-frame batches"]
+    subgraph DGT["ARKit depth / confidence / geometry"]
+        D1["ARKit depth: PNG passthrough (k=0)<br>or rot90 re-encode; EncodedDepthImage<br>meter=1000, 1000-frame batches"]
         D2["confidence: SegmentationImage<br>+ AnnotationContext(low/med/high),<br>batched columns"]
-        D3["mesh: Mesh3D, face_rendering=Front<br>(interior visible)"]
+        D3["ARKit mesh: Mesh3D, face_rendering=Front<br>(interior visible)"]
         D4["boxes: half_sizes + labels;<br>InstancePoses3D(translations=centroid,<br>mat3x3=normalizedAxes.T)<br>2D overlay = NATIVE viewer reprojection"]
     end
 
-    PUB["atomic layer publish (cli.py)<br>for each of 7 layers: tempfile.mkstemp(dir=output)<br>→ RecordingStream ctx → blocking finalize → os.replace<br>then rerun rrd verify all layers together"]
+    PUB["atomic layer publish (cli.py)<br>for each of 8 layers: tempfile.mkstemp(dir=output)<br>→ RecordingStream ctx → blocking finalize → os.replace<br>then rerun rrd verify all layers together"]
 
     IMOV --> CLOCK & MDEC & IMU & VID
     ITRAJ --> ORIENT
@@ -149,7 +148,7 @@ flowchart TB
     ORIENT --> POSE & VID & D1 & D2
     M1 --> RIGTREE
     CLOCK --> V6
-    IDEPTH & IHDEPTH --> D1
+    IDEPTH --> D1
     ICONF --> D2
     IMESH --> D3
     IANN --> D4
@@ -157,25 +156,28 @@ flowchart TB
     POSE --> RIGTREE
     V6 --> RIGTREE
     D1 & D2 & D3 & D4 --> RIGTREE
-    RIGTREE["entity data split across 7 layers (base, calibration,<br>video_wide, video_ultrawide, depth, imu, gt)<br>base embeds GT-mesh-framed blueprint (§4)<br>ONE timeline: video_time = ARKit uptime seconds"]
+    RIGTREE["entity data split across 8 required layers (base, calibration,<br>video_wide, video_ultrawide, arkit_depth, imu, arkit_mesh, gt_boxes)<br>base embeds ARKit-mesh-framed blueprint (§4)<br>ONE timeline: video_time = ARKit uptime seconds"]
     RIGTREE --> PUB
 ```
 
 ---
 
-## 4. Recording schema (`arkitscenes:v1`, exoego-style rig grammar)
+## 4. Recording schema (`arkitscenes:v2`, exoego-style rig grammar)
 
 ```mermaid
 flowchart TD
     ROOT["/ world<br>ViewCoordinates RIGHT_HAND_Z_UP"]
-    ROOT --> GT["world/gt"]
-    GT --> MESH["gt/mesh — Mesh3D (Front-face)"]
-    GT --> BOXES["gt/boxes/box_&lt;slot&gt;  (shared slot paths;<br>Apple's uid is an AnyValues component)<br>Boxes3D + InstancePoses3D<br>(translations + mat3x3 together!)"]
+    ROOT --> MESH["world/arkit_mesh — Mesh3D (Front-face)"]
+    ROOT --> BOXES["world/gt_boxes/box_&lt;slot&gt;  (shared slot paths;<br>Apple's uid is an AnyValues component)<br>Boxes3D + InstancePoses3D<br>(translations + mat3x3 together!)"]
+    ROOT --> GT["world/gt — optional CA-1M laser GT"]
+    GT --> GTRIG["gt/rig_00 — laser-GT trajectory"]
+    GTRIG --> GTCAM["rig_00/cam_00"]
+    GTCAM --> GTPIN["cam_00/pinhole"]
+    GTPIN --> DGT0["pinhole/depth — laser GT depth"]
     ROOT --> RIG["world/rig_00 — the iPad<br>world_T_rig(t) @ 60 Hz (stream-4 poses)<br>AnyValues: schema_version, reference, num_cameras"]
     RIG --> CAM0["rig_00/cam_00 — wide (reference)<br>identity rig_T_cam"]
     CAM0 --> PIN0["cam_00/pinhole<br>Pinhole columns (baked K, 60 Hz)"]
     PIN0 --> VID0["pinhole/video — VideoStream AV1<br>+ encoder provenance"]
-    PIN0 --> DGT0["pinhole/depth_gt — EncodedDepthImage<br>(laser GT, when available)"]
     PIN0 --> SKY0["pinhole/sky_angle_rad — Scalars"]
     CAM0 --> PINL["cam_00/pinhole_lowres<br>Pinhole 256×192"]
     PINL --> DAR["pinhole_lowres/depth — ARKit LiDAR"]
@@ -192,7 +194,7 @@ Recording properties (queryable as catalog columns): `video_id`, `visit_id`, `sp
 
 **Timeline**: a single `video_time` duration timeline whose values are ARKit device-uptime seconds — scrubber positions match raw asset filenames exactly. Each camera's samples are placed with its own independently recovered clock offset.
 
-**Blueprints**: the base layer embeds a per-sequence default blueprint. Its `EyeControls3D` orbits the GT mesh center, using `mesh_bounding_geometry` and `orbit_eye_position` to frame the mesh at `2.2 × 1.25 ×` its bounding radius. Generic portrait and landscape blueprints remain catalog dataset defaults, but the embedded blueprint takes precedence when a segment opens.
+**Blueprints**: the base layer embeds a per-sequence default blueprint. Its `EyeControls3D` orbits the ARKit mesh center, using `mesh_bounding_geometry` and `orbit_eye_position` to frame the mesh at `2.2 × 1.25 ×` its bounding radius. The `world GT` tab stays present even when the two optional CA-1M layers are absent; that empty-ish view is the deliberate no-GT marker. Generic portrait and landscape blueprints remain catalog dataset defaults, but the embedded blueprint takes precedence when a segment opens.
 
 ---
 
@@ -207,7 +209,7 @@ sequenceDiagram
     participant SRV as rerun server :51235
     participant V as viewers
 
-    loop base, calibration, video_wide, video_ultrawide, depth, imu, gt
+    loop base, calibration, video_wide, video_ultrawide, arkit_depth, imu, arkit_mesh, gt_boxes
         CLI->>TMP: mkstemp(suffix=.rrd.tmp) · RecordingStream sink
         CLI->>TMP: stream layer chunks (bounded batches)
         CLI->>TMP: context exit = blocking finalize
@@ -217,8 +219,8 @@ sequenceDiagram
             CLI->>TMP: unlink — previous good layer untouched
         end
     end
-    CLI->>FS: rerun rrd verify all 7 layer files together
-    CAT->>SRV: register each layer with shared recording id<br>(idempotent SKIP per segment layer, --recreate opt-in)
+    CLI->>FS: rerun rrd verify all 8 required layer files together
+    CAT->>SRV: register each required and present optional layer with shared recording id<br>(idempotent SKIP per segment layer, --recreate opt-in)
     CAT->>SRV: register generic portrait/landscape .rbl defaults<br>(base's embedded sequence blueprint wins on open)
     V->>SRV: rerun+http://127.0.0.1:51235<br>segment table → open → stream VideoStream samples
 ```

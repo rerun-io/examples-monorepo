@@ -7,13 +7,15 @@ from rerun.blueprint.api import Container, View
 
 from arkitscenes_download.ingest.blueprint import make_blueprint, make_table_blueprint
 from arkitscenes_download.ingest.paths import (
+    ARKIT_MESH,
     CONFIDENCE,
     DEPTH,
-    DEPTH_GT,
     DEPTH_PROMPTDA,
-    GT_MESH,
+    GT,
+    GT_BOXES,
+    GT_DEPTH,
+    GT_PINHOLE_WIDE,
     PINHOLE_WIDE_LOWRES,
-    PROMPTDA_MESH,
     VIDEO_ULTRAWIDE,
     VIDEO_WIDE,
 )
@@ -46,15 +48,32 @@ def test_default_blueprint_has_no_promptda_views() -> None:
     assert "depth PromptDA" not in names
     assert "world PromptDA" not in names
     assert "world" in names
+    assert "world GT" in names
 
 
-def test_stock_world_hides_gt_depth_but_depth_view_keeps_it() -> None:
-    """Avoid the GT depth backprojection in 3D without hiding its dedicated 2D view."""
-    for include_promptda in (False, True):
-        blueprint = make_blueprint(include_promptda=include_promptda)
-        world_contents = cast(list[str], find_view(blueprint, "world").contents)
-        assert f"- /{DEPTH_GT}/**" in world_contents
-        assert cast(list[str], find_view(blueprint, "depth GT (laser)").contents) == ["$origin/depth_gt"]
+def test_blueprint_variants_construct_with_world_gt_tab() -> None:
+    """Portrait, landscape, and PromptDA layouts always expose the deliberate GT marker tab."""
+    for portrait, include_promptda in ((False, False), (True, False), (False, True), (True, True)):
+        names: list[str] = view_names(make_blueprint(portrait=portrait, include_promptda=include_promptda))
+        assert "world GT" in names
+        assert ("world PromptDA" in names) is include_promptda
+
+
+def test_world_tabs_separate_arkit_and_laser_ground_truth() -> None:
+    """The stock world hides laser GT while the GT tab hides ARKit geometry and low-res depth."""
+    blueprint = make_blueprint()
+    assert cast(list[str], find_view(blueprint, "world").contents) == ["$origin/**", f"- /{GT}/**"]
+    assert cast(list[str], find_view(blueprint, "world GT").contents) == [
+        "$origin/**",
+        f"- /{ARKIT_MESH}/**",
+        f"- /{GT_BOXES}/**",
+        f"- /{DEPTH}/**",
+        f"- /{CONFIDENCE}/**",
+    ]
+
+    laser_depth_view = find_view(blueprint, "depth GT (laser)")
+    assert str(laser_depth_view.origin) == GT_PINHOLE_WIDE
+    assert cast(list[str], laser_depth_view.contents) == ["$origin/depth"]
 
 
 def test_promptda_blueprint_adds_depth_tab_and_world_tab() -> None:
@@ -73,34 +92,33 @@ def test_promptda_blueprint_adds_depth_tab_and_world_tab() -> None:
 def test_depth_views_override_colormap_range() -> None:
     """Encoded uint16 depth defaults to a 0-65535 colormap range in the viewer; the views must pin a sane one."""
     blueprint = make_blueprint(include_promptda=True)
-    for view_name, entity_path in (("depth ARKit", DEPTH), ("depth GT (laser)", DEPTH_GT), ("depth PromptDA", DEPTH_PROMPTDA)):
+    for view_name, entity_path in (("depth ARKit", DEPTH), ("depth GT (laser)", GT_DEPTH), ("depth PromptDA", DEPTH_PROMPTDA)):
         overrides = find_view(blueprint, view_name).visualizer_overrides
         assert overrides is not None and f"/{entity_path}" in overrides, f"{view_name} is missing its depth_range override"
 
 
-def test_promptda_world_tab_hides_gt_mesh_and_other_depths() -> None:
+def test_promptda_world_tab_hides_arkit_mesh_and_other_depths() -> None:
     blueprint = make_blueprint(include_promptda=True)
     world_promptda = find_view(blueprint, "world PromptDA")
     contents = cast(list[str], world_promptda.contents)
-    assert f"- /{GT_MESH}/**" in contents
-    assert f"- /{DEPTH_GT}/**" in contents
+    assert f"- /{ARKIT_MESH}/**" in contents
+    assert f"- /{GT_DEPTH}/**" in contents
     assert f"- /{PINHOLE_WIDE_LOWRES}/**" in contents
     # Everything else under /world stays visible (boxes, frustum, promptda mesh).
     assert "$origin/**" in contents
 
 
-def test_stock_world_tab_hides_promptda_geometry_when_comparison_is_enabled() -> None:
-    """Keep PromptDA geometry exclusive to its dedicated world tab."""
+def test_camera_views_overlay_gt_boxes() -> None:
+    """Both RGB views project the new top-level GT-box subtree."""
     blueprint = make_blueprint(include_promptda=True)
-    contents = cast(list[str], find_view(blueprint, "world").contents)
-    assert f"- /{PROMPTDA_MESH}/**" in contents
-    assert f"- /{DEPTH_PROMPTDA}/**" in contents
+    for view_name in ("wide", "ultrawide"):
+        assert f"/{GT_BOXES}/**" in cast(list[str], find_view(blueprint, view_name).contents)
 
 
 def test_table_blueprint_hides_video_depth_and_confidence() -> None:
     """The segment-table preview cards must not pay AV1 decode or depth/confidence uploads."""
     contents = cast(list[str], find_view(make_table_blueprint(), "world").contents)
-    for excluded in (VIDEO_WIDE, VIDEO_ULTRAWIDE, DEPTH_GT, DEPTH, CONFIDENCE):
+    for excluded in (VIDEO_WIDE, VIDEO_ULTRAWIDE, GT_DEPTH, DEPTH, CONFIDENCE):
         assert f"- /{excluded}/**" in contents
     # Mesh, boxes, and frusta stay: everything else under /world remains included.
     assert "$origin/**" in contents

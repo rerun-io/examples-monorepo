@@ -147,7 +147,7 @@ def run_promptda_batch(
 def log_fused_mesh(recording: rr.RecordingStream, entity_path: str, mesh: o3d.geometry.TriangleMesh) -> None:
     """Log a fused TSDF mesh statically.
 
-    Same see-through treatment as the GT mesh: cull back-facing walls so the
+    Same see-through treatment as the ARKit mesh: cull back-facing walls so the
     3D view looks into the room from outside.
     """
     rr.log(

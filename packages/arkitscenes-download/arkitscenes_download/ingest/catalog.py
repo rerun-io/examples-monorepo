@@ -1,9 +1,10 @@
 """Register ingested ARKitScenes RRDs into a local Rerun catalog.
 
 The local catalog is the in-memory ``rerun server`` (start it with
-``pixi run arkitscenes-download-serve``). Each sequence is one segment assembled from seven layer
-RRDs sharing its ``recording_id`` (the ARKitScenes video id); generic portrait
-and landscape layouts are registered as dataset blueprints.
+``pixi run arkitscenes-download-serve``). Each sequence is one segment assembled from eight required
+layer RRDs sharing its ``recording_id`` (the ARKitScenes video id), plus two optional
+CA-1M laser-GT layers on covered captures; generic portrait and landscape layouts
+are registered as dataset blueprints.
 
 Hard-won registration rules baked in here (see docs/full-run-runbook.md §8):
 ``SKIP`` duplicates instead of ``REPLACE`` (REPLACE invalidates the server's
@@ -26,7 +27,7 @@ from rich.live import Live
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TaskID, TextColumn, TimeElapsedColumn
 
 from arkitscenes_download.ingest.blueprint import make_blueprint, make_table_blueprint
-from arkitscenes_download.ingest.layers import LAYER_NAMES
+from arkitscenes_download.ingest.layers import ALL_LAYER_NAMES, LAYER_NAMES, OPTIONAL_LAYER_NAMES
 
 DEFAULT_CATALOG_URL: str = "rerun+http://127.0.0.1:51235"
 """gRPC URL of a locally-running ``rerun server`` catalog."""
@@ -66,8 +67,8 @@ def layer_files(config: Config) -> dict[str, list[Path]]:
 
     if config.video_ids is None:
         pattern: str = "{layer}/*.rrd" if layer_major else "*/{layer}.rrd"
-        return {layer: sorted(config.rrd_dir.glob(pattern.format(layer=layer))) for layer in LAYER_NAMES}
-    return {layer: [path for video_id in config.video_ids if (path := rrd_path(layer, video_id)).is_file()] for layer in LAYER_NAMES}
+        return {layer: sorted(config.rrd_dir.glob(pattern.format(layer=layer))) for layer in ALL_LAYER_NAMES}
+    return {layer: [path for video_id in config.video_ids if (path := rrd_path(layer, video_id)).is_file()] for layer in ALL_LAYER_NAMES}
 
 
 def registered_layer_count(dataset: DatasetEntry, layer_name: str, video_ids: set[str]) -> int:
@@ -179,7 +180,11 @@ def main(config: Config) -> None:
     """Register all ingested sequences and verify per-segment layer completeness."""
     dataset: DatasetEntry = register_sequences(config)
     table = dataset.segment_table().df.to_pandas()
-    complete: int = sum(1 for layers in table[LAYER_COLUMN] if len(layers) == len(LAYER_NAMES))
-    CONSOLE.print(f"dataset '{config.dataset_name}' at {config.catalog_url}: {len(table)} segments, {complete} with all {len(LAYER_NAMES)} layers")
+    required_layers: set[str] = set(LAYER_NAMES)
+    optional_layers: set[str] = set(OPTIONAL_LAYER_NAMES)
+    segment_layers: list[set[str]] = [set(layers) for layers in table[LAYER_COLUMN]]
+    complete: int = sum(1 for layers in segment_layers if required_layers <= layers)
+    gt_covered: int = sum(1 for layers in segment_layers if optional_layers <= layers)
+    CONSOLE.print(f"dataset '{config.dataset_name}' at {config.catalog_url}: {len(table)} segments, {complete} complete, {gt_covered} gt-covered")
     if complete != len(table):
-        raise RuntimeError(f"incomplete registration: only {complete}/{len(table)} segments carry all {len(LAYER_NAMES)} layers")
+        raise RuntimeError(f"incomplete registration: only {complete}/{len(table)} segments carry all {len(LAYER_NAMES)} required layers")
