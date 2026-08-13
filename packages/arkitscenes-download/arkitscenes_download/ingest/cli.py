@@ -6,19 +6,15 @@ they are frame-agnostic scalar channels, not spatial vector archetypes.
 """
 
 import csv
-import os
 import subprocess
-import tempfile
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import rerun as rr
-import rerun.blueprint as rrb
 from PIL import Image
 from rich.console import Console
 from rich.progress import Progress, TaskID
@@ -75,6 +71,7 @@ from arkitscenes_download.ingest.paths import (
     VIDEO_WIDE,
     WORLD,
 )
+from arkitscenes_download.ingest.recording import atomic_recording
 from arkitscenes_download.ingest.rig import (
     DeviceFrameFit,
     Intrinsics,
@@ -96,23 +93,6 @@ from arkitscenes_download.ingest.rig import (
 
 BATCH_SIZE: int = 1000
 CONSOLE: Console = Console(markup=False)
-
-
-@contextmanager
-def atomic_recording(output_path: Path, recording_id: str, *, send_properties: bool, default_blueprint: rrb.Blueprint | None = None):
-    """Yield a recording that is finalized before atomically replacing its target."""
-    descriptor, temp_name = tempfile.mkstemp(dir=output_path.parent, suffix=".rrd.tmp")
-    os.close(descriptor)
-    temp_path: Path = Path(temp_name)
-    try:
-        with rr.RecordingStream(application_id="arkitscenes", recording_id=recording_id, send_properties=send_properties) as recording:
-            recording.save(temp_path, default_blueprint=default_blueprint)
-            yield recording
-        temp_path.chmod(0o644)  # mkstemp temps are 0600; NFS mounts and the catalog server need world-readable files
-        os.replace(temp_path, output_path)
-    except BaseException:
-        temp_path.unlink(missing_ok=True)
-        raise
 
 
 def verify_rrd(path: Path | list[Path]) -> str:
