@@ -371,29 +371,6 @@ def ingest_sequence(config: Config) -> Path:
     CONSOLE.print(f"IMU frame: original_cam_from_device={device_fit.quaternion_xyzw.tolist()} residual={np.rad2deg(device_fit.rms_residual_rad):.3f}deg")
     sequence_output: Path = config.output / config.video_id
     sequence_output.mkdir(parents=True, exist_ok=True)
-    properties: dict[str, object] = {
-        "video_id": config.video_id,
-        "visit_id": metadata["visit_id"],
-        "sky_direction_label": sky_direction,
-        "orientation_source": "measured_gravity",
-        "orientation_quarter_turns_ccw": quarter_turns,
-        "orientation_ambiguous": orientation_is_ambiguous,
-        "orientation_circular_spread_rad": circular_spread,
-        "split": metadata["fold"],
-        "schema_version": "arkitscenes:v2",
-        "clock_offset_seconds": alignment.offset_seconds,
-        "clock_offset_dispersion_seconds": alignment.dispersion_seconds,
-        "clock_drift_seconds_per_second": alignment.drift_seconds_per_second,
-        "ultrawide_clock_offset_seconds": alignment.ultrawide_offset_seconds,
-        "ultrawide_clock_agreement_seconds": alignment.ultrawide_agreement_seconds,
-        "pose_source": pose_source,
-        "pose_fit_rotation_rms_rad": pose_selection.rotation_rms_rad,
-        "pose_fit_translation_rms_m": pose_selection.translation_rms_m,
-        "original_camera_from_device_quaternion_xyzw": device_fit.quaternion_xyzw.tolist(),
-        "device_frame_fit_rms_residual_rad": device_fit.rms_residual_rad,
-        "accel_samples": len(imu.accel_timestamps),
-        "gyro_samples": len(imu.gyro_timestamps),
-    }
 
     # Rebase the shared timeline so t=0 is the first instant BOTH cameras have
     # a frame: leading frames of the earlier camera are trimmed at transcode
@@ -403,15 +380,6 @@ def ingest_sequence(config: Config) -> Path:
     ultrawide_source_times: np.ndarray = track_packet_times(mov_path, 2) + alignment.ultrawide_offset_seconds
     epoch, wide_drop, ultrawide_drop = shared_epoch(wide_source_times, ultrawide_source_times)
     portrait: bool = wide_resolution[0] < wide_resolution[1]
-    properties.update(
-        {
-            "uptime_epoch_seconds": epoch,
-            "epoch_source": "first_frame_both_cameras",
-            "leading_frames_dropped_wide": wide_drop,
-            "leading_frames_dropped_ultrawide": ultrawide_drop,
-            "portrait": portrait,
-        }
-    )
     CONSOLE.print(f"Timeline: epoch={epoch:.6f}s dropped_leading=(wide={wide_drop}, ultrawide={ultrawide_drop}) portrait={portrait}")
 
     wide_video: VideoSamples = prepare_video_track(mov_path, 0, quarter_turns, config.keep_transcode_cache, drop_leading=wide_drop)
@@ -445,14 +413,6 @@ def ingest_sequence(config: Config) -> Path:
     trajectory: Trajectory = rotate_trajectory(trajectory_unbaked, quarter_turns)
     before: int = int(np.count_nonzero(wide_video_timestamps < pose_trajectory_unbaked.timestamps[0]))
     after: int = int(np.count_nonzero(wide_video_timestamps > pose_trajectory_unbaked.timestamps[-1]))
-    properties.update(
-        {
-            "pose_span_start": pose_trajectory_unbaked.timestamps[0],
-            "pose_span_end": pose_trajectory_unbaked.timestamps[-1],
-            "n_frames_before_pose_span": before,
-            "n_frames_after_pose_span": after,
-        }
-    )
     CONSOLE.print(
         f"Pose coverage: source={pose_source} span={pose_trajectory_unbaked.timestamps[0]:.6f}..{pose_trajectory_unbaked.timestamps[-1]:.6f} before={before} after={after}"
     )
@@ -515,8 +475,32 @@ def ingest_sequence(config: Config) -> Path:
         send_properties=True,
         default_blueprint=make_blueprint(portrait, framing=(mesh_summary.mesh_center_xyz, mesh_summary.bounding_radius_m)),
     ) as recording:
-        for name, value in properties.items():
-            recording.send_property(name, rr.AnyValues(value=str(value)))
+        # Typed, grouped recording properties (segment-table columns property:<group>:<field>).
+        # The bar for a field: someone filters or sorts segments by it. Pipeline
+        # diagnostics stay in the console log, not the table.
+        # Some metadata rows carry visit_id='NA': omit the field (null segment-table
+        # cell) rather than invent a sentinel venue id.
+        visit_id_field: dict[str, int] = {} if metadata["visit_id"] == "NA" else {"visit_id": int(metadata["visit_id"])}
+        recording.send_property(
+            "capture",
+            rr.AnyValues(
+                **visit_id_field,
+                split=metadata["fold"],
+                orientation="portrait" if portrait else "landscape",
+                orientation_quarter_turns_ccw=int(quarter_turns),
+                pose_source=pose_source,
+                uptime_epoch_seconds=float(epoch),
+                schema_version="arkitscenes:v2",
+            ),
+        )
+        recording.send_property(
+            "quality",
+            rr.AnyValues(
+                pose_fit_translation_rms_m=float(pose_selection.translation_rms_m),
+                orientation_ambiguous=bool(orientation_is_ambiguous),
+            ),
+        )
+        recording.send_property("faro", rr.AnyValues(has_scans=metadata["has_laser_scanner_point_clouds"] == "True"))
         _log_rig_grammar(recording)
     layer_paths: list[Path] = [sequence_output / f"{name}.rrd" for name in REQUIRED_LAYER_NAMES]
     verify_rrd(layer_paths)

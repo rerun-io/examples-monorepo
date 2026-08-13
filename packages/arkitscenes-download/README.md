@@ -87,15 +87,15 @@ Facts that shape consumption:
   captures (only those whose laser registration succeeded), and within a capture
   the GT frames can start late, end early, or have interior holes (e.g.
   `42898570` has no GT for its first 16.4 s). Per-capture coverage and quality
-  ship as `property:gt_*` segment-table columns (`gt_start_s`, `gt_end_s`,
-  `gt_max_interior_gap_s`, `gt_umeyama_rms_m`, …). A capture without the `gt_*`
-  layers has no laser GT — that absence is the intended marker.
+  ship as typed `property:gt:*` segment-table columns (`start_s`, `end_s`,
+  `max_interior_gap_s`, `umeyama_rms_m`, `provenance`). A capture without the
+  `gt_*` layers has no laser GT — that absence is the intended marker.
 - **GT is ~10 Hz** (the hi-res frame grid) on the shared `video_time` timeline;
   the 60 Hz device streams simply coexist with it.
 - **Frames are already upright** in CA-1M; the tool applies no rotation.
 - **Coordinate frames:** CA-1M poses live in the FARO venue frame. A per-capture
-  rigid Umeyama fit (residual in `gt_umeyama_rms_m`) connects them to the ARKit
-  `/world` via a static transform at `/world/gt`.
+  rigid Umeyama fit (residual in `property:gt:umeyama_rms_m`) connects them to
+  the ARKit `/world` via a static transform at `/world/gt`.
 - **License:** CA-1M data is **CC BY-NC-ND 4.0** — internal research use only;
   do **not** publicly redistribute RRDs derived from it. The original
   ARKitScenes-derived layers keep the far more permissive

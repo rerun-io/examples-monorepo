@@ -23,8 +23,8 @@ from rerun_prompt_da.apis.prompt_da_arkitscenes import (  # noqa: E402
 
 def test_portrait_property_parses_catalog_list_value() -> None:
     """Interpret the first catalog property value instead of list truthiness."""
-    assert portrait_from_segment_row({"property:portrait:value": ["True"]}) is True
-    assert portrait_from_segment_row({"property:portrait:value": ["False"]}) is False
+    assert portrait_from_segment_row({"property:capture:orientation": ["portrait"]}) is True
+    assert portrait_from_segment_row({"property:capture:orientation": ["landscape"]}) is False
 
 
 def test_portrait_property_is_required() -> None:
@@ -35,7 +35,7 @@ def test_portrait_property_is_required() -> None:
 
 def test_orientation_quarter_turns_parses_catalog_list_value() -> None:
     """Preserve ingest's stored rotation direction for portrait inference."""
-    assert orientation_quarter_turns_from_segment_row({"property:orientation_quarter_turns_ccw:value": ["3"]}) == 3
+    assert orientation_quarter_turns_from_segment_row({"property:capture:orientation_quarter_turns_ccw": [3]}) == 3
 
 
 def test_portrait_rotation_round_trip_preserves_asymmetric_layout() -> None:
