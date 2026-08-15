@@ -56,7 +56,7 @@ Stream depth completion off the cloud catalog into the viewer. No local server, 
 download step:
 
 ```bash
-pixi run -e prompt-da-stream --frozen prompt-da-catalog-stream --data.segments 45662951
+pixi run -e prompt-da-stream --frozen prompt-da-arkitscenes --data.segments 45662951
 ```
 
 To register a `promptda` layer on a **local** catalog instead (needs
@@ -64,8 +64,8 @@ To register a `promptda` layer on a **local** catalog instead (needs
 source `.mov` with torchcodec rather than reading video from the catalog:
 
 ```bash
-pixi run -e prompt-da-catalog --frozen prompt-da-arkitscenes --video-id 42899799
-pixi run -e prompt-da-catalog --frozen prompt-da-arkitscenes-raw --video-id 42899799
+pixi run -e prompt-da-catalog --frozen prompt-da-arkitscenes-register --video-id 42899799
+pixi run -e prompt-da-catalog --frozen prompt-da-arkitscenes-register-raw --video-id 42899799
 ```
 
 ## Acknowledgements

@@ -601,17 +601,17 @@ ffmpeg = { version = ">=8.1", build-number = ">=902" }
 arkitscenes-download = { path = "packages/arkitscenes-download", editable = true }
 rerun-sdk = { version = "==0.35.0", extras = ["datafusion", "dataloader"] }
 
-[feature.prompt-da-catalog.tasks.prompt-da-arkitscenes]
+[feature.prompt-da-catalog.tasks.prompt-da-arkitscenes-register]
 cmd = "python tools/prompt_da_arkitscenes.py"
 cwd = "packages/prompt-da"
 env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
-description = "Run PromptDA over registered ARKitScenes segments and register the promptda layer (needs arkitscenes-download-serve running)"
+description = "Ingest: run PromptDA over local ARKitScenes segments and register the promptda layer — writes an RRD, shows nothing (needs arkitscenes-download-serve running)"
 
-[feature.prompt-da-catalog.tasks.prompt-da-arkitscenes-raw]
+[feature.prompt-da-catalog.tasks.prompt-da-arkitscenes-register-raw]
 cmd = "python tools/prompt_da_arkitscenes_raw.py"
 cwd = "packages/prompt-da"
 env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
-description = "Run PromptDA over raw ARKitScenes data (torchcodec .mov decode) and register the promptda_raw layer (needs arkitscenes-download-serve running)"
+description = "Ingest: same as prompt-da-arkitscenes-register but decodes the raw .mov with torchcodec, registering the promptda_raw layer (needs arkitscenes-download-serve running)"
 
 # prompt-da-stream: streaming inference straight from the Rerun dataloader.
 # Its own lane because it needs the 0.36 prerelease dataloader (ColumnDecoder,
@@ -634,11 +634,11 @@ ffmpeg = { version = ">=8.1", build-number = ">=902" }
 [feature.prompt-da-stream.pypi-dependencies]
 arkitscenes-download = { path = "packages/arkitscenes-download", editable = true }
 
-[feature.prompt-da-stream.tasks.prompt-da-catalog-stream]
+[feature.prompt-da-stream.tasks.prompt-da-arkitscenes]
 cmd = "python tools/catalog_promptda.py"
 cwd = "packages/prompt-da"
 env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
-description = "Stream PromptDA inference over catalog segments from the Rerun dataloader (viewer only, writes no layer)"
+description = "Run PromptDA over ARKitScenes catalog segments and stream the result to the viewer (cloud catalog by default, writes no layer)"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # wilor-nano
