@@ -52,34 +52,21 @@ python tools/prompt_da_polycam.py --polycam-zip-path $PATH_TO_POLYCAM_ZIP
 ```
 
 ### ARKitScenes from a Rerun catalog
-Run depth completion straight off a catalog, with no download or export step. The
-Rerun dataloader carries the AV1 video (NVDEC-decoded on the GPU), the ARKit LiDAR
-prompt depth, and the pose/calibration columns on one fetch query per segment; the
-viewer shows the RGB frame, the LiDAR prompt, and the prediction side by side.
-
-This tool defaults to the public cloud catalog, so nothing needs to run locally:
+Stream depth completion off the cloud catalog into the viewer. No local server, no
+download step:
 
 ```bash
-pixi run -e prompt-da-stream --frozen prompt-da-catalog-stream
 pixi run -e prompt-da-stream --frozen prompt-da-catalog-stream --data.segments 45662951
 ```
 
-It logs to the viewer only and writes nothing back. Add `--rr-config.save out.rrd
---rr-config.headless` on a machine with no display. Other flags: `--target-fps`,
-`--batch-size`, `--max-image-size`.
-
-To write a registered `promptda` layer back to a **local** catalog instead, use the
-sibling tools. Both need `pixi run arkitscenes-download-serve` running, and a corpus
-ingested with the current layer taxonomy:
+To register a `promptda` layer on a **local** catalog instead (needs
+`arkitscenes-download-serve` running), use the sibling tools — `-raw` decodes the
+source `.mov` with torchcodec rather than reading video from the catalog:
 
 ```bash
 pixi run -e prompt-da-catalog --frozen prompt-da-arkitscenes --video-id 42899799
 pixi run -e prompt-da-catalog --frozen prompt-da-arkitscenes-raw --video-id 42899799
 ```
-
-`prompt-da-arkitscenes-raw` decodes the source `.mov` with torchcodec rather than
-reading video from the catalog. Pass `--process-all` in place of `--video-id` to
-cover every segment that has no `promptda` layer yet.
 
 ## Acknowledgements
 Thanks to the original Prompt DepthAnything and DepthAnythingV2 repos!
