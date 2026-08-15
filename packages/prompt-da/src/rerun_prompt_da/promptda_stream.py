@@ -52,7 +52,7 @@ class PromptDARow(TypedDict):
     The video frame is device-resident (NVDEC); the rest arrive on the CPU.
     """
 
-    video: UInt8[Tensor, "rgb=3 h w"] | None
+    video: UInt8[Tensor, "3 h w"] | None
     depth: UInt16[Tensor, "1 prompt_h prompt_w"]
     k: Float32[Tensor, "k=9"]
     pose_t: Float32[Tensor, "xyz=3"]
@@ -69,7 +69,7 @@ class PromptDABatch:
     """Sampling-grid timestamp per row, in nanoseconds."""
     quarter_turns: int
     """Counter-clockwise quarter turns applied to reach landscape; undo them when logging."""
-    rgb_bhw3: UInt8[Tensor, "b h w rgb=3"]
+    rgb_bhw3: UInt8[Tensor, "b h w 3"]
     """Device-resident landscape RGB frames."""
     prompt_bhw: Float32[Tensor, "b prompt_h=192 prompt_w=256"]
     """Device-resident landscape LiDAR prompt depth, in metres."""
@@ -144,7 +144,7 @@ class PromptDACollate:
         """Stack the rows that carry every field into one device-resident query."""
         frame_indices: list[int] = []
         timestamps_ns: list[int] = []
-        frames_3hw: list[UInt8[Tensor, "rgb=3 stored_h stored_w"]] = []
+        frames_3hw: list[UInt8[Tensor, "3 stored_h stored_w"]] = []
         prompts_hw: list[UInt16[Tensor, "stored_prompt_h stored_prompt_w"]] = []
         k_matrices_33: list[Float32[ndarray, "3 3"]] = []
         world_T_cam_44: list[Float64[ndarray, "4 4"]] = []
@@ -163,7 +163,7 @@ class PromptDACollate:
                 continue
             if min(video.numel(), depth.numel(), k.numel(), pose_t.numel(), pose_q.numel()) == 0:
                 continue
-            frame_chw: UInt8[Tensor, "rgb=3 stored_h stored_w"] = video
+            frame_chw: UInt8[Tensor, "3 stored_h stored_w"] = video
             depth_1hw: UInt16[Tensor, "1 stored_prompt_h stored_prompt_w"] = depth
             k_9: Float32[Tensor, "k=9"] = k
             pose_t_3: Float32[Tensor, "xyz=3"] = pose_t
@@ -184,7 +184,7 @@ class PromptDACollate:
         # landscape input. The frame shape decides this, so no orientation property is
         # read — those are spelled differently across dataset generations.
         quarter_turns: int = 1 if stored_hw[0] > stored_hw[1] else 0
-        rgb_b3hw: UInt8[Tensor, "b rgb=3 h w"] = torch.rot90(torch.stack(frames_3hw), quarter_turns, dims=(2, 3))
+        rgb_b3hw: UInt8[Tensor, "b 3 h w"] = torch.rot90(torch.stack(frames_3hw), quarter_turns, dims=(2, 3))
         prompt_bhw: UInt16[Tensor, "b prompt_h=192 prompt_w=256"] = torch.rot90(prompt_stored_bhw, quarter_turns, dims=(1, 2))
         return PromptDABatch(
             frame_indices=frame_indices,

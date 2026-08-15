@@ -134,7 +134,7 @@ def process_segment(dataset: DatasetEntry, segment_id: str, config: Config, pred
         if batch is None:
             continue
 
-        image_b3hw: Float32[Tensor, "b rgb=3 net_h net_w"]
+        image_b3hw: Float32[Tensor, "b 3 net_h net_w"]
         prompt_b1hw: Float32[Tensor, "b 1 prompt_h=192 prompt_w=256"]
         image_b3hw, prompt_b1hw = preprocess_batch(batch.rgb_bhw3, batch.prompt_bhw, predictor.image_hw)
         depth_b1hw: Float32[Tensor, "b 1 net_h net_w"] = predictor.runtime({

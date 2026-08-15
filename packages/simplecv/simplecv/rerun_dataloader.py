@@ -9,6 +9,16 @@ keyframe window into its own in-memory MP4 and is slower than dav1d — no
 decode-session reuse across calls. ``SegmentNvdecDecoder`` instead bulk-fetches
 a segment's packets once, wraps them into a single MP4 (same ``add_mux_stream``
 technique), and serves every sample from one GPU decoder.
+
+TODO(rerun#upstream): delete this module once the dataloader decodes video fast
+enough on its own — this is a stopgap, and it costs real flexibility: holding a
+``DatasetEntry`` makes it unpicklable (so ``num_workers`` must stay 0), and the
+cached CUDA decoder does not survive ``decode_threads > 1``. Two upstream PRs
+converge on it: reality#2893 adds a torchcodec decoder (slower than the av path
+today, by its author's own measurement), and reality#3083 replaces per-sample
+``decode`` with a batch API whose ``_DecoderSession`` reuses one codec context
+across a GOP — the session reuse this module hand-rolls. #3083 also changes the
+``ColumnDecoder.decode`` signature, so this class needs a port when it lands.
 """
 
 from fractions import Fraction
@@ -28,7 +38,7 @@ from torchcodec.decoders import VideoDecoder
 
 TimedeltaNs: TypeAlias = Shaped[ndarray, " n_samples"]
 """Sample timestamps in timeline order, dtype ``timedelta64[ns]`` (jaxtyping has no timedelta dtype)."""
-FrameRgbChw: TypeAlias = UInt8[Tensor, "rgb=3 h w"]
+FrameRgbChw: TypeAlias = UInt8[Tensor, "3 h w"]
 """One decoded frame, channels-first RGB on the decoder's device."""
 
 
