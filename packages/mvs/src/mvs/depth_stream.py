@@ -25,9 +25,10 @@ from rerun.experimental.dataloader import (
     NumericDecoder,
     RerunIterableDataset,
 )
+from simplecv.rerun_dataloader import SegmentNvdecDecoder
 from torch import Tensor
 
-from mvs.apis.live_mesh import FETCH_SIZE, NATIVE_FPS, TIMELINE, VIDEO_WIDE, SegmentNvdecDecoder
+from mvs.apis.live_mesh import FETCH_SIZE, NATIVE_FPS, TIMELINE, VIDEO_WIDE
 from mvs.depth_engine import DepthInputs, preprocess_image, s1_intrinsics
 from mvs.pose_stream import (
     CAM_QUATERNION,
@@ -93,7 +94,7 @@ def depth_dataset(
         A natural-order iterable dataset over the segment's video grid, and its video
         decoder (whose raw AV1 samples are relayable as a Rerun VideoStream).
     """
-    video_decoder: SegmentNvdecDecoder = SegmentNvdecDecoder(dataset, VIDEO_WIDE, device)
+    video_decoder: SegmentNvdecDecoder = SegmentNvdecDecoder(dataset, VIDEO_WIDE, TIMELINE, device, int(NATIVE_FPS))
     fields: dict[str, Field] = {
         "video": Field(f"/{VIDEO_WIDE}:VideoStream:sample", decode=video_decoder),
         "rig_quaternion": Field(RIG_QUATERNION, decode=NumericDecoder()),
