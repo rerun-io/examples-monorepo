@@ -71,7 +71,7 @@ Set `PIXI_ENV` in a gitignored `.envrc.local` to override a directory's default.
 | [monoprior](packages/monoprior/) | Monocular relative depth, metric depth, surface-normal, and calibration tools. |
 | [mv-api](packages/mv-api/) | Full egocentric/exocentric multiview processing for raw HOCap datasets. |
 | [posekit](packages/posekit/) | One model API for human perception networks (detect, pose, segment, re-ID) over torch/onnx/tensorrt backends. |
-| [prompt-da](packages/prompt-da/) | Prompt Depth Anything depth completion for Polycam captures. |
+| [prompt-da](packages/prompt-da/) | Prompt Depth Anything depth completion for Polycam captures and ARKitScenes catalog segments. |
 | [pysfm](packages/pysfm/) | COLMAP/pycolmap structure-from-motion with Rerun visualization. |
 | [pyvrs-viewer](packages/pyvrs-viewer/) | VRS-to-Rerun conversion with compressed video and sensor streams. |
 | [robocap-slam](packages/robocap-slam/) | Multicamera visual odometry and SLAM using NVIDIA cuVSLAM. |

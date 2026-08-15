@@ -601,17 +601,44 @@ ffmpeg = { version = ">=8.1", build-number = ">=902" }
 arkitscenes-download = { path = "packages/arkitscenes-download", editable = true }
 rerun-sdk = { version = "==0.35.0", extras = ["datafusion", "dataloader"] }
 
-[feature.prompt-da-catalog.tasks.prompt-da-arkitscenes]
+[feature.prompt-da-catalog.tasks.prompt-da-arkitscenes-register]
 cmd = "python tools/prompt_da_arkitscenes.py"
 cwd = "packages/prompt-da"
 env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
-description = "Run PromptDA over registered ARKitScenes segments and register the promptda layer (needs arkitscenes-download-serve running)"
+description = "Ingest: run PromptDA over local ARKitScenes segments and register the promptda layer — writes an RRD, shows nothing (needs arkitscenes-download-serve running)"
 
-[feature.prompt-da-catalog.tasks.prompt-da-arkitscenes-raw]
+[feature.prompt-da-catalog.tasks.prompt-da-arkitscenes-register-raw]
 cmd = "python tools/prompt_da_arkitscenes_raw.py"
 cwd = "packages/prompt-da"
 env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
-description = "Run PromptDA over raw ARKitScenes data (torchcodec .mov decode) and register the promptda_raw layer (needs arkitscenes-download-serve running)"
+description = "Ingest: same as prompt-da-arkitscenes-register but decodes the raw .mov with torchcodec, registering the promptda_raw layer (needs arkitscenes-download-serve running)"
+
+# prompt-da-stream: streaming inference straight from the Rerun dataloader.
+# Its own lane because it needs the 0.36 prerelease dataloader (ColumnDecoder,
+# fetch_size); `common`'s 0.35 pin and a prerelease pin cannot share an env.
+# Explicit platforms required — see AGENTS.md "Platforms & lockfile".
+[feature.prompt-da-stream]
+platforms = ["linux-64"]
+
+[feature.prompt-da-stream.dependencies]
+imagecodecs = ">=2024.9.22"
+# arkitscenes_download.ingest imports these at package load.
+trimesh = "*"
+pillow = "*"
+av = ">=18"
+# simplecv's SegmentNvdecDecoder decodes the segment's AV1 packets on NVDEC.
+torchcodec = "*"
+# ffmpeg <902 links libjxl 0.11 and dlopen-fails beside the env's 0.12.
+ffmpeg = { version = ">=8.1", build-number = ">=902" }
+
+[feature.prompt-da-stream.pypi-dependencies]
+arkitscenes-download = { path = "packages/arkitscenes-download", editable = true }
+
+[feature.prompt-da-stream.tasks.prompt-da-arkitscenes]
+cmd = "python tools/catalog_promptda.py"
+cwd = "packages/prompt-da"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Run PromptDA over ARKitScenes catalog segments and stream the result to the viewer (cloud catalog by default, writes no layer)"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # wilor-nano
@@ -2381,6 +2408,22 @@ prompt-da-catalog-dev = { features = [
     "prompt-da-catalog",
     "dev",
 ], solve-group = "prompt-da", no-default-feature = true }
+# Catalog-lane env: catalog-common (rerun-pin-free) so rerun-prerelease's pin wins.
+prompt-da-stream = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "prompt-da",
+    "prompt-da-stream",
+], solve-group = "prompt-da-stream", no-default-feature = true }
+prompt-da-stream-dev = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "prompt-da",
+    "prompt-da-stream",
+    "dev",
+], solve-group = "prompt-da-stream", no-default-feature = true }
 wilor-nano = { features = [
     "common",
     "cuda",

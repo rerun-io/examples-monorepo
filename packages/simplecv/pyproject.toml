@@ -69,4 +69,6 @@ sort_by_size = true
 # SimpleCV exposes many public APIs and schema fields that Vulture reports at 60%.
 min_confidence = 80
 # Monkeypatched rr.send_columns lambdas must keep the API's keyword parameter names.
-ignore_names = ["indexes"]
+# pts/dts/duration: av.Packet timing attributes set during the in-memory MP4 wrap.
+# decode: ColumnDecoder hook invoked by the Rerun dataloader, not by package code.
+ignore_names = ["indexes", "pts", "dts", "duration", "decode"]

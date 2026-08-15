@@ -51,6 +51,23 @@ with python in pixi shell
 python tools/prompt_da_polycam.py --polycam-zip-path $PATH_TO_POLYCAM_ZIP
 ```
 
+### ARKitScenes from a Rerun catalog
+Stream depth completion off the cloud catalog into the viewer. No local server, no
+download step:
+
+```bash
+pixi run -e prompt-da-stream --frozen prompt-da-arkitscenes --data.segments 45662951
+```
+
+To register a `promptda` layer on a **local** catalog instead (needs
+`arkitscenes-download-serve` running), use the sibling tools — `-raw` decodes the
+source `.mov` with torchcodec rather than reading video from the catalog:
+
+```bash
+pixi run -e prompt-da-catalog --frozen prompt-da-arkitscenes-register --video-id 42899799
+pixi run -e prompt-da-catalog --frozen prompt-da-arkitscenes-register-raw --video-id 42899799
+```
+
 ## Acknowledgements
 Thanks to the original Prompt DepthAnything and DepthAnythingV2 repos!
 

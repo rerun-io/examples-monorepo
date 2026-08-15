@@ -27,4 +27,5 @@ exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modu
 sort_by_size = true
 min_confidence = 60
 # _engine: held only to keep the TRT engine alive for its execution context
-ignore_names = ["rr_config", "_engine"]
+# video/depth/k/pose_t/pose_q: PromptDARow TypedDict fields, read via subscript.
+ignore_names = ["rr_config", "_engine", "video", "depth", "k", "pose_t", "pose_q"]
