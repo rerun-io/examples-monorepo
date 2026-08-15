@@ -86,7 +86,10 @@ def stream_blueprint(portrait: bool) -> rrb.Blueprint:
     depth_range = rr.DepthImage.from_fields(depth_range=DEPTH_RANGE_MM)
     return rrb.Blueprint(
         rrb.Horizontal(
-            rrb.Spatial3DView(name="world", origin=WORLD),
+            # Both depth images back-project into this view and land on top of each other.
+            # Start with the coarse LiDAR prompt hidden so the prediction reads cleanly;
+            # it stays in the view tree, one toggle away, for comparing the two.
+            rrb.Spatial3DView(name="world", origin=WORLD, overrides={f"/{DEPTH}": rrb.EntityBehavior(visible=False)}),
             rrb.Vertical(
                 rrb.Spatial2DView(name="RGB", origin=PINHOLE_WIDE, contents=["$origin/video"]),
                 rrb.Spatial2DView(
