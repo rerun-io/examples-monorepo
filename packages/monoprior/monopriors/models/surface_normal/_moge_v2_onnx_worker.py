@@ -1,30 +1,41 @@
 """Uninstrumented subprocess entry point for dynamic-batch MoGe ONNX export."""
 
-import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+
+import tyro
 
 from monopriors.models.surface_normal.moge_v2_trt import Encoder, export_moge_v2_normal_onnx
 
 
-def main() -> None:
-    """Parse the parent export request and build its ONNX artifact."""
-    if len(sys.argv) != 7:
-        raise ValueError(f"Expected six MoGe v2 ONNX worker arguments, got {len(sys.argv) - 1}.")
-    encoder: Encoder = cast(Encoder, sys.argv[1])
-    height: int = int(sys.argv[2])
-    width: int = int(sys.argv[3])
-    resolution_level: int = int(sys.argv[4])
-    max_batch_size: int = int(sys.argv[5])
-    cache_dir: Path = Path(sys.argv[6])
+@dataclass(frozen=True, slots=True)
+class Config:
+    """Export request forwarded by the parent predictor process."""
+
+    encoder: Encoder
+    """DINOv2 encoder size."""
+    height: int
+    """Static network height."""
+    width: int
+    """Static network width."""
+    resolution_level: int
+    """Detail level from 0 through 9."""
+    max_batch_size: int
+    """Largest batch encoded in the dynamic ONNX constraint."""
+    cache_dir: Path
+    """Cache root; the graph lands in ``cache_dir / "onnx"``."""
+
+
+def main(config: Config) -> None:
+    """Build the requested ONNX artifact in this clean interpreter."""
     export_moge_v2_normal_onnx(
-        encoder=encoder,
-        image_hw=(height, width),
-        resolution_level=resolution_level,
-        max_batch_size=max_batch_size,
-        cache_dir=cache_dir,
+        encoder=config.encoder,
+        image_hw=(config.height, config.width),
+        resolution_level=config.resolution_level,
+        max_batch_size=config.max_batch_size,
+        cache_dir=config.cache_dir,
     )
 
 
 if __name__ == "__main__":
-    main()
+    main(tyro.cli(Config))

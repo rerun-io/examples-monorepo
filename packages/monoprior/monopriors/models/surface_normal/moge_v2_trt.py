@@ -46,7 +46,14 @@ class MoGeV2NormalOutput(NamedTuple):
 
 
 class _MoGeV2NormalHeads(torch.nn.Module):
-    """Fixed-token adapter exposing the normal and mask heads as tuple outputs."""
+    """Fixed-token adapter exposing the normal and mask heads as tuple outputs.
+
+    TODO: export the full MoGe graph (points + depth heads too) once a consumer
+    needs them — the heads share the backbone, so the marginal engine cost is
+    the decoders and the extra D2H. The metric-depth recovery (affine
+    point-map postprocess, ``recover_focal_shift``) is data-dependent logic
+    outside the graph and would still run on the outputs either way.
+    """
 
     def __init__(self, model: MoGeModel, num_tokens: int) -> None:
         super().__init__()
@@ -155,11 +162,17 @@ def export_moge_v2_normal_onnx(
             sys.executable,
             "-m",
             "monopriors.models.surface_normal._moge_v2_onnx_worker",
+            "--encoder",
             encoder,
+            "--height",
             str(height),
+            "--width",
             str(width),
+            "--resolution-level",
             str(resolution_level),
+            "--max-batch-size",
             str(max_batch_size),
+            "--cache-dir",
             str(cache_dir),
         ]
         subprocess.run(worker_command, check=True, env=worker_env)
@@ -182,6 +195,10 @@ def export_moge_v2_normal_onnx(
         device="cuda",
     )
 
+    # trtkit is imported at call sites, not module top (unlike prompt-da's
+    # dedicated TRT module): this module doubles as the tensor-contract and
+    # torch-twin home, and importing trtkit pulls the tensorrt runtime, which
+    # torch-only consumers should not pay for.
     from trtkit import export_onnx, sweep_stale_onnx_exports
 
     export_onnx(
@@ -196,10 +213,9 @@ def export_moge_v2_normal_onnx(
     del dummy_image_b3hw, wrapper, model
     torch.cuda.empty_cache()
 
-    # Preserve the current external-data sidecar. trtkit publishes the ONNX
-    # protobuf atomically, while dynamo keeps its large weights in the
-    # pid-suffixed sidecar referenced by that protobuf.
-    current_sidecar: Path = onnx_path.with_name(f"{onnx_path.name}.part{os.getpid()}.data")
+    # ViT-L weights exceed the 2 GB protobuf limit, so trtkit publishes a
+    # deterministic `<name>.data` external-data sidecar beside the graph.
+    current_sidecar: Path = onnx_path.with_name(f"{onnx_path.name}.data")
     stale_prefix: str = f"moge-v2-{encoder}-normal_{height}x{width}_t{num_tokens}_"
     sweep_stale_onnx_exports(onnx_dir, stale_prefix, keep_paths={onnx_path, current_sidecar})
     return onnx_path
