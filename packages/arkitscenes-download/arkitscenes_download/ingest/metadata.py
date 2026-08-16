@@ -61,9 +61,9 @@ class CameraDistortion:
     camera_name: str
     """Stable ingest camera name (``wide`` or ``ultrawide``)."""
     coefficients: np.ndarray
-    """Eight Brown-Conrady polynomial coefficients as float32."""
+    """Eight Apple distorted-to-rectified radial polynomial coefficients as float32."""
     inverse_coefficients: np.ndarray
-    """Eight inverse polynomial coefficients as float32."""
+    """Eight Apple rectified-to-distorted radial polynomial coefficients as float32."""
     center_xy: Float64[np.ndarray, "2"]
     """Distortion center in reference-image pixels."""
     reference_dimensions_wh: Float64[np.ndarray, "2"]

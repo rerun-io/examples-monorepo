@@ -296,7 +296,15 @@ def _log_distortions(recording: rr.RecordingStream, distortions: list[CameraDist
         center_xy: np.ndarray = rotate_pixels(distortion.center_xy, dimensions_wh, quarter_turns)
         baked_dimensions_wh: tuple[int, int] = rotate_resolution(dimensions_wh, quarter_turns)
         path: str = camera_paths[distortion.camera_name]
-        recording.log(path, RerunCameraDistortion(model="brown_conrady", coefficients=distortion.coefficients), static=True)
+        recording.log(
+            path,
+            RerunCameraDistortion(
+                model="apple_radial_poly",
+                coefficients=distortion.coefficients,
+                inverse_coefficients=distortion.inverse_coefficients,
+            ),
+            static=True,
+        )
         recording.log(
             path,
             rr.AnyValues(
@@ -421,7 +429,7 @@ def ingest_sequence(config: Config) -> Path:
     distortions: list[CameraDistortion] = decode_camera_distortions_from_packets(metadata_packets[10])
     for distortion in distortions:
         CONSOLE.print(
-            f"Distortion {distortion.camera_name}: model=brown_conrady coefficients={distortion.coefficients.tolist()} "
+            f"Distortion {distortion.camera_name}: model=apple_radial_poly coefficients={distortion.coefficients.tolist()} "
             f"inverse={distortion.inverse_coefficients.tolist()} center={distortion.center_xy.tolist()} "
             f"reference={distortion.reference_dimensions_wh.tolist()} temporal_samples={distortion.temporal_sample_count}"
         )

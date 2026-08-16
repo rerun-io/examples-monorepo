@@ -37,5 +37,29 @@ sort_by_size = true
 min_confidence = 60
 # benchmark/full_run/convert: Modal CLI entrypoints, invoked via `modal run ...::name`
 # is_in_threedod: metadata.csv row field, parsed for schema completeness
-# DEPTH_PROMPTDA / PROMPTDA_MESH: entity paths consumed by packages/prompt-da
-ignore_names = ["is_in_threedod", "clock_fraction_over_10ms", "DEPTH_PROMPTDA", "PROMPTDA_MESH", "benchmark", "full_run", "convert"]
+# Foreign-layer entity paths are consumed by packages/prompt-da and packages/gauss-surf.
+ignore_names = [
+    "is_in_threedod",
+    "clock_fraction_over_10ms",
+    "DEPTH_PROMPTDA",
+    "PROMPTDA_MESH",
+    "DEPTH_SPLAT_WIDE",
+    "DEPTH_SPLAT_ULTRAWIDE",
+    "RGB_SPLAT_ULTRAWIDE_RECT",
+    "NORMALS_SPLAT_ULTRAWIDE_RECT",
+    "ERROR_RGB_ULTRAWIDE_RECT",
+    "ERROR_DEPTH_ULTRAWIDE_RECT",
+    "ERROR_NORMAL_ULTRAWIDE_RECT",
+    "SHARPNESS_WIDE",
+    "SHARPNESS_ULTRAWIDE",
+    "FRAME_SELECTION_WIDE",
+    "FRAME_SELECTION_ULTRAWIDE",
+    "NORMALS_MOGE",
+    "PINHOLE_ULTRAWIDE_RECT",
+    "RGB_ULTRAWIDE_RECT",
+    "DEPTH_ULTRAWIDE_RECT",
+    "NORMALS_ULTRAWIDE_RECT",
+    "benchmark",
+    "full_run",
+    "convert",
+]

@@ -1,6 +1,17 @@
 """Canonical ARKitScenes entity-path checks."""
 
-from arkitscenes_download.ingest.paths import ARKIT_MESH, GT, GT_BOXES, GT_CAM_WIDE, GT_DEPTH, GT_PINHOLE_WIDE, GT_RIG, gt_box
+from arkitscenes_download.ingest.paths import (
+    ARKIT_MESH,
+    GT,
+    GT_BOXES,
+    GT_CAM_WIDE,
+    GT_DEPTH,
+    GT_PINHOLE_WIDE,
+    GT_RIG,
+    NORMALS_SPLAT_WIDE,
+    PINHOLE_WIDE,
+    gt_box,
+)
 
 
 def test_arkit_and_laser_ground_truth_paths_are_separate() -> None:
@@ -13,3 +24,7 @@ def test_arkit_and_laser_ground_truth_paths_are_separate() -> None:
     assert GT_CAM_WIDE == "world/gt/rig_00/cam_00"
     assert GT_PINHOLE_WIDE == "world/gt/rig_00/cam_00/pinhole"
     assert GT_DEPTH == "world/gt/rig_00/cam_00/pinhole/depth"
+
+
+def test_wide_splat_normals_share_the_wide_pinhole() -> None:
+    assert f"{PINHOLE_WIDE}/normals_splat" == NORMALS_SPLAT_WIDE

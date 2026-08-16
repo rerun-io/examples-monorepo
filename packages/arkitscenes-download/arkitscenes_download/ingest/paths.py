@@ -28,7 +28,33 @@ GT_PINHOLE_WIDE: str = f"{GT_CAM_WIDE}/pinhole"
 GT_DEPTH: str = f"{GT_PINHOLE_WIDE}/depth"
 # PromptDA layer (written by the prompt-da package, not by ingest).
 DEPTH_PROMPTDA: str = f"{PINHOLE_WIDE}/depth_promptda"
-PROMPTDA_MESH: str = f"{WORLD}/promptda/mesh"
+PROMPTDA: str = f"{WORLD}/promptda"
+PROMPTDA_MESH: str = f"{PROMPTDA}/mesh"
+SPLATS: str = f"{WORLD}/splats"
+"""Gaussian-splat subtree, with the normalized splats below a metric-world parent transform."""
+# Frame-selection layer (written by the gauss-surf package, not by ingest).
+SHARPNESS_WIDE: str = f"{VIDEO_WIDE}/sharpness"
+SHARPNESS_ULTRAWIDE: str = f"{VIDEO_ULTRAWIDE}/sharpness"
+FRAME_SELECTION_WIDE: str = "frame_selection/wide/chosen"
+FRAME_SELECTION_ULTRAWIDE: str = "frame_selection/ultrawide/chosen"
+# MoGe normals layer (written by the gauss-surf package, not by ingest).
+PINHOLE_MOGE: str = f"{CAM_WIDE}/pinhole_moge"
+NORMALS_MOGE: str = f"{PINHOLE_MOGE}/normals"
+# Rectified ultrawide layers (written by the gauss-surf package, not by ingest).
+PINHOLE_ULTRAWIDE_RECT: str = f"{CAM_ULTRAWIDE}/pinhole_rect"
+RGB_ULTRAWIDE_RECT: str = f"{PINHOLE_ULTRAWIDE_RECT}/rgb"
+DEPTH_ULTRAWIDE_RECT: str = f"{PINHOLE_ULTRAWIDE_RECT}/depth"
+NORMALS_ULTRAWIDE_RECT: str = f"{PINHOLE_ULTRAWIDE_RECT}/normals"
+# Rendered splat-depth layer (written by the gauss-surf package, not by ingest).
+DEPTH_SPLAT_WIDE: str = f"{PINHOLE_WIDE}/depth_splat"
+DEPTH_SPLAT_ULTRAWIDE: str = f"{PINHOLE_ULTRAWIDE_RECT}/depth_splat"
+# Splat fit-triage layer (written by the gauss-surf package, not by ingest).
+NORMALS_SPLAT_WIDE: str = f"{PINHOLE_WIDE}/normals_splat"
+RGB_SPLAT_ULTRAWIDE_RECT: str = f"{PINHOLE_ULTRAWIDE_RECT}/rgb_splat"
+NORMALS_SPLAT_ULTRAWIDE_RECT: str = f"{PINHOLE_ULTRAWIDE_RECT}/normals_splat"
+ERROR_RGB_ULTRAWIDE_RECT: str = f"{PINHOLE_ULTRAWIDE_RECT}/error_rgb"
+ERROR_DEPTH_ULTRAWIDE_RECT: str = f"{PINHOLE_ULTRAWIDE_RECT}/error_depth"
+ERROR_NORMAL_ULTRAWIDE_RECT: str = f"{PINHOLE_ULTRAWIDE_RECT}/error_normal"
 
 
 def gt_box(label: str) -> str:
