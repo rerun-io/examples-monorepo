@@ -24,6 +24,7 @@ project-includes = [
     "packages/egoexo-forge/src/**/*",
     "packages/mamma/src/**/*",
     "packages/mvs/src/**/*",
+    "packages/gauss-surf/src/**/*",
     "packages/live-rerun/src/**/*",
 ]
 project-excludes = [
@@ -76,6 +77,7 @@ search-path = [
     "packages/egoexo-forge/src",
     "packages/mamma/src",
     "packages/mvs/src",
+    "packages/gauss-surf/src",
     "packages/live-rerun/src",
     # Vendored sam2 fork is installed editable; pyrefly can't follow the
     # __editable__ finder, so resolve `sam2.*` from the source tree directly.
@@ -131,6 +133,8 @@ site-package-path = [
     ".pixi/envs/mamma-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/mvs-dev/lib/python3.12/site-packages",
     ".pixi/envs/mvs-dev/lib/python3.12/site-packages/rerun_sdk",
+    ".pixi/envs/gauss-surf-dev/lib/python3.12/site-packages",
+    ".pixi/envs/gauss-surf-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/live-rerun-dev/lib/python3.12/site-packages",
     ".pixi/envs/live-rerun-dev/lib/python3.12/site-packages/rerun_sdk",
 ]

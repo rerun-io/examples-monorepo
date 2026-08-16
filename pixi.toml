@@ -3,7 +3,7 @@ authors = ["pablo vela <pablovela5620@gmail.com>"]
 channels = ["https://prefix.dev/ai-demos", "https://prefix.dev/conda-forge"]
 name = "examples-monorepo"
 # Explicit local conda/PyPI name mapping keeps overrides deterministic.
-conda-pypi-map = { conda-forge = "conda-pypi-map.json" }
+conda-pypi-map = { conda-forge = "conda-pypi-map.json", "https://prefix.dev/ai-demos/" = "conda-pypi-map-ai-demos.json" }
 # Plain subdirs are the CPU/mac lanes; the named entries carry the CUDA-13
 # virtual packages. Features opt in by listing a name — see AGENTS.md
 # "Platforms & lockfile".
@@ -393,6 +393,7 @@ natsort = ">=8.4.0,<9"
 [feature.monoprior.pypi-dependencies]
 monopriors = { path = "packages/monoprior", editable = true }
 sam3 = { path = "packages/sam3", editable = true }
+trtkit = { path = "packages/trtkit", editable = true }
 vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c" }
 
 [feature.monoprior.activation.env]
@@ -2330,6 +2331,108 @@ cwd = "packages/arkitscenes-download"
 description = "Open the native Rerun viewer on the local catalog"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# gauss-surf — GausSurf splat pipeline over ARKitScenes catalog segments
+# ═══════════════════════════════════════════════════════════════════════════
+# Signals/catalog lane: reads the segment through the 0.36 prerelease
+# dataloader, derives frame selection / normals / ultrawide depth, writes
+# layer RRDs back. Explicit platforms required — see AGENTS.md.
+[feature.gauss-surf]
+platforms = ["linux-64"]
+
+[feature.gauss-surf.dependencies]
+# Pinned to match the pyrefly site-package-path registration (python3.12).
+python = "3.12.*"
+# Open3D RaycastingScene renders ultrawide depth from the PromptDA TSDF mesh.
+open3d = ">=0.19.0,<0.20"
+imagecodecs = ">=2024.9.22"
+# arkitscenes_download.ingest imports these at package load.
+trimesh = "*"
+pillow = "*"
+av = ">=18"
+# simplecv's SegmentNvdecDecoder decodes the segment's AV1 packets on NVDEC.
+torchcodec = "*"
+# ffmpeg <902 links libjxl 0.11 and dlopen-fails beside the env's 0.12.
+ffmpeg = { version = ">=8.1", build-number = ">=902" }
+einops = "*"
+# gsplat's source build (git pin below) needs ninja; nvcc comes from the cuda feature.
+ninja = "*"
+# Direct gsplat seed initialization uses sklearn's three-neighbor search.
+scikit-learn = "*"
+# Direct holdout evaluation computes SSIM through torchmetrics.
+torchmetrics = "*"
+
+[feature.gauss-surf.pypi-dependencies]
+gauss-surf = { path = "packages/gauss-surf", editable = true }
+arkitscenes-download = { path = "packages/arkitscenes-download", editable = true }
+monopriors = { path = "packages/monoprior", editable = true }
+trtkit = { path = "packages/trtkit", editable = true }
+plyfile = ">=1.1,<2"
+# Part 8 (gsplat port): v1.6.0 release commit, pinned as git until the PyPI sdist
+# lands (then: bump the ai-demos conda recipe and drop this pin + no-build-isolation).
+# Builds ~50 CUDA TUs at install time — run installs with
+# TORCH_CUDA_ARCH_LIST="8.6;12.0+PTX" (not captured by the lock). uv fetches the
+# glm submodule (verified 2026-08-15).
+gsplat = { git = "https://github.com/nerfstudio-project/gsplat", rev = "c3d59bbb54f91d1c93f1a80dc86960c696b4a059" }
+
+[feature.gauss-surf.pypi-options]
+# gsplat's build requires torch: isolation would compile against a second,
+# wrong-CUDA torch. Build against the env's conda pytorch instead.
+no-build-isolation = ["gsplat"]
+
+[feature.gauss-surf.pypi-options.dependency-overrides]
+# Resolve monopriors' sam3>=0.1.0 requirement to the repository implementation.
+sam3 = { path = "packages/sam3", editable = true }
+
+[feature.gauss-surf.activation.env]
+PACKAGE_DIR = "packages/gauss-surf"
+PYREFLY_TARGET = "src/gauss_surf/apis src/gauss_surf/train_gsplat src/gauss_surf/catalog.py src/gauss_surf/frame_selection.py src/gauss_surf/gaussurf_geometry.py src/gauss_surf/gaussurf_losses.py src/gauss_surf/gsplat_schedule.py src/gauss_surf/normals_encoding.py src/gauss_surf/render_io.py src/gauss_surf/uw_geometry.py src/gauss_surf/__init__.py tools"
+
+[feature.gauss-surf.tasks.gauss-surf-serve]
+cmd = "bash -c 'ulimit -n 524288 && exec rerun server --port 51236'"
+cwd = "packages/gauss-surf"
+description = "Serve the dedicated gauss-surf development catalog on :51236"
+
+[feature.gauss-surf.tasks.gauss-surf-frame-selection]
+cmd = "python tools/apps/frame_selection.py"
+cwd = "packages/gauss-surf"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Score and register the frame-selection layer for one ARKitScenes segment"
+
+[feature.gauss-surf.tasks.gauss-surf-moge-normals]
+cmd = "python tools/apps/moge_normals.py"
+cwd = "packages/gauss-surf"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Infer and register MoGe v2 normals for chosen ARKitScenes wide frames"
+
+[feature.gauss-surf.tasks.gauss-surf-ultrawide-signals]
+cmd = "python tools/apps/ultrawide_signals.py"
+cwd = "packages/gauss-surf"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Rectify chosen ultrawide frames and register mesh depth plus MoGe normal layers"
+
+[feature.gauss-surf.tasks.gauss-surf-register-segment]
+cmd = "python tools/apps/register_segment.py"
+cwd = "packages/gauss-surf"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Reseed one ARKitScenes segment and the v2 blueprints on the development catalog"
+
+[feature.gauss-surf.tasks.gauss-surf-train-gsplat]
+cmd = "python tools/apps/train_gsplat.py"
+cwd = "packages/gauss-surf"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Train the direct gsplat recipe and fused-publish all three splat layers"
+
+[tasks.gauss-surf-segment-pipeline]
+args = ["video_id", "dataset_name", "timestamp"]
+depends-on = [
+    { task = "gauss-surf-frame-selection", environment = "gauss-surf", args = ["--video-id", "{{ video_id }}", "--dataset-name", "{{ dataset_name }}"] },
+    { task = "gauss-surf-moge-normals", environment = "gauss-surf", args = ["--video-id", "{{ video_id }}", "--dataset-name", "{{ dataset_name }}"] },
+    { task = "gauss-surf-ultrawide-signals", environment = "gauss-surf", args = ["--video-id", "{{ video_id }}", "--dataset-name", "{{ dataset_name }}"] },
+    { task = "gauss-surf-train-gsplat", environment = "gauss-surf", args = ["--video-id", "{{ video_id }}", "--dataset-name", "{{ dataset_name }}", "--timestamp", "{{ timestamp }}"] },
+]
+description = "Run signal preparation, two-call gsplat training, and fused in-process publication"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
 [environments]
@@ -2643,6 +2746,19 @@ mamma-dev = { features = [
     "mamma",
     "dev",
 ], solve-group = "mamma", no-default-feature = true }
+gauss-surf = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "gauss-surf",
+], solve-group = "gauss-surf", no-default-feature = true }
+gauss-surf-dev = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "gauss-surf",
+    "dev",
+], solve-group = "gauss-surf", no-default-feature = true }
 mvs = { features = [
     "catalog-common",
     "rerun-prerelease",
