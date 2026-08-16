@@ -1,0 +1,138 @@
+"""Contract, parity, and convention tests for batched MoGe v2 normals."""
+
+import numpy as np
+import pytest
+import torch
+from jaxtyping import Bool, Float32, UInt8
+from torch import Tensor
+
+requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+
+
+def _synthetic_rgb_batch(batch_size: int, image_hw: tuple[int, int]) -> UInt8[Tensor, "b h w 3"]:
+    """Create deterministic RGB gradients directly on CUDA.
+
+    Args:
+        batch_size: Number of frames to create.
+        image_hw: Frame height and width.
+
+    Returns:
+        uint8 CUDA RGB frames shaped ``b h w 3``.
+    """
+    height: int = image_hw[0]
+    width: int = image_hw[1]
+    x_w: Float32[Tensor, "w"] = torch.linspace(0, 255, width, device="cuda", dtype=torch.float32)
+    y_h: Float32[Tensor, "h"] = torch.linspace(0, 255, height, device="cuda", dtype=torch.float32)
+    red_hw: Float32[Tensor, "h w"] = x_w[None, :].expand(height, width)
+    green_hw: Float32[Tensor, "h w"] = y_h[:, None].expand(height, width)
+    blue_hw: Float32[Tensor, "h w"] = (red_hw + green_hw) / 2.0
+    rgb_hw3: UInt8[Tensor, "h w 3"] = torch.stack((red_hw, green_hw, blue_hw), dim=-1).to(torch.uint8)
+    return rgb_hw3[None].expand(batch_size, -1, -1, -1).contiguous()
+
+
+@requires_cuda
+def test_torch_predictor_returns_batched_unit_normals_and_masks() -> None:
+    """The torch twin honors the shared batch, dtype, and unit-normal contract."""
+    from monopriors.models.surface_normal.moge_v2_trt import MoGeV2NormalOutput, MoGeV2TorchNormalPredictor
+
+    image_hw: tuple[int, int] = (56, 70)
+    rgb_bhw3: UInt8[Tensor, "2 56 70 3"] = _synthetic_rgb_batch(2, image_hw)
+    predictor: MoGeV2TorchNormalPredictor = MoGeV2TorchNormalPredictor(
+        encoder="vits",
+        image_hw=image_hw,
+        resolution_level=0,
+    )
+
+    prediction: MoGeV2NormalOutput = predictor(rgb_bhw3)
+
+    assert prediction.normals_bhw3.shape == (2, 56, 70, 3)
+    assert prediction.normals_bhw3.dtype == torch.float32
+    assert prediction.normals_bhw3.is_cuda
+    assert prediction.mask_bhw.shape == (2, 56, 70)
+    assert prediction.mask_bhw.dtype == torch.float32
+    assert prediction.mask_bhw.is_cuda
+    torch.testing.assert_close(
+        torch.linalg.vector_norm(prediction.normals_bhw3, dim=-1),
+        torch.ones((2, 56, 70), device="cuda"),
+        atol=2e-3,
+        rtol=0.0,
+    )
+    assert prediction.mask_bhw.min().item() >= 0.0
+    assert prediction.mask_bhw.max().item() <= 1.0
+
+
+@requires_cuda
+def test_trt_matches_torch_twin_at_default_arkitscenes_resolution() -> None:
+    """TensorRT and ONNX-compatible torch normals meet the angular parity bound."""
+    from monopriors.models.surface_normal.moge_v2_trt import (
+        DEFAULT_IMAGE_HW,
+        MoGeV2NormalOutput,
+        MoGeV2TorchNormalPredictor,
+        MoGeV2TrtNormalPredictor,
+    )
+
+    rgb_bhw3: UInt8[Tensor, "2 756 1008 3"] = _synthetic_rgb_batch(2, DEFAULT_IMAGE_HW)
+    rgb_bhw3[1] = torch.flip(rgb_bhw3[1], dims=(1,))
+    trt_predictor: MoGeV2TrtNormalPredictor = MoGeV2TrtNormalPredictor(batch_size=8)
+    torch_predictor: MoGeV2TorchNormalPredictor = MoGeV2TorchNormalPredictor()
+
+    trt_prediction: MoGeV2NormalOutput = trt_predictor(rgb_bhw3)
+    torch_prediction: MoGeV2NormalOutput = torch_predictor(rgb_bhw3)
+    torch.cuda.synchronize()
+
+    assert trt_prediction.normals_bhw3.shape == (2, 756, 1008, 3)
+    assert trt_prediction.normals_bhw3.dtype == torch.float32
+    assert trt_prediction.mask_bhw.shape == (2, 756, 1008)
+    assert trt_prediction.mask_bhw.dtype == torch.float32
+    torch.testing.assert_close(
+        torch.linalg.vector_norm(trt_prediction.normals_bhw3, dim=-1),
+        torch.ones((2, 756, 1008), device="cuda"),
+        atol=2e-3,
+        rtol=0.0,
+    )
+    cosine_bhw: Float32[Tensor, "2 756 1008"] = torch.sum(
+        trt_prediction.normals_bhw3 * torch_prediction.normals_bhw3,
+        dim=-1,
+    ).clamp(-1.0, 1.0)
+    angular_error_bhw: Float32[Tensor, "2 756 1008"] = torch.rad2deg(torch.acos(cosine_bhw))
+    mean_error_degrees: float = angular_error_bhw.mean().item()
+    p99_error_degrees: float = torch.quantile(angular_error_bhw, 0.99).item()
+
+    assert mean_error_degrees < 0.1
+    assert p99_error_degrees < 0.5
+
+    held_prediction: MoGeV2NormalOutput = trt_predictor(rgb_bhw3[:1])
+    held_normals_copy_bhw3: Float32[Tensor, "1 756 1008 3"] = held_prediction.normals_bhw3.clone()
+    reused_prediction: MoGeV2NormalOutput = trt_predictor(torch.flip(rgb_bhw3[:1], dims=(2,)))
+    assert reused_prediction.normals_bhw3.data_ptr() != held_prediction.normals_bhw3.data_ptr()
+    torch.testing.assert_close(held_prediction.normals_bhw3, held_normals_copy_bhw3)
+
+
+@requires_cuda
+def test_trt_normals_match_existing_single_image_convention() -> None:
+    """The TRT output keeps the existing camera-space layout and sign convention."""
+    from monopriors.models.surface_normal.base_normal_model import SurfaceNormalPrediction
+    from monopriors.models.surface_normal.moge_v2 import MoGeV2NormalPredictor
+    from monopriors.models.surface_normal.moge_v2_trt import (
+        DEFAULT_IMAGE_HW,
+        MoGeV2NormalOutput,
+        MoGeV2TrtNormalPredictor,
+    )
+
+    rgb_bhw3: UInt8[Tensor, "1 756 1008 3"] = _synthetic_rgb_batch(1, DEFAULT_IMAGE_HW)
+    rgb_hw3: UInt8[np.ndarray, "756 1008 3"] = rgb_bhw3[0].cpu().numpy()
+    trt_predictor: MoGeV2TrtNormalPredictor = MoGeV2TrtNormalPredictor(batch_size=8)
+    existing_predictor: MoGeV2NormalPredictor = MoGeV2NormalPredictor(device="cuda", encoder="vitl")
+
+    trt_prediction: MoGeV2NormalOutput = trt_predictor(rgb_bhw3)
+    existing_prediction: SurfaceNormalPrediction = existing_predictor(rgb_hw3)
+    existing_normals_bhw3: Float32[Tensor, "1 756 1008 3"] = torch.from_numpy(existing_prediction.normal_hw3).cuda()[None]
+    valid_bhw: Bool[Tensor, "1 756 1008"] = torch.from_numpy(existing_prediction.confidence_hw1[..., 0] > 0.5).cuda()[None]
+    assert valid_bhw.any()
+    cosine_valid: Float32[Tensor, "valid"] = torch.sum(
+        trt_prediction.normals_bhw3 * existing_normals_bhw3,
+        dim=-1,
+    )[valid_bhw]
+
+    assert cosine_valid.mean().item() > 0.999
+    assert torch.quantile(cosine_valid, 0.01).item() > 0.995

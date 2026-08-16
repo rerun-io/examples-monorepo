@@ -347,10 +347,11 @@ class Points2DWithConfidence(rr.AsComponents):
         return instance
 
 
-# ---- Distortion components (Brown–Conrady) -----------------------------------
+# ---- Camera distortion components -------------------------------------------
 
 _DISTORTION_MODEL_COMPONENT: str = "simplecv.components.DistortionModel"
 _DISTORTION_COEFF_COMPONENT: str = "simplecv.components.DistortionCoefficients"
+_INVERSE_DISTORTION_COEFF_COMPONENT: str = "simplecv.components.InverseDistortionCoefficients"
 
 
 def _distortion_component_descriptor(component: str) -> rr.ComponentDescriptor:
@@ -385,21 +386,40 @@ class DistortionCoefficientsBatch(rr.ComponentBatchMixin):
         return pa.array([coeff_list], type=pa.list_(pa.float32()))
 
 
+class InverseDistortionCoefficientsBatch(DistortionCoefficientsBatch):
+    """Variable-length vector of inverse distortion coefficients."""
+
+    def component_descriptor(self) -> rr.ComponentDescriptor:
+        return _distortion_component_descriptor(_INVERSE_DISTORTION_COEFF_COMPONENT)
+
+
 class CameraDistortion(rr.AsComponents):
     """Bundle distortion model + coefficients as custom components."""
 
-    def __init__(self, model: str, coefficients: Float[ndarray, "n"]) -> None:
+    def __init__(
+        self,
+        model: str,
+        coefficients: Float[ndarray, "n"],
+        inverse_coefficients: Float[ndarray, "n_inverse"] | None = None,
+    ) -> None:
         self.model: str = model
         coeffs_arr: Float[ndarray, "n"] = np.asarray(coefficients, dtype=np.float32).reshape(-1)
         self.coefficients: Float[ndarray, "n"] = coeffs_arr
+        self.inverse_coefficients: Float[ndarray, "n_inverse"] | None = (
+            None if inverse_coefficients is None else np.asarray(inverse_coefficients, dtype=np.float32).reshape(-1)
+        )
 
     def as_component_batches(self) -> list[rr.DescribedComponentBatch]:
-        model_batch = DistortionModelBatch(self.model)
-        coeff_batch = DistortionCoefficientsBatch(self.coefficients)
-        return [
+        model_batch: DistortionModelBatch = DistortionModelBatch(self.model)
+        coeff_batch: DistortionCoefficientsBatch = DistortionCoefficientsBatch(self.coefficients)
+        batches: list[rr.DescribedComponentBatch] = [
             model_batch.described(model_batch.component_descriptor()),
             coeff_batch.described(coeff_batch.component_descriptor()),
         ]
+        if self.inverse_coefficients is not None:
+            inverse_batch: InverseDistortionCoefficientsBatch = InverseDistortionCoefficientsBatch(self.inverse_coefficients)
+            batches.append(inverse_batch.described(inverse_batch.component_descriptor()))
+        return batches
 
 
 class PinholeWithDistortion(rr.AsComponents):

@@ -10,7 +10,8 @@ fusion-breaker outputs) — and nothing else.
 """
 
 import os
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Collection
 from pathlib import Path
 
 import torch
@@ -36,6 +37,38 @@ class _AutocastWrapper(torch.nn.Module):
         if isinstance(outputs, tuple):
             return tuple(o.float() if isinstance(o, torch.Tensor) and o.is_floating_point() else o for o in outputs)
         return outputs.float()
+
+
+def sweep_stale_onnx_exports(
+    directory: Path,
+    filename_prefix: str,
+    *,
+    keep_paths: Collection[Path],
+    partial_grace_seconds: float = 3600.0,
+) -> list[Path]:
+    """Remove obsolete exports while preserving current and in-flight files.
+
+    Args:
+        directory: Directory containing model-specific ONNX exports.
+        filename_prefix: Prefix shared only by versions of one model shape.
+        keep_paths: Complete export and sidecar paths still in use.
+        partial_grace_seconds: Minimum age before a ``.part`` file can be
+            treated as abandoned.
+
+    Returns:
+        Removed paths in deterministic filename order.
+    """
+    keep: set[Path] = set(keep_paths)
+    now: float = time.time()
+    removed: list[Path] = []
+    for path in sorted(directory.iterdir()):
+        if path in keep or not path.name.startswith(filename_prefix):
+            continue
+        if ".part" in path.name and now - path.stat().st_mtime < partial_grace_seconds:
+            continue
+        path.unlink(missing_ok=True)
+        removed.append(path)
+    return removed
 
 
 def export_onnx(

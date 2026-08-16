@@ -67,6 +67,10 @@ class PDAArkitScenesConfig:
     """Process every segment that does not yet have a PromptDA layer."""
     catalog_url: str = DEFAULT_CATALOG_URL
     """URL of the local Rerun catalog server."""
+    dataset_name: str = "arkitscenes-v2"
+    """Catalog dataset to read segments from and register layers on. Distinct from
+    ``ARKITSCENES_DATASET``, which is the recording application id shared by every
+    layer RRD regardless of which catalog dataset serves them."""
     output_dir: Path = Path("data/promptda")
     """Root for generated per-segment PromptDA RRD files."""
     target_fps: float = 10.0
@@ -343,8 +347,8 @@ def process_segment(
 
 def main(config: PDAArkitScenesConfig) -> None:
     """Run PromptDA for selected segments and optionally update the catalog."""
-    client: CatalogClient = connect_catalog(config.catalog_url, ARKITSCENES_DATASET)
-    dataset_entry: DatasetEntry = client.get_dataset(ARKITSCENES_DATASET)
+    client: CatalogClient = connect_catalog(config.catalog_url, config.dataset_name)
+    dataset_entry: DatasetEntry = client.get_dataset(config.dataset_name)
     segment_table: pa.Table = pa.Table.from_batches(dataset_entry.segment_table().collect())
     rows: list[dict] = segment_table.to_pylist()
     segment_ids: list[str] = segments_to_process(rows, config.video_id, config.process_all, PROMPTDA_LAYER)

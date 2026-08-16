@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Literal, TypeAlias
 
 import torch
-from trtkit import TrtBuildConfig, cached_engine_path, ensure_engine
+from trtkit import TrtBuildConfig, cached_engine_path, ensure_engine, sweep_stale_onnx_exports
 
 __all__ = (
     "DEFAULT_CACHE_DIR",
@@ -135,15 +135,8 @@ def export_promptda_onnx(
     # file exists — reclaim the multi-GB they'd otherwise leak. ``.part`` temps
     # are only swept when old enough that their exporter is certainly dead, so
     # a live concurrent export's in-flight write is never yanked away.
-    import time
-
     stale_prefix: str = f"promptda-{model_type}_{height}x{width}_"
-    for stale in onnx_dir.iterdir():
-        if stale == onnx_path or not stale.name.startswith(stale_prefix):
-            continue
-        if ".part" in stale.name and time.time() - stale.stat().st_mtime < 3600.0:
-            continue
-        stale.unlink(missing_ok=True)
+    sweep_stale_onnx_exports(onnx_dir, stale_prefix, keep_paths={onnx_path})
     return onnx_path
 
 
