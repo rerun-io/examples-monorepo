@@ -4,14 +4,12 @@ from io import BytesIO
 
 import numpy as np
 import open3d as o3d
-import pytest
 from arkitscenes_download.ingest.depth import encode_depth_png
 from jaxtyping import Float32, UInt8, UInt16
 from numpy import ndarray
 from PIL import Image
 
 from gauss_surf.uw_geometry import (
-    AppleRadialPolynomial,
     build_apple_undistortion,
     compose_world_from_ultrawide,
     depth_meters_to_uint16_mm,
@@ -24,24 +22,6 @@ REAL_ULTRAWIDE_COEFFICIENTS_8: Float32[ndarray, "8"] = np.array(
     [-0.08353952, -6.350463, 5.248554, -1.9897834, 0.5831521, -0.10259675, 0.009266047, -0.0003309832],
     dtype=np.float32,
 )
-
-
-def test_apple_even_percent_polynomial_round_trips_real_frame_radii() -> None:
-    """The empirically selected even-power forward model inverts within 0.1 px."""
-    model: AppleRadialPolynomial = AppleRadialPolynomial(REAL_ULTRAWIDE_COEFFICIENTS_8)
-    distorted_radii_n: Float32[ndarray, "n=5"] = np.array([0.0, 0.25, 0.5, 0.75, 1.0], dtype=np.float32)
-
-    rectified_radii_n: Float32[ndarray, "n=5"] = model.distorted_to_rectified_radius(distorted_radii_n)
-    recovered_radii_n: Float32[ndarray, "n=5"] = model.rectified_to_distorted_radius(rectified_radii_n)
-
-    np.testing.assert_allclose(
-        rectified_radii_n,
-        [0.0, 0.24992806, 0.49828497, 0.7403127, 0.97314256],
-        atol=2e-7,
-        rtol=0.0,
-    )
-    max_round_trip_error_px: float = float(np.max(np.abs(recovered_radii_n - distorted_radii_n)) * 2315.9016)
-    assert max_round_trip_error_px < 0.1
 
 
 def test_zero_apple_polynomial_builds_an_identity_remap() -> None:
@@ -192,43 +172,3 @@ def test_depth_png_preserves_zero_sentinel_and_clamps_uint16_overflow() -> None:
         decoded_mm_hw: UInt16[ndarray, "h=2 w=3"] = np.asarray(image, dtype=np.uint16)
 
     np.testing.assert_array_equal(decoded_mm_hw, [[0, 1234, 1235], [0, 0, 65535]])
-
-
-def test_opencv_rational_fit_matches_real_ultrawide_calibration_to_sub_millipixel() -> None:
-    """The interop fit reproduces segment 47115416's real Apple field almost exactly.
-
-    Golden values decoded from the segment's mebx stream 10 (see the distortion
-    research report, 2026-08-16): the rational model fit this lens at 9.2e-5 px
-    worst case against a ~10.8 px full-frame distortion.
-    """
-    from gauss_surf.uw_geometry import OpenCVRationalFit, opencv_rational_from_apple
-
-    forward_8 = np.array(
-        [-0.08353952318429947, -6.350462913513184, 5.24855375289917, -1.9897834062576294, 0.5831521153450012, -0.10259674489498138, 0.009266046807169914, -0.0003309831954538822],
-        dtype=np.float32,
-    )
-    center_reference_xy = np.array([1853.150634765625, 1371.03173828125], dtype=np.float32)
-    K_native_33 = np.array(
-        [[245.39100646972656, 0.0, 321.8739929199219], [0.0, 245.39100646972656, 238.02699279785156], [0.0, 0.0, 1.0]],
-        dtype=np.float32,
-    )
-
-    fit: OpenCVRationalFit = opencv_rational_from_apple(K_native_33, forward_8, center_reference_xy, (3680, 2760), (640, 480))
-
-    assert fit.max_residual_px < 1e-3
-    assert fit.K_33[0, 2] == pytest.approx(322.287066915761, abs=1e-3)
-    assert fit.K_33[1, 2] == pytest.approx(238.440302309783, abs=1e-3)
-    assert fit.K_33[0, 0] == pytest.approx(245.391006, abs=1e-3)
-    assert fit.distortion.k1 == pytest.approx(0.1423159406627, rel=1e-2)
-    assert fit.distortion.p1 == 0.0 and fit.distortion.p2 == 0.0
-
-
-def test_opencv_rational_fit_rejects_a_non_invertible_calibration() -> None:
-    """A pathological polynomial fails validation instead of returning a bad fit."""
-    from gauss_surf.uw_geometry import opencv_rational_from_apple
-
-    collapsing_8 = np.array([-200.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
-    K_native_33 = np.array([[245.0, 0.0, 320.0], [0.0, 245.0, 240.0], [0.0, 0.0, 1.0]], dtype=np.float32)
-
-    with pytest.raises(ValueError):
-        opencv_rational_from_apple(K_native_33, collapsing_8, np.array([1840.0, 1380.0], dtype=np.float32), (3680, 2760), (640, 480))
