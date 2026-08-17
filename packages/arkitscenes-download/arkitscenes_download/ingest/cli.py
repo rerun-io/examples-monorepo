@@ -35,7 +35,7 @@ from arkitscenes_download.ingest.clock import (
     shared_epoch,
 )
 from arkitscenes_download.ingest.depth import ArkitDepthConfidence, encode_depth_png, sorted_timestamped_paths
-from arkitscenes_download.ingest.distortion import AppleDistortionProvenance, OpenCVRationalFit, opencv_rational_from_apple
+from arkitscenes_download.ingest.distortion import OpenCVRationalFit, opencv_rational_from_apple
 from arkitscenes_download.ingest.gt import ArkitMeshSummary, log_arkit_mesh, log_gt_boxes
 from arkitscenes_download.ingest.imu import ImuSamples, decode_imu
 from arkitscenes_download.ingest.metadata import (
@@ -295,7 +295,7 @@ def _log_distortions(
     pinhole_intrinsics_by_camera: dict[str, SimpleCVIntrinsics],
     quarter_turns: int,
 ) -> None:
-    """Log a standard fit plus exact first-sample Apple provenance statically."""
+    """Log a standard fit and the framing metadata needed by rectification."""
     camera_paths: dict[str, str] = {
         "wide": PINHOLE_WIDE,
         "ultrawide": PINHOLE_ULTRAWIDE,
@@ -329,16 +329,9 @@ def _log_distortions(
         )
         recording.log(
             path,
-            AppleDistortionProvenance(distortion.coefficients, distortion.inverse_coefficients),
-            static=True,
-        )
-        recording.log(
-            path,
             rr.AnyValues(
                 distortion_center_xy=center_xy.tolist(),
                 reference_dimensions_wh=list(baked_dimensions_wh),
-                distortion_source="mebx_stream_10",
-                distortion_temporal_sample_count=distortion.temporal_sample_count,
             ),
             static=True,
         )

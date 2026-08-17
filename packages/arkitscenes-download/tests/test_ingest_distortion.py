@@ -9,16 +9,12 @@ from rerun.experimental import RrdReader
 from simplecv.camera_parameters import Intrinsics as SimpleCVIntrinsics
 
 from arkitscenes_download.ingest.cli import _log_distortions
-from arkitscenes_download.ingest.distortion import (
-    APPLE_FORWARD_DISTORTION_COMPONENT,
-    APPLE_INVERSE_DISTORTION_COMPONENT,
-)
 from arkitscenes_download.ingest.metadata import CameraDistortion, decode_camera_distortions
 from arkitscenes_download.ingest.paths import PINHOLE_ULTRAWIDE
 
 
-def test_calibration_rrd_logs_canonical_brown_conrady_and_apple_provenance(tmp_path: Path) -> None:
-    """The pinhole gets standard coefficients while both exact Apple arrays remain separate."""
+def test_calibration_rrd_logs_only_canonical_brown_conrady_distortion(tmp_path: Path) -> None:
+    """The pinhole stores the standard model and 14-vector without Apple coefficient components."""
     forward_8: np.ndarray = np.array(
         [-0.08353952, -6.350463, 5.248554, -1.9897834, 0.5831521, -0.10259675, 0.009266047, -0.0003309832],
         dtype=np.float32,
@@ -56,9 +52,11 @@ def test_calibration_rrd_logs_canonical_brown_conrady_and_apple_provenance(tmp_p
 
     reader = RrdReader(rrd_path)
     batches = [chunk.to_record_batch() for chunk in reader.stream() if str(chunk.entity_path) == f"/{PINHOLE_ULTRAWIDE}"]
+    component_names: set[str] = set()
     values_by_component: dict[str, object] = {}
     for batch in batches:
         for name, column in zip(batch.schema.names, batch.columns, strict=True):
+            component_names.add(name)
             if "Distortion" in name:
                 values_by_component[name] = column.to_pylist()[0][0]
 
@@ -72,9 +70,10 @@ def test_calibration_rrd_logs_canonical_brown_conrady_and_apple_provenance(tmp_p
         rtol=0.0,
     )
     np.testing.assert_array_equal(standard_14[8:], np.zeros(6, dtype=np.float32))
-    np.testing.assert_array_equal(values_by_component[APPLE_FORWARD_DISTORTION_COMPONENT], forward_8)
-    np.testing.assert_array_equal(values_by_component[APPLE_INVERSE_DISTORTION_COMPONENT], inverse_8)
     assert "simplecv.components.InverseDistortionCoefficients" not in values_by_component
+    assert not any(name.startswith("arkitscenes.components.Apple") for name in component_names)
+    assert "distortion_source" not in component_names
+    assert "distortion_temporal_sample_count" not in component_names
 
 
 class CameraDistortionTest(unittest.TestCase):

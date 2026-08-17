@@ -4,57 +4,10 @@ from dataclasses import dataclass
 
 import cv2
 import numpy as np
-import pyarrow as pa
-import rerun as rr
 from jaxtyping import Float, Float32, Float64
 from numpy import ndarray
 from scipy.optimize import least_squares
 from simplecv.camera_parameters import BrownConradyDistortion
-
-APPLE_FORWARD_DISTORTION_COMPONENT: str = "arkitscenes.components.AppleForwardDistortionCoefficients"
-"""Exact Apple distorted-to-rectified polynomial provenance component."""
-APPLE_INVERSE_DISTORTION_COMPONENT: str = "arkitscenes.components.AppleInverseDistortionCoefficients"
-"""Apple's supplied rectified-to-distorted polynomial provenance component."""
-
-
-class _AppleDistortionCoefficientsBatch(rr.ComponentBatchMixin):
-    """One variable-length Apple coefficient vector with an explicit descriptor."""
-
-    def __init__(self, coefficients: Float[ndarray, "n"], component: str) -> None:
-        self.coefficients: Float32[ndarray, "n"] = np.asarray(coefficients, dtype=np.float32).reshape(-1)
-        self.component: str = component
-
-    def component_descriptor(self) -> rr.ComponentDescriptor:
-        """Describe the provenance component without using the generic distortion slot."""
-        return rr.ComponentDescriptor(component=self.component, component_type=self.component)
-
-    def as_arrow_array(self) -> pa.Array:
-        """Serialize one coefficient vector as a list-valued component."""
-        coefficients: list[float] = self.coefficients.tolist()
-        return pa.array([coefficients], type=pa.list_(pa.float32()))
-
-
-class AppleDistortionProvenance(rr.AsComponents):
-    """Exact forward and inverse Apple polynomials in provenance-only components."""
-
-    def __init__(self, forward_coefficients_8: Float[ndarray, "8"], inverse_coefficients_8: Float[ndarray, "8"]) -> None:
-        self.forward_coefficients_8: Float32[ndarray, "8"] = np.asarray(forward_coefficients_8, dtype=np.float32).reshape(-1)
-        self.inverse_coefficients_8: Float32[ndarray, "8"] = np.asarray(inverse_coefficients_8, dtype=np.float32).reshape(-1)
-        if self.forward_coefficients_8.shape != (8,) or self.inverse_coefficients_8.shape != (8,):
-            raise ValueError("Apple distortion provenance requires two eight-coefficient vectors")
-
-    def as_component_batches(self) -> list[rr.DescribedComponentBatch]:
-        """Return separately described forward and inverse provenance batches."""
-        forward_batch: _AppleDistortionCoefficientsBatch = _AppleDistortionCoefficientsBatch(
-            self.forward_coefficients_8, APPLE_FORWARD_DISTORTION_COMPONENT
-        )
-        inverse_batch: _AppleDistortionCoefficientsBatch = _AppleDistortionCoefficientsBatch(
-            self.inverse_coefficients_8, APPLE_INVERSE_DISTORTION_COMPONENT
-        )
-        return [
-            forward_batch.described(forward_batch.component_descriptor()),
-            inverse_batch.described(inverse_batch.component_descriptor()),
-        ]
 
 
 @dataclass(frozen=True, slots=True)
