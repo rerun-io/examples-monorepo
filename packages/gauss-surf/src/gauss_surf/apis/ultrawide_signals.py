@@ -43,7 +43,12 @@ from gauss_surf.catalog import (
     table_timestamps,
 )
 from gauss_surf.contracts import (
+    APPLE_FORWARD_DISTORTION_COLUMN,
+    APPLE_INVERSE_DISTORTION_COLUMN,
+    DISTORTION_MODEL_COLUMN,
     FRAME_SELECTION_LAYER,
+    LEGACY_APPLE_DISTORTION_MODELS,
+    LEGACY_DISTORTION_COEFFICIENTS_COLUMN,
     MOGE_INFERENCE_BATCH_SIZE,
     PROMPTDA_LAYER,
     RIG_QUATERNION_COLUMN,
@@ -75,7 +80,6 @@ ULTRAWIDE_IMAGE_HW: tuple[int, int] = (480, 640)
 
 UW_K_COLUMN: str = f"/{PINHOLE_ULTRAWIDE}:Pinhole:image_from_camera"
 UW_RESOLUTION_COLUMN: str = f"/{PINHOLE_ULTRAWIDE}:Pinhole:resolution"
-DISTORTION_COEFFICIENTS_COLUMN: str = f"/{PINHOLE_ULTRAWIDE}:simplecv.components.DistortionCoefficients"
 DISTORTION_CENTER_COLUMN: str = f"/{PINHOLE_ULTRAWIDE}:distortion_center_xy"
 DISTORTION_REFERENCE_COLUMN: str = f"/{PINHOLE_ULTRAWIDE}:reference_dimensions_wh"
 MESH_VERTICES_COLUMN: str = f"/{PROMPTDA_MESH}:Mesh3D:vertex_positions"
@@ -132,15 +136,62 @@ def _single_instance_or_exit(value: Any, component_name: str) -> Any:
         raise SystemExit(str(error)) from error
 
 
+def apple_distortion_coefficients(static_row: dict[str, Any]) -> Float32[ndarray, "8"]:
+    """Resolve exact Apple coefficients from the canonical or legacy schema.
+
+    New recordings must pair Apple provenance with the canonical
+    ``brown_conrady`` generic model. Legacy recordings stored the Apple vector
+    in the generic coefficient column under one of two known stale labels.
+
+    Args:
+        static_row: Catalog row containing one distortion model and either the
+            provenance or legacy coefficient component.
+
+    Returns:
+        Exact float32 Apple forward coefficients shaped ``8``.
+    """
+    model_value: Any = _single_instance_or_exit(static_row[DISTORTION_MODEL_COLUMN], DISTORTION_MODEL_COLUMN)
+    if not isinstance(model_value, str):
+        raise SystemExit(f"component {DISTORTION_MODEL_COLUMN!r} is not a string")
+    model: str = model_value
+    coefficient_column: str
+    allowed_models: frozenset[str]
+    if APPLE_FORWARD_DISTORTION_COLUMN in static_row:
+        coefficient_column = APPLE_FORWARD_DISTORTION_COLUMN
+        allowed_models = frozenset({"brown_conrady"})
+    else:
+        coefficient_column = LEGACY_DISTORTION_COEFFICIENTS_COLUMN
+        allowed_models = LEGACY_APPLE_DISTORTION_MODELS
+    if model not in allowed_models:
+        raise SystemExit(
+            f"distortion model {model!r} is incompatible with Apple coefficient column {coefficient_column!r}; "
+            f"expected one of {sorted(allowed_models)}"
+        )
+    coefficients_8: Float32[ndarray, "8"] = np.asarray(
+        _single_instance_or_exit(static_row[coefficient_column], coefficient_column), dtype=np.float32
+    )
+    if coefficients_8.shape != (8,):
+        raise SystemExit(f"Apple distortion component {coefficient_column!r} has shape {coefficients_8.shape}, expected (8,)")
+    return coefficients_8
+
+
 def _load_inputs(reader: SegmentReader) -> UltrawideInputs:
     """Read chosen times, calibration, causal poses, and the static PromptDA mesh."""
     segment_view: DatasetView = reader.segment_view()
     available_columns: set[str] = set(segment_view.arrow_schema().names)
+    has_apple_provenance: bool = APPLE_FORWARD_DISTORTION_COLUMN in available_columns
+    distortion_coefficient_column: str = (
+        APPLE_FORWARD_DISTORTION_COLUMN if has_apple_provenance else LEGACY_DISTORTION_COEFFICIENTS_COLUMN
+    )
+    provenance_required_columns: tuple[str, ...] = (
+        (APPLE_FORWARD_DISTORTION_COLUMN, APPLE_INVERSE_DISTORTION_COLUMN) if has_apple_provenance else (LEGACY_DISTORTION_COEFFICIENTS_COLUMN,)
+    )
     required_columns: tuple[str, ...] = (
         ULTRAWIDE_CHOSEN_SHARPNESS_COLUMN,
         UW_K_COLUMN,
         UW_RESOLUTION_COLUMN,
-        DISTORTION_COEFFICIENTS_COLUMN,
+        DISTORTION_MODEL_COLUMN,
+        *provenance_required_columns,
         DISTORTION_CENTER_COLUMN,
         DISTORTION_REFERENCE_COLUMN,
         ULTRAWIDE_TRANSLATION_COLUMN,
@@ -174,7 +225,8 @@ def _load_inputs(reader: SegmentReader) -> UltrawideInputs:
         raise SystemExit(f"segment {reader.video_id} ultrawide resolution is {image_wh}, expected (640, 480)")
 
     static_columns: tuple[str, ...] = (
-        DISTORTION_COEFFICIENTS_COLUMN,
+        DISTORTION_MODEL_COLUMN,
+        distortion_coefficient_column,
         DISTORTION_CENTER_COLUMN,
         DISTORTION_REFERENCE_COLUMN,
         ULTRAWIDE_TRANSLATION_COLUMN,
@@ -184,13 +236,7 @@ def _load_inputs(reader: SegmentReader) -> UltrawideInputs:
     if static_table.num_rows != 1:
         raise SystemExit(f"segment {reader.video_id} has no ultrawide static calibration row")
     static_row: dict[str, Any] = static_table.to_pylist()[0]
-    # The existing corpus mislabeled this Apple forward polynomial as
-    # brown_conrady and omitted its inverse. Read the coefficient component
-    # regardless of that stale label so Part 5b does not require a corpus reseed.
-    distortion_coefficients_8: Float32[ndarray, "8"] = np.asarray(
-        _single_instance_or_exit(static_row[DISTORTION_COEFFICIENTS_COLUMN], DISTORTION_COEFFICIENTS_COLUMN),
-        dtype=np.float32,
-    )
+    distortion_coefficients_8: Float32[ndarray, "8"] = apple_distortion_coefficients(static_row)
     distortion_center_reference_xy: Float32[ndarray, "2"] = np.asarray(static_row[DISTORTION_CENTER_COLUMN], dtype=np.float32)
     reference_values_wh: list[int] = [int(value) for value in static_row[DISTORTION_REFERENCE_COLUMN]]
     reference_dimensions_wh: tuple[int, int] = (reference_values_wh[0], reference_values_wh[1])
