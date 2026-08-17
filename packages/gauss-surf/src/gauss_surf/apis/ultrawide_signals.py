@@ -43,12 +43,9 @@ from gauss_surf.catalog import (
     table_timestamps,
 )
 from gauss_surf.contracts import (
-    APPLE_FORWARD_DISTORTION_COLUMN,
-    APPLE_INVERSE_DISTORTION_COLUMN,
+    DISTORTION_COEFFICIENTS_COLUMN,
     DISTORTION_MODEL_COLUMN,
     FRAME_SELECTION_LAYER,
-    LEGACY_APPLE_DISTORTION_MODELS,
-    LEGACY_DISTORTION_COEFFICIENTS_COLUMN,
     MOGE_INFERENCE_BATCH_SIZE,
     PROMPTDA_LAYER,
     RIG_QUATERNION_COLUMN,
@@ -63,10 +60,10 @@ from gauss_surf.contracts import (
 from gauss_surf.normals_encoding import encode_normals_png, to_away_from_camera
 from gauss_surf.render_io import encode_rgb_jpeg
 from gauss_surf.uw_geometry import (
-    AppleUndistortion,
     CameraPoses,
     CameraPoseTrack,
-    build_apple_undistortion,
+    Undistortion,
+    build_brown_conrady_undistortion,
     depth_meters_to_uint16_mm,
     load_camera_pose_track,
     raycast_z_depth,
@@ -106,8 +103,8 @@ class UltrawideInputs:
 
     timestamps: TimedeltaNs
     """Chosen ultrawide packet times as ``timedelta64[ns]``."""
-    undistortion: AppleUndistortion
-    """Apple radial remap and minimally cropped rectified pinhole at 640×480."""
+    undistortion: Undistortion
+    """Brown-Conrady remap and minimally cropped rectified pinhole at 640×480."""
     world_from_ultrawide_n44: Float32[ndarray, "n 4 4"]
     """Chosen camera-to-world transforms using causal rig poses."""
     pose_staleness_ms_n: Float32[ndarray, "n"]
@@ -136,62 +133,57 @@ def _single_instance_or_exit(value: Any, component_name: str) -> Any:
         raise SystemExit(str(error)) from error
 
 
-def apple_distortion_coefficients(static_row: dict[str, Any]) -> Float32[ndarray, "8"]:
-    """Resolve exact Apple coefficients from the canonical or legacy schema.
-
-    New recordings must pair Apple provenance with the canonical
-    ``brown_conrady`` generic model. Legacy recordings stored the Apple vector
-    in the generic coefficient column under one of two known stale labels.
+def brown_conrady_coefficients(static_row: dict[str, Any], *, video_id: str) -> Float32[ndarray, "14"]:
+    """Read one standard Brown-Conrady model and coefficient vector.
 
     Args:
-        static_row: Catalog row containing one distortion model and either the
-            provenance or legacy coefficient component.
+        static_row: Catalog row containing the generic model and coefficients.
+        video_id: Segment identifier included in migration errors.
 
     Returns:
-        Exact float32 Apple forward coefficients shaped ``8``.
+        Standard float32 Brown-Conrady coefficients shaped ``14``.
     """
     model_value: Any = _single_instance_or_exit(static_row[DISTORTION_MODEL_COLUMN], DISTORTION_MODEL_COLUMN)
     if not isinstance(model_value, str):
         raise SystemExit(f"component {DISTORTION_MODEL_COLUMN!r} is not a string")
     model: str = model_value
-    coefficient_column: str
-    allowed_models: frozenset[str]
-    if APPLE_FORWARD_DISTORTION_COLUMN in static_row:
-        coefficient_column = APPLE_FORWARD_DISTORTION_COLUMN
-        allowed_models = frozenset({"brown_conrady"})
-    else:
-        coefficient_column = LEGACY_DISTORTION_COEFFICIENTS_COLUMN
-        allowed_models = LEGACY_APPLE_DISTORTION_MODELS
-    if model not in allowed_models:
-        raise SystemExit(
-            f"distortion model {model!r} is incompatible with Apple coefficient column {coefficient_column!r}; "
-            f"expected one of {sorted(allowed_models)}"
-        )
-    coefficients_8: Float32[ndarray, "8"] = np.asarray(
-        _single_instance_or_exit(static_row[coefficient_column], coefficient_column), dtype=np.float32
+    migration_instruction: str = (
+        f"re-ingest segment {video_id}'s calibration with arkitscenes-download-ingest "
+        f"(`tools/apps/ingest_sequence.py`), then reseed it with gauss-surf-register-segment"
     )
-    if coefficients_8.shape != (8,):
-        raise SystemExit(f"Apple distortion component {coefficient_column!r} has shape {coefficients_8.shape}, expected (8,)")
-    return coefficients_8
+    if model != "brown_conrady":
+        raise SystemExit(
+            f"segment {video_id} distortion model is {model!r}, not 'brown_conrady'; {migration_instruction}"
+        )
+    coefficients_n: Float32[ndarray, "n"] = np.asarray(
+        _single_instance_or_exit(static_row[DISTORTION_COEFFICIENTS_COLUMN], DISTORTION_COEFFICIENTS_COLUMN), dtype=np.float32
+    )
+    if coefficients_n.shape != (14,):
+        raise SystemExit(
+            f"segment {video_id} Brown-Conrady coefficients have shape {coefficients_n.shape}, expected (14,); {migration_instruction}"
+        )
+    return coefficients_n
 
 
 def _load_inputs(reader: SegmentReader) -> UltrawideInputs:
     """Read chosen times, calibration, causal poses, and the static PromptDA mesh."""
     segment_view: DatasetView = reader.segment_view()
     available_columns: set[str] = set(segment_view.arrow_schema().names)
-    has_apple_provenance: bool = APPLE_FORWARD_DISTORTION_COLUMN in available_columns
-    distortion_coefficient_column: str = (
-        APPLE_FORWARD_DISTORTION_COLUMN if has_apple_provenance else LEGACY_DISTORTION_COEFFICIENTS_COLUMN
-    )
-    provenance_required_columns: tuple[str, ...] = (
-        (APPLE_FORWARD_DISTORTION_COLUMN, APPLE_INVERSE_DISTORTION_COLUMN) if has_apple_provenance else (LEGACY_DISTORTION_COEFFICIENTS_COLUMN,)
-    )
+    missing_distortion_columns: list[str] = [
+        name for name in (DISTORTION_MODEL_COLUMN, DISTORTION_COEFFICIENTS_COLUMN) if name not in available_columns
+    ]
+    if missing_distortion_columns:
+        raise SystemExit(
+            f"segment {reader.video_id} lacks Brown-Conrady calibration columns {missing_distortion_columns}; "
+            f"re-ingest that segment's calibration with arkitscenes-download-ingest (`tools/apps/ingest_sequence.py`), "
+            f"then reseed it with gauss-surf-register-segment"
+        )
     required_columns: tuple[str, ...] = (
         ULTRAWIDE_CHOSEN_SHARPNESS_COLUMN,
         UW_K_COLUMN,
         UW_RESOLUTION_COLUMN,
         DISTORTION_MODEL_COLUMN,
-        *provenance_required_columns,
+        DISTORTION_COEFFICIENTS_COLUMN,
         DISTORTION_CENTER_COLUMN,
         DISTORTION_REFERENCE_COLUMN,
         ULTRAWIDE_TRANSLATION_COLUMN,
@@ -226,7 +218,7 @@ def _load_inputs(reader: SegmentReader) -> UltrawideInputs:
 
     static_columns: tuple[str, ...] = (
         DISTORTION_MODEL_COLUMN,
-        distortion_coefficient_column,
+        DISTORTION_COEFFICIENTS_COLUMN,
         DISTORTION_CENTER_COLUMN,
         DISTORTION_REFERENCE_COLUMN,
         ULTRAWIDE_TRANSLATION_COLUMN,
@@ -236,7 +228,7 @@ def _load_inputs(reader: SegmentReader) -> UltrawideInputs:
     if static_table.num_rows != 1:
         raise SystemExit(f"segment {reader.video_id} has no ultrawide static calibration row")
     static_row: dict[str, Any] = static_table.to_pylist()[0]
-    distortion_coefficients_8: Float32[ndarray, "8"] = apple_distortion_coefficients(static_row)
+    distortion_coefficients_14: Float32[ndarray, "14"] = brown_conrady_coefficients(static_row, video_id=reader.video_id)
     distortion_center_reference_xy: Float32[ndarray, "2"] = np.asarray(static_row[DISTORTION_CENTER_COLUMN], dtype=np.float32)
     reference_values_wh: list[int] = [int(value) for value in static_row[DISTORTION_REFERENCE_COLUMN]]
     reference_dimensions_wh: tuple[int, int] = (reference_values_wh[0], reference_values_wh[1])
@@ -244,9 +236,9 @@ def _load_inputs(reader: SegmentReader) -> UltrawideInputs:
         np.asarray(_single_instance_or_exit(static_row[ULTRAWIDE_TRANSLATION_COLUMN], ULTRAWIDE_TRANSLATION_COLUMN), dtype=np.float32),
         np.asarray(_single_instance_or_exit(static_row[ULTRAWIDE_QUATERNION_COLUMN], ULTRAWIDE_QUATERNION_COLUMN), dtype=np.float32),
     )
-    undistortion: AppleUndistortion = build_apple_undistortion(
+    undistortion: Undistortion = build_brown_conrady_undistortion(
         K_uw_33,
-        distortion_coefficients_8,
+        distortion_coefficients_14,
         distortion_center_reference_xy,
         reference_dimensions_wh,
         image_wh,

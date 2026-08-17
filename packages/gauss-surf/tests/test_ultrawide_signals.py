@@ -9,11 +9,10 @@ from monopriors.models.surface_normal.moge_v2_trt import MoGeV2NormalOutput, MoG
 from numpy import ndarray
 from torch import Tensor
 
-from gauss_surf.apis.ultrawide_signals import ULTRAWIDE_IMAGE_HW, apple_distortion_coefficients
+from gauss_surf.apis.ultrawide_signals import ULTRAWIDE_IMAGE_HW, brown_conrady_coefficients
 from gauss_surf.contracts import (
-    APPLE_FORWARD_DISTORTION_COLUMN,
+    DISTORTION_COEFFICIENTS_COLUMN,
     DISTORTION_MODEL_COLUMN,
-    LEGACY_DISTORTION_COEFFICIENTS_COLUMN,
     MOGE_INFERENCE_BATCH_SIZE,
     ULTRAWIDE_CHOSEN_SHARPNESS_COLUMN,
 )
@@ -27,41 +26,49 @@ def test_ultrawide_provenance_is_anchored_to_chosen_rows() -> None:
     assert f"/{FRAME_SELECTION_ULTRAWIDE}:sharpness" == ULTRAWIDE_CHOSEN_SHARPNESS_COLUMN
 
 
-def test_canonical_distortion_reads_apple_provenance_under_a_brown_label() -> None:
-    """New recordings use exact Apple provenance while generic components stay standard."""
+def test_canonical_distortion_reads_the_standard_fourteen_vector() -> None:
+    """The reader consumes the standard Brown-Conrady coefficient component."""
     static_row: dict[str, object] = {
         DISTORTION_MODEL_COLUMN: ["brown_conrady"],
-        APPLE_FORWARD_DISTORTION_COLUMN: [[float(index) for index in range(8)]],
-        LEGACY_DISTORTION_COEFFICIENTS_COLUMN: [[99.0] * 14],
+        DISTORTION_COEFFICIENTS_COLUMN: [[float(index) for index in range(14)]],
     }
 
-    coefficients_8: Float32[ndarray, "8"] = apple_distortion_coefficients(static_row)
+    coefficients_14: Float32[ndarray, "14"] = brown_conrady_coefficients(static_row, video_id="47115416")
 
-    np.testing.assert_array_equal(coefficients_8, np.arange(8, dtype=np.float32))
+    np.testing.assert_array_equal(coefficients_14, np.arange(14, dtype=np.float32))
 
 
-@pytest.mark.parametrize("legacy_model", ["brown_conrady", "apple_radial_poly"])
-def test_legacy_distortion_fallback_accepts_only_documented_stale_labels(legacy_model: str) -> None:
-    """Old corpus rows may carry Apple coefficients under either known stale model label."""
+def test_unmigrated_apple_distortion_requires_calibration_reingest() -> None:
+    """An old Apple-model row fails with the exact migration tools to run."""
     static_row: dict[str, object] = {
-        DISTORTION_MODEL_COLUMN: [legacy_model],
-        LEGACY_DISTORTION_COEFFICIENTS_COLUMN: [[float(index) for index in range(8)]],
+        DISTORTION_MODEL_COLUMN: ["apple_radial_poly"],
+        DISTORTION_COEFFICIENTS_COLUMN: [[float(index) for index in range(8)]],
     }
 
-    coefficients_8: Float32[ndarray, "8"] = apple_distortion_coefficients(static_row)
+    with pytest.raises(SystemExit, match="arkitscenes-download-ingest.*gauss-surf-register-segment"):
+        brown_conrady_coefficients(static_row, video_id="47115416")
 
-    np.testing.assert_array_equal(coefficients_8, np.arange(8, dtype=np.float32))
+
+def test_brown_conrady_distortion_requires_fourteen_coefficients() -> None:
+    """A stale eight-vector under a Brown label also receives the migration instruction."""
+    static_row: dict[str, object] = {
+        DISTORTION_MODEL_COLUMN: ["brown_conrady"],
+        DISTORTION_COEFFICIENTS_COLUMN: [[float(index) for index in range(8)]],
+    }
+
+    with pytest.raises(SystemExit, match="arkitscenes-download-ingest.*gauss-surf-register-segment"):
+        brown_conrady_coefficients(static_row, video_id="47115416")
 
 
 def test_distortion_reader_rejects_an_unrecognized_model_label() -> None:
-    """The fallback never ignores an unknown generic distortion label."""
+    """An unknown generic label cannot bypass the standard-only contract."""
     static_row: dict[str, object] = {
         DISTORTION_MODEL_COLUMN: ["mystery_model"],
-        LEGACY_DISTORTION_COEFFICIENTS_COLUMN: [[float(index) for index in range(8)]],
+        DISTORTION_COEFFICIENTS_COLUMN: [[float(index) for index in range(14)]],
     }
 
-    with pytest.raises(SystemExit, match="mystery_model"):
-        apple_distortion_coefficients(static_row)
+    with pytest.raises(SystemExit, match="mystery_model.*arkitscenes-download-ingest"):
+        brown_conrady_coefficients(static_row, video_id="47115416")
 
 
 @requires_cuda
