@@ -62,4 +62,7 @@ ignore_names = [
     "benchmark",
     "full_run",
     "convert",
+    # Rerun protocol hooks invoked dynamically for custom Apple provenance components.
+    "as_arrow_array",
+    "as_component_batches",
 ]
