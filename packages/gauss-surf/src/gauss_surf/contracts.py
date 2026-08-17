@@ -2,7 +2,6 @@
 
 from typing import Final, Literal, TypeAlias
 
-from arkitscenes_download.ingest.distortion import APPLE_FORWARD_DISTORTION_COMPONENT, APPLE_INVERSE_DISTORTION_COMPONENT
 from arkitscenes_download.ingest.paths import (
     CAM_ULTRAWIDE,
     DEPTH_PROMPTDA,
@@ -63,14 +62,8 @@ ULTRAWIDE_QUATERNION_COLUMN: Final[str] = f"/{CAM_ULTRAWIDE}:Transform3D:quatern
 """Static ultrawide-to-wide quaternion component."""
 DISTORTION_MODEL_COLUMN: Final[str] = f"/{PINHOLE_ULTRAWIDE}:simplecv.components.DistortionModel"
 """Generic standard-model label on the native ultrawide pinhole."""
-LEGACY_DISTORTION_COEFFICIENTS_COLUMN: Final[str] = f"/{PINHOLE_ULTRAWIDE}:simplecv.components.DistortionCoefficients"
-"""Generic coefficient column that held Apple data in legacy corpus recordings."""
-APPLE_FORWARD_DISTORTION_COLUMN: Final[str] = f"/{PINHOLE_ULTRAWIDE}:{APPLE_FORWARD_DISTORTION_COMPONENT}"
-"""Exact Apple distorted-to-rectified polynomial provenance."""
-APPLE_INVERSE_DISTORTION_COLUMN: Final[str] = f"/{PINHOLE_ULTRAWIDE}:{APPLE_INVERSE_DISTORTION_COMPONENT}"
-"""Apple's supplied rectified-to-distorted polynomial provenance."""
-LEGACY_APPLE_DISTORTION_MODELS: Final[frozenset[str]] = frozenset({"apple_radial_poly", "brown_conrady"})
-"""Known old labels under which corpus recordings stored Apple coefficients."""
+DISTORTION_COEFFICIENTS_COLUMN: Final[str] = f"/{PINHOLE_ULTRAWIDE}:simplecv.components.DistortionCoefficients"
+"""Standard 14-value Brown-Conrady coefficient component."""
 PROMPTDA_DEPTH_BLOB_COLUMN: Final[str] = f"/{DEPTH_PROMPTDA}:EncodedDepthImage:blob"
 """PromptDA encoded depth blob component."""
 

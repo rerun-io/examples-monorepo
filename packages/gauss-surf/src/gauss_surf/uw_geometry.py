@@ -7,7 +7,6 @@ import cv2
 import numpy as np
 import open3d as o3d
 import pyarrow as pa
-from arkitscenes_download.ingest.distortion import AppleRadialPolynomial
 from arkitscenes_download.ingest.paths import TIMELINE
 from jaxtyping import Float32, Int64, UInt8, UInt16
 from numpy import ndarray
@@ -18,7 +17,7 @@ from gauss_surf.contracts import RIG_QUATERNION_COLUMN, RIG_TRANSLATION_COLUMN, 
 
 
 @dataclass(frozen=True, slots=True)
-class AppleUndistortion:
+class Undistortion:
     """One reusable destination-to-source remap and its rectified pinhole."""
 
     K_rect_33: Float32[ndarray, "3 3"]
@@ -101,19 +100,19 @@ def load_camera_pose_track(
     return CameraPoseTrack(pose_timestamps_n, world_from_rig_n44, calibration_44)
 
 
-def build_apple_undistortion(
+def build_brown_conrady_undistortion(
     K_uw_33: Float32[ndarray, "3 3"],
-    coefficients_8: Float32[ndarray, "8"],
+    coefficients_14: Float32[ndarray, "14"],
     distortion_center_reference_xy: Float32[ndarray, "2"],
     reference_dimensions_wh: tuple[int, int],
     image_wh: tuple[int, int],
-) -> AppleUndistortion:
-    """Build an Apple radial-polynomial remap at the video resolution.
+) -> Undistortion:
+    """Build an OpenCV Brown-Conrady remap with the established crop.
 
     Args:
         K_uw_33: float32 distorted-camera intrinsics shaped ``3 3``.
-        coefficients_8: float32 Apple percent-magnification coefficients shaped ``8``.
-        distortion_center_reference_xy: float32 calibration center shaped ``2``.
+        coefficients_14: float32 standard Brown-Conrady coefficients shaped ``14``.
+        distortion_center_reference_xy: float32 calibration center shaped ``2`` used only to preserve the output framing.
         reference_dimensions_wh: Calibration reference width and height.
         image_wh: Output image width and height.
 
@@ -127,83 +126,77 @@ def build_apple_undistortion(
     if min(reference_width, reference_height, width, height) < 1:
         raise ValueError("Reference and image dimensions must be positive")
     K_input_33: Float32[ndarray, "3 3"] = np.asarray(K_uw_33, dtype=np.float32)
-    coefficients: Float32[ndarray, "8"] = np.asarray(coefficients_8, dtype=np.float32).reshape(-1)
+    coefficients: Float32[ndarray, "14"] = np.asarray(coefficients_14, dtype=np.float32).reshape(-1)
+    if coefficients.shape != (14,) or not np.all(np.isfinite(coefficients)):
+        raise ValueError("Brown-Conrady calibration requires fourteen finite coefficients")
+    if np.any(coefficients[8:] != 0.0):
+        raise ValueError("Ultrawide rectification supports the rational Brown-Conrady eight-vector; thin-prism and tilt terms must be zero")
+    rational_coefficients_8: Float32[ndarray, "8"] = coefficients[:8]
     pixel_x_hw: Float32[ndarray, "h w"]
     pixel_y_hw: Float32[ndarray, "h w"]
     pixel_x_hw, pixel_y_hw = np.meshgrid(np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32))
     if np.all(coefficients == 0.0):
-        return AppleUndistortion(K_input_33.copy(), pixel_x_hw, pixel_y_hw)
+        return Undistortion(K_input_33.copy(), pixel_x_hw, pixel_y_hw)
 
-    model: AppleRadialPolynomial = AppleRadialPolynomial(coefficients)
     center_reference_xy: Float32[ndarray, "2"] = np.asarray(distortion_center_reference_xy, dtype=np.float32)
     reference_per_image_xy: Float32[ndarray, "2"] = np.array([reference_width / width, reference_height / height], dtype=np.float32)
     center_image_xy: Float32[ndarray, "2"] = center_reference_xy / reference_per_image_xy
-    corners_reference_42: Float32[ndarray, "4 2"] = np.array(
-        [[0.0, 0.0], [float(reference_width), 0.0], [0.0, float(reference_height)], [float(reference_width), float(reference_height)]],
-        dtype=np.float32,
-    )
-    radius_max_reference: float = float(np.max(np.linalg.norm(corners_reference_42 - center_reference_xy, axis=1)))
-    output_delta_image_hw2: Float32[ndarray, "h w 2"] = np.stack(
-        [pixel_x_hw - center_image_xy[0], pixel_y_hw - center_image_xy[1]],
-        axis=-1,
-    )
-    def source_map(focal_scale: float) -> Float32[ndarray, "h w 2"]:
-        """Map one uniform rectified focal scale into distorted source pixels."""
-        rectified_delta_reference_hw2: Float32[ndarray, "h w 2"] = output_delta_image_hw2 * reference_per_image_xy / focal_scale
-        rectified_radius_hw: Float32[ndarray, "h w"] = np.linalg.norm(rectified_delta_reference_hw2, axis=-1).astype(np.float32)
-        rectified_normalized_hw: Float32[ndarray, "h w"] = rectified_radius_hw / radius_max_reference
-        distorted_normalized_hw: Float32[ndarray, "h w"] = model.rectified_to_distorted_radius(rectified_normalized_hw)
-        radial_scale_hw: Float32[ndarray, "h w"] = np.divide(
-            distorted_normalized_hw,
-            rectified_normalized_hw,
-            out=np.ones_like(distorted_normalized_hw),
-            where=rectified_normalized_hw > 0.0,
-        )
-        source_reference_hw2: Float32[ndarray, "h w 2"] = center_reference_xy + rectified_delta_reference_hw2 * radial_scale_hw[..., None]
-        return (source_reference_hw2 / reference_per_image_xy).astype(np.float32, copy=False)
+    identity_33: Float32[ndarray, "3 3"] = np.eye(3, dtype=np.float32)
 
-    def is_in_bounds(source_hw2: Float32[ndarray, "h w 2"]) -> bool:
+    def source_map(focal_scale: float) -> Undistortion:
+        """Build one OpenCV map at a candidate uniform rectified focal scale."""
+        K_rect_33: Float32[ndarray, "3 3"] = K_input_33.copy()
+        K_rect_33[0, 0] *= focal_scale
+        K_rect_33[1, 1] *= focal_scale
+        K_rect_33[:2, 2] = center_image_xy
+        K_map_33: Float32[ndarray, "3 3"] = K_rect_33.copy()
+        # OpenCV measures rectified rays from the source pinhole principal point.
+        # Compensate its internal map matrix so the output still scales about the
+        # established framing center recorded in K_rect_33.
+        K_map_33[:2, 2] = center_image_xy + focal_scale * (K_input_33[:2, 2] - center_image_xy)
+        remap: tuple[Float32[ndarray, "h w"], Float32[ndarray, "h w"]] = cv2.initUndistortRectifyMap(
+            K_input_33,
+            rational_coefficients_8,
+            identity_33,
+            K_map_33,
+            (width, height),
+            cv2.CV_32FC1,
+        )
+        return Undistortion(K_rect_33, remap[0], remap[1])
+
+    def is_in_bounds(undistortion: Undistortion) -> bool:
         """Check whether every bilinear sample lies inside the source image."""
         return bool(
-            np.all(source_hw2[..., 0] >= 0.0)
-            and np.all(source_hw2[..., 0] <= width - 1)
-            and np.all(source_hw2[..., 1] >= 0.0)
-            and np.all(source_hw2[..., 1] <= height - 1)
+            np.all(undistortion.source_x_hw >= 0.0)
+            and np.all(undistortion.source_x_hw <= width - 1)
+            and np.all(undistortion.source_y_hw >= 0.0)
+            and np.all(undistortion.source_y_hw <= height - 1)
         )
 
     lower_scale: float = 1.0
     upper_scale: float = 1.0
-    source_image_hw2: Float32[ndarray, "h w 2"] = source_map(upper_scale)
-    while not is_in_bounds(source_image_hw2):
+    undistortion: Undistortion = source_map(upper_scale)
+    while not is_in_bounds(undistortion):
         upper_scale *= 1.05
         if upper_scale > 4.0:
-            raise ValueError("Apple radial calibration has no valid full-frame crop")
-        source_image_hw2 = source_map(upper_scale)
+            raise ValueError("Brown-Conrady calibration has no valid full-frame crop")
+        undistortion = source_map(upper_scale)
     for _ in range(18):
         candidate_scale: float = 0.5 * (lower_scale + upper_scale)
-        candidate_source_hw2: Float32[ndarray, "h w 2"] = source_map(candidate_scale)
-        if is_in_bounds(candidate_source_hw2):
+        candidate: Undistortion = source_map(candidate_scale)
+        if is_in_bounds(candidate):
             upper_scale = candidate_scale
-            source_image_hw2 = candidate_source_hw2
+            undistortion = candidate
         else:
             lower_scale = candidate_scale
-    K_rect_33: Float32[ndarray, "3 3"] = K_input_33.copy()
-    K_rect_33[0, 0] *= upper_scale
-    K_rect_33[1, 1] *= upper_scale
-    K_rect_33[0, 2] = center_image_xy[0]
-    K_rect_33[1, 2] = center_image_xy[1]
-    return AppleUndistortion(
-        K_rect_33,
-        source_image_hw2[..., 0].astype(np.float32, copy=False),
-        source_image_hw2[..., 1].astype(np.float32, copy=False),
-    )
+    return undistortion
 
 
 def undistort_rgb(
     rgb_hw3: UInt8[ndarray, "h w 3"],
-    undistortion: AppleUndistortion,
+    undistortion: Undistortion,
 ) -> UInt8[ndarray, "h w 3"]:
-    """Rectify one RGB frame with a reusable Apple destination-to-source remap.
+    """Rectify one RGB frame with a reusable destination-to-source remap.
 
     Args:
         rgb_hw3: uint8 distorted RGB image shaped ``h w 3``.
@@ -215,7 +208,7 @@ def undistort_rgb(
     if rgb_hw3.ndim != 3 or rgb_hw3.shape[2] != 3:
         raise ValueError("RGB frame must have shape (H, W, 3)")
     if undistortion.source_x_hw.shape != rgb_hw3.shape[:2] or undistortion.source_y_hw.shape != rgb_hw3.shape[:2]:
-        raise ValueError("Apple remap dimensions must match the RGB frame")
+        raise ValueError("Undistortion remap dimensions must match the RGB frame")
     rectified_hw3: UInt8[ndarray, "h w 3"] = cv2.remap(
         rgb_hw3,
         undistortion.source_x_hw,

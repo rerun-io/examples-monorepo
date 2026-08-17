@@ -10,7 +10,7 @@ from numpy import ndarray
 from PIL import Image
 
 from gauss_surf.uw_geometry import (
-    build_apple_undistortion,
+    build_brown_conrady_undistortion,
     compose_world_from_ultrawide,
     depth_meters_to_uint16_mm,
     pose_indices_at_or_before,
@@ -18,22 +18,37 @@ from gauss_surf.uw_geometry import (
     undistort_rgb,
 )
 
-REAL_ULTRAWIDE_COEFFICIENTS_8: Float32[ndarray, "8"] = np.array(
-    [-0.08353952, -6.350463, 5.248554, -1.9897834, 0.5831521, -0.10259675, 0.009266047, -0.0003309832],
+REAL_ULTRAWIDE_COEFFICIENTS_14: Float32[ndarray, "14"] = np.array(
+    [
+        0.14226905,
+        -0.03264365,
+        -1.7744861e-5,
+        -1.9211448e-5,
+        0.00754465,
+        0.14195952,
+        -0.04144133,
+        0.00897725,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    ],
     dtype=np.float32,
 )
 
 
-def test_zero_apple_polynomial_builds_an_identity_remap() -> None:
-    """Zero Apple coefficients leave the pinhole and every source pixel unchanged."""
+def test_zero_brown_conrady_builds_an_identity_remap() -> None:
+    """Zero Brown-Conrady coefficients leave the pinhole and every source pixel unchanged."""
     K_33: Float32[ndarray, "3 3"] = np.array(
         [[8.0, 0.0, 3.0], [0.0, 8.0, 2.0], [0.0, 0.0, 1.0]],
         dtype=np.float32,
     )
 
-    undistortion = build_apple_undistortion(
+    undistortion = build_brown_conrady_undistortion(
         K_33,
-        np.zeros(8, dtype=np.float32),
+        np.zeros(14, dtype=np.float32),
         distortion_center_reference_xy=np.array([3.0, 2.0], dtype=np.float32),
         reference_dimensions_wh=(7, 5),
         image_wh=(7, 5),
@@ -46,16 +61,16 @@ def test_zero_apple_polynomial_builds_an_identity_remap() -> None:
     np.testing.assert_array_equal(undistortion.source_y_hw, expected_y_hw)
 
 
-def test_real_apple_remap_crops_only_enough_to_keep_every_sample_in_bounds() -> None:
-    """The real 640×480 remap has no invalid sampled source pixels."""
+def test_real_brown_conrady_remap_preserves_the_apple_exact_framing_contract() -> None:
+    """The standard fit stays within 0.006 px of the old remap and preserves its rectified pinhole."""
     K_uw_33: Float32[ndarray, "3 3"] = np.array(
         [[245.3910065, 0.0, 321.8739929], [0.0, 245.3910065, 238.0269928], [0.0, 0.0, 1.0]],
         dtype=np.float32,
     )
 
-    undistortion = build_apple_undistortion(
+    undistortion = build_brown_conrady_undistortion(
         K_uw_33,
-        REAL_ULTRAWIDE_COEFFICIENTS_8,
+        REAL_ULTRAWIDE_COEFFICIENTS_14,
         distortion_center_reference_xy=np.array([1853.1506, 1371.0317], dtype=np.float32),
         reference_dimensions_wh=(3680, 2760),
         image_wh=(640, 480),
@@ -63,8 +78,29 @@ def test_real_apple_remap_crops_only_enough_to_keep_every_sample_in_bounds() -> 
 
     assert np.all((undistortion.source_x_hw >= 0.0) & (undistortion.source_x_hw <= 639.0))
     assert np.all((undistortion.source_y_hw >= 0.0) & (undistortion.source_y_hw <= 479.0))
-    assert K_uw_33[0, 0] < undistortion.K_rect_33[0, 0] < 1.1 * K_uw_33[0, 0]
-    assert K_uw_33[1, 1] < undistortion.K_rect_33[1, 1] < 1.1 * K_uw_33[1, 1]
+    np.testing.assert_allclose(
+        undistortion.K_rect_33,
+        [[252.1431885, 0.0, 322.2870789], [0.0, 252.1431885, 238.4403076], [0.0, 0.0, 1.0]],
+        atol=1e-3,
+        rtol=0.0,
+    )
+    sample_yx_n2: ndarray = np.array([[0, 0], [0, 639], [479, 0], [479, 639], [240, 320], [100, 100], [300, 500]])
+    expected_source_n2: Float32[ndarray, "n=7 2"] = np.array(
+        [
+            [0.05831777, 0.04315982],
+            [638.737793, 0.19737177],
+            [0.00006369, 478.9999695],
+            [638.796814, 478.845703],
+            [320.0612183, 239.9582214],
+            [104.2524643, 102.6484451],
+            [495.6700134, 298.5000916],
+        ],
+        dtype=np.float32,
+    )
+    actual_source_n2: Float32[ndarray, "n=7 2"] = np.array(
+        [[undistortion.source_x_hw[y, x], undistortion.source_y_hw[y, x]] for y, x in sample_yx_n2], dtype=np.float32
+    )
+    assert float(np.max(np.linalg.norm(actual_source_n2 - expected_source_n2, axis=1))) <= 0.006
 
 
 def test_raycast_returns_camera_z_depth_at_oblique_pixels_and_zero_on_miss() -> None:
@@ -138,18 +174,18 @@ def test_pose_lookup_uses_nearest_sample_at_or_before_each_ultrawide_time() -> N
     assert np.all(pose_times_n[indices_n] <= ultrawide_times_n)
 
 
-def test_zero_apple_polynomial_rectification_is_pixel_exact() -> None:
-    """A zero Apple radial model leaves the RGB pixels unchanged."""
+def test_zero_brown_conrady_rectification_is_pixel_exact() -> None:
+    """A zero Brown-Conrady model leaves the RGB pixels unchanged."""
     rgb_hw3: UInt8[ndarray, "h=5 w=7 3"] = np.arange(5 * 7 * 3, dtype=np.uint8).reshape(5, 7, 3)
     K_33: Float32[ndarray, "3 3"] = np.array(
         [[8.0, 0.0, 3.0], [0.0, 8.0, 2.0], [0.0, 0.0, 1.0]],
         dtype=np.float32,
     )
-    coefficients_8: Float32[ndarray, "8"] = np.zeros(8, dtype=np.float32)
+    coefficients_14: Float32[ndarray, "14"] = np.zeros(14, dtype=np.float32)
 
-    undistortion = build_apple_undistortion(
+    undistortion = build_brown_conrady_undistortion(
         K_33,
-        coefficients_8,
+        coefficients_14,
         distortion_center_reference_xy=np.array([3.0, 2.0], dtype=np.float32),
         reference_dimensions_wh=(7, 5),
         image_wh=(7, 5),
