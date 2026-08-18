@@ -36,7 +36,7 @@ from trtkit.backends import (
 )
 from trtkit.base import RuntimeSpec, TensorRuntime, TensorSpec, run_chunked, validate_runtime_inputs
 from trtkit.onnx_cuda import OnnxCudaRuntime
-from trtkit.onnx_export import export_onnx
+from trtkit.onnx_export import export_onnx, sweep_stale_onnx_exports
 from trtkit.onnx_graph import onnx_static_batch_size
 from trtkit.tensorrt_runtime import TensorRtRuntime
 from trtkit.torch_runtime import TorchRuntime
@@ -64,5 +64,6 @@ __all__ = (
     "onnx_content_hash",
     "onnx_static_batch_size",
     "run_chunked",
+    "sweep_stale_onnx_exports",
     "validate_runtime_inputs",
 )

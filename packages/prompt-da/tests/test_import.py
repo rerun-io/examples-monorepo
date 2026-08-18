@@ -9,5 +9,7 @@ def test_import_rerun_prompt_da() -> None:
 
 def test_import_prompt_da_gradio_ui_without_example_data() -> None:
     """Import the Gradio UI even when optional sample data has not been downloaded."""
+    import pytest
 
+    pytest.importorskip("gradio", reason="Gradio is optional outside the PromptDA demo lane")
     import rerun_prompt_da.gradio_ui.prompt_da_ui  # noqa: F401

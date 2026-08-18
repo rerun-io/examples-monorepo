@@ -10,7 +10,9 @@ fusion-breaker outputs) — and nothing else.
 """
 
 import os
-from collections.abc import Callable
+import shutil
+import time
+from collections.abc import Callable, Collection
 from pathlib import Path
 
 import torch
@@ -38,6 +40,41 @@ class _AutocastWrapper(torch.nn.Module):
         return outputs.float()
 
 
+def sweep_stale_onnx_exports(
+    directory: Path,
+    filename_prefix: str,
+    *,
+    keep_paths: Collection[Path],
+    partial_grace_seconds: float = 3600.0,
+) -> list[Path]:
+    """Remove obsolete exports while preserving current and in-flight files.
+
+    Args:
+        directory: Directory containing model-specific ONNX exports.
+        filename_prefix: Prefix shared only by versions of one model shape.
+        keep_paths: Complete export and sidecar paths still in use.
+        partial_grace_seconds: Minimum age before a ``.part`` file can be
+            treated as abandoned.
+
+    Returns:
+        Removed paths in deterministic filename order.
+    """
+    keep: set[Path] = set(keep_paths)
+    now: float = time.time()
+    removed: list[Path] = []
+    for path in sorted(directory.iterdir()):
+        if path in keep or not path.name.startswith(filename_prefix):
+            continue
+        if ".part" in path.name and now - path.stat().st_mtime < partial_grace_seconds:
+            continue
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            path.unlink(missing_ok=True)
+        removed.append(path)
+    return removed
+
+
 def export_onnx(
     model: torch.nn.Module,
     example_inputs: tuple[torch.Tensor, ...],
@@ -54,9 +91,13 @@ def export_onnx(
     Args:
         model: Network (or output-shaping adapter around it) in eval mode.
         example_inputs: Positional example tensors, traced as given.
-        out_path: Final ONNX path, published atomically (pid-unique temp +
-            rename) so a killed export can never leave a truncated file that
-            later runs silently reuse.
+        out_path: Final ONNX path, published atomically: the export writes into
+            a pid-unique temp directory under its FINAL filename, then both the
+            protobuf and any external-data sidecar (``<name>.data``, written by
+            dynamo when weights exceed the 2 GB protobuf limit) move into
+            place. A killed export can never leave a truncated file that later
+            runs silently reuse, and the sidecar keeps a deterministic name the
+            published graph references correctly.
         input_names: ONNX input names, matching ``example_inputs`` order.
         output_names: ONNX output names, matching the model's output order.
         compute_dtype: ``torch.float16``/``torch.bfloat16`` traces the model
@@ -88,16 +129,30 @@ def export_onnx(
         kwargs["dynamic_shapes"] = (per_input,) if compute_dtype is not None else per_input
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path: Path = out_path.with_name(f"{out_path.name}.part{os.getpid()}")
-    with torch.inference_mode():
-        export_fn(
-            export_model,
-            example_inputs,
-            str(tmp_path),
-            input_names=input_names,
-            output_names=output_names,
-            opset_version=opset_version,
-            dynamo=True,
-            **kwargs,
-        )
-    tmp_path.rename(out_path)
+    # Export into a pid-unique temp DIRECTORY under the final filename, so the
+    # external-data sidecar dynamo writes for >2 GB weights is born with the
+    # deterministic name the protobuf references (`<name>.data`), instead of a
+    # permanent pid-suffixed temp name the caller would have to know about.
+    tmp_dir: Path = out_path.with_name(f"{out_path.name}.part{os.getpid()}")
+    tmp_dir.mkdir()
+    tmp_path: Path = tmp_dir / out_path.name
+    try:
+        with torch.inference_mode():
+            export_fn(
+                export_model,
+                example_inputs,
+                str(tmp_path),
+                input_names=input_names,
+                output_names=output_names,
+                opset_version=opset_version,
+                dynamo=True,
+                **kwargs,
+            )
+        # Sidecar first: the protobuf must never be visible while the data it
+        # references is missing.
+        tmp_sidecar: Path = tmp_dir / f"{out_path.name}.data"
+        if tmp_sidecar.exists():
+            os.replace(tmp_sidecar, out_path.with_name(tmp_sidecar.name))
+        os.replace(tmp_path, out_path)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
