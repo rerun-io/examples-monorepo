@@ -60,8 +60,12 @@ def test_export_sapiens_pose_onnx_uses_static_batch_one_graph(tmp_path: Path) ->
     assert export_summary.onnx_path == onnx_path
     assert export_summary.input_shape == (1, 3, 1024, 768)
     assert export_summary.output_shape == (1, 308, 256, 192)
-    assert calls[0]["path"].parent == onnx_path.parent
-    assert calls[0]["path"].name.startswith(onnx_path.name + ".part")
+    # trtkit exports into a pid-unique temp DIRECTORY under the final
+    # filename, so the external-data sidecar is born with the name the
+    # published protobuf references.
+    assert calls[0]["path"].name == onnx_path.name
+    assert calls[0]["path"].parent.parent == onnx_path.parent
+    assert calls[0]["path"].parent.name.startswith(onnx_path.name + ".part")
     assert onnx_path.exists()
     assert calls[0]["dummy_inputs"].shape == (1, 3, 1024, 768)
     assert calls[0]["input_names"] == ["inputs"]
@@ -159,27 +163,32 @@ def test_estimate_sapiens_pose_with_heatmap_runner_uses_common_decode_path() -> 
     assert np.all(artifact.scores > 0.0)
 
 
-def test_estimate_sapiens_pose_tensorrt_runs_multiple_boxes_as_static_batch_one_calls() -> None:
+def test_estimate_sapiens_pose_tensorrt_matches_common_heatmap_runner_path() -> None:
     image_rgb: UInt8[ndarray, "h w 3"] = np.zeros((64, 48, 3), dtype=np.uint8)
     bboxes: Float32[ndarray, "n 4"] = np.asarray([[0.0, 0.0, 47.0, 63.0], [4.0, 5.0, 40.0, 55.0]], dtype=np.float32)
     captured_shapes: list[tuple[int, ...]] = []
 
     def fake_heatmap_runner(inputs: torch.Tensor) -> Float32[ndarray, "n k h w"]:
         captured_shapes.append(tuple(int(dim) for dim in inputs.shape))
-        heatmaps: Float32[ndarray, "n k h w"] = np.zeros((1, 308, 256, 192), dtype=np.float32)
+        heatmaps: Float32[ndarray, "n k h w"] = np.zeros((inputs.shape[0], 308, 256, 192), dtype=np.float32)
         heatmaps[:, :, 128, 96] = 1.0
         return heatmaps
 
-    artifact: PosePredictionArtifact = estimate_sapiens_pose_tensorrt(
+    common_artifact: PosePredictionArtifact = estimate_sapiens_pose_with_heatmap_runner(
         image_rgb,
         bboxes,
-        engine_path=Path("/tmp/static-b1.trt"),
+        model_size="0.4B",
+        device="cpu",
+        heatmap_runner=fake_heatmap_runner,
+    )
+    tensorrt_artifact: PosePredictionArtifact = estimate_sapiens_pose_tensorrt(
+        image_rgb,
+        bboxes,
         model_size="0.4B",
         device="cpu",
         heatmap_runner=fake_heatmap_runner,
     )
 
-    assert captured_shapes == [(1, 3, 1024, 768), (1, 3, 1024, 768)]
-    assert artifact.bboxes.shape == (2, 4)
-    assert artifact.keypoints.shape == (2, 308, 2)
-    assert artifact.scores.shape == (2, 308)
+    assert captured_shapes == [(2, 3, 1024, 768), (2, 3, 1024, 768)]
+    np.testing.assert_allclose(tensorrt_artifact.keypoints, common_artifact.keypoints)
+    np.testing.assert_allclose(tensorrt_artifact.scores, common_artifact.scores)

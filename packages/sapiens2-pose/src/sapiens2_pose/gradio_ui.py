@@ -11,14 +11,17 @@ import gradio as gr
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-import spaces
 import torch
 from gradio_rerun import Rerun
 from huggingface_hub import hf_hub_download
+from jaxtyping import Float32
+from numpy import ndarray
 from PIL import Image
 from transformers import DetrForObjectDetection, DetrImageProcessor
 
-from .sapiens_lite.pose import estimate_pose, init_pose_model, nms, parse_pose_metainfo
+from sapiens2_pose.api.pose_artifact import PosePredictionArtifact
+from sapiens2_pose.api.tensorrt_pose import default_tensorrt_engine_path
+from sapiens2_pose.sapiens_lite.pose import estimate_pose, init_pose_model, nms, parse_pose_metainfo
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 ASSETS_DIR = PACKAGE_DIR / "assets"
@@ -50,6 +53,8 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 BBOX_THR = 0.3
 NMS_THR = 0.3
 
+TENSORRT_MODEL_SIZE = "0.4B"
+
 
 def _env_flag(name: str, default: bool) -> bool:
     value = os.environ.get(name)
@@ -75,8 +80,25 @@ def _server_port() -> int:
 
 _pose_model_cache: dict[str, Any] = {}
 _detector_cache: dict[str, Any] = {}
+_trt_runner_cache: dict[str, Any] = {}
 _metainfo_cache: dict[str, Any] | None = None
 _skeleton_cache: dict[str, Any] | None = None
+
+
+def _get_trt_runner(engine_path: str) -> Any:
+    cache_key: str = str(Path(engine_path).expanduser().resolve())
+    if cache_key not in _trt_runner_cache:
+        if not Path(cache_key).is_file():
+            raise gr.Error(f"TensorRT engine not found at {cache_key}. Build it with the sapiens2-pose-build-trt task.")
+        from sapiens2_pose.api.tensorrt_pose import TensorRtPoseHeatmapRunner
+
+        _trt_runner_cache[cache_key] = TensorRtPoseHeatmapRunner(Path(cache_key))
+        if len(_trt_runner_cache) > 1:
+            oldest_key: str = next(iter(_trt_runner_cache))
+            evicted: Any = _trt_runner_cache.pop(oldest_key)
+            # TensorRT allocates outside Torch's caching allocator; del drops the last reference.
+            del evicted
+    return _trt_runner_cache[cache_key]
 
 
 def _get_metainfo() -> dict[str, Any]:
@@ -195,8 +217,8 @@ def _log_annotation_context() -> None:
 def _log_pose_recording(
     image_rgb: np.ndarray,
     bboxes: np.ndarray,
-    keypoints: list[np.ndarray],
-    scores: list[np.ndarray],
+    keypoints: Float32[ndarray, "n k 2"],
+    scores: Float32[ndarray, "n k"],
     kpt_thr: float,
 ) -> None:
     skeleton = _get_sapiens_skeleton()
@@ -217,7 +239,7 @@ def _log_pose_recording(
         rr.log(
             f"image/person_{idx}/bbox",
             rr.Boxes2D(
-                array=np.asarray(bbox, dtype=np.float32).reshape(1, 4),
+                array=bbox.reshape(1, 4),
                 array_format=rr.Box2DFormat.XYXY,
                 class_ids=0,
                 labels=f"person_{idx}",
@@ -225,8 +247,8 @@ def _log_pose_recording(
             ),
         )
 
-        kpts_arr = np.asarray(kpts, dtype=np.float32).copy()
-        scores_arr = np.asarray(scr, dtype=np.float32).reshape(-1)
+        kpts_arr = kpts.copy()
+        scores_arr = scr.reshape(-1)
         kpts_arr[scores_arr < kpt_thr] = np.nan
         rr.log(
             f"image/person_{idx}/keypoints",
@@ -244,6 +266,7 @@ def _predict_impl(
     image: Image.Image,
     size: str,
     kpt_thr: float,
+    use_tensorrt: bool,
     recording_id: uuid.UUID | str | None,
 ):
     if image is None:
@@ -251,17 +274,35 @@ def _predict_impl(
 
     image_pil = image.convert("RGB")
     image_rgb = np.array(image_pil)
-    image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
 
     bboxes = _detect_persons(image_rgb)
-    model = _get_pose_model(size)
-    keypoints, scores = estimate_pose(image_bgr, bboxes, model)
+    if use_tensorrt:
+        if size != TENSORRT_MODEL_SIZE:
+            raise gr.Error(f"The TensorRT engine is a static {TENSORRT_MODEL_SIZE} build; select the {TENSORRT_MODEL_SIZE} model.")
+        engine_path: str = default_tensorrt_engine_path()
+        from sapiens2_pose.api.tensorrt_pose import estimate_sapiens_pose_tensorrt
+
+        artifact: PosePredictionArtifact = estimate_sapiens_pose_tensorrt(
+            image_rgb,
+            np.asarray(bboxes, dtype=np.float32),
+            engine_path=Path(engine_path),
+            model_size=TENSORRT_MODEL_SIZE,
+            heatmap_runner=_get_trt_runner(engine_path),
+        )
+        keypoints: Float32[ndarray, "n k 2"] = artifact.keypoints
+        scores: Float32[ndarray, "n k"] = artifact.scores
+    else:
+        image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+        model = _get_pose_model(size)
+        pose_result: tuple[list[np.ndarray], list[np.ndarray]] = estimate_pose(image_bgr, bboxes, model)
+        keypoints = np.stack(pose_result[0], axis=0).astype(np.float32, copy=False)
+        scores = np.stack(pose_result[1], axis=0).astype(np.float32, copy=False)
 
     instances = [
         {
-            "bbox": [float(v) for v in np.asarray(bbox).reshape(-1)[:4]],
-            "keypoints": np.asarray(kpts, dtype=float).tolist(),
-            "keypoint_scores": np.asarray(s, dtype=float).reshape(-1).tolist(),
+            "bbox": bbox.reshape(-1)[:4].tolist(),
+            "keypoints": kpts.tolist(),
+            "keypoint_scores": s.reshape(-1).tolist(),
         }
         for bbox, kpts, s in zip(bboxes, keypoints, scores, strict=False)
     ]
@@ -275,22 +316,18 @@ def _predict_impl(
     yield stream.read(), payload
 
 
-@spaces.GPU(duration=120)
-def predict(image: Image.Image, size: str, kpt_thr: float, recording_id: uuid.UUID | str | None):
-    yield from _predict_impl(image, size, kpt_thr, recording_id)
-
-
-@spaces.GPU(duration=120)
 def predict_ui(
     image: Image.Image,
     size: str,
     kpt_thr: float,
+    use_tensorrt: bool,
     recording_id: uuid.UUID | str | None,
 ):
-    for stream, payload in _predict_impl(image, size, kpt_thr, recording_id):
+    backend_label = "TensorRT" if use_tensorrt else "PyTorch"
+    for stream, payload in _predict_impl(image, size, kpt_thr, use_tensorrt, recording_id):
         count = len(payload["instances"])
         suffix = "" if count == 1 else "s"
-        yield stream, payload, f"Complete: {count} person{suffix} detected with Sapiens2 {size}."
+        yield stream, payload, f"Complete: {count} person{suffix} detected with Sapiens2 {size} ({backend_label})."
 
 
 def _switch_to_outputs():
@@ -362,6 +399,9 @@ HEADER_HTML = """
 </div>
 """
 
+# The viewer stream (crypto.randomUUID) and the image "Paste from clipboard"
+# button (navigator.clipboard.read) need a secure context. Serve over HTTPS —
+# on the tailnet: `tailscale serve --bg --https=7860 http://127.0.0.1:7860`.
 with gr.Blocks(title="Sapiens2 Pose") as demo:
     gr.HTML(HEADER_HTML)
     recording_id = gr.State(str(uuid.uuid4()))
@@ -386,6 +426,10 @@ with gr.Blocks(title="Sapiens2 Pose") as demo:
                             choices=list(POSE_MODELS.keys()),
                             value=DEFAULT_SIZE,
                             label="Model",
+                        )
+                        use_trt = gr.Checkbox(
+                            value=False,
+                            label=f"Use TensorRT Backend ({TENSORRT_MODEL_SIZE} only)",
                         )
 
                     examples = gr.Examples(
@@ -435,7 +479,7 @@ with gr.Blocks(title="Sapiens2 Pose") as demo:
         api_visibility="private",
     ).then(
         fn=predict_ui,
-        inputs=[inp, size, thr, recording_id],
+        inputs=[inp, size, thr, use_trt, recording_id],
         outputs=[viewer, out_json, status_text],
     )
 
