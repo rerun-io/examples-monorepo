@@ -6,7 +6,7 @@ import numpy as np
 import rerun.blueprint as rrb
 from simplecv.rerun_log_utils import mesh_bounding_geometry, orbit_eye_position
 
-from arkitscenes_download.ingest.blueprint import EXTRA_ZOOM_OUT, FIT_DISTANCE_FACTOR, make_blueprint
+from arkitscenes_download.ingest.blueprint import EXTRA_ZOOM_OUT, FIT_DISTANCE_FACTOR, INSIDE_DISTANCE_FACTOR, make_blueprint
 
 FRAMING_FACTOR: float = FIT_DISTANCE_FACTOR * EXTRA_ZOOM_OUT
 
@@ -29,6 +29,18 @@ class OrbitEyePositionTest(unittest.TestCase):
         large: np.ndarray = orbit_eye_position(center, 10.0, FRAMING_FACTOR)
         self.assertGreater(small[2], 0.0)
         np.testing.assert_allclose(small / np.linalg.norm(small), large / np.linalg.norm(large), atol=1e-12)
+
+
+class InsideEyePositionTest(unittest.TestCase):
+    """Splat views orbit from inside the scene: splats are view-blocking, unlike front-face-only meshes."""
+
+    def test_inside_factor_places_eye_within_the_scene_at_center_height(self) -> None:
+        """The splat eye offset stays well inside the bounding sphere with no vertical offset."""
+        center: np.ndarray = np.array([2.566, -1.774, 0.062])
+        radius: float = 5.44
+        position: np.ndarray = orbit_eye_position(center, radius, INSIDE_DISTANCE_FACTOR, direction_xyz=(1.0, 1.0, 0.0))
+        self.assertLess(float(np.linalg.norm(position - center)), 0.5 * radius)
+        self.assertAlmostEqual(float(position[2]), float(center[2]), places=12)
 
 
 class MeshBoundingGeometryTest(unittest.TestCase):

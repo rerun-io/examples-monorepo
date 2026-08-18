@@ -20,7 +20,10 @@ from PIL import Image
 from rich.console import Console
 from rich.progress import Progress, TaskID
 from scipy.spatial.transform import Rotation
+from simplecv.camera_parameters import Extrinsics, PinholeParameters
+from simplecv.camera_parameters import Intrinsics as SimpleCVIntrinsics
 from simplecv.rerun_custom_types import CameraDistortion as RerunCameraDistortion
+from simplecv.rerun_custom_types import PinholeWithDistortion
 
 from arkitscenes_download.ingest.blueprint import DEPTH_RANGE_MM, make_blueprint
 from arkitscenes_download.ingest.clock import (
@@ -32,6 +35,7 @@ from arkitscenes_download.ingest.clock import (
     shared_epoch,
 )
 from arkitscenes_download.ingest.depth import ArkitDepthConfidence, encode_depth_png, sorted_timestamped_paths
+from arkitscenes_download.ingest.distortion import OpenCVRationalFit, opencv_rational_from_apple
 from arkitscenes_download.ingest.gt import ArkitMeshSummary, log_arkit_mesh, log_gt_boxes
 from arkitscenes_download.ingest.imu import ImuSamples, decode_imu
 from arkitscenes_download.ingest.metadata import (
@@ -285,8 +289,13 @@ def _log_calibration_rig(
     recording.log(IMU, rr.AnyValues(values_frame="CoreMotion device; entity transform maps values into baked rig frame"), static=True)
 
 
-def _log_distortions(recording: rr.RecordingStream, distortions: list[CameraDistortion], quarter_turns: int) -> None:
-    """Log the first temporal stream-10 polynomial calibration statically."""
+def _log_distortions(
+    recording: rr.RecordingStream,
+    distortions: list[CameraDistortion],
+    pinhole_intrinsics_by_camera: dict[str, SimpleCVIntrinsics],
+    quarter_turns: int,
+) -> None:
+    """Log a standard fit and the framing metadata needed by rectification."""
     camera_paths: dict[str, str] = {
         "wide": PINHOLE_WIDE,
         "ultrawide": PINHOLE_ULTRAWIDE,
@@ -296,16 +305,39 @@ def _log_distortions(recording: rr.RecordingStream, distortions: list[CameraDist
         center_xy: np.ndarray = rotate_pixels(distortion.center_xy, dimensions_wh, quarter_turns)
         baked_dimensions_wh: tuple[int, int] = rotate_resolution(dimensions_wh, quarter_turns)
         path: str = camera_paths[distortion.camera_name]
-        recording.log(path, RerunCameraDistortion(model="brown_conrady", coefficients=distortion.coefficients), static=True)
+        pinhole_intrinsics: SimpleCVIntrinsics = pinhole_intrinsics_by_camera[distortion.camera_name]
+        fit: OpenCVRationalFit = opencv_rational_from_apple(
+            np.asarray(pinhole_intrinsics.k_matrix, dtype=np.float64),
+            distortion.coefficients,
+            center_xy,
+            baked_dimensions_wh,
+            (pinhole_intrinsics.width, pinhole_intrinsics.height),
+        )
+        camera: PinholeParameters = PinholeParameters(
+            name=distortion.camera_name,
+            extrinsics=Extrinsics(cam_R_world=np.eye(3, dtype=np.float64), cam_t_world=np.zeros(3, dtype=np.float64)),
+            intrinsics=pinhole_intrinsics,
+            distortion=fit.distortion,
+        )
+        standard_components: RerunCameraDistortion | None = PinholeWithDistortion.from_camera(camera).distortion
+        if standard_components is None:
+            raise AssertionError("Brown-Conrady fit did not produce Rerun distortion components")
+        recording.log(
+            path,
+            standard_components,
+            static=True,
+        )
         recording.log(
             path,
             rr.AnyValues(
                 distortion_center_xy=center_xy.tolist(),
                 reference_dimensions_wh=list(baked_dimensions_wh),
-                distortion_source="mebx_stream_10",
-                distortion_temporal_sample_count=distortion.temporal_sample_count,
             ),
             static=True,
+        )
+        CONSOLE.print(
+            f"Distortion fit {distortion.camera_name}: model=brown_conrady center=pinhole_principal_point "
+            f"max_residual={fit.max_residual_px:.6f}px"
         )
 
 
@@ -421,9 +453,23 @@ def ingest_sequence(config: Config) -> Path:
     distortions: list[CameraDistortion] = decode_camera_distortions_from_packets(metadata_packets[10])
     for distortion in distortions:
         CONSOLE.print(
-            f"Distortion {distortion.camera_name}: model=brown_conrady coefficients={distortion.coefficients.tolist()} "
+            f"Distortion {distortion.camera_name}: model=apple_radial_poly coefficients={distortion.coefficients.tolist()} "
             f"inverse={distortion.inverse_coefficients.tolist()} center={distortion.center_xy.tolist()} "
             f"reference={distortion.reference_dimensions_wh.tolist()} temporal_samples={distortion.temporal_sample_count}"
+        )
+    pinhole_intrinsics_by_camera: dict[str, SimpleCVIntrinsics] = {}
+    for camera_name, intrinsics, resolution in (
+        ("wide", wide_intrinsics, wide_resolution),
+        ("ultrawide", ultrawide_intrinsics, ultrawide_resolution),
+    ):
+        logged_indices: np.ndarray = np.flatnonzero(intrinsics.timestamps >= epoch)
+        if len(logged_indices) == 0:
+            raise ValueError(f"{camera_name} has no pinhole calibration at or after the shared epoch")
+        pinhole_intrinsics_by_camera[camera_name] = SimpleCVIntrinsics.from_k_matrix(
+            camera_conventions="RDF",
+            k_matrix=intrinsics.matrices[int(logged_indices[0])],
+            width=resolution[0],
+            height=resolution[1],
         )
     calibration_path: Path = sequence_output / "calibration.rrd"
     with atomic_recording(calibration_path, config.video_id, send_properties=False) as recording:
@@ -434,7 +480,7 @@ def ingest_sequence(config: Config) -> Path:
         _log_sky_angles(recording, SKY_ANGLE_WIDE, trajectory.timestamps, sky_angles(trajectory.quaternion_xyzw), epoch)
         ultrawide_sky_angles: np.ndarray = interpolate_sky_angles(trajectory_sparse, ultrawide_video_timestamps)
         _log_sky_angles(recording, SKY_ANGLE_ULTRAWIDE, ultrawide_video_timestamps, ultrawide_sky_angles, epoch)
-        _log_distortions(recording, distortions, quarter_turns)
+        _log_distortions(recording, distortions, pinhole_intrinsics_by_camera, quarter_turns)
 
     confidence: list[Path] = sorted_timestamped_paths(sequence_dir / "confidence")
     depth_started: float = time.perf_counter()
