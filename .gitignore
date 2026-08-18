@@ -100,6 +100,7 @@ cython_debug/
 packages/monoprior/data/
 packages/simplecv/data/
 packages/mvs/data/
+packages/gauss-surf/data/
 # License-gated SMPL-X body model (lazily downloaded; the MANO pkls next to it stay tracked)
 packages/simplecv/simplecv/data/body_models/
 packages/prompt-da/data/
