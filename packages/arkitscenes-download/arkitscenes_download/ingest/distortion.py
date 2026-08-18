@@ -84,13 +84,15 @@ def opencv_rational_from_apple(
     distortion_center_reference_xy: Float[ndarray, "2"],
     reference_dimensions_wh: tuple[int, int],
     image_wh: tuple[int, int],
-    residual_bound_px: float = 0.01,
 ) -> OpenCVRationalFit:
     """Fit OpenCV's rational Brown-Conrady model around the pinhole principal point.
 
     The exact Apple field remains centered at Apple's distinct distortion center.
     Tangential terms model that small center offset while the returned K stays
-    unchanged, matching simplecv's one-center pinhole convention.
+    unchanged, matching simplecv's one-center pinhole convention. When the free
+    rational denominator misbehaves over the frame (poles or a folded radius map
+    — common on nearly-flat wide lenses), the fit falls back to the polynomial
+    form with ``k4..k6 = 0``, which cannot misbehave that way by construction.
 
     Args:
         K_native_33: Floating-point native-resolution pinhole intrinsics shaped ``3 3``.
@@ -98,14 +100,14 @@ def opencv_rational_from_apple(
         distortion_center_reference_xy: Floating-point Apple distortion center shaped ``2`` in reference pixels.
         reference_dimensions_wh: Calibration reference width and height.
         image_wh: Native image width and height at which to validate the fit.
-        residual_bound_px: Reject the fit if its worst-case error exceeds this value.
 
     Returns:
-        Validated simplecv Brown-Conrady distortion and the unchanged pinhole K.
+        Validated simplecv Brown-Conrady distortion, the unchanged pinhole K, and
+        the fit's measured worst-case residual in native pixels.
 
     Raises:
-        ValueError: On anisotropic reference scaling, an invalid source or fitted
-            map, or a residual beyond ``residual_bound_px``.
+        ValueError: On anisotropic reference scaling, an invalid source map, or a
+            fitted radius map that is not strictly increasing even in polynomial form.
     """
     width: int = image_wh[0]
     height: int = image_wh[1]
@@ -191,19 +193,33 @@ def opencv_rational_from_apple(
     rectified_corners_42: Float64[ndarray, "4 2"] = apple_rectified(corners_native_42)
     radius_domain: float = float(np.max(np.linalg.norm(rectified_corners_42 - fit_center_native_xy, axis=1))) / focal_fit_px
     r2_probe_n: Float64[ndarray, "n=4096"] = np.square(np.linspace(0.0, 1.05 * radius_domain, 4096))
-    denominator_probe_n: Float64[ndarray, "n=4096"] = (
-        1.0 + distortion_fit_8[5] * r2_probe_n + distortion_fit_8[6] * r2_probe_n**2 + distortion_fit_8[7] * r2_probe_n**3
-    )
-    if np.any(denominator_probe_n <= 0.0):
-        raise ValueError("Fitted rational denominator is not positive over the calibrated frame")
     probe_n2: Float64[ndarray, "n=4096 2"] = np.stack(
         [fit_center_native_xy[0] + np.sqrt(r2_probe_n) * focal_fit_px, np.full(r2_probe_n.shape, fit_center_native_xy[1])], axis=1
     )
-    distorted_radii_n: Float64[ndarray, "n=4096"] = np.linalg.norm(
-        rational_distorted(probe_n2, distortion_fit_8) - fit_center_native_xy, axis=1
-    )
-    if np.any(np.diff(distorted_radii_n) <= 0.0):
-        raise ValueError("Fitted rational radius map is not strictly increasing over the calibrated frame")
+
+    def frame_map_is_valid(distortion_8: Float64[ndarray, "8"]) -> bool:
+        """True when the denominator stays positive and the radius map strictly increases over the frame."""
+        denominator_probe_n: Float64[ndarray, "n=4096"] = (
+            1.0 + distortion_8[5] * r2_probe_n + distortion_8[6] * r2_probe_n**2 + distortion_8[7] * r2_probe_n**3
+        )
+        if np.any(denominator_probe_n <= 0.0):
+            return False
+        distorted_radii_n: Float64[ndarray, "n=4096"] = np.linalg.norm(
+            rational_distorted(probe_n2, distortion_8) - fit_center_native_xy, axis=1
+        )
+        return not np.any(np.diff(distorted_radii_n) <= 0.0)
+
+    if not frame_map_is_valid(distortion_fit_8):
+        poly_5: Float64[ndarray, "5"] = least_squares(
+            lambda k_5: residuals(np.array([k_5[0], k_5[1], k_5[2], k_5[3], k_5[4], 0.0, 0.0, 0.0])),
+            np.array([brown_3[0], brown_3[1], 0.0, 0.0, brown_3[2]]),
+            ftol=1e-13,
+            xtol=1e-13,
+            gtol=1e-13,
+        ).x
+        distortion_fit_8 = np.array([poly_5[0], poly_5[1], poly_5[2], poly_5[3], poly_5[4], 0.0, 0.0, 0.0])
+        if not frame_map_is_valid(distortion_fit_8):
+            raise ValueError("Fitted polynomial radius map is not strictly increasing over the calibrated frame")
 
     K_fit_33: Float64[ndarray, "3 3"] = np.array(
         [[focal_fit_px, 0.0, fit_center_native_xy[0]], [0.0, focal_fit_px, fit_center_native_xy[1]], [0.0, 0.0, 1.0]]
@@ -221,8 +237,6 @@ def opencv_rational_from_apple(
     max_residual_px: float = float(
         np.max(np.linalg.norm(rectified_check_n12.reshape(-1, 2) - apple_rectified(distorted_check_n2), axis=1))
     )
-    if max_residual_px > residual_bound_px:
-        raise ValueError(f"Rational fit residual {max_residual_px:.6f} px exceeds the {residual_bound_px} px bound")
 
     ratio: float = float(K_native[0, 0]) / focal_fit_px
     distortion_physical_8: Float64[ndarray, "8"] = distortion_fit_8 * np.array(
