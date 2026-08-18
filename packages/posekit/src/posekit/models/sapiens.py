@@ -42,6 +42,7 @@ from posekit.runtimes import (
 from posekit.skeletons import COCO_133
 
 SapiensModelSize = Literal["0.4B", "0.8B", "1B"]
+SAPIENS_ONNX_EXPORT_VERSION: int = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,7 +165,10 @@ def _ensure_sapiens_onnx(model_size: SapiensModelSize, static_batch: int, *, bf1
     # graphs overflow; opset >= 22 required for bf16 Conv). bf16=False keeps the
     # plain fp32 graph ONNX Runtime has always run (ORT lacks bf16 Conv kernels).
     dtype_key: str = "bf16" if bf16 else "fp32"
-    onnx_path: Path = DEFAULT_ONNX_CACHE_DIR / f"sapiens2_{model_size.lower()}_pose_b{static_batch}_{dtype_key}.onnx"
+    # bf16 exports now carry fp32 ConvTranspose islands, so warm caches must re-export.
+    onnx_path: Path = (
+        DEFAULT_ONNX_CACHE_DIR / f"sapiens2_{model_size.lower()}_pose_b{static_batch}_{dtype_key}_v{SAPIENS_ONNX_EXPORT_VERSION}.onnx"
+    )
     if onnx_path.exists():
         return onnx_path
     onnx_path.parent.mkdir(parents=True, exist_ok=True)

@@ -114,3 +114,24 @@ def test_allow_tf32_cache_key(tmp_path: Path) -> None:
     assert default_path != notf32_path
     assert "notf32" in notf32_path.name
     assert "notf32" not in default_path.name
+
+
+def test_fp32_transposed_conv_islands_share_weights_without_mutating() -> None:
+    """bf16 exports isolate transposed convs in fp32 without touching the caller's model."""
+    from trtkit.onnx_export import _Fp32Island, _with_fp32_transposed_convs
+
+    model = torch.nn.Sequential(
+        torch.nn.Conv2d(2, 4, 3, padding=1),
+        torch.nn.ConvTranspose2d(4, 2, 2, stride=2),
+    ).eval()
+    wrapped = _with_fp32_transposed_convs(model)
+
+    assert isinstance(wrapped[1], _Fp32Island)
+    assert wrapped[1].inner is model[1], "island must share the original conv (weights by reference)"
+    assert not any(isinstance(m, _Fp32Island) for m in model.modules()), "caller's tree must stay unmodified"
+    rewrapped = _with_fp32_transposed_convs(wrapped)
+    assert rewrapped[1] is wrapped[1], "re-wrapping must be idempotent"
+
+    x = torch.randn(1, 2, 8, 8)
+    with torch.inference_mode():
+        torch.testing.assert_close(wrapped(x), model(x))
