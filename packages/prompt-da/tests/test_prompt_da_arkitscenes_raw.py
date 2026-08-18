@@ -11,9 +11,9 @@ import numpy as np
 import pytest
 from numpy.testing import assert_array_equal
 
-pytest.importorskip("pyarrow", reason="ARKitScenes catalog deps live in the prompt-da-catalog envs")
-pytest.importorskip("torchcodec", reason="raw video decode deps live in the prompt-da-catalog envs")
-pytest.importorskip("arkitscenes_download", reason="ARKitScenes ingest deps live in the prompt-da-catalog envs")
+pytest.importorskip("pyarrow", reason="ARKitScenes catalog deps live in the prompt-da-stream envs")
+pytest.importorskip("torchcodec", reason="raw video decode deps live in the prompt-da-stream envs")
+pytest.importorskip("arkitscenes_download", reason="ARKitScenes ingest deps live in the prompt-da-stream envs")
 
 from rerun_prompt_da.apis.arkitscenes_shared import segments_to_process  # noqa: E402
 from rerun_prompt_da.apis.prompt_da_arkitscenes_raw import (  # noqa: E402

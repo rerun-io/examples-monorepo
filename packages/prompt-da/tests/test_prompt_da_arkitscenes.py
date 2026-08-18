@@ -1,24 +1,163 @@
 """Behavioral tests for the ARKitScenes PromptDA API."""
 
-import numpy as np
-import pytest
-from numpy.testing import assert_allclose, assert_array_equal
+from pathlib import Path
+from types import SimpleNamespace
 
-pytest.importorskip("pyarrow", reason="ARKitScenes catalog deps live in the prompt-da-catalog envs")
-pytest.importorskip("arkitscenes_download", reason="ARKitScenes catalog deps live in the prompt-da-catalog envs")
+import numpy as np
+import open3d as o3d
+import pytest
+import rerun as rr
+import torch
+from numpy.testing import assert_allclose, assert_array_equal
+from rerun.catalog import DatasetEntry
+from rerun.experimental import RrdReader
+from simplecv.ops.tsdf_depth_fuser import Open3DFuser
+
+pytest.importorskip("pyarrow", reason="ARKitScenes catalog deps live in the PromptDA catalog lanes")
+pytest.importorskip("arkitscenes_download", reason="ARKitScenes catalog deps live in the PromptDA catalog lanes")
+_dataloader = pytest.importorskip("rerun.experimental.dataloader")
+if not hasattr(_dataloader, "NoShuffle"):
+    pytest.skip("NVDEC tests need the prerelease Rerun dataloader", allow_module_level=True)
+
+from arkitscenes_download.ingest.paths import CONFIDENCE, DEPTH_PROMPTDA, PROMPTDA_MESH, VIDEO_WIDE  # noqa: E402
+from rerun.experimental.dataloader import RerunIterableDataset  # noqa: E402
+from simplecv.rerun_dataloader import SegmentNvdecDecoder  # noqa: E402
 
 from rerun_prompt_da.apis.arkitscenes_shared import (  # noqa: E402
     filter_depth_for_fusion,
+    log_fused_mesh,
     segments_to_process,
     stride_for,
     world_t_cam_from_pose,
 )
 from rerun_prompt_da.apis.prompt_da_arkitscenes import (  # noqa: E402
+    CompletedPromptDABatch,
+    PDAArkitScenesConfig,
+    fuse_and_log_batch,
+    log_promptda_frame,
     orientation_quarter_turns_from_segment_row,
     portrait_from_segment_row,
-    rotate_landscape_to_portrait,
-    rotate_portrait_to_landscape,
 )
+from rerun_prompt_da.promptda_stream import PromptDACollate, promptda_dataset  # noqa: E402
+
+
+def test_promptda_layer_rrd_keeps_depth_and_mesh_contract(tmp_path: Path) -> None:
+    """Write the registered layer's two entities with only depth on video_time."""
+    rrd_path: Path = tmp_path / "promptda.rrd"
+    with rr.RecordingStream("arkitscenes", recording_id="segment", send_properties=False) as recording:
+        recording.save(rrd_path)
+        log_promptda_frame(recording, 123_456_789, np.full((2, 3), 1500, dtype=np.uint16))
+        mesh: o3d.geometry.TriangleMesh = o3d.geometry.TriangleMesh(
+            o3d.utility.Vector3dVector(np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])),
+            o3d.utility.Vector3iVector(np.array([[0, 1, 2]], dtype=np.int32)),
+        )
+        mesh.compute_vertex_normals()
+        log_fused_mesh(recording, PROMPTDA_MESH, mesh)
+
+    reader: RrdReader = RrdReader(rrd_path)
+    chunks = list(reader.stream(store=reader.recordings()[0]).to_chunks())
+    chunks_by_path = {str(chunk.entity_path): chunk for chunk in chunks}
+    assert set(chunks_by_path) == {f"/{DEPTH_PROMPTDA}", f"/{PROMPTDA_MESH}"}
+    assert "video_time" in chunks_by_path[f"/{DEPTH_PROMPTDA}"].to_record_batch().schema.names
+
+
+def test_promptda_dataset_uses_nvdec_and_fetches_fusion_confidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Build one natural-order NVDEC query with the confidence needed by TSDF fusion."""
+    dataset = object.__new__(DatasetEntry)
+    captured: dict[str, object] = {}
+
+    def initialize_decoder(_decoder: SegmentNvdecDecoder, *args: object) -> None:
+        captured["decoder_args"] = args
+
+    def initialize_samples(_samples: RerunIterableDataset, *args: object, **kwargs: object) -> None:
+        captured["dataset_args"] = args
+        captured["dataset_kwargs"] = kwargs
+
+    monkeypatch.setattr(SegmentNvdecDecoder, "__init__", initialize_decoder)
+    monkeypatch.setattr(RerunIterableDataset, "__init__", initialize_samples)
+
+    samples, decoder = promptda_dataset(dataset, "segment", 10.0, torch.device("cuda"))
+
+    assert isinstance(samples, RerunIterableDataset)
+    assert isinstance(decoder, SegmentNvdecDecoder)
+    assert captured["decoder_args"] == (dataset, VIDEO_WIDE, "video_time", torch.device("cuda"), 60)
+    fields = captured["dataset_kwargs"]["fields"]  # type: ignore[index]
+    assert fields["video"].decode is decoder  # type: ignore[index]
+    assert fields["conf"].path == f"/{CONFIDENCE}:SegmentationImage:buffer"  # type: ignore[index]
+
+
+def test_promptda_collate_keeps_stored_confidence_and_honors_ingest_rotation() -> None:
+    """Prepare landscape model inputs while retaining confidence in catalog orientation."""
+    samples: RerunIterableDataset = object.__new__(RerunIterableDataset)
+    samples._sample_index = SimpleNamespace(  # pyrefly: ignore  # bad-assignment — minimal synthetic sampling grid
+        segments=[SimpleNamespace(index_start=100)], ns_per_sample=10
+    )
+    collate: PromptDACollate = PromptDACollate(samples, torch.device("cpu"), quarter_turns=3, timestamp_step_ns=12)
+    batch = collate([
+        {
+            "video": torch.arange(18, dtype=torch.uint8).reshape(3, 3, 2),
+            "depth": torch.zeros((1, 256, 192), dtype=torch.uint16),
+            "conf": torch.arange(256 * 192).to(torch.uint8),
+            "k": torch.eye(3, dtype=torch.float32).T.reshape(9),
+            "pose_t": torch.tensor([1.0, 2.0, 3.0]),
+            "pose_q": torch.tensor([0.0, 0.0, 0.0, 1.0]),
+        }
+    ])
+
+    assert batch is not None
+    assert batch.quarter_turns == 3
+    assert tuple(batch.rgb_bhw3.shape) == (1, 2, 3, 3)
+    assert tuple(batch.prompt_bhw.shape) == (1, 192, 256)
+    assert batch.confidence_bhw.shape == (1, 256, 192)
+    assert_array_equal(batch.confidence_bhw[0, 0, :6], np.arange(6, dtype=np.uint8))
+    assert batch.timestamps_ns == [100]
+    second_batch = collate([
+        {
+            "video": torch.arange(18, dtype=torch.uint8).reshape(3, 3, 2),
+            "depth": torch.zeros((1, 256, 192), dtype=torch.uint16),
+            "conf": torch.arange(256 * 192).to(torch.uint8),
+            "k": torch.eye(3, dtype=torch.float32).T.reshape(9),
+            "pose_t": torch.tensor([1.0, 2.0, 3.0]),
+            "pose_q": torch.tensor([0.0, 0.0, 0.0, 1.0]),
+        }
+    ])
+    assert second_batch is not None
+    assert second_batch.timestamps_ns == [112]
+
+
+def test_fuse_and_log_batch_preserves_frame_order_and_fusion_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Log and fuse every completed row in timestamp order."""
+    completed = CompletedPromptDABatch(
+        timestamps_ns=[100, 200],
+        quarter_turns=0,
+        depth_mm_bhw=np.full((2, 4, 6), 1500, dtype=np.uint16),
+        depth_model_mm_bhw=np.full((2, 2, 3), 1500, dtype=np.uint16),
+        rgb_stored_bhw3=np.full((2, 4, 6, 3), 128, dtype=np.uint8),
+        confidence_bhw=np.full((2, 1, 1), 2, dtype=np.uint8),
+        K_native_b33=np.repeat(np.eye(3, dtype=np.float32)[None], 2, axis=0),
+        world_T_cam_b44=np.repeat(np.eye(4)[None], 2, axis=0),
+        stored_hw=(4, 6),
+    )
+    logged_timestamps: list[int] = []
+    fused_depths: list[np.ndarray] = []
+
+    def record_depth(_recording: rr.RecordingStream, timestamp_ns: int, _depth_hw: np.ndarray) -> None:
+        logged_timestamps.append(timestamp_ns)
+
+    def record_fusion(_fuser: object, *, depth_hw: np.ndarray, **_kwargs: object) -> None:
+        fused_depths.append(depth_hw.copy())
+
+    monkeypatch.setattr("rerun_prompt_da.apis.prompt_da_arkitscenes.log_promptda_frame", record_depth)
+    monkeypatch.setattr(Open3DFuser, "fuse_frames", record_fusion)
+    fuser: Open3DFuser = object.__new__(Open3DFuser)
+    recording = rr.RecordingStream("test", recording_id="segment", send_properties=False)
+
+    inferred_frames = fuse_and_log_batch(completed, recording, fuser, PDAArkitScenesConfig())
+
+    assert inferred_frames == 2
+    assert logged_timestamps == [100, 200]
+    assert len(fused_depths) == 2
+    assert_array_equal(fused_depths[0], np.full((2, 3), 1500, dtype=np.uint16))
 
 
 def test_portrait_property_parses_catalog_list_value() -> None:
@@ -29,22 +168,13 @@ def test_portrait_property_parses_catalog_list_value() -> None:
 
 def test_portrait_property_is_required() -> None:
     """Reject segments whose required orientation metadata is absent."""
-    with pytest.raises(KeyError, match="portrait"):
+    with pytest.raises(KeyError, match="orientation"):
         portrait_from_segment_row({})
 
 
 def test_orientation_quarter_turns_parses_catalog_list_value() -> None:
     """Preserve ingest's stored rotation direction for portrait inference."""
     assert orientation_quarter_turns_from_segment_row({"property:capture:orientation_quarter_turns_ccw": [3]}) == 3
-
-
-def test_portrait_rotation_round_trip_preserves_asymmetric_layout() -> None:
-    """Undo ingest's CCW portrait bake for inference and restore it afterward."""
-    portrait = np.array([[10, 11], [20, 21], [30, 31]], dtype=np.uint16)
-    landscape = rotate_portrait_to_landscape(portrait, 1)
-    assert_array_equal(landscape, np.array([[30, 20, 10], [31, 21, 11]], dtype=np.uint16))
-    assert_array_equal(rotate_landscape_to_portrait(landscape, 1), portrait)
-    assert_array_equal(rotate_landscape_to_portrait(rotate_portrait_to_landscape(portrait, 3), 3), portrait)
 
 
 def test_stride_for_uses_nearest_native_frame_interval() -> None:
@@ -109,22 +239,3 @@ def test_segments_to_process_requires_exactly_one_selection_mode(video_id: str |
     """Reject missing and ambiguous segment selection modes."""
     with pytest.raises(SystemExit, match="exactly one"):
         segments_to_process([], video_id, process_all, "promptda")
-
-
-def test_resilient_decoder_turns_decode_errors_into_skippable_none() -> None:
-    """A per-sample AV1 decode failure becomes a None frame, not a crash."""
-    from unittest.mock import patch
-
-    import av
-    import pyarrow as pa
-    from rerun.experimental.dataloader import VideoFrameDecoder
-
-    from rerun_prompt_da.apis.prompt_da_arkitscenes import ResilientVideoFrameDecoder
-
-    decoder = ResilientVideoFrameDecoder(codec="av1", keyframe_interval=300, fps_estimate=60.0)
-    error = av.error.InvalidDataError(1094995529, "Invalid data found when processing input")
-    with patch.object(VideoFrameDecoder, "decode", side_effect=error):
-        assert decoder.decode(pa.chunked_array([pa.array([b"packet"])]), 0, "segment") is None
-    # Retain the observed failure for diagnostics. The dav1d_flush deadlock specifically needs an
-    # errored, un-drained context finalized at interpreter shutdown; prompt del + gc is safe.
-    assert decoder.decode_failures == [error]
