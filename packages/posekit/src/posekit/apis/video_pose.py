@@ -19,7 +19,7 @@ from tqdm.auto import tqdm
 
 from posekit.models import AnnotatedDetectorConfig, AnnotatedPose2dConfig, Pose2dPipeline, RtmPoseConfig, YoloxDetectorConfig
 from posekit.predictions import BoxDetections, Keypoints2d
-from posekit.skeletons import KeypointSkeleton
+from posekit.rerun_logging import log_person_points2d, log_skeleton_annotation_context
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -48,28 +48,6 @@ class VideoPoseConfig:
         return Pose2dPipeline(self.detector.setup(), self.pose.setup())
 
 
-def log_skeleton_annotation_context(skeleton: KeypointSkeleton, *, entity_path: str = "video") -> None:
-    """Log a Rerun annotation context describing the skeleton's keypoints/links.
-
-    Args:
-        skeleton: Skeleton format of the predictions.
-        entity_path: Entity subtree the context applies to.
-    """
-    rr.log(
-        entity_path,
-        rr.AnnotationContext(
-            [
-                rr.ClassDescription(
-                    info=rr.AnnotationInfo(id=0, label=skeleton.name),
-                    keypoint_annotations=[rr.AnnotationInfo(id=idx, label=name) for idx, name in enumerate(skeleton.keypoint_names)],
-                    keypoint_connections=list(skeleton.links),
-                )
-            ]
-        ),
-        static=True,
-    )
-
-
 def log_frame_predictions(
     *,
     frame_indices: Int[ndarray, "chunk"],
@@ -94,7 +72,7 @@ def log_frame_predictions(
             entities are never created in the recording.
     """
     person_frames: Int[ndarray, "n"] = detections.frame_indices.cpu().numpy()
-    boxes: Float32[ndarray, "n 4"] = detections.xyxy.cpu().numpy().astype(np.float32, copy=False)
+    boxes: Float32[ndarray, "n 4"] = detections.xyxy_numpy()
     xy: Float32[ndarray, "n k 2"] = keypoints.xy_numpy()
     scores: Float32[ndarray, "n k"] = keypoints.scores_numpy()
     for local_idx, (frame_idx, timestamp_ns) in enumerate(zip(frame_indices, timestamps_ns, strict=True)):
@@ -112,16 +90,14 @@ def log_frame_predictions(
                 continue
             live_slots.add(slot)
             row: int = int(rows[slot])
-            visible_xy: Float32[ndarray, "k 2"] = xy[row].copy()
-            visible_xy[scores[row] < keypoint_threshold] = np.nan
             rr.log(bbox_path, rr.Boxes2D(array=boxes[row][None], array_format=rr.Box2DFormat.XYXY))
-            rr.log(
+            log_person_points2d(
                 keypoints_path,
-                rr.Points2D(
-                    positions=visible_xy,
-                    keypoint_ids=np.arange(visible_xy.shape[0], dtype=np.uint16),
-                    class_ids=0,
-                ),
+                xy[row],
+                scores[row],
+                keypoint_threshold,
+                keypoint_ids=np.arange(xy.shape[1], dtype=np.uint16),
+                class_ids=0,
             )
 
 
