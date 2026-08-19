@@ -25,6 +25,8 @@ DEFAULT_MEAN: Float32[ndarray, "3"] = (255.0 * np.array([0.485, 0.456, 0.406])).
 """Per-channel RGB mean (0..255 scale) used to normalize crops."""
 DEFAULT_STD: Float32[ndarray, "3"] = (255.0 * np.array([0.229, 0.224, 0.225])).astype(np.float32)
 """Per-channel RGB std (0..255 scale) used to normalize crops."""
+MAMMANET_WEIGHTS_REPO: str = "pablovela5620/mamma-streaming-data"
+MAMMANET_WEIGHTS_FILE: str = "weights/ma_2d/mamma_mask_full_cvpr.safetensors"
 
 
 class MammaNet(nn.Module):
@@ -72,11 +74,38 @@ class MammaNet(nn.Module):
         return self.decoder(features, self.backbone.pos_embed)
 
 
-def load_mammanet(weights_path: Path, device: str = "cuda", config: MammaNetConfig = DEFAULT_MAMMANET_CONFIG) -> MammaNet:
-    """Load MammaNet from the converted safetensors state dict (strict)."""
+def resolve_mammanet_weights_path(weights_path: Path | None = None) -> Path:
+    """Resolve an explicit checkpoint or download the published MammaNet weights."""
+    if weights_path is None:
+        from huggingface_hub import hf_hub_download
+
+        weights_path = Path(hf_hub_download(repo_id=MAMMANET_WEIGHTS_REPO, repo_type="dataset", filename=MAMMANET_WEIGHTS_FILE))
+    resolved_path: Path = weights_path.expanduser().resolve()
+    if not resolved_path.is_file():
+        raise FileNotFoundError(f"MammaNet weights not found: {resolved_path}")
+    return resolved_path
+
+
+def load_mammanet(
+    weights_path: Path | None = None,
+    device: str = "cuda",
+    config: MammaNetConfig = DEFAULT_MAMMANET_CONFIG,
+) -> MammaNet:
+    """Load MammaNet from the converted safetensors state dict.
+
+    Args:
+        weights_path: Local checkpoint path. ``None`` downloads the published
+            MammaNet weights from Hugging Face.
+        device: Device receiving the loaded model.
+        config: MammaNet architecture configuration.
+
+    Returns:
+        The strictly loaded evaluation model.
+    """
+    resolved_path: Path = resolve_mammanet_weights_path(weights_path)
     from safetensors.torch import load_file
 
     model: MammaNet = MammaNet(config)
-    state_dict: dict[str, torch.Tensor] = load_file(str(weights_path))
+    state_dict: dict[str, torch.Tensor] = load_file(str(resolved_path))
     model.load_state_dict(state_dict, strict=True)
     return model.to(device).eval()

@@ -14,6 +14,7 @@ from mamma.engine.types import CameraTracks
 from mamma.landmarks.config import DEFAULT_MAMMANET_CONFIG, MammaNetConfig
 from mamma.landmarks.crops import box_geometry, gpu_crop_batch, gpu_mask_crop_batch, unproject_joints2d
 from mamma.landmarks.mammanet import MammaNet, load_mammanet
+from mamma.landmarks.tensorrt_backend import INPUT_NAMES, OUTPUT_NAMES
 
 
 @dataclass(slots=True)
@@ -41,7 +42,7 @@ class LandmarkEstimator:
 
     def __init__(
         self,
-        weights_path: Path,
+        weights_path: Path | None = None,
         device: str = "cuda",
         config: MammaNetConfig = DEFAULT_MAMMANET_CONFIG,
         compile_model: bool = False,
@@ -117,15 +118,15 @@ class LandmarkEstimator:
         img_crops, _ = gpu_crop_batch(frames_batch, centers * s, sizes * s, None, self.config)
         mask_crops = gpu_mask_crop_batch(masks_batch, centers, sizes, self.config)
         if self.runner is not None and img_crops.shape[0] <= 4:
-            out: dict[str, torch.Tensor | None] = dict(self.runner({"crops": img_crops, "masks": mask_crops}))
+            out: dict[str, torch.Tensor | None] = dict(self.runner({INPUT_NAMES[0]: img_crops, INPUT_NAMES[1]: mask_crops}))
         else:
             with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16, enabled="cuda" in self.device):
                 out = self.model(img_crops, mask_crops)
 
-        joints2d_raw = out["joints2d"]
-        visibility_raw = out["visibility"]
-        contact_raw = out["contact"]
-        floor_raw = out["floor_contact"]
+        joints2d_raw = out[OUTPUT_NAMES[0]]
+        visibility_raw = out[OUTPUT_NAMES[1]]
+        contact_raw = out[OUTPUT_NAMES[2]]
+        floor_raw = out[OUTPUT_NAMES[3]]
         assert joints2d_raw is not None and visibility_raw is not None and contact_raw is not None and floor_raw is not None
         joints2d_px: Float32[torch.Tensor, "n j 3"] = unproject_joints2d(joints2d_raw.float(), centers, sizes, self.config)
         visibility: Float32[torch.Tensor, "n j"] = torch.sigmoid(visibility_raw.squeeze(-1).float())

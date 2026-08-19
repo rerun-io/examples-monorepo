@@ -60,6 +60,10 @@ class BoxDetections:
         """Number of detections across the whole frame batch."""
         return int(self.xyxy.shape[0])
 
+    def xyxy_numpy(self) -> Float32[ndarray, "n 4"]:
+        """Copy boxes to CPU for logging/serialization."""
+        return self.xyxy.detach().cpu().numpy().astype(np.float32, copy=False)
+
     @classmethod
     def empty(cls, device: torch.device | str, *, mask_hw: tuple[int, int] | None = None, with_track_ids: bool = False) -> "BoxDetections":
         """Build a zero-detection result on the given device.
@@ -160,6 +164,22 @@ class DenseLandmarks2d:
     def num_instances(self) -> int:
         """Number of landmark instances across the whole frame batch."""
         return int(self.xy.shape[0])
+
+    def xy_numpy(self) -> Float32[ndarray, "n p 2"]:
+        """Copy landmarks to CPU for logging/serialization."""
+        return self.xy.detach().cpu().numpy().astype(np.float32, copy=False)
+
+    def visibility_numpy(self) -> Float32[ndarray, "n p"]:
+        """Copy visibility scores to CPU for logging/serialization."""
+        return self.visibility.detach().cpu().numpy().astype(np.float32, copy=False)
+
+    def contact_numpy(self) -> Float32[ndarray, "n p"]:
+        """Copy contact scores to CPU for logging/serialization."""
+        return self.contact.detach().cpu().numpy().astype(np.float32, copy=False)
+
+    def floor_contact_numpy(self) -> Float32[ndarray, "n p"]:
+        """Copy floor-contact scores to CPU for logging/serialization."""
+        return self.floor_contact.detach().cpu().numpy().astype(np.float32, copy=False)
 
 
 @dataclass(frozen=True, slots=True)
