@@ -1,0 +1,833 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dataforge — download → convert → register → view, from first principles</title>
+<style>
+:root{
+  --page:#0d0d0d; --surface:#1a1a19; --surface-2:#232322; --surface-3:#2c2c2a;
+  --ink:#ffffff; --ink-2:#c3c2b7; --ink-3:#898781;
+  --grid:#2c2c2a; --baseline:#383835; --ring:rgba(255,255,255,0.10);
+  --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500;
+  --good:#0ca30c; --warn:#fab219; --serious:#ec835a; --crit:#d03b3b;
+  --accent:var(--s1);
+  --mono:ui-monospace,'SF Mono','Cascadia Code',Menlo,Consolas,monospace;
+  --sans:system-ui,-apple-system,'Segoe UI',sans-serif;
+  --r:8px;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--page);color:var(--ink-2);font:15px/1.6 var(--sans)}
+h1,h2,h3,h4{color:var(--ink);line-height:1.25;font-weight:650}
+h1{font-size:26px;margin:0 0 6px}
+h2{font-size:21px;margin:0 0 4px;scroll-margin-top:70px}
+h3{font-size:16px;margin:22px 0 8px}
+a{color:var(--s1);text-decoration:none}
+a:hover{text-decoration:underline}
+code,.mono{font-family:var(--mono);font-size:0.92em}
+code{background:var(--surface-2);border:1px solid var(--ring);border-radius:4px;padding:1px 5px;color:var(--ink-2)}
+pre{background:var(--surface);border:1px solid var(--ring);border-radius:var(--r);padding:14px 16px;overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.55;color:var(--ink-2)}
+pre code{background:none;border:none;padding:0}
+strong{color:var(--ink);font-weight:600}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th{color:var(--ink);text-align:left;font-weight:600}
+th,td{padding:7px 10px;border-bottom:1px solid var(--grid);vertical-align:top}
+thead th{border-bottom:1px solid var(--baseline)}
+tbody tr:hover{background:rgba(255,255,255,0.02)}
+
+/* layout */
+header.top{position:sticky;top:0;z-index:50;background:rgba(13,13,13,0.85);backdrop-filter:blur(8px);border-bottom:1px solid var(--grid)}
+.topbar{max-width:1160px;margin:0 auto;padding:10px 24px;display:flex;gap:18px;align-items:baseline;flex-wrap:wrap}
+.topbar .t{color:var(--ink);font-weight:650;font-size:14px;white-space:nowrap}
+nav.toc{display:flex;gap:2px;flex-wrap:wrap;font-size:12.5px}
+nav.toc a{color:var(--ink-3);padding:3px 9px;border-radius:99px}
+nav.toc a:hover{color:var(--ink);text-decoration:none;background:var(--surface-2)}
+nav.toc a.on{color:var(--ink);background:var(--surface-3)}
+main{max-width:1160px;margin:0 auto;padding:28px 24px 80px}
+section{margin:0 0 54px}
+.kicker{font-size:11px;letter-spacing:0.14em;text-transform:uppercase;color:var(--s1);font-weight:700;margin:0 0 6px}
+.sub{color:var(--ink-3);font-size:13.5px;max-width:76ch;margin:2px 0 18px}
+p{max-width:76ch}
+.meta{color:var(--ink-3);font-size:12.5px;margin-top:10px}
+.meta b{color:var(--ink-2);font-weight:600}
+
+/* cards & bands */
+.band{background:var(--surface);border:1px solid var(--ring);border-radius:var(--r);padding:18px 20px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+@media(max-width:900px){.grid2,.grid3{grid-template-columns:1fr}}
+.tile{background:var(--surface);border:1px solid var(--ring);border-radius:var(--r);padding:12px 14px}
+.tile .v{color:var(--ink);font-size:24px;font-weight:650}
+.tile .l{font-size:12px;color:var(--ink-3);margin-top:2px;line-height:1.45}
+.tiles{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin:18px 0 0}
+@media(max-width:1000px){.tiles{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:620px){.tiles{grid-template-columns:repeat(2,1fr)}}
+
+/* decision list */
+ol.decisions{counter-reset:d;list-style:none;margin:14px 0 0;padding:0;display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:900px){ol.decisions{grid-template-columns:1fr}}
+ol.decisions li{counter-increment:d;background:var(--surface);border:1px solid var(--ring);border-radius:var(--r);padding:13px 15px 13px 52px;position:relative;font-size:13.5px}
+ol.decisions li::before{content:counter(d);position:absolute;left:15px;top:13px;width:24px;height:24px;border-radius:99px;background:var(--surface-3);color:var(--ink);font-weight:650;font-size:12px;display:flex;align-items:center;justify-content:center}
+ol.decisions li b{display:block;color:var(--ink);margin-bottom:2px}
+
+/* chips */
+.chip{display:inline-block;font-family:var(--mono);font-size:11px;padding:1px 8px;border-radius:99px;border:1px solid var(--ring);background:var(--surface-2);color:var(--ink-2);white-space:nowrap}
+.chip.ok{color:var(--good);border-color:rgba(12,163,12,.35)}
+.chip.warn{color:var(--warn);border-color:rgba(250,178,25,.35)}
+.chip.bad{color:var(--serious);border-color:rgba(236,131,90,.35)}
+.chip.s1{color:var(--s1)}.chip.s2{color:var(--s2)}.chip.s3{color:var(--s3)}.chip.s4{color:var(--s4)}
+
+/* matrix */
+.matrix-wrap{overflow-x:auto;border:1px solid var(--ring);border-radius:var(--r);background:var(--surface)}
+table.matrix{font-size:13px;min-width:820px}
+table.matrix th,table.matrix td{padding:8px 10px}
+table.matrix tbody th{font-family:var(--mono);font-size:12px;font-weight:500;color:var(--ink-2);white-space:nowrap}
+table.matrix td.c{text-align:center;font-size:14px;cursor:default}
+.g-full{color:var(--good)} .g-part{color:var(--warn)} .g-none{color:var(--ink-3)}
+.legend{display:flex;gap:18px;flex-wrap:wrap;font-size:12px;color:var(--ink-3);margin-top:8px}
+.legend span b{font-weight:400}
+
+/* system cards */
+.sys{background:var(--surface);border:1px solid var(--ring);border-radius:var(--r);padding:16px 18px;margin:0 0 14px}
+.sys h3{margin:0 0 2px;font-size:15.5px}
+.sys .role{font-size:12px;color:var(--ink-3);margin:0 0 10px}
+.sys .cols{display:grid;grid-template-columns:1fr 1fr;gap:0 24px}
+@media(max-width:820px){.sys .cols{grid-template-columns:1fr}}
+.sys h4{margin:8px 0 4px;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;font-weight:700}
+.sys h4.adopt{color:var(--good)} .sys h4.avoid{color:var(--serious)}
+.sys ul{margin:0;padding-left:16px;font-size:13px}
+.sys li{margin:0 0 6px}
+.sys details{margin-top:6px}
+.sys summary{cursor:pointer;font-size:12px;color:var(--ink-3)}
+.sys summary:hover{color:var(--ink)}
+cite.ref{font-style:normal;font-family:var(--mono);font-size:11px;color:var(--ink-3)}
+
+/* tree diff */
+.treediff{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:900px){.treediff{grid-template-columns:1fr}}
+.treediff pre{margin:0}
+.treediff .cap{font-size:12px;color:var(--ink-3);margin:0 0 6px;font-weight:600}
+.add{color:var(--good)} .del{color:var(--serious)} .dim{color:var(--ink-3)} .kept{color:var(--s1)}
+
+/* chart */
+.viz{background:var(--surface);border:1px solid var(--ring);border-radius:var(--r);padding:16px 18px}
+.viz .title{color:var(--ink);font-weight:600;font-size:14px;margin:0 0 2px}
+.viz .note{font-size:12px;color:var(--ink-3);margin:0 0 12px}
+#tip{position:fixed;pointer-events:none;background:var(--surface-3);border:1px solid var(--ring);border-radius:6px;padding:6px 10px;font-size:12px;color:var(--ink);opacity:0;transition:opacity .12s ease-out;z-index:99;max-width:320px}
+svg text{font-family:var(--sans)}
+svg .mono{font-family:var(--mono)}
+
+.callout{border-left:3px solid var(--s1);background:var(--surface);border-radius:0 var(--r) var(--r) 0;padding:12px 16px;margin:16px 0;font-size:13.5px;max-width:80ch}
+.callout.warn{border-left-color:var(--warn)}
+.footer{border-top:1px solid var(--grid);color:var(--ink-3);font-size:12px;padding:18px 0 0;margin-top:30px}
+.copybtn{float:right;background:var(--surface-3);color:var(--ink-2);border:1px solid var(--ring);border-radius:5px;font-size:11px;padding:2px 8px;cursor:pointer}
+.copybtn:hover{color:var(--ink)}
+
+@media print{
+  :root{--page:#ffffff;--surface:#fcfcfb;--surface-2:#f0efec;--surface-3:#e1e0d9;--ink:#0b0b0b;--ink-2:#333230;--ink-3:#52514e;--grid:#e1e0d9;--baseline:#c3c2b7;--ring:rgba(11,11,11,0.12);--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--good:#006300;--serious:#c0392b}
+  header.top{position:static;background:#fff}
+  section,.sys,.band{break-inside:avoid}
+  body{font-size:12px}
+}
+</style>
+</head>
+<body>
+<div id="tip" role="tooltip"></div>
+<header class="top"><div class="topbar">
+  <span class="t">dataforge</span>
+  <nav class="toc" id="toc">
+    <a href="#decisions">Decisions</a>
+    <a href="#pipeline">Pipeline</a>
+    <a href="#matrix">9-system matrix</a>
+    <a href="#downloads">Downloads</a>
+    <a href="#systems">System cards</a>
+    <a href="#proposal">Proposal</a>
+    <a href="#plan">Work plan</a>
+  </nav>
+</div></header>
+<main>
+
+<section id="hero" style="margin-bottom:38px">
+  <p class="kicker">Design report · first principles</p>
+  <h1>dataforge: one package for download → convert → register → view</h1>
+  <p class="sub" style="font-size:14.5px;max-width:82ch">One small package to consolidate every dataset pipeline in the monorepo. Evidence: a 9-system study + a decision interview. <strong>Hover anything for detail — the visible text is the short version.</strong></p>
+  <p class="meta"><b>branch</b> scrawny-fox · <b>rerun-sdk</b> 0.35.0 · <b>as of</b> 2026-08-16 · full findings <span class="mono">/tmp/dataflow-research/results/</span></p>
+</section>
+
+<section id="decisions">
+  <p class="kicker">Section 1</p>
+  <h2>The decisions, first</h2>
+  <p class="sub">Settled in the interview. Hover a card for the fine print.</p>
+  <ol class="decisions">
+    <li data-tip="egoexo-forge dies. simplecv-exoego and arkitscenes-download migrate in later, one at a time. robocap-slam stays untouched for now."><b>One package: <code>packages/dataforge/</code></b> Future home for all dataset work. v1 ports exactly two simplecv datasets: <strong>robocap</strong> + <strong>HOCap</strong>.</li>
+    <li data-tip="One generic driver module per verb; per-dataset logic lives in the spec. v1 ships no training or metric code, but the schema must not need a migration when they arrive."><b>Four verbs: download → convert → register → view.</b> Train + eval are the reserved second half.</li>
+    <li data-tip="dict of default configs → tyro.extras.subcommand_type_from_defaults, nerfstudio-style _target + setup() — exactly as simplecv does today."><b>Registration idiom: unchanged.</b> Adding a dataset = one import + one dict line.</li>
+    <li data-tip="Readers (Mp4Reader / McapReader / ParquetReader) → lenses → write_rrd with optimize=OBJECT_STORE. rr.log / send_columns stay legal for one-off statics. Transcode folds inside convert with a fingerprinted cache — no preprocess stage, no AV1 mirror."><b>Chunk-native conversion.</b> No per-frame <code>rr.log</code> loops. <strong>The .rrd is the baseline artifact.</strong></li>
+    <li data-tip="recording_id = '&lt;dataset&gt;__&lt;sequence&gt;'. Atomic write (tmp → os.replace) makes 'file exists = done' sound — no manifests, no hashes, no status DB. --force to redo; converter version stamped as a recording property."><b>Team artifact convention.</b> One base .rrd per sequence; derived layers (GT included) share the <code>recording_id</code>; layer-major on disk.</li>
+    <li data-tip="Composes common + simplecv (RerunTyroConfig, camera dataclasses). Files are the truth; register is scripted and re-runnable — the server forgets on restart. Typed Python downloads with 4 transport helpers; small subset by default, --fetch-all for everything. Linux only."><b>simplecv is the base · catalog optional · one shared schema</b> <code>dataforge:v1</code> in stdlib-only <code>schema.py</code> + <code>paths.py</code>.</li>
+  </ol>
+  <div class="tiles">
+    <div class="tile"><div class="v">9</div><div class="l">systems studied end-to-end by the research fan-out</div></div>
+    <div class="tile"><div class="v">13.8k</div><div class="l">LOC in simplecv's exoego data + apis layer today — the thing being replaced</div></div>
+    <div class="tile"><div class="v">842</div><div class="l">LOC to add one dataset (HOCap) under the old 3-class-tree design</div></div>
+    <div class="tile"><div class="v">5 → 1</div><div class="l">download mechanisms today → one typed spec with transport helpers</div></div>
+    <div class="tile"><div class="v">100–1000×</div><div class="l">chunk bloat from unoptimized writes seen in the team's own POC firefight</div></div>
+    <div class="tile"><div class="v">2</div><div class="l">datasets in v1: robocap + HOCap. Nothing else until they work.</div></div>
+  </div>
+</section>
+
+<section id="pipeline">
+  <p class="kicker">Section 2</p>
+  <h2>The pipeline</h2>
+  <p class="sub">Files are the truth; the catalog serves them. Dashed = built later.</p>
+
+  <div class="viz">
+    <div class="title">The dataforge pipeline</div>
+    <div class="note">Solid = v1. Dashed = designed-for, built later. Colors follow the stage everywhere in this report.</div>
+    <svg viewBox="0 0 1160 400" role="img" aria-label="Pipeline diagram: sources flow into download, then raw data on disk, then convert, then layered rrd files, then register into the catalog and view; train and eval consume the catalog later.">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#898781"/></marker>
+      </defs>
+      <!-- sources -->
+      <g font-size="11.5" class="mono">
+        <rect x="8" y="52" width="118" height="26" rx="5" fill="#232322" stroke="rgba(255,255,255,0.10)"/><text x="67" y="69" text-anchor="middle" fill="#c3c2b7">HF hub</text>
+        <rect x="8" y="88" width="118" height="26" rx="5" fill="#232322" stroke="rgba(255,255,255,0.10)"/><text x="67" y="105" text-anchor="middle" fill="#c3c2b7">HTTP / CDN</text>
+        <rect x="8" y="124" width="118" height="26" rx="5" fill="#232322" stroke="rgba(255,255,255,0.10)"/><text x="67" y="141" text-anchor="middle" fill="#c3c2b7">Google Drive</text>
+        <rect x="8" y="160" width="118" height="26" rx="5" fill="#232322" stroke="rgba(255,255,255,0.10)"/><text x="67" y="177" text-anchor="middle" fill="#c3c2b7">cred. API</text>
+        <rect x="8" y="196" width="118" height="26" rx="5" fill="#232322" stroke="rgba(255,255,255,0.10)"/><text x="67" y="213" text-anchor="middle" fill="#c3c2b7">NAS / local</text>
+        <text x="67" y="42" text-anchor="middle" fill="#898781" font-family="system-ui" font-size="11">transports</text>
+      </g>
+      <path d="M126,65 C150,65 150,120 168,124" fill="none" stroke="#898781" stroke-width="1.3" marker-end="url(#arr)"/>
+      <path d="M126,101 C146,101 150,122 168,130" fill="none" stroke="#898781" stroke-width="1.3" marker-end="url(#arr)"/>
+      <path d="M126,137 L168,137" fill="none" stroke="#898781" stroke-width="1.3" marker-end="url(#arr)"/>
+      <path d="M126,173 C146,173 150,152 168,144" fill="none" stroke="#898781" stroke-width="1.3" marker-end="url(#arr)"/>
+      <path d="M126,209 C150,209 150,154 168,150" fill="none" stroke="#898781" stroke-width="1.3" marker-end="url(#arr)"/>
+      <!-- download -->
+      <g>
+        <rect x="170" y="104" width="132" height="66" rx="8" fill="rgba(57,135,229,0.13)" stroke="#3987e5" stroke-width="1.5"/>
+        <text x="236" y="131" text-anchor="middle" fill="#ffffff" font-size="14" font-weight="650">download</text>
+        <text x="236" y="149" text-anchor="middle" fill="#c3c2b7" font-size="10.5">typed spec · markers</text>
+        <text x="236" y="162" text-anchor="middle" fill="#c3c2b7" font-size="10.5">subset default · --all</text>
+      </g>
+      <path d="M302,137 L344,137" fill="none" stroke="#898781" stroke-width="1.3" marker-end="url(#arr)"/>
+      <!-- raw artifact -->
+      <g>
+        <rect x="346" y="110" width="158" height="54" rx="6" fill="#232322" stroke="rgba(255,255,255,0.14)"/>
+        <text x="425" y="133" text-anchor="middle" fill="#c3c2b7" font-size="12" class="mono">data/raw/&lt;dataset&gt;/…</text>
+        <text x="425" y="150" text-anchor="middle" fill="#898781" font-size="10.5">upstream layout, untouched</text>
+      </g>
+      <path d="M504,137 L546,137" fill="none" stroke="#898781" stroke-width="1.3" marker-end="url(#arr)"/>
+      <!-- convert -->
+      <g>
+        <rect x="548" y="98" width="146" height="78" rx="8" fill="rgba(217,89,38,0.13)" stroke="#d95926" stroke-width="1.5"/>
+        <text x="621" y="124" text-anchor="middle" fill="#ffffff" font-size="14" font-weight="650">convert</text>
+        <text x="621" y="141" text-anchor="middle" fill="#c3c2b7" font-size="10.5">chunk streams + lenses</text>
+        <text x="621" y="154" text-anchor="middle" fill="#c3c2b7" font-size="10.5">transcode inside, cached</text>
+        <text x="621" y="167" text-anchor="middle" fill="#c3c2b7" font-size="10.5">atomic write · skip / --force</text>
+      </g>
+      <path d="M694,137 L736,137" fill="none" stroke="#898781" stroke-width="1.3" marker-end="url(#arr)"/>
+      <!-- layer artifacts -->
+      <g>
+        <rect x="738" y="84" width="188" height="106" rx="6" fill="#232322" stroke="rgba(255,255,255,0.14)"/>
+        <rect x="750" y="100" width="164" height="26" rx="4" fill="#1a1a19" stroke="rgba(255,255,255,0.14)"/>
+        <text x="832" y="117" text-anchor="middle" fill="#c3c2b7" font-size="11" class="mono">base/&lt;id&gt;.rrd</text>
+        <rect x="750" y="132" width="164" height="26" rx="4" fill="#1a1a19" stroke="rgba(255,255,255,0.14)"/>
+        <text x="832" y="149" text-anchor="middle" fill="#c3c2b7" font-size="11" class="mono">gt/&lt;id&gt;.rrd</text>
+        <text x="832" y="177" text-anchor="middle" fill="#898781" font-size="10.5">one recording_id, N layer files</text>
+      </g>
+      <!-- register + catalog -->
+      <path d="M926,110 C960,104 966,92 984,88" fill="none" stroke="#898781" stroke-width="1.3" marker-end="url(#arr)"/>
+      <g>
+        <rect x="986" y="56" width="128" height="58" rx="8" fill="rgba(25,158,112,0.13)" stroke="#199e70" stroke-width="1.5"/>
+        <text x="1050" y="80" text-anchor="middle" fill="#ffffff" font-size="14" font-weight="650">register</text>
+        <text x="1050" y="97" text-anchor="middle" fill="#c3c2b7" font-size="10.5">scripted · re-runnable</text>
+      </g>
+      <path d="M1050,114 L1050,140" fill="none" stroke="#898781" stroke-width="1.3" marker-end="url(#arr)"/>
+      <g>
+        <rect x="978" y="142" width="144" height="46" rx="6" fill="#232322" stroke="rgba(255,255,255,0.14)"/>
+        <text x="1050" y="161" text-anchor="middle" fill="#c3c2b7" font-size="11.5">rerun server catalog</text>
+        <text x="1050" y="177" text-anchor="middle" fill="#898781" font-size="10">in-memory · forgets on restart</text>
+      </g>
+      <!-- view -->
+      <path d="M1050,188 L1050,216" fill="none" stroke="#898781" stroke-width="1.3" marker-end="url(#arr)"/>
+      <g>
+        <rect x="986" y="218" width="128" height="52" rx="8" fill="rgba(201,133,0,0.15)" stroke="#c98500" stroke-width="1.5"/>
+        <text x="1050" y="241" text-anchor="middle" fill="#ffffff" font-size="14" font-weight="650">view</text>
+        <text x="1050" y="258" text-anchor="middle" fill="#c3c2b7" font-size="10.5">blueprint embedded</text>
+      </g>
+      <!-- direct file view path -->
+      <path d="M832,190 C832,258 900,244 984,244" fill="none" stroke="#898781" stroke-width="1.3" stroke-dasharray="none" marker-end="url(#arr)"/>
+      <text x="880" y="278" text-anchor="middle" fill="#898781" font-size="10.5">files are the truth — view works without the catalog</text>
+      <!-- future train/eval -->
+      <path d="M1122,165 C1150,165 1146,318 1108,318" fill="none" stroke="#898781" stroke-width="1.3" stroke-dasharray="5 4" marker-end="url(#arr)"/>
+      <g stroke-dasharray="5 4">
+        <rect x="880" y="296" width="108" height="44" rx="8" fill="none" stroke="#898781" stroke-width="1.3"/>
+        <rect x="998" y="296" width="108" height="44" rx="8" fill="none" stroke="#898781" stroke-width="1.3"/>
+      </g>
+      <text x="934" y="315" text-anchor="middle" fill="#898781" font-size="13" font-weight="600">train</text>
+      <text x="934" y="331" text-anchor="middle" fill="#898781" font-size="10">RerunIterableDataset</text>
+      <text x="1052" y="315" text-anchor="middle" fill="#898781" font-size="13" font-weight="600">eval</text>
+      <text x="1052" y="331" text-anchor="middle" fill="#898781" font-size="10">gt layer + properties</text>
+      <text x="934" y="360" text-anchor="middle" fill="#898781" font-size="10.5">second half — designed for, not built in v1</text>
+      <!-- stage color legend -->
+      <g font-size="11" transform="translate(180,320)">
+        <circle cx="0" cy="0" r="5" fill="#3987e5"/><text x="10" y="4" fill="#c3c2b7">download</text>
+        <circle cx="100" cy="0" r="5" fill="#d95926"/><text x="110" y="4" fill="#c3c2b7">convert</text>
+        <circle cx="196" cy="0" r="5" fill="#199e70"/><text x="206" y="4" fill="#c3c2b7">register</text>
+        <circle cx="290" cy="0" r="5" fill="#c98500"/><text x="300" y="4" fill="#c3c2b7">view</text>
+        <rect x="366" y="-5" width="18" height="10" fill="none" stroke="#898781" stroke-dasharray="4 3"/><text x="392" y="4" fill="#c3c2b7">future half</text>
+      </g>
+    </svg>
+  </div>
+
+  <h3>Why conversion changes: the logging SDK vs the chunk API</h3>
+  <p>Every <code>rr.log</code> call builds one tiny row-chunk — the bloat the team fought in the POC. The chunk path writes columnar once.</p>
+
+  <div class="viz" style="margin-top:12px">
+    <div class="title">Two conversion paths</div>
+    <div class="note">Same input, same recording — different write mechanics. dataforge takes the lower lane; <code>rr.log</code> survives only for one-off statics (calibration, meshes, annotation contexts).</div>
+    <svg viewBox="0 0 1120 230" role="img" aria-label="Comparison of the per-frame logging path against the chunk-native path.">
+      <defs><marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#898781"/></marker></defs>
+      <!-- slow lane -->
+      <rect x="6" y="14" width="1108" height="92" rx="8" fill="rgba(236,131,90,0.05)" stroke="rgba(236,131,90,0.30)"/>
+      <text x="22" y="36" fill="#ec835a" font-size="11" font-weight="700" letter-spacing="1.5">LOGGING-SDK PATH — TODAY'S EXOEGO CONVERTER</text>
+      <g font-size="11.5" class="mono">
+        <rect x="22" y="48" width="170" height="40" rx="5" fill="#232322" stroke="rgba(255,255,255,0.12)"/><text x="107" y="66" text-anchor="middle" fill="#c3c2b7">for frame in video:</text><text x="107" y="80" text-anchor="middle" fill="#c3c2b7">decode → numpy</text>
+        <rect x="238" y="48" width="150" height="40" rx="5" fill="#232322" stroke="rgba(255,255,255,0.12)"/><text x="313" y="66" text-anchor="middle" fill="#c3c2b7">rr.log(entity, …)</text><text x="313" y="80" text-anchor="middle" fill="#898781" font-family="system-ui">once per row</text>
+        <rect x="434" y="48" width="196" height="40" rx="5" fill="#232322" stroke="rgba(255,255,255,0.12)"/><text x="532" y="66" text-anchor="middle" fill="#c3c2b7">1 row-chunk per call</text><text x="532" y="80" text-anchor="middle" fill="#898781" font-family="system-ui">thousands of tiny chunks</text>
+        <rect x="676" y="48" width="180" height="40" rx="5" fill="#232322" stroke="rgba(236,131,90,0.45)"/><text x="766" y="66" text-anchor="middle" fill="#ec835a">bloated .rrd</text><text x="766" y="80" text-anchor="middle" fill="#898781" font-family="system-ui">100–1000× chunk bloat</text>
+        <rect x="902" y="48" width="196" height="40" rx="5" fill="#232322" stroke="rgba(236,131,90,0.45)"/><text x="1000" y="66" text-anchor="middle" fill="#ec835a">slow catalog reads</text><text x="1000" y="80" text-anchor="middle" fill="#898781" font-family="system-ui">+ single-thread register</text>
+      </g>
+      <path d="M192,68 L232,68" stroke="#898781" stroke-width="1.3" fill="none" marker-end="url(#arr2)"/>
+      <path d="M388,68 L428,68" stroke="#898781" stroke-width="1.3" fill="none" marker-end="url(#arr2)"/>
+      <path d="M630,68 L670,68" stroke="#898781" stroke-width="1.3" fill="none" marker-end="url(#arr2)"/>
+      <path d="M856,68 L896,68" stroke="#898781" stroke-width="1.3" fill="none" marker-end="url(#arr2)"/>
+      <!-- fast lane -->
+      <rect x="6" y="122" width="1108" height="92" rx="8" fill="rgba(12,163,12,0.05)" stroke="rgba(12,163,12,0.30)"/>
+      <text x="22" y="144" fill="#0ca30c" font-size="11" font-weight="700" letter-spacing="1.5">CHUNK-NATIVE PATH — DATAFORGE (ABC-130K PATTERN)</text>
+      <g font-size="11.5" class="mono">
+        <rect x="22" y="156" width="170" height="40" rx="5" fill="#232322" stroke="rgba(255,255,255,0.12)"/><text x="107" y="174" text-anchor="middle" fill="#c3c2b7">Mp4Reader / McapReader</text><text x="107" y="188" text-anchor="middle" fill="#898781" font-family="system-ui">no re-decode, re-mux only</text>
+        <rect x="238" y="156" width="150" height="40" rx="5" fill="#232322" stroke="rgba(255,255,255,0.12)"/><text x="313" y="174" text-anchor="middle" fill="#c3c2b7">DeriveLens / Mutate</text><text x="313" y="188" text-anchor="middle" fill="#898781" font-family="system-ui">typed components</text>
+        <rect x="434" y="156" width="196" height="40" rx="5" fill="#232322" stroke="rgba(255,255,255,0.12)"/><text x="532" y="174" text-anchor="middle" fill="#c3c2b7">merge streams</text><text x="532" y="188" text-anchor="middle" fill="#898781" font-family="system-ui">video + labels + properties</text>
+        <rect x="676" y="156" width="180" height="40" rx="5" fill="#232322" stroke="rgba(255,255,255,0.12)"/><text x="766" y="174" text-anchor="middle" fill="#c3c2b7">collect(optimize=</text><text x="766" y="188" text-anchor="middle" fill="#c3c2b7">OBJECT_STORE)</text>
+        <rect x="902" y="156" width="196" height="40" rx="5" fill="#232322" stroke="rgba(12,163,12,0.45)"/><text x="1000" y="174" text-anchor="middle" fill="#0ca30c">write_rrd → columnar</text><text x="1000" y="188" text-anchor="middle" fill="#898781" font-family="system-ui">atomic tmp → os.replace</text>
+      </g>
+      <path d="M192,176 L232,176" stroke="#898781" stroke-width="1.3" fill="none" marker-end="url(#arr2)"/>
+      <path d="M388,176 L428,176" stroke="#898781" stroke-width="1.3" fill="none" marker-end="url(#arr2)"/>
+      <path d="M630,176 L670,176" stroke="#898781" stroke-width="1.3" fill="none" marker-end="url(#arr2)"/>
+      <path d="M856,176 L896,176" stroke="#898781" stroke-width="1.3" fill="none" marker-end="url(#arr2)"/>
+    </svg>
+  </div>
+
+  <h3>How much code each studied system spends</h3>
+  <div class="viz" style="margin-top:12px">
+    <div class="title">Lines of Python per system</div>
+    <div class="note">Hover a bar. Single-purpose converters live near 1.5k LOC; framework-shaped data layers grow past 8k. dataforge targets the low band.</div>
+    <svg id="locchart" viewBox="0 0 1080 328" role="img" aria-label="Horizontal bar chart of lines of code per studied system, from nerfstudio at 47,600 down to egoexo-forge at 853.">
+      <g font-size="12" fill="#c3c2b7" text-anchor="end">
+        <text x="196" y="34">nerfstudio</text>
+        <text x="196" y="70">simplecv exoego</text>
+        <text x="196" y="106">VSLAM-LAB</text>
+        <text x="196" y="142">arkitscenes-download</text>
+        <text x="196" y="178">abc-130k</text>
+        <text x="196" y="214">trossen-oss</text>
+        <text x="196" y="250">robocap-slam</text>
+        <text x="196" y="286">egoexo-forge</text>
+      </g>
+      <g stroke="#2c2c2a" stroke-width="1">
+        <line x1="380" y1="10" x2="380" y2="298"/><line x1="552" y1="10" x2="552" y2="298"/><line x1="724" y1="10" x2="724" y2="298"/><line x1="896" y1="10" x2="896" y2="298"/><line x1="1068" y1="10" x2="1068" y2="298"/>
+      </g>
+      <g fill="#898781" font-size="10.5" text-anchor="middle">
+        <text x="380" y="315">10k</text><text x="552" y="315">20k</text><text x="724" y="315">30k</text><text x="896" y="315">40k</text><text x="1068" y="315">50k</text>
+      </g>
+      <line x1="208" y1="10" x2="208" y2="298" stroke="#383835" stroke-width="1.5"/>
+      <g fill="#3987e5">
+        <rect x="208" y="22" width="819" height="16" rx="3" data-tip="nerfstudio — 47,600 LOC. The whole training framework; included for scale. Its registry idiom is ~40 LOC of it."/>
+        <rect x="208" y="58" width="237" height="16" rx="3" data-tip="simplecv exoego — 13,800 LOC: 8.2k data loaders (30 files, 11 datasets, 3–4 classes each) + 5.6k exoego-facing apis. 719 LOC provably dead."/>
+        <rect x="208" y="94" width="136" height="16" rx="3" data-tip="VSLAM-LAB dataset core — 7,900 LOC: 37 dataset modules averaging 213 LOC + a 215-LOC abstract base."/>
+        <rect x="208" y="130" width="73" height="16" rx="3" data-tip="arkitscenes-download — 4,228 LOC source + 1,107 tests. One dataset, all four verbs, cloud fan-out included."/>
+        <rect x="208" y="166" width="30" height="16" rx="3" data-tip="abc-130k-conversion — 1,752 LOC + 437 tests. 130k episodes, >1 TB, Modal fan-out. No framework layer at all."/>
+        <rect x="208" y="202" width="25" height="16" rx="3" data-tip="trossen-oss — 1,481 LOC in five modules. Rerun's official learn-path reference: preprocess, catalog, enrich, query, train."/>
+        <rect x="208" y="238" width="25" height="16" rx="3" data-tip="robocap-slam — 1,452 LOC / 19 files. Looks tiny but borrows calibration + decode from simplecv (32.9k LOC)."/>
+        <rect x="208" y="274" width="15" height="16" rx="3" data-tip="egoexo-forge — 853 LOC of which ~490 are a dead fork of the migrated converter. ~360 live."/>
+      </g>
+      <g fill="#c3c2b7" font-size="11.5" font-variant-numeric="tabular-nums">
+        <text x="1033" y="34">47,600</text>
+        <text x="451" y="70">13,800</text>
+        <text x="350" y="106">7,900</text>
+        <text x="287" y="142">4,228</text>
+        <text x="244" y="178">1,752</text>
+        <text x="239" y="214">1,481</text>
+        <text x="239" y="250">1,452</text>
+        <text x="229" y="286">853</text>
+      </g>
+      <line x1="208" y1="298" x2="1068" y2="298" stroke="#383835" stroke-width="1.5"/>
+    </svg>
+  </div>
+
+  <div class="callout"><strong>Consumption already runs chunk-native in production</strong> — prompt-da streams NVDEC batches from the catalog; the team’s batching PR doubled throughput. Conversion is the half still on the old API.</div>
+</section>
+
+<section id="matrix">
+  <p class="kicker">Section 3</p>
+  <h2>Nine systems, six stages</h2>
+  <p class="sub">Nobody has the full row — eval is empty everywhere. Hover any cell.</p>
+  <div class="matrix-wrap">
+  <table class="matrix">
+    <thead><tr>
+      <th>system</th>
+      <th style="color:var(--s1)">download</th>
+      <th style="color:var(--s2)">convert</th>
+      <th style="color:var(--s3)">register / catalog</th>
+      <th style="color:var(--s4)">view</th>
+      <th>train</th>
+      <th>eval</th>
+      <th>role in this design</th>
+    </tr></thead>
+    <tbody>
+      <tr><th>simplecv exoego</th>
+        <td class="c g-part" data-tip="5 coexisting mechanisms: pixi hf-download tasks, Python CDN downloaders with sha1, credentialed MAMMA POST, HF streaming, NAS mounts.">◐</td>
+        <td class="c g-part" data-tip="One code path (batch_raw_to_rrd) but the writer IS the viewer: per-frame rr.log through visualize_exo_ego. Slow path.">◐</td>
+        <td class="c g-full" data-tip="rerun server + catalog_register.py; two-tier, idempotent; needs ulimit -n 524288.">●</td>
+        <td class="c g-full" data-tip="view-exoego-data with blueprint sent at log time.">●</td>
+        <td class="c g-part" data-tip="rerun_dataloader.py stopgap: unpicklable CUDA decoder, num_workers must be 0, dies with decode_threads>1.">◐</td>
+        <td class="c g-none" data-tip="No metrics, no splits. /world/pred paths reserved and never emitted; 3 MANO benchmarks are dead code.">✗</td>
+        <td>the donor: schema, registry idiom, and 11 datasets to migrate</td></tr>
+      <tr><th>egoexo-forge</th>
+        <td class="c g-none" data-tip="No download code left — all migrated to simplecv.">✗</td>
+        <td class="c g-none" data-tip="Only a ~490-LOC dead fork of the old converter remains.">✗</td>
+        <td class="c g-part" data-tip="A 'Phase 1 spike' that mounts HF-hosted rrds through the hub cache as a catalog.">◐</td>
+        <td class="c g-part" data-tip="110-line Gradio page that builds HF resolve URLs; network call at import time.">◐</td>
+        <td class="c g-none" data-tip="Nothing.">✗</td>
+        <td class="c g-none" data-tip="Nothing.">✗</td>
+        <td>deleted; name retired</td></tr>
+      <tr><th>robocap-slam</th>
+        <td class="c g-full" data-tip="One idempotent pixi task: test -d || hf download, with outputs= and depends-on so demos self-bootstrap.">●</td>
+        <td class="c g-none" data-tip="Deliberately none — reads raw MP4 + Kalibr YAML at runtime. Simple, but nothing cached, queryable, or trainable.">✗</td>
+        <td class="c g-none" data-tip="No catalog use.">✗</td>
+        <td class="c g-full" data-tip="Live viewer with blueprint built from the dataset's own cam_names.">●</td>
+        <td class="c g-none" data-tip="No training.">✗</td>
+        <td class="c g-part" data-tip="rrd_compare.py: reference-rrd regression diff with rtol/atol, media columns skipped. Baselines hardcoded to /tmp.">◐</td>
+        <td>a consumer (cuVSLAM), not a dataset — untouched</td></tr>
+      <tr><th>arkitscenes-download</th>
+        <td class="c g-full" data-tip="Apple CDN with metadata.csv index, curl --retry -C -, .part staging, per-capture planning, asset tables.">●</td>
+        <td class="c g-full" data-tip="Chunk-native-ish ingest, AV1 transcode with fingerprinted cache, atomic writes, rrd verify. But 8 layer files per capture and a ~195-line straight-line ingest fn.">●</td>
+        <td class="c g-full" data-tip="Layer-by-layer register with SKIP, per-segment completeness assertions, 1-second zero-copy sub-datasets.">●</td>
+        <td class="c g-full" data-tip="Per-item blueprint embedded in base + generic dataset defaults.">●</td>
+        <td class="c g-part" data-tip="prompt-da streams NVDEC batches from the catalog (RerunIterableDataset) — inference only, no training loop.">◐</td>
+        <td class="c g-none" data-tip="gt_depth layer + gt-clean sub-dataset exist for exactly this; no metric code compares against them.">✗</td>
+        <td>the modern in-house reference; migrates in later</td></tr>
+      <tr><th>trossen-oss</th>
+        <td class="c g-full" data-tip="One declarative hf download glob with an existence guard. Honest for HF-only sources.">●</td>
+        <td class="c g-full" data-tip="MCAP → base rrd + urdf layer sharing one recording_id; chunk streams; .rbl blueprint saved as data.">●</td>
+        <td class="c g-full" data-tip="Segments + layers + derived quality layer + DataFusion query results persisted as catalog Tables.">●</td>
+        <td class="c g-full" data-tip="Blueprint registered as dataset default.">●</td>
+        <td class="c g-full" data-tip="Streams joint scalars from catalog via RerunIterableDataset; training split selected by catalog query; runs registered in a _runs dataset.">●</td>
+        <td class="c g-none" data-tip="Deploy/eval advertised in the loop but absent from the code; LeRobot export is future work.">✗</td>
+        <td>the official experiment-loop narrative (rerun.io/learn)</td></tr>
+      <tr><th>abc-130k</th>
+        <td class="c g-full" data-tip="HF listing cached on the repo commit sha; per-worker hf_hub_download of only the 1-2 files needed.">●</td>
+        <td class="c g-full" data-tip="McapReader → lenses → closed-GOP transcode → collect(OBJECT_STORE) → write_rrd. One rrd per episode at 130k scale via Modal.">●</td>
+        <td class="c g-part" data-tip="Local file:// registration only — the S3 output path never reaches a catalog.">◐</td>
+        <td class="c g-full" data-tip="Generated .rbl committed and installed as dataset default.">●</td>
+        <td class="c g-none" data-tip="Notebook queries only.">✗</td>
+        <td class="c g-none" data-tip="Nothing.">✗</td>
+        <td>the scale + idempotency playbook</td></tr>
+      <tr><th>VSLAM-LAB</th>
+        <td class="c g-full" data-tip="40 datasets, 5 transports, resumable downloads, completion markers, declarative 'what's missing' resolution with human-fix instructions.">●</td>
+        <td class="c g-full" data-tip="7-hook template method normalizes everything to rgb/ + rgb.csv + calibration.yaml + groundtruth.csv. The IR is a directory, not an rrd.">●</td>
+        <td class="c g-none" data-tip="No catalog concept.">✗</td>
+        <td class="c g-part" data-tip="One 187-line optional Rerun script pinned to rerun-sdk <0.32. Visualization bolted on the side drifts.">◐</td>
+        <td class="c g-none" data-tip="No training — an external fork consumes the normalized directory.">✗</td>
+        <td class="c g-full" data-tip="evo-based ATE/RPE with resumable per-run CSV state and comparison plots — but by shelling out to evo_ape and unzipping its output.">●</td>
+        <td>the download→convert structure to steal (with types)</td></tr>
+      <tr><th>nerfstudio</th>
+        <td class="c g-part" data-tip="ns-download-data exists but 8 of 15 dataparsers have no downloader; gdown Drive IDs, no checksums.">◐</td>
+        <td class="c g-part" data-tip="ns-process-data → transforms.json + images/. No binary IR; parsers re-read JSON+JPEG every run, patched by cache_images config flags.">◐</td>
+        <td class="c g-none" data-tip="No catalog; handoff is a pickled-YAML config.yml next to checkpoints.">✗</td>
+        <td class="c g-full" data-tip="Web viewer wired into training.">●</td>
+        <td class="c g-full" data-tip="The whole point: TrainerConfig tree → pipeline → datamanager → model.">●</td>
+        <td class="c g-full" data-tip="ns-eval computes PSNR/SSIM/LPIPS — hardcoded, no metric registry.">●</td>
+        <td>the registry idiom we already copied; little else</td></tr>
+      <tr><th style="color:var(--ink)">dataforge v1</th>
+        <td class="c g-full" data-tip="Typed spec download() + transport helpers; subset by default, --all flag.">●</td>
+        <td class="c g-full" data-tip="Chunk-native, transcode inside, atomic writes, one base rrd per sequence + gt layer.">●</td>
+        <td class="c g-full" data-tip="Scripted idempotent register; catalog optional.">●</td>
+        <td class="c g-full" data-tip="Embedded per-sequence blueprint + dataset default.">●</td>
+        <td class="c g-none" data-tip="Reserved: paths.py constants + properties are designed as the dataloader/split contract.">—</td>
+        <td class="c g-none" data-tip="Reserved: gt layers + property columns are designed as the metric surface.">—</td>
+        <td><strong>the target row</strong></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="legend">
+    <span class="g-full">● <b>works today</b></span>
+    <span class="g-part">◐ <b>partial / caveats (hover)</b></span>
+    <span class="g-none">✗ <b>absent</b></span>
+    <span class="g-none">— <b>deliberately deferred</b></span>
+  </div>
+</section>
+
+<section id="downloads">
+  <p class="kicker">Section 4</p>
+  <h2>Every dataset, one download story</h2>
+  <p class="sub">Everything dataforge may ever hold, by transport. One typed <code>download()</code> + four helpers covers every row; gated rows get a printed manual step.</p>
+  <table>
+    <thead><tr><th>dataset</th><th>family</th><th>source</th><th>transport helper</th><th>access gate</th><th>status</th></tr></thead>
+    <tbody>
+      <tr data-tip="Self-captured rig data: ~24 sessions + factory calibration, 129 GB, 6 camera MP4s + 3 IMU .db per session. download() only verifies the mount and layout — it never fetches. (robocap-slam's small HF example sequence stays as its own demo task.)"><td><strong>robocap</strong></td><td>rig / ego</td><td>self-captured · NAS <code>/mnt/nas/datasets/robocap</code> (24 sessions, 129&nbsp;GB, synced from M5 2026-08-16)</td><td><span class="chip s4">local_verify</span></td><td>none — we generate it</td><td><span class="chip ok">v1 port</span></td></tr>
+      <tr><td><strong>HOCap</strong></td><td>rig / exo+ego</td><td>HF sample zip <code>pablovela5620/hocap-sample</code>; full set upstream</td><td><span class="chip s1">hf_fetch</span></td><td>none (sample)</td><td><span class="chip ok">v1 port</span></td></tr>
+      <tr><td>MAMMA</td><td>rig / exo</td><td>vendor HTTP POST + NAS mirror (6.85 TB verified)</td><td><span class="chip s2">api_fetch</span> / <span class="chip s4">local_verify</span></td><td>username + password (env)</td><td><span class="chip">later</span></td></tr>
+      <tr><td>EPFL smart-kitchen</td><td>rig / exo+ego</td><td>HF sample zip</td><td><span class="chip s1">hf_fetch</span></td><td>none</td><td><span class="chip">later</span></td></tr>
+      <tr><td>Assembly101</td><td>rig / exo+ego</td><td>HF sample; full set behind a form</td><td><span class="chip s1">hf_fetch</span></td><td>signup form (manual step)</td><td><span class="chip">later</span></td></tr>
+      <tr><td>HOT3D · Aria Gen2</td><td>rig / ego</td><td>projectaria CDN via per-account URL manifest</td><td><span class="chip s3">http_fetch</span> + sha1</td><td>manual: fetch urls.json from projectaria.com</td><td><span class="chip">later</span></td></tr>
+      <tr><td>Ego-100K · EgoDex</td><td>ego</td><td>HF streaming / NAS</td><td><span class="chip s1">hf_fetch</span> / <span class="chip s4">local_verify</span></td><td>none</td><td><span class="chip">later</span></td></tr>
+      <tr><td>UmeTrack · Polycam · EasyMocap</td><td>rig</td><td>NAS / HF zips</td><td><span class="chip s4">local_verify</span> / <span class="chip s1">hf_fetch</span></td><td>none</td><td><span class="chip">later</span></td></tr>
+      <tr><td>ARKitScenes</td><td>scene scan</td><td>Apple CDN + <code>metadata.csv</code> index (5,071 captures)</td><td><span class="chip s3">http_fetch</span> (resume, retry, staging)</td><td>license acceptance</td><td><span class="chip">migrates in</span></td></tr>
+      <tr><td>CA-1M laser GT</td><td>scene scan</td><td>tars listed in pinned GitHub manifests</td><td><span class="chip s3">http_fetch</span></td><td>CC BY-NC-ND (track per-layer license)</td><td><span class="chip">migrates in</span></td></tr>
+      <tr><td>TUM-RGBD · EuRoC · ETH3D…</td><td>SLAM (VSLAM-LAB)</td><td>university HTTP roots, per-sequence archives</td><td><span class="chip s3">http_fetch</span></td><td>none</td><td><span class="chip">candidate</span></td></tr>
+      <tr><td>Hilti SLAM</td><td>SLAM</td><td>Google Drive folder (crawl once, cache path→id manifest)</td><td><span class="chip s2">gdrive_fetch</span></td><td>none</td><td><span class="chip">candidate</span></td></tr>
+      <tr><td>abc-130k · trossen aloha</td><td>robot episodes</td><td>HF (gated / public), MCAP</td><td><span class="chip s1">hf_fetch</span> + listing cache</td><td>HF token (abc)</td><td><span class="chip">reference</span></td></tr>
+      <tr><td>bring-your-own capture</td><td>any</td><td>a local folder or video</td><td><span class="chip s4">local_verify</span></td><td>none</td><td><span class="chip">designed-in seam</span></td></tr>
+    </tbody>
+  </table>
+  <div class="callout warn"><strong>Two rules:</strong> subset by default (<code>--fetch-all</code> for the corpus) · completion markers, never <code>dir.exists()</code>.</div>
+</section>
+
+<section id="systems">
+  <p class="kicker">Section 5</p>
+  <h2>What each system taught us</h2>
+  <p class="sub">What dataforge copies and refuses. Citations are <code>file:line</code> in the studied repo; full findings at <span class="mono">/tmp/dataflow-research/results/</span>.</p>
+
+  <div class="sys">
+    <h3>simplecv exoego <span class="chip">packages/simplecv</span></h3>
+    <p class="role">The donor: 11 datasets, one rig schema, 13.8k LOC.</p>
+    <div class="cols">
+      <div><h4 class="adopt">Adopt</h4><ul>
+        <li>The dict → tyro registry, composable by dict-merge. <cite class="ref">exoego_dataset_configs.py:21</cite></li>
+        <li><code>SequenceIdentity</code>: one value → key, recording_id, path. <cite class="ref">sequence_identity.py:36</cite></li>
+        <li>Enumeration classmethods: free <code>--dry-run</code>, resume, progress. <cite class="ref">base_exoego.py:534</cite></li>
+        <li>Rig layout derived from camera data, not per-dataset code. <cite class="ref">base_exoego.py:314</cite></li>
+      </ul></div>
+      <div><h4 class="avoid">Avoid</h4><ul>
+        <li data-tip="Three parallel class trees (data/exo, data/ego, data/exoego) cost 3–4 files per dataset; HOCap alone is 842 LOC.">The exo/ego class split — 842 LOC per dataset.</li>
+        <li data-tip="rrd_exoego.py reads only the deprecated v1 layout and its setup() raises — no round-trip test of the recording contract.">A writer with no reader.</li>
+        <li data-tip="batch job silently defaults to max_conversions=5; hardcoded camera tables in catalog code; 719 LOC of dead benchmarks.">Per-frame <code>rr.log</code> convert; silent 5-item cap; 719 LOC dead code.</li>
+      </ul></div>
+    </div>
+  </div>
+
+  <div class="sys">
+    <h3>egoexo-forge <span class="chip">packages/egoexo-forge</span></h3>
+    <p class="role">Being replaced: ~360 live LOC of viewer glue.</p>
+    <div class="cols">
+      <div><h4 class="adopt">Adopt</h4><ul>
+        <li>Nothing unique — its registry idiom lives in simplecv (decision 3).</li>
+      </ul></div>
+      <div><h4 class="avoid">Avoid</h4><ul>
+        <li data-tip="tools/batch_convert.py prints a message and exits 0; the pixi task exists 'so it does not error'; a 490-LOC dead fork still lints green.">Deprecation-by-stub; a 490-LOC dead fork that lints green.</li>
+        <li data-tip="The 'rrd' subcommand is registered but its setup() unconditionally raises; CUDA+TensorRT locked into an env whose live code is an iframe; zero CI.">Broken subcommand in <code>--help</code>; CUDA env for an iframe; no CI.</li>
+      </ul></div>
+    </div>
+  </div>
+
+  <div class="sys">
+    <h3>robocap-slam <span class="chip">packages/robocap-slam</span></h3>
+    <p class="role">A consumer, not a dataset: cuVSLAM over the simplecv robocap loader. Studied as the simplicity baseline (1,452 LOC).</p>
+    <div class="cols">
+      <div><h4 class="adopt">Adopt</h4><ul>
+        <li>Self-bootstrapping download task (<code>outputs=</code> + <code>depends-on</code>). <cite class="ref">pixi.toml:1163</cite></li>
+        <li>Nested <code>RerunTyroConfig</code>; field docstrings as <code>--help</code>; 10-line shims.</li>
+        <li>Reference-rrd regression diff as an eval gate. <cite class="ref">rrd_compare.py:317</cite></li>
+      </ul></div>
+      <div><h4 class="avoid">Avoid</h4><ul>
+        <li data-tip="OpenCV re-decode + Kalibr re-parse on every run — nothing cached, shareable, or trainable.">Skipping conversion entirely.</li>
+        <li data-tip="BaseTrackDataset mandates cuvslam cameras, so importing any dataset imports cuvslam; eval baselines hardcoded to /tmp.">An ABC shaped around one consumer; /tmp eval baselines.</li>
+      </ul></div>
+    </div>
+  </div>
+
+  <div class="sys">
+    <h3>arkitscenes-download <span class="chip">packages/arkitscenes-download</span></h3>
+    <p class="role">Most modern in-house package: 4 verbs, layers, catalog, 4,228 LOC.</p>
+    <div class="cols">
+      <div><h4 class="adopt">Adopt</h4><ul>
+        <li>Module-per-verb: <code>Config</code> + <code>main</code> + 5-line shim. No framework.</li>
+        <li>Stdlib-only <code>schema.py</code>/<code>paths.py</code> contracts, pinned by a test.</li>
+        <li><code>atomic_recording</code> (26 lines). <cite class="ref">ingest/recording.py</cite></li>
+        <li>Zero-copy sub-datasets from filtered segment tables. <cite class="ref">ingest/subdataset.py</cite></li>
+        <li>Typed properties as the query surface; subprocess-per-item batch runner.</li>
+      </ul></div>
+      <div><h4 class="avoid">Avoid</h4><ul>
+        <li data-tip="ingest writes sequence-major, CA-1M writes layer-major; auto-detection leaks into three modules.">Two on-disk layouts behind auto-detection.</li>
+        <li data-tip="5,015 captures × 8 files = 40,120 fds; needs ulimit -n 524288. Team convention: base = one file.">8 raw layer files per capture → 40k fds.</li>
+        <li data-tip="A ~195-line straight-line ingest fn (no per-layer re-run) and two forked pixi lanes with duplicate 420-LOC modules to trial a dataloader API.">Monolithic ingest fn; forked lanes to try an API.</li>
+      </ul></div>
+    </div>
+  </div>
+
+  <div class="sys">
+    <h3>trossen-oss <span class="chip">rerun-io/trossen-oss · rerun.io/learn</span></h3>
+    <p class="role">The official experiment loop; the only system that trains from the catalog.</p>
+    <div class="cols">
+      <div><h4 class="adopt">Adopt</h4><ul>
+        <li>Base vs derived layers sharing one <code>recording_id</code>. <cite class="ref">preprocessing.py:280</cite></li>
+        <li>Idempotent re-registration (<code>REPLACE</code> + <code>--no-recreate</code>); blueprint shipped as data.</li>
+        <li>Split = a catalog query; runs registered in a <code>_runs</code> dataset. <cite class="ref">train.py:66</cite></li>
+      </ul></div>
+      <div><h4 class="avoid">Avoid</h4><ul>
+        <li data-tip="Dataset name duplicated in three configs and three notebooks; entity paths, joints, blueprint are module constants — a second dataset means editing modules.">No dataset abstraction at all.</li>
+        <li data-tip="'entity:Scalars:scalars' strings duplicated across SQL, dataloader Fields, and notebooks — a typo is a runtime error.">Component ids as magic strings everywhere.</li>
+      </ul></div>
+    </div>
+  </div>
+
+  <div class="sys">
+    <h3>abc-130k-conversion <span class="chip">rerun-io/abc-130k-conversion</span></h3>
+    <p class="role">The scale playbook: 130k episodes, &gt;1 TB, 1,752 LOC, no framework.</p>
+    <div class="cols">
+      <div><h4 class="adopt">Adopt</h4><ul>
+        <li>Content-derived id = filename = S3 key = segment id. <cite class="ref">episode_index.py:36</cite></li>
+        <li>Two-level idempotency; zero-byte output = not done; <code>--limit</code> means "N more".</li>
+        <li>Listing cached on repo sha; probe pass over config matrix; closed-GOP re-encode. <cite class="ref">convert.py:224</cite></li>
+      </ul></div>
+      <div><h4 class="avoid">Avoid</h4><ul>
+        <li data-tip="spawn_map with no retries= and no per-item status record — 'which 200 failed?' means diffing listings by hand.">No retries, no failure record at 130k items.</li>
+        <li data-tip="HF_REPO_ID, DATA_ROOT, APPLICATION_ID, output prefix, blueprint path — five files; and discovery derives the id twice (local vs HF).">Dataset identity smeared across five files; id derived twice.</li>
+      </ul></div>
+    </div>
+  </div>
+
+  <div class="sys">
+    <h3>VSLAM-LAB <span class="chip">VSLAM-LAB/VSLAM-LAB</span></h3>
+    <p class="role">40 datasets, one CLI — the download→convert structure, untyped.</p>
+    <div class="cols">
+      <div><h4 class="adopt">Adopt</h4><ul>
+        <li>One tiny normalized IR per sequence — dataforge makes it the .rrd. <cite class="ref">DatasetVSLAMLAB.py:101</cite></li>
+        <li>Independently-callable stage hooks; completion markers; never mutate the canonical sequence.</li>
+        <li>Missing-data resolution: auto-fixable vs needs-a-human, fix printed. <cite class="ref">DatasetVSLAMLAB_issues.py:92</cite></li>
+      </ul></div>
+      <div><h4 class="avoid">Avoid</h4><ul>
+        <li data-tip="get_dataset.py returns the string 'Invalid case' on a miss; the CLI is a sys.argv if-chain where a typo silently succeeds.">Dicts of lambdas + a <code>sys.argv</code> if-chain.</li>
+        <li data-tip="~1,400 lines of markdown encode the dataset contract; closed lists belong in Literal/Enum; zero tests; rerun pinned <0.32 on the side.">Prose as the type system; no tests; Rerun bolted on.</li>
+      </ul></div>
+    </div>
+  </div>
+
+  <div class="sys">
+    <h3>nerfstudio <span class="chip">nerfstudio-project/nerfstudio</span></h3>
+    <p class="role">47.6k LOC — studied for the registry idiom and the data regrets.</p>
+    <div class="cols">
+      <div><h4 class="adopt">Adopt</h4><ul>
+        <li><code>InstantiateConfig</code> + dict-of-instances registry — already ours, kept. <cite class="ref">base_config.py:46</cite></li>
+        <li>Nested registries as typed fields → free nested subcommands.</li>
+        <li>"Not installed" stubs visible in <code>--help</code> — right shape for gated datasets. <cite class="ref">download_data.py:556</cite></li>
+      </ul></div>
+      <div><h4 class="avoid">Avoid</h4><ul>
+        <li data-tip="in-repo dict, entry points, env var, and external-methods advertisement, merged by 25 lines of overwrite semantics.">Four registration channels merged by overwrite.</li>
+        <li data-tip="yaml.dump of a live dataclass graph + unsafe reload breaks on rename and forces a _target re-patch hack.">Pickled-YAML configs; three unrelated registries (8/15 parsers lack downloaders).</li>
+      </ul></div>
+    </div>
+  </div>
+</section>
+
+<section id="proposal">
+  <p class="kicker">Section 6</p>
+  <h2>The dataforge proposal</h2>
+  <p class="sub">Left: today. Right: the replacement. <span class="kept">blue = kept</span> · <span class="add">green = new</span> · <span class="del">red = dies</span>.</p>
+
+  <div class="treediff">
+    <div>
+      <p class="cap">TODAY — four packages, five download mechanisms</p>
+<pre>packages/simplecv/                <span class="dim">13.8k exoego-facing LOC</span>
+  simplecv/
+    data/
+      <span class="del">exo/</span>      <span class="dim"># base_exo + per-dataset exo halves</span>
+      <span class="del">ego/</span>      <span class="dim"># base_ego + per-dataset ego halves</span>
+      <span class="del">exoego/</span>   <span class="dim"># combined classes — 3–4 files/dataset</span>
+    apis/
+      <span class="del">exoego_tools/</span>  <span class="dim"># view_exoego.py = the converter</span>
+      <span class="del">download_hot3d.py · download_mamma.py · …</span>
+    configs/
+      <span class="kept">exoego_dataset_configs.py</span>  <span class="dim"># registry idiom — kept</span>
+      <span class="kept">base_config.py</span>             <span class="dim"># _target + setup() — kept</span>
+    <span class="kept">rerun_log_utils.py</span>           <span class="dim"># RerunTyroConfig — stays, imported</span>
+<span class="del">packages/egoexo-forge/</span>          <span class="dim"># ~360 live LOC — deleted</span>
+packages/robocap-slam/           <span class="dim"># no artifact; untouched for now</span>
+packages/arkitscenes-download/   <span class="dim"># own verbs; migrates in later</span>
+<span class="del">+ AV1 mirror dirs · per-frame rr.log · 5 download paths</span></pre>
+    </div>
+    <div>
+      <p class="cap">PROPOSED — packages/dataforge/</p>
+<pre><span class="add">packages/dataforge/</span>
+  pyproject.toml
+  dataforge/
+    __init__.py      <span class="dim"># beartype activation</span>
+    <span class="add">schema.py</span>        <span class="dim"># layers · properties · "dataforge:v1" — stdlib-only</span>
+    <span class="add">paths.py</span>         <span class="dim"># entity paths · timeline — stdlib-only</span>
+    <span class="kept">identity.py</span>      <span class="dim"># SequenceIdentity → recording_id · rrd path</span>
+    <span class="add">transports.py</span>    <span class="dim"># hf / http / gdrive / local + markers</span>
+    <span class="add">writing.py</span>       <span class="dim"># atomic_recording: tmp → os.replace</span>
+    datasets/
+      <span class="kept">__init__.py</span>    <span class="dim"># dataset_defaults dict → tyro union</span>
+      <span class="add">robocap.py</span>     <span class="dim"># one file per dataset — spec + streams</span>
+      <span class="add">hocap.py</span>       <span class="dim">#   + gt layer stream</span>
+    apis/            <span class="dim"># one Config + main per verb</span>
+      <span class="add">download.py · convert.py · register.py · view.py</span>
+  tools/apps/        <span class="dim"># 5-line tyro shims</span>
+  tests/             <span class="dim"># tiny fixtures · identity · transports · schema pin</span></pre>
+    </div>
+  </div>
+
+  <h3>The dataset spec, sketched</h3>
+  <p>Same idiom as today; the only new obligations: per-verb methods, chunk streams.</p>
+  <pre><button class="copybtn" data-copy>copy</button><code># dataforge/datasets/hocap.py
+@dataclass
+class HocapConfig(DataforgeDatasetConfig):
+    _target: type = field(default_factory=lambda: HocapDataset)
+    subset: tuple[str, ...] = ("subject_1",)     # small fetch by default
+    fetch_all: bool = False                      # --fetch-all opts into the corpus
+
+class HocapDataset(DataforgeDataset):
+    def download(self) -> None: ...              # transports.hf_fetch + completion marker
+    def sequences(self) -> Iterable[SequenceIdentity]: ...
+    def base_stream(self, seq) -> LazyChunkStream: ...
+        # Mp4Reader re-mux + rig transforms + pinholes + properties + blueprint
+    def layer_streams(self, seq) -> dict[str, LazyChunkStream]:
+        return {"gt": self._gt_stream(seq)}      # MANO + keypoints as a layer
+
+# dataforge/datasets/__init__.py — the whole registry
+dataset_defaults: dict[str, DataforgeDatasetConfig] = {
+    "robocap": RobocapConfig(),
+    "hocap": HocapConfig(),
+}</code></pre>
+
+  <h3>What convert produces</h3>
+  <div class="viz">
+    <div class="title">One sequence on disk and in the catalog</div>
+    <div class="note">Layer-major files; the shared <code>recording_id</code> is the only glue. The catalog stacks the files into one segment; a missing optional layer is a first-class "not available", never an error.</div>
+    <svg viewBox="0 0 1120 250" role="img" aria-label="Diagram showing base and gt rrd files sharing one recording id, stacked by the catalog into a single segment with queryable properties.">
+      <defs><marker id="arr3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#898781"/></marker></defs>
+      <text x="30" y="30" fill="#898781" font-size="11" font-weight="700" letter-spacing="1.5">ON DISK — data/dataforge/rrd/</text>
+      <g class="mono" font-size="12">
+        <rect x="30" y="46" width="300" height="54" rx="6" fill="#232322" stroke="rgba(217,89,38,0.5)"/>
+        <text x="46" y="69" fill="#c3c2b7">base/hocap__subject_1_seq01.rrd</text>
+        <text x="46" y="88" fill="#898781" font-size="10.5" font-family="system-ui">all raw modalities · blueprint · properties</text>
+        <rect x="30" y="112" width="300" height="54" rx="6" fill="#232322" stroke="rgba(217,89,38,0.5)"/>
+        <text x="46" y="135" fill="#c3c2b7">gt/hocap__subject_1_seq01.rrd</text>
+        <text x="46" y="154" fill="#898781" font-size="10.5" font-family="system-ui">MANO + keypoints · re-generable alone</text>
+        <rect x="30" y="178" width="300" height="42" rx="6" fill="none" stroke="#898781" stroke-dasharray="5 4"/>
+        <text x="46" y="199" fill="#898781">pred/hocap__subject_1_seq01.rrd</text>
+        <text x="46" y="213" fill="#898781" font-size="10.5" font-family="system-ui">future: model outputs attach the same way</text>
+      </g>
+      <!-- recording id pill -->
+      <rect x="368" y="106" width="304" height="30" rx="15" fill="rgba(57,135,229,0.13)" stroke="#3987e5"/>
+      <text x="520" y="126" text-anchor="middle" fill="#ffffff" font-size="11.5" class="mono">recording_id = hocap__subject_1_seq01</text>
+      <path d="M330,73 C356,73 342,110 364,116" stroke="#898781" stroke-width="1.3" fill="none" marker-end="url(#arr3)"/>
+      <path d="M330,139 C356,139 342,128 364,124" stroke="#898781" stroke-width="1.3" fill="none" marker-end="url(#arr3)"/>
+      <path d="M330,199 C360,199 346,136 364,128" stroke="#898781" stroke-width="1.3" fill="none" stroke-dasharray="5 4" marker-end="url(#arr3)"/>
+      <path d="M672,121 L700,121" stroke="#898781" stroke-width="1.3" fill="none" marker-end="url(#arr3)"/>
+      <!-- catalog segment -->
+      <text x="704" y="30" fill="#898781" font-size="11" font-weight="700" letter-spacing="1.5">IN THE CATALOG — ONE SEGMENT</text>
+      <rect x="704" y="46" width="386" height="174" rx="8" fill="#232322" stroke="rgba(25,158,112,0.5)"/>
+      <text x="724" y="74" fill="#ffffff" font-size="13" font-weight="600">segment hocap__subject_1_seq01</text>
+      <g font-size="11.5" class="mono">
+        <rect x="724" y="88" width="150" height="24" rx="4" fill="#1a1a19" stroke="rgba(255,255,255,0.14)"/><text x="736" y="104" fill="#c3c2b7">layer: base</text>
+        <rect x="724" y="118" width="150" height="24" rx="4" fill="#1a1a19" stroke="rgba(255,255,255,0.14)"/><text x="736" y="134" fill="#c3c2b7">layer: gt</text>
+        <rect x="724" y="148" width="150" height="24" rx="4" fill="none" stroke="#898781" stroke-dasharray="4 3"/><text x="736" y="164" fill="#898781">layer: pred (later)</text>
+      </g>
+      <g font-size="11">
+        <text x="896" y="104" fill="#898781">property:capture:num_frames</text>
+        <text x="896" y="122" fill="#898781">property:capture:schema = dataforge:v1</text>
+        <text x="896" y="140" fill="#898781">property:convert:version · settings</text>
+        <text x="896" y="158" fill="#898781">property:gt:… (split/filter surface)</text>
+      </g>
+      <text x="724" y="200" fill="#898781" font-size="10.5">sub-datasets (splits, subsets) = re-register filtered rows — one second, zero bytes copied</text>
+    </svg>
+  </div>
+
+  <h3>Every decision, one line each</h3>
+  <table>
+    <thead><tr><th style="width:20%">decision</th><th style="width:42%">choice</th><th>why</th></tr></thead>
+    <tbody>
+      <tr><td>Scope, day one</td><td>the simplecv robocap + HOCap datasets, nothing else</td><td>only 3–4 of 11 exoego datasets are label-complete</td></tr>
+      <tr><td>End state</td><td>all dataset work in dataforge</td><td>one home, one convention</td></tr>
+      <tr><td>Verbs</td><td>download · convert · register · view</td><td>arkitscenes shape + VSLAM-LAB callable stages</td></tr>
+      <tr><td>Registration</td><td>dict → tyro union, <code>_target</code> + <code>setup()</code>, unchanged</td><td>proven in 6 packages</td></tr>
+      <tr><td>Conversion</td><td>chunk-native; <code>rr.log</code> for statics only</td><td>100–1000× bloat from row logging</td></tr>
+      <tr><td>Artifact unit</td><td>one base rrd + derived layers, shared recording_id</td><td>team convention; avoids the 40k-fd split</td></tr>
+      <tr><td>On-disk layout</td><td>layer-major, chosen day zero</td><td>dual layouts leak</td></tr>
+      <tr><td>HOCap GT</td><td>a <code>gt</code> layer</td><td>base = the sensor recording</td></tr>
+      <tr><td>Identity</td><td><code>&lt;dataset&gt;__&lt;sequence&gt;</code> via SequenceIdentity</td><td>id = filename = key = segment (abc-130k)</td></tr>
+      <tr><td>Download</td><td>typed <code>download()</code> + 4 transport helpers</td><td>pixi tasks cover only the HF row</td></tr>
+      <tr><td>Download size</td><td>subset default, <code>--fetch-all</code></td><td>no accidental terabytes</td></tr>
+      <tr><td>Idempotency</td><td>atomic write; exists = done; <code>--force</code></td><td>half-files poison batch and catalog</td></tr>
+      <tr><td>Staleness</td><td>converter version as recording property</td><td>auditable, no status DB</td></tr>
+      <tr><td>Transcode</td><td>inside convert, fingerprinted cache</td><td>rrd is the baseline; disk stops doubling</td></tr>
+      <tr><td>Schema</td><td>one shared shape, <code>dataforge:v1</code></td><td>consistency wins; a phone scan = a moving rig</td></tr>
+      <tr><td>Blueprints</td><td>embed at convert; dataset default at register</td><td>the converter knows the real cameras</td></tr>
+      <tr><td>Catalog</td><td>optional; files are the truth</td><td>the server forgets on restart</td></tr>
+      <tr><td>Base dep</td><td>simplecv (composes <code>common</code>)</td><td>the foundation, by decision</td></tr>
+      <tr><td>Platforms</td><td><code>linux-64</code> + <code>linux-aarch64</code></td><td>NVENC; macOS later</td></tr>
+      <tr><td>Train / eval</td><td>seams reserved, nothing built</td><td>no studied system has the eval half</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="plan">
+  <p class="kicker">Section 7</p>
+  <h2>Order of attack</h2>
+  <p class="sub">Ranked by value per unit of work; each step ships alone.</p>
+  <ol class="decisions" style="grid-template-columns:1fr">
+    <li><b>Scaffold <code>packages/dataforge/</code></b> feature + envs + pyrefly ×3 + <code>.envrc</code>. Copy the feature shape from <code>mv-api</code>.</li>
+    <li><b>Contracts first</b> — <code>schema.py</code> · <code>paths.py</code> · <code>identity.py</code> · <code>writing.py</code> · <code>transports.py</code>, unit-tested without data.</li>
+    <li><b>robocap (the simplecv dataset) end-to-end</b> — the walking skeleton every dataset copies. Pixel-verify in the viewer.</li>
+    <li><b>HOCap + <code>gt</code> layer</b> — proves layers and shared recording_id.</li>
+    <li><b><code>register</code> + <code>view</code> verbs</b> — idempotent, with a per-segment layer-completeness check.</li>
+    <li><b>Batch runner</b> — subprocess per sequence, bounded pool, per-item summary.</li>
+    <li><b>Migrations, one at a time</b> — exoego datasets → arkitscenes → robocap-slam switch → SLAM sets. Delete donor code in the same PR.</li>
+    <li><b>Second half</b> — dataloader lane, splits, pred layers + metrics, runs-as-segments.</li>
+  </ol>
+  <div class="callout"><strong>Done =</strong> <code>pixi run dataforge-download hocap && dataforge-convert hocap && dataforge-view hocap</code> on a fresh checkout; every step re-runnable and crash-safe; viewer output pixel-verified.</div>
+</section>
+
+<div class="footer">
+  <p><strong>Provenance:</strong> 9 Opus-5 explorers (workflow <span class="mono">wf_4e2377eb-974</span>) + design interview + team huddle notes, 2026-08-16. Hand-authored; LOC figures as of that date. Full findings: <span class="mono">/tmp/dataflow-research/results/*.json</span>.</p>
+  <p>Legend: ● works · ◐ partial · ✗ absent · — deferred. Stage colors: <span style="color:var(--s1)">download</span> · <span style="color:var(--s2)">convert</span> · <span style="color:var(--s3)">register</span> · <span style="color:var(--s4)">view</span>.</p>
+</div>
+
+</main>
+<script>
+(function(){
+  var tip=document.getElementById('tip');
+  function show(e){var t=e.target.closest('[data-tip]');if(!t){tip.style.opacity=0;return}
+    tip.textContent=t.getAttribute('data-tip');tip.style.opacity=1;
+    var x=e.clientX+14,y=e.clientY+14;
+    var r=tip.getBoundingClientRect();
+    if(x+r.width>window.innerWidth-8)x=e.clientX-r.width-10;
+    if(y+r.height>window.innerHeight-8)y=e.clientY-r.height-10;
+    tip.style.left=x+'px';tip.style.top=y+'px';}
+  document.addEventListener('mousemove',show);
+  document.addEventListener('mouseleave',function(){tip.style.opacity=0});
+  // focusable tooltips for keyboard users
+  document.querySelectorAll('[data-tip]').forEach(function(el){el.setAttribute('tabindex','0');
+    el.addEventListener('focus',function(){tip.textContent=el.getAttribute('data-tip');tip.style.opacity=1;
+      var r=el.getBoundingClientRect();tip.style.left=Math.min(r.left,window.innerWidth-340)+'px';tip.style.top=(r.bottom+8)+'px';});
+    el.addEventListener('blur',function(){tip.style.opacity=0});});
+  // TOC active state
+  var links=[].slice.call(document.querySelectorAll('#toc a'));
+  var secs=links.map(function(a){return document.querySelector(a.getAttribute('href'))});
+  var io=new IntersectionObserver(function(es){es.forEach(function(en){
+    if(en.isIntersecting){links.forEach(function(a){a.classList.toggle('on',a.getAttribute('href')==='#'+en.target.id)})}
+  })},{rootMargin:'-20% 0px -70% 0px'});
+  secs.forEach(function(s){if(s)io.observe(s)});
+  // copy buttons
+  document.querySelectorAll('[data-copy]').forEach(function(b){b.addEventListener('click',function(){
+    var code=b.parentElement.querySelector('code');
+    navigator.clipboard.writeText(code.innerText).then(function(){b.textContent='copied';setTimeout(function(){b.textContent='copy'},1200)});
+  })});
+})();
+</script>
+</body>
+</html>

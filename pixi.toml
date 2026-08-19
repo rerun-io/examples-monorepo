@@ -2413,6 +2413,25 @@ depends-on = [
 description = "Run signal preparation, two-call gsplat training, and fused in-process publication"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# dataforge
+# ═══════════════════════════════════════════════════════════════════════════
+# Explicit platforms required — see AGENTS.md "Platforms & lockfile".
+[feature.dataforge]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.dataforge.dependencies]
+python = "3.12.*"
+tyro = ">=0.9.1,<0.10"
+# CPU torch only satisfies simplecv's module-load import.
+pytorch-cpu = ">=2.8.0"
+
+[feature.dataforge.pypi-dependencies]
+dataforge = { path = "packages/dataforge", editable = true }
+
+[feature.dataforge.activation.env]
+PACKAGE_DIR = "packages/dataforge"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
 [environments]
@@ -2682,6 +2701,15 @@ gsplat-rust-renderer-dev = { features = [
     "gsplat-rust-renderer",
     "dev",
 ], solve-group = "gsplat-rust-renderer", no-default-feature = true }
+dataforge = { features = [
+    "common",
+    "dataforge",
+], solve-group = "dataforge", no-default-feature = true }
+dataforge-dev = { features = [
+    "common",
+    "dataforge",
+    "dev",
+], solve-group = "dataforge", no-default-feature = true }
 dpvo = { features = [
     "common",
     "cuda",
