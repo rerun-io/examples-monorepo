@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,12 +43,24 @@ TensorRtPrecision = Literal["bf16"]
 
 STATIC_B1_PROFILE: tuple[int, int, int] = (1, 1, 1)
 """Static batch-1 profile used by the retained fastest engine."""
+DEFAULT_TENSORRT_ENGINE_ENV_VAR: str = "SAPIENS2_POSE_TENSORRT_ENGINE_PATH"
+DEFAULT_TENSORRT_ENGINE_FILENAME: str = "sapiens2_0_4b_pose_static_b1_bf16_current_static_graph.trt"
 
 PoseHeatmapRunner = Callable[[torch.Tensor], torch.Tensor | Float32[ndarray, "n k h w"]]
 """Callable backend that maps preprocessed Sapiens pose tensors to heatmaps."""
 
 ModelLoader = Callable[[str, str | Path, str], torch.nn.Module]
 ExportFn = Callable[..., object]
+
+
+def default_tensorrt_engine_path() -> str:
+    """Return the configured or stable cached Sapiens2 pose engine path."""
+    explicit_engine_path: str | None = os.environ.get(DEFAULT_TENSORRT_ENGINE_ENV_VAR)
+    if explicit_engine_path is not None:
+        return explicit_engine_path
+    xdg_cache_home: str | None = os.environ.get("XDG_CACHE_HOME")
+    cache_root: Path = Path(xdg_cache_home).expanduser() if xdg_cache_home is not None else Path.home() / ".cache"
+    return str(cache_root / "sapiens2-pose" / "tensorrt" / DEFAULT_TENSORRT_ENGINE_FILENAME)
 
 
 class ExportableRMSNorm(torch.nn.Module):
@@ -416,47 +429,54 @@ class TensorRtPoseHeatmapRunner:
         self._output_name: str = self._runtime.spec.outputs[0].name
 
     def __call__(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Run TensorRT heatmap inference for one normalized static batch-1 input."""
+        """Run TensorRT heatmap inference, chunking full batches for the static batch-1 engine."""
         if inputs.device.type != "cuda":
             inputs = inputs.to("cuda")
-        return self._runtime({self._input_name: inputs})[self._output_name]
+        from trtkit import run_chunked
+
+        outputs: dict[str, torch.Tensor] = run_chunked(self._runtime, {self._input_name: inputs})
+        return outputs[self._output_name]
 
 
 def estimate_sapiens_pose_tensorrt(
     image_rgb: UInt8[ndarray, "h w 3"],
     bboxes: Float32[ndarray, "n 4"],
     *,
-    engine_path: Path,
+    engine_path: Path | None = None,
     model_size: ModelSize = "0.4B",
     device: DeviceChoice = "cuda",
     heatmap_runner: PoseHeatmapRunner | None = None,
 ) -> PosePredictionArtifact:
-    """Estimate Sapiens2 pose by running each person crop through the static batch-1 TensorRT engine."""
-    bboxes_f32: Float32[ndarray, "n 4"] = np.asarray(bboxes, dtype=np.float32).reshape(-1, 4)
-    spec: Any = MODEL_SPECS[model_size]
-    if bboxes_f32.shape[0] == 0:
-        empty_keypoints: Float32[ndarray, "0 308 2"] = np.empty((0, spec.num_keypoints, 2), dtype=np.float32)
-        empty_scores: Float32[ndarray, "0 308"] = np.empty((0, spec.num_keypoints), dtype=np.float32)
-        return PosePredictionArtifact(bboxes=bboxes_f32, keypoints=empty_keypoints, scores=empty_scores)
+    """Estimate Sapiens2 pose with a TensorRT or supplied heatmap runner.
 
-    runner: PoseHeatmapRunner = heatmap_runner or TensorRtPoseHeatmapRunner(engine_path, device=device)
-    keypoints_list: list[Float32[ndarray, "sapiens_k 2"]] = []
-    scores_list: list[Float32[ndarray, "sapiens_k"]] = []
-    for bbox in bboxes_f32:
-        one_bbox: Float32[ndarray, "1 4"] = np.asarray(bbox, dtype=np.float32).reshape(1, 4)
-        artifact: PosePredictionArtifact = estimate_sapiens_pose_with_heatmap_runner(
-            image_rgb,
-            one_bbox,
-            model_size=model_size,
-            device=device,
-            heatmap_runner=runner,
-        )
-        keypoints_list.append(np.asarray(artifact.keypoints[0], dtype=np.float32))
-        scores_list.append(np.asarray(artifact.scores[0], dtype=np.float32).reshape(-1))
+    Args:
+        image_rgb: Source image in uint8 RGB order.
+        bboxes: Person boxes in XYXY image coordinates.
+        engine_path: TensorRT engine path. May be ``None`` when
+            ``heatmap_runner`` is supplied.
+        model_size: Sapiens2 model size represented by the runner.
+        device: Inference device.
+        heatmap_runner: Optional ready heatmap backend.
 
-    keypoints: Float32[ndarray, "n sapiens_k 2"] = np.stack(keypoints_list, axis=0).astype(np.float32, copy=False)
-    scores: Float32[ndarray, "n sapiens_k"] = np.stack(scores_list, axis=0).astype(np.float32, copy=False)
-    return PosePredictionArtifact(bboxes=bboxes_f32, keypoints=keypoints, scores=scores)
+    Returns:
+        Dense Sapiens2 keypoints and scores for each box.
+
+    Raises:
+        ValueError: If neither an engine path nor a ready runner is supplied.
+    """
+    if heatmap_runner is None:
+        if engine_path is None:
+            raise ValueError("engine_path is required when heatmap_runner is not provided.")
+        runner: PoseHeatmapRunner = TensorRtPoseHeatmapRunner(engine_path, device=device)
+    else:
+        runner = heatmap_runner
+    return estimate_sapiens_pose_with_heatmap_runner(
+        image_rgb,
+        bboxes,
+        model_size=model_size,
+        device=device,
+        heatmap_runner=runner,
+    )
 
 
 def run_tensorrt_image_pose(config: TensorRtImagePoseConfig) -> ImagePoseSummary:

@@ -9,7 +9,6 @@ dependencies = [
     # cuda: pytorch-gpu, torchvision
     "safetensors",
     "timm",
-    "spaces>=0.43.0",
     "tyro>=0.9.1",
 ]
 

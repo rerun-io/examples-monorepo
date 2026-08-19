@@ -8,12 +8,9 @@ from jaxtyping import Float32, UInt8
 from numpy import ndarray
 
 from sapiens2_pose.api.runtime import PoseEstimation
+from sapiens2_pose.api.tensorrt_pose import DEFAULT_TENSORRT_ENGINE_ENV_VAR, default_tensorrt_engine_path
 from sapiens2_pose.api.video import SapiensVideoPoseConfig, _make_effective_bbox_pose_fn, run_video_pose_pipeline
-from sapiens2_pose.video_gradio_ui import (
-    DEFAULT_TENSORRT_ENGINE_ENV_VAR,
-    _default_tensorrt_engine_path,
-    _format_video_inference_status,
-)
+from sapiens2_pose.video_gradio_ui import _format_video_inference_status
 
 
 def test_video_pipeline_tensorrt_backend_detects_boxes_then_runs_bbox_pose(tmp_path: Path) -> None:
@@ -121,12 +118,12 @@ def test_default_tensorrt_engine_path_uses_stable_cache(monkeypatch: Any, tmp_pa
     monkeypatch.delenv(DEFAULT_TENSORRT_ENGINE_ENV_VAR, raising=False)
     monkeypatch.setenv("XDG_CACHE_HOME", str(cache_root))
 
-    engine_path: Path = Path(_default_tensorrt_engine_path())
+    engine_path: Path = Path(default_tensorrt_engine_path())
 
     assert engine_path == cache_root / "sapiens2-pose" / "tensorrt" / "sapiens2_0_4b_pose_static_b1_bf16_current_static_graph.trt"
 
     monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
-    home_engine_path: Path = Path(_default_tensorrt_engine_path())
+    home_engine_path: Path = Path(default_tensorrt_engine_path())
 
     assert home_engine_path == Path.home() / ".cache" / "sapiens2-pose" / "tensorrt" / "sapiens2_0_4b_pose_static_b1_bf16_current_static_graph.trt"
 
@@ -135,7 +132,7 @@ def test_default_tensorrt_engine_path_honors_explicit_env_var(monkeypatch: Any, 
     engine_path: Path = tmp_path / "custom.trt"
     monkeypatch.setenv(DEFAULT_TENSORRT_ENGINE_ENV_VAR, str(engine_path))
 
-    assert _default_tensorrt_engine_path() == str(engine_path)
+    assert default_tensorrt_engine_path() == str(engine_path)
 
 
 def test_format_video_inference_status_reports_backend_and_elapsed_time() -> None:

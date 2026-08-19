@@ -13,7 +13,6 @@ from typing import cast
 
 import gradio as gr
 import rerun as rr
-import spaces
 import torch
 from gradio.data_classes import FileData
 from gradio_rerun import Rerun
@@ -21,13 +20,12 @@ from gradio_rerun import Rerun
 from .api.metadata import KeypointSchemaName
 from .api.runtime import DEFAULT_BBOX_THR, DEFAULT_MODEL_SIZE, DEFAULT_NMS_THR, POSE_MODELS, ModelSize
 from .api.sam3_tracking import DEFAULT_SAM3_MEMORY_RETENTION_FRAMES, DEFAULT_SAM3_MIN_MASK_AREA_PX
+from .api.tensorrt_pose import DEFAULT_TENSORRT_ENGINE_ENV_VAR, default_tensorrt_engine_path
 from .api.video import PoseBackend, SapiensVideoPoseConfig, TrackingBackend, run_video_pose_pipeline
 
 DEFAULT_SIZE: ModelSize = DEFAULT_MODEL_SIZE
 DEFAULT_SCHEMA: KeypointSchemaName = "coco133"
 DEFAULT_TRACKING_BACKEND: TrackingBackend = "sam3_tracking"
-DEFAULT_TENSORRT_ENGINE_ENV_VAR: str = "SAPIENS2_POSE_TENSORRT_ENGINE_PATH"
-DEFAULT_TENSORRT_ENGINE_FILENAME: str = "sapiens2_0_4b_pose_static_b1_bf16_current_static_graph.trt"
 
 
 def _server_port() -> int:
@@ -79,18 +77,6 @@ def _remux_mov_for_rerun(video_path: Path, output_dir: Path) -> Path:
     return remuxed_path
 
 
-def _default_tensorrt_engine_path() -> str:
-    """Return the app's default TensorRT engine path."""
-    explicit_engine_path: str | None = os.environ.get(DEFAULT_TENSORRT_ENGINE_ENV_VAR)
-    if explicit_engine_path is not None:
-        return explicit_engine_path
-
-    xdg_cache_home: str | None = os.environ.get("XDG_CACHE_HOME")
-    cache_root: Path = Path(xdg_cache_home).expanduser() if xdg_cache_home is not None else Path.home() / ".cache"
-    engine_path: Path = cache_root / "sapiens2-pose" / "tensorrt" / DEFAULT_TENSORRT_ENGINE_FILENAME
-    return str(engine_path)
-
-
 def _format_video_inference_status(*, status: str, backend_label: str, elapsed_seconds: float) -> str:
     """Append whole-video inference timing to a completion status."""
     return f"{status} {backend_label} inference took {elapsed_seconds:.2f}s for the whole video."
@@ -106,7 +92,6 @@ def predict_video_ui(
     nms_thr: float,
     kpt_thr: float,
     use_tensorrt: bool,
-    tensorrt_engine_path: str | None,
     sam3_min_mask_area_px: float | int | None,
     sam3_memory_retention_frames: float | int | None,
     max_frames: float | int | None,
@@ -128,7 +113,7 @@ def predict_video_ui(
     if use_tensorrt:
         if model_size != "0.4B":
             raise gr.Error("TensorRT video mode currently expects a 0.4B pose engine.")
-        engine_path_text: str = str(tensorrt_engine_path or _default_tensorrt_engine_path()).strip()
+        engine_path_text: str = default_tensorrt_engine_path().strip()
         if engine_path_text == "":
             raise gr.Error(f"TensorRT video mode requires an engine path or {DEFAULT_TENSORRT_ENGINE_ENV_VAR}.")
         resolved_tensorrt_engine_path = Path(engine_path_text).expanduser()
@@ -173,9 +158,6 @@ def predict_video_ui(
                 elapsed_seconds=elapsed_seconds,
             )
         yield stream.read(), status_with_note
-
-
-predict_video_ui = spaces.GPU(duration=120)(predict_video_ui)
 
 
 def _reset_video_outputs() -> tuple[None, str]:
@@ -225,11 +207,6 @@ with gr.Blocks(title="Sapiens2 Video Pose") as demo:
                 use_tensorrt = gr.Checkbox(
                     value=False,
                     label="Use TensorRT Backend",
-                )
-                tensorrt_engine_path = gr.Textbox(
-                    value=_default_tensorrt_engine_path(),
-                    label="TensorRT Engine Path",
-                    placeholder=f"Set {DEFAULT_TENSORRT_ENGINE_ENV_VAR} or paste a .trt path",
                 )
                 tracking_backend = gr.Radio(
                     choices=["sam3_tracking", "detr_per_frame"],
@@ -303,7 +280,6 @@ with gr.Blocks(title="Sapiens2 Video Pose") as demo:
             nms_thr,
             kpt_thr,
             use_tensorrt,
-            tensorrt_engine_path,
             sam3_min_mask_area_px,
             sam3_memory_retention_frames,
             max_frames,
