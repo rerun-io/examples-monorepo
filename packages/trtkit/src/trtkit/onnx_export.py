@@ -9,6 +9,7 @@ network — or a thin adapter that shapes outputs (flatten a dict, add
 fusion-breaker outputs) — and nothing else.
 """
 
+import copy
 import os
 import shutil
 import time
@@ -16,8 +17,49 @@ from collections.abc import Callable, Collection
 from pathlib import Path
 
 import torch
+from torch.nn.modules.conv import _ConvTransposeNd
 
 ExportFn = Callable[..., object]
+
+
+class _Fp32Island(torch.nn.Module):
+    """Runs its inner module in fp32 inside an autocast region.
+
+    TensorRT's strongly-typed builds cannot type a BF16 ConvTranspose — an
+    open type-inference-rule gap (NVIDIA/TensorRT-Incubator#565, verified
+    failing on TRT 11.2.1.2) — so bf16 exports keep transposed convolutions
+    fp32. Weak typing made this exact fallback implicitly before TRT 11
+    removed it. Retest on TRT bumps; delete when the upstream bug is fixed.
+    """
+
+    def __init__(self, inner: torch.nn.Module) -> None:
+        super().__init__()
+        self.inner = inner
+
+    def forward(self, *inputs: torch.Tensor) -> torch.Tensor:
+        with torch.autocast("cuda", enabled=False):
+            return self.inner(*(t.float() if t.is_floating_point() else t for t in inputs))
+
+
+def _with_fp32_transposed_convs(module: torch.nn.Module) -> torch.nn.Module:
+    """Return a structural copy whose transposed convs sit in fp32 islands.
+
+    Parameters and buffers are shared with the original; the caller's module
+    tree is never mutated, so eager parity references stay honest.
+    """
+    if isinstance(module, _Fp32Island):
+        return module
+    if isinstance(module, _ConvTransposeNd):
+        return _Fp32Island(module)
+    replaced: dict[str, torch.nn.Module] = {
+        name: _with_fp32_transposed_convs(child) for name, child in module.named_children()
+    }
+    if all(replaced[name] is child for name, child in module.named_children()):
+        return module
+    clone: torch.nn.Module = copy.copy(module)
+    clone._modules = dict(module._modules)
+    clone._modules.update(replaced)
+    return clone
 
 
 class _AutocastWrapper(torch.nn.Module):
@@ -116,7 +158,10 @@ def export_onnx(
     # TRT parsers accept the invalid graph and silently miscompile it. 18 is
     # the dynamo baseline for everything else; TRT 11 parses up to 24.
     opset_version: int = 23 if compute_dtype == torch.bfloat16 else 18
-    export_model: torch.nn.Module = _AutocastWrapper(model, compute_dtype).eval() if compute_dtype is not None else model
+    # bf16 also forces fp32 islands around transposed convs (see _Fp32Island);
+    # derived from the dtype, like the opset — not a caller knob.
+    inner: torch.nn.Module = _with_fp32_transposed_convs(model) if compute_dtype == torch.bfloat16 else model
+    export_model: torch.nn.Module = _AutocastWrapper(inner, compute_dtype).eval() if compute_dtype is not None else model
 
     kwargs: dict[str, object] = {}
     if dynamic_batch_max is not None:

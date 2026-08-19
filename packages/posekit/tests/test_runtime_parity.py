@@ -116,6 +116,28 @@ def test_three_backend_parity(tmp_path: Path) -> None:
 
 
 @cuda_only
+def test_tensorrt_static_engine_drops_padded_rows(tmp_path: Path) -> None:
+    """A static engine always computes its baked batch; callers must still see only their rows."""
+    module = TinyNet().cuda().eval()
+    torch_runtime = TorchRuntime(
+        module, input_specs=(IMAGE_SPEC, MASK_SPEC), output_specs=(FEATURES_SPEC, LOGITS_SPEC), max_batch_size=STATIC_BATCH
+    )
+    engine_path: Path = ensure_engine(
+        _export_tiny_onnx(module, tmp_path),
+        TrtBuildConfig(max_batch_size=STATIC_BATCH, opt_batch_size=STATIC_BATCH, allow_tf32=False),
+        cache_dir=tmp_path / "trt",
+    )
+    trt_runtime = TensorRtRuntime(engine_path)
+    for batch in (STATIC_BATCH, 1):
+        inputs: dict[str, Tensor] = _example_inputs(batch, "cuda")
+        outputs: dict[str, Tensor] = trt_runtime(inputs)
+        reference: dict[str, Tensor] = torch_runtime(inputs)
+        for output_name in ("features", "logits"):
+            assert outputs[output_name].shape[0] == batch
+            torch.testing.assert_close(outputs[output_name], reference[output_name], rtol=1e-3, atol=1e-4)
+
+
+@cuda_only
 def test_tensorrt_cuda_graph_replay(tmp_path: Path) -> None:
     module = TinyNet().cuda().eval()
     onnx_path: Path = _export_tiny_onnx(module, tmp_path, dynamic_batch=True)

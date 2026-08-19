@@ -92,6 +92,23 @@ class TensorRtRuntime:
             )
             for spec in self._spec.outputs
         }
+        # Static engines report the baked max batch through the context at every
+        # call, so padded rows must be sliced off by per-sample ratio; dynamic
+        # engines report exact shapes per active batch and owe no divisibility.
+        # The slice assumes sample-major rows (leading dim = batch * k); a
+        # k-major intermediate would yield the wrong rows — none exists today.
+        self._static_rows_per_sample: dict[str, int] = {}
+        if not self._dynamic:
+            for out_spec in self._spec.outputs:
+                rows_at_max: int = int(self._output_buffers[out_spec.name].shape[0])
+                if rows_at_max % max_batch != 0:
+                    raise ValueError(
+                        f"Static engine output {out_spec.name!r} has {rows_at_max} rows at batch {max_batch}; "
+                        "padded rows cannot be sliced off a non-multiple. Constant-shaped outputs usually "
+                        "come from TrtBuildConfig.extra_output_patterns intermediates — rebuild without "
+                        "materializing that tensor, or use a dynamic-batch engine."
+                    )
+                self._static_rows_per_sample[out_spec.name] = rows_at_max // max_batch
         for name, tensor in {**self._input_buffers, **self._output_buffers}.items():
             self._context.set_tensor_address(name, int(tensor.data_ptr()))
         self._stream: torch.cuda.Stream = torch.cuda.Stream(device=self._device)
@@ -138,10 +155,16 @@ class TensorRtRuntime:
             self._graphs[graph_key].replay()
         else:
             self._execute()
-        # Slice each output to the rows the context actually produced at this batch
-        # (materialized intermediates may scale their leading dim beyond the batch).
+        # Dynamic engines report exact per-batch output shapes; static engines
+        # always report the baked max batch, so padded rows are sliced off by
+        # the per-sample ratio recorded at construction.
+        if self._dynamic:
+            return {
+                name: tensor[: int(self._context.get_tensor_shape(name)[0])]
+                for name, tensor in self._output_buffers.items()
+            }
         return {
-            name: tensor[: int(self._context.get_tensor_shape(name)[0])]
+            name: tensor[: self._static_rows_per_sample[name] * batch_size]
             for name, tensor in self._output_buffers.items()
         }
 
