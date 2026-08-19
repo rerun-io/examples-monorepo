@@ -20,8 +20,8 @@ from mamma.landmarks.tensorrt_backend import ENGINE_BATCH, build_engine, export_
 
 @dataclass
 class BuildConfig:
-    mammanet_weights: Path = Path("data/weights/ma_2d/mamma_mask_full_cvpr.safetensors")
-    """Converted MammaNet state dict."""
+    mammanet_weights: Path | None = None
+    """Converted MammaNet state dict; ``None`` downloads the published weights."""
     cache_dir: Path = Path(".trt_cache")
     """Machine-local engine cache."""
     force: bool = False

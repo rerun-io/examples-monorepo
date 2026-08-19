@@ -1,4 +1,4 @@
-"""MammaNet behind posekit's ``TopDownDenseLandmarks2d`` role.
+"""Posekit adapter for MammaNet's ``TopDownDenseLandmarks2d`` role.
 
 The adapter that lets mamma's dense-landmark net slot into any posekit
 pipeline (posekit docs/design.md §6): detections with masks in — the tracker's
@@ -7,7 +7,7 @@ visibility / contact heads out, all GPU tensors. Crop math, normalization, and
 precision match ``LandmarkEstimator.estimate`` exactly (same mamma ops).
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -17,23 +17,35 @@ from numpy import ndarray
 from posekit.models import TopDownDenseLandmarks2d
 from posekit.predictions import BoxDetections, DenseLandmarks2d, validate_frames_rgb
 from torch import Tensor
+from trtkit import (
+    TensorRtBackendConfig,
+    TensorRuntime,
+    TensorSpec,
+    TorchBackendConfig,
+    TorchRuntime,
+    create_runtime_from_onnx,
+    run_chunked,
+)
 
 from mamma.landmarks.config import DEFAULT_MAMMANET_CONFIG, MammaNetConfig
 from mamma.landmarks.crops import box_geometry, gpu_crop_batch, gpu_mask_crop_batch, unproject_joints2d
-from mamma.landmarks.mammanet import MammaNet, load_mammanet
-
-MAMMANET_WEIGHTS_REPO: str = "pablovela5620/mamma-streaming-data"
-MAMMANET_WEIGHTS_FILE: str = "weights/ma_2d/mamma_mask_full_cvpr.safetensors"
+from mamma.landmarks.mammanet import MammaNet, load_mammanet, resolve_mammanet_weights_path
+from mamma.landmarks.tensorrt_backend import INPUT_NAMES, OUTPUT_NAMES, FlattenOutputs, ensure_mammanet_onnx
 
 
 @dataclass(frozen=True, slots=True)
 class MammaNetLandmarksConfig:
-    """MammaNet dense-landmark estimator configuration (torch backend)."""
+    """MammaNet dense-landmark estimator configuration."""
 
     weights_path: Path | None = None
-    """Local safetensors checkpoint; ``None`` downloads mamma's HF weights."""
+    """Checkpoint used by the torch backend and by one-time ONNX export; ``None`` downloads the published weights."""
     device: str = "cuda"
     """Inference device."""
+    backend: TorchBackendConfig | TensorRtBackendConfig = field(default_factory=TorchBackendConfig)
+    """Backend running the loaded model or its cached dynamic ONNX export.
+
+    ``OnnxBackendConfig`` is excluded because the fp16-compute graph uses kernels not covered by ONNX Runtime's CUDA provider.
+    """
 
     def setup(self) -> "MammaNetLandmarks":
         """Load weights and return a ready estimator."""
@@ -47,18 +59,35 @@ class MammaNetLandmarks(TopDownDenseLandmarks2d):
         """Load the checkpoint.
 
         Args:
-            config: Weights source and device.
+            config: Weights source, runtime backend, and device.
         """
-        from huggingface_hub import hf_hub_download
-
+        if not isinstance(config.backend, TorchBackendConfig) and config.device != "cuda":
+            raise ValueError("MammaNet accelerated backends require device='cuda'.")
         self.config: MammaNetLandmarksConfig = config
-        weights_path: Path = (
-            config.weights_path
-            if config.weights_path is not None
-            else Path(hf_hub_download(repo_id=MAMMANET_WEIGHTS_REPO, repo_type="dataset", filename=MAMMANET_WEIGHTS_FILE))
-        )
         self.mamma_config: MammaNetConfig = DEFAULT_MAMMANET_CONFIG
-        self.model: MammaNet = load_mammanet(weights_path, device=config.device, config=self.mamma_config)
+        weights_path: Path = resolve_mammanet_weights_path(config.weights_path)
+        model: MammaNet = load_mammanet(weights_path, device=config.device, config=self.mamma_config)
+        input_specs: tuple[TensorSpec, TensorSpec] = (
+            TensorSpec(INPUT_NAMES[0], (3, self.mamma_config.crop_height, self.mamma_config.crop_width), torch.float32),
+            TensorSpec(INPUT_NAMES[1], (1, self.mamma_config.crop_height, self.mamma_config.crop_width), torch.float32),
+        )
+        output_specs: tuple[TensorSpec, TensorSpec, TensorSpec, TensorSpec] = (
+            TensorSpec(OUTPUT_NAMES[0], (self.mamma_config.num_landmarks, 3), torch.float32),
+            TensorSpec(OUTPUT_NAMES[1], (self.mamma_config.num_landmarks, 1), torch.float32),
+            TensorSpec(OUTPUT_NAMES[2], (self.mamma_config.num_landmarks, 1), torch.float32),
+            TensorSpec(OUTPUT_NAMES[3], (self.mamma_config.num_landmarks, 1), torch.float32),
+        )
+        if isinstance(config.backend, TorchBackendConfig):
+            autocast_dtype: torch.dtype | None = config.backend.autocast_dtype if "cuda" in config.device else None
+            self.runtime: TensorRuntime = TorchRuntime(
+                FlattenOutputs(model),
+                input_specs=input_specs,
+                output_specs=output_specs,
+                max_batch_size=config.backend.max_batch_size,
+                autocast_dtype=autocast_dtype,
+            )
+        else:
+            self.runtime = create_runtime_from_onnx(ensure_mammanet_onnx(model, weights_path), config.backend)
         self.num_landmarks = int(self.mamma_config.num_landmarks)
 
     @torch.no_grad()
@@ -86,7 +115,7 @@ class MammaNetLandmarks(TopDownDenseLandmarks2d):
             empty_p: Float32[Tensor, "0 p"] = torch.empty((0, self.num_landmarks), dtype=torch.float32, device=device)
             return DenseLandmarks2d(empty_xy, empty_p, empty_p, empty_p, empty_p, detections.frame_indices)
 
-        boxes_np: Float32[ndarray, "n 4"] = detections.xyxy.detach().cpu().numpy().astype(np.float32, copy=False)
+        boxes_np: Float32[ndarray, "n 4"] = detections.xyxy_numpy()
         geometry: list[tuple[Float64[ndarray, "2"], Float64[ndarray, "2"]]] = [
             box_geometry(boxes_np[row], self.mamma_config) for row in range(num_instances)
         ]
@@ -98,13 +127,11 @@ class MammaNetLandmarks(TopDownDenseLandmarks2d):
         masks_batch: Float[Tensor, "n 1 h w"] = detections.masks.unsqueeze(1).float() * 255.0
         img_crops, _ = gpu_crop_batch(gathered, centers, sizes, None, self.mamma_config)
         mask_crops = gpu_mask_crop_batch(masks_batch, centers, sizes, self.mamma_config)
-        with torch.autocast("cuda", dtype=torch.float16, enabled="cuda" in self.config.device):
-            out: dict[str, Tensor | None] = self.model(img_crops, mask_crops)
-        joints2d_raw = out["joints2d"]
-        visibility_raw = out["visibility"]
-        contact_raw = out["contact"]
-        floor_raw = out["floor_contact"]
-        assert joints2d_raw is not None and visibility_raw is not None and contact_raw is not None and floor_raw is not None
+        out: dict[str, Tensor] = run_chunked(self.runtime, {INPUT_NAMES[0]: img_crops, INPUT_NAMES[1]: mask_crops})
+        joints2d_raw: Tensor = out[OUTPUT_NAMES[0]]
+        visibility_raw: Tensor = out[OUTPUT_NAMES[1]]
+        contact_raw: Tensor = out[OUTPUT_NAMES[2]]
+        floor_raw: Tensor = out[OUTPUT_NAMES[3]]
         joints2d_px: Float32[Tensor, "n p 3"] = unproject_joints2d(joints2d_raw.float(), centers, sizes, self.mamma_config)
         return DenseLandmarks2d(
             xy=joints2d_px[:, :, 0:2].contiguous(),
@@ -116,4 +143,7 @@ class MammaNetLandmarks(TopDownDenseLandmarks2d):
         )
 
 
-__all__ = ("MammaNetLandmarks", "MammaNetLandmarksConfig")
+__all__ = (
+    "MammaNetLandmarks",
+    "MammaNetLandmarksConfig",
+)
