@@ -2446,6 +2446,26 @@ dataforge = { path = "packages/dataforge", editable = true }
 [feature.dataforge.activation.env]
 PACKAGE_DIR = "packages/dataforge"
 
+[feature.dataforge.tasks.dataforge-download]
+cmd = "python tools/apps/download.py"
+cwd = "packages/dataforge"
+description = "Fetch (or verify, for local corpora) a dataset's raw tree"
+
+[feature.dataforge.tasks.dataforge-convert]
+cmd = "python tools/apps/convert.py"
+cwd = "packages/dataforge"
+description = "Convert discovered sequences into base-layer rrds (--sequence, --force)"
+
+[feature.dataforge.tasks.dataforge-register]
+cmd = "python tools/apps/register.py"
+cwd = "packages/dataforge"
+description = "Register base-layer rrds into a local Rerun catalog"
+
+[feature.dataforge.tasks.dataforge-view]
+cmd = "python tools/apps/view.py"
+cwd = "packages/dataforge"
+description = "Open one converted recording in the viewer (--rr-config.headless in a bare shell)"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════

@@ -24,12 +24,13 @@ ignore = [
     "F821",   # jaxtyping forward annotation false positive
     "UP037",  # Remove quotes false positive with jaxtyping
     "UP040",  # Beartype requires TypeAlias, not PEP 695 type
+    "UP046",  # Same reason: beartype needs Generic[TypeVar], not PEP 695 type params
 ]
 
 [tool.vulture]
 paths = ["dataforge", "tests"]
-# Contract constant consumed by the robocap converter (next PR in the stack).
-ignore_names = ["DATAFORGE_SCHEMA_VERSION"]
+# Tyro-facing verb entry points and config fields; the CLI shims call them.
+ignore_names = ["main", "rr_config", "sequence", "force", "catalog_url", "dataset", "root", "_target"]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true
 min_confidence = 60
