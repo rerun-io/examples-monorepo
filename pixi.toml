@@ -2412,6 +2412,21 @@ depends-on = [
 ]
 description = "Run signal preparation, two-call gsplat training, and fused in-process publication"
 
+# ════════════════════════════════════════════════════════════════════════════
+# pose-app — unified SAM3 + 2D pose Gradio playground
+# ════════════════════════════════════════════════════════════════════════════
+[feature.pose-app]
+platforms = ["linux-64"]
+
+[feature.pose-app.activation.env]
+# This PACKAGE_DIR must win over posekit/mamma's bindings through feature order.
+PACKAGE_DIR = "packages/posekit"
+
+[feature.pose-app.tasks.pose-app]
+cmd = "python tools/apps/gradio_app.py"
+cwd = "packages/posekit"
+description = "Launch the unified SAM3 + 2D pose Gradio playground"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2560,6 +2575,21 @@ trtkit-dev = { features = [
     "trtkit",
     "dev",
 ], solve-group = "trtkit", no-default-feature = true }
+pose-app = { features = [
+    "common",
+    "cuda",
+    "posekit",
+    "mamma",
+    "pose-app",
+], solve-group = "pose-app", no-default-feature = true }
+pose-app-dev = { features = [
+    "common",
+    "cuda",
+    "posekit",
+    "mamma",
+    "pose-app",
+    "dev",
+], solve-group = "pose-app", no-default-feature = true }
 posekit = { features = [
     "common",
     "cuda",

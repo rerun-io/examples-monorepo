@@ -20,11 +20,11 @@ from simplecv.rerun_log_utils import RerunTyroConfig, log_video
 from torch import Tensor
 from tqdm.auto import tqdm
 
-from posekit.apis.video_pose import log_skeleton_annotation_context
 from posekit.models import AnnotatedDetectorConfig, AnnotatedPose2dConfig, RtmPoseConfig, SegmentationPrompts, YoloxDetectorConfig
 from posekit.models.clip_identity import ClipIdentityConfig
 from posekit.models.sam2_video import Sam2VideoSegmenterConfig
 from posekit.predictions import BoxDetections, Keypoints2d
+from posekit.rerun_logging import log_skeleton_annotation_context
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -68,7 +68,7 @@ def _log_tracked_frame(
     rr.set_time("video_time", duration=1e-9 * float(timestamp_ns))
     assert tracks.masks is not None and tracks.track_ids is not None
     label_map: ndarray = np.zeros(frame_hw, dtype=np.uint8)
-    boxes: Float32[ndarray, "n 4"] = tracks.xyxy.cpu().numpy().astype(np.float32, copy=False)
+    boxes: Float32[ndarray, "n 4"] = tracks.xyxy_numpy()
     track_ids: Int[ndarray, "n"] = tracks.track_ids.cpu().numpy()
     masks: Bool[ndarray, "n h w"] = tracks.masks.cpu().numpy()
     xy: Float32[ndarray, "p k 2"] = keypoints.xy_numpy()
