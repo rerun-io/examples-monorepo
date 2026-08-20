@@ -26,6 +26,7 @@ lives here).
 
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
 from contextlib import closing
@@ -71,6 +72,17 @@ SESSION_DIR_RE: re.Pattern[str] = re.compile(r"^(?P<device>[0-9a-f]+)_session_(?
 """Session directory names; the ``-old`` duplicates deliberately do not match."""
 IDENTITY_TRANSFORM: rr.Transform3D = rr.Transform3D(translation=[0.0, 0.0, 0.0], mat3x3=np.eye(3, dtype=np.float32))
 """Explicit identity pose; an argument-less ``Transform3D`` logs no components at all."""
+MESH_RELATIVE_PATH: str = "robocap-mesh/3DModel.glb"
+"""Cap scan location under the corpus root; the mesh is optional (skipped when unreadable)."""
+MESH_TRANSLATION: list[float] = [0.0, -0.15, 0.025]
+"""Hand-tuned alignment of the Y-up photogrammetry scan into the dev0 IMU (rig) frame,
+carried over from robocap-slam's visualization; eyeballed, not a CAD extrinsic."""
+MESH_MAT3X3: list[list[float]] = [
+    [0.17364818, 0.0, 0.98480775],
+    [-0.98480775, 0.0, 0.17364818],
+    [0.0, -1.0, 0.0],
+]
+"""Rz(-80deg) @ Rx(-90deg), the rotation half of the same hand-tuned alignment."""
 VIDEO_NAME_RE: re.Pattern[str] = re.compile(r"^video_dev(?P<device>\d+)_session(?P<session>\d+)_segment(?P<segment>\d+)_(?P<camname>[a-z-]+)$")
 """Per-camera MP4 stem, e.g. ``video_dev0_session1_segment1_right-eye``."""
 
@@ -93,6 +105,8 @@ class RobocapConfig(DataforgeDatasetConfig):
     """Dataset class instantiated by ``setup()``."""
     root: Path = Path("/mnt/nas/datasets/robocap")
     """Corpus root holding ``<device>_session_<N>/`` and the factory calibration."""
+    mesh_path: Path | None = None
+    """Cap mesh glb; defaults to ``<root>/robocap-mesh/3DModel.glb`` when None."""
 
 
 def read_imu_channel(database: sqlite3.Connection, table: str, scale: float) -> ImuSamples:
@@ -304,17 +318,18 @@ class RobocapDataset(DataforgeDataset[RobocapConfig]):
             recording_id=identity.recording_id,
             default_blueprint=build_blueprint(camera_names),
         ) as recording:
-            rr.log("/", rr.ViewCoordinates.RDF, static=True, recording=recording)
-            # simplecv's RoboCap loader treats the dev0 IMU frame as world, so world_T_rig is
-            # identity and static for v1. TODO(dataforge): log the VIO trajectory as a temporal
-            # world_T_rig once a pose layer exists.
-            rr.log(schema.rig_path(RIG), IDENTITY_TRANSFORM, static=True, recording=recording)
+            # Deliberately NO static Transform3D on the rig node and NO ViewCoordinates at "/":
+            # per exoego:v2 a world-anchored rig carries no transform, and a static one would
+            # permanently shadow the temporal world_T_rig that a slam/pose layer stacks on this
+            # entity (verified: static components shadow temporal ones per component, silently).
+            # The pose layer owns the root ViewCoordinates (its world is gravity-aligned Z-up).
             rr.log(
                 schema.rig_path(RIG),
                 rr.AnyValues(schema_version=schema.EXOEGO_SCHEMA_VERSION, reference="cam_00", num_cameras=len(camera_names)),
                 static=True,
                 recording=recording,
             )
+            self._log_mesh(recording)
 
             num_frames: int = 0
             for index, cam_name in enumerate(camera_names):
@@ -352,6 +367,20 @@ class RobocapDataset(DataforgeDataset[RobocapConfig]):
 
         print(f"done {identity.sequence_key} → {target} ({len(camera_names)} cameras, {num_frames} frames)")
         return target
+
+    def _log_mesh(self, recording: rr.RecordingStream) -> None:
+        """Log the textured cap scan as a static child of the rig, if the asset is readable.
+
+        The mesh makes the rig legible as a physical object (the pinholes attach to
+        its brim) and rides any temporal ``world_T_rig`` a pose layer adds later.
+        """
+        mesh_path: Path = self.config.mesh_path if self.config.mesh_path is not None else self.config.root / MESH_RELATIVE_PATH
+        if not os.access(mesh_path, os.R_OK):
+            print(f"  warning: cap mesh not readable, skipping: {mesh_path}")
+            return
+        mesh_entity: str = f"{schema.rig_path(RIG)}/mesh"
+        rr.log(mesh_entity, rr.Transform3D(translation=MESH_TRANSLATION, mat3x3=MESH_MAT3X3), static=True, recording=recording)
+        rr.log(mesh_entity, rr.Asset3D(path=mesh_path), static=True, recording=recording)
 
     def _log_video(self, recording: rr.RecordingStream, video_path: Path, entity_path: str) -> int:
         """Remux one MP4 as a ``VideoStream``, retimed onto the camera clock.
