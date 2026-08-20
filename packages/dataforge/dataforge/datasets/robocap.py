@@ -6,14 +6,18 @@ Raw layout on disk (already local; ``download`` only verifies it):
     <root>/<device>_session_<S>/video_dev<D>_session<S>_segment<G>_<camname>.mp4
     <root>/<device>_session_<S>/IMUWriter_dev<0|1|2>_session<S>_segment<G>.db
 
-Clocks. Both sensors share one nanosecond device clock, offset by a fixed
-constant: basalt's RoboCap loader (``src/io/dataset_io_robocap.cpp``) *adds*
+Clocks. Both sensors share one nanosecond device clock (boot-relative, NOT a
+Unix epoch — values sit around tens of seconds), offset by a fixed constant:
+basalt's RoboCap loader (``src/io/dataset_io_robocap.cpp``) *adds*
 ``kCameraToImuOffsetNs`` to camera timestamps to land on the IMU clock. We pick
 the **raw camera clock** for ``video_time`` — video times are
-``comment_us * 1000 + pts_ns`` (the MP4 format-level ``comment`` tag is an
-absolute epoch in microseconds), and IMU sample times are therefore
-``t_imu_ns - CAMERA_TO_IMU_OFFSET_NS``. Nothing is resampled: raw samples land
-at their native rate.
+``comment_us * 1000 + pts_ns`` (the MP4 format-level ``comment`` tag is the
+capture start on that device clock, in microseconds), and IMU sample times are
+therefore ``t_imu_ns - CAMERA_TO_IMU_OFFSET_NS``. Nothing is resampled: raw
+samples land at their native rate. ``video_time`` is deliberately a *duration*
+timeline — retagging it as ``timestamp`` would render the boot clock as
+1970-01-01T00:00:25. Segments recorded within one boot share the axis, which
+is what makes a future multi-segment session view line up for free.
 
 Calibration comes from simplecv's RoboCap ego loader; the private helpers are
 imported deliberately (the donor is scheduled for deletion once the dataset
@@ -24,6 +28,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -123,7 +128,9 @@ def read_imu_database(db_path: Path) -> tuple[ImuSamples, ImuSamples] | None:
         The gyro and accel channels, or ``None`` if SQLite refused the file.
     """
     try:
-        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as database:
+        # contextlib.closing because sqlite3's own context manager only ends the
+        # transaction; it leaves the connection (and its fd) open until GC.
+        with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as database:
             gyro: ImuSamples = read_imu_channel(database, "gyro_data", GYRO_SCALE)
             accel: ImuSamples = read_imu_channel(database, "acc_data", ACCEL_SCALE)
     except BeartypeException:
@@ -135,16 +142,16 @@ def read_imu_database(db_path: Path) -> tuple[ImuSamples, ImuSamples] | None:
 
 
 def video_epoch_ns(video_path: Path) -> int:
-    """Absolute start time of an MP4 from its format-level ``comment`` tag.
+    """Start time of an MP4 on the device clock, from its format-level ``comment`` tag.
 
-    RoboCap writes the capture epoch in microseconds into the container
-    ``comment`` metadata; sample PTS are offsets from it.
+    RoboCap writes the capture start (boot-relative device clock, microseconds)
+    into the container ``comment`` metadata; sample PTS are offsets from it.
 
     Args:
         video_path: Path to a RoboCap MP4.
 
     Returns:
-        The capture epoch in nanoseconds on the camera clock.
+        The capture start in nanoseconds on the camera clock.
     """
     with av.open(str(video_path)) as container:
         comment: str | None = container.metadata.get("comment")
@@ -329,9 +336,17 @@ class RobocapDataset(DataforgeDataset[RobocapConfig]):
             self._log_imu(recording, session_dir, session, segment)
 
             recording.send_recording_name(identity.recording_id)
+            # start_time_ns makes the device-clock origin queryable without scanning chunks
+            # (e.g. for a consumer that wants a zero-based axis or cross-segment alignment).
+            start_time_ns: int = min(video_epoch_ns(path) for path in videos.values())
             recording.send_property(
                 "capture",
-                rr.AnyValues(schema=schema.DATAFORGE_SCHEMA_VERSION, num_frames=num_frames, num_cameras=len(camera_names)),
+                rr.AnyValues(
+                    schema=schema.DATAFORGE_SCHEMA_VERSION,
+                    num_frames=num_frames,
+                    num_cameras=len(camera_names),
+                    start_time_ns=start_time_ns,
+                ),
             )
             recording.send_property("convert", rr.AnyValues(version="1"))
 
@@ -365,7 +380,9 @@ class RobocapDataset(DataforgeDataset[RobocapConfig]):
             shifted: pa.Array = pa.array(np.asarray(record_batch.column(index).cast(pa.int64())) + epoch_ns, type=pa.duration("ns"))
             sample_count += record_batch.num_rows
             retimed: pa.RecordBatch = record_batch.set_column(index, record_batch.schema.field(index), shifted)
-            return rr.experimental.Chunk.from_record_batch(retimed, index=schema.TIMELINE, entity_path=chunk.entity_path)
+            # No index=/entity_path= overrides: the batch's rerun:* metadata already carries
+            # both, and passing either forces from_record_batch to mint fresh row/chunk ids.
+            return rr.experimental.Chunk.from_record_batch(retimed)
 
         reader: rr.experimental.Mp4Reader = rr.experimental.Mp4Reader(
             video_path,
@@ -373,6 +390,8 @@ class RobocapDataset(DataforgeDataset[RobocapConfig]):
             entity_path=entity_path,
             timeline_name=schema.TIMELINE,
         )
+        # send_chunks drives the lazy stream to completion, so sample_count is final here;
+        # anything short of a fully-consuming terminal would silently leave it at 0.
         recording.send_chunks(reader.stream().flat_map(retime))
         return sample_count
 
