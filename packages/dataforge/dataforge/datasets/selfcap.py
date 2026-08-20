@@ -162,6 +162,11 @@ class CameraPane:
     """Rig index owning the camera."""
     cam: int
     """Camera index within the rig."""
+    kind: str
+    """Device group the pane belongs to: ``exo``, ``ego``, or ``quest``.
+
+    Blueprints cannot select entities by AnyValues, so the exo/ego grouping the
+    layout communicates has to travel with the pane list itself."""
 
 
 @dataclass
@@ -368,15 +373,28 @@ def build_blueprint(panes: list[CameraPane], ego_rig: int) -> rrb.Blueprint:
     Returns:
         The blueprint embedded in every SelfCap base-layer rrd.
     """
-    camera_views: list[rrb.Spatial2DView] = [
-        rrb.Spatial2DView(name=pane.name, origin=schema.pinhole_path(pane.rig, pane.cam), contents=f"{schema.pinhole_path(pane.rig, pane.cam)}/**")
-        for pane in panes
-    ]
+    def views(kind: str) -> list[rrb.Spatial2DView]:
+        return [
+            rrb.Spatial2DView(name=pane.name, origin=schema.pinhole_path(pane.rig, pane.cam), contents=f"{schema.pinhole_path(pane.rig, pane.cam)}/**")
+            for pane in panes
+            if pane.kind == kind
+        ]
+
+    # The layout is grouped by device kind (blueprints cannot select on the rigs'
+    # `kind` AnyValues, so the grouping travels through the pane list instead):
+    # exo cameras as a grid, the OAK and Quest as labeled ego rows beneath it.
     return rrb.Blueprint(
         rrb.Vertical(
             rrb.Horizontal(
                 rrb.Spatial3DView(name="Scene", origin="/", line_grid=True),
-                rrb.Grid(*camera_views, grid_columns=3, name="Synchronized cameras"),
+                rrb.Vertical(
+                    rrb.Grid(*views("exo"), grid_columns=2, name="Exo"),
+                    rrb.Horizontal(*views("ego"), name="Ego · OAK"),
+                    rrb.Horizontal(*views("quest"), name="Ego · Quest"),
+                    row_shares=[2.0, 1.0, 1.0],
+                    name="Cameras",
+                ),
+                column_shares=[1.0, 1.0],
             ),
             rrb.Horizontal(
                 rrb.TimeSeriesView(
@@ -407,9 +425,9 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig]):
         Exo device names vary per session, so the dataset default labels them by
         index; the per-recording blueprint embedded at convert uses real names.
         """
-        panes: list[CameraPane] = [CameraPane(name=f"exo {rig}", rig=rig, cam=0) for rig in range(DEFAULT_EXO_CAMERAS)]
-        panes += [CameraPane(name=f"ego {stream}", rig=DEFAULT_EXO_CAMERAS, cam=index) for index, (stream, _) in enumerate(EGO_STREAM_LAYOUTS)]
-        panes += [CameraPane(name=f"quest {stream}", rig=DEFAULT_EXO_CAMERAS + 1, cam=index) for index, (stream, _) in enumerate(QUEST_STREAM_LAYOUTS)]
+        panes: list[CameraPane] = [CameraPane(name=f"exo {rig}", rig=rig, cam=0, kind="exo") for rig in range(DEFAULT_EXO_CAMERAS)]
+        panes += [CameraPane(name=f"ego {stream}", rig=DEFAULT_EXO_CAMERAS, cam=index, kind="ego") for index, (stream, _) in enumerate(EGO_STREAM_LAYOUTS)]
+        panes += [CameraPane(name=f"quest {stream}", rig=DEFAULT_EXO_CAMERAS + 1, cam=index, kind="quest") for index, (stream, _) in enumerate(QUEST_STREAM_LAYOUTS)]
         return build_blueprint(panes, ego_rig=DEFAULT_EXO_CAMERAS)
 
     # ── raw-tree discovery ────────────────────────────────────────────────
@@ -485,9 +503,9 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig]):
         ego_rig: int = len(devices)
         quest_rig: int = ego_rig + 1
 
-        panes: list[CameraPane] = [CameraPane(name=device.split("-")[0], rig=rig, cam=0) for rig, device in enumerate(devices)]
-        panes += [CameraPane(name=f"ego {stream}", rig=ego_rig, cam=index) for index, (stream, _) in enumerate(EGO_STREAM_LAYOUTS)]
-        panes += [CameraPane(name=f"quest {stream}", rig=quest_rig, cam=index) for index, (stream, _) in enumerate(QUEST_STREAM_LAYOUTS)]
+        panes: list[CameraPane] = [CameraPane(name=device.split("-")[0], rig=rig, cam=0, kind="exo") for rig, device in enumerate(devices)]
+        panes += [CameraPane(name=f"ego {stream}", rig=ego_rig, cam=index, kind="ego") for index, (stream, _) in enumerate(EGO_STREAM_LAYOUTS)]
+        panes += [CameraPane(name=f"quest {stream}", rig=quest_rig, cam=index, kind="quest") for index, (stream, _) in enumerate(QUEST_STREAM_LAYOUTS)]
 
         with writing.atomic_recording(
             target,
