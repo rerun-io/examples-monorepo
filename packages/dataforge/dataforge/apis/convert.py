@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from beartype.roar import BeartypeException
+
 from dataforge.datasets import AnnotatedDatasetUnion, RobocapConfig
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.identity import SequenceIdentity
@@ -35,12 +37,27 @@ def select(identities: list[SequenceIdentity], sequence: str | None) -> list[Seq
 
 
 def main(config: Config) -> None:
-    """Convert every selected sequence serially."""
+    """Convert every selected sequence serially, surviving individual failures.
+
+    One bad sequence must not throw away a batch that is hours in (a lesson from
+    robocap's malformed ``s10``), so failures are reported and the run continues;
+    the process still exits non-zero so a caller can tell a partial run apart
+    from a clean one.
+    """
     dataset_config: DataforgeDatasetConfig = config.dataset
     dataset: DataforgeDataset = dataset_config.setup()
     selected: list[SequenceIdentity] = select(dataset.sequences(), config.sequence)
     print(f"converting {len(selected)} sequence(s)")
+    failed: list[str] = []
     for identity in selected:
-        target: Path = dataset.convert(identity, force=config.force)
-        if not target.is_file():
-            raise RuntimeError(f"convert produced no recording for {identity.sequence_key}")
+        try:
+            target: Path = dataset.convert(identity, force=config.force)
+            if not target.is_file():
+                raise RuntimeError(f"convert produced no recording for {identity.sequence_key}")
+        except BeartypeException:
+            raise
+        except Exception as error:
+            print(f"FAILED {identity.sequence_key}: {type(error).__name__}: {error}")
+            failed.append(identity.sequence_key)
+    if failed:
+        raise SystemExit(f"{len(failed)} of {len(selected)} sequence(s) failed: {', '.join(failed)}")
