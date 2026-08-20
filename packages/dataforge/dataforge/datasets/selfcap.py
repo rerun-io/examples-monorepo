@@ -381,21 +381,18 @@ def build_blueprint(panes: list[CameraPane], ego_rig: int) -> rrb.Blueprint:
         ]
 
     # The layout is grouped by device kind (blueprints cannot select on the rigs'
-    # `kind` AnyValues, so the grouping travels through the pane list instead):
-    # exo cameras as a grid, the OAK and Quest as labeled ego rows beneath it.
+    # `kind` AnyValues, so the grouping travels through the pane list instead) and
+    # mirrors simplecv's exoego ergonomics: a dominant 3D scene with the ego views
+    # (OAK + Quest) in a two-column grid beside it, the exo cameras as a bottom
+    # row, and the IMU strip beneath. Layout only — the logged schema is untouched.
     return rrb.Blueprint(
         rrb.Vertical(
             rrb.Horizontal(
                 rrb.Spatial3DView(name="Scene", origin="/", line_grid=True),
-                rrb.Vertical(
-                    rrb.Grid(*views("exo"), grid_columns=2, name="Exo"),
-                    rrb.Horizontal(*views("ego"), name="Ego · OAK"),
-                    rrb.Horizontal(*views("quest"), name="Ego · Quest"),
-                    row_shares=[2.0, 1.0, 1.0],
-                    name="Cameras",
-                ),
-                column_shares=[1.0, 1.0],
+                rrb.Grid(*views("ego"), *views("quest"), grid_columns=2, name="Ego"),
+                column_shares=[3.0, 1.0],
             ),
+            rrb.Horizontal(*views("exo"), name="Exo"),
             rrb.Horizontal(
                 rrb.TimeSeriesView(
                     name="Gyroscope",
@@ -410,7 +407,7 @@ def build_blueprint(panes: list[CameraPane], ego_rig: int) -> rrb.Blueprint:
                     plot_legend=rrb.PlotLegend(visible=True),
                 ),
             ),
-            row_shares=[3, 1],
+            row_shares=[4.0, 1.4, 1.0],
         ),
         collapse_panels=True,
     )
