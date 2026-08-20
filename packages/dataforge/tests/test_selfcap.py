@@ -12,10 +12,11 @@ from numpy import ndarray
 
 from dataforge.datasets.selfcap import (
     CameraCalibration,
+    EpisodePlan,
     HeadPoses,
-    ImuSamples,
     SelfcapConfig,
     SelfcapDataset,
+    build_episode_plan,
     exo_devices,
     read_calibration,
     read_frame_times_ns,
@@ -24,6 +25,7 @@ from dataforge.datasets.selfcap import (
     read_session_task,
 )
 from dataforge.identity import SequenceIdentity
+from dataforge.logging_toolkit import ImuChannel
 
 SESSION_A: str = "25aeb66a-cf5a-44a3-845f-62606cefabe7"
 """Session uuid whose first eight characters become the identity's middle part."""
@@ -81,22 +83,24 @@ def corpus(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def test_sequences_skips_episodes_with_unreadable_files(corpus: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_discover_skips_episodes_with_unreadable_files(corpus: Path, capsys: pytest.CaptureFixture[str]) -> None:
     dataset: SelfcapDataset = SelfcapDataset(SelfcapConfig(root=corpus))
-    identities: list[SequenceIdentity] = dataset.sequences()
-    assert [identity.sequence_key for identity in identities] == [
+    discovered: list[tuple[SequenceIdentity, Path]] = dataset.discover()
+    assert [identity.sequence_key for identity, _ in discovered] == [
         f"2025-12-20/{SESSION_A[:8]}/ep001",
         f"2025-12-20/{SESSION_A[:8]}/ep009",
         f"2025-12-21/{SESSION_B[:8]}/ep002",
     ]
     assert "skipped 1 episode" in capsys.readouterr().out
+    # sequences() is derived from discover(), so the two can never disagree.
+    assert dataset.sequences() == [identity for identity, _ in discovered]
 
 
-def test_identity_maps_to_recording_id_and_back_to_the_episode_directory(corpus: Path) -> None:
+def test_discover_pairs_each_identity_with_its_episode_directory(corpus: Path) -> None:
     dataset: SelfcapDataset = SelfcapDataset(SelfcapConfig(root=corpus))
-    identity: SequenceIdentity = dataset.sequences()[1]
-    assert identity.recording_id == f"selfcap__2025-12-20__{SESSION_A[:8]}__ep009"
-    assert dataset._locate(identity) == corpus / "cut" / "2025-12-20" / SESSION_A / "episodes" / "episode-009"
+    pair: tuple[SequenceIdentity, Path] = dataset.discover()[1]
+    assert pair[0].recording_id == f"selfcap__2025-12-20__{SESSION_A[:8]}__ep009"
+    assert pair[1] == corpus / "cut" / "2025-12-20" / SESSION_A / "episodes" / "episode-009"
 
 
 def test_download_verifies_the_local_corpus(corpus: Path, tmp_path: Path) -> None:
@@ -146,12 +150,15 @@ def test_imu_csv_keeps_accel_and_gyro_and_drops_mag_and_rot(tmp_path: Path) -> N
         "0,0.71875,-4.95703125,-8.796875,-0.13671875,-0.15625,-0.07421875,19.25,10.1875,73.0625,-0.85,-0.45,0.068\n"
         "10035000,0.76953125,-5.01171875,-8.88671875,-0.111328125,-0.154296875,-0.0703125,20.3125,4.8125,69.75,-0.851,-0.455,0.068\n"
     )
-    samples: ImuSamples = read_imu_csv(csv_path)
-    np.testing.assert_array_equal(samples.times_ns, np.array([0, 10035000], dtype=np.int64))
-    expected_accel: Float64[ndarray, "2 3"] = np.array([[0.71875, -4.95703125, -8.796875], [0.76953125, -5.01171875, -8.88671875]])
-    np.testing.assert_allclose(samples.accel_xyz, expected_accel)
+    channels: tuple[ImuChannel, ImuChannel] = read_imu_csv(csv_path)
+    gyro: ImuChannel = channels[0]
+    accel: ImuChannel = channels[1]
+    np.testing.assert_array_equal(gyro.times_ns, np.array([0, 10035000], dtype=np.int64))
+    np.testing.assert_array_equal(accel.times_ns, np.array([0, 10035000], dtype=np.int64))
     expected_gyro: Float64[ndarray, "2 3"] = np.array([[-0.13671875, -0.15625, -0.07421875], [-0.111328125, -0.154296875, -0.0703125]])
-    np.testing.assert_allclose(samples.gyro_xyz, expected_gyro)
+    np.testing.assert_allclose(gyro.values_xyz, expected_gyro)
+    expected_accel: Float64[ndarray, "2 3"] = np.array([[0.71875, -4.95703125, -8.796875], [0.76953125, -5.01171875, -8.88671875]])
+    np.testing.assert_allclose(accel.values_xyz, expected_accel)
 
 
 def test_head_poses_take_the_left_eye_track_as_xyzw_quaternions(tmp_path: Path) -> None:
@@ -212,3 +219,54 @@ def test_calibration_keys_on_positional_layout_and_maps_14_coefficients(tmp_path
 def test_default_blueprint_covers_nine_cameras() -> None:
     blueprint = SelfcapConfig().setup().default_blueprint()
     assert blueprint is not None
+
+
+def calibration_document(layouts: tuple[str, ...]) -> str:
+    """A minimal ``calibration.json`` describing one usable camera per positional layout."""
+    return json.dumps(
+        {
+            "intrinsics": [
+                {
+                    "positional_layout": layout,
+                    "lens_intrinsics": {"focal_length_x": 700.0, "focal_length_y": 700.0, "principal_point_x": 640.0, "principal_point_y": 360.0},
+                    "capture_resolution": {"width": 1280, "height": 720},
+                }
+                for layout in layouts
+            ],
+            "extrinsics": [],
+        }
+    )
+
+
+def test_episode_plan_drops_cameras_without_intrinsics(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # The bug this guards: panes built from readability alone described cameras the
+    # converter then skipped, so the blueprint and num_cameras over-reported.
+    episode_dir: Path = tmp_path / "episode-001"
+    make_episode(episode_dir)
+    for device in EXO_DEVICES[:-1]:
+        (episode_dir / "exo" / device / "calibration.json").write_text(calibration_document(("center",)))
+    (episode_dir / "exo" / EXO_DEVICES[-1] / "calibration.json").write_text(calibration_document(()))
+    (episode_dir / "ego" / "calibration.json").write_text(calibration_document(("center", "left")))  # no "right"
+    (episode_dir / "quest" / "calibration.json").write_text(calibration_document(("left", "right")))
+
+    plan: EpisodePlan = build_episode_plan(episode_dir)
+    assert (plan.ego_rig, plan.quest_rig) == (4, 5)
+    assert [(pane.rig, pane.cam, pane.kind) for pane in plan.panes] == [
+        (0, 0, "exo"),
+        (1, 0, "exo"),
+        (2, 0, "exo"),
+        (4, 0, "ego"),
+        (4, 1, "ego"),
+        (5, 0, "quest"),
+        (5, 1, "quest"),
+    ]
+    # The intrinsics-less exo device keeps its rig node, honestly declaring zero cameras.
+    assert [len(rig.cameras) for rig in plan.rigs] == [1, 1, 1, 0, 2, 2]
+    assert len(plan.panes) == sum(len(rig.cameras) for rig in plan.rigs)
+    assert {rig.reference for rig in plan.rigs} == {"cam_00"}
+    warnings: str = capsys.readouterr().out
+    assert "skipping Wolf-387E89E1" in warnings
+    assert "skipping ego right" in warnings
+    # Ego cameras carry the native-rate csv metadata; exo/quest leave it off entirely.
+    assert [(camera.native_frames, camera.native_duration_ns) for camera in plan.rigs[4].cameras] == [(1, 0), (1, 0)]
+    assert plan.rigs[0].cameras[0].native_frames is None

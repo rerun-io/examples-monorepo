@@ -14,12 +14,13 @@ from dataforge.datasets.robocap import (
     ACCEL_SCALE,
     CAMERA_TO_IMU_OFFSET_NS,
     GYRO_SCALE,
-    ImuSamples,
     RobocapConfig,
     RobocapDataset,
+    RobocapSource,
     read_imu_database,
 )
 from dataforge.identity import SequenceIdentity
+from dataforge.logging_toolkit import ImuChannel
 
 DEVICE: str = "f408193e6447b3b0"
 """Device id used by every fake session directory in these tests."""
@@ -47,15 +48,19 @@ def corpus(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def test_sequences_discovers_every_segment_and_skips_old_dirs(corpus: Path) -> None:
+def test_discover_pairs_every_segment_with_its_session_dir_and_skips_old_dirs(corpus: Path) -> None:
     dataset: RobocapDataset = RobocapDataset(RobocapConfig(root=corpus))
-    identities: list[SequenceIdentity] = dataset.sequences()
-    assert [identity.sequence_key for identity in identities] == [
+    discovered: list[tuple[SequenceIdentity, RobocapSource]] = dataset.discover()
+    assert [identity.sequence_key for identity, _ in discovered] == [
         f"{DEVICE}/s1/seg1",
         f"{DEVICE}/s1/seg2",
         f"{DEVICE}/s10/seg1",
     ]
-    assert identities[0].recording_id == f"robocap__{DEVICE}__s1__seg1"
+    assert discovered[0][0].recording_id == f"robocap__{DEVICE}__s1__seg1"
+    assert discovered[0][1] == RobocapSource(session_dir=corpus / f"{DEVICE}_session_1", device=DEVICE, session=1, segment=1)
+    assert discovered[2][1].session == 10
+    # sequences() is derived from discover(), so the two can never disagree.
+    assert dataset.sequences() == [identity for identity, _ in discovered]
 
 
 def test_download_verifies_local_corpus(corpus: Path, tmp_path: Path) -> None:
@@ -79,10 +84,10 @@ def write_imu_db(db_path: Path) -> None:
 def test_imu_parsing_scales_values_and_shifts_onto_camera_clock(tmp_path: Path) -> None:
     db_path: Path = tmp_path / "IMUWriter_dev0_session1_segment1.db"
     write_imu_db(db_path)
-    channels: tuple[ImuSamples, ImuSamples] | None = read_imu_database(db_path)
+    channels: tuple[ImuChannel, ImuChannel] | None = read_imu_database(db_path)
     assert channels is not None
-    gyro: ImuSamples = channels[0]
-    accel: ImuSamples = channels[1]
+    gyro: ImuChannel = channels[0]
+    accel: ImuChannel = channels[1]
 
     expected_gyro_times: Int64[ndarray, "2"] = np.array([1000000000, 1002000000], dtype=np.int64) - CAMERA_TO_IMU_OFFSET_NS
     np.testing.assert_array_equal(gyro.times_ns, expected_gyro_times)

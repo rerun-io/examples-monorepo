@@ -8,12 +8,9 @@ from pathlib import Path
 import rerun.blueprint as rrb
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
 
-from dataforge import paths
-from dataforge.datasets import AnnotatedDatasetUnion, RobocapConfig, dataset_key
+from dataforge import paths, writing
+from dataforge.datasets import AnnotatedDatasetUnion, RobocapConfig
 from dataforge.datasets.base import DataforgeDatasetConfig
-
-LAYER: str = "base"
-"""Only layer dataforge v1 emits."""
 
 
 @dataclass
@@ -29,24 +26,25 @@ class Config:
 def main(config: Config) -> None:
     """Create the dataset if needed and register every base-layer rrd (idempotent)."""
     dataset_config: DataforgeDatasetConfig = config.dataset
-    name: str = dataset_key(dataset_config)
-    rrd_paths: list[Path] = sorted((paths.output_root() / LAYER).glob(f"{name}__*.rrd"))
+    name: str = dataset_config.name
+    layer_root: Path = paths.output_root() / paths.BASE_LAYER
+    rrd_paths: list[Path] = sorted(layer_root.glob(f"{name}__*.rrd"))
     if not rrd_paths:
-        raise FileNotFoundError(f"no {LAYER}-layer rrds for {name} under {paths.output_root() / LAYER}")
+        raise FileNotFoundError(f"no {paths.BASE_LAYER}-layer rrds for {name} under {layer_root}")
 
     client: CatalogClient = CatalogClient(config.catalog_url)
     dataset: DatasetEntry = client.create_dataset(name, exist_ok=True)
     dataset.register(
         [path.resolve().as_uri() for path in rrd_paths],
-        layer_name=LAYER,
+        layer_name=paths.BASE_LAYER,
         on_duplicate=OnDuplicateSegmentLayer.SKIP,
     ).wait()
 
     blueprint: rrb.Blueprint | None = dataset_config.setup().default_blueprint()
     if blueprint is not None:
         blueprint_path: Path = paths.output_root() / "blueprints" / f"{name}.rbl"
-        blueprint_path.parent.mkdir(parents=True, exist_ok=True)
-        blueprint.save(name, str(blueprint_path))
-        blueprint_path.chmod(0o644)  # uid-squashing NFS mounts can land fresh writes as mode 0000
+        # A re-register must never truncate the .rbl a live catalog server still holds open.
+        with writing.atomic_write(blueprint_path) as temp_path:
+            blueprint.save(name, str(temp_path))
         dataset.register_blueprint(blueprint_path.resolve().as_uri(), set_default=True)
-    print(f"registered {len(rrd_paths)} {LAYER}-layer rrds into '{name}' at {config.catalog_url}")
+    print(f"registered {len(rrd_paths)} {paths.BASE_LAYER}-layer rrds into '{name}' at {config.catalog_url}")

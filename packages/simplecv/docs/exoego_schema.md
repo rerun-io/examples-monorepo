@@ -88,6 +88,16 @@ world_T_cam  = world_T_rig @ rig_T_cam           # composes along the entity tre
 - `reference` = the reference camera's id (e.g. `"cam_00"`),
 - `num_cameras`.
 
+Those three keys are the **required** set. A writer may add the two optional
+rig-level keys `name` (human device label, e.g. `"robocap"`, `"oak"`, an iPhone's
+advertised name) and `kind` (device role: `"exo"` / `"ego"` / `"quest"`) — dataforge
+emits both, because a capture with several unlike rigs is unreadable without them
+and blueprints cannot select entities by their `AnyValues`. Readers must treat them
+as optional. Note also that `reference` names a **sensor child**, not necessarily a
+camera: a rig whose extrinsics are all expressed in its inertial frame states
+`reference = "imu_00"` (dataforge's RoboCap rig does), and a single-camera rig
+trivially states `"cam_00"`.
+
 Per camera, on `/world/rig_NN/cam_MM`: `name` (human stream label) and `kind`
 (`"rgb"` / `"grayscale"`, a best-effort content hint). The reference camera of a
 **multi-camera** rig gets a green frustum tint; single-camera rigs are untinted.

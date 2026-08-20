@@ -32,10 +32,10 @@ import sqlite3
 from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import ClassVar
 
 import av
 import numpy as np
-import pyarrow as pa
 import rerun as rr
 import rerun.blueprint as rrb
 from beartype.roar import BeartypeException
@@ -55,6 +55,7 @@ from simplecv.rerun_log_utils import log_pinhole
 from dataforge import paths, schema, transports, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.identity import SequenceIdentity
+from dataforge.logging_toolkit import ImuChannel, log_imu, log_rig_node, log_video_stream
 
 GYRO_SCALE: float = 0.000266316
 """Raw gyro LSB → rad/s; measured in the basalt fork (``dataset_io_robocap.cpp``)."""
@@ -66,12 +67,13 @@ IMAGE_PLANE_DISTANCE: float = 0.025
 """Frustum length in metres, matching ``RobocapEgoSequence.image_plane_distance``."""
 RIG: int = 0
 """RoboCap is one rig; the whole device is ``rig_00``."""
+RIG_REFERENCE: str = "imu_00"
+"""The rig frame *is* dev0's IMU frame: every camera's Kalibr extrinsic is a ``T_imu_cam``,
+so the rig's reference sensor is the IMU node, not a camera."""
 IMU_DEVICE: int = 0
 """v1 logs the middle IMU (``dev0``) only. TODO(dataforge): also emit dev1/dev2."""
 SESSION_DIR_RE: re.Pattern[str] = re.compile(r"^(?P<device>[0-9a-f]+)_session_(?P<session>\d+)$")
 """Session directory names; the ``-old`` duplicates deliberately do not match."""
-IDENTITY_TRANSFORM: rr.Transform3D = rr.Transform3D(translation=[0.0, 0.0, 0.0], mat3x3=np.eye(3, dtype=np.float32))
-"""Explicit identity pose; an argument-less ``Transform3D`` logs no components at all."""
 MESH_RELATIVE_PATH: str = "robocap-mesh/3DModel.glb"
 """Cap scan location under the corpus root; the mesh is optional (skipped when unreadable)."""
 MESH_TRANSLATION: list[float] = [0.0, -0.15, 0.025]
@@ -88,18 +90,25 @@ VIDEO_NAME_RE: re.Pattern[str] = re.compile(r"^video_dev(?P<device>\d+)_session(
 
 
 @dataclass(frozen=True, slots=True)
-class ImuSamples:
-    """One raw IMU channel (gyro or accel) at its native sample rate."""
+class RobocapSource:
+    """One segment as discovery found it; ``convert`` needs nothing else from the tree."""
 
-    times_ns: Int64[ndarray, "n_samples"]
-    """Sample times on the ``video_time`` camera clock, in nanoseconds."""
-    values_xyz: Float64[ndarray, "n_samples 3"]
-    """Scaled samples (rad/s for gyro, m/s^2 for accel)."""
+    session_dir: Path
+    """``<root>/<device>_session_<S>`` directory holding the videos and IMU dbs."""
+    device: str
+    """Capture-device id, which also names the factory calibration directory."""
+    session: int
+    """Session number ``S`` (part of every filename in the directory)."""
+    segment: int
+    """Segment number ``G`` within the session."""
 
 
 @dataclass
 class RobocapConfig(DataforgeDatasetConfig):
     """RoboCap capture-rig recordings (6 fisheye cameras, 3 IMUs, no labels)."""
+
+    name: ClassVar[str] = "robocap"
+    """Registry key, catalog dataset name, and identity ``dataset`` part."""
 
     _target: type = field(default_factory=lambda: RobocapDataset)
     """Dataset class instantiated by ``setup()``."""
@@ -109,7 +118,7 @@ class RobocapConfig(DataforgeDatasetConfig):
     """Cap mesh glb; defaults to ``<root>/robocap-mesh/3DModel.glb`` when None."""
 
 
-def read_imu_channel(database: sqlite3.Connection, table: str, scale: float) -> ImuSamples:
+def read_imu_channel(database: sqlite3.Connection, table: str, scale: float) -> ImuChannel:
     """Read one raw IMU table and map it onto the camera clock.
 
     Args:
@@ -122,14 +131,14 @@ def read_imu_channel(database: sqlite3.Connection, table: str, scale: float) -> 
     """
     rows: list[tuple[int, int, int, int]] = database.execute(f"SELECT x, y, z, timestamp FROM {table} ORDER BY timestamp").fetchall()
     if not rows:
-        return ImuSamples(times_ns=np.zeros(0, dtype=np.int64), values_xyz=np.zeros((0, 3), dtype=np.float64))
+        return ImuChannel(times_ns=np.zeros(0, dtype=np.int64), values_xyz=np.zeros((0, 3), dtype=np.float64))
     raw: Int64[ndarray, "n_samples 4"] = np.asarray(rows, dtype=np.int64)
     times_ns: Int64[ndarray, "n_samples"] = raw[:, 3] - CAMERA_TO_IMU_OFFSET_NS
     values_xyz: Float64[ndarray, "n_samples 3"] = raw[:, :3].astype(np.float64) * scale
-    return ImuSamples(times_ns=times_ns, values_xyz=values_xyz)
+    return ImuChannel(times_ns=times_ns, values_xyz=values_xyz)
 
 
-def read_imu_database(db_path: Path) -> tuple[ImuSamples, ImuSamples] | None:
+def read_imu_database(db_path: Path) -> tuple[ImuChannel, ImuChannel] | None:
     """Read ``(gyro, accel)`` from one IMU db, or ``None`` when the file is unusable.
 
     Some segments ship a malformed db (session_1's ``dev2``), which must not
@@ -145,8 +154,8 @@ def read_imu_database(db_path: Path) -> tuple[ImuSamples, ImuSamples] | None:
         # contextlib.closing because sqlite3's own context manager only ends the
         # transaction; it leaves the connection (and its fd) open until GC.
         with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as database:
-            gyro: ImuSamples = read_imu_channel(database, "gyro_data", GYRO_SCALE)
-            accel: ImuSamples = read_imu_channel(database, "acc_data", ACCEL_SCALE)
+            gyro: ImuChannel = read_imu_channel(database, "gyro_data", GYRO_SCALE)
+            accel: ImuChannel = read_imu_channel(database, "acc_data", ACCEL_SCALE)
     except BeartypeException:
         raise
     except sqlite3.DatabaseError as error:
@@ -218,7 +227,7 @@ def build_blueprint(camera_names: list[str]) -> rrb.Blueprint:
     )
 
 
-class RobocapDataset(DataforgeDataset[RobocapConfig]):
+class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
     """Converts RoboCap segments into exoego:v2 base-layer recordings."""
 
     def default_blueprint(self) -> rrb.Blueprint:
@@ -238,9 +247,9 @@ class RobocapDataset(DataforgeDataset[RobocapConfig]):
         sessions: list[Path] = self.session_dirs()
         print(f"robocap: {self.config.root} — {len(sessions)} sessions, {len(self.sequences())} segments, calibration present")
 
-    def sequences(self) -> list[SequenceIdentity]:
-        """Discover every ``(device, session, segment)`` triple on disk."""
-        triples: set[tuple[str, int, int]] = set()
+    def discover(self) -> list[tuple[SequenceIdentity, RobocapSource]]:
+        """Pair every ``(device, session, segment)`` triple on disk with its session directory."""
+        sources: dict[tuple[str, int, int], Path] = {}
         for session_dir in self.session_dirs():
             match: re.Match[str] | None = SESSION_DIR_RE.match(session_dir.name)
             if match is None:
@@ -250,22 +259,14 @@ class RobocapDataset(DataforgeDataset[RobocapConfig]):
             for video_path in session_dir.glob(f"video_dev*_session{session}_segment*_*.mp4"):
                 video_match: re.Match[str] | None = VIDEO_NAME_RE.match(video_path.stem)
                 if video_match is not None:
-                    triples.add((device, session, int(video_match["segment"])))
+                    sources[(device, session, int(video_match["segment"]))] = session_dir
         return [
-            SequenceIdentity(dataset="robocap", parts=(device, f"s{session}", f"seg{segment}")) for device, session, segment in sorted(triples)
+            (
+                SequenceIdentity(dataset=self.config.name, parts=(device, f"s{session}", f"seg{segment}")),
+                RobocapSource(session_dir=session_dir, device=device, session=session, segment=segment),
+            )
+            for (device, session, segment), session_dir in sorted(sources.items())
         ]
-
-    def _locate(self, identity: SequenceIdentity) -> tuple[Path, str, int, int]:
-        """Resolve an identity back to ``(session_dir, device, session, segment)``."""
-        if len(identity.parts) != 3:
-            raise ValueError(f"RoboCap identities have three parts, got {identity.sequence_key!r}")
-        device: str = identity.parts[0]
-        session: int = int(identity.parts[1].removeprefix("s"))
-        segment: int = int(identity.parts[2].removeprefix("seg"))
-        session_dir: Path = self.config.root / f"{device}_session_{session}"
-        if not session_dir.is_dir():
-            raise FileNotFoundError(f"Session directory not found: {session_dir}")
-        return session_dir, device, session, segment
 
     def _videos(self, session_dir: Path, session: int, segment: int) -> dict[str, Path]:
         """Map canonical camera name → MP4 path, ordered by ``CAMERA_DISPLAY_ORDER``."""
@@ -296,21 +297,23 @@ class RobocapDataset(DataforgeDataset[RobocapConfig]):
         return cameras
 
     # ── conversion ────────────────────────────────────────────────────────
-    def convert(self, identity: SequenceIdentity, *, force: bool) -> Path:
+    def convert(self, identity: SequenceIdentity, source: RobocapSource, *, force: bool) -> Path:
         """Write one segment's base-layer rrd (cameras + video + dev0 IMU)."""
-        target: Path = paths.rrd_path(paths.output_root(), layer="base", identity=identity)
+        target: Path = paths.rrd_path(paths.output_root(), layer=paths.BASE_LAYER, identity=identity)
         if writing.should_skip(target, force=force):
             print(f"skip {identity.sequence_key} → {target}")
             return target
 
-        session_dir, device, session, segment = self._locate(identity)
-        videos: dict[str, Path] = self._videos(session_dir, session, segment)
+        videos: dict[str, Path] = self._videos(source.session_dir, source.session, source.segment)
         if not videos:
-            raise FileNotFoundError(f"No videos for {identity.sequence_key} in {session_dir}")
-        cameras: dict[str, Fisheye62Parameters] = self._calibration(device)
+            raise FileNotFoundError(f"No videos for {identity.sequence_key} in {source.session_dir}")
+        cameras: dict[str, Fisheye62Parameters] = self._calibration(source.device)
         camera_names: list[str] = [name for name in videos if name in cameras]
         if not camera_names:
             raise FileNotFoundError(f"No calibrated cameras for {identity.sequence_key}")
+        # Every MP4's container comment is parsed exactly once, before the recording opens:
+        # each stream is retimed by its own epoch, and the earliest doubles as start_time_ns.
+        epochs_ns: dict[str, int] = {name: video_epoch_ns(path) for name, path in videos.items()}
 
         with writing.atomic_recording(
             target,
@@ -318,17 +321,9 @@ class RobocapDataset(DataforgeDataset[RobocapConfig]):
             recording_id=identity.recording_id,
             default_blueprint=build_blueprint(camera_names),
         ) as recording:
-            # Deliberately NO static Transform3D on the rig node and NO ViewCoordinates at "/":
-            # per exoego:v2 a world-anchored rig carries no transform, and a static one would
-            # permanently shadow the temporal world_T_rig that a slam/pose layer stacks on this
-            # entity (verified: static components shadow temporal ones per component, silently).
-            # The pose layer owns the root ViewCoordinates (its world is gravity-aligned Z-up).
-            rr.log(
-                schema.rig_path(RIG),
-                rr.AnyValues(schema_version=schema.EXOEGO_SCHEMA_VERSION, reference="cam_00", num_cameras=len(camera_names)),
-                static=True,
-                recording=recording,
-            )
+            # Deliberately NO ViewCoordinates at "/": the pose layer owns the root
+            # ViewCoordinates (its world is gravity-aligned Z-up).
+            log_rig_node(recording, RIG, reference=RIG_REFERENCE, num_cameras=len(camera_names), name="robocap", kind="ego")
             self._log_mesh(recording)
 
             num_frames: int = 0
@@ -346,24 +341,22 @@ class RobocapDataset(DataforgeDataset[RobocapConfig]):
                     static=True,
                     recording=recording,
                 )
-                num_frames = max(num_frames, self._log_video(recording, videos[cam_name], schema.video_path(RIG, index)))
+                num_frames = max(
+                    num_frames,
+                    log_video_stream(recording, videos[cam_name], schema.video_path(RIG, index), shift_ns=epochs_ns[cam_name]),
+                )
 
-            self._log_imu(recording, session_dir, session, segment)
+            self._log_imu(recording, source)
 
-            recording.send_recording_name(identity.recording_id)
             # start_time_ns makes the device-clock origin queryable without scanning chunks
             # (e.g. for a consumer that wants a zero-based axis or cross-segment alignment).
-            start_time_ns: int = min(video_epoch_ns(path) for path in videos.values())
-            recording.send_property(
-                "capture",
-                rr.AnyValues(
-                    schema=schema.DATAFORGE_SCHEMA_VERSION,
-                    num_frames=num_frames,
-                    num_cameras=len(camera_names),
-                    start_time_ns=start_time_ns,
-                ),
+            writing.send_capture_properties(
+                recording,
+                identity,
+                num_cameras=len(camera_names),
+                num_frames=num_frames,
+                start_time_ns=min(epochs_ns.values()),
             )
-            recording.send_property("convert", rr.AnyValues(version="1"))
 
         print(f"done {identity.sequence_key} → {target} ({len(camera_names)} cameras, {num_frames} frames)")
         return target
@@ -382,70 +375,13 @@ class RobocapDataset(DataforgeDataset[RobocapConfig]):
         rr.log(mesh_entity, rr.Transform3D(translation=MESH_TRANSLATION, mat3x3=MESH_MAT3X3), static=True, recording=recording)
         rr.log(mesh_entity, rr.Asset3D(path=mesh_path), static=True, recording=recording)
 
-    def _log_video(self, recording: rr.RecordingStream, video_path: Path, entity_path: str) -> int:
-        """Remux one MP4 as a ``VideoStream``, retimed onto the camera clock.
-
-        ``Mp4Reader`` emits chunk timestamps as raw PTS (nanoseconds from the
-        start of the file), so every indexed chunk is shifted by the file's
-        absolute epoch before it reaches the recording.
-
-        Args:
-            recording: Destination recording stream.
-            video_path: RoboCap MP4 to remux (no decode, no re-encode).
-            entity_path: ``.../pinhole/video`` entity to log under.
-
-        Returns:
-            Number of video samples written.
-        """
-        epoch_ns: int = video_epoch_ns(video_path)
-        sample_count: int = 0
-
-        def retime(chunk: rr.experimental.Chunk) -> list[rr.experimental.Chunk]:
-            nonlocal sample_count
-            if schema.TIMELINE not in chunk.timeline_names:
-                return [chunk]  # the static codec chunk carries no index
-            record_batch: pa.RecordBatch = chunk.to_record_batch()
-            index: int = record_batch.schema.get_field_index(schema.TIMELINE)
-            shifted: pa.Array = pa.array(np.asarray(record_batch.column(index).cast(pa.int64())) + epoch_ns, type=pa.duration("ns"))
-            sample_count += record_batch.num_rows
-            retimed: pa.RecordBatch = record_batch.set_column(index, record_batch.schema.field(index), shifted)
-            # No index=/entity_path= overrides: the batch's rerun:* metadata already carries
-            # both, and passing either forces from_record_batch to mint fresh row/chunk ids.
-            return rr.experimental.Chunk.from_record_batch(retimed)
-
-        reader: rr.experimental.Mp4Reader = rr.experimental.Mp4Reader(
-            video_path,
-            mode="stream",
-            entity_path=entity_path,
-            timeline_name=schema.TIMELINE,
-        )
-        # send_chunks drives the lazy stream to completion, so sample_count is final here;
-        # anything short of a fully-consuming terminal would silently leave it at 0.
-        recording.send_chunks(reader.stream().flat_map(retime))
-        return sample_count
-
-    def _log_imu(self, recording: rr.RecordingStream, session_dir: Path, session: int, segment: int) -> None:
+    def _log_imu(self, recording: rr.RecordingStream, source: RobocapSource) -> None:
         """Log the dev0 IMU's raw gyro/accel samples columnar on ``video_time``."""
-        db_path: Path = session_dir / f"IMUWriter_dev{IMU_DEVICE}_session{session}_segment{segment}.db"
+        db_path: Path = source.session_dir / f"IMUWriter_dev{IMU_DEVICE}_session{source.session}_segment{source.segment}.db"
         if not db_path.is_file():
             print(f"  warning: no IMU database at {db_path}")
             return
-        channels: tuple[ImuSamples, ImuSamples] | None = read_imu_database(db_path)
+        channels: tuple[ImuChannel, ImuChannel] | None = read_imu_database(db_path)
         if channels is None:
             return
-        for samples, entity_path in ((channels[0], schema.gyro_path(RIG, IMU_DEVICE)), (channels[1], schema.accel_path(RIG, IMU_DEVICE))):
-            if samples.times_ns.size == 0:
-                continue
-            rr.send_columns(
-                entity_path,
-                indexes=[rr.TimeColumn(schema.TIMELINE, duration=samples.times_ns.astype("timedelta64[ns]"))],
-                columns=rr.Scalars.columns(scalars=samples.values_xyz),
-                recording=recording,
-            )
-        rr.log(schema.imu_path(RIG, IMU_DEVICE), IDENTITY_TRANSFORM, static=True, recording=recording)
-        rr.log(
-            schema.imu_path(RIG, IMU_DEVICE),
-            rr.AnyValues(name=f"dev{IMU_DEVICE}", kind="imu"),
-            static=True,
-            recording=recording,
-        )
+        log_imu(recording, RIG, IMU_DEVICE, gyro=channels[0], accel=channels[1], name=f"dev{IMU_DEVICE}")

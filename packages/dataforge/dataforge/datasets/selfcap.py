@@ -59,6 +59,7 @@ import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import ClassVar
 
 import numpy as np
 import rerun as rr
@@ -71,6 +72,7 @@ from simplecv.rerun_custom_types import CameraDistortion, PinholeWithDistortion
 from dataforge import paths, schema, transports, writing
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.identity import SequenceIdentity
+from dataforge.logging_toolkit import ImuChannel, log_imu, log_rig_node, log_video_stream
 
 DATE_DIR_RE: re.Pattern[str] = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 """Capture-day directories under the subset; the loose ``manifest.json`` siblings do not match."""
@@ -129,18 +131,6 @@ class CameraCalibration:
 
 
 @dataclass(frozen=True, slots=True)
-class ImuSamples:
-    """The OAK IMU's raw accelerometer and gyroscope channels at their native rate."""
-
-    times_ns: Int64[ndarray, "n_samples"]
-    """Sample times on the episode-relative ``video_time`` clock, in nanoseconds."""
-    accel_xyz: Float64[ndarray, "n_samples 3"]
-    """Linear acceleration in m/s^2 (gravity included)."""
-    gyro_xyz: Float64[ndarray, "n_samples 3"]
-    """Angular velocity in rad/s."""
-
-
-@dataclass(frozen=True, slots=True)
 class HeadPoses:
     """The Quest's left-eye track in its own Y-up world frame."""
 
@@ -169,9 +159,72 @@ class CameraPane:
     layout communicates has to travel with the pane list itself."""
 
 
+@dataclass(frozen=True, slots=True)
+class CameraPlan:
+    """One camera that *will* be logged: its slot, its media, and its metadata."""
+
+    rig: int
+    """Rig index owning the camera."""
+    cam: int
+    """Camera index within the rig."""
+    video_path: Path
+    """mp4 remuxed onto ``schema.video_path(rig, cam)``."""
+    calibration: CameraCalibration
+    """Intrinsics; a camera without them never reaches a plan."""
+    name: str
+    """``name`` AnyValue on the cam node (device name or stream label)."""
+    kind: str
+    """``kind`` AnyValue on the cam node: ``rgb`` or ``grayscale``."""
+    native_frames: int | None = None
+    """Rows in the ego stream's native-rate csv; None for cameras without one."""
+    native_duration_ns: int | None = None
+    """Last native-rate timestamp; None for cameras without a csv."""
+
+
+@dataclass(frozen=True, slots=True)
+class RigPlan:
+    """One rig node and the cameras that survived plan building."""
+
+    rig: int
+    """Rig index; the node is ``schema.rig_path(rig)``."""
+    reference: str
+    """Sensor child whose frame the rig frame coincides with."""
+    name: str
+    """Human device label (the exo device name, ``oak``, ``quest``)."""
+    kind: str
+    """Device role: ``exo`` / ``ego`` / ``quest``."""
+    cameras: tuple[CameraPlan, ...]
+    """Cameras actually logged under this rig; sets the node's ``num_cameras``."""
+
+
+@dataclass(frozen=True, slots=True)
+class EpisodePlan:
+    """Everything convert needs, decided *before* the recording opens.
+
+    Building the plan first is what keeps the embedded blueprint and the
+    ``num_cameras`` property honest: a camera that lacks intrinsics is warned
+    about and dropped here, so it can never appear as a pane describing an
+    entity the converter then never logs.
+    """
+
+    episode_dir: Path
+    """``episodes/episode-<NNN>`` directory the plan was built from."""
+    rigs: tuple[RigPlan, ...]
+    """Exo rigs in name order, then the OAK ego rig, then the Quest."""
+    ego_rig: int
+    """Rig index of the OAK, whose ``imu_00`` feeds the time-series views."""
+    quest_rig: int
+    """Rig index of the Quest, whose node carries the temporal ``world_T_rig``."""
+    panes: tuple[CameraPane, ...]
+    """Blueprint panes — exactly the cameras in ``rigs``, in rig-then-camera order."""
+
+
 @dataclass
 class SelfcapConfig(DataforgeDatasetConfig):
     """Self-collected exo/ego/Quest captures, cut into per-task episodes."""
+
+    name: ClassVar[str] = "selfcap"
+    """Registry key, catalog dataset name, and identity ``dataset`` part."""
 
     _target: type = field(default_factory=lambda: SelfcapDataset)
     """Dataset class instantiated by ``setup()``."""
@@ -219,22 +272,25 @@ def read_frame_times_ns(csv_path: Path) -> Int64[ndarray, "n_frames"]:
     return np.rint(columns["ts_ns"]).astype(np.int64)
 
 
-def read_imu_csv(csv_path: Path) -> ImuSamples:
-    """Read the OAK IMU csv, keeping only the accelerometer and gyroscope channels.
+def read_imu_csv(csv_path: Path) -> tuple[ImuChannel, ImuChannel]:
+    """Read the OAK IMU csv, keeping only the gyroscope and accelerometer channels.
+
+    Both channels share the csv's single ``ts_ns`` column: the OAK reports one
+    fused row per sample instant, unlike RoboCap's two independent tables.
 
     Args:
         csv_path: An ``ego/imu.csv``; also holds ``mag_*`` and ``rot_*`` columns.
 
     Returns:
-        Accel (m/s^2) and gyro (rad/s) samples at their native ~100 Hz rate.
+        The gyro (rad/s) and accel (m/s^2) channels at their native ~100 Hz rate.
         TODO(dataforge): the magnetometer and the ``rot_ijk`` device attitude are
         dropped; they want a magnetometer entity and a proper rotation component.
     """
     columns: dict[str, Float64[ndarray, "n_rows"]] = read_csv_columns(csv_path)
     times_ns: Int64[ndarray, "n_samples"] = np.rint(columns["ts_ns"]).astype(np.int64)
-    accel_xyz: Float64[ndarray, "n_samples 3"] = np.stack([columns["accel_x"], columns["accel_y"], columns["accel_z"]], axis=-1)
     gyro_xyz: Float64[ndarray, "n_samples 3"] = np.stack([columns["gyro_x"], columns["gyro_y"], columns["gyro_z"]], axis=-1)
-    return ImuSamples(times_ns=times_ns, accel_xyz=accel_xyz, gyro_xyz=gyro_xyz)
+    accel_xyz: Float64[ndarray, "n_samples 3"] = np.stack([columns["accel_x"], columns["accel_y"], columns["accel_z"]], axis=-1)
+    return ImuChannel(times_ns=times_ns, values_xyz=gyro_xyz), ImuChannel(times_ns=times_ns, values_xyz=accel_xyz)
 
 
 def read_head_poses(csv_path: Path) -> HeadPoses:
@@ -363,7 +419,97 @@ def episode_is_readable(episode_dir: Path) -> bool:
     return bool(exo_devices(episode_dir))
 
 
-def build_blueprint(panes: list[CameraPane], ego_rig: int) -> rrb.Blueprint:
+def build_episode_plan(episode_dir: Path) -> EpisodePlan:
+    """Decide the whole recording's shape from the raw tree, before anything is logged.
+
+    Every camera is vetted here — the device directory must be readable (already
+    checked by discovery) *and* its ``calibration.json`` must actually describe
+    the camera. A camera that fails is warned about and dropped, so the blueprint
+    panes and the ``num_cameras`` property describe exactly what gets logged.
+
+    Args:
+        episode_dir: A readable ``episodes/episode-<NNN>`` directory.
+
+    Returns:
+        The rig/camera/pane plan for this episode.
+    """
+    devices: list[str] = exo_devices(episode_dir)
+    ego_rig: int = len(devices)
+    quest_rig: int = ego_rig + 1
+    rigs: list[RigPlan] = []
+    panes: list[CameraPane] = []
+
+    for rig, device in enumerate(devices):
+        device_dir: Path = episode_dir / "exo" / device
+        cameras: dict[str, CameraCalibration] = read_calibration(device_dir / "calibration.json")
+        # iPhone calibration ships one entry whose positional_layout is always "center";
+        # fall back to the sole entry so a renamed layout does not lose the camera.
+        calibration: CameraCalibration | None = cameras.get("center") or next(iter(cameras.values()), None)
+        exo_cameras: list[CameraPlan] = []
+        if calibration is None:
+            print(f"  warning: no usable intrinsics in {device_dir / 'calibration.json'}, skipping {device}")
+        else:
+            exo_cameras.append(
+                CameraPlan(rig=rig, cam=0, video_path=device_dir / f"{device}.mp4", calibration=calibration, name=device, kind="rgb")
+            )
+            panes.append(CameraPane(name=device.split("-")[0], rig=rig, cam=0, kind="exo"))
+        # reference="cam_00": a single-camera rig's frame is its camera's frame by construction.
+        rigs.append(RigPlan(rig=rig, reference="cam_00", name=device, kind="exo", cameras=tuple(exo_cameras)))
+
+    ego_dir: Path = episode_dir / "ego"
+    ego_calibration: dict[str, CameraCalibration] = read_calibration(ego_dir / "calibration.json")
+    ego_cameras: list[CameraPlan] = []
+    for cam, (stream, layout) in enumerate(EGO_STREAM_LAYOUTS):
+        calibration = ego_calibration.get(layout)
+        if calibration is None:
+            print(f"  warning: no '{layout}' intrinsics in {ego_dir / 'calibration.json'}, skipping ego {stream}")
+            continue
+        # The mp4 is resampled onto the shared episode grid, so the csv's native-rate
+        # clock is surfaced as metadata rather than used to retime the samples.
+        frame_times_ns: Int64[ndarray, "n_frames"] = read_frame_times_ns(ego_dir / f"{stream}.csv")
+        ego_cameras.append(
+            CameraPlan(
+                rig=ego_rig,
+                cam=cam,
+                video_path=ego_dir / f"{stream}.mp4",
+                calibration=calibration,
+                name=stream,
+                kind="rgb" if stream == "rgb" else "grayscale",
+                native_frames=frame_times_ns.size,
+                native_duration_ns=int(frame_times_ns[-1]) if frame_times_ns.size else 0,
+            )
+        )
+        panes.append(CameraPane(name=f"ego {stream}", rig=ego_rig, cam=cam, kind="ego"))
+    # reference="cam_00": the OAK's rgb camera stands in for the rig frame while the
+    # stereo extrinsics stay unlogged (see read_calibration's TODO on their units).
+    rigs.append(RigPlan(rig=ego_rig, reference="cam_00", name="oak", kind="ego", cameras=tuple(ego_cameras)))
+
+    quest_dir: Path = episode_dir / "quest"
+    quest_calibration: dict[str, CameraCalibration] = read_calibration(quest_dir / "calibration.json")
+    quest_cameras: list[CameraPlan] = []
+    for cam, (stream, layout) in enumerate(QUEST_STREAM_LAYOUTS):
+        calibration = quest_calibration.get(layout)
+        if calibration is None:
+            print(f"  warning: no '{layout}' intrinsics in {quest_dir / 'calibration.json'}, skipping quest {stream}")
+            continue
+        quest_cameras.append(
+            CameraPlan(
+                rig=quest_rig,
+                cam=cam,
+                video_path=quest_dir / f"{stream}.mp4",
+                calibration=calibration,
+                name=stream,
+                kind="grayscale",
+            )
+        )
+        panes.append(CameraPane(name=f"quest {stream}", rig=quest_rig, cam=cam, kind="quest"))
+    # reference="cam_00": the head_pose track logged on the rig node *is* the left-eye pose.
+    rigs.append(RigPlan(rig=quest_rig, reference="cam_00", name="quest", kind="quest", cameras=tuple(quest_cameras)))
+
+    return EpisodePlan(episode_dir=episode_dir, rigs=tuple(rigs), ego_rig=ego_rig, quest_rig=quest_rig, panes=tuple(panes))
+
+
+def build_blueprint(panes: tuple[CameraPane, ...], ego_rig: int) -> rrb.Blueprint:
     """Default layout: the 3D scene plus a camera grid over the ego IMU plots.
 
     Args:
@@ -413,7 +559,7 @@ def build_blueprint(panes: list[CameraPane], ego_rig: int) -> rrb.Blueprint:
     )
 
 
-class SelfcapDataset(DataforgeDataset[SelfcapConfig]):
+class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
     """Converts SelfCap episodes into exoego:v2 base-layer recordings."""
 
     def default_blueprint(self) -> rrb.Blueprint:
@@ -425,7 +571,7 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig]):
         panes: list[CameraPane] = [CameraPane(name=f"exo {rig}", rig=rig, cam=0, kind="exo") for rig in range(DEFAULT_EXO_CAMERAS)]
         panes += [CameraPane(name=f"ego {stream}", rig=DEFAULT_EXO_CAMERAS, cam=index, kind="ego") for index, (stream, _) in enumerate(EGO_STREAM_LAYOUTS)]
         panes += [CameraPane(name=f"quest {stream}", rig=DEFAULT_EXO_CAMERAS + 1, cam=index, kind="quest") for index, (stream, _) in enumerate(QUEST_STREAM_LAYOUTS)]
-        return build_blueprint(panes, ego_rig=DEFAULT_EXO_CAMERAS)
+        return build_blueprint(tuple(panes), ego_rig=DEFAULT_EXO_CAMERAS)
 
     # ── raw-tree discovery ────────────────────────────────────────────────
     def subset_root(self) -> Path:
@@ -448,9 +594,9 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig]):
         dates: set[str] = {date for date, _ in sessions}
         print(f"selfcap: {self.subset_root()} — {len(dates)} days, {len(sessions)} sessions, {len(self.sequences())} readable episodes")
 
-    def sequences(self) -> list[SequenceIdentity]:
-        """Discover every readable episode; unreadable ones are dropped, not raised on."""
-        identities: list[SequenceIdentity] = []
+    def discover(self) -> list[tuple[SequenceIdentity, Path]]:
+        """Pair every readable episode with its directory; unreadable ones are dropped, not raised on."""
+        pairs: list[tuple[SequenceIdentity, Path]] = []
         skipped: int = 0
         for date, session_dir in self.session_dirs():
             for episode_dir in sorted((session_dir / "episodes").iterdir()):
@@ -460,102 +606,93 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig]):
                 if not episode_is_readable(episode_dir):
                     skipped += 1
                     continue
-                identities.append(
-                    SequenceIdentity(
-                        dataset="selfcap",
-                        parts=(date, session_dir.name[:SESSION_KEY_LENGTH], f"ep{int(match['number']):03d}"),
-                    )
+                identity: SequenceIdentity = SequenceIdentity(
+                    dataset=self.config.name,
+                    parts=(date, session_dir.name[:SESSION_KEY_LENGTH], f"ep{int(match['number']):03d}"),
                 )
+                pairs.append((identity, episode_dir))
         if skipped:
             print(f"  warning: skipped {skipped} episode(s) with unreadable files (corpus chmod pending)")
-        return identities
-
-    def _locate(self, identity: SequenceIdentity) -> Path:
-        """Resolve an identity back to its ``episodes/episode-<NNN>`` directory."""
-        if len(identity.parts) != 3:
-            raise ValueError(f"SelfCap identities have three parts, got {identity.sequence_key!r}")
-        date: str = identity.parts[0]
-        session_prefix: str = identity.parts[1]
-        episode_number: int = int(identity.parts[2].removeprefix("ep"))
-        candidates: list[Path] = sorted(path for path in self.subset_root().glob(f"{date}/{session_prefix}*") if (path / "episodes").is_dir())
-        if len(candidates) != 1:
-            raise FileNotFoundError(f"Expected exactly one session for {identity.sequence_key!r}, found {len(candidates)}")
-        episode_dir: Path = candidates[0] / "episodes" / f"episode-{episode_number:03d}"
-        if not episode_dir.is_dir():
-            raise FileNotFoundError(f"Episode directory not found: {episode_dir}")
-        return episode_dir
+        return pairs
 
     # ── conversion ────────────────────────────────────────────────────────
-    def convert(self, identity: SequenceIdentity, *, force: bool) -> Path:
+    def convert(self, identity: SequenceIdentity, source: Path, *, force: bool) -> Path:
         """Write one episode's base-layer rrd (nine cameras, ego IMU, Quest pose)."""
-        target: Path = paths.rrd_path(paths.output_root(), layer="base", identity=identity)
+        target: Path = paths.rrd_path(paths.output_root(), layer=paths.BASE_LAYER, identity=identity)
         if writing.should_skip(target, force=force):
             print(f"skip {identity.sequence_key} → {target}")
             return target
 
-        episode_dir: Path = self._locate(identity)
-        if not episode_is_readable(episode_dir):
-            raise PermissionError(f"Episode {identity.sequence_key} has unreadable files: {episode_dir}")
-        devices: list[str] = exo_devices(episode_dir)
-        ego_rig: int = len(devices)
-        quest_rig: int = ego_rig + 1
-
-        panes: list[CameraPane] = [CameraPane(name=device.split("-")[0], rig=rig, cam=0, kind="exo") for rig, device in enumerate(devices)]
-        panes += [CameraPane(name=f"ego {stream}", rig=ego_rig, cam=index, kind="ego") for index, (stream, _) in enumerate(EGO_STREAM_LAYOUTS)]
-        panes += [CameraPane(name=f"quest {stream}", rig=quest_rig, cam=index, kind="quest") for index, (stream, _) in enumerate(QUEST_STREAM_LAYOUTS)]
+        # Plan first, log second: the blueprint panes and num_cameras below are the
+        # plan's, so they can only ever describe cameras that really get logged.
+        plan: EpisodePlan = build_episode_plan(source)
 
         with writing.atomic_recording(
             target,
             application_id="dataforge",
             recording_id=identity.recording_id,
-            default_blueprint=build_blueprint(panes, ego_rig=ego_rig),
+            default_blueprint=build_blueprint(plan.panes, ego_rig=plan.ego_rig),
         ) as recording:
             # The base layer owns the root ViewCoordinates because it already carries a real
-            # moving-rig pose: the Quest world is right-handed Y-up. Still NO static
-            # Transform3D on any rig node — a static component permanently shadows the
-            # temporal world_T_rig that a slam/pose layer stacks on the same entity.
+            # moving-rig pose: the Quest world is right-handed Y-up.
             rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Y_UP, static=True, recording=recording)
 
             num_frames: int = 0
-            for rig, device in enumerate(devices):
-                num_frames = max(num_frames, self._log_exo(recording, episode_dir / "exo" / device, rig))
-            num_frames = max(num_frames, self._log_ego(recording, episode_dir / "ego", ego_rig))
-            num_frames = max(num_frames, self._log_quest(recording, episode_dir / "quest", quest_rig))
+            for rig_plan in plan.rigs:
+                log_rig_node(
+                    recording,
+                    rig_plan.rig,
+                    reference=rig_plan.reference,
+                    num_cameras=len(rig_plan.cameras),
+                    name=rig_plan.name,
+                    kind=rig_plan.kind,
+                )
+                for camera in rig_plan.cameras:
+                    num_frames = max(num_frames, self._log_camera(recording, camera))
+            self._log_ego_imu(recording, plan)
+            self._log_quest_pose(recording, plan)
 
-            recording.send_recording_name(identity.recording_id)
             # AnyValues drops None-valued kwargs, so an unreadable metadata.json simply
             # leaves task/collector off the property instead of writing empty strings.
-            session: dict[str, str] = read_session_task(episode_dir.parents[1] / "metadata.json")
-            recording.send_property(
-                "capture",
-                rr.AnyValues(
-                    schema=schema.DATAFORGE_SCHEMA_VERSION,
-                    num_cameras=len(panes),
-                    num_frames=num_frames,
-                    task=session.get("task"),
-                    collector=session.get("collector"),
-                ),
+            session: dict[str, str] = read_session_task(plan.episode_dir.parents[1] / "metadata.json")
+            writing.send_capture_properties(
+                recording,
+                identity,
+                num_cameras=len(plan.panes),
+                num_frames=num_frames,
+                task=session.get("task"),
+                collector=session.get("collector"),
             )
-            recording.send_property("convert", rr.AnyValues(version="1"))
 
-        print(f"done {identity.sequence_key} → {target} ({len(panes)} cameras, {num_frames} frames)")
+        print(f"done {identity.sequence_key} → {target} ({len(plan.panes)} cameras, {num_frames} frames)")
         return target
 
-    def _log_rig(self, recording: rr.RecordingStream, rig: int, *, name: str, kind: str) -> None:
-        """Tag a rig node with its schema version, device name, and role."""
+    def _log_camera(self, recording: rr.RecordingStream, camera: CameraPlan) -> int:
+        """Log one planned camera: node metadata, static pinhole, and its video stream.
+
+        No ``rig_T_cam`` transform is written: the raw exo calibration ships empty
+        extrinsics, and the ego/Quest ones are in unvalidated units. Brown-Conrady
+        coefficients ride along when the calibration declares them.
+
+        Args:
+            recording: Destination recording stream.
+            camera: The camera's slot, media, and metadata as planned.
+
+        Returns:
+            Number of video samples written for this camera.
+        """
         rr.log(
-            schema.rig_path(rig),
-            rr.AnyValues(schema_version=schema.EXOEGO_SCHEMA_VERSION, name=name, kind=kind),
+            schema.cam_path(camera.rig, camera.cam),
+            rr.AnyValues(
+                name=camera.name,
+                kind=camera.kind,
+                num_native_frames=camera.native_frames,
+                native_duration_ns=camera.native_duration_ns,
+            ),
             static=True,
             recording=recording,
         )
-
-    def _log_camera(self, recording: rr.RecordingStream, calibration: CameraCalibration, rig: int, cam: int) -> None:
-        """Log one camera's static pinhole (plus Brown-Conrady coefficients when known).
-
-        No ``rig_T_cam`` transform is written: the raw exo calibration ships empty
-        extrinsics, and the ego/Quest ones are in unvalidated units.
-        """
+        calibration: CameraCalibration = camera.calibration
         focal_length_xy: Float64[ndarray, "2"] = calibration.focal_length_xy
         principal_point_xy: Float64[ndarray, "2"] = calibration.principal_point_xy
         image_from_camera: Float32[ndarray, "3 3"] = np.array(
@@ -571,8 +708,11 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig]):
             if calibration.distortion_coefficients is None
             else CameraDistortion(model="brown_conrady", coefficients=calibration.distortion_coefficients.astype(np.float32))
         )
+        # TODO(dataforge): the Quest intrinsics describe the 1280x1280 sensor array while
+        # capture_resolution (and the mp4) is 1280x960, so cy lands ~160 px below the image
+        # centre. Confirm the crop origin against the device before shifting the principal point.
         rr.log(
-            schema.pinhole_path(rig, cam),
+            schema.pinhole_path(camera.rig, camera.cam),
             PinholeWithDistortion(
                 pinhole=rr.Pinhole(
                     image_from_camera=image_from_camera,
@@ -586,121 +726,25 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig]):
             static=True,
             recording=recording,
         )
+        # Raw PTS is already the shared episode clock (see the module docstring), so no shift.
+        return log_video_stream(recording, camera.video_path, schema.video_path(camera.rig, camera.cam))
 
-    def _log_video(self, recording: rr.RecordingStream, video_path: Path, entity_path: str) -> int:
-        """Remux one mp4 as a ``VideoStream`` on its own PTS, counting samples.
+    def _log_ego_imu(self, recording: rr.RecordingStream, plan: EpisodePlan) -> None:
+        """Log the OAK's single IMU on the ego rig, when its csv holds samples."""
+        channels: tuple[ImuChannel, ImuChannel] = read_imu_csv(plan.episode_dir / "ego" / "imu.csv")
+        if channels[0].times_ns.size:
+            log_imu(recording, plan.ego_rig, IMU_DEVICE, gyro=channels[0], accel=channels[1], name="oak-imu")
 
-        Raw PTS is already the shared episode clock (see the module docstring),
-        so chunks pass straight through; the tap only tallies samples so the
-        capture property can report a frame count.
-
-        Args:
-            recording: Destination recording stream.
-            video_path: SelfCap mp4 to remux (no decode, no re-encode).
-            entity_path: ``.../pinhole/video`` entity to log under.
-
-        Returns:
-            Number of video samples written.
-        """
-        sample_count: int = 0
-
-        def tally(chunk: rr.experimental.Chunk) -> list[rr.experimental.Chunk]:
-            nonlocal sample_count
-            if schema.TIMELINE in chunk.timeline_names:  # the static codec chunk carries no index
-                sample_count += chunk.num_rows
-            return [chunk]
-
-        reader: rr.experimental.Mp4Reader = rr.experimental.Mp4Reader(
-            video_path,
-            mode="stream",
-            entity_path=entity_path,
-            timeline_name=schema.TIMELINE,
+    def _log_quest_pose(self, recording: rr.RecordingStream, plan: EpisodePlan) -> None:
+        """Log the Quest's left-eye track as the temporal ``world_T_rig`` on its rig node."""
+        head_pose_path: Path = plan.episode_dir / "quest" / "head_pose.csv"
+        poses: HeadPoses = read_head_poses(head_pose_path)
+        if not poses.times_ns.size:
+            print(f"  warning: no head poses in {head_pose_path}; the quest rig stays unposed")
+            return
+        rr.send_columns(
+            schema.rig_path(plan.quest_rig),
+            indexes=[rr.TimeColumn(schema.TIMELINE, duration=poses.times_ns.astype("timedelta64[ns]"))],
+            columns=rr.Transform3D.columns(translation=poses.translations_xyz, quaternion=poses.quaternions_xyzw),
+            recording=recording,
         )
-        # send_chunks drives the lazy stream to completion, so sample_count is final here.
-        recording.send_chunks(reader.stream().flat_map(tally))
-        return sample_count
-
-    def _log_exo(self, recording: rr.RecordingStream, device_dir: Path, rig: int) -> int:
-        """Log one iPhone as a world-anchored-unknown rig with a single camera."""
-        self._log_rig(recording, rig, name=device_dir.name, kind="exo")
-        cameras: dict[str, CameraCalibration] = read_calibration(device_dir / "calibration.json")
-        # iPhone calibration ships one entry whose positional_layout is always "center";
-        # fall back to the sole entry so a renamed layout does not lose the camera.
-        calibration: CameraCalibration | None = cameras.get("center") or next(iter(cameras.values()), None)
-        if calibration is None:
-            print(f"  warning: no usable intrinsics in {device_dir / 'calibration.json'}, skipping {device_dir.name}")
-            return 0
-        rr.log(schema.cam_path(rig, 0), rr.AnyValues(name=device_dir.name, kind="rgb"), static=True, recording=recording)
-        self._log_camera(recording, calibration, rig, 0)
-        return self._log_video(recording, device_dir / f"{device_dir.name}.mp4", schema.video_path(rig, 0))
-
-    def _log_ego(self, recording: rr.RecordingStream, ego_dir: Path, rig: int) -> int:
-        """Log the OAK's three cameras and its IMU."""
-        self._log_rig(recording, rig, name="oak", kind="ego")
-        cameras: dict[str, CameraCalibration] = read_calibration(ego_dir / "calibration.json")
-        num_frames: int = 0
-        for cam, (stream, layout) in enumerate(EGO_STREAM_LAYOUTS):
-            calibration: CameraCalibration | None = cameras.get(layout)
-            if calibration is None:
-                print(f"  warning: no '{layout}' intrinsics in {ego_dir / 'calibration.json'}, skipping ego {stream}")
-                continue
-            # The mp4 is resampled onto the shared episode grid, so the csv's native-rate
-            # clock is surfaced as metadata rather than used to retime the samples.
-            frame_times_ns: Int64[ndarray, "n_frames"] = read_frame_times_ns(ego_dir / f"{stream}.csv")
-            rr.log(
-                schema.cam_path(rig, cam),
-                rr.AnyValues(
-                    name=stream,
-                    kind="rgb" if stream == "rgb" else "grayscale",
-                    num_native_frames=frame_times_ns.size,
-                    native_duration_ns=int(frame_times_ns[-1]) if frame_times_ns.size else 0,
-                ),
-                static=True,
-                recording=recording,
-            )
-            self._log_camera(recording, calibration, rig, cam)
-            num_frames = max(num_frames, self._log_video(recording, ego_dir / f"{stream}.mp4", schema.video_path(rig, cam)))
-
-        samples: ImuSamples = read_imu_csv(ego_dir / "imu.csv")
-        if samples.times_ns.size:
-            for values_xyz, entity_path in (
-                (samples.gyro_xyz, schema.gyro_path(rig, IMU_DEVICE)),
-                (samples.accel_xyz, schema.accel_path(rig, IMU_DEVICE)),
-            ):
-                rr.send_columns(
-                    entity_path,
-                    indexes=[rr.TimeColumn(schema.TIMELINE, duration=samples.times_ns.astype("timedelta64[ns]"))],
-                    columns=rr.Scalars.columns(scalars=values_xyz),
-                    recording=recording,
-                )
-            rr.log(schema.imu_path(rig, IMU_DEVICE), rr.AnyValues(name="oak-imu", kind="imu"), static=True, recording=recording)
-        return num_frames
-
-    def _log_quest(self, recording: rr.RecordingStream, quest_dir: Path, rig: int) -> int:
-        """Log the Quest's two eye cameras and its left-eye world pose track."""
-        self._log_rig(recording, rig, name="quest", kind="quest")
-        poses: HeadPoses = read_head_poses(quest_dir / "head_pose.csv")
-        if poses.times_ns.size:
-            rr.send_columns(
-                schema.rig_path(rig),
-                indexes=[rr.TimeColumn(schema.TIMELINE, duration=poses.times_ns.astype("timedelta64[ns]"))],
-                columns=rr.Transform3D.columns(translation=poses.translations_xyz, quaternion=poses.quaternions_xyzw),
-                recording=recording,
-            )
-        else:
-            print(f"  warning: no head poses in {quest_dir / 'head_pose.csv'}; the quest rig stays unposed")
-
-        cameras: dict[str, CameraCalibration] = read_calibration(quest_dir / "calibration.json")
-        num_frames: int = 0
-        for cam, (stream, layout) in enumerate(QUEST_STREAM_LAYOUTS):
-            calibration: CameraCalibration | None = cameras.get(layout)
-            if calibration is None:
-                print(f"  warning: no '{layout}' intrinsics in {quest_dir / 'calibration.json'}, skipping quest {stream}")
-                continue
-            rr.log(schema.cam_path(rig, cam), rr.AnyValues(name=stream, kind="grayscale"), static=True, recording=recording)
-            # TODO(dataforge): the Quest intrinsics describe the 1280x1280 sensor array while
-            # capture_resolution (and the mp4) is 1280x960, so cy lands ~160 px below the image
-            # centre. Confirm the crop origin against the device before shifting the principal point.
-            self._log_camera(recording, calibration, rig, cam)
-            num_frames = max(num_frames, self._log_video(recording, quest_dir / f"{stream}.mp4", schema.video_path(rig, cam)))
-        return num_frames

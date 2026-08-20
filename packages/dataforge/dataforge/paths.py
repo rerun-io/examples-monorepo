@@ -14,6 +14,9 @@ from pathlib import Path
 
 from dataforge.identity import SequenceIdentity
 
+BASE_LAYER: str = "base"
+"""The only layer dataforge v1 emits; the first path component under ``output_root()``."""
+
 
 def output_root() -> Path:
     """Root of the converted rrd tree; override with ``DATAFORGE_OUTPUT_ROOT``."""

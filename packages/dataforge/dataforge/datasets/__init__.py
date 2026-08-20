@@ -8,11 +8,8 @@ from dataforge.datasets.base import DataforgeDatasetConfig
 from dataforge.datasets.robocap import RobocapConfig
 from dataforge.datasets.selfcap import SelfcapConfig
 
-dataset_defaults: dict[str, DataforgeDatasetConfig] = {
-    "robocap": RobocapConfig(),
-    "selfcap": SelfcapConfig(),
-}
-"""Every dataset dataforge knows about, keyed by its CLI name."""
+dataset_defaults: dict[str, DataforgeDatasetConfig] = {config.name: config for config in (RobocapConfig(), SelfcapConfig())}
+"""Every dataset dataforge knows about, keyed by its own ``name`` (the single source of truth)."""
 
 DatasetUnion = tyro.extras.subcommand_type_from_defaults(dataset_defaults, prefix_names=False)
 """Config type every verb's ``Config.dataset`` field uses (one tyro subcommand per registry key).
@@ -25,11 +22,3 @@ pyrefly reject the call in an annotation position.
 
 AnnotatedDatasetUnion = tyro.conf.OmitSubcommandPrefixes[DatasetUnion]
 """``DatasetUnion`` without tyro's per-subcommand flag prefixes."""
-
-
-def dataset_key(config: DataforgeDatasetConfig) -> str:
-    """Registry key of a parsed dataset config (the catalog dataset name)."""
-    for key, default in dataset_defaults.items():
-        if isinstance(config, type(default)):
-            return key
-    raise ValueError(f"Config {type(config).__name__} is not in dataset_defaults")
