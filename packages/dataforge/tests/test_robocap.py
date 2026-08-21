@@ -48,17 +48,17 @@ def corpus(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def test_discover_pairs_every_segment_with_its_session_dir_and_skips_old_dirs(corpus: Path) -> None:
+def test_discover_pairs_every_session_with_its_segments_and_skips_old_dirs(corpus: Path) -> None:
     dataset: RobocapDataset = RobocapDataset(RobocapConfig(root=corpus))
     discovered: list[tuple[SequenceIdentity, RobocapSource]] = dataset.discover()
     assert [identity.sequence_key for identity, _ in discovered] == [
-        f"{DEVICE}/s1/seg1",
-        f"{DEVICE}/s1/seg2",
-        f"{DEVICE}/s10/seg1",
+        f"{DEVICE}/s1",
+        f"{DEVICE}/s10",
     ]
-    assert discovered[0][0].recording_id == f"robocap__{DEVICE}__s1__seg1"
-    assert discovered[0][1] == RobocapSource(session_dir=corpus / f"{DEVICE}_session_1", device=DEVICE, session=1, segment=1)
-    assert discovered[2][1].session == 10
+    assert discovered[0][0].recording_id == f"robocap__{DEVICE}__s1"
+    # The session is the sequence unit; its file-roll segments merge at convert.
+    assert discovered[0][1] == RobocapSource(session_dir=corpus / f"{DEVICE}_session_1", device=DEVICE, session=1, segments=(1, 2))
+    assert discovered[1][1].segments == (1,)
     # sequences() is derived from discover(), so the two can never disagree.
     assert dataset.sequences() == [identity for identity, _ in discovered]
 
