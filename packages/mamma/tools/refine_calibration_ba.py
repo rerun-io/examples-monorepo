@@ -95,8 +95,8 @@ class RefineConfig:
     landmark as a ground point."""
     device: str = "cuda"
     """Compute device."""
-    decode_device: str = "cpu"
-    """Video-decode device; CPU avoids CUDA decoder-context conflicts during inference."""
+    decode_device: str = "cuda"
+    """Video-decode device; defaults to NVDEC after all CUDA models initialize."""
     seed: int = 0
     """Correspondence-subsampling seed (determinism)."""
 

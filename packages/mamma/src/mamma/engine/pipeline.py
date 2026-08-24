@@ -288,14 +288,6 @@ def build_streaming_pipeline(
         hires_crops = False
 
     scaled_cams: list[CameraCalibration] = sequence.scaled_cameras(resize_hw)
-    # hires_crops: decode at native resolution; the pipeline downscales to
-    # resize_hw per tick for tracking/logging and crops landmarks from native.
-    reader_device: str = device if decode_device is None else decode_device
-    reader = TorchCodecMultiVideoReader(
-        list(decode_sequence.video_paths),
-        device=reader_device,
-        resize_hw=None if hires_crops else resize_hw,
-    )
     logger = StreamLogger(sequence, resize_hw=resize_hw, seg_stride=seg_stride)
 
     tracker: MultiViewTracker | None = None
@@ -311,6 +303,16 @@ def build_streaming_pipeline(
     if landmarks is not None and fitter_config is not None:
         fitter_config.device = device
         fitting = FittingStage(scaled_cams, fitter_config)
+
+    # Construct NVDEC only after every CUDA model/runtime. Some runtimes replace
+    # the active CUDA context during initialization; a decoder made earlier then
+    # fails on its first read with CUDA_ERROR_INVALID_CONTEXT.
+    reader_device: str = device if decode_device is None else decode_device
+    reader = TorchCodecMultiVideoReader(
+        list(decode_sequence.video_paths),
+        device=reader_device,
+        resize_hw=None if hires_crops else resize_hw,
+    )
 
     return StreamingPipeline(
         decode_sequence,  # proxy paths drive the reader; logger keeps the native sequence
