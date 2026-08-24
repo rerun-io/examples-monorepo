@@ -13,7 +13,7 @@ import rerun.blueprint as rrb
 from jaxtyping import Float32, UInt8
 from numpy import ndarray
 from PIL import Image
-from simplecv.rerun_custom_types import Points2DWithConfidence, confidence_scores_to_rgb
+from simplecv.rerun_custom_types import Points2DWithConfidence
 
 from sapiens2_pose.api.metadata import get_sapiens_metainfo
 from sapiens2_pose.api.pose_artifact import PosePredictionArtifact, save_pose_prediction_artifact
@@ -160,7 +160,6 @@ def _log_pose_recording(
         scores: Float32[ndarray, "k"] = np.asarray(artifact.scores[idx], dtype=np.float32).reshape(-1)
         low_confidence_indices: ndarray = np.flatnonzero(scores < kpt_thr)
         keypoints[low_confidence_indices] = np.nan
-        confidence_rgb: UInt8[ndarray, "k 3"] = confidence_scores_to_rgb(scores[None, :, None])[0]
         rr.log(
             f"image/person_{idx}/keypoints",
             Points2DWithConfidence(
@@ -168,7 +167,6 @@ def _log_pose_recording(
                 confidences=scores,
                 class_ids=0,
                 keypoint_ids=keypoint_ids,
-                colors=confidence_rgb,
             ),
         )
 

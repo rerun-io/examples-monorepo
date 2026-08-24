@@ -9,7 +9,7 @@ import rerun as rr
 import rerun.blueprint as rrb
 from jaxtyping import Bool, Float32, Int, UInt8, UInt16
 from numpy import ndarray
-from simplecv.rerun_custom_types import Points2DWithConfidence, confidence_scores_to_rgb
+from simplecv.rerun_custom_types import Points2DWithConfidence
 
 from sapiens2_pose.api.metadata import PoseSchema, log_annotation_context
 
@@ -111,16 +111,18 @@ def _prepare_keypoints_for_logging(
     keypoints: Float32[ndarray, "k 2"],
     scores: Float32[ndarray, "k"],
     kpt_thr: float,
-) -> Float32[ndarray, "k 2"]:
-    """Mask low-confidence keypoints with NaN so Rerun does not draw them."""
+) -> tuple[Float32[ndarray, "k 2"], Float32[ndarray, "k"]]:
+    """Mask low-confidence keypoints with NaN and return the length-reconciled scores."""
     keypoints_arr: Float32[ndarray, "k 2"] = np.asarray(keypoints, dtype=np.float32).copy()
     scores_arr: Float32[ndarray, "k"] = np.asarray(scores, dtype=np.float32).reshape(-1)
     valid_count: int = min(keypoints_arr.shape[0], scores_arr.shape[0])
     if valid_count < keypoints_arr.shape[0]:
         keypoints_arr[valid_count:] = np.nan
+    reconciled_scores: Float32[ndarray, "k"] = np.zeros((keypoints_arr.shape[0],), dtype=np.float32)
+    reconciled_scores[:valid_count] = scores_arr[:valid_count]
     low_confidence_indices: Int[ndarray, "low_confidence"] = np.flatnonzero(scores_arr[:valid_count] < kpt_thr).astype(np.int32)
     keypoints_arr[low_confidence_indices] = np.nan
-    return keypoints_arr
+    return keypoints_arr, reconciled_scores
 
 
 def log_pose_instances(
@@ -160,9 +162,9 @@ def log_pose_instances(
             recording=recording,
         )
 
-        keypoints_arr: Float32[ndarray, "k 2"] = _prepare_keypoints_for_logging(kpts, scr, kpt_thr)
-        scores_f32: Float32[ndarray, "k"] = np.asarray(scr, dtype=np.float32).reshape(-1)
-        confidence_rgb: UInt8[ndarray, "k 3"] = confidence_scores_to_rgb(scores_f32[None, :, None])[0]
+        prepared: tuple[Float32[ndarray, "k 2"], Float32[ndarray, "k"]] = _prepare_keypoints_for_logging(kpts, scr, kpt_thr)
+        keypoints_arr: Float32[ndarray, "k 2"] = prepared[0]
+        scores_f32: Float32[ndarray, "k"] = prepared[1]
         rr.log(
             f"{person_path}/keypoints",
             Points2DWithConfidence(
@@ -170,7 +172,6 @@ def log_pose_instances(
                 confidences=scores_f32,
                 class_ids=0,
                 keypoint_ids=keypoint_ids,
-                colors=confidence_rgb,
             ),
             recording=recording,
         )

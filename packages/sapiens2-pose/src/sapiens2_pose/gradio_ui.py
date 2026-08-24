@@ -14,10 +14,10 @@ import rerun.blueprint as rrb
 import torch
 from gradio_rerun import Rerun
 from huggingface_hub import hf_hub_download
-from jaxtyping import Float32, UInt8
+from jaxtyping import Float32
 from numpy import ndarray
 from PIL import Image
-from simplecv.rerun_custom_types import Points2DWithConfidence, confidence_scores_to_rgb
+from simplecv.rerun_custom_types import Points2DWithConfidence
 from transformers import DetrForObjectDetection, DetrImageProcessor
 
 from sapiens2_pose.api.pose_artifact import PosePredictionArtifact
@@ -125,7 +125,6 @@ def _get_sapiens_skeleton() -> dict[str, Any]:
                 (int(a), int(b))
                 for a, b in meta["skeleton_links"]
             ],
-            "keypoint_colors": np.asarray(meta["keypoint_colors"], dtype=np.uint8),
         }
     return _skeleton_cache
 
@@ -250,7 +249,6 @@ def _log_pose_recording(
         kpts_arr = kpts.copy()
         scores_arr = scr.reshape(-1)
         kpts_arr[scores_arr < kpt_thr] = np.nan
-        confidence_rgb: UInt8[ndarray, "k 3"] = confidence_scores_to_rgb(scores_arr.astype(np.float32)[None, :, None])[0]
         rr.log(
             f"image/person_{idx}/keypoints",
             Points2DWithConfidence(
@@ -258,7 +256,6 @@ def _log_pose_recording(
                 confidences=scores_arr,
                 class_ids=0,
                 keypoint_ids=keypoint_ids,
-                colors=confidence_rgb,
             ),
         )
 

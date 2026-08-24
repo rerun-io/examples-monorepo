@@ -6,7 +6,7 @@ import numpy as np
 import rerun as rr
 from jaxtyping import Float32, UInt8, UInt16
 from numpy import ndarray
-from simplecv.rerun_custom_types import Points2DWithConfidence, confidence_scores_to_rgb
+from simplecv.rerun_custom_types import Points2DWithConfidence
 
 from posekit.skeletons import KeypointSkeleton
 
@@ -71,7 +71,6 @@ def log_person_points2d(
     """
     visible_xy: Float32[ndarray, "p 2"] = xy.copy()
     visible_xy[confidence < threshold] = np.nan
-    colors: UInt8[ndarray, "p 3"] = confidence_scores_to_rgb(confidence.astype(np.float32)[None, :, None])[0]
     rr.log(
         entity_path,
         Points2DWithConfidence(
@@ -79,7 +78,6 @@ def log_person_points2d(
             confidences=confidence,
             keypoint_ids=keypoint_ids,
             class_ids=class_ids,
-            colors=colors,
             # Negative radii are screen-space UI points, so they stay visible at every zoom level.
             radii=-2.5,
         ),

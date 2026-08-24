@@ -230,7 +230,12 @@ class _ConfidenceAwareColumnList(rr.ComponentColumnList):
 
 
 class Points2DWithConfidence(rr.AsComponents):
-    """Custom Points2D archetype with per-keypoint and average confidences."""
+    """Custom Points2D archetype with per-keypoint and average confidences.
+
+    When ``colors`` is omitted, point colors are derived from ``confidences``
+    with the shared red -> yellow -> green gradient, so per-point colors and the
+    logged confidence components can never disagree.
+    """
 
     def __init__(
         self: Any,
@@ -243,6 +248,9 @@ class Points2DWithConfidence(rr.AsComponents):
         radii: float | None = None,
     ) -> None:
         show_labels_bool: bool = bool(np.all(show_labels)) if np.size(show_labels) else bool(show_labels)
+        confidences_arr: Float[ndarray, "n_kpts"] = np.asarray(confidences, dtype=np.float32)
+        if colors is None:
+            colors = confidence_scores_to_rgb(confidences_arr[None, :, None])[0]
         self.points2d = rr.Points2D(
             positions=positions,
             class_ids=class_ids,
@@ -260,7 +268,6 @@ class Points2DWithConfidence(rr.AsComponents):
             field_name="average_confidence",
             component_type="simplecv.components.KeypointConfidenceMean",
         )
-        confidences_arr: Float[ndarray, "n_kpts"] = np.asarray(confidences, dtype=np.float32)
         mean_confidence: float = float(np.nanmean(confidences_arr)) if confidences_arr.size else float("nan")
         self.confidences = ConfidenceBatch(confidences_arr).described(confidence_descriptor)
         self.average_confidence = AverageConfidenceBatch(mean_confidence).described(average_descriptor)
@@ -275,6 +282,9 @@ class Points2DWithConfidence(rr.AsComponents):
     def columns(
         cls,
         *,
+        # Unlike __init__, the columnar path derives NO default colors: exoego
+        # ingest deliberately omits colors here so annotation-context class
+        # colors win (e.g. quest3_oakd_loader, ingest_exoego_recording).
         positions: Float[ndarray, "n 2"] | None = None,
         confidences: Float[ndarray, "n"] | None = None,
         average_confidences: Float[ndarray, "m"] | None = None,

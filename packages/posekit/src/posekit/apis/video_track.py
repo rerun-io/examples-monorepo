@@ -14,7 +14,7 @@ import numpy as np
 import rerun as rr
 import torch
 import torch.nn.functional as F
-from jaxtyping import Bool, Float32, Int, UInt8
+from jaxtyping import Bool, Float32, Int, UInt8, UInt16
 from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig, log_video
 from torch import Tensor
@@ -73,6 +73,7 @@ def _log_tracked_frame(
     masks: Bool[ndarray, "n h w"] = tracks.masks.cpu().numpy()
     xy: Float32[ndarray, "p k 2"] = keypoints.xy_numpy()
     scores: Float32[ndarray, "p k"] = keypoints.scores_numpy()
+    keypoint_ids: UInt16[ndarray, "k"] = np.arange(xy.shape[1], dtype=np.uint16)
     row_to_pose: dict[int, int] = {int(row): pose_idx for pose_idx, row in enumerate(pose_rows)}
     seen: set[int] = set()
     for row in range(tracks.num_detections):
@@ -91,7 +92,7 @@ def _log_tracked_frame(
                 xy[pose_idx],
                 scores[pose_idx],
                 keypoint_threshold,
-                keypoint_ids=np.arange(xy.shape[1], dtype=np.uint16),
+                keypoint_ids=keypoint_ids,
                 class_ids=0,
             )
         if track_id in identity_cosine:
