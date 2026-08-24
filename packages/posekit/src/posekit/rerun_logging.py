@@ -6,6 +6,7 @@ import numpy as np
 import rerun as rr
 from jaxtyping import Float32, UInt8, UInt16
 from numpy import ndarray
+from simplecv.rerun_custom_types import Points2DWithConfidence, confidence_scores_to_rgb
 
 from posekit.skeletons import KeypointSkeleton
 
@@ -60,23 +61,27 @@ def log_person_points2d(
     confidence: Float32[ndarray, "p"],
     threshold: float,
     *,
-    color: tuple[int, int, int] | None = None,
     keypoint_ids: UInt16[ndarray, "p"] | None = None,
     class_ids: int | None = None,
 ) -> None:
-    """Log one person's points after masking low-confidence positions."""
+    """Log one person's points colored by confidence, masking low-confidence positions.
+
+    Point colors follow the shared red -> yellow -> green confidence gradient and
+    the raw (unmasked) scores ride along as queryable confidence components.
+    """
     visible_xy: Float32[ndarray, "p 2"] = xy.copy()
     visible_xy[confidence < threshold] = np.nan
+    colors: UInt8[ndarray, "p 3"] = confidence_scores_to_rgb(confidence.astype(np.float32)[None, :, None])[0]
     rr.log(
         entity_path,
-        rr.Points2D(
+        Points2DWithConfidence(
             positions=visible_xy,
+            confidences=confidence,
             keypoint_ids=keypoint_ids,
             class_ids=class_ids,
-            colors=color,
+            colors=colors,
             # Negative radii are screen-space UI points, so they stay visible at every zoom level.
             radii=-2.5,
-            show_labels=False,
         ),
     )
 
@@ -98,7 +103,6 @@ def log_topdown_predictions(
             keypoints_xy[person_idx],
             scores[person_idx],
             keypoint_threshold,
-            color=person_color(person_idx),
             keypoint_ids=keypoint_ids,
             class_ids=0,
         )
@@ -118,7 +122,6 @@ def log_dense_predictions(
             landmarks_xy[person_idx],
             visibility[person_idx],
             visibility_threshold,
-            color=person_color(person_idx),
         )
 
 

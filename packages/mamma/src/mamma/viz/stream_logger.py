@@ -17,6 +17,7 @@ import torch
 from jaxtyping import UInt8
 from numpy import ndarray
 from simplecv.camera_parameters import PinholeParameters
+from simplecv.rerun_custom_types import Points2DWithConfidence, confidence_scores_to_rgb
 from simplecv.rerun_log_utils import log_pinhole
 from simplecv.video_encoder import VideoCodecChoice, VideoEncoder
 
@@ -279,14 +280,11 @@ class StreamLogger:
             entity_base: str = pinhole_entity(cam_name)
             for obj_id, result in sorted(cam_landmarks.items()):
                 positions: ndarray = result.joints2d[:, :2].cpu().numpy()
-                vis: ndarray = result.visibility.cpu().numpy()
-                colors: ndarray = np.zeros((positions.shape[0], 4), dtype=np.uint8)
-                colors[:, 1] = (vis * 255).astype(np.uint8)
-                colors[:, 0] = ((1.0 - vis) * 255).astype(np.uint8)
-                colors[:, 3] = 255
+                vis: ndarray = result.visibility.cpu().numpy().astype(np.float32).reshape(-1)
+                colors: UInt8[ndarray, "p 3"] = confidence_scores_to_rgb(vis[None, :, None])[0]
                 rr.log(
                     f"{entity_base}/landmarks/person_{obj_id}",
-                    rr.Points2D(positions=positions, colors=colors, radii=1.5),
+                    Points2DWithConfidence(positions=positions, confidences=vis, colors=colors, radii=1.5),
                 )
 
     def log_tick_fit(

@@ -13,6 +13,7 @@ import rerun.blueprint as rrb
 from jaxtyping import Float32, UInt8
 from numpy import ndarray
 from PIL import Image
+from simplecv.rerun_custom_types import Points2DWithConfidence, confidence_scores_to_rgb
 
 from sapiens2_pose.api.metadata import get_sapiens_metainfo
 from sapiens2_pose.api.pose_artifact import PosePredictionArtifact, save_pose_prediction_artifact
@@ -137,9 +138,7 @@ def _log_pose_recording(
 ) -> None:
     """Log one image pose artifact into the active Rerun recording."""
     keypoint_count: int = int(artifact.keypoints.shape[1]) if artifact.keypoints.ndim == 3 else 0
-    meta: dict[str, Any] = get_sapiens_metainfo()
     keypoint_ids: list[int] = list(range(keypoint_count))
-    keypoint_colors: UInt8[ndarray, "k 3"] = np.asarray(meta["keypoint_colors"], dtype=np.uint8)[:keypoint_count]
 
     rr.send_blueprint(rrb.Blueprint(rrb.Spatial2DView(name="Pose", origin="image"), collapse_panels=True))
     rr.set_time("iteration", sequence=0)
@@ -161,14 +160,15 @@ def _log_pose_recording(
         scores: Float32[ndarray, "k"] = np.asarray(artifact.scores[idx], dtype=np.float32).reshape(-1)
         low_confidence_indices: ndarray = np.flatnonzero(scores < kpt_thr)
         keypoints[low_confidence_indices] = np.nan
+        confidence_rgb: UInt8[ndarray, "k 3"] = confidence_scores_to_rgb(scores[None, :, None])[0]
         rr.log(
             f"image/person_{idx}/keypoints",
-            rr.Points2D(
+            Points2DWithConfidence(
                 positions=keypoints,
+                confidences=scores,
                 class_ids=0,
                 keypoint_ids=keypoint_ids,
-                colors=keypoint_colors,
-                show_labels=False,
+                colors=confidence_rgb,
             ),
         )
 

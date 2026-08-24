@@ -5,7 +5,7 @@ from typing import Any
 import numpy as np
 import pyarrow as pa
 import rerun as rr
-from jaxtyping import Float, Int, UInt8
+from jaxtyping import Float, Int, Integer, UInt8
 from numpy import ndarray
 from numpy.typing import ArrayLike
 from typing_extensions import Self
@@ -236,8 +236,8 @@ class Points2DWithConfidence(rr.AsComponents):
         self: Any,
         positions: Float[ndarray, "n_kpts 2"],
         confidences: Float[ndarray, "n_kpts"],
-        class_ids: int,
-        keypoint_ids: list[int],
+        class_ids: int | None = None,
+        keypoint_ids: list[int] | Integer[ndarray, "n_kpts"] | None = None,
         show_labels: bool | Int[ndarray, "..."] = False,
         colors: UInt8[ndarray, "n_kpts 3"] | None = None,
         radii: float | None = None,

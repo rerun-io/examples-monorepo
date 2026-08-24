@@ -9,6 +9,7 @@ import rerun as rr
 import rerun.blueprint as rrb
 from jaxtyping import Bool, Float32, Int, UInt8, UInt16
 from numpy import ndarray
+from simplecv.rerun_custom_types import Points2DWithConfidence, confidence_scores_to_rgb
 
 from sapiens2_pose.api.metadata import PoseSchema, log_annotation_context
 
@@ -135,7 +136,6 @@ def log_pose_instances(
 ) -> None:
     """Log per-person 2D boxes and keypoints below an entity root."""
     keypoint_ids: Int[ndarray, "k"] = np.asarray(schema.keypoint_ids, dtype=np.int32)
-    keypoint_colors: UInt8[ndarray, "k 3"] = np.asarray(schema.keypoint_colors, dtype=np.uint8)
     bboxes_f32: Float32[ndarray, "n 4"] = np.asarray(bboxes, dtype=np.float32).reshape(-1, 4)
     if track_ids is None:
         track_ids_arr: Int[ndarray, "n"] = np.arange(bboxes_f32.shape[0], dtype=np.int32)
@@ -161,14 +161,16 @@ def log_pose_instances(
         )
 
         keypoints_arr: Float32[ndarray, "k 2"] = _prepare_keypoints_for_logging(kpts, scr, kpt_thr)
+        scores_f32: Float32[ndarray, "k"] = np.asarray(scr, dtype=np.float32).reshape(-1)
+        confidence_rgb: UInt8[ndarray, "k 3"] = confidence_scores_to_rgb(scores_f32[None, :, None])[0]
         rr.log(
             f"{person_path}/keypoints",
-            rr.Points2D(
+            Points2DWithConfidence(
                 positions=keypoints_arr,
+                confidences=scores_f32,
                 class_ids=0,
                 keypoint_ids=keypoint_ids,
-                colors=keypoint_colors,
-                show_labels=False,
+                colors=confidence_rgb,
             ),
             recording=recording,
         )

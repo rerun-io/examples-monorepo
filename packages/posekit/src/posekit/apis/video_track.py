@@ -24,7 +24,7 @@ from posekit.models import AnnotatedDetectorConfig, AnnotatedPose2dConfig, RtmPo
 from posekit.models.clip_identity import ClipIdentityConfig
 from posekit.models.sam2_video import Sam2VideoSegmenterConfig
 from posekit.predictions import BoxDetections, Keypoints2d
-from posekit.rerun_logging import log_skeleton_annotation_context
+from posekit.rerun_logging import log_person_points2d, log_skeleton_annotation_context
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -86,11 +86,13 @@ def _log_tracked_frame(
         rr.log(f"video/track_{track_id}/bbox", rr.Boxes2D(array=boxes[row][None], array_format=rr.Box2DFormat.XYXY, class_ids=track_id + 1))
         if row in row_to_pose:
             pose_idx: int = row_to_pose[row]
-            visible_xy: Float32[ndarray, "k 2"] = xy[pose_idx].copy()
-            visible_xy[scores[pose_idx] < keypoint_threshold] = np.nan
-            rr.log(
+            log_person_points2d(
                 f"video/track_{track_id}/keypoints",
-                rr.Points2D(positions=visible_xy, keypoint_ids=np.arange(visible_xy.shape[0], dtype=np.uint16), class_ids=0),
+                xy[pose_idx],
+                scores[pose_idx],
+                keypoint_threshold,
+                keypoint_ids=np.arange(xy.shape[1], dtype=np.uint16),
+                class_ids=0,
             )
         if track_id in identity_cosine:
             rr.log(f"identity/track_{track_id}", rr.Scalars(identity_cosine[track_id]))
