@@ -518,6 +518,7 @@ class TorchCodecVideoReader:
         if frame_id < 0 or frame_id >= self._frame_cnt:
             raise IndexError(f'"frame_id" must be between 0 and {self._frame_cnt - 1}')
 
+        self._activate_decode_device()
         frame: UInt8[torch.Tensor, "3 h w"] = self._decoder.get_frame_at(frame_id).data
         if self._needs_post_resize:
             frame = self._maybe_resize(frame.unsqueeze(0)).squeeze(0)
@@ -557,9 +558,16 @@ class TorchCodecVideoReader:
                 device=self.device,
             )
             return empty
+        self._activate_decode_device()
         video: UInt8[torch.Tensor, "b 3 h w"] = self._decoder.get_frames_in_range(start, clamped_stop).data
         video = self._maybe_resize(video)
         return video
+
+    def _activate_decode_device(self) -> None:
+        """Make a CUDA decoder's context current on the calling thread."""
+        if self.device.startswith("cuda"):
+            device_index: int | None = torch.device(self.device).index
+            torch.cuda.set_device(torch.cuda.current_device() if device_index is None else device_index)
 
     def iter_chunks(
         self,

@@ -220,6 +220,36 @@ class TestTorchCodecVideoReader:
         assert int(first_frame[0, 0, 0].item()) == 0
         assert int(second_frame[0, 0, 0].item()) == 1
 
+    def test_cuda_range_decode_activates_context_on_calling_thread(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A worker thread must make the decoder's CUDA context current."""
+
+        class _FrameBatch:
+            def __init__(self, data: torch.Tensor) -> None:
+                self.data: torch.Tensor = data
+
+        class _FakeCudaDecoder:
+            def get_frames_in_range(self, start: int, stop: int) -> _FrameBatch:
+                return _FrameBatch(torch.zeros((stop - start, 3, 2, 4), dtype=torch.uint8))
+
+        activated_devices: list[int] = []
+        monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+        monkeypatch.setattr(torch.cuda, "set_device", activated_devices.append)
+        reader: TorchCodecVideoReader = object.__new__(TorchCodecVideoReader)
+        reader.device = "cuda"
+        reader._decoder = _FakeCudaDecoder()
+        reader._frame_cnt = 1
+        reader._height = 2
+        reader._width = 4
+        reader._needs_post_resize = False
+
+        frames: UInt8[torch.Tensor, "b 3 h w"] = reader.get_frames_in_range(0, 1)
+
+        assert activated_devices == [0]
+        assert frames.shape == (1, 3, 2, 4)
+
     def test_random_access(self, sample_video_path: Path) -> None:
         """Test random access to frames."""
         reader: TorchCodecVideoReader = TorchCodecVideoReader(sample_video_path, device="cpu")
