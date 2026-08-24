@@ -40,7 +40,7 @@ from simplecv.data.skeleton.coco_133 import (
 from simplecv.ops.pc_utils import estimate_voxel_size
 from simplecv.ops.triangulate import proj_3d_vectorized
 from simplecv.ops.tsdf_depth_fuser import Open3DScaleInvariantFuser
-from simplecv.rerun_custom_types import Points2DWithConfidence, Points3DWithConfidence, confidence_scores_to_rgb
+from simplecv.rerun_custom_types import Points2DWithConfidence, Points3DWithConfidence
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole
 from simplecv.video_io import MultiVideoReader, TorchCodecMultiVideoReader, rgb_chw_tensor_to_bgr_hwc
 from tqdm import tqdm
@@ -548,10 +548,6 @@ def predict_kpts3d_from_calibrated_videos(
             vis_xyz[RIGHT_HAND_IDX, :] = np.nan
             vis_scores_3d[RIGHT_HAND_IDX] = np.nan
 
-        confidence_rgb_stack: UInt8[ndarray, "1 n_kpts 3"] = confidence_scores_to_rgb(
-            vis_scores_3d[np.newaxis, :, np.newaxis]
-        )
-        confidence_rgb: UInt8[ndarray, "n_kpts 3"] = confidence_rgb_stack[0]
         rr.log(
             str(parent_log_path / "gt" / "coco133_xyz"),
             Points3DWithConfidence(
@@ -560,7 +556,6 @@ def predict_kpts3d_from_calibrated_videos(
                 class_ids=triangulated_class_id,
                 keypoint_ids=COCO_133_IDS,
                 show_labels=False,
-                colors=confidence_rgb,
             ),
             recording=recording,
         )
@@ -590,10 +585,6 @@ def predict_kpts3d_from_calibrated_videos(
                 if exo_pinhole_log_paths is not None
                 else parent_log_path / "exo" / exo_cam.name / "pinhole"
             )
-            confidence_rgb_view_stack: UInt8[ndarray, "1 n_kpts 3"] = confidence_scores_to_rgb(
-                confidences_view[np.newaxis, :, np.newaxis]
-            )
-            confidence_rgb_view: UInt8[ndarray, "n_kpts 3"] = confidence_rgb_view_stack[0]
             rr.log(
                 str(pinhole_log_path / "gt" / "coco133_uv"),
                 Points2DWithConfidence(
@@ -602,7 +593,6 @@ def predict_kpts3d_from_calibrated_videos(
                     class_ids=triangulated_class_id,
                     keypoint_ids=COCO_133_IDS,
                     show_labels=False,
-                    colors=confidence_rgb_view,
                 ),
                 recording=recording,
             )
@@ -1019,10 +1009,6 @@ def run_model_backed_pipeline(
                 )
                 uv = masked_points.uv
                 confidences_view = masked_points.confidences
-                confidence_rgb_view_stack: UInt8[ndarray, "1 n_kpts 3"] = confidence_scores_to_rgb(
-                    confidences_view[np.newaxis, :, np.newaxis]
-                )
-                confidence_rgb_view: UInt8[ndarray, "n_kpts 3"] = confidence_rgb_view_stack[0]
                 rr.log(
                     str(pinhole_log_path / "pred" / "coco133_uv" / projected_variant),
                     Points2DWithConfidence(
@@ -1031,7 +1017,6 @@ def run_model_backed_pipeline(
                         class_ids=projected_class_id,
                         keypoint_ids=COCO_133_IDS,
                         show_labels=False,
-                        colors=confidence_rgb_view,
                     ),
                     recording=recording,
                 )

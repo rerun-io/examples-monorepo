@@ -118,7 +118,9 @@ def _prepare_keypoints_for_logging(
     valid_count: int = min(keypoints_arr.shape[0], scores_arr.shape[0])
     if valid_count < keypoints_arr.shape[0]:
         keypoints_arr[valid_count:] = np.nan
-    reconciled_scores: Float32[ndarray, "k"] = np.zeros((keypoints_arr.shape[0],), dtype=np.float32)
+    # NaN (not 0.0) for missing tail scores: nanmean-based average_confidence
+    # skips NaN, and the gradient renders NaN as red either way.
+    reconciled_scores: Float32[ndarray, "k"] = np.full((keypoints_arr.shape[0],), np.nan, dtype=np.float32)
     reconciled_scores[:valid_count] = scores_arr[:valid_count]
     low_confidence_indices: Int[ndarray, "low_confidence"] = np.flatnonzero(scores_arr[:valid_count] < kpt_thr).astype(np.int32)
     keypoints_arr[low_confidence_indices] = np.nan

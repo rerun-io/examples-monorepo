@@ -282,7 +282,6 @@ def log_incremental(
 
     xyz_stack: Float32[ndarray, "n_frames 68 3"] = ego_sequence.xyz_stack
     conf_stack: Float32[ndarray, "n_frames 68 1"] = ego_sequence.conf_stack
-    all_colors_stack: UInt8[ndarray, "n_frames 68 3"] = confidence_scores_to_rgb(confidence_scores=conf_stack)
 
     rr.log(
         "llm_description", rr.TextDocument(text=ego_sequence.llm_description, media_type="text/markdown"), static=True
@@ -304,13 +303,11 @@ def log_incremental(
         )
         current_xyz: Float32[ndarray, "68 3"] = xyz_stack[ts_idx, ...]
         current_conf: Float32[ndarray, "68 1"] = conf_stack[ts_idx, ...]
-        current_colors: UInt8[ndarray, "68 3"] = all_colors_stack[ts_idx]
         rr.log(
             f"{joints_log_path}",
             Points3DWithConfidence(
                 positions=current_xyz,
                 confidences=current_conf.squeeze(),
-                colors=current_colors,
                 class_ids=0,
                 keypoint_ids=AVP_IDS,
                 show_labels=False,
@@ -329,13 +326,13 @@ def log_incremental(
         uv[..., 0] = np.where((uv[..., 0] < 0) | (uv[..., 0] > pinhole.intrinsics.width), np.nan, uv[..., 0])
         uv[..., 1] = np.where((uv[..., 1] < 0) | (uv[..., 1] > pinhole.intrinsics.height), np.nan, uv[..., 1])
 
-        # Log the 2D keypoints
+        # Log the 2D keypoints. uv[..., -1] is the homogeneous camera-space
+        # depth, NOT a confidence -- the tracked confidence lives in conf_stack.
         rr.log(
             f"{video_log_path}/keypoints",
             Points2DWithConfidence(
                 positions=uv[0, :, 0:2],  # Remove the view dimension
-                confidences=uv[0, :, -1],  # Keep the confidence scores
-                colors=current_colors,
+                confidences=current_conf.squeeze(),
                 class_ids=0,
                 keypoint_ids=AVP_IDS,
                 show_labels=False,

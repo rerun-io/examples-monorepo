@@ -41,7 +41,6 @@ from simplecv.ops.triangulate import batch_triangulate
 from simplecv.rerun_custom_types import (
     Points2DWithConfidence,
     Points3DWithConfidence,
-    confidence_scores_to_rgb,
 )
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.rerun_rig_logger import log_rig_static
@@ -341,11 +340,6 @@ def run_wilor_ego_tracking(
                     uvc_coco[RIGHT_HAND_IDX, 2] = wilor_preds.scores[0]
 
             # Log 2D keypoints
-            confidence_rgb_stack: UInt8[ndarray, "1 n_kpts 3"] = confidence_scores_to_rgb(
-                uvc_coco[:, 2][np.newaxis, :, np.newaxis]
-            )
-            confidence_rgb: UInt8[ndarray, "n_kpts 3"] = confidence_rgb_stack[0]
-
             rr.log(
                 f"{pinhole_log_path}/coco133_uv",
                 Points2DWithConfidence(
@@ -354,7 +348,6 @@ def run_wilor_ego_tracking(
                     class_ids=int(Coco133AnnotationLayer.RAW_2D),
                     keypoint_ids=COCO_133_IDS,
                     show_labels=False,
-                    colors=confidence_rgb,
                 ),
             )
             # Collect for triangulation
@@ -389,11 +382,6 @@ def run_wilor_ego_tracking(
             invalid_mask: Bool[ndarray, "133"] = (~np.isfinite(confidences_for_log)) | (confidences_for_log <= 0.0)
             positions_for_log[invalid_mask, :] = np.nan
             
-            tri_conf_rgb_stack: UInt8[ndarray, "1 133 3"] = confidence_scores_to_rgb(
-                xyzc_coco[:, 3][np.newaxis, :, np.newaxis]
-            )
-            tri_conf_rgb: UInt8[ndarray, "133 3"] = tri_conf_rgb_stack[0]
-            
             rr.log(
                 f"{parent_log_path}/triangulated_hands/coco133_xyz",
                 Points3DWithConfidence(
@@ -402,7 +390,6 @@ def run_wilor_ego_tracking(
                     class_ids=int(Coco133AnnotationLayer.TRIANGULATED_3D),
                     keypoint_ids=COCO_133_IDS,
                     show_labels=False,
-                    colors=tri_conf_rgb,
                 ),
             )
 

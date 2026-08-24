@@ -282,14 +282,11 @@ class Points2DWithConfidence(rr.AsComponents):
     def columns(
         cls,
         *,
-        # Unlike __init__, the columnar path derives NO default colors: exoego
-        # ingest deliberately omits colors here so annotation-context class
-        # colors win (e.g. quest3_oakd_loader, ingest_exoego_recording).
         positions: Float[ndarray, "n 2"] | None = None,
         confidences: Float[ndarray, "n"] | None = None,
         average_confidences: Float[ndarray, "m"] | None = None,
         class_ids: Int[ndarray, "n"] | int | None = None,
-        keypoint_ids: Int[ndarray, "n"] | list[int] | None = None,
+        keypoint_ids: Integer[ndarray, "n"] | list[int] | None = None,
         show_labels: bool | ndarray | None = None,
         colors: UInt8[ndarray, "n 3"] | None = None,
         radii: float | Float[ndarray, "n"] | None = None,
@@ -299,6 +296,11 @@ class Points2DWithConfidence(rr.AsComponents):
         Inputs are already flattened to `(n_frames * n_kpts)` by the caller so the
         returned list can be partitioned with per-frame lengths before handing it
         to `rr.send_columns`.
+
+        Unlike ``__init__``, this columnar path derives NO default colors when
+        ``colors`` is omitted: exoego ingest deliberately passes no colors here
+        so annotation-context class colors win (quest3_oakd_loader,
+        ingest_exoego_recording). Do not "fix" the asymmetry.
         """
         show_labels_param: list[bool] | None = (
             None if show_labels is None else [bool(np.all(show_labels)) if np.size(show_labels) else bool(show_labels)]
@@ -515,20 +517,28 @@ class PinholeWithDistortion(rr.AsComponents):
         return cls(pinhole=pinhole, distortion=distortion_obj)
 
 
-class Points3DWithConfidence(rr.ComponentColumn):
-    """Custom Points3D archetype with per-keypoint and average confidences."""
+class Points3DWithConfidence(rr.AsComponents):
+    """Custom Points3D archetype with per-keypoint and average confidences.
+
+    When ``colors`` is omitted, point colors are derived from ``confidences``
+    with the shared red -> yellow -> green gradient, so per-point colors and the
+    logged confidence components can never disagree.
+    """
 
     def __init__(
         self: Any,
         positions: Float[ndarray, "n_kpts 3"],
         confidences: Float[ndarray, "n_kpts"],
-        class_ids: int,
-        keypoint_ids: list[int],
+        class_ids: int | None = None,
+        keypoint_ids: list[int] | Integer[ndarray, "n_kpts"] | None = None,
         show_labels: bool | Int[ndarray, "..."] = False,
         colors: UInt8[ndarray, "n_kpts 3"] | None = None,
         radii: float | None = None,
     ) -> None:
         show_labels_bool: bool = bool(np.all(show_labels)) if np.size(show_labels) else bool(show_labels)
+        confidences_arr: Float[ndarray, "n_kpts"] = np.asarray(confidences, dtype=np.float32)
+        if colors is None:
+            colors = confidence_scores_to_rgb(confidences_arr[None, :, None])[0]
         self.points3d = rr.Points3D(
             positions=positions,
             class_ids=class_ids,
@@ -546,7 +556,6 @@ class Points3DWithConfidence(rr.ComponentColumn):
             field_name="average_confidence",
             component_type="simplecv.components.KeypointConfidenceMean",
         )
-        confidences_arr: Float[ndarray, "n_kpts"] = np.asarray(confidences, dtype=np.float32)
         mean_confidence: float = float(np.nanmean(confidences_arr)) if confidences_arr.size else float("nan")
         self.confidences = ConfidenceBatch(confidences_arr).described(confidence_descriptor)
         self.average_confidence = AverageConfidenceBatch(mean_confidence).described(average_descriptor)
@@ -565,7 +574,7 @@ class Points3DWithConfidence(rr.ComponentColumn):
         confidences: Float[ndarray, "n"] | None = None,
         average_confidences: Float[ndarray, "m"] | None = None,
         class_ids: Int[ndarray, "n"] | int | None = None,
-        keypoint_ids: Int[ndarray, "n"] | list[int] | None = None,
+        keypoint_ids: Integer[ndarray, "n"] | list[int] | None = None,
         show_labels: bool | ndarray | None = None,
         colors: UInt8[ndarray, "n 3"] | None = None,
         radii: float | Float[ndarray, "n"] | None = None,
