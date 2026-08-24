@@ -95,6 +95,8 @@ class RefineConfig:
     landmark as a ground point."""
     device: str = "cuda"
     """Compute device."""
+    decode_device: str = "cpu"
+    """Video-decode device; CPU avoids CUDA decoder-context conflicts during inference."""
     seed: int = 0
     """Correspondence-subsampling seed (determinism)."""
 
@@ -262,6 +264,7 @@ def main(config: RefineConfig) -> int:
         trt_engine=config.trt_engine,
         collector=collector,
         hires_crops=preset.hires_crops,
+        decode_device=config.decode_device,
     )
     try:
         stats = pipeline.run(chunk_size=32, max_frames=config.max_calib_frames)

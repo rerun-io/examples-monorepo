@@ -256,6 +256,7 @@ def build_streaming_pipeline(
     hires_crops: bool = True,
     proxy_dir: Path | None = None,
     seg_stride: int = 5,
+    decode_device: str | None = None,
 ) -> StreamingPipeline:
     """Assemble the standard decode->track->landmarks->fit->log pipeline.
 
@@ -264,6 +265,10 @@ def build_streaming_pipeline(
     ``tracker_config``; landmarks additionally need ``mammanet_weights``;
     fitting additionally needs ``fitter_config``. ``device`` is propagated
     into the stage configs here so callers never mutate them.
+
+    ``decode_device`` may place video decoding on a different device from the
+    model stages. It defaults to ``device`` for backward compatibility. This is
+    useful when a CUDA inference runtime invalidates an existing NVDEC context.
 
     ``proxy_dir`` (from ``tools/make_proxies.py``) swaps the decode source to
     pre-transcoded ``<proxy_dir>/<cam>.mp4`` videos already at ``resize_hw``,
@@ -285,7 +290,12 @@ def build_streaming_pipeline(
     scaled_cams: list[CameraCalibration] = sequence.scaled_cameras(resize_hw)
     # hires_crops: decode at native resolution; the pipeline downscales to
     # resize_hw per tick for tracking/logging and crops landmarks from native.
-    reader = TorchCodecMultiVideoReader(list(decode_sequence.video_paths), device=device, resize_hw=None if hires_crops else resize_hw)
+    reader_device: str = device if decode_device is None else decode_device
+    reader = TorchCodecMultiVideoReader(
+        list(decode_sequence.video_paths),
+        device=reader_device,
+        resize_hw=None if hires_crops else resize_hw,
+    )
     logger = StreamLogger(sequence, resize_hw=resize_hw, seg_stride=seg_stride)
 
     tracker: MultiViewTracker | None = None
