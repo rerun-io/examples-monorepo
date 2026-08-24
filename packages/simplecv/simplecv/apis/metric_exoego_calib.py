@@ -291,10 +291,6 @@ def single_frame_mv_hands(
 
         uvc_coco_list.append(uvc_coco)
         uvc_cam_names.append(ego_cam_name)
-        confidence_rgb_view_stack: UInt8[ndarray, "1 n_kpts 3"] = confidence_scores_to_rgb(
-            uvc_coco[:, 2][np.newaxis, :, np.newaxis]
-        )
-        confidence_rgb_view: UInt8[ndarray, "n_kpts 3"] = confidence_rgb_view_stack[0]
         # log all keypoints
         if debug:
             rr.log(
@@ -305,7 +301,6 @@ def single_frame_mv_hands(
                     class_ids=int(Coco133AnnotationLayer.RAW_2D),
                     keypoint_ids=COCO_133_IDS,
                     show_labels=False,
-                    colors=confidence_rgb_view,
                 ),
             )
     # triangulate 3d keypoints from all ego views (undistort before solving)
@@ -342,11 +337,6 @@ def single_frame_mv_hands(
         keypoints_2d=uvc_coco_stack,
         projection_matrices=Pall,
     )
-    tri_conf_rgb_stack: UInt8[ndarray, "1 n_kpts 3"] = confidence_scores_to_rgb(
-        xyzc_coco[:, 3][np.newaxis, :, np.newaxis]
-    )
-    tri_conf_rgb: UInt8[ndarray, "n_kpts 3"] = tri_conf_rgb_stack[0]
-
     positions_for_log: Float32[ndarray, "n_kpts 3"] = xyzc_coco[:, :3].astype(np.float32, copy=True)
     confidences_for_log: Float32[ndarray, "n_kpts"] = xyzc_coco[:, 3].astype(np.float32, copy=True)
     # Points with zero/invalid confidence correspond to missing detections; log them as NaN
@@ -363,7 +353,6 @@ def single_frame_mv_hands(
                 class_ids=int(Coco133AnnotationLayer.TRIANGULATED_3D),
                 keypoint_ids=COCO_133_IDS,
                 show_labels=False,
-                colors=tri_conf_rgb,
             ),
             static=True,
         )
@@ -409,7 +398,6 @@ def single_frame_mv_hands(
         pinholes_per_view=pinhole_param_list,
         filter_invalid=True,
     )
-    aligned_conf_rgb: UInt8[ndarray, "1 133 3"] = confidence_scores_to_rgb(aligned_conf_full[..., np.newaxis])
     for view_idx, cam_name in enumerate(uvc_cam_names):
         if debug:
             pinhole_log_path: Path = parent_log_path / "ego" / cam_name / "pinhole"
@@ -421,7 +409,6 @@ def single_frame_mv_hands(
                     class_ids=int(Coco133AnnotationLayer.TRIANGULATED_3D),
                     keypoint_ids=COCO_133_IDS,
                     show_labels=False,
-                    colors=aligned_conf_rgb[0],
                 ),
             )
     residuals: Float[ndarray, "n_valid"] = np.linalg.norm(aligned_points - dst_points, axis=1)

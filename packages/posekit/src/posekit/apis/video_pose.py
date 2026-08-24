@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import rerun as rr
 import torch
-from jaxtyping import Float32, Int, UInt8
+from jaxtyping import Float32, Int, UInt8, UInt16
 from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig, log_video
 from torch import Tensor
@@ -75,6 +75,7 @@ def log_frame_predictions(
     boxes: Float32[ndarray, "n 4"] = detections.xyxy_numpy()
     xy: Float32[ndarray, "n k 2"] = keypoints.xy_numpy()
     scores: Float32[ndarray, "n k"] = keypoints.scores_numpy()
+    keypoint_ids: UInt16[ndarray, "k"] = np.arange(xy.shape[1], dtype=np.uint16)
     for local_idx, (frame_idx, timestamp_ns) in enumerate(zip(frame_indices, timestamps_ns, strict=True)):
         rr.set_time("frame", sequence=int(frame_idx))
         rr.set_time("video_time", duration=1e-9 * float(timestamp_ns))
@@ -96,7 +97,7 @@ def log_frame_predictions(
                 xy[row],
                 scores[row],
                 keypoint_threshold,
-                keypoint_ids=np.arange(xy.shape[1], dtype=np.uint16),
+                keypoint_ids=keypoint_ids,
                 class_ids=0,
             )
 

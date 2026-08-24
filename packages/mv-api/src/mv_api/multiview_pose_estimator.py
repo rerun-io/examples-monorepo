@@ -15,7 +15,7 @@ from simplecv.camera_parameters import PinholeParameters
 from simplecv.data.skeleton.coco133_layers import COCO133_PREDICTION_LAYER_TO_PATH, Coco133AnnotationLayer
 from simplecv.data.skeleton.coco_133 import COCO_133_IDS, LEFT_HAND_IDX, RIGHT_HAND_IDX
 from simplecv.ops.triangulate import batch_triangulate, projectN3
-from simplecv.rerun_custom_types import Points2DWithConfidence, confidence_scores_to_rgb
+from simplecv.rerun_custom_types import Points2DWithConfidence
 from torch import Tensor
 from wilor_nano.hand_keypoints import (
     FinalWilorPred,
@@ -350,9 +350,6 @@ class MultiviewBodyTracker:
         )
         filtered_keypoints = np.where(finite_mask[:, None], filtered_keypoints, np.nan).astype(np.float32, copy=False)
         filtered_confidences = np.where(finite_mask, filtered_confidences, 0.0).astype(np.float32, copy=False)
-        confidence_rgb: UInt8[ndarray, "n_kpts 3"] = confidence_scores_to_rgb(
-            filtered_confidences[np.newaxis, :, np.newaxis]
-        )[0]
         layer_segment: str = COCO133_PREDICTION_LAYER_TO_PATH[layer]
         rr.log(
             f"{pinhole_path}/pred/coco133_uv/{layer_segment}",
@@ -362,7 +359,6 @@ class MultiviewBodyTracker:
                 class_ids=int(layer),
                 keypoint_ids=COCO_133_IDS,
                 show_labels=False,
-                colors=confidence_rgb,
             ),
             recording=recording,
         )

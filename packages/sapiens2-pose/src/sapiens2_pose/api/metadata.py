@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 import numpy as np
 import rerun as rr
-from jaxtyping import Float32, UInt8
+from jaxtyping import Float32
 from numpy import ndarray
 
 from sapiens2_pose.sapiens_lite.pose import parse_pose_metainfo
@@ -35,8 +35,6 @@ class PoseSchema:
     """Mapping from keypoint ID to display name."""
     keypoint_connections: list[tuple[int, int]]
     """Skeleton edges expressed in schema-local keypoint IDs."""
-    keypoint_colors: UInt8[ndarray, "k 3"]
-    """Per-keypoint RGB colors."""
 
 
 _keypoint_module_cache: Any | None = None
@@ -74,14 +72,12 @@ def _build_sapiens_schema() -> PoseSchema:
     keypoint_ids: list[int] = list(range(int(meta["num_keypoints"])))
     id2name: dict[int, str] = {int(idx): str(meta["keypoint_id2name"][idx]) for idx in keypoint_ids}
     keypoint_connections: list[tuple[int, int]] = [(int(a), int(b)) for a, b in meta["skeleton_links"]]
-    keypoint_colors: UInt8[ndarray, "k 3"] = np.asarray(meta["keypoint_colors"], dtype=np.uint8)
     return PoseSchema(
         name="sapiens308",
         class_label="Sapiens2 308",
         keypoint_ids=keypoint_ids,
         id2name=id2name,
         keypoint_connections=keypoint_connections,
-        keypoint_colors=keypoint_colors,
     )
 
 
@@ -94,10 +90,6 @@ def _build_coco133_schema() -> PoseSchema:
         int(idx): str(coco_info["keypoint_info"][idx]["name"])
         for idx in keypoint_ids
     }
-    keypoint_colors: UInt8[ndarray, "k 3"] = np.asarray(
-        [coco_info["keypoint_info"][idx].get("color", [255, 128, 0]) for idx in keypoint_ids],
-        dtype=np.uint8,
-    )
     name2id: dict[str, int] = {name: idx for idx, name in id2name.items()}
     keypoint_connections: list[tuple[int, int]] = []
     for skeleton_info in coco_info["skeleton_info"].values():
@@ -111,7 +103,6 @@ def _build_coco133_schema() -> PoseSchema:
         keypoint_ids=keypoint_ids,
         id2name=id2name,
         keypoint_connections=keypoint_connections,
-        keypoint_colors=keypoint_colors,
     )
 
 

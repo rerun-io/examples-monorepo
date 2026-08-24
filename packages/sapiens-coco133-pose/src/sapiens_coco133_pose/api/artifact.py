@@ -14,7 +14,7 @@ from numpy import ndarray
 from sapiens2_pose.api.metadata import get_pose_schema, log_annotation_context
 from sapiens2_pose.api.pose_artifact import PoseArtifactComparisonConfig, PoseArtifactComparisonMetrics, PosePredictionArtifact, compare_pose_prediction_artifacts
 from sapiens2_pose.api.rerun_pose_artifact import _load_one_recording_chunks
-from simplecv.rerun_custom_types import Points2DWithConfidence, confidence_scores_to_rgb
+from simplecv.rerun_custom_types import Points2DWithConfidence
 from simplecv.rerun_log_utils import log_video
 
 _LEGACY_POSE_ENTITY_PATTERN = re.compile(r"^/?video/frame_(?P<frame>\d+)/person_(?P<person>\d+)/(?P<kind>bbox|keypoints)$")
@@ -115,14 +115,14 @@ def coco133_points2d_with_confidence(
         class_id: Rerun class id for the person instance.
 
     Returns:
-        ``Points2DWithConfidence`` containing positions, confidence values, keypoint ids, class ids, and confidence colors.
+        ``Points2DWithConfidence`` containing positions, confidence values, keypoint ids, and class ids;
+        colors derive from the confidences inside the archetype.
     """
     keypoints_f32: Float32[ndarray, "133 2"] = np.asarray(keypoints, dtype=np.float32).reshape(133, 2).copy()
     scores_f32: Float32[ndarray, "133"] = np.asarray(scores, dtype=np.float32).reshape(133).copy()
     visible_mask: Bool[ndarray, "133"] = np.asarray(scores_f32 >= np.float32(keypoint_threshold), dtype=np.bool_)
     keypoints_f32[~visible_mask] = np.nan
-    confidence_rgb: UInt8[ndarray, "133 3"] = confidence_scores_to_rgb(scores_f32[np.newaxis, :, np.newaxis])[0]
-    return Points2DWithConfidence(positions=keypoints_f32, confidences=scores_f32, class_ids=class_id, keypoint_ids=keypoint_ids, colors=confidence_rgb, show_labels=False)
+    return Points2DWithConfidence(positions=keypoints_f32, confidences=scores_f32, class_ids=class_id, keypoint_ids=keypoint_ids, show_labels=False)
 
 
 def log_video_pose_frames(frames: list[Coco133PoseFrame], *, keypoint_threshold: float, recording: rr.RecordingStream, video_path: Path | None = None, video_log_path: Path = Path("video")) -> rr.RecordingStream:

@@ -9,6 +9,7 @@ import rerun as rr
 import rerun.blueprint as rrb
 from jaxtyping import Bool, Float32, Int, UInt8, UInt16
 from numpy import ndarray
+from simplecv.rerun_custom_types import Points2DWithConfidence
 
 from sapiens2_pose.api.metadata import PoseSchema, log_annotation_context
 
@@ -110,16 +111,20 @@ def _prepare_keypoints_for_logging(
     keypoints: Float32[ndarray, "k 2"],
     scores: Float32[ndarray, "k"],
     kpt_thr: float,
-) -> Float32[ndarray, "k 2"]:
-    """Mask low-confidence keypoints with NaN so Rerun does not draw them."""
+) -> tuple[Float32[ndarray, "k 2"], Float32[ndarray, "k"]]:
+    """Mask low-confidence keypoints with NaN and return the length-reconciled scores."""
     keypoints_arr: Float32[ndarray, "k 2"] = np.asarray(keypoints, dtype=np.float32).copy()
     scores_arr: Float32[ndarray, "k"] = np.asarray(scores, dtype=np.float32).reshape(-1)
     valid_count: int = min(keypoints_arr.shape[0], scores_arr.shape[0])
     if valid_count < keypoints_arr.shape[0]:
         keypoints_arr[valid_count:] = np.nan
+    # NaN (not 0.0) for missing tail scores: nanmean-based average_confidence
+    # skips NaN, and the gradient renders NaN as red either way.
+    reconciled_scores: Float32[ndarray, "k"] = np.full((keypoints_arr.shape[0],), np.nan, dtype=np.float32)
+    reconciled_scores[:valid_count] = scores_arr[:valid_count]
     low_confidence_indices: Int[ndarray, "low_confidence"] = np.flatnonzero(scores_arr[:valid_count] < kpt_thr).astype(np.int32)
     keypoints_arr[low_confidence_indices] = np.nan
-    return keypoints_arr
+    return keypoints_arr, reconciled_scores
 
 
 def log_pose_instances(
@@ -135,7 +140,6 @@ def log_pose_instances(
 ) -> None:
     """Log per-person 2D boxes and keypoints below an entity root."""
     keypoint_ids: Int[ndarray, "k"] = np.asarray(schema.keypoint_ids, dtype=np.int32)
-    keypoint_colors: UInt8[ndarray, "k 3"] = np.asarray(schema.keypoint_colors, dtype=np.uint8)
     bboxes_f32: Float32[ndarray, "n 4"] = np.asarray(bboxes, dtype=np.float32).reshape(-1, 4)
     if track_ids is None:
         track_ids_arr: Int[ndarray, "n"] = np.arange(bboxes_f32.shape[0], dtype=np.int32)
@@ -160,15 +164,16 @@ def log_pose_instances(
             recording=recording,
         )
 
-        keypoints_arr: Float32[ndarray, "k 2"] = _prepare_keypoints_for_logging(kpts, scr, kpt_thr)
+        prepared: tuple[Float32[ndarray, "k 2"], Float32[ndarray, "k"]] = _prepare_keypoints_for_logging(kpts, scr, kpt_thr)
+        keypoints_arr: Float32[ndarray, "k 2"] = prepared[0]
+        scores_f32: Float32[ndarray, "k"] = prepared[1]
         rr.log(
             f"{person_path}/keypoints",
-            rr.Points2D(
+            Points2DWithConfidence(
                 positions=keypoints_arr,
+                confidences=scores_f32,
                 class_ids=0,
                 keypoint_ids=keypoint_ids,
-                colors=keypoint_colors,
-                show_labels=False,
             ),
             recording=recording,
         )
