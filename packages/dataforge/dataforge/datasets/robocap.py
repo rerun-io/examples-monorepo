@@ -208,11 +208,15 @@ def build_blueprint(camera_names: list[str]) -> rrb.Blueprint:
         rrb.Spatial2DView(name=name, origin=schema.pinhole_path(RIG, index), contents=f"{schema.pinhole_path(RIG, index)}/**")
         for index, name in enumerate(camera_names)
     ]
-    # SLAM-layer trajectory defaults: the full path overwhelms long sessions, so it
-    # starts hidden and a 10 s trail (per-pose segments windowed by the blueprint's
-    # VisibleTimeRange) shows recent motion instead. Overrides on entities a
-    # base-only recording lacks are simply inert.
-    slam_overrides: dict[str, rrb.EntityBehavior | rrb.VisibleTimeRanges] = {
+    # SLAM-layer trajectory defaults, split per view: the overview shows the whole
+    # path (its trail stays hidden), while the follow-cam shows only a 10 s trail
+    # (per-pose segments windowed by the blueprint's VisibleTimeRange — the window
+    # is a viewer setting). Overrides on entities a base-only recording lacks are
+    # simply inert.
+    overview_overrides: dict[str, rrb.EntityBehavior] = {
+        "/world/runs/basalt/trail": rrb.EntityBehavior(visible=False),
+    }
+    follow_overrides: dict[str, rrb.EntityBehavior | rrb.VisibleTimeRanges] = {
         "/world/runs/basalt/trajectory": rrb.EntityBehavior(visible=False),
         "/world/runs/basalt/trail": rrb.VisibleTimeRanges(
             rrb.VisibleTimeRange(
@@ -227,7 +231,7 @@ def build_blueprint(camera_names: list[str]) -> rrb.Blueprint:
         rrb.Vertical(
             rrb.Horizontal(
                 rrb.Vertical(
-                    rrb.Spatial3DView(name="Rig", origin="/", line_grid=True, overrides=slam_overrides),
+                    rrb.Spatial3DView(name="Rig", origin="/", line_grid=True, overrides=overview_overrides),
                     # Follow-cam (rerun-io/eye_control_example pattern): the view's
                     # origin IS the rig frame, so a fixed first-person eye in that
                     # frame rides the rig. Inert until a pose layer animates rig_00.
@@ -236,7 +240,7 @@ def build_blueprint(camera_names: list[str]) -> rrb.Blueprint:
                         origin=schema.rig_path(RIG),
                         contents="/**",
                         line_grid=True,
-                        overrides=slam_overrides,
+                        overrides=follow_overrides,
                         eye_controls=rrb.EyeControls3D(
                             kind=rrb.Eye3DKind.FirstPerson,
                             position=(1.6, -1.6, 1.2),
