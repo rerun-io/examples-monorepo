@@ -243,7 +243,7 @@ def build_blueprint(camera_names: list[str]) -> rrb.Blueprint:
                         overrides=follow_overrides,
                         eye_controls=rrb.EyeControls3D(
                             kind=rrb.Eye3DKind.FirstPerson,
-                            position=(1.6, -1.6, 1.2),
+                            position=(0.8, -0.8, 0.6),
                             look_target=(0.0, 0.0, 0.0),
                             eye_up=(0.0, 0.0, 1.0),
                             spin_speed=0.0,
