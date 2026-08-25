@@ -226,8 +226,28 @@ def build_blueprint(camera_names: list[str]) -> rrb.Blueprint:
     return rrb.Blueprint(
         rrb.Vertical(
             rrb.Horizontal(
-                rrb.Spatial3DView(name="Rig", origin="/", line_grid=True, overrides=slam_overrides),
-                rrb.Grid(*camera_views, grid_columns=3, name="Synchronized cameras"),
+                rrb.Vertical(
+                    rrb.Spatial3DView(name="Rig", origin="/", line_grid=True, overrides=slam_overrides),
+                    # Follow-cam (rerun-io/eye_control_example pattern): the view's
+                    # origin IS the rig frame, so a fixed first-person eye in that
+                    # frame rides the rig. Inert until a pose layer animates rig_00.
+                    rrb.Spatial3DView(
+                        name="Follow",
+                        origin=schema.rig_path(RIG),
+                        contents="/**",
+                        line_grid=True,
+                        overrides=slam_overrides,
+                        eye_controls=rrb.EyeControls3D(
+                            kind=rrb.Eye3DKind.FirstPerson,
+                            position=(1.6, -1.6, 1.2),
+                            look_target=(0.0, 0.0, 0.0),
+                            eye_up=(0.0, 0.0, 1.0),
+                            spin_speed=0.0,
+                        ),
+                    ),
+                ),
+                rrb.Grid(*camera_views, grid_columns=2, name="Synchronized cameras"),
+                column_shares=[3, 2],
             ),
             rrb.Horizontal(
                 rrb.TimeSeriesView(
