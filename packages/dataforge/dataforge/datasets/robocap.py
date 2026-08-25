@@ -245,10 +245,11 @@ def build_blueprint(camera_names: list[str]) -> rrb.Blueprint:
                             kind=rrb.Eye3DKind.FirstPerson,
                             # Rig-frame coordinates: the dev0 IMU frame's -Z is the
                             # wearer's up (the cap mesh alignment maps scan-up there).
-                            position=(0.8, -0.95, -0.6),
-                            # Aim at the cap, not the rig origin: the mesh sits at
-                            # MESH_TRANSLATION, ~15 cm off the dev0 IMU point.
-                            look_target=(0.0, -0.15, 0.025),
+                            position=(0.8, -0.8, -0.6),
+                            # The rig origin coincides with the front-stereo cameras
+                            # (left_front is ~4 cm away), so this lines the view up
+                            # with where the wearer faces.
+                            look_target=(0.0, 0.0, 0.0),
                             eye_up=(0.0, 0.0, -1.0),
                             spin_speed=0.0,
                         ),
@@ -298,8 +299,8 @@ def build_table_blueprint(camera_names: list[str]) -> rrb.Blueprint:
                 eye_controls=rrb.EyeControls3D(
                     kind=rrb.Eye3DKind.FirstPerson,
                     # Rig-frame coordinates: wearer-up is -Z (see the segment Follow view).
-                    position=(0.8, -0.95, -0.6),
-                    look_target=(0.0, -0.15, 0.025),  # the cap (MESH_TRANSLATION), not the rig origin
+                    position=(0.8, -0.8, -0.6),
+                    look_target=(0.0, 0.0, 0.0),  # ~= the front-stereo cameras (see the segment Follow view)
                     eye_up=(0.0, 0.0, -1.0),
                     spin_speed=0.0,
                 ),
