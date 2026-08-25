@@ -7,9 +7,12 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import rerun.blueprint as rrb
 from jaxtyping import Float64, Int64
 from numpy import ndarray
+from simplecv.data.ego.robocap_ego import CAMERA_DISPLAY_ORDER
 
+from dataforge import schema
 from dataforge.datasets.robocap import (
     ACCEL_SCALE,
     CAMERA_TO_IMU_OFFSET_NS,
@@ -17,6 +20,8 @@ from dataforge.datasets.robocap import (
     RobocapConfig,
     RobocapDataset,
     RobocapSource,
+    build_blueprint,
+    build_table_blueprint,
     read_imu_database,
 )
 from dataforge.identity import SequenceIdentity
@@ -39,11 +44,12 @@ def make_segment(session_dir: Path, session: int, segment: int) -> None:
 
 @pytest.fixture
 def corpus(tmp_path: Path) -> Path:
-    """A fake RoboCap root: two sessions, three segments, one ``-old`` decoy."""
+    """A fake RoboCap root: two video sessions, one empty session, and one ``-old`` decoy."""
     (tmp_path / f"0factory-calibration-{DEVICE}").mkdir()
     make_segment(tmp_path / f"{DEVICE}_session_1", session=1, segment=1)
     make_segment(tmp_path / f"{DEVICE}_session_1", session=1, segment=2)
     make_segment(tmp_path / f"{DEVICE}_session_10", session=10, segment=1)
+    (tmp_path / f"{DEVICE}_session_20").mkdir()
     make_segment(tmp_path / f"{DEVICE}_session_10-old", session=10, segment=9)
     return tmp_path
 
@@ -63,12 +69,30 @@ def test_discover_pairs_every_session_with_its_segments_and_skips_old_dirs(corpu
     assert dataset.sequences() == [identity for identity, _ in discovered]
 
 
-def test_download_verifies_local_corpus(corpus: Path, tmp_path: Path) -> None:
+def test_download_verifies_local_corpus_and_reports_video_less_sessions(corpus: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     RobocapConfig(root=corpus).setup().download()
+    output: str = capsys.readouterr().out
+    assert "3 session dirs, 2 with videos" in output
+    assert f"warning: session directories contain no videos: {DEVICE}_session_20" in output
     empty_root: Path = tmp_path / "empty"
     empty_root.mkdir()
     with pytest.raises(FileNotFoundError, match="missing"):
         RobocapConfig(root=empty_root).setup().download()
+
+
+def test_blueprints_serialize_with_canonical_camera_order(tmp_path: Path) -> None:
+    camera_names: list[str] = list(CAMERA_DISPLAY_ORDER)
+    segment_blueprint: rrb.Blueprint = build_blueprint(camera_names)
+    table_blueprint: rrb.Blueprint = build_table_blueprint(camera_names)
+    segment_path: Path = tmp_path / "robocap.rbl"
+    table_path: Path = tmp_path / "robocap-table.rbl"
+
+    segment_blueprint.save("robocap", str(segment_path))
+    table_blueprint.save("robocap", str(table_path))
+
+    assert segment_path.stat().st_size > 0
+    assert table_path.stat().st_size > 0
+    assert schema.trail_path("basalt") == "/world/runs/basalt/trail"
 
 
 def write_imu_db(db_path: Path) -> None:

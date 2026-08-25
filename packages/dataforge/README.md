@@ -21,14 +21,14 @@ land with the next dataset).
 
 | dataset | raw corpus | one sequence | rrd contents |
 | --- | --- | --- | --- |
-| `robocap` | `/mnt/nas/datasets/robocap` | one `(device, session, segment)` | 6 fisheye video streams, the dev0 IMU, the cap mesh |
+| `robocap` | `/mnt/nas/datasets/robocap` | one `(device, session)`; file-roll segments merge at convert | 6 fisheye video streams, the dev0 IMU, the cap mesh |
 | `selfcap` | `/mnt/nas/datasets/exoego-self-collected/main` | one cut episode | 4 iPhone exo rigs + the OAK ego rig + the Quest (9 cameras), the OAK IMU, the Quest head-pose track |
 
 **Verbs**, each a thin `tools/apps/*.py` shim over `dataforge/apis/`:
 
 ```bash
 pixi run -e dataforge --frozen dataforge-download selfcap        # fetch, or verify a local corpus
-pixi run -e dataforge --frozen dataforge-convert robocap --sequence f408193e6447b3b0/s1/seg1
+pixi run -e dataforge --frozen dataforge-convert robocap --sequence f408193e6447b3b0/s1
 pixi run -e dataforge --frozen dataforge-register selfcap        # into a local `rerun server` catalog
 pixi run -e dataforge --frozen dataforge-view robocap --rr-config.headless
 ```

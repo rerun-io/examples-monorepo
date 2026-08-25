@@ -10,6 +10,9 @@ from dataforge.schema import (
     imu_path,
     pinhole_path,
     rig_path,
+    run_path,
+    trail_path,
+    trajectory_path,
     video_path,
 )
 
@@ -37,3 +40,9 @@ def test_indices_must_be_nonnegative() -> None:
 def test_capture_property_keys() -> None:
     assert capture_property("num_frames") == "property:capture:num_frames"
     assert capture_property("schema") == "property:capture:schema"
+
+
+def test_run_paths_are_nested_below_the_source() -> None:
+    assert run_path("basalt") == "/world/runs/basalt"
+    assert trajectory_path("basalt") == "/world/runs/basalt/trajectory"
+    assert trail_path("basalt") == "/world/runs/basalt/trail"

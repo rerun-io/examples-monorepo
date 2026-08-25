@@ -84,7 +84,7 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
 
         The viewer renders every visible dataset row through this blueprint at
         once ("Table cards and blueprints" experimental setting), so it must
-        stay cheap — exclude video entities from ``contents`` rather than
-        hiding them, or the cards decode every stream. ``None`` skips it.
+        stay cheap — cards decode exactly one stream (the front-stereo pane);
+        everything else is excluded rather than hidden. ``None`` skips it.
         """
         return None
