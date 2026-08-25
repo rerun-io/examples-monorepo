@@ -208,11 +208,25 @@ def build_blueprint(camera_names: list[str]) -> rrb.Blueprint:
         rrb.Spatial2DView(name=name, origin=schema.pinhole_path(RIG, index), contents=f"{schema.pinhole_path(RIG, index)}/**")
         for index, name in enumerate(camera_names)
     ]
+    # SLAM-layer trajectory defaults: the full path overwhelms long sessions, so it
+    # starts hidden and a 10 s trail (per-pose segments windowed by the blueprint's
+    # VisibleTimeRange) shows recent motion instead. Overrides on entities a
+    # base-only recording lacks are simply inert.
+    slam_overrides: dict[str, rrb.EntityBehavior | rrb.VisibleTimeRanges] = {
+        "/world/runs/basalt/trajectory": rrb.EntityBehavior(visible=False),
+        "/world/runs/basalt/trail": rrb.VisibleTimeRanges(
+            rrb.VisibleTimeRange(
+                "video_time",
+                start=rrb.TimeRangeBoundary.cursor_relative(seconds=-10.0),
+                end=rrb.TimeRangeBoundary.cursor_relative(),
+            )
+        ),
+    }
     # TODO(dataforge): once dev1/dev2 are emitted, fan the plots out to one pane pair per IMU.
     return rrb.Blueprint(
         rrb.Vertical(
             rrb.Horizontal(
-                rrb.Spatial3DView(name="Rig", origin="/", line_grid=True),
+                rrb.Spatial3DView(name="Rig", origin="/", line_grid=True, overrides=slam_overrides),
                 rrb.Grid(*camera_views, grid_columns=3, name="Synchronized cameras"),
             ),
             rrb.Horizontal(
