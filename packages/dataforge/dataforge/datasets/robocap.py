@@ -273,12 +273,49 @@ def build_blueprint(camera_names: list[str]) -> rrb.Blueprint:
     )
 
 
+def build_table_blueprint(camera_names: list[str]) -> rrb.Blueprint:
+    """Segment-table preview card: follow-framed 3D (full trajectory, all frusta,
+    NO video textures) beside the single front-stereo video pane.
+
+    Every visible table row renders through this at once, so video is *excluded*
+    from the 3D contents rather than hidden — excluded entities never decode
+    (ARKitScenes profiled ~15 cards saturating 12 cores when they did).
+    """
+    video_exclusions: list[str] = [f"- {schema.video_path(RIG, index)}/**" for index in range(len(camera_names))]
+    front_name: str = "left_front" if "left_front" in camera_names else camera_names[0]
+    front_index: int = camera_names.index(front_name)
+    return rrb.Blueprint(
+        rrb.Horizontal(
+            rrb.Spatial3DView(
+                name="Follow",
+                origin=schema.rig_path(RIG),
+                contents=["/**", *video_exclusions, "- /world/runs/basalt/trail/**"],
+                line_grid=True,
+                eye_controls=rrb.EyeControls3D(
+                    kind=rrb.Eye3DKind.FirstPerson,
+                    position=(0.8, -0.8, 0.6),
+                    look_target=(0.0, 0.0, 0.0),
+                    eye_up=(0.0, 0.0, 1.0),
+                    spin_speed=0.0,
+                ),
+            ),
+            rrb.Spatial2DView(name=front_name, origin=schema.pinhole_path(RIG, front_index), contents=f"{schema.pinhole_path(RIG, front_index)}/**"),
+            column_shares=[3, 2],
+        ),
+        rrb.TimePanel(timeline="video_time"),
+    )
+
+
 class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
     """Converts RoboCap segments into exoego:v2 base-layer recordings."""
 
     def default_blueprint(self) -> rrb.Blueprint:
         """Corpus-wide layout: every RoboCap rig has the same six cameras."""
         return build_blueprint(list(CAMERA_DISPLAY_ORDER))
+
+    def table_blueprint(self) -> rrb.Blueprint:
+        """Cheap preview card for the dataset's segment table."""
+        return build_table_blueprint(list(CAMERA_DISPLAY_ORDER))
 
     # ── raw-tree discovery ────────────────────────────────────────────────
     def session_dirs(self) -> list[Path]:

@@ -40,11 +40,18 @@ def main(config: Config) -> None:
         on_duplicate=OnDuplicateSegmentLayer.SKIP,
     ).wait()
 
-    blueprint: rrb.Blueprint | None = dataset_config.setup().default_blueprint()
+    dataset_instance = dataset_config.setup()
+    blueprint: rrb.Blueprint | None = dataset_instance.default_blueprint()
     if blueprint is not None:
         blueprint_path: Path = paths.output_root() / "blueprints" / f"{name}.rbl"
         # A re-register must never truncate the .rbl a live catalog server still holds open.
         with writing.atomic_write(blueprint_path) as temp_path:
             blueprint.save(name, str(temp_path))
         dataset.register_blueprint(blueprint_path.resolve().as_uri(), set_default=True)
+    table_blueprint: rrb.Blueprint | None = dataset_instance.table_blueprint()
+    if table_blueprint is not None:
+        table_path: Path = paths.output_root() / "blueprints" / f"{name}-table.rbl"
+        with writing.atomic_write(table_path) as temp_path:
+            table_blueprint.save(name, str(temp_path))
+        dataset.register_blueprint(table_path.resolve().as_uri(), segment_table=True)
     print(f"registered {len(rrd_paths)} {paths.BASE_LAYER}-layer rrds into '{name}' at {config.catalog_url}")
