@@ -243,9 +243,11 @@ def build_blueprint(camera_names: list[str]) -> rrb.Blueprint:
                         overrides=follow_overrides,
                         eye_controls=rrb.EyeControls3D(
                             kind=rrb.Eye3DKind.FirstPerson,
-                            position=(0.8, -0.8, 0.6),
+                            # Rig-frame coordinates: the dev0 IMU frame's -Z is the
+                            # wearer's up (the cap mesh alignment maps scan-up there).
+                            position=(0.8, -0.8, -0.6),
                             look_target=(0.0, 0.0, 0.0),
-                            eye_up=(0.0, 0.0, 1.0),
+                            eye_up=(0.0, 0.0, -1.0),
                             spin_speed=0.0,
                         ),
                     ),
@@ -293,9 +295,10 @@ def build_table_blueprint(camera_names: list[str]) -> rrb.Blueprint:
                 line_grid=True,
                 eye_controls=rrb.EyeControls3D(
                     kind=rrb.Eye3DKind.FirstPerson,
-                    position=(0.8, -0.8, 0.6),
+                    # Rig-frame coordinates: wearer-up is -Z (see the segment Follow view).
+                    position=(0.8, -0.8, -0.6),
                     look_target=(0.0, 0.0, 0.0),
-                    eye_up=(0.0, 0.0, 1.0),
+                    eye_up=(0.0, 0.0, -1.0),
                     spin_speed=0.0,
                 ),
             ),
