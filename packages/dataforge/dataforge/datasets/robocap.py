@@ -367,7 +367,9 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
                     found.setdefault((device, session), (session_dir, set()))[1].add(int(video_match["segment"]))
         return [
             (
-                SequenceIdentity(dataset=self.config.name, parts=(device, f"s{session}")),
+                # Zero-padded so lexicographic ordering (catalog tables, file
+                # listings) matches capture order for any conceivable corpus size.
+                SequenceIdentity(dataset=self.config.name, parts=(device, f"s{session:08d}")),
                 RobocapSource(session_dir=session_dir, device=device, session=session, segments=tuple(sorted(segments))),
             )
             for (device, session), (session_dir, segments) in sorted(found.items())

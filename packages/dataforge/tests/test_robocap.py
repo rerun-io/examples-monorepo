@@ -58,10 +58,10 @@ def test_discover_pairs_every_session_with_its_segments_and_skips_old_dirs(corpu
     dataset: RobocapDataset = RobocapDataset(RobocapConfig(root=corpus))
     discovered: list[tuple[SequenceIdentity, RobocapSource]] = dataset.discover()
     assert [identity.sequence_key for identity, _ in discovered] == [
-        f"{DEVICE}/s1",
-        f"{DEVICE}/s10",
+        f"{DEVICE}/s00000001",
+        f"{DEVICE}/s00000010",
     ]
-    assert discovered[0][0].recording_id == f"robocap__{DEVICE}__s1"
+    assert discovered[0][0].recording_id == f"robocap__{DEVICE}__s00000001"
     # The session is the sequence unit; its file-roll segments merge at convert.
     assert discovered[0][1] == RobocapSource(session_dir=corpus / f"{DEVICE}_session_1", device=DEVICE, session=1, segments=(1, 2))
     assert discovered[1][1].segments == (1,)
