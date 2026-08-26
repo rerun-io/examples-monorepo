@@ -61,9 +61,9 @@ torchvision = "*"
 
 [feature.common.pypi-dependencies]
 # datafusion only — the dataloader extra would drag torch into common envs.
-rerun-sdk = { version = "==0.35.0", extras = ["datafusion"] }
+rerun-sdk = { version = "==0.36.2", extras = ["datafusion"] }
 gradio = "==6.13.0"
-gradio-rerun = "==0.35.0"
+gradio-rerun = "==0.36.2"
 simplecv = { path = "packages/simplecv", editable = true }
 
 # ─── catalog common feature (Rerun catalog prerelease lane) ────────────────
@@ -98,15 +98,10 @@ simplecv = { path = "packages/simplecv", editable = true }
 platforms = ["linux-64", "linux-aarch64"]
 
 [feature.rerun-prerelease.pypi-dependencies]
-rerun-sdk = { version = "==0.36.0a1+dev", extras = [
+rerun-sdk = { version = "==0.36.2", extras = [
     "datafusion",
     "dataloader",
 ] }
-
-[feature.rerun-prerelease.pypi-options]
-index-url = "https://pypi.org/simple"
-find-links = [{ url = "https://build.rerun.io/commit/4265652/wheels/" }]
-prerelease-mode = "allow"
 
 
 # ─── CUDA 13.0 feature (shared across all GPU envs) ─────────────────────────
@@ -796,7 +791,7 @@ scipy = "*"
 [feature.mv-api-catalog-register-mac.pypi-dependencies]
 tyro = ">=0.9.1,<0.10"
 simplecv = { path = "packages/simplecv", editable = true }
-rerun-sdk = { version = "==0.35.0", extras = ["datafusion"] }
+rerun-sdk = { version = "==0.36.2", extras = ["datafusion"] }
 
 [feature.mv-api-catalog-register-mac.pypi-options]
 index-url = "https://pypi.org/simple"
@@ -1625,7 +1620,7 @@ xorg-libxrandr = "*"
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
 lpips = ">=0.1.4,<1"
 plyfile = ">=1.1,<2"
-rerun-sdk = "==0.35.0"
+rerun-sdk = "==0.36.2"
 simplecv = { path = "packages/simplecv", editable = true }
 
 [feature.gsplat-rust-renderer.activation.env]
@@ -1781,7 +1776,7 @@ depends-on = [
     "_gsplat-rust-renderer-download-nerfbaselines-data-lego",
 ]
 cwd = "packages/gsplat-rust-renderer"
-description = "Train Lego for 7k steps while Rerun 0.35.0 replays Brush eval pairs, metrics, cameras, and eight retained snapshots"
+description = "Train Lego for 7k steps while Rerun 0.36.2 replays Brush eval pairs, metrics, cameras, and eight retained snapshots"
 
 [feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-build-viewer]
 cmd = "cargo build --release --bin gsplat-rust-renderer"

@@ -910,7 +910,7 @@ impl GaussianRenderer {
                     };
 
                     if mapped_ok {
-                        let bytes = slot.buffer.slice(..).get_mapped_range();
+                        let bytes = slot.buffer.slice(..).get_mapped_range().expect("readback buffer mapped");
                         let words = bytemuck::cast_slice::<u8, u32>(&bytes);
                         // The totals buffer keeps a legacy DrawIndirect-shaped
                         // layout: word[0] is an unused legacy quad vertex count

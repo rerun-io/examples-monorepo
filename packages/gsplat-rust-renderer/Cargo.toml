@@ -53,30 +53,30 @@ ply-rs = "0.1"
 pollster = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-wgpu = "=29.0.3"
+wgpu = "=30.0.0"
 
 # ── Viewer-only deps (behind "viewer" feature flag) ───────────────────
-# Published Rerun 0.35.0 crates from crates.io — reproducible from a clean
+# Published Rerun 0.36.2 crates from crates.io — reproducible from a clean
 # checkout on any machine.  Rerun 0.34.x-0.35.x use egui/eframe 0.35, so the headless
 # kittest harness must stay on the same egui family as re_viewer.
-egui_kittest = { version = "0.35.0", features = ["wgpu", "eframe"], optional = true }
+egui_kittest = { version = "0.36.1", features = ["wgpu", "eframe"], optional = true }
 # `half::f16` decode for the `SphericalHarmonics3` wire component (viewer only).
 # `bytemuck` feature makes `f16: Pod` so `[f16; 45]` slices out of Arrow.
 half = { version = "2.7", features = ["bytemuck"], optional = true }
-re_byte_size = { version = "=0.35.0", optional = true }
-re_crash_handler = { version = "=0.35.0", optional = true }
-re_grpc_server = { version = "=0.35.0", optional = true }
-re_log_channel = { version = "=0.35.0", optional = true }
-re_log_encoding = { version = "=0.35.0", optional = true }
-re_log = { version = "=0.35.0", optional = true }
-re_log_types = { version = "=0.35.0", optional = true }
-re_query = { version = "=0.35.0", optional = true }
-re_renderer = { version = "=0.35.0", optional = true }
-re_sdk = { version = "=0.35.0", optional = true }
-re_sdk_types = { version = "=0.35.0", optional = true }
-re_view = { version = "=0.35.0", optional = true }
-re_view_spatial = { version = "=0.35.0", optional = true }
-re_viewer = { version = "=0.35.0", optional = true }
-re_viewer_context = { version = "=0.35.0", optional = true }
-rerun = { version = "=0.35.0", features = ["native_viewer"], optional = true }
+re_byte_size = { version = "=0.36.2", optional = true }
+re_crash_handler = { version = "=0.36.2", optional = true }
+re_grpc_server = { version = "=0.36.2", optional = true }
+re_log_channel = { version = "=0.36.2", optional = true }
+re_log_encoding = { version = "=0.36.2", optional = true }
+re_log = { version = "=0.36.2", optional = true }
+re_log_types = { version = "=0.36.2", optional = true }
+re_query = { version = "=0.36.2", optional = true }
+re_renderer = { version = "=0.36.2", optional = true }
+re_sdk = { version = "=0.36.2", optional = true }
+re_sdk_types = { version = "=0.36.2", optional = true }
+re_view = { version = "=0.36.2", optional = true }
+re_view_spatial = { version = "=0.36.2", optional = true }
+re_viewer = { version = "=0.36.2", optional = true }
+re_viewer_context = { version = "=0.36.2", optional = true }
+rerun = { version = "=0.36.2", features = ["native_viewer"], optional = true }
 tokio = { version = "1.50", features = ["macros", "rt-multi-thread"], optional = true }
