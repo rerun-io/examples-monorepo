@@ -60,15 +60,19 @@ def video_height(video_path: Path) -> int | None:
     when the file cannot be probed (corrupt, empty, or ffprobe missing)."""
     try:
         probe = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=height", "-of", "csv=p=0", str(video_path)],
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=height", "-of", "default=nw=1:nk=1", str(video_path)],
             capture_output=True,
             text=True,
             check=False,
         )
     except FileNotFoundError:
         return None
-    out: str = probe.stdout.strip()
-    return int(out.splitlines()[0]) if probe.returncode == 0 and out else None
+    if probe.returncode != 0 or not probe.stdout.strip():
+        return None
+    # Some streams make ffprobe's writers emit trailing separators ("2560,"), so
+    # keep only the leading digits of the first line.
+    first: str = probe.stdout.strip().splitlines()[0].strip().rstrip(",")
+    return int(first) if first.isdigit() else None
 
 
 def group_page_size(videos: list[Path]) -> int:
