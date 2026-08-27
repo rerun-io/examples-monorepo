@@ -70,21 +70,24 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
     def convert(self, identity: SequenceIdentity, source: SourceT, *, force: bool) -> Path:
         """Write the base-layer rrd for one discovered sequence and return its path."""
 
+    @abstractmethod
     def default_blueprint(self) -> rrb.Blueprint | None:
         """Dataset-wide default blueprint, registered on the catalog dataset.
 
         Per-recording blueprints are embedded at convert; this is the "dataset
-        default at register" half of the design. ``None`` means the dataset has
-        no sensible corpus-wide layout.
+        default at register" half of the design. Every dataset must decide this
+        explicitly — return ``None`` only when the corpus genuinely has no
+        derivable layout (e.g. it is empty), never as a default.
         """
-        return None
 
+    @abstractmethod
     def table_blueprint(self) -> rrb.Blueprint | None:
         """Lightweight segment-table preview card, registered with ``segment_table=True``.
 
         The viewer renders every visible dataset row through this blueprint at
         once ("Table cards and blueprints" experimental setting), so it must
         stay cheap — cards decode exactly one stream (the front-stereo pane);
-        everything else is excluded rather than hidden. ``None`` skips it.
+        everything else is excluded rather than hidden. Mandatory for the same
+        reason: without it, table cards fall back to viewer heuristics that
+        decode every stream of every visible row.
         """
-        return None
