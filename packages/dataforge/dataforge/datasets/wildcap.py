@@ -44,6 +44,12 @@ from dataforge.logging_toolkit import log_rig_node, log_video_stream
 EGO_RIG_NAME: str = "ego"
 """Device label of the single moving rig; the raw tree names no device."""
 
+DEFAULT_EXO_CAMERAS: int = 4
+"""Exo cameras in the modal self-collected capture (four static phones)."""
+
+DEFAULT_EGO_STREAMS: int = 3
+"""Ego streams in the modal self-collected capture (the OAK's left/rgb/right)."""
+
 
 @dataclass
 class WildcapConfig(DataforgeDatasetConfig):
@@ -85,28 +91,44 @@ def group_videos(capture_dir: Path, group: str) -> list[Path]:
     return videos
 
 
-def build_blueprint(exo: list[Path], ego: list[Path]) -> rrb.Blueprint:
-    """Default layout: the ego cameras over an exo row — SelfCap's layout minus
-    the 3D scene and IMU strip, which would both be empty here.
+def build_blueprint(exo: list[str], ego: list[str]) -> rrb.Blueprint:
+    """Ego cameras over an exo row — SelfCap's layout minus the 3D scene and
+    IMU strip, which would both be empty here.
 
     Args:
-        exo: Exo mp4s in stem order; mp4 ``N`` is rig ``N``, camera 0.
-        ego: Ego mp4s in stem order; all on rig ``len(exo)`` as camera 0..
+        exo: Pane label per exo camera; label ``N`` is rig ``N``, camera 0.
+        ego: Pane label per ego stream, all on rig ``len(exo)`` as camera 0..
 
     Returns:
-        The blueprint embedded in every WildCap base-layer rrd.
+        The blueprint embedded at convert (real device names) and registered as
+        the dataset default (index labels, see ``default_blueprint``).
     """
     def view(name: str, rig: int, cam: int) -> rrb.Spatial2DView:
         return rrb.Spatial2DView(name=name, origin=schema.pinhole_path(rig, cam), contents=f"{schema.pinhole_path(rig, cam)}/**")
 
-    ego_row: list[rrb.Spatial2DView] = [view(f"ego {video_path.stem}", len(exo), cam) for cam, video_path in enumerate(ego)]
-    exo_row: list[rrb.Spatial2DView] = [view(video_path.stem, rig, 0) for rig, video_path in enumerate(exo)]
+    ego_row: list[rrb.Spatial2DView] = [view(name, len(exo), cam) for cam, name in enumerate(ego)]
+    exo_row: list[rrb.Spatial2DView] = [view(name, rig, 0) for rig, name in enumerate(exo)]
     rows: list[rrb.Container] = [rrb.Horizontal(*views, name=name) for name, views in (("Ego", ego_row), ("Exo", exo_row)) if views]
     return rrb.Blueprint(rrb.Vertical(*rows), collapse_panels=True)
 
 
 class WildcapDataset(DataforgeDataset[WildcapConfig, Path]):
     """Converts bare exo/ego mp4 captures into exoego:v2 base-layer recordings."""
+
+    def default_blueprint(self) -> rrb.Blueprint:
+        """Corpus-wide layout for the modal self-collected capture.
+
+        Device names vary per capture, so the dataset default labels panes by
+        index; the per-recording blueprint embedded at convert uses real names.
+        """
+        return build_blueprint([f"exo {rig}" for rig in range(DEFAULT_EXO_CAMERAS)], [f"ego {cam}" for cam in range(DEFAULT_EGO_STREAMS)])
+
+    def table_blueprint(self) -> rrb.Blueprint:
+        """Cheap preview card: the first exo camera's video, nothing else decoded."""
+        return rrb.Blueprint(
+            rrb.Spatial2DView(name="exo 0", origin=schema.pinhole_path(0, 0), contents=f"{schema.pinhole_path(0, 0)}/**"),
+            collapse_panels=True,
+        )
 
     def download(self) -> None:
         """Verify the local tree; WildCap is user-assembled and has no upstream fetch."""
@@ -144,7 +166,7 @@ class WildcapDataset(DataforgeDataset[WildcapConfig, Path]):
             target,
             application_id="dataforge",
             recording_id=identity.recording_id,
-            default_blueprint=build_blueprint(exo, ego),
+            default_blueprint=build_blueprint([video_path.stem for video_path in exo], [f"ego {video_path.stem}" for video_path in ego]),
         ) as recording:
             num_frames: int = 0
             for rig, video_path in enumerate(exo):

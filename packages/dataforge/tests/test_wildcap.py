@@ -88,5 +88,7 @@ def test_group_videos_skips_mov_files_and_accepts_uppercase_mp4(tmp_path: Path, 
     assert "IMG_0078.MOV — Rerun does not support .mov" in capsys.readouterr().out
 
 
-def test_default_blueprint_is_none_because_camera_counts_vary() -> None:
-    assert WildcapConfig().setup().default_blueprint() is None
+def test_dataset_blueprints_exist_for_the_modal_capture_shape() -> None:
+    dataset = WildcapConfig().setup()
+    assert dataset.default_blueprint() is not None
+    assert dataset.table_blueprint() is not None
