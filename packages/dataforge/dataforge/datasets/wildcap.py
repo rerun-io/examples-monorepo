@@ -31,6 +31,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import ClassVar
 
 import av
 import rerun as rr
@@ -84,6 +85,9 @@ class WildcapConfig(DataforgeDatasetConfig):
     captures), not more segments in an existing dataset.
     """
 
+    command: ClassVar[str] = "wildcap"
+    """One subcommand for every wildcap corpus; ``--corpus`` picks the dataset."""
+
     _target: type = field(default_factory=lambda: WildcapDataset)
     """Dataset class instantiated by ``setup()``."""
     corpus: str = "selfcollected"
@@ -93,10 +97,9 @@ class WildcapConfig(DataforgeDatasetConfig):
     Pair it with ``corpus``: ``--corpus mamma32 --root data/raw/wildcap-mamma32``."""
 
     @property
-    # pyrefly: ignore[bad-override]  # the ClassVar contract holds for fixed datasets; wildcap's name is per-corpus by design
     def name(self) -> str:
         """Catalog dataset name and identity ``dataset`` part: ``wildcap-<corpus>``."""
-        return f"wildcap-{self.corpus}"
+        return f"{self.command}-{self.corpus}"
 
 
 def group_videos(capture_dir: Path, group: str) -> list[Path]:

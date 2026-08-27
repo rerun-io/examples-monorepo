@@ -223,7 +223,7 @@ class EpisodePlan:
 class SelfcapConfig(DataforgeDatasetConfig):
     """Self-collected exo/ego/Quest captures, cut into per-task episodes."""
 
-    name: ClassVar[str] = "selfcap"
+    command: ClassVar[str] = "selfcap"
     """Registry key, catalog dataset name, and identity ``dataset`` part."""
 
     _target: type = field(default_factory=lambda: SelfcapDataset)

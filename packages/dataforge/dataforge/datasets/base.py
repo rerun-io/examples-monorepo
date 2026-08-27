@@ -28,12 +28,20 @@ from dataforge.identity import SequenceIdentity
 class DataforgeDatasetConfig:
     """Base config for a dataforge dataset; ``setup()`` builds the dataset."""
 
-    name: ClassVar[str]
-    """Registry key of the dataset: the CLI subcommand, the catalog dataset, and
-    the ``dataset`` part of every ``SequenceIdentity`` it produces."""
+    command: ClassVar[str]
+    """CLI subcommand of the dataset, and its key in the registry."""
 
     _target: type
     """Dataset class instantiated by ``setup()``."""
+
+    @property
+    def name(self) -> str:
+        """Catalog dataset name and the ``dataset`` part of every ``SequenceIdentity``.
+
+        The command itself for a fixed dataset; a dataset that serves many
+        corpora from one command (wildcap) derives a per-instance name.
+        """
+        return self.command
 
     def setup(self) -> DataforgeDataset:
         """Instantiate the dataset this config describes."""
