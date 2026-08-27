@@ -31,6 +31,7 @@ impl GpuContext {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
             force_fallback_adapter: false,
+            ..Default::default()
         }))
         .map_err(|e| anyhow::anyhow!("No GPU adapter found: {e}"))?;
 
