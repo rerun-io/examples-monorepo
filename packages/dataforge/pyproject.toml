@@ -28,6 +28,8 @@ ignore = [
 
 [tool.vulture]
 paths = ["dataforge", "tests"]
+# Contract constant consumed by the robocap converter (next PR in the stack).
+ignore_names = ["DATAFORGE_SCHEMA_VERSION"]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true
 min_confidence = 60
