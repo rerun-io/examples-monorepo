@@ -10,7 +10,7 @@ from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
 
 from dataforge import paths, writing
 from dataforge.datasets import AnnotatedDatasetUnion, RobocapConfig
-from dataforge.datasets.base import DataforgeDatasetConfig
+from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 
 
 @dataclass
@@ -40,11 +40,18 @@ def main(config: Config) -> None:
         on_duplicate=OnDuplicateSegmentLayer.SKIP,
     ).wait()
 
-    blueprint: rrb.Blueprint | None = dataset_config.setup().default_blueprint()
+    dataforge_dataset: DataforgeDataset = dataset_config.setup()
+    # A re-register must never truncate an .rbl that a live catalog server still holds open.
+    blueprint: rrb.Blueprint | None = dataforge_dataset.default_blueprint()
     if blueprint is not None:
-        blueprint_path: Path = paths.output_root() / "blueprints" / f"{name}.rbl"
-        # A re-register must never truncate the .rbl a live catalog server still holds open.
+        blueprint_path: Path = paths.blueprint_path(paths.output_root(), name)
         with writing.atomic_write(blueprint_path) as temp_path:
             blueprint.save(name, str(temp_path))
         dataset.register_blueprint(blueprint_path.resolve().as_uri(), set_default=True)
+    table_blueprint: rrb.Blueprint | None = dataforge_dataset.table_blueprint()
+    if table_blueprint is not None:
+        table_path: Path = paths.blueprint_path(paths.output_root(), name, segment_table=True)
+        with writing.atomic_write(table_path) as temp_path:
+            table_blueprint.save(name, str(temp_path))
+        dataset.register_blueprint(table_path.resolve().as_uri(), segment_table=True)
     print(f"registered {len(rrd_paths)} {paths.BASE_LAYER}-layer rrds into '{name}' at {config.catalog_url}")

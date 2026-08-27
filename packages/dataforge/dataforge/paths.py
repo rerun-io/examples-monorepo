@@ -5,6 +5,7 @@ pixi tasks run with ``cwd = packages/dataforge``):
 
     data/raw/<dataset>/...            upstream layout, untouched
     data/dataforge/rrd/<layer>/<recording_id>.rrd
+    data/dataforge/rrd/blueprints/<name>[-table].rbl
 """
 
 from __future__ import annotations
@@ -31,3 +32,8 @@ def raw_root() -> Path:
 def rrd_path(root: Path, *, layer: str, identity: SequenceIdentity) -> Path:
     """Layer-major rrd location: ``<root>/<layer>/<recording_id>.rrd``."""
     return root / layer / f"{identity.recording_id}.rrd"
+
+
+def blueprint_path(root: Path, name: str, *, segment_table: bool = False) -> Path:
+    """Blueprint location: ``<root>/blueprints/<name>[-table].rbl``."""
+    return root / "blueprints" / f"{name}{'-table' if segment_table else ''}.rbl"

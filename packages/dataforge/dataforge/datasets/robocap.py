@@ -12,7 +12,9 @@ gap at a roll boundary is ~30 ms). The sequence unit is therefore the
 **session**, and ``convert`` merges all of its segments into one recording —
 a pure remux per segment, no re-encoding, joined on the shared device clock.
 Each segment's video starts with its own IDR frame, so the viewer's decoder
-resets cleanly at every boundary.
+resets cleanly at every boundary. Converted rrds span 16 MB to 22.7 GB. Both
+``should_skip`` and mid-write failure are all-or-nothing at session granularity;
+that tradeoff is accepted for v1 and should be revisited if resumability matters.
 
 Clocks. Both sensors share one nanosecond device clock (boot-relative, NOT a
 Unix epoch — values sit around tens of seconds), offset by a fixed constant:
@@ -193,13 +195,30 @@ def video_epoch_ns(video_path: Path) -> int:
     return int(comment) * 1_000
 
 
+def follow_eye_controls() -> rrb.EyeControls3D:
+    """First-person eye controls aligned with RoboCap's rig frame."""
+    # EyeControls3D is marked unstable by the SDK; re-validate this factory on Rerun bumps.
+    return rrb.EyeControls3D(
+        kind=rrb.Eye3DKind.FirstPerson,
+        # Rig-frame coordinates: the dev0 IMU frame's -Z is the wearer's up
+        # (the cap mesh alignment maps scan-up there).
+        position=(0.8, -0.8, -0.6),
+        # The rig origin coincides with the front-stereo cameras (left_front is
+        # ~4 cm away), so this lines the view up with where the wearer faces.
+        look_target=(0.0, 0.0, 0.0),
+        eye_up=(0.0, 0.0, -1.0),
+        spin_speed=0.0,
+    )
+
+
 def build_blueprint(camera_names: list[str]) -> rrb.Blueprint:
     """Default layout: 3D rig + a grid of camera panes over gyro/accel plots.
 
     Mirrors basalt's ``basalt_vio_blueprint.py`` layout, on exoego:v2 paths.
 
     Args:
-        camera_names: Human camera labels in ``cam_00..cam_NN`` order.
+        camera_names: Full canonical camera labels in ``cam_00..cam_NN`` order;
+            callers pass ``list(CAMERA_DISPLAY_ORDER)`` so panes stay stable.
 
     Returns:
         The blueprint embedded in every RoboCap base-layer rrd.
@@ -212,8 +231,40 @@ def build_blueprint(camera_names: list[str]) -> rrb.Blueprint:
     return rrb.Blueprint(
         rrb.Vertical(
             rrb.Horizontal(
-                rrb.Spatial3DView(name="Rig", origin="/", line_grid=True),
-                rrb.Grid(*camera_views, grid_columns=3, name="Synchronized cameras"),
+                rrb.Vertical(
+                    rrb.Spatial3DView(
+                        name="Rig",
+                        origin="/",
+                        line_grid=True,
+                        # The overview shows the whole SLAM path, while its trail stays hidden.
+                        # Overrides on entities a base-only recording lacks are simply inert.
+                        overrides={schema.trail_path("basalt"): rrb.EntityBehavior(visible=False)},
+                    ),
+                    # Follow-cam (rerun-io/eye_control_example pattern): the view's
+                    # origin IS the rig frame, so a fixed first-person eye in that
+                    # frame rides the rig. Inert until a pose layer animates rig_00.
+                    rrb.Spatial3DView(
+                        name="Follow",
+                        origin=schema.rig_path(RIG),
+                        contents="/**",
+                        line_grid=True,
+                        # The follow view hides the full path and shows only a 10 s
+                        # cursor-relative trail. The window is a viewer setting.
+                        overrides={
+                            schema.trajectory_path("basalt"): rrb.EntityBehavior(visible=False),
+                            schema.trail_path("basalt"): rrb.VisibleTimeRanges(
+                                rrb.VisibleTimeRange(
+                                    "video_time",
+                                    start=rrb.TimeRangeBoundary.cursor_relative(seconds=-10.0),
+                                    end=rrb.TimeRangeBoundary.cursor_relative(),
+                                )
+                            ),
+                        },
+                        eye_controls=follow_eye_controls(),
+                    ),
+                ),
+                rrb.Grid(*camera_views, grid_columns=2, name="Synchronized cameras"),
+                column_shares=[3, 2],
             ),
             rrb.Horizontal(
                 rrb.TimeSeriesView(
@@ -231,16 +282,53 @@ def build_blueprint(camera_names: list[str]) -> rrb.Blueprint:
             ),
             row_shares=[3, 1],
         ),
+        rrb.TimePanel(timeline="video_time"),
         collapse_panels=True,
     )
 
 
+def build_table_blueprint(camera_names: list[str]) -> rrb.Blueprint:
+    """Segment-table preview card: follow-framed 3D (full trajectory, all frusta,
+    NO video textures) beside the single front-stereo video pane.
+
+    Cards decode exactly one stream (the front-stereo pane); everything else is
+    excluded rather than hidden. Every visible table row renders through this at
+    once (ARKitScenes profiled ~15 cards saturating 12 cores when they decoded all).
+
+    Args:
+        camera_names: Full canonical camera labels in ``cam_00..cam_NN`` order.
+    """
+    video_exclusions: list[str] = [f"- {schema.video_path(RIG, index)}/**" for index in range(len(camera_names))]
+    return rrb.Blueprint(
+        rrb.Horizontal(
+            rrb.Spatial3DView(
+                name="Follow",
+                origin=schema.rig_path(RIG),
+                contents=["/**", *video_exclusions, f"- {schema.trail_path('basalt')}/**"],
+                line_grid=True,
+                eye_controls=follow_eye_controls(),
+            ),
+            rrb.Spatial2DView(
+                name=CAMERA_DISPLAY_ORDER[0],
+                origin=schema.pinhole_path(RIG, 0),
+                contents=f"{schema.pinhole_path(RIG, 0)}/**",
+            ),
+            column_shares=[3, 2],
+        ),
+        rrb.TimePanel(timeline="video_time"),
+    )
+
+
 class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
-    """Converts RoboCap segments into exoego:v2 base-layer recordings."""
+    """Converts RoboCap sessions into exoego:v2 base-layer recordings."""
 
     def default_blueprint(self) -> rrb.Blueprint:
         """Corpus-wide layout: every RoboCap rig has the same six cameras."""
         return build_blueprint(list(CAMERA_DISPLAY_ORDER))
+
+    def table_blueprint(self) -> rrb.Blueprint:
+        """Cheap preview card for the dataset's segment table."""
+        return build_table_blueprint(list(CAMERA_DISPLAY_ORDER))
 
     # ── raw-tree discovery ────────────────────────────────────────────────
     def session_dirs(self) -> list[Path]:
@@ -252,9 +340,17 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
         missing: list[str] = transports.local_verify(self.config.root, required=["*_session_*", "0factory-calibration-*"])
         if missing:
             raise FileNotFoundError(f"RoboCap corpus at {self.config.root} is missing: {', '.join(missing)}")
+        session_dirs: list[Path] = self.session_dirs()
         discovered: list[tuple[SequenceIdentity, RobocapSource]] = self.discover()
         num_segments: int = sum(len(source.segments) for _, source in discovered)
-        print(f"robocap: {self.config.root} — {len(discovered)} sessions ({num_segments} segments), calibration present")
+        print(
+            f"robocap: {self.config.root} — {len(session_dirs)} session dirs, {len(discovered)} with videos "
+            f"({num_segments} segments), calibration present"
+        )
+        discovered_dirs: set[Path] = {source.session_dir for _, source in discovered}
+        video_less_session_dirs: list[Path] = sorted(set(session_dirs) - discovered_dirs)
+        if video_less_session_dirs:
+            print(f"  warning: session directories contain no videos: {', '.join(path.name for path in video_less_session_dirs)}")
 
     def discover(self) -> list[tuple[SequenceIdentity, RobocapSource]]:
         """Pair every ``(device, session)`` on disk with its directory and the segments inside."""
@@ -271,7 +367,9 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
                     found.setdefault((device, session), (session_dir, set()))[1].add(int(video_match["segment"]))
         return [
             (
-                SequenceIdentity(dataset=self.config.name, parts=(device, f"s{session}")),
+                # Zero-padded so lexicographic ordering (catalog tables, file
+                # listings) matches capture order for any conceivable corpus size.
+                SequenceIdentity(dataset=self.config.name, parts=(device, f"s{session:08d}")),
                 RobocapSource(session_dir=session_dir, device=device, session=session, segments=tuple(sorted(segments))),
             )
             for (device, session), (session_dir, segments) in sorted(found.items())
@@ -337,14 +435,18 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
             name for name in CAMERA_DISPLAY_ORDER if name in cameras and any(name in epochs for epochs in segment_epochs.values())
         ]
         if not camera_names:
-            raise FileNotFoundError(f"No calibrated, timestamped cameras for {identity.sequence_key} in {source.session_dir}")
+            raise ValueError(
+                f"no camera stream in {source.session_dir} carries a comment epoch tag "
+                f"({len(cameras)} calibrated cameras, {len(source.segments)} segments scanned)"
+            )
         segment_starts_ns: dict[int, int] = {segment: min(epochs.values()) for segment, epochs in segment_epochs.items() if epochs}
+        ordered_segment_starts_ns: list[int] = [segment_starts_ns[segment] for segment in sorted(segment_starts_ns)]
 
         with writing.atomic_recording(
             target,
             application_id="dataforge",
             recording_id=identity.recording_id,
-            default_blueprint=build_blueprint(camera_names),
+            default_blueprint=build_blueprint(list(CAMERA_DISPLAY_ORDER)),
         ) as recording:
             # Deliberately NO ViewCoordinates at "/": the pose layer owns the root
             # ViewCoordinates (its world is gravity-aligned Z-up).
@@ -352,7 +454,8 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
             self._log_mesh(recording)
 
             frames_per_camera: dict[str, int] = dict.fromkeys(camera_names, 0)
-            for index, cam_name in enumerate(camera_names):
+            for cam_name in camera_names:
+                index: int = CAMERA_DISPLAY_ORDER.index(cam_name)
                 rr.log(
                     schema.cam_path(RIG, index),
                     rr.AnyValues(name=cam_name, kind="grayscale"),
@@ -387,7 +490,8 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
                 num_frames=max(frames_per_camera.values()),
                 start_time_ns=min(segment_starts_ns.values()),
                 num_segments=len(source.segments),
-                segment_starts_ns=", ".join(str(segment_starts_ns[segment]) for segment in sorted(segment_starts_ns)),
+                num_timed_segments=len(segment_starts_ns),
+                segment_starts_ns=ordered_segment_starts_ns,
             )
 
         print(f"done {identity.sequence_key} → {target} ({len(camera_names)} cameras, {len(source.segments)} segments, {max(frames_per_camera.values())} frames)")

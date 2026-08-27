@@ -78,3 +78,13 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
         no sensible corpus-wide layout.
         """
         return None
+
+    def table_blueprint(self) -> rrb.Blueprint | None:
+        """Lightweight segment-table preview card, registered with ``segment_table=True``.
+
+        The viewer renders every visible dataset row through this blueprint at
+        once ("Table cards and blueprints" experimental setting), so it must
+        stay cheap — cards decode exactly one stream (the front-stereo pane);
+        everything else is excluded rather than hidden. ``None`` skips it.
+        """
+        return None

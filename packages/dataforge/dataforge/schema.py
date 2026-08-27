@@ -60,6 +60,21 @@ def accel_path(rig: int, imu: int) -> str:
     return f"{imu_path(rig, imu)}/accel"
 
 
+def run_path(source: str) -> str:
+    """``/world/runs/<source>`` — derived outputs from one processing source."""
+    return f"/world/runs/{source}"
+
+
+def trajectory_path(source: str) -> str:
+    """``.../runs/<source>/trajectory`` — the source's full rig trajectory."""
+    return f"{run_path(source)}/trajectory"
+
+
+def trail_path(source: str) -> str:
+    """``.../runs/<source>/trail`` — the source's cursor-relative trajectory trail."""
+    return f"{run_path(source)}/trail"
+
+
 def capture_property(name: str) -> str:
     """``property:capture:<name>`` — recording-level capture metadata key."""
     return f"property:capture:{name}"
