@@ -50,6 +50,10 @@ DEFAULT_EXO_CAMERAS: int = 4
 DEFAULT_EGO_STREAMS: int = 3
 """Ego streams in the modal self-collected capture (the OAK's left/rgb/right)."""
 
+MAX_ROW_PANES: int = 6
+"""Cameras shown side by side before a row's panes become unreadable slivers
+(a 30-camera capture would get ~60px per pane); past this the row becomes tabs."""
+
 
 @dataclass
 class WildcapConfig(DataforgeDatasetConfig):
@@ -108,7 +112,11 @@ def build_blueprint(exo: list[str], ego: list[str]) -> rrb.Blueprint:
 
     ego_row: list[rrb.Spatial2DView] = [view(name, len(exo), cam) for cam, name in enumerate(ego)]
     exo_row: list[rrb.Spatial2DView] = [view(name, rig, 0) for rig, name in enumerate(exo)]
-    rows: list[rrb.Container] = [rrb.Horizontal(*views, name=name) for name, views in (("Ego", ego_row), ("Exo", exo_row)) if views]
+    rows: list[rrb.Container] = [
+        rrb.Horizontal(*views, name=name) if len(views) <= MAX_ROW_PANES else rrb.Tabs(*views, name=name)
+        for name, views in (("Ego", ego_row), ("Exo", exo_row))
+        if views
+    ]
     return rrb.Blueprint(rrb.Vertical(*rows), collapse_panels=True)
 
 
