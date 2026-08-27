@@ -13,9 +13,9 @@ and mamma. It splits into two layers (vision-rt's crate layering, in Python):
   :mod:`trtkit.trt_builder` (build + cache key + manifest) and
   :mod:`trtkit.onnx_graph` (generic ONNX graph surgery).
 
-ONNX files are the portable artifacts; engines are machine-locked (TensorRT
-version + compute capability), never committed, and rebuilt from ONNX on each
-machine. Model-specific concerns — export wrappers, checkpoint resolution,
+ONNX files are the universally portable artifacts. TensorRT engines remain
+version-specific and are device-specific unless explicitly built for compatible
+hardware. Model-specific concerns — export wrappers, checkpoint resolution,
 pre/postprocessing — stay in the model packages.
 """
 
@@ -40,11 +40,20 @@ from trtkit.onnx_export import export_onnx, sweep_stale_onnx_exports
 from trtkit.onnx_graph import onnx_static_batch_size
 from trtkit.tensorrt_runtime import TensorRtRuntime
 from trtkit.torch_runtime import TorchRuntime
-from trtkit.trt_builder import DEFAULT_TRT_CACHE_DIR, TrtBuildConfig, build_engine, cached_engine_path, ensure_engine, onnx_content_hash
+from trtkit.trt_builder import (
+    DEFAULT_TRT_CACHE_DIR,
+    HardwareCompatibility,
+    TrtBuildConfig,
+    build_engine,
+    cached_engine_path,
+    ensure_engine,
+    onnx_content_hash,
+)
 
 __all__ = (
     "BackendConfig",
     "DEFAULT_TRT_CACHE_DIR",
+    "HardwareCompatibility",
     "OnnxBackendConfig",
     "OnnxCudaRuntime",
     "OnnxOrTrtBackendConfig",

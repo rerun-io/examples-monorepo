@@ -1,8 +1,9 @@
 """TensorRT engine building and machine-local caching (the hub layer).
 
-Engines are never committed or downloaded: they are sm-/version-specific
-artifacts built once from a model's ONNX interchange file into a local cache
-directory, with a JSON manifest recording how each engine was produced.
+Device-specific engines stay machine-local. Engines built with an explicit
+hardware-compatibility level may be distributed to matching targets. Every
+plan remains TensorRT-version-specific, and a JSON manifest records how it was
+produced.
 
 When TensorRT miscompiles a graph whose fusion spans an input-derived
 reduction all the way to an output (garbage/NaN at every precision), mark the
@@ -16,7 +17,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, TypeAlias
 
 import torch
 from rich.console import Console
@@ -24,6 +25,9 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 DEFAULT_TRT_CACHE_DIR: Path = Path(os.environ.get("TRTKIT_TRT_CACHE", "~/.cache/trtkit/trt")).expanduser()
 """Machine-local engine cache; override with the ``TRTKIT_TRT_CACHE`` env var."""
+
+HardwareCompatibility: TypeAlias = Literal["none", "same_compute_capability"]
+"""TensorRT plan portability requested at build time."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +47,8 @@ class TrtBuildConfig:
     memory, not an upfront allocation."""
     builder_optimization_level: int = 3
     """TensorRT builder optimization level (0-5)."""
+    hardware_compatibility: HardwareCompatibility = "none"
+    """Plan portability: device-specific, or portable across GPUs with the same compute capability."""
     extra_output_patterns: tuple[str, ...] = ()
     """Mark every intermediate tensor whose name contains one of these substrings as
     an additional engine output. Materializing a tensor bars TensorRT from fusing it
@@ -81,9 +87,10 @@ def cached_engine_path(onnx_path: Path, config: TrtBuildConfig, *, cache_dir: Pa
         if config.extra_output_patterns
         else ""
     )
+    hardware_key: str = "_hcsamecc" if config.hardware_compatibility == "same_compute_capability" else ""
     name: str = (
         f"{onnx_path.stem}_b1-{config.opt_batch_size}-{config.max_batch_size}_{precision_key}"
-        f"_w{config.workspace_gib:g}o{config.builder_optimization_level}{extra_outputs_key}"
+        f"_w{config.workspace_gib:g}o{config.builder_optimization_level}{hardware_key}{extra_outputs_key}"
         f"_trt{trt.__version__}_sm{capability[0]}{capability[1]}_{onnx_hash}.engine"
     )
     return cache_dir / name
@@ -133,6 +140,8 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
     builder_config: Any = builder.create_builder_config()
     builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, int(config.workspace_gib * (1 << 30)))
     builder_config.builder_optimization_level = int(config.builder_optimization_level)
+    if config.hardware_compatibility == "same_compute_capability":
+        builder_config.hardware_compatibility_level = trt.HardwareCompatibilityLevel.SAME_COMPUTE_CAPABILITY
     if not config.allow_tf32:
         builder_config.clear_flag(trt.BuilderFlag.TF32)
     profile: Any = builder.create_optimization_profile()
@@ -178,14 +187,15 @@ def build_engine(onnx_path: Path, engine_path: Path, config: TrtBuildConfig, *, 
         "onnx_path": str(onnx_path),
         "onnx_sha256": onnx_sha256 or onnx_content_hash(onnx_path),
         "engine_path": str(engine_path),
-        "portable_engine": False,
-        "rebuild_from_onnx_on_target_machine": True,
+        "portable_engine": config.hardware_compatibility != "none",
+        "rebuild_from_onnx_on_target_machine": config.hardware_compatibility == "none",
         "max_batch_size": config.max_batch_size,
         "opt_batch_size": config.opt_batch_size,
         "strongly_typed": True,
         "allow_tf32": config.allow_tf32,
         "workspace_gib": config.workspace_gib,
         "builder_optimization_level": config.builder_optimization_level,
+        "hardware_compatibility": config.hardware_compatibility,
         "build_seconds": build_seconds,
         "tensorrt_version": str(trt.__version__),
         "cuda_device_name": torch.cuda.get_device_name(),

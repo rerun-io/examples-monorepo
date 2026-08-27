@@ -1,5 +1,9 @@
 """Contract, parity, and convention tests for batched MoGe v2 normals."""
 
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
@@ -7,6 +11,27 @@ from jaxtyping import Bool, Float32, UInt8
 from torch import Tensor
 
 requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+
+
+def test_trt_predictor_loads_prebuilt_engine_without_export(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A supplied engine bypasses ONNX export and TensorRT build work."""
+    import monopriors.models.surface_normal.moge_v2_trt as moge_v2_trt
+
+    class FakeRuntime:
+        def __init__(self, engine_path: Path) -> None:
+            self.engine_path: Path = engine_path
+
+    def fail_export(*args: object, **kwargs: object) -> Path:
+        raise AssertionError("prebuilt engine path must bypass ONNX export")
+
+    engine_path: Path = tmp_path / "moge.engine"
+    engine_path.write_bytes(b"engine")
+    monkeypatch.setattr(moge_v2_trt, "export_moge_v2_normal_onnx", fail_export)
+    monkeypatch.setitem(sys.modules, "trtkit.tensorrt_runtime", SimpleNamespace(TensorRtRuntime=FakeRuntime))
+
+    predictor: moge_v2_trt.MoGeV2TrtNormalPredictor = moge_v2_trt.MoGeV2TrtNormalPredictor(engine_path=engine_path)
+
+    assert predictor.runtime.engine_path == engine_path
 
 
 def _synthetic_rgb_batch(batch_size: int, image_hw: tuple[int, int]) -> UInt8[Tensor, "b h w 3"]:
