@@ -1,5 +1,6 @@
 """Select sharp ARKitScenes frames and publish a catalog layer."""
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeAlias
@@ -17,37 +18,38 @@ from arkitscenes_download.ingest.paths import (
     VIDEO_WIDE,
 )
 from arkitscenes_download.ingest.recording import atomic_recording
+from beartype.roar import BeartypeException
 from einops import rearrange
 from jaxtyping import Float32, UInt8
 from numpy import ndarray
-from rerun.catalog import DatasetEntry
-from rerun.experimental.dataloader import DataSource, Field, FixedRateSampling, NoShuffle, RerunIterableDataset
-from simplecv.rerun_dataloader import SegmentNvdecDecoder
+from rerun.catalog import CatalogClient, DatasetEntry
+from simplecv.rerun_dataloader import open_segment_decoder
 from torch import Tensor
-from torch.utils.data import DataLoader
+from torchcodec.decoders import VideoDecoder
 
-from gauss_surf.catalog import DEFAULT_CATALOG_URL, DEFAULT_DATASET_NAME, SegmentReader, register_layer
+from gauss_surf.catalog import DEFAULT_CATALOG_URL, DEFAULT_DATASET_NAME, connect_catalog, register_layer
 from gauss_surf.contracts import FRAME_SELECTION_LAYER, ULTRAWIDE_FPS, WIDE_FPS
 from gauss_surf.frame_selection import FrameScores, SelectionResult, TimedeltaNs, score_frames, select_ultrawide_frames, select_wide_frames
-
-FETCH_SIZE: int = 1024
-"""Samples fetched per catalog request."""
 
 ScoreArrays: TypeAlias = tuple[Float32[ndarray, "n"], Float32[ndarray, "n"]]
 
 
 @dataclass(frozen=True, slots=True)
 class Config:
-    """Configuration for one segment's frame-selection layer."""
+    """Configuration for one or many segments' frame-selection layers."""
 
-    video_id: str
-    """ARKitScenes segment identifier to score."""
+    video_id: str | None = None
+    """Single ARKitScenes segment identifier to score."""
+    video_ids_file: Path | None = None
+    """Newline-separated segment identifiers for batch mode; mutually exclusive with ``video_id``."""
     catalog_url: str = DEFAULT_CATALOG_URL
     """URL of the gauss-surf development catalog server."""
     dataset_name: str = DEFAULT_DATASET_NAME
     """Catalog dataset to read and update."""
     output_dir: Path = Path("data/frame_selection")
-    """Directory for generated per-segment frame-selection RRDs."""
+    """Directory for generated per-segment frame-selection RRDs (``<output_dir>/<video_id>.rrd``)."""
+    force: bool = False
+    """Regenerate and re-register segments whose output RRD already exists."""
     window_size: int = 6
     """Number of consecutive wide frames in each strict non-overlapping window."""
     min_chosen: int = 200
@@ -68,27 +70,6 @@ class CameraMeasurements:
     """Grayscale standard deviation per frame."""
 
 
-def _camera_dataset(
-    dataset: DatasetEntry,
-    video_id: str,
-    entity_path: str,
-    fps: float,
-    device: torch.device,
-) -> tuple[RerunIterableDataset, SegmentNvdecDecoder]:
-    """Build one natural-order dataset for one camera's video packets."""
-    decoder: SegmentNvdecDecoder = SegmentNvdecDecoder(dataset, entity_path, TIMELINE, device, int(fps))
-    fields: dict[str, Field] = {"video": Field(f"/{entity_path}:VideoStream:sample", decode=decoder)}
-    samples: RerunIterableDataset = RerunIterableDataset(
-        DataSource(dataset=dataset, segments=[video_id]),
-        index=TIMELINE,
-        fields=fields,
-        timeline_sampling=FixedRateSampling(rate_hz=fps),
-        shuffle_strategy=NoShuffle(),  # pyrefly: ignore  # unexpected-keyword — gauss-surf runs the 0.36 prerelease API
-        fetch_size=FETCH_SIZE,
-    )
-    return samples, decoder
-
-
 def _score_frame_batch(frames_hwc: list[UInt8[Tensor, "h w 3"]]) -> ScoreArrays:
     """Stack and score one same-resolution decoded frame batch."""
     frames_bhw3: UInt8[Tensor, "b h w 3"] = torch.stack(frames_hwc)
@@ -106,24 +87,29 @@ def _score_camera(
     device: torch.device,
     batch_size: int,
 ) -> CameraMeasurements:
-    """Decode and score every packet from one camera entity in natural order."""
+    """Decode and score every video packet from one camera entity in packet order.
+
+    The packet timeline itself drives iteration, so every packet is scored exactly
+    once and ``timestamps`` matches ``sharpness`` by construction — unlike the
+    previous fixed-rate sampling grid, whose latest-at resampling could duplicate
+    or skip packets whenever the stream's packet spacing was irregular.
+    """
     if batch_size < 1:
         raise ValueError("score_batch_size must be positive")
-    samples: RerunIterableDataset
-    decoder: SegmentNvdecDecoder
-    samples, decoder = _camera_dataset(dataset, video_id, entity_path, fps, device)
-    loader: DataLoader = DataLoader(samples, batch_size=None, num_workers=0)
+    timestamps_n: TimedeltaNs
+    decoder: VideoDecoder
+    timestamps_n, _samples, _keyframes, decoder = open_segment_decoder(dataset, video_id, entity_path, TIMELINE, device, int(fps))
+    if len(timestamps_n) == 0:
+        raise RuntimeError(f"{entity_path} has no video packets for segment {video_id}")
+    if np.any(np.diff(timestamps_n.astype(np.int64)) <= 0):
+        raise RuntimeError(f"{entity_path} packet timestamps are not strictly increasing for segment {video_id}")
+
     pending_frames_hwc: list[UInt8[Tensor, "h w 3"]] = []
     sharpness_parts: list[Float32[ndarray, "batch"]] = []
     texture_parts: list[Float32[ndarray, "batch"]] = []
-
-    row: dict[str, Tensor | None]
     with torch.inference_mode():
-        for row in loader:
-            video: Tensor | None = row["video"]
-            if video is None:
-                continue
-            frame_chw: UInt8[Tensor, "3 h w"] = video
+        for frame_index in range(len(timestamps_n)):
+            frame_chw: UInt8[Tensor, "3 h w"] = decoder.get_frame_at(frame_index).data
             frame_hwc: UInt8[Tensor, "h w 3"] = rearrange(frame_chw, "c h w -> h w c")  # pyrefly: ignore  # bad-argument-type — einops stub
             pending_frames_hwc.append(frame_hwc)
             if len(pending_frames_hwc) < batch_size:
@@ -137,16 +123,9 @@ def _score_camera(
             sharpness_parts.append(final_scores[0])
             texture_parts.append(final_scores[1])
 
-    if not sharpness_parts:
-        raise RuntimeError(f"{entity_path} yielded no decodable frames for segment {video_id}")
     sharpness_n: Float32[ndarray, "n_frames"] = np.concatenate(sharpness_parts).astype(np.float32, copy=False)
     texture_n: Float32[ndarray, "n_frames"] = np.concatenate(texture_parts).astype(np.float32, copy=False)
-    timestamps_n: TimedeltaNs = np.asarray(decoder.times, dtype="timedelta64[ns]")
-    if len(sharpness_n) != len(timestamps_n):
-        raise RuntimeError(
-            f"{entity_path} decoded {len(sharpness_n)} frames but exposed {len(timestamps_n)} packet timestamps; "
-            "the native-rate sampling grid is not one-to-one"
-        )
+    assert len(sharpness_n) == len(timestamps_n), f"{entity_path} scored {len(sharpness_n)} of {len(timestamps_n)} packets"
     return CameraMeasurements(timestamps=timestamps_n, sharpness=sharpness_n, texture=texture_n)
 
 
@@ -187,18 +166,15 @@ def _print_summary(camera_name: str, result: SelectionResult) -> None:
     )
 
 
-def main(config: Config) -> None:
-    """Score both cameras, publish an accepted selection RRD, and register it."""
-    if not torch.cuda.is_available():
-        raise SystemExit("frame selection requires a CUDA device for whole-segment NVDEC decoding")
-    reader: SegmentReader = SegmentReader.open(config.catalog_url, config.dataset_name, config.video_id)
-    reader.row()
-    dataset: DatasetEntry = reader.dataset
-    device: torch.device = torch.device("cuda")
+def process_segment(dataset: DatasetEntry, config: Config, video_id: str, device: torch.device) -> Path:
+    """Score both cameras of one segment, write its RRD, and register the layer.
 
+    Returns:
+        The written layer RRD path.
+    """
     wide_measurements: CameraMeasurements = _score_camera(
         dataset,
-        config.video_id,
+        video_id,
         VIDEO_WIDE,
         WIDE_FPS,
         device,
@@ -206,7 +182,7 @@ def main(config: Config) -> None:
     )
     ultrawide_measurements: CameraMeasurements = _score_camera(
         dataset,
-        config.video_id,
+        video_id,
         VIDEO_ULTRAWIDE,
         ULTRAWIDE_FPS,
         device,
@@ -225,13 +201,55 @@ def main(config: Config) -> None:
     _print_summary("wide", wide_result)
     _print_summary("ultrawide", ultrawide_result)
     if wide_result.rejected:
-        raise SystemExit(f"segment {config.video_id} rejected: {wide_result.rejection_reason}; no layer written")
+        raise RuntimeError(f"segment {video_id} rejected: {wide_result.rejection_reason}; no layer written")
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
-    rrd_path: Path = config.output_dir / f"{config.video_id}.rrd"
-    with atomic_recording(rrd_path, config.video_id, send_properties=False) as recording:
+    rrd_path: Path = config.output_dir / f"{video_id}.rrd"
+    with atomic_recording(rrd_path, video_id, send_properties=False) as recording:
         _send_camera_columns(recording, SHARPNESS_WIDE, FRAME_SELECTION_WIDE, wide_result)
         _send_camera_columns(recording, SHARPNESS_ULTRAWIDE, FRAME_SELECTION_ULTRAWIDE, ultrawide_result)
     register_layer(dataset, rrd_path, FRAME_SELECTION_LAYER)
-    print(f"rrd: {rrd_path}")
-    print(f"registered layer: {FRAME_SELECTION_LAYER}")
+    return rrd_path
+
+
+def main(config: Config) -> None:
+    """Run frame selection for one segment or a batch queue with skip-if-exists semantics."""
+    if (config.video_id is None) == (config.video_ids_file is None):
+        raise SystemExit("provide exactly one of --video-id or --video-ids-file")
+    if not torch.cuda.is_available():
+        raise SystemExit("frame selection requires a CUDA device for whole-segment NVDEC decoding")
+    if config.video_id is not None:
+        video_ids: list[str] = [config.video_id]
+    else:
+        assert config.video_ids_file is not None  # enforced by the exclusive-arg check above
+        video_ids = [line.strip() for line in config.video_ids_file.read_text().splitlines() if line.strip()]
+    client: CatalogClient = connect_catalog(config.catalog_url, config.dataset_name)
+    dataset: DatasetEntry = client.get_dataset(config.dataset_name)
+    device: torch.device = torch.device("cuda")
+
+    completed: int = 0
+    skipped: int = 0
+    failed: list[str] = []
+    for video_id in video_ids:
+        rrd_path: Path = config.output_dir / f"{video_id}.rrd"
+        if rrd_path.is_file() and not config.force:
+            skipped += 1
+            print(f"SKIP {video_id}: {rrd_path} exists (use --force to regenerate)", flush=True)
+            continue
+        start: float = time.perf_counter()
+        try:
+            process_segment(dataset, config, video_id, device)
+        except BeartypeException:
+            raise
+        except Exception as error:
+            failed.append(video_id)
+            print(f"FAIL {video_id}: {type(error).__name__}: {error}", flush=True)
+            if config.video_id is not None:
+                raise
+            continue
+        completed += 1
+        print(f"DONE {video_id}: {time.perf_counter() - start:.1f}s ({completed} done, {skipped} skipped, {len(failed)} failed)", flush=True)
+
+    print(f"frame-selection batch: {completed} done, {skipped} skipped, {len(failed)} failed of {len(video_ids)}")
+    if failed:
+        print("failed segments: " + ", ".join(failed))
