@@ -1,10 +1,18 @@
-"""RoboCap: 6-camera + 3-IMU capture rig → one exoego:v2 base-layer rrd per segment.
+"""RoboCap: 6-camera + 3-IMU capture rig → one exoego:v2 base-layer rrd per session.
 
 Raw layout on disk (already local; ``download`` only verifies it):
 
     <root>/0factory-calibration-<device>/imus_cam_*_extrinsic/*-camchain-imucam.yaml
     <root>/<device>_session_<S>/video_dev<D>_session<S>_segment<G>_<camname>.mp4
     <root>/<device>_session_<S>/IMUWriter_dev<0|1|2>_session<S>_segment<G>.db
+
+Sessions vs segments. The recorder rolls every stream to new files every
+~10 minutes; a *segment* is that storage artifact, not a semantic unit (the
+gap at a roll boundary is ~30 ms). The sequence unit is therefore the
+**session**, and ``convert`` merges all of its segments into one recording —
+a pure remux per segment, no re-encoding, joined on the shared device clock.
+Each segment's video starts with its own IDR frame, so the viewer's decoder
+resets cleanly at every boundary.
 
 Clocks. Both sensors share one nanosecond device clock (boot-relative, NOT a
 Unix epoch — values sit around tens of seconds), offset by a fixed constant:
@@ -17,7 +25,7 @@ therefore ``t_imu_ns - CAMERA_TO_IMU_OFFSET_NS``. Nothing is resampled: raw
 samples land at their native rate. ``video_time`` is deliberately a *duration*
 timeline — retagging it as ``timestamp`` would render the boot clock as
 1970-01-01T00:00:25. Segments recorded within one boot share the axis, which
-is what makes a future multi-segment session view line up for free.
+is exactly what makes the merged session line up without any retiming.
 
 Calibration comes from simplecv's RoboCap ego loader; the private helpers are
 imported deliberately (the donor is scheduled for deletion once the dataset
@@ -91,7 +99,7 @@ VIDEO_NAME_RE: re.Pattern[str] = re.compile(r"^video_dev(?P<device>\d+)_session(
 
 @dataclass(frozen=True, slots=True)
 class RobocapSource:
-    """One segment as discovery found it; ``convert`` needs nothing else from the tree."""
+    """One session as discovery found it; ``convert`` needs nothing else from the tree."""
 
     session_dir: Path
     """``<root>/<device>_session_<S>`` directory holding the videos and IMU dbs."""
@@ -99,8 +107,8 @@ class RobocapSource:
     """Capture-device id, which also names the factory calibration directory."""
     session: int
     """Session number ``S`` (part of every filename in the directory)."""
-    segment: int
-    """Segment number ``G`` within the session."""
+    segments: tuple[int, ...]
+    """Segment numbers present on disk, ascending; ``convert`` merges them all."""
 
 
 @dataclass
@@ -244,12 +252,13 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
         missing: list[str] = transports.local_verify(self.config.root, required=["*_session_*", "0factory-calibration-*"])
         if missing:
             raise FileNotFoundError(f"RoboCap corpus at {self.config.root} is missing: {', '.join(missing)}")
-        sessions: list[Path] = self.session_dirs()
-        print(f"robocap: {self.config.root} — {len(sessions)} sessions, {len(self.sequences())} segments, calibration present")
+        discovered: list[tuple[SequenceIdentity, RobocapSource]] = self.discover()
+        num_segments: int = sum(len(source.segments) for _, source in discovered)
+        print(f"robocap: {self.config.root} — {len(discovered)} sessions ({num_segments} segments), calibration present")
 
     def discover(self) -> list[tuple[SequenceIdentity, RobocapSource]]:
-        """Pair every ``(device, session, segment)`` triple on disk with its session directory."""
-        sources: dict[tuple[str, int, int], Path] = {}
+        """Pair every ``(device, session)`` on disk with its directory and the segments inside."""
+        found: dict[tuple[str, int], tuple[Path, set[int]]] = {}
         for session_dir in self.session_dirs():
             match: re.Match[str] | None = SESSION_DIR_RE.match(session_dir.name)
             if match is None:
@@ -259,13 +268,13 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
             for video_path in session_dir.glob(f"video_dev*_session{session}_segment*_*.mp4"):
                 video_match: re.Match[str] | None = VIDEO_NAME_RE.match(video_path.stem)
                 if video_match is not None:
-                    sources[(device, session, int(video_match["segment"]))] = session_dir
+                    found.setdefault((device, session), (session_dir, set()))[1].add(int(video_match["segment"]))
         return [
             (
-                SequenceIdentity(dataset=self.config.name, parts=(device, f"s{session}", f"seg{segment}")),
-                RobocapSource(session_dir=session_dir, device=device, session=session, segment=segment),
+                SequenceIdentity(dataset=self.config.name, parts=(device, f"s{session}")),
+                RobocapSource(session_dir=session_dir, device=device, session=session, segments=tuple(sorted(segments))),
             )
-            for (device, session, segment), session_dir in sorted(sources.items())
+            for (device, session), (session_dir, segments) in sorted(found.items())
         ]
 
     def _videos(self, session_dir: Path, session: int, segment: int) -> dict[str, Path]:
@@ -298,22 +307,38 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
 
     # ── conversion ────────────────────────────────────────────────────────
     def convert(self, identity: SequenceIdentity, source: RobocapSource, *, force: bool) -> Path:
-        """Write one segment's base-layer rrd (cameras + video + dev0 IMU)."""
+        """Write one session's base-layer rrd: every segment merged on the shared device clock.
+
+        A stream that cannot be placed on the clock (a missing ``comment`` epoch
+        tag, a defect in the corpus) degrades to a warning and a gap in that
+        camera's stream — one bad file must not lose the rest of a session.
+        """
         target: Path = paths.rrd_path(paths.output_root(), layer=paths.BASE_LAYER, identity=identity)
         if writing.should_skip(target, force=force):
             print(f"skip {identity.sequence_key} → {target}")
             return target
 
-        videos: dict[str, Path] = self._videos(source.session_dir, source.session, source.segment)
-        if not videos:
-            raise FileNotFoundError(f"No videos for {identity.sequence_key} in {source.session_dir}")
         cameras: dict[str, Fisheye62Parameters] = self._calibration(source.device)
-        camera_names: list[str] = [name for name in videos if name in cameras]
+        # Every MP4's container comment is parsed before the recording opens: each
+        # stream is retimed by its own epoch, and the earliest doubles as start_time_ns.
+        segment_videos: dict[int, dict[str, Path]] = {}
+        segment_epochs: dict[int, dict[str, int]] = {}
+        for segment in source.segments:
+            videos: dict[str, Path] = self._videos(source.session_dir, source.session, segment)
+            epochs: dict[str, int] = {}
+            for cam_name, video_path in videos.items():
+                try:
+                    epochs[cam_name] = video_epoch_ns(video_path)
+                except ValueError as error:
+                    print(f"  warning: segment {segment} {cam_name}: {error}; stream gap")
+            segment_videos[segment] = videos
+            segment_epochs[segment] = epochs
+        camera_names: list[str] = [
+            name for name in CAMERA_DISPLAY_ORDER if name in cameras and any(name in epochs for epochs in segment_epochs.values())
+        ]
         if not camera_names:
-            raise FileNotFoundError(f"No calibrated cameras for {identity.sequence_key}")
-        # Every MP4's container comment is parsed exactly once, before the recording opens:
-        # each stream is retimed by its own epoch, and the earliest doubles as start_time_ns.
-        epochs_ns: dict[str, int] = {name: video_epoch_ns(path) for name, path in videos.items()}
+            raise FileNotFoundError(f"No calibrated, timestamped cameras for {identity.sequence_key} in {source.session_dir}")
+        segment_starts_ns: dict[int, int] = {segment: min(epochs.values()) for segment, epochs in segment_epochs.items() if epochs}
 
         with writing.atomic_recording(
             target,
@@ -326,7 +351,7 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
             log_rig_node(recording, RIG, reference=RIG_REFERENCE, num_cameras=len(camera_names), name="robocap", kind="ego")
             self._log_mesh(recording)
 
-            num_frames: int = 0
+            frames_per_camera: dict[str, int] = dict.fromkeys(camera_names, 0)
             for index, cam_name in enumerate(camera_names):
                 rr.log(
                     schema.cam_path(RIG, index),
@@ -341,10 +366,15 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
                     static=True,
                     recording=recording,
                 )
-                num_frames = max(
-                    num_frames,
-                    log_video_stream(recording, videos[cam_name], schema.video_path(RIG, index), shift_ns=epochs_ns[cam_name]),
-                )
+                for segment in source.segments:
+                    if cam_name not in segment_epochs[segment]:
+                        continue
+                    frames_per_camera[cam_name] += log_video_stream(
+                        recording,
+                        segment_videos[segment][cam_name],
+                        schema.video_path(RIG, index),
+                        shift_ns=segment_epochs[segment][cam_name],
+                    )
 
             self._log_imu(recording, source)
 
@@ -354,11 +384,13 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
                 recording,
                 identity,
                 num_cameras=len(camera_names),
-                num_frames=num_frames,
-                start_time_ns=min(epochs_ns.values()),
+                num_frames=max(frames_per_camera.values()),
+                start_time_ns=min(segment_starts_ns.values()),
+                num_segments=len(source.segments),
+                segment_starts_ns=", ".join(str(segment_starts_ns[segment]) for segment in sorted(segment_starts_ns)),
             )
 
-        print(f"done {identity.sequence_key} → {target} ({len(camera_names)} cameras, {num_frames} frames)")
+        print(f"done {identity.sequence_key} → {target} ({len(camera_names)} cameras, {len(source.segments)} segments, {max(frames_per_camera.values())} frames)")
         return target
 
     def _log_mesh(self, recording: rr.RecordingStream) -> None:
@@ -376,12 +408,30 @@ class RobocapDataset(DataforgeDataset[RobocapConfig, RobocapSource]):
         rr.log(mesh_entity, rr.Asset3D(path=mesh_path), static=True, recording=recording)
 
     def _log_imu(self, recording: rr.RecordingStream, source: RobocapSource) -> None:
-        """Log the dev0 IMU's raw gyro/accel samples columnar on ``video_time``."""
-        db_path: Path = source.session_dir / f"IMUWriter_dev{IMU_DEVICE}_session{source.session}_segment{source.segment}.db"
-        if not db_path.is_file():
-            print(f"  warning: no IMU database at {db_path}")
+        """Log the dev0 IMU's raw gyro/accel samples columnar on ``video_time``.
+
+        Segments' dbs concatenate directly: their timestamps are already on the
+        shared device clock, so the merged channels stay sorted.
+        """
+        gyro_parts: list[ImuChannel] = []
+        accel_parts: list[ImuChannel] = []
+        for segment in source.segments:
+            db_path: Path = source.session_dir / f"IMUWriter_dev{IMU_DEVICE}_session{source.session}_segment{segment}.db"
+            if not db_path.is_file():
+                print(f"  warning: no IMU database at {db_path}")
+                continue
+            channels: tuple[ImuChannel, ImuChannel] | None = read_imu_database(db_path)
+            if channels is not None:
+                gyro_parts.append(channels[0])
+                accel_parts.append(channels[1])
+        if not gyro_parts:
             return
-        channels: tuple[ImuChannel, ImuChannel] | None = read_imu_database(db_path)
-        if channels is None:
-            return
-        log_imu(recording, RIG, IMU_DEVICE, gyro=channels[0], accel=channels[1], name=f"dev{IMU_DEVICE}")
+        gyro: ImuChannel = ImuChannel(
+            times_ns=np.concatenate([part.times_ns for part in gyro_parts]),
+            values_xyz=np.concatenate([part.values_xyz for part in gyro_parts]),
+        )
+        accel: ImuChannel = ImuChannel(
+            times_ns=np.concatenate([part.times_ns for part in accel_parts]),
+            values_xyz=np.concatenate([part.values_xyz for part in accel_parts]),
+        )
+        log_imu(recording, RIG, IMU_DEVICE, gyro=gyro, accel=accel, name=f"dev{IMU_DEVICE}")
