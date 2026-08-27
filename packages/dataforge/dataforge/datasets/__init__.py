@@ -7,8 +7,9 @@ import tyro
 from dataforge.datasets.base import DataforgeDatasetConfig
 from dataforge.datasets.robocap import RobocapConfig
 from dataforge.datasets.selfcap import SelfcapConfig
+from dataforge.datasets.wildcap import WildcapConfig
 
-dataset_defaults: dict[str, DataforgeDatasetConfig] = {config.name: config for config in (RobocapConfig(), SelfcapConfig())}
+dataset_defaults: dict[str, DataforgeDatasetConfig] = {config.name: config for config in (RobocapConfig(), SelfcapConfig(), WildcapConfig())}
 """Every dataset dataforge knows about, keyed by its own ``name`` (the single source of truth)."""
 
 DatasetUnion = tyro.extras.subcommand_type_from_defaults(dataset_defaults, prefix_names=False)

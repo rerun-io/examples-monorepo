@@ -8,6 +8,7 @@ fresh row ids), and the IMU node's mandatory static ``rig_T_imu``.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -102,11 +103,18 @@ def log_video_stream(recording: rr.RecordingStream, video_path: Path, entity_pat
         retimed: pa.RecordBatch = record_batch.set_column(index, record_batch.schema.field(index), shifted)
         return rr.experimental.Chunk.from_record_batch(retimed)  # invariant 3
 
+    # A B-frame source (iPhone/insta360 HEVC) forces Mp4Reader into an FFmpeg
+    # re-encode; everything else passes through untouched, and then these options
+    # are documented no-ops. try_gpu turns that unavoidable re-encode into NVENC
+    # when the ffmpeg build has it — conda-forge's does not, so DATAFORGE_FFMPEG
+    # points at an NVENC-capable binary (e.g. the fleet's ~/.pixi/bin/ffmpeg).
+    ffmpeg_override: str | None = os.environ.get("DATAFORGE_FFMPEG")
     reader: rr.experimental.Mp4Reader = rr.experimental.Mp4Reader(
         video_path,
         mode="stream",
         entity_path=entity_path,
         timeline_name=schema.TIMELINE,
+        transcode=rr.experimental.Mp4TranscodeOptions(try_gpu=True, ffmpeg_override=ffmpeg_override),
     )
     recording.send_chunks(reader.stream().flat_map(tap))  # invariant 2
     return sample_count

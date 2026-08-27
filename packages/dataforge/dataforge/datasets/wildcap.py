@@ -1,0 +1,164 @@
+"""WildCap: in-the-wild exo/ego mp4s — nothing else — → one exoego:v2 base rrd per capture.
+
+Raw layout on disk (user-assembled; ``download`` only verifies it)::
+
+    <root>/<capture-name>/
+        exo/*.mp4     one file per static exo camera
+        ego/*.mp4     one or more streams from a single head-mounted device
+
+That is the whole contract: no calibration, no per-frame csvs, no IMU, no
+poses. The ``.mp4`` match is case-insensitive; ``.mov`` files (iPhones ship
+them) are warned about and skipped — Rerun does not support them, so remux
+to mp4 first. Each exo video becomes its own single-camera rig (``rig_00..``
+in stem order); every ego video lands on one final moving rig as ``cam_00..``
+(also in stem order). The base layer therefore only asserts what the mp4s themselves
+know:
+
+* Videos go to the canonical ``.../cam_MM/pinhole/video`` paths, but the
+  ``pinhole`` node carries **no** ``Pinhole`` — a calibration layer (e.g. a
+  gravity-aligned VGGT + MoGe pass) logs intrinsics there later without any
+  path change.
+* No root ``ViewCoordinates`` and no transforms anywhere: nothing is posed,
+  so the localization layer that first establishes a world frame owns both.
+* The clock is each file's as-encoded PTS on ``video_time``, unshifted.
+  Nothing guarantees the files are mutually synced; a sync layer can retime
+  them later. Files trimmed to a common start (like the SelfCap cutting
+  pipeline's output) line up as-is.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import ClassVar
+
+import rerun as rr
+import rerun.blueprint as rrb
+
+from dataforge import paths, schema, transports, writing
+from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
+from dataforge.identity import SequenceIdentity
+from dataforge.logging_toolkit import log_rig_node, log_video_stream
+
+EGO_RIG_NAME: str = "ego"
+"""Device label of the single moving rig; the raw tree names no device."""
+
+
+@dataclass
+class WildcapConfig(DataforgeDatasetConfig):
+    """In-the-wild exo/ego video captures: bare mp4s, no calibration, no metadata."""
+
+    name: ClassVar[str] = "wildcap"
+    """Registry key, catalog dataset name, and identity ``dataset`` part."""
+
+    _target: type = field(default_factory=lambda: WildcapDataset)
+    """Dataset class instantiated by ``setup()``."""
+    root: Path = Path("data/raw/wildcap")
+    """Corpus root holding one ``<capture-name>/{exo,ego}/*.mp4`` tree per capture."""
+
+
+def group_videos(capture_dir: Path, group: str) -> list[Path]:
+    """Readable mp4s of one device group, in stem order.
+
+    Args:
+        capture_dir: A ``<root>/<capture-name>`` directory.
+        group: ``exo`` or ``ego``.
+
+    Returns:
+        Video paths sorted by filename. Unreadable files and ``.mov`` files
+        (which Rerun does not support) are warned about and dropped.
+    """
+    if not (capture_dir / group).is_dir():
+        return []
+    videos: list[Path] = []
+    for video_path in sorted((capture_dir / group).iterdir()):
+        if video_path.suffix.lower() == ".mov":
+            print(f"  warning: skipping {video_path} — Rerun does not support .mov; remux it to mp4 first")
+            continue
+        if video_path.suffix.lower() != ".mp4":
+            continue
+        if not os.access(video_path, os.R_OK):
+            print(f"  warning: skipping unreadable {video_path}")
+            continue
+        videos.append(video_path)
+    return videos
+
+
+def build_blueprint(exo: list[Path], ego: list[Path]) -> rrb.Blueprint:
+    """Default layout: the ego cameras over an exo row — SelfCap's layout minus
+    the 3D scene and IMU strip, which would both be empty here.
+
+    Args:
+        exo: Exo mp4s in stem order; mp4 ``N`` is rig ``N``, camera 0.
+        ego: Ego mp4s in stem order; all on rig ``len(exo)`` as camera 0..
+
+    Returns:
+        The blueprint embedded in every WildCap base-layer rrd.
+    """
+    def view(name: str, rig: int, cam: int) -> rrb.Spatial2DView:
+        return rrb.Spatial2DView(name=name, origin=schema.pinhole_path(rig, cam), contents=f"{schema.pinhole_path(rig, cam)}/**")
+
+    ego_row: list[rrb.Spatial2DView] = [view(f"ego {video_path.stem}", len(exo), cam) for cam, video_path in enumerate(ego)]
+    exo_row: list[rrb.Spatial2DView] = [view(video_path.stem, rig, 0) for rig, video_path in enumerate(exo)]
+    rows: list[rrb.Container] = [rrb.Horizontal(*views, name=name) for name, views in (("Ego", ego_row), ("Exo", exo_row)) if views]
+    return rrb.Blueprint(rrb.Vertical(*rows), collapse_panels=True)
+
+
+class WildcapDataset(DataforgeDataset[WildcapConfig, Path]):
+    """Converts bare exo/ego mp4 captures into exoego:v2 base-layer recordings."""
+
+    def download(self) -> None:
+        """Verify the local tree; WildCap is user-assembled and has no upstream fetch."""
+        missing: list[str] = transports.local_verify(self.config.root, required=["*/*/*.mp4"])
+        if missing:
+            raise FileNotFoundError(f"WildCap tree at {self.config.root} is missing: {', '.join(missing)}")
+        print(f"wildcap: {self.config.root} — {len(self.sequences())} convertible capture(s)")
+
+    def discover(self) -> list[tuple[SequenceIdentity, Path]]:
+        """Pair every capture directory holding at least one readable mp4 with its path."""
+        pairs: list[tuple[SequenceIdentity, Path]] = []
+        for capture_dir in sorted(path for path in self.config.root.glob("*") if path.is_dir()):
+            if not any(group_videos(capture_dir, group) for group in ("exo", "ego")):
+                continue
+            pairs.append((SequenceIdentity(dataset=self.config.name, parts=(capture_dir.name,)), capture_dir))
+        return pairs
+
+    def convert(self, identity: SequenceIdentity, source: Path, *, force: bool) -> Path:
+        """Write one capture's base-layer rrd: the videos, and deliberately nothing else.
+
+        No root ``ViewCoordinates``, no ``Pinhole``, no transforms — see the
+        module docstring; those belong to the calibration/localization layers.
+        """
+        target: Path = paths.rrd_path(paths.output_root(), layer=paths.BASE_LAYER, identity=identity)
+        if writing.should_skip(target, force=force):
+            print(f"skip {identity.sequence_key} → {target}")
+            return target
+
+        # The blueprint (built before the recording opens) and the loops below derive
+        # from the same two lists, so it can only describe cameras that really get logged.
+        exo: list[Path] = group_videos(source, "exo")
+        ego: list[Path] = group_videos(source, "ego")
+
+        with writing.atomic_recording(
+            target,
+            application_id="dataforge",
+            recording_id=identity.recording_id,
+            default_blueprint=build_blueprint(exo, ego),
+        ) as recording:
+            num_frames: int = 0
+            for rig, video_path in enumerate(exo):
+                log_rig_node(recording, rig, reference="cam_00", num_cameras=1, name=video_path.stem, kind="exo")
+                rr.log(schema.cam_path(rig, 0), rr.AnyValues(name=video_path.stem), static=True, recording=recording)
+                # Raw PTS is the only clock the raw tree has (see the module docstring), so no shift.
+                num_frames = max(num_frames, log_video_stream(recording, video_path, schema.video_path(rig, 0)))
+            if ego:
+                ego_rig: int = len(exo)
+                log_rig_node(recording, ego_rig, reference="cam_00", num_cameras=len(ego), name=EGO_RIG_NAME, kind="ego")
+                for cam, video_path in enumerate(ego):
+                    rr.log(schema.cam_path(ego_rig, cam), rr.AnyValues(name=video_path.stem), static=True, recording=recording)
+                    num_frames = max(num_frames, log_video_stream(recording, video_path, schema.video_path(ego_rig, cam)))
+            writing.send_capture_properties(recording, identity, num_cameras=len(exo) + len(ego), num_frames=num_frames)
+
+        print(f"done {identity.sequence_key} → {target} ({len(exo) + len(ego)} cameras, {num_frames} frames)")
+        return target
