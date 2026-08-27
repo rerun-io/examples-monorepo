@@ -49,14 +49,11 @@ def grid_page_size(max_height: int) -> int:
     """Cameras per grid page, by the sharpest stream in the group.
 
     Higher-resolution streams stay legible in fewer, larger panes: 8 panes for
-    1080p and below, 4 for 2K-class footage, 2 for anything sharper. A group
-    larger than its page becomes tabs of grid pages (see ``build_blueprint``).
+    1080p and below, 4 for anything sharper (2 per page felt too sparse). A
+    group larger than its page becomes tabs of grid pages (see
+    ``build_blueprint``).
     """
-    if max_height <= 1080:
-        return 8
-    if max_height <= 1600:
-        return 4
-    return 2
+    return 8 if max_height <= 1080 else 4
 
 
 def video_height(video_path: Path) -> int | None:

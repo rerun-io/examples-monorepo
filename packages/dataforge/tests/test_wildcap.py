@@ -94,7 +94,7 @@ def test_grid_page_size_shrinks_with_resolution() -> None:
     assert grid_page_size(720) == 8
     assert grid_page_size(1080) == 8
     assert grid_page_size(1504) == 4  # 2K-class (the mamma capture rigs)
-    assert grid_page_size(2160) == 2
+    assert grid_page_size(2160) == 4
 
 
 def test_default_blueprint_derives_from_the_corpus(corpus: Path, tmp_path: Path) -> None:
