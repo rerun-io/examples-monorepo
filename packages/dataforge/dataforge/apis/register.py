@@ -41,15 +41,18 @@ def main(config: Config) -> None:
     ).wait()
 
     dataforge_dataset: DataforgeDataset = dataset_config.setup()
-    # A re-register must never truncate an .rbl that a live catalog server still holds open.
+    # Blueprints register once: every register_blueprint call adds a NEW entry to the
+    # dataset's blueprint list (cluttering the viewer's selector), so an incremental
+    # re-register skips them. To refresh a blueprint, delete the dataset and re-register.
+    # A re-register must also never truncate an .rbl a live catalog server holds open.
     blueprint: rrb.Blueprint | None = dataforge_dataset.default_blueprint()
-    if blueprint is not None:
+    if blueprint is not None and dataset.default_blueprint() is None:
         blueprint_path: Path = paths.blueprint_path(paths.output_root(), name)
         with writing.atomic_write(blueprint_path) as temp_path:
             blueprint.save(name, str(temp_path))
         dataset.register_blueprint(blueprint_path.resolve().as_uri(), set_default=True)
     table_blueprint: rrb.Blueprint | None = dataforge_dataset.table_blueprint()
-    if table_blueprint is not None:
+    if table_blueprint is not None and dataset.default_segment_table_blueprint() is None:
         table_path: Path = paths.blueprint_path(paths.output_root(), name, segment_table=True)
         with writing.atomic_write(table_path) as temp_path:
             table_blueprint.save(name, str(temp_path))

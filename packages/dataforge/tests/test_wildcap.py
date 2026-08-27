@@ -51,7 +51,7 @@ def test_discover_keeps_only_captures_with_a_readable_video(corpus: Path) -> Non
 def test_discover_pairs_each_identity_with_its_capture_directory(corpus: Path) -> None:
     dataset: WildcapDataset = WildcapDataset(WildcapConfig(root=corpus))
     pair: tuple[SequenceIdentity, Path] = dataset.discover()[1]
-    assert pair[0].recording_id == "wildcap__kitchen-01"
+    assert pair[0].recording_id == "wildcap-selfcollected__kitchen-01"
     assert pair[1] == corpus / "kitchen-01"
 
 
@@ -97,7 +97,10 @@ def test_grid_page_size_shrinks_with_resolution() -> None:
     assert grid_page_size(2160) == 2
 
 
-def test_dataset_blueprints_exist_for_the_modal_capture_shape() -> None:
-    dataset = WildcapConfig().setup()
+def test_default_blueprint_derives_from_the_corpus(corpus: Path, tmp_path: Path) -> None:
+    dataset = WildcapConfig(root=corpus).setup()
     assert dataset.default_blueprint() is not None
     assert dataset.table_blueprint() is not None
+    empty_root: Path = tmp_path / "no-captures"
+    empty_root.mkdir()
+    assert WildcapConfig(root=empty_root).setup().default_blueprint() is None

@@ -45,12 +45,6 @@ from dataforge.logging_toolkit import log_rig_node, log_video_stream
 EGO_RIG_NAME: str = "ego"
 """Device label of the single moving rig; the raw tree names no device."""
 
-DEFAULT_EXO_CAMERAS: int = 4
-"""Exo cameras in the modal self-collected capture (four static phones)."""
-
-DEFAULT_EGO_STREAMS: int = 3
-"""Ego streams in the modal self-collected capture (the OAK's left/rgb/right)."""
-
 def grid_page_size(max_height: int) -> int:
     """Cameras per grid page, by the sharpest stream in the group.
 
@@ -65,27 +59,47 @@ def grid_page_size(max_height: int) -> int:
     return 2
 
 
-def video_height(video_path: Path) -> int:
-    """Pixel height of the first video stream, via the env's ffprobe."""
-    probe = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=height", "-of", "csv=p=0", str(video_path)],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return int(probe.stdout.strip().splitlines()[0])
+def video_height(video_path: Path) -> int | None:
+    """Pixel height of the first video stream via the env's ffprobe, or ``None``
+    when the file cannot be probed (corrupt, empty, or ffprobe missing)."""
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=height", "-of", "csv=p=0", str(video_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return None
+    out: str = probe.stdout.strip()
+    return int(out.splitlines()[0]) if probe.returncode == 0 and out else None
+
+
+def group_page_size(videos: list[Path]) -> int:
+    """Grid page size for one device group, from its sharpest probeable stream
+    (mixed-resolution groups page for the stream that needs the most pixels).
+    Falls back to the 1080p page when nothing probes."""
+    heights: list[int] = [height for height in (video_height(path) for path in videos) if height is not None]
+    return grid_page_size(max(heights)) if heights else 8
 
 
 @dataclass
 class WildcapConfig(DataforgeDatasetConfig):
-    """In-the-wild exo/ego video captures: bare mp4s, no calibration, no metadata."""
+    """In-the-wild exo/ego video captures: bare mp4s, no calibration, no metadata.
 
-    name: ClassVar[str] = "wildcap"
+    One wildcap catalog dataset holds one topology family (one corpus root),
+    because the catalog applies a single default blueprint to every segment of
+    a dataset. A new corpus with a different camera layout gets its own
+    subclass with its own ``name`` and ``root`` (e.g. a 32-camera mocap stage
+    beside the self-collected exoego captures), not more segments here.
+    """
+
+    name: ClassVar[str] = "wildcap-selfcollected"
     """Registry key, catalog dataset name, and identity ``dataset`` part."""
 
     _target: type = field(default_factory=lambda: WildcapDataset)
     """Dataset class instantiated by ``setup()``."""
-    root: Path = Path("data/raw/wildcap")
+    root: Path = Path("data/raw/wildcap-selfcollected")
     """Corpus root holding one ``<capture-name>/{exo,ego}/*.mp4`` tree per capture."""
 
 
@@ -154,13 +168,26 @@ def build_blueprint(exo: list[str], ego: list[str], *, exo_page: int = 8, ego_pa
 class WildcapDataset(DataforgeDataset[WildcapConfig, Path]):
     """Converts bare exo/ego mp4 captures into exoego:v2 base-layer recordings."""
 
-    def default_blueprint(self) -> rrb.Blueprint:
-        """Corpus-wide layout for the modal self-collected capture.
+    def default_blueprint(self) -> rrb.Blueprint | None:
+        """Corpus-derived dataset default: the first discovered capture's shape.
 
-        Device names vary per capture, so the dataset default labels panes by
-        index; the per-recording blueprint embedded at convert uses real names.
+        The corpus is one topology family (see ``WildcapConfig``), so the first
+        capture speaks for all of them. Device names still vary per capture, so
+        panes are labeled by index; the per-recording blueprint embedded at
+        convert uses real names. ``None`` when the corpus is empty.
         """
-        return build_blueprint([f"exo {rig}" for rig in range(DEFAULT_EXO_CAMERAS)], [f"ego {cam}" for cam in range(DEFAULT_EGO_STREAMS)])
+        discovered: list[tuple[SequenceIdentity, Path]] = self.discover()
+        if not discovered:
+            return None
+        _, capture_dir = discovered[0]
+        exo: list[Path] = group_videos(capture_dir, "exo")
+        ego: list[Path] = group_videos(capture_dir, "ego")
+        return build_blueprint(
+            [f"exo {rig}" for rig in range(len(exo))],
+            [f"ego {cam}" for cam in range(len(ego))],
+            exo_page=group_page_size(exo),
+            ego_page=group_page_size(ego),
+        )
 
     def table_blueprint(self) -> rrb.Blueprint:
         """Cheap preview card: the first exo camera's video, nothing else decoded."""
@@ -208,8 +235,8 @@ class WildcapDataset(DataforgeDataset[WildcapConfig, Path]):
             default_blueprint=build_blueprint(
                 [video_path.stem for video_path in exo],
                 [f"ego {video_path.stem}" for video_path in ego],
-                exo_page=grid_page_size(max(video_height(p) for p in exo)) if exo else 8,
-                ego_page=grid_page_size(max(video_height(p) for p in ego)) if ego else 8,
+                exo_page=group_page_size(exo),
+                ego_page=group_page_size(ego),
             ),
         ) as recording:
             num_frames: int = 0
