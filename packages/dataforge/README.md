@@ -12,9 +12,9 @@ work plan — is in **[docs/dataforge-design-report.html](docs/dataforge-design-
 From the repo root, with `<dataset>` one of `robocap`, `selfcap`, `wildcap`:
 
 ```bash
-# 1. Catalog server, in its own shell. Registrations live in its memory only:
-#    if it restarts, repeat step 4 for each dataset.
-pixi run -e dataforge --frozen dataforge-serve                          # rerun server on :51235
+# 1. Catalog server, in a tmux session so it outlives your shell. Registrations
+#    live in its memory only: if it restarts, repeat step 4 for each dataset.
+tmux new -d -s dataforge-catalog 'pixi run -e dataforge --frozen dataforge-serve'   # rerun server on :51235
 
 # 2. Fetch the raw corpus, or verify a local one (--root <dir> if it is not at the default)
 pixi run -e dataforge --frozen dataforge-download <dataset>
