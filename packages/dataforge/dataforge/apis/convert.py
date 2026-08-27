@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from beartype.roar import BeartypeException
+
 from dataforge.datasets import AnnotatedDatasetUnion, RobocapConfig
 from dataforge.datasets.base import DataforgeDataset, DataforgeDatasetConfig
 from dataforge.identity import SequenceIdentity
@@ -22,25 +24,42 @@ class Config:
     """Rewrite recordings that already exist instead of skipping them."""
 
 
-def select(identities: list[SequenceIdentity], sequence: str | None) -> list[SequenceIdentity]:
-    """Filter discovered identities by key, recording id, or a single part."""
+def select(discovered: list[tuple[SequenceIdentity, object]], sequence: str | None) -> list[tuple[SequenceIdentity, object]]:
+    """Filter discovered ``(identity, source)`` pairs by key, recording id, or a single part."""
     if sequence is None:
-        return identities
-    matches: list[SequenceIdentity] = [
-        identity for identity in identities if sequence in (identity.sequence_key, identity.recording_id) or sequence in identity.parts
+        return discovered
+    matches: list[tuple[SequenceIdentity, object]] = [
+        (identity, source)
+        for identity, source in discovered
+        if sequence in (identity.sequence_key, identity.recording_id) or sequence in identity.parts
     ]
     if not matches:
-        raise ValueError(f"No sequence matches {sequence!r} among {len(identities)} discovered sequences")
+        raise ValueError(f"No sequence matches {sequence!r} among {len(discovered)} discovered sequences")
     return matches
 
 
 def main(config: Config) -> None:
-    """Convert every selected sequence serially."""
+    """Convert every selected sequence serially, surviving individual failures.
+
+    One bad sequence must not throw away a batch that is hours in (a lesson from
+    robocap's malformed ``s10``), so failures are reported and the run continues;
+    the process still exits non-zero so a caller can tell a partial run apart
+    from a clean one.
+    """
     dataset_config: DataforgeDatasetConfig = config.dataset
     dataset: DataforgeDataset = dataset_config.setup()
-    selected: list[SequenceIdentity] = select(dataset.sequences(), config.sequence)
+    selected: list[tuple[SequenceIdentity, object]] = select(dataset.discover(), config.sequence)
     print(f"converting {len(selected)} sequence(s)")
-    for identity in selected:
-        target: Path = dataset.convert(identity, force=config.force)
-        if not target.is_file():
-            raise RuntimeError(f"convert produced no recording for {identity.sequence_key}")
+    failed: list[str] = []
+    for identity, source in selected:
+        try:
+            target: Path = dataset.convert(identity, source, force=config.force)
+            if not target.is_file():
+                raise RuntimeError(f"convert produced no recording for {identity.sequence_key}")
+        except BeartypeException:
+            raise
+        except Exception as error:
+            print(f"FAILED {identity.sequence_key}: {type(error).__name__}: {error}")
+            failed.append(identity.sequence_key)
+    if failed:
+        raise SystemExit(f"{len(failed)} of {len(selected)} sequence(s) failed: {', '.join(failed)}")
