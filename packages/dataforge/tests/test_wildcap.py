@@ -88,6 +88,15 @@ def test_group_videos_skips_mov_files_and_accepts_uppercase_mp4(tmp_path: Path, 
     assert "IMG_0078.MOV — Rerun does not support .mov" in capsys.readouterr().out
 
 
+def test_grid_page_size_shrinks_with_resolution() -> None:
+    from dataforge.datasets.wildcap import grid_page_size
+
+    assert grid_page_size(720) == 8
+    assert grid_page_size(1080) == 8
+    assert grid_page_size(1504) == 4  # 2K-class (the mamma capture rigs)
+    assert grid_page_size(2160) == 2
+
+
 def test_dataset_blueprints_exist_for_the_modal_capture_shape() -> None:
     dataset = WildcapConfig().setup()
     assert dataset.default_blueprint() is not None

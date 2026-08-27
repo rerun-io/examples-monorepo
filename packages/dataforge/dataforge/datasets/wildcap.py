@@ -29,6 +29,7 @@ know:
 from __future__ import annotations
 
 import os
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
@@ -50,9 +51,29 @@ DEFAULT_EXO_CAMERAS: int = 4
 DEFAULT_EGO_STREAMS: int = 3
 """Ego streams in the modal self-collected capture (the OAK's left/rgb/right)."""
 
-MAX_ROW_PANES: int = 6
-"""Cameras shown side by side before a row's panes become unreadable slivers
-(a 30-camera capture would get ~60px per pane); past this the row becomes tabs."""
+def grid_page_size(max_height: int) -> int:
+    """Cameras per grid page, by the sharpest stream in the group.
+
+    Higher-resolution streams stay legible in fewer, larger panes: 8 panes for
+    1080p and below, 4 for 2K-class footage, 2 for anything sharper. A group
+    larger than its page becomes tabs of grid pages (see ``build_blueprint``).
+    """
+    if max_height <= 1080:
+        return 8
+    if max_height <= 1600:
+        return 4
+    return 2
+
+
+def video_height(video_path: Path) -> int:
+    """Pixel height of the first video stream, via the env's ffprobe."""
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=height", "-of", "csv=p=0", str(video_path)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return int(probe.stdout.strip().splitlines()[0])
 
 
 @dataclass
@@ -95,13 +116,19 @@ def group_videos(capture_dir: Path, group: str) -> list[Path]:
     return videos
 
 
-def build_blueprint(exo: list[str], ego: list[str]) -> rrb.Blueprint:
-    """Ego cameras over an exo row — SelfCap's layout minus the 3D scene and
-    IMU strip, which would both be empty here.
+def build_blueprint(exo: list[str], ego: list[str], *, exo_page: int = 8, ego_page: int = 8) -> rrb.Blueprint:
+    """Ego cameras over the exo cameras — SelfCap's layout minus the 3D scene
+    and IMU strip, which would both be empty here.
+
+    Each device group is a grid of at most one page of cameras; a larger group
+    becomes tabs of grid pages, so a 32-camera capture pages instead of
+    shrinking every pane into a sliver.
 
     Args:
         exo: Pane label per exo camera; label ``N`` is rig ``N``, camera 0.
         ego: Pane label per ego stream, all on rig ``len(exo)`` as camera 0..
+        exo_page: Cameras per exo grid page (``grid_page_size`` of the group).
+        ego_page: Cameras per ego grid page.
 
     Returns:
         The blueprint embedded at convert (real device names) and registered as
@@ -110,14 +137,18 @@ def build_blueprint(exo: list[str], ego: list[str]) -> rrb.Blueprint:
     def view(name: str, rig: int, cam: int) -> rrb.Spatial2DView:
         return rrb.Spatial2DView(name=name, origin=schema.pinhole_path(rig, cam), contents=f"{schema.pinhole_path(rig, cam)}/**")
 
-    ego_row: list[rrb.Spatial2DView] = [view(name, len(exo), cam) for cam, name in enumerate(ego)]
-    exo_row: list[rrb.Spatial2DView] = [view(name, rig, 0) for rig, name in enumerate(exo)]
-    rows: list[rrb.Container] = [
-        rrb.Horizontal(*views, name=name) if len(views) <= MAX_ROW_PANES else rrb.Tabs(*views, name=name)
-        for name, views in (("Ego", ego_row), ("Exo", exo_row))
-        if views
+    def paged(views: list[rrb.Spatial2DView], name: str, page: int) -> rrb.Container:
+        if len(views) <= page:
+            return rrb.Grid(*views, name=name)
+        chunks: list[list[rrb.Spatial2DView]] = [views[start : start + page] for start in range(0, len(views), page)]
+        return rrb.Tabs(*[rrb.Grid(*chunk, name=f"{name} {i * page + 1}-{i * page + len(chunk)}") for i, chunk in enumerate(chunks)], name=name)
+
+    ego_views: list[rrb.Spatial2DView] = [view(name, len(exo), cam) for cam, name in enumerate(ego)]
+    exo_views: list[rrb.Spatial2DView] = [view(name, rig, 0) for rig, name in enumerate(exo)]
+    groups: list[rrb.Container] = [
+        paged(views, name, page) for name, views, page in (("Ego", ego_views, ego_page), ("Exo", exo_views, exo_page)) if views
     ]
-    return rrb.Blueprint(rrb.Vertical(*rows), collapse_panels=True)
+    return rrb.Blueprint(rrb.Vertical(*groups), collapse_panels=True)
 
 
 class WildcapDataset(DataforgeDataset[WildcapConfig, Path]):
@@ -174,7 +205,12 @@ class WildcapDataset(DataforgeDataset[WildcapConfig, Path]):
             target,
             application_id="dataforge",
             recording_id=identity.recording_id,
-            default_blueprint=build_blueprint([video_path.stem for video_path in exo], [f"ego {video_path.stem}" for video_path in ego]),
+            default_blueprint=build_blueprint(
+                [video_path.stem for video_path in exo],
+                [f"ego {video_path.stem}" for video_path in ego],
+                exo_page=grid_page_size(max(video_height(p) for p in exo)) if exo else 8,
+                ego_page=grid_page_size(max(video_height(p) for p in ego)) if ego else 8,
+            ),
         ) as recording:
             num_frames: int = 0
             for rig, video_path in enumerate(exo):
