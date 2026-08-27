@@ -28,12 +28,20 @@ from dataforge.identity import SequenceIdentity
 class DataforgeDatasetConfig:
     """Base config for a dataforge dataset; ``setup()`` builds the dataset."""
 
-    name: ClassVar[str]
-    """Registry key of the dataset: the CLI subcommand, the catalog dataset, and
-    the ``dataset`` part of every ``SequenceIdentity`` it produces."""
+    command: ClassVar[str]
+    """CLI subcommand of the dataset, and its key in the registry."""
 
     _target: type
     """Dataset class instantiated by ``setup()``."""
+
+    @property
+    def name(self) -> str:
+        """Catalog dataset name and the ``dataset`` part of every ``SequenceIdentity``.
+
+        The command itself for a fixed dataset; a dataset that serves many
+        corpora from one command (wildcap) derives a per-instance name.
+        """
+        return self.command
 
     def setup(self) -> DataforgeDataset:
         """Instantiate the dataset this config describes."""
@@ -70,21 +78,24 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
     def convert(self, identity: SequenceIdentity, source: SourceT, *, force: bool) -> Path:
         """Write the base-layer rrd for one discovered sequence and return its path."""
 
-    def default_blueprint(self) -> rrb.Blueprint | None:
+    @abstractmethod
+    def default_blueprint(self) -> rrb.Blueprint:
         """Dataset-wide default blueprint, registered on the catalog dataset.
 
         Per-recording blueprints are embedded at convert; this is the "dataset
-        default at register" half of the design. ``None`` means the dataset has
-        no sensible corpus-wide layout.
+        default at register" half of the design. A dataset that cannot produce
+        one (e.g. a corpus-derived layout with no readable captures) raises
+        rather than degrading to viewer heuristics.
         """
-        return None
 
-    def table_blueprint(self) -> rrb.Blueprint | None:
+    @abstractmethod
+    def table_blueprint(self) -> rrb.Blueprint:
         """Lightweight segment-table preview card, registered with ``segment_table=True``.
 
         The viewer renders every visible dataset row through this blueprint at
         once ("Table cards and blueprints" experimental setting), so it must
         stay cheap — cards decode exactly one stream (the front-stereo pane);
-        everything else is excluded rather than hidden. ``None`` skips it.
+        everything else is excluded rather than hidden. Mandatory for the same
+        reason: without it, table cards fall back to viewer heuristics that
+        decode every stream of every visible row.
         """
-        return None

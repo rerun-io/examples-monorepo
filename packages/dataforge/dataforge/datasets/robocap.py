@@ -117,7 +117,7 @@ class RobocapSource:
 class RobocapConfig(DataforgeDatasetConfig):
     """RoboCap capture-rig recordings (6 fisheye cameras, 3 IMUs, no labels)."""
 
-    name: ClassVar[str] = "robocap"
+    command: ClassVar[str] = "robocap"
     """Registry key, catalog dataset name, and identity ``dataset`` part."""
 
     _target: type = field(default_factory=lambda: RobocapDataset)

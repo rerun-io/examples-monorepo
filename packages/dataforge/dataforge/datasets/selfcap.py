@@ -223,7 +223,7 @@ class EpisodePlan:
 class SelfcapConfig(DataforgeDatasetConfig):
     """Self-collected exo/ego/Quest captures, cut into per-task episodes."""
 
-    name: ClassVar[str] = "selfcap"
+    command: ClassVar[str] = "selfcap"
     """Registry key, catalog dataset name, and identity ``dataset`` part."""
 
     _target: type = field(default_factory=lambda: SelfcapDataset)
@@ -572,6 +572,15 @@ class SelfcapDataset(DataforgeDataset[SelfcapConfig, Path]):
         panes += [CameraPane(name=f"ego {stream}", rig=DEFAULT_EXO_CAMERAS, cam=index, kind="ego") for index, (stream, _) in enumerate(EGO_STREAM_LAYOUTS)]
         panes += [CameraPane(name=f"quest {stream}", rig=DEFAULT_EXO_CAMERAS + 1, cam=index, kind="quest") for index, (stream, _) in enumerate(QUEST_STREAM_LAYOUTS)]
         return build_blueprint(tuple(panes), ego_rig=DEFAULT_EXO_CAMERAS)
+
+    def table_blueprint(self) -> rrb.Blueprint:
+        """Cheap preview card: the ego rgb stream only, nothing else decoded.
+
+        Every visible table row renders through this at once, so the card must
+        decode exactly one video (see the base-class contract).
+        """
+        ego_rgb: str = schema.pinhole_path(DEFAULT_EXO_CAMERAS, 0)
+        return rrb.Blueprint(rrb.Spatial2DView(name="ego rgb", origin=ego_rgb, contents=f"{ego_rgb}/**"), collapse_panels=True)
 
     # ── raw-tree discovery ────────────────────────────────────────────────
     def subset_root(self) -> Path:

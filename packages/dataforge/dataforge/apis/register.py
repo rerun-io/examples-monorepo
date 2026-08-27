@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import rerun.blueprint as rrb
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer
 
 from dataforge import paths, writing
@@ -33,25 +32,27 @@ def main(config: Config) -> None:
         raise FileNotFoundError(f"no {paths.BASE_LAYER}-layer rrds for {name} under {layer_root}")
 
     client: CatalogClient = CatalogClient(config.catalog_url)
-    dataset: DatasetEntry = client.create_dataset(name, exist_ok=True)
-    dataset.register(
+    entry: DatasetEntry = client.create_dataset(name, exist_ok=True)
+    entry.register(
         [path.resolve().as_uri() for path in rrd_paths],
         layer_name=paths.BASE_LAYER,
         on_duplicate=OnDuplicateSegmentLayer.SKIP,
     ).wait()
 
-    dataforge_dataset: DataforgeDataset = dataset_config.setup()
-    # A re-register must never truncate an .rbl that a live catalog server still holds open.
-    blueprint: rrb.Blueprint | None = dataforge_dataset.default_blueprint()
-    if blueprint is not None:
+    dataset: DataforgeDataset = dataset_config.setup()
+    # Blueprints register once: every register_blueprint call adds a NEW entry to the
+    # catalog dataset's blueprint list (cluttering the viewer's selector), so an
+    # incremental re-register skips a blueprint the catalog already has a default for.
+    # To refresh a blueprint, delete the dataset and re-register. A re-register must
+    # also never truncate an .rbl a live catalog server holds open.
+    if entry.default_blueprint() is None:
         blueprint_path: Path = paths.blueprint_path(paths.output_root(), name)
         with writing.atomic_write(blueprint_path) as temp_path:
-            blueprint.save(name, str(temp_path))
-        dataset.register_blueprint(blueprint_path.resolve().as_uri(), set_default=True)
-    table_blueprint: rrb.Blueprint | None = dataforge_dataset.table_blueprint()
-    if table_blueprint is not None:
+            dataset.default_blueprint().save(name, str(temp_path))
+        entry.register_blueprint(blueprint_path.resolve().as_uri(), set_default=True)
+    if entry.default_segment_table_blueprint() is None:
         table_path: Path = paths.blueprint_path(paths.output_root(), name, segment_table=True)
         with writing.atomic_write(table_path) as temp_path:
-            table_blueprint.save(name, str(temp_path))
-        dataset.register_blueprint(table_path.resolve().as_uri(), segment_table=True)
+            dataset.table_blueprint().save(name, str(temp_path))
+        entry.register_blueprint(table_path.resolve().as_uri(), segment_table=True)
     print(f"registered {len(rrd_paths)} {paths.BASE_LAYER}-layer rrds into '{name}' at {config.catalog_url}")
