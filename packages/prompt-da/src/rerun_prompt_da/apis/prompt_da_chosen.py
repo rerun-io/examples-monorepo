@@ -239,6 +239,9 @@ def process_segment_chosen(
             recording=recording,
         )
     recording.flush()
+    # RecordingStream.save leaves mode-0000 files on the NAS mount, which the
+    # catalog server cannot read back on (re-)registration.
+    rrd_path.chmod(0o644)
     return SegmentResult(rrd_path=rrd_path, inferred_frames=inferred_frames, skipped_decodes=0)
 
 
