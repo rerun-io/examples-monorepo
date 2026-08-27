@@ -32,7 +32,6 @@ import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import ClassVar
 
 import rerun as rr
 import rerun.blueprint as rrb
@@ -87,17 +86,23 @@ class WildcapConfig(DataforgeDatasetConfig):
     One wildcap catalog dataset holds one topology family (one corpus root),
     because the catalog applies a single default blueprint to every segment of
     a dataset. A new corpus with a different camera layout gets its own
-    subclass with its own ``name`` and ``root`` (e.g. a 32-camera mocap stage
-    beside the self-collected exoego captures), not more segments here.
+    ``--corpus`` (e.g. a 32-camera mocap stage beside the self-collected exoego
+    captures), not more segments in an existing dataset.
     """
-
-    name: ClassVar[str] = "wildcap-selfcollected"
-    """Registry key, catalog dataset name, and identity ``dataset`` part."""
 
     _target: type = field(default_factory=lambda: WildcapDataset)
     """Dataset class instantiated by ``setup()``."""
+    corpus: str = "selfcollected"
+    """Topology family this run works on; the dataset is ``wildcap-<corpus>``."""
     root: Path = Path("data/raw/wildcap-selfcollected")
-    """Corpus root holding one ``<capture-name>/{exo,ego}/*.mp4`` tree per capture."""
+    """Corpus root holding one ``<capture-name>/{exo,ego}/*.mp4`` tree per capture.
+    Pair it with ``corpus``: ``--corpus mamma32 --root data/raw/wildcap-mamma32``."""
+
+    @property
+    # pyrefly: ignore[bad-override]  # the ClassVar contract holds for fixed datasets; wildcap's name is per-corpus by design
+    def name(self) -> str:
+        """Catalog dataset name and identity ``dataset`` part: ``wildcap-<corpus>``."""
+        return f"wildcap-{self.corpus}"
 
 
 def group_videos(capture_dir: Path, group: str) -> list[Path]:

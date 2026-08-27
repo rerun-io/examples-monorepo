@@ -9,8 +9,16 @@ from dataforge.datasets.robocap import RobocapConfig
 from dataforge.datasets.selfcap import SelfcapConfig
 from dataforge.datasets.wildcap import WildcapConfig
 
-dataset_defaults: dict[str, DataforgeDatasetConfig] = {config.name: config for config in (RobocapConfig(), SelfcapConfig(), WildcapConfig())}
-"""Every dataset dataforge knows about, keyed by its own ``name`` (the single source of truth)."""
+dataset_defaults: dict[str, DataforgeDatasetConfig] = {
+    RobocapConfig.name: RobocapConfig(),
+    SelfcapConfig.name: SelfcapConfig(),
+    "wildcap": WildcapConfig(),
+}
+"""Every dataset dataforge knows about, keyed by its CLI subcommand.
+
+For robocap/selfcap the key IS ``config.name``. Wildcap is one subcommand for
+many corpora: ``--corpus`` picks the topology family and ``config.name``
+becomes ``wildcap-<corpus>`` (the catalog dataset and rrd prefix)."""
 
 DatasetUnion = tyro.extras.subcommand_type_from_defaults(dataset_defaults, prefix_names=False)
 """Config type every verb's ``Config.dataset`` field uses (one tyro subcommand per registry key).
