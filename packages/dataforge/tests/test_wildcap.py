@@ -103,4 +103,5 @@ def test_default_blueprint_derives_from_the_corpus(corpus: Path, tmp_path: Path)
     assert dataset.table_blueprint() is not None
     empty_root: Path = tmp_path / "no-captures"
     empty_root.mkdir()
-    assert WildcapConfig(root=empty_root).setup().default_blueprint() is None
+    with pytest.raises(FileNotFoundError, match="no readable captures"):
+        WildcapConfig(root=empty_root).setup().default_blueprint()

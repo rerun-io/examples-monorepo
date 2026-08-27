@@ -29,10 +29,10 @@ know:
 from __future__ import annotations
 
 import os
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import av
 import rerun as rr
 import rerun.blueprint as rrb
 
@@ -56,23 +56,13 @@ def grid_page_size(max_height: int) -> int:
 
 
 def video_height(video_path: Path) -> int | None:
-    """Pixel height of the first video stream via the env's ffprobe, or ``None``
-    when the file cannot be probed (corrupt, empty, or ffprobe missing)."""
+    """Pixel height of the first video stream (PyAV, in-process header read), or
+    ``None`` when the file has no decodable video stream."""
     try:
-        probe = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=height", "-of", "default=nw=1:nk=1", str(video_path)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except FileNotFoundError:
+        with av.open(str(video_path)) as container:
+            return container.streams.video[0].height if container.streams.video else None
+    except (av.error.FFmpegError, OSError):
         return None
-    if probe.returncode != 0 or not probe.stdout.strip():
-        return None
-    # Some streams make ffprobe's writers emit trailing separators ("2560,"), so
-    # keep only the leading digits of the first line.
-    first: str = probe.stdout.strip().splitlines()[0].strip().rstrip(",")
-    return int(first) if first.isdigit() else None
 
 
 def group_page_size(videos: list[Path]) -> int:
@@ -174,17 +164,22 @@ def build_blueprint(exo: list[str], ego: list[str], *, exo_page: int = 8, ego_pa
 class WildcapDataset(DataforgeDataset[WildcapConfig, Path]):
     """Converts bare exo/ego mp4 captures into exoego:v2 base-layer recordings."""
 
-    def default_blueprint(self) -> rrb.Blueprint | None:
+    def default_blueprint(self) -> rrb.Blueprint:
         """Corpus-derived dataset default: the first discovered capture's shape.
 
         The corpus is one topology family (see ``WildcapConfig``), so the first
         capture speaks for all of them. Device names still vary per capture, so
         panes are labeled by index; the per-recording blueprint embedded at
-        convert uses real names. ``None`` when the corpus is empty.
+        convert uses real names.
+
+        Raises:
+            FileNotFoundError: No readable capture under ``root`` — the layout
+                cannot be derived, and a wrong ``--root`` must not silently
+                register a dataset without blueprints.
         """
         discovered: list[tuple[SequenceIdentity, Path]] = self.discover()
         if not discovered:
-            return None
+            raise FileNotFoundError(f"{self.config.name}: no readable captures under {self.config.root} to derive a blueprint from")
         _, capture_dir = discovered[0]
         exo: list[Path] = group_videos(capture_dir, "exo")
         ego: list[Path] = group_videos(capture_dir, "ego")

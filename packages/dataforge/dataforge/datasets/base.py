@@ -71,17 +71,17 @@ class DataforgeDataset(Generic[ConfigT, SourceT], ABC):
         """Write the base-layer rrd for one discovered sequence and return its path."""
 
     @abstractmethod
-    def default_blueprint(self) -> rrb.Blueprint | None:
+    def default_blueprint(self) -> rrb.Blueprint:
         """Dataset-wide default blueprint, registered on the catalog dataset.
 
         Per-recording blueprints are embedded at convert; this is the "dataset
-        default at register" half of the design. Every dataset must decide this
-        explicitly — return ``None`` only when the corpus genuinely has no
-        derivable layout (e.g. it is empty), never as a default.
+        default at register" half of the design. A dataset that cannot produce
+        one (e.g. a corpus-derived layout with no readable captures) raises
+        rather than degrading to viewer heuristics.
         """
 
     @abstractmethod
-    def table_blueprint(self) -> rrb.Blueprint | None:
+    def table_blueprint(self) -> rrb.Blueprint:
         """Lightweight segment-table preview card, registered with ``segment_table=True``.
 
         The viewer renders every visible dataset row through this blueprint at
