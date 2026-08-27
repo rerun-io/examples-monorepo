@@ -2461,6 +2461,12 @@ cmd = "python tools/apps/view.py"
 cwd = "packages/dataforge"
 description = "Open one converted recording in the viewer (--rr-config.headless in a bare shell)"
 
+[feature.dataforge.tasks.dataforge-serve]
+# One open fd per registered rrd; the default 1024 overflows fast (see arkitscenes-download-serve).
+cmd = "bash -c 'ulimit -n 524288 && exec rerun server --port 51235'"
+cwd = "packages/dataforge"
+description = "Start the local in-memory Rerun catalog on :51235 (own shell; keep running to register/view)"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════

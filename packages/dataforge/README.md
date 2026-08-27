@@ -7,6 +7,62 @@ The full design — decisions, evidence from a 9-system study, and the ranked
 work plan — is in **[docs/dataforge-design-report.html](docs/dataforge-design-report.html)**
 (single self-contained file; open it in a browser).
 
+## Run it
+
+From the repo root, with `<dataset>` one of `robocap`, `selfcap`, `wildcap`:
+
+```bash
+# 1. Catalog server, in its own shell. Registrations live in its memory only:
+#    if it restarts, repeat step 4 for each dataset.
+pixi run -e dataforge --frozen dataforge-serve                          # rerun server on :51235
+
+# 2. Fetch the raw corpus, or verify a local one (--root <dir> if it is not at the default)
+pixi run -e dataforge --frozen dataforge-download <dataset>
+
+# 3. One base-layer rrd per sequence; existing rrds are skipped
+pixi run -e dataforge --frozen dataforge-convert <dataset>               # --sequence <key> | --force
+
+# 4. Register the rrds and the dataset's two blueprints
+pixi run -e dataforge --frozen dataforge-register <dataset>              # --catalog-url <url>
+
+# 5. Open one recording straight from disk
+pixi run -e dataforge --frozen dataforge-view <dataset> --rr-config.headless   # --sequence <key>
+```
+
+Open the catalog with `rerun rerun+http://127.0.0.1:51235`, or a web viewer
+with `?url=rerun+http://<host>:51235`. Reload the viewer after re-registering;
+it caches catalog entries.
+
+### Your own footage (wildcap)
+
+wildcap takes bare mp4s — no calibration, no metadata, no sync. Because one
+catalog dataset holds one camera layout (see *Blueprints*), each corpus gets a
+`--corpus` name:
+
+```
+data/raw/wildcap-<corpus>/<capture>/exo/*.mp4      one file per static camera
+data/raw/wildcap-<corpus>/<capture>/ego/*.mp4      optional: one head-mounted device's streams
+```
+
+```bash
+pixi run -e dataforge --frozen dataforge-convert  wildcap --corpus <corpus> --root data/raw/wildcap-<corpus>
+pixi run -e dataforge --frozen dataforge-register wildcap --corpus <corpus> --root data/raw/wildcap-<corpus>
+```
+
+That registers dataset `wildcap-<corpus>`. `.mov` is skipped with a warning
+(remux: `ffmpeg -i in.mov -c copy out.mp4`).
+
+### Environment variables
+
+| variable | default | purpose |
+| --- | --- | --- |
+| `DATAFORGE_OUTPUT_ROOT` | `packages/dataforge/data/dataforge/rrd` | where rrds and blueprints go; set it for convert **and** register |
+| `DATAFORGE_RAW_ROOT` | `packages/dataforge/data/raw` | where raw corpora are fetched to |
+| `DATAFORGE_FFMPEG` | the env's ffmpeg | an ffmpeg with hardware encoding. Sources with B-frames (most phone HEVC) must be re-encoded; the env's ffmpeg does that on the CPU, silently and slowly |
+
+Paths in `--root`/`--sequence` and the defaults above are relative to
+`packages/dataforge/` (the tasks run there).
+
 ## What exists
 
 **Contracts** (`dataforge/`): `identity.py` (one `SequenceIdentity` derives the
@@ -14,32 +70,43 @@ sequence key, the Rerun recording id, and the rrd filename), `paths.py` (the
 layer-major output tree), `schema.py` (the `exoego:v2` entity paths and the
 single `video_time` timeline, as code), `writing.py` (atomic publication and the
 capture/convert recording properties), `logging_toolkit.py` (the shared rig-node,
-video-stream, and IMU writers), and `transports.py` (`local_verify`; the fetchers
-land with the next dataset).
+video-stream, and IMU writers), and `transports.py` (`local_verify`).
 
 **Datasets** (`dataforge/datasets/`), one config + one dataset class each:
 
-| dataset | raw corpus | one sequence | rrd contents |
-| --- | --- | --- | --- |
-| `robocap` | `/mnt/nas/datasets/robocap` | one `(device, session)`; file-roll segments merge at convert | 6 fisheye video streams, the dev0 IMU, the cap mesh |
-| `selfcap` | `/mnt/nas/datasets/exoego-self-collected/main` | one cut episode | 4 iPhone exo rigs + the OAK ego rig + the Quest (9 cameras), the OAK IMU, the Quest head-pose track |
+| dataset | one sequence | rrd contents |
+| --- | --- | --- |
+| `robocap` | one `(device, session)`; file-roll segments merge at convert | 6 fisheye video streams, the dev0 IMU, the cap mesh |
+| `selfcap` | one cut episode | 4 phone exo rigs + the OAK ego rig + the Quest (9 cameras), the OAK IMU, the Quest head-pose track |
+| `wildcap` | one capture directory | the videos only: no `Pinhole`, no `ViewCoordinates`, no transforms — calibration, sync and localization are later layers |
 
-**Verbs**, each a thin `tools/apps/*.py` shim over `dataforge/apis/`:
+A config's `command` is its CLI subcommand; its `name` is the catalog dataset
+and the prefix of every recording id. They are equal for robocap and selfcap;
+wildcap derives `wildcap-<corpus>`.
+
+**Verbs**, each a thin `tools/apps/*.py` shim over `dataforge/apis/`.
+`convert` writes `<DATAFORGE_OUTPUT_ROOT>/base/<recording_id>.rrd` through a
+temp file that atomically replaces the target, so "exists = done" and a re-run
+never truncates a file the catalog server holds open. Derived layers (slam,
+pose, labels) stack onto the same entities as sibling layers; v1 emits `base`.
+
+## Blueprints
+
+Every dataset provides two (abstract on `DataforgeDataset`; missing one fails
+at `setup()`):
+
+- **default** — applied when a segment is opened from the catalog. The catalog
+  holds exactly one per dataset, so one dataset = one camera layout.
+- **segment table** — the preview card the table renders for every visible row
+  at once, so it decodes exactly one video stream.
+
+`register` adds them once and never replaces them (each registration is a new
+entry in the viewer's blueprint list). To refresh: delete the dataset, then
+re-register — files on disk are untouched.
 
 ```bash
-pixi run -e dataforge --frozen dataforge-download selfcap        # fetch, or verify a local corpus
-pixi run -e dataforge --frozen dataforge-convert robocap --sequence f408193e6447b3b0/s1
-pixi run -e dataforge --frozen dataforge-register selfcap        # into a local `rerun server` catalog
-pixi run -e dataforge --frozen dataforge-view robocap --rr-config.headless
+pixi run -e dataforge --frozen python -c "from rerun.catalog import CatalogClient; CatalogClient('rerun+http://127.0.0.1:51235').get_dataset(name='<name>').delete()"
 ```
-
-`convert` writes **one base-layer rrd per sequence**, layer-major, at
-`<DATAFORGE_OUTPUT_ROOT>/base/<recording_id>.rrd` — a temp file that atomically
-replaces the target, so "exists = done" and a re-run never truncates a file a
-catalog server holds open. Derived layers (slam, pose, labels) stack onto the
-same entities as sibling layers; v1 emits `base` only. Each rrd embeds a
-per-recording blueprint; `register` additionally sets the dataset-wide default
-blueprint on the catalog dataset.
 
 Conventions this package follows — beartype under `PIXI_DEV_MODE`, thin `tools/`
 shims, jaxtyping annotations, `pixi run -e dataforge-dev {lint,typecheck,deadcode,tests}` —
