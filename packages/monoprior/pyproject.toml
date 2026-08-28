@@ -1,6 +1,6 @@
 [project]
 name = "monopriors"
-version = "0.3.2"
+version = "0.3.3"
 description = "Monocular Geometric Priors"
 requires-python = ">=3.11.0"
 readme = "README.md"
@@ -23,6 +23,7 @@ include = ["monopriors*", "tools*"]
 monopriors = [
     "third_party/g3t/LICENSE.txt",
     "third_party/g3t/README.md",
+    "third_party/zipdepth/LICENSE",
 ]
 
 [tool.ruff]
@@ -33,6 +34,7 @@ exclude = [
     "monopriors/third_party/g3t",
     "monopriors/third_party/promptda",
     "monopriors/third_party/video_depth_anything",
+    "monopriors/third_party/zipdepth",
     "notebooks",
 ]
 
@@ -72,6 +74,7 @@ exclude = [
     "*/third_party/g3t/*",
     "*/third_party/promptda/*",
     "*/third_party/video_depth_anything/*",
+    "*/third_party/zipdepth/*",
 ]
 sort_by_size = true
 min_confidence = 60

@@ -617,6 +617,47 @@ env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
 description = "Ingest: same as prompt-da-arkitscenes-register but decodes the raw .mov with torchcodec, registering the promptda_raw layer (needs arkitscenes-download-serve running)"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# zipdepth — training / eval / export for ZipDepth; the network is vendored in
+# monopriors (monopriors.third_party.zipdepth). Explicit platforms required —
+# see AGENTS.md "Platforms & lockfile".
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.zipdepth]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.zipdepth.dependencies]
+python = "3.12.*"
+tyro = ">=0.9.1,<0.10"
+matplotlib = ">=3.8.3"
+pyyaml = ">=6.0"
+tensorboard = ">=2.16.0"
+# dataset.py decodes JPEGs with PyTurboJPEG (pypi) on top of the conda libjpeg-turbo
+libjpeg-turbo = ">=3.0.0,<4"
+
+[feature.zipdepth.pypi-dependencies]
+zipdepth = { path = "packages/zipdepth", editable = true }
+monopriors = { path = "packages/monoprior", editable = true }
+# monopriors' metadata requires sam3; resolve it to the workspace package like the other monopriors consumers
+sam3 = { path = "packages/sam3", editable = true }
+# albucore -> simsimd has no conda-forge linux-aarch64 build
+albumentations = ">=2.0.0"
+pyturbojpeg = ">=2.0.0,<3"
+
+[feature.zipdepth.activation.env]
+PACKAGE_DIR = "packages/zipdepth"
+# authored code only; the unmodified upstream tree (data/loss/training/evaluation/upstream_cli) is a vendor boundary
+PYREFLY_TARGET = "zipdepth/apis zipdepth/__init__.py tests tools"
+
+[feature.zipdepth.tasks.zipdepth-infer-rerun]
+cmd = "python tools/infer_rerun.py"
+cwd = "packages/zipdepth"
+description = "ZipDepth single-image inference visualized in Rerun (2D + 3D); --checkpoint for a trained .pth"
+
+[feature.zipdepth.tasks.zipdepth-train-smoke]
+cmd = "python tools/train_smoke.py"
+cwd = "packages/zipdepth"
+description = "Smoke: self-distilled example data -> train -> resume -> torchrun -> checkpoints load through monopriors ZipDepthPredictor"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # wilor-nano
 # ═══════════════════════════════════════════════════════════════════════════
 # Explicit platforms required — see AGENTS.md "Platforms & lockfile".
@@ -2549,6 +2590,17 @@ prompt-da-stream-dev = { features = [
     "prompt-da-stream",
     "dev",
 ], solve-group = "prompt-da-stream", no-default-feature = true }
+zipdepth = { features = [
+    "common",
+    "cuda",
+    "zipdepth",
+], solve-group = "zipdepth", no-default-feature = true }
+zipdepth-dev = { features = [
+    "common",
+    "cuda",
+    "zipdepth",
+    "dev",
+], solve-group = "zipdepth", no-default-feature = true }
 wilor-nano = { features = [
     "common",
     "cuda",
