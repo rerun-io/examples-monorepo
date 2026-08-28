@@ -11,6 +11,7 @@ from monopriors.models.metric_depth.base_metric_depth import (
     BaseMetricPredictor,
     MetricDepthPrediction,
 )
+from monopriors.models.relative_depth.unidepth import predicted_error_to_confidence
 
 
 class UniDepthPredictions(TypedDict):
@@ -97,8 +98,7 @@ class UniDepthMetricPredictor(BaseMetricPredictor[UniDepthModel]):
 
         assert depth_b1hw.shape[0] == 1, "Batch size must be 1"
 
-        # normalize the confidence to 0-1
-        conf_b1hw = (conf_b1hw - conf_b1hw.min()) / (conf_b1hw.max() - conf_b1hw.min())
+        conf_b1hw = predicted_error_to_confidence(conf_b1hw)
 
         # convert to numpy and rearrange
         depth_hw = rearrange(depth_b1hw, "1 1 h w -> h w").numpy(force=True)

@@ -18,7 +18,7 @@ class RelativeDepthPrediction:
     # relative depth
     K_33: Float32[np.ndarray, "3 3"]
     # intrinsics
-    confidence: Float32[np.ndarray, "h w"] | None = None
+    confidence: Float32[np.ndarray, "h w"] | None
     # per-pixel confidence in [0, 1]; None when the model has no confidence head
     # (DepthAnything v1/v2, VideoDepthAnything, ZipDepth). MoGe gives a validity mask,
     # UniDepth a normalized confidence.
