@@ -12,6 +12,8 @@ import torch
 from jaxtyping import Bool, Float32, UInt8
 from torch import Tensor
 
+from monopriors.models.surface_normal.moge_v2_trt import Encoder
+
 requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 
@@ -168,8 +170,9 @@ def test_torch_predictor_returns_batched_metric_geometry() -> None:
 
 
 @requires_cuda
-def test_trt_matches_torch_twin_at_default_arkitscenes_resolution() -> None:
-    """TensorRT and ONNX-compatible torch geometry meet the parity bounds."""
+@pytest.mark.parametrize("encoder", ("vitl", "vitb", "vits"))
+def test_trt_matches_torch_twin_at_default_arkitscenes_resolution(encoder: Encoder) -> None:
+    """TensorRT and ONNX-compatible torch geometry meet the parity bounds for every encoder."""
     from monopriors.models.monoprior.moge_v2_trt import (
         DEFAULT_IMAGE_HW,
         MoGeV2GeometryOutput,
@@ -179,8 +182,8 @@ def test_trt_matches_torch_twin_at_default_arkitscenes_resolution() -> None:
 
     rgb_bhw3: UInt8[Tensor, "2 756 1008 3"] = _synthetic_rgb_batch(2, DEFAULT_IMAGE_HW)
     rgb_bhw3[1] = torch.flip(rgb_bhw3[1], dims=(1,))
-    trt_predictor: MoGeV2TrtGeometryPredictor = MoGeV2TrtGeometryPredictor(batch_size=8)
-    torch_predictor: MoGeV2TorchGeometryPredictor = MoGeV2TorchGeometryPredictor()
+    trt_predictor: MoGeV2TrtGeometryPredictor = MoGeV2TrtGeometryPredictor(encoder=encoder, batch_size=8)
+    torch_predictor: MoGeV2TorchGeometryPredictor = MoGeV2TorchGeometryPredictor(encoder=encoder)
 
     trt_prediction: MoGeV2GeometryOutput = trt_predictor(rgb_bhw3)
     torch_prediction: MoGeV2GeometryOutput = torch_predictor(rgb_bhw3)
@@ -228,11 +231,21 @@ def test_trt_matches_torch_twin_at_default_arkitscenes_resolution() -> None:
 
 
 @requires_cuda
-def test_trt_geometry_matches_vendored_infer_convention() -> None:
-    """TRT keeps vendored infer's raw-point, metric, and RDF conventions."""
+@pytest.mark.parametrize("encoder", ("vitl", "vitb", "vits"))
+@pytest.mark.parametrize("caller_hw", ((756, 1008), (720, 1280)), ids=("4:3", "16:9"))
+def test_trt_geometry_matches_vendored_infer_convention(encoder: Encoder, caller_hw: tuple[int, int]) -> None:
+    """TRT matches vendored ``infer`` (raw points, metric, RDF, normalized K) within tolerance.
+
+    Bars are set from measured errors on ``room.jpg`` (2026-08-28, RTX 5090):
+    depth/points median <= 0.7 %, p95 <= 0.85 %; focal <= 0.51 %; normals
+    mean <= 0.56 deg, p99 <= 4.3 deg; mask agreement 100 %. The residual is the
+    resample path (``infer`` resizes once inside the encoder; the batched
+    predictor resizes to the bucket and back), not the engine: the torch twin
+    sits at the same distance from ``infer``.
+    """
     from einops import rearrange
 
-    from monopriors.models.monoprior.moge_v2_trt import DEFAULT_IMAGE_HW, MoGeV2GeometryOutput, MoGeV2TrtGeometryPredictor
+    from monopriors.models.monoprior.moge_v2_trt import MoGeV2GeometryOutput, MoGeV2TrtGeometryPredictor
     from monopriors.models.surface_normal.moge_v2 import MOGE_V2_NORMAL_CHECKPOINTS
     from monopriors.third_party.moge.model._inference import InferenceOutput
     from monopriors.third_party.moge.model.v2 import MoGeModel
@@ -240,19 +253,14 @@ def test_trt_geometry_matches_vendored_infer_convention() -> None:
     image_path: Path = Path("data/examples/single-image/room.jpg")
     bgr_hw3: UInt8[np.ndarray, "h0 w0 3"] | None = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
     if bgr_hw3 is None:
-        rgb_bhw3: UInt8[Tensor, "1 756 1008 3"] = _synthetic_rgb_batch(1, DEFAULT_IMAGE_HW)
-    else:
-        resized_bgr_hw3: UInt8[np.ndarray, "756 1008 3"] = cv2.resize(
-            bgr_hw3,
-            (DEFAULT_IMAGE_HW[1], DEFAULT_IMAGE_HW[0]),
-            interpolation=cv2.INTER_AREA,
-        )
-        rgb_hw3: UInt8[np.ndarray, "756 1008 3"] = cv2.cvtColor(resized_bgr_hw3, cv2.COLOR_BGR2RGB)
-        rgb_bhw3 = torch.from_numpy(rgb_hw3).cuda()[None]
-    image_3hw: Float32[Tensor, "3 756 1008"] = rearrange(rgb_bhw3[0], "h w c -> c h w").float() / 255.0  # pyrefly: ignore  # bad-argument-type — einops stub false positive
+        pytest.skip(f"{image_path} missing; run the monoprior download task")
+    resized_bgr_hw3: UInt8[np.ndarray, "h w 3"] = cv2.resize(bgr_hw3, (caller_hw[1], caller_hw[0]), interpolation=cv2.INTER_AREA)
+    rgb_hw3: UInt8[np.ndarray, "h w 3"] = cv2.cvtColor(resized_bgr_hw3, cv2.COLOR_BGR2RGB)
+    rgb_bhw3: UInt8[Tensor, "1 h w 3"] = torch.from_numpy(rgb_hw3).cuda()[None]
+    image_3hw: Float32[Tensor, "3 h w"] = rearrange(rgb_bhw3[0], "h w c -> c h w").float() / 255.0  # pyrefly: ignore  # bad-argument-type — einops stub false positive
 
-    trt_predictor: MoGeV2TrtGeometryPredictor = MoGeV2TrtGeometryPredictor(batch_size=8)
-    checkpoint: tuple[str, str] = MOGE_V2_NORMAL_CHECKPOINTS["vitl"]
+    trt_predictor: MoGeV2TrtGeometryPredictor = MoGeV2TrtGeometryPredictor(encoder=encoder, batch_size=8)
+    checkpoint: tuple[str, str] = MOGE_V2_NORMAL_CHECKPOINTS[encoder]
     model: MoGeModel = MoGeModel.from_pretrained(checkpoint[0], revision=checkpoint[1]).to("cuda").eval()
     model.onnx_compatible_mode = True
 
@@ -264,33 +272,39 @@ def test_trt_geometry_matches_vendored_infer_convention() -> None:
         apply_mask=False,
         output_heads=("points", "normal", "mask", "scale"),
     )
-    reference_points_hw3: Float32[Tensor, "756 1008 3"] = reference["points"]
-    reference_depth_hw: Float32[Tensor, "756 1008"] = reference["depth"]
+    reference_points_hw3: Float32[Tensor, "h w 3"] = reference["points"]
+    reference_depth_hw: Float32[Tensor, "h w"] = reference["depth"]
     reference_intrinsics_33: Float32[Tensor, "3 3"] = reference["intrinsics"]
-    reference_normals_hw3: Float32[Tensor, "756 1008 3"] = reference["normal"]
+    reference_normals_hw3: Float32[Tensor, "h w 3"] = reference["normal"]
+    reference_mask_hw: Bool[Tensor, "h w"] = reference["mask"]
 
-    finite_hw: Bool[Tensor, "756 1008"] = torch.isfinite(reference_depth_hw)
-    assert finite_hw.any()
+    finite_hw: Bool[Tensor, "h w"] = torch.isfinite(reference_depth_hw)
+    assert finite_hw.float().mean().item() > 0.5
     relative_depth_error_valid: Float32[Tensor, "valid"] = (
         (trt_prediction.depth_bhw[0] - reference_depth_hw).abs() / reference_depth_hw.abs().clamp_min(1e-6)
     )[finite_hw]
-    assert torch.median(relative_depth_error_valid).item() < 0.01
-    intrinsics_indices: tuple[tuple[int, ...], tuple[int, ...]] = ((0, 1, 0, 1), (0, 1, 2, 2))
-    trt_intrinsics_4: Float32[Tensor, "4"] = trt_prediction.intrinsics_b33[0][intrinsics_indices]
-    reference_intrinsics_4: Float32[Tensor, "4"] = reference_intrinsics_33[intrinsics_indices]
-    intrinsics_relative_error_4: Float32[Tensor, "4"] = (trt_intrinsics_4 - reference_intrinsics_4).abs() / reference_intrinsics_4.abs()
-    assert intrinsics_relative_error_4.max().item() < 0.01
+    depth_median: float = torch.median(relative_depth_error_valid).item()
+    depth_p95: float = torch.quantile(relative_depth_error_valid, 0.95).item()
+    assert depth_median < 0.01 and depth_p95 < 0.03, f"depth: median={depth_median:.5f} p95={depth_p95:.5f}"
     point_relative_error_valid: Float32[Tensor, "valid"] = (
         torch.linalg.vector_norm(trt_prediction.points_bhw3[0] - reference_points_hw3, dim=-1)
         / torch.linalg.vector_norm(reference_points_hw3, dim=-1).clamp_min(1e-6)
     )[finite_hw]
-    assert torch.median(point_relative_error_valid).item() < 0.01
-    assert torch.quantile(point_relative_error_valid, 0.95).item() < 0.03
-    cosine_valid: Float32[Tensor, "valid"] = torch.sum(
-        trt_prediction.normals_bhw3[0] * reference_normals_hw3,
-        dim=-1,
-    )[finite_hw]
-    assert cosine_valid.mean().item() > 0.999
+    points_median: float = torch.median(point_relative_error_valid).item()
+    points_p95: float = torch.quantile(point_relative_error_valid, 0.95).item()
+    assert points_median < 0.01 and points_p95 < 0.03, f"points: median={points_median:.5f} p95={points_p95:.5f}"
+    intrinsics_indices: tuple[tuple[int, ...], tuple[int, ...]] = ((0, 1, 0, 1), (0, 1, 2, 2))
+    trt_intrinsics_4: Float32[Tensor, "4"] = trt_prediction.intrinsics_b33[0][intrinsics_indices]
+    reference_intrinsics_4: Float32[Tensor, "4"] = reference_intrinsics_33[intrinsics_indices]
+    intrinsics_relative_error_4: Float32[Tensor, "4"] = (trt_intrinsics_4 - reference_intrinsics_4).abs() / reference_intrinsics_4.abs()
+    assert intrinsics_relative_error_4.max().item() < 0.01, f"intrinsics: {intrinsics_relative_error_4.tolist()}"
+    cosine_valid: Float32[Tensor, "valid"] = torch.sum(trt_prediction.normals_bhw3[0] * reference_normals_hw3, dim=-1)[finite_hw].clamp(-1.0, 1.0)
+    angular_error_valid: Float32[Tensor, "valid"] = torch.rad2deg(torch.acos(cosine_valid))
+    normal_mean_degrees: float = angular_error_valid.mean().item()
+    normal_p99_degrees: float = torch.quantile(angular_error_valid, 0.99).item()
+    assert normal_mean_degrees < 1.0 and normal_p99_degrees < 5.0, f"normals: mean={normal_mean_degrees:.4f} p99={normal_p99_degrees:.4f} deg"
+    mask_agreement: float = ((trt_prediction.mask_bhw[0] > 0.5) == reference_mask_hw).float().mean().item()
+    assert mask_agreement > 0.99, f"mask agreement: {mask_agreement:.5f}"
 
 
 @requires_cuda
