@@ -11,6 +11,53 @@ from monopriors.models.metric_depth import METRIC_PREDICTORS, MetricDepthPredict
 from monopriors.models.relative_depth import RELATIVE_PREDICTORS, RelativeDepthPrediction
 from monopriors.models.surface_normal.base_normal_model import SurfaceNormalPrediction
 
+CONFIDENCE_THRESHOLD: float = 0.5
+"""Confidence in [0, 1] above which a pixel is shown as ``confident`` in the semantic mask."""
+
+
+def log_confidence(
+    pinhole_path: Path,
+    confidence_hw: Float32[np.ndarray, "h w"],
+    threshold: float = CONFIDENCE_THRESHOLD,
+    static: bool = False,
+) -> None:
+    """Log a confidence map twice: the full [0, 1] spectrum as grayscale (``confidence``), and its
+    thresholded semantic version as a segmentation image (``confidence_mask``: confident / not confident)."""
+    confidence_u8: UInt8[np.ndarray, "h w"] = (np.clip(confidence_hw, 0.0, 1.0) * 255).astype(np.uint8)
+    rr.log(f"{pinhole_path}/confidence", rr.Image(confidence_u8, color_model=rr.ColorModel.L), static=static)
+    classes: list[rr.AnnotationInfo] = [
+        rr.AnnotationInfo(id=0, label="not confident", color=(220, 60, 60)),
+        rr.AnnotationInfo(id=1, label="confident", color=(60, 200, 90)),
+    ]
+    rr.log(f"{pinhole_path}/confidence_mask", rr.AnnotationContext(classes), static=True)
+    rr.log(f"{pinhole_path}/confidence_mask", rr.SegmentationImage((confidence_hw > threshold).astype(np.uint8)), static=static)
+
+
+def create_relative_depth_blueprint(parent_log_path: Path) -> rrb.Blueprint:
+    """3D view beside image / depth / confidence (mask tab first, spectrum behind it).
+
+    The confidence views stay in the layout even for predictors without a confidence head; an
+    empty view is cheaper than a blueprint that depends on the prediction. Image-plane quads are
+    excluded from the 3D view so only the point cloud and camera are drawn there.
+    """
+    pinhole_path: Path = parent_log_path / "camera" / "pinhole"
+    return rrb.Blueprint(
+        rrb.Horizontal(
+            rrb.Spatial3DView(contents=["$origin/**", f"- {pinhole_path}/image", f"- {pinhole_path}/confidence", f"- {pinhole_path}/confidence_mask"]),
+            rrb.Vertical(
+                rrb.Spatial2DView(origin=f"{pinhole_path}/image"),
+                rrb.Spatial2DView(origin=f"{pinhole_path}/depth"),
+                rrb.Tabs(
+                    rrb.Spatial2DView(origin=f"{pinhole_path}/confidence_mask", name="confidence mask"),
+                    rrb.Spatial2DView(origin=f"{pinhole_path}/confidence", name="confidence"),
+                    active_tab=0,
+                ),
+            ),
+            column_shares=[3, 1],
+        ),
+        collapse_panels=True,
+    )
+
 
 def log_relative_pred(
     parent_log_path: Path,
@@ -20,6 +67,7 @@ def log_relative_pred(
     log_disparity: bool = False,
     jpeg_quality: int = 90,
     depth_edge_threshold: int | float = 1.1,
+    confidence_threshold: float = CONFIDENCE_THRESHOLD,
 ) -> None:
     cam_log_path: Path = parent_log_path / "camera"
     pinhole_path: Path = cam_log_path / "pinhole"
@@ -56,8 +104,8 @@ def log_relative_pred(
 
     rr.log(f"{pinhole_path}/depth", rr.DepthImage(depth_hw))
 
-    confidence_hw: Bool[np.ndarray, "h w"] = relative_pred.confidence > 0.5
-    rr.log(f"{pinhole_path}/confidence", rr.Image((confidence_hw * 255).astype(np.uint8)))
+    if relative_pred.confidence is not None:
+        log_confidence(pinhole_path, relative_pred.confidence, threshold=confidence_threshold)
 
     if log_disparity:
         # removes outliers from disparity (sometimes we can get weirdly large values)

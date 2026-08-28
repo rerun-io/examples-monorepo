@@ -34,7 +34,8 @@ exclude = [
     "monopriors/third_party/g3t",
     "monopriors/third_party/promptda",
     "monopriors/third_party/video_depth_anything",
-    "monopriors/third_party/zipdepth",
+    "tests/reference_data/zipdepth/upstream_architecture.py",
+    "tests/reference_data/zipdepth/upstream_model_utils.py",
     "notebooks",
 ]
 
@@ -74,11 +75,17 @@ exclude = [
     "*/third_party/g3t/*",
     "*/third_party/promptda/*",
     "*/third_party/video_depth_anything/*",
-    "*/third_party/zipdepth/*",
+    "*/tests/reference_data/zipdepth/upstream_architecture.py",
+    "*/tests/reference_data/zipdepth/upstream_model_utils.py",
 ]
 sort_by_size = true
 min_confidence = 60
 ignore_names = [
+    # third_party/zipdepth: TypedDict fields read by subscript and APIs used by packages/zipdepth
+    "heads",
+    "parameters_M",
+    "print_model_summary",
+    "fuse_remaining_conv_bn",
     "StableNormalPredictor",
     "aabb",
     "camera_model",

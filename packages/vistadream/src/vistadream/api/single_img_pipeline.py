@@ -86,6 +86,13 @@ def log_frame(parent_log_path: Path, frame: Frame, cam_params: PinholeParameters
 
 
 @dataclass
+
+def _confidence_mask(prediction: RelativeDepthPrediction) -> Bool[np.ndarray, "H W"]:
+    """MoGe's confidence is a 0/1 validity mask; VistaDream requires a predictor that emits one."""
+    if prediction.confidence is None:
+        raise ValueError("VistaDream requires MoGe (the only relative predictor with a validity mask)")
+    return prediction.confidence > 0
+
 class SingleImageConfig:
     """
     Configuration for Single Image Processing.
@@ -335,9 +342,7 @@ class SingleImagePipeline:
         frame.inpaint_wo_edge = frame_inpaint & ~edges_mask
 
         # Get depth confidence mask from depth prediction confidence
-        dpt_conf_mask: Float[np.ndarray, "H W"] = depth_prediction.confidence
-        dpt_conf_mask_bool: Bool[np.ndarray, "H W"] = dpt_conf_mask > 0
-        frame.dpt_conf_mask = dpt_conf_mask_bool
+        frame.dpt_conf_mask = _confidence_mask(depth_prediction)
 
         # Further refine inpaint_wo_edge with depth confidence mask
         frame.inpaint_wo_edge = frame.inpaint_wo_edge & dpt_conf_mask_bool
@@ -426,9 +431,7 @@ class SingleImagePipeline:
             # Just use the input image for depth prediction since there's no outpainting
             outpaint_rgb_hw3: UInt8[np.ndarray, "H W 3"] = np.array(outpaint_img.convert("RGB"))
             outpaint_rel_depth: RelativeDepthPrediction = self.predictor.__call__(rgb=outpaint_rgb_hw3, K_33=None)
-            dpt_conf_mask: Float[np.ndarray, "h w"] = outpaint_rel_depth.confidence
-            # convert to boolean mask, depth confidence mask is a binary mask where values > 0 are considered confident
-            dpt_conf_mask: Bool[np.ndarray, "H W"] = dpt_conf_mask > 0
+            dpt_conf_mask: Bool[np.ndarray, "H W"] = _confidence_mask(outpaint_rel_depth)
 
             outpaint_depth_hw: Float[np.ndarray, "H W"] = outpaint_rel_depth.depth
 
@@ -463,9 +466,7 @@ class SingleImagePipeline:
 
             outpaint_rgb_hw3: UInt8[np.ndarray, "H W 3"] = np.array(outpaint_img.convert("RGB"))
             outpaint_rel_depth: RelativeDepthPrediction = self.predictor.__call__(rgb=outpaint_rgb_hw3, K_33=None)
-            dpt_conf_mask: Float[np.ndarray, "h w"] = outpaint_rel_depth.confidence
-            # convert to boolean mask, depth confidence mask is a binary mask where values > 0 are considered confident
-            dpt_conf_mask: Bool[np.ndarray, "H W"] = dpt_conf_mask > 0
+            dpt_conf_mask: Bool[np.ndarray, "H W"] = _confidence_mask(outpaint_rel_depth)
 
             outpaint_depth_hw: Float[np.ndarray, "H W"] = outpaint_rel_depth.depth
             # remove any nans or infs and set them to 0
