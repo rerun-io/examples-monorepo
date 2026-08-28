@@ -36,19 +36,6 @@ def resize_image(image: np.ndarray, max_dim: int = 1024) -> np.ndarray:
 
 def relative_depth_from_img(config: PredictorConfig) -> None:
     parent_log_path = Path("world")
-    blueprint = rrb.Blueprint(
-        rrb.Horizontal(
-            rrb.Spatial3DView(),
-            rrb.Vertical(
-                rrb.Spatial2DView(origin=f"{parent_log_path}/camera/pinhole/image"),
-                rrb.Spatial2DView(origin=f"{parent_log_path}/camera/pinhole/depth"),
-                rrb.Spatial2DView(origin=f"{parent_log_path}/camera/pinhole/confidence"),
-            ),
-            column_shares=[3, 1],
-        ),
-        collapse_panels=True,
-    )
-    rr.send_blueprint(blueprint=blueprint)
     bgr_hw3 = cv2.imread(str(config.image_path))
     if bgr_hw3 is None:
         raise FileNotFoundError(f"Failed to read image {config.image_path}")
@@ -59,6 +46,17 @@ def relative_depth_from_img(config: PredictorConfig) -> None:
 
     predictor: BaseRelativePredictor = get_relative_predictor(config.predictor_name)(device="cuda")
     relative_pred: RelativeDepthPrediction = predictor.__call__(rgb=rgb_hw3, K_33=None)
+
+    pinhole_path = parent_log_path / "camera" / "pinhole"
+    image_views = [rrb.Spatial2DView(origin=f"{pinhole_path}/image"), rrb.Spatial2DView(origin=f"{pinhole_path}/depth")]
+    if relative_pred.confidence is not None:
+        image_views += [rrb.Spatial2DView(origin=f"{pinhole_path}/confidence"), rrb.Spatial2DView(origin=f"{pinhole_path}/confidence_mask")]
+    rr.send_blueprint(
+        rrb.Blueprint(
+            rrb.Horizontal(rrb.Spatial3DView(), rrb.Vertical(*image_views), column_shares=[3, 1]),
+            collapse_panels=True,
+        )
+    )
     rr.set_time("time", sequence=0)
     rr.log("/", rr.ViewCoordinates.RDF, static=True)
     log_relative_pred(parent_log_path, relative_pred, rgb_hw3, depth_edge_threshold=config.depth_edge_threshold)
