@@ -2,7 +2,7 @@ import gc
 import os
 import tempfile
 from pathlib import Path
-from typing import get_args
+from typing import Final, get_args
 
 import cv2
 import gradio as gr
@@ -28,6 +28,7 @@ except ImportError:
     print("Not running on Zero")
 
 model_load_status: str = "Models loaded and ready to use!"
+EXAMPLE_DATA_DIR: Final[Path] = Path(__file__).resolve().parents[2] / "data" / "examples" / "single-image"
 if gr.NO_RELOAD:
     DEPTH_PREDICTOR: BaseRelativePredictor = get_relative_predictor("MoGeV1Predictor")(device="cuda")
 
@@ -184,10 +185,7 @@ with gr.Blocks() as depth_inference_block:
             },
         )
 
-    # get all jpegs in examples path
-    examples_paths = Path("examples").glob("*.jpeg")
-    # set the examples to be the sorted list of input parameterss (path, remove_flying_pixels, depth_map_threshold)
-    examples_list = sorted([[str(path)] for path in examples_paths])
+    examples_list = sorted([str(path)] for path in EXAMPLE_DATA_DIR.glob("*.jp*g"))
     examples = gr.Examples(
         examples=examples_list,
         inputs=[

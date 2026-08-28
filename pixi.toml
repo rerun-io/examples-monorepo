@@ -481,8 +481,9 @@ description = "Run monoprior (metric depth + normals) on example image"
 # ── App tasks (Gradio UIs) ──────────────────────────────────────────────
 [feature.monoprior.tasks.monoprior-depth-compare-app]
 cmd = "python tools/apps/depth_compare_app.py"
+depends-on = ["_monoprior-download-single-image"]
 cwd = "packages/monoprior"
-description = "Launch Gradio depth comparison UI"
+description = "Launch Gradio depth comparison UI (binds 127.0.0.1:7861; pass --port/--root-path to override)"
 
 [feature.monoprior.tasks.monoprior-calibration-app]
 cmd = "python tools/apps/calibration_app.py"

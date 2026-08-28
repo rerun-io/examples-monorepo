@@ -130,7 +130,8 @@ def create_compare_depth_blueprint(
 ) -> rrb.Blueprint:
     # model_names: list[str] = [model.__class__.__name__ for model in models]
     contents = [
-        rrb.Spatial3DView(origin=f"{model_names[0]}"),
+        # disparity has no pinhole, so the 3D view can't back-project it; keep it out of the 3D view to avoid the warning badge
+        rrb.Spatial3DView(origin=f"{model_names[0]}", contents=["$origin/**", "- $origin/camera/disparity"]),
         rrb.Vertical(
             rrb.Spatial2DView(
                 origin=f"{model_names[0]}/camera/pinhole/image",
@@ -142,7 +143,8 @@ def create_compare_depth_blueprint(
                 origin=f"{model_names[0]}/camera/disparity",
             ),
         ),
-        rrb.Spatial3DView(origin=f"{model_names[1]}"),
+        # disparity has no pinhole, so the 3D view can't back-project it; keep it out of the 3D view to avoid the warning badge
+        rrb.Spatial3DView(origin=f"{model_names[1]}", contents=["$origin/**", "- $origin/camera/disparity"]),
         rrb.Vertical(
             rrb.Spatial2DView(
                 origin=f"{model_names[1]}/camera/pinhole/image",
