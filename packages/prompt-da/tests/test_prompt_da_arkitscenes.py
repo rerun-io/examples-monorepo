@@ -152,7 +152,7 @@ def test_fuse_and_log_batch_preserves_frame_order_and_fusion_inputs(monkeypatch:
     fuser: Open3DFuser = object.__new__(Open3DFuser)
     recording = rr.RecordingStream("test", recording_id="segment", send_properties=False)
 
-    inferred_frames = fuse_and_log_batch(completed, recording, fuser, PDAArkitScenesConfig())
+    inferred_frames = fuse_and_log_batch(completed, recording, fuser, PDAArkitScenesConfig().max_depth_range_meter)
 
     assert inferred_frames == 2
     assert logged_timestamps == [100, 200]

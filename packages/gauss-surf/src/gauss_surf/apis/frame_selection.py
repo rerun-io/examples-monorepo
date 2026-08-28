@@ -1,13 +1,12 @@
 """Select sharp ARKitScenes frames and publish a catalog layer."""
 
-import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeAlias
 
 import numpy as np
 import rerun as rr
 import torch
+from arkitscenes_download.ingest.layer_batch import LayerBatchSummary, run_layer_batch, segment_ids_from_selection
 from arkitscenes_download.ingest.paths import (
     FRAME_SELECTION_ULTRAWIDE,
     FRAME_SELECTION_WIDE,
@@ -18,7 +17,6 @@ from arkitscenes_download.ingest.paths import (
     VIDEO_WIDE,
 )
 from arkitscenes_download.ingest.recording import atomic_recording
-from beartype.roar import BeartypeException
 from einops import rearrange
 from jaxtyping import Float32, UInt8
 from numpy import ndarray
@@ -30,8 +28,6 @@ from torchcodec.decoders import VideoDecoder
 from gauss_surf.catalog import DEFAULT_CATALOG_URL, DEFAULT_DATASET_NAME, connect_catalog, register_layer
 from gauss_surf.contracts import FRAME_SELECTION_LAYER, ULTRAWIDE_FPS, WIDE_FPS
 from gauss_surf.frame_selection import FrameScores, SelectionResult, TimedeltaNs, score_frames, select_ultrawide_frames, select_wide_frames
-
-ScoreArrays: TypeAlias = tuple[Float32[ndarray, "n"], Float32[ndarray, "n"]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,17 +62,12 @@ class CameraMeasurements:
     """Packet timestamp per scored frame, as ``timedelta64[ns]``."""
     sharpness: Float32[ndarray, "n_frames"]
     """Normalized sharpness score per frame."""
-    texture: Float32[ndarray, "n_frames"]
-    """Grayscale standard deviation per frame."""
 
 
-def _score_frame_batch(frames_hwc: list[UInt8[Tensor, "h w 3"]]) -> ScoreArrays:
+def _score_frame_batch(frames_hwc: list[UInt8[Tensor, "h w 3"]]) -> Float32[ndarray, "b"]:
     """Stack and score one same-resolution decoded frame batch."""
-    frames_bhw3: UInt8[Tensor, "b h w 3"] = torch.stack(frames_hwc)
-    scores: FrameScores = score_frames(frames_bhw3)
-    sharpness_b: Float32[ndarray, "b"] = scores.sharpness.detach().cpu().numpy().astype(np.float32, copy=False)
-    texture_b: Float32[ndarray, "b"] = scores.texture.detach().cpu().numpy().astype(np.float32, copy=False)
-    return sharpness_b, texture_b
+    scores: FrameScores = score_frames(torch.stack(frames_hwc))
+    return scores.sharpness.detach().cpu().numpy().astype(np.float32, copy=False)
 
 
 def _score_camera(
@@ -106,7 +97,6 @@ def _score_camera(
 
     pending_frames_hwc: list[UInt8[Tensor, "h w 3"]] = []
     sharpness_parts: list[Float32[ndarray, "batch"]] = []
-    texture_parts: list[Float32[ndarray, "batch"]] = []
     with torch.inference_mode():
         for frame_index in range(len(timestamps_n)):
             frame_chw: UInt8[Tensor, "3 h w"] = decoder.get_frame_at(frame_index).data
@@ -114,19 +104,14 @@ def _score_camera(
             pending_frames_hwc.append(frame_hwc)
             if len(pending_frames_hwc) < batch_size:
                 continue
-            batch_scores: ScoreArrays = _score_frame_batch(pending_frames_hwc)
-            sharpness_parts.append(batch_scores[0])
-            texture_parts.append(batch_scores[1])
+            sharpness_parts.append(_score_frame_batch(pending_frames_hwc))
             pending_frames_hwc = []
         if pending_frames_hwc:
-            final_scores: ScoreArrays = _score_frame_batch(pending_frames_hwc)
-            sharpness_parts.append(final_scores[0])
-            texture_parts.append(final_scores[1])
+            sharpness_parts.append(_score_frame_batch(pending_frames_hwc))
 
     sharpness_n: Float32[ndarray, "n_frames"] = np.concatenate(sharpness_parts).astype(np.float32, copy=False)
-    texture_n: Float32[ndarray, "n_frames"] = np.concatenate(texture_parts).astype(np.float32, copy=False)
     assert len(sharpness_n) == len(timestamps_n), f"{entity_path} scored {len(sharpness_n)} of {len(timestamps_n)} packets"
-    return CameraMeasurements(timestamps=timestamps_n, sharpness=sharpness_n, texture=texture_n)
+    return CameraMeasurements(timestamps=timestamps_n, sharpness=sharpness_n)
 
 
 def _send_camera_columns(
@@ -214,42 +199,18 @@ def process_segment(dataset: DatasetEntry, config: Config, video_id: str, device
 
 def main(config: Config) -> None:
     """Run frame selection for one segment or a batch queue with skip-if-exists semantics."""
-    if (config.video_id is None) == (config.video_ids_file is None):
-        raise SystemExit("provide exactly one of --video-id or --video-ids-file")
+    video_ids: list[str] = segment_ids_from_selection(config.video_id, config.video_ids_file)
     if not torch.cuda.is_available():
         raise SystemExit("frame selection requires a CUDA device for whole-segment NVDEC decoding")
-    if config.video_id is not None:
-        video_ids: list[str] = [config.video_id]
-    else:
-        assert config.video_ids_file is not None  # enforced by the exclusive-arg check above
-        video_ids = [line.strip() for line in config.video_ids_file.read_text().splitlines() if line.strip()]
     client: CatalogClient = connect_catalog(config.catalog_url, config.dataset_name)
     dataset: DatasetEntry = client.get_dataset(config.dataset_name)
     device: torch.device = torch.device("cuda")
 
-    completed: int = 0
-    skipped: int = 0
-    failed: list[str] = []
-    for video_id in video_ids:
-        rrd_path: Path = config.output_dir / f"{video_id}.rrd"
-        if rrd_path.is_file() and not config.force:
-            skipped += 1
-            print(f"SKIP {video_id}: {rrd_path} exists (use --force to regenerate)", flush=True)
-            continue
-        start: float = time.perf_counter()
-        try:
-            process_segment(dataset, config, video_id, device)
-        except BeartypeException:
-            raise
-        except Exception as error:
-            failed.append(video_id)
-            print(f"FAIL {video_id}: {type(error).__name__}: {error}", flush=True)
-            if config.video_id is not None:
-                raise
-            continue
-        completed += 1
-        print(f"DONE {video_id}: {time.perf_counter() - start:.1f}s ({completed} done, {skipped} skipped, {len(failed)} failed)", flush=True)
+    def process(video_id: str) -> str:
+        return f"wrote {process_segment(dataset, config, video_id, device).name}"
 
-    print(f"frame-selection batch: {completed} done, {skipped} skipped, {len(failed)} failed of {len(video_ids)}")
-    if failed:
-        print("failed segments: " + ", ".join(failed))
+    summary: LayerBatchSummary = run_layer_batch(
+        video_ids, lambda video_id: config.output_dir / f"{video_id}.rrd", process, force=config.force, label="frame-selection"
+    )
+    if summary.failed:
+        raise SystemExit(1)
