@@ -39,6 +39,44 @@ Each pipeline stage is also its own task (`gauss-surf-frame-selection`,
 `gauss-surf-moge-normals`, `gauss-surf-ultrawide-signals`,
 `gauss-surf-train-gsplat`) — `pixi task list -e gauss-surf` lists everything.
 
+## Corpus run: frame selection + chosen-frame PromptDA
+
+The first two stages run over many segments in one process each, writing one
+layer RRD per segment straight into the corpus layer tree and registering it.
+Existing outputs are skipped (`--force` regenerates); a segment that fails is
+logged and the batch continues, so a run can be stopped and resumed at will.
+
+```bash
+CATALOG=rerun+http://<host>:51235
+NAS=/mnt/nas/datasets/arkitscenes/arkitscenes.2026.07.22   # layer-major corpus root
+
+# 1. Queue: one segment id per line (e.g. every landscape gt-clean segment)
+pixi run -e prompt-da-stream python -c "
+from rerun.catalog import CatalogClient; import pyarrow as pa
+t = pa.Table.from_batches(CatalogClient('$CATALOG').get_dataset('arkitscenes-v2-gt-clean').segment_table().collect())
+print('\n'.join(sorted(str(r['rerun_segment_id']) for r in t.to_pylist()
+      if int(r['property:capture:orientation_quarter_turns_ccw'][0]) == 0)))" > queue.txt
+
+# 2. Frame selection (~6 s/segment) — must finish before PromptDA reads its chosen frames
+pixi run -e gauss-surf gauss-surf-frame-selection --video-ids-file queue.txt \
+  --catalog-url $CATALOG --output-dir $NAS/frame_selection
+
+# 3. PromptDA at the chosen frames (~35-50 s/segment; fine to run concurrently, it trails stage 2)
+pixi run -e prompt-da-stream prompt-da-arkitscenes-chosen --video-ids-file queue.txt \
+  --catalog-url $CATALOG --output-dir $NAS/promptda
+
+# 4. Sub-datasets are snapshots: rebuild gt-clean so it sees the new layers
+pixi run -e arkitscenes-download arkitscenes-download-gt-subdataset --catalog-url $CATALOG
+```
+
+Run long batches in a tmux session started over `ssh <host>` (a tmux server
+started from an agent shell dies with that shell). The catalog is in-memory: if
+the server restarts, re-register from the layer tree
+(`register_catalog.py --rrd-dir $NAS`, then `dataset.register(<layer>/*.rrd)` for
+the derived layers) — the RRDs on disk are the durable product. Segments with
+fewer than `--min-chosen` sharp windows (default 200) are rejected by design and
+get no PromptDA layer.
+
 ## What the trainer does
 
 - **Catalog-native input**: all cameras, poses, video, PromptDA depth, and MoGe

@@ -7,31 +7,38 @@ import pytest
 from arkitscenes_download.ingest.layer_batch import run_layer_batch, segment_ids_from_selection
 
 
-def test_run_layer_batch_skips_existing_unless_forced(tmp_path: Path) -> None:
+def test_run_layer_batch_skips_generation_but_still_registers_existing(tmp_path: Path) -> None:
     (tmp_path / "a.rrd").touch()
-    processed: list[str] = []
+    generated: list[str] = []
+    registered: list[str] = []
 
-    def process(video_id: str) -> str:
-        processed.append(video_id)
-        (tmp_path / f"{video_id}.rrd").touch()
+    def generate(video_id: str, path: Path) -> str:
+        generated.append(video_id)
+        path.touch()
         return "ok"
 
-    summary = run_layer_batch(["a", "b"], lambda v: tmp_path / f"{v}.rrd", process, force=False, label="test")
+    summary = run_layer_batch(["a", "b"], lambda v: tmp_path / f"{v}.rrd", generate, lambda v, _: registered.append(v), force=False, label="t")
     assert (summary.done, summary.skipped, summary.failed) == (["b"], ["a"], [])
-    assert processed == ["b"]
+    assert generated == ["b"]
+    assert registered == ["a", "b"]  # the pre-existing file is (re-)registered, closing the written-but-unregistered gap
 
-    summary = run_layer_batch(["a"], lambda v: tmp_path / f"{v}.rrd", process, force=True, label="test")
-    assert summary.done == ["a"]
+    summary = run_layer_batch(["a"], lambda v: tmp_path / f"{v}.rrd", generate, None, force=True, label="t")
+    assert summary.done == ["a"] and generated == ["b", "a"]
 
 
 def test_run_layer_batch_records_failures_and_continues(tmp_path: Path) -> None:
-    def process(video_id: str) -> str:
+    def generate(video_id: str, path: Path) -> str:
         if video_id == "bad":
             raise RuntimeError("boom")
         return "ok"
 
-    summary = run_layer_batch(["bad", "good"], lambda v: tmp_path / f"{v}.rrd", process, force=False, label="test")
-    assert (summary.done, summary.failed) == (["good"], ["bad"])
+    def register(video_id: str, path: Path) -> None:
+        if video_id == "unregisterable":
+            raise RuntimeError("catalog down")
+
+    ids = ["bad", "good", "unregisterable"]
+    summary = run_layer_batch(ids, lambda v: tmp_path / f"{v}.rrd", generate, register, force=False, label="t")
+    assert (summary.done, summary.failed) == (["good"], ["bad", "unregisterable"])
 
 
 def test_segment_ids_from_selection_requires_exactly_one_mode(tmp_path: Path) -> None:

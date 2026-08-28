@@ -9,6 +9,7 @@ timestamps instead of synthesized grid slots. Everything after batch assembly
 is shared with the grid tool (:func:`run_segment`).
 """
 
+import functools
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,7 @@ from arkitscenes_download.ingest.catalog import DEFAULT_CATALOG_URL
 from arkitscenes_download.ingest.cells import component_instance
 from arkitscenes_download.ingest.layer_batch import LayerBatchSummary, run_layer_batch, segment_ids_from_selection
 from arkitscenes_download.ingest.paths import CONFIDENCE, DEPTH, FRAME_SELECTION_WIDE, PINHOLE_WIDE, RIG, TIMELINE, VIDEO_WIDE
+from arkitscenes_download.ingest.timestamps import match_exact_timestamps, table_timestamps
 from datafusion import col
 from jaxtyping import Float64, UInt16
 from numpy import ndarray
@@ -100,20 +102,17 @@ def chosen_batches(
         .sort(TIMELINE)
         .to_arrow_table()
     )
-    rows: list[dict[str, Any]] = table.to_pylist()
-    if not rows:
+    if table.num_rows == 0:
         raise RuntimeError(f"segment {video_id} frame_selection layer contains no chosen wide rows")
 
     device: torch.device = torch.device("cuda")
     decoder: VideoDecoder
-    packet_times_n, _samples, _keyframes, decoder = open_segment_decoder(dataset, video_id, VIDEO_WIDE, TIMELINE, device, int(NATIVE_FPS))
-    chosen_times_n: ndarray = np.array([row[TIMELINE].value for row in rows], dtype="timedelta64[ns]")
-    packet_indices_n: ndarray = np.searchsorted(packet_times_n, chosen_times_n, side="left")
-    if np.any(packet_indices_n >= len(packet_times_n)) or not np.array_equal(packet_times_n[packet_indices_n], chosen_times_n):
-        raise RuntimeError(f"segment {video_id}: chosen timestamps do not map one-to-one onto wide video packets")
+    packet_times_n, _, _, decoder = open_segment_decoder(dataset, video_id, VIDEO_WIDE, TIMELINE, device, int(NATIVE_FPS))
+    packet_indices_n: ndarray = match_exact_timestamps(packet_times_n, table_timestamps(table))
 
-    for batch_start in range(0, len(rows), batch_size):
-        batch_rows: list[dict[str, Any]] = rows[batch_start : batch_start + batch_size]
+    for batch_start in range(0, table.num_rows, batch_size):
+        # Convert one batch at a time: the PNG blob cells are large as Python lists.
+        batch_rows: list[dict[str, Any]] = table.slice(batch_start, batch_size).to_pylist()
         packet_indices: list[int] = [int(i) for i in packet_indices_n[batch_start : batch_start + batch_size]]
         prompts_hw: list[UInt16[ndarray, "ph pw"]] = []
         for row in batch_rows:
@@ -154,13 +153,13 @@ def main(config: PDAChosenConfig) -> None:
     row_by_id: dict[str, dict[str, Any]] = {
         str(row["rerun_segment_id"]): row for row in pa.Table.from_batches(dataset.segment_table().collect()).to_pylist()
     }
-    predictor: PromptDATrtPredictor = PromptDATrtPredictor(
-        model_type="large",
-        image_hw=network_image_hw((1440, 1920), config.max_image_size),
-        batch_size=config.batch_size,
-    )
 
-    def process(video_id: str) -> str:
+    @functools.cache
+    def predictor() -> PromptDATrtPredictor:
+        # Built on first use so a fully-skipped queue never loads the engine.
+        return PromptDATrtPredictor(model_type="large", image_hw=network_image_hw((1440, 1920), config.max_image_size), batch_size=config.batch_size)
+
+    def generate(video_id: str, rrd_path: Path) -> str:
         row: dict[str, Any] = row_by_id[video_id]
         portrait: bool = portrait_from_segment_row(row)
         quarter_turns: int = (-orientation_quarter_turns_from_segment_row(row)) % 4 if portrait else 0
@@ -168,17 +167,23 @@ def main(config: PDAChosenConfig) -> None:
             chosen_batches(dataset, video_id, quarter_turns, config.batch_size),
             video_id,
             portrait,
-            config.output_dir / f"{video_id}.rrd",
-            predictor,
+            rrd_path,
+            predictor(),
             max_depth_range_meter=config.max_depth_range_meter,
             depth_fusion_resolution=config.depth_fusion_resolution,
         )
-        if config.register:
-            dataset.register([result.rrd_path.resolve().as_uri()], layer_name=PROMPTDA_LAYER, on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
         return f"{result.inferred_frames} frames"
 
+    def register(_video_id: str, rrd_path: Path) -> None:
+        dataset.register([rrd_path.resolve().as_uri()], layer_name=PROMPTDA_LAYER, on_duplicate=OnDuplicateSegmentLayer.REPLACE).wait()
+
     summary: LayerBatchSummary = run_layer_batch(
-        video_ids, lambda video_id: config.output_dir / f"{video_id}.rrd", process, force=config.force, label="promptda-chosen"
+        video_ids,
+        lambda video_id: config.output_dir / f"{video_id}.rrd",
+        generate,
+        register if config.register else None,
+        force=config.force,
+        label="promptda-chosen",
     )
     if summary.failed:
         raise SystemExit(1)

@@ -30,40 +30,50 @@ class LayerBatchSummary:
 def run_layer_batch(
     video_ids: list[str],
     output_path_for: Callable[[str], Path],
-    process: Callable[[str], str],
+    generate: Callable[[str, Path], str],
+    register: Callable[[str, Path], None] | None,
     *,
     force: bool,
     label: str,
 ) -> LayerBatchSummary:
-    """Run ``process`` per segment, skipping segments whose output already exists.
+    """Generate and register one layer per segment, resuming from files already on disk.
+
+    An existing output file skips generation but is still registered: registration
+    is idempotent (REPLACE) and cheap, and re-applying it is what makes a file left
+    behind by a failed or disabled registration eventually reach the catalog.
 
     Args:
         video_ids: Segments to process, in order.
-        output_path_for: The layer file a segment produces; its existence means "done".
-        process: Generates and registers one segment's layer; returns a short
+        output_path_for: The layer file a segment produces.
+        generate: Writes one segment's layer to the given path; returns a short
             description for the progress line (for example ``"651 frames"``).
-        force: Process segments even when their output already exists.
+        register: Registers one written layer, or None to only write files.
+        force: Regenerate segments whose output already exists.
         label: Batch name used in the summary line.
 
     Returns:
-        Which segments completed, were skipped, or failed. A failure never stops
-        the batch; the caller decides the exit status.
+        Which segments completed, were skipped (existing file, registration
+        re-applied), or failed. A failure never stops the batch; the caller
+        decides the exit status.
     """
     summary: LayerBatchSummary = LayerBatchSummary()
     for video_id in video_ids:
         output_path: Path = output_path_for(video_id)
-        if output_path.is_file() and not force:
-            summary.skipped.append(video_id)
-            print(f"SKIP {video_id}: {output_path} exists (use --force to regenerate)", flush=True)
-            continue
+        existing: bool = output_path.is_file() and not force
         start: float = time.perf_counter()
         try:
-            description: str = process(video_id)
+            description: str = "exists" if existing else generate(video_id, output_path)
+            if register is not None:
+                register(video_id, output_path)
         except BeartypeException:
             raise
         except Exception as error:
             summary.failed.append(video_id)
             print(f"FAIL {video_id}: {type(error).__name__}: {error}", flush=True)
+            continue
+        if existing:
+            summary.skipped.append(video_id)
+            print(f"SKIP {video_id}: {output_path} exists — registered, not regenerated (use --force)", flush=True)
             continue
         summary.done.append(video_id)
         print(

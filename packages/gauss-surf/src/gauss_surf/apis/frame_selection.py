@@ -27,7 +27,7 @@ from torchcodec.decoders import VideoDecoder
 
 from gauss_surf.catalog import DEFAULT_CATALOG_URL, DEFAULT_DATASET_NAME, connect_catalog, register_layer
 from gauss_surf.contracts import FRAME_SELECTION_LAYER, ULTRAWIDE_FPS, WIDE_FPS
-from gauss_surf.frame_selection import FrameScores, SelectionResult, TimedeltaNs, score_frames, select_ultrawide_frames, select_wide_frames
+from gauss_surf.frame_selection import SelectionResult, TimedeltaNs, select_ultrawide_frames, select_wide_frames, sharpness_scores
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,8 +66,7 @@ class CameraMeasurements:
 
 def _score_frame_batch(frames_hwc: list[UInt8[Tensor, "h w 3"]]) -> Float32[ndarray, "b"]:
     """Stack and score one same-resolution decoded frame batch."""
-    scores: FrameScores = score_frames(torch.stack(frames_hwc))
-    return scores.sharpness.detach().cpu().numpy().astype(np.float32, copy=False)
+    return sharpness_scores(torch.stack(frames_hwc)).detach().cpu().numpy().astype(np.float32, copy=False)
 
 
 def _score_camera(
@@ -89,7 +88,7 @@ def _score_camera(
         raise ValueError("score_batch_size must be positive")
     timestamps_n: TimedeltaNs
     decoder: VideoDecoder
-    timestamps_n, _samples, _keyframes, decoder = open_segment_decoder(dataset, video_id, entity_path, TIMELINE, device, int(fps))
+    timestamps_n, _, _, decoder = open_segment_decoder(dataset, video_id, entity_path, TIMELINE, device, int(fps))
     if len(timestamps_n) == 0:
         raise RuntimeError(f"{entity_path} has no video packets for segment {video_id}")
     if np.any(np.diff(timestamps_n.astype(np.int64)) <= 0):
@@ -151,11 +150,11 @@ def _print_summary(camera_name: str, result: SelectionResult) -> None:
     )
 
 
-def process_segment(dataset: DatasetEntry, config: Config, video_id: str, device: torch.device) -> Path:
-    """Score both cameras of one segment, write its RRD, and register the layer.
+def process_segment(dataset: DatasetEntry, config: Config, video_id: str, rrd_path: Path, device: torch.device) -> str:
+    """Score both cameras of one segment and write its layer RRD.
 
     Returns:
-        The written layer RRD path.
+        A short description of the written selection.
     """
     wide_measurements: CameraMeasurements = _score_camera(
         dataset,
@@ -188,13 +187,11 @@ def process_segment(dataset: DatasetEntry, config: Config, video_id: str, device
     if wide_result.rejected:
         raise RuntimeError(f"segment {video_id} rejected: {wide_result.rejection_reason}; no layer written")
 
-    config.output_dir.mkdir(parents=True, exist_ok=True)
-    rrd_path: Path = config.output_dir / f"{video_id}.rrd"
+    rrd_path.parent.mkdir(parents=True, exist_ok=True)
     with atomic_recording(rrd_path, video_id, send_properties=False) as recording:
         _send_camera_columns(recording, SHARPNESS_WIDE, FRAME_SELECTION_WIDE, wide_result)
         _send_camera_columns(recording, SHARPNESS_ULTRAWIDE, FRAME_SELECTION_ULTRAWIDE, ultrawide_result)
-    register_layer(dataset, rrd_path, FRAME_SELECTION_LAYER)
-    return rrd_path
+    return f"{len(wide_result.chosen_indices)} wide + {len(ultrawide_result.chosen_indices)} ultrawide chosen"
 
 
 def main(config: Config) -> None:
@@ -206,11 +203,13 @@ def main(config: Config) -> None:
     dataset: DatasetEntry = client.get_dataset(config.dataset_name)
     device: torch.device = torch.device("cuda")
 
-    def process(video_id: str) -> str:
-        return f"wrote {process_segment(dataset, config, video_id, device).name}"
-
     summary: LayerBatchSummary = run_layer_batch(
-        video_ids, lambda video_id: config.output_dir / f"{video_id}.rrd", process, force=config.force, label="frame-selection"
+        video_ids,
+        lambda video_id: config.output_dir / f"{video_id}.rrd",
+        lambda video_id, rrd_path: process_segment(dataset, config, video_id, rrd_path, device),
+        lambda _video_id, rrd_path: register_layer(dataset, rrd_path, FRAME_SELECTION_LAYER),
+        force=config.force,
+        label="frame-selection",
     )
     if summary.failed:
         raise SystemExit(1)
