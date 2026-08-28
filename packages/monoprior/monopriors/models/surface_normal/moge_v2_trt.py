@@ -47,14 +47,7 @@ class MoGeV2NormalOutput(NamedTuple):
 
 
 class _MoGeV2NormalHeads(torch.nn.Module):
-    """Fixed-token adapter exposing the normal and mask heads as tuple outputs.
-
-    TODO: export the full MoGe graph (points + depth heads too) once a consumer
-    needs them — the heads share the backbone, so the marginal engine cost is
-    the decoders and the extra D2H. The metric-depth recovery (affine
-    point-map postprocess, ``recover_focal_shift``) is data-dependent logic
-    outside the graph and would still run on the outputs either way.
-    """
+    """Fixed-token adapter exposing the normal and mask heads as tuple outputs."""
 
     def __init__(self, model: MoGeModel, num_tokens: int) -> None:
         super().__init__()
@@ -83,7 +76,7 @@ class _MoGeV2NormalHeads(torch.nn.Module):
         return normals_bhw3, mask_bhw
 
 
-def _resolve_num_tokens(resolution_level: int) -> int:
+def resolve_num_tokens(resolution_level: int) -> int:
     """Map a MoGe resolution level to the pinned checkpoint token range.
 
     Args:
@@ -140,7 +133,7 @@ def export_moge_v2_normal_onnx(
     if max_batch_size < 1:
         raise ValueError(f"max_batch_size must be positive, got {max_batch_size}.")
 
-    num_tokens: int = _resolve_num_tokens(resolution_level)
+    num_tokens: int = resolve_num_tokens(resolution_level)
     checkpoint: tuple[str, str] = MOGE_V2_NORMAL_CHECKPOINTS[encoder]
     checkpoint_revision: str = checkpoint[1][:8]
     onnx_dir: Path = cache_dir / "onnx"
@@ -163,6 +156,8 @@ def export_moge_v2_normal_onnx(
             sys.executable,
             "-m",
             "monopriors.models.surface_normal._moge_v2_onnx_worker",
+            "--heads",
+            "normal",
             "--encoder",
             encoder,
             "--height",
@@ -222,7 +217,7 @@ def export_moge_v2_normal_onnx(
     return onnx_path
 
 
-def _preprocess_rgb(
+def preprocess_rgb(
     rgb_bhw3: UInt8[Tensor, "b h w 3"],
     image_hw: tuple[int, int],
 ) -> Float32[Tensor, "b 3 nh nw"]:
@@ -306,7 +301,7 @@ class MoGeV2TorchNormalPredictor:
         """
         if not torch.cuda.is_available():
             raise RuntimeError("MoGe v2 batched normal prediction requires CUDA.")
-        num_tokens: int = _resolve_num_tokens(resolution_level)
+        num_tokens: int = resolve_num_tokens(resolution_level)
         checkpoint: tuple[str, str] = MOGE_V2_NORMAL_CHECKPOINTS[encoder]
         self.model: MoGeModel = MoGeModel.from_pretrained(checkpoint[0], revision=checkpoint[1]).to("cuda").eval()
         if self.model.num_tokens_range != MOGE_V2_NUM_TOKENS_RANGE:
@@ -328,7 +323,7 @@ class MoGeV2TorchNormalPredictor:
             shaped ``b h w``, both on CUDA. Normals point toward the camera.
         """
         output_hw: tuple[int, int] = (rgb_bhw3.shape[1], rgb_bhw3.shape[2])
-        image_b3hw: Float32[Tensor, "b 3 nh nw"] = _preprocess_rgb(rgb_bhw3, self.image_hw)
+        image_b3hw: Float32[Tensor, "b 3 nh nw"] = preprocess_rgb(rgb_bhw3, self.image_hw)
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.float16):
             output: ForwardOutput = self.model(
                 image_b3hw,
@@ -401,7 +396,7 @@ class MoGeV2TrtNormalPredictor:
             shaped ``b h w``, both on CUDA. Normals point toward the camera.
         """
         output_hw: tuple[int, int] = (rgb_bhw3.shape[1], rgb_bhw3.shape[2])
-        image_b3hw: Float32[Tensor, "b 3 nh nw"] = _preprocess_rgb(rgb_bhw3, self.image_hw)
+        image_b3hw: Float32[Tensor, "b 3 nh nw"] = preprocess_rgb(rgb_bhw3, self.image_hw)
         runtime_output: dict[str, Tensor] = self.runtime({"image": image_b3hw})
         normals_bnhw3: Float32[Tensor, "b nh nw 3"] = runtime_output["normal"].float()
         mask_bnhw: Float32[Tensor, "b nh nw"] = runtime_output["mask"].float()

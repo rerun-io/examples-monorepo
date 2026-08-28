@@ -2,16 +2,19 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import tyro
 
-from monopriors.models.surface_normal.moge_v2_trt import Encoder, export_moge_v2_normal_onnx
+from monopriors.models.surface_normal.moge_v2_trt import Encoder
 
 
 @dataclass(frozen=True, slots=True)
 class Config:
     """Export request forwarded by the parent predictor process."""
 
+    heads: Literal["normal", "geometry"]
+    """Head set to export in the clean interpreter."""
     encoder: Encoder
     """DINOv2 encoder size."""
     height: int
@@ -28,13 +31,26 @@ class Config:
 
 def main(config: Config) -> None:
     """Build the requested ONNX artifact in this clean interpreter."""
-    export_moge_v2_normal_onnx(
-        encoder=config.encoder,
-        image_hw=(config.height, config.width),
-        resolution_level=config.resolution_level,
-        max_batch_size=config.max_batch_size,
-        cache_dir=config.cache_dir,
-    )
+    if config.heads == "normal":
+        from monopriors.models.surface_normal.moge_v2_trt import export_moge_v2_normal_onnx
+
+        export_moge_v2_normal_onnx(
+            encoder=config.encoder,
+            image_hw=(config.height, config.width),
+            resolution_level=config.resolution_level,
+            max_batch_size=config.max_batch_size,
+            cache_dir=config.cache_dir,
+        )
+    else:
+        from monopriors.models.monoprior.moge_v2_trt import export_moge_v2_geometry_onnx
+
+        export_moge_v2_geometry_onnx(
+            encoder=config.encoder,
+            image_hw=(config.height, config.width),
+            resolution_level=config.resolution_level,
+            max_batch_size=config.max_batch_size,
+            cache_dir=config.cache_dir,
+        )
 
 
 if __name__ == "__main__":
