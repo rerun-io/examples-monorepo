@@ -152,23 +152,13 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
         self._num_producers: int = num_producers
         self._prefetch_samples: int = prefetch_samples
         self._segment_seed_index: dict[str, int] = {segment_id: index for index, segment_id in enumerate(self._segment_ids)}
-        self._producer_stats: dict[int, CatalogDatasetStats] = {}
-        self._builders: list[SampleBuilder] = []
+        self._slots: list[tuple[SampleBuilder, CatalogDatasetStats]] = []
+        """One (builder, dataset counters) pair per producer thread, created on the first pass."""
 
     @property
     def stats(self) -> CatalogDatasetStats:
-        """Return a snapshot summed across producer-local dataset and builder counters."""
-        builder_stats: list[CatalogDatasetStats] = [
-            CatalogDatasetStats(
-                blob_decode=builder.stats.blob_decode,
-                augment=builder.stats.augment,
-                samples_built=builder.stats.samples_built,
-                png_fallbacks=builder.stats.png_fallbacks,
-                skipped_flat_frames=builder.stats.skipped_flat_frames,
-            )
-            for builder in self._builders
-        ]
-        return total([*self._producer_stats.values(), *builder_stats])
+        """Return a snapshot summed across every producer slot's dataset and builder counters."""
+        return total([stats + CatalogDatasetStats.from_builder(builder.stats) for builder, stats in self._slots])
 
     @property
     def skipped_frames(self) -> int:
@@ -184,9 +174,13 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
         """Set the pass index used to seed segment and sample shuffling."""
         self._epoch = epoch
 
-    def _iter_segment(self, segment_id: str, builder: SampleBuilder) -> Generator[dict[str, Tensor], None, None]:
+    def _iter_segment(
+        self,
+        segment_id: str,
+        builder: SampleBuilder,
+        stats: CatalogDatasetStats,
+    ) -> Generator[dict[str, Tensor], None, None]:
         """Run the complete query, decode, filter, and build pipeline for one segment."""
-        stats: CatalogDatasetStats = self._producer_stats[id(builder)]
         started: float = perf_counter()
         table: pa.Table = (
             self._dataset_entry.filter_segments(segment_id)
@@ -255,26 +249,25 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
 
     def _iter_parallel(self, segment_ids: list[str]) -> Generator[dict[str, Tensor], None, None]:
         """Yield complete samples from independent whole-segment worker threads."""
-        if not self._builders:
-            # One long-lived builder (and, on CUDA, one stream) per producer slot: reused by every
-            # pass so counters stay cumulative and nothing accumulates across passes.
-            self._builders = [self._builder_factory() for _ in range(self._num_producers)]
-            self._producer_stats = {id(builder): CatalogDatasetStats() for builder in self._builders}
+        if not self._slots:
+            # One long-lived builder (and, on CUDA, one stream) per producer thread, never more
+            # threads than segments: reused by every pass so counters stay cumulative and nothing leaks.
+            self._slots = [(self._builder_factory(), CatalogDatasetStats()) for _ in range(min(self._num_producers, len(segment_ids)))]
         segment_queue: Queue[str] = Queue()
         segment_id: str
         for segment_id in segment_ids:
             segment_queue.put(segment_id)
 
-        def produce(builder: SampleBuilder) -> Generator[dict[str, Tensor], None, None]:
+        def produce(builder: SampleBuilder, stats: CatalogDatasetStats) -> Generator[dict[str, Tensor], None, None]:
             """Claim whole segments with one builder until the queue is empty."""
             while True:
                 try:
                     claimed_segment_id: str = segment_queue.get_nowait()
                 except Empty:
                     return
-                yield from self._iter_segment(claimed_segment_id, builder)
+                yield from self._iter_segment(claimed_segment_id, builder, stats)
 
-        workers: list[Callable[[], Generator[dict[str, Tensor], None, None]]] = [partial(produce, builder) for builder in self._builders]
+        workers: list[Callable[[], Generator[dict[str, Tensor], None, None]]] = [partial(produce, builder, stats) for builder, stats in self._slots]
         yield from iter_threaded(workers, maxsize=self._prefetch_samples)
 
     def __iter__(self) -> Iterator[dict[str, Tensor]]:

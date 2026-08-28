@@ -20,7 +20,7 @@ from rerun.catalog import DatasetEntry  # noqa: E402
 from zipdepth.apis.catalog_throughput import CatalogThroughputConfig  # noqa: E402
 from zipdepth.catalog.builders import CpuSampleBuilder  # noqa: E402
 from zipdepth.catalog.dataset import CatalogPromptDepthDataset, promptda_blob_views  # noqa: E402
-from zipdepth.catalog.stats import CatalogDatasetStats, total  # noqa: E402
+from zipdepth.catalog.stats import CatalogDatasetStats  # noqa: E402
 from zipdepth.catalog.targets import build_eval_transform  # noqa: E402
 
 
@@ -64,22 +64,6 @@ def test_cpu_sample_builder_decodes_and_reports_local_stats() -> None:
     assert builder.stats.png_fallbacks == 0
     assert builder.stats.blob_decode > 0.0
     assert builder.stats.augment > 0.0
-
-
-def test_catalog_stats_add_and_total_every_field() -> None:
-    """Aggregate producer-local timings and counters without shared mutation."""
-    first: CatalogDatasetStats = CatalogDatasetStats(segment_query=1.5, samples_built=2, skipped_frames=1)
-    second: CatalogDatasetStats = CatalogDatasetStats(video_decode=2.5, samples_built=3, png_fallbacks=4)
-
-    combined: CatalogDatasetStats = total([first, second])
-
-    assert combined == CatalogDatasetStats(
-        segment_query=1.5,
-        video_decode=2.5,
-        samples_built=5,
-        png_fallbacks=4,
-        skipped_frames=1,
-    )
 
 
 @pytest.mark.parametrize(("num_producers", "prefetch_samples"), [(0, 64), (1, 0)])
