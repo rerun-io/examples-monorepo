@@ -93,8 +93,12 @@ class UniDepthRelativePredictor(BaseRelativePredictor[UniDepthModel]):
 
         assert depth_b1hw.shape[0] == 1, "Batch size must be 1"
 
-        # normalize the confidence to 0-1
-        conf_b1hw = (conf_b1hw - conf_b1hw.min()) / (conf_b1hw.max() - conf_b1hw.min())
+        # UniDepthV2's "confidence" head is trained so that log(confidence) matches the absolute
+        # (median-rescaled) depth error, i.e. it is a *predicted error*: higher = worse, and it
+        # spikes at depth edges. Map it to a confidence in (0, 1]: 1 / (1 + predicted_error), so
+        # the default 0.5 mask threshold means "predicted error below one depth unit".
+        predicted_error_b1hw = conf_b1hw.log().clamp_min(0.0)
+        conf_b1hw = 1.0 / (1.0 + predicted_error_b1hw)
 
         # convert to numpy and rearrange
         depth_hw = rearrange(depth_b1hw, "1 1 h w -> h w").numpy(force=True)
