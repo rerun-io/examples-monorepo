@@ -1,0 +1,40 @@
+[project]
+authors = [{ name = "pablo vela", email = "pablovela5620@gmail.com" }]
+dependencies = [
+    # common: numpy, scipy, jaxtyping, rerun-sdk, huggingface_hub, tqdm, opencv
+    # network + inference wrapper: monopriors.third_party.zipdepth (added in 0.3.3)
+    "monopriors>=0.3.3",
+]
+description = "ZipDepth training / evaluation / export (model vendored in monopriors)"
+name = "zipdepth"
+requires-python = ">= 3.12"
+version = "0.1.0"
+
+[build-system]
+build-backend = "hatchling.build"
+requires = ["hatchling"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["zipdepth"]
+
+[tool.ruff]
+line-length = 150
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+ignore = ["E501", "F722", "F821", "UP037", "UP040"]
+
+[tool.ruff.lint.per-file-ignores]
+# upstream package facades re-export without __all__ (unmodified fork files)
+"zipdepth/data/__init__.py" = ["F401"]
+"zipdepth/loss/__init__.py" = ["F401"]
+"zipdepth/training/__init__.py" = ["F401"]
+"zipdepth/evaluation/__init__.py" = ["F401"]
+
+[tool.vulture]
+# authored code only; the unmodified upstream tree is a vendor boundary
+paths = ["zipdepth/apis", "zipdepth/__init__.py", "tests", "tools"]
+exclude = ["*/.pixi/*", "*/__pycache__/*"]
+sort_by_size = true
+min_confidence = 60
+ignore_names = ["rr_config"]
