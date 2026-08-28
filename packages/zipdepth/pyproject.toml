@@ -33,7 +33,7 @@ ignore = ["E501", "F722", "F821", "UP037", "UP040"]
 
 [tool.vulture]
 # authored code only; the unmodified upstream tree is a vendor boundary
-paths = ["zipdepth/apis", "zipdepth/__init__.py", "tests", "tools"]
+paths = ["zipdepth/apis", "zipdepth/catalog", "zipdepth/__init__.py", "tests", "tools"]
 exclude = ["*/.pixi/*", "*/__pycache__/*"]
 sort_by_size = true
 min_confidence = 60
