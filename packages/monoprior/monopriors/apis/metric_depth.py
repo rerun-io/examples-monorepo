@@ -85,6 +85,8 @@ def main(config: MetricDepthCLIConfig) -> None:
     from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
     from simplecv.rerun_log_utils import log_pinhole
 
+    from monopriors.rr_logging_utils import log_confidence
+
     parent_log_path: Path = Path("world")
 
     # Load image
@@ -138,4 +140,4 @@ def main(config: MetricDepthCLIConfig) -> None:
 
     rr.log(f"{cam_log_path}/pinhole/image", rr.Image(rgb, color_model=rr.ColorModel.RGB).compress(), static=True)
     rr.log(f"{cam_log_path}/pinhole/depth", rr.DepthImage(result.depth_meters, meter=1), static=True)
-    rr.log(f"{cam_log_path}/pinhole/confidence", rr.Image(result.confidence, color_model=rr.ColorModel.L), static=True)
+    log_confidence(cam_log_path / "pinhole", result.confidence, static=True)

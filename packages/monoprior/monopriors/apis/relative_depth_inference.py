@@ -4,7 +4,6 @@ from pathlib import Path
 import cv2
 import numpy as np
 import rerun as rr
-import rerun.blueprint as rrb
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from monopriors.models.relative_depth import (
@@ -13,7 +12,7 @@ from monopriors.models.relative_depth import (
     get_relative_predictor,
 )
 from monopriors.models.relative_depth.base_relative_depth import BaseRelativePredictor
-from monopriors.rr_logging_utils import log_relative_pred
+from monopriors.rr_logging_utils import CONFIDENCE_THRESHOLD, create_relative_depth_blueprint, log_relative_pred
 
 
 @dataclass
@@ -22,6 +21,8 @@ class PredictorConfig:
     image_path: Path = Path("data/examples/single-image/room.jpg")
     predictor_name: RELATIVE_PREDICTORS = "MoGeV1Predictor"
     depth_edge_threshold: float = 0.1
+    confidence_threshold: float = CONFIDENCE_THRESHOLD
+    """Confidence above which a pixel counts as confident in the semantic mask view (models with a confidence head only)."""
 
 
 def resize_image(image: np.ndarray, max_dim: int = 1024) -> np.ndarray:
@@ -36,6 +37,7 @@ def resize_image(image: np.ndarray, max_dim: int = 1024) -> np.ndarray:
 
 def relative_depth_from_img(config: PredictorConfig) -> None:
     parent_log_path = Path("world")
+    rr.send_blueprint(create_relative_depth_blueprint(parent_log_path))
     bgr_hw3 = cv2.imread(str(config.image_path))
     if bgr_hw3 is None:
         raise FileNotFoundError(f"Failed to read image {config.image_path}")
@@ -47,26 +49,8 @@ def relative_depth_from_img(config: PredictorConfig) -> None:
     predictor: BaseRelativePredictor = get_relative_predictor(config.predictor_name)(device="cuda")
     relative_pred: RelativeDepthPrediction = predictor.__call__(rgb=rgb_hw3, K_33=None)
 
-    pinhole_path = parent_log_path / "camera" / "pinhole"
-    image_views: list[rrb.Container | rrb.View] = [
-        rrb.Spatial2DView(origin=f"{pinhole_path}/image"),
-        rrb.Spatial2DView(origin=f"{pinhole_path}/depth"),
-    ]
-    if relative_pred.confidence is not None:
-        # semantic mask is the default tab; the full spectrum sits behind it
-        image_views.append(
-            rrb.Tabs(
-                rrb.Spatial2DView(origin=f"{pinhole_path}/confidence_mask", name="confidence mask"),
-                rrb.Spatial2DView(origin=f"{pinhole_path}/confidence", name="confidence"),
-                active_tab=0,
-            )
-        )
-    rr.send_blueprint(
-        rrb.Blueprint(
-            rrb.Horizontal(rrb.Spatial3DView(), rrb.Vertical(*image_views), column_shares=[3, 1]),
-            collapse_panels=True,
-        )
-    )
     rr.set_time("time", sequence=0)
     rr.log("/", rr.ViewCoordinates.RDF, static=True)
-    log_relative_pred(parent_log_path, relative_pred, rgb_hw3, depth_edge_threshold=config.depth_edge_threshold)
+    log_relative_pred(
+        parent_log_path, relative_pred, rgb_hw3, depth_edge_threshold=config.depth_edge_threshold, confidence_threshold=config.confidence_threshold
+    )

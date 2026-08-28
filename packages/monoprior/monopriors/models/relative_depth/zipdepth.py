@@ -88,4 +88,5 @@ class ZipDepthPredictor(BaseRelativePredictor[ZipDepth]):
             disparity=disparity,
             depth=disparity_to_depth(disparity, focal_length=int(K_33_f32[0, 0])),
             K_33=K_33_f32,
+            confidence=None,
         )

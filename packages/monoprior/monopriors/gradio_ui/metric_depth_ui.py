@@ -32,6 +32,7 @@ from simplecv.rerun_log_utils import log_pinhole
 
 from monopriors.apis.metric_depth import MetricDepthNodeConfig, create_metric_predictor, run_metric_depth
 from monopriors.models.metric_depth import METRIC_PREDICTORS, BaseMetricPredictor, MetricDepthPrediction
+from monopriors.rr_logging_utils import log_confidence
 
 PARENT_LOG_PATH: Final[Path] = Path("world")
 EXAMPLE_DATA_DIR: Final[Path] = Path(__file__).resolve().parents[2] / "data" / "examples" / "multiview"
@@ -164,7 +165,7 @@ def _log_results(
         # Log image, depth, confidence
         rr.log(f"{cam_log_path}/pinhole/image", rr.Image(img, color_model=rr.ColorModel.RGB).compress(), static=True)
         rr.log(f"{cam_log_path}/pinhole/depth", rr.DepthImage(result.depth_meters, meter=1), static=True)
-        rr.log(f"{cam_log_path}/pinhole/confidence", rr.Image(result.confidence, color_model=rr.ColorModel.L), static=True)
+        log_confidence(cam_log_path / "pinhole", result.confidence, static=True)
 
     yield stream.read(), "Metric depth complete"
 
