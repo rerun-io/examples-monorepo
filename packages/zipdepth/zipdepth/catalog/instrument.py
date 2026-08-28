@@ -19,12 +19,7 @@ from zipdepth.catalog.stats import STAGE_FIELDS, CatalogDatasetStats
 
 def _stage_totals(stats: CatalogDatasetStats) -> dict[str, float]:
     """Read the cumulative floating-point duration for every catalog stage."""
-    return {
-        "segment_query": stats.segment_query,
-        "video_decode": stats.video_decode,
-        "blob_decode": stats.blob_decode,
-        "augment": stats.augment,
-    }
+    return {name: getattr(stats, name) for name in STAGE_FIELDS}
 
 
 @dataclass(slots=True)
