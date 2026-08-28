@@ -44,7 +44,7 @@ def test_call_contract(predictor: ZipDepthPredictor) -> None:
     pred = predictor(rgb, None)
     assert pred.disparity.shape == (48, 72) and pred.disparity.dtype == np.float32 and np.isfinite(pred.disparity).all()
     assert pred.depth.shape == (48, 72) and pred.depth.dtype == np.float32
-    assert pred.confidence.shape == (48, 72)
+    assert pred.confidence is None  # ZipDepth has no confidence head
     assert pred.K_33.dtype == np.float32 and pred.K_33[0, 2] == 36.0 and pred.K_33[1, 2] == 24.0
 
 

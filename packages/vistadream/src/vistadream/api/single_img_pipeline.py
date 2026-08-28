@@ -335,6 +335,7 @@ class SingleImagePipeline:
         frame.inpaint_wo_edge = frame_inpaint & ~edges_mask
 
         # Get depth confidence mask from depth prediction confidence
+        assert depth_prediction.confidence is not None, "VistaDream needs a predictor with a confidence head (MoGe/UniDepth)"
         dpt_conf_mask: Float[np.ndarray, "H W"] = depth_prediction.confidence
         dpt_conf_mask_bool: Bool[np.ndarray, "H W"] = dpt_conf_mask > 0
         frame.dpt_conf_mask = dpt_conf_mask_bool
@@ -426,6 +427,7 @@ class SingleImagePipeline:
             # Just use the input image for depth prediction since there's no outpainting
             outpaint_rgb_hw3: UInt8[np.ndarray, "H W 3"] = np.array(outpaint_img.convert("RGB"))
             outpaint_rel_depth: RelativeDepthPrediction = self.predictor.__call__(rgb=outpaint_rgb_hw3, K_33=None)
+            assert outpaint_rel_depth.confidence is not None, "VistaDream needs a predictor with a confidence head (MoGe/UniDepth)"
             dpt_conf_mask: Float[np.ndarray, "h w"] = outpaint_rel_depth.confidence
             # convert to boolean mask, depth confidence mask is a binary mask where values > 0 are considered confident
             dpt_conf_mask: Bool[np.ndarray, "H W"] = dpt_conf_mask > 0
@@ -463,6 +465,7 @@ class SingleImagePipeline:
 
             outpaint_rgb_hw3: UInt8[np.ndarray, "H W 3"] = np.array(outpaint_img.convert("RGB"))
             outpaint_rel_depth: RelativeDepthPrediction = self.predictor.__call__(rgb=outpaint_rgb_hw3, K_33=None)
+            assert outpaint_rel_depth.confidence is not None, "VistaDream needs a predictor with a confidence head (MoGe/UniDepth)"
             dpt_conf_mask: Float[np.ndarray, "h w"] = outpaint_rel_depth.confidence
             # convert to boolean mask, depth confidence mask is a binary mask where values > 0 are considered confident
             dpt_conf_mask: Bool[np.ndarray, "H W"] = dpt_conf_mask > 0
