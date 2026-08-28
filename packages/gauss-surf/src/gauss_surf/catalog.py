@@ -3,15 +3,17 @@
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TypeAlias
+from typing import Any
 
 import numpy as np
 import pyarrow as pa
 import torch
+from arkitscenes_download.ingest.cells import component_instance as _single_instance  # noqa: F401  # re-exported
 from arkitscenes_download.ingest.paths import TIMELINE
+from arkitscenes_download.ingest.timestamps import TimedeltaNs, match_exact_timestamps, table_timestamps  # noqa: F401  # re-exported
 from beartype.roar import BeartypeException
 from datafusion import col
-from jaxtyping import Bool, Float32, Int64, Shaped, UInt8
+from jaxtyping import Float32, Int64, UInt8
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry, DatasetView, OnDuplicateSegmentLayer, RegistrationHandle
 from simplecv.rerun_dataloader import SegmentNvdecDecoder
@@ -22,23 +24,6 @@ DEFAULT_CATALOG_URL: str = "rerun+http://127.0.0.1:51236"
 DEFAULT_DATASET_NAME: str = "arkitscenes-v2"
 """Development ARKitScenes dataset used by the staged gauss-surf pipeline."""
 
-TimedeltaNs: TypeAlias = Shaped[ndarray, " n"]
-"""One-dimensional ``timedelta64[ns]`` timestamps."""
-
-
-def _single_instance(value: Any, component_name: str) -> Any:
-    """Unwrap one Rerun archetype instance from an Arrow cell."""
-    if value is None or not isinstance(value, list) or len(value) != 1:
-        raise ValueError(f"component {component_name!r} has no unambiguous single instance")
-    return value[0]
-
-
-def table_timestamps(table: pa.Table) -> TimedeltaNs:
-    """Return an Arrow table timeline as ``timedelta64[ns]`` values."""
-    values_n: ndarray = table.column(TIMELINE).combine_chunks().to_numpy(zero_copy_only=False)
-    return np.asarray(values_n, dtype="timedelta64[ns]")
-
-
 def _matrix_from_cell(value: Any, component_name: str) -> Float32[ndarray, "3 3"]:
     """Decode one column-major Rerun 3x3 matrix cell."""
     return np.asarray(_single_instance(value, component_name), dtype=np.float32).reshape(3, 3, order="F")
@@ -48,36 +33,6 @@ def _resolution_from_cell(value: Any, component_name: str) -> tuple[int, int]:
     """Decode one Rerun resolution cell as width and height."""
     resolution_2: Float32[ndarray, "2"] = np.asarray(_single_instance(value, component_name), dtype=np.float32)
     return int(round(float(resolution_2[0]))), int(round(float(resolution_2[1])))
-
-
-def match_exact_timestamps(packet_times_n: TimedeltaNs, target_times_n: TimedeltaNs) -> Int64[ndarray, "n_targets"]:
-    """Resolve target times to exact packet indices without nearest-neighbor drift.
-
-    Args:
-        packet_times_n: Decoder packet timestamps shaped ``n_packets``.
-        target_times_n: Target timestamps shaped ``n_targets``.
-
-    Returns:
-        int64 packet indices shaped ``n_targets``.
-
-    Raises:
-        ValueError: If either input is not one-dimensional, the packet timeline
-            is unsorted, or any target time is absent from the packet timeline.
-    """
-    if packet_times_n.ndim != 1 or target_times_n.ndim != 1:
-        raise ValueError("Packet and target timestamps must be one-dimensional")
-    packet_ns_n: TimedeltaNs = np.asarray(packet_times_n, dtype="timedelta64[ns]")
-    target_ns_n: TimedeltaNs = np.asarray(target_times_n, dtype="timedelta64[ns]")
-    if np.any(packet_ns_n[1:] < packet_ns_n[:-1]):
-        raise ValueError("Packet timestamps must be sorted")
-    matched_indices_n: Int64[ndarray, "n_targets"] = np.searchsorted(packet_ns_n, target_ns_n, side="left").astype(np.int64)
-    in_bounds_n: Bool[ndarray, "n_targets"] = matched_indices_n < len(packet_ns_n)
-    exact_n: Bool[ndarray, "n_targets"] = np.zeros(len(target_ns_n), dtype=np.bool_)
-    exact_n[in_bounds_n] = packet_ns_n[matched_indices_n[in_bounds_n]] == target_ns_n[in_bounds_n]
-    if not np.all(exact_n):
-        first_missing: np.timedelta64 = target_ns_n[int(np.flatnonzero(~exact_n)[0])]
-        raise ValueError(f"target timestamp {first_missing} has no exact video-packet match")
-    return matched_indices_n
 
 
 def connect_catalog(

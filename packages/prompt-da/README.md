@@ -68,6 +68,11 @@ pixi run -e prompt-da-stream --frozen prompt-da-arkitscenes-register --video-id 
 pixi run -e prompt-da-stream --frozen prompt-da-arkitscenes-register-raw --video-id 42899799
 ```
 
+`prompt-da-arkitscenes-chosen` infers only at the wide frames gauss-surf's
+frame selection chose (the segment needs a registered `frame_selection` layer),
+so the depth aligns exactly with the frames later stages train on. Same
+`promptda` layer; accepts `--video-ids-file` for batches and `--force` to redo.
+
 ## Acknowledgements
 Thanks to the original Prompt DepthAnything and DepthAnythingV2 repos!
 

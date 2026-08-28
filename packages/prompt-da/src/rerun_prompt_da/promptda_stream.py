@@ -198,24 +198,63 @@ class PromptDACollate:
 
         if not frames_3hw:
             return None
-        stored_hw: tuple[int, int] = (frames_3hw[0].shape[1], frames_3hw[0].shape[2])
-        prompt_stored_bhw: UInt16[Tensor, "b stored_prompt_h stored_prompt_w"] = torch.stack(prompts_hw).to(self._device, non_blocking=True)
-        confidence_stored_bhw: UInt8[Tensor, "b stored_prompt_h stored_prompt_w"] = torch.stack(confidences_hw)
-        # A tall frame would have its aspect ratio squashed into the engine's fixed
-        # landscape input. The frame shape decides this, so no orientation property is
-        # read — those are spelled differently across dataset generations.
-        quarter_turns: int = self._quarter_turns if self._quarter_turns is not None else (1 if stored_hw[0] > stored_hw[1] else 0)
-        rgb_b3hw: UInt8[Tensor, "b 3 h w"] = torch.rot90(torch.stack(frames_3hw), quarter_turns, dims=(2, 3))
-        prompt_bhw: UInt16[Tensor, "b prompt_h=192 prompt_w=256"] = torch.rot90(prompt_stored_bhw, quarter_turns, dims=(1, 2))
-        return PromptDABatch(
-            frame_indices=frame_indices,
-            timestamps_ns=timestamps_ns,
-            quarter_turns=quarter_turns,
-            rgb_bhw3=rearrange(rgb_b3hw, "b c h w -> b h w c"),  # pyrefly: ignore  # bad-argument-type — einops stub false positive
-            prompt_bhw=prompt_bhw.float() / 1000.0,
-            prompt_mm_bhw=prompt_stored_bhw.cpu().numpy().astype(np.uint16),
-            confidence_bhw=confidence_stored_bhw.cpu().numpy().astype(np.uint8),
-            K_native_b33=np.stack(k_matrices_33),
-            world_T_cam_b44=np.stack(world_T_cam_44),
-            stored_hw=stored_hw,
+        return assemble_promptda_batch(
+            frame_indices,
+            timestamps_ns,
+            frames_3hw,
+            prompts_hw,
+            confidences_hw,
+            k_matrices_33,
+            world_T_cam_44,
+            device=self._device,
+            quarter_turns=self._quarter_turns,
         )
+
+
+def assemble_promptda_batch(
+    frame_indices: list[int],
+    timestamps_ns: list[int],
+    frames_3hw: list[UInt8[Tensor, "3 stored_h stored_w"]],
+    prompts_hw: list[UInt16[Tensor, "stored_prompt_h stored_prompt_w"]],
+    confidences_hw: list[UInt8[Tensor, "stored_prompt_h stored_prompt_w"]],
+    k_matrices_33: list[Float32[ndarray, "3 3"]],
+    world_T_cam_44: list[Float64[ndarray, "4 4"]],
+    *,
+    device: torch.device,
+    quarter_turns: int | None,
+) -> PromptDABatch:
+    """Stack per-frame inputs into one landscape-oriented, device-resident batch.
+
+    Args:
+        frame_indices: Source index per row (sampling-grid slot or packet index).
+        timestamps_ns: Output timeline timestamp per row, in nanoseconds.
+        frames_3hw: Decoded RGB frames in stored orientation.
+        prompts_hw: uint16 millimetre prompt depth per row, stored orientation.
+        confidences_hw: ARKit confidence per row, stored orientation.
+        k_matrices_33: Row-major native intrinsics per row.
+        world_T_cam_44: Camera-to-world transform per row.
+        device: Inference device the RGB and prompt tensors land on.
+        quarter_turns: Counter-clockwise turns to landscape, or None to infer one
+            quarter turn from a tall frame shape.
+    """
+    stored_hw: tuple[int, int] = (int(frames_3hw[0].shape[1]), int(frames_3hw[0].shape[2]))
+    prompt_stored_bhw: UInt16[Tensor, "b stored_prompt_h stored_prompt_w"] = torch.stack(prompts_hw).to(device, non_blocking=True)
+    confidence_stored_bhw: UInt8[Tensor, "b stored_prompt_h stored_prompt_w"] = torch.stack(confidences_hw)
+    # A tall frame would have its aspect ratio squashed into the engine's fixed
+    # landscape input. The frame shape decides this, so no orientation property is
+    # read — those are spelled differently across dataset generations.
+    turns: int = quarter_turns if quarter_turns is not None else (1 if stored_hw[0] > stored_hw[1] else 0)
+    rgb_b3hw: UInt8[Tensor, "b 3 h w"] = torch.rot90(torch.stack(frames_3hw).to(device), turns, dims=(2, 3))
+    prompt_bhw: UInt16[Tensor, "b prompt_h=192 prompt_w=256"] = torch.rot90(prompt_stored_bhw, turns, dims=(1, 2))
+    return PromptDABatch(
+        frame_indices=frame_indices,
+        timestamps_ns=timestamps_ns,
+        quarter_turns=turns,
+        rgb_bhw3=rearrange(rgb_b3hw, "b c h w -> b h w c"),  # pyrefly: ignore  # bad-argument-type — einops stub false positive
+        prompt_bhw=prompt_bhw.float() / 1000.0,
+        prompt_mm_bhw=prompt_stored_bhw.cpu().numpy().astype(np.uint16),
+        confidence_bhw=confidence_stored_bhw.cpu().numpy().astype(np.uint8),
+        K_native_b33=np.stack(k_matrices_33),
+        world_T_cam_b44=np.stack(world_T_cam_44),
+        stored_hw=stored_hw,
+    )

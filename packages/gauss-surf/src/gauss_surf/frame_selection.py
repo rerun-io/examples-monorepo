@@ -5,12 +5,11 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 import torch.nn.functional as functional
+from arkitscenes_download.ingest.timestamps import TimedeltaNs
 from einops import rearrange
 from jaxtyping import Float32, Int64, UInt8
 from numpy import ndarray
 from torch import Tensor
-
-from gauss_surf.catalog import TimedeltaNs
 
 SCORE_HEIGHT: int = 540
 """Fixed scoring height inherited from the reference frame-selection fork."""
@@ -49,12 +48,42 @@ class FrameScores:
     """Grayscale population standard deviation at the fixed scoring resolution."""
 
 
-def score_frames(frames_bhw3: UInt8[Tensor, "b h w 3"]) -> FrameScores:
-    """Measure sharpness and texture for a CPU or CUDA RGB frame batch.
+def _reference_gray(frames_bhw3: UInt8[Tensor, "b h w 3"]) -> Float32[Tensor, "b 1 score_h=540 score_w=720"]:
+    """Convert frames to grayscale at the fixed scoring resolution.
 
-    Every frame is first converted to grayscale and resized to 720x540. Scoring
-    at this fixed reference resolution makes scores comparable across source
+    Scoring at one reference resolution makes scores comparable across source
     camera resolutions.
+    """
+    if frames_bhw3.ndim != 4 or frames_bhw3.shape[-1] != 3:
+        raise ValueError("Frames must have shape (B, H, W, 3)")
+    luma_weights_3: Float32[Tensor, "channels=3"] = torch.tensor([0.299, 0.587, 0.114], dtype=torch.float32, device=frames_bhw3.device)
+    gray_bhw: Float32[Tensor, "b h w"] = torch.sum(frames_bhw3.to(dtype=torch.float32) * luma_weights_3, dim=-1)
+    return functional.interpolate(rearrange(gray_bhw, "b h w -> b 1 h w"), size=(SCORE_HEIGHT, SCORE_WIDTH), mode="area")
+
+
+def sharpness_scores(frames_bhw3: UInt8[Tensor, "b h w 3"]) -> Float32[Tensor, "b"]:
+    """Variance of the grayscale Laplacian per frame — the production selection signal.
+
+    Args:
+        frames_bhw3: uint8 RGB frames with shape ``(B, H, W, 3)`` on any Torch device.
+
+    Returns:
+        Float32 sharpness with shape ``(B,)`` on the input device.
+    """
+    if frames_bhw3.ndim == 4 and len(frames_bhw3) == 0:
+        return torch.empty(0, dtype=torch.float32, device=frames_bhw3.device)
+    reference_b1hw: Float32[Tensor, "b 1 score_h=540 score_w=720"] = _reference_gray(frames_bhw3)
+    laplacian_kernel_1133: Float32[Tensor, "1 1 kh=3 kw=3"] = torch.tensor(
+        [[[[0.0, 1.0, 0.0], [1.0, -4.0, 1.0], [0.0, 1.0, 0.0]]]],
+        dtype=torch.float32,
+        device=frames_bhw3.device,
+    )
+    laplacian_b1hw: Float32[Tensor, "b 1 lap_h lap_w"] = functional.conv2d(reference_b1hw, laplacian_kernel_1133)
+    return torch.var(laplacian_b1hw, dim=(1, 2, 3), correction=0)
+
+
+def score_frames(frames_bhw3: UInt8[Tensor, "b h w 3"]) -> FrameScores:
+    """Measure sharpness and texture for a CPU or CUDA RGB frame batch (diagnostics).
 
     Args:
         frames_bhw3: uint8 RGB frames with shape ``(B, H, W, 3)`` on any Torch device.
@@ -62,33 +91,10 @@ def score_frames(frames_bhw3: UInt8[Tensor, "b h w 3"]) -> FrameScores:
     Returns:
         Float32 sharpness and texture tensors with shape ``(B,)`` on the input device.
     """
-    if frames_bhw3.ndim != 4 or frames_bhw3.shape[-1] != 3:
-        raise ValueError("Frames must have shape (B, H, W, 3)")
+    sharpness_b: Float32[Tensor, "b"] = sharpness_scores(frames_bhw3)
     if len(frames_bhw3) == 0:
-        empty_b: Float32[Tensor, "b=0"] = torch.empty(0, dtype=torch.float32, device=frames_bhw3.device)
-        return FrameScores(sharpness=empty_b, texture=empty_b)
-
-    rgb_bhw3: Float32[Tensor, "b h w 3"] = frames_bhw3.to(dtype=torch.float32)
-    luma_weights_3: Float32[Tensor, "channels=3"] = torch.tensor(
-        [0.299, 0.587, 0.114],
-        dtype=torch.float32,
-        device=frames_bhw3.device,
-    )
-    gray_bhw: Float32[Tensor, "b h w"] = torch.sum(rgb_bhw3 * luma_weights_3, dim=-1)
-    gray_b1hw: Float32[Tensor, "b 1 h w"] = rearrange(gray_bhw, "b h w -> b 1 h w")
-    reference_b1hw: Float32[Tensor, "b 1 score_h=540 score_w=720"] = functional.interpolate(
-        gray_b1hw,
-        size=(SCORE_HEIGHT, SCORE_WIDTH),
-        mode="area",
-    )
-    laplacian_kernel_1133: Float32[Tensor, "1 1 kh=3 kw=3"] = torch.tensor(
-        [[[[0.0, 1.0, 0.0], [1.0, -4.0, 1.0], [0.0, 1.0, 0.0]]]],
-        dtype=torch.float32,
-        device=frames_bhw3.device,
-    )
-    laplacian_b1hw: Float32[Tensor, "b 1 lap_h lap_w"] = functional.conv2d(reference_b1hw, laplacian_kernel_1133)
-    sharpness_b: Float32[Tensor, "b"] = torch.var(laplacian_b1hw, dim=(1, 2, 3), correction=0)
-    texture_b: Float32[Tensor, "b"] = torch.std(reference_b1hw, dim=(1, 2, 3), correction=0)
+        return FrameScores(sharpness=sharpness_b, texture=sharpness_b)
+    texture_b: Float32[Tensor, "b"] = torch.std(_reference_gray(frames_bhw3), dim=(1, 2, 3), correction=0)
     return FrameScores(sharpness=sharpness_b, texture=texture_b)
 
 

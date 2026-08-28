@@ -610,6 +610,12 @@ cwd = "packages/prompt-da"
 env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1", OMP_WAIT_POLICY = "PASSIVE", KMP_BLOCKTIME = "0" }
 description = "Ingest: run PromptDA over local ARKitScenes segments with NVDEC and register the promptda layer — writes an RRD, shows nothing (needs arkitscenes-download-serve running)"
 
+[feature.prompt-da-stream.tasks.prompt-da-arkitscenes-chosen]
+cmd = "python tools/prompt_da_chosen.py"
+cwd = "packages/prompt-da"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1", OMP_WAIT_POLICY = "PASSIVE", KMP_BLOCKTIME = "0" }
+description = "Ingest: run PromptDA only at frame selection's chosen wide frames and register the promptda layer (needs the segment's frame_selection layer)"
+
 [feature.prompt-da-stream.tasks.prompt-da-arkitscenes-register-raw]
 cmd = "python tools/prompt_da_arkitscenes_raw.py"
 cwd = "packages/prompt-da"

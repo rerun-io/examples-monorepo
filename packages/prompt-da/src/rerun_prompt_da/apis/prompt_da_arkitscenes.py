@@ -5,6 +5,7 @@ local Rerun catalog, completes depth frame-by-frame, fuses a final TSDF mesh,
 and writes a replaceable ``promptda`` layer back to the dataset.
 """
 
+from collections.abc import Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,7 @@ from arkitscenes_download.ingest.blueprint import DEPTH_RANGE_MM, make_blueprint
 from arkitscenes_download.ingest.catalog import DEFAULT_CATALOG_URL
 from arkitscenes_download.ingest.depth import encode_depth_png
 from arkitscenes_download.ingest.paths import DEPTH_PROMPTDA, PROMPTDA_MESH, TIMELINE
+from arkitscenes_download.ingest.recording import atomic_recording
 from jaxtyping import Float, UInt8, UInt16
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer, RegistrationHandle
@@ -62,7 +64,7 @@ class PDAArkitScenesConfig:
     ``ARKITSCENES_DATASET``, which is the recording application id shared by every
     layer RRD regardless of which catalog dataset serves them."""
     output_dir: Path = Path("data/promptda")
-    """Root for generated per-segment PromptDA RRD files."""
+    """Directory for generated layer RRDs (``<output_dir>/<segment_id>.rrd``, corpus layer-major naming)."""
     target_fps: float = 10.0
     """Inference rate used to build the catalog sampling grid."""
     max_image_size: int = 1008
@@ -167,7 +169,7 @@ def fuse_and_log_batch(
     batch: CompletedPromptDABatch,
     recording: rr.RecordingStream,
     fuser: Open3DFuser,
-    config: PDAArkitScenesConfig,
+    max_depth_meter: float,
 ) -> int:
     """Log and fuse one completed batch in row order.
 
@@ -175,7 +177,7 @@ def fuse_and_log_batch(
         batch: CPU-resident inference results and matching sensor metadata.
         recording: PromptDA layer recording stream.
         fuser: Segment TSDF accumulator.
-        config: Fusion depth and resolution settings.
+        max_depth_meter: Furthest predicted depth retained for fusion, in metres.
 
     Returns:
         Number of rows logged and fused.
@@ -191,7 +193,7 @@ def fuse_and_log_batch(
         filtered_depth_hw: UInt16[ndarray, "h w"] = filter_depth_for_fusion(
             fusion_depth_hw,
             confidence_hw,
-            config.max_depth_range_meter,
+            max_depth_meter,
         )
         rgb_fusion_hw3: UInt8[ndarray, "fh fw 3"] = np.asarray(
             cv2.resize(rgb_hw3, (fusion_depth_hw.shape[1], fusion_depth_hw.shape[0]), interpolation=cv2.INTER_AREA), dtype=np.uint8
@@ -219,23 +221,19 @@ def fuse_and_log_batch(
     return len(batch.timestamps_ns)
 
 
-def process_segment(
+def grid_batches(
     dataset_entry: DatasetEntry,
     segment_id: str,
     portrait: bool,
     orientation_quarter_turns: int,
     config: PDAArkitScenesConfig,
-    predictor: PromptDATrtPredictor,
-) -> SegmentResult:
-    """Infer and fuse one catalog segment into a PromptDA RRD."""
+) -> tuple[Iterator[PromptDABatch], int]:
+    """Yield fixed-rate sampling-grid batches for one segment, plus the grid slot count."""
     device: torch.device = torch.device("cuda")
     stride: int = stride_for(NATIVE_FPS, config.target_fps)
-    sampling_fps: float = NATIVE_FPS / stride
-    samples: RerunIterableDataset = promptda_dataset(dataset_entry, segment_id, sampling_fps, device)[0]
+    samples: RerunIterableDataset = promptda_dataset(dataset_entry, segment_id, NATIVE_FPS / stride, device)[0]
     # NVDEC and the collate's sampling-grid position are stateful, so iteration
     # must remain in natural order in this process.
-    model_quarter_turns: int = (-orientation_quarter_turns) % 4 if portrait else 0
-    timestamp_step_ns: int = round(1_000_000_000 / NATIVE_FPS) * stride
     loader: DataLoader = DataLoader(
         samples,
         batch_size=config.batch_size,
@@ -243,30 +241,45 @@ def process_segment(
         collate_fn=PromptDACollate(
             samples,
             device,
-            quarter_turns=model_quarter_turns,
-            timestamp_step_ns=timestamp_step_ns,
+            quarter_turns=(-orientation_quarter_turns) % 4 if portrait else 0,
+            timestamp_step_ns=round(1_000_000_000 / NATIVE_FPS) * stride,
         ),
     )
-    grid_slots: int = samples.sample_index.total_samples
-    rrd_path: Path = config.output_dir / segment_id / "promptda.rrd"
+    return (batch for batch in loader if batch is not None), samples.sample_index.total_samples
+
+
+def run_segment(
+    batches: Iterable[PromptDABatch],
+    segment_id: str,
+    portrait: bool,
+    rrd_path: Path,
+    predictor: PromptDATrtPredictor,
+    *,
+    max_depth_range_meter: float,
+    depth_fusion_resolution: float,
+    expected_frames: int | None = None,
+) -> SegmentResult:
+    """Infer, fuse, and atomically publish one segment's PromptDA layer from any batch source.
+
+    Args:
+        batches: Landscape-oriented inference batches in timeline order.
+        segment_id: Catalog segment identifier (the recording id).
+        portrait: Whether the segment's embedded blueprint uses the portrait layout.
+        rrd_path: Layer RRD destination; written atomically.
+        predictor: Cached TensorRT PromptDA predictor.
+        max_depth_range_meter: Furthest predicted depth retained for TSDF fusion.
+        depth_fusion_resolution: TSDF voxel resolution in metres.
+        expected_frames: Frames the source could have produced, for the skipped count.
+    """
     rrd_path.parent.mkdir(parents=True, exist_ok=True)
-    recording: rr.RecordingStream | None = None
-    fuser: Open3DFuser = Open3DFuser(
-        fusion_resolution=config.depth_fusion_resolution,
-        max_fusion_depth=config.max_depth_range_meter,
-    )
+    fuser: Open3DFuser = Open3DFuser(fusion_resolution=depth_fusion_resolution, max_fusion_depth=max_depth_range_meter)
     inferred_frames: int = 0
     pending_batch: Future[int] | None = None
-    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="promptda-rrd") as executor:
-        batch: PromptDABatch | None
-        for batch in tqdm(
-            loader,
-            total=(grid_slots + config.batch_size - 1) // config.batch_size,
-            desc=f"PromptDA {segment_id}",
-            unit="batch",
-        ):
-            if batch is None:
-                continue
+    with (
+        atomic_recording(rrd_path, segment_id, send_properties=False) as recording,
+        ThreadPoolExecutor(max_workers=1, thread_name_prefix="promptda-rrd") as executor,
+    ):
+        for batch in tqdm(batches, desc=f"PromptDA {segment_id}", unit="batch"):
             inference_result: tuple[UInt16[ndarray, "b h w"], UInt16[ndarray, "b nh nw"]] = run_promptda_batch(
                 predictor,
                 batch.rgb_bhw3,
@@ -277,13 +290,6 @@ def process_segment(
                 torch.rot90(batch.rgb_bhw3, -batch.quarter_turns, dims=(1, 2)).cpu().numpy(),
                 dtype=np.uint8,
             )
-            if recording is None:
-                recording = rr.RecordingStream(
-                    application_id=ARKITSCENES_DATASET,
-                    recording_id=segment_id,
-                    send_properties=False,
-                )
-                recording.save(rrd_path)
             if pending_batch is not None:
                 inferred_frames += pending_batch.result()
             completed_batch: CompletedPromptDABatch = CompletedPromptDABatch(
@@ -297,29 +303,48 @@ def process_segment(
                 world_T_cam_b44=batch.world_T_cam_b44,
                 stored_hw=batch.stored_hw,
             )
-            pending_batch = executor.submit(fuse_and_log_batch, completed_batch, recording, fuser, config)
+            pending_batch = executor.submit(fuse_and_log_batch, completed_batch, recording, fuser, max_depth_range_meter)
         if pending_batch is not None:
             inferred_frames += pending_batch.result()
-
-    skipped_decodes: int = grid_slots - inferred_frames
-    if inferred_frames == 0 or recording is None:
-        raise RuntimeError(f"segment {segment_id!r} produced zero inferred frames")
-    mesh: o3d.geometry.TriangleMesh = fuser.get_mesh()
-    mesh.compute_vertex_normals()
-    vertices: Float[ndarray, "n 3"] = np.asarray(mesh.vertices)
-    log_fused_mesh(recording, PROMPTDA_MESH, mesh)
-    # Embed the PromptDA layout in this layer, framed on the fused mesh (the
-    # same per-sequence treatment the base layer gives the ARKit mesh). Sent at
-    # the end of the stream so it wins blueprint activation when the segment's
-    # layers load together in the viewer.
-    if len(vertices) > 0:
-        mesh_geometry: tuple[Float[ndarray, "3"], float] = mesh_bounding_geometry(vertices)
-        rr.send_blueprint(
-            make_blueprint(portrait=portrait, framing=mesh_geometry, include_promptda=True),
-            recording=recording,
-        )
-    recording.flush()
+        if inferred_frames == 0:
+            raise RuntimeError(f"segment {segment_id!r} produced zero inferred frames")
+        mesh: o3d.geometry.TriangleMesh = fuser.get_mesh()
+        mesh.compute_vertex_normals()
+        vertices: Float[ndarray, "n 3"] = np.asarray(mesh.vertices)
+        log_fused_mesh(recording, PROMPTDA_MESH, mesh)
+        # Embed the PromptDA layout in this layer, framed on the fused mesh (the
+        # same per-sequence treatment the base layer gives the ARKit mesh). Sent at
+        # the end of the stream so it wins blueprint activation when the segment's
+        # layers load together in the viewer.
+        if len(vertices) > 0:
+            rr.send_blueprint(
+                make_blueprint(portrait=portrait, framing=mesh_bounding_geometry(vertices), include_promptda=True),
+                recording=recording,
+            )
+    skipped_decodes: int = 0 if expected_frames is None else expected_frames - inferred_frames
     return SegmentResult(rrd_path=rrd_path, inferred_frames=inferred_frames, skipped_decodes=skipped_decodes)
+
+
+def process_segment(
+    dataset_entry: DatasetEntry,
+    segment_id: str,
+    portrait: bool,
+    orientation_quarter_turns: int,
+    config: PDAArkitScenesConfig,
+    predictor: PromptDATrtPredictor,
+) -> SegmentResult:
+    """Infer and fuse one catalog segment's sampling grid into a PromptDA RRD."""
+    batches, grid_slots = grid_batches(dataset_entry, segment_id, portrait, orientation_quarter_turns, config)
+    return run_segment(
+        batches,
+        segment_id,
+        portrait,
+        config.output_dir / f"{segment_id}.rrd",
+        predictor,
+        max_depth_range_meter=config.max_depth_range_meter,
+        depth_fusion_resolution=config.depth_fusion_resolution,
+        expected_frames=grid_slots,
+    )
 
 
 def main(config: PDAArkitScenesConfig) -> None:
