@@ -14,13 +14,25 @@ import logging
 import sys
 from pathlib import Path
 
+import cv2
+import numpy as np
 import torch
-from monopriors.third_party.zipdepth.predictor import DepthInference
+from monopriors.models.relative_depth.zipdepth import ZipDepthPredictor
 
 from zipdepth.evaluation import DATASET_CONFIGS, discover_samples, evaluate
 from zipdepth.evaluation.evaluator import print_results, save_results
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+
+
+class _EvaluatorAdapter:
+    """``evaluate`` expects ``infer_image(bgr) -> inverse depth``; monopriors' predictor takes RGB."""
+
+    def __init__(self, predictor: ZipDepthPredictor) -> None:
+        self.predictor = predictor
+
+    def infer_image(self, bgr: np.ndarray) -> np.ndarray:
+        return self.predictor(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), None).disparity
 
 
 def main():
@@ -85,15 +97,9 @@ def main():
     if args.max_samples:
         samples = samples[:args.max_samples]
 
-    predictor = DepthInference(
-        checkpoint_path=args.checkpoint,
-        variant=args.variant,
-        device=args.device,
-        use_half=args.fp16,
-        input_size=args.input_size,
-        upsample_unfold=not args.npu,
-        warmup_iters=0,
-    )
+    predictor = _EvaluatorAdapter(ZipDepthPredictor(
+        device=args.device, checkpoint=Path(args.checkpoint), input_size=args.input_size, npu=args.npu,
+    ))
 
     output_dir = Path(args.output_dir) / args.dataset
     output_dir.mkdir(parents=True, exist_ok=True)

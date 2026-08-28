@@ -1,4 +1,7 @@
-"""ZipDepthPredictor: registration, checkpoint-prefix handling, and the RelativeDepthPrediction contract."""
+"""ZipDepthPredictor: registration, checkpoint handling, and the RelativeDepthPrediction contract.
+
+Runs on CPU against a randomly initialised ZipDepth-base saved to disk, so no download or GPU is needed.
+"""
 
 from pathlib import Path
 from typing import get_args
@@ -10,7 +13,6 @@ import torch
 from monopriors.models.relative_depth import RELATIVE_PREDICTORS, ZipDepthPredictor, get_relative_predictor
 from monopriors.models.relative_depth import zipdepth as zipdepth_module
 from monopriors.third_party.zipdepth.architecture import create_model
-from monopriors.third_party.zipdepth.model_utils import strip_state_dict_prefixes
 
 
 def test_registered() -> None:
@@ -18,67 +20,48 @@ def test_registered() -> None:
     assert get_relative_predictor("ZipDepthPredictor") is ZipDepthPredictor
 
 
-def test_strip_prefixes_roundtrip() -> None:
-    # Training checkpoints carry DDP / torch.compile prefixes; the plain model must accept them.
+@pytest.fixture(scope="module")
+def trainer_checkpoint(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A checkpoint in the training package's format: DDP+compile-prefixed keys plus optimizer state."""
     model = create_model(variant="base")
-    prefixed = {"module._orig_mod." + k: v for k, v in model.state_dict().items()}
-    model.load_state_dict(strip_state_dict_prefixes(prefixed), strict=True)
+    path = tmp_path_factory.mktemp("ckpt") / "final_model.pth"
+    torch.save({"model_state_dict": {"module._orig_mod." + k: v for k, v in model.state_dict().items()}, "optimizer_state_dict": {}}, path)
+    return path
 
 
-class _FakeInference:
-    """Stands in for DepthInference: records the BGR input and returns a deterministic disparity."""
-
-    def __init__(self, checkpoint_path: str, **kwargs: object) -> None:
-        self.checkpoint_path = checkpoint_path
-        self.kwargs = kwargs
-        self.device = kwargs["device"]
-        self.model = create_model(variant="base")
-        self._resize_buf_shape: tuple[int, int] | None = (1, 1)
-        self.last_bgr: np.ndarray | None = None
-
-    def infer_image(self, bgr: np.ndarray) -> np.ndarray:
-        self.last_bgr = bgr
-        h, w = bgr.shape[:2]
-        return np.linspace(0.01, 0.15, h * w, dtype=np.float32).reshape(h, w)
+@pytest.fixture(scope="module")
+def predictor(trainer_checkpoint: Path) -> ZipDepthPredictor:
+    return ZipDepthPredictor(device="cpu", checkpoint=trainer_checkpoint, input_size=64)
 
 
-@pytest.fixture
-def predictor(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> ZipDepthPredictor:
-    monkeypatch.setattr(zipdepth_module, "DepthInference", _FakeInference)
-    monkeypatch.setattr(zipdepth_module, "download_zipdepth_checkpoint", lambda npu=False: tmp_path / "fake.pth")
-    return ZipDepthPredictor(device="cpu")
+def test_local_checkpoint_bypasses_download(monkeypatch: pytest.MonkeyPatch, trainer_checkpoint: Path) -> None:
+    monkeypatch.setattr(zipdepth_module, "download_zipdepth_checkpoint", lambda npu=False: pytest.fail("should not download"))
+    ZipDepthPredictor(device="cpu", checkpoint=trainer_checkpoint, input_size=64)
 
 
-def test_call_contract_and_bgr_conversion(predictor: ZipDepthPredictor) -> None:
-    rgb = np.zeros((4, 6, 3), dtype=np.uint8)
-    rgb[..., 0] = 255  # pure red in RGB
+def test_call_contract(predictor: ZipDepthPredictor) -> None:
+    rgb = np.random.default_rng(0).integers(0, 255, (48, 72, 3), dtype=np.uint8)
     pred = predictor(rgb, None)
-    fake: _FakeInference = predictor._inference  # type: ignore[assignment]
-    assert fake.last_bgr is not None and fake.last_bgr[0, 0].tolist() == [0, 0, 255]  # red lands in the B channel
-    assert pred.disparity.shape == (4, 6) and pred.disparity.dtype == np.float32
-    assert pred.depth.shape == (4, 6) and pred.depth.dtype == np.float32
-    assert np.array_equal(pred.confidence, np.ones((4, 6), dtype=np.float32))
-    assert pred.K_33.dtype == np.float32 and pred.K_33[0, 2] == 3.0 and pred.K_33[1, 2] == 2.0
+    assert pred.disparity.shape == (48, 72) and pred.disparity.dtype == np.float32 and np.isfinite(pred.disparity).all()
+    assert pred.depth.shape == (48, 72) and pred.depth.dtype == np.float32
+    assert pred.confidence.shape == (48, 72)
+    assert pred.K_33.dtype == np.float32 and pred.K_33[0, 2] == 36.0 and pred.K_33[1, 2] == 24.0
 
 
 def test_supplied_intrinsics_are_kept_as_float32(predictor: ZipDepthPredictor) -> None:
-    K = np.array([[500.0, 0, 3], [0, 500.0, 2], [0, 0, 1]], dtype=np.float64)
-    pred = predictor(np.zeros((4, 6, 3), dtype=np.uint8), K)
+    K = np.array([[500.0, 0, 36], [0, 500.0, 24], [0, 0, 1]], dtype=np.float64)
+    pred = predictor(np.zeros((48, 72, 3), dtype=np.uint8), K)
     assert pred.K_33.dtype == np.float32 and np.array_equal(pred.K_33, K.astype(np.float32))
 
 
-def test_set_model_device_retargets_runtime(predictor: ZipDepthPredictor) -> None:
-    fake: _FakeInference = predictor._inference  # type: ignore[assignment]
+def test_network_size_keeps_aspect_and_multiple_of_32(predictor: ZipDepthPredictor) -> None:
+    assert predictor._network_size(480, 640) == (64, 96)  # shorter side -> 64, longer side 85.3 rounded to /32
+    assert predictor._network_size(640, 480) == (96, 64)
+
+
+def test_set_model_device(predictor: ZipDepthPredictor) -> None:
     predictor.set_model_device("cpu")
-    assert fake.device == "cpu" and fake._resize_buf_shape is None
-    assert predictor.model is fake.model
-
-
-def test_local_checkpoint_bypasses_download(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(zipdepth_module, "DepthInference", _FakeInference)
-    monkeypatch.setattr(zipdepth_module, "download_zipdepth_checkpoint", lambda npu=False: pytest.fail("should not download"))
-    predictor = ZipDepthPredictor(device="cpu", checkpoint=tmp_path / "trained.pth")
-    assert predictor._inference.checkpoint_path == str(tmp_path / "trained.pth")  # type: ignore[attr-defined]
+    assert next(predictor.model.parameters()).device.type == "cpu"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU and the Hub weights")

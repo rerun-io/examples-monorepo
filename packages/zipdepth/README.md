@@ -13,6 +13,6 @@ pixi run -e zipdepth --frozen zipdepth-train-smoke      # data → train → res
 
 Layout:
 - `zipdepth/apis/` — typed tyro entry points authored here (`smoke_data`, `infer_rerun`, `train_smoke`).
-- `zipdepth/upstream_cli/` — the fork's `scripts/*.py` (argparse), unmodified apart from model imports.
+- `zipdepth/upstream_cli/` — the fork's `scripts/*.py` (argparse), unmodified apart from model imports (`infer.py` dropped: `ZipDepthPredictor` covers it).
 - `zipdepth/{data,loss,training,evaluation}/` — upstream training code, unmodified.
 - `tools/` — thin shims only: `python tools/train.py --config configs/default.json ...` (see `UPSTREAM_README.md`).
