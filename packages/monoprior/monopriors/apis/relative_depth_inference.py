@@ -48,9 +48,19 @@ def relative_depth_from_img(config: PredictorConfig) -> None:
     relative_pred: RelativeDepthPrediction = predictor.__call__(rgb=rgb_hw3, K_33=None)
 
     pinhole_path = parent_log_path / "camera" / "pinhole"
-    image_views = [rrb.Spatial2DView(origin=f"{pinhole_path}/image"), rrb.Spatial2DView(origin=f"{pinhole_path}/depth")]
+    image_views: list[rrb.Container | rrb.View] = [
+        rrb.Spatial2DView(origin=f"{pinhole_path}/image"),
+        rrb.Spatial2DView(origin=f"{pinhole_path}/depth"),
+    ]
     if relative_pred.confidence is not None:
-        image_views += [rrb.Spatial2DView(origin=f"{pinhole_path}/confidence"), rrb.Spatial2DView(origin=f"{pinhole_path}/confidence_mask")]
+        # semantic mask is the default tab; the full spectrum sits behind it
+        image_views.append(
+            rrb.Tabs(
+                rrb.Spatial2DView(origin=f"{pinhole_path}/confidence_mask", name="confidence mask"),
+                rrb.Spatial2DView(origin=f"{pinhole_path}/confidence", name="confidence"),
+                active_tab=0,
+            )
+        )
     rr.send_blueprint(
         rrb.Blueprint(
             rrb.Horizontal(rrb.Spatial3DView(), rrb.Vertical(*image_views), column_shares=[3, 1]),
