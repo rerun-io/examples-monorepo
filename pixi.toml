@@ -61,9 +61,9 @@ torchvision = "*"
 
 [feature.common.pypi-dependencies]
 # datafusion only — the dataloader extra would drag torch into common envs.
-rerun-sdk = { version = "==0.35.0", extras = ["datafusion"] }
+rerun-sdk = { version = "==0.36.2", extras = ["datafusion"] }
 gradio = "==6.13.0"
-gradio-rerun = "==0.35.0"
+gradio-rerun = "==0.36.2"
 simplecv = { path = "packages/simplecv", editable = true }
 
 # ─── catalog common feature (Rerun catalog prerelease lane) ────────────────
@@ -98,15 +98,10 @@ simplecv = { path = "packages/simplecv", editable = true }
 platforms = ["linux-64", "linux-aarch64"]
 
 [feature.rerun-prerelease.pypi-dependencies]
-rerun-sdk = { version = "==0.36.0a1+dev", extras = [
+rerun-sdk = { version = "==0.36.2", extras = [
     "datafusion",
     "dataloader",
 ] }
-
-[feature.rerun-prerelease.pypi-options]
-index-url = "https://pypi.org/simple"
-find-links = [{ url = "https://build.rerun.io/commit/4265652/wheels/" }]
-prerelease-mode = "allow"
 
 
 # ─── CUDA 13.0 feature (shared across all GPU envs) ─────────────────────────
@@ -398,7 +393,7 @@ vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f
 
 [feature.monoprior.activation.env]
 PACKAGE_DIR = "packages/monoprior"
-PYREFLY_TARGET = "monopriors/apis monopriors/data monopriors/gradio_ui monopriors/models monopriors/dc_utils.py monopriors/depth_utils.py monopriors/rr_logging_utils.py monopriors/scale_utils.py monopriors/__init__.py"
+PYREFLY_TARGET = "monopriors/apis monopriors/data monopriors/gradio_ui monopriors/models monopriors/dc_utils.py monopriors/depth_utils.py monopriors/rr_logging_utils.py monopriors/scale_utils.py monopriors/__init__.py monopriors/third_party/zipdepth"
 
 # ── Download tasks (hidden, used as depends-on) ─────────────────────────
 [feature.monoprior.tasks._monoprior-download-single-image]
@@ -628,6 +623,47 @@ env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
 description = "Ingest: same as prompt-da-arkitscenes-register but decodes the raw .mov with torchcodec, registering the promptda_raw layer (needs arkitscenes-download-serve running)"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# zipdepth — training / eval / export for ZipDepth; the network is vendored in
+# monopriors (monopriors.third_party.zipdepth). Explicit platforms required —
+# see AGENTS.md "Platforms & lockfile".
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.zipdepth]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.zipdepth.dependencies]
+python = "3.12.*"
+tyro = ">=0.9.1,<0.10"
+matplotlib = ">=3.8.3"
+pyyaml = ">=6.0"
+tensorboard = ">=2.16.0"
+# dataset.py decodes JPEGs with PyTurboJPEG (pypi) on top of the conda libjpeg-turbo
+libjpeg-turbo = ">=3.0.0,<4"
+
+[feature.zipdepth.pypi-dependencies]
+zipdepth = { path = "packages/zipdepth", editable = true }
+monopriors = { path = "packages/monoprior", editable = true }
+# monopriors' metadata requires sam3; resolve it to the workspace package like the other monopriors consumers
+sam3 = { path = "packages/sam3", editable = true }
+# albucore -> simsimd has no conda-forge linux-aarch64 build
+albumentations = ">=2.0.0"
+pyturbojpeg = ">=2.0.0,<3"
+
+[feature.zipdepth.activation.env]
+PACKAGE_DIR = "packages/zipdepth"
+# authored code only; the unmodified upstream tree (data/loss/training/evaluation/upstream_cli) is a vendor boundary
+PYREFLY_TARGET = "zipdepth/apis zipdepth/__init__.py tests tools"
+
+[feature.zipdepth.tasks.zipdepth-infer-rerun]
+cmd = "python tools/infer_rerun.py"
+cwd = "packages/zipdepth"
+description = "ZipDepth single-image inference visualized in Rerun (2D + 3D); --checkpoint for a trained .pth"
+
+[feature.zipdepth.tasks.zipdepth-train-smoke]
+cmd = "python tools/train_smoke.py"
+cwd = "packages/zipdepth"
+description = "Smoke: self-distilled example data -> train -> resume -> torchrun -> checkpoints load through monopriors ZipDepthPredictor"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # wilor-nano
 # ═══════════════════════════════════════════════════════════════════════════
 # Explicit platforms required — see AGENTS.md "Platforms & lockfile".
@@ -802,7 +838,7 @@ scipy = "*"
 [feature.mv-api-catalog-register-mac.pypi-dependencies]
 tyro = ">=0.9.1,<0.10"
 simplecv = { path = "packages/simplecv", editable = true }
-rerun-sdk = { version = "==0.35.0", extras = ["datafusion"] }
+rerun-sdk = { version = "==0.36.2", extras = ["datafusion"] }
 
 [feature.mv-api-catalog-register-mac.pypi-options]
 index-url = "https://pypi.org/simple"
@@ -1631,7 +1667,7 @@ xorg-libxrandr = "*"
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
 lpips = ">=0.1.4,<1"
 plyfile = ">=1.1,<2"
-rerun-sdk = "==0.35.0"
+rerun-sdk = "==0.36.2"
 simplecv = { path = "packages/simplecv", editable = true }
 
 [feature.gsplat-rust-renderer.activation.env]
@@ -1787,7 +1823,7 @@ depends-on = [
     "_gsplat-rust-renderer-download-nerfbaselines-data-lego",
 ]
 cwd = "packages/gsplat-rust-renderer"
-description = "Train Lego for 7k steps while Rerun 0.35.0 replays Brush eval pairs, metrics, cameras, and eight retained snapshots"
+description = "Train Lego for 7k steps while Rerun 0.36.2 replays Brush eval pairs, metrics, cameras, and eight retained snapshots"
 
 [feature.gsplat-rust-renderer.tasks._gsplat-rust-renderer-build-viewer]
 cmd = "cargo build --release --bin gsplat-rust-renderer"
@@ -2452,6 +2488,32 @@ dataforge = { path = "packages/dataforge", editable = true }
 [feature.dataforge.activation.env]
 PACKAGE_DIR = "packages/dataforge"
 
+[feature.dataforge.tasks.dataforge-download]
+cmd = "python tools/apps/download.py"
+cwd = "packages/dataforge"
+description = "Fetch (or verify, for local corpora) a dataset's raw tree"
+
+[feature.dataforge.tasks.dataforge-convert]
+cmd = "python tools/apps/convert.py"
+cwd = "packages/dataforge"
+description = "Convert discovered sequences into base-layer rrds (--sequence, --force)"
+
+[feature.dataforge.tasks.dataforge-register]
+cmd = "python tools/apps/register.py"
+cwd = "packages/dataforge"
+description = "Register base-layer rrds into a local Rerun catalog"
+
+[feature.dataforge.tasks.dataforge-view]
+cmd = "python tools/apps/view.py"
+cwd = "packages/dataforge"
+description = "Open one converted recording in the viewer (--rr-config.headless in a bare shell)"
+
+[feature.dataforge.tasks.dataforge-serve]
+# One open fd per registered rrd; the default 1024 overflows fast (see arkitscenes-download-serve).
+cmd = "bash -c 'ulimit -n 524288 && exec rerun server --port 51235'"
+cwd = "packages/dataforge"
+description = "Start the local in-memory Rerun catalog on :51235 (own shell; keep running to register/view)"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Environments
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2534,6 +2596,17 @@ prompt-da-stream-dev = { features = [
     "prompt-da-stream",
     "dev",
 ], solve-group = "prompt-da-stream", no-default-feature = true }
+zipdepth = { features = [
+    "common",
+    "cuda",
+    "zipdepth",
+], solve-group = "zipdepth", no-default-feature = true }
+zipdepth-dev = { features = [
+    "common",
+    "cuda",
+    "zipdepth",
+    "dev",
+], solve-group = "zipdepth", no-default-feature = true }
 wilor-nano = { features = [
     "common",
     "cuda",

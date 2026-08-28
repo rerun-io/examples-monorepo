@@ -22,6 +22,7 @@ from monopriors.models.surface_normal.moge_v2 import MOGE_V2_NORMAL_CHECKPOINTS
 from monopriors.third_party.moge.model.v2 import ForwardOutput, MoGeModel
 
 Encoder: TypeAlias = Literal["vits", "vitb", "vitl"]
+HardwareCompatibility: TypeAlias = Literal["none", "same_compute_capability"]
 
 DEFAULT_CACHE_DIR: Path = Path(os.environ.get("MONOPRIOR_TRT_CACHE", "~/.cache/monoprior")).expanduser()
 """Cache root holding portable ``onnx/`` and machine-local ``trt/`` artifacts."""
@@ -349,6 +350,8 @@ class MoGeV2TrtNormalPredictor:
         resolution_level: int = 9,
         batch_size: int = 8,
         cache_dir: Path = DEFAULT_CACHE_DIR,
+        hardware_compatibility: HardwareCompatibility = "none",
+        engine_path: Path | None = None,
     ) -> None:
         """Export ONNX and build or load the machine-local engine on first use.
 
@@ -359,20 +362,32 @@ class MoGeV2TrtNormalPredictor:
                 3600 tokens for the pinned checkpoints.
             batch_size: Engine profile maximum and optimization batch.
             cache_dir: Cache root for ONNX and TensorRT artifacts.
+            hardware_compatibility: Plan portability requested when building an engine.
+            engine_path: Optional prebuilt engine. When provided, ONNX export and engine build are skipped.
         """
-        from trtkit import TrtBuildConfig, ensure_engine
         from trtkit.tensorrt_runtime import TensorRtRuntime
 
-        onnx_path: Path = export_moge_v2_normal_onnx(
-            encoder=encoder,
-            image_hw=image_hw,
-            resolution_level=resolution_level,
-            max_batch_size=batch_size,
-            cache_dir=cache_dir,
-        )
-        config: TrtBuildConfig = TrtBuildConfig(max_batch_size=batch_size, opt_batch_size=batch_size)
-        engine_path: Path = ensure_engine(onnx_path, config, cache_dir=cache_dir / "trt")
-        self.runtime: TensorRtRuntime = TensorRtRuntime(engine_path)
+        resolved_engine_path: Path
+        if engine_path is None:
+            from trtkit import TrtBuildConfig, ensure_engine
+
+            onnx_path: Path = export_moge_v2_normal_onnx(
+                encoder=encoder,
+                image_hw=image_hw,
+                resolution_level=resolution_level,
+                max_batch_size=batch_size,
+                cache_dir=cache_dir,
+            )
+            config: TrtBuildConfig = TrtBuildConfig(
+                max_batch_size=batch_size,
+                opt_batch_size=batch_size,
+                hardware_compatibility=hardware_compatibility,
+            )
+            resolved_engine_path = ensure_engine(onnx_path, config, cache_dir=cache_dir / "trt")
+        else:
+            resolved_engine_path = engine_path
+        self.engine_path: Path = resolved_engine_path
+        self.runtime: TensorRtRuntime = TensorRtRuntime(resolved_engine_path)
         self.image_hw: tuple[int, int] = image_hw
 
     def __call__(self, rgb_bhw3: UInt8[Tensor, "b h w 3"]) -> MoGeV2NormalOutput:

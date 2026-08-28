@@ -16,10 +16,12 @@ class RelativeDepthPrediction:
     # relative disparity
     depth: Float32[np.ndarray, "h w"]
     # relative depth
-    confidence: Float32[np.ndarray, "h w"]
-    # confidence values
     K_33: Float32[np.ndarray, "3 3"]
     # intrinsics
+    confidence: Float32[np.ndarray, "h w"] | None
+    # per-pixel confidence in [0, 1]; None when the model has no confidence head
+    # (DepthAnything v1/v2, VideoDepthAnything, ZipDepth). MoGe gives a validity mask,
+    # UniDepth a normalized confidence.
 
 
 class BaseRelativePredictor(ABC, Generic[ModelT]):

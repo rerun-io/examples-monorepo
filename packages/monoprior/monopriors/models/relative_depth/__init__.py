@@ -6,6 +6,7 @@ from .depth_anything_v1 import DepthAnythingV1Predictor
 from .depth_anything_v2 import DepthAnythingV2Predictor
 from .moge_v1 import MoGeV1Predictor
 from .unidepth import UniDepthRelativePredictor
+from .zipdepth import ZipDepthPredictor
 
 # Define predictor names as a list of strings
 RELATIVE_PREDICTORS = Literal[
@@ -13,6 +14,7 @@ RELATIVE_PREDICTORS = Literal[
     "DepthAnythingV2Predictor",
     "UniDepthRelativePredictor",
     "MoGeV1Predictor",
+    "ZipDepthPredictor",
 ]
 
 # Use the list to generate the __all__ list
@@ -33,5 +35,7 @@ def get_relative_predictor(
             return DepthAnythingV1Predictor
         case "MoGeV1Predictor":
             return MoGeV1Predictor
+        case "ZipDepthPredictor":
+            return ZipDepthPredictor
         case _:
             raise ValueError(f"Unknown predictor type: {predictor_type}")

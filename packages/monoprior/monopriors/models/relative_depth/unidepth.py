@@ -14,6 +14,18 @@ from monopriors.models.relative_depth.base_relative_depth import (
 )
 
 
+def predicted_error_to_confidence(raw_b1hw: Float[torch.Tensor, "b 1 h w"]) -> Float[torch.Tensor, "b 1 h w"]:
+    """Map UniDepthV2's "confidence" output to a confidence in (0, 1].
+
+    The head is trained so that ``confidence.log()`` matches the absolute, median-rescaled depth
+    error in metres (``unidepth/ops/losses/confidence.py``), i.e. ``log(raw)`` *is* the predicted
+    error: higher = worse, spiking at depth edges. ``1 / (1 + error)`` makes the default 0.5 mask
+    threshold mean "predicted error under one metre".
+    """
+    predicted_error_b1hw: Float[torch.Tensor, "b 1 h w"] = raw_b1hw.log().clamp_min(0.0)
+    return 1.0 / (1.0 + predicted_error_b1hw)
+
+
 class UniDepthPredictions(TypedDict):
     """Tensor outputs returned by UniDepth inference."""
 
@@ -93,8 +105,7 @@ class UniDepthRelativePredictor(BaseRelativePredictor[UniDepthModel]):
 
         assert depth_b1hw.shape[0] == 1, "Batch size must be 1"
 
-        # normalize the confidence to 0-1
-        conf_b1hw = (conf_b1hw - conf_b1hw.min()) / (conf_b1hw.max() - conf_b1hw.min())
+        conf_b1hw = predicted_error_to_confidence(conf_b1hw)
 
         # convert to numpy and rearrange
         depth_hw = rearrange(depth_b1hw, "1 1 h w -> h w").numpy(force=True)

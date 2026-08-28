@@ -70,7 +70,7 @@ world_T_cam  = world_T_rig @ rig_T_cam           # composes along the entity tre
       /pinhole/video, /pinhole/coco133_uv
     /cam_01                     fixed rig_T_cam offset (multi-camera ego devices)
       /pinhole/video, /pinhole/coco133_uv
-    /imu_00                     reserved peer sensor (IMU — see §8; not emitted yet)
+    /imu_00                     peer sensor (IMU — see §8; emitted by dataforge)
   /gt                           ground-truth annotations (UNCHANGED from v1, see §5)
 ```
 
@@ -87,6 +87,16 @@ world_T_cam  = world_T_rig @ rig_T_cam           # composes along the entity tre
 - `schema_version` = `"exoego:v2"`,
 - `reference` = the reference camera's id (e.g. `"cam_00"`),
 - `num_cameras`.
+
+Those three keys are the **required** set. A writer may add the two optional
+rig-level keys `name` (human device label, e.g. `"robocap"`, `"oak"`, an iPhone's
+advertised name) and `kind` (device role: `"exo"` / `"ego"` / `"quest"`) — dataforge
+emits both, because a capture with several unlike rigs is unreadable without them
+and blueprints cannot select entities by their `AnyValues`. Readers must treat them
+as optional. Note also that `reference` names a **sensor child**, not necessarily a
+camera: a rig whose extrinsics are all expressed in its inertial frame states
+`reference = "imu_00"` (dataforge's RoboCap rig does), and a single-camera rig
+trivially states `"cam_00"`.
 
 Per camera, on `/world/rig_NN/cam_MM`: `name` (human stream label) and `kind`
 (`"rgb"` / `"grayscale"`, a best-effort content hint). The reference camera of a
@@ -144,16 +154,17 @@ from the normalized `exo_cam_list` / `exo_video_names` and `ego_cam_dict` /
       temporal `world_T_rig` on the ego rig, and `schema_version=exoego:v2`; no
       `/world/{exo,ego}/*` remain.
 
-## 8. Reserved / planned sensors: IMU *(not emitted yet)*
+## 8. IMU *(emitted — first writer: dataforge / RoboCap dev0)*
 
 The rig model treats **every sensor as a peer child of the rig**, so a non-camera
-sensor slots in alongside the cameras without nesting under one. The next one to add
-is the **IMU**: ego devices like **Project Aria** (RGB + SLAM cameras *and* IMUs) and
+sensor slots in alongside the cameras without nesting under one. The first such
+sensor is the **IMU**: ego devices like **Project Aria** (RGB + SLAM cameras *and* IMUs) and
 the **RoboCap** capture rigs carry inertial data, and `SensorKind` in
 `simplecv/rig.py` already reserves `"imu"` for exactly this.
 
-**Planned layout** (mirrors `slam-evals`' `-vi` inertial modalities — **reserved; the
-current writer does not emit it**):
+**Layout** (mirrors `slam-evals`' `-vi` inertial modalities). `dataforge`'s RoboCap
+converter (`packages/dataforge/dataforge/datasets/robocap.py`) is the first writer that
+actually emits it; simplecv's own exo/ego writer still does not.
 
 ```
 /world/rig_NN/imu_MM        Transform3D = rig_T_imu (static) + AnyValues{name, kind="imu"}
@@ -171,8 +182,17 @@ current writer does not emit it**):
 - On a **moving** ego rig the IMU rides the rig's `world_T_rig(t)` like every other
   sensor; its `gyro`/`accel` samples are logged on the shared `video_time` timeline,
   as `slam-evals` does.
+- Samples are logged **raw, at their native rate, without interpolation or
+  resampling**, as columnar `rr.Scalars` batches (three components per row:
+  x/y/z) on `video_time`. Readers must not assume IMU rows line up with video
+  frames.
 - Adding IMUs is **mechanical** — a new peer entity plus the already-reserved `"imu"`
-  kind, no new vocabulary. Per the rule below, the first writer that actually emits
-  IMU data should bump the schema version and update this section.
+  kind, no new vocabulary. Emitting IMU data did not change any existing path, so
+  the schema version stays `exoego:v2`.
+- **RoboCap status / TODO:** dataforge v1 emits the middle IMU (`dev0`) only, as
+  `imu_00`; `dev1`/`dev2` and a multi-IMU blueprint layout (one gyro/accel pane pair
+  per IMU) are still TODO. RoboCap's IMU and camera clocks differ by a fixed
+  14,902,432 ns offset (basalt's `kCameraToImuOffsetNs`); dataforge picks the raw
+  **camera** clock for `video_time` and subtracts the offset from IMU timestamps.
 
 Any change to the layout should increment the schema version and update this doc.

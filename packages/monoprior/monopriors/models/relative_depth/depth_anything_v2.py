@@ -76,8 +76,8 @@ class DepthAnythingV2Predictor(BaseRelativePredictor[DepthAnythingV2]):
         relative_prediction = RelativeDepthPrediction(
             disparity=disparity,
             depth=disparity_to_depth(disparity, focal_length=int(K_33[0, 0])),
-            confidence=np.ones_like(disparity),
             K_33=K_33,
+            confidence=None,
         )
 
         return relative_prediction

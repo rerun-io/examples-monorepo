@@ -695,7 +695,7 @@ impl GpuRenderResources {
             .expect("map_async channel closed")
             .expect("map_async failed");
 
-        let data = buffer_slice.get_mapped_range();
+        let data = buffer_slice.get_mapped_range().expect("staging buffer mapped range");
         let row_bytes: usize = self.width as usize * 4;
         let mut pixels: Vec<u8> = Vec::with_capacity(row_bytes * self.height as usize);
         for y in 0..self.height as usize {
