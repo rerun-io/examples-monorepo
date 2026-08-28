@@ -1,4 +1,6 @@
-from typing import Self, TypeAlias, TypedDict, cast
+"""ZipDepth model architecture with runtime-checkable tensor annotations."""
+
+from typing import Self, TypeAlias, TypedDict
 
 import torch
 import torch.nn as nn
@@ -87,11 +89,7 @@ def count_parameters(model: nn.Module) -> float:
     Returns:
         Number of trainable parameters, in millions.
     """
-    parameter_count: int = 0
-    parameter: nn.Parameter
-    for parameter in model.parameters():
-        if parameter.requires_grad:
-            parameter_count += parameter.numel()
+    parameter_count: int = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
     return parameter_count / 1e6
 
 
@@ -177,10 +175,18 @@ class QARepBlock(nn.Module):
         if hasattr(self, "fused_conv"):
             return
 
-        branch_3x3_conv: nn.Conv2d = cast(nn.Conv2d, self.branch_3x3[0])
-        branch_3x3_bn: nn.BatchNorm2d = cast(nn.BatchNorm2d, self.branch_3x3[1])
-        branch_1x1_conv: nn.Conv2d = cast(nn.Conv2d, self.branch_1x1[0])
-        branch_1x1_bn: nn.BatchNorm2d = cast(nn.BatchNorm2d, self.branch_1x1[1])
+        branch_3x3_conv_module: nn.Module = self.branch_3x3[0]
+        branch_3x3_bn_module: nn.Module = self.branch_3x3[1]
+        branch_1x1_conv_module: nn.Module = self.branch_1x1[0]
+        branch_1x1_bn_module: nn.Module = self.branch_1x1[1]
+        if not isinstance(branch_3x3_conv_module, nn.Conv2d) or not isinstance(branch_1x1_conv_module, nn.Conv2d):
+            raise TypeError("QARepBlock convolution branches have unexpected module types")
+        if not isinstance(branch_3x3_bn_module, nn.BatchNorm2d) or not isinstance(branch_1x1_bn_module, nn.BatchNorm2d):
+            raise TypeError("QARepBlock batch-normalization branches have unexpected module types")
+        branch_3x3_conv: nn.Conv2d = branch_3x3_conv_module
+        branch_3x3_bn: nn.BatchNorm2d = branch_3x3_bn_module
+        branch_1x1_conv: nn.Conv2d = branch_1x1_conv_module
+        branch_1x1_bn: nn.BatchNorm2d = branch_1x1_bn_module
         fused_3x3: ConvBNFusion = self._fuse_conv_bn(branch_3x3_conv, branch_3x3_bn)
         kernel_3x3: Float[torch.Tensor, "c_out c_in_per_group 3 3"] = fused_3x3[0]
         bias_3x3: Float[torch.Tensor, "c_out"] = fused_3x3[1]
@@ -194,25 +200,40 @@ class QARepBlock(nn.Module):
 
         if self.has_identity:
             identity_kernel: Float[torch.Tensor, "c_out c_in_per_group 3 3"] = torch.zeros_like(kernel)
-            i: int
             for i in range(self.in_ch):
                 identity_kernel[i, i % (self.in_ch // self.groups), 1, 1] = 1.0
             kernel = kernel + identity_kernel
 
         self.fused_conv: nn.Conv2d = nn.Conv2d(self.in_ch, self.out_ch, 3, self.stride, 1, groups=self.groups, bias=True)
         self.fused_conv.weight.data = kernel
-        fused_bias: Float[torch.Tensor, "c_out"] = cast(Float[torch.Tensor, "c_out"], self.fused_conv.bias)
-        fused_bias.data = bias
+        if self.fused_conv.bias is None:
+            raise RuntimeError("fused QARepBlock convolution unexpectedly has no bias")
+        self.fused_conv.bias.data = bias
 
         del self.branch_3x3, self.branch_1x1
 
     def _fuse_conv_bn(self, conv: nn.Conv2d, bn: nn.BatchNorm2d) -> ConvBNFusion:
-        """Combine convolution and batch-normalization tensors."""
+        """Combine convolution and batch-normalization tensors.
+
+        Args:
+            conv: Convolution whose float weights have shape
+                ``(output_channels, input_channels_per_group, kernel_height, kernel_width)``.
+            bn: Batch normalization with one float statistic per output channel.
+
+        Returns:
+            Fused float weights and bias with shapes
+            ``(output_channels, input_channels_per_group, kernel_height, kernel_width)`` and
+            ``(output_channels,)``.
+        """
+        if bn.running_mean is None or bn.running_var is None:
+            raise ValueError("BatchNorm without running statistics cannot be fused")
+        if bn.weight is None or bn.bias is None:
+            raise ValueError("BatchNorm without affine parameters cannot be fused")
         weights: Float[torch.Tensor, "c_out c_in_per_group kernel_h kernel_w"] = conv.weight
-        running_mean: Float[torch.Tensor, "c_out"] = cast(Float[torch.Tensor, "c_out"], bn.running_mean)
-        running_var: Float[torch.Tensor, "c_out"] = cast(Float[torch.Tensor, "c_out"], bn.running_var)
-        gamma: Float[torch.Tensor, "c_out"] = cast(Float[torch.Tensor, "c_out"], bn.weight)
-        beta: Float[torch.Tensor, "c_out"] = cast(Float[torch.Tensor, "c_out"], bn.bias)
+        running_mean: Float[torch.Tensor, "c_out"] = bn.running_mean
+        running_var: Float[torch.Tensor, "c_out"] = bn.running_var
+        gamma: Float[torch.Tensor, "c_out"] = bn.weight
+        beta: Float[torch.Tensor, "c_out"] = bn.bias
         epsilon: float = bn.eps
         std: Float[torch.Tensor, "c_out"] = (running_var + epsilon).sqrt()
         scale: Float[torch.Tensor, "c_out 1 1 1"] = (gamma / std).reshape(-1, 1, 1, 1)
@@ -265,7 +286,7 @@ class EfficientGlobalAttention(nn.Module):
         self.head_dim: int = dim // num_heads
         self.scale: float = self.head_dim**-0.5
 
-        self.tokens: Float[torch.Tensor, "1 tokens c"] = nn.Parameter(torch.randn(1, num_tokens, dim))
+        self.tokens: nn.Parameter = nn.Parameter(torch.randn(1, num_tokens, dim))
         nn.init.trunc_normal_(self.tokens, std=0.02)
 
         self.q_tokens: nn.Linear = nn.Linear(dim, dim, bias=False)
@@ -446,8 +467,16 @@ class MinimalMultiScale(nn.Module):
 # CROSS-SCALE
 # =============================================================================
 def _pick_groups(in_ch: int, out_ch: int, max_g: int = 4) -> int:
-    """Safe group selection."""
-    g: int
+    """Choose the largest supported group count that divides both channel counts.
+
+    Args:
+        in_ch: Input channel count.
+        out_ch: Output channel count.
+        max_g: Largest group count to try.
+
+    Returns:
+        A group count that divides both channel counts.
+    """
     for g in (max_g, 2, 1):
         if in_ch % g == 0 and out_ch % g == 0:
             return g
@@ -569,7 +598,6 @@ class FastConvexUpsample(nn.Module):
     def __init__(
         self,
         feat_ch: int,
-        edge_ch: int = 8,
         scale: int = 4,
         temperature: float = 1.0,
         use_unfold: bool = True,
@@ -579,22 +607,20 @@ class FastConvexUpsample(nn.Module):
         self.temperature: float = temperature
         self.use_unfold: bool = use_unfold
 
-        in_ch: int = feat_ch
-
         if use_unfold:
             # --- GPU / TensorRT path ---
             hidden: int = max(feat_ch // 4, 8)
             self.mask_pred: nn.Sequential = nn.Sequential(
-                nn.Conv2d(in_ch, hidden, 3, padding=1, bias=False),
+                nn.Conv2d(feat_ch, hidden, 3, padding=1, bias=False),
                 nn.BatchNorm2d(hidden),
                 nn.ReLU(inplace=True),
                 nn.Conv2d(hidden, 9 * scale * scale, 1),
             )
         else:
             # --- NPU path ---
-            where_hidden: int = max(in_ch // 2, 8)
+            where_hidden: int = max(feat_ch // 2, 8)
             self.where_conv: nn.Sequential = nn.Sequential(
-                nn.Conv2d(in_ch, where_hidden, 1, bias=False),
+                nn.Conv2d(feat_ch, where_hidden, 1, bias=False),
                 nn.BatchNorm2d(where_hidden),
                 nn.ReLU(inplace=True),
                 nn.Conv2d(where_hidden, where_hidden, 5, padding=2, groups=where_hidden, bias=False),
@@ -605,8 +631,8 @@ class FastConvexUpsample(nn.Module):
 
     def forward(
         self,
-        feat: Float[torch.Tensor, "b c_feat h w"],
-        depth: Float[torch.Tensor, "b 1 h w"],
+        feat: Float[torch.Tensor, "b c_feat h_low w_low"],
+        depth: Float[torch.Tensor, "b 1 h_low w_low"],
     ) -> Float[torch.Tensor, "b 1 h_up w_up"]:
         """Upsample a low-resolution depth map.
 
@@ -626,36 +652,48 @@ class FastConvexUpsample(nn.Module):
         depth_nn_b1hw: Float[torch.Tensor, "b 1 h_up w_up"] = F.interpolate(depth, scale_factor=scale, mode="nearest")
         depth_bilinear_b1hw: Float[torch.Tensor, "b 1 h_up w_up"] = F.interpolate(depth, scale_factor=scale, mode="bilinear", align_corners=False)
 
-        alpha_b1hw: Float[torch.Tensor, "b 1 h w"] = self.where_conv(feat)
-        alpha_up_b1hw: Float[torch.Tensor, "b 1 h_up w_up"] = F.interpolate(alpha_b1hw, scale_factor=scale, mode="bilinear", align_corners=False)
-        alpha_up_b1hw = torch.sigmoid(alpha_up_b1hw)
+        alpha_b1h_low_w_low: Float[torch.Tensor, "b 1 h_low w_low"] = self.where_conv(feat)
+        alpha_up_b1h_up_w_up: Float[torch.Tensor, "b 1 h_up w_up"] = F.interpolate(
+            alpha_b1h_low_w_low, scale_factor=scale, mode="bilinear", align_corners=False
+        )
+        alpha_up_b1h_up_w_up = torch.sigmoid(alpha_up_b1h_up_w_up)
 
-        out_b1hw: Float[torch.Tensor, "b 1 h_up w_up"] = alpha_up_b1hw * depth_nn_b1hw + (1.0 - alpha_up_b1hw) * depth_bilinear_b1hw
+        out_b1hw: Float[torch.Tensor, "b 1 h_up w_up"] = alpha_up_b1h_up_w_up * depth_nn_b1hw + (1.0 - alpha_up_b1h_up_w_up) * depth_bilinear_b1hw
 
         return F.relu(out_b1hw)
 
     def _forward_unfold(
         self,
-        feat: Float[torch.Tensor, "b c_feat h w"],
-        depth: Float[torch.Tensor, "b 1 h w"],
+        feat: Float[torch.Tensor, "b c_feat h_low w_low"],
+        depth: Float[torch.Tensor, "b 1 h_low w_low"],
     ) -> Float[torch.Tensor, "b 1 h_up w_up"]:
-        """Upsample depth from learned convex neighborhood weights."""
+        """Upsample depth from learned convex neighborhood weights.
+
+        Args:
+            feat: Float feature tensor with shape
+                ``(batch, feature_channels, low_height, low_width)``.
+            depth: Float depth tensor with shape ``(batch, 1, low_height, low_width)``.
+
+        Returns:
+            Nonnegative float depth tensor with shape
+            ``(batch, 1, upsampled_height, upsampled_width)``.
+        """
         batch_size: int = depth.shape[0]
         height: int = depth.shape[2]
         width: int = depth.shape[3]
         scale: int = self.scale
 
         mask_raw_bchw: Float[torch.Tensor, "b mask_channels h w"] = self.mask_pred(feat)
-        mask_b9shw: Float[torch.Tensor, "b 9 subpixels h w"] = mask_raw_bchw.view(batch_size, 9, scale * scale, height, width)
-        mask_b9shw = F.softmax(mask_b9shw / self.temperature, dim=1)
+        mask_b9sh_low_w_low: Float[torch.Tensor, "b 9 subpixels h_low w_low"] = mask_raw_bchw.view(batch_size, 9, scale * scale, height, width)
+        mask_b9sh_low_w_low = F.softmax(mask_b9sh_low_w_low / self.temperature, dim=1)
 
         depth_pad_b1hw: Float[torch.Tensor, "b 1 h_pad w_pad"] = F.pad(depth, (1, 1, 1, 1), mode="replicate")
         neighbors_b91hw: Float[torch.Tensor, "b 9 1 h w"] = F.unfold(depth_pad_b1hw, 3).view(batch_size, 9, 1, height, width)
 
-        up_bshw: Float[torch.Tensor, "b subpixels h w"] = (mask_b9shw * neighbors_b91hw).sum(1)
-        up_b1hw: Float[torch.Tensor, "b 1 h_up w_up"] = F.pixel_shuffle(up_bshw.view(batch_size, scale * scale, height, width), scale)
+        up_bsh_low_w_low: Float[torch.Tensor, "b subpixels h_low w_low"] = (mask_b9sh_low_w_low * neighbors_b91hw).sum(1)
+        up_b1h_up_w_up: Float[torch.Tensor, "b 1 h_up w_up"] = F.pixel_shuffle(up_bsh_low_w_low.view(batch_size, scale * scale, height, width), scale)
 
-        return up_b1hw
+        return up_b1h_up_w_up
 
 
 # =============================================================================
@@ -671,10 +709,8 @@ class ZipDepthDecoder(nn.Module):
         dec_ch: int,
         half_dec_ch: int = 16,
         upsample_unfold: bool = True,
-        use_half_res: bool = True,
     ) -> None:
         super().__init__()
-        self.use_half_res: bool = use_half_res
         c1: int = enc_dims[0]
         c2: int = enc_dims[1]
         c3: int = enc_dims[2]
@@ -688,32 +724,24 @@ class ZipDepthDecoder(nn.Module):
         self.fuse2: UltraLightFusion = UltraLightFusion(c2, ch3, ch2)
         self.fuse1: UltraLightFusion = UltraLightFusion(c1, ch2, ch1)
 
-        if use_half_res:
-            ch_half: int = half_dec_ch
-            self.fuse_half: UltraLightFusion = UltraLightFusion(high_ch=half_ch, low_ch=ch1, out_ch=ch_half)
-            self.head_half: nn.Conv2d = nn.Conv2d(ch_half, 1, 3, padding=1)
-            nn.init.kaiming_normal_(self.head_half.weight, mode="fan_out", nonlinearity="relu")
-            head_half_bias: Float[torch.Tensor, "1"] = cast(Float[torch.Tensor, "1"], self.head_half.bias)
-            nn.init.constant_(head_half_bias, 0.5)
-            self.convex_up: FastConvexUpsample = FastConvexUpsample(feat_ch=ch_half, scale=2, use_unfold=upsample_unfold)
-        else:
-            self.head_direct: nn.Conv2d = nn.Conv2d(ch1, 1, 3, padding=1)
-            nn.init.kaiming_normal_(self.head_direct.weight, mode="fan_out", nonlinearity="relu")
-            head_direct_bias: Float[torch.Tensor, "1"] = cast(Float[torch.Tensor, "1"], self.head_direct.bias)
-            nn.init.constant_(head_direct_bias, 0.5)
+        ch_half: int = half_dec_ch
+        self.fuse_half: UltraLightFusion = UltraLightFusion(high_ch=half_ch, low_ch=ch1, out_ch=ch_half)
+        self.head_half: nn.Conv2d = nn.Conv2d(ch_half, 1, 3, padding=1)
+        nn.init.kaiming_normal_(self.head_half.weight, mode="fan_out", nonlinearity="relu")
+        if self.head_half.bias is not None:
+            nn.init.constant_(self.head_half.bias, 0.5)
+        self.convex_up: FastConvexUpsample = FastConvexUpsample(feat_ch=ch_half, scale=2, use_unfold=upsample_unfold)
 
     def forward(
         self,
         s_half: Float[torch.Tensor, "b c_half h_half w_half"],
         feats: FeaturePyramid,
-        size: tuple[int, int],
     ) -> Float[torch.Tensor, "b 1 h_out w_out"]:
         """Decode multi-scale encoder features.
 
         Args:
             s_half: Float stem tensor with shape ``(batch, half_channels, half_height, half_width)``.
             feats: Four float tensors at quarter, eighth, sixteenth, and thirty-second resolution.
-            size: Requested output ``(height, width)``. The architecture currently derives the output size from its feature maps.
 
         Returns:
             Nonnegative float depth tensor with shape ``(batch, 1, output_height, output_width)``.
@@ -726,20 +754,14 @@ class ZipDepthDecoder(nn.Module):
         f3_bchw: Float[torch.Tensor, "b dec3 h_sixteenth w_sixteenth"] = self.fuse3(c3_bchw, f4_bchw)
         f2_bchw: Float[torch.Tensor, "b dec2 h_eighth w_eighth"] = self.fuse2(c2_bchw, f3_bchw)
         f1_bchw: Float[torch.Tensor, "b dec1 h_quarter w_quarter"] = self.fuse1(c1_bchw, f2_bchw)
-        depth_b1hw: Float[torch.Tensor, "b 1 h_out w_out"]
-
-        if self.use_half_res:
-            f_half_bchw: Float[torch.Tensor, "b dec_half h_half w_half"] = self.fuse_half(s_half, f1_bchw)
-            depth_half_b1hw: Float[torch.Tensor, "b 1 h_half w_half"] = self.head_half(f_half_bchw)
-            depth_b1hw = self.convex_up(f_half_bchw, depth_half_b1hw)
-        else:
-            depth_lr_b1hw: Float[torch.Tensor, "b 1 h_quarter w_quarter"] = self.head_direct(f1_bchw)
-            depth_b1hw = F.relu(F.interpolate(depth_lr_b1hw, scale_factor=4, mode="bilinear", align_corners=False))
+        f_half_bchw: Float[torch.Tensor, "b dec_half h_half w_half"] = self.fuse_half(s_half, f1_bchw)
+        depth_half_b1hw: Float[torch.Tensor, "b 1 h_half w_half"] = self.head_half(f_half_bchw)
+        depth_b1hw: Float[torch.Tensor, "b 1 h_out w_out"] = self.convex_up(f_half_bchw, depth_half_b1hw)
 
         return depth_b1hw
 
     def fuse(self) -> None:
-        """Fuse decoder blocks when a block exposes a fusion path."""
+        """Do nothing; the decoder has no reparameterizable blocks and keeps this method for encoder symmetry."""
         pass
 
 
@@ -766,16 +788,12 @@ class ZipDepthEncoder(nn.Module):
         self.stem_quarter: ConvBN = ConvBN(dims[0] // 2, dims[0], k=3, s=2)  # -> H/4
 
         # Stage 1
-        stage1_blocks: list[nn.Module] = []
-        _stage1_index: int
-        for _stage1_index in range(depths[0]):
-            stage1_blocks.append(QARepBlock(dims[0], dims[0]))
+        stage1_blocks: list[nn.Module] = [QARepBlock(dims[0], dims[0]) for _ in range(depths[0])]
         self.stage1: nn.Sequential = nn.Sequential(*stage1_blocks)
 
         # Stage 2
         self.down2: QARepBlock = QARepBlock(dims[0], dims[1], stride=2)
         stage2_blocks: list[nn.Module] = []
-        i: int
         for i in range(depths[1]):
             stage2_blocks.append(QARepBlock(dims[1], dims[1]))
             if i == depths[1] - 1:
@@ -797,10 +815,7 @@ class ZipDepthEncoder(nn.Module):
 
         # Stage 4
         self.down4: QARepBlock = QARepBlock(dims[2], dims[3], stride=2)
-        stage4_blocks: list[nn.Module] = []
-        _i: int
-        for _i in range(depths[3]):
-            stage4_blocks.append(QARepBlock(dims[3], dims[3]))
+        stage4_blocks: list[nn.Module] = [QARepBlock(dims[3], dims[3]) for _ in range(depths[3])]
         if use_global and global_mode == "full":
             stage4_blocks.append(EfficientGlobalAttention(dims[3], num_tokens=8, num_heads=num_heads))
         self.stage4: nn.Sequential = nn.Sequential(*stage4_blocks)
@@ -809,11 +824,11 @@ class ZipDepthEncoder(nn.Module):
         self.spp: LightweightSPPF = LightweightSPPF(dims[3], dims[3])
         self.cross_scale: MinimalCrossScale = MinimalCrossScale(dims[2], dims[3])
 
-    def forward(self, x: Float[torch.Tensor, "b 3 h w"]) -> EncoderOutput:
+    def forward(self, x: Float[torch.Tensor, "b c_in h w"]) -> EncoderOutput:
         """Build half-resolution stem features and a four-level pyramid.
 
         Args:
-            x: Float RGB tensor with shape ``(batch, 3, height, width)``.
+            x: Float tensor with shape ``(batch, input_channels, height, width)``.
 
         Returns:
             A half-resolution float tensor and four float tensors at quarter, eighth, sixteenth, and thirty-second resolution.
@@ -839,9 +854,8 @@ class ZipDepthEncoder(nn.Module):
 
     def fuse(self) -> None:
         """Fuse every reparameterizable encoder block in place."""
-        m: nn.Module
         for m in self.modules():
-            if m is not self and hasattr(m, "fuse") and callable(m.fuse):
+            if isinstance(m, QARepBlock):
                 m.fuse()
 
 
@@ -860,17 +874,19 @@ class ZipDepth(nn.Module):
     ) -> None:
         super().__init__()
 
-        cfg: ModelConfig = MODEL_CONFIGS.get(variant, MODEL_CONFIGS["base"])
+        if variant not in MODEL_CONFIGS:
+            raise ValueError(f"unknown ZipDepth variant {variant!r}; expected one of {sorted(MODEL_CONFIGS)}")
+        cfg: ModelConfig = MODEL_CONFIGS[variant]
         self.variant: str = variant
         self.global_mode: str = global_mode
 
-        use_global: bool = cfg.get("use_global", True) and global_mode != "none"
+        use_global: bool = cfg["use_global"] and global_mode != "none"
 
         self.encoder: ZipDepthEncoder = ZipDepthEncoder(
             in_ch=3,
             dims=cfg["dims"],
             depths=cfg["depths"],
-            num_heads=cfg.get("heads", 4),
+            num_heads=cfg["heads"],
             use_global=use_global,
             global_mode=global_mode,
         )
@@ -883,12 +899,12 @@ class ZipDepth(nn.Module):
             upsample_unfold=upsample_unfold,
         )
 
-        mean_b311: Float[torch.Tensor, "1 3 1 1"] = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
-        std_b311: Float[torch.Tensor, "1 3 1 1"] = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+        mean_1311: Float[torch.Tensor, "1 3 1 1"] = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+        std_1311: Float[torch.Tensor, "1 3 1 1"] = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
         self.mean: Float[torch.Tensor, "1 3 1 1"]
         self.std: Float[torch.Tensor, "1 3 1 1"]
-        self.register_buffer("mean", mean_b311)
-        self.register_buffer("std", std_b311)
+        self.register_buffer("mean", mean_1311)
+        self.register_buffer("std", std_1311)
 
         self.apply(self._init_weights)
 
@@ -897,16 +913,23 @@ class ZipDepth(nn.Module):
 
     # ------------------------------------------------------------------
     def _init_weights(self, m: nn.Module) -> None:
-        """Initialize one child module with the model's original scheme."""
+        """Initialize one child module with the model's original scheme.
+
+        Args:
+            m: Child module to initialize.
+
+        Returns:
+            None.
+        """
         if isinstance(m, nn.Conv2d):
             nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
             if m.bias is not None:
                 nn.init.zeros_(m.bias)
         elif isinstance(m, (nn.BatchNorm2d, nn.LayerNorm)):
-            norm_weight: Float[torch.Tensor, "..."] = cast(Float[torch.Tensor, "..."], m.weight)
-            norm_bias: Float[torch.Tensor, "..."] = cast(Float[torch.Tensor, "..."], m.bias)
-            nn.init.ones_(norm_weight)
-            nn.init.zeros_(norm_bias)
+            if m.weight is not None:
+                nn.init.ones_(m.weight)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
         elif isinstance(m, nn.Linear):
             nn.init.trunc_normal_(m.weight, std=0.02)
             if m.bias is not None:
@@ -922,15 +945,13 @@ class ZipDepth(nn.Module):
         Returns:
             Float depth tensor with shape ``(batch, 1, output_height, output_width)``.
         """
-        height: int = x.shape[2]
-        width: int = x.shape[3]
         x_norm_bchw: Float[torch.Tensor, "b 3 h w"] = (x - self.mean) / self.std
 
         encoder_output: EncoderOutput = self.encoder(x_norm_bchw)
         s_half_bchw: Float[torch.Tensor, "b c_half h_half w_half"] = encoder_output[0]
         enc_feats: FeaturePyramid = encoder_output[1]
 
-        depth_b1hw: Float[torch.Tensor, "b 1 h_out w_out"] = self.decoder(s_half_bchw, enc_feats, (height, width))
+        depth_b1hw: Float[torch.Tensor, "b 1 h_out w_out"] = self.decoder(s_half_bchw, enc_feats)
         return depth_b1hw
 
     # ------------------------------------------------------------------
@@ -948,7 +969,7 @@ class ZipDepth(nn.Module):
     # ------------------------------------------------------------------
     def get_model_info(self) -> ModelInfo:
         """Return model configuration and parameter-count information."""
-        cfg: ModelConfig = MODEL_CONFIGS.get(self.variant, MODEL_CONFIGS["base"])
+        cfg: ModelConfig = MODEL_CONFIGS[self.variant]
         return {
             "variant": self.variant,
             "dims": cfg["dims"],
@@ -988,7 +1009,7 @@ def create_model(
     """Create a ZipDepth model.
 
     Args:
-        variant: Model-size name. Unknown names fall back to ``base``.
+        variant: Model-size name. Hyphen and known prefix spelling variants are normalized.
         global_mode: Global-attention mode passed to the encoder.
         pretrained: Whether to request pretrained weights. The vendored model only emits a warning when true.
         upsample_unfold: Whether to use the unfold-based convex upsampling path.
@@ -998,7 +1019,7 @@ def create_model(
     """
     variant = variant.lower().replace("-", "_").replace("zip_", "").replace("depth_", "")
     if variant not in MODEL_CONFIGS:
-        variant = "base"
+        raise ValueError(f"unknown ZipDepth variant {variant!r}; expected one of {sorted(MODEL_CONFIGS)}")
     model: ZipDepth = ZipDepth(
         variant=variant,
         global_mode=global_mode,

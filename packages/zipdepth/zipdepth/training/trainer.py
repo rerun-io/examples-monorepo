@@ -118,7 +118,10 @@ class ZipDepthTrainer:
         )
 
         # Compile student for faster iteration (PyTorch >= 2.0)
-        self.student = torch.compile(self.student, mode="reduce-overhead")
+        # Under the beartype dev env, Dynamo tracing through beartype's jaxtyping wrapper
+        # raises a desynchronization error; production environments still compile.
+        if os.environ.get("PIXI_DEV_MODE") != "1":
+            self.student = torch.compile(self.student, mode="reduce-overhead")
 
     def train(self, num_epochs: int, save_dir: str = './checkpoints', start_epoch: int = 0,
             save_every_steps: int = 0, max_step_checkpoints: int = 5, max_steps: int = 0):
