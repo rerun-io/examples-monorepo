@@ -1,55 +1,21 @@
-"""Bounded producer/consumer iteration shared by catalog pipelines."""
+"""Bounded threaded fan-in for catalog producer pipelines."""
 
 from collections.abc import Callable, Generator, Iterable, Sequence
 from dataclasses import dataclass
 from queue import Full, Queue
-from random import Random
 from threading import Event, Thread
-from typing import Generic, TypeVar
+from typing import TypeVar
 from warnings import warn
 
 ItemT = TypeVar("ItemT")
 
 
-class ShuffleBuffer(Generic[ItemT]):  # noqa: UP046 — beartype does not support PEP 695 generics
-    """Seeded streaming shuffle with bounded memory."""
-
-    def __init__(self, size: int, seed: int) -> None:
-        """Create an empty buffer."""
-        if size <= 0:
-            raise ValueError("shuffle buffer size must be positive")
-        self._size: int = size
-        self._rng: Random = Random(seed)
-        self._samples: list[ItemT] = []
-
-    def push(self, sample: ItemT) -> ItemT | None:
-        """Add one sample and return a random eviction when the buffer is full."""
-        if len(self._samples) < self._size:
-            self._samples.append(sample)
-            return None
-        index: int = self._rng.randrange(self._size)
-        evicted: ItemT = self._samples[index]
-        self._samples[index] = sample
-        return evicted
-
-    def flush(self) -> Generator[ItemT, None, None]:
-        """Yield all remaining samples in seeded random order and empty the buffer."""
-        remaining: list[ItemT] = list(self._samples)
-        self._samples.clear()
-        self._rng.shuffle(remaining)
-        yield from remaining
-
-
 @dataclass(slots=True)
-class _Failure:
-    """Exception transported from a producer thread to the consumer."""
+class _Done:
+    """Terminal message transported from one producer to the consumer."""
 
-    error: BaseException
-    """Original worker exception with its traceback."""
-
-
-_END: object = object()
-"""Queue sentinel emitted once by each normally exhausted worker."""
+    error: BaseException | None
+    """Original worker exception with its traceback, or None after normal exhaustion."""
 
 
 def iter_threaded(  # noqa: UP047 — beartype does not support PEP 695 type parameters
@@ -76,10 +42,10 @@ def iter_threaded(  # noqa: UP047 — beartype does not support PEP 695 type par
     if join_timeout <= 0.0:
         raise ValueError("threaded iterator join_timeout must be positive")
 
-    queue: Queue[ItemT | _Failure | object] = Queue(maxsize=maxsize)
+    queue: Queue[ItemT | _Done] = Queue(maxsize=maxsize)
     stop: Event = Event()
 
-    def put_unless_stopped(item: ItemT | _Failure | object) -> bool:
+    def put_unless_stopped(item: ItemT | _Done) -> bool:
         """Bound queue writes while allowing a closed consumer to stop workers."""
         while not stop.is_set():
             try:
@@ -96,9 +62,9 @@ def iter_threaded(  # noqa: UP047 — beartype does not support PEP 695 type par
             for item in worker():
                 if not put_unless_stopped(item):
                     return
-            put_unless_stopped(_END)
+            put_unless_stopped(_Done(None))
         except BaseException as error:
-            if put_unless_stopped(_Failure(error)):
+            if put_unless_stopped(_Done(error)):
                 stop.set()
 
     threads: list[Thread] = [
@@ -111,13 +77,13 @@ def iter_threaded(  # noqa: UP047 — beartype does not support PEP 695 type par
     completed: int = 0
     try:
         while completed < len(threads):
-            queued: ItemT | _Failure | object = queue.get()
-            if queued is _END:
+            queued: ItemT | _Done = queue.get()
+            if isinstance(queued, _Done):
+                if queued.error is not None:
+                    raise queued.error
                 completed += 1
                 continue
-            if isinstance(queued, _Failure):
-                raise queued.error
-            yield queued  # type: ignore[misc]  # narrowed by the private queue transports above
+            yield queued
     finally:
         stop.set()
         for thread in threads:
