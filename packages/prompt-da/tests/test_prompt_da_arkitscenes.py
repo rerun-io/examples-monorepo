@@ -35,8 +35,6 @@ from rerun_prompt_da.apis.prompt_da_arkitscenes import (  # noqa: E402
     PDAArkitScenesConfig,
     fuse_and_log_batch,
     log_promptda_frame,
-    orientation_quarter_turns_from_segment_row,
-    portrait_from_segment_row,
 )
 from rerun_prompt_da.promptda_stream import PromptDACollate, promptda_dataset  # noqa: E402
 
@@ -158,23 +156,6 @@ def test_fuse_and_log_batch_preserves_frame_order_and_fusion_inputs(monkeypatch:
     assert logged_timestamps == [100, 200]
     assert len(fused_depths) == 2
     assert_array_equal(fused_depths[0], np.full((2, 3), 1500, dtype=np.uint16))
-
-
-def test_portrait_property_parses_catalog_list_value() -> None:
-    """Interpret the first catalog property value instead of list truthiness."""
-    assert portrait_from_segment_row({"property:capture:orientation": ["portrait"]}) is True
-    assert portrait_from_segment_row({"property:capture:orientation": ["landscape"]}) is False
-
-
-def test_portrait_property_is_required() -> None:
-    """Reject segments whose required orientation metadata is absent."""
-    with pytest.raises(KeyError, match="orientation"):
-        portrait_from_segment_row({})
-
-
-def test_orientation_quarter_turns_parses_catalog_list_value() -> None:
-    """Preserve ingest's stored rotation direction for portrait inference."""
-    assert orientation_quarter_turns_from_segment_row({"property:capture:orientation_quarter_turns_ccw": [3]}) == 3
 
 
 def test_stride_for_uses_nearest_native_frame_interval() -> None:

@@ -20,7 +20,7 @@ import numpy as np
 import pyarrow as pa
 import torch
 from arkitscenes_download.ingest.catalog import DEFAULT_CATALOG_URL
-from arkitscenes_download.ingest.cells import component_instance
+from arkitscenes_download.ingest.cells import component_instance, landscape_quarter_turns, portrait_from_segment_row
 from arkitscenes_download.ingest.layer_batch import LayerBatchSummary, run_layer_batch, segment_ids_from_selection
 from arkitscenes_download.ingest.paths import CONFIDENCE, DEPTH, FRAME_SELECTION_WIDE, PINHOLE_WIDE, RIG, TIMELINE, VIDEO_WIDE
 from arkitscenes_download.ingest.timestamps import match_exact_timestamps, table_timestamps
@@ -35,8 +35,6 @@ from rerun_prompt_da.apis.arkitscenes_shared import NATIVE_FPS, connect_catalog,
 from rerun_prompt_da.apis.prompt_da_arkitscenes import (
     PROMPTDA_LAYER,
     SegmentResult,
-    orientation_quarter_turns_from_segment_row,
-    portrait_from_segment_row,
     run_segment,
 )
 from rerun_prompt_da.apis.prompt_da_trt_polycam import network_image_hw
@@ -162,7 +160,7 @@ def main(config: PDAChosenConfig) -> None:
     def generate(video_id: str, rrd_path: Path) -> str:
         row: dict[str, Any] = row_by_id[video_id]
         portrait: bool = portrait_from_segment_row(row)
-        quarter_turns: int = (-orientation_quarter_turns_from_segment_row(row)) % 4 if portrait else 0
+        quarter_turns: int = landscape_quarter_turns(row)
         result: SegmentResult = run_segment(
             chosen_batches(dataset, video_id, quarter_turns, config.batch_size),
             video_id,

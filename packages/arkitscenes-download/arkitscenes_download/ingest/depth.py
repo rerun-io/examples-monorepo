@@ -134,10 +134,8 @@ def decode_depth_png_fast(blob_u8: UInt8[ndarray, "n"]) -> UInt16[ndarray, "h w"
     filtered_hwb: UInt8[ndarray, "h row_bytes"] = inflated[0]
     height: int = inflated[1][0]
     width: int = inflated[1][1]
-    reconstructed_hwb: UInt8[ndarray, "h pixel_bytes"] = filtered_hwb[:, 1:].copy()
-    row: int
-    for row in range(1, height):
-        reconstructed_hwb[row] += reconstructed_hwb[row - 1]
+    # Undo the Up filter: each byte is the sum of the bytes above it, modulo 256.
+    reconstructed_hwb: UInt8[ndarray, "h pixel_bytes"] = np.cumsum(filtered_hwb[:, 1:], axis=0, dtype=np.uint8)
     big_endian_hw: Shaped[ndarray, "h w"] = reconstructed_hwb.view(">u2").reshape(height, width)
     return big_endian_hw.astype(np.uint16, copy=True)
 

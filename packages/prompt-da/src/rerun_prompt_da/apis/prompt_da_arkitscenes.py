@@ -9,7 +9,6 @@ from collections.abc import Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import cv2
 import numpy as np
@@ -19,6 +18,7 @@ import rerun as rr
 import torch
 from arkitscenes_download.ingest.blueprint import DEPTH_RANGE_MM, make_blueprint
 from arkitscenes_download.ingest.catalog import DEFAULT_CATALOG_URL
+from arkitscenes_download.ingest.cells import landscape_quarter_turns, portrait_from_segment_row
 from arkitscenes_download.ingest.depth import encode_depth_png
 from arkitscenes_download.ingest.paths import DEPTH_PROMPTDA, PROMPTDA_MESH, TIMELINE
 from arkitscenes_download.ingest.recording import atomic_recording
@@ -118,34 +118,6 @@ class CompletedPromptDABatch:
     """Native frame height and width in catalog orientation."""
 
 
-def portrait_from_segment_row(row: dict[str, Any]) -> bool:
-    """Parse the required catalog orientation property from one segment row."""
-    property_name: str = "property:capture:orientation"
-    if property_name not in row or row[property_name] is None:
-        raise KeyError(f"segment {row.get('rerun_segment_id', '<unknown>')!r} is missing the orientation property")
-    value: Any = row[property_name]
-    if isinstance(value, (list, np.ndarray)):
-        if len(value) == 0:
-            raise ValueError(f"segment {row.get('rerun_segment_id', '<unknown>')!r} has an empty orientation property")
-        value = value[0]
-    if value not in ("portrait", "landscape"):
-        raise ValueError(f"segment {row.get('rerun_segment_id', '<unknown>')!r} has an invalid orientation property: {value!r}")
-    return value == "portrait"
-
-
-def orientation_quarter_turns_from_segment_row(row: dict[str, Any]) -> int:
-    """Parse the ingest rotation needed to undo a stored portrait segment."""
-    property_name: str = "property:capture:orientation_quarter_turns_ccw"
-    if property_name not in row or row[property_name] is None:
-        raise KeyError(f"segment {row.get('rerun_segment_id', '<unknown>')!r} is missing the orientation quarter-turn property")
-    value: Any = row[property_name]
-    if isinstance(value, (list, np.ndarray)):
-        if len(value) == 0:
-            raise ValueError(f"segment {row.get('rerun_segment_id', '<unknown>')!r} has an empty orientation quarter-turn property")
-        value = value[0]
-    return int(value) % 4
-
-
 def log_promptda_frame(
     recording: rr.RecordingStream, timestamp_ns: int, predicted_depth_hw: UInt16[ndarray, "h w"]
 ) -> None:
@@ -224,8 +196,7 @@ def fuse_and_log_batch(
 def grid_batches(
     dataset_entry: DatasetEntry,
     segment_id: str,
-    portrait: bool,
-    orientation_quarter_turns: int,
+    quarter_turns: int,
     config: PDAArkitScenesConfig,
 ) -> tuple[Iterator[PromptDABatch], int]:
     """Yield fixed-rate sampling-grid batches for one segment, plus the grid slot count."""
@@ -241,7 +212,7 @@ def grid_batches(
         collate_fn=PromptDACollate(
             samples,
             device,
-            quarter_turns=(-orientation_quarter_turns) % 4 if portrait else 0,
+            quarter_turns=quarter_turns,
             timestamp_step_ns=round(1_000_000_000 / NATIVE_FPS) * stride,
         ),
     )
@@ -329,12 +300,12 @@ def process_segment(
     dataset_entry: DatasetEntry,
     segment_id: str,
     portrait: bool,
-    orientation_quarter_turns: int,
+    quarter_turns: int,
     config: PDAArkitScenesConfig,
     predictor: PromptDATrtPredictor,
 ) -> SegmentResult:
     """Infer and fuse one catalog segment's sampling grid into a PromptDA RRD."""
-    batches, grid_slots = grid_batches(dataset_entry, segment_id, portrait, orientation_quarter_turns, config)
+    batches, grid_slots = grid_batches(dataset_entry, segment_id, quarter_turns, config)
     return run_segment(
         batches,
         segment_id,
@@ -365,9 +336,7 @@ def main(config: PDAArkitScenesConfig) -> None:
         batch_size=config.batch_size,
     )
     portrait_by_id: dict[str, bool] = {str(row["rerun_segment_id"]): portrait_from_segment_row(row) for row in rows}
-    orientation_quarter_turns_by_id: dict[str, int] = {
-        str(row["rerun_segment_id"]): orientation_quarter_turns_from_segment_row(row) for row in rows
-    }
+    quarter_turns_by_id: dict[str, int] = {str(row["rerun_segment_id"]): landscape_quarter_turns(row) for row in rows}
     results: list[SegmentResult] = []
     registration_handles: list[RegistrationHandle] = []
     for segment_id in segment_ids:
@@ -375,7 +344,7 @@ def main(config: PDAArkitScenesConfig) -> None:
             dataset_entry,
             segment_id,
             portrait_by_id[segment_id],
-            orientation_quarter_turns_by_id[segment_id],
+            quarter_turns_by_id[segment_id],
             config,
             predictor,
         )
