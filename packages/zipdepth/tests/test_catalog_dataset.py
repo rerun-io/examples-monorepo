@@ -1,5 +1,6 @@
-"""Import and construction smoke tests for catalog training data."""
+"""Behavioral and construction tests for catalog training data."""
 
+from threading import Event, Thread
 from typing import Any
 
 import numpy as np
@@ -19,9 +20,31 @@ from rerun.catalog import DatasetEntry  # noqa: E402
 
 from zipdepth.apis.catalog_throughput import CatalogThroughputConfig  # noqa: E402
 from zipdepth.catalog.builders import CpuSampleBuilder  # noqa: E402
-from zipdepth.catalog.dataset import CatalogPromptDepthDataset, promptda_blob_views  # noqa: E402
+from zipdepth.catalog.dataset import CatalogPromptDepthDataset, ShuffleBuffer, _ProducerSlot, promptda_blob_views  # noqa: E402
 from zipdepth.catalog.stats import CatalogDatasetStats  # noqa: E402
 from zipdepth.catalog.targets import build_eval_transform  # noqa: E402
+
+
+def test_shuffle_buffer_is_seeded_and_preserves_every_sample() -> None:
+    """Produce one deterministic streaming permutation without drops or duplicates."""
+
+    def shuffled(seed: int) -> list[int]:
+        """Shuffle one fixed range through the streaming buffer."""
+        buffer: ShuffleBuffer[int] = ShuffleBuffer(size=3, seed=seed)
+        output: list[int] = []
+        value: int
+        for value in range(10):
+            evicted: int | None = buffer.push(value)
+            if evicted is not None:
+                output.append(evicted)
+        output.extend(buffer.flush())
+        return output
+
+    first: list[int] = shuffled(17)
+    second: list[int] = shuffled(17)
+
+    assert first == second
+    assert sorted(first) == list(range(10))
 
 
 def test_catalog_dataset_constructs_without_contacting_server() -> None:
@@ -47,6 +70,37 @@ def test_catalog_dataset_constructs_without_contacting_server() -> None:
     assert isinstance(dataset, IterableDataset)
     assert dataset.stats == CatalogDatasetStats()
     assert dataset.skipped_frames == 0
+
+
+def test_iter_parallel_refuses_a_slot_owned_by_a_live_thread() -> None:
+    """Reject builder reuse while a producer from the previous pass is still alive."""
+    dataset_entry: DatasetEntry = object.__new__(DatasetEntry)
+    row_by_id: dict[str, dict[str, Any]] = {
+        "segment-a": {
+            "rerun_segment_id": "segment-a",
+            "property:capture:orientation": ["portrait"],
+            "property:capture:orientation_quarter_turns_ccw": [1],
+        }
+    }
+    builder: CpuSampleBuilder = CpuSampleBuilder(build_eval_transform(8, 8), min_depth_span=0.0)
+    dataset: CatalogPromptDepthDataset = CatalogPromptDepthDataset(
+        dataset_entry,
+        ["segment-a"],
+        row_by_id,
+        device=torch.device("cpu"),
+        builder_factory=lambda: CpuSampleBuilder(build_eval_transform(8, 8), min_depth_span=0.0),
+    )
+    release: Event = Event()
+    owner: Thread = Thread(target=release.wait, name="test-stale-zipdepth-producer")
+    owner.start()
+    dataset._slots = [_ProducerSlot(builder, CatalogDatasetStats(), owner=owner)]
+
+    try:
+        with pytest.raises(RuntimeError, match="still owns builder slot"):
+            next(dataset._iter_parallel(["segment-a"]))
+    finally:
+        release.set()
+        owner.join(timeout=2.0)
 
 
 def test_cpu_sample_builder_decodes_and_reports_local_stats() -> None:

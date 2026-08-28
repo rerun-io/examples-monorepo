@@ -1,11 +1,13 @@
 """Stream chosen-frame PromptDA targets from a Rerun catalog."""
 
 from collections.abc import Callable, Generator, Iterator
+from dataclasses import dataclass
 from functools import partial
 from queue import Empty, Queue
 from random import Random
+from threading import Thread, current_thread
 from time import perf_counter
-from typing import Any
+from typing import Any, Generic, TypeVar
 from warnings import warn
 
 import numpy as np
@@ -26,12 +28,54 @@ from torchcodec.decoders import VideoDecoder
 
 from zipdepth.catalog.builders import SampleBuilder
 from zipdepth.catalog.stats import CatalogDatasetStats, total
-from zipdepth.catalog.threaded import ShuffleBuffer, iter_threaded
+from zipdepth.catalog.threaded import iter_threaded
 
 PROMPTDA_BLOB_COLUMN: str = f"/{DEPTH_PROMPTDA}:EncodedDepthImage:blob"
 """Catalog column containing uint16 PromptDA PNG blobs."""
 NATIVE_VIDEO_FPS: int = 60
 """Nominal frame rate used when wrapping the segment's encoded AV1 packets."""
+ItemT = TypeVar("ItemT")
+
+
+class ShuffleBuffer(Generic[ItemT]):  # noqa: UP046 — beartype does not support PEP 695 generics
+    """Seeded streaming shuffle with bounded memory."""
+
+    def __init__(self, size: int, seed: int) -> None:
+        """Create an empty buffer."""
+        if size <= 0:
+            raise ValueError("shuffle buffer size must be positive")
+        self._size: int = size
+        self._rng: Random = Random(seed)
+        self._samples: list[ItemT] = []
+
+    def push(self, sample: ItemT) -> ItemT | None:
+        """Add one sample and return a random eviction when the buffer is full."""
+        if len(self._samples) < self._size:
+            self._samples.append(sample)
+            return None
+        index: int = self._rng.randrange(self._size)
+        evicted: ItemT = self._samples[index]
+        self._samples[index] = sample
+        return evicted
+
+    def flush(self) -> Generator[ItemT, None, None]:
+        """Yield all remaining samples in seeded random order and empty the buffer."""
+        remaining: list[ItemT] = list(self._samples)
+        self._samples.clear()
+        self._rng.shuffle(remaining)
+        yield from remaining
+
+
+@dataclass(slots=True)
+class _ProducerSlot:
+    """Long-lived builder state owned by at most one producer thread."""
+
+    builder: SampleBuilder
+    """Sample builder reused across dataset passes."""
+    stats: CatalogDatasetStats
+    """Dataset counters accumulated across passes."""
+    owner: Thread | None = None
+    """Producer thread currently driving this builder; None when idle."""
 
 
 def promptda_blob_views(column: pa.ChunkedArray) -> list[UInt8[ndarray, "n_bytes"]]:
@@ -152,13 +196,13 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
         self._num_producers: int = num_producers
         self._prefetch_samples: int = prefetch_samples
         self._segment_seed_index: dict[str, int] = {segment_id: index for index, segment_id in enumerate(self._segment_ids)}
-        self._slots: list[tuple[SampleBuilder, CatalogDatasetStats]] = []
-        """One (builder, dataset counters) pair per producer thread, created on the first pass."""
+        self._slots: list[_ProducerSlot] = []
+        """One builder, its counters, and its current owner per producer slot."""
 
     @property
     def stats(self) -> CatalogDatasetStats:
         """Return a snapshot summed across every producer slot's dataset and builder counters."""
-        return total([stats + CatalogDatasetStats.from_builder(builder.stats) for builder, stats in self._slots])
+        return total([slot.stats + CatalogDatasetStats.from_builder(slot.builder.stats) for slot in self._slots])
 
     @property
     def skipped_frames(self) -> int:
@@ -249,25 +293,37 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
 
     def _iter_parallel(self, segment_ids: list[str]) -> Generator[dict[str, Tensor], None, None]:
         """Yield complete samples from independent whole-segment worker threads."""
+        for index, slot in enumerate(self._slots):
+            if slot.owner is not None and slot.owner.is_alive():
+                raise RuntimeError(
+                    f"producer thread {slot.owner.name!r} from a previous pass still owns builder slot {index}; refusing to reuse it"
+                )
         if not self._slots:
             # One long-lived builder (and, on CUDA, one stream) per producer thread, never more
             # threads than segments: reused by every pass so counters stay cumulative and nothing leaks.
-            self._slots = [(self._builder_factory(), CatalogDatasetStats()) for _ in range(min(self._num_producers, len(segment_ids)))]
+            self._slots = [
+                _ProducerSlot(self._builder_factory(), CatalogDatasetStats())
+                for _ in range(min(self._num_producers, len(segment_ids)))
+            ]
         segment_queue: Queue[str] = Queue()
         segment_id: str
         for segment_id in segment_ids:
             segment_queue.put(segment_id)
 
-        def produce(builder: SampleBuilder, stats: CatalogDatasetStats) -> Generator[dict[str, Tensor], None, None]:
+        def produce(slot: _ProducerSlot) -> Generator[dict[str, Tensor], None, None]:
             """Claim whole segments with one builder until the queue is empty."""
-            while True:
-                try:
-                    claimed_segment_id: str = segment_queue.get_nowait()
-                except Empty:
-                    return
-                yield from self._iter_segment(claimed_segment_id, builder, stats)
+            slot.owner = current_thread()
+            try:
+                while True:
+                    try:
+                        claimed_segment_id: str = segment_queue.get_nowait()
+                    except Empty:
+                        return
+                    yield from self._iter_segment(claimed_segment_id, slot.builder, slot.stats)
+            finally:
+                slot.owner = None
 
-        workers: list[Callable[[], Generator[dict[str, Tensor], None, None]]] = [partial(produce, builder, stats) for builder, stats in self._slots]
+        workers: list[Callable[[], Generator[dict[str, Tensor], None, None]]] = [partial(produce, slot) for slot in self._slots]
         yield from iter_threaded(workers, maxsize=self._prefetch_samples)
 
     def __iter__(self) -> Iterator[dict[str, Tensor]]:
