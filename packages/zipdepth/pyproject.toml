@@ -37,4 +37,4 @@ paths = ["zipdepth/apis", "zipdepth/catalog", "zipdepth/__init__.py", "tests", "
 exclude = ["*/.pixi/*", "*/__pycache__/*"]
 sort_by_size = true
 min_confidence = 60
-ignore_names = ["rr_config"]
+ignore_names = ["allow_tf32", "benchmark", "forward", "rr_config", "train_epoch"]

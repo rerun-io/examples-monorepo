@@ -124,7 +124,8 @@ class ZipDepthTrainer:
             self.student = torch.compile(self.student, mode="reduce-overhead")
 
     def train(self, num_epochs: int, save_dir: str = './checkpoints', start_epoch: int = 0,
-            save_every_steps: int = 0, max_step_checkpoints: int = 5, max_steps: int = 0):
+            save_every_steps: int = 0, max_step_checkpoints: int = 5, max_steps: int = 0,
+            skip_batches: int | None = None):
         if self.is_main:
             os.makedirs(save_dir, exist_ok=True)
 
@@ -136,7 +137,7 @@ class ZipDepthTrainer:
 
         # When resuming mid-epoch, skip the batches already processed so the
         # scheduler is stepped exactly the right number of times.
-        initial_skip = self.global_step % steps_per_epoch if self.global_step > 0 else 0
+        initial_skip = skip_batches if skip_batches is not None else self.global_step % steps_per_epoch
         if initial_skip > 0 and self.is_main:
             print(f"\nResume: skipping first {initial_skip}/{steps_per_epoch} batches "
                   f"of epoch {start_epoch} (global_step={self.global_step})")
@@ -299,6 +300,11 @@ class ZipDepthTrainer:
                 teacher_depth = batch['depth'].to(self.device, non_blocking=True)
                 teacher_depth = teacher_depth.float().div_(256.0)
 
+                # Local addition: sparse catalog targets carry an explicit validity mask.
+                mask = batch.get('mask')
+                if mask is not None:
+                    mask = mask.to(self.device, non_blocking=True).float()
+
                 del batch
 
                 with torch.amp.autocast('cuda', dtype=self.amp_dtype, enabled=self.use_amp):
@@ -306,6 +312,7 @@ class ZipDepthTrainer:
                     loss, loss_dict = self.criterion(
                         pred=student_depth,
                         target=teacher_depth,
+                        mask=mask,
                     )
 
                 loss_value = loss.item()
@@ -381,7 +388,7 @@ class ZipDepthTrainer:
                     print(f'\n  -> Checkpoint saved at step {self.global_step}')
                     self.cleanup_step_checkpoints()
 
-                del student_depth, teacher_depth, loss
+                del student_depth, teacher_depth, mask, loss
 
                 # Advance profiler schedule (no-op after schedule completes or when profiling disabled)
                 if prof is not None:
