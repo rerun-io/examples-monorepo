@@ -1,7 +1,7 @@
 """Dependency-free catalog pipeline statistics."""
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 STAGE_FIELDS: tuple[str, ...] = ("segment_query", "video_decode", "blob_decode", "augment")
 """Floating-point stage timers reported by catalog instrumentation."""
@@ -43,6 +43,11 @@ class CatalogDatasetStats:
     """Video frames skipped after decode errors."""
     skipped_flat_frames: int = 0
     """Frames rejected by the configured depth-span filter."""
+
+    @classmethod
+    def from_builder(cls, builder_stats: BuilderStats) -> "CatalogDatasetStats":
+        """Lift builder-local counters into the dataset schema; dataset-only counters stay zero."""
+        return cls(**asdict(builder_stats))
 
     def __add__(self, other: "CatalogDatasetStats") -> "CatalogDatasetStats":
         """Return field-wise sums without mutating either operand."""
