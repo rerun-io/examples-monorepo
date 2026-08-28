@@ -1,0 +1,153 @@
+"""Typed CPU and CUDA builders for catalog training samples."""
+
+from time import perf_counter
+from typing import Protocol, runtime_checkable
+
+import numpy as np
+import torch
+from arkitscenes_download.ingest.depth import decode_depth_png, decode_depth_png_fast, inflate_depth_png_rows
+from jaxtyping import Float32, Int32, UInt8, UInt16
+from numpy import ndarray
+from torch import Tensor
+
+from zipdepth.catalog.png import unfilter_up_cuda
+from zipdepth.catalog.stats import BuilderStats
+from zipdepth.catalog.targets import (
+    AugmentPolicy,
+    build_training_sample,
+    build_training_sample_cuda,
+    depth_span_ratio,
+    depth_span_ratio_cuda,
+)
+from zipdepth.data.transforms import AlbumentationsWrapper
+
+
+@runtime_checkable
+class SampleBuilder(Protocol):
+    """Build one collatable training sample from aligned catalog inputs."""
+
+    stats: BuilderStats
+    """Counters owned by this builder and its producer thread."""
+
+    def __call__(
+        self,
+        frame_chw: UInt8[Tensor, "3 h w"],
+        blob_u8: UInt8[ndarray, "n"],
+        quarter_turns: int,
+        sample_seed: int,
+    ) -> dict[str, Tensor] | None:
+        """Build a sample, or return None when the flat-depth filter rejects it."""
+
+
+class CpuSampleBuilder:
+    """Decode depth and build samples on the CPU."""
+
+    def __init__(self, transform: AlbumentationsWrapper, min_depth_span: float) -> None:
+        """Configure deterministic transform and optional flat-depth filtering."""
+        if min_depth_span < 0.0:
+            raise ValueError("min_depth_span must be non-negative")
+        self._transform: AlbumentationsWrapper = transform
+        self._min_depth_span: float = min_depth_span
+        self.stats: BuilderStats = BuilderStats()
+        """Counters local to this builder."""
+
+    def __call__(
+        self,
+        frame_chw: UInt8[Tensor, "3 h w"],
+        blob_u8: UInt8[ndarray, "n"],
+        quarter_turns: int,
+        sample_seed: int,
+    ) -> dict[str, Tensor] | None:
+        """Decode, orient, filter, and transform one CPU sample."""
+        del sample_seed
+        started: float = perf_counter()
+        depth_mm_hw: UInt16[ndarray, "h w"] | None = decode_depth_png_fast(blob_u8)
+        if depth_mm_hw is None:
+            depth_mm_hw = decode_depth_png(blob_u8)
+            self.stats.png_fallbacks += 1
+        if self._min_depth_span > 0.0 and depth_span_ratio(depth_mm_hw) < self._min_depth_span:
+            self.stats.blob_decode += perf_counter() - started
+            self.stats.skipped_flat_frames += 1
+            return None
+        self.stats.blob_decode += perf_counter() - started
+
+        started = perf_counter()
+        rgb_chw: UInt8[ndarray, "3 h w"] = frame_chw.cpu().numpy()
+        rgb_hw3: UInt8[ndarray, "h w 3"] = np.moveaxis(rgb_chw, 0, -1)
+        rgb_landscape_hw3: UInt8[ndarray, "landscape_h landscape_w 3"] = np.ascontiguousarray(np.rot90(rgb_hw3, quarter_turns))
+        depth_landscape_mm_hw: UInt16[ndarray, "landscape_h landscape_w"] = np.ascontiguousarray(np.rot90(depth_mm_hw, quarter_turns))
+        sample: dict[str, Tensor] = build_training_sample(rgb_landscape_hw3, depth_landscape_mm_hw, self._transform)
+        self.stats.augment += perf_counter() - started
+        self.stats.samples_built += 1
+        return sample
+
+
+class CudaSampleBuilder:
+    """Inflate depth and build samples on one producer-owned CUDA stream."""
+
+    def __init__(self, out_hw: tuple[int, int], policy: AugmentPolicy, min_depth_span: float, device: torch.device) -> None:
+        """Configure output shape, augmentation, filtering, and CUDA state."""
+        if out_hw[0] <= 0 or out_hw[1] <= 0:
+            raise ValueError("output height and width must be positive")
+        if min_depth_span < 0.0:
+            raise ValueError("min_depth_span must be non-negative")
+        if device.type != "cuda":
+            raise ValueError("CudaSampleBuilder requires a CUDA device")
+        self._out_hw: tuple[int, int] = out_hw
+        self._policy: AugmentPolicy = policy
+        self._min_depth_span: float = min_depth_span
+        self._device: torch.device = device
+        self._generator: torch.Generator = torch.Generator()
+        self._stream: torch.cuda.Stream = torch.cuda.Stream(device=device)
+        self.stats: BuilderStats = BuilderStats()
+        """Counters local to this builder."""
+
+    def __call__(
+        self,
+        frame_chw: UInt8[Tensor, "3 h w"],
+        blob_u8: UInt8[ndarray, "n"],
+        quarter_turns: int,
+        sample_seed: int,
+    ) -> dict[str, Tensor] | None:
+        """Inflate, unfilter, filter, and augment one CUDA sample."""
+        self._stream.wait_stream(torch.cuda.current_stream(self._device))
+        frame_chw.record_stream(self._stream)
+        started: float = perf_counter()
+        with torch.cuda.stream(self._stream):
+            inflated: tuple[UInt8[ndarray, "h row_bytes"], tuple[int, int]] | None = inflate_depth_png_rows(blob_u8)
+            if inflated is None:
+                depth_mm_hw: UInt16[ndarray, "h w"] = decode_depth_png(blob_u8)
+                depth_mm_cuda_hw: Int32[Tensor, "h w"] = torch.from_numpy(depth_mm_hw).to(
+                    device=self._device,
+                    dtype=torch.int32,
+                    non_blocking=True,
+                )
+                self.stats.png_fallbacks += 1
+            else:
+                filtered_hwb: UInt8[ndarray, "h row_bytes"] = inflated[0]
+                filtered_cuda_hwb: UInt8[Tensor, "h row_bytes"] = torch.from_numpy(filtered_hwb).to(
+                    device=self._device,
+                    non_blocking=True,
+                )
+                depth_mm_cuda_hw = unfilter_up_cuda(filtered_cuda_hwb)
+            span_ratio: Float32[Tensor, ""] = depth_span_ratio_cuda(depth_mm_cuda_hw)
+        self.stats.blob_decode += perf_counter() - started
+
+        self._generator.manual_seed(sample_seed)
+        started = perf_counter()
+        with torch.cuda.stream(self._stream):
+            sample: dict[str, Tensor] = build_training_sample_cuda(
+                frame_chw,
+                depth_mm_cuda_hw,
+                quarter_turns,
+                self._out_hw,
+                self._generator,
+                self._policy,
+            )
+            self._stream.synchronize()
+        self.stats.augment += perf_counter() - started
+        if self._min_depth_span > 0.0 and float(span_ratio.item()) < self._min_depth_span:
+            self.stats.skipped_flat_frames += 1
+            return None
+        self.stats.samples_built += 1
+        return sample
