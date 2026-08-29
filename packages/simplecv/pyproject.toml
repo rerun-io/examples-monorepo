@@ -10,7 +10,9 @@ authors = [{ name = "pablovela5620", email = "pablovela5620@gmail.com" }]
 requires-python = ">=3.10"
 readme = "README.md"
 dependencies = [
-    "jaxtyping>=0.2.36,<0.3.0",
+    # The old <0.3 cap guarded pyserde's jaxtyping breakage (pyserde#643);
+    # current pyserde releases dropped their jaxtyping pin, so 0.3 is fine.
+    "jaxtyping>=0.2.36",
     "numpy>=2.0",
     "einops>=0.8.0",
     "icecream>=2.1.3",
