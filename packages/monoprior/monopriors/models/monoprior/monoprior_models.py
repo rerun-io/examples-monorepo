@@ -4,7 +4,6 @@ from typing import Literal
 
 import numpy as np
 import torch
-from einops import rearrange
 from jaxtyping import Float, UInt8
 
 from monopriors.models.metric_depth import BaseMetricPredictor, MetricDepthPrediction, get_metric_predictor
@@ -16,53 +15,6 @@ from monopriors.models.surface_normal import (
     SurfaceNormalPrediction,
     get_normal_predictor,
 )
-
-
-@dataclass
-class OldMonoPriorPrediction:
-    """Legacy batched tensor representation of monocular priors."""
-
-    depth_b1hw: Float[torch.Tensor, "b 1 h w"]
-    """Predicted metric depth in BCHW layout."""
-    normal_b3hw: Float[torch.Tensor, "b 3 h w"]
-    """Predicted surface normals in BCHW layout."""
-    K_b33: Float[torch.Tensor, "b 3 3"] | None = None
-    """Optional camera intrinsics for each batch item."""
-    depth_conf_b1hw: Float[torch.Tensor, "b 1 h w"] | None = None
-    """Optional per-pixel depth confidence."""
-    normal_conf_b1hw: Float[torch.Tensor, "b 1 h w"] | None = None
-    """Optional per-pixel normal confidence."""
-
-    def to_numpy(
-        self,
-    ) -> tuple[
-        Float[np.ndarray, "b h w 1"],
-        Float[np.ndarray, "b h w 3"],
-        Float[np.ndarray, "b 3 3"] | None,
-        Float[np.ndarray, "b h w 1"] | None,
-        Float[np.ndarray, "b h w 1"] | None,
-    ]:
-        """Convert legacy Torch predictions to channel-last NumPy arrays.
-
-        Returns:
-            Float depth, normal, intrinsics, depth-confidence, and normal-confidence arrays with their documented shapes.
-        """
-        depth_np_bhw1: Float[np.ndarray, "b h w 1"] = rearrange(self.depth_b1hw, "b c h w -> b h w c").numpy(force=True)
-        normal_np_bhw3: Float[np.ndarray, "b h w 3"] = rearrange(self.normal_b3hw, "b c h w -> b h w c").numpy(force=True)
-        K_np_b33: Float[np.ndarray, "b 3 3"] | None = self.K_b33.numpy(force=True) if self.K_b33 is not None else None
-        depth_conf_np_bhw1: Float[np.ndarray, "b h w 1"] | None = (
-            rearrange(self.depth_conf_b1hw, "b c h w -> b h w c").numpy(force=True) if self.depth_conf_b1hw is not None else None
-        )
-        normal_conf_np_bhw1: Float[np.ndarray, "b h w 1"] | None = (
-            rearrange(self.normal_conf_b1hw, "b c h w -> b h w c").numpy(force=True) if self.normal_conf_b1hw is not None else None
-        )
-        return (
-            depth_np_bhw1,
-            normal_np_bhw3,
-            K_np_b33,
-            depth_conf_np_bhw1,
-            normal_conf_np_bhw1,
-        )
 
 
 @dataclass

@@ -9,12 +9,12 @@ import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 import rerun as rr
-from jaxtyping import Bool, Float64
+from jaxtyping import Bool, Float, Float64
 from tqdm import tqdm
 
 from monopriors.data.nerfstudio_data import load_nerfstudio_from_json
 from monopriors.data.sdfstudio_data import SceneBox, SDFStudioData, SDFStudioFrame
-from monopriors.models.monoprior import DsineAndUnidepth, OldMonoPriorPrediction
+from monopriors.models.monoprior import DsineAndUnidepth, MonoPriorPrediction
 
 
 def main(
@@ -126,12 +126,13 @@ def main(
         # img.save(target_image)
 
         K_33 = K_b33[idx]
-        pred: OldMonoPriorPrediction = model(rgb, K_33.astype(np.float32))
-        depth_np_bhw1, normal_np_bhw3, _ = pred.to_numpy()
+        pred: MonoPriorPrediction = model(rgb, K_33.astype(np.float32))
+        depth_np_hw: Float[np.ndarray, "h w"] = pred.metric_pred.depth_meters
+        normal_np_hw3: Float[np.ndarray, "h w 3"] = pred.normal_pred.normal_hw3.copy()
 
         # convert to normalized like omnidata (this is what nerfstudio accepts)
-        normal_np_bhw3[..., 2] *= -1
-        normal_np_bhw3 = (normal_np_bhw3 + 1.0) / 2.0
+        normal_np_hw3[..., 2] *= -1
+        normal_np_hw3 = (normal_np_hw3 + 1.0) / 2.0
 
         rgb_path = str(target_image.relative_to(output_dir))
 
@@ -139,20 +140,17 @@ def main(
         mono_depth_path = rgb_path.replace("_rgb.png", "_depth.npy")
         mono_normal_path = rgb_path.replace("_rgb.png", "_normal.npy")
 
-        # convert hw1 depth to hw3 using grayscale to rgb
-        depth_np_hw1 = depth_np_bhw1[0]
         # normalize depth to 0-1
-        depth_np_hw1 = (depth_np_hw1 - depth_np_hw1.min()) / (depth_np_hw1.max() - depth_np_hw1.min())
-        depth_np_hw = depth_np_hw1.squeeze()
+        depth_np_hw = (depth_np_hw - depth_np_hw.min()) / (depth_np_hw.max() - depth_np_hw.min())
         np.save(output_dir / mono_depth_path, depth_np_hw)
-        np.save(output_dir / mono_normal_path, normal_np_bhw3[0])
+        np.save(output_dir / mono_normal_path, normal_np_hw3)
         # save as images
         plt.imsave(
             output_dir / mono_depth_path.replace(".npy", ".png"),
             depth_np_hw,
             cmap="viridis",
         )
-        plt.imsave(output_dir / mono_normal_path.replace(".npy", ".png"), normal_np_bhw3[0])
+        plt.imsave(output_dir / mono_normal_path.replace(".npy", ".png"), normal_np_hw3)
 
         frame = SDFStudioFrame(
             rgb_path=rgb_path,
@@ -190,11 +188,11 @@ def main(
             )
             rr.log(
                 f"{pinhole_log_path}/depth",
-                rr.DepthImage(depth_np_bhw1[0]),
+                rr.DepthImage(depth_np_hw),
             )
             rr.log(
                 f"{pinhole_log_path}/normal",
-                rr.Image(normal_np_bhw3[0]),
+                rr.Image(normal_np_hw3),
             )
 
     # scene bbox for the scannet scene
