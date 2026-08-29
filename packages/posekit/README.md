@@ -99,6 +99,41 @@ pixi run -e posekit --frozen posekit-video-pose --video-path video.mp4 rtdetr vi
 pixi run -e posekit --frozen posekit-video-track --video-path video.mp4
 ```
 
+## Click-to-track app (SAM2 + Rerun)
+
+A Gradio app for single-object video segmentation: upload a clip, click the object in
+the embedded Rerun viewer, refine on any frame, and propagate the mask through the clip.
+
+```bash
+pixi run -e posekit --frozen posekit-track-app            # http://127.0.0.1:7870
+pixi run -e posekit --frozen posekit-track-app --port 7870 --variant efficienttam-s-512
+```
+
+The embedded viewer needs a secure context; on the tailnet expose it with
+`tailscale serve --bg --https=7870 http://127.0.0.1:7870` and open
+`https://<host>.<tailnet>.ts.net:7870/` (served at `/`, so `--root-path` stays empty).
+Run it in a shell without `DISPLAY`: the app never spawns a native viewer.
+
+Using it:
+
+- **Click** the object in the viewer at the current frame (`+ Include`); `− Exclude` and
+  `✕ Remove` add negative points / delete the nearest point. Pause the viewer before
+  clicking — while it plays the click's frame is unknown. Scrubbing shows a memory-conditioned
+  preview of the current mask.
+- **Track** propagates from the first prompted frame forward, then backward to frame 0, and
+  streams masks plus per-frame confidence traces. Clicking again after a track refines it;
+  Track re-runs from the kept prompts.
+- **Config** tab: model (`efficienttam-s-512` default, `-ti-512` faster), SAM2 memory window,
+  point-removal radius, and "re-segment" (clicks replace the object instead of refining it).
+  Model and memory window reload the clip and clear the points.
+- **Outputs** tab: after a track, download a self-contained `.rrd` (video, prompts, masks,
+  confidence). Masks are logged at 1/4 resolution under a `Transform3D(scale=4)` on
+  both `video/mask` and `video/preview`; apply it when reading them back.
+
+H.264 input passes through unchanged. HEVC input in MP4 or MOV is transcoded to H.264,
+using the GPU when available, so browsers can decode it. Other codecs depend on Rerun
+`Mp4Reader` support; MPEG-4 Part 2 (`mp4v`) is not supported and fails at load.
+
 ## What runs today, and how well
 
 Every implementation is parity-validated against its reference:
