@@ -3,7 +3,6 @@ from .monoprior_models import (
     MoGeV2MonoPrior,
     MonoPriorModel,
     MonoPriorPrediction,
-    OldMonoPriorPrediction,
 )
 
 __all__: list[str] = [
@@ -11,5 +10,4 @@ __all__: list[str] = [
     "MoGeV2MonoPrior",
     "MonoPriorModel",
     "MonoPriorPrediction",
-    "OldMonoPriorPrediction",
 ]

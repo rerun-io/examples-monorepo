@@ -160,7 +160,7 @@ def test_chosen_timestamp_matching_refuses_one_nanosecond_drift() -> None:
 @requires_cuda
 def test_trt_front_facing_normals_keep_unit_length_and_positive_z_after_png() -> None:
     """The catalog representation stores away-from-camera RDF normals (the gaussurf training convention)."""
-    from monopriors.models.surface_normal.moge_v2_trt import DEFAULT_IMAGE_HW, MoGeV2NormalOutput, MoGeV2TrtNormalPredictor
+    from monopriors.models.moge_v2 import DEFAULT_IMAGE_HW, MoGeV2NormalOutput, MoGeV2TrtPredictor
 
     height: int = DEFAULT_IMAGE_HW[0]
     width: int = DEFAULT_IMAGE_HW[1]
@@ -170,9 +170,9 @@ def test_trt_front_facing_normals_keep_unit_length_and_positive_z_after_png() ->
     green_hw: Float32[Tensor, "h w"] = y_h[:, None].expand(height, width)
     blue_hw: Float32[Tensor, "h w"] = (red_hw + green_hw) / 2.0
     rgb_bhw3: UInt8[Tensor, "b=1 h=756 w=1008 3"] = torch.stack((red_hw, green_hw, blue_hw), dim=-1).to(torch.uint8)[None]
-    predictor: MoGeV2TrtNormalPredictor = MoGeV2TrtNormalPredictor(batch_size=8)
+    predictor: MoGeV2TrtPredictor = MoGeV2TrtPredictor(heads="normal", network_hw_options=(DEFAULT_IMAGE_HW,), batch_size=8)
 
-    prediction: MoGeV2NormalOutput = predictor(rgb_bhw3)
+    prediction: MoGeV2NormalOutput = predictor.predict_normals(rgb_bhw3)
     # Mirror the layer path: MoGe's toward-camera output is negated before encoding.
     normals_hw3: Float32[ndarray, "h=756 w=1008 3"] = (-prediction.normals_bhw3[0]).detach().cpu().numpy()
     decoded_hw3: Float32[ndarray, "h=756 w=1008 3"] = decode_normals_png(encode_normals_png(normals_hw3))
