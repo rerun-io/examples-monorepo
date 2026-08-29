@@ -5,7 +5,7 @@ from pathlib import Path
 
 import tyro
 
-from monopriors.models.moge_v2_trt_shared import Encoder, HeadSet, export_moge_v2_onnx
+from monopriors.models.moge_v2.export import Encoder, HeadSet, export_moge_v2_onnx
 
 
 @dataclass(frozen=True, slots=True)

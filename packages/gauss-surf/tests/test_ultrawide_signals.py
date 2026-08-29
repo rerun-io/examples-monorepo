@@ -5,7 +5,7 @@ import pytest
 import torch
 from arkitscenes_download.ingest.paths import FRAME_SELECTION_ULTRAWIDE
 from jaxtyping import Float32, UInt8
-from monopriors.models.surface_normal.moge_v2_trt import MoGeV2NormalOutput, MoGeV2TrtNormalPredictor
+from monopriors.models.moge_v2 import MoGeV2NormalOutput, MoGeV2TrtPredictor
 from numpy import ndarray
 from torch import Tensor
 
@@ -82,12 +82,13 @@ def test_ultrawide_trt_normals_store_away_from_camera_positive_z() -> None:
     green_hw: Float32[Tensor, "h w"] = y_h[:, None].expand(height, width)
     blue_hw: Float32[Tensor, "h w"] = (red_hw + green_hw) / 2.0
     rgb_bhw3: UInt8[Tensor, "b=1 h=480 w=640 3"] = torch.stack((red_hw, green_hw, blue_hw), dim=-1).to(torch.uint8)[None]
-    predictor: MoGeV2TrtNormalPredictor = MoGeV2TrtNormalPredictor(
-        image_hw=ULTRAWIDE_IMAGE_HW,
+    predictor: MoGeV2TrtPredictor = MoGeV2TrtPredictor(
+        heads="normal",
+        network_hw_options=(ULTRAWIDE_IMAGE_HW,),
         batch_size=MOGE_INFERENCE_BATCH_SIZE,
     )
 
-    prediction: MoGeV2NormalOutput = predictor(rgb_bhw3)
+    prediction: MoGeV2NormalOutput = predictor.predict_normals(rgb_bhw3)
     toward_hw3: Float32[ndarray, "h=480 w=640 3"] = prediction.normals_bhw3[0].detach().cpu().numpy().astype(np.float32, copy=False)
     away_hw3: Float32[ndarray, "h=480 w=640 3"] = to_away_from_camera(toward_hw3)
     decoded_hw3: Float32[ndarray, "h=480 w=640 3"] = decode_normals_png(encode_normals_png(away_hw3))

@@ -12,23 +12,21 @@ from einops import rearrange
 from jaxtyping import Float32, UInt8
 from torch import Tensor
 
-from monopriors.models.moge_v2_trt_shared import (
+from monopriors.models.moge_v2 import (
     ASPECT_BUCKETS,
     Encoder,
+    MoGeV2GeometryGraphOutput,
+    MoGeV2TorchPredictor,
+    MoGeV2TrtPredictor,
     load_pinned_moge_v2,
+    postprocess_moge_v2_geometry,
     resolve_num_tokens,
     token_grid_hw,
-)
-from monopriors.models.monoprior.moge_v2_trt import (
-    MoGeV2GeometryGraphOutput,
-    MoGeV2TorchGeometryPredictor,
-    MoGeV2TrtGeometryPredictor,
-    postprocess_moge_v2_geometry,
 )
 from monopriors.third_party.moge.model.v2 import MoGeModel
 
 Backend: TypeAlias = Literal["moge-infer", "torch-geometry", "trt-geometry", "trt-geometry-cudagraph"]
-GeometryPredictor: TypeAlias = MoGeV2TorchGeometryPredictor | MoGeV2TrtGeometryPredictor
+GeometryPredictor: TypeAlias = MoGeV2TorchPredictor | MoGeV2TrtPredictor
 
 ALL_BACKENDS: tuple[Backend, ...] = ("moge-infer", "torch-geometry", "trt-geometry", "trt-geometry-cudagraph")
 
@@ -95,11 +93,11 @@ def _benchmark_geometry(
         Per-batch timing row with diagnostic forward and postprocess columns.
     """
     output_hw: tuple[int, int] = (rgb_bhw3.shape[1], rgb_bhw3.shape[2])
-    warmup_graph_output: MoGeV2GeometryGraphOutput = predictor.forward(rgb_bhw3)
+    warmup_graph_output: MoGeV2GeometryGraphOutput = predictor.forward_geometry(rgb_bhw3)
     postprocess_moge_v2_geometry(warmup_graph_output, output_hw)
     bucket_hw: tuple[int, int] = (warmup_graph_output.points_bhw3.shape[1], warmup_graph_output.points_bhw3.shape[2])
     for _warmup_index in range(max(0, warmup_iters - 1)):
-        warmup_graph_output = predictor.forward(rgb_bhw3)
+        warmup_graph_output = predictor.forward_geometry(rgb_bhw3)
         postprocess_moge_v2_geometry(warmup_graph_output, output_hw)
     torch.cuda.synchronize()
 
@@ -108,7 +106,7 @@ def _benchmark_geometry(
     for _timed_index in range(timed_iters):
         torch.cuda.synchronize()
         forward_started: float = time.perf_counter()
-        graph_output: MoGeV2GeometryGraphOutput = predictor.forward(rgb_bhw3)
+        graph_output: MoGeV2GeometryGraphOutput = predictor.forward_geometry(rgb_bhw3)
         torch.cuda.synchronize()
         forward_seconds += time.perf_counter() - forward_started
 
@@ -119,7 +117,7 @@ def _benchmark_geometry(
 
     total_started: float = time.perf_counter()
     for _timed_index in range(timed_iters):
-        predictor(rgb_bhw3)
+        predictor.predict_geometry(rgb_bhw3)
     torch.cuda.synchronize()
     total_seconds: float = time.perf_counter() - total_started
 
@@ -258,10 +256,16 @@ def main(config: Config) -> None:
         else:
             predictor: GeometryPredictor
             if backend == "torch-geometry":
-                predictor = MoGeV2TorchGeometryPredictor(encoder=config.encoder, resolution_level=config.resolution_level)
-            else:
-                predictor = MoGeV2TrtGeometryPredictor(
+                predictor = MoGeV2TorchPredictor(
                     encoder=config.encoder,
+                    heads="geometry",
+                    network_hw_options=ASPECT_BUCKETS,
+                    resolution_level=config.resolution_level,
+                )
+            else:
+                predictor = MoGeV2TrtPredictor(
+                    encoder=config.encoder,
+                    heads="geometry",
                     resolution_level=config.resolution_level,
                     batch_size=max_batch_size,
                     use_cuda_graph=backend == "trt-geometry-cudagraph",

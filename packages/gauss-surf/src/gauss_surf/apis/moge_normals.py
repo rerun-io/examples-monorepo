@@ -15,7 +15,7 @@ from arkitscenes_download.ingest.paths import NORMALS_MOGE, PINHOLE_MOGE, TIMELI
 from arkitscenes_download.ingest.recording import atomic_recording
 from einops import rearrange
 from jaxtyping import Float32, UInt8
-from monopriors.models.surface_normal.moge_v2_trt import DEFAULT_IMAGE_HW, MoGeV2NormalOutput, MoGeV2TrtNormalPredictor
+from monopriors.models.moge_v2 import DEFAULT_IMAGE_HW, MoGeV2NormalOutput, MoGeV2TrtPredictor
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from simplecv.camera_parameters import Intrinsics, rescale_intri
@@ -127,7 +127,7 @@ def _send_pinhole_columns(recording: rr.RecordingStream, inputs: ChosenFrameInpu
 def _infer_and_write_normals(
     reader: SegmentReader,
     inputs: ChosenFrameInputs,
-    predictor: MoGeV2TrtNormalPredictor,
+    predictor: MoGeV2TrtPredictor,
     recording: rr.RecordingStream,
 ) -> int:
     """Decode exact chosen frames, infer batches, and stream PNG columns."""
@@ -159,7 +159,7 @@ def _infer_and_write_normals(
                 resized_b3hw.round().clamp(0.0, 255.0).to(torch.uint8),
                 "b c h w -> b h w c",
             )  # pyrefly: ignore  # bad-argument-type — einops stub
-            prediction: MoGeV2NormalOutput = predictor(resized_bhw3)
+            prediction: MoGeV2NormalOutput = predictor.predict_normals(resized_bhw3)
             # MoGe emits toward-camera RDF normals; the layer stores the negated
             # away-from-camera convention — the gaussurf training target and the
             # colorization the mvsanywhere fork's figures use.
@@ -192,7 +192,11 @@ def main(config: Config) -> None:
     reader.require_zero_orientation("MoGe normal inference")
     dataset: DatasetEntry = reader.dataset
     inputs: ChosenFrameInputs = _load_chosen_frame_inputs(reader)
-    predictor: MoGeV2TrtNormalPredictor = MoGeV2TrtNormalPredictor(batch_size=MOGE_INFERENCE_BATCH_SIZE)
+    predictor: MoGeV2TrtPredictor = MoGeV2TrtPredictor(
+        heads="normal",
+        network_hw_options=(DEFAULT_IMAGE_HW,),
+        batch_size=MOGE_INFERENCE_BATCH_SIZE,
+    )
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
     rrd_path: Path = config.output_dir / f"{config.video_id}.rrd"

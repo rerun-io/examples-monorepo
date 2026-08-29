@@ -1,4 +1,4 @@
-"""Shared MoGe v2 TensorRT preprocessing, export, and aspect plumbing."""
+"""Shared MoGe v2 checkpoint, preprocessing, export, and aspect plumbing."""
 
 import math
 import os
@@ -13,12 +13,21 @@ from einops import rearrange
 from jaxtyping import Float, Float32, UInt8
 from torch import Tensor, nn
 
-from monopriors.models.surface_normal.moge_v2 import MOGE_V2_NORMAL_CHECKPOINTS
 from monopriors.third_party.moge.model.v2 import ForwardOutput, MoGeModel
 
 Encoder: TypeAlias = Literal["vits", "vitb", "vitl"]
 HardwareCompatibility: TypeAlias = Literal["none", "same_compute_capability"]
 HeadSet: TypeAlias = Literal["normal", "geometry"]
+
+DEFAULT_IMAGE_HW: tuple[int, int] = (756, 1008)
+"""ARKitScenes-aligned MoGe network height and width."""
+
+MOGE_V2_CHECKPOINTS: dict[Encoder, tuple[str, str]] = {
+    "vitl": ("Ruicheng/moge-2-vitl-normal", "b135031bae30b5ac2ae141a0e68717795ce38340"),
+    "vitb": ("Ruicheng/moge-2-vitb-normal", "54ad3a693e61907ea4633d13dec6ee682fa09419"),
+    "vits": ("Ruicheng/moge-2-vits-normal", "679230677b4d282c6f304189a93e98e14f085902"),
+}
+"""Pinned normal-capable checkpoint repository and revision for each encoder."""
 
 DEFAULT_CACHE_DIR: Path = Path(os.environ.get("MONOPRIOR_TRT_CACHE", "~/.cache/monoprior")).expanduser()
 """Cache root holding portable ``onnx/`` and machine-local ``trt/`` artifacts."""
@@ -28,7 +37,7 @@ MOGE_V2_NUM_TOKENS_RANGE: tuple[int, int] = (1200, 3600)
 
 _EXPORT_WORKER_ENV: str = "MONOPRIOR_MOGE_V2_ONNX_EXPORT_WORKER"
 
-_FORWARD_HEADS: dict[HeadSet, tuple[str, ...]] = {
+FORWARD_HEADS: dict[HeadSet, tuple[str, ...]] = {
     "normal": ("normal", "mask"),
     "geometry": ("points", "normal", "mask", "scale"),
 }
@@ -176,7 +185,7 @@ def load_pinned_moge_v2(encoder: Encoder, resolution_level: int) -> tuple[MoGeMo
         ValueError: If the resolution level or pinned token metadata is invalid.
     """
     num_tokens: int = resolve_num_tokens(resolution_level)
-    checkpoint: tuple[str, str] = MOGE_V2_NORMAL_CHECKPOINTS[encoder]
+    checkpoint: tuple[str, str] = MOGE_V2_CHECKPOINTS[encoder]
     model: MoGeModel = MoGeModel.from_pretrained(checkpoint[0], revision=checkpoint[1]).to("cuda").eval()
     if model.num_tokens_range != MOGE_V2_NUM_TOKENS_RANGE:
         raise ValueError(
@@ -207,7 +216,7 @@ class _MoGeV2Heads(nn.Module):
         output: ForwardOutput = self.model(
             image_b3hw,
             num_tokens=self.num_tokens,
-            output_heads=_FORWARD_HEADS[self.heads],
+            output_heads=FORWARD_HEADS[self.heads],
         )
         return tuple(output[name] for name in ONNX_OUTPUT_NAMES[self.heads])
 
@@ -247,7 +256,7 @@ def export_moge_v2_onnx(
         raise ValueError(f"max_batch_size must be positive, got {max_batch_size}.")
 
     num_tokens: int = resolve_num_tokens(resolution_level)
-    checkpoint: tuple[str, str] = MOGE_V2_NORMAL_CHECKPOINTS[encoder]
+    checkpoint: tuple[str, str] = MOGE_V2_CHECKPOINTS[encoder]
     checkpoint_revision: str = checkpoint[1][:8]
     onnx_dir: Path = cache_dir / "onnx"
     export_version: int = _ONNX_EXPORT_VERSIONS[heads]
@@ -267,7 +276,7 @@ def export_moge_v2_onnx(
         worker_command: list[str] = [
             sys.executable,
             "-m",
-            "monopriors.models._moge_v2_onnx_worker",
+            "monopriors.models.moge_v2._onnx_worker",
             "--heads",
             heads,
             "--encoder",
