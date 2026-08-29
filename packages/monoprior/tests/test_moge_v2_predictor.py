@@ -1,4 +1,4 @@
-"""Contract, parity, and convention tests for batched full MoGe v2 geometry."""
+"""Contracts and parity tests for the unified batched MoGe v2 predictors."""
 
 import sys
 from pathlib import Path
@@ -13,8 +13,7 @@ from conftest import requires_cuda, slow_cuda, synthetic_rgb_batch
 from jaxtyping import Bool, Float32, UInt8
 from torch import Tensor
 
-from monopriors.models.moge_v2_trt_shared import Encoder
-from monopriors.models.monoprior.moge_v2_trt import MoGeV2GeometryOutput
+from monopriors.models.moge_v2 import Encoder, MoGeV2GeometryOutput
 
 
 class GeometryCloseBars(NamedTuple):
@@ -88,7 +87,7 @@ def _assert_geometry_close(
 
 def test_token_grid_hw_matches_pinned_aspect_buckets() -> None:
     """The 3,600-token budget produces the five fixed network grids."""
-    from monopriors.models.moge_v2_trt_shared import ASPECT_BUCKETS, token_grid_hw
+    from monopriors.models.moge_v2 import ASPECT_BUCKETS, token_grid_hw
 
     expected_buckets: tuple[tuple[int, int], ...] = (
         (728, 966),
@@ -123,7 +122,7 @@ def test_select_aspect_bucket_uses_nearest_log_aspect(
     expected_bucket: tuple[int, int],
 ) -> None:
     """Bucket selection snaps common input shapes to their nearest aspect."""
-    from monopriors.models.moge_v2_trt_shared import ASPECT_BUCKETS, select_aspect_bucket
+    from monopriors.models.moge_v2 import ASPECT_BUCKETS, select_aspect_bucket
 
     selected_bucket: tuple[int, int] = select_aspect_bucket(input_hw, ASPECT_BUCKETS)
 
@@ -132,7 +131,7 @@ def test_select_aspect_bucket_uses_nearest_log_aspect(
 
 def test_trt_predictor_builds_exact_fixed_network_size(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A single network option eagerly creates exactly that runtime key."""
-    import monopriors.models.monoprior.moge_v2_trt as moge_v2_trt
+    import monopriors.models.moge_v2.predictor as moge_v2_predictor
 
     class FakeRuntime:
         def __init__(self, engine_path: Path, *, use_cuda_graph: bool = False) -> None:
@@ -152,7 +151,7 @@ def test_trt_predictor_builds_exact_fixed_network_size(monkeypatch: pytest.Monke
     engine_path: Path = tmp_path / "moge-geometry.engine"
     engine_path.write_bytes(b"engine")
     onnx_path: Path = tmp_path / "moge-geometry.onnx"
-    monkeypatch.setattr(moge_v2_trt, "export_moge_v2_onnx", lambda **_kwargs: onnx_path)
+    monkeypatch.setattr(moge_v2_predictor, "export_moge_v2_onnx", lambda **_kwargs: onnx_path)
     monkeypatch.setitem(
         sys.modules,
         "trtkit",
@@ -161,7 +160,8 @@ def test_trt_predictor_builds_exact_fixed_network_size(monkeypatch: pytest.Monke
     monkeypatch.setitem(sys.modules, "trtkit.tensorrt_runtime", SimpleNamespace(TensorRtRuntime=FakeRuntime))
 
     network_hw: tuple[int, int] = (728, 966)
-    predictor: moge_v2_trt.MoGeV2TrtGeometryPredictor = moge_v2_trt.MoGeV2TrtGeometryPredictor(
+    predictor: moge_v2_predictor.MoGeV2TrtPredictor = moge_v2_predictor.MoGeV2TrtPredictor(
+        heads="geometry",
         network_hw_options=(network_hw,),
         use_cuda_graph=True,
     )
@@ -171,21 +171,50 @@ def test_trt_predictor_builds_exact_fixed_network_size(monkeypatch: pytest.Monke
     assert predictor.runtimes[network_hw].use_cuda_graph
 
 
+def test_torch_typed_entry_points_reject_wrong_heads() -> None:
+    """Each Torch entry point rejects a predictor built for the other head set."""
+    from monopriors.models.moge_v2 import MoGeV2TorchPredictor
+
+    rgb_bhw3: UInt8[Tensor, "1 2 3 3"] = torch.zeros((1, 2, 3, 3), dtype=torch.uint8)
+    predictor: MoGeV2TorchPredictor = MoGeV2TorchPredictor.__new__(MoGeV2TorchPredictor)
+    predictor.heads = "geometry"
+    with pytest.raises(ValueError, match="heads='geometry'; it cannot produce 'normal'"):
+        predictor.predict_normals(rgb_bhw3)
+    predictor.heads = "normal"
+    with pytest.raises(ValueError, match="heads='normal'; it cannot produce 'geometry'"):
+        predictor.predict_geometry(rgb_bhw3)
+
+
+def test_trt_typed_entry_points_reject_wrong_heads() -> None:
+    """Each TensorRT entry point rejects a predictor built for the other head set."""
+    from monopriors.models.moge_v2 import MoGeV2TrtPredictor
+
+    rgb_bhw3: UInt8[Tensor, "1 2 3 3"] = torch.zeros((1, 2, 3, 3), dtype=torch.uint8)
+    predictor: MoGeV2TrtPredictor = MoGeV2TrtPredictor.__new__(MoGeV2TrtPredictor)
+    predictor.heads = "geometry"
+    with pytest.raises(ValueError, match="heads='geometry'; it cannot produce 'normal'"):
+        predictor.predict_normals(rgb_bhw3)
+    predictor.heads = "normal"
+    with pytest.raises(ValueError, match="heads='normal'; it cannot produce 'geometry'"):
+        predictor.predict_geometry(rgb_bhw3)
+
+
 @slow_cuda
 @requires_cuda
 def test_torch_predictor_returns_batched_metric_geometry() -> None:
     """The torch twin returns owning CUDA tensors in the geometry contract."""
-    from monopriors.models.monoprior.moge_v2_trt import MoGeV2GeometryOutput, MoGeV2TorchGeometryPredictor
+    from monopriors.models.moge_v2 import MoGeV2GeometryOutput, MoGeV2TorchPredictor
 
     image_hw: tuple[int, int] = (56, 70)
     rgb_bhw3: UInt8[Tensor, "2 56 70 3"] = synthetic_rgb_batch(2, image_hw)
-    predictor: MoGeV2TorchGeometryPredictor = MoGeV2TorchGeometryPredictor(
+    predictor: MoGeV2TorchPredictor = MoGeV2TorchPredictor(
         encoder="vits",
+        heads="geometry",
         network_hw_options=(image_hw,),
         resolution_level=0,
     )
 
-    prediction: MoGeV2GeometryOutput = predictor(rgb_bhw3)
+    prediction: MoGeV2GeometryOutput = predictor.predict_geometry(rgb_bhw3)
 
     assert prediction.depth_bhw.shape == (2, 56, 70)
     assert prediction.points_bhw3.shape == (2, 56, 70, 3)
@@ -220,16 +249,15 @@ def test_torch_predictor_returns_batched_metric_geometry() -> None:
 @requires_cuda
 def test_trt_matches_torch_twin_at_caller_resolution() -> None:
     """ViT-L TensorRT and torch geometry meet the caller-resolution parity bounds."""
-    from monopriors.models.monoprior.moge_v2_trt import MoGeV2TorchGeometryPredictor, MoGeV2TrtGeometryPredictor
-    from monopriors.models.surface_normal.moge_v2_trt import DEFAULT_IMAGE_HW
+    from monopriors.models.moge_v2 import ASPECT_BUCKETS, DEFAULT_IMAGE_HW, MoGeV2TorchPredictor, MoGeV2TrtPredictor
 
     rgb_bhw3: UInt8[Tensor, "2 756 1008 3"] = synthetic_rgb_batch(2, DEFAULT_IMAGE_HW)
     rgb_bhw3[1] = torch.flip(rgb_bhw3[1], dims=(1,))
-    trt_predictor: MoGeV2TrtGeometryPredictor = MoGeV2TrtGeometryPredictor(encoder="vitl", batch_size=8)
-    torch_predictor: MoGeV2TorchGeometryPredictor = MoGeV2TorchGeometryPredictor(encoder="vitl")
+    trt_predictor: MoGeV2TrtPredictor = MoGeV2TrtPredictor(encoder="vitl", heads="geometry", batch_size=8)
+    torch_predictor: MoGeV2TorchPredictor = MoGeV2TorchPredictor(encoder="vitl", heads="geometry", network_hw_options=ASPECT_BUCKETS)
 
-    trt_prediction: MoGeV2GeometryOutput = trt_predictor(rgb_bhw3)
-    torch_prediction: MoGeV2GeometryOutput = torch_predictor(rgb_bhw3)
+    trt_prediction: MoGeV2GeometryOutput = trt_predictor.predict_geometry(rgb_bhw3)
+    torch_prediction: MoGeV2GeometryOutput = torch_predictor.predict_geometry(rgb_bhw3)
     torch.cuda.synchronize()
 
     _assert_geometry_close(
@@ -245,9 +273,9 @@ def test_trt_matches_torch_twin_at_caller_resolution() -> None:
     torch.testing.assert_close(trt_prediction.shift_b, torch_prediction.shift_b, rtol=0.0, atol=0.01)
     torch.testing.assert_close(trt_prediction.points_bhw3[..., 2], trt_prediction.depth_bhw, atol=0.0, rtol=0.0)
 
-    held_prediction: MoGeV2GeometryOutput = trt_predictor(rgb_bhw3[:1])
+    held_prediction: MoGeV2GeometryOutput = trt_predictor.predict_geometry(rgb_bhw3[:1])
     held_copies: tuple[Float32[Tensor, "*shape"], ...] = tuple(output_tensor.clone() for output_tensor in held_prediction)
-    reused_prediction: MoGeV2GeometryOutput = trt_predictor(torch.flip(rgb_bhw3[:1], dims=(2,)))
+    reused_prediction: MoGeV2GeometryOutput = trt_predictor.predict_geometry(torch.flip(rgb_bhw3[:1], dims=(2,)))
     for held_tensor, held_copy, reused_tensor in zip(held_prediction, held_copies, reused_prediction, strict=True):
         assert reused_tensor.data_ptr() != held_tensor.data_ptr()
         torch.testing.assert_close(held_tensor, held_copy)
@@ -272,8 +300,7 @@ def test_trt_geometry_matches_vendored_infer_convention(encoder: Encoder, caller
     """
     from einops import rearrange
 
-    from monopriors.models.moge_v2_trt_shared import load_pinned_moge_v2
-    from monopriors.models.monoprior.moge_v2_trt import MoGeV2TrtGeometryPredictor
+    from monopriors.models.moge_v2 import MoGeV2TrtPredictor, load_pinned_moge_v2
     from monopriors.third_party.moge.model._inference import InferenceOutput
     from monopriors.third_party.moge.model.v2 import MoGeModel
 
@@ -286,11 +313,11 @@ def test_trt_geometry_matches_vendored_infer_convention(encoder: Encoder, caller
     rgb_bhw3: UInt8[Tensor, "1 h w 3"] = torch.from_numpy(rgb_hw3).cuda()[None]
     image_3hw: Float32[Tensor, "3 h w"] = rearrange(rgb_bhw3[0], "h w c -> c h w").float() / 255.0  # pyrefly: ignore  # bad-argument-type — einops stub false positive
 
-    trt_predictor: MoGeV2TrtGeometryPredictor = MoGeV2TrtGeometryPredictor(encoder=encoder, batch_size=8)
+    trt_predictor: MoGeV2TrtPredictor = MoGeV2TrtPredictor(encoder=encoder, heads="geometry", batch_size=8)
     loaded: tuple[MoGeModel, int] = load_pinned_moge_v2(encoder, 9)
     model: MoGeModel = loaded[0]
 
-    trt_prediction: MoGeV2GeometryOutput = trt_predictor(rgb_bhw3)
+    trt_prediction: MoGeV2GeometryOutput = trt_predictor.predict_geometry(rgb_bhw3)
     reference: InferenceOutput = model.infer(
         image_3hw,
         resolution_level=9,
@@ -313,3 +340,78 @@ def test_trt_geometry_matches_vendored_infer_convention(encoder: Encoder, caller
         reference_intrinsics_33[None],
         GeometryCloseBars(0.01, 0.03, 0.01, 0.03, 0.01, 1.0, 5.0, 0.99),
     )
+
+
+@slow_cuda
+@requires_cuda
+def test_torch_predictor_returns_batched_unit_normals_and_masks() -> None:
+    """The unified Torch core honors the normal-only batch and output contract."""
+    from monopriors.models.moge_v2 import MoGeV2NormalOutput, MoGeV2TorchPredictor
+
+    image_hw: tuple[int, int] = (56, 70)
+    rgb_bhw3: UInt8[Tensor, "2 56 70 3"] = synthetic_rgb_batch(2, image_hw)
+    predictor: MoGeV2TorchPredictor = MoGeV2TorchPredictor(
+        encoder="vits",
+        heads="normal",
+        network_hw_options=(image_hw,),
+        resolution_level=0,
+    )
+
+    prediction: MoGeV2NormalOutput = predictor.predict_normals(rgb_bhw3)
+
+    assert prediction.normals_bhw3.shape == (2, 56, 70, 3)
+    assert prediction.normals_bhw3.dtype == torch.float32
+    assert prediction.normals_bhw3.is_cuda
+    assert prediction.mask_bhw.shape == (2, 56, 70)
+    assert prediction.mask_bhw.dtype == torch.float32
+    assert prediction.mask_bhw.is_cuda
+    torch.testing.assert_close(
+        torch.linalg.vector_norm(prediction.normals_bhw3, dim=-1),
+        torch.ones((2, 56, 70), device="cuda"),
+        atol=2e-3,
+        rtol=0.0,
+    )
+    assert prediction.mask_bhw.min().item() >= 0.0
+    assert prediction.mask_bhw.max().item() <= 1.0
+
+
+@slow_cuda
+@requires_cuda
+def test_trt_normal_heads_match_torch_twin_and_return_owning_outputs() -> None:
+    """The cached normal-only engine matches Torch and returns owning tensors."""
+    from monopriors.models.moge_v2 import (
+        DEFAULT_IMAGE_HW,
+        MoGeV2NormalOutput,
+        MoGeV2TorchPredictor,
+        MoGeV2TrtPredictor,
+    )
+
+    rgb_bhw3: UInt8[Tensor, "2 756 1008 3"] = synthetic_rgb_batch(2, DEFAULT_IMAGE_HW)
+    rgb_bhw3[1] = torch.flip(rgb_bhw3[1], dims=(1,))
+    trt_predictor: MoGeV2TrtPredictor = MoGeV2TrtPredictor(
+        heads="normal",
+        network_hw_options=(DEFAULT_IMAGE_HW,),
+        batch_size=8,
+    )
+    torch_predictor: MoGeV2TorchPredictor = MoGeV2TorchPredictor(
+        heads="normal",
+        network_hw_options=(DEFAULT_IMAGE_HW,),
+    )
+
+    trt_prediction: MoGeV2NormalOutput = trt_predictor.predict_normals(rgb_bhw3)
+    torch_prediction: MoGeV2NormalOutput = torch_predictor.predict_normals(rgb_bhw3)
+    torch.cuda.synchronize()
+
+    cosine_bhw: Float32[Tensor, "2 756 1008"] = torch.sum(
+        trt_prediction.normals_bhw3 * torch_prediction.normals_bhw3,
+        dim=-1,
+    ).clamp(-1.0, 1.0)
+    angular_error_bhw: Float32[Tensor, "2 756 1008"] = torch.rad2deg(torch.acos(cosine_bhw))
+    assert angular_error_bhw.mean().item() < 0.1
+    assert torch.quantile(angular_error_bhw, 0.99).item() < 0.5
+
+    held_prediction: MoGeV2NormalOutput = trt_predictor.predict_normals(rgb_bhw3[:1])
+    held_normals_copy_bhw3: Float32[Tensor, "1 756 1008 3"] = held_prediction.normals_bhw3.clone()
+    reused_prediction: MoGeV2NormalOutput = trt_predictor.predict_normals(torch.flip(rgb_bhw3[:1], dims=(2,)))
+    assert reused_prediction.normals_bhw3.data_ptr() != held_prediction.normals_bhw3.data_ptr()
+    torch.testing.assert_close(held_prediction.normals_bhw3, held_normals_copy_bhw3)

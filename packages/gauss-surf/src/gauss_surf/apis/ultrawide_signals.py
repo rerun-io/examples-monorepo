@@ -26,7 +26,7 @@ from arkitscenes_download.ingest.recording import atomic_recording
 from arkitscenes_download.schema import DEPTH_RANGE_MM
 from einops import rearrange
 from jaxtyping import Float32, UInt8, UInt32
-from monopriors.models.surface_normal.moge_v2_trt import MoGeV2NormalOutput, MoGeV2TrtNormalPredictor
+from monopriors.models.moge_v2 import MoGeV2NormalOutput, MoGeV2TrtPredictor
 from numpy import ndarray
 from rerun.catalog import DatasetEntry, DatasetView
 from torch import Tensor
@@ -303,7 +303,7 @@ def _send_rectified_pinhole(recording: rr.RecordingStream, inputs: UltrawideInpu
 def _process_and_write(
     reader: SegmentReader,
     inputs: UltrawideInputs,
-    predictor: MoGeV2TrtNormalPredictor,
+    predictor: MoGeV2TrtPredictor,
     scene: o3d.t.geometry.RaycastingScene,
     depth_recording: rr.RecordingStream,
     normals_recording: rr.RecordingStream,
@@ -348,7 +348,7 @@ def _process_and_write(
 
         frames_bhw3: UInt8[ndarray, "batch h=480 w=640 3"] = np.stack(rectified_frames)
         frames_cuda_bhw3: UInt8[Tensor, "batch h=480 w=640 3"] = torch.from_numpy(frames_bhw3).to(device="cuda", dtype=torch.uint8)
-        prediction: MoGeV2NormalOutput = predictor(frames_cuda_bhw3)
+        prediction: MoGeV2NormalOutput = predictor.predict_normals(frames_cuda_bhw3)
         normals_toward_bhw3: Float32[ndarray, "batch h=480 w=640 3"] = (
             prediction.normals_bhw3.detach().cpu().numpy().astype(np.float32, copy=False)
         )
@@ -397,8 +397,9 @@ def main(config: Config) -> None:
     reader.require_zero_orientation("ultrawide rectification")
     dataset: DatasetEntry = reader.dataset
     inputs: UltrawideInputs = _load_inputs(reader)
-    predictor: MoGeV2TrtNormalPredictor = MoGeV2TrtNormalPredictor(
-        image_hw=ULTRAWIDE_IMAGE_HW,
+    predictor: MoGeV2TrtPredictor = MoGeV2TrtPredictor(
+        heads="normal",
+        network_hw_options=(ULTRAWIDE_IMAGE_HW,),
         batch_size=MOGE_INFERENCE_BATCH_SIZE,
     )
     mesh: o3d.t.geometry.TriangleMesh = o3d.t.geometry.TriangleMesh(

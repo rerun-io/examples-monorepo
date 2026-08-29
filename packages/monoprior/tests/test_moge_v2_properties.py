@@ -8,11 +8,14 @@ from hypothesis import strategies as st
 from jaxtyping import Bool, Float32
 from torch import Tensor
 
-from monopriors.models.moge_v2_trt_shared import ASPECT_BUCKETS, aspect_buckets, select_aspect_bucket, token_grid_hw
-from monopriors.models.monoprior.moge_v2_trt import (
+from monopriors.models.moge_v2 import (
+    ASPECT_BUCKETS,
     MoGeV2GeometryGraphOutput,
     MoGeV2GeometryOutput,
+    aspect_buckets,
     postprocess_moge_v2_geometry,
+    select_aspect_bucket,
+    token_grid_hw,
 )
 from monopriors.third_party.moge.utils.geometry_torch import normalized_view_plane_uv
 
