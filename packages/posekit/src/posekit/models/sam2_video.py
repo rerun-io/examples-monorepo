@@ -10,7 +10,7 @@ detections with GPU masks and stable ``track_ids``.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, TypeAlias
 
 import torch
 from jaxtyping import Bool, Float, UInt8
@@ -19,14 +19,16 @@ from torch import Tensor
 from posekit.models.base import SegmentationPrompts, VideoSegmenter
 from posekit.predictions import BoxDetections, validate_frames_rgb
 
-Sam2Variant = Literal["efficienttam-ti-512"]
+Sam2Variant: TypeAlias = Literal["efficienttam-ti-512", "efficienttam-s-512"]
 
 SAM2_VARIANT_CONFIGS: dict[Sam2Variant, str] = {
     "efficienttam-ti-512": "configs/efficienttam/efficienttam_ti_512x512.yaml",
+    "efficienttam-s-512": "configs/efficienttam/efficienttam_s_512x512.yaml",
 }
-SAM2_WEIGHTS_REPO: str = "pablovela5620/mamma-streaming-data"
-SAM2_VARIANT_WEIGHTS: dict[Sam2Variant, str] = {
-    "efficienttam-ti-512": "weights/efficienttam/efficienttam_ti.pt",
+# (repo_id, repo_type, filename) per variant; -s is Kineo's pick, -ti is mamma's speed pick.
+SAM2_VARIANT_WEIGHTS: dict[Sam2Variant, tuple[str, str, str]] = {
+    "efficienttam-ti-512": ("pablovela5620/mamma-streaming-data", "dataset", "weights/efficienttam/efficienttam_ti.pt"),
+    "efficienttam-s-512": ("yunyangx/efficient-track-anything", "model", "efficienttam_s_512x512.pt"),
 }
 
 
@@ -35,7 +37,7 @@ class Sam2VideoSegmenterConfig:
     """Streaming SAM2/EfficientTAM video segmenter configuration."""
 
     variant: Sam2Variant = "efficienttam-ti-512"
-    """Model architecture + checkpoint (EfficientTAM-ti@512 is mamma's speed pick)."""
+    """Model architecture + checkpoint (-ti@512 is mamma's speed pick, -s@512 is Kineo's)."""
     device: str = "cuda"
     """Inference device."""
     memory_window_size: int = 7
@@ -60,9 +62,8 @@ class Sam2VideoSegmenter(VideoSegmenter):
         from sam2.sam2_generic_video_predictor import SAM2GenericVideoPredictorState
 
         self.config: Sam2VideoSegmenterConfig = config
-        checkpoint_path: str = hf_hub_download(
-            repo_id=SAM2_WEIGHTS_REPO, repo_type="dataset", filename=SAM2_VARIANT_WEIGHTS[config.variant]
-        )
+        repo_id, repo_type, filename = SAM2_VARIANT_WEIGHTS[config.variant]
+        checkpoint_path: str = hf_hub_download(repo_id=repo_id, repo_type=repo_type, filename=filename)
         self.predictor = build_sam2_generic_video_predictor(SAM2_VARIANT_CONFIGS[config.variant], checkpoint_path, device=config.device)
         self._states: list[SAM2GenericVideoPredictorState] | None = None
         self._frame_idx: int = 0
