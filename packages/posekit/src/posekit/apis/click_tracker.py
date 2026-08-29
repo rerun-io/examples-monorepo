@@ -10,21 +10,19 @@ forward and backward from the first prompted frame.
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Iterator
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeVar
 
 import torch
 from einops import rearrange
 from jaxtyping import Bool, UInt8
+from simplecv.video_io import TorchCodecVideoReader
 from torch import Tensor
 from torch.nn import functional as F
 
 OBJ_ID: int = 0
 """The single tracked object."""
-T = TypeVar("T")
 _INFERENCE_LOCK = threading.Lock()  # no annotation: beartype rejects the builtin lock type hint
 """Serialize calls into the shared GPU predictor, one inference step at a time."""
 
@@ -57,6 +55,16 @@ class MaskResult:
     """Sigmoid object-presence score."""
 
 
+@dataclass(frozen=True, slots=True)
+class PointEdit:
+    """Outcome of removing one point from the prompt set."""
+
+    point: Point | None
+    """Removed point, or ``None`` when no point matched."""
+    result: MaskResult | None
+    """Refreshed mask on the edited frame, or ``None`` when it has no points."""
+
+
 class ClickTracker:
     """Stateful single-object tracker driven by clicks on arbitrary frames."""
 
@@ -81,8 +89,6 @@ class ClickTracker:
         Raises:
             ValueError: If the clip has no decodable frames.
         """
-        from torchcodec.decoders import VideoDecoder
-
         self.predictor = predictor
         self.device: str = device
         self.remove_radius_px: float = remove_radius_px
@@ -91,15 +97,12 @@ class ClickTracker:
         # 201" / "Could not receive frame from decoder"), even when serialized. Web
         # callbacks run on pool threads, so the decoder lives on its own thread and
         # every decode is executed there.
-        self._decode_thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="click-tracker-decode")
-        self._decoder = self._decode(lambda: VideoDecoder(video_path, dimension_order="NHWC", device=device))
-        total: int | None = self._decoder.metadata.num_frames
-        if total is None or total <= 0:
+        self._video_reader: TorchCodecVideoReader = TorchCodecVideoReader(video_path, device=device, thread_owned=True)
+        if self._video_reader.frame_cnt <= 0:
             raise ValueError(f"{video_path} has no decodable frames.")
-        self.num_frames: int = int(total)
-        first = self._decode(lambda: self._decoder.get_frame_at(0))
-        self.frame_hw: tuple[int, int] = (int(first.data.shape[0]), int(first.data.shape[1]))
-        self.points: list[Point] = []
+        self.num_frames: int = self._video_reader.frame_cnt
+        self.frame_hw: tuple[int, int] = (self._video_reader.height, self._video_reader.width)
+        self._points: list[Point] = []
         """Every live point, in insertion order (the undo order)."""
         self._memory_window_size: int = memory_window_size
         self._state = self._new_state()
@@ -116,20 +119,17 @@ class ClickTracker:
 
     # ── frames ────────────────────────────────────────────────────────────
 
-    def _decode(self, fn: Callable[[], T]) -> T:
-        """Run a decoder call on the decoder's own thread and return its result."""
-        return self._decode_thread.submit(fn).result()
-
     def close(self) -> None:
         """Stop the thread-affine decoder executor. Safe to call more than once."""
         if self._closed:
             return
         self._closed = True
-        self._decode_thread.shutdown(wait=True, cancel_futures=True)
+        self._video_reader.close()
 
     def frame(self, frame_idx: int) -> UInt8[Tensor, "h w 3"]:
         """Decode one frame on the inference device."""
-        return self._decode(lambda: self._decoder.get_frame_at(frame_idx)).data
+        frame_chw: UInt8[Tensor, "3 h w"] = self._video_reader.get_frame(frame_idx)
+        return rearrange(frame_chw, "c h w -> h w c")
 
     def _embeddings(self, frame_idx: int) -> tuple[list[Tensor], list[Tensor]]:
         """Image-encoder output for one frame; the last frame's is cached (Kineo's one-frame cache)."""
@@ -142,42 +142,47 @@ class ClickTracker:
 
     # ── points ────────────────────────────────────────────────────────────
 
-    def points_on(self, frame_idx: int) -> list[Point]:
-        """The live points placed on one frame."""
-        return [p for p in self.points if p.frame_idx == frame_idx]
+    @property
+    def points(self) -> tuple[Point, ...]:
+        """All live points in insertion order."""
+        return tuple(self._points)
 
-    def prompted_frames(self) -> list[int]:
+    def points_on(self, frame_idx: int) -> tuple[Point, ...]:
+        """The live points placed on one frame."""
+        return tuple(point for point in self._points if point.frame_idx == frame_idx)
+
+    def prompted_frames(self) -> tuple[int, ...]:
         """Sorted frame indices that carry at least one point."""
-        return sorted({p.frame_idx for p in self.points})
+        return tuple(sorted({point.frame_idx for point in self._points}))
 
     def add_point(self, frame_idx: int, x: float, y: float, *, positive: bool, resegment: bool = False) -> MaskResult:
         """Add a point on a frame and return that frame's re-prompted mask."""
-        self.points.append(Point(frame_idx=frame_idx, x=float(x), y=float(y), positive=positive))
+        self._points.append(Point(frame_idx=frame_idx, x=float(x), y=float(y), positive=positive))
         result = self.refresh(frame_idx, resegment=resegment)
         assert result is not None
         return result
 
-    def remove_point_near(self, frame_idx: int, x: float, y: float) -> tuple[Point | None, MaskResult | None]:
+    def remove_point_near(self, frame_idx: int, x: float, y: float) -> PointEdit:
         """Remove the closest point on the frame within ``remove_radius_px`` (Kineo's Shift+Click)."""
-        candidates: list[Point] = self.points_on(frame_idx)
+        candidates: tuple[Point, ...] = self.points_on(frame_idx)
         if not candidates:
-            return None, None
+            return PointEdit(point=None, result=None)
         nearest: Point = min(candidates, key=lambda p: (p.x - x) ** 2 + (p.y - y) ** 2)
         if (nearest.x - x) ** 2 + (nearest.y - y) ** 2 > self.remove_radius_px**2:
-            return None, None
-        self.points.remove(nearest)
-        return nearest, self.refresh(frame_idx)
+            return PointEdit(point=None, result=None)
+        self._points.remove(nearest)
+        return PointEdit(point=nearest, result=self.refresh(frame_idx))
 
-    def undo(self) -> tuple[Point | None, MaskResult | None]:
+    def undo(self) -> PointEdit:
         """Remove the most recently added point."""
-        if not self.points:
-            return None, None
-        last: Point = self.points.pop()
-        return last, self.refresh(last.frame_idx)
+        if not self._points:
+            return PointEdit(point=None, result=None)
+        last: Point = self._points.pop()
+        return PointEdit(point=last, result=self.refresh(last.frame_idx))
 
     def clear(self) -> None:
         """Drop every point and every memory."""
-        self.points = []
+        self._points.clear()
         self._state = self._new_state()
 
     # ── inference ─────────────────────────────────────────────────────────
@@ -191,7 +196,7 @@ class ClickTracker:
         """
         from sam2.modeling.sam2_prompt import SAM2Prompt
 
-        frame_points: list[Point] = self.points_on(frame_idx)
+        frame_points: tuple[Point, ...] = self.points_on(frame_idx)
         if not frame_points:
             self._state.memory_bank.clear_conditional_memories_in_frame(frame_idx=frame_idx)
             self._state.memory_bank.clear_non_conditional_memories_in_frame(frame_idx=frame_idx)
@@ -203,7 +208,7 @@ class ClickTracker:
         embeddings: tuple[list[Tensor], list[Tensor]] = self._embeddings(frame_idx)
         img_embeddings: list[Tensor] = embeddings[0]
         img_pos_embeddings: list[Tensor] = embeddings[1]
-        has_other_prompt: bool = any(point.frame_idx != frame_idx for point in self.points)
+        has_other_prompt: bool = any(point.frame_idx != frame_idx for point in self._points)
         if resegment or not has_other_prompt:
             prompt = SAM2Prompt(obj_id=OBJ_ID, points_coords=user_coords, points_labels=user_labels)
             with _INFERENCE_LOCK:
@@ -280,7 +285,7 @@ class ClickTracker:
             self._state.memory_bank.prune_memories(obj_ids=[OBJ_ID], current_frame_idx=frame_idx)
         return self._result(frame_idx, selected)
 
-    def _sample_anchors(self, mask: Bool[Tensor, "h w"], frame_points: list[Point]) -> Tensor:
+    def _sample_anchors(self, mask: Bool[Tensor, "h w"], frame_points: tuple[Point, ...]) -> Tensor:
         """Sample four to six separated positives from an eroded mask interior."""
         area: int = int(mask.sum())
         erosion_radius: int = max(3, min(12, round(area**0.5 / 80.0)))
@@ -321,7 +326,7 @@ class ClickTracker:
             min_distance_sq = torch.minimum(min_distance_sq, distance_sq)
         return coords_xy[chosen]
 
-    def _select_candidate(self, result, propagated_mask: Bool[Tensor, "h w"], frame_points: list[Point]):
+    def _select_candidate(self, result, propagated_mask: Bool[Tensor, "h w"], frame_points: tuple[Point, ...]):
         """Choose a multimask candidate by user-click satisfaction, then prior-mask IoU."""
         from sam2.modeling.sam2_result import SAM2Result
 
@@ -353,7 +358,7 @@ class ClickTracker:
         Returns:
             ``None`` when nothing has been prompted yet.
         """
-        if not self.points:
+        if not self._points:
             return None
         if self.points_on(frame_idx):
             return self.refresh(frame_idx)
@@ -378,15 +383,14 @@ class ClickTracker:
         Raises:
             ValueError: If no point has been placed.
         """
-        prompted: list[int] = self.prompted_frames()
+        prompted: tuple[int, ...] = self.prompted_frames()
         if not prompted:
             raise ValueError("Place at least one point before tracking.")
         self._state.memory_bank.clear_all_non_conditional_memories()
         self._embedding_cache = None
         for start in range(prompted[0], self.num_frames, chunk):
             stop: int = min(start + chunk, self.num_frames)
-            batch = self._decode(lambda a=start, b=stop: self._decoder.get_frames_in_range(a, b))
-            frames_rgb: UInt8[Tensor, "c h w 3"] = batch.data.contiguous()
+            frames_rgb: UInt8[Tensor, "b 3 h w"] = self._video_reader.get_frames_in_range(start, stop).contiguous()
             for offset in range(int(frames_rgb.shape[0])):
                 frame_idx: int = start + offset
                 if self.points_on(frame_idx):
@@ -394,7 +398,7 @@ class ClickTracker:
                     assert result is not None
                     yield result
                     continue
-                frame_chw: UInt8[Tensor, "3 h w"] = rearrange(frames_rgb[offset], "h w c -> c h w").contiguous()
+                frame_chw: UInt8[Tensor, "3 h w"] = frames_rgb[offset]
                 with _INFERENCE_LOCK:
                     results = self.predictor.forward(
                         self._state, frame_idx, frame_chw, prompts=[], multimask_output=True, create_memory=True
@@ -405,11 +409,10 @@ class ClickTracker:
         self._embedding_cache = None
         for stop in range(prompted[0], 0, -chunk):
             start: int = max(0, stop - chunk)
-            batch = self._decode(lambda a=start, b=stop: self._decoder.get_frames_in_range(a, b))
-            frames_rgb = batch.data.contiguous()
+            frames_rgb = self._video_reader.get_frames_in_range(start, stop).contiguous()
             for offset in range(int(frames_rgb.shape[0]) - 1, -1, -1):
                 frame_idx = start + offset
-                frame_chw = rearrange(frames_rgb[offset], "h w c -> c h w").contiguous()
+                frame_chw = frames_rgb[offset]
                 with _INFERENCE_LOCK:
                     results = self.predictor.forward(
                         self._state,
@@ -432,4 +435,4 @@ class ClickTracker:
         )
 
 
-__all__ = ("ClickTracker", "MaskResult", "Point")
+__all__ = ("ClickTracker", "MaskResult", "Point", "PointEdit")

@@ -1,10 +1,10 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from collections import OrderedDict
-from collections.abc import Generator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from itertools import repeat
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypeVar
 
 import cv2
 import numpy as np
@@ -21,6 +21,8 @@ from einops import rearrange
 from jaxtyping import UInt8
 
 from simplecv.image_types import BGRList, ImageBGR
+
+T = TypeVar("T")
 
 
 def validate_video_file_path(video_path: Path) -> Path:
@@ -378,6 +380,7 @@ class TorchCodecVideoReader:
         num_ffmpeg_threads: int = 0,
         seek_mode: Literal["exact", "approximate"] = "approximate",
         resize_hw: tuple[int, int] | None = None,
+        thread_owned: bool = False,
     ) -> None:
         """Initialize the TorchCodec tensor video reader.
 
@@ -394,6 +397,9 @@ class TorchCodecVideoReader:
                 materialized. ``width``/``height``/``resolution`` report the
                 post-resize dimensions; use ``source_width``/``source_height``
                 for the native ones.
+            thread_owned: Create the decoder and run every decode on one owned
+                thread. CUDA TorchCodec decoders are thread-affine, so use this
+                when callers may access one reader from several threads.
         """
         from torchcodec.decoders import VideoDecoder
 
@@ -402,6 +408,9 @@ class TorchCodecVideoReader:
         self.num_ffmpeg_threads: int = num_ffmpeg_threads
         self.seek_mode: Literal["exact", "approximate"] = seek_mode
         self.resize_hw: tuple[int, int] | None = resize_hw
+        self._decode_thread: ThreadPoolExecutor | None = (
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="torchcodec-video-reader") if thread_owned else None
+        )
 
         # On CPU, resize during decoding (FFmpeg scale filter). On CUDA, decode
         # native via NVDEC and resize on-GPU after decode.
@@ -411,16 +420,18 @@ class TorchCodecVideoReader:
 
             decode_time_transforms = [_TorchCodecResize(size=list(resize_hw))]
 
-        self._decoder: VideoDecoder = VideoDecoder(
-            source,
-            device=self.device,
-            seek_mode=self.seek_mode,
-            num_ffmpeg_threads=self.num_ffmpeg_threads,
-            dimension_order="NCHW",
-            transforms=decode_time_transforms,
+        self._decoder: VideoDecoder = self._decode(
+            lambda: VideoDecoder(
+                source,
+                device=self.device,
+                seek_mode=self.seek_mode,
+                num_ffmpeg_threads=self.num_ffmpeg_threads,
+                dimension_order="NCHW",
+                transforms=decode_time_transforms,
+            )
         )
 
-        metadata = self._decoder.metadata
+        metadata = self._decode(lambda: self._decoder.metadata)
         self._source_width: int = required_torchcodec_int(metadata.width, "width")
         self._source_height: int = required_torchcodec_int(metadata.height, "height")
         self._width: int = self._source_width if resize_hw is None else int(resize_hw[1])
@@ -439,6 +450,18 @@ class TorchCodecVideoReader:
         self._read_buffer: UInt8[torch.Tensor, "b 3 h w"] | None = None
         self._read_buffer_start: int = 0
         self._read_buffer_stop: int = 0
+
+    def _decode(self, callback: Callable[[], T]) -> T:
+        """Run decoder work on its owned thread when thread affinity is enabled."""
+        if self._decode_thread is None:
+            return callback()
+        return self._decode_thread.submit(callback).result()
+
+    def close(self) -> None:
+        """Stop the owned decoder thread. Safe to call more than once."""
+        if self._decode_thread is not None:
+            self._decode_thread.shutdown(wait=True, cancel_futures=True)
+            self._decode_thread = None
 
     @property
     def width(self) -> int:
@@ -518,7 +541,7 @@ class TorchCodecVideoReader:
         if frame_id < 0 or frame_id >= self._frame_cnt:
             raise IndexError(f'"frame_id" must be between 0 and {self._frame_cnt - 1}')
 
-        frame: UInt8[torch.Tensor, "3 h w"] = self._decoder.get_frame_at(frame_id).data
+        frame: UInt8[torch.Tensor, "3 h w"] = self._decode(lambda: self._decoder.get_frame_at(frame_id).data)
         if self._needs_post_resize:
             frame = self._maybe_resize(frame.unsqueeze(0)).squeeze(0)
         return frame
@@ -557,7 +580,7 @@ class TorchCodecVideoReader:
                 device=self.device,
             )
             return empty
-        video: UInt8[torch.Tensor, "b 3 h w"] = self._decoder.get_frames_in_range(start, clamped_stop).data
+        video: UInt8[torch.Tensor, "b 3 h w"] = self._decode(lambda: self._decoder.get_frames_in_range(start, clamped_stop).data)
         video = self._maybe_resize(video)
         return video
 
@@ -617,8 +640,8 @@ class TorchCodecVideoReader:
     def __enter__(self):
         return self
 
-    def __exit__(self, _exc_type, _exc_value, _traceback):
-        pass  # No explicit cleanup needed for TorchCodec
+    def __exit__(self, _exc_type, _exc_value, _traceback) -> None:
+        self.close()
 
 
 class TorchCodecMultiVideoReader:

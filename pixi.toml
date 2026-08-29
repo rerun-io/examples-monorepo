@@ -1160,6 +1160,11 @@ cmd = "python tools/apps/track_app.py"
 cwd = "packages/posekit"
 description = "Launch the click-to-track video Gradio app (SAM2-streaming/EfficientTAM + Rerun)"
 
+[feature.posekit.tasks.sam2-streaming-tests]
+cmd = "pytest -q tests"
+cwd = "packages/sam2-streaming"
+description = "Run SAM2-streaming regression tests"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # robocap-slam
 # ═══════════════════════════════════════════════════════════════════════════
