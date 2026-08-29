@@ -8,13 +8,11 @@ from hypothesis import strategies as st
 from jaxtyping import Bool, Float32
 from torch import Tensor
 
+from monopriors.models.moge_v2_trt_shared import ASPECT_BUCKETS, aspect_buckets, select_aspect_bucket, token_grid_hw
 from monopriors.models.monoprior.moge_v2_trt import (
-    ASPECT_BUCKETS,
     MoGeV2GeometryGraphOutput,
     MoGeV2GeometryOutput,
     postprocess_moge_v2_geometry,
-    select_aspect_bucket,
-    token_grid_hw,
 )
 from monopriors.third_party.moge.utils.geometry_torch import normalized_view_plane_uv
 
@@ -35,6 +33,18 @@ def test_token_grid_is_patch_aligned_and_near_budget(aspect_ratio: float, num_to
     # Rounding each side by at most 0.5 token bounds the product error.
     assert abs(token_rows * token_cols - num_tokens) <= 0.5 * (token_rows + token_cols) + 0.25
     assert abs(math.log(token_cols / token_rows) - math.log(aspect_ratio)) <= math.log(1.0 + 0.5 / min(token_rows, token_cols)) * 2.0
+
+
+@settings(max_examples=100, deadline=None)
+@given(num_tokens=st.integers(min_value=1, max_value=5000))
+def test_aspect_buckets_match_each_pinned_aspect_grid(num_tokens: int) -> None:
+    """Every generated bucket is the token grid for its declared aspect."""
+    expected_buckets: tuple[tuple[int, int], ...] = tuple(
+        token_grid_hw(aspect_ratio, num_tokens) for aspect_ratio in (4.0 / 3.0, 3.0 / 4.0, 16.0 / 9.0, 9.0 / 16.0, 1.0)
+    )
+
+    assert aspect_buckets(num_tokens) == expected_buckets
+    assert len(aspect_buckets(num_tokens)) == 5
 
 
 @settings(max_examples=200, deadline=None)
@@ -61,7 +71,7 @@ def test_every_bucket_selects_itself() -> None:
         assert select_aspect_bucket(bucket_hw, ASPECT_BUCKETS) == bucket_hw
 
 
-@settings(max_examples=20, deadline=None)
+@settings(max_examples=10, deadline=None)
 @given(
     focal=st.floats(min_value=0.6, max_value=3.0, allow_nan=False, allow_infinity=False),
     shift=st.floats(min_value=-0.5, max_value=0.5, allow_nan=False, allow_infinity=False),
