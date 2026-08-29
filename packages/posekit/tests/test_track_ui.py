@@ -16,9 +16,10 @@ from gradio_rerun.events import SelectionChange
 from jaxtyping import Int64, UInt8
 from numpy import ndarray
 
+import posekit.apis.track_recording as track_recording
 import posekit.track_ui as track_ui
 from posekit.apis.click_tracker import ClickTracker, MaskResult
-from posekit.track_ui import MASK_SCALE, Session, _close_session, _invalidate_track, _mask_hw, _merge_rrd_parts, _open_recording
+from posekit.apis.track_recording import MASK_SCALE, Session, _close_session, _invalidate_track, _mask_hw, _merge_rrd_parts, _open_recording
 
 CLIP: Path = Path(__file__).resolve().parents[2] / "wilor-nano" / "assets" / "video.mp4"
 SessionWithMock: TypeAlias = tuple[Session, Mock]
@@ -59,7 +60,7 @@ def test_state_delete_callback_closes_tracker_and_removes_rrds(tmp_path: Path, m
     session_with_mock: SessionWithMock = _session("expired")
     session: Session = session_with_mock[0]
     tracker: Mock = session_with_mock[1]
-    monkeypatch.setattr(track_ui, "RRD_DIR", tmp_path)
+    monkeypatch.setattr(track_recording, "RRD_DIR", tmp_path)
     config: track_ui.AppConfig = track_ui.AppConfig(variant="efficienttam-ti-512")
     demo: gr.Blocks = track_ui.build_demo(config)
     states: list[gr.State] = [block for block in demo.blocks.values() if isinstance(block, gr.State)]
@@ -83,7 +84,7 @@ def test_state_delete_callback_closes_tracker_and_removes_rrds(tmp_path: Path, m
 def test_download_recording_contains_video_prompts_masks_and_confidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     session_with_mock: SessionWithMock = _session("download", prompted=[0])
     session: Session = session_with_mock[0]
-    monkeypatch.setattr(track_ui, "RRD_DIR", tmp_path)
+    monkeypatch.setattr(track_recording, "RRD_DIR", tmp_path)
 
     recording_pair: tuple[rr.RecordingStream, rr.BinaryStream] = _open_recording(session)
     rec: rr.RecordingStream = recording_pair[0]
@@ -174,7 +175,7 @@ def test_load_video_forwards_model_and_memory_config(monkeypatch: pytest.MonkeyP
     stream_mock: Mock = Mock(spec=rr.BinaryStream)
     stream_mock.read.return_value = b"payload"
     monkeypatch.setattr(track_ui, "ClickTracker", FakeClickTracker)
-    monkeypatch.setattr(track_ui, "_predictor", lambda _variant: predictor)
+    monkeypatch.setattr(track_ui, "cached_predictor", lambda _variant: predictor)
     monkeypatch.setattr(track_ui, "_open_recording", lambda _session: (rec_mock, stream_mock))
     monkeypatch.setattr(track_ui, "log_video", fake_log_video)
 
@@ -195,7 +196,7 @@ def test_failed_reload_keeps_previous_session_open(tmp_path: Path, monkeypatch: 
     previous_tracker: Mock = session_with_mock[1]
     corrupt_video: Path = tmp_path / "corrupt.mp4"
     corrupt_video.write_bytes(b"not an mp4")
-    monkeypatch.setattr(track_ui, "_predictor", lambda _variant: object())
+    monkeypatch.setattr(track_ui, "cached_predictor", lambda _variant: object())
 
     with pytest.raises((RuntimeError, ValueError)):
         next(track_ui.load_video(str(corrupt_video), previous_session, "efficienttam-s-512", 10.0))
