@@ -1,6 +1,5 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from timeit import default_timer as timer
 from typing import Literal
 
 import numpy as np
@@ -9,14 +8,14 @@ from einops import rearrange
 from jaxtyping import Float, UInt8
 
 from monopriors.models.metric_depth import BaseMetricPredictor, MetricDepthPrediction, get_metric_predictor
-from monopriors.models.metric_depth.moge_v2 import MOGE_V2_CHECKPOINTS
+from monopriors.models.moge_v2.adapters import geometry_to_metric_prediction, normal_to_surface_prediction, rgb_to_cuda_batch
+from monopriors.models.moge_v2.export import Encoder
+from monopriors.models.moge_v2.predictor import MoGeV2GeometryOutput, MoGeV2TorchPredictor
 from monopriors.models.surface_normal import (
     BaseNormalPredictor,
     SurfaceNormalPrediction,
     get_normal_predictor,
 )
-from monopriors.third_party.moge.model._inference import InferenceOutput
-from monopriors.third_party.moge.model.v2 import MoGeModel
 
 
 @dataclass
@@ -126,7 +125,7 @@ class MoGeV2MonoPrior(MonoPriorModel):
 
     def __init__(
         self,
-        encoder: Literal["vits", "vitb", "vitl"] = "vitl",
+        encoder: Encoder = "vitl",
     ) -> None:
         """Load a pinned normal-capable MoGe v2 checkpoint.
 
@@ -134,13 +133,7 @@ class MoGeV2MonoPrior(MonoPriorModel):
             encoder: DINOv2 encoder size.
         """
         super().__init__()
-        checkpoint: tuple[str, str] = MOGE_V2_CHECKPOINTS[(encoder, True)]
-        repo_id: str = checkpoint[0]
-        revision: str = checkpoint[1]
-        print(f"Loading MoGe v2 mono-prior model ({repo_id})...")
-        start: float = timer()
-        self.model: MoGeModel = MoGeModel.from_pretrained(repo_id, revision=revision).to(self.device)
-        print(f"MoGe v2 mono-prior model loaded. Time: {timer() - start:.2f}s")
+        self.predictor: MoGeV2TorchPredictor = MoGeV2TorchPredictor(encoder=encoder, heads="geometry")
 
     def __call__(
         self,
@@ -156,41 +149,7 @@ class MoGeV2MonoPrior(MonoPriorModel):
         Returns:
             Combined metric-depth and surface-normal prediction.
         """
-        h: int
-        w: int
-        h, w, _ = rgb.shape
-        input_image: Float[torch.Tensor, "3 h w"] = rearrange(torch.from_numpy(rgb), "h w c -> c h w").to(
-            device=self.device,
-            dtype=torch.float32,
-        )
-        input_image.div_(255.0)
-
-        output: InferenceOutput = self.model.infer(input_image, force_projection=False)
-
-        # Build intrinsics from normalized values
-        normalized_k: Float[np.ndarray, "3 3"] = output["intrinsics"].numpy(force=True)
-        fx: float = float(normalized_k[0, 0] * w)
-        fy: float = float(normalized_k[1, 1] * h)
-        cx: float = float(normalized_k[0, 2] * w)
-        cy: float = float(normalized_k[1, 2] * h)
-        intrinsics: Float[np.ndarray, "3 3"] = np.array(
-            [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]],
-            dtype=np.float32,
-        )
-
-        depth_meters: Float[np.ndarray, "h w"] = output["depth"].numpy(force=True)
-        confidence: Float[np.ndarray, "h w"] = output["mask"].numpy(force=True).astype(np.float32)
-        normal_hw3: Float[np.ndarray, "h w 3"] = output["normal"].numpy(force=True)
-        confidence_hw1: Float[np.ndarray, "h w 1"] = confidence[:, :, np.newaxis]
-
-        metric_pred: MetricDepthPrediction = MetricDepthPrediction(
-            depth_meters=depth_meters,
-            confidence=confidence,
-            K_33=intrinsics,
-        )
-        normal_pred: SurfaceNormalPrediction = SurfaceNormalPrediction(
-            normal_hw3=normal_hw3,
-            confidence_hw1=confidence_hw1,
-        )
-
+        output: MoGeV2GeometryOutput = self.predictor.predict_geometry(rgb_to_cuda_batch(rgb))
+        metric_pred: MetricDepthPrediction = geometry_to_metric_prediction(output)
+        normal_pred: SurfaceNormalPrediction = normal_to_surface_prediction(output)
         return MonoPriorPrediction(metric_pred=metric_pred, normal_pred=normal_pred)
