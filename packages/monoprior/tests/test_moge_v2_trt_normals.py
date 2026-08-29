@@ -7,10 +7,9 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
+from conftest import requires_cuda, slow_cuda, synthetic_rgb_batch
 from jaxtyping import Bool, Float32, UInt8
 from torch import Tensor
-
-requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 
 def test_trt_predictor_loads_prebuilt_engine_without_export(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -34,34 +33,14 @@ def test_trt_predictor_loads_prebuilt_engine_without_export(monkeypatch: pytest.
     assert predictor.runtime.engine_path == engine_path
 
 
-def _synthetic_rgb_batch(batch_size: int, image_hw: tuple[int, int]) -> UInt8[Tensor, "b h w 3"]:
-    """Create deterministic RGB gradients directly on CUDA.
-
-    Args:
-        batch_size: Number of frames to create.
-        image_hw: Frame height and width.
-
-    Returns:
-        uint8 CUDA RGB frames shaped ``b h w 3``.
-    """
-    height: int = image_hw[0]
-    width: int = image_hw[1]
-    x_w: Float32[Tensor, "w"] = torch.linspace(0, 255, width, device="cuda", dtype=torch.float32)
-    y_h: Float32[Tensor, "h"] = torch.linspace(0, 255, height, device="cuda", dtype=torch.float32)
-    red_hw: Float32[Tensor, "h w"] = x_w[None, :].expand(height, width)
-    green_hw: Float32[Tensor, "h w"] = y_h[:, None].expand(height, width)
-    blue_hw: Float32[Tensor, "h w"] = (red_hw + green_hw) / 2.0
-    rgb_hw3: UInt8[Tensor, "h w 3"] = torch.stack((red_hw, green_hw, blue_hw), dim=-1).to(torch.uint8)
-    return rgb_hw3[None].expand(batch_size, -1, -1, -1).contiguous()
-
-
+@slow_cuda
 @requires_cuda
 def test_torch_predictor_returns_batched_unit_normals_and_masks() -> None:
     """The torch twin honors the shared batch, dtype, and unit-normal contract."""
     from monopriors.models.surface_normal.moge_v2_trt import MoGeV2NormalOutput, MoGeV2TorchNormalPredictor
 
     image_hw: tuple[int, int] = (56, 70)
-    rgb_bhw3: UInt8[Tensor, "2 56 70 3"] = _synthetic_rgb_batch(2, image_hw)
+    rgb_bhw3: UInt8[Tensor, "2 56 70 3"] = synthetic_rgb_batch(2, image_hw)
     predictor: MoGeV2TorchNormalPredictor = MoGeV2TorchNormalPredictor(
         encoder="vits",
         image_hw=image_hw,
@@ -86,6 +65,7 @@ def test_torch_predictor_returns_batched_unit_normals_and_masks() -> None:
     assert prediction.mask_bhw.max().item() <= 1.0
 
 
+@slow_cuda
 @requires_cuda
 def test_trt_matches_torch_twin_at_default_arkitscenes_resolution() -> None:
     """TensorRT and ONNX-compatible torch normals meet the angular parity bound."""
@@ -96,7 +76,7 @@ def test_trt_matches_torch_twin_at_default_arkitscenes_resolution() -> None:
         MoGeV2TrtNormalPredictor,
     )
 
-    rgb_bhw3: UInt8[Tensor, "2 756 1008 3"] = _synthetic_rgb_batch(2, DEFAULT_IMAGE_HW)
+    rgb_bhw3: UInt8[Tensor, "2 756 1008 3"] = synthetic_rgb_batch(2, DEFAULT_IMAGE_HW)
     rgb_bhw3[1] = torch.flip(rgb_bhw3[1], dims=(1,))
     trt_predictor: MoGeV2TrtNormalPredictor = MoGeV2TrtNormalPredictor(batch_size=8)
     torch_predictor: MoGeV2TorchNormalPredictor = MoGeV2TorchNormalPredictor()
@@ -133,6 +113,7 @@ def test_trt_matches_torch_twin_at_default_arkitscenes_resolution() -> None:
     torch.testing.assert_close(held_prediction.normals_bhw3, held_normals_copy_bhw3)
 
 
+@slow_cuda
 @requires_cuda
 def test_trt_normals_match_existing_single_image_convention() -> None:
     """The TRT output keeps the existing camera-space layout and sign convention."""
@@ -144,7 +125,7 @@ def test_trt_normals_match_existing_single_image_convention() -> None:
         MoGeV2TrtNormalPredictor,
     )
 
-    rgb_bhw3: UInt8[Tensor, "1 756 1008 3"] = _synthetic_rgb_batch(1, DEFAULT_IMAGE_HW)
+    rgb_bhw3: UInt8[Tensor, "1 756 1008 3"] = synthetic_rgb_batch(1, DEFAULT_IMAGE_HW)
     rgb_hw3: UInt8[np.ndarray, "756 1008 3"] = rgb_bhw3[0].cpu().numpy()
     trt_predictor: MoGeV2TrtNormalPredictor = MoGeV2TrtNormalPredictor(batch_size=8)
     existing_predictor: MoGeV2NormalPredictor = MoGeV2NormalPredictor(device="cuda", encoder="vitl")

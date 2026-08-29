@@ -478,6 +478,12 @@ depends-on = ["_monoprior-download-single-image"]
 cwd = "packages/monoprior"
 description = "Run monoprior (metric depth + normals) on example image"
 
+[feature.monoprior.tasks.monoprior-moge-v2-trt-benchmark]
+cmd = "python tools/eval/benchmark_moge_v2_trt.py"
+depends-on = ["_monoprior-download-single-image"]
+cwd = "packages/monoprior"
+description = "Benchmark batched full MoGe v2 torch and TensorRT predictors"
+
 # ── App tasks (Gradio UIs) ──────────────────────────────────────────────
 [feature.monoprior.tasks.monoprior-depth-compare-app]
 cmd = "python tools/apps/depth_compare_app.py"
