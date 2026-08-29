@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
@@ -255,6 +256,7 @@ def log_video(
     timeline: str = "video_time",
     *,
     recording: rr.RecordingStream | None = None,
+    output_codec: rr.VideoCodec | None = None,
 ) -> Int[ndarray, "num_frames"]:
     """
     Logs a video and its frame timestamps.
@@ -264,6 +266,7 @@ def log_video(
         video_log_path: The entity path where the video log will be saved.
         timeline: Timeline name for frame timestamps.
         recording: Optional specific recording stream to log to.
+        output_codec: Output codec override; ``None`` keeps the source codec.
 
     Returns:
         Frame timestamps in nanoseconds, sorted ascending.
@@ -271,30 +274,34 @@ def log_video(
     Raises:
         RuntimeError: When Rerun cannot ingest or transcode the MP4.
     """
-    try:
-        frame_timestamps_ns: Int[ndarray, "num_frames"] = rr.AssetVideo(
-            path=video_source
-        ).read_frame_timestamps_nanos()
-    except RuntimeError as exc:
-        raise RuntimeError(f"Failed to read frame timestamps from {video_source}: {exc}") from exc
-
     target_recording: rr.RecordingStream | None = (
         recording if recording is not None else rr.get_global_data_recording()
     )
     if target_recording is None:
         raise RuntimeError("No active Rerun recording. Call rr.init() or pass recording= before logging video.")
+    # The VideoStream chunks carry the sample times on ``timeline``; they are the frame
+    # timestamps, so no separate AssetVideo probe (which rejects QuickTime-brand .MOV files).
+    times: list[Int[ndarray, "rows"]] = []
     try:
-        reader = rr.experimental.Mp4Reader(
+        reader: rr.experimental.Mp4Reader = rr.experimental.Mp4Reader(
             video_source,
             mode="stream",
             entity_path=str(video_log_path),
             timeline_name=timeline,
-            transcode=rr.experimental.Mp4TranscodeOptions(try_gpu=True),
+            transcode=rr.experimental.Mp4TranscodeOptions(output_codec=output_codec, try_gpu=True),
         )
-        target_recording.send_chunks(reader.stream())
+
+        def _chunks_recording_times() -> Iterator[rr.experimental.Chunk]:
+            for chunk in reader.stream():
+                if not chunk.is_static:
+                    times.append(chunk.to_record_batch().column(timeline).to_numpy().astype("timedelta64[ns]").astype(np.int64))
+                yield chunk
+
+        target_recording.send_chunks(_chunks_recording_times())
     except RuntimeError as exc:
         raise RuntimeError(f"Mp4Reader failed for {video_source}: {exc}") from exc
 
+    frame_timestamps_ns: Int[ndarray, "num_frames"] = np.sort(np.concatenate(times)) if times else np.empty(0, dtype=np.int64)
     return frame_timestamps_ns
 
 
