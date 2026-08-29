@@ -152,10 +152,18 @@ def _open_recording(session: Session, *, write_part: bool = True) -> tuple[rr.Re
 
 
 def _merge_rrd_parts(session: Session) -> Path:
-    """Merge this session's footerless callback parts into one valid RRD."""
+    """Merge this session's footerless callback parts into one valid, compacted RRD.
+
+    The parts are hundreds of tiny per-callback chunks; ``rrd optimize`` re-batches
+    them into fewer, larger chunks and re-derives video keyframes so the download loads fast.
+    """
     output: Path = RRD_DIR / f"{session.recording_id}.rrd"
+    merged: Path = RRD_DIR / f"{session.recording_id}.merged.rrd"
     parts: list[Path] = sorted((RRD_DIR / session.recording_id).glob("*.rrd"))
-    subprocess.run(["rerun", "rrd", "merge", "--output", str(output), *(str(part) for part in parts)], check=True)
+    subprocess.run(["rerun", "rrd", "merge", "--output", str(merged), *(str(part) for part in parts)], check=True)
+    # --fix-keyframe: the Mp4Reader stream logs is_keyframe=false rows, which blocks GoP rebatching of the video.
+    subprocess.run(["rerun", "rrd", "optimize", "--fix-keyframe", "--output", str(output), str(merged)], check=True)
+    merged.unlink()
     return output
 
 
