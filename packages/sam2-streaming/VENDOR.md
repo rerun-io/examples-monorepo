@@ -46,3 +46,19 @@
   `_target_: sam2.modeling.efficienttam_base.EfficientTAMBase`, which does not
   exist — EfficientTAM checkpoints only work through the `build_sam2_generic*`
   builders, which override `model._target_`.
+
+## Local patches
+
+- `sam2/modeling/sam2_generic.py` `encode_prompts`: the dense-mask prompt branch
+  passed `masks_low_res_logits` (always `None`) into `downscale_masks_logits`
+  instead of `masks_logits`, so any `SAM2Prompt(masks_logits=...)` crashed with
+  `AttributeError: 'NoneType' object has no attribute 'shape'`; and
+  `downscale_masks_logits` targets the image resolution, which the mask encoder
+  then rejects (`size of tensor a (32) must match ... (128)`). Fixed to resize
+  `masks_logits` straight to `sam_prompt_encoder.mask_input_size` (the generic
+  dense-mask prompt path; posekit's click tracker ended up refining with
+  sampled anchor points instead, but the API should not crash).
+- `sam2/modeling/sam2_memory.py`: fixed positive conditional-memory limits,
+  which indexed a Python list with a list of `ObjectMemory` instances, and copy
+  the stored non-conditional list before appending unselected conditional
+  memories so a read-only selection no longer mutates the bank.

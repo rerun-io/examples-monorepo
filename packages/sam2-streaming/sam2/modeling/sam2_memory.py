@@ -180,7 +180,7 @@ class SAM2ObjectMemoryBank(ObjectMemoryBank):
             # 2. Select the non-conditional memories
             # If an unselected conditioning frame is among the last frames, we still attend to it as if it's a non-conditioning frame.
 
-            selected_obj_non_conditional_memories = obj_non_conditional_memories
+            selected_obj_non_conditional_memories = list(obj_non_conditional_memories)
             selected_obj_non_conditional_memories.extend(
                 unselected_obj_conditional_memories
             )
@@ -327,21 +327,21 @@ def _select_N_closest_conditional_memories(
     selected_outputs = []
 
     # Add the closest conditioning frame before `current_frame_idx` (if any)
-    if last_idx_before > 0:
+    if N > 0 and last_idx_before > 0:
         selected_outputs.append(conditional_memories[last_idx_before - 1])
     # Add the closest conditioning frame after `current_frame_idx` (if any)
-    if first_idx_after < len(conditional_memories):
+    if len(selected_outputs) < N and first_idx_after < len(conditional_memories):
         selected_outputs.append(conditional_memories[first_idx_after])
 
     n_remaining = N - len(selected_outputs)
 
     # Add other temporally closest conditioning frames until reaching a total of `N` conditioning frames.
-    remaining_indices = sorted(
+    remaining_outputs = sorted(
         (t for t in conditional_memories if t not in selected_outputs),
         key=lambda x: abs(x.frame_idx - current_frame_idx),
     )
-    selected_outputs.extend(conditional_memories[remaining_indices[:n_remaining]])
-    unselected_outputs = conditional_memories[remaining_indices[n_remaining:]]
+    selected_outputs.extend(remaining_outputs[:n_remaining])
+    unselected_outputs = remaining_outputs[n_remaining:]
 
     return selected_outputs, unselected_outputs
 
