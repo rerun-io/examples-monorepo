@@ -87,6 +87,7 @@ ignore_names = [
     "print_model_summary",
     "fuse_remaining_conv_bn",
     "StableNormalPredictor",
+    "MOGE_V2_NORMAL_CHECKPOINTS",
     "aabb",
     "camera_model",
     "camtoworld",

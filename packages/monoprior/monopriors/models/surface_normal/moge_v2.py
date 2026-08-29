@@ -1,50 +1,37 @@
-from timeit import default_timer as timer
+"""Single-image surface-normal adapter for the unified MoGe v2 core."""
+
 from typing import Literal
 
 import numpy as np
-import torch
-from einops import rearrange
 from jaxtyping import Float, UInt8
 
-from monopriors.models.metric_depth.moge_v2 import MOGE_V2_CHECKPOINTS
-from monopriors.third_party.moge.model._inference import InferenceOutput
+from monopriors.models.moge_v2.export import MOGE_V2_CHECKPOINTS, Encoder
+from monopriors.models.moge_v2.predictor import MoGeV2NormalOutput, MoGeV2TorchPredictor
+from monopriors.models.surface_normal.base_normal_model import BaseNormalPredictor, SurfaceNormalPrediction
 from monopriors.third_party.moge.model.v2 import MoGeModel
 
-from .base_normal_model import BaseNormalPredictor, SurfaceNormalPrediction
-
-MOGE_V2_NORMAL_CHECKPOINTS: dict[str, tuple[str, str]] = {
-    "vitl": MOGE_V2_CHECKPOINTS[("vitl", True)],
-    "vitb": MOGE_V2_CHECKPOINTS[("vitb", True)],
-    "vits": MOGE_V2_CHECKPOINTS[("vits", True)],
-}
-"""Mapping of encoder to Hugging Face repository and revision (all include normals)."""
+MOGE_V2_NORMAL_CHECKPOINTS: dict[Encoder, tuple[str, str]] = MOGE_V2_CHECKPOINTS
+"""Backward-compatible name for the unified normal-capable checkpoint table."""
 
 
 class MoGeV2NormalPredictor(BaseNormalPredictor[MoGeModel]):
-    """MoGe v2 predictor producing surface normals.
+    """MoGe v2 surface-normal adapter using the normal-only heads."""
 
-    Requires a ``-normal`` checkpoint variant.
-    """
-
-    def __init__(
-        self,
-        device: Literal["cpu", "cuda"],
-        encoder: Literal["vits", "vitb", "vitl"] = "vitl",
-    ) -> None:
-        """Load a pinned normal-capable MoGe v2 checkpoint.
+    def __init__(self, device: Literal["cpu", "cuda"], encoder: Encoder = "vitl") -> None:
+        """Load the unified normal-only core.
 
         Args:
-            device: Torch device used for inference.
+            device: Must be ``"cuda"``; MoGe v2 inference is GPU-only.
             encoder: DINOv2 encoder size.
+
+        Raises:
+            ValueError: If CPU is requested.
         """
         super().__init__()
-        checkpoint: tuple[str, str] = MOGE_V2_NORMAL_CHECKPOINTS[encoder]
-        repo_id: str = checkpoint[0]
-        revision: str = checkpoint[1]
-        print(f"Loading MoGe v2 normal model ({repo_id})...")
-        start: float = timer()
-        self.model: MoGeModel = MoGeModel.from_pretrained(repo_id, revision=revision).to(device)
-        print(f"MoGe v2 normal model loaded. Time: {timer() - start:.2f}s")
+        if device == "cpu":
+            raise ValueError("MoGe v2 predictors require CUDA; device='cpu' is unsupported.")
+        self.predictor: MoGeV2TorchPredictor = MoGeV2TorchPredictor(encoder=encoder, heads="normal")
+        self.model: MoGeModel = self.predictor.model
         self.device: Literal["cpu", "cuda"] = device
 
     def __call__(
@@ -52,36 +39,16 @@ class MoGeV2NormalPredictor(BaseNormalPredictor[MoGeModel]):
         rgb: UInt8[np.ndarray, "h w 3"],
         K_33: Float[np.ndarray, "3 3"] | None = None,
     ) -> SurfaceNormalPrediction:
-        """Predict surface normals from an RGB image.
+        """Predict surface normals and binary confidence.
 
         Args:
-            rgb: uint8 RGB image shaped ``h w 3``.
-            K_33: Optional float camera intrinsics shaped ``3 3``; normals do not use it.
+            rgb: uint8 NumPy RGB image shaped ``h w 3``.
+            K_33: Ignored camera intrinsics; the normal head does not use them.
 
         Returns:
-            Surface normals and per-pixel confidence.
+            Float32 normals zeroed outside the binary-valid mask and confidence.
         """
-        h: int
-        w: int
-        h, w, _ = rgb.shape
-        input_image: Float[torch.Tensor, "3 h w"] = rearrange(torch.from_numpy(rgb), "h w c -> c h w").to(
-            device=self.device,
-            dtype=torch.float32,
-        )
-        input_image.div_(255.0)
+        from monopriors.models.moge_v2.adapters import normal_to_surface_prediction, rgb_to_cuda_batch
 
-        output: InferenceOutput = self.model.infer(
-            input_image,
-            force_projection=False,
-            output_heads=("normal", "mask"),
-        )
-        # v2 normal checkpoint output includes "normal" (H,W,3) and "mask" (H,W)
-
-        normal_hw3: Float[np.ndarray, "h w 3"] = output["normal"].numpy(force=True)
-        mask: Float[np.ndarray, "h w"] = output["mask"].numpy(force=True).astype(np.float32)
-        confidence_hw1: Float[np.ndarray, "h w 1"] = mask[:, :, np.newaxis]
-
-        return SurfaceNormalPrediction(
-            normal_hw3=normal_hw3,
-            confidence_hw1=confidence_hw1,
-        )
+        output: MoGeV2NormalOutput = self.predictor.predict_normals(rgb_to_cuda_batch(rgb))
+        return normal_to_surface_prediction(output)
