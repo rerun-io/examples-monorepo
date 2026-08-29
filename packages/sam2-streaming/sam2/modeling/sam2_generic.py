@@ -474,8 +474,14 @@ class SAM2Generic(SAM2Base):
                 1,
             ), f"Expected masks to be of shape (B, 1, H, W), got {masks_logits.shape}"
 
-            masks_low_res_logits = self._transforms.downscale_masks_logits(
-                masks_low_res_logits
+            # The dense prompt must match the prompt encoder's mask input grid
+            # (4x the image-embedding size), not the image resolution.
+            masks_low_res_logits = torch.nn.functional.interpolate(
+                masks_logits.float(),
+                size=self.sam_prompt_encoder.mask_input_size,
+                mode="bilinear",
+                align_corners=False,
+                antialias=True,
             )
 
         if boxes is not None:

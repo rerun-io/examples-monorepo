@@ -1149,6 +1149,11 @@ cmd = "python tools/demos/video_track.py"
 cwd = "packages/posekit"
 description = "Run the streaming detect/track/pose/re-ID demo (YOLOX + SAM2-streaming + RTMPose + CLIP)"
 
+[feature.posekit.tasks.posekit-track-app]
+cmd = "python tools/apps/track_app.py"
+cwd = "packages/posekit"
+description = "Launch the click-to-track video Gradio app (SAM2-streaming/EfficientTAM + Rerun)"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # robocap-slam
 # ═══════════════════════════════════════════════════════════════════════════
