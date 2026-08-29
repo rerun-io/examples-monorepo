@@ -7,6 +7,24 @@ from pathlib import Path
 from timeit import default_timer as timer
 from typing import Literal, TypeAlias
 
+import numpy as np
+from jaxtyping import Int
+from numpy import ndarray
+
+
+def frame_at(frame_timestamps_ns: Int[ndarray, "n"], time_ns: float) -> int:
+    """Return the latest frame at or before a viewer time.
+
+    Args:
+        frame_timestamps_ns: Int[np.ndarray, "n"] monotonic frame timestamps in nanoseconds.
+        time_ns: Viewer time in nanoseconds.
+
+    Returns:
+        Zero-based frame index, clamped to the available timeline.
+    """
+    frame_idx: int = int(np.searchsorted(frame_timestamps_ns, time_ns, side="right")) - 1
+    return max(0, min(frame_idx, int(frame_timestamps_ns.shape[0]) - 1))
+
 
 def create_temp_video_from_img_dir(
     image_directory: Path,

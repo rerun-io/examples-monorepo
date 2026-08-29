@@ -5,6 +5,8 @@ These tests use the street_dance videos which are synced multi-camera recordings
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -219,6 +221,38 @@ class TestTorchCodecVideoReader:
         assert second_frame is not None
         assert int(first_frame[0, 0, 0].item()) == 0
         assert int(second_frame[0, 0, 0].item()) == 1
+
+    def test_thread_owned_reader_routes_random_access_to_decoder_thread(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A thread-owned reader must create and use its decoder on one thread."""
+        import sys
+        import types
+
+        class _Metadata:
+            width: int = 4
+            height: int = 2
+            num_frames: int = 1
+            average_fps: float = 30.0
+
+        class _FrameBatch:
+            data: torch.Tensor = torch.zeros((3, 2, 4), dtype=torch.uint8)
+
+        class _FakeVideoDecoder:
+            def __init__(self, _source: Path, **_kwargs: object) -> None:
+                self.metadata: _Metadata = _Metadata()
+                self.owner_thread: int = threading.get_ident()
+
+            def get_frame_at(self, _frame_id: int) -> _FrameBatch:
+                assert threading.get_ident() == self.owner_thread
+                return _FrameBatch()
+
+        monkeypatch.setitem(sys.modules, "torchcodec.decoders", types.SimpleNamespace(VideoDecoder=_FakeVideoDecoder))
+        reader: TorchCodecVideoReader = TorchCodecVideoReader(Path("cam0.mp4"), device="cpu", thread_owned=True)
+        try:
+            with ThreadPoolExecutor(max_workers=1) as caller:
+                frame: UInt8[torch.Tensor, "3 h w"] = caller.submit(reader.get_frame, 0).result()
+            assert tuple(frame.shape) == (3, 2, 4)
+        finally:
+            reader.close()
 
     def test_random_access(self, sample_video_path: Path) -> None:
         """Test random access to frames."""

@@ -7,12 +7,24 @@ from pathlib import Path
 import pytest
 import torch
 
-from posekit.apis.click_tracker import ClickTracker
+from posekit.apis.click_tracker import ClickTracker, Point, PointEdit
 from posekit.models.sam2_video import Sam2VideoSegmenterConfig
 
 cuda_only = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 CLIP: Path = Path(__file__).resolve().parents[2] / "wilor-nano" / "assets" / "video.mp4"
 CHEST: tuple[float, float] = (360.0, 450.0)
+
+
+def test_point_accessors_are_read_only_and_edits_are_explicit() -> None:
+    tracker: ClickTracker = object.__new__(ClickTracker)
+    tracker._points = [Point(frame_idx=2, x=3.0, y=4.0, positive=True)]
+
+    assert tracker.points == (Point(frame_idx=2, x=3.0, y=4.0, positive=True),)
+    assert tracker.points_on(2) == tracker.points
+    assert tracker.prompted_frames() == (2,)
+
+    tracker._points.clear()
+    assert tracker.undo() == PointEdit(point=None, result=None)
 
 
 @pytest.fixture(scope="module")
@@ -54,10 +66,10 @@ def test_negative_point_shrinks_and_removal_restores(tracker: ClickTracker) -> N
     full = tracker.add_point(0, *CHEST, positive=True)
     shrunk = tracker.add_point(0, 320.0, 320.0, positive=False)  # on the face
     assert int(shrunk.mask.sum()) < int(full.mask.sum())
-    removed, restored = tracker.remove_point_near(0, 325.0, 318.0)
-    assert removed is not None and not removed.positive and restored is not None
-    assert abs(int(restored.mask.sum()) - int(full.mask.sum())) < 0.02 * int(full.mask.sum())
-    assert tracker.remove_point_near(0, 10.0, 10.0) == (None, None)
+    edit: PointEdit = tracker.remove_point_near(0, 325.0, 318.0)
+    assert edit.point is not None and not edit.point.positive and edit.result is not None
+    assert abs(int(edit.result.mask.sum()) - int(full.mask.sum())) < 0.02 * int(full.mask.sum())
+    assert tracker.remove_point_near(0, 10.0, 10.0) == PointEdit(point=None, result=None)
 
 
 @cuda_only
@@ -65,10 +77,10 @@ def test_undo_last_point_clears_its_frame_memory(tracker: ClickTracker) -> None:
     tracker.clear()
     tracker.add_point(0, *CHEST, positive=True)
     tracker.add_point(40, *CHEST, positive=True)
-    assert tracker.prompted_frames() == [0, 40]
-    last, result = tracker.undo()
-    assert last is not None and last.frame_idx == 40 and result is None
-    assert tracker.prompted_frames() == [0]
+    assert tracker.prompted_frames() == (0, 40)
+    edit: PointEdit = tracker.undo()
+    assert edit.point is not None and edit.point.frame_idx == 40 and edit.result is None
+    assert tracker.prompted_frames() == (0,)
     assert tracker._state.memory_bank.count_conditional_memories() == 1
 
 

@@ -15,7 +15,8 @@ Rerun recording; each viewer event appends to that recording through
 from __future__ import annotations
 
 import functools
-import threading
+import shutil
+import subprocess
 import time
 import uuid
 from collections.abc import Iterator
@@ -33,8 +34,9 @@ from gradio_rerun.events import Pause, Play, SelectionChange, TimeUpdate
 from jaxtyping import Int, UInt8
 from numpy import ndarray
 from simplecv.rerun_log_utils import log_video
+from simplecv.video_utils import frame_at
 
-from posekit.apis.click_tracker import ClickTracker, MaskResult, Point
+from posekit.apis.click_tracker import ClickTracker, MaskResult, Point, PointEdit
 from posekit.models.sam2_video import Sam2Variant, Sam2VideoSegmenterConfig
 
 APP_ID: str = "posekit_click_to_track"
@@ -45,7 +47,6 @@ MODES: list[Mode] = ["+ Include", "− Exclude", "✕ Remove"]
 POSITIVE_COLOR: tuple[int, int, int] = (76, 220, 96)
 NEGATIVE_COLOR: tuple[int, int, int] = (255, 87, 51)
 MASK_COLOR: tuple[int, int, int] = (51, 178, 255)
-MAX_SESSIONS: int = 4
 RRD_DIR: Path = Path("/tmp/posekit-rrd")
 _EXAMPLES_DIR: Path = Path(__file__).resolve().parents[2] / "assets" / "examples"
 EXAMPLE_VIDEOS: list[str] = [
@@ -82,7 +83,7 @@ class Session:
     video_path: Path
     """Input video used by the live and downloadable recordings."""
     recording_id: str
-    """Rerun recording ID and session-table key."""
+    """Rerun recording ID."""
     frame_timestamps_ns: Int[ndarray, "n"]
     """Viewer timestamps returned by the logged video stream."""
     current_frame: int = 0
@@ -99,24 +100,12 @@ class Session:
     """Frames that carry a mask; anything else must show none (latest-at would otherwise keep the last one)."""
     pointed_frames: set[int] = field(default_factory=set)
     """Frames that carry temporal point data."""
-    tracked_frames: dict[int, TrackedFrame] = field(default_factory=dict)
-    """Completed or in-progress Track outputs kept on CPU for RRD export."""
+    tracked_frame_indices: set[int] = field(default_factory=set)
+    """Frames written by the latest Track run, retained only for invalidation."""
+    rrd_part_counter: int = 0
+    """Monotonic callback-part number within this session."""
 
 
-@dataclass(frozen=True, slots=True)
-class TrackedFrame:
-    """One tracked frame retained for the downloadable recording."""
-
-    mask_bits: UInt8[ndarray, "n"]
-    """Binary object mask, ``np.packbits`` of the flattened h*w mask (8x smaller than a byte per pixel)."""
-    score: float
-    """SAM decoder predicted IoU."""
-    object_score: float
-    """Sigmoid object-presence score."""
-
-
-_SESSIONS: dict[str, Session] = {}
-_SESSIONS_LOCK = threading.Lock()  # no annotation: beartype rejects the builtin lock type hint
 VARIANT: Sam2Variant = "efficienttam-s-512"
 
 
@@ -140,38 +129,34 @@ def _blueprint() -> rrb.Blueprint:
     )
 
 
-def _store_session(session: Session, previous_recording_id: str | None) -> None:
-    """Replace this browser's old session and evict the oldest excess sessions."""
-    removed: list[Session] = []
-    with _SESSIONS_LOCK:
-        if previous_recording_id and previous_recording_id != session.recording_id:
-            previous: Session | None = _SESSIONS.pop(previous_recording_id, None)
-            if previous is not None:
-                removed.append(previous)
-        _SESSIONS[session.recording_id] = session
-        while len(_SESSIONS) > MAX_SESSIONS:
-            oldest_id: str = next(iter(_SESSIONS))
-            removed.append(_SESSIONS.pop(oldest_id))
-    for old_session in removed:
-        _close_session(old_session)
-
-
-def _close_session(session: Session) -> None:
+def _close_session(session: Session | None) -> None:
     """Release a session's decoder thread and its downloadable recording."""
+    if session is None:
+        return
     session.tracker.close()
     (RRD_DIR / f"{session.recording_id}.rrd").unlink(missing_ok=True)
+    shutil.rmtree(RRD_DIR / session.recording_id, ignore_errors=True)
 
 
-def _drop_session(recording_id: str | None) -> None:
-    """Close and remove one session if it still exists."""
-    with _SESSIONS_LOCK:
-        session: Session | None = _SESSIONS.pop(recording_id or "", None)
-    if session is not None:
-        _close_session(session)
+def _open_recording(session: Session, *, write_part: bool = True) -> tuple[rr.RecordingStream, rr.BinaryStream]:
+    """Open one callback recording with a browser stream and, except for previews, a footerless file part."""
+    rec: rr.RecordingStream = rr.RecordingStream(application_id=APP_ID, recording_id=session.recording_id)
+    stream: rr.BinaryStream = rec.binary_stream()
+    if write_part:
+        part_dir: Path = RRD_DIR / session.recording_id
+        part_dir.mkdir(parents=True, exist_ok=True)
+        part: Path = part_dir / f"{session.rrd_part_counter:04d}.rrd"
+        session.rrd_part_counter += 1
+        rec.set_sinks(stream, rr.FileSink(str(part), write_footer=False))
+    return rec, stream
 
 
-def _rec(session: Session) -> rr.RecordingStream:
-    return rr.RecordingStream(application_id=APP_ID, recording_id=session.recording_id)
+def _merge_rrd_parts(session: Session) -> Path:
+    """Merge this session's footerless callback parts into one valid RRD."""
+    output: Path = RRD_DIR / f"{session.recording_id}.rrd"
+    parts: list[Path] = sorted((RRD_DIR / session.recording_id).glob("*.rrd"))
+    subprocess.run(["rerun", "rrd", "merge", "--output", str(output), *(str(part) for part in parts)], check=True)
+    return output
 
 
 def _viewer_time_s(session: Session, frame_idx: int) -> float:
@@ -203,7 +188,7 @@ def _log_points(rec: rr.RecordingStream, session: Session, frame_idx: int) -> No
     """Log the frame's points (or a clear) at that frame's time so markers show only where they belong."""
     entity: str = f"{VIDEO}/points"
     rec.set_time(TIMELINE, duration=_viewer_time_s(session, frame_idx))
-    points: list[Point] = session.tracker.points_on(frame_idx)
+    points: tuple[Point, ...] = session.tracker.points_on(frame_idx)
     if not points:
         session.pointed_frames.discard(frame_idx)
         rec.log(entity, rr.Clear(recursive=False))
@@ -240,7 +225,7 @@ def _log_mask(rec: rr.RecordingStream, session: Session, mask_hw: UInt8[ndarray,
 
 
 def _mask_hw(result: MaskResult | None) -> UInt8[ndarray, "h w"] | None:
-    """One GPU→CPU copy of a result's mask, shared by live logging and the export cache."""
+    """Copy one result mask from the inference device for Rerun logging."""
     return None if result is None else result.mask.cpu().numpy().astype(np.uint8)
 
 
@@ -251,118 +236,60 @@ def _log_confidence(rec: rr.RecordingStream, session: Session, result: MaskResul
     rec.log(f"{VIDEO}/object_score", rr.Scalars(result.object_score))
 
 
-def _remember_result(session: Session, result: MaskResult, mask_hw: UInt8[ndarray, "h w"]) -> None:
-    """Keep one result on the CPU (bit-packed) for the completed downloadable recording."""
-    session.tracked_frames[result.frame_idx] = TrackedFrame(
-        mask_bits=np.packbits(mask_hw.reshape(-1)),
-        score=result.score,
-        object_score=result.object_score,
-    )
-
-
 def _invalidate_track(rec: rr.RecordingStream, session: Session) -> bool:
     """Clear propagated overlays and confidence after a point edit."""
-    if not session.tracked_frames:
+    if not session.tracked_frame_indices:
         return False
     prompted: set[int] = set(session.tracker.prompted_frames())
     for frame_idx in sorted(session.masked_frames - prompted):
         rec.set_time(TIMELINE, duration=_viewer_time_s(session, frame_idx))
         rec.log(f"{VIDEO}/mask", rr.Clear(recursive=False))
-    for frame_idx in sorted(session.tracked_frames):
+    for frame_idx in sorted(session.tracked_frame_indices):
         rec.set_time(TIMELINE, duration=_viewer_time_s(session, frame_idx))
         rec.log(f"{VIDEO}/confidence", rr.Clear(recursive=False))
         rec.log(f"{VIDEO}/object_score", rr.Clear(recursive=False))
     session.masked_frames = prompted
-    session.tracked_frames.clear()
+    session.tracked_frame_indices.clear()
     return True
 
 
-def _save_recording(session: Session) -> Path:
-    """Write the video, prompts, tracked masks, and confidence to one RRD."""
-    RRD_DIR.mkdir(parents=True, exist_ok=True)
-    output: Path = RRD_DIR / f"{session.recording_id}.rrd"
-    rec: rr.RecordingStream = rr.RecordingStream(application_id=APP_ID, recording_id=session.recording_id)
-    rec.save(output, default_blueprint=_blueprint())
-    rec.log(
-        VIDEO,
-        rr.AnnotationContext(
-            [
-                rr.AnnotationInfo(id=0, label="background", color=(0, 0, 0, 0)),
-                rr.AnnotationInfo(id=1, label="object", color=MASK_COLOR),
-            ]
-        ),
-        static=True,
-    )
-    log_video(session.video_path, Path(VIDEO), timeline=TIMELINE, recording=rec)
-    prompted: set[int] = set(session.tracker.prompted_frames())
-    for frame_idx in sorted(prompted):
-        rec.set_time(TIMELINE, duration=_viewer_time_s(session, frame_idx))
-        points: list[Point] = session.tracker.points_on(frame_idx)
-        rec.log(
-            f"{VIDEO}/points",
-            rr.Points2D(
-                np.asarray([[point.x, point.y] for point in points], dtype=np.float32),
-                colors=[POSITIVE_COLOR if point.positive else NEGATIVE_COLOR for point in points],
-                radii=6,
-                labels=["+" if point.positive else "−" for point in points],
-            ),
-        )
-        nxt: int = frame_idx + 1
-        if nxt < session.tracker.num_frames and nxt not in prompted:
-            rec.set_time(TIMELINE, duration=_viewer_time_s(session, nxt))
-            rec.log(f"{VIDEO}/points", rr.Clear(recursive=False))
-    for frame_idx, tracked in sorted(session.tracked_frames.items()):
-        rec.set_time(TIMELINE, duration=_viewer_time_s(session, frame_idx))
-        h, w = session.tracker.frame_hw
-        mask_hw: UInt8[ndarray, "h w"] = np.unpackbits(tracked.mask_bits)[: h * w].reshape(h, w)
-        rec.log(f"{VIDEO}/mask", rr.SegmentationImage(mask_hw))
-        rec.log(f"{VIDEO}/confidence", rr.Scalars(tracked.score))
-        rec.log(f"{VIDEO}/object_score", rr.Scalars(tracked.object_score))
-    rec.disconnect()
-    return output
-
-
-def frame_at(frame_timestamps_ns: Int[ndarray, "n"], time_ns: float) -> int:
-    """The frame the viewer shows at a time: the last frame whose pts <= t (latest-at), like the viewer itself.
-
-    The viewer reports duration timelines in nanoseconds.
-    """
-    idx: int = int(np.searchsorted(frame_timestamps_ns, time_ns, side="right")) - 1
-    return max(0, min(idx, int(frame_timestamps_ns.shape[0]) - 1))
-
-
 def _status(session: Session, prefix: str) -> str:
-    frames: list[int] = session.tracker.prompted_frames()
+    frames: tuple[int, ...] = session.tracker.prompted_frames()
     return f"{prefix} {len(session.tracker.points)} point(s) on frame(s) {frames} · viewer at frame {session.current_frame}."
 
 
 # ── callbacks ─────────────────────────────────────────────────────────────
 
 
-def load_video(video: str | None, previous_recording_id: str | None) -> Iterator[tuple[bytes | None, str, str, str, Any, Any]]:
+def load_video(video: str | None, previous_session: Session | None) -> Iterator[tuple[bytes | None, Session | None, str, str, Any, Any]]:
     """Start a fresh session + recording for the clip (generators only: the streaming viewer rejects plain bytes)."""
-    _drop_session(previous_recording_id)
+    _close_session(previous_session)
     if video is None:
-        yield None, "", "Upload a video to begin.", "Upload a video to begin.", gr.Tabs(selected="input"), gr.DownloadButton(visible=False)
+        yield None, None, "Upload a video to begin.", "Upload a video to begin.", gr.Tabs(selected="input"), gr.DownloadButton(visible=False)
         return
     recording_id: str = str(uuid.uuid4())
     video_path: Path = Path(video)
-    tracker = ClickTracker(video_path, _predictor(VARIANT))
-    rec = rr.RecordingStream(application_id=APP_ID, recording_id=recording_id)
-    stream: rr.BinaryStream = rec.binary_stream()
+    tracker: ClickTracker = ClickTracker(video_path, _predictor(VARIANT))
+    session: Session = Session(
+        tracker=tracker,
+        video_path=video_path,
+        recording_id=recording_id,
+        frame_timestamps_ns=np.empty(0, dtype=np.int64),
+    )
+    rec, stream = _open_recording(session)
     rec.send_blueprint(_blueprint())
     rec.log(
         VIDEO,
         rr.AnnotationContext([rr.AnnotationInfo(id=0, label="background", color=(0, 0, 0, 0)), rr.AnnotationInfo(id=1, label="object", color=MASK_COLOR)]),
         static=True,
     )
-    timestamps_ns = log_video(video_path, Path(VIDEO), timeline=TIMELINE, recording=rec)
-    session = Session(tracker=tracker, video_path=video_path, recording_id=recording_id, frame_timestamps_ns=timestamps_ns)
-    _store_session(session, None)
+    session.frame_timestamps_ns = log_video(video_path, Path(VIDEO), timeline=TIMELINE, recording=rec)
     stream.flush()
+    payload: bytes | None = stream.read()
+    rec.disconnect()
     yield (
-        stream.read(),
-        recording_id,
+        payload,
+        session,
         "Click the object on frame 0, or scrub (drag / ← →) to another frame first. Add − to exclude; Remove deletes a point.",
         "Click the object on frame 0, or scrub (drag / ← →) to another frame first. Add − to exclude; Remove deletes a point.",
         gr.Tabs(selected="input"),
@@ -370,13 +297,12 @@ def load_video(video: str | None, previous_recording_id: str | None) -> Iterator
     )
 
 
-def record_time(recording_id: str | None, stamp: float | None, evt: TimeUpdate) -> None:
+def record_time(session: Session | None, stamp: float | None, evt: TimeUpdate) -> None:
     """Record the viewer's frame instantly (no queue, no outputs) so a click right after a scrub reads the right frame.
 
     ``stamp`` is the browser's ``performance.now()`` at dispatch (see the ``js`` hook): unqueued
     requests can complete out of order, so an older event must never overwrite a newer one.
     """
-    session: Session | None = _SESSIONS.get(recording_id or "")
     if session is None:
         return
     stamp_value: float = float(stamp) if stamp is not None else session.last_stamp + 1.0
@@ -387,23 +313,20 @@ def record_time(recording_id: str | None, stamp: float | None, evt: TimeUpdate) 
     session.last_time_update = time.monotonic()
 
 
-def on_play(recording_id: str | None, evt: Play) -> None:
+def on_play(session: Session | None, evt: Play) -> None:
     """Playback emits no time_update: remember that the frame is unknown until the viewer pauses."""
-    session: Session | None = _SESSIONS.get(recording_id or "")
     if session is not None:
         session.playing = True
 
 
-def on_pause(recording_id: str | None, evt: Pause) -> None:
+def on_pause(session: Session | None, evt: Pause) -> None:
     """The viewer paused; the next time_update (or the pre-play frame) is authoritative again."""
-    session: Session | None = _SESSIONS.get(recording_id or "")
     if session is not None:
         session.playing = False
 
 
-def on_time_update(recording_id: str | None, evt: TimeUpdate) -> Iterator[tuple[bytes | None, str, str]]:
+def on_time_update(session: Session | None, evt: TimeUpdate) -> Iterator[tuple[bytes | None, str, str]]:
     """When prompts exist, preview the memory-conditioned mask on the frame under the cursor."""
-    session: Session | None = _SESSIONS.get(recording_id or "")
     if session is None:
         yield b"", gr.skip(), gr.skip()
         return
@@ -413,11 +336,12 @@ def on_time_update(recording_id: str | None, evt: TimeUpdate) -> Iterator[tuple[
         if not session.preview_visible:
             yield b"", gr.skip(), gr.skip()
             return
-        rec = _rec(session)
-        stream: rr.BinaryStream = rec.binary_stream()
+        rec, stream = _open_recording(session, write_part=False)
         _clear_preview(rec, session)
         stream.flush()
-        yield stream.read(), gr.skip(), gr.skip()
+        payload: bytes | None = stream.read()
+        rec.disconnect()
+        yield payload, gr.skip(), gr.skip()
         return
     # This handler is queued (always_last) and may run late; it must never write
     # session.current_frame — only the unqueued record_time does, or a backlog of
@@ -426,8 +350,7 @@ def on_time_update(recording_id: str | None, evt: TimeUpdate) -> Iterator[tuple[
     frame_text: str = f"Viewer at frame {frame_idx} — a click prompts this frame."
     # The preview is *static* (no timeline → no ticks, overwritten in place), so it
     # must go away the moment the cursor leaves the frame it was computed for.
-    rec = _rec(session)
-    stream: rr.BinaryStream = rec.binary_stream()
+    rec, stream = _open_recording(session, write_part=False)
     _clear_preview(rec, session)
     stamp: float = session.last_stamp
     wants_preview: bool = bool(session.tracker.points) and not session.tracker.points_on(frame_idx)
@@ -439,17 +362,18 @@ def on_time_update(recording_id: str | None, evt: TimeUpdate) -> Iterator[tuple[
             rec.log(f"{VIDEO}/preview", rr.SegmentationImage(result.mask.cpu().numpy().astype(np.uint8)), static=True)
             session.preview_visible = True
     stream.flush()
-    yield stream.read(), frame_text, frame_text
+    payload = stream.read()
+    rec.disconnect()
+    yield payload, frame_text, frame_text
 
 
-def on_select(recording_id: str | None, mode: str, resegment: bool, evt: SelectionChange) -> Iterator[tuple[bytes | None, str, str]]:
+def on_select(session: Session | None, mode: str, resegment: bool, evt: SelectionChange) -> Iterator[tuple[bytes | None, str, str]]:
     """A click on the video at the current frame: add a +/− point or remove the nearest one, then show the mask."""
     # The viewer fires selection_change on recording open and on every click
     # anywhere; ignored selections must still yield a chunk for the streaming
     # viewer output (gr.skip() there crashes Gradio's end_stream).
     # A click on a masked pixel selects both /video/mask and /video, so take the
     # first positioned entity under the video rather than demanding exactly one.
-    session: Session | None = _SESSIONS.get(recording_id or "")
     hits = [i for i in evt.payload.items if i.type == "entity" and i.position is not None and i.entity_path.startswith(f"/{VIDEO}")]
     if session is None or not hits:
         yield b"", gr.skip(), gr.skip()
@@ -464,13 +388,13 @@ def on_select(recording_id: str | None, mode: str, resegment: bool, evt: Selecti
     while time.monotonic() - session.last_time_update < 0.12 and time.monotonic() < deadline:
         time.sleep(0.02)
     frame_idx: int = session.current_frame
-    rec = _rec(session)
-    stream: rr.BinaryStream = rec.binary_stream()
+    rec, stream = _open_recording(session)
     _clear_preview(rec, session)
     changed: bool = True
     if mode == "✕ Remove":
-        removed, result = session.tracker.remove_point_near(frame_idx, x, y)
-        changed = removed is not None
+        edit: PointEdit = session.tracker.remove_point_near(frame_idx, x, y)
+        changed = edit.point is not None
+        result: MaskResult | None = edit.result
         prefix: str = "Removed a point." if changed else f"No point within {session.tracker.remove_radius_px:.0f}px on this frame."
     else:
         positive: bool = mode != "− Exclude"
@@ -481,43 +405,44 @@ def on_select(recording_id: str | None, mode: str, resegment: bool, evt: Selecti
     _log_mask(rec, session, _mask_hw(result), frame_idx)
     _log_points(rec, session, frame_idx)
     stream.flush()
+    payload = stream.read()
+    rec.disconnect()
     if stale:
         prefix += " The previous track is stale — Track again."
     status_text: str = _status(session, prefix)
-    yield stream.read(), status_text, status_text
+    yield payload, status_text, status_text
 
 
-def undo(recording_id: str | None) -> Iterator[tuple[bytes | None, str, str]]:
+def undo(session: Session | None) -> Iterator[tuple[bytes | None, str, str]]:
     """Remove the most recently added point."""
-    session: Session | None = _SESSIONS.get(recording_id or "")
     if session is None:
         raise gr.Error("Upload a video first.")
-    rec = _rec(session)
-    stream: rr.BinaryStream = rec.binary_stream()
+    rec, stream = _open_recording(session)
     _clear_preview(rec, session)
-    last, result = session.tracker.undo()
-    if last is None:
+    edit: PointEdit = session.tracker.undo()
+    if edit.point is None:
+        rec.disconnect()
         status_text: str = _status(session, "Nothing to undo.")
         yield b"", status_text, status_text
         return
     stale: bool = _invalidate_track(rec, session)
-    _log_mask(rec, session, _mask_hw(result), last.frame_idx)
-    _log_points(rec, session, last.frame_idx)
+    _log_mask(rec, session, _mask_hw(edit.result), edit.point.frame_idx)
+    _log_points(rec, session, edit.point.frame_idx)
     stream.flush()
-    prefix: str = f"Undid the point on frame {last.frame_idx}."
+    payload = stream.read()
+    rec.disconnect()
+    prefix: str = f"Undid the point on frame {edit.point.frame_idx}."
     if stale:
         prefix += " The previous track is stale — Track again."
     status_text = _status(session, prefix)
-    yield stream.read(), status_text, status_text
+    yield payload, status_text, status_text
 
 
-def clear(recording_id: str | None) -> Iterator[tuple[bytes | None, str, str]]:
+def clear(session: Session | None) -> Iterator[tuple[bytes | None, str, str]]:
     """Drop every point, every memory, and every overlay."""
-    session: Session | None = _SESSIONS.get(recording_id or "")
     if session is None:
         raise gr.Error("Upload a video first.")
-    rec = _rec(session)
-    stream: rr.BinaryStream = rec.binary_stream()
+    rec, stream = _open_recording(session)
     _clear_preview(rec, session)
     session.tracker.clear()
     stale: bool = _invalidate_track(rec, session)
@@ -528,20 +453,20 @@ def clear(recording_id: str | None) -> Iterator[tuple[bytes | None, str, str]]:
             rec.log(entity, rr.Clear(recursive=False))
         frames.clear()
     stream.flush()
+    payload = stream.read()
+    rec.disconnect()
     suffix: str = " The previous track is stale — add a point and Track again." if stale else ""
     status_text: str = f"Cleared all points and memory.{suffix}"
-    yield stream.read(), status_text, status_text
+    yield payload, status_text, status_text
 
 
-def track(recording_id: str | None) -> Iterator[tuple[bytes | None, str, str, Any, Any]]:
+def track(session: Session | None) -> Iterator[tuple[bytes | None, str, str, Any, Any]]:
     """Propagate in both directions, stream masks, and write the downloadable RRD."""
-    session: Session | None = _SESSIONS.get(recording_id or "")
     if session is None:
         raise gr.Error("Upload a video first.")
     if not session.tracker.points:
         raise gr.Error("Click at least one point on the object first.")
-    rec = _rec(session)
-    stream: rr.BinaryStream = rec.binary_stream()
+    rec, stream = _open_recording(session)
     _clear_preview(rec, session)
     _invalidate_track(rec, session)
     stream.flush()
@@ -556,7 +481,7 @@ def track(recording_id: str | None) -> Iterator[tuple[bytes | None, str, str, An
         # points were already logged (and bounded) when they were placed.
         _log_mask(rec, session, mask_hw, result.frame_idx, bound=False)
         _log_confidence(rec, session, result)
-        _remember_result(session, result, mask_hw)
+        session.tracked_frame_indices.add(result.frame_idx)
         done += 1
         low_score += int(result.score < 0.5)
         if done % 30 == 0:
@@ -568,10 +493,12 @@ def track(recording_id: str | None) -> Iterator[tuple[bytes | None, str, str, An
                 gr.skip(),
                 gr.skip(),
             )
-    output: Path = _save_recording(session)
     stream.flush()
+    payload = stream.read()
+    rec.disconnect()
+    output: Path = _merge_rrd_parts(session)
     yield (
-        stream.read(),
+        payload,
         f"Done: tracked all {done} frames; {low_score} low-confidence frame(s). Add a corrective click where needed, then Track again.",
         f"Done: tracked all {done} frames; {low_score} low-confidence frame(s). Add a corrective click where needed, then Track again.",
         gr.Tabs(selected="outputs"),
@@ -661,7 +588,7 @@ footer { display: none !important; }
 
 with gr.Blocks(title="posekit: Click to Track") as demo:
     gr.Markdown(DESCRIPTION, elem_id="app-description")
-    recording_state: gr.State = gr.State("")
+    recording_state: gr.State = gr.State(value=None, delete_callback=_close_session)
     stamp_in: gr.Number = gr.Number(value=0.0, visible=False)
     with gr.Row(elem_id="main-row"):
         with gr.Column(scale=1, elem_id="left-column"):
@@ -714,7 +641,7 @@ with gr.Blocks(title="posekit: Click to Track") as demo:
         outputs=None,
         queue=False,
         trigger_mode="multiple",
-        js="(rid, _stamp) => [rid, performance.now()]",
+        js="(session, _stamp) => [session, performance.now()]",
         api_visibility="private",
     )
     viewer.play(fn=on_play, inputs=[recording_state], outputs=None, queue=False, trigger_mode="multiple", api_visibility="private")
