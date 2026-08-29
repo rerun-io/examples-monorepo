@@ -454,10 +454,13 @@ def on_select(
     # The viewer fires selection_change on recording open and on every click
     # anywhere; ignored selections must still yield a chunk for the streaming
     # viewer output (gr.skip() there crashes Gradio's end_stream).
-    # A masked pixel can report both the scaled overlay and the source video.
-    # Only the source entity's hit is guaranteed to use video pixel coordinates.
+    # A click on a masked pixel reports the position on the overlay entity
+    # (/video/mask or /video/preview) and lists /video with position=None, so the
+    # first positioned hit under the video is the one to use. Measured on 0.36.2:
+    # the overlays sit under a scale transform, yet their reported position is in
+    # video pixels (preview hit [360.0, 620.0] for a video hit [359.99, 618.69]).
     position: list[float] | None = next(
-        (item.position for item in evt.payload.items if item.type == "entity" and item.entity_path == f"/{VIDEO}" and item.position is not None),
+        (item.position for item in evt.payload.items if item.type == "entity" and item.entity_path.startswith(f"/{VIDEO}") and item.position is not None),
         None,
     )
     if session is None or position is None:

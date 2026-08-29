@@ -117,7 +117,8 @@ def test_mask_hw_downsamples_by_mask_scale() -> None:
     assert mask_hw.shape == (64 // MASK_SCALE, 96 // MASK_SCALE)
 
 
-def test_click_position_comes_from_video_entity_before_mask(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_click_on_masked_pixel_uses_the_overlay_hit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The viewer reports a masked click on the overlay entity (video pixels) and lists /video without a position."""
     session_with_mock: SessionWithMock = _session("selection")
     session: Session = session_with_mock[0]
     tracker: Mock = session_with_mock[1]
@@ -138,8 +139,8 @@ def test_click_position_comes_from_video_entity_before_mask(monkeypatch: pytest.
             "application_id": "test",
             "recording_id": session.recording_id,
             "items": [
-                {"type": "entity", "entity_path": "/video/mask", "position": [8.0, 9.0]},
-                {"type": "entity", "entity_path": "/video", "position": [80.0, 90.0]},
+                {"type": "entity", "entity_path": "/video/mask", "position": [80.0, 90.0]},
+                {"type": "entity", "entity_path": "/video", "position": None},
             ],
         }
     )
