@@ -22,7 +22,7 @@ import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, TypeAlias
+from typing import Literal, TypeAlias, get_args
 
 import gradio as gr
 import numpy as np
@@ -44,9 +44,14 @@ VIDEO: str = "video"
 TIMELINE: str = "video_time"
 Mode: TypeAlias = Literal["+ Include", "− Exclude", "✕ Remove"]
 MODES: list[Mode] = ["+ Include", "− Exclude", "✕ Remove"]
+TabName: TypeAlias = Literal["Input", "Config", "Outputs"]
+RecordingPair: TypeAlias = tuple[rr.RecordingStream, rr.BinaryStream]
 POSITIVE_COLOR: tuple[int, int, int] = (76, 220, 96)
 NEGATIVE_COLOR: tuple[int, int, int] = (255, 87, 51)
 MASK_COLOR: tuple[int, int, int] = (51, 178, 255)
+MASK_SCALE: int = 4
+"""Masks are logged at 1/MASK_SCALE resolution under a static scale transform: a full-res
+uint8 mask per frame costs ~40x the video in viewer memory, and SAM2's logits are 128^2 anyway."""
 RRD_DIR: Path = Path("/tmp/posekit-rrd")
 _EXAMPLES_DIR: Path = Path(__file__).resolve().parents[2] / "assets" / "examples"
 EXAMPLE_VIDEOS: list[str] = [
@@ -60,6 +65,7 @@ EXAMPLE_VIDEOS: list[str] = [
     )
     if path.is_file()
 ]
+DEFAULT_VARIANT: Sam2Variant = "efficienttam-s-512"
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,7 +76,7 @@ class AppConfig:
     """Port to serve on."""
     root_path: str = ""
     """Root path when mounted under a reverse-proxy subpath (empty when served at ``/``)."""
-    variant: Sam2Variant = "efficienttam-s-512"
+    variant: Sam2Variant = DEFAULT_VARIANT
     """SAM2-family checkpoint. -s (Kineo's pick) holds a point-seeded track through the clip where -ti drifts."""
 
 
@@ -106,7 +112,10 @@ class Session:
     """Monotonic callback-part number within this session."""
 
 
-VARIANT: Sam2Variant = "efficienttam-s-512"
+SAM2_VARIANTS: list[Sam2Variant] = list(get_args(Sam2Variant))
+# The interactive tracker favors a longer window than Sam2VideoSegmenterConfig's streaming default of 7.
+DEFAULT_MEMORY_WINDOW: int = 10
+DEFAULT_REMOVE_RADIUS_PX: float = 100.0
 
 
 @functools.cache
@@ -178,7 +187,11 @@ def _viewer_time_s(session: Session, frame_idx: int) -> float:
 
 
 def _clear_preview(rec: rr.RecordingStream, session: Session) -> None:
-    """Remove the static scrub preview (no-op when none is shown)."""
+    """Remove the static scrub preview (no-op when none is shown).
+
+    A native Rerun 0.36.2 pixel check confirms that this same-entity static
+    ``Clear`` leaves ``video/preview``'s static scale transform in effect.
+    """
     if session.preview_visible:
         rec.log(f"{VIDEO}/preview", rr.Clear(recursive=False), static=True)
         session.preview_visible = False
@@ -232,9 +245,13 @@ def _log_mask(rec: rr.RecordingStream, session: Session, mask_hw: UInt8[ndarray,
         _bound_next_frame(rec, session, entity, frame_idx, session.masked_frames)
 
 
-def _mask_hw(result: MaskResult | None) -> UInt8[ndarray, "h w"] | None:
-    """Copy one result mask from the inference device for Rerun logging."""
-    return None if result is None else result.mask.cpu().numpy().astype(np.uint8)
+def _mask_hw(result: MaskResult) -> UInt8[ndarray, "h w"]:
+    """Copy one result mask from the inference device, downsampled for Rerun logging.
+
+    Strided sampling rounds each output dimension up, so a non-multiple of
+    ``MASK_SCALE`` can overhang the full-resolution image by up to three pixels.
+    """
+    return result.mask[::MASK_SCALE, ::MASK_SCALE].cpu().numpy().astype(np.uint8)
 
 
 def _log_confidence(rec: rr.RecordingStream, session: Session, result: MaskResult) -> None:
@@ -269,29 +286,69 @@ def _status(session: Session, prefix: str) -> str:
 # ── callbacks ─────────────────────────────────────────────────────────────
 
 
-def load_video(video: str | None, previous_session: Session | None) -> Iterator[tuple[bytes | None, Session | None, str, str, Any, Any]]:
-    """Start a fresh session + recording for the clip (generators only: the streaming viewer rejects plain bytes)."""
-    _close_session(previous_session)
+def show_control_tab(selected: TabName) -> tuple[gr.Column, gr.Column, gr.Column]:
+    """Show only the controls panel selected by the tab-strip radio."""
+    return (
+        gr.Column(visible=selected == "Input"),
+        gr.Column(visible=selected == "Config"),
+        gr.Column(visible=selected == "Outputs"),
+    )
+
+
+def load_video(
+    video: str | None,
+    previous_session: Session | None,
+    variant: str,
+    memory_window: float,
+    *,
+    selected_tab: TabName = "Input",
+) -> Iterator[tuple[bytes | None, Session | None, str, str, TabName, gr.DownloadButton]]:
+    """Start a fresh session + recording for the clip (generators only: the streaming viewer rejects plain bytes).
+
+    ``variant`` and ``memory_window`` come from the Config panel; both shape the
+    tracker's memory state, so changing them re-runs this and starts the clip over.
+    """
     if video is None:
-        yield None, None, "Upload a video to begin.", "Upload a video to begin.", gr.Tabs(selected="input"), gr.DownloadButton(visible=False)
+        _close_session(previous_session)
+        yield (
+            None,
+            None,
+            "Upload a video to begin.",
+            "Upload a video to begin.",
+            selected_tab,
+            gr.DownloadButton(visible=False),
+        )
         return
     recording_id: str = str(uuid.uuid4())
     video_path: Path = Path(video)
-    tracker: ClickTracker = ClickTracker(video_path, _predictor(VARIANT))
+    if variant not in SAM2_VARIANTS:
+        raise gr.Error(f"Unknown model {variant!r}.")
+    tracker: ClickTracker = ClickTracker(video_path, _predictor(variant), memory_window_size=int(memory_window))
+    _close_session(previous_session)
     session: Session = Session(
         tracker=tracker,
         video_path=video_path,
         recording_id=recording_id,
         frame_timestamps_ns=np.empty(0, dtype=np.int64),
     )
-    rec, stream = _open_recording(session)
+    recording_pair: RecordingPair = _open_recording(session)
+    rec: rr.RecordingStream = recording_pair[0]
+    stream: rr.BinaryStream = recording_pair[1]
     rec.send_blueprint(_blueprint())
     rec.log(
         VIDEO,
         rr.AnnotationContext([rr.AnnotationInfo(id=0, label="background", color=(0, 0, 0, 0)), rr.AnnotationInfo(id=1, label="object", color=MASK_COLOR)]),
         static=True,
     )
-    session.frame_timestamps_ns = log_video(video_path, Path(VIDEO), timeline=TIMELINE, recording=rec)
+    for entity in (f"{VIDEO}/mask", f"{VIDEO}/preview"):
+        rec.log(entity, rr.Transform3D(scale=float(MASK_SCALE)), static=True)
+    session.frame_timestamps_ns = log_video(
+        video_path,
+        Path(VIDEO),
+        timeline=TIMELINE,
+        recording=rec,
+        output_codec=rr.VideoCodec.H264,
+    )
     stream.flush()
     payload: bytes | None = stream.read()
     rec.disconnect()
@@ -300,9 +357,19 @@ def load_video(video: str | None, previous_session: Session | None) -> Iterator[
         session,
         "Click the object on frame 0, or scrub (drag / ← →) to another frame first. Add − to exclude; Remove deletes a point.",
         "Click the object on frame 0, or scrub (drag / ← →) to another frame first. Add − to exclude; Remove deletes a point.",
-        gr.Tabs(selected="input"),
+        selected_tab,
         gr.DownloadButton(visible=False),
     )
+
+
+def _reload_video_from_config(
+    video: str | None,
+    previous_session: Session | None,
+    variant: str,
+    memory_window: float,
+) -> Iterator[tuple[bytes | None, Session | None, str, str, TabName, gr.DownloadButton]]:
+    """Reload tracker configuration without moving the controls away from Config."""
+    yield from load_video(video, previous_session, variant, memory_window, selected_tab="Config")
 
 
 def record_time(session: Session | None, stamp: float | None, evt: TimeUpdate) -> None:
@@ -344,7 +411,9 @@ def on_time_update(session: Session | None, evt: TimeUpdate) -> Iterator[tuple[b
         if not session.preview_visible:
             yield b"", gr.skip(), gr.skip()
             return
-        rec, stream = _open_recording(session, write_part=False)
+        recording_pair: RecordingPair = _open_recording(session, write_part=False)
+        rec: rr.RecordingStream = recording_pair[0]
+        stream: rr.BinaryStream = recording_pair[1]
         _clear_preview(rec, session)
         stream.flush()
         payload: bytes | None = stream.read()
@@ -358,7 +427,9 @@ def on_time_update(session: Session | None, evt: TimeUpdate) -> Iterator[tuple[b
     frame_text: str = f"Viewer at frame {frame_idx} — a click prompts this frame."
     # The preview is *static* (no timeline → no ticks, overwritten in place), so it
     # must go away the moment the cursor leaves the frame it was computed for.
-    rec, stream = _open_recording(session, write_part=False)
+    recording_pair = _open_recording(session, write_part=False)
+    rec = recording_pair[0]
+    stream = recording_pair[1]
     _clear_preview(rec, session)
     stamp: float = session.last_stamp
     wants_preview: bool = bool(session.tracker.points) and not session.tracker.points_on(frame_idx)
@@ -367,7 +438,8 @@ def on_time_update(session: Session | None, evt: TimeUpdate) -> Iterator[tuple[b
     if wants_preview and session.last_stamp == stamp:
         result: MaskResult | None = session.tracker.preview(frame_idx)
         if result is not None and session.last_stamp == stamp and not session.playing:  # discard late results
-            rec.log(f"{VIDEO}/preview", rr.SegmentationImage(result.mask.cpu().numpy().astype(np.uint8)), static=True)
+            preview_hw: UInt8[ndarray, "h w"] = _mask_hw(result)
+            rec.log(f"{VIDEO}/preview", rr.SegmentationImage(preview_hw), static=True)
             session.preview_visible = True
     stream.flush()
     payload = stream.read()
@@ -375,42 +447,49 @@ def on_time_update(session: Session | None, evt: TimeUpdate) -> Iterator[tuple[b
     yield payload, frame_text, frame_text
 
 
-def on_select(session: Session | None, mode: str, resegment: bool, evt: SelectionChange) -> Iterator[tuple[bytes | None, str, str]]:
+def on_select(
+    session: Session | None, mode: str, resegment: bool, remove_radius_px: float, evt: SelectionChange
+) -> Iterator[tuple[bytes | None, str, str]]:
     """A click on the video at the current frame: add a +/− point or remove the nearest one, then show the mask."""
     # The viewer fires selection_change on recording open and on every click
     # anywhere; ignored selections must still yield a chunk for the streaming
     # viewer output (gr.skip() there crashes Gradio's end_stream).
-    # A click on a masked pixel selects both /video/mask and /video, so take the
-    # first positioned entity under the video rather than demanding exactly one.
-    hits = [i for i in evt.payload.items if i.type == "entity" and i.position is not None and i.entity_path.startswith(f"/{VIDEO}")]
-    if session is None or not hits:
+    # A masked pixel can report both the scaled overlay and the source video.
+    # Only the source entity's hit is guaranteed to use video pixel coordinates.
+    position: list[float] | None = next(
+        (item.position for item in evt.payload.items if item.type == "entity" and item.entity_path == f"/{VIDEO}" and item.position is not None),
+        None,
+    )
+    if session is None or position is None:
         yield b"", gr.skip(), gr.skip()
         return
-    position: list[float] | None = hits[0].position
-    assert position is not None
     if session.playing:
         raise gr.Error("Pause the viewer first — while it plays, the click's frame is unknown.")
-    x, y = float(position[0]), float(position[1])
+    position_xy: tuple[float, float] = (float(position[0]), float(position[1]))
+    x: float = position_xy[0]
+    y: float = position_xy[1]
     # The viewer sends the final time_update of a scrub just before the click; wait for the stream to go quiet.
     deadline: float = time.monotonic() + 0.4
     while time.monotonic() - session.last_time_update < 0.12 and time.monotonic() < deadline:
         time.sleep(0.02)
     frame_idx: int = session.current_frame
-    rec, stream = _open_recording(session)
+    recording_pair: RecordingPair = _open_recording(session)
+    rec: rr.RecordingStream = recording_pair[0]
+    stream: rr.BinaryStream = recording_pair[1]
     _clear_preview(rec, session)
     changed: bool = True
     if mode == "✕ Remove":
-        edit: PointEdit = session.tracker.remove_point_near(frame_idx, x, y)
+        edit: PointEdit = session.tracker.remove_point_near(frame_idx, x, y, radius_px=float(remove_radius_px))
         changed = edit.point is not None
         result: MaskResult | None = edit.result
-        prefix: str = "Removed a point." if changed else f"No point within {session.tracker.remove_radius_px:.0f}px on this frame."
+        prefix: str = "Removed a point." if changed else f"No point within {remove_radius_px:.0f}px on this frame."
     else:
         positive: bool = mode != "− Exclude"
         result = session.tracker.add_point(frame_idx, x, y, positive=positive, resegment=resegment)
         action: str = "Re-segmented +" if resegment else ("Added +" if positive else "Added −")
         prefix = f"{action} at ({x:.0f}, {y:.0f}) on frame {frame_idx}."
     stale: bool = _invalidate_track(rec, session) if changed else False
-    _log_mask(rec, session, _mask_hw(result), frame_idx)
+    _log_mask(rec, session, _mask_hw(result) if result is not None else None, frame_idx)
     _log_points(rec, session, frame_idx)
     stream.flush()
     payload = stream.read()
@@ -425,7 +504,9 @@ def undo(session: Session | None) -> Iterator[tuple[bytes | None, str, str]]:
     """Remove the most recently added point."""
     if session is None:
         raise gr.Error("Upload a video first.")
-    rec, stream = _open_recording(session)
+    recording_pair: RecordingPair = _open_recording(session)
+    rec: rr.RecordingStream = recording_pair[0]
+    stream: rr.BinaryStream = recording_pair[1]
     _clear_preview(rec, session)
     edit: PointEdit = session.tracker.undo()
     if edit.point is None:
@@ -434,7 +515,7 @@ def undo(session: Session | None) -> Iterator[tuple[bytes | None, str, str]]:
         yield b"", status_text, status_text
         return
     stale: bool = _invalidate_track(rec, session)
-    _log_mask(rec, session, _mask_hw(edit.result), edit.point.frame_idx)
+    _log_mask(rec, session, _mask_hw(edit.result) if edit.result is not None else None, edit.point.frame_idx)
     _log_points(rec, session, edit.point.frame_idx)
     stream.flush()
     payload = stream.read()
@@ -450,7 +531,9 @@ def clear(session: Session | None) -> Iterator[tuple[bytes | None, str, str]]:
     """Drop every point, every memory, and every overlay."""
     if session is None:
         raise gr.Error("Upload a video first.")
-    rec, stream = _open_recording(session)
+    recording_pair: RecordingPair = _open_recording(session)
+    rec: rr.RecordingStream = recording_pair[0]
+    stream: rr.BinaryStream = recording_pair[1]
     _clear_preview(rec, session)
     session.tracker.clear()
     stale: bool = _invalidate_track(rec, session)
@@ -468,23 +551,30 @@ def clear(session: Session | None) -> Iterator[tuple[bytes | None, str, str]]:
     yield payload, status_text, status_text
 
 
-def track(session: Session | None) -> Iterator[tuple[bytes | None, str, str, Any, Any]]:
+def track(session: Session | None) -> Iterator[tuple[bytes | None, str, str, object, object]]:
     """Propagate in both directions, stream masks, and write the downloadable RRD."""
     if session is None:
         raise gr.Error("Upload a video first.")
     if not session.tracker.points:
         raise gr.Error("Click at least one point on the object first.")
-    rec, stream = _open_recording(session)
+    recording_pair: RecordingPair = _open_recording(session)
+    rec: rr.RecordingStream = recording_pair[0]
+    stream: rr.BinaryStream = recording_pair[1]
     _clear_preview(rec, session)
     _invalidate_track(rec, session)
     stream.flush()
     status_text: str = "Tracking from the prompted frame in both directions…"
-    yield stream.read(), status_text, status_text, gr.Tabs(selected="outputs"), gr.DownloadButton(visible=False)
+    yield (
+        stream.read(),
+        status_text,
+        status_text,
+        "Outputs",
+        gr.DownloadButton(visible=False),
+    )
     done: int = 0
     low_score: int = 0
     for result in session.tracker.track():
-        mask_hw: UInt8[ndarray, "h w"] | None = _mask_hw(result)
-        assert mask_hw is not None
+        mask_hw: UInt8[ndarray, "h w"] = _mask_hw(result)
         # Dense output: every frame gets its own mask, so no next-frame bounds, and
         # points were already logged (and bounded) when they were placed.
         _log_mask(rec, session, mask_hw, result.frame_idx, bound=False)
@@ -509,7 +599,7 @@ def track(session: Session | None) -> Iterator[tuple[bytes | None, str, str, Any
         payload,
         f"Done: tracked all {done} frames; {low_score} low-confidence frame(s). Add a corrective click where needed, then Track again.",
         f"Done: tracked all {done} frames; {low_score} low-confidence frame(s). Add a corrective click where needed, then Track again.",
-        gr.Tabs(selected="outputs"),
+        "Outputs",
         gr.DownloadButton(value=str(output), visible=True),
     )
 
@@ -562,9 +652,21 @@ html, body, gradio-app, .gradio-container {
     overflow: hidden;
 }
 #left-column, #viewer-column { min-height: 0; }
+/* Only the controls scroll on short viewports; the viewer never moves. Reserve the
+   scrollbar gutter so the controls do not shift horizontally when it appears. */
+#left-column { height: 100%; max-height: 100%; overflow-y: auto; scrollbar-gutter: stable; flex-wrap: nowrap; }
+#left-column > * { flex-shrink: 0; }
 #source-video { height: auto !important; }
 #source-video video { max-height: 225px !important; }
 #examples { flex: none; }
+/* Radio-based tab strip: Gradio 6.13 loops in Svelte when this app renders three
+   native Tab components. The panels below are ordinary Columns. */
+#control-tabs { overflow: visible; min-width: 0 !important; }
+#control-tabs .wrap { display: flex; gap: 0; border-bottom: 1px solid var(--border-color-primary); }
+#control-tabs label { flex: 1; justify-content: center; margin: 0; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; padding: 0.55rem 0.4rem; color: var(--body-text-color); cursor: pointer; }
+#control-tabs label.selected { border-bottom-color: var(--color-accent); color: var(--color-accent); }
+#control-tabs input { display: none; }
+#control-tabs span { font-weight: 600; }
 /* Click-mode radio as a segmented pill group. */
 #click-mode .wrap { display: flex; gap: 0; border: 1px solid var(--border-color-primary); border-radius: var(--radius-lg); overflow: hidden; }
 #click-mode label { flex: 1; justify-content: center; margin: 0; border-radius: 0; border: 0; background: var(--background-fill-secondary); padding: 0.45rem 0.4rem; cursor: pointer; }
@@ -594,94 +696,129 @@ footer { display: none !important; }
 """
 
 
-with gr.Blocks(title="posekit: Click to Track") as demo:
-    gr.Markdown(DESCRIPTION, elem_id="app-description")
-    recording_state: gr.State = gr.State(value=None, delete_callback=_close_session)
-    stamp_in: gr.Number = gr.Number(value=0.0, visible=False)
-    with gr.Row(elem_id="main-row"):
-        with gr.Column(scale=1, elem_id="left-column"):
-            # Video and status sit above the tabs: the status must stay visible when
-            # Track auto-switches to Outputs, and it belongs right under the input.
-            video_in: gr.Video = gr.Video(label="Video", height=240, elem_id="source-video")
-            status: gr.Markdown = gr.Markdown("Upload a video to begin.", elem_id="run-status")
-            with gr.Tabs(selected="input") as tabs:
-                with gr.Tab("Input", id="input"):
+def build_demo(config: AppConfig) -> gr.Blocks:
+    """Build a click-to-track app with the requested initial model variant."""
+    with gr.Blocks(title="posekit: Click to Track") as demo:
+        gr.Markdown(DESCRIPTION, elem_id="app-description")
+        recording_state: gr.State = gr.State(value=None, delete_callback=_close_session)
+        stamp_in: gr.Number = gr.Number(value=0.0, visible=False)
+        with gr.Row(elem_id="main-row"):
+            with gr.Column(scale=1, elem_id="left-column"):
+                # Video and status sit above the tabs: the status must stay visible when
+                # Track auto-switches to Outputs, and it belongs right under the input.
+                video_in: gr.Video = gr.Video(label="Video", height=240, elem_id="source-video")
+                status: gr.Markdown = gr.Markdown("Upload a video to begin.", elem_id="run-status")
+                # Three native gr.Tab components trigger a Svelte effect loop in Gradio 6.13.
+                tabs_radio: gr.Radio = gr.Radio(
+                    choices=["Input", "Config", "Outputs"],
+                    value="Input",
+                    show_label=False,
+                    container=False,
+                    elem_id="control-tabs",
+                )
+                with gr.Column() as input_panel:
                     # A segmented control (see #click-mode CSS): the three everyday click modes on one line.
                     mode: gr.Radio = gr.Radio(choices=MODES, value=MODES[0], show_label=False, container=False, elem_id="click-mode")
                     with gr.Row():
                         undo_btn: gr.Button = gr.Button("Undo point", size="sm")
                         clear_btn: gr.Button = gr.Button("Clear", size="sm")
-                    with gr.Accordion("Advanced", open=False):
-                        resegment_box: gr.Checkbox = gr.Checkbox(
-                            value=False,
-                            label="Clicks replace the object (re-segment) instead of refining the propagated mask",
-                        )
-                with gr.Tab("Outputs", id="outputs"):
-                    gr.Markdown("When tracking finishes, download a self-contained Rerun recording with the video, prompts, masks, and confidence traces.")
+                with gr.Column(visible=False) as config_panel:
+                    model_dd: gr.Dropdown = gr.Dropdown(label="Model", choices=SAM2_VARIANTS, value=config.variant)
+                    memory_window_slider: gr.Slider = gr.Slider(
+                        label="Memory window (frames)", minimum=1, maximum=32, step=1, value=DEFAULT_MEMORY_WINDOW
+                    )
+                    remove_radius_slider: gr.Slider = gr.Slider(
+                        label="Remove radius (px)", minimum=10, maximum=300, step=10, value=DEFAULT_REMOVE_RADIUS_PX
+                    )
+                    resegment_box: gr.Checkbox = gr.Checkbox(
+                        value=False,
+                        label="Clicks replace the object (re-segment) instead of refining the propagated mask",
+                    )
+                    gr.Markdown("Model and memory window apply when the clip loads: changing them reloads it and clears the points.")
+                with gr.Column(visible=False) as outputs_panel:
+                    gr.Markdown(
+                        "When tracking finishes, download a self-contained Rerun recording with the video, prompts, masks, and confidence traces."
+                    )
                     download: gr.DownloadButton = gr.DownloadButton("Download the recording (.rrd)", visible=False)
-            with gr.Row():
-                track_btn: gr.Button = gr.Button("Track", variant="primary")
-                stop_btn: gr.Button = gr.Button("Stop", variant="stop")
-            status_probe: gr.Textbox = gr.Textbox(value="Upload a video to begin.", visible="hidden", elem_id="status-probe")
-            # Examples last: a secondary "pick a sample" action, below the controls it feeds.
-            gr.Examples(examples=EXAMPLE_VIDEOS, inputs=[video_in], cache_examples=False, examples_per_page=4, elem_id="examples")
-        with gr.Column(scale=3, elem_id="viewer-column"):
-            viewer: Rerun = Rerun(
-                label="Click to track",
-                streaming=True,
-                panel_states={"time": "expanded", "blueprint": "hidden", "selection": "hidden"},
-                # A CSS height keeps the viewer's own frame inside the fold; a pixel
-                # height would overflow whatever the wrapper is sized to.
-                height=VIEWER_HEIGHT,
-                elem_id="rerun-viewer",
-            )
+                with gr.Row():
+                    track_btn: gr.Button = gr.Button("Track", variant="primary")
+                    stop_btn: gr.Button = gr.Button("Stop", variant="stop")
+                status_probe: gr.Textbox = gr.Textbox(value="Upload a video to begin.", visible="hidden", elem_id="status-probe")
+                # Examples last: a secondary "pick a sample" action, below the controls it feeds.
+                gr.Examples(examples=EXAMPLE_VIDEOS, inputs=[video_in], cache_examples=False, examples_per_page=4, elem_id="examples")
+            with gr.Column(scale=3, elem_id="viewer-column"):
+                viewer: Rerun = Rerun(
+                    label="Click to track",
+                    streaming=True,
+                    panel_states={"time": "expanded", "blueprint": "hidden", "selection": "hidden"},
+                    # A CSS height keeps the viewer's own frame inside the fold; a pixel
+                    # height would overflow whatever the wrapper is sized to.
+                    height=VIEWER_HEIGHT,
+                    elem_id="rerun-viewer",
+                )
 
-    video_in.change(
-        fn=load_video,
-        inputs=[video_in, recording_state],
-        outputs=[viewer, recording_state, status, status_probe, tabs, download],
-        api_visibility="private",
-    )
-    # always_last coalesces the flood of time updates while scrubbing/playing into "the latest one".
-    viewer.time_update(
-        fn=record_time,
-        inputs=[recording_state, stamp_in],
-        outputs=None,
-        queue=False,
-        trigger_mode="multiple",
-        js="(session, _stamp) => [session, performance.now()]",
-        api_visibility="private",
-    )
-    viewer.play(fn=on_play, inputs=[recording_state], outputs=None, queue=False, trigger_mode="multiple", api_visibility="private")
-    viewer.pause(fn=on_pause, inputs=[recording_state], outputs=None, queue=False, trigger_mode="multiple", api_visibility="private")
-    viewer.time_update(
-        fn=on_time_update,
-        inputs=[recording_state],
-        outputs=[viewer, status, status_probe],
-        trigger_mode="always_last",
-        show_progress="hidden",
-        api_visibility="private",
-    )
-    viewer.selection_change(
-        fn=on_select,
-        inputs=[recording_state, mode, resegment_box],
-        outputs=[viewer, status, status_probe],
-        show_progress="hidden",
-        api_visibility="private",
-    )
-    undo_btn.click(fn=undo, inputs=[recording_state], outputs=[viewer, status, status_probe], api_visibility="private")
-    clear_btn.click(fn=clear, inputs=[recording_state], outputs=[viewer, status, status_probe], api_visibility="private")
-    track_event = track_btn.click(fn=track, inputs=[recording_state], outputs=[viewer, status, status_probe, tabs, download])
-    stop_btn.click(fn=stop_tracking, outputs=[status, status_probe], cancels=[track_event], queue=False)
+        video_in.change(
+            fn=load_video,
+            inputs=[video_in, recording_state, model_dd, memory_window_slider],
+            outputs=[viewer, recording_state, status, status_probe, tabs_radio, download],
+            api_visibility="private",
+        )
+        # Model and memory window shape the tracker state, so each change reloads the clip while Config stays selected.
+        for event in (model_dd.change, memory_window_slider.release):
+            event(
+                fn=_reload_video_from_config,
+                inputs=[video_in, recording_state, model_dd, memory_window_slider],
+                outputs=[viewer, recording_state, status, status_probe, tabs_radio, download],
+                api_visibility="private",
+            )
+        tabs_radio.change(
+            fn=show_control_tab,
+            inputs=[tabs_radio],
+            outputs=[input_panel, config_panel, outputs_panel],
+            queue=False,
+            show_progress="hidden",
+            api_visibility="private",
+        )
+        # always_last coalesces the flood of time updates while scrubbing/playing into "the latest one".
+        viewer.time_update(
+            fn=record_time,
+            inputs=[recording_state, stamp_in],
+            outputs=None,
+            queue=False,
+            trigger_mode="multiple",
+            js="(session, _stamp) => [session, performance.now()]",
+            api_visibility="private",
+        )
+        viewer.play(fn=on_play, inputs=[recording_state], outputs=None, queue=False, trigger_mode="multiple", api_visibility="private")
+        viewer.pause(fn=on_pause, inputs=[recording_state], outputs=None, queue=False, trigger_mode="multiple", api_visibility="private")
+        viewer.time_update(
+            fn=on_time_update,
+            inputs=[recording_state],
+            outputs=[viewer, status, status_probe],
+            trigger_mode="always_last",
+            show_progress="hidden",
+            api_visibility="private",
+        )
+        viewer.selection_change(
+            fn=on_select,
+            inputs=[recording_state, mode, resegment_box, remove_radius_slider],
+            outputs=[viewer, status, status_probe],
+            show_progress="hidden",
+            api_visibility="private",
+        )
+        undo_btn.click(fn=undo, inputs=[recording_state], outputs=[viewer, status, status_probe], api_visibility="private")
+        clear_btn.click(fn=clear, inputs=[recording_state], outputs=[viewer, status, status_probe], api_visibility="private")
+        track_event = track_btn.click(fn=track, inputs=[recording_state], outputs=[viewer, status, status_probe, tabs_radio, download])
+        stop_btn.click(fn=stop_tracking, outputs=[status, status_probe], cancels=[track_event], queue=False)
+
+    return demo
 
 
 # The embedded viewer stream needs a secure context: on the tailnet use
 # `tailscale serve --bg --https=<port> http://127.0.0.1:<port>` (served at `/`, so root_path stays empty).
 def launch(config: AppConfig) -> None:
     """Launch the click-to-track Gradio app."""
-    global VARIANT
-    VARIANT = config.variant  # read by load_video, which caches one predictor per variant
-    demo.launch(
+    build_demo(config).launch(
         server_port=config.port,
         root_path=config.root_path,
         allowed_paths=sorted({str(Path(example).parent) for example in EXAMPLE_VIDEOS} | {str(RRD_DIR)}),

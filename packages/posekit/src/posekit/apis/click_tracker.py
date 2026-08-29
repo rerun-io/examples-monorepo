@@ -75,7 +75,6 @@ class ClickTracker:
         *,
         device: str = "cuda",
         memory_window_size: int = 10,
-        remove_radius_px: float = 100.0,
     ) -> None:
         """Open the clip and start an empty memory state.
 
@@ -84,20 +83,23 @@ class ClickTracker:
             predictor: A ``SAM2GenericVideoPredictor`` (e.g. ``Sam2VideoSegmenter(...).predictor``).
             device: CUDA device for decode + inference.
             memory_window_size: Non-conditional memories kept around the current frame.
-            remove_radius_px: How close a click must be to an existing point to remove it.
 
         Raises:
             ValueError: If the clip has no decodable frames.
         """
         self.predictor = predictor
         self.device: str = device
-        self.remove_radius_px: float = remove_radius_px
         # torchcodec's CUDA (NVDEC) decoder is thread-affine: any call from a thread
         # other than the one that created it fails ("Failed to create NVDEC decoder:
         # 201" / "Could not receive frame from decoder"), even when serialized. Web
         # callbacks run on pool threads, so the decoder lives on its own thread and
         # every decode is executed there.
-        self._video_reader: TorchCodecVideoReader = TorchCodecVideoReader(video_path, device=device, thread_owned=True)
+        # Clicks are random access, so seek exactly despite the open-time index scan: the
+        # approximate header index overshoots on some clips (iPhone .MOV), and the last
+        # frames then fail with "Requested next frame while there are no more frames left to decode".
+        self._video_reader: TorchCodecVideoReader = TorchCodecVideoReader(
+            video_path, device=device, thread_owned=True, seek_mode="exact"
+        )
         if self._video_reader.frame_cnt <= 0:
             raise ValueError(f"{video_path} has no decodable frames.")
         self.num_frames: int = self._video_reader.frame_cnt
@@ -162,13 +164,13 @@ class ClickTracker:
         assert result is not None
         return result
 
-    def remove_point_near(self, frame_idx: int, x: float, y: float) -> PointEdit:
-        """Remove the closest point on the frame within ``remove_radius_px`` (Kineo's Shift+Click)."""
+    def remove_point_near(self, frame_idx: int, x: float, y: float, *, radius_px: float) -> PointEdit:
+        """Remove the closest point on the frame within ``radius_px`` (Kineo's Shift+Click)."""
         candidates: tuple[Point, ...] = self.points_on(frame_idx)
         if not candidates:
             return PointEdit(point=None, result=None)
         nearest: Point = min(candidates, key=lambda p: (p.x - x) ** 2 + (p.y - y) ** 2)
-        if (nearest.x - x) ** 2 + (nearest.y - y) ** 2 > self.remove_radius_px**2:
+        if (nearest.x - x) ** 2 + (nearest.y - y) ** 2 > radius_px**2:
             return PointEdit(point=None, result=None)
         self._points.remove(nearest)
         return PointEdit(point=nearest, result=self.refresh(frame_idx))

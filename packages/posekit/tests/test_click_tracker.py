@@ -66,10 +66,10 @@ def test_negative_point_shrinks_and_removal_restores(tracker: ClickTracker) -> N
     full = tracker.add_point(0, *CHEST, positive=True)
     shrunk = tracker.add_point(0, 320.0, 320.0, positive=False)  # on the face
     assert int(shrunk.mask.sum()) < int(full.mask.sum())
-    edit: PointEdit = tracker.remove_point_near(0, 325.0, 318.0)
+    edit: PointEdit = tracker.remove_point_near(0, 325.0, 318.0, radius_px=100.0)
     assert edit.point is not None and not edit.point.positive and edit.result is not None
     assert abs(int(edit.result.mask.sum()) - int(full.mask.sum())) < 0.02 * int(full.mask.sum())
-    assert tracker.remove_point_near(0, 10.0, 10.0) == PointEdit(point=None, result=None)
+    assert tracker.remove_point_near(0, 10.0, 10.0, radius_px=100.0) == PointEdit(point=None, result=None)
 
 
 @cuda_only
