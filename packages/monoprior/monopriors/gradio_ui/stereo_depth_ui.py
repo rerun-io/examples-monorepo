@@ -37,6 +37,9 @@ _PREDICTORS: dict[LAS2ModelSize, LiteAnyStereoPredictor] = {}
 class AppConfig:
     """Server settings for the stereo depth app."""
 
+    host: str = "127.0.0.1"
+    """Interface to bind. The embedded viewer needs a secure context, so expose it to the tailnet with
+    ``tailscale serve --bg --https=<port> http://127.0.0.1:<port>`` rather than binding ``0.0.0.0`` (plain http breaks the viewer)."""
     port: int = 7871
     """Port to serve on."""
     root_path: str = ""
@@ -141,7 +144,7 @@ def build_demo() -> gr.Blocks:
 
 def launch(config: AppConfig) -> None:
     """Launch the stereo depth Gradio app."""
-    build_demo().launch(server_port=config.port, root_path=config.root_path, allowed_paths=[str(EXAMPLE_SCENE)], show_error=True)
+    build_demo().launch(server_name=config.host, server_port=config.port, root_path=config.root_path, allowed_paths=[str(EXAMPLE_SCENE)], show_error=True)
 
 
 if __name__ == "__main__":
