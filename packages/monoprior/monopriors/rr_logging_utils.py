@@ -287,7 +287,8 @@ def create_stereo_depth_blueprint(parent_log_path: Path) -> rrb.Blueprint:
     right_path: Path = parent_log_path / "rig_00" / "cam_01"
     return rrb.Blueprint(
         rrb.Horizontal(
-            rrb.Spatial3DView(origin=f"{parent_log_path}", contents=["$origin/**", f"- {left_path}/pinhole/image", f"- {right_path}/pinhole/image", f"- {left_path}/disparity"]),
+            # Images stay in the 3D view so each frustum shows its picture (exoego convention); disparity is 2D-only.
+            rrb.Spatial3DView(origin=f"{parent_log_path}", contents=["$origin/**", f"- {left_path}/disparity"]),
             rrb.Vertical(
                 rrb.Horizontal(rrb.Spatial2DView(origin=f"{left_path}/pinhole/image", name="left"), rrb.Spatial2DView(origin=f"{right_path}/pinhole/image", name="right")),
                 rrb.Spatial2DView(origin=f"{left_path}/pinhole/depth", name="depth (m)"),
