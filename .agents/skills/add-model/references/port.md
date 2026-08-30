@@ -3,6 +3,17 @@
 Target package is normally `packages/monoprior` (`monopriors`). Branch names `<model>/<n>-<stage>`;
 each PR bases on the previous one. Keep every PR reviewable on its own.
 
+## Setup (once per port)
+
+```bash
+git worktree add /tmp/<model>/wt -b <model>/1-vendor <base-branch>
+cd /tmp/<model>/wt && pixi install -e <pkg>-dev          # editable installs must point at THIS tree — do not symlink .pixi
+pixi run -e <pkg>-dev python -c "import <module>; print(<module>.__file__)"   # must print /tmp/<model>/wt/...
+ln -s <main-checkout>/packages/<pkg>/data/examples/<family> packages/<pkg>/data/examples/<family>   # gitignored samples
+```
+Run pytest from `packages/<pkg>` (root collection pulls in packages whose envs are absent). Use
+`pixi run --frozen` after the first install; re-run `pixi install` only after changing deps.
+
 ## PR 1 — `1-vendor`: upstream inference subset, as-is
 
 - Copy only the inference modules to `monopriors/third_party/<model>/` plus the upstream `LICENSE`.
@@ -85,9 +96,20 @@ Follow `monopriors/apis/stereo_catalog.py` / `promptda_polycam`: read cameras + 
 (`Fisheye62Parameters`, `PinholeParameters`), rectify with `models/stereo_depth/rectify.py`, log the rig with
 `log_rig_static`, relay video with `send_columns`, `EncodedDepthImage` (16-bit mm, `depth_range`) for depth,
 `Open3DFuser` + `log_open3d_mesh` for incremental TSDF, `RerunTyroConfig` for the sink. Stream to the viewer;
-do not register a layer unless asked.
+do not register a layer unless asked. Catalog registrations are in-memory: after a server restart the dataset is
+gone (`LookupError: No dataset found with name 'robocap'`) — re-register (`/mnt/nas/datasets/robocap/rrd/reregister.py`)
+before blaming the tool.
+
+## PR description (every PR)
+
+Stacked-on line; what the PR adds in 3–6 bullets; **numbers** (reference metric vs paper/incumbent, warm ms/frame,
+resolution); **gates** as run (lint/typecheck/deadcode/tests counts, slow tests); licenses when non-permissive;
+for the last PR the evidence directory and the key screenshots (frusta, depth, mesh, same-frame comparison).
 
 ## Stacking and merging
 
-Open PRs bottom-up with `--base` on the previous branch. When merging: merge with a merge commit in order,
+Open PRs bottom-up with `--base` on the previous branch. A fix that belongs to a lower PR goes on that PR's branch
+(cherry-pick), then replay everything above it (`git rebase <lower>` per branch, or `git rebase --onto` for
+worktrees based on an old tip) and `git push --force-with-lease` — a fix on the top branch hides the defect in the
+reviewed PR. When merging: merge with a merge commit in order,
 retarget each next PR to `main` (`gh pr edit N --base main`) right before merging it, delete branches after.

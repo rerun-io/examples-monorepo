@@ -49,5 +49,8 @@ Use the `rerun-viewer-validation` skill: run with `--rr-config.headless --rr-con
 right camera, mesh faces visible from inside, no error badges). Evidence lives in
 `/tmp/rerun-viewer-validation/<date>-<model>/` (screenshots + the `.rrd`); the PR description links the
 directory and embeds the key screenshots.
+For a model joining an existing family, add a **same-frame comparison** against the incumbent (open both `.rrd`s,
+`set_time` to the same `video_time`, screenshot both) — that, not the absolute look, is what the reviewer asks about.
+Before a catalog-backed run, confirm the dataset is registered (see port.md PR 5).
 Watch for: child `Transform3D` is relative to its *parent*, not the rig (a level mesh does not prove the tree);
 `EncodedDepthImage` needs `depth_range` or renders purple; colour range 0–6 m for indoor scenes.
