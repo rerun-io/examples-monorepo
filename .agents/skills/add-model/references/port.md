@@ -38,6 +38,10 @@ Do not import upstream at its original path and do not re-host converted files. 
 `pickle.Unpickler` whose `find_class` remaps upstream module paths (`core.foundation_stereo` →
 `monopriors.third_party.<model>.foundation_stereo`, `Utils` → ...) onto the vendored modules, then take
 `.state_dict()` and load it strictly into a freshly built module. Cover it with a test on the real file (slow).
+Inspect the pickle first (`zipfile` + `re.findall(rb'core\.[A-Za-z_.]+', data.pkl)`): it also references the
+config classes the module holds (e.g. `omegaconf.dictconfig`), which then become a dependency, and a checkpoint
+serialised by older code may lack attributes the current `forward()` reads — measure each candidate default
+against the reference sample instead of guessing (FFS: `args.normalize` missing; True → 0.48 % bad1, False → 45 %).
 
 ## PR 3 — `3-typed`: owned fork
 
