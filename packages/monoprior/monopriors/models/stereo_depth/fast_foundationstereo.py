@@ -1,7 +1,10 @@
 """Fast-FoundationStereo as a ``BaseStereoPredictor``."""
 
+from __future__ import annotations
+
 import copy
 import pickle
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -13,7 +16,12 @@ from jaxtyping import Float32, UInt8
 from omegaconf import DictConfig, OmegaConf
 from torch import nn
 
-from monopriors.models.stereo_depth.base_stereo_depth import BaseStereoPredictor, StereoDepthPrediction, disparity_to_metric_depth
+from monopriors.models.stereo_depth.base_stereo_depth import (
+    BaseStereoPredictor,
+    BaseStereoPredictorConfig,
+    StereoDepthPrediction,
+    disparity_to_metric_depth,
+)
 from monopriors.third_party.fast_foundationstereo.foundation_stereo import FastFoundationStereo
 from monopriors.third_party.fast_foundationstereo.utils import InputPadder
 
@@ -88,6 +96,22 @@ def load_fast_foundationstereo(checkpoint: Path, valid_iters: int = 8, max_disp:
     model: nn.Module = copy.deepcopy(serialized_model)
     model.load_state_dict(serialized_model.state_dict(), strict=True)
     return model
+
+
+@dataclass
+class FastFoundationStereoConfig(BaseStereoPredictorConfig):
+    """Configuration for Fast-FoundationStereo."""
+
+    valid_iters: int = 8
+    """Number of recurrent disparity updates used at inference."""
+    max_disp: int = 416
+    """Maximum modeled disparity in pixels."""
+    checkpoint: Path | None = None
+    """Local released checkpoint, or None to download the pinned release."""
+
+    def setup(self, device: Literal["cpu", "cuda"]) -> FastFoundationStereoPredictor:
+        """Build the configured Fast-FoundationStereo predictor on one device."""
+        return FastFoundationStereoPredictor(device=device, checkpoint=self.checkpoint, valid_iters=self.valid_iters, max_disp=self.max_disp)
 
 
 class FastFoundationStereoPredictor(BaseStereoPredictor[nn.Module]):

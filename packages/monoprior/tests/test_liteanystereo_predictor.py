@@ -4,20 +4,23 @@ Runs on CPU against a randomly initialised LAS2-S saved to disk, so no download 
 """
 
 from pathlib import Path
-from typing import get_args
 
 import numpy as np
 import pytest
 import torch
+import tyro
 
-from monopriors.models.stereo_depth import STEREO_PREDICTORS, LiteAnyStereoPredictor, get_stereo_predictor
+from monopriors.models.stereo_depth import AnnotatedStereoPredictorUnion, LiteAnyStereoConfig, LiteAnyStereoPredictor, stereo_predictor_defaults
 from monopriors.models.stereo_depth import liteanystereo as liteanystereo_module
 from monopriors.third_party.liteanystereo.liteanystereov2 import build_liteanystereo
 
 
-def test_registered() -> None:
-    assert "LiteAnyStereoPredictor" in get_args(STEREO_PREDICTORS)
-    assert get_stereo_predictor("LiteAnyStereoPredictor") is LiteAnyStereoPredictor
+def test_liteanystereo_config_registered() -> None:
+    assert set(stereo_predictor_defaults) == {"liteanystereo", "fast-foundationstereo"}
+    config = stereo_predictor_defaults["liteanystereo"]
+    assert isinstance(config, LiteAnyStereoConfig)
+    assert config.max_disp == 192
+    assert isinstance(tyro.cli(AnnotatedStereoPredictorUnion, args=["liteanystereo"]), LiteAnyStereoConfig)
 
 
 @pytest.fixture(scope="module")
