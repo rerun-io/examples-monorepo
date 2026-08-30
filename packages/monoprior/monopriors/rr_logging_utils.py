@@ -7,8 +7,8 @@ from einops import rearrange
 from jaxtyping import Bool, Float32, Float64, UInt8
 
 from monopriors.depth_utils import clip_disparity, depth_edges_mask, depth_to_disparity, depth_to_points
-from monopriors.models.metric_depth import METRIC_PREDICTORS, MetricDepthPrediction
-from monopriors.models.relative_depth import RELATIVE_PREDICTORS, RelativeDepthPrediction
+from monopriors.models.metric_depth import MetricDepthPrediction
+from monopriors.models.relative_depth import RelativeDepthPrediction
 from monopriors.models.surface_normal.base_normal_model import SurfaceNormalPrediction
 
 CONFIDENCE_THRESHOLD: float = 0.5
@@ -126,7 +126,7 @@ def log_relative_pred(
 
 
 def create_compare_depth_blueprint(
-    model_names: list[RELATIVE_PREDICTORS | METRIC_PREDICTORS],
+    model_names: list[str],
 ) -> rrb.Blueprint:
     # model_names: list[str] = [model.__class__.__name__ for model in models]
     contents = [

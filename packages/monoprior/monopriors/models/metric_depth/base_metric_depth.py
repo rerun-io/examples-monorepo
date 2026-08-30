@@ -29,3 +29,13 @@ class BaseMetricPredictor(ABC, Generic[ModelT]):
 
     def set_model_device(self, device: Literal["cpu", "cuda"] = "cuda") -> None:
         self.model.to(device)
+
+
+@dataclass
+class BaseMetricPredictorConfig(ABC):
+    """Base configuration for a metric-depth predictor."""
+
+    @abstractmethod
+    def setup(self, device: Literal["cpu", "cuda"]) -> BaseMetricPredictor:
+        """Build the configured predictor on one device."""
+        raise NotImplementedError
