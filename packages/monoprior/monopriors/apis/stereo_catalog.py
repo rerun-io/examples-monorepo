@@ -19,15 +19,18 @@ import torch
 from einops import rearrange
 from jaxtyping import Float32, Float64, UInt8, UInt16
 from rerun.catalog import CatalogClient, DatasetEntry, DatasetView
+from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion, PinholeParameters
 from simplecv.ops.tsdf_depth_fuser import Open3DFuser
 from simplecv.rerun_dataloader import open_segment_decoder
 from simplecv.rerun_log_utils import RerunTyroConfig
+from simplecv.rerun_rig_logger import log_rig_static
+from simplecv.rig import CameraSensor, Rig, RigCalibration
 from torchcodec.decoders import VideoDecoder
 
 from monopriors.depth_utils import depth_edges_mask
 from monopriors.models.stereo_depth import LiteAnyStereoPredictor, StereoDepthPrediction
 from monopriors.models.stereo_depth.liteanystereo import LAS2ModelSize
-from monopriors.models.stereo_depth.rectify import FisheyeCamera, StereoRectification, fisheye_stereo_rectify, rectified_rig_extrinsics, rectify_pair
+from monopriors.models.stereo_depth.rectify import StereoRectification, fisheye_stereo_rectify, rectify_pair
 
 TIMELINE: str = "video_time"
 RIG: str = "world/rig_00"
@@ -88,20 +91,24 @@ def read_static(view: DatasetView, entity: str, component: str) -> np.ndarray | 
     return np.asarray(value) if isinstance(value, list) else value
 
 
-def read_fisheye_camera(view: DatasetView, cam: str) -> tuple[FisheyeCamera, Float64[np.ndarray, "4 4"]]:
-    """Fisheye intrinsics and ``cam_T_rig`` for one rig camera written by dataforge (exoego:v2 + simplecv distortion)."""
+def read_fisheye_camera(view: DatasetView, cam: str) -> Fisheye62Parameters:
+    """One rig camera as written by dataforge (exoego:v2 + simplecv distortion components); extrinsics are ``cam_T_rig``."""
     pinhole: str = f"{RIG}/{cam}/pinhole"
     model = read_static(view, pinhole, "simplecv.components.DistortionModel")
     if model != "kannala_brandt":
         raise ValueError(f"{pinhole}: expected kannala_brandt distortion, got {model!r}")
     K_33: Float64[np.ndarray, "3 3"] = np.asarray(read_static(view, pinhole, "Pinhole:image_from_camera"), dtype=np.float64).reshape(3, 3, order="F")
     resolution = np.asarray(read_static(view, pinhole, "Pinhole:resolution"), dtype=np.float64)
-    coefficients = np.asarray(read_static(view, pinhole, "simplecv.components.DistortionCoefficients"), dtype=np.float64)
-    camera: FisheyeCamera = FisheyeCamera(K_33=K_33, dist_4=coefficients[:4], width=int(resolution[0]), height=int(resolution[1]))
-    cam_T_rig: Float64[np.ndarray, "4 4"] = np.eye(4)
-    cam_T_rig[:3, :3] = np.asarray(read_static(view, f"{RIG}/{cam}", "Transform3D:mat3x3"), dtype=np.float64).reshape(3, 3, order="F")
-    cam_T_rig[:3, 3] = np.asarray(read_static(view, f"{RIG}/{cam}", "Transform3D:translation"), dtype=np.float64)
-    return camera, cam_T_rig
+    k = np.asarray(read_static(view, pinhole, "simplecv.components.DistortionCoefficients"), dtype=np.float64)
+    return Fisheye62Parameters(
+        name=str(read_static(view, f"{RIG}/{cam}", "name")),
+        extrinsics=Extrinsics(
+            cam_R_world=np.asarray(read_static(view, f"{RIG}/{cam}", "Transform3D:mat3x3"), dtype=np.float64).reshape(3, 3, order="F"),
+            cam_t_world=np.asarray(read_static(view, f"{RIG}/{cam}", "Transform3D:translation"), dtype=np.float64),
+        ),
+        intrinsics=Intrinsics.from_k_matrix(camera_conventions="RDF", k_matrix=K_33, height=int(resolution[1]), width=int(resolution[0])),
+        distortion=KannalaBrandtDistortion(k1=float(k[0]), k2=float(k[1]), k3=float(k[2]), k4=float(k[3]), k5=float(k[4]), k6=float(k[5]), p1=float(k[6]), p2=float(k[7])),
+    )
 
 
 def read_rig_poses(view: DatasetView) -> tuple[np.ndarray, Float64[np.ndarray, "n 4 4"]]:
@@ -128,32 +135,20 @@ def read_rig_poses(view: DatasetView) -> tuple[np.ndarray, Float64[np.ndarray, "
     return times, poses_n44
 
 
-def scale_intrinsics(K_33: Float64[np.ndarray, "3 3"], scale: float) -> Float64[np.ndarray, "3 3"]:
-    """Pinhole intrinsics for an image resized by ``scale``."""
-    K_scaled_33: Float64[np.ndarray, "3 3"] = K_33.copy()
-    K_scaled_33[:2] *= scale
-    return K_scaled_33
-
-
-def log_static_rig(cam: str, name: str, camera: FisheyeCamera, cam_T_rig: Float64[np.ndarray, "4 4"], R_rect: Float64[np.ndarray, "3 3"], rect: StereoRectification, scale: float) -> None:
-    """The fisheye camera node (``rig_T_cam`` + pinhole) and its rectified child (rotation ``R_rect`` only, relative to the camera)."""
-    path: str = f"{RIG}/{cam}"
-    rr.log(path, rr.Transform3D(mat3x3=cam_T_rig[:3, :3], translation=cam_T_rig[:3, 3], from_parent=True), static=True)
-    rr.log(path, rr.AnyValues(name=name, kind="grayscale"), static=True)
-    rr.log(f"{path}/pinhole", rr.Pinhole(image_from_camera=camera.K_33, width=camera.width, height=camera.height, camera_xyz=rr.ViewCoordinates.RDF, image_plane_distance=0.1), static=True)
-    rr.log(f"{path}/rectified", rr.Transform3D(mat3x3=R_rect, from_parent=True), static=True)
-    rr.log(f"{path}/rectified", rr.AnyValues(name=f"{name}_rectified", kind="grayscale"), static=True)
-    rr.log(
-        f"{path}/rectified/pinhole",
-        rr.Pinhole(
-            image_from_camera=scale_intrinsics(rect.K_rect_33, scale),
-            width=round(rect.width * scale),
-            height=round(rect.height * scale),
-            camera_xyz=rr.ViewCoordinates.RDF,
-            image_plane_distance=0.1,
-        ),
-        static=True,
+def scaled_pinhole(camera: PinholeParameters, scale: float) -> PinholeParameters:
+    """The same camera for an image resized by ``scale``."""
+    K_33: Float64[np.ndarray, "3 3"] = np.asarray(camera.intrinsics.k_matrix, dtype=np.float64).copy()
+    K_33[:2] *= scale
+    return PinholeParameters(
+        name=camera.name,
+        extrinsics=camera.extrinsics,
+        intrinsics=Intrinsics.from_k_matrix(camera_conventions="RDF", k_matrix=K_33, height=round(camera.intrinsics.height * scale), width=round(camera.intrinsics.width * scale)),
     )
+
+
+LEFT_RECT_INDEX: int = 10
+"""Rig sensor index of the rectified left camera (``cam_10``): above the six physical robocap cameras."""
+RIGHT_RECT_INDEX: int = 11
 
 
 def log_mesh(fuser: Open3DFuser) -> None:
@@ -173,7 +168,7 @@ def log_mesh(fuser: Open3DFuser) -> None:
 
 
 def build_blueprint(left_cam: str, right_cam: str) -> rrb.Blueprint:
-    rect_pinhole: str = f"{RIG}/{left_cam}/rectified/pinhole"
+    rect_pinhole: str = f"{RIG}/cam_{LEFT_RECT_INDEX}/pinhole"
     return rrb.Blueprint(
         rrb.Horizontal(
             rrb.Spatial3DView(origin="world", name="rig + stereo cloud + mesh", contents=["$origin/**"]),
@@ -195,11 +190,12 @@ def build_blueprint(left_cam: str, right_cam: str) -> rrb.Blueprint:
 def main(config: StereoCatalogConfig) -> None:
     dataset: DatasetEntry = CatalogClient(config.catalog_url).get_dataset(config.dataset_name)
     view: DatasetView = dataset.filter_segments(config.segment_id)
-    left, left_T_rig = read_fisheye_camera(view, config.left_cam)
-    right, right_T_rig = read_fisheye_camera(view, config.right_cam)
-    rect: StereoRectification = fisheye_stereo_rectify(left, right, right_T_rig @ np.linalg.inv(left_T_rig), focal_scale=config.focal_scale)
+    left: Fisheye62Parameters = read_fisheye_camera(view, config.left_cam)
+    right: Fisheye62Parameters = read_fisheye_camera(view, config.right_cam)
+    rect: StereoRectification = fisheye_stereo_rectify(left, right, focal_scale=config.focal_scale)
+    left_rect_out: PinholeParameters = scaled_pinhole(rect.left_rect, config.output_scale)
     pose_times, world_T_rig_n44 = read_rig_poses(view)
-    print(f"rectified pair: baseline {rect.baseline_m * 1000:.1f} mm, fx_rect {rect.K_rect_33[0, 0]:.1f} px; {len(pose_times)} rig poses")
+    print(f"rectified pair: baseline {rect.baseline_m * 1000:.1f} mm, fx_rect {rect.left_rect.intrinsics.fl_x:.1f} px; {len(pose_times)} rig poses")
 
     device: torch.device = torch.device("cuda")
     codec_fourcc: int = int(np.asarray(read_static(view, f"{RIG}/{config.left_cam}/pinhole/video", "VideoStream:codec")).ravel()[0])
@@ -218,23 +214,33 @@ def main(config: StereoCatalogConfig) -> None:
     # ── static scene + blueprint, then the raw videos relayed as-is (no re-encode) ──
     rr.send_blueprint(build_blueprint(config.left_cam, config.right_cam))
     rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
-    rr.log(RIG, rr.AnyValues(schema_version="exoego:v2", reference="imu_00", num_cameras=2, name=config.dataset_name, kind="ego"), static=True)
-    log_static_rig(config.left_cam, "left_front", left, left_T_rig, rect.R0_33, rect, config.output_scale)
-    log_static_rig(config.right_cam, "right_front", right, right_T_rig, rect.R1_33, rect, config.output_scale)
+    # The two fisheye cameras plus the two rectified virtual cameras, all as rig sensors (rig_T_cam extrinsics).
+    rig: Rig = Rig(
+        index=0,
+        calibration=RigCalibration(
+            cameras=[
+                CameraSensor(index=int(config.left_cam.split("_")[1]), name=left.name, kind="grayscale", pinhole=left),
+                CameraSensor(index=int(config.right_cam.split("_")[1]), name=right.name, kind="grayscale", pinhole=right),
+                CameraSensor(index=LEFT_RECT_INDEX, name=rect.left_rect.name, kind="grayscale", pinhole=left_rect_out),
+                CameraSensor(index=RIGHT_RECT_INDEX, name=rect.right_rect.name, kind="grayscale", pinhole=scaled_pinhole(rect.right_rect, config.output_scale)),
+            ],
+            reference_index=int(config.left_cam.split("_")[1]),
+        ),
+        image_plane_distance=0.1,
+    )
+    log_rig_static(rig)
     video_codec = rr.VideoCodec.H264 if codec == "h264" else rr.VideoCodec.AV1
     for cam, (times, samples, keyframes, _) in decoders.items():
         rr.log(f"{RIG}/{cam}/pinhole/video", rr.VideoStream(codec=video_codec), static=True)
         rr.send_columns(f"{RIG}/{cam}/pinhole/video", indexes=[rr.TimeColumn(TIMELINE, duration=times)], columns=rr.VideoStream.columns(sample=samples, is_keyframe=keyframes))
 
     predictor: LiteAnyStereoPredictor = LiteAnyStereoPredictor(device=config.device, model_size=config.model_size)
-    rect_pinhole: str = f"{RIG}/{config.left_cam}/rectified/pinhole"
-    output_wh: tuple[int, int] = (round(rect.width * config.output_scale), round(rect.height * config.output_scale))
-    K_out_33: Float64[np.ndarray, "3 3"] = scale_intrinsics(rect.K_rect_33, config.output_scale)
+    rect_pinhole: str = f"{RIG}/cam_{LEFT_RECT_INDEX}/pinhole"
+    output_wh: tuple[int, int] = (left_rect_out.intrinsics.width, left_rect_out.intrinsics.height)
+    K_out_33: Float64[np.ndarray, "3 3"] = np.asarray(left_rect_out.intrinsics.k_matrix, dtype=np.float64)
+    K_rect_32: Float32[np.ndarray, "3 3"] = np.asarray(rect.left_rect.intrinsics.k_matrix, dtype=np.float32)
+    cam_rect_T_rig: Float64[np.ndarray, "4 4"] = rect.left_rect.extrinsics.cam_T_world
     colormap_max_mm: float = config.colormap_max_m * 1000.0
-    cam_rect_R_rig, cam_rect_t_rig = rectified_rig_extrinsics(left_T_rig[:3, :3], left_T_rig[:3, 3], rect.R0_33)
-    cam_rect_T_rig: Float64[np.ndarray, "4 4"] = np.eye(4)
-    cam_rect_T_rig[:3, :3] = cam_rect_R_rig
-    cam_rect_T_rig[:3, 3] = cam_rect_t_rig
     fuser: Open3DFuser | None = Open3DFuser(fusion_resolution=config.fusion_voxel_m, max_fusion_depth=config.fusion_max_depth_m) if config.fuse else None
 
     def frame_at(cam: str, t_ns: int) -> UInt8[np.ndarray, "h w 3"]:
@@ -245,7 +251,7 @@ def main(config: StereoCatalogConfig) -> None:
     for i, t_ns in enumerate(grid_ns.tolist()):
         world_T_rig: Float64[np.ndarray, "4 4"] = world_T_rig_n44[min(int(np.searchsorted(pose_times, np.timedelta64(t_ns, "ns"))), len(pose_times) - 1)]
         left_rect, right_rect = rectify_pair(rect, frame_at(config.left_cam, t_ns), frame_at(config.right_cam, t_ns))
-        pred: StereoDepthPrediction = predictor(left_rect, right_rect, K_33=rect.K_rect_33.astype(np.float32), baseline_m=rect.baseline_m)
+        pred: StereoDepthPrediction = predictor(left_rect, right_rect, K_33=K_rect_32, baseline_m=rect.baseline_m)
         assert pred.depth_meters is not None
         depth_hw: Float32[np.ndarray, "h w"] = np.where(pred.depth_meters > config.max_depth_m, 0.0, pred.depth_meters).astype(np.float32)
         if config.remove_flying_pixels:
