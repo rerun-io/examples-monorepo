@@ -1,19 +1,19 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 import numpy as np
-import torch
 from jaxtyping import Float, UInt8
 
-from monopriors.models.metric_depth import BaseMetricPredictor, MetricDepthPrediction, UniDepthMetricConfig
+from monopriors.models.metric_depth import BaseMetricPredictor, BaseMetricPredictorConfig, MetricDepthPrediction, UniDepthMetricConfig
 from monopriors.models.moge_v2.adapters import geometry_to_metric_prediction, normal_to_surface_prediction, rgb_to_cuda_batch
 from monopriors.models.moge_v2.export import Encoder
 from monopriors.models.moge_v2.predictor import MoGeV2GeometryOutput, MoGeV2TorchPredictor
 from monopriors.models.surface_normal import (
     BaseNormalPredictor,
+    BaseNormalPredictorConfig,
     DSineNormalConfig,
     SurfaceNormalPrediction,
 )
@@ -32,8 +32,8 @@ class MonoPriorPrediction:
 class MonoPriorModel(ABC):
     """Interface for a paired metric-depth and surface-normal predictor."""
 
-    def __init__(self) -> None:
-        self.device: Literal["cuda", "cpu"] = "cuda" if torch.cuda.is_available() else "cpu"
+    def __init__(self, device: Literal["cpu", "cuda"]) -> None:
+        self.device: Literal["cpu", "cuda"] = device
 
     @abstractmethod
     def __call__(self, rgb: UInt8[np.ndarray, "h w 3"], K_33: Float[np.ndarray, "3 3"] | None) -> MonoPriorPrediction:
@@ -46,8 +46,8 @@ class MonoPriorModelConfig(ABC):
     """Base configuration for a paired metric-depth and surface-normal model."""
 
     @abstractmethod
-    def setup(self) -> MonoPriorModel:
-        """Build the configured composite model using its existing automatic device selection."""
+    def setup(self, device: Literal["cpu", "cuda"]) -> MonoPriorModel:
+        """Build the configured composite model on one device."""
         raise NotImplementedError
 
 
@@ -55,19 +55,23 @@ class MonoPriorModelConfig(ABC):
 class DsineAndUnidepthConfig(MonoPriorModelConfig):
     """Configuration for separate UniDepth metric-depth and DSINE normal models."""
 
-    def setup(self) -> DsineAndUnidepth:
+    metric: BaseMetricPredictorConfig = field(default_factory=UniDepthMetricConfig)
+    """Metric-depth predictor configuration."""
+    normal: BaseNormalPredictorConfig = field(default_factory=DSineNormalConfig)
+    """Surface-normal predictor configuration."""
+
+    def setup(self, device: Literal["cpu", "cuda"]) -> DsineAndUnidepth:
         """Build the configured UniDepth and DSINE composite model."""
-        return DsineAndUnidepth()
+        return DsineAndUnidepth(config=self, device=device)
 
 
 class DsineAndUnidepth(MonoPriorModel):
     """Pair UniDepth metric depth with DSINE surface normals."""
 
-    def __init__(self) -> None:
-        super().__init__()
-        # Keep this composite aligned with its name by using UniDepth for metric depth.
-        self.depth_model: BaseMetricPredictor = UniDepthMetricConfig().setup(device=self.device)
-        self.surface_model: BaseNormalPredictor = DSineNormalConfig().setup(device=self.device)
+    def __init__(self, config: DsineAndUnidepthConfig, device: Literal["cpu", "cuda"]) -> None:
+        super().__init__(device=device)
+        self.depth_model: BaseMetricPredictor = config.metric.setup(device=device)
+        self.surface_model: BaseNormalPredictor = config.normal.setup(device=device)
 
     def __call__(
         self,
@@ -96,9 +100,9 @@ class MoGeV2MonoPriorConfig(MonoPriorModelConfig):
     encoder: Encoder = "vitl"
     """DINOv2 encoder size."""
 
-    def setup(self) -> MoGeV2MonoPrior:
+    def setup(self, device: Literal["cpu", "cuda"]) -> MoGeV2MonoPrior:
         """Build the configured MoGe v2 composite model."""
-        return MoGeV2MonoPrior(encoder=self.encoder)
+        return MoGeV2MonoPrior(device=device, encoder=self.encoder)
 
 
 class MoGeV2MonoPrior(MonoPriorModel):
@@ -110,14 +114,21 @@ class MoGeV2MonoPrior(MonoPriorModel):
 
     def __init__(
         self,
+        device: Literal["cpu", "cuda"],
         encoder: Encoder = "vitl",
     ) -> None:
         """Load a pinned normal-capable MoGe v2 checkpoint.
 
         Args:
+            device: Must be ``"cuda"``; MoGe v2 inference is GPU-only.
             encoder: DINOv2 encoder size.
+
+        Raises:
+            ValueError: If CPU is requested.
         """
-        super().__init__()
+        super().__init__(device=device)
+        if device == "cpu":
+            raise ValueError("MoGe v2 predictors require CUDA; device='cpu' is unsupported.")
         self.predictor: MoGeV2TorchPredictor = MoGeV2TorchPredictor(encoder=encoder, heads="geometry")
 
     def __call__(

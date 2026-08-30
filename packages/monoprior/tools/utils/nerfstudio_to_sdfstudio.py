@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 from monopriors.data.nerfstudio_data import load_nerfstudio_from_json
 from monopriors.data.sdfstudio_data import SceneBox, SDFStudioData, SDFStudioFrame
-from monopriors.models.monoprior import DsineAndUnidepth, MonoPriorPrediction
+from monopriors.models.monoprior import DsineAndUnidepthConfig, MonoPriorModel, MonoPriorPrediction
 
 
 def main(
@@ -109,7 +109,7 @@ def main(
         gt_T_world = np.eye(4).astype(np.float32)
 
     # Generate SDFStudio data json and save related images/monopriors
-    model = DsineAndUnidepth()
+    model: MonoPriorModel = DsineAndUnidepthConfig().setup(device="cuda")
 
     frames = []
     sdf_log_path = Path("sdf")
