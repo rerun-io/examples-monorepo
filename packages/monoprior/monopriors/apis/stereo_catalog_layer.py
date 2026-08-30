@@ -22,6 +22,7 @@ import torch
 from einops import rearrange
 from jaxtyping import Float32, Float64, UInt8, UInt16
 from rerun.catalog import CatalogClient, DatasetEntry, DatasetView, OnDuplicateSegmentLayer
+from simplecv.ops.tsdf_depth_fuser import Open3DFuser
 from simplecv.rerun_dataloader import open_segment_decoder
 from torchcodec.decoders import VideoDecoder
 
@@ -65,6 +66,12 @@ class StereoCatalogLayerConfig:
     output_scale: float = 0.5
     """Resolution of the logged rectified image + depth relative to the video (inference stays at full res); 16-bit
     depth PNGs are 1.5 MB/frame at 1080p, 0.27 MB at half."""
+    fuse: bool = True
+    """TSDF-fuse the depth along the ``slam`` layer's ``world_T_rig`` poses and log the mesh at ``world/stereo_las2/mesh``."""
+    fusion_voxel_m: float = 0.04
+    """TSDF voxel size in metres."""
+    fusion_max_depth_m: float = 4.0
+    """Depth beyond this is not fused (stereo error grows with distance squared)."""
     output_dir: Path = Path("data/stereo_layer")
     """Where the layer RRD and blueprint are written."""
     layer_name: str = "stereo_las2"
@@ -134,6 +141,31 @@ def scale_intrinsics(K_33: Float64[np.ndarray, "3 3"], scale: float) -> Float64[
     return K_scaled_33
 
 
+def read_rig_poses(view: DatasetView) -> tuple[np.ndarray, Float64[np.ndarray, "n 4 4"]]:
+    """Temporal ``world_T_rig`` from the rig node (the ``slam`` layer): sample times (timedelta64[ns]) and 4x4 poses."""
+    table: pa.Table = (
+        view.filter_contents(RIG).reader(index=TIMELINE).select(TIMELINE, f"/{RIG}:Transform3D:translation", f"/{RIG}:Transform3D:quaternion").sort(TIMELINE).to_arrow_table()
+    )
+    if table.num_rows == 0:
+        raise ValueError(f"{RIG} carries no temporal Transform3D — is the slam layer registered?")
+    times: np.ndarray = np.array([t.value for t in table.column(0)], dtype="timedelta64[ns]")
+    translations_n3: Float64[np.ndarray, "n 3"] = np.array([v[0] for v in table.column(1).to_pylist()], dtype=np.float64)
+    quaternions_n4: Float64[np.ndarray, "n 4"] = np.array([v[0] for v in table.column(2).to_pylist()], dtype=np.float64)  # xyzw
+    poses_n44: Float64[np.ndarray, "n 4 4"] = np.tile(np.eye(4), (len(times), 1, 1))
+    x, y, z, w = quaternions_n4.T
+    poses_n44[:, 0, 0] = 1 - 2 * (y * y + z * z)
+    poses_n44[:, 0, 1] = 2 * (x * y - z * w)
+    poses_n44[:, 0, 2] = 2 * (x * z + y * w)
+    poses_n44[:, 1, 0] = 2 * (x * y + z * w)
+    poses_n44[:, 1, 1] = 1 - 2 * (x * x + z * z)
+    poses_n44[:, 1, 2] = 2 * (y * z - x * w)
+    poses_n44[:, 2, 0] = 2 * (x * z - y * w)
+    poses_n44[:, 2, 1] = 2 * (y * z + x * w)
+    poses_n44[:, 2, 2] = 1 - 2 * (x * x + y * y)
+    poses_n44[:, :3, 3] = translations_n3
+    return times, poses_n44
+
+
 def build_blueprint(left_cam: str, right_cam: str) -> rrb.Blueprint:
     """3D rig beside the rectified image, its depth, and the two raw fisheye videos."""
     rect_pinhole: str = f"{RIG}/{left_cam}/rectified/pinhole"
@@ -187,6 +219,19 @@ def main(config: StereoCatalogLayerConfig) -> None:
     output_wh: tuple[int, int] = (round(rect.width * config.output_scale), round(rect.height * config.output_scale))
     rect_pinhole: str = f"{RIG}/{config.left_cam}/rectified/pinhole"
     max_depth_mm: float = config.max_depth_m * 1000.0
+    fuser: Open3DFuser | None = None
+    cam_rect_T_world_n44: Float64[np.ndarray, "n 4 4"] = np.empty((0, 4, 4))
+    K_out_33: Float64[np.ndarray, "3 3"] = scale_intrinsics(rect.K_rect_33, config.output_scale)
+    if config.fuse:
+        pose_times, world_T_rig_n44 = read_rig_poses(view)
+        cam_rect_R_rig, cam_rect_t_rig = rectified_rig_extrinsics(left_T_rig[:3, :3], left_T_rig[:3, 3], rect.R0_33)
+        cam_rect_T_rig: Float64[np.ndarray, "4 4"] = np.eye(4)
+        cam_rect_T_rig[:3, :3] = cam_rect_R_rig
+        cam_rect_T_rig[:3, 3] = cam_rect_t_rig
+        pose_indices: np.ndarray = np.minimum(np.searchsorted(pose_times, grid_ns.astype("timedelta64[ns]")), len(pose_times) - 1)
+        cam_rect_T_world_n44 = cam_rect_T_rig[None] @ np.linalg.inv(world_T_rig_n44[pose_indices])
+        fuser = Open3DFuser(fusion_resolution=config.fusion_voxel_m, max_fusion_depth=config.fusion_max_depth_m)
+        print(f"fusing along {len(pose_times)} slam poses, voxel {config.fusion_voxel_m} m, max depth {config.fusion_max_depth_m} m")
 
     def frame_at(decoder: VideoDecoder, sample_times: np.ndarray, t_ns: int) -> UInt8[np.ndarray, "h w 3"]:
         index: int = int(np.searchsorted(sample_times, np.timedelta64(t_ns, "ns"), side="right")) - 1
@@ -208,8 +253,27 @@ def main(config: StereoCatalogLayerConfig) -> None:
         rr.set_time(TIMELINE, duration=np.timedelta64(t_ns, "ns"), recording=rec)
         rr.log(f"{rect_pinhole}/image", rr.Image(left_rect).compress(jpeg_quality=85), recording=rec)
         rr.log(f"{rect_pinhole}/depth", rr.EncodedDepthImage(blob=png.tobytes(), media_type="image/png", meter=1000.0, depth_range=(0.0, max_depth_mm)), recording=rec)
+        if fuser is not None:
+            fuser.fuse_frames(np.ascontiguousarray(depth_mm_hw), K_out_33, cam_rect_T_world_n44[i], np.ascontiguousarray(left_rect))
         if i % 50 == 0:
             print(f"  {i}/{len(grid_ns)}  t={(t_ns - t_start_ns) / 1e9:6.1f}s  disparity {pred.disparity.max():.1f} px")
+    if fuser is not None:
+        mesh = fuser.get_mesh()
+        mesh.compute_vertex_normals()
+        print(f"fused mesh: {len(mesh.vertices)} vertices, {len(mesh.triangles)} triangles")
+        # Front-face rendering culls the outward-facing side of the walls, so the 3D view looks into the room from outside.
+        rr.log(
+            f"world/{config.layer_name}/mesh",
+            rr.Mesh3D(
+                vertex_positions=np.asarray(mesh.vertices),
+                triangle_indices=np.asarray(mesh.triangles),
+                vertex_normals=np.asarray(mesh.vertex_normals),
+                vertex_colors=np.asarray(mesh.vertex_colors),
+                face_rendering=rr.components.MeshFaceRendering.Front,
+            ),
+            static=True,
+            recording=rec,
+        )
     rr.send_blueprint(build_blueprint(config.left_cam, config.right_cam), recording=rec)
     rec.flush(timeout_sec=60.0)
     rec.disconnect()
