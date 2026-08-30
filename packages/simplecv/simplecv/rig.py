@@ -33,7 +33,7 @@ import numpy as np
 from jaxtyping import Bool, Float
 from numpy import ndarray
 
-from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, PinholeParameters
+from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, PinholeParameters
 
 #: Reserved sensor kinds describing image *content* (not projection model — a
 #: fisheye RGB camera is still ``"rgb"``). Only ``rgb``/``grayscale`` cameras are
@@ -181,3 +181,23 @@ def rebuild_camera_with_extrinsics(
     and re-runs ``__post_init__`` so the derived ``projection_matrix`` is rebuilt.
     """
     return replace(camera, extrinsics=extrinsics)
+
+
+def stereo_rig_calibration(K_33: Float[ndarray, "3 3"], baseline_m: float, width: int, height: int) -> RigCalibration:
+    """Calibration for a rectified stereo pair: ``cam_00`` = left (reference, identity), ``cam_01`` = right at ``+baseline_m`` along x.
+
+    Args:
+        K_33: Shared pinhole intrinsics of the rectified pair, ``Float[ndarray, "3 3"]``.
+        baseline_m: Distance between the optical centres in metres.
+        width: Image width in pixels.
+        height: Image height in pixels.
+
+    Returns:
+        A two-camera :class:`RigCalibration` with the left camera as reference.
+    """
+    cameras: list[CameraSensor] = []
+    for index, name, t_x in ((0, "left", 0.0), (1, "right", baseline_m)):
+        intrinsics: Intrinsics = Intrinsics(camera_conventions="RDF", height=height, width=width, k_matrix=K_33)
+        extrinsics: Extrinsics = Extrinsics(world_R_cam=np.eye(3), world_t_cam=np.array([t_x, 0.0, 0.0]))
+        cameras.append(CameraSensor(index=index, name=name, kind="rgb", pinhole=PinholeParameters(name=name, extrinsics=extrinsics, intrinsics=intrinsics)))
+    return RigCalibration(cameras=cameras, reference_index=0)
