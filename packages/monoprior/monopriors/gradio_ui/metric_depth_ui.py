@@ -45,9 +45,6 @@ _CONFIG: MetricDepthNodeConfig = MetricDepthNodeConfig(device="cuda")
 _PREDICTOR: BaseMetricPredictor = create_metric_predictor(_CONFIG)
 """Module-level predictor singleton. Re-created when predictor_name changes."""
 
-_PREDICTOR_NAME: str = "moge-v2-metric"
-"""Name of the config used to create the module-level predictor."""
-
 
 def _sync_config(predictor_name: str) -> None:
     """Sync UI widget values into the module-level config and predictor singleton.
@@ -55,20 +52,19 @@ def _sync_config(predictor_name: str) -> None:
     Args:
         predictor_name: Which metric predictor to use.
     """
-    global _CONFIG, _PREDICTOR, _PREDICTOR_NAME
+    global _CONFIG, _PREDICTOR
     import torch
 
-    predictor_config: BaseMetricPredictorConfig | None = metric_predictor_defaults.get(predictor_name)
-    if predictor_config is None:
-        raise gr.Error(f"{predictor_name} is not a metric depth predictor.")
-    needs_reinit: bool = predictor_name != _PREDICTOR_NAME
+    try:
+        predictor_config: BaseMetricPredictorConfig = metric_predictor_defaults[predictor_name]
+    except KeyError:
+        raise gr.Error(f"{predictor_name} is not a metric depth predictor.") from None
+    needs_reinit: bool = predictor_config != _CONFIG.predictor
 
     _CONFIG = MetricDepthNodeConfig(
         predictor=predictor_config,
         device="cuda",
     )
-    _PREDICTOR_NAME = predictor_name
-
     if needs_reinit:
         del _PREDICTOR
         gc.collect()
@@ -223,7 +219,7 @@ def main() -> gr.Blocks:
                             predictor_dropdown = gr.Dropdown(
                                 label="Predictor",
                                 choices=list(metric_predictor_defaults),
-                                value=_PREDICTOR_NAME,
+                                value=next(name for name, config in metric_predictor_defaults.items() if config == _CONFIG.predictor),
                             )
 
                     with gr.TabItem("Outputs", id="outputs"):
