@@ -2,16 +2,23 @@
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast, get_args
+from typing import Any, cast
 
 import numpy as np
 import pytest
 import torch
+import tyro
 from jaxtyping import Bool, Float32, UInt8
 from omegaconf import DictConfig, OmegaConf
 from torch import nn
 
-from monopriors.models.stereo_depth import STEREO_PREDICTORS, FastFoundationStereoPredictor, StereoDepthPrediction, get_stereo_predictor
+from monopriors.models.stereo_depth import (
+    AnnotatedStereoPredictorUnion,
+    FastFoundationStereoConfig,
+    FastFoundationStereoPredictor,
+    StereoDepthPrediction,
+    stereo_predictor_defaults,
+)
 from monopriors.models.stereo_depth import fast_foundationstereo as predictor_module
 from monopriors.third_party.fast_foundationstereo import extractor as extractor_module
 from monopriors.third_party.fast_foundationstereo import foundation_stereo as foundation_stereo_module
@@ -43,9 +50,12 @@ class FakeFastFoundationStereo(nn.Module):
         return left_13hw[:, :1] - 100.0 + self.anchor.sum()
 
 
-def test_registered() -> None:
-    assert "FastFoundationStereoPredictor" in get_args(STEREO_PREDICTORS)
-    assert get_stereo_predictor("FastFoundationStereoPredictor") is FastFoundationStereoPredictor
+def test_fast_foundationstereo_config_registered() -> None:
+    assert set(stereo_predictor_defaults) == {"liteanystereo", "fast-foundationstereo"}
+    config = stereo_predictor_defaults["fast-foundationstereo"]
+    assert isinstance(config, FastFoundationStereoConfig)
+    assert config.max_disp == 416
+    assert isinstance(tyro.cli(AnnotatedStereoPredictorUnion, args=["fast-foundationstereo"]), FastFoundationStereoConfig)
 
 
 def test_random_module_runs_tiny_cpu_pair(monkeypatch: pytest.MonkeyPatch) -> None:

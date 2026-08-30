@@ -7,7 +7,7 @@ rectifies the fisheye front pair, runs the selected stereo predictor, and logs e
 videos and the slam poses line up. Nothing is registered back to the catalog.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 import cv2
@@ -29,8 +29,7 @@ from simplecv.rig import CameraSensor, Rig, RigCalibration
 from simplecv.rrd_query_utils import first_valid_value
 
 from monopriors.depth_utils import depth_edges_mask
-from monopriors.models.stereo_depth import STEREO_PREDICTORS, BaseStereoPredictor, StereoDepthPrediction, get_stereo_predictor
-from monopriors.models.stereo_depth.liteanystereo import LAS2ModelSize
+from monopriors.models.stereo_depth import AnnotatedStereoPredictorUnion, BaseStereoPredictor, LiteAnyStereoConfig, StereoDepthPrediction
 from monopriors.models.stereo_depth.rectify import StereoRectification, fisheye_stereo_rectify, rectify_pair
 
 TIMELINE: str = "video_time"
@@ -71,10 +70,8 @@ class StereoCatalogConfig:
     """Frames per second sampled from the video timeline."""
     max_seconds: float | None = 120.0
     """Only the first N seconds of the segment; None processes it all."""
-    predictor_name: STEREO_PREDICTORS = "LiteAnyStereoPredictor"
-    """Which stereo predictor to use."""
-    model_size: LAS2ModelSize = "m"
-    """LiteAnyStereo V2 variant; ignored by Fast-FoundationStereo."""
+    predictor: AnnotatedStereoPredictorUnion = field(default_factory=LiteAnyStereoConfig)
+    """Stereo model to run; pick with the subcommand, e.g. ``liteanystereo --predictor.model-size h`` or ``fast-foundationstereo``."""
     focal_scale: float = 0.8
     """Rectified focal length as a multiple of the fisheye fx; below 1 keeps more of the wide FOV."""
     max_depth_m: float = 20.0
@@ -218,11 +215,7 @@ def main(config: StereoCatalogConfig) -> None:
         rr.log(f"{RIG}/{cam}/pinhole/video", rr.VideoStream(codec=video_codec), static=True)
         rr.send_columns(f"{RIG}/{cam}/pinhole/video", indexes=[rr.TimeColumn(TIMELINE, duration=times)], columns=rr.VideoStream.columns(sample=samples, is_keyframe=keyframes))
 
-    match config.predictor_name:
-        case "LiteAnyStereoPredictor":
-            predictor: BaseStereoPredictor = get_stereo_predictor(config.predictor_name)(device=config.device, model_size=config.model_size)
-        case "FastFoundationStereoPredictor":
-            predictor = get_stereo_predictor(config.predictor_name)(device=config.device)
+    predictor: BaseStereoPredictor = config.predictor.setup(device=config.device)
     rect_pinhole: str = f"{RIG}/cam_{LEFT_RECT_INDEX}/pinhole"
     output_wh: tuple[int, int] = (left_rect_out.intrinsics.width, left_rect_out.intrinsics.height)
     K_out_33: Float64[np.ndarray, "3 3"] = np.asarray(left_rect_out.intrinsics.k_matrix, dtype=np.float64)

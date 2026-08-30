@@ -1,7 +1,7 @@
 """Stereo depth on one rectified pair with Middlebury-style calibration, visualized as an exoego:v2 rig in Rerun."""
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -11,7 +11,7 @@ import rerun as rr
 from jaxtyping import Bool, Float32, UInt8
 from simplecv.rerun_log_utils import RerunTyroConfig
 
-from monopriors.models.stereo_depth import STEREO_PREDICTORS, BaseStereoPredictor, StereoDepthPrediction, get_stereo_predictor
+from monopriors.models.stereo_depth import AnnotatedStereoPredictorUnion, BaseStereoPredictor, LiteAnyStereoConfig, StereoDepthPrediction
 from monopriors.rr_logging_utils import create_stereo_depth_blueprint, log_stereo_pred
 
 
@@ -44,10 +44,8 @@ class StereoDepthCLIConfig:
     """Rerun logging configuration."""
     scene_dir: Path = Path("data/examples/stereo/eth3d/two_view_training/playground_1l")
     """Directory with ``im0.png`` (left), ``im1.png`` (right) and a Middlebury-style ``calib.txt``."""
-    predictor_name: STEREO_PREDICTORS = "LiteAnyStereoPredictor"
-    """Which stereo predictor to use."""
-    model_size: Literal["s", "m", "l", "h"] = "m"
-    """LiteAnyStereo V2 variant."""
+    predictor: AnnotatedStereoPredictorUnion = field(default_factory=LiteAnyStereoConfig)
+    """Stereo model to run; pick with the subcommand, e.g. ``liteanystereo --predictor.model-size h`` or ``fast-foundationstereo``."""
     device: Literal["cuda", "cpu"] = "cuda"
     """Execution backend."""
     max_depth_m: float = 20.0
@@ -110,11 +108,7 @@ def main(config: StereoDepthCLIConfig) -> None:
     right_rgb: UInt8[np.ndarray, "h w 3"] = read_rgb(config.scene_dir / "im1.png")
     calibration: MiddleburyCalibration = read_middlebury_calib(config.scene_dir / "calib.txt")
 
-    match config.predictor_name:
-        case "LiteAnyStereoPredictor":
-            predictor: BaseStereoPredictor = get_stereo_predictor(config.predictor_name)(device=config.device, model_size=config.model_size)
-        case "FastFoundationStereoPredictor":
-            predictor = get_stereo_predictor(config.predictor_name)(device=config.device)
+    predictor: BaseStereoPredictor = config.predictor.setup(device=config.device)
     stereo_pred: StereoDepthPrediction = predictor(left_rgb, right_rgb, K_33=calibration.K_33, baseline_m=calibration.baseline_m)
 
     gt_dir: Path = config.scene_dir.parent.with_name(f"{config.scene_dir.parent.name}_gt") / config.scene_dir.name
@@ -125,9 +119,9 @@ def main(config: StereoDepthCLIConfig) -> None:
         nonoccluded_hw: UInt8[np.ndarray, "h w"] | None = cv2.imread(str(nonoccluded_path), cv2.IMREAD_GRAYSCALE)
         if nonoccluded_hw is None:
             raise FileNotFoundError(f"Failed to read image {nonoccluded_path}")
-        max_disp: float = 416.0 if config.predictor_name == "FastFoundationStereoPredictor" else 192.0
+        max_disp: float = float(config.predictor.max_disp)
         metrics: tuple[float, float] = stereo_metrics(stereo_pred.disparity, ground_truth_hw, nonoccluded_hw, max_disp=max_disp)
-        print(f"{config.predictor_name} ETH3D: EPE {metrics[0]:.3f} px, bad1 {metrics[1]:.2f}%")
+        print(f"{type(predictor).__name__} ETH3D: EPE {metrics[0]:.3f} px, bad1 {metrics[1]:.2f}%")
 
     parent_log_path: Path = Path("world")
     rr.send_blueprint(create_stereo_depth_blueprint(parent_log_path))

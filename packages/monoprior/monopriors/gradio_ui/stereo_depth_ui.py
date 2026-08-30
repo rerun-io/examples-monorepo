@@ -21,7 +21,14 @@ from jaxtyping import Float32, UInt8
 from numpy import ndarray
 
 from monopriors.apis.stereo_depth import MiddleburyCalibration, read_middlebury_calib
-from monopriors.models.stereo_depth import STEREO_PREDICTORS, BaseStereoPredictor, StereoDepthPrediction, get_stereo_predictor
+from monopriors.models.stereo_depth import (
+    BaseStereoPredictor,
+    BaseStereoPredictorConfig,
+    FastFoundationStereoConfig,
+    LiteAnyStereoConfig,
+    StereoDepthPrediction,
+    stereo_predictor_defaults,
+)
 from monopriors.models.stereo_depth.liteanystereo import LAS2ModelSize
 from monopriors.rr_logging_utils import create_stereo_depth_blueprint, log_stereo_pred
 
@@ -30,7 +37,7 @@ TabName: TypeAlias = Literal["Input", "Config", "Outputs"]
 EXAMPLE_SCENE: Path = Path("data/examples/stereo/eth3d/two_view_training/playground_1l")
 """ETH3D two-view sample fetched by the ``_monoprior-download-stereo`` task (im0/im1 + Middlebury calib.txt)."""
 
-PredictorKey: TypeAlias = tuple[STEREO_PREDICTORS, LAS2ModelSize | None]
+PredictorKey: TypeAlias = tuple[str, LAS2ModelSize | None]
 _PREDICTORS: dict[PredictorKey, BaseStereoPredictor] = {}
 
 
@@ -47,14 +54,17 @@ class AppConfig:
     """Root path when mounted under a reverse-proxy subpath (empty when served at ``/``)."""
 
 
-def _predictor(predictor_name: STEREO_PREDICTORS, model_size: LAS2ModelSize) -> BaseStereoPredictor:
-    key: PredictorKey = (predictor_name, model_size if predictor_name == "LiteAnyStereoPredictor" else None)
+def _predictor(predictor_name: str, model_size: LAS2ModelSize) -> BaseStereoPredictor:
+    key: PredictorKey = (predictor_name, model_size if predictor_name == "liteanystereo" else None)
     if key not in _PREDICTORS:
         match predictor_name:
-            case "LiteAnyStereoPredictor":
-                _PREDICTORS[key] = get_stereo_predictor(predictor_name)(device="cuda", model_size=model_size)
-            case "FastFoundationStereoPredictor":
-                _PREDICTORS[key] = get_stereo_predictor(predictor_name)(device="cuda")
+            case "liteanystereo":
+                config: BaseStereoPredictorConfig = LiteAnyStereoConfig(model_size=model_size)
+            case "fast-foundationstereo":
+                config = FastFoundationStereoConfig()
+            case _:
+                raise ValueError(f"Unknown stereo predictor: {predictor_name}")
+        _PREDICTORS[key] = config.setup(device="cuda")
     return _PREDICTORS[key]
 
 
@@ -65,7 +75,7 @@ def show_control_tab(selected: TabName) -> tuple[gr.Column, gr.Column, gr.Column
 def run_stereo(
     left_rgb: UInt8[ndarray, "h w 3"] | None,
     right_rgb: UInt8[ndarray, "h w 3"] | None,
-    predictor_name: STEREO_PREDICTORS,
+    predictor_name: str,
     model_size: LAS2ModelSize,
     fx: float | int,
     cx: float | int,
@@ -101,7 +111,7 @@ def run_stereo(
             depth_edge_threshold=float(depth_edge_threshold),
         )
     valid_hw = stereo_pred.disparity > 0.0
-    model_label: str = f"LAS2-{model_size.upper()}" if predictor_name == "LiteAnyStereoPredictor" else "Fast-FoundationStereo"
+    model_label: str = f"LAS2-{model_size.upper()}" if predictor_name == "liteanystereo" else "Fast-FoundationStereo"
     status: str = (
         f"{model_label} · {left_rgb.shape[1]}×{left_rgb.shape[0]} · {elapsed_ms:.0f} ms end-to-end · "
         f"disparity {stereo_pred.disparity[valid_hw].min():.1f}–{stereo_pred.disparity[valid_hw].max():.1f} px"
@@ -131,7 +141,7 @@ def build_demo() -> gr.Blocks:
                     if example_calibration is not None:
                         gr.Examples(examples=[[str(EXAMPLE_SCENE / "im0.png"), str(EXAMPLE_SCENE / "im1.png")]], inputs=[left_in, right_in], label="ETH3D playground_1l")
                 with gr.Column(visible=False) as config_panel:
-                    predictor_dd: gr.Dropdown = gr.Dropdown(label="Model", choices=list(get_args(STEREO_PREDICTORS)), value="LiteAnyStereoPredictor")
+                    predictor_dd: gr.Dropdown = gr.Dropdown(label="Model", choices=list(stereo_predictor_defaults), value="liteanystereo")
                     model_size_dd: gr.Dropdown = gr.Dropdown(label="LAS2 model size (ignored by Fast-FoundationStereo)", choices=list(get_args(LAS2ModelSize)), value="m")
                     max_depth_slider: gr.Slider = gr.Slider(label="Max depth (m)", minimum=1.0, maximum=100.0, value=20.0, step=1.0)
                     flying_box: gr.Checkbox = gr.Checkbox(label="Remove flying pixels", value=True)
