@@ -44,7 +44,8 @@ class DSineNormalPredictor(BaseNormalPredictor[DSINE | DSINE_v02_kappa]):
         self.model = self.load_model(model_type=model_type)
 
     def load_model(self, model_type: Literal["dsine", "dsine_kappa"]):
-        state_dict = self._load_state_dict(local_file_path="checkpoints/dsine_kappa.pt", model_type=model_type)
+        local_file_path: str = "checkpoints/dsine.pt" if model_type == "dsine" else "checkpoints/dsine_kappa.pt"
+        state_dict = self._load_state_dict(local_file_path=local_file_path, model_type=model_type)
         model = DSINE() if model_type == "dsine" else DSINE_v02_kappa()
 
         model.load_state_dict(state_dict, strict=True)

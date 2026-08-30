@@ -39,29 +39,26 @@ class OmniNormalConfig(BaseNormalPredictorConfig):
                 f"or download {OMNIDATA_NORMAL_CHECKPOINT_URL} to that path. "
                 "Pass --omnidata-pretrained-weights-path if the checkpoint is in another directory."
             )
-        return OmniNormalPredictor(device=device, omnidata_pretrained_weights_path=self.omnidata_pretrained_weights_path)
+        return OmniNormalPredictor(device=device, checkpoint=checkpoint_path)
 
 
 class OmniNormalPredictor(BaseNormalPredictor[DPTDepthModel]):
-    def __init__(self, device: Literal["cpu", "cuda"], omnidata_pretrained_weights_path: Path) -> None:
+    def __init__(self, device: Literal["cpu", "cuda"], checkpoint: Path) -> None:
         self.device = device
-        self.model = self._load_model(omnidata_pretrained_weights_path)
+        self.model = self._load_model(checkpoint)
         self.image_size = 384
 
-    def _load_model(self, omnidata_pretrained_weights_path: Path) -> DPTDepthModel:
+    def _load_model(self, checkpoint: Path) -> DPTDepthModel:
         model: DPTDepthModel = DPTDepthModel(backbone="vitb_rn50_384", num_channels=3)  # DPT Hybrid
-        omnidata_pretrained_weights_path = omnidata_pretrained_weights_path / OMNIDATA_NORMAL_CHECKPOINT_NAME
-        if not omnidata_pretrained_weights_path.is_file():
-            raise FileNotFoundError(f"OmniData normal weights not found at {omnidata_pretrained_weights_path}")
         map_location = (lambda storage, _loc: storage.cuda()) if torch.cuda.is_available() else torch.device("cpu")
-        checkpoint = torch.load(omnidata_pretrained_weights_path, map_location=map_location)
+        checkpoint_data = torch.load(checkpoint, map_location=map_location)
 
-        if "state_dict" in checkpoint:
+        if "state_dict" in checkpoint_data:
             state_dict = {}
-            for k, v in checkpoint["state_dict"].items():
+            for k, v in checkpoint_data["state_dict"].items():
                 state_dict[k[6:]] = v
         else:
-            state_dict = checkpoint
+            state_dict = checkpoint_data
 
         model.load_state_dict(state_dict)
         model.to(self.device)
