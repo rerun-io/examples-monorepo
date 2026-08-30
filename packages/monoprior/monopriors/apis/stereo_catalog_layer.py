@@ -112,13 +112,14 @@ def read_fisheye_camera(view: DatasetView, cam: str) -> tuple[FisheyeCamera, Flo
     return camera, cam_T_rig
 
 
-def log_rectified_camera(
-    rec: rr.RecordingStream, cam: str, name: str, cam_T_rig: Float64[np.ndarray, "4 4"], R_rect: Float64[np.ndarray, "3 3"], rect: StereoRectification, scale: float
-) -> None:
-    """Static rig node ``cam_MM/rectified`` = the rectified virtual pinhole camera, at ``scale`` × the video resolution."""
-    cam_rect_R_rig, cam_rect_t_rig = rectified_rig_extrinsics(cam_T_rig[:3, :3], cam_T_rig[:3, 3], R_rect)
+def log_rectified_camera(rec: rr.RecordingStream, cam: str, name: str, R_rect: Float64[np.ndarray, "3 3"], rect: StereoRectification, scale: float) -> None:
+    """Static rig node ``cam_MM/rectified`` = the rectified virtual pinhole camera, at ``scale`` × the video resolution.
+
+    The node is a child of ``cam_MM``, so its transform is relative to that camera: just the rectification rotation
+    ``R_rect`` (rectified_R_cam, cv2's R1/R2) with zero translation. The camera's own ``rig_T_cam`` stays on ``cam_MM``.
+    """
     path: str = f"{RIG}/{cam}/rectified"
-    rr.log(path, rr.Transform3D(mat3x3=cam_rect_R_rig, translation=cam_rect_t_rig, from_parent=True), static=True, recording=rec)
+    rr.log(path, rr.Transform3D(mat3x3=R_rect, from_parent=True), static=True, recording=rec)
     rr.log(path, rr.AnyValues(name=name, kind="grayscale"), static=True, recording=rec)
     rr.log(
         f"{path}/pinhole",
@@ -214,8 +215,8 @@ def main(config: StereoCatalogLayerConfig) -> None:
     rrd_path: Path = config.output_dir / f"{config.segment_id}.rrd"
     rec: rr.RecordingStream = rr.RecordingStream(application_id="dataforge", recording_id=config.segment_id)
     rec.save(rrd_path)
-    log_rectified_camera(rec, config.left_cam, "left_front_rectified", left_T_rig, rect.R0_33, rect, config.output_scale)
-    log_rectified_camera(rec, config.right_cam, "right_front_rectified", right_T_rig, rect.R1_33, rect, config.output_scale)
+    log_rectified_camera(rec, config.left_cam, "left_front_rectified", rect.R0_33, rect, config.output_scale)
+    log_rectified_camera(rec, config.right_cam, "right_front_rectified", rect.R1_33, rect, config.output_scale)
     output_wh: tuple[int, int] = (round(rect.width * config.output_scale), round(rect.height * config.output_scale))
     rect_pinhole: str = f"{RIG}/{config.left_cam}/rectified/pinhole"
     max_depth_mm: float = config.max_depth_m * 1000.0
