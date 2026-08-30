@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Literal
@@ -39,6 +41,25 @@ class MonoPriorModel(ABC):
         raise NotImplementedError
 
 
+@dataclass
+class MonoPriorModelConfig(ABC):
+    """Base configuration for a paired metric-depth and surface-normal model."""
+
+    @abstractmethod
+    def setup(self) -> MonoPriorModel:
+        """Build the configured composite model using its existing automatic device selection."""
+        raise NotImplementedError
+
+
+@dataclass
+class DsineAndUnidepthConfig(MonoPriorModelConfig):
+    """Configuration for separate UniDepth metric-depth and DSINE normal models."""
+
+    def setup(self) -> DsineAndUnidepth:
+        """Build the configured UniDepth and DSINE composite model."""
+        return DsineAndUnidepth()
+
+
 class DsineAndUnidepth(MonoPriorModel):
     """Pair UniDepth metric depth with DSINE surface normals."""
 
@@ -66,6 +87,18 @@ class DsineAndUnidepth(MonoPriorModel):
         normal_pred: SurfaceNormalPrediction = self.surface_model(rgb, K_33)
 
         return MonoPriorPrediction(metric_pred=metric_pred, normal_pred=normal_pred)
+
+
+@dataclass
+class MoGeV2MonoPriorConfig(MonoPriorModelConfig):
+    """Configuration for joint MoGe v2 metric-depth and normal prediction."""
+
+    encoder: Encoder = "vitl"
+    """DINOv2 encoder size."""
+
+    def setup(self) -> MoGeV2MonoPrior:
+        """Build the configured MoGe v2 composite model."""
+        return MoGeV2MonoPrior(encoder=self.encoder)
 
 
 class MoGeV2MonoPrior(MonoPriorModel):
