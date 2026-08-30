@@ -19,7 +19,7 @@ import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypeAlias, get_args
+from typing import Any, Literal, TypeAlias, get_args
 
 import gradio as gr
 import numpy as np
@@ -210,51 +210,50 @@ def on_pause(session: Session | None, evt: Pause) -> None:
         session.playing = False
 
 
-def on_time_update(session: Session | None, evt: TimeUpdate) -> Iterator[tuple[bytes | None, str, str]]:
-    """When prompts exist, preview the memory-conditioned mask on the frame under the cursor."""
-    if session is None:
-        yield b"", gr.skip(), gr.skip()
-        return
-    if session.playing:
-        # Playback emits ~10 time updates a second; previewing and re-writing the
-        # status on each would spam the UI and the GPU. Just drop any preview.
-        if not session.preview_visible:
-            yield b"", gr.skip(), gr.skip()
-            return
-        recording_pair: RecordingPair = _open_recording(session, write_part=False)
-        rec: rr.RecordingStream = recording_pair[0]
-        stream: rr.BinaryStream = recording_pair[1]
-        _clear_preview(rec, session)
-        stream.flush()
-        payload: bytes | None = stream.read()
-        rec.disconnect()
-        yield payload, gr.skip(), gr.skip()
-        return
-    # This handler is queued (always_last) and may run late; it must never write
-    # session.current_frame — only the unqueued record_time does, or a backlog of
-    # previews would overwrite the frame with stale times right before a click.
+def on_time_update(session: Session | None, evt: TimeUpdate) -> tuple[Any, Any, Any]:
+    """Report the frame under the cursor and hand it to ``push_preview``.
+
+    Unqueued and cheap on purpose. This listener must never use ``trigger_mode="always_last"``:
+    Gradio re-dispatches the coalesced *event* with a stale payload, and that re-dispatch
+    also reaches ``record_time``, which then records a frame the user left long ago.
+    (That is how a click after moving the playhead prompted the wrong frame.)
+    """
+    if session is None or session.playing:
+        # Playback emits ~10 time updates a second; previewing and re-writing the status on each would spam the UI and the GPU.
+        return gr.skip(), gr.skip(), gr.skip()
     frame_idx: int = frame_at(session.frame_timestamps_ns, float(evt.payload.time))
     frame_text: str = f"Viewer at frame {frame_idx} — a click prompts this frame."
-    # The preview is *static* (no timeline → no ticks, overwritten in place), so it
-    # must go away the moment the cursor leaves the frame it was computed for.
-    recording_pair = _open_recording(session, write_part=False)
-    rec = recording_pair[0]
-    stream = recording_pair[1]
+    return frame_text, frame_text, float(frame_idx)
+
+
+def push_preview(session: Session | None, request: float | None) -> Iterator[bytes | None]:
+    """Preview the memory-conditioned mask on the frame under the cursor once it has rested there.
+
+    The only viewer write on the scrub path. Queued and coalesced (``always_last``) on
+    ``preview_request.change``, which has no other listener, so the re-dispatch is harmless.
+    The preview is static (no ticks, overwritten in place): it goes the moment the cursor moves on.
+    """
+    if session is None or request is None:
+        yield b""
+        return
+    frame_idx: int = int(request)
+    recording_pair: RecordingPair = _open_recording(session, write_part=False)
+    rec: rr.RecordingStream = recording_pair[0]
+    stream: rr.BinaryStream = recording_pair[1]
     _clear_preview(rec, session)
-    stamp: float = session.last_stamp
-    wants_preview: bool = bool(session.tracker.points) and not session.tracker.points_on(frame_idx)
+    wants_preview: bool = bool(session.tracker.points) and not session.tracker.points_on(frame_idx) and not session.playing
     if wants_preview:
         time.sleep(0.15)  # rest-throttle: skip frames the cursor only passed through
-    if wants_preview and session.last_stamp == stamp:
+    if wants_preview and frame_idx == session.current_frame:
         result: MaskResult | None = session.tracker.preview(frame_idx)
-        if result is not None and session.last_stamp == stamp and not session.playing:  # discard late results
+        if result is not None and frame_idx == session.current_frame and not session.playing:  # discard late results
             preview_hw: UInt8[ndarray, "h w"] = _mask_hw(result)
             rec.log(f"{VIDEO}/preview", rr.SegmentationImage(preview_hw), static=True)
             session.preview_visible = True
     stream.flush()
-    payload = stream.read()
+    payload: bytes | None = stream.read()
     rec.disconnect()
-    yield payload, frame_text, frame_text
+    yield payload
 
 
 def on_select(
@@ -429,6 +428,7 @@ def build_demo(config: AppConfig) -> gr.Blocks:
         gr.Markdown(DESCRIPTION, elem_id="app-description")
         recording_state: gr.State = gr.State(value=None, delete_callback=_close_session)
         stamp_in: gr.Number = gr.Number(value=0.0, visible=False)
+        preview_request: gr.Number = gr.Number(value=-1.0, visible=False)
         with gr.Row(elem_id="main-row"):
             with gr.Column(scale=1, elem_id="left-column"):
                 # Video and status sit above the tabs: the status must stay visible when
@@ -521,7 +521,16 @@ def build_demo(config: AppConfig) -> gr.Blocks:
         viewer.time_update(
             fn=on_time_update,
             inputs=[recording_state],
-            outputs=[viewer, status, status_probe],
+            outputs=[status, status_probe, preview_request],
+            queue=False,
+            trigger_mode="multiple",
+            show_progress="hidden",
+            api_visibility="private",
+        )
+        preview_request.change(
+            fn=push_preview,
+            inputs=[recording_state, preview_request],
+            outputs=[viewer],
             trigger_mode="always_last",
             show_progress="hidden",
             api_visibility="private",
