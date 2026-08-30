@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import cv2
 import numpy as np
@@ -27,6 +28,8 @@ class MonoPriorConfig:
     """Path to the input image."""
     model: AnnotatedMonoPriorModelUnion = field(default_factory=MoGeV2MonoPriorConfig)
     """Composite monoprior model to run; select it with a model subcommand."""
+    device: Literal["cuda", "cpu"] = "cuda"
+    """Execution backend."""
     depth_edge_threshold: float = 0.1
     """Threshold for removing flying pixels at depth edges."""
 
@@ -53,7 +56,7 @@ def monoprior_from_img(config: MonoPriorConfig) -> None:
         raise FileNotFoundError(f"Failed to read image {config.image_path}")
     rgb_hw3: UInt8[np.ndarray, "h w 3"] = cv2.cvtColor(bgr_hw3, cv2.COLOR_BGR2RGB)
 
-    model: MonoPriorModel = config.model.setup()
+    model: MonoPriorModel = config.model.setup(device=config.device)
     pred: MonoPriorPrediction = model(rgb=rgb_hw3, K_33=None)
 
     rr.set_time("time", sequence=0)
