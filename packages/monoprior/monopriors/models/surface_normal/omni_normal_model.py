@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -10,29 +13,52 @@ from omnidata_tools.torch.modules.midas.dpt_depth import DPTDepthModel
 
 from monopriors.models.surface_normal.base_normal_model import (
     BaseNormalPredictor,
+    BaseNormalPredictorConfig,
     SurfaceNormalPrediction,
 )
 
+OMNIDATA_NORMAL_CHECKPOINT_NAME: str = "omnidata_dpt_normal_v2.ckpt"
+OMNIDATA_NORMAL_CHECKPOINT_URL: str = "https://zenodo.org/records/10447888/files/omnidata_dpt_normal_v2.ckpt?download=1"
+OMNIDATA_DEFAULT_WEIGHTS_PATH: Path = Path("pretrained_models")
+
+
+@dataclass
+class OmniNormalConfig(BaseNormalPredictorConfig):
+    """Configuration for OmniData surface-normal prediction."""
+
+    omnidata_pretrained_weights_path: Path = OMNIDATA_DEFAULT_WEIGHTS_PATH
+    """Directory containing ``omnidata_dpt_normal_v2.ckpt``."""
+
+    def setup(self, device: Literal["cpu", "cuda"]) -> OmniNormalPredictor:
+        """Build the configured OmniData predictor after validating its manually fetched checkpoint."""
+        checkpoint_path: Path = self.omnidata_pretrained_weights_path / OMNIDATA_NORMAL_CHECKPOINT_NAME
+        if not checkpoint_path.is_file():
+            raise FileNotFoundError(
+                f"OmniData normal weights not found at {checkpoint_path}. "
+                "Run omnidata_tools/torch/tools/download_surface_normal_models.sh from the upstream EPFL-VILAB/omnidata repository, "
+                f"or download {OMNIDATA_NORMAL_CHECKPOINT_URL} to that path. "
+                "Pass --omnidata-pretrained-weights-path if the checkpoint is in another directory."
+            )
+        return OmniNormalPredictor(device=device, checkpoint=checkpoint_path)
+
 
 class OmniNormalPredictor(BaseNormalPredictor[DPTDepthModel]):
-    def __init__(self, device: Literal["cpu", "cuda"], omnidata_pretrained_weights_path: Path) -> None:
+    def __init__(self, device: Literal["cpu", "cuda"], checkpoint: Path) -> None:
         self.device = device
-        self.model = self._load_model(omnidata_pretrained_weights_path)
+        self.model = self._load_model(checkpoint)
         self.image_size = 384
 
-    def _load_model(self, omnidata_pretrained_weights_path: Path):
-        model = DPTDepthModel(backbone="vitb_rn50_384", num_channels=3)  # DPT Hybrid
-        omnidata_pretrained_weights_path = omnidata_pretrained_weights_path / "omnidata_dpt_normal_v2.ckpt"
-        assert omnidata_pretrained_weights_path.exists(), "Weights not found"
+    def _load_model(self, checkpoint: Path) -> DPTDepthModel:
+        model: DPTDepthModel = DPTDepthModel(backbone="vitb_rn50_384", num_channels=3)  # DPT Hybrid
         map_location = (lambda storage, _loc: storage.cuda()) if torch.cuda.is_available() else torch.device("cpu")
-        checkpoint = torch.load(omnidata_pretrained_weights_path, map_location=map_location)
+        checkpoint_data = torch.load(checkpoint, map_location=map_location)
 
-        if "state_dict" in checkpoint:
+        if "state_dict" in checkpoint_data:
             state_dict = {}
-            for k, v in checkpoint["state_dict"].items():
+            for k, v in checkpoint_data["state_dict"].items():
                 state_dict[k[6:]] = v
         else:
-            state_dict = checkpoint
+            state_dict = checkpoint_data
 
         model.load_state_dict(state_dict)
         model.to(self.device)

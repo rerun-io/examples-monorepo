@@ -1,5 +1,6 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import cv2
 import numpy as np
@@ -9,9 +10,9 @@ from jaxtyping import UInt8
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from monopriors.models.surface_normal import (
-    NORMAL_PREDICTORS,
+    AnnotatedNormalPredictorUnion,
+    DSineNormalConfig,
     SurfaceNormalPrediction,
-    get_normal_predictor,
 )
 from monopriors.models.surface_normal.base_normal_model import BaseNormalPredictor
 from monopriors.rr_logging_utils import log_normal_pred
@@ -25,8 +26,10 @@ class NormalPredictorConfig:
     """Rerun logging configuration."""
     image_path: Path = Path("data/examples/single-image/room.jpg")
     """Path to the input image."""
-    predictor_name: NORMAL_PREDICTORS = "DSineNormalPredictor"
-    """Which surface normal predictor to use."""
+    predictor: AnnotatedNormalPredictorUnion = field(default_factory=DSineNormalConfig)
+    """Surface-normal model to run; select it with a predictor subcommand."""
+    device: Literal["cuda", "cpu"] = "cuda"
+    """Execution backend."""
 
 
 def surface_normal_from_img(config: NormalPredictorConfig) -> None:
@@ -46,7 +49,7 @@ def surface_normal_from_img(config: NormalPredictorConfig) -> None:
         raise FileNotFoundError(f"Failed to read image {config.image_path}")
     rgb_hw3: UInt8[np.ndarray, "h w 3"] = cv2.cvtColor(bgr_hw3, cv2.COLOR_BGR2RGB)
 
-    predictor: BaseNormalPredictor = get_normal_predictor(config.predictor_name)(device="cuda")
+    predictor: BaseNormalPredictor = config.predictor.setup(device=config.device)
     normal_pred: SurfaceNormalPrediction = predictor(rgb=rgb_hw3, K_33=None)
 
     rr.set_time("time", sequence=0)

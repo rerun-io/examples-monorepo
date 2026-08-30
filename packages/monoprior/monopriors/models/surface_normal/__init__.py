@@ -1,29 +1,36 @@
-from collections.abc import Callable
-from typing import Literal, get_args
+from typing import TYPE_CHECKING
 
-from .base_normal_model import BaseNormalPredictor, SurfaceNormalPrediction
-from .dsine_model import DSineNormalPredictor
-from .moge_v2 import MoGeV2NormalPredictor
-from .omni_normal_model import OmniNormalPredictor
+import tyro
 
-# Define predictor names as a list of strings
-NORMAL_PREDICTORS = Literal["DSineNormalPredictor", "OmniNormalPredictor", "MoGeV2NormalPredictor"]
+from monopriors.models.surface_normal.base_normal_model import BaseNormalPredictor, BaseNormalPredictorConfig, SurfaceNormalPrediction
+from monopriors.models.surface_normal.dsine_model import DSineNormalConfig, DSineNormalPredictor
+from monopriors.models.surface_normal.moge_v2 import MoGeV2NormalConfig, MoGeV2NormalPredictor
+from monopriors.models.surface_normal.omni_normal_model import OmniNormalConfig, OmniNormalPredictor
 
-# Use the list to generate the __all__ list
-__all__: list[str] = list(get_args(NORMAL_PREDICTORS)) + [
+normal_predictor_defaults: dict[str, BaseNormalPredictorConfig] = {
+    "dsine-normal": DSineNormalConfig(),
+    "moge-v2-normal": MoGeV2NormalConfig(),
+    "omni-normal": OmniNormalConfig(),
+}
+
+if TYPE_CHECKING:
+    NormalPredictorUnion = BaseNormalPredictorConfig
+else:
+    NormalPredictorUnion = tyro.extras.subcommand_type_from_defaults(normal_predictor_defaults, prefix_names=False)
+
+AnnotatedNormalPredictorUnion = tyro.conf.OmitSubcommandPrefixes[NormalPredictorUnion]
+
+__all__: list[str] = [
+    "AnnotatedNormalPredictorUnion",
+    "BaseNormalPredictor",
+    "BaseNormalPredictorConfig",
+    "DSineNormalConfig",
+    "DSineNormalPredictor",
+    "MoGeV2NormalConfig",
+    "MoGeV2NormalPredictor",
+    "NormalPredictorUnion",
+    "OmniNormalConfig",
+    "OmniNormalPredictor",
     "SurfaceNormalPrediction",
+    "normal_predictor_defaults",
 ]
-
-
-def get_normal_predictor(
-    predictor_type: NORMAL_PREDICTORS,
-) -> Callable[..., BaseNormalPredictor]:
-    match predictor_type:
-        case "DSineNormalPredictor":
-            return DSineNormalPredictor
-        case "OmniNormalPredictor":
-            return OmniNormalPredictor
-        case "MoGeV2NormalPredictor":
-            return MoGeV2NormalPredictor
-        case _:
-            raise ValueError(f"Unknown predictor type: {predictor_type}")
