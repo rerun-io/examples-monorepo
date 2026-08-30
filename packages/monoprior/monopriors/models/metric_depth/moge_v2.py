@@ -1,15 +1,30 @@
 """Single-image metric-depth adapter for the unified MoGe v2 core."""
 
+from __future__ import annotations
+
+from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
 from jaxtyping import Float, UInt8
 
-from monopriors.models.metric_depth.base_metric_depth import BaseMetricPredictor, MetricDepthPrediction
+from monopriors.models.metric_depth.base_metric_depth import BaseMetricPredictor, BaseMetricPredictorConfig, MetricDepthPrediction
 from monopriors.models.moge_v2.adapters import geometry_to_metric_prediction, rgb_to_cuda_batch
 from monopriors.models.moge_v2.export import Encoder
 from monopriors.models.moge_v2.predictor import MoGeV2GeometryOutput, MoGeV2TorchPredictor
 from monopriors.third_party.moge.model.v2 import MoGeModel
+
+
+@dataclass
+class MoGeV2MetricConfig(BaseMetricPredictorConfig):
+    """Configuration for MoGe v2 metric-depth prediction."""
+
+    encoder: Encoder = "vitl"
+    """DINOv2 encoder size."""
+
+    def setup(self, device: Literal["cpu", "cuda"]) -> MoGeV2MetricPredictor:
+        """Build the configured MoGe v2 metric predictor on one device."""
+        return MoGeV2MetricPredictor(device=device, encoder=self.encoder)
 
 
 class MoGeV2MetricPredictor(BaseMetricPredictor[MoGeModel]):

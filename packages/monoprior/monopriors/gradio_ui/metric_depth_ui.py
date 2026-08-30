@@ -18,7 +18,7 @@ import gc
 import uuid
 from collections.abc import Generator
 from pathlib import Path
-from typing import Final, get_args
+from typing import Final
 
 import gradio as gr
 import numpy as np
@@ -31,7 +31,7 @@ from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from simplecv.rerun_log_utils import log_pinhole
 
 from monopriors.apis.metric_depth import MetricDepthNodeConfig, create_metric_predictor, run_metric_depth
-from monopriors.models.metric_depth import METRIC_PREDICTORS, BaseMetricPredictor, MetricDepthPrediction
+from monopriors.models.metric_depth import BaseMetricPredictor, BaseMetricPredictorConfig, MetricDepthPrediction, metric_predictor_defaults
 from monopriors.rr_logging_utils import log_confidence
 
 PARENT_LOG_PATH: Final[Path] = Path("world")
@@ -55,13 +55,16 @@ def _sync_config(predictor_name: str) -> None:
     global _CONFIG, _PREDICTOR
     import torch
 
-    needs_reinit: bool = predictor_name != _CONFIG.predictor_name
+    try:
+        predictor_config: BaseMetricPredictorConfig = metric_predictor_defaults[predictor_name]
+    except KeyError:
+        raise gr.Error(f"{predictor_name} is not a metric depth predictor.") from None
+    needs_reinit: bool = predictor_config != _CONFIG.predictor
 
     _CONFIG = MetricDepthNodeConfig(
-        predictor_name=predictor_name,  # type: ignore[arg-type]  # Gradio dropdown returns str
+        predictor=predictor_config,
         device="cuda",
     )
-
     if needs_reinit:
         del _PREDICTOR
         gc.collect()
@@ -215,8 +218,8 @@ def main() -> gr.Blocks:
                         with gr.Accordion("Config", open=False):
                             predictor_dropdown = gr.Dropdown(
                                 label="Predictor",
-                                choices=list(get_args(METRIC_PREDICTORS)),
-                                value=_CONFIG.predictor_name,
+                                choices=list(metric_predictor_defaults),
+                                value=next(name for name, config in metric_predictor_defaults.items() if config == _CONFIG.predictor),
                             )
 
                     with gr.TabItem("Outputs", id="outputs"):

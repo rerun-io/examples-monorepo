@@ -13,9 +13,9 @@ from tqdm import tqdm
 
 from monopriors.depth_utils import estimate_intrinsics
 from monopriors.models.metric_depth import (
-    METRIC_PREDICTORS,
+    BaseMetricPredictorConfig,
     MetricDepthPrediction,
-    get_metric_predictor,
+    metric_predictor_defaults,
 )
 from monopriors.models.relative_depth import (
     RELATIVE_PREDICTORS,
@@ -57,7 +57,7 @@ def predict_depth(
         return relative_pred
     elif model_type == "Metric":
         K_33: Float32[np.ndarray, "3 3"] = estimate_intrinsics(H=rgb.shape[0], W=rgb.shape[1])
-        metric_pred: MetricDepthPrediction = predictor(device=DEVICE).__call__(rgb, K_33=K_33)
+        metric_pred: MetricDepthPrediction = predictor.setup(device=DEVICE).__call__(rgb, K_33=K_33)
         del predictor
         gc.collect()
         torch.cuda.empty_cache()
@@ -65,19 +65,7 @@ def predict_depth(
     raise ValueError(f"Unsupported model type: {model_type}")
 
 
-def _metric_predictor_name(model_name: RELATIVE_PREDICTORS | METRIC_PREDICTORS) -> METRIC_PREDICTORS:
-    """Validate and narrow a Gradio model choice to a metric predictor name."""
-
-    match model_name:
-        case "UniDepthMetricPredictor":
-            return "UniDepthMetricPredictor"
-        case "MoGeV2MetricPredictor":
-            return "MoGeV2MetricPredictor"
-        case _:
-            raise gr.Error(f"{model_name} is not a metric depth predictor.")
-
-
-def _relative_predictor_name(model_name: RELATIVE_PREDICTORS | METRIC_PREDICTORS) -> RELATIVE_PREDICTORS:
+def _relative_predictor_name(model_name: str) -> RELATIVE_PREDICTORS:
     """Validate and narrow a Gradio model choice to a relative predictor name."""
 
     match model_name:
@@ -106,15 +94,22 @@ def on_submit(
     remove_flying_pixels: bool,
     depth_map_threshold: float,
     model_type: Literal["Metric", "Relative"],
-    model_1_name: RELATIVE_PREDICTORS | METRIC_PREDICTORS,
-    model_2_name: RELATIVE_PREDICTORS | METRIC_PREDICTORS,
+    model_1_name: str,
+    model_2_name: str,
     progress=_ON_SUBMIT_PROGRESS,
 ) -> bytes:
     stream: rr.BinaryStream = rr.binary_stream()
     if rgb is None:
         raise gr.Error("Please provide an input image.")
-    model_names = [model_1_name, model_2_name]
-    blueprint = create_compare_depth_blueprint(model_names)
+    display_labels: list[str] = [model_1_name, model_2_name]
+    metric_configs: list[BaseMetricPredictorConfig] = []
+    if model_type == "Metric":
+        try:
+            metric_configs = [metric_predictor_defaults[name] for name in display_labels]
+        except KeyError as error:
+            raise gr.Error(f"{error.args[0]} is not a metric depth predictor.") from None
+
+    blueprint = create_compare_depth_blueprint(display_labels)
     rr.send_blueprint(blueprint)
 
     rr.log("/", rr.ViewCoordinates.RDF, static=True)
@@ -129,13 +124,12 @@ def on_submit(
         new_w: int = int(rgb.shape[1] * scale_factor)
         rgb = cv2.resize(rgb, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
 
-    for model_name in tqdm(model_names, desc="Loading Model and Predicting Depth"):
+    for model_index, model_name in enumerate(tqdm(display_labels, desc="Loading Model and Predicting Depth")):
         # get the name of the model
         parent_log_path = Path(f"{model_name}")
         if model_type == "Metric":
-            metric_model_name: METRIC_PREDICTORS = _metric_predictor_name(model_name)
-            predictor = get_metric_predictor(metric_model_name)
-            metric_pred: MetricDepthPrediction = predict_depth(predictor, "Metric", rgb)
+            predictor_config: BaseMetricPredictorConfig = metric_configs[model_index]
+            metric_pred: MetricDepthPrediction = predict_depth(predictor_config, "Metric", rgb)
             log_metric_pred(
                 parent_log_path=parent_log_path,
                 metric_pred=metric_pred,
@@ -213,16 +207,16 @@ with gr.Blocks() as relative_compare_block:
     )
 
     def change_dropdown(model_type: Literal["Metric", "Relative"]) -> tuple[gr.Dropdown, gr.Dropdown]:
-        choices = list(get_args(METRIC_PREDICTORS)) if model_type == "Metric" else list(get_args(RELATIVE_PREDICTORS))
+        choices = list(metric_predictor_defaults) if model_type == "Metric" else list(get_args(RELATIVE_PREDICTORS))
         model_1_dropdown = gr.Dropdown(
             choices=choices,
             label="Model1",
-            value="UniDepthMetricPredictor" if model_type == "Metric" else "DepthAnythingV2Predictor",
+            value="unidepth-metric" if model_type == "Metric" else "DepthAnythingV2Predictor",
         )
         model_2_dropdown = gr.Dropdown(
             choices=choices,
             label="Model2",
-            value="MoGeV2MetricPredictor" if model_type == "Metric" else "UniDepthRelativePredictor",
+            value="moge-v2-metric" if model_type == "Metric" else "UniDepthRelativePredictor",
         )
         return model_1_dropdown, model_2_dropdown
 
