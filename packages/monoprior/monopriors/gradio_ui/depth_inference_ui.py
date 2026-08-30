@@ -60,9 +60,10 @@ def load_model(
 
     progress(0, desc="Loading Model please wait...")
 
-    predictor_config: BaseRelativePredictorConfig | None = relative_predictor_defaults.get(model)
-    if predictor_config is None:
-        raise gr.Error(f"{model} is not a relative depth predictor.")
+    try:
+        predictor_config: BaseRelativePredictorConfig = relative_predictor_defaults[model]
+    except KeyError:
+        raise gr.Error(f"{model} is not a relative depth predictor.") from None
     DEPTH_PREDICTOR = predictor_config.setup(device="cuda")
 
     return model_load_status
