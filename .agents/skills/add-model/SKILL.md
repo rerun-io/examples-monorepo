@@ -76,8 +76,9 @@ Worked examples with every gotcha hit so far: [references/example-liteanystereo.
    the result as a *baseline*, not a reproduction.
 6. **Upstream entry points.** Name the demo script (for `demo-upstream`), its preprocessing (scaling, padding divisor, normalisation, AMP dtype), the forward signature (`iters`, `test_mode`, output shape), and the minimum input size the network accepts (fixes the fast test's tiny pair).
 7. **Contract.** Which existing predictor family does it join (`monopriors.models.stereo_depth`,
-   `relative_depth`, `normals`, ...)? Joining an existing `Base*Predictor` + `get_*_predictor` registry is the
-   goal; a new family needs its contract designed first (grill the user).
+   `relative_depth`, `normals`, ...)? Joining an existing `Base*Predictor` through its per-model config
+   dataclasses, defaults dict, and Tyro subcommand-union registry is the goal; a new family needs its contract
+   designed first (grill the user).
 8. **Which PRs.** `1-vendor`, `2-predictor`, `3-typed` are always required. `4-app`/`5-catalog` only when the
    family has no app/catalog tool yet — an existing tool gains the new model through the registry.
 

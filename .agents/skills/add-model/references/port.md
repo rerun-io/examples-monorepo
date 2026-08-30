@@ -35,14 +35,12 @@ Run pytest from `packages/<pkg>` (root collection pulls in packages whose envs a
   HF revision, strict `load_state_dict`, preprocessing mirroring upstream's demo exactly (padding, scaling,
   normalisation, `iters`/`test_mode`), and `__call__` returning the family's prediction dataclass
   (stereo: `StereoDepthPrediction(disparity, depth_meters, K_33, baseline_m)` via `disparity_to_metric_depth`).
-- Register: `<FAMILY>_PREDICTORS` Literal + `get_<family>_predictor` in `models/<family>/__init__.py`.
-  Existing demos/apps/catalog tools select by `predictor_name`; if one still hardcodes a class, switch it to
-  the registry in this PR (that is how the tools gain the model). Constructors differ per model (one has
-  `model_size`, another `valid_iters`): model-specific options live in a per-model config dataclass next to the
+- Register model-specific options in a per-model config dataclass next to the
   predictor (`LiteAnyStereoConfig(model_size=...)`, `FastFoundationStereoConfig(valid_iters=...)`, each with
   `setup(device) -> Predictor`), combined into a tyro subcommand union exactly like
   `simplecv/configs/exoego_dataset_configs.py` (defaults dict → `tyro.extras.subcommand_type_from_defaults` →
-  `tyro.conf.OmitSubcommandPrefixes`); tools take one `predictor:` union field. Never put a model-specific flag
+  `tyro.conf.OmitSubcommandPrefixes`); tools take one `predictor:` union field, and existing demos/apps/catalog
+  tools gain the model through that registry. Never put a model-specific flag
   (a `model_size`, an iteration count) flat on a tool's config — review feedback on FFS PR #162.
 - Tests: fast CPU test that builds the model from config and runs a tiny random pair (shape/dtype/finite);
   slow band (`pytestmark = [slow_cuda, requires_cuda]`) that downloads the checkpoint and checks the
