@@ -424,6 +424,16 @@ cmd = "test -d data/examples/polycam || hf download pablovela5620/monoprior-exam
 cwd = "packages/monoprior"
 
 # ── Demo tasks ───────────────────────────────────────────────────────────
+[feature.monoprior.tasks._monoprior-download-stereo]
+cmd = "test -d data/examples/stereo/eth3d || hf download pablovela5620/monoprior-example --include 'stereo/eth3d/two_view_training*/**' --repo-type dataset --local-dir data/examples/"
+cwd = "packages/monoprior"
+
+[feature.monoprior.tasks.monoprior-stereo-depth]
+cmd = "python tools/demos/stereo_depth.py"
+depends-on = ["_monoprior-download-stereo"]
+cwd = "packages/monoprior"
+description = "LiteAnyStereo V2 on the ETH3D playground_1l stereo pair, shown as an exoego:v2 rig in Rerun"
+
 [feature.monoprior.tasks.monoprior-relative-depth]
 cmd = "python tools/demos/relative_depth.py --image-path data/examples/single-image/room.jpg"
 depends-on = ["_monoprior-download-single-image"]
