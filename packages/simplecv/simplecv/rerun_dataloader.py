@@ -43,7 +43,7 @@ FrameRgbChw: TypeAlias = UInt8[Tensor, "3 h w"]
 
 
 def open_segment_decoder(
-    dataset: DatasetEntry, segment_id: str, entity: str, timeline: str, device: torch.device, fps: int
+    dataset: DatasetEntry, segment_id: str, entity: str, timeline: str, device: torch.device, fps: int, codec: str = "av1"
 ) -> tuple[TimedeltaNs, list[bytes], list[bool], VideoDecoder]:
     """Fetch one segment's video packets (one query), wrap them, and open a GPU decoder.
 
@@ -54,6 +54,7 @@ def open_segment_decoder(
         timeline: Index timeline the packets are read and sorted on.
         device: Device the decoder outputs frames on (``cuda`` uses NVDEC).
         fps: Nominal frame rate written into the wrapping MP4 track.
+        codec: Codec of the stored samples (``av1`` for ARKitScenes, ``h264`` for dataforge/robocap).
 
     Returns:
         The sample timestamps (timedelta64[ns], timeline order), the raw video
@@ -73,7 +74,7 @@ def open_segment_decoder(
     offsets: list[int] = blobs.offsets.to_pylist()
     samples: list[bytes] = [bytes(data[start:end]) for start, end in zip(offsets[:-1], offsets[1:], strict=True)]
     keyframes: list[bool] = [bool(flag) for flag in table[2].combine_chunks().flatten().to_pylist()]
-    decoder: VideoDecoder = VideoDecoder(wrap_mp4(samples, keyframes, fps), device=device, seek_mode="exact", num_ffmpeg_threads=0)
+    decoder: VideoDecoder = VideoDecoder(wrap_mp4(samples, keyframes, fps, codec=codec), device=device, seek_mode="exact", num_ffmpeg_threads=0)
     return times, samples, keyframes, decoder
 
 
@@ -119,7 +120,7 @@ class SegmentNvdecDecoder(ColumnDecoder):
     frame comes from the cached segment-wide NVDEC decoder instead.
     """
 
-    def __init__(self, dataset: DatasetEntry, entity: str, timeline: str, device: torch.device, fps: int) -> None:
+    def __init__(self, dataset: DatasetEntry, entity: str, timeline: str, device: torch.device, fps: int, codec: str = "av1") -> None:
         """Bind the decoder to one dataset's video column.
 
         Args:
@@ -128,8 +129,10 @@ class SegmentNvdecDecoder(ColumnDecoder):
             timeline: Index timeline the packets are read and sorted on.
             device: Device decoded frames land on (``cuda`` uses NVDEC).
             fps: Nominal frame rate of the stored video.
+            codec: Codec of the stored samples (``av1`` or ``h264``).
         """
         self._dataset = dataset
+        self._codec = codec
         self._entity = entity
         self._timeline = timeline
         self._device = device
@@ -148,7 +151,7 @@ class SegmentNvdecDecoder(ColumnDecoder):
         del raw  # decoded from the segment-wide cache, not the shipped point read
         if segment_id != self._segment_id:
             self.times, self.samples, self.keyframes, self._decoder = open_segment_decoder(
-                self._dataset, segment_id, self._entity, self._timeline, self._device, self._fps
+                self._dataset, segment_id, self._entity, self._timeline, self._device, self._fps, self._codec
             )
             self._segment_id = segment_id
         frame_index: int = int(np.searchsorted(self.times, index_value, side="right")) - 1
