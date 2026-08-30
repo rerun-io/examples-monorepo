@@ -85,12 +85,30 @@ class ZipDepthPrompt(nn.Module):
 
         Returns:
             Float metric depth in metres with shape
-            ``(batch, 1, height, width)``.
+                ``(batch, 1, height, width)``.
+        """
+        metric_depth_b1hw: Float[Tensor, "b 1 h w"]
+        metric_depth_b1hw, _, _ = self.forward_with_range(image, prompt_depth)
+        return metric_depth_b1hw
+
+    def forward_with_range(
+        self,
+        image: UInt8[Tensor, "b 3 h w"] | Float[Tensor, "b 3 h w"],
+        prompt_depth: Float32[Tensor, "b 1 192 256"],
+    ) -> tuple[
+        Float[Tensor, "b 1 h w"],
+        Float32[Tensor, "b 1 1 1"],
+        Float32[Tensor, "b 1 1 1"],
+    ]:
+        """Predict metric depth and expose the prompt range for TRT export.
+
+        The two scalar outputs force TensorRT to materialize the input-derived
+        reductions. Normal callers use :meth:`forward` and receive depth only.
         """
         if image.dtype == torch.uint8:
-            image_b3hw: Float32[Tensor, "b 3 h w"] = image.to(dtype=torch.float32) / 255.0
+            image_b3hw: Float[Tensor, "b 3 h w"] = image.to(dtype=self.backbone.mean.dtype) / 255.0
         else:
-            image_b3hw = image.to(dtype=torch.float32)
+            image_b3hw = image.to(dtype=self.backbone.mean.dtype)
 
         valid_b1hw: torch.Tensor = (
             torch.isfinite(prompt_depth)
@@ -117,7 +135,7 @@ class ZipDepthPrompt(nn.Module):
             torch.zeros_like(prompt_depth),
         )
 
-        normalized_image_b3hw: Float32[Tensor, "b 3 h w"] = (image_b3hw - self.backbone.mean) / self.backbone.std
+        normalized_image_b3hw: Float[Tensor, "b 3 h w"] = (image_b3hw - self.backbone.mean) / self.backbone.std
         encoder_output: EncoderOutput = self.backbone.encoder(normalized_image_b3hw)
         stem_half_bchw: Float[Tensor, "b c_half h_half w_half"] = encoder_output[0]
         encoder_features: FeaturePyramid = encoder_output[1]
@@ -128,27 +146,27 @@ class ZipDepthPrompt(nn.Module):
 
         decoder = self.backbone.decoder
         f4_bchw: Float[Tensor, "b 288 h_thirtysecond w_thirtysecond"] = decoder.proj4(c4_bchw)
-        prompt4_b1hw: Float32[Tensor, "b 1 h_thirtysecond w_thirtysecond"] = F.interpolate(
+        prompt4_b1hw: Float[Tensor, "b 1 h_thirtysecond w_thirtysecond"] = F.interpolate(
             normalized_prompt_b1hw, size=f4_bchw.shape[-2:], mode="bilinear", align_corners=False
-        )
+        ).to(dtype=f4_bchw.dtype)
         f4_bchw = f4_bchw + self.prompt_branches[0](prompt4_b1hw)
 
         f3_bchw: Float[Tensor, "b 192 h_sixteenth w_sixteenth"] = decoder.fuse3(c3_bchw, f4_bchw)
-        prompt3_b1hw: Float32[Tensor, "b 1 h_sixteenth w_sixteenth"] = F.interpolate(
+        prompt3_b1hw: Float[Tensor, "b 1 h_sixteenth w_sixteenth"] = F.interpolate(
             normalized_prompt_b1hw, size=f3_bchw.shape[-2:], mode="bilinear", align_corners=False
-        )
+        ).to(dtype=f3_bchw.dtype)
         f3_bchw = f3_bchw + self.prompt_branches[1](prompt3_b1hw)
 
         f2_bchw: Float[Tensor, "b 144 h_eighth w_eighth"] = decoder.fuse2(c2_bchw, f3_bchw)
-        prompt2_b1hw: Float32[Tensor, "b 1 h_eighth w_eighth"] = F.interpolate(
+        prompt2_b1hw: Float[Tensor, "b 1 h_eighth w_eighth"] = F.interpolate(
             normalized_prompt_b1hw, size=f2_bchw.shape[-2:], mode="bilinear", align_corners=False
-        )
+        ).to(dtype=f2_bchw.dtype)
         f2_bchw = f2_bchw + self.prompt_branches[2](prompt2_b1hw)
 
         f1_bchw: Float[Tensor, "b 96 h_quarter w_quarter"] = decoder.fuse1(c1_bchw, f2_bchw)
-        prompt1_b1hw: Float32[Tensor, "b 1 h_quarter w_quarter"] = F.interpolate(
+        prompt1_b1hw: Float[Tensor, "b 1 h_quarter w_quarter"] = F.interpolate(
             normalized_prompt_b1hw, size=f1_bchw.shape[-2:], mode="bilinear", align_corners=False
-        )
+        ).to(dtype=f1_bchw.dtype)
         f1_bchw = f1_bchw + self.prompt_branches[3](prompt1_b1hw)
 
         f_half_bchw: Float[Tensor, "b 32 h_half w_half"] = decoder.fuse_half(stem_half_bchw, f1_bchw)
@@ -156,7 +174,7 @@ class ZipDepthPrompt(nn.Module):
         depth_logits_b1hw: Float[Tensor, "b 1 h w"] = decoder.convex_up._forward_unfold(f_half_bchw, depth_logits_half_b1hw)
         normalized_depth_b1hw: Float[Tensor, "b 1 h w"] = torch.sigmoid(depth_logits_b1hw)
         metric_depth_b1hw: Float[Tensor, "b 1 h w"] = normalized_depth_b1hw * span_b111 + min_depth_b111
-        return metric_depth_b1hw
+        return metric_depth_b1hw, min_depth_b111, max_depth_b111
 
     def fuse_for_inference(self) -> Self:
         """Fuse the released ZipDepth backbone in place and enter eval mode."""
