@@ -17,7 +17,7 @@ from torch import nn
 from monopriors.third_party.liteanystereo.liteanystereov2 import build_liteanystereo
 from monopriors.third_party.liteanystereo.padding import InputPadder
 
-from .base_stereo_depth import BaseStereoPredictor, StereoDepthPrediction, disparity_to_metric_depth
+from .base_stereo_depth import BaseStereoPredictor
 
 LAS2ModelSize: TypeAlias = Literal["s", "m", "l", "h"]
 
@@ -71,16 +71,3 @@ class LiteAnyStereoPredictor(BaseStereoPredictor[nn.Module]):
         with torch.no_grad():
             disparity_11hw: Float32[torch.Tensor, "1 1 hp wp"] = self.model(padded[0], padded[1], max_disp=self.max_disp, test_mode=True)
         return rearrange(padder.unpad(disparity_11hw.float()), "1 1 h w -> h w").cpu().numpy()
-
-    def __call__(
-        self,
-        left_rgb: UInt8[np.ndarray, "h w 3"],
-        right_rgb: UInt8[np.ndarray, "h w 3"],
-        K_33: Float32[np.ndarray, "3 3"] | None = None,
-        baseline_m: float | None = None,
-    ) -> StereoDepthPrediction:
-        disparity_hw: Float32[np.ndarray, "h w"] = self.infer_disparity(left_rgb, right_rgb)
-        depth_hw: Float32[np.ndarray, "h w"] | None = None
-        if K_33 is not None and baseline_m is not None:
-            depth_hw = disparity_to_metric_depth(disparity_hw, float(K_33[0, 0]), baseline_m)
-        return StereoDepthPrediction(disparity=disparity_hw, depth_meters=depth_hw, K_33=K_33, baseline_m=baseline_m)

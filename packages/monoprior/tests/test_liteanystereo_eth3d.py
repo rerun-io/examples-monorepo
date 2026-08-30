@@ -40,4 +40,4 @@ def test_eth3d_playground_bad1(model_size: str, max_bad1_percent: float) -> None
     error_hw = np.abs(pred.disparity - gt_hw)
     bad1_percent = 100.0 * float((error_hw[valid_hw] > 1.0).mean())
     assert bad1_percent < max_bad1_percent, f"LAS2-{model_size.upper()} bad1 {bad1_percent:.2f}%"
-    assert pred.depth_meters is not None and np.nanmedian(pred.depth_meters[pred.depth_meters > 0]) < 50.0
+    assert np.nanmedian(pred.depth_meters[pred.depth_meters > 0]) < 50.0
