@@ -13,6 +13,7 @@ from typing import Any, cast
 
 import torch
 import torch.distributed as dist
+from monopriors.models.depth_completion.zipdepth_prompt import ZipDepthPrompt, load_zipdepth_prompt
 from monopriors.models.relative_depth.zipdepth import download_zipdepth_checkpoint
 from monopriors.third_party.zipdepth.architecture import ZipDepth, create_model
 from monopriors.third_party.zipdepth.model_utils import StateDict, strip_state_dict_prefixes
@@ -23,7 +24,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from zipdepth.catalog.instrument import InstrumentedLoader
 from zipdepth.catalog.segments import DEFAULT_CATALOG_URL, PromptDACatalog, load_promptda_catalog
-from zipdepth.catalog.targets import AugmentPolicy
+from zipdepth.catalog.targets import AugmentPolicy, TargetMode
 from zipdepth.training.distributed import barrier, cleanup_distributed, fix_state_dict_prefix, print_main, setup_distributed
 from zipdepth.training.trainer import ZipDepthTrainer
 
@@ -50,6 +51,8 @@ class TrainCatalogConfig:
     """Training image width after augmentation."""
     batch_size: int = 8
     """Samples per rank and optimizer step."""
+    target_mode: TargetMode = "metric"
+    """Prompted metric distillation by default; ``ssi`` retains the legacy RGB-only lane."""
     total_steps: int = 70_000
     """Optimizer steps in the run; the OneCycle schedule spans exactly this many. 70k is about one pass over the 875-segment train split at batch 8 (70.5k steps measured 2026-08-28)."""
     shuffle_buffer_size: int = 256
@@ -323,6 +326,8 @@ def main(
             raise ValueError("num_producers and prefetch_samples must be positive")
         if config.save_every_steps < 0:
             raise ValueError("save_every_steps must be non-negative")
+        if config.target_mode not in ("ssi", "metric"):
+            raise ValueError(f"unknown target mode {config.target_mode!r}")
         torch.backends.cudnn.benchmark = True
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
@@ -381,6 +386,7 @@ def main(
                 AugmentPolicy(),
                 config.min_depth_span,
                 device,
+                target_mode=config.target_mode,
             ),
             shuffle_buffer_size=config.shuffle_buffer_size,
             seed=config.seed,
@@ -403,20 +409,31 @@ def main(
             writer=writer if is_main else None,
         )
 
-        model: ZipDepth = create_model(variant="base", upsample_unfold=bool(model_config.get("upsample_unfold", True)))
         initialization: Path | None = config.init_checkpoint
         if initialization is None and not config.from_scratch and config.resume is None:
             initialization = download_zipdepth_checkpoint()
-        if initialization is not None:
-            print_main(f"Loading trainable initialization: {initialization}", rank)
-            load_trainable_checkpoint(model, initialization)
+        if config.target_mode == "metric":
+            if initialization is not None:
+                print_main(f"Loading prompted trainable initialization: {initialization}", rank)
+                model: nn.Module = load_zipdepth_prompt(initialization)
+            else:
+                model = ZipDepthPrompt(
+                    create_model(variant="base", upsample_unfold=bool(model_config.get("upsample_unfold", True)))
+                )
+                print_main("Training ZipDepth-PromptDA from scratch", rank)
         else:
-            print_main("Training ZipDepth-base from scratch", rank)
+            relative_model: ZipDepth = create_model(variant="base", upsample_unfold=bool(model_config.get("upsample_unfold", True)))
+            if initialization is not None:
+                print_main(f"Loading trainable initialization: {initialization}", rank)
+                load_trainable_checkpoint(relative_model, initialization)
+            else:
+                print_main("Training ZipDepth-base from scratch", rank)
+            model = relative_model
         if config.freeze_bn and not config.from_scratch:
             pinned: int = pin_batchnorm_eval(model)
             print_main(f"Pinned {pinned} BatchNorm modules to eval (released running stats)", rank)
         model = model.to(device)
-        wrapped_model: ZipDepth | DDP = (
+        wrapped_model: nn.Module | DDP = (
             DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False) if is_distributed else model
         )
 
@@ -441,6 +458,7 @@ def main(
             amp_dtype=str(amp_config.get("dtype", "bfloat16")),
             alpha_ssi=float(loss_config.get("alpha_ssi", 1.0)),
             alpha_grad=float(loss_config.get("alpha_grad", 2.0)),
+            target_mode=config.target_mode,
         )
         if step_loss_callback is not None:
             trainer.criterion = cast(Any, _LossObserver(trainer.criterion, step_loss_callback))

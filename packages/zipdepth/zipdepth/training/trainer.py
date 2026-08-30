@@ -4,6 +4,7 @@ import glob
 import os
 import time
 from contextlib import nullcontext, suppress
+from typing import Literal
 
 import torch
 from torch.profiler import ProfilerActivity, profile, schedule, tensorboard_trace_handler
@@ -17,7 +18,7 @@ except ImportError:
 
 from monopriors.third_party.zipdepth.model_utils import strip_state_dict_prefixes
 
-from zipdepth.loss import ZipDepthLoss
+from zipdepth.loss import MetricDepthLoss, ZipDepthLoss
 from zipdepth.training.visualization import depth_to_spectral
 
 
@@ -57,6 +58,7 @@ class ZipDepthTrainer:
                 amp_dtype='bfloat16',
                 alpha_ssi: float = 1.0,
                 alpha_grad: float = 2.0,
+                target_mode: Literal['ssi', 'metric'] = 'ssi',
                 ):
         """
         Args:
@@ -81,6 +83,7 @@ class ZipDepthTrainer:
                        or 'float16' (requires GradScaler, narrower range)
             alpha_ssi: Weight for SSI loss component
             alpha_grad: Weight for gradient loss component
+            target_mode: Relative SSI or prompted metric training lane
         """
         self.student = student.to(device)
         self.train_loader = train_loader
@@ -106,9 +109,16 @@ class ZipDepthTrainer:
         self._snapshot_start = None
         self._restart_interval = 1000
         self._loader_config = None
+        if target_mode not in ('ssi', 'metric'):
+            raise ValueError(f"unknown target mode {target_mode!r}")
+        self.target_mode = target_mode
 
         # Loss function initialization
-        self.criterion = ZipDepthLoss(alpha_ssi=alpha_ssi, alpha_grad=alpha_grad).to(device)
+        self.criterion = (
+            MetricDepthLoss(gradient_weight=0.5, grad_scales=4)
+            if target_mode == 'metric'
+            else ZipDepthLoss(alpha_ssi=alpha_ssi, alpha_grad=alpha_grad)
+        ).to(device)
 
         # GradScaler only needed for FP16 — BF16 has FP32-range exponents so no overflow
         self.scaler = (
@@ -297,18 +307,26 @@ class ZipDepthTrainer:
                 images = batch['image'].to(self.device, non_blocking=True)
                 images = images.float() / 255.0
 
-                teacher_depth = batch['depth'].to(self.device, non_blocking=True)
-                teacher_depth = teacher_depth.float().div_(256.0)
+                prompt_depth = None
+                if self.target_mode == 'metric':
+                    teacher_depth = batch['target_depth'].to(self.device, non_blocking=True).float()
+                    mask = batch['target_valid'].to(self.device, non_blocking=True)
+                    raw_prompt_depth = batch['prompt_depth'].to(self.device, non_blocking=True).float()
+                    prompt_valid = batch['prompt_valid'].to(self.device, non_blocking=True)
+                    prompt_depth = torch.where(prompt_valid, raw_prompt_depth, torch.zeros_like(raw_prompt_depth))
+                else:
+                    teacher_depth = batch['depth'].to(self.device, non_blocking=True)
+                    teacher_depth = teacher_depth.float().div_(256.0)
 
-                # Local addition: sparse catalog targets carry an explicit validity mask.
-                mask = batch.get('mask')
-                if mask is not None:
-                    mask = mask.to(self.device, non_blocking=True).float()
+                    # Local addition: sparse catalog targets carry an explicit validity mask.
+                    mask = batch.get('mask')
+                    if mask is not None:
+                        mask = mask.to(self.device, non_blocking=True).float()
 
                 del batch
 
                 with torch.amp.autocast('cuda', dtype=self.amp_dtype, enabled=self.use_amp):
-                    student_depth = self.student(images)
+                    student_depth = self.student(images, prompt_depth) if prompt_depth is not None else self.student(images)
                     loss, loss_dict = self.criterion(
                         pred=student_depth,
                         target=teacher_depth,
@@ -345,6 +363,7 @@ class ZipDepthTrainer:
                     break
 
                 avg_loss = total_loss / processed_batches
+                primary_name = 'l1' if self.target_mode == 'metric' else 'ssi'
 
                 if not disable_tqdm:
                     pbar.update(1)
@@ -353,7 +372,7 @@ class ZipDepthTrainer:
                         'B': f"{batch_idx+1}/{num_batches}",
                         'loss': f"{loss_value:.3f}",
                         'avg_loss': f"{avg_loss:.3f}",
-                        'ssi': f"{loss_dict['ssi']:.3f}",
+                        primary_name: f"{loss_dict[primary_name]:.3f}",
                     })
 
                 # Logging
@@ -361,7 +380,7 @@ class ZipDepthTrainer:
                     if self.global_step % 750 == 0:
                         self.writer.add_scalar('train/loss', loss.item(), self.global_step)
                         self.writer.add_scalar('train/lr', self.optimizer.param_groups[0]['lr'], self.global_step)
-                        self.writer.add_scalar('train/loss_ssi', loss_dict['ssi'], self.global_step)
+                        self.writer.add_scalar(f'train/loss_{primary_name}', loss_dict[primary_name], self.global_step)
                         self.writer.add_scalar('train/loss_grad', loss_dict['grad'], self.global_step)
 
                     if self.global_step % 750 == 0:
@@ -388,7 +407,7 @@ class ZipDepthTrainer:
                     print(f'\n  -> Checkpoint saved at step {self.global_step}')
                     self.cleanup_step_checkpoints()
 
-                del student_depth, teacher_depth, mask, loss
+                del student_depth, teacher_depth, mask, prompt_depth, loss
 
                 # Advance profiler schedule (no-op after schedule completes or when profiling disabled)
                 if prof is not None:

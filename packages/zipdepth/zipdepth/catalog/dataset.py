@@ -14,7 +14,7 @@ import numpy as np
 import pyarrow as pa
 import torch
 from arkitscenes_download.ingest.cells import landscape_quarter_turns
-from arkitscenes_download.ingest.paths import DEPTH_PROMPTDA, TIMELINE, VIDEO_WIDE
+from arkitscenes_download.ingest.paths import CONFIDENCE, DEPTH, DEPTH_PROMPTDA, TIMELINE, VIDEO_WIDE
 from arkitscenes_download.ingest.timestamps import match_exact_timestamps, table_timestamps
 from beartype.roar import BeartypeException
 from datafusion import col
@@ -32,6 +32,10 @@ from zipdepth.catalog.threaded import iter_threaded
 
 PROMPTDA_BLOB_COLUMN: str = f"/{DEPTH_PROMPTDA}:EncodedDepthImage:blob"
 """Catalog column containing uint16 PromptDA PNG blobs."""
+PROMPT_BLOB_COLUMN: str = f"/{DEPTH}:EncodedDepthImage:blob"
+"""Catalog column containing uint16 ARKit LiDAR prompt PNG blobs."""
+CONFIDENCE_COLUMN: str = f"/{CONFIDENCE}:SegmentationImage:buffer"
+"""Catalog column containing flattened uint8 ARKit depth confidence."""
 NATIVE_VIDEO_FPS: int = 60
 """Nominal frame rate used when wrapping the segment's encoded AV1 packets."""
 ItemT = TypeVar("ItemT")
@@ -78,12 +82,13 @@ class _ProducerSlot:
     """Producer thread currently driving this builder; None when idle."""
 
 
-def promptda_blob_views(column: pa.ChunkedArray) -> list[UInt8[ndarray, "n_bytes"]]:
-    """Return byte views into each Arrow chunk for one blob instance per row.
+def component_u8_views(column: pa.ChunkedArray, column_name: str) -> list[UInt8[ndarray, "n_bytes"]]:
+    """Return byte views into each Arrow chunk for one uint8 component instance per row.
 
     Args:
-        column: PromptDA ``list<list<uint8>>`` component column. Each outer row
+        column: Rerun ``list<list<uint8>>`` component column. Each outer row
             must contain exactly one component instance.
+        column_name: Fully-qualified column name used in validation errors.
 
     Returns:
         One zero-copy uint8 view into its source chunk's values buffer per row.
@@ -92,30 +97,30 @@ def promptda_blob_views(column: pa.ChunkedArray) -> list[UInt8[ndarray, "n_bytes
     chunk: pa.Array
     for chunk in column.chunks:
         if not isinstance(chunk, pa.ListArray):
-            raise ValueError(f"{PROMPTDA_BLOB_COLUMN}: expected list rows, got {chunk.type}")
+            raise ValueError(f"{column_name}: expected list rows, got {chunk.type}")
         if chunk.offset != 0:
-            raise ValueError(f"{PROMPTDA_BLOB_COLUMN}: outer chunk offset must be zero, got {chunk.offset}")
+            raise ValueError(f"{column_name}: outer chunk offset must be zero, got {chunk.offset}")
         if chunk.null_count != 0:
-            raise ValueError(f"{PROMPTDA_BLOB_COLUMN}: outer rows must not be null")
+            raise ValueError(f"{column_name}: outer rows must not be null")
         outer_offsets: Shaped[ndarray, "n_rows_plus_one"] = chunk.offsets.to_numpy()
         if not bool(np.all(np.diff(outer_offsets) == 1)):
-            raise ValueError(f"{PROMPTDA_BLOB_COLUMN}: each row must contain exactly one blob instance")
+            raise ValueError(f"{column_name}: each row must contain exactly one component instance")
 
         inner: pa.Array = chunk.values
         if not isinstance(inner, pa.ListArray):
-            raise ValueError(f"{PROMPTDA_BLOB_COLUMN}: expected list blob instances, got {inner.type}")
+            raise ValueError(f"{column_name}: expected list component instances, got {inner.type}")
         if inner.offset != 0:
-            raise ValueError(f"{PROMPTDA_BLOB_COLUMN}: inner array offset must be zero, got {inner.offset}")
+            raise ValueError(f"{column_name}: inner array offset must be zero, got {inner.offset}")
         if inner.null_count != 0:
-            raise ValueError(f"{PROMPTDA_BLOB_COLUMN}: blob instances must not be null")
+            raise ValueError(f"{column_name}: component instances must not be null")
         data: pa.Array = inner.values
         if not pa.types.is_uint8(data.type):
-            raise ValueError(f"{PROMPTDA_BLOB_COLUMN}: expected uint8 blob values, got {data.type}")
+            raise ValueError(f"{column_name}: expected uint8 component values, got {data.type}")
         if data.null_count != 0:
-            raise ValueError(f"{PROMPTDA_BLOB_COLUMN}: blob values must not be null")
+            raise ValueError(f"{column_name}: component values must not be null")
         data_buffer: pa.Buffer | None = data.buffers()[1]
         if data_buffer is None:
-            raise ValueError(f"{PROMPTDA_BLOB_COLUMN}: blob values have no Arrow data buffer")
+            raise ValueError(f"{column_name}: component values have no Arrow data buffer")
         all_bytes_n: UInt8[ndarray, "all_bytes"] = np.frombuffer(data_buffer, dtype=np.uint8, offset=data.offset, count=len(data))
         inner_offsets: Shaped[ndarray, "n_instances_plus_one"] = inner.offsets.to_numpy()
         row: int
@@ -125,6 +130,11 @@ def promptda_blob_views(column: pa.ChunkedArray) -> list[UInt8[ndarray, "n_bytes
             end: int = int(inner_offsets[instance + 1]) - data.offset
             views.append(all_bytes_n[start:end])
     return views
+
+
+def promptda_blob_views(column: pa.ChunkedArray) -> list[UInt8[ndarray, "n_bytes"]]:
+    """Return zero-copy PromptDA blob views, retaining the established public helper."""
+    return component_u8_views(column, PROMPTDA_BLOB_COLUMN)
 
 
 class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
@@ -228,9 +238,10 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
         started: float = perf_counter()
         table: pa.Table = (
             self._dataset_entry.filter_segments(segment_id)
+            .filter_contents([f"/{DEPTH_PROMPTDA}", f"/{DEPTH}", f"/{CONFIDENCE}"])
             .reader(index=TIMELINE, fill_latest_at=True)
             .filter(col(f'"{PROMPTDA_BLOB_COLUMN}"').is_not_null())
-            .select(TIMELINE, PROMPTDA_BLOB_COLUMN)
+            .select(TIMELINE, PROMPTDA_BLOB_COLUMN, PROMPT_BLOB_COLUMN, CONFIDENCE_COLUMN)
             .sort(TIMELINE)
             .to_arrow_table()
         )
@@ -240,8 +251,15 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
 
         all_times_n: Shaped[ndarray, "n_rows"] = table_timestamps(table)
         chosen_times_n: Shaped[ndarray, "n_chosen"] = all_times_n[:: self._frame_stride]
-        all_blobs: list[UInt8[ndarray, "n_bytes"]] = promptda_blob_views(table.column(PROMPTDA_BLOB_COLUMN))
-        chosen_blobs: list[UInt8[ndarray, "n_bytes"]] = all_blobs[:: self._frame_stride]
+        target_blobs: list[UInt8[ndarray, "target_n_bytes"]] = component_u8_views(table.column(PROMPTDA_BLOB_COLUMN), PROMPTDA_BLOB_COLUMN)[
+            :: self._frame_stride
+        ]
+        prompt_blobs: list[UInt8[ndarray, "prompt_n_bytes"]] = component_u8_views(table.column(PROMPT_BLOB_COLUMN), PROMPT_BLOB_COLUMN)[
+            :: self._frame_stride
+        ]
+        confidences: list[UInt8[ndarray, "confidence_n_values"]] = component_u8_views(table.column(CONFIDENCE_COLUMN), CONFIDENCE_COLUMN)[
+            :: self._frame_stride
+        ]
 
         started = perf_counter()
         decoder_result: tuple[Shaped[ndarray, "n_packets"], list[bytes], list[bool], VideoDecoder] = open_segment_decoder(
@@ -265,10 +283,13 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
             + self._segment_seed_index[segment_id] * 100_000_007
         )
 
-        blob_u8: UInt8[ndarray, "n_bytes"]
+        target_blob_u8: UInt8[ndarray, "target_n_bytes"]
+        prompt_blob_u8: UInt8[ndarray, "prompt_n_bytes"]
+        confidence_u8: UInt8[ndarray, "confidence_n_values"]
         packet_index: np.int64
         first_decode_error_reported: bool = False
-        for sample_index, (blob_u8, packet_index) in enumerate(zip(chosen_blobs, packet_indices_n, strict=True)):
+        sample_inputs = zip(target_blobs, prompt_blobs, confidences, packet_indices_n, strict=True)
+        for sample_index, (target_blob_u8, prompt_blob_u8, confidence_u8, packet_index) in enumerate(sample_inputs):
             try:
                 started = perf_counter()
                 frame_chw: UInt8[Tensor, "3 stored_h stored_w"] = decoder.get_frame_at(int(packet_index)).data
@@ -284,7 +305,9 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
                 continue
             sample: dict[str, Tensor] | None = builder(
                 frame_chw,
-                blob_u8,
+                target_blob_u8,
+                prompt_blob_u8,
+                confidence_u8,
                 quarter_turns,
                 (segment_seed + sample_index) % (2**63 - 1),
             )

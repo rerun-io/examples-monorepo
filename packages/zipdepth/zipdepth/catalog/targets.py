@@ -2,7 +2,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import Any, Literal, TypeAlias
 
 import albumentations as A
 import cv2
@@ -30,6 +30,7 @@ _DepthTransform: TypeAlias = Callable[
     [UInt8[ndarray, "h w 3"], Float32[ndarray, "h w"]],
     tuple[UInt8[ndarray, "out_h out_w 3"], Float32[ndarray, "out_h out_w"] | None],
 ]
+TargetMode: TypeAlias = Literal["ssi", "metric"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,7 +91,7 @@ def build_train_transform(height: int, width: int, policy: AugmentPolicy) -> Alb
     color augmentation but resizes deterministically to the training size.
     """
     return AlbumentationsWrapper(
-        A.Compose(
+        A.ReplayCompose(
             [
                 A.Resize(height=height, width=width, interpolation=cv2.INTER_LINEAR),
                 A.HorizontalFlip(p=policy.flip_p),
@@ -106,11 +107,74 @@ def build_eval_transform(height: int, width: int) -> AlbumentationsWrapper:
     """Build deterministic aligned RGB/mask resizing for evaluation."""
     if height <= 0 or width <= 0:
         raise ValueError("evaluation height and width must be positive")
-    transform: A.Compose = A.Compose(
+    transform: A.ReplayCompose = A.ReplayCompose(
         [A.Resize(height=height, width=width, interpolation=cv2.INTER_LINEAR, mask_interpolation=cv2.INTER_NEAREST)],
         additional_targets={"mask": "mask"},
     )
     return AlbumentationsWrapper(transform)
+
+
+def _replay_applied_horizontal_flip(replay: dict[str, Any]) -> bool:
+    """Return whether an Albumentations replay applied a horizontal flip."""
+    transforms: Any = replay.get("transforms", [])
+    if not isinstance(transforms, list):
+        return False
+    transform: Any
+    for transform in transforms:
+        if not isinstance(transform, dict):
+            continue
+        class_name: str = str(transform.get("__class_fullname__", ""))
+        if class_name.endswith("HorizontalFlip") and bool(transform.get("applied", False)):
+            return True
+        if _replay_applied_horizontal_flip(transform):
+            return True
+    return False
+
+
+def _transform_with_flip_state(
+    rgb_hw3: UInt8[ndarray, "h w 3"],
+    target_hw: Float32[ndarray, "h w"],
+    transform: _DepthTransform,
+) -> tuple[UInt8[ndarray, "out_h out_w 3"], Float32[ndarray, "out_h out_w"], bool]:
+    """Apply RGB/target augmentation and report the replayed horizontal flip."""
+    if not isinstance(transform, AlbumentationsWrapper) or not isinstance(transform.transform, A.ReplayCompose):
+        transformed: tuple[UInt8[ndarray, "out_h out_w 3"], Float32[ndarray, "out_h out_w"] | None] = transform(rgb_hw3, target_hw)
+        if transformed[1] is None:
+            raise RuntimeError("training transform dropped the depth target")
+        return transformed[0], transformed[1], False
+    result: dict[str, Any] = transform.transform(image=rgb_hw3, mask=target_hw)
+    augmented_rgb_hw3: UInt8[ndarray, "out_h out_w 3"] = result["image"]
+    augmented_target_hw: Float32[ndarray, "out_h out_w"] = result["mask"]
+    replay: Any = result.get("replay")
+    if not isinstance(replay, dict):
+        raise RuntimeError("ReplayCompose did not return augmentation metadata")
+    return augmented_rgb_hw3, augmented_target_hw, _replay_applied_horizontal_flip(replay)
+
+
+def _prompt_tensors(
+    prompt_depth_mm_hw: UInt16[ndarray, "192 256"],
+    prompt_confidence_hw: UInt8[ndarray, "192 256"],
+    *,
+    flipped: bool,
+) -> dict[str, Tensor]:
+    """Convert one oriented native-grid LiDAR prompt to collatable tensors."""
+    if prompt_depth_mm_hw.shape != (192, 256) or prompt_confidence_hw.shape != (192, 256):
+        raise ValueError(
+            f"oriented prompt depth and confidence must both be 192x256, got {prompt_depth_mm_hw.shape} and {prompt_confidence_hw.shape}"
+        )
+    prompt_depth_m_hw: Float32[ndarray, "192 256"] = prompt_depth_mm_hw.astype(np.float32) / 1000.0
+    prompt_valid_hw: Bool[ndarray, "192 256"] = (
+        (prompt_confidence_hw >= 1) & (prompt_depth_mm_hw >= MIN_DEPTH_MM) & (prompt_depth_mm_hw <= MAX_DEPTH_MM)
+    )
+    if flipped:
+        prompt_depth_m_hw = np.flip(prompt_depth_m_hw, axis=-1)
+        prompt_valid_hw = np.flip(prompt_valid_hw, axis=-1)
+    prompt_depth_1hw: Float32[ndarray, "1 192 256"] = np.ascontiguousarray(prompt_depth_m_hw[None])
+    prompt_valid_1hw: Bool[ndarray, "1 192 256"] = np.ascontiguousarray(prompt_valid_hw[None])
+    return {
+        "prompt_depth": torch.from_numpy(prompt_depth_1hw),
+        "prompt_valid": torch.from_numpy(prompt_valid_1hw),
+    }
 
 
 def depth_span_ratio(depth_mm_hw: UInt16[ndarray, "h w"]) -> float:
@@ -170,7 +234,12 @@ def depth_span_ratio_cuda(depth_mm_hw: Shaped[Tensor, "h w"]) -> Float32[Tensor,
 
 
 def build_training_sample(
-    rgb_hw3: UInt8[ndarray, "h w 3"], depth_mm_hw: UInt16[ndarray, "h w"], transform: _DepthTransform
+    rgb_hw3: UInt8[ndarray, "h w 3"],
+    depth_mm_hw: UInt16[ndarray, "h w"],
+    transform: _DepthTransform,
+    *,
+    prompt_depth_mm_hw: UInt16[ndarray, "192 256"] | None = None,
+    prompt_confidence_hw: UInt8[ndarray, "192 256"] | None = None,
 ) -> dict[str, Tensor]:
     """Augment aligned RGB and inverse depth, then build one collatable sample.
 
@@ -191,11 +260,11 @@ def build_training_sample(
         RuntimeError: If the transform drops the depth target.
     """
     inverse_depth_hw: Float32[ndarray, "h w"] = inverse_depth_from_mm(depth_mm_hw)
-    transformed: tuple[UInt8[ndarray, "out_h out_w 3"], Float32[ndarray, "out_h out_w"] | None] = transform(rgb_hw3, inverse_depth_hw)
+    transformed: tuple[UInt8[ndarray, "out_h out_w 3"], Float32[ndarray, "out_h out_w"], bool] = _transform_with_flip_state(
+        rgb_hw3, inverse_depth_hw, transform
+    )
     augmented_rgb_hw3: UInt8[ndarray, "out_h out_w 3"] = transformed[0]
-    augmented_inverse_depth_hw: Float32[ndarray, "out_h out_w"] | None = transformed[1]
-    if augmented_inverse_depth_hw is None:
-        raise RuntimeError("training transform dropped the inverse-depth target")
+    augmented_inverse_depth_hw: Float32[ndarray, "out_h out_w"] = transformed[1]
     quantized_hw: UInt16[ndarray, "out_h out_w"] = quantize_inverse_depth(augmented_inverse_depth_hw)
     image_chw: UInt8[ndarray, "3 out_h out_w"] = np.ascontiguousarray(np.moveaxis(augmented_rgb_hw3, -1, 0))
     depth_1hw: UInt16[ndarray, "1 out_h out_w"] = np.ascontiguousarray(quantized_hw[None])
@@ -203,7 +272,60 @@ def build_training_sample(
     image_tensor: UInt8[Tensor, "3 out_h out_w"] = torch.from_numpy(image_chw)
     depth_tensor: UInt16[Tensor, "1 out_h out_w"] = torch.from_numpy(depth_1hw)
     mask_tensor: Bool[Tensor, "1 out_h out_w"] = torch.from_numpy(mask_1hw)
-    return {"image": image_tensor, "depth": depth_tensor, "mask": mask_tensor}
+    sample: dict[str, Tensor] = {"image": image_tensor, "depth": depth_tensor, "mask": mask_tensor}
+    if (prompt_depth_mm_hw is None) != (prompt_confidence_hw is None):
+        raise ValueError("prompt depth and confidence must be provided together")
+    if prompt_depth_mm_hw is not None and prompt_confidence_hw is not None:
+        sample.update(_prompt_tensors(prompt_depth_mm_hw, prompt_confidence_hw, flipped=transformed[2]))
+    return sample
+
+
+def build_metric_training_sample(
+    rgb_hw3: UInt8[ndarray, "h w 3"],
+    target_depth_mm_hw: UInt16[ndarray, "h w"],
+    prompt_depth_mm_hw: UInt16[ndarray, "192 256"],
+    prompt_confidence_hw: UInt8[ndarray, "192 256"],
+    transform: _DepthTransform,
+) -> dict[str, Tensor]:
+    """Build a metric prompted sample without inverse-depth quantization.
+
+    Args:
+        rgb_hw3: Oriented uint8 RGB with shape ``(H, W, 3)``.
+        target_depth_mm_hw: Oriented dense PromptDA depth in millimetres with
+            shape ``(H, W)``.
+        prompt_depth_mm_hw: Oriented ARKit LiDAR depth in millimetres with
+            native shape ``(192, 256)``.
+        prompt_confidence_hw: Oriented ARKit confidence with native shape
+            ``(192, 256)``.
+        transform: Replayable aligned RGB/target augmentation.
+
+    Returns:
+        A dictionary with uint8 ``image``; float32 metre ``target_depth`` and
+        ``prompt_depth``; and bool ``target_valid`` and ``prompt_valid``.
+    """
+    target_valid_hw: Bool[ndarray, "h w"] = (target_depth_mm_hw >= MIN_DEPTH_MM) & (target_depth_mm_hw <= MAX_DEPTH_MM)
+    target_depth_m_hw: Float32[ndarray, "h w"] = np.where(
+        target_valid_hw,
+        target_depth_mm_hw.astype(np.float32) / 1000.0,
+        0.0,
+    ).astype(np.float32)
+    transformed: tuple[UInt8[ndarray, "out_h out_w 3"], Float32[ndarray, "out_h out_w"], bool] = _transform_with_flip_state(
+        rgb_hw3, target_depth_m_hw, transform
+    )
+    augmented_rgb_hw3: UInt8[ndarray, "out_h out_w 3"] = transformed[0]
+    augmented_target_depth_hw: Float32[ndarray, "out_h out_w"] = transformed[1]
+    image_chw: UInt8[ndarray, "3 out_h out_w"] = np.ascontiguousarray(np.moveaxis(augmented_rgb_hw3, -1, 0))
+    target_depth_1hw: Float32[ndarray, "1 out_h out_w"] = np.ascontiguousarray(augmented_target_depth_hw[None])
+    target_valid_1hw: Bool[ndarray, "1 out_h out_w"] = np.ascontiguousarray(
+        (target_depth_1hw >= MIN_DEPTH_MM / 1000.0) & (target_depth_1hw <= MAX_DEPTH_MM / 1000.0)
+    )
+    sample: dict[str, Tensor] = {
+        "image": torch.from_numpy(image_chw),
+        "target_depth": torch.from_numpy(target_depth_1hw),
+        "target_valid": torch.from_numpy(target_valid_1hw),
+    }
+    sample.update(_prompt_tensors(prompt_depth_mm_hw, prompt_confidence_hw, flipped=transformed[2]))
+    return sample
 
 
 def build_training_sample_cuda(
@@ -213,6 +335,10 @@ def build_training_sample_cuda(
     out_hw: tuple[int, int],
     generator: torch.Generator,
     policy: AugmentPolicy,
+    *,
+    prompt_depth_mm_hw: Shaped[Tensor, "prompt_h prompt_w"] | None = None,
+    prompt_confidence_hw: UInt8[Tensor, "prompt_h prompt_w"] | None = None,
+    target_mode: TargetMode = "ssi",
 ) -> dict[str, Tensor]:
     """Build one augmented training sample without leaving CUDA.
 
@@ -253,9 +379,13 @@ def build_training_sample_cuda(
     rotated_depth_mm_hw: Shaped[Tensor, "rotated_h rotated_w"] = torch.rot90(depth_mm_hw, turns, dims=(-2, -1))
     depth_float_hw: Float32[Tensor, "rotated_h rotated_w"] = rotated_depth_mm_hw.to(dtype=torch.float32)
     valid_hw: Bool[Tensor, "rotated_h rotated_w"] = (depth_float_hw >= MIN_DEPTH_MM) & (depth_float_hw <= MAX_DEPTH_MM)
-    inverse_depth_hw: Float32[Tensor, "rotated_h rotated_w"] = torch.where(
+    if target_mode not in ("ssi", "metric"):
+        raise ValueError(f"unknown target mode {target_mode!r}")
+    if (prompt_depth_mm_hw is None) != (prompt_confidence_hw is None):
+        raise ValueError("prompt depth and confidence must be provided together")
+    target_hw: Float32[Tensor, "rotated_h rotated_w"] = torch.where(
         valid_hw,
-        1000.0 / depth_float_hw,
+        1000.0 / depth_float_hw if target_mode == "ssi" else depth_float_hw / 1000.0,
         torch.zeros_like(depth_float_hw),
     )
     resized_rgb_float_chw: Float32[Tensor, "3 out_h out_w"] = F.interpolate(
@@ -266,18 +396,40 @@ def build_training_sample_cuda(
         antialias=False,
     ).squeeze(0)
     resized_rgb_chw: UInt8[Tensor, "3 out_h out_w"] = torch.round(resized_rgb_float_chw).clamp_(0.0, 255.0).to(dtype=torch.uint8)
-    resized_inverse_depth_hw: Float32[Tensor, "out_h out_w"] = F.interpolate(
-        inverse_depth_hw.unsqueeze(0).unsqueeze(0),
+    resized_target_hw: Float32[Tensor, "out_h out_w"] = F.interpolate(
+        target_hw.unsqueeze(0).unsqueeze(0),
         size=(out_height, out_width),
         mode="nearest",
     ).squeeze(0).squeeze(0)
+    prompt_depth_m_hw: Float32[Tensor, "192 256"] | None = None
+    prompt_valid_hw: Bool[Tensor, "192 256"] | None = None
+    if prompt_depth_mm_hw is not None and prompt_confidence_hw is not None:
+        rotated_prompt_mm_hw: Shaped[Tensor, "oriented_prompt_h oriented_prompt_w"] = torch.rot90(
+            prompt_depth_mm_hw, turns, dims=(-2, -1)
+        )
+        rotated_confidence_hw: UInt8[Tensor, "oriented_prompt_h oriented_prompt_w"] = torch.rot90(
+            prompt_confidence_hw, turns, dims=(-2, -1)
+        )
+        if tuple(rotated_prompt_mm_hw.shape) != (192, 256) or tuple(rotated_confidence_hw.shape) != (192, 256):
+            raise ValueError(
+                f"oriented prompt depth and confidence must both be 192x256, got {tuple(rotated_prompt_mm_hw.shape)} and {tuple(rotated_confidence_hw.shape)}"
+            )
+        prompt_depth_m_hw = rotated_prompt_mm_hw.to(dtype=torch.float32) / 1000.0
+        prompt_valid_hw = (
+            (rotated_confidence_hw >= 1)
+            & (rotated_prompt_mm_hw >= MIN_DEPTH_MM)
+            & (rotated_prompt_mm_hw <= MAX_DEPTH_MM)
+        )
 
     random_values_n: Float32[Tensor, "3"] = torch.rand(3, device=generator.device, generator=generator)
     random_values: list[float] = random_values_n.cpu().tolist()
 
     if random_values[0] < policy.flip_p:
         resized_rgb_chw = torch.flip(resized_rgb_chw, dims=(-1,))
-        resized_inverse_depth_hw = torch.flip(resized_inverse_depth_hw, dims=(-1,))
+        resized_target_hw = torch.flip(resized_target_hw, dims=(-1,))
+        if prompt_depth_m_hw is not None and prompt_valid_hw is not None:
+            prompt_depth_m_hw = torch.flip(prompt_depth_m_hw, dims=(-1,))
+            prompt_valid_hw = torch.flip(prompt_valid_hw, dims=(-1,))
 
     if random_values[1] < policy.channel_shuffle_p:
         channel_order: Int64[Tensor, "3"] = torch.randperm(3, device=generator.device, generator=generator).to(device=rgb_chw.device)
@@ -290,8 +442,19 @@ def build_training_sample_cuda(
         )
         resized_rgb_chw = torch.round(gray_hw).clamp_(0.0, 255.0).to(dtype=torch.uint8).expand_as(resized_rgb_chw)
 
-    quantized_i32_hw: Shaped[Tensor, "out_h out_w"] = torch.round(resized_inverse_depth_hw * INV_DEPTH_SCALE).clamp_(0.0, 65535.0).to(dtype=torch.int32)
-    mask_1hw: Bool[Tensor, "1 out_h out_w"] = (quantized_i32_hw > 0).unsqueeze(0).contiguous()
-    depth_1hw: UInt16[Tensor, "1 out_h out_w"] = quantized_i32_hw.to(dtype=torch.uint16).unsqueeze(0).contiguous()
     image_chw: UInt8[Tensor, "3 out_h out_w"] = resized_rgb_chw.contiguous()
-    return {"image": image_chw, "depth": depth_1hw, "mask": mask_1hw}
+    if target_mode == "ssi":
+        quantized_i32_hw: Shaped[Tensor, "out_h out_w"] = torch.round(resized_target_hw * INV_DEPTH_SCALE).clamp_(0.0, 65535.0).to(dtype=torch.int32)
+        mask_1hw: Bool[Tensor, "1 out_h out_w"] = (quantized_i32_hw > 0).unsqueeze(0).contiguous()
+        depth_1hw: UInt16[Tensor, "1 out_h out_w"] = quantized_i32_hw.to(dtype=torch.uint16).unsqueeze(0).contiguous()
+        sample: dict[str, Tensor] = {"image": image_chw, "depth": depth_1hw, "mask": mask_1hw}
+    else:
+        target_depth_1hw: Float32[Tensor, "1 out_h out_w"] = resized_target_hw.unsqueeze(0).contiguous()
+        target_valid_1hw: Bool[Tensor, "1 out_h out_w"] = (
+            (target_depth_1hw >= MIN_DEPTH_MM / 1000.0) & (target_depth_1hw <= MAX_DEPTH_MM / 1000.0)
+        )
+        sample = {"image": image_chw, "target_depth": target_depth_1hw, "target_valid": target_valid_1hw}
+    if prompt_depth_m_hw is not None and prompt_valid_hw is not None:
+        sample["prompt_depth"] = prompt_depth_m_hw.unsqueeze(0).contiguous()
+        sample["prompt_valid"] = prompt_valid_hw.unsqueeze(0).contiguous()
+    return sample

@@ -20,7 +20,7 @@ from rerun.catalog import DatasetEntry  # noqa: E402
 
 from zipdepth.apis.catalog_throughput import CatalogThroughputConfig  # noqa: E402
 from zipdepth.catalog.builders import CpuSampleBuilder  # noqa: E402
-from zipdepth.catalog.dataset import CatalogPromptDepthDataset, ShuffleBuffer, _ProducerSlot, promptda_blob_views  # noqa: E402
+from zipdepth.catalog.dataset import CatalogPromptDepthDataset, ShuffleBuffer, _ProducerSlot, component_u8_views, promptda_blob_views  # noqa: E402
 from zipdepth.catalog.stats import CatalogDatasetStats  # noqa: E402
 from zipdepth.catalog.targets import build_eval_transform  # noqa: E402
 
@@ -108,16 +108,59 @@ def test_cpu_sample_builder_decodes_and_reports_local_stats() -> None:
     rgb_chw: UInt8[torch.Tensor, "3 h w"] = torch.arange(3 * 6 * 8, dtype=torch.uint8).reshape(3, 6, 8)
     depth_mm_hw: UInt16[ndarray, "h w"] = np.arange(6 * 8, dtype=np.uint16).reshape(6, 8) + 100
     blob_u8: UInt8[ndarray, "n"] = np.frombuffer(encode_depth_png(depth_mm_hw), dtype=np.uint8)
+    prompt_mm_hw: UInt16[ndarray, "192 256"] = np.full((192, 256), 1250, dtype=np.uint16)
+    prompt_blob_u8: UInt8[ndarray, "prompt_n"] = np.frombuffer(encode_depth_png(prompt_mm_hw), dtype=np.uint8)
+    confidence_hw: UInt8[ndarray, "192 256"] = np.full((192, 256), 2, dtype=np.uint8)
+    confidence_u8: UInt8[ndarray, "confidence_n"] = confidence_hw.reshape(-1)
     builder: CpuSampleBuilder = CpuSampleBuilder(build_eval_transform(6, 8), min_depth_span=0.0)
 
-    sample: dict[str, torch.Tensor] | None = builder(rgb_chw, blob_u8, quarter_turns=0, sample_seed=17)
+    sample: dict[str, torch.Tensor] | None = builder(
+        rgb_chw,
+        blob_u8,
+        prompt_blob_u8,
+        confidence_u8,
+        quarter_turns=0,
+        sample_seed=17,
+    )
 
     assert sample is not None
     assert sample["image"].shape == (3, 6, 8)
+    assert sample["depth"].dtype == torch.uint16
+    assert sample["prompt_depth"].shape == (1, 192, 256)
+    assert sample["prompt_valid"].all()
     assert builder.stats.samples_built == 1
     assert builder.stats.png_fallbacks == 0
     assert builder.stats.blob_decode > 0.0
     assert builder.stats.augment > 0.0
+
+
+def test_cpu_metric_builder_orients_prompt_and_confidence_with_rgb_and_target() -> None:
+    """Apply one counter-clockwise turn to every spatial catalog input."""
+    rgb_chw: UInt8[torch.Tensor, "3 stored_h stored_w"] = torch.arange(3 * 8 * 6, dtype=torch.uint8).reshape(3, 8, 6)
+    target_mm_hw: UInt16[ndarray, "stored_h stored_w"] = np.full((8, 6), 2000, dtype=np.uint16)
+    target_blob_u8: UInt8[ndarray, "target_n"] = np.frombuffer(encode_depth_png(target_mm_hw), dtype=np.uint8)
+    prompt_stored_mm_hw: UInt16[ndarray, "256 192"] = np.full((256, 192), 1000, dtype=np.uint16)
+    prompt_stored_mm_hw[:, :96] = 3000
+    prompt_blob_u8: UInt8[ndarray, "prompt_n"] = np.frombuffer(encode_depth_png(prompt_stored_mm_hw), dtype=np.uint8)
+    confidence_stored_hw: UInt8[ndarray, "256 192"] = np.full((256, 192), 2, dtype=np.uint8)
+    confidence_stored_hw[:128] = 0
+    builder: CpuSampleBuilder = CpuSampleBuilder(build_eval_transform(6, 8), min_depth_span=0.0, target_mode="metric")
+
+    sample: dict[str, torch.Tensor] | None = builder(
+        rgb_chw,
+        target_blob_u8,
+        prompt_blob_u8,
+        confidence_stored_hw.reshape(-1),
+        quarter_turns=1,
+        sample_seed=23,
+    )
+
+    assert sample is not None
+    assert set(sample) == {"image", "target_depth", "target_valid", "prompt_depth", "prompt_valid"}
+    assert sample["image"].shape == (3, 6, 8)
+    assert_array_equal(sample["prompt_depth"].numpy()[0], np.rot90(prompt_stored_mm_hw, 1) / 1000.0)
+    expected_valid_hw: ndarray = np.rot90((confidence_stored_hw >= 1) & (prompt_stored_mm_hw >= 100) & (prompt_stored_mm_hw <= 4000), 1)
+    assert_array_equal(sample["prompt_valid"].numpy()[0], expected_valid_hw)
 
 
 @pytest.mark.parametrize(("num_producers", "prefetch_samples"), [(0, 64), (1, 0)])
@@ -151,6 +194,15 @@ def test_promptda_blob_views_extract_one_instance_per_row_without_python_lists()
     for view, python_row in zip(views, column.to_pylist(), strict=True):
         assert not view.flags.owndata
         assert_array_equal(view, python_row[0])
+
+
+def test_component_u8_views_handles_prompt_and_confidence_columns() -> None:
+    """Extract generic uint8 component cells without PromptDA-specific errors."""
+    column = pa.chunked_array([pa.array([[[1, 2]], [[3, 4, 5]]], type=pa.list_(pa.list_(pa.uint8())))])
+
+    views: list[ndarray] = component_u8_views(column, "/confidence:SegmentationImage:buffer")
+
+    assert [view.tolist() for view in views] == [[1, 2], [3, 4, 5]]
 
 
 def test_promptda_blob_views_rejects_sliced_outer_arrays() -> None:

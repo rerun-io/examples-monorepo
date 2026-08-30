@@ -146,6 +146,7 @@ def main(config: TrainCatalogSmokeConfig) -> None:
         height=768,
         width=1024,
         batch_size=4,
+        target_mode="ssi",
         total_steps=config.total_steps,
         shuffle_buffer_size=32,
         num_producers=1,

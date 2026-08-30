@@ -11,6 +11,7 @@ from zipdepth.catalog.targets import (
     INV_DEPTH_SCALE,
     AugmentPolicy,
     build_eval_transform,
+    build_metric_training_sample,
     build_train_transform,
     build_training_sample,
     build_training_sample_cuda,
@@ -214,3 +215,44 @@ def test_build_train_transform_is_the_eval_resize_with_optional_mirroring() -> N
     for key in ("image", "depth", "mask"):
         assert torch.equal(actual[key], expected[key])
         assert_array_equal(flipped[key].numpy(), np.flip(expected[key].numpy(), axis=-1))
+
+
+def test_metric_training_sample_emits_metres_and_flips_every_spatial_input() -> None:
+    """Keep metric target and prompt aligned while preserving the native prompt grid."""
+    rgb_hw3: UInt8[ndarray, "4 6 3"] = np.arange(4 * 6 * 3, dtype=np.uint8).reshape(4, 6, 3)
+    target_mm_hw: UInt16[ndarray, "4 6"] = np.array(
+        [
+            [0, 100, 500, 1000, 4000, 4001],
+            [1000, 1000, 1000, 1000, 1000, 1000],
+            [2000, 2000, 2000, 2000, 2000, 2000],
+            [3000, 3000, 3000, 3000, 3000, 3000],
+        ],
+        dtype=np.uint16,
+    )
+    prompt_mm_hw: UInt16[ndarray, "192 256"] = np.full((192, 256), 1500, dtype=np.uint16)
+    prompt_mm_hw[:, :128] = 500
+    confidence_hw: UInt8[ndarray, "192 256"] = np.full((192, 256), 2, dtype=np.uint8)
+    confidence_hw[:, :64] = 0
+    mirror: AugmentPolicy = AugmentPolicy(flip_p=1.0, channel_shuffle_p=0.0, gray_p=0.0)
+
+    sample: dict[str, torch.Tensor] = build_metric_training_sample(
+        rgb_hw3,
+        target_mm_hw,
+        prompt_mm_hw,
+        confidence_hw,
+        build_train_transform(4, 6, mirror),
+    )
+
+    assert set(sample) == {"image", "target_depth", "target_valid", "prompt_depth", "prompt_valid"}
+    assert sample["target_depth"].shape == (1, 4, 6)
+    assert sample["target_depth"].dtype == torch.float32
+    assert sample["target_valid"].dtype == torch.bool
+    assert sample["prompt_depth"].shape == (1, 192, 256)
+    assert sample["prompt_depth"].dtype == torch.float32
+    assert sample["prompt_valid"].shape == (1, 192, 256)
+    assert sample["prompt_valid"].dtype == torch.bool
+    assert_array_equal(sample["target_valid"].numpy()[0], np.flip((target_mm_hw >= 100) & (target_mm_hw <= 4000), axis=-1))
+    assert_allclose(sample["target_depth"].numpy()[0], np.flip(np.where((target_mm_hw >= 100) & (target_mm_hw <= 4000), target_mm_hw / 1000.0, 0.0), axis=-1))
+    assert_allclose(sample["prompt_depth"].numpy()[0], np.flip(prompt_mm_hw / 1000.0, axis=-1))
+    expected_prompt_valid_hw: np.ndarray = (confidence_hw >= 1) & (prompt_mm_hw >= 100) & (prompt_mm_hw <= 4000)
+    assert_array_equal(sample["prompt_valid"].numpy()[0], np.flip(expected_prompt_valid_hw, axis=-1))

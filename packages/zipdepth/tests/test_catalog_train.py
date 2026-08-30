@@ -4,6 +4,7 @@ import pytest
 from torch import nn, optim
 
 from zipdepth.apis.train_catalog import TrainCatalogConfig, pin_batchnorm_eval, resolve_max_lr, split_holdout_segments
+from zipdepth.loss import MetricDepthLoss, ZipDepthLoss
 from zipdepth.training.trainer import ZipDepthTrainer
 
 
@@ -16,6 +17,24 @@ def test_catalog_training_defaults_to_parallel_segment_producers() -> None:
     assert config.prefetch_samples == 256
     assert not hasattr(config, "prefetch")
     assert not hasattr(config, "gpu_augment")
+
+
+def test_catalog_training_defaults_to_metric_with_an_explicit_ssi_lane() -> None:
+    """Make prompted metric distillation the default without removing relative training."""
+    assert TrainCatalogConfig().target_mode == "metric"
+    assert TrainCatalogConfig(target_mode="ssi").target_mode == "ssi"
+
+
+def test_trainer_selects_the_objective_without_mixing_ssi_into_metric() -> None:
+    """Use the fixed metric criterion only for the prompted lane."""
+    model: nn.Linear = nn.Linear(1, 1)
+    optimizer: optim.SGD = optim.SGD(model.parameters(), lr=0.1)
+
+    ssi_trainer: ZipDepthTrainer = ZipDepthTrainer(model, [], optimizer, None, "cpu", use_amp=False, target_mode="ssi")
+    metric_trainer: ZipDepthTrainer = ZipDepthTrainer(model, [], optimizer, None, "cpu", use_amp=False, target_mode="metric")
+
+    assert isinstance(ssi_trainer.criterion, ZipDepthLoss)
+    assert isinstance(metric_trainer.criterion, MetricDepthLoss)
 
 
 def test_catalog_training_uses_one_explicit_optimizer_step_schedule() -> None:
@@ -106,5 +125,4 @@ def test_pin_batchnorm_eval_overrides_only_the_model_root_train_method() -> None
     assert batchnorms[0].training is True
     model.train(True)
     assert all(not module.training for module in batchnorms)
-
 
