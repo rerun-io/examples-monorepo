@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -25,24 +25,32 @@ from monopriors.models.relative_depth.base_relative_depth import RelativeDepthPr
 from monopriors.models.relative_depth.video_depth_anything import (
     DepthChunkIntermediate,
     FinalDepthResult,
-    VideoDepthAnythingPredictor,
+    VideoDepthAnythingConfig,
 )
 
 
 @dataclass
 class VDAConfig:
     rr_config: RerunTyroConfig
+    """Rerun logging configuration."""
     video_path: Path = Path("data/examples/video/davis_rollercoaster.mp4")
+    """Path to the input video."""
     max_len: int = 100
+    """Maximum number of decoded frames."""
     target_fps: int = -1
+    """Target decode rate, or -1 to keep the source frame rate."""
     max_res: int = 1280
-    input_size: int = 518
-    encoder: Literal["vits", "vitl"] = "vits"
+    """Maximum decoded frame resolution."""
+    predictor: VideoDepthAnythingConfig = field(default_factory=VideoDepthAnythingConfig)
+    """Video Depth Anything model configuration."""
+    device: Literal["cuda", "cpu"] = "cuda"
+    """Execution backend."""
     iterate: bool = False
+    """Log raw chunk predictions before the final aligned result."""
 
 
 def vda_inference(config: VDAConfig) -> None:
-    video_depth_anything = VideoDepthAnythingPredictor(device="cuda", encoder=config.encoder)
+    video_depth_anything = config.predictor.setup(device=config.device)
     read_output: tuple[UInt8[ndarray, "T H W 3"], float] = read_video_frames(
         config.video_path, config.max_len, config.target_fps, config.max_res
     )

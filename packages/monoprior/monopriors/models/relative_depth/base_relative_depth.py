@@ -48,3 +48,23 @@ class BaseVideoRelativePredictor(ABC, Generic[ModelT]):
 
     def set_model_device(self, device: Literal["cpu", "cuda"] = "cuda") -> None:
         self.model.to(device)
+
+
+@dataclass
+class BaseRelativePredictorConfig(ABC):
+    """Base configuration for a single-image relative-depth predictor."""
+
+    @abstractmethod
+    def setup(self, device: Literal["cpu", "cuda"]) -> BaseRelativePredictor:
+        """Build the configured predictor on one device."""
+        raise NotImplementedError
+
+
+@dataclass
+class BaseVideoRelativePredictorConfig(ABC):
+    """Base configuration for a video relative-depth predictor."""
+
+    @abstractmethod
+    def setup(self, device: Literal["cpu", "cuda"]) -> BaseVideoRelativePredictor:
+        """Build the configured video predictor on one device."""
+        raise NotImplementedError

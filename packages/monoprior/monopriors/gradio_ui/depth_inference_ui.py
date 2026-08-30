@@ -2,7 +2,6 @@ import gc
 import os
 import tempfile
 from pathlib import Path
-from typing import get_args
 
 import cv2
 import gradio as gr
@@ -10,14 +9,16 @@ import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 import torch
+from beartype.roar import BeartypeException
 from gradio_rerun import Rerun
 from jaxtyping import UInt8
 
 from monopriors.models.relative_depth import (
-    RELATIVE_PREDICTORS,
     BaseRelativePredictor,
+    BaseRelativePredictorConfig,
+    MoGeV1Config,
     RelativeDepthPrediction,
-    get_relative_predictor,
+    relative_predictor_defaults,
 )
 from monopriors.rr_logging_utils import log_relative_pred
 
@@ -29,7 +30,7 @@ except ImportError:
 
 model_load_status: str = "Models loaded and ready to use!"
 if gr.NO_RELOAD:
-    DEPTH_PREDICTOR: BaseRelativePredictor = get_relative_predictor("MoGeV1Predictor")(device="cuda")
+    DEPTH_PREDICTOR: BaseRelativePredictor = MoGeV1Config().setup(device="cuda")
 
 
 def predict_depth(rgb_hw3: UInt8[np.ndarray, "h w 3"]) -> RelativeDepthPrediction:
@@ -45,7 +46,7 @@ _LOAD_MODEL_PROGRESS = gr.Progress()
 
 
 def load_model(
-    model: RELATIVE_PREDICTORS,
+    model: str,
     progress=_LOAD_MODEL_PROGRESS,
 ) -> str:
     print(model)
@@ -59,7 +60,11 @@ def load_model(
 
     progress(0, desc="Loading Model please wait...")
 
-    DEPTH_PREDICTOR = get_relative_predictor(model)(device="cuda")
+    try:
+        predictor_config: BaseRelativePredictorConfig = relative_predictor_defaults[model]
+    except KeyError:
+        raise gr.Error(f"{model} is not a relative depth predictor.") from None
+    DEPTH_PREDICTOR = predictor_config.setup(device="cuda")
 
     return model_load_status
 
@@ -122,6 +127,8 @@ def relative_depth_from_img(
             return temp.name
     except NameError as e:
         raise gr.Error(f"Please wait Model is being loaded: {e}") from e
+    except BeartypeException:
+        raise
     except Exception as e:
         raise gr.Error(f"Error predicting depth: {e}") from e
 
@@ -156,9 +163,9 @@ with gr.Blocks() as depth_inference_block:
                 )
             with gr.Row():
                 model_dropdown = gr.Dropdown(
-                    choices=list(get_args(RELATIVE_PREDICTORS)),
+                    choices=list(relative_predictor_defaults),
                     label="Model",
-                    value="MoGeV1Predictor",
+                    value="moge-v1",
                     interactive=True,
                 )
             with gr.Row():

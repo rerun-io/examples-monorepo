@@ -1,5 +1,6 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import cv2
 import numpy as np
@@ -7,9 +8,9 @@ import rerun as rr
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from monopriors.models.relative_depth import (
-    RELATIVE_PREDICTORS,
+    AnnotatedRelativePredictorUnion,
+    MoGeV1Config,
     RelativeDepthPrediction,
-    get_relative_predictor,
 )
 from monopriors.models.relative_depth.base_relative_depth import BaseRelativePredictor
 from monopriors.rr_logging_utils import CONFIDENCE_THRESHOLD, create_relative_depth_blueprint, log_relative_pred
@@ -18,9 +19,15 @@ from monopriors.rr_logging_utils import CONFIDENCE_THRESHOLD, create_relative_de
 @dataclass
 class PredictorConfig:
     rr_config: RerunTyroConfig
+    """Rerun logging configuration."""
     image_path: Path = Path("data/examples/single-image/room.jpg")
-    predictor_name: RELATIVE_PREDICTORS = "MoGeV1Predictor"
+    """Path to the input image."""
+    predictor: AnnotatedRelativePredictorUnion = field(default_factory=MoGeV1Config)
+    """Relative-depth model to run; select it with a predictor subcommand."""
+    device: Literal["cuda", "cpu"] = "cuda"
+    """Execution backend."""
     depth_edge_threshold: float = 0.1
+    """Depth-gradient threshold used to remove flying pixels."""
     confidence_threshold: float = CONFIDENCE_THRESHOLD
     """Confidence above which a pixel counts as confident in the semantic mask view (models with a confidence head only)."""
 
@@ -46,7 +53,7 @@ def relative_depth_from_img(config: PredictorConfig) -> None:
     max_dim = 1024 // 2
     rgb_hw3 = resize_image(rgb_hw3, max_dim)
 
-    predictor: BaseRelativePredictor = get_relative_predictor(config.predictor_name)(device="cuda")
+    predictor: BaseRelativePredictor = config.predictor.setup(device=config.device)
     relative_pred: RelativeDepthPrediction = predictor.__call__(rgb=rgb_hw3, K_33=None)
 
     rr.set_time("time", sequence=0)
