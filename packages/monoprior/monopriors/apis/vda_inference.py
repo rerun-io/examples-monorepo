@@ -13,6 +13,7 @@
 # limitations under the License.
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import rerun as rr
 from jaxtyping import UInt8
@@ -42,12 +43,14 @@ class VDAConfig:
     """Maximum decoded frame resolution."""
     predictor: VideoDepthAnythingConfig = field(default_factory=VideoDepthAnythingConfig)
     """Video Depth Anything model configuration."""
+    device: Literal["cuda", "cpu"] = "cuda"
+    """Execution backend."""
     iterate: bool = False
     """Log raw chunk predictions before the final aligned result."""
 
 
 def vda_inference(config: VDAConfig) -> None:
-    video_depth_anything = config.predictor.setup(device="cuda")
+    video_depth_anything = config.predictor.setup(device=config.device)
     read_output: tuple[UInt8[ndarray, "T H W 3"], float] = read_video_frames(
         config.video_path, config.max_len, config.target_fps, config.max_res
     )

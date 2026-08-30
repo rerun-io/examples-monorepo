@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import cv2
 import numpy as np
@@ -23,6 +24,8 @@ class PredictorConfig:
     """Path to the input image."""
     predictor: AnnotatedRelativePredictorUnion = field(default_factory=MoGeV1Config)
     """Relative-depth model to run; select it with a predictor subcommand."""
+    device: Literal["cuda", "cpu"] = "cuda"
+    """Execution backend."""
     depth_edge_threshold: float = 0.1
     """Depth-gradient threshold used to remove flying pixels."""
     confidence_threshold: float = CONFIDENCE_THRESHOLD
@@ -50,7 +53,7 @@ def relative_depth_from_img(config: PredictorConfig) -> None:
     max_dim = 1024 // 2
     rgb_hw3 = resize_image(rgb_hw3, max_dim)
 
-    predictor: BaseRelativePredictor = config.predictor.setup(device="cuda")
+    predictor: BaseRelativePredictor = config.predictor.setup(device=config.device)
     relative_pred: RelativeDepthPrediction = predictor.__call__(rgb=rgb_hw3, K_33=None)
 
     rr.set_time("time", sequence=0)
