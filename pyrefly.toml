@@ -39,7 +39,6 @@ project-excludes = [
     "packages/monoprior/monopriors/third_party/depth_anything_v2/**/*",
     "packages/monoprior/monopriors/third_party/dinov2/**/*",
     "packages/monoprior/monopriors/third_party/dsine/**/*",
-    "packages/monoprior/monopriors/third_party/fast_foundationstereo/**/*",
     "packages/monoprior/monopriors/third_party/g3t/**/*",
     "packages/monoprior/monopriors/third_party/moge/**/*",
     "packages/monoprior/monopriors/third_party/promptda/**/*",

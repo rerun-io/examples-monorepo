@@ -1,670 +1,1448 @@
-import torch,pdb
-import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-try:
-  import triton
-  import triton.language as tl
-except Exception:
-  triton = None
-  tl = None
+"""Convolution, attention, cost-volume, and upsampling layers for Fast-FoundationStereo."""
 
-def _is_contiguous(tensor: torch.Tensor) -> bool:
+import math
+import os
+from collections.abc import Callable
+from typing import Any, Literal, TypeAlias
+
+import torch
+import torch.nn.functional as F
+import triton
+import triton.language as tl
+from einops import rearrange
+from jaxtyping import Float
+from torch import Tensor, nn
+
+ActivationFactory: TypeAlias = Callable[[], nn.Module]
+NormFactory: TypeAlias = Callable[[int], nn.Module]
+NormChoice: TypeAlias = Literal["batch", "instance"]
+SpatialArgument: TypeAlias = int | tuple[int, ...]
+
+
+def _is_contiguous(tensor: Tensor) -> bool:
+    """Return whether a tensor uses contiguous memory format.
+
+    Args:
+        tensor: Tensor with arbitrary dtype and shape.
+
+    Returns:
+        Whether the tensor is contiguous.
+    """
     if torch.jit.is_scripting():
         return tensor.is_contiguous()
-    else:
-        return tensor.is_contiguous(memory_format=torch.contiguous_format)
-
+    return tensor.is_contiguous(memory_format=torch.contiguous_format)
 
 
 class LayerNorm2d(nn.LayerNorm):
-    r""" https://huggingface.co/spaces/Roll20/pet_score/blob/b258ef28152ab0d5b377d9142a23346f863c1526/lib/timm/models/convnext.py#L85
-    LayerNorm for channels_first tensors with 2d spatial dimensions (ie N, C, H, W).
-    """
+    """Apply channel-wise layer normalization to a 2D feature map."""
 
-    def __init__(self, normalized_shape, eps=1e-6):
-        """
-        @normalized_shape: channel dim
+    def __init__(self, normalized_shape: int, eps: float = 1e-6) -> None:
+        """Initialize channels-first layer normalization.
+
+        Args:
+            normalized_shape: Channel count.
+            eps: Numerical-stability constant.
         """
         super().__init__(normalized_shape, eps=eps)
 
-    def forward(self, x) -> torch.Tensor:
+    def forward(self, input: Float[Tensor, "b channels h w"]) -> Float[Tensor, "b channels h w"]:
+        """Normalize a floating-point feature map over channels.
+
+        Args:
+            input: Features with shape ``(batch, channels, height, width)``.
+
+        Returns:
+            Normalized features with shape ``(batch, channels, height, width)``.
         """
-        @x: (B,C,H,W)
-        """
-        if _is_contiguous(x):
-            return F.layer_norm(x.permute(0, 2, 3, 1), self.normalized_shape, self.weight, self.bias, self.eps).permute(0, 3, 1, 2).contiguous()
-        else:
-            s, u = torch.var_mean(x, dim=1, keepdim=True)
-            x = (x - u) * torch.rsqrt(s + self.eps)
-            x = x * self.weight[:, None, None] + self.bias[:, None, None]
-            return x
+        x_bchw: Float[Tensor, "b channels h w"] = input
+        if _is_contiguous(x_bchw):
+            channels_last_bhwc: Float[Tensor, "b h w channels"] = rearrange(x_bchw, "b c h w -> b h w c")
+            normalized_bhwc: Float[Tensor, "b h w channels"] = F.layer_norm(
+                channels_last_bhwc,
+                self.normalized_shape,
+                self.weight,
+                self.bias,
+                self.eps,
+            )
+            output_bchw: Float[Tensor, "b channels h w"] = rearrange(normalized_bhwc, "b h w c -> b c h w").contiguous()
+            return output_bchw
+        variance_b1hw: Float[Tensor, "b 1 h w"]
+        mean_b1hw: Float[Tensor, "b 1 h w"]
+        variance_b1hw, mean_b1hw = torch.var_mean(x_bchw, dim=1, keepdim=True)
+        normalized_bchw = (x_bchw - mean_b1hw) * torch.rsqrt(variance_b1hw + self.eps)
+        output_bchw = normalized_bchw * self.weight[:, None, None] + self.bias[:, None, None]
+        return output_bchw
 
 
 class BasicConv(nn.Module):
+    """Apply a 2D or 3D convolution with optional normalization and activation."""
 
-    def __init__(self, in_channels, out_channels, deconv=False, is_3d=False, bn=True, relu=True, norm='batch', **kwargs):
-        super(BasicConv, self).__init__()
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        deconv: bool = False,
+        is_3d: bool = False,
+        bn: bool = True,
+        relu: bool = True,
+        norm: NormChoice = "batch",
+        **kwargs: Any,
+    ) -> None:
+        """Initialize the convolution block.
 
-        self.relu = nn.LeakyReLU(inplace=True) if relu else nn.Identity()
-        self.use_bn = bn
-        self.bn = nn.Identity()
+        Args:
+            in_channels: Input channel count.
+            out_channels: Output channel count.
+            deconv: Whether to use a transposed convolution.
+            is_3d: Whether to use volumetric rather than image convolution.
+            bn: Whether to apply normalization.
+            relu: Whether to apply LeakyReLU.
+            norm: Batch or instance normalization.
+            **kwargs: Convolution arguments such as kernel size, stride, and padding.
+        """
+        super().__init__()
+        self.relu: nn.Module | bool = nn.LeakyReLU(inplace=True) if relu else nn.Identity()
+        self.use_bn: bool = bn
+        self.bn: nn.Module = nn.Identity()
         if is_3d:
-            if deconv:
-                self.conv = nn.ConvTranspose3d(in_channels, out_channels, bias=False, **kwargs)
-            else:
-                self.conv = nn.Conv3d(in_channels, out_channels, bias=False, **kwargs)
+            self.conv: nn.Module = (
+                nn.ConvTranspose3d(in_channels, out_channels, bias=False, **kwargs)
+                if deconv
+                else nn.Conv3d(in_channels, out_channels, bias=False, **kwargs)
+            )
             if self.use_bn:
-              if norm=='batch':
-                self.bn = nn.BatchNorm3d(out_channels)
-              elif norm=='instance':
-                self.bn = nn.InstanceNorm3d(out_channels)
+                self.bn = nn.BatchNorm3d(out_channels) if norm == "batch" else nn.InstanceNorm3d(out_channels)
         else:
-            if deconv:
-                self.conv = nn.ConvTranspose2d(in_channels, out_channels, bias=False, **kwargs)
-            else:
-                self.conv = nn.Conv2d(in_channels, out_channels, bias=False, **kwargs)
+            self.conv = (
+                nn.ConvTranspose2d(in_channels, out_channels, bias=False, **kwargs)
+                if deconv
+                else nn.Conv2d(in_channels, out_channels, bias=False, **kwargs)
+            )
             if self.use_bn:
-              if norm=='batch':
-                self.bn = nn.BatchNorm2d(out_channels)
-              elif norm=='instance':
-                self.bn = nn.InstanceNorm2d(out_channels)
+                self.bn = nn.BatchNorm2d(out_channels) if norm == "batch" else nn.InstanceNorm2d(out_channels)
 
-    def forward(self, x):
-        x = self.conv(x)
+    def forward(self, x: Float[Tensor, "b channels ..."]) -> Float[Tensor, "b output_channels ..."]:
+        """Transform a floating-point image or cost volume.
+
+        Args:
+            x: Tensor with shape ``(batch, channels, spatial...)``.
+
+        Returns:
+            Tensor with shape ``(batch, output_channels, output_spatial...)``.
+        """
+        output: Float[Tensor, "b output_channels ..."] = self.conv(x)
         if self.use_bn:
-            x = self.bn(x)
+            output = self.bn(output)
         if isinstance(self.relu, bool):
-          if self.relu:
-            self.relu = nn.LeakyReLU(inplace=True)
-          else:
-            self.relu = nn.Identity()
-        x = self.relu(x)
-        return x
+            self.relu = nn.LeakyReLU(inplace=True) if self.relu else nn.Identity()
+        output = self.relu(output)
+        return output
 
 
 class Conv3dNormActReduced(nn.Module):
-    def __init__(self, C_in, C_out, hidden=None, kernel_size=3, kernel_disp=None, stride=1, norm=nn.BatchNorm3d):
+    """Factor a 3D convolution into spatial and disparity convolutions."""
+
+    def __init__(
+        self,
+        C_in: int,
+        C_out: int,
+        hidden: int | None = None,
+        kernel_size: int = 3,
+        kernel_disp: int | None = None,
+        stride: int = 1,
+        norm: NormFactory = nn.BatchNorm3d,
+    ) -> None:
+        """Initialize the reduced volumetric convolution.
+
+        Args:
+            C_in: Input channel count.
+            C_out: Output channel count.
+            hidden: Intermediate channel count; defaults to ``C_out``.
+            kernel_size: Spatial kernel size.
+            kernel_disp: Disparity kernel size; defaults to ``kernel_size``.
+            stride: Spatial and disparity stride.
+            norm: Normalization-layer factory.
+        """
         super().__init__()
-        if kernel_disp is None:
-          kernel_disp = kernel_size
-        if hidden is None:
-            hidden = C_out
-        self.conv1 = nn.Sequential(
-            nn.Conv3d(C_in, hidden, kernel_size=(1,kernel_size,kernel_size), padding=(0, kernel_size//2, kernel_size//2), stride=(1, stride, stride)),
-            norm(hidden),
+        resolved_kernel_disp: int = kernel_size if kernel_disp is None else kernel_disp
+        resolved_hidden: int = C_out if hidden is None else hidden
+        self.conv1: nn.Sequential = nn.Sequential(
+            nn.Conv3d(
+                C_in,
+                resolved_hidden,
+                kernel_size=(1, kernel_size, kernel_size),
+                padding=(0, kernel_size // 2, kernel_size // 2),
+                stride=(1, stride, stride),
+            ),
+            norm(resolved_hidden),
             nn.ReLU(),
         )
-        self.conv2 = nn.Sequential(
-            nn.Conv3d(hidden, C_out, kernel_size=(kernel_disp, 1, 1), padding=(kernel_disp//2, 0, 0), stride=(stride, 1, 1)),
+        self.conv2: nn.Sequential = nn.Sequential(
+            nn.Conv3d(
+                resolved_hidden,
+                C_out,
+                kernel_size=(resolved_kernel_disp, 1, 1),
+                padding=(resolved_kernel_disp // 2, 0, 0),
+                stride=(stride, 1, 1),
+            ),
             norm(C_out),
             nn.ReLU(),
         )
 
+    def forward(self, x_bcdhw: Float[Tensor, "b channels disparities h w"]) -> Float[Tensor, "b output_channels output_d output_h output_w"]:
+        """Transform a floating-point cost volume.
 
-    def forward(self, x):
+        Args:
+            x_bcdhw: Cost volume with shape ``(batch, channels, disparities, height, width)``.
+
+        Returns:
+            Cost volume with shape ``(batch, output_channels, output_disparities, output_height, output_width)``.
         """
-        @x: (B,C,D,H,W)
-        """
-        x = self.conv1(x)
-        x = self.conv2(x)
-        return x
+        spatial_bcdhw: Float[Tensor, "b hidden disparities output_h output_w"] = self.conv1(x_bcdhw)
+        output_bcdhw: Float[Tensor, "b output_channels output_d output_h output_w"] = self.conv2(spatial_bcdhw)
+        return output_bcdhw
 
 
 class ResnetBasicBlock(nn.Module):
-  def __init__(self, inplanes, planes, kernel_size=3, stride=1, padding=1, downsample=None, groups=1, base_width=64, dilation=1, norm_layer=nn.BatchNorm2d, bias=False):
-    super().__init__()
-    self.norm_layer = norm_layer
-    if groups != 1 or base_width != 64:
-            raise ValueError('BasicBlock only supports groups=1 and base_width=64')
-    if dilation > 1:
+    """Two-layer residual block for 2D feature maps."""
+
+    def __init__(
+        self,
+        inplanes: int,
+        planes: int,
+        kernel_size: int = 3,
+        stride: int = 1,
+        padding: int = 1,
+        downsample: nn.Module | None = None,
+        groups: int = 1,
+        base_width: int = 64,
+        dilation: int = 1,
+        norm_layer: NormFactory | None = nn.BatchNorm2d,
+        bias: bool = False,
+    ) -> None:
+        """Initialize a 2D residual block.
+
+        Args:
+            inplanes: Input channel count.
+            planes: Output channel count.
+            kernel_size: Convolution kernel size.
+            stride: First-convolution stride.
+            padding: Convolution padding.
+            downsample: Optional residual projection.
+            groups: Must be one.
+            base_width: Must be 64.
+            dilation: Must be one.
+            norm_layer: Optional normalization-layer factory.
+            bias: Whether convolutions use bias.
+        """
+        super().__init__()
+        if groups != 1 or base_width != 64:
+            raise ValueError("BasicBlock only supports groups=1 and base_width=64")
+        if dilation > 1:
             raise NotImplementedError("Dilation > 1 not supported in BasicBlock")
-    # Both self.conv1 and self.downsample layers downsample the input when stride != 1
-    self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=kernel_size, stride=stride, bias=bias, padding=padding)
-    if self.norm_layer is not None:
-      self.bn1 = norm_layer(planes)
-    self.relu = nn.ReLU(inplace=True)
-    self.conv2 = nn.Conv2d(planes, planes, kernel_size=kernel_size, bias=bias, padding=padding)
-    if self.norm_layer is not None:
-      self.bn2 = norm_layer(planes)
-    self.downsample = downsample
-    self.stride = stride
+        self.norm_layer: NormFactory | None = norm_layer
+        self.conv1: nn.Conv2d = nn.Conv2d(inplanes, planes, kernel_size=kernel_size, stride=stride, bias=bias, padding=padding)
+        self.bn1: nn.Module | None = norm_layer(planes) if norm_layer is not None else None
+        self.relu: nn.ReLU = nn.ReLU(inplace=True)
+        self.conv2: nn.Conv2d = nn.Conv2d(planes, planes, kernel_size=kernel_size, bias=bias, padding=padding)
+        self.bn2: nn.Module | None = norm_layer(planes) if norm_layer is not None else None
+        self.downsample: nn.Module | None = downsample
+        self.stride: int = stride
 
+    def forward(self, x_bchw: Float[Tensor, "b channels h w"]) -> Float[Tensor, "b channels h_out w_out"]:
+        """Transform a floating-point feature map with a residual.
 
-  def forward(self, x):
-    identity = x
+        Args:
+            x_bchw: Features with shape ``(batch, channels, height, width)``.
 
-    out = self.conv1(x)
-    if self.norm_layer is not None:
-      out = self.bn1(out)
-    out = self.relu(out)
-
-    out = self.conv2(out)
-    if self.norm_layer is not None:
-      out = self.bn2(out)
-
-    if self.downsample is not None:
-      identity = self.downsample(x)
-    out += identity
-    out = self.relu(out)
-
-    return out
+        Returns:
+            Features with shape ``(batch, channels, output_height, output_width)``.
+        """
+        identity_bchw: Float[Tensor, "b channels h_out w_out"] = x_bchw
+        output_bchw: Float[Tensor, "b channels h_out w_out"] = self.conv1(x_bchw)
+        if self.bn1 is not None:
+            output_bchw = self.bn1(output_bchw)
+        output_bchw = self.relu(output_bchw)
+        output_bchw = self.conv2(output_bchw)
+        if self.bn2 is not None:
+            output_bchw = self.bn2(output_bchw)
+        if self.downsample is not None:
+            identity_bchw = self.downsample(x_bchw)
+        output_bchw += identity_bchw
+        output_bchw = self.relu(output_bchw)
+        return output_bchw
 
 
 class ResnetBasicBlock3D(nn.Module):
-  def __init__(self, inplanes, planes, kernel_size=3, stride=1, padding=1, downsample=None, groups=1, base_width=64, dilation=1, norm_layer=nn.BatchNorm3d, bias=False):
-    super().__init__()
-    self.norm_layer = norm_layer
-    if groups != 1 or base_width != 64:
-            raise ValueError('BasicBlock only supports groups=1 and base_width=64')
-    if dilation > 1:
+    """Two-layer residual block for 3D cost volumes."""
+
+    def __init__(
+        self,
+        inplanes: int,
+        planes: int,
+        kernel_size: int = 3,
+        stride: int = 1,
+        padding: int = 1,
+        downsample: nn.Module | None = None,
+        groups: int = 1,
+        base_width: int = 64,
+        dilation: int = 1,
+        norm_layer: NormFactory | None = nn.BatchNorm3d,
+        bias: bool = False,
+    ) -> None:
+        """Initialize a 3D residual block.
+
+        Args:
+            inplanes: Input channel count.
+            planes: Output channel count.
+            kernel_size: Convolution kernel size.
+            stride: First-convolution stride.
+            padding: Convolution padding.
+            downsample: Optional residual projection.
+            groups: Must be one.
+            base_width: Must be 64.
+            dilation: Must be one.
+            norm_layer: Optional normalization-layer factory.
+            bias: Whether convolutions use bias.
+        """
+        super().__init__()
+        if groups != 1 or base_width != 64:
+            raise ValueError("BasicBlock only supports groups=1 and base_width=64")
+        if dilation > 1:
             raise NotImplementedError("Dilation > 1 not supported in BasicBlock")
-    # Both self.conv1 and self.downsample layers downsample the input when stride != 1
-    self.conv1 = nn.Conv3d(inplanes, planes, kernel_size=kernel_size, stride=stride, bias=bias, padding=padding)
-    if self.norm_layer is not None:
-      self.bn1 = norm_layer(planes)
-    self.relu = nn.ReLU(inplace=True)
-    self.conv2 = nn.Conv3d(planes, planes, kernel_size=kernel_size, bias=bias, padding=padding)
-    if self.norm_layer is not None:
-      self.bn2 = norm_layer(planes)
-    self.downsample = downsample
-    self.stride = stride
+        self.norm_layer: NormFactory | None = norm_layer
+        self.conv1: nn.Conv3d = nn.Conv3d(inplanes, planes, kernel_size=kernel_size, stride=stride, bias=bias, padding=padding)
+        self.bn1: nn.Module | None = norm_layer(planes) if norm_layer is not None else None
+        self.relu: nn.ReLU = nn.ReLU(inplace=True)
+        self.conv2: nn.Conv3d = nn.Conv3d(planes, planes, kernel_size=kernel_size, bias=bias, padding=padding)
+        self.bn2: nn.Module | None = norm_layer(planes) if norm_layer is not None else None
+        self.downsample: nn.Module | None = downsample
+        self.stride: int = stride
 
+    def forward(self, x_bcdhw: Float[Tensor, "b channels disparities h w"]) -> Float[Tensor, "b channels output_d output_h output_w"]:
+        """Transform a floating-point cost volume with a residual.
 
-  def forward(self, x):
-    identity = x
+        Args:
+            x_bcdhw: Volume with shape ``(batch, channels, disparities, height, width)``.
 
-    out = self.conv1(x)
-    if self.norm_layer is not None:
-      out = self.bn1(out)
-    out = self.relu(out)
-
-    out = self.conv2(out)
-    if self.norm_layer is not None:
-      out = self.bn2(out)
-
-    if self.downsample is not None:
-      identity = self.downsample(x)
-    out += identity
-    out = self.relu(out)
-
-    return out
+        Returns:
+            Volume with shape ``(batch, channels, output_disparities, output_height, output_width)``.
+        """
+        identity_bcdhw: Float[Tensor, "b channels output_d output_h output_w"] = x_bcdhw
+        output_bcdhw: Float[Tensor, "b channels output_d output_h output_w"] = self.conv1(x_bcdhw)
+        if self.bn1 is not None:
+            output_bcdhw = self.bn1(output_bcdhw)
+        output_bcdhw = self.relu(output_bcdhw)
+        output_bcdhw = self.conv2(output_bcdhw)
+        if self.bn2 is not None:
+            output_bcdhw = self.bn2(output_bcdhw)
+        if self.downsample is not None:
+            identity_bcdhw = self.downsample(x_bcdhw)
+        output_bcdhw += identity_bcdhw
+        output_bcdhw = self.relu(output_bcdhw)
+        return output_bcdhw
 
 
 class FlashMultiheadAttention(nn.Module):
-    def __init__(self, embed_dim, num_heads):
+    """Projection wrapper around scaled dot-product attention."""
+
+    def __init__(self, embed_dim: int, num_heads: int) -> None:
+        """Initialize multi-head attention.
+
+        Args:
+            embed_dim: Embedding width.
+            num_heads: Attention-head count.
+        """
         super().__init__()
-        self.num_heads = num_heads
-        self.embed_dim = embed_dim
-        self.head_dim = embed_dim // num_heads
-        assert self.head_dim * num_heads == self.embed_dim, "embed_dim must be divisible by num_heads"
+        self.num_heads: int = num_heads
+        self.embed_dim: int = embed_dim
+        self.head_dim: int = embed_dim // num_heads
+        if self.head_dim * num_heads != self.embed_dim:
+            raise ValueError("embed_dim must be divisible by num_heads")
+        self.q_proj: nn.Linear = nn.Linear(embed_dim, embed_dim)
+        self.k_proj: nn.Linear = nn.Linear(embed_dim, embed_dim)
+        self.v_proj: nn.Linear = nn.Linear(embed_dim, embed_dim)
+        self.out_proj: nn.Linear = nn.Linear(embed_dim, embed_dim)
 
-        self.q_proj = nn.Linear(embed_dim, embed_dim)
-        self.k_proj = nn.Linear(embed_dim, embed_dim)
-        self.v_proj = nn.Linear(embed_dim, embed_dim)
-        self.out_proj = nn.Linear(embed_dim, embed_dim)
+    def forward(
+        self,
+        query_blc: Float[Tensor, "b length channels"],
+        key_blc: Float[Tensor, "b length channels"],
+        value_blc: Float[Tensor, "b length channels"],
+        attn_mask: Tensor | None = None,
+        window_size: tuple[int, int] = (-1, -1),
+    ) -> Float[Tensor, "b length channels"]:
+        """Apply the released attention layout.
 
-    def forward(self, query, key, value, attn_mask=None, window_size=(-1,-1)):
+        Args:
+            query_blc: Query with shape ``(batch, length, channels)``.
+            key_blc: Key with shape ``(batch, length, channels)``.
+            value_blc: Value with shape ``(batch, length, channels)``.
+            attn_mask: Unused upstream compatibility argument.
+            window_size: Unused upstream compatibility argument.
+
+        Returns:
+            Attention output with shape ``(batch, length, channels)``.
         """
-        @query: (B,L,C)
-        """
-        B,L,C = query.shape
-        Q = self.q_proj(query)
-        K = self.k_proj(key)
-        V = self.v_proj(value)
-
-        Q = Q.view(Q.size(0), Q.size(1), self.num_heads, self.head_dim)
-        K = K.view(K.size(0), K.size(1), self.num_heads, self.head_dim)
-        V = V.view(V.size(0), V.size(1), self.num_heads, self.head_dim)
-
-        attn_output = F.scaled_dot_product_attention(Q, K, V)
-
-        attn_output = attn_output.reshape(B,L,-1)
-        output = self.out_proj(attn_output)
-
-        return output
-
+        queries_blhd: Float[Tensor, "b length heads head_dim"] = rearrange(
+            self.q_proj(query_blc),
+            "b length (heads head_dim) -> b length heads head_dim",
+            heads=self.num_heads,
+        )
+        keys_blhd: Float[Tensor, "b length heads head_dim"] = rearrange(
+            self.k_proj(key_blc),
+            "b length (heads head_dim) -> b length heads head_dim",
+            heads=self.num_heads,
+        )
+        values_blhd: Float[Tensor, "b length heads head_dim"] = rearrange(
+            self.v_proj(value_blc),
+            "b length (heads head_dim) -> b length heads head_dim",
+            heads=self.num_heads,
+        )
+        attention_blhd: Float[Tensor, "b length heads head_dim"] = F.scaled_dot_product_attention(
+            queries_blhd,
+            keys_blhd,
+            values_blhd,
+        )
+        attention_blc: Float[Tensor, "b length channels"] = rearrange(attention_blhd, "b length heads head_dim -> b length (heads head_dim)")
+        output_blc: Float[Tensor, "b length channels"] = self.out_proj(attention_blc)
+        return output_blc
 
 
 class FlashAttentionTransformerEncoderLayer(nn.Module):
-    def __init__(self, embed_dim, num_heads, dim_feedforward, dropout=0.1, act=nn.GELU, norm=nn.LayerNorm):
+    """Transformer encoder layer using the released attention wrapper."""
+
+    def __init__(
+        self,
+        embed_dim: int,
+        num_heads: int,
+        dim_feedforward: int,
+        dropout: float = 0.1,
+        act: ActivationFactory = nn.GELU,
+        norm: NormFactory = nn.LayerNorm,
+    ) -> None:
+        """Initialize the transformer layer.
+
+        Args:
+            embed_dim: Embedding width.
+            num_heads: Attention-head count.
+            dim_feedforward: Feed-forward hidden width.
+            dropout: Dropout probability.
+            act: Activation-layer factory.
+            norm: Normalization-layer factory.
+        """
         super().__init__()
-        self.self_attn = FlashMultiheadAttention(embed_dim, num_heads)
-        self.act = act()
+        self.self_attn: FlashMultiheadAttention = FlashMultiheadAttention(embed_dim, num_heads)
+        self.act: nn.Module = act()
+        self.linear1: nn.Linear = nn.Linear(embed_dim, dim_feedforward)
+        self.dropout: nn.Dropout = nn.Dropout(dropout)
+        self.linear2: nn.Linear = nn.Linear(dim_feedforward, embed_dim)
+        self.norm1: nn.Module = norm(embed_dim)
+        self.norm2: nn.Module = norm(embed_dim)
+        self.dropout1: nn.Dropout = nn.Dropout(dropout)
+        self.dropout2: nn.Dropout = nn.Dropout(dropout)
 
-        self.linear1 = nn.Linear(embed_dim, dim_feedforward)
-        self.dropout = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(dim_feedforward, embed_dim)
+    def forward(
+        self,
+        src_blc: Float[Tensor, "b length channels"],
+        src_mask: Tensor | None = None,
+        window_size: tuple[int, int] = (-1, -1),
+    ) -> Float[Tensor, "b length channels"]:
+        """Transform one floating-point token sequence.
 
-        self.norm1 = norm(embed_dim)
-        self.norm2 = norm(embed_dim)
-        self.dropout1 = nn.Dropout(dropout)
-        self.dropout2 = nn.Dropout(dropout)
+        Args:
+            src_blc: Tokens with shape ``(batch, length, channels)``.
+            src_mask: Optional attention mask retained by the upstream interface.
+            window_size: Window selector retained by the upstream interface.
 
-    def forward(self, src, src_mask=None, window_size=(-1, -1)):
-        dtype = src.dtype
-        src2 = self.self_attn(src, src, src, src_mask, window_size=window_size)
-        src = src + self.dropout1(src2)
-        src = self.norm1(src).to(dtype)
-
-        src2 = self.linear2(self.dropout(self.act(self.linear1(src))))
-        src = src + self.dropout2(src2)
-        src = self.norm2(src).to(dtype)
-
-        return src
+        Returns:
+            Tokens with shape ``(batch, length, channels)``.
+        """
+        input_dtype: torch.dtype = src_blc.dtype
+        attention_blc: Float[Tensor, "b length channels"] = self.self_attn(
+            src_blc,
+            src_blc,
+            src_blc,
+            src_mask,
+            window_size=window_size,
+        )
+        output_blc: Float[Tensor, "b length channels"] = src_blc + self.dropout1(attention_blc)
+        output_blc = self.norm1(output_blc).to(input_dtype)
+        feedforward_blc: Float[Tensor, "b length channels"] = self.linear2(self.dropout(self.act(self.linear1(output_blc))))
+        output_blc = output_blc + self.dropout2(feedforward_blc)
+        output_blc = self.norm2(output_blc).to(input_dtype)
+        return output_blc
 
 
 class Conv2x(nn.Module):
+    """Resize a 2D feature map by two, merge a skip, and convolve."""
 
-    def __init__(self, in_channels, out_channels, deconv=False, is_3d=False, concat=True, keep_concat=True, bn=True, relu=True, keep_dispc=False):
-        super(Conv2x, self).__init__()
-        self.concat = concat
-        self.is_3d = is_3d
-        if deconv and is_3d:
-            kernel = (4, 4, 4)
-        elif deconv:
-            kernel = 4
-        else:
-            kernel = 3
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        deconv: bool = False,
+        is_3d: bool = False,
+        concat: bool = True,
+        keep_concat: bool = True,
+        bn: bool = True,
+        relu: bool = True,
+        keep_dispc: bool = False,
+    ) -> None:
+        """Initialize the released 2D resize-and-fuse block.
 
-        if deconv and is_3d and keep_dispc:
-            kernel = (1, 4, 4)
-            stride = (1, 2, 2)
-            padding = (0, 1, 1)
-            self.conv1 = BasicConv(in_channels, out_channels, deconv, is_3d, bn=bn, relu=True, kernel_size=kernel, stride=stride, padding=padding)
-        else:
-            self.conv1 = BasicConv(in_channels, out_channels, deconv, is_3d, bn=bn, relu=True, kernel_size=kernel, stride=2, padding=1)
+        Args:
+            in_channels: Main input channel count.
+            out_channels: Resized feature channel count.
+            deconv: Whether to upsample instead of downsample.
+            is_3d: Must be false for the released inference architecture.
+            concat: Whether to concatenate rather than add the skip.
+            keep_concat: Whether concatenation doubles the output channels.
+            bn: Whether to apply batch normalization.
+            relu: Whether to apply LeakyReLU in the fusion convolution.
+            keep_dispc: Must be false for the released inference architecture.
 
+        Raises:
+            ValueError: If an unused 3D branch is requested.
+        """
+        super().__init__()
+        if is_3d or keep_dispc:
+            raise ValueError("The owned Fast-FoundationStereo fork retains only the released 2D Conv2x path.")
+        self.concat: bool = concat
+        self.is_3d: bool = False
+        kernel_size: int = 4 if deconv else 3
+        self.conv1: BasicConv = BasicConv(
+            in_channels,
+            out_channels,
+            deconv=deconv,
+            bn=bn,
+            relu=True,
+            kernel_size=kernel_size,
+            stride=2,
+            padding=1,
+        )
         if self.concat:
-            mul = 2 if keep_concat else 1
-            self.conv2 = BasicConv(out_channels*2, out_channels*mul, False, is_3d, bn, relu, kernel_size=3, stride=1, padding=1)
+            multiplier: int = 2 if keep_concat else 1
+            self.conv2: BasicConv = BasicConv(
+                out_channels * 2,
+                out_channels * multiplier,
+                bn=bn,
+                relu=relu,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+            )
         else:
-            self.conv2 = BasicConv(out_channels, out_channels, False, is_3d, bn, relu, kernel_size=3, stride=1, padding=1)
+            self.conv2 = BasicConv(out_channels, out_channels, bn=bn, relu=relu, kernel_size=3, stride=1, padding=1)
 
-    def forward(self, x, rem):
-        x = self.conv1(x)
-        if x.shape != rem.shape:
-            x = F.interpolate(x, size=(rem.shape[-2], rem.shape[-1]), mode='bilinear')
-        if self.concat:
-            x = torch.cat((x, rem), 1)
-        else:
-            x = x + rem
-        x = self.conv2(x)
-        return x
+    def forward(
+        self,
+        x_bchw: Float[Tensor, "b channels h w"],
+        rem_bchw: Float[Tensor, "b rem_channels rem_h rem_w"],
+    ) -> Float[Tensor, "b output_channels rem_h rem_w"]:
+        """Resize and merge two floating-point feature maps.
+
+        Args:
+            x_bchw: Main features with shape ``(batch, channels, height, width)``.
+            rem_bchw: Skip features with shape ``(batch, rem_channels, rem_height, rem_width)``.
+
+        Returns:
+            Merged features with shape ``(batch, output_channels, rem_height, rem_width)``.
+        """
+        resized_bchw: Float[Tensor, "b resized_channels resized_h resized_w"] = self.conv1(x_bchw)
+        if resized_bchw.shape != rem_bchw.shape:
+            resized_bchw = F.interpolate(resized_bchw, size=(rem_bchw.shape[-2], rem_bchw.shape[-1]), mode="bilinear")
+        combined_bchw: Float[Tensor, "b combined_channels rem_h rem_w"] = (
+            torch.cat((resized_bchw, rem_bchw), dim=1) if self.concat else resized_bchw + rem_bchw
+        )
+        output_bchw: Float[Tensor, "b output_channels rem_h rem_w"] = self.conv2(combined_bchw)
+        return output_bchw
 
 
 class BasicConv_IN(nn.Module):
+    """Apply a 2D convolution with optional instance normalization and activation."""
 
-    def __init__(self, in_channels, out_channels, deconv=False, is_3d=False, IN=True, relu=True, **kwargs):
-        super(BasicConv_IN, self).__init__()
-        if relu:
-          self.relu = nn.LeakyReLU(inplace=True)
-        else:
-          self.relu = nn.Identity()
-        self.use_in = IN
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        deconv: bool = False,
+        is_3d: bool = False,
+        IN: bool = True,
+        relu: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        """Initialize the instance-normalized convolution.
+
+        Args:
+            in_channels: Input channel count.
+            out_channels: Output channel count.
+            deconv: Whether to use a transposed convolution.
+            is_3d: Must be false for the released inference architecture.
+            IN: Whether to apply instance normalization.
+            relu: Whether to apply LeakyReLU.
+            **kwargs: 2D convolution arguments.
+
+        Raises:
+            ValueError: If the unused 3D branch is requested.
+        """
+        super().__init__()
         if is_3d:
-            if deconv:
-                self.conv = nn.ConvTranspose3d(in_channels, out_channels, bias=False, **kwargs)
-            else:
-                self.conv = nn.Conv3d(in_channels, out_channels, bias=False, **kwargs)
-            self.IN = nn.InstanceNorm3d(out_channels)
-        else:
-            if deconv:
-                self.conv = nn.ConvTranspose2d(in_channels, out_channels, bias=False, **kwargs)
-            else:
-                self.conv = nn.Conv2d(in_channels, out_channels, bias=False, **kwargs)
-            self.IN = nn.InstanceNorm2d(out_channels)
+            raise ValueError("The owned Fast-FoundationStereo fork retains only the released 2D BasicConv_IN path.")
+        self.relu: nn.Module | bool = nn.LeakyReLU(inplace=True) if relu else nn.Identity()
+        self.use_in: bool = IN
+        self.conv: nn.Module = (
+            nn.ConvTranspose2d(in_channels, out_channels, bias=False, **kwargs)
+            if deconv
+            else nn.Conv2d(in_channels, out_channels, bias=False, **kwargs)
+        )
+        self.IN: nn.InstanceNorm2d = nn.InstanceNorm2d(out_channels)
 
-    def forward(self, x):
-        x = self.conv(x)
+    def forward(self, x_bchw: Float[Tensor, "b channels h w"]) -> Float[Tensor, "b output_channels output_h output_w"]:
+        """Transform a floating-point feature map.
+
+        Args:
+            x_bchw: Features with shape ``(batch, channels, height, width)``.
+
+        Returns:
+            Features with shape ``(batch, output_channels, output_height, output_width)``.
+        """
+        output_bchw: Float[Tensor, "b output_channels output_h output_w"] = self.conv(x_bchw)
         if self.use_in:
-          x = self.IN(x)
+            output_bchw = self.IN(output_bchw)
         if isinstance(self.relu, bool):
-          if self.relu:
-            self.relu = nn.LeakyReLU(inplace=True)
-          else:
-            self.relu = nn.Identity()
-        x = self.relu(x)
-        return x
+            self.relu = nn.LeakyReLU(inplace=True) if self.relu else nn.Identity()
+        output_bchw = self.relu(output_bchw)
+        return output_bchw
 
 
 class Conv2x_IN(nn.Module):
-    def __init__(self, in_channels, out_channels, c_middle=None, deconv=False, is_3d=False, concat=True, keep_concat=True, IN=True, relu=True, keep_dispc=False):
-        super(Conv2x_IN, self).__init__()
-        self.concat = concat
-        self.is_3d = is_3d
-        if deconv and is_3d:
-            kernel = (4, 4, 4)
-        elif deconv:
-            kernel = 4
-        else:
-            kernel = 3
-        if c_middle is None:
-          c_middle = out_channels
+    """Resize and fuse 2D feature maps with instance normalization."""
 
-        if deconv and is_3d and keep_dispc:
-            kernel = (1, 4, 4)
-            stride = (1, 2, 2)
-            padding = (0, 1, 1)
-            self.conv1 = BasicConv_IN(in_channels, c_middle, deconv, is_3d, IN=True, relu=True, kernel_size=kernel, stride=stride, padding=padding)
-        else:
-            self.conv1 = BasicConv_IN(in_channels, c_middle, deconv, is_3d, IN=True, relu=True, kernel_size=kernel, stride=2, padding=1)
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        c_middle: int | None = None,
+        deconv: bool = False,
+        is_3d: bool = False,
+        concat: bool = True,
+        keep_concat: bool = True,
+        IN: bool = True,
+        relu: bool = True,
+        keep_dispc: bool = False,
+    ) -> None:
+        """Initialize the instance-normalized resize-and-fuse block.
 
+        Args:
+            in_channels: Main input channel count.
+            out_channels: Skip feature channel count.
+            c_middle: Resized feature channel count; defaults to ``out_channels``.
+            deconv: Whether to upsample instead of downsample.
+            is_3d: Must be false for the released inference architecture.
+            concat: Whether to concatenate rather than add the skip.
+            keep_concat: Whether concatenation doubles the output channels.
+            IN: Whether to apply instance normalization.
+            relu: Whether to apply LeakyReLU in the additive path.
+            keep_dispc: Must be false for the released inference architecture.
+
+        Raises:
+            ValueError: If an unused 3D branch is requested.
+        """
+        super().__init__()
+        if is_3d or keep_dispc:
+            raise ValueError("The owned Fast-FoundationStereo fork retains only the released 2D Conv2x_IN path.")
+        self.concat: bool = concat
+        self.is_3d: bool = False
+        middle_channels: int = out_channels if c_middle is None else c_middle
+        kernel_size: int = 4 if deconv else 3
+        self.conv1: BasicConv_IN = BasicConv_IN(
+            in_channels,
+            middle_channels,
+            deconv=deconv,
+            IN=True,
+            relu=True,
+            kernel_size=kernel_size,
+            stride=2,
+            padding=1,
+        )
         if self.concat:
-            mul = 2 if keep_concat else 1
-            self.conv2 = ResnetBasicBlock(out_channels*2, out_channels*mul, kernel_size=3, stride=1, padding=1, norm_layer=nn.InstanceNorm2d)
+            multiplier: int = 2 if keep_concat else 1
+            self.conv2: nn.Module = ResnetBasicBlock(
+                out_channels * 2,
+                out_channels * multiplier,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+                norm_layer=nn.InstanceNorm2d,
+            )
         else:
-            self.conv2 = BasicConv_IN(c_middle, out_channels, False, is_3d, IN, relu, kernel_size=3, stride=1, padding=1)
+            self.conv2 = BasicConv_IN(
+                middle_channels,
+                out_channels,
+                IN=IN,
+                relu=relu,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+            )
 
-    def forward(self, x, rem):
-        x = self.conv1(x)
-        if x.shape != rem.shape:
-            x = F.interpolate(x, size=(rem.shape[-2], rem.shape[-1]), mode='bilinear')
-        if self.concat:
-            x = torch.cat((x, rem), 1)
-        else:
-            x = x + rem
-        x = self.conv2(x)
-        return x
+    def forward(
+        self,
+        x_bchw: Float[Tensor, "b channels h w"],
+        rem_bchw: Float[Tensor, "b rem_channels rem_h rem_w"],
+    ) -> Float[Tensor, "b output_channels rem_h rem_w"]:
+        """Resize and merge two floating-point feature maps.
 
+        Args:
+            x_bchw: Main features with shape ``(batch, channels, height, width)``.
+            rem_bchw: Skip features with shape ``(batch, rem_channels, rem_height, rem_width)``.
 
-
-@torch.compile
-def build_gwc_volume_optimized_pytorch1(refimg_fea: torch.Tensor, targetimg_fea: torch.Tensor, maxdisp: int, num_groups: int, normalize=True):
-  dtype = refimg_fea.dtype
-  B, C, H, W = refimg_fea.shape
-  channels_per_group = C // num_groups
-
-  ref_volume = refimg_fea.unsqueeze(2).expand(B, C, maxdisp, H, W)
-  padded_target = F.pad(targetimg_fea, (maxdisp - 1, 0, 0, 0))
-  unfolded_target = padded_target.unfold(3, W, 1)
-  target_volume = torch.flip(unfolded_target, [3]).permute(0, 1, 3, 2, 4)
-  ref_volume = ref_volume.view(B, num_groups, channels_per_group, maxdisp, H, W)
-  target_volume = target_volume.view(B, num_groups, channels_per_group, maxdisp, H, W)
-  if normalize:
-    ref_volume = F.normalize(ref_volume.float(), dim=2).to(dtype)
-    target_volume = F.normalize(target_volume.float(), dim=2).to(dtype)
-
-  cost_volume = (ref_volume * target_volume).sum(dim=2)
-
-  return cost_volume.contiguous()
+        Returns:
+            Merged features with shape ``(batch, output_channels, rem_height, rem_width)``.
+        """
+        resized_bchw: Float[Tensor, "b resized_channels resized_h resized_w"] = self.conv1(x_bchw)
+        if resized_bchw.shape != rem_bchw.shape:
+            resized_bchw = F.interpolate(resized_bchw, size=(rem_bchw.shape[-2], rem_bchw.shape[-1]), mode="bilinear")
+        combined_bchw: Float[Tensor, "b combined_channels rem_h rem_w"] = (
+            torch.cat((resized_bchw, rem_bchw), dim=1) if self.concat else resized_bchw + rem_bchw
+        )
+        output_bchw: Float[Tensor, "b output_channels rem_h rem_w"] = self.conv2(combined_bchw)
+        return output_bchw
 
 
-if triton is not None and torch.cuda.is_available():
-  @triton.autotune(configs=[
-    triton.Config({'BLOCK_C':4,'BLOCK_W':128,'BLOCK_D':8}, num_warps=4, num_stages=2),
-    triton.Config({'BLOCK_C':8,'BLOCK_W':128,'BLOCK_D':8}, num_warps=4, num_stages=2),
-    triton.Config({'BLOCK_C':16,'BLOCK_W':128,'BLOCK_D':8}, num_warps=4, num_stages=2),
-    triton.Config({'BLOCK_C':64,'BLOCK_W':128,'BLOCK_D':8}, num_warps=8, num_stages=2),
-    triton.Config({'BLOCK_C':128,'BLOCK_W':64,'BLOCK_D':8}, num_warps=8, num_stages=2),
-    triton.Config({'BLOCK_C':128,'BLOCK_W':128,'BLOCK_D':8}, num_warps=8, num_stages=2),
-  ], key=['C','W','D','G','K','NORMALIZE'])
-  @triton.jit
-  def _gwc_triton_kernel(ref_ptr, tar_ptr, ref_norm_ptr, tar_norm_ptr, out_ptr, BH, C, W, D: tl.constexpr, G: tl.constexpr, K: tl.constexpr,
-                         stride_rn, stride_rw, stride_rc, stride_tn, stride_tw, stride_tc,
-                         stride_nn, stride_ng, stride_nw,
-                         stride_on, stride_og, stride_od, stride_ow,
-                         NORMALIZE: tl.constexpr,
-                         BLOCK_C: tl.constexpr, BLOCK_W: tl.constexpr, BLOCK_D: tl.constexpr):
-    pid0 = tl.program_id(0)
-    db = tl.program_id(1)
-    wb = tl.program_id(2)
-    bh = pid0 // G
-    g = pid0 % G
-    w_off = wb*BLOCK_W + tl.arange(0, BLOCK_W)
-    d_off = db*BLOCK_D + tl.arange(0, BLOCK_D)
-    w_mask = w_off < W
-    w_src = w_off[None, :] - d_off[:, None]
-    td_mask = (w_src >= 0) & w_mask[None, :]
-    acc = tl.zeros((BLOCK_D, BLOCK_W), dtype=tl.float32)
-    for k0 in tl.static_range(0, K, BLOCK_C):
-      k_off = k0 + tl.arange(0, BLOCK_C)
-      k_mask = k_off < K
-      c_idx = g*K + k_off
-      ref_ptrs = ref_ptr + bh*stride_rn + w_off[None, :]*stride_rw + c_idx[:, None]*stride_rc
-      ref_vals = tl.load(ref_ptrs, mask=k_mask[:, None] & w_mask[None, :], other=0.).to(tl.float32)
-      tar_ptrs = tar_ptr + bh*stride_tn + w_src[None, :, :]*stride_tw + c_idx[:, None, None]*stride_tc
-      tar_vals = tl.load(tar_ptrs, mask=k_mask[:, None, None] & td_mask[None, :, :], other=0.).to(tl.float32)
-      acc += tl.sum(tar_vals * ref_vals[:, None, :], axis=0)
+def _build_gwc_volume_optimized_pytorch1(
+    refimg_fea_bchw: Float[Tensor, "b channels h w"],
+    targetimg_fea_bchw: Float[Tensor, "b channels h w"],
+    maxdisp: int,
+    num_groups: int,
+    normalize: bool = True,
+) -> Float[Tensor, "b groups disparities h w"]:
+    """Run the compiler-compatible groupwise-correlation operations."""
+    input_dtype: torch.dtype = refimg_fea_bchw.dtype
+    batch_size: int = refimg_fea_bchw.shape[0]
+    channels: int = refimg_fea_bchw.shape[1]
+    height: int = refimg_fea_bchw.shape[2]
+    width: int = refimg_fea_bchw.shape[3]
+    channels_per_group: int = channels // num_groups
+    ref_volume_bcdhw: Float[Tensor, "b channels disparities h w"] = refimg_fea_bchw.unsqueeze(2).expand(
+        batch_size,
+        channels,
+        maxdisp,
+        height,
+        width,
+    )
+    padded_target_bchw: Float[Tensor, "b channels h padded_w"] = F.pad(targetimg_fea_bchw, (maxdisp - 1, 0, 0, 0))
+    unfolded_target_bchdw: Float[Tensor, "b channels h disparities w"] = padded_target_bchw.unfold(3, width, 1)
+    target_volume_bcdhw: Float[Tensor, "b channels disparities h w"] = rearrange(
+        torch.flip(unfolded_target_bchdw, [3]),
+        "b channels h disparities w -> b channels disparities h w",
+    )
+    grouped_ref_bgkdhw: Float[Tensor, "b groups channels_per_group disparities h w"] = ref_volume_bcdhw.view(
+        batch_size,
+        num_groups,
+        channels_per_group,
+        maxdisp,
+        height,
+        width,
+    )
+    grouped_target_bgkdhw: Float[Tensor, "b groups channels_per_group disparities h w"] = target_volume_bcdhw.view(
+        batch_size,
+        num_groups,
+        channels_per_group,
+        maxdisp,
+        height,
+        width,
+    )
+    if normalize:
+        grouped_ref_bgkdhw = F.normalize(grouped_ref_bgkdhw.float(), dim=2).to(input_dtype)
+        grouped_target_bgkdhw = F.normalize(grouped_target_bgkdhw.float(), dim=2).to(input_dtype)
+    cost_volume_bgdhw: Float[Tensor, "b groups disparities h w"] = (grouped_ref_bgkdhw * grouped_target_bgkdhw).sum(dim=2)
+    return cost_volume_bgdhw.contiguous()
 
-    if NORMALIZE:
-      norm_offset = bh*stride_nn + g*stride_ng
-      ref_norm = tl.load(ref_norm_ptr + norm_offset + w_off*stride_nw, mask=w_mask, other=1.0).to(tl.float32)
-      tar_norm = tl.load(tar_norm_ptr + norm_offset + w_src*stride_nw, mask=td_mask, other=1.0).to(tl.float32)
-      denom = (ref_norm[None, :] * tar_norm) + 1e-5
-      acc = acc / denom
-    out_ptrs = out_ptr + bh*stride_on + g*stride_og + d_off[:, None]*stride_od + w_off[None, :]*stride_ow
-    tl.store(out_ptrs, acc, mask=w_mask[None, :])
+
+_compiled_build_gwc_volume: Callable[..., Tensor] = (
+    _build_gwc_volume_optimized_pytorch1 if os.environ.get("PIXI_DEV_MODE") == "1" else torch.compile(_build_gwc_volume_optimized_pytorch1)
+)
+
+
+class _GwcVolumeBuilder:
+    """Typed groupwise-correlation callable with TorchDynamo eager access."""
+
+    def __init__(self) -> None:
+        """Expose the original callable for deterministic eager tests."""
+        self._torchdynamo_orig_callable: Callable[..., Tensor] = _build_gwc_volume_optimized_pytorch1
+
+    def __call__(
+        self,
+        refimg_fea_bchw: Float[Tensor, "b channels h w"],
+        targetimg_fea_bchw: Float[Tensor, "b channels h w"],
+        maxdisp: int,
+        num_groups: int,
+        normalize: bool = True,
+    ) -> Float[Tensor, "b groups disparities h w"]:
+        """Build the groupwise-correlation volume with PyTorch tensor operations.
+
+        Args:
+            refimg_fea_bchw: Left features with shape ``(batch, channels, height, width)``.
+            targetimg_fea_bchw: Right features with shape ``(batch, channels, height, width)``.
+            maxdisp: Number of feature-space disparity candidates.
+            num_groups: Number of channel groups.
+            normalize: Whether to normalize each channel group before correlation.
+
+        Returns:
+            Correlation volume with shape ``(batch, groups, disparities, height, width)``.
+        """
+        cost_volume_bgdhw: Float[Tensor, "b groups disparities h w"] = _compiled_build_gwc_volume(
+            refimg_fea_bchw,
+            targetimg_fea_bchw,
+            maxdisp,
+            num_groups,
+            normalize,
+        )
+        return cost_volume_bgdhw
+
+
+build_gwc_volume_optimized_pytorch1: _GwcVolumeBuilder = _GwcVolumeBuilder()
+
+
+def _create_gwc_triton_kernel() -> Any:
+    """Create the cached Triton autotuner outside module scope.
+
+    Returns:
+        Triton autotuner for groupwise correlation.
+    """
+
+    def gwc_triton_kernel(
+        ref_ptr,
+        tar_ptr,
+        ref_norm_ptr,
+        tar_norm_ptr,
+        out_ptr,
+        BH,
+        C,
+        W,
+        D,
+        G,
+        K,
+        stride_rn,
+        stride_rw,
+        stride_rc,
+        stride_tn,
+        stride_tw,
+        stride_tc,
+        stride_nn,
+        stride_ng,
+        stride_nw,
+        stride_on,
+        stride_og,
+        stride_od,
+        stride_ow,
+        NORMALIZE,
+        BLOCK_C,
+        BLOCK_W,
+        BLOCK_D,
+    ):
+        program_group = tl.program_id(0)
+        disparity_block = tl.program_id(1)
+        width_block = tl.program_id(2)
+        batch_height = program_group // G
+        group = program_group % G
+        width_offsets = width_block * BLOCK_W + tl.arange(0, BLOCK_W)
+        disparity_offsets = disparity_block * BLOCK_D + tl.arange(0, BLOCK_D)
+        width_mask = width_offsets < W
+        source_width = width_offsets[None, :] - disparity_offsets[:, None]
+        target_mask = (source_width >= 0) & width_mask[None, :]
+        accumulator = tl.zeros((BLOCK_D, BLOCK_W), dtype=tl.float32)
+        for channel_block in tl.static_range(0, K, BLOCK_C):
+            channel_offsets = channel_block + tl.arange(0, BLOCK_C)
+            channel_mask = channel_offsets < K
+            channel_indices = group * K + channel_offsets
+            ref_pointers = ref_ptr + batch_height * stride_rn + width_offsets[None, :] * stride_rw + channel_indices[:, None] * stride_rc
+            ref_values = tl.load(ref_pointers, mask=channel_mask[:, None] & width_mask[None, :], other=0.0).to(tl.float32)
+            target_pointers = (
+                tar_ptr
+                + batch_height * stride_tn
+                + source_width[None, :, :] * stride_tw
+                + channel_indices[:, None, None] * stride_tc
+            )
+            target_values = tl.load(
+                target_pointers,
+                mask=channel_mask[:, None, None] & target_mask[None, :, :],
+                other=0.0,
+            ).to(tl.float32)
+            accumulator += tl.sum(target_values * ref_values[:, None, :], axis=0)
+        if NORMALIZE:
+            norm_offset = batch_height * stride_nn + group * stride_ng
+            ref_norm = tl.load(ref_norm_ptr + norm_offset + width_offsets * stride_nw, mask=width_mask, other=1.0).to(tl.float32)
+            target_norm = tl.load(tar_norm_ptr + norm_offset + source_width * stride_nw, mask=target_mask, other=1.0).to(tl.float32)
+            denominator = ref_norm[None, :] * target_norm + 1e-5
+            accumulator = accumulator / denominator
+        output_pointers = (
+            out_ptr
+            + batch_height * stride_on
+            + group * stride_og
+            + disparity_offsets[:, None] * stride_od
+            + width_offsets[None, :] * stride_ow
+        )
+        tl.store(output_pointers, accumulator, mask=width_mask[None, :])
+
+    gwc_triton_kernel.__annotations__ = {
+        "D": tl.constexpr,
+        "G": tl.constexpr,
+        "K": tl.constexpr,
+        "NORMALIZE": tl.constexpr,
+        "BLOCK_C": tl.constexpr,
+        "BLOCK_W": tl.constexpr,
+        "BLOCK_D": tl.constexpr,
+    }
+    jit_kernel: Any = triton.jit(gwc_triton_kernel)
+    autotuned_kernel: Any = triton.autotune(
+        configs=[
+            triton.Config({"BLOCK_C": 4, "BLOCK_W": 128, "BLOCK_D": 8}, num_warps=4, num_stages=2),
+            triton.Config({"BLOCK_C": 8, "BLOCK_W": 128, "BLOCK_D": 8}, num_warps=4, num_stages=2),
+            triton.Config({"BLOCK_C": 16, "BLOCK_W": 128, "BLOCK_D": 8}, num_warps=4, num_stages=2),
+            triton.Config({"BLOCK_C": 64, "BLOCK_W": 128, "BLOCK_D": 8}, num_warps=8, num_stages=2),
+            triton.Config({"BLOCK_C": 128, "BLOCK_W": 64, "BLOCK_D": 8}, num_warps=8, num_stages=2),
+            triton.Config({"BLOCK_C": 128, "BLOCK_W": 128, "BLOCK_D": 8}, num_warps=8, num_stages=2),
+        ],
+        key=["C", "W", "D", "G", "K", "NORMALIZE"],
+    )(jit_kernel)
+    return autotuned_kernel
+
+
+def _make_gwc_triton_kernel_getter() -> Callable[[], Any]:
+    """Hide the Triton Autotuner in a closure so beartype does not inspect it.
+
+    Returns:
+        Lazy cached kernel getter.
+    """
+    kernel: Any | None = None
+
+    def get_kernel() -> Any:
+        nonlocal kernel
+        if kernel is None:
+            kernel = _create_gwc_triton_kernel()
+        return kernel
+
+    return get_kernel
+
+
+_get_gwc_triton_kernel: Callable[[], Any] = _make_gwc_triton_kernel_getter()
+
 
 @torch.no_grad()
-def build_gwc_volume_triton(refimg_fea: torch.Tensor, targetimg_fea: torch.Tensor, maxdisp: int, num_groups: int, normalize=True):
-  if triton is None:
-    raise RuntimeError('Triton is not available. Please install triton to use build_gwc_volume_triton.')
-  B, C, H, W = refimg_fea.shape
-  assert maxdisp > 0 and C % num_groups == 0
-  K = C // num_groups
-  in_dtype = refimg_fea.dtype if refimg_fea.dtype in (torch.float16, torch.bfloat16, torch.float32) else torch.float32
+def build_gwc_volume_triton(
+    refimg_fea_bchw: Float[Tensor, "b channels h w"],
+    targetimg_fea_bchw: Float[Tensor, "b channels h w"],
+    maxdisp: int,
+    num_groups: int,
+    normalize: bool = True,
+) -> Float[Tensor, "b groups disparities h w"]:
+    """Build the groupwise-correlation volume with the Triton kernel.
 
-  if normalize:
-    ref_norm = refimg_fea.float().view(B, num_groups, K, H, W).norm(dim=2)
-    tar_norm = targetimg_fea.float().view(B, num_groups, K, H, W).norm(dim=2)
-    ref_norm = ref_norm.permute(0, 2, 1, 3).reshape(B*H, num_groups, W).to(in_dtype).contiguous()
-    tar_norm = tar_norm.permute(0, 2, 1, 3).reshape(B*H, num_groups, W).to(in_dtype).contiguous()
-  else:
-    # Dummy tensors; kernel won't read them when NORMALIZE=False
-    ref_norm = refimg_fea.new_empty((1, 1, 1), dtype=in_dtype)
-    tar_norm = refimg_fea.new_empty((1, 1, 1), dtype=in_dtype)
+    Args:
+        refimg_fea_bchw: Left features with shape ``(batch, channels, height, width)``.
+        targetimg_fea_bchw: Right features with shape ``(batch, channels, height, width)``.
+        maxdisp: Number of feature-space disparity candidates.
+        num_groups: Number of channel groups.
+        normalize: Whether to normalize each channel group before correlation.
 
-  ref = refimg_fea.to(in_dtype)
-  tar = targetimg_fea.to(in_dtype)
-  ref_bhwc = ref.permute(0, 2, 3, 1).view(B * H, W, C).contiguous()
-  tar_bhwc = tar.permute(0, 2, 3, 1).view(B * H, W, C).contiguous()
-  out_bhw = torch.empty((B * H, num_groups, maxdisp, W), device=ref.device, dtype=in_dtype)
-  BH = B * H
-  D_eff = min(maxdisp, W)
-  grid = lambda META: (BH * num_groups, triton.cdiv(D_eff, META['BLOCK_D']), triton.cdiv(W, META['BLOCK_W']))
-  _gwc_triton_kernel[grid](ref_bhwc, tar_bhwc, ref_norm, tar_norm, out_bhw, BH, C, W, D_eff, num_groups, K,
-                           ref_bhwc.stride(0), ref_bhwc.stride(1), ref_bhwc.stride(2),
-                           tar_bhwc.stride(0), tar_bhwc.stride(1), tar_bhwc.stride(2),
-                           ref_norm.stride(0), ref_norm.stride(1), ref_norm.stride(2),
-                           out_bhw.stride(0), out_bhw.stride(1), out_bhw.stride(2), out_bhw.stride(3),
-                           NORMALIZE=normalize)
-  if D_eff < maxdisp: out_bhw[:, :, D_eff:, :] = 0
-  volume = out_bhw.view(B, H, num_groups, maxdisp, W).permute(0, 2, 3, 1, 4).contiguous()
-  return volume
+    Returns:
+        Correlation volume with shape ``(batch, groups, disparities, height, width)``.
+    """
+    batch_size: int = refimg_fea_bchw.shape[0]
+    channels: int = refimg_fea_bchw.shape[1]
+    height: int = refimg_fea_bchw.shape[2]
+    width: int = refimg_fea_bchw.shape[3]
+    if maxdisp <= 0 or channels % num_groups != 0:
+        raise ValueError("maxdisp must be positive and channels must be divisible by num_groups")
+    channels_per_group: int = channels // num_groups
+    input_dtype: torch.dtype = refimg_fea_bchw.dtype if refimg_fea_bchw.dtype in (torch.float16, torch.bfloat16, torch.float32) else torch.float32
+    if normalize:
+        ref_grouped_bgkhw: Float[Tensor, "b groups channels_per_group h w"] = refimg_fea_bchw.float().view(
+            batch_size,
+            num_groups,
+            channels_per_group,
+            height,
+            width,
+        )
+        target_grouped_bgkhw: Float[Tensor, "b groups channels_per_group h w"] = targetimg_fea_bchw.float().view(
+            batch_size,
+            num_groups,
+            channels_per_group,
+            height,
+            width,
+        )
+        ref_norm_bghw: Float[Tensor, "b groups h w"] = ref_grouped_bgkhw.norm(dim=2)
+        target_norm_bghw: Float[Tensor, "b groups h w"] = target_grouped_bgkhw.norm(dim=2)
+        ref_norm_ngw: Float[Tensor, "batch_height groups w"] = rearrange(ref_norm_bghw, "b groups h w -> (b h) groups w").to(input_dtype).contiguous()
+        target_norm_ngw: Float[Tensor, "batch_height groups w"] = (
+            rearrange(target_norm_bghw, "b groups h w -> (b h) groups w").to(input_dtype).contiguous()
+        )
+    else:
+        ref_norm_ngw = refimg_fea_bchw.new_empty((1, 1, 1), dtype=input_dtype)
+        target_norm_ngw = refimg_fea_bchw.new_empty((1, 1, 1), dtype=input_dtype)
+    ref_bhwc: Float[Tensor, "batch_height w channels"] = rearrange(
+        refimg_fea_bchw.to(input_dtype),
+        "b channels h w -> (b h) w channels",
+    ).contiguous()
+    target_bhwc: Float[Tensor, "batch_height w channels"] = rearrange(
+        targetimg_fea_bchw.to(input_dtype),
+        "b channels h w -> (b h) w channels",
+    ).contiguous()
+    output_ngdw: Float[Tensor, "batch_height groups disparities w"] = torch.empty(
+        (batch_size * height, num_groups, maxdisp, width),
+        device=ref_bhwc.device,
+        dtype=input_dtype,
+    )
+    batch_height: int = batch_size * height
+    effective_disparities: int = min(maxdisp, width)
+
+    def grid(meta: dict[str, Any]) -> tuple[Any, Any, Any]:
+        return (
+            batch_height * num_groups,
+            triton.cdiv(effective_disparities, meta["BLOCK_D"]),
+            triton.cdiv(width, meta["BLOCK_W"]),
+        )
+
+    kernel: Any = _get_gwc_triton_kernel()
+    kernel[grid](
+        ref_bhwc,
+        target_bhwc,
+        ref_norm_ngw,
+        target_norm_ngw,
+        output_ngdw,
+        batch_height,
+        channels,
+        width,
+        effective_disparities,
+        num_groups,
+        channels_per_group,
+        ref_bhwc.stride(0),
+        ref_bhwc.stride(1),
+        ref_bhwc.stride(2),
+        target_bhwc.stride(0),
+        target_bhwc.stride(1),
+        target_bhwc.stride(2),
+        ref_norm_ngw.stride(0),
+        ref_norm_ngw.stride(1),
+        ref_norm_ngw.stride(2),
+        output_ngdw.stride(0),
+        output_ngdw.stride(1),
+        output_ngdw.stride(2),
+        output_ngdw.stride(3),
+        NORMALIZE=normalize,
+    )
+    if effective_disparities < maxdisp:
+        output_ngdw[:, :, effective_disparities:, :] = 0
+    volume_bgdhw: Float[Tensor, "b groups disparities h w"] = rearrange(
+        output_ngdw,
+        "(b h) groups disparities w -> b groups disparities h w",
+        b=batch_size,
+        h=height,
+    ).contiguous()
+    return volume_bgdhw
 
 
+def _build_concat_volume_optimized_pytorch1(
+    refimg_fea_bchw: Float[Tensor, "b channels h w"],
+    targetimg_fea_bchw: Float[Tensor, "b channels h w"],
+    maxdisp: int,
+) -> Float[Tensor, "b double_channels disparities h w"]:
+    """Run the compiler-compatible concatenated-volume operations."""
+    batch_size: int = refimg_fea_bchw.shape[0]
+    channels: int = refimg_fea_bchw.shape[1]
+    height: int = refimg_fea_bchw.shape[2]
+    width: int = refimg_fea_bchw.shape[3]
+    ref_volume_bcdhw: Float[Tensor, "b channels disparities h w"] = refimg_fea_bchw.unsqueeze(2).expand(
+        batch_size,
+        channels,
+        maxdisp,
+        height,
+        width,
+    )
+    padded_target_bchw: Float[Tensor, "b channels h padded_w"] = F.pad(targetimg_fea_bchw, (maxdisp - 1, 0, 0, 0))
+    unfolded_target_bchdw: Float[Tensor, "b channels h disparities w"] = padded_target_bchw.unfold(dimension=3, size=width, step=1)
+    target_volume_bcdhw: Float[Tensor, "b channels disparities h w"] = rearrange(
+        torch.flip(unfolded_target_bchdw, [3]),
+        "b channels h disparities w -> b channels disparities h w",
+    )
+    volume_bcdhw: Float[Tensor, "b double_channels disparities h w"] = torch.cat((ref_volume_bcdhw, target_volume_bcdhw), dim=1)
+    return volume_bcdhw.contiguous()
 
-@torch.compile
-def build_concat_volume_optimized_pytorch(refimg_fea, targetimg_fea, maxdisp:int):
-  B, C, H, W = refimg_fea.shape
-  ref_volume = refimg_fea.unsqueeze(2).expand(B, C, maxdisp, H, W)
-  shifted_target_list = [F.pad(targetimg_fea, (int(d), 0, 0, 0), "constant", 0.0)[:, :, :, :W] for d in range(maxdisp)]
-  target_volume = torch.stack(shifted_target_list, dim=2)
-  volume = torch.cat((ref_volume, target_volume), dim=1)
-  return volume.contiguous()
+
+_compiled_build_concat_volume: Callable[..., Tensor] = (
+    _build_concat_volume_optimized_pytorch1 if os.environ.get("PIXI_DEV_MODE") == "1" else torch.compile(_build_concat_volume_optimized_pytorch1)
+)
 
 
-@torch.compile
-def build_concat_volume_optimized_pytorch1(refimg_fea, targetimg_fea, maxdisp:int):
-    B, C, H, W = refimg_fea.shape
+class _ConcatVolumeBuilder:
+    """Typed concatenated-volume callable with TorchDynamo eager access."""
 
-    ref_volume = refimg_fea.unsqueeze(2).expand(B, C, maxdisp, H, W)
-    padded_target = F.pad(targetimg_fea, (maxdisp - 1, 0, 0, 0))  # (B, C, H, W + maxdisp - 1)
-    unfolded_target = padded_target.unfold(dimension=3, size=W, step=1)  # (B, C, H, maxdisp, W)
-    target_volume = torch.flip(unfolded_target, [3]).permute(0, 1, 3, 2, 4)
-    volume = torch.cat((ref_volume, target_volume), dim=1)
-    return volume.contiguous()
+    def __init__(self) -> None:
+        """Expose the original callable for deterministic eager tests."""
+        self._torchdynamo_orig_callable: Callable[..., Tensor] = _build_concat_volume_optimized_pytorch1
+
+    def __call__(
+        self,
+        refimg_fea_bchw: Float[Tensor, "b channels h w"],
+        targetimg_fea_bchw: Float[Tensor, "b channels h w"],
+        maxdisp: int,
+    ) -> Float[Tensor, "b double_channels disparities h w"]:
+        """Build the concatenated left/right feature volume.
+
+        Args:
+            refimg_fea_bchw: Left features with shape ``(batch, channels, height, width)``.
+            targetimg_fea_bchw: Right features with shape ``(batch, channels, height, width)``.
+            maxdisp: Number of feature-space disparity candidates.
+
+        Returns:
+            Concatenated volume with shape ``(batch, 2 * channels, disparities, height, width)``.
+        """
+        volume_bcdhw: Float[Tensor, "b double_channels disparities h w"] = _compiled_build_concat_volume(
+            refimg_fea_bchw,
+            targetimg_fea_bchw,
+            maxdisp,
+        )
+        return volume_bcdhw
 
 
+build_concat_volume_optimized_pytorch1: _ConcatVolumeBuilder = _ConcatVolumeBuilder()
 
 
-def disparity_regression(x, maxdisp):
-    assert len(x.shape) == 4
-    disp_values = torch.arange(0, maxdisp, dtype=x.dtype, device=x.device)
-    disp_values = disp_values.reshape(1, maxdisp, 1, 1)
-    return torch.sum(x * disp_values, 1, keepdim=True)   #(B,1,H,W)
+def disparity_regression(probability_bdhw: Float[Tensor, "b disparities h w"], maxdisp: int) -> Float[Tensor, "b 1 h w"]:
+    """Compute expected disparity from a probability volume.
+
+    Args:
+        probability_bdhw: Disparity probabilities with shape ``(batch, disparities, height, width)``.
+        maxdisp: Number of discrete disparity candidates.
+
+    Returns:
+        Expected disparity with shape ``(batch, 1, height, width)``.
+    """
+    assert probability_bdhw.ndim == 4
+    disparity_values_d: Float[Tensor, "disparities"] = torch.arange(
+        0,
+        maxdisp,
+        dtype=probability_bdhw.dtype,
+        device=probability_bdhw.device,
+    )
+    disparity_values_1d11: Float[Tensor, "1 disparities 1 1"] = disparity_values_d.reshape(1, maxdisp, 1, 1)
+    disparity_b1hw: Float[Tensor, "b 1 h w"] = torch.sum(probability_bdhw * disparity_values_1d11, 1, keepdim=True)
+    return disparity_b1hw
 
 
 class FeatureAtt(nn.Module):
-    def __init__(self, cv_chan, feat_chan):
-        super(FeatureAtt, self).__init__()
+    """Modulate a cost volume with image-conditioned channel attention."""
 
-        self.feat_att = nn.Sequential(
-            BasicConv(feat_chan, feat_chan//2, kernel_size=1, stride=1, padding=0),
-            nn.Conv2d(feat_chan//2, cv_chan, 1)
-            )
+    def __init__(self, cv_chan: int, feat_chan: int) -> None:
+        """Initialize feature attention.
 
-    def forward(self, cv, feat):
-        '''
-        @cv: cost volume (B,C,D,H,W)
-        @feat: (B,C,H,W)
-        '''
-        feat_att = self.feat_att(feat).unsqueeze(2)   #(B,C,1,H,W)
-        cv = torch.sigmoid(feat_att)*cv
-        return cv
+        Args:
+            cv_chan: Cost-volume channel count.
+            feat_chan: Image-feature channel count.
+        """
+        super().__init__()
+        self.feat_att: nn.Sequential = nn.Sequential(
+            BasicConv(feat_chan, feat_chan // 2, kernel_size=1, stride=1, padding=0),
+            nn.Conv2d(feat_chan // 2, cv_chan, 1),
+        )
 
-def context_upsample(disp_low, up_weights):
+    def forward(
+        self,
+        cost_volume_bcdhw: Float[Tensor, "b channels disparities h w"],
+        features_bchw: Float[Tensor, "b feature_channels h w"],
+    ) -> Float[Tensor, "b channels disparities h w"]:
+        """Apply image-conditioned sigmoid attention.
+
+        Args:
+            cost_volume_bcdhw: Cost volume with shape ``(batch, channels, disparities, height, width)``.
+            features_bchw: Image features with shape ``(batch, feature_channels, height, width)``.
+
+        Returns:
+            Modulated cost volume with shape ``(batch, channels, disparities, height, width)``.
+        """
+        attention_bc1hw: Float[Tensor, "b channels 1 h w"] = self.feat_att(features_bchw).unsqueeze(2)
+        output_bcdhw: Float[Tensor, "b channels disparities h w"] = torch.sigmoid(attention_bc1hw) * cost_volume_bcdhw
+        return output_bcdhw
+
+
+def context_upsample(
+    disp_low_b1hw: Float[Tensor, "b 1 h w"],
+    up_weights_b9hw: Float[Tensor, "b 9 h4 w4"],
+) -> Float[Tensor, "b h4 w4"]:
+    """Upsample disparity fourfold with learned 3-by-3 context weights.
+
+    Args:
+        disp_low_b1hw: Low-resolution disparity with shape ``(batch, 1, height, width)``.
+        up_weights_b9hw: Weights with shape ``(batch, 9, 4 * height, 4 * width)``.
+
+    Returns:
+        Upsampled disparity with shape ``(batch, 4 * height, 4 * width)``.
     """
-    @disp_low: (b,1,h,w)  1/4 resolution
-    @up_weights: (b,9,4*h,4*w)  Image resolution
-    """
-    b, c, h, w = disp_low.shape
-
-    disp_unfold = F.unfold(disp_low.reshape(b,c,h,w),3,1,1).reshape(b,-1,h,w)
-    disp_unfold = F.interpolate(disp_unfold,(h*4,w*4),mode='nearest').reshape(b,9,h*4,w*4)
-
-    disp = (disp_unfold*up_weights).sum(1)
-
-    return disp
-
+    height: int = disp_low_b1hw.shape[2]
+    width: int = disp_low_b1hw.shape[3]
+    unfolded_b9hw: Float[Tensor, "b 9 h w"] = rearrange(
+        F.unfold(disp_low_b1hw, 3, 1, 1),
+        "b neighbors (h w) -> b neighbors h w",
+        h=height,
+        w=width,
+    )
+    upsampled_b9hw: Float[Tensor, "b 9 h4 w4"] = F.interpolate(
+        unfolded_b9hw,
+        (height * 4, width * 4),
+        mode="nearest",
+    )
+    disparity_bhw: Float[Tensor, "b h4 w4"] = (upsampled_b9hw * up_weights_b9hw).sum(1)
+    return disparity_bhw
 
 
 class PositionalEmbedding(nn.Module):
-  def __init__(self, d_model, max_len=512):
-    super().__init__()
+    """Add fixed sinusoidal disparity-position embeddings."""
 
-    # Compute the positional encodings once in log space.
-    pe = torch.zeros(max_len, d_model, dtype=torch.float)
-    pe.require_grad = False
+    def __init__(self, d_model: int, max_len: int = 512) -> None:
+        """Initialize positional embeddings.
 
-    position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)  #(N,1)
-    div_term = (torch.arange(0, d_model, 2, dtype=torch.float) * -(np.log(10000.0) / d_model)).exp()[None]
+        Args:
+            d_model: Embedding width.
+            max_len: Maximum disparity-token count.
+        """
+        super().__init__()
+        embedding_lc: Float[Tensor, "length channels"] = torch.zeros(max_len, d_model, dtype=torch.float32)
+        positions_l1: Float[Tensor, "length 1"] = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)
+        frequencies_1c: Float[Tensor, "1 half_channels"] = (
+            torch.arange(0, d_model, 2, dtype=torch.float32) * -(math.log(10000.0) / d_model)
+        ).exp()[None]
+        embedding_lc[:, 0::2] = torch.sin(positions_l1 * frequencies_1c)
+        embedding_lc[:, 1::2] = torch.cos(positions_l1 * frequencies_1c)
+        self.pe: Float[Tensor, "1 length channels"] = embedding_lc.unsqueeze(0)
 
-    pe[:, 0::2] = torch.sin(position * div_term)  #(N, d_model/2)
-    pe[:, 1::2] = torch.cos(position * div_term)
+    def forward(
+        self,
+        x_blc: Float[Tensor, "b length channels"],
+        resize_embed: bool = False,
+    ) -> Float[Tensor, "b length channels"]:
+        """Add position embeddings to a token sequence.
 
-    pe = pe.unsqueeze(0)
-    self.pe = pe
+        Args:
+            x_blc: Tokens with shape ``(batch, length, channels)``.
+            resize_embed: Whether to linearly extend embeddings for a longer sequence.
 
-
-  def forward(self, x, resize_embed=False):
-    '''
-    @x: (B,N,D)
-    '''
-    dtype = x.dtype
-    self.pe = self.pe.to(x.device).to(x.dtype)
-    pe = self.pe
-    if pe.shape[1]<x.shape[1]:
-      if resize_embed:
-        pe = F.interpolate(pe.permute(0,2,1), size=x.shape[1], mode='linear', align_corners=True).permute(0,2,1)
-      else:
-        raise RuntimeError(f'x:{x.shape}, pe:{pe.shape}')
-    return (x + pe[:, :x.size(1)]).to(dtype)
-
+        Returns:
+            Position-encoded tokens with shape ``(batch, length, channels)``.
+        """
+        input_dtype: torch.dtype = x_blc.dtype
+        self.pe = self.pe.to(device=x_blc.device, dtype=x_blc.dtype)
+        embedding_blc: Float[Tensor, "1 length channels"] = self.pe
+        if embedding_blc.shape[1] < x_blc.shape[1]:
+            if not resize_embed:
+                raise RuntimeError(f"x:{x_blc.shape}, pe:{embedding_blc.shape}")
+            embedding_bcl: Float[Tensor, "1 channels length"] = rearrange(embedding_blc, "b length channels -> b channels length")
+            resized_bcl: Float[Tensor, "1 channels new_length"] = F.interpolate(
+                embedding_bcl,
+                size=x_blc.shape[1],
+                mode="linear",
+                align_corners=True,
+            )
+            embedding_blc = rearrange(resized_bcl, "b channels length -> b length channels")
+        output_blc: Float[Tensor, "b length channels"] = (x_blc + embedding_blc[:, : x_blc.size(1)]).to(input_dtype)
+        return output_blc
 
 
 class CostVolumeDisparityAttention(nn.Module):
-  def __init__(self, d_model, nhead, dim_feedforward, dropout=0.1, act=nn.GELU, norm_first=False, num_transformer=6, max_len=512, resize_embed=False):
-    super().__init__()
-    self.resize_embed = resize_embed
-    self.sa = nn.ModuleList([])
-    for _ in range(num_transformer):
-      self.sa.append(FlashAttentionTransformerEncoderLayer(embed_dim=d_model, num_heads=nhead, dim_feedforward=dim_feedforward, act=act, dropout=dropout))
-    self.pos_embed0 = PositionalEmbedding(d_model, max_len=max_len)
+    """Apply transformer attention along a cost volume's disparity axis."""
 
+    def __init__(
+        self,
+        d_model: int,
+        nhead: int,
+        dim_feedforward: int,
+        dropout: float = 0.1,
+        act: ActivationFactory = nn.GELU,
+        norm_first: bool = False,
+        num_transformer: int = 6,
+        max_len: int = 512,
+        resize_embed: bool = False,
+    ) -> None:
+        """Initialize disparity attention.
 
-  def forward(self, cv, window_size=(-1,-1)):
-    """
-    @cv: (B,C,D,H,W) where D is max disparity
-    """
-    x = cv
-    B,C,D,H,W = x.shape
-    x = x.permute(0,3,4,2,1).reshape(B*H*W, D, C)
-    x = self.pos_embed0(x, resize_embed=self.resize_embed)  #!NOTE No resize since disparity is pre-determined
-    for i in range(len(self.sa)):
-        x = self.sa[i](x, window_size=window_size)
-    x = x.reshape(B,H,W,D,C).permute(0,4,3,1,2)
+        Args:
+            d_model: Cost-volume channel count.
+            nhead: Attention-head count.
+            dim_feedforward: Feed-forward hidden width.
+            dropout: Dropout probability.
+            act: Activation-layer factory.
+            norm_first: Upstream compatibility field; the released layer is post-normalized.
+            num_transformer: Number of transformer layers.
+            max_len: Positional-embedding length.
+            resize_embed: Whether embeddings may be resized.
+        """
+        super().__init__()
+        self.resize_embed: bool = resize_embed
+        self.sa: nn.ModuleList = nn.ModuleList(
+            [
+                FlashAttentionTransformerEncoderLayer(
+                    embed_dim=d_model,
+                    num_heads=nhead,
+                    dim_feedforward=dim_feedforward,
+                    act=act,
+                    dropout=dropout,
+                )
+                for _ in range(num_transformer)
+            ]
+        )
+        self.pos_embed0: PositionalEmbedding = PositionalEmbedding(d_model, max_len=max_len)
 
-    return x
+    def forward(
+        self,
+        cost_volume_bcdhw: Float[Tensor, "b channels disparities h w"],
+        window_size: tuple[int, int] = (-1, -1),
+    ) -> Float[Tensor, "b channels disparities h w"]:
+        """Transform each pixel's disparity sequence.
 
+        Args:
+            cost_volume_bcdhw: Volume with shape ``(batch, channels, disparities, height, width)``.
+            window_size: Attention window retained by the upstream interface.
+
+        Returns:
+            Volume with shape ``(batch, channels, disparities, height, width)``.
+        """
+        batch_size: int = cost_volume_bcdhw.shape[0]
+        height: int = cost_volume_bcdhw.shape[3]
+        width: int = cost_volume_bcdhw.shape[4]
+        tokens_ndc: Float[Tensor, "pixels disparities channels"] = rearrange(
+            cost_volume_bcdhw,
+            "b channels disparities h w -> (b h w) disparities channels",
+        )
+        tokens_ndc = self.pos_embed0(tokens_ndc, resize_embed=self.resize_embed)
+        for layer in self.sa:
+            tokens_ndc = layer(tokens_ndc, window_size=window_size)
+        output_bcdhw: Float[Tensor, "b channels disparities h w"] = rearrange(
+            tokens_ndc,
+            "(b h w) disparities channels -> b channels disparities h w",
+            b=batch_size,
+            h=height,
+            w=width,
+        )
+        return output_bcdhw
 
 
 class ChannelAttentionEnhancement(nn.Module):
-    def __init__(self, in_planes, ratio=16):
-        """From selective-IGEV
+    """Predict per-channel recurrent-context weights."""
+
+    def __init__(self, in_planes: int, ratio: int = 16) -> None:
+        """Initialize channel attention.
+
+        Args:
+            in_planes: Input and output channel count.
+            ratio: Hidden-channel reduction ratio.
         """
-        super(ChannelAttentionEnhancement, self).__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        super().__init__()
+        hidden_channels: int = in_planes // ratio
+        self.avg_pool: nn.AdaptiveAvgPool2d = nn.AdaptiveAvgPool2d(1)
+        self.max_pool: nn.AdaptiveMaxPool2d = nn.AdaptiveMaxPool2d(1)
+        self.fc: nn.Sequential = nn.Sequential(
+            nn.Conv2d(in_planes, hidden_channels, 1, bias=False),
+            nn.ReLU(),
+            nn.Conv2d(hidden_channels, in_planes, 1, bias=False),
+        )
+        self.sigmoid: nn.Sigmoid = nn.Sigmoid()
 
-        self.fc = nn.Sequential(nn.Conv2d(in_planes, in_planes // 16, 1, bias=False),
-                               nn.ReLU(),
-                               nn.Conv2d(in_planes // 16, in_planes, 1, bias=False))
-        self.sigmoid = nn.Sigmoid()
+    def forward(self, x_bchw: Float[Tensor, "b channels h w"]) -> Float[Tensor, "b channels 1 1"]:
+        """Predict floating-point channel weights.
 
-    def forward(self, x):
-        avg_out = self.fc(self.avg_pool(x))
-        max_out = self.fc(self.max_pool(x))
-        out = avg_out + max_out
-        return self.sigmoid(out)
+        Args:
+            x_bchw: Features with shape ``(batch, channels, height, width)``.
+
+        Returns:
+            Weights with shape ``(batch, channels, 1, 1)``.
+        """
+        average_bchw: Float[Tensor, "b channels 1 1"] = self.fc(self.avg_pool(x_bchw))
+        maximum_bchw: Float[Tensor, "b channels 1 1"] = self.fc(self.max_pool(x_bchw))
+        weights_bchw: Float[Tensor, "b channels 1 1"] = self.sigmoid(average_bchw + maximum_bchw)
+        return weights_bchw
+
 
 class SpatialAttentionExtractor(nn.Module):
-    def __init__(self, kernel_size=7):
-        """From selective-IGEV
+    """Predict per-pixel recurrent update weights."""
+
+    def __init__(self, kernel_size: int = 7) -> None:
+        """Initialize spatial attention.
+
+        Args:
+            kernel_size: Spatial convolution kernel size.
         """
-        super(SpatialAttentionExtractor, self).__init__()
+        super().__init__()
+        self.samconv: nn.Conv2d = nn.Conv2d(2, 1, kernel_size, padding=kernel_size // 2, bias=False)
+        self.sigmoid: nn.Sigmoid = nn.Sigmoid()
 
-        self.samconv = nn.Conv2d(2, 1, kernel_size, padding=kernel_size//2, bias=False)
-        self.sigmoid = nn.Sigmoid()
+    def forward(self, x_bchw: Float[Tensor, "b channels h w"]) -> Float[Tensor, "b 1 h w"]:
+        """Predict floating-point spatial weights.
 
-    def forward(self, x):
-        avg_out = torch.mean(x, dim=1, keepdim=True)
-        max_out, _ = torch.max(x, dim=1, keepdim=True)
-        x = torch.cat([avg_out, max_out], dim=1)
-        x = self.samconv(x)
-        return self.sigmoid(x)
+        Args:
+            x_bchw: Features with shape ``(batch, channels, height, width)``.
 
+        Returns:
+            Weights with shape ``(batch, 1, height, width)``.
+        """
+        average_b1hw: Float[Tensor, "b 1 h w"] = torch.mean(x_bchw, dim=1, keepdim=True)
+        maximum_b1hw: Float[Tensor, "b 1 h w"] = torch.max(x_bchw, dim=1, keepdim=True)[0]
+        pooled_b2hw: Float[Tensor, "b 2 h w"] = torch.cat([average_b1hw, maximum_b1hw], dim=1)
+        weights_b1hw: Float[Tensor, "b 1 h w"] = self.sigmoid(self.samconv(pooled_b2hw))
+        return weights_b1hw
 
 
 class EdgeNextConvEncoder(nn.Module):
-    def __init__(self, dim, layer_scale_init_value=1e-6, expan_ratio=4, kernel_size=7, norm='layer'):
-        """https://github.com/mmaaz60/EdgeNeXt/blob/main/models/conv_encoder.py#L7
+    """EdgeNeXt depthwise convolution and pointwise MLP residual block."""
+
+    def __init__(
+        self,
+        dim: int,
+        layer_scale_init_value: float = 1e-6,
+        expan_ratio: int = 4,
+        kernel_size: int = 7,
+        norm: Literal["layer", "batch"] | None = "layer",
+    ) -> None:
+        """Initialize the convolution encoder.
+
+        Args:
+            dim: Input and output channel count.
+            layer_scale_init_value: Initial residual-branch scale.
+            expan_ratio: Pointwise MLP expansion ratio.
+            kernel_size: Depthwise convolution kernel size.
+            norm: Layer normalization, batch normalization, or no normalization.
         """
         super().__init__()
-        self.dwconv = nn.Conv2d(dim, dim, kernel_size=kernel_size, padding=kernel_size // 2, groups=dim)
-        if norm=='layer':
-          self.norm = LayerNorm2d(dim, eps=1e-6)
-        elif norm=='batch':
-          self.norm = nn.BatchNorm2d(dim)
+        self.dwconv: nn.Conv2d = nn.Conv2d(dim, dim, kernel_size=kernel_size, padding=kernel_size // 2, groups=dim)
+        if norm == "layer":
+            self.norm: nn.Module = LayerNorm2d(dim, eps=1e-6)
+        elif norm == "batch":
+            self.norm = nn.BatchNorm2d(dim)
         else:
-          self.norm = nn.Identity()
-        self.pwconv1 = nn.Linear(dim, expan_ratio * dim)
-        self.act = nn.GELU()
-        self.pwconv2 = nn.Linear(expan_ratio * dim, dim)
-        self.gamma = nn.Parameter(layer_scale_init_value * torch.ones(dim), requires_grad=True) if layer_scale_init_value > 0 else None
+            self.norm = nn.Identity()
+        self.pwconv1: nn.Linear = nn.Linear(dim, expan_ratio * dim)
+        self.act: nn.GELU = nn.GELU()
+        self.pwconv2: nn.Linear = nn.Linear(expan_ratio * dim, dim)
+        self.gamma: nn.Parameter | None = (
+            nn.Parameter(layer_scale_init_value * torch.ones(dim), requires_grad=True) if layer_scale_init_value > 0.0 else None
+        )
 
-    def forward(self, x):
-        input = x
-        x = self.dwconv(x)
-        x = self.norm(x)
-        x = x.permute(0, 2, 3, 1)  # (N, C, H, W) -> (N, H, W, C)
-        x = self.pwconv1(x)
-        x = self.act(x)
-        x = self.pwconv2(x)
+    def forward(self, x_bchw: Float[Tensor, "b channels h w"]) -> Float[Tensor, "b channels h w"]:
+        """Transform a floating-point feature map with a residual.
+
+        Args:
+            x_bchw: Features with shape ``(batch, channels, height, width)``.
+
+        Returns:
+            Features with shape ``(batch, channels, height, width)``.
+        """
+        shortcut_bchw: Float[Tensor, "b channels h w"] = x_bchw
+        output_bchw: Float[Tensor, "b channels h w"] = self.norm(self.dwconv(x_bchw))
+        output_bhwc: Float[Tensor, "b h w channels"] = rearrange(output_bchw, "b c h w -> b h w c")
+        output_bhwc = self.pwconv2(self.act(self.pwconv1(output_bhwc)))
         if self.gamma is not None:
-            x = self.gamma * x
-        x = x.permute(0, 3, 1, 2)  # (N, H, W, C) -> (N, C, H, W)
-
-        x = input + x
-        return x
+            output_bhwc = self.gamma * output_bhwc
+        output_bchw = rearrange(output_bhwc, "b h w c -> b c h w")
+        output_bchw = shortcut_bchw + output_bchw
+        return output_bchw
