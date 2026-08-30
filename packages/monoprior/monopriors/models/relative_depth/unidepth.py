@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
 from timeit import default_timer as timer
 from typing import Literal, Protocol, Self, TypedDict, cast, runtime_checkable
 
@@ -10,6 +13,7 @@ from monopriors.depth_utils import depth_to_disparity
 from monopriors.models._protocols import DeviceMovable
 from monopriors.models.relative_depth.base_relative_depth import (
     BaseRelativePredictor,
+    BaseRelativePredictorConfig,
     RelativeDepthPrediction,
 )
 
@@ -42,6 +46,7 @@ class UniDepthModel(DeviceMovable, Protocol):
         """Set evaluation mode and return the model."""
         ...
 
+
     def infer(
         self,
         rgb_chw: UInt8[torch.Tensor, "3 h w"],
@@ -59,13 +64,27 @@ class UniDepthModel(DeviceMovable, Protocol):
         ...
 
 
+@dataclass
+class UniDepthRelativeConfig(BaseRelativePredictorConfig):
+    """Configuration for UniDepth relative-depth prediction."""
+
+    version: Literal["v1", "v2"] = "v2"
+    """UniDepth model generation."""
+    backbone: Literal["vits14", "vitl14"] = "vitl14"
+    """DINOv2 backbone size."""
+
+    def setup(self, device: Literal["cpu", "cuda"]) -> UniDepthRelativePredictor:
+        """Build the configured UniDepth relative predictor on one device."""
+        return UniDepthRelativePredictor(device=device, version=self.version, backbone=self.backbone)
+
+
 class UniDepthRelativePredictor(BaseRelativePredictor[UniDepthModel]):
     def __init__(
         self,
         device: Literal["cpu", "cuda"],
         version: Literal["v1", "v2"] = "v2",
         backbone: Literal["vits14", "vitl14"] = "vitl14",
-    ):
+    ) -> None:
         super().__init__()
         print("Loading UniDepth model...")
         start = timer()

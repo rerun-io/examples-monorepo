@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import gc
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -15,6 +17,7 @@ from torchvision.transforms import Compose
 from tqdm import tqdm
 
 from monopriors.depth_utils import disparity_to_depth, estimate_intrinsics
+from monopriors.models.relative_depth.base_relative_depth import BaseVideoRelativePredictor, BaseVideoRelativePredictorConfig, RelativeDepthPrediction
 from monopriors.scale_utils import compute_scale_and_shift, get_interpolate_frames
 from monopriors.third_party.depth_anything_v2.util.transform import NormalizeImage, PrepareForNet, Resize
 from monopriors.third_party.video_depth_anything.video_depth import (
@@ -24,8 +27,6 @@ from monopriors.third_party.video_depth_anything.video_depth import (
     OVERLAP,
     VideoDepthAnything,
 )
-
-from .base_relative_depth import BaseVideoRelativePredictor, RelativeDepthPrediction
 
 model_configs = {
     "vits": {"encoder": "vits", "features": 64, "out_channels": [48, 96, 192, 384]},
@@ -154,6 +155,20 @@ def align_depths(
                 ref_align.append(new_depth)
 
     return depth_list_aligned
+
+
+@dataclass
+class VideoDepthAnythingConfig(BaseVideoRelativePredictorConfig):
+    """Configuration for Video Depth Anything prediction."""
+
+    encoder: Literal["vits", "vitl"] = "vits"
+    """DINOv2 encoder size."""
+    input_size: int = 518
+    """Network input size before aspect-ratio adjustment."""
+
+    def setup(self, device: Literal["cpu", "cuda"]) -> VideoDepthAnythingPredictor:
+        """Build the configured Video Depth Anything predictor on one device."""
+        return VideoDepthAnythingPredictor(device=device, encoder=self.encoder, input_size=self.input_size)
 
 
 class VideoDepthAnythingPredictor(BaseVideoRelativePredictor[VideoDepthAnything]):

@@ -28,8 +28,8 @@ from monopriors.models.multiview.multiview_predictor import (
     MultiviewPredictorConfig,
 )
 from monopriors.models.relative_depth import (
+    MoGeV1Config,
     RelativeDepthPrediction,
-    get_relative_predictor,
 )
 from monopriors.models.relative_depth.base_relative_depth import BaseRelativePredictor
 
@@ -275,7 +275,7 @@ class MultiViewCalibrationPostprocessor:
             self.seg_predictor = SAM3Predictor(SAM3Config(device=self.device))
         self.moge_predictor: BaseRelativePredictor | None = moge_predictor
         if self.config.refine_depth_maps and self.moge_predictor is None:
-            self.moge_predictor = get_relative_predictor("MoGeV1Predictor")(device=self.device)
+            self.moge_predictor = MoGeV1Config().setup(device=self.device)
 
     def __call__(
         self,

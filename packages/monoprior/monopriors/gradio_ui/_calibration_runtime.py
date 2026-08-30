@@ -7,7 +7,7 @@ from typing import Literal
 
 from sam3.api.predictor import SAM3Config, SAM3Predictor
 
-from monopriors.models.relative_depth import get_relative_predictor
+from monopriors.models.relative_depth import MoGeV1Config
 from monopriors.models.relative_depth.base_relative_depth import BaseRelativePredictor
 
 
@@ -45,7 +45,7 @@ class CalibrationAuxiliaryCache:
             moge_predictor: BaseRelativePredictor | None = None
             if refine_depth_maps:
                 if device not in self._depth_predictors:
-                    self._depth_predictors[device] = get_relative_predictor("MoGeV1Predictor")(device=device)
+                    self._depth_predictors[device] = MoGeV1Config().setup(device=device)
                 moge_predictor = self._depth_predictors[device]
 
             return CalibrationAuxiliaryModels(
