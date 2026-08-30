@@ -5,7 +5,8 @@ shows it in Rerun, on the monorepo's pins, with upstream code untouched.
 
 ## Layout of the fork
 
-- `main` = upstream commit, frozen (record the SHA in NOTES.md). Never push to it.
+- Upstream's default branch (`main` or `master` — keep its name) = upstream commit, frozen (record the SHA in
+  NOTES.md). Never push to it.
 - `pixi` = default branch. Change set is limited to: `pixi.toml`, `pixi.lock`, `.gitignore`,
   `demo_rerun.py`, `NOTES.md`, one README section "Run with pixi". Any upstream `.py` edit needs a
   reason under "Upstream edits" in NOTES.md (target: none; `git diff main -- '*.py'` shows only the demo).
@@ -13,7 +14,7 @@ shows it in Rerun, on the monorepo's pins, with upstream code untouched.
 ```bash
 GH_TOKEN=$(gh auth token --user pablovela5620) gh repo fork <org>/<repo> --clone=false
 git clone git@github.com:pablovela5620/<repo> ~/0Dev/forks/<repo>   # personal SSH identity
-git -C ~/0Dev/forks/<repo> checkout main && git -C ~/0Dev/forks/<repo> reset --hard <upstream-sha>   # main == the frozen SHA even if upstream moved
+git -C ~/0Dev/forks/<repo> reset --hard <upstream-sha>   # default branch == the frozen SHA even if upstream moved
 git -C ~/0Dev/forks/<repo> checkout -b pixi
 # after pushing: make pixi the default branch
 GH_TOKEN=$(gh auth token --user pablovela5620) gh repo edit pablovela5620/<repo> --default-branch pixi
@@ -33,7 +34,9 @@ GH_TOKEN=$(gh auth token --user pablovela5620) gh repo edit pablovela5620/<repo>
     skip gitignored files); use `hf download` (never `huggingface-cli`).
   - `demo` (depends-on both downloads) → `python demo_rerun.py`; `demo-upstream` → upstream's own script.
   - `eval` when upstream has an eval script, on the single hosted sample.
-- Verify: `pixi lock --check` clean; fresh clone → `pixi run demo` timing in NOTES.md.
+- Verify: `pixi lock --check` clean; fresh clone → `pixi run demo` timing in NOTES.md (warm pixi package cache,
+  empty env/weights/data — state it). If upstream's demo is interactive (`cv2.imshow`), `demo-upstream` stays
+  interactive; do not patch upstream for it.
 
 ## Weights and sample data
 
