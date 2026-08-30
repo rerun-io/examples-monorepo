@@ -6,9 +6,9 @@ inspection. The student is the distilled 6.14 M-parameter model; the teacher is
 the 340 M-parameter PromptDA-large TensorRT engine that produced its training
 labels.
 
-Preprocessing mirrors the training pipeline exactly: RGB is resized with
-``cv2.INTER_LINEAR`` and prompt pixels failing the confidence or range test are
-zeroed before the student sees them.
+Both models receive the same raw LiDAR prompt -- distillation is only meaningful
+when student and teacher see identical input. RGB resizing mirrors the training
+transform (``cv2.INTER_LINEAR``).
 """
 
 import time
@@ -21,7 +21,7 @@ import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 import torch
-from jaxtyping import Bool, Float32, UInt8, UInt16
+from jaxtyping import Float32, UInt8, UInt16
 from monopriors.models.depth_completion.zipdepth_prompt import ZipDepthPrompt, load_zipdepth_prompt
 from numpy import ndarray
 from simplecv.data.polycam import PolycamData, PolycamDataset, load_polycam_data
@@ -31,11 +31,6 @@ from tqdm import tqdm
 
 from rerun_prompt_da.apis.prompt_da_trt_polycam import network_image_hw
 from rerun_prompt_da.trt_predictor import PromptDATrtPredictor
-
-PROMPT_MIN_DEPTH_MM: int = 100
-"""Shortest prompt depth the student was trained to trust, in millimetres."""
-PROMPT_MAX_DEPTH_MM: int = 4000
-"""Furthest prompt depth the student was trained to trust, in millimetres."""
 
 
 @dataclass
@@ -59,27 +54,6 @@ class PolycamCompareConfig:
     max_frames: int | None = None
     """Optional cap on processed frames, for a quick visual check."""
 
-
-def masked_prompt_metres(polycam_data: PolycamData) -> Float32[ndarray, "192 256"]:
-    """Return the LiDAR prompt in metres with untrusted pixels zeroed.
-
-    Mirrors ``zipdepth.catalog.targets._prompt_tensors`` so the student sees the
-    same prompt distribution it was trained on: confidence above LOW, depth
-    inside 0.1--4.0 m, everything else zero.
-
-    Args:
-        polycam_data: One decoded Polycam frame.
-
-    Returns:
-        Float32 prompt depth in metres with shape ``(192, 256)``.
-    """
-    prompt_depth_mm_hw: UInt16[ndarray, "192 256"] = polycam_data.original_depth_hw
-    prompt_confidence_hw: UInt8[ndarray, "192 256"] = polycam_data.original_confidence_hw
-    prompt_valid_hw: Bool[ndarray, "192 256"] = (
-        (prompt_confidence_hw >= 1) & (prompt_depth_mm_hw >= PROMPT_MIN_DEPTH_MM) & (prompt_depth_mm_hw <= PROMPT_MAX_DEPTH_MM)
-    )
-    prompt_depth_m_hw: Float32[ndarray, "192 256"] = prompt_depth_mm_hw.astype(np.float32) / 1000.0
-    return np.where(prompt_valid_hw, prompt_depth_m_hw, np.float32(0.0))
 
 
 def create_compare_blueprint(parent_log_path: Path) -> rrb.Blueprint:
@@ -138,15 +112,12 @@ def polycam_compare(config: PolycamCompareConfig) -> None:
         batch_start: int = n_frames
         n_frames += len(batch)
 
-        # The teacher gets the RAW prompt and the student the confidence-masked
-        # one. PromptDA normalizes by the prompt's own min/max with no mask and
-        # no epsilon, so zeroed holes drag its minimum to 0 and corrupt the
-        # prediction; the student was trained on the masked prompt and expects it.
+        # Both models get the same RAW prompt. Distillation only makes sense when
+        # student and teacher see identical input, and PromptDA normalizes by the
+        # prompt's own min/max with no mask -- zeroed holes would drag its minimum
+        # to 0 and corrupt the teacher.
         raw_prompt_bhw: Float32[Tensor, "b 192 256"] = torch.from_numpy(
             np.stack([data.original_depth_hw for data in batch]).astype(np.float32) / 1000.0
-        ).cuda()
-        masked_prompt_bhw: Float32[Tensor, "b 192 256"] = torch.from_numpy(
-            np.stack([masked_prompt_metres(data) for data in batch])
         ).cuda()
         rgb_bhw3: UInt8[Tensor, "b h w 3"] = torch.from_numpy(np.stack([data.rgb_hw3 for data in batch])).cuda()
 
@@ -169,7 +140,7 @@ def polycam_compare(config: PolycamCompareConfig) -> None:
         torch.cuda.synchronize()
         student_start: float = time.perf_counter()
         with torch.inference_mode():
-            student_depth_b1hw: Float32[Tensor, "b 1 sh sw"] = student(student_rgb_b3hw, masked_prompt_bhw.unsqueeze(1))
+            student_depth_b1hw: Float32[Tensor, "b 1 sh sw"] = student(student_rgb_b3hw, raw_prompt_bhw.unsqueeze(1))
         torch.cuda.synchronize()
         student_seconds += time.perf_counter() - student_start
 

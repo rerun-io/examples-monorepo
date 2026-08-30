@@ -311,9 +311,13 @@ class ZipDepthTrainer:
                 if self.target_mode == 'metric':
                     teacher_depth = batch['target_depth'].to(self.device, non_blocking=True).float()
                     mask = batch['target_valid'].to(self.device, non_blocking=True)
-                    raw_prompt_depth = batch['prompt_depth'].to(self.device, non_blocking=True).float()
-                    prompt_valid = batch['prompt_valid'].to(self.device, non_blocking=True)
-                    prompt_depth = torch.where(prompt_valid, raw_prompt_depth, torch.zeros_like(raw_prompt_depth))
+                    # Feed the RAW prompt, exactly what the teacher saw when it produced
+                    # these labels (promptda_stream.py:254). Zeroing low-confidence pixels
+                    # made the student solve a different problem from the teacher, and the
+                    # degenerate cases it guarded against are already handled inside the
+                    # model, which computes its own finite/0.1-4 m validity for the
+                    # normalization range and clamps the span.
+                    prompt_depth = batch['prompt_depth'].to(self.device, non_blocking=True).float()
                 else:
                     teacher_depth = batch['depth'].to(self.device, non_blocking=True)
                     teacher_depth = teacher_depth.float().div_(256.0)

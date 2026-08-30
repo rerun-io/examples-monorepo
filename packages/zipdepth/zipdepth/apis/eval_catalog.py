@@ -38,8 +38,9 @@ class EvalCatalogConfig:
     """Explicit evaluation segment identifiers; overrides the saved holdout manifest."""
     checkpoint: Path | None = None
     """Checkpoint to evaluate; None uses released ZipDepth-base weights."""
-    evaluation: Literal["metric", "affine-reference", "aligned-relative"] = "metric"
-    """Direct prompted model, closed-form untrained reference, or legacy aligned diagnostic."""
+    evaluation: Literal["metric", "affine-reference", "aligned-relative", "prompt-upsample"] = "metric"
+    """Direct prompted model, closed-form untrained reference, legacy aligned diagnostic, or the
+    zero-parameter bilinear prompt upsample -- the floor any trained student must beat."""
     height: int = 768
     """Deterministic evaluation image height."""
     width: int = 1024
@@ -78,6 +79,41 @@ class MetricCatalogDepthMetrics:
     """Fraction of valid depth ratios below 1.25."""
     mae: float
     """Mean absolute error in metres."""
+
+
+def prompt_upsample_depth(
+    prompt_depth_hw: Float32[ndarray, "192 256"],
+    prompt_valid_hw: Bool[ndarray, "192 256"],
+    *,
+    height: int,
+    width: int,
+) -> Float32[ndarray, "h w"]:
+    """Bilinearly upsample the LiDAR prompt to full resolution, ignoring holes.
+
+    The zero-parameter control every trained student must beat. Invalid prompt
+    pixels are excluded rather than treated as zero depth: depth and validity are
+    resized together and divided, which is a normalized-convolution fill. Pixels
+    with no valid support anywhere nearby take the frame's median valid depth, so
+    the prediction is dense and is scored on the same pixels as a model's.
+
+    Args:
+        prompt_depth_hw: Prompt depth in metres with shape ``(192, 256)``.
+        prompt_valid_hw: Prompt validity with shape ``(192, 256)``.
+        height: Output height.
+        width: Output width.
+
+    Returns:
+        Dense float32 depth in metres with shape ``(height, width)``.
+    """
+    valid_f32_hw: Float32[ndarray, "192 256"] = prompt_valid_hw.astype(np.float32)
+    weighted_hw: Float32[ndarray, "192 256"] = (prompt_depth_hw * valid_f32_hw).astype(np.float32)
+    weighted_up_hw: Float32[ndarray, "h w"] = cv2.resize(weighted_hw, (width, height), interpolation=cv2.INTER_LINEAR)
+    weight_up_hw: Float32[ndarray, "h w"] = cv2.resize(valid_f32_hw, (width, height), interpolation=cv2.INTER_LINEAR)
+    supported_hw: Bool[ndarray, "h w"] = weight_up_hw > 1.0e-3
+    fallback: float = float(np.median(prompt_depth_hw[prompt_valid_hw])) if bool(prompt_valid_hw.any()) else 1.0
+    upsampled_hw: Float32[ndarray, "h w"] = np.full((height, width), fallback, dtype=np.float32)
+    upsampled_hw[supported_hw] = weighted_up_hw[supported_hw] / weight_up_hw[supported_hw]
+    return upsampled_hw
 
 
 def score_metric_depth(
@@ -254,7 +290,8 @@ def main(config: EvalCatalogConfig) -> Path:
     relative_predictor: ZipDepthPredictor | None = None
     if config.evaluation == "metric":
         prompted_model = load_zipdepth_prompt(checkpoint).to(device).fuse_for_inference()
-    else:
+    elif config.evaluation != "prompt-upsample":
+        # The prompt-upsample control needs no network at all.
         relative_predictor = ZipDepthPredictor(
             device="cuda" if device.type == "cuda" else "cpu",
             checkpoint=checkpoint,
@@ -302,15 +339,19 @@ def main(config: EvalCatalogConfig) -> Path:
             prompt_depth_hw: Float32[ndarray, "192 256"] = batch["prompt_depth"][0, 0].numpy().astype(np.float32, copy=False)
             prompt_valid_hw: Bool[ndarray, "192 256"] = batch["prompt_valid"][0, 0].numpy().astype(bool, copy=False)
 
-            if prompted_model is not None:
+            if config.evaluation == "prompt-upsample":
+                # Zero-parameter control: bilinearly resize the confidence-masked
+                # LiDAR prompt to full resolution. A trained student that does not
+                # beat this has learned nothing beyond upsampling its own input.
+                prediction_depth_hw: Float32[ndarray, "h w"] = prompt_upsample_depth(
+                    prompt_depth_hw, prompt_valid_hw, height=config.height, width=config.width
+                )
+            elif prompted_model is not None:
                 image_b3hw: Tensor = batch["image"].to(device=device, non_blocking=True)
+                # Raw prompt, matching both training and the teacher's own input.
                 prompt_depth_b1hw: Tensor = batch["prompt_depth"].to(device=device, non_blocking=True)
-                prompt_valid_b1hw: Tensor = batch["prompt_valid"].to(device=device, non_blocking=True)
-                masked_prompt_b1hw: Tensor = torch.where(prompt_valid_b1hw, prompt_depth_b1hw, torch.zeros_like(prompt_depth_b1hw))
                 with torch.inference_mode():
-                    prediction_depth_hw: Float32[ndarray, "h w"] = (
-                        prompted_model(image_b3hw, masked_prompt_b1hw)[0, 0].float().cpu().numpy()
-                    )
+                    prediction_depth_hw = prompted_model(image_b3hw, prompt_depth_b1hw)[0, 0].float().cpu().numpy()
             else:
                 if relative_predictor is None:
                     raise RuntimeError("relative predictor was not initialized")
