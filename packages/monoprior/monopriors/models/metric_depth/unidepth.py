@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
 from timeit import default_timer as timer
 from typing import Literal, Protocol, Self, TypedDict, cast, runtime_checkable
 
@@ -9,6 +12,7 @@ from jaxtyping import Float, UInt8
 from monopriors.models._protocols import DeviceMovable
 from monopriors.models.metric_depth.base_metric_depth import (
     BaseMetricPredictor,
+    BaseMetricPredictorConfig,
     MetricDepthPrediction,
 )
 from monopriors.models.relative_depth.unidepth import predicted_error_to_confidence
@@ -32,6 +36,7 @@ class UniDepthModel(DeviceMovable, Protocol):
         """Set evaluation mode and return the model."""
         ...
 
+
     def infer(
         self,
         rgb_chw: UInt8[torch.Tensor, "3 h w"],
@@ -47,6 +52,20 @@ class UniDepthModel(DeviceMovable, Protocol):
             Batched depth, intrinsics, and confidence tensors.
         """
         ...
+
+
+@dataclass
+class UniDepthMetricConfig(BaseMetricPredictorConfig):
+    """Configuration for UniDepth metric-depth prediction."""
+
+    version: Literal["v1", "v2"] = "v2"
+    """UniDepth model generation."""
+    backbone: Literal["vits14", "vitl14"] = "vitl14"
+    """DINOv2 backbone size."""
+
+    def setup(self, device: Literal["cpu", "cuda"]) -> UniDepthMetricPredictor:
+        """Build the configured UniDepth metric predictor on one device."""
+        return UniDepthMetricPredictor(device=device, version=self.version, backbone=self.backbone)
 
 
 class UniDepthMetricPredictor(BaseMetricPredictor[UniDepthModel]):

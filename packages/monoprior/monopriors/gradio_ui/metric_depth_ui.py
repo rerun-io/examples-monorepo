@@ -18,7 +18,7 @@ import gc
 import uuid
 from collections.abc import Generator
 from pathlib import Path
-from typing import Final, get_args
+from typing import Final
 
 import gradio as gr
 import numpy as np
@@ -31,7 +31,7 @@ from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from simplecv.rerun_log_utils import log_pinhole
 
 from monopriors.apis.metric_depth import MetricDepthNodeConfig, create_metric_predictor, run_metric_depth
-from monopriors.models.metric_depth import METRIC_PREDICTORS, BaseMetricPredictor, MetricDepthPrediction
+from monopriors.models.metric_depth import BaseMetricPredictor, BaseMetricPredictorConfig, MetricDepthPrediction, metric_predictor_defaults
 from monopriors.rr_logging_utils import log_confidence
 
 PARENT_LOG_PATH: Final[Path] = Path("world")
@@ -45,6 +45,9 @@ _CONFIG: MetricDepthNodeConfig = MetricDepthNodeConfig(device="cuda")
 _PREDICTOR: BaseMetricPredictor = create_metric_predictor(_CONFIG)
 """Module-level predictor singleton. Re-created when predictor_name changes."""
 
+_PREDICTOR_NAME: str = "moge-v2-metric"
+"""Name of the config used to create the module-level predictor."""
+
 
 def _sync_config(predictor_name: str) -> None:
     """Sync UI widget values into the module-level config and predictor singleton.
@@ -52,15 +55,19 @@ def _sync_config(predictor_name: str) -> None:
     Args:
         predictor_name: Which metric predictor to use.
     """
-    global _CONFIG, _PREDICTOR
+    global _CONFIG, _PREDICTOR, _PREDICTOR_NAME
     import torch
 
-    needs_reinit: bool = predictor_name != _CONFIG.predictor_name
+    predictor_config: BaseMetricPredictorConfig | None = metric_predictor_defaults.get(predictor_name)
+    if predictor_config is None:
+        raise gr.Error(f"{predictor_name} is not a metric depth predictor.")
+    needs_reinit: bool = predictor_name != _PREDICTOR_NAME
 
     _CONFIG = MetricDepthNodeConfig(
-        predictor_name=predictor_name,  # type: ignore[arg-type]  # Gradio dropdown returns str
+        predictor=predictor_config,
         device="cuda",
     )
+    _PREDICTOR_NAME = predictor_name
 
     if needs_reinit:
         del _PREDICTOR
@@ -215,8 +222,8 @@ def main() -> gr.Blocks:
                         with gr.Accordion("Config", open=False):
                             predictor_dropdown = gr.Dropdown(
                                 label="Predictor",
-                                choices=list(get_args(METRIC_PREDICTORS)),
-                                value=_CONFIG.predictor_name,
+                                choices=list(metric_predictor_defaults),
+                                value=_PREDICTOR_NAME,
                             )
 
                     with gr.TabItem("Outputs", id="outputs"):

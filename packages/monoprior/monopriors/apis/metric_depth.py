@@ -2,7 +2,7 @@
 
 Provides a self-contained API for running any ``BaseMetricPredictor`` on a
 single RGB image to produce metric-scale depth, confidence, and camera
-intrinsics. Uses the existing factory pattern from ``models/metric_depth/``.
+intrinsics.
 
 Also provides a CLI entry point (``main``) for standalone usage with tyro.
 """
@@ -16,10 +16,10 @@ from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from monopriors.models.metric_depth import (
-    METRIC_PREDICTORS,
+    AnnotatedMetricPredictorUnion,
     BaseMetricPredictor,
     MetricDepthPrediction,
-    get_metric_predictor,
+    MoGeV2MetricConfig,
 )
 
 
@@ -27,8 +27,8 @@ from monopriors.models.metric_depth import (
 class MetricDepthNodeConfig:
     """Configuration for metric depth estimation — works with any metric predictor."""
 
-    predictor_name: METRIC_PREDICTORS = "MoGeV2MetricPredictor"
-    """Which metric depth predictor to use (MoGeV2MetricPredictor, UniDepthMetricPredictor, etc.)."""
+    predictor: AnnotatedMetricPredictorUnion = field(default_factory=MoGeV2MetricConfig)
+    """Metric-depth model to run; select it with a predictor subcommand."""
     device: Literal["cuda", "cpu"] = "cuda"
     """Execution backend."""
 
@@ -54,7 +54,7 @@ def create_metric_predictor(config: MetricDepthNodeConfig) -> BaseMetricPredicto
     Returns:
         An initialised ``BaseMetricPredictor`` instance.
     """
-    return get_metric_predictor(config.predictor_name)(device=config.device)
+    return config.predictor.setup(device=config.device)
 
 
 def run_metric_depth(
