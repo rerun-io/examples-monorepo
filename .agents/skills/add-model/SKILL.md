@@ -10,7 +10,7 @@ description: >
 
 # Add a model to the monorepo
 
-Two phases, four gates. Phase 1 is skippable when a pixified fork already exists.
+Two phases, five gates. Phase 1 is skippable when a pixified fork already exists.
 Every phase reads one reference file; read it fully before starting that phase.
 
 | Phase | Reference | Output |
@@ -47,9 +47,9 @@ Worked example with every gotcha hit so far: [references/example-liteanystereo.m
 ## Phase 0 — Scope (write the answers into the fork's `NOTES.md` later)
 
 1. **License.** MIT/Apache: mirror freely. NVIDIA Source Code License / research-only: allowed to vendor and
-   mirror *with the license text*; flag non-commercial in the vendored `__init__.py` docstring and the HF card.
+   mirror *with the license text*; flag non-commercial in the vendored `__init__.py` docstring, the fork's NOTES.md, and (own mirrors only) the HF card. Weights can carry a different license than the code (e.g. NVIDIA Open Model Agreement vs Source Code License) — record both.
 2. **Weights.** Is there an official HF repo? Search the Hub (`curl 'https://huggingface.co/api/models?search=<name>'`)
-   before mirroring anything. Pin the revision SHA. Is the file a `state_dict` or a pickled module
+   before mirroring anything. Pin the HF revision SHA (`curl .../api/models/<repo>` → `sha`) and record the file's SHA-256 in the loader test. Is the file a `state_dict` or a pickled module
    (`torch.load(..., weights_only=False)`)? Pickled modules need the unpickler remap recipe in port.md.
 3. **Inference subset.** List the modules the demo actually imports. Everything else (training, export,
    ONNX/TRT, dataset loaders, visualisation utils) stays out.
@@ -58,10 +58,11 @@ Worked example with every gotcha hit so far: [references/example-liteanystereo.m
 5. **Reference number.** Does upstream ship an eval script and a per-dataset number? If not, the monorepo's
    ETH3D `playground_1l` sample (HF `pablovela5620/monoprior-example`, `stereo/eth3d`) is the fallback: record
    the result as a *baseline*, not a reproduction.
-6. **Contract.** Which existing predictor family does it join (`monopriors.models.stereo_depth`,
+6. **Upstream entry points.** Name the demo script (for `demo-upstream`), its preprocessing (scaling, padding divisor, normalisation, AMP dtype), the forward signature (`iters`, `test_mode`, output shape), and the minimum input size the network accepts (fixes the fast test's tiny pair).
+7. **Contract.** Which existing predictor family does it join (`monopriors.models.stereo_depth`,
    `relative_depth`, `normals`, ...)? Joining an existing `Base*Predictor` + `get_*_predictor` registry is the
    goal; a new family needs its contract designed first (grill the user).
-7. **Which PRs.** `1-vendor`, `2-predictor`, `3-typed` are always required. `4-app`/`5-catalog` only when the
+8. **Which PRs.** `1-vendor`, `2-predictor`, `3-typed` are always required. `4-app`/`5-catalog` only when the
    family has no app/catalog tool yet — an existing tool gains the new model through the registry.
 
 Grill the user on anything ambiguous above (batch the questions, give recommendations) before phase 1.

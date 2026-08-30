@@ -7,14 +7,15 @@ each PR bases on the previous one. Keep every PR reviewable on its own.
 
 - Copy only the inference modules to `monopriors/third_party/<model>/` plus the upstream `LICENSE`.
   Docstring in `__init__.py`: upstream URL, license (flag non-commercial), fork + SHA, file mapping
-  (`ours.py <- upstream/path.py`), "Local changes: none yet".
+  (`ours.py <- upstream/path.py`), "Local changes: import paths only" (absolute imports, no `sys.path` hacks, export/TRT-only classes dropped — nothing behavioural).
 - Make it importable: absolute imports, drop `sys.path` hacks; nothing else changes.
 - Register the vendor dir as *unowned* in `pyrefly.toml` (`project-excludes`) and in the package
   `pyproject.toml` (ruff `extend-exclude`, vulture `exclude`, package-data for LICENSE).
 - Deps: add to the package feature in root `pixi.toml` (conda first, PyPI second); keep `platforms`
   explicit. `pixi install -e <pkg>-dev` then commit `pixi.lock`.
 - Copy the same upstream files a second time to `tests/reference_data/<model>/upstream_*.py` — pristine
-  fixtures for the equivalence test in PR 3 (also excluded from lint/typecheck).
+  fixtures (excluded from lint/typecheck) — and add `tests/test_<model>_upstream_equivalence.py` already here
+  (it passes trivially against the as-is copy); PR 3 must keep it passing.
 
 ## PR 2 — `2-predictor`: the contract
 
@@ -25,7 +26,9 @@ each PR bases on the previous one. Keep every PR reviewable on its own.
   (stereo: `StereoDepthPrediction(disparity, depth_meters, K_33, baseline_m)` via `disparity_to_metric_depth`).
 - Register: `<FAMILY>_PREDICTORS` Literal + `get_<family>_predictor` in `models/<family>/__init__.py`.
   Existing demos/apps/catalog tools select by `predictor_name`; if one still hardcodes a class, switch it to
-  the registry in this PR (that is how the tools gain the model).
+  the registry in this PR (that is how the tools gain the model). Constructors differ per model (one has
+  `model_size`, another `valid_iters`); tools keep a small `match predictor_name` at the construction site — no
+  config abstraction, no kwargs plumbing for options a model does not have.
 - Tests: fast CPU test that builds the model from config and runs a tiny random pair (shape/dtype/finite);
   slow band (`pytestmark = [slow_cuda, requires_cuda]`) that downloads the checkpoint and checks the
   reference number on the ETH3D sample (validate.md gate 2). Default `pytest -q` must stay seconds.
@@ -35,7 +38,8 @@ each PR bases on the previous one. Keep every PR reviewable on its own.
 ### Pickled-module checkpoints (`torch.load(..., weights_only=False)` on a whole `nn.Module`)
 
 Do not import upstream at its original path and do not re-host converted files. Load with a custom
-`pickle.Unpickler` whose `find_class` remaps upstream module paths (`core.foundation_stereo` →
+`pickle.Unpickler` subclass (wrapped in a module-like namespace for `torch.load(..., pickle_module=...)`) whose
+`find_class` remaps upstream module paths (`core.foundation_stereo` →
 `monopriors.third_party.<model>.foundation_stereo`, `Utils` → ...) onto the vendored modules, then take
 `.state_dict()` and load it strictly into a freshly built module. Cover it with a test on the real file (slow).
 Inspect the pickle first (`zipfile` + `re.findall(rb'core\.[A-Za-z_.]+', data.pkl)`): it also references the
@@ -50,10 +54,14 @@ against the reference sample instead of guessing (FFS: `args.normalize` missing;
 - Module/parameter names and `state_dict` keys must not change.
 - `tests/test_<model>_upstream_equivalence.py`: load the pristine fixtures as a synthetic package
   (`importlib.util.spec_from_file_location` under a fake package name), build upstream and ours from the same
-  config, copy the state dict, assert bit-identical outputs on seeded random pairs for every variant and
-  every optional path (e.g. triton kernel vs torch fallback, hierarchical vs plain).
-- Flip the vendor dir to *owned*: remove it from `pyrefly.toml`/ruff/vulture excludes; add vulture
-  `ignore_names` for framework-read config keys instead of reworking code.
+  config, copy the state dict, assert bit-identical outputs (fp32, no autocast) on seeded random pairs for every
+  checkpoint/config variant and every code path that has both an upstream and an owned implementation
+  (hierarchical vs plain, iteration counts). Alternative kernels (triton vs torch volume) are *parity* checks
+  with a tolerance, not bit-identity, and are asserted separately.
+- Flip the vendor dir to *owned*: remove it from `pyrefly.toml`/ruff/vulture excludes **and add it to the
+  package's `PYREFLY_TARGET` list in root `pixi.toml`** (monoprior enumerates its typechecked paths; a path
+  missing there is silently never checked); add vulture `ignore_names` for framework-read config keys instead of
+  reworking code.
 - Update the `__init__.py` docstring: "Local changes vs upstream" + the re-sync recipe (copy upstream to
   fixtures, re-apply annotations, run the equivalence test).
 

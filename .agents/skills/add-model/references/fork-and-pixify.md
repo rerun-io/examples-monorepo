@@ -13,6 +13,7 @@ shows it in Rerun, on the monorepo's pins, with upstream code untouched.
 ```bash
 GH_TOKEN=$(gh auth token --user pablovela5620) gh repo fork <org>/<repo> --clone=false
 git clone git@github.com:pablovela5620/<repo> ~/0Dev/forks/<repo>   # personal SSH identity
+git -C ~/0Dev/forks/<repo> checkout main && git -C ~/0Dev/forks/<repo> reset --hard <upstream-sha>   # main == the frozen SHA even if upstream moved
 git -C ~/0Dev/forks/<repo> checkout -b pixi
 # after pushing: make pixi the default branch
 GH_TOKEN=$(gh auth token --user pablovela5620) gh repo edit pablovela5620/<repo> --default-branch pixi
