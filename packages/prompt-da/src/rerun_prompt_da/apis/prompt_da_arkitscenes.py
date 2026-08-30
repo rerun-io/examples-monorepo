@@ -5,6 +5,8 @@ local Rerun catalog, completes depth frame-by-frame, fuses a final TSDF mesh,
 and writes a replaceable ``promptda`` layer back to the dataset.
 """
 
+import ctypes
+import gc
 from collections.abc import Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -49,6 +51,11 @@ from rerun_prompt_da.promptda_stream import PromptDABatch, PromptDACollate, prom
 from rerun_prompt_da.trt_predictor import PromptDATrtPredictor
 
 PROMPTDA_LAYER = "promptda"
+
+_MALLOC_TRIM = ctypes.CDLL(None).malloc_trim
+"""glibc ``malloc_trim``; Linux-only, like the rest of this pipeline (NVDEC, TensorRT)."""
+_MALLOC_TRIM.argtypes = [ctypes.c_size_t]
+_MALLOC_TRIM.restype = ctypes.c_int
 
 
 @dataclass
@@ -305,6 +312,11 @@ def run_segment(
                 make_blueprint(portrait=portrait, framing=mesh_bounding_geometry(vertices), include_promptda=True),
                 recording=recording,
             )
+    # Open3D's TSDF churn leaves ~0.6 GB of freed native pages per segment resident in
+    # glibc arenas (measured: OOM at 142 GB after 234 segments). The fuser, executor and
+    # recording are out of scope here, so return those pages to the OS at the boundary.
+    gc.collect()
+    _MALLOC_TRIM(0)
     skipped_decodes: int = 0 if expected_frames is None else expected_frames - inferred_frames
     return SegmentResult(rrd_path=rrd_path, inferred_frames=inferred_frames, skipped_decodes=skipped_decodes)
 
