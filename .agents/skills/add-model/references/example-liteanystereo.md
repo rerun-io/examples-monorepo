@@ -15,6 +15,8 @@ Fork: `pablovela5620/LiteAnyStereo` (`main` = upstream 8c97bd4, `pixi` default).
   (robocap front pair → rectify → stereo → `EncodedDepthImage` + incremental TSDF mesh, streamed to the viewer).
 - simplecv additions: `rig.stereo_rig_calibration`, `rerun_dataloader(codec=)`, `log_open3d_mesh`.
 
+The constructor-flag examples above predate the config-class rework in #162; current tools select predictor config subcommands from the defaults-dict registry.
+
 ## Numbers
 
 ETH3D `playground_1l` (non-occluded, gt < 192): LAS2-M EPE 0.350 / bad1 2.24 % (paper 2.59), LAS2-H 0.250 / 1.12 %
