@@ -80,16 +80,16 @@ Output: `MonoPriorPrediction(metric_pred, normal_pred)`
 
 ## Predictor API pattern
 
-Every model family follows the same factory + callable pattern:
+Every model family exposes per-model configuration dataclasses with a common ``setup`` method:
 
 ```python
-from monopriors.models.relative_depth import get_relative_predictor
+from monopriors.models.relative_depth import DepthAnythingV2Config
 
-predictor = get_relative_predictor("DepthAnythingV2Predictor")(device="cuda")
+predictor = DepthAnythingV2Config(encoder="vits").setup(device="cuda")
 result: RelativeDepthPrediction = predictor(rgb=rgb_hw3, K_33=None)
 ```
 
-Factory functions (`get_relative_predictor`, `get_metric_predictor`, `get_normal_predictor`) use `Literal` types for predictor names and `match` statements for dispatch. All predictors have a `set_model_device()` method for moving weights between CPU/GPU.
+Tyro-facing tools use subcommand unions built from named default configs. All predictors have a `set_model_device()` method for moving weights between CPU/GPU.
 
 ## Core data types
 

@@ -1,6 +1,6 @@
 import gc
 from pathlib import Path
-from typing import Literal, get_args, overload
+from typing import Literal, overload
 
 import cv2
 import gradio as gr
@@ -18,9 +18,9 @@ from monopriors.models.metric_depth import (
     metric_predictor_defaults,
 )
 from monopriors.models.relative_depth import (
-    RELATIVE_PREDICTORS,
+    BaseRelativePredictorConfig,
     RelativeDepthPrediction,
-    get_relative_predictor,
+    relative_predictor_defaults,
 )
 from monopriors.rr_logging_utils import (
     create_compare_depth_blueprint,
@@ -50,7 +50,7 @@ def predict_depth(
     predictor, model_type: Literal["Relative", "Metric"], rgb: UInt8[np.ndarray, "h w 3"]
 ) -> RelativeDepthPrediction | MetricDepthPrediction:
     if model_type == "Relative":
-        relative_pred: RelativeDepthPrediction = predictor(device=DEVICE).__call__(rgb, None)
+        relative_pred: RelativeDepthPrediction = predictor.setup(device=DEVICE).__call__(rgb, None)
         del predictor
         gc.collect()
         torch.cuda.empty_cache()
@@ -63,22 +63,6 @@ def predict_depth(
         torch.cuda.empty_cache()
         return metric_pred
     raise ValueError(f"Unsupported model type: {model_type}")
-
-
-def _relative_predictor_name(model_name: str) -> RELATIVE_PREDICTORS:
-    """Validate and narrow a Gradio model choice to a relative predictor name."""
-
-    match model_name:
-        case "DepthAnythingV1Predictor":
-            return "DepthAnythingV1Predictor"
-        case "DepthAnythingV2Predictor":
-            return "DepthAnythingV2Predictor"
-        case "UniDepthRelativePredictor":
-            return "UniDepthRelativePredictor"
-        case "MoGeV1Predictor":
-            return "MoGeV1Predictor"
-        case _:
-            raise gr.Error(f"{model_name} is not a relative depth predictor.")
 
 
 if spaces is not None:
@@ -138,9 +122,10 @@ def on_submit(
                 depth_edge_threshold=depth_map_threshold,
             )
         elif model_type == "Relative":
-            relative_model_name: RELATIVE_PREDICTORS = _relative_predictor_name(model_name)
-            predictor = get_relative_predictor(relative_model_name)
-            relative_pred: RelativeDepthPrediction = predict_depth(predictor, "Relative", rgb)
+            relative_predictor_config: BaseRelativePredictorConfig | None = relative_predictor_defaults.get(model_name)
+            if relative_predictor_config is None:
+                raise gr.Error(f"{model_name} is not a relative depth predictor.")
+            relative_pred: RelativeDepthPrediction = predict_depth(relative_predictor_config, "Relative", rgb)
 
             log_relative_pred(
                 parent_log_path=parent_log_path,
@@ -176,14 +161,14 @@ with gr.Blocks() as relative_compare_block:
                 )
             with gr.Row():
                 model_1_dropdown = gr.Dropdown(
-                    choices=list(get_args(RELATIVE_PREDICTORS)),
+                    choices=list(relative_predictor_defaults),
                     label="Model1",
-                    value="DepthAnythingV2Predictor",
+                    value="depth-anything-v2",
                 )
                 model_2_dropdown = gr.Dropdown(
-                    choices=list(get_args(RELATIVE_PREDICTORS)),
+                    choices=list(relative_predictor_defaults),
                     label="Model2",
-                    value="MoGeV1Predictor",
+                    value="moge-v1",
                 )
             with gr.Row():
                 model_type = gr.Radio(
@@ -207,16 +192,16 @@ with gr.Blocks() as relative_compare_block:
     )
 
     def change_dropdown(model_type: Literal["Metric", "Relative"]) -> tuple[gr.Dropdown, gr.Dropdown]:
-        choices = list(metric_predictor_defaults) if model_type == "Metric" else list(get_args(RELATIVE_PREDICTORS))
+        choices = list(metric_predictor_defaults) if model_type == "Metric" else list(relative_predictor_defaults)
         model_1_dropdown = gr.Dropdown(
             choices=choices,
             label="Model1",
-            value="unidepth-metric" if model_type == "Metric" else "DepthAnythingV2Predictor",
+            value="unidepth-metric" if model_type == "Metric" else "depth-anything-v2",
         )
         model_2_dropdown = gr.Dropdown(
             choices=choices,
             label="Model2",
-            value="moge-v2-metric" if model_type == "Metric" else "UniDepthRelativePredictor",
+            value="moge-v2-metric" if model_type == "Metric" else "unidepth-relative",
         )
         return model_1_dropdown, model_2_dropdown
 

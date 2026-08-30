@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
 from pathlib import Path
 from timeit import default_timer as timer
 from typing import Literal
@@ -10,10 +13,9 @@ from huggingface_hub import hf_hub_download
 from jaxtyping import Float, Float32, UInt8
 
 from monopriors.depth_utils import disparity_to_depth, estimate_intrinsics
+from monopriors.models.relative_depth.base_relative_depth import BaseRelativePredictor, BaseRelativePredictorConfig, RelativeDepthPrediction
 from monopriors.third_party.zipdepth.architecture import ZipDepth, create_model
 from monopriors.third_party.zipdepth.model_utils import strip_state_dict_prefixes
-
-from .base_relative_depth import BaseRelativePredictor, RelativeDepthPrediction
 
 ZIPDEPTH_HF_REPO = "pablovela5620/zipdepth"
 # Pinned Hub commit: both released checkpoints, MIT license, model card (sha256-verified against the fork).
@@ -38,6 +40,22 @@ def load_zipdepth(checkpoint: Path, npu: bool = False) -> ZipDepth:
     model = create_model(variant="base", upsample_unfold=not npu)
     model.load_state_dict(state_dict, strict=True)
     return model.fuse_for_inference()  # RepVGG re-parameterisation; the fused graph is what the paper benchmarks
+
+
+@dataclass
+class ZipDepthConfig(BaseRelativePredictorConfig):
+    """Configuration for ZipDepth relative-depth prediction."""
+
+    checkpoint: Path | None = None
+    """Local weights, or None to download the pinned release checkpoint."""
+    input_size: int = 384
+    """Target size for the shorter input-image side."""
+    npu: bool = False
+    """Use the unfold-free NPU upsampling head and matching checkpoint."""
+
+    def setup(self, device: Literal["cpu", "cuda"]) -> ZipDepthPredictor:
+        """Build the configured ZipDepth predictor on one device."""
+        return ZipDepthPredictor(device=device, checkpoint=self.checkpoint, input_size=self.input_size, npu=self.npu)
 
 
 class ZipDepthPredictor(BaseRelativePredictor[ZipDepth]):

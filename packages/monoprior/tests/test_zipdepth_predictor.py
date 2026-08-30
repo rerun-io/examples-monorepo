@@ -4,25 +4,31 @@ Runs on CPU against a randomly initialised ZipDepth-base saved to disk, so no do
 """
 
 from pathlib import Path
-from typing import get_args
 
 import numpy as np
 import pytest
 import torch
 
-from monopriors.models.relative_depth import RELATIVE_PREDICTORS, ZipDepthPredictor, get_relative_predictor
+from monopriors.models.relative_depth import ZipDepthConfig, ZipDepthPredictor, relative_predictor_defaults
 from monopriors.models.relative_depth import zipdepth as zipdepth_module
 from monopriors.third_party.zipdepth.architecture import create_model
 
 
 def test_registered() -> None:
-    assert "ZipDepthPredictor" in get_args(RELATIVE_PREDICTORS)
-    assert get_relative_predictor("ZipDepthPredictor") is ZipDepthPredictor
+    assert set(relative_predictor_defaults) == {
+        "depth-anything-v1",
+        "depth-anything-v2",
+        "moge-v1",
+        "unidepth-relative",
+        "zipdepth",
+    }
+    assert isinstance(relative_predictor_defaults["zipdepth"], ZipDepthConfig)
 
 
 @pytest.fixture(scope="module")
 def trainer_checkpoint(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """A checkpoint in the training package's format: DDP+compile-prefixed keys plus optimizer state."""
+    torch.manual_seed(0)
     model = create_model(variant="base")
     path = tmp_path_factory.mktemp("ckpt") / "final_model.pth"
     torch.save({"model_state_dict": {"module._orig_mod." + k: v for k, v in model.state_dict().items()}, "optimizer_state_dict": {}}, path)
@@ -31,12 +37,12 @@ def trainer_checkpoint(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 @pytest.fixture(scope="module")
 def predictor(trainer_checkpoint: Path) -> ZipDepthPredictor:
-    return ZipDepthPredictor(device="cpu", checkpoint=trainer_checkpoint, input_size=64)
+    return ZipDepthConfig(checkpoint=trainer_checkpoint, input_size=64).setup(device="cpu")
 
 
 def test_local_checkpoint_bypasses_download(monkeypatch: pytest.MonkeyPatch, trainer_checkpoint: Path) -> None:
     monkeypatch.setattr(zipdepth_module, "download_zipdepth_checkpoint", lambda npu=False: pytest.fail("should not download"))
-    ZipDepthPredictor(device="cpu", checkpoint=trainer_checkpoint, input_size=64)
+    ZipDepthConfig(checkpoint=trainer_checkpoint, input_size=64).setup(device="cpu")
 
 
 def test_call_contract(predictor: ZipDepthPredictor) -> None:
@@ -66,5 +72,5 @@ def test_set_model_device(predictor: ZipDepthPredictor) -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU and the Hub weights")
 def test_real_weights_predict() -> None:
-    pred = ZipDepthPredictor(device="cuda")(np.full((240, 320, 3), 128, dtype=np.uint8), None)
+    pred = ZipDepthConfig().setup(device="cuda")(np.full((240, 320, 3), 128, dtype=np.uint8), None)
     assert pred.disparity.shape == (240, 320) and np.isfinite(pred.disparity).all()
