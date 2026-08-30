@@ -235,7 +235,6 @@ def main(config: StereoCatalogConfig) -> None:
         world_T_rig: Float64[np.ndarray, "4 4"] = world_T_rig_n44[min(int(np.searchsorted(pose_times, np.timedelta64(t_ns, "ns"))), len(pose_times) - 1)]
         left_rect, right_rect = rectify_pair(rect, frame_at(config.left_cam, t_ns), frame_at(config.right_cam, t_ns))
         pred: StereoDepthPrediction = predictor(left_rect, right_rect, K_33=K_rect_32, baseline_m=rect.baseline_m)
-        assert pred.depth_meters is not None
         depth_hw: Float32[np.ndarray, "h w"] = np.where(pred.depth_meters > config.max_depth_m, 0.0, pred.depth_meters).astype(np.float32)
         if config.remove_flying_pixels:
             depth_hw = np.asarray(depth_hw * ~depth_edges_mask(depth_hw, threshold=config.depth_edge_threshold), dtype=np.float32)

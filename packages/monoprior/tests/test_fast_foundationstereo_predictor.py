@@ -1,6 +1,7 @@
 """FastFoundationStereoPredictor registry and stereo prediction contract."""
 
 from collections.abc import Callable
+from dataclasses import fields
 from pathlib import Path
 from typing import Any, cast
 
@@ -14,6 +15,7 @@ from torch import nn
 
 from monopriors.models.stereo_depth import (
     AnnotatedStereoPredictorUnion,
+    BaseStereoPredictorConfig,
     FastFoundationStereoConfig,
     FastFoundationStereoPredictor,
     StereoDepthPrediction,
@@ -51,6 +53,7 @@ class FakeFastFoundationStereo(nn.Module):
 
 
 def test_fast_foundationstereo_config_registered() -> None:
+    assert fields(BaseStereoPredictorConfig) == ()
     assert set(stereo_predictor_defaults) == {"liteanystereo", "fast-foundationstereo"}
     config = stereo_predictor_defaults["fast-foundationstereo"]
     assert isinstance(config, FastFoundationStereoConfig)
@@ -115,7 +118,6 @@ def test_predictor_preprocesses_and_returns_metric_depth(monkeypatch: pytest.Mon
 
     expected_disparity: Float32[np.ndarray, "35 61"] = np.clip(left_rgb[..., 0].astype(np.float32) - 100.0, 0.0, None)
     assert np.array_equal(prediction.disparity, expected_disparity)
-    assert prediction.depth_meters is not None
     valid_hw: Bool[np.ndarray, "35 61"] = expected_disparity > 0.0
     assert np.allclose(prediction.depth_meters[valid_hw], 10.0 / expected_disparity[valid_hw])
     assert np.all(prediction.depth_meters[~valid_hw] == 0.0)
