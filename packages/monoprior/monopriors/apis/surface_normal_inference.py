@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import cv2
 import numpy as np
@@ -27,6 +28,8 @@ class NormalPredictorConfig:
     """Path to the input image."""
     predictor: AnnotatedNormalPredictorUnion = field(default_factory=DSineNormalConfig)
     """Surface-normal model to run; select it with a predictor subcommand."""
+    device: Literal["cuda", "cpu"] = "cuda"
+    """Execution backend."""
 
 
 def surface_normal_from_img(config: NormalPredictorConfig) -> None:
@@ -46,7 +49,7 @@ def surface_normal_from_img(config: NormalPredictorConfig) -> None:
         raise FileNotFoundError(f"Failed to read image {config.image_path}")
     rgb_hw3: UInt8[np.ndarray, "h w 3"] = cv2.cvtColor(bgr_hw3, cv2.COLOR_BGR2RGB)
 
-    predictor: BaseNormalPredictor = config.predictor.setup(device="cuda")
+    predictor: BaseNormalPredictor = config.predictor.setup(device=config.device)
     normal_pred: SurfaceNormalPrediction = predictor(rgb=rgb_hw3, K_33=None)
 
     rr.set_time("time", sequence=0)
