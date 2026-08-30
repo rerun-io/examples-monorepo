@@ -13,7 +13,7 @@ import rerun as rr
 import rerun.experimental as rrx
 import torch
 from gradio_rerun import Rerun
-from gradio_rerun.events import SelectionChange
+from gradio_rerun.events import SelectionChange, TimeUpdate
 from jaxtyping import Int64, UInt8
 from numpy import ndarray
 
@@ -216,9 +216,60 @@ def test_scrub_handler_never_writes_to_the_viewer() -> None:
     demo: gr.Blocks = track_ui.build_demo(track_ui.AppConfig())
     viewer_id: int = next(block._id for block in demo.blocks.values() if isinstance(block, Rerun))
     time_update_fns: list[Any] = [fn for fn in demo.fns.values() if any(t[1] == "time_update" for t in fn.targets)]
-    assert len(time_update_fns) == 2  # record_time (no outputs) + on_time_update
+    assert len(time_update_fns) == 1  # one unqueued, stamp-guarded listener; a queued one would re-dispatch stale events
     for fn in time_update_fns:
         assert viewer_id not in {block._id for block in fn.outputs}
         # always_last re-dispatches the *event* with a stale payload, which also reaches
         # record_time: a click after moving the playhead then prompts the wrong frame.
         assert fn.trigger_mode != "always_last"
+
+
+def test_late_reload_failure_keeps_previous_session_and_closes_the_candidate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failure after the candidate tracker exists (e.g. transcoding) must not close the old session nor leak the new tracker."""
+    previous: Session = _session("previous")[0]
+    candidate_closed: list[bool] = []
+
+    class CandidateClickTracker(ClickTracker):
+        def __init__(self, video_path: Path, actual_predictor: object, *, memory_window_size: int) -> None:
+            pass
+
+        def close(self) -> None:
+            candidate_closed.append(True)
+
+    monkeypatch.setattr(track_ui, "ClickTracker", CandidateClickTracker)
+    monkeypatch.setattr(track_ui, "cached_predictor", lambda _variant: object())
+
+    def failing_log_video(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("injected transcode failure")
+
+    monkeypatch.setattr(track_ui, "log_video", failing_log_video)
+    previous_closed: list[bool] = []
+    monkeypatch.setattr(previous.tracker, "close", lambda: previous_closed.append(True))
+    with pytest.raises(RuntimeError, match="injected"):
+        list(track_ui.load_video("clip.mp4", previous, "efficienttam-s-512", 10.0))
+    assert not previous_closed
+    assert candidate_closed == [True]
+
+
+def test_time_update_ignores_older_stamps_for_status_too() -> None:
+    """Unqueued requests finish out of order: an older event must not roll back the frame or the status text."""
+    session: Session = _session("stamps")[0]
+    session.frame_timestamps_ns = np.arange(0, 300, dtype=np.int64) * 33_366_667
+
+    def event(frame_idx: int) -> TimeUpdate:
+        return TimeUpdate(None, json.dumps({"type": "time_update", "application_id": "t", "recording_id": session.recording_id, "time": int(session.frame_timestamps_ns[frame_idx])}))
+
+    newer: tuple[Any, Any, Any] = track_ui.on_time_update(session, 200.0, event(30))
+    older: tuple[Any, Any, Any] = track_ui.on_time_update(session, 100.0, event(27))
+    assert session.current_frame == 30
+    assert "frame 30" in newer[0]
+    assert all(isinstance(value, type(gr.skip())) for value in older)
+
+
+def test_preview_requests_are_always_fresh_values() -> None:
+    """Re-requesting the same frame (e.g. after Undo) must still trigger preview_request.change."""
+    session: Session = _session("seq")[0]
+    first: float = track_ui._preview_request(session, 42)
+    second: float = track_ui._preview_request(session, 42)
+    assert first != second
+    assert int(first) % track_ui.PREVIEW_SEQ_STRIDE == 42 and int(second) % track_ui.PREVIEW_SEQ_STRIDE == 42

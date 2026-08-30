@@ -25,6 +25,7 @@ import gradio as gr
 import numpy as np
 import rerun as rr
 import tyro
+from beartype.roar import BeartypeException
 from gradio_rerun import Rerun
 from gradio_rerun.events import Pause, Play, SelectionChange, TimeUpdate
 from jaxtyping import UInt8
@@ -59,6 +60,8 @@ from posekit.track_ui_theme import APP_CSS, DESCRIPTION, FORCE_DARK_HEAD, VIEWER
 
 Mode: TypeAlias = Literal["+ Include", "− Exclude", "✕ Remove"]
 MODES: list[Mode] = ["+ Include", "− Exclude", "✕ Remove"]
+PREVIEW_SEQ_STRIDE: int = 1_000_000
+"""``preview_request`` = seq * stride + frame: the sequence number makes every request a new value."""
 TabName: TypeAlias = Literal["Input", "Config", "Outputs"]
 _EXAMPLES_DIR: Path = Path(__file__).resolve().parents[2] / "assets" / "examples"
 EXAMPLE_VIDEOS: list[str] = [
@@ -133,35 +136,44 @@ def load_video(
     video_path: Path = Path(video)
     if variant not in SAM2_VARIANTS:
         raise gr.Error(f"Unknown model {variant!r}.")
+    # The previous session stays live until the replacement is complete: a failure
+    # anywhere below (undecodable clip, transcode error) leaves Gradio holding the
+    # old Session, which must therefore still own an open decoder.
     tracker: ClickTracker = ClickTracker(video_path, cached_predictor(variant), memory_window_size=int(memory_window))
-    _close_session(previous_session)
     session: Session = Session(
         tracker=tracker,
         video_path=video_path,
         recording_id=recording_id,
         frame_timestamps_ns=np.empty(0, dtype=np.int64),
     )
-    recording_pair: RecordingPair = _open_recording(session)
-    rec: rr.RecordingStream = recording_pair[0]
-    stream: rr.BinaryStream = recording_pair[1]
-    rec.send_blueprint(_blueprint())
-    rec.log(
-        VIDEO,
-        rr.AnnotationContext([rr.AnnotationInfo(id=0, label="background", color=(0, 0, 0, 0)), rr.AnnotationInfo(id=1, label="object", color=MASK_COLOR)]),
-        static=True,
-    )
-    for entity in (f"{VIDEO}/mask", f"{VIDEO}/preview"):
-        rec.log(entity, rr.Transform3D(scale=float(MASK_SCALE)), static=True)
-    session.frame_timestamps_ns = log_video(
-        video_path,
-        Path(VIDEO),
-        timeline=TIMELINE,
-        recording=rec,
-        output_codec=rr.VideoCodec.H264,
-    )
-    stream.flush()
-    payload: bytes | None = stream.read()
-    rec.disconnect()
+    try:
+        recording_pair: RecordingPair = _open_recording(session)
+        rec: rr.RecordingStream = recording_pair[0]
+        stream: rr.BinaryStream = recording_pair[1]
+        rec.send_blueprint(_blueprint())
+        rec.log(
+            VIDEO,
+            rr.AnnotationContext([rr.AnnotationInfo(id=0, label="background", color=(0, 0, 0, 0)), rr.AnnotationInfo(id=1, label="object", color=MASK_COLOR)]),
+            static=True,
+        )
+        for entity in (f"{VIDEO}/mask", f"{VIDEO}/preview"):
+            rec.log(entity, rr.Transform3D(scale=float(MASK_SCALE)), static=True)
+        session.frame_timestamps_ns = log_video(
+            video_path,
+            Path(VIDEO),
+            timeline=TIMELINE,
+            recording=rec,
+            output_codec=rr.VideoCodec.H264,
+        )
+        stream.flush()
+        payload: bytes | None = stream.read()
+        rec.disconnect()
+    except BeartypeException:
+        raise
+    except Exception:
+        _close_session(session)
+        raise
+    _close_session(previous_session)
     yield (
         payload,
         session,
@@ -182,20 +194,36 @@ def _reload_video_from_config(
     yield from load_video(video, previous_session, variant, memory_window, selected_tab="Config")
 
 
-def record_time(session: Session | None, stamp: float | None, evt: TimeUpdate) -> None:
-    """Record the viewer's frame instantly (no queue, no outputs) so a click right after a scrub reads the right frame.
+def _preview_request(session: Session, frame_idx: int) -> float:
+    """A fresh ``preview_request`` value for ``frame_idx`` (a repeat of the same frame must still fire ``.change``)."""
+    session.preview_seq += 1
+    return float(session.preview_seq * PREVIEW_SEQ_STRIDE + frame_idx)
 
-    ``stamp`` is the browser's ``performance.now()`` at dispatch (see the ``js`` hook): unqueued
-    requests can complete out of order, so an older event must never overwrite a newer one.
+
+def on_time_update(session: Session | None, stamp: float | None, evt: TimeUpdate) -> tuple[Any, Any, Any]:
+    """Record the viewer's frame instantly, report it, and hand it to ``push_preview``.
+
+    Unqueued and cheap on purpose, and the only listener on time_update: a queued or
+    ``always_last`` listener here re-dispatches the *event* with a stale payload, which
+    made clicks after a playhead drag prompt the frame the drag started from.
+    ``stamp`` is the browser's ``performance.now()`` at dispatch (see the ``js`` hook):
+    unqueued requests complete out of order, so an older event never overwrites a
+    newer one — neither ``current_frame`` nor the status text.
     """
     if session is None:
-        return
+        return gr.skip(), gr.skip(), gr.skip()
     stamp_value: float = float(stamp) if stamp is not None else session.last_stamp + 1.0
     if stamp_value < session.last_stamp:
-        return
+        return gr.skip(), gr.skip(), gr.skip()
     session.last_stamp = stamp_value
-    session.current_frame = frame_at(session.frame_timestamps_ns, float(evt.payload.time))
+    frame_idx: int = frame_at(session.frame_timestamps_ns, float(evt.payload.time))
+    session.current_frame = frame_idx
     session.last_time_update = time.monotonic()
+    if session.playing:
+        # Playback emits ~10 time updates a second; previewing and re-writing the status on each would spam the UI and the GPU.
+        return gr.skip(), gr.skip(), gr.skip()
+    frame_text: str = f"Viewer at frame {frame_idx} — a click prompts this frame."
+    return frame_text, frame_text, _preview_request(session, frame_idx)
 
 
 def on_play(session: Session | None, evt: Play) -> None:
@@ -210,22 +238,6 @@ def on_pause(session: Session | None, evt: Pause) -> None:
         session.playing = False
 
 
-def on_time_update(session: Session | None, evt: TimeUpdate) -> tuple[Any, Any, Any]:
-    """Report the frame under the cursor and hand it to ``push_preview``.
-
-    Unqueued and cheap on purpose. This listener must never use ``trigger_mode="always_last"``:
-    Gradio re-dispatches the coalesced *event* with a stale payload, and that re-dispatch
-    also reaches ``record_time``, which then records a frame the user left long ago.
-    (That is how a click after moving the playhead prompted the wrong frame.)
-    """
-    if session is None or session.playing:
-        # Playback emits ~10 time updates a second; previewing and re-writing the status on each would spam the UI and the GPU.
-        return gr.skip(), gr.skip(), gr.skip()
-    frame_idx: int = frame_at(session.frame_timestamps_ns, float(evt.payload.time))
-    frame_text: str = f"Viewer at frame {frame_idx} — a click prompts this frame."
-    return frame_text, frame_text, float(frame_idx)
-
-
 def push_preview(session: Session | None, request: float | None) -> Iterator[bytes | None]:
     """Preview the memory-conditioned mask on the frame under the cursor once it has rested there.
 
@@ -236,7 +248,7 @@ def push_preview(session: Session | None, request: float | None) -> Iterator[byt
     if session is None or request is None:
         yield b""
         return
-    frame_idx: int = int(request)
+    frame_idx: int = int(request) % PREVIEW_SEQ_STRIDE
     recording_pair: RecordingPair = _open_recording(session, write_part=False)
     rec: rr.RecordingStream = recording_pair[0]
     stream: rr.BinaryStream = recording_pair[1]
@@ -312,7 +324,7 @@ def on_select(
     yield payload, status_text, status_text
 
 
-def undo(session: Session | None) -> Iterator[tuple[bytes | None, str, str]]:
+def undo(session: Session | None) -> Iterator[tuple[bytes | None, str, str, Any]]:
     """Remove the most recently added point."""
     if session is None:
         raise gr.Error("Upload a video first.")
@@ -324,7 +336,7 @@ def undo(session: Session | None) -> Iterator[tuple[bytes | None, str, str]]:
     if edit.point is None:
         rec.disconnect()
         status_text: str = _status(session, "Nothing to undo.")
-        yield b"", status_text, status_text
+        yield b"", status_text, status_text, gr.skip()
         return
     stale: bool = _invalidate_track(rec, session)
     _log_mask(rec, session, _mask_hw(edit.result) if edit.result is not None else None, edit.point.frame_idx)
@@ -336,7 +348,8 @@ def undo(session: Session | None) -> Iterator[tuple[bytes | None, str, str]]:
     if stale:
         prefix += " The previous track is stale — Track again."
     status_text = _status(session, prefix)
-    yield payload, status_text, status_text
+    # The preview under the cursor was cleared above; ask for a fresh one when the cursor's frame has no point of its own.
+    yield payload, status_text, status_text, (_preview_request(session, session.current_frame) if session.tracker.points else gr.skip())
 
 
 def clear(session: Session | None) -> Iterator[tuple[bytes | None, str, str]]:
@@ -507,23 +520,15 @@ def build_demo(config: AppConfig) -> gr.Blocks:
             api_visibility="private",
         )
         # always_last coalesces the flood of time updates while scrubbing/playing into "the latest one".
-        viewer.time_update(
-            fn=record_time,
-            inputs=[recording_state, stamp_in],
-            outputs=None,
-            queue=False,
-            trigger_mode="multiple",
-            js="(session, _stamp) => [session, performance.now()]",
-            api_visibility="private",
-        )
         viewer.play(fn=on_play, inputs=[recording_state], outputs=None, queue=False, trigger_mode="multiple", api_visibility="private")
         viewer.pause(fn=on_pause, inputs=[recording_state], outputs=None, queue=False, trigger_mode="multiple", api_visibility="private")
         viewer.time_update(
             fn=on_time_update,
-            inputs=[recording_state],
+            inputs=[recording_state, stamp_in],
             outputs=[status, status_probe, preview_request],
             queue=False,
             trigger_mode="multiple",
+            js="(session, _stamp) => [session, performance.now()]",
             show_progress="hidden",
             api_visibility="private",
         )
@@ -542,7 +547,7 @@ def build_demo(config: AppConfig) -> gr.Blocks:
             show_progress="hidden",
             api_visibility="private",
         )
-        undo_btn.click(fn=undo, inputs=[recording_state], outputs=[viewer, status, status_probe], api_visibility="private")
+        undo_btn.click(fn=undo, inputs=[recording_state], outputs=[viewer, status, status_probe, preview_request], api_visibility="private")
         clear_btn.click(fn=clear, inputs=[recording_state], outputs=[viewer, status, status_probe], api_visibility="private")
         track_event = track_btn.click(fn=track, inputs=[recording_state], outputs=[viewer, status, status_probe, tabs_radio, download])
         stop_btn.click(fn=stop_tracking, outputs=[status, status_probe], cancels=[track_event], queue=False)

@@ -51,6 +51,8 @@ class Session:
     """Set by the viewer's play/pause events; clicks while playing have no known frame and are refused."""
     preview_visible: bool = False
     """A static preview mask is currently shown on ``video/preview``."""
+    preview_seq: int = 0
+    """Sequence number folded into ``preview_request`` values (see ``track_ui._preview_request``)."""
     masked_frames: set[int] = field(default_factory=set)
     """Frames that carry a mask; anything else must show none (latest-at would otherwise keep the last one)."""
     pointed_frames: set[int] = field(default_factory=set)
