@@ -46,6 +46,12 @@ Inspect the pickle first (`zipfile` + `re.findall(rb'core\.[A-Za-z_.]+', data.pk
 config classes the module holds (e.g. `omegaconf.dictconfig`), which then become a dependency, and a checkpoint
 serialised by older code may lack attributes the current `forward()` reads — measure each candidate default
 against the reference sample instead of guessing (FFS: `args.normalize` missing; True → 0.48 % bad1, False → 45 %).
+Compare the unpickled module's `state_dict` against a config-built module before promising "build from config +
+strict load": a NAS-pruned / distilled release (FFS: 210 tensors only in the pickle, 54 shape changes, distillation
+wrapper modules) cannot be described by its `cfg.yaml`. Then the pickle *is* the architecture spec: the loader
+unpickles + deep-copies + strictly reloads, the typed fork types the classes without renaming modules, classes or
+parameters (the remap and the state_dict keys depend on them), the fast equivalence test compares config-built
+upstream vs owned nets, and a slow test unpickles the real file onto both packages and compares outputs.
 
 ## PR 3 — `3-typed`: owned fork
 
