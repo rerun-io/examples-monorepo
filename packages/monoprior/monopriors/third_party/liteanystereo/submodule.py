@@ -1,221 +1,310 @@
-from __future__ import print_function
-import torch
-import torch.nn as nn
-import torch.utils.data
-import torch.nn.functional as F
+"""Shared convolution, correlation, and upsampling layers for LiteAnyStereo V2."""
+
+from collections.abc import Callable
 from functools import partial
+from typing import Any, TypeAlias
+
+import torch
+import torch.nn.functional as F
+from jaxtyping import Float32
+from torch import Tensor, nn
+
+ActivationFactory: TypeAlias = Callable[[], nn.Module]
+NormFactory: TypeAlias = Callable[[int], nn.Module]
+SpatialArgument: TypeAlias = int | tuple[int, int]
 
 
 class BasicConv2d(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=0, bias=False,
-                 norm_layer=None, act_layer=None, **kwargs):
-        super(BasicConv2d, self).__init__()
-        layers = [nn.Conv2d(in_channels, out_channels,
-                            kernel_size=kernel_size, stride=stride, padding=padding, bias=bias, **kwargs)]
+    """Apply a 2D convolution followed by optional normalization and activation."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: SpatialArgument = 3,
+        stride: SpatialArgument = 1,
+        padding: SpatialArgument = 0,
+        bias: bool = False,
+        norm_layer: NormFactory | None = None,
+        act_layer: ActivationFactory | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Initialize the convolution block.
+
+        Args:
+            in_channels: Number of input channels.
+            out_channels: Number of output channels.
+            kernel_size: Convolution kernel size.
+            stride: Convolution stride.
+            padding: Input padding.
+            bias: Whether the convolution has a bias parameter.
+            norm_layer: Optional normalization-layer factory.
+            act_layer: Optional activation-layer factory.
+            **kwargs: Extra keyword arguments forwarded to ``nn.Conv2d``.
+        """
+        super().__init__()
+        layers: list[nn.Module] = [
+            nn.Conv2d(
+                in_channels,
+                out_channels,
+                kernel_size=kernel_size,
+                stride=stride,
+                padding=padding,
+                bias=bias,
+                **kwargs,
+            )
+        ]
         if norm_layer is not None:
             layers.append(norm_layer(out_channels))
         if act_layer is not None:
             layers.append(act_layer())
 
-        self.block = nn.Sequential(*layers)
+        self.block: nn.Sequential = nn.Sequential(*layers)
 
-    def forward(self, x):
-        x = self.block(x)
-        return x
+    def forward(self, x_bchw: Float32[Tensor, "b c_in h w"]) -> Float32[Tensor, "b c_out h_out w_out"]:
+        """Transform one float32 feature map.
+
+        Args:
+            x_bchw: Float32 input tensor with shape ``(batch, input_channels, height, width)``.
+
+        Returns:
+            Float32 output tensor with shape ``(batch, output_channels, output_height, output_width)``.
+        """
+        output_bchw: Float32[Tensor, "b c_out h_out w_out"] = self.block(x_bchw)
+        return output_bchw
 
 
 class BasicDeconv2d(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, bias=False,
-                 norm_layer=None, act_layer=None, **kwargs):
-        super(BasicDeconv2d, self).__init__()
-        layers = [nn.ConvTranspose2d(in_channels, out_channels,
-                                     kernel_size=kernel_size, stride=stride, padding=padding, bias=bias, **kwargs)]
+    """Apply a 2D transposed convolution followed by optional normalization and activation."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: SpatialArgument,
+        stride: SpatialArgument = 1,
+        padding: SpatialArgument = 0,
+        bias: bool = False,
+        norm_layer: NormFactory | None = None,
+        act_layer: ActivationFactory | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Initialize the transposed-convolution block.
+
+        Args:
+            in_channels: Number of input channels.
+            out_channels: Number of output channels.
+            kernel_size: Transposed-convolution kernel size.
+            stride: Transposed-convolution stride.
+            padding: Input padding.
+            bias: Whether the convolution has a bias parameter.
+            norm_layer: Optional normalization-layer factory.
+            act_layer: Optional activation-layer factory.
+            **kwargs: Extra keyword arguments forwarded to ``nn.ConvTranspose2d``.
+        """
+        super().__init__()
+        layers: list[nn.Module] = [
+            nn.ConvTranspose2d(
+                in_channels,
+                out_channels,
+                kernel_size=kernel_size,
+                stride=stride,
+                padding=padding,
+                bias=bias,
+                **kwargs,
+            )
+        ]
         if norm_layer is not None:
             layers.append(norm_layer(out_channels))
         if act_layer is not None:
             layers.append(act_layer())
 
-        self.block = nn.Sequential(*layers)
+        self.block: nn.Sequential = nn.Sequential(*layers)
 
-    def forward(self, x):
-        x = self.block(x)
-        return x
+    def forward(self, x_bchw: Float32[Tensor, "b c_in h w"]) -> Float32[Tensor, "b c_out h_out w_out"]:
+        """Upsample one float32 feature map.
+
+        Args:
+            x_bchw: Float32 input tensor with shape ``(batch, input_channels, height, width)``.
+
+        Returns:
+            Float32 output tensor with shape ``(batch, output_channels, output_height, output_width)``.
+        """
+        output_bchw: Float32[Tensor, "b c_out h_out w_out"] = self.block(x_bchw)
+        return output_bchw
 
 
 class FPNLayer(nn.Module):
-    def __init__(self, chan_low, chan_high):
+    """Fuse one low-resolution feature map with a higher-resolution skip feature."""
+
+    def __init__(self, chan_low: int, chan_high: int) -> None:
+        """Initialize the feature-pyramid layer.
+
+        Args:
+            chan_low: Number of low-resolution input channels.
+            chan_high: Number of skip and output channels.
+        """
         super().__init__()
-        self.deconv = BasicDeconv2d(chan_low, chan_high, kernel_size=4, stride=2, padding=1,
-                                    norm_layer=nn.BatchNorm2d,
-                                    act_layer=partial(nn.LeakyReLU, negative_slope=0.2, inplace=True))
+        self.deconv: BasicDeconv2d = BasicDeconv2d(
+            chan_low,
+            chan_high,
+            kernel_size=4,
+            stride=2,
+            padding=1,
+            norm_layer=nn.BatchNorm2d,
+            act_layer=partial(nn.LeakyReLU, negative_slope=0.2, inplace=True),
+        )
+        self.conv: BasicConv2d = BasicConv2d(
+            chan_high * 2,
+            chan_high,
+            kernel_size=3,
+            padding=1,
+            norm_layer=nn.BatchNorm2d,
+            act_layer=partial(nn.LeakyReLU, negative_slope=0.2, inplace=True),
+        )
 
-        self.conv = BasicConv2d(chan_high * 2, chan_high, kernel_size=3, padding=1,
-                                norm_layer=nn.BatchNorm2d,
-                                act_layer=partial(nn.LeakyReLU, negative_slope=0.2, inplace=True))
+    def forward(
+        self,
+        low_bchw: Float32[Tensor, "b c_low h_low w_low"],
+        high_bchw: Float32[Tensor, "b c_high h_high w_high"],
+    ) -> Float32[Tensor, "b c_high h_high w_high"]:
+        """Fuse low- and high-resolution float32 feature maps.
 
-    def forward(self, low, high):
-        low = self.deconv(low)
-        feat = torch.cat([high, low], 1)
-        feat = self.conv(feat)
-        return feat
+        Args:
+            low_bchw: Float32 low-resolution tensor with shape ``(batch, low_channels, low_height, low_width)``.
+            high_bchw: Float32 skip tensor with shape ``(batch, high_channels, high_height, high_width)``.
 
-
-class BasicConv(nn.Module):
-
-    def __init__(self, in_channels, out_channels, deconv=False, is_3d=False, bn=True, relu=True, **kwargs):
-        super(BasicConv, self).__init__()
-
-        self.relu = relu
-        self.use_bn = bn
-        if is_3d:
-            if deconv:
-                self.conv = nn.ConvTranspose3d(in_channels, out_channels, bias=False, **kwargs)
-            else:
-                self.conv = nn.Conv3d(in_channels, out_channels, bias=False, **kwargs)
-            if self.use_bn:
-                self.bn = nn.BatchNorm3d(out_channels)
-        else:
-            if deconv:
-                self.conv = nn.ConvTranspose2d(in_channels, out_channels, bias=False, **kwargs)
-            else:
-                self.conv = nn.Conv2d(in_channels, out_channels, bias=False, **kwargs)
-            if self.use_bn:
-                self.bn = nn.BatchNorm2d(out_channels)
-
-    def forward(self, x):
-        x = self.conv(x)
-        if self.use_bn:
-            x = self.bn(x)
-        if self.relu:
-            x = nn.ReLU6()(x)#, inplace=True)
-        return x
+        Returns:
+            Float32 fused tensor with shape ``(batch, high_channels, high_height, high_width)``.
+        """
+        upsampled_bchw: Float32[Tensor, "b c_high h_high w_high"] = self.deconv(low_bchw)
+        concatenated_bchw: Float32[Tensor, "b two_c_high h_high w_high"] = torch.cat([high_bchw, upsampled_bchw], 1)
+        fused_bchw: Float32[Tensor, "b c_high h_high w_high"] = self.conv(concatenated_bchw)
+        return fused_bchw
 
 
-def disparity_regression(x, maxdisp):
-    assert len(x.shape) == 4
-    disp_values = torch.arange(0, maxdisp, dtype=x.dtype, device=x.device)
-    disp_values = disp_values.view(1, maxdisp, 1, 1)
-    return torch.sum(x * disp_values, 1, keepdim=True)
+def disparity_regression(probability_bdhw: Float32[Tensor, "b disparities h w"], max_disp: int) -> Float32[Tensor, "b 1 h w"]:
+    """Compute expected disparity from a float32 probability volume.
+
+    Args:
+        probability_bdhw: Float32 disparity probabilities with shape ``(batch, disparities, height, width)``.
+        max_disp: Number of discrete disparity values.
+
+    Returns:
+        Float32 expected disparity with shape ``(batch, 1, height, width)``.
+    """
+    assert probability_bdhw.ndim == 4
+    disparity_values_d: Float32[Tensor, "disparities"] = torch.arange(
+        0,
+        max_disp,
+        dtype=probability_bdhw.dtype,
+        device=probability_bdhw.device,
+    )
+    disparity_values_1d11: Float32[Tensor, "1 disparities 1 1"] = disparity_values_d.view(1, max_disp, 1, 1)
+    disparity_b1hw: Float32[Tensor, "b 1 h w"] = torch.sum(probability_bdhw * disparity_values_1d11, 1, keepdim=True)
+    return disparity_b1hw
 
 
-def groupwise_correlation(fea1, fea2, num_groups):
-    B, C, H, W = fea1.shape
-    assert C % num_groups == 0
-    channels_per_group = C // num_groups
-    cost = (fea1 * fea2).view([B, num_groups, channels_per_group, H, W]).mean(dim=2)
-    assert cost.shape == (B, num_groups, H, W)
-    return cost
+def build_gwc_volume_fast(
+    reference_bchw: Float32[Tensor, "b channels h w"],
+    target_bchw: Float32[Tensor, "b channels h w"],
+    max_disp: int,
+    num_groups: int,
+) -> Float32[Tensor, "b groups disparities h w"]:
+    """Build the groupwise-correlation cost volume used by LAS2-H.
 
-def build_gwc_volume(refimg_fea, targetimg_fea, maxdisp, num_groups):
-    B, C, H, W = refimg_fea.shape
-    volume = refimg_fea.new_zeros([B, num_groups, maxdisp, H, W])
-    for i in range(maxdisp):
-        if i > 0:
-            volume[:, :, i, :, i:] = groupwise_correlation(refimg_fea[:, :, :, i:], targetimg_fea[:, :, :, :-i],
-                                                           num_groups)
-        else:
-            volume[:, :, i, :, :] = groupwise_correlation(refimg_fea, targetimg_fea, num_groups)
-    volume = volume.contiguous()
-    return volume
+    Args:
+        reference_bchw: Float32 left features with shape ``(batch, channels, height, width)``.
+        target_bchw: Float32 right features with shape ``(batch, channels, height, width)``.
+        max_disp: Number of feature-space disparity candidates.
+        num_groups: Number of channel groups.
 
+    Returns:
+        Float32 correlation volume with shape ``(batch, groups, disparities, height, width)``.
+    """
+    shape_bchw: torch.Size = reference_bchw.shape
+    batch_size: int = shape_bchw[0]
+    channels: int = shape_bchw[1]
+    height: int = shape_bchw[2]
+    width: int = shape_bchw[3]
+    assert channels % num_groups == 0
+    channels_per_group: int = channels // num_groups
 
-def build_gwc_volume_fast(refimg_fea, targetimg_fea, maxdisp, num_groups):
-    B, C, H, W = refimg_fea.shape
-    assert C % num_groups == 0
-    channels_per_group = C // num_groups
+    reference_bcdhw: Float32[Tensor, "b channels disparities h w"] = reference_bchw.unsqueeze(2).expand(
+        batch_size, channels, max_disp, height, width
+    )
+    padded_target_bchw: Float32[Tensor, "b channels h padded_w"] = F.pad(target_bchw, (max_disp - 1, 0, 0, 0))
+    unfolded_target_bchdw: Float32[Tensor, "b channels h disparities w"] = padded_target_bchw.unfold(3, width, 1)
+    target_bcdhw: Float32[Tensor, "b channels disparities h w"] = torch.flip(unfolded_target_bchdw, [3]).permute(0, 1, 3, 2, 4)
 
-    ref_volume = refimg_fea.unsqueeze(2).expand(B, C, maxdisp, H, W)
-    padded_target = F.pad(targetimg_fea, (maxdisp - 1, 0, 0, 0))
-    unfolded_target = padded_target.unfold(3, W, 1)
-    target_volume = torch.flip(unfolded_target, [3]).permute(0, 1, 3, 2, 4)
-
-    ref_volume = ref_volume.view(B, num_groups, channels_per_group, maxdisp, H, W)
-    target_volume = target_volume.view(B, num_groups, channels_per_group, maxdisp, H, W)
-    volume = (ref_volume * target_volume).mean(dim=2)
-    return volume.contiguous()
-
-def groupwise_correlation_norm(fea1, fea2, num_groups):
-    B, C, H, W = fea1.shape
-    assert C % num_groups == 0
-    channels_per_group = C // num_groups
-    fea1 = fea1.view([B, num_groups, channels_per_group, H, W])
-    fea2 = fea2.view([B, num_groups, channels_per_group, H, W])
-    cost = ((fea1/(torch.norm(fea1, 2, 2, True)+1e-05)) * (fea2/(torch.norm(fea2, 2, 2, True)+1e-05))).mean(dim=2)
-    assert cost.shape == (B, num_groups, H, W)
-    return cost
+    grouped_reference_bgcdhw: Float32[Tensor, "b groups channels_per_group disparities h w"] = reference_bcdhw.view(
+        batch_size, num_groups, channels_per_group, max_disp, height, width
+    )
+    grouped_target_bgcdhw: Float32[Tensor, "b groups channels_per_group disparities h w"] = target_bcdhw.view(
+        batch_size, num_groups, channels_per_group, max_disp, height, width
+    )
+    volume_bgdhw: Float32[Tensor, "b groups disparities h w"] = (grouped_reference_bgcdhw * grouped_target_bgcdhw).mean(dim=2)
+    return volume_bgdhw.contiguous()
 
 
-def build_gwc_volume_norm(refimg_fea, targetimg_fea, maxdisp, num_groups):
-    B, C, H, W = refimg_fea.shape
-    volume = refimg_fea.new_zeros([B, num_groups, maxdisp, H, W])
-    for i in range(maxdisp):
-        if i > 0:
-            volume[:, :, i, :, i:] = groupwise_correlation_norm(refimg_fea[:, :, :, i:], targetimg_fea[:, :, :, :-i],
-                                                           num_groups)
-        else:
-            volume[:, :, i, :, :] = groupwise_correlation_norm(refimg_fea, targetimg_fea, num_groups)
-    volume = volume.contiguous()
-    return volume
+def build_correlation_volume(
+    left_feature_bchw: Float32[Tensor, "b channels h w"],
+    right_feature_bchw: Float32[Tensor, "b channels h w"],
+    max_disp: int,
+) -> Float32[Tensor, "b disparities h w"]:
+    """Build the scalar-correlation cost volume used by LAS2-S/M/L.
+
+    Args:
+        left_feature_bchw: Float32 left features with shape ``(batch, channels, height, width)``.
+        right_feature_bchw: Float32 right features with shape ``(batch, channels, height, width)``.
+        max_disp: Number of feature-space disparity candidates.
+
+    Returns:
+        Float32 cost volume with shape ``(batch, disparities, height, width)``.
+    """
+    shape_bchw: torch.Size = left_feature_bchw.shape
+    batch_size: int = shape_bchw[0]
+    channels: int = shape_bchw[1]
+    height: int = shape_bchw[2]
+    width: int = shape_bchw[3]
+
+    left_volume_bcdhw: Float32[Tensor, "b channels disparities h w"] = left_feature_bchw.unsqueeze(2).expand(
+        batch_size, channels, max_disp, height, width
+    )
+    padded_right_bchw: Float32[Tensor, "b channels h padded_w"] = F.pad(right_feature_bchw, (max_disp - 1, 0, 0, 0))
+    unfolded_right_bchdw: Float32[Tensor, "b channels h disparities w"] = padded_right_bchw.unfold(3, width, 1)
+    right_volume_bcdhw: Float32[Tensor, "b channels disparities h w"] = torch.flip(unfolded_right_bchdw, [3]).permute(0, 1, 3, 2, 4)
+
+    cost_volume_bdhw: Float32[Tensor, "b disparities h w"] = (left_volume_bcdhw * right_volume_bcdhw).mean(dim=1)
+    return cost_volume_bdhw.contiguous()
 
 
-def norm_correlation(fea1, fea2):
-    cost = torch.mean(((fea1/(torch.norm(fea1, 2, 1, True)+1e-05)) * (fea2/(torch.norm(fea2, 2, 1, True)+1e-05))), dim=1, keepdim=True)
-    return cost
+def context_upsample(
+    depth_low_b1hw: Float32[Tensor, "b 1 h w"],
+    up_weights_b9hw: Float32[Tensor, "b 9 h4 w4"],
+) -> Float32[Tensor, "b 1 h4 w4"]:
+    """Upsample disparity fourfold with learned 3-by-3 context weights.
 
+    Args:
+        depth_low_b1hw: Float32 low-resolution disparity with shape ``(batch, 1, height, width)``.
+        up_weights_b9hw: Float32 weights with shape ``(batch, 9, 4 * height, 4 * width)``.
 
-def build_norm_correlation_volume(refimg_fea, targetimg_fea, maxdisp):
-    B, C, H, W = refimg_fea.shape
-    volume = refimg_fea.new_zeros([B, 1, maxdisp, H, W])
-    for i in range(maxdisp):
-        if i > 0:
-            volume[:, :, i, :, i:] = norm_correlation(refimg_fea[:, :, :, i:], targetimg_fea[:, :, :, :-i])
-        else:
-            volume[:, :, i, :, :] = norm_correlation(refimg_fea, targetimg_fea)
-    volume = volume.contiguous()
-    return volume
+    Returns:
+        Float32 upsampled disparity with shape ``(batch, 1, 4 * height, 4 * width)``.
+    """
+    shape_b1hw: torch.Size = depth_low_b1hw.shape
+    batch_size: int = shape_b1hw[0]
+    channels: int = shape_b1hw[1]
+    height: int = shape_b1hw[2]
+    width: int = shape_b1hw[3]
 
-
-def build_correlation_volume(left_feature, right_feature, max_disp):
-    B, C, H, W = left_feature.shape
-
-    left_volume = left_feature.unsqueeze(2).expand(B, C, max_disp, H, W)
-    padded_right = F.pad(right_feature, (max_disp - 1, 0, 0, 0))
-    unfolded_right = padded_right.unfold(3, W, 1)              # (B, C, H, max_disp, W)
-    right_volume = torch.flip(unfolded_right, [3]).permute(0, 1, 3, 2, 4)
-
-    cost_volume = (left_volume * right_volume).mean(dim=1)
-    return cost_volume.contiguous()
-
-
-def SpatialTransformer_grid(x, y, disp_range_samples):
-    bs, channels, height, width = y.size()
-    ndisp = disp_range_samples.size()[1]
-
-    mh, mw = torch.meshgrid([torch.arange(0, height, dtype=x.dtype, device=x.device),
-                                 torch.arange(0, width, dtype=x.dtype, device=x.device)])  # (H *W)
-    mh = mh.reshape(1, 1, height, width).repeat(bs, ndisp, 1, 1)
-    mw = mw.reshape(1, 1, height, width).repeat(bs, ndisp, 1, 1)  # (B, D, H, W)
-
-    cur_disp_coords_y = mh
-    cur_disp_coords_x = mw - disp_range_samples
-    coords_x = cur_disp_coords_x / ((width - 1.0) / 2.0) - 1.0  # trans to -1 - 1
-    coords_y = cur_disp_coords_y / ((height - 1.0) / 2.0) - 1.0
-    grid = torch.stack([coords_x, coords_y], dim=4) #(B, D, H, W, 2)
-
-    y_warped = F.grid_sample(y, grid.view(bs, ndisp * height, width, 2), mode='bilinear',
-                               padding_mode='zeros', align_corners=True).view(bs, channels, ndisp, height, width)  #(B, C, D, H, W)
-
-    return y_warped
-
-        
-def context_upsample(depth_low, up_weights):
-    b, c, h, w = depth_low.shape
-        
-    depth_unfold = F.unfold(depth_low.reshape(b,c,h,w),3,1,1).reshape(b,-1,h,w)
-    depth_unfold = F.interpolate(depth_unfold,(h*4,w*4),mode='nearest').reshape(b,9,h*4,w*4)
-
-    depth = torch.sum(depth_unfold*up_weights, dim=1, keepdim=True)
-        
-    return depth
-
-
+    depth_unfold_b9hw: Float32[Tensor, "b 9 h w"] = F.unfold(depth_low_b1hw.reshape(batch_size, channels, height, width), 3, 1, 1).reshape(
+        batch_size, -1, height, width
+    )
+    depth_unfold_b9h4w4: Float32[Tensor, "b 9 h4 w4"] = F.interpolate(
+        depth_unfold_b9hw,
+        (height * 4, width * 4),
+        mode="nearest",
+    ).reshape(batch_size, 9, height * 4, width * 4)
+    depth_b1h4w4: Float32[Tensor, "b 1 h4 w4"] = torch.sum(depth_unfold_b9h4w4 * up_weights_b9hw, dim=1, keepdim=True)
+    return depth_b1h4w4

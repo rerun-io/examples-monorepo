@@ -35,9 +35,15 @@ project-excludes = [
     "**/__pycache__",
     "**/*.ipynb",
     "**/*venv/**/*",
-    "**/third_party/**/*",
-    "monopriors/third_party/**/*",
-    "packages/monoprior/monopriors/third_party/**/*",
+    # Unowned vendor boundaries. Owned typed forks (liteanystereo and zipdepth)
+    # remain in the project and are checked like first-party code.
+    "packages/monoprior/monopriors/third_party/depth_anything_v2/**/*",
+    "packages/monoprior/monopriors/third_party/dinov2/**/*",
+    "packages/monoprior/monopriors/third_party/dsine/**/*",
+    "packages/monoprior/monopriors/third_party/g3t/**/*",
+    "packages/monoprior/monopriors/third_party/moge/**/*",
+    "packages/monoprior/monopriors/third_party/promptda/**/*",
+    "packages/monoprior/monopriors/third_party/video_depth_anything/**/*",
     # unmodified upstream ZipDepth training code is a vendor boundary (untyped)
     "packages/zipdepth/zipdepth/data/**/*",
     "packages/zipdepth/zipdepth/loss/**/*",
