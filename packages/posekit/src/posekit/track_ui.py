@@ -33,7 +33,8 @@ from simplecv.rerun_log_utils import log_video
 from simplecv.video_utils import frame_at
 
 from posekit.apis.click_tracker import ClickTracker, MaskResult, PointEdit
-from posekit.apis.track_recording import (
+from posekit.models.sam2_video import Sam2Variant, cached_predictor
+from posekit.track_recording import (
     MASK_COLOR,
     MASK_SCALE,
     RRD_DIR,
@@ -54,7 +55,6 @@ from posekit.apis.track_recording import (
     _status,
     _viewer_time_s,
 )
-from posekit.models.sam2_video import Sam2Variant, cached_predictor
 from posekit.track_ui_theme import APP_CSS, DESCRIPTION, FORCE_DARK_HEAD, VIEWER_HEIGHT
 
 Mode: TypeAlias = Literal["+ Include", "− Exclude", "✕ Remove"]

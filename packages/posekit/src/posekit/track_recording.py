@@ -219,5 +219,3 @@ def _invalidate_track(rec: rr.RecordingStream, session: Session) -> bool:
 def _status(session: Session, prefix: str) -> str:
     frames: tuple[int, ...] = session.tracker.prompted_frames()
     return f"{prefix} {len(session.tracker.points)} point(s) on frame(s) {frames} · viewer at frame {session.current_frame}."
-
-

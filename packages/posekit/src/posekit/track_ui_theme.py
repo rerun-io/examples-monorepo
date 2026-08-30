@@ -84,5 +84,3 @@ html, body, gradio-app, .gradio-container {
 #run-status p { font-size: 1.05rem; line-height: 1.4; margin: 0; }
 footer { display: none !important; }
 """
-
-

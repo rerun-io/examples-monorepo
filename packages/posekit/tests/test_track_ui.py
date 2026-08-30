@@ -16,10 +16,10 @@ from gradio_rerun.events import SelectionChange
 from jaxtyping import Int64, UInt8
 from numpy import ndarray
 
-import posekit.apis.track_recording as track_recording
+import posekit.track_recording as track_recording
 import posekit.track_ui as track_ui
 from posekit.apis.click_tracker import ClickTracker, MaskResult
-from posekit.apis.track_recording import MASK_SCALE, Session, _close_session, _invalidate_track, _mask_hw, _merge_rrd_parts, _open_recording
+from posekit.track_recording import MASK_SCALE, Session, _close_session, _invalidate_track, _mask_hw, _merge_rrd_parts, _open_recording
 
 CLIP: Path = Path(__file__).resolve().parents[2] / "wilor-nano" / "assets" / "video.mp4"
 SessionWithMock: TypeAlias = tuple[Session, Mock]
