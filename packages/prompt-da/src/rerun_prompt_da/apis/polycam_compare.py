@@ -83,12 +83,13 @@ def masked_prompt_metres(polycam_data: PolycamData) -> Float32[ndarray, "192 256
 
 
 def create_compare_blueprint(parent_log_path: Path) -> rrb.Blueprint:
-    """Lay out RGB, both predictions, and their difference for visual comparison."""
+    """Lay out RGB, the LiDAR prompt, both predictions, and their difference."""
     pinhole_path: Path = parent_log_path / "cam" / "pinhole"
     return rrb.Blueprint(
         rrb.Vertical(
             rrb.Horizontal(
-                rrb.Spatial2DView(origin=str(pinhole_path / "rgb"), name="RGB"),
+                rrb.Spatial2DView(origin=str(pinhole_path / "rgb"), name="RGB (768x1024)"),
+                rrb.Spatial2DView(origin=str(pinhole_path / "lidar_prompt"), name="LiDAR prompt (192x256)"),
                 rrb.Spatial2DView(origin=str(pinhole_path / "abs_diff"), name="|teacher - student|"),
             ),
             rrb.Horizontal(
@@ -188,6 +189,9 @@ def polycam_compare(config: PolycamCompareConfig) -> None:
             (student_depth_b1hw.squeeze(1) * 1000.0).clamp(0.0, 65535.0).to(torch.uint16).cpu().numpy()
         )
         diff_mm_bhw: UInt16[ndarray, "b sh sw"] = (abs_diff_b1hw.squeeze(1) * 1000.0).clamp(0.0, 65535.0).to(torch.uint16).cpu().numpy()
+        # The raw prompt is what the teacher sees; it is the model's only source
+        # of metric scale, so log it at its native 192x256 beside the predictions.
+        prompt_mm_bhw: UInt16[ndarray, "b 192 256"] = np.stack([data.original_depth_hw for data in batch])
 
         frame_offset: int
         for frame_offset in range(len(batch)):
@@ -195,6 +199,10 @@ def polycam_compare(config: PolycamCompareConfig) -> None:
             rr.log(
                 str(pinhole_path / "rgb"),
                 rr.Image(cv2.resize(batch[frame_offset].rgb_hw3, (student_hw[1], student_hw[0]), interpolation=cv2.INTER_LINEAR)),
+            )
+            rr.log(
+                str(pinhole_path / "lidar_prompt"),
+                rr.DepthImage(prompt_mm_bhw[frame_offset], meter=1000.0, colormap="Viridis"),
             )
             rr.log(str(pinhole_path / "teacher_depth"), rr.DepthImage(teacher_mm_bhw[frame_offset], meter=1000.0, colormap="Viridis"))
             rr.log(str(pinhole_path / "student_depth"), rr.DepthImage(student_mm_bhw[frame_offset], meter=1000.0, colormap="Viridis"))
