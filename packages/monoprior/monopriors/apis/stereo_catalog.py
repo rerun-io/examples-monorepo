@@ -19,10 +19,11 @@ import torch
 from einops import rearrange
 from jaxtyping import Float32, Float64, UInt8, UInt16
 from rerun.catalog import CatalogClient, DatasetEntry, DatasetView
-from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion, PinholeParameters
+from scipy.spatial.transform import Rotation
+from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion, PinholeParameters, rescale_intri
 from simplecv.ops.tsdf_depth_fuser import Open3DFuser
 from simplecv.rerun_dataloader import open_segment_decoder
-from simplecv.rerun_log_utils import RerunTyroConfig
+from simplecv.rerun_log_utils import RerunTyroConfig, log_open3d_mesh
 from simplecv.rerun_rig_logger import log_rig_static
 from simplecv.rig import CameraSensor, Rig, RigCalibration
 from torchcodec.decoders import VideoDecoder
@@ -120,51 +121,22 @@ def read_rig_poses(view: DatasetView) -> tuple[np.ndarray, Float64[np.ndarray, "
         raise ValueError(f"{RIG} carries no temporal Transform3D — is the slam layer registered?")
     times: np.ndarray = np.array([t.value for t in table.column(0)], dtype="timedelta64[ns]")
     translations_n3: Float64[np.ndarray, "n 3"] = np.array([v[0] for v in table.column(1).to_pylist()], dtype=np.float64)
-    x, y, z, w = np.array([v[0] for v in table.column(2).to_pylist()], dtype=np.float64).T  # xyzw
+    quaternions_n4: Float64[np.ndarray, "n 4"] = np.array([v[0] for v in table.column(2).to_pylist()], dtype=np.float64)  # xyzw, as Rerun stores it
     poses_n44: Float64[np.ndarray, "n 4 4"] = np.tile(np.eye(4), (len(times), 1, 1))
-    poses_n44[:, 0, 0] = 1 - 2 * (y * y + z * z)
-    poses_n44[:, 0, 1] = 2 * (x * y - z * w)
-    poses_n44[:, 0, 2] = 2 * (x * z + y * w)
-    poses_n44[:, 1, 0] = 2 * (x * y + z * w)
-    poses_n44[:, 1, 1] = 1 - 2 * (x * x + z * z)
-    poses_n44[:, 1, 2] = 2 * (y * z - x * w)
-    poses_n44[:, 2, 0] = 2 * (x * z - y * w)
-    poses_n44[:, 2, 1] = 2 * (y * z + x * w)
-    poses_n44[:, 2, 2] = 1 - 2 * (x * x + y * y)
+    poses_n44[:, :3, :3] = Rotation.from_quat(quaternions_n4).as_matrix()
     poses_n44[:, :3, 3] = translations_n3
     return times, poses_n44
 
 
 def scaled_pinhole(camera: PinholeParameters, scale: float) -> PinholeParameters:
     """The same camera for an image resized by ``scale``."""
-    K_33: Float64[np.ndarray, "3 3"] = np.asarray(camera.intrinsics.k_matrix, dtype=np.float64).copy()
-    K_33[:2] *= scale
-    return PinholeParameters(
-        name=camera.name,
-        extrinsics=camera.extrinsics,
-        intrinsics=Intrinsics.from_k_matrix(camera_conventions="RDF", k_matrix=K_33, height=round(camera.intrinsics.height * scale), width=round(camera.intrinsics.width * scale)),
-    )
+    intrinsics: Intrinsics = rescale_intri(camera.intrinsics, target_width=round(camera.intrinsics.width * scale), target_height=round(camera.intrinsics.height * scale))
+    return PinholeParameters(name=camera.name, extrinsics=camera.extrinsics, intrinsics=intrinsics)
 
 
 LEFT_RECT_INDEX: int = 10
 """Rig sensor index of the rectified left camera (``cam_10``): above the six physical robocap cameras."""
 RIGHT_RECT_INDEX: int = 11
-
-
-def log_mesh(fuser: Open3DFuser) -> None:
-    """Current TSDF surface at the current time; Front-face rendering culls the outside of the walls so the room reads from outside."""
-    mesh = fuser.get_mesh()
-    mesh.compute_vertex_normals()
-    rr.log(
-        "world/stereo/mesh",
-        rr.Mesh3D(
-            vertex_positions=np.asarray(mesh.vertices),
-            triangle_indices=np.asarray(mesh.triangles),
-            vertex_normals=np.asarray(mesh.vertex_normals),
-            vertex_colors=np.asarray(mesh.vertex_colors),
-            face_rendering=rr.components.MeshFaceRendering.Front,
-        ),
-    )
 
 
 def build_blueprint(left_cam: str, right_cam: str) -> rrb.Blueprint:
@@ -198,8 +170,8 @@ def main(config: StereoCatalogConfig) -> None:
     print(f"rectified pair: baseline {rect.baseline_m * 1000:.1f} mm, fx_rect {rect.left_rect.intrinsics.fl_x:.1f} px; {len(pose_times)} rig poses")
 
     device: torch.device = torch.device("cuda")
-    codec_fourcc: int = int(np.asarray(read_static(view, f"{RIG}/{config.left_cam}/pinhole/video", "VideoStream:codec")).ravel()[0])
-    codec: str = "h264" if codec_fourcc.to_bytes(4, "big") == b"avc1" else "av1"  # VideoCodec is the big-endian fourcc
+    video_codec: rr.VideoCodec = rr.VideoCodec(int(np.asarray(read_static(view, f"{RIG}/{config.left_cam}/pinhole/video", "VideoStream:codec")).ravel()[0]))
+    codec: str = "h264" if video_codec == rr.VideoCodec.H264 else "av1"
     decoders: dict[str, tuple[np.ndarray, list[bytes], list[bool], VideoDecoder]] = {
         cam: open_segment_decoder(dataset, config.segment_id, f"{RIG}/{cam}/pinhole/video", TIMELINE, device, 30, codec) for cam in (config.left_cam, config.right_cam)
     }
@@ -229,7 +201,6 @@ def main(config: StereoCatalogConfig) -> None:
         image_plane_distance=0.1,
     )
     log_rig_static(rig)
-    video_codec = rr.VideoCodec.H264 if codec == "h264" else rr.VideoCodec.AV1
     for cam, (times, samples, keyframes, _) in decoders.items():
         rr.log(f"{RIG}/{cam}/pinhole/video", rr.VideoStream(codec=video_codec), static=True)
         rr.send_columns(f"{RIG}/{cam}/pinhole/video", indexes=[rr.TimeColumn(TIMELINE, duration=times)], columns=rr.VideoStream.columns(sample=samples, is_keyframe=keyframes))
@@ -270,9 +241,9 @@ def main(config: StereoCatalogConfig) -> None:
         if fuser is not None:
             fuser.fuse_frames(np.ascontiguousarray(depth_mm_hw), K_out_33, cam_rect_T_rig @ np.linalg.inv(world_T_rig), np.ascontiguousarray(left_rect))
             if config.mesh_every and (i + 1) % config.mesh_every == 0:
-                log_mesh(fuser)
+                log_open3d_mesh("world/stereo/mesh", fuser.get_mesh())
         if i % 50 == 0:
             print(f"  {i}/{len(grid_ns)}  t={(t_ns - t_start_ns) / 1e9:6.1f}s  disparity {pred.disparity.max():.1f} px")
     if fuser is not None:
-        log_mesh(fuser)
+        log_open3d_mesh("world/stereo/mesh", fuser.get_mesh())
         print(f"fused mesh logged: {len(fuser.get_mesh().vertices)} vertices")
