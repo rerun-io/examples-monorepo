@@ -434,6 +434,12 @@ depends-on = ["_monoprior-download-stereo"]
 cwd = "packages/monoprior"
 description = "LiteAnyStereo V2 on the ETH3D playground_1l stereo pair, shown as an exoego:v2 rig in Rerun"
 
+[feature.monoprior.tasks.monoprior-stereo-depth-app]
+cmd = "python tools/apps/stereo_depth_app.py"
+depends-on = ["_monoprior-download-stereo"]
+cwd = "packages/monoprior"
+description = "Launch the stereo depth Gradio app (LiteAnyStereo V2 + Rerun rig viewer)"
+
 [feature.monoprior.tasks.monoprior-relative-depth]
 cmd = "python tools/demos/relative_depth.py --image-path data/examples/single-image/room.jpg"
 depends-on = ["_monoprior-download-single-image"]
