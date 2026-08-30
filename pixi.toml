@@ -435,13 +435,13 @@ cwd = "packages/monoprior"
 cmd = "python tools/demos/stereo_depth.py"
 depends-on = ["_monoprior-download-stereo"]
 cwd = "packages/monoprior"
-description = "LiteAnyStereo V2 on the ETH3D playground_1l stereo pair, shown as an exoego:v2 rig in Rerun"
+description = "Selected stereo predictor on the ETH3D playground_1l pair, shown as an exoego:v2 rig in Rerun"
 
 [feature.monoprior.tasks.monoprior-stereo-depth-app]
 cmd = "python tools/apps/stereo_depth_app.py"
 depends-on = ["_monoprior-download-stereo"]
 cwd = "packages/monoprior"
-description = "Launch the stereo depth Gradio app (LiteAnyStereo V2 + Rerun rig viewer)"
+description = "Launch the multi-model stereo depth Gradio app with a Rerun rig viewer"
 
 [feature.monoprior.tasks.monoprior-relative-depth]
 cmd = "python tools/demos/relative_depth.py --image-path data/examples/single-image/room.jpg"
@@ -557,7 +557,7 @@ torchcodec = "*"
 cmd = "python tools/apps/stereo_catalog.py"
 cwd = "packages/monoprior"
 env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
-description = "Stream LiteAnyStereo V2 depth + an incremental TSDF mesh for a catalog rig segment (robocap front pair on :51235) into the Rerun viewer"
+description = "Stream selected-model stereo depth + an incremental TSDF mesh for a catalog rig segment (robocap front pair on :51235) into the Rerun viewer"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # prompt-da

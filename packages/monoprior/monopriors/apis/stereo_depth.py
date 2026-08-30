@@ -8,7 +8,7 @@ from typing import Literal
 import cv2
 import numpy as np
 import rerun as rr
-from jaxtyping import Float32, UInt8
+from jaxtyping import Bool, Float32, UInt8
 from simplecv.rerun_log_utils import RerunTyroConfig
 
 from monopriors.models.stereo_depth import STEREO_PREDICTORS, BaseStereoPredictor, StereoDepthPrediction, get_stereo_predictor
@@ -65,13 +65,69 @@ def read_rgb(path: Path) -> UInt8[np.ndarray, "h w 3"]:
     return cv2.cvtColor(bgr_hw3, cv2.COLOR_BGR2RGB)
 
 
+def read_pfm(path: Path) -> Float32[np.ndarray, "h w"]:
+    """Read a grayscale PFM disparity image.
+
+    Args:
+        path: PFM file whose first line is ``Pf``.
+
+    Returns:
+        Bottom-to-top corrected disparity, ``Float32[ndarray, "h w"]``.
+    """
+    with path.open("rb") as file:
+        if file.readline().strip() != b"Pf":
+            raise ValueError(f"{path} is not a grayscale PFM")
+        width, height = (int(value) for value in file.readline().split())
+        scale: float = float(file.readline())
+        data: Float32[np.ndarray, "pixels"] = np.fromfile(file, dtype="<f4" if scale < 0.0 else ">f4", count=width * height)
+    return np.flipud(data.reshape(height, width)).astype(np.float32)
+
+
+def stereo_metrics(
+    disparity_hw: Float32[np.ndarray, "h w"],
+    ground_truth_hw: Float32[np.ndarray, "h w"],
+    nonoccluded_hw: UInt8[np.ndarray, "h w"],
+    max_disp: float,
+) -> tuple[float, float]:
+    """Compute ETH3D EPE and bad1 on finite, non-occluded disparities below the model range.
+
+    Args:
+        disparity_hw: Predicted left disparity, ``Float32[ndarray, "h w"]``.
+        ground_truth_hw: Ground-truth left disparity, ``Float32[ndarray, "h w"]``.
+        nonoccluded_hw: ETH3D non-occlusion mask, ``UInt8[ndarray, "h w"]``; 255 marks valid pixels.
+        max_disp: Exclude ground-truth disparities at or above this value.
+
+    Returns:
+        Mean endpoint error in pixels and bad1 percentage.
+    """
+    valid_hw: Bool[np.ndarray, "h w"] = np.isfinite(ground_truth_hw) & (ground_truth_hw < max_disp) & (nonoccluded_hw == 255)
+    error_hw: Float32[np.ndarray, "h w"] = np.abs(disparity_hw - ground_truth_hw)
+    return float(error_hw[valid_hw].mean()), 100.0 * float((error_hw[valid_hw] > 1.0).mean())
+
+
 def main(config: StereoDepthCLIConfig) -> None:
     left_rgb: UInt8[np.ndarray, "h w 3"] = read_rgb(config.scene_dir / "im0.png")
     right_rgb: UInt8[np.ndarray, "h w 3"] = read_rgb(config.scene_dir / "im1.png")
     calibration: MiddleburyCalibration = read_middlebury_calib(config.scene_dir / "calib.txt")
 
-    predictor: BaseStereoPredictor = get_stereo_predictor(config.predictor_name)(device=config.device, model_size=config.model_size)
+    match config.predictor_name:
+        case "LiteAnyStereoPredictor":
+            predictor: BaseStereoPredictor = get_stereo_predictor(config.predictor_name)(device=config.device, model_size=config.model_size)
+        case "FastFoundationStereoPredictor":
+            predictor = get_stereo_predictor(config.predictor_name)(device=config.device)
     stereo_pred: StereoDepthPrediction = predictor(left_rgb, right_rgb, K_33=calibration.K_33, baseline_m=calibration.baseline_m)
+
+    gt_dir: Path = config.scene_dir.parent.with_name(f"{config.scene_dir.parent.name}_gt") / config.scene_dir.name
+    ground_truth_path: Path = gt_dir / "disp0GT.pfm"
+    nonoccluded_path: Path = gt_dir / "mask0nocc.png"
+    if ground_truth_path.is_file() and nonoccluded_path.is_file():
+        ground_truth_hw: Float32[np.ndarray, "h w"] = read_pfm(ground_truth_path)
+        nonoccluded_hw: UInt8[np.ndarray, "h w"] | None = cv2.imread(str(nonoccluded_path), cv2.IMREAD_GRAYSCALE)
+        if nonoccluded_hw is None:
+            raise FileNotFoundError(f"Failed to read image {nonoccluded_path}")
+        max_disp: float = 416.0 if config.predictor_name == "FastFoundationStereoPredictor" else 192.0
+        metrics: tuple[float, float] = stereo_metrics(stereo_pred.disparity, ground_truth_hw, nonoccluded_hw, max_disp=max_disp)
+        print(f"{config.predictor_name} ETH3D: EPE {metrics[0]:.3f} px, bad1 {metrics[1]:.2f}%")
 
     parent_log_path: Path = Path("world")
     rr.send_blueprint(create_stereo_depth_blueprint(parent_log_path))

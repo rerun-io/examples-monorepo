@@ -1,7 +1,7 @@
 """Stereo depth Gradio app: a rectified left/right pair + calibration in, an exoego:v2 rig in the Rerun viewer out.
 
 Layout follows ``posekit.track_ui`` (inputs + status on the left, Radio-driven Input/Config/Outputs panels, a
-streaming Rerun viewer on the right). One predictor per model size is kept warm for the process lifetime.
+streaming Rerun viewer on the right). One predictor per model selection is kept warm for the process lifetime.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from jaxtyping import Float32, UInt8
 from numpy import ndarray
 
 from monopriors.apis.stereo_depth import MiddleburyCalibration, read_middlebury_calib
-from monopriors.models.stereo_depth import LiteAnyStereoPredictor, StereoDepthPrediction
+from monopriors.models.stereo_depth import STEREO_PREDICTORS, BaseStereoPredictor, StereoDepthPrediction, get_stereo_predictor
 from monopriors.models.stereo_depth.liteanystereo import LAS2ModelSize
 from monopriors.rr_logging_utils import create_stereo_depth_blueprint, log_stereo_pred
 
@@ -30,7 +30,8 @@ TabName: TypeAlias = Literal["Input", "Config", "Outputs"]
 EXAMPLE_SCENE: Path = Path("data/examples/stereo/eth3d/two_view_training/playground_1l")
 """ETH3D two-view sample fetched by the ``_monoprior-download-stereo`` task (im0/im1 + Middlebury calib.txt)."""
 
-_PREDICTORS: dict[LAS2ModelSize, LiteAnyStereoPredictor] = {}
+PredictorKey: TypeAlias = tuple[STEREO_PREDICTORS, LAS2ModelSize | None]
+_PREDICTORS: dict[PredictorKey, BaseStereoPredictor] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,10 +47,15 @@ class AppConfig:
     """Root path when mounted under a reverse-proxy subpath (empty when served at ``/``)."""
 
 
-def _predictor(model_size: LAS2ModelSize) -> LiteAnyStereoPredictor:
-    if model_size not in _PREDICTORS:
-        _PREDICTORS[model_size] = LiteAnyStereoPredictor(device="cuda", model_size=model_size)
-    return _PREDICTORS[model_size]
+def _predictor(predictor_name: STEREO_PREDICTORS, model_size: LAS2ModelSize) -> BaseStereoPredictor:
+    key: PredictorKey = (predictor_name, model_size if predictor_name == "LiteAnyStereoPredictor" else None)
+    if key not in _PREDICTORS:
+        match predictor_name:
+            case "LiteAnyStereoPredictor":
+                _PREDICTORS[key] = get_stereo_predictor(predictor_name)(device="cuda", model_size=model_size)
+            case "FastFoundationStereoPredictor":
+                _PREDICTORS[key] = get_stereo_predictor(predictor_name)(device="cuda")
+    return _PREDICTORS[key]
 
 
 def show_control_tab(selected: TabName) -> tuple[gr.Column, gr.Column, gr.Column]:
@@ -59,6 +65,7 @@ def show_control_tab(selected: TabName) -> tuple[gr.Column, gr.Column, gr.Column
 def run_stereo(
     left_rgb: UInt8[ndarray, "h w 3"] | None,
     right_rgb: UInt8[ndarray, "h w 3"] | None,
+    predictor_name: STEREO_PREDICTORS,
     model_size: LAS2ModelSize,
     fx: float | int,
     cx: float | int,
@@ -75,7 +82,7 @@ def run_stereo(
         raise gr.Error(f"Left {left_rgb.shape[:2]} and right {right_rgb.shape[:2]} images must have the same size (rectified pair).")
     K_33: Float32[ndarray, "3 3"] = np.array([[fx, 0.0, cx], [0.0, fx, cy], [0.0, 0.0, 1.0]], dtype=np.float32)
 
-    predictor: LiteAnyStereoPredictor = _predictor(model_size)
+    predictor: BaseStereoPredictor = _predictor(predictor_name, model_size)
     start: float = time.perf_counter()
     stereo_pred: StereoDepthPrediction = predictor(left_rgb, right_rgb, K_33=K_33, baseline_m=float(baseline_mm) / 1000.0)
     elapsed_ms: float = (time.perf_counter() - start) * 1000.0
@@ -94,8 +101,9 @@ def run_stereo(
             depth_edge_threshold=float(depth_edge_threshold),
         )
     valid_hw = stereo_pred.disparity > 0.0
+    model_label: str = f"LAS2-{model_size.upper()}" if predictor_name == "LiteAnyStereoPredictor" else "Fast-FoundationStereo"
     status: str = (
-        f"LAS2-{model_size.upper()} · {left_rgb.shape[1]}×{left_rgb.shape[0]} · {elapsed_ms:.0f} ms end-to-end · "
+        f"{model_label} · {left_rgb.shape[1]}×{left_rgb.shape[0]} · {elapsed_ms:.0f} ms end-to-end · "
         f"disparity {stereo_pred.disparity[valid_hw].min():.1f}–{stereo_pred.disparity[valid_hw].max():.1f} px"
     )
     yield stream.read(), status, "Outputs"
@@ -104,7 +112,7 @@ def run_stereo(
 def build_demo() -> gr.Blocks:
     example_calibration: MiddleburyCalibration | None = read_middlebury_calib(EXAMPLE_SCENE / "calib.txt") if EXAMPLE_SCENE.is_dir() else None
     with gr.Blocks(title="monoprior: Stereo Depth") as demo:
-        gr.Markdown("**Stereo depth** — a rectified left/right pair + pinhole calibration → LiteAnyStereo V2 disparity, metric depth, and the backprojected cloud as an exoego:v2 rig.")
+        gr.Markdown("**Stereo depth** — a rectified left/right pair + pinhole calibration → selected-model disparity, metric depth, and the backprojected cloud as an exoego:v2 rig.")
         with gr.Row():
             with gr.Column(scale=1):
                 with gr.Row():
@@ -123,7 +131,8 @@ def build_demo() -> gr.Blocks:
                     if example_calibration is not None:
                         gr.Examples(examples=[[str(EXAMPLE_SCENE / "im0.png"), str(EXAMPLE_SCENE / "im1.png")]], inputs=[left_in, right_in], label="ETH3D playground_1l")
                 with gr.Column(visible=False) as config_panel:
-                    model_dd: gr.Dropdown = gr.Dropdown(label="Model", choices=list(get_args(LAS2ModelSize)), value="m")
+                    predictor_dd: gr.Dropdown = gr.Dropdown(label="Model", choices=list(get_args(STEREO_PREDICTORS)), value="LiteAnyStereoPredictor")
+                    model_size_dd: gr.Dropdown = gr.Dropdown(label="LAS2 model size (ignored by Fast-FoundationStereo)", choices=list(get_args(LAS2ModelSize)), value="m")
                     max_depth_slider: gr.Slider = gr.Slider(label="Max depth (m)", minimum=1.0, maximum=100.0, value=20.0, step=1.0)
                     flying_box: gr.Checkbox = gr.Checkbox(label="Remove flying pixels", value=True)
                     edge_slider: gr.Slider = gr.Slider(label="Depth edge threshold (m/px)", minimum=0.05, maximum=5.0, value=0.5, step=0.05)
@@ -136,7 +145,7 @@ def build_demo() -> gr.Blocks:
         tabs_radio.change(fn=show_control_tab, inputs=[tabs_radio], outputs=[input_panel, config_panel, outputs_panel], queue=False, show_progress="hidden", api_visibility="private")
         run_btn.click(
             fn=run_stereo,
-            inputs=[left_in, right_in, model_dd, fx_in, cx_in, cy_in, baseline_in, max_depth_slider, flying_box, edge_slider],
+            inputs=[left_in, right_in, predictor_dd, model_size_dd, fx_in, cx_in, cy_in, baseline_in, max_depth_slider, flying_box, edge_slider],
             outputs=[viewer, status, tabs_radio],
         )
     return demo

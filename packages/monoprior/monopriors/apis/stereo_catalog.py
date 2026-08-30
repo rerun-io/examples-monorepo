@@ -1,7 +1,7 @@
 """Stream stereo depth + an incremental TSDF mesh for a catalog rig segment into the Rerun viewer.
 
 Reads one exoego:v2 segment straight from the catalog (video packets fetched once per camera, decoded on NVDEC),
-rectifies the fisheye front pair, runs LiteAnyStereo, and logs everything to the ambient recording configured by
+rectifies the fisheye front pair, runs the selected stereo predictor, and logs everything to the ambient recording configured by
 ``RerunTyroConfig`` — the PromptDA Polycam pattern (viewer/save/connect, per-frame logging, mesh re-logged every
 ``mesh_every`` frames so scrubbing shows it grow), on the catalog's own ``video_time`` timeline so the relayed raw
 videos and the slam poses line up. Nothing is registered back to the catalog.
@@ -29,7 +29,7 @@ from simplecv.rig import CameraSensor, Rig, RigCalibration
 from simplecv.rrd_query_utils import first_valid_value
 
 from monopriors.depth_utils import depth_edges_mask
-from monopriors.models.stereo_depth import LiteAnyStereoPredictor, StereoDepthPrediction
+from monopriors.models.stereo_depth import STEREO_PREDICTORS, BaseStereoPredictor, StereoDepthPrediction, get_stereo_predictor
 from monopriors.models.stereo_depth.liteanystereo import LAS2ModelSize
 from monopriors.models.stereo_depth.rectify import StereoRectification, fisheye_stereo_rectify, rectify_pair
 
@@ -71,8 +71,10 @@ class StereoCatalogConfig:
     """Frames per second sampled from the video timeline."""
     max_seconds: float | None = 120.0
     """Only the first N seconds of the segment; None processes it all."""
+    predictor_name: STEREO_PREDICTORS = "LiteAnyStereoPredictor"
+    """Which stereo predictor to use."""
     model_size: LAS2ModelSize = "m"
-    """LiteAnyStereo V2 variant."""
+    """LiteAnyStereo V2 variant; ignored by Fast-FoundationStereo."""
     focal_scale: float = 0.8
     """Rectified focal length as a multiple of the fisheye fx; below 1 keeps more of the wide FOV."""
     max_depth_m: float = 20.0
@@ -216,7 +218,11 @@ def main(config: StereoCatalogConfig) -> None:
         rr.log(f"{RIG}/{cam}/pinhole/video", rr.VideoStream(codec=video_codec), static=True)
         rr.send_columns(f"{RIG}/{cam}/pinhole/video", indexes=[rr.TimeColumn(TIMELINE, duration=times)], columns=rr.VideoStream.columns(sample=samples, is_keyframe=keyframes))
 
-    predictor: LiteAnyStereoPredictor = LiteAnyStereoPredictor(device=config.device, model_size=config.model_size)
+    match config.predictor_name:
+        case "LiteAnyStereoPredictor":
+            predictor: BaseStereoPredictor = get_stereo_predictor(config.predictor_name)(device=config.device, model_size=config.model_size)
+        case "FastFoundationStereoPredictor":
+            predictor = get_stereo_predictor(config.predictor_name)(device=config.device)
     rect_pinhole: str = f"{RIG}/cam_{LEFT_RECT_INDEX}/pinhole"
     output_wh: tuple[int, int] = (left_rect_out.intrinsics.width, left_rect_out.intrinsics.height)
     K_out_33: Float64[np.ndarray, "3 3"] = np.asarray(left_rect_out.intrinsics.k_matrix, dtype=np.float64)
