@@ -571,6 +571,12 @@ depends-on = ["_prompt-da-download-polycam-example"]
 cwd = "packages/prompt-da"
 description = "Run batched TensorRT PromptDA on the example Polycam dataset"
 
+[feature.prompt-da-demo.tasks.prompt-da-polycam-compare]
+cmd = "python tools/polycam_compare.py --polycam-zip-path data/6G-room-example.zip"
+depends-on = ["_prompt-da-download-polycam-example"]
+cwd = "packages/prompt-da"
+description = "Compare PromptDA-large against a trained ZipDepth-PromptDA checkpoint on the example Polycam capture"
+
 [feature.prompt-da-demo.tasks.prompt-da-app]
 cmd = "python tools/gradio_app.py"
 depends-on = ["_prompt-da-download-polycam-example"]
