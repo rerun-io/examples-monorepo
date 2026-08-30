@@ -12,8 +12,8 @@ from monopriors.models.moge_v2.export import Encoder
 from monopriors.models.moge_v2.predictor import MoGeV2GeometryOutput, MoGeV2TorchPredictor
 from monopriors.models.surface_normal import (
     BaseNormalPredictor,
+    DSineNormalConfig,
     SurfaceNormalPrediction,
-    get_normal_predictor,
 )
 
 
@@ -46,7 +46,7 @@ class DsineAndUnidepth(MonoPriorModel):
         super().__init__()
         # Keep this composite aligned with its name by using UniDepth for metric depth.
         self.depth_model: BaseMetricPredictor = UniDepthMetricConfig().setup(device=self.device)
-        self.surface_model: BaseNormalPredictor = get_normal_predictor("DSineNormalPredictor")(device=self.device)
+        self.surface_model: BaseNormalPredictor = DSineNormalConfig().setup(device=self.device)
 
     def __call__(
         self,

@@ -29,3 +29,13 @@ class BaseNormalPredictor(ABC, Generic[ModelT]):
 
     def set_model_device(self, device: Literal["cpu", "cuda"] = "cuda") -> None:
         self.model.to(device)
+
+
+@dataclass
+class BaseNormalPredictorConfig(ABC):
+    """Base configuration for a surface-normal predictor."""
+
+    @abstractmethod
+    def setup(self, device: Literal["cpu", "cuda"]) -> BaseNormalPredictor:
+        """Build the configured predictor on one device."""
+        raise NotImplementedError
