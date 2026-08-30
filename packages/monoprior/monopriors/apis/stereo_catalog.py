@@ -8,7 +8,7 @@ videos and the slam poses line up. Nothing is registered back to the catalog.
 """
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Protocol
 
 import cv2
 import numpy as np
@@ -26,7 +26,7 @@ from simplecv.rerun_dataloader import open_segment_decoder
 from simplecv.rerun_log_utils import RerunTyroConfig, log_open3d_mesh
 from simplecv.rerun_rig_logger import log_rig_static
 from simplecv.rig import CameraSensor, Rig, RigCalibration
-from torchcodec.decoders import VideoDecoder
+from simplecv.rrd_query_utils import first_valid_value
 
 from monopriors.depth_utils import depth_edges_mask
 from monopriors.models.stereo_depth import LiteAnyStereoPredictor, StereoDepthPrediction
@@ -35,6 +35,20 @@ from monopriors.models.stereo_depth.rectify import StereoRectification, fisheye_
 
 TIMELINE: str = "video_time"
 RIG: str = "world/rig_00"
+
+
+class VideoFrame(Protocol):
+    """Decoded RGB frame returned by the catalog video decoder."""
+
+    data: UInt8[torch.Tensor, "3 h w"]
+
+
+class SegmentVideoDecoder(Protocol):
+    """Subset of the TorchCodec decoder used by this catalog tool."""
+
+    def get_frame_at(self, index: int) -> VideoFrame:
+        """Decode one frame by sample index."""
+        ...
 
 
 @dataclass
@@ -83,26 +97,23 @@ class StereoCatalogConfig:
     """Where the network runs (decode is always NVDEC)."""
 
 
-def read_static(view: DatasetView, entity: str, component: str) -> np.ndarray | str | int:
+def read_static(view: DatasetView, entity: str, component: str) -> object:
     """First value of a static component on one entity."""
     table: pa.Table = view.filter_contents(entity).reader(index=None).select(f"/{entity}:{component}").to_arrow_table()
-    value = table.column(0)[0].as_py()
-    if isinstance(value, list):
-        value = value[0] if len(value) == 1 and not isinstance(value[0], (int, float)) else value
-    return np.asarray(value) if isinstance(value, list) else value
+    return first_valid_value(table.column(0), component_name=component)
 
 
 def read_fisheye_camera(view: DatasetView, cam: str) -> Fisheye62Parameters:
     """One rig camera as written by dataforge (exoego:v2 + simplecv distortion components); extrinsics are ``cam_T_rig``."""
     pinhole: str = f"{RIG}/{cam}/pinhole"
-    model = read_static(view, pinhole, "simplecv.components.DistortionModel")
+    model: str = str(np.asarray(read_static(view, pinhole, "simplecv.components.DistortionModel")).ravel()[0])
     if model != "kannala_brandt":
         raise ValueError(f"{pinhole}: expected kannala_brandt distortion, got {model!r}")
     K_33: Float64[np.ndarray, "3 3"] = np.asarray(read_static(view, pinhole, "Pinhole:image_from_camera"), dtype=np.float64).reshape(3, 3, order="F")
     resolution = np.asarray(read_static(view, pinhole, "Pinhole:resolution"), dtype=np.float64)
     k = np.asarray(read_static(view, pinhole, "simplecv.components.DistortionCoefficients"), dtype=np.float64)
     return Fisheye62Parameters(
-        name=str(read_static(view, f"{RIG}/{cam}", "name")),
+        name=str(np.asarray(read_static(view, f"{RIG}/{cam}", "name")).ravel()[0]),
         extrinsics=Extrinsics(
             cam_R_world=np.asarray(read_static(view, f"{RIG}/{cam}", "Transform3D:mat3x3"), dtype=np.float64).reshape(3, 3, order="F"),
             cam_t_world=np.asarray(read_static(view, f"{RIG}/{cam}", "Transform3D:translation"), dtype=np.float64),
@@ -172,7 +183,7 @@ def main(config: StereoCatalogConfig) -> None:
     device: torch.device = torch.device("cuda")
     video_codec: rr.VideoCodec = rr.VideoCodec(int(np.asarray(read_static(view, f"{RIG}/{config.left_cam}/pinhole/video", "VideoStream:codec")).ravel()[0]))
     codec: str = "h264" if video_codec == rr.VideoCodec.H264 else "av1"
-    decoders: dict[str, tuple[np.ndarray, list[bytes], list[bool], VideoDecoder]] = {
+    decoders: dict[str, tuple[np.ndarray, list[bytes], list[bool], SegmentVideoDecoder]] = {
         cam: open_segment_decoder(dataset, config.segment_id, f"{RIG}/{cam}/pinhole/video", TIMELINE, device, 30, codec) for cam in (config.left_cam, config.right_cam)
     }
     left_times, right_times = decoders[config.left_cam][0], decoders[config.right_cam][0]

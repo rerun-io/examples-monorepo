@@ -372,11 +372,6 @@ platforms = ["linux-64"]
 
 [feature.monoprior.dependencies]
 python = "3.12.*"
-# Catalog stereo layer (stereo_catalog_layer): simplecv's SegmentNvdecDecoder decodes segment packets on NVDEC.
-# Mirrors prompt-da-stream (minus its ffmpeg pin: common's py-opencv needs ffmpeg 9); the dataloader
-# extra comes from the rerun-prerelease feature.
-av = ">=18"
-torchcodec = "*"
 icecream = ">=2.1.3,<2.2"
 einops = ">=0.8.0,<0.9"
 matplotlib = ">=3.8.3,<3.9"
@@ -444,12 +439,6 @@ cmd = "python tools/apps/stereo_depth_app.py"
 depends-on = ["_monoprior-download-stereo"]
 cwd = "packages/monoprior"
 description = "Launch the stereo depth Gradio app (LiteAnyStereo V2 + Rerun rig viewer)"
-
-[feature.monoprior.tasks.monoprior-stereo-catalog]
-cmd = "python tools/apps/stereo_catalog.py"
-cwd = "packages/monoprior"
-env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
-description = "Stream LiteAnyStereo V2 depth + an incremental TSDF mesh for a catalog rig segment (robocap front pair on :51235) into the Rerun viewer"
 
 [feature.monoprior.tasks.monoprior-relative-depth]
 cmd = "python tools/demos/relative_depth.py --image-path data/examples/single-image/room.jpg"
@@ -552,6 +541,20 @@ cwd = "packages/monoprior"
 cmd = "python tools/utils/upload_to_hf.py"
 depends-on = ["monoprior-build-wheel"]
 cwd = "packages/monoprior"
+
+[feature.monoprior-catalog]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.monoprior-catalog.dependencies]
+# simplecv's SegmentNvdecDecoder decodes catalog video packets on NVDEC. The rerun dataloader extra comes from rerun-prerelease.
+av = ">=18"
+torchcodec = "*"
+
+[feature.monoprior-catalog.tasks.monoprior-stereo-catalog]
+cmd = "python tools/apps/stereo_catalog.py"
+cwd = "packages/monoprior"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Stream LiteAnyStereo V2 depth + an incremental TSDF mesh for a catalog rig segment (robocap front pair on :51235) into the Rerun viewer"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # prompt-da
@@ -2602,17 +2605,30 @@ simplecv-catalog-dev = { features = [
 ], solve-group = "simplecv-catalog", no-default-feature = true }
 monoprior = { features = [
     "common",
-    "rerun-prerelease",
     "cuda",
     "monoprior",
 ], solve-group = "monoprior", no-default-feature = true }
 monoprior-dev = { features = [
     "common",
-    "rerun-prerelease",
     "cuda",
     "monoprior",
     "dev",
 ], solve-group = "monoprior", no-default-feature = true }
+monoprior-catalog = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "monoprior",
+    "monoprior-catalog",
+], solve-group = "monoprior-catalog", no-default-feature = true }
+monoprior-catalog-dev = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "monoprior",
+    "monoprior-catalog",
+    "dev",
+], solve-group = "monoprior-catalog", no-default-feature = true }
 prompt-da = { features = [
     "common",
     "cuda",
