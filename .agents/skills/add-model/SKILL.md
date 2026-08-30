@@ -43,8 +43,22 @@ Worked examples with every gotcha hit so far: [references/example-liteanystereo.
 - **Process hygiene.** Never `pkill -f`/`pgrep -f` a pattern that appears in the same command line
   (kills the tool's shell, exit 144); use `pkill -x`, a saved PID, `fuser -k <port>/tcp`, or tmux sessions.
   Never start ad-hoc HTTP servers for artifacts; Gradio apps go through `tailscale serve --https`.
-- **Identities.** Forks live under the personal GitHub account (`GH_TOKEN=$(gh auth token --user pablovela5620)`),
-  monorepo PRs use the work account. Check `gh auth status` first. HF mirrors under the personal HF account.
+- **Identities.** Forks live under the personal GitHub account (`GH_TOKEN=$(gh auth token --user pablovela5620) gh …`),
+  monorepo PRs use the work account (`GH_TOKEN=$(gh auth token --user pablo-rerun) gh pr create …` — the active
+  login is often the personal one and `gh pr create` then fails with "must be a collaborator"). HF mirrors under the
+  personal HF account.
+- **Durable execution.** Anything longer than a minute (env solves, catalog runs, Codex jobs) runs in a named tmux
+  session with `python -u`, a log file, and a sentinel file on exit; background shells die with the agent session
+  and leave half-written `.rrd`s that look complete. Poll the sentinel, never the process name.
+- **Feedback loop.** Every delegated run (Codex or subagent) ends its report with a "skill discrepancies" list:
+  anything unclear, missing, contradictory, or guessed. Fold each item into this skill before the next phase.
+
+## Running as Codex (sandbox)
+
+- The sandbox may hide the CUDA virtual package (`CONDA_OVERRIDE_CUDA=13.0` for solves) and make the default pixi
+  cache read-only (`PIXI_CACHE_DIR=/tmp/<job>-pixi-cache`). Neither proves the GPU works: run the GPU gate outside
+  the sandbox or report exactly which command the reviewer must run — never fake numbers.
+- Work in a dedicated git worktree (see port.md "Setup"); never edit the reviewer's checkout.
 
 ## Phase 0 — Scope (write the answers into the fork's `NOTES.md` later)
 
@@ -66,5 +80,22 @@ Worked examples with every gotcha hit so far: [references/example-liteanystereo.
    goal; a new family needs its contract designed first (grill the user).
 8. **Which PRs.** `1-vendor`, `2-predictor`, `3-typed` are always required. `4-app`/`5-catalog` only when the
    family has no app/catalog tool yet — an existing tool gains the new model through the registry.
+
+Probe commands that answer 1–5 in minutes (run them, do not ask the user for these facts):
+
+```bash
+git clone -q --depth 1 https://github.com/<org>/<repo> /tmp/<model>-probe && cd /tmp/<model>-probe && git rev-parse HEAD
+head -40 LICENSE*; grep -n -iE "commercial|research" LICENSE* | head           # code license
+grep -rhoE "^(import|from) [a-zA-Z_0-9.]+" --include=*.py <model-dir> | sort | uniq -c | sort -rn   # real deps
+curl -s 'https://huggingface.co/api/models?search=<name>' | python3 -c 'import sys,json;[print(m["id"]) for m in json.load(sys.stdin)]'
+curl -s https://huggingface.co/api/models/<repo>/tree/main | python3 -c 'import sys,json;[print(f["path"],f.get("size")) for f in json.load(sys.stdin)]'
+curl -s https://huggingface.co/api/models/<repo> | python3 -c 'import sys,json;print(json.load(sys.stdin)["sha"])'
+python - <<'PY'   # is the .pth a state_dict or a pickled module, and which classes does it reference?
+import zipfile,re; z=zipfile.ZipFile('<file>.pth'); d=z.read([n for n in z.namelist() if n.endswith('data.pkl')][0])
+print(sorted(set(re.findall(rb'[A-Za-z_][A-Za-z_0-9]*\.[A-Za-z_0-9.]+', d)))[:60])
+PY
+```
+When `forward()` reads an attribute the checkpoint lacks, A/B each candidate value against the reference sample's
+ground truth (FFS `normalize`: True 0.48 % vs False 45 % bad1) — never pick by reading code alone.
 
 Grill the user on anything ambiguous above (batch the questions, give recommendations) before phase 1.
