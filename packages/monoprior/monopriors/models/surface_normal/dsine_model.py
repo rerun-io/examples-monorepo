@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import os
+from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
@@ -10,6 +13,7 @@ from torchvision import transforms
 
 from monopriors.models.surface_normal.base_normal_model import (
     BaseNormalPredictor,
+    BaseNormalPredictorConfig,
     SurfaceNormalPrediction,
 )
 from monopriors.third_party.dsine.dsine import DSINE
@@ -17,12 +21,24 @@ from monopriors.third_party.dsine.dsine_kappa import DSINE_v02_kappa
 from monopriors.third_party.dsine.utils.utils import get_intrins_from_fov, pad_input
 
 
+@dataclass
+class DSineNormalConfig(BaseNormalPredictorConfig):
+    """Configuration for DSINE surface-normal prediction."""
+
+    model_type: Literal["dsine", "dsine_kappa"] = "dsine_kappa"
+    """DSINE output head; kappa also predicts per-pixel confidence."""
+
+    def setup(self, device: Literal["cpu", "cuda"]) -> DSineNormalPredictor:
+        """Build the configured DSINE predictor on one device."""
+        return DSineNormalPredictor(device=device, model_type=self.model_type)
+
+
 class DSineNormalPredictor(BaseNormalPredictor[DSINE | DSINE_v02_kappa]):
     def __init__(
         self,
         device: Literal["cpu", "cuda"],
         model_type: Literal["dsine", "dsine_kappa"] = "dsine_kappa",
-    ):
+    ) -> None:
         self.device = device
         self.transform = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         self.model = self.load_model(model_type=model_type)

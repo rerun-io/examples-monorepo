@@ -1,5 +1,8 @@
 """Single-image surface-normal adapter for the unified MoGe v2 core."""
 
+from __future__ import annotations
+
+from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
@@ -7,11 +10,23 @@ from jaxtyping import Float, UInt8
 
 from monopriors.models.moge_v2.export import MOGE_V2_CHECKPOINTS, Encoder
 from monopriors.models.moge_v2.predictor import MoGeV2NormalOutput, MoGeV2TorchPredictor
-from monopriors.models.surface_normal.base_normal_model import BaseNormalPredictor, SurfaceNormalPrediction
+from monopriors.models.surface_normal.base_normal_model import BaseNormalPredictor, BaseNormalPredictorConfig, SurfaceNormalPrediction
 from monopriors.third_party.moge.model.v2 import MoGeModel
 
 MOGE_V2_NORMAL_CHECKPOINTS: dict[Encoder, tuple[str, str]] = MOGE_V2_CHECKPOINTS
 """Backward-compatible name for the unified normal-capable checkpoint table."""
+
+
+@dataclass
+class MoGeV2NormalConfig(BaseNormalPredictorConfig):
+    """Configuration for MoGe v2 surface-normal prediction."""
+
+    encoder: Encoder = "vitl"
+    """DINOv2 encoder size."""
+
+    def setup(self, device: Literal["cpu", "cuda"]) -> MoGeV2NormalPredictor:
+        """Build the configured MoGe v2 normal predictor on one device."""
+        return MoGeV2NormalPredictor(device=device, encoder=self.encoder)
 
 
 class MoGeV2NormalPredictor(BaseNormalPredictor[MoGeModel]):
