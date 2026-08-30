@@ -16,10 +16,12 @@ A phase is not done until its gate passes. Report failures as failures.
 - Warm timing: `torch.cuda.synchronize()` around 50 forwards after 10 warm-ups, at the demo resolution;
   record ms/frame in the PR description.
 
-## Gate 3 — Equivalence + dev tasks (PR 3, and every PR)
+## Gate 3 — Equivalence + dev tasks
 
-- `tests/test_<model>_upstream_equivalence.py` passes (bit-identical outputs, all variants, all optional paths).
-- From repo root: `pixi run -e <pkg>-dev --frozen lint`, `typecheck`, `deadcode`, `tests` all green.
+- Every PR: the dev tasks below. From PR 1 on: `tests/test_<model>_upstream_equivalence.py` passes (bit-identical
+  fp32 outputs for all variants and shared code paths; kernel alternatives with tolerance).
+- From repo root: `pixi run -e <pkg>-dev --frozen lint`, `typecheck`, `deadcode`, `tests` all green — and confirm
+  the new paths are actually inside the package's `PYREFLY_TARGET` (root `pixi.toml`), else typecheck is vacuous.
 - Default `pytest -q` runtime stays in seconds; checkpoint tests are `-m slow`.
 
 ## Gate 4 — Hand-roll audit (last PR before pushing)
@@ -44,6 +46,8 @@ Keep a hand-rolled version only when no shared helper fits, and say so in the PR
 
 Use the `rerun-viewer-validation` skill: run with `--rr-config.headless --rr-config.save <rrd>`, open the
 `.rrd` in a viewer, take screenshots that show the actual claim (frusta orientation, depth pointing out of the
-right camera, mesh faces visible from inside, no error badges), and note the evidence directory in the PR.
+right camera, mesh faces visible from inside, no error badges). Evidence lives in
+`/tmp/rerun-viewer-validation/<date>-<model>/` (screenshots + the `.rrd`); the PR description links the
+directory and embeds the key screenshots.
 Watch for: child `Transform3D` is relative to its *parent*, not the rig (a level mesh does not prove the tree);
 `EncodedDepthImage` needs `depth_range` or renders purple; colour range 0–6 m for indoor scenes.
