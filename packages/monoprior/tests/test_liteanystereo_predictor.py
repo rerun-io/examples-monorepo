@@ -40,19 +40,17 @@ def test_local_checkpoint_bypasses_download(monkeypatch: pytest.MonkeyPatch, rel
     LiteAnyStereoPredictor(device="cpu", model_size="s", checkpoint=released_style_checkpoint)
 
 
-def test_call_contract_without_calibration(predictor: LiteAnyStereoPredictor) -> None:
-    rng = np.random.default_rng(0)
-    left = rng.integers(0, 255, (50, 70, 3), dtype=np.uint8)  # not a multiple of 32: exercises the padder
-    pred = predictor(left, left)
-    assert pred.disparity.shape == (50, 70) and pred.disparity.dtype == np.float32 and np.isfinite(pred.disparity).all()
-    assert pred.depth_meters is None and pred.K_33 is None and pred.baseline_m is None
+def test_call_requires_calibration(predictor: LiteAnyStereoPredictor) -> None:
+    left = np.zeros((64, 96, 3), dtype=np.uint8)
+    with pytest.raises(TypeError):
+        predictor(left, left)
 
 
 def test_call_contract_with_calibration(predictor: LiteAnyStereoPredictor) -> None:
     left = np.zeros((64, 96, 3), dtype=np.uint8)
     K_33 = np.array([[100.0, 0, 48], [0, 100.0, 32], [0, 0, 1]], dtype=np.float32)
     pred = predictor(left, left, K_33=K_33, baseline_m=0.1)
-    assert pred.depth_meters is not None and pred.depth_meters.shape == (64, 96) and pred.depth_meters.dtype == np.float32
+    assert pred.depth_meters.shape == (64, 96) and pred.depth_meters.dtype == np.float32
     valid = pred.disparity > 0.0
     assert np.allclose(pred.depth_meters[valid], 100.0 * 0.1 / pred.disparity[valid])
     assert (pred.depth_meters[~valid] == 0.0).all()

@@ -16,12 +16,12 @@ class StereoDepthPrediction:
 
     disparity: Float32[np.ndarray, "h w"]
     """Left-view disparity in pixels (the network's native output); ``<= 0`` marks invalid pixels."""
-    depth_meters: Float32[np.ndarray, "h w"] | None
-    """``fx * baseline / disparity`` when intrinsics and baseline were given, ``0`` where disparity is invalid; else None."""
-    K_33: Float32[np.ndarray, "3 3"] | None
-    """Rectified pinhole intrinsics shared by both views, when given."""
-    baseline_m: float | None
-    """Stereo baseline in metres, when given."""
+    depth_meters: Float32[np.ndarray, "h w"]
+    """``fx * baseline / disparity``, with ``0`` where disparity is invalid."""
+    K_33: Float32[np.ndarray, "3 3"]
+    """Rectified pinhole intrinsics shared by both views."""
+    baseline_m: float
+    """Stereo baseline in metres."""
 
 
 def disparity_to_metric_depth(disparity_hw: Float32[np.ndarray, "h w"], fx: float, baseline_m: float) -> Float32[np.ndarray, "h w"]:
@@ -45,15 +45,25 @@ class BaseStereoPredictor(ABC, Generic[ModelT]):
     model: ModelT
 
     @abstractmethod
+    def infer_disparity(
+        self,
+        left_rgb: UInt8[np.ndarray, "h w 3"],
+        right_rgb: UInt8[np.ndarray, "h w 3"],
+    ) -> Float32[np.ndarray, "h w"]:
+        """Predict left-view disparity in pixels for a rectified stereo pair."""
+        raise NotImplementedError
+
     def __call__(
         self,
         left_rgb: UInt8[np.ndarray, "h w 3"],
         right_rgb: UInt8[np.ndarray, "h w 3"],
-        K_33: Float32[np.ndarray, "3 3"] | None = None,
-        baseline_m: float | None = None,
+        K_33: Float32[np.ndarray, "3 3"],
+        baseline_m: float,
     ) -> StereoDepthPrediction:
-        """Predict left-view disparity for a rectified pair; metric depth is filled when ``K_33`` and ``baseline_m`` are given."""
-        raise NotImplementedError
+        """Predict calibrated left-view disparity and metric depth for a rectified stereo pair."""
+        disparity_hw: Float32[np.ndarray, "h w"] = self.infer_disparity(left_rgb, right_rgb)
+        depth_hw: Float32[np.ndarray, "h w"] = disparity_to_metric_depth(disparity_hw, float(K_33[0, 0]), baseline_m)
+        return StereoDepthPrediction(disparity=disparity_hw, depth_meters=depth_hw, K_33=K_33, baseline_m=baseline_m)
 
     def set_model_device(self, device: Literal["cpu", "cuda"] = "cuda") -> None:
         self.model.to(device)

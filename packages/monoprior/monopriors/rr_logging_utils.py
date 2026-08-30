@@ -324,8 +324,6 @@ def log_stereo_pred(
     from simplecv.rerun_rig_logger import log_rig_static
     from simplecv.rig import Rig, stereo_rig_calibration
 
-    if stereo_pred.K_33 is None or stereo_pred.baseline_m is None or stereo_pred.depth_meters is None:
-        raise ValueError("log_stereo_pred needs a calibrated prediction (K_33, baseline_m, depth_meters)")
     height: int = left_rgb.shape[0]
     width: int = left_rgb.shape[1]
     rig: Rig = Rig(index=0, calibration=stereo_rig_calibration(stereo_pred.K_33, stereo_pred.baseline_m, width, height), image_plane_distance=0.5)
