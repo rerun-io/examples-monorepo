@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 import open3d as o3d
 import rerun as rr
+import torch
 from arkitscenes_download.ingest.depth import ArkitDepthConfidence
 from beartype.roar import BeartypeException
 from einops import rearrange
@@ -137,10 +138,15 @@ def run_promptda_batch(
     image_b3hw, prompt_b1hw = preprocess_batch(rgb_bhw3, prompt_bhw, predictor.image_hw)
     depth_model_b1hw: Float32[Tensor, "b 1 nh nw"] = predictor.runtime({"image": image_b3hw, "prompt_depth": prompt_b1hw})["depth"]
     depth_bhw: Float32[Tensor, "b oh ow"] = postprocess_depth(depth_model_b1hw, output_hw)
-    depth_mm_bhw: UInt16[ndarray, "b oh ow"] = (depth_bhw.cpu().numpy() * 1000.0).astype(np.uint16)
+    # Scale and cast on the GPU: halves the device-to-host copy and drops two full-size host passes.
+    depth_mm_bhw: UInt16[ndarray, "b oh ow"] = (depth_bhw * 1000.0).clamp(0.0, 65535.0).to(torch.uint16).cpu().numpy()
     depth_model_mm_bhw: UInt16[ndarray, "b nh nw"] = (
-        rearrange(depth_model_b1hw, "b 1 h w -> b h w").cpu().numpy() * 1000.0  # pyrefly: ignore  # bad-argument-type — einops stub false positive
-    ).astype(np.uint16)
+        (rearrange(depth_model_b1hw, "b 1 h w -> b h w") * 1000.0)  # pyrefly: ignore  # bad-argument-type — einops stub false positive
+        .clamp(0.0, 65535.0)
+        .to(torch.uint16)
+        .cpu()
+        .numpy()
+    )
     return depth_mm_bhw, depth_model_mm_bhw
 
 
