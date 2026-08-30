@@ -8,9 +8,9 @@ import numpy as np
 import pytest
 from conftest import requires_cuda, slow_cuda
 from huggingface_hub import snapshot_download
-from jaxtyping import Bool, Float32, UInt8
+from jaxtyping import Float32, UInt8
 
-from monopriors.apis.stereo_depth import read_middlebury_calib, read_rgb
+from monopriors.apis.stereo_depth import ETH3D_MAX_DISP, read_middlebury_calib, read_rgb, stereo_metrics
 from monopriors.models.stereo_depth import LiteAnyStereoPredictor
 
 pytestmark = [slow_cuda, requires_cuda]
@@ -36,8 +36,7 @@ def test_eth3d_playground_bad1(model_size: str, max_bad1_percent: float) -> None
 
     gt_hw: Float32[np.ndarray, "h w"] = _read_pfm(gt_dir / "disp0GT.pfm")
     nocc_hw: UInt8[np.ndarray, "h w"] = cv2.imread(str(gt_dir / "mask0nocc.png"), cv2.IMREAD_GRAYSCALE)
-    valid_hw: Bool[np.ndarray, "h w"] = np.isfinite(gt_hw) & (gt_hw < 192) & (nocc_hw == 255)
-    error_hw = np.abs(pred.disparity - gt_hw)
-    bad1_percent = 100.0 * float((error_hw[valid_hw] > 1.0).mean())
+    epe_px, bad1_percent = stereo_metrics(pred.disparity, gt_hw, nocc_hw, max_disp=ETH3D_MAX_DISP)
+    print(f"LAS2-{model_size.upper()} playground_1l: EPE {epe_px:.3f} px, bad1 {bad1_percent:.2f}%")
     assert bad1_percent < max_bad1_percent, f"LAS2-{model_size.upper()} bad1 {bad1_percent:.2f}%"
     assert np.nanmedian(pred.depth_meters[pred.depth_meters > 0]) < 50.0

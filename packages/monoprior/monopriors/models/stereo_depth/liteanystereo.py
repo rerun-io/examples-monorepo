@@ -20,8 +20,6 @@ from torch import nn
 from monopriors.models.stereo_depth.base_stereo_depth import (
     BaseStereoPredictor,
     BaseStereoPredictorConfig,
-    StereoDepthPrediction,
-    disparity_to_metric_depth,
 )
 from monopriors.third_party.liteanystereo.liteanystereov2 import build_liteanystereo
 from monopriors.third_party.liteanystereo.padding import InputPadder

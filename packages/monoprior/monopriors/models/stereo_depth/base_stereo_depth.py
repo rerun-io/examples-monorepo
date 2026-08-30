@@ -73,9 +73,6 @@ class BaseStereoPredictor(ABC, Generic[ModelT]):
 class BaseStereoPredictorConfig(ABC):
     """Base configuration for a stereo predictor."""
 
-    max_disp: int
-    """Maximum modeled disparity in pixels."""
-
     @abstractmethod
     def setup(self, device: Literal["cpu", "cuda"]) -> BaseStereoPredictor:
         """Build the configured predictor on one device."""

@@ -14,6 +14,9 @@ from simplecv.rerun_log_utils import RerunTyroConfig
 from monopriors.models.stereo_depth import AnnotatedStereoPredictorUnion, BaseStereoPredictor, LiteAnyStereoConfig, StereoDepthPrediction
 from monopriors.rr_logging_utils import create_stereo_depth_blueprint, log_stereo_pred
 
+ETH3D_MAX_DISP: float = 192.0
+"""Ground-truth disparity cutoff used for comparable ETH3D metrics across predictors."""
+
 
 @dataclass(slots=True)
 class MiddleburyCalibration:
@@ -87,13 +90,13 @@ def stereo_metrics(
     nonoccluded_hw: UInt8[np.ndarray, "h w"],
     max_disp: float,
 ) -> tuple[float, float]:
-    """Compute ETH3D EPE and bad1 on finite, non-occluded disparities below the model range.
+    """Compute ETH3D EPE and bad1 on finite, non-occluded disparities below an evaluation cutoff.
 
     Args:
         disparity_hw: Predicted left disparity, ``Float32[ndarray, "h w"]``.
         ground_truth_hw: Ground-truth left disparity, ``Float32[ndarray, "h w"]``.
         nonoccluded_hw: ETH3D non-occlusion mask, ``UInt8[ndarray, "h w"]``; 255 marks valid pixels.
-        max_disp: Exclude ground-truth disparities at or above this value.
+        max_disp: Evaluation cutoff; exclude ground-truth disparities at or above this value.
 
     Returns:
         Mean endpoint error in pixels and bad1 percentage.
@@ -119,8 +122,7 @@ def main(config: StereoDepthCLIConfig) -> None:
         nonoccluded_hw: UInt8[np.ndarray, "h w"] | None = cv2.imread(str(nonoccluded_path), cv2.IMREAD_GRAYSCALE)
         if nonoccluded_hw is None:
             raise FileNotFoundError(f"Failed to read image {nonoccluded_path}")
-        max_disp: float = float(config.predictor.max_disp)
-        metrics: tuple[float, float] = stereo_metrics(stereo_pred.disparity, ground_truth_hw, nonoccluded_hw, max_disp=max_disp)
+        metrics: tuple[float, float] = stereo_metrics(stereo_pred.disparity, ground_truth_hw, nonoccluded_hw, max_disp=ETH3D_MAX_DISP)
         print(f"{type(predictor).__name__} ETH3D: EPE {metrics[0]:.3f} px, bad1 {metrics[1]:.2f}%")
 
     parent_log_path: Path = Path("world")

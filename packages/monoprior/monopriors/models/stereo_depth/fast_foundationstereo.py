@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import pickle
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,8 +18,6 @@ from torch import nn
 from monopriors.models.stereo_depth.base_stereo_depth import (
     BaseStereoPredictor,
     BaseStereoPredictorConfig,
-    StereoDepthPrediction,
-    disparity_to_metric_depth,
 )
 from monopriors.third_party.fast_foundationstereo.foundation_stereo import FastFoundationStereo
 from monopriors.third_party.fast_foundationstereo.utils import InputPadder
@@ -60,7 +57,11 @@ def download_fast_foundationstereo_checkpoint() -> Path:
 
 
 def load_fast_foundationstereo(checkpoint: Path, valid_iters: int = 8, max_disp: int = 416) -> nn.Module:
-    """Remap the released NAS architecture, clone it, and strictly load its state dict.
+    """Load and remap the released NAS-pruned architecture.
+
+    The pickle is the architecture specification: its per-layer widths cannot be reconstructed from
+    ``cfg.yaml``. ``torch.load`` creates the returned object graph, while the adjacent config supplies runtime
+    arguments that were not serialized with the release.
 
     Args:
         checkpoint: Pickled upstream ``FastFoundationStereo`` module with ``cfg.yaml`` beside it.
@@ -68,12 +69,11 @@ def load_fast_foundationstereo(checkpoint: Path, valid_iters: int = 8, max_disp:
         max_disp: Maximum modeled disparity in pixels.
 
     Returns:
-        A fresh evaluation-ready architecture on CPU with the released state loaded strictly.
+        The remapped serialized architecture on CPU with its runtime arguments updated.
 
     Raises:
         TypeError: If the checkpoint is not a module or the config is not a mapping.
         FileNotFoundError: If ``cfg.yaml`` is not beside the checkpoint.
-        RuntimeError: If the released state does not strictly match its remapped NAS architecture.
     """
     serialized: object = torch.load(checkpoint, map_location="cpu", pickle_module=_FastFoundationStereoPickleModule, weights_only=False)
     if not isinstance(serialized, nn.Module):
@@ -93,9 +93,7 @@ def load_fast_foundationstereo(checkpoint: Path, valid_iters: int = 8, max_disp:
     serialized_args.max_disp = max_disp
     serialized_args.normalize = True
 
-    model: nn.Module = copy.deepcopy(serialized_model)
-    model.load_state_dict(serialized_model.state_dict(), strict=True)
-    return model
+    return serialized_model
 
 
 @dataclass
@@ -162,27 +160,3 @@ class FastFoundationStereoPredictor(BaseStereoPredictor[nn.Module]):
             )
         disparity_hw: Float32[torch.Tensor, "h w"] = rearrange(padder.unpad(disparity_11hw.float()).clamp_min(0.0), "1 1 h w -> h w")
         return disparity_hw.cpu().numpy()
-
-    def __call__(
-        self,
-        left_rgb: UInt8[np.ndarray, "h w 3"],
-        right_rgb: UInt8[np.ndarray, "h w 3"],
-        K_33: Float32[np.ndarray, "3 3"] | None = None,
-        baseline_m: float | None = None,
-    ) -> StereoDepthPrediction:
-        """Predict disparity and optional metric depth for a rectified RGB pair.
-
-        Args:
-            left_rgb: Rectified left RGB image, ``UInt8[ndarray, "h w 3"]``.
-            right_rgb: Rectified right RGB image, ``UInt8[ndarray, "h w 3"]``.
-            K_33: Shared rectified intrinsics, ``Float32[ndarray, "3 3"]``, when metric depth is wanted.
-            baseline_m: Stereo baseline in metres when metric depth is wanted.
-
-        Returns:
-            Left-view disparity and optional metric depth in a ``StereoDepthPrediction``.
-        """
-        disparity_hw: Float32[np.ndarray, "h w"] = self.infer_disparity(left_rgb, right_rgb)
-        depth_hw: Float32[np.ndarray, "h w"] | None = None
-        if K_33 is not None and baseline_m is not None:
-            depth_hw = disparity_to_metric_depth(disparity_hw, float(K_33[0, 0]), baseline_m)
-        return StereoDepthPrediction(disparity=disparity_hw, depth_meters=depth_hw, K_33=K_33, baseline_m=baseline_m)

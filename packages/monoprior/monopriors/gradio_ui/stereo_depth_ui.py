@@ -1,14 +1,14 @@
 """Stereo depth Gradio app: a rectified left/right pair + calibration in, an exoego:v2 rig in the Rerun viewer out.
 
 Layout follows ``posekit.track_ui`` (inputs + status on the left, Radio-driven Input/Config/Outputs panels, a
-streaming Rerun viewer on the right). One predictor per model selection is kept warm for the process lifetime.
+streaming Rerun viewer on the right). The most recently selected predictor is kept warm.
 """
 
 from __future__ import annotations
 
 import time
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, TypeAlias, get_args
 
@@ -24,7 +24,6 @@ from monopriors.apis.stereo_depth import MiddleburyCalibration, read_middlebury_
 from monopriors.models.stereo_depth import (
     BaseStereoPredictor,
     BaseStereoPredictorConfig,
-    FastFoundationStereoConfig,
     LiteAnyStereoConfig,
     StereoDepthPrediction,
     stereo_predictor_defaults,
@@ -37,8 +36,7 @@ TabName: TypeAlias = Literal["Input", "Config", "Outputs"]
 EXAMPLE_SCENE: Path = Path("data/examples/stereo/eth3d/two_view_training/playground_1l")
 """ETH3D two-view sample fetched by the ``_monoprior-download-stereo`` task (im0/im1 + Middlebury calib.txt)."""
 
-PredictorKey: TypeAlias = tuple[str, LAS2ModelSize | None]
-_PREDICTORS: dict[PredictorKey, BaseStereoPredictor] = {}
+_CACHED_PREDICTOR: tuple[BaseStereoPredictorConfig, BaseStereoPredictor] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,17 +53,13 @@ class AppConfig:
 
 
 def _predictor(predictor_name: str, model_size: LAS2ModelSize) -> BaseStereoPredictor:
-    key: PredictorKey = (predictor_name, model_size if predictor_name == "liteanystereo" else None)
-    if key not in _PREDICTORS:
-        match predictor_name:
-            case "liteanystereo":
-                config: BaseStereoPredictorConfig = LiteAnyStereoConfig(model_size=model_size)
-            case "fast-foundationstereo":
-                config = FastFoundationStereoConfig()
-            case _:
-                raise ValueError(f"Unknown stereo predictor: {predictor_name}")
-        _PREDICTORS[key] = config.setup(device="cuda")
-    return _PREDICTORS[key]
+    global _CACHED_PREDICTOR
+    config: BaseStereoPredictorConfig = stereo_predictor_defaults[predictor_name]
+    if isinstance(config, LiteAnyStereoConfig):
+        config = replace(config, model_size=model_size)
+    if _CACHED_PREDICTOR is None or _CACHED_PREDICTOR[0] != config:
+        _CACHED_PREDICTOR = (config, config.setup(device="cuda"))
+    return _CACHED_PREDICTOR[1]
 
 
 def show_control_tab(selected: TabName) -> tuple[gr.Column, gr.Column, gr.Column]:
@@ -111,7 +105,7 @@ def run_stereo(
             depth_edge_threshold=float(depth_edge_threshold),
         )
     valid_hw = stereo_pred.disparity > 0.0
-    model_label: str = f"LAS2-{model_size.upper()}" if predictor_name == "liteanystereo" else "Fast-FoundationStereo"
+    model_label: str = type(predictor).__name__
     status: str = (
         f"{model_label} · {left_rgb.shape[1]}×{left_rgb.shape[0]} · {elapsed_ms:.0f} ms end-to-end · "
         f"disparity {stereo_pred.disparity[valid_hw].min():.1f}–{stereo_pred.disparity[valid_hw].max():.1f} px"
