@@ -305,6 +305,8 @@ def log_stereo_pred(
     left_rgb: UInt8[np.ndarray, "h w 3"],
     right_rgb: UInt8[np.ndarray, "h w 3"],
     max_depth_m: float = 20.0,
+    remove_flying_pixels: bool = True,
+    depth_edge_threshold: float = 0.5,
     jpeg_quality: int = 90,
 ) -> None:
     """Log a calibrated stereo prediction as an exoego:v2 rig.
@@ -319,6 +321,8 @@ def log_stereo_pred(
         left_rgb: Left image, ``UInt8[ndarray, "h w 3"]``.
         right_rgb: Right image, ``UInt8[ndarray, "h w 3"]``.
         max_depth_m: Depth cut-off for the logged depth image.
+        remove_flying_pixels: Zero depth on depth edges so the backprojected cloud has no streaks between surfaces.
+        depth_edge_threshold: Depth-gradient magnitude (metres per pixel) above which a pixel counts as an edge.
         jpeg_quality: JPEG quality for the two images.
     """
     from simplecv.rerun_rig_logger import log_rig_static
@@ -334,5 +338,8 @@ def log_stereo_pred(
     rr.log(f"{left_path}/pinhole/image", rr.Image(left_rgb).compress(jpeg_quality=jpeg_quality), static=True)
     rr.log(f"{right_path}/pinhole/image", rr.Image(right_rgb).compress(jpeg_quality=jpeg_quality), static=True)
     depth_hw: Float32[np.ndarray, "h w"] = np.where(stereo_pred.depth_meters > max_depth_m, 0.0, stereo_pred.depth_meters).astype(np.float32)
+    if remove_flying_pixels:
+        edges_hw: Bool[np.ndarray, "h w"] = depth_edges_mask(depth_hw, threshold=depth_edge_threshold)
+        depth_hw = np.asarray(depth_hw * ~edges_hw, dtype=np.float32)
     rr.log(f"{left_path}/pinhole/depth", rr.DepthImage(depth_hw, meter=1.0, depth_range=(0.0, max_depth_m)), static=True)
     rr.log(f"{left_path}/disparity", rr.DepthImage(stereo_pred.disparity), static=True)
