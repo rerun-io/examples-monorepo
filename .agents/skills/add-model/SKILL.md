@@ -20,7 +20,9 @@ Every phase reads one reference file; read it fully before starting that phase.
 | 2. Port | [references/port.md](references/port.md) | PR stack `1-vendor → 2-predictor → 3-typed (→ 4-app → 5-catalog)` |
 | Gates | [references/validate.md](references/validate.md) | equivalence test, reference number, dev tasks green, viewer pixel evidence |
 
-Worked example with every gotcha hit so far: [references/example-liteanystereo.md](references/example-liteanystereo.md).
+Worked examples with every gotcha hit so far: [references/example-liteanystereo.md](references/example-liteanystereo.md)
+(the run this skill was distilled from) and [references/example-fast-foundationstereo.md](references/example-fast-foundationstereo.md)
+(the first run *through* the skill: pickled NAS checkpoint, existing family).
 
 ## Rules that always bind
 
