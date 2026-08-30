@@ -399,7 +399,7 @@ vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f
 
 [feature.monoprior.activation.env]
 PACKAGE_DIR = "packages/monoprior"
-PYREFLY_TARGET = "monopriors/apis monopriors/data monopriors/gradio_ui monopriors/models monopriors/dc_utils.py monopriors/depth_utils.py monopriors/rr_logging_utils.py monopriors/scale_utils.py monopriors/__init__.py monopriors/third_party/zipdepth monopriors/third_party/liteanystereo"
+PYREFLY_TARGET = "monopriors/apis monopriors/data monopriors/gradio_ui monopriors/models monopriors/dc_utils.py monopriors/depth_utils.py monopriors/rr_logging_utils.py monopriors/scale_utils.py monopriors/__init__.py monopriors/third_party/zipdepth monopriors/third_party/liteanystereo monopriors/third_party/fast_foundationstereo"
 
 # ── Download tasks (hidden, used as depends-on) ─────────────────────────
 [feature.monoprior.tasks._monoprior-download-single-image]
