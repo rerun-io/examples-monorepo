@@ -114,11 +114,13 @@ def _disable_pretrained_and_compilation(monkeypatch: pytest.MonkeyPatch, upstrea
     monkeypatch.setattr(owned_extractor.timm, "create_model", create_model_without_pretrained)
     upstream_submodule: ModuleType = upstream_modules["submodule"]
     upstream_foundation: ModuleType = upstream_modules["foundation_stereo"]
-    for function_name in ("build_gwc_volume_optimized_pytorch1", "build_concat_volume_optimized_pytorch1"):
-        upstream_compiled: Callable[..., Tensor] = cast(Callable[..., Tensor], getattr(upstream_submodule, function_name))
-        owned_compiled: Callable[..., Tensor] = cast(Callable[..., Tensor], getattr(owned_submodule, function_name))
+    for function_name, eager_name in (
+        ("build_gwc_volume_optimized_pytorch1", "build_gwc_volume_optimized_pytorch1_eager"),
+        ("build_concat_volume_optimized_pytorch1", "build_concat_volume_optimized_pytorch1_eager"),
+    ):
+        upstream_compiled: Any = getattr(upstream_submodule, function_name)
         monkeypatch.setattr(upstream_foundation, function_name, upstream_compiled._torchdynamo_orig_callable)
-        monkeypatch.setattr(owned_foundation_stereo, function_name, owned_compiled._torchdynamo_orig_callable)
+        monkeypatch.setattr(owned_foundation_stereo, function_name, getattr(owned_submodule, eager_name))
 
 
 def _build_equal_models(monkeypatch: pytest.MonkeyPatch) -> tuple[nn.Module, FastFoundationStereo]:
@@ -276,9 +278,7 @@ def test_released_checkpoint_matches_upstream_and_gwc_kernels(monkeypatch: pytes
         feature_pair: list[Float32[Tensor, "2 _channels _height _width"]] = owned_model.feature(normalized_pair_23hw)
         left_features_1chw: Float32[Tensor, "1 channels h4 w4"] = feature_pair[0][:1]
         right_features_1chw: Float32[Tensor, "1 channels h4 w4"] = feature_pair[0][1:]
-        eager_gwc: Callable[..., Tensor] = cast(
-            Callable[..., Tensor], owned_submodule.build_gwc_volume_optimized_pytorch1._torchdynamo_orig_callable
-        )
+        eager_gwc: Callable[..., Tensor] = owned_submodule.build_gwc_volume_optimized_pytorch1_eager
         pytorch_volume_1gdhw: Float32[Tensor, "1 groups disparities h4 w4"] = eager_gwc(
             left_features_1chw,
             right_features_1chw,

@@ -22,6 +22,7 @@ from monopriors.models.stereo_depth import (
     stereo_predictor_defaults,
 )
 from monopriors.models.stereo_depth import fast_foundationstereo as predictor_module
+from monopriors.third_party.fast_foundationstereo import cost_volume_triton
 from monopriors.third_party.fast_foundationstereo import extractor as extractor_module
 from monopriors.third_party.fast_foundationstereo import foundation_stereo as foundation_stereo_module
 from monopriors.third_party.fast_foundationstereo import submodule as submodule_module
@@ -61,6 +62,11 @@ def test_fast_foundationstereo_config_registered() -> None:
     assert isinstance(tyro.cli(AnnotatedStereoPredictorUnion, args=["fast-foundationstereo"]), FastFoundationStereoConfig)
 
 
+def test_triton_cost_volume_names_remain_reexported() -> None:
+    assert submodule_module._create_gwc_triton_kernel is cost_volume_triton._create_gwc_triton_kernel
+    assert submodule_module.build_gwc_volume_triton is cost_volume_triton.build_gwc_volume_triton
+
+
 def test_random_module_runs_tiny_cpu_pair(monkeypatch: pytest.MonkeyPatch) -> None:
     """A config-built random module runs the PyTorch cost-volume path without CUDA or released weights."""
 
@@ -69,8 +75,8 @@ def test_random_module_runs_tiny_cpu_pair(monkeypatch: pytest.MonkeyPatch) -> No
         return TIMM_CREATE_MODEL(model_name, *args, **kwargs)
 
     monkeypatch.setattr(extractor_module.timm, "create_model", create_model_without_pretrained)
-    eager_gwc: Callable[..., torch.Tensor] = cast(Callable[..., torch.Tensor], submodule_module.build_gwc_volume_optimized_pytorch1._torchdynamo_orig_callable)
-    eager_concat: Callable[..., torch.Tensor] = cast(Callable[..., torch.Tensor], submodule_module.build_concat_volume_optimized_pytorch1._torchdynamo_orig_callable)
+    eager_gwc: Callable[..., torch.Tensor] = submodule_module.build_gwc_volume_optimized_pytorch1_eager
+    eager_concat: Callable[..., torch.Tensor] = submodule_module.build_concat_volume_optimized_pytorch1_eager
     monkeypatch.setattr(foundation_stereo_module, "build_gwc_volume_optimized_pytorch1", eager_gwc)
     monkeypatch.setattr(foundation_stereo_module, "build_concat_volume_optimized_pytorch1", eager_concat)
     config: DictConfig = OmegaConf.create(
