@@ -1,6 +1,7 @@
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import rerun as rr
@@ -11,13 +12,15 @@ from simplecv.ops.tsdf_depth_fuser import Open3DFuser
 from simplecv.rerun_log_utils import RerunTyroConfig
 from tqdm import tqdm
 
-from monopriors.models.monoprior import DsineAndUnidepth, MonoPriorPrediction
+from monopriors.models.monoprior import DsineAndUnidepthConfig, MonoPriorModel, MonoPriorPrediction
 
 
 @dataclass
 class PolycamConfig:
     polycam_zip_path: Path
     rr_config: RerunTyroConfig
+    device: Literal["cuda", "cpu"] = "cuda"
+    """Execution backend for the composite predictor."""
 
 
 def extract_zip(zip_path: Path, extract_dir: Path) -> None:
@@ -89,7 +92,7 @@ def log_mono_pred(
 def polycam_inference(config: PolycamConfig) -> None:
     polycam_dataset: PolycamDataset = load_polycam_data(config.polycam_zip_path)
 
-    model = DsineAndUnidepth()
+    model: MonoPriorModel = DsineAndUnidepthConfig().setup(device=config.device)
     gt_fuser = Open3DFuser()
     pred_fuser = Open3DFuser()
 
