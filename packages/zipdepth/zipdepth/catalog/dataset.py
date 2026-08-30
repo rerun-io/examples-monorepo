@@ -162,6 +162,7 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
         frame_stride: int = 1,
         num_producers: int = 6,
         prefetch_samples: int = 256,
+        load_confidence: bool = True,
     ) -> None:
         """Configure catalog streaming without opening the server or decoder.
 
@@ -178,6 +179,11 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
             frame_stride: Keep every Nth chosen PromptDA row within each segment.
             num_producers: Whole-segment producer threads. One preserves order.
             prefetch_samples: Maximum completed samples queued by producers.
+            load_confidence: Fetch the ARKit confidence column. Training ignores it --
+                the student takes the raw prompt and the model range-gates internally --
+                so leaving it out drops a column and ~48 KB/frame off every segment
+                query. Evaluation keeps it for the affine-reference and prompt-upsample
+                diagnostics, which do consume ``prompt_valid``.
 
         Raises:
             ValueError: If sizes or distributed shard settings are invalid.
@@ -197,6 +203,7 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
         self._row_by_id: dict[str, dict[str, Any]] = row_by_id
         self._device: torch.device = device
         self._builder_factory: Callable[[], SampleBuilder] = builder_factory
+        self._load_confidence: bool = load_confidence
         self._shuffle_buffer_size: int = shuffle_buffer_size
         self._seed: int = seed
         self._rank: int = rank
@@ -236,12 +243,17 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
     ) -> Generator[dict[str, Tensor], None, None]:
         """Run the complete query, decode, filter, and build pipeline for one segment."""
         started: float = perf_counter()
+        contents: list[str] = [f"/{DEPTH_PROMPTDA}", f"/{DEPTH}"]
+        columns: list[str] = [TIMELINE, PROMPTDA_BLOB_COLUMN, PROMPT_BLOB_COLUMN]
+        if self._load_confidence:
+            contents.append(f"/{CONFIDENCE}")
+            columns.append(CONFIDENCE_COLUMN)
         table: pa.Table = (
             self._dataset_entry.filter_segments(segment_id)
-            .filter_contents([f"/{DEPTH_PROMPTDA}", f"/{DEPTH}", f"/{CONFIDENCE}"])
+            .filter_contents(contents)
             .reader(index=TIMELINE, fill_latest_at=True)
             .filter(col(f'"{PROMPTDA_BLOB_COLUMN}"').is_not_null())
-            .select(TIMELINE, PROMPTDA_BLOB_COLUMN, PROMPT_BLOB_COLUMN, CONFIDENCE_COLUMN)
+            .select(*columns)
             .sort(TIMELINE)
             .to_arrow_table()
         )
@@ -257,9 +269,13 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
         prompt_blobs: list[UInt8[ndarray, "prompt_n_bytes"]] = component_u8_views(table.column(PROMPT_BLOB_COLUMN), PROMPT_BLOB_COLUMN)[
             :: self._frame_stride
         ]
-        confidences: list[UInt8[ndarray, "confidence_n_values"]] = component_u8_views(table.column(CONFIDENCE_COLUMN), CONFIDENCE_COLUMN)[
-            :: self._frame_stride
-        ]
+        confidences: list[UInt8[ndarray, "confidence_n_values"] | None]
+        if self._load_confidence:
+            confidences = list(component_u8_views(table.column(CONFIDENCE_COLUMN), CONFIDENCE_COLUMN)[:: self._frame_stride])
+        else:
+            # Not fetched: the builder stands in an all-trusted mask once it knows the
+            # decoded prompt shape. The model range-gates the prompt itself.
+            confidences = [None] * len(prompt_blobs)
 
         started = perf_counter()
         decoder_result: tuple[Shaped[ndarray, "n_packets"], list[bytes], list[bool], VideoDecoder] = open_segment_decoder(
@@ -285,7 +301,7 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
 
         target_blob_u8: UInt8[ndarray, "target_n_bytes"]
         prompt_blob_u8: UInt8[ndarray, "prompt_n_bytes"]
-        confidence_u8: UInt8[ndarray, "confidence_n_values"]
+        confidence_u8: UInt8[ndarray, "confidence_n_values"] | None
         packet_index: np.int64
         first_decode_error_reported: bool = False
         sample_inputs = zip(target_blobs, prompt_blobs, confidences, packet_indices_n, strict=True)

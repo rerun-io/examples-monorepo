@@ -394,6 +394,10 @@ def main(
             world_size=world_size,
             num_producers=config.num_producers,
             prefetch_samples=config.prefetch_samples,
+            # Training ignores confidence: the student takes the raw prompt and the model
+            # range-gates internally. Skipping the column drops a column and ~48 KB/frame
+            # off every segment query.
+            load_confidence=False
         )
         data_loader: DataLoader[dict[str, Tensor]] = DataLoader(
             dataset,

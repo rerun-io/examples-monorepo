@@ -40,6 +40,8 @@ class CatalogThroughputConfig:
     """Whole-segment producer threads, each with its own video decoder."""
     prefetch_samples: int = 256
     """Maximum completed samples buffered across segment producers."""
+    load_confidence: bool = True
+    """Fetch the ARKit confidence column; training skips it."""
     min_depth_span: float = 1.25
     """Minimum valid-depth p95/p5 ratio; zero disables flat-frame filtering."""
     max_batches: int | None = None

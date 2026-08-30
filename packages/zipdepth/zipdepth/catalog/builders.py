@@ -23,6 +23,9 @@ from zipdepth.catalog.targets import (
 )
 from zipdepth.data.transforms import AlbumentationsWrapper
 
+ARKIT_CONFIDENCE_HIGH: int = 2
+"""ARKit HIGH confidence; stood in when the confidence column is not fetched."""
+
 
 @runtime_checkable
 class SampleBuilder(Protocol):
@@ -36,7 +39,7 @@ class SampleBuilder(Protocol):
         frame_chw: UInt8[Tensor, "3 h w"],
         target_blob_u8: UInt8[ndarray, "target_n"],
         prompt_blob_u8: UInt8[ndarray, "prompt_n"],
-        confidence_u8: UInt8[ndarray, "confidence_n"],
+        confidence_u8: UInt8[ndarray, "confidence_n"] | None,
         quarter_turns: int,
         sample_seed: int,
     ) -> dict[str, Tensor] | None:
@@ -63,7 +66,7 @@ class CpuSampleBuilder:
         frame_chw: UInt8[Tensor, "3 h w"],
         target_blob_u8: UInt8[ndarray, "target_n"],
         prompt_blob_u8: UInt8[ndarray, "prompt_n"],
-        confidence_u8: UInt8[ndarray, "confidence_n"],
+        confidence_u8: UInt8[ndarray, "confidence_n"] | None,
         quarter_turns: int,
         sample_seed: int,
     ) -> dict[str, Tensor] | None:
@@ -78,9 +81,14 @@ class CpuSampleBuilder:
         if prompt_depth_mm_hw is None:
             prompt_depth_mm_hw = decode_depth_png(prompt_blob_u8)
             self.stats.png_fallbacks += 1
-        if confidence_u8.size != prompt_depth_mm_hw.size:
-            raise ValueError(f"prompt confidence has {confidence_u8.size} values for prompt shape {prompt_depth_mm_hw.shape}")
-        prompt_confidence_hw: UInt8[ndarray, "prompt_h prompt_w"] = confidence_u8.reshape(prompt_depth_mm_hw.shape)
+        if confidence_u8 is None:
+            # Confidence was not fetched: trust every prompt pixel and let the model's
+            # own 0.1-4 m range gate do the filtering.
+            prompt_confidence_hw: UInt8[ndarray, "prompt_h prompt_w"] = np.full(prompt_depth_mm_hw.shape, ARKIT_CONFIDENCE_HIGH, dtype=np.uint8)
+        else:
+            if confidence_u8.size != prompt_depth_mm_hw.size:
+                raise ValueError(f"prompt confidence has {confidence_u8.size} values for prompt shape {prompt_depth_mm_hw.shape}")
+            prompt_confidence_hw = confidence_u8.reshape(prompt_depth_mm_hw.shape)
         if self._min_depth_span > 0.0 and depth_span_ratio(depth_mm_hw) < self._min_depth_span:
             self.stats.blob_decode += perf_counter() - started
             self.stats.skipped_flat_frames += 1
@@ -150,7 +158,7 @@ class CudaSampleBuilder:
         frame_chw: UInt8[Tensor, "3 h w"],
         target_blob_u8: UInt8[ndarray, "target_n"],
         prompt_blob_u8: UInt8[ndarray, "prompt_n"],
-        confidence_u8: UInt8[ndarray, "confidence_n"],
+        confidence_u8: UInt8[ndarray, "confidence_n"] | None,
         quarter_turns: int,
         sample_seed: int,
     ) -> dict[str, Tensor] | None:
@@ -179,6 +187,10 @@ class CudaSampleBuilder:
             if prompt_depth_mm_hw is None:
                 prompt_depth_mm_hw = decode_depth_png(prompt_blob_u8)
                 self.stats.png_fallbacks += 1
+            if confidence_u8 is None:
+                # Confidence was not fetched: trust every prompt pixel and let the
+                # model's own 0.1-4 m range gate do the filtering.
+                confidence_u8 = np.full(prompt_depth_mm_hw.size, ARKIT_CONFIDENCE_HIGH, dtype=np.uint8)
             if confidence_u8.size != prompt_depth_mm_hw.size:
                 raise ValueError(f"prompt confidence has {confidence_u8.size} values for prompt shape {prompt_depth_mm_hw.shape}")
             prompt_depth_cuda_hw: Int32[Tensor, "prompt_h prompt_w"] = torch.from_numpy(prompt_depth_mm_hw).to(
