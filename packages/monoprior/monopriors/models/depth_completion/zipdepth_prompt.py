@@ -180,6 +180,10 @@ def load_zipdepth_prompt(checkpoint: Path) -> ZipDepthPrompt:
     checkpoint_data: dict[str, Any] = torch.load(checkpoint, map_location="cpu", weights_only=True)
     raw_state_dict: StateDict = checkpoint_data.get("model_state_dict", checkpoint_data)
     state_dict: StateDict = strip_state_dict_prefixes(raw_state_dict)
+    if any(key.startswith("backbone.") for key in state_dict):
+        prompted_model: ZipDepthPrompt = ZipDepthPrompt()
+        prompted_model.load_state_dict(state_dict, strict=True)
+        return prompted_model
     backbone: ZipDepth = create_model(variant="base")
     backbone.load_state_dict(state_dict, strict=True)
     return ZipDepthPrompt(backbone)

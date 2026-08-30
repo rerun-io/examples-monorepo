@@ -708,7 +708,7 @@ description = "Smoke: 2 catalog segments -> short fine-tune -> resume -> torchru
 [feature.zipdepth-catalog.tasks.zipdepth-eval-catalog]
 cmd = "python tools/eval_catalog.py"
 cwd = "packages/zipdepth"
-description = "Scale-shift-aligned AbsRel/delta1 vs PromptDA pseudo-labels on held-out catalog segments (released vs trained)"
+description = "Unaligned metric AbsRel/delta1/MAE vs held-out PromptDA labels, with separately named aligned diagnostics"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # wilor-nano
