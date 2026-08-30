@@ -59,6 +59,8 @@ class StereoCatalogConfig:
     """Rectified focal length as a multiple of the fisheye fx; below 1 keeps more of the wide FOV."""
     max_depth_m: float = 20.0
     """Depth beyond this is dropped."""
+    colormap_max_m: float = 6.0
+    """Upper end of the depth image's colour range (a viewer hint; indoor scenes are unreadable on a 0-20 m ramp)."""
     remove_flying_pixels: bool = True
     """Zero depth on depth edges so the backprojected cloud has no streaks."""
     depth_edge_threshold: float = 0.5
@@ -228,7 +230,7 @@ def main(config: StereoCatalogConfig) -> None:
     rect_pinhole: str = f"{RIG}/{config.left_cam}/rectified/pinhole"
     output_wh: tuple[int, int] = (round(rect.width * config.output_scale), round(rect.height * config.output_scale))
     K_out_33: Float64[np.ndarray, "3 3"] = scale_intrinsics(rect.K_rect_33, config.output_scale)
-    max_depth_mm: float = config.max_depth_m * 1000.0
+    colormap_max_mm: float = config.colormap_max_m * 1000.0
     cam_rect_R_rig, cam_rect_t_rig = rectified_rig_extrinsics(left_T_rig[:3, :3], left_T_rig[:3, 3], rect.R0_33)
     cam_rect_T_rig: Float64[np.ndarray, "4 4"] = np.eye(4)
     cam_rect_T_rig[:3, :3] = cam_rect_R_rig
@@ -258,7 +260,7 @@ def main(config: StereoCatalogConfig) -> None:
         rr.set_time(TIMELINE, duration=np.timedelta64(t_ns, "ns"))
         rr.log(RIG, rr.Transform3D(mat3x3=world_T_rig[:3, :3], translation=world_T_rig[:3, 3]))
         rr.log(f"{rect_pinhole}/image", rr.Image(left_rect).compress(jpeg_quality=85))
-        rr.log(f"{rect_pinhole}/depth", rr.EncodedDepthImage(blob=png.tobytes(), media_type="image/png", meter=1000.0, depth_range=(0.0, max_depth_mm)))
+        rr.log(f"{rect_pinhole}/depth", rr.EncodedDepthImage(blob=png.tobytes(), media_type="image/png", meter=1000.0, depth_range=(0.0, colormap_max_mm)))
         if fuser is not None:
             fuser.fuse_frames(np.ascontiguousarray(depth_mm_hw), K_out_33, cam_rect_T_rig @ np.linalg.inv(world_T_rig), np.ascontiguousarray(left_rect))
             if config.mesh_every and (i + 1) % config.mesh_every == 0:
