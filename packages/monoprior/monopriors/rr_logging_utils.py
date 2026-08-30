@@ -126,32 +126,32 @@ def log_relative_pred(
 
 
 def create_compare_depth_blueprint(
-    model_names: list[str],
+    display_labels: list[str],
 ) -> rrb.Blueprint:
-    # model_names: list[str] = [model.__class__.__name__ for model in models]
+    """Build a comparison layout from UI labels, not predictor selectors."""
     contents = [
-        rrb.Spatial3DView(origin=f"{model_names[0]}"),
+        rrb.Spatial3DView(origin=f"{display_labels[0]}"),
         rrb.Vertical(
             rrb.Spatial2DView(
-                origin=f"{model_names[0]}/camera/pinhole/image",
+                origin=f"{display_labels[0]}/camera/pinhole/image",
             ),
             rrb.Spatial2DView(
-                origin=f"{model_names[0]}/camera/pinhole/depth",
+                origin=f"{display_labels[0]}/camera/pinhole/depth",
             ),
             rrb.Spatial2DView(
-                origin=f"{model_names[0]}/camera/disparity",
+                origin=f"{display_labels[0]}/camera/disparity",
             ),
         ),
-        rrb.Spatial3DView(origin=f"{model_names[1]}"),
+        rrb.Spatial3DView(origin=f"{display_labels[1]}"),
         rrb.Vertical(
             rrb.Spatial2DView(
-                origin=f"{model_names[1]}/camera/pinhole/image",
+                origin=f"{display_labels[1]}/camera/pinhole/image",
             ),
             rrb.Spatial2DView(
-                origin=f"{model_names[1]}/camera/pinhole/depth",
+                origin=f"{display_labels[1]}/camera/pinhole/depth",
             ),
             rrb.Spatial2DView(
-                origin=f"{model_names[1]}/camera/disparity",
+                origin=f"{display_labels[1]}/camera/disparity",
             ),
         ),
     ]

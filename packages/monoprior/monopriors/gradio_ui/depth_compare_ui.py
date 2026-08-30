@@ -101,8 +101,15 @@ def on_submit(
     stream: rr.BinaryStream = rr.binary_stream()
     if rgb is None:
         raise gr.Error("Please provide an input image.")
-    model_names = [model_1_name, model_2_name]
-    blueprint = create_compare_depth_blueprint(model_names)
+    display_labels: list[str] = [model_1_name, model_2_name]
+    metric_configs: list[BaseMetricPredictorConfig] = []
+    if model_type == "Metric":
+        try:
+            metric_configs = [metric_predictor_defaults[name] for name in display_labels]
+        except KeyError as error:
+            raise gr.Error(f"{error.args[0]} is not a metric depth predictor.") from None
+
+    blueprint = create_compare_depth_blueprint(display_labels)
     rr.send_blueprint(blueprint)
 
     rr.log("/", rr.ViewCoordinates.RDF, static=True)
@@ -117,13 +124,11 @@ def on_submit(
         new_w: int = int(rgb.shape[1] * scale_factor)
         rgb = cv2.resize(rgb, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
 
-    for model_name in tqdm(model_names, desc="Loading Model and Predicting Depth"):
+    for model_index, model_name in enumerate(tqdm(display_labels, desc="Loading Model and Predicting Depth")):
         # get the name of the model
         parent_log_path = Path(f"{model_name}")
         if model_type == "Metric":
-            predictor_config: BaseMetricPredictorConfig | None = metric_predictor_defaults.get(model_name)
-            if predictor_config is None:
-                raise gr.Error(f"{model_name} is not a metric depth predictor.")
+            predictor_config: BaseMetricPredictorConfig = metric_configs[model_index]
             metric_pred: MetricDepthPrediction = predict_depth(predictor_config, "Metric", rgb)
             log_metric_pred(
                 parent_log_path=parent_log_path,
