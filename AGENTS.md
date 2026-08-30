@@ -68,6 +68,12 @@ packages/<name>/
   tests/
 ```
 
+## Adding a model
+
+Bringing an upstream research model in (fork + pixify, then a vendor → predictor → typed PR stack with
+Rerun pixel evidence) follows the repo skill `add-model` (`.agents/skills/add-model/SKILL.md`, also visible to
+Claude Code through `.claude/skills`). Both Codex and Claude Code load it when asked to "add/port <model>".
+
 ## Adding a new package
 
 1. Create `packages/<name>/` with `pyproject.toml`, the source module, `tools/`, and `tests/` (structure above).
