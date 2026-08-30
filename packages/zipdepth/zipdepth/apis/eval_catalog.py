@@ -292,6 +292,7 @@ def main(config: EvalCatalogConfig) -> Path:
         segment_diagnostic_abs_rel: list[float] = []
         segment_diagnostic_delta1: list[float] = []
         segment_diagnostic_mae: list[float] = []
+        skipped_frame_count: int = 0
         batch: dict[str, Tensor]
         for batch in loader:
             image_chw: UInt8[ndarray, "3 h w"] = batch["image"][0].numpy()
@@ -315,7 +316,12 @@ def main(config: EvalCatalogConfig) -> Path:
                     raise RuntimeError("relative predictor was not initialized")
                 relative_inverse_hw: Float32[ndarray, "h w"] = relative_predictor(rgb_hw3, None).disparity
                 if config.evaluation == "affine-reference":
-                    prediction_depth_hw = affine_reference_depth(relative_inverse_hw, prompt_depth_hw, prompt_valid_hw)
+                    try:
+                        prediction_depth_hw = affine_reference_depth(relative_inverse_hw, prompt_depth_hw, prompt_valid_hw)
+                    except ValueError as error:
+                        print(f"{segment_id}: skipping frame without a solvable LiDAR fit ({error})")
+                        skipped_frame_count += 1
+                        continue
                 else:
                     prediction_depth_hw = np.reciprocal(np.clip(relative_inverse_hw, 1.0e-6, None)).astype(np.float32)
 
@@ -334,12 +340,13 @@ def main(config: EvalCatalogConfig) -> Path:
             segment_diagnostic_mae.append(diagnostic.mae)
 
         if not segment_diagnostic_abs_rel:
-            print(f"{segment_id}: no frames")
+            print(f"{segment_id}: no scorable frames (skipped={skipped_frame_count})")
             continue
         frame_count: int = len(segment_diagnostic_abs_rel)
         segment_report: dict[str, float | int | str] = {
             "segment_id": segment_id,
             "frame_count": frame_count,
+            "skipped_frame_count": skipped_frame_count,
             "aligned_inverse_diagnostic_abs_rel": float(np.mean(segment_diagnostic_abs_rel)),
             "aligned_inverse_diagnostic_delta1": float(np.mean(segment_diagnostic_delta1)),
             "aligned_inverse_diagnostic_mae": float(np.mean(segment_diagnostic_mae)),
