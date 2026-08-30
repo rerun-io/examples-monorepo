@@ -3,7 +3,7 @@
 import json
 import subprocess
 from pathlib import Path
-from typing import TypeAlias, cast
+from typing import Any, TypeAlias, cast
 from unittest.mock import Mock
 
 import gradio as gr
@@ -12,6 +12,7 @@ import pytest
 import rerun as rr
 import rerun.experimental as rrx
 import torch
+from gradio_rerun import Rerun
 from gradio_rerun.events import SelectionChange
 from jaxtyping import Int64, UInt8
 from numpy import ndarray
@@ -208,3 +209,16 @@ def test_control_tab_shows_only_selected_panel() -> None:
     updates: tuple[gr.Column, gr.Column, gr.Column] = track_ui.show_control_tab("Config")
 
     assert [panel.visible for panel in updates] == [False, True, False]
+
+
+def test_scrub_handler_never_writes_to_the_viewer() -> None:
+    """time_update → on_time_update must not output to the viewer: every push makes the viewer echo stale time_updates."""
+    demo: gr.Blocks = track_ui.build_demo(track_ui.AppConfig())
+    viewer_id: int = next(block._id for block in demo.blocks.values() if isinstance(block, Rerun))
+    time_update_fns: list[Any] = [fn for fn in demo.fns.values() if any(t[1] == "time_update" for t in fn.targets)]
+    assert len(time_update_fns) == 2  # record_time (no outputs) + on_time_update
+    for fn in time_update_fns:
+        assert viewer_id not in {block._id for block in fn.outputs}
+        # always_last re-dispatches the *event* with a stale payload, which also reaches
+        # record_time: a click after moving the playhead then prompts the wrong frame.
+        assert fn.trigger_mode != "always_last"
