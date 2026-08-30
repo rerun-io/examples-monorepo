@@ -109,6 +109,41 @@ layer. `arkitscenes-download-serve` uses `ulimit -n 524288`; restart the server
 to inherit it. This is a capacity workaround—the upstream fix is open-on-demand
 files or an LRU descriptor pool.
 
+### The catalog server is in-memory and dies to `pkill -x rerun`
+
+`rerun server` keeps all registrations in memory: any exit — even a graceful
+SIGTERM — loses every dataset, and the whole corpus must be re-registered
+(`register_catalog.py` + `make_gt_subdataset.py` + the `frame_selection`/`promptda`
+layers; ~90 s warm, ~16 min cold). On 2026-08-29 it died three times in one
+evening because **another agent session** cleaned up its headless viewer with
+`pkill -x rerun`, which matches every process named `rerun` on the machine.
+
+Rules for every agent on a shared host:
+
+- **Never kill Rerun by name** (`pkill -x rerun`, `pkill rerun`, `killall rerun`,
+  `pkill -f rerun`). Kill your own viewer by pid, or with a pattern that includes
+  your port: `pkill -f "rerun --headless --port 9877"`.
+- Do not assume a Rerun process is yours because you started one. Check
+  `ss -ltnp | grep 51235` before touching anything named `rerun`.
+
+Short-term hack in place: the shared server on :51235 is launched through a
+symlink named `rerun-catalog` (`~/.local/bin/rerun-catalog` → `rerun_cli/rerun`),
+so its process name is not `rerun` and name-based kills miss it. This hides the
+symptom, not the cause — a session that kills by name is still wrong. The real
+fixes are (a) a persistent catalog store so a restart is not a rebuild, and
+(b) running the server under a supervisor (systemd --user) instead of a shell.
+
+A second, unrelated killer (2026-08-30 00:52): **`paseo.service` has
+`KillMode=control-group`**, and every agent session paseo hosts — plus every
+process those sessions spawn — lives in its cgroup. A paseo restart SIGTERMs all
+of it — and a restart is what systemd does when the kernel OOM-kills *any*
+process in that cgroup (on 2026-08-30 a leaking batch hit 142 GB RSS, got
+OOM-killed, paseo.service was marked `oom-kill` and restarted, and the catalog
+died as collateral). `setsid`/`nohup`/`disown` do not escape a cgroup.
+Long-lived servers and batches started from an agent session must be launched via
+`tmux new-session` (the tmux server lives in the user's SSH session scope, which
+survives paseo restarts; check with `cat /proc/<pid>/cgroup`) or `systemd-run --user`.
+
 ## Testing Rerun builds
 
 **One Rerun version repo-wide — Rust follows Python.** The PyPI `rerun-sdk` pin
