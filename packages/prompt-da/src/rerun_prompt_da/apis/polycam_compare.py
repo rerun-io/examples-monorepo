@@ -64,11 +64,15 @@ def create_compare_blueprint(parent_log_path: Path) -> rrb.Blueprint:
             rrb.Horizontal(
                 rrb.Spatial2DView(origin=str(pinhole_path / "rgb"), name="RGB (768x1024)"),
                 rrb.Spatial2DView(origin=str(pinhole_path / "lidar_prompt"), name="LiDAR prompt (192x256)"),
-                rrb.Spatial2DView(origin=str(pinhole_path / "abs_diff"), name="|teacher - student|"),
             ),
             rrb.Horizontal(
-                rrb.Spatial2DView(origin=str(pinhole_path / "teacher_depth"), name="PromptDA-large (teacher)"),
-                rrb.Spatial2DView(origin=str(pinhole_path / "student_depth"), name="ZipDepth-PromptDA (student)"),
+                rrb.Spatial2DView(origin=str(pinhole_path / "teacher_depth"), name="PromptDA-large (teacher, 340M)"),
+                rrb.Spatial2DView(origin=str(pinhole_path / "student_depth"), name="ZipDepth-PromptDA (student, 6.95M)"),
+                rrb.Spatial2DView(origin=str(pinhole_path / "bilinear_depth"), name="bilinear upsample (0 params)"),
+            ),
+            rrb.Horizontal(
+                rrb.Spatial2DView(origin=str(pinhole_path / "abs_diff"), name="|teacher - student|"),
+                rrb.Spatial2DView(origin=str(pinhole_path / "abs_diff_bilinear"), name="|teacher - bilinear|"),
             ),
         ),
         collapse_panels=True,
@@ -101,6 +105,7 @@ def polycam_compare(config: PolycamCompareConfig) -> None:
     teacher_seconds: float = 0.0
     student_seconds: float = 0.0
     abs_diff_sum: float = 0.0
+    bilinear_sum: float = 0.0
     abs_diff_count: int = 0
     wall_start: float = time.perf_counter()
 
@@ -149,7 +154,14 @@ def polycam_compare(config: PolycamCompareConfig) -> None:
         teacher_on_student_b1hw: Float32[Tensor, "b 1 sh sw"] = torch.nn.functional.interpolate(
             teacher_depth_bhw.unsqueeze(1), size=student_hw, mode="bilinear", align_corners=False
         )
+        # Zero-parameter control: bilinearly upsample the same raw prompt. Logged beside
+        # the student so the difference the network actually buys is visible, not asserted.
+        bilinear_b1hw: Float32[Tensor, "b 1 sh sw"] = torch.nn.functional.interpolate(
+            raw_prompt_bhw.unsqueeze(1), size=student_hw, mode="bilinear", align_corners=False
+        )
         abs_diff_b1hw: Float32[Tensor, "b 1 sh sw"] = (teacher_on_student_b1hw - student_depth_b1hw).abs()
+        abs_diff_bilinear_b1hw: Float32[Tensor, "b 1 sh sw"] = (teacher_on_student_b1hw - bilinear_b1hw).abs()
+        bilinear_sum += float(abs_diff_bilinear_b1hw.sum().item())
         abs_diff_sum += float(abs_diff_b1hw.sum().item())
         abs_diff_count += int(abs_diff_b1hw.numel())
 
@@ -160,6 +172,10 @@ def polycam_compare(config: PolycamCompareConfig) -> None:
             (student_depth_b1hw.squeeze(1) * 1000.0).clamp(0.0, 65535.0).to(torch.uint16).cpu().numpy()
         )
         diff_mm_bhw: UInt16[ndarray, "b sh sw"] = (abs_diff_b1hw.squeeze(1) * 1000.0).clamp(0.0, 65535.0).to(torch.uint16).cpu().numpy()
+        bilinear_mm_bhw: UInt16[ndarray, "b sh sw"] = (bilinear_b1hw.squeeze(1) * 1000.0).clamp(0.0, 65535.0).to(torch.uint16).cpu().numpy()
+        diff_bil_mm_bhw: UInt16[ndarray, "b sh sw"] = (
+            (abs_diff_bilinear_b1hw.squeeze(1) * 1000.0).clamp(0.0, 65535.0).to(torch.uint16).cpu().numpy()
+        )
         # The raw prompt is what the teacher sees; it is the model's only source
         # of metric scale, so log it at its native 192x256 beside the predictions.
         prompt_mm_bhw: UInt16[ndarray, "b 192 256"] = np.stack([data.original_depth_hw for data in batch])
@@ -178,8 +194,16 @@ def polycam_compare(config: PolycamCompareConfig) -> None:
             rr.log(str(pinhole_path / "teacher_depth"), rr.DepthImage(teacher_mm_bhw[frame_offset], meter=1000.0, colormap="Viridis"))
             rr.log(str(pinhole_path / "student_depth"), rr.DepthImage(student_mm_bhw[frame_offset], meter=1000.0, colormap="Viridis"))
             rr.log(
+                str(pinhole_path / "bilinear_depth"),
+                rr.DepthImage(bilinear_mm_bhw[frame_offset], meter=1000.0, colormap="Viridis"),
+            )
+            rr.log(
                 str(pinhole_path / "abs_diff"),
                 rr.DepthImage(diff_mm_bhw[frame_offset], meter=1000.0, colormap="Inferno", depth_range=(0.0, 250.0)),
+            )
+            rr.log(
+                str(pinhole_path / "abs_diff_bilinear"),
+                rr.DepthImage(diff_bil_mm_bhw[frame_offset], meter=1000.0, colormap="Inferno", depth_range=(0.0, 250.0)),
             )
 
     wall_seconds: float = time.perf_counter() - wall_start
@@ -188,7 +212,8 @@ def polycam_compare(config: PolycamCompareConfig) -> None:
     print(f"teacher (PromptDA-L)  {1000.0 * teacher_seconds / n_frames:.2f} ms/frame")
     print(f"student (ZipDepth-PDA){1000.0 * student_seconds / n_frames:.2f} ms/frame")
     print(f"speedup               {teacher_seconds / student_seconds:.1f}x")
-    print(f"mean |teacher-student| {1000.0 * mean_abs_diff_m:.1f} mm")
+    print(f"mean |teacher-student|  {1000.0 * mean_abs_diff_m:.1f} mm")
+    print(f"mean |teacher-bilinear| {1000.0 * bilinear_sum / abs_diff_count:.1f} mm  (zero-parameter control)")
     print(f"wall                  {wall_seconds:.1f} s")
 
 
