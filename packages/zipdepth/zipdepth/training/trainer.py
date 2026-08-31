@@ -59,6 +59,7 @@ class ZipDepthTrainer:
                 alpha_ssi: float = 1.0,
                 alpha_grad: float = 2.0,
                 target_mode: Literal['ssi', 'metric'] = 'ssi',
+                metric_gradient_weight: float = 0.5,
                 ):
         """
         Args:
@@ -84,6 +85,9 @@ class ZipDepthTrainer:
             alpha_ssi: Weight for SSI loss component
             alpha_grad: Weight for gradient loss component
             target_mode: Relative SSI or prompted metric training lane
+            metric_gradient_weight: Weight on the multi-scale gradient term in the metric
+                lane. Upstream ZipDepth's SSI lane uses 2.0; 0.5 leaves the term at ~9%
+                of the objective, which under-penalizes depth-discontinuity errors.
         """
         self.student = student.to(device)
         self.train_loader = train_loader
@@ -115,7 +119,7 @@ class ZipDepthTrainer:
 
         # Loss function initialization
         self.criterion = (
-            MetricDepthLoss(gradient_weight=0.5, grad_scales=4)
+            MetricDepthLoss(gradient_weight=metric_gradient_weight, grad_scales=4)
             if target_mode == 'metric'
             else ZipDepthLoss(alpha_ssi=alpha_ssi, alpha_grad=alpha_grad)
         ).to(device)

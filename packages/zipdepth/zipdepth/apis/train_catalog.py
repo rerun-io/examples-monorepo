@@ -69,6 +69,11 @@ class TrainCatalogConfig:
     """Minimum valid-depth p95/p5 ratio; zero disables flat-frame filtering."""
     from_scratch: bool = False
     """Start with random weights instead of the released ZipDepth-base weights."""
+    metric_gradient_weight: float = 0.5
+    """Weight on the multi-scale gradient term in the metric loss (L1 + w * grad).
+    At 0.5 the term supplies only ~9% of the objective; upstream ZipDepth weights its
+    equivalent term at 2.0. Raising it targets depth-discontinuity error, where the model
+    beats a bilinear prompt upsample by the smallest margin."""
     freeze_bn: bool = True
     """Pin BatchNorm to eval mode while fine-tuning: forwards use the released running
     stats instead of batch statistics, and the stats never drift toward the new data.
@@ -463,6 +468,7 @@ def main(
             alpha_ssi=float(loss_config.get("alpha_ssi", 1.0)),
             alpha_grad=float(loss_config.get("alpha_grad", 2.0)),
             target_mode=config.target_mode,
+            metric_gradient_weight=config.metric_gradient_weight,
         )
         if step_loss_callback is not None:
             trainer.criterion = cast(Any, _LossObserver(trainer.criterion, step_loss_callback))
