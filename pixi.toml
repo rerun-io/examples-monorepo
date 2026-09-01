@@ -69,14 +69,20 @@ platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 [feature.rerun-037.pypi-dependencies]
 rerun-sdk = { version = "==0.37.0rc2", extras = ["catalog"] }
 
-# Temporary lane until gradio-rerun ships 0.37; collapse back into rerun-037 then.
+# TEMPORARY 0.36.3 lane: gradio-rerun has no 0.37 release yet and hard-pins
+# rerun-sdk==0.36.3, so every Gradio-UI env rides this lane instead of rerun-037.
+# When gradio-rerun >= 0.37.0 ships (watch https://pypi.org/project/gradio-rerun/):
+#   1. bump gradio-rerun + rerun-sdk here to match rerun-037 (extras: catalog),
+#   2. swap "gradio-rerun-036" -> "rerun-037" in every env feature list below,
+#   3. delete this feature and re-lock (pixi install per touched env).
 [feature.gradio-rerun-036]
 platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 
 [feature.gradio-rerun-036.pypi-dependencies]
-rerun-sdk = { version = "==0.36.3", extras = ["datafusion"] }
-gradio = "==6.13.0"
-gradio-rerun = "==0.36.3"
+# pin-bump: hold — these three move together or not at all (partial bump = unsolvable).
+rerun-sdk = { version = "==0.36.3", extras = ["datafusion"] } # pin-bump: hold
+gradio = "==6.13.0"                                           # pin-bump: hold
+gradio-rerun = "==0.36.3"                                     # pin-bump: hold
 
 # ─── catalog common feature (Rerun catalog prerelease lane) ────────────────
 # Explicit platforms required — see AGENTS.md "Platforms & lockfile".
