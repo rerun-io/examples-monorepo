@@ -62,8 +62,10 @@ class Keypoints2dConfig:
     """Keep every ``frame_stride``-th sample inside the window."""
     batch_size: int = 32
     """Frames decoded and inferred per chunk."""
+    pose_model: Literal["sapiens", "rtmw-x"] = "sapiens"
+    """Top-down pose network: Sapiens2 (size via ``model_size``) or RTMW-x cocktail14."""
     model_size: Literal["0.4B", "0.8B", "1B"] = "1B"
-    """Sapiens2 checkpoint size."""
+    """Sapiens2 checkpoint size (ignored for ``rtmw-x``)."""
     pose_backend: PoseBackendName = "tensorrt"
     """Backend for the Sapiens2 pose network."""
     detector_backend: Literal["tensorrt", "onnxruntime"] = "tensorrt"
@@ -375,6 +377,7 @@ def log_keypoints_layer(per_camera: dict[str, CameraKeypoints], recording: rr.Re
 
 def main(config: Keypoints2dConfig) -> None:
     """Run Stage B over all exo cameras and (optionally) register the layer."""
+    from posekit.models.rtmpose import RtmPoseConfig
     from posekit.models.sapiens import SapiensPoseConfig
     from posekit.models.yolox import YoloxDetectorConfig
     from posekit.runtimes import TensorRtBackendConfig, TorchBackendConfig
@@ -394,7 +397,10 @@ def main(config: Keypoints2dConfig) -> None:
         "onnxruntime": OnnxBackendConfig(max_batch_size=config.batch_size),
         "torch": TorchBackendConfig(max_batch_size=config.batch_size),
     }[config.pose_backend]
-    pose = SapiensPoseConfig(model_size=config.model_size, backend=backend).setup()
+    if config.pose_model == "rtmw-x":
+        pose = RtmPoseConfig(variant="rtmw-x-coco133", backend=TensorRtBackendConfig(max_batch_size=config.batch_size)).setup()
+    else:
+        pose = SapiensPoseConfig(model_size=config.model_size, backend=backend).setup()
 
     per_camera: dict[str, CameraKeypoints] = {}
     for cam_idx, name in enumerate(streams.names):
