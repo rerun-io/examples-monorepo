@@ -67,22 +67,17 @@ simplecv = { path = "packages/simplecv", editable = true }
 platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 
 [feature.rerun-037.pypi-dependencies]
-rerun-sdk = { version = "==0.37.0rc2", extras = ["catalog"] }
+rerun-sdk = { version = "==0.37.0", extras = ["catalog"] }
 
-# TEMPORARY 0.36.3 lane: gradio-rerun has no 0.37 release yet and hard-pins
-# rerun-sdk==0.36.3, so every Gradio-UI env rides this lane instead of rerun-037.
-# When gradio-rerun >= 0.37.0 ships (watch https://pypi.org/project/gradio-rerun/):
-#   1. bump gradio-rerun + rerun-sdk here to match rerun-037 (extras: catalog),
-#   2. swap "gradio-rerun-036" -> "rerun-037" in every env feature list below,
-#   3. delete this feature and re-lock (pixi install per touched env).
-[feature.gradio-rerun-036]
+# Gradio UI add-on. gradio-rerun pins an exact rerun-sdk, so it must move in
+# lockstep with rerun-037 (AGENTS.md: bump gradio-rerun and rerun-sdk together).
+[feature.gradio-ui]
 platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
 
-[feature.gradio-rerun-036.pypi-dependencies]
-# pin-bump: hold — these three move together or not at all (partial bump = unsolvable).
-rerun-sdk = { version = "==0.36.3", extras = ["datafusion"] } # pin-bump: hold
-gradio = "==6.13.0"                                           # pin-bump: hold
-gradio-rerun = "==0.36.3"                                     # pin-bump: hold
+[feature.gradio-ui.pypi-dependencies]
+# pin-bump: hold — gradio-rerun's exact rerun-sdk pin must match [feature.rerun-037].
+gradio = "==6.13.0"          # pin-bump: hold
+gradio-rerun = "==0.37.0"    # pin-bump: hold
 
 # ─── catalog common feature (Rerun catalog prerelease lane) ────────────────
 # Explicit platforms required — see AGENTS.md "Platforms & lockfile".
@@ -116,7 +111,7 @@ simplecv = { path = "packages/simplecv", editable = true }
 platforms = ["linux-64", "linux-aarch64"]
 
 [feature.rerun-prerelease.pypi-dependencies]
-rerun-sdk = { version = "==0.37.0rc2", extras = [
+rerun-sdk = { version = "==0.37.0", extras = [
     "catalog",
     "dataloader",
 ] }
@@ -927,7 +922,7 @@ scipy = "*"
 [feature.mv-api-catalog-register-mac.pypi-dependencies]
 tyro = ">=0.9.1,<0.10"
 simplecv = { path = "packages/simplecv", editable = true }
-rerun-sdk = { version = "==0.37.0rc2", extras = ["catalog"] }
+rerun-sdk = { version = "==0.37.0", extras = ["catalog"] }
 
 [feature.mv-api-catalog-register-mac.pypi-options]
 index-url = "https://pypi.org/simple"
@@ -1766,7 +1761,7 @@ xorg-libxrandr = "*"
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
 lpips = ">=0.1.4,<1"
 plyfile = ">=1.1,<2"
-rerun-sdk = "==0.37.0rc2"
+rerun-sdk = "==0.37.0"
 simplecv = { path = "packages/simplecv", editable = true }
 
 [feature.gsplat-rust-renderer.activation.env]
@@ -2666,27 +2661,31 @@ simplecv-catalog-dev = { features = [
 ], solve-group = "simplecv-catalog", no-default-feature = true }
 monoprior = { features = [
     "common",
-    "gradio-rerun-036",
+    "rerun-037",
+    "gradio-ui",
     "cuda",
     "monoprior",
 ], solve-group = "monoprior", no-default-feature = true }
 monoprior-dev = { features = [
     "common",
-    "gradio-rerun-036",
+    "rerun-037",
+    "gradio-ui",
     "cuda",
     "monoprior",
     "dev",
 ], solve-group = "monoprior", no-default-feature = true }
 prompt-da = { features = [
     "common",
-    "gradio-rerun-036",
+    "rerun-037",
+    "gradio-ui",
     "cuda",
     "prompt-da",
     "prompt-da-demo",
 ], solve-group = "prompt-da", no-default-feature = true }
 prompt-da-dev = { features = [
     "common",
-    "gradio-rerun-036",
+    "rerun-037",
+    "gradio-ui",
     "cuda",
     "prompt-da",
     "dev",
@@ -2737,52 +2736,60 @@ zipdepth-catalog-dev = { features = [
 ], solve-group = "zipdepth-catalog", no-default-feature = true }
 wilor-nano = { features = [
     "common",
-    "gradio-rerun-036",
+    "rerun-037",
+    "gradio-ui",
     "cuda",
     "wilor-nano",
 ], solve-group = "wilor-nano", no-default-feature = true }
 wilor-nano-dev = { features = [
     "common",
-    "gradio-rerun-036",
+    "rerun-037",
+    "gradio-ui",
     "cuda",
     "wilor-nano",
     "dev",
 ], solve-group = "wilor-nano", no-default-feature = true }
 sam3d-body = { features = [
     "common",
-    "gradio-rerun-036",
+    "rerun-037",
+    "gradio-ui",
     "cuda",
     "sam3d-body",
 ], solve-group = "sam3d-body", no-default-feature = true }
 sam3d-body-dev = { features = [
     "common",
-    "gradio-rerun-036",
+    "rerun-037",
+    "gradio-ui",
     "cuda",
     "sam3d-body",
     "dev",
 ], solve-group = "sam3d-body", no-default-feature = true }
 sam3 = { features = [
     "common",
-    "gradio-rerun-036",
+    "rerun-037",
+    "gradio-ui",
     "cuda",
     "sam3",
 ], solve-group = "sam3", no-default-feature = true }
 sam3-dev = { features = [
     "common",
-    "gradio-rerun-036",
+    "rerun-037",
+    "gradio-ui",
     "cuda",
     "sam3",
     "dev",
 ], solve-group = "sam3", no-default-feature = true }
 sapiens2-pose = { features = [
     "common",
-    "gradio-rerun-036",
+    "rerun-037",
+    "gradio-ui",
     "cuda",
     "sapiens2-pose",
 ], solve-group = "sapiens2-pose", no-default-feature = true }
 sapiens2-pose-dev = { features = [
     "common",
-    "gradio-rerun-036",
+    "rerun-037",
+    "gradio-ui",
     "cuda",
     "sapiens2-pose",
     "dev",
@@ -2815,7 +2822,8 @@ trtkit-dev = { features = [
 ], solve-group = "trtkit", no-default-feature = true }
 pose-app = { features = [
     "common",
-    "gradio-rerun-036",
+    "rerun-037",
+    "gradio-ui",
     "cuda",
     "posekit",
     "mamma",
@@ -2823,7 +2831,8 @@ pose-app = { features = [
 ], solve-group = "pose-app", no-default-feature = true }
 pose-app-dev = { features = [
     "common",
-    "gradio-rerun-036",
+    "rerun-037",
+    "gradio-ui",
     "cuda",
     "posekit",
     "mamma",
@@ -2832,13 +2841,15 @@ pose-app-dev = { features = [
 ], solve-group = "pose-app", no-default-feature = true }
 posekit = { features = [
     "common",
-    "gradio-rerun-036",
+    "rerun-037",
+    "gradio-ui",
     "cuda",
     "posekit",
 ], solve-group = "posekit", no-default-feature = true }
 posekit-dev = { features = [
     "common",
-    "gradio-rerun-036",
+    "rerun-037",
+    "gradio-ui",
     "cuda",
     "posekit",
     "dev",
@@ -2857,26 +2868,30 @@ robocap-slam-dev = { features = [
 # pysfm runs on the conda CPU pycolmap build — see the feature.pysfm note.
 pysfm = { features = [
     "common",
-    "gradio-rerun-036",
+    "rerun-037",
+    "gradio-ui",
     "cuda",
     "pysfm",
 ], solve-group = "pysfm", no-default-feature = true }
 pysfm-dev = { features = [
     "common",
-    "gradio-rerun-036",
+    "rerun-037",
+    "gradio-ui",
     "cuda",
     "pysfm",
     "dev",
 ], solve-group = "pysfm", no-default-feature = true }
 vistadream = { features = [
     "common",
-    "gradio-rerun-036",
+    "rerun-037",
+    "gradio-ui",
     "cuda",
     "vistadream",
 ], solve-group = "vistadream", no-default-feature = true }
 vistadream-dev = { features = [
     "common",
-    "gradio-rerun-036",
+    "rerun-037",
+    "gradio-ui",
     "cuda",
     "vistadream",
     "dev",
@@ -2907,14 +2922,16 @@ live-rerun-dev = { features = [
 ], solve-group = "live-rerun", no-default-feature = true }
 egoexo-forge = { features = [
     "common",
-    "gradio-rerun-036",
+    "rerun-037",
+    "gradio-ui",
     "cuda",
     "egoexo-forge",
     "egoexo-forge-demo",
 ], solve-group = "egoexo-forge", no-default-feature = true }
 egoexo-forge-dev = { features = [
     "common",
-    "gradio-rerun-036",
+    "rerun-037",
+    "gradio-ui",
     "cuda",
     "egoexo-forge",
     "dev",
@@ -2952,13 +2969,15 @@ mv-api-catalog-register-mac = { features = [
 ], solve-group = "mv-api-catalog-register-mac", no-default-feature = true }
 mast3r-slam = { features = [
     "common",
-    "gradio-rerun-036",
+    "rerun-037",
+    "gradio-ui",
     "cuda",
     "mast3r-slam",
 ], solve-group = "mast3r-slam", no-default-feature = true }
 mast3r-slam-dev = { features = [
     "common",
-    "gradio-rerun-036",
+    "rerun-037",
+    "gradio-ui",
     "cuda",
     "mast3r-slam",
     "dev",
@@ -2983,13 +3002,15 @@ dataforge-dev = { features = [
 ], solve-group = "dataforge", no-default-feature = true }
 dpvo = { features = [
     "common",
-    "gradio-rerun-036",
+    "rerun-037",
+    "gradio-ui",
     "cuda",
     "dpvo",
 ], solve-group = "dpvo", no-default-feature = true }
 dpvo-dev = { features = [
     "common",
-    "gradio-rerun-036",
+    "rerun-037",
+    "gradio-ui",
     "cuda",
     "dpvo",
     "dev",

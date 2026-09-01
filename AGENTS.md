@@ -154,10 +154,9 @@ silently loses protocol/tooling parity. To bump: Python first, then the Rust pin
 
 The primary workspace lane runs **`rerun-sdk == 0.37.0rc2`** with the `catalog`
 extra. Catalog/stream environments add the `dataloader` extra through
-`rerun-prerelease`. Gradio UI environments temporarily compose
-`gradio-rerun-036`, which pins **`rerun-sdk == 0.36.3`**, `gradio == 6.13.0`, and
-`gradio-rerun == 0.36.3`; collapse that lane into `rerun-037` once gradio-rerun
-ships 0.37. A solve group must not mix the two Rerun lanes.
+`rerun-prerelease`. Gradio UI environments compose `rerun-037` plus the
+`gradio-ui` add-on feature (`gradio`, `gradio-rerun`); gradio-rerun pins an exact
+`rerun-sdk`, so bump it and `[feature.rerun-037]` together, never separately.
 
 To test an **unreleased** Rerun build, add a `find-links` at
 `build.rerun.io/commit/<sha>/wheels/` to `[feature.rerun-prerelease.pypi-options]` (CI builds one
