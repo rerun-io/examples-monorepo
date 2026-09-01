@@ -132,7 +132,7 @@ class ExoVideoStreams:
 
     def frame_rgb_hw3(self, cam_idx: int, sample_idx: int) -> ndarray:
         """Decode one frame to a uint8 RGB HWC numpy array."""
-        frame_chw: torch.Tensor = self.decoders[cam_idx][sample_idx]
+        frame_chw: torch.Tensor = self.decoders[cam_idx][sample_idx]  # pyrefly: ignore[bad-index]  # TorchCodec accepts Python int indices.
         return frame_chw.permute(1, 2, 0).contiguous().cpu().numpy()
 
 

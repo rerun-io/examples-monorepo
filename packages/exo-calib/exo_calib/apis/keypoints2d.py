@@ -54,6 +54,9 @@ class Keypoints2dConfig:
     """Sapiens2 checkpoint size."""
     pose_backend: PoseBackendName = "tensorrt"
     """Backend for the Sapiens2 pose network."""
+    detector_backend: Literal["tensorrt", "onnxruntime"] = "tensorrt"
+    """Backend for the YOLOX detector. onnxruntime-gpu lacks sm_121 kernels on the
+    GB10 (cudaErrorNoKernelImageForDevice), so TensorRT is the default."""
     detection_score_thr: float = 0.5
     """Minimum YOLOX person score."""
     output_dir: Path = Path("data/outputs")
@@ -228,7 +231,11 @@ def main(config: Keypoints2dConfig) -> None:
     segment_id: str = config.segment_id or only_segment_id(dataset)
     streams: ExoVideoStreams = open_exo_streams(dataset, segment_id)
 
-    detector = YoloxDetectorConfig(score_thr=config.detection_score_thr).setup()
+    detector_backend = {
+        "tensorrt": TensorRtBackendConfig(max_batch_size=config.batch_size),
+        "onnxruntime": OnnxBackendConfig(max_batch_size=config.batch_size),
+    }[config.detector_backend]
+    detector = YoloxDetectorConfig(score_thr=config.detection_score_thr, backend=detector_backend).setup()
     backend = {
         "tensorrt": TensorRtBackendConfig(max_batch_size=config.batch_size),
         "onnxruntime": OnnxBackendConfig(max_batch_size=config.batch_size),

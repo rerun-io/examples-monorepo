@@ -111,7 +111,6 @@ def postprocess_confidences(cam: CameraKeypoints, median_window: int, margin_px:
 def main(config: RefineConfig) -> None:
     """Run correspondence building, robust triangulation, staged BA, and layer logging."""
     from exo_calib.ba import mean_reprojection_error_px, refine_extrinsics
-    from exo_calib.confidence import kineo_point_confidence
     from exo_calib.correspondences import build_observations
     from exo_calib.triangulation import triangulate_robust
 
