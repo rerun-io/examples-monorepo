@@ -26,18 +26,26 @@ class BlueprintConfig:
 
 
 def main(config: BlueprintConfig) -> None:
-    """Write a world + per-camera-grid blueprint bound to the dataset's current id."""
+    """Recreate the exoego viewer layout, bound to the dataset's current id.
+
+    Mirrors the exo-only branch of ``simplecv.apis.view_exoego.create_container``
+    (the base rrd's own blueprint, which the catalog does not serve): a 3D view
+    over a strip of tabbed per-camera 2D panes. Not imported from simplecv
+    because that module pulls in dataset configs with deps outside this env.
+    """
     dataset = connect_dataset(config.catalog_url, config.dataset_name)
-    cam_views: list[rrb.Spatial2DView] = [
-        rrb.Spatial2DView(origin=f"/world/{name}/pinhole", name=name.split("/")[0]) for name in EXO_CAMERA_NAMES
-    ]
-    blueprint = rrb.Blueprint(
-        rrb.Horizontal(
-            rrb.Spatial3DView(origin="/world", name="world"),
-            rrb.Grid(*cam_views, grid_columns=4),
-            column_shares=[1.0, 2.0],
-        )
+    exo_tabs: list[rrb.Tabs] = [rrb.Tabs(rrb.Spatial2DView(origin=f"/world/{name}/pinhole", name=name)) for name in EXO_CAMERA_NAMES]
+    container: rrb.Vertical = rrb.Vertical(
+        rrb.Spatial3DView(
+            origin="/",
+            name="3D View",
+            contents="/**",
+            spatial_information=rrb.SpatialInformation.from_fields(show_axes=True),
+        ),
+        rrb.Horizontal(contents=exo_tabs),
+        row_shares=[4, 1],
     )
+    blueprint: rrb.Blueprint = rrb.Blueprint(rrb.Horizontal(contents=[container], column_shares=[4, 1]), collapse_panels=True)
     config.output.parent.mkdir(parents=True, exist_ok=True)
     blueprint.save(str(dataset.id), str(config.output))
     print(f"wrote {config.output} for application id {dataset.id}")
