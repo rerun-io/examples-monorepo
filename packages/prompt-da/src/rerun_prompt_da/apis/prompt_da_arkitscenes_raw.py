@@ -50,13 +50,13 @@ from rerun_prompt_da.apis.arkitscenes_shared import (
     NATIVE_FPS,
     connect_catalog,
     filter_depth_for_fusion,
-    log_fused_mesh,
     run_promptda_batch,
     segments_to_process,
     stride_for,
     world_t_cam_from_pose,
 )
 from rerun_prompt_da.apis.prompt_da_trt_polycam import network_image_hw
+from rerun_prompt_da.mesh_logging import log_fused_mesh
 from rerun_prompt_da.trt_predictor import PromptDATrtPredictor
 
 PROMPTDA_RAW_LAYER = "promptda_raw"

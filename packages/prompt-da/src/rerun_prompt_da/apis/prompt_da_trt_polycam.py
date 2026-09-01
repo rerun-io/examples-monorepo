@@ -15,7 +15,6 @@ import numpy as np
 import rerun as rr
 import torch
 from jaxtyping import Float32, UInt8, UInt16
-from monopriors.models.depth_completion.prompt_da import ensure_multiple_of
 from numpy import ndarray
 from simplecv.data.polycam import (
     DepthConfidenceLevel,
@@ -29,7 +28,7 @@ from torch import Tensor
 from tqdm import tqdm
 
 from rerun_prompt_da.apis.prompt_da_polycam import _log_mesh, create_blueprint, filter_depth, log_polycam_data
-from rerun_prompt_da.trt_predictor import PromptDATrtPredictor
+from rerun_prompt_da.trt_predictor import PromptDATrtPredictor, network_image_hw
 
 
 @dataclass
@@ -52,22 +51,6 @@ class PDATrtPolycamConfig:
     """Log the fused mesh after every batch instead of only at the end."""
 
 
-def network_image_hw(capture_hw: tuple[int, int], max_image_size: int) -> tuple[int, int]:
-    """14-align the capture resolution scaled to fit ``max_image_size``.
-
-    Mirrors the torch predictor's preprocessing policy so both backends run
-    the network at the same resolution.
-
-    Args:
-        capture_hw: Native capture (height, width).
-        max_image_size: Longest allowed network side.
-
-    Returns:
-        Network (height, width), each a multiple of 14.
-    """
-    height, width = capture_hw
-    scale: float = min(1.0, max_image_size / max(height, width))
-    return (ensure_multiple_of(height * scale), ensure_multiple_of(width * scale))
 
 
 def pda_trt_polycam_inference(config: PDATrtPolycamConfig) -> None:
@@ -89,11 +72,7 @@ def pda_trt_polycam_inference(config: PDATrtPolycamConfig) -> None:
     if first_batch is None:
         raise ValueError(f"Polycam capture {config.polycam_zip_path} contains no frames.")
     image_hw: tuple[int, int] = network_image_hw(first_batch[0].rgb_hw3.shape[:2], config.max_image_size)
-    predictor = PromptDATrtPredictor(
-        model_type="large",
-        image_hw=image_hw,
-        batch_size=config.batch_size,
-    )
+    predictor = PromptDATrtPredictor(model_type="large", image_hw=image_hw, batch_size=config.batch_size)
 
     n_frames: int = 0
     model_seconds: float = 0.0

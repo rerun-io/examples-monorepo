@@ -15,6 +15,7 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange
 from jaxtyping import Float32, UInt8
+from monopriors.models.depth_completion.prompt_da import ensure_multiple_of
 from torch import Tensor
 
 from rerun_prompt_da.trt_engine import (
@@ -24,6 +25,24 @@ from rerun_prompt_da.trt_engine import (
     ensure_engine,
     export_promptda_onnx,
 )
+
+
+def network_image_hw(capture_hw: tuple[int, int], max_image_size: int) -> tuple[int, int]:
+    """14-align the capture resolution scaled to fit ``max_image_size``.
+
+    Lives beside ``preprocess_batch`` because it is the other half of the same
+    resolution policy: the size this returns is what the predictor resizes to.
+
+    Args:
+        capture_hw: Native capture (height, width).
+        max_image_size: Longest allowed network side.
+
+    Returns:
+        Network (height, width), each a multiple of 14.
+    """
+    height, width = capture_hw
+    scale: float = min(1.0, max_image_size / max(height, width))
+    return (ensure_multiple_of(height * scale), ensure_multiple_of(width * scale))
 
 
 def preprocess_batch(

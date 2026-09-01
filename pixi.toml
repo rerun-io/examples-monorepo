@@ -577,6 +577,12 @@ depends-on = ["_prompt-da-download-polycam-example"]
 cwd = "packages/prompt-da"
 description = "Compare PromptDA-large against a trained ZipDepth-PromptDA checkpoint on the example Polycam capture"
 
+[feature.prompt-da-demo.tasks.prompt-da-polycam-trio]
+cmd = "python tools/polycam_trio.py --polycam-zip-path data/6G-room-example.zip"
+depends-on = ["_prompt-da-download-polycam-example"]
+cwd = "packages/prompt-da"
+description = "Three-way Polycam comparison: raw ARKit LiDAR vs PromptDA-large vs ZipDepth-PromptDA, with a fused mesh each"
+
 [feature.prompt-da-demo.tasks.prompt-da-app]
 cmd = "python tools/gradio_app.py"
 depends-on = ["_prompt-da-download-polycam-example"]

@@ -5,8 +5,6 @@ from typing import Any
 
 import cv2
 import numpy as np
-import open3d as o3d
-import rerun as rr
 import torch
 from arkitscenes_download.ingest.depth import ArkitDepthConfidence
 from beartype.roar import BeartypeException
@@ -150,21 +148,3 @@ def run_promptda_batch(
     return depth_mm_bhw, depth_model_mm_bhw
 
 
-def log_fused_mesh(recording: rr.RecordingStream, entity_path: str, mesh: o3d.geometry.TriangleMesh) -> None:
-    """Log a fused TSDF mesh statically.
-
-    Same see-through treatment as the ARKit mesh: cull back-facing walls so the
-    3D view looks into the room from outside.
-    """
-    rr.log(
-        entity_path,
-        rr.Mesh3D(
-            vertex_positions=np.asarray(mesh.vertices),
-            triangle_indices=np.asarray(mesh.triangles),
-            vertex_normals=np.asarray(mesh.vertex_normals),
-            vertex_colors=np.asarray(mesh.vertex_colors),
-            face_rendering=rr.components.MeshFaceRendering.Front,
-        ),
-        static=True,
-        recording=recording,
-    )
