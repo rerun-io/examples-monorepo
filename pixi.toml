@@ -1241,14 +1241,6 @@ platforms = ["linux-64", "linux-aarch64"]
 [feature.pysfm.dependencies]
 python = "3.12.*"
 tyro = ">=0.9.1,<0.10"
-# No CUDA-13 pycolmap on conda-forge yet: its cuda* builds pin cuda-version <13
-# (hard conflict), and the PyPI wheel core-dumps in feature extraction. The
-# conda cpu_* build links the env's own libs and passes all tests — the only
-# cost is GPU SIFT. Switch back to build = "cuda*" once the conda-forge cuda130
-# migration reaches colmap/pycolmap (or build them in ai-demos if GPU SIFT is
-# needed sooner).
-pycolmap = { version = "4.1.*", build = "cpu*" }
-
 [feature.pysfm.pypi-dependencies]
 pysfm = { path = "packages/pysfm", editable = true }
 
@@ -1334,6 +1326,18 @@ description = "Train a first 5k-step Brush splat from the kitchen train 0100 rig
 
 [feature.pysfm.target.linux-64.dependencies]
 brush = "==0.3.0"
+# No CUDA-13 pycolmap on conda-forge yet: its cuda* builds pin cuda-version <13
+# (hard conflict), and the PyPI wheel core-dumps in feature extraction. The
+# conda cpu_* build links the env's own libs and passes all tests — the only
+# cost is GPU SIFT. The pin is platform-split: on linux-64, ai-demos ships a
+# custom libfaiss 1.10 whose strict channel priority hides conda-forge's
+# libfaiss 1.14, so colmap stays at 4.0.*; on linux-aarch64 ai-demos has no
+# libfaiss and colmap 4.1.* links conda-forge's libfaiss 1.14 cuda130 cleanly
+# (4.0.* there needs cudatoolkit<12 faiss builds — hard conflict with CUDA 13).
+pycolmap = { version = "4.0.*", build = "cpu*" }
+
+[feature.pysfm.target.linux-aarch64.dependencies]
+pycolmap = { version = "4.1.*", build = "cpu*" }
 
 # ═══════════════════════════════════════════════════════════════════════════
 # exo-calib — Assembly101 exo-camera calibration refinement (Kineo-style
@@ -1349,6 +1353,12 @@ python = "3.12.*"
 tyro = ">=0.9.1,<0.10"
 open3d = ">=0.19.0,<0.20"
 torchcodec = "*"
+
+# pycolmap pin is platform-split — see the rationale on [feature.pysfm.target.*].
+[feature.exo-calib.target.linux-64.dependencies]
+pycolmap = { version = "4.0.*", build = "cpu*" }
+
+[feature.exo-calib.target.linux-aarch64.dependencies]
 pycolmap = { version = "4.1.*", build = "cpu*" }
 
 [feature.exo-calib.pypi-dependencies]
