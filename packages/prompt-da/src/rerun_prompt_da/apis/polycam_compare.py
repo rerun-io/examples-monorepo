@@ -1,19 +1,14 @@
 """Side-by-side PromptDA teacher vs ZipDepth-PromptDA student on a Polycam capture.
 
-Runs both depth models over the same frames with the same LiDAR prompt and logs
+Runs both depth models over the same frames and logs
 RGB, both predictions, and their absolute difference to Rerun for visual
 inspection. The student is the distilled 6.14 M-parameter model; the teacher is
 the 340 M-parameter PromptDA-large TensorRT engine that produced its training
 labels.
-
-Both models receive the same raw LiDAR prompt -- distillation is only meaningful
-when student and teacher see identical input. RGB resizing mirrors the training
-transform (``cv2.INTER_LINEAR``).
 """
 
 import time
 from dataclasses import dataclass, field, replace
-from itertools import batched, chain
 from pathlib import Path
 
 import numpy as np
@@ -29,8 +24,9 @@ from simplecv.data.polycam import PolycamData, PolycamDataset, load_polycam_data
 from simplecv.ops.depth import quantize_depth_m_to_mm
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
-from tqdm import tqdm
 from trtkit import TensorRtBackendConfig, TorchBackendConfig
+
+from rerun_prompt_da.polycam_batching import prepare_polycam_batches, stack_polycam_batch
 
 
 @dataclass
@@ -103,17 +99,18 @@ def polycam_compare(config: PolycamCompareConfig) -> None:
 
     polycam_dataset: PolycamDataset = load_polycam_data(polycam_zip_or_directory_path=config.polycam_zip_path)
 
-    batches = batched(polycam_dataset, config.batch_size)
-    first_batch: tuple[PolycamData, ...] | None = next(batches, None)
-    if first_batch is None:
-        raise ValueError(f"Polycam capture {config.polycam_zip_path} contains no frames.")
+    batch_plan = prepare_polycam_batches(
+        polycam_dataset,
+        batch_size=config.batch_size,
+        max_frames=config.max_frames,
+        capture_path=config.polycam_zip_path,
+        description="Comparing",
+    )
+    first_batch: tuple[PolycamData, ...] = batch_plan.first_batch
 
     comparison_hw: tuple[int, int] = first_batch[0].rgb_hw3.shape[:2]
     teacher: BaseCompletionPredictor = config.teacher.setup()
     student: BaseCompletionPredictor = student_config.setup()
-
-    frame_budget: int = config.max_frames if config.max_frames is not None else len(polycam_dataset)
-    total_batches: int = -(-min(frame_budget, len(polycam_dataset)) // config.batch_size)
 
     n_frames: int = 0
     teacher_seconds: float = 0.0
@@ -123,22 +120,14 @@ def polycam_compare(config: PolycamCompareConfig) -> None:
     abs_diff_count: int = 0
     wall_start: float = time.perf_counter()
 
-    progress = tqdm(chain([first_batch], batches), desc="Comparing", total=total_batches)
     batch: tuple[PolycamData, ...]
-    for batch in progress:
-        if n_frames >= frame_budget:
-            break
+    for batch in batch_plan:
         batch_start: int = n_frames
         n_frames += len(batch)
 
-        # Both models get the same RAW prompt. Distillation only makes sense when
-        # student and teacher see identical input, and PromptDA normalizes by the
-        # prompt's own min/max with no mask -- zeroed holes would drag its minimum
-        # to 0 and corrupt the teacher.
-        raw_prompt_bhw: Float32[Tensor, "b 192 256"] = torch.from_numpy(
-            np.stack([data.original_depth_hw for data in batch]).astype(np.float32) / 1000.0
-        ).cuda()
-        rgb_bhw3: UInt8[Tensor, "b h w 3"] = torch.from_numpy(np.stack([data.rgb_hw3 for data in batch])).cuda()
+        tensor_batch = stack_polycam_batch(batch)
+        raw_prompt_bhw: Float32[Tensor, "b 192 256"] = tensor_batch.prompt_bhw
+        rgb_bhw3: UInt8[Tensor, "b h w 3"] = tensor_batch.rgb_bhw3
 
         torch.cuda.synchronize()
         teacher_start: float = time.perf_counter()
@@ -154,7 +143,7 @@ def polycam_compare(config: PolycamCompareConfig) -> None:
 
         teacher_on_student_b1hw: Float32[Tensor, "b 1 h w"] = teacher_depth_bhw.unsqueeze(1)
         student_depth_b1hw: Float32[Tensor, "b 1 h w"] = student_depth_bhw.unsqueeze(1)
-        # Zero-parameter control: bilinearly upsample the same raw prompt. Logged beside
+        # Zero-parameter control: bilinearly upsample the sensor input. Logged beside
         # the student so the difference the network actually buys is visible, not asserted.
         bilinear_b1hw: Float32[Tensor, "b 1 h w"] = torch.nn.functional.interpolate(
             raw_prompt_bhw.unsqueeze(1), size=comparison_hw, mode="bilinear", align_corners=False
@@ -170,8 +159,7 @@ def polycam_compare(config: PolycamCompareConfig) -> None:
         diff_mm_bhw: UInt16[ndarray, "b h w"] = quantize_depth_m_to_mm(abs_diff_b1hw.squeeze(1)).cpu().numpy()
         bilinear_mm_bhw: UInt16[ndarray, "b h w"] = quantize_depth_m_to_mm(bilinear_b1hw.squeeze(1)).cpu().numpy()
         diff_bil_mm_bhw: UInt16[ndarray, "b h w"] = quantize_depth_m_to_mm(abs_diff_bilinear_b1hw.squeeze(1)).cpu().numpy()
-        # The raw prompt is what the teacher sees; it is the model's only source
-        # of metric scale, so log it at its native 192x256 beside the predictions.
+        # Log the metric-scale sensor input at its native 192x256 beside the predictions.
         prompt_mm_bhw: UInt16[ndarray, "b 192 256"] = np.stack([data.original_depth_hw for data in batch])
 
         frame_offset: int

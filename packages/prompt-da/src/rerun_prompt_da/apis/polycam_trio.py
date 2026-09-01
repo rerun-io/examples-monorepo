@@ -1,6 +1,6 @@
 """Three-way Polycam comparison: raw ARKit LiDAR, PromptDA-large, and ZipDepth-PromptDA.
 
-Runs both depth models over the same frames with the same raw prompt and fuses
+Runs both depth models over the same frames and fuses
 each depth source into its own TSDF volume, so the three reconstructions can be
 compared as geometry rather than only as depth images. Accumulated depth error
 shows up in a mesh in ways a per-frame depth view hides.
@@ -11,7 +11,6 @@ phone gives you for free, and the thing both models have to beat.
 
 import time
 from dataclasses import dataclass, field, replace
-from itertools import batched, chain
 from pathlib import Path
 
 import cv2
@@ -30,10 +29,10 @@ from simplecv.ops.depth import quantize_depth_m_to_mm
 from simplecv.ops.tsdf_depth_fuser import Open3DFuser
 from simplecv.rerun_log_utils import RerunTyroConfig, log_fused_mesh, log_pinhole
 from torch import Tensor
-from tqdm import tqdm
 from trtkit import TensorRtBackendConfig, TorchBackendConfig
 
 from rerun_prompt_da.apis.prompt_da_polycam import filter_depth
+from rerun_prompt_da.polycam_batching import prepare_polycam_batches, stack_polycam_batch
 
 SOURCES: tuple[str, str, str] = ("arkit", "promptda", "zipdepth")
 """Depth sources compared, in increasing order of expected quality."""
@@ -184,10 +183,14 @@ def polycam_trio(config: PolycamTrioConfig) -> None:
         for source in SOURCES
     }
 
-    batches = batched(dataset, config.batch_size)
-    first_batch: tuple[PolycamData, ...] | None = next(batches, None)
-    if first_batch is None:
-        raise ValueError(f"Polycam capture {config.polycam_zip_path} contains no frames.")
+    batch_plan = prepare_polycam_batches(
+        dataset,
+        batch_size=config.batch_size,
+        max_frames=config.max_frames,
+        capture_path=config.polycam_zip_path,
+        description="Trio",
+    )
+    first_batch: tuple[PolycamData, ...] = batch_plan.first_batch
 
     # The raw LiDAR is a fixed 192x256 per PolycamData; one static scale transform maps
     # its 2D frame onto the full-res image (the posekit SAM2-mask pattern, track_ui.py).
@@ -205,25 +208,18 @@ def polycam_trio(config: PolycamTrioConfig) -> None:
     teacher_label: str = type(config.teacher).__name__
     student_label: str = type(student_config).__name__
 
-    frame_budget: int = config.max_frames if config.max_frames is not None else len(dataset)
     n_frames: int = 0
     seconds: dict[str, float] = {"promptda": 0.0, "zipdepth": 0.0}
     wall_start: float = time.perf_counter()
 
-    progress = tqdm(chain([first_batch], batches), desc="Trio", total=-(-min(frame_budget, len(dataset)) // config.batch_size))
     batch: tuple[PolycamData, ...]
-    for batch in progress:
-        if n_frames >= frame_budget:
-            break
+    for batch in batch_plan:
         batch_start: int = n_frames
         n_frames += len(batch)
 
-        # Both models see the same RAW prompt: PromptDA normalizes by its own min/max
-        # with no mask, and the student was trained on the raw prompt to match.
-        prompt_bhw: Float32[Tensor, "b 192 256"] = torch.from_numpy(
-            np.stack([data.original_depth_hw for data in batch]).astype(np.float32) / 1000.0
-        ).cuda()
-        rgb_bhw3: UInt8[Tensor, "b h w 3"] = torch.from_numpy(np.stack([data.rgb_hw3 for data in batch])).cuda()
+        tensor_batch = stack_polycam_batch(batch)
+        prompt_bhw: Float32[Tensor, "b 192 256"] = tensor_batch.prompt_bhw
+        rgb_bhw3: UInt8[Tensor, "b h w 3"] = tensor_batch.rgb_bhw3
 
         torch.cuda.synchronize()
         started: float = time.perf_counter()

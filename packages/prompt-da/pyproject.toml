@@ -28,6 +28,7 @@ sort_by_size = true
 min_confidence = 60
 # _engine: held only to keep the TRT engine alive for its execution context.
 # _sample_index: populated by the synthetic RerunIterableDataset test fixture.
+# cameras_path: populated by the synthetic PolycamDataset batching fixture.
 # forward: called by torch.nn.Module.__call__.
 # video/depth/conf/k/pose_t/pose_q: PromptDARow TypedDict fields, read via subscript.
-ignore_names = ["rr_config", "_engine", "_sample_index", "forward", "video", "depth", "conf", "k", "pose_t", "pose_q"]
+ignore_names = ["rr_config", "_engine", "_sample_index", "cameras_path", "forward", "video", "depth", "conf", "k", "pose_t", "pose_q"]
