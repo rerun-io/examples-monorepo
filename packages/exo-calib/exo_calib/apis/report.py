@@ -1,0 +1,98 @@
+"""Stage E: score init and refined cameras against the dataset ground truth.
+
+GT enters here and nowhere else. Both variants are aligned to the GT rig with
+SE(3) (primary — tests the metric claim) and Sim(3) (secondary — isolates the
+scale error), then per-camera rotation/translation errors and focal errors are
+reported and written to ``eval.json``.
+"""
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+from jaxtyping import Float64
+from numpy import ndarray
+
+from exo_calib.apis.calibrate_init import InitCameras
+from exo_calib.catalog_io import (
+    DEFAULT_CATALOG_URL,
+    DEFAULT_DATASET_NAME,
+    GtCameras,
+    connect_dataset,
+    only_segment_id,
+    read_gt_cameras,
+)
+
+
+@dataclass
+class ReportConfig:
+    """Config for the evaluation report tool."""
+
+    catalog_url: str = DEFAULT_CATALOG_URL
+    """Rerun catalog server URL."""
+    dataset_name: str = DEFAULT_DATASET_NAME
+    """Catalog dataset holding the registered segment."""
+    segment_id: str | None = None
+    """Segment to score; ``None`` uses the dataset's single segment."""
+    output_dir: Path = Path("data/outputs")
+    """Directory holding Stage A/C outputs; ``eval.json`` lands beside them."""
+
+
+def _variant_metrics(pred: InitCameras, gt: GtCameras) -> dict:
+    """Score one camera set against GT under SE(3) and Sim(3) alignment."""
+    from exo_calib.eval import evaluate_rig
+
+    metrics: dict = {}
+    for mode in ("se3", "sim3"):
+        errors = evaluate_rig(pred.cam_T_world_v44, gt.cam_T_world_v44, mode=mode)
+        metrics[mode] = {
+            "rotation_deg": {
+                "per_camera": [round(float(x), 4) for x in errors.rotation_deg_v],
+                "mean": round(float(np.mean(errors.rotation_deg_v)), 4),
+                "median": round(float(np.median(errors.rotation_deg_v)), 4),
+                "max": round(float(np.max(errors.rotation_deg_v)), 4),
+            },
+            "translation_cm": {
+                "per_camera": [round(float(x), 4) for x in errors.translation_cm_v],
+                "mean": round(float(np.mean(errors.translation_cm_v)), 4),
+                "median": round(float(np.median(errors.translation_cm_v)), 4),
+                "max": round(float(np.max(errors.translation_cm_v)), 4),
+            },
+            "scale": round(float(errors.scale), 6),
+        }
+    focal_pct: Float64[ndarray, " v"] = (pred.k_v33[:, 0, 0] - gt.k_v33[:, 0, 0]) / gt.k_v33[:, 0, 0] * 100.0
+    metrics["focal_error_pct"] = {
+        "per_camera": [round(float(x), 3) for x in focal_pct],
+        "mean_abs": round(float(np.abs(focal_pct).mean()), 3),
+        "max_abs": round(float(np.abs(focal_pct).max()), 3),
+    }
+    return metrics
+
+
+def main(config: ReportConfig) -> None:
+    """Score both variants and write ``eval.json``."""
+    dataset = connect_dataset(config.catalog_url, config.dataset_name)
+    segment_id: str = config.segment_id or only_segment_id(dataset)
+    segment_dir: Path = config.output_dir / segment_id
+    gt: GtCameras = read_gt_cameras(dataset, segment_id)
+
+    report: dict = {"segment_id": segment_id}
+    for variant, filename in (("init", "init_cameras.npz"), ("refined", "refined_cameras.npz")):
+        npz_path: Path = segment_dir / filename
+        if not npz_path.exists():
+            print(f"{variant}: {npz_path} missing — skipped")
+            continue
+        pred: InitCameras = InitCameras.load(npz_path)
+        report[variant] = _variant_metrics(pred, gt)
+        for mode in ("se3", "sim3"):
+            m: dict = report[variant][mode]
+            print(
+                f"{variant:8s} {mode:4s}: trans cm mean {m['translation_cm']['mean']:6.2f} med {m['translation_cm']['median']:6.2f} "
+                f"max {m['translation_cm']['max']:6.2f} | rot deg mean {m['rotation_deg']['mean']:5.2f} med {m['rotation_deg']['median']:5.2f} "
+                f"max {m['rotation_deg']['max']:5.2f} | scale {m['scale']:.4f}"
+            )
+
+    eval_path: Path = segment_dir / "eval.json"
+    eval_path.write_text(json.dumps(report, indent=2))
+    print(f"wrote {eval_path}")
