@@ -1,4 +1,13 @@
-"""Confidence-weighted multi-view triangulation."""
+"""Confidence-weighted multi-view triangulation (fully vectorized).
+
+``triangulate_points`` solves every point's weighted DLT at once: each valid
+observation contributes two confidence-scaled rows, the rows scatter into
+per-point 4x4 Gram matrices (``A^T A``) via bincount, and one batched ``eigh``
+extracts the null-space vector per point. ``triangulate_robust`` prunes
+observations whose reprojection residual exceeds a threshold, resolving
+ambiguous cases with leave-one-out consensus — all trials of a round are
+triangulated in a single batched call, grouped by view count.
+"""
 
 from typing import TypeAlias
 
@@ -60,10 +69,27 @@ def _reprojection_errors_px(
     return reproj_error_m
 
 
+def _valid_observation_mask(obs: ObservationSet, n_views: int) -> Bool[ndarray, "n_obs"]:
+    """Return the mask of observations usable for triangulation."""
+    return (
+        np.isfinite(obs.obs_xy).all(axis=1)
+        & np.isfinite(obs.obs_conf)
+        & (obs.obs_conf > 0.0)
+        & (obs.obs_view_idx >= 0)
+        & (obs.obs_view_idx < n_views)
+    )
+
+
 def triangulate_points(
     obs: ObservationSet, k_v33: Float64[ndarray, "v 3 3"], cam_T_world_v44: Float64[ndarray, "v 4 4"]
 ) -> Float64[ndarray, "n_points 3"]:
-    """Triangulate points with confidence-weighted DLT.
+    """Triangulate all points at once with confidence-weighted DLT.
+
+    Each observation contributes rows ``w * (u * P[2] - P[0])`` and
+    ``w * (v * P[2] - P[1])``; the per-point normal matrix ``A^T A`` is
+    accumulated with bincount scatters (zero rows contribute nothing), and the
+    null-space vector is the eigenvector of the smallest eigenvalue from one
+    batched ``eigh`` over all solvable points.
 
     Args:
         obs: Sparse pixel observations for the points.
@@ -75,42 +101,94 @@ def triangulate_points(
     """
     n_points: int = obs.point_frame_idx.size
     n_views: int = k_v33.shape[0]
-    projection_v34: Float64[ndarray, "v 3 4"] = np.einsum("vij,vjk->vik", k_v33, cam_T_world_v44[:, :3, :])
     points_xyz_n3: Float64[ndarray, "n_points 3"] = np.full((n_points, 3), np.nan, dtype=np.float64)
-    point_idx: int
-    for point_idx in range(n_points):
-        point_obs_m: Bool[ndarray, "n_obs"] = obs.obs_point_idx == point_idx
-        valid_obs_m: Bool[ndarray, "n_obs"] = (
-            point_obs_m
-            & np.isfinite(obs.obs_xy).all(axis=1)
-            & np.isfinite(obs.obs_conf)
-            & (obs.obs_conf > 0.0)
-            & (obs.obs_view_idx >= 0)
-            & (obs.obs_view_idx < n_views)
-        )
-        valid_obs_idx_q: Int64[ndarray, "q"] = np.flatnonzero(valid_obs_m).astype(np.int64)
-        if valid_obs_idx_q.size < 2:
-            continue
+    valid_m: Bool[ndarray, "n_obs"] = _valid_observation_mask(obs, n_views)
+    if not valid_m.any():
+        return points_xyz_n3
 
-        dlt_rows_4: list[Float64[ndarray, "4"]] = []
-        obs_idx: np.int64
-        for obs_idx in valid_obs_idx_q:
-            view_idx: int = int(obs.obs_view_idx[obs_idx])
-            u_px: float = float(obs.obs_xy[obs_idx, 0])
-            v_px: float = float(obs.obs_xy[obs_idx, 1])
-            confidence: float = float(obs.obs_conf[obs_idx])
-            projection_34: Float64[ndarray, "3 4"] = projection_v34[view_idx]
-            dlt_rows_4.append(confidence * (u_px * projection_34[2] - projection_34[0]))
-            dlt_rows_4.append(confidence * (v_px * projection_34[2] - projection_34[1]))
+    point_idx_q: Int64[ndarray, "q"] = obs.obs_point_idx[valid_m]
+    view_idx_q: Int64[ndarray, "q"] = obs.obs_view_idx[valid_m]
+    xy_q2: Float64[ndarray, "q 2"] = obs.obs_xy[valid_m]
+    conf_q: Float64[ndarray, "q"] = obs.obs_conf[valid_m]
 
-        dlt_matrix_r4: Float64[ndarray, "rows 4"] = np.stack(dlt_rows_4)
-        svd_result: tuple[Float64[ndarray, "rows 4"], Float64[ndarray, "4"], Float64[ndarray, "4 4"]] = np.linalg.svd(
-            dlt_matrix_r4, full_matrices=False
-        )
-        homogeneous_4: Float64[ndarray, "4"] = svd_result[2][-1]
-        if np.isfinite(homogeneous_4).all() and abs(float(homogeneous_4[3])) > np.finfo(np.float64).eps:
-            points_xyz_n3[point_idx] = homogeneous_4[:3] / homogeneous_4[3]
+    projection_v34: Float64[ndarray, "v 3 4"] = np.einsum("vij,vjk->vik", k_v33, cam_T_world_v44[:, :3, :])
+    projection_q34: Float64[ndarray, "q 3 4"] = projection_v34[view_idx_q]
+    row_u_q4: Float64[ndarray, "q 4"] = conf_q[:, None] * (xy_q2[:, 0:1] * projection_q34[:, 2] - projection_q34[:, 0])
+    row_v_q4: Float64[ndarray, "q 4"] = conf_q[:, None] * (xy_q2[:, 1:2] * projection_q34[:, 2] - projection_q34[:, 1])
+    rows_r4: Float64[ndarray, "r 4"] = np.concatenate((row_u_q4, row_v_q4))
+    row_point_idx_r: Int64[ndarray, "r"] = np.concatenate((point_idx_q, point_idx_q))
+
+    gram_n44: Float64[ndarray, "n_points 4 4"] = np.zeros((n_points, 4, 4), dtype=np.float64)
+    for i in range(4):
+        for j in range(i, 4):
+            entry_n: Float64[ndarray, "n_points"] = np.bincount(
+                row_point_idx_r, weights=rows_r4[:, i] * rows_r4[:, j], minlength=n_points
+            )
+            gram_n44[:, i, j] = entry_n
+            gram_n44[:, j, i] = entry_n
+
+    obs_count_n: Int64[ndarray, "n_points"] = np.bincount(point_idx_q, minlength=n_points).astype(np.int64)
+    solvable_n: Bool[ndarray, "n_points"] = (obs_count_n >= 2) & np.isfinite(gram_n44).all(axis=(1, 2))
+    if not solvable_n.any():
+        return points_xyz_n3
+
+    eig_result: tuple[Float64[ndarray, "s 4"], Float64[ndarray, "s 4 4"]] = np.linalg.eigh(gram_n44[solvable_n])
+    homogeneous_s4: Float64[ndarray, "s 4"] = eig_result[1][:, :, 0]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        dehomogenized_s3: Float64[ndarray, "s 3"] = homogeneous_s4[:, :3] / homogeneous_s4[:, 3:4]
+    usable_s: Bool[ndarray, "s"] = (np.abs(homogeneous_s4[:, 3]) > np.finfo(np.float64).eps) & np.isfinite(dehomogenized_s3).all(axis=1)
+    solvable_idx_s: Int64[ndarray, "s"] = np.flatnonzero(solvable_n).astype(np.int64)
+    points_xyz_n3[solvable_idx_s[usable_s]] = dehomogenized_s3[usable_s]
     return points_xyz_n3
+
+
+def _leave_one_out_drops(
+    obs: ObservationSet,
+    keep_obs_m: Bool[ndarray, "n_obs"],
+    offending_point_m: Bool[ndarray, "n_points"],
+    k_v33: Float64[ndarray, "v 3 3"],
+    cam_T_world_v44: Float64[ndarray, "v 4 4"],
+) -> Int64[ndarray, " n_drop"]:
+    """For each offending point (>= 3 kept obs), pick the single observation whose
+    removal minimizes the point's max reprojection error.
+
+    All leave-one-out trials of all points with the same view count are batched
+    into one synthetic ``ObservationSet`` and triangulated in a single call.
+
+    Returns:
+        Observation indices to drop, one per offending point.
+    """
+    kept_idx_k: Int64[ndarray, "k"] = np.flatnonzero(keep_obs_m & offending_point_m[obs.obs_point_idx]).astype(np.int64)
+    order_k: Int64[ndarray, "k"] = np.argsort(obs.obs_point_idx[kept_idx_k], kind="stable").astype(np.int64)
+    kept_idx_k = kept_idx_k[order_k]
+    kept_point_k: Int64[ndarray, "k"] = obs.obs_point_idx[kept_idx_k]
+    group_starts_g: Int64[ndarray, "g"] = np.flatnonzero(np.r_[True, kept_point_k[1:] != kept_point_k[:-1]]).astype(np.int64)
+    group_sizes_g: Int64[ndarray, "g"] = np.diff(np.r_[group_starts_g, kept_point_k.size]).astype(np.int64)
+
+    drop_indices: list[Int64[ndarray, " d"]] = []
+    for group_size in np.unique(group_sizes_g):
+        size: int = int(group_size)
+        starts_h: Int64[ndarray, "h"] = group_starts_g[group_sizes_g == group_size]
+        obs_idx_hq: Int64[ndarray, "h q"] = kept_idx_k[starts_h[:, None] + np.arange(size)[None, :]]
+        # (h, q, q-1): trial s of group keeps every position except s.
+        off_diag_qq1: Int64[ndarray, "q q1"] = np.stack([np.delete(np.arange(size), s) for s in range(size)]).astype(np.int64)
+        trial_obs_idx_f: Int64[ndarray, "f"] = obs_idx_hq[:, off_diag_qq1].reshape(-1)
+        n_trials: int = starts_h.size * size
+        trial_id_f: Int64[ndarray, "f"] = np.repeat(np.arange(n_trials, dtype=np.int64), size - 1)
+        trial_set: ObservationSet = ObservationSet(
+            point_frame_idx=np.zeros(n_trials, dtype=np.int64),
+            point_joint_idx=np.zeros(n_trials, dtype=np.int64),
+            obs_point_idx=trial_id_f,
+            obs_view_idx=obs.obs_view_idx[trial_obs_idx_f],
+            obs_xy=obs.obs_xy[trial_obs_idx_f],
+            obs_conf=obs.obs_conf[trial_obs_idx_f],
+        )
+        trial_points_t3: Float64[ndarray, "t 3"] = triangulate_points(trial_set, k_v33, cam_T_world_v44)
+        trial_errors_f: Float64[ndarray, "f"] = _reprojection_errors_px(trial_set, trial_points_t3, k_v33, cam_T_world_v44)
+        max_error_hq: Float64[ndarray, "h q"] = trial_errors_f.reshape(starts_h.size, size, size - 1).max(axis=2)
+        best_position_h: Int64[ndarray, "h"] = np.argmin(max_error_hq, axis=1).astype(np.int64)
+        drop_indices.append(obs_idx_hq[np.arange(starts_h.size), best_position_h])
+    return np.concatenate(drop_indices) if drop_indices else np.empty(0, dtype=np.int64)
 
 
 def triangulate_robust(
@@ -135,43 +213,25 @@ def triangulate_robust(
     """
     n_points: int = obs.point_frame_idx.size
     current_obs: ObservationSet = obs
-    _round_idx: int
     for _round_idx in range(max_rounds):
         points_xyz_n3: Float64[ndarray, "n_points 3"] = triangulate_points(current_obs, k_v33, cam_T_world_v44)
         reproj_error_m: Float64[ndarray, "n_obs"] = _reprojection_errors_px(current_obs, points_xyz_n3, k_v33, cam_T_world_v44)
         keep_obs_m: Bool[ndarray, "n_obs"] = np.isfinite(reproj_error_m)
-        point_idx: int
-        for point_idx in range(n_points):
-            point_obs_idx_q: Int64[ndarray, "q"] = np.flatnonzero(keep_obs_m & (current_obs.obs_point_idx == point_idx)).astype(np.int64)
-            if point_obs_idx_q.size < 2:
-                keep_obs_m[point_obs_idx_q] = False
-                continue
-            if np.all(reproj_error_m[point_obs_idx_q] <= reproj_threshold_px):
-                continue
-            if point_obs_idx_q.size == 2:
-                keep_obs_m[point_obs_idx_q] = False
-                continue
 
-            best_candidate_idx: int = -1
-            best_max_error_px: float = np.inf
-            candidate_position: int
-            for candidate_position in range(point_obs_idx_q.size):
-                trial_obs_idx_r: Int64[ndarray, "r"] = np.delete(point_obs_idx_q, candidate_position)
-                trial_obs: ObservationSet = ObservationSet(
-                    point_frame_idx=current_obs.point_frame_idx[point_idx : point_idx + 1],
-                    point_joint_idx=current_obs.point_joint_idx[point_idx : point_idx + 1],
-                    obs_point_idx=np.zeros(trial_obs_idx_r.size, dtype=np.int64),
-                    obs_view_idx=current_obs.obs_view_idx[trial_obs_idx_r],
-                    obs_xy=current_obs.obs_xy[trial_obs_idx_r],
-                    obs_conf=current_obs.obs_conf[trial_obs_idx_r],
-                )
-                trial_point_xyz_13: Float64[ndarray, "1 3"] = triangulate_points(trial_obs, k_v33, cam_T_world_v44)
-                trial_error_r: Float64[ndarray, "r"] = _reprojection_errors_px(trial_obs, trial_point_xyz_13, k_v33, cam_T_world_v44)
-                trial_max_error_px: float = float(np.max(trial_error_r))
-                if trial_max_error_px < best_max_error_px:
-                    best_max_error_px = trial_max_error_px
-                    best_candidate_idx = int(point_obs_idx_q[candidate_position])
-            keep_obs_m[best_candidate_idx] = False
+        kept_count_n: Int64[ndarray, "n_points"] = np.bincount(current_obs.obs_point_idx[keep_obs_m], minlength=n_points).astype(np.int64)
+        over_threshold_m: Bool[ndarray, "n_obs"] = keep_obs_m & (reproj_error_m > reproj_threshold_px)
+        offending_n: Bool[ndarray, "n_points"] = (
+            np.bincount(current_obs.obs_point_idx[over_threshold_m], minlength=n_points).astype(np.int64) > 0
+        )
+
+        # < 2 kept observations, or an offending 2-view point: drop everything.
+        drop_all_n: Bool[ndarray, "n_points"] = (kept_count_n < 2) | (offending_n & (kept_count_n == 2))
+        keep_obs_m &= ~drop_all_n[current_obs.obs_point_idx]
+
+        # Offending points with >= 3 views: leave-one-out consensus, drop one obs each.
+        loo_n: Bool[ndarray, "n_points"] = offending_n & (kept_count_n >= 3)
+        if loo_n.any():
+            keep_obs_m[_leave_one_out_drops(current_obs, keep_obs_m, loo_n, k_v33, cam_T_world_v44)] = False
 
         kept_per_point_n: Int64[ndarray, "n_points"] = np.bincount(
             current_obs.obs_point_idx[keep_obs_m], minlength=n_points

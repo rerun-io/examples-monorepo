@@ -91,6 +91,7 @@ def refine_extrinsics(
     robust_scale_px: float = 2.0,
     fixed_pose_indices: tuple[int, ...] = (0,),
     max_iterations: int = 50,
+    pose_prior_sigma_m: float | None = None,
 ) -> BaResult:
     """Refine camera extrinsics with normalized-intrinsics bundle adjustment.
 
@@ -104,6 +105,8 @@ def refine_extrinsics(
         robust_scale_px: Robust loss scale in pixels before focal normalization.
         fixed_pose_indices: Camera poses held fixed to remove gauge freedom.
         max_iterations: Maximum solver iterations in each round.
+        pose_prior_sigma_m: Soft prior (meters) anchoring every camera center to
+            its initial estimate; ``None`` disables the priors.
 
     Returns:
         Refined poses, re-triangulated points, diagnostics, and convergence state.
@@ -119,6 +122,17 @@ def refine_extrinsics(
     mean_focal: float = float(np.mean(focal_v))
     normalized_robust_scale: float = robust_scale_px / mean_focal
     fixed_pose_index_list: list[int] = list(fixed_pose_indices)
+    # Soft anchors on the INITIAL camera centers. Reprojection-only BA leaves a
+    # 7-DOF similarity gauge (fixing one pose still leaves global scale free);
+    # weak center priors pin every gauge direction without fighting real signal,
+    # and keep the refinement a *refinement* of the Stage A metric rig.
+    prior_centers_v3: Float64[ndarray, "v 3"] | None = None
+    prior_sigmas_v: Float64[ndarray, "v"] | None = None
+    if pose_prior_sigma_m is not None:
+        init_rotations_v33: Float64[ndarray, "v 3 3"] = cam_T_world_v44[:, :3, :3]
+        init_translations_v3: Float64[ndarray, "v 3"] = cam_T_world_v44[:, :3, 3]
+        prior_centers_v3 = -np.einsum("vji,vj->vi", init_rotations_v33, init_translations_v3)
+        prior_sigmas_v = np.full(n_views, pose_prior_sigma_m, dtype=np.float64)
 
     _round_idx: int
     for _round_idx in range(rounds):
@@ -175,7 +189,13 @@ def refine_extrinsics(
             max_iterations=max_iterations,
             robust=robust,
             robust_scale=normalized_robust_scale,
-            solver="lm",
+            # "schur" eliminates the 3N point parameters into a camera-only
+            # reduced system; dense "lm" builds O((6V+3N)^2) normal equations
+            # and stalls for minutes at a few thousand points. It is also the
+            # only solver honoring pose priors.
+            solver="schur",
+            pose_prior_centers=None if prior_centers_v3 is None else prior_centers_v3.astype(np.float32),
+            pose_prior_sigmas=None if prior_sigmas_v is None else prior_sigmas_v.astype(np.float32),
         )
         optimized_rotations_v33: Float64[ndarray, "v 3 3"] = ba_output[0]
         optimized_translations_v3: Float64[ndarray, "v 3"] = ba_output[1]

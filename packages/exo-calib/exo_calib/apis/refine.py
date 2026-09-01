@@ -65,6 +65,11 @@ class RefineConfig:
     """LM iterations per bundle-adjust call."""
     robust_scale_px: float = 2.0
     """Huber scale in pixels for the BA residuals."""
+    pose_prior_sigma_m: float = 0.25
+    """Soft prior (meters) anchoring camera centers to the Stage A estimate;
+    pins the similarity gauge (scale drift) and keeps the BA a refinement."""
+    fix_first_camera: bool = False
+    """Hard-fix camera 0 instead of relying on the center priors for gauge."""
     lambda_decay: float = 1.0
     """Kineo exponential decay for the 3D point confidence."""
     seed: int = 0
@@ -156,6 +161,8 @@ def main(config: RefineConfig) -> None:
         rounds=config.ba_rounds,
         robust_scale_px=config.robust_scale_px,
         max_iterations=config.ba_max_iterations,
+        pose_prior_sigma_m=config.pose_prior_sigma_m,
+        fixed_pose_indices=(0,) if config.fix_first_camera else (),
     )
     print(f"BA reprojection error per round (px): {[round(e, 3) for e in result.mean_reproj_px_per_round]}, converged={result.converged}")
 

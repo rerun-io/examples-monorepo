@@ -215,15 +215,20 @@ def log_cameras_layer(
     resolution_wh: tuple[int, int],
     entity_prefix: str,
     recording: rr.RecordingStream,
+    image_plane_distance: float = 0.1,
 ) -> None:
-    """Log a set of cameras as static pinhole frusta under ``entity_prefix``."""
+    """Log a set of cameras as static pinhole frusta under ``entity_prefix``.
+
+    ``image_plane_distance`` defaults to the base layer's GT frustum size so
+    estimated and GT frusta compare visually.
+    """
     for i, name in enumerate(names):
         intrinsics: Intrinsics = Intrinsics(
             camera_conventions="RDF", k_matrix=cameras_k_v33[i], width=resolution_wh[0], height=resolution_wh[1]
         )
         extrinsics: Extrinsics = Extrinsics(cam_R_world=cameras_cam_T_world_v44[i][:3, :3], cam_t_world=cameras_cam_T_world_v44[i][:3, 3])
         pinhole: PinholeParameters = PinholeParameters(name=name.replace("/", "_"), intrinsics=intrinsics, extrinsics=extrinsics)
-        log_pinhole(pinhole, Path(f"{entity_prefix}/{name}"), image_plane_distance=0.4, static=True, recording=recording)
+        log_pinhole(pinhole, Path(f"{entity_prefix}/{name}"), image_plane_distance=image_plane_distance, static=True, recording=recording)
 
 
 def main(config: InitCalibrationConfig) -> None:

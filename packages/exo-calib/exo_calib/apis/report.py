@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import rerun as rr
 from jaxtyping import Float64
 from numpy import ndarray
 
@@ -20,8 +21,10 @@ from exo_calib.catalog_io import (
     DEFAULT_DATASET_NAME,
     GtCameras,
     connect_dataset,
+    new_layer_recording,
     only_segment_id,
     read_gt_cameras,
+    register_layer,
 )
 
 
@@ -37,6 +40,14 @@ class ReportConfig:
     """Segment to score; ``None`` uses the dataset's single segment."""
     output_dir: Path = Path("data/outputs")
     """Directory holding Stage A/C outputs; ``eval.json`` lands beside them."""
+    align_layer_name: str = "exocalib_align"
+    """Catalog layer carrying the SE(3) alignment transform on ``/world/exocalib``,
+    so the pipeline-frame frusta and 3D tracks display in the GT world frame.
+    The pipeline outputs themselves stay unaligned (self-contained)."""
+    application_id: str = "exocalib"
+    """Application id of generated layer recordings."""
+    register: bool = True
+    """Register the alignment layer into the catalog."""
 
 
 def _variant_metrics(pred: InitCameras, gt: GtCameras) -> dict:
@@ -96,3 +107,45 @@ def main(config: ReportConfig) -> None:
     eval_path: Path = segment_dir / "eval.json"
     eval_path.write_text(json.dumps(report, indent=2))
     print(f"wrote {eval_path}")
+
+    # Viewer alignment: give each variant its own SE(3) pred-world -> GT-world
+    # transform (on its frusta and kp3d subtrees) so everything overlays GT, and
+    # draw labeled error lines from each aligned camera center to its GT center.
+    from exo_calib.eval import align_rigs
+
+    rrd_path: Path = segment_dir / f"{config.align_layer_name}.rrd"
+    recording: rr.RecordingStream = new_layer_recording(config.application_id, segment_id, rrd_path)
+    gt_centers_v3: Float64[ndarray, "v 3"] = np.stack(
+        [-gt.cam_T_world_v44[i, :3, :3].T @ gt.cam_T_world_v44[i, :3, 3] for i in range(len(gt.names))]
+    )
+    for variant, filename in (("init", "init_cameras.npz"), ("refined", "refined_cameras.npz")):
+        npz_path = segment_dir / filename
+        if not npz_path.exists():
+            continue
+        pred = InitCameras.load(npz_path)
+        alignment = align_rigs(pred.cam_T_world_v44, gt.cam_T_world_v44, with_scale=False)
+        transform: rr.Transform3D = rr.Transform3D(translation=alignment.translation_3, mat3x3=alignment.rotation_33)
+        recording.log(f"/world/exocalib/{variant}", transform, static=True)
+        recording.log(f"/world/exocalib/kp3d_{variant}", transform, static=True)
+        pred_centers_v3: Float64[ndarray, "v 3"] = np.stack(
+            [-pred.cam_T_world_v44[i, :3, :3].T @ pred.cam_T_world_v44[i, :3, 3] for i in range(len(pred.names))]
+        )
+        aligned_centers_v3: Float64[ndarray, "v 3"] = (alignment.rotation_33 @ pred_centers_v3.T).T + alignment.translation_3
+        errors_cm_v: Float64[ndarray, " v"] = np.linalg.norm(aligned_centers_v3 - gt_centers_v3, axis=1) * 100.0
+        recording.log(
+            f"/world/exocalib_error/{variant}",
+            rr.LineStrips3D(
+                strips=[np.stack([aligned_centers_v3[i], gt_centers_v3[i]]) for i in range(len(gt.names))],
+                labels=[f"{name}: {errors_cm_v[i]:.1f} cm" for i, name in enumerate(gt.names)],
+                colors=(255, 214, 0) if variant == "init" else (0, 200, 255),
+                radii=0.004,
+                show_labels=True,
+            ),
+            static=True,
+        )
+        print(f"{variant}: alignment + error lines logged (mean {errors_cm_v.mean():.1f} cm)")
+    recording.flush(timeout_sec=30.0)
+    print(f"wrote {rrd_path}")
+    if config.register:
+        register_layer(dataset, rrd_path, config.align_layer_name)
+        print(f"registered layer {config.align_layer_name}")

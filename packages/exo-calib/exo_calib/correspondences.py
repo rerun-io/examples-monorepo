@@ -49,47 +49,39 @@ def build_observations(
     Returns:
         Sparse point and observation arrays.
     """
+    n_views: int = kp_xy_vtj2.shape[0]
     n_frames: int = kp_xy_vtj2.shape[1]
-    n_joints: int = kp_xy_vtj2.shape[2]
-    point_frame_indices: list[int] = []
-    point_joint_indices: list[int] = []
-    obs_point_indices: list[int] = []
-    obs_view_indices: list[int] = []
-    obs_xy_rows_2: list[Float64[ndarray, "2"]] = []
-    obs_conf_values: list[float] = []
+    selected_frames_f: Int64[ndarray, "f"] = np.arange(0, n_frames, frame_stride, dtype=np.int64)
+    conf_vfj: Float64[ndarray, "v f j"] = conf_vtj[:, selected_frames_f]
+    xy_vfj2: Float64[ndarray, "v f j 2"] = kp_xy_vtj2[:, selected_frames_f]
 
-    frame_idx: int
-    joint_idx: int
-    for frame_idx in range(0, n_frames, frame_stride):
-        for joint_idx in range(n_joints):
-            conf_v: Float64[ndarray, "v"] = conf_vtj[:, frame_idx, joint_idx]
-            xy_v2: Float64[ndarray, "v 2"] = kp_xy_vtj2[:, frame_idx, joint_idx]
-            candidate_v: Bool[ndarray, "v"] = (conf_v > 0.0) & np.isfinite(xy_v2).all(axis=1)
-            candidate_conf_v: Float64[ndarray, "v"] = np.where(candidate_v, conf_v, 0.0)
-            pair_strength_vv: Float64[ndarray, "v v"] = np.sqrt(candidate_conf_v[:, None] * candidate_conf_v[None, :])
-            pair_survives_vv: Bool[ndarray, "v v"] = (pair_strength_vv > min_pair_conf) & candidate_v[:, None] & candidate_v[None, :]
-            np.fill_diagonal(pair_survives_vv, False)
-            surviving_v: Bool[ndarray, "v"] = np.any(pair_survives_vv, axis=1)
-            surviving_view_idx_s: Int64[ndarray, "s"] = np.flatnonzero(surviving_v).astype(np.int64)
-            if surviving_view_idx_s.size < min_views:
-                continue
+    candidate_vfj: Bool[ndarray, "v f j"] = (conf_vfj > 0.0) & np.isfinite(xy_vfj2).all(axis=-1)
+    candidate_conf_vfj: Float64[ndarray, "v f j"] = np.where(candidate_vfj, conf_vfj, 0.0)
+    # Kineo pair rule over all view pairs at once: a view survives a cell when it
+    # forms at least one pair whose geometric-mean confidence clears the bound.
+    pair_survives_wvfj: Bool[ndarray, "w v f j"] = (
+        (np.sqrt(candidate_conf_vfj[None, :] * candidate_conf_vfj[:, None]) > min_pair_conf)
+        & candidate_vfj[None, :]
+        & candidate_vfj[:, None]
+    )
+    view_diag_idx_v: Int64[ndarray, "v"] = np.arange(n_views, dtype=np.int64)
+    pair_survives_wvfj[view_diag_idx_v, view_diag_idx_v] = False
+    surviving_vfj: Bool[ndarray, "v f j"] = pair_survives_wvfj.any(axis=0)
+    is_point_fj: Bool[ndarray, "f j"] = surviving_vfj.sum(axis=0) >= min_views
 
-            point_idx: int = len(point_frame_indices)
-            point_frame_indices.append(frame_idx)
-            point_joint_indices.append(joint_idx)
-            view_idx: np.int64
-            for view_idx in surviving_view_idx_s:
-                obs_point_indices.append(point_idx)
-                obs_view_indices.append(int(view_idx))
-                obs_xy_rows_2.append(xy_v2[view_idx])
-                obs_conf_values.append(float(conf_v[view_idx]))
+    point_sel_frame_n, point_joint_idx_all_n = np.nonzero(is_point_fj)  # frame-major order
+    point_frame_idx_all_n: Int64[ndarray, "n_all"] = selected_frames_f[point_sel_frame_n].astype(np.int64)
+    point_joint_idx_all_n = point_joint_idx_all_n.astype(np.int64)
+    point_row_fj: Int64[ndarray, "f j"] = np.full(is_point_fj.shape, -1, dtype=np.int64)
+    point_row_fj[point_sel_frame_n, point_joint_idx_all_n] = np.arange(point_frame_idx_all_n.size, dtype=np.int64)
 
-    point_frame_idx_all_n: Int64[ndarray, "n_all"] = np.asarray(point_frame_indices, dtype=np.int64)
-    point_joint_idx_all_n: Int64[ndarray, "n_all"] = np.asarray(point_joint_indices, dtype=np.int64)
-    obs_point_idx_all_m: Int64[ndarray, "m_all"] = np.asarray(obs_point_indices, dtype=np.int64)
-    obs_view_idx_all_m: Int64[ndarray, "m_all"] = np.asarray(obs_view_indices, dtype=np.int64)
-    obs_xy_all_m2: Float64[ndarray, "m_all 2"] = np.asarray(obs_xy_rows_2, dtype=np.float64).reshape(-1, 2)
-    obs_conf_all_m: Float64[ndarray, "m_all"] = np.asarray(obs_conf_values, dtype=np.float64)
+    obs_view_raw_m, obs_frame_raw_m, obs_joint_raw_m = np.nonzero(surviving_vfj & is_point_fj[None])
+    obs_point_raw_m: Int64[ndarray, "m_all"] = point_row_fj[obs_frame_raw_m, obs_joint_raw_m]
+    obs_order_m: Int64[ndarray, "m_all"] = np.lexsort((obs_view_raw_m, obs_point_raw_m)).astype(np.int64)
+    obs_point_idx_all_m: Int64[ndarray, "m_all"] = obs_point_raw_m[obs_order_m]
+    obs_view_idx_all_m: Int64[ndarray, "m_all"] = obs_view_raw_m[obs_order_m].astype(np.int64)
+    obs_xy_all_m2: Float64[ndarray, "m_all 2"] = xy_vfj2[obs_view_raw_m, obs_frame_raw_m, obs_joint_raw_m][obs_order_m]
+    obs_conf_all_m: Float64[ndarray, "m_all"] = conf_vfj[obs_view_raw_m, obs_frame_raw_m, obs_joint_raw_m][obs_order_m]
 
     n_all_points: int = point_frame_idx_all_n.size
     if max_points is not None and n_all_points > max_points:
