@@ -267,6 +267,10 @@ def log_keypoints_layer(
             rejected_j: ndarray = ~keep_j & np.isfinite(cam.kp_xy[t]).all(axis=1)
             recording.set_time(TIMELINE, duration=1e-9 * float(cam.times_ns[t]))
             recording.log(
+                f"{entity}_bbox",
+                rr.Boxes2D(array=cam.bbox_xyxy[t], array_format=rr.Box2DFormat.XYXY, colors=(240, 140, 60)),
+            )
+            recording.log(
                 entity,
                 Points2DWithConfidence(
                     positions=gated_xy_j2,
