@@ -10,7 +10,14 @@ from pathlib import Path
 
 import rerun.blueprint as rrb
 
-from exo_calib.catalog_io import DEFAULT_CATALOG_URL, DEFAULT_DATASET_NAME, EGO_CAMERA_NAMES, EXO_CAMERA_NAMES, connect_dataset
+from exo_calib.catalog_io import (
+    DEFAULT_CATALOG_URL,
+    DEFAULT_DATASET_NAME,
+    EGO_CAMERA_NAMES,
+    EXO_CAMERA_NAMES,
+    connect_dataset,
+    pinhole_entity,
+)
 
 
 @dataclass
@@ -35,7 +42,17 @@ def main(config: BlueprintConfig) -> None:
     with deps outside this env.
     """
     dataset = connect_dataset(config.catalog_url, config.dataset_name)
-    exo_tabs: list[rrb.Tabs] = [rrb.Tabs(rrb.Spatial2DView(origin=f"/world/{name}/pinhole", name=name)) for name in EXO_CAMERA_NAMES]
+    # The …_raw entities are Stage B's queryable data record, not visualization.
+    exo_tabs: list[rrb.Tabs] = [
+        rrb.Tabs(
+            rrb.Spatial2DView(
+                origin=pinhole_entity(name),
+                name=name,
+                overrides={f"{pinhole_entity(name)}/exocalib_kp2d_raw": rrb.EntityBehavior(visible=False)},
+            )
+        )
+        for name in EXO_CAMERA_NAMES
+    ]
     ego_tabs: list[rrb.Tabs] = [rrb.Tabs(rrb.Spatial2DView(origin=f"/world/{name}/pinhole", name=name)) for name in EGO_CAMERA_NAMES]
     main_view: rrb.Horizontal = rrb.Horizontal(
         contents=[

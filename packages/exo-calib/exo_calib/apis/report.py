@@ -12,20 +12,20 @@ from pathlib import Path
 
 import numpy as np
 import rerun as rr
+from beartype.roar import BeartypeException
 from jaxtyping import Float64
 from numpy import ndarray
 
-from exo_calib.apis.calibrate_init import InitCameras
 from exo_calib.catalog_io import (
     DEFAULT_CATALOG_URL,
     DEFAULT_DATASET_NAME,
-    GtCameras,
+    RigCameras,
     connect_dataset,
     exocalib_entity,
     kp3d_entity,
     new_layer_recording,
     only_segment_id,
-    read_gt_cameras,
+    read_rig_cameras,
     register_layer,
 )
 
@@ -52,7 +52,7 @@ class ReportConfig:
     """Register the alignment layer into the catalog."""
 
 
-def _variant_metrics(pred: InitCameras, gt: GtCameras) -> dict:
+def _variant_metrics(pred: RigCameras, gt: RigCameras) -> dict:
     """Score one camera set against GT under SE(3) and Sim(3) alignment."""
     from exo_calib.eval import evaluate_rig
 
@@ -88,15 +88,18 @@ def main(config: ReportConfig) -> None:
     dataset = connect_dataset(config.catalog_url, config.dataset_name)
     segment_id: str = config.segment_id or only_segment_id(dataset)
     segment_dir: Path = config.output_dir / segment_id
-    gt: GtCameras = read_gt_cameras(dataset, segment_id)
+    gt: RigCameras = read_rig_cameras(dataset, segment_id)
 
     report: dict = {"segment_id": segment_id}
-    for variant, filename in (("init", "init_cameras.npz"), ("refined", "refined_cameras.npz")):
-        npz_path: Path = segment_dir / filename
-        if not npz_path.exists():
-            print(f"{variant}: {npz_path} missing — skipped")
-            continue
-        pred: InitCameras = InitCameras.load(npz_path)
+    variants: dict[str, RigCameras] = {}
+    for variant in ("init", "refined"):
+        try:
+            variants[variant] = read_rig_cameras(dataset, segment_id, root=exocalib_entity(variant))
+        except BeartypeException:
+            raise
+        except Exception as error:
+            print(f"{variant}: layer not readable from catalog — skipped ({type(error).__name__})")
+    for variant, pred in variants.items():
         report[variant] = _variant_metrics(pred, gt)
         for mode in ("se3", "sim3"):
             m: dict = report[variant][mode]
@@ -119,11 +122,7 @@ def main(config: ReportConfig) -> None:
     gt_centers_v3: Float64[ndarray, "v 3"] = np.stack(
         [-gt.cam_T_world_v44[i, :3, :3].T @ gt.cam_T_world_v44[i, :3, 3] for i in range(len(gt.names))]
     )
-    for variant, filename in (("init", "init_cameras.npz"), ("refined", "refined_cameras.npz")):
-        npz_path = segment_dir / filename
-        if not npz_path.exists():
-            continue
-        pred = InitCameras.load(npz_path)
+    for variant, pred in variants.items():
         alignment = align_rigs(pred.cam_T_world_v44, gt.cam_T_world_v44, with_scale=False)
         transform: rr.Transform3D = rr.Transform3D(translation=alignment.translation_3, mat3x3=alignment.rotation_33)
         recording.log(exocalib_entity(variant), transform, static=True)

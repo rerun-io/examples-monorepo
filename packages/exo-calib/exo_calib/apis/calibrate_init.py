@@ -53,7 +53,7 @@ class InitCalibrationConfig:
     unproject_stride: int = 24
     """Pixel stride when unprojecting depth to the ground-fit point cloud."""
     output_dir: Path = Path("data/outputs")
-    """Directory for ``<segment>/init_cameras.npz`` and the layer RRD."""
+    """Directory for the generated layer RRDs."""
     layer_name: str = "exocalib_init"
     """Catalog layer name for the logged initial cameras."""
     application_id: str = "exocalib"
@@ -74,30 +74,6 @@ class InitCameras:
     """Estimated world-to-camera transforms."""
     metric_scale: float
     """Global scale applied to the up-to-scale multi-view translations."""
-
-    def save(self, npz_path: Path) -> None:
-        """Write the parameters to ``npz_path``."""
-        npz_path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez(
-            npz_path,
-            names=np.array(self.names),
-            k_v33=self.k_v33,
-            cam_T_world_v44=self.cam_T_world_v44,
-            metric_scale=np.float64(self.metric_scale),
-        )
-
-    @classmethod
-    def load(cls, npz_path: Path) -> "InitCameras":
-        """Read parameters written by :meth:`save`."""
-        data = np.load(npz_path)
-        return cls(
-            names=tuple(str(n) for n in data["names"]),
-            k_v33=data["k_v33"],
-            cam_T_world_v44=data["cam_T_world_v44"],
-            metric_scale=float(data["metric_scale"]),
-        )
-
-
 def _unproject_world(
     depth_hw: Float64[ndarray, "h w"],
     k_33: Float64[ndarray, "3 3"],
@@ -240,11 +216,9 @@ def main(config: InitCalibrationConfig) -> None:
     print(f"segment {segment_id}: calibrating from frame {config.frame_index} of {len(frames_rgb)} exo views")
 
     init: InitCameras = estimate_init_cameras(frames_rgb, streams.names, config)
-    npz_path: Path = config.output_dir / segment_id / "init_cameras.npz"
-    init.save(npz_path)
-    print(f"wrote {npz_path}")
 
     recording, rrd_path = new_layer_recording(config.application_id, segment_id, config.output_dir / segment_id / f"{config.layer_name}.rrd")
+    recording.log(exocalib_entity("init"), rr.AnyValues(metric_scale=np.array([init.metric_scale])), static=True)
     video_h, video_w = frames_rgb[0].shape[:2]
     log_cameras_layer(init.k_v33, init.cam_T_world_v44, init.names, (video_w, video_h), exocalib_entity("init"), recording)
     recording.flush(timeout_sec=30.0)

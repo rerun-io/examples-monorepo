@@ -2,13 +2,14 @@
 
 For every exo camera, frames stream from the catalog (NVDEC), YOLOX keeps the
 single best person box per frame (Assembly101 has one subject), and Sapiens2
-produces COCO-133 keypoints with confidences. Raw results plus the crop
-rectangles (needed by the AssemblyHands-X margin rule downstream) go to one NPZ
-per camera; a subsampled ``Points2DWithConfidence`` overlay is registered as
-the ``exocalib_kp2d`` layer. The overlay is gated by the AssemblyHands-X
-post-processing: keypoints the pipeline rejects are NaN'd on the skeleton
-entity (which also suppresses their edges) and logged raw on a connectionless
-``…_rejected`` sibling so the prediction stays inspectable.
+produces COCO-133 keypoints with confidences. Everything downstream needs —
+raw keypoints, confidences, boxes, and the crop rectangles the AssemblyHands-X
+margin rule operates on — is logged into the ``exocalib_kp2d`` layer's
+``…_raw`` entities, which :func:`load_stage_b` queries back: the catalog is
+the stage store, not a side channel. A subsampled gated overlay accompanies it:
+keypoints the pipeline rejects are NaN'd on the skeleton entity (which also
+suppresses their edges) and shown raw on a connectionless ``…_rejected``
+sibling.
 """
 
 from dataclasses import dataclass, field
@@ -20,6 +21,7 @@ import rerun as rr
 import torch
 from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
+from rerun.catalog import DatasetEntry
 from simplecv.rerun_custom_types import Points2DWithConfidence
 
 from exo_calib.catalog_io import (
@@ -70,7 +72,7 @@ class Keypoints2dConfig:
     detection_score_thr: float = 0.5
     """Minimum YOLOX person score."""
     output_dir: Path = Path("data/outputs")
-    """Directory for ``<segment>/kp2d/<cam>.npz`` and the layer RRD."""
+    """Directory for the generated layer RRD."""
     layer_name: str = "exocalib_kp2d"
     """Catalog layer name for the keypoint overlays."""
     application_id: str = "exocalib"
@@ -111,27 +113,42 @@ class CameraKeypoints:
     video_wh: Int64[ndarray, "2"] = field(default_factory=lambda: np.array([1280, 720], dtype=np.int64))
     """Native video frame size (width, height)."""
 
-    def save(self, npz_path: Path) -> None:
-        """Write the arrays to ``npz_path``."""
-        npz_path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez(
-            npz_path,
-            sample_indices=self.sample_indices,
-            times_ns=self.times_ns,
-            kp_xy=self.kp_xy,
-            conf=self.conf,
-            bbox_xyxy=self.bbox_xyxy,
-            crop_origin_xy=self.crop_origin_xy,
-            crop_size_wh=self.crop_size_wh,
-            crop_input_wh=self.crop_input_wh,
-            video_wh=self.video_wh,
-        )
 
-    @classmethod
-    def load(cls, npz_path: Path) -> "CameraKeypoints":
-        """Read arrays written by :meth:`save`."""
-        data = np.load(npz_path)
-        return cls(**{key: data[key] for key in data.files})
+def load_stage_b(dataset: DatasetEntry, segment_id: str, names: tuple[str, ...]) -> dict[str, CameraKeypoints]:
+    """Query Stage B's raw record back from the registered ``exocalib_kp2d`` layer.
+
+    The catalog is the pipeline's only stage store: every array
+    :func:`log_keypoints_layer` wrote to the ``…_raw`` entities round-trips
+    exactly (all components are logged at their native dtypes).
+    """
+    import pyarrow as pa
+
+    per_camera: dict[str, CameraKeypoints] = {}
+    for name in names:
+        raw_entity: str = f"{pinhole_entity(name)}/exocalib_kp2d_raw"
+        view = dataset.filter_segments(segment_id).filter_contents([raw_entity])
+        table: pa.Table = view.reader(index=TIMELINE).sort(TIMELINE).to_arrow_table()
+
+        def rows(field_name: str, entity: str = raw_entity, tbl: pa.Table = table) -> list:
+            return tbl.column(f"{entity}:{field_name}").to_pylist()
+
+        def static_row(field_name: str) -> ndarray:
+            values: list = [v for v in rows(field_name) if v is not None]
+            return np.asarray(values[0], dtype=np.int64)
+
+        times_ns: Int64[ndarray, "t"] = table.column(TIMELINE).combine_chunks().cast(pa.int64()).to_numpy()
+        per_camera[name] = CameraKeypoints(
+            sample_indices=np.asarray([v[0] for v in rows("sample_idx")], dtype=np.int64),
+            times_ns=times_ns.astype(np.int64),
+            kp_xy=np.asarray(rows("Points2D:positions"), dtype=np.float32),
+            conf=np.asarray(rows("simplecv.KeypointConfidence2D:confidences"), dtype=np.float32),
+            bbox_xyxy=np.asarray(rows("bbox_xyxy"), dtype=np.float32),
+            crop_origin_xy=np.asarray(rows("crop_origin_xy"), dtype=np.float32),
+            crop_size_wh=np.asarray(rows("crop_size_wh"), dtype=np.float32),
+            crop_input_wh=static_row("crop_input_wh"),
+            video_wh=static_row("video_wh"),
+        )
+    return per_camera
 
 
 def _best_box_per_frame(detections: Any, num_frames: int) -> tuple[Float32[ndarray, "t 4"], Int64[ndarray, " n_det"]]:
@@ -274,17 +291,57 @@ def stack_postprocessed(
 
 
 def log_keypoints_layer(per_camera: dict[str, CameraKeypoints], recording: rr.RecordingStream, config: Keypoints2dConfig) -> None:
-    """Log subsampled keypoint overlays under each camera's pinhole entity.
+    """Log Stage B's complete output under each camera's pinhole entity.
 
-    Keypoints the AssemblyHands-X gate zeroes are NaN'd on the skeleton entity —
-    the only per-keypoint mechanism that also suppresses their edges — and their
-    raw predictions go to a connectionless ``…_rejected`` sibling instead.
+    The ``…_raw`` entity is the layer's data record — every frame's raw
+    keypoints and confidences plus per-frame ``AnyValues`` (decoder sample
+    index, YOLOX box, crop rectangle) and static crop/video sizes — and is what
+    :func:`load_stage_b` queries back. The gated skeleton and ``…_rejected``
+    entities are subsampled visualization: keypoints the AssemblyHands-X gate
+    zeroes are NaN'd on the skeleton entity (the only per-keypoint mechanism
+    that also suppresses their edges) and shown raw, connectionless, on the
+    sibling.
     """
     for name, cam in per_camera.items():
         entity: str = f"{pinhole_entity(name)}/exocalib_kp2d"
+        raw_entity: str = f"{entity}_raw"
         rejected_entity: str = f"{entity}_rejected"
         log_coco133_class_context(recording, entity, ((0, "sapiens2 kp2d", (240, 140, 60)),))
+        log_coco133_class_context(recording, raw_entity, ((0, "sapiens2 kp2d raw", (110, 110, 110)),), connections=False)
         log_coco133_class_context(recording, rejected_entity, ((0, "sapiens2 kp2d rejected", (110, 110, 110)),), connections=False)
+        recording.log(raw_entity, rr.AnyValues(crop_input_wh=cam.crop_input_wh, video_wh=cam.video_wh), static=True)
+        for t in range(len(cam.sample_indices)):
+            recording.set_time(TIMELINE, duration=1e-9 * float(cam.times_ns[t]))
+            recording.log(
+                raw_entity,
+                Points2DWithConfidence(positions=cam.kp_xy[t], confidences=cam.conf[t], class_ids=0, keypoint_ids=np.arange(133), radii=1.0),
+            )
+            recording.log(
+                raw_entity,
+                rr.AnyValues(
+                    sample_idx=cam.sample_indices[t : t + 1],
+                    bbox_xyxy=cam.bbox_xyxy[t],
+                    crop_origin_xy=cam.crop_origin_xy[t],
+                    crop_size_wh=cam.crop_size_wh[t],
+                ),
+            )
+            detected: bool = bool(np.isfinite(cam.bbox_xyxy[t]).all())
+            recording.log(
+                f"{entity}_bbox",
+                rr.Boxes2D(
+                    array=cam.bbox_xyxy[t : t + 1] if detected else np.zeros((0, 4), dtype=np.float32),
+                    array_format=rr.Box2DFormat.XYXY,
+                    colors=(240, 140, 60),
+                ),
+            )
+            recording.log(
+                f"{entity}_crop",
+                rr.Boxes2D(
+                    array=np.concatenate((cam.crop_origin_xy[t], cam.crop_size_wh[t]))[None] if detected else np.zeros((0, 4), dtype=np.float32),
+                    array_format=rr.Box2DFormat.XYWH,
+                    colors=(110, 110, 110),
+                ),
+            )
         kp_filtered_t2, conf_post_t = postprocess_confidences(cam, config.median_window, config.margin_px, config.conf_tau)
         for t in range(0, len(cam.sample_indices), config.log_stride):
             if not np.isfinite(cam.kp_xy[t]).any():
@@ -294,10 +351,6 @@ def log_keypoints_layer(per_camera: dict[str, CameraKeypoints], recording: rr.Re
             gated_xy_j2[~keep_j] = np.nan
             rejected_j: ndarray = ~keep_j & np.isfinite(cam.kp_xy[t]).all(axis=1)
             recording.set_time(TIMELINE, duration=1e-9 * float(cam.times_ns[t]))
-            recording.log(
-                f"{entity}_bbox",
-                rr.Boxes2D(array=cam.bbox_xyxy[t], array_format=rr.Box2DFormat.XYXY, colors=(240, 140, 60)),
-            )
             recording.log(
                 entity,
                 Points2DWithConfidence(
@@ -347,8 +400,6 @@ def main(config: Keypoints2dConfig) -> None:
     for cam_idx, name in enumerate(streams.names):
         cam: CameraKeypoints = run_camera_sweep(streams, cam_idx, detector, pose, config)
         per_camera[name] = cam
-        npz_path: Path = config.output_dir / segment_id / "kp2d" / f"{name.replace('/', '_')}.npz"
-        cam.save(npz_path)
         detected: int = int(np.isfinite(cam.bbox_xyxy).all(axis=1).sum())
         print(f"{name}: {detected}/{len(cam.sample_indices)} frames with a person, mean conf {cam.conf[cam.conf > 0].mean():.3f}")
 

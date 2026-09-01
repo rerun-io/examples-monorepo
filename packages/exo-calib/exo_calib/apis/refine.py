@@ -1,6 +1,7 @@
 """Stage C+D: Kineo-style correspondences, robust triangulation, and staged BA.
 
-Consumes Stage A (``init_cameras.npz``) and Stage B (``kp2d/*.npz``): applies
+Consumes Stage A (``exocalib_init`` layer) and Stage B (``exocalib_kp2d``
+layer) straight from the catalog: applies
 the AssemblyHands-X confidence post-processing (temporal median filter,
 crop-margin downweight, threshold-rescale), builds spatio-temporal
 correspondences with Kineo's pair rule, triangulates robustly against the
@@ -20,20 +21,29 @@ from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from simplecv.rerun_custom_types import Points3DWithConfidence
 
-from exo_calib.apis.calibrate_init import InitCameras, log_cameras_layer
-from exo_calib.apis.keypoints2d import AHX_CONF_TAU, AHX_MARGIN_PX, AHX_MEDIAN_WINDOW, CameraKeypoints, stack_postprocessed
+from exo_calib.apis.calibrate_init import log_cameras_layer
+from exo_calib.apis.keypoints2d import (
+    AHX_CONF_TAU,
+    AHX_MARGIN_PX,
+    AHX_MEDIAN_WINDOW,
+    CameraKeypoints,
+    load_stage_b,
+    stack_postprocessed,
+)
 from exo_calib.catalog_io import (
     DEFAULT_CATALOG_URL,
     DEFAULT_DATASET_NAME,
     EXO_CAMERA_NAMES,
     EXOCALIB_ROOT,
     TIMELINE,
+    RigCameras,
     connect_dataset,
     exocalib_entity,
     kp3d_entity,
     log_coco133_class_context,
     new_layer_recording,
     only_segment_id,
+    read_rig_cameras,
     register_layer,
 )
 from exo_calib.correspondences import ObservationSet
@@ -50,7 +60,7 @@ class RefineConfig:
     segment_id: str | None = None
     """Segment to refine; ``None`` uses the dataset's single segment."""
     output_dir: Path = Path("data/outputs")
-    """Directory holding Stage A/B outputs; refined outputs land beside them."""
+    """Directory for the generated layer RRD."""
     median_window: int = AHX_MEDIAN_WINDOW
     """Temporal median filter window (frames) on the 2D keypoints."""
     margin_px: float = AHX_MARGIN_PX
@@ -93,15 +103,6 @@ class RefineConfig:
     """Application id of generated layer recordings."""
     register: bool = True
     """Register the layer RRD into the catalog after writing it."""
-
-
-def load_stage_b(output_dir: Path, segment_id: str, names: tuple[str, ...]) -> dict[str, CameraKeypoints]:
-    """Load Stage B per-camera NPZs."""
-    per_camera: dict[str, CameraKeypoints] = {}
-    for name in names:
-        npz_path: Path = output_dir / segment_id / "kp2d" / f"{name.replace('/', '_')}.npz"
-        per_camera[name] = CameraKeypoints.load(npz_path)
-    return per_camera
 
 
 def metric_rescale_from_keypoints(
@@ -196,8 +197,8 @@ def main(config: RefineConfig) -> None:
     dataset = connect_dataset(config.catalog_url, config.dataset_name)
     segment_id: str = config.segment_id or only_segment_id(dataset)
     segment_dir: Path = config.output_dir / segment_id
-    init: InitCameras = InitCameras.load(segment_dir / "init_cameras.npz")
-    per_camera: dict[str, CameraKeypoints] = load_stage_b(config.output_dir, segment_id, EXO_CAMERA_NAMES)
+    init: RigCameras = read_rig_cameras(dataset, segment_id, root=exocalib_entity("init"))
+    per_camera: dict[str, CameraKeypoints] = load_stage_b(dataset, segment_id, EXO_CAMERA_NAMES)
 
     kp_xy_vtj2, conf_vtj = stack_postprocessed(per_camera, EXO_CAMERA_NAMES, config.median_window, config.margin_px, config.conf_tau)
     print(f"{kp_xy_vtj2.shape[1]} frames x {len(EXO_CAMERA_NAMES)} views; mean post conf {conf_vtj[conf_vtj > 0].mean():.3f}")
@@ -247,10 +248,6 @@ def main(config: RefineConfig) -> None:
         result.cam_T_world_v44[:, :3, 3] *= scale_fix
         result.points_xyz_n3 *= scale_fix
 
-    refined = InitCameras(names=init.names, k_v33=init.k_v33, cam_T_world_v44=result.cam_T_world_v44, metric_scale=init.metric_scale * scale_fix)
-    refined.save(segment_dir / "refined_cameras.npz")
-    print(f"wrote {segment_dir / 'refined_cameras.npz'}")
-
     # Kineo pairwise reprojection consensus confidences for both camera sets.
     conf3d_by_variant: dict[str, tuple[Float64[ndarray, "n 3"], Float64[ndarray, " n"]]] = {}
     for variant, cams_T, points in (("init", init.cam_T_world_v44, points_init), ("refined", result.cam_T_world_v44, result.points_xyz_n3)):
@@ -262,6 +259,7 @@ def main(config: RefineConfig) -> None:
         print(f"{variant}: {int(valid.sum())} points, mean 3D confidence {conf_points[valid].mean():.3f}")
 
     recording, rrd_path = new_layer_recording(config.application_id, segment_id, segment_dir / f"{config.layer_name}.rrd")
+    recording.log(exocalib_entity("refined"), rr.AnyValues(metric_rescale_fix=np.array([scale_fix])), static=True)
     log_coco133_class_context(
         recording,
         EXOCALIB_ROOT,

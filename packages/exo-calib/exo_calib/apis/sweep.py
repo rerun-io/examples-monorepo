@@ -1,6 +1,6 @@
 """Hill-climb sweep: run many refine configurations in-process and score each.
 
-Loads Stage A/B outputs once, then for every experiment: joint selection →
+Loads Stage A/B layers from the catalog once, then for every experiment: joint selection →
 AssemblyHands-X post-processing → Kineo correspondences → robust triangulation
 → kornia BA → SE(3) evaluation against GT. GT touches only the scoring.
 Results append to ``sweep_results.csv`` next to ``eval.json``.
@@ -14,17 +14,23 @@ import numpy as np
 from jaxtyping import Float64
 from numpy import ndarray
 
-from exo_calib.apis.calibrate_init import InitCameras
-from exo_calib.apis.keypoints2d import AHX_CONF_TAU, AHX_MARGIN_PX, AHX_MEDIAN_WINDOW, CameraKeypoints, stack_postprocessed
-from exo_calib.apis.refine import load_stage_b
+from exo_calib.apis.keypoints2d import (
+    AHX_CONF_TAU,
+    AHX_MARGIN_PX,
+    AHX_MEDIAN_WINDOW,
+    CameraKeypoints,
+    load_stage_b,
+    stack_postprocessed,
+)
 from exo_calib.catalog_io import (
     DEFAULT_CATALOG_URL,
     DEFAULT_DATASET_NAME,
     EXO_CAMERA_NAMES,
-    GtCameras,
+    RigCameras,
     connect_dataset,
+    exocalib_entity,
     only_segment_id,
-    read_gt_cameras,
+    read_rig_cameras,
 )
 
 JOINT_SUBSETS: dict[str, tuple[tuple[int, int], ...]] = {
@@ -89,7 +95,7 @@ class SweepConfig:
     segment_id: str | None = None
     """Segment to sweep; ``None`` uses the dataset's single segment."""
     output_dir: Path = Path("data/outputs")
-    """Directory holding Stage A/B outputs."""
+    """Directory for ``sweep_results.csv``."""
     batch: str = "baseline"
     """Name of the experiment batch defined in ``BATCHES``."""
 
@@ -97,8 +103,8 @@ class SweepConfig:
 def run_experiment(
     experiment: Experiment,
     per_camera: dict[str, CameraKeypoints],
-    init: InitCameras,
-    gt: GtCameras,
+    init: RigCameras,
+    gt: RigCameras,
     postprocess_cache: dict[tuple, tuple],
 ) -> dict:
     """Run one configuration end to end and return its metrics row."""
@@ -230,9 +236,9 @@ def main(config: SweepConfig) -> None:
     dataset = connect_dataset(config.catalog_url, config.dataset_name)
     segment_id: str = config.segment_id or only_segment_id(dataset)
     segment_dir: Path = config.output_dir / segment_id
-    init: InitCameras = InitCameras.load(segment_dir / "init_cameras.npz")
-    gt: GtCameras = read_gt_cameras(dataset, segment_id)
-    per_camera: dict[str, CameraKeypoints] = load_stage_b(config.output_dir, segment_id, EXO_CAMERA_NAMES)
+    init: RigCameras = read_rig_cameras(dataset, segment_id, root=exocalib_entity("init"))
+    gt: RigCameras = read_rig_cameras(dataset, segment_id)
+    per_camera: dict[str, CameraKeypoints] = load_stage_b(dataset, segment_id, EXO_CAMERA_NAMES)
 
     postprocess_cache: dict[tuple, tuple] = {}
     rows: list[dict] = []

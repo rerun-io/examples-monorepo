@@ -47,8 +47,8 @@ def kp3d_entity(variant: str) -> str:
 
 
 @dataclass(slots=True)
-class GtCameras:
-    """Ground-truth exo camera parameters read from the base layer."""
+class RigCameras:
+    """A camera rig read back from a catalog layer (GT base layer or an exocalib layer)."""
 
     names: tuple[str, ...]
     """Camera entity names, e.g. ``rig_00/cam_00``."""
@@ -81,47 +81,49 @@ def only_segment_id(dataset: DatasetEntry) -> str:
     return segment_ids[0]
 
 
-def read_gt_cameras(dataset: DatasetEntry, segment_id: str, names: tuple[str, ...] = EXO_CAMERA_NAMES) -> GtCameras:
-    """Read GT intrinsics and extrinsics of the exo cameras from the base layer.
+def read_rig_cameras(
+    dataset: DatasetEntry, segment_id: str, root: str = "/world", names: tuple[str, ...] = EXO_CAMERA_NAMES
+) -> RigCameras:
+    """Read a rig's intrinsics and extrinsics back from a catalog layer.
+
+    ``root="/world"`` reads the GT base layer (evaluation only — never inside
+    the pipeline); ``exocalib_entity("init")``/``exocalib_entity("refined")``
+    read the pipeline's own frusta layers, which are the stage store for
+    camera parameters.
 
     Args:
         dataset: Catalog dataset entry.
         segment_id: Segment to read.
-        names: Camera entity names under ``/world``.
+        root: Entity prefix the rig's cameras live under.
+        names: Camera entity names under ``root``.
 
     Returns:
-        GT camera parameters (used for evaluation only — never inside the pipeline).
+        The rig's camera parameters.
     """
-    columns: list[str] = []
-    for name in names:
-        columns += [
-            f"/world/{name}:Transform3D:mat3x3",
-            f"/world/{name}:Transform3D:translation",
-            f"/world/{name}/pinhole:Pinhole:image_from_camera",
-        ]
-    view = dataset.filter_segments(segment_id).filter_contents([f"/world/{name}/**" for name in names])
-    table: pa.Table = view.reader(index=TIMELINE, fill_latest_at=True).select(TIMELINE, *columns).sort(TIMELINE).to_arrow_table()
+    view = dataset.filter_segments(segment_id).filter_contents([f"{root}/{name}/**" for name in names])
+    # All rig calibration components are logged static, so read the static row.
+    table: pa.Table = view.reader(index=None).to_arrow_table()
 
     def last_valid(column_name: str) -> ndarray:
         chunk: pa.ChunkedArray = table.column(column_name)
         values: list = [v for v in chunk.to_pylist() if v is not None]
         if not values:
             raise ValueError(f"column {column_name} has no data in segment {segment_id}")
-        return np.asarray(values[-1], dtype=np.float64)
+        return np.asarray(values[-1], dtype=np.float64).reshape(-1)
 
     k_list: list[Float64[ndarray, "3 3"]] = []
     cam_T_world_list: list[Float64[ndarray, "4 4"]] = []
     for name in names:
         # Rerun stores mat3x3 column-major; both Transform3D and Pinhole need the transpose.
-        cam_R_world_33: Float64[ndarray, "3 3"] = last_valid(f"/world/{name}:Transform3D:mat3x3").reshape(3, 3).T
-        cam_t_world_3: Float64[ndarray, "3"] = last_valid(f"/world/{name}:Transform3D:translation").reshape(3)
-        k_33: Float64[ndarray, "3 3"] = last_valid(f"/world/{name}/pinhole:Pinhole:image_from_camera").reshape(3, 3).T
+        cam_R_world_33: Float64[ndarray, "3 3"] = last_valid(f"{root}/{name}:Transform3D:mat3x3").reshape(3, 3).T
+        cam_t_world_3: Float64[ndarray, "3"] = last_valid(f"{root}/{name}:Transform3D:translation").reshape(3)
+        k_33: Float64[ndarray, "3 3"] = last_valid(f"{root}/{name}/pinhole:Pinhole:image_from_camera").reshape(3, 3).T
         cam_T_world_44: Float64[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
         cam_T_world_44[:3, :3] = cam_R_world_33
         cam_T_world_44[:3, 3] = cam_t_world_3
         k_list.append(k_33)
         cam_T_world_list.append(cam_T_world_44)
-    return GtCameras(names=names, k_v33=np.stack(k_list), cam_T_world_v44=np.stack(cam_T_world_list))
+    return RigCameras(names=names, k_v33=np.stack(k_list), cam_T_world_v44=np.stack(cam_T_world_list))
 
 
 def new_layer_recording(application_id: str, segment_id: str, rrd_path: Path) -> tuple[rr.RecordingStream, Path]:
