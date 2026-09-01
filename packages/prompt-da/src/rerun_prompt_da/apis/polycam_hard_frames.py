@@ -13,6 +13,8 @@ from monopriors.models.depth_completion import AnnotatedCompletionConfig, Prompt
 from monopriors.models.depth_completion.base_completion_depth import BaseCompletionPredictor
 from monopriors.models.depth_completion.prompt_da import DEFAULT_PROMPTDA_CACHE_DIR
 from numpy import ndarray
+from serde import field as serde_field
+from serde import serde, to_dict
 from simplecv.data.polycam import PolycamData, PolycamDataset, load_polycam_data
 from torch import Tensor
 from trtkit import TensorRtBackendConfig, TorchBackendConfig
@@ -53,6 +55,7 @@ class PolycamHardFramesConfig:
     """Optional cap on processed frames."""
 
 
+@serde
 @dataclass(frozen=True, slots=True)
 class FrameMetrics:
     """Teacher-relative errors for one capture frame."""
@@ -154,20 +157,76 @@ def compute_frame_metrics(
     )
 
 
-def _metrics_dict(metrics: FrameMetrics) -> dict[str, int | float]:
-    """Convert one metric record to its stable JSON representation."""
-    return {
-        "frame_index": metrics.frame_index,
-        "student_overall_dev_m": metrics.student_overall_dev_m,
-        "student_edge_dev_m": metrics.student_edge_dev_m,
-        "student_flat_dev_m": metrics.student_flat_dev_m,
-        "baseline_overall_dev_m": metrics.baseline_overall_dev_m,
-        "baseline_edge_dev_m": metrics.baseline_edge_dev_m,
-        "baseline_flat_dev_m": metrics.baseline_flat_dev_m,
-        "baseline_to_student_overall_ratio": metrics.baseline_to_student_overall_ratio,
-        "baseline_to_student_edge_ratio": metrics.baseline_to_student_edge_ratio,
-        "baseline_to_student_flat_ratio": metrics.baseline_to_student_flat_ratio,
-    }
+@serde
+@dataclass(frozen=True, slots=True)
+class RankedFrameRecord:
+    """One full-ranking entry: a rank and its frame's flattened metrics."""
+
+    rank: int
+    """One-based rank by descending edge-region student deviation."""
+    metrics: FrameMetrics = serde_field(flatten=True)
+    """Teacher-relative scalar metrics, flattened into this record."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class KeptFrameRecord:
+    """One written hard frame: rank, artifact paths, and flattened metrics."""
+
+    rank: int
+    """One-based rank by descending edge-region student deviation."""
+    frame_path: str
+    """Frame npz path relative to the output directory."""
+    preview_path: str
+    """Preview PNG path relative to the output directory."""
+    metrics: FrameMetrics = serde_field(flatten=True)
+    """Teacher-relative scalar metrics, flattened into this record."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class RunMetadata:
+    """Provenance of one mining run."""
+
+    capture_path: str
+    """Polycam capture the frames came from."""
+    checkpoint_path: str | None
+    """Student checkpoint, when the student is ZipDepth-PromptDA."""
+    edge_quantile: float
+    """Per-frame teacher-gradient quantile defining the edge region."""
+    capture_hw: tuple[int, int]
+    """Capture resolution as (height, width)."""
+    teacher_config_class: str
+    """Completion config class that produced the eval labels."""
+    student_config_class: str
+    """Completion config class whose deviations ranked the frames."""
+    student_reference_version: str
+    """Human label for the student checkpoint generation."""
+    student_output_role: str
+    """How the stored student depth should be used downstream."""
+    eval_label_field: str
+    """npz field holding the eval label."""
+    batch_size: int
+    """Frames per model batch."""
+    max_frames: int | None
+    """Frame cap applied to the capture, if any."""
+    max_keep: int
+    """Maximum number of highest-error frames written."""
+    processed_frames: int
+    """Frames actually processed."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
+class HardFramesReport:
+    """The complete metrics.json document."""
+
+    run: RunMetadata
+    """Provenance of this mining run."""
+    kept_frames: list[KeptFrameRecord]
+    """Written frames, ranked."""
+    full_ranking: list[RankedFrameRecord]
+    """Every processed frame, ranked."""
 
 
 def _colorize_depth(
@@ -298,7 +357,7 @@ def polycam_hard_frames(config: PolycamHardFramesConfig) -> None:
     frames_dir.mkdir(parents=True, exist_ok=True)
     previews_dir.mkdir(parents=True, exist_ok=True)
 
-    kept_json: list[dict[str, object]] = []
+    kept_records: list[KeptFrameRecord] = []
     frame: HardFrame
     for rank, frame in enumerate(kept_frames, start=1):
         frame_name: str = f"frame_{frame.metrics.frame_index:05d}"
@@ -313,41 +372,38 @@ def polycam_hard_frames(config: PolycamHardFramesConfig) -> None:
             frame_index=frame.metrics.frame_index,
         )
         _write_preview(frame, config.out_dir / preview_relative_path)
-        kept_json.append(
-            {
-                "rank": rank,
-                "frame_path": frame_relative_path.as_posix(),
-                "preview_path": preview_relative_path.as_posix(),
-                **_metrics_dict(frame.metrics),
-            }
+        kept_records.append(
+            KeptFrameRecord(
+                rank=rank,
+                frame_path=frame_relative_path.as_posix(),
+                preview_path=preview_relative_path.as_posix(),
+                metrics=frame.metrics,
+            )
         )
 
     checkpoint_path: Path | None = student_config.checkpoint if isinstance(student_config, ZipDepthPromptConfig) else None
-    ranking_json: list[dict[str, int | float]] = [
-        {"rank": rank, **_metrics_dict(metrics)} for rank, metrics in enumerate(ranked_metrics, start=1)
-    ]
-    metadata: dict[str, object] = {
-        "run": {
-            "capture_path": str(config.polycam_zip_path),
-            "checkpoint_path": str(checkpoint_path) if checkpoint_path is not None else None,
-            "edge_quantile": config.edge_quantile,
-            "capture_hw": list(capture_hw),
-            "teacher_config_class": type(config.teacher).__name__,
-            "student_config_class": type(student_config).__name__,
-            "student_reference_version": "v4",
-            "student_output_role": "reference_only",
-            "eval_label_field": "teacher",
-            "batch_size": config.batch_size,
-            "max_frames": config.max_frames,
-            "max_keep": config.max_keep,
-            "processed_frames": n_frames,
-        },
-        "kept_frames": kept_json,
-        "full_ranking": ranking_json,
-    }
+    report = HardFramesReport(
+        run=RunMetadata(
+            capture_path=str(config.polycam_zip_path),
+            checkpoint_path=str(checkpoint_path) if checkpoint_path is not None else None,
+            edge_quantile=config.edge_quantile,
+            capture_hw=capture_hw,
+            teacher_config_class=type(config.teacher).__name__,
+            student_config_class=type(student_config).__name__,
+            student_reference_version="v4",
+            student_output_role="reference_only",
+            eval_label_field="teacher",
+            batch_size=config.batch_size,
+            max_frames=config.max_frames,
+            max_keep=config.max_keep,
+            processed_frames=n_frames,
+        ),
+        kept_frames=kept_records,
+        full_ranking=[RankedFrameRecord(rank=rank, metrics=metrics) for rank, metrics in enumerate(ranked_metrics, start=1)],
+    )
     metrics_path: Path = config.out_dir / "metrics.json"
     with metrics_path.open("w", encoding="utf-8") as metrics_file:
-        json.dump(metadata, metrics_file, indent=2, allow_nan=False)
+        json.dump(to_dict(report), metrics_file, indent=2, allow_nan=False)
         metrics_file.write("\n")
 
     print(f"{'frame':>7}  {'edge dev mm':>11}  {'overall dev mm':>14}  {'baseline/student edge':>21}")
