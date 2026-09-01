@@ -583,6 +583,12 @@ depends-on = ["_prompt-da-download-polycam-example"]
 cwd = "packages/prompt-da"
 description = "Three-way Polycam comparison; pass --zipdepth-checkpoint PATH, or select prompt-da tensorrt zipdepth-promptda {torch,tensorrt} --checkpoint PATH"
 
+[feature.prompt-da-demo.tasks.prompt-da-polycam-hard-frames]
+cmd = "python tools/polycam_hard_frames.py --polycam-zip-path data/6G-room-example.zip --max-keep 20"
+depends-on = ["_prompt-da-download-polycam-example"]
+cwd = "packages/prompt-da"
+description = "Mine Polycam frames with the largest edge-region ZipDepth-PromptDA teacher deviation"
+
 [feature.prompt-da-demo.tasks.prompt-da-app]
 cmd = "python tools/gradio_app.py"
 depends-on = ["_prompt-da-download-polycam-example"]
