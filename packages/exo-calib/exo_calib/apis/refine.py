@@ -70,6 +70,9 @@ class RefineConfig:
     min_pair_conf: float = 0.90
     """Kineo pair rule: geometric-mean confidence a view pair must exceed.
     (Kineo's default is 0.75; 0.90 won the hill-climb on Assembly101.)"""
+    min_views: int = 2
+    """Minimum observing cameras per correspondence point; higher values give the
+    leave-one-out rejection redundancy to excise a single bad view."""
     frame_stride: int = 3
     """Temporal stride over Stage B frames when building correspondences."""
     max_points: int | None = 6000
@@ -220,14 +223,17 @@ def main(config: RefineConfig) -> None:
         conf_vtj,
         frame_stride=config.frame_stride,
         min_pair_conf=config.min_pair_conf,
+        min_views=config.min_views,
         max_points=config.max_points,
         seed=config.seed,
     )
     print(f"observations: {len(obs.obs_view_idx)} over {len(obs.point_frame_idx)} points")
 
+    n_obs_before: int = obs.obs_point_idx.size
     points_init, obs = triangulate_robust(
         obs, init.k_v33, init.cam_T_world_v44, reproj_threshold_px=config.reproj_threshold_px
     )
+    print(f"robust triangulation kept {obs.obs_point_idx.size}/{n_obs_before} observations")
     err_init: float = mean_reprojection_error_px(obs, points_init, init.k_v33, init.cam_T_world_v44)
     print(f"init mean reprojection error: {err_init:.2f} px")
 
