@@ -1,8 +1,10 @@
-"""Write the exocalib viewer blueprint (.rbl) for the current catalog dataset.
+"""Write and register the exocalib viewer blueprint for the catalog dataset.
 
-Catalog partitions use the dataset id as their application id, and the id
-changes every time the dataset is recreated, so the blueprint must be
-regenerated after re-registration and opened alongside the segment URL.
+The blueprint is registered as the dataset's DEFAULT blueprint, so opening any
+segment from the catalog applies the layout automatically — no manual .rbl
+opening. Catalog partitions use the dataset id as their application id and the
+id changes every time the dataset is recreated, so rerun this tool after a
+dataset recreate.
 """
 
 from dataclasses import dataclass
@@ -29,7 +31,10 @@ class BlueprintConfig:
     dataset_name: str = DEFAULT_DATASET_NAME
     """Catalog dataset the blueprint targets (its id becomes the application id)."""
     output: Path = Path("data/exocalib.rbl")
-    """Where to write the .rbl."""
+    """Where to write the .rbl (a ``-N`` suffix is added if the file exists —
+    the server caches file descriptors, so registered files are never overwritten)."""
+    register: bool = True
+    """Register the .rbl with the dataset and set it as the default blueprint."""
 
 
 def main(config: BlueprintConfig) -> None:
@@ -73,5 +78,13 @@ def main(config: BlueprintConfig) -> None:
     )
     blueprint: rrb.Blueprint = rrb.Blueprint(container, collapse_panels=True)
     config.output.parent.mkdir(parents=True, exist_ok=True)
-    blueprint.save(str(dataset.id), str(config.output))
-    print(f"wrote {config.output} for application id {dataset.id}")
+    rbl_path: Path = config.output
+    counter: int = 1
+    while rbl_path.exists():
+        rbl_path = config.output.with_name(f"{config.output.stem}-{counter}{config.output.suffix}")
+        counter += 1
+    blueprint.save(str(dataset.id), str(rbl_path))
+    print(f"wrote {rbl_path} for application id {dataset.id}")
+    if config.register:
+        dataset.register_blueprint(rbl_path.resolve().as_uri(), set_default=True)
+        print(f"registered as default blueprint: {dataset.default_blueprint()}")

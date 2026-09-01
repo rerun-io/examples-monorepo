@@ -140,8 +140,15 @@ def metric_rescale_from_keypoints(
 
     from exo_calib.video_io import open_exo_streams
 
+    # Take the frames with the most observations: on long windows the point
+    # budget spreads thin (a few points per frame), and evenly-spaced frames
+    # leave every (view, frame) group under the >= 3-sample validity floor.
     frames_used: Int64[ndarray, " f"] = np.unique(obs.point_frame_idx)
-    chosen_frames_f: Int64[ndarray, " f"] = frames_used[np.linspace(0, frames_used.size - 1, min(n_frames, frames_used.size)).astype(np.int64)]
+    obs_per_frame_f: Int64[ndarray, " f"] = np.bincount(
+        np.searchsorted(frames_used, obs.point_frame_idx[obs.obs_point_idx]), minlength=frames_used.size
+    ).astype(np.int64)
+    top_order_f: Int64[ndarray, " f"] = np.argsort(-obs_per_frame_f, kind="stable").astype(np.int64)
+    chosen_frames_f: Int64[ndarray, " f"] = frames_used[np.sort(top_order_f[: min(n_frames, frames_used.size)])]
     streams = open_exo_streams(dataset, segment_id)
     moge: MoGeV2MetricPredictor = MoGeV2MetricPredictor(device="cuda")
 
