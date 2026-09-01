@@ -89,6 +89,14 @@ class TrainCatalogConfig:
     """Write a step checkpoint after this many updates; zero disables step checkpoints."""
     resume: Path | None = None
     """Training checkpoint whose model, optimizer, scheduler, and global step are restored."""
+    profile: bool = False
+    """Record one torch.profiler trace (CPU+CUDA ops, shapes, memory, stacks) and print the
+    trainer's bottleneck summary. Uses the trainer's existing profiler machinery."""
+    profile_dir: Path = Path("data/profiler")
+    """Output directory for the profiler trace, summary, and TensorBoard events."""
+    profile_wait: int = 100
+    """Steps to skip before the profiler warms up; must clear the torch.compile warmup so the
+    recorded window reflects steady-state kernels, not compilation."""
     max_lr: float | None = None
     """OneCycle peak LR; None uses config LR / 100 for fine-tuning and config LR from scratch.
     Measured on the fixed probe set: at config/10 (1e-4, batch 4) fine-tuning diverges once
@@ -469,6 +477,11 @@ def main(
             alpha_grad=float(loss_config.get("alpha_grad", 2.0)),
             target_mode=config.target_mode,
             metric_gradient_weight=config.metric_gradient_weight,
+            use_profiler=config.profile,
+            profile_dir=str(config.profile_dir),
+            profile_wait=config.profile_wait,
+            profile_warmup=5,
+            profile_active=10,
         )
         if step_loss_callback is not None:
             trainer.criterion = cast(Any, _LossObserver(trainer.criterion, step_loss_callback))
