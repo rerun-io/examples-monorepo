@@ -11,11 +11,11 @@ Kineo's pairwise reprojection consensus confidence, plus the refined frusta.
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import rerun as rr
-from jaxtyping import Float32, Float64
+from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
 from simplecv.rerun_custom_types import Points3DWithConfidence
 
@@ -51,8 +51,9 @@ class RefineConfig:
     """AssemblyHands-X crop-edge margin, in crop pixels (crop is 768x1024)."""
     conf_tau: float = 0.15
     """AssemblyHands-X confidence threshold before rescaling to [0, 1]."""
-    min_pair_conf: float = 0.75
-    """Kineo pair rule: geometric-mean confidence a view pair must exceed."""
+    min_pair_conf: float = 0.90
+    """Kineo pair rule: geometric-mean confidence a view pair must exceed.
+    (Kineo's default is 0.75; 0.90 won the hill-climb on Assembly101.)"""
     frame_stride: int = 3
     """Temporal stride over Stage B frames when building correspondences."""
     max_points: int | None = 6000
@@ -63,13 +64,19 @@ class RefineConfig:
     """Bundle-adjust / re-triangulate rounds."""
     ba_max_iterations: int = 50
     """LM iterations per bundle-adjust call."""
-    robust_scale_px: float = 2.0
-    """Huber scale in pixels for the BA residuals."""
+    robust: Literal["identity", "huber", "cauchy", "tukey"] = "cauchy"
+    """Robust kernel for the BA residuals."""
+    robust_scale_px: float = 1.0
+    """Robust-kernel scale in pixels for the BA residuals."""
     pose_prior_sigma_m: float = 0.10
     """Soft prior (meters) anchoring camera centers to the Stage A estimate;
     pins the similarity gauge (scale drift) and keeps the BA a refinement."""
     fix_first_camera: bool = False
     """Hard-fix camera 0 instead of relying on the center priors for gauge."""
+    metric_rescale_frames: int = 5
+    """After BA, re-estimate the global metric scale from MoGe-2 depth at the
+    tracked keypoints over this many frames per view (0 disables). Pools
+    thousands of depth ratios instead of Stage A's eight single-frame medians."""
     lambda_decay: float = 1.0
     """Kineo exponential decay for the 3D point confidence."""
     seed: int = 0
@@ -111,6 +118,87 @@ def postprocess_confidences(cam: CameraKeypoints, median_window: int, margin_px:
         modulated: Float64[ndarray, "133"] = modulate_crop_edge_confidence(kp_crop_xy, cam.conf[t].astype(np.float64), crop_wh, margin_px)
         conf_out[t] = threshold_rescale_confidence(modulated, tau=conf_tau)
     return kp_xy_t2.astype(np.float32), conf_out
+
+
+def metric_rescale_from_keypoints(
+    dataset: Any,
+    segment_id: str,
+    cam_T_world_v44: Float64[ndarray, "v 4 4"],
+    k_v33: Float64[ndarray, "v 3 3"],
+    obs: Any,
+    points_xyz_n3: Float64[ndarray, "n 3"],
+    sample_indices_t: ndarray,
+    n_frames: int,
+    rescale_joints: str = "all",
+) -> float:
+    """Estimate a global scale correction from MoGe-2 metric depth at the keypoints.
+
+    For ``n_frames`` frames spread over the window, each view's MoGe-2 metric
+    depth is sampled at the surviving 2D observations and divided by the depth
+    of the triangulated point in that camera; the median ratio over all samples
+    is the correction (1.0 = the rig is already metric).
+
+    Args:
+        dataset: Catalog dataset entry (frames are decoded from it).
+        segment_id: Segment being refined.
+        cam_T_world_v44: Refined world-to-camera transforms.
+        k_v33: Camera intrinsics at video resolution.
+        obs: Surviving observations (pixel coordinates index the video frames).
+        points_xyz_n3: Triangulated points in the rig's (pre-rescale) frame.
+        sample_indices_t: Stage B decoder sample index per correspondence frame.
+        n_frames: Number of distinct frames to sample.
+
+    Returns:
+        Median metric/current depth ratio over all valid samples.
+    """
+    import torch
+    from monopriors.models.metric_depth.moge_v2 import MoGeV2MetricPredictor
+
+    from exo_calib.catalog_io import open_exo_streams
+
+    frames_used: Int64[ndarray, " f"] = np.unique(obs.point_frame_idx)
+    chosen_frames_f: Int64[ndarray, " f"] = frames_used[np.linspace(0, frames_used.size - 1, min(n_frames, frames_used.size)).astype(np.int64)]
+    streams = open_exo_streams(dataset, segment_id)
+    moge: MoGeV2MetricPredictor = MoGeV2MetricPredictor(device="cuda")
+
+    # Empirically the all-joint estimator tracks GT scale best on Assembly101:
+    # body-only sampling has too few surviving correspondences, and MoGe's body
+    # depth runs a few percent short on this scene.
+    if rescale_joints == "body":
+        joint_obs_m: ndarray = obs.point_joint_idx[obs.obs_point_idx] < 17
+    else:
+        joint_obs_m = np.ones(obs.obs_point_idx.shape[0], dtype=bool)
+    group_medians: list[float] = []
+    n_samples: int = 0
+    for frame in chosen_frames_f:
+        in_frame_m: ndarray = joint_obs_m & (obs.point_frame_idx[obs.obs_point_idx] == frame)
+        for view in np.unique(obs.obs_view_idx[in_frame_m]):
+            rows_r: Int64[ndarray, " r"] = np.flatnonzero(in_frame_m & (obs.obs_view_idx == view)).astype(np.int64)
+            point_rows_r: Int64[ndarray, " r"] = obs.obs_point_idx[rows_r]
+            points_r3: Float64[ndarray, "r 3"] = points_xyz_n3[point_rows_r]
+            finite_r: ndarray = np.isfinite(points_r3).all(axis=1)
+            if not finite_r.any():
+                continue
+            frame_rgb: ndarray = streams.frame_rgb_hw3(int(view), int(sample_indices_t[int(frame)]))
+            depth_hw: Float64[ndarray, "h w"] = moge(frame_rgb, K_33=k_v33[int(view)].astype(np.float32)).depth_meters.astype(np.float64)
+            xy_r2: Float64[ndarray, "r 2"] = obs.obs_xy[rows_r]
+            px_r: Int64[ndarray, " r"] = np.clip(np.round(xy_r2[:, 0]).astype(np.int64), 0, depth_hw.shape[1] - 1)
+            py_r: Int64[ndarray, " r"] = np.clip(np.round(xy_r2[:, 1]).astype(np.int64), 0, depth_hw.shape[0] - 1)
+            metric_z_r: Float64[ndarray, " r"] = depth_hw[py_r, px_r]
+            points_homo_r4: Float64[ndarray, "r 4"] = np.column_stack((points_r3, np.ones(points_r3.shape[0])))
+            current_z_r: Float64[ndarray, " r"] = (cam_T_world_v44[int(view)][:3, :] @ points_homo_r4.T).T[:, 2]
+            valid_r: ndarray = finite_r & np.isfinite(metric_z_r) & (metric_z_r > 0.1) & (current_z_r > 0.1)
+            if int(valid_r.sum()) >= 3:
+                group_medians.append(float(np.median(metric_z_r[valid_r] / current_z_r[valid_r])))
+                n_samples += int(valid_r.sum())
+    del moge
+    torch.cuda.empty_cache()
+    if len(group_medians) < 8:
+        print(f"metric rescale skipped: only {len(group_medians)} (view, frame) groups")
+        return 1.0
+    scale: float = float(np.median(np.asarray(group_medians)))
+    print(f"metric rescale[{rescale_joints}]: {n_samples} samples in {len(group_medians)} groups, median-of-medians = {scale:.4f}")
+    return scale
 
 
 def main(config: RefineConfig) -> None:
@@ -159,12 +247,27 @@ def main(config: RefineConfig) -> None:
         obs,
         points_init,
         rounds=config.ba_rounds,
+        robust=config.robust,
         robust_scale_px=config.robust_scale_px,
         max_iterations=config.ba_max_iterations,
         pose_prior_sigma_m=config.pose_prior_sigma_m,
         fixed_pose_indices=(0,) if config.fix_first_camera else (),
     )
     print(f"BA reprojection error per round (px): {[round(e, 3) for e in result.mean_reproj_px_per_round]}, converged={result.converged}")
+
+    if config.metric_rescale_frames > 0:
+        scale_fix: float = metric_rescale_from_keypoints(
+            dataset,
+            segment_id,
+            result.cam_T_world_v44,
+            init.k_v33,
+            obs,
+            result.points_xyz_n3,
+            per_camera[EXO_CAMERA_NAMES[0]].sample_indices,
+            config.metric_rescale_frames,
+        )
+        result.cam_T_world_v44[:, :3, 3] *= scale_fix
+        result.points_xyz_n3 *= scale_fix
 
     refined = InitCameras(names=init.names, k_v33=init.k_v33, cam_T_world_v44=result.cam_T_world_v44, metric_scale=init.metric_scale)
     refined.save(segment_dir / "refined_cameras.npz")
