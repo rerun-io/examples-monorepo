@@ -1366,6 +1366,7 @@ vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f
 
 [feature.exo-calib.activation.env]
 PACKAGE_DIR = "packages/exo-calib"
+PYREFLY_TARGET = "exo_calib"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # vistadream

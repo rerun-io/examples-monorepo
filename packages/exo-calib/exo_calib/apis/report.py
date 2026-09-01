@@ -81,64 +81,6 @@ def _variant_metrics(pred: InitCameras, gt: GtCameras) -> dict:
     return metrics
 
 
-def _gt_kp3d_by_time(dataset, segment_id: str) -> dict[int, Float64[ndarray, "133 3"]]:
-    """Read the GT 3D COCO-133 keypoints (hands) per timeline nanosecond."""
-    from exo_calib.catalog_io import TIMELINE
-
-    column: str = "/world/gt/coco133_xyz:Points3D:positions"
-    view = dataset.filter_segments(segment_id).filter_contents(["/world/gt/**"])
-    table = view.reader(index=TIMELINE, fill_latest_at=False).select(TIMELINE, column).sort(TIMELINE).to_arrow_table()
-    time_column: str = table.column_names[0]
-    gt_by_ns: dict[int, Float64[ndarray, "133 3"]] = {}
-    for row in table.to_pylist():
-        if row[column] is not None and len(row[column]) == 133:
-            gt_by_ns[int(row[time_column].value)] = np.asarray(row[column], dtype=np.float64)
-    return gt_by_ns
-
-
-def _kp3d_metrics(
-    points_npz: Path,
-    alignment,
-    gt_by_ns: dict[int, Float64[ndarray, "133 3"]],
-    max_time_gap_ns: int = 25_000_000,
-) -> dict | None:
-    """Score aligned triangulated keypoints against GT 3D hands (MPJPE, cm)."""
-    data = np.load(points_npz)
-    points_n3: Float64[ndarray, "n 3"] = data["points_xyz_n3"]
-    frame_idx_n = data["frame_idx_n"]
-    joint_idx_n = data["joint_idx_n"]
-    frame_times_ns = data["frame_times_ns"]
-    gt_times: Float64[ndarray, " g"] = np.array(sorted(gt_by_ns.keys()), dtype=np.float64)
-    if gt_times.size == 0:
-        return None
-    aligned_n3: Float64[ndarray, "n 3"] = (alignment.scale * (alignment.rotation_33 @ points_n3.T)).T + alignment.translation_3
-    point_times_n: Float64[ndarray, " n"] = frame_times_ns[frame_idx_n].astype(np.float64)
-    nearest_gt_pos_n = np.clip(np.searchsorted(gt_times, point_times_n), 1, gt_times.size - 1)
-    nearest_gt_ns_n = np.where(
-        np.abs(gt_times[nearest_gt_pos_n - 1] - point_times_n) <= np.abs(gt_times[nearest_gt_pos_n] - point_times_n),
-        gt_times[nearest_gt_pos_n - 1],
-        gt_times[nearest_gt_pos_n],
-    )
-    errors_cm: list[float] = []
-    for i in range(points_n3.shape[0]):
-        if abs(nearest_gt_ns_n[i] - point_times_n[i]) > max_time_gap_ns or not np.isfinite(aligned_n3[i]).all():
-            continue
-        gt_xyz_1333: Float64[ndarray, "133 3"] = gt_by_ns[int(nearest_gt_ns_n[i])]
-        gt_joint_3: Float64[ndarray, "3"] = gt_xyz_1333[int(joint_idx_n[i])]
-        if not np.isfinite(gt_joint_3).all():
-            continue
-        errors_cm.append(float(np.linalg.norm(aligned_n3[i] - gt_joint_3) * 100.0))
-    if not errors_cm:
-        return None
-    errors: Float64[ndarray, " e"] = np.asarray(errors_cm)
-    return {
-        "matched_points": int(errors.size),
-        "mean_cm": round(float(errors.mean()), 3),
-        "median_cm": round(float(np.median(errors)), 3),
-        "p90_cm": round(float(np.percentile(errors, 90)), 3),
-    }
-
-
 def main(config: ReportConfig) -> None:
     """Score both variants and write ``eval.json``."""
     dataset = connect_dataset(config.catalog_url, config.dataset_name)
@@ -162,13 +104,15 @@ def main(config: ReportConfig) -> None:
                 f"max {m['rotation_deg']['max']:5.2f} | scale {m['scale']:.4f}"
             )
 
+    eval_path: Path = segment_dir / "eval.json"
+    eval_path.write_text(json.dumps(report, indent=2))
+    print(f"wrote {eval_path}")
+
     # Viewer alignment: give each variant its own SE(3) pred-world -> GT-world
     # transform (on its frusta and kp3d subtrees) so everything overlays GT, and
     # draw labeled error lines from each aligned camera center to its GT center.
-    # The same alignment scores the triangulated keypoints against the GT hands.
     from exo_calib.eval import align_rigs
 
-    gt_kp3d_by_ns: dict[int, Float64[ndarray, "133 3"]] = _gt_kp3d_by_time(dataset, segment_id)
     rrd_path: Path = segment_dir / f"{config.align_layer_name}.rrd"
     recording: rr.RecordingStream = new_layer_recording(config.application_id, segment_id, rrd_path)
     gt_centers_v3: Float64[ndarray, "v 3"] = np.stack(
@@ -180,15 +124,6 @@ def main(config: ReportConfig) -> None:
             continue
         pred = InitCameras.load(npz_path)
         alignment = align_rigs(pred.cam_T_world_v44, gt.cam_T_world_v44, with_scale=False)
-        points_npz: Path = segment_dir / f"points_{variant}.npz"
-        if points_npz.exists() and variant in report:
-            kp3d_metrics: dict | None = _kp3d_metrics(points_npz, alignment, gt_kp3d_by_ns)
-            if kp3d_metrics is not None:
-                report[variant]["kp3d_hands_cm"] = kp3d_metrics
-                print(
-                    f"{variant:8s} kp3d vs GT hands: {kp3d_metrics['matched_points']} pts | "
-                    f"mean {kp3d_metrics['mean_cm']:.2f} cm med {kp3d_metrics['median_cm']:.2f} cm p90 {kp3d_metrics['p90_cm']:.2f} cm"
-                )
         transform: rr.Transform3D = rr.Transform3D(translation=alignment.translation_3, mat3x3=alignment.rotation_33)
         recording.log(f"/world/exocalib/{variant}", transform, static=True)
         recording.log(f"/world/exocalib/kp3d_{variant}", transform, static=True)
@@ -214,7 +149,3 @@ def main(config: ReportConfig) -> None:
     if config.register:
         register_layer(dataset, rrd_path, config.align_layer_name)
         print(f"registered layer {config.align_layer_name}")
-
-    eval_path: Path = segment_dir / "eval.json"
-    eval_path.write_text(json.dumps(report, indent=2))
-    print(f"wrote {eval_path}")

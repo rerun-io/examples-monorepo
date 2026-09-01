@@ -171,7 +171,6 @@ def main(config: RefineConfig) -> None:
     print(f"wrote {segment_dir / 'refined_cameras.npz'}")
 
     # Kineo pairwise reprojection consensus confidences for both camera sets.
-    times_ns = per_camera[EXO_CAMERA_NAMES[0]].times_ns
     conf3d_by_variant: dict[str, tuple[Float64[ndarray, "n 3"], Float64[ndarray, " n"]]] = {}
     for variant, cams_T, points in (("init", init.cam_T_world_v44, points_init), ("refined", result.cam_T_world_v44, result.points_xyz_n3)):
         conf_points: Float64[ndarray, " n"] = kineo_point_confidence_for_obs(
@@ -180,19 +179,12 @@ def main(config: RefineConfig) -> None:
         conf3d_by_variant[variant] = (points, conf_points)
         valid = np.isfinite(points).all(axis=1)
         print(f"{variant}: {int(valid.sum())} points, mean 3D confidence {conf_points[valid].mean():.3f}")
-        np.savez(
-            segment_dir / f"points_{variant}.npz",
-            points_xyz_n3=points,
-            confidence_n=conf_points,
-            frame_idx_n=obs.point_frame_idx,
-            joint_idx_n=obs.point_joint_idx,
-            frame_times_ns=times_ns,
-        )
 
     rrd_path: Path = segment_dir / f"{config.layer_name}.rrd"
     recording: rr.RecordingStream = new_layer_recording(config.application_id, segment_id, rrd_path)
     video_wh: tuple[int, int] = (1280, 720)
     log_cameras_layer(init.k_v33, result.cam_T_world_v44, tuple(init.names), video_wh, "/world/exocalib/refined", recording)
+    times_ns = per_camera[EXO_CAMERA_NAMES[0]].times_ns
     for variant, (points, conf_points) in conf3d_by_variant.items():
         _log_point_tracks(recording, f"/world/exocalib/kp3d_{variant}", obs, points, conf_points, times_ns)
     recording.flush(timeout_sec=30.0)
