@@ -25,6 +25,7 @@ from torch.utils.tensorboard import SummaryWriter
 from zipdepth.catalog.instrument import InstrumentedLoader
 from zipdepth.catalog.segments import DEFAULT_CATALOG_URL, PromptDACatalog, load_promptda_catalog
 from zipdepth.catalog.targets import AugmentPolicy, TargetMode
+from zipdepth.loss.metric_depth_loss import MetricDepthLoss
 from zipdepth.training.distributed import barrier, cleanup_distributed, fix_state_dict_prefix, print_main, setup_distributed
 from zipdepth.training.trainer import ZipDepthTrainer
 
@@ -111,6 +112,10 @@ class TrainCatalogConfig:
     profile_wait: int = 100
     """Steps to skip before the profiler warms up; must clear the torch.compile warmup so the
     recorded window reflects steady-state kernels, not compilation."""
+    profile_warmup: int = 5
+    """Profiler schedule — steps the profiler warms up on without recording."""
+    profile_active: int = 10
+    """Profiler schedule — steps actually recorded in the trace."""
     max_lr: float | None = None
     """OneCycle peak LR; None uses config LR / 100 for fine-tuning and config LR from scratch.
     Measured on the fixed probe set: at config/10 (1e-4, batch 4) fine-tuning diverges once
@@ -125,9 +130,9 @@ class _LossObserver(nn.Module):
         self._criterion: nn.Module = criterion
         self._callback: Callable[[float], None] = callback
 
-    def forward(self, pred: Tensor, target: Tensor, mask: Tensor | None = None) -> tuple[Tensor, dict[str, float]]:
+    def forward(self, pred: Tensor, target: Tensor, mask: Tensor | None = None) -> tuple[Tensor, dict[str, Tensor | float]]:
         """Forward the loss and synchronously expose its scalar value to the smoke gate."""
-        result: tuple[Tensor, dict[str, float]] = self._criterion(pred=pred, target=target, mask=mask)
+        result: tuple[Tensor, dict[str, Tensor | float]] = self._criterion(pred=pred, target=target, mask=mask)
         self._callback(float(result[0].detach().item()))
         return result
 
@@ -490,16 +495,23 @@ def main(
             alpha_ssi=float(loss_config.get("alpha_ssi", 1.0)),
             alpha_grad=float(loss_config.get("alpha_grad", 2.0)),
             target_mode=config.target_mode,
-            metric_gradient_weight=config.metric_gradient_weight,
-            metric_grad_scale_weights=config.metric_grad_scale_weights,
-            metric_grad_max_depth_m=config.metric_grad_max_depth_m,
-            metric_grad_pool_mask_threshold=config.metric_grad_pool_mask_threshold,
-            metric_edge_weight_alpha=config.metric_edge_weight_alpha,
+            criterion=(
+                MetricDepthLoss(
+                    gradient_weight=config.metric_gradient_weight,
+                    grad_scales=4,
+                    grad_scale_weights=config.metric_grad_scale_weights,
+                    grad_max_depth_m=config.metric_grad_max_depth_m,
+                    grad_pool_mask_threshold=config.metric_grad_pool_mask_threshold,
+                    edge_weight_alpha=config.metric_edge_weight_alpha,
+                )
+                if config.target_mode == "metric"
+                else None
+            ),
             use_profiler=config.profile,
             profile_dir=str(config.profile_dir),
             profile_wait=config.profile_wait,
-            profile_warmup=5,
-            profile_active=10,
+            profile_warmup=config.profile_warmup,
+            profile_active=config.profile_active,
         )
         if step_loss_callback is not None:
             trainer.criterion = cast(Any, _LossObserver(trainer.criterion, step_loss_callback))

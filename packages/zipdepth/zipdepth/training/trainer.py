@@ -7,6 +7,7 @@ from contextlib import nullcontext, suppress
 from typing import Literal
 
 import torch
+from torch import nn
 from torch.profiler import ProfilerActivity, profile, schedule, tensorboard_trace_handler
 from tqdm import tqdm
 
@@ -60,10 +61,7 @@ class ZipDepthTrainer:
                 alpha_grad: float = 2.0,
                 target_mode: Literal['ssi', 'metric'] = 'ssi',
                 metric_gradient_weight: float = 0.5,
-                metric_grad_scale_weights: tuple[float, ...] | None = None,
-                metric_grad_max_depth_m: float = 4.0,
-                metric_grad_pool_mask_threshold: float = 0.99,
-                metric_edge_weight_alpha: float = 0.0,
+                criterion: nn.Module | None = None,
                 ):
         """
         Args:
@@ -92,6 +90,10 @@ class ZipDepthTrainer:
             metric_gradient_weight: Weight on the multi-scale gradient term in the metric
                 lane. Upstream ZipDepth's SSI lane uses 2.0; 0.5 leaves the term at ~9%
                 of the objective, which under-penalizes depth-discontinuity errors.
+            criterion: Pre-built loss module; overrides the target_mode-based default.
+                Callers with more loss knobs than the defaults (train_catalog's
+                metric_* config fields) construct the criterion themselves instead of
+                threading every knob through this signature.
         """
         self.student = student.to(device)
         self.train_loader = train_loader
@@ -122,18 +124,13 @@ class ZipDepthTrainer:
         self.target_mode = target_mode
 
         # Loss function initialization
-        self.criterion = (
-            MetricDepthLoss(
-                gradient_weight=metric_gradient_weight,
-                grad_scales=4,
-                grad_scale_weights=metric_grad_scale_weights,
-                grad_max_depth_m=metric_grad_max_depth_m,
-                grad_pool_mask_threshold=metric_grad_pool_mask_threshold,
-                edge_weight_alpha=metric_edge_weight_alpha,
+        if criterion is None:
+            criterion = (
+                MetricDepthLoss(gradient_weight=metric_gradient_weight)
+                if target_mode == 'metric'
+                else ZipDepthLoss(alpha_ssi=alpha_ssi, alpha_grad=alpha_grad)
             )
-            if target_mode == 'metric'
-            else ZipDepthLoss(alpha_ssi=alpha_ssi, alpha_grad=alpha_grad)
-        ).to(device)
+        self.criterion = criterion.to(device)
 
         # GradScaler only needed for FP16 — BF16 has FP32-range exponents so no overflow
         self.scaler = (
@@ -325,7 +322,10 @@ class ZipDepthTrainer:
                 prompt_depth = None
                 if self.target_mode == 'metric':
                     teacher_depth = batch['target_depth'].to(self.device, non_blocking=True).float()
-                    mask = batch['target_valid'].to(self.device, non_blocking=True)
+                    # The unwindowed teacher validity: the loss applies its own [0.1, 4] m
+                    # L1 window, so a pre-windowed mask would silently cap grad_max_depth_m
+                    # at 4 m. target_valid stays as the fallback for old cached samples.
+                    mask = batch.get('target_finite', batch['target_valid']).to(self.device, non_blocking=True)
                     # Feed the RAW prompt, exactly what the teacher saw when it produced
                     # these labels (promptda_stream.py:254). Zeroing low-confidence pixels
                     # made the student solve a different problem from the teacher, and the
@@ -352,8 +352,6 @@ class ZipDepthTrainer:
                         mask=mask,
                     )
 
-                loss_value = loss.item()
-
                 if self.scaler is not None:
                     # FP16: use GradScaler to prevent overflow
                     self.scaler.scale(loss).backward()
@@ -371,6 +369,12 @@ class ZipDepthTrainer:
                     self.scheduler.step()
 
                 self.optimizer.zero_grad(set_to_none=True)
+
+                # Sync the host only after the whole step is enqueued: an .item() before
+                # backward() drains the CUDA queue on the critical path and costs the
+                # overlap that hides the next batch's data wait.
+                loss_value = loss.item()
+                loss_dict = {key: float(value) for key, value in loss_dict.items()}
 
                 self.global_step += 1
                 total_loss += loss_value
@@ -397,7 +401,7 @@ class ZipDepthTrainer:
                 # Logging
                 if self.is_main and self.writer is not None:
                     if self.global_step % 750 == 0:
-                        self.writer.add_scalar('train/loss', loss.item(), self.global_step)
+                        self.writer.add_scalar('train/loss', loss_value, self.global_step)
                         self.writer.add_scalar('train/lr', self.optimizer.param_groups[0]['lr'], self.global_step)
                         self.writer.add_scalar(f'train/loss_{primary_name}', loss_dict[primary_name], self.global_step)
                         self.writer.add_scalar('train/loss_grad', loss_dict['grad'], self.global_step)

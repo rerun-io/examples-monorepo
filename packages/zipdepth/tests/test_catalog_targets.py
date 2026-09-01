@@ -243,18 +243,21 @@ def test_metric_training_sample_emits_metres_and_flips_every_spatial_input() -> 
         build_train_transform(4, 6, mirror),
     )
 
-    assert set(sample) == {"image", "target_depth", "target_valid", "prompt_depth", "prompt_valid"}
+    assert set(sample) == {"image", "target_depth", "target_valid", "target_finite", "prompt_depth", "prompt_valid"}
     assert sample["target_depth"].shape == (1, 4, 6)
     assert sample["target_depth"].dtype == torch.float32
     assert sample["target_valid"].dtype == torch.bool
+    assert sample["target_finite"].dtype == torch.bool
     assert sample["prompt_depth"].shape == (1, 192, 256)
     assert sample["prompt_depth"].dtype == torch.float32
     assert sample["prompt_valid"].shape == (1, 192, 256)
     assert sample["prompt_valid"].dtype == torch.bool
     assert_array_equal(sample["target_valid"].numpy()[0], np.flip((target_mm_hw >= 100) & (target_mm_hw <= 4000), axis=-1))
     # Depth keeps every real teacher value (0 mm is the invalid encoding) so the gradient
-    # term can supervise edge pairs beyond the 4 m L1 window; validity stays windowed.
+    # term can supervise edge pairs beyond the 4 m L1 window; target_valid stays windowed
+    # for eval, and target_finite carries the unwindowed validity the loss masks with.
     assert_allclose(sample["target_depth"].numpy()[0], np.flip(np.where(target_mm_hw > 0, target_mm_hw / 1000.0, 0.0), axis=-1))
+    assert_array_equal(sample["target_finite"].numpy()[0], np.flip(target_mm_hw > 0, axis=-1))
     assert_allclose(sample["prompt_depth"].numpy()[0], np.flip(prompt_mm_hw / 1000.0, axis=-1))
     expected_prompt_valid_hw: np.ndarray = (confidence_hw >= 1) & (prompt_mm_hw >= 100) & (prompt_mm_hw <= 4000)
     assert_array_equal(sample["prompt_valid"].numpy()[0], np.flip(expected_prompt_valid_hw, axis=-1))

@@ -253,10 +253,9 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
         # both block in native code with the GIL released, so overlapping them takes
         # ~30% off the per-segment stall. The depth query goes to the worker thread (pure
         # datafusion/gRPC); the decoder stays on this thread because NVDEC creation needs
-        # the producer's CUDA context. No .sort(TIMELINE) on either query: the reader
-        # already yields (segment, index)-ordered rows, and a client-side SortExec
-        # re-materializes the blob columns (~4x the query wall time). The ordering is an
-        # implicit server contract — the guard below fails loudly if it ever breaks.
+        # the producer's CUDA context. Neither query sorts client-side — the reader's row
+        # order is trusted; the rationale lives in simplecv's open_segment_decoder, and
+        # the guard below fails loudly if the server ordering contract ever breaks.
         def _query_depth_table() -> pa.Table:
             return (
                 self._dataset_entry.filter_segments(segment_id)
@@ -283,7 +282,7 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
             return
 
         all_times_n: Shaped[ndarray, "n_rows"] = table_timestamps(table)
-        if all_times_n.size > 1 and bool(np.any(all_times_n[1:] < all_times_n[:-1])):
+        if np.any(all_times_n[1:] < all_times_n[:-1]):
             raise ValueError(f"segment {segment_id}: reader returned rows out of {TIMELINE} order; the no-sort fast path assumes index order")
         chosen_times_n: Shaped[ndarray, "n_chosen"] = all_times_n[:: self._frame_stride]
         target_blobs: list[UInt8[ndarray, "target_n_bytes"]] = component_u8_views(table.column(PROMPTDA_BLOB_COLUMN), PROMPTDA_BLOB_COLUMN)[

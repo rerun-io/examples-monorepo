@@ -206,6 +206,11 @@ def main(config: TrainCatalogSmokeConfig) -> None:
         str(ddp.width),
         "--batch-size",
         str(ddp.batch_size),
+        # Pin the lane explicitly: the CLI default became "metric", and without this
+        # flag the DDP leg silently trained the prompted model while check_checkpoint
+        # verifies the bare one (broken since the default changed).
+        "--target-mode",
+        ddp.target_mode,
         "--total-steps",
         str(ddp.total_steps),
         "--shuffle-buffer-size",

@@ -48,7 +48,8 @@ def open_segment_decoder(
         dataset: Rerun catalog dataset entry holding the segment.
         segment_id: Segment whose packets are fetched.
         entity: Entity path of the ``VideoStream`` column, without a leading slash.
-        timeline: Index timeline the packets are read and sorted on.
+        timeline: Index timeline the packets are read on. The reader's row order
+            is trusted; the ordering guard below fails loudly if it breaks.
         device: Device the decoder outputs frames on (``cuda`` uses NVDEC).
         fps: Nominal frame rate written into the wrapping MP4 track.
 
@@ -114,7 +115,7 @@ def wrap_mp4(samples: list[bytes], keyframes: list[bool], fps: int, codec: str =
 
 
 class SegmentNvdecDecoder(ColumnDecoder[FrameRgbChw]):
-    """Serve a fetched request block from cached whole-segment GPU decoders.
+    """Serve a fetched request block from the cached whole-segment GPU decoder.
 
     The base-class defaults (no ``prior_keyframe_path``) make the dataloader ship each
     grid slot as a point read. The shipped bytes are ignored because frames come from
@@ -127,7 +128,8 @@ class SegmentNvdecDecoder(ColumnDecoder[FrameRgbChw]):
         Args:
             dataset: Rerun catalog dataset entry the segments come from.
             entity: Entity path of the ``VideoStream`` column, without a leading slash.
-            timeline: Index timeline the packets are read and sorted on.
+            timeline: Index timeline the packets are read on (row order per
+                ``open_segment_decoder``'s ordering guard).
             device: Device decoded frames land on (``cuda`` uses NVDEC).
             fps: Nominal frame rate of the stored video.
         """
@@ -145,13 +147,16 @@ class SegmentNvdecDecoder(ColumnDecoder[FrameRgbChw]):
         self.keyframes: list[bool] | None = None
         """Keyframe flag per raw sample."""
 
-    def decode_at(self, index_value: int | np.datetime64 | np.timedelta64, segment_id: str) -> FrameRgbChw | None:
-        """Return a segment's latest frame at or before an index value."""
+    def _ensure_segment(self, segment_id: str) -> None:
         if segment_id != self._segment_id:
             self.times, self.samples, self.keyframes, self._decoder = open_segment_decoder(
                 self._dataset, segment_id, self._entity, self._timeline, self._device, self._fps
             )
             self._segment_id = segment_id
+
+    def decode_at(self, index_value: int | np.datetime64 | np.timedelta64, segment_id: str) -> FrameRgbChw | None:
+        """Return a segment's latest frame at or before an index value."""
+        self._ensure_segment(segment_id)
         frame_index: int = int(np.searchsorted(self.times, index_value, side="right")) - 1
         if frame_index < 0:
             return None
@@ -160,9 +165,31 @@ class SegmentNvdecDecoder(ColumnDecoder[FrameRgbChw]):
         return frame_chw
 
     def decode(self, batch: FieldBatch, requests: Sequence[DecodeRequest]) -> Sequence[FrameRgbChw | None]:
-        """Decode one aligned result per request in a fetched field block."""
+        """Decode one aligned result per request in a fetched field block.
+
+        Contiguous same-segment requests share one ``get_frames_at`` call, so a
+        block costs one codec pass per segment instead of one seek per request.
+        """
         del batch  # decoded from the segment-wide cache, not the fetched point reads
-        decoded: list[FrameRgbChw | None] = []
-        for request in requests:
-            decoded.append(self.decode_at(request.index_value, request.segment_id))
+        decoded: list[FrameRgbChw | None] = [None] * len(requests)
+        start: int = 0
+        while start < len(requests):
+            segment_id: str = requests[start].segment_id
+            stop: int = start
+            while stop < len(requests) and requests[stop].segment_id == segment_id:
+                stop += 1
+            self._ensure_segment(segment_id)
+            positions: list[int] = []
+            frame_indices: list[int] = []
+            for position in range(start, stop):
+                frame_index: int = int(np.searchsorted(self.times, requests[position].index_value, side="right")) - 1
+                if frame_index >= 0:
+                    positions.append(position)
+                    frame_indices.append(frame_index)
+            if frame_indices:
+                assert self._decoder is not None
+                frames_nchw: UInt8[Tensor, "n 3 h w"] = self._decoder.get_frames_at(frame_indices).data
+                for row, position in enumerate(positions):
+                    decoded[position] = frames_nchw[row]
+            start = stop
         return decoded

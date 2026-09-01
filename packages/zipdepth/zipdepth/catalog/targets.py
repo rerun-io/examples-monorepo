@@ -14,11 +14,12 @@ from torch import Tensor
 from torch.nn import functional as F
 
 from zipdepth.data.transforms import AlbumentationsWrapper
+from zipdepth.loss.metric_depth_loss import L1_MAX_DEPTH_M, L1_MIN_DEPTH_M
 
-MIN_DEPTH_MM: int = 100
-"""Nearest valid pseudo-depth, in millimetres."""
-MAX_DEPTH_MM: int = 4000
-"""Furthest valid pseudo-depth, in millimetres."""
+MIN_DEPTH_MM: int = int(L1_MIN_DEPTH_M * 1000)
+"""Nearest valid pseudo-depth, in millimetres (the loss's metre window owns the value)."""
+MAX_DEPTH_MM: int = int(L1_MAX_DEPTH_M * 1000)
+"""Furthest valid pseudo-depth, in millimetres (the loss's metre window owns the value)."""
 INV_DEPTH_SCALE: float = 6000.0
 """Inverse-depth quantization scale; 10 1/m maps to 60000 without uint16 overflow.
 
@@ -301,12 +302,14 @@ def build_metric_training_sample(
 
     Returns:
         A dictionary with uint8 ``image``; float32 metre ``target_depth`` and
-        ``prompt_depth``; and bool ``target_valid`` and ``prompt_valid``.
+        ``prompt_depth``; and bool ``target_valid``, ``target_finite``, and
+        ``prompt_valid``.
     """
     # Keep every real teacher value (0 mm is the invalid encoding): the loss windows L1 at
     # 4 m itself, and the gradient term may supervise edge pairs beyond it. The emitted
     # target_valid mask (recomputed post-augmentation below) still carries the [MIN, MAX]
-    # window for L1, eval, and the flat-frame filter.
+    # window for eval and the flat-frame filter; target_finite carries the unwindowed
+    # validity the loss needs so grad_max_depth_m can genuinely widen its window.
     target_depth_m_hw: Float32[ndarray, "h w"] = np.where(
         target_depth_mm_hw > 0,
         target_depth_mm_hw.astype(np.float32) / 1000.0,
@@ -322,10 +325,12 @@ def build_metric_training_sample(
     target_valid_1hw: Bool[ndarray, "1 out_h out_w"] = np.ascontiguousarray(
         (target_depth_1hw >= MIN_DEPTH_MM / 1000.0) & (target_depth_1hw <= MAX_DEPTH_MM / 1000.0)
     )
+    target_finite_1hw: Bool[ndarray, "1 out_h out_w"] = np.ascontiguousarray(target_depth_1hw > 0.0)
     sample: dict[str, Tensor] = {
         "image": torch.from_numpy(image_chw),
         "target_depth": torch.from_numpy(target_depth_1hw),
         "target_valid": torch.from_numpy(target_valid_1hw),
+        "target_finite": torch.from_numpy(target_finite_1hw),
     }
     sample.update(_prompt_tensors(prompt_depth_mm_hw, prompt_confidence_hw, flipped=transformed[2]))
     return sample
@@ -381,12 +386,12 @@ def build_training_sample_cuda(
     rotated_rgb_chw: UInt8[Tensor, "3 rotated_h rotated_w"] = torch.rot90(rgb_chw, turns, dims=(-2, -1))
     rotated_depth_mm_hw: Shaped[Tensor, "rotated_h rotated_w"] = torch.rot90(depth_mm_hw, turns, dims=(-2, -1))
     depth_float_hw: Float32[Tensor, "rotated_h rotated_w"] = rotated_depth_mm_hw.to(dtype=torch.float32)
-    valid_hw: Bool[Tensor, "rotated_h rotated_w"] = (depth_float_hw >= MIN_DEPTH_MM) & (depth_float_hw <= MAX_DEPTH_MM)
     if target_mode not in ("ssi", "metric"):
         raise ValueError(f"unknown target mode {target_mode!r}")
     if (prompt_depth_mm_hw is None) != (prompt_confidence_hw is None):
         raise ValueError("prompt depth and confidence must be provided together")
     if target_mode == "ssi":
+        valid_hw: Bool[Tensor, "rotated_h rotated_w"] = (depth_float_hw >= MIN_DEPTH_MM) & (depth_float_hw <= MAX_DEPTH_MM)
         target_hw: Float32[Tensor, "rotated_h rotated_w"] = torch.where(
             valid_hw,
             1000.0 / depth_float_hw,
@@ -395,7 +400,8 @@ def build_training_sample_cuda(
     else:
         # Keep every real teacher value (0 mm is the invalid encoding): the loss windows
         # L1 at 4 m itself, and the gradient term may supervise edge pairs beyond it.
-        # The emitted validity mask still carries the [MIN, MAX] window.
+        # target_valid still carries the [MIN, MAX] window for eval; target_finite is
+        # the unwindowed validity the loss masks with.
         target_hw = torch.where(
             depth_float_hw > 0,
             depth_float_hw / 1000.0,
@@ -466,7 +472,12 @@ def build_training_sample_cuda(
         target_valid_1hw: Bool[Tensor, "1 out_h out_w"] = (
             (target_depth_1hw >= MIN_DEPTH_MM / 1000.0) & (target_depth_1hw <= MAX_DEPTH_MM / 1000.0)
         )
-        sample = {"image": image_chw, "target_depth": target_depth_1hw, "target_valid": target_valid_1hw}
+        sample = {
+            "image": image_chw,
+            "target_depth": target_depth_1hw,
+            "target_valid": target_valid_1hw,
+            "target_finite": (target_depth_1hw > 0.0).contiguous(),
+        }
     if prompt_depth_m_hw is not None and prompt_valid_hw is not None:
         sample["prompt_depth"] = prompt_depth_m_hw.unsqueeze(0).contiguous()
         sample["prompt_valid"] = prompt_valid_hw.unsqueeze(0).contiguous()

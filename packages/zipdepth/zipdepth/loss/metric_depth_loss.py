@@ -4,7 +4,9 @@ The gradient term reimplements the vendored ``ZipDepthLoss._gradient_loss``
 (same pool-then-difference semantics, verified by test) so the metric lane can
 reallocate weight across scales, widen the gradient validity window past the
 4 m L1 window, and relax the pooled-mask erosion — the three levers behind the
-edge-washout fixes. At the defaults every term matches the previous behavior.
+edge-washout fixes. The masked L1 is likewise inlined rather than reaching into
+the vendored class's private methods. At the defaults every term matches the
+previous behavior bit for bit.
 """
 
 import torch
@@ -12,16 +14,21 @@ import torch.nn.functional as F
 from jaxtyping import Bool, Float
 from torch import Tensor, nn
 
-from zipdepth.loss.depth_loss import ZipDepthLoss
-
 L1_MIN_DEPTH_M: float = 0.1
 """Lower edge of the metric supervision window, in metres."""
 L1_MAX_DEPTH_M: float = 4.0
 """Upper edge of the metric L1 supervision window, in metres."""
+EDGE_WEIGHT_QUANTILE: float = 0.9
+"""Per-frame teacher-gradient quantile normalizing the edge-weighted L1, matching eval's ``EDGE_QUANTILE``."""
 
 
 class MetricDepthLoss(nn.Module):
     """Masked metre L1 plus a reallocatable multi-scale gradient loss.
+
+    The mask argument should carry the teacher's unwindowed validity (finite
+    and non-zero): the L1 window is applied here, and ``grad_max_depth_m`` can
+    then genuinely widen the gradient window past it. A pre-windowed mask
+    silently caps both terms at its own ceiling instead.
 
     Args:
         gradient_weight: Total weight on the gradient term against L1 = 1.
@@ -35,8 +42,10 @@ class MetricDepthLoss(nn.Module):
             The upstream 0.99 kills every kxk block near an invalid pixel;
             0.5 keeps majority-valid blocks.
         edge_weight_alpha: Extra L1 weight on teacher edges,
-            ``w = 1 + alpha * clip(g / q90(g), 0, 1)`` with detached teacher
-            gradient magnitude ``g``. Zero disables the reweighting.
+            ``w = 1 + alpha * clip(g / q(g), 0, 1)`` with detached teacher
+            gradient magnitude ``g`` (validity-masked, computed from the raw
+            target so window and hole boundaries do not read as edges) and a
+            per-frame quantile scale ``q``. Zero disables the reweighting.
     """
 
     def __init__(
@@ -65,21 +74,19 @@ class MetricDepthLoss(nn.Module):
         if edge_weight_alpha < 0.0:
             raise ValueError("edge_weight_alpha must be non-negative")
         self.gradient_weight: float = gradient_weight
-        self.grad_scales: int = grad_scales
         raw_weights: tuple[float, ...] = grad_scale_weights if grad_scale_weights is not None else (1.0,) * grad_scales
         total_weight: float = sum(raw_weights)
         self.grad_scale_weights: tuple[float, ...] = tuple(weight / total_weight for weight in raw_weights)
         self.grad_max_depth_m: float = grad_max_depth_m
         self.grad_pool_mask_threshold: float = grad_pool_mask_threshold
         self.edge_weight_alpha: float = edge_weight_alpha
-        self._l1: ZipDepthLoss = ZipDepthLoss(alpha_ssi=0.0, alpha_grad=1.0, grad_scales=grad_scales)
 
     def forward(
         self,
         pred: Float[Tensor, "b 1 h w"],
         target: Float[Tensor, "b 1 h w"],
         mask: Bool[Tensor, "b 1 h w"] | Float[Tensor, "b 1 h w"] | None = None,
-    ) -> tuple[Tensor, dict[str, float]]:
+    ) -> tuple[Tensor, dict[str, Tensor]]:
         """Compute the metric objective.
 
         Args:
@@ -91,49 +98,66 @@ class MetricDepthLoss(nn.Module):
             mask: Optional explicit teacher-valid mask with the same shape.
 
         Returns:
-            Scalar loss and detached ``l1``/``grad`` components.
+            Scalar loss and detached 0-dim ``l1``/``grad`` components. The
+            components stay on device: the caller decides when to pay the
+            host sync, after the whole step is enqueued.
         """
         finite_b1hw: Tensor = torch.isfinite(target) & (target >= L1_MIN_DEPTH_M)
         if mask is not None:
             finite_b1hw = finite_b1hw & (mask > 0)
         l1_valid_b1hw: Tensor = finite_b1hw & (target <= L1_MAX_DEPTH_M)
         l1_mask_b1hw: Tensor = l1_valid_b1hw.to(dtype=pred.dtype)
-        safe_prediction_b1hw: Tensor = torch.where(l1_valid_b1hw, pred, torch.zeros_like(pred))
-        safe_target_b1hw: Tensor = torch.where(l1_valid_b1hw, target, torch.zeros_like(target))
+        safe_prediction_b1hw: Tensor = torch.where(l1_valid_b1hw, pred, 0.0)
+        safe_target_b1hw: Tensor = torch.where(l1_valid_b1hw, target, 0.0)
         if self.edge_weight_alpha > 0.0:
-            l1_loss: Tensor = self._edge_weighted_l1(safe_prediction_b1hw, safe_target_b1hw, l1_mask_b1hw)
+            weight_b1hw: Tensor = self._edge_weight(target, l1_valid_b1hw) * l1_mask_b1hw
         else:
-            l1_loss = self._l1._ssi_loss(safe_prediction_b1hw, safe_target_b1hw, l1_mask_b1hw)
+            weight_b1hw = l1_mask_b1hw
+        l1_loss: Tensor = ((safe_prediction_b1hw - safe_target_b1hw).abs() * weight_b1hw).sum() / (weight_b1hw.sum() + 1e-8)
 
-        grad_valid_b1hw: Tensor = finite_b1hw & (target <= self.grad_max_depth_m)
-        grad_mask_hw: Tensor = grad_valid_b1hw.to(dtype=pred.dtype).squeeze(1)
-        grad_prediction_hw: Tensor = torch.where(grad_valid_b1hw, pred, torch.zeros_like(pred)).squeeze(1)
-        grad_target_hw: Tensor = torch.where(grad_valid_b1hw, target, torch.zeros_like(target)).squeeze(1)
-        gradient_loss: Tensor = self._gradient_loss(grad_prediction_hw, grad_target_hw, grad_mask_hw)
+        if self.grad_max_depth_m == L1_MAX_DEPTH_M:
+            grad_prediction_b1hw, grad_target_b1hw, grad_mask_b1hw = safe_prediction_b1hw, safe_target_b1hw, l1_mask_b1hw
+        else:
+            grad_valid_b1hw: Tensor = finite_b1hw & (target <= self.grad_max_depth_m)
+            grad_mask_b1hw = grad_valid_b1hw.to(dtype=pred.dtype)
+            grad_prediction_b1hw = torch.where(grad_valid_b1hw, pred, 0.0)
+            grad_target_b1hw = torch.where(grad_valid_b1hw, target, 0.0)
+        gradient_loss: Tensor = self._gradient_loss(
+            grad_prediction_b1hw.squeeze(1), grad_target_b1hw.squeeze(1), grad_mask_b1hw.squeeze(1)
+        )
 
         total_loss: Tensor = l1_loss + self.gradient_weight * gradient_loss
-        return total_loss, {"l1": float(l1_loss.detach().item()), "grad": float(gradient_loss.detach().item())}
+        return total_loss, {"l1": l1_loss.detach(), "grad": gradient_loss.detach()}
 
-    def _edge_weighted_l1(
+    def _edge_weight(
         self,
-        pred_b1hw: Float[Tensor, "b 1 h w"],
         target_b1hw: Float[Tensor, "b 1 h w"],
-        mask_b1hw: Float[Tensor, "b 1 h w"],
-    ) -> Tensor:
-        """Masked L1 with extra weight on teacher depth discontinuities."""
+        valid_b1hw: Bool[Tensor, "b 1 h w"],
+    ) -> Float[Tensor, "b 1 h w"]:
+        """Per-pixel L1 weight from the teacher's validity-masked gradient magnitude.
+
+        Differences straddling an invalid pixel are dropped before accumulation,
+        so window boundaries and holes do not register as (maximal) edges. The
+        normalizing quantile is per frame, matching eval's edge stratification
+        and staying clear of ``torch.quantile``'s 2**24-element limit.
+        """
         with torch.no_grad():
-            gradient_hw: Tensor = torch.zeros_like(target_b1hw.squeeze(1))
-            dx_hw: Tensor = (target_b1hw[..., 1:] - target_b1hw[..., :-1]).abs().squeeze(1)
-            dy_hw: Tensor = (target_b1hw[..., 1:, :] - target_b1hw[..., :-1, :]).abs().squeeze(1)
+            target_hw: Tensor = target_b1hw.squeeze(1)
+            valid_hw: Tensor = valid_b1hw.squeeze(1)
+            valid_f_hw: Tensor = valid_hw.to(dtype=target_hw.dtype)
+            dx_hw: Tensor = (target_hw[..., 1:] - target_hw[..., :-1]).abs() * (valid_f_hw[..., 1:] * valid_f_hw[..., :-1])
+            dy_hw: Tensor = (target_hw[..., 1:, :] - target_hw[..., :-1, :]).abs() * (valid_f_hw[..., 1:, :] * valid_f_hw[..., :-1, :])
+            gradient_hw: Tensor = torch.zeros_like(target_hw)
             gradient_hw[:, :, :-1] += dx_hw
             gradient_hw[:, :, 1:] += dx_hw
             gradient_hw[:, :-1, :] += dy_hw
             gradient_hw[:, 1:, :] += dy_hw
-            valid_gradients: Tensor = gradient_hw[mask_b1hw.squeeze(1) > 0]
-            scale: Tensor = torch.quantile(valid_gradients.float(), 0.9) if valid_gradients.numel() > 0 else gradient_hw.new_ones(())
-            weight_b1hw: Tensor = 1.0 + self.edge_weight_alpha * torch.clamp(gradient_hw / scale.clamp(min=1e-6), 0.0, 1.0).unsqueeze(1)
-        weighted_mask_b1hw: Tensor = weight_b1hw * mask_b1hw
-        return ((pred_b1hw - target_b1hw).abs() * weighted_mask_b1hw).sum() / (weighted_mask_b1hw.sum() + 1e-8)
+            batch: int = gradient_hw.shape[0]
+            masked_gradient_bn: Tensor = torch.where(valid_hw, gradient_hw, torch.nan).view(batch, -1).float()
+            scale_b: Tensor = torch.nanquantile(masked_gradient_bn, EDGE_WEIGHT_QUANTILE, dim=1)
+            scale_b = torch.where(torch.isnan(scale_b) | (scale_b <= 0.0), torch.ones_like(scale_b), scale_b)
+            normalized_hw: Tensor = torch.clamp(gradient_hw / scale_b.view(batch, 1, 1).to(dtype=gradient_hw.dtype), 0.0, 1.0)
+            return (1.0 + self.edge_weight_alpha * normalized_hw).unsqueeze(1)
 
     def _gradient_loss(
         self,

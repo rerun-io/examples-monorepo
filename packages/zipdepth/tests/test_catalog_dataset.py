@@ -156,7 +156,7 @@ def test_cpu_metric_builder_orients_prompt_and_confidence_with_rgb_and_target() 
     )
 
     assert sample is not None
-    assert set(sample) == {"image", "target_depth", "target_valid", "prompt_depth", "prompt_valid"}
+    assert set(sample) == {"image", "target_depth", "target_valid", "target_finite", "prompt_depth", "prompt_valid"}
     assert sample["image"].shape == (3, 6, 8)
     assert_array_equal(sample["prompt_depth"].numpy()[0], np.rot90(prompt_stored_mm_hw, 1) / 1000.0)
     expected_valid_hw: ndarray = np.rot90((confidence_stored_hw >= 1) & (prompt_stored_mm_hw >= 100) & (prompt_stored_mm_hw <= 4000), 1)

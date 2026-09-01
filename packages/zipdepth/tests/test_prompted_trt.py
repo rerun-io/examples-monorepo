@@ -7,15 +7,14 @@ from typing import Any
 import pytest
 import torch
 from monopriors.models.depth_completion.zipdepth_prompt import load_zipdepth_prompt
-from monopriors.models.relative_depth.zipdepth import download_zipdepth_checkpoint
-from torch import Tensor, nn
-
-from zipdepth.apis.prompted_trt import (
+from monopriors.models.depth_completion.zipdepth_prompt_export import (
     IMAGE_INPUT_NAME,
     PROMPT_INPUT_NAME,
     export_zipdepth_prompt_onnx,
     prepare_zipdepth_prompt_for_export,
 )
+from monopriors.models.relative_depth.zipdepth import download_zipdepth_checkpoint
+from torch import Tensor, nn
 
 
 class _FakePromptModel(nn.Module):

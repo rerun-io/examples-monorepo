@@ -27,6 +27,11 @@ def test_segment_nvdec_decoder_decodes_a_fetch_block_across_segments(monkeypatch
             frame_chw: torch.Tensor = torch.full((3, 1, 1), self._offset + index, dtype=torch.uint8)
             return SimpleNamespace(data=frame_chw)
 
+        def get_frames_at(self, indices: list[int]) -> SimpleNamespace:
+            """Return the requested frames using torchcodec's batch result shape."""
+            frames_nchw: torch.Tensor = torch.stack([self.get_frame_at(index).data for index in indices])
+            return SimpleNamespace(data=frames_nchw)
+
     opened_segments: list[str] = []
 
     def open_decoder(
