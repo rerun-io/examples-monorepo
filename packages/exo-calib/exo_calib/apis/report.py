@@ -21,6 +21,7 @@ from exo_calib.catalog_io import (
     DEFAULT_DATASET_NAME,
     GtCameras,
     connect_dataset,
+    log_coco133_skeleton_context,
     new_layer_recording,
     only_segment_id,
     read_gt_cameras,
@@ -115,6 +116,7 @@ def main(config: ReportConfig) -> None:
 
     rrd_path: Path = segment_dir / f"{config.align_layer_name}.rrd"
     recording: rr.RecordingStream = new_layer_recording(config.application_id, segment_id, rrd_path)
+    log_coco133_skeleton_context(recording, "/world/gt", connections=True)
     gt_centers_v3: Float64[ndarray, "v 3"] = np.stack(
         [-gt.cam_T_world_v44[i, :3, :3].T @ gt.cam_T_world_v44[i, :3, 3] for i in range(len(gt.names))]
     )

@@ -15,6 +15,7 @@ Entity map of the base layer (see /tmp/rerun-viewer-validation/assembly101-base/
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pyarrow as pa
@@ -186,3 +187,56 @@ def register_layer(dataset: DatasetEntry, rrd_path: Path, layer_name: str) -> No
 
     handle = dataset.register([rrd_path.resolve().as_uri()], layer_name=layer_name, on_duplicate=OnDuplicateSegmentLayer.REPLACE)
     handle.wait()
+
+
+def log_coco133_skeleton_context(recording: rr.RecordingStream, entity: str, connections: bool = False) -> None:
+    """Log a COCO-133 annotation context with mmpose keypoint names and colors.
+
+    Rerun draws class ``keypoint_connections`` in one class color, so layers that
+    want per-part link colors log explicit line strips instead (see
+    :func:`coco133_link_strips`) and keep ``connections`` off here.
+    """
+    from simplecv.data.skeleton.coco_133 import COCO_133_LINKS, coco133
+
+    recording.log(
+        entity,
+        rr.AnnotationContext(
+            [
+                rr.ClassDescription(
+                    info=rr.AnnotationInfo(id=0, label="coco-133", color=(200, 200, 200)),
+                    keypoint_annotations=[
+                        rr.AnnotationInfo(
+                            id=cast(int, info["id"]),
+                            label=cast(str, info["name"]),
+                            color=tuple(cast(list[int], info["color"])),
+                        )
+                        for info in coco133["keypoint_info"].values()
+                    ],
+                    keypoint_connections=COCO_133_LINKS if connections else None,
+                )
+            ]
+        ),
+        static=True,
+    )
+
+
+def coco133_link_strips(kp_133d: Float64[ndarray, "133 d"]) -> tuple[list, list]:
+    """Build per-link line strips + mmpose link colors for one keypoint set.
+
+    Args:
+        kp_133d: Full COCO-133 keypoint array (2D or 3D); invalid joints NaN.
+
+    Returns:
+        Strips (each a (2, d) array) and their RGB colors, skipping links with
+        a non-finite endpoint.
+    """
+    from simplecv.data.skeleton.coco_133 import COCO_133_LINKS, coco133
+
+    link_colors: list[tuple[int, ...]] = [tuple(cast(list[int], info["color"])) for info in coco133["skeleton_info"].values()]
+    strips: list = []
+    colors: list = []
+    for (a, b), color in zip(COCO_133_LINKS, link_colors, strict=True):
+        if np.isfinite(kp_133d[a]).all() and np.isfinite(kp_133d[b]).all():
+            strips.append(np.stack((kp_133d[a], kp_133d[b])))
+            colors.append(color)
+    return strips, colors

@@ -24,7 +24,9 @@ from exo_calib.catalog_io import (
     DEFAULT_DATASET_NAME,
     TIMELINE,
     ExoVideoStreams,
+    coco133_link_strips,
     connect_dataset,
+    log_coco133_skeleton_context,
     new_layer_recording,
     only_segment_id,
     open_exo_streams,
@@ -213,11 +215,25 @@ def log_keypoints_layer(
     """Log subsampled keypoint overlays under each camera's pinhole entity."""
     for name, cam in per_camera.items():
         entity: str = f"/world/{name}/pinhole/exocalib_kp2d"
+        log_coco133_skeleton_context(recording, entity)
         for t in range(0, len(cam.sample_indices), log_stride):
             if not np.isfinite(cam.kp_xy[t]).any():
                 continue
             recording.set_time(TIMELINE, duration=1e-9 * float(cam.times_ns[t]))
-            recording.log(entity, Points2DWithConfidence(positions=cam.kp_xy[t].astype(np.float64), confidences=cam.conf[t].astype(np.float64), radii=2.0))
+            recording.log(
+                entity,
+                Points2DWithConfidence(
+                    positions=cam.kp_xy[t].astype(np.float64),
+                    confidences=cam.conf[t].astype(np.float64),
+                    class_ids=0,
+                    keypoint_ids=np.arange(133),
+                    radii=2.0,
+                ),
+            )
+            kp_masked_1332 = np.where(cam.conf[t][:, None] > 0.0, cam.kp_xy[t].astype(np.float64), np.nan)
+            strips, colors = coco133_link_strips(kp_masked_1332)
+            if strips:
+                recording.log(f"{entity}/links", rr.LineStrips2D(strips=strips, colors=colors, radii=1.0))
 
 
 def main(config: Keypoints2dConfig) -> None:
