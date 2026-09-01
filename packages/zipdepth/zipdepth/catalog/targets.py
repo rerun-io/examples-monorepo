@@ -303,9 +303,12 @@ def build_metric_training_sample(
         A dictionary with uint8 ``image``; float32 metre ``target_depth`` and
         ``prompt_depth``; and bool ``target_valid`` and ``prompt_valid``.
     """
-    target_valid_hw: Bool[ndarray, "h w"] = (target_depth_mm_hw >= MIN_DEPTH_MM) & (target_depth_mm_hw <= MAX_DEPTH_MM)
+    # Keep every real teacher value (0 mm is the invalid encoding): the loss windows L1 at
+    # 4 m itself, and the gradient term may supervise edge pairs beyond it. The emitted
+    # target_valid mask (recomputed post-augmentation below) still carries the [MIN, MAX]
+    # window for L1, eval, and the flat-frame filter.
     target_depth_m_hw: Float32[ndarray, "h w"] = np.where(
-        target_valid_hw,
+        target_depth_mm_hw > 0,
         target_depth_mm_hw.astype(np.float32) / 1000.0,
         0.0,
     ).astype(np.float32)
@@ -383,11 +386,21 @@ def build_training_sample_cuda(
         raise ValueError(f"unknown target mode {target_mode!r}")
     if (prompt_depth_mm_hw is None) != (prompt_confidence_hw is None):
         raise ValueError("prompt depth and confidence must be provided together")
-    target_hw: Float32[Tensor, "rotated_h rotated_w"] = torch.where(
-        valid_hw,
-        1000.0 / depth_float_hw if target_mode == "ssi" else depth_float_hw / 1000.0,
-        torch.zeros_like(depth_float_hw),
-    )
+    if target_mode == "ssi":
+        target_hw: Float32[Tensor, "rotated_h rotated_w"] = torch.where(
+            valid_hw,
+            1000.0 / depth_float_hw,
+            torch.zeros_like(depth_float_hw),
+        )
+    else:
+        # Keep every real teacher value (0 mm is the invalid encoding): the loss windows
+        # L1 at 4 m itself, and the gradient term may supervise edge pairs beyond it.
+        # The emitted validity mask still carries the [MIN, MAX] window.
+        target_hw = torch.where(
+            depth_float_hw > 0,
+            depth_float_hw / 1000.0,
+            torch.zeros_like(depth_float_hw),
+        )
     resized_rgb_float_chw: Float32[Tensor, "3 out_h out_w"] = F.interpolate(
         rotated_rgb_chw.unsqueeze(0).to(dtype=torch.float32),
         size=(out_height, out_width),

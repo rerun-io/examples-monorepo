@@ -23,6 +23,54 @@ from zipdepth.catalog.targets import build_eval_transform
 from zipdepth.data.transforms import AlbumentationsWrapper
 from zipdepth.evaluation.metrics import abs_relative_difference, align_depth_least_square, delta1_acc, disparity2depth
 
+EDGE_QUANTILE: float = 0.90
+"""Teacher-gradient quantile defining the edge stratum in stratified metrics."""
+
+
+def edge_stratified_mae(
+    prediction_depth_hw: Float32[ndarray, "h w"],
+    target_depth_hw: Float32[ndarray, "h w"],
+    target_valid_hw: Bool[ndarray, "h w"],
+    prompt_depth_hw: Float32[ndarray, "192 256"],
+) -> dict[str, float] | None:
+    """MAE split by teacher depth edges, for the prediction and a bilinear prompt baseline.
+
+    Edges are the top valid pixels by teacher spatial gradient magnitude (above the
+    ``EDGE_QUANTILE`` per-frame threshold). The baseline is the raw prompt bilinearly
+    upsampled to target size — the depth any phone gives for free — so the derived
+    baseline/prediction ratios read as edge and flat improvement over doing nothing.
+    Whole-frame AbsRel is blind to this stratum: edges are ~10% of pixels.
+
+    Returns:
+        Edge/flat MAE for the prediction and the baseline, or None when a stratum
+        is empty or the frame has too few valid pixels to threshold.
+    """
+    gradient_hw: Float32[ndarray, "h w"] = np.zeros_like(target_depth_hw)
+    gradient_x: Float32[ndarray, "h w_minus_one"] = np.abs(np.diff(target_depth_hw, axis=1))
+    gradient_y: Float32[ndarray, "h_minus_one w"] = np.abs(np.diff(target_depth_hw, axis=0))
+    gradient_hw[:, :-1] += gradient_x
+    gradient_hw[:, 1:] += gradient_x
+    gradient_hw[:-1, :] += gradient_y
+    gradient_hw[1:, :] += gradient_y
+    valid_gradients: Float32[ndarray, "n_valid"] = gradient_hw[target_valid_hw]
+    if valid_gradients.size < 100:
+        return None
+    threshold: float = float(np.quantile(valid_gradients, EDGE_QUANTILE))
+    edge_hw: Bool[ndarray, "h w"] = target_valid_hw & (gradient_hw >= threshold)
+    flat_hw: Bool[ndarray, "h w"] = target_valid_hw & (gradient_hw < threshold)
+    if not edge_hw.any() or not flat_hw.any():
+        return None
+    height, width = target_depth_hw.shape
+    baseline_hw: Float32[ndarray, "h w"] = cv2.resize(prompt_depth_hw, (width, height), interpolation=cv2.INTER_LINEAR)
+    prediction_error_hw: Float32[ndarray, "h w"] = np.abs(prediction_depth_hw - target_depth_hw)
+    baseline_error_hw: Float32[ndarray, "h w"] = np.abs(baseline_hw - target_depth_hw)
+    return {
+        "edge_mae": float(prediction_error_hw[edge_hw].mean()),
+        "flat_mae": float(prediction_error_hw[flat_hw].mean()),
+        "baseline_edge_mae": float(baseline_error_hw[edge_hw].mean()),
+        "baseline_flat_mae": float(baseline_error_hw[flat_hw].mean()),
+    }
+
 
 @dataclass(slots=True)
 class EvalCatalogConfig:
@@ -306,6 +354,7 @@ def main(config: EvalCatalogConfig) -> Path:
     all_metric_abs_rel: list[float] = []
     all_metric_delta1: list[float] = []
     all_metric_mae: list[float] = []
+    all_edge_records: list[dict[str, float]] = []
     all_diagnostic_abs_rel: list[float] = []
     all_diagnostic_delta1: list[float] = []
     all_diagnostic_mae: list[float] = []
@@ -326,6 +375,7 @@ def main(config: EvalCatalogConfig) -> Path:
         segment_metric_abs_rel: list[float] = []
         segment_metric_delta1: list[float] = []
         segment_metric_mae: list[float] = []
+        segment_edge_records: list[dict[str, float]] = []
         segment_diagnostic_abs_rel: list[float] = []
         segment_diagnostic_delta1: list[float] = []
         segment_diagnostic_mae: list[float] = []
@@ -371,6 +421,11 @@ def main(config: EvalCatalogConfig) -> Path:
                 segment_metric_abs_rel.append(metric.abs_rel)
                 segment_metric_delta1.append(metric.delta1)
                 segment_metric_mae.append(metric.mae)
+                stratified: dict[str, float] | None = edge_stratified_mae(
+                    prediction_depth_hw, target_depth_hw, target_valid_hw, prompt_depth_hw
+                )
+                if stratified is not None:
+                    segment_edge_records.append(stratified)
             diagnostic: MetricCatalogDepthMetrics = aligned_inverse_diagnostic(
                 prediction_depth_hw,
                 target_depth_hw,
@@ -407,6 +462,11 @@ def main(config: EvalCatalogConfig) -> Path:
             all_metric_abs_rel.extend(segment_metric_abs_rel)
             all_metric_delta1.extend(segment_metric_delta1)
             all_metric_mae.extend(segment_metric_mae)
+            all_edge_records.extend(segment_edge_records)
+            if segment_edge_records:
+                segment_report.update(
+                    {key: float(np.mean([record[key] for record in segment_edge_records])) for key in segment_edge_records[0]}
+                )
         else:
             print(
                 f"{segment_id}: aligned_inverse_diagnostic AbsRel={segment_report['aligned_inverse_diagnostic_abs_rel']:.6f} "
@@ -437,6 +497,19 @@ def main(config: EvalCatalogConfig) -> Path:
             f"overall metric: AbsRel={overall['metric_abs_rel']:.6f} delta1={overall['metric_delta1']:.6f} "
             f"MAE={overall['metric_mae']:.6f}m frames={overall['frame_count']}"
         )
+        if all_edge_records:
+            stratified_means: dict[str, float] = {
+                key: float(np.mean([record[key] for record in all_edge_records])) for key in all_edge_records[0]
+            }
+            stratified_means["edge_ratio_vs_baseline"] = stratified_means["baseline_edge_mae"] / max(stratified_means["edge_mae"], 1e-9)
+            stratified_means["flat_ratio_vs_baseline"] = stratified_means["baseline_flat_mae"] / max(stratified_means["flat_mae"], 1e-9)
+            overall.update(stratified_means)
+            print(
+                f"overall edge-stratified: edge MAE={stratified_means['edge_mae']:.6f}m "
+                f"(baseline/pred {stratified_means['edge_ratio_vs_baseline']:.3f}x) | "
+                f"flat MAE={stratified_means['flat_mae']:.6f}m "
+                f"(baseline/pred {stratified_means['flat_ratio_vs_baseline']:.3f}x)"
+            )
     print(
         f"overall aligned_inverse_diagnostic: AbsRel={overall['aligned_inverse_diagnostic_abs_rel']:.6f} "
         f"delta1={overall['aligned_inverse_diagnostic_delta1']:.6f} MAE={overall['aligned_inverse_diagnostic_mae']:.6f}m"

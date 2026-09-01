@@ -74,6 +74,20 @@ class TrainCatalogConfig:
     At 0.5 the term supplies only ~9% of the objective; upstream ZipDepth weights its
     equivalent term at 2.0. Raising it targets depth-discontinuity error, where the model
     beats a bilinear prompt upsample by the smallest margin."""
+    metric_grad_scale_weights: tuple[float, float, float, float] | None = None
+    """Per-scale gradient weights over k = 1, 2, 4, 8 (normalized to sum to one). None
+    weights all scales equally; only the k = 1 scale sees full-resolution edges, so
+    fine-heavy allocations move gradient pressure onto real discontinuities."""
+    metric_grad_max_depth_m: float = 4.0
+    """Gradient-term validity ceiling in metres. The L1 window stays at 4 m; widening
+    this keeps gradient pairs straddling the 4 m boundary — the strongest room edges,
+    which the default deletes entirely."""
+    metric_grad_pool_mask_threshold: float = 0.99
+    """Pooled-validity threshold at coarse gradient scales. 0.99 erodes every kxk block
+    near an invalid pixel (silhouette rings); 0.5 keeps majority-valid blocks."""
+    metric_edge_weight_alpha: float = 0.0
+    """Extra L1 weight on teacher depth edges: w = 1 + alpha * clip(g / q90(g), 0, 1).
+    Zero keeps plain masked L1."""
     freeze_bn: bool = True
     """Pin BatchNorm to eval mode while fine-tuning: forwards use the released running
     stats instead of batch statistics, and the stats never drift toward the new data.
@@ -477,6 +491,10 @@ def main(
             alpha_grad=float(loss_config.get("alpha_grad", 2.0)),
             target_mode=config.target_mode,
             metric_gradient_weight=config.metric_gradient_weight,
+            metric_grad_scale_weights=config.metric_grad_scale_weights,
+            metric_grad_max_depth_m=config.metric_grad_max_depth_m,
+            metric_grad_pool_mask_threshold=config.metric_grad_pool_mask_threshold,
+            metric_edge_weight_alpha=config.metric_edge_weight_alpha,
             use_profiler=config.profile,
             profile_dir=str(config.profile_dir),
             profile_wait=config.profile_wait,

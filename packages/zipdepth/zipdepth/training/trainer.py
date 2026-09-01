@@ -60,6 +60,10 @@ class ZipDepthTrainer:
                 alpha_grad: float = 2.0,
                 target_mode: Literal['ssi', 'metric'] = 'ssi',
                 metric_gradient_weight: float = 0.5,
+                metric_grad_scale_weights: tuple[float, ...] | None = None,
+                metric_grad_max_depth_m: float = 4.0,
+                metric_grad_pool_mask_threshold: float = 0.99,
+                metric_edge_weight_alpha: float = 0.0,
                 ):
         """
         Args:
@@ -119,7 +123,14 @@ class ZipDepthTrainer:
 
         # Loss function initialization
         self.criterion = (
-            MetricDepthLoss(gradient_weight=metric_gradient_weight, grad_scales=4)
+            MetricDepthLoss(
+                gradient_weight=metric_gradient_weight,
+                grad_scales=4,
+                grad_scale_weights=metric_grad_scale_weights,
+                grad_max_depth_m=metric_grad_max_depth_m,
+                grad_pool_mask_threshold=metric_grad_pool_mask_threshold,
+                edge_weight_alpha=metric_edge_weight_alpha,
+            )
             if target_mode == 'metric'
             else ZipDepthLoss(alpha_ssi=alpha_ssi, alpha_grad=alpha_grad)
         ).to(device)
