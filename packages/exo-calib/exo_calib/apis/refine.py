@@ -65,7 +65,7 @@ class RefineConfig:
     """LM iterations per bundle-adjust call."""
     robust_scale_px: float = 2.0
     """Huber scale in pixels for the BA residuals."""
-    pose_prior_sigma_m: float = 0.25
+    pose_prior_sigma_m: float = 0.10
     """Soft prior (meters) anchoring camera centers to the Stage A estimate;
     pins the similarity gauge (scale drift) and keeps the BA a refinement."""
     fix_first_camera: bool = False
