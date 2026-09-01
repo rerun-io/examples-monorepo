@@ -32,7 +32,7 @@ class HtmlReportConfig:
     """Destination of the generated single-file report."""
     screenshots: tuple[Path, ...] = field(default_factory=tuple)
     """Evidence PNGs embedded (base64) at the bottom of the report."""
-    window_s: float = 30.0
+    window_s: float = 5.0
     """Processed window length noted in the header."""
 
 

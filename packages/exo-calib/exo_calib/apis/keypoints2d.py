@@ -44,8 +44,8 @@ class Keypoints2dConfig:
     """Catalog dataset holding the registered segment."""
     segment_id: str | None = None
     """Segment to process; ``None`` uses the dataset's single segment."""
-    window_s: float = 30.0
-    """Processed duration from the start of the segment."""
+    window_s: float = 5.0
+    """Processed duration from the start of the segment (keep at or under 5 s)."""
     frame_stride: int = 1
     """Keep every ``frame_stride``-th sample inside the window."""
     batch_size: int = 32
