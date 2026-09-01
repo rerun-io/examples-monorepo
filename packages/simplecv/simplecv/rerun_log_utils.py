@@ -505,6 +505,40 @@ def mesh_bounding_geometry(vertices: Float64[ndarray, "n 3"]) -> tuple[Float64[n
     return center, radius
 
 
+def log_fused_mesh(
+    recording: rr.RecordingStream | None,
+    entity_path: str,
+    mesh: Any,
+    *,
+    static: bool = True,
+    face_rendering: rr.components.MeshFaceRendering = rr.components.MeshFaceRendering.Front,
+) -> None:
+    """Log a fused triangle mesh to Rerun.
+
+    Args:
+        recording: Explicit recording stream, or ``None`` for the global stream.
+        entity_path: Rerun entity path for the mesh.
+        mesh: Triangle mesh exposing Open3D-compatible vertex, triangle, normal,
+            and color buffers.
+        static: Whether to log timeless data instead of the current time.
+        face_rendering: Which wound faces the viewer renders. Front-face-only
+            is the room-reconstruction default; pass ``DoubleSided`` to retain
+            Rerun's general mesh default.
+    """
+    rr.log(
+        entity_path,
+        rr.Mesh3D(
+            vertex_positions=np.asarray(mesh.vertices),
+            triangle_indices=np.asarray(mesh.triangles),
+            vertex_normals=np.asarray(mesh.vertex_normals),
+            vertex_colors=np.asarray(mesh.vertex_colors),
+            face_rendering=face_rendering,
+        ),
+        static=static,
+        recording=recording,
+    )
+
+
 def orbit_eye_position(
     look_target_xyz: Float64[ndarray, "3"],
     bounding_radius_m: float,

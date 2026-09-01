@@ -22,6 +22,7 @@ if not hasattr(_dataloader, "NoShuffle"):
 from arkitscenes_download.ingest.paths import CONFIDENCE, DEPTH_PROMPTDA, PROMPTDA_MESH, VIDEO_WIDE  # noqa: E402
 from rerun.experimental.dataloader import RerunIterableDataset  # noqa: E402
 from simplecv.rerun_dataloader import SegmentNvdecDecoder  # noqa: E402
+from simplecv.rerun_log_utils import log_fused_mesh  # noqa: E402
 
 from rerun_prompt_da.apis.arkitscenes_shared import (  # noqa: E402
     filter_depth_for_fusion,
@@ -35,7 +36,6 @@ from rerun_prompt_da.apis.prompt_da_arkitscenes import (  # noqa: E402
     fuse_and_log_batch,
     log_promptda_frame,
 )
-from rerun_prompt_da.mesh_logging import log_fused_mesh  # noqa: E402
 from rerun_prompt_da.promptda_stream import PromptDACollate, promptda_dataset  # noqa: E402
 
 

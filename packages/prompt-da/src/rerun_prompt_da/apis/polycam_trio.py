@@ -26,14 +26,14 @@ from monopriors.models.depth_completion.prompt_da import DEFAULT_PROMPTDA_CACHE_
 from numpy import ndarray
 from simplecv.camera_parameters import rescale_intri
 from simplecv.data.polycam import DepthConfidenceLevel, PolycamData, PolycamDataset, load_polycam_data
+from simplecv.ops.depth import quantize_depth_m_to_mm
 from simplecv.ops.tsdf_depth_fuser import Open3DFuser
-from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole
+from simplecv.rerun_log_utils import RerunTyroConfig, log_fused_mesh, log_pinhole
 from torch import Tensor
 from tqdm import tqdm
 from trtkit import TensorRtBackendConfig, TorchBackendConfig
 
 from rerun_prompt_da.apis.prompt_da_polycam import filter_depth
-from rerun_prompt_da.mesh_logging import log_fused_mesh
 
 SOURCES: tuple[str, str, str] = ("arkit", "promptda", "zipdepth")
 """Depth sources compared, in increasing order of expected quality."""
@@ -238,8 +238,8 @@ def polycam_trio(config: PolycamTrioConfig) -> None:
         seconds["zipdepth"] += time.perf_counter() - started
 
         predicted_mm: dict[str, UInt16[ndarray, "b h w"]] = {
-            "promptda": (teacher_bhw * 1000.0).clamp(0.0, 65535.0).to(torch.uint16).cpu().numpy(),
-            "zipdepth": (student_bhw * 1000.0).clamp(0.0, 65535.0).to(torch.uint16).cpu().numpy(),
+            "promptda": quantize_depth_m_to_mm(teacher_bhw).cpu().numpy(),
+            "zipdepth": quantize_depth_m_to_mm(student_bhw).cpu().numpy(),
         }
 
         frame_offset: int

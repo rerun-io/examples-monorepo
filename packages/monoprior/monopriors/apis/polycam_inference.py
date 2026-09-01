@@ -8,7 +8,7 @@ from jaxtyping import Float, Float32, UInt8, UInt16
 from simplecv.camera_parameters import PinholeParameters
 from simplecv.data.polycam import PolycamData, PolycamDataset, load_polycam_data
 from simplecv.ops.tsdf_depth_fuser import Open3DFuser
-from simplecv.rerun_log_utils import RerunTyroConfig
+from simplecv.rerun_log_utils import RerunTyroConfig, log_fused_mesh
 from tqdm import tqdm
 
 from monopriors.models.monoprior import DsineAndUnidepth, MonoPriorPrediction
@@ -138,22 +138,18 @@ def polycam_inference(config: PolycamConfig) -> None:
     pred_mesh = pred_fuser.get_mesh()
     pred_mesh.compute_vertex_normals()
 
-    rr.log(
+    log_fused_mesh(
+        None,
         f"{parent_path}/gt_mesh",
-        rr.Mesh3D(
-            vertex_positions=gt_mesh.vertices,
-            triangle_indices=gt_mesh.triangles,
-            vertex_normals=gt_mesh.vertex_normals,
-            vertex_colors=gt_mesh.vertex_colors,
-        ),
+        gt_mesh,
+        static=False,
+        face_rendering=rr.components.MeshFaceRendering.DoubleSided,
     )
 
-    rr.log(
+    log_fused_mesh(
+        None,
         f"{parent_path}/pred_mesh",
-        rr.Mesh3D(
-            vertex_positions=pred_mesh.vertices,
-            triangle_indices=pred_mesh.triangles,
-            vertex_normals=pred_mesh.vertex_normals,
-            vertex_colors=pred_mesh.vertex_colors,
-        ),
+        pred_mesh,
+        static=False,
+        face_rendering=rr.components.MeshFaceRendering.DoubleSided,
     )

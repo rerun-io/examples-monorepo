@@ -31,7 +31,7 @@ from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer, 
 from rerun.experimental.dataloader import RerunIterableDataset
 from simplecv.camera_parameters import Intrinsics, rescale_intri
 from simplecv.ops.tsdf_depth_fuser import Open3DFuser
-from simplecv.rerun_log_utils import mesh_bounding_geometry
+from simplecv.rerun_log_utils import log_fused_mesh, mesh_bounding_geometry
 from torch import Tensor
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -46,7 +46,6 @@ from rerun_prompt_da.apis.arkitscenes_shared import (
     stride_for,
 )
 from rerun_prompt_da.apis.prompt_da_trt_polycam import network_image_hw
-from rerun_prompt_da.mesh_logging import log_fused_mesh
 from rerun_prompt_da.promptda_stream import PromptDABatch, PromptDACollate, promptda_dataset
 from rerun_prompt_da.trt_predictor import PromptDATrtPredictor
 

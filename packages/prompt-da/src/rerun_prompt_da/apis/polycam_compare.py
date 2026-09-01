@@ -26,6 +26,7 @@ from monopriors.models.depth_completion.base_completion_depth import BaseComplet
 from monopriors.models.depth_completion.prompt_da import DEFAULT_PROMPTDA_CACHE_DIR
 from numpy import ndarray
 from simplecv.data.polycam import PolycamData, PolycamDataset, load_polycam_data
+from simplecv.ops.depth import quantize_depth_m_to_mm
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
 from tqdm import tqdm
@@ -164,17 +165,11 @@ def polycam_compare(config: PolycamCompareConfig) -> None:
         abs_diff_sum += float(abs_diff_b1hw.sum().item())
         abs_diff_count += int(abs_diff_b1hw.numel())
 
-        teacher_mm_bhw: UInt16[ndarray, "b h w"] = (
-            (teacher_on_student_b1hw.squeeze(1) * 1000.0).clamp(0.0, 65535.0).to(torch.uint16).cpu().numpy()
-        )
-        student_mm_bhw: UInt16[ndarray, "b h w"] = (
-            (student_depth_b1hw.squeeze(1) * 1000.0).clamp(0.0, 65535.0).to(torch.uint16).cpu().numpy()
-        )
-        diff_mm_bhw: UInt16[ndarray, "b h w"] = (abs_diff_b1hw.squeeze(1) * 1000.0).clamp(0.0, 65535.0).to(torch.uint16).cpu().numpy()
-        bilinear_mm_bhw: UInt16[ndarray, "b h w"] = (bilinear_b1hw.squeeze(1) * 1000.0).clamp(0.0, 65535.0).to(torch.uint16).cpu().numpy()
-        diff_bil_mm_bhw: UInt16[ndarray, "b h w"] = (
-            (abs_diff_bilinear_b1hw.squeeze(1) * 1000.0).clamp(0.0, 65535.0).to(torch.uint16).cpu().numpy()
-        )
+        teacher_mm_bhw: UInt16[ndarray, "b h w"] = quantize_depth_m_to_mm(teacher_on_student_b1hw.squeeze(1)).cpu().numpy()
+        student_mm_bhw: UInt16[ndarray, "b h w"] = quantize_depth_m_to_mm(student_depth_b1hw.squeeze(1)).cpu().numpy()
+        diff_mm_bhw: UInt16[ndarray, "b h w"] = quantize_depth_m_to_mm(abs_diff_b1hw.squeeze(1)).cpu().numpy()
+        bilinear_mm_bhw: UInt16[ndarray, "b h w"] = quantize_depth_m_to_mm(bilinear_b1hw.squeeze(1)).cpu().numpy()
+        diff_bil_mm_bhw: UInt16[ndarray, "b h w"] = quantize_depth_m_to_mm(abs_diff_bilinear_b1hw.squeeze(1)).cpu().numpy()
         # The raw prompt is what the teacher sees; it is the model's only source
         # of metric scale, so log it at its native 192x256 beside the predictions.
         prompt_mm_bhw: UInt16[ndarray, "b 192 256"] = np.stack([data.original_depth_hw for data in batch])

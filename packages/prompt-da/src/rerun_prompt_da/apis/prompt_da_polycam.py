@@ -29,7 +29,7 @@ from simplecv.data.polycam import (
     load_polycam_data,
 )
 from simplecv.ops.tsdf_depth_fuser import Open3DFuser
-from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole
+from simplecv.rerun_log_utils import RerunTyroConfig, log_fused_mesh, log_pinhole
 from torch import Tensor
 from tqdm import tqdm
 from trtkit import TorchBackendConfig
@@ -126,14 +126,12 @@ def _log_mesh(parent_log_path: Path, pred_fuser: Open3DFuser) -> None:
 
     pred_mesh = pred_fuser.get_mesh()
     pred_mesh.compute_vertex_normals()
-    rr.log(
+    log_fused_mesh(
+        None,
         f"{parent_log_path}/pred_mesh",
-        rr.Mesh3D(
-            vertex_positions=pred_mesh.vertices,
-            triangle_indices=pred_mesh.triangles,
-            vertex_normals=pred_mesh.vertex_normals,
-            vertex_colors=pred_mesh.vertex_colors,
-        ),
+        pred_mesh,
+        static=False,
+        face_rendering=rr.components.MeshFaceRendering.DoubleSided,
     )
 
 
