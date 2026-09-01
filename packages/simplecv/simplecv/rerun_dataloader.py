@@ -13,26 +13,23 @@ technique), and serves every sample from one GPU decoder.
 TODO(rerun#upstream): delete this module once the dataloader decodes video fast
 enough on its own — this is a stopgap, and it costs real flexibility: holding a
 ``DatasetEntry`` makes it unpicklable (so ``num_workers`` must stay 0), and the
-cached CUDA decoder does not survive ``decode_threads > 1``. Two upstream PRs
-converge on it: reality#2893 adds a torchcodec decoder (slower than the av path
-today, by its author's own measurement), and reality#3083 replaces per-sample
-``decode`` with a batch API whose ``_DecoderSession`` reuses one codec context
-across a GOP — the session reuse this module hand-rolls. #3083 also changes the
-``ColumnDecoder.decode`` signature, so this class needs a port when it lands.
+cached CUDA decoder does not survive ``decode_threads > 1``. Upstream's batch
+decoder now reuses one codec context across a GOP, but its PyAV CPU path remains
+slower than this segment-wide torchcodec/NVDEC path.
 """
 
+from collections.abc import Sequence
 from fractions import Fraction
 from io import BytesIO
 from typing import TypeAlias
 
 import av
 import numpy as np
-import pyarrow as pa
 import torch
 from jaxtyping import Shaped, UInt8
 from numpy import ndarray
 from rerun.catalog import DatasetEntry, DatasetView
-from rerun.experimental.dataloader import ColumnDecoder
+from rerun.experimental.dataloader import ColumnDecoder, DecodeRequest, FieldBatch
 from torch import Tensor
 from torchcodec.decoders import VideoDecoder
 
@@ -116,12 +113,12 @@ def wrap_mp4(samples: list[bytes], keyframes: list[bool], fps: int, codec: str =
     return buffer.getvalue()
 
 
-class SegmentNvdecDecoder(ColumnDecoder):
-    """Serve the dataloader's per-sample decode calls from one whole-segment GPU decoder.
+class SegmentNvdecDecoder(ColumnDecoder[FrameRgbChw]):
+    """Serve a fetched request block from cached whole-segment GPU decoders.
 
-    The base-class defaults (no ``prior_keyframe_path``, no ``context_range``) make the
-    dataloader ship each grid slot as a point read; the shipped bytes are ignored and the
-    frame comes from the cached segment-wide NVDEC decoder instead.
+    The base-class defaults (no ``prior_keyframe_path``) make the dataloader ship each
+    grid slot as a point read. The shipped bytes are ignored because frames come from
+    the cached segment-wide NVDEC decoder instead.
     """
 
     def __init__(self, dataset: DatasetEntry, entity: str, timeline: str, device: torch.device, fps: int) -> None:
@@ -148,9 +145,8 @@ class SegmentNvdecDecoder(ColumnDecoder):
         self.keyframes: list[bool] | None = None
         """Keyframe flag per raw sample."""
 
-    def decode(self, raw: pa.ChunkedArray, index_value: int | np.datetime64 | np.timedelta64, segment_id: str) -> FrameRgbChw | None:
-        """Return the segment's latest frame at or before *index_value*, or None before the first sample."""
-        del raw  # decoded from the segment-wide cache, not the shipped point read
+    def decode_at(self, index_value: int | np.datetime64 | np.timedelta64, segment_id: str) -> FrameRgbChw | None:
+        """Return a segment's latest frame at or before an index value."""
         if segment_id != self._segment_id:
             self.times, self.samples, self.keyframes, self._decoder = open_segment_decoder(
                 self._dataset, segment_id, self._entity, self._timeline, self._device, self._fps
@@ -162,3 +158,11 @@ class SegmentNvdecDecoder(ColumnDecoder):
         assert self._decoder is not None
         frame_chw: FrameRgbChw = self._decoder.get_frame_at(frame_index).data
         return frame_chw
+
+    def decode(self, batch: FieldBatch, requests: Sequence[DecodeRequest]) -> Sequence[FrameRgbChw | None]:
+        """Decode one aligned result per request in a fetched field block."""
+        del batch  # decoded from the segment-wide cache, not the fetched point reads
+        decoded: list[FrameRgbChw | None] = []
+        for request in requests:
+            decoded.append(self.decode_at(request.index_value, request.segment_id))
+        return decoded

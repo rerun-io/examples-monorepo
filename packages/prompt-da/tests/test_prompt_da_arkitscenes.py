@@ -82,6 +82,7 @@ def test_promptda_dataset_uses_nvdec_and_fetches_fusion_confidence(monkeypatch: 
     fields = captured["dataset_kwargs"]["fields"]  # type: ignore[index]
     assert fields["video"].decode is decoder  # type: ignore[index]
     assert fields["conf"].path == f"/{CONFIDENCE}:SegmentationImage:buffer"  # type: ignore[index]
+    assert captured["dataset_kwargs"]["fetch_block_size"] == 1024  # type: ignore[index]
 
 
 def test_promptda_collate_keeps_stored_confidence_and_honors_ingest_rotation() -> None:

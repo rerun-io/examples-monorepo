@@ -614,8 +614,8 @@ cwd = "packages/prompt-da"
 description = "Run the gradio app in dev mode"
 
 # prompt-da-stream: streaming inference straight from the Rerun dataloader.
-# Its own lane because it needs the 0.36 prerelease dataloader (ColumnDecoder,
-# fetch_size); `common`'s 0.35 pin and a prerelease pin cannot share an env.
+# Its own lane because it needs the 0.37 prerelease dataloader (ColumnDecoder,
+# fetch_block_size); the temporary Gradio 0.36 lane cannot share an env.
 # Explicit platforms required — see AGENTS.md "Platforms & lockfile".
 [feature.prompt-da-stream]
 platforms = ["linux-64"]
@@ -2448,7 +2448,7 @@ description = "Open the native Rerun viewer on the local catalog"
 # ═══════════════════════════════════════════════════════════════════════════
 # gauss-surf — GausSurf splat pipeline over ARKitScenes catalog segments
 # ═══════════════════════════════════════════════════════════════════════════
-# Signals/catalog lane: reads the segment through the 0.36 prerelease
+# Signals/catalog lane: reads the segment through the 0.37 prerelease
 # dataloader, derives frame selection / normals / ultrawide depth, writes
 # layer RRDs back. Explicit platforms required — see AGENTS.md.
 [feature.gauss-surf]
@@ -2501,6 +2501,9 @@ sam3 = { path = "packages/sam3", editable = true }
 [feature.gauss-surf.activation.env]
 PACKAGE_DIR = "packages/gauss-surf"
 PYREFLY_TARGET = "src/gauss_surf/apis src/gauss_surf/train_gsplat src/gauss_surf/catalog.py src/gauss_surf/frame_selection.py src/gauss_surf/gaussurf_geometry.py src/gauss_surf/gaussurf_losses.py src/gauss_surf/gsplat_schedule.py src/gauss_surf/normals_encoding.py src/gauss_surf/render_io.py src/gauss_surf/uw_geometry.py src/gauss_surf/__init__.py tools"
+# The pinned gsplat fork accepts extra_signals, but another workspace gsplat
+# install wins Pyrefly's global site-package resolution and lacks those kwargs.
+PYREFLY_EXTRA_ARGS = "--baseline pyrefly-baseline.json"
 
 [feature.gauss-surf.tasks.gauss-surf-serve]
 cmd = "bash -c 'ulimit -n 524288 && exec rerun server --port 51236'"

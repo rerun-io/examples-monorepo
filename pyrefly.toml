@@ -101,6 +101,10 @@ site-package-path = [
     # Per-package envs for package-specific deps.
     # Common deps (rerun, numpy, etc.) are resolved from the python-interpreter-path
     # (dev env) automatically — no need to list .pixi/envs/dev here.
+    # The primary 0.37 dataloader type surface must precede the temporary 0.36
+    # Gradio lane, whose old ColumnDecoder signatures otherwise win resolution.
+    ".pixi/envs/prompt-da-stream-dev/lib/python3.12/site-packages",
+    ".pixi/envs/prompt-da-stream-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/monoprior-dev/lib/python3.12/site-packages",
     ".pixi/envs/monoprior-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/simplecv-dev/lib/python3.12/site-packages",
@@ -109,8 +113,6 @@ site-package-path = [
     ".pixi/envs/arkitscenes-download-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/prompt-da-dev/lib/python3.12/site-packages",
     ".pixi/envs/prompt-da-dev/lib/python3.12/site-packages/rerun_sdk",
-    ".pixi/envs/prompt-da-stream-dev/lib/python3.12/site-packages",
-    ".pixi/envs/prompt-da-stream-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/zipdepth-dev/lib/python3.12/site-packages",
     ".pixi/envs/zipdepth-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/zipdepth-catalog-dev/lib/python3.12/site-packages",

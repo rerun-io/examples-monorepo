@@ -112,7 +112,7 @@ def test_decode_frames_refuses_timestamp_drift(monkeypatch: pytest.MonkeyPatch) 
         def __init__(self, *_args: Any) -> None:
             self.times: np.ndarray = np.asarray([10, 20], dtype=np.int64).astype("timedelta64[ns]")
 
-        def decode(self, _raw: pa.ChunkedArray, _timestamp: np.timedelta64, _video_id: str) -> torch.Tensor:
+        def decode_at(self, _timestamp: np.timedelta64, _video_id: str) -> torch.Tensor:
             """Return one RGB tensor so exactness validation can run."""
             return torch.zeros((3, 2, 2), dtype=torch.uint8)
 
@@ -133,7 +133,7 @@ def test_decode_frames_preserves_requested_timestamp_order(monkeypatch: pytest.M
         def __init__(self, *_args: Any) -> None:
             self.times: np.ndarray = np.asarray([10, 20], dtype=np.int64).astype("timedelta64[ns]")
 
-        def decode(self, _raw: pa.ChunkedArray, timestamp: np.timedelta64, _video_id: str) -> torch.Tensor:
+        def decode_at(self, timestamp: np.timedelta64, _video_id: str) -> torch.Tensor:
             """Encode the requested nanosecond value into the returned frame."""
             value: int = int(timestamp.astype(np.int64))
             return torch.full((3, 1, 1), value, dtype=torch.uint8)

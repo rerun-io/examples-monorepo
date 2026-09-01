@@ -432,7 +432,7 @@ def test_catalog_prediction_layer_config_defaults_match_spec() -> None:
     assert config.assembly101_row_id == 120
     assert config.max_frames == 10
     assert config.video_codec == "av1"
-    assert config.keyframe_interval == 300
+    assert config.fetch_block_size == 64
     assert config.native_fps_override is None
     assert config.output_root == Path("artifacts/catalog_layers")
     assert config.layer_name == "mvapi_coco133_upper_body_v1"
