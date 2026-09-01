@@ -1,6 +1,7 @@
 """Stream chosen-frame PromptDA targets from a Rerun catalog."""
 
 from collections.abc import Callable, Generator, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
 from queue import Empty, Queue
@@ -248,20 +249,42 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
         if self._load_confidence:
             contents.append(f"/{CONFIDENCE}")
             columns.append(CONFIDENCE_COLUMN)
-        table: pa.Table = (
-            self._dataset_entry.filter_segments(segment_id)
-            .filter_contents(contents)
-            .reader(index=TIMELINE, fill_latest_at=True)
-            .filter(col(f'"{PROMPTDA_BLOB_COLUMN}"').is_not_null())
-            .select(*columns)
-            .sort(TIMELINE)
-            .to_arrow_table()
-        )
+        # The depth query is independent of the video query inside open_segment_decoder;
+        # both block in native code with the GIL released, so overlapping them takes
+        # ~30% off the per-segment stall. The depth query goes to the worker thread (pure
+        # datafusion/gRPC); the decoder stays on this thread because NVDEC creation needs
+        # the producer's CUDA context. No .sort(TIMELINE) on either query: the reader
+        # already yields (segment, index)-ordered rows, and a client-side SortExec
+        # re-materializes the blob columns (~4x the query wall time). The ordering is an
+        # implicit server contract — the guard below fails loudly if it ever breaks.
+        def _query_depth_table() -> pa.Table:
+            return (
+                self._dataset_entry.filter_segments(segment_id)
+                .filter_contents(contents)
+                .reader(index=TIMELINE, fill_latest_at=True)
+                .filter(col(f'"{PROMPTDA_BLOB_COLUMN}"').is_not_null())
+                .select(*columns)
+                .to_arrow_table()
+            )
+
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="segment-depth-query") as pool:
+            table_future: Future[pa.Table] = pool.submit(_query_depth_table)
+            decoder_result: tuple[Shaped[ndarray, "n_packets"], list[bytes], list[bool], VideoDecoder] = open_segment_decoder(
+                self._dataset_entry,
+                segment_id,
+                VIDEO_WIDE,
+                TIMELINE,
+                self._device,
+                NATIVE_VIDEO_FPS,
+            )
+            table: pa.Table = table_future.result()
         stats.segment_query += perf_counter() - started
         if table.num_rows == 0:
             return
 
         all_times_n: Shaped[ndarray, "n_rows"] = table_timestamps(table)
+        if all_times_n.size > 1 and bool(np.any(all_times_n[1:] < all_times_n[:-1])):
+            raise ValueError(f"segment {segment_id}: reader returned rows out of {TIMELINE} order; the no-sort fast path assumes index order")
         chosen_times_n: Shaped[ndarray, "n_chosen"] = all_times_n[:: self._frame_stride]
         target_blobs: list[UInt8[ndarray, "target_n_bytes"]] = component_u8_views(table.column(PROMPTDA_BLOB_COLUMN), PROMPTDA_BLOB_COLUMN)[
             :: self._frame_stride
@@ -277,16 +300,6 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
             # decoded prompt shape. The model range-gates the prompt itself.
             confidences = [None] * len(prompt_blobs)
 
-        started = perf_counter()
-        decoder_result: tuple[Shaped[ndarray, "n_packets"], list[bytes], list[bool], VideoDecoder] = open_segment_decoder(
-            self._dataset_entry,
-            segment_id,
-            VIDEO_WIDE,
-            TIMELINE,
-            self._device,
-            NATIVE_VIDEO_FPS,
-        )
-        stats.segment_query += perf_counter() - started
         packet_times_n: Shaped[ndarray, "n_packets"] = decoder_result[0]
         decoder: VideoDecoder = decoder_result[3]
         del decoder_result

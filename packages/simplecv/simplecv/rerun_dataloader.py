@@ -61,13 +61,18 @@ def open_segment_decoder(
         and the decoder over the whole segment.
     """
     view: DatasetView = dataset.filter_segments(segment_id).filter_contents(entity)
+    # No .sort(timeline): the reader already yields (segment, index)-ordered rows, and a
+    # client-side SortExec re-materializes the blob columns (~4x the query wall time).
+    # The ordering is an implicit server contract, so the guard below fails loudly if it
+    # ever breaks instead of silently corrupting packet order.
     table = (
         view.reader(index=timeline)
         .select(timeline, f"/{entity}:VideoStream:sample", f"/{entity}:VideoStream:is_keyframe")
-        .sort(timeline)
         .to_arrow_table()
     )
     times: TimedeltaNs = np.array([t.value for t in table[0]], dtype="timedelta64[ns]")
+    if np.any(times[1:] < times[:-1]):
+        raise ValueError(f"segment {segment_id}: reader returned rows out of timeline order; the no-sort fast path assumes index order")
     blobs = table[1].combine_chunks().flatten()
     data = memoryview(blobs.flatten().buffers()[1])
     offsets: list[int] = blobs.offsets.to_pylist()
