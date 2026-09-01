@@ -448,7 +448,7 @@ def test_pixi_catalog_environment_and_task_are_wired_for_dataloader_lane() -> No
     catalog_task: dict[str, Any] = pixi_data["feature"]["mv-api-catalog"]["tasks"]["mv-api-catalog-prediction-layer"]
     catalog_dev_env: dict[str, Any] = pixi_data["environments"]["mv-api-catalog-dev"]
 
-    assert set(rerun_sdk["extras"]) >= {"datafusion", "dataloader"}
+    assert set(rerun_sdk["extras"]) >= {"catalog", "dataloader"}
     assert catalog_task["cmd"] == "python tools/apps/catalog_prediction_layer.py"
     assert catalog_task["cwd"] == "packages/mv-api"
     assert {"rerun-prerelease", "mv-api-catalog", "dev"}.issubset(set(catalog_dev_env["features"]))

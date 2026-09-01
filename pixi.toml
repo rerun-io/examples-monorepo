@@ -56,15 +56,27 @@ xorg-xorgproto = "*"
 # torch provider, so scope CPU torch to osx-arm64 (Linux keeps pytorch-gpu).
 [feature.common.target.osx-arm64.dependencies]
 pytorch-cpu = "*"
-# rerun-sdk's dataloader extra needs torchvision; conda provides the matching build.
+# Keep torchvision aligned with the project torch build for packages that import it.
 torchvision = "*"
 
 [feature.common.pypi-dependencies]
-# datafusion only — the dataloader extra would drag torch into common envs.
-rerun-sdk = { version = "==0.36.2", extras = ["datafusion"] }
-gradio = "==6.13.0"
-gradio-rerun = "==0.36.2"
 simplecv = { path = "packages/simplecv", editable = true }
+
+# Default Rerun lane for packages without a Gradio UI.
+[feature.rerun-037]
+platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
+
+[feature.rerun-037.pypi-dependencies]
+rerun-sdk = { version = "==0.37.0rc2", extras = ["catalog"] }
+
+# Temporary lane until gradio-rerun ships 0.37; collapse back into rerun-037 then.
+[feature.gradio-rerun-036]
+platforms = ["linux-64", "linux-aarch64", "osx-arm64"]
+
+[feature.gradio-rerun-036.pypi-dependencies]
+rerun-sdk = { version = "==0.36.3", extras = ["datafusion"] }
+gradio = "==6.13.0"
+gradio-rerun = "==0.36.3"
 
 # ─── catalog common feature (Rerun catalog prerelease lane) ────────────────
 # Explicit platforms required — see AGENTS.md "Platforms & lockfile".
@@ -91,15 +103,15 @@ xorg-xorgproto = "*"
 [feature.catalog-common.pypi-dependencies]
 simplecv = { path = "packages/simplecv", editable = true }
 
-# Catalog lane: common's rerun-sdk + the dataloader extra; for unreleased
-# builds see AGENTS.md "Testing Rerun builds".
+# Catalog lane with the dataloader extra; for unreleased builds see AGENTS.md
+# "Testing Rerun builds".
 # Explicit platforms required — see AGENTS.md "Platforms & lockfile".
 [feature.rerun-prerelease]
 platforms = ["linux-64", "linux-aarch64"]
 
 [feature.rerun-prerelease.pypi-dependencies]
-rerun-sdk = { version = "==0.36.2", extras = [
-    "datafusion",
+rerun-sdk = { version = "==0.37.0rc2", extras = [
+    "catalog",
     "dataloader",
 ] }
 
@@ -909,7 +921,7 @@ scipy = "*"
 [feature.mv-api-catalog-register-mac.pypi-dependencies]
 tyro = ">=0.9.1,<0.10"
 simplecv = { path = "packages/simplecv", editable = true }
-rerun-sdk = { version = "==0.36.2", extras = ["datafusion"] }
+rerun-sdk = { version = "==0.37.0rc2", extras = ["catalog"] }
 
 [feature.mv-api-catalog-register-mac.pypi-options]
 index-url = "https://pypi.org/simple"
@@ -1748,7 +1760,7 @@ xorg-libxrandr = "*"
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
 lpips = ">=0.1.4,<1"
 plyfile = ">=1.1,<2"
-rerun-sdk = "==0.36.2"
+rerun-sdk = "==0.37.0rc2"
 simplecv = { path = "packages/simplecv", editable = true }
 
 [feature.gsplat-rust-renderer.activation.env]
@@ -2601,10 +2613,12 @@ description = "Start the local in-memory Rerun catalog on :51235 (own shell; kee
 [environments]
 arkitscenes-download = { features = [
     "common",
+    "rerun-037",
     "arkitscenes-download",
 ], solve-group = "arkitscenes-download", no-default-feature = true }
 arkitscenes-download-dev = { features = [
     "common",
+    "rerun-037",
     "arkitscenes-download",
     "dev",
 ], solve-group = "arkitscenes-download", no-default-feature = true }
@@ -2612,14 +2626,17 @@ dev = { features = [
     "ide",
     "dev",
     "common",
+    "rerun-037",
 ], solve-group = "dev", no-default-feature = true }
 simplecv = { features = [
     "common",
+    "rerun-037",
     "cuda",
     "simplecv",
 ], solve-group = "simplecv", no-default-feature = true }
 simplecv-dev = { features = [
     "common",
+    "rerun-037",
     "cuda",
     "simplecv",
     "dev",
@@ -2640,23 +2657,27 @@ simplecv-catalog-dev = { features = [
 ], solve-group = "simplecv-catalog", no-default-feature = true }
 monoprior = { features = [
     "common",
+    "gradio-rerun-036",
     "cuda",
     "monoprior",
 ], solve-group = "monoprior", no-default-feature = true }
 monoprior-dev = { features = [
     "common",
+    "gradio-rerun-036",
     "cuda",
     "monoprior",
     "dev",
 ], solve-group = "monoprior", no-default-feature = true }
 prompt-da = { features = [
     "common",
+    "gradio-rerun-036",
     "cuda",
     "prompt-da",
     "prompt-da-demo",
 ], solve-group = "prompt-da", no-default-feature = true }
 prompt-da-dev = { features = [
     "common",
+    "gradio-rerun-036",
     "cuda",
     "prompt-da",
     "dev",
@@ -2679,11 +2700,13 @@ prompt-da-stream-dev = { features = [
 ], solve-group = "prompt-da-stream", no-default-feature = true }
 zipdepth = { features = [
     "common",
+    "rerun-037",
     "cuda",
     "zipdepth",
 ], solve-group = "zipdepth", no-default-feature = true }
 zipdepth-dev = { features = [
     "common",
+    "rerun-037",
     "cuda",
     "zipdepth",
     "dev",
@@ -2705,72 +2728,85 @@ zipdepth-catalog-dev = { features = [
 ], solve-group = "zipdepth-catalog", no-default-feature = true }
 wilor-nano = { features = [
     "common",
+    "gradio-rerun-036",
     "cuda",
     "wilor-nano",
 ], solve-group = "wilor-nano", no-default-feature = true }
 wilor-nano-dev = { features = [
     "common",
+    "gradio-rerun-036",
     "cuda",
     "wilor-nano",
     "dev",
 ], solve-group = "wilor-nano", no-default-feature = true }
 sam3d-body = { features = [
     "common",
+    "gradio-rerun-036",
     "cuda",
     "sam3d-body",
 ], solve-group = "sam3d-body", no-default-feature = true }
 sam3d-body-dev = { features = [
     "common",
+    "gradio-rerun-036",
     "cuda",
     "sam3d-body",
     "dev",
 ], solve-group = "sam3d-body", no-default-feature = true }
 sam3 = { features = [
     "common",
+    "gradio-rerun-036",
     "cuda",
     "sam3",
 ], solve-group = "sam3", no-default-feature = true }
 sam3-dev = { features = [
     "common",
+    "gradio-rerun-036",
     "cuda",
     "sam3",
     "dev",
 ], solve-group = "sam3", no-default-feature = true }
 sapiens2-pose = { features = [
     "common",
+    "gradio-rerun-036",
     "cuda",
     "sapiens2-pose",
 ], solve-group = "sapiens2-pose", no-default-feature = true }
 sapiens2-pose-dev = { features = [
     "common",
+    "gradio-rerun-036",
     "cuda",
     "sapiens2-pose",
     "dev",
 ], solve-group = "sapiens2-pose", no-default-feature = true }
 sapiens-coco133-pose = { features = [
     "common",
+    "rerun-037",
     "cuda",
     "sapiens-coco133-pose",
 ], solve-group = "sapiens-coco133-pose", no-default-feature = true }
 sapiens-coco133-pose-dev = { features = [
     "common",
+    "rerun-037",
     "cuda",
     "sapiens-coco133-pose",
     "dev",
 ], solve-group = "sapiens-coco133-pose", no-default-feature = true }
 trtkit = { features = [
     "common",
+    "rerun-037",
     "cuda",
     "trtkit",
 ], solve-group = "trtkit", no-default-feature = true }
 trtkit-dev = { features = [
     "common",
+    "rerun-037",
     "cuda",
     "trtkit",
     "dev",
 ], solve-group = "trtkit", no-default-feature = true }
 pose-app = { features = [
     "common",
+    "gradio-rerun-036",
     "cuda",
     "posekit",
     "mamma",
@@ -2778,6 +2814,7 @@ pose-app = { features = [
 ], solve-group = "pose-app", no-default-feature = true }
 pose-app-dev = { features = [
     "common",
+    "gradio-rerun-036",
     "cuda",
     "posekit",
     "mamma",
@@ -2786,86 +2823,102 @@ pose-app-dev = { features = [
 ], solve-group = "pose-app", no-default-feature = true }
 posekit = { features = [
     "common",
+    "gradio-rerun-036",
     "cuda",
     "posekit",
 ], solve-group = "posekit", no-default-feature = true }
 posekit-dev = { features = [
     "common",
+    "gradio-rerun-036",
     "cuda",
     "posekit",
     "dev",
 ], solve-group = "posekit", no-default-feature = true }
 robocap-slam = { features = [
     "common",
+    "rerun-037",
     "robocap-slam",
 ], solve-group = "robocap-slam", no-default-feature = true }
 robocap-slam-dev = { features = [
     "common",
+    "rerun-037",
     "robocap-slam",
     "dev",
 ], solve-group = "robocap-slam", no-default-feature = true }
 # pysfm runs on the conda CPU pycolmap build — see the feature.pysfm note.
 pysfm = { features = [
     "common",
+    "gradio-rerun-036",
     "cuda",
     "pysfm",
 ], solve-group = "pysfm", no-default-feature = true }
 pysfm-dev = { features = [
     "common",
+    "gradio-rerun-036",
     "cuda",
     "pysfm",
     "dev",
 ], solve-group = "pysfm", no-default-feature = true }
 vistadream = { features = [
     "common",
+    "gradio-rerun-036",
     "cuda",
     "vistadream",
 ], solve-group = "vistadream", no-default-feature = true }
 vistadream-dev = { features = [
     "common",
+    "gradio-rerun-036",
     "cuda",
     "vistadream",
     "dev",
 ], solve-group = "vistadream", no-default-feature = true }
 pyvrs-viewer = { features = [
     "common",
+    "rerun-037",
     "pyvrs-viewer",
     "pyvrs-viewer-demo",
 ], solve-group = "pyvrs-viewer", no-default-feature = true }
 pyvrs-viewer-dev = { features = [
     "common",
+    "rerun-037",
     "pyvrs-viewer",
     "dev",
 ], solve-group = "pyvrs-viewer", no-default-feature = true }
 live-rerun = { features = [
     "common",
+    "rerun-037",
     "live-rerun",
     "live-rerun-demo",
 ], solve-group = "live-rerun", no-default-feature = true }
 live-rerun-dev = { features = [
     "common",
+    "rerun-037",
     "live-rerun",
     "dev",
 ], solve-group = "live-rerun", no-default-feature = true }
 egoexo-forge = { features = [
     "common",
+    "gradio-rerun-036",
     "cuda",
     "egoexo-forge",
     "egoexo-forge-demo",
 ], solve-group = "egoexo-forge", no-default-feature = true }
 egoexo-forge-dev = { features = [
     "common",
+    "gradio-rerun-036",
     "cuda",
     "egoexo-forge",
     "dev",
 ], solve-group = "egoexo-forge", no-default-feature = true }
 mv-api = { features = [
     "common",
+    "rerun-037",
     "cuda",
     "mv-api",
 ], solve-group = "mv-api", no-default-feature = true }
 mv-api-dev = { features = [
     "common",
+    "rerun-037",
     "cuda",
     "mv-api",
     "dev",
@@ -2890,11 +2943,13 @@ mv-api-catalog-register-mac = { features = [
 ], solve-group = "mv-api-catalog-register-mac", no-default-feature = true }
 mast3r-slam = { features = [
     "common",
+    "gradio-rerun-036",
     "cuda",
     "mast3r-slam",
 ], solve-group = "mast3r-slam", no-default-feature = true }
 mast3r-slam-dev = { features = [
     "common",
+    "gradio-rerun-036",
     "cuda",
     "mast3r-slam",
     "dev",
@@ -2908,40 +2963,48 @@ gsplat-rust-renderer-dev = { features = [
 ], solve-group = "gsplat-rust-renderer", no-default-feature = true }
 dataforge = { features = [
     "common",
+    "rerun-037",
     "dataforge",
 ], solve-group = "dataforge", no-default-feature = true }
 dataforge-dev = { features = [
     "common",
+    "rerun-037",
     "dataforge",
     "dev",
 ], solve-group = "dataforge", no-default-feature = true }
 dpvo = { features = [
     "common",
+    "gradio-rerun-036",
     "cuda",
     "dpvo",
 ], solve-group = "dpvo", no-default-feature = true }
 dpvo-dev = { features = [
     "common",
+    "gradio-rerun-036",
     "cuda",
     "dpvo",
     "dev",
 ], solve-group = "dpvo", no-default-feature = true }
 slam-evals = { features = [
     "common",
+    "rerun-037",
     "slam-evals",
 ], solve-group = "slam-evals", no-default-feature = true }
 slam-evals-dev = { features = [
     "common",
+    "rerun-037",
     "slam-evals",
     "dev",
 ], solve-group = "slam-evals", no-default-feature = true }
 mamma = { features = [
     "common",
+    "rerun-037",
     "cuda",
     "mamma",
 ], solve-group = "mamma", no-default-feature = true }
 mamma-dev = { features = [
     "common",
+    "rerun-037",
     "cuda",
     "mamma",
     "dev",
