@@ -20,7 +20,7 @@ from numpy import ndarray
 from simplecv.rerun_custom_types import Points3DWithConfidence
 
 from exo_calib.apis.calibrate_init import InitCameras, log_cameras_layer
-from exo_calib.apis.keypoints2d import CameraKeypoints
+from exo_calib.apis.keypoints2d import CameraKeypoints, postprocess_confidences
 from exo_calib.catalog_io import (
     DEFAULT_CATALOG_URL,
     DEFAULT_DATASET_NAME,
@@ -97,28 +97,6 @@ def load_stage_b(output_dir: Path, segment_id: str, names: tuple[str, ...]) -> d
         npz_path: Path = output_dir / segment_id / "kp2d" / f"{name.replace('/', '_')}.npz"
         per_camera[name] = CameraKeypoints.load(npz_path)
     return per_camera
-
-
-def postprocess_confidences(cam: CameraKeypoints, median_window: int, margin_px: float, conf_tau: float, crop_wh: tuple[int, int]) -> tuple[
-    Float32[ndarray, "t 133 2"], Float64[ndarray, "t 133"]
-]:
-    """Apply the AssemblyHands-X 2D post-processing to one camera's keypoints.
-
-    Returns the median-filtered keypoints and the modulated + rescaled confidences.
-    """
-    from exo_calib.confidence import median_filter_keypoints, modulate_crop_edge_confidence, threshold_rescale_confidence
-
-    kp_xy_t2: Float64[ndarray, "t 133 2"] = median_filter_keypoints(cam.kp_xy.astype(np.float64), window=median_window)
-    num_frames: int = kp_xy_t2.shape[0]
-    conf_out: Float64[ndarray, "t 133"] = np.zeros((num_frames, 133), dtype=np.float64)
-    for t in range(num_frames):
-        if not np.isfinite(cam.crop_origin_xy[t]).all():
-            continue
-        size_wh: Float64[ndarray, "2"] = cam.crop_size_wh[t].astype(np.float64)
-        kp_crop_xy: Float64[ndarray, "133 2"] = (kp_xy_t2[t] - cam.crop_origin_xy[t].astype(np.float64)) / size_wh * np.asarray(crop_wh, dtype=np.float64)
-        modulated: Float64[ndarray, "133"] = modulate_crop_edge_confidence(kp_crop_xy, cam.conf[t].astype(np.float64), crop_wh, margin_px)
-        conf_out[t] = threshold_rescale_confidence(modulated, tau=conf_tau)
-    return kp_xy_t2.astype(np.float32), conf_out
 
 
 def metric_rescale_from_keypoints(

@@ -192,12 +192,14 @@ def log_coco133_class_context(
     recording: rr.RecordingStream,
     entity: str,
     classes: tuple[tuple[int, str, tuple[int, int, int]], ...],
+    connections: bool = True,
 ) -> None:
     """Log a COCO-133 annotation context the simplecv exoego way.
 
     One class per skeleton instance: keypoint links render in the class color,
     so each logged keypoint set (GT / init / refined / 2D detections) is
-    distinguishable by the color of its skeleton.
+    distinguishable by the color of its skeleton. ``connections=False`` keeps
+    the keypoint names (hover) but draws no skeleton edges.
     """
     from simplecv.data.skeleton.coco_133 import COCO_133_ID2NAME, COCO_133_LINKS
 
@@ -208,7 +210,7 @@ def log_coco133_class_context(
                 rr.ClassDescription(
                     info=rr.AnnotationInfo(id=class_id, label=label, color=color),
                     keypoint_annotations=[rr.AnnotationInfo(id=i, label=n) for i, n in COCO_133_ID2NAME.items()],
-                    keypoint_connections=COCO_133_LINKS,
+                    keypoint_connections=COCO_133_LINKS if connections else [],
                 )
                 for class_id, label, color in classes
             ]

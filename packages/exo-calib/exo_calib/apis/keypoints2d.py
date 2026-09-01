@@ -5,7 +5,10 @@ single best person box per frame (Assembly101 has one subject), and Sapiens2
 produces COCO-133 keypoints with confidences. Raw results plus the crop
 rectangles (needed by the AssemblyHands-X margin rule downstream) go to one NPZ
 per camera; a subsampled ``Points2DWithConfidence`` overlay is registered as
-the ``exocalib_kp2d`` layer.
+the ``exocalib_kp2d`` layer. The overlay is gated by the AssemblyHands-X
+post-processing: keypoints the pipeline rejects are NaN'd on the skeleton
+entity (which also suppresses their edges) and logged raw on a connectionless
+``…_rejected`` sibling so the prediction stays inspectable.
 """
 
 from dataclasses import dataclass
@@ -15,7 +18,7 @@ from typing import Any, Literal
 import numpy as np
 import rerun as rr
 import torch
-from jaxtyping import Float32, Int64
+from jaxtyping import Float32, Float64, Int64
 from numpy import ndarray
 from simplecv.rerun_custom_types import Points2DWithConfidence
 
@@ -70,6 +73,13 @@ class Keypoints2dConfig:
     """Register the layer RRD into the catalog after writing it."""
     log_stride: int = 5
     """Log every ``log_stride``-th processed frame into the layer."""
+    median_window: int = 5
+    """Temporal median filter window (frames) for the layer's gate; mirrors
+    ``RefineConfig.median_window`` and only affects the visualization."""
+    margin_px: float = 32.0
+    """AssemblyHands-X crop-edge margin for the layer's gate; mirrors ``RefineConfig``."""
+    conf_tau: float = 0.15
+    """AssemblyHands-X confidence threshold for the layer's gate; mirrors ``RefineConfig``."""
 
 
 @dataclass(slots=True)
@@ -206,27 +216,74 @@ def run_camera_sweep(
     )
 
 
+def postprocess_confidences(cam: CameraKeypoints, median_window: int, margin_px: float, conf_tau: float, crop_wh: tuple[int, int]) -> tuple[
+    Float32[ndarray, "t 133 2"], Float64[ndarray, "t 133"]
+]:
+    """Apply the AssemblyHands-X 2D post-processing to one camera's keypoints.
+
+    Returns the median-filtered keypoints and the modulated + rescaled confidences.
+    """
+    from exo_calib.confidence import median_filter_keypoints, modulate_crop_edge_confidence, threshold_rescale_confidence
+
+    kp_xy_t2: Float64[ndarray, "t 133 2"] = median_filter_keypoints(cam.kp_xy.astype(np.float64), window=median_window)
+    num_frames: int = kp_xy_t2.shape[0]
+    conf_out: Float64[ndarray, "t 133"] = np.zeros((num_frames, 133), dtype=np.float64)
+    for t in range(num_frames):
+        if not np.isfinite(cam.crop_origin_xy[t]).all():
+            continue
+        size_wh: Float64[ndarray, "2"] = cam.crop_size_wh[t].astype(np.float64)
+        kp_crop_xy: Float64[ndarray, "133 2"] = (kp_xy_t2[t] - cam.crop_origin_xy[t].astype(np.float64)) / size_wh * np.asarray(crop_wh, dtype=np.float64)
+        modulated: Float64[ndarray, "133"] = modulate_crop_edge_confidence(kp_crop_xy, cam.conf[t].astype(np.float64), crop_wh, margin_px)
+        conf_out[t] = threshold_rescale_confidence(modulated, tau=conf_tau)
+    return kp_xy_t2.astype(np.float32), conf_out
+
+
 def log_keypoints_layer(
     per_camera: dict[str, CameraKeypoints],
     recording: rr.RecordingStream,
     log_stride: int,
+    median_window: int,
+    margin_px: float,
+    conf_tau: float,
 ) -> None:
-    """Log subsampled keypoint overlays under each camera's pinhole entity."""
+    """Log subsampled keypoint overlays under each camera's pinhole entity.
+
+    Keypoints the AssemblyHands-X gate zeroes are NaN'd on the skeleton entity —
+    the only per-keypoint mechanism that also suppresses their edges — and their
+    raw predictions go to a connectionless ``…_rejected`` sibling instead.
+    """
     for name, cam in per_camera.items():
         entity: str = f"/world/{name}/pinhole/exocalib_kp2d"
+        rejected_entity: str = f"{entity}_rejected"
         log_coco133_class_context(recording, entity, ((0, "sapiens2 kp2d", (240, 140, 60)),))
+        log_coco133_class_context(recording, rejected_entity, ((0, "sapiens2 kp2d rejected", (110, 110, 110)),), connections=False)
+        kp_filtered_t2, conf_post_t = postprocess_confidences(cam, median_window, margin_px, conf_tau, crop_wh=(768, 1024))
         for t in range(0, len(cam.sample_indices), log_stride):
             if not np.isfinite(cam.kp_xy[t]).any():
                 continue
+            keep_j: ndarray = conf_post_t[t] > 0.0
+            gated_xy_j2: Float64[ndarray, "133 2"] = kp_filtered_t2[t].astype(np.float64)
+            gated_xy_j2[~keep_j] = np.nan
+            rejected_j: ndarray = ~keep_j & np.isfinite(cam.kp_xy[t]).all(axis=1)
             recording.set_time(TIMELINE, duration=1e-9 * float(cam.times_ns[t]))
             recording.log(
                 entity,
                 Points2DWithConfidence(
-                    positions=cam.kp_xy[t].astype(np.float64),
-                    confidences=cam.conf[t].astype(np.float64),
+                    positions=gated_xy_j2,
+                    confidences=conf_post_t[t],
                     class_ids=0,
                     keypoint_ids=np.arange(133),
                     radii=2.0,
+                ),
+            )
+            recording.log(
+                rejected_entity,
+                Points2DWithConfidence(
+                    positions=cam.kp_xy[t][rejected_j].astype(np.float64),
+                    confidences=cam.conf[t][rejected_j].astype(np.float64),
+                    class_ids=0,
+                    keypoint_ids=np.flatnonzero(rejected_j),
+                    radii=1.5,
                 ),
             )
 
@@ -265,7 +322,7 @@ def main(config: Keypoints2dConfig) -> None:
 
     rrd_path: Path = config.output_dir / segment_id / f"{config.layer_name}.rrd"
     recording: rr.RecordingStream = new_layer_recording(config.application_id, segment_id, rrd_path)
-    log_keypoints_layer(per_camera, recording, config.log_stride)
+    log_keypoints_layer(per_camera, recording, config.log_stride, config.median_window, config.margin_px, config.conf_tau)
     recording.flush(timeout_sec=30.0)
     print(f"wrote {rrd_path}")
     if config.register:

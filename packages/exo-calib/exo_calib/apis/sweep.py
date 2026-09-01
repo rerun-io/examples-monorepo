@@ -15,8 +15,8 @@ from jaxtyping import Float64
 from numpy import ndarray
 
 from exo_calib.apis.calibrate_init import InitCameras
-from exo_calib.apis.keypoints2d import CameraKeypoints
-from exo_calib.apis.refine import load_stage_b, postprocess_confidences
+from exo_calib.apis.keypoints2d import CameraKeypoints, postprocess_confidences
+from exo_calib.apis.refine import load_stage_b
 from exo_calib.catalog_io import (
     DEFAULT_CATALOG_URL,
     DEFAULT_DATASET_NAME,
