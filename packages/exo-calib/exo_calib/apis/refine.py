@@ -26,9 +26,8 @@ from exo_calib.catalog_io import (
     DEFAULT_DATASET_NAME,
     EXO_CAMERA_NAMES,
     TIMELINE,
-    coco133_link_strips,
     connect_dataset,
-    log_coco133_skeleton_context,
+    log_coco133_class_context,
     new_layer_recording,
     only_segment_id,
     register_layer,
@@ -287,12 +286,16 @@ def main(config: RefineConfig) -> None:
 
     rrd_path: Path = segment_dir / f"{config.layer_name}.rrd"
     recording: rr.RecordingStream = new_layer_recording(config.application_id, segment_id, rrd_path)
-    log_coco133_skeleton_context(recording, "/world/exocalib")
+    log_coco133_class_context(
+        recording,
+        "/world/exocalib",
+        ((1, "kp3d init", (255, 214, 0)), (2, "kp3d refined", (0, 200, 255))),
+    )
     video_wh: tuple[int, int] = (1280, 720)
     log_cameras_layer(init.k_v33, result.cam_T_world_v44, tuple(init.names), video_wh, "/world/exocalib/refined", recording)
     times_ns = per_camera[EXO_CAMERA_NAMES[0]].times_ns
-    for variant, (points, conf_points) in conf3d_by_variant.items():
-        _log_point_tracks(recording, f"/world/exocalib/kp3d_{variant}", obs, points, conf_points, times_ns)
+    for class_id, (variant, (points, conf_points)) in enumerate(conf3d_by_variant.items(), start=1):
+        _log_point_tracks(recording, f"/world/exocalib/kp3d_{variant}", obs, points, conf_points, times_ns, class_id)
     recording.flush(timeout_sec=30.0)
     print(f"wrote {rrd_path}")
     if config.register:
@@ -331,6 +334,7 @@ def _log_point_tracks(
     points_xyz_n3: Float64[ndarray, "n 3"],
     conf_n: Float64[ndarray, " n"],
     times_ns: ndarray,
+    class_id: int,
 ) -> None:
     """Log triangulated points frame-by-frame with per-point Kineo confidences."""
     for frame in np.unique(obs.point_frame_idx):
@@ -345,13 +349,8 @@ def _log_point_tracks(
             Points3DWithConfidence(
                 positions=points[keep],
                 confidences=conf_n[rows][keep],
-                class_ids=0,
+                class_ids=class_id,
                 keypoint_ids=obs.point_joint_idx[rows][keep].astype(np.int64),
                 radii=0.008,
             ),
         )
-        kp_full_1333: Float64[ndarray, "133 3"] = np.full((133, 3), np.nan, dtype=np.float64)
-        kp_full_1333[obs.point_joint_idx[rows][keep]] = points[keep]
-        strips, colors = coco133_link_strips(kp_full_1333)
-        if strips:
-            recording.log(f"{entity}/links", rr.LineStrips3D(strips=strips, colors=colors, radii=0.003))
