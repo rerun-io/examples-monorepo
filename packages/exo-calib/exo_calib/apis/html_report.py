@@ -112,6 +112,23 @@ def render_report(report: dict, config: HtmlReportConfig, segment_id: str) -> st
                 f"<td>{m['rotation_deg']['mean']:.2f} / {m['rotation_deg']['median']:.2f} / {m['rotation_deg']['max']:.2f}</td>"
                 f"<td>{m['scale']:.4f}</td></tr>"
             )
+    kp3d_rows: list[str] = []
+    for variant in ("init", "refined"):
+        kp3d: dict | None = report.get(variant, {}).get("kp3d_hands_cm")
+        if kp3d is not None:
+            kp3d_rows.append(
+                f"<tr><td>{variant}</td><td>{kp3d['matched_points']}</td><td>{kp3d['mean_cm']:.2f}</td>"
+                f"<td>{kp3d['median_cm']:.2f}</td><td>{kp3d['p90_cm']:.2f}</td></tr>"
+            )
+    kp3d_html: str = (
+        f"""<section><h2>Triangulated 3D keypoints vs GT hands (cm)</h2>
+<table><thead><tr><th>variant</th><th>matched</th><th>mean</th><th>median</th><th>p90</th></tr></thead>
+<tbody>{"".join(kp3d_rows)}</tbody></table>
+<p class="note">GT hands are Quest-derived (coarse) — treat this as a relative signal between variants, not absolute accuracy.</p></section>"""
+        if kp3d_rows
+        else ""
+    )
+
     focal: dict | None = report.get("init", {}).get("focal_error_pct")
     focal_html: str = ""
     if focal is not None:
@@ -172,6 +189,7 @@ Ground truth touches evaluation only.</p>
 <tbody>{"".join(summary_rows)}</tbody></table>
 <p class="note">SE(3) alignment is the primary metric (tests the metric-scale claim); Sim(3) isolates residual scale error.</p></section>
 {"".join(blocks)}
+{kp3d_html}
 {focal_html}
 {shots_html}
 <div id="tip"></div>
