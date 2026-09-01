@@ -10,7 +10,7 @@ from pathlib import Path
 
 import rerun.blueprint as rrb
 
-from exo_calib.catalog_io import DEFAULT_CATALOG_URL, DEFAULT_DATASET_NAME, EXO_CAMERA_NAMES, connect_dataset
+from exo_calib.catalog_io import DEFAULT_CATALOG_URL, DEFAULT_DATASET_NAME, EGO_CAMERA_NAMES, EXO_CAMERA_NAMES, connect_dataset
 
 
 @dataclass
@@ -28,20 +28,29 @@ class BlueprintConfig:
 def main(config: BlueprintConfig) -> None:
     """Recreate the exoego viewer layout, bound to the dataset's current id.
 
-    Mirrors the exo-only branch of ``simplecv.apis.view_exoego.create_container``
-    (the base rrd's own blueprint, which the catalog does not serve): a 3D view
-    over a strip of tabbed per-camera 2D panes. Not imported from simplecv
-    because that module pulls in dataset configs with deps outside this env.
+    Mirrors ``simplecv.apis.view_exoego.create_container`` (the base rrd's own
+    blueprint, which the catalog does not serve): a 3D view with the ego cams
+    tabbed in a right-hand column and the exo cams as a tabbed strip below.
+    Not imported from simplecv because that module pulls in dataset configs
+    with deps outside this env.
     """
     dataset = connect_dataset(config.catalog_url, config.dataset_name)
     exo_tabs: list[rrb.Tabs] = [rrb.Tabs(rrb.Spatial2DView(origin=f"/world/{name}/pinhole", name=name)) for name in EXO_CAMERA_NAMES]
+    ego_tabs: list[rrb.Tabs] = [rrb.Tabs(rrb.Spatial2DView(origin=f"/world/{name}/pinhole", name=name)) for name in EGO_CAMERA_NAMES]
+    main_view: rrb.Horizontal = rrb.Horizontal(
+        contents=[
+            rrb.Spatial3DView(
+                origin="/",
+                name="3D View",
+                contents="/**",
+                spatial_information=rrb.SpatialInformation.from_fields(show_axes=True),
+            ),
+            rrb.Vertical(contents=ego_tabs),
+        ],
+        column_shares=[4, 1],
+    )
     container: rrb.Vertical = rrb.Vertical(
-        rrb.Spatial3DView(
-            origin="/",
-            name="3D View",
-            contents="/**",
-            spatial_information=rrb.SpatialInformation.from_fields(show_axes=True),
-        ),
+        main_view,
         rrb.Horizontal(contents=exo_tabs),
         row_shares=[4, 1],
     )

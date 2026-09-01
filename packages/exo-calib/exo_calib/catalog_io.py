@@ -29,6 +29,7 @@ DEFAULT_CATALOG_URL: str = "rerun+http://127.0.0.1:9988"
 DEFAULT_DATASET_NAME: str = "assembly101"
 TIMELINE: str = "video_time"
 EXO_CAMERA_NAMES: tuple[str, ...] = tuple(f"rig_{i:02d}/cam_00" for i in range(8))
+EGO_CAMERA_NAMES: tuple[str, ...] = tuple(f"rig_08/cam_{i:02d}" for i in range(4))
 
 
 @dataclass(slots=True)
