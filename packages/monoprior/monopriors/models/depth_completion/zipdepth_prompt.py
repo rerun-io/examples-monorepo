@@ -5,6 +5,7 @@ normalized metric prompt into all four decoder stages, and returns depth in the
 same units as the prompt (metres for the public API).
 """
 
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Self
 
@@ -12,7 +13,23 @@ import torch
 import torch.nn.functional as F
 from jaxtyping import Float, Float32, UInt8
 from torch import Tensor, nn
+from trtkit import (
+    BackendConfig,
+    OnnxBackendConfig,
+    TensorRtBackendConfig,
+    TensorRuntime,
+    TensorSpec,
+    TorchBackendConfig,
+    TorchRuntime,
+    create_runtime_from_onnx,
+)
 
+from monopriors.models.depth_completion.base_completion_depth import (
+    DEPTH_OUTPUT_NAME,
+    IMAGE_INPUT_NAME,
+    PROMPT_INPUT_NAME,
+    BaseCompletionPredictor,
+)
 from monopriors.third_party.zipdepth.architecture import EncoderOutput, FeaturePyramid, ZipDepth, create_model
 from monopriors.third_party.zipdepth.model_utils import StateDict, strip_state_dict_prefixes
 
@@ -205,3 +222,67 @@ def load_zipdepth_prompt(checkpoint: Path) -> ZipDepthPrompt:
     backbone: ZipDepth = create_model(variant="base")
     backbone.load_state_dict(state_dict, strict=True)
     return ZipDepthPrompt(backbone)
+
+
+@dataclass(frozen=True, slots=True)
+class ZipDepthPromptConfig:
+    """ZipDepth-PromptDA model and runtime configuration."""
+
+    checkpoint: Path = Path()
+    """Prompted model checkpoint; an empty path is only a CLI placeholder."""
+    backend: BackendConfig = field(default_factory=TorchBackendConfig)
+    """Backend running the network: torch, ONNX Runtime CUDA, or TensorRT."""
+    image_height: int = 768
+    """Static network image height; must be divisible by 32."""
+    image_width: int = 1024
+    """Static network image width; must be divisible by 32."""
+
+    def setup(self) -> "ZipDepthPromptPredictor":
+        """Build the selected runtime and return a ready predictor."""
+        if not self.checkpoint.is_file():
+            raise FileNotFoundError(f"ZipDepth-PromptDA checkpoint is not a file: {self.checkpoint}")
+        image_hw: tuple[int, int] = (self.image_height, self.image_width)
+        image_spec = TensorSpec(IMAGE_INPUT_NAME, (3, *image_hw), torch.float32)
+        prompt_spec = TensorSpec(PROMPT_INPUT_NAME, (1, PROMPT_HEIGHT, PROMPT_WIDTH), torch.float32)
+        depth_spec = TensorSpec(DEPTH_OUTPUT_NAME, (1, *image_hw), torch.float32)
+        if isinstance(self.backend, TorchBackendConfig):
+            model: nn.Module = load_zipdepth_prompt(self.checkpoint).cuda().fuse_for_inference()
+            runtime: TensorRuntime = TorchRuntime(
+                model,
+                input_specs=(image_spec, prompt_spec),
+                output_specs=(depth_spec,),
+                max_batch_size=self.backend.max_batch_size,
+                autocast_dtype=self.backend.autocast_dtype,
+            )
+        else:
+            from monopriors.models.depth_completion.zipdepth_prompt_export import export_zipdepth_prompt_onnx
+
+            export_batch_size: int
+            if isinstance(self.backend, TensorRtBackendConfig):
+                export_batch_size = self.backend.opt_batch_size
+            else:
+                onnx_backend: OnnxBackendConfig = self.backend
+                export_batch_size = onnx_backend.max_batch_size
+            onnx_path: Path = export_zipdepth_prompt_onnx(
+                checkpoint=self.checkpoint,
+                image_hw=image_hw,
+                batch_size=export_batch_size,
+            )
+            runtime = create_runtime_from_onnx(onnx_path, self.backend)
+        return ZipDepthPromptPredictor(runtime=runtime)
+
+
+class ZipDepthPromptPredictor(BaseCompletionPredictor[TensorRuntime]):
+    """ZipDepth-PromptDA through the shared batched GPU tensor contract."""
+
+
+__all__ = (
+    "MAX_PROMPT_DEPTH_M",
+    "MIN_PROMPT_DEPTH_M",
+    "PROMPT_HEIGHT",
+    "PROMPT_WIDTH",
+    "ZipDepthPrompt",
+    "ZipDepthPromptConfig",
+    "ZipDepthPromptPredictor",
+    "load_zipdepth_prompt",
+)

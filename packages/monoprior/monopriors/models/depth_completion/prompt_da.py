@@ -1,140 +1,202 @@
-from timeit import default_timer as timer
-from typing import Literal
+"""Prompt Depth Anything model config and backend-neutral predictor."""
 
-import cv2
-import numpy as np
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Literal, TypeAlias
+
 import torch
-from einops import rearrange
-from jaxtyping import Float32, UInt8, UInt16
-from numpy import ndarray
+from jaxtyping import Float32, UInt8
 from torch import Tensor
+from trtkit import (
+    BackendConfig,
+    TensorRtBackendConfig,
+    TensorRuntime,
+    TensorSpec,
+    TorchBackendConfig,
+    TorchRuntime,
+    create_runtime_from_onnx,
+)
 
 from monopriors.models.depth_completion.base_completion_depth import (
+    DEPTH_OUTPUT_NAME,
+    IMAGE_INPUT_NAME,
+    PROMPT_INPUT_NAME,
     BaseCompletionPredictor,
-    CompletionDepthPrediction,
+    postprocess_completion_depth,
+    preprocess_completion_batch,
 )
-from monopriors.third_party.promptda.promptda import PromptDA
 
+ModelType: TypeAlias = Literal["large", "small", "small-transparent"]
 
-def ensure_multiple_of(x: float, multiple_of: int = 14) -> int:
-    return int(x // multiple_of * multiple_of)
-
-
-NAME_TO_HFNAME: dict[str, str] = {
+NAME_TO_HFNAME: dict[ModelType, str] = {
     "large": "depth-anything/prompt-depth-anything-vitl",
     "small": "depth-anything/prompt-depth-anything-vits",
     "small-transparent": "depth-anything/prompt-depth-anything-vits-transparent",
 }
 
+DEFAULT_PROMPTDA_CACHE_DIR: Path = Path(os.environ.get("PROMPTDA_TRT_CACHE", "~/.cache/prompt-da")).expanduser()
+"""Cache root for portable PromptDA ONNX graphs and machine-local engines."""
 
-class PromptDAPredictor(BaseCompletionPredictor[PromptDA]):
+
+def ensure_multiple_of(x: float, multiple_of: int = 14) -> int:
+    """Round a size down to the nearest model patch multiple.
+
+    Args:
+        x: Size to align.
+        multiple_of: Required alignment.
+
+    Returns:
+        Largest aligned integer no greater than ``x``.
+    """
+    return int(x // multiple_of * multiple_of)
+
+
+def network_image_hw(capture_hw: tuple[int, int], max_image_size: int) -> tuple[int, int]:
+    """Scale a capture to the PromptDA limit and align both sides to 14.
+
+    Args:
+        capture_hw: Capture height and width.
+        max_image_size: Longest allowed network side.
+
+    Returns:
+        Network height and width, each divisible by 14.
+    """
+    height, width = capture_hw
+    scale: float = min(1.0, max_image_size / max(height, width))
+    return ensure_multiple_of(height * scale), ensure_multiple_of(width * scale)
+
+
+@dataclass(frozen=True, slots=True)
+class PromptDAConfig:
+    """Prompt Depth Anything model and runtime configuration."""
+
+    model_type: ModelType = "large"
+    """PromptDA checkpoint variant."""
+    backend: BackendConfig = field(default_factory=TorchBackendConfig)
+    """Backend running the network: torch, ONNX Runtime CUDA, or TensorRT."""
+    image_height: int = 756
+    """Static network image height; must be divisible by 14."""
+    image_width: int = 1008
+    """Static network image width; must be divisible by 14."""
+    cache_dir: Path = field(default_factory=lambda: DEFAULT_PROMPTDA_CACHE_DIR)
+    """Portable ONNX cache root; TensorRT uses the backend's engine cache."""
+
+    def setup(self) -> "PromptDAPredictor":
+        """Build the selected runtime and return a ready predictor."""
+        image_hw: tuple[int, int] = (self.image_height, self.image_width)
+        image_spec = TensorSpec(IMAGE_INPUT_NAME, (3, *image_hw), torch.float32)
+        prompt_spec = TensorSpec(PROMPT_INPUT_NAME, (1, 192, 256), torch.float32)
+        depth_spec = TensorSpec(DEPTH_OUTPUT_NAME, (1, *image_hw), torch.float32)
+        if isinstance(self.backend, TorchBackendConfig):
+            from monopriors.third_party.promptda.promptda import PromptDA
+
+            model = PromptDA.from_pretrained(NAME_TO_HFNAME[self.model_type]).to("cuda").eval()
+            runtime: TensorRuntime = TorchRuntime(
+                model,
+                input_specs=(image_spec, prompt_spec),
+                output_specs=(depth_spec,),
+                max_batch_size=self.backend.max_batch_size,
+                autocast_dtype=self.backend.autocast_dtype,
+            )
+        else:
+            from monopriors.models.depth_completion.prompt_da_export import export_promptda_onnx
+
+            onnx_path: Path = export_promptda_onnx(model_type=self.model_type, image_hw=image_hw, cache_dir=self.cache_dir)
+            runtime = create_runtime_from_onnx(onnx_path, self.backend)
+        return PromptDAPredictor(runtime=runtime)
+
+
+class PromptDAPredictor(BaseCompletionPredictor[TensorRuntime]):
+    """PromptDA completion through the shared batched GPU tensor contract."""
+
+
+def preprocess_batch(
+    rgb_bhw3: UInt8[Tensor, "b h w 3"],
+    prompt_depth_bhw: Float32[Tensor, "b 192 256"],
+    image_hw: tuple[int, int],
+) -> tuple[Float32[Tensor, "b 3 nh nw"], Float32[Tensor, "b 1 192 256"]]:
+    """Compatibility wrapper that retains the historical host-to-CUDA move."""
+    return preprocess_completion_batch(
+        rgb_bhw3.to("cuda", non_blocking=True),
+        prompt_depth_bhw.to("cuda", non_blocking=True),
+        image_hw,
+    )
+
+
+def postprocess_depth(
+    depth_b1hw: Float32[Tensor, "b 1 nh nw"],
+    out_hw: tuple[int, int],
+) -> Float32[Tensor, "b h w"]:
+    """Compatibility name for shared completion postprocessing."""
+    return postprocess_completion_depth(depth_b1hw, out_hw)
+
+
+class PromptDATrtPredictor(PromptDAPredictor):
+    """Compatibility constructor for a TensorRT PromptDA predictor."""
+
     def __init__(
         self,
-        device: Literal["cpu", "cuda", "mps"],
-        model_type: Literal["large"] = "large",
-        max_size: int = 1008,
+        model_type: ModelType = "large",
+        image_hw: tuple[int, int] = (756, 1008),
+        batch_size: int = 8,
+        cache_dir: Path = DEFAULT_PROMPTDA_CACHE_DIR,
     ) -> None:
-        super().__init__()
-        self.device = device
-        print("Loading Prompt Depth Anything model...")
-        model_name: str = NAME_TO_HFNAME[model_type]
-        start = timer()
-        self.model = PromptDA.from_pretrained(model_name).to(device).eval()
-        print(f"Prompt Depth Anything model loaded. Time: {timer() - start:.2f}s")
-        self.max_size: int = max_size
-
-    def __call__(
-        self,
-        rgb: UInt8[ndarray, "h w 3"],
-        prompt_depth: UInt16[ndarray, "192 256"],
-    ) -> CompletionDepthPrediction:
-        rgb_hw3: UInt8[ndarray, "h w 3"] = rgb.copy()
-        original_height, original_width, _ = rgb_hw3.shape
-
-        rgb_b3hw: Float32[Tensor, "1 3 h w"] = self.preprocess_rgb(rgb_hw3)
-        prompt_depth_b11hw: Float32[Tensor, "1 1 192 256"] = self.preprocess_depths(prompt_depth)
-
-        rgb_b3hw = rgb_b3hw.to(self.device)
-        prompt_depth_b11hw = prompt_depth_b11hw.to(self.device)
-        depth_pred: Float32[Tensor, "1 1 h w"] = self.model.predict(
-            rgb_b3hw, prompt_depth_b11hw
-        )
-
-        # convert predicted depth to numpy array and UInt16 mm and resize to match the image size
-        depth_pred_np = depth_pred.squeeze().cpu().numpy()
-        depth_pred_mm: UInt16[np.ndarray, "h w"] = (depth_pred_np * 1000).astype(
-            np.uint16
-        )
-        depth_pred_resized: UInt16[np.ndarray, "h w"] = cv2.resize(
-            depth_pred_mm,
-            (original_width, original_height),
-        )
-        completion_depth_prediction: CompletionDepthPrediction = (
-            CompletionDepthPrediction(
-                depth_mm=depth_pred_resized,
-                confidence=np.ones_like(depth_pred_resized, dtype=np.float32),
-            )
-        )
-        return completion_depth_prediction
-
-    def preprocess_rgb(
-        self, rgb_hw3: UInt8[ndarray, "h w 3"]
-    ) -> Float32[Tensor, "1 3 h w"]:
-        """
-        Preprocesses an RGB image by resizing if needed and normalizing pixel values.
+        """Build or load the historical dynamic-batch TensorRT runtime.
 
         Args:
-            rgb_hw3 (ndarray): Input RGB image with shape (H, W, 3) and uint8 dtype.
-
-        Returns:
-            Tensor: Preprocessed RGB image as torch.Tensor with shape (1, 3, H, W)
-                   and values normalized to [0,1] range.
-
-        Notes:
-            - If image size exceeds self.max_size, resizes while maintaining aspect ratio
-            - Converts HWC format to BCHW (batch, channels, height, width)
-            - Converts uint8 values to float32 and normalizes to [0,1] range
+            model_type: PromptDA checkpoint variant.
+            image_hw: Static network image height and width.
+            batch_size: TensorRT profile maximum and optimum batch.
+            cache_dir: PromptDA ONNX and engine cache root.
         """
-        if max(rgb_hw3.shape) > self.max_size:
-            h, w = rgb_hw3.shape[:2]
-            scale: float = self.max_size / max(h, w)
-            tar_h: int = ensure_multiple_of(x=h * scale)
-            tar_w: int = ensure_multiple_of(x=w * scale)
-            rgb_hw3 = cv2.resize(rgb_hw3, (tar_w, tar_h), interpolation=cv2.INTER_AREA)
+        configured: PromptDAPredictor = PromptDAConfig(
+            model_type=model_type,
+            backend=TensorRtBackendConfig(
+                max_batch_size=batch_size,
+                opt_batch_size=batch_size,
+                cache_dir=cache_dir / "trt",
+            ),
+            image_height=image_hw[0],
+            image_width=image_hw[1],
+            cache_dir=cache_dir,
+        ).setup()
+        super().__init__(configured.runtime)
 
-        rgb_b3hw_np: Float32[ndarray, "1 3 h w"] = rearrange(
-            rgb_hw3, "h w c -> 1 c h w"
-        ).astype(np.float32)
-        rgb_b3hw: Float32[Tensor, "1 3 h w"] = torch.from_numpy(rgb_b3hw_np) / 255.0
-        return rgb_b3hw
 
-    def preprocess_depths(
+class PromptDATorchPredictor(PromptDAPredictor):
+    """Compatibility constructor for an eager fp32 PromptDA predictor."""
+
+    def __init__(
         self,
-        prompt_depth: UInt16[ndarray, "192 256"],
-    ) -> Float32[Tensor, "1 1 192 256"]:
-        """
-        Preprocesses depth data by converting it to meters and rearranging dimensions.
+        model_type: ModelType = "large",
+        image_hw: tuple[int, int] = (756, 1008),
+    ) -> None:
+        """Load the historical eager PromptDA baseline.
 
         Args:
-            prompt_depth (np.ndarray): Input depth image array in millimeters.
-                Shape: (192, 256), dtype: uint16
-
-        Returns:
-            torch.Tensor: Preprocessed depth tensor in meters.
-                Shape: (1, 1, 192, 256), dtype: float32
-
-        Note:
-            - Input depth values are expected to be in millimeters
-            - Output depth values are converted to meters (divided by 1000)
-            - Adds batch and channel dimensions to the input array
+            model_type: PromptDA checkpoint variant.
+            image_hw: Static network image height and width.
         """
-        # convert depth data to tensor
-        prompt_depth_f32: Float32[ndarray, "192 256"] = prompt_depth.astype(np.float32)
-        prompt_depth_b11hw_np: Float32[ndarray, "1 1 192 256"] = rearrange(
-            prompt_depth_f32, "h w -> 1 1 h w"
-        )
-        # convert to meters from mm
-        prompt_depth_b11hw: Float32[Tensor, "1 1 192 256"] = (
-            torch.from_numpy(prompt_depth_b11hw_np) / 1000
-        )
-        return prompt_depth_b11hw
+        configured: PromptDAPredictor = PromptDAConfig(
+            model_type=model_type,
+            backend=TorchBackendConfig(autocast="fp32"),
+            image_height=image_hw[0],
+            image_width=image_hw[1],
+        ).setup()
+        super().__init__(configured.runtime)
+
+
+__all__ = (
+    "DEFAULT_PROMPTDA_CACHE_DIR",
+    "ModelType",
+    "NAME_TO_HFNAME",
+    "PromptDAConfig",
+    "PromptDAPredictor",
+    "PromptDATorchPredictor",
+    "PromptDATrtPredictor",
+    "ensure_multiple_of",
+    "network_image_hw",
+    "postprocess_depth",
+    "preprocess_batch",
+)

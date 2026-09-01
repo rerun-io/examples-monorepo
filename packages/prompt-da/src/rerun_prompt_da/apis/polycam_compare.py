@@ -12,25 +12,24 @@ transform (``cv2.INTER_LINEAR``).
 """
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import batched, chain
 from pathlib import Path
 
-import cv2
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 import torch
 from jaxtyping import Float32, UInt8, UInt16
-from monopriors.models.depth_completion.zipdepth_prompt import ZipDepthPrompt, load_zipdepth_prompt
+from monopriors.models.depth_completion import AnnotatedCompletionConfig, PromptDAConfig, ZipDepthPromptConfig
+from monopriors.models.depth_completion.base_completion_depth import BaseCompletionPredictor
+from monopriors.models.depth_completion.prompt_da import DEFAULT_PROMPTDA_CACHE_DIR
 from numpy import ndarray
 from simplecv.data.polycam import PolycamData, PolycamDataset, load_polycam_data
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
 from tqdm import tqdm
-
-from rerun_prompt_da.apis.prompt_da_trt_polycam import network_image_hw
-from rerun_prompt_da.trt_predictor import PromptDATrtPredictor
+from trtkit import TensorRtBackendConfig, TorchBackendConfig
 
 
 @dataclass
@@ -39,24 +38,32 @@ class PolycamCompareConfig:
 
     polycam_zip_path: Path
     """Polycam capture zip (or extracted directory) to process."""
-    zipdepth_checkpoint: Path
-    """Trained ZipDepth-PromptDA checkpoint to evaluate against the teacher."""
+    teacher: AnnotatedCompletionConfig = field(
+        default_factory=lambda: PromptDAConfig(
+            backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=8, cache_dir=DEFAULT_PROMPTDA_CACHE_DIR / "trt")
+        )
+    )
+    """First completion model and backend."""
+    student: AnnotatedCompletionConfig = field(
+        default_factory=lambda: ZipDepthPromptConfig(checkpoint=Path(), backend=TorchBackendConfig())
+    )
+    """Second completion model and backend."""
+    zipdepth_checkpoint: Path | None = None
+    """Compatibility alias for ``student=zipdepth-promptda --checkpoint``."""
     rr_config: RerunTyroConfig = field(default_factory=RerunTyroConfig)
     """Rerun viewer/save/connect behavior."""
     batch_size: int = 8
     """Frames per model batch."""
-    max_image_size: int = 1008
-    """Longest teacher network image side; 14-aligned from the capture resolution."""
-    student_height: int = 768
-    """Student network input height; 768 matches the training resolution."""
-    student_width: int = 1024
-    """Student network input width; 1024 matches the training resolution."""
     max_frames: int | None = None
     """Optional cap on processed frames, for a quick visual check."""
 
 
 
-def create_compare_blueprint(parent_log_path: Path) -> rrb.Blueprint:
+def create_compare_blueprint(
+    parent_log_path: Path,
+    teacher_label: str = "teacher",
+    student_label: str = "student",
+) -> rrb.Blueprint:
     """Lay out RGB, the LiDAR prompt, both predictions, and their difference."""
     pinhole_path: Path = parent_log_path / "cam" / "pinhole"
     return rrb.Blueprint(
@@ -66,8 +73,8 @@ def create_compare_blueprint(parent_log_path: Path) -> rrb.Blueprint:
                 rrb.Spatial2DView(origin=str(pinhole_path / "lidar_prompt"), name="LiDAR prompt (192x256)"),
             ),
             rrb.Horizontal(
-                rrb.Spatial2DView(origin=str(pinhole_path / "teacher_depth"), name="PromptDA-large (teacher, 340M)"),
-                rrb.Spatial2DView(origin=str(pinhole_path / "student_depth"), name="ZipDepth-PromptDA (student, 6.95M)"),
+                rrb.Spatial2DView(origin=str(pinhole_path / "teacher_depth"), name=teacher_label),
+                rrb.Spatial2DView(origin=str(pinhole_path / "student_depth"), name=student_label),
                 rrb.Spatial2DView(origin=str(pinhole_path / "bilinear_depth"), name="bilinear upsample (0 params)"),
             ),
             rrb.Horizontal(
@@ -83,20 +90,26 @@ def polycam_compare(config: PolycamCompareConfig) -> None:
     """Run teacher and student over one Polycam capture and stream both to Rerun."""
     parent_log_path: Path = Path("world")
     pinhole_path: Path = parent_log_path / "cam" / "pinhole"
+    teacher_label: str = type(config.teacher).__name__
+    student_config: AnnotatedCompletionConfig = config.student
+    if config.zipdepth_checkpoint is not None:
+        if not isinstance(student_config, ZipDepthPromptConfig):
+            raise ValueError("--zipdepth-checkpoint requires the ZipDepth-PromptDA student config.")
+        student_config = replace(student_config, checkpoint=config.zipdepth_checkpoint)
+    student_label: str = type(student_config).__name__
     rr.log("/", rr.ViewCoordinates.RUB, static=True)
-    rr.send_blueprint(create_compare_blueprint(parent_log_path))
+    rr.send_blueprint(create_compare_blueprint(parent_log_path, teacher_label, student_label))
 
     polycam_dataset: PolycamDataset = load_polycam_data(polycam_zip_or_directory_path=config.polycam_zip_path)
-    student_hw: tuple[int, int] = (config.student_height, config.student_width)
 
     batches = batched(polycam_dataset, config.batch_size)
     first_batch: tuple[PolycamData, ...] | None = next(batches, None)
     if first_batch is None:
         raise ValueError(f"Polycam capture {config.polycam_zip_path} contains no frames.")
 
-    teacher_hw: tuple[int, int] = network_image_hw(first_batch[0].rgb_hw3.shape[:2], config.max_image_size)
-    teacher = PromptDATrtPredictor(model_type="large", image_hw=teacher_hw, batch_size=config.batch_size)
-    student: ZipDepthPrompt = load_zipdepth_prompt(config.zipdepth_checkpoint).cuda().eval()
+    comparison_hw: tuple[int, int] = first_batch[0].rgb_hw3.shape[:2]
+    teacher: BaseCompletionPredictor = config.teacher.setup()
+    student: BaseCompletionPredictor = student_config.setup()
 
     frame_budget: int = config.max_frames if config.max_frames is not None else len(polycam_dataset)
     total_batches: int = -(-min(frame_budget, len(polycam_dataset)) // config.batch_size)
@@ -128,52 +141,38 @@ def polycam_compare(config: PolycamCompareConfig) -> None:
 
         torch.cuda.synchronize()
         teacher_start: float = time.perf_counter()
-        teacher_depth_bhw: Float32[Tensor, "b th tw"] = teacher(rgb_bhw3, raw_prompt_bhw)
+        teacher_depth_bhw: Float32[Tensor, "b h w"] = teacher(rgb_bhw3, raw_prompt_bhw)
         torch.cuda.synchronize()
         teacher_seconds += time.perf_counter() - teacher_start
 
-        # The student runs at its training resolution; RGB is resized the same
-        # way the training transform did, on the host with cv2.INTER_LINEAR.
-        student_rgb_b3hw: UInt8[Tensor, "b 3 sh sw"] = torch.from_numpy(
-            np.ascontiguousarray(
-                np.stack([cv2.resize(data.rgb_hw3, (student_hw[1], student_hw[0]), interpolation=cv2.INTER_LINEAR) for data in batch]).transpose(
-                    0, 3, 1, 2
-                )
-            )
-        ).cuda()
-
         torch.cuda.synchronize()
         student_start: float = time.perf_counter()
-        with torch.inference_mode():
-            student_depth_b1hw: Float32[Tensor, "b 1 sh sw"] = student(student_rgb_b3hw, raw_prompt_bhw.unsqueeze(1))
+        student_depth_bhw: Float32[Tensor, "b h w"] = student(rgb_bhw3, raw_prompt_bhw)
         torch.cuda.synchronize()
         student_seconds += time.perf_counter() - student_start
 
-        # Compare on the student's grid: resize the teacher down rather than
-        # upsampling the student, so the student is never flattered by interpolation.
-        teacher_on_student_b1hw: Float32[Tensor, "b 1 sh sw"] = torch.nn.functional.interpolate(
-            teacher_depth_bhw.unsqueeze(1), size=student_hw, mode="bilinear", align_corners=False
-        )
+        teacher_on_student_b1hw: Float32[Tensor, "b 1 h w"] = teacher_depth_bhw.unsqueeze(1)
+        student_depth_b1hw: Float32[Tensor, "b 1 h w"] = student_depth_bhw.unsqueeze(1)
         # Zero-parameter control: bilinearly upsample the same raw prompt. Logged beside
         # the student so the difference the network actually buys is visible, not asserted.
-        bilinear_b1hw: Float32[Tensor, "b 1 sh sw"] = torch.nn.functional.interpolate(
-            raw_prompt_bhw.unsqueeze(1), size=student_hw, mode="bilinear", align_corners=False
+        bilinear_b1hw: Float32[Tensor, "b 1 h w"] = torch.nn.functional.interpolate(
+            raw_prompt_bhw.unsqueeze(1), size=comparison_hw, mode="bilinear", align_corners=False
         )
-        abs_diff_b1hw: Float32[Tensor, "b 1 sh sw"] = (teacher_on_student_b1hw - student_depth_b1hw).abs()
-        abs_diff_bilinear_b1hw: Float32[Tensor, "b 1 sh sw"] = (teacher_on_student_b1hw - bilinear_b1hw).abs()
+        abs_diff_b1hw: Float32[Tensor, "b 1 h w"] = (teacher_on_student_b1hw - student_depth_b1hw).abs()
+        abs_diff_bilinear_b1hw: Float32[Tensor, "b 1 h w"] = (teacher_on_student_b1hw - bilinear_b1hw).abs()
         bilinear_sum += float(abs_diff_bilinear_b1hw.sum().item())
         abs_diff_sum += float(abs_diff_b1hw.sum().item())
         abs_diff_count += int(abs_diff_b1hw.numel())
 
-        teacher_mm_bhw: UInt16[ndarray, "b sh sw"] = (
+        teacher_mm_bhw: UInt16[ndarray, "b h w"] = (
             (teacher_on_student_b1hw.squeeze(1) * 1000.0).clamp(0.0, 65535.0).to(torch.uint16).cpu().numpy()
         )
-        student_mm_bhw: UInt16[ndarray, "b sh sw"] = (
+        student_mm_bhw: UInt16[ndarray, "b h w"] = (
             (student_depth_b1hw.squeeze(1) * 1000.0).clamp(0.0, 65535.0).to(torch.uint16).cpu().numpy()
         )
-        diff_mm_bhw: UInt16[ndarray, "b sh sw"] = (abs_diff_b1hw.squeeze(1) * 1000.0).clamp(0.0, 65535.0).to(torch.uint16).cpu().numpy()
-        bilinear_mm_bhw: UInt16[ndarray, "b sh sw"] = (bilinear_b1hw.squeeze(1) * 1000.0).clamp(0.0, 65535.0).to(torch.uint16).cpu().numpy()
-        diff_bil_mm_bhw: UInt16[ndarray, "b sh sw"] = (
+        diff_mm_bhw: UInt16[ndarray, "b h w"] = (abs_diff_b1hw.squeeze(1) * 1000.0).clamp(0.0, 65535.0).to(torch.uint16).cpu().numpy()
+        bilinear_mm_bhw: UInt16[ndarray, "b h w"] = (bilinear_b1hw.squeeze(1) * 1000.0).clamp(0.0, 65535.0).to(torch.uint16).cpu().numpy()
+        diff_bil_mm_bhw: UInt16[ndarray, "b h w"] = (
             (abs_diff_bilinear_b1hw.squeeze(1) * 1000.0).clamp(0.0, 65535.0).to(torch.uint16).cpu().numpy()
         )
         # The raw prompt is what the teacher sees; it is the model's only source
@@ -185,7 +184,7 @@ def polycam_compare(config: PolycamCompareConfig) -> None:
             rr.set_time("frame_idx", sequence=batch_start + frame_offset)
             rr.log(
                 str(pinhole_path / "rgb"),
-                rr.Image(cv2.resize(batch[frame_offset].rgb_hw3, (student_hw[1], student_hw[0]), interpolation=cv2.INTER_LINEAR)),
+                rr.Image(batch[frame_offset].rgb_hw3),
             )
             rr.log(
                 str(pinhole_path / "lidar_prompt"),
@@ -209,8 +208,8 @@ def polycam_compare(config: PolycamCompareConfig) -> None:
     wall_seconds: float = time.perf_counter() - wall_start
     mean_abs_diff_m: float = abs_diff_sum / abs_diff_count if abs_diff_count else 0.0
     print(f"frames                {n_frames}")
-    print(f"teacher (PromptDA-L)  {1000.0 * teacher_seconds / n_frames:.2f} ms/frame")
-    print(f"student (ZipDepth-PDA){1000.0 * student_seconds / n_frames:.2f} ms/frame")
+    print(f"{teacher_label:<22}{1000.0 * teacher_seconds / n_frames:.2f} ms/frame")
+    print(f"{student_label:<22}{1000.0 * student_seconds / n_frames:.2f} ms/frame")
     print(f"speedup               {teacher_seconds / student_seconds:.1f}x")
     print(f"mean |teacher-student|  {1000.0 * mean_abs_diff_m:.1f} mm")
     print(f"mean |teacher-bilinear| {1000.0 * bilinear_sum / abs_diff_count:.1f} mm  (zero-parameter control)")

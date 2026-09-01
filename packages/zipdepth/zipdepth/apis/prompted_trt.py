@@ -2,40 +2,26 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
-import os
-from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import torch
 from monopriors.models.depth_completion.zipdepth_prompt import load_zipdepth_prompt
+from monopriors.models.depth_completion.zipdepth_prompt_export import (
+    DEFAULT_CACHE_DIR,
+    DEPTH_OUTPUT_NAME,
+    IMAGE_INPUT_NAME,
+    ONNX_EXPORT_VERSION,
+    PROMPT_INPUT_NAME,
+    _ExportOutputs,
+    export_zipdepth_prompt_onnx,
+    prepare_zipdepth_prompt_for_export,
+)
 from monopriors.models.relative_depth.zipdepth import download_zipdepth_checkpoint
 from torch import Tensor, nn
-
-IMAGE_INPUT_NAME: str = "image"
-PROMPT_INPUT_NAME: str = "prompt_depth"
-DEPTH_OUTPUT_NAME: str = "depth"
-ONNX_EXPORT_VERSION: int = 1
-DEFAULT_CACHE_DIR: Path = Path(os.environ.get("ZIPDEPTH_PROMPT_TRT_CACHE", "~/.cache/zipdepth-promptda")).expanduser()
-
-ModelLoader = Callable[[Path], Any]
-ExportFn = Callable[..., None]
-
-
-class _ExportOutputs(nn.Module):
-    """Expose the prompt min/max reductions as TRT fusion barriers."""
-
-    def __init__(self, model: nn.Module) -> None:
-        super().__init__()
-        self.model = model
-
-    def forward(self, image: Tensor, prompt_depth: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        prompt_model: Any = self.model
-        return cast(tuple[Tensor, Tensor, Tensor], prompt_model.forward_with_range(image, prompt_depth))
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,87 +44,6 @@ class TrtExportConfig:
     """Measured TensorRT calls."""
     result_path: Path = Path("/tmp/zd-pda-research/trt-parity-latency.json")
     """JSON report containing artifact paths, parity errors, and CUDA-event latency."""
-
-
-def _checkpoint_tag(checkpoint: Path) -> str:
-    """Return a stable short identity for released and locally trained weights."""
-    parts: tuple[str, ...] = checkpoint.parts
-    if "snapshots" in parts:
-        return parts[parts.index("snapshots") + 1][:8]
-    digest = hashlib.sha256()
-    with checkpoint.open("rb") as file:
-        while block := file.read(1024 * 1024):
-            digest.update(block)
-    return digest.hexdigest()[:8]
-
-
-def prepare_zipdepth_prompt_for_export(
-    model: Any,
-    image_hw: tuple[int, int],
-    device: torch.device,
-) -> nn.Module:
-    """Fuse and convert a prompted model for a static fp16 graph."""
-    height, width = image_hw
-    if height <= 0 or width <= 0 or height % 32 != 0 or width % 32 != 0:
-        raise ValueError(f"ZipDepth image dimensions must be positive multiples of 32, got {image_hw}")
-    fused_model = cast(nn.Module, model.fuse_for_inference())
-    return fused_model.to(device).half()
-
-
-def export_zipdepth_prompt_onnx(
-    *,
-    checkpoint: Path | None = None,
-    image_hw: tuple[int, int] = (768, 1024),
-    batch_size: int = 8,
-    cache_dir: Path = DEFAULT_CACHE_DIR,
-    model_loader: ModelLoader = load_zipdepth_prompt,
-    export_fn: ExportFn | None = None,
-    device: str = "cuda",
-) -> Path:
-    """Export a two-input fp16-compute ONNX graph with a fixed batch.
-
-    Static batch is required because TensorRT Myelin cannot build ZipDepth's
-    unfold head when its leading dimension is symbolic. The graph keeps fp32
-    image, prompt, and depth I/O while the network weights and convolutions are
-    fp16.
-    """
-    if batch_size <= 0:
-        raise ValueError("batch_size must be positive")
-    height, width = image_hw
-    resolved_checkpoint: Path = checkpoint or download_zipdepth_checkpoint()
-    tag: str = _checkpoint_tag(resolved_checkpoint)
-    onnx_dir: Path = cache_dir / "onnx"
-    onnx_path: Path = onnx_dir / f"zipdepth-prompt_{height}x{width}_b{batch_size}_fp16_v{ONNX_EXPORT_VERSION}_{tag}.onnx"
-    if onnx_path.is_file():
-        return onnx_path
-
-    resolved_device = torch.device(device)
-    if resolved_device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA is required for the fp16 ZipDepth ONNX export")
-    model: nn.Module = prepare_zipdepth_prompt_for_export(model_loader(resolved_checkpoint), image_hw, resolved_device)
-    wrapper = _ExportOutputs(model).eval()
-    dummy_image = torch.rand((batch_size, 3, height, width), dtype=torch.float32, device=resolved_device)
-    dummy_prompt = torch.linspace(0.2, 3.8, 192 * 256, dtype=torch.float32, device=resolved_device).reshape(1, 1, 192, 256)
-    dummy_prompt = dummy_prompt.expand(batch_size, -1, -1, -1).contiguous()
-    dummy_prompt[:, :, 24:160:3, 32:224:4] = 0.0
-
-    if export_fn is None:
-        from trtkit import export_onnx
-
-        export_fn = export_onnx
-    export_fn(
-        wrapper,
-        (dummy_image, dummy_prompt),
-        onnx_path,
-        input_names=[IMAGE_INPUT_NAME, PROMPT_INPUT_NAME],
-        output_names=[DEPTH_OUTPUT_NAME, "min_depth", "max_depth"],
-        compute_dtype=None,
-        dynamic_batch_max=None,
-    )
-    del wrapper, model
-    if resolved_device.type == "cuda":
-        torch.cuda.empty_cache()
-    return onnx_path
 
 
 def _parity_inputs(batch_size: int, image_hw: tuple[int, int], device: torch.device) -> dict[str, Tensor]:
@@ -277,3 +182,19 @@ def main(config: TrtExportConfig) -> Path:
     config.result_path.write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))
     return config.result_path
+
+
+__all__ = (
+    "DEFAULT_CACHE_DIR",
+    "DEPTH_OUTPUT_NAME",
+    "IMAGE_INPUT_NAME",
+    "ONNX_EXPORT_VERSION",
+    "PROMPT_INPUT_NAME",
+    "TrtExportConfig",
+    "_ExportOutputs",
+    "benchmark_tensorrt",
+    "export_zipdepth_prompt_onnx",
+    "main",
+    "prepare_zipdepth_prompt_for_export",
+    "verify_three_backend_parity",
+)

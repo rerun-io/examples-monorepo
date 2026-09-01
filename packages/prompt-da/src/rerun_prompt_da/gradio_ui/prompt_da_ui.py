@@ -12,12 +12,14 @@ import gradio as gr
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
+import torch
 from gradio_rerun import Rerun
-from jaxtyping import Float, UInt16
-from monopriors.models.depth_completion.base_completion_depth import (
-    CompletionDepthPrediction,
+from jaxtyping import Float, Float32, UInt8, UInt16
+from monopriors.models.depth_completion.prompt_da import (
+    PromptDAConfig,
+    PromptDAPredictor,
+    network_image_hw,
 )
-from monopriors.models.depth_completion.prompt_da import PromptDAPredictor
 from numpy import ndarray
 from simplecv.data.polycam import (
     DepthConfidenceLevel,
@@ -26,7 +28,9 @@ from simplecv.data.polycam import (
     load_polycam_data,
 )
 from simplecv.ops.tsdf_depth_fuser import Open3DFuser
+from torch import Tensor
 from tqdm import tqdm
+from trtkit import TorchBackendConfig
 
 from rerun_prompt_da.apis.prompt_da_polycam import (
     create_blueprint,
@@ -99,18 +103,26 @@ def stream_polycam_da(
     )
 
     progress(progress=0.1, desc="Loading PromptDA model")
-    model = PromptDAPredictor(device="cuda", model_type="large", max_size=1008)
+    first_frame: PolycamData = next(iter(polycam_dataset))
+    image_hw: tuple[int, int] = network_image_hw(first_frame.rgb_hw3.shape[:2], 1008)
+    model: PromptDAPredictor = PromptDAConfig(
+        backend=TorchBackendConfig(),
+        image_height=image_hw[0],
+        image_width=image_hw[1],
+    ).setup()
     polycam_data: PolycamData
     for frame_idx, polycam_data in enumerate(tqdm(polycam_dataset, desc="Inferring", total=len(polycam_dataset))):
         rr.set_time("frame_idx", sequence=frame_idx)
 
-        depth_pred: CompletionDepthPrediction = model(
-            rgb=polycam_data.rgb_hw3,
-            prompt_depth=polycam_data.original_depth_hw,
+        rgb_bhw3: UInt8[Tensor, "1 h w 3"] = torch.from_numpy(polycam_data.rgb_hw3).unsqueeze(0).cuda()
+        prompt_bhw: Float32[Tensor, "1 192 256"] = (
+            torch.from_numpy(polycam_data.original_depth_hw).unsqueeze(0).to(device="cuda", dtype=torch.float32) / 1000.0
         )
+        depth_bhw: Float32[Tensor, "1 h w"] = model(rgb_bhw3, prompt_bhw)
+        depth_pred_mm: UInt16[np.ndarray, "h w"] = (depth_bhw[0] * 1000.0).clamp(0.0, 65535.0).to(torch.uint16).cpu().numpy()
 
         pred_filtered_depth_mm: UInt16[np.ndarray, "h w"] = filter_depth(
-            depth_mm=depth_pred.depth_mm,
+            depth_mm=depth_pred_mm,
             confidence=polycam_data.confidence_hw,
             confidence_threshold=DepthConfidenceLevel.MEDIUM,
             max_depth_meter=parameters.max_depth_range_meter,
@@ -130,7 +142,7 @@ def stream_polycam_da(
         log_polycam_data(
             parent_path=parent_log_path,
             polycam_data=polycam_data,
-            depth_pred=depth_pred.depth_mm,
+            depth_pred=depth_pred_mm,
             rescale_factor=1,
         )
 

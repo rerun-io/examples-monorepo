@@ -575,13 +575,13 @@ description = "Run batched TensorRT PromptDA on the example Polycam dataset"
 cmd = "python tools/polycam_compare.py --polycam-zip-path data/6G-room-example.zip"
 depends-on = ["_prompt-da-download-polycam-example"]
 cwd = "packages/prompt-da"
-description = "Compare PromptDA-large against a trained ZipDepth-PromptDA checkpoint on the example Polycam capture"
+description = "Compare any two completion configs; compatibility: pass --zipdepth-checkpoint PATH, or select nested model/backend subcommands"
 
 [feature.prompt-da-demo.tasks.prompt-da-polycam-trio]
 cmd = "python tools/polycam_trio.py --polycam-zip-path data/6G-room-example.zip"
 depends-on = ["_prompt-da-download-polycam-example"]
 cwd = "packages/prompt-da"
-description = "Three-way Polycam comparison: raw ARKit LiDAR vs PromptDA-large vs ZipDepth-PromptDA, with a fused mesh each"
+description = "Three-way Polycam comparison; pass --zipdepth-checkpoint PATH, or select prompt-da tensorrt zipdepth-promptda {torch,tensorrt} --checkpoint PATH"
 
 [feature.prompt-da-demo.tasks.prompt-da-app]
 cmd = "python tools/gradio_app.py"

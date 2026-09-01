@@ -103,18 +103,12 @@ def test_trt_matches_torch_on_synthetic_frames() -> None:
 
 @pytest.mark.skipif(os.environ.get("PROMPTDA_TRT_E2E") != "1", reason="set PROMPTDA_TRT_E2E=1 to run the engine-building parity test")
 @requires_cuda
-def test_trt_matches_original_numpy_pipeline() -> None:
-    """The TRT path agrees with monoprior's original PromptDAPredictor end to end.
-
-    This crosses the preprocessing boundary on purpose: the original uses cv2
-    INTER_AREA on uint8, the TRT path uses GPU bilinear-antialias on float. On
-    smooth (low-frequency) frames the completed depth must still match closely.
-    """
+def test_trt_matches_torch_family_pipeline() -> None:
+    """The TRT path agrees with the shared torch predictor contract end to end."""
 
     import torch.nn.functional as F
-    from monopriors.models.depth_completion.prompt_da import PromptDAPredictor
 
-    from rerun_prompt_da.trt_predictor import PromptDATrtPredictor
+    from rerun_prompt_da.trt_predictor import PromptDATorchPredictor, PromptDATrtPredictor
 
     generator = torch.Generator().manual_seed(7)
     low_freq = torch.rand((2, 3, 24, 32), generator=generator)
@@ -127,9 +121,8 @@ def test_trt_matches_original_numpy_pipeline() -> None:
     depth_trt_mm = (trt_predictor(rgb_bhw3.cuda(), prompt_m.cuda()) * 1000.0).cpu().numpy()
     torch.cuda.synchronize()
 
-    original = PromptDAPredictor(device="cuda", model_type="large", max_size=1008)
+    torch_predictor = PromptDATorchPredictor()
+    depth_torch_mm = (torch_predictor(rgb_bhw3.cuda(), prompt_m.cuda()) * 1000.0).cpu().numpy()
     for i in range(rgb_bhw3.shape[0]):
-        prompt_mm_u16 = (prompt_m[i].numpy() * 1000.0).astype(np.uint16)
-        depth_orig_mm = original(rgb=rgb_bhw3[i].numpy(), prompt_depth=prompt_mm_u16).depth_mm
-        diff_mm = np.abs(depth_trt_mm[i] - depth_orig_mm.astype(np.float32))
+        diff_mm = np.abs(depth_trt_mm[i] - depth_torch_mm[i])
         assert np.median(diff_mm) < 20.0, f"frame {i}: median {np.median(diff_mm):.1f} mm vs original pipeline"

@@ -10,8 +10,7 @@ phone gives you for free, and the thing both models have to beat.
 """
 
 import time
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import batched, chain
 from pathlib import Path
 
@@ -20,9 +19,10 @@ import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 import torch
-from einops import rearrange
 from jaxtyping import Float32, UInt8, UInt16
-from monopriors.models.depth_completion.zipdepth_prompt import ZipDepthPrompt, load_zipdepth_prompt
+from monopriors.models.depth_completion import AnnotatedCompletionConfig, PromptDAConfig, ZipDepthPromptConfig
+from monopriors.models.depth_completion.base_completion_depth import BaseCompletionPredictor
+from monopriors.models.depth_completion.prompt_da import DEFAULT_PROMPTDA_CACHE_DIR
 from numpy import ndarray
 from simplecv.camera_parameters import rescale_intri
 from simplecv.data.polycam import DepthConfidenceLevel, PolycamData, PolycamDataset, load_polycam_data
@@ -30,11 +30,10 @@ from simplecv.ops.tsdf_depth_fuser import Open3DFuser
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole
 from torch import Tensor
 from tqdm import tqdm
+from trtkit import TensorRtBackendConfig, TorchBackendConfig
 
 from rerun_prompt_da.apis.prompt_da_polycam import filter_depth
-from rerun_prompt_da.apis.prompt_da_trt_polycam import network_image_hw
 from rerun_prompt_da.mesh_logging import log_fused_mesh
-from rerun_prompt_da.trt_predictor import PromptDATrtPredictor
 
 SOURCES: tuple[str, str, str] = ("arkit", "promptda", "zipdepth")
 """Depth sources compared, in increasing order of expected quality."""
@@ -46,20 +45,22 @@ class PolycamTrioConfig:
 
     polycam_zip_path: Path
     """Polycam capture zip (or extracted directory) to process."""
-    zipdepth_checkpoint: Path
-    """Trained ZipDepth-PromptDA checkpoint; also the PyTorch fallback when no engine is given."""
-    zipdepth_engine: Path | None = None
-    """Static-batch TensorRT fp16 engine for the student, built by ``zipdepth-export-prompted-trt``.
-
-    Parity against PyTorch is 0.003 mm at the 95th percentile -- four orders of magnitude
-    below the model's own ~22 mm error -- so running the engine costs nothing in fidelity
-    and makes the timing comparison against the TensorRT teacher apples-to-apples."""
+    teacher: AnnotatedCompletionConfig = field(
+        default_factory=lambda: PromptDAConfig(
+            backend=TensorRtBackendConfig(max_batch_size=8, opt_batch_size=8, cache_dir=DEFAULT_PROMPTDA_CACHE_DIR / "trt")
+        )
+    )
+    """Teacher completion model and backend."""
+    student: AnnotatedCompletionConfig = field(
+        default_factory=lambda: ZipDepthPromptConfig(checkpoint=Path(), backend=TorchBackendConfig())
+    )
+    """Student completion model and backend."""
+    zipdepth_checkpoint: Path | None = None
+    """Compatibility alias for ``student=zipdepth-promptda --checkpoint``."""
     rr_config: RerunTyroConfig = field(default_factory=RerunTyroConfig)
     """Rerun viewer/save/connect behavior."""
     batch_size: int = 8
     """Frames per model batch."""
-    max_image_size: int = 1008
-    """Longest PromptDA network image side; 14-aligned from the capture resolution."""
     max_depth_range_meter: float = 4.0
     """Depth beyond this is dropped before TSDF fusion."""
     depth_fusion_resolution: float = 0.04
@@ -194,39 +195,15 @@ def polycam_trio(config: PolycamTrioConfig) -> None:
     native_scale: float = first_batch[0].rgb_hw3.shape[1] / native_hw[1]
     rr.log(str(lowres_path), rr.Transform3D(scale=native_scale), static=True)
 
-    capture_hw: tuple[int, int] = first_batch[0].rgb_hw3.shape[:2]
-    teacher = PromptDATrtPredictor(
-        model_type="large",
-        image_hw=network_image_hw(capture_hw, config.max_image_size),
-        batch_size=config.batch_size,
-    )
-    # Both closures take BHW3 and do their own layout work INSIDE, so the timing
-    # brackets measure the same preprocessing for student and teacher alike.
-    student_backend: str
-    predict_student: Callable[[UInt8[Tensor, "b h w 3"], Float32[Tensor, "b 1 192 256"]], Float32[Tensor, "b 1 h w"]]
-    if config.zipdepth_engine is None:
-        # fuse_for_inference folds the RepVGG branches, matching how eval_catalog.py
-        # and the TRT export run the model; unfused eager understates its speed.
-        student: ZipDepthPrompt = load_zipdepth_prompt(config.zipdepth_checkpoint).cuda().fuse_for_inference()
-
-        def predict_student(rgb_bhw3: UInt8[Tensor, "b h w 3"], prompt_b1hw: Float32[Tensor, "b 1 192 256"]) -> Float32[Tensor, "b 1 h w"]:
-            image_b3hw: UInt8[Tensor, "b 3 h w"] = rearrange(rgb_bhw3, "b h w c -> b c h w").contiguous()  # pyrefly: ignore  # bad-argument-type — einops stub false positive
-            with torch.inference_mode():
-                return student(image_b3hw, prompt_b1hw)
-
-        student_backend = "PyTorch eager"
-    else:
-        from trtkit import TensorRtRuntime
-
-        runtime = TensorRtRuntime(config.zipdepth_engine)
-
-        def predict_student(rgb_bhw3: UInt8[Tensor, "b h w 3"], prompt_b1hw: Float32[Tensor, "b 1 192 256"]) -> Float32[Tensor, "b 1 h w"]:
-            # The engine bakes the uint8->[0,1] scaling the wrapper does in torch.
-            image_b3hw: Float32[Tensor, "b 3 h w"] = rearrange(rgb_bhw3, "b h w c -> b c h w").contiguous().float() / 255.0  # pyrefly: ignore  # bad-argument-type — einops stub false positive
-            outputs = runtime({"image": image_b3hw, "prompt_depth": prompt_b1hw})
-            return outputs["depth"].clone()
-
-        student_backend = "TensorRT fp16"
+    student_config: AnnotatedCompletionConfig = config.student
+    if config.zipdepth_checkpoint is not None:
+        if not isinstance(student_config, ZipDepthPromptConfig):
+            raise ValueError("--zipdepth-checkpoint requires the ZipDepth-PromptDA student config.")
+        student_config = replace(student_config, checkpoint=config.zipdepth_checkpoint)
+    teacher: BaseCompletionPredictor = config.teacher.setup()
+    student: BaseCompletionPredictor = student_config.setup()
+    teacher_label: str = type(config.teacher).__name__
+    student_label: str = type(student_config).__name__
 
     frame_budget: int = config.max_frames if config.max_frames is not None else len(dataset)
     n_frames: int = 0
@@ -256,7 +233,7 @@ def polycam_trio(config: PolycamTrioConfig) -> None:
 
         torch.cuda.synchronize()
         started = time.perf_counter()
-        student_bhw: Float32[Tensor, "b h w"] = predict_student(rgb_bhw3, prompt_bhw.unsqueeze(1)).squeeze(1)
+        student_bhw: Float32[Tensor, "b h w"] = student(rgb_bhw3, prompt_bhw)
         torch.cuda.synchronize()
         seconds["zipdepth"] += time.perf_counter() - started
 
@@ -361,8 +338,8 @@ def polycam_trio(config: PolycamTrioConfig) -> None:
 
     wall_seconds: float = time.perf_counter() - wall_start
     print(f"frames                {n_frames}")
-    print(f"PromptDA-large        {1000.0 * seconds['promptda'] / n_frames:.2f} ms/frame  (TensorRT fp16)")
-    print(f"ZipDepth-PromptDA     {1000.0 * seconds['zipdepth'] / n_frames:.2f} ms/frame  ({student_backend})")
+    print(f"{teacher_label:<22}{1000.0 * seconds['promptda'] / n_frames:.2f} ms/frame")
+    print(f"{student_label:<22}{1000.0 * seconds['zipdepth'] / n_frames:.2f} ms/frame")
     print(f"speedup               {seconds['promptda'] / seconds['zipdepth']:.1f}x")
     print(f"wall                  {wall_seconds:.1f} s  (three TSDF volumes)")
 
