@@ -9,7 +9,7 @@ from kornia_rs.k3d import bundle_adjust  # pyrefly: ignore[missing-import]  # Co
 from numpy import ndarray
 
 from exo_calib.correspondences import ObservationSet
-from exo_calib.triangulation import triangulate_points
+from exo_calib.triangulation import reprojection_errors_px, triangulate_points, valid_observation_mask
 
 
 @dataclass(slots=True)
@@ -43,41 +43,12 @@ def mean_reprojection_error_px(
     Returns:
         Confidence-weighted mean pixel error, or NaN when no observation is valid.
     """
-    n_points: int = points_xyz_n3.shape[0]
-    n_views: int = k_v33.shape[0]
-    valid_reference_m: Bool[ndarray, "n_obs"] = (
-        (obs.obs_point_idx >= 0)
-        & (obs.obs_point_idx < n_points)
-        & (obs.obs_view_idx >= 0)
-        & (obs.obs_view_idx < n_views)
-        & np.isfinite(obs.obs_xy).all(axis=1)
-        & np.isfinite(obs.obs_conf)
-        & (obs.obs_conf > 0.0)
-    )
-    valid_reference_idx_q: Int64[ndarray, "q"] = np.flatnonzero(valid_reference_m).astype(np.int64)
-    if valid_reference_idx_q.size == 0:
+    error_m: Float64[ndarray, "n_obs"] = reprojection_errors_px(obs, points_xyz_n3, k_v33, cam_T_world_v44)
+    finite_m: Bool[ndarray, "n_obs"] = np.isfinite(error_m)
+    if not finite_m.any():
         return float("nan")
-
-    point_idx_q: Int64[ndarray, "q"] = obs.obs_point_idx[valid_reference_idx_q]
-    view_idx_q: Int64[ndarray, "q"] = obs.obs_view_idx[valid_reference_idx_q]
-    point_homo_q4: Float64[ndarray, "q 4"] = np.column_stack(
-        (points_xyz_n3[point_idx_q], np.ones(valid_reference_idx_q.size, dtype=np.float64))
-    )
-    points_cam_q3: Float64[ndarray, "q 3"] = np.einsum("qij,qj->qi", cam_T_world_v44[view_idx_q, :3, :], point_homo_q4)
-    projected_homo_q3: Float64[ndarray, "q 3"] = np.einsum("qij,qj->qi", k_v33[view_idx_q], points_cam_q3)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        projected_xy_q2: Float64[ndarray, "q 2"] = projected_homo_q3[:, :2] / projected_homo_q3[:, 2:3]
-    valid_projection_q: Bool[ndarray, "q"] = (
-        (points_cam_q3[:, 2] > 0.0) & np.isfinite(points_xyz_n3[point_idx_q]).all(axis=1) & np.isfinite(projected_xy_q2).all(axis=1)
-    )
-    if not np.any(valid_projection_q):
-        return float("nan")
-
-    valid_obs_idx_r: Int64[ndarray, "r"] = valid_reference_idx_q[valid_projection_q]
-    error_r: Float64[ndarray, "r"] = np.linalg.norm(projected_xy_q2[valid_projection_q] - obs.obs_xy[valid_obs_idx_r], axis=1)
-    weight_r: Float64[ndarray, "r"] = obs.obs_conf[valid_obs_idx_r]
-    mean_error_px: float = float(np.sum(weight_r * error_r) / np.sum(weight_r))
-    return mean_error_px
+    weight_r: Float64[ndarray, "r"] = obs.obs_conf[finite_m]
+    return float(np.sum(weight_r * error_m[finite_m]) / np.sum(weight_r))
 
 
 def refine_extrinsics(
@@ -138,15 +109,7 @@ def refine_extrinsics(
     for _round_idx in range(rounds):
         round_start_cam_T_world_v44: Float64[ndarray, "v 4 4"] = current_cam_T_world_v44.copy()
         round_start_points_xyz_n3: Float64[ndarray, "n_points 3"] = current_points_xyz_n3.copy()
-        valid_reference_m: Bool[ndarray, "n_obs"] = (
-            (obs.obs_point_idx >= 0)
-            & (obs.obs_point_idx < n_points)
-            & (obs.obs_view_idx >= 0)
-            & (obs.obs_view_idx < n_views)
-            & np.isfinite(obs.obs_xy).all(axis=1)
-            & np.isfinite(obs.obs_conf)
-            & (obs.obs_conf > 0.0)
-        )
+        valid_reference_m: Bool[ndarray, "n_obs"] = valid_observation_mask(obs, n_views, n_points=n_points)
         valid_reference_idx_q: Int64[ndarray, "q"] = np.flatnonzero(valid_reference_m).astype(np.int64)
         if valid_reference_idx_q.size == 0:
             all_converged = False

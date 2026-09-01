@@ -21,6 +21,8 @@ from exo_calib.catalog_io import (
     DEFAULT_DATASET_NAME,
     GtCameras,
     connect_dataset,
+    exocalib_entity,
+    kp3d_entity,
     new_layer_recording,
     only_segment_id,
     read_gt_cameras,
@@ -59,18 +61,18 @@ def _variant_metrics(pred: InitCameras, gt: GtCameras) -> dict:
         errors = evaluate_rig(pred.cam_T_world_v44, gt.cam_T_world_v44, mode=mode)
         metrics[mode] = {
             "rotation_deg": {
-                "per_camera": [round(float(x), 4) for x in errors.rotation_deg_v],
-                "mean": round(float(np.mean(errors.rotation_deg_v)), 4),
-                "median": round(float(np.median(errors.rotation_deg_v)), 4),
-                "max": round(float(np.max(errors.rotation_deg_v)), 4),
+                "per_camera": [round(float(x), 4) for x in errors.rotation_error_deg_v],
+                "mean": round(float(np.mean(errors.rotation_error_deg_v)), 4),
+                "median": round(float(np.median(errors.rotation_error_deg_v)), 4),
+                "max": round(float(np.max(errors.rotation_error_deg_v)), 4),
             },
             "translation_cm": {
-                "per_camera": [round(float(x), 4) for x in errors.translation_cm_v],
-                "mean": round(float(np.mean(errors.translation_cm_v)), 4),
-                "median": round(float(np.median(errors.translation_cm_v)), 4),
-                "max": round(float(np.max(errors.translation_cm_v)), 4),
+                "per_camera": [round(float(x), 4) for x in errors.translation_error_cm_v],
+                "mean": round(float(np.mean(errors.translation_error_cm_v)), 4),
+                "median": round(float(np.median(errors.translation_error_cm_v)), 4),
+                "max": round(float(np.max(errors.translation_error_cm_v)), 4),
             },
-            "scale": round(float(errors.scale), 6),
+            "scale": round(float(errors.alignment_scale), 6),
         }
     focal_pct: Float64[ndarray, " v"] = (pred.k_v33[:, 0, 0] - gt.k_v33[:, 0, 0]) / gt.k_v33[:, 0, 0] * 100.0
     metrics["focal_error_pct"] = {
@@ -113,8 +115,7 @@ def main(config: ReportConfig) -> None:
     # draw labeled error lines from each aligned camera center to its GT center.
     from exo_calib.eval import align_rigs
 
-    rrd_path: Path = segment_dir / f"{config.align_layer_name}.rrd"
-    recording: rr.RecordingStream = new_layer_recording(config.application_id, segment_id, rrd_path)
+    recording, rrd_path = new_layer_recording(config.application_id, segment_id, segment_dir / f"{config.align_layer_name}.rrd")
     gt_centers_v3: Float64[ndarray, "v 3"] = np.stack(
         [-gt.cam_T_world_v44[i, :3, :3].T @ gt.cam_T_world_v44[i, :3, 3] for i in range(len(gt.names))]
     )
@@ -125,8 +126,8 @@ def main(config: ReportConfig) -> None:
         pred = InitCameras.load(npz_path)
         alignment = align_rigs(pred.cam_T_world_v44, gt.cam_T_world_v44, with_scale=False)
         transform: rr.Transform3D = rr.Transform3D(translation=alignment.translation_3, mat3x3=alignment.rotation_33)
-        recording.log(f"/world/exocalib/{variant}", transform, static=True)
-        recording.log(f"/world/exocalib/kp3d_{variant}", transform, static=True)
+        recording.log(exocalib_entity(variant), transform, static=True)
+        recording.log(kp3d_entity(variant), transform, static=True)
         pred_centers_v3: Float64[ndarray, "v 3"] = np.stack(
             [-pred.cam_T_world_v44[i, :3, :3].T @ pred.cam_T_world_v44[i, :3, 3] for i in range(len(pred.names))]
         )

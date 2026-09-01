@@ -11,27 +11,32 @@ Kineo's pairwise reprojection consensus confidence, plus the refined frusta.
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 import numpy as np
 import rerun as rr
-from jaxtyping import Float32, Float64, Int64
+from jaxtyping import Float64, Int64
 from numpy import ndarray
+from rerun.catalog import DatasetEntry
 from simplecv.rerun_custom_types import Points3DWithConfidence
 
 from exo_calib.apis.calibrate_init import InitCameras, log_cameras_layer
-from exo_calib.apis.keypoints2d import CameraKeypoints, postprocess_confidences
+from exo_calib.apis.keypoints2d import AHX_CONF_TAU, AHX_MARGIN_PX, AHX_MEDIAN_WINDOW, CameraKeypoints, stack_postprocessed
 from exo_calib.catalog_io import (
     DEFAULT_CATALOG_URL,
     DEFAULT_DATASET_NAME,
     EXO_CAMERA_NAMES,
+    EXOCALIB_ROOT,
     TIMELINE,
     connect_dataset,
+    exocalib_entity,
+    kp3d_entity,
     log_coco133_class_context,
     new_layer_recording,
     only_segment_id,
     register_layer,
 )
+from exo_calib.correspondences import ObservationSet
 
 
 @dataclass
@@ -46,11 +51,11 @@ class RefineConfig:
     """Segment to refine; ``None`` uses the dataset's single segment."""
     output_dir: Path = Path("data/outputs")
     """Directory holding Stage A/B outputs; refined outputs land beside them."""
-    median_window: int = 5
+    median_window: int = AHX_MEDIAN_WINDOW
     """Temporal median filter window (frames) on the 2D keypoints."""
-    margin_px: float = 32.0
-    """AssemblyHands-X crop-edge margin, in crop pixels (crop is 768x1024)."""
-    conf_tau: float = 0.15
+    margin_px: float = AHX_MARGIN_PX
+    """AssemblyHands-X crop-edge margin, in crop pixels of the model crop frame."""
+    conf_tau: float = AHX_CONF_TAU
     """AssemblyHands-X confidence threshold before rescaling to [0, 1]."""
     min_pair_conf: float = 0.90
     """Kineo pair rule: geometric-mean confidence a view pair must exceed.
@@ -100,15 +105,14 @@ def load_stage_b(output_dir: Path, segment_id: str, names: tuple[str, ...]) -> d
 
 
 def metric_rescale_from_keypoints(
-    dataset: Any,
+    dataset: DatasetEntry,
     segment_id: str,
     cam_T_world_v44: Float64[ndarray, "v 4 4"],
     k_v33: Float64[ndarray, "v 3 3"],
-    obs: Any,
+    obs: ObservationSet,
     points_xyz_n3: Float64[ndarray, "n 3"],
     sample_indices_t: ndarray,
     n_frames: int,
-    rescale_joints: str = "all",
 ) -> float:
     """Estimate a global scale correction from MoGe-2 metric depth at the keypoints.
 
@@ -133,7 +137,7 @@ def metric_rescale_from_keypoints(
     import torch
     from monopriors.models.metric_depth.moge_v2 import MoGeV2MetricPredictor
 
-    from exo_calib.catalog_io import open_exo_streams
+    from exo_calib.video_io import open_exo_streams
 
     frames_used: Int64[ndarray, " f"] = np.unique(obs.point_frame_idx)
     chosen_frames_f: Int64[ndarray, " f"] = frames_used[np.linspace(0, frames_used.size - 1, min(n_frames, frames_used.size)).astype(np.int64)]
@@ -143,22 +147,25 @@ def metric_rescale_from_keypoints(
     # Empirically the all-joint estimator tracks GT scale best on Assembly101:
     # body-only sampling has too few surviving correspondences, and MoGe's body
     # depth runs a few percent short on this scene.
-    if rescale_joints == "body":
-        joint_obs_m: ndarray = obs.point_joint_idx[obs.obs_point_idx] < 17
-    else:
-        joint_obs_m = np.ones(obs.obs_point_idx.shape[0], dtype=bool)
+    frame_of_obs_m: Int64[ndarray, "n_obs"] = obs.point_frame_idx[obs.obs_point_idx]
     group_medians: list[float] = []
     n_samples: int = 0
-    for frame in chosen_frames_f:
-        in_frame_m: ndarray = joint_obs_m & (obs.point_frame_idx[obs.obs_point_idx] == frame)
-        for view in np.unique(obs.obs_view_idx[in_frame_m]):
-            rows_r: Int64[ndarray, " r"] = np.flatnonzero(in_frame_m & (obs.obs_view_idx == view)).astype(np.int64)
+    for view in np.unique(obs.obs_view_idx):
+        frame_rows: list[tuple[int, Int64[ndarray, " r"]]] = []
+        for frame in chosen_frames_f:
+            rows_r: Int64[ndarray, " r"] = np.flatnonzero((frame_of_obs_m == frame) & (obs.obs_view_idx == view)).astype(np.int64)
+            if rows_r.size and np.isfinite(points_xyz_n3[obs.obs_point_idx[rows_r]]).all(axis=1).any():
+                frame_rows.append((int(frame), rows_r))
+        if not frame_rows:
+            continue
+        # One batched NVDEC read per view instead of interleaved single-frame seeks.
+        decode_idx: list[int] = [int(sample_indices_t[frame]) for frame, _ in frame_rows]
+        frames_bchw: torch.Tensor = streams.decoders[int(view)].get_frames_at(decode_idx).data
+        for (_frame, rows_r), frame_chw in zip(frame_rows, frames_bchw, strict=True):
             point_rows_r: Int64[ndarray, " r"] = obs.obs_point_idx[rows_r]
             points_r3: Float64[ndarray, "r 3"] = points_xyz_n3[point_rows_r]
             finite_r: ndarray = np.isfinite(points_r3).all(axis=1)
-            if not finite_r.any():
-                continue
-            frame_rgb: ndarray = streams.frame_rgb_hw3(int(view), int(sample_indices_t[int(frame)]))
+            frame_rgb: ndarray = frame_chw.permute(1, 2, 0).contiguous().cpu().numpy()
             depth_hw: Float64[ndarray, "h w"] = moge(frame_rgb, K_33=k_v33[int(view)].astype(np.float32)).depth_meters.astype(np.float64)
             xy_r2: Float64[ndarray, "r 2"] = obs.obs_xy[rows_r]
             px_r: Int64[ndarray, " r"] = np.clip(np.round(xy_r2[:, 0]).astype(np.int64), 0, depth_hw.shape[1] - 1)
@@ -176,7 +183,7 @@ def metric_rescale_from_keypoints(
         print(f"metric rescale skipped: only {len(group_medians)} (view, frame) groups")
         return 1.0
     scale: float = float(np.median(np.asarray(group_medians)))
-    print(f"metric rescale[{rescale_joints}]: {n_samples} samples in {len(group_medians)} groups, median-of-medians = {scale:.4f}")
+    print(f"metric rescale: {n_samples} samples in {len(group_medians)} groups, median-of-medians = {scale:.4f}")
     return scale
 
 
@@ -192,17 +199,8 @@ def main(config: RefineConfig) -> None:
     init: InitCameras = InitCameras.load(segment_dir / "init_cameras.npz")
     per_camera: dict[str, CameraKeypoints] = load_stage_b(config.output_dir, segment_id, EXO_CAMERA_NAMES)
 
-    # Common frame grid across cameras (Stage B used the same stride everywhere).
-    num_frames: int = min(len(cam.sample_indices) for cam in per_camera.values())
-    kp_list: list[Float32[ndarray, "t 133 2"]] = []
-    conf_list: list[Float64[ndarray, "t 133"]] = []
-    for name in EXO_CAMERA_NAMES:
-        kp_xy, conf = postprocess_confidences(per_camera[name], config.median_window, config.margin_px, config.conf_tau, crop_wh=(768, 1024))
-        kp_list.append(kp_xy[:num_frames])
-        conf_list.append(conf[:num_frames])
-    kp_xy_vtj2: Float64[ndarray, "v t 133 2"] = np.stack(kp_list).astype(np.float64)
-    conf_vtj: Float64[ndarray, "v t 133"] = np.stack(conf_list)
-    print(f"{num_frames} frames x {len(EXO_CAMERA_NAMES)} views; mean post conf {conf_vtj[conf_vtj > 0].mean():.3f}")
+    kp_xy_vtj2, conf_vtj = stack_postprocessed(per_camera, EXO_CAMERA_NAMES, config.median_window, config.margin_px, config.conf_tau)
+    print(f"{kp_xy_vtj2.shape[1]} frames x {len(EXO_CAMERA_NAMES)} views; mean post conf {conf_vtj[conf_vtj > 0].mean():.3f}")
 
     obs = build_observations(
         kp_xy_vtj2,
@@ -234,8 +232,9 @@ def main(config: RefineConfig) -> None:
     )
     print(f"BA reprojection error per round (px): {[round(e, 3) for e in result.mean_reproj_px_per_round]}, converged={result.converged}")
 
+    scale_fix: float = 1.0
     if config.metric_rescale_frames > 0:
-        scale_fix: float = metric_rescale_from_keypoints(
+        scale_fix = metric_rescale_from_keypoints(
             dataset,
             segment_id,
             result.cam_T_world_v44,
@@ -248,7 +247,7 @@ def main(config: RefineConfig) -> None:
         result.cam_T_world_v44[:, :3, 3] *= scale_fix
         result.points_xyz_n3 *= scale_fix
 
-    refined = InitCameras(names=init.names, k_v33=init.k_v33, cam_T_world_v44=result.cam_T_world_v44, metric_scale=init.metric_scale)
+    refined = InitCameras(names=init.names, k_v33=init.k_v33, cam_T_world_v44=result.cam_T_world_v44, metric_scale=init.metric_scale * scale_fix)
     refined.save(segment_dir / "refined_cameras.npz")
     print(f"wrote {segment_dir / 'refined_cameras.npz'}")
 
@@ -262,18 +261,17 @@ def main(config: RefineConfig) -> None:
         valid = np.isfinite(points).all(axis=1)
         print(f"{variant}: {int(valid.sum())} points, mean 3D confidence {conf_points[valid].mean():.3f}")
 
-    rrd_path: Path = segment_dir / f"{config.layer_name}.rrd"
-    recording: rr.RecordingStream = new_layer_recording(config.application_id, segment_id, rrd_path)
+    recording, rrd_path = new_layer_recording(config.application_id, segment_id, segment_dir / f"{config.layer_name}.rrd")
     log_coco133_class_context(
         recording,
-        "/world/exocalib",
+        EXOCALIB_ROOT,
         ((1, "kp3d init", (255, 214, 0)), (2, "kp3d refined", (0, 200, 255))),
     )
-    video_wh: tuple[int, int] = (1280, 720)
-    log_cameras_layer(init.k_v33, result.cam_T_world_v44, tuple(init.names), video_wh, "/world/exocalib/refined", recording)
-    times_ns = per_camera[EXO_CAMERA_NAMES[0]].times_ns
+    first_cam: CameraKeypoints = per_camera[EXO_CAMERA_NAMES[0]]
+    video_wh: tuple[int, int] = (int(first_cam.video_wh[0]), int(first_cam.video_wh[1]))
+    log_cameras_layer(init.k_v33, result.cam_T_world_v44, tuple(init.names), video_wh, exocalib_entity("refined"), recording)
     for class_id, (variant, (points, conf_points)) in enumerate(conf3d_by_variant.items(), start=1):
-        _log_point_tracks(recording, f"/world/exocalib/kp3d_{variant}", obs, points, conf_points, times_ns, class_id)
+        _log_point_tracks(recording, kp3d_entity(variant), obs, points, conf_points, first_cam.times_ns, class_id)
     recording.flush(timeout_sec=30.0)
     print(f"wrote {rrd_path}")
     if config.register:
@@ -283,7 +281,7 @@ def main(config: RefineConfig) -> None:
 
 def kineo_point_confidence_for_obs(
     points_xyz_n3: Float64[ndarray, "n 3"],
-    obs: Any,
+    obs: ObservationSet,
     k_v33: Float64[ndarray, "v 3 3"],
     cam_T_world_v44: Float64[ndarray, "v 4 4"],
     kp_xy_vtj2: Float64[ndarray, "v t 133 2"],
@@ -308,7 +306,7 @@ def kineo_point_confidence_for_obs(
 def _log_point_tracks(
     recording: rr.RecordingStream,
     entity: str,
-    obs: Any,
+    obs: ObservationSet,
     points_xyz_n3: Float64[ndarray, "n 3"],
     conf_n: Float64[ndarray, " n"],
     times_ns: ndarray,

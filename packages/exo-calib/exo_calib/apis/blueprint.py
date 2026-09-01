@@ -54,7 +54,7 @@ def main(config: BlueprintConfig) -> None:
         rrb.Horizontal(contents=exo_tabs),
         row_shares=[4, 1],
     )
-    blueprint: rrb.Blueprint = rrb.Blueprint(rrb.Horizontal(contents=[container], column_shares=[4, 1]), collapse_panels=True)
+    blueprint: rrb.Blueprint = rrb.Blueprint(container, collapse_panels=True)
     config.output.parent.mkdir(parents=True, exist_ok=True)
     blueprint.save(str(dataset.id), str(config.output))
     print(f"wrote {config.output} for application id {dataset.id}")

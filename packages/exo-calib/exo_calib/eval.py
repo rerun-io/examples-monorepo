@@ -24,41 +24,14 @@ class RigAlignment:
 
 @dataclass(slots=True)
 class CameraErrors:
-    """Per-camera pose errors and aggregate summaries."""
+    """Per-camera pose errors; aggregate with plain numpy at the call site."""
 
     rotation_error_deg_v: Float64[ndarray, "v"]
     """Per-camera geodesic rotation errors in degrees."""
     translation_error_cm_v: Float64[ndarray, "v"]
     """Per-camera center errors in centimeters."""
-    mean_rotation_error_deg: float
-    """Mean rotation error in degrees."""
-    median_rotation_error_deg: float
-    """Median rotation error in degrees."""
-    max_rotation_error_deg: float
-    """Maximum rotation error in degrees."""
-    mean_translation_error_cm: float
-    """Mean camera-center error in centimeters."""
-    median_translation_error_cm: float
-    """Median camera-center error in centimeters."""
-    max_translation_error_cm: float
-    """Maximum camera-center error in centimeters."""
     alignment_scale: float
     """Scale of the alignment applied before measuring errors."""
-
-    @property
-    def rotation_deg_v(self) -> Float64[ndarray, "v"]:
-        """Return Float64 per-camera rotation errors with shape ``(v,)``."""
-        return self.rotation_error_deg_v
-
-    @property
-    def translation_cm_v(self) -> Float64[ndarray, "v"]:
-        """Return Float64 per-camera center errors with shape ``(v,)``."""
-        return self.translation_error_cm_v
-
-    @property
-    def scale(self) -> float:
-        """Return the applied alignment scale."""
-        return self.alignment_scale
 
 
 def align_rigs(
@@ -138,12 +111,6 @@ def camera_errors(
     return CameraErrors(
         rotation_error_deg_v=rotation_error_deg_v,
         translation_error_cm_v=translation_error_cm_v,
-        mean_rotation_error_deg=float(np.mean(rotation_error_deg_v)),
-        median_rotation_error_deg=float(np.median(rotation_error_deg_v)),
-        max_rotation_error_deg=float(np.max(rotation_error_deg_v)),
-        mean_translation_error_cm=float(np.mean(translation_error_cm_v)),
-        median_translation_error_cm=float(np.median(translation_error_cm_v)),
-        max_translation_error_cm=float(np.max(translation_error_cm_v)),
         alignment_scale=alignment.scale,
     )
 

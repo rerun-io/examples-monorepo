@@ -35,8 +35,8 @@ ignore = [
 
 [tool.vulture]
 paths = ["exo_calib", "tests"]
-# Tyro-facing verb entry points and config fields; the CLI shims call them.
-ignore_names = ["main", "resolution_wh_v2", "rr_config"]
+# Tyro-facing verb entry points; the CLI shims call them.
+ignore_names = ["main"]
 exclude = ["*/.pixi/*", "*/__pycache__/*", "*/build/*", "*/dist/*", "*/node_modules/*"]
 sort_by_size = true
 min_confidence = 60

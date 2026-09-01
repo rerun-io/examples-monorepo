@@ -7,7 +7,7 @@ Results append to ``sweep_results.csv`` next to ``eval.json``.
 """
 
 import csv
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -15,7 +15,7 @@ from jaxtyping import Float64
 from numpy import ndarray
 
 from exo_calib.apis.calibrate_init import InitCameras
-from exo_calib.apis.keypoints2d import CameraKeypoints, postprocess_confidences
+from exo_calib.apis.keypoints2d import AHX_CONF_TAU, AHX_MARGIN_PX, AHX_MEDIAN_WINDOW, CameraKeypoints, stack_postprocessed
 from exo_calib.apis.refine import load_stage_b
 from exo_calib.catalog_io import (
     DEFAULT_CATALOG_URL,
@@ -44,11 +44,11 @@ class Experiment:
     """Row label in the results table."""
     joints: str = "all"
     """Joint subset key from ``JOINT_SUBSETS``."""
-    median_window: int = 5
+    median_window: int = AHX_MEDIAN_WINDOW
     """Temporal median filter window (frames)."""
-    margin_px: float = 32.0
+    margin_px: float = AHX_MARGIN_PX
     """AssemblyHands-X crop-edge margin (crop pixels)."""
-    conf_tau: float = 0.15
+    conf_tau: float = AHX_CONF_TAU
     """AssemblyHands-X confidence threshold."""
     min_pair_conf: float = 0.75
     """Kineo pair rule bound."""
@@ -109,15 +109,9 @@ def run_experiment(
 
     cache_key: tuple = (experiment.median_window, experiment.margin_px, experiment.conf_tau)
     if cache_key not in postprocess_cache:
-        num_frames: int = min(len(cam.sample_indices) for cam in per_camera.values())
-        kp_list, conf_list = [], []
-        for name in EXO_CAMERA_NAMES:
-            kp_xy, conf = postprocess_confidences(
-                per_camera[name], experiment.median_window, experiment.margin_px, experiment.conf_tau, crop_wh=(768, 1024)
-            )
-            kp_list.append(kp_xy[:num_frames])
-            conf_list.append(conf[:num_frames])
-        postprocess_cache[cache_key] = (np.stack(kp_list).astype(np.float64), np.stack(conf_list))
+        postprocess_cache[cache_key] = stack_postprocessed(
+            per_camera, EXO_CAMERA_NAMES, experiment.median_window, experiment.margin_px, experiment.conf_tau
+        )
     kp_xy_vtj2, conf_vtj = postprocess_cache[cache_key]
 
     joint_mask_j: Float64[ndarray, "133"] = np.zeros(133, dtype=np.float64)
@@ -135,14 +129,7 @@ def run_experiment(
         seed=experiment.seed,
     )
     if experiment.conf_gamma != 1.0:
-        obs = type(obs)(
-            point_frame_idx=obs.point_frame_idx,
-            point_joint_idx=obs.point_joint_idx,
-            obs_point_idx=obs.obs_point_idx,
-            obs_view_idx=obs.obs_view_idx,
-            obs_xy=obs.obs_xy,
-            obs_conf=obs.obs_conf**experiment.conf_gamma,
-        )
+        obs = replace(obs, obs_conf=obs.obs_conf**experiment.conf_gamma)
     points_init, obs = triangulate_robust(
         obs, init.k_v33, init.cam_T_world_v44, reproj_threshold_px=experiment.reproj_threshold_px
     )
@@ -179,12 +166,12 @@ def run_experiment(
         "n_points": int(obs.point_frame_idx.size),
         "n_obs": int(obs.obs_point_idx.size),
         "reproj_px": round(result.mean_reproj_px_per_round[-1], 3),
-        "trans_cm_mean": round(float(errors.translation_cm_v.mean()), 3),
-        "trans_cm_max": round(float(errors.translation_cm_v.max()), 3),
+        "trans_cm_mean": round(float(errors.translation_error_cm_v.mean()), 3),
+        "trans_cm_max": round(float(errors.translation_error_cm_v.max()), 3),
         "rot_deg_mean": round(float(errors.rotation_error_deg_v.mean()), 3),
         "rot_deg_max": round(float(errors.rotation_error_deg_v.max()), 3),
-        "sim3_trans_cm_mean": round(float(errors_sim3.translation_cm_v.mean()), 3),
-        "sim3_scale": round(float(errors_sim3.scale), 4),
+        "sim3_trans_cm_mean": round(float(errors_sim3.translation_error_cm_v.mean()), 3),
+        "sim3_scale": round(float(errors_sim3.alignment_scale), 4),
     }
 
 

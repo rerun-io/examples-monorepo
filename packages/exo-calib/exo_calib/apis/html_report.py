@@ -87,19 +87,16 @@ def render_report(report: dict, config: HtmlReportConfig, segment_id: str) -> st
     cameras: list[str] = [f"rig_{i:02d}" for i in range(8)]
     blocks: list[str] = []
     tiles: list[str] = []
-    for mode in ("se3", "sim3"):
+    if "init" in report and "refined" in report:
         for metric, unit, key in (("translation", "cm", "translation_cm"), ("rotation", "deg", "rotation_deg")):
-            if "init" not in report or "refined" not in report:
-                continue
-            init_m: dict = report["init"][mode][key]
-            refined_m: dict = report["refined"][mode][key]
-            if mode == "se3":
-                blocks.append(_metric_block(f"Per-camera {metric} error — SE(3) aligned", unit, cameras, init_m["per_camera"], refined_m["per_camera"]))
-                tiles.append(
-                    f'<div class="tile"><div class="tile-label">{metric} (SE3 mean)</div>'
-                    f'<div class="tile-value">{init_m["mean"]:.2f} <span class="tile-unit">{unit}</span>'
-                    f' → {refined_m["mean"]:.2f} <span class="tile-unit">{unit}</span></div></div>'
-                )
+            init_m: dict = report["init"]["se3"][key]
+            refined_m: dict = report["refined"]["se3"][key]
+            blocks.append(_metric_block(f"Per-camera {metric} error — SE(3) aligned", unit, cameras, init_m["per_camera"], refined_m["per_camera"]))
+            tiles.append(
+                f'<div class="tile"><div class="tile-label">{metric} (SE3 mean)</div>'
+                f'<div class="tile-value">{init_m["mean"]:.2f} <span class="tile-unit">{unit}</span>'
+                f' → {refined_m["mean"]:.2f} <span class="tile-unit">{unit}</span></div></div>'
+            )
     summary_rows: list[str] = []
     for variant in ("init", "refined"):
         if variant not in report:

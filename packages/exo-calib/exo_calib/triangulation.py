@@ -20,7 +20,7 @@ from exo_calib.correspondences import ObservationSet
 RobustTriangulationResult: TypeAlias = tuple[Float64[ndarray, "n_points 3"], ObservationSet]
 
 
-def _reprojection_errors_px(
+def reprojection_errors_px(
     obs: ObservationSet,
     points_xyz_n3: Float64[ndarray, "n_points 3"],
     k_v33: Float64[ndarray, "v 3 3"],
@@ -37,19 +37,10 @@ def _reprojection_errors_px(
     Returns:
         Float64 reprojection errors with shape ``(n_obs,)``.
     """
-    n_points: int = points_xyz_n3.shape[0]
     n_views: int = k_v33.shape[0]
     n_obs: int = obs.obs_point_idx.size
     reproj_error_m: Float64[ndarray, "n_obs"] = np.full(n_obs, np.inf, dtype=np.float64)
-    valid_reference_m: Bool[ndarray, "n_obs"] = (
-        (obs.obs_point_idx >= 0)
-        & (obs.obs_point_idx < n_points)
-        & (obs.obs_view_idx >= 0)
-        & (obs.obs_view_idx < n_views)
-        & np.isfinite(obs.obs_xy).all(axis=1)
-        & np.isfinite(obs.obs_conf)
-        & (obs.obs_conf > 0.0)
-    )
+    valid_reference_m: Bool[ndarray, "n_obs"] = valid_observation_mask(obs, n_views, n_points=points_xyz_n3.shape[0])
     valid_reference_idx_q: Int64[ndarray, "q"] = np.flatnonzero(valid_reference_m).astype(np.int64)
     if valid_reference_idx_q.size == 0:
         return reproj_error_m
@@ -69,15 +60,18 @@ def _reprojection_errors_px(
     return reproj_error_m
 
 
-def _valid_observation_mask(obs: ObservationSet, n_views: int) -> Bool[ndarray, "n_obs"]:
-    """Return the mask of observations usable for triangulation."""
-    return (
+def valid_observation_mask(obs: ObservationSet, n_views: int, n_points: int | None = None) -> Bool[ndarray, "n_obs"]:
+    """Return the mask of usable observations; ``n_points`` adds point-index bounds checks."""
+    mask: Bool[ndarray, "n_obs"] = (
         np.isfinite(obs.obs_xy).all(axis=1)
         & np.isfinite(obs.obs_conf)
         & (obs.obs_conf > 0.0)
         & (obs.obs_view_idx >= 0)
         & (obs.obs_view_idx < n_views)
     )
+    if n_points is not None:
+        mask &= (obs.obs_point_idx >= 0) & (obs.obs_point_idx < n_points)
+    return mask
 
 
 def triangulate_points(
@@ -102,7 +96,7 @@ def triangulate_points(
     n_points: int = obs.point_frame_idx.size
     n_views: int = k_v33.shape[0]
     points_xyz_n3: Float64[ndarray, "n_points 3"] = np.full((n_points, 3), np.nan, dtype=np.float64)
-    valid_m: Bool[ndarray, "n_obs"] = _valid_observation_mask(obs, n_views)
+    valid_m: Bool[ndarray, "n_obs"] = valid_observation_mask(obs, n_views)
     if not valid_m.any():
         return points_xyz_n3
 
@@ -184,7 +178,7 @@ def _leave_one_out_drops(
             obs_conf=obs.obs_conf[trial_obs_idx_f],
         )
         trial_points_t3: Float64[ndarray, "t 3"] = triangulate_points(trial_set, k_v33, cam_T_world_v44)
-        trial_errors_f: Float64[ndarray, "f"] = _reprojection_errors_px(trial_set, trial_points_t3, k_v33, cam_T_world_v44)
+        trial_errors_f: Float64[ndarray, "f"] = reprojection_errors_px(trial_set, trial_points_t3, k_v33, cam_T_world_v44)
         max_error_hq: Float64[ndarray, "h q"] = trial_errors_f.reshape(starts_h.size, size, size - 1).max(axis=2)
         best_position_h: Int64[ndarray, "h"] = np.argmin(max_error_hq, axis=1).astype(np.int64)
         drop_indices.append(obs_idx_hq[np.arange(starts_h.size), best_position_h])
@@ -213,9 +207,9 @@ def triangulate_robust(
     """
     n_points: int = obs.point_frame_idx.size
     current_obs: ObservationSet = obs
+    points_xyz_n3: Float64[ndarray, "n_points 3"] = triangulate_points(current_obs, k_v33, cam_T_world_v44)
     for _round_idx in range(max_rounds):
-        points_xyz_n3: Float64[ndarray, "n_points 3"] = triangulate_points(current_obs, k_v33, cam_T_world_v44)
-        reproj_error_m: Float64[ndarray, "n_obs"] = _reprojection_errors_px(current_obs, points_xyz_n3, k_v33, cam_T_world_v44)
+        reproj_error_m: Float64[ndarray, "n_obs"] = reprojection_errors_px(current_obs, points_xyz_n3, k_v33, cam_T_world_v44)
         keep_obs_m: Bool[ndarray, "n_obs"] = np.isfinite(reproj_error_m)
 
         kept_count_n: Int64[ndarray, "n_points"] = np.bincount(current_obs.obs_point_idx[keep_obs_m], minlength=n_points).astype(np.int64)
@@ -249,6 +243,6 @@ def triangulate_robust(
             current_obs = pruned_obs
             break
         current_obs = pruned_obs
+        points_xyz_n3 = triangulate_points(current_obs, k_v33, cam_T_world_v44)
 
-    refined_xyz_n3: Float64[ndarray, "n_points 3"] = triangulate_points(current_obs, k_v33, cam_T_world_v44)
-    return refined_xyz_n3, current_obs
+    return points_xyz_n3, current_obs

@@ -11,7 +11,7 @@ entity (which also suppresses their edges) and logged raw on a connectionless
 ``…_rejected`` sibling so the prediction stays inspectable.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -26,16 +26,22 @@ from exo_calib.catalog_io import (
     DEFAULT_CATALOG_URL,
     DEFAULT_DATASET_NAME,
     TIMELINE,
-    ExoVideoStreams,
     connect_dataset,
     log_coco133_class_context,
     new_layer_recording,
     only_segment_id,
-    open_exo_streams,
+    pinhole_entity,
     register_layer,
 )
+from exo_calib.video_io import ExoVideoStreams, open_exo_streams
 
 PoseBackendName = Literal["tensorrt", "onnxruntime", "torch"]
+
+# AssemblyHands-X gate defaults, shared by Keypoints2dConfig, RefineConfig, and
+# the sweep Experiment so the Stage B overlay and the pipeline cannot drift.
+AHX_MEDIAN_WINDOW: int = 5
+AHX_MARGIN_PX: float = 32.0
+AHX_CONF_TAU: float = 0.15
 
 
 @dataclass
@@ -73,13 +79,12 @@ class Keypoints2dConfig:
     """Register the layer RRD into the catalog after writing it."""
     log_stride: int = 5
     """Log every ``log_stride``-th processed frame into the layer."""
-    median_window: int = 5
-    """Temporal median filter window (frames) for the layer's gate; mirrors
-    ``RefineConfig.median_window`` and only affects the visualization."""
-    margin_px: float = 32.0
-    """AssemblyHands-X crop-edge margin for the layer's gate; mirrors ``RefineConfig``."""
-    conf_tau: float = 0.15
-    """AssemblyHands-X confidence threshold for the layer's gate; mirrors ``RefineConfig``."""
+    median_window: int = AHX_MEDIAN_WINDOW
+    """Temporal median filter window (frames) for the layer's gate; only affects the visualization."""
+    margin_px: float = AHX_MARGIN_PX
+    """AssemblyHands-X crop-edge margin for the layer's gate."""
+    conf_tau: float = AHX_CONF_TAU
+    """AssemblyHands-X confidence threshold for the layer's gate."""
 
 
 @dataclass(slots=True)
@@ -100,6 +105,11 @@ class CameraKeypoints:
     """Image-space origin of the model crop rectangle."""
     crop_size_wh: Float32[ndarray, "t 2"]
     """Image-space size of the model crop rectangle."""
+    crop_input_wh: Int64[ndarray, "2"] = field(default_factory=lambda: np.array([768, 1024], dtype=np.int64))
+    """Pose model crop input size (width, height) the crop rectangles map into;
+    the AssemblyHands-X margin rule operates in this pixel frame."""
+    video_wh: Int64[ndarray, "2"] = field(default_factory=lambda: np.array([1280, 720], dtype=np.int64))
+    """Native video frame size (width, height)."""
 
     def save(self, npz_path: Path) -> None:
         """Write the arrays to ``npz_path``."""
@@ -113,6 +123,8 @@ class CameraKeypoints:
             bbox_xyxy=self.bbox_xyxy,
             crop_origin_xy=self.crop_origin_xy,
             crop_size_wh=self.crop_size_wh,
+            crop_input_wh=self.crop_input_wh,
+            video_wh=self.video_wh,
         )
 
     @classmethod
@@ -170,12 +182,14 @@ def run_camera_sweep(
     kp_xy: Float32[ndarray, "t 133 2"] = np.full((num_frames, 133, 2), np.nan, dtype=np.float32)
     conf: Float32[ndarray, "t 133"] = np.zeros((num_frames, 133), dtype=np.float32)
     bbox_xyxy: Float32[ndarray, "t 4"] = np.full((num_frames, 4), np.nan, dtype=np.float32)
+    video_wh: Int64[ndarray, "2"] = np.array([1280, 720], dtype=np.int64)
 
     decoder = streams.decoders[cam_idx]
     for start in range(0, num_frames, config.batch_size):
         chunk: Int64[ndarray, " b"] = sample_indices[start : start + config.batch_size]
         frames_nchw: torch.Tensor = decoder.get_frames_at(chunk.tolist()).data
         frames_nhwc: torch.Tensor = frames_nchw.permute(0, 2, 3, 1).contiguous()
+        video_wh = np.array([frames_nhwc.shape[2], frames_nhwc.shape[1]], dtype=np.int64)
         detections = detector(frames_nhwc)
         best_xyxy, kept_rows = _best_box_per_frame(detections, len(chunk))
         bbox_xyxy[start : start + len(chunk)] = best_xyxy
@@ -213,11 +227,13 @@ def run_camera_sweep(
         bbox_xyxy=bbox_xyxy,
         crop_origin_xy=crop_origin_xy,
         crop_size_wh=crop_size_wh,
+        crop_input_wh=np.asarray(pose.crop_spec.input_size, dtype=np.int64),
+        video_wh=video_wh,
     )
 
 
-def postprocess_confidences(cam: CameraKeypoints, median_window: int, margin_px: float, conf_tau: float, crop_wh: tuple[int, int]) -> tuple[
-    Float32[ndarray, "t 133 2"], Float64[ndarray, "t 133"]
+def postprocess_confidences(cam: CameraKeypoints, median_window: int, margin_px: float, conf_tau: float) -> tuple[
+    Float64[ndarray, "t 133 2"], Float64[ndarray, "t 133"]
 ]:
     """Apply the AssemblyHands-X 2D post-processing to one camera's keypoints.
 
@@ -225,6 +241,7 @@ def postprocess_confidences(cam: CameraKeypoints, median_window: int, margin_px:
     """
     from exo_calib.confidence import median_filter_keypoints, modulate_crop_edge_confidence, threshold_rescale_confidence
 
+    crop_wh: tuple[int, int] = (int(cam.crop_input_wh[0]), int(cam.crop_input_wh[1]))
     kp_xy_t2: Float64[ndarray, "t 133 2"] = median_filter_keypoints(cam.kp_xy.astype(np.float64), window=median_window)
     num_frames: int = kp_xy_t2.shape[0]
     conf_out: Float64[ndarray, "t 133"] = np.zeros((num_frames, 133), dtype=np.float64)
@@ -235,17 +252,28 @@ def postprocess_confidences(cam: CameraKeypoints, median_window: int, margin_px:
         kp_crop_xy: Float64[ndarray, "133 2"] = (kp_xy_t2[t] - cam.crop_origin_xy[t].astype(np.float64)) / size_wh * np.asarray(crop_wh, dtype=np.float64)
         modulated: Float64[ndarray, "133"] = modulate_crop_edge_confidence(kp_crop_xy, cam.conf[t].astype(np.float64), crop_wh, margin_px)
         conf_out[t] = threshold_rescale_confidence(modulated, tau=conf_tau)
-    return kp_xy_t2.astype(np.float32), conf_out
+    return kp_xy_t2, conf_out
 
 
-def log_keypoints_layer(
-    per_camera: dict[str, CameraKeypoints],
-    recording: rr.RecordingStream,
-    log_stride: int,
-    median_window: int,
-    margin_px: float,
-    conf_tau: float,
-) -> None:
+def stack_postprocessed(
+    per_camera: dict[str, CameraKeypoints], names: tuple[str, ...], median_window: int, margin_px: float, conf_tau: float
+) -> tuple[Float64[ndarray, "v t 133 2"], Float64[ndarray, "v t 133"]]:
+    """Post-process every camera and stack onto the common frame grid.
+
+    Stage B uses the same stride everywhere, so the common grid is the shortest
+    camera's frame count.
+    """
+    num_frames: int = min(len(per_camera[name].sample_indices) for name in names)
+    kp_list: list[Float64[ndarray, "t 133 2"]] = []
+    conf_list: list[Float64[ndarray, "t 133"]] = []
+    for name in names:
+        kp_xy, conf = postprocess_confidences(per_camera[name], median_window, margin_px, conf_tau)
+        kp_list.append(kp_xy[:num_frames])
+        conf_list.append(conf[:num_frames])
+    return np.stack(kp_list), np.stack(conf_list)
+
+
+def log_keypoints_layer(per_camera: dict[str, CameraKeypoints], recording: rr.RecordingStream, config: Keypoints2dConfig) -> None:
     """Log subsampled keypoint overlays under each camera's pinhole entity.
 
     Keypoints the AssemblyHands-X gate zeroes are NaN'd on the skeleton entity —
@@ -253,16 +281,16 @@ def log_keypoints_layer(
     raw predictions go to a connectionless ``…_rejected`` sibling instead.
     """
     for name, cam in per_camera.items():
-        entity: str = f"/world/{name}/pinhole/exocalib_kp2d"
+        entity: str = f"{pinhole_entity(name)}/exocalib_kp2d"
         rejected_entity: str = f"{entity}_rejected"
         log_coco133_class_context(recording, entity, ((0, "sapiens2 kp2d", (240, 140, 60)),))
         log_coco133_class_context(recording, rejected_entity, ((0, "sapiens2 kp2d rejected", (110, 110, 110)),), connections=False)
-        kp_filtered_t2, conf_post_t = postprocess_confidences(cam, median_window, margin_px, conf_tau, crop_wh=(768, 1024))
-        for t in range(0, len(cam.sample_indices), log_stride):
+        kp_filtered_t2, conf_post_t = postprocess_confidences(cam, config.median_window, config.margin_px, config.conf_tau)
+        for t in range(0, len(cam.sample_indices), config.log_stride):
             if not np.isfinite(cam.kp_xy[t]).any():
                 continue
             keep_j: ndarray = conf_post_t[t] > 0.0
-            gated_xy_j2: Float64[ndarray, "133 2"] = kp_filtered_t2[t].astype(np.float64)
+            gated_xy_j2: Float64[ndarray, "133 2"] = kp_filtered_t2[t].copy()
             gated_xy_j2[~keep_j] = np.nan
             rejected_j: ndarray = ~keep_j & np.isfinite(cam.kp_xy[t]).all(axis=1)
             recording.set_time(TIMELINE, duration=1e-9 * float(cam.times_ns[t]))
@@ -283,8 +311,8 @@ def log_keypoints_layer(
             recording.log(
                 rejected_entity,
                 Points2DWithConfidence(
-                    positions=cam.kp_xy[t][rejected_j].astype(np.float64),
-                    confidences=cam.conf[t][rejected_j].astype(np.float64),
+                    positions=cam.kp_xy[t][rejected_j],
+                    confidences=cam.conf[t][rejected_j],
                     class_ids=0,
                     keypoint_ids=np.flatnonzero(rejected_j),
                     radii=1.5,
@@ -324,9 +352,8 @@ def main(config: Keypoints2dConfig) -> None:
         detected: int = int(np.isfinite(cam.bbox_xyxy).all(axis=1).sum())
         print(f"{name}: {detected}/{len(cam.sample_indices)} frames with a person, mean conf {cam.conf[cam.conf > 0].mean():.3f}")
 
-    rrd_path: Path = config.output_dir / segment_id / f"{config.layer_name}.rrd"
-    recording: rr.RecordingStream = new_layer_recording(config.application_id, segment_id, rrd_path)
-    log_keypoints_layer(per_camera, recording, config.log_stride, config.median_window, config.margin_px, config.conf_tau)
+    recording, rrd_path = new_layer_recording(config.application_id, segment_id, config.output_dir / segment_id / f"{config.layer_name}.rrd")
+    log_keypoints_layer(per_camera, recording, config)
     recording.flush(timeout_sec=30.0)
     print(f"wrote {rrd_path}")
     if config.register:

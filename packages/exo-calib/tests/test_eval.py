@@ -16,12 +16,6 @@ def test_evaluate_rig_reports_zero_for_identical_rigs() -> None:
 
     np.testing.assert_allclose(errors.rotation_error_deg_v, np.zeros(4, dtype=np.float64), atol=1e-10)
     np.testing.assert_allclose(errors.translation_error_cm_v, np.zeros(4, dtype=np.float64), atol=1e-10)
-    assert errors.mean_rotation_error_deg == 0.0
-    assert errors.median_rotation_error_deg == 0.0
-    assert errors.max_rotation_error_deg == 0.0
-    assert errors.mean_translation_error_cm == 0.0
-    assert errors.median_translation_error_cm == 0.0
-    assert errors.max_translation_error_cm == 0.0
     assert errors.alignment_scale == 1.0
 
 
@@ -96,6 +90,3 @@ def test_camera_errors_reports_known_single_camera_rotation() -> None:
 
     np.testing.assert_allclose(errors.rotation_error_deg_v, np.array([0.0, 0.0, expected_angle_deg, 0.0], dtype=np.float64), atol=1e-10)
     np.testing.assert_allclose(errors.translation_error_cm_v, np.zeros(4, dtype=np.float64), atol=1e-10)
-    np.testing.assert_array_equal(errors.rotation_deg_v, errors.rotation_error_deg_v)
-    np.testing.assert_array_equal(errors.translation_cm_v, errors.translation_error_cm_v)
-    assert errors.scale == errors.alignment_scale

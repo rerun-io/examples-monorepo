@@ -23,13 +23,13 @@ from simplecv.rerun_log_utils import log_pinhole
 from exo_calib.catalog_io import (
     DEFAULT_CATALOG_URL,
     DEFAULT_DATASET_NAME,
-    ExoVideoStreams,
     connect_dataset,
+    exocalib_entity,
     new_layer_recording,
     only_segment_id,
-    open_exo_streams,
     register_layer,
 )
+from exo_calib.video_io import ExoVideoStreams, open_exo_streams
 
 
 @dataclass
@@ -244,10 +244,9 @@ def main(config: InitCalibrationConfig) -> None:
     init.save(npz_path)
     print(f"wrote {npz_path}")
 
-    rrd_path: Path = config.output_dir / segment_id / f"{config.layer_name}.rrd"
-    recording: rr.RecordingStream = new_layer_recording(config.application_id, segment_id, rrd_path)
+    recording, rrd_path = new_layer_recording(config.application_id, segment_id, config.output_dir / segment_id / f"{config.layer_name}.rrd")
     video_h, video_w = frames_rgb[0].shape[:2]
-    log_cameras_layer(init.k_v33, init.cam_T_world_v44, init.names, (video_w, video_h), "/world/exocalib/init", recording)
+    log_cameras_layer(init.k_v33, init.cam_T_world_v44, init.names, (video_w, video_h), exocalib_entity("init"), recording)
     recording.flush(timeout_sec=30.0)
     print(f"wrote {rrd_path}")
     if config.register:

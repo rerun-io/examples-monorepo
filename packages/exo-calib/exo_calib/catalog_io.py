@@ -19,17 +19,31 @@ from pathlib import Path
 import numpy as np
 import pyarrow as pa
 import rerun as rr
-import torch
-from jaxtyping import Float64, Shaped
+from jaxtyping import Float64
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry
-from torchcodec.decoders import VideoDecoder
 
 DEFAULT_CATALOG_URL: str = "rerun+http://127.0.0.1:9988"
 DEFAULT_DATASET_NAME: str = "assembly101"
 TIMELINE: str = "video_time"
 EXO_CAMERA_NAMES: tuple[str, ...] = tuple(f"rig_{i:02d}/cam_00" for i in range(8))
 EGO_CAMERA_NAMES: tuple[str, ...] = tuple(f"rig_08/cam_{i:02d}" for i in range(4))
+EXOCALIB_ROOT: str = "/world/exocalib"
+
+
+def pinhole_entity(camera_name: str) -> str:
+    """Log-side entity path of a camera's pinhole node."""
+    return f"/world/{camera_name}/pinhole"
+
+
+def exocalib_entity(variant: str) -> str:
+    """Entity path of an exocalib camera-rig variant (``init``/``refined``)."""
+    return f"{EXOCALIB_ROOT}/{variant}"
+
+
+def kp3d_entity(variant: str) -> str:
+    """Entity path of an exocalib triangulated-keypoint variant."""
+    return f"{EXOCALIB_ROOT}/kp3d_{variant}"
 
 
 @dataclass(slots=True)
@@ -42,8 +56,6 @@ class GtCameras:
     """Pinhole intrinsics at the native video resolution."""
     cam_T_world_v44: Float64[ndarray, "v 4 4"]
     """World-to-camera transforms (RDF, metric, +Z-up world)."""
-    resolution_wh_v2: Float64[ndarray, "v 2"]
-    """Native video resolution (width, height) per camera."""
 
 
 def connect_dataset(catalog_url: str = DEFAULT_CATALOG_URL, dataset_name: str = DEFAULT_DATASET_NAME) -> DatasetEntry:
@@ -86,7 +98,6 @@ def read_gt_cameras(dataset: DatasetEntry, segment_id: str, names: tuple[str, ..
             f"/world/{name}:Transform3D:mat3x3",
             f"/world/{name}:Transform3D:translation",
             f"/world/{name}/pinhole:Pinhole:image_from_camera",
-            f"/world/{name}/pinhole:Pinhole:resolution",
         ]
     view = dataset.filter_segments(segment_id).filter_contents([f"/world/{name}/**" for name in names])
     table: pa.Table = view.reader(index=TIMELINE, fill_latest_at=True).select(TIMELINE, *columns).sort(TIMELINE).to_arrow_table()
@@ -100,7 +111,6 @@ def read_gt_cameras(dataset: DatasetEntry, segment_id: str, names: tuple[str, ..
 
     k_list: list[Float64[ndarray, "3 3"]] = []
     cam_T_world_list: list[Float64[ndarray, "4 4"]] = []
-    resolution_list: list[Float64[ndarray, "2"]] = []
     for name in names:
         # Rerun stores mat3x3 column-major; both Transform3D and Pinhole need the transpose.
         cam_R_world_33: Float64[ndarray, "3 3"] = last_valid(f"/world/{name}:Transform3D:mat3x3").reshape(3, 3).T
@@ -111,74 +121,28 @@ def read_gt_cameras(dataset: DatasetEntry, segment_id: str, names: tuple[str, ..
         cam_T_world_44[:3, 3] = cam_t_world_3
         k_list.append(k_33)
         cam_T_world_list.append(cam_T_world_44)
-        resolution_list.append(last_valid(f"/world/{name}/pinhole:Pinhole:resolution").reshape(2))
-    return GtCameras(
-        names=names,
-        k_v33=np.stack(k_list),
-        cam_T_world_v44=np.stack(cam_T_world_list),
-        resolution_wh_v2=np.stack(resolution_list),
-    )
+    return GtCameras(names=names, k_v33=np.stack(k_list), cam_T_world_v44=np.stack(cam_T_world_list))
 
 
-@dataclass(slots=True)
-class ExoVideoStreams:
-    """Per-camera NVDEC decoders over one segment's exo videos."""
-
-    names: tuple[str, ...]
-    """Camera entity names, index-aligned with ``decoders``."""
-    times_ns: list[Shaped[ndarray, " n_samples"]]
-    """Per-camera sample timestamps (timedelta64[ns], timeline order)."""
-    decoders: list[VideoDecoder]
-    """One whole-segment torchcodec GPU decoder per camera."""
-
-    def frame_rgb_hw3(self, cam_idx: int, sample_idx: int) -> ndarray:
-        """Decode one frame to a uint8 RGB HWC numpy array."""
-        frame_chw: torch.Tensor = self.decoders[cam_idx][sample_idx]  # pyrefly: ignore[bad-index]  # TorchCodec accepts Python int indices.
-        return frame_chw.permute(1, 2, 0).contiguous().cpu().numpy()
-
-
-def open_exo_streams(
-    dataset: DatasetEntry,
-    segment_id: str,
-    device: str = "cuda",
-    fps: int = 30,
-    names: tuple[str, ...] = EXO_CAMERA_NAMES,
-) -> ExoVideoStreams:
-    """Open one NVDEC decoder per exo camera from catalog video packets.
-
-    Args:
-        dataset: Catalog dataset entry.
-        segment_id: Segment whose packets are fetched.
-        device: Decode device (``cuda`` uses NVDEC).
-        fps: Nominal frame rate written into the wrapping MP4 track.
-        names: Camera entity names under ``/world``.
-
-    Returns:
-        Decoders and per-camera sample timestamps.
-    """
-    from simplecv.rerun_dataloader import open_segment_decoder
-
-    times_list: list[Shaped[ndarray, " n_samples"]] = []
-    decoder_list: list[VideoDecoder] = []
-    for name in names:
-        times, _samples, _keyframes, decoder = open_segment_decoder(
-            dataset, segment_id, f"world/{name}/pinhole/video", TIMELINE, torch.device(device), fps
-        )
-        times_list.append(times)
-        decoder_list.append(decoder)
-    return ExoVideoStreams(names=names, times_ns=times_list, decoders=decoder_list)
-
-
-def new_layer_recording(application_id: str, segment_id: str, rrd_path: Path) -> rr.RecordingStream:
-    """Create a recording that saves to ``rrd_path`` and registers as a layer of ``segment_id``.
+def new_layer_recording(application_id: str, segment_id: str, rrd_path: Path) -> tuple[rr.RecordingStream, Path]:
+    """Create a recording that saves near ``rrd_path`` and registers as a layer of ``segment_id``.
 
     The recording id must equal the source segment id so the catalog attaches the
     layer to the existing segment (mv-api ``catalog_prediction_layer`` pattern).
+    If ``rrd_path`` exists, a ``-N``-suffixed sibling is written instead: the
+    in-memory catalog server caches layer-file descriptors, so overwriting a
+    registered rrd in place serves stale data. Returns the recording and the
+    path actually written.
     """
     rrd_path.parent.mkdir(parents=True, exist_ok=True)
+    actual_path: Path = rrd_path
+    counter: int = 1
+    while actual_path.exists():
+        actual_path = rrd_path.with_name(f"{rrd_path.stem}-{counter}{rrd_path.suffix}")
+        counter += 1
     recording: rr.RecordingStream = rr.RecordingStream(application_id=application_id, recording_id=segment_id)
-    recording.save(rrd_path)
-    return recording
+    recording.save(actual_path)
+    return recording, actual_path
 
 
 def register_layer(dataset: DatasetEntry, rrd_path: Path, layer_name: str) -> None:

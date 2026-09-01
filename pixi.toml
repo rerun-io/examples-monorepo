@@ -1368,6 +1368,41 @@ vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f
 PACKAGE_DIR = "packages/exo-calib"
 PYREFLY_TARGET = "exo_calib"
 
+[feature.exo-calib.tasks.exocalib-blueprint]
+cmd = "python tools/apps/blueprint.py"
+cwd = "packages/exo-calib"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Write the exoego-layout .rbl bound to the assembly101 dataset's current id"
+
+[feature.exo-calib.tasks.exocalib-init]
+cmd = "python tools/apps/calibrate_init.py"
+cwd = "packages/exo-calib"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Stage A: G3T + MoGe-2 initial extrinsics/intrinsics, registered as exocalib_init"
+
+[feature.exo-calib.tasks.exocalib-kp2d]
+cmd = "python tools/apps/keypoints2d.py"
+cwd = "packages/exo-calib"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Stage B: YOLOX + Sapiens2 TensorRT COCO-133 keypoints, registered as exocalib_kp2d"
+
+[feature.exo-calib.tasks.exocalib-refine]
+cmd = "python tools/apps/refine.py"
+cwd = "packages/exo-calib"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Stage C+D: correspondences, robust triangulation, kornia-rs BA, registered as exocalib_refined"
+
+[feature.exo-calib.tasks.exocalib-report]
+cmd = "python tools/apps/report.py"
+cwd = "packages/exo-calib"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Stage E: SE3/Sim3 eval vs GT (eval.json) plus the exocalib_align layer"
+
+[feature.exo-calib.tasks.exocalib-html-report]
+cmd = "python tools/apps/html_report.py"
+cwd = "packages/exo-calib"
+description = "Render the single-file HTML report from eval.json"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # vistadream
 # ═══════════════════════════════════════════════════════════════════════════
