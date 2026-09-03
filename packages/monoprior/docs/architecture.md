@@ -61,9 +61,10 @@ Refines sparse or noisy depth using an RGB guide. Defined in `monopriors/models/
 | Predictor class | Model | Source |
 |---|---|---|
 | `PromptDAPredictor` | PromptDA | [PromptDA](https://github.com/AnyQuantAI/PromptDA) |
+| `ZipDepthPromptPredictor` | ZipDepth-PromptDA | [ZipDepth](https://github.com/fabiotosi92/ZipDepth) |
 
 Base class: `BaseCompletionPredictor`
-Output: `CompletionDepthPrediction(depth_mm, confidence)`
+Output: `Float32[Tensor, "b h w"]` metric depth in metres. `CompletionDepthPrediction` is a compatibility-only legacy container, not the current predictor return type.
 
 ### Composite models
 

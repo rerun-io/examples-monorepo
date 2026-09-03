@@ -32,6 +32,17 @@ Worked examples with every gotcha hit so far: [references/example-liteanystereo.
   (camera dataclasses, `rescale_intri`, `Rig`/`log_rig_static`, `RerunTyroConfig`, `rerun_dataloader`,
   `Open3DFuser`, `log_open3d_mesh`, `rr.VideoCodec`, `scipy.spatial.transform.Rotation`).
   The port ends with an explicit hand-roll audit (validate.md, gate 4).
+- **Rerun geometry rules** (learned on fisheye rigs and people trackers). (a) `DepthImage`/`EncodedDepthImage` unproject only
+  under a distortion-free `Pinhole`: run the model on the *original* fisheye frames, then log **both** the original view and a
+  rectified pinhole twin per camera (`cv2.fisheye.initUndistortRectifyMap` with `R = I` so the z axis is unchanged; remap the
+  frame and the predicted depth with the same maps — that remapped z-depth *is* the twin's pinhole depth) as rig sensors
+  `cam_1i` (`log_rig_static`, never children of `cam_0i`); TSDF runs on the twins. (b) No per-frame `Points3D` clouds in catalog
+  tools (X-Lens: 60 s at 5 fps = 3.4 GB); the viewer unprojects the twin's depth. (c) Per-id entities (`world/people/<id>/…`)
+  persist as latest-at after a track ends → `rr.Clear(recursive=True)` at the id path when the tracker removes it. (d) People
+  render like `sam3d-body`: `posekit.rerun_logging` helpers + `person_color(id)` for 2D, joints as
+  `rr.Points3D(keypoint_ids=…, class_ids=0)` under an `rr.AnnotationContext` with the skeleton's connections (the viewer draws
+  the edges), meshes as `rr.Mesh3D(vertex_normals=…, albedo_factor=(r, g, b, 0.5))`. (e) Sensors that are out of distribution
+  for every model (robocap `cam_02/03` eye cameras look at the wearer) are excluded from all runs; name the rig's cameras.
 - **Python conventions**: beartype via `PIXI_DEV_MODE` claw (never `@beartype`), PEP 526 annotations
   everywhere, jaxtyping dtype+shape on every array, `TypeAlias` not PEP 695, tyro CLIs, `0.0` for float
   defaults, `einops` over reshape/permute chains, dataclass field docstrings, thin `tools/` shims.
@@ -50,6 +61,10 @@ Worked examples with every gotcha hit so far: [references/example-liteanystereo.
 - **Durable execution.** Anything longer than a minute (env solves, catalog runs, Codex jobs) runs in a named tmux
   session with `python -u`, a log file, and a sentinel file on exit; background shells die with the agent session
   and leave half-written `.rrd`s that look complete. Poll the sentinel, never the process name.
+- **Follow-ups resume the job.** A finished Codex job takes corrections on its own session:
+  `codex exec resume -c 'sandbox_mode="danger-full-access"' -c 'model_reasoning_effort="xhigh"' <session-id> - < followup.md`
+  (session id in the log header; `resume` rejects `--sandbox`). New tmux session, own log and sentinel; the prompt names the
+  branch, the commit message and what to re-run.
 - **Feedback loop.** Every delegated run (Codex or subagent) ends its report with a "skill discrepancies" list:
   anything unclear, missing, contradictory, or guessed. Fold each item into this skill before the next phase.
 
@@ -64,6 +79,9 @@ Worked examples with every gotcha hit so far: [references/example-liteanystereo.
 
 1. **License.** MIT/Apache: mirror freely. NVIDIA Source Code License / research-only: allowed to vendor and
    mirror *with the license text*; flag non-commercial in the vendored `__init__.py` docstring, the fork's NOTES.md, and (own mirrors only) the HF card. Weights can carry a different license than the code (e.g. NVIDIA Open Model Agreement vs Source Code License) — record both.
+   Body models are separately licensed assets: SMPL and SMPL-X are not drop-in for each other (24/6890 vs 55/10475), the smplx
+   `transfer_model` converts *poses* not model files, chumpy pickles load without chumpy through a `pickle.Unpickler.find_class`
+   shim, and the file is hosted privately (SMPL forbids redistribution) with its SHA-256 in the loader test.
 2. **Weights.** Is there an official HF repo? Search the Hub (`curl 'https://huggingface.co/api/models?search=<name>'`)
    before mirroring anything. Pin the HF revision SHA (`curl .../api/models/<repo>` → `sha`) and record the file's SHA-256 in the loader test. Is the file a `state_dict` or a pickled module
    (`torch.load(..., weights_only=False)`)? Pickled modules need the unpickler remap recipe in port.md.
@@ -71,9 +89,17 @@ Worked examples with every gotcha hit so far: [references/example-liteanystereo.
    ONNX/TRT, dataset loaders, visualisation utils) stays out.
 4. **Hard deps.** Custom CUDA/Triton kernels (keep only with a pure-torch fallback + parity test), xformers,
    flash-attn, open3d. Check what the model package imports vs what the README says.
+   When an upstream pin blocks the monorepo (rfdetr 1.5.0 → `transformers<5`), check newer releases' `requires_dist` on PyPI
+   and the attributes the upstream wrapper touches before adding a second env lane (rfdetr ≥1.6 needs `transformers>=5.1` and
+   kept `RFDETRNano(pretrain_weights=)`, `.model.model/.postprocess/.resolution`, `optimize_for_inference`).
 5. **Reference number.** Does upstream ship an eval script and a per-dataset number? If not, the monorepo's
    ETH3D `playground_1l` sample (HF `pablovela5620/monoprior-example`, `stereo/eth3d`) is the fallback: record
    the result as a *baseline*, not a reproduction.
+   Non-stereo families define their own numbers: metric depth → abs-rel/δ1 **and** a median-scale-aligned variant (X-Lens on
+   ETH3D: metric abs-rel 0.76 vs scale-aligned 0.15 — the miss was global scale, which EPE alone hides); trackers → counts,
+   per-stage ms, reprojection error of lifted joints, and a **replay fixture** of the exact model inputs/outputs recorded by the
+   fork's demo. The fork owns the fixture layout (NOTES.md table of keys/dtypes/shapes); the port's loader reads that file and
+   never invents its own contract. Report multi-view timing as ms per frameset with view count and resolution.
 6. **Upstream entry points.** Name the demo script (for `demo-upstream`), its preprocessing (scaling, padding divisor, normalisation, AMP dtype), the forward signature (`iters`, `test_mode`, output shape), and the minimum input size the network accepts (fixes the fast test's tiny pair).
 7. **Contract.** Which existing predictor family does it join (`monopriors.models.stereo_depth`,
    `relative_depth`, `normals`, ...)? Joining an existing `Base*Predictor` through its per-model config
@@ -81,6 +107,7 @@ Worked examples with every gotcha hit so far: [references/example-liteanystereo.
    designed first (grill the user).
 8. **Which PRs.** `1-vendor`, `2-predictor`, `3-typed` are always required. `4-app`/`5-catalog` only when the
    family has no app/catalog tool yet — an existing tool gains the new model through the registry.
+   The app PR is optional when the user scopes it out; renumber (`4-catalog`).
 
 Probe commands that answer 1–5 in minutes (run them, do not ask the user for these facts):
 

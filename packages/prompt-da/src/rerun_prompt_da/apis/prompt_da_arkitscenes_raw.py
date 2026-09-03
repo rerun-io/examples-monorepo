@@ -40,7 +40,7 @@ from jaxtyping import Float, Float32, Float64, UInt8, UInt16
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer, RegistrationHandle
 from simplecv.camera_parameters import Intrinsics, rescale_intri
-from simplecv.ops.tsdf_depth_fuser import Open3DFuser
+from simplecv.ops.tsdf_depth_fuser import Open3DFuser, log_fused_mesh
 from torch import Tensor
 from torchcodec.decoders import VideoDecoder
 from tqdm import tqdm
@@ -50,7 +50,6 @@ from rerun_prompt_da.apis.arkitscenes_shared import (
     NATIVE_FPS,
     connect_catalog,
     filter_depth_for_fusion,
-    log_fused_mesh,
     run_promptda_batch,
     segments_to_process,
     stride_for,
@@ -365,7 +364,7 @@ def process_segment_raw(
     mesh.compute_vertex_normals()
     fusion_s += time.perf_counter() - fusion_started
     log_started = time.perf_counter()
-    log_fused_mesh(recording, PROMPTDA_RAW_MESH, mesh)
+    log_fused_mesh(PROMPTDA_RAW_MESH, mesh, recording=recording)
     recording.flush()
     log_s += time.perf_counter() - log_started
 
@@ -400,7 +399,9 @@ def main(config: PDAArkitScenesRawConfig) -> None:
     """Run raw PromptDA for selected catalog segments."""
     client: CatalogClient = connect_catalog(config.catalog_url, ARKITSCENES_DATASET)
     dataset_entry: DatasetEntry = client.get_dataset(ARKITSCENES_DATASET)
-    segment_table: pa.Table = pa.Table.from_batches(dataset_entry.segment_table().collect())
+    segment_table: pa.Table = pa.Table.from_batches(
+        dataset_entry.segment_table().select("rerun_segment_id", "rerun_layer_names").collect()
+    )
     rows: list[dict[str, Any]] = segment_table.to_pylist()
 
     def raw_data_available(segment_id: str) -> bool:

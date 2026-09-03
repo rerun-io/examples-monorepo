@@ -13,11 +13,13 @@ import cv2
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
-from jaxtyping import Float, UInt8, UInt16
-from monopriors.models.depth_completion.base_completion_depth import (
-    CompletionDepthPrediction,
+import torch
+from jaxtyping import Float, Float32, UInt8, UInt16
+from monopriors.models.depth_completion.prompt_da import (
+    PromptDAConfig,
+    PromptDAPredictor,
+    network_image_hw,
 )
-from monopriors.models.depth_completion.prompt_da import PromptDAPredictor
 from numpy import ndarray
 from simplecv.camera_parameters import Intrinsics, rescale_intri
 from simplecv.data.polycam import (
@@ -26,9 +28,12 @@ from simplecv.data.polycam import (
     PolycamDataset,
     load_polycam_data,
 )
-from simplecv.ops.tsdf_depth_fuser import Open3DFuser
+from simplecv.ops.depth import quantize_depth_m_to_mm
+from simplecv.ops.tsdf_depth_fuser import Open3DFuser, log_fused_mesh
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole
+from torch import Tensor
 from tqdm import tqdm
+from trtkit import TorchBackendConfig
 
 
 @dataclass
@@ -122,14 +127,11 @@ def _log_mesh(parent_log_path: Path, pred_fuser: Open3DFuser) -> None:
 
     pred_mesh = pred_fuser.get_mesh()
     pred_mesh.compute_vertex_normals()
-    rr.log(
+    log_fused_mesh(
         f"{parent_log_path}/pred_mesh",
-        rr.Mesh3D(
-            vertex_positions=pred_mesh.vertices,
-            triangle_indices=pred_mesh.triangles,
-            vertex_normals=pred_mesh.vertex_normals,
-            vertex_colors=pred_mesh.vertex_colors,
-        ),
+        pred_mesh,
+        static=False,
+        face_rendering=rr.components.MeshFaceRendering.DoubleSided,
     )
 
 
@@ -145,24 +147,28 @@ def pda_polycam_inference(config: PDAPolycamConfig) -> None:
         fusion_resolution=config.depth_fusion_resolution,
         max_fusion_depth=config.max_depth_range_meter,
     )
-    model = PromptDAPredictor(
-        device="cuda",
-        model_type="large",
-        max_size=config.max_image_size,
-    )
+    first_frame: PolycamData = next(iter(polycam_dataset))
+    image_hw: tuple[int, int] = network_image_hw(first_frame.rgb_hw3.shape[:2], config.max_image_size)
+    model: PromptDAPredictor = PromptDAConfig(
+        backend=TorchBackendConfig(),
+        image_height=image_hw[0],
+        image_width=image_hw[1],
+    ).setup()
 
     polycam_data: PolycamData
     for frame_idx, polycam_data in enumerate(tqdm(polycam_dataset, desc="Inferring", total=len(polycam_dataset))):
         # Sequence time is what drives the frame scrubber in the viewer.
         rr.set_time("frame_idx", sequence=frame_idx)
-        depth_pred: CompletionDepthPrediction = model(
-            rgb=polycam_data.rgb_hw3,
-            prompt_depth=polycam_data.original_depth_hw,
+        rgb_bhwc: UInt8[Tensor, "1 h w 3"] = torch.from_numpy(polycam_data.rgb_hw3).unsqueeze(0).cuda()
+        prompt_bhw: Float32[Tensor, "1 192 256"] = (
+            torch.from_numpy(polycam_data.original_depth_hw).unsqueeze(0).to(device="cuda", dtype=torch.float32) / 1000.0
         )
+        depth_bhw: Float32[Tensor, "1 h w"] = model(rgb_bhwc, prompt_bhw)
+        depth_pred_mm: UInt16[np.ndarray, "h w"] = quantize_depth_m_to_mm(depth_bhw[0]).cpu().numpy()
 
         # The ARKit confidence map is a simple way to avoid fusing bad prompts.
         pred_filtered_depth_mm: UInt16[np.ndarray, "h w"] = filter_depth(
-            depth_mm=depth_pred.depth_mm,
+            depth_mm=depth_pred_mm,
             confidence=polycam_data.confidence_hw,
             confidence_threshold=DepthConfidenceLevel.MEDIUM,
             max_depth_meter=config.max_depth_range_meter,
@@ -181,7 +187,7 @@ def pda_polycam_inference(config: PDAPolycamConfig) -> None:
         log_polycam_data(
             parent_path=parent_log_path,
             polycam_data=polycam_data,
-            depth_pred=depth_pred.depth_mm,
+            depth_pred=depth_pred_mm,
             rescale_factor=1,
         )
         if config.log_incremental_mesh:
