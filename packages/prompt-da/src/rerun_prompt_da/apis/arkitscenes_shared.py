@@ -139,7 +139,7 @@ def run_promptda_batch(
     depth_bhw: Float32[Tensor, "b oh ow"] = postprocess_depth(depth_model_b1hw, output_hw)
     depth_mm_bhw: UInt16[ndarray, "b oh ow"] = (depth_bhw.cpu().numpy() * 1000.0).astype(np.uint16)
     depth_model_mm_bhw: UInt16[ndarray, "b nh nw"] = (
-        rearrange(depth_model_b1hw, "b 1 h w -> b h w").cpu().numpy() * 1000.0  # pyrefly: ignore  # bad-argument-type — einops stub false positive
+        rearrange(depth_model_b1hw, "b 1 h w -> b h w").cpu().numpy() * 1000.0
     ).astype(np.uint16)
     return depth_mm_bhw, depth_model_mm_bhw
 

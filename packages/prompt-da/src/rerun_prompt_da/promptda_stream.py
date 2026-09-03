@@ -189,7 +189,7 @@ class PromptDACollate:
             frame_indices.append(self._grid_index)
             timestamps_ns.append(self._index_start_ns + self._grid_index * self._ns_per_sample)
             frames_3hw.append(frame_chw)
-            prompts_hw.append(rearrange(depth_1hw, "1 h w -> h w"))  # pyrefly: ignore  # bad-argument-type — einops stub false positive
+            prompts_hw.append(rearrange(depth_1hw, "1 h w -> h w"))
             confidence_hw: UInt8[Tensor, "stored_prompt_h stored_prompt_w"] = confidence_n.reshape(depth_1hw.shape[1:])
             confidences_hw.append(confidence_hw)
             # Rerun stores Pinhole image_from_camera flattened column-major.
@@ -250,7 +250,7 @@ def assemble_promptda_batch(
         frame_indices=frame_indices,
         timestamps_ns=timestamps_ns,
         quarter_turns=turns,
-        rgb_bhw3=rearrange(rgb_b3hw, "b c h w -> b h w c"),  # pyrefly: ignore  # bad-argument-type — einops stub false positive
+        rgb_bhw3=rearrange(rgb_b3hw, "b c h w -> b h w c"),
         prompt_bhw=prompt_bhw.float() / 1000.0,
         prompt_mm_bhw=prompt_stored_bhw.cpu().numpy().astype(np.uint16),
         confidence_bhw=confidence_stored_bhw.cpu().numpy().astype(np.uint8),
