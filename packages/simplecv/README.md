@@ -20,10 +20,10 @@ pixi task list -e simplecv
 
 ### Rerun Environment
 The standard `simplecv` environment uses the released `rerun-sdk` pinned in the
-root `pixi.toml` with the `datafusion` extra requested by `simplecv`.
+root `pixi.toml`; the root Rerun lane selects the version-specific catalog extra.
 
 The catalog runs on the `simplecv-catalog` environment, which explicitly adds
-the `datafusion` and `dataloader` extras through the shared `rerun-prerelease`
+the `catalog` and `dataloader` extras through the shared `rerun-prerelease`
 feature. It currently uses the same release as the rest of the workspace. See
 the root `AGENTS.md` "Testing Rerun builds" section for how to test an
 unreleased build.

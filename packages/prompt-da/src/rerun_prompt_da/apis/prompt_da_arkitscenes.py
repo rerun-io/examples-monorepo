@@ -5,30 +5,34 @@ local Rerun catalog, completes depth frame-by-frame, fuses a final TSDF mesh,
 and writes a replaceable ``promptda`` layer back to the dataset.
 """
 
+import ctypes
+import gc
 from collections.abc import Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-import cv2
 import numpy as np
 import open3d as o3d
 import pyarrow as pa
 import rerun as rr
 import torch
+import torch.nn.functional as F
 from arkitscenes_download.ingest.blueprint import DEPTH_RANGE_MM, make_blueprint
 from arkitscenes_download.ingest.catalog import DEFAULT_CATALOG_URL
 from arkitscenes_download.ingest.cells import landscape_quarter_turns, portrait_from_segment_row
 from arkitscenes_download.ingest.depth import encode_depth_png
 from arkitscenes_download.ingest.paths import DEPTH_PROMPTDA, PROMPTDA_MESH, TIMELINE
 from arkitscenes_download.ingest.recording import atomic_recording
+from einops import rearrange
 from jaxtyping import Float, UInt8, UInt16
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry, OnDuplicateSegmentLayer, RegistrationHandle
 from rerun.experimental.dataloader import RerunIterableDataset
 from simplecv.camera_parameters import Intrinsics, rescale_intri
-from simplecv.ops.tsdf_depth_fuser import Open3DFuser
+from simplecv.ops.tsdf_depth_fuser import Open3DFuser, log_fused_mesh
 from simplecv.rerun_log_utils import mesh_bounding_geometry
+from torch import Tensor
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -37,7 +41,6 @@ from rerun_prompt_da.apis.arkitscenes_shared import (
     NATIVE_FPS,
     connect_catalog,
     filter_depth_for_fusion,
-    log_fused_mesh,
     run_promptda_batch,
     segments_to_process,
     stride_for,
@@ -47,6 +50,11 @@ from rerun_prompt_da.promptda_stream import PromptDABatch, PromptDACollate, prom
 from rerun_prompt_da.trt_predictor import PromptDATrtPredictor
 
 PROMPTDA_LAYER = "promptda"
+
+_MALLOC_TRIM = ctypes.CDLL(None).malloc_trim
+"""glibc ``malloc_trim``; Linux-only, like the rest of this pipeline (NVDEC, TensorRT)."""
+_MALLOC_TRIM.argtypes = [ctypes.c_size_t]
+_MALLOC_TRIM.restype = ctypes.c_int
 
 
 @dataclass
@@ -106,8 +114,8 @@ class CompletedPromptDABatch:
     """Full-resolution predicted depth in millimetres, in inference orientation."""
     depth_model_mm_bhw: UInt16[ndarray, "b nh nw"]
     """Network-resolution predicted depth in millimetres, in inference orientation."""
-    rgb_stored_bhw3: UInt8[ndarray, "b stored_h stored_w 3"]
-    """RGB frames restored to catalog orientation."""
+    rgb_stored_bhw3: UInt8[ndarray, "b fh fw 3"]
+    """RGB frames at the fusion (network) resolution, restored to catalog orientation."""
     confidence_bhw: UInt8[ndarray, "b stored_prompt_h stored_prompt_w"]
     """ARKit confidence in catalog orientation."""
     K_native_b33: Float[ndarray, "b 3 3"]
@@ -160,16 +168,14 @@ def fuse_and_log_batch(
         predicted_depth_hw: UInt16[ndarray, "h w"] = np.ascontiguousarray(np.rot90(batch.depth_mm_bhw[row], -batch.quarter_turns))
         fusion_depth_hw: UInt16[ndarray, "fh fw"] = np.ascontiguousarray(np.rot90(batch.depth_model_mm_bhw[row], -batch.quarter_turns))
         confidence_hw: UInt8[ndarray, "h2 w2"] = batch.confidence_bhw[row]
-        rgb_hw3: UInt8[ndarray, "h w 3"] = batch.rgb_stored_bhw3[row]
         log_promptda_frame(recording, timestamp_ns, predicted_depth_hw)
         filtered_depth_hw: UInt16[ndarray, "h w"] = filter_depth_for_fusion(
             fusion_depth_hw,
             confidence_hw,
             max_depth_meter,
         )
-        rgb_fusion_hw3: UInt8[ndarray, "fh fw 3"] = np.asarray(
-            cv2.resize(rgb_hw3, (fusion_depth_hw.shape[1], fusion_depth_hw.shape[0]), interpolation=cv2.INTER_AREA), dtype=np.uint8
-        )
+        # Already at the fusion resolution and catalog orientation — downscaled on the GPU.
+        rgb_fusion_hw3: UInt8[ndarray, "fh fw 3"] = batch.rgb_stored_bhw3[row]
         stored_k_33: Float[ndarray, "3 3"] = batch.K_native_b33[row]
         stored_intrinsics: Intrinsics = Intrinsics.from_k_matrix(
             camera_conventions="RDF",
@@ -257,9 +263,22 @@ def run_segment(
                 batch.prompt_bhw,
                 (batch.rgb_bhw3.shape[1], batch.rgb_bhw3.shape[2]),
             )
-            rgb_stored_bhw3: UInt8[ndarray, "b stored_h stored_w 3"] = np.asarray(
-                torch.rot90(batch.rgb_bhw3, -batch.quarter_turns, dims=(1, 2)).cpu().numpy(),
-                dtype=np.uint8,
+            # Fusion only needs colour at the network resolution, so downscale on the
+            # GPU and keep the full-resolution frame off the bus entirely.
+            fusion_hw: tuple[int, int] = (inference_result[1].shape[1], inference_result[1].shape[2])
+            rgb_fusion_bchw: Float[Tensor, "b 3 fh fw"] = F.interpolate(
+                rearrange(batch.rgb_bhw3, "b h w c -> b c h w").float(),
+                size=fusion_hw,
+                mode="bilinear",
+                antialias=True,
+            )
+            rgb_stored_bhw3: UInt8[ndarray, "b fh fw 3"] = np.ascontiguousarray(
+                rearrange(torch.rot90(rgb_fusion_bchw, -batch.quarter_turns, dims=(2, 3)), "b c h w -> b h w c")
+                .round()
+                .clamp(0.0, 255.0)
+                .to(torch.uint8)
+                .cpu()
+                .numpy()
             )
             if pending_batch is not None:
                 inferred_frames += pending_batch.result()
@@ -282,7 +301,7 @@ def run_segment(
         mesh: o3d.geometry.TriangleMesh = fuser.get_mesh()
         mesh.compute_vertex_normals()
         vertices: Float[ndarray, "n 3"] = np.asarray(mesh.vertices)
-        log_fused_mesh(recording, PROMPTDA_MESH, mesh)
+        log_fused_mesh(PROMPTDA_MESH, mesh, recording=recording)
         # Embed the PromptDA layout in this layer, framed on the fused mesh (the
         # same per-sequence treatment the base layer gives the ARKit mesh). Sent at
         # the end of the stream so it wins blueprint activation when the segment's
@@ -292,6 +311,11 @@ def run_segment(
                 make_blueprint(portrait=portrait, framing=mesh_bounding_geometry(vertices), include_promptda=True),
                 recording=recording,
             )
+    # Open3D's TSDF churn leaves ~0.6 GB of freed native pages per segment resident in
+    # glibc arenas (measured: OOM at 142 GB after 234 segments). The fuser, executor and
+    # recording are out of scope here, so return those pages to the OS at the boundary.
+    gc.collect()
+    _MALLOC_TRIM(0)
     skipped_decodes: int = 0 if expected_frames is None else expected_frames - inferred_frames
     return SegmentResult(rrd_path=rrd_path, inferred_frames=inferred_frames, skipped_decodes=skipped_decodes)
 
@@ -322,7 +346,16 @@ def main(config: PDAArkitScenesConfig) -> None:
     """Run PromptDA for selected segments and optionally update the catalog."""
     client: CatalogClient = connect_catalog(config.catalog_url, config.dataset_name)
     dataset_entry: DatasetEntry = client.get_dataset(config.dataset_name)
-    segment_table: pa.Table = pa.Table.from_batches(dataset_entry.segment_table().collect())
+    segment_table: pa.Table = pa.Table.from_batches(
+        dataset_entry.segment_table()
+        .select(
+            "rerun_segment_id",
+            "rerun_layer_names",
+            "property:capture:orientation",
+            "property:capture:orientation_quarter_turns_ccw",
+        )
+        .collect()
+    )
     rows: list[dict] = segment_table.to_pylist()
     segment_ids: list[str] = segments_to_process(rows, config.video_id, config.process_all, PROMPTDA_LAYER)
     if not segment_ids:

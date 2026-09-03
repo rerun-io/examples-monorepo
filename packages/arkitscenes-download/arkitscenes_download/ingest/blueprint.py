@@ -135,7 +135,7 @@ def _depth_view(name: str, origin: str, entity_path: str) -> rrb.Spatial2DView:
 
 def _imu_axis() -> rrb.archetypes.TimeAxis:
     """Keep plot X axes to a cursor-centered window instead of the full recording."""
-    window: rr.datatypes.TimeRange = rr.datatypes.TimeRange(
+    window: rr.encodings.TimeRange = rr.encodings.TimeRange(
         start=rrb.TimeRangeBoundary.cursor_relative(seconds=-5.0),
         end=rrb.TimeRangeBoundary.cursor_relative(seconds=5.0),
     )

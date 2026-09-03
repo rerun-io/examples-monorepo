@@ -18,7 +18,7 @@ from rerun.experimental.dataloader import (
     NoShuffle,
     RerunIterableDataset,
 )
-from simplecv.rerun_dataloader import SegmentNvdecDecoder
+from simplecv.rerun_dataloader import RECOMMENDED_FETCH_BLOCK_SIZE, SegmentNvdecDecoder
 from simplecv.rerun_log_utils import RerunTyroConfig
 from tqdm import tqdm
 
@@ -28,11 +28,6 @@ VIDEO_WIDE: str = "world/rig_00/cam_00/pinhole/video"
 TIMELINE: str = "video_time"
 # Catalog segments store the wide camera as 60 fps AV1.
 NATIVE_FPS: float = 60.0
-FETCH_SIZE: int = 1024
-"""Samples per catalog query in the iterable dataset. The NVDEC decoder ignores the
-shipped payloads, so fewer round-trips win: 256 -> 10.3 s, 1024 -> 3.5 s, 2048 flat."""
-
-
 @dataclass(frozen=True)
 class CatalogDataConfig:
     """ARKitScenes Rerun-catalog input configuration."""
@@ -74,8 +69,8 @@ def main(config: Config) -> None:
         index=TIMELINE,
         fields=fields,
         timeline_sampling=FixedRateSampling(rate_hz=NATIVE_FPS),
-        shuffle_strategy=NoShuffle(),  # pyrefly: ignore  # unexpected-keyword — pyrefly resolves rerun stubs from an older env; mvs runs the 0.36 prerelease API
-        fetch_size=FETCH_SIZE,
+        shuffle_strategy=NoShuffle(),
+        fetch_block_size=RECOMMENDED_FETCH_BLOCK_SIZE,
     )
     frames: int = 0
     for sample in tqdm(samples, unit="frame"):

@@ -12,6 +12,7 @@ import torch
 
 from monopriors.models.relative_depth import RELATIVE_PREDICTORS, ZipDepthPredictor, get_relative_predictor
 from monopriors.models.relative_depth import zipdepth as zipdepth_module
+from monopriors.models.zipdepth_checkpoint import load_zipdepth_state_dict
 from monopriors.third_party.zipdepth.architecture import create_model
 
 
@@ -37,6 +38,15 @@ def predictor(trainer_checkpoint: Path) -> ZipDepthPredictor:
 def test_local_checkpoint_bypasses_download(monkeypatch: pytest.MonkeyPatch, trainer_checkpoint: Path) -> None:
     monkeypatch.setattr(zipdepth_module, "download_zipdepth_checkpoint", lambda npu=False: pytest.fail("should not download"))
     ZipDepthPredictor(device="cpu", checkpoint=trainer_checkpoint, input_size=64)
+
+
+def test_checkpoint_rejects_non_tensor_state_value(tmp_path: Path) -> None:
+    """Name the malformed state key instead of passing it into model loading."""
+    checkpoint: Path = tmp_path / "malformed.pth"
+    torch.save({"model_state_dict": {"encoder.weight": "not-a-tensor"}}, checkpoint)
+
+    with pytest.raises(ValueError, match="encoder.weight"):
+        load_zipdepth_state_dict(checkpoint)
 
 
 def test_call_contract(predictor: ZipDepthPredictor) -> None:
