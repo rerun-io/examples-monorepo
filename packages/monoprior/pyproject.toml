@@ -128,12 +128,10 @@ ignore_names = [
     "aggregation_name",
     "base_model_size",
     "h_tail",
-    # third_party/xlens: TypedDict keys, fixture package metadata, and a helper
-    # consumed by the catalog tool in the next stack layer.
+    # third_party/xlens: TypedDict keys and fixture package metadata.
     "depth_metric",
     "metric_scaling_factor",
     "__package__",
-    "fuse_point_cloud",
     "StableNormalPredictor",
     "MOGE_V2_NORMAL_CHECKPOINTS",
     "aabb",
