@@ -15,7 +15,7 @@ from numpy import ndarray
 from torch import Tensor
 from torch.utils.data import DataLoader
 
-from zipdepth.apis.train_catalog import TrainCatalogConfig, load_trainable_checkpoint
+from zipdepth.apis.train_catalog import AmpDtype, CompileMode, TrainCatalogConfig, load_trainable_checkpoint
 from zipdepth.apis.train_catalog import main as train_catalog
 from zipdepth.apis.train_smoke import check_checkpoint, example_rgb, publish_latest, run_required
 from zipdepth.catalog.segments import DEFAULT_CATALOG_URL, DEFAULT_DATASET_NAME, PromptDACatalog, load_promptda_catalog, split_holdout_segments
@@ -44,6 +44,14 @@ class TrainCatalogSmokeConfig:
     """Updates in the one-process torchrun leg."""
     probe_batches: int = 12
     """Fixed probe batches (of the training batch size) scored before and after training."""
+    compile_mode: CompileMode = "reduce-overhead"
+    """torch.compile mode exercised by each training leg."""
+    channels_last: bool = False
+    """Exercise channels-last model and batch storage."""
+    fused_adamw: bool = False
+    """Exercise fused CUDA AdamW."""
+    amp_dtype: AmpDtype | None = None
+    """AMP dtype override passed to each training leg."""
 
 
 def collect_probe_batches(config: TrainCatalogConfig, num_batches: int) -> list[dict[str, Tensor]]:
@@ -149,6 +157,10 @@ def main(config: TrainCatalogSmokeConfig) -> None:
         train_config=config.train_config,
         save_dir=single_dir,
         save_every_steps=5,
+        compile_mode=config.compile_mode,
+        channels_last=config.channels_last,
+        fused_adamw=config.fused_adamw,
+        amp_dtype=config.amp_dtype,
     )
     probe: list[dict[str, Tensor]] = collect_probe_batches(base, config.probe_batches)
     released_loss: float = mean_probe_loss(None, probe)
@@ -223,7 +235,15 @@ def main(config: TrainCatalogSmokeConfig) -> None:
         str(ddp.save_every_steps),
         "--init-checkpoint",
         str(resumed_checkpoint),
+        "--compile-mode",
+        ddp.compile_mode,
     ]
+    if ddp.channels_last:
+        command.append("--channels-last")
+    if ddp.fused_adamw:
+        command.append("--fused-adamw")
+    if ddp.amp_dtype is not None:
+        command.extend(["--amp-dtype", ddp.amp_dtype])
     run_required(command)
 
     image_path: Path = Path(__file__).resolve().parents[2] / "assets" / "examples" / "im0.jpg"

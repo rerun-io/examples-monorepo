@@ -4,7 +4,7 @@ import glob
 import os
 import time
 from contextlib import nullcontext, suppress
-from typing import Literal
+from typing import Literal, TypeAlias
 
 import torch
 from torch import nn
@@ -21,6 +21,8 @@ from monopriors.third_party.zipdepth.model_utils import strip_state_dict_prefixe
 
 from zipdepth.loss import MetricDepthLoss, ZipDepthLoss
 from zipdepth.training.visualization import depth_to_spectral
+
+CompileMode: TypeAlias = Literal['off', 'default', 'reduce-overhead', 'max-autotune']
 
 
 def trim_memory():
@@ -62,6 +64,8 @@ class ZipDepthTrainer:
                 target_mode: Literal['ssi', 'metric'] = 'ssi',
                 metric_gradient_weight: float = 0.5,
                 pin_batchnorm_eval: bool = False,
+                compile_mode: CompileMode = 'reduce-overhead',
+                channels_last: bool = False,
                 ):
         """
         Args:
@@ -91,6 +95,8 @@ class ZipDepthTrainer:
                 lane. Upstream ZipDepth's SSI lane uses 2.0; 0.5 leaves the term at ~9%
                 of the objective, which under-penalizes depth-discontinuity errors.
             pin_batchnorm_eval: Return BatchNorm modules to eval after entering train mode
+            compile_mode: torch.compile mode, or 'off'; dev-mode beartype disables it
+            channels_last: Move four-dimensional batches with channels-last strides
         """
         self.student = student.to(device)
         self.train_loader = train_loader
@@ -101,6 +107,7 @@ class ZipDepthTrainer:
         self.log_wandb = log_wandb and WANDB_AVAILABLE
         self.writer = writer
         self.global_step = 0
+        self.training_stage = 0
         self.is_distributed = is_distributed
         self.rank = rank
         self.world_size = world_size
@@ -120,6 +127,7 @@ class ZipDepthTrainer:
             raise ValueError(f"unknown target mode {target_mode!r}")
         self.target_mode = target_mode
         self.pin_batchnorm_eval = pin_batchnorm_eval
+        self.channels_last = channels_last
 
         # Loss function initialization
         self.criterion: nn.Module = (
@@ -138,8 +146,8 @@ class ZipDepthTrainer:
         # Compile student for faster iteration (PyTorch >= 2.0)
         # Under the beartype dev env, Dynamo tracing through beartype's jaxtyping wrapper
         # raises a desynchronization error; production environments still compile.
-        if os.environ.get("PIXI_DEV_MODE") != "1":
-            self.student = torch.compile(self.student, mode="reduce-overhead")
+        if compile_mode != 'off' and os.environ.get("PIXI_DEV_MODE") != "1":
+            self.student = torch.compile(self.student, mode=compile_mode)
 
     def train(self, num_epochs: int, save_dir: str = './checkpoints', start_epoch: int = 0,
             save_every_steps: int = 0, max_step_checkpoints: int = 5, max_steps: int = 0,
@@ -316,28 +324,29 @@ class ZipDepthTrainer:
                     pbar.update(1)
                     continue
 
-                images = batch['image'].to(self.device, non_blocking=True)
+                memory_format: torch.memory_format = torch.channels_last if self.channels_last else torch.preserve_format
+                images = batch['image'].to(self.device, non_blocking=True, memory_format=memory_format)
                 images = images.float() / 255.0
 
                 prompt_depth = None
                 if self.target_mode == 'metric':
-                    teacher_depth = batch['target_depth'].to(self.device, non_blocking=True).float()
-                    mask = batch['target_valid'].to(self.device, non_blocking=True)
+                    teacher_depth = batch['target_depth'].to(self.device, non_blocking=True, memory_format=memory_format).float()
+                    mask = batch['target_valid'].to(self.device, non_blocking=True, memory_format=memory_format)
                     # Feed the RAW prompt, exactly what the teacher saw when it produced
                     # these labels (promptda_stream.py:254). Zeroing low-confidence pixels
                     # made the student solve a different problem from the teacher, and the
                     # degenerate cases it guarded against are already handled inside the
                     # model, which computes its own finite/0.1-4 m validity for the
                     # normalization range and clamps the span.
-                    prompt_depth = batch['prompt_depth'].to(self.device, non_blocking=True).float()
+                    prompt_depth = batch['prompt_depth'].to(self.device, non_blocking=True, memory_format=memory_format).float()
                 else:
-                    teacher_depth = batch['depth'].to(self.device, non_blocking=True)
+                    teacher_depth = batch['depth'].to(self.device, non_blocking=True, memory_format=memory_format)
                     teacher_depth = teacher_depth.float().div_(256.0)
 
                     # Local addition: sparse catalog targets carry an explicit validity mask.
                     mask = batch.get('mask')
                     if mask is not None:
-                        mask = mask.to(self.device, non_blocking=True).float()
+                        mask = mask.to(self.device, non_blocking=True, memory_format=memory_format).float()
 
                 del batch
 
@@ -449,6 +458,7 @@ class ZipDepthTrainer:
         checkpoint = {
             'epoch': epoch,
             'global_step': self.global_step,
+            'training_stage': self.training_stage,
             'model_state_dict': model_state,
             'optimizer_state_dict': self.optimizer.state_dict(),
             'loss': loss,
