@@ -646,6 +646,7 @@ libjpeg-turbo = ">=3.0.0,<4"
 [feature.zipdepth.pypi-dependencies]
 zipdepth = { path = "packages/zipdepth", editable = true }
 monopriors = { path = "packages/monoprior", editable = true }
+trtkit = { path = "packages/trtkit", editable = true }
 # monopriors' metadata requires sam3; resolve it to the workspace package like the other monopriors consumers
 sam3 = { path = "packages/sam3", editable = true }
 # albucore -> simsimd has no conda-forge linux-aarch64 build
@@ -667,6 +668,11 @@ cmd = "python tools/train_smoke.py"
 cwd = "packages/zipdepth"
 description = "Smoke: self-distilled example data -> train -> resume -> torchrun -> checkpoints load through monopriors ZipDepthPredictor"
 
+[feature.zipdepth.tasks.zipdepth-export-prompted-trt]
+cmd = "python tools/export_prompted_trt.py"
+cwd = "packages/zipdepth"
+description = "Export, build, parity-check, and benchmark static-batch fp16 ZipDepth-PromptDA ONNX/TensorRT"
+# linux-64 only: NVDEC decode via torchcodec, mirroring prompt-da-stream.
 
 # ═══════════════════════════════════════════════════════════════════════════
 # wilor-nano

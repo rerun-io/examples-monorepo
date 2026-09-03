@@ -8,7 +8,7 @@ from jaxtyping import Float32, UInt8
 from torch import Tensor
 from trtkit import RuntimeSpec, TensorSpec
 
-from monopriors.models.depth_completion import PromptDAPredictor
+from monopriors.models.depth_completion import PromptDAPredictor, ZipDepthPromptPredictor
 from monopriors.models.depth_completion.base_completion_depth import upsample_depth_to_image
 
 
@@ -57,9 +57,9 @@ def test_upsample_depth_to_image_preserves_sampling_and_ownership_policy() -> No
     assert owned_bhw.untyped_storage().data_ptr() != depth_bchw.untyped_storage().data_ptr()
 
 
-@pytest.mark.parametrize("predictor_factory", [PromptDAPredictor])
+@pytest.mark.parametrize("predictor_factory", [PromptDAPredictor, ZipDepthPromptPredictor])
 def test_completion_predictor_owns_layout_scale_and_output_resize(
-    predictor_factory: Callable[..., PromptDAPredictor],
+    predictor_factory: Callable[..., PromptDAPredictor | ZipDepthPromptPredictor],
 ) -> None:
     """Every model-zoo predictor exposes the same backend-neutral family contract."""
     runtime = _RecordingRuntime()

@@ -37,4 +37,4 @@ paths = ["zipdepth/apis", "zipdepth/__init__.py", "tests", "tools"]
 exclude = ["*/.pixi/*", "*/__pycache__/*"]
 sort_by_size = true
 min_confidence = 60
-ignore_names = ["rr_config"]
+ignore_names = ["fuse_for_inference", "allow_tf32", "baseline_flat_dev_m", "baseline_overall_dev_m", "benchmark", "capture_path", "eval_label_field", "forward", "forward_with_range", "frames_per_second", "full_ranking", "gpu", "id", "median_ms_per_batch", "median_ms_per_frame", "p95_ms_per_batch", "processed_frames", "rank_count", "resolved_max_lr", "rr_config", "student_config_class", "student_flat_dev_m", "student_output_role", "student_reference_version", "teacher_config_class", "train_epoch"]
