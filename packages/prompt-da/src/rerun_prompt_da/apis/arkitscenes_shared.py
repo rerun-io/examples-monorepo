@@ -5,8 +5,6 @@ from typing import Any
 
 import cv2
 import numpy as np
-import open3d as o3d
-import rerun as rr
 from arkitscenes_download.ingest.depth import ArkitDepthConfidence
 from beartype.roar import BeartypeException
 from einops import rearrange
@@ -14,6 +12,7 @@ from jaxtyping import Float, Float32, UInt8, UInt16
 from numpy import ndarray
 from rerun.catalog import CatalogClient
 from scipy.spatial.transform import Rotation
+from simplecv.ops.depth import quantize_depth_m_to_mm
 from torch import Tensor
 
 from rerun_prompt_da.trt_predictor import PromptDATrtPredictor, postprocess_depth, preprocess_batch
@@ -137,28 +136,13 @@ def run_promptda_batch(
     image_b3hw, prompt_b1hw = preprocess_batch(rgb_bhw3, prompt_bhw, predictor.image_hw)
     depth_model_b1hw: Float32[Tensor, "b 1 nh nw"] = predictor.runtime({"image": image_b3hw, "prompt_depth": prompt_b1hw})["depth"]
     depth_bhw: Float32[Tensor, "b oh ow"] = postprocess_depth(depth_model_b1hw, output_hw)
-    depth_mm_bhw: UInt16[ndarray, "b oh ow"] = (depth_bhw.cpu().numpy() * 1000.0).astype(np.uint16)
+    # Scale and cast on the GPU: halves the device-to-host copy and drops two full-size host passes.
+    depth_mm_bhw: UInt16[ndarray, "b oh ow"] = quantize_depth_m_to_mm(depth_bhw).cpu().numpy()
     depth_model_mm_bhw: UInt16[ndarray, "b nh nw"] = (
-        rearrange(depth_model_b1hw, "b 1 h w -> b h w").cpu().numpy() * 1000.0  # pyrefly: ignore  # bad-argument-type — einops stub false positive
-    ).astype(np.uint16)
-    return depth_mm_bhw, depth_model_mm_bhw
-
-
-def log_fused_mesh(recording: rr.RecordingStream, entity_path: str, mesh: o3d.geometry.TriangleMesh) -> None:
-    """Log a fused TSDF mesh statically.
-
-    Same see-through treatment as the ARKit mesh: cull back-facing walls so the
-    3D view looks into the room from outside.
-    """
-    rr.log(
-        entity_path,
-        rr.Mesh3D(
-            vertex_positions=np.asarray(mesh.vertices),
-            triangle_indices=np.asarray(mesh.triangles),
-            vertex_normals=np.asarray(mesh.vertex_normals),
-            vertex_colors=np.asarray(mesh.vertex_colors),
-            face_rendering=rr.components.MeshFaceRendering.Front,
-        ),
-        static=True,
-        recording=recording,
+        quantize_depth_m_to_mm(
+            rearrange(depth_model_b1hw, "b 1 h w -> b h w")
+        )
+        .cpu()
+        .numpy()
     )
+    return depth_mm_bhw, depth_model_mm_bhw

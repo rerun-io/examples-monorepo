@@ -14,10 +14,44 @@ from pathlib import Path
 
 import numpy as np
 import open3d as o3d
+import rerun as rr
 from jaxtyping import Float, Float32, UInt8, UInt16
 from numpy import ndarray
 
 from simplecv.camera_parameters import PinholeParameters
+
+
+def log_fused_mesh(
+    entity_path: str,
+    mesh: o3d.geometry.TriangleMesh,
+    *,
+    recording: rr.RecordingStream | None = None,
+    static: bool = True,
+    face_rendering: rr.components.MeshFaceRendering = rr.components.MeshFaceRendering.Front,
+) -> None:
+    """Log a fused Open3D triangle mesh to Rerun.
+
+    Args:
+        entity_path: Rerun entity path for the mesh.
+        mesh: Open3D triangle mesh to log.
+        recording: Explicit recording stream, or ``None`` for the global stream.
+        static: Whether to log timeless data instead of the current time.
+        face_rendering: Which wound faces the viewer renders. Front-face-only
+            is the room-reconstruction default; pass ``DoubleSided`` to retain
+            Rerun's general mesh default.
+    """
+    rr.log(
+        entity_path,
+        rr.Mesh3D(
+            vertex_positions=np.asarray(mesh.vertices),
+            triangle_indices=np.asarray(mesh.triangles),
+            vertex_normals=np.asarray(mesh.vertex_normals),
+            vertex_colors=np.asarray(mesh.vertex_colors),
+            face_rendering=face_rendering,
+        ),
+        static=static,
+        recording=recording,
+    )
 
 
 @dataclass

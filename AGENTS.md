@@ -109,6 +109,28 @@ layer. `arkitscenes-download-serve` uses `ulimit -n 524288`; restart the server
 to inherit it. This is a capacity workaround—the upstream fix is open-on-demand
 files or an LRU descriptor pool.
 
+### The shared catalog server (:51235) is in-memory — never kill Rerun by name
+
+`rerun server` keeps every registration in memory: any exit, even SIGTERM, loses
+the whole corpus and re-registering takes ~90 s warm / ~16 min cold. It has died to
+two things, both from agent sessions on this host:
+
+- **Name-based kills** (`pkill -x rerun`, `pkill rerun`, `killall rerun`,
+  `pkill -f rerun`) hit every process called `rerun`. Kill your own viewer by pid or
+  with a pattern that includes your port, e.g. `pkill -f "rerun --headless --port 9877"`,
+  and check `ss -ltnp | grep 51235` before touching anything named `rerun`. (The
+  server currently runs through a `rerun-catalog` symlink so its process name is not
+  `rerun`; that hides the symptom, it does not excuse a name-based kill.)
+- **paseo restarts.** `paseo.service` uses `KillMode=control-group`, so a restart —
+  including the one systemd triggers when the kernel OOM-kills any process in that
+  cgroup — SIGTERMs every agent session and everything they spawned.
+  `setsid`/`nohup`/`disown` do not leave the cgroup. Start long-lived servers and
+  batches with `tmux new-session` (lives in the SSH session scope; verify with
+  `cat /proc/<pid>/cgroup`) or `systemd-run --user`.
+
+Real fixes, not yet done: a persistent catalog store, and running the server under
+a supervisor instead of a shell.
+
 ## Testing Rerun builds
 
 **Rust follows the primary Python Rerun lane.** The `common` / `rerun-prerelease`
