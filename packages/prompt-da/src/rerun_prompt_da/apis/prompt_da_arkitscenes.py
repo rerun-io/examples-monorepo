@@ -346,7 +346,16 @@ def main(config: PDAArkitScenesConfig) -> None:
     """Run PromptDA for selected segments and optionally update the catalog."""
     client: CatalogClient = connect_catalog(config.catalog_url, config.dataset_name)
     dataset_entry: DatasetEntry = client.get_dataset(config.dataset_name)
-    segment_table: pa.Table = pa.Table.from_batches(dataset_entry.segment_table().collect())
+    segment_table: pa.Table = pa.Table.from_batches(
+        dataset_entry.segment_table()
+        .select(
+            "rerun_segment_id",
+            "rerun_layer_names",
+            "property:capture:orientation",
+            "property:capture:orientation_quarter_turns_ccw",
+        )
+        .collect()
+    )
     rows: list[dict] = segment_table.to_pylist()
     segment_ids: list[str] = segments_to_process(rows, config.video_id, config.process_all, PROMPTDA_LAYER)
     if not segment_ids:

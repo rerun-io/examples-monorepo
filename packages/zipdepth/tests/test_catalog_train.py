@@ -56,9 +56,11 @@ def test_upstream_train_config_loads_shipped_values_and_fallbacks(tmp_path: Path
 
 
 def test_catalog_training_defaults_to_parallel_segment_producers() -> None:
-    """Keep enough catalog producers and bounded sample prefetch for GPU training."""
+    """Keep the existing loader, producer count, and bounded sample prefetch by default."""
     config: TrainCatalogConfig = TrainCatalogConfig()
 
+    assert config.dataloader == "current"
+    assert config.rerun_fetch_block_size == 512
     assert config.shuffle_buffer_size == 256
     assert config.num_producers == 6
     assert config.prefetch_samples == 256

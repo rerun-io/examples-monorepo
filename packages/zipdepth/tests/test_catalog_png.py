@@ -13,7 +13,7 @@ pytest.importorskip("arkitscenes_download", reason="Representative depth encodin
 
 from arkitscenes_download.ingest.depth import decode_depth_png, encode_depth_png, inflate_depth_png_rows  # noqa: E402
 
-from zipdepth.catalog.png import unfilter_up_cuda  # noqa: E402
+from zipdepth.catalog.png import unfilter_up_cuda, unfilter_up_cuda_batch  # noqa: E402
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA Up reconstruction needs a GPU")
@@ -34,3 +34,24 @@ def test_unfilter_up_cuda_matches_cpu_decode_for_ingest_pngs() -> None:
     assert actual_cuda.dtype == torch.int32
     assert actual_cuda.device.type == "cuda"
     assert_array_equal(actual_cuda.cpu().numpy(), decode_depth_png(blob_bytes))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA Up reconstruction needs a GPU")
+def test_unfilter_up_cuda_batch_matches_individual_reconstruction() -> None:
+    """Apply the same byte-wise Up reconstruction independently to every batch row."""
+    rng: np.random.Generator = np.random.default_rng(11)
+    expected_depths: UInt16[ndarray, "n h w"] = rng.integers(100, 4001, (3, 48, 64), dtype=np.uint16)
+    filtered_rows: list[UInt8[ndarray, "h row_bytes"]] = []
+    expected_depth: UInt16[ndarray, "h w"]
+    for expected_depth in expected_depths:
+        blob: UInt8[ndarray, "n"] = np.frombuffer(encode_depth_png(expected_depth, level=1), dtype=np.uint8)
+        inflated: tuple[UInt8[ndarray, "h row_bytes"], tuple[int, int]] | None = inflate_depth_png_rows(blob)
+        assert inflated is not None
+        filtered_rows.append(inflated[0])
+    filtered_batch: UInt8[ndarray, "n h row_bytes"] = np.stack(filtered_rows)
+
+    actual_cuda: Int32[Tensor, "n h w"] = unfilter_up_cuda_batch(torch.from_numpy(filtered_batch).to(device="cuda"))
+
+    assert actual_cuda.dtype == torch.int32
+    assert actual_cuda.device.type == "cuda"
+    assert_array_equal(actual_cuda.cpu().numpy(), expected_depths)
