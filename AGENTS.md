@@ -109,21 +109,40 @@ layer. `arkitscenes-download-serve` uses `ulimit -n 524288`; restart the server
 to inherit it. This is a capacity workaround—the upstream fix is open-on-demand
 files or an LRU descriptor pool.
 
+### The shared catalog server (:51235) is in-memory — never kill Rerun by name
+
+`rerun server` keeps every registration in memory: any exit, even SIGTERM, loses
+the whole corpus and re-registering takes ~90 s warm / ~16 min cold. It has died to
+two things, both from agent sessions on this host:
+
+- **Name-based kills** (`pkill -x rerun`, `pkill rerun`, `killall rerun`,
+  `pkill -f rerun`) hit every process called `rerun`. Kill your own viewer by pid or
+  with a pattern that includes your port, e.g. `pkill -f "rerun --headless --port 9877"`,
+  and check `ss -ltnp | grep 51235` before touching anything named `rerun`. (The
+  server currently runs through a `rerun-catalog` symlink so its process name is not
+  `rerun`; that hides the symptom, it does not excuse a name-based kill.)
+- **paseo restarts.** `paseo.service` uses `KillMode=control-group`, so a restart —
+  including the one systemd triggers when the kernel OOM-kills any process in that
+  cgroup — SIGTERMs every agent session and everything they spawned.
+  `setsid`/`nohup`/`disown` do not leave the cgroup. Start long-lived servers and
+  batches with `tmux new-session` (lives in the SSH session scope; verify with
+  `cat /proc/<pid>/cgroup`) or `systemd-run --user`.
+
+Real fixes, not yet done: a persistent catalog store, and running the server under
+a supervisor instead of a shell.
+
 ## Testing Rerun builds
 
-**One Rerun version repo-wide — Rust follows Python.** The PyPI `rerun-sdk` pin
-is the source of truth; the Rust `re_*` crates
-(`packages/gsplat-rust-renderer/Cargo.toml`) must match it exactly, or the
-viewer silently loses protocol/tooling parity (e.g. no viewer-control MCP
-before 0.34). To bump: Python first (rerun-sdk + gradio-rerun together), then
-the Rust pins (matching that release's egui family), then re-lock pixi and cargo.
+**Rust follows the primary Python Rerun lane.** The `common` / `rerun-prerelease`
+PyPI `rerun-sdk` pin is the source of truth; the Rust `re_*` crates
+(`packages/gsplat-rust-renderer/Cargo.toml`) must match it exactly, or the viewer
+silently loses protocol/tooling parity. To bump: Python first, then the Rust pins
+(matching that release's egui family), then re-lock Pixi and Cargo.
 
-The whole workspace runs **`rerun-sdk == 0.36.2`** (and `gradio-rerun == 0.36.2`) from PyPI:
-`common` carries the pin with the `datafusion` extra. The `dataloader` extra stays scoped to
-catalog-side features: `rerun-prerelease` for the shared catalog lanes (composed into
-`no-default-feature` envs beside `catalog-common`, e.g. `simplecv-catalog`, `mv-api-catalog`)
-and `prompt-da-catalog` for ARKitScenes PromptDA inference.
-gradio-rerun releases pin an exact `rerun-sdk==<ver>`, so bump both together.
+The primary workspace lane runs **`rerun-sdk == 0.37.0`** with the `catalog`
+extra through `common`. Catalog/stream environments add the `dataloader` extra
+through `rerun-prerelease`. `gradio-rerun` pins an exact `rerun-sdk`, so bump
+both pins in `[feature.common.pypi-dependencies]` together, never separately.
 
 To test an **unreleased** Rerun build, add a `find-links` at
 `build.rerun.io/commit/<sha>/wheels/` to `[feature.rerun-prerelease.pypi-options]` (CI builds one
