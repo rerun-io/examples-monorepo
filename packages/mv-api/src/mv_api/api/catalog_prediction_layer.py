@@ -8,7 +8,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from time import perf_counter, strftime
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 
 import numpy as np
 import pyarrow as pa
@@ -17,12 +17,27 @@ from einops import rearrange
 from jaxtyping import Bool, Float32, Float64, Int, UInt8
 from numpy import ndarray
 from simplecv.camera_parameters import PinholeParameters
+from simplecv.catalog_rig_layout import CatalogComponent, CatalogRigLayout, SchemaLike, catalog_components, parse_rig_layout
+from simplecv.catalog_video_codec import CatalogCodecName, catalog_codec_name
 from simplecv.data.skeleton.coco_133 import COCO_133_IDS
+from simplecv.rrd_query_utils import first_valid_value
 
 CATALOG_DATASET_NAME: str = "assembly101"
 CATALOG_TIMELINE: str = "video_time"
-PREDICTION_2D_ENTITY_TEMPLATE: str = "/world/exo/{camera_name}/pinhole/pred/mvapi/coco133_uv"
+PREDICTION_2D_ENTITY_SUFFIX: str = "pred/mvapi/coco133_uv"
 PREDICTION_3D_ENTITY: str = "/world/pred/mvapi/coco133_xyz"
+KeypointSubset: TypeAlias = Literal["upper-body", "full"]
+"""Joints written to a prediction layer: the v1 upper-body/face/hands subset, or every COCO-133 joint."""
+DEFAULT_LAYER_NAMES: dict[KeypointSubset, str] = {"upper-body": "mvapi_coco133_upper_body_v1", "full": "mvapi_coco133_full_v1"}
+"""Default catalog layer name per ``keypoint_subset``; the name states which joints the layer carries."""
+CALIBRATION_COMPONENTS: tuple[tuple[Literal["pinhole", "transform"], str], ...] = (
+    ("pinhole", "Pinhole:image_from_camera"),
+    ("pinhole", "Pinhole:camera_xyz"),
+    ("pinhole", "Pinhole:resolution"),
+    ("transform", "Transform3D:translation"),
+    ("transform", "Transform3D:mat3x3"),
+)
+"""Static components a selected exo camera must carry: (which of its two nodes, component identifier)."""
 PREDICTION_VISUALIZATION_RGB: tuple[int, int, int] = (255, 0, 0)
 _NATIVE_FPS_SAMPLE_LIMIT: int = 2048
 """Max ``video_time`` packets read per exo stream to detect native fps. The median inter-packet
@@ -61,12 +76,19 @@ class ExoCameraStream:
     """Rerun entity path for the camera transform."""
 
 
+def prediction_2d_entity(stream: ExoCameraStream) -> str:
+    """Prediction overlay entity under the stream's own pinhole (flat or rig layout)."""
+    return f"{stream.pinhole_entity}/{PREDICTION_2D_ENTITY_SUFFIX}"
+
+
 @dataclass(frozen=True, slots=True)
 class ViewerScreenshotTarget:
     """One required screenshot for validating an exo prediction overlay."""
 
     camera_name: str
     """Exo camera name to validate."""
+    pinhole_entity: str
+    """The camera's pinhole entity: the 2D view's origin."""
     overlay_entity: str
     """Prediction entity that must be visible in the screenshot."""
     blueprint_path: Path
@@ -109,20 +131,22 @@ class CatalogPredictionLayerConfig:
     cause deterministic ``InvalidDataError`` windows or silently wrong pixels."""
     fetch_block_size: int = 64
     """Number of samples fetched per Rerun catalog query."""
-    video_codec: str = "av1"
-    """Video codec passed to Rerun's ``VideoFrameDecoder``."""
     tracker_mode: Literal["lightweight", "balanced", "performance", "wholebody"] = "wholebody"
     """MVAPI tracker model preset."""
     tracker_device: Literal["cpu", "cuda"] = "cuda"
     """Device requested by the MVAPI ONNX runtime backend."""
-    tracker_backend: Literal["onnxruntime"] = "onnxruntime"
-    """Inference backend requested by the MVAPI tracker."""
+    tracker_backend: Literal["onnxruntime", "tensorrt"] = "tensorrt"
+    """Inference backend for the posekit models. ``tensorrt`` reuses the cached dynamic-batch
+    engines and is the faster path; ``onnxruntime`` skips the engine build and, since the
+    workspace takes onnxruntime-gpu >= 1.29 from PyPI (sm_121a), also runs on the GB10 Spark."""
     keypoint_threshold: float = 0.7
     """Minimum keypoint confidence retained in logged prediction layers."""
+    keypoint_subset: KeypointSubset = "upper-body"
+    """Joints written to the layer: the v1 upper-body/face/hands subset, or every COCO-133 joint."""
     output_root: Path = Path("artifacts/catalog_layers")
     """Root directory for generated prediction layer RRDs."""
-    layer_name: str = "mvapi_coco133_upper_body_v1"
-    """Catalog layer name for generated predictions."""
+    layer_name: str | None = None
+    """Catalog layer name; ``None`` derives it from ``keypoint_subset`` (see ``DEFAULT_LAYER_NAMES``)."""
     application_id: str = "assembly101_mvapi_coco133"
     """Rerun application id used by generated prediction recordings."""
     register_layer: bool = True
@@ -143,6 +167,20 @@ class CatalogPredictionLayerConfig:
     """Height used to bound native Viewer 2D validation blueprints."""
     viewer_screenshot_timeout_seconds: float = 120.0
     """Maximum seconds to wait for one native Viewer screenshot before failing."""
+
+    @property
+    def resolved_layer_name(self) -> str:
+        """The catalog layer this run writes: ``layer_name`` when given, else the subset's default.
+
+        Raises:
+            ValueError: If an explicit name is another subset's default, which would put one subset's joints under the other's name.
+        """
+        if self.layer_name is None:
+            return DEFAULT_LAYER_NAMES[self.keypoint_subset]
+        other_defaults: set[str] = {name for subset, name in DEFAULT_LAYER_NAMES.items() if subset != self.keypoint_subset}
+        if self.layer_name in other_defaults:
+            raise ValueError(f"layer_name {self.layer_name!r} is the default name of another keypoint subset; the name states which joints the layer carries")
+        return self.layer_name
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,38 +302,16 @@ def catalog_segments_from_dataset(
     return sorted(rows, key=lambda row: row.sequence_key)
 
 
-def _descriptor_component_name(descriptor: Any) -> str | None:
-    component_raw: Any = getattr(descriptor, "component", None)
-    if isinstance(component_raw, str):
-        return component_raw
-
-    name_raw: Any = getattr(descriptor, "name", None)
-    if isinstance(name_raw, str):
-        return name_raw
-
-    archetype_raw: Any = getattr(descriptor, "archetype", None)
-    component_type_raw: Any = getattr(descriptor, "component_type", None)
-    if isinstance(archetype_raw, str) and isinstance(component_type_raw, str):
-        archetype_name: str = archetype_raw.rsplit(".", 1)[-1]
-        component_type_name: str = component_type_raw.rsplit(".", 1)[-1]
-        return f"{archetype_name}:{component_type_name}"
-    if isinstance(component_type_raw, str):
-        return component_type_raw
-    return None
-
-
-def _schema_descriptors(schema: Any) -> list[Any]:
-    component_columns: Any = schema.component_columns()
-    if isinstance(component_columns, dict):
-        return list(component_columns.keys())
-    return list(component_columns)
-
-
-def discover_exo_camera_streams(schema: Any) -> list[ExoCameraStream]:
+def discover_exo_camera_streams(schema: SchemaLike) -> list[ExoCameraStream]:
     """Discover sorted exo camera VideoStream sample fields from a catalog schema.
 
+    Two layouts are recognized: the v1 flat ``/world/exo/<name>/pinhole/video``
+    entities, and the ``exoego:v2`` rig layout ``/world/rig_NN/cam_MM/pinhole/video``
+    parsed by ``simplecv.catalog_rig_layout``, where a rig whose own transform moves
+    over time is the worn ego device and is skipped.
+
     Args:
-        schema: Rerun catalog schema-like object exposing ``component_columns()``.
+        schema: Rerun catalog schema (``rerun.catalog.Schema`` or a stand-in listing its component columns).
 
     Returns:
         Exo camera streams sorted by camera name.
@@ -303,35 +319,36 @@ def discover_exo_camera_streams(schema: Any) -> list[ExoCameraStream]:
     Raises:
         ValueError: If no exo ``VideoStream:sample`` fields are found.
     """
+    components: list[CatalogComponent] = catalog_components(schema)
     streams_by_entity: dict[str, ExoCameraStream] = {}
     asset_video_entities: list[str] = []
-    for descriptor in _schema_descriptors(schema):
-        entity_path_raw: Any = getattr(descriptor, "entity_path", None)
-        component_name: str | None = _descriptor_component_name(descriptor)
-        if entity_path_raw is None or component_name is None:
+    for item in components:
+        if not item.entity_path.startswith("/world/exo/"):
             continue
+        if item.archetype == "AssetVideo" and item.field == "blob":
+            asset_video_entities.append(item.entity_path)
+            continue
+        if item.archetype != "VideoStream" or item.field != "sample":
+            continue
+        video_path: PurePosixPath = PurePosixPath(item.entity_path)
+        streams_by_entity[item.entity_path] = ExoCameraStream(
+            name=video_path.parent.parent.name,
+            video_entity=item.entity_path,
+            field_path=f"{item.entity_path}:VideoStream:sample",
+            pinhole_entity=str(video_path.parent),
+            transform_entity=str(video_path.parent.parent),
+        )
 
-        entity_path: str = f"/{str(entity_path_raw).lstrip('/')}"
-        entity_no_slash: str = entity_path.lstrip("/")
-        if not entity_no_slash.startswith("world/exo/"):
+    rig_layout: CatalogRigLayout = parse_rig_layout(components)
+    for camera in rig_layout.cameras:
+        if camera.rig_is_moving:
             continue
-        if component_name.endswith("AssetVideo:blob"):
-            asset_video_entities.append(entity_path)
-            continue
-        if not component_name.endswith("VideoStream:sample"):
-            continue
-
-        video_path: PurePosixPath = PurePosixPath(entity_no_slash)
-        pinhole_entity: str = f"/{video_path.parent}"
-        transform_entity: str = f"/{video_path.parent.parent}"
-        camera_name: str = video_path.parent.parent.name
-        field_path: str = f"{entity_path}:VideoStream:sample"
-        streams_by_entity[entity_path] = ExoCameraStream(
-            name=camera_name,
-            video_entity=entity_path,
-            field_path=field_path,
-            pinhole_entity=pinhole_entity,
-            transform_entity=transform_entity,
+        streams_by_entity[camera.video_entity] = ExoCameraStream(
+            name=f"{camera.rig}_{camera.camera}",
+            video_entity=camera.video_entity,
+            field_path=f"{camera.video_entity}:VideoStream:sample",
+            pinhole_entity=camera.pinhole_entity,
+            transform_entity=camera.transform_entity,
         )
 
     streams: list[ExoCameraStream] = sorted(streams_by_entity.values(), key=lambda stream: stream.name)
@@ -345,46 +362,34 @@ def discover_exo_camera_streams(schema: Any) -> list[ExoCameraStream]:
     return streams
 
 
-def _has_component(descriptors: list[Any], *, entity_path: str, component_suffix: str) -> bool:
-    normalized_entity: str = f"/{entity_path.lstrip('/')}"
-    for descriptor in descriptors:
-        entity_path_raw: Any = getattr(descriptor, "entity_path", None)
-        component_name: str | None = _descriptor_component_name(descriptor)
-        if entity_path_raw is None or component_name is None:
-            continue
+def select_calibrated_exo_streams(schema: SchemaLike, streams: list[ExoCameraStream]) -> list[ExoCameraStream]:
+    """Keep the streams whose camera nodes carry a complete static calibration.
 
-        descriptor_entity: str = f"/{str(entity_path_raw).lstrip('/')}"
-        if descriptor_entity == normalized_entity and component_name.endswith(component_suffix):
-            return True
-    return False
-
-
-def validate_exo_camera_calibration(schema: Any, streams: list[ExoCameraStream]) -> None:
-    """Validate that each selected exo camera has catalog pinhole and transform data.
-
-    Args:
-        schema: Rerun catalog schema-like object exposing ``component_columns()``.
-        streams: Selected exo camera streams.
+    A camera with no calibration at all (a wildcap base layer before the refine
+    stage writes one, or an ego camera that never gets one) has no pose to
+    triangulate against and is dropped with a warning; a camera with a partial
+    calibration is a broken layer and aborts the run.
 
     Raises:
-        ValueError: If any selected camera is missing required calibration components.
+        ValueError: If a stream has some but not all of :data:`CALIBRATION_COMPONENTS`.
     """
-    descriptors: list[Any] = _schema_descriptors(schema)
+    present: frozenset[tuple[str, str]] = frozenset((item.entity_path, item.component) for item in catalog_components(schema))
+    kept: list[ExoCameraStream] = []
     missing_fields: list[str] = []
     for stream in streams:
-        required_components: tuple[tuple[str, str], ...] = (
-            (stream.pinhole_entity, "Pinhole:image_from_camera"),
-            (stream.pinhole_entity, "Pinhole:camera_xyz"),
-            (stream.pinhole_entity, "Pinhole:resolution"),
-            (stream.transform_entity, "Transform3D:translation"),
-            (stream.transform_entity, "Transform3D:mat3x3"),
-        )
-        for entity_path, component_suffix in required_components:
-            if not _has_component(descriptors, entity_path=entity_path, component_suffix=component_suffix):
-                missing_fields.append(f"{stream.name}: {entity_path}:{component_suffix}")
-
+        node_entity: dict[str, str] = {"pinhole": stream.pinhole_entity, "transform": stream.transform_entity}
+        missing: list[str] = [
+            f"{node_entity[node]}:{component}" for node, component in CALIBRATION_COMPONENTS if (node_entity[node], component) not in present
+        ]
+        if len(missing) == len(CALIBRATION_COMPONENTS):
+            print(f"warning: skipping {stream.name} — no pinhole/transform on {stream.transform_entity}", flush=True)
+        elif missing:
+            missing_fields.extend(f"{stream.name}: {field}" for field in missing)
+        else:
+            kept.append(stream)
     if missing_fields:
         raise ValueError(f"Selected exo cameras are missing calibration components: {missing_fields}")
+    return kept
 
 
 def build_prediction_rrd_path(
@@ -424,12 +429,13 @@ def build_viewer_screenshot_targets(
     """
     targets: list[ViewerScreenshotTarget] = []
     for stream in streams:
-        overlay_entity: str = f"/world/exo/{stream.name}/pinhole/pred/mvapi/coco133_uv"
+        overlay_entity: str = prediction_2d_entity(stream)
         blueprint_path: Path = run_dir / f"exo_{stream.name}.rbl"
         screenshot_path: Path = run_dir / f"exo_{stream.name}.png"
         targets.append(
             ViewerScreenshotTarget(
                 camera_name=stream.name,
+                pinhole_entity=stream.pinhole_entity,
                 overlay_entity=overlay_entity,
                 blueprint_path=blueprint_path,
                 screenshot_path=screenshot_path,
@@ -558,7 +564,7 @@ def save_exo_viewer_blueprint(
     from rerun import bindings
     from rerun.recording_stream import RecordingStream
 
-    origin: str = f"/world/exo/{target.camera_name}/pinhole"
+    origin: str = target.pinhole_entity
     blueprint: rrb.Blueprint = rrb.Blueprint(
         rrb.Spatial2DView(
             origin=origin,
@@ -638,19 +644,6 @@ def capture_native_viewer_screenshots(
             not target.screenshot_path.exists() or target.screenshot_path.stat().st_size <= 0
         ):
             completed_process.check_returncode()
-
-
-def _first_valid_value(column: pa.ChunkedArray | pa.Array, *, allow_none: bool = False, component_name: str) -> Any:
-    values: list[Any] = column.combine_chunks().to_pylist() if isinstance(column, pa.ChunkedArray) else column.to_pylist()
-    for value in values:
-        if value is None:
-            continue
-        while isinstance(value, list) and len(value) == 1 and isinstance(value[0], list):
-            value = value[0]
-        return value
-    if allow_none:
-        return None
-    raise ValueError(f"Expected at least one non-null value in column {component_name!r}.")
 
 
 def _arrow_time_column_to_ns(column: pa.ChunkedArray | pa.Array) -> Int[ndarray, "time"]:
@@ -771,6 +764,36 @@ def detect_uniform_native_fps(
     return reference_fps
 
 
+def detect_video_codecs(
+    *,
+    dataset_entry: Any,
+    segment: CatalogSegment,
+    streams: list[ExoCameraStream],
+) -> dict[str, CatalogCodecName]:
+    """Read every selected exo stream's static ``VideoStream:codec`` component in one catalog query.
+
+    Args:
+        dataset_entry: Rerun catalog dataset entry.
+        segment: Selected catalog segment.
+        streams: Selected exo camera streams.
+
+    Returns:
+        Decoder codec name keyed by stream name.
+    """
+    selectors: dict[str, str] = {stream.name: f"{stream.video_entity}:VideoStream:codec" for stream in streams}
+    table: pa.Table = (
+        dataset_entry.filter_segments(segment.recording_id)
+        .filter_contents([stream.video_entity for stream in streams])
+        .reader(index=None)
+        .select(*selectors.values())
+        .to_arrow_table()
+    )
+    codecs: dict[str, CatalogCodecName] = {}
+    for name, selector in selectors.items():
+        codecs[name] = catalog_codec_name(int(np.asarray(first_valid_value(table.column(selector), component_name=selector)).reshape(-1)[0]))
+    return codecs
+
+
 def _read_first_catalog_component(
     *,
     segment_view: Any,
@@ -794,7 +817,7 @@ def _read_first_catalog_component(
             return None
         raise ValueError(f"No rows available for catalog component {selector!r}.")
     column_index: int = 0 if index is None else 1
-    return _first_valid_value(
+    return first_valid_value(
         table.column(column_index),
         allow_none=allow_none,
         component_name=selector,
@@ -986,10 +1009,12 @@ def build_rerun_iterable_dataset(
         if config.native_fps_override is not None
         else detect_uniform_native_fps(dataset_entry=dataset_entry, segment=segment, streams=streams)
     )
+    codecs: dict[str, CatalogCodecName] = detect_video_codecs(dataset_entry=dataset_entry, segment=segment, streams=streams)
+    print(f"Video codecs: {codecs}", flush=True)
     fields: dict[str, Any] = {
         stream.name: Field(
             path=stream.field_path,
-            decode=VideoFrameDecoder(codec=config.video_codec),
+            decode=VideoFrameDecoder(codec=codecs[stream.name]),
         )
         for stream in streams
     }
@@ -1050,7 +1075,7 @@ def _log_prediction_frame(
     *,
     mv_state: Any,
     streams: list[ExoCameraStream],
-    top_half_mask: Bool[ndarray, "n_kpts"],
+    kept_joint_mask: Bool[ndarray, "n_kpts"],
     keypoint_threshold: float,
     timestamp_ns: int,
     recording: Any,
@@ -1064,7 +1089,7 @@ def _log_prediction_frame(
         xyz: Float32[ndarray, "n_kpts 3"] = mv_state.xyzc_t[:, :3].astype(np.float32, copy=True)
         scores_3d: Float32[ndarray, "n_kpts"] = mv_state.xyzc_t[:, 3].astype(np.float32, copy=True)
         invalid_3d: Bool[ndarray, "n_kpts"] = np.asarray(
-            (~top_half_mask) | (scores_3d < keypoint_threshold) | ~np.isfinite(xyz).all(axis=1),
+            (~kept_joint_mask) | (scores_3d < keypoint_threshold) | ~np.isfinite(xyz).all(axis=1),
             dtype=bool,
         )
         xyz[invalid_3d, :] = np.nan
@@ -1089,7 +1114,7 @@ def _log_prediction_frame(
             uv: Float32[ndarray, "n_kpts 2"] = uvc_view[:, :2].astype(np.float32, copy=True)
             scores_2d: Float32[ndarray, "n_kpts"] = uvc_view[:, 2].astype(np.float32, copy=True)
             invalid_2d: Bool[ndarray, "n_kpts"] = np.asarray(
-                (~top_half_mask) | (scores_2d < keypoint_threshold) | ~np.isfinite(uv).all(axis=1),
+                (~kept_joint_mask) | (scores_2d < keypoint_threshold) | ~np.isfinite(uv).all(axis=1),
                 dtype=bool,
             )
             uv[invalid_2d, :] = np.nan
@@ -1097,7 +1122,7 @@ def _log_prediction_frame(
             prediction_rgb_2d: UInt8[ndarray, "n_kpts 3"] = prediction_visualization_colors(uv.shape[0])
             keypoint_lengths_2d: Int[ndarray, "1"] = np.array([uv.shape[0]], dtype=np.int32)
             rr.send_columns(
-                PREDICTION_2D_ENTITY_TEMPLATE.format(camera_name=stream.name),
+                prediction_2d_entity(stream),
                 indexes=[rr.TimeColumn(CATALOG_TIMELINE, duration=timestamps_seconds)],
                 columns=[
                     *Points2DWithConfidence.columns(
@@ -1131,7 +1156,7 @@ def _log_prediction_static_metadata(
     )
     for stream in streams:
         rr.log(
-            PREDICTION_2D_ENTITY_TEMPLATE.format(camera_name=stream.name),
+            prediction_2d_entity(stream),
             Points2DWithConfidence.from_fields(
                 class_ids=int(Coco133AnnotationLayer.RAW_2D),
                 keypoint_ids=COCO_133_IDS,
@@ -1171,8 +1196,8 @@ def _run_mvapi_inference(
     if total_to_process <= 0:
         raise ValueError(f"Selected segment {segment.recording_id!r} has no dataloader samples on {CATALOG_TIMELINE!r}.")
 
-    upper_body_filter_idx: Int[ndarray, "upper_body_plus"] = _upper_body_indices()
-    top_half_mask: Bool[ndarray, "n_kpts"] = np.isin(np.arange(133), upper_body_filter_idx)
+    kept_joint_idx: Int[ndarray, "kept"] | None = None if config.keypoint_subset == "full" else _upper_body_indices()
+    kept_joint_mask: Bool[ndarray, "n_kpts"] = np.ones(133, dtype=bool) if kept_joint_idx is None else np.isin(np.arange(133), kept_joint_idx)
     tracker_config: MultiviewBodyTrackerConfig = MultiviewBodyTrackerConfig(
         mode=config.tracker_mode,
         backend=config.tracker_backend,
@@ -1185,7 +1210,7 @@ def _run_mvapi_inference(
     )
     pose_tracker: MultiviewBodyTracker = MultiviewBodyTracker(
         tracker_config,
-        filter_body_idxes=upper_body_filter_idx,
+        filter_body_idxes=kept_joint_idx,
     )
     if pose_tracker.num_keypoints != len(COCO_133_IDS):
         raise ValueError(
@@ -1234,13 +1259,13 @@ def _run_mvapi_inference(
         _log_prediction_frame(
             mv_state=mv_state,
             streams=streams,
-            top_half_mask=top_half_mask,
+            kept_joint_mask=kept_joint_mask,
             keypoint_threshold=config.keypoint_threshold,
             timestamp_ns=timestamp_ns,
             recording=recording,
         )
         if mv_state.xyzc_t is not None:
-            mv_state.xyzc_t[~top_half_mask, :] = np.nan
+            mv_state.xyzc_t[~kept_joint_mask, :] = np.nan
         processed_frames += 1
         if processed_frames == 1 or processed_frames % 50 == 0 or processed_frames == total_to_process:
             elapsed_s: float = perf_counter() - inference_start_s
@@ -1294,9 +1319,11 @@ def run_catalog_prediction_layer(config: CatalogPredictionLayerConfig) -> Catalo
         sequence_key=config.sequence_key,
     )
     segment_view: Any = dataset_entry.filter_segments(segment.recording_id)
-    schema: Any = segment_view.schema()
-    streams: list[ExoCameraStream] = discover_exo_camera_streams(schema)
-    validate_exo_camera_calibration(schema, streams)
+    schema: SchemaLike = segment_view.schema()
+    streams: list[ExoCameraStream] = select_calibrated_exo_streams(schema, discover_exo_camera_streams(schema))
+    if not streams:
+        raise ValueError("No exo camera in the selected segment carries pinhole + transform calibration.")
+    layer_name: str = config.resolved_layer_name
     pinholes: list[PinholeParameters] = load_catalog_pinhole_params(
         dataset_entry=dataset_entry,
         segment=segment,
@@ -1306,7 +1333,7 @@ def run_catalog_prediction_layer(config: CatalogPredictionLayerConfig) -> Catalo
     rrd_path: Path = build_prediction_rrd_path(
         output_root=config.output_root,
         segment=segment,
-        layer_name=config.layer_name,
+        layer_name=layer_name,
     )
     _run_mvapi_inference(
         dataset_entry=dataset_entry,
@@ -1321,7 +1348,7 @@ def run_catalog_prediction_layer(config: CatalogPredictionLayerConfig) -> Catalo
         register_prediction_layer(
             dataset_entry,
             rrd_path=rrd_path,
-            layer_name=config.layer_name,
+            layer_name=layer_name,
         )
 
     validation_run_dir: Path = config.validation_root / strftime("%Y%m%d-%H%M%S")
@@ -1341,7 +1368,7 @@ def run_catalog_prediction_layer(config: CatalogPredictionLayerConfig) -> Catalo
         catalog_url=config.catalog_url,
         segment=segment,
         rrd_path=rrd_path,
-        layer_name=config.layer_name,
+        layer_name=layer_name,
         targets=targets,
     )
 
@@ -1360,7 +1387,7 @@ def run_catalog_prediction_layer(config: CatalogPredictionLayerConfig) -> Catalo
     return CatalogPredictionLayerResult(
         segment=segment,
         rrd_path=rrd_path,
-        layer_name=config.layer_name,
+        layer_name=layer_name,
         validation_targets=targets,
         validation_notes_path=notes_path,
     )
