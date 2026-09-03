@@ -6,19 +6,21 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Protocol, runtime_checkable
 
+import cv2
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 import torch
-from jaxtyping import Float32, Float64, Int64, UInt8
+from jaxtyping import Float32, Float64, Int, Int64, UInt8, UInt16
 from numpy import ndarray
 from posekit.predictions import BoxDetections, Keypoints2d
+from posekit.rerun_logging import log_person_bbox, log_person_points2d, log_skeleton_annotation_context, person_color
 from posekit.skeletons import COCO_17
 from rerun.catalog import CatalogClient, DatasetEntry, DatasetView
 from scipy.spatial.transform import Rotation, Slerp
 from simplecv.camera_parameters import Fisheye62Parameters
 from simplecv.rerun_dataloader import open_segment_decoder
-from simplecv.rerun_log_utils import RerunTyroConfig
+from simplecv.rerun_log_utils import RerunTyroConfig, compute_vertex_normals
 from simplecv.rerun_rig_logger import log_rig_static
 from simplecv.rig import CameraSensor, Rig, RigCalibration
 from simplecv.rrd_query_utils import first_valid_value
@@ -26,7 +28,10 @@ from simplecv.rrd_query_utils import first_valid_value
 from lamptrack.cameras import RigCamera
 from lamptrack.catalog_rig import RIG, TIMELINE, read_fisheye_camera, read_rig_poses
 from lamptrack.models.lamp import AnnotatedLampTrackerUnion, Frameset, LampConfig, LampStep, LampTracker, PersonState
-from lamptrack.third_party.lamp.core.types import SMPL_SKELETON_EDGES, color_from_id
+from lamptrack.rerun_logging import LivePeopleLogger, log_smpl_annotation_context
+
+PREVIEW_SCALE: float = 0.5
+"""Downscale applied to logged camera frames and their 2D overlays."""
 
 
 @runtime_checkable
@@ -175,11 +180,19 @@ def best_detection_window(
 
 
 def build_blueprint(cams: tuple[str, ...]) -> rrb.Blueprint:
-    """Show the moving rig and people beside a two-by-two camera grid."""
-    camera_views = [rrb.Spatial2DView(origin=f"{RIG}/{cam}/pinhole", name=cam) for cam in cams]
+    """Show the moving rig and people beside a two-by-two preview grid.
+
+    The previews are half resolution, so they would cover only a quarter of the
+    full-resolution pinhole image plane; the 3D view therefore excludes them.
+    """
+    camera_views = [rrb.Spatial2DView(origin=f"{RIG}/{cam}/pinhole/preview", name=cam) for cam in cams]
     return rrb.Blueprint(
         rrb.Horizontal(
-            rrb.Spatial3DView(origin="world", name="rig + tracked people", contents=["$origin/**"]),
+            rrb.Spatial3DView(
+                origin="world",
+                name="rig + tracked people",
+                contents=["$origin/**", *[f"- {RIG}/{cam}/pinhole/preview/**" for cam in cams]],
+            ),
             rrb.Vertical(
                 rrb.Horizontal(camera_views[0], camera_views[1]),
                 rrb.Horizontal(camera_views[2], camera_views[3]),
@@ -189,6 +202,19 @@ def build_blueprint(cams: tuple[str, ...]) -> rrb.Blueprint:
         rrb.TimePanel(timeline=TIMELINE),
         collapse_panels=True,
     )
+
+
+def log_static_context(cams: tuple[str, ...]) -> None:
+    """Log the world axes and every annotation context once per recording.
+
+    The SMPL context draws the 3D people's skeleton edges and the per-camera
+    COCO-17 contexts draw the 2D overlay links, so neither has to be re-logged
+    per frameset.
+    """
+    rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
+    log_smpl_annotation_context()
+    for cam in cams:
+        log_skeleton_annotation_context(COCO_17, entity_path=f"{RIG}/{cam}/pinhole")
 
 
 def _read_video_codec(view: DatasetView, cam: str) -> rr.VideoCodec:
@@ -220,12 +246,6 @@ def _frame_at(
     return decoder.get_frame_at(index).data.permute(1, 2, 0).contiguous().cpu().numpy()
 
 
-def _rgb_color(track_id: int) -> tuple[int, int, int]:
-    """Convert LAMP's deterministic float color to Rerun bytes."""
-    red, green, blue, _ = color_from_id(track_id)
-    return round(red * 255.0), round(green * 255.0), round(blue * 255.0)
-
-
 def _log_camera_observations(
     cam: str,
     image: UInt8[ndarray, "h w 3"],
@@ -233,63 +253,66 @@ def _log_camera_observations(
     keypoints: Keypoints2d,
     keypoint_conf_min: float,
 ) -> None:
-    """Log one image with per-track COCO-17 boxes, joints, and edges."""
-    root = f"{RIG}/{cam}/pinhole"
-    rr.log(f"{root}/image", rr.Image(image, color_model=rr.ColorModel.RGB).compress(jpeg_quality=85))
-    rr.log(f"{root}/detections", rr.Clear(recursive=True))
-    boxes_xyxy = boxes.xyxy_numpy()
-    points_xy = keypoints.xy_numpy()
-    scores = keypoints.scores_numpy()
-    track_ids = (
+    """Log one half-resolution preview with per-track COCO-17 boxes and joints.
+
+    Detection and tracking consume the full-resolution frame; only the logged
+    preview and its overlay pixel coordinates are scaled by ``PREVIEW_SCALE``.
+    """
+    preview_root: str = f"{RIG}/{cam}/pinhole/preview"
+    height, width = int(image.shape[0]), int(image.shape[1])
+    preview: UInt8[ndarray, "preview_h preview_w 3"] = cv2.resize(
+        image,
+        (round(width * PREVIEW_SCALE), round(height * PREVIEW_SCALE)),
+        interpolation=cv2.INTER_AREA,
+    )
+    rr.log(f"{preview_root}/image", rr.Image(preview, color_model=rr.ColorModel.RGB).compress(jpeg_quality=85))
+    rr.log(f"{preview_root}/detections", rr.Clear(recursive=True))
+    boxes_xyxy: Float32[ndarray, "n 4"] = (boxes.xyxy_numpy() * PREVIEW_SCALE).astype(np.float32, copy=False)
+    points_xy: Float32[ndarray, "n k 2"] = (keypoints.xy_numpy() * PREVIEW_SCALE).astype(np.float32, copy=False)
+    scores: Float32[ndarray, "n k"] = keypoints.scores_numpy()
+    track_ids: Int64[ndarray, "n"] = (
         boxes.track_ids.detach().cpu().numpy().astype(np.int64, copy=False)
         if boxes.track_ids is not None
         else np.full(len(boxes_xyxy), -1, dtype=np.int64)
     )
-    edges = np.asarray(COCO_17.links, dtype=np.int64)
+    keypoint_ids: UInt16[ndarray, "k"] = np.arange(points_xy.shape[1], dtype=np.uint16)
     for row, track_id_raw in enumerate(track_ids):
         track_id = int(track_id_raw)
-        color = _rgb_color(track_id)
-        entity = f"{root}/detections/person_{track_id}"
-        rr.log(
-            f"{entity}/box",
-            rr.Boxes2D(
-                array=boxes_xyxy[row : row + 1],
-                array_format=rr.Box2DFormat.XYXY,
-                labels=f"person_{track_id}",
-                colors=color,
-                show_labels=True,
-            ),
+        log_person_bbox(boxes_xyxy[row], track_id, entity_path=f"{preview_root}/detections")
+        log_person_points2d(
+            f"{preview_root}/detections/person_{track_id}/keypoints",
+            points_xy[row],
+            scores[row],
+            keypoint_conf_min,
+            keypoint_ids=keypoint_ids,
+            class_ids=0,
         )
-        visible = scores[row] >= keypoint_conf_min
-        points = points_xy[row].copy()
-        points[~visible] = np.nan
-        rr.log(f"{entity}/keypoints", rr.Points2D(points, colors=color, radii=-3.0))
-        valid_edges = visible[edges].all(axis=1)
-        rr.log(f"{entity}/skeleton", rr.LineStrips2D(points_xy[row][edges[valid_edges]], colors=color, radii=-1.5))
 
 
 def _log_person(
-    tracker: LampTracker,
     state: PersonState,
+    vertices: Float32[ndarray, "verts 3"],
+    faces: Int[ndarray, "faces 3"],
     trails: dict[int, list[Float32[ndarray, "3"]]],
-    faces_logged: set[int],
 ) -> None:
-    """Log one person's latest SMPL joints, mesh, and pelvis trail."""
-    track_id = state.track_id
-    color = _rgb_color(track_id)
-    root = f"world/people/{track_id}"
-    joints = state.joints_world[-1]
-    edges = np.asarray(SMPL_SKELETON_EDGES, dtype=np.int64)
-    rr.log(f"{root}/skeleton", rr.Points3D(joints, colors=color, radii=0.025))
-    rr.log(f"{root}/skeleton/edges", rr.LineStrips3D(joints[edges], colors=color, radii=0.012))
-    trail = trails.setdefault(track_id, [])
+    """Log one person's latest SMPL joints, translucent mesh, and pelvis trail."""
+    track_id: int = state.track_id
+    color: tuple[int, int, int] = person_color(track_id)
+    root: str = f"world/people/{track_id}"
+    joints: Float32[ndarray, "24 3"] = state.joints_world[-1]
+    rr.log(f"{root}/joints", rr.Points3D(joints, keypoint_ids=range(24), class_ids=0, colors=color, radii=0.02))
+    trail: list[Float32[ndarray, "3"]] = trails.setdefault(track_id, [])
     trail.append(joints[0].copy())
     rr.log(f"{root}/pelvis_trail", rr.LineStrips3D([np.stack(trail)], colors=color, radii=0.01))
-    if track_id not in faces_logged:
-        rr.log(f"{root}/mesh", rr.Mesh3D.from_fields(triangle_indices=tracker.faces), static=True)
-        faces_logged.add(track_id)
-    vertices = tracker.smpl_vertices(state)[-1]
-    rr.log(f"{root}/mesh", rr.Mesh3D.from_fields(vertex_positions=vertices, albedo_factor=color))
+    rr.log(
+        f"{root}/mesh",
+        rr.Mesh3D(
+            vertex_positions=vertices,
+            triangle_indices=faces,
+            vertex_normals=compute_vertex_normals(vertices, faces),
+            albedo_factor=(*[channel / 255.0 for channel in color], 0.5),
+        ),
+    )
 
 
 def _log_rays(
@@ -315,7 +338,7 @@ def _log_rays(
         track_id = int(track_id_raw)
         rr.log(
             f"world/rays/{cam}/person_{track_id}",
-            rr.Arrows3D(origins=origins, vectors=directions, colors=_rgb_color(track_id)),
+            rr.Arrows3D(origins=origins, vectors=directions, colors=person_color(track_id)),
         )
 
 
@@ -349,7 +372,7 @@ def run(config: Config) -> RunMetrics:
     )
 
     rr.send_blueprint(build_blueprint(config.cams))
-    rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
+    log_static_context(config.cams)
     rig = Rig(
         index=0,
         calibration=RigCalibration(
@@ -364,10 +387,11 @@ def run(config: Config) -> RunMetrics:
     log_rig_static(rig)
 
     tracker_config = replace(config.tracker, floor_z=config.floor_z)
-    tracker = tracker_config.setup(device=device)
+    tracker: LampTracker = tracker_config.setup(device=device)
     tracker.configure_cameras(cameras)
+    faces: Int[ndarray, "faces 3"] = tracker.faces
     trails: dict[int, list[Float32[ndarray, "3"]]] = {}
-    faces_logged: set[int] = set()
+    people_logger = LivePeopleLogger()
     timing_rows: list[Float64[ndarray, "6"]] = []
     unique_people: set[int] = set()
     frames_with_people = 0
@@ -379,7 +403,9 @@ def run(config: Config) -> RunMetrics:
             [_frame_at(decoders[cam][0], decoders[cam][3], timestamp_ns) for cam in config.cams]
         ).astype(np.uint8, copy=False)
         step: LampStep = tracker.step(Frameset(timestamp_ns=timestamp_ns, images=images, world_T_rig=world_T_rig))
+        current_people = [state for state in step.people.values() if int(state.timestamps_ns[-1]) == timestamp_ns]
         rr.set_time(TIMELINE, duration=np.timedelta64(timestamp_ns, "ns"))
+        people_logger.update([state.track_id for state in current_people])
         rr.log(RIG, rr.Transform3D(mat3x3=world_T_rig[:3, :3], translation=world_T_rig[:3, 3]))
         for camera_index, (cam, camera, image) in enumerate(zip(config.cams, cameras, images, strict=True)):
             boxes = step.boxes_by_camera[camera_index]
@@ -387,12 +413,11 @@ def run(config: Config) -> RunMetrics:
             _log_camera_observations(cam, image, boxes, keypoints, tracker_config.keypoint_conf_min)
             if config.log_rays:
                 _log_rays(cam, camera, world_T_rig, boxes, keypoints, tracker_config.keypoint_conf_min)
-        current_people = [state for state in step.people.values() if int(state.timestamps_ns[-1]) == timestamp_ns]
         if current_people:
             frames_with_people += 1
         for state in current_people:
             unique_people.add(state.track_id)
-            _log_person(tracker, state, trails, faces_logged)
+            _log_person(state, tracker.smpl_vertices(state)[-1], faces, trails)
         timing_rows.append(
             np.asarray(
                 [
@@ -444,12 +469,14 @@ def main(config: Config) -> None:
 
 
 __all__ = (
+    "PREVIEW_SCALE",
     "Config",
     "RunMetrics",
     "best_detection_window",
     "build_blueprint",
     "build_time_grid",
     "interpolate_pose",
+    "log_static_context",
     "main",
     "run",
 )
