@@ -196,14 +196,9 @@ def _encode_depth(depth_m_hw: Float32[ndarray, "height width"], max_depth_m: flo
     ok, encoded = cv2.imencode(
         ".png",
         depth_mm,
-        [
-            cv2.IMWRITE_PNG_COMPRESSION,
-            9,
-            cv2.IMWRITE_PNG_STRATEGY,
-            cv2.IMWRITE_PNG_STRATEGY_FILTERED,
-            cv2.IMWRITE_PNG_FILTER,
-            cv2.IMWRITE_PNG_FILTER_UP,
-        ],
+        # zlib level 1: 16 ms per 1120x630 map vs 355 ms at level 9 with the filtered
+        # strategy, for a file only ~6 % larger (py-spy: level 9 was 60 % of the run).
+        [cv2.IMWRITE_PNG_COMPRESSION, 1],
     )
     if not ok:
         raise RuntimeError("OpenCV failed to encode rig-depth PNG")
