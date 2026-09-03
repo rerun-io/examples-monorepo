@@ -45097,6 +45097,7 @@ environments:
       - pypi: ./packages/monoprior
       - pypi: ./packages/sam3
       - pypi: ./packages/simplecv
+      - pypi: ./packages/trtkit
       - pypi: ./packages/zipdepth
       - pypi: https://files.pythonhosted.org/packages/02/36/ecc85bc96c273dc8a11273ed4782272975e6338d4a3e9228621175edf0e3/jaraco_functools-4.6.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/03/e8/5c880ffd8d4bb9df4cdf75ab8b44fc8f7011b6cb629b3e6242f3d5944b4f/stringzilla-5.1.2-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
@@ -45668,6 +45669,7 @@ environments:
       - pypi: ./packages/monoprior
       - pypi: ./packages/sam3
       - pypi: ./packages/simplecv
+      - pypi: ./packages/trtkit
       - pypi: ./packages/zipdepth
       - pypi: https://files.pythonhosted.org/packages/02/36/ecc85bc96c273dc8a11273ed4782272975e6338d4a3e9228621175edf0e3/jaraco_functools-4.6.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/07/42/a687e7091928806e514f89fa2666f25ec9bfe0a902fc4402b25e51ce408b/nh3-0.3.7-cp38-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
@@ -46261,6 +46263,7 @@ environments:
       - pypi: ./packages/monoprior
       - pypi: ./packages/sam3
       - pypi: ./packages/simplecv
+      - pypi: ./packages/trtkit
       - pypi: ./packages/zipdepth
       - pypi: https://files.pythonhosted.org/packages/02/36/ecc85bc96c273dc8a11273ed4782272975e6338d4a3e9228621175edf0e3/jaraco_functools-4.6.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/03/e8/5c880ffd8d4bb9df4cdf75ab8b44fc8f7011b6cb629b3e6242f3d5944b4f/stringzilla-5.1.2-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
@@ -46841,6 +46844,7 @@ environments:
       - pypi: ./packages/monoprior
       - pypi: ./packages/sam3
       - pypi: ./packages/simplecv
+      - pypi: ./packages/trtkit
       - pypi: ./packages/zipdepth
       - pypi: https://files.pythonhosted.org/packages/02/36/ecc85bc96c273dc8a11273ed4782272975e6338d4a3e9228621175edf0e3/jaraco_functools-4.6.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/07/42/a687e7091928806e514f89fa2666f25ec9bfe0a902fc4402b25e51ce408b/nh3-0.3.7-cp38-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl

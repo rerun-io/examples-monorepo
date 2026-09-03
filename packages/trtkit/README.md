@@ -90,6 +90,31 @@ strongly-typed network that takes dtypes from the graph — the escape hatch for
 fp16-overflow-prone ViTs). `allow_tf32=False` disables TF32 for strict-fp32
 models and is part of the cache key (`-notf32`).
 
+## Known TensorRT limitations
+
+**Dynamic batch + Myelin `CHECK(is_const())`.** A graph whose reshape depends on
+the batch symbol can fail to build with `dynamic_batch_max` set:
+
+```
+Could not find any implementation for node {ForeignNode[ONNXTRT_ShapeShuffle_…]}
+MyelinCheckException: value.h:872: CHECK(is_const()) failed
+```
+
+Seen with ZipDepth-base, whose `F.unfold` upsampling head dynamo lowers to a
+gather indexed off `Shape(...)`; head rewrites (`view(-1, …)`, static slices, the
+NPU head) only move the failure earlier, and it reproduces identically on
+TensorRT 10.16.1, 11.0.0, 11.1.0 and 11.2.1 on sm_120 (2026-08-30). It is a
+Myelin limitation on a non-constant leading dim, not a graph bug, and it is not
+in NVIDIA's release notes or tracker. Every other trtkit consumer here (PromptDA,
+MoGe, MammaNet, RTMW, Sapiens) builds fine with a dynamic batch profile.
+
+Workaround: export with `dynamic_batch_max=None` (static batch) and build one
+engine per batch size (`TrtBuildConfig(max_batch_size=b, opt_batch_size=b)`).
+Zero model change; upstream ZipDepth's own `export.py` hardcodes batch 1 for the
+same reason. Related: fp16 via `model.half()`, not autocast — an autocast export
+can leave a float conv kernel beside a half input, which a strongly-typed build
+rejects at parse time.
+
 ## Dev
 
 ```bash
