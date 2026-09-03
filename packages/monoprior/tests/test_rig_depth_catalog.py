@@ -14,9 +14,10 @@ def rr_config() -> RerunTyroConfig:
 
 
 def test_catalog_config_accepts_model_patch_grid(rr_config: RerunTyroConfig) -> None:
-    """The Robocap output size is 16:9 and divisible by the ViT patch size."""
+    """The four outward cameras use the larger patch-aligned 16:9 grid."""
     config = RigDepthCatalogConfig(rr_config=rr_config)
-    assert (config.width, config.height) == (896, 504)
+    assert config.cams == ("cam_00", "cam_01", "cam_04", "cam_05")
+    assert (config.width, config.height) == (1120, 630)
     assert config.fuse is False
 
 

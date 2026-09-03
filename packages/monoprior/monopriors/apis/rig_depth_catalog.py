@@ -1,6 +1,6 @@
 """Stream X-Lens fisheye rig depth from a Robocap catalog segment to Rerun.
 
-The tool samples the six calibrated rig videos on one ``video_time`` grid,
+The tool samples four calibrated outward-facing rig videos on one ``video_time`` grid,
 predicts per-view metric depth, and logs fisheye-safe 2D images plus a fused
 world point cloud. It never registers a catalog layer. The shared TSDF fuser is
 pinhole-only, so this tool deliberately does not synthesize a fisheye TSDF.
@@ -73,17 +73,17 @@ class RigDepthCatalogConfig:
     """Catalog dataset name."""
     segment_id: str = "robocap__f408193e6447b3b0__s00000021"
     """Robocap segment recording id."""
-    cams: tuple[str, ...] = ("cam_00", "cam_01", "cam_02", "cam_03", "cam_04", "cam_05")
-    """Rig camera entities sampled together."""
+    cams: tuple[str, ...] = ("cam_00", "cam_01", "cam_04", "cam_05")
+    """Outward rig cameras; the downward wearer-facing eye cameras 02/03 are out of distribution for X-Lens."""
     fps: float = 5.0
     """Framesets per second on the catalog ``video_time`` timeline."""
     start_s: float | None = None
     """Absolute ``video_time`` start in seconds; None starts at the first shared frame."""
     max_seconds: float = 60.0
     """Maximum interval processed after the chosen start."""
-    width: int = 896
+    width: int = 1120
     """Inference and logging width, divisible by the 14-pixel patch size."""
-    height: int = 504
+    height: int = 630
     """Inference and logging height, divisible by the 14-pixel patch size."""
     max_depth_m: float = 20.0
     """Reject farther points and encode farther depth pixels as zero."""
@@ -137,7 +137,7 @@ def rescaled_fisheye(camera: Fisheye62Parameters, *, width: int, height: int) ->
 
 
 def create_rig_depth_catalog_blueprint(cams: tuple[str, ...]) -> rrb.Blueprint:
-    """Lay out a fisheye-safe 3D view and 3x2 image/depth grids."""
+    """Lay out a fisheye-safe 3D view and 2x2 image/depth grids."""
     image_views: list[rrb.Spatial2DView] = [rrb.Spatial2DView(origin=f"{RIG_PATH}/{cam}/rig_depth/image", name=f"{cam} image") for cam in cams]
     depth_views: list[rrb.Spatial2DView] = [rrb.Spatial2DView(origin=f"{RIG_PATH}/{cam}/rig_depth/depth", name=f"{cam} depth") for cam in cams]
     exclusions: list[str] = [
@@ -147,8 +147,8 @@ def create_rig_depth_catalog_blueprint(cams: tuple[str, ...]) -> rrb.Blueprint:
         rrb.Horizontal(
             rrb.Spatial3DView(origin="world", name="moving rig + fused X-Lens points", contents=["$origin/**", *exclusions]),
             rrb.Vertical(
-                rrb.Grid(*image_views, grid_columns=3, name="fisheye RGB"),
-                rrb.Grid(*depth_views, grid_columns=3, name="metric depth"),
+                rrb.Grid(*image_views, grid_columns=2, name="fisheye RGB"),
+                rrb.Grid(*depth_views, grid_columns=2, name="metric depth"),
             ),
             column_shares=(2, 3),
         ),
