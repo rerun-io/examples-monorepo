@@ -7,10 +7,20 @@ with a least-squares scale-and-shift before metrics are computed.
 
 
 import numpy as np
+from jaxtyping import Float
+from numpy import ndarray
 
 # =============================================================================
 # ALIGNMENT
 # =============================================================================
+
+
+def fit_affine_least_squares(target: Float[ndarray, "n"], prediction: Float[ndarray, "n"]) -> tuple[float, float]:
+    """Fit ``scale * prediction + shift`` to equally shaped target values."""
+    design: Float[ndarray, "n 2"] = np.stack([prediction, np.ones_like(prediction)], axis=1)
+    coefficients: Float[ndarray, "2"] = np.linalg.lstsq(design, target, rcond=None)[0]
+    return float(coefficients[0]), float(coefficients[1])
+
 
 def align_depth_least_square(
     gt: np.ndarray,
@@ -47,9 +57,7 @@ def align_depth_least_square(
     if len(gt_valid) < 10:
         return pred.copy()
 
-    # Solve [pred, 1] @ [s, t]^T = gt in the least-squares sense.
-    A = np.stack([pred_valid, np.ones_like(pred_valid)], axis=1)
-    scale, shift = np.linalg.lstsq(A, gt_valid, rcond=None)[0]
+    scale, shift = fit_affine_least_squares(gt_valid, pred_valid)
     return scale * pred + shift
 
 

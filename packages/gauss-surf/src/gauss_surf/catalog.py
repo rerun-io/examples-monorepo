@@ -220,10 +220,9 @@ class SegmentReader:
             uint8 RGB frames shaped ``3 h w`` in requested timestamp order.
         """
         decoder: SegmentNvdecDecoder = SegmentNvdecDecoder(self.dataset, entity_path, TIMELINE, device, int(fps))
-        empty_raw: pa.ChunkedArray = pa.chunked_array([], type=pa.uint8())
         timestamps_verified: bool = False
         for timestamp in timestamps_n:
-            frame_chw: UInt8[Tensor, "3 h w"] | None = decoder.decode(empty_raw, timestamp, self.video_id)
+            frame_chw: UInt8[Tensor, "3 h w"] | None = decoder.decode_at(timestamp, self.video_id)
             if frame_chw is None:
                 raise RuntimeError(f"{entity_path} decoder returned no frame at requested timestamp {timestamp}")
             if not timestamps_verified:

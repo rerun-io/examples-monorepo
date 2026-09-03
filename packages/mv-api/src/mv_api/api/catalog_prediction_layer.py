@@ -107,12 +107,10 @@ class CatalogPredictionLayerConfig:
     segment's native exo frame rate from packet spacing. The dataloader always samples at (or above)
     the native rate: a sub-native grid drops reference packets before AV1 decode (RR-5087), which can
     cause deterministic ``InvalidDataError`` windows or silently wrong pixels."""
-    fetch_size: int = 64
+    fetch_block_size: int = 64
     """Number of samples fetched per Rerun catalog query."""
     video_codec: str = "av1"
     """Video codec passed to Rerun's ``VideoFrameDecoder``."""
-    keyframe_interval: int = 300
-    """Keyframe interval passed to Rerun's ``VideoFrameDecoder``."""
     tracker_mode: Literal["lightweight", "balanced", "performance", "wholebody"] = "wholebody"
     """MVAPI tracker model preset."""
     tracker_device: Literal["cpu", "cuda"] = "cuda"
@@ -978,6 +976,7 @@ def build_rerun_iterable_dataset(
         DataSource,
         Field,
         FixedRateSampling,
+        NoShuffle,
         RerunIterableDataset,
         VideoFrameDecoder,
     )
@@ -990,11 +989,7 @@ def build_rerun_iterable_dataset(
     fields: dict[str, Any] = {
         stream.name: Field(
             path=stream.field_path,
-            decode=VideoFrameDecoder(
-                codec=config.video_codec,
-                keyframe_interval=config.keyframe_interval,
-                fps_estimate=native_fps,
-            ),
+            decode=VideoFrameDecoder(codec=config.video_codec),
         )
         for stream in streams
     }
@@ -1004,8 +999,8 @@ def build_rerun_iterable_dataset(
         index=CATALOG_TIMELINE,
         fields=fields,
         timeline_sampling=FixedRateSampling(rate_hz=native_fps),
-        fetch_size=config.fetch_size,
-        shuffle=False,
+        fetch_block_size=config.fetch_block_size,
+        shuffle_strategy=NoShuffle(),
     )
 
 
@@ -1260,7 +1255,7 @@ def _run_mvapi_inference(
         raise ValueError(
             f"Selected segment {segment.recording_id!r} produced no fully decoded exo frame sets on "
             f"{CATALOG_TIMELINE!r}; skipped {skipped_decode_frames} samples with undecoded video frames. "
-            "Increase keyframe_interval or verify VideoStream keyframes are present."
+            "Verify that VideoStream keyframes are present in the catalog segment."
         )
 
     flush = getattr(recording, "flush", None)
