@@ -33,6 +33,7 @@ from zipdepth.training.trainer import ZipDepthTrainer
 AmpDtype: TypeAlias = Literal["bfloat16", "float16"]
 CompileMode: TypeAlias = Literal["off", "default", "reduce-overhead", "max-autotune"]
 ScheduleName: TypeAlias = Literal["onecycle", "constant-cooldown"]
+TrainPreset: TypeAlias = Literal["v4", "fast"]
 
 
 @serde
@@ -195,6 +196,8 @@ class TrainCatalogConfig:
     """OneCycle peak LR; None uses config LR / 100 for fine-tuning and config LR from scratch.
     Measured on the fixed probe set: at config/10 (1e-4, batch 4) fine-tuning diverges once
     warmup ends; at config/100 (1e-5) it improves the probe loss ~29% in 120 steps."""
+    preset: TrainPreset = "v4"
+    """Named training recipe. ``fast`` intentionally matches ``v4`` until the hill-climb winner lands."""
     compile_mode: CompileMode = "reduce-overhead"
     """``torch.compile`` mode for the student; ``off`` disables it. Beartype dev mode
     disables compilation regardless of this setting."""
@@ -233,6 +236,31 @@ class ResolutionStage:
 
 @serde
 @dataclass(frozen=True, slots=True)
+class TrainingRecipe:
+    """Resolved runtime controls selected by a preset and explicit overrides."""
+
+    compile_mode: CompileMode
+    """torch.compile mode, or ``off``."""
+    channels_last: bool
+    """Whether model and batch tensors use channels-last storage."""
+    fused_adamw: bool
+    """Whether AdamW uses its fused implementation."""
+    amp_dtype: AmpDtype
+    """Automatic mixed-precision dtype."""
+    schedule: ScheduleName
+    """Learning-rate schedule name."""
+    warmup_pct: float
+    """OneCycle warmup fraction."""
+    final_div_factor: float
+    """Ratio between the initial and final learning rates."""
+    cooldown_pct: float
+    """Constant-cooldown tail fraction."""
+    stage_schedule: str | None
+    """Optional progressive-resolution schedule."""
+
+
+@serde
+@dataclass(frozen=True, slots=True)
 class ResolvedTrainCatalogConfig:
     """Catalog training configuration plus values resolved at runtime."""
 
@@ -246,6 +274,8 @@ class ResolvedTrainCatalogConfig:
     """Total optimizer steps in the run."""
     resolved_max_lr: float
     """Peak learning rate after applying the initialization policy."""
+    recipe: TrainingRecipe
+    """Fully resolved runtime recipe used by training."""
 
 
 def resolve_max_lr(config_lr: float, override: float | None, from_scratch: bool) -> float:
@@ -259,6 +289,29 @@ def resolve_max_lr(config_lr: float, override: float | None, from_scratch: bool)
 def resolve_amp_dtype(override: AmpDtype | None, configured: AmpDtype) -> AmpDtype:
     """Resolve the CLI AMP dtype override against the upstream JSON setting."""
     return configured if override is None else override
+
+
+def resolve_training_recipe(
+    config: TrainCatalogConfig,
+    scheduler_config: UpstreamSchedulerConfig,
+    amp_config: UpstreamAmpConfig,
+) -> TrainingRecipe:
+    """Resolve v4/fast plus explicit hill-climb overrides into runtime values."""
+    if config.preset not in ("v4", "fast"):
+        raise ValueError(f"unknown training preset {config.preset!r}")
+    # The fast recipe is deliberately the v4 recipe until measured hill-climb results
+    # select different defaults. Explicit flags remain usable for every trial arm.
+    return TrainingRecipe(
+        compile_mode=config.compile_mode,
+        channels_last=config.channels_last,
+        fused_adamw=config.fused_adamw,
+        amp_dtype=resolve_amp_dtype(config.amp_dtype, amp_config.dtype),
+        schedule=config.schedule,
+        warmup_pct=scheduler_config.pct_start if config.warmup_pct is None else config.warmup_pct,
+        final_div_factor=scheduler_config.final_div_factor if config.final_div_factor is None else config.final_div_factor,
+        cooldown_pct=config.cooldown_pct,
+        stage_schedule=config.stage_schedule,
+    )
 
 
 def parse_stage_schedule(specification: str | None, total_steps: int, height: int, width: int) -> list[ResolutionStage]:
@@ -544,7 +597,6 @@ def main(
             raise ValueError("save_every_steps must be non-negative")
         if config.target_mode not in ("ssi", "metric"):
             raise ValueError(f"unknown target mode {config.target_mode!r}")
-        stages: list[ResolutionStage] = parse_stage_schedule(config.stage_schedule, config.total_steps, config.height, config.width)
         torch.backends.cudnn.benchmark = True
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
@@ -571,9 +623,8 @@ def main(
         training_config: UpstreamTrainingConfig = upstream_config.training
         config_lr: float = optimizer_config.lr
         actual_max_lr: float = resolve_max_lr(config_lr, config.max_lr, config.from_scratch)
-        actual_amp_dtype: AmpDtype = resolve_amp_dtype(config.amp_dtype, amp_config.dtype)
-        warmup_pct: float = scheduler_config.pct_start if config.warmup_pct is None else config.warmup_pct
-        final_div_factor: float = scheduler_config.final_div_factor if config.final_div_factor is None else config.final_div_factor
+        recipe: TrainingRecipe = resolve_training_recipe(config, scheduler_config, amp_config)
+        stages: list[ResolutionStage] = parse_stage_schedule(recipe.stage_schedule, config.total_steps, config.height, config.width)
 
         if is_main:
             config.save_dir.mkdir(parents=True, exist_ok=True)
@@ -587,6 +638,7 @@ def main(
                 steps_per_epoch=steps_per_epoch,
                 total_steps=total_steps,
                 resolved_max_lr=actual_max_lr,
+                recipe=recipe,
             )
             (config.save_dir / "resolved_config.json").write_text(to_json(resolved) + "\n", encoding="utf-8")
         barrier()
@@ -660,7 +712,7 @@ def main(
         if pin_batchnorm_eval:
             pinned: int = sum(isinstance(module, nn.modules.batchnorm._BatchNorm) for module in model.modules())
             print_main(f"Pinned {pinned} BatchNorm modules to eval (released running stats)", rank)
-        model = _model_to_device(model, device, config.channels_last)
+        model = _model_to_device(model, device, recipe.channels_last)
         wrapped_model: nn.Module | DDP = (
             DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False) if is_distributed else model
         )
@@ -669,17 +721,17 @@ def main(
             model,
             lr=actual_max_lr,
             weight_decay=optimizer_config.weight_decay,
-            fused=config.fused_adamw,
+            fused=recipe.fused_adamw,
         )
         scheduler: optim.lr_scheduler.LRScheduler = _build_scheduler(
             optimizer,
-            schedule=config.schedule,
+            schedule=recipe.schedule,
             max_lr=actual_max_lr,
             total_steps=total_steps,
-            warmup_pct=warmup_pct,
+            warmup_pct=recipe.warmup_pct,
             div_factor=scheduler_config.div_factor,
-            final_div_factor=final_div_factor,
-            cooldown_pct=config.cooldown_pct,
+            final_div_factor=recipe.final_div_factor,
+            cooldown_pct=recipe.cooldown_pct,
         )
         trainer: ZipDepthTrainer = ZipDepthTrainer(
             student=wrapped_model,
@@ -692,9 +744,9 @@ def main(
             is_distributed=is_distributed,
             rank=rank,
             world_size=world_size,
-            amp_dtype=actual_amp_dtype,
-            compile_mode=config.compile_mode,
-            channels_last=config.channels_last,
+            amp_dtype=recipe.amp_dtype,
+            compile_mode=recipe.compile_mode,
+            channels_last=recipe.channels_last,
             alpha_ssi=loss_config.alpha_ssi,
             alpha_grad=loss_config.alpha_grad,
             target_mode=config.target_mode,
@@ -714,10 +766,10 @@ def main(
                 total_steps=total_steps,
                 actual_max_lr=actual_max_lr,
                 scheduler_config=scheduler_config,
-                schedule=config.schedule,
-                warmup_pct=warmup_pct,
-                final_div_factor=final_div_factor,
-                cooldown_pct=config.cooldown_pct,
+                schedule=recipe.schedule,
+                warmup_pct=recipe.warmup_pct,
+                final_div_factor=recipe.final_div_factor,
+                cooldown_pct=recipe.cooldown_pct,
             )
             train_loader.set_global_step(trainer.global_step)
 

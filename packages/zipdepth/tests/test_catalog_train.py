@@ -13,6 +13,8 @@ from zipdepth.apis.train_catalog import (
     ConstantCooldownLR,
     ResolutionStage,
     TrainCatalogConfig,
+    TrainingRecipe,
+    UpstreamTrainConfig,
     _adamw_optimizer,
     _build_scheduler,
     _load_json_config,
@@ -20,6 +22,7 @@ from zipdepth.apis.train_catalog import (
     parse_stage_schedule,
     resolve_amp_dtype,
     resolve_max_lr,
+    resolve_training_recipe,
 )
 from zipdepth.catalog.segments import split_holdout_segments
 from zipdepth.loss import MetricDepthLoss, ZipDepthLoss
@@ -316,6 +319,58 @@ def test_checkpoint_carries_the_progressive_resolution_stage(tmp_path: Path) -> 
 
     assert isinstance(saved, dict)
     assert saved["training_stage"] == 1
+
+
+def test_v4_and_reserved_fast_presets_match_todays_recipe() -> None:
+    """Keep v4 bit-compatible and leave fast unchanged until the hill-climb picks a winner."""
+    upstream: UpstreamTrainConfig = _load_json_config(Path("configs/default.json"))
+
+    v4: TrainingRecipe = resolve_training_recipe(TrainCatalogConfig(preset="v4"), upstream.scheduler, upstream.amp)
+    fast: TrainingRecipe = resolve_training_recipe(TrainCatalogConfig(preset="fast"), upstream.scheduler, upstream.amp)
+
+    assert v4 == TrainingRecipe(
+        compile_mode="reduce-overhead",
+        channels_last=False,
+        fused_adamw=False,
+        amp_dtype="bfloat16",
+        schedule="onecycle",
+        warmup_pct=0.05,
+        final_div_factor=1000.0,
+        cooldown_pct=0.1,
+        stage_schedule=None,
+    )
+    assert fast == v4
+
+
+def test_explicit_training_knobs_override_the_named_preset() -> None:
+    """Let a hill-climb arm replace any individual value without defining a new preset."""
+    upstream: UpstreamTrainConfig = _load_json_config(Path("configs/default.json"))
+    config: TrainCatalogConfig = TrainCatalogConfig(
+        preset="fast",
+        compile_mode="off",
+        channels_last=True,
+        fused_adamw=True,
+        amp_dtype="float16",
+        schedule="constant-cooldown",
+        warmup_pct=0.2,
+        final_div_factor=20.0,
+        cooldown_pct=0.3,
+        stage_schedule="384x512:0.3,768x1024:0.7",
+    )
+
+    recipe: TrainingRecipe = resolve_training_recipe(config, upstream.scheduler, upstream.amp)
+
+    assert recipe == TrainingRecipe(
+        compile_mode="off",
+        channels_last=True,
+        fused_adamw=True,
+        amp_dtype="float16",
+        schedule="constant-cooldown",
+        warmup_pct=0.2,
+        final_div_factor=20.0,
+        cooldown_pct=0.3,
+        stage_schedule="384x512:0.3,768x1024:0.7",
+    )
 
 
 @pytest.mark.parametrize(("skip_batches", "expected_skip"), [(0, 0), (None, 3)])
