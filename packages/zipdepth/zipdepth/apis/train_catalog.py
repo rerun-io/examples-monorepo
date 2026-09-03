@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 from dataclasses import dataclass, field
+from math import ceil
 from pathlib import Path
 from typing import Literal, TypeAlias
 
@@ -31,6 +32,7 @@ from zipdepth.training.trainer import ZipDepthTrainer
 
 AmpDtype: TypeAlias = Literal["bfloat16", "float16"]
 CompileMode: TypeAlias = Literal["off", "default", "reduce-overhead", "max-autotune"]
+ScheduleName: TypeAlias = Literal["onecycle", "constant-cooldown"]
 
 
 @serde
@@ -202,6 +204,14 @@ class TrainCatalogConfig:
     """Use the fused CUDA AdamW implementation."""
     amp_dtype: AmpDtype | None = None
     """AMP dtype override; None keeps the upstream JSON setting."""
+    schedule: ScheduleName = "onecycle"
+    """Learning-rate schedule."""
+    warmup_pct: float | None = None
+    """OneCycle warmup fraction; None keeps the upstream JSON setting."""
+    final_div_factor: float | None = None
+    """Ratio between the initial and final learning rates; None keeps the upstream JSON setting."""
+    cooldown_pct: float = 0.1
+    """Fraction of total steps used by the linear tail of ``constant-cooldown``."""
 
 
 @serde
@@ -290,22 +300,78 @@ def load_trainable_checkpoint(model: ZipDepth, checkpoint: Path) -> None:
     model.load_state_dict(load_zipdepth_state_dict(checkpoint), strict=True)
 
 
-def _one_cycle_scheduler(
+class ConstantCooldownLR(optim.lr_scheduler.LRScheduler):
+    """Hold the peak learning rate, then linearly cool to its final ratio."""
+
+    def __init__(
+        self,
+        optimizer: optim.Optimizer,
+        max_lr: float,
+        total_steps: int,
+        cooldown_pct: float,
+        final_div_factor: float,
+        last_epoch: int = -1,
+    ) -> None:
+        """Configure a step-counted constant schedule with a linear cooldown."""
+        if total_steps <= 0:
+            raise ValueError("total_steps must be positive")
+        if not 0.0 < cooldown_pct <= 1.0:
+            raise ValueError("cooldown_pct must be in (0, 1]")
+        if final_div_factor <= 0.0:
+            raise ValueError("final_div_factor must be positive")
+        self.total_steps: int = total_steps
+        self.cooldown_steps: int = max(1, ceil(total_steps * cooldown_pct))
+        self.constant_steps: int = total_steps - self.cooldown_steps
+        self.final_factor: float = 1.0 / final_div_factor
+        group: dict[str, object]
+        for group in optimizer.param_groups:
+            group["lr"] = max_lr
+            group["initial_lr"] = max_lr
+        super().__init__(optimizer, last_epoch=last_epoch)
+
+    def get_lr(self) -> list[float | Tensor]:
+        """Return the learning rate for the scheduler's current step."""
+        step: int = min(self.last_epoch, self.total_steps)
+        if step <= self.constant_steps:
+            factor: float = 1.0
+        else:
+            progress: float = (step - self.constant_steps) / self.cooldown_steps
+            factor = 1.0 + (self.final_factor - 1.0) * progress
+        return [base_lr * factor for base_lr in self.base_lrs]
+
+
+def _build_scheduler(
     optimizer: optim.Optimizer,
+    *,
+    schedule: ScheduleName,
     max_lr: float,
     total_steps: int,
-    scheduler_config: UpstreamSchedulerConfig,
+    warmup_pct: float,
+    div_factor: float,
+    final_div_factor: float,
+    cooldown_pct: float,
     last_epoch: int = -1,
-) -> optim.lr_scheduler.OneCycleLR:
-    """Build the upstream OneCycle schedule with resolved total steps."""
-    return optim.lr_scheduler.OneCycleLR(
+) -> optim.lr_scheduler.LRScheduler:
+    """Build the selected step-counted learning-rate schedule."""
+    if schedule == "onecycle":
+        if not 0.0 < warmup_pct <= 1.0:
+            raise ValueError("warmup_pct must be in (0, 1]")
+        return optim.lr_scheduler.OneCycleLR(
+            optimizer,
+            max_lr=max_lr,
+            total_steps=total_steps,
+            pct_start=warmup_pct,
+            anneal_strategy="cos",
+            div_factor=div_factor,
+            final_div_factor=final_div_factor,
+            last_epoch=last_epoch,
+        )
+    return ConstantCooldownLR(
         optimizer,
         max_lr=max_lr,
         total_steps=total_steps,
-        pct_start=scheduler_config.pct_start,
-        anneal_strategy="cos",
-        div_factor=scheduler_config.div_factor,
-        final_div_factor=scheduler_config.final_div_factor,
+        cooldown_pct=cooldown_pct,
+        final_div_factor=final_div_factor,
         last_epoch=last_epoch,
     )
 
@@ -327,6 +393,10 @@ def _restore_resume_state(
     total_steps: int,
     actual_max_lr: float,
     scheduler_config: UpstreamSchedulerConfig,
+    schedule: ScheduleName,
+    warmup_pct: float,
+    final_div_factor: float,
+    cooldown_pct: float,
 ) -> None:
     """Restore model, optimizer, schedule, and trainer step."""
     print_main(f"Resuming from: {resume}", trainer.rank)
@@ -366,15 +436,19 @@ def _restore_resume_state(
     if scheduler_state is not None and old_total_steps == total_steps:
         trainer.scheduler.load_state_dict(scheduler_state)
     else:
-        rebased_scheduler: optim.lr_scheduler.OneCycleLR = _one_cycle_scheduler(
+        rebased_scheduler: optim.lr_scheduler.LRScheduler = _build_scheduler(
             trainer.optimizer,
-            actual_max_lr,
-            total_steps,
-            scheduler_config,
+            schedule=schedule,
+            max_lr=actual_max_lr,
+            total_steps=total_steps,
+            warmup_pct=warmup_pct,
+            div_factor=scheduler_config.div_factor,
+            final_div_factor=final_div_factor,
+            cooldown_pct=cooldown_pct,
             last_epoch=trainer.global_step - 1,
         )
         trainer.scheduler = rebased_scheduler
-        print_main(f"Rebased OneCycle schedule from {old_total_steps} to {total_steps} total steps", trainer.rank)
+        print_main(f"Rebased {schedule} schedule from {old_total_steps} to {total_steps} total steps", trainer.rank)
 
 
 def main(
@@ -428,6 +502,8 @@ def main(
         config_lr: float = optimizer_config.lr
         actual_max_lr: float = resolve_max_lr(config_lr, config.max_lr, config.from_scratch)
         actual_amp_dtype: AmpDtype = resolve_amp_dtype(config.amp_dtype, amp_config.dtype)
+        warmup_pct: float = scheduler_config.pct_start if config.warmup_pct is None else config.warmup_pct
+        final_div_factor: float = scheduler_config.final_div_factor if config.final_div_factor is None else config.final_div_factor
 
         if is_main:
             config.save_dir.mkdir(parents=True, exist_ok=True)
@@ -521,7 +597,16 @@ def main(
             weight_decay=optimizer_config.weight_decay,
             fused=config.fused_adamw,
         )
-        scheduler: optim.lr_scheduler.OneCycleLR = _one_cycle_scheduler(optimizer, actual_max_lr, total_steps, scheduler_config)
+        scheduler: optim.lr_scheduler.LRScheduler = _build_scheduler(
+            optimizer,
+            schedule=config.schedule,
+            max_lr=actual_max_lr,
+            total_steps=total_steps,
+            warmup_pct=warmup_pct,
+            div_factor=scheduler_config.div_factor,
+            final_div_factor=final_div_factor,
+            cooldown_pct=config.cooldown_pct,
+        )
         trainer: ZipDepthTrainer = ZipDepthTrainer(
             student=wrapped_model,
             train_loader=train_loader,
@@ -555,6 +640,10 @@ def main(
                 total_steps=total_steps,
                 actual_max_lr=actual_max_lr,
                 scheduler_config=scheduler_config,
+                schedule=config.schedule,
+                warmup_pct=warmup_pct,
+                final_div_factor=final_div_factor,
+                cooldown_pct=config.cooldown_pct,
             )
             train_loader.set_global_step(trainer.global_step)
 

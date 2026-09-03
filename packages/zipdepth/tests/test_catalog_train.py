@@ -10,8 +10,10 @@ from tqdm import tqdm
 
 from zipdepth.apis.train_catalog import (
     CompileMode,
+    ConstantCooldownLR,
     TrainCatalogConfig,
     _adamw_optimizer,
+    _build_scheduler,
     _load_json_config,
     _model_to_device,
     resolve_amp_dtype,
@@ -165,6 +167,108 @@ def test_catalog_training_uses_one_explicit_optimizer_step_schedule() -> None:
     assert config.total_steps == 70_000
     assert not hasattr(config, "epochs")
     assert not hasattr(config, "max_steps")
+
+
+def test_scheduler_defaults_match_existing_onecycle_state() -> None:
+    """Construct the same OneCycle scheduler and optimizer state as today's recipe."""
+    config: TrainCatalogConfig = TrainCatalogConfig()
+    expected_model: nn.Linear = nn.Linear(1, 1)
+    actual_model: nn.Linear = nn.Linear(1, 1)
+    expected_optimizer: optim.AdamW = optim.AdamW(expected_model.parameters(), lr=1e-5, weight_decay=0.05)
+    actual_optimizer: optim.AdamW = optim.AdamW(actual_model.parameters(), lr=1e-5, weight_decay=0.05)
+    expected: optim.lr_scheduler.OneCycleLR = optim.lr_scheduler.OneCycleLR(
+        expected_optimizer,
+        max_lr=1e-5,
+        total_steps=100,
+        pct_start=0.05,
+        anneal_strategy="cos",
+        div_factor=25.0,
+        final_div_factor=1000.0,
+    )
+    actual: optim.lr_scheduler.LRScheduler = _build_scheduler(
+        actual_optimizer,
+        schedule=config.schedule,
+        max_lr=1e-5,
+        total_steps=100,
+        warmup_pct=0.05,
+        div_factor=25.0,
+        final_div_factor=1000.0,
+        cooldown_pct=config.cooldown_pct,
+    )
+
+    assert config.schedule == "onecycle"
+    assert config.warmup_pct is None
+    assert config.final_div_factor is None
+    assert config.cooldown_pct == 0.1
+    assert isinstance(actual, optim.lr_scheduler.OneCycleLR)
+    assert actual.state_dict() == expected.state_dict()
+    assert actual_optimizer.state_dict() == expected_optimizer.state_dict()
+
+
+def test_onecycle_overrides_change_the_lr_trajectory() -> None:
+    """Pass warmup percentage and final division through to OneCycleLR."""
+    default_model: nn.Linear = nn.Linear(1, 1)
+    tuned_model: nn.Linear = nn.Linear(1, 1)
+    default_optimizer: optim.SGD = optim.SGD(default_model.parameters(), lr=1e-3)
+    tuned_optimizer: optim.SGD = optim.SGD(tuned_model.parameters(), lr=1e-3)
+    default_scheduler: optim.lr_scheduler.LRScheduler = _build_scheduler(
+        default_optimizer,
+        schedule="onecycle",
+        max_lr=1e-3,
+        total_steps=100,
+        warmup_pct=0.05,
+        div_factor=25.0,
+        final_div_factor=1000.0,
+        cooldown_pct=0.1,
+    )
+    tuned_scheduler: optim.lr_scheduler.LRScheduler = _build_scheduler(
+        tuned_optimizer,
+        schedule="onecycle",
+        max_lr=1e-3,
+        total_steps=100,
+        warmup_pct=0.25,
+        div_factor=25.0,
+        final_div_factor=10.0,
+        cooldown_pct=0.1,
+    )
+    default_lrs: list[float] = [default_optimizer.param_groups[0]["lr"]]
+    tuned_lrs: list[float] = [tuned_optimizer.param_groups[0]["lr"]]
+    for _ in range(100):
+        default_optimizer.step()
+        tuned_optimizer.step()
+        default_scheduler.step()
+        tuned_scheduler.step()
+        default_lrs.append(default_optimizer.param_groups[0]["lr"])
+        tuned_lrs.append(tuned_optimizer.param_groups[0]["lr"])
+
+    assert tuned_lrs != default_lrs
+    assert tuned_lrs[20] > default_lrs[20]
+    assert tuned_lrs[-1] > default_lrs[-1]
+
+
+def test_constant_cooldown_is_flat_then_linear() -> None:
+    """Hold max LR before cooling linearly over the requested final fraction."""
+    model: nn.Linear = nn.Linear(1, 1)
+    optimizer: optim.SGD = optim.SGD(model.parameters(), lr=1.0)
+    scheduler: optim.lr_scheduler.LRScheduler = _build_scheduler(
+        optimizer,
+        schedule="constant-cooldown",
+        max_lr=1.0,
+        total_steps=10,
+        warmup_pct=0.05,
+        div_factor=25.0,
+        final_div_factor=10.0,
+        cooldown_pct=0.3,
+    )
+    lrs: list[float] = [optimizer.param_groups[0]["lr"]]
+    for _ in range(10):
+        optimizer.step()
+        scheduler.step()
+        lrs.append(optimizer.param_groups[0]["lr"])
+
+    assert isinstance(scheduler, ConstantCooldownLR)
+    assert lrs[:8] == [1.0] * 8
+    assert lrs[8:] == pytest.approx([0.7, 0.4, 0.1])
 
 
 @pytest.mark.parametrize(("skip_batches", "expected_skip"), [(0, 0), (None, 3)])
