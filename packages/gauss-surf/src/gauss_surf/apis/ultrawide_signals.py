@@ -324,7 +324,7 @@ def _process_and_write(
         depth_png_blobs: list[bytes] = []
         for batch_offset, _timestamp in enumerate(batch_timestamps_n):
             frame_chw: UInt8[Tensor, "3 h w"] = next(decoded_frames)
-            frame_hwc: UInt8[Tensor, "h w 3"] = rearrange(frame_chw, "c h w -> h w c")  # pyrefly: ignore  # bad-argument-type — einops stub
+            frame_hwc: UInt8[Tensor, "h w 3"] = rearrange(frame_chw, "c h w -> h w c")
             rgb_hw3: UInt8[ndarray, "h w 3"] = frame_hwc.cpu().numpy().astype(np.uint8, copy=False)
             if rgb_hw3.shape != (ULTRAWIDE_IMAGE_HW[0], ULTRAWIDE_IMAGE_HW[1], 3):
                 raise RuntimeError(f"decoded ultrawide frame has shape {rgb_hw3.shape}, expected (480, 640, 3)")
