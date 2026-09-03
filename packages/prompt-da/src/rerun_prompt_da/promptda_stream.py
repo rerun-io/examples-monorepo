@@ -28,18 +28,13 @@ from rerun.experimental.dataloader import (
     NumericDecoder,
     RerunIterableDataset,
 )
-from simplecv.rerun_dataloader import SegmentNvdecDecoder
+from simplecv.rerun_dataloader import RECOMMENDED_FETCH_BLOCK_SIZE, SegmentNvdecDecoder
 from torch import Tensor
 
 from rerun_prompt_da.apis.arkitscenes_shared import world_t_cam_from_pose
 
 NATIVE_FPS: float = 60.0
 """Frame rate of the stored wide-camera AV1 stream."""
-FETCH_SIZE: int = 1024
-"""Samples per catalog query. The NVDEC decoder ignores the shipped payloads, so
-fewer round-trips win (measured in ``mvs``: 256 -> 10.3 s, 1024 -> 3.5 s, 2048 flat)."""
-
-
 class PromptDARow(TypedDict):
     """One raw Rerun dataloader sample; keys match ``promptda_dataset``'s fields.
 
@@ -114,8 +109,8 @@ def promptda_dataset(dataset: DatasetEntry, segment_id: str, target_fps: float, 
         index=TIMELINE,
         fields=fields,
         timeline_sampling=FixedRateSampling(rate_hz=target_fps),
-        shuffle_strategy=NoShuffle(),  # pyrefly: ignore  # unexpected-keyword — prompt-da's stream lane runs the 0.36 prerelease API
-        fetch_size=FETCH_SIZE,
+        shuffle_strategy=NoShuffle(),
+        fetch_block_size=RECOMMENDED_FETCH_BLOCK_SIZE,
     )
     return samples, video_decoder
 
@@ -189,7 +184,7 @@ class PromptDACollate:
             frame_indices.append(self._grid_index)
             timestamps_ns.append(self._index_start_ns + self._grid_index * self._ns_per_sample)
             frames_3hw.append(frame_chw)
-            prompts_hw.append(rearrange(depth_1hw, "1 h w -> h w"))  # pyrefly: ignore  # bad-argument-type — einops stub false positive
+            prompts_hw.append(rearrange(depth_1hw, "1 h w -> h w"))
             confidence_hw: UInt8[Tensor, "stored_prompt_h stored_prompt_w"] = confidence_n.reshape(depth_1hw.shape[1:])
             confidences_hw.append(confidence_hw)
             # Rerun stores Pinhole image_from_camera flattened column-major.
@@ -250,7 +245,7 @@ def assemble_promptda_batch(
         frame_indices=frame_indices,
         timestamps_ns=timestamps_ns,
         quarter_turns=turns,
-        rgb_bhw3=rearrange(rgb_b3hw, "b c h w -> b h w c"),  # pyrefly: ignore  # bad-argument-type — einops stub false positive
+        rgb_bhw3=rearrange(rgb_b3hw, "b c h w -> b h w c"),
         prompt_bhw=prompt_bhw.float() / 1000.0,
         prompt_mm_bhw=prompt_stored_bhw.cpu().numpy().astype(np.uint16),
         confidence_bhw=confidence_stored_bhw.cpu().numpy().astype(np.uint8),

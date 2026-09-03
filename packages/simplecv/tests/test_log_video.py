@@ -11,6 +11,7 @@ import av
 import numpy as np
 import pytest
 import rerun as rr
+import rerun.experimental as rrx
 from jaxtyping import Int64, UInt8
 from numpy import ndarray
 from pyarrow import ChunkedArray
@@ -180,11 +181,21 @@ def test_log_video_sends_chunks_incrementally(synthetic_h264_mp4: Path, monkeypa
     """The recording receives Mp4Reader's lazy iterator instead of a materialized chunk list."""
     received: list[rr.experimental.Chunk] = []
 
+    exhausted: list[bool] = []
+    real_stream = rrx.Mp4Reader.stream
+
+    def stream_marking_exhaustion(self: rrx.Mp4Reader) -> Iterator[rr.experimental.Chunk]:
+        yield from real_stream(self)
+        exhausted.append(True)
+
+    monkeypatch.setattr(rrx.Mp4Reader, "stream", stream_marking_exhaustion)
+
     def consume_lazily(_recording: rr.RecordingStream, chunks: Iterable[rr.experimental.Chunk]) -> None:
-        assert not isinstance(chunks, list)
         chunk_iterator: Iterator[rr.experimental.Chunk] = iter(chunks)
-        assert chunk_iterator is chunks
-        received.extend(chunks)
+        received.append(next(chunk_iterator))
+        assert not exhausted, "the first chunk must be delivered before the source stream is fully consumed"
+        received.extend(chunk_iterator)
+        assert exhausted
 
     monkeypatch.setattr(rr.RecordingStream, "send_chunks", consume_lazily)
     rec: rr.RecordingStream = rr.RecordingStream(application_id="test-log-video-lazy", recording_id="lazy")
@@ -192,6 +203,32 @@ def test_log_video_sends_chunks_incrementally(synthetic_h264_mp4: Path, monkeypa
     timestamps_ns: Int64[ndarray, "num_frames"] = log_video(synthetic_h264_mp4, Path("/video"), recording=rec)
 
     assert received
+    assert len(timestamps_ns) == _FRAME_COUNT
+
+
+def test_log_video_does_not_materialize_static_chunks(synthetic_h264_mp4: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Forward static metadata without converting it to an Arrow record batch."""
+    real_stream = rrx.Mp4Reader.stream
+
+    class StaticChunk:
+        is_static: bool = True
+
+        def to_record_batch(self) -> None:
+            raise AssertionError("static chunks must not be materialized")
+
+    def stream_with_static(self: rrx.Mp4Reader) -> Iterator[object]:
+        yield StaticChunk()
+        yield from real_stream(self)
+
+    def consume(_recording: rr.RecordingStream, chunks: Iterable[object]) -> None:
+        list(chunks)
+
+    monkeypatch.setattr(rrx.Mp4Reader, "stream", stream_with_static)
+    monkeypatch.setattr(rr.RecordingStream, "send_chunks", consume)
+    rec: rr.RecordingStream = rr.RecordingStream(application_id="test-log-video-static", recording_id="static")
+
+    timestamps_ns: Int64[ndarray, "num_frames"] = log_video(synthetic_h264_mp4, Path("/video"), recording=rec)
+
     assert len(timestamps_ns) == _FRAME_COUNT
 
 
