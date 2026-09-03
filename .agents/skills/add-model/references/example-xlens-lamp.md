@@ -25,7 +25,7 @@ fork (bumped 1.5.0 → 1.9.x for transformers 5). PR stack #196 → #197 → #20
 
 - Numbers: fork on the Aria `test-library` (700 framesets @10 Hz): RF-DETR 8.7 / ViTPose 6.6 / lifter 8.6 / total 28.5 ms,
   lifted-joint reprojection 6.3–7.9 px; port on robocap s29 (four KB4 cameras fed as virtual-pinhole vectors after
-  `cv2.fisheye.undistortPoints`, window 1152–1272 s chosen by a 1 Hz detection scan): 131 ms per frameset, 32 tracks.
+  `cv2.fisheye.undistortPoints`, window 1152–1272 s chosen by a 1 Hz detection scan): 163–170 ms per frameset (detector 38 / pose 28 / tracker 53 / lifter 20), 20 tracks in 30 s, 32 in 120 s; 30 s = 334 MB, 120 s = 1.06 GB with per-frame normals + half-res previews (2.2 GB before).
 - Equivalence: vendored-vs-pristine lifter bit-identical (16 cases); real-fixture seam (lifter I/O + isolated smoothing window)
   bit-identical / 1e-4 m; full-history smoothing off by ≤0.088 m because the fixture lacks merge events (documented limit).
 - Rendering (user request, mirrors `sam3d-body`): posekit `log_person_bbox`/`log_person_points2d` + `person_color` keyed by track id, joints `Points3D(keypoint_ids, class_ids)` under an SMPL-24 `AnnotationContext`, `Mesh3D` with `compute_vertex_normals` + alpha 0.5, `LivePeopleLogger` clears ended tracks, 960×540 previews under `pinhole/preview/` (excluded from the 3D view: a half-res image on the full-res Pinhole plane covers a quarter).
