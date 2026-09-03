@@ -60,6 +60,26 @@ class BaseRigDepthPredictor(ABC):
         """Predict metric z-depth, confidence, and mask for a calibrated rig."""
         raise NotImplementedError
 
+    def predict_batch(
+        self,
+        images: UInt8[ndarray, "b s h w 3"],
+        rays: Float32[ndarray, "s h w 3"],
+        cam_types: Int64[ndarray, "s"],
+        cam_T_ref: Float64[ndarray, "s 4 4"] | None,
+    ) -> list[RigDepthPrediction]:
+        """Predict several framesets of one rig, one per call unless the backend batches them.
+
+        Args:
+            images: RGB framesets sharing one rig, ``UInt8[ndarray, "b s h w 3"]``.
+            rays: Camera-frame unit rays shared by all framesets, ``Float32[ndarray, "s h w 3"]``.
+            cam_types: X-Lens camera ids, ``Int64[ndarray, "s"]``.
+            cam_T_ref: Optional camera-to-reference poses, ``Float64[ndarray, "s 4 4"]``.
+
+        Returns:
+            One prediction per frameset, in order.
+        """
+        return [self(frameset, rays, cam_types, cam_T_ref) for frameset in images]
+
 
 @dataclass
 class BaseRigDepthPredictorConfig(ABC):

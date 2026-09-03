@@ -1,16 +1,17 @@
 """Stream X-Lens fisheye rig depth from a Robocap catalog segment to Rerun.
 
-The tool samples four calibrated outward-facing rig videos on one ``video_time`` grid and predicts per-view metric
-depth on the native fisheye images. It logs the original views in 2D and same-axis, distortion-free pinhole twins whose
-remapped z-depth unprojects natively in Rerun. The pinhole twins also provide valid inputs to the shared TSDF fuser. The
-tool never registers a catalog layer.
+The tool reads four calibrated outward-facing rig videos and the rig pose through the Rerun PyTorch dataloader,
+which samples one ``video_time`` grid across all of them, and predicts per-view metric depth on the native fisheye
+images. It logs the original views in 2D and same-axis, distortion-free pinhole twins whose remapped z-depth
+unprojects natively in Rerun. The pinhole twins also provide valid inputs to the shared TSDF fuser. The tool never
+registers a catalog layer.
 """
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Protocol, TypeAlias, cast, runtime_checkable
+from typing import Any
 
 import cv2
 import numpy as np
@@ -18,14 +19,17 @@ import rerun as rr
 import rerun.blueprint as rrb
 import torch
 from einops import rearrange
-from jaxtyping import Float32, Float64, Int64, Shaped, UInt8, UInt16
+from jaxtyping import Float, Float32, Float64, Int64, UInt8, UInt16
 from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry, DatasetView
+from scipy.spatial.transform import Rotation
 from simplecv.camera_parameters import Fisheye62Parameters, Intrinsics, PinholeParameters, rescale_intri
 from simplecv.ops.tsdf_depth_fuser import Open3DFuser
 from simplecv.rerun_log_utils import RerunTyroConfig, log_open3d_mesh
 from simplecv.rerun_rig_logger import log_rig_static
 from simplecv.rig import CameraSensor, Rig, RigCalibration, entity_id
+from torch import Tensor
+from torch.utils.data import DataLoader
 
 from monopriors.models.rig_depth import (
     AnnotatedRigDepthPredictorUnion,
@@ -41,26 +45,61 @@ from monopriors.third_party.xlens.inference.geometry import fuse_point_cloud
 TIMELINE: str = "video_time"
 RIG_PATH: str = "world/rig_00"
 DEPTH_RANGE_MM: tuple[float, float] = (0.0, 6000.0)
-TimedeltaNs: TypeAlias = Shaped[ndarray, " samples"]
 
 
-@runtime_checkable
-class VideoFrame(Protocol):
-    """Decoded RGB frame returned by TorchCodec."""
+@dataclass(slots=True)
+class RigBatch:
+    """One dataloader batch of rig framesets, cameras in the configured order."""
 
-    data: UInt8[torch.Tensor, "3 height width"]
-
-
-@runtime_checkable
-class SegmentVideoDecoder(Protocol):
-    """TorchCodec operation used by the frame sampler."""
-
-    def get_frame_at(self, index: int) -> VideoFrame:
-        """Decode one frame by sample index."""
-        ...
+    t_ns: list[int]
+    """Grid timestamp per frameset, in nanoseconds on the ``video_time`` timeline."""
+    images: UInt8[Tensor, "b s 3 h w"]
+    """Decoded frames at video resolution, on the decoder's device."""
+    world_T_rig: Float64[ndarray, "b 4 4"]
+    """Rig pose per frameset, the latest one at or before its grid timestamp."""
 
 
-DecoderBundle: TypeAlias = tuple[TimedeltaNs, list[bytes], list[bool], SegmentVideoDecoder]
+@dataclass(slots=True)
+class RigCollate:
+    """Stack dataloader rows into one rig batch.
+
+    A row is the dataloader's ``dict[str, Any]``: a ``TimedFrame`` under each camera key and a tensor
+    under ``pose_t`` / ``pose_q``. Rerun 0.36.2 hands every grid slot to the collate, incomplete ones
+    included, so the two kinds of gap are dropped here: a slot before a camera's first video packet
+    carries ``None``, and a slot before the first rig pose carries an empty tensor. A batch of only
+    those comes out empty, which the run loop skips.
+    """
+
+    cams: tuple[str, ...]
+    """Rig cameras, in the order the predictor sees them."""
+
+    def __call__(self, rows: list[dict[str, Any]]) -> RigBatch:
+        """Stack the complete rows of one dataloader batch."""
+        t_ns: list[int] = []
+        framesets: list[UInt8[Tensor, "s 3 h w"]] = []
+        poses: list[Float64[ndarray, "4 4"]] = []
+        for row in rows:
+            translation: Float[Tensor, " xyz"] = row["pose_t"]
+            quaternion: Float[Tensor, " xyzw"] = row["pose_q"]
+            if translation.numel() != 3 or quaternion.numel() != 4:
+                continue
+            frames: list[UInt8[Tensor, "3 h w"]] = []
+            for cam in self.cams:
+                timed_frame = row[cam]  # a TimedFrame, or None before this camera's first video packet
+                if timed_frame is None:
+                    break
+                frames.append(timed_frame.rgb)
+            if len(frames) != len(self.cams):
+                continue
+            pose: Float64[ndarray, "4 4"] = np.eye(4)
+            pose[:3, :3] = Rotation.from_quat(quaternion.numpy()).as_matrix()  # xyzw, as Rerun stores it
+            pose[:3, 3] = translation.numpy()
+            t_ns.append(row[self.cams[0]].t_ns)  # every camera answers the same grid slot
+            framesets.append(torch.stack(frames))
+            poses.append(pose)
+        if not framesets:
+            return RigBatch(t_ns=[], images=torch.empty((0, len(self.cams), 3, 0, 0), dtype=torch.uint8), world_T_rig=np.empty((0, 4, 4)))
+        return RigBatch(t_ns=t_ns, images=torch.stack(framesets), world_T_rig=np.stack(poses))
 
 
 @dataclass
@@ -79,6 +118,8 @@ class RigDepthCatalogConfig:
     """Outward rig cameras; the downward wearer-facing eye cameras 02/03 are out of distribution for X-Lens."""
     fps: float = 5.0
     """Framesets per second on the catalog ``video_time`` timeline."""
+    batch_size: int = 1
+    """Framesets per dataloader batch and per prediction; the TRT predictor chunks it to its ``max_batch_size``."""
     start_s: float | None = None
     """Absolute ``video_time`` start in seconds; None starts at the first shared frame."""
     max_seconds: float = 60.0
@@ -128,20 +169,6 @@ class RigDepthCatalogConfig:
             raise ValueError("conf_drop_pct must be in [0, 100) and point_stride must be positive")
         if self.fusion_voxel_m <= 0.0 or self.fusion_max_depth_m <= 0.0 or self.mesh_every < 0:
             raise ValueError("fusion voxel/depth must be positive and mesh_every must be non-negative")
-
-
-def nearest_time_index(times: TimedeltaNs, target_ns: int) -> int:
-    """Return the sample nearest one nanosecond timestamp, clamped to endpoints."""
-    if len(times) == 0:
-        raise ValueError("cannot sample an empty timestamp sequence")
-    numeric_times: Int64[ndarray, "samples"] = np.asarray(times, dtype="timedelta64[ns]").astype(np.int64)
-    insertion: int = int(np.searchsorted(numeric_times, target_ns))
-    if insertion == 0:
-        return 0
-    if insertion == len(numeric_times):
-        return len(numeric_times) - 1
-    before: int = insertion - 1
-    return before if target_ns - int(numeric_times[before]) <= int(numeric_times[insertion]) - target_ns else insertion
 
 
 def rescaled_fisheye(camera: Fisheye62Parameters, *, width: int, height: int) -> Fisheye62Parameters:
@@ -235,9 +262,18 @@ def _rectified_camera_entity(cam: str) -> str:
 
 def main(config: RigDepthCatalogConfig) -> None:
     """Decode, predict, and stream one calibrated multi-fisheye segment."""
-    from simplecv.rerun_dataloader import open_segment_decoder
+    from rerun.experimental.dataloader import (
+        DataSource,
+        Field,
+        FixedRateSampling,
+        NoShuffle,
+        NumericDecoder,
+        RerunIterableDataset,
+        SegmentMetadata,
+    )
+    from simplecv.rerun_dataloader import TimedNvdecDecoder
 
-    from monopriors.apis.stereo_catalog import read_fisheye_camera, read_rig_poses, read_static
+    from monopriors.apis.stereo_catalog import read_fisheye_camera, read_static
 
     if not torch.cuda.is_available():
         raise RuntimeError("rig-depth catalog inference requires CUDA for X-Lens and NVDEC")
@@ -248,7 +284,6 @@ def main(config: RigDepthCatalogConfig) -> None:
     model_cameras: dict[str, Fisheye62Parameters] = {
         cam: rescaled_fisheye(camera, width=config.width, height=config.height) for cam, camera in source_cameras.items()
     }
-    pose_times, world_T_rig_values = read_rig_poses(view)
 
     codec_value: int = int(np.asarray(read_static(view, f"{RIG_PATH}/{config.cams[0]}/pinhole/video", "VideoStream:codec")).ravel()[0])
     video_codec = rr.VideoCodec(codec_value)
@@ -258,22 +293,41 @@ def main(config: RigDepthCatalogConfig) -> None:
         codec = "av1"
     else:
         raise ValueError(f"unsupported catalog video codec: {video_codec}")
-    decoders: dict[str, DecoderBundle] = {
-        cam: cast(
-            DecoderBundle,
-            open_segment_decoder(dataset, config.segment_id, f"{RIG_PATH}/{cam}/pinhole/video", TIMELINE, device, 30, codec),
+    fields: dict[str, Field] = {
+        cam: Field(
+            f"/{RIG_PATH}/{cam}/pinhole/video:VideoStream:sample",
+            decode=TimedNvdecDecoder(dataset, f"{RIG_PATH}/{cam}/pinhole/video", TIMELINE, device, 30, codec),
         )
         for cam in config.cams
     }
+    fields |= {
+        "pose_t": Field(f"/{RIG_PATH}:Transform3D:translation", decode=NumericDecoder()),
+        "pose_q": Field(f"/{RIG_PATH}:Transform3D:quaternion", decode=NumericDecoder()),
+    }
+    samples: RerunIterableDataset = RerunIterableDataset(
+        DataSource(dataset, [config.segment_id]),
+        index=TIMELINE,
+        fields=fields,
+        timeline_sampling=FixedRateSampling(rate_hz=config.fps),
+        shuffle_strategy=NoShuffle(),
+    )
+    # One decoder holds a DatasetEntry and one CUDA decoder per camera, so neither survives a fork.
+    loader: DataLoader = DataLoader(samples, batch_size=config.batch_size, num_workers=0, collate_fn=RigCollate(config.cams))
 
-    shared_start_ns: int = max(int(bundle[0][0].astype(np.int64)) for bundle in decoders.values())
-    shared_end_ns: int = min(int(bundle[0][-1].astype(np.int64)) for bundle in decoders.values())
-    start_ns: int = shared_start_ns if config.start_s is None else max(shared_start_ns, round(config.start_s * 1e9))
-    end_ns: int = min(shared_end_ns, start_ns + round(config.max_seconds * 1e9))
-    if start_ns >= end_ns:
-        raise ValueError(f"requested interval [{start_ns / 1e9:.3f}, {end_ns / 1e9:.3f}] has no shared video samples")
+    segments: list[SegmentMetadata] = samples.sample_index.segments
+    if len(segments) != 1:
+        raise ValueError(f"the dataloader index holds {len(segments)} segments for {config.segment_id!r}, expected one")
+    index_start_ns: int = int(segments[0].index_start)
+    index_end_ns: int = int(segments[0].index_end)
     step_ns: int = round(1e9 / config.fps)
-    grid_ns: Int64[ndarray, "framesets"] = np.arange(start_ns, end_ns, step_ns, dtype=np.int64)
+    # The dataloader lays its grid from the segment's first index value, so snap the requested
+    # start up to the next grid point (ceil division) and keep the window a whole number of steps.
+    start_offset_ns: int = 0 if config.start_s is None else round(config.start_s * 1e9) - index_start_ns
+    start_ns: int = index_start_ns + max(0, -(-start_offset_ns // step_ns)) * step_ns
+    end_ns: int = min(index_end_ns, start_ns + round(config.max_seconds * 1e9))
+    if start_ns > end_ns:
+        raise ValueError(f"requested interval [{start_ns / 1e9:.3f}, {end_ns / 1e9:.3f}] lies outside the segment")
+    expected: int = (end_ns - start_ns) // step_ns + 1
 
     rays: Float32[ndarray, "views height width 3"] = np.stack([unit_rays(model_cameras[cam]) for cam in config.cams])
     cam_types: Int64[ndarray, "views"] = np.asarray([camera_type(model_cameras[cam]) for cam in config.cams], dtype=np.int64)
@@ -318,122 +372,142 @@ def main(config: RigDepthCatalogConfig) -> None:
     decode_total_s: float = 0.0
     predict_total_s: float = 0.0
     log_total_s: float = 0.0
-    mesh_logged_at_last_frameset: bool = False
+    processed: int = 0
+    mesh_pending: bool = False
     run_started: float = time.perf_counter()
     print(
-        f"{codec} segment {config.segment_id}: {len(grid_ns)} framesets, {len(config.cams)} cameras, "
-        f"{config.width}x{config.height} at {config.fps:.3f} fps"
+        f"{codec} segment {config.segment_id}: {expected} framesets, {len(config.cams)} cameras, "
+        f"{config.width}x{config.height} at {config.fps:.3f} fps, {config.batch_size} per batch"
     )
 
-    for frameset_index, t_ns_value in enumerate(grid_ns.tolist()):
-        t_ns: int = int(t_ns_value)
-        decode_started: float = time.perf_counter()
-        images: UInt8[ndarray, "views height width 3"] = np.stack(
-            [
-                cv2.resize(
-                    rearrange(decoders[cam][3].get_frame_at(nearest_time_index(decoders[cam][0], t_ns)).data, "c h w -> h w c").cpu().numpy(),
-                    (config.width, config.height),
-                    interpolation=cv2.INTER_AREA,
-                )
-                for cam in config.cams
-            ]
-        )
-        decode_s: float = time.perf_counter() - decode_started
+    wait_started: float = time.perf_counter()
+    for batch in loader:
+        # "decode" now covers the wait on the loader (which owns the NVDEC decoders) plus the
+        # host-side resize onto the network grid, so it stays comparable to the pre-loader runs.
+        selected: list[int] = []
+        resized: list[UInt8[ndarray, "views height width 3"]] = []
+        for row, row_t_ns in enumerate(batch.t_ns):
+            if not start_ns <= row_t_ns <= end_ns:
+                continue
+            views: list[UInt8[ndarray, "height width 3"]] = []
+            for view_index in range(len(config.cams)):
+                frame: UInt8[ndarray, "video_height video_width 3"] = rearrange(batch.images[row, view_index], "c h w -> h w c").cpu().numpy()
+                views.append(cv2.resize(frame, (config.width, config.height), interpolation=cv2.INTER_AREA))
+            selected.append(row)
+            resized.append(np.stack(views))
+        decode_s: float = time.perf_counter() - wait_started
+        reached_end: bool = len(batch.t_ns) > 0 and batch.t_ns[-1] >= end_ns
+        if not selected:
+            if reached_end:
+                break
+            wait_started = time.perf_counter()
+            continue
+        batch_images: UInt8[ndarray, "framesets views height width 3"] = np.stack(resized)
 
         predict_started: float = time.perf_counter()
-        prediction: RigDepthPrediction = predictor(images, rays, cam_types, rig_T_cam)
+        predictions: list[RigDepthPrediction] = predictor.predict_batch(batch_images, rays, cam_types, rig_T_cam)
         torch.cuda.synchronize()
         predict_s: float = time.perf_counter() - predict_started
 
         log_started: float = time.perf_counter()
-        pose_index: int = nearest_time_index(pose_times, t_ns)
-        world_T_rig: Float64[ndarray, "4 4"] = np.asarray(world_T_rig_values[pose_index], dtype=np.float64)
-        rig_T_world: Float64[ndarray, "4 4"] = np.linalg.inv(world_T_rig)
-        depth: Float32[ndarray, "views height width"] = prediction.depth_m.detach().cpu().numpy()
-        remapped: list[tuple[UInt8[ndarray, "height width 3"], Float32[ndarray, "height width"]]] = [
-            remap_fisheye_image_and_depth(images[view_index], depth[view_index], undistortion[cam][1], undistortion[cam][2])
-            for view_index, cam in enumerate(config.cams)
-        ]
-        rectified_images: UInt8[ndarray, "views height width 3"] = np.stack([values[0] for values in remapped])
-        rectified_depth: Float32[ndarray, "views height width"] = np.stack([values[1] for values in remapped])
         points_count: int = 0
+        for frameset_index, row in enumerate(selected):
+            t_ns: int = batch.t_ns[row]
+            images: UInt8[ndarray, "views height width 3"] = batch_images[frameset_index]
+            prediction: RigDepthPrediction = predictions[frameset_index]
+            world_T_rig: Float64[ndarray, "4 4"] = batch.world_T_rig[row]
+            rig_T_world: Float64[ndarray, "4 4"] = np.linalg.inv(world_T_rig)
+            depth: Float32[ndarray, "views height width"] = prediction.depth_m.detach().cpu().numpy()
+            remapped: list[tuple[UInt8[ndarray, "height width 3"], Float32[ndarray, "height width"]]] = [
+                remap_fisheye_image_and_depth(images[view_index], depth[view_index], undistortion[cam][1], undistortion[cam][2])
+                for view_index, cam in enumerate(config.cams)
+            ]
+            rectified_images: UInt8[ndarray, "views height width 3"] = np.stack([values[0] for values in remapped])
+            rectified_depth: Float32[ndarray, "views height width"] = np.stack([values[1] for values in remapped])
 
-        rr.set_time(TIMELINE, duration=np.timedelta64(t_ns, "ns"))
-        rr.log(RIG_PATH, rr.Transform3D(mat3x3=world_T_rig[:3, :3], translation=world_T_rig[:3, 3]))
-        for view_index, cam in enumerate(config.cams):
-            fisheye_path: str = f"{RIG_PATH}/{cam}/rig_depth"
-            rectified_cam: str = _rectified_camera_entity(cam)
-            pinhole_path: str = f"{RIG_PATH}/{rectified_cam}/pinhole"
-            rr.log(f"{fisheye_path}/image", rr.Image(images[view_index]).compress(jpeg_quality=85))
-            rr.log(
-                f"{fisheye_path}/depth",
-                rr.Image(_depth_colormap(depth[view_index], config.fusion_max_depth_m)).compress(jpeg_quality=85),
-            )
-            rr.log(f"{pinhole_path}/image", rr.Image(rectified_images[view_index]).compress(jpeg_quality=85))
-            rr.log(
-                f"{pinhole_path}/depth",
-                rr.EncodedDepthImage(
-                    blob=_encode_depth(rectified_depth[view_index], config.max_depth_m),
-                    media_type="image/png",
-                    meter=1000.0,
-                    depth_range=DEPTH_RANGE_MM,
-                ),
-            )
-            if fuser is not None:
-                rectified_camera: PinholeParameters = rectified_cameras[cam]
-                cam_T_world: Float64[ndarray, "4 4"] = rectified_camera.extrinsics.cam_T_world @ rig_T_world
-                fuser.fuse_frames(
-                    np.ascontiguousarray(_depth_millimeters(rectified_depth[view_index], config.max_depth_m)),
-                    np.asarray(rectified_camera.intrinsics.k_matrix, dtype=np.float64),
-                    cam_T_world,
-                    np.ascontiguousarray(rectified_images[view_index]),
+            rr.set_time(TIMELINE, duration=np.timedelta64(t_ns, "ns"))
+            rr.log(RIG_PATH, rr.Transform3D(mat3x3=world_T_rig[:3, :3], translation=world_T_rig[:3, 3]))
+            for view_index, cam in enumerate(config.cams):
+                fisheye_path: str = f"{RIG_PATH}/{cam}/rig_depth"
+                rectified_cam: str = _rectified_camera_entity(cam)
+                pinhole_path: str = f"{RIG_PATH}/{rectified_cam}/pinhole"
+                rr.log(f"{fisheye_path}/image", rr.Image(images[view_index]).compress(jpeg_quality=85))
+                rr.log(
+                    f"{fisheye_path}/depth",
+                    rr.Image(_depth_colormap(depth[view_index], config.fusion_max_depth_m)).compress(jpeg_quality=85),
                 )
-        if config.log_points:
-            world_T_cam: Float64[ndarray, "views 4 4"] = np.stack([world_T_rig @ camera_pose for camera_pose in rig_T_cam])
-            confidence: Float32[ndarray, "views height width"] = prediction.confidence.detach().cpu().numpy()
-            points: Float32[ndarray, "points 3"]
-            colors: UInt8[ndarray, "points 3"] | None
-            points, colors = fuse_point_cloud(
-                depth,
-                rays,
-                world_T_cam,
-                rgb=images,
-                conf=confidence,
-                conf_drop_pct=config.conf_drop_pct,
-                max_depth=config.max_depth_m,
-                fov_max_deg=config.fov_max_deg,
-            )
-            points = points[:: config.point_stride]
-            if colors is None:
-                raise RuntimeError("X-Lens point-cloud fusion did not return image colors")
-            colors = colors[:: config.point_stride]
-            points_count = len(points)
-            rr.log("world/rig_depth/points", rr.Points3D(points, colors=colors))
-        if fuser is not None and config.mesh_every and (frameset_index + 1) % config.mesh_every == 0:
-            mesh = fuser.get_mesh()
-            log_open3d_mesh("world/rig_depth/mesh", mesh)
-            mesh_logged_at_last_frameset = frameset_index + 1 == len(grid_ns)
-            if mesh_logged_at_last_frameset:
-                print(f"fused mesh logged: {len(mesh.vertices)} vertices")
+                rr.log(f"{pinhole_path}/image", rr.Image(rectified_images[view_index]).compress(jpeg_quality=85))
+                rr.log(
+                    f"{pinhole_path}/depth",
+                    rr.EncodedDepthImage(
+                        blob=_encode_depth(rectified_depth[view_index], config.max_depth_m),
+                        media_type="image/png",
+                        meter=1000.0,
+                        depth_range=DEPTH_RANGE_MM,
+                    ),
+                )
+                if fuser is not None:
+                    rectified_camera: PinholeParameters = rectified_cameras[cam]
+                    cam_T_world: Float64[ndarray, "4 4"] = rectified_camera.extrinsics.cam_T_world @ rig_T_world
+                    fuser.fuse_frames(
+                        np.ascontiguousarray(_depth_millimeters(rectified_depth[view_index], config.max_depth_m)),
+                        np.asarray(rectified_camera.intrinsics.k_matrix, dtype=np.float64),
+                        cam_T_world,
+                        np.ascontiguousarray(rectified_images[view_index]),
+                    )
+            if config.log_points:
+                world_T_cam: Float64[ndarray, "views 4 4"] = np.stack([world_T_rig @ camera_pose for camera_pose in rig_T_cam])
+                confidence: Float32[ndarray, "views height width"] = prediction.confidence.detach().cpu().numpy()
+                points: Float32[ndarray, "points 3"]
+                colors: UInt8[ndarray, "points 3"] | None
+                points, colors = fuse_point_cloud(
+                    depth,
+                    rays,
+                    world_T_cam,
+                    rgb=images,
+                    conf=confidence,
+                    conf_drop_pct=config.conf_drop_pct,
+                    max_depth=config.max_depth_m,
+                    fov_max_deg=config.fov_max_deg,
+                )
+                points = points[:: config.point_stride]
+                if colors is None:
+                    raise RuntimeError("X-Lens point-cloud fusion did not return image colors")
+                colors = colors[:: config.point_stride]
+                points_count = len(points)
+                rr.log("world/rig_depth/points", rr.Points3D(points, colors=colors))
+            processed += 1
+            mesh_pending = fuser is not None
+            if fuser is not None and config.mesh_every and processed % config.mesh_every == 0:
+                mesh = fuser.get_mesh()
+                log_open3d_mesh("world/rig_depth/mesh", mesh)
+                mesh_pending = False
         log_s: float = time.perf_counter() - log_started
 
         decode_total_s += decode_s
         predict_total_s += predict_s
         log_total_s += log_s
         print(
-            f"frameset {frameset_index + 1:04d}/{len(grid_ns):04d} t={t_ns / 1e9:.3f}s "
+            f"framesets {processed - len(selected) + 1:04d}-{processed:04d}/{expected:04d} t={batch.t_ns[selected[0]] / 1e9:.3f}s "
             f"decode={decode_s * 1000.0:.1f}ms predict={predict_s * 1000.0:.1f}ms "
             f"log={log_s * 1000.0:.1f}ms points={points_count if config.log_points else 'off'}"
         )
+        if reached_end:
+            break
+        wait_started = time.perf_counter()
 
-    if fuser is not None and not mesh_logged_at_last_frameset:
+    if processed == 0:
+        raise RuntimeError(
+            f"no grid slot in [{start_ns / 1e9:.3f}, {end_ns / 1e9:.3f}] carried all {len(config.cams)} camera frames and a rig pose"
+        )
+    if fuser is not None and mesh_pending:
         mesh = fuser.get_mesh()
         log_open3d_mesh("world/rig_depth/mesh", mesh)
         print(f"fused mesh logged: {len(mesh.vertices)} vertices")
     wall_s: float = time.perf_counter() - run_started
     print(
-        f"totals: framesets={len(grid_ns)} decode={decode_total_s:.3f}s predict={predict_total_s:.3f}s "
+        f"totals: framesets={processed} decode={decode_total_s:.3f}s predict={predict_total_s:.3f}s "
         f"log={log_total_s:.3f}s wall={wall_s:.3f}s; "
-        f"means={decode_total_s / len(grid_ns) * 1000.0:.2f}/{predict_total_s / len(grid_ns) * 1000.0:.2f}/"
-        f"{log_total_s / len(grid_ns) * 1000.0:.2f} ms"
+        f"means={decode_total_s / processed * 1000.0:.2f}/{predict_total_s / processed * 1000.0:.2f}/"
+        f"{log_total_s / processed * 1000.0:.2f} ms"
     )
