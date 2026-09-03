@@ -82,6 +82,10 @@ def test_runtime_accelerator_defaults_match_existing_training_objects() -> None:
     assert _model_to_device(actual_model, torch.device("cpu"), channels_last=False) is actual_model
     assert actual_model.weight.stride() == expected_model.weight.stride()
     assert actual_model.state_dict().keys() == expected_model.state_dict().keys()
+    name: str
+    tensor: torch.Tensor
+    for name, tensor in actual_model.state_dict().items():
+        assert torch.equal(tensor, expected_model.state_dict()[name])
     assert actual_optimizer.defaults == expected_optimizer.defaults
     assert actual_optimizer.state_dict() == expected_optimizer.state_dict()
     assert resolve_amp_dtype(config.amp_dtype, "bfloat16") == "bfloat16"
@@ -92,10 +96,22 @@ def test_runtime_accelerator_flags_change_constructed_objects() -> None:
     model: nn.Conv2d = nn.Conv2d(3, 4, kernel_size=3)
     prepared: nn.Module = _model_to_device(model, torch.device("cpu"), channels_last=True)
     optimizer: optim.AdamW = _adamw_optimizer(prepared, lr=1e-5, weight_decay=0.05, fused=True)
+    trainer: ZipDepthTrainer = ZipDepthTrainer(
+        prepared,
+        [],
+        optimizer,
+        None,
+        "cpu",
+        use_amp=False,
+        amp_dtype=resolve_amp_dtype("float16", "bfloat16"),
+        compile_mode="off",
+        channels_last=True,
+    )
 
     assert model.weight.is_contiguous(memory_format=torch.channels_last)
     assert optimizer.defaults["fused"] is True
-    assert resolve_amp_dtype("float16", "bfloat16") == "float16"
+    assert trainer.amp_dtype is torch.float16
+    assert trainer.channels_last is True
 
 
 @pytest.mark.parametrize("compile_mode", ["default", "reduce-overhead", "max-autotune"])
