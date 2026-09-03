@@ -14,45 +14,55 @@ Rerun recording; each viewer event appends to that recording through
 
 from __future__ import annotations
 
-import functools
-import shutil
-import subprocess
 import time
 import uuid
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypeAlias, get_args
+from typing import Any, Literal, TypeAlias, get_args
 
 import gradio as gr
 import numpy as np
 import rerun as rr
-import rerun.blueprint as rrb
 import tyro
+from beartype.roar import BeartypeException
 from gradio_rerun import Rerun
 from gradio_rerun.events import Pause, Play, SelectionChange, TimeUpdate
-from jaxtyping import Int, UInt8
+from jaxtyping import UInt8
 from numpy import ndarray
 from simplecv.rerun_log_utils import log_video
 from simplecv.video_utils import frame_at
 
-from posekit.apis.click_tracker import ClickTracker, MaskResult, Point, PointEdit
-from posekit.models.sam2_video import Sam2Variant, Sam2VideoSegmenterConfig
+from posekit.apis.click_tracker import ClickTracker, MaskResult, PointEdit
+from posekit.models.sam2_video import Sam2Variant, cached_predictor
+from posekit.track_recording import (
+    MASK_COLOR,
+    MASK_SCALE,
+    RRD_DIR,
+    TIMELINE,
+    VIDEO,
+    RecordingPair,
+    Session,
+    _blueprint,
+    _clear_preview,
+    _close_session,
+    _invalidate_track,
+    _log_confidence,
+    _log_mask,
+    _log_points,
+    _mask_hw,
+    _merge_rrd_parts,
+    _open_recording,
+    _status,
+    _viewer_time_s,
+)
+from posekit.track_ui_theme import APP_CSS, DESCRIPTION, FORCE_DARK_HEAD, VIEWER_HEIGHT
 
-APP_ID: str = "posekit_click_to_track"
-VIDEO: str = "video"
-TIMELINE: str = "video_time"
 Mode: TypeAlias = Literal["+ Include", "− Exclude", "✕ Remove"]
 MODES: list[Mode] = ["+ Include", "− Exclude", "✕ Remove"]
+PREVIEW_SEQ_STRIDE: int = 1_000_000
+"""``preview_request`` = seq * stride + frame: the sequence number makes every request a new value."""
 TabName: TypeAlias = Literal["Input", "Config", "Outputs"]
-RecordingPair: TypeAlias = tuple[rr.RecordingStream, rr.BinaryStream]
-POSITIVE_COLOR: tuple[int, int, int] = (76, 220, 96)
-NEGATIVE_COLOR: tuple[int, int, int] = (255, 87, 51)
-MASK_COLOR: tuple[int, int, int] = (51, 178, 255)
-MASK_SCALE: int = 4
-"""Masks are logged at 1/MASK_SCALE resolution under a static scale transform: a full-res
-uint8 mask per frame costs ~40x the video in viewer memory, and SAM2's logits are 128^2 anyway."""
-RRD_DIR: Path = Path("/tmp/posekit-rrd")
 _EXAMPLES_DIR: Path = Path(__file__).resolve().parents[2] / "assets" / "examples"
 EXAMPLE_VIDEOS: list[str] = [
     str(path)
@@ -80,207 +90,10 @@ class AppConfig:
     """SAM2-family checkpoint. -s (Kineo's pick) holds a point-seeded track through the clip where -ti drifts."""
 
 
-@dataclass(slots=True)
-class Session:
-    """Per-browser-session state: the tracker, its recording, and the viewer's current frame."""
-
-    tracker: ClickTracker
-    """Clip-local prompts, decoder, and SAM memory state."""
-    video_path: Path
-    """Input video used by the live and downloadable recordings."""
-    recording_id: str
-    """Rerun recording ID."""
-    frame_timestamps_ns: Int[ndarray, "n"]
-    """Viewer timestamps returned by the logged video stream."""
-    current_frame: int = 0
-    """Frame under the viewer cursor: 0 at load (the viewer starts paused there), then updated by time_update."""
-    last_time_update: float = 0.0
-    """``time.monotonic()`` of the last time_update, so a click can wait for the scrub to go quiet."""
-    last_stamp: float = -1.0
-    """Browser ``performance.now()`` of the newest time_update applied; unqueued requests can finish out of order."""
-    playing: bool = False
-    """Set by the viewer's play/pause events; clicks while playing have no known frame and are refused."""
-    preview_visible: bool = False
-    """A static preview mask is currently shown on ``video/preview``."""
-    masked_frames: set[int] = field(default_factory=set)
-    """Frames that carry a mask; anything else must show none (latest-at would otherwise keep the last one)."""
-    pointed_frames: set[int] = field(default_factory=set)
-    """Frames that carry temporal point data."""
-    tracked_frame_indices: set[int] = field(default_factory=set)
-    """Frames written by the latest Track run, retained only for invalidation."""
-    rrd_part_counter: int = 0
-    """Monotonic callback-part number within this session."""
-
-
 SAM2_VARIANTS: list[Sam2Variant] = list(get_args(Sam2Variant))
 # The interactive tracker favors a longer window than Sam2VideoSegmenterConfig's streaming default of 7.
 DEFAULT_MEMORY_WINDOW: int = 10
 DEFAULT_REMOVE_RADIUS_PX: float = 100.0
-
-
-@functools.cache
-def _predictor(variant: Sam2Variant):
-    """Load one SAM2-streaming predictor per variant."""
-    return Sam2VideoSegmenterConfig(variant=variant).setup().predictor
-
-
-def _blueprint() -> rrb.Blueprint:
-    """Viewer layout shared by the live stream and downloadable recording."""
-    return rrb.Blueprint(
-        rrb.Vertical(
-            rrb.Spatial2DView(name="Click to track", origin=VIDEO),
-            rrb.TimeSeriesView(name="Confidence", origin=VIDEO),
-            row_shares=[4, 1],
-        ),
-        rrb.BlueprintPanel(state="hidden"),
-        rrb.SelectionPanel(state="hidden"),
-        rrb.TimePanel(state="expanded", timeline=TIMELINE, play_state=rrb.components.PlayState.Paused),
-    )
-
-
-def _close_session(session: Session | None) -> None:
-    """Release a session's decoder thread and its downloadable recording."""
-    if session is None:
-        return
-    session.tracker.close()
-    (RRD_DIR / f"{session.recording_id}.rrd").unlink(missing_ok=True)
-    shutil.rmtree(RRD_DIR / session.recording_id, ignore_errors=True)
-
-
-def _open_recording(session: Session, *, write_part: bool = True) -> tuple[rr.RecordingStream, rr.BinaryStream]:
-    """Open one callback recording with a browser stream and, except for previews, a footerless file part."""
-    rec: rr.RecordingStream = rr.RecordingStream(application_id=APP_ID, recording_id=session.recording_id)
-    stream: rr.BinaryStream = rec.binary_stream()
-    if write_part:
-        part_dir: Path = RRD_DIR / session.recording_id
-        part_dir.mkdir(parents=True, exist_ok=True)
-        part: Path = part_dir / f"{session.rrd_part_counter:04d}.rrd"
-        session.rrd_part_counter += 1
-        rec.set_sinks(stream, rr.FileSink(str(part), write_footer=False))
-    return rec, stream
-
-
-def _merge_rrd_parts(session: Session) -> Path:
-    """Merge this session's footerless callback parts into one valid, compacted RRD.
-
-    The parts are hundreds of tiny per-callback chunks; ``rrd optimize`` re-batches
-    them into fewer, larger chunks and re-derives video keyframes so the download loads fast.
-    """
-    output: Path = RRD_DIR / f"{session.recording_id}.rrd"
-    merged: Path = RRD_DIR / f"{session.recording_id}.merged.rrd"
-    parts: list[Path] = sorted((RRD_DIR / session.recording_id).glob("*.rrd"))
-    subprocess.run(["rerun", "rrd", "merge", "--output", str(merged), *(str(part) for part in parts)], check=True)
-    # --fix-keyframe: the Mp4Reader stream logs is_keyframe=false rows, which blocks GoP rebatching of the video.
-    subprocess.run(["rerun", "rrd", "optimize", "--fix-keyframe", "--output", str(output), str(merged)], check=True)
-    merged.unlink()
-    return output
-
-
-def _viewer_time_s(session: Session, frame_idx: int) -> float:
-    """The viewer's ``video_time`` for a frame — from the logged video stream, never torchcodec pts.
-
-    A clip cut with ``-ss`` carries an edit-list offset (torchcodec frame 0 at 0.033 s
-    while the stream's frame 0 is at 0.0), so overlays stamped with decoder pts
-    land after the cursor and only show up later.
-    """
-    return float(session.frame_timestamps_ns[frame_idx]) / 1e9
-
-
-def _clear_preview(rec: rr.RecordingStream, session: Session) -> None:
-    """Remove the static scrub preview (no-op when none is shown).
-
-    A native Rerun 0.36.2 pixel check confirms that this same-entity static
-    ``Clear`` leaves ``video/preview``'s static scale transform in effect.
-    """
-    if session.preview_visible:
-        rec.log(f"{VIDEO}/preview", rr.Clear(recursive=False), static=True)
-        session.preview_visible = False
-
-
-def _bound_next_frame(rec: rr.RecordingStream, session: Session, entity: str, frame_idx: int, frames_with_data: set[int]) -> None:
-    """Rerun shows the latest logged value until the next one: clear the entity on the following frame unless it has its own data."""
-    nxt: int = frame_idx + 1
-    if nxt < session.tracker.num_frames and nxt not in frames_with_data:
-        rec.set_time(TIMELINE, duration=_viewer_time_s(session, nxt))
-        rec.log(entity, rr.Clear(recursive=False))
-
-
-def _log_points(rec: rr.RecordingStream, session: Session, frame_idx: int) -> None:
-    """Log the frame's points (or a clear) at that frame's time so markers show only where they belong."""
-    entity: str = f"{VIDEO}/points"
-    rec.set_time(TIMELINE, duration=_viewer_time_s(session, frame_idx))
-    points: tuple[Point, ...] = session.tracker.points_on(frame_idx)
-    if not points:
-        session.pointed_frames.discard(frame_idx)
-        rec.log(entity, rr.Clear(recursive=False))
-        return
-    rec.log(
-        entity,
-        rr.Points2D(
-            np.asarray([[p.x, p.y] for p in points], dtype=np.float32),
-            colors=[POSITIVE_COLOR if p.positive else NEGATIVE_COLOR for p in points],
-            radii=6,
-            labels=["+" if p.positive else "−" for p in points],
-        ),
-    )
-    session.pointed_frames.add(frame_idx)
-    _bound_next_frame(rec, session, entity, frame_idx, session.pointed_frames)
-
-
-def _log_mask(rec: rr.RecordingStream, session: Session, mask_hw: UInt8[ndarray, "h w"] | None, frame_idx: int, *, bound: bool = True) -> None:
-    """Log the mask at its frame (or clear it) on the ``video_time`` timeline.
-
-    ``bound`` writes the next-frame Clear that keeps a lone mask on its own frame;
-    dense tracking skips it because the next frame gets its own mask anyway.
-    """
-    entity: str = f"{VIDEO}/mask"
-    rec.set_time(TIMELINE, duration=_viewer_time_s(session, frame_idx))
-    if mask_hw is None:
-        session.masked_frames.discard(frame_idx)
-        rec.log(entity, rr.Clear(recursive=False))
-        return
-    rec.log(entity, rr.SegmentationImage(mask_hw))
-    session.masked_frames.add(frame_idx)
-    if bound:
-        _bound_next_frame(rec, session, entity, frame_idx, session.masked_frames)
-
-
-def _mask_hw(result: MaskResult) -> UInt8[ndarray, "h w"]:
-    """Copy one result mask from the inference device, downsampled for Rerun logging.
-
-    Strided sampling rounds each output dimension up, so a non-multiple of
-    ``MASK_SCALE`` can overhang the full-resolution image by up to three pixels.
-    """
-    return result.mask[::MASK_SCALE, ::MASK_SCALE].cpu().numpy().astype(np.uint8)
-
-
-def _log_confidence(rec: rr.RecordingStream, session: Session, result: MaskResult) -> None:
-    """Log decoder IoU and object-presence confidence at one frame."""
-    rec.set_time(TIMELINE, duration=_viewer_time_s(session, result.frame_idx))
-    rec.log(f"{VIDEO}/confidence", rr.Scalars(result.score))
-    rec.log(f"{VIDEO}/object_score", rr.Scalars(result.object_score))
-
-
-def _invalidate_track(rec: rr.RecordingStream, session: Session) -> bool:
-    """Clear propagated overlays and confidence after a point edit."""
-    if not session.tracked_frame_indices:
-        return False
-    prompted: set[int] = set(session.tracker.prompted_frames())
-    for frame_idx in sorted(session.masked_frames - prompted):
-        rec.set_time(TIMELINE, duration=_viewer_time_s(session, frame_idx))
-        rec.log(f"{VIDEO}/mask", rr.Clear(recursive=False))
-    for frame_idx in sorted(session.tracked_frame_indices):
-        rec.set_time(TIMELINE, duration=_viewer_time_s(session, frame_idx))
-        rec.log(f"{VIDEO}/confidence", rr.Clear(recursive=False))
-        rec.log(f"{VIDEO}/object_score", rr.Clear(recursive=False))
-    session.masked_frames = prompted
-    session.tracked_frame_indices.clear()
-    return True
-
-
-def _status(session: Session, prefix: str) -> str:
-    frames: tuple[int, ...] = session.tracker.prompted_frames()
-    return f"{prefix} {len(session.tracker.points)} point(s) on frame(s) {frames} · viewer at frame {session.current_frame}."
 
 
 # ── callbacks ─────────────────────────────────────────────────────────────
@@ -323,35 +136,44 @@ def load_video(
     video_path: Path = Path(video)
     if variant not in SAM2_VARIANTS:
         raise gr.Error(f"Unknown model {variant!r}.")
-    tracker: ClickTracker = ClickTracker(video_path, _predictor(variant), memory_window_size=int(memory_window))
-    _close_session(previous_session)
+    # The previous session stays live until the replacement is complete: a failure
+    # anywhere below (undecodable clip, transcode error) leaves Gradio holding the
+    # old Session, which must therefore still own an open decoder.
+    tracker: ClickTracker = ClickTracker(video_path, cached_predictor(variant), memory_window_size=int(memory_window))
     session: Session = Session(
         tracker=tracker,
         video_path=video_path,
         recording_id=recording_id,
         frame_timestamps_ns=np.empty(0, dtype=np.int64),
     )
-    recording_pair: RecordingPair = _open_recording(session)
-    rec: rr.RecordingStream = recording_pair[0]
-    stream: rr.BinaryStream = recording_pair[1]
-    rec.send_blueprint(_blueprint())
-    rec.log(
-        VIDEO,
-        rr.AnnotationContext([rr.AnnotationInfo(id=0, label="background", color=(0, 0, 0, 0)), rr.AnnotationInfo(id=1, label="object", color=MASK_COLOR)]),
-        static=True,
-    )
-    for entity in (f"{VIDEO}/mask", f"{VIDEO}/preview"):
-        rec.log(entity, rr.Transform3D(scale=float(MASK_SCALE)), static=True)
-    session.frame_timestamps_ns = log_video(
-        video_path,
-        Path(VIDEO),
-        timeline=TIMELINE,
-        recording=rec,
-        output_codec=rr.VideoCodec.H264,
-    )
-    stream.flush()
-    payload: bytes | None = stream.read()
-    rec.disconnect()
+    try:
+        recording_pair: RecordingPair = _open_recording(session)
+        rec: rr.RecordingStream = recording_pair[0]
+        stream: rr.BinaryStream = recording_pair[1]
+        rec.send_blueprint(_blueprint())
+        rec.log(
+            VIDEO,
+            rr.AnnotationContext([rr.AnnotationInfo(id=0, label="background", color=(0, 0, 0, 0)), rr.AnnotationInfo(id=1, label="object", color=MASK_COLOR)]),
+            static=True,
+        )
+        for entity in (f"{VIDEO}/mask", f"{VIDEO}/preview"):
+            rec.log(entity, rr.Transform3D(scale=float(MASK_SCALE)), static=True)
+        session.frame_timestamps_ns = log_video(
+            video_path,
+            Path(VIDEO),
+            timeline=TIMELINE,
+            recording=rec,
+            output_codec=rr.VideoCodec.H264,
+        )
+        stream.flush()
+        payload: bytes | None = stream.read()
+        rec.disconnect()
+    except BeartypeException:
+        raise
+    except Exception:
+        _close_session(session)
+        raise
+    _close_session(previous_session)
     yield (
         payload,
         session,
@@ -372,20 +194,36 @@ def _reload_video_from_config(
     yield from load_video(video, previous_session, variant, memory_window, selected_tab="Config")
 
 
-def record_time(session: Session | None, stamp: float | None, evt: TimeUpdate) -> None:
-    """Record the viewer's frame instantly (no queue, no outputs) so a click right after a scrub reads the right frame.
+def _preview_request(session: Session, frame_idx: int) -> float:
+    """A fresh ``preview_request`` value for ``frame_idx`` (a repeat of the same frame must still fire ``.change``)."""
+    session.preview_seq += 1
+    return float(session.preview_seq * PREVIEW_SEQ_STRIDE + frame_idx)
 
-    ``stamp`` is the browser's ``performance.now()`` at dispatch (see the ``js`` hook): unqueued
-    requests can complete out of order, so an older event must never overwrite a newer one.
+
+def on_time_update(session: Session | None, stamp: float | None, evt: TimeUpdate) -> tuple[Any, Any, Any]:
+    """Record the viewer's frame instantly, report it, and hand it to ``push_preview``.
+
+    Unqueued and cheap on purpose, and the only listener on time_update: a queued or
+    ``always_last`` listener here re-dispatches the *event* with a stale payload, which
+    made clicks after a playhead drag prompt the frame the drag started from.
+    ``stamp`` is the browser's ``performance.now()`` at dispatch (see the ``js`` hook):
+    unqueued requests complete out of order, so an older event never overwrites a
+    newer one — neither ``current_frame`` nor the status text.
     """
     if session is None:
-        return
+        return gr.skip(), gr.skip(), gr.skip()
     stamp_value: float = float(stamp) if stamp is not None else session.last_stamp + 1.0
     if stamp_value < session.last_stamp:
-        return
+        return gr.skip(), gr.skip(), gr.skip()
     session.last_stamp = stamp_value
-    session.current_frame = frame_at(session.frame_timestamps_ns, float(evt.payload.time))
+    frame_idx: int = frame_at(session.frame_timestamps_ns, float(evt.payload.time))
+    session.current_frame = frame_idx
     session.last_time_update = time.monotonic()
+    if session.playing:
+        # Playback emits ~10 time updates a second; previewing and re-writing the status on each would spam the UI and the GPU.
+        return gr.skip(), gr.skip(), gr.skip()
+    frame_text: str = f"Viewer at frame {frame_idx} — a click prompts this frame."
+    return frame_text, frame_text, _preview_request(session, frame_idx)
 
 
 def on_play(session: Session | None, evt: Play) -> None:
@@ -400,51 +238,34 @@ def on_pause(session: Session | None, evt: Pause) -> None:
         session.playing = False
 
 
-def on_time_update(session: Session | None, evt: TimeUpdate) -> Iterator[tuple[bytes | None, str, str]]:
-    """When prompts exist, preview the memory-conditioned mask on the frame under the cursor."""
-    if session is None:
-        yield b"", gr.skip(), gr.skip()
+def push_preview(session: Session | None, request: float | None) -> Iterator[bytes | None]:
+    """Preview the memory-conditioned mask on the frame under the cursor once it has rested there.
+
+    The only viewer write on the scrub path. Queued and coalesced (``always_last``) on
+    ``preview_request.change``, which has no other listener, so the re-dispatch is harmless.
+    The preview is static (no ticks, overwritten in place): it goes the moment the cursor moves on.
+    """
+    if session is None or request is None:
+        yield b""
         return
-    if session.playing:
-        # Playback emits ~10 time updates a second; previewing and re-writing the
-        # status on each would spam the UI and the GPU. Just drop any preview.
-        if not session.preview_visible:
-            yield b"", gr.skip(), gr.skip()
-            return
-        recording_pair: RecordingPair = _open_recording(session, write_part=False)
-        rec: rr.RecordingStream = recording_pair[0]
-        stream: rr.BinaryStream = recording_pair[1]
-        _clear_preview(rec, session)
-        stream.flush()
-        payload: bytes | None = stream.read()
-        rec.disconnect()
-        yield payload, gr.skip(), gr.skip()
-        return
-    # This handler is queued (always_last) and may run late; it must never write
-    # session.current_frame — only the unqueued record_time does, or a backlog of
-    # previews would overwrite the frame with stale times right before a click.
-    frame_idx: int = frame_at(session.frame_timestamps_ns, float(evt.payload.time))
-    frame_text: str = f"Viewer at frame {frame_idx} — a click prompts this frame."
-    # The preview is *static* (no timeline → no ticks, overwritten in place), so it
-    # must go away the moment the cursor leaves the frame it was computed for.
-    recording_pair = _open_recording(session, write_part=False)
-    rec = recording_pair[0]
-    stream = recording_pair[1]
+    frame_idx: int = int(request) % PREVIEW_SEQ_STRIDE
+    recording_pair: RecordingPair = _open_recording(session, write_part=False)
+    rec: rr.RecordingStream = recording_pair[0]
+    stream: rr.BinaryStream = recording_pair[1]
     _clear_preview(rec, session)
-    stamp: float = session.last_stamp
-    wants_preview: bool = bool(session.tracker.points) and not session.tracker.points_on(frame_idx)
+    wants_preview: bool = bool(session.tracker.points) and not session.tracker.points_on(frame_idx) and not session.playing
     if wants_preview:
         time.sleep(0.15)  # rest-throttle: skip frames the cursor only passed through
-    if wants_preview and session.last_stamp == stamp:
+    if wants_preview and frame_idx == session.current_frame:
         result: MaskResult | None = session.tracker.preview(frame_idx)
-        if result is not None and session.last_stamp == stamp and not session.playing:  # discard late results
+        if result is not None and frame_idx == session.current_frame and not session.playing:  # discard late results
             preview_hw: UInt8[ndarray, "h w"] = _mask_hw(result)
             rec.log(f"{VIDEO}/preview", rr.SegmentationImage(preview_hw), static=True)
             session.preview_visible = True
     stream.flush()
-    payload = stream.read()
+    payload: bytes | None = stream.read()
     rec.disconnect()
-    yield payload, frame_text, frame_text
+    yield payload
 
 
 def on_select(
@@ -454,10 +275,13 @@ def on_select(
     # The viewer fires selection_change on recording open and on every click
     # anywhere; ignored selections must still yield a chunk for the streaming
     # viewer output (gr.skip() there crashes Gradio's end_stream).
-    # A masked pixel can report both the scaled overlay and the source video.
-    # Only the source entity's hit is guaranteed to use video pixel coordinates.
+    # A click on a masked pixel reports the position on the overlay entity
+    # (/video/mask or /video/preview) and lists /video with position=None, so the
+    # first positioned hit under the video is the one to use. Measured on 0.36.2:
+    # the overlays sit under a scale transform, yet their reported position is in
+    # video pixels (preview hit [360.0, 620.0] for a video hit [359.99, 618.69]).
     position: list[float] | None = next(
-        (item.position for item in evt.payload.items if item.type == "entity" and item.entity_path == f"/{VIDEO}" and item.position is not None),
+        (item.position for item in evt.payload.items if item.type == "entity" and item.entity_path.startswith(f"/{VIDEO}") and item.position is not None),
         None,
     )
     if session is None or position is None:
@@ -500,7 +324,7 @@ def on_select(
     yield payload, status_text, status_text
 
 
-def undo(session: Session | None) -> Iterator[tuple[bytes | None, str, str]]:
+def undo(session: Session | None) -> Iterator[tuple[bytes | None, str, str, Any]]:
     """Remove the most recently added point."""
     if session is None:
         raise gr.Error("Upload a video first.")
@@ -512,7 +336,7 @@ def undo(session: Session | None) -> Iterator[tuple[bytes | None, str, str]]:
     if edit.point is None:
         rec.disconnect()
         status_text: str = _status(session, "Nothing to undo.")
-        yield b"", status_text, status_text
+        yield b"", status_text, status_text, gr.skip()
         return
     stale: bool = _invalidate_track(rec, session)
     _log_mask(rec, session, _mask_hw(edit.result) if edit.result is not None else None, edit.point.frame_idx)
@@ -524,7 +348,8 @@ def undo(session: Session | None) -> Iterator[tuple[bytes | None, str, str]]:
     if stale:
         prefix += " The previous track is stale — Track again."
     status_text = _status(session, prefix)
-    yield payload, status_text, status_text
+    # The preview under the cursor was cleared above; ask for a fresh one when the cursor's frame has no point of its own.
+    yield payload, status_text, status_text, (_preview_request(session, session.current_frame) if session.tracker.points else gr.skip())
 
 
 def clear(session: Session | None) -> Iterator[tuple[bytes | None, str, str]]:
@@ -610,98 +435,13 @@ def stop_tracking() -> tuple[str, str]:
     return status, status
 
 
-DESCRIPTION: str = (
-    "# posekit: Click to Track\n"
-    "Click an object in the Rerun viewer, refine it on any frame, and propagate the mask through the whole clip. "
-    "The confidence traces help you find frames that need another click."
-)
-
-VIEWER_HEIGHT: str = "calc(100vh - 7rem)"
-"""Viewer frame height: the viewport minus the header/description band, so nothing scrolls."""
-
-# HF Spaces render the default theme in dark mode; do the same here by forcing
-# Gradio's ``__theme=dark`` URL switch before the app mounts (a <head> script —
-# the launch ``js`` hook runs too late to redirect).
-FORCE_DARK_HEAD: str = """
-<script>
-(() => {
-    const url = new URL(window.location);
-    if (url.searchParams.get("__theme") !== "dark") {
-        url.searchParams.set("__theme", "dark");
-        window.location.replace(url.href);
-    }
-})();
-</script>
-"""
-
-APP_CSS: str = """
-html, body, gradio-app, .gradio-container {
-    height: 100%;
-    overflow: hidden;
-}
-.gradio-container {
-    max-width: none !important;
-    padding: 0.6rem 1rem !important;
-}
-#app-description { margin-bottom: 0.35rem; }
-#app-description h1 { margin: 0 0 0.2rem; }
-#app-description p { margin: 0; }
-#main-row {
-    height: calc(100vh - 6.4rem);
-    min-height: 0;
-    overflow: hidden;
-}
-#left-column, #viewer-column { min-height: 0; }
-/* Only the controls scroll on short viewports; the viewer never moves. Reserve the
-   scrollbar gutter so the controls do not shift horizontally when it appears. */
-#left-column { height: 100%; max-height: 100%; overflow-y: auto; scrollbar-gutter: stable; flex-wrap: nowrap; }
-#left-column > * { flex-shrink: 0; }
-#source-video { height: auto !important; }
-#source-video video { max-height: 225px !important; }
-#examples { flex: none; }
-/* Radio-based tab strip: Gradio 6.13 loops in Svelte when this app renders three
-   native Tab components. The panels below are ordinary Columns. */
-#control-tabs { overflow: visible; min-width: 0 !important; }
-#control-tabs .wrap { display: flex; gap: 0; border-bottom: 1px solid var(--border-color-primary); }
-#control-tabs label { flex: 1; justify-content: center; margin: 0; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; padding: 0.55rem 0.4rem; color: var(--body-text-color); cursor: pointer; }
-#control-tabs label.selected { border-bottom-color: var(--color-accent); color: var(--color-accent); }
-#control-tabs input { display: none; }
-#control-tabs span { font-weight: 600; }
-/* Click-mode radio as a segmented pill group. */
-#click-mode .wrap { display: flex; gap: 0; border: 1px solid var(--border-color-primary); border-radius: var(--radius-lg); overflow: hidden; }
-#click-mode label { flex: 1; justify-content: center; margin: 0; border-radius: 0; border: 0; background: var(--background-fill-secondary); padding: 0.45rem 0.4rem; cursor: pointer; }
-#click-mode label + label { border-left: 1px solid var(--border-color-primary); }
-#click-mode label.selected { background: var(--color-accent); color: white; }
-#click-mode input { display: none; }
-#click-mode span { font-weight: 600; }
-/* Four small tiles per row with a pager, like the 4DAnyone Space. */
-#examples .gallery { display: flex; flex-wrap: wrap; gap: 0.4rem; }
-#examples .gallery button { flex: none; padding: 0; }
-#examples video, #examples img { height: 64px !important; width: auto !important; max-width: 84px; object-fit: cover; }
-/* The viewer's top edge lines up with the video card beside it. */
-#viewer-column { padding-top: 0; }
-#rerun-viewer { min-height: 0 !important; }
-#run-status {
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    min-height: 4.5rem;
-    overflow: visible !important;
-    padding: 0.65rem 0.85rem;
-    border-radius: var(--radius-lg);
-    background: var(--background-fill-secondary);
-}
-#run-status p { font-size: 1.05rem; line-height: 1.4; margin: 0; }
-footer { display: none !important; }
-"""
-
-
 def build_demo(config: AppConfig) -> gr.Blocks:
     """Build a click-to-track app with the requested initial model variant."""
     with gr.Blocks(title="posekit: Click to Track") as demo:
         gr.Markdown(DESCRIPTION, elem_id="app-description")
         recording_state: gr.State = gr.State(value=None, delete_callback=_close_session)
         stamp_in: gr.Number = gr.Number(value=0.0, visible=False)
+        preview_request: gr.Number = gr.Number(value=-1.0, visible=False)
         with gr.Row(elem_id="main-row"):
             with gr.Column(scale=1, elem_id="left-column"):
                 # Video and status sit above the tabs: the status must stay visible when
@@ -780,21 +520,22 @@ def build_demo(config: AppConfig) -> gr.Blocks:
             api_visibility="private",
         )
         # always_last coalesces the flood of time updates while scrubbing/playing into "the latest one".
-        viewer.time_update(
-            fn=record_time,
-            inputs=[recording_state, stamp_in],
-            outputs=None,
-            queue=False,
-            trigger_mode="multiple",
-            js="(session, _stamp) => [session, performance.now()]",
-            api_visibility="private",
-        )
         viewer.play(fn=on_play, inputs=[recording_state], outputs=None, queue=False, trigger_mode="multiple", api_visibility="private")
         viewer.pause(fn=on_pause, inputs=[recording_state], outputs=None, queue=False, trigger_mode="multiple", api_visibility="private")
         viewer.time_update(
             fn=on_time_update,
-            inputs=[recording_state],
-            outputs=[viewer, status, status_probe],
+            inputs=[recording_state, stamp_in],
+            outputs=[status, status_probe, preview_request],
+            queue=False,
+            trigger_mode="multiple",
+            js="(session, _stamp) => [session, performance.now()]",
+            show_progress="hidden",
+            api_visibility="private",
+        )
+        preview_request.change(
+            fn=push_preview,
+            inputs=[recording_state, preview_request],
+            outputs=[viewer],
             trigger_mode="always_last",
             show_progress="hidden",
             api_visibility="private",
@@ -806,7 +547,7 @@ def build_demo(config: AppConfig) -> gr.Blocks:
             show_progress="hidden",
             api_visibility="private",
         )
-        undo_btn.click(fn=undo, inputs=[recording_state], outputs=[viewer, status, status_probe], api_visibility="private")
+        undo_btn.click(fn=undo, inputs=[recording_state], outputs=[viewer, status, status_probe, preview_request], api_visibility="private")
         clear_btn.click(fn=clear, inputs=[recording_state], outputs=[viewer, status, status_probe], api_visibility="private")
         track_event = track_btn.click(fn=track, inputs=[recording_state], outputs=[viewer, status, status_probe, tabs_radio, download])
         stop_btn.click(fn=stop_tracking, outputs=[status, status_probe], cancels=[track_event], queue=False)

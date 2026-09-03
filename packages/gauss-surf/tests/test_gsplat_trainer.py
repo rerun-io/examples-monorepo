@@ -27,6 +27,13 @@ from gauss_surf.train_gsplat.renderer import fill_depth_holes, render_splats, re
 from gauss_surf.train_gsplat.trainer import camera_sample_indices, metric_training_constants, read_metric_seed, select_training_renderer
 
 
+def _require_local_artifact(path: Path) -> Path:
+    """Skip golden-data checks when the untracked local run is unavailable."""
+    if not path.is_file():
+        pytest.skip(f"local Gauss Surf artifact is unavailable: {path}")
+    return path
+
+
 def test_training_renderer_defaults_to_accepted_two_call_path() -> None:
     """Fused training needs an explicit quality-round opt-in."""
     config = Config(video_id="segment")
@@ -98,7 +105,10 @@ def test_part10_scene_scale_is_inverse_of_saved_applied_scale() -> None:
     """The local formula reproduces the historical float32 parser artifact."""
     package_root: Path = Path(__file__).parents[1]
     bundle_dir: Path = package_root / "data/training_bundle_part10/47115416"
-    transform_path: Path = package_root / "data/splat_runs/47115416-gaussurf/gaussurf-arkit/part10/dataparser_transforms.json"
+    transform_path: Path = _require_local_artifact(
+        package_root / "data/splat_runs/47115416-gaussurf/gaussurf-arkit/part10/dataparser_transforms.json"
+    )
+    _require_local_artifact(bundle_dir / "transforms.json")
     artifact: dict[str, object] = json.loads(transform_path.read_text(encoding="utf-8"))
 
     _cameras, scene_scale = load_training_cameras(bundle_dir)
