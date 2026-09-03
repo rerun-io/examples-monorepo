@@ -23,7 +23,6 @@ from simplecv.rerun_dataloader import open_segment_decoder
 from simplecv.rerun_log_utils import RerunTyroConfig, compute_vertex_normals
 from simplecv.rerun_rig_logger import log_rig_static
 from simplecv.rig import CameraSensor, Rig, RigCalibration
-from simplecv.rrd_query_utils import first_valid_value
 
 from lamptrack.cameras import RigCamera
 from lamptrack.catalog_rig import RIG, TIMELINE, read_fisheye_camera, read_rig_poses
@@ -217,23 +216,6 @@ def log_static_context(cams: tuple[str, ...]) -> None:
         log_skeleton_annotation_context(COCO_17, entity_path=f"{RIG}/{cam}/pinhole")
 
 
-def _read_video_codec(view: DatasetView, cam: str) -> rr.VideoCodec:
-    """Read and type the catalog's static video codec component."""
-    entity = f"{RIG}/{cam}/pinhole/video"
-    table = view.filter_contents(entity).reader(index=None).select(f"/{entity}:VideoStream:codec").to_arrow_table()
-    value = first_valid_value(table.column(0), component_name="VideoStream:codec")
-    return rr.VideoCodec(int(np.asarray(value).ravel()[0]))
-
-
-def _codec_name(codec: rr.VideoCodec) -> str:
-    """Map Rerun's typed codec value to the demuxer's codec name."""
-    if codec == rr.VideoCodec.H264:
-        return "h264"
-    if codec == rr.VideoCodec.AV1:
-        return "av1"
-    raise ValueError(f"Unsupported catalog video codec: {codec}")
-
-
 def _frame_at(
     times: np.ndarray,
     decoder: SegmentVideoDecoder,
@@ -353,7 +335,6 @@ def run(config: Config) -> RunMetrics:
     device = torch.device("cuda")
     decoders: dict[str, tuple[np.ndarray, list[bytes], list[bool], SegmentVideoDecoder]] = {}
     for cam in config.cams:
-        codec = _read_video_codec(view, cam)
         times, samples, keyframes, decoder = open_segment_decoder(
             dataset,
             config.segment_id,
@@ -361,7 +342,6 @@ def run(config: Config) -> RunMetrics:
             TIMELINE,
             device,
             30,
-            _codec_name(codec),
         )
         decoders[cam] = (times, samples, keyframes, decoder)
     grid_ns = build_time_grid(
