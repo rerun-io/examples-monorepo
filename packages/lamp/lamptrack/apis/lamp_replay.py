@@ -10,6 +10,7 @@ from jaxtyping import Bool, Float32, Int64
 from numpy import ndarray
 from simplecv.rerun_log_utils import RerunTyroConfig
 
+from lamptrack.rerun_logging import LivePeopleLogger
 from lamptrack.third_party.lamp.core.types import SMPL_SKELETON_EDGES, Person, PersonState, Skeleton, color_from_id
 from lamptrack.third_party.lamp.models.lifter import Lifter, LifterSettings, SnippetData
 from lamptrack.third_party.lamp.tracking.tracker import LampTracker
@@ -212,6 +213,7 @@ def replay(config: Config) -> ReplayMetrics:
     tracker = LampTracker(num_cameras=4)
     edges = np.asarray(SMPL_SKELETON_EDGES, dtype=np.int64)
     trails: dict[int, list[Float32[ndarray, "3"]]] = {}
+    people_logger = LivePeopleLogger()
     lifter_times: list[float] = []
     raw_errors: list[float] = []
     smoothed_errors: list[float] = []
@@ -220,6 +222,7 @@ def replay(config: Config) -> ReplayMetrics:
     acceptance_mismatches = 0
     records = load_lift_records(path, call_count)
     for record in records:
+        live_people: list[tuple[int, Person]] = []
         for row, person_id_raw in enumerate(record.person_ids):
             person_id = int(person_id_raw)
             person = tracker.people.setdefault(person_id, Person(person_id))
@@ -264,7 +267,14 @@ def replay(config: Config) -> ReplayMetrics:
                 finite = np.isfinite(expected)
                 if finite.any():
                     smoothed_errors.append(float(np.max(np.abs(actual[finite] - expected[finite]))))
-                _log_person(person_id, person, record.call_timestamp_ns, lifter, edges, trails)
+                state = person.ts_to_states.get(record.call_timestamp_ns)
+                if state is not None and state.skeleton is not None:
+                    live_people.append((person_id, person))
+
+        rr.set_time("fixture_time", timestamp=record.call_timestamp_ns * 1e-9)
+        people_logger.update([person_id for person_id, _ in live_people])
+        for person_id, person in live_people:
+            _log_person(person_id, person, record.call_timestamp_ns, lifter, edges, trails)
 
     return ReplayMetrics(
         lift_calls=call_count,
