@@ -52,6 +52,10 @@ Grep the diff for the usual suspects and replace with the shared implementation:
 
 Keep a hand-rolled version only when no shared helper fits, and say so in the PR.
 
+## Gate 4b — Profile the streaming path
+
+Before calling a catalog/streaming tool done, profile one short run: `pixi exec py-spy record -n --rate 250 --format raw -o out.raw -- <env>/bin/python -u tools/apps/<tool>.py …` (child mode — `ptrace_scope=1` blocks attaching to a live process without sudo), then aggregate the folded stacks by leaf and by inclusive function. Report predict vs log time per frameset. X-Lens: depth PNGs at zlib level 9 were 60 % of wall time (2.5–3 s per frameset); level 1 is 20× faster for ~6 % larger files. Any encoder or fusion flag chosen for size needs a timing number next to it.
+
 ## Gate 5 — Viewer pixel evidence (before "done")
 
 Use the `rerun-viewer-validation` skill: run with `--rr-config.headless --rr-config.save <rrd>`, open the
