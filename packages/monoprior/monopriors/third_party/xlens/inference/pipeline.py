@@ -75,11 +75,7 @@ class XLensInference:
             distortion_bias_chunk_size=cfg.get("distortion_bias_chunk_size", 1024),
         ).to(self.device)
 
-        info = model.load_state_dict(state, strict=False)
-        if info.missing_keys:
-            logger.warning("missing keys: %d", len(info.missing_keys))
-        if info.unexpected_keys:
-            logger.warning("unexpected keys: %d", len(info.unexpected_keys))
+        model.load_state_dict(state, strict=True)
         model.eval()
         self.model = model
         logger.info("loaded %s (%.1fM params, n_cam_types=%d)", checkpoint_path,

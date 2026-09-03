@@ -18,7 +18,7 @@ class Permute(nn.Module):
 
 
 def position_grid_to_embed(
-    pos_grid: torch.Tensor, embed_dim: int, omega_0: float = 100
+    pos_grid: torch.Tensor, embed_dim: int, omega_0: float = 100.0
 ) -> torch.Tensor:
     """Convert a 2D position grid (H, W, 2) to sinusoidal embeddings (H, W, C).
 
@@ -40,7 +40,7 @@ def position_grid_to_embed(
     return emb.view(H, W, embed_dim)
 
 
-def make_sincos_pos_embed(embed_dim: int, pos: torch.Tensor, omega_0: float = 100) -> torch.Tensor:
+def make_sincos_pos_embed(embed_dim: int, pos: torch.Tensor, omega_0: float = 100.0) -> torch.Tensor:
     """Generate 1D sin/cos position embeddings."""
     assert embed_dim % 2 == 0
     omega = torch.arange(embed_dim // 2, dtype=torch.float32, device=pos.device)
