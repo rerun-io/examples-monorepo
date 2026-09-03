@@ -1,5 +1,6 @@
 import rerun as rr
-from rerun.experimental.dataloader import DataSource, Field, FixedRateSampling, RerunIterableDataset, VideoFrameDecoder
+from rerun.experimental.dataloader import DataSource, Field, FixedRateSampling, NoShuffle, RerunIterableDataset, VideoFrameDecoder
+from torch import Tensor
 
 if __name__ == "__main__":
     rr.init("dataloader", spawn=True)
@@ -16,7 +17,7 @@ if __name__ == "__main__":
     fields = {
         "video": Field(
             "/world/exo/037522251142/pinhole/video:VideoStream:sample",
-            decode=VideoFrameDecoder(codec="h264", keyframe_interval=300, fps_estimate=15.0),
+            decode=VideoFrameDecoder(codec="h264"),
         ),
     }
 
@@ -25,14 +26,17 @@ if __name__ == "__main__":
         index="video_time",
         fields=fields,
         timeline_sampling=FixedRateSampling(rate_hz=15.0),
-        shuffle=False,
+        shuffle_strategy=NoShuffle(),
     )
     for i, item in enumerate(ds):
         rr.set_time(timeline="test", sequence=i)
-        if item["video"] is None:
+        video = item["video"]
+        if video is None:
             print(f"Item {i}: video is None")
             continue
+        if not isinstance(video, Tensor):
+            raise TypeError(f"Expected an RGB tensor, got {type(video).__name__}")
         print(f"Item {i}: {item}")
-        print(item["video"].shape)
-        video_frame = item["video"].permute(1, 2, 0).numpy()
+        print(video.shape)
+        video_frame = video.permute(1, 2, 0).numpy()
         rr.log("video_frame", rr.Image(video_frame))

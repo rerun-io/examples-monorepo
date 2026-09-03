@@ -14,7 +14,7 @@ def component_instance(value: Any, column_name: str) -> Any:
     if isinstance(value, (list, np.ndarray)):
         if len(value) == 0:
             raise ValueError(f"column {column_name!r} has an empty cell")
-        if len(value) == 1 and isinstance(value[0], (list, np.ndarray, bytes)):
+        if len(value) == 1 and isinstance(value[0], (list, np.ndarray, bytes, str)):
             return value[0]
     return value
 
