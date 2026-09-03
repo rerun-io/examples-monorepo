@@ -43,7 +43,6 @@ def test_segment_nvdec_decoder_decodes_a_fetch_block_across_segments(monkeypatch
         _timeline: str,
         _device: torch.device,
         _fps: int,
-        _codec: str,
     ) -> tuple[np.ndarray, list[bytes], list[bool], _FakeVideoDecoder]:
         """Stand in for the catalog and torchcodec boundary."""
         opened_segments.append(segment_id)
