@@ -5,13 +5,17 @@ dependencies = [
     #         pyserde, av, opencv, transformers, simplecv
     # cuda: pytorch-gpu, torchvision
     "sapiens2-pose",
-    "mv-api",
     "tyro>=0.9.1",
 ]
 description = "RTMLib YOLOX human detection plus Sapiens2 COCO-133 pose estimation with iterable and batched TensorRT video paths"
 name = "sapiens-coco133-pose"
 requires-python = ">= 3.12"
 version = "0.1.0"
+
+# Workspace siblings named above resolve to their in-repo path (never to a PyPI
+# namesake); the root manifest installs the same paths editable.
+[tool.uv.sources]
+sapiens2-pose = { path = "../sapiens2-pose", editable = true }
 
 [build-system]
 build-backend = "hatchling.build"

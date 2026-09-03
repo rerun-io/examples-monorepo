@@ -139,6 +139,11 @@ When ingesting a recording:
 4. GT tensors resolve under `/world/gt/...` when `config.load_labels` is true.
 5. Timeline is `video_time` everywhere.
 
+The read side of these rules is `simplecv/catalog_rig_layout.py`: `parse_rig_layout`
+turns a catalog schema back into typed cameras (video stream, moving rig, rig `kind`,
+calibration presence, camera-node markers). Consumers add only their selection policy
+on top of it instead of parsing entity paths themselves.
+
 ## 7. Dataset author checklist
 
 Datasets need **no** per-dataset rig code — `build_rig_layout` derives everything
