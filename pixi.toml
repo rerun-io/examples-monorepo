@@ -56,14 +56,14 @@ xorg-xorgproto = "*"
 # torch provider, so scope CPU torch to osx-arm64 (Linux keeps pytorch-gpu).
 [feature.common.target.osx-arm64.dependencies]
 pytorch-cpu = "*"
-# rerun-sdk's dataloader extra needs torchvision; conda provides the matching build.
+# Keep torchvision aligned with the project torch build for packages that import it.
 torchvision = "*"
 
 [feature.common.pypi-dependencies]
-# datafusion only — the dataloader extra would drag torch into common envs.
-rerun-sdk = { version = "==0.36.2", extras = ["datafusion"] }
-gradio = "==6.13.0"
-gradio-rerun = "==0.36.2"
+# pin-bump: hold — gradio-rerun's exact rerun-sdk pin must match.
+rerun-sdk = { version = "==0.37.0", extras = ["catalog"] } # pin-bump: hold
+gradio = "==6.13.0"                                        # pin-bump: hold
+gradio-rerun = "==0.37.0"                                  # pin-bump: hold
 simplecv = { path = "packages/simplecv", editable = true }
 
 # ─── catalog common feature (Rerun catalog prerelease lane) ────────────────
@@ -91,15 +91,15 @@ xorg-xorgproto = "*"
 [feature.catalog-common.pypi-dependencies]
 simplecv = { path = "packages/simplecv", editable = true }
 
-# Catalog lane: common's rerun-sdk + the dataloader extra; for unreleased
-# builds see AGENTS.md "Testing Rerun builds".
+# Catalog lane with the dataloader extra; for unreleased builds see AGENTS.md
+# "Testing Rerun builds".
 # Explicit platforms required — see AGENTS.md "Platforms & lockfile".
 [feature.rerun-prerelease]
 platforms = ["linux-64", "linux-aarch64"]
 
 [feature.rerun-prerelease.pypi-dependencies]
-rerun-sdk = { version = "==0.36.2", extras = [
-    "datafusion",
+rerun-sdk = { version = "==0.37.0", extras = [
+    "catalog",
     "dataloader",
 ] }
 
@@ -581,6 +581,12 @@ depends-on = ["_prompt-da-download-polycam-example"]
 cwd = "packages/prompt-da"
 description = "Run batched TensorRT PromptDA on the example Polycam dataset"
 
+[feature.prompt-da-demo.tasks.prompt-da-polycam-trio]
+cmd = "python tools/polycam_trio.py --polycam-zip-path data/6G-room-example.zip"
+depends-on = ["_prompt-da-download-polycam-example"]
+cwd = "packages/prompt-da"
+description = "Three-way Polycam comparison; pass --zipdepth-checkpoint PATH, then select the teacher and student backends (defaults: tensorrt then torch)"
+
 [feature.prompt-da-demo.tasks.prompt-da-app]
 cmd = "python tools/gradio_app.py"
 depends-on = ["_prompt-da-download-polycam-example"]
@@ -594,8 +600,6 @@ cwd = "packages/prompt-da"
 description = "Run the gradio app in dev mode"
 
 # prompt-da-stream: streaming inference straight from the Rerun dataloader.
-# Its own lane because it needs the 0.36 prerelease dataloader (ColumnDecoder,
-# fetch_size); `common`'s 0.35 pin and a prerelease pin cannot share an env.
 # Explicit platforms required — see AGENTS.md "Platforms & lockfile".
 [feature.prompt-da-stream]
 platforms = ["linux-64"]
@@ -658,6 +662,7 @@ libjpeg-turbo = ">=3.0.0,<4"
 [feature.zipdepth.pypi-dependencies]
 zipdepth = { path = "packages/zipdepth", editable = true }
 monopriors = { path = "packages/monoprior", editable = true }
+trtkit = { path = "packages/trtkit", editable = true }
 # monopriors' metadata requires sam3; resolve it to the workspace package like the other monopriors consumers
 sam3 = { path = "packages/sam3", editable = true }
 # albucore -> simsimd has no conda-forge linux-aarch64 build
@@ -667,7 +672,7 @@ pyturbojpeg = ">=2.0.0,<3"
 [feature.zipdepth.activation.env]
 PACKAGE_DIR = "packages/zipdepth"
 # authored code only; the unmodified upstream tree (data/loss/training/evaluation/upstream_cli) is a vendor boundary
-PYREFLY_TARGET = "zipdepth/apis zipdepth/__init__.py tests tools"
+PYREFLY_TARGET = "zipdepth/apis zipdepth/catalog zipdepth/__init__.py tests tools"
 
 [feature.zipdepth.tasks.zipdepth-infer-rerun]
 cmd = "python tools/infer_rerun.py"
@@ -678,6 +683,69 @@ description = "ZipDepth single-image inference visualized in Rerun (2D + 3D); --
 cmd = "python tools/train_smoke.py"
 cwd = "packages/zipdepth"
 description = "Smoke: self-distilled example data -> train -> resume -> torchrun -> checkpoints load through monopriors ZipDepthPredictor"
+
+[feature.zipdepth.tasks.zipdepth-export-prompted-trt]
+cmd = "python tools/export_prompted_trt.py"
+cwd = "packages/zipdepth"
+description = "Export, build, parity-check, and benchmark static-batch fp16 ZipDepth-PromptDA ONNX/TensorRT"
+
+# Catalog training lane: chosen-frame PromptDA pseudo-labels from the local Rerun catalog.
+# linux-64 only: NVDEC decode via torchcodec, mirroring prompt-da-stream.
+[feature.zipdepth-catalog]
+platforms = ["linux-64"]
+
+[feature.zipdepth-catalog.dependencies]
+# arkitscenes_download.ingest imports these at package load.
+imagecodecs = ">=2024.9.22"
+trimesh = "*"
+pillow = "*"
+av = ">=18"
+# simplecv's open_segment_decoder decodes the segment's AV1 packets on NVDEC.
+torchcodec = "*"
+# ffmpeg <902 links libjxl 0.11 and dlopen-fails beside the env's 0.12.
+ffmpeg = { version = ">=8.1", build-number = ">=902" }
+# torch.cuda.utilization() backend for the IO-vs-GPU training instrumentation.
+nvidia-ml-py = "*"
+
+[feature.zipdepth-catalog.pypi-dependencies]
+arkitscenes-download = { path = "packages/arkitscenes-download", editable = true }
+
+[feature.zipdepth-catalog.tasks.zipdepth-catalog-throughput]
+cmd = "python tools/catalog_throughput.py"
+cwd = "packages/zipdepth"
+description = "Measure catalog->batch throughput (frames/s, per-stage ms) over warm promptda segments"
+
+[feature.zipdepth-catalog.tasks.zipdepth-train-catalog]
+cmd = "python tools/train_catalog.py"
+cwd = "packages/zipdepth"
+description = "Fine-tune ZipDepth on chosen-frame PromptDA pseudo-labels streamed from the local Rerun catalog"
+
+[feature.zipdepth-catalog.tasks.zipdepth-catalog-train-smoke]
+cmd = "python tools/train_catalog_smoke.py"
+cwd = "packages/zipdepth"
+description = "Smoke: 2 catalog segments -> short fine-tune -> resume -> torchrun -> checkpoint loads through ZipDepthPredictor"
+
+[feature.zipdepth-catalog.tasks.zipdepth-eval-catalog]
+cmd = "python tools/eval_catalog.py"
+cwd = "packages/zipdepth"
+description = "Unaligned metric AbsRel/delta1/MAE vs held-out PromptDA labels, with separately named aligned diagnostics"
+
+[feature.zipdepth-catalog.tasks.zipdepth-eval-hard20]
+cmd = "python tools/eval_hard_frames.py"
+cwd = "packages/zipdepth"
+description = "Score the frozen Polycam hard-20 set without rerunning the teacher or selecting frames"
+
+[feature.zipdepth-catalog.tasks._zipdepth-download-polycam-example]
+cmd = "hf download pablovela5620/polycam-example-data 6G-room-example.zip --repo-type dataset --local-dir data/"
+cwd = "packages/zipdepth"
+outputs = ["packages/zipdepth/data/6G-room-example.zip"]
+description = "Download the example Polycam zip from HuggingFace"
+
+[feature.zipdepth-catalog.tasks.zipdepth-polycam-hard-frames]
+cmd = "python tools/polycam_hard_frames.py --polycam-zip-path data/6G-room-example.zip --max-keep 20"
+depends-on = ["_zipdepth-download-polycam-example"]
+cwd = "packages/zipdepth"
+description = "Mine Polycam frames with the largest edge-region ZipDepth-PromptDA teacher deviation"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # wilor-nano
@@ -854,7 +922,7 @@ scipy = "*"
 [feature.mv-api-catalog-register-mac.pypi-dependencies]
 tyro = ">=0.9.1,<0.10"
 simplecv = { path = "packages/simplecv", editable = true }
-rerun-sdk = { version = "==0.36.2", extras = ["datafusion"] }
+rerun-sdk = { version = "==0.37.0", extras = ["catalog"] }
 
 [feature.mv-api-catalog-register-mac.pypi-options]
 index-url = "https://pypi.org/simple"
@@ -1693,7 +1761,7 @@ xorg-libxrandr = "*"
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
 lpips = ">=0.1.4,<1"
 plyfile = ">=1.1,<2"
-rerun-sdk = "==0.36.2"
+rerun-sdk = "==0.37.0"
 simplecv = { path = "packages/simplecv", editable = true }
 
 [feature.gsplat-rust-renderer.activation.env]
@@ -2381,7 +2449,7 @@ description = "Open the native Rerun viewer on the local catalog"
 # ═══════════════════════════════════════════════════════════════════════════
 # gauss-surf — GausSurf splat pipeline over ARKitScenes catalog segments
 # ═══════════════════════════════════════════════════════════════════════════
-# Signals/catalog lane: reads the segment through the 0.36 prerelease
+# Signals/catalog lane: reads the segment through the 0.37 prerelease
 # dataloader, derives frame selection / normals / ultrawide depth, writes
 # layer RRDs back. Explicit platforms required — see AGENTS.md.
 [feature.gauss-surf]
@@ -2434,6 +2502,9 @@ sam3 = { path = "packages/sam3", editable = true }
 [feature.gauss-surf.activation.env]
 PACKAGE_DIR = "packages/gauss-surf"
 PYREFLY_TARGET = "src/gauss_surf/apis src/gauss_surf/train_gsplat src/gauss_surf/catalog.py src/gauss_surf/frame_selection.py src/gauss_surf/gaussurf_geometry.py src/gauss_surf/gaussurf_losses.py src/gauss_surf/gsplat_schedule.py src/gauss_surf/normals_encoding.py src/gauss_surf/render_io.py src/gauss_surf/uw_geometry.py src/gauss_surf/__init__.py tools"
+# The pinned gsplat fork accepts extra_signals, but another workspace gsplat
+# install wins Pyrefly's global site-package resolution and lacks those kwargs.
+PYREFLY_EXTRA_ARGS = "--baseline pyrefly-baseline.json"
 
 [feature.gauss-surf.tasks.gauss-surf-serve]
 cmd = "bash -c 'ulimit -n 524288 && exec rerun server --port 51236'"
@@ -2633,6 +2704,21 @@ zipdepth-dev = { features = [
     "zipdepth",
     "dev",
 ], solve-group = "zipdepth", no-default-feature = true }
+zipdepth-catalog = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "zipdepth",
+    "zipdepth-catalog",
+], solve-group = "zipdepth-catalog", no-default-feature = true }
+zipdepth-catalog-dev = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "zipdepth",
+    "zipdepth-catalog",
+    "dev",
+], solve-group = "zipdepth-catalog", no-default-feature = true }
 wilor-nano = { features = [
     "common",
     "cuda",

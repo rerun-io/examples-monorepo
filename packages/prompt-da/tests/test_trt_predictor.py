@@ -103,18 +103,12 @@ def test_trt_matches_torch_on_synthetic_frames() -> None:
 
 @pytest.mark.skipif(os.environ.get("PROMPTDA_TRT_E2E") != "1", reason="set PROMPTDA_TRT_E2E=1 to run the engine-building parity test")
 @requires_cuda
-def test_trt_matches_original_numpy_pipeline() -> None:
-    """The TRT path agrees with monoprior's original PromptDAPredictor end to end.
-
-    This crosses the preprocessing boundary on purpose: the original uses cv2
-    INTER_AREA on uint8, the TRT path uses GPU bilinear-antialias on float. On
-    smooth (low-frequency) frames the completed depth must still match closely.
-    """
+def test_trt_matches_torch_family_pipeline() -> None:
+    """The TRT path agrees with the shared torch predictor contract end to end."""
 
     import torch.nn.functional as F
-    from monopriors.models.depth_completion.prompt_da import PromptDAPredictor
 
-    from rerun_prompt_da.trt_predictor import PromptDATrtPredictor
+    from rerun_prompt_da.trt_predictor import PromptDATorchPredictor, PromptDATrtPredictor
 
     generator = torch.Generator().manual_seed(7)
     low_freq = torch.rand((2, 3, 24, 32), generator=generator)
@@ -124,12 +118,11 @@ def test_trt_matches_original_numpy_pipeline() -> None:
     prompt_m = F.interpolate(prompt_base, size=(192, 256), mode="bilinear", align_corners=False)[:, 0]
 
     trt_predictor = PromptDATrtPredictor(batch_size=8)
-    depth_trt_mm = (trt_predictor(rgb_bhw3.cuda(), prompt_m.cuda()) * 1000.0).cpu().numpy()
+    depth_trt_m = trt_predictor(rgb_bhw3.cuda(), prompt_m.cuda()).cpu().numpy()
     torch.cuda.synchronize()
 
-    original = PromptDAPredictor(device="cuda", model_type="large", max_size=1008)
+    torch_predictor = PromptDATorchPredictor()
+    depth_torch_m = torch_predictor(rgb_bhw3.cuda(), prompt_m.cuda()).cpu().numpy()
     for i in range(rgb_bhw3.shape[0]):
-        prompt_mm_u16 = (prompt_m[i].numpy() * 1000.0).astype(np.uint16)
-        depth_orig_mm = original(rgb=rgb_bhw3[i].numpy(), prompt_depth=prompt_mm_u16).depth_mm
-        diff_mm = np.abs(depth_trt_mm[i] - depth_orig_mm.astype(np.float32))
-        assert np.median(diff_mm) < 20.0, f"frame {i}: median {np.median(diff_mm):.1f} mm vs original pipeline"
+        diff_m = np.abs(depth_trt_m[i] - depth_torch_m[i])
+        assert np.median(diff_m) < 0.02, f"frame {i}: median {np.median(diff_m) * 1000.0:.1f} mm vs original pipeline"

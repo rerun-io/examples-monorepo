@@ -113,6 +113,8 @@ site-package-path = [
     ".pixi/envs/prompt-da-stream-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/zipdepth-dev/lib/python3.12/site-packages",
     ".pixi/envs/zipdepth-dev/lib/python3.12/site-packages/rerun_sdk",
+    ".pixi/envs/zipdepth-catalog-dev/lib/python3.12/site-packages",
+    ".pixi/envs/zipdepth-catalog-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/wilor-nano-dev/lib/python3.12/site-packages",
     ".pixi/envs/sam3d-body-dev/lib/python3.12/site-packages",
     ".pixi/envs/sam3-dev/lib/python3.12/site-packages",
