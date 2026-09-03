@@ -46,7 +46,6 @@ def _bound_decoder(monkeypatch: pytest.MonkeyPatch, times_ns: list[int]) -> tupl
         _timeline: str,
         _device: torch.device,
         _fps: int,
-        _codec: str,
     ) -> tuple[np.ndarray, list[bytes], list[bool], _StubVideoDecoder]:
         """Stand in for the catalog and torchcodec boundary."""
         return np.asarray(times_ns, dtype=np.int64).astype("timedelta64[ns]"), [], [], video
