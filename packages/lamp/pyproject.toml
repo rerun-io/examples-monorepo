@@ -1,0 +1,50 @@
+[project]
+name = "lamptrack"
+version = "0.1.0"
+description = "Non-commercial LAMP multi-camera 3D people tracking"
+requires-python = ">=3.12"
+dependencies = [
+    "posekit",
+    "simplecv",
+    "smplx>=0.1.28",
+    "tyro>=0.9.1",
+    "projectaria-tools>=1.5,<3",
+]
+
+[build-system]
+build-backend = "hatchling.build"
+requires = ["hatchling"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["lamptrack"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"lamptrack/third_party/lamp/LICENSE" = "lamptrack/third_party/lamp/LICENSE"
+
+[tool.ruff]
+line-length = 150
+extend-exclude = [
+    "lamptrack/third_party/lamp",
+    "tests/reference_data/lamp",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]
+ignore = ["E501", "F722", "F821", "UP037", "UP040"]
+
+[tool.pytest.ini_options]
+markers = ["slow: downloads or loads LAMP model artifacts (deselected by default; run with -m slow)"]
+addopts = "-m 'not slow'"
+
+[tool.vulture]
+paths = ["lamptrack", "tests", "tools"]
+exclude = [
+    "*/.pixi/*",
+    "*/__pycache__/*",
+    "*/build/*",
+    "*/dist/*",
+    "*/lamptrack/third_party/lamp/*",
+    "*/tests/reference_data/lamp/*",
+]
+sort_by_size = true
+min_confidence = 80
