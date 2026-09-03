@@ -8,10 +8,11 @@ import numpy as np
 import rerun as rr
 from jaxtyping import Bool, Float32, Int64
 from numpy import ndarray
-from simplecv.rerun_log_utils import RerunTyroConfig
+from posekit.rerun_logging import person_color
+from simplecv.rerun_log_utils import RerunTyroConfig, compute_vertex_normals
 
-from lamptrack.rerun_logging import LivePeopleLogger
-from lamptrack.third_party.lamp.core.types import SMPL_SKELETON_EDGES, Person, PersonState, Skeleton, color_from_id
+from lamptrack.rerun_logging import LivePeopleLogger, log_smpl_annotation_context
+from lamptrack.third_party.lamp.core.types import Person, PersonState, Skeleton
 from lamptrack.third_party.lamp.models.lifter import Lifter, LifterSettings, SnippetData
 from lamptrack.third_party.lamp.tracking.tracker import LampTracker
 
@@ -211,9 +212,9 @@ def replay(config: Config) -> ReplayMetrics:
         capture_cuda_graph=False,
     )
     tracker = LampTracker(num_cameras=4)
-    edges = np.asarray(SMPL_SKELETON_EDGES, dtype=np.int64)
     trails: dict[int, list[Float32[ndarray, "3"]]] = {}
     people_logger = LivePeopleLogger()
+    log_smpl_annotation_context()
     lifter_times: list[float] = []
     raw_errors: list[float] = []
     smoothed_errors: list[float] = []
@@ -274,7 +275,7 @@ def replay(config: Config) -> ReplayMetrics:
         rr.set_time("fixture_time", timestamp=record.call_timestamp_ns * 1e-9)
         people_logger.update([person_id for person_id, _ in live_people])
         for person_id, person in live_people:
-            _log_person(person_id, person, record.call_timestamp_ns, lifter, edges, trails)
+            _log_person(person_id, person, record.call_timestamp_ns, lifter, trails)
 
     return ReplayMetrics(
         lift_calls=call_count,
@@ -309,7 +310,6 @@ def _log_person(
     person: Person,
     timestamp_ns: int,
     lifter: Lifter,
-    edges: Int64[ndarray, "edges 2"],
     trails: dict[int, list[Float32[ndarray, "3"]]],
 ) -> None:
     """Log one accepted person's latest skeleton, mesh, and pelvis trail."""
@@ -317,13 +317,17 @@ def _log_person(
     if state is None or state.skeleton is None:
         return
     skeleton = state.skeleton
-    color_float = color_from_id(person_id)
-    color = tuple(round(channel * 255.0) for channel in color_float)
+    color = person_color(person_id)
     rr.set_time("fixture_time", timestamp=timestamp_ns * 1e-9)
-    rr.log(f"world/people/{person_id}/skeleton", rr.Points3D(skeleton.kp_world, colors=color, radii=0.025))
     rr.log(
-        f"world/people/{person_id}/skeleton/edges",
-        rr.LineStrips3D(skeleton.kp_world[edges], colors=color, radii=0.012),
+        f"world/people/{person_id}/joints",
+        rr.Points3D(
+            skeleton.kp_world,
+            keypoint_ids=range(24),
+            class_ids=0,
+            colors=color,
+            radii=0.02,
+        ),
     )
     trail = trails.setdefault(person_id, [])
     trail.append(skeleton.kp_world[0].copy())
@@ -336,9 +340,16 @@ def _log_person(
             transl=skeleton.T_world_pelvis[None, :3, 3],
         )
         if lifter.smpl_faces is not None:
+            mesh_vertices = vertices[0].astype(np.float32, copy=False)
+            mesh_faces = np.asarray(lifter.smpl_faces)
             rr.log(
                 f"world/people/{person_id}/mesh",
-                rr.Mesh3D(vertex_positions=vertices[0], triangle_indices=lifter.smpl_faces, albedo_factor=color),
+                rr.Mesh3D(
+                    vertex_positions=mesh_vertices,
+                    triangle_indices=mesh_faces,
+                    vertex_normals=compute_vertex_normals(mesh_vertices, mesh_faces),
+                    albedo_factor=(*[channel / 255.0 for channel in color], 0.5),
+                ),
             )
 
 

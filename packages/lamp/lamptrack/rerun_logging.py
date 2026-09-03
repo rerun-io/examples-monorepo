@@ -5,6 +5,25 @@ from dataclasses import dataclass, field
 
 import rerun as rr
 
+from lamptrack.third_party.lamp.core.types import SMPL_JOINT_NAMES, SMPL_SKELETON_EDGES
+
+
+def log_smpl_annotation_context() -> None:
+    """Log the static SMPL-24 joint names and connections for all people."""
+    rr.log(
+        "world/people",
+        rr.AnnotationContext(
+            [
+                rr.ClassDescription(
+                    info=rr.AnnotationInfo(id=0, label="Person"),
+                    keypoint_annotations=[rr.AnnotationInfo(id=joint_id, label=name) for joint_id, name in enumerate(SMPL_JOINT_NAMES)],
+                    keypoint_connections=list(SMPL_SKELETON_EDGES),
+                )
+            ]
+        ),
+        static=True,
+    )
+
 
 @dataclass(slots=True)
 class LivePeopleLogger:
@@ -28,4 +47,4 @@ class LivePeopleLogger:
         self._visible_track_ids = live_ids
 
 
-__all__ = ("LivePeopleLogger",)
+__all__ = ("LivePeopleLogger", "log_smpl_annotation_context")
