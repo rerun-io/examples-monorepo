@@ -182,21 +182,22 @@ def gravity_aligned_world_transform(gravity_world: Float64[ndarray, "3"]) -> Flo
         Transform from world to a right-handed, Z-up gravity frame,
         ``Float32[ndarray, "4 4"]``.
     """
-    gravity: Float32[ndarray, "3"] = np.asarray(gravity_world, dtype=np.float32)
-    norm: float = float(np.linalg.norm(gravity))
-    if norm < 1e-9:
-        raise ValueError("gravity_world must be non-zero.")
-    z_axis: Float32[ndarray, "3"] = -gravity / norm
-    helper: Float32[ndarray, "3"] = np.array([1.0, 0.0, 0.0], dtype=np.float32)
-    if abs(float(np.dot(helper, z_axis))) > 0.99:
+    g = np.asarray(gravity_world, dtype=np.float32)
+    z_axis = -g / max(np.linalg.norm(g), 1e-9)  # gravity-world's +Z in world
+
+    # Pick any vector not parallel to z_axis to build x.
+    helper = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    if abs(np.dot(helper, z_axis)) > 0.99:
         helper = np.array([0.0, 1.0, 0.0], dtype=np.float32)
-    x_axis: Float32[ndarray, "3"] = helper - np.dot(helper, z_axis) * z_axis
-    x_axis /= np.linalg.norm(x_axis)
-    y_axis: Float32[ndarray, "3"] = np.cross(z_axis, x_axis)
-    world_R_gravity: Float32[ndarray, "3 3"] = np.column_stack([x_axis, y_axis, z_axis])
-    gravity_T_world: Float32[ndarray, "4 4"] = np.eye(4, dtype=np.float32)
-    gravity_T_world[:3, :3] = world_R_gravity.T
-    return gravity_T_world
+    x_axis = helper - np.dot(helper, z_axis) * z_axis
+    x_axis /= max(np.linalg.norm(x_axis), 1e-9)
+    y_axis = np.cross(z_axis, x_axis)
+
+    # R_world_gw has those axes as columns; invert (= transpose) for gw <- world.
+    R_world_gw = np.column_stack([x_axis, y_axis, z_axis])
+    out = np.eye(4, dtype=np.float32)
+    out[:3, :3] = R_world_gw.T
+    return out
 
 
 __all__ = ("CameraParameters", "PerCameraCalibration", "RigCamera", "gravity_aligned_world_transform")

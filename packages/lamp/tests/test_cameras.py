@@ -1,13 +1,64 @@
 """Camera-adapter contract tests for LAMP tracking and lifting."""
 
+import importlib.util
+import sys
+from enum import Enum
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
+
 import numpy as np
 import torch
 from jaxtyping import Float32, Float64
 from numpy import ndarray
 from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion, PinholeParameters
 
-from lamptrack.cameras import RigCamera
+from lamptrack.cameras import RigCamera, gravity_aligned_world_transform
 from lamptrack.third_party.lamp.models.model_utils import pinhole_unproject
+
+REFERENCE_DIR = Path(__file__).parent / "reference_data" / "lamp"
+
+
+def _load_reference_module(name: str, filename: str) -> ModuleType:
+    """Load one pristine upstream source file under its original module name."""
+    path = REFERENCE_DIR / filename
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load upstream fixture {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _upstream_gravity_transform(gravity_world: Float64[ndarray, "3"]) -> Float32[ndarray, "4 4"]:
+    """Run pristine ``MpsLoader._compute_T_gravityWorld_world`` on a provider stub."""
+    for package_name in ("lamp", "lamp.core", "lamp.io"):
+        package = ModuleType(package_name)
+        package.__path__ = [str(REFERENCE_DIR)]
+        sys.modules[package_name] = package
+    _load_reference_module("lamp.core.se3", "upstream_core_se3.py")
+    _load_reference_module("lamp.core.types", "upstream_core_types.py")
+    calibration = ModuleType("projectaria_tools.core.calibration")
+
+    class DeviceVersion(Enum):
+        """Names imported by the pristine module but unused by this test seam."""
+
+        GEN1 = "gen1"
+        GEN2 = "gen2"
+
+    calibration.DeviceVersion = DeviceVersion
+    sys.modules[calibration.__name__] = calibration
+    sensor_io = _load_reference_module("lamp.io.sensor_io", "upstream_io_sensor_io.py")
+
+    class ProviderStub:
+        """Return one pose carrying the requested gravity vector."""
+
+        def get_closed_loop_pose(self, _timestamp_ns: int, _query: object) -> SimpleNamespace:
+            return SimpleNamespace(gravity_world=gravity_world)
+
+    loader = object.__new__(sensor_io.MpsLoader)
+    loader._provider = ProviderStub()
+    return loader._compute_T_gravityWorld_world()
 
 
 def _intrinsics() -> Intrinsics:
@@ -79,3 +130,16 @@ def test_virtual_pinhole_lifter_rays_equal_kb4_unprojection() -> None:
     )[0]
     lifter_rays = torch.nn.functional.normalize(lifter_rays, dim=-1)
     assert np.allclose(lifter_rays.numpy(), camera.unproject(distorted), atol=1e-6)
+
+
+def test_gravity_alignment_matches_pristine_mps_loader() -> None:
+    """The package helper preserves upstream axis choice and handedness."""
+    gravity_vectors = (
+        np.array([0.0, 0.0, -9.81], dtype=np.float64),
+        np.array([1.2, -2.3, -9.4], dtype=np.float64),
+        np.array([-9.81, 1e-4, 2e-4], dtype=np.float64),
+    )
+    for gravity_world in gravity_vectors:
+        expected = _upstream_gravity_transform(gravity_world)
+        actual = gravity_aligned_world_transform(gravity_world)
+        assert np.array_equal(actual, expected)

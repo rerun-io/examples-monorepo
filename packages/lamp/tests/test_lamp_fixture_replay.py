@@ -11,6 +11,11 @@ from lamptrack.apis.lamp_replay import Config, fixture_path, load_snippets, repl
 FIXTURE_DIR = Path(__file__).parents[1] / "data" / "fixtures" / "test-library"
 
 
+def test_fixture_path_matches_published_archive() -> None:
+    """The replay resolves the exact archive published by the reviewer."""
+    assert fixture_path(FIXTURE_DIR) == FIXTURE_DIR / "test-library_fixture.npz"
+
+
 @pytest.mark.slow
 def test_fixture_lifter_and_smoothing_equivalence() -> None:
     """CPU fp32 lifting is exact and smoothed joints stay within 0.1 mm."""

@@ -1234,10 +1234,10 @@ depends-on = ["_lamp-download-checkpoint", "_lamp-download-body-model"]
 description = "Download the released LAMP checkpoint and neutral SMPL body model"
 
 [feature.lamp.tasks._lamp-download-fixture]
-cmd = "test -f data/fixtures/test-library/lamp_fixture.npz || hf download pablovela5620/lamp-fixtures --repo-type dataset --include 'test-library/*' --local-dir data/fixtures/"
+cmd = "test -f data/fixtures/test-library/test-library_fixture.npz || hf download pablovela5620/lamp-fixtures --repo-type dataset --revision 6a1374341998e7e25f4d5c3dc805dff7669fc6e6 --include 'test-library/test-library_fixture.npz' --local-dir data/fixtures/"
 cwd = "packages/lamp"
-outputs = ["packages/lamp/data/fixtures/test-library/lamp_fixture.npz"]
-description = "Download the reviewer-populated LAMP test-library replay fixture"
+outputs = ["packages/lamp/data/fixtures/test-library/test-library_fixture.npz"]
+description = "Download the pinned reviewer-published LAMP test-library replay fixture"
 
 [feature.lamp.tasks.lamp-replay]
 cmd = "python tools/demos/lamp_replay.py"

@@ -13,7 +13,7 @@ from lamptrack.third_party.lamp.models.lifter import Lifter, LifterSettings, Sni
 from lamptrack.third_party.lamp.tracking.tracker import LampTracker
 
 _PACKAGE_ROOT = Path(__file__).parents[2]
-_FIXTURE_NAME = "lamp_fixture.npz"
+_FIXTURE_NAME = "test-library_fixture.npz"
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,7 +21,7 @@ class Config:
     """Paths and Rerun output for fixture replay."""
 
     fixture_dir: Path = _PACKAGE_ROOT / "data" / "fixtures" / "test-library"
-    """Directory containing the fork-recorded ``lamp_fixture.npz``."""
+    """Directory containing the fork-recorded ``test-library_fixture.npz``."""
     checkpoint: Path = _PACKAGE_ROOT / "data" / "checkpoints" / "lamp_smpl_aria_gen2.pt"
     """Pinned released LAMP checkpoint."""
     smpl_model_path: Path = _PACKAGE_ROOT / "data" / "body_models" / "smpl" / "SMPL_NEUTRAL.pkl"
@@ -38,8 +38,7 @@ def fixture_path(fixture_dir: Path) -> Path:
     if not path.is_file():
         raise FileNotFoundError(
             f"LAMP replay fixture is missing: {path}\n"
-            "Run `pixi run -e lamp _lamp-download-fixture` after the reviewer publishes "
-            "pablovela5620/lamp-fixtures/test-library/."
+            "Run `pixi run -e lamp _lamp-download-fixture` to download the pinned reviewer fixture."
         )
     return path
 
