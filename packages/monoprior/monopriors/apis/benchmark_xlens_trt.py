@@ -54,10 +54,8 @@ class Config:
     """Outward rig cameras."""
     settings: tuple[tuple[int, int], ...] = ((504, 896), (504, 798))
     """Network height and width per setting; frames are centre-cropped to the target aspect and resized."""
-    off_opt: tuple[tuple[int, tuple[int, int]], ...] = ((2, (504, 798)),)
-    """View count and network size of the dynamic-engine rows away from its tuning shape. Each row also needs an eager fp32
-    reference at that shape, which is why the catalog tool's 630x1120 default is not here: freezing its fp32 geometry beside the
-    resident engine exceeds 24 GB on the RTX 5090 (the catalog smoke measures that shape instead)."""
+    off_opt: tuple[tuple[int, tuple[int, int]], ...] = ((2, (504, 798)), (4, (630, 1120)))
+    """View count and network size of the dynamic-engine rows away from its tuning shape (the second is the catalog tool's default)."""
     batch_sizes: tuple[int, ...] = (2, 4)
     """Frameset batches timed through ``predict_batch`` on the ``trt-rig`` engine."""
     warmup_iters: int = 10
