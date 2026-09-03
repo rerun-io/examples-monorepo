@@ -24,6 +24,7 @@ from numpy import ndarray
 from rerun.catalog import CatalogClient, DatasetEntry, DatasetView
 from scipy.spatial.transform import Rotation
 from simplecv.camera_parameters import Fisheye62Parameters, Intrinsics, PinholeParameters, rescale_intri
+from simplecv.catalog_video_codec import CatalogCodecName, catalog_codec_name
 from simplecv.ops.tsdf_depth_fuser import Open3DFuser
 from simplecv.rerun_log_utils import RerunTyroConfig, log_open3d_mesh
 from simplecv.rerun_rig_logger import log_rig_static
@@ -273,17 +274,11 @@ def main(config: RigDepthCatalogConfig) -> None:
     }
 
     codec_value: int = int(np.asarray(read_static(view, f"{RIG_PATH}/{config.cams[0]}/pinhole/video", "VideoStream:codec")).ravel()[0])
-    video_codec = rr.VideoCodec(codec_value)
-    if video_codec == rr.VideoCodec.H264:
-        codec = "h264"
-    elif video_codec == rr.VideoCodec.AV1:
-        codec = "av1"
-    else:
-        raise ValueError(f"unsupported catalog video codec: {video_codec}")
+    codec: CatalogCodecName = catalog_codec_name(codec_value)
     fields: dict[str, Field] = {
         cam: Field(
             f"/{RIG_PATH}/{cam}/pinhole/video:VideoStream:sample",
-            decode=TimedNvdecDecoder(dataset, f"{RIG_PATH}/{cam}/pinhole/video", TIMELINE, device, 30, codec),
+            decode=TimedNvdecDecoder(dataset, f"{RIG_PATH}/{cam}/pinhole/video", TIMELINE, device, 30),
         )
         for cam in config.cams
     }

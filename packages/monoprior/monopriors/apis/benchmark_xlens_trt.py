@@ -213,26 +213,17 @@ def fit_to_network(frame: UInt8[ndarray, "h0 w0 3"], camera: Fisheye62Parameters
 
 def catalog_frames(config: Config, cams: tuple[str, ...]) -> tuple[dict[str, UInt8[ndarray, "h0 w0 3"]], dict[str, Fisheye62Parameters]]:
     """Decode the first shared frameset of the segment for ``cams`` and read their cameras."""
-    import rerun as rr
     from rerun.catalog import CatalogClient, DatasetEntry, DatasetView
     from simplecv.rerun_dataloader import open_segment_decoder
 
-    from monopriors.apis.stereo_catalog import read_fisheye_camera, read_static
+    from monopriors.apis.stereo_catalog import read_fisheye_camera
 
     dataset: DatasetEntry = CatalogClient(config.catalog_url).get_dataset(config.dataset)
     view: DatasetView = dataset.filter_segments(config.segment_id)
     cameras: dict[str, Fisheye62Parameters] = {cam: read_fisheye_camera(view, cam) for cam in cams}
-    codec_value: int = int(np.asarray(read_static(view, f"{RIG_PATH}/{cams[0]}/pinhole/video", "VideoStream:codec")).ravel()[0])
-    video_codec = rr.VideoCodec(codec_value)
-    if video_codec == rr.VideoCodec.H264:
-        codec = "h264"
-    elif video_codec == rr.VideoCodec.AV1:
-        codec = "av1"
-    else:
-        raise ValueError(f"unsupported catalog video codec: {video_codec}")
     device = torch.device("cuda")
     decoders: dict[str, DecoderBundle] = {
-        cam: cast(DecoderBundle, open_segment_decoder(dataset, config.segment_id, f"{RIG_PATH}/{cam}/pinhole/video", TIMELINE, device, 30, codec))
+        cam: cast(DecoderBundle, open_segment_decoder(dataset, config.segment_id, f"{RIG_PATH}/{cam}/pinhole/video", TIMELINE, device, 30))
         for cam in cams
     }
     shared_start_ns: int = max(int(bundle[0][0].astype(np.int64)) for bundle in decoders.values())
