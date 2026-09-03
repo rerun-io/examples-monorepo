@@ -33,6 +33,7 @@ from simplecv.data.skeleton.coco_133 import (
     RIGHT_HAND_IDX,
 )
 from simplecv.ops.triangulate import batch_triangulate
+from simplecv.ops.umeyama import umeyama_alignment
 from simplecv.rerun_custom_types import PinholeWithDistortion, Points2DWithConfidence, Points3DWithConfidence, confidence_scores_to_rgb
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole, log_video
 from simplecv.rig import rebuild_camera_with_extrinsics
@@ -237,7 +238,7 @@ def single_frame_mv_hands(
 
     uvc_coco_list: list[Float32[ndarray, "133 3"]] = []
     uvc_cam_names: list[str] = []
-    for ego_cam_name, rgb_hw3 in tqdm(
+    for ego_cam_name, frame_rgb in tqdm(
         list(zip(ego_sequence.ego_cam_dict.keys(), rgb_list, strict=True)),
         desc="Hand detect/keypoints (calib frame)",
         leave=False,
@@ -245,15 +246,15 @@ def single_frame_mv_hands(
         # don't run on the quest cameras
         if "quest" in ego_cam_name.lower() or "rgb" in ego_cam_name.lower():
             continue
-        det_results: DetectionResult = hand_detector(rgb_hw3, hand_conf=0.3)
+        det_results: DetectionResult = hand_detector(frame_rgb, hand_conf=0.3)
         cam_log_path: Path = parent_log_path / "ego" / ego_cam_name
         pinhole_log_path: Path = cam_log_path / "pinhole"
-        rr.log(f"{pinhole_log_path}/image", rr.Image(rgb_hw3).compress(jpeg_quality=90))
+        rr.log(f"{pinhole_log_path}/image", rr.Image(frame_rgb).compress(jpeg_quality=90))
         uvc_coco: Float32[ndarray, "133 3"] = np.full((133, 3), np.nan, dtype=np.float32)
         # log detected hands and keypoints
         if det_results.left_xyxy is not None:
             wilor_preds: FinalWilorPred | KeypointResults = hand_keypoint_model(
-                rgb_hw3=rgb_hw3, xyxy=det_results.left_xyxy, handedness="left"
+                rgb_hw3=frame_rgb, xyxy=det_results.left_xyxy, handedness="left"
             )
             assert isinstance(wilor_preds, KeypointResults)
             if debug:
@@ -272,7 +273,7 @@ def single_frame_mv_hands(
 
         if det_results.right_xyxy is not None:
             wilor_preds: FinalWilorPred | KeypointResults = hand_keypoint_model(
-                rgb_hw3=rgb_hw3, xyxy=det_results.right_xyxy, handedness="right"
+                rgb_hw3=frame_rgb, xyxy=det_results.right_xyxy, handedness="right"
             )
             assert isinstance(wilor_preds, KeypointResults)
             if debug:
@@ -377,12 +378,8 @@ def single_frame_mv_hands(
     # dst_points are GT joints expressed in the Quest/world frame coming from the labels.
     dst_points: Float[ndarray, "n_valid 3"] = gt_xyzc[valid_mask, :3].astype(np.float64, copy=False)
 
-    # Similarity that maps Oak→new-Oak-world (destination ← source).
-    new_oak_world_T_oak_world: Float32[ndarray, "4 4"] = umeyama_transform(
-        src_points=src_points,
-        dst_points=dst_points,
-        allow_scaling=False,
-    )
+    # Rigid transform that maps Oak-world into new-Oak-world, as a homogeneous matrix.
+    new_oak_world_T_oak_world: Float32[ndarray, "4 4"] = umeyama_alignment(src_points, dst_points, allow_scaling=False).as_matrix().astype(np.float32)
     src_points_h: Float[ndarray, "n_valid 4"] = np.concatenate(
         (src_points, np.ones((num_valid, 1), dtype=np.float64)),
         axis=1,
@@ -690,83 +687,6 @@ def log_reprojected_gt_uv(
                 ).partition(keypoint_lengths),
             ],
         )
-
-
-def umeyama_transform(
-    *,
-    src_points: Float[ndarray, "n 3"],
-    dst_points: Float[ndarray, "n 3"],
-    allow_scaling: bool = False,
-    eps: float = 1e-9,
-) -> Float32[ndarray, "4 4"]:
-    """Compute the similarity transform aligning ``src_points`` to ``dst_points``.
-
-    The returned transform follows the right-to-left convention::
-
-        dst_points ≈ (dst_T_src[:3, :3] @ src_points.T).T + dst_T_src[:3, 3]
-
-    Args:
-        src_points: Source XYZ coordinates (e.g., triangulated Oak keypoints).
-        dst_points: Target XYZ coordinates (e.g., quest ground-truth keypoints).
-        allow_scaling: If True, estimate an isotropic scale factor; otherwise fix scale=1.
-        eps: Small value guarding against degenerate variance.
-
-    Returns:
-        dst_R_src: Rotation matrix mapping source → destination.
-        dst_t_src: Translation vector (destination frame) mapping source → destination.
-        scale: Isotropic scale factor.
-        dst_T_src: 4x4 homogeneous transform representing the similarity.
-
-    Raises:
-        ValueError: If fewer than 3 correspondences are provided or the source variance is degenerate.
-    """
-    if src_points.shape != dst_points.shape:
-        msg = f"Source and destination shapes must match; got {src_points.shape} vs {dst_points.shape}"
-        raise ValueError(msg)
-
-    n_points: int = int(src_points.shape[0])
-    if n_points < 3:
-        msg = f"Umeyama transform requires at least 3 correspondences; received {n_points}"
-        raise ValueError(msg)
-
-    src_f64: Float[ndarray, "n 3"] = src_points.astype(np.float64, copy=False)
-    dst_f64: Float[ndarray, "n 3"] = dst_points.astype(np.float64, copy=False)
-
-    src_mean: Float[ndarray, "3"] = np.mean(src_f64, axis=0)
-    dst_mean: Float[ndarray, "3"] = np.mean(dst_f64, axis=0)
-
-    src_centered: Float[ndarray, "n 3"] = src_f64 - src_mean
-    dst_centered: Float[ndarray, "n 3"] = dst_f64 - dst_mean
-
-    covariance: Float[ndarray, "3 3"] = (dst_centered.T @ src_centered) / float(n_points)
-
-    u: Float[ndarray, "3 3"]
-    singular_vals: Float[ndarray, "3"]
-    vt: Float[ndarray, "3 3"]
-    u, singular_vals, vt = np.linalg.svd(covariance)
-
-    reflection: Float[ndarray, "3"] = np.ones(3, dtype=np.float64)
-    if np.linalg.det(u) * np.linalg.det(vt) < 0:
-        reflection = np.array([1.0, 1.0, -1.0], dtype=np.float64)
-
-    dst_R_src: Float[ndarray, "3 3"] = u @ np.diag(reflection) @ vt
-
-    src_var: float = float(np.mean(np.sum(src_centered**2, axis=1)))
-    if src_var <= eps:
-        msg = f"Source variance too small for stable Umeyama estimation (variance={src_var})"
-        raise ValueError(msg)
-
-    scale: float = 1.0
-    if allow_scaling:
-        scale = float(np.sum(singular_vals * reflection) / src_var)
-
-    dst_t_src: Float[ndarray, "3"] = dst_mean - scale * (dst_R_src @ src_mean)
-
-    dst_T_src: Float[ndarray, "4 4"] = np.eye(4, dtype=np.float64)
-    dst_T_src[:3, :3] = scale * dst_R_src
-    dst_T_src[:3, 3] = dst_t_src
-
-    return dst_T_src.astype(np.float32)
 
 
 @dataclass
