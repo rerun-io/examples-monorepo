@@ -11,6 +11,12 @@ dependencies = [
     "projectaria-tools>=1.5,<3",
 ]
 
+# Workspace siblings named above resolve to their in-repo path (never to a PyPI
+# namesake); the root manifest installs the same paths editable.
+[tool.uv.sources]
+posekit = { path = "../posekit", editable = true }
+simplecv = { path = "../simplecv", editable = true }
+
 [build-system]
 build-backend = "hatchling.build"
 requires = ["hatchling"]

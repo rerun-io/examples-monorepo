@@ -111114,8 +111114,8 @@ packages:
 - pypi: ./packages/lamp
   name: lamptrack
   requires_dist:
-  - posekit
-  - simplecv
+  - posekit @ ./packages/posekit
+  - simplecv @ ./packages/simplecv
   - smplx>=0.1.28
   - tyro>=0.9.1
   - projectaria-tools>=1.5,<3
