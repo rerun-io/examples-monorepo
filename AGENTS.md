@@ -31,7 +31,7 @@ The workspace `platforms` list defines the full platform vocabulary: the plain `
 
 **Every linux-only feature MUST declare `platforms = ["linux-64", "linux-aarch64"]` explicitly.** Since pixi 0.71 (PR prefix-dev/pixi#6178), a feature that omits `platforms` defaults to the entire workspace list — including `osx-arm64` and the named CUDA platforms. An env's platforms are the intersection of its features' lists, so one omitting feature can demand unintended macOS or CUDA solves; if that demand is unsolvable (CUDA deps like `libcublas`), **every `pixi install -e <any-env>`/`pixi lock` in the whole workspace aborts** on the next lock write. Solvable missing demands get silently solved and added to the lock instead. When adding a feature, copy the `platforms` line from an existing linux-only feature (e.g. `mv-api`).
 
-**Whole-workspace lock generation.** No dependency needs package Python at build time during resolution anymore: the MoGe inference subset is vendored into `packages/monoprior/monopriors/third_party/` (so `moge`/`utils3d`/`pipeline` are not dependencies at all), `gsplat` is prebuilt, and the workspace `sam2` and `dpvo` packages have static metadata (`dpvo` builds its CUDA kernels through an explicit task). `rtmlib` stays a plain git PyPI dep — its fork carries static metadata with empty requirements, so it never needed build isolation. Validated 2026-07-31: **any Linux host regenerates the whole-workspace lock**. Full lock *regeneration* from macOS still fails on an upstream pixi limitation: build dispatch must instantiate each env containing editable/git PyPI deps (`posekit` etc.), and linux-only envs cannot exist on osx.
+**Whole-workspace lock generation.** Resolution never needs package Python at build time: every in-repo package exposes static metadata, and anything that would need a build step is vendored or prebuilt instead. What limits a host is pixi's build dispatch, which instantiates every env that contains editable or git PyPI deps on the current machine and picks any of that env's platforms to do so. Every env has a linux-64 lane, so **a linux-64 host regenerates the whole-workspace lock**. A linux-aarch64 host can re-lock changes scoped to envs that have an aarch64 lane; a change to a shared feature (`cuda`, `common`, `dev`) also invalidates the linux-64-only envs and `pixi lock` fails with `build dispatch initialization failed: the environment '<env>' does not support 'linux-aarch64' on this machine`. Re-lock such changes on a linux-64 host: apply the change in a worktree there, run `CONDA_OVERRIDE_CUDA=13.0 pixi lock`, copy `pixi.lock` back, and confirm with `pixi lock --check`. macOS cannot regenerate the full lock for the same reason: linux-only envs cannot exist on osx.
 
 ## Architecture
 
@@ -70,7 +70,7 @@ packages/<name>/
 
 ## Adding a new package
 
-1. Create `packages/<name>/` with `pyproject.toml`, the source module, `tools/`, and `tests/` (structure above).
+1. Create `packages/<name>/` with `pyproject.toml`, the source module, `tools/`, and `tests/` (structure above). If it imports another workspace package, list that name in `[project].dependencies` **and** pin it in `[tool.uv.sources]` (`name = { path = "../<dir>", editable = true }`); `packages/simplecv/tests/test_workspace_sources.py` checks both and fails if the lock ever resolves a workspace name from PyPI.
 2. Add `[feature.<name>]` in the root `pixi.toml`: conda deps, pypi deps (editable install), `activation.env` with `PACKAGE_DIR = "packages/<name>"`, and tasks with `cwd = "packages/<name>"`. Declare `platforms` explicitly (see **Platforms & lockfile**).
 3. Add `<name>` and `<name>-dev` entries in `[environments]`, both with `solve-group = "<name>"` and `no-default-feature = true`; `<name>-dev` adds the `dev` feature.
 4. Copy a package `.envrc` (defaults `PIXI_ENV` to `<name>-dev`) and add `packages/<name>/data/` to `.gitignore`.
@@ -124,12 +124,24 @@ two things, both from agent sessions on this host:
 - **paseo restarts.** `paseo.service` uses `KillMode=control-group`, so a restart —
   including the one systemd triggers when the kernel OOM-kills any process in that
   cgroup — SIGTERMs every agent session and everything they spawned.
-  `setsid`/`nohup`/`disown` do not leave the cgroup. Start long-lived servers and
-  batches with `tmux new-session` (lives in the SSH session scope; verify with
-  `cat /proc/<pid>/cgroup`) or `systemd-run --user`.
+  `setsid`/`nohup`/`disown` do not leave the cgroup, and neither does `tmux` when the
+  tmux server is started from an agent shell (it inherits the cgroup; only a tmux
+  started from a real SSH login lives in the session scope). From an agent, start
+  long-lived servers as a transient user unit, which sits beside `paseo.service`
+  instead of inside it:
+  ```bash
+  systemd-run --user --unit rerun-catalog-9988 --collect --property=WorkingDirectory=$PWD \
+    .pixi/envs/<env>/lib/python3.12/site-packages/rerun_sdk/rerun_cli/rerun server --port 9988
+  systemctl --user status rerun-catalog-9988      # journalctl --user -u rerun-catalog-9988 for logs
+  systemctl --user stop rerun-catalog-9988        # never pkill by name
+  ```
+  Verify with `cat /proc/<pid>/cgroup` (must not contain `paseo.service`). The unit is
+  transient: a reboot drops it and the in-memory corpus, so keep a re-registration
+  script for the layers on disk. Recreating the env that holds the binary is fine while
+  the server runs, but the next start needs that path to exist.
 
-Real fixes, not yet done: a persistent catalog store, and running the server under
-a supervisor instead of a shell.
+Real fixes, not yet done: a persistent catalog store, and a persistent user unit that
+re-registers from disk on start (then `Restart=on-failure` becomes safe).
 
 ## Testing Rerun builds
 
@@ -155,7 +167,7 @@ linux-64 (pixi 0.70.x) and move back to a public release once the fix ships.
 - **Never use pip** — all dependency management goes through Pixi
 - **`hf download` not `huggingface-cli`** — conda's huggingface_hub provides `hf`, not `huggingface-cli`
 - **gradio from PyPI, not conda** — conda's gradio package has missing transitive deps
-- **Former `no-build-isolation` deps** — the MoGe inference subset is vendored at `packages/monoprior/monopriors/third_party/{moge,utils3d}` (pinned upstream revs and the patch list live in those packages' `__init__.py` docstrings; `moge`/`utils3d`/`pipeline` are no longer dependencies); `gsplat` comes prebuilt from `ai-demos`; `sam2` exposes static metadata with its broken CUDA extension disabled by default; and `dpvo` exposes static metadata and builds CUDA only through its explicit task. `rtmlib` is a plain git PyPI dep (static fork metadata, empty requirements).
+- **No dependency may need a build step during resolution** — `pixi lock` must never need package Python. Vendor the inference subset (as `monopriors/third_party/` does, with the upstream rev and patch list in the package `__init__` docstring), ship a prebuilt wheel, or give the package static metadata and build any CUDA extension through an explicit task.
 - **sam3d-body uses `tool/` (singular)** not `tools/` for its CLI scripts
 - **Direnv fails after changing `pixi.toml`** — run `pixi install -e <name>-dev` to re-solve, then direnv picks up the updated lockfile. A shared-feature change re-solves the whole workspace; that works from any Linux host, while macOS is limited to `pixi lock --check` (see **Platforms & lockfile**).
 - **Never use bare `except Exception` with beartype** — it silently swallows type violations. Always re-raise `BeartypeException`:
@@ -170,7 +182,8 @@ linux-64 (pixi 0.70.x) and move back to a public release once the fix ships.
   ```
 - **Use `0.0` not `0` for float annotations** — beartype strictly distinguishes `int` from `float`. `last_error: float = 0` will fail; use `last_error: float = 0.0`
 - **`vulture` (the `deadcode` task) flags framework-used names** — Tyro/dataclass config fields, `pytestmark`, `__exit__`'s `*exc`, etc. Add them to `[tool.vulture] ignore_names` in the package `pyproject.toml` rather than reworking the code.
-- **pyrefly tensor-shapes fixtures hang the solver** — with `typings/pyrefly/tensor_shapes/fixtures` on pyrefly's `search-path`, pyrefly 1.1.x enters an infinite solver loop on any file that uses numpy values — even `np.zeros(3)`. `tensor-shapes = false` alone does not help; only removing the search-path entry does. Both lines stay commented out in `pyrefly.toml` (shape-aware `torch.Tensor`/jaxtyping inference is disabled meanwhile); re-enable both together once the fixtures are fixed.
+- **Static shape checking is not on yet** — pyrefly checks jaxtyping shapes once the `shape_extensions` package resolves (the `tensor-shapes` config key is a no-op now); it comes from the PyPI stub packages `pyrefly-torch-stubs` and `pyrefly-numpy-stubs`, versioned in lockstep with pyrefly. Neither is in the `dev` feature: the numpy stubs exist only on the 1.3 line and still lack `einsum` and batched `@`, so enabling them today produces hundreds of coverage errors per numpy-heavy package. Until then beartype at function boundaries is the only check on array shapes and dtypes, which is why names must not repeat them (python-conventions skill). Never add a stub fixtures directory to `search-path`.
 - **Pixi collapses multiline `cmd = """..."""` into a single line**, replacing newlines with spaces. If a task has separate commands on different lines (e.g. `export`, `echo`, `python`), they become arguments to the first command and never execute. The task appears to succeed (exit 0) but produces no output. Always use `&&`-chained single-line commands or `\` line continuations instead.
 - **Don't poll with `pgrep -f <pat>` when the polling command itself contains `<pat>`** — it matches its own shell and the `until ! pgrep ...` loop never exits (silently hangs forever). Prefer `run_in_background` on the real command (you're notified on its own exit), or wait on a file/sentinel.
 - **Always pass `--rr-config.headless` to Rerun CLIs in shells without `DISPLAY`** — the `RerunTyroConfig` default calls `rr.spawn()`; when the viewer fails to start (winit "neither WAYLAND_DISPLAY nor DISPLAY is set"), the recording stream's channel fills and every `rr.log()` blocks forever. The run wedges silently (zombie viewer child, zero CPU) instead of erroring out.
+- **beartype's PEP 526 checks re-create jaxtyping hints on every annotated assignment** — under `beartype_this_package()` each `x: Float64[ndarray, "n 3"] = ...` inside a hot loop evaluates its hint again, jaxtyping returns a new class each time, and beartype compiles and caches a new checker for it: exo-calib's Stage B ran 2× slower in the dev env and its memory grew without bound over a 4,000-frame capture. Packages with array-heavy inner loops pass `BeartypeConf(claw_is_pep526=False)` (function boundaries stay checked). beartype caches its transformed bytecode as `__pycache__/*.opt-beartype*.pyc` keyed by beartype version, not by conf, so after changing the conf delete those files or the old checks stay in.
