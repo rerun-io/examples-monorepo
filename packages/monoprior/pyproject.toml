@@ -118,9 +118,7 @@ min_confidence = 60
 ignore_names = [
     # Names consumed by dynamic imports and pytest collection.
     "pytestmark",
-    # rig_depth/xlens_trt: nn.MultiheadAttention call signature kept by the export-friendly replacement,
-    # and the class swap that gives the export copy of the DPT head its symbolic-size position grid.
-    "need_weights",
+    # rig_depth/xlens_trt: the class swap that gives the export copy of the DPT head its symbolic-size position grid.
     "__class__",
     # tests/test_xlens_dynamic_export: exporter entry point invoked in a clean interpreter via subprocess.
     "export_random_dynamic",

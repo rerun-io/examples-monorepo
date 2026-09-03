@@ -28,8 +28,6 @@ from typing import TYPE_CHECKING, Literal, TypeAlias, cast
 
 import numpy as np
 import torch
-import torch.nn.functional as F
-from einops import rearrange
 from jaxtyping import Float, Float32, Float64, Int64, UInt8
 from numpy import ndarray
 from torch import Tensor, nn
@@ -47,7 +45,7 @@ from monopriors.models.rig_depth.xlens import (
 )
 from monopriors.third_party.xlens.models.dinov2.vision_transformer import AttentionBias, DinoVisionTransformer, FrozenRigGeometry
 from monopriors.third_party.xlens.models.dpt_head import DPTHead
-from monopriors.third_party.xlens.models.net import ScaleHead, XLensNet, XLensNetOutput
+from monopriors.third_party.xlens.models.net import XLensNet, XLensNetOutput
 from monopriors.third_party.xlens.models.utils.head_utils import position_grid_to_embed
 
 if TYPE_CHECKING:
@@ -64,7 +62,7 @@ EngineProfile: TypeAlias = Literal["rig", "dynamic"]
 XLENS_CACHE_DIR: Path = Path(os.environ.get("MONOPRIOR_TRT_CACHE", "~/.cache/monoprior")).expanduser()
 """Cache root holding portable ``onnx/`` and machine-local ``trt/`` artifacts."""
 
-ONNX_EXPORT_VERSION: int = 2
+ONNX_EXPORT_VERSION: int = 3
 """Bump when the export graph or its input contract changes."""
 
 ENGINE_OUTPUT_NAMES: tuple[str, ...] = ("depth_metric", "depth_conf", "mask", "metric_scaling_factor")
@@ -167,42 +165,6 @@ def engine_geometry(frozen: FrozenRigGeometry, backbone: DinoVisionTransformer, 
     return EngineGeometry(inputs=inputs, layer_slots=tuple(slots), slot_kinds=kinds, trailing=trailing)
 
 
-class _ManualMultiheadAttention(nn.Module):
-    """``nn.MultiheadAttention`` (batch-first, no masks) as explicit projections plus scaled-dot-product attention.
-
-    The eval fast path emits ``aten::_native_multi_head_attention``, which the
-    exporter cannot lower; this keeps the same weights and math.
-    """
-
-    def __init__(self, inner: nn.MultiheadAttention) -> None:
-        super().__init__()
-        self.inner = inner
-
-    def forward(
-        self,
-        query: Float[Tensor, "batch queries features"],
-        key: Float[Tensor, "batch tokens features"],
-        value: Float[Tensor, "batch tokens features"],
-        need_weights: bool = False,
-    ) -> tuple[Float[Tensor, "batch queries features"], None]:
-        """Cross-attend queries over key/value tokens."""
-        features: int = query.shape[-1]
-        weight: Float[Tensor, "features3 features"] = self.inner.in_proj_weight
-        bias: Float[Tensor, "features3"] = self.inner.in_proj_bias
-        heads: int = self.inner.num_heads
-        q: Float[Tensor, "batch heads queries head_features"] = rearrange(
-            F.linear(query, weight[:features], bias[:features]), "b l (h d) -> b h l d", h=heads
-        )
-        k: Float[Tensor, "batch heads tokens head_features"] = rearrange(
-            F.linear(key, weight[features : 2 * features], bias[features : 2 * features]), "b l (h d) -> b h l d", h=heads
-        )
-        v: Float[Tensor, "batch heads tokens head_features"] = rearrange(
-            F.linear(value, weight[2 * features :], bias[2 * features :]), "b l (h d) -> b h l d", h=heads
-        )
-        pooled: Float[Tensor, "batch heads queries head_features"] = F.scaled_dot_product_attention(q, k, v)
-        return self.inner.out_proj(rearrange(pooled, "b h l d -> b l (h d)")), None
-
-
 def _linspace_tensor(start: Float[Tensor, ""], end: Float[Tensor, ""], steps: int, dtype: torch.dtype, device: torch.device) -> Float[Tensor, "steps"]:
     """``torch.linspace`` with tensor endpoints and a traced (symbolic) ``steps``: the kernel's two-sided formula.
 
@@ -245,18 +207,16 @@ class _ExportDPTHead(DPTHead):
 
 
 def _export_friendly(model: XLensNet) -> XLensNet:
-    """Structural copy of the network for export: explicit scale-head attention and a symbolic-size DPT grid.
+    """Structural copy of the network for export with a symbolic-size DPT grid.
 
     Weights are shared with the caller's model, whose module tree is never mutated.
+    The scale head's ``nn.MultiheadAttention`` exports as is: its eval fast path
+    never fires for cross-attention (query is not key), so the exporter sees the
+    plain projections and scaled-dot-product attention.
     """
     from trtkit import shallow_module_copy
 
     model_copy: XLensNet = shallow_module_copy(model)
-    scale_head: ScaleHead = model.scale_head
-    if scale_head.mode == "attn_pool":
-        head_copy: ScaleHead = shallow_module_copy(scale_head)
-        head_copy.attn_layers = nn.ModuleList([_ManualMultiheadAttention(cast(nn.MultiheadAttention, layer)) for layer in scale_head.attn_layers])
-        model_copy.scale_head = head_copy
     dpt_copy: DPTHead = shallow_module_copy(model.head)
     dpt_copy.__class__ = _ExportDPTHead
     model_copy.head = dpt_copy

@@ -101,7 +101,7 @@ def test_rig_key_memo_follows_content_and_reuses_the_digest() -> None:
 
 @pytest.mark.parametrize(("cam_types", "expected_biases", "local_layers_masked"), [((0, 1, 0), 3, True), ((0, 0, 0), 1, False)], ids=("mixed", "fisheye"))
 def test_export_graph_matches_frozen_forward(random_model: XLensNet, cam_types: tuple[int, ...], expected_biases: int, local_layers_masked: bool) -> None:
-    """The ONNX wrapper (manual scale attention, clamped fp masks, slot mapping) reproduces the frozen eager model."""
+    """The ONNX wrapper (clamped fp masks, slot mapping, batch broadcast) reproduces the frozen eager model."""
     images, rays, cam_T_ref = random_rig(3, (28, 42), 11)
     types: Int64[ndarray, "s"] = np.asarray(cam_types, dtype=np.int64)
     tensors: RigTensors = rig_tensors(rays, types, cam_T_ref, torch.device("cpu"))
