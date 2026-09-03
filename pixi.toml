@@ -584,8 +584,6 @@ cwd = "packages/prompt-da"
 description = "Run the gradio app in dev mode"
 
 # prompt-da-stream: streaming inference straight from the Rerun dataloader.
-# Its own lane because it needs the 0.36 prerelease dataloader (ColumnDecoder,
-# fetch_size); `common`'s 0.35 pin and a prerelease pin cannot share an env.
 # Explicit platforms required — see AGENTS.md "Platforms & lockfile".
 [feature.prompt-da-stream]
 platforms = ["linux-64"]

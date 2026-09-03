@@ -9,13 +9,14 @@ from arkitscenes_download.ingest.depth import ArkitDepthConfidence
 from beartype.roar import BeartypeException
 from einops import rearrange
 from jaxtyping import Float, Float32, UInt8, UInt16
+from monopriors.models.depth_completion.base_completion_depth import upsample_depth_to_image
 from numpy import ndarray
 from rerun.catalog import CatalogClient
 from scipy.spatial.transform import Rotation
 from simplecv.ops.depth import quantize_depth_m_to_mm
 from torch import Tensor
 
-from rerun_prompt_da.trt_predictor import PromptDATrtPredictor, postprocess_depth, preprocess_batch
+from rerun_prompt_da.trt_predictor import PromptDATrtPredictor, preprocess_batch
 
 ARKITSCENES_DATASET = "arkitscenes"
 NATIVE_FPS = 60.0
@@ -135,7 +136,7 @@ def run_promptda_batch(
     prompt_b1hw: Float32[Tensor, "b 1 192 256"]
     image_b3hw, prompt_b1hw = preprocess_batch(rgb_bhw3, prompt_bhw, predictor.image_hw)
     depth_model_b1hw: Float32[Tensor, "b 1 nh nw"] = predictor.runtime({"image": image_b3hw, "prompt_depth": prompt_b1hw})["depth"]
-    depth_bhw: Float32[Tensor, "b oh ow"] = postprocess_depth(depth_model_b1hw, output_hw)
+    depth_bhw: Float32[Tensor, "b oh ow"] = upsample_depth_to_image(depth_model_b1hw, output_hw)
     # Scale and cast on the GPU: halves the device-to-host copy and drops two full-size host passes.
     depth_mm_bhw: UInt16[ndarray, "b oh ow"] = quantize_depth_m_to_mm(depth_bhw).cpu().numpy()
     depth_model_mm_bhw: UInt16[ndarray, "b nh nw"] = (
