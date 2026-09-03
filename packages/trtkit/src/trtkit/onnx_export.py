@@ -14,12 +14,71 @@ import os
 import shutil
 import time
 from collections.abc import Callable, Collection
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeAlias
 
 import torch
 from torch.nn.modules.conv import _ConvTransposeNd
 
 ExportFn = Callable[..., object]
+
+
+@dataclass(frozen=True, slots=True)
+class DynamicDim:
+    """One symbolic input dimension for ``torch.export``; inputs that reuse a name share the symbol."""
+
+    name: str
+    """Symbol name; every input dimension carrying this name is the same ``torch.export.Dim``."""
+    min: int
+    """Smallest value of the symbol."""
+    max: int
+    """Largest value of the symbol."""
+    multiple: int = 1
+    """The dimension equals ``multiple`` times the symbol (a derived dim), e.g. 14 for pixel dims tied to a patch-grid symbol."""
+    auto: bool = False
+    """Export the dimension as ``Dim.AUTO`` (bounds as hints): ``torch.export`` keeps it symbolic and defers guards that
+    relate it to other symbols to runtime asserts, e.g. a token count that equals a product of two other symbols."""
+
+
+DynamicDims: TypeAlias = dict[str, dict[int, DynamicDim]]
+"""Per ONNX input name, the symbolic dimensions by index; unlisted inputs and dimensions stay static."""
+
+
+def _torch_dynamic_shapes(input_names: list[str], dynamic_dims: DynamicDims) -> tuple[dict[int, object], ...]:
+    """Translate a :data:`DynamicDims` spec into one ``torch.export`` shape dict per positional input.
+
+    A spec whose ``min`` equals ``max`` is a static dimension and is left out of
+    the returned dict, so callers can pass a range of one (e.g. batch 1) without
+    special-casing it.
+
+    Raises:
+        ValueError: If a spec names an unknown input or reuses a symbol with different bounds.
+    """
+    unknown: set[str] = set(dynamic_dims) - set(input_names)
+    if unknown:
+        raise ValueError(f"dynamic_dims names inputs that are not exported: {sorted(unknown)}.")
+    symbols: dict[str, object] = {}
+    bounds: dict[str, tuple[int, int]] = {}
+    per_input: list[dict[int, object]] = []
+    for name in input_names:
+        dims: dict[int, object] = {}
+        for index, spec in dynamic_dims.get(name, {}).items():
+            if spec.min == spec.max:
+                continue  # a degenerate range is a static dimension; torch.export.Dim rejects min == max
+            if spec.auto:
+                if spec.multiple != 1:
+                    raise ValueError(f"dynamic dim {spec.name!r}: Dim.AUTO cannot carry a multiple.")
+                dims[index] = torch.export.Dim.AUTO(min=spec.min, max=spec.max)
+                continue
+            if spec.name not in symbols:
+                symbols[spec.name] = torch.export.Dim(spec.name, min=spec.min, max=spec.max)
+                bounds[spec.name] = (spec.min, spec.max)
+            elif bounds[spec.name] != (spec.min, spec.max):
+                raise ValueError(f"dynamic dim {spec.name!r} is declared with bounds {bounds[spec.name]} and {(spec.min, spec.max)}.")
+            dims[index] = symbols[spec.name] if spec.multiple == 1 else spec.multiple * symbols[spec.name]
+        per_input.append(dims)
+    return tuple(per_input)
 
 
 class _Fp32Island(torch.nn.Module):
@@ -126,6 +185,7 @@ def export_onnx(
     output_names: list[str],
     compute_dtype: torch.dtype | None = None,
     dynamic_batch_max: int | None = None,
+    dynamic_dims: DynamicDims | None = None,
     export_fn: ExportFn = torch.onnx.export,
 ) -> None:
     """Export a model to ONNX with the strongly-typed-TRT recipe.
@@ -147,13 +207,19 @@ def export_onnx(
             model's own dtypes unchanged.
         dynamic_batch_max: When set, dim 0 of every input is dynamic in
             ``1..dynamic_batch_max``; ``None`` bakes the example batch in.
+        dynamic_dims: Per-input symbolic dimensions beyond the batch (shared
+            symbols, derived multiples); the complete spec, so it excludes
+            ``dynamic_batch_max``. Inputs without an entry stay static.
         export_fn: ``torch.onnx.export``-compatible hook for tests.
 
     Raises:
-        ValueError: If ``compute_dtype`` is not fp16/bf16/None.
+        ValueError: If ``compute_dtype`` is not fp16/bf16/None, or both
+            ``dynamic_batch_max`` and ``dynamic_dims`` are given.
     """
     if compute_dtype not in (None, torch.float16, torch.bfloat16):
         raise ValueError(f"compute_dtype must be float16, bfloat16, or None, got {compute_dtype}.")
+    if dynamic_batch_max is not None and dynamic_dims is not None:
+        raise ValueError("dynamic_dims is the complete shape spec; declare the batch dim inside it instead of dynamic_batch_max.")
     # bf16 Conv/ConvTranspose only exist in ONNX from opset 22; below that,
     # TRT parsers accept the invalid graph and silently miscompile it. 18 is
     # the dynamo baseline for everything else; TRT 11 parses up to 24.
@@ -172,6 +238,11 @@ def export_onnx(
         # The autocast wrapper's forward is ``*inputs``, so torch.export sees
         # ONE varargs parameter holding the tuple — mirror that nesting.
         kwargs["dynamic_shapes"] = (per_input,) if compute_dtype is not None else per_input
+    elif dynamic_dims is not None:
+        if len(input_names) != len(example_inputs):
+            raise ValueError(f"dynamic_dims needs one input name per example input, got {len(input_names)} names for {len(example_inputs)} inputs.")
+        shapes: tuple[dict[int, object], ...] = _torch_dynamic_shapes(input_names, dynamic_dims)
+        kwargs["dynamic_shapes"] = (shapes,) if compute_dtype is not None else shapes
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     # Export into a pid-unique temp DIRECTORY under the final filename, so the
