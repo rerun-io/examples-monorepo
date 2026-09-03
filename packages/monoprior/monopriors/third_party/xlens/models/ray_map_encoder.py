@@ -15,10 +15,11 @@ does not perturb the pretrained ViT patch-token distribution; the non-zero
 contribution is learned during training (residual-style, as in ControlNet/LoRA).
 """
 
-from typing import List, Sequence, Type
+from collections.abc import Sequence
 
-import torch
 import torch.nn as nn
+from jaxtyping import Float32
+from torch import Tensor
 
 
 class _ResidualBlock(nn.Module):
@@ -28,21 +29,19 @@ class _ResidualBlock(nn.Module):
         self,
         in_channels: int,
         out_channels: int,
-        act_layer: Type[nn.Module] = nn.GELU,
-    ):
+        act_layer: type[nn.Module] = nn.GELU,
+    ) -> None:
+        """Build one convolutional residual block."""
         super().__init__()
         self.conv1 = nn.Conv2d(in_channels, out_channels, 3, 1, 1)
         self.act = act_layer()
         self.conv2 = nn.Conv2d(out_channels, out_channels, 3, 1, 1)
-        self.shortcut = (
-            nn.Conv2d(in_channels, out_channels, 1, 1, 0)
-            if in_channels != out_channels
-            else nn.Identity()
-        )
+        self.shortcut = nn.Conv2d(in_channels, out_channels, 1, 1, 0) if in_channels != out_channels else nn.Identity()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        identity = self.shortcut(x)
-        out = self.conv1(x)
+    def forward(self, x: Float32[Tensor, "batch channels height width"]) -> Float32[Tensor, "batch output_channels height width"]:
+        """Apply two convolutions and a projected residual."""
+        identity: Float32[Tensor, "batch output_channels height width"] = self.shortcut(x)
+        out: Float32[Tensor, "batch output_channels height width"] = self.conv1(x)
         out = self.act(out)
         out = self.conv2(out)
         out = out + identity
@@ -73,8 +72,9 @@ class RayMapEncoder(nn.Module):
         in_chans: int = 6,
         intermediate_dims: Sequence[int] = (588, 768, 1024),
         zero_init_proj: bool = True,
-        act_layer: Type[nn.Module] = nn.GELU,
-    ):
+        act_layer: type[nn.Module] = nn.GELU,
+    ) -> None:
+        """Build the released ray-map encoder."""
         super().__init__()
         self.embed_dim = embed_dim
         self.patch_size = patch_size
@@ -86,19 +86,16 @@ class RayMapEncoder(nn.Module):
         # Patchify: (B, C, H, W) -> (B, C*P*P, H/P, W/P)
         self.unshuffle = nn.PixelUnshuffle(patch_size)
         # First 3x3 conv projects C*P*P to intermediate_dims[0]
-        self.conv_in = nn.Conv2d(
-            in_chans * patch_size * patch_size, intermediate_dims[0], 3, 1, 1
-        )
+        self.conv_in = nn.Conv2d(in_chans * patch_size * patch_size, intermediate_dims[0], 3, 1, 1)
 
-        layers: List[nn.Module] = []
+        layers: list[nn.Module] = []
         for i in range(len(intermediate_dims) - 1):
-            layers.append(
-                _ResidualBlock(intermediate_dims[i], intermediate_dims[i + 1], act_layer=act_layer)
-            )
+            layers.append(_ResidualBlock(intermediate_dims[i], intermediate_dims[i + 1], act_layer=act_layer))
         # Final 1x1 conv projects to embed_dim, zero-initialized by default
         proj = nn.Conv2d(intermediate_dims[-1], embed_dim, 1, 1, 0)
         if zero_init_proj:
             nn.init.zeros_(proj.weight)
+            assert proj.bias is not None
             nn.init.zeros_(proj.bias)
         layers.append(proj)
         self.encoder = nn.Sequential(*layers)
@@ -110,25 +107,25 @@ class RayMapEncoder(nn.Module):
             nn.init.constant_(self.norm.weight, 1.0)
             nn.init.constant_(self.norm.bias, 0.0)
 
-    def forward(self, ray_map: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, ray_map: Float32[Tensor, "batch views channels height width"]
+    ) -> Float32[Tensor, "batch views features patch_height patch_width"]:
         """
         ray_map: (B, S, C, H, W) -> (B, S, embed_dim, H/p, W/p)
         """
         assert ray_map.dim() == 5, f"expected (B, S, C, H, W), got {ray_map.shape}"
         B, S, C, H, W = ray_map.shape
-        assert C == self.in_chans, f"in_chans={self.in_chans} but ray_map has {C}"
-        assert H % self.patch_size == 0 and W % self.patch_size == 0, (
-            f"H, W must be multiples of patch_size={self.patch_size}, got ({H}, {W})"
-        )
+        assert self.in_chans == C, f"in_chans={self.in_chans} but ray_map has {C}"
+        assert H % self.patch_size == 0 and W % self.patch_size == 0, f"H, W must be multiples of patch_size={self.patch_size}, got ({H}, {W})"
 
-        x = ray_map.reshape(B * S, C, H, W)
-        x = self.unshuffle(x)              # (BS, C*P*P, H/P, W/P)
-        x = self.conv_in(x)                # (BS, intermediate_dims[0], H/P, W/P)
-        x = self.encoder(x)                # (BS, embed_dim, H/P, W/P)
+        x: Float32[Tensor, "packed_views channels height width"] = ray_map.reshape(B * S, C, H, W)
+        x = self.unshuffle(x)  # (BS, C*P*P, H/P, W/P)
+        x = self.conv_in(x)  # (BS, intermediate_dims[0], H/P, W/P)
+        x = self.encoder(x)  # (BS, embed_dim, H/P, W/P)
 
         # LayerNorm over the token dimension (BS, N, C)
         Hp, Wp = H // self.patch_size, W // self.patch_size
-        x = x.flatten(2).transpose(1, 2)   # (BS, N, embed_dim)
+        x = x.flatten(2).transpose(1, 2)  # (BS, N, embed_dim)
         x = self.norm(x)
         x = x.transpose(1, 2).reshape(B * S, self.embed_dim, Hp, Wp)
 

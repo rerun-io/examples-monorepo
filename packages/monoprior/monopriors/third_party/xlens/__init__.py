@@ -1,4 +1,4 @@
-"""Vendored X-Lens inference subset.
+"""Owned X-Lens inference fork.
 
 Upstream: https://github.com/zhouhengamerica/XLens
 Revision: ``e6bdf2f66b26a9e4ef1663feaaf7e4618e1e8f7d``
@@ -16,8 +16,26 @@ File mapping:
 - ``xlens_vits.yaml`` <- ``configs/xlens_vits.yaml``
 - ``LICENSE`` <- ``LICENSE``
 
-Local changes: import paths only. Pristine source fixtures live under
-``tests/reference_data/xlens`` for equivalence testing.
+Local changes vs upstream include absolute package imports, complete Python and
+jaxtyping annotations, runtime beartype checks in the dev environment,
+Google-style docstrings, and a validated ``XLensArchitectureConfig`` at the
+checkpoint/YAML boundary. The fork retains only released inference paths:
+optimizer groups, selective-training freezes, stochastic-depth training,
+gradient checkpointing, optional xFormers kernels, feature-export hooks, the
+unused Gram-distillation output, and the separate partial-DINO bootstrap loader
+are removed. The RoPE position cache includes its device to prevent cross-device
+reuse. Released module, class, parameter and state-dict names and all outputs
+used by the rig-depth predictor remain unchanged.
+
+Re-syncing with upstream:
+
+1. Copy the mapped frozen-revision sources into
+   ``tests/reference_data/xlens/upstream_*.py`` without edits.
+2. Re-apply the absolute imports, types, documentation, typed configuration,
+   inference-only cleanup, and device-aware cache without renaming checkpoint
+   modules or parameters.
+3. Run ``tests/test_xlens_upstream_equivalence.py``; all four seeded CPU
+   scenarios must remain bit-identical.
 """
 
 from monopriors.third_party.xlens.models import XLensNet

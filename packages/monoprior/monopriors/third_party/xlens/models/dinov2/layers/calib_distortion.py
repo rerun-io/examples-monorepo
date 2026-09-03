@@ -15,13 +15,14 @@
 #    MLP(phi_ij) -> (B, H, N, N) bias added to attention logits. All global
 #    attention layers share one MLP.
 
-from typing import List, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from typing import Literal, cast
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint
-
+from jaxtyping import Bool, Float, Int64
+from torch import Tensor
 
 # Calibration Tokens
 
@@ -50,6 +51,7 @@ class CalibrationTokens(nn.Module):
         embed_dim: int,
         inject_types: Sequence[int] = (0,),
     ) -> None:
+        """Initialize per-layer tokens for every configured camera type."""
         super().__init__()
         assert depth > 0 and n_cam_types > 0 and tokens_per_type > 0
         self.depth = depth
@@ -61,28 +63,19 @@ class CalibrationTokens(nn.Module):
             assert 0 <= t < n_cam_types, f"inject_type {t} out of range [0, {n_cam_types})"
 
         # (L, T, K, C), zero-initialized.
-        self.tokens = nn.Parameter(
-            torch.zeros(depth, n_cam_types, tokens_per_type, embed_dim)
-        )
+        self.tokens = nn.Parameter(torch.zeros(depth, n_cam_types, tokens_per_type, embed_dim))
 
-    def needs_inject(self, cam_types_BS: torch.Tensor) -> bool:
+    def needs_inject(self, cam_types_BS: Int64[Tensor, "batch views"]) -> bool:
         """Whether any view in the batch needs calib token injection."""
-        if cam_types_BS is None or not self.inject_types:
+        if not self.inject_types:
             return False
-        for t in self.inject_types:
-            if (cam_types_BS == t).any():
-                return True
-        return False
-
-    def get_layer_tokens(self, layer_idx: int) -> torch.Tensor:
-        """Tokens for all camera types at a layer, shape (T, K, C)."""
-        return self.tokens[layer_idx]
+        return any((cam_types_BS == camera_type).any() for camera_type in self.inject_types)
 
     def build_view_calib_tokens(
         self,
         layer_idx: int,
-        cam_types_BS: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        cam_types_BS: Int64[Tensor, "batch views"],
+    ) -> tuple[Float[Tensor, "batch views tokens features"], Bool[Tensor, "batch views"]]:
         """Per-view calib tokens and injection mask from (B, S) cam_types.
 
         Returns:
@@ -91,23 +84,23 @@ class CalibrationTokens(nn.Module):
             inject_mask: (B, S) bool — True where the view should inject K tokens.
         """
         B, S = cam_types_BS.shape
-        T_K_C = self.tokens[layer_idx]                            # (T, K, C)
-        view_tokens = T_K_C[cam_types_BS]                         # (B, S, K, C)
+        T_K_C: Float[Tensor, "camera_types tokens features"] = self.tokens[layer_idx]
+        view_tokens: Float[Tensor, "batch views tokens features"] = T_K_C[cam_types_BS]
 
-        inject_mask = torch.zeros_like(cam_types_BS, dtype=torch.bool)
-        for t in self.inject_types:
-            inject_mask = inject_mask | (cam_types_BS == t)
+        inject_mask: Bool[Tensor, "batch views"] = torch.zeros_like(cam_types_BS, dtype=torch.bool)
+        for camera_type in self.inject_types:
+            inject_mask = inject_mask | (cam_types_BS == camera_type)
         return view_tokens, inject_mask
 
 
 def build_calib_attention_mask(
     K_per_view: int,
-    inject_mask: torch.Tensor,    # (B, S) bool, whether each view actually injected calib tokens
-    N_non_calib: int,             # non-calib length per view (CLS + register + patches [+ scale])
-    attn_type: str,               # "local" or "global"
+    inject_mask: Bool[Tensor, "batch views"],
+    N_non_calib: int,  # non-calib length per view (CLS + register + patches [+ scale])
+    attn_type: Literal["local", "global"],
     device: torch.device,
     dtype: torch.dtype = torch.float32,
-) -> Optional[torch.Tensor]:
+) -> Float[Tensor, "packed_batch tokens tokens"] | None:
     """Build the additive attention mask for calib tokens (-inf blocks).
 
     Sequence layout (calib tokens at the end of each view, so CLS/register/scale
@@ -146,7 +139,7 @@ def build_calib_attention_mask(
         # One mask per view.
         Bp = B * S
         L = L_per_view
-        mask = torch.zeros(Bp, L, L, device=device, dtype=dtype)
+        mask: Float[Tensor, "packed_batch tokens tokens"] = torch.zeros(Bp, L, L, device=device, dtype=dtype)
 
         # Placeholder views: calib at [N_non_calib, L), block whole rows/columns.
         not_inject = (~inject_mask).reshape(Bp)
@@ -155,7 +148,7 @@ def build_calib_attention_mask(
             mask[not_inject, :, N_non_calib:] = NEG_INF
         return mask
 
-    elif attn_type == "global":
+    if attn_type == "global":
         # Full sequence L = S * L_per_view.
         L = S * L_per_view
         mask = torch.zeros(B, L, L, device=device, dtype=dtype)
@@ -185,14 +178,13 @@ def build_calib_attention_mask(
                         mask[b, o_start:o_end, calib_lo:calib_hi] = NEG_INF
         return mask
 
-    else:
-        raise ValueError(f"unknown attn_type: {attn_type}")
+    raise ValueError(f"unknown attn_type: {attn_type}")
 
 
 # Distortion Bias (Jacobian-based geometric attention bias)
 
 
-def jacobian_from_dcam(d_patch_BSN3: torch.Tensor, H_p: int, W_p: int) -> torch.Tensor:
+def jacobian_from_dcam(d_patch_BSN3: Float[Tensor, "batch views patches 3"], H_p: int, W_p: int) -> Float[Tensor, "batch views patches 3 2"]:
     """Per-patch Jacobian J in R^(3x2) from the patch-grid ray directions d.
 
     Finite-difference approximation of dd/du (width) and dd/dv (height);
@@ -206,21 +198,21 @@ def jacobian_from_dcam(d_patch_BSN3: torch.Tensor, H_p: int, W_p: int) -> torch.
         J: (B, S, H_p * W_p, 3, 2) — per-patch Jacobian, col 0 = dd/du, col 1 = dd/dv.
     """
     B, S, N, _ = d_patch_BSN3.shape
-    assert N == H_p * W_p, f"N={N} != H_p*W_p={H_p*W_p}"
-    d = d_patch_BSN3.view(B, S, H_p, W_p, 3)
+    assert H_p * W_p == N, f"N={N} != H_p*W_p={H_p * W_p}"
+    d: Float[Tensor, "batch views patch_height patch_width 3"] = d_patch_BSN3.view(B, S, H_p, W_p, 3)
 
     # dd/dv: difference along H (forward, last row uses backward).
-    dv = torch.zeros_like(d)
+    dv: Float[Tensor, "batch views patch_height patch_width 3"] = torch.zeros_like(d)
     dv[:, :, :-1] = d[:, :, 1:] - d[:, :, :-1]
     dv[:, :, -1] = dv[:, :, -2]
 
     # dd/du: difference along W.
-    du = torch.zeros_like(d)
+    du: Float[Tensor, "batch views patch_height patch_width 3"] = torch.zeros_like(d)
     du[:, :, :, :-1] = d[:, :, :, 1:] - d[:, :, :, :-1]
     du[:, :, :, -1] = du[:, :, :, -2]
 
     # J shape: (B, S, H_p, W_p, 3, 2), col 0 = du, col 1 = dv
-    J = torch.stack([du, dv], dim=-1)                # (B, S, H_p, W_p, 3, 2)
+    J: Float[Tensor, "batch views patch_height patch_width 3 2"] = torch.stack([du, dv], dim=-1)
     return J.view(B, S, N, 3, 2)
 
 
@@ -250,11 +242,11 @@ class DistortionBias(nn.Module):
         hidden_dim: int = 64,
         chunk_size: int = 1024,
     ) -> None:
+        """Build the pairwise geometric-bias MLP."""
         super().__init__()
         self.num_heads = num_heads
-        # Row-chunk size. Pairwise (L,L) peaks at O(L^2); with 6-view global,
-        # L ~= 12.5k, which OOMs. Chunking rows plus gradient checkpointing caps
-        # the peak at O(chunk*L). 0 disables chunking.
+        # Row-chunk size. Pairwise (L,L) peaks at O(L^2); chunking rows caps the
+        # inference peak at O(chunk*L). 0 disables chunking.
         self.chunk_size = int(chunk_size)
         self.mlp = nn.Sequential(
             nn.Linear(self.PHI_DIM, hidden_dim),
@@ -264,85 +256,84 @@ class DistortionBias(nn.Module):
             nn.Linear(hidden_dim, num_heads),
         )
         # Zero-init last layer -> bias output is 0, identity to attention initially.
-        nn.init.zeros_(self.mlp[-1].weight)
-        nn.init.zeros_(self.mlp[-1].bias)
+        last_layer = cast(nn.Linear, self.mlp[-1])
+        nn.init.zeros_(last_layer.weight)
+        nn.init.zeros_(last_layer.bias)
 
     def _bias_rows(
         self,
-        d_i: torch.Tensor,      # (B, c, 3)    row-chunk d
-        log_s_i: torch.Tensor,  # (B, c)       row-chunk log||J||
-        Jt_i: torch.Tensor,     # (B, c, 2, 3) row-chunk J^T
-        d: torch.Tensor,        # (B, L, 3)    all columns
-        log_s: torch.Tensor,    # (B, L)
-        J: torch.Tensor,        # (B, L, 3, 2)
-    ) -> torch.Tensor:
+        d_i: Float[Tensor, "batch rows 3"],
+        log_s_i: Float[Tensor, "batch rows"],
+        Jt_i: Float[Tensor, "batch rows 2 3"],
+        d: Float[Tensor, "batch tokens 3"],
+        log_s: Float[Tensor, "batch tokens"],
+        J: Float[Tensor, "batch tokens 3 2"],
+    ) -> Float[Tensor, "batch heads rows tokens"]:
         """Bias for one row chunk: (B, H, c, L). Same formula as the full
         computation, restricted to the chunk's rows to cut peak memory."""
-        dot = torch.einsum("bid,bjd->bij", d_i, d).unsqueeze(-1)             # (B,c,L,1)
-        d_diff = d_i.unsqueeze(2) - d.unsqueeze(1)                           # (B,c,L,3)
-        log_s_diff = (log_s_i.unsqueeze(2) - log_s.unsqueeze(1)).unsqueeze(-1)  # (B,c,L,1)
-        rel = torch.einsum("bikl,bjlm->bijkm", Jt_i, J)                      # (B,c,L,2,2)
+        dot: Float[Tensor, "batch rows tokens 1"] = torch.einsum("bid,bjd->bij", d_i, d).unsqueeze(-1)
+        d_diff: Float[Tensor, "batch rows tokens 3"] = d_i.unsqueeze(2) - d.unsqueeze(1)
+        log_s_diff: Float[Tensor, "batch rows tokens 1"] = (log_s_i.unsqueeze(2) - log_s.unsqueeze(1)).unsqueeze(-1)
+        rel: Float[Tensor, "batch rows tokens 2 2"] = torch.einsum("bikl,bjlm->bijkm", Jt_i, J)
         B, c, L = dot.shape[0], dot.shape[1], dot.shape[2]
-        rel_flat = rel.reshape(B, c, L, 4)
-        phi = torch.cat([dot, log_s_diff, d_diff, rel_flat], dim=-1)         # (B,c,L,9)
-        b = self.mlp(phi)                                                    # (B,c,L,H)
-        return b.permute(0, 3, 1, 2)                                         # (B,H,c,L)
+        rel_flat: Float[Tensor, "batch rows tokens 4"] = rel.reshape(B, c, L, 4)
+        phi: Float[Tensor, "batch rows tokens 9"] = torch.cat([dot, log_s_diff, d_diff, rel_flat], dim=-1)
+        b: Float[Tensor, "batch rows tokens heads"] = self.mlp(phi)
+        return b.permute(0, 3, 1, 2)  # (B,H,c,L)
 
     def forward(
         self,
-        d: torch.Tensor,           # (B, L, 3)
-        J: torch.Tensor,           # (B, L, 3, 2)
-        valid_mask: Optional[torch.Tensor] = None,  # (B, L) bool — bias 0 where False
-    ) -> torch.Tensor:
-        """Return bias (B, num_heads, L, L), computed in row chunks to bound
-        memory. During training each chunk uses gradient checkpointing."""
+        d: Float[Tensor, "batch tokens 3"],
+        J: Float[Tensor, "batch tokens 3 2"],
+        valid_mask: Bool[Tensor, "batch tokens"] | None = None,
+    ) -> Float[Tensor, "batch heads tokens tokens"]:
+        """Return a row-chunked pairwise geometric attention bias."""
         # Non-geometric tokens (calib / CLS / register / scale) are marked by
         # valid_mask. At those positions set d/J to 0 and force bias to 0.
         if valid_mask is not None:
-            m = valid_mask.unsqueeze(-1).to(d.dtype)
+            m: Float[Tensor, "batch tokens 1"] = valid_mask.unsqueeze(-1).to(d.dtype)
             d = d * m
             J = J * m.unsqueeze(-1)
 
         B, L, _ = d.shape
         # Precompute per-token quantities once, reused across chunks.
-        s = torch.linalg.norm(J.reshape(B, L, 6), dim=-1).clamp(min=1e-6)
-        log_s = torch.log(s)                                   # (B, L)
-        Jt = J.transpose(-1, -2).contiguous()                  # (B, L, 2, 3)
+        s: Float[Tensor, "batch tokens"] = torch.linalg.norm(J.reshape(B, L, 6), dim=-1).clamp(min=1e-6)
+        log_s: Float[Tensor, "batch tokens"] = torch.log(s)
+        Jt: Float[Tensor, "batch tokens 2 3"] = J.transpose(-1, -2).contiguous()
 
         cs = self.chunk_size if self.chunk_size > 0 else L
-        use_ckpt = self.training and torch.is_grad_enabled() and cs < L
-        rows = []
+        rows: list[Float[Tensor, "batch heads rows tokens"]] = []
         for i0 in range(0, L, cs):
             i1 = min(i0 + cs, L)
-            args = (d[:, i0:i1], log_s[:, i0:i1], Jt[:, i0:i1], d, log_s, J)
-            if use_ckpt:
-                b = checkpoint(self._bias_rows, *args, use_reentrant=False)
-            else:
-                b = self._bias_rows(*args)
-            rows.append(b)
-        bias = torch.cat(rows, dim=2)                          # (B, H, L, L)
+            row_bias: Float[Tensor, "batch heads rows tokens"] = self._bias_rows(d[:, i0:i1], log_s[:, i0:i1], Jt[:, i0:i1], d, log_s, J)
+            rows.append(row_bias)
+        bias: Float[Tensor, "batch heads tokens tokens"] = torch.cat(rows, dim=2)
 
         if valid_mask is not None:
             # Zero bias where either end is invalid.
-            row_valid = valid_mask.unsqueeze(1).unsqueeze(-1)   # (B, 1, L, 1)
-            col_valid = valid_mask.unsqueeze(1).unsqueeze(-2)   # (B, 1, 1, L)
+            row_valid = valid_mask.unsqueeze(1).unsqueeze(-1)  # (B, 1, L, 1)
+            col_valid = valid_mask.unsqueeze(1).unsqueeze(-2)  # (B, 1, 1, L)
             bias = bias * (row_valid & col_valid).to(bias.dtype)
         return bias
 
 
 def build_token_geometry(
-    d_cam: Optional[torch.Tensor],      # (B, S, 3, H, W) or (B, S, H, W, 3) or None
+    d_cam: Float[Tensor, "batch views _channels _height _width"] | None,
     H_p: int,
     W_p: int,
-    prefix_len: int,                    # CLS + register, before patches
-    suffix_len_no_calib: int,           # tokens after patches but before calib (scale)
-    K_calib: int,                       # trailing calib tokens per view; 0 if none injected
-    n_views: int,                       # S
-    batch_size: int,                    # B
+    prefix_len: int,  # CLS + register, before patches
+    suffix_len_no_calib: int,  # tokens after patches but before calib (scale)
+    K_calib: int,  # trailing calib tokens per view; 0 if none injected
+    n_views: int,  # S
+    batch_size: int,  # B
     device: torch.device,
     dtype: torch.dtype,
-    attn_type: str = "global",
-) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+    attn_type: Literal["local", "global"] = "global",
+) -> tuple[
+    Float[Tensor, "packed_batch tokens 3"] | None,
+    Float[Tensor, "packed_batch tokens 3 2"] | None,
+    Bool[Tensor, "packed_batch tokens"] | None,
+]:
     """Build (d, J, valid_mask) aligned to the attention sequence from d_cam.
 
     Sequence layout (per view, L_per_view = prefix_len + N_patch + suffix_len_no_calib + K_calib):
@@ -365,26 +356,24 @@ def build_token_geometry(
     # Normalize d_cam to (B, S, 3, H, W).
     if d_cam.dim() == 5 and d_cam.shape[-1] == 3 and d_cam.shape[2] != 3:
         d_cam = d_cam.permute(0, 1, 4, 2, 3).contiguous()
-    assert d_cam.shape[:2] == (batch_size, n_views), (
-        f"d_cam shape {d_cam.shape} does not match (B={batch_size}, S={n_views})"
-    )
+    assert d_cam.shape[:2] == (batch_size, n_views), f"d_cam shape {d_cam.shape} does not match (B={batch_size}, S={n_views})"
     B, S, _, H, W = d_cam.shape
 
     # 1) Downsample to the patch grid.
-    d_bs = d_cam.reshape(B * S, 3, H, W)
+    d_bs: Float[Tensor, "packed_views 3 height width"] = d_cam.reshape(B * S, 3, H, W)
     pool_kh = max(1, H // H_p)
     pool_kw = max(1, W // W_p)
-    d_p = F.avg_pool2d(d_bs, kernel_size=(pool_kh, pool_kw))            # (BS, 3, H_p, W_p)
+    d_p: Float[Tensor, "packed_views 3 patch_height patch_width"] = F.avg_pool2d(d_bs, kernel_size=(pool_kh, pool_kw))
     d_p = F.normalize(d_p, dim=1, eps=1e-6)
-    d_p_flat = d_p.permute(0, 2, 3, 1).reshape(B, S, N_patch, 3)
+    d_p_flat: Float[Tensor, "batch views patches 3"] = d_p.permute(0, 2, 3, 1).reshape(B, S, N_patch, 3)
 
     # 2) Jacobian.
-    J = jacobian_from_dcam(d_p_flat, H_p, W_p)                          # (B, S, N_patch, 3, 2)
+    J: Float[Tensor, "batch views patches 3 2"] = jacobian_from_dcam(d_p_flat, H_p, W_p)
 
     # 3) Assemble the full sequence; non-patch positions are 0.
-    d_tokens = torch.zeros(B, S, L_per_view, 3, device=device, dtype=dtype)
-    J_tokens = torch.zeros(B, S, L_per_view, 3, 2, device=device, dtype=dtype)
-    valid_mask = torch.zeros(B, S, L_per_view, device=device, dtype=torch.bool)
+    d_tokens: Float[Tensor, "batch views per_view_tokens 3"] = torch.zeros(B, S, L_per_view, 3, device=device, dtype=dtype)
+    J_tokens: Float[Tensor, "batch views per_view_tokens 3 2"] = torch.zeros(B, S, L_per_view, 3, 2, device=device, dtype=dtype)
+    valid_mask: Bool[Tensor, "batch views per_view_tokens"] = torch.zeros(B, S, L_per_view, device=device, dtype=torch.bool)
 
     patch_lo = prefix_len
     patch_hi = patch_lo + N_patch

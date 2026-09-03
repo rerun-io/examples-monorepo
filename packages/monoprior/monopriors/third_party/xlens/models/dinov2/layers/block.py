@@ -10,8 +10,10 @@
 #   https://github.com/rwightman/pytorch-image-models/tree/master/timm/layers/patch_embed.py
 
 import logging
-from typing import Callable, Optional
-import torch
+from collections.abc import Callable
+from typing import TypeAlias
+
+from jaxtyping import Bool, Float
 from torch import Tensor, nn
 
 from monopriors.third_party.xlens.models.dinov2.layers.attention import Attention
@@ -20,10 +22,12 @@ from monopriors.third_party.xlens.models.dinov2.layers.layer_scale import LayerS
 from monopriors.third_party.xlens.models.dinov2.layers.mlp import Mlp
 
 logger = logging.getLogger("dinov2")
-XFORMERS_AVAILABLE = True
+DwcInfo: TypeAlias = tuple[int, int, int, int, int]
 
 
 class Block(nn.Module):
+    """Inference transformer block with attention and feed-forward residuals."""
+
     def __init__(
         self,
         dim: int,
@@ -34,19 +38,20 @@ class Block(nn.Module):
         ffn_bias: bool = True,
         drop: float = 0.0,
         attn_drop: float = 0.0,
-        init_values=None,
+        init_values: float | None = None,
         drop_path: float = 0.0,
         act_layer: Callable[..., nn.Module] = nn.GELU,
         norm_layer: Callable[..., nn.Module] = nn.LayerNorm,
         attn_class: Callable[..., nn.Module] = Attention,
         ffn_layer: Callable[..., nn.Module] = Mlp,
         qk_norm: bool = False,
-        rope=None,
+        rope: nn.Module | None = None,
         ln_eps: float = 1e-6,
-        use_dwc: bool = False,           # DWC bypass toggle (forwarded to Attention)
+        use_dwc: bool = False,  # DWC bypass toggle (forwarded to Attention)
         dwc_kernel_size: int = 3,
-        n_cam_types: int = 0,            # number of camera types (forwarded to Attention)
+        n_cam_types: int = 0,  # number of camera types (forwarded to Attention)
     ) -> None:
+        """Build one transformer block while preserving checkpoint module names."""
         super().__init__()
         # print(f"biases: qkv: {qkv_bias}, proj: {proj_bias}, ffn: {ffn_bias}")
         self.norm1 = norm_layer(dim, eps=ln_eps)
@@ -78,81 +83,27 @@ class Block(nn.Module):
         self.ls2 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         self.drop_path2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
-        self.sample_drop_ratio = drop_path
+    def forward(
+        self,
+        x: Float[Tensor, "batch tokens features"],
+        pos: Float[Tensor, "batch tokens 2"] | None = None,
+        attn_mask: Float[Tensor, "batch ... tokens tokens"] | Bool[Tensor, "batch ... tokens tokens"] | None = None,
+        dwc_info: DwcInfo | None = None,
+    ) -> Float[Tensor, "batch tokens features"]:
+        """Apply one inference transformer block.
 
-    def forward(self, x: Tensor, pos=None, attn_mask=None, dwc_info=None,
-                cam_types=None) -> Tensor:
+        Args:
+            x: Token features.
+            pos: Optional two-dimensional rotary positions.
+            attn_mask: Optional additive or Boolean attention mask.
+            dwc_info: Patch layout for the optional depthwise bypass.
+
+        Returns:
+            Updated token features.
         """
-        cam_types: (B, N) int64 per-token camera type id, forwarded to self.attn.
-                   None disables it.
-        """
-        def attn_residual_func(x: Tensor, pos=None, attn_mask=None) -> Tensor:
-            return self.ls1(self.attn(
-                self.norm1(x), pos=pos, attn_mask=attn_mask,
-                dwc_info=dwc_info, cam_types=cam_types,
-            ))
-
-        def ffn_residual_func(x: Tensor) -> Tensor:
-            return self.ls2(self.mlp(self.norm2(x)))
-
-        if self.training and self.sample_drop_ratio > 0.1:
-            # the overhead is compensated only for a drop path rate larger than 0.1
-            # Note: cam_types is not subset alongside x on the stochastic-depth path.
-            x = drop_add_residual_stochastic_depth(
-                x,
-                residual_func=attn_residual_func,
-                sample_drop_ratio=self.sample_drop_ratio,
-                pos=pos,
-            )
-            x = drop_add_residual_stochastic_depth(
-                x,
-                residual_func=ffn_residual_func,
-                sample_drop_ratio=self.sample_drop_ratio,
-            )
-        elif self.training and self.sample_drop_ratio > 0.0:
-            x = x + self.drop_path1(attn_residual_func(x, pos=pos, attn_mask=attn_mask))
-            x = x + self.drop_path1(ffn_residual_func(x))  # FIXME: drop_path2
-        else:
-            x = x + attn_residual_func(x, pos=pos, attn_mask=attn_mask)
-            x = x + ffn_residual_func(x)
-        return x
-
-
-def drop_add_residual_stochastic_depth(
-    x: Tensor,
-    residual_func: Callable[[Tensor], Tensor],
-    sample_drop_ratio: float = 0.0,
-    pos: Optional[Tensor] = None,
-) -> Tensor:
-    # 1) extract subset using permutation
-    b, n, d = x.shape
-    sample_subset_size = max(int(b * (1 - sample_drop_ratio)), 1)
-    brange = (torch.randperm(b, device=x.device))[:sample_subset_size]
-    x_subset = x[brange]
-
-    # 2) apply residual_func to get residual
-    if pos is not None:
-        # if necessary, apply rope to the subset
-        pos = pos[brange]
-        residual = residual_func(x_subset, pos=pos)
-    else:
-        residual = residual_func(x_subset)
-
-    x_flat = x.flatten(1)
-    residual = residual.flatten(1)
-
-    residual_scale_factor = b / sample_subset_size
-
-    # 3) add the residual
-    x_plus_residual = torch.index_add(
-        x_flat, 0, brange, residual.to(dtype=x.dtype), alpha=residual_scale_factor
-    )
-    return x_plus_residual.view_as(x)
-
-
-def get_branges_scales(x, sample_drop_ratio=0.0):
-    b, n, d = x.shape
-    sample_subset_size = max(int(b * (1 - sample_drop_ratio)), 1)
-    brange = (torch.randperm(b, device=x.device))[:sample_subset_size]
-    residual_scale_factor = b / sample_subset_size
-    return brange, residual_scale_factor
+        attention_residual: Float[Tensor, "batch tokens features"] = self.ls1(
+            self.attn(self.norm1(x), pos=pos, attn_mask=attn_mask, dwc_info=dwc_info)
+        )
+        x = x + self.drop_path1(attention_residual)
+        feed_forward_residual: Float[Tensor, "batch tokens features"] = self.ls2(self.mlp(self.norm2(x)))
+        return x + self.drop_path2(feed_forward_residual)
