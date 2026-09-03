@@ -571,6 +571,12 @@ depends-on = ["_prompt-da-download-polycam-example"]
 cwd = "packages/prompt-da"
 description = "Run batched TensorRT PromptDA on the example Polycam dataset"
 
+[feature.prompt-da-demo.tasks.prompt-da-polycam-trio]
+cmd = "python tools/polycam_trio.py --polycam-zip-path data/6G-room-example.zip"
+depends-on = ["_prompt-da-download-polycam-example"]
+cwd = "packages/prompt-da"
+description = "Three-way Polycam comparison; pass --zipdepth-checkpoint PATH, then select the teacher and student backends (defaults: tensorrt then torch)"
+
 [feature.prompt-da-demo.tasks.prompt-da-app]
 cmd = "python tools/gradio_app.py"
 depends-on = ["_prompt-da-download-polycam-example"]
@@ -714,6 +720,22 @@ cmd = "python tools/eval_catalog.py"
 cwd = "packages/zipdepth"
 description = "Unaligned metric AbsRel/delta1/MAE vs held-out PromptDA labels, with separately named aligned diagnostics"
 
+[feature.zipdepth-catalog.tasks.zipdepth-eval-hard20]
+cmd = "python tools/eval_hard_frames.py"
+cwd = "packages/zipdepth"
+description = "Score the frozen Polycam hard-20 set without rerunning the teacher or selecting frames"
+
+[feature.zipdepth-catalog.tasks._zipdepth-download-polycam-example]
+cmd = "hf download pablovela5620/polycam-example-data 6G-room-example.zip --repo-type dataset --local-dir data/"
+cwd = "packages/zipdepth"
+outputs = ["packages/zipdepth/data/6G-room-example.zip"]
+description = "Download the example Polycam zip from HuggingFace"
+
+[feature.zipdepth-catalog.tasks.zipdepth-polycam-hard-frames]
+cmd = "python tools/polycam_hard_frames.py --polycam-zip-path data/6G-room-example.zip --max-keep 20"
+depends-on = ["_zipdepth-download-polycam-example"]
+cwd = "packages/zipdepth"
+description = "Mine Polycam frames with the largest edge-region ZipDepth-PromptDA teacher deviation"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # wilor-nano

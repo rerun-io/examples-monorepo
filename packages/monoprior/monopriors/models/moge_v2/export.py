@@ -165,7 +165,7 @@ def preprocess_rgb(
     if image_hw[0] < 1 or image_hw[1] < 1:
         raise ValueError(f"MoGe v2 network dimensions must be positive, got {image_hw}.")
 
-    image_b3hw: Float32[Tensor, "b 3 h w"] = rearrange(rgb_bhw3, "b h w c -> b c h w").to(dtype=torch.float32) / 255.0  # pyrefly: ignore  # bad-argument-type — einops stub false positive
+    image_b3hw: Float32[Tensor, "b 3 h w"] = rearrange(rgb_bhw3, "b h w c -> b c h w").to(dtype=torch.float32) / 255.0
     if tuple(image_b3hw.shape[-2:]) != image_hw:
         image_b3hw = F.interpolate(image_b3hw, size=image_hw, mode="bilinear", antialias=True)
     return image_b3hw
