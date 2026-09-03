@@ -9,6 +9,7 @@ lock, which is the only place a fallback would show up.
 
 import re
 from pathlib import Path
+from typing import Any
 
 import tomllib
 
@@ -38,8 +39,8 @@ def test_member_pyprojects_pin_workspace_siblings_with_uv_sources() -> None:
     packages: dict[str, Path] = _workspace_packages()
     problems: list[str] = []
     for name, package_dir in sorted(packages.items()):
-        manifest: dict = tomllib.loads((package_dir / "pyproject.toml").read_text())
-        sources: dict[str, dict] = {_normalize(k): v for k, v in manifest.get("tool", {}).get("uv", {}).get("sources", {}).items()}
+        manifest: dict[str, Any] = tomllib.loads((package_dir / "pyproject.toml").read_text())
+        sources: dict[str, dict[str, Any]] = {_normalize(k): v for k, v in manifest.get("tool", {}).get("uv", {}).get("sources", {}).items()}
         for requirement in manifest.get("project", {}).get("dependencies", []):
             sibling: str = _requirement_name(requirement)
             if sibling not in packages or sibling == name:
@@ -58,9 +59,14 @@ def test_lock_never_resolves_a_workspace_package_from_an_index() -> None:
     lock_text: str = (REPO_ROOT / "pixi.lock").read_text()
     package_section: str = lock_text.split("\npackages:\n", maxsplit=1)[1]
     from_index: list[str] = []
+    workspace_entries: int = 0
     for entry in re.finditer(r"^- pypi: (\S+)\n((?:  .*\n)+)", package_section, re.M):
         locator: str = entry.group(1)
         name_match: re.Match[str] | None = re.search(r"^  name: (\S+)$", entry.group(2), re.M)
-        if name_match and _normalize(name_match.group(1)) in packages and locator.startswith(("http://", "https://")):
-            from_index.append(f"{name_match.group(1)} <- {locator}")
+        if name_match and _normalize(name_match.group(1)) in packages:
+            workspace_entries += 1
+            if locator.startswith(("http://", "https://")):
+                from_index.append(f"{name_match.group(1)} <- {locator}")
+    # A lock-format change must fail here, not silently scan nothing.
+    assert workspace_entries > 0, "the lock scan matched no workspace package entry; the pixi.lock layout changed"
     assert not from_index, "workspace packages resolved from an index (pin them with [tool.uv.sources]):\n" + "\n".join(from_index)
