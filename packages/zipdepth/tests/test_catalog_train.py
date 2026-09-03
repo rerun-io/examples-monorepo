@@ -337,8 +337,16 @@ def test_checkpoint_carries_the_progressive_resolution_stage(tmp_path: Path) -> 
     assert saved["training_stage"] == 1
 
 
-def test_v4_and_reserved_fast_presets_match_todays_recipe() -> None:
-    """Keep v4 bit-compatible and leave fast unchanged until the hill-climb picks a winner."""
+def test_fast_preset_only_raises_the_peak_learning_rate() -> None:
+    """The hill-climb winner: fast = v4 with max_lr config/10 instead of config/100; an explicit --max-lr still wins."""
+    assert resolve_max_lr(config_lr=1e-3, override=None, from_scratch=False, preset="v4") == pytest.approx(1e-5)
+    assert resolve_max_lr(config_lr=1e-3, override=None, from_scratch=False, preset="fast") == pytest.approx(1e-4)
+    assert resolve_max_lr(config_lr=1e-3, override=3e-5, from_scratch=False, preset="fast") == pytest.approx(3e-5)
+    assert resolve_max_lr(config_lr=1e-3, override=None, from_scratch=True, preset="fast") == pytest.approx(1e-3)
+
+
+def test_v4_and_fast_presets_share_every_runtime_control() -> None:
+    """Keep v4 bit-compatible; fast shares the whole recipe except the peak learning rate."""
     upstream: UpstreamTrainConfig = _load_json_config(Path("configs/default.json"))
 
     v4: TrainingRecipe = resolve_training_recipe(TrainCatalogConfig(preset="v4"), upstream.scheduler, upstream.amp)

@@ -278,9 +278,12 @@ class ResolvedTrainCatalogConfig:
     """Fully resolved runtime recipe used by training."""
 
 
-def resolve_max_lr(config_lr: float, override: float | None, from_scratch: bool) -> float:
+def resolve_max_lr(config_lr: float, override: float | None, from_scratch: bool, preset: TrainPreset = "v4") -> float:
     """Resolve the OneCycle peak learning rate from initialization policy."""
-    max_lr: float = override if override is not None else config_lr if from_scratch else config_lr / 100.0
+    # v4 fine-tunes the released weights at config/100 (1e-5). The hill-climb of 2026-09-03 found config/10 (1e-4) reaches
+    # the same quick-holdout quality in 2.5-3x fewer steps and keeps improving where v4 stalls; nothing else moved.
+    divisor: float = 10.0 if preset == "fast" else 100.0
+    max_lr: float = override if override is not None else config_lr if from_scratch else config_lr / divisor
     if max_lr <= 0.0:
         raise ValueError("max_lr must be positive")
     return max_lr
@@ -299,8 +302,8 @@ def resolve_training_recipe(
     """Resolve v4/fast plus explicit hill-climb overrides into runtime values."""
     if config.preset not in ("v4", "fast"):
         raise ValueError(f"unknown training preset {config.preset!r}")
-    # The fast recipe is deliberately the v4 recipe until measured hill-climb results
-    # select different defaults. Explicit flags remain usable for every trial arm.
+    # `fast` differs from v4 only in the peak learning rate (see resolve_max_lr); every other
+    # runtime control is identical, and explicit flags override both presets.
     return TrainingRecipe(
         compile_mode=config.compile_mode,
         channels_last=config.channels_last,
@@ -622,7 +625,7 @@ def main(
         model_config: UpstreamModelConfig = upstream_config.model
         training_config: UpstreamTrainingConfig = upstream_config.training
         config_lr: float = optimizer_config.lr
-        actual_max_lr: float = resolve_max_lr(config_lr, config.max_lr, config.from_scratch)
+        actual_max_lr: float = resolve_max_lr(config_lr, config.max_lr, config.from_scratch, config.preset)
         recipe: TrainingRecipe = resolve_training_recipe(config, scheduler_config, amp_config)
         stages: list[ResolutionStage] = parse_stage_schedule(recipe.stage_schedule, config.total_steps, config.height, config.width)
 
