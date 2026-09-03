@@ -107,6 +107,7 @@ class ZipDepthTrainer:
         self.log_wandb = log_wandb and WANDB_AVAILABLE
         self.writer = writer
         self.global_step = 0
+        self.training_stage = 0
         self.is_distributed = is_distributed
         self.rank = rank
         self.world_size = world_size
@@ -457,6 +458,7 @@ class ZipDepthTrainer:
         checkpoint = {
             'epoch': epoch,
             'global_step': self.global_step,
+            'training_stage': self.training_stage,
             'model_state_dict': model_state,
             'optimizer_state_dict': self.optimizer.state_dict(),
             'loss': loss,

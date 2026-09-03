@@ -11,11 +11,13 @@ from tqdm import tqdm
 from zipdepth.apis.train_catalog import (
     CompileMode,
     ConstantCooldownLR,
+    ResolutionStage,
     TrainCatalogConfig,
     _adamw_optimizer,
     _build_scheduler,
     _load_json_config,
     _model_to_device,
+    parse_stage_schedule,
     resolve_amp_dtype,
     resolve_max_lr,
 )
@@ -269,6 +271,51 @@ def test_constant_cooldown_is_flat_then_linear() -> None:
     assert isinstance(scheduler, ConstantCooldownLR)
     assert lrs[:8] == [1.0] * 8
     assert lrs[8:] == pytest.approx([0.7, 0.4, 0.1])
+
+
+def test_stage_schedule_defaults_to_one_unchanged_resolution() -> None:
+    """Keep the configured height and width for every step by default."""
+    config: TrainCatalogConfig = TrainCatalogConfig()
+
+    stages: list[ResolutionStage] = parse_stage_schedule(config.stage_schedule, config.total_steps, config.height, config.width)
+
+    assert config.stage_schedule is None
+    assert stages == [ResolutionStage(height=768, width=1024, start_step=0, end_step=70_000)]
+
+
+def test_stage_schedule_assigns_each_fraction_to_a_resolution() -> None:
+    """Convert progressive fractions into exact, contiguous optimizer-step ranges."""
+    stages: list[ResolutionStage] = parse_stage_schedule("384x512:0.3,768x1024:0.7", total_steps=10, height=1, width=1)
+
+    assert stages == [
+        ResolutionStage(height=384, width=512, start_step=0, end_step=3),
+        ResolutionStage(height=768, width=1024, start_step=3, end_step=10),
+    ]
+
+
+@pytest.mark.parametrize(
+    "stage_schedule",
+    ["", "384x512", "384x512:0.0,768x1024:1.0", "384x512:0.4,768x1024:0.5"],
+)
+def test_stage_schedule_rejects_invalid_or_incomplete_fractions(stage_schedule: str) -> None:
+    """Reject malformed stages, empty stages, and fractions that do not cover the run."""
+    with pytest.raises(ValueError):
+        parse_stage_schedule(stage_schedule, total_steps=10, height=768, width=1024)
+
+
+def test_checkpoint_carries_the_progressive_resolution_stage(tmp_path: Path) -> None:
+    """Persist the active stage so a checkpoint records where training stopped."""
+    model: nn.Linear = nn.Linear(1, 1)
+    optimizer: optim.SGD = optim.SGD(model.parameters(), lr=0.1)
+    trainer: ZipDepthTrainer = ZipDepthTrainer(model, [], optimizer, None, "cpu", use_amp=False)
+    trainer.training_stage = 1
+    checkpoint: Path = tmp_path / "stage.pth"
+
+    trainer.save_checkpoint(checkpoint, epoch=0, loss=0.5)
+    saved: object = torch.load(checkpoint, map_location="cpu", weights_only=True)
+
+    assert isinstance(saved, dict)
+    assert saved["training_stage"] == 1
 
 
 @pytest.mark.parametrize(("skip_batches", "expected_skip"), [(0, 0), (None, 3)])

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 from dataclasses import dataclass, field
-from math import ceil
+from math import ceil, isclose, isfinite
 from pathlib import Path
 from typing import Literal, TypeAlias
 
@@ -212,6 +212,23 @@ class TrainCatalogConfig:
     """Ratio between the initial and final learning rates; None keeps the upstream JSON setting."""
     cooldown_pct: float = 0.1
     """Fraction of total steps used by the linear tail of ``constant-cooldown``."""
+    stage_schedule: str | None = None
+    """Optional ``HEIGHTxWIDTH:FRACTION,...`` progressive-resolution schedule. Fractions
+    must sum to one; the catalog loader is rebuilt at each stage boundary."""
+
+
+@dataclass(frozen=True, slots=True)
+class ResolutionStage:
+    """One progressive-resolution optimizer-step interval."""
+
+    height: int
+    """Training image height during the stage."""
+    width: int
+    """Training image width during the stage."""
+    start_step: int
+    """Inclusive global optimizer step at which the stage starts."""
+    end_step: int
+    """Exclusive global optimizer step at which the stage ends."""
 
 
 @serde
@@ -242,6 +259,54 @@ def resolve_max_lr(config_lr: float, override: float | None, from_scratch: bool)
 def resolve_amp_dtype(override: AmpDtype | None, configured: AmpDtype) -> AmpDtype:
     """Resolve the CLI AMP dtype override against the upstream JSON setting."""
     return configured if override is None else override
+
+
+def parse_stage_schedule(specification: str | None, total_steps: int, height: int, width: int) -> list[ResolutionStage]:
+    """Parse progressive resolutions into contiguous global-step intervals."""
+    if total_steps <= 0 or height <= 0 or width <= 0:
+        raise ValueError("total_steps, height, and width must be positive")
+    if specification is None:
+        return [ResolutionStage(height=height, width=width, start_step=0, end_step=total_steps)]
+    if not specification.strip():
+        raise ValueError("stage_schedule must not be empty")
+
+    entries: list[tuple[int, int, float]] = []
+    entry: str
+    for entry in specification.split(","):
+        resolution: str
+        fraction_text: str
+        resolution, fraction_separator, fraction_text = entry.strip().partition(":")
+        height_text: str
+        width_text: str
+        height_text, resolution_separator, width_text = resolution.partition("x")
+        if not fraction_separator or not resolution_separator:
+            raise ValueError(f"invalid stage {entry!r}; expected HEIGHTxWIDTH:FRACTION")
+        try:
+            stage_height: int = int(height_text)
+            stage_width: int = int(width_text)
+            fraction: float = float(fraction_text)
+        except ValueError as error:
+            raise ValueError(f"invalid stage {entry!r}; expected HEIGHTxWIDTH:FRACTION") from error
+        if stage_height <= 0 or stage_width <= 0 or not isfinite(fraction) or fraction <= 0.0:
+            raise ValueError(f"stage dimensions and fraction must be positive: {entry!r}")
+        entries.append((stage_height, stage_width, fraction))
+
+    fraction_sum: float = sum(fraction for _, _, fraction in entries)
+    if not isclose(fraction_sum, 1.0, rel_tol=0.0, abs_tol=1e-9):
+        raise ValueError(f"stage fractions must sum to 1.0, got {fraction_sum}")
+
+    stages: list[ResolutionStage] = []
+    cumulative_fraction: float = 0.0
+    start_step: int = 0
+    index: int
+    for index, (stage_height, stage_width, fraction) in enumerate(entries):
+        cumulative_fraction += fraction
+        end_step: int = total_steps if index == len(entries) - 1 else round(total_steps * cumulative_fraction)
+        if end_step <= start_step:
+            raise ValueError("each stage must receive at least one optimizer step")
+        stages.append(ResolutionStage(stage_height, stage_width, start_step, end_step))
+        start_step = end_step
+    return stages
 
 
 def _model_to_device(model: nn.Module, device: torch.device, channels_last: bool) -> nn.Module:
@@ -427,6 +492,10 @@ def _restore_resume_state(
     if not isinstance(raw_global_step, int):
         raise ValueError("resume checkpoint global_step must be an integer")
     trainer.global_step = raw_global_step
+    raw_training_stage: object = checkpoint.get("training_stage", 0)
+    if not isinstance(raw_training_stage, int) or raw_training_stage < 0:
+        raise ValueError("resume checkpoint training_stage must be a non-negative integer")
+    trainer.training_stage = raw_training_stage
     raw_scheduler_state: object = checkpoint.get("scheduler_state_dict")
     scheduler_state: dict[str, object] | None = raw_scheduler_state if isinstance(raw_scheduler_state, dict) else None
     raw_old_total_steps: object | None = scheduler_state.get("total_steps") if scheduler_state is not None else None
@@ -475,6 +544,7 @@ def main(
             raise ValueError("save_every_steps must be non-negative")
         if config.target_mode not in ("ssi", "metric"):
             raise ValueError(f"unknown target mode {config.target_mode!r}")
+        stages: list[ResolutionStage] = parse_stage_schedule(config.stage_schedule, config.total_steps, config.height, config.width)
         torch.backends.cudnn.benchmark = True
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
@@ -525,42 +595,46 @@ def main(
             writer = SummaryWriter(log_dir=str(config.save_dir / "runs"))
             owns_writer = True
 
-        dataset: CatalogPromptDepthDataset = CatalogPromptDepthDataset(
-            catalog.dataset_entry,
-            train_segment_ids,
-            catalog.row_by_id,
-            device=device,
-            builder_factory=lambda: CudaSampleBuilder(
-                (config.height, config.width),
-                AugmentPolicy(),
-                config.min_depth_span,
-                device,
-                target_mode=config.target_mode,
-            ),
-            shuffle_buffer_size=config.shuffle_buffer_size,
-            seed=config.seed,
-            rank=rank,
-            world_size=world_size,
-            num_producers=config.num_producers,
-            prefetch_samples=config.prefetch_samples,
-            # Training ignores confidence: the student takes the raw prompt and the model
-            # range-gates internally. Skipping the column drops a column and ~48 KB/frame
-            # off every segment query.
-            load_confidence=False
-        )
-        data_loader: DataLoader[dict[str, Tensor]] = DataLoader(
-            dataset,
-            batch_size=config.batch_size,
-            num_workers=0,
-            pin_memory=False,
-            drop_last=True,
-        )
-        train_loader: InstrumentedLoader = InstrumentedLoader(
-            dataset,
-            data_loader,
-            steps_per_epoch=steps_per_epoch,
-            writer=writer if is_main else None,
-        )
+        def build_train_loader(stage: ResolutionStage, stage_steps: int) -> InstrumentedLoader:
+            """Build the catalog stream for one resolution stage."""
+            dataset: CatalogPromptDepthDataset = CatalogPromptDepthDataset(
+                catalog.dataset_entry,
+                train_segment_ids,
+                catalog.row_by_id,
+                device=device,
+                builder_factory=lambda: CudaSampleBuilder(
+                    (stage.height, stage.width),
+                    AugmentPolicy(),
+                    config.min_depth_span,
+                    device,
+                    target_mode=config.target_mode,
+                ),
+                shuffle_buffer_size=config.shuffle_buffer_size,
+                seed=config.seed,
+                rank=rank,
+                world_size=world_size,
+                num_producers=config.num_producers,
+                prefetch_samples=config.prefetch_samples,
+                # Training ignores confidence: the student takes the raw prompt and the model
+                # range-gates internally. Skipping the column drops a column and ~48 KB/frame
+                # off every segment query.
+                load_confidence=False,
+            )
+            data_loader: DataLoader[dict[str, Tensor]] = DataLoader(
+                dataset,
+                batch_size=config.batch_size,
+                num_workers=0,
+                pin_memory=False,
+                drop_last=True,
+            )
+            return InstrumentedLoader(
+                dataset,
+                data_loader,
+                steps_per_epoch=stage_steps,
+                writer=writer if is_main else None,
+            )
+
+        train_loader: InstrumentedLoader = build_train_loader(stages[0], stages[0].end_step)
 
         initialization: Path | None = config.init_checkpoint
         if initialization is None and not config.from_scratch and config.resume is None:
@@ -651,15 +725,29 @@ def main(
             f"Catalog train: {len(train_segment_ids)} segments, {total_steps} optimizer steps, max_lr={actual_max_lr:.2e}, device={device}",
             rank,
         )
-        trainer.train(
-            num_epochs=1,
-            save_dir=str(config.save_dir),
-            start_epoch=0,
-            save_every_steps=config.save_every_steps,
-            max_step_checkpoints=training_config.max_step_checkpoints,
-            max_steps=total_steps,
-            skip_batches=0,
-        )
+        stage_index: int
+        stage: ResolutionStage
+        for stage_index, stage in enumerate(stages):
+            if trainer.global_step >= stage.end_step:
+                continue
+            if stage_index > 0:
+                train_loader = build_train_loader(stage, stage.end_step - trainer.global_step)
+                trainer.train_loader = train_loader
+            train_loader.set_global_step(trainer.global_step)
+            trainer.training_stage = stage_index
+            print_main(
+                f"Resolution stage {stage_index + 1}/{len(stages)}: {stage.height}x{stage.width}, steps {trainer.global_step}:{stage.end_step}",
+                rank,
+            )
+            trainer.train(
+                num_epochs=1,
+                save_dir=str(config.save_dir),
+                start_epoch=0,
+                save_every_steps=config.save_every_steps,
+                max_step_checkpoints=training_config.max_step_checkpoints,
+                max_steps=stage.end_step,
+                skip_batches=0,
+            )
         barrier()
         latest: Path = config.save_dir / "latest.pth"
         if is_main:
