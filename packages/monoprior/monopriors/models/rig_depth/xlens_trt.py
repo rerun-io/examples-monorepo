@@ -16,15 +16,15 @@ tensors handed to the engine each call, so a ~1 GB bias never lives in an ONNX
 file or an engine plan.
 """
 
-import copy
 import hashlib
+import json
 import os
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypeAlias, TypeVar, cast
+from typing import TYPE_CHECKING, Literal, TypeAlias, cast
 
 import numpy as np
 import torch
@@ -41,6 +41,7 @@ from monopriors.models.rig_depth.xlens import (
     RigTensors,
     load_xlens_model,
     normalize_framesets,
+    rig_depth_prediction,
     rig_tensors,
     validate_rig_inputs,
 )
@@ -57,7 +58,6 @@ else:
     InputShapeProfile = object
     TensorRtDynamicRuntime = object
 
-ModuleT = TypeVar("ModuleT", bound=nn.Module)
 EngineProfile: TypeAlias = Literal["rig", "dynamic"]
 """``dynamic`` (default) spans view counts and resolutions; ``rig`` bakes one rig layout (its ranges collapse to the rig)."""
 
@@ -93,8 +93,11 @@ class EngineGeometry:
     """Inputs by name: optional ``ray_feat``, then ``pos_embed``, ``pos_local``, ``pos_global``, ``cam_types``, and ``attn_bias_<i>``."""
     layer_slots: tuple[str | None, ...]
     """Attention-bias input feeding each backbone layer; None where the layer has no bias (all-zero masks are dropped)."""
-    local_slots: frozenset[str]
-    """Bias inputs shaped ``(1, views, L, L)`` for within-view attention; the rest are ``(1, heads, L, L)`` cross-view biases."""
+    slot_kinds: dict[str, tuple[bool, int]]
+    """Per bias input: whether it serves cross-view layers (shape ``(1, heads, L, L)``; within-view ones are ``(1, views, L, L)``)
+    and how many non-patch tokens each view carries there (the scale token from ``alt_start`` plus the calibration tokens)."""
+    trailing: int
+    """Scale plus calibration tokens appended to each view's patch tokens."""
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -102,18 +105,20 @@ class EngineGeometry:
         return tuple(self.inputs)
 
 
-def engine_geometry(frozen: FrozenRigGeometry, bias_dtype: torch.dtype = torch.float16) -> EngineGeometry:
+def engine_geometry(frozen: FrozenRigGeometry, backbone: DinoVisionTransformer, bias_dtype: torch.dtype = torch.float16) -> EngineGeometry:
     """Flatten frozen geometry into engine inputs with a leading dimension of one.
 
     Args:
         frozen: Rig geometry from ``XLensNet.freeze_geometry`` (float FishRoPE positions required).
+        backbone: The network's backbone, which says which layers attend across views and where the scale token starts.
         bias_dtype: Storage dtype of the attention biases; fp16 halves the largest input.
 
     Returns:
-        Named inputs plus the per-layer slot map the export graph bakes in.
+        Named inputs plus the per-layer slot map and per-slot token facts the export graph bakes in.
 
     Raises:
-        ValueError: If the rig has no float RoPE positions (no per-pixel rays), camera types, or position embedding.
+        ValueError: If the rig has no float RoPE positions (no per-pixel rays), camera types, or position embedding, or a
+            bias mask's layout disagrees with the layer type it feeds.
     """
     if frozen.pos_local is None or frozen.pos_global is None or not frozen.pos_local.is_floating_point():
         raise ValueError("X-Lens TensorRT export needs float FishRoPE positions; freeze the geometry with per-pixel rays")
@@ -147,22 +152,19 @@ def engine_geometry(frozen: FrozenRigGeometry, bias_dtype: torch.dtype = torch.f
                     inputs[name] = clamped
                 named[id(mask)] = name
         slots.append(named[id(mask)])
-    return EngineGeometry(inputs=inputs, layer_slots=tuple(slots), local_slots=frozenset(local_slots))
-
-
-def slot_token_extras(backbone: DinoVisionTransformer, layer_slots: tuple[str | None, ...], calib_k: int) -> dict[str, tuple[bool, int]]:
-    """Per bias input: whether it serves cross-view layers and how many non-patch tokens each view carries there.
-
-    The per-view token count of a layer is ``1 (CLS) + patches + extra`` where
-    ``extra`` counts the scale token (from ``alt_start``) and the calibration tokens.
-    """
+    # Per slot, the layer type decides the mask layout the graph slices: cross-view layers take the per-head bias,
+    # within-view layers the per-view one. The per-view token count of a layer is 1 (CLS) + patches + extra.
     kinds: dict[str, tuple[bool, int]] = {}
-    for layer_index, slot in enumerate(layer_slots):
+    for layer_index, slot in enumerate(slots):
         if slot is None or slot in kinds:
             continue
+        is_global: bool = backbone._is_global_layer(layer_index)
+        if is_global == (slot in local_slots):
+            raise ValueError(f"{slot} feeds a {'cross-view' if is_global else 'within-view'} layer but carries a {'per-view' if is_global else 'per-head'} mask")
         scale_injected: bool = backbone.alt_start != -1 and layer_index >= backbone.alt_start
-        kinds[slot] = (backbone._is_global_layer(layer_index), (1 if scale_injected else 0) + calib_k)
-    return kinds
+        kinds[slot] = (is_global, (1 if scale_injected else 0) + frozen.calib_k)
+    trailing: int = (1 if backbone.alt_start != -1 else 0) + frozen.calib_k
+    return EngineGeometry(inputs=inputs, layer_slots=tuple(slots), slot_kinds=kinds, trailing=trailing)
 
 
 class _ManualMultiheadAttention(nn.Module):
@@ -247,23 +249,18 @@ def _export_friendly(model: XLensNet) -> XLensNet:
 
     Weights are shared with the caller's model, whose module tree is never mutated.
     """
-    model_copy: XLensNet = _shallow_module_copy(model)
+    from trtkit import shallow_module_copy
+
+    model_copy: XLensNet = shallow_module_copy(model)
     scale_head: ScaleHead = model.scale_head
     if scale_head.mode == "attn_pool":
-        head_copy: ScaleHead = _shallow_module_copy(scale_head)
+        head_copy: ScaleHead = shallow_module_copy(scale_head)
         head_copy.attn_layers = nn.ModuleList([_ManualMultiheadAttention(cast(nn.MultiheadAttention, layer)) for layer in scale_head.attn_layers])
         model_copy.scale_head = head_copy
-    dpt_copy: DPTHead = _shallow_module_copy(model.head)
+    dpt_copy: DPTHead = shallow_module_copy(model.head)
     dpt_copy.__class__ = _ExportDPTHead
     model_copy.head = dpt_copy
     return model_copy
-
-
-def _shallow_module_copy(module: ModuleT) -> ModuleT:
-    """Copy a module object so child assignments do not touch the original tree."""
-    clone: ModuleT = copy.copy(module)
-    clone._modules = dict(module._modules)
-    return clone
 
 
 class _XLensRigGraph(nn.Module):
@@ -277,14 +274,13 @@ class _XLensRigGraph(nn.Module):
 
     def __init__(self, model: XLensNet, frozen: FrozenRigGeometry, geometry: EngineGeometry) -> None:
         super().__init__()
-        backbone: DinoVisionTransformer = model.backbone.pretrained
         self.model: XLensNet = _export_friendly(model)
-        self.patch_size: int = backbone.patch_size
+        self.patch_size: int = model.backbone.pretrained.patch_size
         self.calib_k: int = frozen.calib_k
-        self.trailing: int = (1 if backbone.alt_start != -1 else 0) + frozen.calib_k
+        self.trailing: int = geometry.trailing
         self.input_names: tuple[str, ...] = geometry.names
         self.layer_slots: tuple[str | None, ...] = geometry.layer_slots
-        self.slot_kinds: dict[str, tuple[bool, int]] = slot_token_extras(backbone, geometry.layer_slots, frozen.calib_k)
+        self.slot_kinds: dict[str, tuple[bool, int]] = geometry.slot_kinds
 
     def forward(self, images: Float32[Tensor, "b s 3 h w"], *geometry: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Run the network on ``b`` framesets of one rig; ``geometry`` follows ``input_names`` order."""
@@ -318,7 +314,7 @@ class _XLensRigGraph(nn.Module):
             pos_embed=pos_embed,
         )
         output: XLensNetOutput = self.model(images, frozen=frozen)
-        return output["depth_metric"], output["depth_conf"], output["mask"], output["metric_scaling_factor"]
+        return tuple(output[name] for name in ENGINE_OUTPUT_NAMES)  # pyrefly: ignore  # bad-return — TypedDict keys are the output names
 
 
 @dataclass(frozen=True, slots=True)
@@ -335,7 +331,7 @@ class DynamicRanges:
     """Smallest and largest frameset batch."""
 
 
-def dynamic_dims_spec(geometry: EngineGeometry, kinds: dict[str, tuple[bool, int]], ranges: DynamicRanges, trailing: int) -> "DynamicDims":
+def dynamic_dims_spec(geometry: EngineGeometry, ranges: DynamicRanges) -> "DynamicDims":
     """``torch.export`` symbols for the dynamic profile: shared ``batch``/``views``/``patch_rows``/``patch_cols``, one token symbol per geometry input.
 
     Token counts are products of the patch-grid symbols, which ``torch.export``
@@ -351,6 +347,7 @@ def dynamic_dims_spec(geometry: EngineGeometry, kinds: dict[str, tuple[bool, int
     rows = DynamicDim("patch_rows", ranges.patch_rows[0], ranges.patch_rows[1])
     cols = DynamicDim("patch_cols", ranges.patch_cols[0], ranges.patch_cols[1])
     patches: tuple[int, int] = (ranges.patch_rows[0] * ranges.patch_cols[0], ranges.patch_rows[1] * ranges.patch_cols[1])
+    trailing: int = geometry.trailing
     spec: DynamicDims = {
         "images": {0: batch, 1: views, 3: DynamicDim("patch_rows", rows.min, rows.max, multiple=14), 4: DynamicDim("patch_cols", cols.min, cols.max, multiple=14)},
         "pos_embed": {1: DynamicDim("pos_embed_tokens", 1 + patches[0], 1 + patches[1], auto=True)},
@@ -360,7 +357,7 @@ def dynamic_dims_spec(geometry: EngineGeometry, kinds: dict[str, tuple[bool, int
     }
     if "ray_feat" in geometry.inputs:
         spec["ray_feat"] = {1: views, 3: rows, 4: cols}
-    for name, (is_global, extra) in kinds.items():
+    for name, (is_global, extra) in geometry.slot_kinds.items():
         lengths: tuple[int, int] = (1 + patches[0] + extra, 1 + patches[1] + extra)
         if is_global:
             lengths = (ranges.views[0] * lengths[0], ranges.views[1] * lengths[1])
@@ -372,21 +369,17 @@ def dynamic_dims_spec(geometry: EngineGeometry, kinds: dict[str, tuple[bool, int
 
 def shape_profiles(
     geometry: EngineGeometry,
-    kinds: dict[str, tuple[bool, int]],
     ranges: DynamicRanges,
     opt: tuple[int, int, int, int],
-    trailing: int,
     embed_dim: int,
     heads: int,
 ) -> tuple["InputShapeProfile", ...]:
     """TensorRT min/opt/max shapes for every engine input, consistent with :func:`dynamic_dims_spec`.
 
     Args:
-        geometry: Input names of the rig the graph was exported from.
-        kinds: Per bias input, cross-view flag and non-patch token count.
+        geometry: Input names and per-slot token facts of the rig the graph was exported from.
         ranges: Symbol bounds.
         opt: Batch, views, patch rows, and patch columns TensorRT tunes for.
-        trailing: Scale plus calibration tokens appended to each view.
         embed_dim: Backbone feature width.
         heads: Backbone attention heads.
 
@@ -401,11 +394,11 @@ def shape_profiles(
             "images": (batch, views, 3, 14 * rows, 14 * cols),
             "ray_feat": (1, views, embed_dim, rows, cols),
             "pos_embed": (1, 1 + patches, embed_dim),
-            "pos_local": (1, views, 1 + patches + trailing, 2),
-            "pos_global": (1, views, 1 + patches + trailing, 2),
+            "pos_local": (1, views, 1 + patches + geometry.trailing, 2),
+            "pos_global": (1, views, 1 + patches + geometry.trailing, 2),
             "cam_types": (1, views),
         }
-        for name, (is_global, extra) in kinds.items():
+        for name, (is_global, extra) in geometry.slot_kinds.items():
             length: int = 1 + patches + extra
             shapes[name] = (1, heads, views * length, views * length) if is_global else (1, views, length, length)
         return shapes
@@ -432,10 +425,6 @@ class ExportPlan:
     """Batch, views, patch rows, and patch columns TensorRT tunes for."""
     dynamic_dims: "DynamicDims | None"
     """Symbolic export dimensions, or None for a fully static graph."""
-    kinds: dict[str, tuple[bool, int]]
-    """Per bias input, cross-view flag and non-patch token count."""
-    trailing: int
-    """Scale plus calibration tokens appended to each view."""
     image_hw: tuple[int, int]
     """Rig image height and width (the export example)."""
 
@@ -471,10 +460,7 @@ def plan_export(
     tensors: RigTensors = rig_tensors(rays, cam_types, cam_T_ref, torch.device("cuda"))
     with torch.inference_mode():
         frozen: FrozenRigGeometry = model.freeze_geometry(tensors.d_cam, tensors.cam_types, tensors.ray_map)
-    geometry: EngineGeometry = engine_geometry(frozen)
-    backbone: DinoVisionTransformer = model.backbone.pretrained
-    kinds: dict[str, tuple[bool, int]] = slot_token_extras(backbone, geometry.layer_slots, frozen.calib_k)
-    trailing: int = (1 if backbone.alt_start != -1 else 0) + frozen.calib_k
+    geometry: EngineGeometry = engine_geometry(frozen, model.backbone.pretrained)
     if profile == "rig":
         ranges = DynamicRanges(views=(n_views, n_views), patch_rows=(rows, rows), patch_cols=(cols, cols), batch=dynamic_ranges.batch)
         signature: str = f"{rig_signature(cam_types, image_hw, cam_T_ref is not None)}_b{ranges.batch[1]}"
@@ -489,24 +475,11 @@ def plan_export(
             min(max(DYNAMIC_OPT_HW[1] // 14, ranges.patch_cols[0]), ranges.patch_cols[1]),
         )
     # Degenerate ranges become static dims in trtkit, so a rig graph with batch 1 is fully static.
-    spec: DynamicDims = dynamic_dims_spec(geometry, kinds, ranges, trailing)
+    spec: DynamicDims = dynamic_dims_spec(geometry, ranges)
     symbolic: bool = any(dim.min != dim.max for dims in spec.values() for dim in dims.values())
     dynamic_dims: DynamicDims | None = spec if symbolic else None
     return ExportPlan(
-        frozen=frozen, geometry=geometry, signature=signature, ranges=ranges, opt=opt, dynamic_dims=dynamic_dims, kinds=kinds, trailing=trailing, image_hw=image_hw
-    )
-
-
-def export_plan_onnx(model: XLensNet, plan: ExportPlan, onnx_path: Path) -> None:
-    """Export one planned graph (two example framesets when the batch is symbolic)."""
-    export_xlens_onnx(
-        model,
-        plan.frozen,
-        plan.geometry,
-        plan.image_hw,
-        onnx_path,
-        example_batch=min(2, plan.ranges.batch[1]),
-        dynamic_dims=plan.dynamic_dims,
+        frozen=frozen, geometry=geometry, signature=signature, ranges=ranges, opt=opt, dynamic_dims=dynamic_dims, image_hw=image_hw
     )
 
 
@@ -521,7 +494,7 @@ def rig_signature(cam_types: Int64[ndarray, "s"], image_hw: tuple[int, int], has
 
 def dynamic_signature(ranges: DynamicRanges, calib_k: int, geometry: EngineGeometry) -> str:
     """Filename fragment naming a dynamic-profile graph: symbol ranges, calibration tokens, mask layout, pose presence."""
-    masks: str = "local" if geometry.local_slots else "nolocal"
+    masks: str = "local" if any(not is_global for is_global, _ in geometry.slot_kinds.values()) else "nolocal"
     rays: str = "rays" if "ray_feat" in geometry.inputs else "norays"
     return (
         f"dyn_v{ranges.views[0]}-{ranges.views[1]}_h{14 * ranges.patch_rows[0]}-{14 * ranges.patch_rows[1]}"
@@ -529,44 +502,30 @@ def dynamic_signature(ranges: DynamicRanges, calib_k: int, geometry: EngineGeome
     )
 
 
-def export_xlens_onnx(
-    model: XLensNet,
-    frozen: FrozenRigGeometry,
-    geometry: EngineGeometry,
-    image_hw: tuple[int, int],
-    onnx_path: Path,
-    *,
-    example_batch: int,
-    dynamic_dims: "DynamicDims | None",
-) -> None:
-    """Export the fp16 graph with trtkit's strongly-typed recipe.
+def export_plan_onnx(model: XLensNet, plan: ExportPlan, onnx_path: Path) -> None:
+    """Export one planned graph with trtkit's strongly-typed recipe, then drop superseded exports of the same signature.
 
-    Args:
-        model: Released X-Lens network on CUDA.
-        frozen: Rig geometry the graph structure is derived from.
-        geometry: Engine inputs for this rig (traced as example values).
-        image_hw: Example image height and width.
-        onnx_path: Destination ONNX path, published atomically by trtkit.
-        example_batch: Frameset batch of the traced example (two when the batch is symbolic).
-        dynamic_dims: Symbolic dimensions, or None for a fully static graph.
+    The traced example carries two framesets when the batch is symbolic.
     """
-    from trtkit import export_onnx
+    from trtkit import export_onnx, sweep_stale_onnx_exports
 
-    graph: _XLensRigGraph = _XLensRigGraph(model, frozen, geometry).eval()
-    n_views: int = int(geometry.inputs["pos_local"].shape[1])
+    graph: _XLensRigGraph = _XLensRigGraph(model, plan.frozen, plan.geometry).eval()
+    n_views: int = int(plan.geometry.inputs["pos_local"].shape[1])
     example_images: Float32[Tensor, "b s 3 h w"] = torch.zeros(
-        (example_batch, n_views, 3, image_hw[0], image_hw[1]), dtype=torch.float32, device="cuda"
+        (min(2, plan.ranges.batch[1]), n_views, 3, plan.image_hw[0], plan.image_hw[1]), dtype=torch.float32, device="cuda"
     )
     print(f"[monoprior] exporting X-Lens rig graph to ONNX (one-time, may take minutes): {onnx_path.name}")
     export_onnx(
         graph,
-        (example_images, *(geometry.inputs[name] for name in geometry.names)),
+        (example_images, *(plan.geometry.inputs[name] for name in plan.geometry.names)),
         onnx_path,
-        input_names=["images", *geometry.names],
+        input_names=["images", *plan.geometry.names],
         output_names=list(ENGINE_OUTPUT_NAMES),
         compute_dtype=torch.float16,
-        dynamic_dims=dynamic_dims,
+        dynamic_dims=plan.dynamic_dims,
     )
+    # Earlier ONNX_EXPORT_VERSIONs or checkpoints of this signature are superseded; keep this export and its sidecar.
+    sweep_stale_onnx_exports(onnx_path.parent, f"xlens-vits-rig_{plan.signature}_", keep_paths={onnx_path, onnx_path.with_name(onnx_path.name + ".data")})
 
 
 @dataclass
@@ -646,7 +605,8 @@ class XLensTrtPredictor(BaseRigDepthPredictor):
         loaded: tuple[XLensNet, Path] = load_xlens_model(checkpoint, "cuda")
         self.model: XLensNet = loaded[0]
         self.checkpoint_path: Path = loaded[1]
-        self.checkpoint_digest: str = hashlib.sha256(loaded[1].read_bytes()).hexdigest()
+        with loaded[1].open("rb") as stream:
+            self.checkpoint_digest: str = hashlib.file_digest(stream, "sha256").hexdigest()
         self.use_cuda_graph: bool = use_cuda_graph
         self.cache_dir: Path = cache_dir
         self.workspace_gib: float = workspace_gib
@@ -687,7 +647,7 @@ class XLensTrtPredictor(BaseRigDepthPredictor):
 
         Symbolic dims reach the fork as ``torch.SymInt`` values, which the dev-mode
         ``int`` checks reject (the same reason MoGe re-enters its export). The worker
-        rebuilds the identical plan from the rig arrays and this predictor's settings.
+        rebuilds the identical plan from the rig arrays and the settings file.
         """
         if os.environ.get("PIXI_DEV_MODE") != "1" or os.environ.get(_EXPORT_WORKER_ENV) == "1" or plan.dynamic_dims is None:
             export_plan_onnx(self.model, plan, onnx_path)
@@ -696,6 +656,8 @@ class XLensTrtPredictor(BaseRigDepthPredictor):
             rig_path: Path = Path(directory) / "rig.npz"
             # An empty pose stack stands for "no poses" (keyword unpacking confuses the numpy stubs).
             np.savez(rig_path, rays=rays, cam_types=cam_types, cam_T_ref=np.zeros((0, 4, 4)) if cam_T_ref is None else cam_T_ref)
+            settings_path: Path = Path(directory) / "plan.json"
+            settings_path.write_text(json.dumps({"profile": self.profile, "opt_batch_size": self.opt_batch_size, "ranges": asdict(self.dynamic_ranges)}))
             worker_env: dict[str, str] = dict(os.environ)
             worker_env["PIXI_DEV_MODE"] = "0"
             worker_env[_EXPORT_WORKER_ENV] = "1"
@@ -705,28 +667,18 @@ class XLensTrtPredictor(BaseRigDepthPredictor):
                 "monopriors.models.rig_depth._xlens_onnx_worker",
                 "--rig-path",
                 str(rig_path),
+                "--settings-path",
+                str(settings_path),
                 "--onnx-path",
                 str(onnx_path),
                 "--checkpoint",
                 str(self.checkpoint_path),
-                "--profile",
-                self.profile,
-                "--max-batch-size",
-                str(self.max_batch_size),
-                "--opt-batch-size",
-                str(self.opt_batch_size),
-                "--dynamic-views",
-                *(str(value) for value in self.dynamic_ranges.views),
-                "--dynamic-height",
-                *(str(14 * value) for value in self.dynamic_ranges.patch_rows),
-                "--dynamic-width",
-                *(str(14 * value) for value in self.dynamic_ranges.patch_cols),
             ]
             subprocess.run(command, check=True, env=worker_env)
         if not onnx_path.exists():
             raise RuntimeError(f"X-Lens ONNX export worker did not produce {onnx_path}")
 
-    def prepare(
+    def _prepare(
         self,
         rays: Float32[ndarray, "s h w 3"],
         cam_types: Int64[ndarray, "s"],
@@ -751,14 +703,13 @@ class XLensTrtPredictor(BaseRigDepthPredictor):
             from trtkit import TrtBuildConfig, ensure_engine
 
             self._runtime = None
+            self._geometry = None  # the previous rig's inputs go before the new engine's buffers are allocated
             onnx_path: Path = self.onnx_path(plan.signature)
             if not onnx_path.exists():
                 self._export(plan, onnx_path, rays, cam_types, cam_T_ref)
             torch.cuda.empty_cache()
             backbone: DinoVisionTransformer = self.model.backbone.pretrained
-            profiles: tuple[InputShapeProfile, ...] = shape_profiles(
-                geometry, plan.kinds, plan.ranges, plan.opt, plan.trailing, backbone.embed_dim, backbone.num_heads
-            )
+            profiles: tuple[InputShapeProfile, ...] = shape_profiles(geometry, plan.ranges, plan.opt, backbone.embed_dim, backbone.num_heads)
             build_config: TrtBuildConfig = TrtBuildConfig(
                 max_batch_size=plan.ranges.batch[1], opt_batch_size=plan.opt[0], workspace_gib=self.workspace_gib, shape_profiles=profiles
             )
@@ -792,21 +743,13 @@ class XLensTrtPredictor(BaseRigDepthPredictor):
             One owning prediction per frameset, in order.
         """
         validate_rig_inputs(images[0], rays, cam_types)
-        geometry, runtime = self.prepare(rays, cam_types, cam_T_ref)
+        geometry, runtime = self._prepare(rays, cam_types, cam_T_ref)
         predictions: list[RigDepthPrediction] = []
         chunk: int = self.max_batch_size
         for start in range(0, images.shape[0], chunk):
             image_tensor: Float32[Tensor, "c s 3 h w"] = normalize_framesets(images[start : start + chunk], torch.device("cuda"))
-            outputs: dict[str, Tensor] = runtime({"images": image_tensor, **geometry.inputs})
-            for index in range(image_tensor.shape[0]):
-                predictions.append(
-                    RigDepthPrediction(
-                        depth_m=outputs["depth_metric"][index].float().clone(),
-                        confidence=outputs["depth_conf"][index].float().clone(),
-                        mask=outputs["mask"][index].float().clone(),
-                        scale=float(outputs["metric_scaling_factor"][index]),
-                    )
-                )
+            outputs: XLensNetOutput = cast(XLensNetOutput, runtime({"images": image_tensor, **geometry.inputs}))
+            predictions.extend(rig_depth_prediction(outputs, index) for index in range(image_tensor.shape[0]))
         return predictions
 
     def __call__(
@@ -827,4 +770,4 @@ class XLensTrtPredictor(BaseRigDepthPredictor):
         Returns:
             Owning metric depth, confidence, mask, and scale on CUDA.
         """
-        return self.predict_batch(np.ascontiguousarray(images)[None], rays, cam_types, cam_T_ref)[0]
+        return self.predict_batch(images[None], rays, cam_types, cam_T_ref)[0]

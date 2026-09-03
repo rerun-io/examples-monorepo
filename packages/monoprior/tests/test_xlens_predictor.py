@@ -1,15 +1,13 @@
 """X-Lens rig-depth registration, model outputs, export graph, and unprojection contract."""
 
 from dataclasses import fields
-from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pytest
 import torch
 import tyro
-import yaml
-from jaxtyping import Float32, Float64, Int64, UInt8
+from conftest import build_random_xlens_model, random_rig
+from jaxtyping import Float32, Int64
 from numpy import ndarray
 from torch import Tensor, nn
 
@@ -23,8 +21,8 @@ from monopriors.models.rig_depth import (
     rig_depth_predictor_defaults,
     unproject,
 )
-from monopriors.models.rig_depth.xlens import RigKeyMemo, RigTensors, normalize_images, rig_tensors
-from monopriors.models.rig_depth.xlens_trt import EngineGeometry, _XLensRigGraph, engine_geometry
+from monopriors.models.rig_depth.xlens import RigKeyMemo, RigTensors, normalize_framesets, rig_tensors
+from monopriors.models.rig_depth.xlens_trt import ENGINE_OUTPUT_NAMES, EngineGeometry, _XLensRigGraph, engine_geometry
 from monopriors.third_party.xlens.inference.preprocess import AssembledBatch, assemble_batch, normalize_image
 from monopriors.third_party.xlens.models.dinov2.vision_transformer import FrozenRigGeometry
 from monopriors.third_party.xlens.models.net import XLensNet
@@ -32,41 +30,8 @@ from monopriors.third_party.xlens.models.net import XLensNet
 
 @pytest.fixture(scope="module")
 def random_model() -> XLensNet:
-    """Build the released ViT-S architecture with deterministic random weights."""
-    config_path: Path = Path(__file__).parents[1] / "monopriors/third_party/xlens/xlens_vits.yaml"
-    config: dict[str, Any] = yaml.safe_load(config_path.read_text())
-    with torch.random.fork_rng():
-        torch.manual_seed(17)
-        return XLensNet(
-            backbone_name=config["backbone"],
-            checkpoint_dir="/nonexistent/xlens-test-checkpoints",
-            head_features=config["head_features"],
-            head_out_channels=tuple(config["head_out_channels"]),
-            predict_mask=config["predict_mask"],
-            scale_head_mode=config["scale_head_mode"],
-            scale_head_num_queries=config["scale_head_num_queries"],
-            scale_head_num_heads=config["scale_head_num_heads"],
-            n_cam_types=config["n_cam_types"],
-            use_calib_tokens=config["use_calib_tokens"],
-            calib_tokens_per_type=config["calib_tokens_per_type"],
-            calib_inject_types=tuple(config["calib_token_inject_types"]),
-            use_distortion_bias=config["use_distortion_bias"],
-            distortion_bias_layers=config["distortion_bias_layers"],
-            distortion_bias_hidden_dim=config["distortion_bias_hidden_dim"],
-            distortion_bias_chunk_size=config["distortion_bias_chunk_size"],
-        ).eval()
-
-
-def _random_rig(views: int, with_poses: bool, seed: int) -> tuple[UInt8[ndarray, "s 28 42 3"], Float32[ndarray, "s 28 42 3"], Float64[ndarray, "s 4 4"] | None]:
-    generator: np.random.Generator = np.random.default_rng(seed)
-    images: UInt8[ndarray, "s 28 42 3"] = generator.integers(0, 256, size=(views, 28, 42, 3), dtype=np.uint8)
-    rays: Float32[ndarray, "s 28 42 3"] = generator.normal(size=(views, 28, 42, 3)).astype(np.float32)
-    rays /= np.maximum(np.linalg.norm(rays, axis=-1, keepdims=True), 1e-6)
-    cam_T_ref: Float64[ndarray, "s 4 4"] | None = None
-    if with_poses:
-        cam_T_ref = np.tile(np.eye(4, dtype=np.float64), (views, 1, 1))
-        cam_T_ref[:, 0, 3] = np.arange(views, dtype=np.float64) * 0.1
-    return images, rays, cam_T_ref
+    """The released ViT-S architecture with deterministic random weights."""
+    return build_random_xlens_model()
 
 
 def test_registry_has_eager_and_tensorrt_configs() -> None:
@@ -88,7 +53,7 @@ def test_registry_has_eager_and_tensorrt_configs() -> None:
 
 @pytest.mark.parametrize(("views", "cam_types", "with_poses"), [(2, (1, 1), False), (3, (0, 1, 0), False), (3, (0, 1, 0), True)])
 def test_random_model_returns_rig_depth_contract(random_model: XLensNet, views: int, cam_types: tuple[int, ...], with_poses: bool) -> None:
-    images, rays, cam_T_ref = _random_rig(views, with_poses, 19 + views + int(with_poses))
+    images, rays, cam_T_ref = random_rig(views, (28, 42), 19 + views + int(with_poses), with_poses=with_poses)
     types: Int64[ndarray, "s"] = np.asarray(cam_types, dtype=np.int64)
     batch: AssembledBatch = assemble_batch(list(images), list(rays), types.tolist(), c2w=cam_T_ref, device=torch.device("cpu"))
 
@@ -105,10 +70,10 @@ def test_random_model_returns_rig_depth_contract(random_model: XLensNet, views: 
 
 def test_device_preprocessing_matches_upstream_numpy() -> None:
     """GPU-side normalisation and geometry tensors equal ``assemble_batch`` bit for bit."""
-    images, rays, cam_T_ref = _random_rig(3, True, 5)
+    images, rays, cam_T_ref = random_rig(3, (28, 42), 5)
     cam_types: Int64[ndarray, "s"] = np.asarray((0, 1, 0), dtype=np.int64)
     batch: AssembledBatch = assemble_batch(list(images), list(rays), cam_types.tolist(), c2w=cam_T_ref, device=torch.device("cpu"))
-    normalized: Float32[Tensor, "1 s 3 h w"] = normalize_images(images, torch.device("cpu"))
+    normalized: Float32[Tensor, "1 s 3 h w"] = normalize_framesets(images[None], torch.device("cpu"))
     assert torch.equal(normalized, batch["images"])
     assert torch.equal(normalized[0, 1], torch.from_numpy(normalize_image(images[1])))
     tensors: RigTensors = rig_tensors(rays, cam_types, cam_T_ref, torch.device("cpu"))
@@ -119,7 +84,7 @@ def test_device_preprocessing_matches_upstream_numpy() -> None:
 
 
 def test_rig_key_memo_follows_content_and_reuses_the_digest() -> None:
-    _, rays, cam_T_ref = _random_rig(2, True, 7)
+    _, rays, cam_T_ref = random_rig(2, (28, 42), 7)
     cam_types: Int64[ndarray, "s"] = np.asarray((0, 0), dtype=np.int64)
     memo = RigKeyMemo()
     key = memo.key(rays, cam_types, cam_T_ref)
@@ -137,14 +102,14 @@ def test_rig_key_memo_follows_content_and_reuses_the_digest() -> None:
 @pytest.mark.parametrize(("cam_types", "expected_biases", "local_layers_masked"), [((0, 1, 0), 3, True), ((0, 0, 0), 1, False)], ids=("mixed", "fisheye"))
 def test_export_graph_matches_frozen_forward(random_model: XLensNet, cam_types: tuple[int, ...], expected_biases: int, local_layers_masked: bool) -> None:
     """The ONNX wrapper (manual scale attention, clamped fp masks, slot mapping) reproduces the frozen eager model."""
-    images, rays, cam_T_ref = _random_rig(3, True, 11)
+    images, rays, cam_T_ref = random_rig(3, (28, 42), 11)
     types: Int64[ndarray, "s"] = np.asarray(cam_types, dtype=np.int64)
     tensors: RigTensors = rig_tensors(rays, types, cam_T_ref, torch.device("cpu"))
-    image_tensor: Float32[Tensor, "1 s 3 h w"] = normalize_images(images, torch.device("cpu"))
+    image_tensor: Float32[Tensor, "1 s 3 h w"] = normalize_framesets(images[None], torch.device("cpu"))
     with torch.inference_mode():
         frozen: FrozenRigGeometry = random_model.freeze_geometry(tensors.d_cam, tensors.cam_types, tensors.ray_map)
         reference: dict = random_model(image_tensor, frozen=frozen)
-        geometry: EngineGeometry = engine_geometry(frozen, bias_dtype=torch.float32)
+        geometry: EngineGeometry = engine_geometry(frozen, random_model.backbone.pretrained, bias_dtype=torch.float32)
         graph = _XLensRigGraph(random_model, frozen, geometry).eval()
         outputs: tuple[Tensor, Tensor, Tensor, Tensor] = graph(image_tensor, *(geometry.inputs[name] for name in geometry.names))
 
@@ -158,21 +123,22 @@ def test_export_graph_matches_frozen_forward(random_model: XLensNet, cam_types: 
     assert all(geometry.inputs[name].shape[0] == 1 for name in geometry.names)
     for name in bias_names:
         assert float(geometry.inputs[name].min()) >= -1.0e4
-        assert geometry.inputs[name].shape == ((1, 3, geometry.inputs[name].shape[2], geometry.inputs[name].shape[2]) if name in geometry.local_slots else (1, 6, geometry.inputs[name].shape[2], geometry.inputs[name].shape[2]))
+        is_global, _ = geometry.slot_kinds[name]
+        assert geometry.inputs[name].shape == (1, 6 if is_global else 3, geometry.inputs[name].shape[2], geometry.inputs[name].shape[2])
     # The wrapper never touches the eager network's own scale head.
     assert all(isinstance(layer, nn.MultiheadAttention) for layer in random_model.scale_head.attn_layers)
-    for value, key in zip(outputs, ("depth_metric", "depth_conf", "mask", "metric_scaling_factor"), strict=True):
+    for value, key in zip(outputs, ENGINE_OUTPUT_NAMES, strict=True):
         assert value.shape == reference[key].shape
         assert torch.allclose(value, reference[key], rtol=1e-4, atol=1e-5), key
 
     # A batch of two framesets of the same rig: geometry stays batch-1 and broadcasts; each frameset matches its own eager run.
-    second_images, _, _ = _random_rig(3, True, 12)
-    stacked: Float32[Tensor, "2 s 3 h w"] = torch.cat([image_tensor, normalize_images(second_images, torch.device("cpu"))], dim=0)
+    second_images, _, _ = random_rig(3, (28, 42), 12)
+    stacked: Float32[Tensor, "2 s 3 h w"] = torch.cat([image_tensor, normalize_framesets(second_images[None], torch.device("cpu"))], dim=0)
     with torch.inference_mode():
         batched: tuple[Tensor, Tensor, Tensor, Tensor] = graph(stacked, *(geometry.inputs[name] for name in geometry.names))
         second_reference: dict = random_model(stacked[1:], frozen=frozen)
     for index, expected in enumerate((reference, second_reference)):
-        for value, key in zip(batched, ("depth_metric", "depth_conf", "mask", "metric_scaling_factor"), strict=True):
+        for value, key in zip(batched, ENGINE_OUTPUT_NAMES, strict=True):
             assert torch.allclose(value[index : index + 1], expected[key], rtol=1e-4, atol=1e-5), (index, key)
 
 
@@ -183,7 +149,7 @@ def test_engine_geometry_requires_float_rope_positions(random_model: XLensNet) -
         )
     assert frozen.pos_local is not None and not frozen.pos_local.is_floating_point()
     with pytest.raises(ValueError, match="FishRoPE"):
-        engine_geometry(frozen)
+        engine_geometry(frozen, random_model.backbone.pretrained)
 
 
 def test_unproject_uses_camera_z_depth() -> None:

@@ -19,7 +19,72 @@ from torch import Tensor
 from trtkit.base import RuntimeSpec, TensorSpec, validate_runtime_inputs
 
 
-class TensorRtRuntime:
+class _TrtEngine:
+    """Deserialized engine, execution context, private stream, and CUDA-graph capture shared by both runtimes."""
+
+    def __init__(self, engine_path: Path, *, use_cuda_graph: bool) -> None:
+        """Deserialize a machine-local engine and create its execution context.
+
+        Raises:
+            RuntimeError: If CUDA is unavailable or the engine cannot be deserialized.
+        """
+        if not torch.cuda.is_available():
+            raise RuntimeError("TensorRT execution requires CUDA.")
+        import tensorrt
+
+        self._trt: Any = tensorrt  # the compiled bindings have incomplete stubs
+        engine: Any = self._trt.Runtime(self._trt.Logger(self._trt.Logger.WARNING)).deserialize_cuda_engine(engine_path.expanduser().read_bytes())
+        context: Any = None if engine is None else engine.create_execution_context()
+        if engine is None or context is None:
+            raise RuntimeError(f"Could not load TensorRT engine: {engine_path}")
+        self._engine: Any = engine
+        self._context: Any = context
+        self._device: torch.device = torch.device("cuda")
+        self._stream: torch.cuda.Stream = torch.cuda.Stream(device=self._device)
+        self._use_cuda_graph: bool = use_cuda_graph
+
+    def _execute(self) -> None:
+        """Launch the engine on the private stream, fenced against torch's current stream.
+
+        Raises:
+            RuntimeError: If TensorRT reports a failed ``execute_async_v3`` call.
+        """
+        current: torch.cuda.Stream = torch.cuda.current_stream(self._device)
+        self._stream.wait_stream(current)
+        with torch.cuda.stream(self._stream):
+            ok: bool = bool(self._context.execute_async_v3(stream_handle=int(self._stream.cuda_stream)))
+        if not ok:
+            raise RuntimeError("TensorRT execute_async_v3 failed.")
+        current.wait_stream(self._stream)
+
+    def _capture_graph(self) -> torch.cuda.CUDAGraph:
+        """Warm up and capture a single engine launch into a CUDA graph.
+
+        The capture is valid for the currently active input shapes; dynamic
+        engines keep one graph per batch size.
+
+        Returns:
+            Captured graph whose replay re-runs the engine on the persistent buffers.
+
+        Raises:
+            RuntimeError: If the warmup or capture launch fails.
+        """
+        warmup: torch.cuda.Stream = torch.cuda.Stream(device=self._device)
+        warmup.wait_stream(torch.cuda.current_stream(self._device))
+        with torch.cuda.stream(warmup):
+            if not bool(self._context.execute_async_v3(stream_handle=int(warmup.cuda_stream))):
+                raise RuntimeError("TensorRT warmup launch failed.")
+        torch.cuda.current_stream(self._device).wait_stream(warmup)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, capture_error_mode="thread_local"):
+            stream: torch.cuda.Stream = torch.cuda.current_stream(self._device)
+            if not bool(self._context.execute_async_v3(stream_handle=int(stream.cuda_stream))):
+                raise RuntimeError("TensorRT capture launch failed.")
+        return graph
+
+
+class TensorRtRuntime(_TrtEngine):
     """TensorRT engine implementing the trtkit runtime contract."""
 
     def __init__(self, engine_path: Path, *, use_cuda_graph: bool = False) -> None:
@@ -39,19 +104,9 @@ class TensorRtRuntime:
             ValueError: If the engine has dynamic non-batch dims or its inputs
                 disagree on batch size.
         """
-        if not torch.cuda.is_available():
-            raise RuntimeError("TensorRT execution requires CUDA.")
-        import tensorrt
-
-        trt: Any = tensorrt  # the compiled bindings have incomplete stubs
-        engine: Any = trt.Runtime(trt.Logger(trt.Logger.WARNING)).deserialize_cuda_engine(engine_path.expanduser().read_bytes())
-        context: Any = None if engine is None else engine.create_execution_context()
-        if engine is None or context is None:
-            raise RuntimeError(f"Could not load TensorRT engine: {engine_path}")
-        self._trt: Any = trt
-        self._engine: Any = engine
-        self._context: Any = context
-        self._device: torch.device = torch.device("cuda")
+        super().__init__(engine_path, use_cuda_graph=use_cuda_graph)
+        trt: Any = self._trt
+        engine: Any = self._engine
         input_specs: list[TensorSpec] = []
         output_specs: list[TensorSpec] = []
         max_batches: set[int] = set()
@@ -112,8 +167,6 @@ class TensorRtRuntime:
                 self._static_rows_per_sample[out_spec.name] = rows_at_max // max_batch
         for name, tensor in {**self._input_buffers, **self._output_buffers}.items():
             self._context.set_tensor_address(name, int(tensor.data_ptr()))
-        self._stream: torch.cuda.Stream = torch.cuda.Stream(device=self._device)
-        self._use_cuda_graph: bool = use_cuda_graph
         self._graphs: dict[int, torch.cuda.CUDAGraph] = {}
 
     @property
@@ -169,48 +222,7 @@ class TensorRtRuntime:
             for name, tensor in self._output_buffers.items()
         }
 
-    def _execute(self) -> None:
-        """Launch the engine on the private stream, fenced against torch's current stream.
-
-        Raises:
-            RuntimeError: If TensorRT reports a failed ``execute_async_v3`` call.
-        """
-        current: torch.cuda.Stream = torch.cuda.current_stream(self._device)
-        self._stream.wait_stream(current)
-        with torch.cuda.stream(self._stream):
-            ok: bool = bool(self._context.execute_async_v3(stream_handle=int(self._stream.cuda_stream)))
-        if not ok:
-            raise RuntimeError("TensorRT execute_async_v3 failed.")
-        current.wait_stream(self._stream)
-
-    def _capture_graph(self) -> torch.cuda.CUDAGraph:
-        """Warm up and capture a single engine launch into a CUDA graph.
-
-        The capture is valid for the currently active input shapes; dynamic
-        engines keep one graph per batch size.
-
-        Returns:
-            Captured graph whose replay re-runs the engine on the persistent buffers.
-
-        Raises:
-            RuntimeError: If the warmup or capture launch fails.
-        """
-        warmup: torch.cuda.Stream = torch.cuda.Stream(device=self._device)
-        warmup.wait_stream(torch.cuda.current_stream(self._device))
-        with torch.cuda.stream(warmup):
-            if not bool(self._context.execute_async_v3(stream_handle=int(warmup.cuda_stream))):
-                raise RuntimeError("TensorRT warmup launch failed.")
-        torch.cuda.current_stream(self._device).wait_stream(warmup)
-        torch.cuda.synchronize()
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph, capture_error_mode="thread_local"):
-            stream: torch.cuda.Stream = torch.cuda.current_stream(self._device)
-            if not bool(self._context.execute_async_v3(stream_handle=int(stream.cuda_stream))):
-                raise RuntimeError("TensorRT capture launch failed.")
-        return graph
-
-
-class TensorRtDynamicRuntime:
+class TensorRtDynamicRuntime(_TrtEngine):
     """TensorRT engine whose inputs may be dynamic in any dimension (one optimization profile).
 
     Companion to :class:`TensorRtRuntime` for engines built with
@@ -218,7 +230,9 @@ class TensorRtDynamicRuntime:
     dim may vary within the profile. Buffers are allocated once at the profile's
     max shapes; each call pins the concrete input shapes, copies inputs into the
     buffer prefixes, and returns output views shaped by the execution context.
-    CUDA graphs are captured per distinct input-shape signature.
+    CUDA graphs are captured per distinct input-shape signature and kept for the
+    runtime's lifetime, so a caller that walks many shapes should pass
+    ``use_cuda_graph=False``.
     """
 
     def __init__(self, engine_path: Path, *, use_cuda_graph: bool = False) -> None:
@@ -231,19 +245,9 @@ class TensorRtDynamicRuntime:
         Raises:
             RuntimeError: If CUDA is unavailable or the engine cannot be deserialized.
         """
-        if not torch.cuda.is_available():
-            raise RuntimeError("TensorRT execution requires CUDA.")
-        import tensorrt
-
-        trt: Any = tensorrt  # the compiled bindings have incomplete stubs
-        engine: Any = trt.Runtime(trt.Logger(trt.Logger.WARNING)).deserialize_cuda_engine(engine_path.expanduser().read_bytes())
-        context: Any = None if engine is None else engine.create_execution_context()
-        if engine is None or context is None:
-            raise RuntimeError(f"Could not load TensorRT engine: {engine_path}")
-        self._trt: Any = trt
-        self._engine: Any = engine
-        self._context: Any = context
-        self._device: torch.device = torch.device("cuda")
+        super().__init__(engine_path, use_cuda_graph=use_cuda_graph)
+        trt: Any = self._trt
+        engine: Any = self._engine
         self.min_input_shapes: dict[str, tuple[int, ...]] = {}
         """Smallest accepted shape per input."""
         self.max_input_shapes: dict[str, tuple[int, ...]] = {}
@@ -280,22 +284,9 @@ class TensorRtDynamicRuntime:
         }
         for name, tensor in {**self._input_buffers, **self._output_buffers}.items():
             self._context.set_tensor_address(name, int(tensor.data_ptr()))
-        self._stream: torch.cuda.Stream = torch.cuda.Stream(device=self._device)
-        self._use_cuda_graph: bool = use_cuda_graph
         self._graphs: dict[tuple[tuple[str, tuple[int, ...]], ...], torch.cuda.CUDAGraph] = {}
         self.device_memory_bytes: int = int(engine.device_memory_size_v2)
         """Activation memory TensorRT reserves for the execution context (sized at the profile's max shapes)."""
-
-    @property
-    def spec(self) -> RuntimeSpec:
-        """I/O contract with **full** max shapes (not per-sample) and the largest leading input dim as ``max_batch_size``."""
-        inputs: tuple[TensorSpec, ...] = tuple(
-            TensorSpec(name=name, shape=shape, dtype=self._input_dtypes[name]) for name, shape in self.max_input_shapes.items()
-        )
-        outputs: tuple[TensorSpec, ...] = tuple(
-            TensorSpec(name=name, shape=shape, dtype=self._output_dtypes[name]) for name, shape in self.max_output_shapes.items()
-        )
-        return RuntimeSpec(inputs=inputs, outputs=outputs, max_batch_size=max(shape[0] for shape in self.max_input_shapes.values()))
 
     def _set_input_shape(self, name: str, shape: tuple[int, ...]) -> None:
         """Pin one input's concrete shape on the context when it changes."""
@@ -340,32 +331,6 @@ class TensorRtDynamicRuntime:
             out_shape: tuple[int, ...] = tuple(int(dim) for dim in self._context.get_tensor_shape(name))
             outputs[name] = buffer[: math.prod(out_shape)].view(out_shape)
         return outputs
-
-    def _execute(self) -> None:
-        """Launch the engine on the private stream, fenced against torch's current stream."""
-        current: torch.cuda.Stream = torch.cuda.current_stream(self._device)
-        self._stream.wait_stream(current)
-        with torch.cuda.stream(self._stream):
-            ok: bool = bool(self._context.execute_async_v3(stream_handle=int(self._stream.cuda_stream)))
-        if not ok:
-            raise RuntimeError("TensorRT execute_async_v3 failed.")
-        current.wait_stream(self._stream)
-
-    def _capture_graph(self) -> torch.cuda.CUDAGraph:
-        """Warm up and capture one engine launch for the currently pinned input shapes."""
-        warmup: torch.cuda.Stream = torch.cuda.Stream(device=self._device)
-        warmup.wait_stream(torch.cuda.current_stream(self._device))
-        with torch.cuda.stream(warmup):
-            if not bool(self._context.execute_async_v3(stream_handle=int(warmup.cuda_stream))):
-                raise RuntimeError("TensorRT warmup launch failed.")
-        torch.cuda.current_stream(self._device).wait_stream(warmup)
-        torch.cuda.synchronize()
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph, capture_error_mode="thread_local"):
-            stream: torch.cuda.Stream = torch.cuda.current_stream(self._device)
-            if not bool(self._context.execute_async_v3(stream_handle=int(stream.cuda_stream))):
-                raise RuntimeError("TensorRT capture launch failed.")
-        return graph
 
 
 def _torch_dtype(dtype: Any, trt: Any) -> torch.dtype:

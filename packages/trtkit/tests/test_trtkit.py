@@ -370,7 +370,6 @@ def test_dynamic_runtime_runs_two_shapes_from_one_engine(tmp_path: Path) -> None
     )
     runtime = TensorRtDynamicRuntime(ensure_engine(onnx_path, config, cache_dir=tmp_path), use_cuda_graph=True)
     assert runtime.max_input_shapes == {"images": (4, 3, 84, 84), "bias": (1, 4)}
-    assert runtime.spec.max_batch_size == 4
     bias = torch.randn(1, 4, device="cuda")
     for shape in ((1, 3, 28, 42), (3, 3, 70, 56), (4, 3, 84, 84)):
         images = torch.randn(*shape, device="cuda")

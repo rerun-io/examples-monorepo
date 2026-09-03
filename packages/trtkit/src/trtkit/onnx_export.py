@@ -38,7 +38,8 @@ class DynamicDim:
     """The dimension equals ``multiple`` times the symbol (a derived dim), e.g. 14 for pixel dims tied to a patch-grid symbol."""
     auto: bool = False
     """Export the dimension as ``Dim.AUTO`` (bounds as hints): ``torch.export`` keeps it symbolic and defers guards that
-    relate it to other symbols to runtime asserts, e.g. a token count that equals a product of two other symbols."""
+    relate it to other symbols to runtime asserts, e.g. a token count that equals a product of two other symbols.
+    ``name`` is not a sharing key for AUTO dims; each one is an independent symbol."""
 
 
 DynamicDims: TypeAlias = dict[str, dict[int, DynamicDim]]
@@ -115,9 +116,18 @@ def _with_fp32_transposed_convs(module: torch.nn.Module) -> torch.nn.Module:
     }
     if all(replaced[name] is child for name, child in module.named_children()):
         return module
-    clone: torch.nn.Module = copy.copy(module)
-    clone._modules = dict(module._modules)
+    clone: torch.nn.Module = shallow_module_copy(module)
     clone._modules.update(replaced)
+    return clone
+
+
+def shallow_module_copy[ModuleT: torch.nn.Module](module: ModuleT) -> ModuleT:
+    """Copy a module object with its own child table, so reassigning children never touches the caller's tree.
+
+    Parameters and buffers stay shared with the original.
+    """
+    clone: ModuleT = copy.copy(module)
+    clone._modules = dict(module._modules)
     return clone
 
 

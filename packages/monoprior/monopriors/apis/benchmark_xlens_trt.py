@@ -12,9 +12,11 @@ import gc
 import json
 import statistics
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
-from typing import Literal, TypeAlias, cast
+from typing import Any, Literal, TypeAlias, cast, get_args
 
 import cv2
 import numpy as np
@@ -27,12 +29,12 @@ from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsi
 from torch import Tensor
 
 from monopriors.models.rig_depth import BaseRigDepthPredictor, RigDepthPrediction, XLensPredictor, XLensTrtPredictor, camera_type, unit_rays
-from monopriors.models.rig_depth.xlens_trt import XLENS_CACHE_DIR
+from monopriors.models.rig_depth.xlens_trt import XLENS_CACHE_DIR, EngineProfile
 
 Mode: TypeAlias = Literal["eager-bf16", "eager-frozen-bf16", "trt-rig-static", "trt-rig", "trt-dynamic"]
 """``trt-rig-static``: one static engine per rig (batch 1); ``trt-rig``: per-rig engine with a dynamic frameset batch;
 ``trt-dynamic``: the predictor's default profile, one engine over its view/resolution ranges. All TensorRT modes replay CUDA graphs."""
-ALL_MODES: tuple[Mode, ...] = ("eager-bf16", "eager-frozen-bf16", "trt-rig-static", "trt-rig", "trt-dynamic")
+ALL_MODES: tuple[Mode, ...] = get_args(Mode)
 
 TIMELINE: str = "video_time"
 RIG_PATH: str = "world/rig_00"
@@ -170,17 +172,24 @@ def catalog_frames(config: Config, cams: tuple[str, ...]) -> tuple[dict[str, UIn
     from rerun.catalog import CatalogClient, DatasetEntry, DatasetView
     from simplecv.rerun_dataloader import open_segment_decoder
 
-    from monopriors.apis.rig_depth_catalog import nearest_time_index
+    from monopriors.apis.rig_depth_catalog import DecoderBundle, nearest_time_index
     from monopriors.apis.stereo_catalog import read_fisheye_camera, read_static
 
     dataset: DatasetEntry = CatalogClient(config.catalog_url).get_dataset(config.dataset)
     view: DatasetView = dataset.filter_segments(config.segment_id)
     cameras: dict[str, Fisheye62Parameters] = {cam: read_fisheye_camera(view, cam) for cam in cams}
     codec_value: int = int(np.asarray(read_static(view, f"{RIG_PATH}/{cams[0]}/pinhole/video", "VideoStream:codec")).ravel()[0])
-    codec: str = "h264" if rr.VideoCodec(codec_value) == rr.VideoCodec.H264 else "av1"
+    video_codec = rr.VideoCodec(codec_value)
+    if video_codec == rr.VideoCodec.H264:
+        codec = "h264"
+    elif video_codec == rr.VideoCodec.AV1:
+        codec = "av1"
+    else:
+        raise ValueError(f"unsupported catalog video codec: {video_codec}")
     device = torch.device("cuda")
-    decoders: dict[str, tuple] = {
-        cam: open_segment_decoder(dataset, config.segment_id, f"{RIG_PATH}/{cam}/pinhole/video", TIMELINE, device, 30, codec) for cam in cams
+    decoders: dict[str, DecoderBundle] = {
+        cam: cast(DecoderBundle, open_segment_decoder(dataset, config.segment_id, f"{RIG_PATH}/{cam}/pinhole/video", TIMELINE, device, 30, codec))
+        for cam in cams
     }
     shared_start_ns: int = max(int(bundle[0][0].astype(np.int64)) for bundle in decoders.values())
     frames: dict[str, UInt8[ndarray, "h0 w0 3"]] = {}
@@ -191,18 +200,23 @@ def catalog_frames(config: Config, cams: tuple[str, ...]) -> tuple[dict[str, UIn
     return frames, cameras
 
 
+def rig_frames(source: str, images: UInt8[ndarray, "s h w 3"], cameras: list[Fisheye62Parameters]) -> RigFrames:
+    """Rig geometry arrays of ``cameras`` beside their images."""
+    return RigFrames(
+        source=source,
+        images=images,
+        rays=np.stack([unit_rays(camera) for camera in cameras]),
+        cam_types=np.asarray([camera_type(camera) for camera in cameras], dtype=np.int64),
+        cam_T_ref=np.stack([np.asarray(camera.extrinsics.world_T_cam, dtype=np.float64) for camera in cameras]),
+    )
+
+
 def catalog_rig_frames(
     frames: dict[str, UInt8[ndarray, "h0 w0 3"]], cameras: dict[str, Fisheye62Parameters], cams: tuple[str, ...], image_hw: tuple[int, int]
 ) -> RigFrames:
     """Fit decoded catalog frames and cameras of ``cams`` to one network size."""
     fitted: list[tuple[UInt8[ndarray, "h w 3"], Fisheye62Parameters]] = [fit_to_network(frames[cam], cameras[cam], image_hw) for cam in cams]
-    return RigFrames(
-        source="robocap catalog",
-        images=np.stack([image for image, _ in fitted]),
-        rays=np.stack([unit_rays(camera) for _, camera in fitted]),
-        cam_types=np.asarray([camera_type(camera) for _, camera in fitted], dtype=np.int64),
-        cam_T_ref=np.stack([np.asarray(camera.extrinsics.world_T_cam, dtype=np.float64) for _, camera in fitted]),
-    )
+    return rig_frames("robocap catalog", np.stack([image for image, _ in fitted]), [camera for _, camera in fitted])
 
 
 def synthetic_rig_frames(n_views: int, image_hw: tuple[int, int], seed: int = 3) -> RigFrames:
@@ -223,13 +237,7 @@ def synthetic_rig_frames(n_views: int, image_hw: tuple[int, int], seed: int = 3)
                 distortion=KannalaBrandtDistortion(k1=0.0, k2=0.0, k3=0.0, k4=0.0, k5=0.0, k6=0.0, p1=0.0, p2=0.0),
             )
         )
-    return RigFrames(
-        source="synthetic",
-        images=images,
-        rays=np.stack([unit_rays(camera) for camera in cameras]),
-        cam_types=np.asarray([camera_type(camera) for camera in cameras], dtype=np.int64),
-        cam_T_ref=np.stack([np.asarray(camera.extrinsics.world_T_cam, dtype=np.float64) for camera in cameras]),
-    )
+    return rig_frames("synthetic", images, cameras)
 
 
 def build_predictor(mode: Mode, config: Config) -> BaseRigDepthPredictor:
@@ -238,46 +246,28 @@ def build_predictor(mode: Mode, config: Config) -> BaseRigDepthPredictor:
         return XLensPredictor(device="cuda", checkpoint=config.checkpoint, amp="bf16", freeze_geometry=False)
     if mode == "eager-frozen-bf16":
         return XLensPredictor(device="cuda", checkpoint=config.checkpoint, amp="bf16", freeze_geometry=True)
-    if mode == "trt-rig-static":
-        return XLensTrtPredictor(checkpoint=config.checkpoint, cache_dir=config.cache_dir, workspace_gib=config.workspace_gib, profile="rig")
-    if mode == "trt-rig":
-        return XLensTrtPredictor(
-            checkpoint=config.checkpoint, cache_dir=config.cache_dir, workspace_gib=config.workspace_gib, profile="rig", max_batch_size=config.max_batch_size
-        )
-    return XLensTrtPredictor(checkpoint=config.checkpoint, cache_dir=config.cache_dir, workspace_gib=config.workspace_gib)
+    profile: EngineProfile = "dynamic" if mode == "trt-dynamic" else "rig"
+    return XLensTrtPredictor(
+        checkpoint=config.checkpoint,
+        cache_dir=config.cache_dir,
+        workspace_gib=config.workspace_gib,
+        profile=profile,
+        max_batch_size=config.max_batch_size if mode == "trt-rig" else 1,
+    )
 
 
-def time_calls(predictor: BaseRigDepthPredictor, frames: RigFrames, warmup_iters: int, timed_iters: int) -> tuple[list[float], RigDepthPrediction]:
-    """Return per-call milliseconds under explicit synchronisation and the last prediction."""
-    prediction: RigDepthPrediction | None = None
+def time_calls(run: Callable[[], object], warmup_iters: int, timed_iters: int) -> list[float]:
+    """Per-call milliseconds of ``run`` under explicit synchronisation, after untimed warm-ups."""
     for _warmup_index in range(warmup_iters):
-        prediction = predictor(frames.images, frames.rays, frames.cam_types, frames.cam_T_ref)
+        run()
     torch.cuda.synchronize()
     samples_ms: list[float] = []
     for _timed_index in range(timed_iters):
         torch.cuda.synchronize()
         started: float = time.perf_counter()
-        prediction = predictor(frames.images, frames.rays, frames.cam_types, frames.cam_T_ref)
+        run()
         torch.cuda.synchronize()
         samples_ms.append((time.perf_counter() - started) * 1000.0)
-    if prediction is None:
-        raise ValueError("timed_iters must be positive")
-    return samples_ms, prediction
-
-
-def time_batches(predictor: XLensTrtPredictor, frames: RigFrames, batch: int, warmup_iters: int, timed_iters: int) -> list[float]:
-    """Per-frameset milliseconds of ``predict_batch`` over ``batch`` copies of the frameset."""
-    stacked: UInt8[ndarray, "b s h w 3"] = np.stack([frames.images] * batch)
-    for _warmup_index in range(warmup_iters):
-        predictor.predict_batch(stacked, frames.rays, frames.cam_types, frames.cam_T_ref)
-    torch.cuda.synchronize()
-    samples_ms: list[float] = []
-    for _timed_index in range(timed_iters):
-        torch.cuda.synchronize()
-        started: float = time.perf_counter()
-        predictor.predict_batch(stacked, frames.rays, frames.cam_types, frames.cam_T_ref)
-        torch.cuda.synchronize()
-        samples_ms.append((time.perf_counter() - started) * 1000.0 / batch)
     return samples_ms
 
 
@@ -300,12 +290,12 @@ def artifact_summary(predictor: XLensTrtPredictor) -> str:
     engine_path: Path | None = predictor.engine_path
     if engine_path is None:
         return "no engine"
-    manifest: dict[str, object] = json.loads(engine_path.with_suffix(engine_path.suffix + ".json").read_text())
-    onnx_path = Path(str(manifest["onnx_path"]))
+    manifest: dict[str, Any] = json.loads(engine_path.with_suffix(engine_path.suffix + ".json").read_text())
+    onnx_path = Path(manifest["onnx_path"])
     onnx_bytes: int = onnx_path.stat().st_size + (onnx_path.with_suffix(".onnx.data").stat().st_size if onnx_path.with_suffix(".onnx.data").exists() else 0)
     return (
         f"onnx {onnx_path.name} {onnx_bytes / 1e6:.1f} MB; engine {engine_path.name} {engine_path.stat().st_size / 1e6:.1f} MB; "
-        f"build {float(cast(float, manifest['build_seconds'])):.1f} s"
+        f"build {float(manifest['build_seconds']):.1f} s"
     )
 
 
@@ -359,8 +349,8 @@ def main(config: Config) -> None:
         torch.cuda.empty_cache()
         return prediction
 
-    def release(*objects: object) -> None:
-        del objects
+    def release() -> None:
+        """Return freed GPU memory once the caller has dropped its own references."""
         gc.collect()
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
@@ -373,7 +363,8 @@ def main(config: Config) -> None:
     def measure(mode: Mode, predictor: BaseRigDepthPredictor, frames: RigFrames, reference: RigDepthPrediction) -> None:
         views: int = int(frames.images.shape[0])
         image_hw: tuple[int, int] = (int(frames.images.shape[1]), int(frames.images.shape[2]))
-        samples_ms, prediction = time_calls(predictor, frames, config.warmup_iters, config.timed_iters)
+        prediction: RigDepthPrediction = predictor(frames.images, frames.rays, frames.cam_types, frames.cam_T_ref)
+        samples_ms: list[float] = time_calls(partial(predictor, frames.images, frames.rays, frames.cam_types, frames.cam_T_ref), config.warmup_iters, config.timed_iters)
         timings.append(
             TimingRow(
                 mode=mode, views=views, image_hw=image_hw, batch=1, source=frames.source,
@@ -388,7 +379,11 @@ def main(config: Config) -> None:
             if mode == "trt-rig":
                 for batch in config.batch_sizes:
                     if batch <= predictor.max_batch_size:
-                        batched_ms: list[float] = time_batches(predictor, frames, batch, max(1, config.warmup_iters // 2), config.timed_iters)
+                        stacked: UInt8[ndarray, "b s h w 3"] = np.stack([frames.images] * batch)
+                        call_ms: list[float] = time_calls(
+                            partial(predictor.predict_batch, stacked, frames.rays, frames.cam_types, frames.cam_T_ref), max(1, config.warmup_iters // 2), config.timed_iters
+                        )
+                        batched_ms: list[float] = [ms / batch for ms in call_ms]
                         timings.append(
                             TimingRow(
                                 mode=mode, views=views, image_hw=image_hw, batch=batch, source=frames.source,
@@ -408,8 +403,10 @@ def main(config: Config) -> None:
                 continue
             predictor: BaseRigDepthPredictor = build_predictor(mode, config)
             measure(mode, predictor, frames, reference)
-            release(predictor)
-        release(reference)
+            del predictor
+            release()
+        del reference
+        release()
 
     if dynamic is not None:
         for views, image_hw in config.off_opt:
@@ -421,7 +418,9 @@ def main(config: Config) -> None:
             reference = reference_for(frames)
             eager_frozen: BaseRigDepthPredictor = build_predictor("eager-frozen-bf16", config)
             measure("eager-frozen-bf16", eager_frozen, frames, reference)
-            release(eager_frozen)
+            del eager_frozen
+            release()
             measure("trt-dynamic", dynamic, frames, reference)
-            release(reference)
+            del reference
+            release()
     print_tables(timings, parities)

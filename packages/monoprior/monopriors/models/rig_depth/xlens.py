@@ -107,19 +107,6 @@ def normalize_framesets(images: UInt8[ndarray, "b s h w 3"], device: torch.devic
     return rearrange(normalized, "b s h w c -> b s c h w").contiguous()  # pyrefly: ignore  # bad-argument-type — einops stub false positive
 
 
-def normalize_images(images: UInt8[ndarray, "s h w 3"], device: torch.device) -> Float32[Tensor, "1 s 3 h w"]:
-    """ImageNet-normalise one frameset of uint8 RGB views on the inference device.
-
-    Args:
-        images: RGB views, ``UInt8[ndarray, "s h w 3"]``.
-        device: Device that owns the result.
-
-    Returns:
-        Normalised network input, ``Float32[Tensor, "1 s 3 h w"]``.
-    """
-    return normalize_framesets(images[None], device)
-
-
 @dataclass(frozen=True, slots=True)
 class RigTensors:
     """Model-ready geometry of one rig on the inference device."""
@@ -181,13 +168,13 @@ class RigKeyMemo:
         return (self._digest, np.ascontiguousarray(cam_types, dtype=np.int64).tobytes(), poses)
 
 
-def rig_depth_prediction(output: XLensNetOutput) -> RigDepthPrediction:
-    """Take view-0 batch outputs as an owning float32 prediction."""
+def rig_depth_prediction(output: XLensNetOutput, index: int = 0) -> RigDepthPrediction:
+    """Take one frameset's network outputs as an owning float32 prediction."""
     return RigDepthPrediction(
-        depth_m=output["depth_metric"][0].float().clone(),
-        confidence=output["depth_conf"][0].float().clone(),
-        mask=output["mask"][0].float().clone(),
-        scale=float(output["metric_scaling_factor"][0]),
+        depth_m=output["depth_metric"][index].to(torch.float32, copy=True),
+        confidence=output["depth_conf"][index].to(torch.float32, copy=True),
+        mask=output["mask"][index].to(torch.float32, copy=True),
+        scale=float(output["metric_scaling_factor"][index]),
     )
 
 
@@ -236,7 +223,7 @@ class XLensPredictor(BaseRigDepthPredictor):
         self._frozen_key: RigKey | None = None
         self._frozen: FrozenRigGeometry | None = None
 
-    def frozen_geometry(
+    def _cached_frozen_geometry(
         self,
         rays: Float32[ndarray, "s h w 3"],
         cam_types: Int64[ndarray, "s"],
@@ -283,13 +270,13 @@ class XLensPredictor(BaseRigDepthPredictor):
                 is smaller than 28 pixels or not divisible by 14.
         """
         validate_rig_inputs(images, rays, cam_types)
-        image_tensor: Float32[Tensor, "1 s 3 h w"] = normalize_images(images, self.device)
+        image_tensor: Float32[Tensor, "1 s 3 h w"] = normalize_framesets(images[None], self.device)
         # Geometry is built outside autocast, like upstream's ``assemble_batch``: the
         # pose canonicalisation and ray-map matmuls stay float32. The frozen path
         # therefore also evaluates the ray encoder and distortion-bias MLP in
         # float32 once per rig, whereas the unfrozen path rebuilds them under
         # autocast at every call exactly as the released pipeline does.
-        frozen: FrozenRigGeometry | None = self.frozen_geometry(rays, cam_types, cam_T_ref) if self.freeze_geometry else None
+        frozen: FrozenRigGeometry | None = self._cached_frozen_geometry(rays, cam_types, cam_T_ref) if self.freeze_geometry else None
         tensors: RigTensors | None = None if self.freeze_geometry else rig_tensors(rays, cam_types, cam_T_ref, self.device)
         autocast_enabled: bool = self.amp_dtype is not None and self.device.type == "cuda"
         with torch.inference_mode(), torch.autocast("cuda", enabled=autocast_enabled, dtype=self.amp_dtype or torch.bfloat16):
