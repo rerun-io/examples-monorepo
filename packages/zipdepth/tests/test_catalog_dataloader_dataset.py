@@ -1,12 +1,13 @@
 """Live equivalence proof for the Rerun-0.37 ZipDepth dataloader path."""
 
 import os
-from itertools import zip_longest
+from hashlib import sha256
+from typing import TypeAlias
 
 import numpy as np
 import pytest
 import torch
-from jaxtyping import Int64
+from jaxtyping import Int64, Shaped
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from rerun.experimental.dataloader import NoShuffle
@@ -16,6 +17,21 @@ from zipdepth.catalog.dataloader_dataset import RerunPromptDepthDataset, _ExactT
 from zipdepth.catalog.dataset import CatalogPromptDepthDataset
 from zipdepth.catalog.segments import DEFAULT_CATALOG_URL, DEFAULT_DATASET_NAME, PromptDACatalog, load_promptda_catalog
 from zipdepth.catalog.targets import AugmentPolicy
+
+TensorDigest: TypeAlias = tuple[torch.dtype, tuple[int, ...], bytes]
+SampleDigest: TypeAlias = dict[str, TensorDigest]
+
+
+def _sample_digest(sample: dict[str, torch.Tensor]) -> SampleDigest:
+    """Describe every tensor with its dtype, shape, and exact contiguous bytes."""
+    digest_by_field: SampleDigest = {}
+    field: str
+    value: Shaped[torch.Tensor, "..."]
+    for field, value in sample.items():
+        shape: tuple[int, ...] = tuple(value.shape)
+        digest: bytes = sha256(value.detach().cpu().contiguous().numpy().tobytes()).digest()
+        digest_by_field[field] = (value.dtype, shape, digest)
+    return digest_by_field
 
 
 def test_exact_timestamp_index_preserves_irregular_duration_values() -> None:
@@ -86,21 +102,10 @@ def test_rerun_dataloader_matches_every_sample_from_one_segment() -> None:
         load_confidence=True,
     )
 
-    sentinel: object = object()
-    sample_count: int = 0
-    current_sample: dict[str, torch.Tensor] | object
-    idiomatic_sample: dict[str, torch.Tensor] | object
-    for current_sample, idiomatic_sample in zip_longest(current, idiomatic, fillvalue=sentinel):
-        assert current_sample is not sentinel
-        assert idiomatic_sample is not sentinel
-        assert isinstance(current_sample, dict)
-        assert isinstance(idiomatic_sample, dict)
-        assert current_sample.keys() == idiomatic_sample.keys()
-        key: str
-        for key in current_sample:
-            assert current_sample[key].dtype == idiomatic_sample[key].dtype
-            assert current_sample[key].shape == idiomatic_sample[key].shape
-            assert torch.equal(current_sample[key], idiomatic_sample[key]), f"sample {sample_count}, field {key}"
-        sample_count += 1
+    # Production selects one loader. Run them sequentially so beartype's lazy
+    # PEP 526 checker cache is never initialized concurrently by both pipelines.
+    current_digests: list[SampleDigest] = [_sample_digest(sample) for sample in current]
+    idiomatic_digests: list[SampleDigest] = [_sample_digest(sample) for sample in idiomatic]
 
-    assert sample_count > 0
+    assert current_digests
+    assert idiomatic_digests == current_digests
