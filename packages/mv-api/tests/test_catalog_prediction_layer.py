@@ -26,26 +26,28 @@ from mv_api.api.catalog_prediction_layer import (
     index_value_to_time_ns,
     native_fps_from_packet_ns,
     none_decoded_exo_stream_names,
+    prediction_2d_entity,
     prediction_visualization_colors,
     register_prediction_layer,
     save_exo_viewer_blueprint,
+    select_calibrated_exo_streams,
     select_catalog_segment,
-    validate_exo_camera_calibration,
     write_viewer_validation_notes,
 )
 
 
 class _Descriptor:
-    def __init__(self, entity_path: str, component: str) -> None:
+    def __init__(self, entity_path: str, component: str, is_static: bool = True) -> None:
         self.entity_path: str = entity_path
         self.component: str = component
+        self.is_static: bool = is_static
 
 
 class _Schema:
     def __init__(self, descriptors: list[_Descriptor]) -> None:
         self._descriptors: list[_Descriptor] = descriptors
 
-    def component_columns(self) -> dict[_Descriptor, Any]:
+    def component_columns(self) -> dict[_Descriptor, object]:
         return {descriptor: object() for descriptor in self._descriptors}
 
 
@@ -79,9 +81,9 @@ class _RegistrationHandle:
 class _LayerDatasetEntry:
     def __init__(self) -> None:
         self.registration_handle: _RegistrationHandle = _RegistrationHandle()
-        self.calls: list[tuple[list[str], dict[str, Any]]] = []
+        self.calls: list[tuple[list[str], dict[str, object]]] = []
 
-    def register(self, recording_uri: list[str], **kwargs: Any) -> _RegistrationHandle:
+    def register(self, recording_uri: list[str], **kwargs: object) -> _RegistrationHandle:
         self.calls.append((recording_uri, kwargs))
         return self.registration_handle
 
@@ -318,7 +320,7 @@ def test_none_decoded_exo_stream_names_skips_pre_keyframe_samples_but_requires_k
         none_decoded_exo_stream_names({"C10095": object()}, streams)
 
 
-def test_validate_exo_camera_calibration_fails_when_pinhole_is_missing() -> None:
+def test_select_calibrated_exo_streams_rejects_a_partial_calibration_without_pinhole() -> None:
     schema: _Schema = _Schema(
         [
             _Descriptor("/world/exo/C10095/pinhole/video", "rerun.archetypes.VideoStream:sample"),
@@ -329,10 +331,10 @@ def test_validate_exo_camera_calibration_fails_when_pinhole_is_missing() -> None
     streams = discover_exo_camera_streams(schema)
 
     with pytest.raises(ValueError, match="C10095.*Pinhole:image_from_camera"):
-        validate_exo_camera_calibration(schema, streams)
+        select_calibrated_exo_streams(schema, streams)
 
 
-def test_validate_exo_camera_calibration_fails_when_transform_is_missing() -> None:
+def test_select_calibrated_exo_streams_rejects_a_partial_calibration_without_transform() -> None:
     schema: _Schema = _Schema(
         [
             _Descriptor("/world/exo/C10095/pinhole/video", "rerun.archetypes.VideoStream:sample"),
@@ -344,7 +346,7 @@ def test_validate_exo_camera_calibration_fails_when_transform_is_missing() -> No
     streams = discover_exo_camera_streams(schema)
 
     with pytest.raises(ValueError, match="C10095.*Transform3D:translation"):
-        validate_exo_camera_calibration(schema, streams)
+        select_calibrated_exo_streams(schema, streams)
 
 
 def test_build_prediction_rrd_path_uses_dataset_sequence_and_layer_name() -> None:
@@ -431,11 +433,11 @@ def test_catalog_prediction_layer_config_defaults_match_spec() -> None:
     assert config.catalog_url == "rerun+http://127.0.0.1:9988"
     assert config.assembly101_row_id == 120
     assert config.max_frames == 10
-    assert config.video_codec == "av1"
     assert config.fetch_block_size == 64
     assert config.native_fps_override is None
     assert config.output_root == Path("artifacts/catalog_layers")
-    assert config.layer_name == "mvapi_coco133_upper_body_v1"
+    assert config.keypoint_subset == "upper-body"
+    assert config.resolved_layer_name == "mvapi_coco133_upper_body_v1"
     assert config.register_layer is True
     assert config.capture_native_viewer_screenshots is True
 
@@ -502,10 +504,11 @@ def test_write_viewer_validation_notes_records_every_required_exo_screenshot(tmp
 
 
 def test_save_exo_viewer_blueprint_fixes_2d_visual_bounds(tmp_path: Path) -> None:
-    from rerun.experimental import RrdReader
+    from rerun.experimental import RrdReader, StoreEntry
 
     target: ViewerScreenshotTarget = ViewerScreenshotTarget(
         camera_name="C10095",
+        pinhole_entity="/world/exo/C10095/pinhole",
         overlay_entity="/world/exo/C10095/pinhole/pred/mvapi/coco133_uv",
         screenshot_path=tmp_path / "exo_C10095.png",
         blueprint_path=tmp_path / "exo_C10095.rbl",
@@ -513,7 +516,7 @@ def test_save_exo_viewer_blueprint_fixes_2d_visual_bounds(tmp_path: Path) -> Non
 
     blueprint_path: Path = save_exo_viewer_blueprint(target)
 
-    blueprint_store: Any = RrdReader(blueprint_path).blueprints()[0]
+    blueprint_store: StoreEntry = RrdReader(blueprint_path).blueprints()[0]
     summary: str = str(RrdReader(blueprint_path).stream(store=blueprint_store).collect().summary())
     assert "VisualBounds2D:range" in summary
 
@@ -528,18 +531,22 @@ def test_capture_native_viewer_screenshots_uses_timeout(monkeypatch: pytest.Monk
     )
     target: ViewerScreenshotTarget = ViewerScreenshotTarget(
         camera_name="C10095",
+        pinhole_entity="/world/exo/C10095/pinhole",
         overlay_entity="/world/exo/C10095/pinhole/pred/mvapi/coco133_uv",
         screenshot_path=tmp_path / "exo_C10095.png",
         blueprint_path=tmp_path / "exo_C10095.rbl",
     )
-    observed_timeout: dict[str, float | None] = {}
+    observed_timeouts: list[float] = []
 
-    def save_blueprint(_: ViewerScreenshotTarget, **__: Any) -> Path:
+    def save_blueprint(_: ViewerScreenshotTarget, **__: object) -> Path:
         target.blueprint_path.write_bytes(b"blueprint")
         return target.blueprint_path
 
-    def run_command(*_: Any, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
-        observed_timeout["value"] = kwargs.get("timeout")
+    def run_command(*_: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        timeout: object = kwargs.get("timeout")
+        if not isinstance(timeout, float):
+            raise AssertionError(f"subprocess.run got timeout={timeout!r}, expected a float")
+        observed_timeouts.append(timeout)
         target.screenshot_path.write_bytes(b"png")
         return subprocess.CompletedProcess(args=[], returncode=0)
 
@@ -553,7 +560,7 @@ def test_capture_native_viewer_screenshots_uses_timeout(monkeypatch: pytest.Monk
         timeout_seconds=7.5,
     )
 
-    assert observed_timeout["value"] == 7.5
+    assert observed_timeouts == [7.5]
 
 
 def test_prediction_layer_rows_are_column_logged_on_video_time_only(tmp_path: Path) -> None:
@@ -581,7 +588,7 @@ def test_prediction_layer_rows_are_column_logged_on_video_time_only(tmp_path: Pa
     _log_prediction_frame(
         mv_state=mv_state,
         streams=[stream],
-        top_half_mask=np.ones(133, dtype=bool),
+        kept_joint_mask=np.ones(133, dtype=bool),
         keypoint_threshold=0.5,
         timestamp_ns=123_456_789,
         recording=recording,
@@ -600,3 +607,48 @@ def test_prediction_visualization_colors_are_red_for_catalog_overlays() -> None:
     assert colors.dtype == np.uint8
     assert colors.shape == (4, 3)
     np.testing.assert_array_equal(colors, np.full((4, 3), [255, 0, 0], dtype=np.uint8))
+
+
+def test_discover_exo_camera_streams_accepts_rig_layout_and_skips_moving_ego_rig() -> None:
+    schema: _Schema = _Schema(
+        [
+            _Descriptor("/world/rig_01/cam_00/pinhole/video", "VideoStream:sample"),
+            _Descriptor("/world/rig_00/cam_00/pinhole/video", "VideoStream:sample"),
+            _Descriptor("/world/rig_02", "Transform3D:translation", False),
+            _Descriptor("/world/rig_02/cam_00/pinhole/video", "VideoStream:sample"),
+        ]
+    )
+
+    streams = discover_exo_camera_streams(schema)
+
+    assert [stream.name for stream in streams] == ["rig_00_cam_00", "rig_01_cam_00"]
+    assert streams[0].pinhole_entity == "/world/rig_00/cam_00/pinhole"
+    assert streams[0].transform_entity == "/world/rig_00/cam_00"
+    assert prediction_2d_entity(streams[0]) == "/world/rig_00/cam_00/pinhole/pred/mvapi/coco133_uv"
+
+
+def test_select_calibrated_exo_streams_drops_cameras_without_any_calibration() -> None:
+    schema: _Schema = _Schema(
+        [
+            _Descriptor("/world/rig_00/cam_00/pinhole/video", "VideoStream:sample"),
+            _Descriptor("/world/rig_00/cam_00/pinhole", "Pinhole:image_from_camera"),
+            _Descriptor("/world/rig_00/cam_00/pinhole", "Pinhole:camera_xyz"),
+            _Descriptor("/world/rig_00/cam_00/pinhole", "Pinhole:resolution"),
+            _Descriptor("/world/rig_00/cam_00", "Transform3D:mat3x3"),
+            _Descriptor("/world/rig_00/cam_00", "Transform3D:translation"),
+            _Descriptor("/world/rig_01/cam_00/pinhole/video", "VideoStream:sample"),
+        ]
+    )
+
+    streams = select_calibrated_exo_streams(schema, discover_exo_camera_streams(schema))
+
+    assert [stream.name for stream in streams] == ["rig_00_cam_00"]
+
+
+def test_resolved_layer_name_follows_the_keypoint_subset_and_rejects_the_other_subsets_name() -> None:
+    assert CatalogPredictionLayerConfig().resolved_layer_name == "mvapi_coco133_upper_body_v1"
+    assert CatalogPredictionLayerConfig(keypoint_subset="full").resolved_layer_name == "mvapi_coco133_full_v1"
+    assert CatalogPredictionLayerConfig(keypoint_subset="full", layer_name="mvapi_coco133_full").resolved_layer_name == "mvapi_coco133_full"
+    with pytest.raises(ValueError, match="another keypoint subset"):
+        _ = CatalogPredictionLayerConfig(keypoint_subset="full", layer_name="mvapi_coco133_upper_body_v1").resolved_layer_name
+
