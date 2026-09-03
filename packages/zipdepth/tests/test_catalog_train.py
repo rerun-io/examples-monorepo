@@ -8,7 +8,15 @@ from torch import nn, optim
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
-from zipdepth.apis.train_catalog import TrainCatalogConfig, _load_json_config, resolve_max_lr
+from zipdepth.apis.train_catalog import (
+    CompileMode,
+    TrainCatalogConfig,
+    _adamw_optimizer,
+    _load_json_config,
+    _model_to_device,
+    resolve_amp_dtype,
+    resolve_max_lr,
+)
 from zipdepth.catalog.segments import split_holdout_segments
 from zipdepth.loss import MetricDepthLoss, ZipDepthLoss
 from zipdepth.training.trainer import ZipDepthTrainer
@@ -49,6 +57,76 @@ def test_catalog_training_defaults_to_parallel_segment_producers() -> None:
     assert config.prefetch_samples == 256
     assert not hasattr(config, "prefetch")
     assert not hasattr(config, "gpu_augment")
+
+
+def test_runtime_accelerator_defaults_match_existing_training_objects() -> None:
+    """Keep the v4 model layout, AdamW arguments, compile mode, and JSON AMP default."""
+    config: TrainCatalogConfig = TrainCatalogConfig()
+    expected_model: nn.Conv2d = nn.Conv2d(3, 4, kernel_size=3)
+    actual_model: nn.Conv2d = nn.Conv2d(3, 4, kernel_size=3)
+    actual_model.load_state_dict(expected_model.state_dict())
+    expected_optimizer: optim.AdamW = optim.AdamW(expected_model.parameters(), lr=1e-5, weight_decay=0.05)
+    actual_optimizer: optim.AdamW = _adamw_optimizer(actual_model, lr=1e-5, weight_decay=0.05, fused=False)
+
+    assert config.compile_mode == "reduce-overhead"
+    assert config.channels_last is False
+    assert config.fused_adamw is False
+    assert config.amp_dtype is None
+    assert _model_to_device(actual_model, torch.device("cpu"), channels_last=False) is actual_model
+    assert actual_model.weight.stride() == expected_model.weight.stride()
+    assert actual_model.state_dict().keys() == expected_model.state_dict().keys()
+    assert actual_optimizer.defaults == expected_optimizer.defaults
+    assert actual_optimizer.state_dict() == expected_optimizer.state_dict()
+    assert resolve_amp_dtype(config.amp_dtype, "bfloat16") == "bfloat16"
+
+
+def test_runtime_accelerator_flags_change_constructed_objects() -> None:
+    """Apply channels-last layout, fused AdamW, and an explicit AMP dtype."""
+    model: nn.Conv2d = nn.Conv2d(3, 4, kernel_size=3)
+    prepared: nn.Module = _model_to_device(model, torch.device("cpu"), channels_last=True)
+    optimizer: optim.AdamW = _adamw_optimizer(prepared, lr=1e-5, weight_decay=0.05, fused=True)
+
+    assert model.weight.is_contiguous(memory_format=torch.channels_last)
+    assert optimizer.defaults["fused"] is True
+    assert resolve_amp_dtype("float16", "bfloat16") == "float16"
+
+
+@pytest.mark.parametrize("compile_mode", ["default", "reduce-overhead", "max-autotune"])
+def test_compile_mode_selects_torch_compile(monkeypatch: pytest.MonkeyPatch, compile_mode: CompileMode) -> None:
+    """Compile with the selected production mode."""
+    model: nn.Linear = nn.Linear(1, 1)
+    optimizer: optim.SGD = optim.SGD(model.parameters(), lr=0.1)
+    observed_modes: list[str] = []
+
+    def fake_compile(module: nn.Module, *, mode: str) -> nn.Module:
+        observed_modes.append(mode)
+        return module
+
+    monkeypatch.delenv("PIXI_DEV_MODE", raising=False)
+    monkeypatch.setattr(torch, "compile", fake_compile)
+
+    ZipDepthTrainer(model, [], optimizer, None, "cpu", use_amp=False, compile_mode=compile_mode)
+
+    assert observed_modes == [compile_mode]
+
+
+def test_compile_can_be_disabled_by_flag_or_dev_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep compilation off when requested and whenever beartype instrumentation is active."""
+    model: nn.Linear = nn.Linear(1, 1)
+    optimizer: optim.SGD = optim.SGD(model.parameters(), lr=0.1)
+    observed_modes: list[str] = []
+
+    def fake_compile(module: nn.Module, *, mode: str) -> nn.Module:
+        observed_modes.append(mode)
+        return module
+
+    monkeypatch.delenv("PIXI_DEV_MODE", raising=False)
+    monkeypatch.setattr(torch, "compile", fake_compile)
+    ZipDepthTrainer(model, [], optimizer, None, "cpu", use_amp=False, compile_mode="off")
+    monkeypatch.setenv("PIXI_DEV_MODE", "1")
+    ZipDepthTrainer(model, [], optimizer, None, "cpu", use_amp=False, compile_mode="max-autotune")
+
+    assert observed_modes == []
 
 
 def test_catalog_training_defaults_to_metric_with_an_explicit_ssi_lane() -> None:

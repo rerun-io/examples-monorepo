@@ -30,6 +30,7 @@ from zipdepth.training.distributed import barrier, cleanup_distributed, fix_stat
 from zipdepth.training.trainer import ZipDepthTrainer
 
 AmpDtype: TypeAlias = Literal["bfloat16", "float16"]
+CompileMode: TypeAlias = Literal["off", "default", "reduce-overhead", "max-autotune"]
 
 
 @serde
@@ -192,6 +193,15 @@ class TrainCatalogConfig:
     """OneCycle peak LR; None uses config LR / 100 for fine-tuning and config LR from scratch.
     Measured on the fixed probe set: at config/10 (1e-4, batch 4) fine-tuning diverges once
     warmup ends; at config/100 (1e-5) it improves the probe loss ~29% in 120 steps."""
+    compile_mode: CompileMode = "reduce-overhead"
+    """``torch.compile`` mode for the student; ``off`` disables it. Beartype dev mode
+    disables compilation regardless of this setting."""
+    channels_last: bool = False
+    """Store the model and four-dimensional training tensors in channels-last format."""
+    fused_adamw: bool = False
+    """Use the fused CUDA AdamW implementation."""
+    amp_dtype: AmpDtype | None = None
+    """AMP dtype override; None keeps the upstream JSON setting."""
 
 
 @serde
@@ -217,6 +227,27 @@ def resolve_max_lr(config_lr: float, override: float | None, from_scratch: bool)
     if max_lr <= 0.0:
         raise ValueError("max_lr must be positive")
     return max_lr
+
+
+def resolve_amp_dtype(override: AmpDtype | None, configured: AmpDtype) -> AmpDtype:
+    """Resolve the CLI AMP dtype override against the upstream JSON setting."""
+    return configured if override is None else override
+
+
+def _model_to_device(model: nn.Module, device: torch.device, channels_last: bool) -> nn.Module:
+    """Move a model before DDP construction and optionally select channels-last storage."""
+    if channels_last:
+        # PyTorch supports this documented overload; pyrefly's torch stubs omit it.
+        # pyrefly: ignore [no-matching-overload]
+        return model.to(device=device, memory_format=torch.channels_last)
+    return model.to(device=device)
+
+
+def _adamw_optimizer(model: nn.Module, lr: float, weight_decay: float, fused: bool) -> optim.AdamW:
+    """Build AdamW without changing the established defaults when fusion is disabled."""
+    if fused:
+        return optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay, fused=True)
+    return optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
 
 def _select_train_and_holdout(config: TrainCatalogConfig, catalog: PromptDACatalog) -> tuple[list[str], list[str]]:
@@ -396,6 +427,7 @@ def main(
         training_config: UpstreamTrainingConfig = upstream_config.training
         config_lr: float = optimizer_config.lr
         actual_max_lr: float = resolve_max_lr(config_lr, config.max_lr, config.from_scratch)
+        actual_amp_dtype: AmpDtype = resolve_amp_dtype(config.amp_dtype, amp_config.dtype)
 
         if is_main:
             config.save_dir.mkdir(parents=True, exist_ok=True)
@@ -478,15 +510,16 @@ def main(
         if pin_batchnorm_eval:
             pinned: int = sum(isinstance(module, nn.modules.batchnorm._BatchNorm) for module in model.modules())
             print_main(f"Pinned {pinned} BatchNorm modules to eval (released running stats)", rank)
-        model = model.to(device)
+        model = _model_to_device(model, device, config.channels_last)
         wrapped_model: nn.Module | DDP = (
             DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False) if is_distributed else model
         )
 
-        optimizer: optim.AdamW = optim.AdamW(
-            model.parameters(),
+        optimizer: optim.AdamW = _adamw_optimizer(
+            model,
             lr=actual_max_lr,
             weight_decay=optimizer_config.weight_decay,
+            fused=config.fused_adamw,
         )
         scheduler: optim.lr_scheduler.OneCycleLR = _one_cycle_scheduler(optimizer, actual_max_lr, total_steps, scheduler_config)
         trainer: ZipDepthTrainer = ZipDepthTrainer(
@@ -500,7 +533,9 @@ def main(
             is_distributed=is_distributed,
             rank=rank,
             world_size=world_size,
-            amp_dtype=amp_config.dtype,
+            amp_dtype=actual_amp_dtype,
+            compile_mode=config.compile_mode,
+            channels_last=config.channels_last,
             alpha_ssi=loss_config.alpha_ssi,
             alpha_grad=loss_config.alpha_grad,
             target_mode=config.target_mode,
