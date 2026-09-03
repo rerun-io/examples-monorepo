@@ -27,7 +27,6 @@ from typing import TypeAlias
 
 import av
 import numpy as np
-import pyarrow as pa
 import torch
 from jaxtyping import Shaped, UInt8
 from numpy import ndarray
@@ -233,11 +232,11 @@ class TimedNvdecDecoder(SegmentNvdecDecoder):
     count); a timestamp timeline would need its own epoch handling.
     """
 
-    # rerun 0.36.2 per-sample signature; on 0.37 this becomes decode(batch, requests) (main's plugin is already ported).
-    # pyrefly: ignore  # bad-override — upstream types decode as Tensor | None; the dataloader only moves the value into the sample dict.
-    def decode(self, raw: pa.ChunkedArray, index_value: int | np.datetime64 | np.timedelta64, segment_id: str) -> TimedFrame | None:
-        """Return the segment's latest frame at or before *index_value* beside that timestamp, or None before the first sample."""
-        frame_chw = super().decode(raw, index_value, segment_id)
-        if frame_chw is None:
-            return None
-        return TimedFrame(t_ns=int(np.asarray(index_value).astype("timedelta64[ns]").astype(np.int64)), rgb=frame_chw)
+    # pyrefly: ignore  # bad-override — the base decodes to Tensor; the dataloader only moves the value into the sample dict.
+    def decode(self, batch: FieldBatch, requests: Sequence[DecodeRequest]) -> list[TimedFrame | None]:
+        """Pair each decoded frame with the grid timestamp its request asked for; slots before the first sample stay None."""
+        frames: Sequence[FrameRgbChw | None] = super().decode(batch, requests)
+        return [
+            None if frame is None else TimedFrame(t_ns=int(np.asarray(request.index_value).astype("timedelta64[ns]").astype(np.int64)), rgb=frame)
+            for request, frame in zip(requests, frames, strict=True)
+        ]

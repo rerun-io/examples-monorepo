@@ -24,15 +24,15 @@ class _TimedFrame:
         self.rgb = rgb
 
 
-def _row(t_ns: int, *, pose: bool = True) -> dict[str, Any]:
-    """One dataloader row: a frame per camera whose pixels name the camera, plus a rig pose.
+def _row(t_ns: int) -> dict[str, Any]:
+    """One complete dataloader row: a frame per camera whose pixels name the camera, plus a rig pose.
 
-    The pose tensors are float32, the width Rerun stores ``Vec3D`` and ``Quaternion`` at, and empty
-    when the grid slot precedes the first pose row — what ``NumericDecoder`` returns for that slot.
+    The pose tensors are float32, the width Rerun stores ``Vec3D`` and ``Quaternion`` at. Incomplete
+    grid slots never reach the collate: the dataloader drops any sample with a field that decoded to None.
     """
     row: dict[str, Any] = {cam: _TimedFrame(t_ns, torch.full((3, 2, 4), index, dtype=torch.uint8)) for index, cam in enumerate(CAMS)}
-    row["pose_t"] = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32) if pose else torch.empty(0, dtype=torch.float32)
-    row["pose_q"] = torch.tensor([0.0, 0.0, 0.0, 1.0], dtype=torch.float32) if pose else torch.empty(0, dtype=torch.float32)
+    row["pose_t"] = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32)
+    row["pose_q"] = torch.tensor([0.0, 0.0, 0.0, 1.0], dtype=torch.float32)
     return row
 
 
@@ -89,21 +89,3 @@ def test_collate_builds_the_rig_pose_from_translation_and_xyzw_quaternion() -> N
     )
     assert batch.world_T_rig.dtype == np.float64
     assert np.allclose(batch.world_T_rig[0], expected, atol=1e-6)
-
-
-def test_collate_drops_rows_without_every_camera_or_a_pose() -> None:
-    """Grid slots before a camera's first packet (None) or before the first pose (empty) carry no frameset."""
-    missing_frame: dict[str, Any] = _row(0)
-    missing_frame[CAMS[1]] = None
-    batch: RigBatch = RigCollate(CAMS)([missing_frame, _row(200, pose=False), _row(400)])
-    assert batch.t_ns == [400]
-    assert batch.images.shape == (1, 2, 3, 2, 4)
-    assert batch.world_T_rig.shape == (1, 4, 4)
-
-
-def test_collate_returns_an_empty_batch_the_run_loop_can_skip() -> None:
-    """A batch whose rows are all incomplete stays shaped but empty."""
-    batch: RigBatch = RigCollate(CAMS)([_row(0, pose=False)])
-    assert batch.t_ns == []
-    assert batch.images.shape[0] == 0
-    assert batch.world_T_rig.shape == (0, 4, 4)

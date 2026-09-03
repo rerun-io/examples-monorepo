@@ -64,41 +64,28 @@ class RigCollate:
     """Stack dataloader rows into one rig batch.
 
     A row is the dataloader's ``dict[str, Any]``: a ``TimedFrame`` under each camera key and a tensor
-    under ``pose_t`` / ``pose_q``. Rerun 0.36.2 hands every grid slot to the collate, incomplete ones
-    included, so the two kinds of gap are dropped here: a slot before a camera's first video packet
-    carries ``None``, and a slot before the first rig pose carries an empty tensor. A batch of only
-    those comes out empty, which the run loop skips.
+    under ``pose_t`` / ``pose_q``. Every row is complete: a grid slot before a camera's first video
+    packet or before the first rig pose decodes to ``None``, and the dataloader drops it before the
+    collate sees it, so batches are shorter but never ragged.
     """
 
     cams: tuple[str, ...]
     """Rig cameras, in the order the predictor sees them."""
 
     def __call__(self, rows: list[dict[str, Any]]) -> RigBatch:
-        """Stack the complete rows of one dataloader batch."""
+        """Stack one dataloader batch of rig framesets."""
         t_ns: list[int] = []
         framesets: list[UInt8[Tensor, "s 3 h w"]] = []
         poses: list[Float64[ndarray, "4 4"]] = []
         for row in rows:
             translation: Float[Tensor, " xyz"] = row["pose_t"]
             quaternion: Float[Tensor, " xyzw"] = row["pose_q"]
-            if translation.numel() != 3 or quaternion.numel() != 4:
-                continue
-            frames: list[UInt8[Tensor, "3 h w"]] = []
-            for cam in self.cams:
-                timed_frame = row[cam]  # a TimedFrame, or None before this camera's first video packet
-                if timed_frame is None:
-                    break
-                frames.append(timed_frame.rgb)
-            if len(frames) != len(self.cams):
-                continue
             pose: Float64[ndarray, "4 4"] = np.eye(4)
             pose[:3, :3] = Rotation.from_quat(quaternion.numpy()).as_matrix()  # xyzw, as Rerun stores it
             pose[:3, 3] = translation.numpy()
             t_ns.append(row[self.cams[0]].t_ns)  # every camera answers the same grid slot
-            framesets.append(torch.stack(frames))
+            framesets.append(torch.stack([row[cam].rgb for cam in self.cams]))
             poses.append(pose)
-        if not framesets:
-            return RigBatch(t_ns=[], images=torch.empty((0, len(self.cams), 3, 0, 0), dtype=torch.uint8), world_T_rig=np.empty((0, 4, 4)))
         return RigBatch(t_ns=t_ns, images=torch.stack(framesets), world_T_rig=np.stack(poses))
 
 
@@ -310,6 +297,11 @@ def main(config: RigDepthCatalogConfig) -> None:
         fields=fields,
         timeline_sampling=FixedRateSampling(rate_hz=config.fps),
         shuffle_strategy=NoShuffle(),
+        # The default fetch block stays at 128: every slot in a block is decoded before the first
+        # one is yielded, so one block holds block_size x len(cams) frames of GPU memory at once.
+        # A dense grid can sit before the first video packet or rig pose for longer than the
+        # default 1000 consecutive dropped slots, which would abort the run instead of skipping.
+        max_consecutive_skipped_samples=None,
     )
     # One decoder holds a DatasetEntry and one CUDA decoder per camera, so neither survives a fork.
     loader: DataLoader = DataLoader(samples, batch_size=config.batch_size, num_workers=0, collate_fn=RigCollate(config.cams))
@@ -396,7 +388,7 @@ def main(config: RigDepthCatalogConfig) -> None:
             selected.append(row)
             resized.append(np.stack(views))
         decode_s: float = time.perf_counter() - wait_started
-        reached_end: bool = len(batch.t_ns) > 0 and batch.t_ns[-1] >= end_ns
+        reached_end: bool = batch.t_ns[-1] >= end_ns
         if not selected:
             if reached_end:
                 break
