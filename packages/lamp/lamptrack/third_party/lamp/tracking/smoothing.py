@@ -9,6 +9,9 @@
 from __future__ import annotations
 
 import numpy as np
+from jaxtyping import Float32
+from numpy import ndarray
+
 from lamptrack.third_party.lamp.core.se3 import slerp_se3_batched, slerp_so3_batched
 from lamptrack.third_party.lamp.core.types import Person, PersonState, Skeleton
 
@@ -17,7 +20,7 @@ def fuse_or_store_batched(
     person: Person,
     skeletons_with_ts: list[tuple[int, Skeleton]],
     *,
-    shape_override: np.ndarray | None = None,
+    shape_override: Float32[ndarray, "betas"] | None = None,
 ) -> None:
     """Fuse lifted snippet poses into the track timeline."""
     if shape_override is not None:
@@ -53,7 +56,7 @@ def fuse_or_store_batched(
     fused_kps = (kfs[:, None, None] * old_kps + new_kps) * invds[:, None, None]
 
     shape_mask = np.zeros(len(fuse_entries), dtype=bool)
-    fused_shapes: np.ndarray | None = None
+    fused_shapes: Float32[ndarray, "n betas"] | None = None
     if shape_override is None:
         shape_mask = np.array(
             [
@@ -84,7 +87,7 @@ def fuse_or_store_batched(
         ],
         dtype=bool,
     )
-    fused_joints_rot: np.ndarray | None = None
+    fused_joints_rot: Float32[ndarray, "n joints 3 3"] | None = None
     if jr_mask.any():
         sub_idx = [int(i) for i in np.where(jr_mask)[0]]
         old_jr = np.stack(

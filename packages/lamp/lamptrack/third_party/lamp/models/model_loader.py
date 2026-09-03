@@ -6,13 +6,14 @@
 
 """Checkpoint loading for the public LAMP SMPL model."""
 
-# pyright: reportPrivateImportUsage=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false
-
 from __future__ import annotations
 
 from pathlib import Path
 
 import torch
+from jaxtyping import Float32
+from torch import Tensor
+
 from lamptrack.third_party.lamp.models.model import LampNet
 from lamptrack.third_party.lamp.models.model_utils import GRAVITY_DIRECTION_VIO, R_CG_CGZ
 
@@ -25,7 +26,7 @@ def build_lampnet_from_checkpoint(
     device: torch.device,
 ) -> LampNet:
     """Construct `LampNet`, load weights, and return an eval-mode model."""
-    checkpoint_state: dict[str, torch.Tensor] = torch.load(
+    checkpoint_state: dict[str, Tensor] = torch.load(
         str(checkpoint_path), map_location=device, weights_only=True
     )
     checkpoint_state = _drop_unused_checkpoint_keys(checkpoint_state)
@@ -35,7 +36,7 @@ def build_lampnet_from_checkpoint(
         dim_feat=256,
         depth=3,
         num_heads=8,
-        mlp_ratio=4,
+        mlp_ratio=4.0,
         num_joints=17,
         maxlen=20,
         smpl_model_path=str(smpl_model_path),
@@ -62,8 +63,8 @@ def build_lampnet_from_checkpoint(
 
 
 def _drop_unused_checkpoint_keys(
-    checkpoint_state: dict[str, torch.Tensor],
-) -> dict[str, torch.Tensor]:
+    checkpoint_state: dict[str, Tensor],
+) -> dict[str, Tensor]:
     return {
         key: value
         for key, value in checkpoint_state.items()
@@ -72,8 +73,8 @@ def _drop_unused_checkpoint_keys(
 
 
 def _validate_runtime_constants(model: LampNet, device: torch.device) -> None:
-    expected_r_cg = torch.tensor(list(R_CG_CGZ), dtype=torch.float32, device=device)
-    expected_g_w = torch.tensor(
+    expected_r_cg: Float32[Tensor, "1 3 3"] = torch.tensor(list(R_CG_CGZ), dtype=torch.float32, device=device)
+    expected_g_w: Float32[Tensor, "3"] = torch.tensor(
         list(GRAVITY_DIRECTION_VIO), dtype=torch.float32, device=device
     )
     assert torch.equal(model._r_cg_cgz, expected_r_cg), (  # pyright: ignore[reportPrivateUsage]

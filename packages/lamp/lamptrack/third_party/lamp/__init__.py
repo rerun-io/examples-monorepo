@@ -1,4 +1,4 @@
-"""Unowned LAMP inference subset from https://github.com/facebookresearch/LAMP.
+"""Owned typed LAMP inference subset from https://github.com/facebookresearch/LAMP.
 
 Taken from upstream revision ``db3e4bf9992874a85946b92e9c8933bba396bc44``
 under CC-BY-NC 4.0. The code and public weights are for **non-commercial use
@@ -17,9 +17,10 @@ File mapping:
 - ``tracking/snippets.py`` <- ``lamp/tracking/snippets.py``
 - ``tracking/tracker.py`` <- ``lamp/tracking/tracker.py``
 - ``tracking/tracking_utils.py`` <- ``lamp/tracking/tracking_utils.py``
-- ``io/sensor_io.py`` <- ``lamp/io/sensor_io.py``
+The Aria-specific ``io/sensor_io.py`` reader is not carried by the owned fork;
+``lamptrack.cameras.RigCamera`` supplies its small inference calibration seam.
 
-Local changes: import paths only. Absolute ``lamp.*`` imports point at
-``lamptrack.third_party.lamp.*`` so the subset is importable without path
-mutation. No behavior changed.
+Local changes: import paths, static typing, Google-style documentation, and
+removal of Aria-only loaders and dead code. Model modules, parameter names,
+state-dict keys, and numerical operations remain unchanged.
 """

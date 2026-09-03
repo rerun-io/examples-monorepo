@@ -6,18 +6,20 @@
 
 """3D pose lifter for temporal snippets."""
 
-# pyright: reportPrivateImportUsage=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false
-
 from __future__ import annotations
 
 import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 import numpy as np
+import smplx
 import torch
+from jaxtyping import Float, Float32
+from numpy import ndarray
+from torch import Tensor
+
 from lamptrack.third_party.lamp.core.se3 import invert
 from lamptrack.third_party.lamp.core.types import Skeleton
 
@@ -46,12 +48,12 @@ class SnippetData:
     person_id: int
     snippet_timestamps_ns: list[int]
     view_cam_indices: list[int | None] = field(default_factory=list[int | None])
-    kp2ds_per_view: list[np.ndarray] = field(default_factory=list[np.ndarray])
-    Ts_gw_cam_per_view: list[np.ndarray] = field(default_factory=list[np.ndarray])
-    cam_params_per_view: list[np.ndarray] = field(default_factory=list[np.ndarray])
+    kp2ds_per_view: list[Float32[ndarray, "time 17 3"]] = field(default_factory=list)
+    Ts_gw_cam_per_view: list[Float32[ndarray, "time 4 4"]] = field(default_factory=list)
+    cam_params_per_view: list[Float32[ndarray, "time params"]] = field(default_factory=list)
     # `T_gravityWorld_world` snapshot at lift time, retained for downstream
     # consumers; the lifter keeps its outputs in the gravity-world frame.
-    T_gravityWorld_world: np.ndarray = field(
+    T_gravityWorld_world: Float32[ndarray, "4 4"] = field(
         default_factory=lambda: np.eye(4, dtype=np.float32)
     )
 
@@ -87,7 +89,7 @@ class _CapturedLampNet(torch.nn.Module):
         self._capture_b: int = capture_batch_size
         self._device: torch.device = device
         # Static buffers are updated in place before each CUDA graph replay.
-        self._static_x: list[torch.Tensor] = [
+        self._static_x: list[Float32[Tensor, "batch time 17 3"]] = [
             torch.zeros(
                 capture_batch_size,
                 snippet_length,
@@ -97,16 +99,16 @@ class _CapturedLampNet(torch.nn.Module):
             )
             for _ in range(num_views)
         ]
-        self._static_cams: list[torch.Tensor] = [
+        self._static_cams: list[Float32[Tensor, "batch time 16"]] = [
             torch.zeros(capture_batch_size, snippet_length, 16, device=device)
             for _ in range(num_views)
         ]
         eye_template = torch.eye(4, device=device)
-        self._static_Ts: list[torch.Tensor] = [
+        self._static_Ts: list[Float32[Tensor, "batch time 4 4"]] = [
             eye_template.expand(capture_batch_size, snippet_length, 4, 4).contiguous()
             for _ in range(num_views)
         ]
-        self._static_gp: torch.Tensor = torch.full(
+        self._static_gp: Float32[Tensor, "batch 4 3"] = torch.full(
             (capture_batch_size, 4, 3),
             float("nan"),
             dtype=torch.float32,
@@ -130,7 +132,7 @@ class _CapturedLampNet(torch.nn.Module):
         # Graph outputs are overwritten on each replay, so callers receive clones.
         self._graph: torch.cuda.CUDAGraph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self._graph, stream=capture_stream), torch.no_grad():
-            self._static_out: dict[str, torch.Tensor] = self._eager_model(
+            self._static_out: dict[str, Tensor] = self._eager_model(
                 self._static_x,
                 self._static_cams,
                 self._static_Ts,
@@ -139,11 +141,11 @@ class _CapturedLampNet(torch.nn.Module):
 
     def forward(
         self,
-        x_list: list[torch.Tensor],
-        cam_params: list[torch.Tensor],
-        Ts_wc: list[torch.Tensor],
-        ground_planes: torch.Tensor | None,
-    ) -> dict[str, torch.Tensor]:
+        x_list: list[Float[Tensor, "batch time 17 3"]],
+        cam_params: list[Float[Tensor, "batch time params"]],
+        Ts_wc: list[Float[Tensor, "batch time 4 4"]],
+        ground_planes: Float[Tensor, "batch 4 3"] | None,
+    ) -> dict[str, Tensor]:
         actual_b = x_list[0].shape[0]
         if actual_b > self._capture_b:
             # Out-of-range batches fall back to the eager model.
@@ -188,12 +190,12 @@ class Lifter:
         self._device: torch.device = device
         self._settings: LifterSettings = settings
         # Used to re-skin fused SMPL parameters at render time.
-        self._smpl_model: Any | None = None
+        self._smpl_model: smplx.SMPL | None = None
         # NaNs mark the floor height as unknown.
-        self._ground_planes_unknown: torch.Tensor = torch.full(
+        self._ground_planes_unknown: Float32[Tensor, "1 4 3"] = torch.full(
             (1, 4, 3), float("nan"), dtype=torch.float32, device=device
         )
-        self._floor_plane: torch.Tensor | None = None
+        self._floor_plane: Float32[Tensor, "1 4 3"] | None = None
 
     def set_floor_plane(self, z: float | None) -> None:
         """Set or clear the fixed floor plane passed to the model."""
@@ -296,10 +298,7 @@ class Lifter:
                         for _ in range(num_views)
                     ]
                     # Re-use the cached NaN ground-plane tensor.
-                    if b == 1:
-                        gp = self._ground_planes_unknown
-                    else:
-                        gp = self._ground_planes_unknown.expand(b, -1, -1).contiguous()
+                    gp = self._ground_planes_unknown if b == 1 else self._ground_planes_unknown.expand(b, -1, -1).contiguous()
                     with torch.no_grad():
                         _ = self._model(x, cams, Ts, gp)
             torch.cuda.synchronize()
@@ -331,7 +330,7 @@ class Lifter:
         return _DEFAULT_NUM_VIEWS
 
     @property
-    def smpl_faces(self) -> np.ndarray | None:
+    def smpl_faces(self) -> ndarray | None:
         """SMPL face topology `(13776, 3)` int32, or None for non-SMPL lifters."""
         for candidate in (self._model, getattr(self._model, "_eager_model", None)):
             if candidate is None:
@@ -346,11 +345,11 @@ class Lifter:
 
     def forward_smpl_geometry(
         self,
-        betas: np.ndarray,
-        global_orient_rotmat: np.ndarray,
-        body_pose_rotmat: np.ndarray,
-        transl: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray]:
+        betas: Float32[ndarray, "batch 10"],
+        global_orient_rotmat: Float32[ndarray, "batch 3 3"],
+        body_pose_rotmat: Float32[ndarray, "batch 23 3 3"],
+        transl: Float32[ndarray, "batch 3"],
+    ) -> tuple[Float32[ndarray, "batch 24 3"], Float32[ndarray, "batch 6890 3"]]:
         """Batched SMPL forward over B persons -> world-frame joints and vertices."""
         if self._smpl_model is None:
             raise RuntimeError(
@@ -453,10 +452,10 @@ class Lifter:
             out = self._model(x_list, cam_list, Ts_list, ground_planes)
 
         # One host transfer per logical output array, then slice per person.
-        skel_w_t: torch.Tensor = out["skel_w"]  # (B, T, 24, 3)
+        skel_w_t: Tensor = out["skel_w"]  # (B, T, 24, 3)
         skel_w_batch = skel_w_t.detach().cpu().numpy().astype(np.float32, copy=False)
         # Optional SMPL body mesh `(B, T, 6890, 3)`.
-        verts_w_batch: np.ndarray | None = None
+        verts_w_batch: Float32[ndarray, "batch time 6890 3"] | None = None
         if "verts_w" in out:
             verts_w_batch = (
                 out["verts_w"].detach().cpu().numpy().astype(np.float32, copy=False)
@@ -535,12 +534,16 @@ class Lifter:
         self,
         snippets: dict[int, SnippetData],
         person_ids: list[int],
-    ) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
+    ) -> tuple[
+        list[Float32[Tensor, "batch time 17 3"]],
+        list[Float32[Tensor, "batch time params"]],
+        list[Float32[Tensor, "batch time 4 4"]],
+    ]:
         """Stack per-view per-person tensors for one batched model forward."""
         num_views = len(snippets[person_ids[0]].kp2ds_per_view)
-        x_list: list[torch.Tensor] = []
-        cam_list: list[torch.Tensor] = []
-        Ts_list: list[torch.Tensor] = []
+        x_list: list[Float32[Tensor, "batch time 17 3"]] = []
+        cam_list: list[Float32[Tensor, "batch time params"]] = []
+        Ts_list: list[Float32[Tensor, "batch time 4 4"]] = []
         for v in range(num_views):
             # Build one host stack per view to minimize CPU->GPU transfers.
             kp_np = np.stack(
@@ -574,9 +577,9 @@ class Lifter:
 
 
 def is_outlier_pose(
-    skeleton_world: np.ndarray,  # shape (24, 3)
-    T_world_cams: dict[int, np.ndarray],
-    T_gravityWorld_world: np.ndarray,
+    skeleton_world: Float32[ndarray, "24 3"],
+    T_world_cams: dict[int, Float32[ndarray, "4 4"]],
+    T_gravityWorld_world: Float32[ndarray, "4 4"],
     *,
     min_depth: float = 0.5,
     max_depth: float = 5.0,

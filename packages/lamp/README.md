@@ -13,8 +13,8 @@ Download the checkpoint and neutral SMPL body model:
 pixi run -e lamp lamp-download-artifacts
 ```
 
-The replay fixture is not published with the package. After the reviewer adds
-it to `pablovela5620/lamp-fixtures`, download and replay it with:
+The replay fixture is not committed with the package. Download the reviewer
+copy from `pablovela5620/lamp-fixtures` and replay it with:
 
 ```bash
 pixi run -e lamp _lamp-download-fixture

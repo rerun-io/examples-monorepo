@@ -52,7 +52,6 @@ project-excludes = [
     "packages/zipdepth/zipdepth/upstream_cli/**/*",
     "packages/sapiens2-pose/src/sapiens2_pose/assets/**/*",
     "packages/sapiens2-pose/src/sapiens2_pose/sapiens_lite/**/*",
-    "packages/lamp/lamptrack/third_party/lamp/**/*",
     "packages/lamp/tests/reference_data/lamp/**/*",
 ]
 

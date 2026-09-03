@@ -11,9 +11,11 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+from jaxtyping import Float, Float32
+from numpy import ndarray
 
 
-def as_4x4_f32(any_se3: Any) -> np.ndarray:
+def as_4x4_f32(any_se3: Any) -> Float32[ndarray, "4 4"]:
     """Coerce an SE(3)-like value to a `(4, 4)` `np.float32` matrix."""
     raw: Any = any_se3
     if hasattr(any_se3, "to_matrix"):
@@ -21,7 +23,7 @@ def as_4x4_f32(any_se3: Any) -> np.ndarray:
     elif hasattr(any_se3, "matrix"):
         raw = any_se3.matrix()
 
-    m: np.ndarray = np.asarray(raw, dtype=np.float32)  # pyright: ignore[reportUnknownArgumentType]
+    m: ndarray = np.asarray(raw, dtype=np.float32)  # pyright: ignore[reportUnknownArgumentType]
     if m.shape == (3, 4):
         out = np.eye(4, dtype=np.float32)
         out[:3, :] = m
@@ -31,7 +33,7 @@ def as_4x4_f32(any_se3: Any) -> np.ndarray:
     return m
 
 
-def compose(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+def compose(a: Float[ndarray, "4 4"], b: Float[ndarray, "4 4"]) -> Float32[ndarray, "4 4"]:
     """Right-multiply: `T_a @ T_b` (a then b applied in the matrix-product sense).
 
     With the `T_dest_src` naming convention used elsewhere in the codebase,
@@ -40,7 +42,7 @@ def compose(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return (a @ b).astype(np.float32, copy=False)
 
 
-def invert(t: np.ndarray) -> np.ndarray:
+def invert(t: Float[ndarray, "4 4"]) -> Float32[ndarray, "4 4"]:
     """Invert an SE(3) transform analytically (`R^T`, `-R^T t`).
 
     Faster + more numerically stable than `np.linalg.inv` for SE(3) matrices.
@@ -53,10 +55,10 @@ def invert(t: np.ndarray) -> np.ndarray:
 
 
 def slerp_so3_batched(
-    R_old: np.ndarray,
-    R_new: np.ndarray,
-    alpha: float | np.ndarray,
-) -> np.ndarray:
+    R_old: Float[ndarray, "n 3 3"],
+    R_new: Float[ndarray, "n 3 3"],
+    alpha: float | Float[ndarray, "n"],
+) -> Float32[ndarray, "n 3 3"]:
     """Per-joint SO3 slerp on a `(J, 3, 3)` batch."""
     if R_old.shape != R_new.shape:
         raise ValueError(
@@ -65,7 +67,7 @@ def slerp_so3_batched(
     if R_old.size == 0:
         # Defensive: allow callers to pass an empty rotation stack.
         return R_old.astype(np.float32, copy=False)
-    if isinstance(alpha, np.ndarray):
+    if isinstance(alpha, ndarray):
         if alpha.shape != (R_old.shape[0],):
             raise ValueError(
                 f"alpha array shape must be ({R_old.shape[0]},); got {alpha.shape}"
@@ -116,10 +118,10 @@ def slerp_so3_batched(
 
 
 def slerp_se3_batched(
-    T_old: np.ndarray,
-    T_new: np.ndarray,
-    alphas: np.ndarray,
-) -> np.ndarray:
+    T_old: Float[ndarray, "n 4 4"],
+    T_new: Float[ndarray, "n 4 4"],
+    alphas: Float[ndarray, "n"],
+) -> Float32[ndarray, "n 4 4"]:
     """Per-row SE(3) slerp on `(N, 4, 4)` batches with per-row alphas."""
     if T_old.shape != T_new.shape:
         raise ValueError(
@@ -150,7 +152,7 @@ def slerp_se3_batched(
     return out
 
 
-def _mat_to_quat_xyzw_batched(R: np.ndarray) -> np.ndarray:
+def _mat_to_quat_xyzw_batched(R: Float[ndarray, "n 3 3"]) -> Float32[ndarray, "n 4"]:
     """Vectorized rotation matrix → quaternion (xyzw) via Shepperd's method."""
     R32 = R.astype(np.float32, copy=False)
     m00 = R32[:, 0, 0]
@@ -204,7 +206,7 @@ def _mat_to_quat_xyzw_batched(R: np.ndarray) -> np.ndarray:
     return np.stack([x, y, z, w], axis=1).astype(np.float32, copy=False)
 
 
-def _quat_xyzw_to_mat_batched(q: np.ndarray) -> np.ndarray:
+def _quat_xyzw_to_mat_batched(q: Float[ndarray, "n 4"]) -> Float32[ndarray, "n 3 3"]:
     """Vectorized quaternion (xyzw) → rotation matrix. Returns `(J, 3, 3)`."""
     x = q[:, 0]
     y = q[:, 1]

@@ -8,10 +8,15 @@
 
 from __future__ import annotations
 
+from typing import TypedDict
+
 import torch
 import torch.nn as nn
-from lamptrack.third_party.lamp.models.model_utils import rotation_6d_to_matrix
+from jaxtyping import Float
+from torch import Tensor
 from torch.nn import functional as F
+
+from lamptrack.third_party.lamp.models.model_utils import rotation_6d_to_matrix
 
 __all__ = [
     "MLP",
@@ -20,6 +25,15 @@ __all__ = [
     "MVRayFusion",
     "SMPLHeads",
 ]
+
+
+class SMPLHeadOutput(TypedDict):
+    """Raw SMPL parameters regressed by :class:`SMPLHeads`."""
+
+    betas: Float[Tensor, "batch 10"]
+    transl: Float[Tensor, "batch time 3"]
+    body_pose_rotmat: Float[Tensor, "batch time 23 3 3"]
+    global_orient_rotmat: Float[Tensor, "batch time 1 3 3"]
 
 
 class MLP(nn.Module):
@@ -41,7 +55,7 @@ class MLP(nn.Module):
         self.fc2 = nn.Linear(hidden_features, out_features)
         self.drop = nn.Dropout(drop)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: Float[Tensor, "... in_features"]) -> Float[Tensor, "... out_features"]:
         x = self.fc1(x)
         x = self.act(x)
         x = self.drop(x)
@@ -75,7 +89,7 @@ class Attention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
         self.mode = st_mode
 
-    def forward(self, x: torch.Tensor, seqlen: int = 1) -> torch.Tensor:
+    def forward(self, x: Float[Tensor, "batch tokens channels"], seqlen: int = 1) -> Float[Tensor, "batch tokens channels"]:
         B, N, C = x.shape
         qkv = (
             self.qkv(x)
@@ -95,8 +109,11 @@ class Attention(nn.Module):
         return x
 
     def forward_spatial(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
-    ) -> torch.Tensor:
+        self,
+        q: Float[Tensor, "batch heads tokens head_dim"],
+        k: Float[Tensor, "batch heads tokens head_dim"],
+        v: Float[Tensor, "batch heads tokens head_dim"],
+    ) -> Float[Tensor, "batch tokens channels"]:
         B, _, N, C = q.shape
         dropout_p = self.attn_drop.p if self.training else 0.0
         x = F.scaled_dot_product_attention(
@@ -107,11 +124,11 @@ class Attention(nn.Module):
 
     def forward_temporal(
         self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
+        q: Float[Tensor, "batch heads tokens head_dim"],
+        k: Float[Tensor, "batch heads tokens head_dim"],
+        v: Float[Tensor, "batch heads tokens head_dim"],
         seqlen: int = 8,
-    ) -> torch.Tensor:
+    ) -> Float[Tensor, "batch tokens channels"]:
         B, _, N, C = q.shape
         # Reinterpret `(B, H, N, C)` as `(B', T, H, N, C)` then rearrange to
         # `(B', H, N, T, C)` so SDPA attends across the T axis.
@@ -184,17 +201,17 @@ class Block(nn.Module):
             drop=drop,
         )
 
-    def _spatial_step(self, x: torch.Tensor, seqlen: int) -> torch.Tensor:
+    def _spatial_step(self, x: Float[Tensor, "batch tokens channels"], seqlen: int) -> Float[Tensor, "batch tokens channels"]:
         x = x + self.spatial_attn(self.pre_attn_norm_spatial(x), seqlen)
         x = x + self.spatial_mlp(self.pre_mlp_norm_spatial(x))
         return x
 
-    def _temporal_step(self, x: torch.Tensor, seqlen: int) -> torch.Tensor:
+    def _temporal_step(self, x: Float[Tensor, "batch tokens channels"], seqlen: int) -> Float[Tensor, "batch tokens channels"]:
         x = x + self.temporal_attn(self.pre_attn_norm_temporal(x), seqlen)
         x = x + self.temporal_mlp(self.pre_mlp_norm_temporal(x))
         return x
 
-    def forward(self, x: torch.Tensor, seqlen: int = 1) -> torch.Tensor:
+    def forward(self, x: Float[Tensor, "batch tokens channels"], seqlen: int = 1) -> Float[Tensor, "batch tokens channels"]:
         # path_order is a string config attribute — resolves at trace time.
         if self.path_order == "spatial_first":
             return self._temporal_step(self._spatial_step(x, seqlen), seqlen)
@@ -231,14 +248,14 @@ class MVRayFusion(nn.Module):
             ]
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: Float[Tensor, "samples views channels"]) -> Float[Tensor, "samples channels"]:
         # nn.TransformerEncoderLayer can't handle B > 65535 (PyTorch limit).
         max_batch_size = 65535
         fusion_embedding = self.fusion_embedding.expand(x.shape[0], -1, -1)
         x = torch.cat([fusion_embedding, x], dim=-2)
         B = x.shape[0]
         for blk in self.fusion_layers:
-            outputs: list[torch.Tensor] = []
+            outputs: list[Float[Tensor, "subbatch views channels"]] = []
             start_idx = 0
             while start_idx < B:
                 end_idx = min(start_idx + max_batch_size, B)
@@ -257,12 +274,14 @@ class SMPLHeads(nn.Module):
     num_smpl_betas: int
     rot_dim: int
     num_smpl_poses: int
+    init_body_pose: Tensor
+    init_betas: Tensor
 
     def __init__(
         self,
         dim_feat: int,
-        init_body_pose: torch.Tensor | None = None,  # (1, 1, 144); zeros if None
-        init_betas: torch.Tensor | None = None,  # (1, 10); zeros if None
+        init_body_pose: Float[Tensor, "1 1 pose_dim"] | None = None,
+        init_betas: Float[Tensor, "1 10"] | None = None,
     ) -> None:
         super().__init__()
         self.num_smpl_betas = 10
@@ -286,7 +305,7 @@ class SMPLHeads(nn.Module):
         self.register_buffer("init_body_pose", init_body_pose)
         self.register_buffer("init_betas", init_betas)
 
-    def forward(self, readout_embedding: torch.Tensor) -> dict[str, torch.Tensor]:
+    def forward(self, readout_embedding: Float[Tensor, "batch time channels"]) -> SMPLHeadOutput:
         # Pool over the temporal axis for the per-clip shape head.
         x_mean_F = readout_embedding.mean(dim=1)
 

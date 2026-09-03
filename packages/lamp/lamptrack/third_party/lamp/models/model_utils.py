@@ -9,12 +9,15 @@
 The functions here are stateless and keep tensors on the caller's device, which
 makes them usable inside regular eager inference and CUDA Graph capture.
 """
-# pyright: reportPrivateImportUsage=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportConstantRedefinition=false, reportPossiblyUnboundVariable=false, reportMissingParameterType=false, reportUnknownParameterType=false
-
 from __future__ import annotations
 
+from typing import Any, cast
+
+import smplx
 import torch
 import torch.nn.functional as F
+from jaxtyping import Float
+from torch import Tensor
 
 # Constants
 
@@ -32,7 +35,7 @@ R_CG_CGZ: tuple[tuple[tuple[float, float, float], ...], ...] = (
 # SE(3) helpers
 
 
-def inverse_se3(T: torch.Tensor) -> torch.Tensor:
+def inverse_se3(T: Float[Tensor, "... 4 4"]) -> Float[Tensor, "... 4 4"]:
     """SE(3) inverse for a `(..., 4, 4)` rigid transform."""
     R = T[..., :3, :3]
     t = T[..., :3, 3:]
@@ -44,12 +47,12 @@ def inverse_se3(T: torch.Tensor) -> torch.Tensor:
     return T_inv
 
 
-def se3_transform_points(T: torch.Tensor, points: torch.Tensor) -> torch.Tensor:
+def se3_transform_points(T: Float[Tensor, "... 4 4"], points: Float[Tensor, "... points 3"]) -> Float[Tensor, "... points 3"]:
     """Apply rigid transform `T` to `points`."""
     return points @ T[..., :3, :3].transpose(-1, -2) + T[..., :3, 3].unsqueeze(-2)
 
 
-def reject_vector_a_from_b(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+def reject_vector_a_from_b(a: Float[Tensor, "... 3"], b: Float[Tensor, "... 3"]) -> Float[Tensor, "... 3"]:
     """Return `a - proj_b(a)`, the component of `a` orthogonal to `b`."""
     b_norm = torch.sqrt((b**2).sum(-1, keepdim=True))
     b_unit = b / b_norm
@@ -60,7 +63,7 @@ def reject_vector_a_from_b(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 # Rotation representations
 
 
-def rotation_6d_to_matrix(d6: torch.Tensor) -> torch.Tensor:
+def rotation_6d_to_matrix(d6: Float[Tensor, "... 6"]) -> Float[Tensor, "... 3 3"]:
     """Zhou et al. (2019) 6D rotation to 3x3 matrix via Gram-Schmidt."""
     a1, a2 = d6[..., :3], d6[..., 3:]
     b1 = F.normalize(a1, dim=-1)
@@ -74,10 +77,10 @@ def rotation_6d_to_matrix(d6: torch.Tensor) -> torch.Tensor:
 
 
 def gravity_align_T_world_cam(
-    T_world_cam: torch.Tensor,
-    gravity_w: torch.Tensor,
-    R_cg_cgz: torch.Tensor,
-) -> torch.Tensor:
+    T_world_cam: Float[Tensor, "... 4 4"],
+    gravity_w: Float[Tensor, "3"],
+    R_cg_cgz: Float[Tensor, "1 3 3"],
+) -> Float[Tensor, "... 4 4"]:
     """Build a gravity-aligned canonical local frame at `T_world_cam`."""
     assert T_world_cam.dim() > 1, f"expected dim > 1, got shape {T_world_cam.shape}"
     dim = T_world_cam.dim()
@@ -107,10 +110,10 @@ def gravity_align_T_world_cam(
 
 
 def get_T_x_c(
-    Ts_wc: torch.Tensor,
-    gravity_w: torch.Tensor,
-    R_cg_cgz: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    Ts_wc: Float[Tensor, "batch time 4 4"],
+    gravity_w: Float[Tensor, "3"],
+    R_cg_cgz: Float[Tensor, "1 3 3"],
+) -> tuple[Float[Tensor, "batch time 4 4"], Float[Tensor, "batch 1 4 4"]]:
     """Build a snippet-local canonical frame using the LAST camera pose."""
     # Use the last camera pose as the local-frame origin.
     T_w_x_anchor = Ts_wc[:, -1, ...]  # (B, 4, 4)
@@ -126,13 +129,16 @@ def get_T_x_c(
 # Camera unprojection (2D pixel → 3D ray)
 
 
-def pinhole_unproject(uv: torch.Tensor, params: torch.Tensor) -> torch.Tensor:
+def pinhole_unproject(
+    uv: Float[Tensor, "... points 2"], params: Float[Tensor, "... 4"]
+) -> Float[Tensor, "... points 3"]:
     """Pinhole 2D→3D ray with z=1."""
     assert uv.ndim in (3, 4), f"uv must be (B,N,2) or (B,T,N,2), got {uv.shape}"
     assert params.ndim in (2, 3), f"params must be (B,4) or (B,T,4), got {params.shape}"
     assert params.shape[-1] == 4
 
     has_t = uv.ndim == 4
+    T_ = 1
     if has_t:
         T_, N = uv.shape[1], uv.shape[2]
         uv = uv.reshape(-1, N, 2)
@@ -149,16 +155,16 @@ def pinhole_unproject(uv: torch.Tensor, params: torch.Tensor) -> torch.Tensor:
     return ray
 
 
-def _sign_plus(x: torch.Tensor) -> torch.Tensor:
+def _sign_plus(x: Float[Tensor, "..."]) -> Float[Tensor, "..."]:
     """Returns +1 for x >= 0, -1 for x < 0. Capture-safe (no .item)."""
     return 2.0 * (x >= 0.0).to(x.dtype) - 1.0
 
 
 def fisheye624_unproject(
-    uv: torch.Tensor,
-    params: torch.Tensor,
+    uv: Float[Tensor, "... points 2"],
+    params: Float[Tensor, "... params"],
     max_iters: int = 5,
-) -> torch.Tensor:
+) -> Float[Tensor, "... points 3"]:
     """FisheyeRadTanThinPrism 2D -> 3D ray via Newton inverse."""
     assert uv.ndim == 3 or uv.ndim == 4, "Expected batched input shaped Bx(T)xNx2"
     assert uv.shape[-1] == 2
@@ -269,16 +275,13 @@ def fisheye624_unproject(
 
 
 def get_cam_ray(
-    cam_params: torch.Tensor,
-    kp_2ds: torch.Tensor,
-    T_x_c: torch.Tensor | None = None,
-) -> torch.Tensor:
+    cam_params: Float[Tensor, "batch time params"],
+    kp_2ds: Float[Tensor, "batch time points 3"],
+    T_x_c: Float[Tensor, "batch time 4 4"] | None = None,
+) -> Float[Tensor, "batch time points 7"]:
     """2D keypoint → Plücker ray (direction, normal, score) in local frame."""
     is_pinhole = cam_params.shape[-1] == 4
-    if is_pinhole:
-        ray_dirs = pinhole_unproject(kp_2ds[..., :2], cam_params)
-    else:
-        ray_dirs = fisheye624_unproject(kp_2ds[..., :2], cam_params)
+    ray_dirs = pinhole_unproject(kp_2ds[..., :2], cam_params) if is_pinhole else fisheye624_unproject(kp_2ds[..., :2], cam_params)
 
     ray_dirs = F.normalize(ray_dirs, p=2.0, dim=-1, eps=1e-6)
     # `zeros_like` already lives on `ray_dirs`'s device; no `.to()` needed.
@@ -300,12 +303,12 @@ def get_cam_ray(
 
 
 def transform_smpl_params(
-    root_orient: torch.Tensor,
-    transl: torch.Tensor,
-    R: torch.Tensor,
-    t: torch.Tensor,
-    smpl_t_pose_pelvis: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    root_orient: Float[Tensor, "batch time 3 3"],
+    transl: Float[Tensor, "batch time 3"],
+    R: Float[Tensor, "batch time 3 3"],
+    t: Float[Tensor, "batch time 3"],
+    smpl_t_pose_pelvis: Float[Tensor, "batch 3"],
+) -> tuple[Float[Tensor, "batch time 3 3"], Float[Tensor, "batch time 3"]]:
     """Apply a rigid transform (R, t) to the SMPL root pose, fixing the T-pose pelvis offset."""
     smpl_t_pose_pelvis = smpl_t_pose_pelvis.unsqueeze(-2).unsqueeze(-1)  # (B, 1, 3, 1)
     transl = transl.unsqueeze(-1).float()  # (B, T, 3, 1)
@@ -315,7 +318,7 @@ def transform_smpl_params(
     return root_orient, transl.squeeze(-1)
 
 
-def matrix_to_axis_angle(rotmat: torch.Tensor) -> torch.Tensor:
+def matrix_to_axis_angle(rotmat: Float[Tensor, "... 3 3"]) -> Float[Tensor, "... 3"]:
     """Rotation matrix → axis-angle (Rodrigues) representation."""
     if rotmat.shape[-2:] != (3, 3):
         raise ValueError(f"rotmat must end in shape (3, 3); got {rotmat.shape}")
@@ -380,13 +383,13 @@ def matrix_to_axis_angle(rotmat: torch.Tensor) -> torch.Tensor:
 
 
 def smpl_forward_joints_lamp_outputs(
-    smpl_model,  # smplx.SMPL — duck-typed so import isn't required at module load
-    betas: torch.Tensor,
-    body_pose_rotmat: torch.Tensor,
-    global_orient_rotmat: torch.Tensor,
-    transl: torch.Tensor,
+    smpl_model: smplx.SMPL,
+    betas: Float[Tensor, "batch 10"],
+    body_pose_rotmat: Float[Tensor, "batch time 23 3 3"],
+    global_orient_rotmat: Float[Tensor, "batch time 1 3 3"],
+    transl: Float[Tensor, "batch time 3"],
     return_verts: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
+) -> tuple[Float[Tensor, "batch time 24 3"], Float[Tensor, "batch time 6890 3"] | None]:
     """Wrap `smplx.SMPL.forward` for rotation-matrix (B, T) inputs; returns LAMP joints/verts."""
     B, T = body_pose_rotmat.shape[:2]
     body_pose_aa = matrix_to_axis_angle(body_pose_rotmat).reshape(B * T, -1)
@@ -394,7 +397,7 @@ def smpl_forward_joints_lamp_outputs(
     betas_bt = betas.unsqueeze(1).expand(-1, T, -1).reshape(B * T, -1)
     transl_bt = transl.reshape(B * T, -1)
 
-    smpl_out = smpl_model.forward(
+    smpl_out: Any = cast(Any, smpl_model.forward)(
         betas=betas_bt,
         body_pose=body_pose_aa,
         global_orient=global_orient_aa,
@@ -402,7 +405,7 @@ def smpl_forward_joints_lamp_outputs(
         return_verts=return_verts,
     )
     smpl_joints = smpl_out.joints[:, :24].reshape(B, T, 24, 3)
-    smpl_verts: torch.Tensor | None = None
+    smpl_verts: Tensor | None = None
     if return_verts:
         smpl_verts = smpl_out.vertices.reshape(B, T, 6890, 3)
     return smpl_joints, smpl_verts

@@ -11,9 +11,12 @@ from __future__ import annotations
 import logging
 
 import numpy as np
+from jaxtyping import Float32
+from numpy import ndarray
+
 from lamptrack.third_party.lamp.core.types import Person, PersonState
 from lamptrack.third_party.lamp.models.lifter import SnippetData
-from lamptrack.third_party.lamp.tracking.tracking_utils import cam_params_16, SensorRecord
+from lamptrack.third_party.lamp.tracking.tracking_utils import SensorRecord, cam_params_16
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -23,7 +26,7 @@ def build_snippets_for_lifting(
     sensor_data_per_cam: dict[int, dict[int, SensorRecord]],
     *,
     snippet_length: int,
-    T_gravity_world: np.ndarray,
+    T_gravity_world: Float32[ndarray, "4 4"],
     kp_thres: float,
     num_views: int,
     min_track_frame_ratio: float,
@@ -70,7 +73,7 @@ def _build_person_snippet(
     person: Person,
     snippet_timestamps: list[int],
     sensor_data_per_cam: dict[int, dict[int, SensorRecord]],
-    T_gravity_world: np.ndarray,
+    T_gravity_world: Float32[ndarray, "4 4"],
     kp_thres: float,
     num_views: int,
     view_slot_by_cam: dict[int, int],
@@ -86,7 +89,7 @@ def _build_person_snippet(
     # Allocated lazily so each view's width follows its camera model: 16 for
     # fisheye624, 4 for pinhole. `get_cam_ray` routes on this width, so a pinhole
     # view must stay length-4 rather than being padded to 16.
-    cam_params_per_view: list[np.ndarray | None] = [None] * num_views
+    cam_params_per_view: list[Float32[ndarray, "t params"] | None] = [None] * num_views
 
     num_found_ts = 0
     last_found_idx = -1
@@ -161,7 +164,7 @@ def _build_person_snippet(
 def _fill_keypoints_at_timestamp(
     *,
     state: PersonState,
-    kp2ds_per_view: list[np.ndarray],
+    kp2ds_per_view: list[Float32[ndarray, "t 17 3"]],
     t_idx: int,
     kp_thres: float,
     view_slot_by_cam: dict[int, int],
