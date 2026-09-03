@@ -1,0 +1,28 @@
+{
+  "errors": [
+    {
+      "line": 112,
+      "column": 13,
+      "stop_line": 112,
+      "stop_column": 26,
+      "path": "src/gauss_surf/train_gsplat/renderer.py",
+      "code": -2,
+      "name": "unexpected-keyword",
+      "description": "Unexpected keyword argument `extra_signals` in function `gsplat.rendering.rasterization`",
+      "concise_description": "Unexpected keyword argument `extra_signals` in function `gsplat.rendering.rasterization`",
+      "severity": "error"
+    },
+    {
+      "line": 113,
+      "column": 13,
+      "stop_line": 113,
+      "stop_column": 36,
+      "path": "src/gauss_surf/train_gsplat/renderer.py",
+      "code": -2,
+      "name": "unexpected-keyword",
+      "description": "Unexpected keyword argument `extra_signals_sh_degree` in function `gsplat.rendering.rasterization`",
+      "concise_description": "Unexpected keyword argument `extra_signals_sh_degree` in function `gsplat.rendering.rasterization`",
+      "severity": "error"
+    }
+  ]
+}

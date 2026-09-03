@@ -11,7 +11,7 @@ import torch
 from numpy.testing import assert_allclose, assert_array_equal
 from rerun.catalog import DatasetEntry
 from rerun.experimental import RrdReader
-from simplecv.ops.tsdf_depth_fuser import Open3DFuser
+from simplecv.ops.tsdf_depth_fuser import Open3DFuser, log_fused_mesh
 
 pytest.importorskip("pyarrow", reason="ARKitScenes catalog deps live in the PromptDA catalog lanes")
 pytest.importorskip("arkitscenes_download", reason="ARKitScenes catalog deps live in the PromptDA catalog lanes")
@@ -25,7 +25,6 @@ from simplecv.rerun_dataloader import SegmentNvdecDecoder  # noqa: E402
 
 from rerun_prompt_da.apis.arkitscenes_shared import (  # noqa: E402
     filter_depth_for_fusion,
-    log_fused_mesh,
     segments_to_process,
     stride_for,
     world_t_cam_from_pose,
@@ -50,7 +49,7 @@ def test_promptda_layer_rrd_keeps_depth_and_mesh_contract(tmp_path: Path) -> Non
             o3d.utility.Vector3iVector(np.array([[0, 1, 2]], dtype=np.int32)),
         )
         mesh.compute_vertex_normals()
-        log_fused_mesh(recording, PROMPTDA_MESH, mesh)
+        log_fused_mesh(PROMPTDA_MESH, mesh, recording=recording)
 
     reader: RrdReader = RrdReader(rrd_path)
     chunks = list(reader.stream(store=reader.recordings()[0]).to_chunks())
@@ -82,6 +81,7 @@ def test_promptda_dataset_uses_nvdec_and_fetches_fusion_confidence(monkeypatch: 
     fields = captured["dataset_kwargs"]["fields"]  # type: ignore[index]
     assert fields["video"].decode is decoder  # type: ignore[index]
     assert fields["conf"].path == f"/{CONFIDENCE}:SegmentationImage:buffer"  # type: ignore[index]
+    assert captured["dataset_kwargs"]["fetch_block_size"] == 1024  # type: ignore[index]
 
 
 def test_promptda_collate_keeps_stored_confidence_and_honors_ingest_rotation() -> None:

@@ -247,8 +247,8 @@ def main(config: Config) -> None:
         if backend == "moge-infer":
             loaded: tuple[MoGeModel, int] = load_pinned_moge_v2(config.encoder, config.resolution_level)
             model: MoGeModel = loaded[0]
-            primary_image_b3hw: Float32[Tensor, "b 3 h w"] = rearrange(primary_rgb_bhw3, "b h w c -> b c h w").float() / 255.0  # pyrefly: ignore  # bad-argument-type — einops stub false positive
-            widescreen_image_b3hw: Float32[Tensor, "1 3 h w"] = rearrange(widescreen_rgb_bhw3, "b h w c -> b c h w").float() / 255.0  # pyrefly: ignore  # bad-argument-type — einops stub false positive
+            primary_image_b3hw: Float32[Tensor, "b 3 h w"] = rearrange(primary_rgb_bhw3, "b h w c -> b c h w").float() / 255.0
+            widescreen_image_b3hw: Float32[Tensor, "1 3 h w"] = rearrange(widescreen_rgb_bhw3, "b h w c -> b c h w").float() / 255.0
             for batch_size in config.batch_sizes:
                 rows.append(_benchmark_moge_infer(model, primary_image_b3hw[:batch_size], config.resolution_level, config.warmup_iters, config.timed_iters))
             rows.append(_benchmark_moge_infer(model, widescreen_image_b3hw, config.resolution_level, config.warmup_iters, config.timed_iters))
