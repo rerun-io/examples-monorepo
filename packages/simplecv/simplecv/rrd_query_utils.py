@@ -4,13 +4,15 @@ import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 import rerun as rr
 from numpy import ndarray
+
+T = TypeVar("T")  # simplecv still supports Python 3.10, so no PEP 695 type parameters here.
 
 
 def _normalize_content_expr(expr: str) -> str:
@@ -54,6 +56,18 @@ def first_valid_value(
         return None
     column_name = component_name or "(unknown component)"
     raise ValueError(f"Expected at least one non-null value in column '{column_name}'")
+
+
+def first_valid_value_as(column: pa.ChunkedArray | pa.Array, kind: type[T], *, component_name: str | None = None) -> T:
+    """:func:`first_valid_value` narrowed to ``kind``, so callers get a precise type instead of ``Any``.
+
+    Raises:
+        TypeError: If the first non-null value is not an instance of ``kind``.
+    """
+    value = first_valid_value(column, component_name=component_name)
+    if not isinstance(value, kind):
+        raise TypeError(f"column '{component_name or '(unknown component)'}' holds {type(value).__name__}, expected {kind.__name__}")
+    return value
 
 
 def series_to_int64_ns(series: pd.Series) -> ndarray:
