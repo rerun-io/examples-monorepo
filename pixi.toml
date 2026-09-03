@@ -656,7 +656,7 @@ pyturbojpeg = ">=2.0.0,<3"
 [feature.zipdepth.activation.env]
 PACKAGE_DIR = "packages/zipdepth"
 # authored code only; the unmodified upstream tree (data/loss/training/evaluation/upstream_cli) is a vendor boundary
-PYREFLY_TARGET = "zipdepth/apis zipdepth/__init__.py tests tools"
+PYREFLY_TARGET = "zipdepth/apis zipdepth/catalog zipdepth/__init__.py tests tools"
 
 [feature.zipdepth.tasks.zipdepth-infer-rerun]
 cmd = "python tools/infer_rerun.py"
@@ -672,7 +672,38 @@ description = "Smoke: self-distilled example data -> train -> resume -> torchrun
 cmd = "python tools/export_prompted_trt.py"
 cwd = "packages/zipdepth"
 description = "Export, build, parity-check, and benchmark static-batch fp16 ZipDepth-PromptDA ONNX/TensorRT"
+
+# Catalog training lane: chosen-frame PromptDA pseudo-labels from the local Rerun catalog.
 # linux-64 only: NVDEC decode via torchcodec, mirroring prompt-da-stream.
+[feature.zipdepth-catalog]
+platforms = ["linux-64"]
+
+[feature.zipdepth-catalog.dependencies]
+# arkitscenes_download.ingest imports these at package load.
+imagecodecs = ">=2024.9.22"
+trimesh = "*"
+pillow = "*"
+av = ">=18"
+# simplecv's open_segment_decoder decodes the segment's AV1 packets on NVDEC.
+torchcodec = "*"
+# ffmpeg <902 links libjxl 0.11 and dlopen-fails beside the env's 0.12.
+ffmpeg = { version = ">=8.1", build-number = ">=902" }
+# torch.cuda.utilization() backend for the IO-vs-GPU training instrumentation.
+nvidia-ml-py = "*"
+
+[feature.zipdepth-catalog.pypi-dependencies]
+arkitscenes-download = { path = "packages/arkitscenes-download", editable = true }
+
+[feature.zipdepth-catalog.tasks.zipdepth-catalog-throughput]
+cmd = "python tools/catalog_throughput.py"
+cwd = "packages/zipdepth"
+description = "Measure catalog->batch throughput (frames/s, per-stage ms) over warm promptda segments"
+
+[feature.zipdepth-catalog.tasks.zipdepth-eval-catalog]
+cmd = "python tools/eval_catalog.py"
+cwd = "packages/zipdepth"
+description = "Unaligned metric AbsRel/delta1/MAE vs held-out PromptDA labels, with separately named aligned diagnostics"
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # wilor-nano
@@ -2631,6 +2662,21 @@ zipdepth-dev = { features = [
     "zipdepth",
     "dev",
 ], solve-group = "zipdepth", no-default-feature = true }
+zipdepth-catalog = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "zipdepth",
+    "zipdepth-catalog",
+], solve-group = "zipdepth-catalog", no-default-feature = true }
+zipdepth-catalog-dev = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "zipdepth",
+    "zipdepth-catalog",
+    "dev",
+], solve-group = "zipdepth-catalog", no-default-feature = true }
 wilor-nano = { features = [
     "common",
     "cuda",
