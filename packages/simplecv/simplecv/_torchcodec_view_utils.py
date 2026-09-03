@@ -27,8 +27,8 @@ def build_blueprint(video_names: list[str]) -> rrb.Blueprint:
         )
         rows.append(row)
 
-    preview_start_time: rr.datatypes.TimeInt = rr.datatypes.TimeInt(seconds=0.0)
-    preview_end_time: rr.datatypes.TimeInt = rr.datatypes.TimeInt(seconds=PREVIEW_SECONDS)
+    preview_start_time: rr.encodings.TimeInt = rr.encodings.TimeInt(seconds=0.0)
+    preview_end_time: rr.encodings.TimeInt = rr.encodings.TimeInt(seconds=PREVIEW_SECONDS)
     preview_time_selection: rrb.components.AbsoluteTimeRange = rrb.components.AbsoluteTimeRange(
         min=preview_start_time,
         max=preview_end_time,
