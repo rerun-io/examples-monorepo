@@ -146,7 +146,7 @@ def process_segment(dataset: DatasetEntry, segment_id: str, config: Config, pred
         })["depth"]
         # Undo the collate's landscape rotation so the prediction sits in the same frame
         # as the relayed video and the stored intrinsics.
-        depth_bhw: Float32[Tensor, "b net_h net_w"] = rearrange(depth_b1hw, "b 1 h w -> b h w")  # pyrefly: ignore  # bad-argument-type — einops stub false positive
+        depth_bhw: Float32[Tensor, "b net_h net_w"] = rearrange(depth_b1hw, "b 1 h w -> b h w")
         depth_mm_bhw: UInt16[Tensor, "b pred_h pred_w"] = torch.rot90(
             (depth_bhw * 1000.0).to(torch.uint16), -batch.quarter_turns, dims=(1, 2)
         )

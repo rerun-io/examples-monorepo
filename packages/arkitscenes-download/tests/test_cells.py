@@ -3,7 +3,12 @@
 import numpy as np
 import pytest
 
-from arkitscenes_download.ingest.cells import landscape_quarter_turns, portrait_from_segment_row, segment_property
+from arkitscenes_download.ingest.cells import component_instance, landscape_quarter_turns, portrait_from_segment_row, segment_property
+
+
+def test_component_instance_unwraps_a_string_component() -> None:
+    """Decode a one-instance string component cell to its scalar value."""
+    assert component_instance(["brown_conrady"], "model") == "brown_conrady"
 
 
 @pytest.mark.parametrize(
