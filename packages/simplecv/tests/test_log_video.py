@@ -206,6 +206,32 @@ def test_log_video_sends_chunks_incrementally(synthetic_h264_mp4: Path, monkeypa
     assert len(timestamps_ns) == _FRAME_COUNT
 
 
+def test_log_video_does_not_materialize_static_chunks(synthetic_h264_mp4: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Forward static metadata without converting it to an Arrow record batch."""
+    real_stream = rrx.Mp4Reader.stream
+
+    class StaticChunk:
+        is_static: bool = True
+
+        def to_record_batch(self) -> None:
+            raise AssertionError("static chunks must not be materialized")
+
+    def stream_with_static(self: rrx.Mp4Reader) -> Iterator[object]:
+        yield StaticChunk()
+        yield from real_stream(self)
+
+    def consume(_recording: rr.RecordingStream, chunks: Iterable[object]) -> None:
+        list(chunks)
+
+    monkeypatch.setattr(rrx.Mp4Reader, "stream", stream_with_static)
+    monkeypatch.setattr(rr.RecordingStream, "send_chunks", consume)
+    rec: rr.RecordingStream = rr.RecordingStream(application_id="test-log-video-static", recording_id="static")
+
+    timestamps_ns: Int64[ndarray, "num_frames"] = log_video(synthetic_h264_mp4, Path("/video"), recording=rec)
+
+    assert len(timestamps_ns) == _FRAME_COUNT
+
+
 def test_log_video_reencodes_hevc_to_h264(synthetic_hevc_mp4: Path, tmp_path: Path) -> None:
     """Callers can request H.264 output for browser compatibility."""
     if not _can_open_local_socket():
