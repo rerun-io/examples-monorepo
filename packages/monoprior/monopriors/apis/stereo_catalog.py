@@ -21,6 +21,7 @@ from jaxtyping import Float32, Float64, UInt8, UInt16
 from rerun.catalog import CatalogClient, DatasetEntry, DatasetView
 from scipy.spatial.transform import Rotation
 from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion, PinholeParameters, rescale_intri
+from simplecv.catalog_video_codec import CatalogCodecName, catalog_codec_name
 from simplecv.ops.tsdf_depth_fuser import Open3DFuser
 from simplecv.rerun_dataloader import open_segment_decoder
 from simplecv.rerun_log_utils import RerunTyroConfig, log_open3d_mesh
@@ -181,10 +182,11 @@ def main(config: StereoCatalogConfig) -> None:
     print(f"rectified pair: baseline {rect.baseline_m * 1000:.1f} mm, fx_rect {rect.left_rect.intrinsics.fl_x:.1f} px; {len(pose_times)} rig poses")
 
     device: torch.device = torch.device("cuda")
-    video_codec: rr.VideoCodec = rr.VideoCodec(int(np.asarray(read_static(view, f"{RIG}/{config.left_cam}/pinhole/video", "VideoStream:codec")).ravel()[0]))
-    codec: str = "h264" if video_codec == rr.VideoCodec.H264 else "av1"
+    codec_value: int = int(np.asarray(read_static(view, f"{RIG}/{config.left_cam}/pinhole/video", "VideoStream:codec")).ravel()[0])
+    video_codec: rr.VideoCodec = rr.VideoCodec(codec_value)
+    codec: CatalogCodecName = catalog_codec_name(codec_value)
     decoders: dict[str, tuple[np.ndarray, list[bytes], list[bool], SegmentVideoDecoder]] = {
-        cam: open_segment_decoder(dataset, config.segment_id, f"{RIG}/{cam}/pinhole/video", TIMELINE, device, 30, codec) for cam in (config.left_cam, config.right_cam)
+        cam: open_segment_decoder(dataset, config.segment_id, f"{RIG}/{cam}/pinhole/video", TIMELINE, device, 30) for cam in (config.left_cam, config.right_cam)
     }
     left_times, right_times = decoders[config.left_cam][0], decoders[config.right_cam][0]
     t_start_ns: int = int(max(left_times[0], right_times[0]).astype("int64"))
