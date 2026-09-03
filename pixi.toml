@@ -1432,6 +1432,18 @@ vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f
 PACKAGE_DIR = "packages/exo-calib"
 PYREFLY_TARGET = "exo_calib"
 
+[feature.exo-calib.tasks.exocalib-pipeline]
+cmd = "python tools/apps/pipeline.py"
+cwd = "packages/exo-calib"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Full calibration of one catalog segment: Stage A, two passes of Stage B + C+D, Stage E"
+
+[feature.exo-calib.tasks.exocalib-blueprint]
+cmd = "python tools/apps/blueprint.py"
+cwd = "packages/exo-calib"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Write the exoego-layout .rbl bound to the dataset's current id and register it as the default blueprint"
+
 [feature.exo-calib.tasks.exocalib-init]
 cmd = "python tools/apps/calibrate_init.py"
 cwd = "packages/exo-calib"
@@ -1443,6 +1455,18 @@ cmd = "python tools/apps/keypoints2d.py"
 cwd = "packages/exo-calib"
 env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
 description = "Stage B: reprojection-tracked boxes (YOLOX re-anchoring) + RTMW-x (TensorRT) COCO-133 keypoints over the whole capture, registered as exocalib_kp2d"
+
+[feature.exo-calib.tasks.exocalib-refine]
+cmd = "python tools/apps/refine.py"
+cwd = "packages/exo-calib"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Stage C+D: correspondences, robust triangulation, kornia-rs BA, focal stage, MoGe-2 metric rescale, registered as exocalib_refined"
+
+[feature.exo-calib.tasks.exocalib-report]
+cmd = "python tools/apps/report.py"
+cwd = "packages/exo-calib"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Stage E: SE3/Sim3 eval vs GT (eval.json) plus the exocalib_align layer"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # vistadream
