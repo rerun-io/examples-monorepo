@@ -1138,7 +1138,6 @@ tyro = ">=0.9.1,<0.10"
 sapiens-coco133-pose = { path = "packages/sapiens-coco133-pose", editable = true }
 trtkit = { path = "packages/trtkit", editable = true }
 sapiens2-pose = { path = "packages/sapiens2-pose", editable = true }
-mv-api = { path = "packages/mv-api", editable = true }
 wilor_nano = { path = "packages/wilor-nano", editable = true }
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 onnx = "*"
