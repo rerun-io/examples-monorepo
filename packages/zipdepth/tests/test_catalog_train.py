@@ -265,15 +265,15 @@ def test_constant_cooldown_is_flat_then_linear() -> None:
         final_div_factor=10.0,
         cooldown_pct=0.3,
     )
-    lrs: list[float] = [optimizer.param_groups[0]["lr"]]
+    used_lrs: list[float] = []
     for _ in range(10):
+        used_lrs.append(optimizer.param_groups[0]["lr"])
         optimizer.step()
         scheduler.step()
-        lrs.append(optimizer.param_groups[0]["lr"])
 
     assert isinstance(scheduler, ConstantCooldownLR)
-    assert lrs[:8] == [1.0] * 8
-    assert lrs[8:] == pytest.approx([0.7, 0.4, 0.1])
+    assert used_lrs[:7] == [1.0] * 7
+    assert used_lrs[7:] == pytest.approx([0.7, 0.4, 0.1])
 
 
 def test_stage_schedule_defaults_to_one_unchanged_resolution() -> None:

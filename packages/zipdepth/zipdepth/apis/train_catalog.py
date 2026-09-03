@@ -450,10 +450,10 @@ class ConstantCooldownLR(optim.lr_scheduler.LRScheduler):
     def get_lr(self) -> list[float | Tensor]:
         """Return the learning rate for the scheduler's current step."""
         step: int = min(self.last_epoch, self.total_steps)
-        if step <= self.constant_steps:
+        if step < self.constant_steps:
             factor: float = 1.0
         else:
-            progress: float = (step - self.constant_steps) / self.cooldown_steps
+            progress: float = min((step - self.constant_steps + 1) / self.cooldown_steps, 1.0)
             factor = 1.0 + (self.final_factor - 1.0) * progress
         return [base_lr * factor for base_lr in self.base_lrs]
 
