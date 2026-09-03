@@ -1432,6 +1432,18 @@ vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f
 PACKAGE_DIR = "packages/exo-calib"
 PYREFLY_TARGET = "exo_calib"
 
+[feature.exo-calib.tasks.exocalib-init]
+cmd = "python tools/apps/calibrate_init.py"
+cwd = "packages/exo-calib"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Stage A: G3T + MoGe-2 initial extrinsics/intrinsics, registered as exocalib_init"
+
+[feature.exo-calib.tasks.exocalib-kp2d]
+cmd = "python tools/apps/keypoints2d.py"
+cwd = "packages/exo-calib"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Stage B: reprojection-tracked boxes (YOLOX re-anchoring) + RTMW-x (TensorRT) COCO-133 keypoints over the whole capture, registered as exocalib_kp2d"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # vistadream
 # ═══════════════════════════════════════════════════════════════════════════
