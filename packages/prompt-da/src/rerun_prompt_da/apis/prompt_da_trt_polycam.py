@@ -8,28 +8,27 @@ demo. Prints model and end-to-end throughput so speedups are measurable.
 
 import time
 from dataclasses import dataclass, field
-from itertools import batched, chain
 from pathlib import Path
 
-import numpy as np
 import rerun as rr
 import torch
 from jaxtyping import Float32, UInt8, UInt16
-from monopriors.models.depth_completion.prompt_da import ensure_multiple_of
 from numpy import ndarray
 from simplecv.data.polycam import (
     DepthConfidenceLevel,
     PolycamData,
     PolycamDataset,
     load_polycam_data,
+    prepare_polycam_batches,
+    stack_polycam_batch,
 )
+from simplecv.ops.depth import quantize_depth_m_to_mm
 from simplecv.ops.tsdf_depth_fuser import Open3DFuser
 from simplecv.rerun_log_utils import RerunTyroConfig
 from torch import Tensor
-from tqdm import tqdm
 
 from rerun_prompt_da.apis.prompt_da_polycam import _log_mesh, create_blueprint, filter_depth, log_polycam_data
-from rerun_prompt_da.trt_predictor import PromptDATrtPredictor
+from rerun_prompt_da.trt_predictor import PromptDATrtPredictor, network_image_hw
 
 
 @dataclass
@@ -42,6 +41,8 @@ class PDATrtPolycamConfig:
     """Rerun viewer/save/connect behavior."""
     batch_size: int = 8
     """Frames per TensorRT batch (engine profile optimum and max)."""
+    max_frames: int | None = None
+    """Optional cap on processed frames."""
     max_image_size: int = 1008
     """Longest network image side; the actual size is 14-aligned from the capture resolution."""
     max_depth_range_meter: float = 4.0
@@ -52,22 +53,6 @@ class PDATrtPolycamConfig:
     """Log the fused mesh after every batch instead of only at the end."""
 
 
-def network_image_hw(capture_hw: tuple[int, int], max_image_size: int) -> tuple[int, int]:
-    """14-align the capture resolution scaled to fit ``max_image_size``.
-
-    Mirrors the torch predictor's preprocessing policy so both backends run
-    the network at the same resolution.
-
-    Args:
-        capture_hw: Native capture (height, width).
-        max_image_size: Longest allowed network side.
-
-    Returns:
-        Network (height, width), each a multiple of 14.
-    """
-    height, width = capture_hw
-    scale: float = min(1.0, max_image_size / max(height, width))
-    return (ensure_multiple_of(height * scale), ensure_multiple_of(width * scale))
 
 
 def pda_trt_polycam_inference(config: PDATrtPolycamConfig) -> None:
@@ -82,40 +67,35 @@ def pda_trt_polycam_inference(config: PDATrtPolycamConfig) -> None:
         max_fusion_depth=config.max_depth_range_meter,
     )
 
-    # Consume the capture in batch-sized chunks so memory stays bounded on
-    # long recordings; only the first batch is peeked to size the engine.
-    batches = batched(polycam_dataset, config.batch_size)
-    first_batch: tuple[PolycamData, ...] | None = next(batches, None)
-    if first_batch is None:
-        raise ValueError(f"Polycam capture {config.polycam_zip_path} contains no frames.")
-    image_hw: tuple[int, int] = network_image_hw(first_batch[0].rgb_hw3.shape[:2], config.max_image_size)
-    predictor = PromptDATrtPredictor(
-        model_type="large",
-        image_hw=image_hw,
+    batch_plan = prepare_polycam_batches(
+        polycam_dataset,
         batch_size=config.batch_size,
+        max_frames=config.max_frames,
+        capture_path=config.polycam_zip_path,
+        description="Inferring (TRT)",
     )
+    first_batch: tuple[PolycamData, ...] = batch_plan.first_batch
+    image_hw: tuple[int, int] = network_image_hw(first_batch[0].rgb_hw3.shape[:2], config.max_image_size)
+    predictor = PromptDATrtPredictor(model_type="large", image_hw=image_hw, batch_size=config.batch_size)
 
     n_frames: int = 0
     model_seconds: float = 0.0
     wall_start: float = time.perf_counter()
-    total_batches: int = -(-len(polycam_dataset) // config.batch_size)
-    progress = tqdm(chain([first_batch], batches), desc="Inferring (TRT)", total=total_batches)
     batch: tuple[PolycamData, ...]
-    for batch in progress:
+    for batch in batch_plan:
         batch_start: int = n_frames
         n_frames += len(batch)
-        rgb_bhw3: UInt8[Tensor, "b h w 3"] = torch.from_numpy(np.stack([data.rgb_hw3 for data in batch]))
-        prompt_bhw: Float32[Tensor, "b 192 256"] = torch.from_numpy(
-            np.stack([data.original_depth_hw for data in batch]).astype(np.float32) / 1000.0
-        )
+        tensor_batch: tuple[UInt8[Tensor, "b h w 3"], Float32[Tensor, "b 192 256"]] = stack_polycam_batch(batch)
+        rgb_bhw3: UInt8[Tensor, "b h w 3"] = tensor_batch[0]
+        prompt_bhw: Float32[Tensor, "b 192 256"] = tensor_batch[1]
 
         torch.cuda.synchronize()
         model_start: float = time.perf_counter()
-        depth_bhw: Float32[Tensor, "b h w"] = predictor(rgb_bhw3.cuda(), prompt_bhw.cuda())
+        depth_bhw: Float32[Tensor, "b h w"] = predictor(rgb_bhw3, prompt_bhw)
         torch.cuda.synchronize()
         model_seconds += time.perf_counter() - model_start
 
-        depth_mm_bhw: UInt16[ndarray, "b h w"] = (depth_bhw.cpu().numpy() * 1000).astype(np.uint16)
+        depth_mm_bhw: UInt16[ndarray, "b h w"] = quantize_depth_m_to_mm(depth_bhw).cpu().numpy()
         for frame_offset, polycam_data in enumerate(batch):
             frame_idx: int = batch_start + frame_offset
             rr.set_time("frame_idx", sequence=frame_idx)
