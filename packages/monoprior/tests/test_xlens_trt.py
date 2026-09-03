@@ -64,17 +64,16 @@ def _assert_parity(prediction: RigDepthPrediction, reference: RigDepthPrediction
 
 
 def test_dynamic_profile_engine_serves_batches_and_other_shapes(checkpoint: Path, pair: ETH3DRigPair, reference: RigDepthPrediction) -> None:
-    """One dynamic engine (views 2-4, up to the ETH3D crop, batch 2) matches eager fp32 at the rig shape and at a smaller off-profile-opt shape."""
+    """The default profile, one dynamic engine (views 2-4, up to the ETH3D crop, batch 2), matches eager fp32 at the rig shape and at a smaller off-opt shape."""
     height: int = pair.images.shape[1]
     width: int = pair.images.shape[2]
     predictor = XLensTrtPredictor(
         checkpoint=checkpoint,
         use_cuda_graph=True,
-        profile="dynamic",
         dynamic_views=(2, 4),
         dynamic_height=(280, height),
         dynamic_width=(336, width),
-        dynamic_max_batch_size=2,
+        max_batch_size=2,
     )
     prediction: RigDepthPrediction = predictor(pair.images, pair.rays, pair.cam_types, pair.cam_T_ref)
     assert predictor.engine_path is not None and "dyn_v2-4" in predictor.engine_path.name
@@ -105,7 +104,7 @@ def test_dynamic_profile_engine_serves_batches_and_other_shapes(checkpoint: Path
 
 def test_tensorrt_matches_eager_fp32_and_keeps_accuracy(checkpoint: Path, pair: ETH3DRigPair, reference: RigDepthPrediction) -> None:
     """The rig-profile engine (dynamic batch up to 4) stays within 2% median abs-rel of eager fp32 and inside the ETH3D regression band."""
-    predictor = XLensTrtPredictor(checkpoint=checkpoint, use_cuda_graph=True)
+    predictor = XLensTrtPredictor(checkpoint=checkpoint, use_cuda_graph=True, profile="rig", max_batch_size=4)
     prediction: RigDepthPrediction = predictor(pair.images, pair.rays, pair.cam_types, pair.cam_T_ref)
     assert predictor.engine_path is not None and predictor.engine_path.exists() and "_b4_" in predictor.engine_path.name
     replay: RigDepthPrediction = predictor(pair.images, pair.rays, pair.cam_types, pair.cam_T_ref)

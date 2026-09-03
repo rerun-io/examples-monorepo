@@ -31,7 +31,7 @@ from monopriors.models.rig_depth.xlens_trt import XLENS_CACHE_DIR
 
 Mode: TypeAlias = Literal["eager-bf16", "eager-frozen-bf16", "trt-rig-static", "trt-rig", "trt-dynamic"]
 """``trt-rig-static``: one static engine per rig (batch 1); ``trt-rig``: per-rig engine with a dynamic frameset batch;
-``trt-dynamic``: one engine over the view/resolution ranges. All TensorRT modes replay CUDA graphs."""
+``trt-dynamic``: the predictor's default profile, one engine over its view/resolution ranges. All TensorRT modes replay CUDA graphs."""
 ALL_MODES: tuple[Mode, ...] = ("eager-bf16", "eager-frozen-bf16", "trt-rig-static", "trt-rig", "trt-dynamic")
 
 TIMELINE: str = "video_time"
@@ -50,12 +50,12 @@ class Config:
     """Robocap segment recording id."""
     cams: tuple[str, ...] = ("cam_00", "cam_01", "cam_04", "cam_05")
     """Outward rig cameras."""
-    extra_cams: tuple[str, ...] = ("cam_02", "cam_03")
-    """Cameras appended for the six-view off-optimum row (the downward eye cameras; content is out of distribution but parity is measured against eager)."""
     settings: tuple[tuple[int, int], ...] = ((504, 896), (504, 798))
     """Network height and width per setting; frames are centre-cropped to the target aspect and resized."""
-    off_opt: tuple[tuple[int, tuple[int, int]], ...] = ((2, (504, 798)), (6, (504, 798)))
-    """View count and network size of the dynamic-engine rows away from its tuning shape."""
+    off_opt: tuple[tuple[int, tuple[int, int]], ...] = ((2, (504, 798)),)
+    """View count and network size of the dynamic-engine rows away from its tuning shape. Each row also needs an eager fp32
+    reference at that shape, which is why the catalog tool's 630x1120 default is not here: freezing its fp32 geometry beside the
+    resident engine exceeds 24 GB on the RTX 5090 (the catalog smoke measures that shape instead)."""
     batch_sizes: tuple[int, ...] = (2, 4)
     """Frameset batches timed through ``predict_batch`` on the ``trt-rig`` engine."""
     warmup_iters: int = 10
@@ -72,12 +72,6 @@ class Config:
     """TensorRT builder workspace cap."""
     max_batch_size: int = 4
     """``trt-rig`` engine batch profile maximum."""
-    dynamic_views: tuple[int, int] = (2, 6)
-    """``trt-dynamic`` view-count range."""
-    dynamic_height: tuple[int, int] = (280, 504)
-    """``trt-dynamic`` image-height range."""
-    dynamic_width: tuple[int, int] = (336, 896)
-    """``trt-dynamic`` image-width range."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,18 +239,12 @@ def build_predictor(mode: Mode, config: Config) -> BaseRigDepthPredictor:
     if mode == "eager-frozen-bf16":
         return XLensPredictor(device="cuda", checkpoint=config.checkpoint, amp="bf16", freeze_geometry=True)
     if mode == "trt-rig-static":
-        return XLensTrtPredictor(checkpoint=config.checkpoint, cache_dir=config.cache_dir, workspace_gib=config.workspace_gib, max_batch_size=1)
+        return XLensTrtPredictor(checkpoint=config.checkpoint, cache_dir=config.cache_dir, workspace_gib=config.workspace_gib, profile="rig")
     if mode == "trt-rig":
-        return XLensTrtPredictor(checkpoint=config.checkpoint, cache_dir=config.cache_dir, workspace_gib=config.workspace_gib, max_batch_size=config.max_batch_size)
-    return XLensTrtPredictor(
-        checkpoint=config.checkpoint,
-        cache_dir=config.cache_dir,
-        workspace_gib=config.workspace_gib,
-        profile="dynamic",
-        dynamic_views=config.dynamic_views,
-        dynamic_height=config.dynamic_height,
-        dynamic_width=config.dynamic_width,
-    )
+        return XLensTrtPredictor(
+            checkpoint=config.checkpoint, cache_dir=config.cache_dir, workspace_gib=config.workspace_gib, profile="rig", max_batch_size=config.max_batch_size
+        )
+    return XLensTrtPredictor(checkpoint=config.checkpoint, cache_dir=config.cache_dir, workspace_gib=config.workspace_gib)
 
 
 def time_calls(predictor: BaseRigDepthPredictor, frames: RigFrames, warmup_iters: int, timed_iters: int) -> tuple[list[float], RigDepthPrediction]:
@@ -347,11 +335,10 @@ def main(config: Config) -> None:
     if config.timed_iters < 1 or config.warmup_iters < 0:
         raise ValueError("timed_iters must be positive and warmup_iters non-negative")
 
-    all_cams: tuple[str, ...] = (*config.cams, *(cam for cam in config.extra_cams if cam not in config.cams))
     source_frames: dict[str, UInt8[ndarray, "h0 w0 3"]] | None = None
     cameras: dict[str, Fisheye62Parameters] | None = None
     try:
-        source_frames, cameras = catalog_frames(config, all_cams)
+        source_frames, cameras = catalog_frames(config, config.cams)
         first: UInt8[ndarray, "h0 w0 3"] = next(iter(source_frames.values()))
         print(f"catalog frames: {len(source_frames)} cameras at {first.shape[1]}x{first.shape[0]} from {config.segment_id}")
     except BeartypeException:
@@ -361,7 +348,7 @@ def main(config: Config) -> None:
 
     def frames_for(views: int, image_hw: tuple[int, int]) -> RigFrames:
         if source_frames is not None and cameras is not None:
-            return catalog_rig_frames(source_frames, cameras, all_cams[:views], image_hw)
+            return catalog_rig_frames(source_frames, cameras, config.cams[:views], image_hw)
         return synthetic_rig_frames(views, image_hw)
 
     def reference_for(frames: RigFrames) -> RigDepthPrediction:
@@ -400,7 +387,7 @@ def main(config: Config) -> None:
             print(f"  {predictor.runtime_summary()}")
             if mode == "trt-rig":
                 for batch in config.batch_sizes:
-                    if batch <= predictor.engine_batch_size:
+                    if batch <= predictor.max_batch_size:
                         batched_ms: list[float] = time_batches(predictor, frames, batch, max(1, config.warmup_iters // 2), config.timed_iters)
                         timings.append(
                             TimingRow(
@@ -426,8 +413,8 @@ def main(config: Config) -> None:
 
     if dynamic is not None:
         for views, image_hw in config.off_opt:
-            if views > len(all_cams):
-                print(f"skipping {views}-view row: only {len(all_cams)} cameras configured")
+            if views > len(config.cams):
+                print(f"skipping {views}-view row: only {len(config.cams)} cameras configured")
                 continue
             frames = frames_for(views, image_hw)
             print(f"\n== off-optimum {views} views at {image_hw[0]}x{image_hw[1]}, source={frames.source} ==")

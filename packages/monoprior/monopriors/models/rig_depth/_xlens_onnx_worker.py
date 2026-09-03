@@ -31,17 +31,15 @@ class WorkerArgs:
     profile: EngineProfile
     """Engine profile."""
     max_batch_size: int
-    """``rig`` profile batch maximum."""
+    """Largest frameset batch per engine call."""
     opt_batch_size: int
-    """``rig`` profile tuning batch."""
+    """Frameset batch TensorRT tunes for."""
     dynamic_views: tuple[int, int]
     """Dynamic view-count range."""
     dynamic_height: tuple[int, int]
     """Dynamic image-height range."""
     dynamic_width: tuple[int, int]
     """Dynamic image-width range."""
-    dynamic_max_batch_size: int
-    """Dynamic profile batch maximum."""
 
 
 def main(args: WorkerArgs) -> None:
@@ -58,13 +56,12 @@ def main(args: WorkerArgs) -> None:
         cam_types,
         cam_T_ref,
         profile=args.profile,
-        max_batch_size=args.max_batch_size,
         opt_batch_size=args.opt_batch_size,
         dynamic_ranges=DynamicRanges(
             views=args.dynamic_views,
             patch_rows=(args.dynamic_height[0] // 14, args.dynamic_height[1] // 14),
             patch_cols=(args.dynamic_width[0] // 14, args.dynamic_width[1] // 14),
-            batch=(1, args.dynamic_max_batch_size),
+            batch=(1, args.max_batch_size),
         ),
     )
     export_plan_onnx(loaded[0], plan, args.onnx_path)

@@ -1,13 +1,14 @@
 """TensorRT X-Lens predictor: an fp16 engine fed with images plus frozen rig geometry.
 
-Two engine profiles:
+Two engine profiles, both with a dynamic frameset batch:
 
-- ``rig``: one engine per rig layout (view count, resolution, camera types,
-  pose presence) with a dynamic batch of framesets of that rig.
-- ``dynamic``: one engine spanning a range of view counts and resolutions (plus
-  batch), tuned at four 896x504 views. Every geometry input carries its own
-  symbolic token dimension; the wrapper slices each to the token count the
+- ``dynamic`` (default): one engine spanning a range of view counts and
+  resolutions, tuned at four 896x504 views. Every geometry input carries its
+  own symbolic token dimension; the wrapper slices each to the token count the
   image shape implies, and the TensorRT profile pins the ranges.
+- ``rig``: one engine per rig layout (view count, resolution, camera types,
+  pose presence); the ranges collapse to that rig, which buys a few
+  milliseconds per call at the price of a rebuild for every new rig.
 
 Everything geometric that is large (ray-map features, RoPE positions, the
 combined per-head attention bias) stays outside the graph as persistent device
@@ -58,7 +59,7 @@ else:
 
 ModuleT = TypeVar("ModuleT", bound=nn.Module)
 EngineProfile: TypeAlias = Literal["rig", "dynamic"]
-"""``rig`` bakes one rig layout (dynamic batch only); ``dynamic`` spans view counts and resolutions."""
+"""``dynamic`` (default) spans view counts and resolutions; ``rig`` bakes one rig layout (its ranges collapse to the rig)."""
 
 XLENS_CACHE_DIR: Path = Path(os.environ.get("MONOPRIOR_TRT_CACHE", "~/.cache/monoprior")).expanduser()
 """Cache root holding portable ``onnx/`` and machine-local ``trt/`` artifacts."""
@@ -446,7 +447,6 @@ def plan_export(
     cam_T_ref: Float64[ndarray, "s 4 4"] | None,
     *,
     profile: EngineProfile,
-    max_batch_size: int,
     opt_batch_size: int,
     dynamic_ranges: DynamicRanges,
 ) -> ExportPlan:
@@ -476,20 +476,22 @@ def plan_export(
     kinds: dict[str, tuple[bool, int]] = slot_token_extras(backbone, geometry.layer_slots, frozen.calib_k)
     trailing: int = (1 if backbone.alt_start != -1 else 0) + frozen.calib_k
     if profile == "rig":
-        ranges = DynamicRanges(views=(n_views, n_views), patch_rows=(rows, rows), patch_cols=(cols, cols), batch=(1, max_batch_size))
-        signature: str = f"{rig_signature(cam_types, image_hw, cam_T_ref is not None)}_b{max_batch_size}"
+        ranges = DynamicRanges(views=(n_views, n_views), patch_rows=(rows, rows), patch_cols=(cols, cols), batch=dynamic_ranges.batch)
+        signature: str = f"{rig_signature(cam_types, image_hw, cam_T_ref is not None)}_b{ranges.batch[1]}"
         opt: tuple[int, int, int, int] = (opt_batch_size, n_views, rows, cols)
-        dynamic_dims: DynamicDims | None = {"images": {0: _batch_dim(max_batch_size)}} if max_batch_size > 1 else None
     else:
         ranges = dynamic_ranges
         signature = dynamic_signature(ranges, frozen.calib_k, geometry)
         opt = (
-            1,
+            opt_batch_size,
             min(max(DYNAMIC_OPT_VIEWS, ranges.views[0]), ranges.views[1]),
             min(max(DYNAMIC_OPT_HW[0] // 14, ranges.patch_rows[0]), ranges.patch_rows[1]),
             min(max(DYNAMIC_OPT_HW[1] // 14, ranges.patch_cols[0]), ranges.patch_cols[1]),
         )
-        dynamic_dims = dynamic_dims_spec(geometry, kinds, ranges, trailing)
+    # Degenerate ranges become static dims in trtkit, so a rig graph with batch 1 is fully static.
+    spec: DynamicDims = dynamic_dims_spec(geometry, kinds, ranges, trailing)
+    symbolic: bool = any(dim.min != dim.max for dims in spec.values() for dim in dims.values())
+    dynamic_dims: DynamicDims | None = spec if symbolic else None
     return ExportPlan(
         frozen=frozen, geometry=geometry, signature=signature, ranges=ranges, opt=opt, dynamic_dims=dynamic_dims, kinds=kinds, trailing=trailing, image_hw=image_hw
     )
@@ -579,20 +581,18 @@ class XLensTrtConfig(BaseRigDepthPredictorConfig):
     """Cache root for ONNX exports and machine-local engines."""
     workspace_gib: float = 8.0
     """TensorRT builder workspace cap in GiB."""
-    max_batch_size: int = 4
-    """Largest frameset batch of the ``rig`` profile (``predict_batch`` chunks beyond it); 1 bakes a fully static engine."""
+    max_batch_size: int = 1
+    """Largest frameset batch per engine call (``predict_batch`` chunks beyond it); activation memory scales with batch x views x tokens^2 at the max shape."""
     opt_batch_size: int = 1
-    """Frameset batch TensorRT tunes the ``rig`` profile for."""
-    profile: EngineProfile = "rig"
-    """``rig``: one engine per rig layout; ``dynamic``: one engine over the view/resolution ranges below."""
-    dynamic_views: tuple[int, int] = (2, 6)
+    """Frameset batch TensorRT tunes kernels for."""
+    profile: EngineProfile = "dynamic"
+    """``dynamic``: one engine over the view/resolution ranges below; ``rig``: one engine per rig layout (a few ms faster, rebuilt per rig)."""
+    dynamic_views: tuple[int, int] = (2, 4)
     """View-count range of the dynamic profile."""
-    dynamic_height: tuple[int, int] = (280, 504)
+    dynamic_height: tuple[int, int] = (280, 630)
     """Image-height range of the dynamic profile (multiples of 14)."""
-    dynamic_width: tuple[int, int] = (336, 896)
-    """Image-width range of the dynamic profile (multiples of 14)."""
-    dynamic_max_batch_size: int = 1
-    """Largest frameset batch of the dynamic profile; activation memory scales with batch x views x tokens^2 at the max shape."""
+    dynamic_width: tuple[int, int] = (336, 1120)
+    """Image-width range of the dynamic profile (multiples of 14); the attention-bias input at the max shape is heads x tokens^2 fp16, ~2.5 GB for 4 views at 630x1120."""
 
     def setup(self, device: Literal["cpu", "cuda"]) -> "XLensTrtPredictor":
         """Build the TensorRT predictor; only CUDA is supported."""
@@ -609,7 +609,6 @@ class XLensTrtConfig(BaseRigDepthPredictorConfig):
             dynamic_views=self.dynamic_views,
             dynamic_height=self.dynamic_height,
             dynamic_width=self.dynamic_width,
-            dynamic_max_batch_size=self.dynamic_max_batch_size,
         )
 
 
@@ -622,13 +621,12 @@ class XLensTrtPredictor(BaseRigDepthPredictor):
         use_cuda_graph: bool = True,
         cache_dir: Path = XLENS_CACHE_DIR,
         workspace_gib: float = 8.0,
-        max_batch_size: int = 4,
+        max_batch_size: int = 1,
         opt_batch_size: int = 1,
-        profile: EngineProfile = "rig",
-        dynamic_views: tuple[int, int] = (2, 6),
-        dynamic_height: tuple[int, int] = (280, 504),
-        dynamic_width: tuple[int, int] = (336, 896),
-        dynamic_max_batch_size: int = 1,
+        profile: EngineProfile = "dynamic",
+        dynamic_views: tuple[int, int] = (2, 4),
+        dynamic_height: tuple[int, int] = (280, 630),
+        dynamic_width: tuple[int, int] = (336, 1120),
     ) -> None:
         """Load the eager model (it computes each rig's geometry and exports the graph); engines build lazily.
 
@@ -638,8 +636,8 @@ class XLensTrtPredictor(BaseRigDepthPredictor):
         """
         if not torch.cuda.is_available():
             raise RuntimeError("the X-Lens TensorRT predictor requires CUDA")
-        if not 1 <= opt_batch_size <= max_batch_size or dynamic_max_batch_size < 1:
-            raise ValueError("batch sizes must satisfy 1 <= opt_batch_size <= max_batch_size and dynamic_max_batch_size >= 1")
+        if not 1 <= opt_batch_size <= max_batch_size:
+            raise ValueError("batch sizes must satisfy 1 <= opt_batch_size <= max_batch_size")
         if dynamic_views[0] < 2 or dynamic_views[0] > dynamic_views[1]:
             raise ValueError(f"dynamic_views must be an increasing range starting at 2 or more, got {dynamic_views}")
         for name, (low, high) in (("dynamic_height", dynamic_height), ("dynamic_width", dynamic_width)):
@@ -659,7 +657,7 @@ class XLensTrtPredictor(BaseRigDepthPredictor):
             views=dynamic_views,
             patch_rows=(dynamic_height[0] // 14, dynamic_height[1] // 14),
             patch_cols=(dynamic_width[0] // 14, dynamic_width[1] // 14),
-            batch=(1, dynamic_max_batch_size),
+            batch=(1, max_batch_size),
         )
         self._memo: RigKeyMemo = RigKeyMemo()
         self._rig_key: RigKey | None = None
@@ -668,11 +666,6 @@ class XLensTrtPredictor(BaseRigDepthPredictor):
         self._runtime: TensorRtDynamicRuntime | None = None
         self.engine_path: Path | None = None
         """Machine-local engine serving the current rig; None before the first call."""
-
-    @property
-    def engine_batch_size(self) -> int:
-        """Largest frameset batch one engine call accepts."""
-        return self.max_batch_size if self.profile == "rig" else self.dynamic_ranges.batch[1]
 
     def runtime_summary(self) -> str:
         """Max input shapes, the attention-bias buffer size at the profile maximum, and the engine's device memory."""
@@ -728,8 +721,6 @@ class XLensTrtPredictor(BaseRigDepthPredictor):
                 *(str(14 * value) for value in self.dynamic_ranges.patch_rows),
                 "--dynamic-width",
                 *(str(14 * value) for value in self.dynamic_ranges.patch_cols),
-                "--dynamic-max-batch-size",
-                str(self.dynamic_ranges.batch[1]),
             ]
             subprocess.run(command, check=True, env=worker_env)
         if not onnx_path.exists():
@@ -751,7 +742,6 @@ class XLensTrtPredictor(BaseRigDepthPredictor):
             cam_types,
             cam_T_ref,
             profile=self.profile,
-            max_batch_size=self.max_batch_size,
             opt_batch_size=self.opt_batch_size,
             dynamic_ranges=self.dynamic_ranges,
         )
@@ -804,7 +794,7 @@ class XLensTrtPredictor(BaseRigDepthPredictor):
         validate_rig_inputs(images[0], rays, cam_types)
         geometry, runtime = self.prepare(rays, cam_types, cam_T_ref)
         predictions: list[RigDepthPrediction] = []
-        chunk: int = self.engine_batch_size
+        chunk: int = self.max_batch_size
         for start in range(0, images.shape[0], chunk):
             image_tensor: Float32[Tensor, "c s 3 h w"] = normalize_framesets(images[start : start + chunk], torch.device("cuda"))
             outputs: dict[str, Tensor] = runtime({"images": image_tensor, **geometry.inputs})
@@ -838,10 +828,3 @@ class XLensTrtPredictor(BaseRigDepthPredictor):
             Owning metric depth, confidence, mask, and scale on CUDA.
         """
         return self.predict_batch(np.ascontiguousarray(images)[None], rays, cam_types, cam_T_ref)[0]
-
-
-def _batch_dim(max_batch_size: int) -> "DynamicDim":
-    """The frameset batch symbol of a rig-profile graph."""
-    from trtkit import DynamicDim as ExportDim
-
-    return ExportDim("batch", 1, max_batch_size)
