@@ -15,7 +15,7 @@ import numpy as np
 import rerun as rr
 from jaxtyping import Float32, Float64, Int
 from numpy import ndarray
-from pyarrow import ChunkedArray, LargeListArray, ListArray
+from pyarrow import ChunkedArray, LargeListArray, ListArray, RecordBatch
 
 from simplecv.camera_parameters import Fisheye62Parameters, PinholeParameters
 from simplecv.rerun_custom_types import (
@@ -335,7 +335,9 @@ def log_video(
         def _chunks_recording_times() -> Iterator[rr.experimental.Chunk]:
             for chunk in reader.stream():
                 if not chunk.is_static:
-                    times.append(chunk.to_record_batch().column(timeline).to_numpy().astype("timedelta64[ns]").astype(np.int64))
+                    batch: RecordBatch = chunk.to_record_batch()
+                    if "VideoStream:sample" in batch.schema.names:
+                        times.append(batch.column(timeline).to_numpy().astype("timedelta64[ns]").astype(np.int64))
                 yield chunk
 
         target_recording.send_chunks(_chunks_recording_times())
