@@ -25,10 +25,10 @@ from rerun.experimental.dataloader import (
     NumericDecoder,
     RerunIterableDataset,
 )
-from simplecv.rerun_dataloader import SegmentNvdecDecoder
+from simplecv.rerun_dataloader import RECOMMENDED_FETCH_BLOCK_SIZE, SegmentNvdecDecoder
 from torch import Tensor
 
-from mvs.apis.live_mesh import FETCH_SIZE, NATIVE_FPS, TIMELINE, VIDEO_WIDE
+from mvs.apis.live_mesh import NATIVE_FPS, TIMELINE, VIDEO_WIDE
 from mvs.depth_engine import DepthInputs, preprocess_image, s1_intrinsics
 from mvs.pose_stream import (
     CAM_QUATERNION,
@@ -109,8 +109,8 @@ def depth_dataset(
         index=TIMELINE,
         fields=fields,
         timeline_sampling=FixedRateSampling(rate_hz=NATIVE_FPS),
-        shuffle_strategy=NoShuffle(),  # pyrefly: ignore  # unexpected-keyword — mvs uses the prerelease dataloader API
-        fetch_size=FETCH_SIZE,
+        shuffle_strategy=NoShuffle(),
+        fetch_block_size=RECOMMENDED_FETCH_BLOCK_SIZE,
     )
     return samples, video_decoder
 

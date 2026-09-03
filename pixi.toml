@@ -56,14 +56,14 @@ xorg-xorgproto = "*"
 # torch provider, so scope CPU torch to osx-arm64 (Linux keeps pytorch-gpu).
 [feature.common.target.osx-arm64.dependencies]
 pytorch-cpu = "*"
-# rerun-sdk's dataloader extra needs torchvision; conda provides the matching build.
+# Keep torchvision aligned with the project torch build for packages that import it.
 torchvision = "*"
 
 [feature.common.pypi-dependencies]
-# datafusion only — the dataloader extra would drag torch into common envs.
-rerun-sdk = { version = "==0.36.2", extras = ["datafusion"] }
-gradio = "==6.13.0"
-gradio-rerun = "==0.36.2"
+# pin-bump: hold — gradio-rerun's exact rerun-sdk pin must match.
+rerun-sdk = { version = "==0.37.0", extras = ["catalog"] } # pin-bump: hold
+gradio = "==6.13.0"                                        # pin-bump: hold
+gradio-rerun = "==0.37.0"                                  # pin-bump: hold
 simplecv = { path = "packages/simplecv", editable = true }
 
 # ─── catalog common feature (Rerun catalog prerelease lane) ────────────────
@@ -91,15 +91,15 @@ xorg-xorgproto = "*"
 [feature.catalog-common.pypi-dependencies]
 simplecv = { path = "packages/simplecv", editable = true }
 
-# Catalog lane: common's rerun-sdk + the dataloader extra; for unreleased
-# builds see AGENTS.md "Testing Rerun builds".
+# Catalog lane with the dataloader extra; for unreleased builds see AGENTS.md
+# "Testing Rerun builds".
 # Explicit platforms required — see AGENTS.md "Platforms & lockfile".
 [feature.rerun-prerelease]
 platforms = ["linux-64", "linux-aarch64"]
 
 [feature.rerun-prerelease.pypi-dependencies]
-rerun-sdk = { version = "==0.36.2", extras = [
-    "datafusion",
+rerun-sdk = { version = "==0.37.0", extras = [
+    "catalog",
     "dataloader",
 ] }
 
@@ -669,6 +669,7 @@ cmd = "python tools/train_smoke.py"
 cwd = "packages/zipdepth"
 description = "Smoke: self-distilled example data -> train -> resume -> torchrun -> checkpoints load through monopriors ZipDepthPredictor"
 
+
 # ═══════════════════════════════════════════════════════════════════════════
 # wilor-nano
 # ═══════════════════════════════════════════════════════════════════════════
@@ -844,7 +845,7 @@ scipy = "*"
 [feature.mv-api-catalog-register-mac.pypi-dependencies]
 tyro = ">=0.9.1,<0.10"
 simplecv = { path = "packages/simplecv", editable = true }
-rerun-sdk = { version = "==0.36.2", extras = ["datafusion"] }
+rerun-sdk = { version = "==0.37.0", extras = ["catalog"] }
 
 [feature.mv-api-catalog-register-mac.pypi-options]
 index-url = "https://pypi.org/simple"
@@ -1683,7 +1684,7 @@ xorg-libxrandr = "*"
 gsplat-rust-renderer = { path = "packages/gsplat-rust-renderer", editable = true }
 lpips = ">=0.1.4,<1"
 plyfile = ">=1.1,<2"
-rerun-sdk = "==0.36.2"
+rerun-sdk = "==0.37.0"
 simplecv = { path = "packages/simplecv", editable = true }
 
 [feature.gsplat-rust-renderer.activation.env]
@@ -2371,7 +2372,7 @@ description = "Open the native Rerun viewer on the local catalog"
 # ═══════════════════════════════════════════════════════════════════════════
 # gauss-surf — GausSurf splat pipeline over ARKitScenes catalog segments
 # ═══════════════════════════════════════════════════════════════════════════
-# Signals/catalog lane: reads the segment through the 0.36 prerelease
+# Signals/catalog lane: reads the segment through the 0.37 prerelease
 # dataloader, derives frame selection / normals / ultrawide depth, writes
 # layer RRDs back. Explicit platforms required — see AGENTS.md.
 [feature.gauss-surf]
@@ -2424,6 +2425,9 @@ sam3 = { path = "packages/sam3", editable = true }
 [feature.gauss-surf.activation.env]
 PACKAGE_DIR = "packages/gauss-surf"
 PYREFLY_TARGET = "src/gauss_surf/apis src/gauss_surf/train_gsplat src/gauss_surf/catalog.py src/gauss_surf/frame_selection.py src/gauss_surf/gaussurf_geometry.py src/gauss_surf/gaussurf_losses.py src/gauss_surf/gsplat_schedule.py src/gauss_surf/normals_encoding.py src/gauss_surf/render_io.py src/gauss_surf/uw_geometry.py src/gauss_surf/__init__.py tools"
+# The pinned gsplat fork accepts extra_signals, but another workspace gsplat
+# install wins Pyrefly's global site-package resolution and lacks those kwargs.
+PYREFLY_EXTRA_ARGS = "--baseline pyrefly-baseline.json"
 
 [feature.gauss-surf.tasks.gauss-surf-serve]
 cmd = "bash -c 'ulimit -n 524288 && exec rerun server --port 51236'"
