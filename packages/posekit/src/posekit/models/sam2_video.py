@@ -9,6 +9,7 @@ detections with GPU masks and stable ``track_ids``.
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 from typing import Literal, TypeAlias
 
@@ -30,6 +31,12 @@ SAM2_VARIANT_WEIGHTS: dict[Sam2Variant, tuple[str, str, str]] = {
     "efficienttam-ti-512": ("pablovela5620/mamma-streaming-data", "dataset", "weights/efficienttam/efficienttam_ti.pt"),
     "efficienttam-s-512": ("yunyangx/efficient-track-anything", "model", "efficienttam_s_512x512.pt"),
 }
+
+
+@functools.cache
+def cached_predictor(variant: Sam2Variant):
+    """Load one SAM2-streaming predictor per variant."""
+    return Sam2VideoSegmenterConfig(variant=variant).setup().predictor
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,4 +178,4 @@ class Sam2VideoSegmenter(VideoSegmenter):
         return sam2_prompts
 
 
-__all__ = ("Sam2VideoSegmenter", "Sam2VideoSegmenterConfig")
+__all__ = ("Sam2VideoSegmenter", "Sam2VideoSegmenterConfig", "cached_predictor")

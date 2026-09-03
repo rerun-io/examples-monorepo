@@ -144,11 +144,11 @@ def _infer_and_write_normals(
             frames_hwc: list[UInt8[Tensor, "h w 3"]] = []
             for _timestamp in batch_timestamps_n:
                 frame_chw: UInt8[Tensor, "3 h w"] = next(decoded_frames)
-                frame_hwc: UInt8[Tensor, "h w 3"] = rearrange(frame_chw, "c h w -> h w c")  # pyrefly: ignore  # bad-argument-type — einops stub
+                frame_hwc: UInt8[Tensor, "h w 3"] = rearrange(frame_chw, "c h w -> h w c")
                 frames_hwc.append(frame_hwc)
 
             frames_bhw3: UInt8[Tensor, "batch h w 3"] = torch.stack(frames_hwc)
-            frames_b3hw: Float32[Tensor, "batch 3 h w"] = rearrange(frames_bhw3, "b h w c -> b c h w").to(torch.float32)  # pyrefly: ignore  # bad-argument-type — einops stub
+            frames_b3hw: Float32[Tensor, "batch 3 h w"] = rearrange(frames_bhw3, "b h w c -> b c h w").to(torch.float32)
             resized_b3hw: Float32[Tensor, "batch 3 net_h=756 net_w=1008"] = functional.interpolate(
                 frames_b3hw,
                 size=DEFAULT_IMAGE_HW,
@@ -158,7 +158,7 @@ def _infer_and_write_normals(
             resized_bhw3: UInt8[Tensor, "batch net_h=756 net_w=1008 3"] = rearrange(
                 resized_b3hw.round().clamp(0.0, 255.0).to(torch.uint8),
                 "b c h w -> b h w c",
-            )  # pyrefly: ignore  # bad-argument-type — einops stub
+            )
             prediction: MoGeV2NormalOutput = predictor.predict_normals(resized_bhw3)
             # MoGe emits toward-camera RDF normals; the layer stores the negated
             # away-from-camera convention — the gaussurf training target and the
