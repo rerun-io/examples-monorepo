@@ -159,6 +159,8 @@ class RigCamera:
         pixels: Float64[ndarray, "*batch 2"] = np.asarray(keypoints_uv, dtype=np.float64)
         if pixels.shape[-1] != 2:
             raise ValueError(f"keypoints_uv must end in 2 coordinates, got {pixels.shape}")
+        if pixels.size == 0:
+            return pixels.astype(np.float32, copy=True)
         if isinstance(self.parameters, PinholeParameters):
             return pixels.astype(np.float32, copy=True)
         batch_shape: tuple[int, ...] = pixels.shape[:-1]

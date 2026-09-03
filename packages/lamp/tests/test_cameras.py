@@ -161,3 +161,20 @@ def test_gravity_alignment_matches_pristine_mps_loader() -> None:
         expected = _upstream_gravity_transform(gravity_world)
         actual = gravity_aligned_world_transform(gravity_world)
         assert np.array_equal(actual, expected)
+
+
+def test_kb4_virtual_pinhole_accepts_an_empty_keypoint_set() -> None:
+    """A camera with no valid keypoints preserves the empty batch shape."""
+    camera = RigCamera(
+        Fisheye62Parameters(
+            name="left_front",
+            extrinsics=_identity_extrinsics(),
+            intrinsics=_intrinsics(),
+            distortion=KannalaBrandtDistortion(k1=0.0617, k2=-0.0211, k3=0.0372, k4=-0.0135),
+        )
+    )
+
+    virtual = camera.to_virtual_pinhole(np.empty((0, 2), dtype=np.float32))
+
+    assert virtual.shape == (0, 2)
+    assert virtual.dtype == np.float32
