@@ -28,12 +28,17 @@ GH_TOKEN=$(gh auth token --user pablovela5620) gh repo edit pablovela5620/<repo>
 - `simplecv` as a git PyPI dep on monorepo `main` — it gives `RerunTyroConfig`, camera dataclasses, and
   `log_rig_static`. It does not carry its runtime deps: add `av`, `pyarrow`, `einops`, and pin
   `typing-extensions = ">=4.1,<4.16"` (pyserde<0.32).
+- The git `simplecv` package now declares most runtime deps (including `opencv-python`, `matplotlib`); still add `av`, `pyarrow`
+  and `typing-extensions>=4.1,<4.16` explicitly. Frozen upstream code may already use PEP 695 (`type X = …`) — fine on 3.12;
+  the ban applies to new code only.
 - Packages missing from conda-forge go to `[pypi-dependencies]`. Drop upstream's training/export/profiling deps.
 - Tasks (single-line `&&` chains only — pixi collapses multiline `cmd`):
   - `_download-checkpoints`, `_download-data`: guarded by shell `test -f`/`test -d` (pixi `inputs`/`outputs`
     skip gitignored files); use `hf download` (never `huggingface-cli`).
   - `demo` (depends-on both downloads) → `python demo_rerun.py`; `demo-upstream` → upstream's own script.
   - `eval` when upstream has an eval script, on the single hosted sample.
+- `demo`/`demo-<scene>` default to headless save (`mkdir -p out && python -u demo_rerun.py --rr-config.headless --rr-config.save out/<scene>.rrd`);
+  explicit `--rr-config.*` flags override. Foreground `python -u` + tee logs inside the (already durable) tmux job.
 - Verify: `pixi lock --check` clean; fresh clone → `pixi run demo` timing in NOTES.md (warm pixi package cache,
   empty env/weights/data — state it). If upstream's demo is interactive (`cv2.imshow`), `demo-upstream` stays
   interactive; do not patch upstream for it.
@@ -60,3 +65,5 @@ GH_TOKEN=$(gh auth token --user pablovela5620) gh repo edit pablovela5620/<repo>
 
 Sections: Decisions, Commands (fork, sample prep, upload), Upstream edits, Gotchas found,
 Reproduction table (ours vs paper), fresh-clone timing.
+When the demo records a replay fixture, NOTES.md carries its layout as a table (key, dtype, shape, meaning) — the port reads
+this file; the Middlebury `doffs` convention used (`disp = fx·B/depth + doffs`) is stated even when the sample has `doffs = 0`.

@@ -98,12 +98,12 @@ def _resize_and_normalize_normals(
     Returns:
         Owning float32 unit normals shaped ``b h w 3``.
     """
-    normals_b3nhw: Float32[Tensor, "b 3 nh nw"] = rearrange(normals_bnhw3.float(), "b h w c -> b c h w")  # pyrefly: ignore  # bad-argument-type — einops stub false positive
+    normals_b3nhw: Float32[Tensor, "b 3 nh nw"] = rearrange(normals_bnhw3.float(), "b h w c -> b c h w")
     if tuple(normals_b3nhw.shape[-2:]) != output_hw:
         normals_b3hw: Float32[Tensor, "b 3 h w"] = F.interpolate(normals_b3nhw, size=output_hw, mode="bilinear", align_corners=False)
     else:
         normals_b3hw = normals_b3nhw
-    normals_bhw3: Float32[Tensor, "b h w 3"] = rearrange(normals_b3hw, "b c h w -> b h w c")  # pyrefly: ignore  # bad-argument-type — einops stub false positive
+    normals_bhw3: Float32[Tensor, "b h w 3"] = rearrange(normals_b3hw, "b c h w -> b h w c")
     return F.normalize(normals_bhw3, dim=-1)
 
 
@@ -121,12 +121,12 @@ def postprocess_moge_v2_normal(
         Owning float32 unit normals and validity probabilities at caller resolution.
     """
     normals_bhw3: Float32[Tensor, "b h w 3"] = _resize_and_normalize_normals(graph_output.normals_bhw3, output_hw)
-    mask_b1nhw: Float32[Tensor, "b 1 nh nw"] = rearrange(graph_output.mask_bhw.float(), "b h w -> b 1 h w")  # pyrefly: ignore  # bad-argument-type — einops stub false positive
+    mask_b1nhw: Float32[Tensor, "b 1 nh nw"] = rearrange(graph_output.mask_bhw.float(), "b h w -> b 1 h w")
     if tuple(mask_b1nhw.shape[-2:]) != output_hw:
         mask_b1hw: Float32[Tensor, "b 1 h w"] = F.interpolate(mask_b1nhw, size=output_hw, mode="bilinear", align_corners=False)
     else:
         mask_b1hw = mask_b1nhw.clone()
-    mask_bhw: Float32[Tensor, "b h w"] = rearrange(mask_b1hw, "b 1 h w -> b h w")  # pyrefly: ignore  # bad-argument-type — einops stub false positive
+    mask_bhw: Float32[Tensor, "b h w"] = rearrange(mask_b1hw, "b 1 h w -> b h w")
     return MoGeV2NormalOutput(normals_bhw3=normals_bhw3, mask_bhw=mask_bhw)
 
 
@@ -165,8 +165,8 @@ def postprocess_moge_v2_geometry(
     positive_z_bnhw: Bool[Tensor, "b nh nw"] = points_bnhw3[..., 2] > 0.0
     mask_bnhw = torch.where(positive_z_bnhw, mask_bnhw, 0.0)
 
-    points_b3nhw: Float32[Tensor, "b 3 nh nw"] = rearrange(points_bnhw3, "b h w c -> b c h w")  # pyrefly: ignore  # bad-argument-type — einops stub false positive
-    mask_b1nhw: Float32[Tensor, "b 1 nh nw"] = rearrange(mask_bnhw, "b h w -> b 1 h w")  # pyrefly: ignore  # bad-argument-type — einops stub false positive
+    points_b3nhw: Float32[Tensor, "b 3 nh nw"] = rearrange(points_bnhw3, "b h w c -> b c h w")
+    mask_b1nhw: Float32[Tensor, "b 1 nh nw"] = rearrange(mask_bnhw, "b h w -> b 1 h w")
     if (network_height, network_width) != output_hw:
         points_b3hw: Float32[Tensor, "b 3 h w"] = F.interpolate(points_b3nhw, size=output_hw, mode="bilinear", align_corners=False)
         mask_b1hw: Float32[Tensor, "b 1 h w"] = F.interpolate(mask_b1nhw, size=output_hw, mode="bilinear", align_corners=False)
@@ -174,9 +174,9 @@ def postprocess_moge_v2_geometry(
         points_b3hw = points_b3nhw
         mask_b1hw = mask_b1nhw
 
-    points_bhw3: Float32[Tensor, "b h w 3"] = rearrange(points_b3hw, "b c h w -> b h w c").contiguous()  # pyrefly: ignore  # bad-argument-type — einops stub false positive
+    points_bhw3: Float32[Tensor, "b h w 3"] = rearrange(points_b3hw, "b c h w -> b h w c").contiguous()
     depth_bhw: Float32[Tensor, "b h w"] = points_bhw3[..., 2]
-    resized_mask_bhw: Float32[Tensor, "b h w"] = rearrange(mask_b1hw, "b 1 h w -> b h w")  # pyrefly: ignore  # bad-argument-type — einops stub false positive
+    resized_mask_bhw: Float32[Tensor, "b h w"] = rearrange(mask_b1hw, "b 1 h w -> b h w")
     mask_bhw: Float32[Tensor, "b h w"] = torch.where(depth_bhw > 0.0, resized_mask_bhw, 0.0)
     return MoGeV2GeometryOutput(
         depth_bhw=depth_bhw,

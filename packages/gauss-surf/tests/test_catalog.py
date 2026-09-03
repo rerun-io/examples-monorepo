@@ -6,7 +6,9 @@ import numpy as np
 import pyarrow as pa
 import pytest
 import torch
+from jaxtyping import UInt8
 from rerun.catalog import DatasetEntry
+from torch import Tensor
 
 from gauss_surf.catalog import SegmentReader
 
@@ -112,7 +114,7 @@ def test_decode_frames_refuses_timestamp_drift(monkeypatch: pytest.MonkeyPatch) 
         def __init__(self, *_args: Any) -> None:
             self.times: np.ndarray = np.asarray([10, 20], dtype=np.int64).astype("timedelta64[ns]")
 
-        def decode(self, _raw: pa.ChunkedArray, _timestamp: np.timedelta64, _video_id: str) -> torch.Tensor:
+        def decode_at(self, _timestamp: np.timedelta64, _video_id: str) -> UInt8[Tensor, "3 h w"]:
             """Return one RGB tensor so exactness validation can run."""
             return torch.zeros((3, 2, 2), dtype=torch.uint8)
 
@@ -133,7 +135,7 @@ def test_decode_frames_preserves_requested_timestamp_order(monkeypatch: pytest.M
         def __init__(self, *_args: Any) -> None:
             self.times: np.ndarray = np.asarray([10, 20], dtype=np.int64).astype("timedelta64[ns]")
 
-        def decode(self, _raw: pa.ChunkedArray, timestamp: np.timedelta64, _video_id: str) -> torch.Tensor:
+        def decode_at(self, timestamp: np.timedelta64, _video_id: str) -> UInt8[Tensor, "3 h w"]:
             """Encode the requested nanosecond value into the returned frame."""
             value: int = int(timestamp.astype(np.int64))
             return torch.full((3, 1, 1), value, dtype=torch.uint8)
@@ -142,6 +144,6 @@ def test_decode_frames_preserves_requested_timestamp_order(monkeypatch: pytest.M
     reader: SegmentReader = SegmentReader(_Dataset([_row()]), "segment-a")
     requested_n: np.ndarray = np.asarray([20, 10], dtype=np.int64).astype("timedelta64[ns]")
 
-    frames: list[torch.Tensor] = list(reader.decode_frames("video/wide", requested_n, fps=60.0, device=torch.device("cpu")))
+    frames: list[UInt8[Tensor, "3 h w"]] = list(reader.decode_frames("video/wide", requested_n, fps=60.0, device=torch.device("cpu")))
 
     assert [int(frame[0, 0, 0]) for frame in frames] == [20, 10]

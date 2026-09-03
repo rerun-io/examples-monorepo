@@ -90,7 +90,7 @@ def test_all_single_image_adapters_match_vendored_infer_on_room() -> None:
     if bgr_hw3 is None:
         pytest.skip(f"{image_path} missing; run the monoprior download task")
     rgb_hw3: UInt8[np.ndarray, "h w 3"] = cv2.cvtColor(bgr_hw3, cv2.COLOR_BGR2RGB)
-    image_3hw: Float32[Tensor, "3 h w"] = rearrange(torch.from_numpy(rgb_hw3).to(device="cuda"), "h w c -> c h w").float() / 255.0  # pyrefly: ignore  # bad-argument-type — einops stub false positive
+    image_3hw: Float32[Tensor, "3 h w"] = rearrange(torch.from_numpy(rgb_hw3).to(device="cuda"), "h w c -> c h w").float() / 255.0
     checkpoint: tuple[str, str] = MOGE_V2_CHECKPOINTS["vitl"]
     reference_model: MoGeModel = MoGeModel.from_pretrained(checkpoint[0], revision=checkpoint[1]).to("cuda").eval()
     reference: InferenceOutput = reference_model.infer(image_3hw, force_projection=False, apply_mask=True)
