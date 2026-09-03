@@ -9,6 +9,9 @@ import pytest
 import torch
 from jaxtyping import Int64, Shaped
 from numpy import ndarray
+
+pytest.importorskip("rerun.catalog", reason="Rerun catalog dependencies live in the zipdepth catalog lane")
+pytest.importorskip("arkitscenes_download", reason="ARKitScenes catalog dependencies live in the zipdepth catalog lane")
 from rerun.catalog import DatasetEntry
 from rerun.experimental.dataloader import NoShuffle
 
