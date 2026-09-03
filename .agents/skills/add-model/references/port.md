@@ -20,6 +20,9 @@ Run pytest from `packages/<pkg>` (root collection pulls in packages whose envs a
   Docstring in `__init__.py`: upstream URL, license (flag non-commercial), fork + SHA, file mapping
   (`ours.py <- upstream/path.py`), "Local changes: import paths only" (absolute imports, no `sys.path` hacks, export/TRT-only classes dropped — nothing behavioural).
 - Make it importable: absolute imports, drop `sys.path` hacks; nothing else changes.
+- Exception forced by the beartype claw (it instruments `third_party/` too): annotations that lie (`mlp_ratio: int = 4` used as
+  a float, `size: Tuple[int, int] = None`) get value-preserving fixes (`4.0`, `Optional[...]`) in PR 1 or PR 2, listed in the
+  docstring as "beartype-compatible annotation fixes, values unchanged".
 - Register the vendor dir as *unowned* in `pyrefly.toml` (`project-excludes`) and in the package
   `pyproject.toml` (ruff `extend-exclude`, vulture `exclude`, package-data for LICENSE).
 - Deps: add to the package feature in root `pixi.toml` (conda first, PyPI second); keep `platforms`
@@ -42,6 +45,16 @@ Run pytest from `packages/<pkg>` (root collection pulls in packages whose envs a
   `tyro.conf.OmitSubcommandPrefixes`); tools take one `predictor:` union field, and existing demos/apps/catalog
   tools gain the model through that registry. Never put a model-specific flag
   (a `model_size`, an iteration count) flat on a tool's config — review feedback on FFS PR #162.
+- A family's first model: tyro cannot build a subcommand union from a one-entry defaults dict — alias the union to that config
+  at runtime (base class under `TYPE_CHECKING`) and switch to `subcommand_type_from_defaults` when the second model lands.
+- Upstream private helpers that fix a frame convention (LAMP `MpsLoader._compute_T_gravityWorld_world`) are ported verbatim
+  with a parity test against the pristine fixture — never re-derived.
+- New package instead of a family (LAMP → `packages/lamp`, module `lamptrack`): its env composes `common` + `cuda` + the
+  package feature (+ `posekit` for 2D people stages); a `<pkg>-catalog` lane mirrors `monoprior-catalog`; the two catalog rig
+  readers are copied from `monopriors/apis/stereo_catalog.py` (no monoprior dependency) pending a shared simplecv reader.
+  A lane solved in isolation may need deps its imports pull transitively (`requests` via posekit/simplecv): add them to the
+  lane explicitly. When the fork runs in parallel, PR 2 ships clear skip/fail behaviour for the missing fixture and PR 3
+  integrates it after a second check.
 - Tests: fast CPU test that builds the model from config and runs a tiny random pair (shape/dtype/finite);
   slow band (`pytestmark = [slow_cuda, requires_cuda]`) that downloads the checkpoint and checks the
   reference number on the ETH3D sample (validate.md gate 2). Default `pytest -q` must stay seconds.
@@ -101,6 +114,11 @@ Follow `monopriors/apis/stereo_catalog.py` / `promptda_polycam`: read cameras + 
 do not register a layer unless asked. Catalog registrations are in-memory: after a server restart the dataset is
 gone (`LookupError: No dataset found with name 'robocap'`) — re-register (`/mnt/nas/datasets/robocap/rrd/reregister.py`)
 before blaming the tool.
+
+Catalog-tool rules added by the X-Lens/LAMP runs: fisheye rigs get rectified pinhole twins for depth (SKILL.md "Rerun geometry
+rules"); `start_s` is absolute `video_time` seconds (say so in the field docstring); decoded+resized fisheye frames are logged
+as `rr.Image(...).compress(...)` (the `send_columns` relay is for untouched pinhole streams); print ms per frameset with
+views × resolution; ended tracks are cleared; the 60-s evidence rrd stays well under 500 MB.
 
 ## PR description (every PR)
 

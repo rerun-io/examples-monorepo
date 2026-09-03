@@ -432,7 +432,7 @@ def test_catalog_prediction_layer_config_defaults_match_spec() -> None:
     assert config.assembly101_row_id == 120
     assert config.max_frames == 10
     assert config.video_codec == "av1"
-    assert config.keyframe_interval == 300
+    assert config.fetch_block_size == 64
     assert config.native_fps_override is None
     assert config.output_root == Path("artifacts/catalog_layers")
     assert config.layer_name == "mvapi_coco133_upper_body_v1"
@@ -448,7 +448,7 @@ def test_pixi_catalog_environment_and_task_are_wired_for_dataloader_lane() -> No
     catalog_task: dict[str, Any] = pixi_data["feature"]["mv-api-catalog"]["tasks"]["mv-api-catalog-prediction-layer"]
     catalog_dev_env: dict[str, Any] = pixi_data["environments"]["mv-api-catalog-dev"]
 
-    assert set(rerun_sdk["extras"]) >= {"datafusion", "dataloader"}
+    assert set(rerun_sdk["extras"]) >= {"catalog", "dataloader"}
     assert catalog_task["cmd"] == "python tools/apps/catalog_prediction_layer.py"
     assert catalog_task["cwd"] == "packages/mv-api"
     assert {"rerun-prerelease", "mv-api-catalog", "dev"}.issubset(set(catalog_dev_env["features"]))

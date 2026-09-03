@@ -99,7 +99,7 @@ def _score_camera(
     with torch.inference_mode():
         for frame_index in range(len(timestamps_n)):
             frame_chw: UInt8[Tensor, "3 h w"] = decoder.get_frame_at(frame_index).data
-            frame_hwc: UInt8[Tensor, "h w 3"] = rearrange(frame_chw, "c h w -> h w c")  # pyrefly: ignore  # bad-argument-type — einops stub
+            frame_hwc: UInt8[Tensor, "h w 3"] = rearrange(frame_chw, "c h w -> h w c")
             pending_frames_hwc.append(frame_hwc)
             if len(pending_frames_hwc) < batch_size:
                 continue

@@ -316,7 +316,7 @@ def load_gpu_cache(
     wide_rgb_nhw3: torch.Tensor = torch.empty((len(wide_rows), *wide_hw, 3), dtype=torch.uint8, device=device)
     decoded_wide = reader.decode_frames(VIDEO_WIDE, wide_timestamps, fps=WIDE_FPS, device=device)
     for index, (row, frame_chw) in enumerate(zip(wide_rows, decoded_wide, strict=True)):
-        decoded_rgb_hw3: torch.Tensor = rearrange(frame_chw, "c h w -> h w c")  # pyrefly: ignore  # einops stubs
+        decoded_rgb_hw3: torch.Tensor = rearrange(frame_chw, "c h w -> h w c")
         depth_hw: np.ndarray = _decode_png_uint16(blob_bytes(row[PROMPTDA_DEPTH_BLOB_COLUMN], PROMPTDA_DEPTH_BLOB_COLUMN))
         normal_hw3: np.ndarray = first_wide_normal_hw3 if index == 0 else decode_rgb_image(blob_bytes(row[WIDE_NORMAL_COLUMN], WIDE_NORMAL_COLUMN))
         if tuple(decoded_rgb_hw3.shape) != (*wide_hw, 3) or depth_hw.shape != wide_hw or normal_hw3.shape != wide_normal_hw3:

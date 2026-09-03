@@ -1,15 +1,19 @@
 import zipfile
-from collections.abc import Generator
+from collections.abc import Generator, Iterator
 from dataclasses import dataclass, field
 from enum import IntEnum
+from itertools import batched, chain, islice
 from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
+import torch
 from jaxtyping import Float32, UInt8, UInt16
 from serde import serde
 from serde.json import from_json
+from torch import Tensor
+from tqdm import tqdm
 
 from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
 from simplecv.ops import conventions
@@ -213,6 +217,66 @@ class PolycamDataset:
                 original_confidence_hw=original_confidence,
                 pinhole_params=pinhole_params,
             )
+
+
+@dataclass(frozen=True, slots=True)
+class PolycamBatchPlan:
+    """Peeked first batch and one-shot bounded iterator for one capture."""
+
+    first_batch: tuple[PolycamData, ...]
+    """First batch, exposed for predictor sizing before iteration."""
+    total_batches: int
+    """Ceiling-divided batch count shown by the progress bar."""
+    _remaining_batches: Iterator[tuple[PolycamData, ...]]
+    """Unconsumed batches after the peeked first batch."""
+    _description: str
+    """Progress-bar label."""
+
+    def __iter__(self) -> Iterator[tuple[PolycamData, ...]]:
+        """Yield all bounded batches, including ``first_batch``, with progress."""
+        yield from tqdm(
+            chain((self.first_batch,), self._remaining_batches),
+            desc=self._description,
+            total=self.total_batches,
+        )
+
+
+def prepare_polycam_batches(
+    dataset: PolycamDataset,
+    *,
+    batch_size: int,
+    max_frames: int | None,
+    capture_path: Path,
+    description: str,
+) -> PolycamBatchPlan:
+    """Peek and progress-wrap batches while enforcing an exact frame budget."""
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive.")
+    if max_frames is not None and max_frames <= 0:
+        raise ValueError("max_frames must be positive when provided.")
+
+    frame_count: int = min(max_frames if max_frames is not None else len(dataset), len(dataset))
+    batch_iterator: Iterator[tuple[PolycamData, ...]] = batched(islice(dataset, frame_count), batch_size)
+    first_batch: tuple[PolycamData, ...] | None = next(batch_iterator, None)
+    if first_batch is None:
+        raise ValueError(f"Polycam capture {capture_path} contains no frames.")
+
+    total_batches: int = -(-frame_count // batch_size)
+    return PolycamBatchPlan(
+        first_batch=first_batch,
+        total_batches=total_batches,
+        _remaining_batches=batch_iterator,
+        _description=description,
+    )
+
+
+def stack_polycam_batch(batch: tuple[PolycamData, ...]) -> tuple[UInt8[Tensor, "b h w 3"], Float32[Tensor, "b 192 256"]]:
+    """Stack one batch into raw CUDA RGB and metric-depth prompt tensors."""
+    prompt_m_bhw: Float32[np.ndarray, "b 192 256"] = np.stack([data.original_depth_hw for data in batch], dtype=np.float32)
+    prompt_m_bhw /= 1000.0
+    rgb_bhwc: UInt8[Tensor, "b h w 3"] = torch.from_numpy(np.stack([data.rgb_hw3 for data in batch])).cuda()
+    prompt_bhw: Float32[Tensor, "b 192 256"] = torch.from_numpy(prompt_m_bhw).cuda()
+    return rgb_bhwc, prompt_bhw
 
 
 def extract_zip(zip_path: Path, extract_dir: Path) -> None:
