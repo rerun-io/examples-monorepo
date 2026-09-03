@@ -11,7 +11,7 @@ from typing import Literal, TypeAlias
 from jaxtyping import Float, Int64
 from torch import Tensor, nn
 
-from monopriors.third_party.xlens.models.dinov2.vision_transformer import DinoVisionTransformer
+from monopriors.third_party.xlens.models.dinov2.vision_transformer import DinoVisionTransformer, FrozenRigGeometry
 
 BackboneName = Literal["vits", "vitb", "vitl"]
 BackboneFeature: TypeAlias = tuple[Float[Tensor, "batch views patches features"], Float[Tensor, "batch views features"]]
@@ -106,10 +106,15 @@ class DinoV2(nn.Module):
         ray_feat: Float[Tensor, "batch views features patch_height patch_width"] | None = None,
         d_cam: Float[Tensor, "batch views 3 height width"] | None = None,
         cam_types: Int64[Tensor, "batch views"] | None = None,
+        frozen: FrozenRigGeometry | None = None,
     ) -> BackboneOutput:
         """
         Args:
             x: input images (B, S, 3, H, W), S views.
+            ray_feat: optional ray-map encoder output added to the patch tokens.
+            d_cam: optional per-pixel camera-frame unit rays.
+            cam_types: optional camera type ids.
+            frozen: precomputed rig geometry replacing the three optional inputs.
 
         Returns:
             feats: multi-scale feature list.
@@ -122,5 +127,6 @@ class DinoV2(nn.Module):
             ray_feat=ray_feat,
             d_cam=d_cam,
             cam_types=cam_types,
+            frozen=frozen,
         )
         return feats, scale_tokens

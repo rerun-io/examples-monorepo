@@ -146,3 +146,45 @@ def test_owned_model_is_bit_identical(
         )
     output_keys: tuple[str, ...] = ("depth", "depth_metric", "depth_conf", "metric_scaling_factor", "mask_logits", "mask")
     assert all(torch.equal(upstream_output[key], owned_output[key]) for key in output_keys)
+
+
+@pytest.mark.parametrize(
+    ("cam_types", "with_poses"),
+    [((0, 0), True), ((0, 1, 0), True), ((0, 1, 0), False)],
+    ids=("fisheye-poses", "mixed-poses", "mixed-no-poses"),
+)
+def test_frozen_geometry_is_bit_identical(
+    equal_models: tuple[nn.Module, XLensNet, ModuleType],
+    cam_types: tuple[int, ...],
+    with_poses: bool,
+) -> None:
+    """Freezing the rig geometry once reproduces the per-layer path bit for bit."""
+    _, owned_model, _ = equal_models
+    views: int = len(cam_types)
+    generator: np.random.Generator = np.random.default_rng(41 + views + int(with_poses))
+    images: UInt8[ndarray, "s 28 42 3"] = generator.integers(0, 256, size=(views, 28, 42, 3), dtype=np.uint8)
+    rays: Float32[ndarray, "s 28 42 3"] = generator.normal(size=(views, 28, 42, 3)).astype(np.float32)
+    rays /= np.maximum(np.linalg.norm(rays, axis=-1, keepdims=True), 1e-6)
+    c2w: Float32[ndarray, "s 4 4"] | None = None
+    if with_poses:
+        c2w = np.tile(np.eye(4, dtype=np.float32), (views, 1, 1))
+        c2w[:, 1, 3] = np.arange(views, dtype=np.float32) * 0.15
+    batch: dict[str, Tensor | None] = owned_preprocess.assemble_batch(list(images), list(rays), list(cam_types), c2w=c2w, device=torch.device("cpu"))
+    d_cam: Tensor = cast(Tensor, batch["d_cam"])
+    cam_types_tensor: Tensor = cast(Tensor, batch["cam_types"])
+
+    with torch.inference_mode():
+        reference: dict[str, Tensor] = owned_model(batch["images"], ray_map=batch["ray_map"], d_cam=d_cam, cam_types=cam_types_tensor)
+        frozen = owned_model.freeze_geometry(d_cam, cam_types_tensor, batch["ray_map"])
+        frozen_output: dict[str, Tensor] = owned_model(batch["images"], frozen=frozen)
+        second_output: dict[str, Tensor] = owned_model(batch["images"], frozen=frozen)
+    output_keys: tuple[str, ...] = ("depth", "depth_metric", "depth_conf", "metric_scaling_factor", "mask_logits", "mask")
+    assert all(torch.equal(reference[key], frozen_output[key]) for key in output_keys)
+    assert all(torch.equal(reference[key], second_output[key]) for key in output_keys)
+    assert (frozen.ray_feat is not None) == with_poses
+    assert frozen.calib_k == 16
+    # Local layers before/after the scale token and the global layers share three tensors across twelve blocks.
+    assert len(frozen.attn_masks) == 12
+    assert len({id(mask) for mask in frozen.attn_masks if mask is not None}) == 3
+    with pytest.raises(ValueError, match="not both"):
+        owned_model(batch["images"], d_cam=d_cam, frozen=frozen)
