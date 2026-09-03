@@ -1,0 +1,21 @@
+# X-Lens (ViT-S) architecture — inference.
+# NOTE: the released checkpoint also embeds its own arch; the inference loader
+# reads n_cam_types / calibration-token shapes directly from the weights, so you
+# normally do NOT need to edit this file. It documents the Stage-3 architecture
+# that serves all three camera modes (pinhole / fisheye / heterogeneous).
+backbone: "vits"
+head_features: 128
+head_out_channels: [128, 256, 384, 384]
+predict_mask: true
+scale_head_mode: "attn_pool"
+scale_head_num_queries: 4
+scale_head_num_heads: 6
+# heterogeneous-camera support (0 = fisheye, 1 = pinhole)
+n_cam_types: 2
+use_calib_tokens: true
+calib_tokens_per_type: 16
+calib_token_inject_types: [0]
+use_distortion_bias: true
+distortion_bias_layers: "global_only"
+distortion_bias_hidden_dim: 64
+distortion_bias_chunk_size: 512

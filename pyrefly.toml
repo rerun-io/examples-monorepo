@@ -43,6 +43,7 @@ project-excludes = [
     "packages/monoprior/monopriors/third_party/moge/**/*",
     "packages/monoprior/monopriors/third_party/promptda/**/*",
     "packages/monoprior/monopriors/third_party/video_depth_anything/**/*",
+    "packages/monoprior/monopriors/third_party/xlens/**/*",
     # unmodified upstream ZipDepth training code is a vendor boundary (untyped)
     "packages/zipdepth/zipdepth/data/**/*",
     "packages/zipdepth/zipdepth/loss/**/*",
