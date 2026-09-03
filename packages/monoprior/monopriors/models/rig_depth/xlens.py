@@ -87,11 +87,28 @@ def validate_rig_inputs(images: UInt8[ndarray, "s h w 3"], rays: Float32[ndarray
         raise ValueError("X-Lens images, rays, and camera types must have matching view and image dimensions")
 
 
-def normalize_images(images: UInt8[ndarray, "s h w 3"], device: torch.device) -> Float32[Tensor, "1 s 3 h w"]:
-    """ImageNet-normalise uint8 RGB views on the inference device.
+def normalize_framesets(images: UInt8[ndarray, "b s h w 3"], device: torch.device) -> Float32[Tensor, "b s 3 h w"]:
+    """ImageNet-normalise a batch of uint8 RGB framesets on the inference device.
 
     Same operation order as the upstream numpy ``normalize_image`` (divide,
     subtract, divide), so the float32 results are identical.
+
+    Args:
+        images: RGB framesets, ``UInt8[ndarray, "b s h w 3"]``.
+        device: Device that owns the result.
+
+    Returns:
+        Normalised network input, ``Float32[Tensor, "b s 3 h w"]``.
+    """
+    rgb: UInt8[Tensor, "b s h w 3"] = torch.from_numpy(np.ascontiguousarray(images)).to(device)
+    mean: Float32[Tensor, "3"] = torch.as_tensor(IMAGENET_MEAN, device=device)
+    std: Float32[Tensor, "3"] = torch.as_tensor(IMAGENET_STD, device=device)
+    normalized: Float32[Tensor, "b s h w 3"] = (rgb.to(torch.float32) / 255.0 - mean) / std
+    return rearrange(normalized, "b s h w c -> b s c h w").contiguous()  # pyrefly: ignore  # bad-argument-type — einops stub false positive
+
+
+def normalize_images(images: UInt8[ndarray, "s h w 3"], device: torch.device) -> Float32[Tensor, "1 s 3 h w"]:
+    """ImageNet-normalise one frameset of uint8 RGB views on the inference device.
 
     Args:
         images: RGB views, ``UInt8[ndarray, "s h w 3"]``.
@@ -100,11 +117,7 @@ def normalize_images(images: UInt8[ndarray, "s h w 3"], device: torch.device) ->
     Returns:
         Normalised network input, ``Float32[Tensor, "1 s 3 h w"]``.
     """
-    rgb: UInt8[Tensor, "s h w 3"] = torch.from_numpy(np.ascontiguousarray(images)).to(device)
-    mean: Float32[Tensor, "3"] = torch.as_tensor(IMAGENET_MEAN, device=device)
-    std: Float32[Tensor, "3"] = torch.as_tensor(IMAGENET_STD, device=device)
-    normalized: Float32[Tensor, "s h w 3"] = (rgb.to(torch.float32) / 255.0 - mean) / std
-    return rearrange(normalized, "s h w c -> 1 s c h w").contiguous()  # pyrefly: ignore  # bad-argument-type — einops stub false positive
+    return normalize_framesets(images[None], device)
 
 
 @dataclass(frozen=True, slots=True)

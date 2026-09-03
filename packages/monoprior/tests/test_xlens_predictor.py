@@ -148,8 +148,8 @@ def test_export_graph_matches_frozen_forward(random_model: XLensNet, cam_types: 
         graph = _XLensRigGraph(random_model, frozen, geometry).eval()
         outputs: tuple[Tensor, Tensor, Tensor, Tensor] = graph(image_tensor, *(geometry.inputs[name] for name in geometry.names))
 
-    assert geometry.names[:3] == ("ray_feat", "pos_local", "pos_global")
-    bias_names: tuple[str, ...] = geometry.names[3:]
+    assert geometry.names[:5] == ("ray_feat", "pos_embed", "pos_local", "pos_global", "cam_types")
+    bias_names: tuple[str, ...] = geometry.names[5:]
     assert len(bias_names) == expected_biases
     assert len(geometry.layer_slots) == 12
     # Global layers (odd from alt_start=4) always carry the combined per-head bias; local layers only when a view is a pinhole placeholder.
@@ -164,6 +164,16 @@ def test_export_graph_matches_frozen_forward(random_model: XLensNet, cam_types: 
     for value, key in zip(outputs, ("depth_metric", "depth_conf", "mask", "metric_scaling_factor"), strict=True):
         assert value.shape == reference[key].shape
         assert torch.allclose(value, reference[key], rtol=1e-4, atol=1e-5), key
+
+    # A batch of two framesets of the same rig: geometry stays batch-1 and broadcasts; each frameset matches its own eager run.
+    second_images, _, _ = _random_rig(3, True, 12)
+    stacked: Float32[Tensor, "2 s 3 h w"] = torch.cat([image_tensor, normalize_images(second_images, torch.device("cpu"))], dim=0)
+    with torch.inference_mode():
+        batched: tuple[Tensor, Tensor, Tensor, Tensor] = graph(stacked, *(geometry.inputs[name] for name in geometry.names))
+        second_reference: dict = random_model(stacked[1:], frozen=frozen)
+    for index, expected in enumerate((reference, second_reference)):
+        for value, key in zip(batched, ("depth_metric", "depth_conf", "mask", "metric_scaling_factor"), strict=True):
+            assert torch.allclose(value[index : index + 1], expected[key], rtol=1e-4, atol=1e-5), (index, key)
 
 
 def test_engine_geometry_requires_float_rope_positions(random_model: XLensNet) -> None:

@@ -65,6 +65,8 @@ class FrozenRigGeometry:
     """Cross-view RoPE positions with the same layout as ``pos_local``."""
     attn_masks: tuple[AttentionBias | None, ...]
     """Per-layer additive attention bias (calibration mask plus distortion bias); layers with equal geometry share one tensor."""
+    pos_embed: Float32[Tensor, "1 tokens features"] | None = None
+    """Position embedding interpolated to this image size (CLS + patches); None recomputes it from the pretrained grid."""
 
     def with_mask_dtype(self, dtype: torch.dtype) -> "FrozenRigGeometry":
         """Copy with the attention biases cast to ``dtype``, keeping the tensor sharing between layers.
@@ -290,6 +292,7 @@ class DinoVisionTransformer(nn.Module):
         x: Float[Tensor, "batch views 3 height width"],
         ray_feat: Float[Tensor, "batch views features patch_height patch_width"] | None = None,
         cam_types: Int64[Tensor, "batch views"] | None = None,
+        pos_embed: Float32[Tensor, "1 tokens features"] | None = None,
     ) -> Float[Tensor, "batch views tokens features"]:
         """Build the input token sequence.
 
@@ -302,6 +305,8 @@ class DinoVisionTransformer(nn.Module):
                        RayMapEncoder, added element-wise to patch tokens.
             cam_types: Optional (B, S) int camera-type ids (0=fisheye, 1=pinhole),
                        looked up in cam_type_embed and broadcast over patch tokens.
+            pos_embed: Optional precomputed (1, 1 + N, C) position embedding for this
+                       image size; None interpolates the pretrained grid here.
 
         Returns:
             Token sequence (B, S, N, C).
@@ -328,7 +333,7 @@ class DinoVisionTransformer(nn.Module):
 
         cls_token = self.prepare_cls_token(B, S)
         x = torch.cat((cls_token, x), dim=1)
-        x = x + self.interpolate_pos_encoding(x, w, h)
+        x = x + (self.interpolate_pos_encoding(x, w, h) if pos_embed is None else pos_embed.to(x.dtype))
         if self.register_tokens is not None:
             x = torch.cat(
                 (
@@ -553,6 +558,12 @@ class DinoVisionTransformer(nn.Module):
             pos_nodiff = torch.cat([pos_nodiff, zeros], dim=2)
 
         patch_hw: tuple[int, int] = (height // self.patch_size, width // self.patch_size)
+        # The token sequence is float32 where the position embedding is added (the CLS
+        # concat promotes it), so interpolating in float32 here is what forward does.
+        token_probe: Float32[Tensor, "1 tokens features"] = torch.empty(
+            1, 1 + patch_hw[0] * patch_hw[1], self.embed_dim, dtype=torch.float32, device=device
+        )
+        pos_embed: Float32[Tensor, "1 tokens features"] = self.interpolate_pos_encoding(token_probe, height, width)
         distortion_active: bool = self.distortion_bias is not None and d_cam is not None
         shared: dict[tuple[AttentionType, bool], AttentionBias | None] = {}
         attn_masks: list[AttentionBias | None] = []
@@ -582,6 +593,7 @@ class DinoVisionTransformer(nn.Module):
             pos_local=pos,
             pos_global=pos_nodiff,
             attn_masks=tuple(attn_masks),
+            pos_embed=pos_embed,
         )
 
     def _get_intermediate_layers_not_chunked(
@@ -614,6 +626,7 @@ class DinoVisionTransformer(nn.Module):
             x,
             ray_feat=frozen.ray_feat,
             cam_types=frozen.cam_types,
+            pos_embed=frozen.pos_embed,
         )
         output: list[tuple[Float[Tensor, "batch views features"], Float[Tensor, "batch views tokens features"]]] = []
         total_block_len = len(self.blocks)
