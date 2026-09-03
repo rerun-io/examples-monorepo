@@ -121,3 +121,9 @@ ignore_names = [
 [tool.pytest.ini_options]
 markers = ["slow: loads a checkpoint or builds a TensorRT engine (deselected by default; run with -m slow)"]
 addopts = "-m 'not slow'"
+
+# Workspace siblings named above resolve to their in-repo path (never to a PyPI
+# namesake); the root manifest installs the same paths editable.
+[tool.uv.sources]
+sam3 = { path = "../sam3", editable = true }
+

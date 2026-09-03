@@ -32988,7 +32988,6 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/webencodings-0.5.1-pyhd8ed1ab_3.conda
       - conda: https://prefix.dev/conda-forge/noarch/websocket-client-1.9.0-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
-      - pypi: ./packages/mv-api
       - pypi: ./packages/sapiens-coco133-pose
       - pypi: ./packages/sapiens2-pose
       - pypi: ./packages/simplecv
@@ -33055,7 +33054,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b2/a3/e137168c9c44d18eff0376253da9f1e9234d0239e0ee230d2fee6cea8e55/jeepney-0.9.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b5/11/87d6d29fb5d237229d67973a6c9e06e048f01cf4994dee194ab0ea841814/tomlkit-0.14.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/b7/97/30a3a3775ead580134088dfc116a410e2ae490c044ec357109eeb11503ec/monopriors-0.1.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bd/1f/73c53fcbfb0b5a78f91176df41945ca466e71e9d9d836e5c522abda39ee7/pydantic-2.11.10-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/c1/76/de1bfac17d183c49c6d0887903d3064ced51cf1d9ba7a8d611c1a8808c4f/timm-1.0.28-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/c4/13/680c54afe3e65767bed7ec1a15571e1a2f1257128733851ade24abcefbcc/kiwisolver-1.5.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
@@ -33555,7 +33553,6 @@ environments:
       - conda: https://prefix.dev/conda-forge/noarch/webencodings-0.5.1-pyhd8ed1ab_3.conda
       - conda: https://prefix.dev/conda-forge/noarch/websocket-client-1.9.0-pyhd8ed1ab_0.conda
       - conda: https://prefix.dev/conda-forge/noarch/zipp-4.1.0-pyhcf101f3_0.conda
-      - pypi: ./packages/mv-api
       - pypi: ./packages/sapiens-coco133-pose
       - pypi: ./packages/sapiens2-pose
       - pypi: ./packages/simplecv
@@ -33624,7 +33621,6 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/b2/a3/e137168c9c44d18eff0376253da9f1e9234d0239e0ee230d2fee6cea8e55/jeepney-0.9.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b5/11/87d6d29fb5d237229d67973a6c9e06e048f01cf4994dee194ab0ea841814/tomlkit-0.14.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl
-      - pypi: https://files.pythonhosted.org/packages/b7/97/30a3a3775ead580134088dfc116a410e2ae490c044ec357109eeb11503ec/monopriors-0.1.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/bd/1f/73c53fcbfb0b5a78f91176df41945ca466e71e9d9d836e5c522abda39ee7/pydantic-2.11.10-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/c1/76/de1bfac17d183c49c6d0887903d3064ced51cf1d9ba7a8d611c1a8808c4f/timm-1.0.28-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/c4/13/680c54afe3e65767bed7ec1a15571e1a2f1257128733851ade24abcefbcc/kiwisolver-1.5.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
@@ -92464,14 +92460,14 @@ packages:
   - pytorch-lightning>=2.5.1,<3
   - diffusers[torch]>=0.32.2
   - timm>=1.0.15,<2
-  - sam3>=0.1.0
+  - sam3 @ ./packages/sam3
   requires_python: '>=3.11.0'
 - pypi: ./packages/mv-api
   name: mv-api
   requires_dist:
-  - monopriors
+  - monopriors @ ./packages/monoprior
   - tyro>=0.9.1
-  - wilor-nano
+  - wilor-nano @ ./packages/wilor-nano
   requires_python: '>=3.12'
 - pypi: ./packages/mvs
   name: mvs
@@ -92481,13 +92477,13 @@ packages:
 - pypi: ./packages/posekit
   name: posekit
   requires_dist:
-  - simplecv
+  - simplecv @ ./packages/simplecv
   - tyro>=0.9.1
   requires_python: '>=3.12'
 - pypi: ./packages/prompt-da
   name: rerun-prompt-da
   requires_dist:
-  - monopriors>=0.3.2
+  - monopriors @ ./packages/monoprior
   requires_python: '>=3.12'
 - pypi: ./packages/pysfm
   name: pysfm
@@ -92558,14 +92554,13 @@ packages:
   - omegaconf>=2.3.0,<3
   - termcolor>=3.2.0,<4
   - spaces>=0.43.0
-  - monopriors>=0.3.2
-  - sam3>=0.1.0
+  - monopriors @ ./packages/monoprior
+  - sam3 @ ./packages/sam3
   requires_python: '>=3.12'
 - pypi: ./packages/sapiens-coco133-pose
   name: sapiens-coco133-pose
   requires_dist:
-  - sapiens2-pose
-  - mv-api
+  - sapiens2-pose @ ./packages/sapiens2-pose
   - tyro>=0.9.1
   requires_python: '>=3.12'
 - pypi: ./packages/sapiens2-pose
@@ -92613,7 +92608,7 @@ packages:
   name: vistadream
   requires_dist:
   - einops>=0.8.1,<0.9
-  - monopriors>=0.3.2
+  - monopriors @ ./packages/monoprior
   requires_python: '>=3.11'
 - pypi: ./packages/wilor-nano
   name: wilor-nano
@@ -92627,7 +92622,7 @@ packages:
 - pypi: ./packages/zipdepth
   name: zipdepth
   requires_dist:
-  - monopriors>=0.3.3
+  - monopriors @ ./packages/monoprior
   requires_python: '>=3.12'
 - pypi: direct+https://github.com/nvidia-isaac/cuVSLAM/releases/download/v15.0.0/cuvslam-15.0.0%2Bcu13-cp312-abi3-manylinux_2_39_aarch64.whl
   name: cuvslam
@@ -97497,11 +97492,6 @@ packages:
   version: 2.27.0.0
   sha256: 33cf852883baeaa274069eceefe2b2de4e2d1da1c8b16939aea676a5ac37781c
   requires_python: '>=3.7'
-- pypi: https://files.pythonhosted.org/packages/b7/97/30a3a3775ead580134088dfc116a410e2ae490c044ec357109eeb11503ec/monopriors-0.1.0-py3-none-any.whl
-  name: monopriors
-  version: 0.1.0
-  sha256: 5198d2d6a7e2f78caad9a4755bf383bb973996579a493709def1179dcad125bc
-  requires_python: '>=3.10.0'
 - pypi: https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl
   name: six
   version: 1.17.0

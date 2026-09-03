@@ -108,6 +108,13 @@ environments or demo tasks; their role is described in the second column.
   lockfile.
 - List the tasks available in an environment with
   `pixi task list -e <name>` or `pixi task list -e <name>-dev`.
+- In-repo packages depend on each other by name in `[project].dependencies`
+  and pin that name to the sibling's path with `[tool.uv.sources]` in their
+  own `pyproject.toml`; the root manifest installs the same paths editable.
+  The pin keeps a PyPI namesake (there is one for `monopriors`) out of the
+  solve. pixi-build source packages, which `asmk`, `dpretrieval`, and
+  `mast3r` already are, are the eventual replacement once that preview
+  stabilizes.
 
 For agent and contributor documentation — architecture, platform rules, adding
 a new package, Rerun version policy, and known issues — see
