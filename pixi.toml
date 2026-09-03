@@ -126,7 +126,7 @@ cuda-nvtx-dev = "*"
 cuda-nvml-dev = "*"
 cuda-profiler-api = "*"
 # CUDA Libraries
-cudnn = "*"
+cudnn = ">=9,<10"  # onnxruntime 1.29 and pytorch cuda130 builds are cuDNN 9 ABI
 libcublas-dev = "*"
 libcudss-dev = "*"
 libcufile-dev = "*"
@@ -138,15 +138,8 @@ libnvjitlink = "*"
 # PyTorch — forces the cuda130/2.12.1 build (explicit beats relying on cuda-version alone)
 pytorch-gpu = ">=2.12,<2.13"
 torchvision = "*"
-# onnxruntime — conda-forge *_cuda130 builds cover linux-64 AND linux-aarch64,
-# replacing the old two-index pypi onnxruntime-gpu split. Build glob required:
-# CPU builds carry no cuda-version constraint. No sm_121 SASS — the GB10 Spark
-# JITs the bundled compute_120 PTX (validated on-device 2026-08-05).
-# MIGRATION GOTCHA: envs installed before this switch keep stale files from the
-# pypi wheel (its onnxruntime_pybind11_state.cpython-*.so shadows conda's plain
-# .so → CUDA-EP segfault at session creation). Recreate such envs:
-# rm -rf .pixi/envs/<env> && pixi install --frozen -e <env>.
-onnxruntime = { version = ">=1.26.0,<2", build = "*cuda130*" }
+# onnxruntime comes from PyPI (see [feature.cuda.pypi-dependencies]); conda-forge
+# supplies only the CUDA/cuDNN libraries it dlopens.
 
 # TensorRT — one shared source for every cuda env (pypi.nvidia.com ships both
 # platforms, cp310–cp313). tensorrt-cu13-libs' stale metadata demands
@@ -155,6 +148,12 @@ onnxruntime = { version = ">=1.26.0,<2", build = "*cuda130*" }
 [feature.cuda.pypi-dependencies]
 tensorrt-cu13 = { version = "==11.2.1.2", index = "https://pypi.nvidia.com" }
 nvidia-cuda-runtime-cu13 = "==0.0.0a0"
+# onnxruntime from PyPI, like TensorRT: conda-forge's build ships no sm_121 kernels
+# (its CUDA EP dies on the GB10), and 1.29.0 is the first release whose aarch64
+# CUDA 13 wheels carry sm_121a. No [cuda]/[cudnn] extras — cudart/cuBLAS/cuDNN come
+# from conda above through the LD_LIBRARY_PATH activation. Exact pin: bump
+# deliberately and re-run the GB10 smoke tests.
+onnxruntime-gpu = "==1.29.0"
 cuda-python = "*"
 # The dynamo exporter — the only torch.onnx.export path now that TRT 11 made
 # strongly-typed networks mandatory — imports onnxscript at export time.
@@ -216,7 +215,7 @@ description = "Run package tests"
 # simplecv
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.simplecv]
-platforms = ["linux-64"]
+platforms = ["linux-64", "linux-aarch64"]
 
 [feature.simplecv.dependencies]
 python = "3.12.*"
@@ -243,8 +242,12 @@ rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193
 wilor-nano = { path = "packages/wilor-nano", editable = true }
 trtkit = { path = "packages/trtkit", editable = true }
 timm = "<1.0"
-vrs = ">=1.1.0"
 PyTurboJPEG = ">=1.7.0"
+
+# vrs ships no linux-aarch64 wheels (macOS arm64 + sdist only); it is used only by
+# the Aria/HOT3D download+preprocess apis, so keep it linux-64-scoped.
+[feature.simplecv.target.linux-64.pypi-dependencies]
+vrs = ">=1.1.0"
 
 [feature.simplecv.activation.env]
 PACKAGE_DIR = "packages/simplecv"
@@ -368,7 +371,7 @@ description = "Download an example Assembly101 720p dataset from Hugging Face"
 # monoprior
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.monoprior]
-platforms = ["linux-64"]
+platforms = ["linux-64", "linux-aarch64"]
 
 [feature.monoprior.dependencies]
 python = "3.12.*"
@@ -876,7 +879,7 @@ description = "Mount HF-hosted egoexo-forge RRDs (5 per source) as a Rerun catal
 # mv-api
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.mv-api]
-platforms = ["linux-64"]
+platforms = ["linux-64", "linux-aarch64"]
 
 [feature.mv-api.dependencies]
 python = "3.12.*"
@@ -886,8 +889,7 @@ open3d = ">=0.19.0,<0.20"
 scikit-image = ">=0.24.0,<0.25"
 torchcodec = "*"
 tyro = ">=0.9.1,<0.10"
-
-[feature.mv-api.target.linux-64.dependencies]
+# simplecv.apis.view_exoego (imported by the full pipeline) needs it; noarch, solves on both platforms.
 datasets = ">=4.0.0"
 
 [feature.mv-api.pypi-dependencies]
@@ -916,7 +918,7 @@ outputs = ["packages/mv-api/data/hocap/sample"]
 description = "Download and extract the raw HoCap sample"
 
 [feature.mv-api-catalog]
-platforms = ["linux-64"]
+platforms = ["linux-64", "linux-aarch64"]
 
 [feature.mv-api-catalog.activation.env]
 PACKAGE_DIR = "packages/mv-api"
@@ -1080,7 +1082,7 @@ description = "Launch SAM3 segmentation Gradio app with annotated image"
 # sapiens2-pose
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.sapiens2-pose]
-platforms = ["linux-64"]
+platforms = ["linux-64", "linux-aarch64"]
 
 [feature.sapiens2-pose.dependencies]
 python = "3.12.*"
@@ -1171,7 +1173,6 @@ tyro = ">=0.9.1,<0.10"
 sapiens-coco133-pose = { path = "packages/sapiens-coco133-pose", editable = true }
 trtkit = { path = "packages/trtkit", editable = true }
 sapiens2-pose = { path = "packages/sapiens2-pose", editable = true }
-mv-api = { path = "packages/mv-api", editable = true }
 wilor_nano = { path = "packages/wilor-nano", editable = true }
 rtmlib = { git = "https://github.com/pablovela5620/rtmlib.git", rev = "98bca2193c39b349034b280803b54c9ee58f7c68" }
 onnx = "*"
@@ -1228,7 +1229,7 @@ PACKAGE_DIR = "packages/trtkit"
 # posekit
 # ═══════════════════════════════════════════════════════════════════════════
 [feature.posekit]
-platforms = ["linux-64"]
+platforms = ["linux-64", "linux-aarch64"]
 
 [feature.posekit.dependencies]
 python = "3.12.*"
@@ -1340,7 +1341,7 @@ cuvslam = { url = "https://github.com/nvidia-isaac/cuVSLAM/releases/download/v15
 
 [feature.robocap-slam.activation.env]
 PACKAGE_DIR = "packages/robocap-slam"
-LD_LIBRARY_PATH = "${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH}"
+LD_LIBRARY_PATH = "${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
 [feature.robocap-slam.tasks.robocap-slam-download-example]
 cmd = """test -d data/robocap/f408193e6447b3b0_session_14 || hf download pablovela5620/robocap-example --repo-type dataset --local-dir data/robocap"""
@@ -1387,7 +1388,6 @@ tyro = ">=0.9.1,<0.10"
 # migration reaches colmap/pycolmap (or build them in ai-demos if GPU SIFT is
 # needed sooner).
 pycolmap = { version = "4.0.*", build = "cpu*" }
-
 [feature.pysfm.pypi-dependencies]
 pysfm = { path = "packages/pysfm", editable = true }
 
@@ -1473,6 +1473,75 @@ description = "Train a first 5k-step Brush splat from the kitchen train 0100 rig
 
 [feature.pysfm.target.linux-64.dependencies]
 brush = "==0.3.0"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# exo-calib — exo-camera calibration from human keypoints (Kineo-style
+# correspondences + staged kornia-rs bundle adjustment). Catalog-native: its
+# envs compose catalog-common + rerun-prerelease for the dataloader lane.
+# ═══════════════════════════════════════════════════════════════════════════
+# Explicit platforms required — see AGENTS.md "Platforms & lockfile".
+[feature.exo-calib]
+platforms = ["linux-64", "linux-aarch64"]
+
+[feature.exo-calib.dependencies]
+python = "3.12.*"
+tyro = ">=0.9.1,<0.10"
+open3d = ">=0.19.0,<0.20"
+torchcodec = "*"
+
+[feature.exo-calib.pypi-dependencies]
+# Bundle adjustment comes from kornia-rs (Rust core, cp312 manylinux aarch64
+# wheels) — conda-forge pycolmap is unsolvable next to CUDA 13 on aarch64
+# (its colmap→libfaiss chains pin older cudatoolkits).
+kornia-rs = ">=0.1.14,<0.2"
+exo-calib = { path = "packages/exo-calib", editable = true }
+monopriors = { path = "packages/monoprior", editable = true }
+posekit = { path = "packages/posekit", editable = true }
+trtkit = { path = "packages/trtkit", editable = true }
+# monopriors declares sam3 and its multi-view predictor imports vggt (G3T builds on it).
+sam3 = { path = "packages/sam3", editable = true }
+onnx = "*"
+vggt = { git = "https://github.com/pablovela5620/vggt.git", rev = "5ed6ec88a951f27959f73bc72eb4b6dc7a028b0c" }
+
+[feature.exo-calib.activation.env]
+PACKAGE_DIR = "packages/exo-calib"
+PYREFLY_TARGET = "exo_calib"
+
+[feature.exo-calib.tasks.exocalib-pipeline]
+cmd = "python tools/apps/pipeline.py"
+cwd = "packages/exo-calib"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Full calibration of one catalog segment: Stage A, two passes of Stage B + C+D, Stage E"
+
+[feature.exo-calib.tasks.exocalib-blueprint]
+cmd = "python tools/apps/blueprint.py"
+cwd = "packages/exo-calib"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Write the exoego-layout .rbl bound to the dataset's current id and register it as the default blueprint"
+
+[feature.exo-calib.tasks.exocalib-init]
+cmd = "python tools/apps/calibrate_init.py"
+cwd = "packages/exo-calib"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Stage A: G3T + MoGe-2 initial extrinsics/intrinsics, registered as exocalib_init"
+
+[feature.exo-calib.tasks.exocalib-kp2d]
+cmd = "python tools/apps/keypoints2d.py"
+cwd = "packages/exo-calib"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Stage B: reprojection-tracked boxes (YOLOX re-anchoring) + RTMW-x (TensorRT) COCO-133 keypoints over the whole capture, registered as exocalib_kp2d"
+
+[feature.exo-calib.tasks.exocalib-refine]
+cmd = "python tools/apps/refine.py"
+cwd = "packages/exo-calib"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Stage C+D: correspondences, robust triangulation, kornia-rs BA, focal stage, MoGe-2 metric rescale, registered as exocalib_refined"
+
+[feature.exo-calib.tasks.exocalib-report]
+cmd = "python tools/apps/report.py"
+cwd = "packages/exo-calib"
+env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
+description = "Stage E: SE3/Sim3 eval vs GT (eval.json) plus the exocalib_align layer"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # vistadream
@@ -2719,6 +2788,19 @@ simplecv-catalog-dev = { features = [
     "simplecv",
     "dev",
 ], solve-group = "simplecv-catalog", no-default-feature = true }
+exo-calib = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "exo-calib",
+], solve-group = "exo-calib", no-default-feature = true }
+exo-calib-dev = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "exo-calib",
+    "dev",
+], solve-group = "exo-calib", no-default-feature = true }
 monoprior = { features = [
     "common",
     "cuda",

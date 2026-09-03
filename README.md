@@ -63,6 +63,7 @@ Set `PIXI_ENV` in a gitignored `.envrc.local` to override a directory's default.
 | [dpretrieval](packages/dpretrieval/) | Pixi-build recipe for a DBoW2/pybind11 image-retrieval extension used by DPVO. |
 | [dpvo](packages/dpvo/) | Deep Patch Visual Odometry with Rerun and Gradio integrations. |
 | [egoexo-forge](packages/egoexo-forge/) | Rerun and Gradio tools for egocentric and exocentric human datasets. |
+| [exo-calib](packages/exo-calib/) | Exo-camera calibration from human keypoints over a Rerun catalog: G3T + MoGe-2 init, tracked RTMW-x keypoints, kornia-rs bundle adjustment, evaluation against dataset ground truth. |
 | [gsplat-rust-renderer](packages/gsplat-rust-renderer/) | GPU Gaussian-splat viewer implemented as a custom Rerun visualizer. See its [README](packages/gsplat-rust-renderer/README.md). |
 | [live-rerun](packages/live-rerun/) | Zero-transcode live H.264/H.265 sensor streaming into Rerun. |
 | [mamma](packages/mamma/) | Streaming multiview body capture from decode through SMPL-X fitting and Rerun logging. |
@@ -108,6 +109,13 @@ environments or demo tasks; their role is described in the second column.
   lockfile.
 - List the tasks available in an environment with
   `pixi task list -e <name>` or `pixi task list -e <name>-dev`.
+- In-repo packages depend on each other by name in `[project].dependencies`
+  and pin that name to the sibling's path with `[tool.uv.sources]` in their
+  own `pyproject.toml`; the root manifest installs the same paths editable.
+  The pin keeps a PyPI namesake (there is one for `monopriors`) out of the
+  solve. pixi-build source packages, which `asmk`, `dpretrieval`, and
+  `mast3r` already are, are the eventual replacement once that preview
+  stabilizes.
 
 For agent and contributor documentation — architecture, platform rules, adding
 a new package, Rerun version policy, and known issues — see

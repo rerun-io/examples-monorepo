@@ -11,6 +11,7 @@ project-includes = [
     "packages/mv-api/src/**/*",
     "packages/robocap-slam/robocap_slam/**/*",
     "packages/dataforge/dataforge/**/*",
+    "packages/exo-calib/exo_calib/**/*",
     "packages/pysfm/pysfm/**/*",
     "packages/vistadream/src/**/*",
     "packages/pyvrs-viewer/src/**/*",
@@ -60,16 +61,14 @@ project-excludes = [
 # not per-file guesses (critical for monorepo with multiple source roots)
 disable-search-path-heuristics = true
 
-# Enable Pyrefly's experimental tensor-shape inference for torch.Tensor and
-# jaxtyping annotations. Shape-aware torch stubs are provided in search-path.
-# TODO: investigate — the tensor_shapes fixtures send pyrefly 1.1.x into an
-# infinite solver loop on any numpy-using file (see AGENTS.md "Gotchas").
-# Disabled until fixed; re-enable BOTH lines together.
-# tensor-shapes = true
+# Tensor-shape checking of jaxtyping annotations turns on by itself when the
+# `shape_extensions` package resolves; pyrefly ships it as PyPI stub packages
+# pinned to its own version (`pyrefly-torch-stubs`, `pyrefly-numpy-stubs`, both
+# on `pyrefly-shape-extensions`). Adopt them in the `dev` feature once the numpy
+# stubs (pyrefly 1.3 line) cover `einsum` and batched `@`; see AGENTS.md.
 
 # Source roots — where first-party imports are resolved from
 search-path = [
-    # "typings/pyrefly/tensor_shapes/fixtures",  # TODO: hangs pyrefly, see AGENTS.md
     "packages/monoprior",
     "packages/simplecv",
     "packages/prompt-da/src",
@@ -80,6 +79,7 @@ search-path = [
     "packages/mv-api/src",
     "packages/robocap-slam",
     "packages/dataforge",
+    "packages/exo-calib",
     "packages/pysfm",
     "packages/vistadream/src",
     "packages/pyvrs-viewer/src",
@@ -132,6 +132,8 @@ site-package-path = [
     ".pixi/envs/robocap-slam-dev/lib/python3.12/site-packages",
     ".pixi/envs/dataforge-dev/lib/python3.12/site-packages",
     ".pixi/envs/dataforge-dev/lib/python3.12/site-packages/rerun_sdk",
+    ".pixi/envs/exo-calib-dev/lib/python3.12/site-packages",
+    ".pixi/envs/exo-calib-dev/lib/python3.12/site-packages/rerun_sdk",
     ".pixi/envs/pysfm-dev/lib/python3.12/site-packages",
     ".pixi/envs/vistadream-dev/lib/python3.12/site-packages",
     ".pixi/envs/pyvrs-viewer-dev/lib/python3.12/site-packages",
