@@ -311,7 +311,7 @@ def test_trt_geometry_matches_vendored_infer_convention(encoder: Encoder, caller
     resized_bgr_hw3: UInt8[np.ndarray, "h w 3"] = cv2.resize(bgr_hw3, (caller_hw[1], caller_hw[0]), interpolation=cv2.INTER_AREA)
     rgb_hw3: UInt8[np.ndarray, "h w 3"] = cv2.cvtColor(resized_bgr_hw3, cv2.COLOR_BGR2RGB)
     rgb_bhw3: UInt8[Tensor, "1 h w 3"] = torch.from_numpy(rgb_hw3).cuda()[None]
-    image_3hw: Float32[Tensor, "3 h w"] = rearrange(rgb_bhw3[0], "h w c -> c h w").float() / 255.0  # pyrefly: ignore  # bad-argument-type — einops stub false positive
+    image_3hw: Float32[Tensor, "3 h w"] = rearrange(rgb_bhw3[0], "h w c -> c h w").float() / 255.0
 
     trt_predictor: MoGeV2TrtPredictor = MoGeV2TrtPredictor(encoder=encoder, heads="geometry", batch_size=8)
     loaded: tuple[MoGeModel, int] = load_pinned_moge_v2(encoder, 9)

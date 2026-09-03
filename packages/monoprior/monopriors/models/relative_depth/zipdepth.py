@@ -10,8 +10,8 @@ from huggingface_hub import hf_hub_download
 from jaxtyping import Float, Float32, UInt8
 
 from monopriors.depth_utils import disparity_to_depth, estimate_intrinsics
+from monopriors.models.zipdepth_checkpoint import load_zipdepth_state_dict
 from monopriors.third_party.zipdepth.architecture import ZipDepth, create_model
-from monopriors.third_party.zipdepth.model_utils import strip_state_dict_prefixes
 
 from .base_relative_depth import BaseRelativePredictor, RelativeDepthPrediction
 
@@ -33,10 +33,8 @@ def load_zipdepth(checkpoint: Path, npu: bool = False) -> ZipDepth:
     DDP / torch.compile key prefixes are stripped. Loading is strict: the checkpoint must be a
     complete ZipDepth-base.
     """
-    ckpt = torch.load(checkpoint, map_location="cpu", weights_only=True)
-    state_dict = strip_state_dict_prefixes(ckpt.get("model_state_dict", ckpt))
     model = create_model(variant="base", upsample_unfold=not npu)
-    model.load_state_dict(state_dict, strict=True)
+    model.load_state_dict(load_zipdepth_state_dict(checkpoint), strict=True)
     return model.fuse_for_inference()  # RepVGG re-parameterisation; the fused graph is what the paper benchmarks
 
 
