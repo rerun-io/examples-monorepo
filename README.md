@@ -63,6 +63,7 @@ Set `PIXI_ENV` in a gitignored `.envrc.local` to override a directory's default.
 | [dpretrieval](packages/dpretrieval/) | Pixi-build recipe for a DBoW2/pybind11 image-retrieval extension used by DPVO. |
 | [dpvo](packages/dpvo/) | Deep Patch Visual Odometry with Rerun and Gradio integrations. |
 | [egoexo-forge](packages/egoexo-forge/) | Rerun and Gradio tools for egocentric and exocentric human datasets. |
+| [exo-calib](packages/exo-calib/) | Exo-camera calibration from human keypoints over a Rerun catalog: G3T + MoGe-2 init, tracked RTMW-x keypoints, kornia-rs bundle adjustment, evaluation against dataset ground truth. |
 | [gsplat-rust-renderer](packages/gsplat-rust-renderer/) | GPU Gaussian-splat viewer implemented as a custom Rerun visualizer. See its [README](packages/gsplat-rust-renderer/README.md). |
 | [live-rerun](packages/live-rerun/) | Zero-transcode live H.264/H.265 sensor streaming into Rerun. |
 | [mamma](packages/mamma/) | Streaming multiview body capture from decode through SMPL-X fitting and Rerun logging. |
