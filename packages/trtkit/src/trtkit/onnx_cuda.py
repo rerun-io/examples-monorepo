@@ -7,6 +7,7 @@ current torch CUDA stream (``user_compute_stream``) so execution is fully
 stream-ordered with surrounding torch preprocessing/decode kernels.
 """
 
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +60,12 @@ class OnnxCudaRuntime:
             import onnxruntime as ort
         except ImportError as exc:
             raise RuntimeError("onnxruntime is not installed in this Pixi environment.") from exc
+        # The PyPI wheel dlopens cuDNN/cuBLAS/cudart from the conda prefix. Under
+        # `pixi run` the cuda feature's LD_LIBRARY_PATH covers that; a bare
+        # `.pixi/envs/<env>/bin/python` does not, so point ORT at the prefix
+        # explicitly (its default search only knows torch on Windows and the
+        # nvidia-* pip packages).
+        ort.preload_dlls(directory=str(Path(sys.prefix) / "lib"))
         if "CUDAExecutionProvider" not in ort.get_available_providers():
             raise RuntimeError("onnxruntime CUDAExecutionProvider is unavailable; install onnxruntime-gpu.")
         self._device: torch.device = torch.device("cuda", device_id)

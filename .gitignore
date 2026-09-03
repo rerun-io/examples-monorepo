@@ -102,6 +102,7 @@ packages/simplecv/data/
 packages/mvs/data/
 packages/gauss-surf/data/
 packages/dataforge/data/
+packages/exo-calib/data/
 packages/lamp/data/
 # License-gated SMPL-X body model (lazily downloaded; the MANO pkls next to it stay tracked)
 packages/simplecv/simplecv/data/body_models/
