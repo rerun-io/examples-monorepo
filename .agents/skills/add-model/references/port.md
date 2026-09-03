@@ -52,6 +52,9 @@ Run pytest from `packages/<pkg>` (root collection pulls in packages whose envs a
 - New package instead of a family (LAMP → `packages/lamp`, module `lamptrack`): its env composes `common` + `cuda` + the
   package feature (+ `posekit` for 2D people stages); a `<pkg>-catalog` lane mirrors `monoprior-catalog`; the two catalog rig
   readers are copied from `monopriors/apis/stereo_catalog.py` (no monoprior dependency) pending a shared simplecv reader.
+  A lane solved in isolation may need deps its imports pull transitively (`requests` via posekit/simplecv): add them to the
+  lane explicitly. When the fork runs in parallel, PR 2 ships clear skip/fail behaviour for the missing fixture and PR 3
+  integrates it after a second check.
 - Tests: fast CPU test that builds the model from config and runs a tiny random pair (shape/dtype/finite);
   slow band (`pytestmark = [slow_cuda, requires_cuda]`) that downloads the checkpoint and checks the
   reference number on the ETH3D sample (validate.md gate 2). Default `pytest -q` must stay seconds.

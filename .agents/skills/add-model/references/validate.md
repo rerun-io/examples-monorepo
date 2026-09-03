@@ -30,6 +30,9 @@ A phase is not done until its gate passes. Report failures as failures.
 - From repo root: `pixi run -e <pkg>-dev --frozen lint`, `typecheck`, `deadcode`, `tests` all green — and confirm
   the new paths are actually inside the package's `PYREFLY_TARGET` (root `pixi.toml`), else typecheck is vacuous.
 - Default `pytest -q` runtime stays in seconds; checkpoint tests are `-m slow`.
+- Measure performance evidence in the non-dev env (`<pkg>` or `<pkg>-catalog`): the beartype claw instruments hot per-frame
+  loops in `-dev`. Evidence rrds above ~1.5 GB cannot be browser-embedded — validate the quick rrd in the native headless
+  viewer and keep the full one for `rrd verify` only.
 
 ## Gate 4 — Hand-roll audit (last PR before pushing)
 
