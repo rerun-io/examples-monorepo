@@ -571,7 +571,7 @@ description = "Stream selected-model stereo depth + an incremental TSDF mesh for
 cmd = "python tools/apps/rig_depth_catalog.py"
 cwd = "packages/monoprior"
 env = { RERUN_INSECURE_SKIP_HOST_CHECK = "1" }
-description = "Stream X-Lens depth and fused points for a calibrated Robocap fisheye rig into Rerun"
+description = "Stream native-fisheye X-Lens depth through rectified pinhole twins and TSDF for a calibrated Robocap rig"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # prompt-da
