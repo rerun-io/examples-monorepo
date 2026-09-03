@@ -16,7 +16,7 @@ from simplecv.data.polycam import (
     PolycamDataset,
     load_polycam_data,
 )
-from simplecv.ops.tsdf_depth_fuser import Open3DFuser
+from simplecv.ops.tsdf_depth_fuser import Open3DFuser, log_fused_mesh
 from simplecv.rerun_log_utils import RerunTyroConfig, log_pinhole
 
 
@@ -124,26 +124,20 @@ def view_polycam_data(config: PolyViewConfig) -> None:
             gt_mesh: o3d.geometry.TriangleMesh = depth_fuser.get_mesh()
             gt_mesh.compute_vertex_normals()
 
-            rr.log(
+            log_fused_mesh(
                 f"{parent_path}/gt_mesh",
-                rr.Mesh3D(
-                    vertex_positions=gt_mesh.vertices,
-                    triangle_indices=gt_mesh.triangles,
-                    vertex_normals=gt_mesh.vertex_normals,
-                    vertex_colors=gt_mesh.vertex_colors,
-                ),
+                gt_mesh,
+                static=False,
+                face_rendering=rr.components.MeshFaceRendering.DoubleSided,
             )
 
     # export mesh
     gt_mesh: o3d.geometry.TriangleMesh = depth_fuser.get_mesh()
     gt_mesh.compute_vertex_normals()
 
-    rr.log(
+    log_fused_mesh(
         f"{parent_path}/gt_mesh",
-        rr.Mesh3D(
-            vertex_positions=gt_mesh.vertices,
-            triangle_indices=gt_mesh.triangles,
-            vertex_normals=gt_mesh.vertex_normals,
-            vertex_colors=gt_mesh.vertex_colors,
-        ),
+        gt_mesh,
+        static=False,
+        face_rendering=rr.components.MeshFaceRendering.DoubleSided,
     )

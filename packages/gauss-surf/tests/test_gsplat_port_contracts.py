@@ -7,6 +7,7 @@ import math
 import re
 from pathlib import Path
 
+import pytest
 import torch
 
 from gauss_surf.train_gsplat.core import per_frame_average_psnr
@@ -82,6 +83,13 @@ PART10_REFINE_STEPS: tuple[int, ...] = (
 """The 27 refinements printed by both real 1,221-image reference runs."""
 
 
+def _require_local_artifact(path: Path) -> Path:
+    """Skip golden-data checks when the untracked local run is unavailable."""
+    if not path.is_file():
+        pytest.skip(f"local Gauss Surf artifact is unavailable: {path}")
+    return path
+
+
 def _part10_should_refine(step: int, *, num_train_data: int) -> bool:
     """Return the integer-only Part 10 refinement predicate."""
     warmup_length: int = 500
@@ -109,9 +117,8 @@ def _sh_degree(step: int) -> int:
 
 def test_part6_training_log_contains_the_exact_35_refinement_steps() -> None:
     """The checked-in real run, not a reconstructed config, owns this golden."""
-    training_log: Path = (
-        Path(__file__).parents[1]
-        / "data/splat_runs/47115416-gaussurf/gaussurf-arkit/part6/training.log"
+    training_log: Path = _require_local_artifact(
+        Path(__file__).parents[1] / "data/splat_runs/47115416-gaussurf/gaussurf-arkit/part6/training.log"
     )
     refine_pattern: re.Pattern[str] = re.compile(
         r"^Step (\d+): \d+ GSs duplicated, \d+ GSs split\.", re.MULTILINE
@@ -133,7 +140,10 @@ def test_part10_and_part8_0b_logs_contain_the_same_27_refinement_steps() -> None
     )
 
     parsed_by_run: dict[str, tuple[int, ...]] = {
-        run_name: tuple(int(match) for match in refine_pattern.findall((run_root / run_name / "training.log").read_text()))
+        run_name: tuple(
+            int(match)
+            for match in refine_pattern.findall(_require_local_artifact(run_root / run_name / "training.log").read_text())
+        )
         for run_name in ("part10", "part8-0b")
     }
 
@@ -147,7 +157,7 @@ def test_part10_pause_after_reset_is_derived_from_train_frame_count() -> None:
     refinement events at 1400–2900 and 4400–5400. The prior 670-step pause
     predicted 41 events and therefore contradicted both empirical logs.
     """
-    transforms_path: Path = Path(__file__).parents[1] / "data/training_bundle_part10/47115416/transforms.json"
+    transforms_path: Path = _require_local_artifact(Path(__file__).parents[1] / "data/training_bundle_part10/47115416/transforms.json")
     transforms: dict[str, object] = json.loads(transforms_path.read_text(encoding="utf-8"))
     frames: list[dict[str, object]] = transforms["frames"]  # type: ignore[assignment]
     chosen_frames: int = len(frames)

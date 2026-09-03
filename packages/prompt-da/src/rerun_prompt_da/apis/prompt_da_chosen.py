@@ -90,7 +90,9 @@ def chosen_batches(
     intrinsics, and pose in one catalog query, then decodes those packets
     (and only those) from the whole-segment NVDEC decoder.
     """
-    view = dataset.filter_segments(video_id)
+    view = dataset.filter_segments(video_id).filter_contents(
+        [f"/{FRAME_SELECTION_WIDE}", f"/{DEPTH}", f"/{CONFIDENCE}", f"/{PINHOLE_WIDE}", f"/{RIG}"]
+    )
     if CHOSEN_SHARPNESS_COLUMN not in set(view.arrow_schema().names):
         raise RuntimeError(f"segment {video_id} has no registered frame_selection layer (column {CHOSEN_SHARPNESS_COLUMN!r} absent)")
     table: pa.Table = (
@@ -148,9 +150,17 @@ def main(config: PDAChosenConfig) -> None:
     video_ids: list[str] = segment_ids_from_selection(config.video_id, config.video_ids_file)
     client: CatalogClient = connect_catalog(config.catalog_url, config.dataset_name)
     dataset: DatasetEntry = client.get_dataset(config.dataset_name)
-    row_by_id: dict[str, dict[str, Any]] = {
-        str(row["rerun_segment_id"]): row for row in pa.Table.from_batches(dataset.segment_table().collect()).to_pylist()
-    }
+    segment_table: pa.Table = pa.Table.from_batches(
+        dataset.filter_segments(video_ids)
+        .segment_table()
+        .select(
+            "rerun_segment_id",
+            "property:capture:orientation",
+            "property:capture:orientation_quarter_turns_ccw",
+        )
+        .collect()
+    )
+    row_by_id: dict[str, dict[str, Any]] = {str(row["rerun_segment_id"]): row for row in segment_table.to_pylist()}
 
     @functools.cache
     def predictor() -> PromptDATrtPredictor:
