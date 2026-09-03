@@ -242,6 +242,8 @@ def test_catalog_throughput_config_has_safe_smoke_defaults() -> None:
     assert config.num_segments == 2
     assert config.batch_size == 8
     assert config.builder == "cuda"
+    assert config.dataloader == "current"
+    assert config.fetch_block_size == 512
     assert config.num_producers == 6
     assert config.prefetch_samples == 256
     assert config.segment_ids is None

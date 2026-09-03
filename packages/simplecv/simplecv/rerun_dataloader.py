@@ -21,6 +21,7 @@ slower than this segment-wide torchcodec/NVDEC path.
 from collections.abc import Sequence
 from fractions import Fraction
 from io import BytesIO
+from time import perf_counter
 from typing import TypeAlias
 
 import av
@@ -142,6 +143,12 @@ class SegmentNvdecDecoder(ColumnDecoder[FrameRgbChw]):
         self._fps = fps
         self._segment_id: str | None = None
         self._decoder: VideoDecoder | None = None
+        self.query_seconds: float = 0.0
+        """Whole-segment packet query, mux, and decoder initialization wall time."""
+        self.decode_seconds: float = 0.0
+        """Indexed GPU frame decode wall time."""
+        self.query_count: int = 0
+        """Whole-segment packet materializations performed by this decoder."""
         self.times: TimedeltaNs = np.empty(0, dtype="timedelta64[ns]")
         """The current segment's sample timestamps (timedelta64[ns], timeline order)."""
         self.samples: list[bytes] | None = None
@@ -151,9 +158,12 @@ class SegmentNvdecDecoder(ColumnDecoder[FrameRgbChw]):
 
     def _ensure_segment(self, segment_id: str) -> None:
         if segment_id != self._segment_id:
+            started: float = perf_counter()
             self.times, self.samples, self.keyframes, self._decoder = open_segment_decoder(
                 self._dataset, segment_id, self._entity, self._timeline, self._device, self._fps
             )
+            self.query_seconds += perf_counter() - started
+            self.query_count += 1
             self._segment_id = segment_id
 
     def decode_at(self, index_value: int | np.datetime64 | np.timedelta64, segment_id: str) -> FrameRgbChw | None:
@@ -163,7 +173,9 @@ class SegmentNvdecDecoder(ColumnDecoder[FrameRgbChw]):
         if frame_index < 0:
             return None
         assert self._decoder is not None
+        started: float = perf_counter()
         frame_chw: FrameRgbChw = self._decoder.get_frame_at(frame_index).data
+        self.decode_seconds += perf_counter() - started
         return frame_chw
 
     def decode(self, batch: FieldBatch, requests: Sequence[DecodeRequest]) -> Sequence[FrameRgbChw | None]:
@@ -190,7 +202,9 @@ class SegmentNvdecDecoder(ColumnDecoder[FrameRgbChw]):
                     frame_indices.append(frame_index)
             if frame_indices:
                 assert self._decoder is not None
+                started: float = perf_counter()
                 frames_nchw: UInt8[Tensor, "n 3 h w"] = self._decoder.get_frames_at(frame_indices).data
+                self.decode_seconds += perf_counter() - started
                 for row, position in enumerate(positions):
                     decoded[position] = frames_nchw[row]
             start = stop

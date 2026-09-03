@@ -10,6 +10,7 @@ from torch import Tensor
 from torch.utils.data import DataLoader
 
 from zipdepth.catalog.builders import CpuSampleBuilder, CudaSampleBuilder, SampleBuilder
+from zipdepth.catalog.dataloader_dataset import RerunPromptDepthDataset
 from zipdepth.catalog.dataset import CatalogPromptDepthDataset
 from zipdepth.catalog.segments import DEFAULT_CATALOG_URL, DEFAULT_DATASET_NAME, PromptDACatalog, load_promptda_catalog
 from zipdepth.catalog.stats import CatalogDatasetStats
@@ -36,10 +37,16 @@ class CatalogThroughputConfig:
     """Samples per DataLoader batch."""
     builder: Literal["cuda", "cpu"] = "cuda"
     """Sample builder implementation used by the A/B throughput probe."""
+    dataloader: Literal["current", "rerun"] = "current"
+    """Current threaded dataset or the Rerun-0.37 dataloader path."""
     num_producers: int = 6
-    """Whole-segment producer threads, each with its own video decoder."""
+    """Whole-segment producer threads for the current loader."""
     prefetch_samples: int = 256
-    """Maximum completed samples buffered across segment producers."""
+    """Maximum completed samples buffered by the current loader."""
+    shuffle_buffer_size: int = 256
+    """Decoded samples retained by the current loader's shuffle buffer."""
+    fetch_block_size: int = 512
+    """Samples requested per Rerun dataloader catalog fetch."""
     load_confidence: bool = True
     """Fetch the ARKit confidence column; training skips it."""
     min_depth_span: float = 1.25
@@ -62,8 +69,10 @@ def main(config: CatalogThroughputConfig) -> None:
         raise ValueError("num_segments must be positive")
     if config.batch_size <= 0:
         raise ValueError("batch_size must be positive")
-    if config.num_producers <= 0 or config.prefetch_samples <= 0:
-        raise ValueError("num_producers and prefetch_samples must be positive")
+    if config.num_producers <= 0 or config.prefetch_samples <= 0 or config.shuffle_buffer_size <= 0:
+        raise ValueError("num_producers, prefetch_samples, and shuffle_buffer_size must be positive")
+    if config.fetch_block_size <= 0:
+        raise ValueError("fetch_block_size must be positive")
     if config.max_batches is not None and config.max_batches <= 0:
         raise ValueError("max_batches must be positive when set")
 
@@ -85,16 +94,41 @@ def main(config: CatalogThroughputConfig) -> None:
         builder_factory = lambda: CpuSampleBuilder(  # noqa: E731
             build_train_transform(config.height, config.width, policy), config.min_depth_span
         )
-    samples: CatalogPromptDepthDataset = CatalogPromptDepthDataset(
-        catalog.dataset_entry,
-        segment_ids,
-        catalog.row_by_id,
-        device=device,
-        builder_factory=builder_factory,
-        num_producers=config.num_producers,
-        prefetch_samples=config.prefetch_samples,
-        load_confidence=config.load_confidence,
-    )
+    setup_started: float = perf_counter()
+    samples: CatalogPromptDepthDataset | RerunPromptDepthDataset
+    if config.dataloader == "rerun":
+        if config.builder != "cuda":
+            raise ValueError("the Rerun dataloader path requires builder='cuda'")
+        from rerun.experimental.dataloader import BlockShuffle
+
+        samples = RerunPromptDepthDataset(
+            catalog.dataset_entry,
+            segment_ids,
+            catalog.row_by_id,
+            device=device,
+            builder_factory=lambda: CudaSampleBuilder(
+                (config.height, config.width), policy, config.min_depth_span, device
+            ),
+            # The Rerun buffer would retain native 1920x1440 frame and target
+            # tensors. Block order still shuffles segments without that cost.
+            shuffle_strategy=BlockShuffle(),
+            fetch_block_size=config.fetch_block_size,
+            build_batch_size=config.batch_size,
+            load_confidence=config.load_confidence,
+        )
+    else:
+        samples = CatalogPromptDepthDataset(
+            catalog.dataset_entry,
+            segment_ids,
+            catalog.row_by_id,
+            device=device,
+            builder_factory=builder_factory,
+            shuffle_buffer_size=config.shuffle_buffer_size,
+            num_producers=config.num_producers,
+            prefetch_samples=config.prefetch_samples,
+            load_confidence=config.load_confidence,
+        )
+    setup_elapsed: float = perf_counter() - setup_started
     loader: DataLoader[dict[str, Tensor]] = DataLoader(samples, batch_size=config.batch_size, num_workers=0)
     started: float = perf_counter()
     frames: int = 0
@@ -116,9 +150,11 @@ def main(config: CatalogThroughputConfig) -> None:
     decoded_frames: int = built_frames + stats.skipped_flat_frames
     video_attempts: int = decoded_frames + stats.skipped_frames
     print(
-        f"config: builder={config.builder}, producers={config.num_producers}, "
-        f"prefetch_samples={config.prefetch_samples}, batch_size={config.batch_size}, out={config.width}x{config.height}"
+        f"config: dataloader={config.dataloader}, builder={config.builder}, producers={config.num_producers}, "
+        f"prefetch_samples={config.prefetch_samples}, fetch_block_size={config.fetch_block_size}, "
+        f"batch_size={config.batch_size}, out={config.width}x{config.height}"
     )
+    print(f"setup: {setup_elapsed:.3f}s")
     print(f"overall: {frames / elapsed:.2f} frames/s ({frames} yielded, {built_frames} built, {batches} batches, {elapsed:.2f}s)")
     print(f"segment_query: {stats.segment_query * 1000.0 / video_attempts:.3f} ms/frame")
     print(f"video_decode: {stats.video_decode * 1000.0 / video_attempts:.3f} ms/frame")

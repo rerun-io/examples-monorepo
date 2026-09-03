@@ -142,20 +142,24 @@ class TrainCatalogConfig:
     """Training image width after augmentation."""
     batch_size: int = 8
     """Samples per rank and optimizer step."""
+    dataloader: Literal["current", "rerun"] = "current"
+    """Current threaded dataset or the Rerun-0.37 dataloader A/B path."""
+    rerun_fetch_block_size: int = 512
+    """Samples requested per catalog fetch by the Rerun dataloader path."""
     target_mode: TargetMode = "metric"
     """Prompted metric distillation by default; ``ssi`` retains the legacy RGB-only lane."""
     total_steps: int = 70_000
     """Optimizer steps in the run; the OneCycle schedule spans exactly this many. 70k is about one pass over the 875-segment train split at batch 8 (70.5k steps measured 2026-08-28)."""
     shuffle_buffer_size: int = 256
-    """Maximum decoded samples held for bounded random shuffling. CUDA samples
+    """Maximum decoded samples held by the current loader for bounded random shuffling. CUDA samples
     use about 4.7 MB each at 1024x768, so this and the default producer queue
     retain about 2.4 GB of device memory together."""
     seed: int = 0
     """Base seed for dataset segment order and shuffle-buffer eviction."""
     num_producers: int = 6
-    """Whole-segment catalog producer threads, each with its own video decoder."""
+    """Whole-segment producer threads used by the current loader."""
     prefetch_samples: int = 256
-    """Maximum completed samples buffered across catalog producers."""
+    """Maximum completed samples buffered by the current loader."""
     min_depth_span: float = 1.25
     """Minimum valid-depth p95/p5 ratio; zero disables flat-frame filtering."""
     from_scratch: bool = False
@@ -592,8 +596,8 @@ def main(
     try:
         if config.height <= 0 or config.width <= 0 or config.batch_size <= 0 or config.total_steps <= 0:
             raise ValueError("height, width, batch_size, and total_steps must be positive")
-        if config.shuffle_buffer_size <= 0:
-            raise ValueError("shuffle_buffer_size must be positive")
+        if config.shuffle_buffer_size <= 0 or config.rerun_fetch_block_size <= 0:
+            raise ValueError("shuffle_buffer_size and rerun_fetch_block_size must be positive")
         if config.num_producers <= 0 or config.prefetch_samples <= 0:
             raise ValueError("num_producers and prefetch_samples must be positive")
         if config.save_every_steps < 0:
@@ -611,7 +615,10 @@ def main(
         holdout_segment_ids: list[str] = selected[1]
 
         # Catalog-only imports stay local so zipdepth-dev can run the pure policy tests.
+        from rerun.experimental.dataloader import BlockShuffle
+
         from zipdepth.catalog.builders import CudaSampleBuilder
+        from zipdepth.catalog.dataloader_dataset import ExactIndexQueryStats, RerunPromptDepthDataset
         from zipdepth.catalog.dataset import CatalogPromptDepthDataset
 
         steps_per_epoch: int = config.total_steps
@@ -652,29 +659,60 @@ def main(
 
         def build_train_loader(stage: ResolutionStage, stage_steps: int) -> InstrumentedLoader:
             """Build the catalog stream for one resolution stage."""
-            dataset: CatalogPromptDepthDataset = CatalogPromptDepthDataset(
-                catalog.dataset_entry,
-                train_segment_ids,
-                catalog.row_by_id,
-                device=device,
-                builder_factory=lambda: CudaSampleBuilder(
-                    (stage.height, stage.width),
-                    AugmentPolicy(),
-                    config.min_depth_span,
-                    device,
-                    target_mode=config.target_mode,
-                ),
-                shuffle_buffer_size=config.shuffle_buffer_size,
-                seed=config.seed,
-                rank=rank,
-                world_size=world_size,
-                num_producers=config.num_producers,
-                prefetch_samples=config.prefetch_samples,
-                # Training ignores confidence: the student takes the raw prompt and the model
-                # range-gates internally. Skipping the column drops a column and ~48 KB/frame
-                # off every segment query.
-                load_confidence=False,
-            )
+            dataset: CatalogPromptDepthDataset | RerunPromptDepthDataset
+            if config.dataloader == "rerun":
+                dataset = RerunPromptDepthDataset(
+                    catalog.dataset_entry,
+                    train_segment_ids,
+                    catalog.row_by_id,
+                    device=device,
+                    builder_factory=lambda: CudaSampleBuilder(
+                        (stage.height, stage.width),
+                        AugmentPolicy(),
+                        config.min_depth_span,
+                        device,
+                        target_mode=config.target_mode,
+                    ),
+                    # Keep fetch-local block shuffling, but do not retain hundreds of
+                    # native-resolution decoded samples before ZipDepth resizing.
+                    shuffle_strategy=BlockShuffle(),
+                    seed=config.seed,
+                    fetch_block_size=config.rerun_fetch_block_size,
+                    build_batch_size=config.batch_size,
+                    load_confidence=False,
+                )
+            else:
+                dataset = CatalogPromptDepthDataset(
+                    catalog.dataset_entry,
+                    train_segment_ids,
+                    catalog.row_by_id,
+                    device=device,
+                    builder_factory=lambda: CudaSampleBuilder(
+                        (stage.height, stage.width),
+                        AugmentPolicy(),
+                        config.min_depth_span,
+                        device,
+                        target_mode=config.target_mode,
+                    ),
+                    shuffle_buffer_size=config.shuffle_buffer_size,
+                    seed=config.seed,
+                    rank=rank,
+                    world_size=world_size,
+                    num_producers=config.num_producers,
+                    prefetch_samples=config.prefetch_samples,
+                    # Training ignores confidence: the student takes the raw prompt and the model
+                    # range-gates internally. Skipping the column drops a column and ~48 KB/frame
+                    # off every segment query.
+                    load_confidence=False,
+                )
+            if is_main and isinstance(dataset, RerunPromptDepthDataset):
+                index_stats: ExactIndexQueryStats = dataset.index_query_stats
+                print_main(
+                    f"Rerun dataset setup: {dataset.setup_s:.2f}s "
+                    f"(exact-index materialize={index_stats.materialize_s:.2f}s, "
+                    f"rows={len(dataset):,}, arrow={index_stats.arrow_bytes / 1_000_000.0:.1f} MB)",
+                    rank,
+                )
             data_loader: DataLoader[dict[str, Tensor]] = DataLoader(
                 dataset,
                 batch_size=config.batch_size,
@@ -777,7 +815,8 @@ def main(
             train_loader.set_global_step(trainer.global_step)
 
         print_main(
-            f"Catalog train: {len(train_segment_ids)} segments, {total_steps} optimizer steps, max_lr={actual_max_lr:.2e}, device={device}",
+            f"Catalog train: {len(train_segment_ids)} segments, {total_steps} optimizer steps, "
+            f"dataloader={config.dataloader}, max_lr={actual_max_lr:.2e}, device={device}",
             rank,
         )
         stage_index: int

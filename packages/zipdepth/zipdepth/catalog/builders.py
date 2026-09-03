@@ -226,3 +226,113 @@ class CudaSampleBuilder:
             return None
         self.stats.samples_built += 1
         return sample
+
+    def build_decoded_batch(
+        self,
+        frames: list[UInt8[Tensor, "3 h w"]],
+        targets_mm: list[Int32[Tensor, "h w"]],
+        prompts_mm: list[Int32[Tensor, "prompt_h prompt_w"]],
+        confidences: list[UInt8[Tensor, "confidence_n"] | None],
+        quarter_turns: list[int],
+        sample_seeds: list[int],
+    ) -> list[dict[str, Tensor] | None]:
+        """Build one decoded batch on the builder stream with one synchronization.
+
+        Args:
+            frames: CUDA uint8 RGB frames with shape ``(3, H, W)``.
+            targets_mm: CUDA int32 dense target depths aligned with the frames.
+            prompts_mm: CUDA int32 low-resolution prompt depths.
+            confidences: Flattened uint8 prompt confidence, or None for all trusted.
+            quarter_turns: Counter-clockwise orientation correction per sample.
+            sample_seeds: Deterministic augmentation seed per sample.
+
+        Returns:
+            One existing-contract training sample per accepted input and None for
+            each target rejected by the depth-span filter.
+
+        Raises:
+            ValueError: If the input lists differ in length or prompt confidence
+                does not match its prompt depth.
+        """
+        batch_size: int = len(frames)
+        if not all(
+            len(values) == batch_size
+            for values in (targets_mm, prompts_mm, confidences, quarter_turns, sample_seeds)
+        ):
+            raise ValueError("decoded sample batch inputs must have equal lengths")
+        if batch_size == 0:
+            return []
+
+        self._stream.wait_stream(torch.cuda.current_stream(self._device))
+        frame: UInt8[Tensor, "3 h w"]
+        target_mm: Int32[Tensor, "h w"]
+        prompt_mm: Int32[Tensor, "prompt_h prompt_w"]
+        for frame, target_mm, prompt_mm in zip(frames, targets_mm, prompts_mm, strict=True):
+            frame.record_stream(self._stream)
+            target_mm.record_stream(self._stream)
+            prompt_mm.record_stream(self._stream)
+
+        started: float = perf_counter()
+        samples: list[dict[str, Tensor]] = []
+        span_ratios: list[Float32[Tensor, ""] | None] = []
+        with torch.cuda.stream(self._stream):
+            confidence: UInt8[Tensor, "confidence_n"] | None
+            turns: int
+            sample_seed: int
+            for frame, target_mm, prompt_mm, confidence, turns, sample_seed in zip(
+                frames,
+                targets_mm,
+                prompts_mm,
+                confidences,
+                quarter_turns,
+                sample_seeds,
+                strict=True,
+            ):
+                if confidence is None:
+                    prompt_confidence: UInt8[Tensor, "prompt_h prompt_w"] = torch.full(
+                        prompt_mm.shape,
+                        ArkitDepthConfidence.HIGH,
+                        dtype=torch.uint8,
+                        device=self._device,
+                    )
+                else:
+                    if confidence.numel() != prompt_mm.numel():
+                        raise ValueError(
+                            f"prompt confidence has {confidence.numel()} values for prompt shape {tuple(prompt_mm.shape)}"
+                        )
+                    prompt_confidence = confidence.reshape(prompt_mm.shape).to(
+                        device=self._device,
+                        dtype=torch.uint8,
+                        non_blocking=True,
+                    )
+                span_ratios.append(
+                    depth_span_ratio_cuda(target_mm) if self._min_depth_span > 0.0 else None
+                )
+                self._generator.manual_seed(sample_seed)
+                samples.append(
+                    build_training_sample_cuda(
+                        frame,
+                        target_mm,
+                        turns,
+                        self._out_hw,
+                        self._generator,
+                        self._policy,
+                        prompt_depth_mm_hw=prompt_mm,
+                        prompt_confidence_hw=prompt_confidence,
+                        target_mode=self._target_mode,
+                    )
+                )
+        self._stream.synchronize()
+        self.stats.augment += perf_counter() - started
+
+        accepted: list[dict[str, Tensor] | None] = []
+        sample: dict[str, Tensor]
+        span_ratio: Float32[Tensor, ""] | None
+        for sample, span_ratio in zip(samples, span_ratios, strict=True):
+            if span_ratio is not None and float(span_ratio.item()) < self._min_depth_span:
+                self.stats.skipped_flat_frames += 1
+                accepted.append(None)
+            else:
+                self.stats.samples_built += 1
+                accepted.append(sample)
+        return accepted

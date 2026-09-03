@@ -399,7 +399,9 @@ def main(config: PDAArkitScenesRawConfig) -> None:
     """Run raw PromptDA for selected catalog segments."""
     client: CatalogClient = connect_catalog(config.catalog_url, ARKITSCENES_DATASET)
     dataset_entry: DatasetEntry = client.get_dataset(ARKITSCENES_DATASET)
-    segment_table: pa.Table = pa.Table.from_batches(dataset_entry.segment_table().collect())
+    segment_table: pa.Table = pa.Table.from_batches(
+        dataset_entry.segment_table().select("rerun_segment_id", "rerun_layer_names").collect()
+    )
     rows: list[dict[str, Any]] = segment_table.to_pylist()
 
     def raw_data_available(segment_id: str) -> bool:

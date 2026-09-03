@@ -36,3 +36,31 @@ def unfilter_up_cuda(filtered_hwb: UInt8[Tensor, "h row_bytes"]) -> Int32[Tensor
     high_hw: Int32[Tensor, "h w"] = reconstructed_hwb[:, 0::2]
     low_hw: Int32[Tensor, "h w"] = reconstructed_hwb[:, 1::2]
     return torch.bitwise_or(torch.bitwise_left_shift(high_hw, 8), low_hw)
+
+
+def unfilter_up_cuda_batch(filtered_batch: UInt8[Tensor, "n h row_bytes"]) -> Int32[Tensor, "n h w"]:
+    """Reconstruct a batch of 16-bit grayscale PNG all-Up rows on CUDA.
+
+    Args:
+        filtered_batch: CUDA uint8 filtered rows with shape
+            ``(batch, height, 1 + 2 * width)``.
+
+    Returns:
+        CUDA int32 metric depth with shape ``(batch, height, width)``.
+
+    Raises:
+        ValueError: If the input is not a three-dimensional CUDA uint8 tensor
+            with a filter byte followed by complete byte pairs.
+    """
+    if filtered_batch.ndim != 3 or filtered_batch.dtype != torch.uint8 or not filtered_batch.is_cuda:
+        raise ValueError("batched filtered PNG rows must be a three-dimensional CUDA uint8 tensor")
+    pixel_bytes: int = int(filtered_batch.shape[2]) - 1
+    if pixel_bytes <= 0 or pixel_bytes % 2 != 0:
+        raise ValueError("batched filtered PNG rows must contain complete 16-bit pixels")
+    reconstructed: Int32[Tensor, "n h pixel_bytes"] = torch.bitwise_and(
+        torch.cumsum(filtered_batch[:, :, 1:], dim=1, dtype=torch.int32),
+        0xFF,
+    )
+    high_bytes: Int32[Tensor, "n h w"] = reconstructed[:, :, 0::2]
+    low_bytes: Int32[Tensor, "n h w"] = reconstructed[:, :, 1::2]
+    return torch.bitwise_or(torch.bitwise_left_shift(high_bytes, 8), low_bytes)
