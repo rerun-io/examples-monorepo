@@ -9,7 +9,7 @@ import torch
 from jaxtyping import Bool, Float32, UInt8
 from monopriors.models.depth_completion.base_completion_depth import MAX_METRIC_DEPTH_M, MIN_METRIC_DEPTH_M
 from monopriors.models.depth_completion.zipdepth_prompt import ZipDepthPrompt, load_zipdepth_prompt
-from monopriors.models.zipdepth_checkpoint import RANGE_MARGIN_KEY
+from monopriors.models.zipdepth_checkpoint import RANGE_MARGIN_M_KEY
 from monopriors.third_party.zipdepth.architecture import FastConvexUpsample, ZipDepth, create_model
 from torch import Tensor
 
@@ -66,10 +66,10 @@ def _run_capturing_logits(
     return outputs, captured[0]
 
 
-def _prompted_model(range_margin: float, *, seed: int = 0) -> ZipDepthPrompt:
+def _prompted_model(range_margin_m: float, *, seed: int = 0) -> ZipDepthPrompt:
     """Build a deterministically initialized prompted model with live prompt branches."""
     torch.manual_seed(seed)
-    model: ZipDepthPrompt = ZipDepthPrompt(range_margin=range_margin).eval()
+    model: ZipDepthPrompt = ZipDepthPrompt(range_margin_m=range_margin_m).eval()
     # The released initialization zeroes every branch output, which would hide any
     # change in the prompt conditioning; give the branches a signal to carry.
     for parameter in model.prompt_branches.parameters():
@@ -131,6 +131,14 @@ def test_released_zipdepth_state_loads_strictly_into_backbone(tmp_path: Path) ->
         assert torch.equal(prompted_backbone_state[key], released_tensor), key
 
 
+
+def _prompt_spanning(low_m: float, high_m: float) -> Float32[Tensor, "1 1 192 256"]:
+    """Return an otherwise-invalid prompt whose valid pixels span exactly ``[low_m, high_m]``."""
+    prompt_bchw: Float32[Tensor, "1 1 192 256"] = torch.zeros(1, 1, 192, 256)
+    prompt_bchw[:, :, 80:112, 96:160] = torch.linspace(low_m, high_m, 32 * 64).reshape(1, 1, 32, 64)
+    return prompt_bchw
+
+
 def test_zero_range_margin_reproduces_the_prompt_bounded_head_bit_for_bit(monkeypatch: pytest.MonkeyPatch) -> None:
     """Guarantee the default margin leaves today's forward pass untouched."""
     model: ZipDepthPrompt = _prompted_model(0.0)
@@ -177,20 +185,20 @@ def test_zero_range_margin_parity_holds_under_cuda_float16_autocast(monkeypatch:
     assert torch.equal(outputs[0], reference_depth_bchw)
 
 
-def test_range_margin_widens_the_reachable_output_range_by_a_span_fraction(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_range_margin_widens_the_reachable_output_range_by_absolute_metres(monkeypatch: pytest.MonkeyPatch) -> None:
     """Let the periphery of an ultrawide frame leave the prompt's own range."""
-    model: ZipDepthPrompt = _prompted_model(0.25)
+    model: ZipDepthPrompt = _prompted_model(0.5)
     torch.manual_seed(1)
     image_bchw: Float32[Tensor, "1 3 64 96"] = torch.rand(1, 3, 64, 96)
-    prompt_bchw: Float32[Tensor, "1 1 192 256"] = torch.zeros(1, 1, 192, 256)
-    prompt_bchw[:, :, 80:112, 96:160] = torch.linspace(1.0, 2.0, 32 * 64).reshape(1, 1, 32, 64)
+    prompt_bchw: Float32[Tensor, "1 1 192 256"] = _prompt_spanning(1.0, 1.4)
 
     outputs: ModelOutputs
     logits_bchw: Float32[Tensor, "1 1 64 96"]
     outputs, logits_bchw = _run_capturing_logits(model, image_bchw, prompt_bchw, monkeypatch)
 
-    expected_min_b: Float32[Tensor, "1 1 1 1"] = torch.full((1, 1, 1, 1), 1.0 - 0.25)
-    expected_max_b: Float32[Tensor, "1 1 1 1"] = torch.full((1, 1, 1, 1), 2.0 + 0.25)
+    # 0.5 m on each side of [1.0, 1.4], not 0.5 spans (which would only reach [0.8, 1.6]).
+    expected_min_b: Float32[Tensor, "1 1 1 1"] = torch.full((1, 1, 1, 1), 0.5)
+    expected_max_b: Float32[Tensor, "1 1 1 1"] = torch.full((1, 1, 1, 1), 1.9)
     expected_depth_bchw: Float32[Tensor, "1 1 64 96"] = torch.sigmoid(logits_bchw) * (expected_max_b - expected_min_b) + expected_min_b
 
     torch.testing.assert_close(outputs[1], expected_min_b)
@@ -198,19 +206,48 @@ def test_range_margin_widens_the_reachable_output_range_by_a_span_fraction(monke
     torch.testing.assert_close(outputs[0], expected_depth_bchw)
 
 
-def test_range_margin_never_leaves_the_shared_metric_validity_window(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Clip the widened range to the 0.1--4.0 m window the family agrees on."""
-    model: ZipDepthPrompt = _prompted_model(2.0)
+def test_range_margin_widens_a_narrow_prompt_as_much_as_a_wide_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give a close-up prompt the same extra reach a span-relative margin would deny it."""
+    model: ZipDepthPrompt = _prompted_model(0.5)
     torch.manual_seed(1)
     image_bchw: Float32[Tensor, "1 3 64 96"] = torch.rand(1, 3, 64, 96)
-    prompt_bchw: Float32[Tensor, "1 1 192 256"] = _prompt_with_fixed_range()
+
+    narrow: ModelOutputs = _run_capturing_logits(model, image_bchw, _prompt_spanning(1.0, 1.1), monkeypatch)[0]
+    wide: ModelOutputs = _run_capturing_logits(model, image_bchw, _prompt_spanning(1.0, 2.0), monkeypatch)[0]
+
+    assert float(narrow[1]) == pytest.approx(0.5)
+    assert float(wide[1]) == pytest.approx(0.5)
+    assert float(narrow[2]) == pytest.approx(1.6)
+    assert float(wide[2]) == pytest.approx(2.5)
+
+
+def test_range_margin_never_leaves_the_shared_metric_validity_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clip the widened range to the 0.1--4.0 m window the family agrees on."""
+    model: ZipDepthPrompt = _prompted_model(0.5)
+    torch.manual_seed(1)
+    image_bchw: Float32[Tensor, "2 3 64 96"] = torch.rand(2, 3, 64, 96)
+    # Image 1 has no valid prompt pixel at all, so its range starts at the window edges.
+    prompt_bchw: Float32[Tensor, "2 1 192 256"] = torch.cat([_prompt_spanning(0.3, 3.8), torch.zeros(1, 1, 192, 256)])
 
     outputs: ModelOutputs = _run_capturing_logits(model, image_bchw, prompt_bchw, monkeypatch)[0]
 
-    assert float(outputs[1]) == pytest.approx(MIN_METRIC_DEPTH_M)
-    assert float(outputs[2]) == pytest.approx(MAX_METRIC_DEPTH_M)
+    assert outputs[1].flatten().tolist() == pytest.approx([MIN_METRIC_DEPTH_M, MIN_METRIC_DEPTH_M])
+    assert outputs[2].flatten().tolist() == pytest.approx([MAX_METRIC_DEPTH_M, MAX_METRIC_DEPTH_M])
+    assert torch.isfinite(outputs[0]).all()
     assert float(outputs[0].min()) >= MIN_METRIC_DEPTH_M
     assert float(outputs[0].max()) <= MAX_METRIC_DEPTH_M
+
+
+def test_a_margin_of_the_full_window_width_opens_the_whole_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Document the ultrawide fine-tune setting: 3.9 m reaches every valid depth."""
+    model: ZipDepthPrompt = _prompted_model(MAX_METRIC_DEPTH_M - MIN_METRIC_DEPTH_M)
+    torch.manual_seed(1)
+    image_bchw: Float32[Tensor, "1 3 64 96"] = torch.rand(1, 3, 64, 96)
+
+    outputs: ModelOutputs = _run_capturing_logits(model, image_bchw, _prompt_spanning(1.0, 1.1), monkeypatch)[0]
+
+    assert float(outputs[1]) == pytest.approx(MIN_METRIC_DEPTH_M)
+    assert float(outputs[2]) == pytest.approx(MAX_METRIC_DEPTH_M)
 
 
 def test_range_margin_leaves_the_prompt_conditioning_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -229,20 +266,20 @@ def test_range_margin_leaves_the_prompt_conditioning_unchanged(monkeypatch: pyte
 
 def test_range_margin_rejects_negative_and_non_finite_values() -> None:
     """Fail loudly instead of inverting or poisoning the output range."""
-    with pytest.raises(ValueError, match="range_margin"):
-        ZipDepthPrompt(range_margin=-0.1)
-    with pytest.raises(ValueError, match="range_margin"):
-        ZipDepthPrompt(range_margin=float("nan"))
+    with pytest.raises(ValueError, match="range_margin_m"):
+        ZipDepthPrompt(range_margin_m=-0.1)
+    with pytest.raises(ValueError, match="range_margin_m"):
+        ZipDepthPrompt(range_margin_m=float("nan"))
 
 
 def test_trainer_checkpoints_carry_the_range_margin_to_inference(tmp_path: Path) -> None:
     """Rebuild the trained head from the checkpoint without repeating the flag."""
-    trained: ZipDepthPrompt = ZipDepthPrompt(range_margin=0.35)
+    trained: ZipDepthPrompt = ZipDepthPrompt(range_margin_m=3.9)
     checkpoint: Path = tmp_path / "final_model.pth"
-    torch.save({"model_state_dict": trained.state_dict(), RANGE_MARGIN_KEY: 0.35}, checkpoint)
+    torch.save({"model_state_dict": trained.state_dict(), RANGE_MARGIN_M_KEY: 3.9}, checkpoint)
 
-    assert load_zipdepth_prompt(checkpoint).range_margin == 0.35
-    assert load_zipdepth_prompt(checkpoint, range_margin=0.0).range_margin == 0.0
+    assert load_zipdepth_prompt(checkpoint).range_margin_m == 3.9
+    assert load_zipdepth_prompt(checkpoint, range_margin_m=0.0).range_margin_m == 0.0
 
 
 def test_checkpoints_without_a_recorded_margin_stay_prompt_bounded(tmp_path: Path) -> None:
@@ -253,5 +290,5 @@ def test_checkpoints_without_a_recorded_margin_stay_prompt_bounded(tmp_path: Pat
     legacy: Path = tmp_path / "zdpda_v4.pth"
     torch.save({"model_state_dict": ZipDepthPrompt().state_dict(), "global_step": 70_000}, legacy)
 
-    assert load_zipdepth_prompt(bare).range_margin == 0.0
-    assert load_zipdepth_prompt(legacy).range_margin == 0.0
+    assert load_zipdepth_prompt(bare).range_margin_m == 0.0
+    assert load_zipdepth_prompt(legacy).range_margin_m == 0.0

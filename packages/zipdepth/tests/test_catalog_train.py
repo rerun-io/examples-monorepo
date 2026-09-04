@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 import torch
-from monopriors.models.zipdepth_checkpoint import RANGE_MARGIN_KEY
+from monopriors.models.zipdepth_checkpoint import RANGE_MARGIN_M_KEY
 from serde.json import from_json, to_json
 from torch import nn, optim
 from torch.utils.data import DataLoader, TensorDataset
@@ -17,11 +17,13 @@ from zipdepth.apis.train_catalog import (
     ResolvedTrainCatalogConfig,
     TrainCatalogConfig,
     TrainingRecipe,
+    UpstreamSchedulerConfig,
     UpstreamTrainConfig,
     _adamw_optimizer,
     _build_scheduler,
     _load_json_config,
     _model_to_device,
+    _restore_resume_state,
     parse_stage_schedule,
     resolve_amp_dtype,
     resolve_max_lr,
@@ -165,8 +167,8 @@ def test_catalog_training_defaults_to_metric_with_an_explicit_ssi_lane() -> None
 
 def test_range_margin_defaults_to_the_prompt_bounded_head_and_survives_resolved_config() -> None:
     """Record the ultrawide output-range margin in the run's resolved_config.json."""
-    assert TrainCatalogConfig().range_margin == 0.0
-    config: TrainCatalogConfig = TrainCatalogConfig(range_margin=0.25)
+    assert TrainCatalogConfig().range_margin_m == 0.0
+    config: TrainCatalogConfig = TrainCatalogConfig(range_margin_m=3.9)
     upstream: UpstreamTrainConfig = _load_json_config(Path("configs/default.json"))
 
     resolved: ResolvedTrainCatalogConfig = ResolvedTrainCatalogConfig(
@@ -179,20 +181,48 @@ def test_range_margin_defaults_to_the_prompt_bounded_head_and_survives_resolved_
     )
 
     restored: ResolvedTrainCatalogConfig = from_json(ResolvedTrainCatalogConfig, to_json(resolved))
-    assert restored.config.range_margin == 0.25
+    assert restored.config.range_margin_m == 3.9
+
+
+def _margin_trainer(range_margin_m: float) -> ZipDepthTrainer:
+    """Build a minimal trainer carrying one output-range margin."""
+    model: nn.Linear = nn.Linear(1, 1)
+    optimizer: optim.SGD = optim.SGD(model.parameters(), lr=0.1)
+    return ZipDepthTrainer(model, [], optimizer, None, "cpu", use_amp=False, range_margin_m=range_margin_m)
 
 
 def test_trainer_records_the_range_margin_in_every_checkpoint(tmp_path: Path) -> None:
     """Let inference rebuild the trained head without repeating the training flag."""
-    model: nn.Linear = nn.Linear(1, 1)
-    optimizer: optim.SGD = optim.SGD(model.parameters(), lr=0.1)
-    trainer: ZipDepthTrainer = ZipDepthTrainer(model, [], optimizer, None, "cpu", use_amp=False, range_margin=0.25)
+    trainer: ZipDepthTrainer = _margin_trainer(3.9)
     checkpoint: Path = tmp_path / "step_1.pth"
 
     trainer.save_checkpoint(str(checkpoint), epoch=0, loss=0.0)
 
     saved: dict[str, object] = torch.load(checkpoint, map_location="cpu", weights_only=True)
-    assert saved[RANGE_MARGIN_KEY] == 0.25
+    assert saved[RANGE_MARGIN_M_KEY] == 3.9
+
+
+def test_resuming_with_a_different_range_margin_is_refused(tmp_path: Path) -> None:
+    """Resuming continues one run, so its head must keep the output range it was trained with."""
+    trainer: ZipDepthTrainer = _margin_trainer(3.9)
+    resume: Path = tmp_path / "step_1.pth"
+    trainer.save_checkpoint(str(resume), epoch=0, loss=0.0)
+    wrapped_model: nn.Linear = nn.Linear(1, 1)
+
+    with pytest.raises(ValueError, match="range_margin_m"):
+        _restore_resume_state(
+            resume,
+            wrapped_model,
+            trainer,
+            total_steps=10,
+            actual_max_lr=1e-5,
+            range_margin_m=0.0,
+            scheduler_config=UpstreamSchedulerConfig(),
+            schedule="onecycle",
+            warmup_pct=0.05,
+            final_div_factor=1000.0,
+            cooldown_pct=0.1,
+        )
 
 
 def test_catalog_training_exposes_only_the_fixed_metric_loss_weight() -> None:

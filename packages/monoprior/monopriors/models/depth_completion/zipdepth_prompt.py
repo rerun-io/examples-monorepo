@@ -5,8 +5,8 @@ normalized metric prompt into all four decoder stages, and returns depth in the
 same units as the prompt (metres for the public API).
 
 The head can only reach depths inside the range it is rescaled into, which by
-default is the prompt's own ``[min, max]``. ``ZipDepthPrompt(range_margin=...)``
-widens that range by a fraction of the prompt span on each side, which ultrawide
+default is the prompt's own ``[min, max]``. ``ZipDepthPrompt(range_margin_m=...)``
+widens that range by a fixed number of metres on each side, which ultrawide
 captures need: their prompt covers the image centre, so the periphery is often
 nearer or farther than anything the prompt saw.
 """
@@ -42,7 +42,7 @@ from monopriors.models.depth_completion.base_completion_depth import (
 )
 from monopriors.models.zipdepth_checkpoint import (
     load_zipdepth_checkpoint,
-    range_margin_from_checkpoint,
+    range_margin_m_from_checkpoint,
     state_dict_from_checkpoint,
 )
 from monopriors.third_party.zipdepth.architecture import EncoderOutput, FeaturePyramid, ZipDepth, create_model
@@ -96,23 +96,37 @@ class ZipDepthPrompt(nn.Module):
     """ZipDepth-base with PromptDA-style multi-scale metric conditioning.
 
     The head is a sigmoid rescaled into a per-image depth range derived from the
-    prompt. ``range_margin`` widens that output range symmetrically, so predicted
-    depth is no longer trapped inside the prompt's own ``[min, max]``. The prompt
-    *normalization* fed to the four decoder injection branches deliberately keeps
-    the original ``[min, max]``: the prompt itself does not change, only the range
-    the head may reach, and holding the conditioning fixed keeps a margin change
-    from shifting the features a trained model already relies on.
+    prompt. ``range_margin_m`` widens that output range by a fixed number of
+    metres on each side, so predicted depth is no longer trapped inside the
+    prompt's own ``[min, max]``.
+
+    The margin is absolute rather than a fraction of the prompt span on purpose.
+    A span-relative margin widens least exactly where the need is greatest: a
+    close-up prompt spanning 0.8--1.2 m would reach only 0.6--1.4 m at half a
+    span, leaving a 3.5 m wall in the ultrawide periphery unreachable, while a
+    prompt that already spans most of the window would gain the whole rest of it.
+    Because the widened range is still clipped to ``[MIN_METRIC_DEPTH_M,
+    MAX_METRIC_DEPTH_M]``, any ``range_margin_m >= 3.9`` opens the full
+    ``[0.1, 4.0]`` m window for every image; that is the setting the ultrawide
+    fine-tune uses.
+
+    The prompt *normalization* fed to the four decoder injection branches is
+    unchanged: it deliberately keeps the original ``[min, max]``. The prompt
+    itself does not change, only the range the head may reach, and holding the
+    conditioning fixed keeps a margin change from shifting the features a trained
+    model already relies on.
     """
 
-    def __init__(self, backbone: ZipDepth | None = None, *, range_margin: float = 0.0) -> None:
+    def __init__(self, backbone: ZipDepth | None = None, *, range_margin_m: float = 0.0) -> None:
         """Build the prompted wrapper.
 
         Args:
             backbone: ZipDepth-base network; ``None`` creates a fresh one.
-            range_margin: Fraction of the prompt span by which the head's output
-                range is widened past the prompt's own minimum and maximum. Zero
-                reproduces the prompt-bounded head exactly, emitting none of the
-                widening operations.
+            range_margin_m: Metres by which the head's output range is widened
+                past the prompt's own minimum and maximum, before clipping to the
+                shared validity window. Zero reproduces the prompt-bounded head
+                exactly, emitting none of the widening operations; ``3.9`` or more
+                opens the full window.
         """
         super().__init__()
         self.backbone: ZipDepth = create_model(variant="base") if backbone is None else backbone
@@ -120,9 +134,9 @@ class ZipDepthPrompt(nn.Module):
             raise ValueError(f"ZipDepthPrompt requires the base variant, got {self.backbone.variant!r}")
         if not self.backbone.decoder.convex_up.use_unfold:
             raise ValueError("ZipDepthPrompt currently requires ZipDepth's unfold-based convex head")
-        if not isfinite(range_margin) or range_margin < 0.0:
-            raise ValueError(f"range_margin must be finite and non-negative, got {range_margin}")
-        self.range_margin: float = range_margin
+        if not isfinite(range_margin_m) or range_margin_m < 0.0:
+            raise ValueError(f"range_margin_m must be finite and non-negative, got {range_margin_m}")
+        self.range_margin_m: float = range_margin_m
         self.prompt_branches: nn.ModuleList = nn.ModuleList(
             [_make_prompt_branch(channels) for channels in (288, 192, 144, 96)]
         )
@@ -169,7 +183,7 @@ class ZipDepthPrompt(nn.Module):
 
         Returns:
             Metric depth, and the minimum and maximum the head can reach. Those
-            two already include ``range_margin``, so ``sigmoid(logits) * (max -
+            two already include ``range_margin_m``, so ``sigmoid(logits) * (max -
             min) + min`` reproduces depth from captured logits.
         """
         if image.dtype == torch.uint8:
@@ -202,17 +216,20 @@ class ZipDepthPrompt(nn.Module):
             0.0,
         )
 
-        # The head may leave the prompt's own range by ``range_margin`` spans on each
-        # side, still clipped to the shared validity window. At zero margin these
-        # operations are skipped entirely, so torch and the exported fp16 graph are
-        # unchanged. Prompt normalization above keeps the un-widened range.
+        # The head may leave the prompt's own range by ``range_margin_m`` metres on
+        # each side, still clipped to the shared validity window. At zero margin
+        # these operations are skipped entirely, so torch and the exported fp16
+        # graph are unchanged. Prompt normalization above keeps the un-widened
+        # range. No floor is needed on the widened span: a positive margin always
+        # separates the two bounds, because clipping sends them to opposite edges
+        # of a window that already contains the prompt range.
         min_output_b: Float32[Tensor, "b 1 1 1"] = min_depth_b
         max_output_b: Float32[Tensor, "b 1 1 1"] = max_depth_b
         span_output_b: Float32[Tensor, "b 1 1 1"] = span_b
-        if self.range_margin > 0.0:
-            min_output_b = (min_depth_b - self.range_margin * span_b).clamp_min(MIN_METRIC_DEPTH_M)
-            max_output_b = (max_depth_b + self.range_margin * span_b).clamp_max(MAX_METRIC_DEPTH_M)
-            span_output_b = (max_output_b - min_output_b).clamp_min(MIN_PROMPT_SPAN_M)
+        if self.range_margin_m > 0.0:
+            min_output_b = (min_depth_b - self.range_margin_m).clamp_min(MIN_METRIC_DEPTH_M)
+            max_output_b = (max_depth_b + self.range_margin_m).clamp_max(MAX_METRIC_DEPTH_M)
+            span_output_b = max_output_b - min_output_b
 
         normalized_image_bchw: Float[Tensor, "b 3 h w"] = (image_bchw - self.backbone.mean).div_(self.backbone.std)
         encoder_output: EncoderOutput = self.backbone.encoder(normalized_image_bchw)
@@ -250,17 +267,17 @@ class ZipDepthPrompt(nn.Module):
         return self
 
 
-def load_zipdepth_prompt(checkpoint: Path, range_margin: float | None = None) -> ZipDepthPrompt:
+def load_zipdepth_prompt(checkpoint: Path, *, range_margin_m: float | None = None) -> ZipDepthPrompt:
     """Load a complete released ZipDepth-base checkpoint into the wrapper.
 
     Args:
         checkpoint: Bare ZipDepth state dict or trainer checkpoint containing
             ``model_state_dict``. DDP and ``torch.compile`` prefixes are
             accepted.
-        range_margin: Output-range margin override. ``None`` takes the margin
-            the training run recorded in the checkpoint, which is ``0.0`` for
-            bare state dicts and for checkpoints written before the margin
-            existed.
+        range_margin_m: Output-range margin override, in metres. ``None`` takes
+            the margin the training run recorded in the checkpoint, which is
+            ``0.0`` for bare state dicts and for checkpoints written before the
+            margin existed.
 
     Returns:
         A trainable prompted model. Every released tensor is loaded strictly;
@@ -268,14 +285,14 @@ def load_zipdepth_prompt(checkpoint: Path, range_margin: float | None = None) ->
     """
     loaded: dict[str, object] = load_zipdepth_checkpoint(checkpoint)
     state_dict: StateDict = state_dict_from_checkpoint(loaded, checkpoint)
-    margin: float = range_margin if range_margin is not None else range_margin_from_checkpoint(loaded, checkpoint)
+    margin_m: float = range_margin_m if range_margin_m is not None else range_margin_m_from_checkpoint(loaded, checkpoint)
     if any(key.startswith("backbone.") for key in state_dict):
-        prompted_model: ZipDepthPrompt = ZipDepthPrompt(range_margin=margin)
+        prompted_model: ZipDepthPrompt = ZipDepthPrompt(range_margin_m=margin_m)
         prompted_model.load_state_dict(state_dict, strict=True)
         return prompted_model
     backbone: ZipDepth = create_model(variant="base")
     backbone.load_state_dict(state_dict, strict=True)
-    return ZipDepthPrompt(backbone, range_margin=margin)
+    return ZipDepthPrompt(backbone, range_margin_m=margin_m)
 
 
 @dataclass(frozen=True, slots=True)

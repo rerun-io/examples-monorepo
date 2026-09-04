@@ -12,12 +12,13 @@ from monopriors.models.depth_completion.zipdepth_prompt import ZipDepthPrompt
 from monopriors.models.depth_completion.zipdepth_prompt_export import (
     IMAGE_INPUT_NAME,
     PROMPT_INPUT_NAME,
+    ModelLoader,
     PromptedDepthModel,
     _ExportOutputs,
     export_zipdepth_prompt_onnx,
 )
 from monopriors.models.relative_depth.zipdepth import download_zipdepth_checkpoint
-from monopriors.models.zipdepth_checkpoint import RANGE_MARGIN_KEY
+from monopriors.models.zipdepth_checkpoint import RANGE_MARGIN_M_KEY
 from torch import Tensor, nn
 
 from zipdepth.apis import prompted_trt
@@ -64,6 +65,15 @@ class _FakePromptModel(nn.Module):
         return depth, prompt_depth.amin(dim=(1, 2, 3), keepdim=True), prompt_depth.amax(dim=(1, 2, 3), keepdim=True)
 
 
+def _fake_loader(fake_model: _FakePromptModel) -> ModelLoader:
+    """Return a loader boundary that ignores the checkpoint and the margin."""
+
+    def load(_checkpoint: Path, *, range_margin_m: float | None = None) -> PromptedDepthModel:
+        return fake_model
+
+    return load
+
+
 def test_fake_model_satisfies_prompted_export_protocol() -> None:
     """Keep exporter tests structural rather than coupled to ZipDepthPrompt."""
     assert isinstance(_FakePromptModel(), PromptedDepthModel)
@@ -103,7 +113,8 @@ def test_export_uses_two_inputs_with_export_dtype_and_static_batch_eight(tmp_pat
         image_hw=(768, 1024),
         batch_size=8,
         cache_dir=tmp_path / "cache",
-        model_loader=lambda _checkpoint: fake_model,
+        range_margin_m=0.0,
+        model_loader=_fake_loader(fake_model),
         export_fn=fake_export,
         device="cpu",
     )
@@ -111,6 +122,7 @@ def test_export_uses_two_inputs_with_export_dtype_and_static_batch_eight(tmp_pat
     call: _ExportCall = calls[0]
     assert onnx_path == call.out_path
     assert "768x1024_b8_fp16" in onnx_path.name
+    assert onnx_path.name.endswith("_m0.00.onnx")
     assert call.input_names == [IMAGE_INPUT_NAME, PROMPT_INPUT_NAME]
     assert call.output_names == ["depth", "min_depth", "max_depth"]
     assert call.dynamic_batch_max is None
@@ -120,11 +132,11 @@ def test_export_uses_two_inputs_with_export_dtype_and_static_batch_eight(tmp_pat
     assert fake_model.weight.dtype == torch.float16
 
 
-def test_export_bakes_the_checkpoint_range_margin_into_the_graph(tmp_path: Path) -> None:
+def test_export_bakes_the_checkpoint_range_margin_into_the_graph_and_its_cache_key(tmp_path: Path) -> None:
     """Export the head the checkpoint was trained with, keeping the binding names."""
-    trained: ZipDepthPrompt = ZipDepthPrompt(range_margin=0.4)
+    trained: ZipDepthPrompt = ZipDepthPrompt(range_margin_m=3.9)
     checkpoint: Path = tmp_path / "final_model.pth"
-    torch.save({"model_state_dict": trained.state_dict(), RANGE_MARGIN_KEY: 0.4}, checkpoint)
+    torch.save({"model_state_dict": trained.state_dict(), RANGE_MARGIN_M_KEY: 3.9}, checkpoint)
     exported_models: list[ZipDepthPrompt] = []
 
     def fake_export(model: nn.Module, _inputs: ExportInputs, out_path: Path, **kwargs: object) -> None:
@@ -137,7 +149,7 @@ def test_export_bakes_the_checkpoint_range_margin_into_the_graph(tmp_path: Path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_bytes(b"onnx")
 
-    export_zipdepth_prompt_onnx(
+    onnx_path: Path = export_zipdepth_prompt_onnx(
         checkpoint=checkpoint,
         image_hw=(64, 96),
         batch_size=1,
@@ -146,7 +158,36 @@ def test_export_bakes_the_checkpoint_range_margin_into_the_graph(tmp_path: Path)
         device="cpu",
     )
 
-    assert exported_models[0].range_margin == 0.4
+    assert exported_models[0].range_margin_m == 3.9
+    # The cache short-circuits before the model loads, so the margin has to be in the name.
+    assert onnx_path.name.endswith("_m3.90.onnx")
+
+
+def test_export_caches_one_graph_per_margin(tmp_path: Path) -> None:
+    """Never serve a graph built for a different output range out of the cache."""
+    checkpoint: Path = tmp_path / "final_model.pth"
+    torch.save({"model_state_dict": ZipDepthPrompt().state_dict()}, checkpoint)
+    fake_model = _FakePromptModel()
+
+    def fake_export(_model: nn.Module, _inputs: ExportInputs, out_path: Path, **_kwargs: object) -> None:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(b"onnx")
+
+    paths: list[Path] = [
+        export_zipdepth_prompt_onnx(
+            checkpoint=checkpoint,
+            image_hw=(64, 96),
+            batch_size=1,
+            cache_dir=tmp_path / "cache",
+            range_margin_m=margin_m,
+            model_loader=_fake_loader(fake_model),
+            export_fn=fake_export,
+            device="cpu",
+        )
+        for margin_m in (0.0, 3.9)
+    ]
+
+    assert paths[0] != paths[1]
 
 
 trt_parity = pytest.mark.skipif(

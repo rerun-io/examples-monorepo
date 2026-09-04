@@ -7,8 +7,8 @@ from torch import Tensor
 
 from monopriors.third_party.zipdepth.model_utils import StateDict, strip_state_dict_prefixes
 
-RANGE_MARGIN_KEY: str = "range_margin"
-"""Trainer-checkpoint key holding the prompted head's output-range margin."""
+RANGE_MARGIN_M_KEY: str = "range_margin_m"
+"""Trainer-checkpoint key holding the prompted head's output-range margin, in metres."""
 
 
 def load_zipdepth_checkpoint(checkpoint: Path) -> dict[str, object]:
@@ -47,22 +47,22 @@ def state_dict_from_checkpoint(loaded: dict[str, object], checkpoint: Path) -> S
     return strip_state_dict_prefixes(state_dict)
 
 
-def range_margin_from_checkpoint(loaded: dict[str, object], checkpoint: Path) -> float:
-    """Read the prompted output-range margin recorded by training.
+def range_margin_m_from_checkpoint(loaded: dict[str, object], checkpoint: Path) -> float:
+    """Read the prompted output-range margin, in metres, recorded by training.
 
     Args:
         loaded: Mapping returned by :func:`load_zipdepth_checkpoint`.
         checkpoint: Source path, used only for error messages.
 
     Returns:
-        The recorded margin, or ``0.0`` for bare state dicts and for
+        The recorded margin in metres, or ``0.0`` for bare state dicts and for
         checkpoints written before the margin existed (for example
         ``zdpda-v4``).
     """
-    raw_margin: object = loaded.get(RANGE_MARGIN_KEY, 0.0)
-    if isinstance(raw_margin, bool) or not isinstance(raw_margin, float | int):
-        raise ValueError(f"checkpoint {RANGE_MARGIN_KEY} must be a number: {checkpoint}")
-    return float(raw_margin)
+    raw_margin_m: object = loaded.get(RANGE_MARGIN_M_KEY, 0.0)
+    if isinstance(raw_margin_m, bool) or not isinstance(raw_margin_m, float | int):
+        raise ValueError(f"checkpoint {RANGE_MARGIN_M_KEY} must be a number: {checkpoint}")
+    return float(raw_margin_m)
 
 
 def load_zipdepth_state_dict(checkpoint: Path) -> StateDict:
@@ -71,10 +71,10 @@ def load_zipdepth_state_dict(checkpoint: Path) -> StateDict:
 
 
 __all__ = (
-    "RANGE_MARGIN_KEY",
+    "RANGE_MARGIN_M_KEY",
     "load_zipdepth_checkpoint",
     "load_zipdepth_state_dict",
     "narrow_zipdepth_state_dict",
-    "range_margin_from_checkpoint",
+    "range_margin_m_from_checkpoint",
     "state_dict_from_checkpoint",
 )

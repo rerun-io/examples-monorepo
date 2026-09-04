@@ -13,7 +13,12 @@ import torch
 import torch.distributed as dist
 from monopriors.models.depth_completion.zipdepth_prompt import ZipDepthPrompt, load_zipdepth_prompt
 from monopriors.models.relative_depth.zipdepth import download_zipdepth_checkpoint
-from monopriors.models.zipdepth_checkpoint import load_zipdepth_state_dict, narrow_zipdepth_state_dict
+from monopriors.models.zipdepth_checkpoint import (
+    load_zipdepth_checkpoint,
+    load_zipdepth_state_dict,
+    narrow_zipdepth_state_dict,
+    range_margin_m_from_checkpoint,
+)
 from monopriors.third_party.zipdepth.architecture import ZipDepth, create_model
 from monopriors.third_party.zipdepth.model_utils import strip_state_dict_prefixes
 from serde import field as serde_field
@@ -162,11 +167,14 @@ class TrainCatalogConfig:
     """Maximum completed samples buffered by the current loader."""
     min_depth_span: float = 1.25
     """Minimum valid-depth p95/p5 ratio; zero disables flat-frame filtering."""
-    range_margin: float = 0.0
-    """Widen the head's output range beyond the prompt's own [min, max] by this fraction of
-    the span; needed for ultrawide prompts that cover only the image center. The value is
-    recorded in ``resolved_config.json`` and in every checkpoint this run writes, so
-    inference rebuilds the same head. Zero reproduces the prompt-bounded head exactly."""
+    range_margin_m: float = 0.0
+    """Widen the head's output range beyond the prompt's own [min, max] by this many metres
+    on each side; needed for ultrawide prompts that cover only the image center. The margin
+    is absolute rather than a fraction of the prompt span so that a close-up prompt gains as
+    much reach as a wide one. Clipping to the 0.1--4.0 m validity window means 3.9 or more
+    opens the full window. The value is recorded in ``resolved_config.json`` and in every
+    checkpoint this run writes, so inference rebuilds the same head. Zero reproduces the
+    prompt-bounded head exactly."""
     from_scratch: bool = False
     """Start with random weights instead of the released ZipDepth-base weights."""
     metric_gradient_weight: float = 0.5
@@ -522,13 +530,21 @@ def _restore_resume_state(
     *,
     total_steps: int,
     actual_max_lr: float,
+    range_margin_m: float,
     scheduler_config: UpstreamSchedulerConfig,
     schedule: ScheduleName,
     warmup_pct: float,
     final_div_factor: float,
     cooldown_pct: float,
 ) -> None:
-    """Restore model, optimizer, schedule, and trainer step."""
+    """Restore model, optimizer, schedule, and trainer step.
+
+    Raises:
+        ValueError: If the checkpoint recorded a different output-range margin
+            than this run is configured with. Resuming rewrites the same run, so
+            silently changing the head's output range mid-run would make the
+            optimizer state and the recorded margin describe different models.
+    """
     print_main(f"Resuming from: {resume}", trainer.rank)
     checkpoint: dict[str, object] | None
     if trainer.is_distributed:
@@ -544,6 +560,12 @@ def _restore_resume_state(
         checkpoint = loaded_checkpoint if isinstance(loaded_checkpoint, dict) else None
     if checkpoint is None:
         raise ValueError(f"resume checkpoint must contain a mapping: {resume}")
+    resumed_margin_m: float = range_margin_m_from_checkpoint(checkpoint, resume)
+    if not isclose(resumed_margin_m, range_margin_m, rel_tol=0.0, abs_tol=1e-9):
+        raise ValueError(
+            f"resume checkpoint recorded range_margin_m={resumed_margin_m} but this run is configured with "
+            f"range_margin_m={range_margin_m}; resume with the recorded value or start a new run: {resume}"
+        )
     raw_resume_state: object = checkpoint.get("model_state_dict", checkpoint)
     tensor_state: dict[str, Tensor] = narrow_zipdepth_state_dict(raw_resume_state, resume)
     resume_state: dict[str, Tensor] = fix_state_dict_prefix(strip_state_dict_prefixes(tensor_state), trainer.is_distributed)
@@ -609,10 +631,10 @@ def main(
             raise ValueError("save_every_steps must be non-negative")
         if config.target_mode not in ("ssi", "metric"):
             raise ValueError(f"unknown target mode {config.target_mode!r}")
-        if not isfinite(config.range_margin) or config.range_margin < 0.0:
-            raise ValueError("range_margin must be finite and non-negative")
-        if config.range_margin > 0.0 and config.target_mode != "metric":
-            raise ValueError("range_margin only applies to the prompted metric lane")
+        if not isfinite(config.range_margin_m) or config.range_margin_m < 0.0:
+            raise ValueError("range_margin_m must be finite and non-negative")
+        if config.range_margin_m > 0.0 and config.target_mode != "metric":
+            raise ValueError("range_margin_m only applies to the prompted metric lane")
         torch.backends.cudnn.benchmark = True
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
@@ -744,11 +766,23 @@ def main(
         if config.target_mode == "metric":
             if initialization is not None:
                 print_main(f"Loading prompted trainable initialization: {initialization}", rank)
-                model: nn.Module = load_zipdepth_prompt(initialization, range_margin=config.range_margin)
+                # A fine-tune may deliberately change the margin: v4 recorded none, and the
+                # ultrawide run starts from it with the full window open. Say so loudly
+                # rather than failing, which is what resuming the same run does instead.
+                initialization_margin_m: float = range_margin_m_from_checkpoint(
+                    load_zipdepth_checkpoint(initialization), initialization
+                )
+                if not isclose(initialization_margin_m, config.range_margin_m, rel_tol=0.0, abs_tol=1e-9):
+                    print_main(
+                        f"OVERRIDE: initialization recorded range_margin_m={initialization_margin_m}, "
+                        f"training with range_margin_m={config.range_margin_m}",
+                        rank,
+                    )
+                model: nn.Module = load_zipdepth_prompt(initialization, range_margin_m=config.range_margin_m)
             else:
                 model = ZipDepthPrompt(
                     create_model(variant="base", upsample_unfold=model_config.upsample_unfold),
-                    range_margin=config.range_margin,
+                    range_margin_m=config.range_margin_m,
                 )
                 print_main("Training ZipDepth-PromptDA from scratch", rank)
         else:
@@ -803,7 +837,7 @@ def main(
             target_mode=config.target_mode,
             metric_gradient_weight=config.metric_gradient_weight,
             pin_batchnorm_eval=pin_batchnorm_eval,
-            range_margin=config.range_margin,
+            range_margin_m=config.range_margin_m,
             use_profiler=config.profile,
             profile_dir=str(config.profile_dir),
             profile_wait=config.profile_wait,
@@ -817,6 +851,7 @@ def main(
                 trainer,
                 total_steps=total_steps,
                 actual_max_lr=actual_max_lr,
+                range_margin_m=config.range_margin_m,
                 scheduler_config=scheduler_config,
                 schedule=recipe.schedule,
                 warmup_pct=recipe.warmup_pct,

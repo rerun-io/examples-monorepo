@@ -15,6 +15,7 @@ from torch import Tensor, nn
 from monopriors.models.depth_completion.base_completion_depth import DEPTH_OUTPUT_NAME, IMAGE_INPUT_NAME, PROMPT_DEPTH_HW, PROMPT_INPUT_NAME
 from monopriors.models.depth_completion.zipdepth_prompt import load_zipdepth_prompt
 from monopriors.models.relative_depth.zipdepth import download_zipdepth_checkpoint
+from monopriors.models.zipdepth_checkpoint import load_zipdepth_checkpoint, range_margin_m_from_checkpoint
 
 ONNX_EXPORT_VERSION: int = 1
 DEFAULT_CACHE_DIR: Path = Path(os.environ.get("ZIPDEPTH_PROMPT_TRT_CACHE", "~/.cache/zipdepth-promptda")).expanduser()
@@ -50,15 +51,23 @@ class PromptedDepthModel(Protocol):
         ...
 
 
-ModelLoader = Callable[[Path], PromptedDepthModel]
+@runtime_checkable
+class ModelLoader(Protocol):
+    """Checkpoint-to-model boundary used by the exporter and its tests."""
+
+    def __call__(self, checkpoint: Path, /, *, range_margin_m: float | None = None) -> PromptedDepthModel:
+        """Load a prompted model, optionally overriding its output-range margin."""
+        ...
+
+
 ExportFn = Callable[..., None]
 
 
 class _ExportOutputs(nn.Module):
     """Expose the head's output-range min/max as TensorRT fusion barriers.
 
-    Those two scalars carry the loaded checkpoint's ``range_margin``, so the graph
-    bakes in the range the model was trained with.
+    Those two scalars carry the loaded checkpoint's ``range_margin_m``, so the
+    graph bakes in the range the model was trained with.
     """
 
     def __init__(self, model: PromptedDepthModel) -> None:
@@ -114,6 +123,7 @@ def export_zipdepth_prompt_onnx(
     image_hw: tuple[int, int] = (768, 1024),
     batch_size: int = 8,
     cache_dir: Path = DEFAULT_CACHE_DIR,
+    range_margin_m: float | None = None,
     model_loader: ModelLoader = load_zipdepth_prompt,
     export_fn: ExportFn | None = None,
     device: str = "cuda",
@@ -125,6 +135,11 @@ def export_zipdepth_prompt_onnx(
         image_hw: Static image height and width.
         batch_size: Batch baked into the graph.
         cache_dir: Portable ONNX cache root.
+        range_margin_m: Output-range margin baked into the graph, in metres. It
+            is both the cache key and the value handed to ``model_loader``, so
+            the filename can never disagree with the graph. ``None`` reads the
+            value the checkpoint recorded, which costs one ``torch.load`` even
+            on a cache hit.
         model_loader: Model loader boundary used by export tests.
         export_fn: ONNX writer boundary; defaults to :func:`trtkit.export_onnx`.
         device: Torch export device.
@@ -137,15 +152,26 @@ def export_zipdepth_prompt_onnx(
     height, width = image_hw
     resolved_checkpoint: Path = checkpoint or download_zipdepth_checkpoint()
     tag: str = _checkpoint_tag(resolved_checkpoint)
+    # The margin changes the graph, so it belongs in the cache key next to the
+    # checkpoint tag: the lookup below short-circuits before the model is loaded,
+    # and an explicit override would otherwise be served a stale graph.
+    resolved_margin_m: float = (
+        range_margin_m
+        if range_margin_m is not None
+        else range_margin_m_from_checkpoint(load_zipdepth_checkpoint(resolved_checkpoint), resolved_checkpoint)
+    )
     onnx_dir: Path = cache_dir / "onnx"
-    onnx_path: Path = onnx_dir / f"zipdepth-prompt_{height}x{width}_b{batch_size}_fp16_v{ONNX_EXPORT_VERSION}_{tag}.onnx"
+    onnx_path: Path = (
+        onnx_dir / f"zipdepth-prompt_{height}x{width}_b{batch_size}_fp16_v{ONNX_EXPORT_VERSION}_{tag}_m{resolved_margin_m:.2f}.onnx"
+    )
     if onnx_path.is_file():
         return onnx_path
 
     resolved_device = torch.device(device)
     if resolved_device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for the fp16 ZipDepth ONNX export")
-    model: PromptedDepthModel = prepare_zipdepth_prompt_for_export(model_loader(resolved_checkpoint), image_hw, resolved_device)
+    loaded_model: PromptedDepthModel = model_loader(resolved_checkpoint, range_margin_m=resolved_margin_m)
+    model: PromptedDepthModel = prepare_zipdepth_prompt_for_export(loaded_model, image_hw, resolved_device)
     wrapper: nn.Module = _ExportOutputs(model).eval()
     dummy_image_bchw: Float32[Tensor, "b 3 h w"] = torch.rand(
         (batch_size, 3, height, width), dtype=torch.float32, device=resolved_device
@@ -180,6 +206,7 @@ __all__ = (
     "DEFAULT_CACHE_DIR",
     "DEPTH_OUTPUT_NAME",
     "IMAGE_INPUT_NAME",
+    "ModelLoader",
     "ONNX_EXPORT_VERSION",
     "PROMPT_INPUT_NAME",
     "PromptedDepthModel",
