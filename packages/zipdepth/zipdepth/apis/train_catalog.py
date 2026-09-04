@@ -162,6 +162,11 @@ class TrainCatalogConfig:
     """Maximum completed samples buffered by the current loader."""
     min_depth_span: float = 1.25
     """Minimum valid-depth p95/p5 ratio; zero disables flat-frame filtering."""
+    range_margin: float = 0.0
+    """Widen the head's output range beyond the prompt's own [min, max] by this fraction of
+    the span; needed for ultrawide prompts that cover only the image center. The value is
+    recorded in ``resolved_config.json`` and in every checkpoint this run writes, so
+    inference rebuilds the same head. Zero reproduces the prompt-bounded head exactly."""
     from_scratch: bool = False
     """Start with random weights instead of the released ZipDepth-base weights."""
     metric_gradient_weight: float = 0.5
@@ -604,6 +609,10 @@ def main(
             raise ValueError("save_every_steps must be non-negative")
         if config.target_mode not in ("ssi", "metric"):
             raise ValueError(f"unknown target mode {config.target_mode!r}")
+        if not isfinite(config.range_margin) or config.range_margin < 0.0:
+            raise ValueError("range_margin must be finite and non-negative")
+        if config.range_margin > 0.0 and config.target_mode != "metric":
+            raise ValueError("range_margin only applies to the prompted metric lane")
         torch.backends.cudnn.benchmark = True
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
@@ -735,10 +744,11 @@ def main(
         if config.target_mode == "metric":
             if initialization is not None:
                 print_main(f"Loading prompted trainable initialization: {initialization}", rank)
-                model: nn.Module = load_zipdepth_prompt(initialization)
+                model: nn.Module = load_zipdepth_prompt(initialization, range_margin=config.range_margin)
             else:
                 model = ZipDepthPrompt(
-                    create_model(variant="base", upsample_unfold=model_config.upsample_unfold)
+                    create_model(variant="base", upsample_unfold=model_config.upsample_unfold),
+                    range_margin=config.range_margin,
                 )
                 print_main("Training ZipDepth-PromptDA from scratch", rank)
         else:
@@ -793,6 +803,7 @@ def main(
             target_mode=config.target_mode,
             metric_gradient_weight=config.metric_gradient_weight,
             pin_batchnorm_eval=pin_batchnorm_eval,
+            range_margin=config.range_margin,
             use_profiler=config.profile,
             profile_dir=str(config.profile_dir),
             profile_wait=config.profile_wait,

@@ -8,13 +8,16 @@ from typing import TypeAlias
 import pytest
 import torch
 from jaxtyping import Float32
+from monopriors.models.depth_completion.zipdepth_prompt import ZipDepthPrompt
 from monopriors.models.depth_completion.zipdepth_prompt_export import (
     IMAGE_INPUT_NAME,
     PROMPT_INPUT_NAME,
     PromptedDepthModel,
+    _ExportOutputs,
     export_zipdepth_prompt_onnx,
 )
 from monopriors.models.relative_depth.zipdepth import download_zipdepth_checkpoint
+from monopriors.models.zipdepth_checkpoint import RANGE_MARGIN_KEY
 from torch import Tensor, nn
 
 from zipdepth.apis import prompted_trt
@@ -115,6 +118,35 @@ def test_export_uses_two_inputs_with_export_dtype_and_static_batch_eight(tmp_pat
     assert all(tensor.dtype == torch.float32 for tensor in call.inputs)
     assert fake_model.fused
     assert fake_model.weight.dtype == torch.float16
+
+
+def test_export_bakes_the_checkpoint_range_margin_into_the_graph(tmp_path: Path) -> None:
+    """Export the head the checkpoint was trained with, keeping the binding names."""
+    trained: ZipDepthPrompt = ZipDepthPrompt(range_margin=0.4)
+    checkpoint: Path = tmp_path / "final_model.pth"
+    torch.save({"model_state_dict": trained.state_dict(), RANGE_MARGIN_KEY: 0.4}, checkpoint)
+    exported_models: list[ZipDepthPrompt] = []
+
+    def fake_export(model: nn.Module, _inputs: ExportInputs, out_path: Path, **kwargs: object) -> None:
+        assert kwargs["input_names"] == [IMAGE_INPUT_NAME, PROMPT_INPUT_NAME]
+        assert kwargs["output_names"] == ["depth", "min_depth", "max_depth"]
+        assert isinstance(model, _ExportOutputs)
+        inner: object = model.model
+        assert isinstance(inner, ZipDepthPrompt)
+        exported_models.append(inner)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(b"onnx")
+
+    export_zipdepth_prompt_onnx(
+        checkpoint=checkpoint,
+        image_hw=(64, 96),
+        batch_size=1,
+        cache_dir=tmp_path / "cache",
+        export_fn=fake_export,
+        device="cpu",
+    )
+
+    assert exported_models[0].range_margin == 0.4
 
 
 trt_parity = pytest.mark.skipif(

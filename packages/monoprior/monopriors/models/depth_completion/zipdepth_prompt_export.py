@@ -38,7 +38,7 @@ class PromptedDepthModel(Protocol):
         image: Float32[Tensor, "b 3 h w"],
         prompt_depth: Float32[Tensor, "b 1 192 256"],
     ) -> tuple[Float32[Tensor, "b 1 h w"], Float32[Tensor, "b 1 1 1"], Float32[Tensor, "b 1 1 1"]]:
-        """Return metric depth and the input-derived minimum and maximum."""
+        """Return metric depth and the input-derived output-range minimum and maximum."""
         ...
 
     def fuse_for_inference(self) -> "PromptedDepthModel":
@@ -55,7 +55,11 @@ ExportFn = Callable[..., None]
 
 
 class _ExportOutputs(nn.Module):
-    """Expose prompt min/max reductions as TensorRT fusion barriers."""
+    """Expose the head's output-range min/max as TensorRT fusion barriers.
+
+    Those two scalars carry the loaded checkpoint's ``range_margin``, so the graph
+    bakes in the range the model was trained with.
+    """
 
     def __init__(self, model: PromptedDepthModel) -> None:
         super().__init__()

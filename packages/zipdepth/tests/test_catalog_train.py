@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 import torch
+from monopriors.models.zipdepth_checkpoint import RANGE_MARGIN_KEY
+from serde.json import from_json, to_json
 from torch import nn, optim
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
@@ -12,6 +14,7 @@ from zipdepth.apis.train_catalog import (
     CompileMode,
     ConstantCooldownLR,
     ResolutionStage,
+    ResolvedTrainCatalogConfig,
     TrainCatalogConfig,
     TrainingRecipe,
     UpstreamTrainConfig,
@@ -158,6 +161,38 @@ def test_catalog_training_defaults_to_metric_with_an_explicit_ssi_lane() -> None
     """Make prompted metric distillation the default without removing relative training."""
     assert TrainCatalogConfig().target_mode == "metric"
     assert TrainCatalogConfig(target_mode="ssi").target_mode == "ssi"
+
+
+def test_range_margin_defaults_to_the_prompt_bounded_head_and_survives_resolved_config() -> None:
+    """Record the ultrawide output-range margin in the run's resolved_config.json."""
+    assert TrainCatalogConfig().range_margin == 0.0
+    config: TrainCatalogConfig = TrainCatalogConfig(range_margin=0.25)
+    upstream: UpstreamTrainConfig = _load_json_config(Path("configs/default.json"))
+
+    resolved: ResolvedTrainCatalogConfig = ResolvedTrainCatalogConfig(
+        config=config,
+        rank_count=1,
+        steps_per_epoch=10,
+        total_steps=10,
+        resolved_max_lr=1e-5,
+        recipe=resolve_training_recipe(config, upstream.scheduler, upstream.amp),
+    )
+
+    restored: ResolvedTrainCatalogConfig = from_json(ResolvedTrainCatalogConfig, to_json(resolved))
+    assert restored.config.range_margin == 0.25
+
+
+def test_trainer_records_the_range_margin_in_every_checkpoint(tmp_path: Path) -> None:
+    """Let inference rebuild the trained head without repeating the training flag."""
+    model: nn.Linear = nn.Linear(1, 1)
+    optimizer: optim.SGD = optim.SGD(model.parameters(), lr=0.1)
+    trainer: ZipDepthTrainer = ZipDepthTrainer(model, [], optimizer, None, "cpu", use_amp=False, range_margin=0.25)
+    checkpoint: Path = tmp_path / "step_1.pth"
+
+    trainer.save_checkpoint(str(checkpoint), epoch=0, loss=0.0)
+
+    saved: dict[str, object] = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    assert saved[RANGE_MARGIN_KEY] == 0.25
 
 
 def test_catalog_training_exposes_only_the_fixed_metric_loss_weight() -> None:
