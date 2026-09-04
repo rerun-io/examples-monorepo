@@ -23,6 +23,7 @@ include = ["monopriors*", "tools*"]
 monopriors = [
     "third_party/g3t/LICENSE.txt",
     "third_party/g3t/README.md",
+    "third_party/liteanystereo/LICENSE",
     "third_party/zipdepth/LICENSE",
 ]
 
@@ -32,8 +33,15 @@ exclude = [
     "monopriors/third_party/depth_anything_v2",
     "monopriors/third_party/dsine",
     "monopriors/third_party/g3t",
+    "monopriors/third_party/liteanystereo",
     "monopriors/third_party/promptda",
     "monopriors/third_party/video_depth_anything",
+    "tests/reference_data/liteanystereo/upstream_aggregation_fasternet.py",
+    "tests/reference_data/liteanystereo/upstream_fnet.py",
+    "tests/reference_data/liteanystereo/upstream_liteanystereov2.py",
+    "tests/reference_data/liteanystereo/upstream_liteanystereov2_H.py",
+    "tests/reference_data/liteanystereo/upstream_submodule.py",
+    "tests/reference_data/liteanystereo/upstream_utils.py",
     "tests/reference_data/zipdepth/upstream_architecture.py",
     "tests/reference_data/zipdepth/upstream_model_utils.py",
     "notebooks",
@@ -73,14 +81,24 @@ exclude = [
     "*/third_party/depth_anything_v2/*",
     "*/third_party/dsine/*",
     "*/third_party/g3t/*",
+    "*/third_party/liteanystereo/*",
     "*/third_party/promptda/*",
     "*/third_party/video_depth_anything/*",
+    "*/tests/reference_data/liteanystereo/upstream_aggregation_fasternet.py",
+    "*/tests/reference_data/liteanystereo/upstream_fnet.py",
+    "*/tests/reference_data/liteanystereo/upstream_liteanystereov2.py",
+    "*/tests/reference_data/liteanystereo/upstream_liteanystereov2_H.py",
+    "*/tests/reference_data/liteanystereo/upstream_submodule.py",
+    "*/tests/reference_data/liteanystereo/upstream_utils.py",
     "*/tests/reference_data/zipdepth/upstream_architecture.py",
     "*/tests/reference_data/zipdepth/upstream_model_utils.py",
 ]
 sort_by_size = true
 min_confidence = 60
 ignore_names = [
+    # Names consumed by dynamic imports and pytest collection.
+    "__path__",
+    "pytestmark",
     # third_party/zipdepth: TypedDict fields read by subscript and APIs used by packages/zipdepth
     "heads",
     "parameters_M",
