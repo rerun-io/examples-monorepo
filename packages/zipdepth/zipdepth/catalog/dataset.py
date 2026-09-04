@@ -1,6 +1,6 @@
 """Stream chosen-frame PromptDA targets from a Rerun catalog."""
 
-from collections.abc import Callable, Generator, Iterator
+from collections.abc import Callable, Generator, Iterable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
@@ -522,9 +522,10 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
             # The Arrow view is read-only, and decode_jpeg needs an owned uint8
             # tensor. Copying one ~50 KB blob costs far less than the decode.
             encoded_n: UInt8[Tensor, "rgb_n_bytes"] = torch.frombuffer(bytearray(rgb_blob_bytes), dtype=torch.uint8)
-            frame_chw: UInt8[Tensor, "3 stored_h stored_w"] = decode_jpeg(encoded_n, mode=ImageReadMode.RGB).to(
-                device=self._device, non_blocking=True
-            )
+            decoded: Tensor | list[Tensor] = decode_jpeg(encoded_n, mode=ImageReadMode.RGB)
+            if not isinstance(decoded, Tensor):
+                raise TypeError("decode_jpeg returned a batch for one encoded ultrawide frame")
+            frame_chw: UInt8[Tensor, "3 stored_h stored_w"] = decoded.to(device=self._device, non_blocking=True)
             stats.jpeg_decode += perf_counter() - started
             sample: dict[str, Tensor] | None = builder(
                 frame_chw,
@@ -565,7 +566,7 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
         ultrawide_prepared: _UltrawideSegment | None = (
             self._prepare_ultrawide(segment_id, stats, frame_limit) if wants_ultrawide else None
         )
-        streams: list[Generator[dict[str, Tensor], None, None]] = []
+        streams: list[Iterable[dict[str, Tensor]]] = []
         if wide_prepared is not None:
             streams.append(self._build_wide_samples(segment_id, wide_prepared, builder, stats))
         if ultrawide_prepared is not None:
