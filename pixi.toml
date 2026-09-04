@@ -1288,6 +1288,48 @@ cwd = "packages/sam2-streaming"
 description = "Run SAM2-streaming regression tests"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# LAMP — CC-BY-NC 4.0, non-commercial use only
+# ═══════════════════════════════════════════════════════════════════════════
+[feature.lamp]
+platforms = ["linux-64"]
+
+[feature.lamp.dependencies]
+python = "3.12.*"
+tyro = ">=0.9.1,<0.10"
+
+[feature.lamp.pypi-dependencies]
+lamptrack = { path = "packages/lamp", editable = true }
+projectaria-tools = ">=1.5,<3"
+smplx = ">=0.1.28"
+
+[feature.lamp.activation.env]
+PACKAGE_DIR = "packages/lamp"
+PYREFLY_TARGET = "lamptrack/__init__.py lamptrack/third_party/__init__.py"
+
+[feature.lamp.tasks._lamp-download-checkpoint]
+cmd = "test -f data/checkpoints/lamp_smpl_aria_gen2.pt || hf download facebook/LAMP --revision 875ab025bd63c7b0ede9db2485cae72ee414e035 --include 'lamp_smpl_aria_gen2.pt' --local-dir data/checkpoints/"
+cwd = "packages/lamp"
+outputs = ["packages/lamp/data/checkpoints/lamp_smpl_aria_gen2.pt"]
+description = "Download the released non-commercial LAMP checkpoint at its pinned revision"
+
+[feature.lamp.tasks._lamp-download-body-model]
+cmd = "test -f data/body_models/smpl/SMPL_NEUTRAL.pkl || hf download pablovela5620/mamma-streaming-data --repo-type dataset --include 'body_models/smpl/*' --local-dir data/"
+cwd = "packages/lamp"
+outputs = ["packages/lamp/data/body_models/smpl/SMPL_NEUTRAL.pkl"]
+description = "Download the private chumpy-free neutral SMPL body model"
+
+[feature.lamp.tasks.lamp-download-artifacts]
+depends-on = ["_lamp-download-checkpoint", "_lamp-download-body-model"]
+description = "Download the released LAMP checkpoint and neutral SMPL body model"
+
+[feature.lamp-catalog]
+platforms = ["linux-64"]
+
+[feature.lamp-catalog.dependencies]
+av = ">=18"
+torchcodec = "*"
+
+# ═══════════════════════════════════════════════════════════════════════════
 # robocap-slam
 # ═══════════════════════════════════════════════════════════════════════════
 # Explicit platforms: libcublas can never solve on osx-arm64; omitting the list
@@ -2951,6 +2993,36 @@ posekit-dev = { features = [
     "posekit",
     "dev",
 ], solve-group = "posekit", no-default-feature = true }
+lamp = { features = [
+    "common",
+    "cuda",
+    "lamp",
+    "posekit",
+], solve-group = "lamp", no-default-feature = true }
+lamp-dev = { features = [
+    "common",
+    "cuda",
+    "lamp",
+    "posekit",
+    "dev",
+], solve-group = "lamp", no-default-feature = true }
+lamp-catalog = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "lamp",
+    "posekit",
+    "lamp-catalog",
+], solve-group = "lamp-catalog", no-default-feature = true }
+lamp-catalog-dev = { features = [
+    "catalog-common",
+    "rerun-prerelease",
+    "cuda",
+    "lamp",
+    "posekit",
+    "lamp-catalog",
+    "dev",
+], solve-group = "lamp-catalog", no-default-feature = true }
 robocap-slam = { features = [
     "common",
     "robocap-slam",
