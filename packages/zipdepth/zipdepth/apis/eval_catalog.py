@@ -98,7 +98,7 @@ class MetricCatalogDepthMetrics:
     """Mean absolute error in metres."""
 
 
-def _mean_metrics(records: list[MetricCatalogDepthMetrics]) -> MetricCatalogDepthMetrics:
+def mean_metrics(records: list[MetricCatalogDepthMetrics]) -> MetricCatalogDepthMetrics:
     """Average one non-empty list of per-frame metric records."""
     return MetricCatalogDepthMetrics(
         abs_rel=float(np.mean([record.abs_rel for record in records])),
@@ -253,13 +253,13 @@ class FootprintSplitMetrics:
     """Zero-parameter bilinear prompt-upsample floor inside the footprint."""
 
 
-def _mean_footprint_metrics(records: list[FootprintSplitMetrics]) -> FootprintSplitMetrics:
+def mean_footprint_metrics(records: list[FootprintSplitMetrics]) -> FootprintSplitMetrics:
     """Average one non-empty list of footprint-split records field by field."""
     return FootprintSplitMetrics(
-        whole=_mean_metrics([record.whole for record in records]),
-        inside=_mean_metrics([record.inside for record in records]),
-        outside=_mean_metrics([record.outside for record in records]),
-        inside_prompt_upsample=_mean_metrics([record.inside_prompt_upsample for record in records]),
+        whole=mean_metrics([record.whole for record in records]),
+        inside=mean_metrics([record.inside for record in records]),
+        outside=mean_metrics([record.outside for record in records]),
+        inside_prompt_upsample=mean_metrics([record.inside_prompt_upsample for record in records]),
     )
 
 
@@ -438,7 +438,7 @@ def _evaluate_ultrawide(
         if not segment_records:
             print(f"{segment_id}: no scorable ultrawide frames")
             continue
-        segment_metrics: FootprintSplitMetrics = _mean_footprint_metrics(segment_records)
+        segment_metrics: FootprintSplitMetrics = mean_footprint_metrics(segment_records)
         segment_report: dict[str, float | int | str] = {
             "segment_id": segment_id,
             "frame_count": len(segment_records),
@@ -454,7 +454,7 @@ def _evaluate_ultrawide(
 
     if not all_records:
         raise RuntimeError("ultrawide evaluation yielded no valid frames")
-    overall_metrics: FootprintSplitMetrics = _mean_footprint_metrics(all_records)
+    overall_metrics: FootprintSplitMetrics = mean_footprint_metrics(all_records)
     overall: dict[str, float | int] = {
         "ultrawide_frame_count": len(all_records),
         **_footprint_metrics_report("ultrawide", overall_metrics),
@@ -601,7 +601,7 @@ def main(config: EvalCatalogConfig) -> Path:
             print(f"{segment_id}: no scorable frames (skipped={skipped_frame_count})")
             continue
         frame_count: int = len(segment_diagnostic_records)
-        segment_diagnostic: MetricCatalogDepthMetrics = _mean_metrics(segment_diagnostic_records)
+        segment_diagnostic: MetricCatalogDepthMetrics = mean_metrics(segment_diagnostic_records)
         segment_report: dict[str, float | int | str] = {
             "segment_id": segment_id,
             "frame_count": frame_count,
@@ -611,7 +611,7 @@ def main(config: EvalCatalogConfig) -> Path:
             "aligned_inverse_diagnostic_mae": segment_diagnostic.mae,
         }
         if segment_metric_records:
-            segment_metric: MetricCatalogDepthMetrics = _mean_metrics(segment_metric_records)
+            segment_metric: MetricCatalogDepthMetrics = mean_metrics(segment_metric_records)
             segment_report.update(
                 {
                     "metric_abs_rel": segment_metric.abs_rel,
@@ -645,7 +645,7 @@ def main(config: EvalCatalogConfig) -> Path:
         raise RuntimeError("evaluation yielded no valid frames")
     overall: dict[str, float | int] = {}
     if all_diagnostic_records:
-        overall_diagnostic: MetricCatalogDepthMetrics = _mean_metrics(all_diagnostic_records)
+        overall_diagnostic: MetricCatalogDepthMetrics = mean_metrics(all_diagnostic_records)
         overall.update(
             {
                 "frame_count": len(all_diagnostic_records),
@@ -655,7 +655,7 @@ def main(config: EvalCatalogConfig) -> Path:
             }
         )
     if all_metric_records:
-        overall_metric: MetricCatalogDepthMetrics = _mean_metrics(all_metric_records)
+        overall_metric: MetricCatalogDepthMetrics = mean_metrics(all_metric_records)
         overall.update(
             {
                 "metric_abs_rel": overall_metric.abs_rel,

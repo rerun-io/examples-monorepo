@@ -776,6 +776,11 @@ cmd = "python tools/eval_catalog.py"
 cwd = "packages/zipdepth"
 description = "Unaligned metric AbsRel/delta1/MAE vs held-out PromptDA labels, with separately named aligned diagnostics"
 
+[feature.zipdepth-catalog.tasks.zipdepth-infer-segment-rerun]
+cmd = "python tools/infer_segment_rerun.py"
+cwd = "packages/zipdepth"
+description = "Stream one catalog segment through ZipDepth-PromptDA and log wide + ultrawide inputs, predictions, targets, and per-frame scores to Rerun"
+
 [feature.zipdepth-catalog.tasks.zipdepth-eval-hard20]
 cmd = "python tools/eval_hard_frames.py"
 cwd = "packages/zipdepth"
