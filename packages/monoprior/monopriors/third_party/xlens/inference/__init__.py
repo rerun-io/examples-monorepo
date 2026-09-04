@@ -8,4 +8,5 @@ It provides everything needed to run the released checkpoints:
     geometry.py    - unproject predicted depth to a fused world point cloud (.ply).
     pipeline.py    - XLensInference: load a checkpoint and run all 3 modes.
 """
+
 from monopriors.third_party.xlens.inference.pipeline import XLensInference  # noqa: F401

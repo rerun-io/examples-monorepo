@@ -1,4 +1,4 @@
-"""Unproject predicted depth to a fused world-frame point cloud, and write PLY.
+"""Unproject predicted depth to a fused world-frame point cloud.
 
 Convention (consistent with training / eval):
     depth  = z-depth in meters
@@ -8,29 +8,37 @@ Convention (consistent with training / eval):
     pt_cam   = (depth / |d_cam.z|) * d_cam_unit      # radial ray * depth-along-z
     pt_world = c2w @ pt_cam                           # works for fisheye AND pinhole
 """
+
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Optional
-
 import numpy as np
+from jaxtyping import Bool, Float, Float32, UInt8
 
 
-def unproject_to_world(depth: np.ndarray, d_cam: np.ndarray, c2w: np.ndarray) -> np.ndarray:
+def unproject_to_world(
+    depth: Float32[np.ndarray, "height width"],
+    d_cam: Float32[np.ndarray, "height width 3"],
+    c2w: Float[np.ndarray, "4 4"],
+) -> Float32[np.ndarray, "height width 3"]:
     """One view: depth (H, W), d_cam (H, W, 3) unit, c2w (4, 4) -> world points (H, W, 3)."""
-    z = np.clip(np.abs(d_cam[..., 2]), 1e-6, None)
-    pt_cam = (depth / z)[..., None] * d_cam                      # (H, W, 3)
+    z: Float32[np.ndarray, "height width"] = np.clip(np.abs(d_cam[..., 2]), 1e-6, None)
+    pt_cam: Float32[np.ndarray, "height width 3"] = (depth / z)[..., None] * d_cam
     R, t = c2w[:3, :3], c2w[:3, 3]
     return pt_cam @ R.T + t
 
 
-def fuse_point_cloud(depth: np.ndarray, d_cam: np.ndarray, c2w: np.ndarray,
-                     rgb: Optional[np.ndarray] = None,
-                     conf: Optional[np.ndarray] = None, conf_thresh: float = 0.0,
-                     conf_drop_pct: float = 0.0,
-                     masks: Optional[np.ndarray] = None,
-                     max_depth: Optional[float] = None,
-                     fov_max_deg: Optional[float] = None):
+def fuse_point_cloud(
+    depth: Float32[np.ndarray, "views height width"],
+    d_cam: Float32[np.ndarray, "views height width 3"],
+    c2w: Float[np.ndarray, "views 4 4"],
+    rgb: UInt8[np.ndarray, "views height width 3"] | None = None,
+    conf: Float32[np.ndarray, "views height width"] | None = None,
+    conf_thresh: float = 0.0,
+    conf_drop_pct: float = 0.0,
+    masks: Bool[np.ndarray, "views height width"] | None = None,
+    max_depth: float | None = None,
+    fov_max_deg: float | None = None,
+) -> tuple[Float32[np.ndarray, "points 3"], UInt8[np.ndarray, "points 3"] | None]:
     """Fuse all S views into a single (N, 3) world point cloud (+ optional colors).
 
     Args:
@@ -52,12 +60,14 @@ def fuse_point_cloud(depth: np.ndarray, d_cam: np.ndarray, c2w: np.ndarray,
     Returns:
         points (N, 3) float32, colors (N, 3) uint8 or None
     """
-    pts_all, col_all, conf_all = [], [], []
+    pts_all: list[Float32[np.ndarray, "points 3"]] = []
+    col_all: list[UInt8[np.ndarray, "points 3"]] = []
+    conf_all: list[Float32[np.ndarray, "points"]] = []
     for s in range(depth.shape[0]):
-        pw = unproject_to_world(depth[s], d_cam[s], c2w[s]).reshape(-1, 3)
-        valid = np.isfinite(pw).all(-1) & (depth[s].reshape(-1) > 0)
-        valid &= np.linalg.norm(d_cam[s].reshape(-1, 3), axis=-1) > 1e-3   # drop LUT edge / null rays
-        if fov_max_deg is not None:                                        # trim high-distortion fisheye periphery
+        pw: Float32[np.ndarray, "pixels 3"] = unproject_to_world(depth[s], d_cam[s], c2w[s]).reshape(-1, 3)
+        valid: Bool[np.ndarray, "pixels"] = np.isfinite(pw).all(-1) & (depth[s].reshape(-1) > 0)
+        valid &= np.linalg.norm(d_cam[s].reshape(-1, 3), axis=-1) > 1e-3  # drop LUT edge / null rays
+        if fov_max_deg is not None:  # trim high-distortion fisheye periphery
             valid &= np.abs(d_cam[s].reshape(-1, 3)[:, 2]) >= np.cos(np.deg2rad(fov_max_deg))
         if masks is not None:
             valid &= masks[s].reshape(-1).astype(bool)
@@ -71,67 +81,13 @@ def fuse_point_cloud(depth: np.ndarray, d_cam: np.ndarray, c2w: np.ndarray,
             col_all.append(rgb[s].reshape(-1, 3)[valid])
         if conf is not None:
             conf_all.append(conf[s].reshape(-1)[valid])
-    points = np.concatenate(pts_all, 0).astype(np.float32)
-    colors = np.concatenate(col_all, 0).astype(np.uint8) if rgb is not None else None
+    points: Float32[np.ndarray, "points 3"] = np.concatenate(pts_all, 0).astype(np.float32)
+    colors: UInt8[np.ndarray, "points 3"] | None = np.concatenate(col_all, 0).astype(np.uint8) if rgb is not None else None
 
     # global confidence-percentile drop (keep the most confident points)
     if conf is not None and conf_drop_pct > 0 and len(points):
-        c = np.concatenate(conf_all, 0)
-        keep = c >= np.percentile(c, conf_drop_pct)
+        c: Float32[np.ndarray, "points"] = np.concatenate(conf_all, 0)
+        keep: Bool[np.ndarray, "points"] = c >= np.percentile(c, conf_drop_pct)
         points = points[keep]
         colors = colors[keep] if colors is not None else None
     return points, colors
-
-
-def save_ply(path, points: np.ndarray, colors: Optional[np.ndarray] = None) -> None:
-    """Write a binary little-endian PLY (xyz + optional rgb)."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    points = np.asarray(points, np.float32)
-    N = len(points)
-    has_color = colors is not None and len(colors) == N
-    header = ["ply", "format binary_little_endian 1.0", f"element vertex {N}",
-              "property float x", "property float y", "property float z"]
-    if has_color:
-        header += ["property uchar red", "property uchar green", "property uchar blue"]
-    header.append("end_header\n")
-    if has_color:
-        dt = np.dtype([("x", "<f4"), ("y", "<f4"), ("z", "<f4"),
-                       ("r", "u1"), ("g", "u1"), ("b", "u1")])
-        buf = np.empty(N, dt)
-        buf["x"], buf["y"], buf["z"] = points.T
-        buf["r"], buf["g"], buf["b"] = np.asarray(colors, np.uint8).T
-    else:
-        dt = np.dtype([("x", "<f4"), ("y", "<f4"), ("z", "<f4")])
-        buf = np.empty(N, dt)
-        buf["x"], buf["y"], buf["z"] = points.T
-    with open(path, "wb") as f:
-        f.write("\n".join(header).encode("ascii"))
-        buf.tofile(f)
-
-
-def save_depth_preview(path, depth: np.ndarray, valid: Optional[np.ndarray] = None,
-                       ncol: int = 3) -> bool:
-    """Save a turbo-colormap mosaic of per-view metric depth. Returns False if matplotlib absent."""
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except Exception:
-        return False
-    S = depth.shape[0]
-    nrow = int(np.ceil(S / ncol))
-    fig, axes = plt.subplots(nrow, ncol, figsize=(4 * ncol, 3 * nrow))
-    axes = np.atleast_1d(axes).ravel()
-    for s in range(len(axes)):
-        axes[s].axis("off")
-        if s >= S:
-            continue
-        d = depth[s].astype(np.float32)
-        m = valid[s].astype(bool) if valid is not None else (np.isfinite(d) & (d > 0))
-        vmax = float(np.percentile(d[m], 95)) if m.sum() > 10 else 1.0
-        axes[s].imshow(np.where(m, d, np.nan), cmap="turbo", vmin=0, vmax=max(vmax, 1e-3))
-        axes[s].set_title(f"view {s}", fontsize=9)
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    fig.tight_layout(); fig.savefig(path, dpi=110, bbox_inches="tight"); plt.close(fig)
-    return True

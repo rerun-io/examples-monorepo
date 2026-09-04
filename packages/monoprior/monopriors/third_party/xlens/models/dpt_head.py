@@ -6,13 +6,37 @@ Features:
   (shares the final 1x1 conv of the depth fusion chain).
 """
 
-from typing import Dict as TyDict
-from typing import List, Optional, Sequence, Tuple
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import TypeAlias
 
 import torch
 import torch.nn as nn
+from jaxtyping import Float, Float32
+from torch import Tensor
 
 from monopriors.third_party.xlens.models.utils.head_utils import create_uv_grid, custom_interpolate, position_grid_to_embed
+
+BackboneFeature = tuple[Float[Tensor, "batch views patches features"], Float[Tensor, "batch views features"]]
+
+
+DPTOutput: TypeAlias = dict[str, Float32[Tensor, "batch height width"]]
+
+
+class Scratch(nn.Module):
+    """Typed namespace retaining the released DPT checkpoint paths."""
+
+    layer1_rn: nn.Conv2d
+    layer2_rn: nn.Conv2d
+    layer3_rn: nn.Conv2d
+    layer4_rn: nn.Conv2d
+    refinenet1: "FeatureFusionBlock"
+    refinenet2: "FeatureFusionBlock"
+    refinenet3: "FeatureFusionBlock"
+    refinenet4: "FeatureFusionBlock"
+    output_conv1: nn.Conv2d
+    output_conv2: nn.Sequential
 
 
 class DPTHead(nn.Module):
@@ -42,6 +66,7 @@ class DPTHead(nn.Module):
         down_ratio: int = 1,
         predict_mask: bool = False,
     ) -> None:
+        """Build the released four-scale DPT decoder."""
         super().__init__()
 
         self.patch_size = self.PATCH_SIZE
@@ -53,13 +78,11 @@ class DPTHead(nn.Module):
         self.predict_mask = predict_mask
         self.depth_out_dim = depth_output_dim + (1 if predict_mask else 0)
 
-        self.intermediate_layer_idx: Tuple[int, int, int, int] = (0, 1, 2, 3)
+        self.intermediate_layer_idx: tuple[int, int, int, int] = (0, 1, 2, 3)
 
         # Shared layers: per-stage projection + scale alignment
         self.norm = nn.Identity()
-        self.projects = nn.ModuleList(
-            [nn.Conv2d(dim_in, oc, kernel_size=1, stride=1, padding=0) for oc in out_channels]
-        )
+        self.projects = nn.ModuleList([nn.Conv2d(dim_in, oc, kernel_size=1, stride=1, padding=0) for oc in out_channels])
 
         self.resize_layers = nn.ModuleList(
             [
@@ -70,7 +93,7 @@ class DPTHead(nn.Module):
             ]
         )
 
-        self.scratch = _make_scratch(list(out_channels), features, expand=False)
+        self.scratch: Scratch = _make_scratch(list(out_channels), features, expand=False)
 
         # Depth fusion chain
         self.scratch.refinenet1 = _make_fusion_block(features)
@@ -80,9 +103,7 @@ class DPTHead(nn.Module):
 
         head_features_1 = features
         head_features_2 = 32
-        self.scratch.output_conv1 = nn.Conv2d(
-            head_features_1, head_features_1 // 2, kernel_size=3, stride=1, padding=1
-        )
+        self.scratch.output_conv1 = nn.Conv2d(head_features_1, head_features_1 // 2, kernel_size=3, stride=1, padding=1)
         self.scratch.output_conv2 = nn.Sequential(
             nn.Conv2d(head_features_1 // 2, head_features_2, kernel_size=3, stride=1, padding=1),
             nn.ReLU(inplace=True),
@@ -91,43 +112,42 @@ class DPTHead(nn.Module):
 
     def forward(
         self,
-        feats: Sequence[Tuple[torch.Tensor, torch.Tensor]],
+        feats: Sequence[BackboneFeature],
         H: int,
         W: int,
         patch_start_idx: int,
-        chunk_size: Optional[int] = 8,
-        **kwargs,
-    ) -> dict:
+        chunk_size: int | None = 8,
+    ) -> dict[str, Float32[Tensor, "batch views height width"]]:
+        """Decode multi-scale backbone features into dense per-view outputs."""
         B, S, N, C = feats[0][0].shape
-        feats = [feat[0].reshape(B * S, N, C) for feat in feats]
+        feature_tensors: list[Float[Tensor, "packed_views patches features"]] = [feature[0].reshape(B * S, N, C) for feature in feats]
 
         if chunk_size is None or chunk_size >= S:
-            out_dict = self._forward_impl(feats, H, W, patch_start_idx)
+            out_dict = self._forward_impl(feature_tensors, H, W, patch_start_idx)
             out_dict = {k: v.view(B, S, *v.shape[1:]) for k, v in out_dict.items()}
             return out_dict
 
-        out_dicts: List[TyDict[str, torch.Tensor]] = []
+        out_dicts: list[DPTOutput] = []
         for s0 in range(0, B * S, chunk_size):
             s1 = min(s0 + chunk_size, B * S)
-            out_dicts.append(
-                self._forward_impl([f[s0:s1] for f in feats], H, W, patch_start_idx)
-            )
-        out_dict = {k: torch.cat([od[k] for od in out_dicts], dim=0) for k in out_dicts[0].keys()}
+            out_dicts.append(self._forward_impl([feature[s0:s1] for feature in feature_tensors], H, W, patch_start_idx))
+        out_dict = {k: torch.cat([od[k] for od in out_dicts], dim=0) for k in out_dicts[0]}
         out_dict = {k: v.view(B, S, *v.shape[1:]) for k, v in out_dict.items()}
         return out_dict
 
     def _forward_impl(
         self,
-        feats: List[torch.Tensor],
+        feats: list[Float[Tensor, "batch patches features"]],
         H: int,
         W: int,
         patch_start_idx: int,
-    ) -> TyDict[str, torch.Tensor]:
+    ) -> DPTOutput:
+        """Decode one batch or view chunk."""
         B, _, C = feats[0].shape
         ph, pw = H // self.patch_size, W // self.patch_size
 
         # 1) Per-stage feature projection and scale alignment
-        resized_feats = []
+        resized_feats: list[Float[Tensor, "batch channels _height _width"]] = []
         for stage_idx, take_idx in enumerate(self.intermediate_layer_idx):
             x = feats[take_idx][:, patch_start_idx:]
             x = self.norm(x)
@@ -161,7 +181,7 @@ class DPTHead(nn.Module):
         depth_logits = self.scratch.output_conv2(depth_out)
 
         # 5) Outputs
-        outs: TyDict[str, torch.Tensor] = {}
+        outs: DPTOutput = {}
 
         depth_fmap = depth_logits.permute(0, 2, 3, 1)  # (B, H, W, depth_out_dim)
         outs["depth"] = torch.nn.functional.softplus(depth_fmap[..., 0])  # (B, H, W)
@@ -174,7 +194,8 @@ class DPTHead(nn.Module):
 
         return outs
 
-    def _apply_activation(self, x: torch.Tensor, activation: str) -> torch.Tensor:
+    def _apply_activation(self, x: Float[Tensor, "..."], activation: str) -> Float[Tensor, "..."]:
+        """Apply one named dense-output activation."""
         act = activation.lower()
         if act == "exp":
             return torch.exp(x.clamp(max=10.0))
@@ -188,7 +209,10 @@ class DPTHead(nn.Module):
             return torch.nn.functional.softplus(x)
         return x
 
-    def _add_pos_embed(self, x: torch.Tensor, W: int, H: int, ratio: float = 0.1) -> torch.Tensor:
+    def _add_pos_embed(
+        self, x: Float[Tensor, "batch channels height width"], W: int, H: int, ratio: float = 0.1
+    ) -> Float[Tensor, "batch channels height width"]:
+        """Add a low-amplitude two-dimensional sinusoidal embedding."""
         pw, ph = x.shape[-1], x.shape[-2]
         pe = create_uv_grid(pw, ph, aspect_ratio=W / H, dtype=x.dtype, device=x.device)
         pe = position_grid_to_embed(pe, x.shape[1]) * ratio
@@ -198,12 +222,14 @@ class DPTHead(nn.Module):
 
 # Builder helpers
 
+
 def _make_fusion_block(
     features: int,
-    size: Optional[Tuple[int, int]] = None,
+    size: tuple[int, int] | None = None,
     has_residual: bool = True,
     groups: int = 1,
-) -> nn.Module:
+) -> FeatureFusionBlock:
+    """Build one top-down feature-fusion stage."""
     return FeatureFusionBlock(
         features=features,
         activation=nn.ReLU(inplace=False),
@@ -217,10 +243,9 @@ def _make_fusion_block(
     )
 
 
-def _make_scratch(
-    in_shape: List[int], out_shape: int, groups: int = 1, expand: bool = False
-) -> nn.Module:
-    scratch = nn.Module()
+def _make_scratch(in_shape: list[int], out_shape: int, groups: int = 1, expand: bool = False) -> Scratch:
+    """Build the typed module namespace used by DPT checkpoints."""
+    scratch = Scratch()
     c1 = out_shape
     c2 = out_shape * (2 if expand else 1)
     c3 = out_shape * (4 if expand else 1)
@@ -234,13 +259,17 @@ def _make_scratch(
 
 
 class ResidualConvUnit(nn.Module):
+    """Two-convolution residual refinement unit."""
+
     def __init__(self, features: int, activation: nn.Module, bn: bool, groups: int = 1) -> None:
+        """Build one residual refinement unit."""
         super().__init__()
         self.conv1 = nn.Conv2d(features, features, 3, 1, 1, bias=True, groups=groups)
         self.conv2 = nn.Conv2d(features, features, 3, 1, 1, bias=True, groups=groups)
         self.activation = activation
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: Float[Tensor, "batch channels height width"]) -> Float[Tensor, "batch channels height width"]:
+        """Refine one spatial feature map."""
         out = self.activation(x)
         out = self.conv1(out)
         out = self.activation(out)
@@ -249,6 +278,8 @@ class ResidualConvUnit(nn.Module):
 
 
 class FeatureFusionBlock(nn.Module):
+    """Fuse and upsample adjacent DPT pyramid levels."""
+
     def __init__(
         self,
         features: int,
@@ -257,37 +288,37 @@ class FeatureFusionBlock(nn.Module):
         bn: bool = False,
         expand: bool = False,
         align_corners: bool = True,
-        size: Optional[Tuple[int, int]] = None,
+        size: tuple[int, int] | None = None,
         has_residual: bool = True,
         groups: int = 1,
     ) -> None:
+        """Build one feature-fusion block."""
         super().__init__()
         self.align_corners = align_corners
         self.size = size
         self.has_residual = has_residual
 
-        self.resConfUnit1 = (
-            ResidualConvUnit(features, activation, bn, groups=groups) if has_residual else None
-        )
+        self.resConfUnit1 = ResidualConvUnit(features, activation, bn, groups=groups) if has_residual else None
         self.resConfUnit2 = ResidualConvUnit(features, activation, bn, groups=groups)
 
         out_features = (features // 2) if expand else features
         self.out_conv = nn.Conv2d(features, out_features, 1, 1, 0, bias=True, groups=groups)
 
-    def forward(self, *xs: torch.Tensor, size: Optional[Tuple[int, int]] = None) -> torch.Tensor:
-        y = xs[0]
+    def forward(
+        self, *xs: Float[Tensor, "batch channels _height _width"], size: tuple[int, int] | None = None
+    ) -> Float[Tensor, "batch channels output_height output_width"]:
+        """Fuse optional residual features and upsample the result."""
+        y: Float[Tensor, "batch channels _height _width"] = xs[0]
         if self.has_residual and len(xs) > 1 and self.resConfUnit1 is not None:
             y = y + self.resConfUnit1(xs[1])
 
         y = self.resConfUnit2(y)
 
-        if (size is None) and (self.size is None):
-            up_kwargs = {"scale_factor": 2.0}
+        if size is None and self.size is None:
+            y = custom_interpolate(y, scale_factor=2.0, mode="bilinear", align_corners=self.align_corners)
         elif size is None:
-            up_kwargs = {"size": self.size}
+            y = custom_interpolate(y, size=self.size, mode="bilinear", align_corners=self.align_corners)
         else:
-            up_kwargs = {"size": size}
-
-        y = custom_interpolate(y, **up_kwargs, mode="bilinear", align_corners=self.align_corners)
+            y = custom_interpolate(y, size=size, mode="bilinear", align_corners=self.align_corners)
         y = self.out_conv(y)
         return y

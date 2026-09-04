@@ -9,20 +9,25 @@
 #   https://github.com/rwightman/pytorch-image-models/tree/master/timm/layers/mlp.py
 
 
-from typing import Callable, Optional
+from collections.abc import Callable
+
+from jaxtyping import Float
 from torch import Tensor, nn
 
 
 class Mlp(nn.Module):
+    """Two-layer transformer feed-forward network."""
+
     def __init__(
         self,
         in_features: int,
-        hidden_features: Optional[int] = None,
-        out_features: Optional[int] = None,
+        hidden_features: int | None = None,
+        out_features: int | None = None,
         act_layer: Callable[..., nn.Module] = nn.GELU,
         drop: float = 0.0,
         bias: bool = True,
     ) -> None:
+        """Build the feed-forward projection."""
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
@@ -31,7 +36,8 @@ class Mlp(nn.Module):
         self.fc2 = nn.Linear(hidden_features, out_features, bias=bias)
         self.drop = nn.Dropout(drop)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Float[Tensor, "... input_features"]) -> Float[Tensor, "... output_features"]:
+        """Project token features through the MLP."""
         x = self.fc1(x)
         x = self.act(x)
         x = self.drop(x)

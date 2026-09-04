@@ -11,8 +11,8 @@ from jaxtyping import Float32, Float64, Int64, UInt8
 from numpy import ndarray
 
 from monopriors.models.rig_depth.base_rig_depth import BaseRigDepthPredictor, BaseRigDepthPredictorConfig, RigDepthPrediction
-from monopriors.third_party.xlens.inference.pipeline import XLensInference
-from monopriors.third_party.xlens.inference.preprocess import assemble_batch
+from monopriors.third_party.xlens.inference.pipeline import XLensInference, XLensOutput
+from monopriors.third_party.xlens.inference.preprocess import AssembledBatch, assemble_batch
 
 XLENS_HF_REPO: str = "henryzhou998/X-Lens"
 XLENS_HF_REVISION: str = "1d0c96353b69464addad12389fadbb816e3978ae"
@@ -115,10 +115,10 @@ class XLensPredictor(BaseRigDepthPredictor):
             raise ValueError("X-Lens images, rays, and camera types must have matching view and image dimensions")
 
         device: torch.device = next(self.model.parameters()).device
-        batch: dict = assemble_batch(list(images), list(rays), cam_types.tolist(), c2w=cam_T_ref, device=device)
-        output: dict[str, torch.Tensor] = self.pipeline(batch)
-        depth: torch.Tensor = output["depth_metric"]
-        confidence: torch.Tensor = output["depth_conf"]
-        mask: torch.Tensor = output["mask"]
-        scale: torch.Tensor = output["metric_scaling_factor"]
+        batch: AssembledBatch = assemble_batch(list(images), list(rays), cam_types.tolist(), c2w=cam_T_ref, device=device)
+        output: XLensOutput = self.pipeline(batch)
+        depth: Float32[torch.Tensor, "1 s h w"] = output["depth_metric"]
+        confidence: Float32[torch.Tensor, "1 s h w"] = output["depth_conf"]
+        mask: Float32[torch.Tensor, "1 s h w"] = output["mask"]
+        scale: Float32[torch.Tensor, "1"] = output["metric_scaling_factor"]
         return RigDepthPrediction(depth_m=depth[0], confidence=confidence[0], mask=mask[0], scale=float(scale[0]))
