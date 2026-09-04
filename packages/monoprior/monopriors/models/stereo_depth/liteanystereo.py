@@ -4,6 +4,9 @@ Preprocessing mirrors upstream ``demo.py``: float RGB in ``[0, 255]`` (no normal
 multiple of 32 with the upstream ``InputPadder``, ``model(left, right, max_disp, test_mode=True)``.
 """
 
+from __future__ import annotations
+
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeAlias
 
@@ -14,10 +17,12 @@ from huggingface_hub import hf_hub_download
 from jaxtyping import Float32, UInt8
 from torch import nn
 
+from monopriors.models.stereo_depth.base_stereo_depth import (
+    BaseStereoPredictor,
+    BaseStereoPredictorConfig,
+)
 from monopriors.third_party.liteanystereo.liteanystereov2 import build_liteanystereo
 from monopriors.third_party.liteanystereo.padding import InputPadder
-
-from .base_stereo_depth import BaseStereoPredictor
 
 LAS2ModelSize: TypeAlias = Literal["s", "m", "l", "h"]
 
@@ -41,6 +46,22 @@ def load_liteanystereo(model_size: LAS2ModelSize, checkpoint: Path, max_disp: in
     state = {k.removeprefix("module."): v for k, v in state.items()}
     model.load_state_dict(state, strict=True)
     return model
+
+
+@dataclass
+class LiteAnyStereoConfig(BaseStereoPredictorConfig):
+    """Configuration for LiteAnyStereo V2."""
+
+    model_size: LAS2ModelSize = "m"
+    """LAS2 variant; S/M/L are feed-forward and H uses an iterative ConvGRU."""
+    max_disp: int = 192
+    """Disparity search range in pixels."""
+    checkpoint: Path | None = None
+    """Local weights, or None to download the pinned release checkpoint."""
+
+    def setup(self, device: Literal["cpu", "cuda"]) -> LiteAnyStereoPredictor:
+        """Build the configured LiteAnyStereo predictor on one device."""
+        return LiteAnyStereoPredictor(device=device, model_size=self.model_size, checkpoint=self.checkpoint, max_disp=self.max_disp)
 
 
 class LiteAnyStereoPredictor(BaseStereoPredictor[nn.Module]):

@@ -67,3 +67,13 @@ class BaseStereoPredictor(ABC, Generic[ModelT]):
 
     def set_model_device(self, device: Literal["cpu", "cuda"] = "cuda") -> None:
         self.model.to(device)
+
+
+@dataclass
+class BaseStereoPredictorConfig(ABC):
+    """Base configuration for a stereo predictor."""
+
+    @abstractmethod
+    def setup(self, device: Literal["cpu", "cuda"]) -> BaseStereoPredictor:
+        """Build the configured predictor on one device."""
+        raise NotImplementedError
