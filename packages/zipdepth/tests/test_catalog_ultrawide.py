@@ -306,6 +306,76 @@ def test_ultrawide_sample_drops_a_frame_below_the_valid_fraction() -> None:
     assert builder.stats.samples_built == 0
 
 
+def test_portrait_ultrawide_sample_orients_image_target_and_prompt_together() -> None:
+    """Rotate a stored-portrait ultrawide frame, its target, and its prompt as one.
+
+    813 of the 2,024 registered segments store the rectified ultrawide as 480x640.
+    The layer writer reads ``image_wh`` from the calibration and has no
+    orientation guard, so the lane must do the rotation and must keep the image,
+    the target, and the placed prompt on the same scene coordinates.
+    """
+    stored_hw: tuple[int, int] = (FRAME_HW[1], FRAME_HW[0])
+    rgb_chw: UInt8[Tensor, "3 stored_h stored_w"] = torch.zeros((3, *stored_hw), dtype=torch.uint8)
+    # A bright band on the stored top edge lands on the landscape left edge after
+    # one counter-clockwise turn, which is where the target's near band goes too.
+    rgb_chw[:, :8, :] = 255
+    target_mm_hw: UInt16[ndarray, "stored_h stored_w"] = np.full(stored_hw, 3000, dtype=np.uint16)
+    target_mm_hw[:8, :] = 500
+    target_blob_bytes: UInt8[ndarray, "target_n"] = np.frombuffer(encode_depth_png(target_mm_hw), dtype=np.uint8)
+    prompt_stored_mm_hw: UInt16[ndarray, "256 192"] = np.full((256, 192), 1000, dtype=np.uint16)
+    prompt_blob_bytes: UInt8[ndarray, "prompt_n"] = np.frombuffer(encode_depth_png(prompt_stored_mm_hw), dtype=np.uint8)
+    confidence: UInt8[ndarray, "confidence_n"] = np.full(256 * 192, 2, dtype=np.uint8)
+    policy: UltrawidePolicy = UltrawidePolicy(min_valid_fraction=0.0, valid_erosion_px=0)
+    builder: CpuSampleBuilder = CpuSampleBuilder(
+        build_eval_transform(*FRAME_HW), min_depth_span=0.0, target_mode="metric", ultrawide_policy=policy
+    )
+    placement: PromptPlacement = prompt_placement(policy.prompt_scale)
+
+    sample: dict[str, Tensor] | None = builder(
+        rgb_chw, target_blob_bytes, prompt_blob_bytes, confidence, quarter_turns=1, sample_seed=29, camera="ultrawide"
+    )
+
+    assert sample is not None
+    # Upright landscape output, not the stored portrait shape.
+    assert sample["image"].shape == (3, *FRAME_HW)
+    assert sample["target_depth"].shape == (1, *FRAME_HW)
+    image_hw: UInt8[ndarray, "h w"] = sample["image"][0].numpy()
+    target_hw: Float32[ndarray, "h w"] = sample["target_depth"][0].numpy()
+    # The bright RGB band and the near depth band both land on the left edge.
+    assert image_hw[:, 0].min() == 255
+    assert image_hw[:, -1].max() == 0
+    assert target_hw[:, 0].max() == pytest.approx(0.5)
+    assert target_hw[:, -1].min() == pytest.approx(3.0)
+    # The prompt is still centred on the canvas at the placement.
+    placed_valid_hw: Bool[ndarray, "192 256"] = sample["prompt_valid"][0].numpy()
+    assert placed_valid_hw[placement.top : placement.top + placement.height, placement.left : placement.left + placement.width].all()
+    assert placed_valid_hw.mean() == pytest.approx(placement.height * placement.width / (192 * 256))
+    assert_allclose(sample["prompt_depth"][0].numpy()[placed_valid_hw], 1.0, rtol=1.0e-6)
+
+
+@pytest.mark.parametrize("quarter_turns", [0, 2])
+def test_ultrawide_rejects_a_portrait_frame_that_stays_portrait(quarter_turns: int) -> None:
+    """Fail loudly when the orientation turns do not bring the frame to landscape."""
+    stored_hw: tuple[int, int] = (FRAME_HW[1], FRAME_HW[0])
+    rgb_chw: UInt8[Tensor, "3 stored_h stored_w"] = torch.zeros((3, *stored_hw), dtype=torch.uint8)
+    target_mm_hw: UInt16[ndarray, "stored_h stored_w"] = np.full(stored_hw, 1500, dtype=np.uint16)
+    target_blob_bytes: UInt8[ndarray, "target_n"] = np.frombuffer(encode_depth_png(target_mm_hw), dtype=np.uint8)
+    prompt_mm_hw: UInt16[ndarray, "192 256"] = np.full((192, 256), 1000, dtype=np.uint16)
+    prompt_blob_bytes: UInt8[ndarray, "prompt_n"] = np.frombuffer(encode_depth_png(prompt_mm_hw), dtype=np.uint8)
+    confidence: UInt8[ndarray, "confidence_n"] = np.full(192 * 256, 2, dtype=np.uint8)
+    builder: CpuSampleBuilder = CpuSampleBuilder(
+        build_eval_transform(*FRAME_HW),
+        min_depth_span=0.0,
+        target_mode="metric",
+        ultrawide_policy=UltrawidePolicy(min_valid_fraction=0.0),
+    )
+
+    with pytest.raises(ValueError, match="not landscape"):
+        builder(
+            rgb_chw, target_blob_bytes, prompt_blob_bytes, confidence, quarter_turns=quarter_turns, sample_seed=1, camera="ultrawide"
+        )
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA builder parity needs a GPU")
 def test_cuda_and_cpu_builders_place_the_same_ultrawide_prompt() -> None:
     """Match the CPU builder's placed prompt exactly on the CUDA builder."""

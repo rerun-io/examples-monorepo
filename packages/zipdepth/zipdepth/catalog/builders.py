@@ -67,6 +67,31 @@ def _resolve_placement(camera: Camera, policy: UltrawidePolicy | None) -> Prompt
     return prompt_placement(policy.prompt_scale)
 
 
+def _require_landscape_after_rotation(frame_chw: UInt8[Tensor, "3 h w"], quarter_turns: int) -> None:
+    """Reject an ultrawide frame that the orientation turns do not bring to landscape.
+
+    The ``ultrawide_depth`` layer stores 640x480 for landscape captures and
+    480x640 for portrait ones and carries no orientation guard of its own, so a
+    segment whose stored orientation disagrees with its capture property would
+    otherwise train silently on a rotated image.
+
+    Args:
+        frame_chw: Decoded rectified frame with shape ``(3, H, W)``.
+        quarter_turns: Counter-clockwise turns applied before resizing.
+
+    Raises:
+        ValueError: If the frame is not landscape after the turns.
+    """
+    height: int = int(frame_chw.shape[-2])
+    width: int = int(frame_chw.shape[-1])
+    if quarter_turns % 2 == 1:
+        height, width = width, height
+    if height >= width:
+        raise ValueError(
+            f"ultrawide frame {tuple(frame_chw.shape[-2:])} is {height}x{width} after {quarter_turns} quarter turns, which is not landscape"
+        )
+
+
 def _apply_ultrawide_mask_policy(sample: dict[str, Tensor], policy: UltrawidePolicy, stats: BuilderStats) -> dict[str, Tensor] | None:
     """Drop a sparse ultrawide frame, then erode the surviving target mask.
 
@@ -127,6 +152,8 @@ class CpuSampleBuilder:
         """Decode, orient, filter, and transform one CPU sample."""
         del sample_seed
         placement: PromptPlacement | None = _resolve_placement(camera, self._ultrawide_policy)
+        if camera == "ultrawide":
+            _require_landscape_after_rotation(frame_chw, quarter_turns)
         started: float = perf_counter()
         depth_mm_hw: UInt16[ndarray, "h w"] | None = decode_depth_png_fast(target_blob_bytes)
         if depth_mm_hw is None:
@@ -232,6 +259,8 @@ class CudaSampleBuilder:
     ) -> dict[str, Tensor] | None:
         """Inflate, unfilter, filter, and augment one CUDA sample."""
         placement: PromptPlacement | None = _resolve_placement(camera, self._ultrawide_policy)
+        if camera == "ultrawide":
+            _require_landscape_after_rotation(frame_chw, quarter_turns)
         self._stream.wait_stream(torch.cuda.current_stream(self._device))
         frame_chw.record_stream(self._stream)
         started: float = perf_counter()
