@@ -44,10 +44,10 @@ exclude = [
     "tests/reference_data/liteanystereo/upstream_utils.py",
     "tests/reference_data/zipdepth/upstream_architecture.py",
     "tests/reference_data/zipdepth/upstream_model_utils.py",
+    "vulture_whitelists/fast_foundationstereo.py",
     "notebooks",
 ]
 extend-exclude = [
-    "monopriors/third_party/fast_foundationstereo",
     "tests/reference_data/fast_foundationstereo/upstream_distill_block.py",
     "tests/reference_data/fast_foundationstereo/upstream_extractor.py",
     "tests/reference_data/fast_foundationstereo/upstream_foundation_stereo.py",
@@ -81,14 +81,13 @@ ignore = [
 ]
 
 [tool.vulture]
-paths = ["monopriors", "tests", "tools"]
+paths = ["monopriors", "tests", "tools", "vulture_whitelists/fast_foundationstereo.py"]
 exclude = [
     "*/.pixi/*",
     "*/__pycache__/*",
     "*/build/*",
     "*/dist/*",
     "*/node_modules/*",
-    "*/third_party/fast_foundationstereo/*",
     "*/third_party/depth_anything_v2/*",
     "*/third_party/dsine/*",
     "*/third_party/g3t/*",
@@ -114,7 +113,6 @@ sort_by_size = true
 min_confidence = 60
 ignore_names = [
     # Names consumed by dynamic imports and pytest collection.
-    "__path__",
     "pytestmark",
     # third_party/zipdepth: TypedDict fields read by subscript and APIs used by packages/zipdepth
     "heads",

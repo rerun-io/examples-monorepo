@@ -1,79 +1,127 @@
+"""Geometric and all-pairs correlation pyramids for Fast-FoundationStereo."""
+
 import torch
 import torch.nn.functional as F
-from monopriors.third_party.fast_foundationstereo.utils import bilinear_sampler, bilinear_sampler1d
+from einops import rearrange
+from jaxtyping import Float, Int8
+from torch import Tensor
+
+from monopriors.third_party.fast_foundationstereo.utils import bilinear_sampler
+
 
 class Combined_Geo_Encoding_Volume:
-    def __init__(self, init_fmap1, init_fmap2, geo_volume, num_levels=2):
-        self.num_levels = num_levels
-        self.geo_volume_pyramid = []
-        self.init_corr_pyramid = []
+    """Build and sample geometric and all-pairs correlation pyramids."""
 
-        # all pairs correlation
-        init_corr = Combined_Geo_Encoding_Volume.corr(init_fmap1, init_fmap2)
+    def __init__(
+        self,
+        init_fmap1_bchw: Float[Tensor, "b channels h w"],
+        init_fmap2_bchw: Float[Tensor, "b channels h w2"],
+        geo_volume_bgdhw: Float[Tensor, "b groups disparities h w"],
+        num_levels: int = 2,
+    ) -> None:
+        """Initialize the correlation pyramids.
 
-        b, h, w, _, w2 = init_corr.shape
-        b, c, d, h, w = geo_volume.shape
-        geo_volume = geo_volume.permute(0, 3, 4, 1, 2).reshape(b*h*w, c, 1, d)
+        Args:
+            init_fmap1_bchw: Floating-point left features with shape ``(batch, channels, height, width)``.
+            init_fmap2_bchw: Floating-point right features with shape ``(batch, channels, height, right_width)``.
+            geo_volume_bgdhw: Floating-point geometric volume with shape ``(batch, groups, disparities, height, width)``.
+            num_levels: Number of horizontal average-pooling levels.
+        """
+        self.num_levels: int = num_levels
+        self.geo_volume_pyramid: list[Float[Tensor, "samples groups 1 _disparities"]] = []
+        self.init_corr_pyramid: list[Float[Tensor, "samples 1 1 _right_width"]] = []
 
-        init_corr = init_corr.view(b*h*w, 1, 1, w2)
-        self.geo_volume_pyramid.append(geo_volume)
-        self.init_corr_pyramid.append(init_corr)
-        for _ in range(self.num_levels-1):
-            geo_volume = F.avg_pool2d(geo_volume, [1,2], stride=[1,2])
-            self.geo_volume_pyramid.append(geo_volume)
+        init_corr_bhw1v: Float[Tensor, "b h w 1 w2"] = self.corr(init_fmap1_bchw, init_fmap2_bchw)
+        geo_volume_ng1d: Float[Tensor, "samples groups 1 disparities"] = rearrange(
+            geo_volume_bgdhw,
+            "b groups disparities h w -> (b h w) groups 1 disparities",
+        )
+        init_corr_n11v: Float[Tensor, "samples 1 1 right_width"] = rearrange(
+            init_corr_bhw1v,
+            "b h w one right_width -> (b h w) one 1 right_width",
+        )
+        self.geo_volume_pyramid.append(geo_volume_ng1d)
+        self.init_corr_pyramid.append(init_corr_n11v)
+        for _ in range(self.num_levels - 1):
+            geo_volume_ng1d = F.avg_pool2d(geo_volume_ng1d, [1, 2], stride=[1, 2])
+            self.geo_volume_pyramid.append(geo_volume_ng1d)
+        for _ in range(self.num_levels - 1):
+            init_corr_n11v = F.avg_pool2d(init_corr_n11v, [1, 2], stride=[1, 2])
+            self.init_corr_pyramid.append(init_corr_n11v)
 
-        for _ in range(self.num_levels-1):
-            init_corr = F.avg_pool2d(init_corr, [1,2], stride=[1,2])
-            self.init_corr_pyramid.append(init_corr)
+    def __call__(
+        self,
+        disparity_b1hw: Float[Tensor, "b 1 h w"],
+        coordinates_bhw1: Float[Tensor, "b h w 1"],
+        dx_11r1: Int8[Tensor, "1 1 radius_samples 1"],
+    ) -> Float[Tensor, "b correlation_features h w"]:
+        """Sample both pyramids around a disparity estimate.
 
+        Args:
+            disparity_b1hw: Floating-point disparity with shape ``(batch, 1, height, width)``.
+            coordinates_bhw1: Floating-point x coordinates with shape ``(batch, height, width, 1)``.
+            dx_11r1: Floating-point or integer local offsets with shape ``(1, 1, radius_samples, 1)``.
 
+        Returns:
+            Floating-point encoded correlation with shape ``(batch, correlation_features, height, width)``.
+        """
+        batch_size: int = disparity_b1hw.shape[0]
+        height: int = disparity_b1hw.shape[2]
+        width: int = disparity_b1hw.shape[3]
+        outputs_bhwf: list[Float[Tensor, "b h w _features"]] = []
+        for level in range(self.num_levels):
+            scale: int = 2**level
+            disparity_n111: Float[Tensor, "samples 1 1 1"] = disparity_b1hw.view(batch_size * height * width, 1, 1, 1) / scale
+            geo_x_n1r1: Float[Tensor, "samples 1 radius_samples 1"] = dx_11r1 + disparity_n111
+            y_n1r1: Float[Tensor, "samples 1 radius_samples 1"] = torch.zeros_like(geo_x_n1r1)
+            geo_grid_n1r2: Float[Tensor, "samples 1 radius_samples 2"] = torch.cat([geo_x_n1r1, y_n1r1], dim=-1)
+            geo_sample_ng1r: Float[Tensor, "samples groups 1 radius_samples"] = bilinear_sampler(
+                self.geo_volume_pyramid[level],
+                geo_grid_n1r2,
+            )
+            geo_bhwf: Float[Tensor, "b h w geo_features"] = geo_sample_ng1r.view(batch_size, height, width, -1)
 
-    def __call__(self, disp, coords, dx, low_memory=True):
-        b, _, h, w = disp.shape
-        out_pyramid = []
-        for i in range(self.num_levels):
-            with torch.profiler.record_function(f"make disp_lvl {i}"):
-              geo_volume = self.geo_volume_pyramid[i]
-              x0 = dx + disp.view(b*h*w, 1, 1, 1) / 2**i
-            with torch.profiler.record_function(f"bilinear_sampler geo_volume {i}"):
-              if low_memory:
-                geo_volume = bilinear_sampler1d(geo_volume, x0, mode='bilinear', align_corners=True)
-              else:
-                y0 = torch.zeros_like(x0)
-                disp_lvl = torch.cat([x0,y0], dim=-1)
-                geo_volume = bilinear_sampler(geo_volume, disp_lvl, low_memory=low_memory)
-              geo_volume = geo_volume.view(b, h, w, -1)   #(b, h, h, 3x3xC)
+            init_x_n1r1: Float[Tensor, "samples 1 radius_samples 1"] = (
+                coordinates_bhw1.view(batch_size * height * width, 1, 1, 1) / scale - disparity_n111 + dx_11r1
+            )
+            corr_grid_n1r2: Float[Tensor, "samples 1 radius_samples 2"] = torch.cat([init_x_n1r1, y_n1r1], dim=-1)
+            corr_sample_n11r: Float[Tensor, "samples 1 1 radius_samples"] = bilinear_sampler(
+                self.init_corr_pyramid[level],
+                corr_grid_n1r2,
+            )
+            corr_bhwf: Float[Tensor, "b h w corr_features"] = corr_sample_n11r.view(batch_size, height, width, -1)
+            outputs_bhwf.extend((geo_bhwf, corr_bhwf))
 
-            with torch.profiler.record_function(f"make init_coords_lvl {i}"):
-              init_corr = self.init_corr_pyramid[i]   # (B*H*W, 1, 1, W2)
-              init_x0 = coords.view(b*h*w, 1, 1, 1)/2**i - disp.view(b*h*w, 1, 1, 1) / 2**i + dx   # X on right image
-            with torch.profiler.record_function(f"bilinear_sampler init_corr {i}"):
-              if low_memory:
-                init_corr = bilinear_sampler1d(init_corr, init_x0, mode='bilinear', align_corners=True)
-              else:
-                init_coords_lvl = torch.cat([init_x0,y0], dim=-1)
-                init_corr = bilinear_sampler(init_corr, init_coords_lvl, low_memory=low_memory)
-              init_corr = init_corr.view(b, h, w, -1)
-
-            out_pyramid.append(geo_volume)
-            out_pyramid.append(init_corr)
-
-        with torch.profiler.record_function(f"make out_pyramid"):
-          out_pyramid = torch.cat(out_pyramid, dim=-1)
-          return out_pyramid.permute(0, 3, 1, 2)   #(B,C,H,W)
-
+        combined_bhwf: Float[Tensor, "b h w correlation_features"] = torch.cat(outputs_bhwf, dim=-1)
+        combined_bfhw: Float[Tensor, "b correlation_features h w"] = rearrange(combined_bhwf, "b h w features -> b features h w")
+        return combined_bfhw
 
     @staticmethod
-    def corr(fmap1, fmap2, normalize=True):
-        with torch.profiler.record_function("build corr"):
-          B, D, H, W1 = fmap1.shape
-          _, _, _, W2 = fmap2.shape
-          fmap1 = fmap1.view(B, D, H, W1)
-          fmap2 = fmap2.view(B, D, H, W2)
-          if normalize:
-            with torch.cuda.amp.autocast(enabled=False):
-              corr = torch.einsum('aijk,aijh->ajkh', F.normalize(fmap1.float(), dim=1), F.normalize(fmap2.float(), dim=1))
-          else:
-            corr = corr.view(B, H, W1, 1, W2).to(fmap1.dtype)
-          corr = corr.view(B, H, W1, 1, W2).to(fmap1.dtype)
-        return corr
+    def corr(
+        fmap1_bchw: Float[Tensor, "b channels h w"],
+        fmap2_bchw: Float[Tensor, "b channels h w2"],
+        normalize: bool = True,
+    ) -> Float[Tensor, "b h w 1 w2"]:
+        """Compute normalized all-pairs horizontal correlation.
+
+        Args:
+            fmap1_bchw: Floating-point left features with shape ``(batch, channels, height, width)``.
+            fmap2_bchw: Floating-point right features with shape ``(batch, channels, height, right_width)``.
+            normalize: Must remain true for the released inference path.
+
+        Returns:
+            Floating-point correlation with shape ``(batch, height, width, 1, right_width)``.
+
+        Raises:
+            ValueError: If the removed unnormalized path is requested.
+        """
+        if not normalize:
+            raise ValueError("Fast-FoundationStereo inference requires normalized all-pairs correlation.")
+        with torch.amp.autocast("cuda", enabled=False):
+            correlation_bhwv: Float[Tensor, "b h w w2"] = torch.einsum(
+                "bchw,bchv->bhwv",
+                F.normalize(fmap1_bchw.float(), dim=1),
+                F.normalize(fmap2_bchw.float(), dim=1),
+            )
+        correlation_bhw1v: Float[Tensor, "b h w 1 w2"] = rearrange(correlation_bhwv, "b h w w2 -> b h w 1 w2").to(fmap1_bchw.dtype)
+        return correlation_bhw1v
