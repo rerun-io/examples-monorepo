@@ -38,7 +38,13 @@ def _upstream_gravity_transform(gravity_world: Float64[ndarray, "3"]) -> Float32
         sys.modules[package_name] = package
     _load_reference_module("lamp.core.se3", "upstream_core_se3.py")
     _load_reference_module("lamp.core.types", "upstream_core_types.py")
+    projectaria_tools = ModuleType("projectaria_tools")
+    core = ModuleType("projectaria_tools.core")
+    data_provider = ModuleType("projectaria_tools.core.data_provider")
     calibration = ModuleType("projectaria_tools.core.calibration")
+    mps = ModuleType("projectaria_tools.core.mps")
+    sensor_data = ModuleType("projectaria_tools.core.sensor_data")
+    stream_id = ModuleType("projectaria_tools.core.stream_id")
 
     class DeviceVersion(Enum):
         """Names imported by the pristine module but unused by this test seam."""
@@ -46,8 +52,20 @@ def _upstream_gravity_transform(gravity_world: Float64[ndarray, "3"]) -> Float32
         GEN1 = "gen1"
         GEN2 = "gen2"
 
+    class ImportedTypeStub:
+        """Stand in for Aria types outside the tested gravity seam."""
+
+        AFTER = "after"
+
+    core.data_provider = data_provider
     calibration.DeviceVersion = DeviceVersion
-    sys.modules[calibration.__name__] = calibration
+    mps.MpsDataPaths = ImportedTypeStub
+    mps.MpsDataProvider = ImportedTypeStub
+    sensor_data.TimeDomain = ImportedTypeStub
+    sensor_data.TimeQueryOptions = ImportedTypeStub
+    stream_id.StreamId = ImportedTypeStub
+    for module in (projectaria_tools, core, data_provider, calibration, mps, sensor_data, stream_id):
+        sys.modules[module.__name__] = module
     sensor_io = _load_reference_module("lamp.io.sensor_io", "upstream_io_sensor_io.py")
 
     class ProviderStub:

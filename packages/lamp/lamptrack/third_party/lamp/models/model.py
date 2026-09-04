@@ -6,31 +6,30 @@
 
 """Neural network modules for the LAMP SMPL lifter."""
 
-# (PyTorch ships imprecise stubs that mark `torch.zeros`, `torch.cat`,
-# `nn.ModuleList.__getitem__`, etc. as private re-exports or untyped
-# — suppressing project-wide for this file. Matches the pattern in
-# `lamp.models.lifter`, `lamp.detection.detector`, `lamp.tracking.tracker`, etc.)
-
 from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any, cast
 
 import smplx
 import torch
 import torch.nn as nn
-from lamptrack.third_party.lamp.models.blocks import Block, MVRayFusion, SMPLHeads
+from jaxtyping import Float, Float32, Int64
+from torch import Tensor
+from torch.nn import functional as F
+
+from lamptrack.third_party.lamp.models.blocks import Block, MVRayFusion, SMPLHeadOutput, SMPLHeads
 from lamptrack.third_party.lamp.models.model_utils import (
+    GRAVITY_DIRECTION_VIO,
+    R_CG_CGZ,
     get_cam_ray,
     get_T_x_c,
-    GRAVITY_DIRECTION_VIO,
     inverse_se3,
-    R_CG_CGZ,
     se3_transform_points,
     smpl_forward_joints_lamp_outputs,
     transform_smpl_params,
 )
-from torch.nn import functional as F
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -40,7 +39,7 @@ logger: logging.Logger = logging.getLogger(__name__)
 _SMPLX_PATCHED: bool = False
 
 
-def _ensure_smplx_capture_safe(parents: torch.Tensor) -> None:
+def _ensure_smplx_capture_safe(parents: Int64[Tensor, "joints"]) -> None:
     """Patch `smplx` rigid transforms to avoid CUDA Graph host syncs."""
     global _SMPLX_PATCHED
     if _SMPLX_PATCHED:
@@ -51,15 +50,15 @@ def _ensure_smplx_capture_safe(parents: torch.Tensor) -> None:
     _orig_transform_mat = smplx.lbs.transform_mat
 
     def _patched_batch_rigid_transform(
-        rot_mats: torch.Tensor,
-        joints: torch.Tensor,
-        parents: torch.Tensor,
+        rot_mats: Float[Tensor, "batch joints 3 3"],
+        joints: Float[Tensor, "batch joints 3"],
+        parents: Int64[Tensor, "joints"],
         dtype: torch.dtype = torch.float32,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[Float[Tensor, "batch joints 3"], Float[Tensor, "batch joints 4 4"]]:
         joints = torch.unsqueeze(joints, dim=-1)
         rel_joints = joints.clone()
         rel_joints[:, 1:] -= joints[:, parents[1:]]
-        transforms_mat = _orig_transform_mat(
+        transforms_mat = cast(Any, _orig_transform_mat)(
             rot_mats.reshape(-1, 3, 3),
             rel_joints.reshape(-1, 3, 1),
         ).reshape(-1, joints.shape[1], 4, 4)
@@ -76,7 +75,7 @@ def _ensure_smplx_capture_safe(parents: torch.Tensor) -> None:
         )
         return posed_joints, rel_transforms
 
-    smplx.lbs.batch_rigid_transform = _patched_batch_rigid_transform
+    smplx.lbs.batch_rigid_transform = cast(Any, _patched_batch_rigid_transform)
     _SMPLX_PATCHED = True
     logger.debug(
         "Installed capture-safe smplx.lbs.batch_rigid_transform (parents=%s)",
@@ -93,8 +92,8 @@ class LampNet(nn.Module):
     # Declared here so pyright sees them as typed attributes.
     dim_feat: int
 
-    _gravity_w: torch.Tensor
-    _r_cg_cgz: torch.Tensor
+    _gravity_w: Float32[Tensor, "3"]
+    _r_cg_cgz: Float32[Tensor, "1 3 3"]
 
     def __init__(
         self,
@@ -203,7 +202,7 @@ class LampNet(nn.Module):
             model_path=str(smpl_model_path), gender="neutral"
         )
 
-        _ensure_smplx_capture_safe(self.smpl.parents)
+        _ensure_smplx_capture_safe(cast(Tensor, self.smpl.parents))
 
         # Register constants as buffers so dtype/device moves happen with the
         # rest of the model and never inside the captured forward path.
@@ -234,11 +233,11 @@ class LampNet(nn.Module):
 
     def forward_share(
         self,
-        x_list: list[torch.Tensor],
-        cam_params: list[torch.Tensor],
-        Ts_wc: list[torch.Tensor],
-        ground_planes: torch.Tensor | None,
-    ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+        x_list: list[Float[Tensor, "batch time 17 3"]],
+        cam_params: list[Float[Tensor, "batch time params"]],
+        Ts_wc: list[Float[Tensor, "batch time 4 4"]],
+        ground_planes: Float[Tensor, "batch 4 3"] | None,
+    ) -> tuple[SMPLHeadOutput, Float[Tensor, "batch 1 4 4"]]:
         """The shared transformer + decoder + SMPL-head pipeline."""
         anchor_cam = 0
         device = x_list[anchor_cam].device
@@ -261,13 +260,13 @@ class LampNet(nn.Module):
         )
 
         # Lift each view's 2D keypoints to Plücker rays in the local frame.
-        rays: list[torch.Tensor] = []
+        rays: list[Float[Tensor, "batch time 17 7"]] = []
         T_x_w = inverse_se3(T_w_x)
         for num_cam in range(len(x_list)):
             T_x_c = T_x_w @ Ts_wc[num_cam]
             rays.append(get_cam_ray(cam_params[num_cam], x_list[num_cam], T_x_c=T_x_c))
 
-        x: torch.Tensor = torch.stack(rays, dim=1)
+        x: Float[Tensor, "batch views time 17 7"] = torch.stack(rays, dim=1)
         # v: views, f: frames, j: joints, c: channels (lowercase to avoid
         # pyright `reportConstantRedefinition` — the joints_embed below
         # changes C from the input ray dim to dim_feat, so we rebind).
@@ -335,18 +334,21 @@ class LampNet(nn.Module):
 
     def forward(
         self,
-        x: list[torch.Tensor],
-        cam_params: list[torch.Tensor],
-        Ts_wc: list[torch.Tensor],
-        ground_planes: torch.Tensor | None = None,
-    ) -> dict[str, torch.Tensor]:
+        x: list[Float[Tensor, "batch time 17 3"]],
+        cam_params: list[Float[Tensor, "batch time params"]],
+        Ts_wc: list[Float[Tensor, "batch time 4 4"]],
+        ground_planes: Float[Tensor, "batch 4 3"] | None = None,
+    ) -> dict[str, Tensor]:
         """Lift per-view 2D keypoints into world-frame SMPL joints and parameters."""
         assert len(x) == len(cam_params) == len(Ts_wc)
-        ret: dict[str, torch.Tensor] = {}
+        ret: dict[str, Tensor] = {}
         smpl_outs, T_w_x = self.forward_share(x, cam_params, Ts_wc, ground_planes)
 
         ret["T_w_x"] = T_w_x
-        ret.update(smpl_outs)
+        ret["betas"] = smpl_outs["betas"]
+        ret["transl"] = smpl_outs["transl"]
+        ret["body_pose_rotmat"] = smpl_outs["body_pose_rotmat"]
+        ret["global_orient_rotmat"] = smpl_outs["global_orient_rotmat"]
 
         B = ret["betas"].shape[0]
         device = ret["betas"].device

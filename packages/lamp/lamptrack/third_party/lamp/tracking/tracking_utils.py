@@ -11,12 +11,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from lamptrack.third_party.lamp.core.se3 import compose, invert
-from lamptrack.third_party.lamp.core.types import Person, PersonState, Skeleton
-from lamptrack.cameras import PerCameraCalibration
+from jaxtyping import Float, Float32
+from numpy import ndarray
 from scipy.optimize import (
     linear_sum_assignment,  # pyright: ignore[reportUnknownVariableType]
 )
+
+from lamptrack.cameras import PerCameraCalibration
+from lamptrack.third_party.lamp.core.se3 import compose, invert
+from lamptrack.third_party.lamp.core.types import Person, PersonState, Skeleton
 
 
 @dataclass(slots=True)
@@ -32,12 +35,12 @@ class Assignment:
 class SensorRecord:
     """Per-camera per-timestamp record needed for cross-cam reprojection."""
 
-    T_world_cam: np.ndarray  # 4x4 float32
+    T_world_cam: Float32[ndarray, "4 4"]
     cam_model: PerCameraCalibration | None
     cam_idx: int
 
 
-def hungarian_assign(cost: np.ndarray) -> list[Assignment]:
+def hungarian_assign(cost: Float[ndarray, "detections tracks"]) -> list[Assignment]:
     """Wrap `scipy.optimize.linear_sum_assignment` for our rectangular case."""
     if cost.size == 0:
         return []
@@ -55,7 +58,7 @@ def hungarian_assign(cost: np.ndarray) -> list[Assignment]:
     return out
 
 
-def _clip_xy(xy: np.ndarray, image_size: tuple[int, int]) -> np.ndarray:
+def _clip_xy(xy: Float[ndarray, "2"], image_size: tuple[int, int]) -> Float32[ndarray, "2"]:
     """Clamp a `(2,)` pixel coord into `[0, W-1] x [0, H-1]`."""
     width, height = image_size
     return np.array(
@@ -67,7 +70,7 @@ def _clip_xy(xy: np.ndarray, image_size: tuple[int, int]) -> np.ndarray:
     )
 
 
-def _box_corners_xyxy(box: np.ndarray) -> np.ndarray:
+def _box_corners_xyxy(box: Float32[ndarray, "4"]) -> Float32[ndarray, "4 2"]:
     """Return the 4 corners of an xyxy box as a `(4, 2)` array."""
     x1, y1, x2, y2 = (float(v) for v in box[:4])
     return np.array(
@@ -76,7 +79,7 @@ def _box_corners_xyxy(box: np.ndarray) -> np.ndarray:
     )
 
 
-def _bbox_from_points(points: list[np.ndarray]) -> np.ndarray | None:
+def _bbox_from_points(points: list[Float32[ndarray, "2"]]) -> Float32[ndarray, "4"] | None:
     """Axis-aligned bbox `[xmin, ymin, xmax, ymax]` from a list of `(2,)` pixels."""
     if not points:
         return None
@@ -91,9 +94,9 @@ def transform_detection_2d(
     person: Person,
     old_cam: PerCameraCalibration | None,
     new_cam: PerCameraCalibration | None,
-    T_world_oldcam: np.ndarray,
-    T_world_newcam: np.ndarray,
-) -> np.ndarray | None:
+    T_world_oldcam: Float32[ndarray, "4 4"],
+    T_world_newcam: Float32[ndarray, "4 4"],
+) -> Float32[ndarray, "4"] | None:
     """Reproject a person's last detection into a new camera frame."""
     if not person.ts_to_states or person.last_obs_ts < 0:
         return None
@@ -125,7 +128,7 @@ def transform_detection_2d(
     unproject = old_cam.unproject
     project = new_cam.project
 
-    def _reproject(xy: np.ndarray) -> np.ndarray | None:
+    def _reproject(xy: Float32[ndarray, "2"]) -> Float32[ndarray, "2"] | None:
         """Unproject `xy` in the old cam, rotate, and reproject into the new cam."""
         ray3 = unproject(xy)
         if ray3 is None:
@@ -141,7 +144,7 @@ def transform_detection_2d(
             return None
         return _clip_xy(new_xy, new_cam.image_size)
 
-    projected: list[np.ndarray] = []
+    projected: list[Float32[ndarray, "2"]] = []
     if old_det.has_keypoints and old_det.keypoints.size > 0:
         # Per-keypoint path.
         for kp_idx in range(old_det.keypoints.shape[0]):
@@ -172,14 +175,14 @@ def transform_detection_2d(
 def _project_skeleton_box(
     skeleton: Skeleton,
     new_cam: PerCameraCalibration,
-    T_world_newcam: np.ndarray,
-) -> np.ndarray | None:
+    T_world_newcam: Float32[ndarray, "4 4"],
+) -> Float32[ndarray, "4"] | None:
     """Project a 3D skeleton into a camera and return an in-image bbox."""
     if new_cam.project is None:
         return None
     T_newcam_world = invert(T_world_newcam)
     width, height = new_cam.image_size
-    in_image: list[np.ndarray] = []
+    in_image: list[Float32[ndarray, "2"]] = []
     for kp_world in skeleton.kp_world:
         kp_world_4 = np.array(
             [float(kp_world[0]), float(kp_world[1]), float(kp_world[2]), 1.0],
@@ -203,7 +206,7 @@ def _project_skeleton_box(
     return _bbox_from_points(in_image)
 
 
-def cam_params_16(cam: PerCameraCalibration) -> np.ndarray:
+def cam_params_16(cam: PerCameraCalibration) -> Float32[ndarray, "params"]:
     """Build the per-frame camera vector LAMP's unprojector expects.
 
     Fisheye624 cameras return a length-16 vector `[fx, fy, cx, cy, k0..k11]`

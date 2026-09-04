@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 
 import numpy as np
+from jaxtyping import Float32, UInt8
+from numpy import ndarray
 
 # Golden-ratio hue step for deterministic, visually distinct track colors.
 _GOLDEN_RATIO_CONJ: float = 0.6180339887498949
@@ -29,14 +31,14 @@ def color_from_id(person_id: int) -> tuple[float, float, float, float]:
 class Detection2D:
     """A 2D person detection (bbox + keypoints) for one camera at one timestamp."""
 
-    box_xyxy: np.ndarray  # shape (4,), [xmin, ymin, xmax, ymax]
+    box_xyxy: Float32[ndarray, "4"]  # [xmin, ymin, xmax, ymax]
     box_score: float  # 0..1
-    keypoints: np.ndarray  # shape (17, 3) - COCO order, [x, y, score]
+    keypoints: Float32[ndarray, "17 3"]  # COCO order, [x, y, score]
     cam_idx: int
     timestamp_ns: int
     has_keypoints: bool = True  # False if keypoints are placeholder zeros
-    det_crop: np.ndarray | None = None  # uint8 HxWx3, resized model crop
-    det_crop_raw: np.ndarray | None = None  # uint8 HxWx3, original-resolution crop
+    det_crop: UInt8[ndarray, "h w 3"] | None = None  # resized model crop
+    det_crop_raw: UInt8[ndarray, "h w 3"] | None = None  # original-resolution crop
     track_id: int | None = None  # filled in by LampTracker after assignment
 
     def iou(self, other: Detection2D) -> float:
@@ -53,27 +55,27 @@ class Detection2D:
         return float((normal_iou - (encl - union) / max(encl, 1e-6) + 1.0) / 2.0)
 
 
-def _box_area(box: np.ndarray) -> float:
+def _box_area(box: Float32[ndarray, "4"]) -> float:
     """Area of an xyxy box; 0 for degenerate (max < min) boxes."""
     w = max(0.0, float(box[2] - box[0]))
     h = max(0.0, float(box[3] - box[1]))
     return w * h
 
 
-def _box_intersection_area(a: np.ndarray, b: np.ndarray) -> float:
+def _box_intersection_area(a: Float32[ndarray, "4"], b: Float32[ndarray, "4"]) -> float:
     x1, y1 = max(float(a[0]), float(b[0])), max(float(a[1]), float(b[1]))
     x2, y2 = min(float(a[2]), float(b[2])), min(float(a[3]), float(b[3]))
     return max(0.0, x2 - x1) * max(0.0, y2 - y1)
 
 
-def _box_enclosing_area(a: np.ndarray, b: np.ndarray) -> float:
+def _box_enclosing_area(a: Float32[ndarray, "4"], b: Float32[ndarray, "4"]) -> float:
     """Area of the smallest axis-aligned box containing both `a` and `b`."""
     x1, y1 = min(float(a[0]), float(b[0])), min(float(a[1]), float(b[1]))
     x2, y2 = max(float(a[2]), float(b[2])), max(float(a[3]), float(b[3]))
     return max(0.0, x2 - x1) * max(0.0, y2 - y1)
 
 
-def box_iou_xyxy(a: np.ndarray, b: np.ndarray) -> float:
+def box_iou_xyxy(a: Float32[ndarray, "4"], b: Float32[ndarray, "4"]) -> float:
     """Axis-aligned bounding-box IoU on raw `(4,)` xyxy arrays."""
     inter = _box_intersection_area(a, b)
     if inter == 0.0:
@@ -86,14 +88,14 @@ def box_iou_xyxy(a: np.ndarray, b: np.ndarray) -> float:
 class Skeleton:
     """A SMPL 3D person pose in the world frame."""
 
-    kp_world: np.ndarray  # shape (24, 3)
-    kp_score: np.ndarray  # shape (24,)
-    T_world_pelvis: np.ndarray  # shape (4, 4)
-    shape: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
-    joints_rot_mat: np.ndarray = field(
+    kp_world: Float32[ndarray, "24 3"]
+    kp_score: Float32[ndarray, "24"]
+    T_world_pelvis: Float32[ndarray, "4 4"]
+    shape: Float32[ndarray, "betas"] = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
+    joints_rot_mat: Float32[ndarray, "joints 3 3"] = field(
         default_factory=lambda: np.zeros((0, 3, 3), dtype=np.float32)
     )
-    verts_w: np.ndarray = field(
+    verts_w: Float32[ndarray, "vertices 3"] = field(
         default_factory=lambda: np.zeros((0, 3), dtype=np.float32)
     )
 
@@ -120,7 +122,7 @@ class Person:
     inactive_ts: int = -1
     uncertainty: float = -1.0
     num_obs_3d: float = 0.0
-    shape_estimate: np.ndarray = field(
+    shape_estimate: Float32[ndarray, "betas"] = field(
         default_factory=lambda: np.zeros(0, dtype=np.float32)
     )
     shape_num_updates: int = 0
@@ -145,7 +147,7 @@ class Frameset:
     """A multi-camera capture at a single timestamp."""
 
     timestamp_ns: int  # capture timestamp
-    images: dict[int, np.ndarray]  # cam_idx -> uint8 HxW(xC)
+    images: dict[int, UInt8[ndarray, "h w channels"]]
 
 
 class CameraOrientation(IntEnum):
@@ -153,6 +155,36 @@ class CameraOrientation(IntEnum):
 
     UPRIGHT = 0
     ROTATE_90_CW = 1  # Aria SLAM cameras
+
+
+# Standard SMPL 24-joint names. Upstream documents this order beside the
+# topology but does not expose the names as a constant.
+SMPL_JOINT_NAMES: tuple[str, ...] = (
+    "Pelvis",
+    "L_Hip",
+    "R_Hip",
+    "Spine1",
+    "L_Knee",
+    "R_Knee",
+    "Spine2",
+    "L_Ankle",
+    "R_Ankle",
+    "Spine3",
+    "L_Foot",
+    "R_Foot",
+    "Neck",
+    "L_Collar",
+    "R_Collar",
+    "Head",
+    "L_Shoulder",
+    "R_Shoulder",
+    "L_Elbow",
+    "R_Elbow",
+    "L_Wrist",
+    "R_Wrist",
+    "L_Hand",
+    "R_Hand",
+)
 
 
 # SMPL 24-joint topology — `(parent_idx, child_idx)` pairs used by the

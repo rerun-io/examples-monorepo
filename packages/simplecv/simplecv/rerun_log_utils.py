@@ -13,7 +13,7 @@ from typing import Any
 import av
 import numpy as np
 import rerun as rr
-from jaxtyping import Float64, Int
+from jaxtyping import Float32, Float64, Int
 from numpy import ndarray
 from pyarrow import ChunkedArray, LargeListArray, ListArray, RecordBatch
 
@@ -25,6 +25,47 @@ from simplecv.rerun_custom_types import (
     confidence_scores_to_rgb as confidence_scores_to_rgb,
 )
 from simplecv.rrd_query_utils import RRDQuerySession, first_valid_value, unwrap_singleton_lists
+
+
+def compute_vertex_normals(
+    verts: Float32[ndarray, "n_verts 3"],
+    faces: Int[ndarray, "n_faces 3"],
+    eps: float = 1e-12,
+) -> Float32[ndarray, "n_verts 3"]:
+    """Compute per-vertex normals for a single mesh.
+
+    Args:
+        verts: Float32 array of vertex positions with shape ``(n_verts, 3)``.
+        faces: Int array of triangle indices with shape ``(n_faces, 3)``.
+        eps: Small epsilon to avoid division by zero when normalizing.
+
+    Returns:
+        Float32 array of unit vertex normals with shape ``(n_verts, 3)``; zeros for degenerate vertices.
+    """
+
+    # Expand faces to vertex triplets and fetch their positions.
+    faces_i: Int[ndarray, "n_faces 3"] = faces.astype(np.int64)
+    v0: Float32[ndarray, "n_faces 3"] = verts[faces_i[:, 0]]
+    v1: Float32[ndarray, "n_faces 3"] = verts[faces_i[:, 1]]
+    v2: Float32[ndarray, "n_faces 3"] = verts[faces_i[:, 2]]
+
+    # Face normal = cross(edge1, edge2).
+    e1: Float32[ndarray, "n_faces 3"] = v1 - v0
+    e2: Float32[ndarray, "n_faces 3"] = v2 - v0
+    face_normals: Float32[ndarray, "n_faces 3"] = np.cross(e1, e2)
+
+    # Accumulate each face normal into its three vertices with a vectorized scatter-add.
+    vertex_normals: Float32[ndarray, "n_verts 3"] = np.zeros_like(verts, dtype=np.float32)
+    flat_indices: Int[ndarray, "n_faces3"] = faces_i.reshape(-1)
+    face_normals_repeated: Float32[ndarray, "n_faces3 3"] = np.repeat(face_normals, 3, axis=0)
+    np.add.at(vertex_normals, flat_indices, face_normals_repeated)
+
+    norms: Float32[ndarray, "n_verts 1"] = np.linalg.norm(vertex_normals, axis=-1, keepdims=True)
+    denom: Float32[ndarray, "n_verts 1"] = np.maximum(norms, eps).astype(np.float32)
+    vn_unit: Float32[ndarray, "n_verts 3"] = (vertex_normals / denom).astype(np.float32)
+    mask: ndarray = norms > eps
+    vn_unit = np.where(mask, vn_unit, np.float32(0.0))
+    return vn_unit
 
 
 def _default_cache_root() -> Path:

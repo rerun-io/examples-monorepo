@@ -12,18 +12,21 @@ import logging
 from dataclasses import dataclass
 
 import numpy as np
-from lamptrack.third_party.lamp.core.types import box_iou_xyxy, Detection2D, Person, PersonState, Skeleton
+from jaxtyping import Float32
+from numpy import ndarray
+from scipy.optimize import (
+    linear_sum_assignment,  # pyright: ignore[reportUnknownVariableType]
+)
+
 from lamptrack.cameras import PerCameraCalibration
-from lamptrack.third_party.lamp.models.lifter import is_outlier_pose, SnippetData
+from lamptrack.third_party.lamp.core.types import Detection2D, Person, PersonState, Skeleton, box_iou_xyxy
+from lamptrack.third_party.lamp.models.lifter import SnippetData, is_outlier_pose
 from lamptrack.third_party.lamp.tracking.smoothing import fuse_or_store_batched
 from lamptrack.third_party.lamp.tracking.snippets import build_snippets_for_lifting
 from lamptrack.third_party.lamp.tracking.tracking_utils import (
-    hungarian_assign,
     SensorRecord,
+    hungarian_assign,
     transform_detection_2d,
-)
-from scipy.optimize import (
-    linear_sum_assignment,  # pyright: ignore[reportUnknownVariableType]
 )
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -94,7 +97,7 @@ class LampTracker:
     def track_frameset(
         self,
         detections: dict[int, list[Detection2D]],
-        T_world_cams: dict[int, np.ndarray],
+        T_world_cams: dict[int, Float32[ndarray, "4 4"]],
         cam_models: dict[int, PerCameraCalibration | None],
         timestamp_ns: int,
     ) -> None:
@@ -148,7 +151,7 @@ class LampTracker:
     def _track_one_cam(
         self,
         detections: list[Detection2D],
-        T_world_cam: np.ndarray,
+        T_world_cam: Float32[ndarray, "4 4"],
         cam_model: PerCameraCalibration | None,
         cam_idx: int,
         ts_ns: int,
@@ -203,8 +206,8 @@ class LampTracker:
         detections: list[Detection2D],
         active_handles: list[_TrackHandle],
         new_cam: PerCameraCalibration | None,
-        T_world_newcam: np.ndarray,
-    ) -> np.ndarray:
+        T_world_newcam: Float32[ndarray, "4 4"],
+    ) -> Float32[ndarray, "detections tracks"]:
         """Return `(num_dets, num_active_tracks)` cost matrix; 1 - IoU per cell."""
         n_dets = len(detections)
         n_tracks = len(active_handles)
@@ -226,7 +229,7 @@ class LampTracker:
                 old_record.T_world_cam,
                 T_world_newcam,
             )
-            fallback_box: np.ndarray | None = None
+            fallback_box: Float32[ndarray, "4"] | None = None
             if (
                 transformed_box is None
                 and new_cam is None
@@ -285,7 +288,7 @@ class LampTracker:
     def get_snippets_for_lifting(
         self,
         snippet_length: int,
-        T_gravityWorld_world: np.ndarray,
+        T_gravityWorld_world: Float32[ndarray, "4 4"],
         kp_thres: float = 0.0,
         num_views: int | None = None,
     ) -> dict[int, SnippetData]:
@@ -304,8 +307,8 @@ class LampTracker:
         self,
         person_id: int,
         skeletons_with_ts: list[tuple[int, Skeleton]],
-        T_world_cams: dict[int, np.ndarray],
-        T_gravityWorld_world: np.ndarray,
+        T_world_cams: dict[int, Float32[ndarray, "4 4"]],
+        T_gravityWorld_world: Float32[ndarray, "4 4"],
         *,
         min_pose_depth: float = 0.5,
         max_pose_depth: float = 5.0,
@@ -337,9 +340,9 @@ class LampTracker:
 
     def _update_person_shape(
         self, person: Person, skeletons_with_ts: list[tuple[int, Skeleton]]
-    ) -> np.ndarray | None:
+    ) -> Float32[ndarray, "betas"] | None:
         """Update the person-level SMPL betas estimate."""
-        shape_obs: np.ndarray | None = None
+        shape_obs: Float32[ndarray, "betas"] | None = None
         for _ts, skel in reversed(skeletons_with_ts):
             if skel.shape.size > 0:
                 shape_obs = skel.shape.astype(np.float32, copy=False)
@@ -486,24 +489,8 @@ class LampTracker:
             return 0
 
         # Pelvis-distance cost matrix (rows = new, cols = candidates).
-        new_pelvises = np.stack(
-            [
-                self._people[pid]
-                .ts_to_states[self._people[pid].last_lifted_ts]
-                .skeleton.kp_world[0]  # pyright: ignore[reportOptionalMemberAccess]
-                for pid in new_ids
-            ],
-            axis=0,
-        )
-        cand_pelvises = np.stack(
-            [
-                self._people[pid]
-                .ts_to_states[self._people[pid].last_lifted_ts]
-                .skeleton.kp_world[0]  # pyright: ignore[reportOptionalMemberAccess]
-                for pid in candidate_ids
-            ],
-            axis=0,
-        )
+        new_pelvises = np.stack([self._last_lifted_pelvis(pid) for pid in new_ids], axis=0)
+        cand_pelvises = np.stack([self._last_lifted_pelvis(pid) for pid in candidate_ids], axis=0)
         # Pairwise L2: (N_new, N_cand)
         diffs = new_pelvises[:, None, :] - cand_pelvises[None, :, :]
         cost = np.linalg.norm(diffs, axis=-1).astype(np.float64, copy=False)
@@ -527,3 +514,11 @@ class LampTracker:
             self.merge_track(target_id=target_id, src_id=src_id)
             n_merges += 1
         return n_merges
+
+    def _last_lifted_pelvis(self, person_id: int) -> Float32[ndarray, "3"]:
+        """Return the pelvis of a merge candidate validated by the caller."""
+        person = self._people[person_id]
+        state = person.ts_to_states[person.last_lifted_ts]
+        if state.skeleton is None:
+            raise RuntimeError(f"Person {person_id} has no skeleton at its last lifted timestamp.")
+        return state.skeleton.kp_world[0]

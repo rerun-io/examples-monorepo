@@ -8,7 +8,6 @@ dependencies = [
     "simplecv",
     "smplx>=0.1.28",
     "tyro>=0.9.1",
-    "projectaria-tools>=1.5,<3",
 ]
 
 # Workspace siblings named above resolve to their in-repo path (never to a PyPI
@@ -30,7 +29,6 @@ packages = ["lamptrack"]
 [tool.ruff]
 line-length = 150
 extend-exclude = [
-    "lamptrack/third_party/lamp",
     "tests/reference_data/lamp",
 ]
 
@@ -49,8 +47,8 @@ exclude = [
     "*/__pycache__/*",
     "*/build/*",
     "*/dist/*",
-    "*/lamptrack/third_party/lamp/*",
     "*/tests/reference_data/lamp/*",
 ]
+ignore_names = ["*exc"]
 sort_by_size = true
 min_confidence = 80
