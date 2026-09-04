@@ -26,6 +26,7 @@ from zipdepth.catalog.ultrawide import (
     PromptPlacement,
     UltrawidePolicy,
     erode_valid,
+    largest_hole_fraction,
     prompt_placement,
     valid_fraction,
 )
@@ -93,24 +94,35 @@ def _require_landscape_after_rotation(frame_chw: UInt8[Tensor, "3 h w"], quarter
 
 
 def _apply_ultrawide_mask_policy(sample: dict[str, Tensor], policy: UltrawidePolicy, stats: BuilderStats) -> dict[str, Tensor] | None:
-    """Drop a sparse ultrawide frame, then erode the surviving target mask.
+    """Drop a sparse or badly-holed ultrawide frame, then erode the surviving mask.
 
-    The valid fraction is measured on the resized target before erosion, so the
-    threshold describes the supervision the loss would actually see and does not
+    Both fractions are measured on the resized target before erosion, so the
+    thresholds describe the supervision the loss would actually see and do not
     move when the erosion radius changes.
+
+    Sparsity and holes are separate rejections on purpose. A frame can clear
+    ``min_valid_fraction`` on total area while one window or skylight removes a
+    contiguous fifth of the image, and the metric loss then has no target across
+    a whole region rather than in speckle.
 
     Args:
         sample: Built sample carrying ``target_valid`` (metric) or ``mask`` (SSI).
-        policy: Minimum valid fraction and erosion radius.
+        policy: Minimum valid fraction, maximum hole fraction, and erosion radius.
         stats: Builder counters incremented when the frame is rejected.
 
     Returns:
-        The sample with an eroded mask, or None when the frame is too sparse.
+        The sample with an eroded mask, or None when the frame is rejected.
     """
     valid_key: str = "target_valid" if "target_valid" in sample else "mask"
     valid_chw: Bool[Tensor, "1 h w"] = sample[valid_key]
-    if valid_fraction(valid_chw) < policy.min_valid_fraction:
+    valid_area: float = valid_fraction(valid_chw)
+    if valid_area < policy.min_valid_fraction:
         stats.skipped_low_valid_frames += 1
+        return None
+    # No single region can be larger than the total invalid area, so the cheap
+    # test settles most frames and the default policy never labels at all.
+    if 1.0 - valid_area > policy.max_hole_fraction and largest_hole_fraction(valid_chw) > policy.max_hole_fraction:
+        stats.skipped_large_hole_frames += 1
         return None
     sample[valid_key] = erode_valid(valid_chw, policy.valid_erosion_px)
     return sample

@@ -9,9 +9,11 @@ import torch
 from jaxtyping import Bool, Float32, UInt8
 from monopriors.models.depth_completion.base_completion_depth import MAX_METRIC_DEPTH_M, MIN_METRIC_DEPTH_M
 from monopriors.models.depth_completion.zipdepth_prompt import ZipDepthPrompt, load_zipdepth_prompt
-from monopriors.models.zipdepth_checkpoint import RANGE_MARGIN_M_KEY
+from monopriors.models.zipdepth_checkpoint import RANGE_MARGIN_COVERAGE_MAX_KEY, RANGE_MARGIN_M_KEY
 from monopriors.third_party.zipdepth.architecture import FastConvexUpsample, ZipDepth, create_model
 from torch import Tensor
+
+from zipdepth.catalog.ultrawide import DEFAULT_ULTRAWIDE_PROMPT_SCALE, PromptPlacement, prompt_placement
 
 PromptRange: TypeAlias = tuple[Float32[Tensor, "b 1 1 1"], Float32[Tensor, "b 1 1 1"]]
 ModelOutputs: TypeAlias = tuple[Float32[Tensor, "b 1 h w"], Float32[Tensor, "b 1 1 1"], Float32[Tensor, "b 1 1 1"]]
@@ -66,10 +68,12 @@ def _run_capturing_logits(
     return outputs, captured[0]
 
 
-def _prompted_model(range_margin_m: float, *, seed: int = 0) -> ZipDepthPrompt:
+def _prompted_model(range_margin_m: float, *, range_margin_coverage_max: float = 1.0, seed: int = 0) -> ZipDepthPrompt:
     """Build a deterministically initialized prompted model with live prompt branches."""
     torch.manual_seed(seed)
-    model: ZipDepthPrompt = ZipDepthPrompt(range_margin_m=range_margin_m).eval()
+    model: ZipDepthPrompt = ZipDepthPrompt(
+        range_margin_m=range_margin_m, range_margin_coverage_max=range_margin_coverage_max
+    ).eval()
     # The released initialization zeroes every branch output, which would hide any
     # change in the prompt conditioning; give the branches a signal to carry.
     for parameter in model.prompt_branches.parameters():
@@ -137,6 +141,35 @@ def _prompt_spanning(low_m: float, high_m: float) -> Float32[Tensor, "1 1 192 25
     prompt_bchw: Float32[Tensor, "1 1 192 256"] = torch.zeros(1, 1, 192, 256)
     prompt_bchw[:, :, 80:112, 96:160] = torch.linspace(low_m, high_m, 32 * 64).reshape(1, 1, 32, 64)
     return prompt_bchw
+
+
+def _full_canvas_prompt(low_m: float, high_m: float) -> Float32[Tensor, "1 1 192 256"]:
+    """Return a wide-lane prompt: every canvas pixel valid, spanning ``[low_m, high_m]``."""
+    return torch.linspace(low_m, high_m, 192 * 256, dtype=torch.float32).reshape(1, 1, 192, 256)
+
+
+def _padded_ultrawide_prompt(low_m: float, high_m: float) -> Float32[Tensor, "1 1 192 256"]:
+    """Return the wide LiDAR block padded into its ultrawide footprint, zeros elsewhere."""
+    placement: PromptPlacement = prompt_placement(DEFAULT_ULTRAWIDE_PROMPT_SCALE)
+    prompt_bchw: Float32[Tensor, "1 1 192 256"] = torch.zeros(1, 1, 192, 256)
+    block_hw: Float32[Tensor, "1 1 block_h block_w"] = torch.linspace(
+        low_m, high_m, placement.height * placement.width, dtype=torch.float32
+    ).reshape(1, 1, placement.height, placement.width)
+    prompt_bchw[
+        :,
+        :,
+        placement.top : placement.top + placement.height,
+        placement.left : placement.left + placement.width,
+    ] = block_hw
+    return prompt_bchw
+
+
+def _prompt_coverage(prompt_bchw: Float32[Tensor, "1 1 192 256"]) -> float:
+    """Return the fraction of the canvas the model counts as a valid prompt."""
+    valid_bchw: Bool[Tensor, "1 1 192 256"] = (
+        torch.isfinite(prompt_bchw) & (prompt_bchw >= MIN_METRIC_DEPTH_M) & (prompt_bchw <= MAX_METRIC_DEPTH_M)
+    )
+    return float(valid_bchw.to(dtype=torch.float32).mean())
 
 
 def test_zero_range_margin_reproduces_the_prompt_bounded_head_bit_for_bit(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -292,3 +325,115 @@ def test_checkpoints_without_a_recorded_margin_stay_prompt_bounded(tmp_path: Pat
 
     assert load_zipdepth_prompt(bare).range_margin_m == 0.0
     assert load_zipdepth_prompt(legacy).range_margin_m == 0.0
+
+
+def test_the_ultrawide_and_wide_prompts_sit_on_opposite_sides_of_the_gate() -> None:
+    """Anchor the 0.6 threshold in the two coverages the ``both`` lane actually produces."""
+    placement: PromptPlacement = prompt_placement(DEFAULT_ULTRAWIDE_PROMPT_SCALE)
+
+    assert (placement.height, placement.width) == (91, 122)
+    assert _prompt_coverage(_full_canvas_prompt(1.0, 1.4)) == 1.0
+    # 91 * 122 / (192 * 256): the whole wide field of view inside an ultrawide frame.
+    assert _prompt_coverage(_padded_ultrawide_prompt(1.0, 1.4)) == pytest.approx(0.2259, abs=1e-4)
+
+
+def test_a_gated_margin_leaves_a_fully_prompted_frame_bit_identical() -> None:
+    """Keep the wide lane on exactly the head v4 trained, tensor for tensor.
+
+    An unconditional 3.9 m margin broke this lane (AbsRel 0.19 against 0.013),
+    so the gate has to be an identity for a full-canvas prompt, not merely close.
+    """
+    bounded: ZipDepthPrompt = _prompted_model(0.0)
+    gated: ZipDepthPrompt = _prompted_model(MAX_METRIC_DEPTH_M - MIN_METRIC_DEPTH_M, range_margin_coverage_max=0.6)
+    torch.manual_seed(1)
+    image_bchw: Float32[Tensor, "1 3 64 96"] = torch.rand(1, 3, 64, 96)
+    prompt_bchw: Float32[Tensor, "1 1 192 256"] = _full_canvas_prompt(1.0, 1.4)
+
+    with torch.inference_mode():
+        bounded_outputs: ModelOutputs = bounded.forward_with_range(image_bchw, prompt_bchw)
+        gated_outputs: ModelOutputs = gated.forward_with_range(image_bchw, prompt_bchw)
+
+    assert torch.equal(gated_outputs[1], bounded_outputs[1])
+    assert torch.equal(gated_outputs[2], bounded_outputs[2])
+    assert torch.equal(gated_outputs[0], bounded_outputs[0])
+
+
+def test_a_gated_margin_opens_the_whole_window_for_a_padded_ultrawide_prompt() -> None:
+    """Let the ultrawide periphery reach depth the centre prompt never saw."""
+    model: ZipDepthPrompt = _prompted_model(MAX_METRIC_DEPTH_M - MIN_METRIC_DEPTH_M, range_margin_coverage_max=0.6)
+    torch.manual_seed(1)
+    image_bchw: Float32[Tensor, "1 3 64 96"] = torch.rand(1, 3, 64, 96)
+
+    with torch.inference_mode():
+        outputs: ModelOutputs = model.forward_with_range(image_bchw, _padded_ultrawide_prompt(1.0, 1.4))
+
+    assert float(outputs[1]) == pytest.approx(MIN_METRIC_DEPTH_M)
+    assert float(outputs[2]) == pytest.approx(MAX_METRIC_DEPTH_M)
+    assert float(outputs[0].min()) >= MIN_METRIC_DEPTH_M
+    assert float(outputs[0].max()) <= MAX_METRIC_DEPTH_M
+
+
+def test_the_coverage_gate_decides_per_batch_element() -> None:
+    """Train both cameras in one batch: the ``both`` lane interleaves them."""
+    model: ZipDepthPrompt = _prompted_model(MAX_METRIC_DEPTH_M - MIN_METRIC_DEPTH_M, range_margin_coverage_max=0.6)
+    torch.manual_seed(1)
+    image_bchw: Float32[Tensor, "2 3 64 96"] = torch.rand(2, 3, 64, 96)
+    prompt_bchw: Float32[Tensor, "2 1 192 256"] = torch.cat(
+        [_full_canvas_prompt(1.0, 1.4), _padded_ultrawide_prompt(1.0, 1.4)]
+    )
+
+    with torch.inference_mode():
+        outputs: ModelOutputs = model.forward_with_range(image_bchw, prompt_bchw)
+
+    assert outputs[1].flatten().tolist() == pytest.approx([1.0, MIN_METRIC_DEPTH_M])
+    assert outputs[2].flatten().tolist() == pytest.approx([1.4, MAX_METRIC_DEPTH_M])
+    assert torch.isfinite(outputs[0]).all()
+
+
+def test_the_default_coverage_ceiling_widens_every_image() -> None:
+    """Keep the pre-gate behaviour reachable: 1.0 is the largest coverage there is."""
+    model: ZipDepthPrompt = _prompted_model(MAX_METRIC_DEPTH_M - MIN_METRIC_DEPTH_M)
+    torch.manual_seed(1)
+    image_bchw: Float32[Tensor, "1 3 64 96"] = torch.rand(1, 3, 64, 96)
+
+    with torch.inference_mode():
+        outputs: ModelOutputs = model.forward_with_range(image_bchw, _full_canvas_prompt(1.0, 1.4))
+
+    assert model.range_margin_coverage_max == 1.0
+    assert float(outputs[1]) == pytest.approx(MIN_METRIC_DEPTH_M)
+    assert float(outputs[2]) == pytest.approx(MAX_METRIC_DEPTH_M)
+
+
+def test_range_margin_coverage_max_rejects_values_outside_the_unit_interval() -> None:
+    """A coverage is a fraction; anything else would silently disable or force the margin."""
+    with pytest.raises(ValueError, match="range_margin_coverage_max"):
+        ZipDepthPrompt(range_margin_coverage_max=-0.1)
+    with pytest.raises(ValueError, match="range_margin_coverage_max"):
+        ZipDepthPrompt(range_margin_coverage_max=1.5)
+    with pytest.raises(ValueError, match="range_margin_coverage_max"):
+        ZipDepthPrompt(range_margin_coverage_max=float("nan"))
+
+
+def test_trainer_checkpoints_carry_the_coverage_gate_to_inference(tmp_path: Path) -> None:
+    """Rebuild the trained gate from the checkpoint without repeating the flag."""
+    trained: ZipDepthPrompt = ZipDepthPrompt(range_margin_m=3.9, range_margin_coverage_max=0.6)
+    checkpoint: Path = tmp_path / "final_model.pth"
+    torch.save(
+        {
+            "model_state_dict": trained.state_dict(),
+            RANGE_MARGIN_M_KEY: 3.9,
+            RANGE_MARGIN_COVERAGE_MAX_KEY: 0.6,
+        },
+        checkpoint,
+    )
+
+    assert load_zipdepth_prompt(checkpoint).range_margin_coverage_max == 0.6
+    assert load_zipdepth_prompt(checkpoint, range_margin_coverage_max=1.0).range_margin_coverage_max == 1.0
+
+
+def test_checkpoints_without_a_recorded_coverage_gate_widen_every_image(tmp_path: Path) -> None:
+    """Keep every pre-gate margin checkpoint on the behaviour it was trained with."""
+    legacy: Path = tmp_path / "zdpda_uw_v1.pth"
+    torch.save({"model_state_dict": ZipDepthPrompt().state_dict(), RANGE_MARGIN_M_KEY: 3.9}, legacy)
+
+    assert load_zipdepth_prompt(legacy).range_margin_coverage_max == 1.0

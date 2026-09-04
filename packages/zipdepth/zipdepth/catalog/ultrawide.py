@@ -14,9 +14,12 @@ from dataclasses import dataclass
 from random import Random
 from typing import Literal, TypeAlias, TypeVar
 
+import numpy as np
 import torch
 from jaxtyping import Bool, Float32, Shaped
 from monopriors.models.depth_completion.base_completion_depth import MAX_METRIC_DEPTH_M, MIN_METRIC_DEPTH_M
+from numpy import ndarray
+from scipy.ndimage import label
 from torch import Tensor
 from torch.nn import functional as F
 
@@ -73,15 +76,40 @@ class UltrawidePolicy:
     past the mesh, so the boundary ring is the least trustworthy supervision."""
     prompt_scale: float = DEFAULT_ULTRAWIDE_PROMPT_SCALE
     """Prompt block size as a fraction of the canvas, per axis."""
+    max_hole_fraction: float = 1.0
+    """Reject an ultrawide frame whose LARGEST connected invalid region, measured
+    before erosion, exceeds this fraction of the frame. ``min_valid_fraction``
+    only counts invalid pixels; it cannot tell speckle at glazing from one window
+    swallowing a fifth of the image, and the second kind leaves the loss
+    supervising a frame it has no target for over a whole contiguous region. Of
+    5,415 measured ultrawide frames, 6.6% fall below 0.8 valid and 3.5% carry a
+    hole larger than 20% of the frame. The default 1.0 is the whole frame, so no
+    frame is ever rejected and the connected-component pass never runs.
+
+    This only has an effect below ``1 - min_valid_fraction``. A frame that clears
+    the valid-fraction gate has at most ``1 - min_valid_fraction`` invalid area in
+    total, and no single region can exceed that, so a larger cap can never fire.
+    ``__post_init__`` rejects such a pairing rather than letting it silently do
+    nothing, which is exactly how the first uw-v2 gate ran ``0.8``/``0.2`` and
+    reported ``skipped_large_hole_frames = 0`` over 600 steps."""
 
     def __post_init__(self) -> None:
-        """Reject a fraction outside the unit interval or a negative erosion."""
+        """Reject a fraction outside the unit interval, a negative erosion, or an inert hole cap."""
         if not 0.0 <= self.min_valid_fraction <= 1.0:
             raise ValueError("min_valid_fraction must be in [0, 1]")
         if self.valid_erosion_px < 0:
             raise ValueError("valid_erosion_px must be non-negative")
         if not 0.0 < self.prompt_scale <= 1.0:
             raise ValueError("prompt_scale must be in (0, 1]")
+        if not 0.0 <= self.max_hole_fraction <= 1.0:
+            raise ValueError("max_hole_fraction must be in [0, 1]")
+        if self.max_hole_fraction < 1.0 and self.max_hole_fraction + self.min_valid_fraction >= 1.0:
+            raise ValueError(
+                f"max_hole_fraction={self.max_hole_fraction} can never reject a frame that "
+                f"min_valid_fraction={self.min_valid_fraction} keeps, because a kept frame has at most "
+                f"{1.0 - self.min_valid_fraction:.3g} invalid area in total; lower max_hole_fraction below that, "
+                "or leave it at 1.0 to disable the filter"
+            )
 
 
 def prompt_placement(scale: float, canvas_hw: tuple[int, int] = PROMPT_CANVAS_HW) -> PromptPlacement:
@@ -263,6 +291,41 @@ def erode_valid(valid_chw: Bool[Tensor, "1 h w"], erosion_px: int) -> Bool[Tenso
 def valid_fraction(valid_chw: Bool[Tensor, "1 h w"]) -> float:
     """Return the fraction of the mask that is valid."""
     return float(valid_chw.to(dtype=torch.float32).mean().item())
+
+
+def largest_hole_fraction(valid_chw: Bool[Tensor, "1 h w"]) -> float:
+    """Return the frame fraction covered by the largest connected invalid region.
+
+    Labelling runs on the CPU through ``scipy.ndimage.label`` with the default
+    4-connectivity. A CUDA-built mask is copied down first, which keeps the CPU
+    and CUDA builders on exactly the same component decomposition — the point of
+    the filter is to reject the same frames on both paths, and a mask is under a
+    megabyte. Callers gate this behind a cheap test on the total invalid area,
+    which no single region can exceed.
+
+    Args:
+        valid_chw: Boolean validity with shape ``(1, H, W)``.
+
+    Returns:
+        The largest invalid region's pixel count over the frame's pixel count, or
+        ``0.0`` when every pixel is valid.
+
+    Raises:
+        ValueError: If the mask is not ``(1, H, W)``.
+    """
+    if valid_chw.ndim != 3 or valid_chw.shape[0] != 1:
+        raise ValueError(f"validity mask must have shape (1, H, W), got {tuple(valid_chw.shape)}")
+    invalid_hw: Bool[ndarray, "h w"] = (~valid_chw[0]).detach().cpu().numpy()
+    # scipy picks the label integer width itself, and bincount always counts in
+    # int64, so neither array is pinned to a dtype here.
+    labels_hw: Shaped[ndarray, "h w"]
+    region_count: int
+    labels_hw, region_count = label(invalid_hw)
+    if region_count == 0:
+        return 0.0
+    # Bin 0 is the valid background, which is never a hole.
+    region_sizes: Shaped[ndarray, " regions"] = np.bincount(labels_hw.reshape(-1))[1:]
+    return float(region_sizes.max()) / float(invalid_hw.size)
 
 
 def subsample_indices(available: int, wanted: int, seed: int) -> list[int]:

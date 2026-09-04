@@ -322,6 +322,11 @@ class CatalogPromptDepthDataset(IterableDataset[dict[str, Tensor]]):
         """Return the number of ultrawide frames rejected for sparse valid depth."""
         return self.stats.skipped_low_valid_frames
 
+    @property
+    def skipped_large_hole_frames(self) -> int:
+        """Return the number of ultrawide frames rejected for one oversized invalid region."""
+        return self.stats.skipped_large_hole_frames
+
     def set_epoch(self, epoch: int) -> None:
         """Set the pass index used to seed segment and sample shuffling."""
         self._epoch = epoch

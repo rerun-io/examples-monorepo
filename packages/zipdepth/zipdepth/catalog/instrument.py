@@ -140,6 +140,7 @@ class InstrumentedLoader:
             f"{stage_text} skipped={current_stats.skipped_frames} "
             f"skipped_flat={current_stats.skipped_flat_frames} "
             f"skipped_low_valid={current_stats.skipped_low_valid_frames} "
+            f"skipped_large_hole={current_stats.skipped_large_hole_frames} "
             f"skipped_missing_payload={current_stats.skipped_missing_payload_frames}"
         )
         if self._writer is None:
@@ -151,6 +152,7 @@ class InstrumentedLoader:
             "io/skipped_frames": float(current_stats.skipped_frames),
             "io/skipped_flat_frames": float(current_stats.skipped_flat_frames),
             "io/skipped_low_valid_frames": float(current_stats.skipped_low_valid_frames),
+            "io/skipped_large_hole_frames": float(current_stats.skipped_large_hole_frames),
             "io/skipped_missing_payload_frames": float(current_stats.skipped_missing_payload_frames),
         }
         name: str
