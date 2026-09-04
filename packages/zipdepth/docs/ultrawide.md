@@ -237,6 +237,43 @@ sigmoid is quantization precision — spreading the same output resolution over
 3.9 m instead of a 0.4 m span — and that works out to a few millimetres, far
 below the lane's ~70 mm edge-MAE gate.
 
+### Conditioning the margin on prompt coverage
+
+Opening the window *for every frame* is what the uw-v1 gate measured, and the
+wide lane does not survive it: 600 steps of `--range-margin-m 3.9` with
+`--cameras both` scored wide AbsRel **0.19** against v4's **0.013**. A wide
+prompt fills the canvas, so its own `[min, max]` is already the right range, and
+re-spanning the head for it is pure loss.
+
+`range_margin_coverage_max` conditions the widening on the prompt itself. The
+model computes coverage inside `forward_with_range`, from the same validity mask
+it already builds:
+
+```
+coverage = valid_prompt_mask.float().mean(dim=(1, 2, 3))
+widen    = coverage <= range_margin_coverage_max
+```
+
+A wide prompt covers the whole `192x256` canvas and scores ~1.0. An ultrawide
+prompt is the wide block padded into the central `122x91`, so it scores at most
+`122 * 91 / (256 * 192) = 0.226`, less where the block has holes. The two lanes
+never overlap, and `0.6` separates them with room on both sides. The gate is a
+`torch.where` on the per-element bounds, so a mixed `both` batch resolves each
+element independently and the fp16 export graph keeps its data-independent shape.
+
+The wide path is then **bit-identical** to the un-widened head: `torch.where`
+hands back the very tensors the prompt-bounded head computes. The default
+`range_margin_coverage_max = 1.0` is the largest coverage possible, so it admits
+every image and reproduces the ungated margin exactly; checkpoints written before
+the gate existed read back as `1.0` for the same reason. The uw-v2 fine-tune uses
+`range_margin_m = 3.9` with `range_margin_coverage_max = 0.6`.
+
+**Why this matters for the periphery.** On the 20 holdout segments a mean 27% of
+ultrawide periphery ground-truth pixels lie outside the prompt's `[min, max]`
+(25% below the minimum, 3% above the maximum), and 61% of frames have more than
+20% of their periphery unreachable. uw-v1 ran at margin 0.0 and therefore could
+not reach a quarter of the periphery at all.
+
 ## Training recipe
 
 Fine-tune from `zdpda-v4` (`data/checkpoints/zdpda-v4/final_model.pth`):

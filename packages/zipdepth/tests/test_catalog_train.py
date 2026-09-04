@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 import torch
-from monopriors.models.zipdepth_checkpoint import RANGE_MARGIN_M_KEY
+from monopriors.models.zipdepth_checkpoint import RANGE_MARGIN_COVERAGE_MAX_KEY, RANGE_MARGIN_M_KEY
 from serde.json import from_json, to_json
 from torch import nn, optim
 from torch.utils.data import DataLoader, TensorDataset
@@ -184,11 +184,20 @@ def test_range_margin_defaults_to_the_prompt_bounded_head_and_survives_resolved_
     assert restored.config.range_margin_m == 3.9
 
 
-def _margin_trainer(range_margin_m: float) -> ZipDepthTrainer:
-    """Build a minimal trainer carrying one output-range margin."""
+def _margin_trainer(range_margin_m: float, range_margin_coverage_max: float = 1.0) -> ZipDepthTrainer:
+    """Build a minimal trainer carrying one output-range margin and coverage gate."""
     model: nn.Linear = nn.Linear(1, 1)
     optimizer: optim.SGD = optim.SGD(model.parameters(), lr=0.1)
-    return ZipDepthTrainer(model, [], optimizer, None, "cpu", use_amp=False, range_margin_m=range_margin_m)
+    return ZipDepthTrainer(
+        model,
+        [],
+        optimizer,
+        None,
+        "cpu",
+        use_amp=False,
+        range_margin_m=range_margin_m,
+        range_margin_coverage_max=range_margin_coverage_max,
+    )
 
 
 def test_trainer_records_the_range_margin_in_every_checkpoint(tmp_path: Path) -> None:
@@ -217,6 +226,7 @@ def test_resuming_with_a_different_range_margin_is_refused(tmp_path: Path) -> No
             total_steps=10,
             actual_max_lr=1e-5,
             range_margin_m=0.0,
+            range_margin_coverage_max=1.0,
             scheduler_config=UpstreamSchedulerConfig(),
             schedule="onecycle",
             warmup_pct=0.05,
@@ -552,3 +562,57 @@ def test_trainer_pins_wrapped_batchnorm_after_entering_train_mode() -> None:
     assert wrapped.training is True
     assert inner[0].training is True
     assert all(not module.training for module in batchnorms)
+
+
+def test_range_margin_coverage_max_defaults_to_widening_every_image_and_survives_resolved_config() -> None:
+    """Record the ultrawide coverage gate in the run's resolved_config.json."""
+    assert TrainCatalogConfig().range_margin_coverage_max == 1.0
+    config: TrainCatalogConfig = TrainCatalogConfig(range_margin_m=3.9, range_margin_coverage_max=0.6)
+    upstream: UpstreamTrainConfig = _load_json_config(Path("configs/default.json"))
+
+    resolved: ResolvedTrainCatalogConfig = ResolvedTrainCatalogConfig(
+        config=config,
+        rank_count=1,
+        steps_per_epoch=10,
+        total_steps=10,
+        resolved_max_lr=1e-5,
+        recipe=resolve_training_recipe(config, upstream.scheduler, upstream.amp),
+    )
+
+    restored: ResolvedTrainCatalogConfig = from_json(ResolvedTrainCatalogConfig, to_json(resolved))
+    assert restored.config.range_margin_coverage_max == 0.6
+
+
+def test_trainer_records_the_coverage_gate_in_every_checkpoint(tmp_path: Path) -> None:
+    """Let inference rebuild the trained gate without repeating the training flag."""
+    trainer: ZipDepthTrainer = _margin_trainer(3.9, 0.6)
+    checkpoint: Path = tmp_path / "step_1.pth"
+
+    trainer.save_checkpoint(str(checkpoint), epoch=0, loss=0.0)
+
+    saved: dict[str, object] = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    assert saved[RANGE_MARGIN_COVERAGE_MAX_KEY] == 0.6
+
+
+def test_resuming_with_a_different_coverage_gate_is_refused(tmp_path: Path) -> None:
+    """Resuming continues one run, so its head must keep the gate it was trained with."""
+    trainer: ZipDepthTrainer = _margin_trainer(3.9, 0.6)
+    resume: Path = tmp_path / "step_1.pth"
+    trainer.save_checkpoint(str(resume), epoch=0, loss=0.0)
+    wrapped_model: nn.Linear = nn.Linear(1, 1)
+
+    with pytest.raises(ValueError, match="range_margin_coverage_max"):
+        _restore_resume_state(
+            resume,
+            wrapped_model,
+            trainer,
+            total_steps=10,
+            actual_max_lr=1e-5,
+            range_margin_m=3.9,
+            range_margin_coverage_max=1.0,
+            scheduler_config=UpstreamSchedulerConfig(),
+            schedule="onecycle",
+            warmup_pct=0.05,
+            final_div_factor=1000.0,
+            cooldown_pct=0.1,
+        )
