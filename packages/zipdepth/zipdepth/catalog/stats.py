@@ -3,7 +3,7 @@
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 
-STAGE_FIELDS: tuple[str, ...] = ("segment_query", "video_decode", "blob_decode", "augment")
+STAGE_FIELDS: tuple[str, ...] = ("segment_query", "video_decode", "jpeg_decode", "blob_decode", "augment")
 """Floating-point stage timers reported by catalog instrumentation."""
 
 
@@ -21,6 +21,8 @@ class BuilderStats:
     """PromptDA frames handled by the general PNG decoder."""
     skipped_flat_frames: int = 0
     """Frames rejected by the configured depth-span filter."""
+    skipped_low_valid_frames: int = 0
+    """Ultrawide frames rejected by the minimum valid-target-fraction gate."""
 
 
 @dataclass(slots=True)
@@ -31,6 +33,8 @@ class CatalogDatasetStats:
     """Target/video catalog query and decoder-initialization time in seconds."""
     video_decode: float = 0.0
     """Video frame decode time in seconds."""
+    jpeg_decode: float = 0.0
+    """Rectified ultrawide JPEG decode time in seconds."""
     blob_decode: float = 0.0
     """PromptDA PNG blob decode time in seconds."""
     augment: float = 0.0
@@ -43,6 +47,8 @@ class CatalogDatasetStats:
     """Video frames skipped after decode errors."""
     skipped_flat_frames: int = 0
     """Frames rejected by the configured depth-span filter."""
+    skipped_low_valid_frames: int = 0
+    """Ultrawide frames rejected by the minimum valid-target-fraction gate."""
 
     @classmethod
     def from_builder(cls, builder_stats: BuilderStats) -> "CatalogDatasetStats":
@@ -54,12 +60,14 @@ class CatalogDatasetStats:
         return CatalogDatasetStats(
             segment_query=self.segment_query + other.segment_query,
             video_decode=self.video_decode + other.video_decode,
+            jpeg_decode=self.jpeg_decode + other.jpeg_decode,
             blob_decode=self.blob_decode + other.blob_decode,
             augment=self.augment + other.augment,
             samples_built=self.samples_built + other.samples_built,
             png_fallbacks=self.png_fallbacks + other.png_fallbacks,
             skipped_frames=self.skipped_frames + other.skipped_frames,
             skipped_flat_frames=self.skipped_flat_frames + other.skipped_flat_frames,
+            skipped_low_valid_frames=self.skipped_low_valid_frames + other.skipped_low_valid_frames,
         )
 
 

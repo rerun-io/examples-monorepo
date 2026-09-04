@@ -20,6 +20,7 @@ from zipdepth.apis.train_catalog import main as train_catalog
 from zipdepth.apis.train_smoke import check_checkpoint, example_rgb, publish_latest, run_required
 from zipdepth.catalog.segments import DEFAULT_CATALOG_URL, DEFAULT_DATASET_NAME, PromptDACatalog, load_promptda_catalog, split_holdout_segments
 from zipdepth.catalog.targets import build_eval_transform
+from zipdepth.catalog.ultrawide import Camera, CameraSelection, UltrawidePolicy
 from zipdepth.data.transforms import AlbumentationsWrapper
 from zipdepth.loss import ZipDepthLoss
 
@@ -32,6 +33,11 @@ class TrainCatalogSmokeConfig:
     """URL of the live local Rerun catalog server."""
     dataset_name: str = DEFAULT_DATASET_NAME
     """Catalog dataset containing ARKitScenes and PromptDA layers."""
+    segment_ids: list[str] | None = None
+    """Explicit smoke segments; None takes the first ``num_segments`` training segments."""
+    cameras: CameraSelection = "wide"
+    """Cameras every training leg streams. Each selected camera gets its own fixed
+    probe set, and the loss gate must fall for every one of them."""
     work_dir: Path = Path("data/smoke/catalog-runs")
     """Parent directory whose ``latest`` child is published after every gate passes."""
     train_config: Path = Path("configs/default.json")
@@ -79,17 +85,32 @@ def collect_probe_batches(config: TrainCatalogConfig, num_batches: int) -> list[
     if not segment_ids:
         raise RuntimeError("probe selection contains no training segments")
     transform: AlbumentationsWrapper = build_eval_transform(config.height, config.width)
+    ultrawide_policy: UltrawidePolicy | None = (
+        None
+        if config.cameras == "wide"
+        else UltrawidePolicy(
+            min_valid_fraction=config.ultrawide_min_valid_fraction,
+            valid_erosion_px=config.ultrawide_valid_erosion_px,
+            prompt_scale=config.ultrawide_prompt_scale,
+        )
+    )
     dataset: CatalogPromptDepthDataset = CatalogPromptDepthDataset(
         catalog.dataset_entry,
         segment_ids,
         catalog.row_by_id,
         device=torch.device("cuda"),
-        builder_factory=lambda: CpuSampleBuilder(transform, min_depth_span=config.min_depth_span, target_mode=config.target_mode),
+        builder_factory=lambda: CpuSampleBuilder(
+            transform,
+            min_depth_span=config.min_depth_span,
+            target_mode=config.target_mode,
+            ultrawide_policy=ultrawide_policy,
+        ),
         shuffle_buffer_size=1,
         frame_stride=8,
         num_producers=config.num_producers,
         prefetch_samples=config.prefetch_samples,
         load_confidence=False,
+        cameras=config.cameras,
     )
     loader: DataLoader[dict[str, Tensor]] = DataLoader(dataset, batch_size=config.batch_size, num_workers=0, drop_last=True)
     batches: list[dict[str, Tensor]] = []
@@ -141,10 +162,13 @@ def main(config: TrainCatalogSmokeConfig) -> None:
     run_dir: Path = Path(tempfile.mkdtemp(prefix="run-", dir=config.work_dir))
     single_dir: Path = run_dir / "single"
     ddp_dir: Path = run_dir / "ddp"
+    probe_cameras: list[Camera] = ["wide", "ultrawide"] if config.cameras == "both" else [config.cameras]
     base: TrainCatalogConfig = TrainCatalogConfig(
         catalog_url=config.catalog_url,
         dataset_name=config.dataset_name,
         num_segments=2,
+        segment_ids=config.segment_ids,
+        cameras=config.cameras,
         holdout_count=0,
         height=768,
         width=1024,
@@ -162,8 +186,12 @@ def main(config: TrainCatalogSmokeConfig) -> None:
         fused_adamw=config.fused_adamw,
         amp_dtype=config.amp_dtype,
     )
-    probe: list[dict[str, Tensor]] = collect_probe_batches(base, config.probe_batches)
-    released_loss: float = mean_probe_loss(None, probe)
+    # One fixed probe set per selected camera: a mixed set would hide a camera
+    # whose loss rose behind another camera's larger fall.
+    probes: dict[Camera, list[dict[str, Tensor]]] = {
+        camera: collect_probe_batches(replace(base, cameras=camera), config.probe_batches) for camera in probe_cameras
+    }
+    released_losses: dict[Camera, float] = {camera: mean_probe_loss(None, probe) for camera, probe in probes.items()}
 
     latest_checkpoint: Path = train_catalog(base)
     saved: object = torch.load(latest_checkpoint, map_location="cpu", weights_only=True)
@@ -171,10 +199,13 @@ def main(config: TrainCatalogSmokeConfig) -> None:
     if saved_step != config.total_steps:
         raise RuntimeError(f"checkpoint global_step is {saved_step!r}, expected {config.total_steps}")
 
-    trained_loss: float = mean_probe_loss(latest_checkpoint, probe)
-    if not trained_loss < released_loss:
-        raise RuntimeError(f"fixed-probe loss did not fall: released={released_loss:.6f}, trained={trained_loss:.6f}")
-    print(f"loss gate passed on the fixed probe set: released={released_loss:.6f}, trained={trained_loss:.6f}")
+    camera: Camera
+    for camera in probe_cameras:
+        released_loss: float = released_losses[camera]
+        trained_loss: float = mean_probe_loss(latest_checkpoint, probes[camera])
+        if not trained_loss < released_loss:
+            raise RuntimeError(f"{camera} fixed-probe loss did not fall: released={released_loss:.6f}, trained={trained_loss:.6f}")
+        print(f"loss gate passed on the fixed {camera} probe set: released={released_loss:.6f}, trained={trained_loss:.6f}")
 
     expected_resume_step: int = config.total_steps + config.resume_steps
     resume_config: TrainCatalogConfig = replace(
@@ -237,7 +268,11 @@ def main(config: TrainCatalogSmokeConfig) -> None:
         str(resumed_checkpoint),
         "--compile-mode",
         ddp.compile_mode,
+        "--cameras",
+        ddp.cameras,
     ]
+    if ddp.segment_ids is not None:
+        command.extend(["--segment-ids", *ddp.segment_ids])
     if ddp.channels_last:
         command.append("--channels-last")
     if ddp.fused_adamw:

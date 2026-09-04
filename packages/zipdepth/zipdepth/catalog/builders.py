@@ -6,7 +6,7 @@ from typing import Protocol, runtime_checkable
 import numpy as np
 import torch
 from arkitscenes_download.ingest.depth import ArkitDepthConfidence, decode_depth_png, decode_depth_png_fast, inflate_depth_png_rows
-from jaxtyping import Float32, Int32, UInt8, UInt16
+from jaxtyping import Bool, Float32, Int32, UInt8, UInt16
 from numpy import ndarray
 from torch import Tensor
 
@@ -20,6 +20,14 @@ from zipdepth.catalog.targets import (
     build_training_sample_cuda,
     depth_span_ratio,
     depth_span_ratio_cuda,
+)
+from zipdepth.catalog.ultrawide import (
+    Camera,
+    PromptPlacement,
+    UltrawidePolicy,
+    erode_valid,
+    prompt_placement,
+    valid_fraction,
 )
 from zipdepth.data.transforms import AlbumentationsWrapper
 
@@ -39,15 +47,61 @@ class SampleBuilder(Protocol):
         confidence: UInt8[ndarray, "confidence_n"] | None,
         quarter_turns: int,
         sample_seed: int,
+        *,
+        camera: Camera = "wide",
     ) -> dict[str, Tensor] | None:
-        """Build a sample, or return None when the flat-depth filter rejects it."""
+        """Build a sample, or return None when a frame filter rejects it."""
+
+
+def _resolve_placement(camera: Camera, policy: UltrawidePolicy | None) -> PromptPlacement | None:
+    """Return the prompt placement one camera needs, or None for the full-canvas wide prompt.
+
+    Raises:
+        ValueError: If an ultrawide sample is requested from a builder that was
+            not configured with an ultrawide policy.
+    """
+    if camera == "wide":
+        return None
+    if policy is None:
+        raise ValueError("this builder was not configured with an ultrawide policy")
+    return prompt_placement(policy.prompt_scale)
+
+
+def _apply_ultrawide_mask_policy(sample: dict[str, Tensor], policy: UltrawidePolicy, stats: BuilderStats) -> dict[str, Tensor] | None:
+    """Drop a sparse ultrawide frame, then erode the surviving target mask.
+
+    The valid fraction is measured on the resized target before erosion, so the
+    threshold describes the supervision the loss would actually see and does not
+    move when the erosion radius changes.
+
+    Args:
+        sample: Built sample carrying ``target_valid`` (metric) or ``mask`` (SSI).
+        policy: Minimum valid fraction and erosion radius.
+        stats: Builder counters incremented when the frame is rejected.
+
+    Returns:
+        The sample with an eroded mask, or None when the frame is too sparse.
+    """
+    valid_key: str = "target_valid" if "target_valid" in sample else "mask"
+    valid_chw: Bool[Tensor, "1 h w"] = sample[valid_key]
+    if valid_fraction(valid_chw) < policy.min_valid_fraction:
+        stats.skipped_low_valid_frames += 1
+        return None
+    sample[valid_key] = erode_valid(valid_chw, policy.valid_erosion_px)
+    return sample
 
 
 class CpuSampleBuilder:
     """Decode depth and build samples on the CPU."""
 
-    def __init__(self, transform: AlbumentationsWrapper, min_depth_span: float, target_mode: TargetMode = "ssi") -> None:
-        """Configure deterministic transform and optional flat-depth filtering."""
+    def __init__(
+        self,
+        transform: AlbumentationsWrapper,
+        min_depth_span: float,
+        target_mode: TargetMode = "ssi",
+        ultrawide_policy: UltrawidePolicy | None = None,
+    ) -> None:
+        """Configure deterministic transform, flat-depth filtering, and ultrawide policy."""
         if min_depth_span < 0.0:
             raise ValueError("min_depth_span must be non-negative")
         if target_mode not in ("ssi", "metric"):
@@ -55,6 +109,7 @@ class CpuSampleBuilder:
         self._transform: AlbumentationsWrapper = transform
         self._min_depth_span: float = min_depth_span
         self._target_mode: TargetMode = target_mode
+        self._ultrawide_policy: UltrawidePolicy | None = ultrawide_policy
         self.stats: BuilderStats = BuilderStats()
         """Counters local to this builder."""
 
@@ -66,9 +121,12 @@ class CpuSampleBuilder:
         confidence: UInt8[ndarray, "confidence_n"] | None,
         quarter_turns: int,
         sample_seed: int,
+        *,
+        camera: Camera = "wide",
     ) -> dict[str, Tensor] | None:
         """Decode, orient, filter, and transform one CPU sample."""
         del sample_seed
+        placement: PromptPlacement | None = _resolve_placement(camera, self._ultrawide_policy)
         started: float = perf_counter()
         depth_mm_hw: UInt16[ndarray, "h w"] | None = decode_depth_png_fast(target_blob_bytes)
         if depth_mm_hw is None:
@@ -108,6 +166,7 @@ class CpuSampleBuilder:
                 prompt_landscape_mm_hw,
                 confidence_landscape_hw,
                 self._transform,
+                prompt_placement=placement,
             )
         else:
             sample = build_training_sample(
@@ -116,8 +175,14 @@ class CpuSampleBuilder:
                 self._transform,
                 prompt_depth_mm_hw=prompt_landscape_mm_hw,
                 prompt_confidence_hw=confidence_landscape_hw,
+                prompt_placement=placement,
             )
         self.stats.augment += perf_counter() - started
+        if camera == "ultrawide" and self._ultrawide_policy is not None:
+            accepted: dict[str, Tensor] | None = _apply_ultrawide_mask_policy(sample, self._ultrawide_policy, self.stats)
+            if accepted is None:
+                return None
+            sample = accepted
         self.stats.samples_built += 1
         return sample
 
@@ -132,8 +197,9 @@ class CudaSampleBuilder:
         min_depth_span: float,
         device: torch.device,
         target_mode: TargetMode = "ssi",
+        ultrawide_policy: UltrawidePolicy | None = None,
     ) -> None:
-        """Configure output shape, augmentation, filtering, and CUDA state."""
+        """Configure output shape, augmentation, filtering, ultrawide policy, and CUDA state."""
         if out_hw[0] <= 0 or out_hw[1] <= 0:
             raise ValueError("output height and width must be positive")
         if min_depth_span < 0.0:
@@ -147,6 +213,7 @@ class CudaSampleBuilder:
         self._min_depth_span: float = min_depth_span
         self._device: torch.device = device
         self._target_mode: TargetMode = target_mode
+        self._ultrawide_policy: UltrawidePolicy | None = ultrawide_policy
         self._generator: torch.Generator = torch.Generator()
         self._stream: torch.cuda.Stream = torch.cuda.Stream(device=device)
         self.stats: BuilderStats = BuilderStats()
@@ -160,8 +227,11 @@ class CudaSampleBuilder:
         confidence: UInt8[ndarray, "confidence_n"] | None,
         quarter_turns: int,
         sample_seed: int,
+        *,
+        camera: Camera = "wide",
     ) -> dict[str, Tensor] | None:
         """Inflate, unfilter, filter, and augment one CUDA sample."""
+        placement: PromptPlacement | None = _resolve_placement(camera, self._ultrawide_policy)
         self._stream.wait_stream(torch.cuda.current_stream(self._device))
         frame_chw.record_stream(self._stream)
         started: float = perf_counter()
@@ -218,12 +288,18 @@ class CudaSampleBuilder:
                 prompt_depth_mm_hw=prompt_depth_cuda_hw,
                 prompt_confidence_hw=prompt_confidence_cuda_hw,
                 target_mode=self._target_mode,
+                prompt_placement=placement,
             )
             self._stream.synchronize()
         self.stats.augment += perf_counter() - started
         if span_ratio is not None and float(span_ratio.item()) < self._min_depth_span:
             self.stats.skipped_flat_frames += 1
             return None
+        if camera == "ultrawide" and self._ultrawide_policy is not None:
+            accepted: dict[str, Tensor] | None = _apply_ultrawide_mask_policy(sample, self._ultrawide_policy, self.stats)
+            if accepted is None:
+                return None
+            sample = accepted
         self.stats.samples_built += 1
         return sample
 
