@@ -411,6 +411,25 @@ def test_cuda_and_cpu_builders_place_the_same_ultrawide_prompt() -> None:
     assert_array_equal(actual["target_valid"].cpu().numpy(), expected["target_valid"].numpy())
 
 
+def test_a_hole_cap_that_can_never_fire_is_refused() -> None:
+    """Fail at construction instead of running thousands of steps with an inert filter.
+
+    A frame that clears ``min_valid_fraction`` has at most ``1 - min_valid_fraction``
+    invalid area in total, and one region cannot exceed the total, so a cap at or
+    above that is subsumed. The first uw-v2 gate ran 0.8/0.2 and rejected nothing.
+    """
+    with pytest.raises(ValueError, match="max_hole_fraction"):
+        UltrawidePolicy(min_valid_fraction=0.8, max_hole_fraction=0.2)
+    with pytest.raises(ValueError, match="max_hole_fraction"):
+        UltrawidePolicy(min_valid_fraction=0.9, max_hole_fraction=0.5)
+
+    # The run's own pairing, and the two ways to mean "no hole filter", all stand.
+    assert UltrawidePolicy(min_valid_fraction=0.7, max_hole_fraction=0.2).max_hole_fraction == 0.2
+    assert UltrawidePolicy(min_valid_fraction=0.8, max_hole_fraction=0.1).max_hole_fraction == 0.1
+    assert UltrawidePolicy(min_valid_fraction=0.8).max_hole_fraction == 1.0
+    assert UltrawidePolicy(min_valid_fraction=0.0, max_hole_fraction=1.0).max_hole_fraction == 1.0
+
+
 def test_largest_hole_fraction_measures_one_connected_region_not_total_invalid_area() -> None:
     """Separate speckle from a window: the same invalid area, very different holes."""
     speckled_chw: Bool[Tensor, "1 20 20"] = torch.ones((1, 20, 20), dtype=torch.bool)

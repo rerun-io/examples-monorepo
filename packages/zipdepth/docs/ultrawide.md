@@ -150,8 +150,18 @@ views through windows, and thin structure.
   labels anything. Rejections are counted as `skipped_large_hole_frames` and
   logged beside `skipped_low_valid`.
 
-The uw-v2 run tightens both: `--ultrawide-min-valid-fraction 0.8
---ultrawide-max-hole-fraction 0.2`.
+**The hole cap only bites below `1 - ultrawide_min_valid_fraction`.** A frame that
+clears the valid-fraction gate has at most `1 - min_valid` invalid area *in
+total*, and no single region can exceed the total, so any larger cap is subsumed
+and can never reject anything. `UltrawidePolicy.__post_init__` refuses such a
+pairing rather than silently doing nothing.
+
+This is not hypothetical: the first uw-v2 gate ran `0.8`/`0.2` and reported
+`skipped_large_hole = 0` across all 600 steps, because `0.2 >= 1 - 0.8`. The run
+therefore uses **`--ultrawide-min-valid-fraction 0.7 --ultrawide-max-hole-fraction
+0.2`**, which also keeps uw-v1's valid threshold so the margin's effect stays
+attributable. Re-gated at 300 steps it rejected **17** frames for one oversized
+hole beside 39 for low valid fraction — the ~3.5% tail the filter exists for.
 
 The existing flat-frame filter (`min_depth_span`, p95/p5 of valid depth) applies
 unchanged.
@@ -289,6 +299,40 @@ ultrawide periphery ground-truth pixels lie outside the prompt's `[min, max]`
 20% of their periphery unreachable. uw-v1 ran at margin 0.0 and therefore could
 not reach a quarter of the periphery at all.
 
+#### The lanes separate cleanly, measured
+
+Prompt coverage over the 4 gate segments (51 frames each, stride 60), which is
+the quantity the gate keys on:
+
+| camera | mean | p05 | median | min | max | fraction <= 0.6 (widened) |
+| --- | --- | --- | --- | --- | --- | --- |
+| wide | 0.960 | 0.818 | 1.000 | 0.247 | 1.000 | **2.0%** (1 of 51) |
+| ultrawide | 0.217 | 0.183 | 0.226 | 0.057 | 0.226 | **100%** |
+
+The gap between the wide p05 (**0.82**) and the ultrawide max (**0.23**) is wide
+enough that any threshold in roughly `[0.23, 0.82]` behaves identically, so `0.6`
+is not a tuned constant and the gate is not sensitive to it.
+
+#### Gate results, 600 steps from `zdpda-v4`
+
+Scored on 4 holdout segments at stride 60, `--cameras both`:
+
+| run | wide AbsRel | ultrawide outside-footprint AbsRel |
+| --- | --- | --- |
+| `zdpda-v4` reference | 0.012690 | — |
+| uw-v1 control (margin 0.0) | 0.015466 | 0.4072 |
+| global margin 3.9, ungated | ~0.19 | — |
+| **uw-v2 gate** (3.9, coverage 0.6) | **0.024991** | **0.355270** |
+
+The gated margin recovers the periphery — outside-footprint AbsRel improves 12.7%
+over the uw-v1 control — and it is nowhere near the ungated margin's collapse of
+the wide lane. It does not hold the wide lane at v4's number, though: the 0.0123
+gap over v4 is *not* mis-gating, since only 2% of wide frames are widened at all.
+It is the cost of co-training the shared backbone on ultrawide frames with an
+opened head. `--cameras both` alone already costs 0.0028 (the uw-v1 control), and
+the opened head adds the rest. 600 steps is also a very early read on a 140k
+OneCycle schedule.
+
 ## Training recipe
 
 Fine-tune from `zdpda-v4` (`data/checkpoints/zdpda-v4/final_model.pth`):
@@ -296,7 +340,8 @@ Fine-tune from `zdpda-v4` (`data/checkpoints/zdpda-v4/final_model.pth`):
 ```
 --cameras both --preset fast --max-lr 1e-4 --batch-size 8
 --height 768 --width 1024 --total-steps 140000 --freeze-bn --target-mode metric
---range-margin-m 3.9
+--range-margin-m 3.9 --range-margin-coverage-max 0.6
+--ultrawide-min-valid-fraction 0.7 --ultrawide-max-hole-fraction 0.2
 ```
 
 (`--range-margin-m` lands with the sibling PR; this lane does not read it.)
