@@ -19,6 +19,7 @@ slower than this segment-wide torchcodec/NVDEC path.
 """
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from fractions import Fraction
 from io import BytesIO
 from time import perf_counter
@@ -220,3 +221,30 @@ class SegmentNvdecDecoder(ColumnDecoder[FrameRgbChw]):
                     decoded[position] = frames_nchw[row]
             start = stop
         return decoded
+
+
+@dataclass(slots=True, frozen=True)
+class TimedFrame:
+    """One decoded camera frame and the grid timestamp (ns on the index timeline) it answers."""
+
+    t_ns: int
+    """Grid timestamp the frame was asked for, in nanoseconds on the index timeline."""
+    rgb: FrameRgbChw
+    """The segment's latest frame at or before ``t_ns``, channels-first RGB on the decoder's device."""
+
+
+class TimedNvdecDecoder(SegmentNvdecDecoder):
+    """``SegmentNvdecDecoder`` whose values also carry the grid timestamp; the dataloader sample has none.
+
+    The index values must come from a duration timeline (or a plain nanosecond
+    count); a timestamp timeline would need its own epoch handling.
+    """
+
+    # pyrefly: ignore  # bad-override — the base decodes to Tensor; the dataloader only moves the value into the sample dict.
+    def decode(self, batch: FieldBatch, requests: Sequence[DecodeRequest]) -> list[TimedFrame | None]:
+        """Pair each decoded frame with the grid timestamp its request asked for; slots before the first sample stay None."""
+        frames: Sequence[FrameRgbChw | None] = super().decode(batch, requests)
+        return [
+            None if frame is None else TimedFrame(t_ns=int(np.asarray(request.index_value).astype("timedelta64[ns]").astype(np.int64)), rgb=frame)
+            for request, frame in zip(requests, frames, strict=True)
+        ]

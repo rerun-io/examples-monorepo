@@ -16,14 +16,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import Any, Literal, TypeAlias, cast, get_args
+from typing import Any, Literal, Protocol, TypeAlias, cast, get_args, runtime_checkable
 
 import cv2
 import numpy as np
 import torch
 from beartype.roar import BeartypeException
 from einops import rearrange
-from jaxtyping import Bool, Float32, Float64, Int64, UInt8
+from jaxtyping import Bool, Float32, Float64, Int64, Shaped, UInt8
 from numpy import ndarray
 from simplecv.camera_parameters import Extrinsics, Fisheye62Parameters, Intrinsics, KannalaBrandtDistortion
 from torch import Tensor
@@ -38,6 +38,53 @@ ALL_MODES: tuple[Mode, ...] = get_args(Mode)
 
 TIMELINE: str = "video_time"
 RIG_PATH: str = "world/rig_00"
+TimedeltaNs: TypeAlias = Shaped[ndarray, " samples"]
+"""Sample timestamps in timeline order, dtype ``timedelta64[ns]`` (jaxtyping has no timedelta dtype)."""
+
+
+@runtime_checkable
+class VideoFrame(Protocol):
+    """Decoded RGB frame returned by TorchCodec."""
+
+    data: UInt8[Tensor, "3 height width"]
+
+
+@runtime_checkable
+class SegmentVideoDecoder(Protocol):
+    """TorchCodec operation used by the benchmark's frame sampler."""
+
+    def get_frame_at(self, index: int) -> VideoFrame:
+        """Decode one frame by sample index."""
+        ...
+
+
+DecoderBundle: TypeAlias = tuple[TimedeltaNs, list[bytes], list[bool], SegmentVideoDecoder]
+"""What ``open_segment_decoder`` returns: sample times, raw samples, keyframe flags, and the decoder."""
+
+
+def nearest_time_index(times: TimedeltaNs, target_ns: int) -> int:
+    """Return the sample nearest one nanosecond timestamp, clamped to endpoints.
+
+    Args:
+        times: Sample timestamps in timeline order, ``timedelta64[ns]``.
+        target_ns: The wanted time in nanoseconds on the same timeline.
+
+    Returns:
+        Index of the nearest sample.
+
+    Raises:
+        ValueError: If *times* is empty.
+    """
+    if len(times) == 0:
+        raise ValueError("cannot sample an empty timestamp sequence")
+    numeric_times: Int64[ndarray, "samples"] = np.asarray(times, dtype="timedelta64[ns]").astype(np.int64)
+    insertion: int = int(np.searchsorted(numeric_times, target_ns))
+    if insertion == 0:
+        return 0
+    if insertion == len(numeric_times):
+        return len(numeric_times) - 1
+    before: int = insertion - 1
+    return before if target_ns - int(numeric_times[before]) <= int(numeric_times[insertion]) - target_ns else insertion
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,7 +216,6 @@ def catalog_frames(config: Config, cams: tuple[str, ...]) -> tuple[dict[str, UIn
     from rerun.catalog import CatalogClient, DatasetEntry, DatasetView
     from simplecv.rerun_dataloader import open_segment_decoder
 
-    from monopriors.apis.rig_depth_catalog import DecoderBundle, nearest_time_index
     from monopriors.apis.stereo_catalog import read_fisheye_camera
 
     dataset: DatasetEntry = CatalogClient(config.catalog_url).get_dataset(config.dataset)
