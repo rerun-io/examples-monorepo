@@ -84,10 +84,17 @@ class UltrawidePolicy:
     supervising a frame it has no target for over a whole contiguous region. Of
     5,415 measured ultrawide frames, 6.6% fall below 0.8 valid and 3.5% carry a
     hole larger than 20% of the frame. The default 1.0 is the whole frame, so no
-    frame is ever rejected and the connected-component pass never runs."""
+    frame is ever rejected and the connected-component pass never runs.
+
+    This only has an effect below ``1 - min_valid_fraction``. A frame that clears
+    the valid-fraction gate has at most ``1 - min_valid_fraction`` invalid area in
+    total, and no single region can exceed that, so a larger cap can never fire.
+    ``__post_init__`` rejects such a pairing rather than letting it silently do
+    nothing, which is exactly how the first uw-v2 gate ran ``0.8``/``0.2`` and
+    reported ``skipped_large_hole_frames = 0`` over 600 steps."""
 
     def __post_init__(self) -> None:
-        """Reject a fraction outside the unit interval or a negative erosion."""
+        """Reject a fraction outside the unit interval, a negative erosion, or an inert hole cap."""
         if not 0.0 <= self.min_valid_fraction <= 1.0:
             raise ValueError("min_valid_fraction must be in [0, 1]")
         if self.valid_erosion_px < 0:
@@ -96,6 +103,13 @@ class UltrawidePolicy:
             raise ValueError("prompt_scale must be in (0, 1]")
         if not 0.0 <= self.max_hole_fraction <= 1.0:
             raise ValueError("max_hole_fraction must be in [0, 1]")
+        if self.max_hole_fraction < 1.0 and self.max_hole_fraction + self.min_valid_fraction >= 1.0:
+            raise ValueError(
+                f"max_hole_fraction={self.max_hole_fraction} can never reject a frame that "
+                f"min_valid_fraction={self.min_valid_fraction} keeps, because a kept frame has at most "
+                f"{1.0 - self.min_valid_fraction:.3g} invalid area in total; lower max_hole_fraction below that, "
+                "or leave it at 1.0 to disable the filter"
+            )
 
 
 def prompt_placement(scale: float, canvas_hw: tuple[int, int] = PROMPT_CANVAS_HW) -> PromptPlacement:

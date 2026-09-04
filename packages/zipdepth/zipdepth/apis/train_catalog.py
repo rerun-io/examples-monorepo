@@ -168,9 +168,15 @@ class TrainCatalogConfig:
     exceeds this fraction of the frame. ``ultrawide_min_valid_fraction`` counts invalid
     area only, so it passes a frame where one window or skylight removes a contiguous
     fifth of the image while the rest is dense. Of 5,415 measured ultrawide frames, 6.6%
-    fall below 0.8 valid and 3.5% carry a hole larger than 20% of the frame; the uw-v2 run
-    uses 0.2. Rejections are counted as ``skipped_large_hole_frames``. The default 1.0 is
-    the whole frame, so nothing is rejected and the labelling pass never runs."""
+    fall below 0.8 valid and 3.5% carry a hole larger than 20% of the frame. Rejections
+    are counted as ``skipped_large_hole_frames``. The default 1.0 is the whole frame, so
+    nothing is rejected and the labelling pass never runs.
+
+    Must be below ``1 - ultrawide_min_valid_fraction`` to do anything: a frame that clears
+    the valid-fraction gate has at most that much invalid area in total, and one region
+    cannot exceed the total. An inert pairing is refused rather than ignored. The uw-v2 run
+    uses ``0.7``/``0.2``, which rejected 17 frames in 300 steps; ``0.8``/``0.2`` rejected
+    none in 600."""
     ultrawide_valid_erosion_px: int = 1
     """Binary-erode the ultrawide target mask by this many pixels; raycast silhouettes
     bleed about one output pixel past the mesh."""
