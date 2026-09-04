@@ -294,6 +294,8 @@ def main(config: Config) -> None:
     output_dir: Path = config.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     log_path: Path = config.log_path if config.log_path is not None else output_dir.parent / "ultrawide_depth_log.jsonl"
+    log_path.touch()
+    log_path.chmod(0o644)  # NFS uid squash lands new files at mode 0000, same as the RRDs below
     shard_label: str = f"shard {config.shard_index}/{config.shard_count}"
     print(f"{shard_label}: {len(shard_ids)} of {len(queued_video_ids)} queued segments -> {output_dir}", flush=True)
 
