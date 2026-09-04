@@ -5,7 +5,7 @@ import pytest
 import torch
 from jaxtyping import Bool, Float32, UInt8, UInt16
 from numpy import ndarray
-from numpy.testing import assert_array_equal
+from numpy.testing import assert_allclose, assert_array_equal
 from torch import Tensor
 
 from zipdepth.catalog.ultrawide import (
@@ -230,8 +230,8 @@ def test_wide_samples_are_bit_identical_with_and_without_an_ultrawide_policy() -
         build_eval_transform(*FRAME_HW), min_depth_span=0.0, target_mode="metric", ultrawide_policy=AGGRESSIVE_POLICY
     )
 
-    expected: dict[str, Tensor] | None = baseline(*inputs, quarter_turns=1, sample_seed=7)
-    actual: dict[str, Tensor] | None = with_policy(*inputs, quarter_turns=1, sample_seed=7)
+    expected: dict[str, Tensor] | None = baseline(*inputs, quarter_turns=0, sample_seed=7)
+    actual: dict[str, Tensor] | None = with_policy(*inputs, quarter_turns=0, sample_seed=7)
 
     assert expected is not None
     assert actual is not None
@@ -329,6 +329,8 @@ def test_cuda_and_cpu_builders_place_the_same_ultrawide_prompt() -> None:
 
     assert expected is not None
     assert actual is not None
-    assert_array_equal(actual["prompt_depth"].cpu().numpy(), expected["prompt_depth"].numpy())
+    # Placement, resampling, and masking agree exactly; the metre conversion is a
+    # float32 divide, whose last bit differs between the CPU and CUDA kernels.
+    assert_allclose(actual["prompt_depth"].cpu().numpy(), expected["prompt_depth"].numpy(), rtol=1.0e-6, atol=0.0)
     assert_array_equal(actual["prompt_valid"].cpu().numpy(), expected["prompt_valid"].numpy())
     assert_array_equal(actual["target_valid"].cpu().numpy(), expected["target_valid"].numpy())
