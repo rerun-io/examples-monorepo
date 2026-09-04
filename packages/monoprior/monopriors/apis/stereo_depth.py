@@ -52,6 +52,10 @@ class StereoDepthCLIConfig:
     """Execution backend."""
     max_depth_m: float = 20.0
     """Depth beyond this is dropped from the logged depth image / point cloud."""
+    remove_flying_pixels: bool = True
+    """Zero depth on depth edges so the point cloud has no streaks between surfaces."""
+    depth_edge_threshold: float = 0.5
+    """Depth-gradient magnitude (metres per pixel) that counts as an edge."""
 
 
 def read_rgb(path: Path) -> UInt8[np.ndarray, "h w 3"]:
@@ -71,4 +75,12 @@ def main(config: StereoDepthCLIConfig) -> None:
 
     parent_log_path: Path = Path("world")
     rr.send_blueprint(create_stereo_depth_blueprint(parent_log_path))
-    log_stereo_pred(parent_log_path, stereo_pred, left_rgb, right_rgb, max_depth_m=config.max_depth_m)
+    log_stereo_pred(
+        parent_log_path,
+        stereo_pred,
+        left_rgb,
+        right_rgb,
+        max_depth_m=config.max_depth_m,
+        remove_flying_pixels=config.remove_flying_pixels,
+        depth_edge_threshold=config.depth_edge_threshold,
+    )
