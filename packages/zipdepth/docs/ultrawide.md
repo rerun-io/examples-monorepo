@@ -133,6 +133,33 @@ In practice the two counts are close already (`47115416`: 651 wide, 651
 ultrawide; `42444511`: 528 and 528), so the subsample mostly reorders rather
 than discards.
 
+## Measured cost
+
+`tools/catalog_throughput.py`, 8 segments, 8 producers, batch 8, 768x1024 out,
+CUDA builder, RTX 5090 (one full pass per configuration):
+
+| cameras | frames/s | segment_query | video_decode | jpeg_decode | blob_decode | augment |
+| --- | --- | --- | --- | --- | --- | --- |
+| wide | 173.9 | 11.92 | 5.53 | 0.00 | 4.00 | 0.52 |
+| both | 344.2 | 5.00 | 3.64 | 0.39 | 3.29 | 1.14 |
+| ultrawide | 681.3 | 1.73 | 0.00 | 0.75 | 2.50 | 2.24 |
+
+(stage columns in ms/frame.)
+
+The ultrawide lane is far cheaper than the wide one: no NVDEC, a 640x480 JPEG
+instead of a 1920x1440 video frame, and a 640x480 depth PNG instead of a
+1920x1440 one. Mixing the cameras therefore **doubles** loader throughput rather
+than costing anything, and the lane stays comfortably ahead of the ~150 frames/s
+the trainer consumes. JPEG decode is the new stage and is not the bottleneck.
+
+The RGB JPEG is decoded on the **CPU** with `torchvision.io.decode_jpeg`, not on
+the GPU with nvjpeg. Measured on this host: nvjpeg 0.171 ms/frame batched versus
+0.566 ms/frame on the CPU — but nvjpeg's output differs from libjpeg-turbo's by
+up to 27/255 per channel, which would break the CPU/CUDA builder parity the
+probe and evaluation paths rely on, and torchvision's nvjpeg handle is shared
+across the producer threads. Buying 0.4 ms/frame is not worth either risk while
+the loader already runs at twice the trainer's rate.
+
 ## The widened output range
 
 The sibling PR (`zipdepth/uw-1-range`) adds `range_margin_m` to `ZipDepthPrompt`,
