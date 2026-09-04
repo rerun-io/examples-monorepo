@@ -17,7 +17,7 @@ try:
 except ImportError:
     WANDB_AVAILABLE = False
 
-from monopriors.models.zipdepth_checkpoint import RANGE_MARGIN_M_KEY
+from monopriors.models.zipdepth_checkpoint import RANGE_MARGIN_COVERAGE_MAX_KEY, RANGE_MARGIN_M_KEY
 from monopriors.third_party.zipdepth.model_utils import strip_state_dict_prefixes
 
 from zipdepth.loss import MetricDepthLoss, ZipDepthLoss
@@ -68,6 +68,7 @@ class ZipDepthTrainer:
                 compile_mode: CompileMode = 'reduce-overhead',
                 channels_last: bool = False,
                 range_margin_m: float = 0.0,
+                range_margin_coverage_max: float = 1.0,
                 ):
         """
         Args:
@@ -101,6 +102,8 @@ class ZipDepthTrainer:
             channels_last: Move four-dimensional batches with channels-last strides
             range_margin_m: Prompted head output-range margin of the student, in metres,
                 recorded in every checkpoint so inference rebuilds the same head
+            range_margin_coverage_max: Largest prompt coverage that still receives that
+                margin, recorded alongside it so inference rebuilds the same gate
         """
         self.student = student.to(device)
         self.train_loader = train_loader
@@ -133,6 +136,7 @@ class ZipDepthTrainer:
         self.pin_batchnorm_eval = pin_batchnorm_eval
         self.channels_last = channels_last
         self.range_margin_m = range_margin_m
+        self.range_margin_coverage_max = range_margin_coverage_max
 
         # Loss function initialization
         self.criterion: nn.Module = (
@@ -468,6 +472,7 @@ class ZipDepthTrainer:
             'optimizer_state_dict': self.optimizer.state_dict(),
             'loss': loss,
             RANGE_MARGIN_M_KEY: self.range_margin_m,
+            RANGE_MARGIN_COVERAGE_MAX_KEY: self.range_margin_coverage_max,
         }
 
         if self.scheduler is not None:

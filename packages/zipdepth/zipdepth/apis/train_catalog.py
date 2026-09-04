@@ -17,6 +17,7 @@ from monopriors.models.zipdepth_checkpoint import (
     load_zipdepth_checkpoint,
     load_zipdepth_state_dict,
     narrow_zipdepth_state_dict,
+    range_margin_coverage_max_from_checkpoint,
     range_margin_m_from_checkpoint,
 )
 from monopriors.third_party.zipdepth.architecture import ZipDepth, create_model
@@ -192,6 +193,16 @@ class TrainCatalogConfig:
     opens the full window. The value is recorded in ``resolved_config.json`` and in every
     checkpoint this run writes, so inference rebuilds the same head. Zero reproduces the
     prompt-bounded head exactly."""
+    range_margin_coverage_max: float = 1.0
+    """Apply ``range_margin_m`` only to images whose valid prompt covers at most this
+    fraction of the 192x256 prompt canvas. A wide prompt fills the canvas (coverage ~1.0)
+    and does not want a wider head: an unconditional 3.9 m margin cost the wide lane
+    AbsRel 0.19 against 0.013 after 600 steps. An ultrawide prompt is the wide LiDAR block
+    padded into the canvas centre and covers at most 0.24, so 0.6 separates the two lanes
+    cleanly and the ``both`` run widens only the frames that need it. The default 1.0 is
+    the largest coverage possible, so the gate admits every image and the head behaves
+    exactly as it did before the gate existed. Recorded in ``resolved_config.json`` and in
+    every checkpoint, like the margin itself."""
     from_scratch: bool = False
     """Start with random weights instead of the released ZipDepth-base weights."""
     metric_gradient_weight: float = 0.5
@@ -548,6 +559,7 @@ def _restore_resume_state(
     total_steps: int,
     actual_max_lr: float,
     range_margin_m: float,
+    range_margin_coverage_max: float,
     scheduler_config: UpstreamSchedulerConfig,
     schedule: ScheduleName,
     warmup_pct: float,
@@ -557,10 +569,11 @@ def _restore_resume_state(
     """Restore model, optimizer, schedule, and trainer step.
 
     Raises:
-        ValueError: If the checkpoint recorded a different output-range margin
-            than this run is configured with. Resuming rewrites the same run, so
-            silently changing the head's output range mid-run would make the
-            optimizer state and the recorded margin describe different models.
+        ValueError: If the checkpoint recorded a different output-range margin or
+            prompt-coverage gate than this run is configured with. Resuming
+            rewrites the same run, so silently changing the head's output range
+            mid-run would make the optimizer state and the recorded settings
+            describe different models.
     """
     print_main(f"Resuming from: {resume}", trainer.rank)
     checkpoint: dict[str, object] | None
@@ -582,6 +595,13 @@ def _restore_resume_state(
         raise ValueError(
             f"resume checkpoint recorded range_margin_m={resumed_margin_m} but this run is configured with "
             f"range_margin_m={range_margin_m}; resume with the recorded value or start a new run: {resume}"
+        )
+    resumed_coverage_max: float = range_margin_coverage_max_from_checkpoint(checkpoint, resume)
+    if not isclose(resumed_coverage_max, range_margin_coverage_max, rel_tol=0.0, abs_tol=1e-9):
+        raise ValueError(
+            f"resume checkpoint recorded range_margin_coverage_max={resumed_coverage_max} but this run is configured "
+            f"with range_margin_coverage_max={range_margin_coverage_max}; resume with the recorded value or start a "
+            f"new run: {resume}"
         )
     raw_resume_state: object = checkpoint.get("model_state_dict", checkpoint)
     tensor_state: dict[str, Tensor] = narrow_zipdepth_state_dict(raw_resume_state, resume)
@@ -652,6 +672,8 @@ def main(
             raise ValueError("range_margin_m must be finite and non-negative")
         if config.range_margin_m > 0.0 and config.target_mode != "metric":
             raise ValueError("range_margin_m only applies to the prompted metric lane")
+        if not isfinite(config.range_margin_coverage_max) or not 0.0 <= config.range_margin_coverage_max <= 1.0:
+            raise ValueError("range_margin_coverage_max must be a fraction in [0, 1]")
         if config.cameras not in ("wide", "ultrawide", "both"):
             raise ValueError(f"unknown camera selection {config.cameras!r}")
         if config.cameras != "wide" and config.dataloader == "rerun":
@@ -800,23 +822,37 @@ def main(
         if config.target_mode == "metric":
             if initialization is not None:
                 print_main(f"Loading prompted trainable initialization: {initialization}", rank)
-                # A fine-tune may deliberately change the margin: v4 recorded none, and the
-                # ultrawide run starts from it with the full window open. Say so loudly
-                # rather than failing, which is what resuming the same run does instead.
-                initialization_margin_m: float = range_margin_m_from_checkpoint(
-                    load_zipdepth_checkpoint(initialization), initialization
-                )
+                # A fine-tune may deliberately change the margin or its coverage gate: v4
+                # recorded neither, and the ultrawide run starts from it with the window
+                # open on low-coverage prompts. Say so loudly rather than failing, which is
+                # what resuming the same run does instead.
+                initialization_checkpoint: dict[str, object] = load_zipdepth_checkpoint(initialization)
+                initialization_margin_m: float = range_margin_m_from_checkpoint(initialization_checkpoint, initialization)
                 if not isclose(initialization_margin_m, config.range_margin_m, rel_tol=0.0, abs_tol=1e-9):
                     print_main(
                         f"OVERRIDE: initialization recorded range_margin_m={initialization_margin_m}, "
                         f"training with range_margin_m={config.range_margin_m}",
                         rank,
                     )
-                model: nn.Module = load_zipdepth_prompt(initialization, range_margin_m=config.range_margin_m)
+                initialization_coverage_max: float = range_margin_coverage_max_from_checkpoint(
+                    initialization_checkpoint, initialization
+                )
+                if not isclose(initialization_coverage_max, config.range_margin_coverage_max, rel_tol=0.0, abs_tol=1e-9):
+                    print_main(
+                        f"OVERRIDE: initialization recorded range_margin_coverage_max={initialization_coverage_max}, "
+                        f"training with range_margin_coverage_max={config.range_margin_coverage_max}",
+                        rank,
+                    )
+                model: nn.Module = load_zipdepth_prompt(
+                    initialization,
+                    range_margin_m=config.range_margin_m,
+                    range_margin_coverage_max=config.range_margin_coverage_max,
+                )
             else:
                 model = ZipDepthPrompt(
                     create_model(variant="base", upsample_unfold=model_config.upsample_unfold),
                     range_margin_m=config.range_margin_m,
+                    range_margin_coverage_max=config.range_margin_coverage_max,
                 )
                 print_main("Training ZipDepth-PromptDA from scratch", rank)
         else:
@@ -872,6 +908,7 @@ def main(
             metric_gradient_weight=config.metric_gradient_weight,
             pin_batchnorm_eval=pin_batchnorm_eval,
             range_margin_m=config.range_margin_m,
+            range_margin_coverage_max=config.range_margin_coverage_max,
             use_profiler=config.profile,
             profile_dir=str(config.profile_dir),
             profile_wait=config.profile_wait,
@@ -886,6 +923,7 @@ def main(
                 total_steps=total_steps,
                 actual_max_lr=actual_max_lr,
                 range_margin_m=config.range_margin_m,
+                range_margin_coverage_max=config.range_margin_coverage_max,
                 scheduler_config=scheduler_config,
                 schedule=recipe.schedule,
                 warmup_pct=recipe.warmup_pct,

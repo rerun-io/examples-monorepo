@@ -18,7 +18,7 @@ from monopriors.models.depth_completion.zipdepth_prompt_export import (
     export_zipdepth_prompt_onnx,
 )
 from monopriors.models.relative_depth.zipdepth import download_zipdepth_checkpoint
-from monopriors.models.zipdepth_checkpoint import RANGE_MARGIN_M_KEY
+from monopriors.models.zipdepth_checkpoint import RANGE_MARGIN_COVERAGE_MAX_KEY, RANGE_MARGIN_M_KEY
 from torch import Tensor, nn
 
 from zipdepth.apis import prompted_trt
@@ -66,9 +66,14 @@ class _FakePromptModel(nn.Module):
 
 
 def _fake_loader(fake_model: _FakePromptModel) -> ModelLoader:
-    """Return a loader boundary that ignores the checkpoint and the margin."""
+    """Return a loader boundary that ignores the checkpoint, the margin, and its gate."""
 
-    def load(_checkpoint: Path, *, range_margin_m: float | None = None) -> PromptedDepthModel:
+    def load(
+        _checkpoint: Path,
+        *,
+        range_margin_m: float | None = None,
+        range_margin_coverage_max: float | None = None,
+    ) -> PromptedDepthModel:
         return fake_model
 
     return load
@@ -114,6 +119,7 @@ def test_export_uses_two_inputs_with_export_dtype_and_static_batch_eight(tmp_pat
         batch_size=8,
         cache_dir=tmp_path / "cache",
         range_margin_m=0.0,
+        range_margin_coverage_max=1.0,
         model_loader=_fake_loader(fake_model),
         export_fn=fake_export,
         device="cpu",
@@ -122,7 +128,7 @@ def test_export_uses_two_inputs_with_export_dtype_and_static_batch_eight(tmp_pat
     call: _ExportCall = calls[0]
     assert onnx_path == call.out_path
     assert "768x1024_b8_fp16" in onnx_path.name
-    assert onnx_path.name.endswith("_m0.00.onnx")
+    assert onnx_path.name.endswith("_m0.00_c1.00.onnx")
     assert call.input_names == [IMAGE_INPUT_NAME, PROMPT_INPUT_NAME]
     assert call.output_names == ["depth", "min_depth", "max_depth"]
     assert call.dynamic_batch_max is None
@@ -134,9 +140,16 @@ def test_export_uses_two_inputs_with_export_dtype_and_static_batch_eight(tmp_pat
 
 def test_export_bakes_the_checkpoint_range_margin_into_the_graph_and_its_cache_key(tmp_path: Path) -> None:
     """Export the head the checkpoint was trained with, keeping the binding names."""
-    trained: ZipDepthPrompt = ZipDepthPrompt(range_margin_m=3.9)
+    trained: ZipDepthPrompt = ZipDepthPrompt(range_margin_m=3.9, range_margin_coverage_max=0.6)
     checkpoint: Path = tmp_path / "final_model.pth"
-    torch.save({"model_state_dict": trained.state_dict(), RANGE_MARGIN_M_KEY: 3.9}, checkpoint)
+    torch.save(
+        {
+            "model_state_dict": trained.state_dict(),
+            RANGE_MARGIN_M_KEY: 3.9,
+            RANGE_MARGIN_COVERAGE_MAX_KEY: 0.6,
+        },
+        checkpoint,
+    )
     exported_models: list[ZipDepthPrompt] = []
 
     def fake_export(model: nn.Module, _inputs: ExportInputs, out_path: Path, **kwargs: object) -> None:
@@ -159,12 +172,17 @@ def test_export_bakes_the_checkpoint_range_margin_into_the_graph_and_its_cache_k
     )
 
     assert exported_models[0].range_margin_m == 3.9
-    # The cache short-circuits before the model loads, so the margin has to be in the name.
-    assert onnx_path.name.endswith("_m3.90.onnx")
+    assert exported_models[0].range_margin_coverage_max == 0.6
+    # The cache short-circuits before the model loads, so both have to be in the name.
+    assert onnx_path.name.endswith("_m3.90_c0.60.onnx")
 
 
-def test_export_caches_one_graph_per_margin(tmp_path: Path) -> None:
-    """Never serve a graph built for a different output range out of the cache."""
+def test_export_caches_one_graph_per_margin_and_coverage_gate(tmp_path: Path) -> None:
+    """Never serve a graph built for a different output range out of the cache.
+
+    The gate changes which images the margin reaches, so two graphs sharing a
+    margin but not a coverage ceiling are different graphs.
+    """
     checkpoint: Path = tmp_path / "final_model.pth"
     torch.save({"model_state_dict": ZipDepthPrompt().state_dict()}, checkpoint)
     fake_model = _FakePromptModel()
@@ -180,14 +198,15 @@ def test_export_caches_one_graph_per_margin(tmp_path: Path) -> None:
             batch_size=1,
             cache_dir=tmp_path / "cache",
             range_margin_m=margin_m,
+            range_margin_coverage_max=coverage_max,
             model_loader=_fake_loader(fake_model),
             export_fn=fake_export,
             device="cpu",
         )
-        for margin_m in (0.0, 3.9)
+        for margin_m, coverage_max in ((0.0, 1.0), (3.9, 1.0), (3.9, 0.6))
     ]
 
-    assert paths[0] != paths[1]
+    assert len(set(paths)) == 3
 
 
 trt_parity = pytest.mark.skipif(
