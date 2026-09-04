@@ -25,6 +25,8 @@ monopriors = [
     "third_party/g3t/LICENSE.txt",
     "third_party/g3t/README.md",
     "third_party/liteanystereo/LICENSE",
+    "third_party/xlens/LICENSE",
+    "third_party/xlens/xlens_vits.yaml",
     "third_party/zipdepth/LICENSE",
 ]
 
@@ -48,6 +50,7 @@ exclude = [
     "notebooks",
 ]
 extend-exclude = [
+    "monopriors/third_party/xlens",
     "tests/reference_data/fast_foundationstereo/upstream_distill_block.py",
     "tests/reference_data/fast_foundationstereo/upstream_extractor.py",
     "tests/reference_data/fast_foundationstereo/upstream_foundation_stereo.py",
@@ -55,6 +58,7 @@ extend-exclude = [
     "tests/reference_data/fast_foundationstereo/upstream_submodule.py",
     "tests/reference_data/fast_foundationstereo/upstream_update.py",
     "tests/reference_data/fast_foundationstereo/upstream_utils.py",
+    "tests/reference_data/xlens/*.py",
 ]
 
 [tool.ruff.lint]
@@ -93,6 +97,7 @@ exclude = [
     "*/third_party/g3t/*",
     "*/third_party/promptda/*",
     "*/third_party/video_depth_anything/*",
+    "*/third_party/xlens/*",
     "*/tests/reference_data/fast_foundationstereo/upstream_distill_block.py",
     "*/tests/reference_data/fast_foundationstereo/upstream_extractor.py",
     "*/tests/reference_data/fast_foundationstereo/upstream_foundation_stereo.py",
@@ -106,6 +111,7 @@ exclude = [
     "*/tests/reference_data/liteanystereo/upstream_liteanystereov2_H.py",
     "*/tests/reference_data/liteanystereo/upstream_submodule.py",
     "*/tests/reference_data/liteanystereo/upstream_utils.py",
+    "*/tests/reference_data/xlens/*",
     "*/tests/reference_data/zipdepth/upstream_architecture.py",
     "*/tests/reference_data/zipdepth/upstream_model_utils.py",
 ]

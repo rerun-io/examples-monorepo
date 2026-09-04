@@ -390,6 +390,8 @@ easydict = ">=1.13,<2"
 imageio = ">=2.37.0,<3"
 imageio-ffmpeg = ">=0.6.0,<0.7"
 natsort = ">=8.4.0,<9"
+pyyaml = ">=6.0"
+safetensors = "*"
 
 [feature.monoprior.pypi-dependencies]
 monopriors = { path = "packages/monoprior", editable = true }
