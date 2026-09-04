@@ -11,12 +11,19 @@ Both cameras are logged in the lane's ``768x1024`` network frame, which is where
 the model sees them and where the footprint split is defined. Portrait captures
 are rotated to landscape by the builders, so the logged ``Pinhole`` is the stored
 calibration carried through the same quarter turns and rescaled to that frame.
+
+``--prompt-mode`` picks what the ultrawide camera is prompted with. ``padded`` is
+the trained-on default and leaves the behaviour untouched; ``prefill-hybrid``
+replaces the zeroed periphery with MoGe-2 metric depth aligned to the wide LiDAR
+over the footprint, which is the two-pass pre-fill the decomposition validated.
+The wide camera is never pre-filled: its LiDAR already covers the whole frame.
 """
 
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from time import perf_counter
+from typing import Literal, TypeAlias
 
 import numpy as np
 import pyarrow as pa
@@ -26,12 +33,15 @@ import torch
 from arkitscenes_download.ingest.paths import PINHOLE_ULTRAWIDE_RECT, PINHOLE_WIDE, PINHOLE_WIDE_LOWRES, TIMELINE
 from arkitscenes_download.schema import DEPTH_RANGE_MM
 from jaxtyping import Bool, Float32, Float64, UInt8, UInt16
+from monopriors.models.depth_completion.base_completion_depth import MAX_METRIC_DEPTH_M, MIN_METRIC_DEPTH_M
 from monopriors.models.depth_completion.zipdepth_prompt import ZipDepthPrompt, load_zipdepth_prompt
+from monopriors.models.moge_v2.predictor import MoGeV2GeometryOutput, MoGeV2TrtPredictor
 from numpy import ndarray
 from rerun.catalog import DatasetEntry
 from simplecv.rerun_log_utils import RerunTyroConfig
 from simplecv.rrd_query_utils import first_valid_value
 from torch import Tensor
+from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
 from zipdepth.apis.eval_catalog import (
@@ -48,6 +58,7 @@ from zipdepth.catalog.segments import DEFAULT_CATALOG_URL, DEFAULT_DATASET_NAME,
 from zipdepth.catalog.targets import build_eval_transform
 from zipdepth.catalog.ultrawide import (
     DEFAULT_ULTRAWIDE_PROMPT_SCALE,
+    PROMPT_CANVAS_HW,
     ULTRAWIDE_LAYER,
     Camera,
     CameraSelection,
@@ -56,6 +67,9 @@ from zipdepth.catalog.ultrawide import (
     footprint_box,
     prompt_placement,
 )
+
+PromptMode: TypeAlias = Literal["padded", "prefill-hybrid"]
+"""Ultrawide prompt fed to the model: the trained-on padded block, or the MoGe-2 pre-fill."""
 
 NETWORK_HW: tuple[int, int] = (768, 1024)
 """Network input and output size the ultrawide lane trains and evaluates at."""
@@ -67,8 +81,14 @@ WIDE_ROOT: str = f"/{PINHOLE_WIDE}"
 """Entity carrying the wide pinhole and its images."""
 WIDE_PROMPT_ENTITY: str = f"/{PINHOLE_WIDE_LOWRES}/prompt"
 """Entity carrying the raw 192x256 ARKit LiDAR prompt."""
+PREFILL_DEPTH_ENTITY: str = f"{ULTRAWIDE_ROOT}/prefill_depth"
+"""Entity carrying MoGe-2's aligned metric depth, the pre-fill prompt's source."""
 METRICS_ROOT: str = "/metrics"
 """Root of the per-frame scalar series."""
+MOGE_NETWORK_HW: tuple[int, int] = (756, 1008)
+"""MoGe-2 4:3 network bucket at 3,600 tokens, matching the 768x1024 demo frames."""
+MIN_ALIGNMENT_PAIRS: int = 20
+"""Fewest footprint cells the median-ratio alignment needs before it is trusted."""
 
 
 @dataclass(slots=True)
@@ -87,6 +107,8 @@ class InferSegmentRerunConfig:
     """Catalog dataset containing the ARKitScenes, PromptDA, and ultrawide layers."""
     cameras: CameraSelection = "both"
     """Cameras to run. Each is streamed and logged as its own pass over the segment."""
+    prompt_mode: PromptMode = "padded"
+    """Ultrawide prompt to run. ``prefill-hybrid`` pre-fills the periphery with MoGe-2."""
     frame_stride: int = 1
     """Keep every Nth chosen frame of each camera; 10 keeps a 1 Hz demo."""
     max_frames: int | None = None
@@ -108,23 +130,92 @@ class CameraSummary:
     ultrawide adds the prompt-footprint split and its prompt-upsample floor."""
 
 
-def demo_blueprint() -> rrb.Blueprint:
+@dataclass(slots=True)
+class PrefillPrompter:
+    """Build the pre-fill ultrawide prompt: MoGe-2 outside the footprint, LiDAR inside.
+
+    The wide LiDAR only covers the centre ``DEFAULT_ULTRAWIDE_PROMPT_SCALE`` of an
+    ultrawide frame, so the padded prompt leaves the periphery with no metric
+    anchor at all. This runs MoGe-2 on the same rectified ultrawide RGB, rescales
+    it by the median LiDAR-to-MoGe ratio over the footprint -- scale only, because
+    a shift fitted on the centre alone extrapolates badly outwards -- and pastes
+    the real LiDAR block back inside. Scoring keeps using the padded prompt, so
+    the reported regions and the prompt-upsample floor stay the eval lane's.
+    """
+
+    predictor: MoGeV2TrtPredictor
+    """Fixed-size MoGe-2 geometry runtime, one frame per call."""
+    placement: PromptPlacement
+    """Where the real LiDAR block sits inside the prompt canvas."""
+
+    def build(
+        self, image_hwc: UInt8[Tensor, "h w 3"], padded_chw: Float32[Tensor, "1 192 256"]
+    ) -> tuple[Float32[Tensor, "1 192 256"], Float32[ndarray, "h w"]]:
+        """Pre-fill one frame's prompt canvas and return it with the aligned plane.
+
+        Args:
+            image_hwc: The frame the model sees, as uint8 channels-last on device.
+            padded_chw: That frame's padded LiDAR prompt canvas.
+
+        Returns:
+            The hybrid prompt canvas, and MoGe-2's aligned metric depth at the
+            logged frame size for the ``prefill_depth`` view.
+        """
+        geometry: MoGeV2GeometryOutput = self.predictor.predict_geometry(image_hwc[None])
+        depth_hw: Float32[Tensor, "h w"] = geometry.depth_bhw[0]
+        valid_hw: Bool[Tensor, "h w"] = (geometry.mask_bhw[0] > 0.5) & (depth_hw > 0.0) & torch.isfinite(depth_hw)
+        # Nearest-exact keeps every canvas cell a real reading, as the wide path does.
+        canvas_bchw: Float32[Tensor, "1 1 192 256"] = F.interpolate(depth_hw[None, None], size=PROMPT_CANVAS_HW, mode="nearest-exact")
+        valid_bchw: Bool[Tensor, "1 1 192 256"] = (
+            F.interpolate(valid_hw[None, None].float(), size=PROMPT_CANVAS_HW, mode="nearest-exact") > 0.5
+        )
+        block: tuple[slice, slice] = (
+            slice(self.placement.top, self.placement.top + self.placement.height),
+            slice(self.placement.left, self.placement.left + self.placement.width),
+        )
+        lidar_block: Float32[Tensor, "block_h block_w"] = padded_chw[0][block]
+        paired_block: Bool[Tensor, "block_h block_w"] = (
+            valid_bchw[0, 0][block] & torch.isfinite(lidar_block) & (lidar_block >= MIN_METRIC_DEPTH_M) & (lidar_block <= MAX_METRIC_DEPTH_M)
+        )
+        scale: float = 1.0
+        if int(torch.count_nonzero(paired_block)) >= MIN_ALIGNMENT_PAIRS:
+            scale = float(torch.median(lidar_block[paired_block] / canvas_bchw[0, 0][block][paired_block]))
+        if not np.isfinite(scale) or scale <= 0.0:
+            scale = 1.0
+        scaled_bchw: Float32[Tensor, "1 1 192 256"] = canvas_bchw * scale
+        # Zero reads as "no prompt", so drop every cell the shared metric window rejects.
+        admitted_bchw: Bool[Tensor, "1 1 192 256"] = (
+            valid_bchw & (scaled_bchw >= MIN_METRIC_DEPTH_M) & (scaled_bchw <= MAX_METRIC_DEPTH_M)
+        )
+        hybrid_chw: Float32[Tensor, "1 192 256"] = torch.where(admitted_bchw, scaled_bchw, torch.zeros_like(scaled_bchw))[0]
+        hybrid_chw[0][block] = lidar_block
+        return hybrid_chw, (depth_hw * scale).float().cpu().numpy()
+
+
+def demo_blueprint(prompt_mode: PromptMode = "padded") -> rrb.Blueprint:
     """Lay the demo out as an ultrawide row, a wide row, and the metric series.
+
+    Args:
+        prompt_mode: Ultrawide prompt the run uses. ``prefill-hybrid`` appends the
+            aligned MoGe-2 plane to the ultrawide row, after the shared columns so
+            that both modes stack column for column.
 
     Returns:
         A blueprint with one 2D view per logged image and one time-series view
         over every per-frame scalar.
     """
+    ultrawide_views: list[rrb.Spatial2DView] = [
+        rrb.Spatial2DView(origin=f"{ULTRAWIDE_ROOT}/rgb", name="ultrawide rgb"),
+        rrb.Spatial2DView(origin=f"{ULTRAWIDE_ROOT}/prompt_footprint", name="prompt footprint"),
+        rrb.Spatial2DView(origin=f"{ULTRAWIDE_ROOT}/depth_pred", name="ultrawide pred"),
+        rrb.Spatial2DView(origin=f"{ULTRAWIDE_ROOT}/depth_target", name="ultrawide target"),
+        rrb.Spatial2DView(origin=f"{ULTRAWIDE_ROOT}/abs_error", name="ultrawide |error|"),
+    ]
+    if prompt_mode == "prefill-hybrid":
+        ultrawide_views.append(rrb.Spatial2DView(origin=PREFILL_DEPTH_ENTITY, name="MoGe-2 aligned"))
     return rrb.Blueprint(
         rrb.Vertical(
-            rrb.Horizontal(
-                rrb.Spatial2DView(origin=f"{ULTRAWIDE_ROOT}/rgb", name="ultrawide rgb"),
-                rrb.Spatial2DView(origin=f"{ULTRAWIDE_ROOT}/prompt_footprint", name="prompt footprint"),
-                rrb.Spatial2DView(origin=f"{ULTRAWIDE_ROOT}/depth_pred", name="ultrawide pred"),
-                rrb.Spatial2DView(origin=f"{ULTRAWIDE_ROOT}/depth_target", name="ultrawide target"),
-                rrb.Spatial2DView(origin=f"{ULTRAWIDE_ROOT}/abs_error", name="ultrawide |error|"),
-                name="ultrawide",
-            ),
+            rrb.Horizontal(*ultrawide_views, name="ultrawide"),
             rrb.Horizontal(
                 rrb.Spatial2DView(origin=f"{WIDE_ROOT}/rgb", name="wide rgb"),
                 rrb.Spatial2DView(origin=f"{WIDE_ROOT}/depth_pred", name="wide pred"),
@@ -262,6 +353,7 @@ def run_camera(
     model: ZipDepthPrompt,
     device: torch.device,
     camera: Camera,
+    prompter: PrefillPrompter | None = None,
 ) -> CameraSummary | None:
     """Stream one camera's frames of the segment, predict, log, and score them.
 
@@ -271,6 +363,7 @@ def run_camera(
         model: Fused prompted model in evaluation mode.
         device: Device the model and the segment decoder run on.
         camera: Camera streamed on this pass.
+        prompter: Pre-fill builder, set only for a pre-filled ultrawide pass.
 
     Returns:
         The camera's mean metrics, or None when no frame could be scored.
@@ -310,8 +403,18 @@ def run_camera(
             break
         image_bchw: UInt8[Tensor, "b 3 h w"] = batch["image"].to(device=device, non_blocking=True)
         prompt_depth_bchw: Float32[Tensor, "b 1 192 256"] = batch["prompt_depth"].to(device=device, non_blocking=True)
+        model_prompt_bchw: Float32[Tensor, "b 1 192 256"] = prompt_depth_bchw
+        prefill_depth_bhw: list[Float32[ndarray, "h w"]] = []
+        if prompter is not None:
+            # MoGe-2 runs one frame at a time, on the engine the pre-fill evaluation built.
+            built: list[tuple[Float32[Tensor, "1 192 256"], Float32[ndarray, "h w"]]] = [
+                prompter.build(image_bchw[frame].permute(1, 2, 0).contiguous(), prompt_depth_bchw[frame])
+                for frame in range(image_bchw.shape[0])
+            ]
+            model_prompt_bchw = torch.stack([canvas for canvas, _ in built])
+            prefill_depth_bhw = [aligned for _, aligned in built]
         with torch.inference_mode(), torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
-            prediction_bhw: Float32[ndarray, "b h w"] = model(image_bchw, prompt_depth_bchw)[:, 0].float().cpu().numpy()
+            prediction_bhw: Float32[ndarray, "b h w"] = model(image_bchw, model_prompt_bchw)[:, 0].float().cpu().numpy()
 
         index: int
         for index in range(prediction_bhw.shape[0]):
@@ -339,7 +442,15 @@ def run_camera(
                 rr.DepthImage(depth_mm(absolute_error_hw), meter=1000.0, depth_range=ERROR_RANGE_MM, colormap="turbo"),
             )
             prompt_entity: str = f"{root}/prompt_footprint" if camera == "ultrawide" else WIDE_PROMPT_ENTITY
-            rr.log(prompt_entity, rr.DepthImage(depth_mm(prompt_depth_hw), meter=1000.0, depth_range=DEPTH_RANGE_MM))
+            # The prompt panel shows what the model was actually given; the split
+            # metrics below keep using the padded LiDAR canvas either way.
+            canvas_hw: Float32[ndarray, "192 256"] = model_prompt_bchw[index, 0].float().cpu().numpy()
+            rr.log(prompt_entity, rr.DepthImage(depth_mm(canvas_hw), meter=1000.0, depth_range=DEPTH_RANGE_MM))
+            if prefill_depth_bhw:
+                rr.log(
+                    PREFILL_DEPTH_ENTITY,
+                    rr.DepthImage(depth_mm(prefill_depth_bhw[index]), meter=1000.0, depth_range=DEPTH_RANGE_MM),
+                )
 
             frame_regions: dict[str, MetricCatalogDepthMetrics] = {}
             if camera == "ultrawide":
@@ -410,17 +521,31 @@ def main(config: InferSegmentRerunConfig) -> None:
 
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model: ZipDepthPrompt = load_zipdepth_prompt(config.checkpoint).to(device).eval().fuse_for_inference()
-    print(f"{config.video_id}: {segment_row.orientation} capture, {config.checkpoint}, range margin {model.range_margin_m:.2f} m on {device}")
+    print(
+        f"{config.video_id}: {segment_row.orientation} capture, {config.checkpoint}, "
+        f"range margin {model.range_margin_m:.2f} m, {config.prompt_mode} ultrawide prompt on {device}"
+    )
+    prompter: PrefillPrompter | None = None
+    if config.prompt_mode == "prefill-hybrid" and "ultrawide" in cameras:
+        prefill_started: float = perf_counter()
+        prompter = PrefillPrompter(
+            predictor=MoGeV2TrtPredictor(heads="geometry", network_hw_options=(MOGE_NETWORK_HW,), batch_size=1),
+            placement=prompt_placement(DEFAULT_ULTRAWIDE_PROMPT_SCALE),
+        )
+        print(f"MoGe-2 vitl TRT geometry runtime ready in {perf_counter() - prefill_started:.1f}s at {MOGE_NETWORK_HW}")
     # Same rule the dataset applies: a stored portrait frame is turned back to landscape.
     quarter_turns: int = 0 if segment_row.orientation == "landscape" else (-segment_row.orientation_quarter_turns_ccw) % 4
 
-    rr.send_blueprint(demo_blueprint())
+    rr.send_blueprint(demo_blueprint(config.prompt_mode))
     rr.log("/", rr.ViewCoordinates.RDF, static=True)
     summaries: list[CameraSummary] = []
     camera: Camera
     for camera in cameras:
         log_camera_calibration(catalog, config.video_id, quarter_turns, camera)
-        summary: CameraSummary | None = run_camera(config, catalog, model, device, camera)
+        # The wide LiDAR already covers its whole frame, so only the ultrawide is pre-filled.
+        summary: CameraSummary | None = run_camera(
+            config, catalog, model, device, camera, prompter if camera == "ultrawide" else None
+        )
         if summary is not None:
             summaries.append(summary)
     if not summaries:
@@ -433,6 +558,7 @@ def main(config: InferSegmentRerunConfig) -> None:
         "video_id": config.video_id,
         "checkpoint": str(config.checkpoint),
         "cameras": config.cameras,
+        "prompt_mode": config.prompt_mode,
         "frame_stride": config.frame_stride,
         "orientation": segment_row.orientation,
         "summaries": [
